@@ -1358,7 +1358,8 @@ peer_clean() {
 }
 
 recover_stale_test_default_pool() {
-  local source state status used_by rc
+  local source state status used_by used_by_entries rc project project_marker
+  local stale_root='' marker='' expected_marker='' name token=''
   local query_timeout="${P0_E2E_INCUS_QUERY_TIMEOUT:-30}"
   command -v incus >/dev/null 2>&1 || return 0
   [[ "$query_timeout" =~ ^[1-9][0-9]*$ ]] || die 'Incus query timeout is invalid'
@@ -1376,8 +1377,49 @@ recover_stale_test_default_pool() {
   [ ! -e "$source" ] || return 0
   case "$source" in
     /tmp/subyard-hermes-profile.*/storage) ;;
+    /var/tmp/subyard-nested-teardown.*/storage)
+      stale_root="${source%/storage}"
+      marker="$stale_root/.marker"
+      expected_marker=nested-teardown-e2e-v1
+      ;;
+    "$HOME"/.cache/subyard-p0-*/owner/subyard/incus/storage)
+      stale_root="${source%/owner/subyard/incus/storage}"
+      name="${stale_root##*/}"
+      token="${name#subyard-p0-}"
+      [[ "$token" =~ ^[0-9]+$ ]] \
+        || die "refusing stale P0 pool with an invalid allocation path at $source"
+      marker="$stale_root/.subyard-p0-marker"
+      expected_marker="subyard-p0-$token"
+      ;;
     *) return 0 ;;
   esac
+  if [ -n "$stale_root" ] && { [ -e "$stale_root" ] || [ -L "$stale_root" ]; }; then
+    [ -d "$stale_root" ] && [ ! -L "$stale_root" ] \
+      && [ "$(cat "$marker" 2>/dev/null)" = "$expected_marker" ] \
+      || die "refusing unmarked stale test pool root at $stale_root"
+  fi
+  status="$(sed -n 's/^status: //p' <<<"$state")"
+  [ "$status" = Unavailable ] \
+    || die "refusing to recover an active stale test pool at $source"
+  if [ -n "$token" ]; then
+    for project in subyard-e2e-yard subyard-test-yard; do
+      incus project show "$project" >/dev/null 2>&1 || continue
+      project_marker="$(incus project get "$project" user.subyard.p0-image-cache 2>/dev/null)"
+      [ "$project_marker" = "$expected_marker" ] \
+        || die "refusing stale P0 pool with foreign project $project"
+      reclaim_owner_project_residue "$project"
+    done
+    state="$(timeout --foreground "$query_timeout" \
+      incus storage show default --project default 2>/dev/null)"
+    used_by_entries="$(sed -n '/^used_by:$/,/^status:/s/^- //p' <<<"$state")"
+    if [ "$used_by_entries" = /1.0/profiles/default ]; then
+      [ "$(incus profile device get default root pool --project default 2>/dev/null)" = default ] \
+        || die 'refusing stale P0 pool with a foreign default root device'
+      incus profile device remove default root --project default >/dev/null
+      state="$(timeout --foreground "$query_timeout" \
+        incus storage show default --project default 2>/dev/null)"
+    fi
+  fi
   status="$(sed -n 's/^status: //p' <<<"$state")"
   used_by="$(sed -n 's/^used_by: //p' <<<"$state")"
   [ "$status" = Unavailable ] && [ "$used_by" = '[]' ] \
@@ -1512,7 +1554,7 @@ EOF
 )
 
 capacity_verify_cleanup() {
-  local path project
+  local path project leftover
   [ ! -e "$P0_CAPACITY_STATE_ROOT" ] \
     || die "P0 state root remains after cleanup: $P0_CAPACITY_STATE_ROOT"
   [ ! -e "$HOME/.cache/subyard-p0-peer-$TOKEN" ] \
@@ -1528,7 +1570,18 @@ capacity_verify_cleanup() {
   done
   [ -z "$(find /tmp -maxdepth 1 -name 'subyard-p0-incus.*' -print -quit)" ] \
     || die 'real-Incus transient directory remains after cleanup'
+  [ -z "$(find /var/tmp -maxdepth 1 -type d -name 'subyard-nested-teardown.*' -print -quit)" ] \
+    || die 'nested-teardown transient directory remains after cleanup'
   if command -v incus >/dev/null 2>&1 && incus info >/dev/null 2>&1; then
+    leftover="$(incus project list --format csv -c n \
+      | awk '/^subyard-nested-e2e-/ { print; exit }')"
+    [ -z "$leftover" ] || die "nested-teardown project remains after cleanup: $leftover"
+    leftover="$(incus storage list --project default --format csv -c n \
+      | awk '/^nested-e2e-/ { print; exit }')"
+    [ -z "$leftover" ] || die "nested-teardown pool remains after cleanup: $leftover"
+    leftover="$(incus network list --project default --format csv -c n \
+      | awk '/^ne[a-z0-9]{6,8}br0$/ { print; exit }')"
+    [ -z "$leftover" ] || die "nested-teardown network remains after cleanup: $leftover"
     ! incus storage show "$PEER_INCUS_POOL" --project default >/dev/null 2>&1 \
       || die "P0 Incus pool remains after cleanup: $PEER_INCUS_POOL"
     for project in subyard-p0-real-incus subyard-e2e-yard subyard-test-yard subyard; do
@@ -1558,6 +1611,7 @@ capacity_verify_cleanup() {
   capacity-verify-cleanup) capacity_verify_cleanup ;;
   dependency-verify) dependency_verify ;;
   dependency-bootstrap) dependency_bootstrap ;;
+  nested-teardown) bash dev/e2e/nested-teardown-data-boundary.sh ;;
   real-incus) bash dev/e2e/p0-real-incus.sh ;;
   profile-resource) profile_resource ;;
   owner) owner ;;

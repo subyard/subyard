@@ -8,6 +8,8 @@ OUTER_YARD=''
 OUTER_PROJECT=''
 OUTER_INSTANCE=''
 OUTER_POOL=''
+OUTER_BRIDGE=''
+DEFAULT_POOL_BEFORE=''
 
 die() { printf 'nested-teardown-boundary: %s\n' "$*" >&2; exit 2; }
 
@@ -36,6 +38,32 @@ setting() {
   value="$(yard config show "$key" | sed -n 's/^effective: //p')"
   [ -n "$value" ] || die "could not resolve $key"
   printf '%s\n' "$value"
+}
+
+default_pool_snapshot() {
+  local state rc inventory
+  set +e
+  state="$(incus storage show default --project default 2>/dev/null)"
+  rc=$?
+  set -e
+  if [ "$rc" = 0 ]; then
+    printf 'present\n%s\n' "$state"
+    return
+  fi
+  inventory="$(incus storage list --project default --format csv -c n)" \
+    || die 'could not inventory the default Incus pool'
+  ! grep -Fxq default <<<"$inventory" \
+    || die 'default Incus pool inventory and state query disagree'
+  printf 'absent\n'
+}
+
+assert_default_pool_unchanged() {
+  local after before_hash after_hash
+  after="$(default_pool_snapshot)"
+  [ "$after" = "$DEFAULT_POOL_BEFORE" ] && return
+  before_hash="$(printf '%s' "$DEFAULT_POOL_BEFORE" | sha256sum | awk '{print $1}')"
+  after_hash="$(printf '%s' "$after" | sha256sum | awk '{print $1}')"
+  die "candidate lifecycle changed the default Incus pool: before=$before_hash after=$after_hash"
 }
 
 assert_outer_vm_ssh_address() {
@@ -84,6 +112,17 @@ cleanup() {
       nested-teardown-e2e-v1 ]; then
     incus storage delete "$OUTER_POOL" --project default >/dev/null 2>&1 || rc=3
   fi
+  if [ -n "$OUTER_BRIDGE" ] \
+    && incus network show "$OUTER_BRIDGE" --project default >/dev/null 2>&1; then
+    if [ "$(incus network get "$OUTER_BRIDGE" user.subyard.owner \
+      --project default 2>/dev/null)" = nested-teardown-e2e-v1 ] \
+      && [ "$(incus network show "$OUTER_BRIDGE" --project default \
+        | sed -n 's/^used_by: //p')" = '[]' ]; then
+      incus network delete "$OUTER_BRIDGE" --project default >/dev/null 2>&1 || rc=3
+    else
+      rc=3
+    fi
+  fi
   if [ -n "$STATE" ] && [[ "$STATE" = /var/tmp/subyard-nested-teardown.* ]] \
     && [ -f "$STATE/.marker" ] && [ "$(<"$STATE/.marker")" = nested-teardown-e2e-v1 ]; then
     sudo -n find "$STATE" -depth -delete || rc=3
@@ -99,12 +138,15 @@ OUTER_YARD="nested-e2e-$token"
 OUTER_PROJECT="subyard-$OUTER_YARD"
 OUTER_INSTANCE="yard-$OUTER_YARD"
 OUTER_POOL="nested-e2e-$token"
-outer_bridge="ne${token:0:8}br0"
+OUTER_BRIDGE="ne${token:0:8}br0"
+DEFAULT_POOL_BEFORE="$(default_pool_snapshot)"
 
 incus project show "$OUTER_PROJECT" >/dev/null 2>&1 \
   && die "refusing existing project $OUTER_PROJECT"
 incus storage show "$OUTER_POOL" --project default >/dev/null 2>&1 \
   && die "refusing existing pool $OUTER_POOL"
+incus network show "$OUTER_BRIDGE" --project default >/dev/null 2>&1 \
+  && die "refusing existing network $OUTER_BRIDGE"
 incus storage create "$OUTER_POOL" dir --project default >/dev/null
 incus storage set "$OUTER_POOL" user.subyard.owner=nested-teardown-e2e-v1 \
   --project default >/dev/null
@@ -133,7 +175,7 @@ INSTANCE_TYPE=vm
 LIMITS_CPU=4
 LIMITS_MEMORY=3GiB
 SRV_POOL=$OUTER_POOL
-INCUS_BRIDGE=$outer_bridge
+INCUS_BRIDGE=$OUTER_BRIDGE
 HOST_MOUNTS=
 HOST_LINKS=
 HOST_BASE=$STATE/host
@@ -145,6 +187,8 @@ EOF
 
 printf '  [ .. ] creating the outer yard\n'
 yard init --yes
+incus network set "$OUTER_BRIDGE" user.subyard.owner=nested-teardown-e2e-v1 \
+  --project default >/dev/null
 yard start --yes
 [ "$(incus config get "$OUTER_INSTANCE" user.subyard.managed --project "$OUTER_PROJECT")" = true ] \
   || die 'outer instance is not marker-owned'
@@ -228,4 +272,10 @@ incus info "$OUTER_INSTANCE" --project "$OUTER_PROJECT" >/dev/null \
 yard shell "$project_id" --yes -- true \
   || die 'inner teardown or agent data deletion broke outer SSH transport'
 
-printf 'ok: nested teardown preserves the outer yard, transport descriptor and foreign data\n'
+printf '  [ .. ] tearing down the outer yard and checking the default pool\n'
+yard teardown --yes
+! incus project show "$OUTER_PROJECT" >/dev/null 2>&1 \
+  || die 'outer project remains after teardown'
+assert_default_pool_unchanged
+
+printf 'ok: nested teardown preserves the outer yard boundary, foreign data and default pool\n'

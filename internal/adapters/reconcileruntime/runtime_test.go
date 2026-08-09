@@ -42,6 +42,36 @@ func TestProbeConvergedClassifiesExitStatus(t *testing.T) {
 	}
 }
 
+func TestInstallIncusUsesConfiguredSRVPool(t *testing.T) {
+	root := t.TempDir()
+	scripts := filepath.Join(root, "scripts")
+	if err := os.Mkdir(scripts, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	capture := filepath.Join(root, "storage-pool")
+	if err := os.WriteFile(filepath.Join(scripts, "01-install-incus.sh"), []byte(
+		"#!/bin/sh\nprintf '%s\\n' \"${STORAGE_POOL:-}\" > \"$CAPTURE\"\n",
+	), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runtime := Runtime{
+		RepositoryRoot: root,
+		Environment:    []string{"CAPTURE=" + capture},
+		Incus:          &testkit.Incus{},
+		SRVPool:        "nested-e2e",
+	}
+	if err := runtime.installIncus(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	pool, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(pool) != "nested-e2e\n" {
+		t.Fatalf("installer storage pool = %q, want nested-e2e", pool)
+	}
+}
+
 func TestPowerImportIsNativeAcrossRegisteredLocalYards(t *testing.T) {
 	incus := &testkit.Incus{
 		ServerInfo: ports.ServerInfo{Environment: "incus"},

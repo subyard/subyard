@@ -36,7 +36,7 @@ P0_EVIDENCE=''
 P0_CURRENT_PHASE='startup'
 P0_PHASE_STARTED=0
 P0_CHILD_PIDS=()
-FULL_P0_LANES=(boundary transport release source-upgrade peer cleanup)
+FULL_P0_LANES=(boundary nested-teardown transport release source-upgrade peer cleanup)
 
 # Reuse one ordinary broker lease for the full matrix. This avoids the retired raw SSH-config
 # export and ensures every direct and bundled command addresses the same retained pair.
@@ -58,7 +58,7 @@ EOF
 }
 list_lanes() {
   printf '%s\n' \
-    boundary transport dependencies real-incus profile-resource release source-upgrade \
+    boundary nested-teardown transport dependencies real-incus profile-resource release source-upgrade \
     reboot-verify peer peer-cleanup cleanup
   printf 'full\t%s\n' "${FULL_P0_LANES[*]}"
 }
@@ -80,7 +80,7 @@ parse_arguments() {
     esac
   done
   case "$P0_LANE" in
-    boundary|transport|dependencies|real-incus|profile-resource|release|source-upgrade|reboot-verify|peer|peer-cleanup|cleanup|full) ;;
+    boundary|nested-teardown|transport|dependencies|real-incus|profile-resource|release|source-upgrade|reboot-verify|peer|peer-cleanup|cleanup|full) ;;
     *) die "unknown lane '$P0_LANE'" ;;
   esac
   [ "$P0_LANE" = full ] || [ "$BROKER_RECOVERY_ONLY" = 0 ] \
@@ -611,6 +611,13 @@ dependency_lane() {
   run_vm 2 dependency-verify
 }
 
+nested_teardown_lane() {
+  local vm
+  for vm in 1 2; do
+    run_vm "$vm" nested-teardown
+  done
+}
+
 source_upgrade_lane() {
   prepare_source_archive
   SOURCE_HOST_STARTED=1
@@ -737,6 +744,11 @@ vm2_ip="$(ssh -F "$CONFIG" -G e2e-vm-2 | awk '$1=="hostname" {print $2; exit}')"
 
 case "$P0_LANE" in
   boundary) run_phase boundary verify_boundary ;;
+  nested-teardown)
+    run_phase capacity-preflight preflight_lane
+    run_phase nested-teardown nested_teardown_lane
+    run_phase cleanup cleanup_lane
+    ;;
   transport) run_phase transport transport_probes ;;
   dependencies) run_phase dependencies dependency_lane ;;
   real-incus)
@@ -775,6 +787,7 @@ case "$P0_LANE" in
     run_phase capacity-preflight preflight_lane
     start_capacity_monitors
     run_phase boundary verify_boundary
+    run_phase nested-teardown nested_teardown_lane
     run_phase transport transport_probes
     run_phase release run_lanes
     run_phase source-upgrade source_upgrade_lane

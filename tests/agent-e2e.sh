@@ -253,11 +253,11 @@ grep -Fq 'P0_E2E_MIN_PEAK_MEMORY_RESERVE_BYTES:-67108864' \
   "$ROOT/dev/e2e/p0-acceptance.sh" \
   || fail "P0 acceptance does not keep only the 64 MiB minimum peak memory reserve"
 lane_inventory="$("$ROOT/dev/e2e/p0-acceptance.sh" --list-lanes)"
-for lane in boundary transport dependencies real-incus profile-resource release source-upgrade \
+for lane in boundary nested-teardown transport dependencies real-incus profile-resource release source-upgrade \
   reboot-verify peer peer-cleanup cleanup; do
   grep -qx "$lane" <<<"$lane_inventory" || fail "P0 lane inventory omitted $lane"
 done
-grep -Fq $'full\tboundary transport release source-upgrade peer cleanup' <<<"$lane_inventory" \
+grep -Fq $'full\tboundary nested-teardown transport release source-upgrade peer cleanup' <<<"$lane_inventory" \
   || fail 'continuous P0 gate lost a mandatory public-contract phase'
 grep -Fq '.allocation == {slot: $slot, resource_generation: $generation}' \
   "$ROOT/dev/e2e/p0-acceptance.sh" \

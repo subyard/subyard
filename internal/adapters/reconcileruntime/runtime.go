@@ -441,7 +441,9 @@ func versionAtLeast(current, minimum string) bool {
 }
 
 func (runtime Runtime) installIncus(ctx context.Context) error {
-	if err := runtime.runScript(ctx, runtime.Stderr, "01-install-incus.sh", "--yes"); err != nil {
+	pool, _ := runtime.volumeNames()
+	if err := runtime.runScriptEnvironment(ctx, runtime.Stderr,
+		map[string]string{"STORAGE_POOL": pool}, "01-install-incus.sh", "--yes"); err != nil {
 		return err
 	}
 	if ready, _ := runtime.incusReady(ctx); ready {
