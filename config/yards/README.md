@@ -53,5 +53,7 @@ YARD_TEMPLATE=test-vms
 SSH_PORT=2223
 ```
 
+For an isolated Hermes backend, see the [Hermes profile guide](../../docs/hermes.md).
+
 See [Subyard configuration](../../docs/configuration.md), [`docs/test-vms.md`](../../docs/test-vms.md)
 and [`docs/keys.md`](../../docs/keys.md).

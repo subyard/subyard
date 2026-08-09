@@ -17,6 +17,7 @@ import (
 func TestProvisionSelectionUsesYardThenProjectProfiles(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	writeProvisionProfile(t, root, "android")
+	writeProvisionProfile(t, root, "hermes")
 	writeProvisionProfile(t, root, "openclaw")
 	writeProvisionProfile(t, root, "subyard-dev")
 	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment})
@@ -36,6 +37,14 @@ func TestProvisionSelectionUsesYardThenProjectProfiles(t *testing.T) {
 	}
 	if !slices.Equal(execution.profiles, []string{"openclaw", "android", "subyard-dev"}) {
 		t.Fatalf("profiles=%v", execution.profiles)
+	}
+	loaded.Environment["YARD_PROFILES"] = "hermes"
+	execution, err = program.prepareProvisionExecution(loaded, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(execution.profiles, []string{"hermes"}) {
+		t.Fatalf("Hermes no-argument profiles=%v", execution.profiles)
 	}
 }
 

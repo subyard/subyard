@@ -13,7 +13,9 @@ WorkingDirectory=/srv/hermes/workspace
 Environment=HOME=@DEV_HOME@
 Environment=HERMES_HOME=/srv/hermes
 Environment=HERMES_DISABLE_LAZY_INSTALLS=1
-Environment=PATH=/opt/hermes-agent/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/hermes-agent/playwright
+Environment=AGENT_BROWSER_EXECUTABLE_PATH=@HERMES_BROWSER_EXECUTABLE@
+Environment=PATH=/opt/hermes-agent/node/bin:/opt/hermes-agent/agent-browser/bin:/opt/hermes-agent/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
 EnvironmentFile=/srv/hermes/.serve.env
 UMask=0077
 ExecStartPre=/usr/local/libexec/subyard-hermes-pin-check

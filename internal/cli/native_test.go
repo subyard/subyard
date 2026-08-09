@@ -2369,7 +2369,7 @@ func nativeFixture(t *testing.T) (string, []string, string) {
 		}
 	}
 	manifest := strings.Join([]string{
-		"init||@init||forward|mutate|required|public|lifecycle|simple|init|init|--configs --reset --yes --help|",
+		"init||@init||forward|mutate|required|public|lifecycle|simple|init|init|--configs --reset --profile --yes --help|",
 		"start||@lifecycle||forward|mutate|never|public|lifecycle|simple|start|start|--yes --help|",
 		"stop||@lifecycle||forward|mutate|required|public|lifecycle|simple|stop|stop|--force --yes --help|",
 		"provision||@provision||forward|mutate|required|public|lifecycle|profiles|provision [profile]|provision|-l --list --yes --help|",

@@ -132,17 +132,21 @@ func (runtime Runtime) applyGitIdentity(ctx context.Context) error {
 func (runtime Runtime) guestConfigFiles() ([]guestConfigFile, error) {
 	user := runtime.devUser()
 	home := "/home/" + user
-	files := []guestConfigFile{
-		{label: "Claude instructions", source: runtime.environmentValue("HOST_CLAUDE_MD"),
+	files := []guestConfigFile{}
+	instructions := map[string]guestConfigFile{
+		"claude": {label: "Claude instructions", source: runtime.environmentValue("HOST_CLAUDE_MD"),
 			destination: home + "/.claude/CLAUDE.md", followSymlinks: true},
-		{label: "Codex instructions", source: runtime.environmentValue("HOST_CODEX_AGENTS_MD"),
+		"codex": {label: "Codex instructions", source: runtime.environmentValue("HOST_CODEX_AGENTS_MD"),
 			destination: home + "/.codex/AGENTS.md", followSymlinks: true},
-		{label: "OpenCode instructions", source: runtime.environmentValue("HOST_OPENCODE_AGENTS_MD"),
+		"opencode": {label: "OpenCode instructions", source: runtime.environmentValue("HOST_OPENCODE_AGENTS_MD"),
 			destination: home + "/.config/opencode/AGENTS.md", followSymlinks: true},
 	}
 	for _, agent := range strings.Fields(runtime.environmentValue("AGENTS")) {
 		if !domain.SafeName(agent) {
 			return nil, fmt.Errorf("invalid agent name %q", agent)
+		}
+		if instruction, ok := instructions[agent]; ok {
+			files = append(files, instruction)
 		}
 		for _, kind := range []string{"CONFIG", "RULES"} {
 			source := runtime.environmentValue("AGENT_" + agent + "_" + kind)

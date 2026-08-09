@@ -108,6 +108,9 @@ grep -Fxq './bin/yard' "$bundle_list" \
   && grep -Fxq './config/systemd/subyard-test-vms-host-sink.timer.in' "$bundle_list" \
   && grep -Fxq './config/commands.registry' "$bundle_list" \
   && grep -Fxq './config/migrations.json' "$bundle_list" \
+  && grep -Fxq './config/agents/codex/provision.sh' "$bundle_list" \
+  && grep -Fxq './config/profiles/hermes/hermes' "$bundle_list" \
+  && grep -Fxq './config/profiles/hermes/yard.env' "$bundle_list" \
   || fail 'runtime bundle does not contain the complete launcher contract'
 grep -Fxq './runtime-files.sha256' "$bundle_list" \
   || fail 'runtime bundle exact file manifest is missing'

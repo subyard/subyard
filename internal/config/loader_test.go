@@ -78,6 +78,54 @@ func TestLoadNamedContext(t *testing.T) {
 	}
 }
 
+func TestLoadExactYardSettingsFile(t *testing.T) {
+	root := t.TempDir()
+	operatorHome := filepath.Join(root, "home")
+	configHome := filepath.Join(root, "config-home")
+	shipped := filepath.Join(root, "config")
+	preset := filepath.Join(shipped, "profiles", "hermes", "yard.env")
+	for _, directory := range []string{operatorHome, shipped, configHome} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFixture(t, filepath.Join(shipped, "incus.project.env"), `: "${INCUS_PROJECT:=subyard}"
+: "${RESTRICTED_DISK_PATHS:=/srv/subyard}"`)
+	writeFixture(t, filepath.Join(shipped, "subyard.env"), `: "${INSTANCE_NAME:=yard}"
+: "${INSTANCE_TYPE:=container}"
+: "${SHIFT_MODE:=shift}"
+: "${FORWARD_SSH_AGENT:=0}"
+: "${DEV_SUDO:=0}"
+: "${DEV_UID:=1000}"
+: "${SSH_HOST:=yard}"
+: "${SSH_PORT:=2222}"`)
+	writeFixture(t, filepath.Join(shipped, "host.env"), `: "${SUBYARD_CONFIG_HOME:=$SUBYARD_OPERATOR_HOME/.config/subyard}"
+: "${SUBYARD_HOME:=$SUBYARD_OPERATOR_HOME/.subyard}"
+: "${STORAGE_PATH:=$SUBYARD_HOME/incus/storage}"
+: "${HOST_BASE:=${RESTRICTED_DISK_PATHS:-/srv/subyard}}"`)
+	writeFixture(t, preset, "YARD_PROFILES=hermes\nAGENTS=codex\nSSH_PORT=3333\n")
+
+	loaded, err := Load(LoadOptions{
+		RepositoryRoot:   root,
+		OperatorHome:     operatorHome,
+		YardName:         "custom-name",
+		YardSettingsFile: preset,
+		DisablePrivate:   true,
+		Environment: map[string]string{
+			"SUBYARD_OPERATOR_HOME": operatorHome,
+			"SUBYARD_CONFIG_HOME":   configHome,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Context.YardName != "custom-name" || loaded.Context.SSHPort != 3333 ||
+		loaded.Environment["YARD_PROFILES"] != "hermes" || loaded.Environment["AGENTS"] != "codex" {
+		t.Fatalf("exact yard settings were not loaded: %#v %#v", loaded.Context, loaded.Environment)
+	}
+	assertEffectiveSetting(t, loaded.Settings["SSH_PORT"], "3333", "yard", "scalar settings", preset)
+}
+
 func TestRetiredE2EVMTemplateReportsMigrationAndTeardown(t *testing.T) {
 	root := t.TempDir()
 	configDir := filepath.Join(root, "config")
@@ -292,6 +340,71 @@ func TestSettingsPrecedenceAndYardFileOverride(t *testing.T) {
 	}
 }
 
+func TestHermesYardFileClearsInheritedHostAndCapabilityWiring(t *testing.T) {
+	root := filepath.Clean(filepath.Join("..", ".."))
+	temp := t.TempDir()
+	home := filepath.Join(temp, "home")
+	configHome := filepath.Join(home, ".config", "subyard")
+	writeFixture(t, filepath.Join(configHome, "config.env"), `AGENTS="claude opencode pi"
+YARD_PROFILES=openclaw
+HOST_CLAUDE_MD=/tmp/CLAUDE.md
+HOST_CODEX_AGENTS_MD=/tmp/CODEX.md
+HOST_OPENCODE_AGENTS_MD=/tmp/OPENCODE.md
+HOST_MOUNTS=host-cache:/mnt/cache:ro:0755
+HOST_LINKS=.claude/sessions:/mnt/host/agent-sessions/claude/sessions
+YARD_CAPABILITIES=android
+YARD_CAPS=fuse
+YARD_DEVICES=gpu
+YARD_MOUNTS=cache:/srv/cache:rw:0755
+FORWARD_SSH_AGENT=1
+DEV_SUDO=1
+NESTED_E2E_VMS=1
+`)
+	writeFixture(t, filepath.Join(configHome, "yards", "hermes", "config.env"), `SSH_PORT=2224
+YARD_PROFILES=hermes
+AGENTS=codex
+HOST_CLAUDE_MD=
+HOST_CODEX_AGENTS_MD=
+HOST_OPENCODE_AGENTS_MD=
+HOST_MOUNTS=
+HOST_LINKS=
+YARD_CAPABILITIES=
+YARD_CAPS=
+YARD_DEVICES=
+YARD_MOUNTS=
+FORWARD_SSH_AGENT=0
+DEV_SUDO=0
+NESTED_E2E_VMS=0
+`)
+	loaded, err := Load(LoadOptions{
+		RepositoryRoot: root, OperatorHome: home, YardName: "hermes", DisablePrivate: true,
+		Environment: map[string]string{
+			"HOME": home, "SUBYARD_OPERATOR_HOME": home,
+			"SUBYARD_CONFIG_HOME": configHome, "SUBYARD_HOME": filepath.Join(home, ".subyard"),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]string{
+		"YARD_PROFILES": "hermes", "AGENTS": "codex",
+		"HOST_CLAUDE_MD": "", "HOST_CODEX_AGENTS_MD": "", "HOST_OPENCODE_AGENTS_MD": "",
+		"HOST_MOUNTS": "", "HOST_LINKS": "",
+		"YARD_CAPABILITIES": "", "YARD_CAPS": "", "YARD_DEVICES": "", "YARD_MOUNTS": "",
+	} {
+		if got := loaded.Environment[name]; got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+	if loaded.Context.ForwardSSHAgent || loaded.Context.DevSudo || loaded.Context.NestedE2EVMs {
+		t.Fatalf("Hermes security boundary drifted: %#v", loaded.Context)
+	}
+	if loaded.Context.SSHPort != 2224 || loaded.Environment["AGENT_codex_COMMAND"] != "codex" ||
+		loaded.Environment["AGENT_codex_CHECK"] != "codex-check" {
+		t.Fatalf("Hermes Codex selection drifted: %#v", loaded.Environment)
+	}
+}
+
 func TestPersistentSettingsValidationFailsClosed(t *testing.T) {
 	root := filepath.Clean(filepath.Join("..", ".."))
 	for _, test := range []struct {
@@ -439,6 +552,31 @@ func TestSingleQuotedValueIsLiteral(t *testing.T) {
 	}
 	if values["VALUE"] != "$HOME" {
 		t.Fatalf("single-quoted value expanded: %q", values["VALUE"])
+	}
+}
+
+func TestNormalizeAgentPersistLinksUsesExactSelection(t *testing.T) {
+	tracker := newSettingTracker()
+	defaults := tracker.addLayer("default", "shipped defaults", "agents.env", true, settingAny)
+	tracker.record(defaults, "HOST_LINKS", "all-agent-links", "agents.env", 1, "")
+	values := environment{
+		"AGENTS":                 "codex",
+		"HOST_LINKS":             "all-agent-links",
+		"AGENT_claude_PERSIST":   "claude-link\n",
+		"AGENT_codex_PERSIST":    "codex-link\n",
+		"AGENT_opencode_PERSIST": "opencode-link\n",
+	}
+	normalizeAgentPersistLinks(values, tracker, defaults)
+	if values["HOST_LINKS"] != "codex-link\n" {
+		t.Fatalf("selected-agent links = %q, want Codex only", values["HOST_LINKS"])
+	}
+
+	explicit := tracker.addLayer("yard", "scalar settings", "hermes.env", true, settingScalar)
+	tracker.record(explicit, "HOST_LINKS", "", "hermes.env", 1, "")
+	values["HOST_LINKS"] = ""
+	normalizeAgentPersistLinks(values, tracker, defaults)
+	if values["HOST_LINKS"] != "" {
+		t.Fatalf("explicit empty HOST_LINKS was replaced with %q", values["HOST_LINKS"])
 	}
 }
 

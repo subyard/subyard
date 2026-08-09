@@ -29,6 +29,28 @@ func TestHostCheckRejectsStrictPortCollisionWithoutHostAccess(t *testing.T) {
 	}
 }
 
+func TestHostCheckRejectsListeningPortForFreshStrictInit(t *testing.T) {
+	facts := readyFacts()
+	facts.PortListening = true
+	var output bytes.Buffer
+	check := HostCheck{
+		Yard: testYard("alpha", 2323), Yards: []domain.Context{testYard("alpha", 2323)},
+		Output: &output,
+		Probe: func(context.Context, HostCheck) (HostFacts, error) {
+			return facts, nil
+		},
+	}
+	if err := check.Run(context.Background(), CheckOptions{Strict: true}); !errors.Is(err, ErrHostNotReady) {
+		t.Fatalf("fresh strict init accepted a listening port: %v", err)
+	}
+	if err := check.Run(context.Background(), CheckOptions{Strict: true, BasePresent: true}); err != nil {
+		t.Fatalf("existing yard could not reuse its listening port: %v", err)
+	}
+	if !strings.Contains(output.String(), "host port 2323 is already listening") {
+		t.Fatalf("missing listening-port diagnostic:\n%s", output.String())
+	}
+}
+
 func TestHostCheckIgnoresRemotePortAndWarnsOutsideStrictMode(t *testing.T) {
 	var output bytes.Buffer
 	remote := testYard("remote", 2323)

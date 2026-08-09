@@ -316,6 +316,7 @@ func productionShellContracts() map[string]shellContract {
 	goCLI := "internal/cli/cli.go"
 	return map[string]shellContract{
 		"config/agents/ccusage/provision.sh":  {"profile", "config/agents.env", `agents/ccusage/provision.sh`},
+		"config/agents/codex/provision.sh":    {"profile", "config/agents.env", `agents/codex/provision.sh`},
 		"config/agents/opencode/provision.sh": {"profile", "config/agents.env", `agents/opencode/provision.sh`},
 		"config/agents/paseo/provision.sh":    {"profile", "config/agents.env", `agents/paseo/provision.sh`},
 		"scripts/01-install-incus.sh":         {"leaf", goReconcile, `"01-install-incus.sh"`},

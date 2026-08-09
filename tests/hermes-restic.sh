@@ -94,6 +94,11 @@ case "${1:-}" in
     ;;
   ls)
     printf '%s\n' '/hermes-backup.zip' '/metadata.env'
+    if [ "${HERMES_TEST_RESTIC_LARGE_LS:-0}" = 1 ]; then
+      for index in $(seq 1 20000); do
+        printf '/filler-%05d\n' "$index"
+      done
+    fi
     ;;
   forget) ;;
   *) exit 95 ;;
@@ -117,6 +122,7 @@ common_env=(
   HERMES_TEST_FINALIZE_LOG="$tmp/finalize.log"
   HERMES_TEST_MARKER_LOG="$tmp/marker.log"
   HERMES_TEST_RESTIC_LOG="$tmp/restic.log"
+  HERMES_TEST_RESTIC_LARGE_LS=1
 )
 
 env "${common_env[@]}" "$BACKUP" \

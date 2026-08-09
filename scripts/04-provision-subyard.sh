@@ -36,7 +36,7 @@ announce_confirm "Subyard Phase 3 — provision the yard ($INSTANCE_NAME)" \
   "Inside the yard: install the pinned native ccusage reporter." \
   "Inside the yard: bootstrap enabled agent CLIs when missing." \
   "On the host: set the /dev/kvm device GID to the in-yard 'kvm' group." \
-  "On the host: copy global Claude/Codex instructions into the yard, if present." \
+  "On the host: copy instructions for enabled agents into the yard, if present." \
   "This pulls packages from the network and changes the yard's userspace (not the host system)."
 
 # RUNNING precedes guest-agent readiness for VMs. Wait before the first mutating exec.
@@ -46,11 +46,19 @@ incus_wait_instance_agent "$INCUS_PROJECT" "$INSTANCE_NAME" \
 
 incus config set "$INSTANCE_NAME" user.subyard.ccusage_version pending "${PROJ[@]}" \
   || die "could not invalidate ccusage convergence"
+_codex_selected=0
+for _agent in ${AGENTS:-}; do
+  [ "$_agent" != codex ] || _codex_selected=1
+done
+if [ "$_codex_selected" = 1 ]; then
+  incus config set "$INSTANCE_NAME" user.subyard.codex_version pending "${PROJ[@]}" \
+    || die "could not invalidate Codex convergence"
+fi
 
 # --- 1. provision inside the yard --------------------------------------------
 # Quoted heredoc: nothing expands on the host; vars arrive via --env.
 info "provisioning inside $INSTANCE_NAME (packages, Docker, user, /srv, services)"
-incus exec "$INSTANCE_NAME" "${PROJ[@]}" --env DEV_USER="$DEV_USER" --env DEV_UID="$DEV_UID" --env DEV_SUDO="${DEV_SUDO:-0}" --env HOST_LINKS="${HOST_LINKS:-}" -- bash -euo pipefail -s <<'EOS'
+incus exec "$INSTANCE_NAME" "${PROJ[@]}" --env DEV_USER="$DEV_USER" --env DEV_UID="$DEV_UID" --env DEV_SUDO="${DEV_SUDO:-0}" --env AGENTS="${AGENTS:-}" --env HOST_LINKS="${HOST_LINKS:-}" -- bash -euo pipefail -s <<'EOS'
 export DEBIAN_FRONTEND=noninteractive
 # The yard bridge is IPv4-only (ipv6.address=none), so steer apt to IPv4 — mirrors that
 # resolve to AAAA records would otherwise be tried over an unreachable IPv6 path first.
@@ -140,13 +148,19 @@ fi
 # CLAUDE.md is copied in host-side (section 3), not symlinked.
 dev_home="$(getent passwd "$DEV_USER" | cut -d: -f6)"
 
-# Agent homes are real rootfs dirs (creds land here). Drop any stale symlink so
-# re-provisioning a previously-shared yard is clean.
-for d in .claude .codex; do
+# Selected credential homes are real rootfs dirs. Drop only their stale legacy symlinks;
+# reconciliation never creates or deletes homes for unselected agents.
+for agent in ${AGENTS:-}; do
+  case "$agent" in
+    claude) d=.claude ;;
+    codex) d=.codex ;;
+    *) continue ;;
+  esac
   p="$dev_home/$d"
   [ -L "$p" ] && rm -f "$p"
   runuser -u "$DEV_USER" -- mkdir -p "$p"
 done
+unset agent d p
 
 # Symlink dev's session paths to the host-agent-sessions mount (HOST_LINKS, config/host.env).
 # Entry "<name>:<target>[:file]"; ":file" makes the target's parent, not the path. Idempotent;
@@ -217,7 +231,13 @@ for _agent in ${AGENTS:-}; do
   [ -n "$_provision" ] || continue
   [ -r "$_provision" ] || die "$_agent provision hook missing: $_provision"
   info "provisioning $_agent CLI in $INSTANCE_NAME"
-  _agent_env=(--env DEV_USER="$DEV_USER" --env YARD_VERSION="${YARD_VERSION:-}")
+  _agent_env=(
+    --env DEV_USER="$DEV_USER"
+    --env YARD_VERSION="${YARD_VERSION:-}"
+    --env CODEX_VERSION="$CODEX_VERSION"
+    --env CODEX_SHA256_AMD64="$CODEX_SHA256_AMD64"
+    --env CODEX_SHA256_ARM64="$CODEX_SHA256_ARM64"
+  )
   incus exec "$INSTANCE_NAME" "${PROJ[@]}" "${_agent_env[@]}" \
     -- bash -euo pipefail -s < "$_provision" \
     || die "$_agent CLI provisioning failed"
@@ -301,6 +321,11 @@ fi
 # --- summary -----------------------------------------------------------------
 incus config set "$INSTANCE_NAME" user.subyard.ccusage_version "$CCUSAGE_VERSION" "${PROJ[@]}" \
   || die "could not record ccusage convergence"
+if [ "$_codex_selected" = 1 ]; then
+  incus config set "$INSTANCE_NAME" user.subyard.codex_version "$CODEX_VERSION" "${PROJ[@]}" \
+    || die "could not record Codex convergence"
+fi
+unset _codex_selected
 echo
 ok "Phase 3 done."
 cat <<MSG

@@ -50,8 +50,13 @@ func TestRefreshConfigsUsesTypedAtomicGuestWrites(t *testing.T) {
 	if err := runtime.RefreshConfigs(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(incus.ExecCalls) != 10 {
-		t.Fatalf("typed config writes = %d, want 10", len(incus.ExecCalls))
+	if len(incus.ExecCalls) != 6 {
+		t.Fatalf("typed config writes = %d, want 6 selected-agent writes", len(incus.ExecCalls))
+	}
+	wantDestinations := []string{
+		"/home/dev/.config/opencode/AGENTS.md",
+		"/home/dev/.config/opencode/opencode.jsonc",
+		"/home/dev/.config/opencode/repo.rules",
 	}
 	for index, call := range incus.ExecCalls {
 		if call.Project != "subyard" || call.Name != "yard" ||
@@ -66,11 +71,14 @@ func TestRefreshConfigsUsesTypedAtomicGuestWrites(t *testing.T) {
 			strings.Contains(destination, "auth.json") {
 			t.Fatalf("unsafe config destination %q", destination)
 		}
-		if index >= 5 {
-			first := incus.ExecCalls[index-5].Request
+		if !slices.Contains(wantDestinations, destination) {
+			t.Fatalf("unselected agent config destination %q", destination)
+		}
+		if index >= 3 {
+			first := incus.ExecCalls[index-3].Request
 			if !slices.Equal(first.Command, call.Request.Command) ||
 				!bytes.Equal(first.Stdin, call.Request.Stdin) {
-				t.Fatalf("config refresh %d is not idempotent", index-5)
+				t.Fatalf("config refresh %d is not idempotent", index-3)
 			}
 		}
 	}
@@ -157,7 +165,7 @@ func TestRefreshConfigsFollowsHostInstructionSymlink(t *testing.T) {
 	}
 	incus := runningIncus(1)
 	runtime := Runtime{
-		Environment: []string{"HOST_CLAUDE_MD=" + source},
+		Environment: []string{"AGENTS=claude", "HOST_CLAUDE_MD=" + source},
 		Incus:       incus, Executor: incus,
 		Yard: domain.Context{
 			IncusProject: "subyard", InstanceName: "yard", DevUser: "dev",

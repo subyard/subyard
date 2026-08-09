@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestPowerYardContextsAreDiscoveredWithoutChangingSelection(t *testing.T) {
@@ -78,6 +80,8 @@ type initPlatformFixture struct {
 	converged      map[ports.ReconcileStageID]bool
 	applied        []ports.ReconcileStageID
 	preflightFresh []bool
+	preflightErr   error
+	applyErr       error
 	configs        int
 	teardowns      int
 }
@@ -97,11 +101,314 @@ func newInitPlatformFixture() *initPlatformFixture {
 	return &initPlatformFixture{converged: converged}
 }
 
+func TestParseInitProfile(t *testing.T) {
+	request, err := parseInitArguments([]string{"--profile", "hermes", "--yes"})
+	if err != nil || request.mode != initReconcile || request.profile != "hermes" {
+		t.Fatalf("unexpected init request: %#v err=%v", request, err)
+	}
+
+	for _, test := range []struct {
+		name      string
+		arguments []string
+		want      string
+	}{
+		{name: "missing value", arguments: []string{"--profile"}, want: "needs a value"},
+		{name: "duplicate", arguments: []string{"--profile", "hermes", "--profile", "android"}, want: "only once"},
+		{name: "unsafe", arguments: []string{"--profile", "../hermes"}, want: "invalid profile"},
+		{name: "configs", arguments: []string{"--configs", "--profile", "hermes"}, want: "cannot be used together"},
+		{name: "reset", arguments: []string{"--profile", "hermes", "--reset"}, want: "cannot be used together"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := parseInitArguments(test.arguments)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("parseInitArguments(%v) error=%v, want %q", test.arguments, err, test.want)
+			}
+		})
+	}
+}
+
+func withoutCommandSetting(environment []string, name string) []string {
+	prefix := name + "="
+	return slices.DeleteFunc(slices.Clone(environment), func(value string) bool {
+		return strings.HasPrefix(value, prefix)
+	})
+}
+
+func TestLoadInitProfileUsesShippedPresetForUnknownYard(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	environment = withoutCommandSetting(environment, "SSH_PORT")
+	preset := filepath.Join(root, "config", "profiles", "hermes", "yard.env")
+	if err := os.MkdirAll(filepath.Dir(preset), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	content := "YARD_PROFILES=hermes\nAGENTS=codex\nSSH_PORT=2234\n"
+	writeCLIFile(t, preset, content, 0o600)
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, bootstrap, err := program.loadInitContext(
+		"custom-name", true, []string{"--profile", "hermes"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Context.YardName != "custom-name" || loaded.Context.SSHPort != 2234 ||
+		loaded.Environment["YARD_PROFILES"] != "hermes" || loaded.Environment["AGENTS"] != "codex" {
+		t.Fatalf("profile preset was not loaded for selected yard: %#v %#v", loaded.Context, loaded.Environment)
+	}
+	target := filepath.Join(root, "state", "yards", "custom-name", "config.env")
+	if bootstrap == nil || bootstrap.profile != "hermes" || bootstrap.sourcePath != preset ||
+		bootstrap.targetPath != target || string(bootstrap.content) != content {
+		t.Fatalf("unexpected bootstrap: %#v", bootstrap)
+	}
+	if _, err := os.Lstat(target); !os.IsNotExist(err) {
+		t.Fatalf("bootstrap load mutated persistent definition: %v", err)
+	}
+}
+
+func TestLoadInitProfileRejectsCommandOverridesOfPresetSettings(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		override string
+		want     string
+	}{
+		{name: "profiles", override: "YARD_PROFILES=openclaw", want: "YARD_PROFILES"},
+		{name: "agents", override: "AGENTS=claude", want: "AGENTS"},
+		{name: "host mounts", override: "HOST_MOUNTS=/tmp:/mnt/host:ro:0755", want: "HOST_MOUNTS"},
+		{name: "host links", override: "HOST_LINKS=.claude/sessions:/mnt/host/agent-sessions/claude/sessions", want: "HOST_LINKS"},
+		{name: "Claude instructions", override: "HOST_CLAUDE_MD=/tmp/CLAUDE.md", want: "HOST_CLAUDE_MD"},
+		{name: "Codex instructions", override: "HOST_CODEX_AGENTS_MD=/tmp/AGENTS.md", want: "HOST_CODEX_AGENTS_MD"},
+		{name: "OpenCode instructions", override: "HOST_OPENCODE_AGENTS_MD=/tmp/AGENTS.md", want: "HOST_OPENCODE_AGENTS_MD"},
+		{name: "capabilities", override: "YARD_CAPABILITIES=android", want: "YARD_CAPABILITIES"},
+		{name: "caps", override: "YARD_CAPS=fuse", want: "YARD_CAPS"},
+		{name: "devices", override: "YARD_DEVICES=gpu", want: "YARD_DEVICES"},
+		{name: "yard mounts", override: "YARD_MOUNTS=cache:/srv/cache:rw:0755", want: "YARD_MOUNTS"},
+		{name: "SSH forwarding", override: "FORWARD_SSH_AGENT=1", want: "FORWARD_SSH_AGENT"},
+		{name: "sudo", override: "DEV_SUDO=1", want: "DEV_SUDO"},
+		{name: "nested VMs", override: "NESTED_E2E_VMS=1", want: "NESTED_E2E_VMS"},
+		{name: "SSH port", override: "SSH_PORT=2299", want: "SSH_PORT"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			environment = withoutCommandSetting(environment, "SSH_PORT")
+			if test.name == "host mounts" {
+				hostSource := filepath.Join(root, "host", "fixture")
+				if err := os.MkdirAll(hostSource, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				test.override = "HOST_MOUNTS=fixture:/mnt/host:ro:0755"
+			}
+			setting := strings.SplitN(test.override, "=", 2)[0] + "="
+			environment = slices.DeleteFunc(environment, func(value string) bool {
+				return strings.HasPrefix(value, setting)
+			})
+			environment = append(environment, test.override)
+			preset := filepath.Join(root, "config", "profiles", "hermes", "yard.env")
+			if err := os.MkdirAll(filepath.Dir(preset), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			writeCLIFile(t, preset, `YARD_PROFILES=hermes
+AGENTS=codex
+HOST_MOUNTS=
+HOST_LINKS=
+HOST_CLAUDE_MD=
+HOST_CODEX_AGENTS_MD=
+HOST_OPENCODE_AGENTS_MD=
+YARD_CAPABILITIES=
+YARD_CAPS=
+YARD_DEVICES=
+YARD_MOUNTS=
+FORWARD_SSH_AGENT=0
+DEV_SUDO=0
+NESTED_E2E_VMS=0
+SSH_PORT=2234
+`, 0o600)
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			_, bootstrap, err := program.loadInitContext(
+				"custom-name", true, []string{"--profile", "hermes"},
+			)
+			if err == nil || !strings.Contains(err.Error(),
+				"command environment overrides profile \"hermes\" at setting "+test.want) ||
+				bootstrap != nil {
+				t.Fatalf("profile command override: bootstrap=%#v err=%v", bootstrap, err)
+			}
+		})
+	}
+}
+
+func TestLoadInitProfileAllowsMatchingCommandValue(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	environment = withoutCommandSetting(environment, "SSH_PORT")
+	environment = slices.DeleteFunc(environment, func(value string) bool {
+		return strings.HasPrefix(value, "AGENTS=")
+	})
+	environment = append(environment, "AGENTS=codex")
+	preset := filepath.Join(root, "config", "profiles", "hermes", "yard.env")
+	if err := os.MkdirAll(filepath.Dir(preset), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, preset, "YARD_PROFILES=hermes\nAGENTS=codex\nSSH_PORT=2234\n", 0o600)
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, bootstrap, err := program.loadInitContext(
+		"custom-name", true, []string{"--profile", "hermes"},
+	)
+	if err != nil || bootstrap == nil || loaded.Environment["AGENTS"] != "codex" {
+		t.Fatalf("matching command value was rejected: loaded=%#v bootstrap=%#v err=%v",
+			loaded.Environment, bootstrap, err)
+	}
+}
+
+func TestInitProfileExistingDefinitionMustMatchPreset(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		existing string
+		wantErr  string
+	}{
+		{
+			name: "semantic match",
+			existing: "# locally documented\n" +
+				"YARD_PROFILES='hermes'\nAGENTS=\"codex\"\nSSH_PORT=2234\n",
+		},
+		{
+			name:     "conflict",
+			existing: "YARD_PROFILES=hermes\nAGENTS=claude\nSSH_PORT=2234\n",
+			wantErr:  "conflicts with profile \"hermes\" at setting AGENTS",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			environment = withoutCommandSetting(environment, "SSH_PORT")
+			preset := filepath.Join(root, "config", "profiles", "hermes", "yard.env")
+			if err := os.MkdirAll(filepath.Dir(preset), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			writeCLIFile(t, preset, "YARD_PROFILES=hermes\nAGENTS=codex\nSSH_PORT=2234\n", 0o600)
+			target := filepath.Join(root, "state", "yards", "custom-name", "config.env")
+			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			writeCLIFile(t, target, test.existing, 0o600)
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			loaded, bootstrap, err := program.loadInitContext(
+				"custom-name", true, []string{"--profile", "hermes"},
+			)
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("loadInitContext error=%v, want %q", err, test.wantErr)
+				}
+				content, readErr := os.ReadFile(target)
+				if readErr != nil || string(content) != test.existing {
+					t.Fatalf("conflict changed definition: content=%q err=%v", content, readErr)
+				}
+				return
+			}
+			if err != nil || bootstrap != nil || loaded.Environment["AGENTS"] != "codex" {
+				t.Fatalf("matching definition was not reused: loaded=%#v bootstrap=%#v err=%v",
+					loaded.Environment, bootstrap, err)
+			}
+		})
+	}
+}
+
+func TestInitProfileReusesSupportedLegacyDefinition(t *testing.T) {
+	for _, location := range []string{"private", "flat config home"} {
+		t.Run(location, func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			environment = withoutCommandSetting(environment, "SSH_PORT")
+			preset := filepath.Join(root, "config", "profiles", "hermes", "yard.env")
+			if err := os.MkdirAll(filepath.Dir(preset), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			content := "YARD_PROFILES=hermes\nAGENTS=codex\nSSH_PORT=2234\n"
+			writeCLIFile(t, preset, content, 0o600)
+			legacy := filepath.Join(root, "private", "yards", "custom-name.env")
+			if location == "flat config home" {
+				legacy = filepath.Join(root, "state", "yards", "custom-name.env")
+			}
+			if err := os.MkdirAll(filepath.Dir(legacy), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			writeCLIFile(t, legacy, content, 0o600)
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			loaded, bootstrap, err := program.loadInitContext(
+				"custom-name", true, []string{"--profile", "hermes"},
+			)
+			if err != nil || bootstrap != nil || loaded.Environment["AGENTS"] != "codex" {
+				t.Fatalf("legacy definition was not reused: loaded=%#v bootstrap=%#v err=%v",
+					loaded.Environment, bootstrap, err)
+			}
+			canonical := filepath.Join(root, "state", "yards", "custom-name", "config.env")
+			if _, err := os.Lstat(canonical); !os.IsNotExist(err) {
+				t.Fatalf("legacy definition was shadowed by canonical file: %v", err)
+			}
+		})
+	}
+}
+
+func TestInitProfileRejectsRemoteContextBeforeBootstrap(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	environment = withoutCommandSetting(environment, "SSH_PORT")
+	preset := filepath.Join(root, "config", "profiles", "hermes", "yard.env")
+	if err := os.MkdirAll(filepath.Dir(preset), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, preset, "YARD_PROFILES=hermes\nAGENTS=codex\nSSH_PORT=2234\n", 0o600)
+	environment = append(environment, "YARD_TYPE=remote", "REMOTE_DEST=operator@example.test")
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, bootstrap, err := program.loadInitContext(
+		"custom-name", true, []string{"--profile", "hermes"},
+	)
+	if err == nil || !strings.Contains(err.Error(), "only supported for local yards") || bootstrap != nil {
+		t.Fatalf("remote profile bootstrap: bootstrap=%#v err=%v", bootstrap, err)
+	}
+	target := filepath.Join(root, "state", "yards", "custom-name", "config.env")
+	if _, err := os.Lstat(target); !os.IsNotExist(err) {
+		t.Fatalf("remote profile bootstrap wrote a definition: %v", err)
+	}
+}
+
 func (fixture *initPlatformFixture) CheckStage(_ context.Context, stage ports.ReconcileStageID) (bool, error) {
 	return fixture.converged[stage], nil
 }
 
 func (fixture *initPlatformFixture) ApplyStage(_ context.Context, stage ports.ReconcileStageID) error {
+	if fixture.applyErr != nil {
+		return fixture.applyErr
+	}
 	fixture.applied = append(fixture.applied, stage)
 	fixture.converged[stage] = true
 	return nil
@@ -113,7 +420,7 @@ func (fixture *initPlatformFixture) VerifyStage(_ context.Context, stage ports.R
 
 func (fixture *initPlatformFixture) Preflight(_ context.Context, fresh bool) error {
 	fixture.preflightFresh = append(fixture.preflightFresh, fresh)
-	return nil
+	return fixture.preflightErr
 }
 
 func (fixture *initPlatformFixture) RefreshConfigs(context.Context) error {
@@ -354,6 +661,114 @@ func TestNativeInitOwnsPlanResumeAndFinalization(t *testing.T) {
 	}
 	if len(platform.applied) != 2 {
 		t.Fatalf("no-op init reapplied stages: %v", platform.applied)
+	}
+}
+
+func TestInitProfileCreatesDefinitionOnlyAfterConfirmationAndPreflight(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		confirm       bool
+		preflightErr  error
+		applyErr      error
+		allConverged  bool
+		wantCode      int
+		wantPersisted bool
+	}{
+		{name: "success", confirm: true, wantPersisted: true},
+		{name: "converged infrastructure still preflights", confirm: true, allConverged: true, wantPersisted: true},
+		{name: "declined", wantCode: 1},
+		{name: "preflight failure", confirm: true, preflightErr: errors.New("unsupported host"), wantCode: 1},
+		{name: "reconcile failure is resumable", confirm: true, applyErr: errors.New("incus failed"), wantCode: 1, wantPersisted: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			environment = withoutCommandSetting(environment, "SSH_PORT")
+			preset := filepath.Join(root, "config", "profiles", "hermes", "yard.env")
+			if err := os.MkdirAll(filepath.Dir(preset), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			content := "YARD_PROFILES=hermes\nAGENTS=codex\nSSH_PORT=2234\n"
+			writeCLIFile(t, preset, content, 0o600)
+			platform := newInitPlatformFixture()
+			platform.preflightErr = test.preflightErr
+			platform.applyErr = test.applyErr
+			if test.allConverged {
+				platform.converged[ports.ReconcileStageProject] = true
+			}
+			prompt := &testkit.Prompt{Answers: []bool{test.confirm}}
+			arguments := []string{"-Y", "hermes", "init", "--profile", "hermes"}
+			var stdout, stderr bytes.Buffer
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard", Arguments: arguments,
+				Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
+				InitPlatform: platform, Prompt: prompt,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			target := filepath.Join(root, "state", "yards", "hermes", "config.env")
+			if _, err := os.Lstat(target); !os.IsNotExist(err) {
+				t.Fatalf("definition existed before init: %v", err)
+			}
+			if code := program.Run(context.Background()); code != test.wantCode {
+				t.Fatalf("init code=%d want=%d stdout=%q stderr=%q",
+					code, test.wantCode, stdout.String(), stderr.String())
+			}
+			if test.allConverged && !slices.Equal(platform.preflightFresh, []bool{false}) {
+				t.Fatalf("bootstrap skipped preflight: %v", platform.preflightFresh)
+			}
+			stored, err := os.ReadFile(target)
+			if !test.wantPersisted {
+				if !os.IsNotExist(err) {
+					t.Fatalf("unconfirmed definition was written: content=%q err=%v", stored, err)
+				}
+				return
+			}
+			if err != nil || string(stored) != content {
+				t.Fatalf("definition content=%q err=%v", stored, err)
+			}
+			info, err := os.Lstat(target)
+			if err != nil || info.Mode().Perm() != 0o600 {
+				t.Fatalf("definition mode=%v err=%v", info.Mode(), err)
+			}
+		})
+	}
+}
+
+func TestNativeInitProfileIsAdvertisedAndUnknownPresetDoesNotWrite(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments:   []string{"-Y", "hermes", "init", "--profile", "missing", "--yes"},
+		Environment: environment, WorkingDir: root, InitPlatform: newInitPlatformFixture(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, ok := program.manifest.Lookup("init")
+	if !ok || !slices.Contains(definition.Options, "--profile") {
+		t.Fatalf("init manifest does not advertise --profile: %#v", definition.Options)
+	}
+	var stderr bytes.Buffer
+	program.options.Stderr = &stderr
+	if code := program.Run(context.Background()); code != 2 ||
+		!strings.Contains(stderr.String(), "has no named-yard preset") {
+		t.Fatalf("unknown profile: code=%d stderr=%q", code, stderr.String())
+	}
+	target := filepath.Join(root, "state", "yards", "hermes", "config.env")
+	if _, err := os.Lstat(target); !os.IsNotExist(err) {
+		t.Fatalf("unknown profile wrote a definition: %v", err)
+	}
+
+	repositoryProgram, err := New(Options{
+		RepositoryRoot: repositoryRoot(t), Program: "yard", Environment: environment,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, ok = repositoryProgram.manifest.Lookup("init")
+	if !ok || !slices.Contains(definition.Options, "--profile") {
+		t.Fatalf("repository init manifest does not advertise --profile: %#v", definition.Options)
 	}
 }
 

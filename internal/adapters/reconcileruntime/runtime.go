@@ -656,16 +656,16 @@ func (runtime Runtime) testVMBackend(desired string) *testvmsruntime.Backend {
 }
 
 func (runtime Runtime) extrasContext() (map[string]string, error) {
-	paths, err := filepath.Glob(filepath.Join(runtime.RepositoryRoot,
-		"config", "profiles", "*", "profile.conf"))
-	if err != nil {
-		return nil, err
-	}
 	mounts := map[string]bool{}
 	capabilities := map[string]bool{}
 	devices := map[string]bool{}
 	base := runtimeEnvironment(runtime.Environment)
-	for _, path := range paths {
+	for _, profile := range strings.Fields(base["YARD_PROFILES"]) {
+		if !domain.SafeName(profile) {
+			return nil, fmt.Errorf("invalid YARD_PROFILES entry %q", profile)
+		}
+		path := filepath.Join(runtime.RepositoryRoot,
+			"config", "profiles", profile, "profile.conf")
 		values, err := config.ReadAssignmentsOver(path, base)
 		if err != nil {
 			return nil, err
@@ -982,14 +982,27 @@ func (runtime Runtime) provisionConverged(ctx context.Context) (bool, error) {
 	if version == "" || version == "latest" {
 		return false, nil
 	}
+	codexSelected := false
+	for _, agent := range strings.Fields(runtime.environmentValue("AGENTS")) {
+		if agent == "codex" {
+			codexSelected = true
+			break
+		}
+	}
+	codexVersion := runtime.environmentValue("CODEX_VERSION")
+	if codexSelected && (codexVersion == "" || codexVersion == "latest") {
+		return false, nil
+	}
 	state, err := runtime.reconcileState(ctx)
 	if err != nil || !state.InstanceFound {
 		return false, err
 	}
 	instance := state.Instance
 	marker, _ := instance.EffectiveConfig("user.subyard.ccusage_version")
+	codexMarker, _ := instance.EffectiveConfig("user.subyard.codex_version")
 	if strings.EqualFold(instance.Status, "stopped") {
-		return instanceIntentionallyStopped(instance) && marker == version, nil
+		return instanceIntentionallyStopped(instance) && marker == version &&
+			(!codexSelected || codexMarker == codexVersion), nil
 	}
 	if !strings.EqualFold(instance.Status, "running") {
 		return false, nil
@@ -1098,7 +1111,7 @@ jq -e '."ip-forward-no-drop" == true' /etc/docker/daemon.json >/dev/null \
 	if exists && strings.TrimSpace(string(link.Stdout)) == "/mnt/host/agent-sessions/opencode/storage" {
 		return false, nil
 	}
-	return marker == version, nil
+	return marker == version && (!codexSelected || codexMarker == codexVersion), nil
 }
 
 func (runtime Runtime) provisionAgentCommands() ([]string, error) {

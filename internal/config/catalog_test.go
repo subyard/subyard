@@ -46,3 +46,27 @@ func TestPublicSettingsExampleCoversStaticCatalog(t *testing.T) {
 		}
 	}
 }
+
+func TestCodexReleasePinsAreTypedYardInitSettings(t *testing.T) {
+	definitions := make(map[string]SettingDefinition)
+	for _, definition := range SettingCatalog() {
+		definitions[definition.Name] = definition
+	}
+	for name, valueType := range map[string]SettingValueType{
+		"CODEX_VERSION":      SettingVersion,
+		"CODEX_SHA256_AMD64": SettingSHA256,
+		"CODEX_SHA256_ARM64": SettingSHA256,
+	} {
+		definition, ok := definitions[name]
+		if !ok {
+			t.Errorf("catalog is missing %s", name)
+			continue
+		}
+		if definition.Type != valueType {
+			t.Errorf("%s type = %s, want %s", name, definition.Type, valueType)
+		}
+		if definition.Application != SettingYardInit || !definition.Syncable {
+			t.Errorf("%s must be a syncable yard-init setting", name)
+		}
+	}
+}

@@ -449,8 +449,11 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 	}
 	runtime := Runtime{
 		Incus: incus, Executor: incus,
-		Yard:        domain.Context{IncusProject: "subyard", InstanceName: "yard", DevUser: "dev"},
-		Environment: []string{"CCUSAGE_VERSION=1.2.3", "HOST_OPENCODE_AGENTS_MD=" + instructions},
+		Yard: domain.Context{IncusProject: "subyard", InstanceName: "yard", DevUser: "dev"},
+		Environment: []string{
+			"AGENTS=opencode", "CCUSAGE_VERSION=1.2.3",
+			"HOST_OPENCODE_AGENTS_MD=" + instructions,
+		},
 	}
 	assertStage(t, runtime, "provision", true, "matching running provision state")
 	if command := incus.ExecCalls[7].Request.Command; len(command) != 3 ||
@@ -467,13 +470,15 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime.Environment = []string{
-		"CCUSAGE_VERSION=1.2.3", "HOST_OPENCODE_AGENTS_MD=" + linkedInstructions,
+		"AGENTS=opencode", "CCUSAGE_VERSION=1.2.3",
+		"HOST_OPENCODE_AGENTS_MD=" + linkedInstructions,
 	}
 	linkedDigest := fmt.Sprintf("%x", sha256.Sum256([]byte("updated\n")))
 	incus.ExecSteps = steps("regular file|755|0:0", linkedDigest)
 	assertStage(t, runtime, "provision", true, "symlinked host instructions")
 	runtime.Environment = []string{
-		"CCUSAGE_VERSION=1.2.3", "HOST_OPENCODE_AGENTS_MD=" + instructions,
+		"AGENTS=opencode", "CCUSAGE_VERSION=1.2.3",
+		"HOST_OPENCODE_AGENTS_MD=" + instructions,
 	}
 	missing := steps("regular file|755|0:0", digest)
 	missing[7] = testkit.IncusExecStep{
@@ -496,7 +501,16 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 		"user.subyard.desired_power": "stopped", "user.subyard.ccusage_version": "1.2.3",
 	}}
 	assertStage(t, runtime, "provision", true, "matching stopped provision marker")
-	runtime.Environment = []string{"CCUSAGE_VERSION=1.2.4", "HOST_OPENCODE_AGENTS_MD=" + instructions}
+	runtime.Environment = []string{
+		"AGENTS=codex", "CCUSAGE_VERSION=1.2.3", "CODEX_VERSION=0.147.0",
+	}
+	assertStage(t, runtime, "provision", false, "missing stopped Codex version marker")
+	incus.Reconcile.Instance.Config["user.subyard.codex_version"] = "0.147.0"
+	assertStage(t, runtime, "provision", true, "matching stopped Codex version marker")
+	runtime.Environment = []string{
+		"AGENTS=opencode", "CCUSAGE_VERSION=1.2.4",
+		"HOST_OPENCODE_AGENTS_MD=" + instructions,
+	}
 	assertStage(t, runtime, "provision", false, "stale stopped provision marker")
 }
 
@@ -699,8 +713,18 @@ func TestExtrasDesiredStateIsParsedAndValidatedInGo(t *testing.T) {
 	}
 	writeProfile("a", "YARD_MOUNTS='cache:/srv/cache:rw:0755'\nYARD_CAPS='fuse'\n")
 	writeProfile("b", "YARD_CAPS='rootless-docker fuse'\nYARD_DEVICES='gpu'\n")
-	runtime := Runtime{RepositoryRoot: root}
+	runtime := Runtime{RepositoryRoot: root, Environment: []string{"YARD_PROFILES=a"}}
 	values, err := runtime.extrasContext()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if values["SUBYARD_EXTRAS_MOUNTS"] != "cache:/srv/cache:rw:0755" ||
+		values["SUBYARD_EXTRAS_CAPABILITIES"] != "fuse" ||
+		values["SUBYARD_EXTRAS_DEVICES"] != "" {
+		t.Fatalf("unselected profile leaked extras: %#v", values)
+	}
+	runtime.Environment = []string{"YARD_PROFILES=a b"}
+	values, err = runtime.extrasContext()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -715,6 +739,7 @@ func TestExtrasDesiredStateIsParsedAndValidatedInGo(t *testing.T) {
 		t.Fatalf("VM inherited container-only device extras: %#v, %v", values, err)
 	}
 	writeProfile("bad", "YARD_MOUNTS='../escape:/srv/cache:rw:0755'\n")
+	runtime.Environment = []string{"YARD_PROFILES=bad"}
 	if _, err := runtime.extrasContext(); err == nil {
 		t.Fatal("unsafe profile extras were accepted")
 	}

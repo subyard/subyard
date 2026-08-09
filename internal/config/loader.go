@@ -13,15 +13,16 @@ import (
 )
 
 type LoadOptions struct {
-	RepositoryRoot string
-	OperatorHome   string
-	YardName       string
-	Environment    map[string]string
-	DisablePrivate bool
-	SyncSource     bool
-	ConfigLocked   bool
-	LayerPaths     *LayerPaths
-	YardDirs       []string
+	RepositoryRoot   string
+	OperatorHome     string
+	YardName         string
+	YardSettingsFile string
+	Environment      map[string]string
+	DisablePrivate   bool
+	SyncSource       bool
+	ConfigLocked     bool
+	LayerPaths       *LayerPaths
+	YardDirs         []string
 }
 
 type LayerPaths struct {
@@ -43,6 +44,8 @@ type Loaded struct {
 type retiredYardTemplateError struct {
 	diagnostic string
 }
+
+var ErrUnknownYard = errors.New("unknown yard")
 
 func (err *retiredYardTemplateError) Error() string {
 	return err.diagnostic
@@ -242,7 +245,9 @@ func load(
 		)
 		applyYardDerivations(yardName, values, tracker, yardDerivationLayer)
 		yardFile := ""
-		if options.LayerPaths != nil {
+		if options.YardSettingsFile != "" {
+			yardFile = options.YardSettingsFile
+		} else if options.LayerPaths != nil {
 			yardFile = options.LayerPaths.YardSettings[yardName]
 			if yardFile == "" {
 				return domain.Context{}, nil, fmt.Errorf("unknown yard %q", yardName)
@@ -301,8 +306,26 @@ func load(
 	if err := normalizeAgentAssetPaths(values, tracker); err != nil {
 		return domain.Context{}, nil, err
 	}
+	normalizeAgentPersistLinks(values, tracker, defaultLayer)
 	ctx, err := contextFrom(root, yardName, values, tracker, defaultLayer, normalizationLayer)
 	return ctx, values, err
+}
+
+func normalizeAgentPersistLinks(
+	values environment,
+	tracker *settingTracker,
+	defaultLayer settingLayerID,
+) {
+	assignments := tracker.assignments["HOST_LINKS"]
+	if len(assignments) == 0 || assignments[len(assignments)-1].Layer != defaultLayer {
+		return
+	}
+	var selected strings.Builder
+	for _, agent := range strings.Fields(values["AGENTS"]) {
+		selected.WriteString(values["AGENT_"+agent+"_PERSIST"])
+	}
+	values["HOST_LINKS"] = selected.String()
+	tracker.normalize("HOST_LINKS", values["HOST_LINKS"], "derived from selected AGENTS")
 }
 
 func cloneEnvironment(values environment) environment {
@@ -699,7 +722,17 @@ func environmentFrom(explicit map[string]string) environment {
 	return values
 }
 
+// FindYardSettingsFile returns the highest-precedence supported definition for
+// a named yard.
+func FindYardSettingsFile(root, name, configHome string) (string, error) {
+	return findYardFileAt(root, name, configHome, nil)
+}
+
 func findYardFile(root, name string, values environment, explicit []string) (string, error) {
+	return findYardFileAt(root, name, values["SUBYARD_CONFIG_HOME"], explicit)
+}
+
+func findYardFileAt(root, name, configHome string, explicit []string) (string, error) {
 	var candidates []string
 	if len(explicit) != 0 {
 		for _, directory := range explicit {
@@ -709,7 +742,6 @@ func findYardFile(root, name string, values environment, explicit []string) (str
 			)
 		}
 	} else {
-		configHome := values["SUBYARD_CONFIG_HOME"]
 		privateYards := filepath.Join(root, "private", "yards")
 		candidates = []string{
 			filepath.Join(configHome, "yards", name, "config.env"),
@@ -722,7 +754,7 @@ func findYardFile(root, name string, values environment, explicit []string) (str
 			return candidate, nil
 		}
 	}
-	return "", fmt.Errorf("unknown yard %q", name)
+	return "", fmt.Errorf("%w %q", ErrUnknownYard, name)
 }
 
 func applyYardDerivations(

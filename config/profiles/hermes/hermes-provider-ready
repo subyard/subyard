@@ -17,7 +17,10 @@ HERMES_RUNTIME_ENV="$runtime_env" "$HERMES_PIN_CHECK" --runtime-only
 if [ "${HERMES_PROVIDER_READY_SKIP_DOCTOR:-0}" != 1 ]; then
   runuser -u "$HERMES_DEV_USER" -- env \
     HOME="$HERMES_DEV_HOME" HERMES_HOME="$HERMES_HOME" \
-    HERMES_DISABLE_LAZY_INSTALLS=1 PATH="$HERMES_VENV/bin:/usr/local/bin:/usr/bin:/bin" \
+    HERMES_DISABLE_LAZY_INSTALLS=1 \
+    PLAYWRIGHT_BROWSERS_PATH="$HERMES_PLAYWRIGHT_BROWSERS_PATH" \
+    AGENT_BROWSER_EXECUTABLE_PATH="$HERMES_BROWSER_EXECUTABLE" \
+    PATH="$(dirname "$HERMES_NODE"):$HERMES_VENV/bin:/usr/local/bin:/usr/bin:/bin" \
     "$HERMES_VENV/bin/hermes" doctor
 fi
 

@@ -1,8 +1,12 @@
 # Host-free process integrations using temporary roots and fake external commands.
+agent-selection.sh
 ccusage-provision.sh
+codex-agent-defaults.sh
+codex-agent-provision.sh
 emulator-process-control.sh
 engine-release.sh
 hermes-backup.sh
+hermes-e2e-contract.sh
 hermes-provision.sh
 hermes-restic.sh
 key-tools-install.sh

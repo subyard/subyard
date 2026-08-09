@@ -137,9 +137,12 @@ if not snapshot:
 print(snapshot)
 PY
 )"
-restic ls "$snapshot_id" | grep -Fq "/$(basename "$local_zip")" \
+restic_listing="$(mktemp "$local_stage/restic-ls.XXXXXX")"
+chmod 0600 "$restic_listing"
+restic ls "$snapshot_id" > "$restic_listing"
+grep -Fxq "/$(basename "$local_zip")" "$restic_listing" \
   || die "archive is absent from the restic snapshot"
-restic ls "$snapshot_id" | grep -Fq "/$(basename "$local_metadata")" \
+grep -Fxq "/$(basename "$local_metadata")" "$restic_listing" \
   || die "metadata is absent from the restic snapshot"
 
 {

@@ -253,7 +253,13 @@ func (cli *CLI) Run(ctx context.Context) int {
 	if core {
 		remotePlane = definition.Remote
 	}
-	loaded, err := cli.loadContext(yard)
+	var loaded config.Loaded
+	var bootstrap *initBootstrap
+	if core && definition.Handler == "@init" && !commandHelpRequested(commandArguments) {
+		loaded, bootstrap, err = cli.loadInitContext(yard, explicit, commandArguments)
+	} else {
+		loaded, err = cli.loadContext(yard)
+	}
 	if core && (definition.Handler == "@list" || definition.Handler == "@status" ||
 		definition.Handler == "@yards") && strings.Contains(yard, "/") {
 		cli.env["SUBYARD_INVENTORY_SELECTOR"] = yard
@@ -340,7 +346,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 	if core && structuredCommandSupported(definition.Name) &&
 		!commandHelpRequested(commandArguments) {
 		return cli.runStructuredCommand(ctx, loaded, definition, commandArguments,
-			yes || cli.env["ASSUME_YES"] == "1", projectRun, remoteRun)
+			yes || cli.env["ASSUME_YES"] == "1", projectRun, remoteRun, bootstrap)
 	}
 	target, routeErr := application.Route(loadedContext, domain.RemotePolicy(remotePlane))
 	if routeErr != nil {
@@ -2398,6 +2404,7 @@ func (cli *CLI) runStructuredCommand(
 	assumeYes bool,
 	project *projectExecution,
 	remote *domain.RemotePrepared,
+	bootstrap *initBootstrap,
 ) int {
 	for _, argument := range arguments {
 		if argument == "-y" || argument == "--yes" {
@@ -2407,13 +2414,13 @@ func (cli *CLI) runStructuredCommand(
 	var initRun *initExecution
 	if definition.Handler == "@init" && loaded.Context.YardType != domain.YardRemote {
 		var err error
-		initRun, err = cli.prepareInitExecution(ctx, loaded, arguments)
+		initRun, err = cli.prepareInitExecution(ctx, loaded, arguments, bootstrap)
 		if err != nil {
 			cli.errorf("prepare init: %v", err)
 			return 1
 		}
 		cli.printInitPlan(initRun)
-		if initRun.mode == initReconcile && initRun.plan.Pending() == 0 {
+		if initRun.mode == initReconcile && initRun.plan.Pending() == 0 && bootstrap == nil {
 			fmt.Fprintln(cli.options.Stdout, "  [ ok ] Everything is already set up")
 			return 0
 		}
@@ -2873,26 +2880,39 @@ func (cli *CLI) usageSection(title, section string) {
 }
 
 func (cli *CLI) loadContext(yard string) (config.Loaded, error) {
+	return cli.loadContextWithYardSettings(yard, "")
+}
+
+func (cli *CLI) loadContextWithYardSettings(yard, yardSettingsFile string) (config.Loaded, error) {
+	loaded, err := cli.resolveContextWithYardSettings(yard, yardSettingsFile)
+	if err != nil {
+		return config.Loaded{}, err
+	}
+	cli.adoptContext(loaded)
+	return loaded, nil
+}
+
+func (cli *CLI) resolveContextWithYardSettings(yard, yardSettingsFile string) (config.Loaded, error) {
 	operatorHome := cli.env["SUBYARD_OPERATOR_HOME"]
 	if operatorHome == "" {
 		operatorHome = cli.env["HOME"]
 	}
-	loaded, err := config.Load(config.LoadOptions{
-		RepositoryRoot: cli.options.RepositoryRoot,
-		OperatorHome:   operatorHome,
-		YardName:       yard,
-		Environment:    cli.env,
+	return config.Load(config.LoadOptions{
+		RepositoryRoot:   cli.options.RepositoryRoot,
+		OperatorHome:     operatorHome,
+		YardName:         yard,
+		YardSettingsFile: yardSettingsFile,
+		Environment:      cli.env,
 	})
-	if err != nil {
-		return config.Loaded{}, err
-	}
+}
+
+func (cli *CLI) adoptContext(loaded config.Loaded) {
 	for name, value := range loaded.Environment {
 		cli.env[name] = value
 	}
 	cli.env["SUBYARD_CONFIG_LOADED"] = "1"
 	cli.env["SUBYARD_ENGINE_CONTEXT"] = "1"
 	cli.env["SUBYARD_ENGINE_CONTEXT_SCHEMA"] = "1"
-	return loaded, nil
 }
 
 func (cli *CLI) runCommand(ctx context.Context, path string, arguments []string, extra map[string]string) int {
@@ -3168,7 +3188,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		}
 		var initRun *initExecution
 		if definition.Handler == "@init" && loaded.Context.YardType != domain.YardRemote {
-			initRun, err = handler.cli.prepareInitExecution(ctx, loaded, arguments)
+			initRun, err = handler.cli.prepareInitExecution(ctx, loaded, arguments, nil)
 			if err != nil {
 				return nil, &rpc.Error{Code: "plan_failed", Message: err.Error()}
 			}

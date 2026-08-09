@@ -7,7 +7,7 @@
 # commands remain data-driven by config/profiles/*/resources/*.res and are appended by the engine.
 check||@check||forward|read|never|public|lifecycle|simple|check|verify the host can run a yard (read-only preflight)|--help|
 security||@security||forward|read|never|public|lifecycle|simple|security|validate static and live Incus host-boundary invariants|--quiet --require-live --help|
-init|setup|@init||forward|mutate|required|public|lifecycle|simple|init|install or reconcile Incus, the yard and its core configuration|--configs --reset --yes --help|
+init|setup|@init||forward|mutate|required|public|lifecycle|simple|init|install or reconcile Incus, the yard and its core configuration|--configs --reset --profile --yes --help|
 start||@lifecycle||forward|mutate|never|public|lifecycle|simple|start|start the yard|--yes --help|
 status||@status||local|read|never|public|lifecycle|status|status|summarize all yards or show one selected yard in detail|--all --yes --help|
 space||@space||local|read|never|public|lifecycle|simple|space|show disk usage for local yards|--refresh --help|

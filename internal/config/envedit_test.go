@@ -53,3 +53,51 @@ func TestWritePersistentAssignmentPreservesUnrelatedRecords(t *testing.T) {
 		t.Fatalf("persistent config mode = %o", info.Mode().Perm())
 	}
 }
+
+func TestCreatePersistentFileRefusesExistingTarget(t *testing.T) {
+	configHome := filepath.Join(t.TempDir(), "config")
+	if err := os.MkdirAll(configHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(configHome, "yards", "hermes", "config.env")
+	content := []byte("YARD_PROFILES=hermes\n")
+	if err := CreatePersistentFile(configHome, path, content); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || string(stored) != string(content) {
+		t.Fatalf("unexpected persistent file: mode=%v content=%q", info.Mode(), stored)
+	}
+	if err := CreatePersistentFile(configHome, path, []byte("AGENTS=claude\n")); err == nil ||
+		!strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("existing target error=%v", err)
+	}
+	stored, err = os.ReadFile(path)
+	if err != nil || string(stored) != string(content) {
+		t.Fatalf("existing target was changed: content=%q err=%v", stored, err)
+	}
+}
+
+func TestCreatePersistentFileCreatesMissingConfigurationRoot(t *testing.T) {
+	configHome := filepath.Join(t.TempDir(), "missing")
+	path := filepath.Join(configHome, "yards", "hermes", "config.env")
+	content := []byte("YARD_PROFILES=hermes\n")
+	if err := CreatePersistentFile(configHome, path, content); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := os.ReadFile(path)
+	if err != nil || string(stored) != string(content) {
+		t.Fatalf("persistent file content=%q err=%v", stored, err)
+	}
+	info, err := os.Lstat(configHome)
+	if err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
+		t.Fatalf("configuration root mode=%v err=%v", info.Mode(), err)
+	}
+}

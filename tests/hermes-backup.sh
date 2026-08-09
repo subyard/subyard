@@ -11,11 +11,18 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
 tmp="$(mktemp -d)"
 trap 'rm -rf -- "$tmp"' EXIT
-mkdir -p "$tmp/bin" "$tmp/runtime/source" "$tmp/runtime/venv/bin" \
-  "$tmp/home/workspace" "$tmp/stages"
+mkdir -p "$tmp/bin" "$tmp/runtime/source/node_modules/.bin" \
+  "$tmp/runtime/venv/bin" "$tmp/runtime/node/bin" \
+  "$tmp/runtime/playwright/chromium-fixture" "$tmp/home/workspace" "$tmp/stages"
 printf 'lock\n' > "$tmp/runtime/source/uv.lock"
+printf '%s\n' \
+  '{"name":"fixture","lockfileVersion":3,"packages":{"node_modules/agent-browser":{"version":"0.26.0"}}}' \
+  > "$tmp/runtime/source/package-lock.json"
 printf '%s\n' 3ef6bbd201263d354fd83ec55b3c306ded2eb72a \
   > "$tmp/runtime/.subyard-commit"
+browser_contract='node=22.20.0 npm=10.9.3 agent-browser=0.26.0 playwright=1.62.1'
+printf -v browser_contract_q '%q' "$browser_contract"
+printf '%s\n' "$browser_contract" > "$tmp/runtime/.subyard-browser-runtime"
 printf 'model:\n  provider: fixture\n' > "$tmp/home/config.yaml"
 printf 'HERMES_DASHBOARD_SESSION_TOKEN=%064d\n' 0 > "$tmp/home/.serve.env"
 
@@ -49,6 +56,8 @@ fi
 exit 90
 HERMES
 chmod +x "$tmp/runtime/venv/bin/hermes"
+cp "$tmp/runtime/venv/bin/hermes" "$tmp/hermes"
+chmod 0755 "$tmp/hermes"
 cat > "$tmp/runtime/venv/bin/python" <<'PYTHON'
 #!/usr/bin/env bash
 if [ "${1:-}" = -c ]; then
@@ -58,6 +67,33 @@ fi
 exec python3 "$@"
 PYTHON
 chmod +x "$tmp/runtime/venv/bin/python"
+
+cat > "$tmp/runtime/node/bin/node" <<'NODE'
+#!/usr/bin/env bash
+[ "${1:-}" = --version ] && { printf 'v22.20.0\n'; exit; }
+exit 89
+NODE
+cat > "$tmp/runtime/node/bin/npm" <<'NPM'
+#!/usr/bin/env bash
+[ "${1:-}" = --version ] && { printf '10.9.3\n'; exit; }
+exit 88
+NPM
+cat > "$tmp/runtime/source/node_modules/.bin/agent-browser" <<'AGENT_BROWSER'
+#!/usr/bin/env bash
+[ "${1:-}" = --version ] && { printf 'agent-browser 0.26.0\n'; exit; }
+exit 87
+AGENT_BROWSER
+printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/runtime/node/bin/npx"
+printf '#!/usr/bin/env bash\nexit 0\n' \
+  > "$tmp/runtime/playwright/chromium-fixture/chrome"
+chmod +x "$tmp/runtime/node/bin/node" "$tmp/runtime/node/bin/npm" \
+  "$tmp/runtime/node/bin/npx" "$tmp/runtime/source/node_modules/.bin/agent-browser" \
+  "$tmp/runtime/playwright/chromium-fixture/chrome"
+ln -s "$tmp/runtime/node/bin/node" "$tmp/node-command"
+ln -s "$tmp/runtime/node/bin/npm" "$tmp/npm-command"
+ln -s "$tmp/runtime/node/bin/npx" "$tmp/npx-command"
+cp "$tmp/runtime/source/node_modules/.bin/agent-browser" "$tmp/agent-browser-command"
+chmod 0755 "$tmp/agent-browser-command"
 
 cat > "$tmp/bin/systemctl" <<'SYSTEMCTL'
 #!/usr/bin/env bash
@@ -101,9 +137,27 @@ HERMES_HOME=$tmp/home
 HERMES_INSTALL_ROOT=$tmp/runtime
 HERMES_SOURCE=$tmp/runtime/source
 HERMES_VENV=$tmp/runtime/venv
+HERMES_NODE_VERSION=22.20.0
+HERMES_NPM_VERSION=10.9.3
+HERMES_AGENT_BROWSER_VERSION=0.26.0
+HERMES_PLAYWRIGHT_VERSION=1.62.1
+HERMES_BROWSER_RUNTIME_MARKER=$tmp/runtime/.subyard-browser-runtime
+HERMES_BROWSER_RUNTIME_CONTRACT=$browser_contract_q
+HERMES_NODE=$tmp/runtime/node/bin/node
+HERMES_NPM=$tmp/runtime/node/bin/npm
+HERMES_NPX=$tmp/runtime/node/bin/npx
+HERMES_AGENT_BROWSER=$tmp/runtime/source/node_modules/.bin/agent-browser
+HERMES_PLAYWRIGHT_BROWSERS_PATH=$tmp/runtime/playwright
+HERMES_BROWSER_EXECUTABLE=$tmp/runtime/playwright/chromium-fixture/chrome
+HERMES_NODE_COMMAND=$tmp/node-command
+HERMES_NPM_COMMAND=$tmp/npm-command
+HERMES_NPX_COMMAND=$tmp/npx-command
+HERMES_AGENT_BROWSER_COMMAND=$tmp/agent-browser-command
 HERMES_DEV_USER=$(id -un)
 HERMES_DEV_GROUP=$(id -gn)
 HERMES_DEV_HOME=$tmp
+HERMES_LAUNCHER=$tmp/hermes
+HERMES_RUNTIME_OWNER=$(id -u):$(id -g)
 HERMES_PIN_CHECK=$PROFILE_DIR/hermes-pin-check
 HERMES_VERIFY_BACKUP=$VERIFY
 EOF

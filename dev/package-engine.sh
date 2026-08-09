@@ -84,6 +84,9 @@ runtime_list="$bundle_stage/.runtime-inputs"
 runtime_extras=(
   scripts/lib/engine-context.sh
   scripts/install-test-vms-host-sink.sh
+  config/agents/codex/provision.sh
+  config/profiles/hermes/hermes
+  config/profiles/hermes/yard.env
   config/systemd/subyard-test-vms-host-sink.service.in
   config/systemd/subyard-test-vms-host-sink.timer.in
 )

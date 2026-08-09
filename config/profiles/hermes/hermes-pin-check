@@ -5,19 +5,80 @@ runtime_env="${HERMES_RUNTIME_ENV:-/etc/subyard/hermes-runtime.env}"
 [ -r "$runtime_env" ] || { printf 'hermes pin check: missing %s\n' "$runtime_env" >&2; exit 1; }
 # shellcheck disable=SC1090
 . "$runtime_env"
+[ -n "${HERMES_LAUNCHER:-}" ] && [ -n "${HERMES_RUNTIME_OWNER:-}" ] \
+  && [ -n "${HERMES_NODE_VERSION:-}" ] && [ -n "${HERMES_NPM_VERSION:-}" ] \
+  && [ -n "${HERMES_AGENT_BROWSER_VERSION:-}" ] \
+  && [ -n "${HERMES_PLAYWRIGHT_VERSION:-}" ] \
+  && [ -n "${HERMES_BROWSER_RUNTIME_MARKER:-}" ] \
+  && [ -n "${HERMES_BROWSER_RUNTIME_CONTRACT:-}" ] \
+  && [ -n "${HERMES_NODE:-}" ] && [ -n "${HERMES_NPM:-}" ] \
+  && [ -n "${HERMES_NPX:-}" ] && [ -n "${HERMES_AGENT_BROWSER:-}" ] \
+  && [ -n "${HERMES_PLAYWRIGHT_BROWSERS_PATH:-}" ] \
+  && [ -n "${HERMES_BROWSER_EXECUTABLE:-}" ] \
+  || { printf 'hermes pin check: launcher contract missing from runtime env\n' >&2; exit 1; }
 
 marker="$HERMES_INSTALL_ROOT/.subyard-commit"
 [ -r "$marker" ] && [ "$(<"$marker")" = "$HERMES_COMMIT" ] \
   || { printf 'hermes pin check: runtime commit mismatch\n' >&2; exit 1; }
 [ -x "$HERMES_VENV/bin/hermes" ] \
   || { printf 'hermes pin check: runtime entrypoint missing\n' >&2; exit 1; }
+[ -f "$HERMES_LAUNCHER" ] && [ ! -L "$HERMES_LAUNCHER" ] && [ -x "$HERMES_LAUNCHER" ] \
+  || { printf 'hermes pin check: yard-wide launcher missing\n' >&2; exit 1; }
+[ "$(stat -c '%a' "$HERMES_LAUNCHER" 2>/dev/null)" = 755 ] \
+  || { printf 'hermes pin check: yard-wide launcher mode drifted\n' >&2; exit 1; }
+[ "$(stat -c '%u:%g' "$HERMES_LAUNCHER" 2>/dev/null)" = "$HERMES_RUNTIME_OWNER" ] \
+  || { printf 'hermes pin check: yard-wide launcher owner drifted\n' >&2; exit 1; }
 [ -r "$HERMES_SOURCE/uv.lock" ] \
   || { printf 'hermes pin check: locked source missing\n' >&2; exit 1; }
+[ -r "$HERMES_SOURCE/package-lock.json" ] \
+  || { printf 'hermes pin check: locked browser source missing\n' >&2; exit 1; }
+[ -r "$HERMES_BROWSER_RUNTIME_MARKER" ] \
+  && [ "$(<"$HERMES_BROWSER_RUNTIME_MARKER")" = \
+    "$HERMES_BROWSER_RUNTIME_CONTRACT" ] \
+  || { printf 'hermes pin check: browser runtime contract mismatch\n' >&2; exit 1; }
+node_bin="$(dirname "$HERMES_NODE")"
+[ "$($HERMES_NODE --version 2>/dev/null)" = "v$HERMES_NODE_VERSION" ] \
+  || { printf 'hermes pin check: Node.js version mismatch\n' >&2; exit 1; }
+[ "$(PATH="$node_bin:$PATH" "$HERMES_NPM" --version 2>/dev/null)" = \
+  "$HERMES_NPM_VERSION" ] \
+  || { printf 'hermes pin check: npm version mismatch\n' >&2; exit 1; }
+[ "$(PATH="$node_bin:$PATH" "$HERMES_AGENT_BROWSER" --version 2>/dev/null)" = \
+  "agent-browser $HERMES_AGENT_BROWSER_VERSION" ] \
+  || { printf 'hermes pin check: agent-browser version mismatch\n' >&2; exit 1; }
+[ -n "$(find "$HERMES_PLAYWRIGHT_BROWSERS_PATH" -type f -name chrome \
+  -perm /111 -print -quit 2>/dev/null)" ] \
+  || { printf 'hermes pin check: Playwright Chromium missing\n' >&2; exit 1; }
+[ -f "$HERMES_BROWSER_EXECUTABLE" ] && [ -x "$HERMES_BROWSER_EXECUTABLE" ] \
+  && [[ "$HERMES_BROWSER_EXECUTABLE" = "$HERMES_PLAYWRIGHT_BROWSERS_PATH"/* ]] \
+  || { printf 'hermes pin check: Chromium executable mismatch\n' >&2; exit 1; }
+
+check_managed_link() {
+  command_path="$1"
+  target="$2"
+  [ -L "$command_path" ] && [ "$(readlink "$command_path")" = "$target" ] \
+    && [ "$(stat -c '%u:%g' "$command_path" 2>/dev/null)" = "$HERMES_RUNTIME_OWNER" ] \
+    || { printf 'hermes pin check: canonical runtime command drifted: %s\n' \
+      "$command_path" >&2; exit 1; }
+}
+check_managed_link "$HERMES_NODE_COMMAND" "$HERMES_NODE"
+check_managed_link "$HERMES_NPM_COMMAND" "$HERMES_NPM"
+check_managed_link "$HERMES_NPX_COMMAND" "$HERMES_NPX"
+[ -f "$HERMES_AGENT_BROWSER_COMMAND" ] && [ ! -L "$HERMES_AGENT_BROWSER_COMMAND" ] \
+  && [ -x "$HERMES_AGENT_BROWSER_COMMAND" ] \
+  && [ "$(stat -c '%a' "$HERMES_AGENT_BROWSER_COMMAND" 2>/dev/null)" = 755 ] \
+  && [ "$(stat -c '%u:%g' "$HERMES_AGENT_BROWSER_COMMAND" 2>/dev/null)" = \
+    "$HERMES_RUNTIME_OWNER" ] \
+  || { printf 'hermes pin check: canonical agent-browser wrapper drifted\n' >&2; exit 1; }
+[ "$($HERMES_AGENT_BROWSER_COMMAND --version 2>/dev/null)" = \
+  "agent-browser $HERMES_AGENT_BROWSER_VERSION" ] \
+  || { printf 'hermes pin check: canonical agent-browser wrapper failed\n' >&2; exit 1; }
 
 actual_version="$("$HERMES_VENV/bin/python" -c \
   'from hermes_cli import __version__; print(__version__)' 2>/dev/null)"
 [ "$actual_version" = "$HERMES_VERSION" ] \
   || { printf 'hermes pin check: version mismatch\n' >&2; exit 1; }
+"$HERMES_LAUNCHER" --version >/dev/null 2>&1 \
+  || { printf 'hermes pin check: yard-wide launcher failed\n' >&2; exit 1; }
 
 if [ "${1:-}" != "--runtime-only" ]; then
   ready="$HERMES_HOME/.provider-ready"

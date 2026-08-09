@@ -53,6 +53,7 @@ See the [control-plane architecture](docs/control-plane.md) for module ownership
 contracts, test topology, and the real-host acceptance lane. Paseo Desktop support is available as
 an [opt-in agent package](docs/paseo.md). A pinned
 [Orca remote server](docs/orca.md) is available as an opt-in profile resource.
+For a dedicated Hermes backend, see the [Hermes profile guide](docs/hermes.md).
 
 ## Everyday commands
 

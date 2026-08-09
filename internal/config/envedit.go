@@ -72,6 +72,20 @@ func WritePersistentFile(configHome, path string, content []byte) error {
 	return writePersistentFile(configHome, path, content)
 }
 
+// CreatePersistentFile atomically stores a new persistent file and refuses to
+// replace an existing target.
+func CreatePersistentFile(configHome, path string, content []byte) error {
+	if err := ensurePersistentRoot(configHome); err != nil {
+		return err
+	}
+	unlock, err := LockRoot(configHome, true)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return persistFile(configHome, path, content, false)
+}
+
 type envEditRecord struct {
 	content []byte
 	name    string
@@ -168,6 +182,10 @@ func dereference(value *string) string {
 }
 
 func writePersistentFile(configHome, path string, content []byte) error {
+	return persistFile(configHome, path, content, true)
+}
+
+func persistFile(configHome, path string, content []byte, replace bool) error {
 	relative, err := filepath.Rel(configHome, path)
 	if err != nil || relative == "." || filepath.IsAbs(relative) ||
 		relative == ".." ||
@@ -179,6 +197,9 @@ func writePersistentFile(configHome, path string, content []byte) error {
 		return err
 	}
 	if info, err := os.Lstat(path); err == nil {
+		if !replace {
+			return errors.New("persistent setting target already exists")
+		}
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			return errors.New("persistent setting target is not a regular file")
 		}
@@ -213,11 +234,30 @@ func writePersistentFile(configHome, path string, content []byte) error {
 	if err := file.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(temp, path); err != nil {
-		return err
+	if replace {
+		if err := os.Rename(temp, path); err != nil {
+			return err
+		}
+	} else {
+		if err := os.Link(temp, path); err != nil {
+			if errors.Is(err, os.ErrExist) {
+				return errors.New("persistent setting target already exists")
+			}
+			return err
+		}
+		if err := os.Remove(temp); err != nil {
+			return err
+		}
 	}
 	keep = true
 	return syncPersistentDirectory(directory)
+}
+
+func ensurePersistentRoot(configHome string) error {
+	if err := os.MkdirAll(configHome, 0o700); err != nil {
+		return err
+	}
+	return validatePersistentDirectory(configHome)
 }
 
 func ensurePersistentDirectory(configHome, target string) error {

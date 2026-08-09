@@ -8,37 +8,83 @@ Hermes gateway.
 
 ## Create and provision the yard
 
-Choose an unused SSH port in the named-yard configuration:
+Bootstrap the named yard from the shipped, non-secret Hermes preset, then run
+profile provisioning as its own confirmed mutation:
 
 ```sh
-mkdir -p ~/.config/subyard/yards/hermes
-cat >~/.config/subyard/yards/hermes/config.env <<'EOF'
-YARD_PROFILES=hermes
-FORWARD_SSH_AGENT=0
-SSH_PORT=2224
-EOF
+yard -Y hermes init --profile hermes
+yard -Y hermes provision
 
-yard -Y hermes init
-yard -Y hermes provision hermes
+yard -Y hermes config show YARD_PROFILES
+yard -Y hermes config show AGENTS
+yard -Y hermes config show HOST_MOUNTS
+yard -Y hermes config show FORWARD_SSH_AGENT
+yard -Y hermes config show SSH_PORT
+ss -H -ltn 'sport = :2224'
 ```
+
+`init` and `provision` are separate mutations and each displays its own plan and
+confirmation. Bare `provision` is deliberate: `YARD_PROFILES=hermes` limits the
+selection to this profile. The bootstrap validates the complete preset before
+creating its mode-0600 named-yard definition. To customize a setting afterwards,
+use the supported authoring command, for example
+`yard -Y hermes config set SSH_PORT 2225 --scope yard`, then run plain
+`yard -Y hermes init`.
 
 The profile installs Hermes Agent 0.19.0 from an exact source commit, uses a
 pinned `uv` and Python, and resolves only the committed lock file. The
-root-owned runtime is under `/opt/hermes-agent`; persistent state is under
-`/srv/hermes`. Re-provisioning the same pin preserves state and the dashboard
-session token.
+root-owned runtime under `/opt/hermes-agent` also includes Node.js 22.20.0 with
+its bundled npm 10.9.3, locked `agent-browser` 0.26.0, and Chromium installed by
+Playwright 1.62.1. No manual Node or browser setup is required. Persistent Hermes
+state remains under `/srv/hermes`, so the reproducible Node/browser runtime does
+not inflate its backups. Re-provisioning the same pins preserves state and the
+dashboard session token. `AGENTS=codex` also installs the pinned Codex CLI and
+its config, but not Claude, OpenCode, pi, or Paseo. `HOST_LINKS=` keeps Codex
+authorization and sessions inside this yard rather than mounting owner-host
+state.
 
-Provisioning leaves `hermes-serve.service` disabled until a provider has been
-configured and tested. Enter the yard, perform the provider's normal
-interactive setup, run `hermes doctor`, and make one real inference. Record any
-provider credential store outside `HERMES_HOME`; Hermes' native backup does not
-promise to include arbitrary CLI or OS credential stores. After that check:
+Verify the profile-owned browser runtime from an ordinary yard shell:
 
 ```sh
-sudo hermes-provider-ready --inference-ok
-systemctl is-active hermes-serve.service
-ss -ltnp | grep '127.0.0.1:9119'
+node --version
+npm --version
+agent-browser --version
+agent-browser doctor --offline --quick
+agent-browser --session hermes-smoke open about:blank
+agent-browser --session hermes-smoke close
 ```
+
+Provisioning leaves `hermes-serve.service` disabled until a provider has been
+configured and tested. Enter the yard as `dev`, authorize the yard-local Codex
+CLI, and let Hermes import that authorization for its native `openai-codex`
+provider:
+
+```sh
+yard -Y hermes shell
+cd /srv/hermes/workspace
+codex login --device-auth
+codex login status
+hermes setup model
+hermes doctor
+hermes chat
+```
+
+Choose `openai-codex` during model setup and import the current Codex CLI
+authorization. `hermes chat` must complete one real inference. Then leave the
+interactive shell and approve the service through Subyard's explicit root
+surface (the yard has `DEV_SUDO=0`):
+
+```sh
+yard -Y hermes shell --root -- hermes-provider-ready --inference-ok
+yard -Y hermes shell -- systemctl is-enabled hermes-serve.service
+yard -Y hermes shell -- systemctl is-active hermes-serve.service
+yard -Y hermes shell -- curl -fsS http://127.0.0.1:9119/api/status
+```
+
+Codex authorization remains in `/home/dev/.codex`; never copy or mount the
+owner host's Codex home into this yard. The Hermes backup contract does not
+include that CLI authorization, so a restored yard must run the login/status
+and provider import steps again.
 
 The approval marker is bound to the installed commit. A restore or pin change
 invalidates it.
@@ -94,13 +140,14 @@ For a restore, provision a clean yard with the same exact profile commit, copy
 the verified ZIP into that yard, then run:
 
 ```sh
-sudo hermes-restore /path/to/hermes-backup.zip EXPECTED_SHA256
+yard -Y hermes shell --root -- hermes-restore /path/to/hermes-backup.zip EXPECTED_SHA256
 ```
 
 The restore leaves the service disabled and removes provider approval. Recheck
-external credentials, run `hermes doctor`, make a real inference, and approve
-the provider again. Do not use cross-version import as rollback: restore the
-old runtime pin and its matching backup together.
+external credentials, repeat `codex login --device-auth`, verify `codex login
+status`, import `openai-codex` again, run `hermes doctor`, make a real inference,
+and approve the provider again. Do not use cross-version import as rollback:
+restore the old runtime pin and its matching backup together.
 
 ## Maintainer acceptance
 

@@ -196,7 +196,11 @@ func (check HostCheck) evaluate(facts HostFacts, options CheckOptions) []finding
 				strings.Join(duplicates, " ")))
 	}
 	if facts.PortListening {
-		add("Yard SSH port", "warn",
+		level := "warn"
+		if options.Strict && !options.BasePresent {
+			level = "fail"
+		}
+		add("Yard SSH port", level,
 			fmt.Sprintf("host port %d is already listening (another service, or this yard is running)",
 				check.Yard.SSHPort))
 	} else {

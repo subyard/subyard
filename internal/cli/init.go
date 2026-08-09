@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
@@ -23,9 +26,22 @@ const (
 	initReset
 )
 
+type initArguments struct {
+	mode    initMode
+	profile string
+}
+
+type initBootstrap struct {
+	profile    string
+	sourcePath string
+	targetPath string
+	content    []byte
+}
+
 type initExecution struct {
 	loaded        config.Loaded
 	mode          initMode
+	bootstrap     *initBootstrap
 	plan          application.ReconcilePlan
 	platform      ports.InitPlatform
 	powerYards    []domain.Context
@@ -43,26 +59,197 @@ func (reporter initReporter) StageStarted(stage application.ReconcileStage) {
 	fmt.Fprintf(reporter.output, "  [ .. ] %s\n", stage.ID)
 }
 
-func parseInitArguments(arguments []string) (initMode, error) {
-	mode := initReconcile
-	for _, argument := range arguments {
+func parseInitArguments(arguments []string) (initArguments, error) {
+	request := initArguments{mode: initReconcile}
+	for index := 0; index < len(arguments); index++ {
+		argument := arguments[index]
 		switch argument {
 		case "-y", "--yes":
 		case "--configs":
-			if mode == initReset {
-				return 0, errors.New("--configs and --reset cannot be used together")
+			if request.mode == initReset || request.profile != "" {
+				return initArguments{}, errors.New("--configs, --reset and --profile cannot be used together")
 			}
-			mode = initConfigs
+			request.mode = initConfigs
 		case "--reset":
-			if mode == initConfigs {
-				return 0, errors.New("--configs and --reset cannot be used together")
+			if request.mode == initConfigs || request.profile != "" {
+				return initArguments{}, errors.New("--configs, --reset and --profile cannot be used together")
 			}
-			mode = initReset
+			request.mode = initReset
+		case "--profile":
+			if index+1 >= len(arguments) {
+				return initArguments{}, errors.New("--profile needs a value")
+			}
+			index++
+			if request.profile != "" {
+				return initArguments{}, errors.New("--profile may be specified only once")
+			}
+			if request.mode != initReconcile {
+				return initArguments{}, errors.New("--configs, --reset and --profile cannot be used together")
+			}
+			request.profile = arguments[index]
+			if !domain.SafeName(request.profile) {
+				return initArguments{}, fmt.Errorf("invalid profile %q", request.profile)
+			}
 		default:
-			return 0, fmt.Errorf("unknown option %q", argument)
+			return initArguments{}, fmt.Errorf("unknown option %q", argument)
 		}
 	}
-	return mode, nil
+	return request, nil
+}
+
+func (cli *CLI) loadInitContext(
+	yard string,
+	explicit bool,
+	arguments []string,
+) (config.Loaded, *initBootstrap, error) {
+	request, err := parseInitArguments(arguments)
+	if err != nil {
+		return config.Loaded{}, nil, err
+	}
+	if request.profile == "" {
+		loaded, err := cli.loadContext(yard)
+		return loaded, nil, err
+	}
+	if !explicit || yard == "" || yard == "default" {
+		return config.Loaded{}, nil, errors.New(
+			"--profile requires selecting a non-default yard with -Y",
+		)
+	}
+	source := filepath.Join(
+		cli.options.RepositoryRoot, "config", "profiles", request.profile, "yard.env",
+	)
+	info, err := os.Lstat(source)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return config.Loaded{}, nil, fmt.Errorf(
+				"profile %q has no named-yard preset", request.profile,
+			)
+		}
+		return config.Loaded{}, nil, fmt.Errorf("inspect profile preset: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return config.Loaded{}, nil, fmt.Errorf(
+			"profile %q named-yard preset is not a regular file", request.profile,
+		)
+	}
+	content, err := os.ReadFile(source)
+	if err != nil {
+		return config.Loaded{}, nil, fmt.Errorf("read profile preset: %w", err)
+	}
+	operatorHome := cli.env["SUBYARD_OPERATOR_HOME"]
+	if operatorHome == "" {
+		operatorHome = cli.env["HOME"]
+	}
+	configHome, err := config.ResolveConfigHome(operatorHome, cli.env)
+	if err != nil {
+		return config.Loaded{}, nil, err
+	}
+	target := filepath.Join(configHome, "yards", yard, "config.env")
+	existingPath, existingErr := config.FindYardSettingsFile(
+		cli.options.RepositoryRoot, yard, configHome,
+	)
+	if existingErr == nil {
+		existing, err := cli.resolveContextWithYardSettings(yard, existingPath)
+		if err != nil {
+			return config.Loaded{}, nil, err
+		}
+		if existing.Context.YardType != domain.YardLocal {
+			return config.Loaded{}, nil, errors.New("--profile is only supported for local yards")
+		}
+		preset, err := cli.resolveContextWithYardSettings(yard, source)
+		if err != nil {
+			return config.Loaded{}, nil, err
+		}
+		if preset.Context.YardType != domain.YardLocal {
+			return config.Loaded{}, nil, errors.New("--profile is only supported for local yards")
+		}
+		if name := firstInitProfileConflict(existing, existingPath, preset, source); name != "" {
+			return config.Loaded{}, nil, fmt.Errorf(
+				"named yard %q conflicts with profile %q at setting %s; use plain init for an intentionally customized yard",
+				yard, request.profile, name,
+			)
+		}
+		if name := firstInitProfileOverride(existing, preset, source); name != "" {
+			return config.Loaded{}, nil, fmt.Errorf(
+				"command environment overrides profile %q at setting %s",
+				request.profile, name,
+			)
+		}
+		cli.adoptContext(existing)
+		return existing, nil, nil
+	} else if !errors.Is(existingErr, config.ErrUnknownYard) {
+		return config.Loaded{}, nil, fmt.Errorf("inspect named-yard definition: %w", existingErr)
+	}
+	loaded, err := cli.loadContextWithYardSettings(yard, source)
+	if err != nil {
+		return config.Loaded{}, nil, err
+	}
+	if loaded.Context.YardType != domain.YardLocal {
+		return config.Loaded{}, nil, errors.New("--profile is only supported for local yards")
+	}
+	if name := firstInitProfileOverride(loaded, loaded, source); name != "" {
+		return config.Loaded{}, nil, fmt.Errorf(
+			"command environment overrides profile %q at setting %s",
+			request.profile, name,
+		)
+	}
+	return loaded, &initBootstrap{
+		profile: request.profile, sourcePath: source, targetPath: target, content: content,
+	}, nil
+}
+
+func firstInitProfileOverride(
+	loaded config.Loaded,
+	preset config.Loaded,
+	presetPath string,
+) string {
+	presetValues := yardAssignments(preset, presetPath)
+	names := make([]string, 0, len(presetValues))
+	for name := range presetValues {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if loaded.Environment[name] != presetValues[name] {
+			return name
+		}
+	}
+	return ""
+}
+
+func firstInitProfileConflict(
+	existing config.Loaded,
+	existingPath string,
+	preset config.Loaded,
+	presetPath string,
+) string {
+	existingValues := yardAssignments(existing, existingPath)
+	presetValues := yardAssignments(preset, presetPath)
+	names := make([]string, 0, len(presetValues))
+	for name := range presetValues {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if value, ok := existingValues[name]; !ok || value != presetValues[name] {
+			return name
+		}
+	}
+	return ""
+}
+
+func yardAssignments(loaded config.Loaded, path string) map[string]string {
+	values := map[string]string{}
+	path = filepath.Clean(path)
+	for name, trace := range loaded.Settings {
+		for _, resolution := range trace.Resolutions {
+			if resolution.Scope == string(config.ScopeYard) &&
+				resolution.Status != "unset" && filepath.Clean(resolution.Path) == path {
+				values[name] = resolution.Value
+			}
+		}
+	}
+	return values
 }
 
 func (cli *CLI) initPlatform(loaded config.Loaded, powerYards []domain.Context) ports.InitPlatform {
@@ -125,11 +312,13 @@ func (cli *CLI) prepareInitExecution(
 	ctx context.Context,
 	loaded config.Loaded,
 	arguments []string,
+	bootstrap *initBootstrap,
 ) (*initExecution, error) {
-	mode, err := parseInitArguments(arguments)
+	request, err := parseInitArguments(arguments)
 	if err != nil {
 		return nil, err
 	}
+	mode := request.mode
 	var platform ports.InitPlatform
 	var powerYards []domain.Context
 	if cli.options.InitPlatform != nil {
@@ -142,7 +331,7 @@ func (cli *CLI) prepareInitExecution(
 		platform = cli.initPlatform(loaded, powerYards)
 	}
 	execution := &initExecution{
-		loaded: loaded, mode: mode, platform: platform, powerYards: powerYards,
+		loaded: loaded, mode: mode, bootstrap: bootstrap, platform: platform, powerYards: powerYards,
 	}
 	execution.hostID, execution.hostIDPending, err = configsync.ResolveHostID(
 		loaded.Context.Paths.ConfigHome, loaded.Environment,
@@ -165,7 +354,7 @@ func (cli *CLI) prepareInitExecution(
 			return nil, err
 		}
 	}
-	if execution.plan.Pending() != 0 {
+	if execution.plan.Pending() != 0 || bootstrap != nil {
 		if err := execution.platform.Preflight(ctx, mode == initReset); err != nil {
 			return nil, fmt.Errorf("host preflight failed: %w", err)
 		}
@@ -175,6 +364,10 @@ func (cli *CLI) prepareInitExecution(
 
 func (execution *initExecution) consequences() []string {
 	hostIDConsequences := []string{}
+	if execution.bootstrap != nil {
+		hostIDConsequences = append(hostIDConsequences,
+			"create named yard definition from profile "+execution.bootstrap.profile)
+	}
 	if execution.hostIDPending {
 		hostIDConsequences = append(hostIDConsequences, "record owner HostID "+execution.hostID)
 	}
@@ -214,6 +407,15 @@ func (cli *CLI) printInitPlan(execution *initExecution) {
 }
 
 func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Writer) error {
+	if execution.bootstrap != nil {
+		if err := config.CreatePersistentFile(
+			execution.loaded.Context.Paths.ConfigHome,
+			execution.bootstrap.targetPath,
+			execution.bootstrap.content,
+		); err != nil {
+			return fmt.Errorf("create named-yard definition: %w", err)
+		}
+	}
 	hostID, err := configsync.EnsureHostID(
 		execution.loaded.Context.Paths.ConfigHome, execution.loaded.Environment,
 	)
