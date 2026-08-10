@@ -1207,13 +1207,7 @@ func validateConfigOwnerMode(path string, info os.FileInfo, directory bool, uid 
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("config path is not a regular file: %s", path)
 	}
-	sensitive := filepath.Base(path) == "config.env" ||
-		strings.Contains(path, string(filepath.Separator)+"secrets"+string(filepath.Separator)) ||
-		strings.Contains(path, string(filepath.Separator)+"generated"+string(filepath.Separator))
-	if sensitive && info.Mode().Perm() != 0o600 {
-		return fmt.Errorf("sensitive config file mode must be 0600: %s", path)
-	}
-	if !sensitive && info.Mode().Perm()&0o022 != 0 {
+	if info.Mode().Perm()&0o022 != 0 {
 		return fmt.Errorf("config file is group/world writable: %s", path)
 	}
 	return nil

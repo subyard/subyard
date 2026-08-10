@@ -860,10 +860,16 @@ resume() {
   candidate_migrate apply >/dev/null
   verify_prepared_versioned_migration
 
+  operator_env chmod 0755 "$OPERATOR_HOME/.config/subyard/yards/test-yard"
+  operator_env chmod 0640 \
+    "$OPERATOR_HOME/.config/subyard/yards/test-yard/config.env"
+
   operator_no_go env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT/b" \
     "$OPERATOR_HOME/.local/bin/yard" update --version "$VERSION_B" --yes
   verify_committed_versioned_migration
   verify_config_workflow
+  operator_env chmod 0600 \
+    "$OPERATOR_HOME/.config/subyard/yards/test-yard/config.env"
   [ "$(incus config get "$INSTANCE" user.subyard.desired_power --project "$PROJECT")" = running ] \
     && [ "$(incus config get "$DEFAULT_INSTANCE" user.subyard.desired_power \
       --project "$DEFAULT_PROJECT")" = running ] \

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/config"
@@ -296,6 +297,88 @@ func TestConfigApplyRejectsUnsafeSettingsTreeBeforeMutation(t *testing.T) {
 	if len(applier.yards) != 0 {
 		t.Fatalf("unsafe tree was applied to %#v", applier.yards)
 	}
+}
+
+func TestConfigValidationAllowsReadableManagedFilesAndRejectsUnsafePermissions(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		relative string
+		mode     os.FileMode
+		wantErr  string
+	}{
+		{name: "host config group readable", relative: "config.env", mode: 0o640},
+		{name: "host config world readable", relative: "config.env", mode: 0o644},
+		{name: "secret group readable", relative: "secrets/token", mode: 0o640},
+		{name: "secret world readable", relative: "secrets/token", mode: 0o644},
+		{name: "generated group readable", relative: "generated/codex/config", mode: 0o640},
+		{name: "generated world readable", relative: "generated/codex/config", mode: 0o644},
+		{name: "group writable", relative: "secrets/token", mode: 0o620, wantErr: "group/world writable"},
+		{name: "world writable", relative: "generated/codex/config", mode: 0o602, wantErr: "group/world writable"},
+		{name: "group readable and writable", relative: "config.env", mode: 0o660, wantErr: "group/world writable"},
+		{name: "group and world writable", relative: "config.env", mode: 0o666, wantErr: "group/world writable"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			configHome := filepath.Join(t.TempDir(), "config")
+			path := filepath.Join(configHome, filepath.FromSlash(test.relative))
+			writeConfigCommandFile(t, path, "value\n", test.mode)
+			if err := os.Chmod(path, test.mode); err != nil {
+				t.Fatal(err)
+			}
+
+			err := validateManagedConfigTree(configHome)
+			if test.wantErr == "" && err != nil {
+				t.Fatalf("mode %04o was rejected: %v", test.mode, err)
+			}
+			if test.wantErr != "" && (err == nil || !strings.Contains(err.Error(), test.wantErr)) {
+				t.Fatalf("mode %04o error = %v, want %q", test.mode, err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestConfigValidationKeepsOwnershipSymlinkAndTypeChecks(t *testing.T) {
+	t.Run("foreign owner", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.env")
+		writeConfigCommandFile(t, path, "value\n", 0o600)
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := validateConfigOwnerMode(path, info, false, uint32(os.Getuid()+1)); err == nil ||
+			!strings.Contains(err.Error(), "not operator-owned") {
+			t.Fatalf("foreign owner error = %v", err)
+		}
+	})
+
+	t.Run("symlink", func(t *testing.T) {
+		configHome := filepath.Join(t.TempDir(), "config")
+		target := filepath.Join(t.TempDir(), "target")
+		writeConfigCommandFile(t, target, "value\n", 0o600)
+		if err := os.MkdirAll(configHome, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, filepath.Join(configHome, "config.env")); err != nil {
+			t.Fatal(err)
+		}
+		if err := validateManagedConfigTree(configHome); err == nil || !strings.Contains(err.Error(), "symlink") {
+			t.Fatalf("symlink error = %v", err)
+		}
+	})
+
+	t.Run("non regular file", func(t *testing.T) {
+		configHome := filepath.Join(t.TempDir(), "config")
+		path := filepath.Join(configHome, "config.env")
+		if err := os.MkdirAll(configHome, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := syscall.Mkfifo(path, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := validateManagedConfigTree(configHome); err == nil ||
+			!strings.Contains(err.Error(), "not a regular file") {
+			t.Fatalf("non-regular error = %v", err)
+		}
+	})
 }
 
 func TestConfigValidationExcludesRuntimeStateTrees(t *testing.T) {

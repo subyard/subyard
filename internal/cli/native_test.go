@@ -677,6 +677,69 @@ func TestUpdateReportsActivatedRuntimeWhenConfigRefreshFails(t *testing.T) {
 	}
 }
 
+func TestUpdateRefreshAcceptsReadableConfigAndRejectsWritableConfigAfterActivation(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		mode     os.FileMode
+		wantCode int
+		wantErr  string
+	}{
+		{name: "group readable", mode: 0o640},
+		{name: "group writable", mode: 0o660, wantCode: 1, wantErr: "group/world writable"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, environment, runtimeRoot := updateReleaseFixture(t)
+			configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+			yardDirectory := filepath.Join(configHome, "yards", "hermes")
+			if err := os.MkdirAll(yardDirectory, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			configPath := filepath.Join(yardDirectory, "config.env")
+			writeCLIFile(t, configPath, "SSH_PORT=2224\n", test.mode)
+			if err := os.Chmod(configPath, test.mode); err != nil {
+				t.Fatal(err)
+			}
+
+			var stderr bytes.Buffer
+			applier := &validatingConfigApplier{configHome: configHome}
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard",
+				Arguments: []string{
+					"-Y", "hermes", "update", "--yes", "--version", "1.2.3",
+					"--runtime-root", runtimeRoot,
+				},
+				Environment: environment, WorkingDir: root, Config: applier, Stderr: &stderr,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code := program.Run(context.Background()); code != test.wantCode ||
+				(test.wantErr != "" && !strings.Contains(stderr.String(), test.wantErr)) {
+				t.Fatalf("update mode %04o: code=%d stderr=%q", test.mode, code, stderr.String())
+			}
+			if _, err := os.Lstat(filepath.Join(runtimeRoot, "current", "bin", "yard")); err != nil {
+				t.Fatalf("runtime was not activated before refresh: %v", err)
+			}
+			if test.wantCode == 0 && !slices.Equal(applier.yards, []string{"hermes"}) {
+				t.Fatalf("refreshed yards = %#v", applier.yards)
+			}
+		})
+	}
+}
+
+type validatingConfigApplier struct {
+	configHome string
+	yards      []string
+}
+
+func (applier *validatingConfigApplier) ApplyConfig(_ context.Context, yard string) error {
+	if err := validateManagedConfigTree(applier.configHome); err != nil {
+		return err
+	}
+	applier.yards = append(applier.yards, yard)
+	return nil
+}
+
 type failingConfigApplier struct{ err error }
 
 func (applier failingConfigApplier) ApplyConfig(context.Context, string) error { return applier.err }

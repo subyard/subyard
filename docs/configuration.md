@@ -42,6 +42,12 @@ configuration:
 Run `yard config paths` to resolve these roles for the current installation and selected yard.
 Immutable shipped defaults stay in the installed runtime and do not belong in the configuration root.
 
+Managed configuration paths must be real (not symbolic links), operator-owned files and directories.
+Subyard rejects any managed path that is writable by its group or by other users. The operator may
+choose the group and other read bits for existing files; Subyard does not treat those read bits as a
+confidentiality policy. New sensitive files are created with mode `0600` by default, without
+silently changing the mode of existing files during update or apply.
+
 ## Scalar settings
 
 Common portable values may go in `overrides/shared/config.env` only when `config fields` lists the
