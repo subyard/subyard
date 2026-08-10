@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Veranda UX wireframes</title>
+  <style>
+    :root { color-scheme: dark; --bg:#111216; --panel:#1b1d22; --line:#383b44; --muted:#969ba8; --accent:#83c7ff; }
+    * { box-sizing:border-box; }
+    body { margin:0; font:14px/1.45 system-ui,sans-serif; background:var(--bg); color:#eef0f5; }
+    header { position:sticky; top:0; z-index:2; padding:18px 24px; background:#181a1feF; border-bottom:1px solid var(--line); backdrop-filter:blur(12px); }
+    header h1 { margin:0 0 8px; font-size:20px; }
+    nav { display:flex; gap:14px; flex-wrap:wrap; }
+    nav a { color:var(--accent); text-decoration:none; }
+    main { max-width:1240px; margin:auto; padding:28px 22px 80px; }
+    section { margin:0 0 44px; scroll-margin-top:100px; }
+    h2 { margin-bottom:6px; }
+    .note { color:var(--muted); margin-top:0; }
+    .pair { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
+    .app { border:1px solid var(--line); border-radius:10px; overflow:hidden; background:var(--panel); min-height:390px; }
+    .title { padding:10px 14px; border-bottom:1px solid var(--line); color:var(--muted); }
+    .bar { padding:12px 14px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; gap:12px; }
+    .layout { display:grid; grid-template-columns:220px 1fr; min-height:340px; }
+    .fleet { padding:16px; border-right:1px solid var(--line); line-height:1.85; }
+    .workspace { padding:18px; min-width:0; }
+    .eyebrow { color:var(--muted); text-transform:uppercase; font-size:11px; letter-spacing:.08em; }
+    .object-head { display:flex; justify-content:space-between; gap:12px; align-items:start; }
+    .object-head h3 { margin:4px 0; font-size:21px; }
+    button { color:#eef0f5; background:#2a2d34; border:1px solid #4b4f5a; border-radius:5px; padding:7px 10px; margin:2px; }
+    .tabs { margin:14px 0; padding:11px 0; border-top:1px solid var(--line); border-bottom:1px solid var(--line); word-spacing:10px; }
+    .tabs strong { color:var(--accent); }
+    .row { display:grid; grid-template-columns:1fr auto; gap:12px; align-items:center; padding:13px 4px; border-bottom:1px solid var(--line); }
+    .card { padding:13px; margin:10px 0; border:1px solid var(--line); border-radius:7px; background:#202228; }
+    .card-head { display:flex; justify-content:space-between; gap:12px; }
+    .grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+    .field { border:1px solid var(--line); border-radius:6px; padding:12px; min-height:68px; }
+    input { width:100%; padding:9px; color:#eef0f5; background:#15171b; border:1px solid #4b4f5a; border-radius:5px; margin:5px 0 10px; }
+    .terminal { background:#080a0c; color:#b9eabf; font:13px/1.5 ui-monospace,monospace; padding:18px; min-height:260px; white-space:pre-wrap; }
+    code { color:#b8dfff; }
+    @media (max-width:850px) { .pair { grid-template-columns:1fr; } .layout { grid-template-columns:170px 1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Veranda low-fidelity wireframes</h1>
+    <nav>
+      <a href="#shell">Host and yard</a><a href="#projects">Projects</a><a href="#profiles">Profiles</a>
+      <a href="#diagnostics">Diagnostics</a><a href="#settings">Settings</a><a href="#sync">Sync</a>
+      <a href="#connect">Remote connection</a><a href="#resources">CPU / RAM</a>
+    </nav>
+  </header>
+  <main>
+    <section id="shell">
+      <h2>Object-scoped application shell</h2>
+      <p class="note">The fleet stays fixed. Selecting a host or yard changes the workspace tabs and actions.</p>
+      <div class="pair">
+        <div class="app">
+          <div class="title">Host selected</div><div class="bar"><b>Veranda</b><span>+ Connect remote host</span></div>
+          <div class="layout"><aside class="fleet"><span class="eyebrow">Hosts</span><br><br><b>▾ local-host</b><br>　default<br>　dev-yard<br>　test-yard<br><br>▸ remote-host</aside>
+            <div class="workspace"><div class="object-head"><div><span class="eyebrow">Current local host</span><h3>local-host</h3></div><div><button>CPU / RAM</button><button>Host shell</button><button>Copy command</button></div></div>
+              <div class="tabs"><strong>Overview</strong> Yards Sync Diagnostics Settings</div>
+              <div class="card"><b>Yards</b><br>default · dev-yard · test-yard</div><div class="card"><b>Configuration sync</b><br>Connected · Up to date</div><div class="card"><b>Credential sync</b><br>Redacted status only</div>
+            </div></div>
+        </div>
+        <div class="app">
+          <div class="title">Yard selected</div><div class="bar"><b>Veranda</b><span>+ Connect remote host</span></div>
+          <div class="layout"><aside class="fleet"><span class="eyebrow">Hosts</span><br><br>▾ local-host<br>　<b>default</b><br>　dev-yard<br>　test-yard<br><br>▸ remote-host</aside>
+            <div class="workspace"><div class="object-head"><div><span class="eyebrow">Yard · local-host</span><h3>default</h3><span>RUNNING · 2 projects</span></div><div><button>Yard shell</button><button>Copy command</button></div></div>
+              <div class="tabs"><strong>Overview</strong> Projects Profiles Diagnostics Settings</div>
+              <div class="card"><b>Projects</b><br>web-app · api-service</div><div class="card"><b>Profiles</b><br>developer · android</div><div class="card"><b>Diagnostics</b><br>SSH configured · VS Code ready</div>
+            </div></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="projects">
+      <h2>Minimal project list</h2><p class="note">No inferred agent presence, activity, health, or running state.</p>
+      <div class="app"><div class="title">Yard · default · Projects</div><div class="workspace">
+        <div class="tabs">Overview <strong>Projects</strong> Profiles Diagnostics Settings</div>
+        <div class="row"><b>web-app</b><div><button>Open in VS Code</button><button>Shell</button></div></div>
+        <div class="row"><b>api-service</b><div><button>Open in VS Code</button><button>Shell</button></div></div>
+      </div></div>
+    </section>
+
+    <section id="profiles">
+      <h2>Profiles</h2><p class="note">A simple selected/effective view. Changes use the owner-side exact plan.</p>
+      <div class="app"><div class="title">Yard · default · Profiles</div><div class="workspace">
+        <div class="tabs">Overview Projects <strong>Profiles</strong> Diagnostics Settings</div>
+        <div class="row"><span>☑　<b>developer</b><br>　　 Core development tools</span><span>Applied　<button>Details</button></span></div>
+        <div class="row"><span>☑　<b>android</b><br>　　 Android development tools</span><span>Applied　<button>Details</button></span></div>
+        <div class="row"><span>☐　<b>web</b><br>　　 Web project environment</span><span>Available　<button>Details</button></span></div>
+      </div></div>
+    </section>
+
+    <section id="diagnostics">
+      <h2>Diagnostics</h2><p class="note">Typed RPC facts only. Unknown facts display as Unavailable.</p>
+      <div class="app"><div class="title">Yard · default · Diagnostics</div><div class="workspace">
+        <div class="tabs">Overview Projects Profiles <strong>Diagnostics</strong> Settings</div>
+        <div class="grid"><div class="field"><span class="eyebrow">Yard state</span><br><b>RUNNING</b><br>Desired: running</div><div class="field"><span class="eyebrow">Initialization</span><br><b>Initialized</b><br>Autostart enabled</div><div class="field"><span class="eyebrow">Access</span><br><b>SSH configured</b><br>IP and dev user available</div><div class="field"><span class="eyebrow">Development</span><br><b>VS Code ready</b><br>Services available</div><div class="field"><span class="eyebrow">Storage</span><br><b>Space facts</b><br>Managed mounts</div><div class="field"><span class="eyebrow">Security</span><br><b>Security facts</b><br>Owner-side status probe</div></div>
+      </div></div>
+    </section>
+
+    <section id="settings">
+      <h2>Typed settings</h2><p class="note">Profiles, credentials, projects, runtime observations, and secret values stay outside this table.</p>
+      <div class="app"><div class="title">Yard · default · Settings</div><div class="workspace">
+        <input placeholder="Search settings">
+        <div class="row"><span><b>boot.autostart</b><br><small>Effective: false · From: yard</small></span><button>Edit</button></div>
+        <div class="row"><span><b>dev.uid</b><br><small>Effective: 1000 · From: host</small></span><button>Edit</button></div>
+        <div class="row"><span><b>network.mode</b><br><small>Effective: managed · From: shipped default</small></span><button>Edit</button></div>
+      </div></div>
+    </section>
+
+    <section id="sync">
+      <h2>Owner-host synchronization</h2><p class="note">Non-secret configuration and redacted credential status remain separate.</p>
+      <div class="app"><div class="title">Host · local-host · Sync</div><div class="workspace">
+        <div class="tabs">Overview Yards <strong>Sync</strong> Diagnostics Settings</div>
+        <div class="card"><div class="card-head"><b>Configuration repository</b><span>Connected</span></div><p><code>git@example.net:team/subyard-config.git</code><br>Clean · Up to date · Generation 18</p><button>Pull</button><button>Push…</button><button>Details</button></div>
+        <div class="card"><div class="card-head"><b>Credentials</b><span>Synced</span></div><p>3 redacted credentials · 1 trusted peer<br>Last success 24 minutes ago</p><button>Sync now</button><button>Status</button></div>
+      </div></div>
+    </section>
+
+    <section id="connect">
+      <h2>Inline remote owner-host connection</h2><p class="note">This workspace appears only after the fleet link is selected.</p>
+      <div class="app"><div class="bar"><b>Veranda</b><span>Cancel connection</span></div><div class="layout"><aside class="fleet"><span class="eyebrow">Hosts</span><br><br>▾ local-host<br>　default<br>　dev-yard<br><br><b>+ New connection</b></aside>
+        <div class="workspace"><span class="eyebrow">New connection</span><h3>Connect a remote Subyard host</h3><p>All yards discovered through this owner host will appear in the fleet.</p><label>Display name</label><input placeholder="Build host"><label>SSH destination</label><input placeholder="user@hostname"><label>Authentication</label><input value="SSH agent" readonly><button>Test connection</button><p class="note">Next: verify host key → negotiate RPC → discover yards → save connection.</p></div>
+      </div></div>
+    </section>
+
+    <section id="resources">
+      <h2>CPU / RAM terminal</h2><p class="note">The host action opens a terminal session and runs htop; it does not require a metrics backend.</p>
+      <div class="app"><div class="title">CPU / RAM · local-host</div><div class="terminal">CPU[|||||||||||                  28.4%]   Tasks: 124, 312 thr
+Mem[|||||||||||||              7.1G/31.2G]   Load average: 0.84 0.72 0.61
+Swp[                             0K/8.0G]   Uptime: 12 days
+
+ PID USER       CPU%  MEM%  Command
+4821 dev        18.2   4.1  agent
+1288 root        3.0   1.2  incusd
+5102 dev         1.1   0.8  node
+ 914 root        0.4   0.3  sshd
+
+F1 Help  F2 Setup  F3 Search  F6 SortBy  F9 Kill  F10 Quit</div></div>
+    </section>
+  </main>
+</body>
+</html>
