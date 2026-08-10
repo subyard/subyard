@@ -118,6 +118,14 @@ incus_project_has_isolated_images() {
   [ "$(incus project get "$1" features.images 2>/dev/null)" != false ]
 }
 
+incus_remove_default_profile_device_if_matches() {
+  local device="$1" property="$2" expected="$3" actual
+  actual="$(incus profile device get default "$device" "$property" \
+    --project default 2>/dev/null || true)"
+  [ "$actual" = "$expected" ] || return 0
+  incus profile device remove default "$device" --project default
+}
+
 nm_unmanaged_guard() {
   local bridge="${1:-incusbr0}" conf="${2:-/etc/NetworkManager/conf.d/zz-subyard-unmanaged.conf}"
   local want changed=0 nm_rc

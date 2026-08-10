@@ -13,9 +13,24 @@ SUBYARD_OPERATOR_HOME="$TMP/operator"
 # shellcheck source=scripts/lib/host.sh
 . "$ROOT/scripts/lib/host.sh"
 
+INCUS_LOG="$TMP/incus.log"
+INCUS_ROOT_POOL=default
+INCUS_ETH0_NETWORK=incusbr0
 incus() {
-  [ "$1 $2 $3 $4" = "project get fixture features.images" ] || return 1
-  printf '%s\n' "$INCUS_FEATURES_IMAGES"
+  case "$*" in
+    "project get fixture features.images") printf '%s\n' "$INCUS_FEATURES_IMAGES" ;;
+    "profile device get default root pool --project default")
+      printf '%s\n' "$INCUS_ROOT_POOL"
+      ;;
+    "profile device get default eth0 network --project default")
+      printf '%s\n' "$INCUS_ETH0_NETWORK"
+      ;;
+    "profile device remove default root --project default" | \
+      "profile device remove default eth0 --project default")
+      printf '%s\n' "$*" >> "$INCUS_LOG"
+      ;;
+    *) return 1 ;;
+  esac
 }
 INCUS_FEATURES_IMAGES=false
 ! incus_project_has_isolated_images fixture \
@@ -23,6 +38,22 @@ INCUS_FEATURES_IMAGES=false
 INCUS_FEATURES_IMAGES=true
 incus_project_has_isolated_images fixture \
   || fail 'isolated project images were not treated as yard-owned'
+
+declare -F incus_remove_default_profile_device_if_matches >/dev/null \
+  || fail 'teardown has no guarded default-profile device removal'
+: > "$INCUS_LOG"
+incus_remove_default_profile_device_if_matches root pool fixture-pool
+incus_remove_default_profile_device_if_matches eth0 network fixture-bridge
+[ ! -s "$INCUS_LOG" ] \
+  || fail 'teardown removed default-profile devices owned by foreign infrastructure'
+INCUS_ROOT_POOL=fixture-pool
+INCUS_ETH0_NETWORK=fixture-bridge
+incus_remove_default_profile_device_if_matches root pool fixture-pool
+incus_remove_default_profile_device_if_matches eth0 network fixture-bridge
+grep -Fxq 'profile device remove default root --project default' "$INCUS_LOG" \
+  || fail 'teardown kept the root device for its own storage pool'
+grep -Fxq 'profile device remove default eth0 --project default' "$INCUS_LOG" \
+  || fail 'teardown kept the eth0 device for its own bridge'
 grep -Fq 'STORAGE_POOL="${STORAGE_POOL:-$SRV_POOL}"' \
   "$ROOT/scripts/teardown-physical.sh" \
   || fail 'teardown does not inherit the configured yard storage pool'

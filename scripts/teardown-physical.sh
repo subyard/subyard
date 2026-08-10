@@ -102,8 +102,10 @@ if [ "$KEEP_DATA" = 0 ]; then
       warn "other Incus instances exist — keeping shared bridge '$BRIDGE' and pool '$STORAGE_POOL':"
       printf '%s\n' "$others" | sed 's/^/      - /'
     else
-      incus profile device remove default eth0 --project default >/dev/null 2>&1 || true
-      incus profile device remove default root --project default >/dev/null 2>&1 || true
+      incus_remove_default_profile_device_if_matches eth0 network "$BRIDGE" \
+        >/dev/null 2>&1 || true
+      incus_remove_default_profile_device_if_matches root pool "$STORAGE_POOL" \
+        >/dev/null 2>&1 || true
       if ! incus network show "$BRIDGE" --project default >/dev/null 2>&1; then
         bridge_gone=1; ok "bridge '$BRIDGE' absent"
       elif incus network delete "$BRIDGE" --project default >/dev/null 2>&1; then
