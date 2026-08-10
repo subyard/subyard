@@ -584,6 +584,13 @@ grep -Fq '. "$ROOT/tests/helpers/test-context.sh"' "$ROOT/dev/e2e/p0-source-upgr
   && ! grep -Fq '"$ROOT/scripts/01-install-incus.sh" --yes --zabbly' \
     "$ROOT/dev/e2e/p0-source-upgrade.sh" \
   || fail "P0 source-upgrade bootstrap bypasses the typed test engine context"
+grep -Fq 'POWER_RETRY_WRAPPER=' "$ROOT/dev/e2e/p0-source-upgrade.sh" \
+  && grep -Fq '"ExecStart=$POWER_RETRY_WRAPPER"' \
+    "$ROOT/dev/e2e/p0-source-upgrade.sh" \
+  && grep -Fq 'exec /usr/local/libexec/subyard/yard-boot-reconcile _power-reconcile' \
+    "$ROOT/dev/e2e/p0-source-upgrade.sh" \
+  && ! grep -Fq 'ExecStartPre=' "$ROOT/dev/e2e/p0-source-upgrade.sh" \
+  || fail "P0 source-upgrade TEMPFAIL probe does not exercise the main reconciler process"
 ! grep -Fq '"$SOURCE_ROOT/config/qa-pool/"*' "$ROOT/dev/e2e/p0-source-upgrade.sh" \
   || fail "P0 source-upgrade fixture expands operator-private paths as the outer user"
 grep -Fq 'AGENTS=codex\nAGENT_codex_RULES=' "$ROOT/dev/e2e/p0-source-upgrade.sh" \

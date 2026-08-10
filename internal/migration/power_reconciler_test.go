@@ -29,10 +29,12 @@ func TestPowerReconcilerOperationRefreshesInstalledRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(template, []byte("Restart=on-failure")) ||
-		!bytes.Contains(template, []byte("StartLimitIntervalSec=15min")) ||
-		!bytes.Contains(template, []byte("StartLimitBurst=6")) {
-		t.Fatal("shipped power reconciler unit has no bounded boot retry")
+	if !bytes.Contains(template, []byte("Restart=no")) ||
+		!bytes.Contains(template, []byte("RestartForceExitStatus=75")) ||
+		!bytes.Contains(template, []byte("RestartSec=10s")) ||
+		!bytes.Contains(template, []byte("StartLimitIntervalSec=0")) ||
+		bytes.Contains(template, []byte("StartLimitBurst=")) {
+		t.Fatal("shipped power reconciler unit does not isolate temporary retries")
 	}
 	templatePath := filepath.Join(repository, "config", "systemd",
 		"subyard-power-reconcile.service.in")

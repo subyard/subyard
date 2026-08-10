@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -14,6 +16,58 @@ import (
 type bootNetworkGuard struct{}
 
 func (bootNetworkGuard) Check(context.Context, []string) error { return nil }
+
+type bootPowerManagerFunc func(context.Context, string, string, string, bool) error
+
+func (function bootPowerManagerFunc) SetInstancePower(
+	ctx context.Context,
+	project string,
+	name string,
+	action string,
+	force bool,
+) error {
+	return function(ctx, project, name, action, force)
+}
+
+func bootPowerFailureReconciler(powerError error) application.BootPowerReconciler {
+	instance := ports.InstanceInfo{
+		Project: "p", Name: "yard", Status: "Stopped",
+		Config: map[string]string{
+			"user.subyard.managed": "true", "user.subyard.initialized": "true",
+			"user.subyard.desired_power": "running", "user.subyard.bridge": "incusbr0",
+			"boot.autostart": "false",
+		},
+	}
+	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"p/yard": instance}}
+	return application.BootPowerReconciler{
+		Inventory: fake,
+		Instances: fake,
+		Power: bootPowerManagerFunc(func(context.Context, string, string, string, bool) error {
+			return powerError
+		}),
+		Network: bootNetworkGuard{},
+	}
+}
+
+func TestRunBootPowerReturnsTempfailForUnavailableIncus(t *testing.T) {
+	reconciler := bootPowerFailureReconciler(
+		fmt.Errorf("wait for start instance: %w", ports.ErrIncusUnavailable),
+	)
+	if code := RunBootPower(
+		context.Background(), nil, &bytes.Buffer{}, &bytes.Buffer{}, reconciler,
+	); code != 75 {
+		t.Fatalf("temporary Incus failure returned %d, want 75", code)
+	}
+}
+
+func TestRunBootPowerReturnsFailureForPermanentError(t *testing.T) {
+	reconciler := bootPowerFailureReconciler(errors.New("invalid instance configuration"))
+	if code := RunBootPower(
+		context.Background(), nil, &bytes.Buffer{}, &bytes.Buffer{}, reconciler,
+	); code != 1 {
+		t.Fatalf("permanent power failure returned %d, want 1", code)
+	}
+}
 
 func TestRunBootPowerAndHasManaged(t *testing.T) {
 	instance := ports.InstanceInfo{

@@ -550,6 +550,9 @@ func (client *Client) validateExtensions(info *api.Server) error {
 }
 
 func normalizeError(operation string, err error) error {
+	if api.StatusErrorCheck(err, http.StatusServiceUnavailable) {
+		return fmt.Errorf("%s: %w: %w", operation, ports.ErrIncusUnavailable, err)
+	}
 	return fmt.Errorf("%s: %w", operation, err)
 }
 

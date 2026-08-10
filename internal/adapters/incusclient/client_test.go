@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -11,7 +12,24 @@ import (
 	"github.com/Subyard/Subyard/internal/contracttest"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
+	"github.com/lxc/incus/v6/shared/api"
 )
+
+func TestNormalizeErrorClassifiesTemporaryIncusFailure(t *testing.T) {
+	cause := api.StatusErrorf(http.StatusServiceUnavailable, "storage pool unavailable")
+	temporary := normalizeError("start instance", cause)
+	if !errors.Is(temporary, ports.ErrIncusUnavailable) {
+		t.Fatalf("HTTP 503 was not classified as temporary: %v", temporary)
+	}
+	if !errors.Is(temporary, cause) {
+		t.Fatalf("HTTP 503 cause was not preserved: %v", temporary)
+	}
+
+	permanent := normalizeError("start instance", errors.New("invalid instance configuration"))
+	if errors.Is(permanent, ports.ErrIncusUnavailable) {
+		t.Fatalf("permanent error was classified as temporary: %v", permanent)
+	}
+}
 
 func TestOfficialClientMapsServerAndInstance(t *testing.T) {
 	server, err := testkit.NewIncusServer(t.TempDir())

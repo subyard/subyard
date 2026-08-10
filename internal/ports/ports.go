@@ -9,7 +9,10 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 )
 
-var ErrInstanceNotFound = errors.New("instance not found")
+var (
+	ErrInstanceNotFound = errors.New("instance not found")
+	ErrIncusUnavailable = errors.New("Incus is temporarily unavailable")
+)
 
 type ServerInfo struct {
 	Environment   string   `json:"environment"`

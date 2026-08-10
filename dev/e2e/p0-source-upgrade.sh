@@ -36,6 +36,7 @@ LAYOUT_FIVE_REGISTRY="$ROOT/tests/fixtures/migrations/layout-5-production-prefix
 POWER_RETRY_RUNTIME="subyard-p0-source-power-retry-$TOKEN"
 POWER_RETRY_PROBE="/run/$POWER_RETRY_RUNTIME/failed-once"
 POWER_RETRY_DROPIN="/etc/systemd/system/subyard-power-reconcile.service.d/p0-source-$TOKEN.conf"
+POWER_RETRY_WRAPPER="/usr/local/libexec/subyard/p0-source-power-retry-$TOKEN"
 
 die() { printf 'p0-source-upgrade: %s\n' "$*" >&2; exit 2; }
 [[ "$TOKEN" =~ ^[0-9]+$ ]] || die 'allocation token must be numeric'
@@ -157,6 +158,7 @@ cleanup_fixture() {
     power_unit_changed=1
   fi
   sudo -n rmdir "$(dirname "$POWER_RETRY_DROPIN")" 2>/dev/null || true
+  sudo -n find "$POWER_RETRY_WRAPPER" -delete 2>/dev/null || true
   sudo -n find "$POWER_RETRY_PROBE" -delete 2>/dev/null || true
   sudo -n rmdir "$(dirname "$POWER_RETRY_PROBE")" 2>/dev/null || true
   [ "$power_unit_changed" = 0 ] || sudo -n systemctl daemon-reload
@@ -680,17 +682,32 @@ wait_for_running_yards() {
 }
 
 install_power_retry_probe() {
-  local temporary
-  temporary="$(mktemp)"
+  local dropin wrapper
+  dropin="$(mktemp)"
+  wrapper="$(mktemp)"
+  printf '%s\n' \
+    '#!/bin/sh' \
+    'set -eu' \
+    "probe=$POWER_RETRY_PROBE" \
+    'if [ ! -e "$probe" ]; then' \
+    '  echo "subyard-p0-source: injected transient power readiness failure" >&2' \
+    '  : > "$probe"' \
+    '  exit 75' \
+    'fi' \
+    'exec /usr/local/libexec/subyard/yard-boot-reconcile _power-reconcile' \
+    > "$wrapper"
   printf '%s\n' \
     '[Service]' \
     "RuntimeDirectory=$POWER_RETRY_RUNTIME" \
     'RuntimeDirectoryPreserve=restart' \
-    "ExecStartPre=/bin/sh -c 'if [ ! -e $POWER_RETRY_PROBE ]; then echo subyard-p0-source: injected transient power readiness failure >&2; touch $POWER_RETRY_PROBE; exit 1; fi'" \
-    > "$temporary"
+    'ExecStart=' \
+    "ExecStart=$POWER_RETRY_WRAPPER" \
+    > "$dropin"
+  sudo -n install -d -o root -g root -m 0755 "$(dirname "$POWER_RETRY_WRAPPER")"
+  sudo -n install -o root -g root -m 0755 "$wrapper" "$POWER_RETRY_WRAPPER"
   sudo -n install -d -o root -g root -m 0755 "$(dirname "$POWER_RETRY_DROPIN")"
-  sudo -n install -o root -g root -m 0644 "$temporary" "$POWER_RETRY_DROPIN"
-  find "$temporary" -delete
+  sudo -n install -o root -g root -m 0644 "$dropin" "$POWER_RETRY_DROPIN"
+  find "$dropin" "$wrapper" -delete
   sudo -n systemctl daemon-reload
 }
 

@@ -2,11 +2,15 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
 	"github.com/Subyard/Subyard/internal/application"
+	"github.com/Subyard/Subyard/internal/ports"
 )
+
+const bootPowerTemporaryFailure = 75
 
 func RunBootPower(
 	ctx context.Context,
@@ -33,6 +37,9 @@ func RunBootPower(
 	result, err := reconciler.Run(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "subyard-power: FAIL: %v\n", err)
+		if errors.Is(err, ports.ErrIncusUnavailable) {
+			return bootPowerTemporaryFailure
+		}
 		return 1
 	}
 	if len(result.Started)+len(result.Stopped)+len(result.AlreadyRunning) == 0 {
