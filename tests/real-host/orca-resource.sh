@@ -180,6 +180,22 @@ client_status() {
   fi
 }
 
+retarget_pairing() {
+  local pairing="$1" endpoint="$2" code payload
+  code="${pairing#orca://pair?code=}"
+  case $((${#code} % 4)) in
+    0) ;;
+    2) code="${code}==" ;;
+    3) code="${code}=" ;;
+    *) die 'stock client pairing payload has invalid base64url length' ;;
+  esac
+  payload="$(printf '%s' "$code" | tr -- '_-' '/+' | base64 -d)"
+  printf 'orca://pair?code='
+  jq -c --arg endpoint "$endpoint" '.endpoint = $endpoint' <<<"$payload" |
+    base64 -w 0 | tr -- '+/' '-_' | tr -d '='
+  printf '\n'
+}
+
 assert_repos() {
   local payload="$work/repos.json"
   server_cli repo list --json >"$payload"
@@ -188,6 +204,26 @@ assert_repos() {
     ($paths | index("/srv/workspaces/alpha-12345678/src")) != null and
     ($paths | index("/srv/workspaces/beta-12345678/src")) != null
   ' "$payload" >/dev/null
+}
+
+assert_all_repos() {
+  local payload="$work/all-repos.json"
+  server_cli repo list --json >"$payload"
+  jq -e '
+    [.result.repos[].path] as $paths |
+    ($paths | index("/srv/workspaces/alpha-12345678/src")) != null and
+    ($paths | index("/srv/workspaces/beta-12345678/src")) != null and
+    ($paths | index("/srv/workspaces/gamma-12345678/src")) != null
+  ' "$payload" >/dev/null
+}
+
+assert_no_pairing_journal() {
+  local logs
+  logs="$("${incus[@]}" exec "$instance" -- \
+    journalctl -u subyard-orca.service --no-pager)"
+  case "$logs" in
+    *orca://*|*'"url":"orca:'*) die 'service journal leaked a pairing capability' ;;
+  esac
 }
 
 stage 'installing and starting the production handler'
@@ -200,10 +236,7 @@ stage 'installing and starting the production handler'
   grep -Fq 'comment "subyard-orca-managed"'
 [ "$("${incus[@]}" exec "$instance" -- stat -c %a /srv/agents/orca/ready.json)" = 600 ] \
   || die 'pairing readiness file is not mode 0600'
-logs="$("${incus[@]}" exec "$instance" -- journalctl -u subyard-orca.service --no-pager)"
-case "$logs" in
-  *orca://*|*'"url":"orca:'*) die 'service journal leaked a pairing capability' ;;
-esac
+assert_no_pairing_journal
 assert_repos
 
 stage 'pairing two independent clients and reconnecting the first'
@@ -240,7 +273,16 @@ export ORCA_ADVERTISE_HOST=127.0.0.1
   "tcp:127.0.0.1:$host_port" ] || die 'SSH route is not owner loopback'
 "${incus[@]}" exec "$instance" -- jq -e \
   --arg endpoint "ws://127.0.0.1:$host_port" \
-  '.advertisedEndpoint == $endpoint' /srv/agents/orca/ready.json >/dev/null
+  '.type == "orca_server_ready" and
+   .schemaVersion == 1 and
+   .advertisedEndpoint == $endpoint and
+   .pairing.available == true and
+   (.pairing.url | type == "string" and startswith("orca://pair?"))' \
+  /srv/agents/orca/ready.json >/dev/null
+retargeted_first_pair="$(retarget_pairing "$first_pair" "ws://127.0.0.1:$host_port")"
+client_status "$retargeted_first_pair" client-a
+assert_all_repos
+assert_no_pairing_journal
 "$handler" down
 
 if "${incus[@]}" config device list "$instance" | grep -qx orca-server; then
@@ -251,4 +293,4 @@ if "${incus[@]}" exec "$instance" -- nft list table inet subyard_orca >/dev/null
   die 'owned ingress table survived down'
 fi
 
-printf 'ok: stock Orca paired two clients, preserved grants/repos, and used exact host routes\n'
+printf 'ok: stock Orca reconnected clients, preserved grants/repos, and repeated exact host routes\n'

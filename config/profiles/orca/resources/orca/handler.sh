@@ -29,11 +29,29 @@ ORCA_SYNC=/usr/local/libexec/subyard/projects-changed.d/orca
 ORCA_GUEST_PORT=6768
 ORCA_RUNTIME_CHANGED=0
 ORCA_TMP_DIR=
+ORCA_GUEST_TMP_DIR=
 
-cleanup_local() {
-  [ -z "$ORCA_TMP_DIR" ] || rm -rf -- "$ORCA_TMP_DIR"
+valid_guest_tmp_dir() {
+  [[ "$1" =~ ^/tmp/subyard-orca\.[A-Za-z0-9]{6,}$ ]]
 }
-trap cleanup_local EXIT
+
+cleanup_guest() {
+  [ -z "$ORCA_GUEST_TMP_DIR" ] && return 0
+  valid_guest_tmp_dir "$ORCA_GUEST_TMP_DIR" || return 1
+  yexec rm -rf -- "$ORCA_GUEST_TMP_DIR" || return 1
+  ORCA_GUEST_TMP_DIR=
+}
+
+cleanup() {
+  local status=$? cleanup_failed=0
+  cleanup_guest >/dev/null 2>&1 || cleanup_failed=1
+  if [ -n "$ORCA_TMP_DIR" ]; then
+    rm -rf -- "$ORCA_TMP_DIR" || cleanup_failed=1
+  fi
+  [ "$status" -ne 0 ] || [ "$cleanup_failed" -eq 0 ] || return 1
+  return "$status"
+}
+trap cleanup EXIT
 
 device_exists() {
   incus config device list "$INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null |
@@ -223,6 +241,13 @@ stage_runtime_contract() {
   local capture="$ORCA_TMP_DIR/orca-capture-ready"
   local sync="$ORCA_TMP_DIR/orca-sync"
   local unit="$ORCA_TMP_DIR/$ORCA_UNIT"
+  ORCA_GUEST_TMP_DIR="$(yexec mktemp -d /tmp/subyard-orca.XXXXXX)"
+  valid_guest_tmp_dir "$ORCA_GUEST_TMP_DIR" \
+    || die "Orca guest staging returned an unsafe temporary path"
+  local guest_ingress="$ORCA_GUEST_TMP_DIR/orca-ingress"
+  local guest_capture="$ORCA_GUEST_TMP_DIR/orca-capture-ready"
+  local guest_sync="$ORCA_GUEST_TMP_DIR/orca-sync"
+  local guest_unit="$ORCA_GUEST_TMP_DIR/$ORCA_UNIT"
   cat >"$ingress" <<'INGRESS'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -321,26 +346,26 @@ UMask=0077
 WantedBy=multi-user.target
 UNIT
   chmod 0755 "$ingress" "$capture" "$sync"
-  incus file push "$ingress" "$INSTANCE_NAME/tmp/subyard-orca-ingress" \
+  incus file push "$ingress" "$INSTANCE_NAME$guest_ingress" \
     "${PROJ[@]}" --mode 0755 >/dev/null
-  incus file push "$capture" "$INSTANCE_NAME/tmp/subyard-orca-capture-ready" \
+  incus file push "$capture" "$INSTANCE_NAME$guest_capture" \
     "${PROJ[@]}" --mode 0755 >/dev/null
-  incus file push "$sync" "$INSTANCE_NAME/tmp/subyard-orca-sync" \
+  incus file push "$sync" "$INSTANCE_NAME$guest_sync" \
     "${PROJ[@]}" --mode 0755 >/dev/null
-  incus file push "$unit" "$INSTANCE_NAME/tmp/$ORCA_UNIT" \
+  incus file push "$unit" "$INSTANCE_NAME$guest_unit" \
     "${PROJ[@]}" --mode 0644 >/dev/null
-  if ! yexec cmp -s /tmp/subyard-orca-ingress "$ORCA_INGRESS" ||
-    ! yexec cmp -s /tmp/subyard-orca-capture-ready "$ORCA_CAPTURE" ||
-    ! yexec cmp -s /tmp/subyard-orca-sync "$ORCA_SYNC" ||
-    ! yexec cmp -s "/tmp/$ORCA_UNIT" "/etc/systemd/system/$ORCA_UNIT" ||
+  if ! yexec cmp -s "$guest_ingress" "$ORCA_INGRESS" ||
+    ! yexec cmp -s "$guest_capture" "$ORCA_CAPTURE" ||
+    ! yexec cmp -s "$guest_sync" "$ORCA_SYNC" ||
+    ! yexec cmp -s "$guest_unit" "/etc/systemd/system/$ORCA_UNIT" ||
     ! ingress_active; then
     ORCA_RUNTIME_CHANGED=1
   fi
   yexec install -d -m 0755 "$(dirname "$ORCA_CAPTURE")" "$(dirname "$ORCA_SYNC")"
-  yexec install -m 0755 /tmp/subyard-orca-ingress "$ORCA_INGRESS"
-  yexec install -m 0755 /tmp/subyard-orca-capture-ready "$ORCA_CAPTURE"
-  yexec install -m 0755 /tmp/subyard-orca-sync "$ORCA_SYNC"
-  yexec install -m 0644 "/tmp/$ORCA_UNIT" "/etc/systemd/system/$ORCA_UNIT"
+  yexec install -m 0755 "$guest_ingress" "$ORCA_INGRESS"
+  yexec install -m 0755 "$guest_capture" "$ORCA_CAPTURE"
+  yexec install -m 0755 "$guest_sync" "$ORCA_SYNC"
+  yexec install -m 0644 "$guest_unit" "/etc/systemd/system/$ORCA_UNIT"
   yexec bash -se -- "${DEV_USER:-dev}" "$ORCA_STATE" "$ORCA_READY" <<'YARD'
 set -euo pipefail
 dev_user="$1"
@@ -353,6 +378,7 @@ chown "$dev_user:$dev_user" "$ready"
 chmod 0600 "$ready"
 YARD
   yexec systemctl daemon-reload
+  cleanup_guest || die "Orca guest staging directory could not be removed"
 }
 
 remove_route() {
