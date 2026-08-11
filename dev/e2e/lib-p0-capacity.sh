@@ -192,6 +192,28 @@ p0_capacity_remove_build_cache() {
   p0_capacity_remove_root_if_empty
 }
 
+p0_capacity_reclaim_dependency_caches() {
+  local home_path module_path module_before module_after
+  [ "${SUBYARD_E2E_VM:-}" = 1 ] \
+    || p0_capacity_die 'dependency-cache reclaim is restricted to P0 VM1' || return
+  home_path="$(realpath -e -- "$HOME")" \
+    || p0_capacity_die 'cannot resolve P0 home for dependency-cache reclaim' || return
+  module_path="$(realpath -m -- "$P0_CAPACITY_MODULE_CACHE")" \
+    || p0_capacity_die 'cannot resolve the Go module cache' || return
+  case "$module_path" in
+    "$home_path"/*) ;;
+    *) p0_capacity_die "refusing Go module cache outside P0 home: $module_path"; return ;;
+  esac
+
+  module_before="$(p0_capacity_cache_bytes "$P0_CAPACITY_MODULE_CACHE")"
+  go clean -modcache
+  sudo -n apt-get clean
+  sudo -n find /var/lib/apt/lists -xdev -type f -delete
+  module_after="$(p0_capacity_cache_bytes "$P0_CAPACITY_MODULE_CACHE")"
+  printf '  [ ok ] reclaimed disposable dependency caches module=%s->%s and APT\n' \
+    "$module_before" "$module_after"
+}
+
 p0_capacity_cache_bytes() {
   local path="$1"
   if [ -e "$path" ]; then
@@ -228,7 +250,7 @@ p0_capacity_require_persistent_path() {
 
 p0_capacity_preflight() {
   local root_available inode_available tmp_size tmp_available pool_source='' stale=''
-  local pool_state='' pool_rc query_timeout="${P0_E2E_INCUS_QUERY_TIMEOUT:-30}"
+  local pool_state='' pool_rc query_attempt query_timeout="${P0_E2E_INCUS_QUERY_TIMEOUT:-120}"
   local min_root="${P0_E2E_MIN_ROOT_AVAILABLE_BYTES:-3221225472}"
   local min_inodes="${P0_E2E_MIN_AVAILABLE_INODES:-100000}"
   local min_tmp_size="${P0_E2E_MIN_TMP_SIZE_BYTES:-536870912}"
@@ -251,19 +273,32 @@ p0_capacity_preflight() {
   [[ "$query_timeout" =~ ^[1-9][0-9]*$ ]] \
     || p0_capacity_die 'Incus query timeout is invalid' || return
   if command -v incus >/dev/null 2>&1; then
-    set +e
-    pool_state="$(timeout --foreground "$query_timeout" \
-      incus storage show default --project default 2>/dev/null)"
-    pool_rc=$?
-    set -e
-    case "$pool_rc" in
-      0) ;;
-      124|137)
-        p0_capacity_die "Incus default-pool query exceeded ${query_timeout}s"
-        return
-        ;;
-      *) pool_state='' ;;
-    esac
+    for query_attempt in 1 2; do
+      set +e
+      pool_state="$(timeout --foreground "$query_timeout" \
+        incus storage show default --project default 2>/dev/null)"
+      pool_rc=$?
+      set -e
+      case "$pool_rc" in
+        0) break ;;
+        124|137)
+          if [ "$query_attempt" -lt 2 ]; then
+            printf '  [ .. ] Incus default-pool query timed out; retrying cold activation\n'
+            case "${SUBYARD_E2E_VM:-}" in
+              1|2)
+                timeout --foreground "$query_timeout" \
+                  sudo -n systemctl restart incus.service \
+                  || p0_capacity_die 'failed to restart the stuck Incus daemon' || return
+                ;;
+            esac
+            continue
+          fi
+          p0_capacity_die "Incus default-pool query exceeded ${query_timeout}s twice"
+          return
+          ;;
+        *) pool_state=''; break ;;
+      esac
+    done
   fi
   if [ -n "$pool_state" ]; then
     pool_source="$(sed -n 's/^  source: //p' <<<"$pool_state")"

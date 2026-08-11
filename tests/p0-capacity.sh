@@ -20,16 +20,46 @@ install -d -m 0700 "$HOME"
 install -d -m 0700 "$TMP/bin"
 PATH="$TMP/bin:$PATH"
 export PATH
+export P0_FAKE_TIMEOUT_LOG="$TMP/timeout.log"
+export P0_FAKE_GO_LOG="$TMP/go.log"
+export P0_FAKE_SUDO_LOG="$TMP/sudo.log"
 printf '%s\n' \
-  '#!/usr/bin/env bash' \
+  '#!/bin/bash' \
   'set -euo pipefail' \
-  '[ "${1:-}" = env ] && [ "$#" = 2 ] || exit 2' \
-  'case "$2" in' \
-  '  GOCACHE) printf "%s/.cache/go-build\n" "$HOME" ;;' \
-  '  GOMODCACHE) printf "%s/go/pkg/mod\n" "$HOME" ;;' \
+  'case "$*" in' \
+  '  "env GOCACHE") printf "%s/.cache/go-build\n" "$HOME" ;;' \
+  '  "env GOMODCACHE") printf "%s/go/pkg/mod\n" "$HOME" ;;' \
+  '  "clean -modcache")' \
+  '    printf "%s\n" "$*" >> "$P0_FAKE_GO_LOG"' \
+  '    [ ! -e "$P0_CAPACITY_MODULE_CACHE" ] || find "$P0_CAPACITY_MODULE_CACHE" -depth -delete' \
+  '    ;;' \
   '  *) exit 2 ;;' \
   'esac' > "$TMP/bin/go"
 chmod 0700 "$TMP/bin/go"
+printf '%s\n' \
+  '#!/bin/bash' \
+  'set -euo pipefail' \
+  'case "$*" in' \
+  '  "-n apt-get clean"|"-n find /var/lib/apt/lists -xdev -type f -delete"|"-n systemctl restart incus.service")' \
+  '    printf "%s\n" "$*" >> "$P0_FAKE_SUDO_LOG"' \
+  '    ;;' \
+  '  *) exit 2 ;;' \
+  'esac' > "$TMP/bin/sudo"
+chmod 0700 "$TMP/bin/sudo"
+printf '%s\n' \
+  '#!/bin/bash' \
+  'set -euo pipefail' \
+  '[ "${1:-}" = --foreground ] || exit 2' \
+  'shift' \
+  'printf "%s\n" "$*" >> "$P0_FAKE_TIMEOUT_LOG"' \
+  'if [ "${P0_FAKE_TIMEOUT_FAIL_ONCE:-0}" = 1 ] && [ ! -e "$P0_FAKE_TIMEOUT_FAIL_MARKER" ]; then' \
+  '  : > "$P0_FAKE_TIMEOUT_FAIL_MARKER"' \
+  '  exit 124' \
+  'fi' \
+  'shift' \
+  'exec "$@"' \
+  > "$TMP/bin/timeout"
+chmod 0700 "$TMP/bin/timeout"
 printf '%s\n' \
   '#!/usr/bin/env bash' \
   '# Keep this host-free unit isolated from any retained real-host Incus daemon.' \
@@ -45,12 +75,49 @@ P0_E2E_MIN_AVAILABLE_INODES=1 \
 P0_E2E_MIN_TMP_SIZE_BYTES=1 \
 P0_E2E_MIN_TMP_AVAILABLE_BYTES=1 \
   p0_capacity_preflight >/dev/null
+grep -Fxq '120 incus storage show default --project default' "$P0_FAKE_TIMEOUT_LOG" \
+  || fail "P0 Incus cold-start query is not bounded at 120 seconds"
 [ "$GOCACHE" = "$HOME/.cache/subyard-p0-123/go-build" ] \
   || fail "P0 build cache is not allocation-scoped"
 [ "$GOMODCACHE" = "$(env -u GOMODCACHE go env GOMODCACHE)" ] \
   || fail "P0 module cache is not the reusable Go cache"
 [ "$(cat "$GOCACHE/.subyard-p0-marker")" = subyard-p0-123 ] \
   || fail "P0 build cache is not marker-owned"
+
+install -d -m 0755 "$P0_CAPACITY_MODULE_CACHE/cache/download"
+printf 'module\n' > "$P0_CAPACITY_MODULE_CACHE/cache/download/fixture"
+: > "$P0_FAKE_GO_LOG"
+: > "$P0_FAKE_SUDO_LOG"
+SUBYARD_E2E_VM=1 p0_capacity_reclaim_dependency_caches >/dev/null
+[ ! -e "$P0_CAPACITY_MODULE_CACHE" ] \
+  || fail "P0 dependency reclaim left the reusable module cache behind"
+grep -Fxq 'clean -modcache' "$P0_FAKE_GO_LOG" \
+  || fail "P0 dependency reclaim did not use the Go module-cache cleanup"
+grep -Fxq -- '-n apt-get clean' "$P0_FAKE_SUDO_LOG" \
+  && grep -Fxq -- '-n find /var/lib/apt/lists -xdev -type f -delete' \
+    "$P0_FAKE_SUDO_LOG" \
+  || fail "P0 dependency reclaim did not remove disposable APT caches"
+
+: > "$P0_FAKE_TIMEOUT_LOG"
+export P0_FAKE_TIMEOUT_FAIL_ONCE=1
+export P0_FAKE_TIMEOUT_FAIL_MARKER="$TMP/timeout-failed-once"
+p0_capacity_init 135
+if ! SUBYARD_E2E_VM=2 \
+  P0_E2E_MIN_ROOT_AVAILABLE_BYTES=1 \
+  P0_E2E_MIN_AVAILABLE_INODES=1 \
+  P0_E2E_MIN_TMP_SIZE_BYTES=1 \
+  P0_E2E_MIN_TMP_AVAILABLE_BYTES=1 \
+  p0_capacity_preflight >/dev/null; then
+  fail "P0 Incus cold-start query did not recover after one timeout"
+fi
+[ "$(grep -Fc '120 incus storage show default --project default' "$P0_FAKE_TIMEOUT_LOG")" = 2 ] \
+  || fail "P0 Incus cold-start query did not make exactly one recovery retry"
+grep -Fxq -- '-n systemctl restart incus.service' "$P0_FAKE_SUDO_LOG" \
+  || fail "P0 Incus cold-start retry did not restart the stuck daemon"
+unset P0_FAKE_TIMEOUT_FAIL_ONCE P0_FAKE_TIMEOUT_FAIL_MARKER
+p0_capacity_remove_build_cache
+p0_capacity_init 123
+p0_capacity_reset_build_cache
 
 subtree="$P0_CAPACITY_STATE_ROOT/fixture"
 p0_capacity_prepare_subtree "$subtree"
@@ -315,5 +382,28 @@ if SUBYARD_E2E_VM=1 \
 fi
 [ ! -s "$P0_FAKE_INCUS_LOG" ] || fail "foreign unavailable pool was deleted"
 find "$HOME/.cache/subyard-p0-126" -depth -delete
+
+nested_bin="$TMP/nested-bin"
+nested_probe="$TMP/nested-cache-probe"
+install -d -m 0700 "$nested_bin"
+printf '%s\n' \
+  '#!/bin/bash' \
+  'set -euo pipefail' \
+  '[ "$*" = dev/e2e/nested-teardown-data-boundary.sh ] || exit 2' \
+  'expected="$HOME/.cache/subyard-p0-134/go-build"' \
+  '[ "${GOCACHE:-}" = "$expected" ] || exit 3' \
+  '[ "${GOMODCACHE:-}" = "$HOME/go/pkg/mod" ] || exit 4' \
+  '[ "$(cat "$GOCACHE/.subyard-p0-marker" 2>/dev/null)" = subyard-p0-134 ] || exit 5' \
+  'printf "ok\n" > "$P0_NESTED_CACHE_PROBE"' \
+  > "$nested_bin/bash"
+chmod 0700 "$nested_bin/bash"
+if ! env -u GOCACHE -u GOMODCACHE \
+  PATH="$nested_bin:$PATH" P0_NESTED_CACHE_PROBE="$nested_probe" SUBYARD_E2E_VM=2 \
+  /bin/bash "$ROOT/dev/e2e/p0-guest.sh" nested-teardown 134 >/dev/null; then
+  fail "nested teardown did not use its allocation-scoped Go cache"
+fi
+[ "$(cat "$nested_probe" 2>/dev/null)" = ok ] \
+  || fail "nested teardown cache probe did not run"
+find "$HOME/.cache/subyard-p0-134" -depth -delete
 
 printf 'ok: P0 capacity layout is persistent and marker-guarded\n'

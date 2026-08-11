@@ -565,11 +565,12 @@ reclaim_owner_lease_capacity() {
       || incus image delete "$fingerprint" --project default >/dev/null
   done < <(incus image list --project default --format csv -c f)
   # P0 builds use the marker-owned cache above. The outer VM is a disposable
-  # lease, so its reproducible default build cache need not compete with the
-  # four retained nested VM disks used by the isolation contract.
+  # lease, so its reproducible build and dependency caches need not compete
+  # with the four retained nested VM disks used by the isolation contract.
   default_build_before="$(p0_capacity_cache_bytes "$P0_CAPACITY_DEFAULT_BUILD_CACHE")"
   env -u GOCACHE go clean -cache
   default_build_after="$(p0_capacity_cache_bytes "$P0_CAPACITY_DEFAULT_BUILD_CACHE")"
+  p0_capacity_reclaim_dependency_caches
   p0_capacity_remove_build_cache
   p0_capacity_use_build_cache
   while ! incus exec yard-test-yard --project subyard-test-yard -- \
@@ -1611,7 +1612,10 @@ capacity_verify_cleanup() {
   capacity-verify-cleanup) capacity_verify_cleanup ;;
   dependency-verify) dependency_verify ;;
   dependency-bootstrap) dependency_bootstrap ;;
-  nested-teardown) bash dev/e2e/nested-teardown-data-boundary.sh ;;
+  nested-teardown)
+    p0_capacity_use_build_cache
+    bash dev/e2e/nested-teardown-data-boundary.sh
+    ;;
   real-incus) bash dev/e2e/p0-real-incus.sh ;;
   profile-resource) profile_resource ;;
   owner) owner ;;
