@@ -325,6 +325,12 @@ func agentSettingDefinition(name string) (SettingDefinition, bool) {
 				Scopes:   scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand),
 				Syncable: false, Merge: "replace", Application: SettingYardInit, Owner: "agent-integration",
 			}, true
+		case "_DEPENDS":
+			return SettingDefinition{
+				Kind: SettingScalar, Type: SettingNameList,
+				Scopes:   scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand),
+				Syncable: false, Merge: "replace", Application: SettingYardInit, Owner: "agent-integration",
+			}, true
 		case "_PERSIST":
 			return SettingDefinition{
 				Kind: SettingScalar, Type: SettingMultiline,

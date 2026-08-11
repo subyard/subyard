@@ -16,6 +16,8 @@ mapfile -t values <<<"$agents"
 [ "${values[2]}" = paseo ] || fail "wrong Paseo command"
 [ "${values[3]}" = paseo-check ] || fail "wrong Paseo check"
 [ "${values[4]}" = paseo-sync-projects ] || fail "wrong Paseo project hook"
+[ "$(SUBYARD_CONFIG_DIR="$ROOT/config" bash -c '. "$1"; printf "%s" "$AGENT_paseo_DEPENDS"' _ "$ROOT/config/agents.env")" = codex ] \
+  || fail "Paseo does not declare its Codex dependency"
 
 jq -e '
   .version == 1 and .daemon.listen == "127.0.0.1:6767" and
@@ -64,10 +66,24 @@ rg -q 'files[.]sha256' "$ROOT/config/agents/paseo/provision.sh" \
   || fail "provision does not verify the deploy closure"
 rg -q 'PASEO_HEALTH_WAIT_SECONDS' "$ROOT/config/agents/paseo/bin/paseo-check" \
   || fail "readiness has no bounded local health wait"
+rg -q 'PASEO_UNIT_WAIT_SECONDS' "$ROOT/config/agents/paseo/bin/paseo-check" \
+  || fail "readiness has no bounded systemd activation wait"
+rg -q 'until systemctl is-active --quiet' "$ROOT/config/agents/paseo/bin/paseo-check" \
+  || fail "readiness rejects the normal systemd activating state"
+rg -q 'as_dev /usr/local/bin/codex-check' "$ROOT/config/agents/paseo/bin/paseo-check" \
+  || fail "readiness does not verify the canonical Codex package"
+rg -q 'CODEX_HOME=' "$ROOT/config/agents/paseo/bin/paseo-check" \
+  || fail "readiness does not give Codex its exact user state directory"
+codex_check_line="$(rg -n 'as_dev /usr/local/bin/codex-check' \
+  "$ROOT/config/agents/paseo/bin/paseo-check" | cut -d: -f1)"
+pair_check_line="$(rg -n 'daemon pair .*--json' \
+  "$ROOT/config/agents/paseo/bin/paseo-check" | cut -d: -f1)"
+[ "$codex_check_line" -lt "$pair_check_line" ] \
+  || fail "Paseo generates a pairing offer before Codex capability readiness"
 rg -q 'ubuntu-24[.]04-arm' "$ROOT/.github/workflows/release.yml" \
   || fail "release has no native arm64 Paseo lane"
-rg -q 'AGENTS="claude codex opencode pi paseo"' "$ROOT/docs/paseo.md" \
-  || fail "Paseo opt-in documentation is missing"
+rg -q 'AGENTS="paseo"' "$ROOT/docs/paseo.md" \
+  || fail "Paseo dependency-driven opt-in documentation is missing"
 rg -q 'ssh yard-<name> -- paseo-pair' "$ROOT/docs/paseo.md" \
   || fail "Paseo pairing documentation is missing"
 
@@ -78,8 +94,24 @@ rg -q 'ssh yard-<name> -- paseo-pair' "$ROOT/docs/paseo.md" \
 wrapper_temp="$(mktemp -d)"
 cleanup_wrapper() { rm -rf -- "$wrapper_temp"; }
 trap cleanup_wrapper EXIT HUP INT TERM
-mkdir -p "$wrapper_temp/bin" "$wrapper_temp/runtime/node/bin" \
+mkdir -p "$wrapper_temp/bin" "$wrapper_temp/check-bin" "$wrapper_temp/runtime/node/bin" \
   "$wrapper_temp/runtime/app/libexec" "$wrapper_temp/home"
+
+# The documented SSH helper runs directly as dev, whose PATH need not include /usr/sbin/runuser.
+for command in bash curl grep id journalctl jq mktemp readlink sha256sum ss stat systemctl; do
+  executable="$(command -v "$command")"
+  ln -s "$executable" "$wrapper_temp/check-bin/$command"
+done
+set +e
+check_output="$(PATH="$wrapper_temp/check-bin" PASEO_DEV_USER="$(id -un)" \
+  PASEO_INSTALL_ROOT="$wrapper_temp/missing" \
+  "$ROOT/config/agents/paseo/bin/paseo-check" 2>&1)"
+check_status=$?
+set -e
+[ "$check_status" -ne 0 ] || fail "incomplete Paseo fixture unexpectedly passed readiness"
+[[ "$check_output" == *"active runtime link is missing"* ]] \
+  || fail "dev-side paseo-check incorrectly requires runuser: $check_output"
+
 ln -s "$wrapper_temp/runtime" "$wrapper_temp/current"
 touch "$wrapper_temp/runtime/app/libexec/paseo-sync-projects.mjs"
 cat >"$wrapper_temp/runtime/node/bin/node" <<'SH'

@@ -306,9 +306,74 @@ func load(
 	if err := normalizeAgentAssetPaths(values, tracker); err != nil {
 		return domain.Context{}, nil, err
 	}
+	if err := resolveAgentDependencies(values); err != nil {
+		return domain.Context{}, nil, err
+	}
+	tracker.normalize("AGENTS", values["AGENTS"], "resolved agent dependencies")
 	normalizeAgentPersistLinks(values, tracker, defaultLayer)
 	ctx, err := contextFrom(root, yardName, values, tracker, defaultLayer, normalizationLayer)
 	return ctx, values, err
+}
+
+func resolveAgentDependencies(values environment) error {
+	requested := strings.Fields(values["AGENTS"])
+	selected := make(map[string]bool, len(requested))
+	for _, agent := range requested {
+		if selected[agent] {
+			return fmt.Errorf("duplicate agent %q", agent)
+		}
+		selected[agent] = true
+	}
+
+	knownAgent := func(agent string) bool {
+		for _, suffix := range []string{
+			"COMMAND", "CHECK", "CONFIG", "CONFIG_DEST", "DEPENDS", "PERSIST",
+			"PROJECTS_CHANGED", "PROVISION", "RULES", "RULES_DEST",
+		} {
+			if _, found := values["AGENT_"+agent+"_"+suffix]; found {
+				return true
+			}
+		}
+		return false
+	}
+	visiting := make(map[string]bool)
+	visited := make(map[string]bool)
+	resolved := make([]string, 0, len(requested))
+	var visit func(string) error
+	visit = func(agent string) error {
+		if visited[agent] {
+			return nil
+		}
+		if visiting[agent] {
+			return fmt.Errorf("agent dependency cycle at %q", agent)
+		}
+		visiting[agent] = true
+		dependencies := strings.Fields(values["AGENT_"+agent+"_DEPENDS"])
+		seenDependencies := make(map[string]bool, len(dependencies))
+		for _, dependency := range dependencies {
+			if seenDependencies[dependency] {
+				return fmt.Errorf("duplicate dependency %q for agent %q", dependency, agent)
+			}
+			seenDependencies[dependency] = true
+			if !domain.SafeName(dependency) || !knownAgent(dependency) {
+				return fmt.Errorf("unknown dependency %q for agent %q", dependency, agent)
+			}
+			if err := visit(dependency); err != nil {
+				return err
+			}
+		}
+		delete(visiting, agent)
+		visited[agent] = true
+		resolved = append(resolved, agent)
+		return nil
+	}
+	for _, agent := range requested {
+		if err := visit(agent); err != nil {
+			return err
+		}
+	}
+	values["AGENTS"] = strings.Join(resolved, " ")
+	return nil
 }
 
 func normalizeAgentPersistLinks(

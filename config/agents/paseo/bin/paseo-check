@@ -8,6 +8,7 @@ PASEO_INSTALL_ROOT="${PASEO_INSTALL_ROOT:-/opt/subyard/paseo/current}"
 PASEO_DEV_USER="${PASEO_DEV_USER:-@DEV_USER@}"
 PASEO_DEV_HOME="${PASEO_DEV_HOME:-@DEV_HOME@}"
 PASEO_UNIT="${PASEO_UNIT:-paseo.service}"
+PASEO_UNIT_WAIT_SECONDS="${PASEO_UNIT_WAIT_SECONDS:-60}"
 PASEO_HEALTH_WAIT_SECONDS="${PASEO_HEALTH_WAIT_SECONDS:-30}"
 PASEO_RELAY_WAIT_SECONDS="${PASEO_RELAY_WAIT_SECONDS:-60}"
 CONFIG="$PASEO_HOME/config.json"
@@ -15,13 +16,16 @@ CONFIG="$PASEO_HOME/config.json"
 die() { printf 'Paseo check: %s\n' "$*" >&2; exit 1; }
 as_dev() {
   if [ "$(id -un)" = "$PASEO_DEV_USER" ]; then
-    env HOME="$PASEO_DEV_HOME" PASEO_HOME="$PASEO_HOME" "$@"
+    env HOME="$PASEO_DEV_HOME" CODEX_HOME="$PASEO_DEV_HOME/.codex" \
+      PASEO_HOME="$PASEO_HOME" "$@"
   else
-    runuser -u "$PASEO_DEV_USER" -- env HOME="$PASEO_DEV_HOME" PASEO_HOME="$PASEO_HOME" "$@"
+    command -v runuser >/dev/null 2>&1 || die "runuser is required for user switching"
+    runuser -u "$PASEO_DEV_USER" -- env HOME="$PASEO_DEV_HOME" \
+      CODEX_HOME="$PASEO_DEV_HOME/.codex" PASEO_HOME="$PASEO_HOME" "$@"
   fi
 }
 
-for command in curl grep journalctl jq mktemp readlink runuser sha256sum ss stat systemctl; do
+for command in curl grep journalctl jq mktemp readlink sha256sum ss stat systemctl; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
 
@@ -54,7 +58,12 @@ jq -e '
 ' "$CONFIG" >/dev/null || die "config drift"
 
 systemctl is-enabled --quiet "$PASEO_UNIT" || die "unit is not enabled"
-systemctl is-active --quiet "$PASEO_UNIT" || die "unit is not active"
+unit_deadline=$((SECONDS + PASEO_UNIT_WAIT_SECONDS))
+until systemctl is-active --quiet "$PASEO_UNIT"; do
+  systemctl is-failed --quiet "$PASEO_UNIT" && die "unit failed during activation"
+  [ "$SECONDS" -lt "$unit_deadline" ] || die "unit did not become active"
+  sleep 1
+done
 [ "$(systemctl show "$PASEO_UNIT" -p User --value)" = "$PASEO_DEV_USER" ] \
   || die "unit does not run as $PASEO_DEV_USER"
 main_pid="$(systemctl show "$PASEO_UNIT" -p MainPID --value)"
@@ -87,8 +96,8 @@ jq -e --arg version "$PASEO_VERSION" '
   .listen == "127.0.0.1:6767" and
   .relay == "wss://relay.paseo.sh:443"
 ' "$status_file" >/dev/null || die "daemon status or version drift"
-as_dev sh -c 'command -v codex >/dev/null' \
-  || die "Codex provider is unavailable to $PASEO_DEV_USER"
+as_dev /usr/local/bin/codex-check \
+  || die "Codex provider capability is unavailable to $PASEO_DEV_USER"
 
 for identity in server-id daemon-keypair.json; do
   [ -e "$PASEO_HOME/$identity" ] || die "$identity is missing"

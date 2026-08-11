@@ -153,7 +153,7 @@ func (cli *CLI) writeConfigFields(loaded config.Loaded, requested string) int {
 	}
 	_ = writer.Flush()
 	fmt.Fprintln(cli.options.Stdout,
-		"AGENT_<name>_{CONFIG,RULES,CONFIG_DEST,RULES_DEST,PROVISION,COMMAND,CHECK,PERSIST} are typed catalog patterns.")
+		"AGENT_<name>_{CONFIG,RULES,CONFIG_DEST,RULES_DEST,PROVISION,COMMAND,CHECK,DEPENDS,PERSIST} are typed catalog patterns.")
 	return 0
 }
 

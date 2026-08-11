@@ -405,6 +405,72 @@ NESTED_E2E_VMS=0
 	}
 }
 
+func TestResolveAgentDependencies(t *testing.T) {
+	tests := []struct {
+		name    string
+		agents  string
+		values  environment
+		want    string
+		wantErr string
+	}{
+		{
+			name:   "dependency before dependent",
+			agents: "paseo",
+			values: environment{"AGENT_paseo_DEPENDS": "codex", "AGENT_codex_COMMAND": "codex"},
+			want:   "codex paseo",
+		},
+		{
+			name:   "stable independent order and transitive closure",
+			agents: "pi paseo claude",
+			values: environment{
+				"AGENT_paseo_DEPENDS": "bridge", "AGENT_bridge_COMMAND": "bridge",
+				"AGENT_bridge_DEPENDS": "codex", "AGENT_codex_COMMAND": "codex",
+			},
+			want: "pi codex bridge paseo claude",
+		},
+		{
+			name:   "agent id containing underscore",
+			agents: "paseo",
+			values: environment{
+				"AGENT_paseo_DEPENDS": "codex_bridge", "AGENT_codex_bridge_COMMAND": "bridge",
+			},
+			want: "codex_bridge paseo",
+		},
+		{name: "duplicate input", agents: "paseo paseo", wantErr: "duplicate agent"},
+		{
+			name: "unknown dependency", agents: "paseo",
+			values: environment{"AGENT_paseo_DEPENDS": "missing"}, wantErr: "unknown dependency",
+		},
+		{
+			name: "self dependency", agents: "paseo",
+			values: environment{"AGENT_paseo_DEPENDS": "paseo"}, wantErr: "dependency cycle",
+		},
+		{
+			name: "dependency cycle", agents: "paseo",
+			values: environment{
+				"AGENT_paseo_DEPENDS": "codex", "AGENT_codex_DEPENDS": "paseo",
+			},
+			wantErr: "dependency cycle",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			values := cloneEnvironment(test.values)
+			values["AGENTS"] = test.agents
+			err := resolveAgentDependencies(values)
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("resolve error = %v, want containing %q", err, test.wantErr)
+				}
+				return
+			}
+			if err != nil || values["AGENTS"] != test.want {
+				t.Fatalf("resolve = %q, %v; want %q", values["AGENTS"], err, test.want)
+			}
+		})
+	}
+}
+
 func TestPersistentSettingsValidationFailsClosed(t *testing.T) {
 	root := filepath.Clean(filepath.Join("..", ".."))
 	for _, test := range []struct {

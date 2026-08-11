@@ -82,7 +82,7 @@ subyard_elevated_context() {
   while IFS= read -r name; do
     case "$name" in
       AGENT_*_CHECK | AGENT_*_COMMAND | AGENT_*_CONFIG | AGENT_*_CONFIG_DEST | \
-        AGENT_*_PERSIST | AGENT_*_PROJECTS_CHANGED | AGENT_*_PROVISION | \
+        AGENT_*_DEPENDS | AGENT_*_PERSIST | AGENT_*_PROJECTS_CHANGED | AGENT_*_PROVISION | \
         AGENT_*_RULES | AGENT_*_RULES_DEST)
         SUBYARD_ELEVATED_ENV+=("$name=${!name}")
         ;;

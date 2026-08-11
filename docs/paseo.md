@@ -9,8 +9,12 @@ agent defaults.
 Add `paseo` to the effective `AGENTS` setting for the selected yard:
 
 ```sh
-AGENTS="claude codex opencode pi paseo"
+AGENTS="paseo"
 ```
+
+Paseo declares Codex as a required provider. Subyard expands the dependency automatically and
+installs its pinned Codex package before Paseo, regardless of the order of entries in `AGENTS`.
+Include other agents in the same setting when that yard should expose their command-line tools too.
 
 Put this in the host-wide Subyard settings for the default yard, or in the selected named-yard
 settings. Apply it with the normal provisioning command:
@@ -22,8 +26,9 @@ yard -Y <name> init
 
 Provisioning installs the pinned headless runtime, starts it as the yard's `dev` user, checks its
 loopback API and hosted-relay connection, and registers existing Subyard checkouts. It never prints
-the pairing offer. Retrieve that trust anchor only when you are ready to add the connection in
-Paseo Desktop:
+the pairing offer and does not start or modify Codex login. Authenticate Codex explicitly as the
+yard's `dev` user when needed, then retrieve the trust anchor only when you are ready to add the
+connection in Paseo Desktop:
 
 ```sh
 ssh yard -- paseo-pair
@@ -54,6 +59,9 @@ Run the package check from the yard when Desktop cannot connect:
 ssh yard -- paseo-check
 ssh yard-<name> -- paseo-check
 ```
+
+The check runs directly as the SSH `dev` user, verifies the Subyard-managed Codex package and its
+`app-server` capability, and does not require `sudo`, SSH agent forwarding, or a login attempt.
 
 Then inspect `systemctl status paseo.service` from a shell in the yard and rerun `yard init` to
 repair package, configuration, or unit drift. A hosted-relay outage can make Desktop unavailable
