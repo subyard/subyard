@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/application"
@@ -19,10 +17,11 @@ type preparedConfigSyncPull struct {
 	checkout       string
 	expectedHead   string
 	expectedRemote string
+	remote         string
+	remoteURL      string
 	preview        configsync.Plan
 	options        configsync.Options
-	worktree       string
-	worktreeParent string
+	candidate      *configGitCandidate
 	fastForward    bool
 }
 
@@ -68,45 +67,43 @@ func (cli *CLI) runConfigSyncPull(
 	}
 	writeConfigSyncPlan(cli.options.Stdout, prepared.preview)
 
-	needsConfirmation := prepared.fastForward || prepared.preview.NeedsConfirmation()
-	var applied configsync.Plan
-	if needsConfirmation {
-		consequences := []string{}
-		if prepared.fastForward {
-			consequences = append(consequences,
-				"fast-forward the registered configuration checkout")
-		}
-		if prepared.preview.InitializeHostID {
-			consequences = append(consequences,
-				"record owner host ID "+prepared.preview.HostID)
-		}
+	changed := prepared.fastForward || prepared.preview.NeedsApply()
+	consequences := []string{}
+	if changed && prepared.fastForward {
+		consequences = append(consequences,
+			"fast-forward the registered configuration checkout")
+	}
+	if changed && prepared.preview.InitializeHostID {
+		consequences = append(consequences,
+			"record owner host ID "+prepared.preview.HostID)
+	}
+	if changed {
 		for _, change := range prepared.preview.Changes {
 			consequences = append(consequences, change.Action+" "+change.Path)
 		}
-		if materialize && configSyncPlanNeedsMaterialization(prepared.preview) {
+		if prepared.preview.ManifestChanged {
 			consequences = append(consequences,
-				"refresh affected file settings in running local yards")
+				"update versioned configuration manifest metadata")
 		}
-		orchestrator := cli.operationOrchestrator(
-			cli.env["SUBYARD_OPERATION_ID"], loaded, nil, nil,
-		)
-		operation, err := orchestrator.Prepare(loaded.Context, domain.CommandPolicy{
-			Name: "config sync pull", Effect: domain.CommandMutate, Confirmation: domain.ConfirmationRequired,
-			RemotePolicy: domain.RemoteOnOwner, Consequences: consequences,
-		})
-		if err != nil {
-			cli.errorf("config sync pull: %v", err)
-			return 1
-		}
-		operation, err = orchestrator.Confirm(ctx, operation, assumeYes)
-		if errors.Is(err, application.ErrDeclined) {
-			cli.errorf("config sync pull: operation declined")
-			return 1
-		}
-		if err != nil {
-			cli.errorf("config sync pull: %v", err)
-			return 1
-		}
+	}
+	if changed && materialize && configSyncPlanNeedsMaterialization(prepared.preview) {
+		consequences = append(consequences,
+			"refresh affected file settings in running local yards")
+	}
+	orchestrator, operation, err := cli.planConfigSyncOperation(
+		ctx, loaded, "config sync pull", "config.sync.pull", changed,
+		consequences, assumeYes,
+	)
+	if errors.Is(err, application.ErrDeclined) {
+		cli.errorf("config sync pull: operation declined")
+		return 1
+	}
+	if err != nil {
+		cli.errorf("config sync pull: %v", err)
+		return 1
+	}
+	var applied configsync.Plan
+	if changed {
 		adapter := &configSyncPullAdapter{cli: cli, prepared: prepared}
 		orchestrator.Runner = adapter
 		if _, _, err := orchestrator.RunAdapter(ctx, operation, domain.AdapterRequest{
@@ -157,7 +154,7 @@ func (cli *CLI) prepareConfigSyncPull(
 			cli.options.Program,
 		)
 	}
-	state := cli.inspectConfigGit(ctx, record.Checkout, true)
+	state := cli.inspectConfigGit(ctx, record.Checkout)
 	verifyConfigGitRegistration(record, &state)
 	if state.Problem != nil {
 		return nil, state.Problem
@@ -176,14 +173,14 @@ func (cli *CLI) prepareConfigSyncPull(
 			state.Worktree, record.Checkout,
 		)
 	}
-	if state.Relation == "diverged" {
+	candidate, err := cli.prepareConfigGitCandidate(ctx, record.Checkout, state)
+	if err != nil {
+		return nil, err
+	}
+	if candidate.ahead != 0 && candidate.behind != 0 {
+		candidate.cleanup()
 		return nil, errors.New(
 			"branch has diverged from upstream; Subyard will not merge or rebase it",
-		)
-	}
-	if state.Relation == "unknown" {
-		return nil, errors.New(
-			"cannot determine the exact relation to upstream",
 		)
 	}
 	options := configsync.Options{
@@ -197,39 +194,25 @@ func (cli *CLI) prepareConfigSyncPull(
 	}
 	prepared := &preparedConfigSyncPull{
 		checkout: record.Checkout, expectedHead: state.Head,
-		expectedRemote: state.UpstreamCommit, options: options,
-		fastForward: state.Behind > 0,
+		expectedRemote: candidate.remoteCommit, remote: state.RemoteName,
+		remoteURL: state.RemoteRaw, options: options, candidate: candidate,
+		fastForward: candidate.behind > 0,
 	}
-	if !prepared.fastForward {
-		prepared.preview, err = configsync.BuildPlan(options)
-		if err != nil {
-			return nil, err
+	if prepared.fastForward {
+		if err := cli.configGitRun(
+			ctx, candidate.checkout, "checkout", "--quiet", "--detach",
+			candidate.remoteCommit,
+		); err != nil {
+			prepared.cleanup(cli, ctx)
+			return nil, fmt.Errorf("prepare upstream candidate: %w", err)
 		}
-		return prepared, nil
 	}
-	parent, err := os.MkdirTemp("", ".subyard-config-pull-")
-	if err != nil {
-		return nil, err
-	}
-	if err := os.Chmod(parent, 0o700); err != nil {
-		_ = os.Remove(parent)
-		return nil, err
-	}
-	prepared.worktreeParent = parent
-	prepared.worktree = filepath.Join(parent, "candidate")
-	if err := cli.configGitRun(
-		ctx, record.Checkout, "worktree", "add", "--quiet", "--detach",
-		prepared.worktree, state.UpstreamCommit,
-	); err != nil {
-		prepared.cleanup(cli, ctx)
-		return nil, fmt.Errorf("prepare upstream candidate: %w", err)
-	}
-	if err := hardenConfigCandidate(prepared.worktree); err != nil {
+	if err := hardenConfigCandidate(candidate.checkout); err != nil {
 		prepared.cleanup(cli, ctx)
 		return nil, fmt.Errorf("protect upstream candidate: %w", err)
 	}
 	candidateOptions := options
-	candidateOptions.SourceRoot = prepared.worktree
+	candidateOptions.SourceRoot = candidate.checkout
 	candidateOptions.SourceIdentityRoot = record.Checkout
 	prepared.preview, err = configsync.BuildPlan(candidateOptions)
 	if err != nil {
@@ -240,18 +223,13 @@ func (cli *CLI) prepareConfigSyncPull(
 }
 
 func (prepared *preparedConfigSyncPull) cleanup(cli *CLI, ctx context.Context) {
-	if prepared == nil || prepared.worktreeParent == "" {
+	_ = cli
+	_ = ctx
+	if prepared == nil || prepared.candidate == nil {
 		return
 	}
-	if filepath.Dir(prepared.worktree) == prepared.worktreeParent &&
-		strings.HasPrefix(filepath.Base(prepared.worktreeParent), ".subyard-config-pull-") {
-		_ = cli.configGitRun(
-			ctx, prepared.checkout, "worktree", "remove", "--force", prepared.worktree,
-		)
-		_ = os.RemoveAll(prepared.worktreeParent)
-	}
-	prepared.worktree = ""
-	prepared.worktreeParent = ""
+	prepared.candidate.cleanup()
+	prepared.candidate = nil
 }
 
 type configSyncPullAdapter struct {
@@ -279,15 +257,13 @@ func (adapter *configSyncPullAdapter) Run(
 			"checkout HEAD changed after preview; rerun pull",
 		)
 	}
+	if err := adapter.cli.fetchRegisteredConfigUpstream(
+		ctx, prepared.checkout, prepared.remote, prepared.remoteURL,
+		prepared.expectedRemote,
+	); err != nil {
+		return domain.AdapterResult{}, "", err
+	}
 	if prepared.fastForward {
-		upstream, err := adapter.cli.configGitOutput(
-			ctx, prepared.checkout, "rev-parse", "--verify", "@{upstream}",
-		)
-		if err != nil || strings.TrimSpace(upstream) != prepared.expectedRemote {
-			return domain.AdapterResult{}, "", errors.New(
-				"upstream changed after preview; rerun pull",
-			)
-		}
 		if err := adapter.cli.configGitRun(
 			ctx, prepared.checkout, "merge", "--ff-only", "--no-edit",
 			prepared.expectedRemote,

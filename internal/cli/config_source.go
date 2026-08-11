@@ -20,6 +20,7 @@ import (
 )
 
 const sourceStagePrefix = ".subyard-config-source-"
+const sourceInitCandidatePrefix = ".subyard-config-source-init-"
 
 type configSourceConnectOptions struct {
 	origin      string
@@ -40,6 +41,10 @@ type preparedConfigSource struct {
 	needsRegister    bool
 	initialPush      bool
 	initialBranch    string
+	initialCommit    string
+	initialCandidate string
+	candidateParent  string
+	targetBranch     string
 }
 
 func (cli *CLI) runConfigSyncConnect(
@@ -71,47 +76,46 @@ func (cli *CLI) runConfigSyncConnect(
 	fmt.Fprintln(cli.options.Stdout, "Configuration source onboarding")
 	fmt.Fprintf(cli.options.Stdout, "  checkout: %s\n", prepared.checkout)
 	writeConfigSyncPlan(cli.options.Stdout, prepared.preview)
-	if !prepared.needsClone && !prepared.needsRegister &&
-		!prepared.preview.NeedsApply() {
-		fmt.Fprintln(cli.options.Stdout, "config sync: already connected and converged")
-		return 0
-	}
+	changed := prepared.needsClone || prepared.needsRegister || prepared.initialPush ||
+		prepared.preview.NeedsApply()
 	consequences := make([]string, 0, len(prepared.preview.Changes)+3)
-	if prepared.needsClone {
+	if changed && prepared.needsClone {
 		consequences = append(consequences,
 			"install the prepared private Git checkout at "+prepared.checkout)
 	}
-	if prepared.needsRegister {
+	if changed && prepared.needsRegister {
 		consequences = append(consequences,
 			"register the owner-host configuration source checkout")
 	}
-	if prepared.initialPush {
+	if changed && prepared.initialPush {
 		consequences = append(consequences,
 			"create and push the initial configuration commit without force")
 	}
-	if prepared.preview.InitializeHostID {
+	if changed && prepared.initialCandidate != "" {
+		consequences = append(consequences,
+			"initialize the existing configuration source checkout from the prepared commit")
+	}
+	if changed && prepared.preview.InitializeHostID {
 		consequences = append(consequences,
 			"record owner host ID "+prepared.preview.HostID)
 	}
-	for _, change := range prepared.preview.Changes {
-		consequences = append(consequences, change.Action+" "+change.Path)
+	if changed {
+		for _, change := range prepared.preview.Changes {
+			consequences = append(consequences, change.Action+" "+change.Path)
+		}
+		if prepared.preview.ManifestChanged {
+			consequences = append(consequences,
+				"update versioned configuration manifest metadata")
+		}
 	}
-	if connect.materialize && configSyncPlanNeedsMaterialization(prepared.preview) {
+	if changed && connect.materialize && configSyncPlanNeedsMaterialization(prepared.preview) {
 		consequences = append(consequences,
 			"refresh affected file settings in running local yards")
 	}
-	orchestrator := cli.operationOrchestrator(
-		cli.env["SUBYARD_OPERATION_ID"], loaded, nil, nil,
+	orchestrator, operation, err := cli.planConfigSyncOperation(
+		ctx, loaded, "config sync connect", "config.sync.connect", changed,
+		consequences, assumeYes,
 	)
-	operation, err := orchestrator.Prepare(loaded.Context, domain.CommandPolicy{
-		Name: "config sync connect", Effect: domain.CommandMutate, Confirmation: domain.ConfirmationRequired,
-		RemotePolicy: domain.RemoteOnOwner, Consequences: consequences,
-	})
-	if err != nil {
-		cli.errorf("config sync connect: %v", err)
-		return 1
-	}
-	operation, err = orchestrator.Confirm(ctx, operation, assumeYes)
 	if errors.Is(err, application.ErrDeclined) {
 		cli.errorf("config sync connect: operation declined")
 		return 1
@@ -119,6 +123,10 @@ func (cli *CLI) runConfigSyncConnect(
 	if err != nil {
 		cli.errorf("config sync connect: %v", err)
 		return 1
+	}
+	if !changed {
+		fmt.Fprintln(cli.options.Stdout, "config sync: already connected and converged")
+		return 0
 	}
 	adapter := &configSourceConnectAdapter{cli: cli, prepared: prepared}
 	orchestrator.Runner = adapter
@@ -274,7 +282,7 @@ func (cli *CLI) prepareConfigSource(
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 			return nil, errors.New("configuration source checkout must be a real directory")
 		}
-		if err := verifyConfigGitOrigin(ctx, checkout, origin, cli.env); err != nil {
+		if err := cli.verifyConfigGitOrigin(ctx, checkout, origin); err != nil {
 			return nil, err
 		}
 	case errors.Is(statErr, os.ErrNotExist):
@@ -311,7 +319,7 @@ func (cli *CLI) prepareConfigSource(
 	if request.hostID != "" {
 		environment["SUBYARD_HOST_ID"] = request.hostID
 	}
-	sourceHead, headErr := cli.configGitOutput(
+	sourceHead, headErr := cli.configGitInspectOutput(
 		ctx, sourceRoot, "rev-parse", "--verify", "HEAD",
 	)
 	if headErr != nil {
@@ -321,11 +329,40 @@ func (cli *CLI) prepareConfigSource(
 				"configuration repository has no commit; repeat connect with --init to create the initial manifest",
 			)
 		}
+		if !prepared.needsClone {
+			prepared.candidateParent, prepared.initialCandidate, err =
+				cli.cloneInitialConfigSourceCandidate(ctx, origin)
+			if err != nil {
+				prepared.cleanup()
+				return nil, err
+			}
+			sourceRoot = prepared.initialCandidate
+			prepared.targetBranch, err = cli.configGitInspectOutput(
+				ctx, checkout, "symbolic-ref", "--quiet", "--short", "HEAD",
+			)
+			prepared.targetBranch = strings.TrimSpace(prepared.targetBranch)
+			if err != nil || prepared.targetBranch == "" {
+				prepared.cleanup()
+				return nil, errors.New("empty configuration checkout has no unborn branch")
+			}
+		}
 		branch, branchErr := cli.initializeConfigSource(ctx, sourceRoot)
 		if branchErr != nil {
 			prepared.cleanup()
 			return nil, branchErr
 		}
+		if prepared.targetBranch != "" && prepared.targetBranch != branch {
+			prepared.cleanup()
+			return nil, errors.New("prepared initial branch does not match the empty checkout")
+		}
+		prepared.initialCommit, err = cli.configGitOutput(
+			ctx, sourceRoot, "rev-parse", "--verify", "HEAD",
+		)
+		if err != nil {
+			prepared.cleanup()
+			return nil, err
+		}
+		prepared.initialCommit = strings.TrimSpace(prepared.initialCommit)
 		prepared.initialPush = true
 		prepared.initialBranch = branch
 	} else if request.initialize {
@@ -358,6 +395,26 @@ func (cli *CLI) prepareConfigSource(
 		)
 	}
 	return prepared, nil
+}
+
+func (cli *CLI) cloneInitialConfigSourceCandidate(
+	ctx context.Context,
+	origin string,
+) (string, string, error) {
+	parent, err := os.MkdirTemp("", sourceInitCandidatePrefix)
+	if err != nil {
+		return "", "", err
+	}
+	if err := os.Chmod(parent, 0o700); err != nil {
+		_ = os.Remove(parent)
+		return "", "", err
+	}
+	candidate := filepath.Join(parent, "candidate")
+	if err := cli.cloneConfigSource(ctx, origin, candidate); err != nil {
+		_ = os.RemoveAll(parent)
+		return "", "", err
+	}
+	return parent, candidate, nil
 }
 
 func (cli *CLI) initializeConfigSource(
@@ -408,13 +465,30 @@ func (cli *CLI) cloneConfigSource(
 	origin string,
 	destination string,
 ) error {
+	return cli.cloneConfigSourceWithEnvironment(ctx, origin, destination, nil)
+}
+
+func (cli *CLI) cloneRegisteredConfigSource(
+	ctx context.Context,
+	origin string,
+	destination string,
+) error {
+	return cli.cloneConfigSourceWithEnvironment(
+		ctx, origin, destination, configGitInspectionOverrides(),
+	)
+}
+
+func (cli *CLI) cloneConfigSourceWithEnvironment(
+	ctx context.Context,
+	origin string,
+	destination string,
+	environment map[string]string,
+) error {
 	command := exec.CommandContext(ctx,
 		"git", "clone", "--quiet", "--", origin, destination,
 	)
 	command.Dir = filepath.Dir(destination)
-	command.Env = environmentList(cli.env, map[string]string{
-		"GIT_TERMINAL_PROMPT": "0",
-	})
+	command.Env = cli.configGitEnvironment(environment)
 	var diagnostics bytes.Buffer
 	command.Stdout = io.Discard
 	command.Stderr = &diagnostics
@@ -434,7 +508,7 @@ func (cli *CLI) cloneConfigSource(
 	if err := hardenClonedConfigSource(destination); err != nil {
 		return fmt.Errorf("protect cloned configuration source: %w", err)
 	}
-	return verifyConfigGitOrigin(ctx, destination, origin, cli.env)
+	return cli.verifyConfigGitOrigin(ctx, destination, origin)
 }
 
 func hardenClonedConfigSource(root string) error {
@@ -505,23 +579,18 @@ func hardenConfigCandidate(root string) error {
 	})
 }
 
-func verifyConfigGitOrigin(
+func (cli *CLI) verifyConfigGitOrigin(
 	ctx context.Context,
 	checkout string,
 	expected string,
-	environment map[string]string,
 ) error {
-	command := exec.CommandContext(ctx,
-		"git", "-C", checkout, "remote", "get-url", "origin",
+	output, err := cli.configGitInspectOutput(
+		ctx, checkout, "remote", "get-url", "origin",
 	)
-	command.Env = environmentList(environment, map[string]string{
-		"GIT_TERMINAL_PROMPT": "0",
-	})
-	output, err := command.Output()
 	if err != nil {
 		return errors.New("configuration source checkout has no readable Git origin")
 	}
-	actual := strings.TrimSpace(string(output))
+	actual := strings.TrimSpace(output)
 	if actual != expected {
 		return fmt.Errorf(
 			"configuration source checkout origin does not match the requested Git URL",
@@ -729,16 +798,24 @@ func syncConfigSourceDirectoryChain(path, stop string) error {
 }
 
 func (prepared *preparedConfigSource) cleanup() {
-	if prepared == nil || prepared.stage == "" {
+	if prepared == nil {
 		return
 	}
-	parent := filepath.Dir(prepared.stage)
-	if parent != prepared.existingAncestor ||
-		!strings.HasPrefix(filepath.Base(prepared.stage), sourceStagePrefix) {
-		return
+	if prepared.stage != "" {
+		parent := filepath.Dir(prepared.stage)
+		if parent == prepared.existingAncestor &&
+			strings.HasPrefix(filepath.Base(prepared.stage), sourceStagePrefix) {
+			_ = os.RemoveAll(prepared.stage)
+		}
+		prepared.stage = ""
 	}
-	_ = os.RemoveAll(prepared.stage)
-	prepared.stage = ""
+	if prepared.candidateParent != "" &&
+		filepath.Dir(prepared.initialCandidate) == prepared.candidateParent &&
+		strings.HasPrefix(filepath.Base(prepared.candidateParent), sourceInitCandidatePrefix) {
+		_ = os.RemoveAll(prepared.candidateParent)
+	}
+	prepared.initialCandidate = ""
+	prepared.candidateParent = ""
 }
 
 type configSourceConnectAdapter struct {
@@ -765,6 +842,11 @@ func (adapter *configSourceConnectAdapter) Run(
 			return domain.AdapterResult{}, "", err
 		}
 		prepared.stage = ""
+	}
+	if prepared.initialCandidate != "" {
+		if err := adapter.cli.installInitialConfigSourceCandidate(ctx, prepared); err != nil {
+			return domain.AdapterResult{}, "", err
+		}
 	}
 	finalOptions := prepared.options
 	finalOptions.SourceRoot = prepared.checkout
@@ -808,4 +890,54 @@ func (adapter *configSourceConnectAdapter) Run(
 			"generation": finalPlan.Generation,
 		},
 	}, "", nil
+}
+
+func (cli *CLI) installInitialConfigSourceCandidate(
+	ctx context.Context,
+	prepared *preparedConfigSource,
+) error {
+	if err := cli.verifyConfigGitOrigin(ctx, prepared.checkout, prepared.origin); err != nil {
+		return err
+	}
+	if head, err := cli.configGitOutput(
+		ctx, prepared.checkout, "rev-parse", "--verify", "HEAD",
+	); err == nil || strings.TrimSpace(head) != "" {
+		return errors.New("configuration source checkout gained a commit after preview")
+	}
+	branch, err := cli.configGitOutput(
+		ctx, prepared.checkout, "symbolic-ref", "--quiet", "--short", "HEAD",
+	)
+	if err != nil || strings.TrimSpace(branch) != prepared.targetBranch {
+		return errors.New("configuration source checkout branch changed after preview")
+	}
+	status, err := cli.configGitOutput(
+		ctx, prepared.checkout, "status", "--porcelain=v1", "--untracked-files=all",
+	)
+	if err != nil || strings.TrimSpace(status) != "" {
+		return errors.New("configuration source checkout changed after preview")
+	}
+	refs, err := cli.configGitOutput(
+		ctx, prepared.checkout, "for-each-ref", "--format=%(refname):%(objectname)",
+	)
+	if err != nil || strings.TrimSpace(refs) != "" {
+		return errors.New("configuration source checkout refs changed after preview")
+	}
+	candidate, err := cli.configGitOutput(
+		ctx, prepared.initialCandidate, "rev-parse", "--verify", "HEAD",
+	)
+	if err != nil || strings.TrimSpace(candidate) != prepared.initialCommit {
+		return errors.New("prepared initial configuration commit changed")
+	}
+	if err := cli.configGitRun(
+		ctx, prepared.checkout, "fetch", "--quiet", "--no-tags", "--",
+		prepared.initialCandidate, prepared.initialCommit,
+	); err != nil {
+		return fmt.Errorf("import prepared initial configuration commit: %w", err)
+	}
+	if err := cli.configGitRun(
+		ctx, prepared.checkout, "reset", "--hard", prepared.initialCommit,
+	); err != nil {
+		return fmt.Errorf("initialize configuration checkout: %w", err)
+	}
+	return hardenClonedConfigSource(prepared.checkout)
 }

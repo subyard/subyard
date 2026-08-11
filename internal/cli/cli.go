@@ -80,15 +80,17 @@ type Options struct {
 }
 
 type CLI struct {
-	options          Options
-	env              map[string]string
-	baseEnv          map[string]string
-	manifest         command.Manifest
-	resources        resource.Registry
-	inventoryRoutes  map[string]config.Loaded
-	operatorTerminal func() bool
-	openTerminal     func() (*os.File, error)
-	effectiveUID     func() int
+	options             Options
+	env                 map[string]string
+	baseEnv             map[string]string
+	manifest            command.Manifest
+	resources           resource.Registry
+	inventoryRoutes     map[string]config.Loaded
+	coreActions         *domain.ActionRegistry
+	promptInputTerminal func() bool
+	operatorTerminal    func() bool
+	openTerminal        func() (*os.File, error)
+	effectiveUID        func() int
 }
 
 func New(options Options) (*CLI, error) {
@@ -128,6 +130,14 @@ func New(options Options) (*CLI, error) {
 	if err != nil {
 		return nil, err
 	}
+	coreActions, err := application.NewCoreActionRegistry()
+	if err != nil {
+		return nil, fmt.Errorf("create core action registry: %w", err)
+	}
+	coreActions, err = coreActions.With(resources.ActionDefinitions())
+	if err != nil {
+		return nil, fmt.Errorf("compose resource action registry: %w", err)
+	}
 	for _, definition := range resources.Definitions() {
 		if _, conflict := manifest.Lookup(definition.Command); conflict {
 			return nil, fmt.Errorf("profile resource command conflicts with core command: %s", definition.Command)
@@ -141,8 +151,9 @@ func New(options Options) (*CLI, error) {
 	}
 	cli := &CLI{
 		options: options, env: activeEnvironment, baseEnv: baseEnvironment,
-		manifest: manifest, resources: resources, inventoryRoutes: make(map[string]config.Loaded),
+		manifest: manifest, resources: resources, inventoryRoutes: make(map[string]config.Loaded), coreActions: coreActions,
 	}
+	cli.promptInputTerminal = func() bool { return terminalStream(options.Stdin) }
 	cli.operatorTerminal = func() bool {
 		return terminalStream(options.Stdin) &&
 			terminalStream(options.Stdout) &&
@@ -206,46 +217,25 @@ func (cli *CLI) Run(ctx context.Context) int {
 	if core && definition.Handler == "@migrate" {
 		return cli.runMigration(ctx, yard, commandArguments)
 	}
-	if core && definition.Handler == "@test-vms" &&
-		testVMLogsInvocation(commandArguments) {
-		if cli.env["SUBYARD_NO_AUDIT"] == "" {
-			cli.audit(name, commandArguments, "", "")
-		}
-		return cli.runTestVMLogs(ctx, commandArguments)
-	}
+	configSync, configSyncCheck, configSyncStatus := false, false, false
+	configSyncHome := ""
+	configSyncPending := false
 	if core && definition.Handler == "@config" {
-		configSync, check, status := configSyncInvocation(commandArguments)
+		configSync, configSyncCheck, configSyncStatus = configSyncInvocation(commandArguments)
 		if configSync {
 			operatorHome := cli.env["SUBYARD_OPERATOR_HOME"]
 			if operatorHome == "" {
 				operatorHome = cli.env["HOME"]
 			}
-			configHome, resolveErr := config.ResolveConfigHome(operatorHome, cli.env)
-			if resolveErr != nil {
-				cli.errorf("config sync: %v", resolveErr)
+			configSyncHome, err = config.ResolveConfigHome(operatorHome, cli.env)
+			if err != nil {
+				cli.errorf("config sync: %v", err)
 				return 2
 			}
-			pending, pendingErr := config.PendingConfigurationTransaction(configHome)
-			if pendingErr != nil {
-				cli.errorf("config sync: %v", pendingErr)
+			configSyncPending, err = config.PendingConfigurationTransaction(configSyncHome)
+			if err != nil {
+				cli.errorf("config sync: %v", err)
 				return 1
-			}
-			if pending && check {
-				cli.errorf(
-					"config sync --check: interrupted transaction requires recovery by a normal config sync",
-				)
-				return 1
-			}
-			if pending && status && (yard == "" || yard == "default") {
-				return cli.runPendingConfigSyncStatus(
-					ctx, configHome, configSyncStatusArguments(commandArguments),
-				)
-			}
-			if pending {
-				if recoveryErr := configsync.Recover(configHome); recoveryErr != nil {
-					cli.errorf("config sync recovery: %v", recoveryErr)
-					return 1
-				}
 			}
 		}
 	}
@@ -257,6 +247,8 @@ func (cli *CLI) Run(ctx context.Context) int {
 	var bootstrap *initBootstrap
 	if core && definition.Handler == "@init" && !commandHelpRequested(commandArguments) {
 		loaded, bootstrap, err = cli.loadInitContext(yard, explicit, commandArguments)
+	} else if configSyncPending {
+		loaded, err = cli.resolveContextAllowPending(yard)
 	} else {
 		loaded, err = cli.loadContext(yard)
 	}
@@ -274,7 +266,12 @@ func (cli *CLI) Run(ctx context.Context) int {
 		if baseErr != nil {
 			err = baseErr
 		} else {
-			results := cli.allOwnerInventories(ctx, base, false)
+			var results []ownerInventoryResult
+			if core && definition.Name == "remove" {
+				results = cli.allOwnerInventoriesReadOnly(ctx, base)
+			} else {
+				results = cli.allOwnerInventories(ctx, base, false)
+			}
 			selected, _, selectErr := selectOwnerYards(results, canonical)
 			if selectErr != nil {
 				err = selectErr
@@ -307,6 +304,30 @@ func (cli *CLI) Run(ctx context.Context) int {
 	if cli.env["SUBYARD_OPERATION_ID"] == "" {
 		cli.env["SUBYARD_OPERATION_ID"] = newOperationID()
 	}
+	if core && definition.Handler == "@test-vms" && testVMLogsInvocation(commandArguments) {
+		orchestrator := cli.operationOrchestrator(
+			cli.env["SUBYARD_OPERATION_ID"], loaded, nil, &definition,
+		)
+		plan, planErr := orchestrator.PlanAction(
+			ctx, loaded.Context, definition.Name, domain.RemotePolicy(definition.Remote),
+			"test-vms.logs", domain.ActionDelta{}, yes || cli.env["ASSUME_YES"] == "1",
+		)
+		if planErr != nil {
+			cli.errorf("plan test-vms logs: %v", planErr)
+			return 1
+		}
+		remote := ""
+		if loaded.Context.YardType == domain.YardRemote {
+			remote = loaded.Context.RemoteDest
+		}
+		if cli.env["SUBYARD_NO_AUDIT"] == "" {
+			cli.audit(name, commandArguments, yard, remote)
+		}
+		if plan.Target == domain.TargetRemoteOwner {
+			return cli.forwardRemote(ctx, loaded.Context, definition.Name, commandArguments)
+		}
+		return cli.runTestVMLogs(ctx, commandArguments)
+	}
 	var projectRun *projectExecution
 	var remoteRun *domain.RemotePrepared
 	if !commandHelpRequested(commandArguments) {
@@ -325,10 +346,6 @@ func (cli *CLI) Run(ctx context.Context) int {
 	}
 	if projectRun != nil {
 		defer cli.abortProjectExecution(context.Background(), projectRun)
-		if err := cli.reserveRemoteProject(ctx, projectRun); err != nil {
-			cli.errorf("%s: %v", definition.Name, err)
-			return 1
-		}
 		loaded = projectRun.Loaded
 		loadedContext = loaded.Context
 		commandArguments = projectRun.Arguments
@@ -358,7 +375,46 @@ func (cli *CLI) Run(ctx context.Context) int {
 		return 1
 	}
 	if target == domain.TargetRemoteOwner {
+		if core && definition.Name == "keys" {
+			return cli.runRemoteKeys(ctx, loaded, definition, commandArguments)
+		}
 		return cli.forwardRemote(ctx, loadedContext, name, commandArguments)
+	}
+	if configSync {
+		configSyncTarget, configSyncRouteErr := application.Route(
+			loadedContext, domain.RemoteOnOwner,
+		)
+		if configSyncRouteErr != nil {
+			cli.errorf("route config sync: %v", configSyncRouteErr)
+			return 1
+		}
+		if configSyncTarget == domain.TargetRemoteOwner {
+			return cli.forwardRemote(ctx, loadedContext, name, commandArguments)
+		}
+	}
+	if configSyncPending {
+		switch {
+		case configSyncCheck:
+			cli.errorf(
+				"config sync --check: interrupted transaction requires recovery by a normal config sync",
+			)
+			return 1
+		case configSyncStatus:
+			return cli.runPendingConfigSyncStatus(
+				ctx, configSyncHome, configSyncStatusArguments(commandArguments),
+			)
+		default:
+			if recoveryErr := resumeInterruptedConfigSync(configSyncHome); recoveryErr != nil {
+				cli.errorf("config sync recovery: %v", recoveryErr)
+				return 1
+			}
+			loaded, err = cli.loadContext(yard)
+			if err != nil {
+				cli.errorf("%v", err)
+				return 2
+			}
+			loadedContext = loaded.Context
+		}
 	}
 	switch definition.Handler {
 	case "@check":
@@ -418,21 +474,29 @@ func (cli *CLI) Run(ctx context.Context) int {
 		return 0
 	}
 	if profileResource {
-		return cli.runCommand(ctx, resourceDefinition.HandlerPath(), commandArguments,
-			cli.handlerEnvironment(resourceDefinition.Command, ""))
+		return cli.runResourceCommand(
+			ctx, loaded, resourceDefinition, commandArguments,
+			yes || cli.env["ASSUME_YES"] == "1",
+		)
 	}
 	if definition.Handler == "@resource" {
-		if len(commandArguments) == 0 {
+		resourceArguments := commandArguments
+		if yes && len(resourceArguments) != 0 && resourceArguments[0] == "--yes" {
+			resourceArguments = resourceArguments[1:]
+		}
+		if len(resourceArguments) == 0 {
 			cli.errorf("'svc' needs a resource name or command (see '%s --resources')", cli.options.Program)
 			return 2
 		}
-		selected, ok := cli.resources.Lookup(commandArguments[0])
+		selected, ok := cli.resources.Lookup(resourceArguments[0])
 		if !ok {
-			cli.errorf("unknown resource %q (see '%s --resources')", commandArguments[0], cli.options.Program)
+			cli.errorf("unknown resource %q (see '%s --resources')", resourceArguments[0], cli.options.Program)
 			return 2
 		}
-		return cli.runCommand(ctx, selected.HandlerPath(), commandArguments[1:],
-			cli.handlerEnvironment(selected.Command, ""))
+		return cli.runResourceCommand(
+			ctx, loaded, selected, resourceArguments[1:],
+			yes || cli.env["ASSUME_YES"] == "1",
+		)
 	}
 	path := filepath.Join(cli.options.RepositoryRoot, "scripts", definition.Handler)
 	handlerArguments := commandArguments
@@ -447,6 +511,16 @@ func (cli *CLI) Run(ctx context.Context) int {
 		}
 	}
 	return code
+}
+
+// resumeInterruptedConfigSync is continuation of a prior apply, not mutation in
+// the next command's preflight. configsync.Apply writes the validated journal
+// only after its operation was authorized. Recover either finishes cleanup for
+// that exact committed manifest or rolls back exact journal entries, refusing
+// external drift. It must finish before config.Load can build the next exact
+// owner-side action plan.
+func resumeInterruptedConfigSync(configHome string) error {
+	return configsync.Recover(configHome)
 }
 
 func configSyncInvocation(arguments []string) (bool, bool, bool) {
@@ -553,6 +627,32 @@ func openProjectStore(ctx context.Context, directory string) (*state.FileStore, 
 		return nil, err
 	}
 	return store, nil
+}
+
+type readOnlyProjectStore struct{ store *state.FileStore }
+
+func openProjectStoreReadOnly(directory string) (readOnlyProjectStore, error) {
+	store, err := state.NewFileStore(directory)
+	if err != nil {
+		return readOnlyProjectStore{}, err
+	}
+	return readOnlyProjectStore{store: store}, nil
+}
+
+func (store readOnlyProjectStore) List(ctx context.Context) ([]domain.ProjectRecord, error) {
+	return store.store.ListReadOnly(ctx)
+}
+
+func (store readOnlyProjectStore) Get(ctx context.Context, id string) (domain.ProjectRecord, error) {
+	return store.store.GetReadOnly(ctx, id)
+}
+
+func (store readOnlyProjectStore) Put(context.Context, domain.ProjectRecord) error {
+	return errors.New("read-only project store")
+}
+
+func (store readOnlyProjectStore) Delete(context.Context, string) error {
+	return errors.New("read-only project store")
 }
 
 func (cli *CLI) statusPorts() (ports.Incus, ports.InstanceExecutor) {
@@ -1854,12 +1954,79 @@ func (cli *CLI) projectStores(ctx context.Context, yard domain.Context) (map[str
 	return stores, nil
 }
 
+func (cli *CLI) projectStoresReadOnly(
+	ctx context.Context, yard domain.Context,
+) (map[string]ports.ProjectStore, error) {
+	names, err := config.YardNames(config.RegistryDirectories(yard.Paths.ConfigDir, yard.Paths.ConfigHome)...)
+	if err != nil {
+		return nil, err
+	}
+	stores := make(map[string]ports.ProjectStore, len(names))
+	loaded := config.Loaded{Context: yard}
+	for _, name := range names {
+		contextForYard, loadErr := cli.loadInventoryContext(name, loaded)
+		if loadErr != nil {
+			return nil, loadErr
+		}
+		store, storeErr := openProjectStoreReadOnly(contextForYard.Paths.StateDir)
+		if storeErr != nil {
+			return nil, storeErr
+		}
+		if _, listErr := store.List(ctx); listErr != nil {
+			return nil, listErr
+		}
+		stores[name] = store
+	}
+	return stores, nil
+}
+
 func (cli *CLI) resolveGlobalProject(
 	ctx context.Context,
 	yard domain.Context,
 	selector string,
 ) (state.Match, error) {
 	stores, err := cli.projectStores(ctx, yard)
+	if err != nil {
+		return state.Match{}, err
+	}
+	resolver := state.Resolver{Stores: stores}
+	if !isExplicitProjectPath(selector) {
+		return resolver.Resolve(ctx, selector)
+	}
+	path, err := filepath.EvalSymlinks(cli.projectSelectorPath(selector))
+	if err != nil {
+		return state.Match{}, err
+	}
+	path, err = filepath.Abs(path)
+	if err != nil {
+		return state.Match{}, err
+	}
+	matches := make([]state.Match, 0)
+	for yardName, store := range stores {
+		records, listErr := store.List(ctx)
+		if listErr != nil {
+			return state.Match{}, listErr
+		}
+		for _, record := range recordsBySource(records, path) {
+			matches = append(matches, state.Match{Yard: yardName, Record: record})
+		}
+	}
+	if len(matches) > 1 {
+		return state.Match{}, fmt.Errorf("%w: project path %q is registered in multiple yards",
+			state.ErrAmbiguous, selector)
+	}
+	if len(matches) == 0 {
+		return state.Match{}, fmt.Errorf("project path %q is not in any yard", selector)
+	}
+	return matches[0], nil
+}
+
+func (cli *CLI) resolveGlobalProjectReadOnly(
+	ctx context.Context,
+	yard domain.Context,
+	selector string,
+) (state.Match, error) {
+	stores, err := cli.projectStoresReadOnly(ctx, yard)
 	if err != nil {
 		return state.Match{}, err
 	}
@@ -1974,10 +2141,37 @@ func (cli *CLI) runOwnerProjectState(
 	arguments []string,
 ) int {
 	if len(arguments) == 0 {
-		cli.errorf("internal: _project-state expects reserve, finalize, abort, upsert, remove or unregister")
+		cli.errorf("internal: _project-state expects preview, reserve, finalize, abort, upsert, remove or unregister")
 		return 2
 	}
 	switch arguments[0] {
+	case "preview":
+		if len(arguments) != 5 {
+			cli.errorf("internal: _project-state preview needs <source> <mode> <name> <explicit>")
+			return 2
+		}
+		store, ok := service.Store.(*state.FileStore)
+		if !ok {
+			cli.errorf("internal: owner project preview requires the file store")
+			return 1
+		}
+		admission, err := store.PreviewAdmission(
+			ctx, arguments[1], domain.ProjectMode(arguments[2]),
+			arguments[3], arguments[4] == "1",
+		)
+		if err != nil {
+			cli.errorf("preview owner project identity: %v", err)
+			return 1
+		}
+		response := map[string]any{
+			"projectId": admission.ProjectID,
+			"name":      admission.Name,
+			"existing":  admission.Existing,
+		}
+		if err := json.NewEncoder(cli.options.Stdout).Encode(response); err != nil {
+			cli.errorf("encode owner project preview: %v", err)
+			return 1
+		}
 	case "reserve":
 		if len(arguments) != 6 {
 			cli.errorf("internal: _project-state reserve needs <operation> <source> <mode> <name> <explicit>")
@@ -2091,7 +2285,7 @@ func (cli *CLI) runOwnerProjectState(
 			return 1
 		}
 	default:
-		cli.errorf("internal: _project-state expects reserve, finalize, abort, upsert, remove or unregister")
+		cli.errorf("internal: _project-state expects preview, reserve, finalize, abort, upsert, remove or unregister")
 		return 2
 	}
 	return 0
@@ -2118,25 +2312,55 @@ type fixedIDSource struct{ value string }
 func (source fixedIDSource) NewID() string { return source.value }
 
 type streamPrompt struct {
-	input  io.Reader
-	output io.Writer
+	input       io.Reader
+	output      io.Writer
+	interactive func() bool
 }
 
-func (prompt streamPrompt) Confirm(_ context.Context, summary string, consequences []string) (bool, error) {
-	fmt.Fprintf(prompt.output, "\n%s\nThis will:\n", summary)
-	for _, consequence := range consequences {
-		fmt.Fprintf(prompt.output, "  - %s\n", consequence)
+func (prompt streamPrompt) Confirm(_ context.Context, request domain.ConfirmationRequest) (bool, error) {
+	label, ok := confirmationPromptLabel(request.Default)
+	if !ok {
+		return false, fmt.Errorf("%w: invalid confirmation default %q", domain.ErrConfirmationRequired, request.Default)
 	}
-	fmt.Fprint(prompt.output, "\nProceed? [y/N] ")
-	answer, err := bufio.NewReader(prompt.input).ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
-		return false, err
+	if prompt.interactive == nil || !prompt.interactive() {
+		return false, fmt.Errorf("%w: interactive terminal required", domain.ErrConfirmationRequired)
 	}
-	switch strings.ToLower(strings.TrimSpace(answer)) {
-	case "y", "yes":
-		return true, nil
+	reader := bufio.NewReader(prompt.input)
+	for {
+		fmt.Fprintf(prompt.output, "\n%s\nThis will:\n", request.Summary)
+		for _, consequence := range request.Consequences {
+			fmt.Fprintf(prompt.output, "  - %s\n", consequence)
+		}
+		fmt.Fprintf(prompt.output, "\nProceed? %s ", label)
+		answer, err := reader.ReadString('\n')
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return false, fmt.Errorf("%w: interactive input ended", domain.ErrConfirmationRequired)
+			}
+			return false, err
+		}
+		switch strings.ToLower(strings.TrimSpace(answer)) {
+		case "":
+			if request.Default == domain.ConfirmationDefaultYes {
+				return true, nil
+			}
+			return false, domain.ErrOperationDeclined
+		case "y", "yes":
+			return true, nil
+		case "n", "no":
+			return false, domain.ErrOperationDeclined
+		}
+	}
+}
+
+func confirmationPromptLabel(defaultValue domain.ConfirmationDefault) (string, bool) {
+	switch defaultValue {
+	case domain.ConfirmationDefaultYes:
+		return "[Y/n]", true
+	case domain.ConfirmationDefaultNo:
+		return "[y/N]", true
 	default:
-		return false, nil
+		return "", false
 	}
 }
 
@@ -2159,7 +2383,7 @@ func (cli *CLI) operationOrchestrator(
 	}
 	prompt := cli.options.Prompt
 	if prompt == nil {
-		prompt = streamPrompt{input: cli.options.Stdin, output: cli.options.Stdout}
+		prompt = streamPrompt{input: cli.options.Stdin, output: cli.options.Stdout, interactive: cli.promptInputTerminal}
 	}
 	runner := cli.options.AdapterRunner
 	if runner == nil {
@@ -2191,7 +2415,8 @@ func (cli *CLI) operationOrchestrator(
 					"start": {Path: path, Direct: true}, "stop": {Path: path, Direct: true},
 				}
 				actions["provision"] = map[string]shelladapter.Action{
-					"profile": {Path: filepath.Join(cli.options.RepositoryRoot, "scripts/provision-profile.sh"), Direct: true},
+					"profile":       {Path: filepath.Join(cli.options.RepositoryRoot, "scripts/provision-profile.sh"), Direct: true},
+					"profile-check": {Path: filepath.Join(cli.options.RepositoryRoot, "scripts/provision-profile.sh"), Direct: true},
 				}
 			} else if definition.Handler == "@test-vms" {
 				path := filepath.Join(cli.options.RepositoryRoot, "scripts/e2e-lab/invoke.sh")
@@ -2232,7 +2457,7 @@ func (cli *CLI) operationOrchestrator(
 	}
 	return &application.Orchestrator{
 		Clock: clock, IDs: fixedIDSource{value: operationID}, Prompt: prompt,
-		Runner: runner, Audit: auditSink, Events: events,
+		Runner: runner, Audit: auditSink, Events: events, Actions: cli.coreActions,
 	}
 }
 
@@ -2310,13 +2535,10 @@ const cliProgramName = "yard"
 
 func resolveConfirmationPolicy(
 	definition command.Definition,
-	effect domain.CommandEffect,
+	_ domain.CommandEffect,
 ) domain.ConfirmationPolicy {
 	if definition.Confirmation == command.ConfirmationDynamic {
-		if effect == domain.CommandRead {
-			return domain.ConfirmationNever
-		}
-		return domain.ConfirmationRequired
+		return ""
 	}
 	return domain.ConfirmationPolicy(definition.Confirmation)
 }
@@ -2420,10 +2642,6 @@ func (cli *CLI) runStructuredCommand(
 			return 1
 		}
 		cli.printInitPlan(initRun)
-		if initRun.mode == initReconcile && initRun.plan.Pending() == 0 && bootstrap == nil {
-			fmt.Fprintln(cli.options.Stdout, "  [ ok ] Everything is already set up")
-			return 0
-		}
 	}
 	var lifecycleRun *lifecycleExecution
 	if definition.Handler == "@lifecycle" {
@@ -2476,15 +2694,44 @@ func (cli *CLI) runStructuredCommand(
 	if provisionRun != nil {
 		policy = provisionRun.policy(definition, loaded.Context)
 	}
-	if testVMRun != nil {
-		policy = testVMRun.policy(definition, loaded.Context)
-	}
 	if teardownRun != nil {
 		policy = teardownRun.policy(definition, loaded.Context)
 	}
-	policy = resolveCommandConfirmation(definition, policy)
-	plan, err := orchestrator.Plan(ctx, loaded.Context,
-		policy, assumeYes)
+	action, delta, typedAction, actionErr := cli.assessStructuredAction(
+		ctx, loaded, definition, project, initRun, lifecycleRun, provisionRun, teardownRun,
+	)
+	if actionErr != nil {
+		cli.errorf("prepare %s action: %v", definition.Name, actionErr)
+		return 1
+	}
+	var (
+		plan domain.OperationPlan
+		err  error
+	)
+	if remote != nil {
+		plan, err = cli.prepareRemoteOperation(orchestrator, loaded, *remote)
+		if err == nil {
+			plan, err = orchestrator.Confirm(ctx, plan, assumeYes)
+		}
+	} else if testVMRun != nil {
+		action, delta, actionErr := testVMRun.actionPlan()
+		if actionErr != nil {
+			err = actionErr
+		} else {
+			plan, err = orchestrator.PlanAction(
+				ctx, loaded.Context, definition.Name, domain.RemotePolicy(definition.Remote),
+				action, delta, assumeYes,
+			)
+		}
+	} else if typedAction {
+		plan, err = orchestrator.PlanAction(
+			ctx, loaded.Context, definition.Name, domain.RemotePolicy(definition.Remote),
+			action, delta, assumeYes,
+		)
+	} else {
+		policy = resolveCommandConfirmation(definition, policy)
+		plan, err = orchestrator.Plan(ctx, loaded.Context, policy, assumeYes)
+	}
 	if err != nil {
 		if errors.Is(err, application.ErrDeclined) {
 			cli.errorf("operation declined")
@@ -2492,6 +2739,9 @@ func (cli *CLI) runStructuredCommand(
 			cli.errorf("plan %s: %v", definition.Name, err)
 		}
 		return 1
+	}
+	if operationPlanNoOp(plan) && initRun != nil && initRun.mode == initReconcile {
+		fmt.Fprintln(cli.options.Stdout, "  [ ok ] Everything is already set up")
 	}
 	if plan.Target == domain.TargetRemoteOwner {
 		remoteArguments := append([]string(nil), arguments...)
@@ -2515,7 +2765,7 @@ func (cli *CLI) runStructuredCommand(
 		cli.errorf("%s adapter returned %s (%s)", definition.Name, result.Status, result.ErrorCode)
 		return 1
 	}
-	if project != nil {
+	if project != nil && !operationPlanNoOp(plan) {
 		if err := cli.commitProjectExecution(ctx, project); err != nil {
 			cli.errorf("commit %s: %v", definition.Name, err)
 			return 1
@@ -2543,6 +2793,39 @@ func (cli *CLI) executeStructuredCommand(
 	teardownRun *teardownExecution,
 	diagnostics io.Writer,
 ) (domain.AdapterResult, error) {
+	if operationPlanNoOp(plan) {
+		return domain.AdapterResult{
+			Schema: shelladapter.ProtocolSchema, OperationID: plan.OperationID, Status: "ok",
+		}, nil
+	}
+	if plan.Assessment != nil && remote == nil && testVMRun == nil &&
+		(project != nil || initRun != nil || lifecycleRun != nil || provisionRun != nil || teardownRun != nil) {
+		if initRun != nil {
+			if err := initRun.refreshAssessment(ctx); err != nil {
+				return domain.AdapterResult{}, err
+			}
+		}
+		action, delta, typed, err := cli.assessStructuredAction(
+			ctx, loaded, definition, project, initRun, lifecycleRun, provisionRun, teardownRun,
+		)
+		if err != nil {
+			return domain.AdapterResult{}, err
+		}
+		if !typed || action != plan.Assessment.Action {
+			return domain.AdapterResult{}, fmt.Errorf("%w: structured action changed after confirmation", domain.ErrPlanStale)
+		}
+		if !delta.Changed {
+			return domain.AdapterResult{
+				Schema: shelladapter.ProtocolSchema, OperationID: plan.OperationID, Status: "ok",
+			}, nil
+		}
+		if !slices.Equal(delta.Consequences, plan.Assessment.Consequences) {
+			return domain.AdapterResult{}, fmt.Errorf("%w: action consequences changed after confirmation", domain.ErrPlanStale)
+		}
+	}
+	if err := cli.reserveProjectExecution(ctx, project); err != nil {
+		return domain.AdapterResult{}, err
+	}
 	if remote != nil {
 		orchestrator.Runner = application.RemoteRunner{Control: cli.remoteService(loaded).Control, Prepared: *remote}
 		request := domain.AdapterRequest{
@@ -2906,6 +3189,24 @@ func (cli *CLI) resolveContextWithYardSettings(yard, yardSettingsFile string) (c
 	})
 }
 
+// resolveContextAllowPending loads only enough owner context to route config
+// sync. It deliberately does not adopt an interrupted configuration into the
+// command environment; local mutating sync recovers and performs a normal load
+// after routing, while remote sync leaves this owner's journal untouched.
+func (cli *CLI) resolveContextAllowPending(yard string) (config.Loaded, error) {
+	operatorHome := cli.env["SUBYARD_OPERATOR_HOME"]
+	if operatorHome == "" {
+		operatorHome = cli.env["HOME"]
+	}
+	return config.Load(config.LoadOptions{
+		RepositoryRoot:          cli.options.RepositoryRoot,
+		OperatorHome:            operatorHome,
+		YardName:                yard,
+		Environment:             cli.env,
+		AllowPendingTransaction: true,
+	})
+}
+
 func (cli *CLI) adoptContext(loaded config.Loaded) {
 	for name, value := range loaded.Environment {
 		cli.env[name] = value
@@ -3084,6 +3385,7 @@ func (cli *CLI) serveRPC(ctx context.Context, yard string, arguments []string) i
 		"snapshot", "ordered-events", "cancellation", "deadlines", "commands", "context",
 		"projects", "yard-status", "credential-metadata", "credential-status",
 		"operation-plan", "operation-execute", "resync", "owner-inventory-v1",
+		credentialPrepareCapability,
 	}, DrainOnEOF: true}
 	if err := session.Serve(ctx, cli.options.Stdin, cli.options.Stdout); err != nil {
 		if !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) {
@@ -3131,12 +3433,59 @@ type rpcSnapshot struct {
 	CredentialStatus domain.CredentialStatus     `json:"credentialStatus"`
 }
 
+func operationRPCError(fallback string, err error) *rpc.Error {
+	code := fallback
+	if errors.Is(err, domain.ErrPlanStale) {
+		code = domain.PlanStaleCode
+	} else if errors.Is(err, domain.ErrActionPolicyInvalid) ||
+		domain.ActionPolicyErrorClass(err) == domain.ActionPolicyInvalid {
+		code = domain.ActionPolicyInvalid
+	}
+	return &rpc.Error{Code: code, Message: err.Error()}
+}
+
 func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.Emit) (any, error) {
 	switch call.Method {
 	case "command.list":
 		return handler.commands(), nil
 	case "context.get":
 		return handler.loaded.Context, nil
+	case "keys.prepare":
+		var params struct {
+			Arguments []string `json:"arguments"`
+		}
+		if err := decodeRPCParams(call.Params, &params); err != nil {
+			return nil, err
+		}
+		definition, ok := handler.cli.manifest.Lookup("keys")
+		if !ok || definition.Visibility != command.VisibilityPublic {
+			return nil, &rpc.Error{Code: "command_not_found", Message: "keys"}
+		}
+		previousOperationID := handler.cli.env["SUBYARD_OPERATION_ID"]
+		handler.cli.env["SUBYARD_OPERATION_ID"] = call.OperationID
+		defer func() { handler.cli.env["SUBYARD_OPERATION_ID"] = previousOperationID }()
+		credentialRuntime, err := handler.cli.credentialRuntimeWithStreams(
+			handler.loaded, strings.NewReader(""), io.Discard, io.Discard,
+		)
+		if err != nil {
+			return nil, operationRPCError("plan_failed", err)
+		}
+		prepared, err := credentialRuntime.Prepare(
+			ctx, definition.Arg0, keysWithoutConsent(params.Arguments),
+		)
+		if err != nil {
+			return nil, operationRPCError("plan_failed", err)
+		}
+		orchestrator := handler.cli.operationOrchestrator(call.OperationID, handler.loaded, nil, &definition)
+		plan, err := orchestrator.PrepareAction(
+			handler.loaded.Context, publicKeysCommandName(params.Arguments),
+			domain.RemotePolicy(definition.Remote), prepared.Action,
+			domain.ActionDelta{Changed: prepared.Changed, Consequences: prepared.Consequences},
+		)
+		if err != nil {
+			return nil, operationRPCError("plan_failed", err)
+		}
+		return plan, nil
 	case "operation.plan":
 		var params struct {
 			Command   string   `json:"command"`
@@ -3162,7 +3511,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		)
 		handler.cli.env["SUBYARD_OPERATION_ID"] = previousOperationID
 		if err != nil {
-			return nil, &rpc.Error{Code: "invalid_params", Message: err.Error()}
+			return nil, operationRPCError("invalid_params", err)
 		}
 		keepProjectReservation := false
 		defer func() {
@@ -3170,9 +3519,6 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 				handler.cli.abortProjectExecution(context.Background(), project)
 			}
 		}()
-		if err := handler.cli.reserveRemoteProject(ctx, project); err != nil {
-			return nil, &rpc.Error{Code: "project_reservation_failed", Message: err.Error()}
-		}
 		loaded := handler.loaded
 		arguments := append([]string(nil), params.Arguments...)
 		if project != nil {
@@ -3183,49 +3529,49 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		if definition.Name == "remote" {
 			remote, err = handler.cli.prepareRemoteExecution(ctx, loaded, arguments)
 			if err != nil {
-				return nil, &rpc.Error{Code: "invalid_params", Message: err.Error()}
+				return nil, operationRPCError("invalid_params", err)
 			}
 		}
 		var initRun *initExecution
 		if definition.Handler == "@init" && loaded.Context.YardType != domain.YardRemote {
 			initRun, err = handler.cli.prepareInitExecution(ctx, loaded, arguments, nil)
 			if err != nil {
-				return nil, &rpc.Error{Code: "plan_failed", Message: err.Error()}
+				return nil, operationRPCError("plan_failed", err)
 			}
 		}
 		var releaseRun *releaseExecution
 		if definition.Handler == "@update" {
 			releaseRun, err = handler.cli.prepareRelease(ctx, loaded, arguments)
 			if err != nil {
-				return nil, &rpc.Error{Code: "plan_failed", Message: err.Error()}
+				return nil, operationRPCError("plan_failed", err)
 			}
 		}
 		var lifecycleRun *lifecycleExecution
 		if definition.Handler == "@lifecycle" {
 			lifecycleRun, err = prepareLifecycleExecution(definition, arguments)
 			if err != nil {
-				return nil, &rpc.Error{Code: "invalid_params", Message: err.Error()}
+				return nil, operationRPCError("invalid_params", err)
 			}
 		}
 		var provisionRun *provisionExecution
 		if definition.Handler == "@provision" {
 			provisionRun, err = handler.cli.prepareProvisionExecution(loaded, arguments, project)
 			if err != nil {
-				return nil, &rpc.Error{Code: "invalid_params", Message: err.Error()}
+				return nil, operationRPCError("invalid_params", err)
 			}
 		}
 		var testVMRun *testVMExecution
 		if definition.Handler == "@test-vms" {
 			testVMRun, err = handler.cli.prepareTestVMExecution(ctx, loaded, arguments)
 			if err != nil {
-				return nil, &rpc.Error{Code: "invalid_params", Message: err.Error()}
+				return nil, operationRPCError("invalid_params", err)
 			}
 		}
 		var teardownRun *teardownExecution
 		if definition.Handler == "@teardown" {
 			teardownRun, err = prepareTeardownExecution(arguments)
 			if err != nil {
-				return nil, &rpc.Error{Code: "invalid_params", Message: err.Error()}
+				return nil, operationRPCError("invalid_params", err)
 			}
 		}
 		policy := commandPolicy(definition, loaded.Context, arguments, project, remote)
@@ -3238,20 +3584,34 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		if provisionRun != nil {
 			policy = provisionRun.policy(definition, loaded.Context)
 		}
-		if testVMRun != nil {
-			policy = testVMRun.policy(definition, loaded.Context)
-		}
 		if teardownRun != nil {
 			policy = teardownRun.policy(definition, loaded.Context)
 		}
-		if releaseRun != nil {
-			policy = releaseRun.policy(definition)
+		action, delta, typedAction, actionErr := handler.cli.assessStructuredAction(
+			ctx, loaded, definition, project, initRun, lifecycleRun, provisionRun, teardownRun,
+		)
+		if actionErr != nil {
+			return nil, operationRPCError("plan_failed", actionErr)
 		}
-		policy = resolveCommandConfirmation(definition, policy)
 		orchestrator := handler.cli.operationOrchestrator(call.OperationID, loaded, nil, nil)
-		plan, err := orchestrator.Prepare(loaded.Context, policy)
+		var plan domain.OperationPlan
+		if remote != nil {
+			plan, err = handler.cli.prepareRemoteOperation(orchestrator, loaded, *remote)
+		} else if releaseRun != nil {
+			plan, err = releaseRun.prepareAction(orchestrator, loaded, definition)
+		} else if testVMRun != nil {
+			plan, err = testVMRun.prepareAction(orchestrator, loaded, definition)
+		} else if typedAction {
+			plan, err = orchestrator.PrepareAction(
+				loaded.Context, definition.Name, domain.RemotePolicy(definition.Remote),
+				action, delta,
+			)
+		} else {
+			policy = resolveCommandConfirmation(definition, policy)
+			plan, err = orchestrator.Prepare(loaded.Context, policy)
+		}
 		if err != nil {
-			return nil, &rpc.Error{Code: "plan_failed", Message: err.Error()}
+			return nil, operationRPCError("plan_failed", err)
 		}
 		handler.plansMu.Lock()
 		if handler.plans == nil {
@@ -3301,7 +3661,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		)
 		plan, err := orchestrator.Confirm(ctx, planned.Plan, true)
 		if err != nil {
-			return nil, &rpc.Error{Code: "confirmation_failed", Message: err.Error()}
+			return nil, operationRPCError("confirmation_failed", err)
 		}
 		var result domain.AdapterResult
 		if planned.Release != nil {
@@ -3314,12 +3674,16 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			)
 		}
 		if err != nil {
+			if errors.Is(err, domain.ErrPlanStale) || errors.Is(err, domain.ErrActionPolicyInvalid) ||
+				domain.ActionPolicyErrorClass(err) == domain.ActionPolicyInvalid {
+				return nil, operationRPCError("operation_failed", err)
+			}
 			return nil, err
 		}
 		if result.Status != "ok" {
 			return nil, &rpc.Error{Code: "adapter_failed", Message: result.ErrorCode}
 		}
-		if planned.Project != nil {
+		if planned.Project != nil && !operationPlanNoOp(plan) {
 			if err := handler.cli.commitProjectExecution(ctx, planned.Project); err != nil {
 				return nil, &rpc.Error{Code: "state_commit_failed", Message: err.Error()}
 			}
@@ -3356,7 +3720,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		if err := decodeRPCParams(call.Params, &struct{}{}); err != nil {
 			return nil, err
 		}
-		inventory, err := handler.cli.ownerInventory(ctx, handler.loaded)
+		inventory, err := handler.cli.ownerInventoryReadOnly(ctx, handler.loaded)
 		if err != nil {
 			return nil, &rpc.Error{Code: "owner_inventory_failed", Message: err.Error()}
 		}
@@ -3460,6 +3824,14 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 	default:
 		return nil, &rpc.Error{Code: "method_not_found", Message: call.Method}
 	}
+}
+
+func operationPlanNoOp(plan domain.OperationPlan) bool {
+	if plan.Assessment == nil || plan.Assessment.Changed {
+		return false
+	}
+	return plan.Assessment.Effect == domain.ActionMutation ||
+		plan.Assessment.Effect == domain.ActionDestruction
 }
 
 func (handler *rpcHandler) commands() []map[string]any {

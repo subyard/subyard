@@ -37,6 +37,71 @@ type Admission struct {
 	Reservation *ProjectReservation
 }
 
+// PreviewAdmission derives the current canonical project identity without
+// creating state, a lock file, or a blocking reservation. Callers must still
+// use Admit after consent and reject a different result as a stale plan.
+func (store *FileStore) PreviewAdmission(
+	ctx context.Context,
+	source string,
+	mode domain.ProjectMode,
+	requestedName string,
+	explicit bool,
+) (Admission, error) {
+	if source == "" {
+		return Admission{}, errors.New("project source is required")
+	}
+	if mode != domain.ProjectSync && mode != domain.ProjectBind && mode != domain.ProjectGit {
+		return Admission{}, fmt.Errorf("invalid project mode %q", mode)
+	}
+	if !domain.SafeProjectName(requestedName) {
+		return Admission{}, fmt.Errorf(
+			"invalid project name %q; use 1-50 ASCII letters, digits, '.', '_' or '-' and do not start with '-'",
+			requestedName,
+		)
+	}
+	records, err := store.ListReadOnly(ctx)
+	if err != nil {
+		return Admission{}, err
+	}
+	for index := range records {
+		record := records[index]
+		if record.SourceKey != SourceKey(source) &&
+			(record.SourceKey != "" || record.HostPath != source) {
+			continue
+		}
+		if record.Mode != mode {
+			return Admission{}, fmt.Errorf(
+				"%q is already in the yard as %q; remove it before re-adding as %s",
+				record.Name, record.Mode, mode,
+			)
+		}
+		if explicit && record.Name != requestedName {
+			return Admission{}, fmt.Errorf(
+				"source is already registered as %q; implicit rename to %q is not allowed",
+				record.Name, requestedName,
+			)
+		}
+		current := record
+		return Admission{ProjectID: record.ProjectID, Name: record.Name, Existing: &current}, nil
+	}
+	occupied := make(map[string]string, len(records))
+	for _, record := range records {
+		occupied[domain.ProjectNameKey(record.ProjectID)] = record.ProjectID
+		occupied[domain.ProjectNameKey(record.Name)] = record.ProjectID
+	}
+	name := requestedName
+	if owner, found := occupied[domain.ProjectNameKey(name)]; found {
+		if explicit {
+			return Admission{}, fmt.Errorf(
+				"project name %q conflicts with project %q; choose another explicit name such as %q",
+				name, owner, nextProjectName(requestedName, occupied),
+			)
+		}
+		name = nextProjectName(requestedName, occupied)
+	}
+	return Admission{ProjectID: name, Name: name}, nil
+}
+
 func (store *FileStore) Admit(
 	ctx context.Context,
 	operationID, source string,

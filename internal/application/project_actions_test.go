@@ -139,6 +139,41 @@ func TestProjectCloneCleansPartialWorkspace(t *testing.T) {
 	}
 }
 
+func TestProjectCloneRejectsUnownedExistingWorkspace(t *testing.T) {
+	data := &projectDataStub{}
+	data.run = func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+		if len(request.Command) != 0 && request.Command[0] == "sh" {
+			return ports.InstanceExecResult{ExitCode: 1}, errors.New("workspace exists")
+		}
+		return ports.InstanceExecResult{}, nil
+	}
+	runner := ProjectActionRunner{
+		Data:    data,
+		Yard:    domain.Context{YardType: domain.YardRemote, DevUser: "dev", DevUID: 1000},
+		Project: cloneRecord(),
+	}
+	if _, _, err := runner.Run(context.Background(), domain.AdapterRequest{
+		Schema: 1, OperationID: "operation-clone", Adapter: "project", Action: "clone",
+	}, nil); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("unowned workspace was accepted: %v", err)
+	}
+	if len(data.requests) != 1 || data.requests[0].Command[0] != "sh" {
+		t.Fatalf("existing workspace was modified: %#v", data.requests)
+	}
+}
+
+func TestProjectMetadataIsCanonicalAndNewlineTerminated(t *testing.T) {
+	record := cloneRecord()
+	payload, err := ProjectMetadata(record, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"schema":1,"yard":"default","projectId":"demo-12345678","name":"Demo","mode":"git","target":"openclaw","importedAt":"2026-07-22T00:00:00Z"}` + "\n"
+	if string(payload) != want {
+		t.Fatalf("metadata=%q", payload)
+	}
+}
+
 func TestProjectRemoveCleansEnvironmentBeforeWorkspace(t *testing.T) {
 	data := &projectDataStub{}
 	record := cloneRecord()

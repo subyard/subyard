@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -14,6 +16,7 @@ import (
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -28,10 +31,11 @@ func TestTestVMsUsesTypedWorkerInvocation(t *testing.T) {
 		Schema: 1, OperationID: "test-vms-revoke", Status: "ok",
 	}}}}
 	prompt := &testkit.Prompt{Answers: []bool{true}}
+	probe := &testVMStatusProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","state":"available"},{"slot_id":"slot-002","state":"held"}]}}`)}
 	program, err := New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"test-vms", "revoke", "--slot", "2"},
-		Environment: environment, WorkingDir: root, Incus: incus, AdapterRunner: runner,
+		Environment: environment, WorkingDir: root, Incus: incus, ProjectData: probe, AdapterRunner: runner,
 		Prompt: prompt, Clock: testkit.NewManualClock(time.Unix(100, 0)),
 	})
 	if err != nil {
@@ -45,23 +49,248 @@ func TestTestVMsUsesTypedWorkerInvocation(t *testing.T) {
 		!slices.Equal(runner.Requests[0].Arguments, []string{"revoke-slot-2", "--yes"}) {
 		t.Fatalf("requests=%#v", runner.Requests)
 	}
+	if len(prompt.Requests) != 1 ||
+		prompt.Requests[0].Summary != "Revoke test VM lease slot" ||
+		prompt.Requests[0].Default != domain.ConfirmationDefaultYes {
+		t.Fatalf("confirmation requests=%#v", prompt.Requests)
+	}
 }
 
 func TestTestVMStatusIsReadOnly(t *testing.T) {
 	loaded := config.Loaded{Context: domain.Context{
 		NestedE2EVMs: true, InstanceType: domain.InstanceContainer,
+		IncusProject: "subyard", InstanceName: "yard",
 	}}
-	program := &CLI{}
+	program := &CLI{options: Options{Incus: &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+		"subyard/yard": {Status: "Running"},
+	}}}}
 	execution, err := program.prepareTestVMExecution(
 		context.Background(), loaded, []string{"status"},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	policy := execution.policy(testDefinition("test-vms"), loaded.Context)
-	if policy.Effect != domain.CommandRead {
-		t.Fatalf("policy=%#v", policy)
+	action, delta, err := execution.actionPlan()
+	if err != nil || action != "test-vms.status" || delta.Changed {
+		t.Fatalf("action=%q delta=%#v err=%v", action, delta, err)
 	}
+}
+
+func TestTestVMStatusExecutesReadOnlyWorkerWithoutConfirmation(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	environment = append(environment, "NESTED_E2E_VMS=1", "SUBYARD_OPERATION_ID=test-vms-status")
+	incus := lifecycleIncus()
+	instance := incus.Instances["subyard/yard"]
+	instance.Status = "Running"
+	incus.Instances["subyard/yard"] = instance
+	runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{
+		Schema: 1, OperationID: "test-vms-status", Status: "ok",
+	}}}}
+	prompt := &testkit.Prompt{}
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Arguments: []string{"test-vms", "status"},
+		Environment: environment, WorkingDir: root, Incus: incus, AdapterRunner: runner,
+		Prompt: prompt, Clock: testkit.NewManualClock(time.Unix(100, 0)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("test-vms status failed with %d", code)
+	}
+	if len(prompt.Requests) != 0 {
+		t.Fatalf("read-only status prompted: %#v", prompt.Requests)
+	}
+	if len(runner.Requests) != 1 || runner.Requests[0].Adapter != "test-vms" ||
+		runner.Requests[0].Action != "status" ||
+		!slices.Equal(runner.Requests[0].Arguments, []string{"status"}) {
+		t.Fatalf("status requests=%#v", runner.Requests)
+	}
+}
+
+func TestTestVMsRejectsStoppedYardBeforePrompt(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	environment = append(environment, "NESTED_E2E_VMS=1")
+	prompt := &testkit.Prompt{}
+	runner := &testkit.ScriptedAdapter{}
+	var stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Arguments: []string{"test-vms", "recover", "--slot", "2"},
+		Environment: environment, WorkingDir: root, Incus: lifecycleIncus(), AdapterRunner: runner,
+		Prompt: prompt, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 2 || !strings.Contains(stderr.String(), "must be running") {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if len(prompt.Requests) != 0 || len(runner.Requests) != 0 {
+		t.Fatalf("stopped-yard preflight prompted or applied: prompts=%#v requests=%#v", prompt.Requests, runner.Requests)
+	}
+}
+
+func TestTestVMsDeclineLeavesWorkerUntouched(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	environment = append(environment, "NESTED_E2E_VMS=1", "SUBYARD_OPERATION_ID=test-vms-decline")
+	incus := lifecycleIncus()
+	instance := incus.Instances["subyard/yard"]
+	instance.Status = "Running"
+	incus.Instances["subyard/yard"] = instance
+	prompt := &testkit.Prompt{Answers: []bool{false}}
+	runner := &testkit.ScriptedAdapter{}
+	probe := &testVMStatusProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","state":"available"},{"slot_id":"slot-002","state":"held"}]}}`)}
+	var stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Arguments: []string{"test-vms", "revoke", "--slot", "2"},
+		Environment: environment, WorkingDir: root, Incus: incus, ProjectData: probe, AdapterRunner: runner,
+		Prompt: prompt, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 || !strings.Contains(stderr.String(), "operation declined") {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if len(prompt.Requests) != 1 || prompt.Requests[0].Default != domain.ConfirmationDefaultYes ||
+		len(runner.Requests) != 0 || len(incus.PowerUpdates) != 0 {
+		t.Fatalf("decline mutated state: prompts=%#v requests=%#v power=%#v", prompt.Requests, runner.Requests, incus.PowerUpdates)
+	}
+}
+
+func TestTestVMRevokeAvailableSlotIsNoOpBeforeConfirmation(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	environment = append(environment, "NESTED_E2E_VMS=1", "SUBYARD_OPERATION_ID=test-vms-noop")
+	incus := lifecycleIncus()
+	instance := incus.Instances["subyard/yard"]
+	instance.Status = "Running"
+	incus.Instances["subyard/yard"] = instance
+	probe := &testVMStatusProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","state":"available"},{"slot_id":"slot-002","state":"available"}]}}`)}
+	prompt := &testkit.Prompt{}
+	runner := &testkit.ScriptedAdapter{}
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Arguments: []string{"test-vms", "revoke", "--slot", "2"},
+		Environment: environment, WorkingDir: root, Incus: incus, ProjectData: probe,
+		AdapterRunner: runner, Prompt: prompt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("test-vms returned %d", code)
+	}
+	if len(prompt.Requests) != 0 || len(runner.Requests) != 0 {
+		t.Fatalf("available revoke was not a no-op: prompts=%#v requests=%#v", prompt.Requests, runner.Requests)
+	}
+	if len(probe.requests) != 1 || !slices.Equal(probe.requests[0].Command,
+		[]string{"/usr/local/libexec/subyard/test-vms-inner", "_test-vms-worker", "status"}) {
+		t.Fatalf("status probe=%#v", probe.requests)
+	}
+}
+
+func TestTestVMRecoverAvailableSlotIsNoOpBeforeConfirmation(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	environment = append(environment, "NESTED_E2E_VMS=1", "SUBYARD_OPERATION_ID=test-vms-recover-noop")
+	incus := lifecycleIncus()
+	instance := incus.Instances["subyard/yard"]
+	instance.Status = "Running"
+	incus.Instances["subyard/yard"] = instance
+	probe := &testVMStatusProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","state":"available"},{"slot_id":"slot-002","state":"available"}]}}`)}
+	prompt := &testkit.Prompt{}
+	runner := &testkit.ScriptedAdapter{}
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Arguments: []string{"test-vms", "recover", "--slot", "2"},
+		Environment: environment, WorkingDir: root, Incus: incus, ProjectData: probe,
+		AdapterRunner: runner, Prompt: prompt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("test-vms returned %d", code)
+	}
+	if len(prompt.Requests) != 0 || len(runner.Requests) != 0 {
+		t.Fatalf("available recover was not a no-op: prompts=%#v requests=%#v", prompt.Requests, runner.Requests)
+	}
+}
+
+func TestTestVMPreflightRejectsNoncanonicalSlotInventory(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		slots string
+	}{
+		{
+			name:  "duplicate",
+			slots: `[{"slot_id":"slot-001","state":"held"},{"slot_id":"slot-001","state":"available"}]`,
+		},
+		{
+			name:  "noncanonical id",
+			slots: `[{"slot_id":"slot-001","state":"held"},{"slot_id":"slot-2","state":"available"}]`,
+		},
+		{
+			name:  "unknown state",
+			slots: `[{"slot_id":"slot-001","state":"held"},{"slot_id":"slot-002","state":"unknown"}]`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			environment = append(environment, "NESTED_E2E_VMS=1")
+			incus := lifecycleIncus()
+			instance := incus.Instances["subyard/yard"]
+			instance.Status = "Running"
+			incus.Instances["subyard/yard"] = instance
+			probe := &testVMStatusProbe{output: []byte(
+				`{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":` + test.slots + `}}`,
+			)}
+			prompt := &testkit.Prompt{}
+			runner := &testkit.ScriptedAdapter{}
+			var stderr bytes.Buffer
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard",
+				Arguments:   []string{"test-vms", "revoke", "--slot", "1"},
+				Environment: environment, WorkingDir: root, Incus: incus, ProjectData: probe,
+				AdapterRunner: runner, Prompt: prompt, Stderr: &stderr,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code := program.Run(context.Background()); code != 2 ||
+				!strings.Contains(stderr.String(), "invalid status response") {
+				t.Fatalf("code=%d stderr=%q", code, stderr.String())
+			}
+			if len(prompt.Requests) != 0 || len(runner.Requests) != 0 {
+				t.Fatalf("invalid inventory reached prompt/apply: prompts=%#v requests=%#v",
+					prompt.Requests, runner.Requests)
+			}
+		})
+	}
+}
+
+type testVMStatusProbe struct {
+	requests []ports.InstanceExecRequest
+	output   []byte
+	err      error
+}
+
+func (probe *testVMStatusProbe) Execute(
+	_ context.Context,
+	_ domain.Context,
+	request ports.InstanceExecRequest,
+) (ports.InstanceExecResult, error) {
+	probe.requests = append(probe.requests, request)
+	if probe.err != nil {
+		return ports.InstanceExecResult{}, probe.err
+	}
+	return ports.InstanceExecResult{Stdout: probe.output}, nil
+}
+
+func (probe *testVMStatusProbe) Stream(
+	context.Context,
+	domain.Context,
+	ports.InstanceExecRequest,
+	io.Reader,
+) (ports.InstanceExecResult, error) {
+	return ports.InstanceExecResult{}, errors.New("unexpected stream")
 }
 
 func TestTestVMLogsReadsHostWideLogWithoutYardBrokerContext(t *testing.T) {
@@ -136,7 +365,7 @@ func TestTeardownRejectsUnknownInputAndPublishesMode(t *testing.T) {
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"teardown", "--keep-data"},
 		Environment: append(environment, "SUBYARD_OPERATION_ID=teardown-test"), WorkingDir: root,
 		AdapterRunner: runner, Prompt: prompt, Clock: testkit.NewManualClock(time.Unix(100, 0)),
-		Stderr: &stderr,
+		Stderr: &stderr, Incus: &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -148,6 +377,126 @@ func TestTeardownRejectsUnknownInputAndPublishesMode(t *testing.T) {
 		runner.Requests[0].Context["SUBYARD_TEARDOWN_KEEP_DATA"] != "1" ||
 		runner.Requests[0].Context["SUBYARD_TEARDOWN_KEEP_SHARED"] != "0" {
 		t.Fatalf("requests=%#v", runner.Requests)
+	}
+}
+
+func TestLifecycleExecutionBuildsTypedStopDelta(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		execution lifecycleExecution
+		action    domain.ActionID
+		changed   bool
+	}{
+		{name: "stopped", execution: lifecycleExecution{action: "stop"}, action: "yard.stop"},
+		{name: "running", execution: lifecycleExecution{action: "stop", changed: true}, action: "yard.stop", changed: true},
+		{name: "forced", execution: lifecycleExecution{action: "stop", force: true, changed: true}, action: "yard.stop-force", changed: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			action, delta, err := test.execution.actionPlan(command.Definition{Name: "stop"}, domain.Context{
+				IncusProject: "subyard", InstanceName: "yard",
+			})
+			if err != nil || action != test.action || delta.Changed != test.changed {
+				t.Fatalf("action=%q delta=%#v err=%v", action, delta, err)
+			}
+			if test.changed && len(delta.Consequences) == 0 {
+				t.Fatal("changed lifecycle action has no consequences")
+			}
+		})
+	}
+}
+
+func TestObserveLifecycleExecutionDetectsStoppedNoOp(t *testing.T) {
+	for _, test := range []struct {
+		status  string
+		changed bool
+	}{
+		{status: "Stopped"},
+		{status: "Running", changed: true},
+	} {
+		t.Run(test.status, func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			incus := lifecycleIncus()
+			instance := incus.Instances["subyard/yard"]
+			instance.Status = test.status
+			incus.Instances["subyard/yard"] = instance
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard", Environment: environment,
+				WorkingDir: root, Incus: incus,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			execution := &lifecycleExecution{action: "stop"}
+			if err := program.observeLifecycleExecution(context.Background(), domain.Context{
+				IncusProject: "subyard", InstanceName: "yard",
+			}, execution); err != nil {
+				t.Fatal(err)
+			}
+			if execution.changed != test.changed {
+				t.Fatalf("changed=%t, want %t", execution.changed, test.changed)
+			}
+		})
+	}
+}
+
+func TestTeardownExecutionBuildsTypedActionDelta(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		execution teardownExecution
+		action    domain.ActionID
+		changed   bool
+	}{
+		{name: "absent", execution: teardownExecution{}, action: "yard.teardown.purge"},
+		{name: "keep data", execution: teardownExecution{keepData: true, changed: true}, action: "yard.teardown.keep-data", changed: true},
+		{name: "purge", execution: teardownExecution{changed: true}, action: "yard.teardown.purge", changed: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			action, delta, err := test.execution.actionPlan(command.Definition{Name: "teardown"}, domain.Context{
+				IncusProject: "subyard", InstanceName: "yard",
+			})
+			if err != nil || action != test.action || delta.Changed != test.changed {
+				t.Fatalf("action=%q delta=%#v err=%v", action, delta, err)
+			}
+			if test.changed && len(delta.Consequences) == 0 {
+				t.Fatal("changed teardown action has no consequences")
+			}
+		})
+	}
+}
+
+func TestObserveTeardownExecutionDetectsOwnedTarget(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		reconcile ports.ReconcileState
+		changed   bool
+	}{
+		{name: "absent"},
+		{name: "instance", reconcile: ports.ReconcileState{InstanceFound: true}, changed: true},
+		{name: "persistent volume", reconcile: ports.ReconcileState{VolumeFound: true}, changed: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			incus := lifecycleIncus()
+			incus.Reconcile = test.reconcile
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard", Environment: environment,
+				WorkingDir: root, Incus: incus,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := program.loadContext("default")
+			if err != nil {
+				t.Fatal(err)
+			}
+			execution := &teardownExecution{}
+			if err := program.observeTeardownExecution(context.Background(), loaded, execution); err != nil {
+				t.Fatal(err)
+			}
+			if execution.changed != test.changed {
+				t.Fatalf("changed=%t, want %t", execution.changed, test.changed)
+			}
+		})
 	}
 }
 
@@ -165,6 +514,7 @@ func TestTeardownKeepsSharedIncusForAnotherRegisteredLocalYard(t *testing.T) {
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"teardown", "--yes"},
 		Environment: append(environment, "SUBYARD_OPERATION_ID=teardown-shared-test"), WorkingDir: root,
 		AdapterRunner: runner, Prompt: &testkit.Prompt{},
+		Incus: &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true}},
 		Clock: testkit.NewManualClock(time.Unix(100, 0)),
 	})
 	if err != nil {
@@ -182,6 +532,6 @@ func TestTeardownKeepsSharedIncusForAnotherRegisteredLocalYard(t *testing.T) {
 func testDefinition(name string) command.Definition {
 	return command.Definition{
 		Name: name, Effect: command.EffectMutate,
-		Confirmation: command.ConfirmationRequired, Remote: command.RemoteForward,
+		Confirmation: command.ConfirmationDynamic, Remote: command.RemoteForward,
 	}
 }

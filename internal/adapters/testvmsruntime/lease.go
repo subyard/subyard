@@ -153,6 +153,49 @@ func (store LeaseStore) Status() (LeasePool, error) {
 	return result, err
 }
 
+// Inspect reads the durable lease state without creating a directory or lock,
+// modifying expiration state, or reconciling the pool on disk. Callers that
+// need a safe preflight may use the returned, in-memory reconciliation.
+func (store LeaseStore) Inspect() (LeasePool, error) {
+	if store.SlotCount < 1 {
+		return LeasePool{}, errors.New("slot count must be positive")
+	}
+	pool, err := store.load()
+	if err != nil {
+		return LeasePool{}, err
+	}
+	if err := validateLeaseSlotInventory(pool.Slots); err != nil {
+		return LeasePool{}, err
+	}
+	if err := reconcileSlotCount(&pool, store.SlotCount); err != nil {
+		return LeasePool{}, err
+	}
+	expireStale(&pool, store.now())
+	pool.Slots = append([]LeaseSlot(nil), pool.Slots...)
+	return pool, nil
+}
+
+func validateLeaseSlotInventory(slots []LeaseSlot) error {
+	seen := make(map[int]struct{}, len(slots))
+	for _, slot := range slots {
+		number, err := slotNumber(slot.SlotID, len(slots))
+		if err != nil || slot.SlotID != fmt.Sprintf("slot-%03d", number) {
+			return fmt.Errorf("invalid lease slot id %q", slot.SlotID)
+		}
+		if _, duplicate := seen[number]; duplicate {
+			return fmt.Errorf("duplicate lease slot id %q", slot.SlotID)
+		}
+		seen[number] = struct{}{}
+		switch slot.State {
+		case SlotAvailable, SlotProvisioning, SlotHeld, SlotDraining,
+			SlotQuarantined, SlotRecovering, SlotUnavailable:
+		default:
+			return fmt.Errorf("invalid lease slot state %q for %s", slot.State, slot.SlotID)
+		}
+	}
+	return nil
+}
+
 func (store LeaseStore) Acquire(clientID, fingerprint, label, purpose string) (LeaseGrant, error) {
 	context := legacyLeaseContext(label, purpose)
 	return store.acquire(clientID, fingerprint, label, purpose, context, "")

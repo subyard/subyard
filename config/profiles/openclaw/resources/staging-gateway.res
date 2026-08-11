@@ -4,6 +4,15 @@
 COMMAND=staging
 HANDLER=resources/staging-gateway/handler.sh
 TITLE="Live staging gateway zone (isolated from prod)"
-VERBS="up start stop status logs shell down destroy list e2e"
+ACTION="up up shared-workload-change recreatable"
+ACTION="start start shared-workload-change reversible"
+ACTION="stop stop shared-workload-change reversible"
+ACTION="status status read-only not-needed"
+ACTION="logs logs read-only not-needed"
+ACTION="shell shell session not-needed"
+ACTION="down down runtime-destruction recreatable"
+ACTION="destroy destroy runtime-destruction recreatable"
+ACTION="destroy-purge destroy persistent-data-destruction irreversible"
+ACTION="list list read-only not-needed"
 BRINGUP=start
 SHUTDOWN=stop

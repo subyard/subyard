@@ -104,6 +104,89 @@ func TestLeaseStoreAcquireSlotDoesNotFallback(t *testing.T) {
 	}
 }
 
+func TestLeaseStoreInspectIsReadOnlyAndExpiresOnlyInMemory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "leases.json")
+	now := time.Unix(1_000, 0).UTC()
+	pool := LeasePool{
+		SchemaVersion: LeaseSchemaVersion, ResourceType: "agent-e2e", ResourceID: "test-vms",
+		Slots: []LeaseSlot{{
+			SlotID: "slot-001", State: SlotHeld,
+			ExpiresAt: now.Add(-time.Second),
+		}},
+	}
+	payload, err := json.Marshal(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := LeaseStore{Path: path, SlotCount: 1, Now: func() time.Time { return now }}
+	inspected, err := store.Inspect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inspected.Slots) != 1 || inspected.Slots[0].State != SlotDraining {
+		t.Fatalf("inspect state=%#v, want expired slot draining", inspected.Slots)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("read-only inspection rewrote lease state")
+	}
+	if _, err := os.Stat(path + ".lock"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read-only inspection created lock: %v", err)
+	}
+}
+
+func TestLeaseStoreInspectRejectsNoncanonicalSlotInventory(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		count int
+		slots []LeaseSlot
+	}{
+		{
+			name: "duplicate", count: 2,
+			slots: []LeaseSlot{{SlotID: "slot-001", State: SlotAvailable}, {SlotID: "slot-001", State: SlotAvailable}},
+		},
+		{
+			name: "noncanonical id", count: 1,
+			slots: []LeaseSlot{{SlotID: "slot-1", State: SlotAvailable}},
+		},
+		{
+			name: "unconfigured id", count: 1,
+			slots: []LeaseSlot{{SlotID: "slot-002", State: SlotAvailable}},
+		},
+		{
+			name: "unknown state", count: 1,
+			slots: []LeaseSlot{{SlotID: "slot-001", State: SlotState("unknown")}},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "leases.json")
+			payload, err := json.Marshal(LeasePool{
+				SchemaVersion: LeaseSchemaVersion, ResourceType: "agent-e2e",
+				ResourceID: "test-vms", Slots: test.slots,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, payload, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := (LeaseStore{Path: path, SlotCount: test.count}).Inspect(); err == nil {
+				t.Fatalf("Inspect accepted slots=%#v", test.slots)
+			}
+		})
+	}
+}
+
 func TestLeaseStoreConcurrentCapacityAndFencing(t *testing.T) {
 	now := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
 	store := LeaseStore{

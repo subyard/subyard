@@ -72,6 +72,50 @@ func (runtime Runtime) RefreshConfigs(ctx context.Context) error {
 	return nil
 }
 
+func (runtime Runtime) ConfigsConverged(ctx context.Context) (bool, error) {
+	if runtime.Executor == nil {
+		return false, errors.New("Incus executor is required")
+	}
+	if !domain.SafeName(runtime.devUser()) {
+		return false, errors.New("invalid developer user")
+	}
+	state, err := runtime.reconcileState(ctx)
+	if err != nil || !state.InstanceFound {
+		return false, firstError(err, errors.New("yard instance is missing"))
+	}
+	if !strings.EqualFold(state.Instance.Status, "running") {
+		return false, errors.New("yard is not running")
+	}
+	files, err := runtime.guestConfigFiles()
+	if err != nil {
+		return false, err
+	}
+	for _, file := range files {
+		sourceHash, err := file.sourceHash()
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return false, err
+		}
+		result, execErr := runtime.Executor.Exec(
+			ctx, runtime.Yard.IncusProject, runtime.Yard.InstanceName,
+			ports.InstanceExecRequest{Command: []string{"sha256sum", "--", file.destination}},
+		)
+		if execErr != nil {
+			if result.ExitCode != 0 {
+				return false, nil
+			}
+			return false, execErr
+		}
+		fields := strings.Fields(string(result.Stdout))
+		if len(fields) == 0 || fields[0] != sourceHash {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 func (runtime Runtime) applyGitIdentity(ctx context.Context) error {
 	if runtime.Executor == nil {
 		return errors.New("Incus executor is required")

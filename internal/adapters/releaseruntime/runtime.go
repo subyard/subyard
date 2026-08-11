@@ -13,6 +13,7 @@ import (
 	goruntime "runtime"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/Subyard/Subyard/internal/domain"
 )
@@ -26,7 +27,8 @@ type Config struct {
 }
 
 type Prepared struct {
-	Effect         domain.CommandEffect
+	Action         domain.ActionID
+	Changed        bool
 	Consequences   []string
 	RefreshConfigs bool
 	ActiveLauncher string
@@ -60,16 +62,26 @@ func (runtime *Runtime) Prepare(ctx context.Context, arguments []string) (Prepar
 		return Prepared{}, err
 	}
 	if help {
-		return Prepared{Effect: domain.CommandRead, run: func(context.Context) error {
+		return Prepared{Action: "update.help", run: func(context.Context) error {
 			fmt.Fprintln(runtime.config.Stdout, "Usage: yard update [--check] [--version VERSION] [--offline] [--rollback] [--force]")
 			return nil
 		}}, nil
 	}
 	if options.rollback {
-		return Prepared{Effect: domain.CommandMutate, Consequences: []string{
+		expected, err := runtime.inspectRuntimeLinks(ctx, options.root, true)
+		if err != nil {
+			return Prepared{}, err
+		}
+		return Prepared{Action: "update.rollback", Changed: true, Consequences: []string{
 			"verify and reactivate the previous immutable runtime",
 			"refresh materialized agent configuration",
 		}, run: func(ctx context.Context) error {
+			if err := requirePreparedReleaseRoots(options, false); err != nil {
+				return err
+			}
+			if err := runtime.requireRuntimeLinks(ctx, options.root, expected, true); err != nil {
+				return err
+			}
 			return runtime.install(ctx, "--runtime-root", options.root, "--rollback")
 		}, RefreshConfigs: true, ActiveLauncher: filepath.Join(options.root, "current", "bin", "yard")}, nil
 	}
@@ -99,13 +111,126 @@ func (runtime *Runtime) Prepare(ctx context.Context, arguments []string) (Prepar
 			"refresh materialized agent configuration",
 		)
 	}
+	action := domain.ActionID("update.activate")
+	if options.check {
+		action = "update.check"
+	}
+	var expected runtimeLinkSnapshot
+	if !options.check {
+		expected, err = runtime.inspectRuntimeLinks(ctx, options.root, false)
+		if err != nil {
+			return Prepared{}, err
+		}
+	}
 	return Prepared{
-		Effect:         domain.CommandMutate,
+		Action:         action,
+		Changed:        true,
 		Consequences:   consequences,
 		RefreshConfigs: !options.check,
 		ActiveLauncher: filepath.Join(options.root, "current", "bin", "yard"),
-		run:            func(ctx context.Context) error { return runtime.execute(ctx, options) },
+		run: func(ctx context.Context) error {
+			if err := requirePreparedReleaseRoots(options, true); err != nil {
+				return err
+			}
+			if !options.check {
+				if err := runtime.requireRuntimeLinks(ctx, options.root, expected, false); err != nil {
+					return err
+				}
+			}
+			return runtime.execute(ctx, options)
+		},
 	}, nil
+}
+
+type runtimeLinkState struct {
+	present bool
+	target  string
+}
+
+type runtimeLinkSnapshot struct {
+	current  runtimeLinkState
+	previous runtimeLinkState
+}
+
+func (runtime *Runtime) inspectRuntimeLinks(
+	ctx context.Context,
+	root string,
+	requireRollback bool,
+) (runtimeLinkSnapshot, error) {
+	current, err := inspectRuntimeLink(root, "current")
+	if err != nil {
+		return runtimeLinkSnapshot{}, err
+	}
+	previous, err := inspectRuntimeLink(root, "previous")
+	if err != nil {
+		return runtimeLinkSnapshot{}, err
+	}
+	snapshot := runtimeLinkSnapshot{current: current, previous: previous}
+	if !requireRollback {
+		return snapshot, nil
+	}
+	if !current.present || !previous.present {
+		return runtimeLinkSnapshot{}, errors.New("valid current and previous runtimes are required for rollback")
+	}
+	for _, state := range []runtimeLinkState{current, previous} {
+		engine := filepath.Join(root, state.target, "bin", "yard-engine")
+		info, err := os.Lstat(engine)
+		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o111 == 0 {
+			return runtimeLinkSnapshot{}, fmt.Errorf("runtime %q has no executable yard-engine", state.target)
+		}
+	}
+	previousEngine := filepath.Join(root, previous.target, "bin", "yard-engine")
+	command := exec.CommandContext(ctx, previousEngine, "--version")
+	command.Env = commandEnvironment(runtime.config.Environment)
+	if err := command.Run(); err != nil {
+		return runtimeLinkSnapshot{}, fmt.Errorf("previous runtime self-check failed: %w", err)
+	}
+	return snapshot, nil
+}
+
+func (runtime *Runtime) requireRuntimeLinks(
+	ctx context.Context,
+	root string,
+	expected runtimeLinkSnapshot,
+	requireRollback bool,
+) error {
+	actual, err := runtime.inspectRuntimeLinks(ctx, root, requireRollback)
+	if err != nil || actual != expected {
+		if err != nil {
+			return fmt.Errorf("%w: runtime links changed: %v", domain.ErrPlanStale, err)
+		}
+		return fmt.Errorf("%w: runtime links changed", domain.ErrPlanStale)
+	}
+	return nil
+}
+
+func inspectRuntimeLink(root, name string) (runtimeLinkState, error) {
+	path := filepath.Join(root, name)
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return runtimeLinkState{}, nil
+	}
+	if err != nil {
+		return runtimeLinkState{}, fmt.Errorf("inspect runtime %s link: %w", name, err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		return runtimeLinkState{}, fmt.Errorf("runtime %s must be a symbolic link", name)
+	}
+	target, err := os.Readlink(path)
+	if err != nil {
+		return runtimeLinkState{}, fmt.Errorf("read runtime %s link: %w", name, err)
+	}
+	clean := filepath.Clean(target)
+	relative := strings.TrimPrefix(target, "releases/")
+	if clean != target || filepath.IsAbs(target) || !strings.HasPrefix(target, "releases/") ||
+		relative == "" || relative == "." || relative == ".." || strings.HasPrefix(relative, "../") {
+		return runtimeLinkState{}, fmt.Errorf("runtime %s link has an unsafe target", name)
+	}
+	destinationInfo, err := os.Stat(filepath.Join(root, target))
+	if err != nil || !destinationInfo.IsDir() {
+		return runtimeLinkState{}, fmt.Errorf("runtime %s link target is unavailable", name)
+	}
+	return runtimeLinkState{present: true, target: target}, nil
 }
 
 func (runtime *Runtime) parse(arguments []string) (options, bool, error) {
@@ -156,13 +281,82 @@ func (runtime *Runtime) parse(arguments []string) (options, bool, error) {
 	if result.channel != "stable" {
 		return result, false, fmt.Errorf("unsupported channel %q", result.channel)
 	}
-	if !filepath.IsAbs(result.root) || filepath.Clean(result.root) == "/" {
-		return result, false, errors.New("runtime root must be an absolute non-root path")
-	}
 	if result.rollback && (result.offline || result.check || result.force || result.version != "") {
 		return result, false, errors.New("--rollback cannot be combined with update options")
 	}
+	validatedRoot, err := validateReleaseRoot(result.root, "runtime root")
+	if err != nil {
+		return result, false, err
+	}
+	validatedCache, err := validateReleaseRoot(result.cache, "release cache")
+	if err != nil {
+		return result, false, err
+	}
+	result.root = validatedRoot
+	result.cache = validatedCache
 	return result, false, nil
+}
+
+func validateReleaseRoot(path, name string) (string, error) {
+	clean := filepath.Clean(path)
+	if path == "" || !filepath.IsAbs(path) || clean == string(filepath.Separator) {
+		return "", fmt.Errorf("%s must be an absolute non-root path", name)
+	}
+	current := string(filepath.Separator)
+	components := strings.Split(strings.TrimPrefix(clean, string(filepath.Separator)), string(filepath.Separator))
+	operatorUID := uint32(os.Getuid())
+	privateAncestor := false
+	for index, component := range components {
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if errors.Is(err, os.ErrNotExist) {
+			return clean, nil
+		}
+		if err != nil {
+			return "", fmt.Errorf("inspect %s path %s: %w", name, current, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return "", fmt.Errorf("%s path has a symlink or non-directory ancestor: %s", name, current)
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || stat.Uid != 0 && stat.Uid != operatorUID {
+			return "", fmt.Errorf("%s path has unsafe ownership: %s", name, current)
+		}
+		final := index == len(components)-1
+		stickySystemAncestor := stat.Uid == 0 && info.Mode()&os.ModeSticky != 0 && !final
+		containedOperatorAncestor := stat.Uid == operatorUID && privateAncestor && !final
+		if info.Mode().Perm()&0o022 != 0 && !stickySystemAncestor && !containedOperatorAncestor {
+			return "", fmt.Errorf("%s path has unsafe permissions: %s", name, current)
+		}
+		if stat.Uid == operatorUID && info.Mode().Perm()&0o077 == 0 {
+			privateAncestor = true
+		}
+		if final && stat.Uid != operatorUID {
+			return "", fmt.Errorf("%s is not operator-owned: %s", name, current)
+		}
+	}
+	return clean, nil
+}
+
+func requirePreparedReleaseRoots(options options, requireCache bool) error {
+	for _, root := range []struct {
+		path, name string
+	}{
+		{path: options.root, name: "runtime root"},
+		{path: options.cache, name: "release cache"},
+	} {
+		if root.name == "release cache" && !requireCache {
+			continue
+		}
+		validated, err := validateReleaseRoot(root.path, root.name)
+		if err != nil || validated != root.path {
+			if err != nil {
+				return fmt.Errorf("%w: %s changed after planning: %v", domain.ErrPlanStale, root.name, err)
+			}
+			return fmt.Errorf("%w: %s changed after planning", domain.ErrPlanStale, root.name)
+		}
+	}
+	return nil
 }
 
 func (runtime *Runtime) execute(ctx context.Context, options options) error {

@@ -13,16 +13,17 @@ import (
 )
 
 type LoadOptions struct {
-	RepositoryRoot   string
-	OperatorHome     string
-	YardName         string
-	YardSettingsFile string
-	Environment      map[string]string
-	DisablePrivate   bool
-	SyncSource       bool
-	ConfigLocked     bool
-	LayerPaths       *LayerPaths
-	YardDirs         []string
+	RepositoryRoot          string
+	OperatorHome            string
+	YardName                string
+	YardSettingsFile        string
+	Environment             map[string]string
+	DisablePrivate          bool
+	SyncSource              bool
+	ConfigLocked            bool
+	AllowPendingTransaction bool
+	LayerPaths              *LayerPaths
+	YardDirs                []string
 }
 
 type LayerPaths struct {
@@ -112,7 +113,7 @@ func load(
 	if err != nil {
 		return domain.Context{}, nil, err
 	}
-	if pending {
+	if pending && !options.AllowPendingTransaction {
 		return domain.Context{}, nil, errors.New(
 			"an interrupted configuration transaction requires recovery with yard config sync",
 		)

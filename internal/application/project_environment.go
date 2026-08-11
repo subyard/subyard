@@ -78,6 +78,9 @@ func (runner ProjectEnvironmentRunner) run(ctx context.Context, action string, p
 		if !runner.probe(ctx, []string{"docker", "inspect", box}) {
 			return "", fmt.Errorf("no box for %q", runner.Project.Name)
 		}
+		if err := runner.validateBoxOwnership(ctx, box); err != nil {
+			return "", err
+		}
 		if err := runner.execute(ctx, "stop project environment", ports.InstanceExecRequest{Command: []string{"docker", "stop", box}}); err != nil {
 			return "", err
 		}
@@ -109,13 +112,23 @@ func (runner ProjectEnvironmentRunner) up(
 	}
 	shareSessions := runner.probe(ctx, []string{"test", "-d", "/mnt/host/agent-sessions"})
 	if runner.probe(ctx, []string{"docker", "inspect", box}) {
-		if err := runner.execute(ctx, "start project environment", ports.InstanceExecRequest{Command: []string{"docker", "start", box}}); err != nil {
+		if err := runner.validateBoxOwnership(ctx, box); err != nil {
 			return "", err
 		}
-		if shareSessions {
-			runner.linkSessions(ctx, box)
+		if !runner.Rebuild {
+			if err := runner.execute(ctx, "start project environment", ports.InstanceExecRequest{Command: []string{"docker", "start", box}}); err != nil {
+				return "", err
+			}
+			if shareSessions {
+				runner.linkSessions(ctx, box)
+			}
+			return fmt.Sprintf("box %q already exists — started (profile %s)\n", runner.Project.Name, runner.Project.Target), nil
 		}
-		return fmt.Sprintf("box %q already exists — started (profile %s)\n", runner.Project.Name, runner.Project.Target), nil
+		if err := runner.execute(ctx, "remove project environment for rebuild", ports.InstanceExecRequest{
+			Command: []string{"docker", "rm", "-f", box},
+		}); err != nil {
+			return "", err
+		}
 	}
 	for _, cache := range runner.Profile.Caches {
 		uid := fmt.Sprint(runner.Yard.DevUID)
@@ -126,13 +139,8 @@ func (runner ProjectEnvironmentRunner) up(
 		}
 	}
 
-	image := runner.Profile.Image
-	if image == "" {
-		image = "subyard-env-" + state.ProjectDockerImageID(runner.Project)
-	}
-	if runner.Profile.Dockerfile == "" {
-		image = runner.Profile.BaseImage
-	} else {
+	image := projectEnvironmentImage(runner.Project, runner.Profile)
+	if runner.Profile.Dockerfile != "" {
 		dockerfile := filepath.Join(runner.Project.YardPath, runner.Profile.Dockerfile)
 		if !runner.probe(ctx, []string{"test", "-r", dockerfile}) {
 			return "", fmt.Errorf("profile Dockerfile is missing in the workspace: %s", runner.Profile.Dockerfile)
@@ -156,7 +164,7 @@ func (runner ProjectEnvironmentRunner) up(
 			return "", fmt.Errorf("stage profile secret: %w", err)
 		}
 	}
-	payload, err := runner.manifest(image)
+	payload, err := ProjectEnvironmentManifest(runner.Project, runner.Profile, runner.HasSecret)
 	if err != nil {
 		return "", err
 	}
@@ -212,6 +220,24 @@ func (runner ProjectEnvironmentRunner) up(
 	return warnings.String(), nil
 }
 
+func (runner ProjectEnvironmentRunner) validateBoxOwnership(ctx context.Context, box string) error {
+	result, err := runner.Data.Execute(ctx, runner.Yard, ports.InstanceExecRequest{Command: []string{
+		"docker", "inspect", "-f",
+		`{{ index .Config.Labels "subyard.env" }}{{ "\t" }}{{ index .Config.Labels "subyard.project" }}{{ "\t" }}{{ index .Config.Labels "subyard.profile" }}`,
+		box,
+	}})
+	if err != nil {
+		return executionError("inspect project environment ownership", result, err)
+	}
+	labels := strings.Split(strings.TrimSpace(string(result.Stdout)), "\t")
+	if len(labels) != 3 || labels[0] != "1" ||
+		labels[1] != runner.Project.ProjectID || labels[2] != runner.Project.Target {
+		return fmt.Errorf("project environment %q is not owned by project %q and profile %q",
+			box, runner.Project.ProjectID, runner.Project.Target)
+	}
+	return nil
+}
+
 func (runner ProjectEnvironmentRunner) validateProfile() error {
 	if runner.Profile.BaseImage == "" {
 		return fmt.Errorf("profile %q has no BASE_IMAGE", runner.Project.Target)
@@ -242,14 +268,31 @@ func projectRelative(path string) bool {
 	return path == "" || !filepath.IsAbs(path) && clean != ".." && !strings.HasPrefix(clean, ".."+string(filepath.Separator))
 }
 
-func (runner ProjectEnvironmentRunner) manifest(image string) ([]byte, error) {
-	keys := make([]string, 0, len(runner.Profile.Environment))
-	for key := range runner.Profile.Environment {
+func projectEnvironmentImage(
+	project domain.ProjectRecord,
+	profile ProjectEnvironmentProfile,
+) string {
+	if profile.Dockerfile == "" {
+		return profile.BaseImage
+	}
+	if profile.Image != "" {
+		return profile.Image
+	}
+	return "subyard-env-" + state.ProjectDockerImageID(project)
+}
+
+func ProjectEnvironmentManifest(
+	project domain.ProjectRecord,
+	profile ProjectEnvironmentProfile,
+	hasSecret bool,
+) ([]byte, error) {
+	keys := make([]string, 0, len(profile.Environment))
+	for key := range profile.Environment {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
 	secrets := []map[string]string{}
-	if runner.HasSecret {
+	if hasSecret {
 		secrets = append(secrets, map[string]string{"name": "profile.env", "path": "/run/subyard/profile.env"})
 	}
 	return json.MarshalIndent(struct {
@@ -261,8 +304,8 @@ func (runner ProjectEnvironmentRunner) manifest(image string) ([]byte, error) {
 		EnvKeys  []string            `json:"envKeys"`
 		Secrets  []map[string]string `json:"secrets"`
 		Devices  []string            `json:"devices"`
-	}{runner.Project.Target, image, runner.Profile.BaseImage, runner.Profile.Features,
-		runner.Profile.Caches, keys, secrets, runner.Profile.Devices}, "", "  ")
+	}{project.Target, projectEnvironmentImage(project, profile), profile.BaseImage, profile.Features,
+		profile.Caches, keys, secrets, profile.Devices}, "", "  ")
 }
 
 func (runner ProjectEnvironmentRunner) writeFile(ctx context.Context, path, mode string, input io.Reader) error {

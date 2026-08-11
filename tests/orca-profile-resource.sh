@@ -23,18 +23,28 @@ touch "$ORCA_TEST_GUEST/tmp/unrelated"
 cat >"$TMP/bin/incus" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
-printf '%s\n' "$*" >> "$ORCA_TEST_LOG"
+state_root="$(cd "$(dirname "$0")/.." && pwd)"
+log="$state_root/commands.log"
+route="$state_root/route"
+capture="$state_root/capture"
+guest="$state_root/guest"
+stage_counter_file="$state_root/stage-counter"
+push_counter_file="$state_root/push-counter"
+service="$state_root/service"
+ingress="$state_root/ingress"
+cleanup_failed="$state_root/cleanup-failed"
+printf '%s\n' "$*" >> "$log"
 case "${1:-}" in
   info) exit 0 ;;
   list) printf 'RUNNING\n' ;;
   file)
     if [ "${2:-}" = push ]; then
-      push_counter="$(cat "$ORCA_TEST_PUSH_COUNTER" 2>/dev/null || printf 0)"
+      push_counter="$(cat "$push_counter_file" 2>/dev/null || printf 0)"
       push_counter=$((push_counter + 1))
-      printf '%s\n' "$push_counter" >"$ORCA_TEST_PUSH_COUNTER"
+      printf '%s\n' "$push_counter" >"$push_counter_file"
       guest_path="/${4#*/}"
-      target="$ORCA_TEST_GUEST$guest_path"
-      if [ "${ORCA_TEST_FAIL_PUSH:-0}" = 1 ]; then
+      target="$guest$guest_path"
+      if [ -e "$state_root/fail-push" ]; then
         printf 'injected push failure for %s\n' "$guest_path" >&2
         exit 1
       fi
@@ -45,29 +55,29 @@ case "${1:-}" in
       mkdir -p "${target%/*}"
       cp "$3" "$target"
       case "$guest_path" in
-        */orca-ingress|*/subyard-orca-ingress) cp "$3" "$ORCA_TEST_CAPTURE/orca-ingress" ;;
+        */orca-ingress|*/subyard-orca-ingress) cp "$3" "$capture/orca-ingress" ;;
         */orca-capture-ready|*/subyard-orca-capture-ready)
-          cp "$3" "$ORCA_TEST_CAPTURE/orca-capture-ready"
+          cp "$3" "$capture/orca-capture-ready"
           ;;
-        */orca-sync|*/subyard-orca-sync) cp "$3" "$ORCA_TEST_CAPTURE/orca-sync" ;;
-        */subyard-orca.service) cp "$3" "$ORCA_TEST_CAPTURE/subyard-orca.service" ;;
+        */orca-sync|*/subyard-orca-sync) cp "$3" "$capture/orca-sync" ;;
+        */subyard-orca.service) cp "$3" "$capture/subyard-orca.service" ;;
       esac
     fi
     ;;
   config)
     case "${2:-} ${3:-}" in
       'device list')
-        [ -f "$ORCA_TEST_ROUTE" ] && printf 'orca-server\n'
+        [ -f "$route" ] && printf 'orca-server\n'
         ;;
       'device get')
-        [ -f "$ORCA_TEST_ROUTE" ] || exit 1
+        [ -f "$route" ] || exit 1
         case "${6:-}" in
-          listen) sed -n '1p' "$ORCA_TEST_ROUTE" ;;
-          connect) sed -n '2p' "$ORCA_TEST_ROUTE" ;;
+          listen) sed -n '1p' "$route" ;;
+          connect) sed -n '2p' "$route" ;;
         esac
         ;;
       'device add')
-        [ "${ORCA_TEST_FAIL_ROUTE:-0}" != 1 ] || exit 1
+        [ ! -e "$state_root/fail-route" ] || exit 1
         listen= connect=
         for argument in "$@"; do
           case "$argument" in
@@ -75,31 +85,31 @@ case "${1:-}" in
             connect=*) connect="${argument#connect=}" ;;
           esac
         done
-        printf '%s\n%s\n' "$listen" "$connect" > "$ORCA_TEST_ROUTE"
+        printf '%s\n%s\n' "$listen" "$connect" > "$route"
         ;;
-      'device remove') rm -f "$ORCA_TEST_ROUTE" ;;
+      'device remove') rm -f "$route" ;;
     esac
     ;;
   exec)
     case " $* " in
       *' mktemp -d /tmp/subyard-orca.XXXXXX '*)
-        counter="$(cat "$ORCA_TEST_STAGE_COUNTER" 2>/dev/null || printf 0)"
+        counter="$(cat "$stage_counter_file" 2>/dev/null || printf 0)"
         counter=$((counter + 1))
-        printf '%s\n' "$counter" >"$ORCA_TEST_STAGE_COUNTER"
+        printf '%s\n' "$counter" >"$stage_counter_file"
         guest_path="$(printf '/tmp/subyard-orca.%06d' "$counter")"
-        mkdir "$ORCA_TEST_GUEST$guest_path"
+        mkdir "$guest$guest_path"
         printf '%s\n' "$guest_path"
         ;;
       *' rm -rf -- /tmp/subyard-orca.'*)
         guest_path="${*: -1}"
         case "$guest_path" in
           /tmp/subyard-orca.[0-9][0-9][0-9][0-9][0-9][0-9])
-            if [ "${ORCA_TEST_FAIL_CLEANUP_ONCE:-0}" = 1 ] &&
-              [ ! -e "$ORCA_TEST_CLEANUP_FAILED" ]; then
-              touch "$ORCA_TEST_CLEANUP_FAILED"
+            if [ -e "$state_root/fail-cleanup-once" ] &&
+              [ ! -e "$cleanup_failed" ]; then
+              touch "$cleanup_failed"
               exit 1
             fi
-            rm -rf -- "$ORCA_TEST_GUEST$guest_path"
+            rm -rf -- "$guest$guest_path"
             ;;
           *) exit 1 ;;
         esac
@@ -107,38 +117,38 @@ case "${1:-}" in
       *' cmp -s /tmp/subyard-orca.'*)
         source_path="${*: -2:1}"
         target_path="${*: -1}"
-        cmp -s "$ORCA_TEST_GUEST$source_path" "$ORCA_TEST_GUEST$target_path"
+        cmp -s "$guest$source_path" "$guest$target_path"
         ;;
       *' install -m '*' /tmp/subyard-orca.'*)
         mode="${*: -3:1}"
         source_path="${*: -2:1}"
         target_path="${*: -1}"
         install -D -m "$mode" \
-          "$ORCA_TEST_GUEST$source_path" "$ORCA_TEST_GUEST$target_path"
+          "$guest$source_path" "$guest$target_path"
         ;;
       *' rm '*|*' rm -'*)
         printf 'unexpected destructive guest command: %s\n' "$*" >&2
         exit 1
         ;;
       *' systemctl is-active --quiet subyard-orca.service '*)
-        [ -f "$ORCA_TEST_SERVICE" ]
+        [ -f "$service" ]
         ;;
       *' systemctl start subyard-orca.service '*|*' systemctl restart subyard-orca.service '*)
-        touch "$ORCA_TEST_SERVICE" "$ORCA_TEST_INGRESS"
+        touch "$service" "$ingress"
         ;;
       *' systemctl disable --now subyard-orca.service '*)
-        rm -f "$ORCA_TEST_SERVICE" "$ORCA_TEST_INGRESS"
+        rm -f "$service" "$ingress"
         ;;
       *' /usr/local/libexec/subyard/orca-ingress down '*)
-        rm -f "$ORCA_TEST_INGRESS"
+        rm -f "$ingress"
         ;;
       *' dpkg --print-architecture '*) printf 'amd64\n' ;;
       *' dpkg-query -W '*orca-ide*) printf '1.4.159\n' ;;
       *' nft list chain inet subyard_orca input '*)
-        [ -f "$ORCA_TEST_INGRESS" ] || exit 1
+        [ -f "$ingress" ] || exit 1
         printf 'chain input { comment "subyard-orca-managed"; }\n'
         ;;
-      *' jq -e '*) [ "${ORCA_TEST_FAIL_SERVICE_READY:-0}" != 1 ] ;;
+      *' jq -e '*) [ ! -e "$state_root/fail-service-ready" ] ;;
       *' jq -er '*) printf 'orca://pair?code=test-fixture\n' ;;
     esac
     ;;
@@ -167,7 +177,8 @@ MOCK
 
 cat >"$TMP/bin/curl" <<'MOCK'
 #!/usr/bin/env bash
-printf 'curl %s\n' "$*" >> "$ORCA_TEST_LOG"
+state_root="$(cd "$(dirname "$0")/.." && pwd)"
+printf 'curl %s\n' "$*" >> "$state_root/commands.log"
 MOCK
 
 cat >"$TMP/bin/sleep" <<'MOCK'
@@ -267,31 +278,35 @@ pairing="$(ORCA_TEST_ADVERTISE=127.0.0.1 run_orca pair --yes | tail -n1)"
 run_orca down --yes >/dev/null
 assert_down 'second down'
 
-if ORCA_TEST_ADVERTISE=127.0.0.1 ORCA_TEST_FAIL_CLEANUP_ONCE=1 \
-  run_orca up --yes >"$TMP/cleanup-failure.out" 2>&1; then
+touch "$TMP/fail-cleanup-once"
+if ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >"$TMP/cleanup-failure.out" 2>&1; then
   fail 'guest staging cleanup failure was accepted'
 fi
+rm -f "$TMP/fail-cleanup-once"
 assert_down 'cleanup failure'
 assert_guest_staging_clean 'cleanup failure retry'
 
-if ORCA_TEST_ADVERTISE=127.0.0.1 ORCA_TEST_FAIL_PUSH=1 \
-  run_orca up --yes >"$TMP/push-failure.out" 2>&1; then
+touch "$TMP/fail-push"
+if ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >"$TMP/push-failure.out" 2>&1; then
   fail 'injected guest push failure was accepted'
 fi
+rm -f "$TMP/fail-push"
 assert_down 'push failure'
 assert_guest_staging_clean 'push failure'
 
-if ORCA_TEST_ADVERTISE=127.0.0.1 ORCA_TEST_FAIL_ROUTE=1 \
-  run_orca up --yes >"$TMP/route-failure.out" 2>&1; then
+touch "$TMP/fail-route"
+if ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >"$TMP/route-failure.out" 2>&1; then
   fail 'injected owner route failure was accepted'
 fi
+rm -f "$TMP/fail-route"
 assert_down 'route failure rollback'
 assert_guest_staging_clean 'route failure rollback'
 
-if ORCA_TEST_ADVERTISE=127.0.0.1 ORCA_TEST_FAIL_SERVICE_READY=1 \
-  run_orca up --yes >"$TMP/readiness-failure.out" 2>&1; then
+touch "$TMP/fail-service-ready"
+if ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >"$TMP/readiness-failure.out" 2>&1; then
   fail 'injected service readiness failure was accepted'
 fi
+rm -f "$TMP/fail-service-ready"
 assert_down 'readiness failure rollback'
 assert_guest_staging_clean 'readiness failure rollback'
 

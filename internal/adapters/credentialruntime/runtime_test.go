@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +19,16 @@ import (
 )
 
 const credentialFixturePublicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA fixture"
+
+type credentialReadProbe struct {
+	reader io.Reader
+	reads  int
+}
+
+func (probe *credentialReadProbe) Read(buffer []byte) (int, error) {
+	probe.reads++
+	return probe.reader.Read(buffer)
+}
 
 func TestNewAndBoundaryKeepCredentialStateHostOnly(t *testing.T) {
 	runtime := credentialFixture(t)
@@ -374,7 +385,7 @@ func TestPreparedReadOperationsRenderLedgerStateWithoutMutation(t *testing.T) {
 	runtime.config.Stdout = &output
 
 	prepared, err := runtime.Prepare(context.Background(), "", []string{"--help"})
-	if err != nil || prepared.Effect != domain.CommandRead {
+	if err != nil || prepared.Action != "keys.help" || prepared.Changed {
 		t.Fatalf("help preparation drifted: %#v err=%v", prepared, err)
 	}
 	if err := prepared.Execute(context.Background()); err != nil ||
@@ -397,15 +408,16 @@ func TestPreparedReadOperationsRenderLedgerStateWithoutMutation(t *testing.T) {
 	for _, test := range []struct {
 		arguments []string
 		expected  string
+		action    domain.ActionID
 	}{
-		{[]string{"list"}, metadata.CredentialID},
-		{[]string{"history", metadata.CredentialID}, metadata.RevisionID},
-		{[]string{"status"}, "conflicts=0"},
+		{[]string{"list"}, metadata.CredentialID, "keys.list"},
+		{[]string{"history", metadata.CredentialID}, metadata.RevisionID, "keys.history"},
+		{[]string{"status"}, "conflicts=0", "keys.status"},
 	} {
 		output.Reset()
 		prepared, err := runtime.Prepare(context.Background(), "", test.arguments)
-		if err != nil || prepared.Effect != domain.CommandRead {
-			t.Fatalf("prepare %#v: effect=%q err=%v", test.arguments, prepared.Effect, err)
+		if err != nil || prepared.Action != test.action || prepared.Changed {
+			t.Fatalf("prepare %#v: prepared=%#v err=%v", test.arguments, prepared, err)
 		}
 		if err := prepared.Execute(context.Background()); err != nil ||
 			!strings.Contains(output.String(), test.expected) {
@@ -429,7 +441,7 @@ func TestPreparedDryRunAndAutoSyncPolicyAreDirectlyTestable(t *testing.T) {
 	prepared, err := runtime.Prepare(context.Background(), "", []string{
 		"import", source, "--dry-run", "--label", "fixture",
 	})
-	if err != nil || prepared.Effect != domain.CommandRead {
+	if err != nil || prepared.Action != "keys.import-dry-run" || prepared.Changed {
 		t.Fatalf("dry-run preparation drifted: %#v err=%v", prepared, err)
 	}
 	if err := prepared.Execute(context.Background()); err != nil ||
@@ -438,6 +450,7 @@ func TestPreparedDryRunAndAutoSyncPolicyAreDirectlyTestable(t *testing.T) {
 	}
 
 	identity := credentialPeerIdentity("actor-active")
+	installCredentialIdentity(t, runtime)
 	if _, err := runtime.storePeer("active", identity, "local", "", "", false); err != nil {
 		t.Fatal(err)
 	}
@@ -448,7 +461,7 @@ func TestPreparedDryRunAndAutoSyncPolicyAreDirectlyTestable(t *testing.T) {
 	prepared, err = runtime.Prepare(context.Background(), "", []string{
 		"auto-sync", "pause", "@active",
 	})
-	if err != nil || prepared.Effect != domain.CommandMutate ||
+	if err != nil || prepared.Action != "keys.auto-sync-pause" || !prepared.Changed ||
 		!strings.Contains(strings.Join(prepared.Consequences, " "), "pause") {
 		t.Fatalf("auto-sync pause preparation drifted: %#v err=%v", prepared, err)
 	}
@@ -475,16 +488,14 @@ func TestPreparedDryRunAndAutoSyncPolicyAreDirectlyTestable(t *testing.T) {
 	prepared, err = runtime.Prepare(context.Background(), "", []string{
 		"auto-sync", "pause", "@passive",
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := prepared.Execute(context.Background()); err == nil ||
-		!strings.Contains(err.Error(), "respond-only") {
-		t.Fatalf("passive auto-sync policy was mutable: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "respond-only") {
+		t.Fatalf("passive auto-sync passed preflight: prepared=%#v err=%v", prepared, err)
 	}
 
-	worker, err := runtime.Prepare(context.Background(), "_auto-worker", []string{"--if-due"})
-	if err != nil || worker.Effect != domain.CommandMutate {
+	workerRuntime := credentialFixture(t)
+	installCredentialIdentity(t, workerRuntime)
+	worker, err := workerRuntime.Prepare(context.Background(), "_auto-worker", []string{"--if-due"})
+	if err != nil || worker.Action != "keys.auto-worker" || worker.Changed {
 		t.Fatalf("automatic worker preparation drifted: %#v err=%v", worker, err)
 	}
 	uninitialized := credentialFixture(t)
@@ -492,6 +503,394 @@ func TestPreparedDryRunAndAutoSyncPolicyAreDirectlyTestable(t *testing.T) {
 	if err != nil || worker.Execute(context.Background()) != nil {
 		t.Fatalf("uninitialized automatic worker was not a no-op: %#v err=%v", worker, err)
 	}
+}
+
+func TestPreparedReciprocalTrustDoesNotReadProtectedIdentityBeforeExecution(t *testing.T) {
+	runtime := credentialFixture(t)
+	installCredentialIdentity(t, runtime)
+	input := &credentialReadProbe{reader: strings.NewReader(`{"actorId":"protected"}`)}
+	runtime.config.Stdin = input
+
+	prepared, err := runtime.Prepare(context.Background(), "_exchange", []string{"trust-import", "peer"})
+	if err != nil || prepared.Action != "keys.exchange.trust-import" || !prepared.Changed {
+		t.Fatalf("reciprocal trust preparation=%#v err=%v", prepared, err)
+	}
+	if input.reads != 0 {
+		t.Fatalf("protected reciprocal identity was read %d time(s) during assessment", input.reads)
+	}
+}
+
+func TestPreparedCredentialMutationsAssessReadOnlyStateBeforeExecution(t *testing.T) {
+	const credentialID = "cred-0123456789abcdef0123456789abcdef"
+
+	t.Run("protected file boundaries are validated before confirmation", func(t *testing.T) {
+		runtime := credentialFixture(t)
+		installCredentialIdentity(t, runtime)
+		missing := filepath.Join(t.TempDir(), "missing-secret")
+		if _, err := runtime.Prepare(context.Background(), "", []string{
+			"add", "fixture", "--file", missing,
+		}); err == nil {
+			t.Fatal("add deferred a missing protected source until apply")
+		}
+
+		head := credentialMetadata("actor-a-000000000001-aaaaaaaa", "actor-a", 1)
+		writeCredentialRecord(t, runtime, sharedLedger, head)
+		unsafe := filepath.Join(t.TempDir(), "replacement")
+		writeCredentialFile(t, unsafe, "protected", 0o644)
+		if _, err := runtime.Prepare(context.Background(), "", []string{
+			"rotate", credentialID, "--file", unsafe,
+		}); err == nil || !strings.Contains(err.Error(), "mode 0600 or 0400") {
+			t.Fatalf("rotate deferred protected source mode validation: %v", err)
+		}
+
+		other := credentialMetadata("actor-b-000000000001-bbbbbbbb", "actor-b", 1)
+		writeCredentialRecord(t, runtime, sharedLedger, other)
+		if _, err := runtime.Prepare(context.Background(), "", []string{
+			"resolve", credentialID, "--rotate", "--file", unsafe,
+		}); err == nil || !strings.Contains(err.Error(), "mode 0600 or 0400") {
+			t.Fatalf("resolve --rotate deferred protected source mode validation: %v", err)
+		}
+
+		safe := filepath.Join(t.TempDir(), "safe-replacement")
+		writeCredentialFile(t, safe, "protected", 0o600)
+		prepared, err := runtime.Prepare(context.Background(), "", []string{
+			"resolve", credentialID, "--rotate", "--file", safe,
+		})
+		if err != nil || prepared.Action != "keys.resolve-rotate" {
+			t.Fatalf("safe replacement did not pass metadata preflight: prepared=%#v err=%v", prepared, err)
+		}
+		if err := os.Chmod(safe, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := prepared.Execute(context.Background()); err == nil ||
+			!strings.Contains(err.Error(), "mode 0600 or 0400") {
+			t.Fatalf("apply did not reopen and revalidate the protected source: %v", err)
+		}
+	})
+
+	t.Run("rotate validates current head before protected source", func(t *testing.T) {
+		runtime := credentialFixture(t)
+		installCredentialIdentity(t, runtime)
+		source := filepath.Join(t.TempDir(), "replacement")
+		writeCredentialFile(t, source, "protected", 0o000)
+		if _, err := runtime.Prepare(context.Background(), "", []string{
+			"rotate", credentialID, "--file", source,
+		}); err == nil || !strings.Contains(err.Error(), "credential") {
+			t.Fatalf("missing rotate head passed preflight: %v", err)
+		}
+	})
+
+	t.Run("rollback validates active head and chosen revision", func(t *testing.T) {
+		runtime := credentialFixture(t)
+		installCredentialIdentity(t, runtime)
+		head := credentialMetadata("actor-a-000000000001-aaaaaaaa", "actor-a", 1)
+		head.State = "revoked"
+		writeCredentialRecord(t, runtime, sharedLedger, head)
+		if _, err := runtime.Prepare(context.Background(), "", []string{
+			"rollback", credentialID, head.RevisionID,
+		}); err == nil || !strings.Contains(err.Error(), "cannot resurrect") {
+			t.Fatalf("inactive rollback passed preflight: %v", err)
+		}
+		head.State = "active"
+		writeCredentialRecord(t, runtime, sharedLedger, head)
+		if _, err := runtime.Prepare(context.Background(), "", []string{
+			"rollback", credentialID, "actor-a-000000000999-ffffffff",
+		}); err == nil || !strings.Contains(err.Error(), "unknown revision") {
+			t.Fatalf("unknown rollback revision passed preflight: %v", err)
+		}
+	})
+
+	t.Run("resolve validates multi-head and chosen revision", func(t *testing.T) {
+		runtime := credentialFixture(t)
+		installCredentialIdentity(t, runtime)
+		head := credentialMetadata("actor-a-000000000001-aaaaaaaa", "actor-a", 1)
+		writeCredentialRecord(t, runtime, sharedLedger, head)
+		if _, err := runtime.Prepare(context.Background(), "", []string{
+			"resolve", credentialID, "--choose", head.RevisionID,
+		}); err == nil || !strings.Contains(err.Error(), "no unresolved multi-head") {
+			t.Fatalf("single-head resolve passed preflight: %v", err)
+		}
+	})
+
+	for _, terminal := range []struct {
+		command, state string
+		action         domain.ActionID
+	}{
+		{command: "revoke", state: "revoked", action: "keys.revoke"},
+		{command: "delete", state: "tombstone", action: "keys.delete-tombstone"},
+	} {
+		t.Run(terminal.command+" repeated terminal is no-op", func(t *testing.T) {
+			runtime := credentialFixture(t)
+			installCredentialIdentity(t, runtime)
+			head := credentialMetadata("actor-a-000000000001-aaaaaaaa", "actor-a", 1)
+			head.State = terminal.state
+			writeCredentialRecord(t, runtime, sharedLedger, head)
+			prepared, err := runtime.Prepare(context.Background(), "", []string{
+				terminal.command, credentialID,
+			})
+			if err != nil || prepared.Action != terminal.action || prepared.Changed ||
+				len(prepared.Consequences) != 0 {
+				t.Fatalf("terminal assessment=%#v err=%v", prepared, err)
+			}
+		})
+	}
+
+	t.Run("auto-sync policy is assessed before apply", func(t *testing.T) {
+		runtime := credentialFixture(t)
+		installCredentialIdentity(t, runtime)
+		active := credentialPeerIdentity("actor-active")
+		if _, err := runtime.storePeer("active", active, "local", "", "", false); err != nil {
+			t.Fatal(err)
+		}
+		prepared, err := runtime.Prepare(context.Background(), "", []string{
+			"auto-sync", "pause", "@active",
+		})
+		if err != nil || !prepared.Changed {
+			t.Fatalf("initial pause assessment=%#v err=%v", prepared, err)
+		}
+		if err := prepared.Execute(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		prepared, err = runtime.Prepare(context.Background(), "", []string{
+			"auto-sync", "pause", "@active",
+		})
+		if err != nil || prepared.Changed {
+			t.Fatalf("repeated pause assessment=%#v err=%v", prepared, err)
+		}
+		passive := credentialPeerIdentity("actor-passive")
+		if _, err := runtime.storePeer("passive", passive, "inbound", "", "", true); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := runtime.Prepare(context.Background(), "", []string{
+			"auto-sync", "resume", "@passive",
+		}); err == nil || !strings.Contains(err.Error(), "respond-only") {
+			t.Fatalf("passive auto-sync passed preflight: %v", err)
+		}
+	})
+
+	t.Run("auto-sync policy requires an initialized store", func(t *testing.T) {
+		runtime := credentialFixture(t)
+		if _, err := runtime.Prepare(context.Background(), "", []string{
+			"auto-sync", "pause", "--all",
+		}); err == nil || !strings.Contains(err.Error(), "not initialized") {
+			t.Fatalf("uninitialized auto-sync policy passed preflight: %v", err)
+		}
+	})
+
+	t.Run("all public credential mutations validate initialized state", func(t *testing.T) {
+		for _, arguments := range [][]string{
+			{"delete", credentialID},
+			{"resolve", credentialID, "--rotate"},
+			{"materialize", "--all"},
+			{"untrust", "@peer"},
+			{"move", credentialID, "@peer"},
+		} {
+			runtime := credentialFixture(t)
+			if _, err := runtime.Prepare(context.Background(), "", arguments); err == nil ||
+				!strings.Contains(err.Error(), "not initialized") {
+				t.Fatalf("uninitialized %#v passed mutation preflight: %v", arguments, err)
+			}
+		}
+	})
+
+	t.Run("peer removal is rejected as stale before untrust apply", func(t *testing.T) {
+		runtime := credentialFixture(t)
+		installCredentialIdentity(t, runtime)
+		peer := credentialPeerIdentity("actor-peer")
+		if _, err := runtime.storePeer("peer", peer, "local", "", "", false); err != nil {
+			t.Fatal(err)
+		}
+		prepared, err := runtime.Prepare(context.Background(), "", []string{"untrust", "@peer"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		path, _ := runtime.peerPath("peer")
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if err := prepared.Execute(context.Background()); err == nil || !strings.Contains(err.Error(), "changed") {
+			t.Fatalf("stale untrust apply error=%v", err)
+		}
+	})
+
+	t.Run("sync rejects peer or credential head drift before external effects", func(t *testing.T) {
+		for _, drift := range []string{"peer", "head"} {
+			t.Run(drift, func(t *testing.T) {
+				runtime := credentialFixture(t)
+				installCredentialIdentity(t, runtime)
+				peerIdentity := credentialPeerIdentity("actor-peer")
+				if _, err := runtime.storePeer("peer", peerIdentity, "local", "", "", false); err != nil {
+					t.Fatal(err)
+				}
+				first := credentialMetadata("actor-a-000000000001-aaaaaaaa", "actor-a", 1)
+				writeCredentialRecord(t, runtime, sharedLedger, first)
+				prepared, err := runtime.Prepare(context.Background(), "", []string{"sync", "@peer"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				switch drift {
+				case "peer":
+					peer, err := runtime.peer("peer")
+					if err != nil {
+						t.Fatal(err)
+					}
+					peer.ManualOnly = true
+					payload, err := json.Marshal(peer)
+					if err != nil {
+						t.Fatal(err)
+					}
+					path, _ := runtime.peerPath("peer")
+					writeCredentialFile(t, path, string(payload), 0o600)
+				case "head":
+					second := credentialMetadata("actor-a-000000000002-bbbbbbbb", "actor-a", 2)
+					second.Parents = []string{first.RevisionID}
+					writeCredentialRecord(t, runtime, sharedLedger, second)
+				}
+				if err := prepared.Execute(context.Background()); !errors.Is(err, domain.ErrPlanStale) {
+					t.Fatalf("sync %s drift error=%v", drift, err)
+				}
+			})
+		}
+	})
+
+	t.Run("trust rechecks remote identity and local heads before enrollment", func(t *testing.T) {
+		for _, drift := range []string{"identity", "head"} {
+			t.Run(drift, func(t *testing.T) {
+				runtime := credentialFixture(t)
+				installCredentialIdentity(t, runtime)
+				first := credentialMetadata("actor-a-000000000001-aaaaaaaa", "actor-a", 1)
+				writeCredentialRecord(t, runtime, sharedLedger, first)
+				identityA, err := json.Marshal(credentialPeerIdentity("actor-peer-a"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				identityB, err := json.Marshal(credentialPeerIdentity("actor-peer-b"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				counter := filepath.Join(t.TempDir(), "identity-calls")
+				dispatcher := filepath.Join(runtime.config.RepositoryRoot, "credential-target")
+				body := "#!/bin/sh\nset -eu\n" +
+					"case \"$*\" in\n" +
+					"  *'_keys-exchange identity'*)\n" +
+					"    count=0; [ ! -f '" + counter + "' ] || count=$(cat '" + counter + "')\n" +
+					"    count=$((count + 1)); printf '%s\\n' \"$count\" >'" + counter + "'\n" +
+					"    if [ \"$count\" -eq 1 ] || [ '" + drift + "' = head ]; then printf '%s\\n' '" + string(identityA) + "'; else printf '%s\\n' '" + string(identityB) + "'; fi\n" +
+					"    ;;\n" +
+					"  *) exit 0 ;;\n" +
+					"esac\n"
+				writeCredentialFile(t, dispatcher, body, 0o700)
+				runtime.config.Dispatcher = dispatcher
+				runtime.config.Resolve = func(context.Context, string) (Target, error) {
+					return Target{Name: "peer", Transport: "local"}, nil
+				}
+				prepared, err := runtime.Prepare(context.Background(), "", []string{"trust", "@peer"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if drift == "head" {
+					second := credentialMetadata("actor-a-000000000002-bbbbbbbb", "actor-a", 2)
+					second.Parents = []string{first.RevisionID}
+					writeCredentialRecord(t, runtime, sharedLedger, second)
+				}
+				if err := prepared.Execute(context.Background()); !errors.Is(err, domain.ErrPlanStale) {
+					t.Fatalf("trust %s drift error=%v", drift, err)
+				}
+				if _, err := runtime.peer("peer"); err == nil || !strings.Contains(err.Error(), "not enrolled") {
+					t.Fatalf("trust %s drift mutated local enrollment: %v", drift, err)
+				}
+			})
+		}
+	})
+
+	t.Run("move resume rejects head or target route drift", func(t *testing.T) {
+		for _, drift := range []string{"head", "peer"} {
+			t.Run(drift, func(t *testing.T) {
+				runtime := credentialFixture(t)
+				local := installCredentialIdentity(t, runtime)
+				peerIdentity := credentialPeerIdentity("actor-peer")
+				if _, err := runtime.storePeer("peer", peerIdentity, "local", "", "", false); err != nil {
+					t.Fatal(err)
+				}
+				head := credentialMetadata("host-fixture-000000000001-aaaaaaaa", local.ActorID, 1)
+				head.Exclusive = true
+				head.AuthorityHost = local.ActorID
+				head.AssignedYard = peerIdentity.ActorID + "/peer"
+				head.AssignmentEpoch = 1
+				head.RecipientActors = []string{local.ActorID, peerIdentity.ActorID}
+				writeCredentialRecord(t, runtime, sharedLedger, head)
+				prepared, err := runtime.Prepare(context.Background(), "", []string{"move", credentialID, "@peer"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				switch drift {
+				case "head":
+					second := head
+					second.RevisionID = "host-fixture-000000000002-bbbbbbbb"
+					second.ActorCounter = 2
+					second.Parents = []string{head.RevisionID}
+					writeCredentialRecord(t, runtime, sharedLedger, second)
+				case "peer":
+					peer, err := runtime.peer("peer")
+					if err != nil {
+						t.Fatal(err)
+					}
+					peer.ManualOnly = true
+					payload, err := json.Marshal(peer)
+					if err != nil {
+						t.Fatal(err)
+					}
+					path, _ := runtime.peerPath("peer")
+					writeCredentialFile(t, path, string(payload), 0o600)
+				}
+				if err := prepared.Execute(context.Background()); !errors.Is(err, domain.ErrPlanStale) {
+					t.Fatalf("move resume %s drift error=%v", drift, err)
+				}
+			})
+		}
+	})
+
+	t.Run("reciprocal peer removal is rejected as stale before apply", func(t *testing.T) {
+		runtime := credentialFixture(t)
+		installCredentialIdentity(t, runtime)
+		peer := credentialPeerIdentity("actor-peer")
+		if _, err := runtime.storePeer("peer", peer, "inbound", "", "", true); err != nil {
+			t.Fatal(err)
+		}
+		prepared, err := runtime.Prepare(context.Background(), "_exchange", []string{
+			"untrust-import", peer.ActorID,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		path, _ := runtime.peerPath("peer")
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if err := prepared.Execute(context.Background()); err == nil || !strings.Contains(err.Error(), "changed") {
+			t.Fatalf("stale reciprocal untrust apply error=%v", err)
+		}
+	})
+
+	t.Run("empty sync materialize and worker are no-op", func(t *testing.T) {
+		runtime := credentialFixture(t)
+		installCredentialIdentity(t, runtime)
+		for _, request := range []struct {
+			entry     string
+			arguments []string
+			action    domain.ActionID
+		}{
+			{arguments: []string{"sync"}, action: "keys.sync"},
+			{arguments: []string{"materialize", "--all"}, action: "keys.materialize"},
+			{entry: "_auto-worker", arguments: []string{"--if-due"}, action: "keys.auto-worker"},
+		} {
+			prepared, err := runtime.Prepare(context.Background(), request.entry, request.arguments)
+			if err != nil || prepared.Action != request.action || prepared.Changed ||
+				len(prepared.Consequences) != 0 {
+				t.Fatalf("empty assessment=%#v err=%v", prepared, err)
+			}
+		}
+	})
 }
 
 func TestIdentityAndAllowedSignersAreProtectedAndDeduplicated(t *testing.T) {

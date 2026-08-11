@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 )
@@ -69,16 +71,28 @@ func (cli *CLI) runConfigAuthoring(
 			cli.errorf("config %s: %v", action, err)
 			return 2
 		}
-		if !cli.confirmConfigAuthoring(
-			ctx, request,
-			fmt.Sprintf("%s %s in persistent %s settings at %s",
-				action, request.name, request.scope, path),
-		) {
+		content, err := readConfigAuthoringTarget(path)
+		if err != nil {
+			cli.errorf("config %s: %v", action, err)
 			return 1
 		}
 		var value *string
 		if action == "set" {
 			value = &request.value
+		}
+		candidate, err := config.EditPersistentAssignmentContent(path, content, request.name, value)
+		if err != nil {
+			cli.errorf("config %s: %v", action, err)
+			return 1
+		}
+		if !cli.planConfigAction(ctx, loaded, request.action, request.assumeYes, bytes.Equal(content, candidate),
+			fmt.Sprintf("%s %s in persistent %s settings at %s",
+				action, request.name, request.scope, path)) {
+			return 1
+		}
+		if bytes.Equal(content, candidate) {
+			fmt.Fprintf(cli.options.Stdout, "config %s: already current\n", action)
+			return 0
 		}
 		if err := config.WritePersistentAssignment(
 			loaded.Context.Paths.ConfigHome, path, request.name, value,
@@ -101,11 +115,9 @@ func (cli *CLI) runConfigAuthoring(
 		cli.errorf("config %s: %v", action, err)
 		return 2
 	}
-	if !cli.confirmConfigAuthoring(
-		ctx, request,
-		fmt.Sprintf("replace persistent %s file setting %s at %s",
-			request.scope, request.name, target),
-	) {
+	current, err := readConfigAuthoringTarget(target)
+	if err != nil {
+		cli.errorf("config %s: %v", action, err)
 		return 1
 	}
 	var content []byte
@@ -116,7 +128,7 @@ func (cli *CLI) runConfigAuthoring(
 		}
 		content, err = readConfigAuthoringFile(source)
 	} else {
-		content, err = cli.editConfigAuthoringFile(ctx, target)
+		content, err = cli.editConfigAuthoringFile(ctx, current)
 	}
 	if err != nil {
 		cli.errorf("config %s: %v", action, err)
@@ -125,6 +137,15 @@ func (cli *CLI) runConfigAuthoring(
 	if err := config.ValidateNonSecretContent(request.name, string(content)); err != nil {
 		cli.errorf("config %s: %v", action, err)
 		return 1
+	}
+	if !cli.planConfigAction(ctx, loaded, request.action, request.assumeYes, bytes.Equal(current, content),
+		fmt.Sprintf("replace persistent %s file setting %s at %s",
+			request.scope, request.name, target)) {
+		return 1
+	}
+	if bytes.Equal(current, content) {
+		fmt.Fprintf(cli.options.Stdout, "config %s: already current\n", action)
+		return 0
 	}
 	if err := config.WritePersistentFile(
 		loaded.Context.Paths.ConfigHome, target, content,
@@ -245,30 +266,38 @@ func (cli *CLI) configFileAuthoringPath(
 	return filepath.Join(root, "agents", relative), nil
 }
 
-func (cli *CLI) confirmConfigAuthoring(
+func (cli *CLI) planConfigAction(
 	ctx context.Context,
-	request configAuthoringRequest,
+	loaded config.Loaded,
+	action string,
+	assumeYes bool,
+	unchanged bool,
 	consequence string,
 ) bool {
-	if request.assumeYes {
-		return true
-	}
-	prompt := cli.options.Prompt
-	if prompt == nil {
-		prompt = streamPrompt{input: cli.options.Stdin, output: cli.options.Stderr}
-	}
-	accepted, err := prompt.Confirm(
-		ctx, "Change persistent Subyard configuration", []string{consequence},
+	orchestrator := cli.operationOrchestrator(cli.env["SUBYARD_OPERATION_ID"], loaded, nil, nil)
+	_, err := orchestrator.PlanAction(
+		ctx, loaded.Context, "config "+action, domain.RemoteOnOwner,
+		domain.ActionID("config."+action), domain.ActionDelta{
+			Changed: !unchanged, Consequences: []string{consequence},
+		}, assumeYes,
 	)
 	if err != nil {
-		cli.errorf("config %s: %v", request.action, err)
-		return false
-	}
-	if !accepted {
-		cli.errorf("config %s: operation declined", request.action)
+		if errors.Is(err, application.ErrDeclined) {
+			cli.errorf("config %s: operation declined", action)
+		} else {
+			cli.errorf("config %s: %v", action, err)
+		}
 		return false
 	}
 	return true
+}
+
+func readConfigAuthoringTarget(path string) ([]byte, error) {
+	content, err := readConfigAuthoringFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	return content, err
 }
 
 func readConfigAuthoringFile(path string) ([]byte, error) {
@@ -285,7 +314,7 @@ func readConfigAuthoringFile(path string) ([]byte, error) {
 
 func (cli *CLI) editConfigAuthoringFile(
 	ctx context.Context,
-	target string,
+	content []byte,
 ) ([]byte, error) {
 	editor := cli.env["VISUAL"]
 	if editor == "" {
@@ -308,12 +337,6 @@ func (cli *CLI) editConfigAuthoringFile(
 		return nil, err
 	}
 	draft := filepath.Join(directory, "setting")
-	content, err := readConfigAuthoringFile(target)
-	if errors.Is(err, os.ErrNotExist) {
-		content = nil
-	} else if err != nil {
-		return nil, err
-	}
 	if err := os.WriteFile(draft, content, 0o600); err != nil {
 		return nil, err
 	}

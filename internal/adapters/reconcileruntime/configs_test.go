@@ -3,6 +3,8 @@ package reconcileruntime
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -84,6 +86,44 @@ func TestRefreshConfigsUsesTypedAtomicGuestWrites(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "Agent instructions and configs refreshed") {
 		t.Fatalf("refresh output changed: %q", output.String())
+	}
+}
+
+func TestConfigsConvergedComparesSourceAndGuestHashesReadOnly(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "AGENTS.md")
+	payload := []byte("current instructions\n")
+	if err := os.WriteFile(source, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hash := fmt.Sprintf("%x", sha256.Sum256(payload))
+	for _, test := range []struct {
+		name   string
+		stdout string
+		want   bool
+	}{
+		{name: "converged", stdout: hash + "  /home/dev/.codex/AGENTS.md\n", want: true},
+		{name: "drifted", stdout: strings.Repeat("0", 64) + "  /home/dev/.codex/AGENTS.md\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			incus := runningIncus(1)
+			incus.ExecSteps[0].Result.Stdout = []byte(test.stdout)
+			runtime := Runtime{
+				Environment: []string{"AGENTS=codex", "HOST_CODEX_AGENTS_MD=" + source},
+				Incus:       incus, Executor: incus,
+				Yard: domain.Context{IncusProject: "subyard", InstanceName: "yard", DevUser: "dev"},
+			}
+			got, err := runtime.ConfigsConverged(context.Background())
+			if err != nil || got != test.want {
+				t.Fatalf("converged=%t err=%v", got, err)
+			}
+			if len(incus.ExecCalls) != 1 || !slices.Equal(
+				incus.ExecCalls[0].Request.Command,
+				[]string{"sha256sum", "--", "/home/dev/.codex/AGENTS.md"},
+			) {
+				t.Fatalf("hash probe=%#v", incus.ExecCalls)
+			}
+		})
 	}
 }
 

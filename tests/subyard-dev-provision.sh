@@ -97,6 +97,22 @@ run_hook
 [ "$(wc -l < "$SUBYARD_DEV_GO_LOG")" -eq 2 ] \
   || fail "Go environment was not re-applied exactly once per provision"
 
+apt_lines="$(wc -l < "$SUBYARD_DEV_APT_LOG")"
+go_lines="$(wc -l < "$SUBYARD_DEV_GO_LOG")"
+env "${common_env[@]}" bash "$HOOK" --check >/dev/null \
+  || fail "converged provision check failed"
+[ "$(wc -l < "$SUBYARD_DEV_APT_LOG")" -eq "$apt_lines" ] \
+  || fail "provision check mutated apt state"
+[ "$(wc -l < "$SUBYARD_DEV_GO_LOG")" -eq "$go_lines" ] \
+  || fail "provision check rewrote Go settings"
+
+rm -rf -- "$test_mod_cache"
+set +e
+env "${common_env[@]}" bash "$HOOK" --check >/dev/null
+check_status=$?
+set -e
+[ "$check_status" -eq 10 ] || fail "drifted provision check returned $check_status, want 10"
+
 if [ "$(id -u)" -ne 0 ]; then
   if env PATH="$tmp/fake-bin:$PATH" DEV_USER="$(id -un)" \
     SUBYARD_DEV_HOME="$tmp/home" GOCACHE="$test_cache" GOMODCACHE="$test_mod_cache" \

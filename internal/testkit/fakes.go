@@ -144,13 +144,16 @@ func (source *IDs) NewID() string {
 }
 
 type Prompt struct {
-	Answers []bool
-	Err     error
-	Seen    []string
+	Answers  []bool
+	Err      error
+	Seen     []string
+	Requests []domain.ConfirmationRequest
 }
 
-func (prompt *Prompt) Confirm(_ context.Context, summary string, _ []string) (bool, error) {
-	prompt.Seen = append(prompt.Seen, summary)
+func (prompt *Prompt) Confirm(_ context.Context, request domain.ConfirmationRequest) (bool, error) {
+	prompt.Seen = append(prompt.Seen, request.Summary)
+	request.Consequences = append([]string(nil), request.Consequences...)
+	prompt.Requests = append(prompt.Requests, request)
 	if prompt.Err != nil {
 		return false, prompt.Err
 	}

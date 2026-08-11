@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
 	"github.com/Subyard/Subyard/internal/application"
@@ -14,8 +15,9 @@ import (
 )
 
 type lifecycleExecution struct {
-	action string
-	force  bool
+	action  string
+	force   bool
+	changed bool
 }
 
 func prepareLifecycleExecution(
@@ -71,6 +73,41 @@ func (execution *lifecycleExecution) policy(
 		Name: definition.Name, Effect: domain.CommandEffect(definition.Effect),
 		RemotePolicy: domain.RemotePolicy(definition.Remote), Consequences: consequences,
 	}
+}
+
+func (execution *lifecycleExecution) actionPlan(
+	definition command.Definition,
+	yard domain.Context,
+) (domain.ActionID, domain.ActionDelta, error) {
+	if execution == nil || execution.action != "stop" {
+		return "", domain.ActionDelta{}, errors.New("stop execution is required")
+	}
+	action := domain.ActionID("yard.stop")
+	if execution.force {
+		action = "yard.stop-force"
+	}
+	delta := domain.ActionDelta{Changed: execution.changed}
+	if delta.Changed {
+		delta.Consequences = execution.policy(definition, yard).Consequences
+	}
+	return action, delta, nil
+}
+
+func (cli *CLI) observeLifecycleExecution(
+	ctx context.Context,
+	yard domain.Context,
+	execution *lifecycleExecution,
+) error {
+	if execution == nil || execution.action != "stop" {
+		return nil
+	}
+	incusPort, _ := cli.statusPorts()
+	instance, err := incusPort.Instance(ctx, yard.IncusProject, yard.InstanceName)
+	if err != nil {
+		return err
+	}
+	execution.changed = !strings.EqualFold(instance.Status, "stopped")
+	return nil
 }
 
 func (cli *CLI) executeLifecycle(

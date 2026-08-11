@@ -389,6 +389,18 @@ install -d -m 0700 "$nested_bin"
 printf '%s\n' \
   '#!/bin/bash' \
   'set -euo pipefail' \
+  'case "$*" in' \
+  '  info) ;;' \
+  '  --version) printf "6.0.6\n" ;;' \
+  '  "storage show default --project default") ;;' \
+  '  "network show incusbr0 --project default") ;;' \
+  '  *) exit 2 ;;' \
+  'esac' \
+  > "$nested_bin/incus"
+chmod 0700 "$nested_bin/incus"
+printf '%s\n' \
+  '#!/bin/bash' \
+  'set -euo pipefail' \
   '[ "$*" = dev/e2e/nested-teardown-data-boundary.sh ] || exit 2' \
   'expected="$HOME/.cache/subyard-p0-134/go-build"' \
   '[ "${GOCACHE:-}" = "$expected" ] || exit 3' \

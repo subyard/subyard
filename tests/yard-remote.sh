@@ -155,9 +155,11 @@ export REMOTE_TEST_ROOT="$TMP/state"
 run_add() { "$ROOT/bin/yard" remote add "$@" --yes; }
 
 # Prepare is read-only and shows the scanned yard key before confirmation.
-if output="$(printf 'n\n' | "$ROOT/bin/yard" remote add preview owner-three 2>&1)"; then
+if output="$(printf 'n\n' | script --echo never -qefc \
+  "$ROOT/bin/yard remote add preview owner-three" /dev/null 2>&1)"; then
   fail 'declined remote add succeeded'
 fi
+output="${output//$'\r'/}"
 assert_contains "$output" 'yard ssh key: SHA256:'
 [ ! -e "$REMOTE_TEST_ROOT/owner-mode/authorized-owner-three" ] || fail 'prepare authorized a key before confirmation'
 [ ! -e "$SUBYARD_CONFIG_HOME/yards/preview/config.env" ] || fail 'prepare wrote a context before confirmation'

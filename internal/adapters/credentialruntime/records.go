@@ -17,6 +17,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/Subyard/Subyard/internal/credential"
 	"github.com/Subyard/Subyard/internal/domain"
@@ -525,9 +526,18 @@ func (runtime *Runtime) validateImportPath(path string) (string, error) {
 	if info.Mode().Perm() != 0o600 && info.Mode().Perm() != 0o400 {
 		return "", fmt.Errorf("credential source must have mode 0600 or 0400: %s", path)
 	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != uint32(os.Geteuid()) {
+		return "", fmt.Errorf("credential source must be owned by the current user: %s", path)
+	}
 	real, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return "", err
+	}
+	realInfo, err := os.Lstat(real)
+	if err != nil || !realInfo.Mode().IsRegular() || realInfo.Mode()&os.ModeSymlink != 0 ||
+		!os.SameFile(info, realInfo) {
+		return "", fmt.Errorf("credential source changed during metadata validation: %s", path)
 	}
 	real, err = filepath.Abs(real)
 	if err != nil {

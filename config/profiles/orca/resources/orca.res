@@ -2,6 +2,12 @@
 COMMAND=orca
 HANDLER=resources/orca/handler.sh
 TITLE="Orca remote server"
-VERBS="up is-up status pair sync logs down"
+ACTION="up up host-change recreatable"
+ACTION="is-up is-up read-only not-needed"
+ACTION="status status read-only not-needed"
+ACTION="pair pair external-change reversible"
+ACTION="sync sync bounded-write not-needed"
+ACTION="logs logs read-only not-needed"
+ACTION="down down host-change reversible"
 BRINGUP=up
 SHUTDOWN=down

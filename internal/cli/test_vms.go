@@ -18,6 +18,7 @@ import (
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ports"
 )
 
 func testVMLogsInvocation(arguments []string) bool {
@@ -151,10 +152,21 @@ func (cli *CLI) runTestVMLogs(ctx context.Context, arguments []string) int {
 type testVMExecution struct {
 	action string
 	slot   int
+	noOp   bool
+}
+
+const testVMStatusMaxBytes = 64 << 10
+
+type testVMStatusResponse struct {
+	SchemaVersion int                       `json:"schema_version"`
+	Status        string                    `json:"status"`
+	Code          string                    `json:"code"`
+	Message       string                    `json:"message"`
+	Pool          *testvmsruntime.LeasePool `json:"pool"`
 }
 
 func (cli *CLI) prepareTestVMExecution(
-	_ context.Context,
+	ctx context.Context,
 	loaded config.Loaded,
 	arguments []string,
 ) (*testVMExecution, error) {
@@ -204,34 +216,157 @@ func (cli *CLI) prepareTestVMExecution(
 	default:
 		return nil, fmt.Errorf("unknown test-vms command %q", action)
 	}
-	return &testVMExecution{action: action, slot: slot}, nil
+	// A remote invocation is preflighted by the owner after forwarding. A local
+	// invocation must prove the yard can run the broker operation before any
+	// confirmation is requested.
+	if loaded.Context.YardType != domain.YardRemote {
+		incusPort, _ := cli.statusPorts()
+		instance, err := incusPort.Instance(
+			ctx, loaded.Context.IncusProject, loaded.Context.InstanceName,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if !strings.EqualFold(instance.Status, "running") {
+			return nil, fmt.Errorf("yard %q must be running", loaded.Context.InstanceName)
+		}
+	}
+	execution := &testVMExecution{action: action, slot: slot}
+	if action == "revoke" || action == "recover" {
+		slotState, err := cli.probeTestVMSlot(ctx, loaded, slot)
+		if err != nil {
+			return nil, err
+		}
+		switch action {
+		case "revoke":
+			switch slotState {
+			case testvmsruntime.SlotAvailable:
+				execution.noOp = true
+			case testvmsruntime.SlotHeld, testvmsruntime.SlotProvisioning, testvmsruntime.SlotDraining:
+			default:
+				return nil, fmt.Errorf("test VM slot %d cannot be revoked while %s", slot, slotState)
+			}
+		case "recover":
+			switch slotState {
+			case testvmsruntime.SlotAvailable:
+				execution.noOp = true
+			case testvmsruntime.SlotQuarantined, testvmsruntime.SlotRecovering:
+			default:
+				return nil, fmt.Errorf("test VM slot %d cannot be recovered while %s", slot, slotState)
+			}
+		}
+	}
+	return execution, nil
 }
 
-func (execution *testVMExecution) policy(
-	definition command.Definition,
-	_ domain.Context,
-) domain.CommandPolicy {
-	effect := domain.CommandEffect(definition.Effect)
+func (cli *CLI) probeTestVMSlot(
+	ctx context.Context,
+	loaded config.Loaded,
+	slot int,
+) (testvmsruntime.SlotState, error) {
+	probeContext, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	result, err := cli.projectDataPlane().Execute(probeContext, loaded.Context, ports.InstanceExecRequest{
+		Command: []string{testvmsruntime.DefaultInstalledPath, "_test-vms-worker", "status"},
+	})
+	if err != nil {
+		return "", fmt.Errorf("read test VM broker status: %w", err)
+	}
+	if result.ExitCode != 0 {
+		return "", fmt.Errorf("read test VM broker status: exit status %d", result.ExitCode)
+	}
+	if len(result.Stdout) > testVMStatusMaxBytes {
+		return "", errors.New("test VM broker status exceeds the safe probe limit")
+	}
+	var response testVMStatusResponse
+	if err := json.Unmarshal(result.Stdout, &response); err != nil {
+		return "", fmt.Errorf("decode test VM broker status: %w", err)
+	}
+	if response.SchemaVersion != testvmsruntime.LeaseSchemaVersion || response.Status != "ok" ||
+		response.Pool == nil || response.Pool.SchemaVersion != testvmsruntime.LeaseSchemaVersion ||
+		response.Pool.ResourceType != "agent-e2e" || response.Pool.ResourceID != "test-vms" {
+		return "", errors.New("test VM broker returned an invalid status response")
+	}
+	if err := validateTestVMStatusSlots(response.Pool.Slots); err != nil {
+		return "", errors.New("test VM broker returned an invalid status response")
+	}
+	wanted := fmt.Sprintf("slot-%03d", slot)
+	for _, candidate := range response.Pool.Slots {
+		if candidate.SlotID == wanted {
+			return candidate.State, nil
+		}
+	}
+	return "", fmt.Errorf("test VM slot %d is not configured", slot)
+}
+
+func validateTestVMStatusSlots(slots []testvmsruntime.LeaseSlot) error {
+	seen := make(map[int]struct{}, len(slots))
+	for _, slot := range slots {
+		const prefix = "slot-"
+		if !strings.HasPrefix(slot.SlotID, prefix) {
+			return errors.New("invalid slot id")
+		}
+		number, err := strconv.Atoi(strings.TrimPrefix(slot.SlotID, prefix))
+		if err != nil || number < 1 || number > len(slots) ||
+			slot.SlotID != fmt.Sprintf("slot-%03d", number) {
+			return errors.New("invalid slot id")
+		}
+		if _, duplicate := seen[number]; duplicate {
+			return errors.New("duplicate slot id")
+		}
+		seen[number] = struct{}{}
+		switch slot.State {
+		case testvmsruntime.SlotAvailable, testvmsruntime.SlotProvisioning,
+			testvmsruntime.SlotHeld, testvmsruntime.SlotDraining,
+			testvmsruntime.SlotQuarantined, testvmsruntime.SlotRecovering,
+			testvmsruntime.SlotUnavailable:
+		default:
+			return errors.New("unknown slot state")
+		}
+	}
+	return nil
+}
+
+func (execution *testVMExecution) actionPlan() (domain.ActionID, domain.ActionDelta, error) {
+	if execution == nil {
+		return "", domain.ActionDelta{}, errors.New("test-vms execution is required")
+	}
 	consequences := []string{"read the configured test VM lease pool"}
 	switch execution.action {
 	case "status":
-		effect = domain.CommandRead
+		return "test-vms.status", domain.ActionDelta{Consequences: consequences}, nil
 	case "revoke":
 		consequences = []string{
 			fmt.Sprintf("fence and stop active lease slot %d", execution.slot),
 			"retain both VM disks and the slot network/project",
 		}
+		return "test-vms.revoke", domain.ActionDelta{Changed: !execution.noOp, Consequences: consequences}, nil
 	case "recover":
 		consequences = []string{
 			fmt.Sprintf("immediately recover quarantined lease slot %d", execution.slot),
 			"save incident evidence, then delete both marker-owned disposable VM disks",
 			"provision and verify a clean two-VM pair before publishing the slot as available",
 		}
+		return "test-vms.recover", domain.ActionDelta{Changed: !execution.noOp, Consequences: consequences}, nil
+	default:
+		return "", domain.ActionDelta{}, fmt.Errorf(
+			"%w: unknown test-vms action %q", domain.ErrActionPolicyInvalid, execution.action,
+		)
 	}
-	return domain.CommandPolicy{
-		Name: definition.Name, Effect: effect, RemotePolicy: domain.RemotePolicy(definition.Remote),
-		Consequences: consequences,
+}
+
+func (execution *testVMExecution) prepareAction(
+	orchestrator *application.Orchestrator,
+	loaded config.Loaded,
+	definition command.Definition,
+) (domain.OperationPlan, error) {
+	action, delta, err := execution.actionPlan()
+	if err != nil {
+		return domain.OperationPlan{}, err
 	}
+	return orchestrator.PrepareAction(
+		loaded.Context, definition.Name, domain.RemotePolicy(definition.Remote), action, delta,
+	)
 }
 
 func (cli *CLI) executeTestVMs(
@@ -244,6 +379,11 @@ func (cli *CLI) executeTestVMs(
 ) (domain.AdapterResult, error) {
 	if execution == nil {
 		return domain.AdapterResult{}, errors.New("test-vms execution is required")
+	}
+	if execution.noOp {
+		return domain.AdapterResult{
+			Schema: shelladapter.ProtocolSchema, OperationID: plan.OperationID, Status: "ok",
+		}, nil
 	}
 	incusPort, _ := cli.statusPorts()
 	instance, err := incusPort.Instance(ctx, loaded.Context.IncusProject, loaded.Context.InstanceName)

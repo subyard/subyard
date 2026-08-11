@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 
 	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
 	"github.com/Subyard/Subyard/internal/application"
@@ -13,7 +15,10 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 )
 
-type teardownExecution struct{ keepData bool }
+type teardownExecution struct {
+	keepData bool
+	changed  bool
+}
 
 func prepareTeardownExecution(arguments []string) (*teardownExecution, error) {
 	execution := &teardownExecution{}
@@ -49,6 +54,68 @@ func (execution *teardownExecution) policy(definition command.Definition, yard d
 		Name: definition.Name, Effect: domain.CommandEffect(definition.Effect),
 		RemotePolicy: domain.RemotePolicy(definition.Remote), Consequences: consequences,
 	}
+}
+
+func (execution *teardownExecution) actionPlan(
+	definition command.Definition,
+	yard domain.Context,
+) (domain.ActionID, domain.ActionDelta, error) {
+	if execution == nil {
+		return "", domain.ActionDelta{}, errors.New("teardown execution is required")
+	}
+	action := domain.ActionID("yard.teardown.purge")
+	if execution.keepData {
+		action = "yard.teardown.keep-data"
+	}
+	delta := domain.ActionDelta{Changed: execution.changed}
+	if delta.Changed {
+		delta.Consequences = execution.policy(definition, yard).Consequences
+	}
+	return action, delta, nil
+}
+
+func (cli *CLI) observeTeardownExecution(
+	ctx context.Context,
+	loaded config.Loaded,
+	execution *teardownExecution,
+) error {
+	if execution == nil {
+		return errors.New("teardown execution is required")
+	}
+	incusPort, _ := cli.statusPorts()
+	incusState, err := incusPort.ReconcileState(
+		ctx, loaded.Context.IncusProject, loaded.Context.InstanceName,
+		loaded.Environment["SRV_POOL"], loaded.Environment["SRV_VOLUME"],
+		loaded.Context.IncusBridge,
+	)
+	if err != nil {
+		return fmt.Errorf("inspect teardown target: %w", err)
+	}
+	execution.changed = incusState.InstanceFound
+	if !execution.keepData {
+		execution.changed = execution.changed || incusState.ProjectFound || incusState.ProfileFound ||
+			incusState.VolumeFound || incusState.HostNetworkFound || incusState.HostPoolFound
+	}
+	suffix := ""
+	if loaded.Context.YardName != "" {
+		suffix = "-" + loaded.Context.YardName
+	}
+	paths := []string{
+		loaded.Context.Paths.StateDir,
+		filepath.Join(loaded.Context.Paths.OperatorHome, ".ssh", "subyard"+suffix+".config"),
+		filepath.Join(loaded.Context.Paths.DataHome, "space"+suffix+".cache"),
+	}
+	for _, path := range paths {
+		_, statErr := os.Lstat(path)
+		switch {
+		case statErr == nil:
+			execution.changed = true
+		case errors.Is(statErr, os.ErrNotExist):
+		default:
+			return fmt.Errorf("inspect teardown artifact %s: %w", path, statErr)
+		}
+	}
+	return nil
 }
 
 func (cli *CLI) executeTeardown(

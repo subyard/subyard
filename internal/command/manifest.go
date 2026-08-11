@@ -31,9 +31,8 @@ const (
 type Confirmation string
 
 const (
-	ConfirmationNever    Confirmation = "never"
-	ConfirmationRequired Confirmation = "required"
-	ConfirmationDynamic  Confirmation = "dynamic"
+	ConfirmationNever   Confirmation = "never"
+	ConfirmationDynamic Confirmation = "dynamic"
 )
 
 type Visibility string
@@ -137,7 +136,7 @@ func (definition Definition) Validate() error {
 	if definition.Effect != EffectRead && definition.Effect != EffectMutate {
 		return fmt.Errorf("invalid effect %q", definition.Effect)
 	}
-	if !slices.Contains([]Confirmation{ConfirmationNever, ConfirmationRequired, ConfirmationDynamic}, definition.Confirmation) {
+	if !slices.Contains([]Confirmation{ConfirmationNever, ConfirmationDynamic}, definition.Confirmation) {
 		return fmt.Errorf("invalid confirmation policy %q", definition.Confirmation)
 	}
 	if definition.Visibility != VisibilityPublic && definition.Visibility != VisibilityHidden {

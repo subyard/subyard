@@ -255,11 +255,11 @@ outer_dev sh -euc '
     HOST_CLAUDE_MD= HOST_CODEX_AGENTS_MD= HOST_OPENCODE_AGENTS_MD= \
     ./bin/yard init --yes
   sudo -n incus project show subyard >/dev/null
-  env SUBYARD_NO_AUDIT=1 ./bin/yard teardown --yes
+  sg incus-admin -c "env SUBYARD_NO_AUDIT=1 ./bin/yard teardown --yes"
   ! sudo -n incus project show subyard >/dev/null 2>&1
   [ -f "$HOME/.subyard/workspaces/active.code-workspace" ]
   [ ! -e "$HOME/.config/subyard/projects" ]
-  env SUBYARD_NO_AUDIT=1 ./bin/yard teardown --yes >/dev/null
+  sg incus-admin -c "env SUBYARD_NO_AUDIT=1 ./bin/yard teardown --yes" >/dev/null
 ' _ "$outer_source"
 
 incus info "$OUTER_INSTANCE" --project "$OUTER_PROJECT" >/dev/null \

@@ -39,14 +39,15 @@ type initBootstrap struct {
 }
 
 type initExecution struct {
-	loaded        config.Loaded
-	mode          initMode
-	bootstrap     *initBootstrap
-	plan          application.ReconcilePlan
-	platform      ports.InitPlatform
-	powerYards    []domain.Context
-	hostID        string
-	hostIDPending bool
+	loaded         config.Loaded
+	mode           initMode
+	bootstrap      *initBootstrap
+	plan           application.ReconcilePlan
+	platform       ports.InitPlatform
+	powerYards     []domain.Context
+	hostID         string
+	hostIDPending  bool
+	configsChanged bool
 }
 
 type initReporter struct{ output io.Writer }
@@ -340,6 +341,11 @@ func (cli *CLI) prepareInitExecution(
 		return nil, err
 	}
 	if mode == initConfigs {
+		converged, err := execution.platform.ConfigsConverged(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("inspect agent configuration: %w", err)
+		}
+		execution.configsChanged = !converged
 		return execution, nil
 	}
 	stages := application.InitStages(loaded.Context)
@@ -389,6 +395,64 @@ func (execution *initExecution) consequences() []string {
 		}
 		return append(hostIDConsequences, result...)
 	}
+}
+
+func (execution *initExecution) actionPlan() (domain.ActionID, domain.ActionDelta, error) {
+	if execution == nil {
+		return "", domain.ActionDelta{}, errors.New("init execution is required")
+	}
+	action := domain.ActionID("yard.init.reconcile")
+	changed := execution.plan.Pending() != 0 || execution.bootstrap != nil || execution.hostIDPending
+	switch execution.mode {
+	case initReconcile:
+	case initConfigs:
+		action = "yard.init.configs"
+		changed = execution.configsChanged || execution.bootstrap != nil || execution.hostIDPending
+	case initReset:
+		action = "yard.init.reset"
+		changed = true
+	default:
+		return "", domain.ActionDelta{}, errors.New("invalid init mode")
+	}
+	delta := domain.ActionDelta{Changed: changed}
+	if changed {
+		delta.Consequences = execution.consequences()
+	}
+	return action, delta, nil
+}
+
+func (execution *initExecution) refreshAssessment(ctx context.Context) error {
+	if execution == nil {
+		return errors.New("init execution is required")
+	}
+	hostID, pending, err := configsync.ResolveHostID(
+		execution.loaded.Context.Paths.ConfigHome, execution.loaded.Environment,
+	)
+	if err != nil {
+		return err
+	}
+	execution.hostID = hostID
+	execution.hostIDPending = pending
+	switch execution.mode {
+	case initConfigs:
+		converged, err := execution.platform.ConfigsConverged(ctx)
+		if err != nil {
+			return fmt.Errorf("inspect agent configuration: %w", err)
+		}
+		execution.configsChanged = !converged
+	case initReconcile:
+		plan, err := (application.Reconciler{
+			Stages: application.InitStages(execution.loaded.Context), Runner: execution.platform,
+		}).Plan(ctx)
+		if err != nil {
+			return err
+		}
+		execution.plan = plan
+	case initReset:
+	default:
+		return errors.New("invalid init mode")
+	}
+	return nil
 }
 
 func (cli *CLI) printInitPlan(execution *initExecution) {

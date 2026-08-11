@@ -81,6 +81,16 @@ func (runner ProvisionRunner) Run(
 	}
 
 	for _, profile := range runner.Profiles {
+		changed, checkErr := runner.checkProfile(ctx, request, profile)
+		if checkErr != nil {
+			restoreErr := restore()
+			return domain.AdapterResult{}, output.String(), errors.Join(
+				fmt.Errorf("check provision profile %q: %w", profile, checkErr), restoreErr,
+			)
+		}
+		if !changed {
+			continue
+		}
 		if runner.Reporter != nil {
 			runner.Reporter.ProfileStarted(profile)
 		}
@@ -102,6 +112,16 @@ func (runner ProvisionRunner) Run(
 			}
 			return domain.AdapterResult{}, output.String(), fmt.Errorf("provision profile %q: %w", profile, execErr)
 		}
+		changed, checkErr = runner.checkProfile(ctx, request, profile)
+		if checkErr != nil || changed {
+			if checkErr == nil {
+				checkErr = errors.New("hook still reports changed after apply")
+			}
+			restoreErr := restore()
+			return domain.AdapterResult{}, output.String(), errors.Join(
+				fmt.Errorf("verify provision profile %q: %w", profile, checkErr), restoreErr,
+			)
+		}
 		if runner.Reporter != nil {
 			runner.Reporter.ProfileCompleted(profile)
 		}
@@ -113,4 +133,29 @@ func (runner ProvisionRunner) Run(
 		Schema: request.Schema, OperationID: request.OperationID, Status: "ok",
 		Output: map[string]any{"profiles": len(runner.Profiles), "desiredPower": intent.Desired},
 	}, output.String(), nil
+}
+
+func (runner ProvisionRunner) checkProfile(
+	ctx context.Context,
+	request domain.AdapterRequest,
+	profile string,
+) (bool, error) {
+	physical := request
+	physical.Action = "profile-check"
+	physical.Arguments = []string{"--check", profile}
+	result, diagnostics, err := runner.Physical.Run(ctx, physical, nil)
+	if err != nil {
+		return false, err
+	}
+	if result.Status != "ok" {
+		return false, fmt.Errorf("adapter returned %s", result.Status)
+	}
+	switch strings.TrimSpace(diagnostics) {
+	case "converged":
+		return false, nil
+	case "changed":
+		return true, nil
+	default:
+		return false, errors.New("invalid check result")
+	}
 }

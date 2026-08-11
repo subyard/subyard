@@ -97,24 +97,6 @@ stage_secrets() {
     || die "could not stage secrets.env into the yard"
 }
 
-# A POST to the broker SITE url FROM THE YARD (loopback). The bearer is read in-yard from the
-# staged secrets.env (role = maintainer|ci) so no secret crosses argv. Echoes the response body.
-broker_post() {  # <role> <endpoint-path> <json-body>
-  yexec sh -s -- "$1" "$2" "$3" "$SITE_PORT" "$YSECRETS" <<'EOF'
-set -eu
-role="$1"; path="$2"; body="$3"; port="$4"; secrets="$5"
-[ -r "$secrets" ] || { echo '{"status":"error","code":"NO_SECRETS"}'; exit 0; }
-. "$secrets"
-case "$role" in
-  maintainer) bearer="${OPENCLAW_QA_CONVEX_SECRET_MAINTAINER:-}" ;;
-  ci)         bearer="${OPENCLAW_QA_CONVEX_SECRET_CI:-}" ;;
-  *)          bearer="" ;;
-esac
-curl -sS --max-time 25 -X POST "http://127.0.0.1:$port/qa-credentials/v1$path" \
-  -H "authorization: Bearer $bearer" -H "content-type: application/json" -d "$body"
-EOF
-}
-
 # ----------------------------------------------------------------------------------
 # up — bring the broker online end to end (idempotent / resumable).
 # ----------------------------------------------------------------------------------
@@ -144,13 +126,6 @@ cmd_up() {
   [ "${BACKEND_IMAGE##*:}" = latest ] \
     && warn "BACKEND_IMAGE is ':latest' — pin a commit-hash tag for a reproducible yard, compatible with convex 1.35.1 (see broker.conf)" \
     || true
-
-  announce "yard qa-pool up — in-yard QA credential broker (Convex, self-hosted)" \
-    "Run the Convex backend '$CNAME' on the yard's Docker, bound to 127.0.0.1:$CLOUD_PORT (API) + 127.0.0.1:$SITE_PORT (SITE) — loopback only, never the LAN." \
-    "Persist its DB under $YDATA; generate an admin key; deploy the broker functions from $BROKER_SRC (copied to $YSRC)." \
-    "Register the generated role secrets as Convex deployment env." \
-    "Then seed the generated pool and write the worker env ($YCLIENT)."
-  proceed_or_die y   # transient bring-up (start the shared QA broker) — default Yes
 
   for d in "$DATA_ROOT" "$YDATA" "$YSRC" "$(dirname "$YSECRETS")"; do
     yexec install -d -o "$DEV_UID" -g "$DEV_UID" "$d"
@@ -265,8 +240,11 @@ deploy_functions() {
 # seed — (re)seed the pool from pool.jsonl; idempotent (dedup by note).
 # ----------------------------------------------------------------------------------
 cmd_seed() {
-  require_box; require_secrets; stage_secrets
   [ -r "$POOL" ] || { warn "no generated QA pool at $POOL — nothing to seed"; return 0; }
+  require_box
+  box_running || die "broker is not running — ${PROG:-yard} qa-pool up"
+  require_secrets
+  stage_secrets
   incus file push "$POOL" "$INSTANCE_NAME$YPOOL" "${PROJ[@]}" \
     --mode 0600 --uid "$DEV_UID" --gid "$DEV_UID" >/dev/null \
     || die "could not stage pool.jsonl into the yard"
@@ -377,23 +355,7 @@ cmd_status() {
   echo "api:      http://127.0.0.1:$CLOUD_PORT (deploy/env)   site: http://127.0.0.1:$SITE_PORT (acquire/heartbeat/release)"
   echo "data:     $DATA_ROOT"
   if yexec test -r "$YCLIENT"; then echo "worker:   $YCLIENT (source it; role=ci)"; else echo "worker:   (not exposed) — ${PROG:-yard} qa-pool expose"; fi
-  if box_running && yexec test -r "$YSECRETS"; then
-    local resp
-    resp="$(broker_post maintainer /admin/list '{"status":"all","limit":500}' 2>/dev/null || true)"
-    if [ "$(printf '%s' "$resp" | jq -r '.status // "?"' 2>/dev/null)" = ok ]; then
-      echo "pool:"
-      printf '%s' "$resp" | jq -r '
-        (.credentials // [])
-        | group_by(.kind)[]
-        | "  " + (.[0].kind)
-          + "  active=" + ((map(select(.status=="active")) | length)|tostring)
-          + " leased=" + ((map(select(.lease!=null)) | length)|tostring)
-          + " disabled=" + ((map(select(.status=="disabled")) | length)|tostring)' 2>/dev/null \
-        || echo "  (empty)"
-    else
-      echo "pool:     (unreachable — ${resp:-no response}; functions deployed + secrets set?)"
-    fi
-  fi
+  echo "pool:     credential and lease details withheld from read-only status; run smoke to validate"
 }
 
 cmd_logs() {
@@ -409,8 +371,10 @@ cmd_logs() {
 # smoke — DoD self-test: lease every bot (distinct), prove POOL_EXHAUSTED, release all.
 # ----------------------------------------------------------------------------------
 cmd_smoke() {
-  require_box; require_secrets; stage_secrets
+  require_box
   box_running || die "broker is not running — ${PROG:-yard} qa-pool up"
+  require_secrets
+  stage_secrets
   info "smoke-testing kind '$KIND' (acquire all → expect POOL_EXHAUSTED → release all) …"
   local out
   out="$(yexec sh -s -- "$YSECRETS" "$SITE_PORT" "$KIND" "$OWNER_ID" <<'EOF'
@@ -468,37 +432,207 @@ EOF
 # down / destroy
 # ----------------------------------------------------------------------------------
 cmd_down() {
-  require_box
-  if box_running; then ydocker stop "$CNAME" >/dev/null && ok "broker stopped (data + pool kept)"; else ok "broker already stopped"; fi
+  if box_running; then
+    ydocker stop "$CNAME" >/dev/null && ok "broker stopped (data + pool kept)"
+  else
+    ok "broker already stopped"
+  fi
 }
 
 cmd_destroy() {
   local purge=0; for a in "$@"; do case "$a" in --purge) purge=1 ;; esac; done
-  require_box
-  local purge_line=("The broker data root $DATA_ROOT (admin key, DB, pool) is KEPT (use --purge to wipe it).")
-  [ "$purge" = 1 ] && purge_line=("WIPE the broker data root $DATA_ROOT (admin key, Convex DB, deployed functions, seeded pool) — irreversible; re-seed from host-config on next 'up'.")
-  announce "yard qa-pool destroy — remove the in-yard QA broker" \
-    "Remove the backend container '$CNAME' from the yard (force)." \
-    "Drop staged secrets under /srv/env-secrets/qa-pool." \
-    "${purge_line[@]}"
-  proceed_or_die
+  if ! qa_destroy_target_exists "$purge"; then
+    ok "no QA broker state to destroy"
+    return 0
+  fi
   ydocker rm -f "$CNAME" >/dev/null 2>&1 && ok "broker container removed" || ok "no broker container to remove"
   yexec rm -rf "$(dirname "$YSECRETS")" 2>/dev/null || true
   if [ "$purge" = 1 ]; then yexec rm -rf "$DATA_ROOT" 2>/dev/null && ok "broker data root wiped"; fi
 }
 
 # ----------------------------------------------------------------------------------
+emit_resource_assessment() { # <local-action> <true|false> [fixed consequence...]
+  local action="$1" changed="$2" separator=""
+  shift 2
+  printf '{"schema":"yard.resource-action-assessment.v1","action":"%s","changed":%s,"consequences":[' \
+    "$action" "$changed"
+  local consequence
+  for consequence in "$@"; do
+    printf '%s"%s"' "$separator" "$consequence"
+    separator=,
+  done
+  printf ']}\n'
+}
+
+require_no_resource_arguments() {
+  local verb="$1"
+  shift
+  [ "$#" -eq 0 ] || die "'$verb' does not accept additional arguments"
+}
+
+validate_up_arguments() {
+  local src_override=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --source)
+        src_override="${2:-}"
+        [ -n "$src_override" ] || die "--source needs a yard path"
+        shift
+        ;;
+      --redeploy) ;;
+      -*) die "unknown option '$1'" ;;
+      *) die "unexpected argument '$1'" ;;
+    esac
+    shift
+  done
+  [ -z "$src_override" ] || BROKER_SRC="$src_override"
+}
+
+validate_logs_arguments() {
+  local argument
+  for argument in "$@"; do
+    case "$argument" in
+      -f|--follow) ;;
+      *) die "logs does not accept argument '$argument'" ;;
+    esac
+  done
+}
+
+destroy_action_for_arguments() {
+  local purge_requested=0 argument
+  for argument in "$@"; do
+    case "$argument" in
+      --purge) purge_requested=1 ;;
+      *) die "destroy does not accept argument '$argument'" ;;
+    esac
+  done
+  if [ "$purge_requested" -eq 1 ]; then printf 'destroy-purge\n'; else printf 'destroy\n'; fi
+}
+
+qa_destroy_target_exists() { # <purge:0|1>
+  box_exists && return 0
+  yexec test -e "$(dirname "$YSECRETS")" >/dev/null 2>&1 && return 0
+  [ "$1" -eq 1 ] && yexec test -e "$DATA_ROOT" >/dev/null 2>&1 && return 0
+  return 1
+}
+
+prepare_resource() { # <public-verb> [validated args...]
+  local verb="$1" action changed=false purge_flag=0
+  shift
+  case "$verb" in
+    up)
+      validate_up_arguments "$@"
+      svc_require_yard_running
+      command -v incus >/dev/null 2>&1 || die "incus not found"
+      [ -n "$BROKER_SRC" ] \
+        || die "BROKER_SRC unset — configure the in-yard QA broker source before running qa-pool up"
+      yexec test -r "$BROKER_SRC/convex.json" \
+        || die "the configured QA broker source has no readable convex.json"
+      emit_resource_assessment up true \
+        "converge the in-yard QA credential broker runtime" \
+        "deploy broker functions and generated credentials" \
+        "seed the generated bot pool and refresh its worker environment"
+      ;;
+    seed)
+      require_no_resource_arguments seed "$@"
+      svc_require_yard_running
+      if [ ! -r "$POOL" ]; then
+        emit_resource_assessment seed false
+        return
+      fi
+      require_box
+      box_running || die "QA broker is stopped — run: ${PROG:-yard} qa-pool up"
+      emit_resource_assessment seed true "stage and merge the generated QA bot pool"
+      ;;
+    expose)
+      require_no_resource_arguments expose "$@"
+      svc_require_yard_running
+      require_box
+      emit_resource_assessment expose true "refresh the in-yard QA worker credential environment"
+      ;;
+    smoke)
+      require_no_resource_arguments smoke "$@"
+      svc_require_yard_running
+      require_box
+      box_running || die "QA broker is stopped — run: ${PROG:-yard} qa-pool up"
+      emit_resource_assessment smoke true \
+        "temporarily lease and release every generated QA bot to validate pool isolation"
+      ;;
+    down)
+      require_no_resource_arguments down "$@"
+      svc_require_yard_running
+      if box_running; then
+        emit_resource_assessment down true "stop the QA broker runtime while preserving its data"
+      else
+        emit_resource_assessment down false
+      fi
+      ;;
+    destroy)
+      action="$(destroy_action_for_arguments "$@")"
+      svc_require_yard_running
+      [ "$action" != destroy-purge ] || purge_flag=1
+      qa_destroy_target_exists "$purge_flag" && changed=true
+      if [ "$changed" = false ]; then
+        emit_resource_assessment "$action" false
+      elif [ "$action" = destroy-purge ]; then
+        emit_resource_assessment "$action" true \
+          "remove the QA broker runtime and staged credentials" \
+          "irreversibly delete the persistent QA broker data root"
+      else
+        emit_resource_assessment "$action" true \
+          "remove the QA broker runtime and staged credentials while preserving broker data"
+      fi
+      ;;
+    status)
+      require_no_resource_arguments status "$@"
+      emit_resource_assessment status false
+      ;;
+    logs)
+      validate_logs_arguments "$@"
+      emit_resource_assessment logs false
+      ;;
+    *) die "unknown 'yard qa-pool' resource verb: '$verb'" ;;
+  esac
+}
+
+require_resource_apply() { # <expected-local-action>
+  local expected="$1"
+  [ "${SUBYARD_RESOURCE_MODE:-}" = apply ] || die "resource apply mode is required"
+  [ "${SUBYARD_RESOURCE_ACTION:-}" = "$expected" ] \
+    || die "prepared resource action mismatch (expected '$expected')"
+  [ -n "${SUBYARD_OPERATION_ID:-}" ] || die "resource apply operation ID is required"
+}
+
 sub="${1:-}"; [ $# -gt 0 ] && shift
-case "$sub" in
-  up)      cmd_up "$@" ;;
-  seed)    svc_require_yard_running; cmd_seed ;;
-  expose)  svc_require_yard_running; cmd_expose ;;
-  status)  cmd_status ;;
-  logs)    svc_require_yard_running; cmd_logs "$@" ;;
-  smoke)   svc_require_yard_running; cmd_smoke ;;
-  down)    svc_require_yard_running; cmd_down ;;
-  destroy) svc_require_yard_running; cmd_destroy "$@" ;;
-  is-up)   box_running >/dev/null 2>&1 && exit 0 || exit 1 ;;  # silent registry probe (yard status)
-  ''|-h|--help) _yard_help_and_exit ;;
-  *) die "unknown 'qa-pool' subcommand: '$sub' (try: up | seed | expose | status | logs | smoke | down | destroy)" ;;
+case "${SUBYARD_RESOURCE_MODE:-}" in
+  prepare)
+    [ -n "$sub" ] || die "resource verb is required"
+    prepare_resource "$sub" "$@"
+    ;;
+  apply)
+    case "$sub" in
+      up)      validate_up_arguments "$@"; require_resource_apply up; cmd_up "$@" ;;
+      seed)    require_no_resource_arguments seed "$@"; require_resource_apply seed; svc_require_yard_running; cmd_seed ;;
+      expose)  require_no_resource_arguments expose "$@"; require_resource_apply expose; svc_require_yard_running; cmd_expose ;;
+      status)  require_no_resource_arguments status "$@"; require_resource_apply status; cmd_status ;;
+      logs)    validate_logs_arguments "$@"; require_resource_apply logs; svc_require_yard_running; cmd_logs "$@" ;;
+      smoke)   require_no_resource_arguments smoke "$@"; require_resource_apply smoke; svc_require_yard_running; cmd_smoke ;;
+      down)    require_no_resource_arguments down "$@"; require_resource_apply down; svc_require_yard_running; cmd_down ;;
+      destroy)
+        action="$(destroy_action_for_arguments "$@")"
+        require_resource_apply "$action"
+        svc_require_yard_running
+        cmd_destroy "$@"
+        ;;
+      *) die "unknown 'yard qa-pool' apply verb: '$sub'" ;;
+    esac
+    ;;
+  '')
+    case "$sub" in
+      is-up) box_running >/dev/null 2>&1 && exit 0 || exit 1 ;;
+      ''|-h|--help) _yard_help_and_exit ;;
+      *) die "typed resource dispatcher required for 'yard qa-pool $sub'" ;;
+    esac
+    ;;
+  *) die "unknown resource execution mode '${SUBYARD_RESOURCE_MODE:-}'" ;;
 esac

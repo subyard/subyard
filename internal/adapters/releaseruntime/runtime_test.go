@@ -3,6 +3,7 @@ package releaseruntime
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -13,7 +14,7 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 )
 
-func TestPrepareValidatesOptionsAndKeepsChecksMutating(t *testing.T) {
+func TestPrepareReturnsTypedReleaseActions(t *testing.T) {
 	home := t.TempDir()
 	var output bytes.Buffer
 	release := New(Config{Environment: map[string]string{"HOME": home}, Stdout: &output})
@@ -23,16 +24,16 @@ func TestPrepareValidatesOptionsAndKeepsChecksMutating(t *testing.T) {
 	}
 
 	help, err := release.Prepare(context.Background(), []string{"--help"})
-	if err != nil || help.Effect != domain.CommandRead || help.Execute(context.Background()) != nil ||
+	if err != nil || help.Action != "update.help" || help.Changed || help.Execute(context.Background()) != nil ||
 		!strings.Contains(output.String(), "Usage: yard update") {
 		t.Fatalf("invalid help operation: %#v, %q, %v", help, output.String(), err)
 	}
 	check, err := release.Prepare(context.Background(), []string{"--version", "1.2.3", "--check"})
-	if err != nil || check.Effect != domain.CommandMutate || check.RefreshConfigs {
-		t.Fatalf("update check can write its cache and must stay mutating: %#v, %v", check, err)
+	if err != nil || check.Action != "update.check" || !check.Changed || check.RefreshConfigs {
+		t.Fatalf("update check must be a typed bounded write: %#v, %v", check, err)
 	}
 	update, err := release.Prepare(context.Background(), []string{"--version", "1.2.3"})
-	if err != nil || !update.RefreshConfigs ||
+	if err != nil || update.Action != "update.activate" || !update.Changed || !update.RefreshConfigs ||
 		update.ActiveLauncher != filepath.Join(home, ".subyard", "runtime", "current", "bin", "yard") ||
 		!strings.Contains(strings.Join(update.Consequences, " "), "lifecycle migration") ||
 		strings.Contains(strings.Join(check.Consequences, " "), "lifecycle migration") {
@@ -46,8 +47,9 @@ func TestPrepareValidatesOptionsAndKeepsChecksMutating(t *testing.T) {
 	if err != nil || explicit.ActiveLauncher != filepath.Join(explicitRoot, "current", "bin", "yard") {
 		t.Fatalf("explicit runtime launcher is invalid: %#v, %v", explicit, err)
 	}
+	prepareRollbackRuntime(t, explicitRoot, "current-a", "previous-b")
 	rollback, err := release.Prepare(context.Background(), []string{"--runtime-root", explicitRoot, "--rollback"})
-	if err != nil || !rollback.RefreshConfigs ||
+	if err != nil || rollback.Action != "update.rollback" || !rollback.Changed || !rollback.RefreshConfigs ||
 		rollback.ActiveLauncher != filepath.Join(explicitRoot, "current", "bin", "yard") {
 		t.Fatalf("rollback must refresh materialized config: %#v, %v", rollback, err)
 	}
@@ -64,6 +66,306 @@ func TestPrepareValidatesOptionsAndKeepsChecksMutating(t *testing.T) {
 	}
 	if err := (Prepared{}).Execute(context.Background()); err == nil {
 		t.Fatal("empty prepared release operation was executable")
+	}
+}
+
+func TestPrepareRollbackFailsBeforePlanningWithoutValidPreviousRuntime(t *testing.T) {
+	root := t.TempDir()
+	release := New(Config{Environment: map[string]string{"HOME": root}, Stdout: &bytes.Buffer{}})
+	_, err := release.Prepare(context.Background(), []string{
+		"--runtime-root", filepath.Join(root, "runtime"), "--rollback",
+	})
+	if err == nil || !strings.Contains(err.Error(), "previous") {
+		t.Fatalf("rollback precondition error = %v", err)
+	}
+}
+
+func TestPrepareRejectsUnsafeReleaseRootsBeforePlanning(t *testing.T) {
+	root := t.TempDir()
+	external := filepath.Join(root, "external")
+	if err := os.MkdirAll(external, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cacheLink := filepath.Join(root, "cache-link")
+	if err := os.Symlink(external, cacheLink); err != nil {
+		t.Fatal(err)
+	}
+	runtimeLink := filepath.Join(root, "runtime-link")
+	if err := os.Symlink(external, runtimeLink); err != nil {
+		t.Fatal(err)
+	}
+	unsafeCache := filepath.Join(root, "unsafe-cache")
+	if err := os.Mkdir(unsafeCache, 0o770); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(unsafeCache, 0o770); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		name        string
+		cache       string
+		runtimeRoot string
+		arguments   []string
+	}{
+		{
+			name: "relative check cache", cache: "relative-cache",
+			arguments: []string{"--check", "--version", "1.2.3"},
+		},
+		{
+			name: "filesystem root check cache", cache: string(filepath.Separator),
+			arguments: []string{"--check", "--version", "1.2.3"},
+		},
+		{
+			name: "symlink ancestor check cache", cache: filepath.Join(cacheLink, "releases"),
+			arguments: []string{"--check", "--version", "1.2.3"},
+		},
+		{
+			name: "writable check cache", cache: unsafeCache,
+			arguments: []string{"--check", "--version", "1.2.3"},
+		},
+		{
+			name: "symlink activation runtime root", cache: filepath.Join(root, "cache"),
+			runtimeRoot: runtimeLink, arguments: []string{"--version", "1.2.3"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runtimeRoot := test.runtimeRoot
+			if runtimeRoot == "" {
+				runtimeRoot = filepath.Join(root, "runtime")
+			}
+			environment := map[string]string{
+				"HOME": root, "SUBYARD_HOME": root,
+				"YARD_RELEASE_CACHE": test.cache,
+				"YARD_RUNTIME_ROOT":  runtimeRoot,
+			}
+			release := New(Config{Environment: environment, Stdout: &bytes.Buffer{}})
+			if _, err := release.Prepare(context.Background(), test.arguments); err == nil {
+				t.Fatal("unsafe release roots were accepted")
+			}
+		})
+	}
+}
+
+func TestPreparedReleaseRejectsStaleRuntimeLinksBeforeInstaller(t *testing.T) {
+	root := t.TempDir()
+	runtimeRoot := filepath.Join(root, "runtime")
+	prepareRollbackRuntime(t, runtimeRoot, "current-a", "previous-b")
+	capture := filepath.Join(root, "installer-ran")
+	installer := filepath.Join(root, "installer.sh")
+	if err := os.WriteFile(installer, []byte("#!/bin/sh\ntouch \"$RELEASE_CAPTURE\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	release := New(Config{Environment: map[string]string{
+		"HOME": root, "RELEASE_CAPTURE": capture,
+	}, Installer: installer, Stdout: &bytes.Buffer{}})
+	prepared, err := release.Prepare(context.Background(), []string{
+		"--runtime-root", runtimeRoot, "--rollback",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(runtimeRoot, "previous")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("releases/previous-c", filepath.Join(runtimeRoot, "previous")); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepared.Execute(context.Background()); !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatalf("stale release error = %v", err)
+	}
+	if _, err := os.Stat(capture); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale release reached installer: %v", err)
+	}
+}
+
+func TestPreparedCheckRejectsReleaseCacheBoundaryDriftBeforeWrite(t *testing.T) {
+	for _, drift := range []string{"symlink", "permissions"} {
+		t.Run(drift, func(t *testing.T) {
+			root := t.TempDir()
+			cache := filepath.Join(root, "cache")
+			runtimeRoot := filepath.Join(root, "runtime")
+			if drift == "permissions" {
+				if err := os.Mkdir(cache, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			capture := filepath.Join(root, "installer-ran")
+			installer := filepath.Join(root, "installer.sh")
+			if err := os.WriteFile(installer, []byte("#!/bin/sh\ntouch \"$RELEASE_CAPTURE\"\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			release := New(Config{Environment: map[string]string{
+				"HOME": root, "YARD_RELEASE_CACHE": cache, "YARD_RUNTIME_ROOT": runtimeRoot,
+				"YARD_RELEASE_BASE_URL": "file://" + filepath.Join(root, "missing-assets"),
+				"RELEASE_CAPTURE":       capture,
+			}, Installer: installer, Stdout: &bytes.Buffer{}})
+			prepared, err := release.Prepare(context.Background(), []string{
+				"--check", "--version", "1.2.3",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			switch drift {
+			case "symlink":
+				external := filepath.Join(root, "external-cache")
+				if err := os.Mkdir(external, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(external, cache); err != nil {
+					t.Fatal(err)
+				}
+			case "permissions":
+				if err := os.Chmod(cache, 0o770); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if err := prepared.Execute(context.Background()); !errors.Is(err, domain.ErrPlanStale) {
+				t.Fatalf("release cache %s drift error = %v", drift, err)
+			}
+			if _, err := os.Stat(filepath.Join(cache, "1.2.3")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("release cache %s drift wrote cache data: %v", drift, err)
+			}
+			if _, err := os.Stat(capture); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("release cache %s drift reached installer: %v", drift, err)
+			}
+		})
+	}
+}
+
+func TestPreparedActivationRejectsRuntimeRootBoundaryDriftBeforeEffects(t *testing.T) {
+	for _, drift := range []string{"symlink", "permissions"} {
+		t.Run(drift, func(t *testing.T) {
+			root := t.TempDir()
+			cache := filepath.Join(root, "cache")
+			runtimeRoot := filepath.Join(root, "runtime")
+			if err := os.Mkdir(runtimeRoot, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			capture := filepath.Join(root, "installer-ran")
+			installer := filepath.Join(root, "installer.sh")
+			if err := os.WriteFile(installer, []byte("#!/bin/sh\ntouch \"$RELEASE_CAPTURE\"\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			release := New(Config{Environment: map[string]string{
+				"HOME": root, "YARD_RELEASE_CACHE": cache, "YARD_RUNTIME_ROOT": runtimeRoot,
+				"YARD_RELEASE_BASE_URL": "file://" + filepath.Join(root, "missing-assets"),
+				"RELEASE_CAPTURE":       capture,
+			}, Installer: installer, Stdout: &bytes.Buffer{}})
+			prepared, err := release.Prepare(context.Background(), []string{"--version", "1.2.3"})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			switch drift {
+			case "symlink":
+				external := filepath.Join(root, "external-runtime")
+				if err := os.Mkdir(external, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				original := filepath.Join(root, "prepared-runtime")
+				if err := os.Rename(runtimeRoot, original); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(external, runtimeRoot); err != nil {
+					t.Fatal(err)
+				}
+			case "permissions":
+				if err := os.Chmod(runtimeRoot, 0o770); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if err := prepared.Execute(context.Background()); !errors.Is(err, domain.ErrPlanStale) {
+				t.Fatalf("activation runtime root %s drift error = %v", drift, err)
+			}
+			if _, err := os.Stat(cache); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("activation runtime root %s drift populated cache: %v", drift, err)
+			}
+			if _, err := os.Stat(capture); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("activation runtime root %s drift reached installer: %v", drift, err)
+			}
+		})
+	}
+}
+
+func TestPreparedRollbackRejectsRuntimeRootBoundaryDriftBeforeEngineOrInstaller(t *testing.T) {
+	for _, drift := range []string{"symlink", "permissions"} {
+		t.Run(drift, func(t *testing.T) {
+			root := t.TempDir()
+			runtimeRoot := filepath.Join(root, "runtime")
+			prepareRollbackRuntime(t, runtimeRoot, "current-a", "previous-b")
+			engineCapture := filepath.Join(root, "engine-ran-after-prepare")
+			installerCapture := filepath.Join(root, "installer-ran")
+			installer := filepath.Join(root, "installer.sh")
+			if err := os.WriteFile(installer, []byte("#!/bin/sh\ntouch \"$INSTALLER_CAPTURE\"\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			release := New(Config{Environment: map[string]string{
+				"HOME": root, "ENGINE_CAPTURE": engineCapture, "INSTALLER_CAPTURE": installerCapture,
+			}, Installer: installer, Stdout: &bytes.Buffer{}})
+			prepared, err := release.Prepare(context.Background(), []string{
+				"--runtime-root", runtimeRoot, "--rollback",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			probeEngine := []byte("#!/bin/sh\ntouch \"$ENGINE_CAPTURE\"\nprintf 'yard 1.2.3\\n'\n")
+			switch drift {
+			case "symlink":
+				external := filepath.Join(root, "external-runtime")
+				prepareRollbackRuntime(t, external, "current-a", "previous-b")
+				if err := os.WriteFile(filepath.Join(external, "releases", "previous-b", "bin", "yard-engine"), probeEngine, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				original := filepath.Join(root, "prepared-runtime")
+				if err := os.Rename(runtimeRoot, original); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(external, runtimeRoot); err != nil {
+					t.Fatal(err)
+				}
+			case "permissions":
+				if err := os.WriteFile(filepath.Join(runtimeRoot, "releases", "previous-b", "bin", "yard-engine"), probeEngine, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(runtimeRoot, 0o770); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if err := prepared.Execute(context.Background()); !errors.Is(err, domain.ErrPlanStale) {
+				t.Fatalf("rollback runtime root %s drift error = %v", drift, err)
+			}
+			if _, err := os.Stat(engineCapture); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("rollback runtime root %s drift executed engine: %v", drift, err)
+			}
+			if _, err := os.Stat(installerCapture); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("rollback runtime root %s drift reached installer: %v", drift, err)
+			}
+		})
+	}
+}
+
+func prepareRollbackRuntime(t *testing.T, root, current, previous string) {
+	t.Helper()
+	for _, name := range []string{current, previous} {
+		engine := filepath.Join(root, "releases", name, "bin", "yard-engine")
+		if err := os.MkdirAll(filepath.Dir(engine), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(engine, []byte("#!/bin/sh\nprintf 'yard 1.2.3\\n'\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("releases/"+current, filepath.Join(root, "current")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("releases/"+previous, filepath.Join(root, "previous")); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -128,7 +430,7 @@ func TestExecuteDownloadsAssetsAndPassesValidatedEnvironment(t *testing.T) {
 		t.Fatalf("release status was not reported: %q", output.String())
 	}
 
-	currentEngine := filepath.Join(runtimeRoot, "current", "bin", "yard-engine")
+	currentEngine := filepath.Join(runtimeRoot, "releases", "current-a", "bin", "yard-engine")
 	if err := os.MkdirAll(filepath.Dir(currentEngine), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -137,6 +439,9 @@ func TestExecuteDownloadsAssetsAndPassesValidatedEnvironment(t *testing.T) {
 		[]byte("#!/bin/sh\nprintf 'yard 1.2.3\\n'\n"),
 		0o700,
 	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("releases/current-a", filepath.Join(runtimeRoot, "current")); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Remove(capture); err != nil {

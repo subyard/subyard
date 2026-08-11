@@ -1,10 +1,19 @@
 #!/usr/bin/env bash
+# subyard-provision-check-v1
 # config/profiles/openclaw/provision.sh — install the OpenClaw toolchain into the yard (run as root
 # inside the yard by the Go provision workflow; idempotent). Vars: NODE_VERSION, COREPACK_VERSION,
 # PNPM_VERSION, DEV_USER, OPTIONAL_FEATURES, and the cache contract forwarded from profile.conf
 # (PIP_CACHE_DIR, npm_config_cache, npm_config_store_dir, PLAYWRIGHT_BROWSERS_PATH). Cache paths use
 # DEV_USER tool configs to keep root writes out of the shared cache.
 set -euo pipefail
+
+check_only=0
+case "${1:-}" in
+  --check) check_only=1; shift ;;
+  "") ;;
+  *) printf 'openclaw provision: unknown argument %s\n' "$1" >&2; exit 2 ;;
+esac
+[ "$#" -eq 0 ] || { printf 'openclaw provision: unexpected argument\n' >&2; exit 2; }
 
 NODE_VERSION="${NODE_VERSION:-24.15.0}"
 COREPACK_VERSION="${COREPACK_VERSION:-0.31.0}"
@@ -19,8 +28,71 @@ CACHE_PNPM_STORE="${npm_config_store_dir:-}"
 CACHE_PLAYWRIGHT="${PLAYWRIGHT_BROWSERS_PATH:-}"
 unset PIP_CACHE_DIR npm_config_cache npm_config_store_dir PLAYWRIGHT_BROWSERS_PATH
 
+DEV_HOME="${OPENCLAW_DEV_HOME:-$(getent passwd "$DEV_USER" | cut -d: -f6)}"
+: "${DEV_HOME:=/home/$DEV_USER}"
+
+if [ "$check_only" -eq 1 ]; then
+  root_prefix="${OPENCLAW_TEST_ROOT:-}"
+  rooted() { printf '%s%s' "$root_prefix" "$1"; }
+  changed=0
+  node="$(rooted /usr/local/bin/node)"
+  corepack="$(rooted /usr/local/bin/corepack)"
+  pnpm="$(rooted /usr/local/bin/pnpm)"
+  sy_cache="$(rooted /usr/local/bin/sy-cache)"
+  python="$(rooted /opt/venv/bin/python)"
+  pip="$(rooted /opt/venv/bin/pip)"
+  [ -x "$node" ] && [ "$($node --version 2>/dev/null)" = "v${NODE_VERSION}" ] || changed=1
+  [ -x "$corepack" ] && [ "$($corepack --version 2>/dev/null)" = "$COREPACK_VERSION" ] || changed=1
+  [ -x "$pnpm" ] && [ "$($pnpm --version 2>/dev/null)" = "$PNPM_VERSION" ] || changed=1
+  [ -x "$sy_cache" ] && [ -x "$python" ] && [ -x "$pip" ] || changed=1
+  expected_owner="$(id -u "$DEV_USER"):$(id -g "$DEV_USER")"
+  for cache in /srv/cache/pnpm /srv/cache/pip /srv/cache/npm; do
+    directory="$(rooted "$cache")"
+    [ -d "$directory" ] && [ ! -L "$directory" ] \
+      && [ "$(stat -c '%u:%g' "$directory" 2>/dev/null)" = "$expected_owner" ] || changed=1
+  done
+  if [ -n "$CACHE_NPM" ]; then
+    npmrc="$DEV_HOME/.npmrc"
+    [ -f "$npmrc" ] && [ ! -L "$npmrc" ] \
+      && [ "$(grep -Fxc '# >>> subyard-openclaw >>>' "$npmrc" 2>/dev/null)" -eq 1 ] \
+      && [ "$(grep -Fxc "cache=$CACHE_NPM" "$npmrc" 2>/dev/null)" -eq 1 ] \
+      && [ "$(grep -Fxc '# <<< subyard-openclaw <<<' "$npmrc" 2>/dev/null)" -eq 1 ] \
+      || changed=1
+  fi
+  if [ -n "$CACHE_PIP" ]; then
+    pip_conf="$DEV_HOME/.config/pip/pip.conf"
+    [ -f "$pip_conf" ] && [ ! -L "$pip_conf" ] \
+      && grep -Fxq "cache-dir = $CACHE_PIP" "$pip_conf" 2>/dev/null || changed=1
+  fi
+  profile_env="$(rooted /etc/profile.d/subyard-openclaw.sh)"
+  environment_file="$(rooted /etc/environment)"
+  docs="$(rooted /etc/subyard/openclaw-l1.md)"
+  [ -f "$profile_env" ] && [ ! -L "$profile_env" ] \
+    && grep -Fq 'SUBYARD_OPENCLAW_DOCS=/etc/subyard/openclaw-l1.md' "$profile_env" || changed=1
+  [ -f "$environment_file" ] && [ ! -L "$environment_file" ] \
+    && [ "$(grep -Fxc '# >>> subyard-openclaw >>>' "$environment_file" 2>/dev/null)" -eq 1 ] \
+    && grep -Fxq 'SUBYARD_OPENCLAW_DOCS=/etc/subyard/openclaw-l1.md' "$environment_file" \
+    || changed=1
+  [ -f "$docs" ] && [ ! -L "$docs" ] \
+    && grep -Fq '# OpenClaw in this yard' "$docs" || changed=1
+  case " ${OPTIONAL_FEATURES:-} " in
+    *" browser_tests "*)
+      command -v chromium >/dev/null 2>&1 || changed=1
+      [ -d "$(rooted /srv/cache/playwright)" ] || changed=1
+      ;;
+  esac
+  case " ${OPTIONAL_FEATURES:-} " in
+    *" sandbox_tests "*)
+      for tool in dockerd-rootless-setuptool.sh fuse-overlayfs slirp4netns bwrap; do
+        command -v "$tool" >/dev/null 2>&1 || changed=1
+      done
+      ;;
+  esac
+  [ "$changed" -eq 0 ] && exit 0
+  exit 10
+fi
+
 export DEBIAN_FRONTEND=noninteractive
-DEV_HOME="$(getent passwd "$DEV_USER" | cut -d: -f6)"; : "${DEV_HOME:=/home/$DEV_USER}"
 
 # 1. Node — pinned, from nodejs.org into /usr/local (shadows the distro node).
 if [ "$(/usr/local/bin/node --version 2>/dev/null)" != "v${NODE_VERSION}" ]; then

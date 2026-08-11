@@ -64,6 +64,31 @@ func TestProjectEnvironmentUpStagesProtectedInputAndNativeManifest(t *testing.T)
 	}
 }
 
+func TestProjectEnvironmentManifestIsCanonical(t *testing.T) {
+	payload, err := ProjectEnvironmentManifest(
+		cloneRecord(), ProjectEnvironmentProfile{
+			BaseImage: "ubuntu:24.04", Features: []string{"browser"},
+			Environment: map[string]string{"PUBLIC_VALUE": "visible"},
+		}, true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Profile string              `json:"profile"`
+		Image   string              `json:"image"`
+		EnvKeys []string            `json:"envKeys"`
+		Secrets []map[string]string `json:"secrets"`
+	}
+	if err := json.Unmarshal(payload, &document); err != nil {
+		t.Fatal(err)
+	}
+	if document.Profile != "openclaw" || document.Image != "ubuntu:24.04" ||
+		!slices.Equal(document.EnvKeys, []string{"PUBLIC_VALUE"}) || len(document.Secrets) != 1 {
+		t.Fatalf("manifest=%s", payload)
+	}
+}
+
 func TestProjectEnvironmentRejectsControlSocketMount(t *testing.T) {
 	data := &projectDataStub{}
 	runner := ProjectEnvironmentRunner{
@@ -90,6 +115,10 @@ func TestProjectEnvironmentInfoAndDownUseDataPlane(t *testing.T) {
 		if len(request.Command) == 2 && request.Command[0] == "cat" {
 			return ports.InstanceExecResult{Stdout: []byte(manifestJSON)}, nil
 		}
+		if len(request.Command) >= 3 && request.Command[0] == "docker" &&
+			request.Command[1] == "inspect" && request.Command[2] == "-f" {
+			return ports.InstanceExecResult{Stdout: []byte("1\tdemo-12345678\topenclaw\n")}, nil
+		}
 		return ports.InstanceExecResult{}, nil
 	}}
 	runner := ProjectEnvironmentRunner{Data: data, Project: cloneRecord()}
@@ -108,5 +137,93 @@ func TestProjectEnvironmentInfoAndDownUseDataPlane(t *testing.T) {
 	last := data.requests[len(data.requests)-1].Command
 	if !slices.Equal(last, []string{"docker", "stop", "subyard-box-demo-12345678"}) {
 		t.Fatalf("unexpected down command: %#v", last)
+	}
+}
+
+func TestProjectEnvironmentDownRejectsUnownedBox(t *testing.T) {
+	data := &projectDataStub{run: func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+		if len(request.Command) >= 3 && request.Command[0] == "docker" &&
+			request.Command[1] == "inspect" && request.Command[2] == "-f" {
+			return ports.InstanceExecResult{Stdout: []byte("\t\t\n")}, nil
+		}
+		return ports.InstanceExecResult{}, nil
+	}}
+	runner := ProjectEnvironmentRunner{Data: data, Project: cloneRecord()}
+	if _, _, err := runner.Run(context.Background(), domain.AdapterRequest{
+		Schema: 1, OperationID: "operation-env-down", Adapter: "project-env", Action: "down",
+	}, nil); err == nil || !strings.Contains(err.Error(), "not owned") {
+		t.Fatalf("unowned environment was stopped: %v", err)
+	}
+	for _, request := range data.requests {
+		if slices.Equal(request.Command, []string{"docker", "stop", "subyard-box-demo-12345678"}) {
+			t.Fatal("unowned environment received docker stop")
+		}
+	}
+}
+
+func TestProjectEnvironmentRebuildRecreatesOwnedBox(t *testing.T) {
+	data := &projectDataStub{run: func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+		command := request.Command
+		if slices.Equal(command, []string{"test", "-d", "/mnt/host/agent-sessions"}) {
+			return ports.InstanceExecResult{ExitCode: 1}, errors.New("missing")
+		}
+		if len(command) >= 3 && command[0] == "docker" && command[1] == "inspect" && command[2] == "-f" {
+			return ports.InstanceExecResult{Stdout: []byte("1\tdemo-12345678\topenclaw\n")}, nil
+		}
+		return ports.InstanceExecResult{}, nil
+	}}
+	runner := ProjectEnvironmentRunner{
+		Data: data, Yard: domain.Context{DevUID: 1000}, Project: cloneRecord(), Rebuild: true,
+		Profile: ProjectEnvironmentProfile{BaseImage: "ubuntu:24.04"},
+	}
+	if _, _, err := runner.Run(context.Background(), domain.AdapterRequest{
+		Schema: 1, OperationID: "operation-env-rebuild", Adapter: "project-env", Action: "up",
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	removeIndex, runIndex, startIndex := -1, -1, -1
+	for index, request := range data.requests {
+		command := request.Command
+		if len(command) >= 2 && command[0] == "docker" {
+			switch command[1] {
+			case "rm":
+				removeIndex = index
+			case "run":
+				runIndex = index
+			case "start":
+				startIndex = index
+			}
+		}
+	}
+	if removeIndex < 0 || runIndex <= removeIndex || startIndex >= 0 {
+		t.Fatalf("rebuild did not recreate the box: %#v", data.requests)
+	}
+}
+
+func TestProjectEnvironmentRebuildRejectsUnownedBox(t *testing.T) {
+	data := &projectDataStub{run: func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+		command := request.Command
+		if slices.Equal(command, []string{"test", "-d", "/mnt/host/agent-sessions"}) {
+			return ports.InstanceExecResult{ExitCode: 1}, errors.New("missing")
+		}
+		if len(command) >= 3 && command[0] == "docker" && command[1] == "inspect" && command[2] == "-f" {
+			return ports.InstanceExecResult{Stdout: []byte("\t\t\n")}, nil
+		}
+		return ports.InstanceExecResult{}, nil
+	}}
+	runner := ProjectEnvironmentRunner{
+		Data: data, Yard: domain.Context{DevUID: 1000}, Project: cloneRecord(), Rebuild: true,
+		Profile: ProjectEnvironmentProfile{BaseImage: "ubuntu:24.04"},
+	}
+	if _, _, err := runner.Run(context.Background(), domain.AdapterRequest{
+		Schema: 1, OperationID: "operation-env-rebuild", Adapter: "project-env", Action: "up",
+	}, nil); err == nil || !strings.Contains(err.Error(), "not owned") {
+		t.Fatalf("unowned box was accepted: %v", err)
+	}
+	for _, request := range data.requests {
+		if len(request.Command) >= 2 && request.Command[0] == "docker" &&
+			(request.Command[1] == "rm" || request.Command[1] == "run") {
+			t.Fatalf("unowned box was modified: %#v", data.requests)
+		}
 	}
 }

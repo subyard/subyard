@@ -29,7 +29,7 @@ func WritePersistentAssignment(
 	} else if err != nil {
 		return err
 	}
-	updated, err := editAssignmentContent(path, content, name, value)
+	updated, err := EditPersistentAssignmentContent(path, content, name, value)
 	if err != nil {
 		return err
 	}
@@ -60,6 +60,17 @@ func WritePersistentAssignment(
 		return syncPersistentDirectory(filepath.Dir(path))
 	}
 	return writePersistentFile(configHome, path, updated)
+}
+
+// EditPersistentAssignmentContent returns the complete persistent settings
+// content after applying one assignment change without writing it.
+func EditPersistentAssignmentContent(
+	path string,
+	content []byte,
+	name string,
+	value *string,
+) ([]byte, error) {
+	return editAssignmentContent(path, content, name, value)
 }
 
 // WritePersistentFile atomically stores a validated persistent file setting.

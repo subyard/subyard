@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
+# subyard-provision-check-v1
 # config/profiles/android/provision.sh — install the Android toolchain into the yard (run as root
 # inside the yard by the Go provision workflow; idempotent). Vars: ANDROID_API, JDK_VERSION,
 # BUILD_TOOLS_VERSION, SYSTEM_IMAGE, ANDROID_SDK_ROOT, GRADLE_USER_HOME, CMDLINE_TOOLS_URL, DEV_USER.
 set -euo pipefail
+
+check_only=0
+case "${1:-}" in
+  --check) check_only=1; shift ;;
+  "") ;;
+  *) printf 'android provision: unknown argument %s\n' "$1" >&2; exit 2 ;;
+esac
+[ "$#" -eq 0 ] || { printf 'android provision: unexpected argument\n' >&2; exit 2; }
 
 ANDROID_API="${ANDROID_API:-36}"
 JDK_VERSION="${JDK_VERSION:-17}"
@@ -12,6 +21,52 @@ ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-/srv/cache/android-sdk}"
 GRADLE_USER_HOME="${GRADLE_USER_HOME:-/srv/cache/gradle}"
 DEV_USER="${DEV_USER:-dev}"
 JDK_HOME="/opt/jdk-${JDK_VERSION}"
+
+if [ "$check_only" -eq 1 ]; then
+  root_prefix="${ANDROID_TEST_ROOT:-}"
+  rooted() { printf '%s%s' "$root_prefix" "$1"; }
+  changed=0
+  for command in curl unzip flock setsid cage Xwayland; do
+    command -v "$command" >/dev/null 2>&1 || changed=1
+  done
+  jdk_home="$(rooted "$JDK_HOME")"
+  sdk_root="$(rooted "$ANDROID_SDK_ROOT")"
+  gradle_root="$(rooted "$GRADLE_USER_HOME")"
+  [ -x "$jdk_home/bin/java" ] || changed=1
+  [ -x "$sdk_root/cmdline-tools/latest/bin/sdkmanager" ] || changed=1
+  [ -x "$sdk_root/platform-tools/adb" ] || changed=1
+  [ -d "$sdk_root/platforms/android-${ANDROID_API}" ] || changed=1
+  [ -d "$sdk_root/build-tools/${BUILD_TOOLS_VERSION}" ] || changed=1
+  [ -x "$sdk_root/emulator/emulator" ] || changed=1
+  image_path="${SYSTEM_IMAGE//;/\/}"
+  [ -d "$sdk_root/$image_path" ] || changed=1
+  [ -n "$(find "$sdk_root/licenses" -type f -print -quit 2>/dev/null)" ] || changed=1
+  expected_owner="$(id -u "$DEV_USER"):$(id -g "$DEV_USER")"
+  for directory in "$jdk_home" "$sdk_root" "$gradle_root"; do
+    [ -d "$directory" ] && [ ! -L "$directory" ] \
+      && [ "$(stat -c '%u:%g' "$directory" 2>/dev/null)" = "$expected_owner" ] || changed=1
+  done
+  profile_env="$(rooted /etc/profile.d/subyard-android.sh)"
+  [ -f "$profile_env" ] && [ ! -L "$profile_env" ] \
+    && grep -Fxq "export JAVA_HOME=\"$JDK_HOME\"" "$profile_env" \
+    && grep -Fxq "export ANDROID_HOME=\"$ANDROID_SDK_ROOT\"" "$profile_env" \
+    && grep -Fxq "export ANDROID_SDK_ROOT=\"$ANDROID_SDK_ROOT\"" "$profile_env" \
+    && grep -Fxq "export GRADLE_USER_HOME=\"$GRADLE_USER_HOME\"" "$profile_env" \
+    || changed=1
+  shopt -s nullglob
+  for lp in "$(rooted /srv/workspaces)"/*/src/local.properties; do
+    d="$(sed -n 's/^[[:space:]]*sdk\.dir[[:space:]]*=[[:space:]]*//p' "$lp" | tail -n1)"
+    d="${d%$'\r'}"
+    case "$d" in ""|"$ANDROID_SDK_ROOT") continue ;; esac
+    destination="$(rooted "$d")"
+    [ -L "$destination" ] \
+      && [ "$(readlink -f "$destination" 2>/dev/null)" = "$(readlink -f "$sdk_root")" ] \
+      || changed=1
+  done
+  shopt -u nullglob
+  [ "$changed" -eq 0 ] && exit 0
+  exit 10
+fi
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq

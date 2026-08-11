@@ -43,7 +43,7 @@ func (facade Facade) Run(originalCommand string) error {
 		if len(fields) != 1 {
 			return facade.writeError("invalid_request", "status accepts no arguments")
 		}
-		pool, err := facade.Store.Status()
+		pool, err := facade.Store.Inspect()
 		if err != nil {
 			return facade.writeError("unavailable", err.Error())
 		}

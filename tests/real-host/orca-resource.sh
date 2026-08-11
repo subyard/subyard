@@ -108,18 +108,23 @@ exec sudo /usr/bin/incus "$@"
 MOCK
 cat >"$fakebin/tailscale" <<'MOCK'
 #!/usr/bin/env bash
-[ "${1:-} ${2:-}" = 'ip -4' ] && printf '%s\n' "$ORCA_TEST_OWNER_IP"
+state_root="$(cd "$(dirname "$0")/.." && pwd)"
+[ "${1:-} ${2:-}" = 'ip -4' ] && cat "$state_root/owner-ip"
 MOCK
 cat >"$fakebin/getent" <<'MOCK'
 #!/usr/bin/env bash
-if [ "${1:-} ${2:-}" = "ahostsv4 $ORCA_TEST_ADVERTISE" ]; then
-  printf '%s STREAM %s\n' "$ORCA_TEST_OWNER_IP" "$ORCA_TEST_ADVERTISE"
+state_root="$(cd "$(dirname "$0")/.." && pwd)"
+owner_ip="$(cat "$state_root/owner-ip")"
+advertise="$(cat "$state_root/advertise")"
+if [ "${1:-} ${2:-}" = "ahostsv4 $advertise" ]; then
+  printf '%s STREAM %s\n' "$owner_ip" "$advertise"
 else
   exec /usr/bin/getent "$@"
 fi
 MOCK
 cat >"$fakebin/curl" <<'MOCK'
 #!/usr/bin/env bash
+state_root="$(cd "$(dirname "$0")/.." && pwd)"
 destination=
 release=0
 arguments=("$@")
@@ -134,20 +139,22 @@ for ((index=0; index < ${#arguments[@]}; index++)); do
 done
 if [ "$release" = 1 ]; then
   [ -n "$destination" ] || exit 2
-  cp "$ORCA_TEST_ARTIFACT" "$destination"
+  cp "$state_root/orca.deb" "$destination"
   exit 0
 fi
-exec "$ORCA_TEST_REAL_CURL" "$@"
+exec /usr/bin/curl "$@"
 MOCK
 chmod 0755 "$fakebin/"*
+printf '%s\n' "$owner_ip" >"$work/owner-ip"
+printf '%s\n' "$advertise" >"$work/advertise"
 
 setup_test_context "$work/context" "$project" "$instance"
-ORCA_TEST_REAL_CURL="$(command -v curl)"
 export PATH="$fakebin:$PATH"
-export ORCA_TEST_OWNER_IP="$owner_ip" ORCA_TEST_ADVERTISE="$advertise"
-export ORCA_TEST_ARTIFACT="$artifact" ORCA_TEST_REAL_CURL
 export ORCA_ADVERTISE_HOST="$advertise" ORCA_HOST_PORT="$host_port" ASSUME_YES=1
-handler="$ROOT/config/profiles/orca/resources/orca/handler.sh"
+
+run_orca() {
+  "$ROOT/bin/yard" orca "$@" --yes
+}
 
 server_cli() {
   "${incus[@]}" exec "$instance" -- runuser -u dev -- env \
@@ -227,7 +234,7 @@ assert_no_pairing_journal() {
 }
 
 stage 'installing and starting the production handler'
-"$handler" up
+run_orca up
 "${incus[@]}" exec "$instance" -- systemctl is-active --quiet subyard-orca.service
 "${incus[@]}" exec "$instance" -- test -x /usr/bin/orca-ide
 [ "$("${incus[@]}" exec "$instance" -- dpkg-query -W -f='${Version}' orca-ide)" = \
@@ -243,7 +250,7 @@ stage 'pairing two independent clients and reconnecting the first'
 first_pair="$("${incus[@]}" exec "$instance" -- \
   jq -er '.pairing | select(.available == true) | .url' /srv/agents/orca/ready.json)"
 client_status "$first_pair" client-a
-second_pair="$("$handler" pair | tail -n1)"
+second_pair="$(run_orca pair | tail -n1)"
 [ "$first_pair" != "$second_pair" ] || die 'pair restart reused the old offer'
 client_status "$second_pair" client-b
 client_status "$first_pair" client-a
@@ -259,16 +266,16 @@ printf '{"schema":1,"projectId":"%s","name":"%s","mode":"sync"}\n' \
 chown dev:dev "$root/.subyard-meta.json"
 runuser -u dev -- git -C "$root/src" init -q
 YARD
-"$handler" sync >/dev/null
+run_orca sync >/dev/null
 server_cli repo list --json |
   jq -e '.result.repos | any(.path == "/srv/workspaces/gamma-12345678/src")' >/dev/null
 
 stage 'verifying exact owner route and SSH-loopback mode'
 [ "$("${incus[@]}" config device get "$instance" orca-server listen)" = \
   "tcp:$owner_ip:$host_port" ] || die 'Tailscale route is not exact-address'
-"$handler" down
+run_orca down
 export ORCA_ADVERTISE_HOST=127.0.0.1
-"$handler" up
+run_orca up
 [ "$("${incus[@]}" config device get "$instance" orca-server listen)" = \
   "tcp:127.0.0.1:$host_port" ] || die 'SSH route is not owner loopback'
 "${incus[@]}" exec "$instance" -- jq -e \
@@ -283,7 +290,7 @@ retargeted_first_pair="$(retarget_pairing "$first_pair" "ws://127.0.0.1:$host_po
 client_status "$retargeted_first_pair" client-a
 assert_all_repos
 assert_no_pairing_journal
-"$handler" down
+run_orca down
 
 if "${incus[@]}" config device list "$instance" | grep -qx orca-server; then
   die 'owned proxy survived down'

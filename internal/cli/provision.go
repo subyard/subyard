@@ -18,8 +18,10 @@ import (
 )
 
 type provisionExecution struct {
-	profiles []string
-	list     bool
+	profiles           []string
+	changedProfiles    []string
+	requiresPowerCycle bool
+	list               bool
 }
 
 type provisionReporter struct{ output io.Writer }
@@ -130,6 +132,13 @@ func provisionableProfiles(root string) ([]string, error) {
 		if !info.Mode().IsRegular() {
 			return nil, fmt.Errorf("profile %q provision hook is not a regular file", name)
 		}
+		content, err := os.ReadFile(hookPath)
+		if err != nil {
+			return nil, err
+		}
+		if !strings.Contains(string(content), "\n# subyard-provision-check-v1\n") {
+			return nil, fmt.Errorf("profile %q provision hook does not support check protocol", name)
+		}
 		profiles = append(profiles, name)
 	}
 	sort.Strings(profiles)
@@ -140,13 +149,88 @@ func (execution *provisionExecution) policy(
 	definition command.Definition,
 	yard domain.Context,
 ) domain.CommandPolicy {
+	profiles := execution.changedProfiles
+	if execution.requiresPowerCycle {
+		profiles = execution.profiles
+	}
 	return domain.CommandPolicy{
 		Name: definition.Name, Effect: domain.CommandEffect(definition.Effect),
 		RemotePolicy: domain.RemotePolicy(definition.Remote), Consequences: []string{
-			fmt.Sprintf("provision profiles [%s] in %s", strings.Join(execution.profiles, ", "), yard.InstanceName),
+			fmt.Sprintf("provision profiles [%s] in %s", strings.Join(profiles, ", "), yard.InstanceName),
 			"temporarily start the yard if required and restore its desired power",
 		},
 	}
+}
+
+func (execution *provisionExecution) actionPlan(
+	definition command.Definition,
+	yard domain.Context,
+) (domain.ActionID, domain.ActionDelta, error) {
+	if execution == nil || execution.list {
+		return "", domain.ActionDelta{}, errors.New("provision execution is required")
+	}
+	changed := execution.requiresPowerCycle || len(execution.changedProfiles) != 0
+	delta := domain.ActionDelta{Changed: changed}
+	if changed {
+		delta.Consequences = execution.policy(definition, yard).Consequences
+	}
+	return "yard.provision", delta, nil
+}
+
+func (cli *CLI) observeProvisionExecution(
+	ctx context.Context,
+	loaded config.Loaded,
+	definition command.Definition,
+	execution *provisionExecution,
+) error {
+	if execution == nil || execution.list {
+		return errors.New("provision execution is required")
+	}
+	execution.changedProfiles = nil
+	execution.requiresPowerCycle = false
+	if len(execution.profiles) == 0 {
+		return nil
+	}
+	incusPort, _ := cli.statusPorts()
+	instance, err := incusPort.Instance(
+		ctx, loaded.Context.IncusProject, loaded.Context.InstanceName,
+	)
+	if err != nil {
+		return err
+	}
+	if strings.EqualFold(instance.Status, "stopped") {
+		execution.requiresPowerCycle = true
+		execution.changedProfiles = append([]string(nil), execution.profiles...)
+		return nil
+	}
+	if !strings.EqualFold(instance.Status, "running") {
+		return fmt.Errorf("cannot assess provision while yard state is %q", instance.Status)
+	}
+	runner := cli.operationOrchestrator(
+		cli.env["SUBYARD_OPERATION_ID"], loaded, nil, &definition,
+	).Runner
+	contextValues := structuredCommandContext(loaded)
+	for _, profile := range execution.profiles {
+		result, diagnostics, err := runner.Run(ctx, domain.AdapterRequest{
+			Schema: shelladapter.ProtocolSchema, OperationID: cli.env["SUBYARD_OPERATION_ID"],
+			Adapter: "provision", Action: "profile-check",
+			Arguments: []string{"--check", profile}, Context: contextValues,
+		}, nil)
+		if err != nil {
+			return fmt.Errorf("check provision profile %q: %w", profile, err)
+		}
+		if result.Status != "ok" {
+			return fmt.Errorf("check provision profile %q: adapter returned %s", profile, result.Status)
+		}
+		switch strings.TrimSpace(diagnostics) {
+		case "converged":
+		case "changed":
+			execution.changedProfiles = append(execution.changedProfiles, profile)
+		default:
+			return fmt.Errorf("check provision profile %q: invalid check result", profile)
+		}
+	}
+	return nil
 }
 
 func (execution *provisionExecution) printList(output io.Writer) {

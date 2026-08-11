@@ -76,7 +76,8 @@ if [[ "$joined" == *'yard-remote'*"'docker' 'info'"* ]]; then
   [ "$(cat "$REMOTE_TEST_STATE/cleanup-mode" 2>/dev/null || printf ok)" != fail ] || exit 1
   exit 0
 fi
-if [[ "$joined" == *'yard-remote'*"'docker' 'inspect'"* ]]; then
+if [[ "$joined" == *'yard-remote'*'docker inspect "$1"'* ]]; then
+  [[ "$joined" != *'printf present'* ]] || printf 'present'
   exit 0
 fi
 if [[ "$joined" == *'yard-remote'*"'docker' 'rm'"* || "$joined" == *'/srv/env-secrets/'* ]]; then
@@ -84,6 +85,10 @@ if [[ "$joined" == *'yard-remote'*"'docker' 'rm'"* || "$joined" == *'/srv/env-se
   exit 0
 fi
 if [[ "$joined" == *'yard-remote'*'/srv/workspaces/demo-12345678'* ]]; then
+  if [[ "$joined" == *'printf present'* ]]; then
+    printf 'present'
+    exit 0
+  fi
   : > "$REMOTE_TEST_STATE/workspace-delete"
   exit 0
 fi
@@ -164,15 +169,16 @@ assert_not_contains "$output" 'box teardown'
 [ ! -e "$REMOTE_TEST_STATE/data-cleanup" ] || fail 'L1 removal called L2 cleanup'
 [ ! -e "$state_file" ] || fail 'native soft removal kept controller state'
 
-# An in-yard L2 teardown failure is fatal before either controller state or workspace deletion.
+# An unreachable in-yard L2 environment fails during read-only removal preflight, before either
+# controller state or workspace deletion can change.
 write_state openclaw
 printf 'fail\n' > "$REMOTE_TEST_STATE/cleanup-mode"
 rm -f "$REMOTE_TEST_STATE/data-cleanup" "$REMOTE_TEST_STATE/workspace-delete" "$REMOTE_TEST_STATE/owner-calls"
-if output="$(run_remove 2>&1)"; then fail 'remote L2 removal ignored in-yard teardown failure'; fi
-assert_contains "$output" 'remove project environment before state'
-[ -e "$state_file" ] || fail 'failed L2 teardown removed controller state'
-[ ! -e "$REMOTE_TEST_STATE/workspace-delete" ] || fail 'failed L2 teardown deleted the workspace'
-[ ! -e "$REMOTE_TEST_STATE/owner-calls" ] || fail 'failed L2 teardown changed owner state'
+if output="$(run_remove 2>&1)"; then fail 'remote L2 removal ignored failed environment preflight'; fi
+assert_contains "$output" 'prepare remove action: reach project environment before removal'
+[ -e "$state_file" ] || fail 'failed L2 preflight removed controller state'
+[ ! -e "$REMOTE_TEST_STATE/workspace-delete" ] || fail 'failed L2 preflight deleted the workspace'
+[ ! -e "$REMOTE_TEST_STATE/owner-calls" ] || fail 'failed L2 preflight changed owner state'
 
 # Once in-yard cleanup succeeds, native removal commits state after the workspace is gone.
 printf 'ok\n' > "$REMOTE_TEST_STATE/cleanup-mode"

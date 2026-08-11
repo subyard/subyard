@@ -17,6 +17,8 @@ type provisionFixture struct {
 	actions   []string
 	arguments [][]string
 	profiles  []string
+	checks    []string
+	checkRuns map[string][]string
 	fail      string
 }
 
@@ -42,6 +44,23 @@ func (fixture *provisionFixture) SetInstanceConfig(_ context.Context, _, _ strin
 }
 
 func (fixture *provisionFixture) Run(_ context.Context, request domain.AdapterRequest, _ io.Reader) (domain.AdapterResult, string, error) {
+	if request.Action == "profile-check" {
+		name := request.Arguments[len(request.Arguments)-1]
+		fixture.checks = append(fixture.checks, name)
+		if fixture.checkRuns == nil {
+			state := "changed"
+			if slices.Contains(fixture.profiles, name) {
+				state = "converged"
+			}
+			return domain.AdapterResult{Schema: 1, OperationID: request.OperationID, Status: "ok"}, state + "\n", nil
+		}
+		states := fixture.checkRuns[name]
+		if len(states) == 0 {
+			return domain.AdapterResult{}, "", errors.New("check fixture exhausted")
+		}
+		fixture.checkRuns[name] = states[1:]
+		return domain.AdapterResult{Schema: 1, OperationID: request.OperationID, Status: "ok"}, states[0] + "\n", nil
+	}
 	if request.Action == "profile" {
 		name := request.Arguments[0]
 		fixture.profiles = append(fixture.profiles, name)
@@ -59,6 +78,24 @@ func (fixture *provisionFixture) Run(_ context.Context, request domain.AdapterRe
 		fixture.instance.Status = "Stopped"
 	}
 	return domain.AdapterResult{Schema: 1, OperationID: request.OperationID, Status: "ok"}, "", nil
+}
+
+func TestProvisionAppliesOnlyChangedProfilesAndVerifiesThem(t *testing.T) {
+	fixture := &provisionFixture{
+		instance: managedProvisionInstance("Running", PowerRunning),
+		checkRuns: map[string][]string{
+			"android":  {"converged"},
+			"openclaw": {"changed", "converged"},
+		},
+	}
+	runner := provisionRunnerFixture(fixture, "android", "openclaw")
+	if _, _, err := runner.Run(context.Background(), provisionRequest(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(fixture.profiles, []string{"openclaw"}) ||
+		!slices.Equal(fixture.checks, []string{"android", "openclaw", "openclaw"}) {
+		t.Fatalf("profiles=%v checks=%v", fixture.profiles, fixture.checks)
+	}
 }
 
 func TestProvisionRestoresTemporarilyStartedYard(t *testing.T) {

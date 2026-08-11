@@ -30,8 +30,6 @@
 #   down    [zone]               stop the box (keeps it + its staging data root)
 #   destroy [zone] [--purge]     remove the box (--purge also wipes the staging data root)
 #   list                         list staging-runner boxes in the yard
-#   e2e     [path]               (Slice 2) reflink-isolated ephemeral run — DEFERRED to P4; for now use
-#                               'up <zone> --source <agent-workspace>' for a live-bind run of uncommitted code
 #
 # Per-zone knobs come from overrides/host/staging; ledger consumers come from generated/staging.
 # Operator-owned; no root. Docker here is the yard's nested daemon, never the host's.
@@ -61,36 +59,38 @@ LEASE_DIR="/srv/staging/_lease"                          # in the yard; one leas
 ydocker() { yexec docker "$@"; }
 cname_for() { printf 'subyard-staging-%s' "$1"; }
 
-sub="${1:-}"; shift || true
-[ -n "$sub" ] || die "need a subcommand: up | start | stop | status | logs | shell | down | destroy | list | e2e"
+emit_resource_assessment() { # <local-action> <true|false> [fixed consequence...]
+  local action="$1" changed="$2" separator=""
+  shift 2
+  printf '{"schema":"yard.resource-action-assessment.v1","action":"%s","changed":%s,"consequences":[' \
+    "$action" "$changed"
+  local consequence
+  for consequence in "$@"; do
+    printf '%s"%s"' "$separator" "$consequence"
+    separator=,
+  done
+  printf ']}\n'
+}
 
-# --- list / e2e: handled before zone resolution ------------------------------
-if [ "$sub" = list ]; then
-  svc_require_yard_running
-  echo "Staging-runner zones in the yard:"
-  ydocker ps -a --filter "label=subyard.staging=1" \
-    --format 'table {{.Label "subyard.zone"}}\t{{.Names}}\t{{.Status}}\t{{.Image}}' 2>/dev/null
-  exit 0
-fi
-if [ "$sub" = e2e ]; then
-  # Slice 2 — ephemeral lane. Implemented next; fail loudly rather than pretend.
-  cat >&2 <<'EOF'
-  [fail] `yard staging e2e` (reflink-isolated ephemeral lane) is DEFERRED to P4 (full isolation).
-         For now run an agent's UNCOMMITTED code via a LIVE BIND (the MVP, no commit needed):
-           yard staging up <zone> --source /srv/workspaces/<agent-id>
-           yard staging start <zone>
-         Live bind = the worktree is shared into the runner as-is; edits propagate into the
-         running stage by design (no snapshot). reflink snapshot / per-run isolation / teardown
-         land in p4-staging-full-isolation.
-EOF
-  exit 2
+require_resource_apply() { # <expected-local-action>
+  local expected="$1"
+  [ "${SUBYARD_RESOURCE_MODE:-}" = apply ] || die "resource apply mode is required"
+  [ "${SUBYARD_RESOURCE_ACTION:-}" = "$expected" ] \
+    || die "prepared resource action mismatch (expected '$expected')"
+  [ -n "${SUBYARD_OPERATION_ID:-}" ] || die "resource apply operation ID is required"
+}
+
+sub="${1:-}"; shift || true
+if [ -z "$sub" ]; then
+  [ -z "${SUBYARD_RESOURCE_MODE:-}" ] || die "resource verb is required"
+  _yard_help_and_exit
 fi
 
 # --- is-up: silent registry probe (yard status) — any zone with a live gateway pid? -----------
 # Handled before zone resolution + the loud yard-running check: it must stay quiet and just
 # return 0/1. "up" = any staging-runner box (any zone) has a live gateway pid (the box bind-mounts
 # its data root at the same path, so the pid is /srv/staging/<zone>/run/gateway.pid).
-if [ "$sub" = is-up ]; then
+if [ -z "${SUBYARD_RESOURCE_MODE:-}" ] && [ "$sub" = is-up ]; then
   incus info "$INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1 || exit 1
   if yexec sh -c '
         for c in $(docker ps -q --filter "label=subyard.staging=1" 2>/dev/null); do
@@ -103,7 +103,30 @@ if [ "$sub" = is-up ]; then
   then exit 0; else exit 1; fi
 fi
 
-# --- parse: [zone] [--rebuild|--purge|-f] ------------------------------------
+if [ -z "${SUBYARD_RESOURCE_MODE:-}" ]; then
+  case "$sub" in
+    -h|--help|help) _yard_help_and_exit ;;
+    *) die "typed resource dispatcher required for 'yard staging $sub'" ;;
+  esac
+fi
+
+if [ "$sub" = list ]; then
+  [ "$#" -eq 0 ] || die "'list' does not accept additional arguments"
+  case "${SUBYARD_RESOURCE_MODE:-}" in
+    prepare) emit_resource_assessment list false ;;
+    apply)
+      require_resource_apply list
+      svc_require_yard_running
+      echo "Staging-runner zones in the yard:"
+      ydocker ps -a --filter "label=subyard.staging=1" \
+        --format 'table {{.Label "subyard.zone"}}\t{{.Names}}\t{{.Status}}\t{{.Image}}' 2>/dev/null
+      ;;
+    *) die "unknown resource execution mode '${SUBYARD_RESOURCE_MODE:-}'" ;;
+  esac
+  exit 0
+fi
+
+# --- parse: [zone] plus verb-specific options ---------------------------------
 zone="canonical"; rebuild=0; purge=0; follow=0; zone_set=0; src_override=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -111,13 +134,30 @@ while [ $# -gt 0 ]; do
     --source)  src_override="${2:-}"; [ -n "$src_override" ] || die "--source needs a yard path"; shift ;;
     --purge)   purge=1 ;;
     -f|--follow) follow=1 ;;
-    -y|--yes)  ;;  # handled by ui.sh
     -*)        die "unknown option '$1'" ;;
     *)         [ "$zone_set" = 1 ] && die "unexpected extra argument '$1'"; zone="$1"; zone_set=1 ;;
   esac
   shift
 done
 case "$zone" in *[!a-zA-Z0-9_-]*) die "zone name '$zone' must be [a-zA-Z0-9_-]" ;; esac
+case "$sub" in
+  up)
+    [ "$purge" -eq 0 ] && [ "$follow" -eq 0 ] || die "'up' accepts only --rebuild and --source"
+    ;;
+  logs)
+    [ "$rebuild" -eq 0 ] && [ "$purge" -eq 0 ] && [ -z "$src_override" ] \
+      || die "'logs' accepts only -f or --follow"
+    ;;
+  destroy)
+    [ "$rebuild" -eq 0 ] && [ "$follow" -eq 0 ] && [ -z "$src_override" ] \
+      || die "'destroy' accepts only --purge"
+    ;;
+  start|stop|status|shell|down)
+    [ "$rebuild" -eq 0 ] && [ "$purge" -eq 0 ] && [ "$follow" -eq 0 ] && [ -z "$src_override" ] \
+      || die "'$sub' does not accept options"
+    ;;
+  *) die "unknown staging resource verb '$sub'" ;;
+esac
 
 svc_require_yard_running
 
@@ -152,6 +192,7 @@ ysecret="/srv/env-secrets/staging-$zone/staging.env"
 BOX_SECRET="/run/subyard/staging.env"
 
 box_exists()  { ydocker inspect "$cname" >/dev/null 2>&1; }
+box_running() { [ "$(ydocker inspect -f '{{.State.Running}}' "$cname" 2>/dev/null)" = true ]; }
 require_box() { box_exists || die "no staging-runner for zone '$zone' — run: ${PROG:-yard} staging up $zone"; }
 gateway_running() {
   ydocker exec "$cname" sh -c '[ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null' _ "$GW_PID" 2>/dev/null
@@ -197,6 +238,200 @@ LEASE
 }
 lease_show() { yexec sh -c '[ -r "$1/$2.json" ] && cat "$1/$2.json" || echo "{}"' _ "$LEASE_DIR" "$BOT_LEASE_KEY" 2>/dev/null; }
 
+lease_owned() {
+  yexec sh -c \
+    '[ -r "$1/$2.json" ] && [ "$(jq -r ".holder // \"\"" "$1/$2.json")" = "$3" ]' \
+    _ "$LEASE_DIR" "$BOT_LEASE_KEY" "$zone" 2>/dev/null
+}
+
+# Read-only lease probe. It never opens the lock or creates the lease directory.
+lease_inspect() {
+  yexec sh -s -- "$LEASE_DIR" "$BOT_LEASE_KEY" "$zone" <<'LEASE'
+set -eu
+st="$1/$2.json"; me="$3"
+[ -r "$st" ] || { echo MISSING; exit 0; }
+jq -e '
+  type == "object" and
+  (.holder | type == "string" and length > 0) and
+  (.kind | type == "string" and length > 0) and
+  (.expires | type == "number" and . >= 0)
+' "$st" >/dev/null 2>&1 || { echo INVALID; exit 0; }
+now=$(date +%s)
+holder=$(jq -r '.holder' "$st")
+kind=$(jq -r '.kind' "$st")
+expires=$(jq -r '.expires' "$st")
+if [ "$now" -ge "$expires" ]; then
+  echo "EXPIRED $holder $kind"
+elif [ "$holder" = "$me" ]; then
+  echo "OWNED $kind $((expires-now))"
+else
+  echo "FOREIGN $holder $kind $((expires-now))"
+fi
+LEASE
+}
+
+validate_start_lease_available() {
+  local lease_state
+  lease_state="$(lease_inspect)"
+  case "$lease_state" in
+    MISSING|EXPIRED\ *) ;;
+    OWNED\ canonical\ *) ;;
+    OWNED\ *) die "zone '$zone' holds an incompatible bot lease: ${lease_state#OWNED }" ;;
+    FOREIGN\ *) die "bot lease held: ${lease_state#FOREIGN } — another runner is polling; stop it or wait" ;;
+    INVALID) die "bot lease state is invalid — repair it before staging start" ;;
+    *) die "could not read bot lease availability" ;;
+  esac
+}
+
+validate_running_gateway_lease() {
+  local lease_state
+  lease_state="$(lease_inspect)"
+  case "$lease_state" in
+    OWNED\ canonical\ *) return 0 ;;
+    MISSING) die "gateway for zone '$zone' is running without its bot lease — run: ${PROG:-yard} staging stop $zone" ;;
+    EXPIRED\ *) die "gateway for zone '$zone' is running with an expired bot lease — run: ${PROG:-yard} staging stop $zone" ;;
+    FOREIGN\ *) die "gateway for zone '$zone' is running while the bot lease is foreign — run: ${PROG:-yard} staging stop $zone" ;;
+    OWNED\ *) die "gateway for zone '$zone' is running with an incompatible bot lease — run: ${PROG:-yard} staging stop $zone" ;;
+    INVALID) die "gateway for zone '$zone' has invalid bot lease state — run: ${PROG:-yard} staging stop $zone" ;;
+    *) die "could not validate the running gateway bot lease" ;;
+  esac
+}
+
+validate_start_guard() {
+  local prod_fps="" guard_out=""
+  require_box
+  box_running \
+    || die "staging-runner zone '$zone' is stopped — run: ${PROG:-yard} staging up $zone"
+
+  validate_start_lease_available
+
+  # The authority check is read-only and must happen before central consent or lease acquisition.
+  "$SUBYARD_ROOT/bin/yard" keys check-exclusive "$zone" >/dev/null
+  [ -r "$PROD_FP_FILE" ] \
+    && prod_fps="$(grep -vE '^\s*(#|$)' "$PROD_FP_FILE" 2>/dev/null | tr -s '[:space:]' '\n' || true)"
+  guard_out="$(ydocker exec -i -e "SUBYARD_PROD_FPS=$prod_fps" "$cname" sh -s <<'GUARD'
+set -eu
+cfg="${OPENCLAW_CONFIG_PATH:-$VASILY_HOME/openclaw/openclaw.json}"
+[ -r "$cfg" ] || { echo "FAIL no staging config at $cfg — paste it first (yard staging shell)"; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "FAIL jq absent in the runner — cannot validate config"; exit 1; }
+marker=0
+[ "$(jq -r '._subyardStaging // false' "$cfg" 2>/dev/null)" = true ] && marker=1
+[ -r /run/subyard/staging.env ] && grep -qE '^SUBYARD_STAGING=1\b' /run/subyard/staging.env && marker=1
+[ "$marker" = 1 ] || { echo "FAIL config not marked staging (\"_subyardStaging\": true, or SUBYARD_STAGING=1 in staging.env)"; exit 1; }
+sroot="${OPENCLAW_STATE_DIR:-$VASILY_HOME/openclaw}"
+case "$sroot" in
+  "$SUBYARD_STAGING_DATA_ROOT"/*) : ;;
+  *) echo "FAIL state dir $sroot is not under the staging data root $SUBYARD_STAGING_DATA_ROOT"; exit 1 ;;
+esac
+tf="$(jq -r '.channels.telegram.tokenFile // ""' "$cfg" 2>/dev/null || true)"
+if [ -n "$tf" ] && [ -r "$tf" ]; then tok="$(cat "$tf")"; else tok="$(jq -r '.channels.telegram.botToken // ""' "$cfg" 2>/dev/null || true)"; fi
+[ -n "$tok" ] || { echo "FAIL no telegram bot token in $cfg (channels.telegram.botToken/tokenFile)"; exit 1; }
+fp="$(printf '%s' "$tok" | sha256sum | cut -d' ' -f1)"
+for bad in ${SUBYARD_PROD_FPS:-}; do
+  [ "$fp" = "$bad" ] && { echo "FAIL bot-token fingerprint matches a recorded PROD fingerprint — refusing"; exit 1; }
+done
+echo OK
+GUARD
+)" || true
+  case "$guard_out" in
+    OK) ;;
+    FAIL\ *) die "prod-guard refused start: ${guard_out#FAIL }" ;;
+    *) die "prod-guard produced no verdict — refusing (fail-closed)" ;;
+  esac
+}
+
+destroy_action() {
+  if [ "$purge" -eq 1 ]; then printf 'destroy-purge\n'; else printf 'destroy\n'; fi
+}
+
+destroy_target_exists() {
+  box_exists && return 0
+  lease_owned && return 0
+  yexec test -e "$(dirname "$ysecret")" >/dev/null 2>&1 && return 0
+  [ "$purge" -eq 1 ] && yexec test -e "$dataRoot" >/dev/null 2>&1 && return 0
+  return 1
+}
+
+prepare_resource() {
+  local action changed=false
+  case "$sub" in
+    up)
+      # shellcheck disable=SC1090
+      . "$pf"
+      : "${BASE_IMAGE:?profile $profile has no BASE_IMAGE}"
+      [ -z "$SOURCE_BIND" ] || yexec test -d "$SOURCE_BIND" \
+        || die "SOURCE_BIND is not a directory in the yard"
+      emit_resource_assessment up true \
+        "converge the isolated staging-runner box while leaving its gateway stopped"
+      ;;
+    start)
+      if gateway_running; then
+        validate_running_gateway_lease
+        emit_resource_assessment start false
+      else
+        validate_start_guard
+        emit_resource_assessment start true \
+          "acquire the staging bot lease and launch its gateway heartbeat"
+      fi
+      ;;
+    stop)
+      if { box_exists && gateway_running; } || lease_owned; then
+        emit_resource_assessment stop true "stop the staging gateway and release its bot lease"
+      else
+        emit_resource_assessment stop false
+      fi
+      ;;
+    status) emit_resource_assessment status false ;;
+    logs)
+      require_box
+      emit_resource_assessment logs false
+      ;;
+    shell)
+      require_box
+      box_running && gateway_running \
+        || die "staging gateway for zone '$zone' is not running — run: ${PROG:-yard} staging start $zone"
+      emit_resource_assessment shell false
+      ;;
+    down)
+      if box_running || lease_owned; then
+        emit_resource_assessment down true \
+          "stop the staging-runner box and release its bot lease while preserving staging data"
+      else
+        emit_resource_assessment down false
+      fi
+      ;;
+    destroy)
+      action="$(destroy_action)"
+      if destroy_target_exists; then changed=true; fi
+      if [ "$changed" = false ]; then
+        emit_resource_assessment "$action" false
+      elif [ "$action" = destroy-purge ]; then
+        emit_resource_assessment "$action" true \
+          "remove the staging-runner box, staged credentials and bot lease" \
+          "irreversibly delete the persistent staging data root"
+      else
+        emit_resource_assessment "$action" true \
+          "remove the staging-runner box, staged credentials and bot lease while preserving staging data"
+      fi
+      ;;
+    *) die "unknown staging resource verb '$sub'" ;;
+  esac
+}
+
+case "${SUBYARD_RESOURCE_MODE:-}" in
+  prepare)
+    prepare_resource
+    exit 0
+    ;;
+  apply)
+    case "$sub" in
+      destroy) require_resource_apply "$(destroy_action)" ;;
+      *) require_resource_apply "$sub" ;;
+    esac
+    ;;
+  *) die "unknown resource execution mode '${SUBYARD_RESOURCE_MODE:-}'" ;;
+esac
+
 case "$sub" in
   up)
     # shellcheck disable=SC1090
@@ -223,17 +458,6 @@ case "$sub" in
     # source tree: a bound yard path, else the zone's own src dir (operator populates from main)
     src_desc="$srcDir (populate from main: clone/sync into it)"
     [ -n "$SOURCE_BIND" ] && src_desc="$SOURCE_BIND (bound)"
-    sec_line=(); build_line=()
-    [ "$have_secrets" = 1 ] && sec_line=("Stage staging/$zone.env into the yard and mount it ro at $BOX_SECRET (never -e).")
-    [ -n "$df" ] && build_line=("Build the env image '$run_image' from $df (context $ctx) in the yard's Docker.")
-    announce "yard staging up — zone '$zone' (shared staging-runner, profile $profile)" \
-      ${build_line[@]+"${build_line[@]}"} \
-      "Run a Docker container '$cname' inside the yard from image '$run_image' (role: staging-runner, zone $zone)." \
-      "Create a STAGING-only data root at $dataRoot (its own VASILY_HOME; never prod state)." \
-      "Source tree at /workspace <- $src_desc." \
-      ${sec_line[@]+"${sec_line[@]}"} \
-      "The gateway is NOT started here — 'yard staging start $zone' runs the prod-guard + lease first."
-    proceed_or_die y   # transient bring-up (start the shared staging-runner) — default Yes
 
     for d in "$dataRoot" "$dataRoot/logs" "$dataRoot/run" "$dataRoot/creds" "$vasilyHome" "$srcDir" "$LEASE_DIR"; do
       yexec install -d -o "$DEV_UID" -g "$DEV_UID" "$d"
@@ -334,53 +558,12 @@ MSG
 
   start)
     require_box
-    if gateway_running; then ok "gateway already running for zone '$zone'"; exit 0; fi
-
-    # A synced exclusive credential (for example one Telegram bot identity) carries a signed
-    # authority assignment. Refuse a second/stale owner before touching the existing consumer.
-    "$SUBYARD_ROOT/bin/yard" keys check-exclusive "$zone"
-
-    # --- prod-fingerprint GUARD (deny-by-default) ----------------------------
-    prod_fps=""
-    [ -r "$PROD_FP_FILE" ] && prod_fps="$(grep -vE '^\s*(#|$)' "$PROD_FP_FILE" 2>/dev/null | tr -s '[:space:]' '\n' || true)"
-    guard_out="$(ydocker exec -i -e "SUBYARD_PROD_FPS=$prod_fps" "$cname" sh -s <<'GUARD'
-set -eu
-cfg="${OPENCLAW_CONFIG_PATH:-$VASILY_HOME/openclaw/openclaw.json}"
-[ -r "$cfg" ] || { echo "FAIL no staging config at $cfg — paste it first (yard staging shell)"; exit 1; }
-command -v jq >/dev/null 2>&1 || { echo "FAIL jq absent in the runner — cannot validate config"; exit 1; }
-
-# explicit staging marker (config or staging.env), else refuse
-marker=0
-[ "$(jq -r '._subyardStaging // false' "$cfg" 2>/dev/null)" = true ] && marker=1
-[ -r /run/subyard/staging.env ] && grep -qE '^SUBYARD_STAGING=1\b' /run/subyard/staging.env && marker=1
-[ "$marker" = 1 ] || { echo "FAIL config not marked staging (\"_subyardStaging\": true, or SUBYARD_STAGING=1 in staging.env)"; exit 1; }
-
-# state-root must live under the staging data root, never under a prod path
-sroot="${OPENCLAW_STATE_DIR:-$VASILY_HOME/openclaw}"
-case "$sroot" in
-  "$SUBYARD_STAGING_DATA_ROOT"/*) : ;;
-  *) echo "FAIL state dir $sroot is not under the staging data root $SUBYARD_STAGING_DATA_ROOT"; exit 1 ;;
-esac
-
-# resolve the bot token (tokenFile preferred), fingerprint it, refuse prod
-tf="$(jq -r '.channels.telegram.tokenFile // ""' "$cfg" 2>/dev/null || true)"
-if [ -n "$tf" ] && [ -r "$tf" ]; then tok="$(cat "$tf")"; else tok="$(jq -r '.channels.telegram.botToken // ""' "$cfg" 2>/dev/null || true)"; fi
-[ -n "$tok" ] || { echo "FAIL no telegram bot token in $cfg (channels.telegram.botToken/tokenFile)"; exit 1; }
-fp="$(printf '%s' "$tok" | sha256sum | cut -d' ' -f1)"
-for bad in ${SUBYARD_PROD_FPS:-}; do
-  [ "$fp" = "$bad" ] && { echo "FAIL bot-token fingerprint matches a recorded PROD fingerprint — refusing"; exit 1; }
-done
-echo "OK staging marker + state-root ok; bot fp ${fp%${fp#????????}}… not on prod denylist"
-GUARD
-)" || true
-    # Fail closed: only an explicit "OK …" verdict may proceed. Empty/garbage (e.g. stdin
-    # never reached the runner) must refuse, never silently pass the guard.
-    case "$guard_out" in
-      OK\ *)   ok "prod-guard: ${guard_out#OK }" ;;
-      FAIL\ *) die "prod-guard refused start: ${guard_out#FAIL }" ;;
-      *)       die "prod-guard produced no verdict — refusing (fail-closed): '${guard_out:-<empty>}'" ;;
-    esac
-    [ -n "$prod_fps" ] || warn "$PROD_FP_FILE is empty — record prod hashes to harden the guard"
+    if gateway_running; then
+      validate_running_gateway_lease
+      ok "gateway already running for zone '$zone' with its owned bot lease"
+      exit 0
+    fi
+    validate_start_guard
 
     # --- acquire the bot lease (canonical takes it too, so ephemeral can preempt) ---
     la="$(lease_acquire canonical normal)"
@@ -391,10 +574,6 @@ GUARD
     esac
 
     gw_cmd="${STAGING_GATEWAY_CMD:-$GATEWAY_CMD}"
-    announce "yard staging start — zone '$zone'" \
-      "Prod-guard passed, lease held (epoch $epoch). Launch the gateway: '$gw_cmd' (cwd /workspace)." \
-      "Log -> $ylog ; pid -> $GW_PID. A heartbeat renews the lease while it runs."
-    proceed_or_die y   # transient start (launch the staging gateway) — default Yes
     ydocker exec -d "$cname" sh -c '
       cd /workspace || exit 1
       mkdir -p "$(dirname "$2")"
@@ -428,19 +607,23 @@ GUARD
     ;;
 
   stop)
-    require_box
-    if gateway_running; then
-      ydocker exec "$cname" sh -c '
-        pid="$(cat "$1" 2>/dev/null)"; [ -n "$pid" ] || exit 0
-        kill "$pid" 2>/dev/null || true
-        for _ in 1 2 3 4 5; do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
-        kill -9 "$pid" 2>/dev/null || true
-        rm -f "$1"
-      ' _ "$GW_PID"
-      ok "gateway stopped for zone '$zone'"
-    else
-      ok "gateway not running for zone '$zone'"
+    if ! box_exists || ! gateway_running; then
+      if lease_owned; then
+        lease_release >/dev/null 2>&1 || true
+        ok "gateway not running for zone '$zone'; released its remaining bot lease"
+      else
+        ok "gateway not running for zone '$zone'"
+      fi
+      exit 0
     fi
+    ydocker exec "$cname" sh -c '
+      pid="$(cat "$1" 2>/dev/null)"; [ -n "$pid" ] || exit 0
+      kill "$pid" 2>/dev/null || true
+      for _ in 1 2 3 4 5; do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+      kill -9 "$pid" 2>/dev/null || true
+      rm -f "$1"
+    ' _ "$GW_PID"
+    ok "gateway stopped for zone '$zone'"
     lease_release >/dev/null 2>&1 || true
     ;;
 
@@ -472,28 +655,35 @@ GUARD
 
   shell)
     require_box
-    ydocker start "$cname" >/dev/null 2>&1 || true
+    box_running && gateway_running \
+      || die "staging gateway for zone '$zone' is not running — run: ${PROG:-yard} staging start $zone"
     exec incus exec "$INSTANCE_NAME" "${PROJ[@]}" -t -- docker exec -it "$cname" bash
     ;;
 
   down)
-    require_box
+    if ! box_running; then
+      if lease_owned; then
+        lease_release >/dev/null 2>&1 || true
+        ok "staging-runner zone '$zone' was stopped; released its remaining bot lease"
+      else
+        ok "staging-runner zone '$zone' already stopped"
+      fi
+      exit 0
+    fi
     gateway_running && warn "gateway still running — stopping the box stops it too"
     lease_release >/dev/null 2>&1 || true
     ydocker stop "$cname" >/dev/null && ok "staging-runner zone '$zone' stopped"
     ;;
 
   destroy)
-    require_box
-    purge_line=("The staging data root $dataRoot is KEPT (use --purge to wipe it).")
-    [ "$purge" = 1 ] && purge_line=("WIPE the staging data root $dataRoot (state, config, creds, logs) — irreversible.")
-    announce "yard staging destroy — zone '$zone'" \
-      "Remove the staging-runner box '$cname' from the yard (force)." \
-      "Release the bot lease if held; drop staged secrets under /srv/env-secrets/staging-$zone." \
-      "${purge_line[@]}"
-    proceed_or_die
+    if ! destroy_target_exists; then
+      ok "no staging-runner state to destroy for zone '$zone'"
+      exit 0
+    fi
     lease_release >/dev/null 2>&1 || true
-    ydocker rm -f "$cname" >/dev/null && ok "staging-runner zone '$zone' destroyed"
+    ydocker rm -f "$cname" >/dev/null 2>&1 \
+      && ok "staging-runner zone '$zone' destroyed" \
+      || ok "no staging-runner box to remove for zone '$zone'"
     yexec rm -rf "$(dirname "$ysecret")" 2>/dev/null || true
     # `if`, not `[ … ] && …`: this is the destroy) arm's last command and the case is the script's
     # final action, so under set -e a false guard (the default, no --purge) would exit 1 despite a
@@ -502,6 +692,6 @@ GUARD
     ;;
 
   *)
-    die "unknown subcommand '$sub' (expected: up | start | stop | status | logs | shell | down | destroy | list | e2e)"
+    die "unknown subcommand '$sub' (expected: up | start | stop | status | logs | shell | down | destroy | list)"
     ;;
 esac

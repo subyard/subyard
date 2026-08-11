@@ -874,8 +874,9 @@ ensure_incus() {
 }
 
 ensure_owner_incus() {
+  local resume_mode="${1:-owner}"
   p0_capacity_prepare_platform_root
-  ensure_incus "$P0_CAPACITY_PLATFORM_ROOT/incus" '' owner
+  ensure_incus "$P0_CAPACITY_PLATFORM_ROOT/incus" '' "$resume_mode"
 }
 ensure_peer_incus() {
   ensure_incus "$PEER_STATE_ROOT/incus-home" "$PEER_INCUS_MARKER" peer-prepare-resume
@@ -1511,7 +1512,7 @@ dependency_bootstrap() (
 )
 
 profile_resource() (
-  local fixture="$P0_CAPACITY_STATE_ROOT/profile-resource" handler rc setup
+  local fixture="$P0_CAPACITY_STATE_ROOT/profile-resource" handler rc setup output
   p0_capacity_prepare_root
   p0_capacity_prepare_subtree "$fixture"
   trap 'rc=$?; set +e; p0_capacity_remove_subtree "$fixture"; p0_capacity_remove_root_if_empty; exit "$rc"' EXIT
@@ -1521,18 +1522,75 @@ profile_resource() (
 COMMAND=p0-smoke
 HANDLER=resources/p0-smoke/handler.sh
 TITLE=Dependency-free P0 smoke
-VERBS=up is-up status down
+ACTION="up up yard-change recreatable"
+ACTION="is-up is-up read-only not-needed"
+ACTION="status status read-only not-needed"
+ACTION="down down runtime-destruction recreatable"
+ACTION="purge purge persistent-data-destruction irreversible"
+BRINGUP=up
+SHUTDOWN=down
 EOF
   handler="$fixture/config/profiles/p0-smoke/resources/p0-smoke/handler.sh"
   cat > "$handler" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 state="${SUBYARD_HOME:?}/p0-profile-resource.state"
-case "${1:-}" in
-  up) install -d -m 0700 "$(dirname "$state")"; printf 'up\n' > "$state" ;;
-  is-up) [ "$(cat "$state" 2>/dev/null)" = up ] ;;
-  status) [ "$(cat "$state" 2>/dev/null)" = up ] && printf 'up\n' || { printf 'down\n'; exit 1; } ;;
-  down) find "$state" -delete 2>/dev/null || true ;;
+data="${SUBYARD_HOME:?}/p0-profile-resource.data"
+verb="${1:-}"; [ $# -eq 0 ] || shift
+[ $# -eq 0 ] || { printf 'unexpected resource argument\n' >&2; exit 2; }
+
+emit() { # <action> <changed> [consequence]
+  if [ "$2" = true ]; then
+    printf '{"schema":"yard.resource-action-assessment.v1","action":"%s","changed":true,"consequences":["%s"]}\n' "$1" "$3"
+  else
+    printf '{"schema":"yard.resource-action-assessment.v1","action":"%s","changed":false,"consequences":[]}\n' "$1"
+  fi
+}
+require_apply() { # <action>
+  [ "${SUBYARD_RESOURCE_MODE:-}" = apply ] || exit 2
+  [ "${SUBYARD_RESOURCE_ACTION:-}" = "$1" ] || exit 2
+  [ -n "${SUBYARD_OPERATION_ID:-}" ] || exit 2
+}
+
+case "${SUBYARD_RESOURCE_MODE:-}" in
+  prepare)
+    case "$verb" in
+      up)
+        if [ "$(cat "$state" 2>/dev/null)" = up ]; then emit up false; else emit up true 'start the marker-owned P0 resource runtime'; fi
+        ;;
+      is-up) emit is-up false ;;
+      status) emit status false ;;
+      down)
+        if [ -e "$state" ]; then emit down true 'stop the marker-owned P0 resource runtime'; else emit down false; fi
+        ;;
+      purge)
+        if [ -e "$data" ]; then emit purge true 'irreversibly delete marker-owned P0 persistent data'; else emit purge false; fi
+        ;;
+      *) exit 2 ;;
+    esac
+    ;;
+  apply)
+    require_apply "$verb"
+    case "$verb" in
+      up)
+        install -d -m 0700 "$(dirname "$state")"
+        printf 'up\n' > "$state"
+        printf 'persistent\n' > "$data"
+        ;;
+      is-up) [ "$(cat "$state" 2>/dev/null)" = up ] ;;
+      status) [ "$(cat "$state" 2>/dev/null)" = up ] && printf 'up\n' || { printf 'down\n'; exit 1; } ;;
+      down) find "$state" -delete 2>/dev/null || true ;;
+      purge) find "$data" -delete 2>/dev/null || true ;;
+      *) exit 2 ;;
+    esac
+    ;;
+  '')
+    case "$verb" in
+      is-up) [ "$(cat "$state" 2>/dev/null)" = up ] ;;
+      -h|--help|help|'') printf 'P0 typed resource fixture\n' ;;
+      *) exit 2 ;;
+    esac
+    ;;
   *) exit 2 ;;
 esac
 EOF
@@ -1543,15 +1601,38 @@ EOF
   . "$ROOT/tests/helpers/test-context.sh"
   setup_test_context "$setup"
   export HOME="$setup/home" SUBYARD_NO_AUDIT=1 SUBYARD_CONFIG_DIR="$fixture/config"
-  SUBYARD_REPOSITORY_ROOT="$fixture" "$ROOT/.build/yard" p0-smoke up --yes >/dev/null
+  output="$fixture/default-yes.out"
+  printf '\n' | script -qefc \
+    "SUBYARD_REPOSITORY_ROOT='$fixture' '$ROOT/.build/yard' p0-smoke up" \
+    /dev/null >"$output"
+  grep -Fq 'Proceed? [Y/n]' "$output" || die 'P0 Default-Yes resource prompt is missing'
   SUBYARD_REPOSITORY_ROOT="$fixture" "$ROOT/.build/yard" p0-smoke is-up
   [ "$(SUBYARD_REPOSITORY_ROOT="$fixture" "$ROOT/.build/yard" p0-smoke status)" = up ] \
     || die 'dependency-free profile resource status failed'
+  output="$(SUBYARD_REPOSITORY_ROOT="$fixture" "$ROOT/.build/yard" p0-smoke up)"
+  ! grep -Fq 'Proceed?' <<<"$output" || die 'converged P0 resource prompted'
   SUBYARD_REPOSITORY_ROOT="$fixture" "$ROOT/.build/yard" p0-smoke down --yes >/dev/null
   if SUBYARD_REPOSITORY_ROOT="$fixture" "$ROOT/.build/yard" p0-smoke is-up; then
     die 'dependency-free profile resource survived reverse lifecycle'
   fi
-  printf 'ok: VM%s dependency-free profile resource up/status/down\n' "$SUBYARD_E2E_VM"
+  [ -e "$setup/subyard/p0-profile-resource.data" ] \
+    || die 'P0 resource down removed persistent data'
+
+  output="$fixture/default-no.out"
+  set +e
+  printf '\n' | script -qefc \
+    "SUBYARD_REPOSITORY_ROOT='$fixture' '$ROOT/.build/yard' p0-smoke purge" \
+    /dev/null >"$output" 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || die 'P0 Default-No purge accepted empty Enter'
+  grep -Fq 'Proceed? [y/N]' "$output" || die 'P0 Default-No resource prompt is missing'
+  [ -e "$setup/subyard/p0-profile-resource.data" ] \
+    || die 'declined P0 purge removed persistent data'
+  SUBYARD_REPOSITORY_ROOT="$fixture" "$ROOT/.build/yard" p0-smoke purge --yes >/dev/null
+  [ ! -e "$setup/subyard/p0-profile-resource.data" ] \
+    || die 'explicit P0 purge kept marker-owned persistent data'
+  printf 'ok: VM%s typed profile resource covers no-op, Default Yes and marker-owned Default No purge\n' "$SUBYARD_E2E_VM"
 )
 
 capacity_verify_cleanup() {
@@ -1614,6 +1695,7 @@ capacity_verify_cleanup() {
   dependency-bootstrap) dependency_bootstrap ;;
   nested-teardown)
     p0_capacity_use_build_cache
+    ensure_owner_incus nested-teardown
     bash dev/e2e/nested-teardown-data-boundary.sh
     ;;
   real-incus) bash dev/e2e/p0-real-incus.sh ;;

@@ -4,13 +4,18 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -25,6 +30,142 @@ func TestRepositoryQueriesUseGoManifest(t *testing.T) {
 	}
 	if code := program.Run(context.Background()); code != 0 || stdout.String() != "read\n" {
 		t.Fatalf("manifest query failed: code=%d output=%q", code, stdout.String())
+	}
+}
+
+func TestStreamPromptAcceptsDefaultYesOnlyOnInteractiveEnter(t *testing.T) {
+	var output bytes.Buffer
+	accepted, err := (streamPrompt{
+		input: strings.NewReader("\n"), output: &output, interactive: func() bool { return true },
+	}).Confirm(context.Background(), domain.ConfirmationRequest{
+		Summary: "Update configuration", Consequences: []string{"replace local settings"},
+		Default: domain.ConfirmationDefaultYes,
+	})
+	if !accepted || err != nil || !strings.Contains(output.String(), "  - replace local settings\n") ||
+		!strings.Contains(output.String(), "Proceed? [Y/n]") {
+		t.Fatalf("interactive default yes accepted=%v err=%v output=%q", accepted, err, output.String())
+	}
+}
+
+func TestStreamPromptDeclinesDefaultNoOnEnter(t *testing.T) {
+	var output bytes.Buffer
+	accepted, err := (streamPrompt{
+		input: strings.NewReader("\n"), output: &output, interactive: func() bool { return true },
+	}).Confirm(context.Background(), domain.ConfirmationRequest{
+		Summary: "Delete data", Default: domain.ConfirmationDefaultNo,
+	})
+	if accepted || !errors.Is(err, domain.ErrOperationDeclined) ||
+		domain.ConfirmationErrorClass(err) != domain.OperationDeclinedCode ||
+		!strings.Contains(output.String(), "Proceed? [y/N]") {
+		t.Fatalf("default no accepted=%v err=%v class=%q output=%q", accepted, err,
+			domain.ConfirmationErrorClass(err), output.String())
+	}
+}
+
+func TestStreamPromptAcceptsExplicitYes(t *testing.T) {
+	for _, answer := range []string{"y\n", "YES\n"} {
+		t.Run(strings.TrimSpace(answer), func(t *testing.T) {
+			accepted, err := (streamPrompt{
+				input: strings.NewReader(answer), output: io.Discard, interactive: func() bool { return true },
+			}).Confirm(context.Background(), domain.ConfirmationRequest{
+				Summary: "Update configuration", Default: domain.ConfirmationDefaultNo,
+			})
+			if !accepted || err != nil {
+				t.Fatalf("answer %q accepted=%v err=%v", answer, accepted, err)
+			}
+		})
+	}
+}
+
+func TestStreamPromptDeclinesExplicitNo(t *testing.T) {
+	for _, answer := range []string{"n\n", "NO\n"} {
+		t.Run(strings.TrimSpace(answer), func(t *testing.T) {
+			accepted, err := (streamPrompt{
+				input: strings.NewReader(answer), output: io.Discard, interactive: func() bool { return true },
+			}).Confirm(context.Background(), domain.ConfirmationRequest{
+				Summary: "Update configuration", Default: domain.ConfirmationDefaultYes,
+			})
+			if accepted || !errors.Is(err, domain.ErrOperationDeclined) {
+				t.Fatalf("answer %q accepted=%v err=%v", answer, accepted, err)
+			}
+		})
+	}
+}
+
+func TestStreamPromptRetriesInvalidInteractiveInput(t *testing.T) {
+	var output bytes.Buffer
+	accepted, err := (streamPrompt{
+		input: strings.NewReader("maybe\ny\n"), output: &output, interactive: func() bool { return true },
+	}).Confirm(context.Background(), domain.ConfirmationRequest{
+		Summary: "Update configuration", Default: domain.ConfirmationDefaultYes,
+	})
+	if !accepted || err != nil || strings.Count(output.String(), "Proceed?") != 2 {
+		t.Fatalf("invalid retry accepted=%v err=%v output=%q", accepted, err, output.String())
+	}
+}
+
+func TestStreamPromptRejectsEOF(t *testing.T) {
+	for _, input := range []string{"", "y"} {
+		t.Run(input, func(t *testing.T) {
+			accepted, err := (streamPrompt{
+				input: strings.NewReader(input), output: io.Discard, interactive: func() bool { return true },
+			}).Confirm(context.Background(), domain.ConfirmationRequest{
+				Summary: "Update configuration", Default: domain.ConfirmationDefaultYes,
+			})
+			if accepted || !errors.Is(err, domain.ErrConfirmationRequired) ||
+				domain.ConfirmationErrorClass(err) != domain.ConfirmationRequiredCode {
+				t.Fatalf("EOF accepted=%v err=%v class=%q", accepted, err, domain.ConfirmationErrorClass(err))
+			}
+		})
+	}
+}
+
+func TestStreamPromptRejectsPipedInputWithoutConsumingIt(t *testing.T) {
+	input := strings.NewReader("y\n")
+	accepted, err := (streamPrompt{
+		input: input, output: io.Discard, interactive: func() bool { return false },
+	}).Confirm(context.Background(), domain.ConfirmationRequest{
+		Summary: "Update configuration", Default: domain.ConfirmationDefaultYes,
+	})
+	if accepted || !errors.Is(err, domain.ErrConfirmationRequired) || input.Len() != len("y\n") {
+		t.Fatalf("piped accepted=%v err=%v remaining=%d", accepted, err, input.Len())
+	}
+}
+
+func TestStreamPromptRejectsUnknownDefault(t *testing.T) {
+	accepted, err := (streamPrompt{
+		input: strings.NewReader("y\n"), output: io.Discard, interactive: func() bool { return true },
+	}).Confirm(context.Background(), domain.ConfirmationRequest{
+		Summary: "Update configuration", Default: domain.ConfirmationDefault("unknown"),
+	})
+	if accepted || !errors.Is(err, domain.ErrConfirmationRequired) {
+		t.Fatalf("unknown default accepted=%v err=%v", accepted, err)
+	}
+}
+
+func TestOperationPromptAcceptsInteractiveInputWithRedirectedOutput(t *testing.T) {
+	var output bytes.Buffer
+	program := &CLI{
+		options: Options{
+			Stdin: strings.NewReader("\n"), Stdout: &output,
+			AdapterRunner: &testkit.ScriptedAdapter{}, Clock: testkit.NewManualClock(time.Unix(100, 0)),
+		},
+		promptInputTerminal: func() bool { return true },
+		operatorTerminal:    func() bool { return false },
+	}
+	orchestrator := program.operationOrchestrator(
+		"operation-redirected-output",
+		config.Loaded{Context: domain.Context{YardType: domain.YardLocal}}, nil, nil,
+	)
+	plan, err := orchestrator.Plan(
+		context.Background(), domain.Context{YardType: domain.YardLocal},
+		domain.CommandPolicy{
+			Name: "Update configuration", Effect: domain.CommandMutate,
+			Confirmation: domain.ConfirmationPromptDefaultYes, RemotePolicy: domain.RemoteOnOwner,
+		}, false,
+	)
+	if err != nil || !plan.Confirmed || !strings.Contains(output.String(), "Proceed? [Y/n]") {
+		t.Fatalf("redirected output prompt: plan=%#v err=%v output=%q", plan, err, output.String())
 	}
 }
 
@@ -98,7 +239,7 @@ func TestOldYardTeardownRequiresCanonicalTemplateMigration(t *testing.T) {
 		}
 	}
 	writeCLIFile(t, filepath.Join(root, "config", "commands.registry"), strings.Join([]string{
-		"teardown|uninstall|99-teardown.sh||forward|mutate|required|public|lifecycle|teardown|teardown|delete the yard|--keep-data --yes --help|",
+		"teardown|uninstall|@teardown||forward|mutate|dynamic|public|lifecycle|teardown|teardown|delete the yard|--keep-data --yes --help|",
 		"list||@list||local|read|never|public|projects|simple|list|list projects currently registered in yards|--live --help|",
 		"yards||@yards||local|read|never|public|lifecycle|simple|yards|list registered local and remote yards|--help|",
 	}, "\n")+"\n", 0o600)
@@ -216,6 +357,7 @@ func TestOldYardTeardownRequiresCanonicalTemplateMigration(t *testing.T) {
 		WorkingDir:     root,
 		Stderr:         &stderr,
 		AdapterRunner:  runner,
+		Incus:          &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -224,7 +366,7 @@ func TestOldYardTeardownRequiresCanonicalTemplateMigration(t *testing.T) {
 		t.Fatalf("canonical-template teardown failed: code=%d stderr=%q", code, stderr.String())
 	}
 	if len(runner.Requests) != 1 ||
-		runner.Requests[0].Action != "teardown" ||
+		runner.Requests[0].Action != "apply" ||
 		runner.Requests[0].Context["YARD_NAME"] != "e2e-yard" ||
 		runner.Requests[0].Context["INCUS_PROJECT"] != "subyard-e2e-yard" ||
 		runner.Requests[0].Context["YARD_TEMPLATE"] != "test-vms" ||

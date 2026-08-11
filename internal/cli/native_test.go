@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -26,6 +27,40 @@ import (
 )
 
 type statusFactsStub struct{ value domain.StatusFacts }
+
+type projectActionObservationProbe struct {
+	execute func(ports.InstanceExecRequest) (ports.InstanceExecResult, error)
+	stream  func(ports.InstanceExecRequest, io.Reader) (ports.InstanceExecResult, error)
+}
+
+type projectActionArchive string
+
+func (archive projectActionArchive) Open(context.Context, string) (io.ReadCloser, error) {
+	return io.NopCloser(strings.NewReader(string(archive))), nil
+}
+
+func (probe projectActionObservationProbe) Execute(
+	_ context.Context,
+	_ domain.Context,
+	request ports.InstanceExecRequest,
+) (ports.InstanceExecResult, error) {
+	if probe.execute == nil {
+		return ports.InstanceExecResult{}, nil
+	}
+	return probe.execute(request)
+}
+
+func (probe projectActionObservationProbe) Stream(
+	_ context.Context,
+	_ domain.Context,
+	request ports.InstanceExecRequest,
+	input io.Reader,
+) (ports.InstanceExecResult, error) {
+	if probe.stream == nil {
+		return ports.InstanceExecResult{}, nil
+	}
+	return probe.stream(request, input)
+}
 
 func (stub statusFactsStub) ReadStatusFacts(context.Context, domain.Context, bool) (domain.StatusFacts, error) {
 	return stub.value, nil
@@ -488,7 +523,10 @@ func TestUpdateUsesThePreparedReleaseAcrossRPCPlanAndExecute(t *testing.T) {
 		t.Fatal(err)
 	}
 	plan := result.(domain.OperationPlan)
-	if plan.Effect != domain.CommandMutate || !strings.Contains(strings.Join(plan.Consequences, " "), "1.2.3") {
+	if plan.Effect != domain.CommandMutate || plan.Confirmation != domain.ConfirmationPromptDefaultYes ||
+		plan.Assessment == nil || plan.Assessment.Action != "update.activate" ||
+		plan.ConfirmationRequest == nil || plan.ConfirmationRequest.Default != domain.ConfirmationDefaultYes ||
+		!strings.Contains(strings.Join(plan.Consequences, " "), "1.2.3") {
 		t.Fatalf("release plan lost prepared evidence: %#v", plan)
 	}
 	execute, _ := json.Marshal(map[string]bool{"confirmed": true})
@@ -510,11 +548,99 @@ func TestUpdateUsesThePreparedReleaseAcrossRPCPlanAndExecute(t *testing.T) {
 	}
 }
 
+func TestUpdateTypedConfirmationSeparatesCheckActivationAndRollbackPreflight(t *testing.T) {
+	t.Run("check is bounded and never prompts or activates", func(t *testing.T) {
+		root, environment, runtimeRoot := updateReleaseFixture(t)
+		capture := filepath.Join(root, "check-installer.args")
+		writeCLIFile(t, filepath.Join(root, "scripts", "install-runtime-release.sh"),
+			"#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" > \"$CHECK_CAPTURE\"\n", 0o700)
+		environment = append(environment, "CHECK_CAPTURE="+capture)
+		prompt := &testkit.Prompt{}
+		configs := &recordingConfigApplier{}
+		var stderr bytes.Buffer
+		program, err := New(Options{
+			RepositoryRoot: root, Program: "yard",
+			Arguments:   []string{"update", "--check", "--version", "1.2.3", "--runtime-root", runtimeRoot},
+			Environment: environment, WorkingDir: root, Prompt: prompt, Config: configs,
+			Stdout: &bytes.Buffer{}, Stderr: &stderr,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code := program.Run(context.Background()); code != 0 {
+			t.Fatalf("code=%d stderr=%q", code, stderr.String())
+		}
+		if len(prompt.Requests) != 0 || len(configs.yards) != 0 {
+			t.Fatalf("check prompted or refreshed: prompt=%#v configs=%#v", prompt.Requests, configs.yards)
+		}
+		arguments, err := os.ReadFile(capture)
+		if err != nil || !slices.Contains(strings.Fields(string(arguments)), "--check") {
+			t.Fatalf("check installer args=%q err=%v", arguments, err)
+		}
+		if _, err := os.Lstat(filepath.Join(runtimeRoot, "current")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("check activated runtime: %v", err)
+		}
+	})
+
+	t.Run("declined activation does not download install or refresh", func(t *testing.T) {
+		root, environment, runtimeRoot := updateReleaseFixture(t)
+		prompt := &testkit.Prompt{Answers: []bool{false}}
+		configs := &recordingConfigApplier{}
+		var stderr bytes.Buffer
+		program, err := New(Options{
+			RepositoryRoot: root, Program: "yard",
+			Arguments:   []string{"update", "--version", "1.2.3", "--runtime-root", runtimeRoot},
+			Environment: environment, WorkingDir: root, Prompt: prompt, Config: configs,
+			Stdout: &bytes.Buffer{}, Stderr: &stderr,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code := program.Run(context.Background()); code != 1 || len(prompt.Requests) != 1 ||
+			prompt.Requests[0].Default != domain.ConfirmationDefaultYes {
+			t.Fatalf("code=%d prompt=%#v stderr=%q", code, prompt.Requests, stderr.String())
+		}
+		cache := environmentValue(environment, "YARD_RELEASE_CACHE")
+		if _, err := os.Stat(cache); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("decline wrote release cache: %v", err)
+		}
+		if _, err := os.Stat(runtimeRoot); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("decline wrote runtime root: %v", err)
+		}
+		if len(configs.yards) != 0 {
+			t.Fatalf("decline refreshed configs: %#v", configs.yards)
+		}
+	})
+
+	for _, assumeYes := range []bool{false, true} {
+		t.Run(fmt.Sprintf("rollback precondition yes=%v", assumeYes), func(t *testing.T) {
+			root, environment, _ := updateReleaseFixture(t)
+			arguments := []string{"update", "--rollback", "--runtime-root", filepath.Join(root, "missing-runtime")}
+			if assumeYes {
+				arguments = append([]string{"update", "--yes"}, arguments[1:]...)
+			}
+			prompt := &testkit.Prompt{}
+			var stderr bytes.Buffer
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard", Arguments: arguments,
+				Environment: environment, WorkingDir: root, Prompt: prompt, Stderr: &stderr,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code := program.Run(context.Background()); code != 1 ||
+				!strings.Contains(stderr.String(), "previous") || len(prompt.Requests) != 0 {
+				t.Fatalf("code=%d prompt=%#v stderr=%q", code, prompt.Requests, stderr.String())
+			}
+		})
+	}
+}
+
 func TestUpdateRefreshesConfigsWithActivatedRuntimeLauncher(t *testing.T) {
 	for _, test := range []struct {
-		name                                      string
-		arguments                                 func(string) []string
-		defaultRoot, sameVersion, inheritedEngine bool
+		name                                                string
+		arguments                                           func(string) []string
+		defaultRoot, sameVersion, rollback, inheritedEngine bool
 	}{
 		{
 			name: "default-root update", arguments: func(string) []string {
@@ -534,7 +660,7 @@ func TestUpdateRefreshesConfigsWithActivatedRuntimeLauncher(t *testing.T) {
 		{
 			name: "explicit-root rollback", arguments: func(root string) []string {
 				return []string{"update", "--yes", "--runtime-root", root, "--rollback"}
-			},
+			}, rollback: true,
 		},
 		{
 			name: "explicit-root ignores inherited engine", arguments: func(root string) []string {
@@ -548,12 +674,10 @@ func TestUpdateRefreshesConfigsWithActivatedRuntimeLauncher(t *testing.T) {
 				runtimeRoot = filepath.Join(root, "data", "runtime")
 			}
 			if test.sameVersion {
-				engine := filepath.Join(runtimeRoot, "current", "bin", "yard-engine")
-				if err := os.MkdirAll(filepath.Dir(engine), 0o700); err != nil {
-					t.Fatal(err)
-				}
-				writeCLIFile(t, engine,
-					"#!/bin/sh\nprintf 'yard 1.2.3\\n'\n", 0o700)
+				prepareCLIReleaseLinks(t, runtimeRoot, false)
+			}
+			if test.rollback {
+				prepareCLIReleaseLinks(t, runtimeRoot, true)
 			}
 			oldDispatcher := filepath.Join(root, "old-dispatcher")
 			oldLog := filepath.Join(root, "old-dispatcher.log")
@@ -584,6 +708,29 @@ func TestUpdateRefreshesConfigsWithActivatedRuntimeLauncher(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func prepareCLIReleaseLinks(t *testing.T, root string, withPrevious bool) {
+	t.Helper()
+	names := []string{"current-a"}
+	if withPrevious {
+		names = append(names, "previous-b")
+	}
+	for _, name := range names {
+		engine := filepath.Join(root, "releases", name, "bin", "yard-engine")
+		if err := os.MkdirAll(filepath.Dir(engine), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeCLIFile(t, engine, "#!/bin/sh\nprintf 'yard 1.2.3\\n'\n", 0o700)
+	}
+	if err := os.Symlink("releases/current-a", filepath.Join(root, "current")); err != nil {
+		t.Fatal(err)
+	}
+	if withPrevious {
+		if err := os.Symlink("releases/previous-b", filepath.Join(root, "previous")); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -1041,6 +1188,10 @@ fi
 func TestStructuredMutationSharesTypedAdapterAcrossCLIAndRPC(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	clock := testkit.NewManualClock(time.Unix(100, 0))
+	cliIncus := lifecycleIncus()
+	cliInstance := cliIncus.Instances["subyard/yard"]
+	cliInstance.Status = "Running"
+	cliIncus.Instances["subyard/yard"] = cliInstance
 	cliRunner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{
 		Schema: 1, OperationID: "operation-stop-cli", Status: "ok",
 	}}}}
@@ -1050,7 +1201,7 @@ func TestStructuredMutationSharesTypedAdapterAcrossCLIAndRPC(t *testing.T) {
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"stop", "--force"},
 		Environment: append(environment, "SUBYARD_OPERATION_ID=operation-stop-cli"), WorkingDir: root,
 		Stderr: &stderr, AdapterRunner: cliRunner, Prompt: prompt, Clock: clock,
-		Incus: lifecycleIncus(),
+		Incus: cliIncus,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1067,9 +1218,13 @@ func TestStructuredMutationSharesTypedAdapterAcrossCLIAndRPC(t *testing.T) {
 	rpcRunner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{
 		Schema: 1, OperationID: "operation-stop-rpc", Status: "ok",
 	}}}}
+	rpcIncus := lifecycleIncus()
+	rpcInstance := rpcIncus.Instances["subyard/yard"]
+	rpcInstance.Status = "Running"
+	rpcIncus.Instances["subyard/yard"] = rpcInstance
 	program, err = New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
-		Stderr: &stderr, AdapterRunner: rpcRunner, Clock: clock, Incus: lifecycleIncus(),
+		Stderr: &stderr, AdapterRunner: rpcRunner, Clock: clock, Incus: rpcIncus,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1095,6 +1250,57 @@ func TestStructuredMutationSharesTypedAdapterAcrossCLIAndRPC(t *testing.T) {
 	if len(rpcRunner.Requests) != 1 || rpcRunner.Requests[0].Action != "stop" ||
 		!slices.Equal(rpcRunner.Requests[0].Arguments, []string{"stop", "--force"}) {
 		t.Fatalf("RPC mutation bypassed the typed command adapter: %#v", rpcRunner.Requests)
+	}
+}
+
+func TestStructuredStoppedYardIsNoOpWithoutPromptOrAdapter(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	runner := &testkit.ScriptedAdapter{}
+	prompt := &testkit.Prompt{}
+	var stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Arguments: []string{"stop"},
+		Environment: append(environment, "SUBYARD_OPERATION_ID=operation-stop-noop"),
+		WorkingDir:  root, Stderr: &stderr, AdapterRunner: runner, Prompt: prompt,
+		Incus: lifecycleIncus(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("stopped-yard no-op failed: code=%d stderr=%q", code, stderr.String())
+	}
+	if len(prompt.Requests) != 0 || len(runner.Requests) != 0 {
+		t.Fatalf("no-op prompted or applied: prompts=%#v requests=%#v", prompt.Requests, runner.Requests)
+	}
+}
+
+func TestStructuredActionRechecksNoOpAfterConsent(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	incus := lifecycleIncus()
+	instance := incus.Instances["subyard/yard"]
+	instance.Status = "Running"
+	incus.Instances["subyard/yard"] = instance
+	runner := &testkit.ScriptedAdapter{}
+	prompt := &callbackPrompt{callback: func() {
+		current := incus.Instances["subyard/yard"]
+		current.Status = "Stopped"
+		incus.Instances["subyard/yard"] = current
+	}}
+	var stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Arguments: []string{"stop"},
+		Environment: append(environment, "SUBYARD_OPERATION_ID=operation-stop-recheck"),
+		WorkingDir:  root, Stderr: &stderr, AdapterRunner: runner, Prompt: prompt, Incus: incus,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("post-consent no-op failed: code=%d stderr=%q", code, stderr.String())
+	}
+	if len(runner.Requests) != 0 {
+		t.Fatalf("post-consent no-op was applied: %#v", runner.Requests)
 	}
 }
 
@@ -1992,8 +2198,7 @@ func TestProjectAdaptersReceiveGoResolvedSnapshotAndGoCommitsState(t *testing.T)
 		execution.Environment["SUBYARD_PROJECT_HOST_PATH"] != projectPath ||
 		execution.Environment["SUBYARD_PROJECT_YARD_PATH"] != state.YardPath(execution.Record.ProjectID) ||
 		execution.Record.ProjectID != "Demo" || execution.Record.Name != "Demo" ||
-		execution.Record.IdentityVersion != 2 || execution.Reservation == nil ||
-		execution.OperationID != execution.Reservation.OperationID {
+		execution.Record.IdentityVersion != 2 || execution.Reservation != nil {
 		t.Fatalf("unexpected project adapter snapshot: %#v", execution)
 	}
 	store, err := state.NewFileStore(stateDirectory)
@@ -2002,6 +2207,12 @@ func TestProjectAdaptersReceiveGoResolvedSnapshotAndGoCommitsState(t *testing.T)
 	}
 	if _, err := store.Get(context.Background(), execution.Record.ProjectID); !errors.Is(err, state.ErrNotFound) {
 		t.Fatalf("project state was published before the adapter succeeded: %v", err)
+	}
+	if err := program.reserveProjectExecution(context.Background(), execution); err != nil {
+		t.Fatal(err)
+	}
+	if execution.Reservation == nil || execution.OperationID != execution.Reservation.OperationID {
+		t.Fatalf("post-consent reservation was not acquired: %#v", execution.Reservation)
 	}
 	if err := program.commitProjectExecution(context.Background(), execution); err != nil {
 		t.Fatal(err)
@@ -2030,6 +2241,553 @@ func TestProjectAdaptersReceiveGoResolvedSnapshotAndGoCommitsState(t *testing.T)
 		[]string{secondPath, "--name", "Demo", "--target", "yard"},
 	); err == nil {
 		t.Fatal("explicit colliding project name was accepted")
+	}
+}
+
+func TestProjectPreparationDoesNotPublishAdmissionBeforeConsent(t *testing.T) {
+	root, environment, stateDirectory := nativeFixture(t)
+	projectPath := filepath.Join(root, "Preview")
+	if err := os.MkdirAll(projectPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := program.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution, err := program.prepareProjectImport(
+		context.Background(), loaded, "sync", []string{projectPath},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if execution.Reservation != nil {
+		t.Fatalf("prepare published reservation: %#v", execution.Reservation)
+	}
+	if _, err := os.Lstat(filepath.Join(stateDirectory, ".reservations")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("prepare created reservation directory: %v", err)
+	}
+}
+
+func TestProjectExecutionBuildsTypedActionVariants(t *testing.T) {
+	record := domain.ProjectRecord{
+		Schema: 1, IdentityVersion: 2, ProjectID: "Demo", Name: "Demo",
+		HostPath: "/host/Demo", SourceKey: state.SourceKey("/host/Demo"),
+		YardPath: state.YardPath("Demo"), Mode: domain.ProjectSync,
+		SSHHost: "yard", Target: "yard",
+	}
+	for _, test := range []struct {
+		name      string
+		command   string
+		execution projectExecution
+		action    domain.ActionID
+		changed   bool
+	}{
+		{name: "sync no-op", command: "sync", execution: projectExecution{Record: record}, action: "project.sync"},
+		{name: "sync changed", command: "sync", execution: projectExecution{Record: record, ActionChanged: true}, action: "project.sync", changed: true},
+		{name: "bind", command: "bind", execution: projectExecution{Record: record, ActionChanged: true}, action: "project.bind", changed: true},
+		{name: "clone", command: "clone", execution: projectExecution{Record: record, ActionChanged: true}, action: "project.clone", changed: true},
+		{name: "export", command: "export", execution: projectExecution{Record: record, ActionChanged: true}, action: "project.export-patch", changed: true},
+		{name: "up", command: "up", execution: projectExecution{Record: record, ActionChanged: true, Environment: map[string]string{}}, action: "project.environment.up", changed: true},
+		{name: "rebuild", command: "up", execution: projectExecution{Record: record, ActionChanged: true, Environment: map[string]string{"SUBYARD_PROJECT_REBUILD": "1"}}, action: "project.environment.rebuild", changed: true},
+		{name: "down", command: "down", execution: projectExecution{Record: record, ActionChanged: true}, action: "project.environment.down", changed: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			action, delta, err := test.execution.actionPlan(test.command)
+			if err != nil || action != test.action || delta.Changed != test.changed {
+				t.Fatalf("action=%q delta=%#v err=%v", action, delta, err)
+			}
+			if test.changed && len(delta.Consequences) == 0 {
+				t.Fatal("changed project action has no consequences")
+			}
+		})
+	}
+}
+
+func TestExistingProjectExportCarriesOperationIDIntoAssessment(t *testing.T) {
+	root, environment, stateDirectory := nativeFixture(t)
+	record := domain.ProjectRecord{
+		Schema: 1, IdentityVersion: 2, ProjectID: "Demo", Name: "Demo",
+		HostPath: filepath.Join(root, "Demo"), SourceKey: state.SourceKey(filepath.Join(root, "Demo")),
+		YardPath: state.YardPath("Demo"), Mode: domain.ProjectSync,
+		SSHHost: "yard", Target: "yard",
+	}
+	store, err := state.NewFileStore(stateDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	probe := projectActionObservationProbe{stream: func(
+		ports.InstanceExecRequest, io.Reader,
+	) (ports.InstanceExecResult, error) {
+		return ports.InstanceExecResult{ExitCode: 0}, nil
+	}}
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Environment: environment,
+		WorkingDir: root, ProjectData: probe, ProjectArchive: projectActionArchive("archive"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	program.env["SUBYARD_OPERATION_ID"] = "operation-export"
+	loaded, err := program.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution, err := program.prepareExistingProject(
+		context.Background(), loaded, "export", []string{"Demo"}, false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := program.observeProjectAction(context.Background(), "export", execution); err != nil {
+		t.Fatalf("ordinary export assessment rejected the CLI operation ID: %v", err)
+	}
+	if execution.OperationID != "operation-export" {
+		t.Fatalf("operation ID=%q", execution.OperationID)
+	}
+}
+
+func TestObserveProjectBindDetectsConvergenceAndConflicts(t *testing.T) {
+	record := domain.ProjectRecord{
+		Schema: 1, IdentityVersion: 2, ProjectID: "Demo", Name: "Demo",
+		HostPath: "/host/Demo", SourceKey: state.SourceKey("/host/Demo"),
+		YardPath: state.YardPath("Demo"), Mode: domain.ProjectBind,
+		SSHHost: "yard", Target: "yard",
+	}
+	loaded := config.Loaded{Context: domain.Context{
+		YardType: domain.YardLocal, IncusProject: "subyard", InstanceName: "yard",
+	}}
+	desired := map[string]string{
+		"type": "disk", "source": record.HostPath, "path": record.YardPath, "shift": "true",
+	}
+	for _, test := range []struct {
+		name      string
+		device    map[string]string
+		changed   bool
+		wantError bool
+	}{
+		{name: "missing", changed: true},
+		{name: "converged", device: desired},
+		{name: "conflict", device: map[string]string{
+			"type": "disk", "source": "/host/Other", "path": record.YardPath, "shift": "true",
+		}, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			devices := map[string]map[string]string{}
+			if test.device != nil {
+				devices[state.WorkspaceDeviceFor(record)] = test.device
+			}
+			incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+				"subyard/yard": {Name: "yard", Project: "subyard", LocalDevices: devices},
+			}}
+			program := &CLI{options: Options{
+				Incus: incus,
+				ProjectData: projectActionObservationProbe{execute: func(ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+					return ports.InstanceExecResult{Stdout: []byte("match"), ExitCode: 0}, nil
+				}},
+			}}
+			execution := &projectExecution{Loaded: loaded, Record: record}
+			err := program.observeProjectAction(context.Background(), "bind", execution)
+			if (err != nil) != test.wantError || execution.ActionChanged != test.changed {
+				t.Fatalf("changed=%t err=%v", execution.ActionChanged, err)
+			}
+		})
+	}
+}
+
+func TestAssessStructuredActionUsesTypedCoreAssessment(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	incus := lifecycleIncus()
+	instance := incus.Instances["subyard/yard"]
+	instance.Status = "Running"
+	incus.Instances["subyard/yard"] = instance
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
+		Incus: incus,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := program.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, ok := program.manifest.Lookup("stop")
+	if !ok {
+		t.Fatal("stop definition is missing")
+	}
+	lifecycle, err := prepareLifecycleExecution(definition, []string{"--force"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	action, delta, typed, err := program.assessStructuredAction(
+		context.Background(), loaded, definition, nil, nil, lifecycle, nil, nil,
+	)
+	if err != nil || !typed || action != "yard.stop-force" || !delta.Changed {
+		t.Fatalf("action=%q delta=%#v typed=%t err=%v", action, delta, typed, err)
+	}
+}
+
+func TestObserveProjectActionDetectsSyncAndEnvironmentNoOps(t *testing.T) {
+	record := domain.ProjectRecord{
+		Schema: 1, IdentityVersion: 2, ProjectID: "Demo", Name: "Demo",
+		HostPath: "/host/Demo", SourceKey: state.SourceKey("/host/Demo"),
+		YardPath: state.YardPath("Demo"), Mode: domain.ProjectSync,
+		SSHHost: "yard", Target: "yard",
+	}
+	t.Run("new sync", func(t *testing.T) {
+		execution := &projectExecution{Record: record}
+		program := &CLI{}
+		if err := program.observeProjectAction(context.Background(), "sync", execution); err != nil {
+			t.Fatal(err)
+		}
+		if !execution.ActionChanged {
+			t.Fatal("new sync was assessed as a no-op")
+		}
+	})
+	t.Run("converged sync", func(t *testing.T) {
+		root, environment, _ := nativeFixture(t)
+		incus := lifecycleIncus()
+		probe := projectActionObservationProbe{
+			execute: func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+				if slices.Contains(request.Command, filepath.Join(filepath.Dir(record.YardPath), ".subyard-meta.json")) {
+					return ports.InstanceExecResult{Stdout: []byte("match"), ExitCode: 0}, nil
+				}
+				return ports.InstanceExecResult{Stdout: []byte("present"), ExitCode: 0}, nil
+			},
+			stream: func(request ports.InstanceExecRequest, _ io.Reader) (ports.InstanceExecResult, error) {
+				if len(request.Command) == 0 || request.Command[0] != "tar" {
+					t.Fatalf("sync comparison=%#v", request.Command)
+				}
+				return ports.InstanceExecResult{ExitCode: 0}, nil
+			},
+		}
+		program, err := New(Options{
+			RepositoryRoot: root, Program: "yard", Environment: environment,
+			WorkingDir: root, Incus: incus, ProjectData: probe, ProjectArchive: projectActionArchive("archive"),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		existing := record
+		execution := &projectExecution{Loaded: config.Loaded{Context: domain.Context{YardType: domain.YardLocal}}, Record: record, PreviewExisting: &existing}
+		if err := program.observeProjectAction(context.Background(), "sync", execution); err != nil {
+			t.Fatal(err)
+		}
+		if execution.ActionChanged {
+			t.Fatal("converged sync was assessed as changed")
+		}
+	})
+	t.Run("sync metadata drift", func(t *testing.T) {
+		root, environment, _ := nativeFixture(t)
+		probe := projectActionObservationProbe{
+			execute: func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+				if slices.Contains(request.Command, record.YardPath) {
+					return ports.InstanceExecResult{Stdout: []byte("present"), ExitCode: 0}, nil
+				}
+				return ports.InstanceExecResult{Stdout: []byte("different"), ExitCode: 0}, nil
+			},
+			stream: func(ports.InstanceExecRequest, io.Reader) (ports.InstanceExecResult, error) {
+				return ports.InstanceExecResult{ExitCode: 0}, nil
+			},
+		}
+		program, err := New(Options{
+			RepositoryRoot: root, Program: "yard", Environment: environment,
+			WorkingDir: root, Incus: lifecycleIncus(), ProjectData: probe,
+			ProjectArchive: projectActionArchive("archive"),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		existing := record
+		execution := &projectExecution{
+			Loaded: config.Loaded{Context: domain.Context{YardType: domain.YardLocal, YardName: "default"}},
+			Record: record, PreviewExisting: &existing,
+		}
+		if err := program.observeProjectAction(context.Background(), "sync", execution); err != nil {
+			t.Fatal(err)
+		}
+		if !execution.ActionChanged {
+			t.Fatal("metadata drift was assessed as a no-op")
+		}
+	})
+	for _, test := range []struct {
+		name     string
+		exitCode int
+		changed  bool
+	}{
+		{name: "export no-op", exitCode: 0},
+		{name: "export diff", exitCode: 1, changed: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			probe := projectActionObservationProbe{stream: func(
+				request ports.InstanceExecRequest, _ io.Reader,
+			) (ports.InstanceExecResult, error) {
+				if len(request.Command) == 0 || request.Command[0] != "sh" {
+					t.Fatalf("export assessment=%#v", request.Command)
+				}
+				result := ports.InstanceExecResult{ExitCode: test.exitCode}
+				if test.exitCode == 1 {
+					return result, errors.New("diff")
+				}
+				return result, nil
+			}}
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard", Environment: environment,
+				WorkingDir: root, Incus: lifecycleIncus(), ProjectData: probe,
+				ProjectArchive: projectActionArchive("archive"),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			execution := &projectExecution{
+				Loaded: config.Loaded{Context: domain.Context{YardType: domain.YardLocal}},
+				Record: record, OperationID: "operation-export-assessment",
+			}
+			if err := program.observeProjectAction(context.Background(), "export", execution); err != nil {
+				t.Fatal(err)
+			}
+			if execution.ActionChanged != test.changed {
+				t.Fatalf("changed=%t", execution.ActionChanged)
+			}
+		})
+	}
+	t.Run("unowned environment", func(t *testing.T) {
+		root, environment, _ := nativeFixture(t)
+		probe := projectActionObservationProbe{execute: func(ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+			return ports.InstanceExecResult{Stdout: []byte("running\t\t\t"), ExitCode: 0}, nil
+		}}
+		program, err := New(Options{
+			RepositoryRoot: root, Program: "yard", Environment: environment,
+			WorkingDir: root, Incus: lifecycleIncus(), ProjectData: probe,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		environmentRecord := record
+		environmentRecord.Target = "fixture"
+		execution := &projectExecution{
+			Loaded: config.Loaded{Context: domain.Context{YardType: domain.YardLocal}},
+			Record: environmentRecord, Environment: map[string]string{},
+		}
+		err = program.observeProjectAction(context.Background(), "up", execution)
+		if err == nil || !strings.Contains(err.Error(), "not owned") {
+			t.Fatalf("unowned environment error=%v", err)
+		}
+	})
+	t.Run("environment manifest drift", func(t *testing.T) {
+		root, environment, _ := nativeFixture(t)
+		probe := projectActionObservationProbe{execute: func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+			if slices.Contains(request.Command, "/srv/env-meta/Demo/profile.json") {
+				return ports.InstanceExecResult{Stdout: []byte("different"), ExitCode: 0}, nil
+			}
+			return ports.InstanceExecResult{Stdout: []byte("running\t1\tDemo\tfixture"), ExitCode: 0}, nil
+		}}
+		program, err := New(Options{
+			RepositoryRoot: root, Program: "yard", Environment: environment,
+			WorkingDir: root, Incus: lifecycleIncus(), ProjectData: probe,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		environmentRecord := record
+		environmentRecord.Target = "fixture"
+		execution := &projectExecution{
+			Loaded: config.Loaded{Context: domain.Context{YardType: domain.YardLocal}},
+			Record: environmentRecord, Environment: map[string]string{},
+		}
+		err = program.observeProjectAction(context.Background(), "up", execution)
+		if err == nil || !strings.Contains(err.Error(), "--rebuild") {
+			t.Fatalf("manifest drift error=%v", err)
+		}
+	})
+	for _, test := range []struct {
+		name      string
+		command   string
+		state     string
+		rebuild   bool
+		changed   bool
+		wantError bool
+	}{
+		{name: "up running", command: "up", state: "running"},
+		{name: "up stopped", command: "up", state: "stopped", changed: true},
+		{name: "rebuild running", command: "up", state: "running", rebuild: true, changed: true},
+		{name: "down running", command: "down", state: "running", changed: true},
+		{name: "down stopped", command: "down", state: "stopped"},
+		{name: "down missing", command: "down", state: "missing", wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			environmentRecord := record
+			environmentRecord.Target = "fixture"
+			root, environment, _ := nativeFixture(t)
+			probe := projectActionObservationProbe{execute: func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+				if slices.Contains(request.Command, "/srv/env-meta/Demo/profile.json") {
+					return ports.InstanceExecResult{Stdout: []byte("match"), ExitCode: 0}, nil
+				}
+				observation := test.state
+				if test.state != "missing" {
+					observation += "\t1\tDemo\tfixture"
+				}
+				return ports.InstanceExecResult{Stdout: []byte(observation), ExitCode: 0}, nil
+			}}
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard", Environment: environment,
+				WorkingDir: root, Incus: lifecycleIncus(), ProjectData: probe,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			execution := &projectExecution{
+				Loaded: config.Loaded{Context: domain.Context{YardType: domain.YardLocal}},
+				Record: environmentRecord, Environment: map[string]string{},
+			}
+			if test.rebuild {
+				execution.Environment["SUBYARD_PROJECT_REBUILD"] = "1"
+			}
+			err = program.observeProjectAction(context.Background(), test.command, execution)
+			if (err != nil) != test.wantError || execution.ActionChanged != test.changed {
+				t.Fatalf("changed=%t err=%v", execution.ActionChanged, err)
+			}
+		})
+	}
+}
+
+func TestProjectReservationRejectsIdentityDriftAfterConsent(t *testing.T) {
+	root, environment, stateDirectory := nativeFixture(t)
+	projectPath := filepath.Join(root, "sources", "Demo")
+	if err := os.MkdirAll(projectPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := program.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution, err := program.prepareProjectImport(
+		context.Background(), loaded, "sync", []string{projectPath},
+	)
+	if err != nil || execution.Record.ProjectID != "Demo" {
+		t.Fatalf("preview=%#v err=%v", execution, err)
+	}
+	store, err := state.NewFileStore(stateDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	competing, err := store.Admit(
+		context.Background(), "competing-operation", "/other/Demo",
+		domain.ProjectSync, "Demo", false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.AbortAdmission(context.Background(), competing.Reservation.OperationID)
+	if err := program.reserveProjectExecution(context.Background(), execution); !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatalf("identity drift was accepted: %v", err)
+	}
+	if execution.Reservation != nil {
+		t.Fatalf("stale reservation was retained: %#v", execution.Reservation)
+	}
+}
+
+func TestOwnerProjectPreviewIsReadOnly(t *testing.T) {
+	stateDirectory := t.TempDir()
+	if err := os.Chmod(stateDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := state.NewFileStore(stateDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	program := &CLI{options: Options{Stdout: &stdout, Stderr: &stderr, Program: "yard"}}
+	code := program.runOwnerProjectState(
+		context.Background(), state.Service{Store: store}, domain.Context{SSHHost: "yard"},
+		[]string{"preview", "/host/Demo", "sync", "Demo", "0"},
+	)
+	if code != 0 {
+		t.Fatalf("preview failed: code=%d stderr=%q", code, stderr.String())
+	}
+	var response struct {
+		ProjectID string                `json:"projectId"`
+		Name      string                `json:"name"`
+		Existing  *domain.ProjectRecord `json:"existing"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.ProjectID != "Demo" || response.Name != "Demo" || response.Existing != nil {
+		t.Fatalf("preview=%#v", response)
+	}
+	if _, err := os.Lstat(filepath.Join(stateDirectory, ".reservations")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("preview published a reservation: %v", err)
+	}
+}
+
+func TestRemoteProjectAdmissionUsesOwnerReadOnlyPreview(t *testing.T) {
+	fakeBin := t.TempDir()
+	writeCLIFile(t, filepath.Join(fakeBin, "ssh"), `#!/bin/sh
+printf '%s\n' '{"projectId":"Demo-2","name":"Demo-2","existing":null}'
+`, 0o700)
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	program := &CLI{
+		options: Options{WorkingDir: t.TempDir(), Stderr: io.Discard},
+		env:     map[string]string{"PATH": fakeBin, "SUBYARD_OPERATION_ID": "preview-operation"},
+	}
+	loaded := config.Loaded{Context: domain.Context{
+		YardType: domain.YardRemote, RemoteDest: "dev@owner.example", SSHHost: "yard",
+	}}
+	admission, err := program.previewProjectAdmission(
+		context.Background(), loaded, nil, "/host/Demo", domain.ProjectSync, "Demo", false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admission.ProjectID != "Demo-2" || admission.Name != "Demo-2" ||
+		admission.Existing != nil || admission.Reservation != nil {
+		t.Fatalf("remote preview=%#v", admission)
+	}
+}
+
+func TestRemoteProjectReservationRejectsPreviewDriftAfterConsent(t *testing.T) {
+	fakeBin := t.TempDir()
+	writeCLIFile(t, filepath.Join(fakeBin, "ssh"), `#!/bin/sh
+printf '%s\n' '{"projectId":"Demo-2","name":"Demo-2","reserved":true,"existing":null}'
+`, 0o700)
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	program := &CLI{
+		options: Options{WorkingDir: t.TempDir(), Stderr: io.Discard},
+		env:     map[string]string{"PATH": fakeBin, "SUBYARD_OPERATION_ID": "reserve-operation"},
+	}
+	execution := &projectExecution{
+		Loaded: config.Loaded{Context: domain.Context{
+			YardType: domain.YardRemote, RemoteDest: "dev@owner.example", SSHHost: "yard",
+		}},
+		Commit: projectCommitPut, OperationID: "reserve-operation", RequestedName: "Demo",
+		Record: domain.ProjectRecord{
+			Schema: 1, IdentityVersion: 2, ProjectID: "Demo", Name: "Demo",
+			HostPath: "/host/Demo", SourceKey: state.SourceKey("/host/Demo"),
+			YardPath: state.YardPath("Demo"), Mode: domain.ProjectSync, SSHHost: "yard", Target: "yard",
+		},
+	}
+	if err := program.reserveProjectExecution(context.Background(), execution); !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatalf("remote identity drift was accepted: %v", err)
+	}
+	if execution.RemoteReserved {
+		t.Fatal("stale remote reservation was retained")
 	}
 }
 
@@ -2432,28 +3190,28 @@ func nativeFixture(t *testing.T) (string, []string, string) {
 		}
 	}
 	manifest := strings.Join([]string{
-		"init||@init||forward|mutate|required|public|lifecycle|simple|init|init|--configs --reset --profile --yes --help|",
+		"init||@init||forward|mutate|dynamic|public|lifecycle|simple|init|init|--configs --reset --profile --yes --help|",
 		"start||@lifecycle||forward|mutate|never|public|lifecycle|simple|start|start|--yes --help|",
-		"stop||@lifecycle||forward|mutate|required|public|lifecycle|simple|stop|stop|--force --yes --help|",
-		"provision||@provision||forward|mutate|required|public|lifecycle|profiles|provision [profile]|provision|-l --list --yes --help|",
+		"stop||@lifecycle||forward|mutate|dynamic|public|lifecycle|simple|stop|stop|--force --yes --help|",
+		"provision||@provision||forward|mutate|dynamic|public|lifecycle|profiles|provision [profile]|provision|-l --list --yes --help|",
 		"test-vms||@test-vms||forward|mutate|dynamic|public|lifecycle|simple|test-vms <command>|test-vms|--slot -n -f --yes --help|logs status revoke recover",
-		"teardown||@teardown||forward|mutate|required|public|lifecycle|teardown|teardown|teardown|--keep-data --yes --help|",
+		"teardown||@teardown||forward|mutate|dynamic|public|lifecycle|teardown|teardown|teardown|--keep-data --yes --help|",
 		"status||@status||forward|read|never|public|lifecycle|status|status|status|--all --help|",
 		"space||@space||local|read|never|public|lifecycle|simple|space|space|--refresh --help|",
 		"logs||@logs||forward|read|never|public|lifecycle|simple|logs|logs|-f -n --yes --help|",
 		"usage||@usage||forward|read|never|public|lifecycle|simple|usage|usage|--help|",
 		"shell||@shell||forward|mutate|never|public|lifecycle|project-shell|shell|shell|--root --yes --help|",
-		"clone||@project||local|mutate|required|public|projects|clone|clone <url>|clone|--target --yes --help|",
+		"clone||@project||local|mutate|dynamic|public|projects|clone|clone <url>|clone|--target --yes --help|",
 		"code||@project||local|mutate|never|public|projects|project|code [project]|code|--yes --help|",
-		"remove||@project||local|mutate|required|public|projects|remove|remove [project]|remove|--soft --yes --help|",
+		"remove||@project||local|mutate|dynamic|public|projects|remove|remove [project]|remove|--soft --yes --help|",
 		"yards||@yards||local|read|never|public|lifecycle|simple|yards|yards|--help|",
 		"remote||@remote||local|mutate|dynamic|public|remote|remote|remote|remote|--yard --yes --help|add repair-key remove list",
 		"update||@update||local|mutate|dynamic|public|lifecycle|simple|update|update|--check --version --offline --rollback --force --yes --help|",
 		"list||@list||local|read|never|public|projects|simple|list|list|--live --help|",
 		"_info||@info||local|read|never|hidden|internal|none|_info|info||",
-		"_authorize||@authorize||forward|mutate|required|hidden|internal|none|_authorize|authorize||",
-		"rpc||@rpc||local|mutate|required|hidden|internal|none|rpc --stdio|rpc|--stdio|",
-		"_state||@state||local|mutate|required|hidden|internal|none|_state|state||",
+		"_authorize||@authorize||forward|mutate|dynamic|hidden|internal|none|_authorize|authorize||",
+		"rpc||@rpc||local|mutate|dynamic|hidden|internal|none|rpc --stdio|rpc|--stdio|",
+		"_state||@state||local|mutate|dynamic|hidden|internal|none|_state|state||",
 	}, "\n") + "\n"
 	writeCLIFile(t, filepath.Join(root, "config", "commands.registry"), manifest, 0o600)
 	for _, name := range []string{"incus.project.env", "subyard.env", "host.env", "agents.env", "ports.env"} {

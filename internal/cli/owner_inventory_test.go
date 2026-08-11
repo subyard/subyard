@@ -2,6 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +13,8 @@ import (
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ownerinventory"
+	"github.com/Subyard/Subyard/internal/rpc"
+	"github.com/Subyard/Subyard/internal/state"
 )
 
 func inventoryResult(hostID, yard, project string) ownerInventoryResult {
@@ -137,6 +141,120 @@ func TestCanonicalYardIdentityRejectsUnknownRemoteOwner(t *testing.T) {
 	}})
 	if err == nil || !strings.Contains(err.Error(), "canonical owner") {
 		t.Fatalf("unknown remote owner was accepted: %v", err)
+	}
+}
+
+func TestReadOnlyOwnerInventoriesDoNotRefreshOrMigrateConnections(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := program.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerRoot := filepath.Join(loaded.Context.Paths.DataHome, "owner-inventory")
+	connections := ownerinventory.Connections{Root: ownerRoot}
+	if err := connections.Write(ownerinventory.Connection{
+		HostID: "remote-owner", Destination: "dev@remote.example",
+		Yards: map[string]ownerinventory.YardRoute{"default": {SSHHost: "yard-remote"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cache := ownerinventory.Cache{Root: ownerRoot}
+	if err := cache.Write(ownerinventory.Snapshot{
+		FetchedAt: time.Unix(1, 0).UTC(), Inventory: inventoryResult("remote-owner", "default", "Remote").inventory,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	connectionPath := filepath.Join(ownerRoot, "connections", "remote-owner.json")
+	cachePath := filepath.Join(ownerRoot, "owners", "remote-owner.json")
+	beforeConnection, err := os.ReadFile(connectionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeCache, err := os.ReadFile(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	results := program.allOwnerInventoriesReadOnly(context.Background(), loaded)
+	if len(results) != 2 || !results[1].stale || results[1].err == nil ||
+		len(results[1].inventory.Yards) != 1 || results[1].inventory.Yards[0].Projects[0].Name != "Remote" {
+		t.Fatalf("read-only inventories=%#v", results)
+	}
+	afterConnection, err := os.ReadFile(connectionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterCache, err := os.ReadFile(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(afterConnection, beforeConnection) || !bytes.Equal(afterCache, beforeCache) {
+		t.Fatal("read-only project resolution rewrote owner inventory state")
+	}
+}
+
+func TestRPCOwnerInventoryPreservesLegacyProjectState(t *testing.T) {
+	root, environment, stateDirectory := nativeFixture(t)
+	store, err := state.NewFileStore(stateDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := projectRemovalRecord(domain.ProjectSync)
+	if err := store.Put(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(stateDirectory, record.ProjectID+".json")
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
+		Incus: lifecycleIncus(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := program.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]rpcPlannedOperation)}
+	result, err := handler.Handle(context.Background(), rpc.Call{
+		Method: "owner.inventory", Params: json.RawMessage(`{}`),
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inventory := result.(domain.OwnerInventory)
+	if len(inventory.Yards) != 1 || len(inventory.Yards[0].Projects) != 1 ||
+		inventory.Yards[0].Projects[0].ProjectID != record.ProjectID {
+		t.Fatalf("owner inventory=%#v", inventory)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) || beforeInfo.Mode().Perm() != afterInfo.Mode().Perm() {
+		t.Fatalf("owner.inventory mutated legacy state: before=%#o after=%#o",
+			beforeInfo.Mode().Perm(), afterInfo.Mode().Perm())
 	}
 }
 

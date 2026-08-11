@@ -21,7 +21,8 @@ import (
 )
 
 type Prepared struct {
-	Effect       domain.CommandEffect
+	Action       domain.ActionID
+	Changed      bool
 	Consequences []string
 	run          func(context.Context) error
 }
@@ -46,10 +47,17 @@ func (runtime *Runtime) Prepare(ctx context.Context, entry string, arguments []s
 		if len(arguments) != 0 {
 			return Prepared{}, errors.New("credential store initializer takes no arguments")
 		}
-		return Prepared{Effect: domain.CommandMutate,
-			Consequences: []string{"initialize the host-only encrypted credential ledger"},
-			run:          runtime.Initialize,
-		}, nil
+		changed := !runtime.Initialized()
+		return runtime.mutation(
+			"keys.init-store", changed,
+			[]string{"initialize the host-only encrypted credential ledger"},
+			func(ctx context.Context) error {
+				if !changed {
+					return nil
+				}
+				return runtime.Initialize(ctx)
+			},
+		), nil
 	default:
 		return Prepared{}, fmt.Errorf("unknown credential entrypoint %q", entry)
 	}
@@ -57,7 +65,7 @@ func (runtime *Runtime) Prepare(ctx context.Context, entry string, arguments []s
 
 func (runtime *Runtime) preparePublic(ctx context.Context, arguments []string) (Prepared, error) {
 	if len(arguments) == 0 || arguments[0] == "-h" || arguments[0] == "--help" {
-		return runtime.readOperation(runtime.help), nil
+		return runtime.readOperation("keys.help", runtime.help), nil
 	}
 	subcommand := arguments[0]
 	arguments = arguments[1:]
@@ -66,40 +74,40 @@ func (runtime *Runtime) preparePublic(ctx context.Context, arguments []string) (
 		if err := onlyYes(arguments); err != nil {
 			return Prepared{}, fmt.Errorf("keys list: %w", err)
 		}
-		return runtime.readOperation(runtime.list), nil
+		return runtime.readOperation("keys.list", runtime.list), nil
 	case "status":
 		if err := onlyYes(arguments); err != nil {
 			return Prepared{}, fmt.Errorf("keys status: %w", err)
 		}
-		return runtime.readOperation(runtime.status), nil
+		return runtime.readOperation("keys.status", runtime.status), nil
 	case "history":
 		wanted, err := optionalValue(arguments)
 		if err != nil {
 			return Prepared{}, fmt.Errorf("keys history: %w", err)
 		}
-		return runtime.readOperation(func(ctx context.Context) error { return runtime.history(ctx, wanted) }), nil
+		return runtime.readOperation("keys.history", func(ctx context.Context) error { return runtime.history(ctx, wanted) }), nil
 	case "check-exclusive":
 		zone, err := requiredValue(arguments, "check-exclusive needs a zone")
 		if err != nil || !validZone(zone) {
 			return Prepared{}, errors.New("check-exclusive needs a valid zone")
 		}
-		return runtime.readOperation(func(ctx context.Context) error { return runtime.checkExclusive(ctx, zone) }), nil
+		return runtime.readOperation("keys.check-exclusive", func(ctx context.Context) error { return runtime.checkExclusive(ctx, zone) }), nil
 	case "add":
 		return runtime.prepareAdd(ctx, arguments)
 	case "import":
 		return runtime.prepareImport(ctx, arguments)
 	case "rotate":
-		return runtime.prepareRotate(arguments)
+		return runtime.prepareRotate(ctx, arguments)
 	case "rollback":
-		return runtime.prepareRollback(arguments)
+		return runtime.prepareRollback(ctx, arguments)
 	case "revoke", "delete":
-		return runtime.prepareTerminal(subcommand, arguments)
+		return runtime.prepareTerminal(ctx, subcommand, arguments)
 	case "resolve":
-		return runtime.prepareResolve(arguments)
+		return runtime.prepareResolve(ctx, arguments)
 	case "materialize":
-		return runtime.prepareMaterialize(arguments)
+		return runtime.prepareMaterialize(ctx, arguments)
 	case "sync":
-		return runtime.prepareSync(arguments)
+		return runtime.prepareSync(ctx, arguments)
 	case "auto-sync":
 		return runtime.prepareAutoSync(arguments)
 	case "trust":
@@ -113,12 +121,20 @@ func (runtime *Runtime) preparePublic(ctx context.Context, arguments []string) (
 	}
 }
 
-func (runtime *Runtime) readOperation(run func(context.Context) error) Prepared {
-	return Prepared{Effect: domain.CommandRead, run: run}
+func (runtime *Runtime) readOperation(action domain.ActionID, run func(context.Context) error) Prepared {
+	return Prepared{Action: action, run: run}
 }
 
-func (runtime *Runtime) mutation(consequences []string, run func(context.Context) error) Prepared {
-	return Prepared{Effect: domain.CommandMutate, Consequences: consequences, run: run}
+func (runtime *Runtime) mutation(
+	action domain.ActionID,
+	changed bool,
+	consequences []string,
+	run func(context.Context) error,
+) Prepared {
+	if !changed {
+		consequences = nil
+	}
+	return Prepared{Action: action, Changed: changed, Consequences: consequences, run: run}
 }
 
 func (runtime *Runtime) help(context.Context) error {
@@ -201,6 +217,12 @@ func (runtime *Runtime) prepareAdd(ctx context.Context, arguments []string) (Pre
 	if err := runtime.requireInitialized(); err != nil {
 		return Prepared{}, err
 	}
+	if options.source != "" {
+		options.source, err = runtime.validateImportPath(options.source)
+		if err != nil {
+			return Prepared{}, err
+		}
+	}
 	if conflict, err := runtime.consumerConflict(ctx, options.consumer, options.zone); err != nil {
 		return Prepared{}, err
 	} else if conflict != "" {
@@ -213,7 +235,7 @@ func (runtime *Runtime) prepareAdd(ctx context.Context, arguments []string) (Pre
 			options.kind, options.zone, options.consumer, options.localOnly, options.exclusive),
 		"read the protected value only after confirmation and publish one signed immutable revision",
 	}
-	return runtime.mutation(consequences, func(ctx context.Context) error {
+	return runtime.mutation("keys.add", true, consequences, func(ctx context.Context) error {
 		return runtime.withLock(ctx, func() error {
 			payload, err := runtime.capturePayload(options.source)
 			if err != nil {
@@ -336,7 +358,7 @@ func (runtime *Runtime) prepareImport(ctx context.Context, arguments []string) (
 		real, options.label, options.kind, options.zone, options.consumer,
 		map[bool]string{true: "local-only", false: "syncable"}[options.localOnly], options.exclusive, info.Size())
 	if options.dryRun {
-		return runtime.readOperation(func(context.Context) error {
+		return runtime.readOperation("keys.import-dry-run", func(context.Context) error {
 			fmt.Fprintln(runtime.config.Stdout, "dry-run only; no value was read and no ledger changed")
 			return nil
 		}), nil
@@ -350,7 +372,7 @@ func (runtime *Runtime) prepareImport(ctx context.Context, arguments []string) (
 		return Prepared{}, fmt.Errorf("consumer %s/%s is already owned by %s; rotate it instead",
 			options.consumer, options.zone, conflict)
 	}
-	return runtime.mutation([]string{
+	return runtime.mutation("keys.import", true, []string{
 		fmt.Sprintf("import static credential file %q", options.label),
 		"read the protected source only after confirmation",
 		"encrypt it into the host-only ledger and keep the source file",
@@ -374,7 +396,7 @@ func (runtime *Runtime) prepareImport(ctx context.Context, arguments []string) (
 	}), nil
 }
 
-func (runtime *Runtime) prepareRotate(arguments []string) (Prepared, error) {
+func (runtime *Runtime) prepareRotate(ctx context.Context, arguments []string) (Prepared, error) {
 	credentialID, source, err := parseCredentialAndFile(arguments)
 	if err != nil {
 		return Prepared{}, fmt.Errorf("keys rotate: %w", err)
@@ -382,7 +404,20 @@ func (runtime *Runtime) prepareRotate(arguments []string) (Prepared, error) {
 	if err := runtime.requireInitialized(); err != nil {
 		return Prepared{}, err
 	}
-	return runtime.mutation([]string{
+	expectedScope, expectedHead, err := runtime.singleHead(ctx, credentialID)
+	if err != nil {
+		return Prepared{}, fmt.Errorf("credential %q: %w", credentialID, err)
+	}
+	if expectedHead.State != "active" {
+		return Prepared{}, errors.New("rotate cannot resurrect a revoked/deleted credential; add a new credential")
+	}
+	if source != "" {
+		source, err = runtime.validateImportPath(source)
+		if err != nil {
+			return Prepared{}, err
+		}
+	}
+	return runtime.mutation("keys.rotate", true, []string{
 		fmt.Sprintf("rotate credential %q", credentialID),
 		"read the replacement only after confirmation and publish a signed successor",
 	}, func(ctx context.Context) error {
@@ -390,6 +425,9 @@ func (runtime *Runtime) prepareRotate(arguments []string) (Prepared, error) {
 			scope, head, err := runtime.singleHead(ctx, credentialID)
 			if err != nil {
 				return fmt.Errorf("credential %q has multiple heads; use resolve --rotate", credentialID)
+			}
+			if scope != expectedScope || head.RevisionID != expectedHead.RevisionID || head.State != "active" {
+				return errors.New("credential head changed while awaiting confirmation")
 			}
 			payload, err := runtime.capturePayload(source)
 			if err != nil {
@@ -410,7 +448,7 @@ func (runtime *Runtime) prepareRotate(arguments []string) (Prepared, error) {
 	}), nil
 }
 
-func (runtime *Runtime) prepareRollback(arguments []string) (Prepared, error) {
+func (runtime *Runtime) prepareRollback(ctx context.Context, arguments []string) (Prepared, error) {
 	values := withoutYes(arguments)
 	if len(values) != 2 || !validCredentialID(values[0]) || !domain.SafeID(values[1]) {
 		return Prepared{}, errors.New("keys rollback needs a credential ID and revision ID")
@@ -419,7 +457,19 @@ func (runtime *Runtime) prepareRollback(arguments []string) (Prepared, error) {
 	if err := runtime.requireInitialized(); err != nil {
 		return Prepared{}, err
 	}
-	return runtime.mutation([]string{
+	expectedScope, expectedHead, err := runtime.singleHead(ctx, credentialID)
+	if err != nil {
+		return Prepared{}, err
+	}
+	if expectedHead.State != "active" {
+		return Prepared{}, errors.New("rollback cannot resurrect a revoked/deleted credential; add a new credential")
+	}
+	targetPath := runtime.recordPath(expectedScope, credentialID, revisionID)
+	expectedTarget, err := runtime.readRecordMetadata(targetPath)
+	if err != nil || expectedTarget.CredentialID != credentialID {
+		return Prepared{}, fmt.Errorf("unknown revision %q", revisionID)
+	}
+	return runtime.mutation("keys.rollback", true, []string{
 		fmt.Sprintf("roll back credential %q to revision %s", credentialID, revisionID),
 		"decrypt the historical value and publish it as a new immutable successor",
 	}, func(ctx context.Context) error {
@@ -428,13 +478,12 @@ func (runtime *Runtime) prepareRollback(arguments []string) (Prepared, error) {
 			if err != nil {
 				return err
 			}
-			if head.State != "active" {
-				return errors.New("rollback cannot resurrect a revoked/deleted credential; add a new credential")
+			if scope != expectedScope || head.RevisionID != expectedHead.RevisionID || head.State != "active" {
+				return errors.New("credential head changed while awaiting confirmation")
 			}
-			targetPath := runtime.recordPath(scope, credentialID, revisionID)
 			target, err := runtime.readRecordMetadata(targetPath)
-			if err != nil || target.CredentialID != credentialID {
-				return fmt.Errorf("unknown revision %q", revisionID)
+			if err != nil || target.RevisionID != expectedTarget.RevisionID || target.CredentialID != credentialID {
+				return errors.New("rollback revision changed while awaiting confirmation")
 			}
 			payload, err := runtime.decrypt(ctx, scope, target)
 			if err != nil {
@@ -455,23 +504,46 @@ func (runtime *Runtime) prepareRollback(arguments []string) (Prepared, error) {
 	}), nil
 }
 
-func (runtime *Runtime) prepareTerminal(action string, arguments []string) (Prepared, error) {
+func (runtime *Runtime) prepareTerminal(
+	ctx context.Context,
+	action string,
+	arguments []string,
+) (Prepared, error) {
 	credentialID, err := requiredValue(arguments, action+" needs a credential ID")
 	if err != nil || !validCredentialID(credentialID) {
 		return Prepared{}, errors.New(action + " needs a valid credential ID")
+	}
+	if err := runtime.requireInitialized(); err != nil {
+		return Prepared{}, err
 	}
 	state := "revoked"
 	if action == "delete" {
 		state = "tombstone"
 	}
-	return runtime.mutation([]string{
+	expectedScope, _, expectedHeads, err := runtime.credentialHeads(ctx, credentialID)
+	if err != nil || len(expectedHeads) == 0 {
+		return Prepared{}, firstError(err, errors.New("credential has no revisions"))
+	}
+	expectedHeadIDs := headIDs(expectedHeads)
+	changed := len(expectedHeads) != 1 || expectedHeads[0].State != state
+	actionID := domain.ActionID("keys.revoke")
+	if action == "delete" {
+		actionID = "keys.delete-tombstone"
+	}
+	return runtime.mutation(actionID, changed, []string{
 		fmt.Sprintf("%s credential %q", action, credentialID),
 		fmt.Sprintf("publish a %s revision and remove its materialized consumer", state),
 	}, func(ctx context.Context) error {
+		if !changed {
+			return nil
+		}
 		return runtime.withLock(ctx, func() error {
 			scope, revisions, heads, err := runtime.credentialHeads(ctx, credentialID)
 			if err != nil || len(heads) == 0 {
 				return firstError(err, errors.New("credential has no revisions"))
+			}
+			if scope != expectedScope || !slices.Equal(headIDs(heads), expectedHeadIDs) {
+				return errors.New("credential heads changed while awaiting confirmation")
 			}
 			_ = revisions
 			recipients := credential.RecipientIntersection(heads)
@@ -496,7 +568,7 @@ func (runtime *Runtime) prepareTerminal(action string, arguments []string) (Prep
 	}), nil
 }
 
-func (runtime *Runtime) prepareResolve(arguments []string) (Prepared, error) {
+func (runtime *Runtime) prepareResolve(ctx context.Context, arguments []string) (Prepared, error) {
 	values := withoutYes(arguments)
 	if len(values) < 2 || !validCredentialID(values[0]) {
 		return Prepared{}, errors.New("keys resolve needs a credential ID and --choose REV or --rotate")
@@ -526,7 +598,39 @@ func (runtime *Runtime) prepareResolve(arguments []string) (Prepared, error) {
 	if mode == "" || mode == "choose" && !domain.SafeID(chosen) {
 		return Prepared{}, errors.New("resolve needs --choose REV or --rotate")
 	}
-	return runtime.mutation([]string{
+	if err := runtime.requireInitialized(); err != nil {
+		return Prepared{}, err
+	}
+	expectedScope, _, expectedHeads, err := runtime.credentialHeads(ctx, credentialID)
+	if err != nil {
+		return Prepared{}, err
+	}
+	if len(expectedHeads) <= 1 {
+		return Prepared{}, fmt.Errorf("credential %q has no unresolved multi-head", credentialID)
+	}
+	recipients := credential.RecipientIntersection(expectedHeads)
+	if len(recipients) == 0 {
+		return Prepared{}, errors.New("heads have no common authorized recipient")
+	}
+	var expectedChosen domain.CredentialMetadata
+	if mode == "choose" {
+		expectedChosen, err = runtime.readRecordMetadata(runtime.recordPath(expectedScope, credentialID, chosen))
+		if err != nil || expectedChosen.CredentialID != credentialID {
+			return Prepared{}, fmt.Errorf("unknown revision %q", chosen)
+		}
+	}
+	if mode == "rotate" && source != "" {
+		source, err = runtime.validateImportPath(source)
+		if err != nil {
+			return Prepared{}, err
+		}
+	}
+	expectedHeadIDs := headIDs(expectedHeads)
+	actionID := domain.ActionID("keys.resolve-choose")
+	if mode == "rotate" {
+		actionID = "keys.resolve-rotate"
+	}
+	return runtime.mutation(actionID, true, []string{
 		fmt.Sprintf("resolve all heads of credential %q", credentialID),
 		map[string]string{"choose": "publish the chosen encrypted value as one successor", "rotate": "read an explicit replacement after confirmation"}[mode],
 	}, func(ctx context.Context) error {
@@ -535,19 +639,15 @@ func (runtime *Runtime) prepareResolve(arguments []string) (Prepared, error) {
 			if err != nil {
 				return err
 			}
-			if len(heads) <= 1 {
-				return fmt.Errorf("credential %q has no unresolved multi-head", credentialID)
-			}
-			recipients := credential.RecipientIntersection(heads)
-			if len(recipients) == 0 {
-				return errors.New("heads have no common authorized recipient")
+			if scope != expectedScope || !slices.Equal(headIDs(heads), expectedHeadIDs) {
+				return errors.New("credential heads changed while awaiting confirmation")
 			}
 			template := heads[0]
 			var payload []byte
 			if mode == "choose" {
 				chosenMetadata, err := runtime.readRecordMetadata(runtime.recordPath(scope, credentialID, chosen))
-				if err != nil {
-					return fmt.Errorf("unknown revision %q", chosen)
+				if err != nil || chosenMetadata.RevisionID != expectedChosen.RevisionID {
+					return errors.New("chosen revision changed while awaiting confirmation")
 				}
 				template = chosenMetadata
 				payload, err = runtime.decrypt(ctx, scope, chosenMetadata)
@@ -576,7 +676,7 @@ func (runtime *Runtime) prepareResolve(arguments []string) (Prepared, error) {
 	}), nil
 }
 
-func (runtime *Runtime) prepareMaterialize(arguments []string) (Prepared, error) {
+func (runtime *Runtime) prepareMaterialize(ctx context.Context, arguments []string) (Prepared, error) {
 	values := withoutYes(arguments)
 	zone := ""
 	if len(values) > 1 {
@@ -588,15 +688,74 @@ func (runtime *Runtime) prepareMaterialize(arguments []string) (Prepared, error)
 		}
 		zone = values[0]
 	}
-	return runtime.mutation([]string{
+	if err := runtime.requireInitialized(); err != nil {
+		return Prepared{}, err
+	}
+	changed, err := runtime.materializationChanged(ctx, zone)
+	if err != nil {
+		return Prepared{}, err
+	}
+	return runtime.mutation("keys.materialize", changed, []string{
 		"materialize authorized active credential heads",
 		"atomically replace only verified mode-0600 consumer files",
 	}, func(ctx context.Context) error {
+		if !changed {
+			return nil
+		}
 		return runtime.withLock(ctx, func() error { return runtime.materializeAll(ctx, zone, false) })
 	}), nil
 }
 
-func (runtime *Runtime) prepareSync(arguments []string) (Prepared, error) {
+func (runtime *Runtime) materializationChanged(ctx context.Context, zone string) (bool, error) {
+	all, err := runtime.allRecords(ctx)
+	if err != nil {
+		return false, err
+	}
+	var identity *Identity
+	changed := false
+	for _, scope := range []ledgerScope{sharedLedger, localLedger} {
+		for _, credentialID := range credentialIDs(all[scope]) {
+			heads := credential.Heads(all[scope], credentialID)
+			if len(heads) != 1 {
+				return false, fmt.Errorf("%s has %d heads; resolve before materializing", credentialID, len(heads))
+			}
+			head := heads[0]
+			if zone != "" && head.Zone != zone {
+				continue
+			}
+			destination, mapped, err := runtime.consumerPath(head.Consumer, head.Zone)
+			if err != nil {
+				return false, err
+			}
+			if !mapped {
+				continue
+			}
+			if head.State != "active" {
+				if _, err := os.Lstat(destination); err == nil {
+					changed = true
+				} else if !errors.Is(err, os.ErrNotExist) {
+					return false, err
+				}
+				continue
+			}
+			if identity == nil {
+				value, err := runtime.Identity()
+				if err != nil {
+					return false, err
+				}
+				identity = &value
+			}
+			if contains(head.RecipientActors, identity.ActorID) {
+				// Equality requires decryption, so active mapped consumers are
+				// conservatively assessed as changed without opening plaintext.
+				changed = true
+			}
+		}
+	}
+	return changed, nil
+}
+
+func (runtime *Runtime) prepareSync(ctx context.Context, arguments []string) (Prepared, error) {
 	values := withoutYes(arguments)
 	target := ""
 	for _, value := range values {
@@ -611,31 +770,68 @@ func (runtime *Runtime) prepareSync(arguments []string) (Prepared, error) {
 			return Prepared{}, fmt.Errorf("keys sync: unexpected %q", value)
 		}
 	}
-	return runtime.mutation([]string{
+	if err := runtime.requireInitialized(); err != nil {
+		return Prepared{}, err
+	}
+	selected := []domain.CredentialPeer{}
+	if target != "" {
+		peer, err := runtime.peer(target)
+		if err != nil {
+			return Prepared{}, err
+		}
+		role, err := peerRole(peer)
+		if err != nil {
+			return Prepared{}, err
+		}
+		if role != "active" {
+			return Prepared{}, fmt.Errorf("peer %q is passive (respond-only); register a reverse route first", target)
+		}
+		selected = append(selected, peer)
+	} else {
+		peers, err := runtime.peers()
+		if err != nil {
+			return Prepared{}, err
+		}
+		for _, peer := range peers {
+			role, err := peerRole(peer)
+			if err != nil {
+				return Prepared{}, err
+			}
+			if role == "active" {
+				selected = append(selected, peer)
+			}
+		}
+	}
+	expectedHeads, err := runtime.headSnapshot(ctx)
+	if err != nil {
+		return Prepared{}, err
+	}
+	return runtime.mutation("keys.sync", len(selected) != 0, []string{
 		map[bool]string{true: "synchronize the signed credential ledger with " + target, false: "synchronize all active credential peers"}[target != ""],
 		"verify append-only history, signatures, ciphertext recipients and DAG policy before merge",
 	}, func(ctx context.Context) error {
+		if len(selected) == 0 {
+			return nil
+		}
 		return runtime.withLock(ctx, func() error {
 			if err := runtime.requireInitialized(); err != nil {
 				return err
 			}
-			if target != "" {
-				return runtime.syncPeer(ctx, target)
-			}
-			peers, err := runtime.peers()
-			if err != nil {
-				return err
+			currentHeads, err := runtime.headSnapshot(ctx)
+			if err != nil || !slices.Equal(currentHeads, expectedHeads) {
+				return fmt.Errorf("%w: credential heads changed while awaiting confirmation", domain.ErrPlanStale)
 			}
 			var failures []error
-			for _, peer := range peers {
-				role, err := peerRole(peer)
+			for _, expected := range selected {
+				peer, err := runtime.peer(expected.Name)
 				if err != nil {
-					return err
+					return fmt.Errorf("%w: credential peer %q changed while awaiting confirmation", domain.ErrPlanStale, expected.Name)
 				}
-				if role == "active" {
-					if err := runtime.syncPeer(ctx, peer.Name); err != nil {
-						failures = append(failures, err)
-					}
+				if peer != expected {
+					return fmt.Errorf("%w: credential peer %q changed while awaiting confirmation", domain.ErrPlanStale, expected.Name)
+				}
+				if err := runtime.syncPreparedPeer(ctx, expected); err != nil {
+					failures = append(failures, err)
 				}
 			}
 			return errors.Join(failures...)
@@ -653,10 +849,13 @@ func (runtime *Runtime) prepareAutoSync(arguments []string) (Prepared, error) {
 		if len(values) != 0 {
 			return Prepared{}, errors.New("auto-sync status takes no target")
 		}
-		return runtime.readOperation(runtime.status), nil
+		return runtime.readOperation("keys.auto-sync-status", runtime.status), nil
 	}
 	if action != "pause" && action != "resume" {
 		return Prepared{}, errors.New("auto-sync expects status, pause or resume")
+	}
+	if err := runtime.requireInitialized(); err != nil {
+		return Prepared{}, err
 	}
 	target := ""
 	for _, value := range values {
@@ -668,32 +867,56 @@ func (runtime *Runtime) prepareAutoSync(arguments []string) (Prepared, error) {
 		}
 		target = strings.TrimPrefix(value, "@")
 	}
-	return runtime.mutation([]string{
+	peers, err := runtime.peers()
+	if err != nil {
+		return Prepared{}, err
+	}
+	selected := make([]domain.CredentialPeer, 0, len(peers))
+	matched := target == ""
+	desiredManual := action == "pause"
+	changed := false
+	for _, peer := range peers {
+		if target != "" && peer.Name != target {
+			continue
+		}
+		matched = true
+		role, err := peerRole(peer)
+		if err != nil {
+			return Prepared{}, err
+		}
+		if role != "active" {
+			if target != "" {
+				return Prepared{}, fmt.Errorf("peer %q is passive (respond-only); register a reverse route first", target)
+			}
+			continue
+		}
+		selected = append(selected, peer)
+		changed = changed || peer.ManualOnly != desiredManual
+	}
+	if !matched {
+		return Prepared{}, fmt.Errorf("credential peer %q is not enrolled", target)
+	}
+	return runtime.mutation(domain.ActionID("keys.auto-sync-"+action), changed, []string{
 		fmt.Sprintf("%s automatic credential synchronization", action),
 		"update only active outbound peer policy; passive peers remain respond-only",
 	}, func(ctx context.Context) error {
+		if !changed {
+			return nil
+		}
 		return runtime.withLock(ctx, func() error {
-			peers, err := runtime.peers()
-			if err != nil {
-				return err
-			}
-			matched := target == ""
-			for _, peer := range peers {
-				if target != "" && peer.Name != target {
-					continue
+			for _, expected := range selected {
+				peer, err := runtime.peer(expected.Name)
+				if err != nil {
+					return err
 				}
-				matched = true
 				role, err := peerRole(peer)
 				if err != nil {
 					return err
 				}
-				if role != "active" {
-					if target != "" {
-						return fmt.Errorf("peer %q is passive (respond-only); register a reverse route first", target)
-					}
-					continue
+				if role != "active" || peer.ManualOnly != expected.ManualOnly {
+					return fmt.Errorf("peer %q policy changed while awaiting confirmation", peer.Name)
 				}
-				peer.ManualOnly = action == "pause"
+				peer.ManualOnly = desiredManual
 				payload, err := json.MarshalIndent(peer, "", "  ")
 				if err != nil {
 					return err
@@ -702,9 +925,6 @@ func (runtime *Runtime) prepareAutoSync(arguments []string) (Prepared, error) {
 				if err := atomicWrite(path, append(payload, '\n'), 0o600); err != nil {
 					return err
 				}
-			}
-			if !matched {
-				return fmt.Errorf("credential peer %q is not enrolled", target)
 			}
 			fmt.Fprintf(runtime.config.Stderr, "  [ ok ] automatic credential sync %sd\n", action)
 			return nil
@@ -754,13 +974,41 @@ func (runtime *Runtime) prepareTrust(ctx context.Context, arguments []string) (P
 	if err != nil {
 		return Prepared{}, err
 	}
-	return runtime.mutation([]string{
+	expectedPeers, err := runtime.peers()
+	if err != nil {
+		return Prepared{}, err
+	}
+	expectedHeads, err := runtime.headSnapshot(ctx)
+	if err != nil {
+		return Prepared{}, err
+	}
+	return runtime.mutation("keys.trust", true, []string{
 		fmt.Sprintf("trust credential peer %q", name),
 		fmt.Sprintf("actor=%s age=%s signing=%s", identity.ActorID, identity.AgeRecipient, fingerprint),
 		"exchange public identities and re-encrypt current shared heads for the new recipient",
 		map[bool]string{true: "keep synchronization manual", false: "enable unattended encrypted synchronization"}[manual],
 	}, func(ctx context.Context) error {
+		currentTarget, err := runtime.resolveTarget(ctx, name)
+		if err != nil || currentTarget != target {
+			return fmt.Errorf("%w: credential peer %q destination changed while awaiting confirmation", domain.ErrPlanStale, name)
+		}
+		currentIdentityBytes, err := runtime.callTarget(ctx, target, []string{"_keys-exchange", "identity"}, nil)
+		if err != nil {
+			return fmt.Errorf("recheck credential peer %q identity: %w", name, err)
+		}
+		currentIdentity, err := decodeIdentity(currentIdentityBytes)
+		if err != nil || currentIdentity != identity {
+			return fmt.Errorf("%w: credential peer %q identity changed while awaiting confirmation", domain.ErrPlanStale, name)
+		}
 		return runtime.withLock(ctx, func() error {
+			currentPeers, err := runtime.peers()
+			if err != nil || !slices.Equal(currentPeers, expectedPeers) {
+				return fmt.Errorf("%w: credential peer policy changed while awaiting confirmation", domain.ErrPlanStale)
+			}
+			currentHeads, err := runtime.headSnapshot(ctx)
+			if err != nil || !slices.Equal(currentHeads, expectedHeads) {
+				return fmt.Errorf("%w: credential heads changed while awaiting confirmation", domain.ErrPlanStale)
+			}
 			peer, err := runtime.storePeer(name, identity, target.Transport, target.Destination, target.RemoteYard, manual)
 			if err != nil {
 				return fmt.Errorf("peer trust metadata was rejected: %w", err)
@@ -776,7 +1024,7 @@ func (runtime *Runtime) prepareTrust(ctx context.Context, arguments []string) (P
 			if err := runtime.rekeyShared(ctx, identity.ActorID, true); err != nil {
 				return err
 			}
-			if err := runtime.syncPeer(ctx, peer.Name); err != nil {
+			if err := runtime.syncPreparedPeer(ctx, peer); err != nil {
 				return err
 			}
 			fmt.Fprintf(runtime.config.Stderr, "  [ ok ] trusted credential peer %q\n", name)
@@ -791,16 +1039,26 @@ func (runtime *Runtime) prepareUntrust(arguments []string) (Prepared, error) {
 		return Prepared{}, errors.New("keys untrust needs @peer")
 	}
 	name := strings.TrimPrefix(value, "@")
+	if err := runtime.requireInitialized(); err != nil {
+		return Prepared{}, err
+	}
 	peer, err := runtime.peer(name)
 	if err != nil {
 		return Prepared{}, err
 	}
-	return runtime.mutation([]string{
+	return runtime.mutation("keys.untrust", true, []string{
 		fmt.Sprintf("remove credential peer %q", name),
 		"publish successor revisions without that recipient and remove signing trust",
 		"plaintext or ciphertext already received cannot be erased; rotate upstream values separately",
 	}, func(ctx context.Context) error {
 		return runtime.withLock(ctx, func() error {
+			current, err := runtime.peer(name)
+			if err != nil {
+				return fmt.Errorf("credential peer %q changed while awaiting confirmation: %w", name, err)
+			}
+			if current != peer {
+				return fmt.Errorf("credential peer %q changed while awaiting confirmation", name)
+			}
 			if err := runtime.rekeyShared(ctx, peer.ActorID, false); err != nil {
 				return err
 			}
@@ -828,7 +1086,9 @@ func (runtime *Runtime) prepareUntrust(arguments []string) (Prepared, error) {
 
 type movePlan struct {
 	credentialID, targetName, targetActor, targetContext, targetAssignment string
-	target, targetPeer                                                     *Target
+	target                                                                 *Target
+	expectedPeer                                                           *domain.CredentialPeer
+	expectedHead                                                           domain.CredentialMetadata
 	current, zone, expectedRevision                                        string
 	expectedEpoch, nextEpoch                                               int64
 	resume                                                                 bool
@@ -838,6 +1098,9 @@ func (runtime *Runtime) prepareMove(ctx context.Context, arguments []string) (Pr
 	values := withoutYes(arguments)
 	if len(values) != 2 || !validCredentialID(values[0]) || !strings.HasPrefix(values[1], "@") {
 		return Prepared{}, errors.New("keys move needs a credential ID and @peer")
+	}
+	if err := runtime.requireInitialized(); err != nil {
+		return Prepared{}, err
 	}
 	plan, err := runtime.planMove(ctx, values[0], strings.TrimPrefix(values[1], "@"))
 	if err != nil {
@@ -854,7 +1117,7 @@ func (runtime *Runtime) prepareMove(ctx context.Context, arguments []string) (Pr
 			fmt.Sprintf("publish authority assignment epoch %d", plan.nextEpoch),
 			"sync and materialize on the target before reporting success")
 	}
-	return runtime.mutation(consequences, func(ctx context.Context) error { return runtime.executeMove(ctx, plan) }), nil
+	return runtime.mutation("keys.move", true, consequences, func(ctx context.Context) error { return runtime.executeMove(ctx, plan) }), nil
 }
 
 func (runtime *Runtime) planMove(ctx context.Context, credentialID, targetName string) (movePlan, error) {
@@ -881,6 +1144,7 @@ func (runtime *Runtime) planMove(ctx context.Context, credentialID, targetName s
 	plan := movePlan{
 		credentialID: credentialID, targetName: targetName, current: head.AssignedYard,
 		zone: head.Zone, expectedRevision: head.RevisionID, expectedEpoch: head.AssignmentEpoch,
+		expectedHead: head,
 	}
 	if peer, err := runtime.peer(targetName); err == nil {
 		assignment, err := peerAssignment(peer)
@@ -890,7 +1154,7 @@ func (runtime *Runtime) planMove(ctx context.Context, credentialID, targetName s
 		plan.targetActor, plan.targetAssignment = peer.ActorID, assignment
 		plan.targetContext = strings.SplitN(assignment, "/", 2)[1]
 		target := Target{Name: peer.Name, Transport: peer.Transport, Destination: peer.Dest, RemoteYard: peer.RemoteYard}
-		plan.target, plan.targetPeer = &target, &target
+		plan.target, plan.expectedPeer = &target, &peer
 	} else if targetName == runtime.config.Context {
 		plan.targetActor, plan.targetContext = identity.ActorID, runtime.config.Context
 		plan.targetAssignment = identity.ActorID + "/" + runtime.config.Context
@@ -930,8 +1194,7 @@ func (runtime *Runtime) planMove(ctx context.Context, credentialID, targetName s
 		if !contains(head.RecipientActors, plan.targetActor) {
 			return movePlan{}, errors.New("target host is not an encrypted recipient")
 		}
-		target := Target{Name: peer.Name, Transport: peer.Transport, Destination: peer.Dest, RemoteYard: peer.RemoteYard}
-		plan.targetPeer = &target
+		plan.expectedPeer = &peer
 	}
 	plan.resume = plan.current == plan.targetAssignment
 	if !plan.resume {
@@ -947,12 +1210,24 @@ func (runtime *Runtime) planMove(ctx context.Context, credentialID, targetName s
 func (runtime *Runtime) executeMove(ctx context.Context, plan movePlan) error {
 	if plan.resume {
 		if err := runtime.withLock(ctx, func() error {
+			scope, head, err := runtime.singleHead(ctx, plan.credentialID)
+			if err != nil || scope != sharedLedger || !sameCredentialMetadata(head, plan.expectedHead) ||
+				head.RevisionID != plan.expectedRevision ||
+				head.AssignmentEpoch != plan.expectedEpoch || head.AssignedYard != plan.current {
+				return fmt.Errorf("%w: exclusive assignment changed while awaiting confirmation", domain.ErrPlanStale)
+			}
+			if plan.expectedPeer != nil {
+				currentPeer, err := runtime.peer(plan.expectedPeer.Name)
+				if err != nil || currentPeer != *plan.expectedPeer {
+					return fmt.Errorf("%w: move target peer changed while awaiting confirmation", domain.ErrPlanStale)
+				}
+			}
 			return runtime.materializeCredential(ctx, sharedLedger, plan.credentialID, true)
 		}); err != nil {
 			return err
 		}
-		if plan.targetPeer != nil {
-			if err := runtime.syncPeer(ctx, plan.targetPeer.Name); err != nil {
+		if plan.expectedPeer != nil {
+			if err := runtime.syncPreparedPeer(ctx, *plan.expectedPeer); err != nil {
 				return err
 			}
 		}
@@ -995,8 +1270,8 @@ func (runtime *Runtime) executeMove(ctx context.Context, plan movePlan) error {
 		return errors.New("handoff was published, but the old assigned host did not synchronize")
 	}
 	currentActor, _, _ := splitAssignment(plan.current)
-	if plan.targetPeer != nil && currentActor != plan.targetActor {
-		if err := runtime.syncPeer(ctx, plan.targetPeer.Name); err != nil {
+	if plan.expectedPeer != nil && currentActor != plan.targetActor {
+		if err := runtime.syncPreparedPeer(ctx, *plan.expectedPeer); err != nil {
 			return errors.New("handoff was published, but the target host did not synchronize")
 		}
 	}
@@ -1025,7 +1300,10 @@ func (runtime *Runtime) prepareExchange(arguments []string) (Prepared, error) {
 		if len(arguments) != 0 {
 			return Prepared{}, errors.New("identity takes no arguments")
 		}
-		return runtime.readOperation(func(context.Context) error {
+		if err := runtime.requireInitialized(); err != nil {
+			return Prepared{}, err
+		}
+		return runtime.readOperation("keys.exchange.identity", func(context.Context) error {
 			identity, err := runtime.Identity()
 			if err != nil {
 				return err
@@ -1036,10 +1314,10 @@ func (runtime *Runtime) prepareExchange(arguments []string) (Prepared, error) {
 		if len(arguments) != 0 {
 			return Prepared{}, errors.New("bare-path takes no arguments")
 		}
-		return runtime.readOperation(func(context.Context) error {
-			if err := runtime.requireInitialized(); err != nil {
-				return err
-			}
+		if err := runtime.requireInitialized(); err != nil {
+			return Prepared{}, err
+		}
+		return runtime.readOperation("keys.exchange.bare-path", func(context.Context) error {
 			fmt.Fprintln(runtime.config.Stdout, runtime.sharedBare)
 			return nil
 		}), nil
@@ -1048,7 +1326,10 @@ func (runtime *Runtime) prepareExchange(arguments []string) (Prepared, error) {
 			return Prepared{}, errors.New("trust-import needs a peer name")
 		}
 		name := arguments[0]
-		return runtime.mutation([]string{"accept reciprocal credential trust"}, func(ctx context.Context) error {
+		if err := runtime.requireInitialized(); err != nil {
+			return Prepared{}, err
+		}
+		return runtime.mutation("keys.exchange.trust-import", true, []string{"accept reciprocal credential trust"}, func(ctx context.Context) error {
 			identityBytes, err := io.ReadAll(io.LimitReader(runtime.config.Stdin, maximumOutput+1))
 			if err != nil || len(identityBytes) > maximumOutput {
 				return errors.New("missing or oversized peer identity")
@@ -1073,11 +1354,24 @@ func (runtime *Runtime) prepareExchange(arguments []string) (Prepared, error) {
 			return Prepared{}, errors.New("untrust-import needs an actor ID")
 		}
 		actor := arguments[0]
-		return runtime.mutation([]string{"remove reciprocal credential trust"}, func(ctx context.Context) error {
+		if err := runtime.requireInitialized(); err != nil {
+			return Prepared{}, err
+		}
+		expectedPeer, found, err := runtime.peerByActor(actor)
+		if err != nil {
+			return Prepared{}, err
+		}
+		return runtime.mutation("keys.exchange.untrust-import", found, []string{"remove reciprocal credential trust"}, func(ctx context.Context) error {
+			if !found {
+				return nil
+			}
 			return runtime.withLock(ctx, func() error {
 				peer, found, err := runtime.peerByActor(actor)
-				if err != nil || !found {
-					return err
+				if err != nil {
+					return fmt.Errorf("credential peer changed while awaiting confirmation: %w", err)
+				}
+				if !found || peer != expectedPeer {
+					return errors.New("credential peer changed while awaiting confirmation")
 				}
 				if err := runtime.rekeyShared(ctx, actor, false); err != nil {
 					return err
@@ -1093,11 +1387,14 @@ func (runtime *Runtime) prepareExchange(arguments []string) (Prepared, error) {
 		if len(arguments) > 1 || len(arguments) == 1 && !domain.SafeID(arguments[0]) {
 			return Prepared{}, errors.New("refresh accepts one actor ID")
 		}
+		if err := runtime.requireInitialized(); err != nil {
+			return Prepared{}, err
+		}
 		sourceActor := ""
 		if len(arguments) == 1 {
 			sourceActor = arguments[0]
 		}
-		return runtime.mutation([]string{"refresh encrypted credential heads and materialization"}, func(ctx context.Context) error {
+		return runtime.mutation("keys.exchange.refresh", true, []string{"refresh encrypted credential heads and materialization"}, func(ctx context.Context) error {
 			return runtime.withLock(ctx, func() error {
 				if sourceActor != "" {
 					if peer, found, err := runtime.peerByActor(sourceActor); err != nil {
@@ -1133,12 +1430,49 @@ func (runtime *Runtime) prepareAutoWorker(arguments []string) (Prepared, error) 
 	if len(values) != 1 || values[0] != "--if-due" {
 		return Prepared{}, errors.New("_keys-auto-sync expects --if-due")
 	}
-	return runtime.mutation([]string{"synchronize due automatic credential peers"}, func(ctx context.Context) error {
-		if !runtime.Initialized() {
+	changed, err := runtime.automaticSyncChanged()
+	if err != nil {
+		return Prepared{}, err
+	}
+	return runtime.mutation("keys.auto-worker", changed, []string{"synchronize due automatic credential peers"}, func(ctx context.Context) error {
+		if !changed {
 			return nil
 		}
 		return runtime.withLock(ctx, func() error { return runtime.syncAll(ctx, true) })
 	}), nil
+}
+
+func (runtime *Runtime) automaticSyncChanged() (bool, error) {
+	if !runtime.Initialized() {
+		return false, nil
+	}
+	peers, err := runtime.peers()
+	if err != nil {
+		return false, err
+	}
+	now := time.Now().Unix()
+	interval := time.Duration(positiveInt(runtime.env["SUBYARD_KEYS_IF_DUE_SECONDS"], 3600)) * time.Second
+	for _, peer := range peers {
+		role, err := peerRole(peer)
+		if err != nil {
+			return false, err
+		}
+		if role != "active" || peer.ManualOnly {
+			continue
+		}
+		state, err := runtime.readState(peer.Name)
+		if err != nil {
+			return false, err
+		}
+		due, err := credential.SyncDue(state, now, interval)
+		if err != nil {
+			return false, err
+		}
+		if due {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (runtime *Runtime) rekeyShared(ctx context.Context, actor string, trust bool) error {
@@ -1691,6 +2025,33 @@ func headIDs(heads []domain.CredentialMetadata) []string {
 	}
 	sort.Strings(result)
 	return result
+}
+
+func (runtime *Runtime) headSnapshot(ctx context.Context) ([]string, error) {
+	all, err := runtime.allRecords(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var snapshot []string
+	for _, scope := range []ledgerScope{sharedLedger, localLedger} {
+		for _, credentialID := range credentialIDs(all[scope]) {
+			heads := credential.Heads(all[scope], credentialID)
+			for _, head := range heads {
+				payload, err := json.Marshal(head)
+				if err != nil {
+					return nil, err
+				}
+				snapshot = append(snapshot, string(scope)+":"+credentialID+":"+string(payload))
+			}
+		}
+	}
+	return snapshot, nil
+}
+
+func sameCredentialMetadata(left, right domain.CredentialMetadata) bool {
+	leftPayload, leftErr := json.Marshal(left)
+	rightPayload, rightErr := json.Marshal(right)
+	return leftErr == nil && rightErr == nil && bytes.Equal(leftPayload, rightPayload)
 }
 
 func withoutYes(arguments []string) []string {

@@ -27,7 +27,13 @@ fi
 if [[ "$joined" == *'_project-state'* ]]; then
   printf '%s\n' "$joined" >> "$REGISTRY_TEST_STATE/owner-calls"
   [ ! -e "$REGISTRY_TEST_STATE/fail-owner" ]
-  if [[ "$joined" == *reserve* && "$joined" == *RemoteDemo* ]]; then
+  if [[ "$joined" == *preview* && "$joined" == *RemoteDemo* ]]; then
+    printf '%s\n' '{"projectId":"RemoteDemo","name":"RemoteDemo"}'
+  elif [[ "$joined" == *preview* && "$joined" == *StaleDemo* ]]; then
+    printf '%s\n' '{"projectId":"StaleDemo-3","name":"StaleDemo-3"}'
+  elif [[ "$joined" == *preview* && "$joined" == *ForeignClone* ]]; then
+    printf '%s\n' '{"projectId":"ForeignClone","name":"ForeignClone"}'
+  elif [[ "$joined" == *reserve* && "$joined" == *RemoteDemo* ]]; then
     printf '%s\n' '{"projectId":"RemoteDemo","name":"RemoteDemo","reserved":true}'
   elif [[ "$joined" == *reserve* && "$joined" == *StaleDemo* ]]; then
     printf '%s\n' '{"projectId":"StaleDemo-3","name":"StaleDemo-3","reserved":true}'

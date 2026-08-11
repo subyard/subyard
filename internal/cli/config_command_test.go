@@ -3,17 +3,21 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
@@ -209,8 +213,8 @@ func TestConfigStatusAndApplyAllLocalExcludeRemoteYards(t *testing.T) {
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("config apply failed: code=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
 	}
-	if strings.Join(applier.yards, ",") != "default,named" {
-		t.Fatalf("config apply selected %#v", applier.yards)
+	if len(applier.yards) != 0 {
+		t.Fatalf("config apply refreshed converged yards %#v", applier.yards)
 	}
 }
 
@@ -398,6 +402,411 @@ func TestConfigValidationExcludesRuntimeStateTrees(t *testing.T) {
 	}
 }
 
+func TestConfigAuthoringNoOpsDoNotPromptOrRewriteTargets(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		initial   string
+		arguments []string
+	}{
+		{
+			name: "equal set", initial: "SSH_PORT='2299'\n",
+			arguments: []string{"config", "set", "SSH_PORT", "2299", "--scope", "host"},
+		},
+		{
+			name: "absent unset", initial: "",
+			arguments: []string{"config", "unset", "SSH_PORT", "--scope", "host"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, _, configHome, environment := configCommandFixture(t)
+			target := filepath.Join(configHome, "config.env")
+			writeConfigCommandFile(t, target, test.initial)
+			before, err := os.ReadFile(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			prompt := &testkit.Prompt{}
+			var stdout, stderr bytes.Buffer
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard", Arguments: test.arguments,
+				Environment: environment, WorkingDir: root, Prompt: prompt,
+				Stdout: &stdout, Stderr: &stderr,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code := program.Run(context.Background()); code != 0 {
+				t.Fatalf("command failed: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+			}
+			after, err := os.ReadFile(target)
+			if err != nil || !bytes.Equal(after, before) {
+				t.Fatalf("target changed: before=%q after=%q err=%v", before, after, err)
+			}
+			if len(prompt.Requests) != 0 {
+				t.Fatalf("no-op prompted: %#v", prompt.Requests)
+			}
+		})
+	}
+}
+
+func TestConfigImportUnchangedDoesNotPromptOrRewriteTarget(t *testing.T) {
+	root, _, configHome, environment := configCommandFixture(t)
+	content := "model = \"fixture\"\n"
+	source := filepath.Join(t.TempDir(), "config.toml")
+	writeConfigCommandFile(t, source, content)
+	target := filepath.Join(configHome, "overrides", "host", "agents", "codex", "config.toml")
+	writeConfigCommandFile(t, target, content)
+	before, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := &testkit.Prompt{}
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments: []string{
+			"config", "import", "AGENT_codex_CONFIG", source, "--scope", "host",
+		},
+		Environment: environment, WorkingDir: root, Prompt: prompt,
+		Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("import failed: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	after, err := os.ReadFile(target)
+	if err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("target changed: before=%q after=%q err=%v", before, after, err)
+	}
+	if len(prompt.Requests) != 0 {
+		t.Fatalf("unchanged import prompted: %#v", prompt.Requests)
+	}
+}
+
+func TestConfigEditUnchangedDoesNotPromptAfterEditingDraft(t *testing.T) {
+	root, _, configHome, environment := configCommandFixture(t)
+	content := "model = \"fixture\"\n"
+	target := filepath.Join(configHome, "overrides", "host", "agents", "codex", "config.toml")
+	writeConfigCommandFile(t, target, content)
+	marker := filepath.Join(t.TempDir(), "editor-ran")
+	editor := writeConfigAuthoringEditor(t, ": >\"$EDITOR_MARKER\"\n")
+	environment = append(environment, "EDITOR="+editor, "EDITOR_MARKER="+marker)
+	prompt := &testkit.Prompt{}
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments:   []string{"config", "edit", "AGENT_codex_CONFIG", "--scope", "host"},
+		Environment: environment, WorkingDir: root, Prompt: prompt,
+		Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("edit failed: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("editor did not run before planning: %v", err)
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != content {
+		t.Fatalf("target changed: %q err=%v", got, err)
+	}
+	if len(prompt.Requests) != 0 {
+		t.Fatalf("unchanged edit prompted: %#v", prompt.Requests)
+	}
+}
+
+func TestConfigEditChangedDeclineLeavesPersistentTargetUntouched(t *testing.T) {
+	root, _, configHome, environment := configCommandFixture(t)
+	target := filepath.Join(configHome, "overrides", "host", "agents", "codex", "config.toml")
+	writeConfigCommandFile(t, target, "model = \"before\"\n")
+	marker := filepath.Join(t.TempDir(), "editor-ran")
+	editor := writeConfigAuthoringEditor(t, "printf '%s\\n' 'model = \\\"after\\\"' >\"$1\"\n: >\"$EDITOR_MARKER\"\n")
+	environment = append(environment, "EDITOR="+editor, "EDITOR_MARKER="+marker)
+	prompt := &testkit.Prompt{Answers: []bool{false}}
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments:   []string{"config", "edit", "AGENT_codex_CONFIG", "--scope", "host"},
+		Environment: environment, WorkingDir: root, Prompt: prompt,
+		Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 || !strings.Contains(stderr.String(), "operation declined") {
+		t.Fatalf("declined edit: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("editor did not run before confirmation: %v", err)
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != "model = \"before\"\n" {
+		t.Fatalf("declined edit changed target: %q err=%v", got, err)
+	}
+	if len(prompt.Requests) != 1 || prompt.Requests[0].Default != domain.ConfirmationDefaultYes {
+		t.Fatalf("edit prompt = %#v", prompt.Requests)
+	}
+}
+
+func TestConfigEditInvalidDraftFailsBeforePrompt(t *testing.T) {
+	root, _, configHome, environment := configCommandFixture(t)
+	target := filepath.Join(configHome, "overrides", "host", "agents", "codex", "config.toml")
+	writeConfigCommandFile(t, target, "model = \"before\"\n")
+	editor := writeConfigAuthoringEditor(t, "printf '%s\\n' 'password=secret' >\"$1\"\n")
+	environment = append(environment, "EDITOR="+editor)
+	prompt := &testkit.Prompt{}
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments:   []string{"config", "edit", "AGENT_codex_CONFIG", "--scope", "host"},
+		Environment: environment, WorkingDir: root, Prompt: prompt,
+		Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 || !strings.Contains(stderr.String(), "secret material") {
+		t.Fatalf("invalid edit: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != "model = \"before\"\n" {
+		t.Fatalf("invalid draft changed target: %q err=%v", got, err)
+	}
+	if len(prompt.Requests) != 0 {
+		t.Fatalf("invalid draft prompted: %#v", prompt.Requests)
+	}
+}
+
+func TestConfigSetChangedUsesOneDefaultYesPrompt(t *testing.T) {
+	root, _, configHome, environment := configCommandFixture(t)
+	target := filepath.Join(configHome, "config.env")
+	writeConfigCommandFile(t, target, "SSH_PORT='2299'\n")
+	prompt := &testkit.Prompt{Answers: []bool{true}}
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments:   []string{"config", "set", "SSH_PORT", "2300", "--scope", "host"},
+		Environment: environment, WorkingDir: root, Prompt: prompt,
+		Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("changed set: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != "SSH_PORT='2300'\n" {
+		t.Fatalf("target = %q err=%v", got, err)
+	}
+	if len(prompt.Requests) != 1 || prompt.Requests[0].Summary != "Set persistent configuration" ||
+		prompt.Requests[0].Default != domain.ConfirmationDefaultYes {
+		t.Fatalf("set prompt = %#v", prompt.Requests)
+	}
+}
+
+func TestConfigAuthoringNoOpWithAssumeYesStillSkipsWriterSafetyChecks(t *testing.T) {
+	root, _, configHome, environment := configCommandFixture(t)
+	target := filepath.Join(configHome, "config.env")
+	writeConfigCommandFile(t, target, "SSH_PORT='2299'\n")
+	linked := filepath.Join(t.TempDir(), "linked-config.env")
+	if err := os.Link(target, linked); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments:   []string{"config", "set", "SSH_PORT", "2299", "--scope", "host", "--yes"},
+		Environment: environment, WorkingDir: root,
+		Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("assume-yes no-op: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestConfigApplyConvergedSkipsPromptAndApplier(t *testing.T) {
+	root, _, _, environment := configCommandFixture(t)
+	loaded := loadConfigCommandContext(t, root, environment, "default")
+	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+		loaded.Context.IncusProject + "/" + loaded.Context.InstanceName: {
+			Name: loaded.Context.InstanceName, Project: loaded.Context.IncusProject, Status: "Running",
+		},
+	}}
+	appendHashSteps(t, fake, loaded)
+	prompt := &testkit.Prompt{}
+	applier := &recordingConfigApplier{}
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "apply"},
+		Environment: environment, WorkingDir: root, Prompt: prompt, Incus: fake, Executor: fake,
+		Config: applier, Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("converged apply: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if len(prompt.Requests) != 0 || len(applier.yards) != 0 {
+		t.Fatalf("converged apply prompted=%#v applied=%#v", prompt.Requests, applier.yards)
+	}
+}
+
+func TestConfigApplyAssessesDriftBeforeOneDefaultYesPrompt(t *testing.T) {
+	root, _, configHome, environment := configCommandFixture(t)
+	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "named", "config.env"), "SSH_PORT=2299\n")
+	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "stopped", "config.env"), "SSH_PORT=2300\n")
+	defaultLoaded := loadConfigCommandContext(t, root, environment, "default")
+	namedLoaded := loadConfigCommandContext(t, root, environment, "named")
+	stoppedLoaded := loadConfigCommandContext(t, root, environment, "stopped")
+	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+		defaultLoaded.Context.IncusProject + "/" + defaultLoaded.Context.InstanceName: {
+			Name: defaultLoaded.Context.InstanceName, Project: defaultLoaded.Context.IncusProject, Status: "Running",
+		},
+		namedLoaded.Context.IncusProject + "/" + namedLoaded.Context.InstanceName: {
+			Name: namedLoaded.Context.InstanceName, Project: namedLoaded.Context.IncusProject, Status: "Running",
+		},
+		stoppedLoaded.Context.IncusProject + "/" + stoppedLoaded.Context.InstanceName: {
+			Name: stoppedLoaded.Context.InstanceName, Project: stoppedLoaded.Context.IncusProject, Status: "Stopped",
+		},
+	}, ExecSteps: []testkit.IncusExecStep{{
+		Result: ports.InstanceExecResult{Stdout: []byte(strings.Repeat("0", 64) + "  stale\n"), ExitCode: 0},
+	}}}
+	appendHashSteps(t, fake, namedLoaded)
+	appendHashSteps(t, fake, defaultLoaded)
+	prompt := &testkit.Prompt{Answers: []bool{true}}
+	applier := &recordingConfigApplier{}
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "apply", "--all-local"},
+		Environment: environment, WorkingDir: root, Prompt: prompt, Incus: fake, Executor: fake,
+		Config: applier, Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("mixed apply: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if strings.Join(applier.yards, ",") != "default" || len(prompt.Requests) != 1 ||
+		prompt.Requests[0].Summary != "Apply Subyard file settings" || prompt.Requests[0].Default != domain.ConfirmationDefaultYes {
+		t.Fatalf("mixed apply requests=%#v yards=%#v", prompt.Requests, applier.yards)
+	}
+}
+
+func TestConfigApplyDeclineLeavesApplierUntouched(t *testing.T) {
+	root, _, _, environment := configCommandFixture(t)
+	loaded := loadConfigCommandContext(t, root, environment, "default")
+	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+		loaded.Context.IncusProject + "/" + loaded.Context.InstanceName: {
+			Name: loaded.Context.InstanceName, Project: loaded.Context.IncusProject, Status: "Running",
+		},
+	}, ExecSteps: []testkit.IncusExecStep{{
+		Result: ports.InstanceExecResult{Stdout: []byte(strings.Repeat("0", 64) + "  stale\n"), ExitCode: 0},
+	}}}
+	prompt := &testkit.Prompt{Answers: []bool{false}}
+	applier := &recordingConfigApplier{}
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "apply"},
+		Environment: environment, WorkingDir: root, Prompt: prompt, Incus: fake, Executor: fake,
+		Config: applier, Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 || !strings.Contains(stderr.String(), "operation declined") {
+		t.Fatalf("declined apply: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if len(applier.yards) != 0 || len(prompt.Requests) != 1 || prompt.Requests[0].Default != domain.ConfirmationDefaultYes {
+		t.Fatalf("declined apply requests=%#v yards=%#v", prompt.Requests, applier.yards)
+	}
+}
+
+func TestConfigApplyExecErrorFailsPreflightWithAssumeYes(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+	}{
+		{name: "transport", err: errors.New("transport disconnected")},
+		{name: "cancellation", err: context.Canceled},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, _, _, environment := configCommandFixture(t)
+			loaded := loadConfigCommandContext(t, root, environment, "default")
+			fake := &testkit.Incus{
+				Instances: map[string]ports.InstanceInfo{
+					loaded.Context.IncusProject + "/" + loaded.Context.InstanceName: {
+						Name: loaded.Context.InstanceName, Project: loaded.Context.IncusProject,
+						Status: "Running",
+					},
+				},
+				ExecSteps: []testkit.IncusExecStep{{Err: test.err}},
+			}
+			prompt := &testkit.Prompt{}
+			applier := &recordingConfigApplier{}
+			var stdout, stderr bytes.Buffer
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard",
+				Arguments:   []string{"config", "apply", "--yes"},
+				Environment: environment, WorkingDir: root, Prompt: prompt,
+				Incus: fake, Executor: fake, Config: applier,
+				Stdout: &stdout, Stderr: &stderr,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code := program.Run(context.Background()); code != 1 ||
+				!strings.Contains(stderr.String(), test.err.Error()) {
+				t.Fatalf("exec error: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+			}
+			if len(prompt.Requests) != 0 || len(applier.yards) != 0 {
+				t.Fatalf("exec error prompted=%#v applied=%#v", prompt.Requests, applier.yards)
+			}
+		})
+	}
+}
+
+func TestConfigApplyCompletedNonzeroProbeRemainsDrift(t *testing.T) {
+	root, _, _, environment := configCommandFixture(t)
+	loaded := loadConfigCommandContext(t, root, environment, "default")
+	fake := &testkit.Incus{
+		Instances: map[string]ports.InstanceInfo{
+			loaded.Context.IncusProject + "/" + loaded.Context.InstanceName: {
+				Name: loaded.Context.InstanceName, Project: loaded.Context.IncusProject,
+				Status: "Running",
+			},
+		},
+		ExecSteps: []testkit.IncusExecStep{{
+			Result: ports.InstanceExecResult{ExitCode: 1},
+			Err:    errors.New("instance command exited with status 1"),
+		}},
+	}
+	appendHashSteps(t, fake, loaded)
+	prompt := &testkit.Prompt{}
+	applier := &recordingConfigApplier{}
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "apply", "--yes"},
+		Environment: environment, WorkingDir: root, Prompt: prompt,
+		Incus: fake, Executor: fake, Config: applier,
+		Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("completed nonzero probe: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if len(prompt.Requests) != 0 || strings.Join(applier.yards, ",") != "default" {
+		t.Fatalf("completed nonzero prompted=%#v applied=%#v", prompt.Requests, applier.yards)
+	}
+}
+
 func TestConfigSyncCheckIsReadOnlyAndMutationPromptsOnce(t *testing.T) {
 	root, _, configHome, environment := configCommandFixture(t)
 	environment = append(environment, "SUBYARD_HOST_ID=owner-a")
@@ -458,8 +867,10 @@ func TestConfigSyncCheckIsReadOnlyAndMutationPromptsOnce(t *testing.T) {
 		t.Fatalf("config sync apply: code=%d stdout=%s stderr=%s",
 			code, stdout.String(), stderr.String())
 	}
-	if len(applyPrompt.Seen) != 1 {
-		t.Fatalf("config sync prompted %d times: %#v", len(applyPrompt.Seen), applyPrompt.Seen)
+	if len(applyPrompt.Requests) != 1 ||
+		applyPrompt.Requests[0].Summary != "Synchronize persistent configuration" ||
+		applyPrompt.Requests[0].Default != domain.ConfirmationDefaultYes {
+		t.Fatalf("config sync requests=%#v", applyPrompt.Requests)
 	}
 	content, err = os.ReadFile(filepath.Join(configHome, "config.env"))
 	if err != nil || string(content) != "SSH_PORT=2290\n" {
@@ -486,6 +897,43 @@ func TestConfigSyncCheckIsReadOnlyAndMutationPromptsOnce(t *testing.T) {
 	if len(convergedPrompt.Seen) != 0 {
 		t.Fatalf("converged sync prompted: %#v", convergedPrompt.Seen)
 	}
+
+	manifestBefore, err := os.ReadFile(configsync.ManifestPath(configHome))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeConfigCommandFile(t, filepath.Join(source, "subyard-config.json"),
+		"{\"schemaVersion\":1}\n")
+	commitConfigSource(t, source, "reformat source manifest")
+	manifestOnlyPrompt := &testkit.Prompt{Answers: []bool{false}}
+	stdout.Reset()
+	stderr.Reset()
+	program, err = New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments:   []string{"config", "sync", source},
+		Environment: environment, WorkingDir: root, Prompt: manifestOnlyPrompt,
+		Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 ||
+		!strings.Contains(stderr.String(), "operation declined") {
+		t.Fatalf("manifest-only decline: code=%d stdout=%s stderr=%s",
+			code, stdout.String(), stderr.String())
+	}
+	if len(manifestOnlyPrompt.Requests) != 1 ||
+		manifestOnlyPrompt.Requests[0].Summary != "Synchronize persistent configuration" ||
+		manifestOnlyPrompt.Requests[0].Default != domain.ConfirmationDefaultYes ||
+		!reflect.DeepEqual(manifestOnlyPrompt.Requests[0].Consequences,
+			[]string{"update versioned configuration manifest metadata"}) {
+		t.Fatalf("manifest-only requests=%#v", manifestOnlyPrompt.Requests)
+	}
+	manifestAfter, err := os.ReadFile(configsync.ManifestPath(configHome))
+	if err != nil || !bytes.Equal(manifestAfter, manifestBefore) {
+		t.Fatalf("declined manifest-only sync changed manifest: equal=%v err=%v",
+			bytes.Equal(manifestAfter, manifestBefore), err)
+	}
 }
 
 func TestConfigSyncCheckLeavesRecoveryPendingAndMutationRecoversFirst(t *testing.T) {
@@ -498,6 +946,12 @@ func TestConfigSyncCheckLeavesRecoveryPendingAndMutationRecoversFirst(t *testing
 	if err := os.MkdirAll(transactionRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	before := []byte("SSH_PORT=2291\n")
+	after := []byte("SSH_PORT=2999\n")
+	writeConfigCommandFile(t, filepath.Join(configHome, "config.env"), string(after))
+	writeConfigCommandFile(
+		t, filepath.Join(transactionRoot, "backup", "config.env"), string(before),
+	)
 	writeConfigCommandFile(
 		t, filepath.Join(configHome, ".sync", "transaction.json"),
 		fmt.Sprintf(`{
@@ -506,10 +960,19 @@ func TestConfigSyncCheckLeavesRecoveryPendingAndMutationRecoversFirst(t *testing
   "phase": "applying",
   "planDigest": %q,
   "newManifestDigest": %q,
-  "applied": 0,
-  "entries": []
+  "applied": 1,
+  "entries": [{
+    "path": "config.env",
+    "action": "update",
+    "existed": true,
+    "beforeDigest": %q,
+    "afterDigest": %q,
+    "beforeMode": 384,
+    "afterMode": 384
+  }]
 }
-`, transactionID, strings.Repeat("a", 64), strings.Repeat("b", 64)),
+`, transactionID, strings.Repeat("a", 64), strings.Repeat("b", 64),
+			fmt.Sprintf("%x", sha256.Sum256(before)), fmt.Sprintf("%x", sha256.Sum256(after))),
 	)
 	source := filepath.Join(t.TempDir(), "source")
 	if err := os.MkdirAll(filepath.Join(source, "hosts", "owner-a"), 0o700); err != nil {
@@ -581,8 +1044,11 @@ func TestConfigSyncCheckLeavesRecoveryPendingAndMutationRecoversFirst(t *testing
 		t.Fatalf("recovery-first sync: code=%d stdout=%s stderr=%s",
 			code, stdout.String(), stderr.String())
 	}
-	if len(prompt.Seen) != 1 {
-		t.Fatalf("recovery-first sync prompted %d times: %#v", len(prompt.Seen), prompt.Seen)
+	if len(prompt.Requests) != 1 ||
+		prompt.Requests[0].Summary != "Synchronize persistent configuration" ||
+		prompt.Requests[0].Default != domain.ConfirmationDefaultYes ||
+		!strings.Contains(strings.Join(prompt.Requests[0].Consequences, "\n"), "adopt config.env") {
+		t.Fatalf("recovery-first sync requests=%#v", prompt.Requests)
 	}
 	if _, err := os.Lstat(filepath.Join(configHome, ".sync", "transaction.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("successful recovery left its journal: %v", err)
@@ -590,6 +1056,131 @@ func TestConfigSyncCheckLeavesRecoveryPendingAndMutationRecoversFirst(t *testing
 	content, err := os.ReadFile(filepath.Join(configHome, "config.env"))
 	if err != nil || string(content) != "SSH_PORT=2291\n" {
 		t.Fatalf("recovery-first sync did not apply source: %q %v", content, err)
+	}
+}
+
+func TestConfigSyncAssumeYesRejectsInvalidRecoveryJournalBeforePlanning(t *testing.T) {
+	root, _, configHome, environment := configCommandFixture(t)
+	target := filepath.Join(configHome, "config.env")
+	writeConfigCommandFile(t, target, "SSH_PORT=2299\n")
+	transactionID := "1-eeeeeeeeeeeeeeee"
+	writeConfigCommandFile(
+		t, filepath.Join(configHome, ".sync", "transaction.json"),
+		fmt.Sprintf(`{
+  "schemaVersion": 1,
+  "id": %q,
+  "phase": "untrusted",
+  "planDigest": %q,
+  "newManifestDigest": %q,
+  "applied": 0,
+  "entries": []
+}
+
+`, transactionID, strings.Repeat("a", 64), strings.Repeat("b", 64)),
+	)
+	prompt := &testkit.Prompt{}
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments:   []string{"config", "sync", filepath.Join(t.TempDir(), "source"), "--yes"},
+		Environment: environment, WorkingDir: root, Prompt: prompt,
+		Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 ||
+		!strings.Contains(stderr.String(), "unknown config sync transaction phase") {
+		t.Fatalf("invalid recovery: code=%d stdout=%s stderr=%s",
+			code, stdout.String(), stderr.String())
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != "SSH_PORT=2299\n" {
+		t.Fatalf("invalid recovery changed target: %q err=%v", got, err)
+	}
+	if len(prompt.Requests) != 0 {
+		t.Fatalf("invalid recovery prompted: %#v", prompt.Requests)
+	}
+	if _, err := os.Lstat(configsync.TransactionPath(configHome)); err != nil {
+		t.Fatalf("invalid recovery discarded its journal: %v", err)
+	}
+}
+
+func TestConfigSyncNamedStatusLeavesRecoveryPending(t *testing.T) {
+	root, _, configHome, environment := configCommandFixture(t)
+	target, transaction := seedConfigSyncRecoveryJournal(t, configHome)
+	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "named", "config.env"), "")
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments:   []string{"-Y", "named", "config", "sync", "status", "--offline"},
+		Environment: environment, WorkingDir: root, Prompt: &testkit.Prompt{},
+		Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 ||
+		!strings.Contains(stdout.String(), "recovery: required") {
+		t.Fatalf("named recovery status: code=%d stdout=%s stderr=%s",
+			code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Lstat(transaction); err != nil {
+		t.Fatalf("named status consumed recovery journal: %v", err)
+	}
+	if content, err := os.ReadFile(target); err != nil || string(content) != "SSH_PORT=2999\n" {
+		t.Fatalf("named status recovered live target: %q err=%v", content, err)
+	}
+}
+
+func TestConfigSyncRemoteRoutingIgnoresLocalRecoveryJournal(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		arguments []string
+	}{
+		{name: "mutation", arguments: []string{"sync", "--yes"}},
+		{name: "check", arguments: []string{"sync", "--check"}},
+		{name: "status", arguments: []string{"sync", "status", "--offline"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, home, configHome, environment := configCommandFixture(t)
+			target, transaction := seedConfigSyncRecoveryJournal(t, configHome)
+			writeConfigCommandFile(t,
+				filepath.Join(configHome, "yards", "remote", "config.env"),
+				"YARD_TYPE=remote\nREMOTE_DEST=owner.example\nREMOTE_YARD=inner\nSSH_PORT=4444\n")
+			fakeBin := filepath.Join(home, "fake-bin")
+			logPath := filepath.Join(home, "ssh-arguments")
+			writeConfigCommandFile(t, filepath.Join(fakeBin, "ssh"), `#!/bin/sh
+printf '%s\n' "$@" >"$SUBYARD_TEST_SSH_LOG"
+`, 0o700)
+			t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+			environment = append(environment,
+				"PATH="+os.Getenv("PATH"),
+				"SUBYARD_TEST_SSH_LOG="+logPath)
+			arguments := append([]string{"-Y", "remote", "config"}, test.arguments...)
+			var stdout, stderr bytes.Buffer
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard", Arguments: arguments,
+				Environment: environment, WorkingDir: root,
+				Stdout: &stdout, Stderr: &stderr,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code := program.Run(context.Background()); code != 0 {
+				t.Fatalf("remote %s: code=%d stdout=%s stderr=%s",
+					test.name, code, stdout.String(), stderr.String())
+			}
+			if _, err := os.Lstat(logPath); err != nil {
+				t.Fatalf("remote %s was not forwarded: %v", test.name, err)
+			}
+			if _, err := os.Lstat(transaction); err != nil {
+				t.Fatalf("remote %s consumed local recovery journal: %v", test.name, err)
+			}
+			if content, err := os.ReadFile(target); err != nil || string(content) != "SSH_PORT=2999\n" {
+				t.Fatalf("remote %s recovered local target: %q err=%v",
+					test.name, content, err)
+			}
+		})
 	}
 }
 
@@ -615,8 +1206,12 @@ func TestConfigSourceConnectClonesRegistersAndAppliesWithOnePrompt(t *testing.T)
 		t.Fatalf("source connect: code=%d stdout=%s stderr=%s",
 			code, stdout.String(), stderr.String())
 	}
-	if len(prompt.Seen) != 1 {
-		t.Fatalf("source connect prompted %d times: %#v", len(prompt.Seen), prompt.Seen)
+	if len(prompt.Requests) != 1 ||
+		prompt.Requests[0].Summary != "Connect versioned configuration source" ||
+		prompt.Requests[0].Default != domain.ConfirmationDefaultYes ||
+		!strings.Contains(strings.Join(prompt.Requests[0].Consequences, "\n"),
+			"update versioned configuration manifest metadata") {
+		t.Fatalf("source connect requests=%#v", prompt.Requests)
 	}
 	for _, expected := range []string{
 		"Configuration source onboarding",
@@ -646,10 +1241,11 @@ func TestConfigSourceConnectClonesRegistersAndAppliesWithOnePrompt(t *testing.T)
 
 	stdout.Reset()
 	stderr.Reset()
+	pathPrompt := &testkit.Prompt{}
 	program, err = New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "sync", "path"},
-		Environment: environment, WorkingDir: root,
+		Environment: environment, WorkingDir: root, Prompt: pathPrompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
 	if err != nil {
@@ -659,6 +1255,9 @@ func TestConfigSourceConnectClonesRegistersAndAppliesWithOnePrompt(t *testing.T)
 		strings.TrimSpace(stdout.String()) != checkout {
 		t.Fatalf("source path: code=%d stdout=%q stderr=%q",
 			code, stdout.String(), stderr.String())
+	}
+	if len(pathPrompt.Requests) != 0 {
+		t.Fatalf("read-only path prompted: %#v", pathPrompt.Requests)
 	}
 
 	stdout.Reset()
@@ -951,14 +1550,16 @@ func TestConfigSourceConnectDeclineLeavesNoCheckoutOrRegistration(t *testing.T) 
 	source := configSourceGitRepository(t, "owner-a", "SSH_PORT=2293\n")
 	checkout := filepath.Join(home, "declined-source")
 	prompt := &testkit.Prompt{Answers: []bool{false}}
+	applier := &recordingConfigApplier{}
 	var stdout, stderr bytes.Buffer
 	program, err := New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments: []string{
 			"config", "sync", "connect", source,
-			"--host-id", "owner-a", "--checkout", checkout,
+			"--host-id", "owner-a", "--checkout", checkout, "--apply",
 		},
 		Environment: environment, WorkingDir: root, Prompt: prompt,
+		Config: applier,
 		Stdout: &stdout, Stderr: &stderr,
 	})
 	if err != nil {
@@ -975,6 +1576,9 @@ func TestConfigSourceConnectDeclineLeavesNoCheckoutOrRegistration(t *testing.T) 
 	if _, exists, err := configsync.ReadSourceRecord(configHome); err != nil || exists {
 		t.Fatalf("declined connect registered source: exists=%v err=%v", exists, err)
 	}
+	if len(applier.yards) != 0 {
+		t.Fatalf("declined connect materialized yards: %#v", applier.yards)
+	}
 	stages, err := filepath.Glob(filepath.Join(home, sourceStagePrefix+"*"))
 	if err != nil || len(stages) != 0 {
 		t.Fatalf("declined connect left stages: %#v err=%v", stages, err)
@@ -987,14 +1591,15 @@ func TestConfigSourceConnectDeclineLeavesNoCheckoutOrRegistration(t *testing.T) 
 
 func TestConfigSourceConnectRejectsEmbeddedCredentialsAndRemoteForwards(t *testing.T) {
 	root, home, configHome, environment := configCommandFixture(t)
+	preconditionPrompt := &testkit.Prompt{}
 	var stderr bytes.Buffer
 	program, err := New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments: []string{
 			"config", "sync", "connect",
-			"https://token@example.invalid/private.git",
+			"https://token@example.invalid/private.git", "--yes",
 		},
-		Environment: environment, WorkingDir: root,
+		Environment: environment, WorkingDir: root, Prompt: preconditionPrompt,
 		Stdout: &bytes.Buffer{}, Stderr: &stderr,
 	})
 	if err != nil {
@@ -1003,6 +1608,9 @@ func TestConfigSourceConnectRejectsEmbeddedCredentialsAndRemoteForwards(t *testi
 	if code := program.Run(context.Background()); code != 1 ||
 		!strings.Contains(stderr.String(), "credentials must not be embedded") {
 		t.Fatalf("credential URL: code=%d stderr=%s", code, stderr.String())
+	}
+	if len(preconditionPrompt.Requests) != 0 {
+		t.Fatalf("credential precondition prompted: %#v", preconditionPrompt.Requests)
 	}
 
 	writeConfigCommandFile(t,
@@ -1055,11 +1663,12 @@ printf '%s\n' "$@" >"$SUBYARD_TEST_SSH_LOG"
 
 func TestConfigSyncStatusNotConfiguredAndOldSourceCommandsAreRemoved(t *testing.T) {
 	root, _, _, environment := configCommandFixture(t)
+	readOnlyPrompt := &testkit.Prompt{}
 	var stdout, stderr bytes.Buffer
 	program, err := New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "sync", "status", "--offline"},
-		Environment: environment, WorkingDir: root,
+		Environment: environment, WorkingDir: root, Prompt: readOnlyPrompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
 	if err != nil {
@@ -1078,6 +1687,9 @@ func TestConfigSyncStatusNotConfiguredAndOldSourceCommandsAreRemoved(t *testing.
 		if !strings.Contains(stdout.String(), expected) {
 			t.Fatalf("unconfigured status omitted %q:\n%s", expected, stdout.String())
 		}
+	}
+	if len(readOnlyPrompt.Requests) != 0 {
+		t.Fatalf("read-only status prompted: %#v", readOnlyPrompt.Requests)
 	}
 
 	stdout.Reset()
@@ -1101,7 +1713,7 @@ func TestConfigSyncStatusNotConfiguredAndOldSourceCommandsAreRemoved(t *testing.
 	program, err = New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "sync", "help"},
-		Environment: environment, WorkingDir: root,
+		Environment: environment, WorkingDir: root, Prompt: readOnlyPrompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
 	if err != nil {
@@ -1124,6 +1736,9 @@ func TestConfigSyncStatusNotConfiguredAndOldSourceCommandsAreRemoved(t *testing.
 	}
 	if strings.Contains(stdout.String(), "config source") {
 		t.Fatalf("sync help retained removed source command:\n%s", stdout.String())
+	}
+	if len(readOnlyPrompt.Requests) != 0 {
+		t.Fatalf("read-only sync help prompted: %#v", readOnlyPrompt.Requests)
 	}
 }
 
@@ -1166,6 +1781,93 @@ func TestConfigSyncConnectInitCreatesInitialCommit(t *testing.T) {
 	))
 	if upstream == "" {
 		t.Fatal("initialized checkout has no upstream")
+	}
+}
+
+func TestConfigSyncConnectInitDeclineLeavesExistingCheckoutUnborn(t *testing.T) {
+	root, home, configHome, environment := configCommandFixture(t)
+	remote := filepath.Join(t.TempDir(), "empty.git")
+	runConfigSyncGit(t, filepath.Dir(remote), "init", "--bare", "-q", remote)
+	checkout := filepath.Join(home, "existing-empty")
+	runConfigSyncGit(t, home, "clone", "-q", remote, checkout)
+	if err := hardenClonedConfigSource(checkout); err != nil {
+		t.Fatal(err)
+	}
+	environment = append(environment,
+		"GIT_AUTHOR_NAME=Subyard Test",
+		"GIT_AUTHOR_EMAIL=test@invalid",
+		"GIT_COMMITTER_NAME=Subyard Test",
+		"GIT_COMMITTER_EMAIL=test@invalid",
+	)
+	before := snapshotConfigCheckout(t, checkout)
+	prompt := &testkit.Prompt{Answers: []bool{false}}
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments: []string{
+			"config", "sync", "connect", remote, "--checkout", checkout,
+			"--host-id", "owner-a", "--init",
+		},
+		Environment: environment, WorkingDir: root, Prompt: prompt,
+		Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 ||
+		!strings.Contains(stderr.String(), "operation declined") {
+		t.Fatalf("declined existing init: code=%d stdout=%s stderr=%s",
+			code, stdout.String(), stderr.String())
+	}
+	if after := snapshotConfigCheckout(t, checkout); !reflect.DeepEqual(after, before) {
+		t.Fatalf("declined existing init changed checkout:\nbefore=%#v\nafter=%#v", before, after)
+	}
+	if _, exists, err := configsync.ReadSourceRecord(configHome); err != nil || exists {
+		t.Fatalf("declined existing init registered source: exists=%v err=%v", exists, err)
+	}
+}
+
+func TestConfigSyncConnectInitChangesExistingCheckoutAfterConsent(t *testing.T) {
+	root, home, _, environment := configCommandFixture(t)
+	remote := filepath.Join(t.TempDir(), "empty.git")
+	runConfigSyncGit(t, filepath.Dir(remote), "init", "--bare", "-q", remote)
+	checkout := filepath.Join(home, "existing-empty")
+	runConfigSyncGit(t, home, "clone", "-q", remote, checkout)
+	if err := hardenClonedConfigSource(checkout); err != nil {
+		t.Fatal(err)
+	}
+	environment = append(environment,
+		"GIT_AUTHOR_NAME=Subyard Test",
+		"GIT_AUTHOR_EMAIL=test@invalid",
+		"GIT_COMMITTER_NAME=Subyard Test",
+		"GIT_COMMITTER_EMAIL=test@invalid",
+	)
+	before := snapshotConfigCheckout(t, checkout)
+	prompt := &callbackPrompt{callback: func() {
+		if during := snapshotConfigCheckout(t, checkout); !reflect.DeepEqual(during, before) {
+			t.Fatalf("existing checkout changed before consent:\nbefore=%#v\nduring=%#v", before, during)
+		}
+	}}
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments: []string{
+			"config", "sync", "connect", remote, "--checkout", checkout,
+			"--host-id", "owner-a", "--init",
+		},
+		Environment: environment, WorkingDir: root, Prompt: prompt,
+		Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("accepted existing init: code=%d stdout=%s stderr=%s",
+			code, stdout.String(), stderr.String())
+	}
+	manifest := configSourceGitOutput(t, checkout, "show", "HEAD:subyard-config.json")
+	if !strings.Contains(manifest, `"schemaVersion": 1`) {
+		t.Fatalf("accepted existing init manifest = %q", manifest)
 	}
 }
 
@@ -1217,8 +1919,8 @@ func TestConfigSyncConnectApplyRefreshesAffectedRunningYardWithOnePrompt(t *test
 	if len(prompt.Seen) != 1 {
 		t.Fatalf("connect --apply prompted %d times: %#v", len(prompt.Seen), prompt.Seen)
 	}
-	if strings.Join(applier.yards, ",") != "default" {
-		t.Fatalf("connect --apply refreshed %#v", applier.yards)
+	if len(applier.yards) != 0 {
+		t.Fatalf("connect --apply refreshed converged yards %#v", applier.yards)
 	}
 }
 
@@ -1251,6 +1953,43 @@ func TestConfigSyncPullFetchesFastForwardsAndImports(t *testing.T) {
 		"SSH_PORT=2296\n")
 	commitConfigSource(t, publisher, "remote update")
 	runConfigSyncGit(t, publisher, "push", "-q")
+	checkoutBeforeDecline := strings.TrimSpace(configSourceGitOutput(
+		t, checkout, "rev-parse", "HEAD",
+	))
+	checkoutStateBeforeDecline := snapshotConfigCheckout(t, checkout)
+	declinePrompt := &testkit.Prompt{Answers: []bool{false}}
+	stdout.Reset()
+	stderr.Reset()
+	program, err = New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments:   []string{"config", "sync", "pull"},
+		Environment: environment, WorkingDir: root, Prompt: declinePrompt,
+		Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 ||
+		!strings.Contains(stderr.String(), "operation declined") {
+		t.Fatalf("declined pull: code=%d stdout=%s stderr=%s",
+			code, stdout.String(), stderr.String())
+	}
+	if len(declinePrompt.Requests) != 1 ||
+		declinePrompt.Requests[0].Default != domain.ConfirmationDefaultYes {
+		t.Fatalf("declined pull requests=%#v", declinePrompt.Requests)
+	}
+	if head := strings.TrimSpace(configSourceGitOutput(t, checkout, "rev-parse", "HEAD")); head != checkoutBeforeDecline {
+		t.Fatalf("declined pull advanced checkout: before=%s after=%s",
+			checkoutBeforeDecline, head)
+	}
+	if after := snapshotConfigCheckout(t, checkout); !reflect.DeepEqual(after, checkoutStateBeforeDecline) {
+		t.Fatalf("declined pull changed registered checkout:\nbefore=%#v\nafter=%#v",
+			checkoutStateBeforeDecline, after)
+	}
+	if content, err := os.ReadFile(filepath.Join(configHome, "config.env")); err != nil ||
+		strings.TrimSpace(string(content)) != "SSH_PORT=2295" {
+		t.Fatalf("declined pull changed live settings: %q err=%v", content, err)
+	}
 
 	stdout.Reset()
 	stderr.Reset()
@@ -1285,8 +2024,10 @@ func TestConfigSyncPullFetchesFastForwardsAndImports(t *testing.T) {
 		t.Fatalf("pull: code=%d stdout=%s stderr=%s",
 			code, stdout.String(), stderr.String())
 	}
-	if len(prompt.Seen) != 1 {
-		t.Fatalf("pull prompted %d times: %#v", len(prompt.Seen), prompt.Seen)
+	if len(prompt.Requests) != 1 ||
+		prompt.Requests[0].Summary != "Pull versioned configuration" ||
+		prompt.Requests[0].Default != domain.ConfirmationDefaultYes {
+		t.Fatalf("pull requests=%#v", prompt.Requests)
 	}
 	content, err := os.ReadFile(filepath.Join(configHome, "config.env"))
 	if err != nil || strings.TrimSpace(string(content)) != "SSH_PORT=2296" {
@@ -1300,6 +2041,413 @@ func TestConfigSyncPullFetchesFastForwardsAndImports(t *testing.T) {
 	))
 	if head != upstream {
 		t.Fatalf("pull did not fast-forward: head=%s upstream=%s", head, upstream)
+	}
+}
+
+func TestConfigSyncPullPromptsForManifestOnlyApplyWithoutFastForward(t *testing.T) {
+	root, home, configHome, environment := configCommandFixture(t)
+	remote, publisher := configBareSourceRepository(
+		t, "owner-a", "SSH_PORT=2296\n",
+	)
+	checkout := filepath.Join(home, ".local", "share", "subyard-config")
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments: []string{
+			"config", "sync", "connect", remote,
+			"--host-id", "owner-a", "--yes",
+		},
+		Environment: environment, WorkingDir: root,
+		Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("connect: code=%d stdout=%s stderr=%s",
+			code, stdout.String(), stderr.String())
+	}
+	manifestBefore, err := os.ReadFile(configsync.ManifestPath(configHome))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	writeConfigCommandFile(t, filepath.Join(publisher, "subyard-config.json"),
+		"{\"schemaVersion\":1}\n")
+	commitConfigSource(t, publisher, "reformat source manifest")
+	runConfigSyncGit(t, publisher, "push", "-q")
+	runConfigSyncGit(t, checkout, "pull", "--ff-only", "-q")
+	if err := os.Chmod(filepath.Join(checkout, "subyard-config.json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	prompt := &testkit.Prompt{Answers: []bool{false}}
+	stdout.Reset()
+	stderr.Reset()
+	program, err = New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments:   []string{"config", "sync", "pull"},
+		Environment: environment, WorkingDir: root, Prompt: prompt,
+		Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 ||
+		!strings.Contains(stderr.String(), "operation declined") {
+		t.Fatalf("manifest-only pull decline: code=%d stdout=%s stderr=%s",
+			code, stdout.String(), stderr.String())
+	}
+	if len(prompt.Requests) != 1 ||
+		prompt.Requests[0].Summary != "Pull versioned configuration" ||
+		prompt.Requests[0].Default != domain.ConfirmationDefaultYes ||
+		!reflect.DeepEqual(prompt.Requests[0].Consequences,
+			[]string{"update versioned configuration manifest metadata"}) {
+		t.Fatalf("manifest-only pull requests=%#v", prompt.Requests)
+	}
+	manifestAfter, err := os.ReadFile(configsync.ManifestPath(configHome))
+	if err != nil || !bytes.Equal(manifestAfter, manifestBefore) {
+		t.Fatalf("declined manifest-only pull changed manifest: equal=%v err=%v",
+			bytes.Equal(manifestAfter, manifestBefore), err)
+	}
+}
+
+func TestConfigSyncPullAndPushNoOpsDoNotPromptOrMutate(t *testing.T) {
+	root, home, configHome, environment := configCommandFixture(t)
+	remote, _ := configBareSourceRepository(
+		t, "owner-a", "SSH_PORT='2297'\n",
+	)
+	environment = append(environment,
+		"GIT_AUTHOR_NAME=Subyard Test",
+		"GIT_AUTHOR_EMAIL=test@invalid",
+		"GIT_COMMITTER_NAME=Subyard Test",
+		"GIT_COMMITTER_EMAIL=test@invalid",
+	)
+	checkout := filepath.Join(home, ".local", "share", "subyard-config")
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments: []string{
+			"config", "sync", "connect", remote,
+			"--host-id", "owner-a", "--yes",
+		},
+		Environment: environment, WorkingDir: root,
+		Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("connect: code=%d stdout=%s stderr=%s",
+			code, stdout.String(), stderr.String())
+	}
+	manifestBefore, err := os.ReadFile(configsync.ManifestPath(configHome))
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkoutBefore := strings.TrimSpace(configSourceGitOutput(t, checkout, "rev-parse", "HEAD"))
+	remoteBefore := strings.TrimSpace(configSourceGitOutput(t, remote, "rev-parse", "HEAD"))
+
+	for _, test := range []struct {
+		name      string
+		arguments []string
+	}{
+		{name: "pull", arguments: []string{"config", "sync", "pull"}},
+		{name: "push", arguments: []string{"config", "sync", "push", "-m", "No changes"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			checkoutStateBefore := snapshotConfigCheckout(t, checkout)
+			prompt := &testkit.Prompt{}
+			stdout.Reset()
+			stderr.Reset()
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard", Arguments: test.arguments,
+				Environment: environment, WorkingDir: root, Prompt: prompt,
+				Stdout: &stdout, Stderr: &stderr,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code := program.Run(context.Background()); code != 0 ||
+				!strings.Contains(stdout.String(), "already converged") {
+				t.Fatalf("no-op %s: code=%d stdout=%s stderr=%s",
+					test.name, code, stdout.String(), stderr.String())
+			}
+			if len(prompt.Requests) != 0 {
+				t.Fatalf("no-op %s prompted: %#v", test.name, prompt.Requests)
+			}
+			manifestAfter, err := os.ReadFile(configsync.ManifestPath(configHome))
+			if err != nil || !bytes.Equal(manifestAfter, manifestBefore) {
+				t.Fatalf("no-op %s rewrote manifest: equal=%v err=%v",
+					test.name, bytes.Equal(manifestAfter, manifestBefore), err)
+			}
+			if head := strings.TrimSpace(configSourceGitOutput(t, checkout, "rev-parse", "HEAD")); head != checkoutBefore {
+				t.Fatalf("no-op %s changed checkout: before=%s after=%s",
+					test.name, checkoutBefore, head)
+			}
+			if head := strings.TrimSpace(configSourceGitOutput(t, remote, "rev-parse", "HEAD")); head != remoteBefore {
+				t.Fatalf("no-op %s changed upstream: before=%s after=%s",
+					test.name, remoteBefore, head)
+			}
+			if after := snapshotConfigCheckout(t, checkout); !reflect.DeepEqual(after, checkoutStateBefore) {
+				t.Fatalf("no-op %s changed registered checkout:\nbefore=%#v\nafter=%#v",
+					test.name, checkoutStateBefore, after)
+			}
+		})
+	}
+}
+
+func TestConfigSyncNoOpPreflightDoesNotRefreshRegisteredIndex(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		arguments        func(remote, checkout string) []string
+		clonesRegistered bool
+	}{
+		{
+			name: "plain sync",
+			arguments: func(_, _ string) []string {
+				return []string{"config", "sync"}
+			},
+		},
+		{
+			name: "connect",
+			arguments: func(remote, checkout string) []string {
+				return []string{
+					"config", "sync", "connect", remote,
+					"--host-id", "owner-a", "--checkout", checkout,
+				}
+			},
+		},
+		{
+			name:             "pull",
+			clonesRegistered: true,
+			arguments: func(_, _ string) []string {
+				return []string{"config", "sync", "pull"}
+			},
+		},
+		{
+			name:             "push",
+			clonesRegistered: true,
+			arguments: func(_, _ string) []string {
+				return []string{"config", "sync", "push", "-m", "No changes"}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("GIT_OPTIONAL_LOCKS", "1")
+			root, home, configHome, environment := configCommandFixture(t)
+			remote, _ := configBareSourceRepository(
+				t, "owner-a", "SSH_PORT='2297'\n",
+			)
+			environment = append(environment,
+				"GIT_AUTHOR_NAME=Subyard Test",
+				"GIT_AUTHOR_EMAIL=test@invalid",
+				"GIT_COMMITTER_NAME=Subyard Test",
+				"GIT_COMMITTER_EMAIL=test@invalid",
+				"GIT_OPTIONAL_LOCKS=1",
+			)
+			checkout := filepath.Join(home, ".local", "share", "subyard-config")
+			var stdout, stderr bytes.Buffer
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard",
+				Arguments: []string{
+					"config", "sync", "connect", remote,
+					"--host-id", "owner-a", "--yes",
+				},
+				Environment: environment, WorkingDir: root,
+				Stdout: &stdout, Stderr: &stderr,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code := program.Run(context.Background()); code != 0 {
+				t.Fatalf("connect: code=%d stdout=%s stderr=%s",
+					code, stdout.String(), stderr.String())
+			}
+			realGit, err := exec.LookPath("git")
+			if err != nil {
+				t.Fatal(err)
+			}
+			fakeBin := t.TempDir()
+			gitLog := filepath.Join(fakeBin, "registered-checkout-git.log")
+			writeConfigCommandFile(t, filepath.Join(fakeBin, "git"), `#!/bin/sh
+set -eu
+for argument do
+	if [ "$argument" = "$SUBYARD_TEST_REGISTERED_CHECKOUT" ]; then
+		printf '%s\t%s\n' "${GIT_OPTIONAL_LOCKS-unset}" "$*" >>"$SUBYARD_TEST_GIT_INSPECT_LOG"
+		break
+	fi
+done
+exec "$SUBYARD_TEST_REAL_GIT" "$@"
+`, 0o700)
+			pathEnv := fakeBin + string(os.PathListSeparator) + os.Getenv("PATH")
+			for key, value := range map[string]string{
+				"PATH":                             pathEnv,
+				"SUBYARD_TEST_REAL_GIT":            realGit,
+				"SUBYARD_TEST_REGISTERED_CHECKOUT": checkout,
+				"SUBYARD_TEST_GIT_INSPECT_LOG":     gitLog,
+			} {
+				t.Setenv(key, value)
+				environment = append(environment, key+"="+value)
+			}
+
+			tracked := filepath.Join(checkout, "subyard-config.json")
+			staleTime := time.Unix(978307200, 0)
+			if err := os.Chtimes(tracked, staleTime, staleTime); err != nil {
+				t.Fatal(err)
+			}
+			before := snapshotConfigCheckoutRaw(t, checkout)
+			registrationBefore, err := os.ReadFile(configsync.SourceRecordPath(configHome))
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifestBefore, err := os.ReadFile(configsync.ManifestPath(configHome))
+			if err != nil {
+				t.Fatal(err)
+			}
+			liveBefore, err := os.ReadFile(filepath.Join(configHome, "config.env"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(gitLog, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			prompt := &testkit.Prompt{}
+			stdout.Reset()
+			stderr.Reset()
+			program, err = New(Options{
+				RepositoryRoot: root, Program: "yard",
+				Arguments:   test.arguments(remote, checkout),
+				Environment: environment, WorkingDir: root, Prompt: prompt,
+				Stdout: &stdout, Stderr: &stderr,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code := program.Run(context.Background()); code != 0 {
+				t.Fatalf("no-op %s: code=%d stdout=%s stderr=%s",
+					test.name, code, stdout.String(), stderr.String())
+			}
+			if len(prompt.Requests) != 0 {
+				t.Fatalf("no-op %s prompted: %#v", test.name, prompt.Requests)
+			}
+			gitLogBytes, err := os.ReadFile(gitLog)
+			if err != nil {
+				t.Fatalf("read registered-checkout Git log for %s: %v", test.name, err)
+			}
+			sawRegisteredClone := false
+			for _, line := range strings.Split(strings.TrimSpace(string(gitLogBytes)), "\n") {
+				if !strings.HasPrefix(line, "0\t") {
+					t.Fatalf("no-op %s ran registered-checkout Git without GIT_OPTIONAL_LOCKS=0: %q",
+						test.name, line)
+				}
+				if strings.Contains(line, "\tclone --quiet -- ") {
+					sawRegisteredClone = true
+				}
+			}
+			if test.clonesRegistered && !sawRegisteredClone {
+				t.Fatalf("no-op %s did not audit the registered checkout as a clone source:\n%s",
+					test.name, gitLogBytes)
+			}
+			if after := snapshotConfigCheckoutRaw(t, checkout); !reflect.DeepEqual(after, before) {
+				t.Fatalf("no-op %s changed registered checkout:\nbefore=%#v\nafter=%#v",
+					test.name, before, after)
+			}
+			for path, expected := range map[string][]byte{
+				configsync.SourceRecordPath(configHome): registrationBefore,
+				configsync.ManifestPath(configHome):     manifestBefore,
+				filepath.Join(configHome, "config.env"): liveBefore,
+			} {
+				actual, err := os.ReadFile(path)
+				if err != nil || !bytes.Equal(actual, expected) {
+					t.Fatalf("no-op %s changed %s: equal=%v err=%v",
+						test.name, path, bytes.Equal(actual, expected), err)
+				}
+			}
+		})
+	}
+}
+
+func TestConfigSyncOnlineStatusFetchesWithoutMutatingRegisteredCheckout(t *testing.T) {
+	root, home, configHome, environment := configCommandFixture(t)
+	remote, publisher := configBareSourceRepository(
+		t, "owner-a", "SSH_PORT=2297\n",
+	)
+	checkout := filepath.Join(home, ".local", "share", "subyard-config")
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments: []string{
+			"config", "sync", "connect", remote,
+			"--host-id", "owner-a", "--yes",
+		},
+		Environment: environment, WorkingDir: root,
+		Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("connect: code=%d stdout=%s stderr=%s",
+			code, stdout.String(), stderr.String())
+	}
+
+	writeConfigCommandFile(t,
+		filepath.Join(publisher, "hosts", "owner-a", "config.env"),
+		"SSH_PORT=2298\n")
+	commitConfigSource(t, publisher, "remote status update")
+	runConfigSyncGit(t, publisher, "push", "-q")
+
+	before := snapshotConfigCheckoutRaw(t, checkout)
+	registrationBefore, err := os.ReadFile(configsync.SourceRecordPath(configHome))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestBefore, err := os.ReadFile(configsync.ManifestPath(configHome))
+	if err != nil {
+		t.Fatal(err)
+	}
+	liveBefore, err := os.ReadFile(filepath.Join(configHome, "config.env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prompt := &testkit.Prompt{}
+	stdout.Reset()
+	stderr.Reset()
+	program, err = New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments:   []string{"config", "sync", "status"},
+		Environment: environment, WorkingDir: root, Prompt: prompt,
+		Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 ||
+		!strings.Contains(stdout.String(), "fetch: fresh") ||
+		!strings.Contains(stdout.String(), "relation: behind 1") {
+		t.Fatalf("online status: code=%d stdout=%s stderr=%s",
+			code, stdout.String(), stderr.String())
+	}
+	if len(prompt.Requests) != 0 {
+		t.Fatalf("online status prompted: %#v", prompt.Requests)
+	}
+	if after := snapshotConfigCheckoutRaw(t, checkout); !reflect.DeepEqual(after, before) {
+		t.Fatalf("online status changed registered checkout:\nbefore=%#v\nafter=%#v",
+			before, after)
+	}
+	for path, expected := range map[string][]byte{
+		configsync.SourceRecordPath(configHome): registrationBefore,
+		configsync.ManifestPath(configHome):     manifestBefore,
+		filepath.Join(configHome, "config.env"): liveBefore,
+	} {
+		actual, err := os.ReadFile(path)
+		if err != nil || !bytes.Equal(actual, expected) {
+			t.Fatalf("online status changed %s: equal=%v err=%v",
+				path, bytes.Equal(actual, expected), err)
+		}
 	}
 }
 
@@ -1348,6 +2496,57 @@ func TestConfigSetAndSyncPushCommitPersistentHostSettings(t *testing.T) {
 		t.Fatalf("config set shared: code=%d stdout=%s stderr=%s",
 			code, stdout.String(), stderr.String())
 	}
+	checkout := filepath.Join(home, ".local", "share", "subyard-config")
+	checkoutBeforeDecline := strings.TrimSpace(configSourceGitOutput(
+		t, checkout, "rev-parse", "HEAD",
+	))
+	remoteBeforeDecline := strings.TrimSpace(configSourceGitOutput(
+		t, remote, "rev-parse", "HEAD",
+	))
+	manifestBeforeDecline, err := os.ReadFile(configsync.ManifestPath(configHome))
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkoutStateBeforeDecline := snapshotConfigCheckout(t, checkout)
+	declinePrompt := &testkit.Prompt{Answers: []bool{false}}
+	stdout.Reset()
+	stderr.Reset()
+	declineProgram, err := New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments:   []string{"config", "sync", "push", "-m", "Declined update"},
+		Environment: environment, WorkingDir: root, Prompt: declinePrompt,
+		Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := declineProgram.Run(context.Background()); code != 1 ||
+		!strings.Contains(stderr.String(), "operation declined") {
+		t.Fatalf("declined push: code=%d stdout=%s stderr=%s",
+			code, stdout.String(), stderr.String())
+	}
+	if len(declinePrompt.Requests) != 1 ||
+		declinePrompt.Requests[0].Summary != "Push versioned configuration" ||
+		declinePrompt.Requests[0].Default != domain.ConfirmationDefaultYes {
+		t.Fatalf("declined push requests=%#v", declinePrompt.Requests)
+	}
+	if head := strings.TrimSpace(configSourceGitOutput(t, checkout, "rev-parse", "HEAD")); head != checkoutBeforeDecline {
+		t.Fatalf("declined push advanced checkout: before=%s after=%s",
+			checkoutBeforeDecline, head)
+	}
+	if after := snapshotConfigCheckout(t, checkout); !reflect.DeepEqual(after, checkoutStateBeforeDecline) {
+		t.Fatalf("declined push changed registered checkout:\nbefore=%#v\nafter=%#v",
+			checkoutStateBeforeDecline, after)
+	}
+	if head := strings.TrimSpace(configSourceGitOutput(t, remote, "rev-parse", "HEAD")); head != remoteBeforeDecline {
+		t.Fatalf("declined push advanced upstream: before=%s after=%s",
+			remoteBeforeDecline, head)
+	}
+	if manifestAfterDecline, err := os.ReadFile(configsync.ManifestPath(configHome)); err != nil ||
+		!bytes.Equal(manifestAfterDecline, manifestBeforeDecline) {
+		t.Fatalf("declined push applied preview: equal=%v err=%v",
+			bytes.Equal(manifestAfterDecline, manifestBeforeDecline), err)
+	}
 	writeConfigCommandFile(t,
 		filepath.Join(configHome, "projects", "must-not-export"), "runtime\n")
 	writeConfigCommandFile(t,
@@ -1375,7 +2574,6 @@ func TestConfigSetAndSyncPushCommitPersistentHostSettings(t *testing.T) {
 		strings.Contains(tree, "projects/") || strings.Contains(tree, "secrets/") {
 		t.Fatalf("push exported runtime or secret paths:\n%s", tree)
 	}
-	checkout := filepath.Join(home, ".local", "share", "subyard-config")
 	status := strings.TrimSpace(configSourceGitOutput(
 		t, checkout, "status", "--short",
 	))
@@ -1432,7 +2630,7 @@ func TestConfigGitStatusParsingAndURLRedaction(t *testing.T) {
 }
 
 func TestConfigSyncPushRejectsConcurrentRemoteAdvanceWithoutForce(t *testing.T) {
-	root, _, _, environment := configCommandFixture(t)
+	root, _, configHome, environment := configCommandFixture(t)
 	remote, publisher := configBareSourceRepository(
 		t, "owner-a", "SSH_PORT=2301\n",
 	)
@@ -1476,6 +2674,12 @@ func TestConfigSyncPushRejectsConcurrentRemoteAdvanceWithoutForce(t *testing.T) 
 		t.Fatalf("set: code=%d stdout=%s stderr=%s",
 			code, stdout.String(), stderr.String())
 	}
+	record, exists, err := configsync.ReadSourceRecord(configHome)
+	if err != nil || !exists {
+		t.Fatalf("read source record: record=%#v exists=%v err=%v", record, exists, err)
+	}
+	checkout := record.Checkout
+	beforePush := snapshotConfigCheckout(t, checkout)
 	prompt := &callbackPrompt{callback: func() {
 		writeConfigCommandFile(t,
 			filepath.Join(publisher, "shared", "config.env"),
@@ -1491,13 +2695,22 @@ func TestConfigSyncPushRejectsConcurrentRemoteAdvanceWithoutForce(t *testing.T) 
 		},
 		Prompt: prompt, Stdout: &stdout, Stderr: &stderr,
 	}); code != 1 ||
-		!strings.Contains(stderr.String(), "push failed without force") ||
-		!strings.Contains(stderr.String(), "local checkout remains ahead") {
+		!strings.Contains(stderr.String(), "upstream changed after preview; rerun operation") {
 		t.Fatalf("concurrent push: code=%d stdout=%s stderr=%s",
 			code, stdout.String(), stderr.String())
 	}
-	if prompt.seen != 1 {
-		t.Fatalf("concurrent push prompted %d times", prompt.seen)
+	afterPush := snapshotConfigCheckout(t, checkout)
+	if afterPush.head != beforePush.head || afterPush.index != beforePush.index ||
+		afterPush.status != beforePush.status {
+		t.Fatalf("stale push changed registered checkout before rejection:\nbefore=%#v\nafter=%#v",
+			beforePush, afterPush)
+	}
+	if len(prompt.requests) != 1 ||
+		prompt.requests[0].Summary != "Push versioned configuration" ||
+		prompt.requests[0].Default != domain.ConfirmationDefaultYes ||
+		!strings.Contains(strings.Join(prompt.requests[0].Consequences, "\n"),
+			"update versioned configuration manifest metadata") {
+		t.Fatalf("concurrent push requests=%#v", prompt.requests)
 	}
 	versioned := configSourceGitOutput(
 		t, remote, "show", "HEAD:hosts/owner-a/config.env",
@@ -1510,7 +2723,7 @@ func TestConfigSyncPushRejectsConcurrentRemoteAdvanceWithoutForce(t *testing.T) 
 	if code := run(Options{
 		Arguments: []string{"config", "sync", "status"},
 		Stdout:    &stdout, Stderr: &stderr,
-	}); code != 1 || !strings.Contains(stdout.String(), "relation: diverged 1/1") {
+	}); code != 1 || !strings.Contains(stdout.String(), "relation: behind 1") {
 		t.Fatalf("post-rejection status: code=%d stdout=%s stderr=%s",
 			code, stdout.String(), stderr.String())
 	}
@@ -1518,15 +2731,14 @@ func TestConfigSyncPushRejectsConcurrentRemoteAdvanceWithoutForce(t *testing.T) 
 
 type callbackPrompt struct {
 	callback func()
-	seen     int
+	requests []domain.ConfirmationRequest
 }
 
 func (prompt *callbackPrompt) Confirm(
 	_ context.Context,
-	_ string,
-	_ []string,
+	request domain.ConfirmationRequest,
 ) (bool, error) {
-	prompt.seen++
+	prompt.requests = append(prompt.requests, request)
 	if prompt.callback != nil {
 		prompt.callback()
 	}
@@ -1576,6 +2788,13 @@ func writeConfigCommandFile(t *testing.T, path, contents string, modes ...os.Fil
 	if err := os.WriteFile(path, []byte(contents), mode); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func writeConfigAuthoringEditor(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "editor")
+	writeConfigCommandFile(t, path, "#!/bin/sh\nset -eu\n"+body, 0o700)
+	return path
 }
 
 func loadConfigCommandContext(t *testing.T, root string, environment []string, yard string) config.Loaded {
@@ -1702,4 +2921,142 @@ func configSourceGitOutput(
 		t.Fatalf("git %s: %v: %s", strings.Join(arguments, " "), err, output)
 	}
 	return string(output)
+}
+
+type configCheckoutSnapshot struct {
+	head      string
+	index     string
+	refs      string
+	fetchHead string
+	status    string
+}
+
+type configCheckoutRawSnapshot struct {
+	head      string
+	index     string
+	refs      string
+	fetchHead string
+	worktree  map[string]configCheckoutPathSnapshot
+}
+
+type configCheckoutPathSnapshot struct {
+	mode    os.FileMode
+	content string
+}
+
+func snapshotConfigCheckoutRaw(t *testing.T, checkout string) configCheckoutRawSnapshot {
+	t.Helper()
+	read := func(path string) string {
+		content, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			return "<absent>"
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(content)
+	}
+	digest := func(path string) string {
+		content, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			return "<absent>"
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fmt.Sprintf("%x", sha256.Sum256(content))
+	}
+	worktree := map[string]configCheckoutPathSnapshot{}
+	err := filepath.Walk(checkout, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if path == filepath.Join(checkout, ".git") {
+			return filepath.SkipDir
+		}
+		relative, err := filepath.Rel(checkout, path)
+		if err != nil {
+			return err
+		}
+		snapshot := configCheckoutPathSnapshot{mode: info.Mode()}
+		if info.Mode()&os.ModeSymlink != 0 {
+			snapshot.content, err = os.Readlink(path)
+		} else if info.Mode().IsRegular() {
+			var content []byte
+			content, err = os.ReadFile(path)
+			snapshot.content = string(content)
+		}
+		if err != nil {
+			return err
+		}
+		worktree[relative] = snapshot
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return configCheckoutRawSnapshot{
+		head:      read(filepath.Join(checkout, ".git", "HEAD")),
+		index:     digest(filepath.Join(checkout, ".git", "index")),
+		refs:      configSourceGitOutput(t, checkout, "for-each-ref", "--format=%(refname):%(objectname)"),
+		fetchHead: read(filepath.Join(checkout, ".git", "FETCH_HEAD")),
+		worktree:  worktree,
+	}
+}
+
+func snapshotConfigCheckout(t *testing.T, checkout string) configCheckoutSnapshot {
+	t.Helper()
+	read := func(path string) string {
+		content, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			return "<absent>"
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(content)
+	}
+	status := configSourceGitOutput(t, checkout, "status", "--porcelain=v1", "--untracked-files=all")
+	return configCheckoutSnapshot{
+		head:      read(filepath.Join(checkout, ".git", "HEAD")),
+		index:     read(filepath.Join(checkout, ".git", "index")),
+		refs:      configSourceGitOutput(t, checkout, "for-each-ref", "--format=%(refname):%(objectname)"),
+		fetchHead: read(filepath.Join(checkout, ".git", "FETCH_HEAD")),
+		status:    status,
+	}
+}
+
+func seedConfigSyncRecoveryJournal(t *testing.T, configHome string) (string, string) {
+	t.Helper()
+	transactionID := "1-ffffffffffffffff"
+	transactionRoot := filepath.Join(configHome, ".sync", "transactions", transactionID)
+	if err := os.MkdirAll(transactionRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	before := []byte("SSH_PORT=2291\n")
+	after := []byte("SSH_PORT=2999\n")
+	target := filepath.Join(configHome, "config.env")
+	writeConfigCommandFile(t, target, string(after))
+	writeConfigCommandFile(t, filepath.Join(transactionRoot, "backup", "config.env"), string(before))
+	transaction := configsync.TransactionPath(configHome)
+	writeConfigCommandFile(t, transaction, fmt.Sprintf(`{
+  "schemaVersion": 1,
+  "id": %q,
+  "phase": "applying",
+  "planDigest": %q,
+  "newManifestDigest": %q,
+  "applied": 1,
+  "entries": [{
+    "path": "config.env",
+    "action": "update",
+    "existed": true,
+    "beforeDigest": %q,
+    "afterDigest": %q,
+    "beforeMode": 384,
+    "afterMode": 384
+  }]
+}
+`, transactionID, strings.Repeat("a", 64), strings.Repeat("b", 64),
+		fmt.Sprintf("%x", sha256.Sum256(before)), fmt.Sprintf("%x", sha256.Sum256(after))))
+	return target, transaction
 }

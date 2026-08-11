@@ -334,6 +334,21 @@ grep -Fq 'sync --locked --no-dev --python' "$tmp/uv.log" \
 
 pin_check="$tmp/root/usr/local/libexec/subyard-hermes-pin-check"
 runtime_env="$tmp/root/etc/subyard/hermes-runtime.env"
+curl_lines="$(wc -l < "$tmp/curl.log")"
+systemctl_lines="$(wc -l < "$tmp/systemctl.log")"
+env "${common_env[@]}" bash "$HOOK" --check >/dev/null \
+  || fail "converged Hermes provision check failed"
+[ "$(wc -l < "$tmp/curl.log")" -eq "$curl_lines" ] \
+  || fail "Hermes provision check downloaded content"
+[ "$(wc -l < "$tmp/systemctl.log")" -eq "$systemctl_lines" ] \
+  || fail "Hermes provision check changed service state"
+printf '%s\n' 0000000000000000000000000000000000000000 > "$install_root/.subyard-commit"
+set +e
+env "${common_env[@]}" bash "$HOOK" --check >/dev/null 2>&1
+check_status=$?
+set -e
+[ "$check_status" -eq 10 ] || fail "drifted Hermes provision check returned $check_status, want 10"
+printf '%s\n' "$HERMES_COMMIT" > "$install_root/.subyard-commit"
 grep -Fxq "HERMES_BROWSER_EXECUTABLE=$install_root/playwright/chromium-fixture/chrome" \
   "$runtime_env" || fail "runtime contract omitted the Chromium executable"
 grep -Fq 'PLAYWRIGHT_BROWSERS_PATH="$HERMES_PLAYWRIGHT_BROWSERS_PATH"' \

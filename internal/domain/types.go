@@ -367,8 +367,9 @@ const (
 type ConfirmationPolicy string
 
 const (
-	ConfirmationNever    ConfirmationPolicy = "never"
-	ConfirmationRequired ConfirmationPolicy = "required"
+	ConfirmationNever            ConfirmationPolicy = "never"
+	ConfirmationPromptDefaultYes ConfirmationPolicy = "prompt-default-yes"
+	ConfirmationPromptDefaultNo  ConfirmationPolicy = "prompt-default-no"
 )
 
 type RemotePolicy string
@@ -396,12 +397,14 @@ type CommandPolicy struct {
 }
 
 type OperationPlan struct {
-	OperationID  string             `json:"operationId"`
-	Command      string             `json:"command"`
-	Effect       CommandEffect      `json:"effect"`
-	Confirmation ConfirmationPolicy `json:"confirmation"`
-	Target       ExecutionTarget    `json:"target"`
-	Consequences []string           `json:"consequences,omitempty"`
-	Confirmed    bool               `json:"confirmed"`
-	CreatedAt    time.Time          `json:"createdAt"`
+	OperationID         string               `json:"operationId"`
+	Command             string               `json:"command"`
+	Effect              CommandEffect        `json:"effect"`
+	Confirmation        ConfirmationPolicy   `json:"confirmation"`
+	Target              ExecutionTarget      `json:"target"`
+	Consequences        []string             `json:"consequences,omitempty"`
+	Assessment          *ActionAssessment    `json:"assessment,omitempty"`
+	ConfirmationRequest *ConfirmationRequest `json:"confirmationRequest,omitempty"`
+	Confirmed           bool                 `json:"confirmed"`
+	CreatedAt           time.Time            `json:"createdAt"`
 }

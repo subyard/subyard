@@ -178,6 +178,75 @@ func TestFileStoreDoesNotRepairAnomalousLegacyMode(t *testing.T) {
 	}
 }
 
+func TestFileStoreReadOnlyRejectsUnsafeStateDirectory(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		setup func(*testing.T, string) string
+	}{
+		{
+			name: "broad permissions",
+			setup: func(t *testing.T, directory string) string {
+				t.Helper()
+				if err := os.Chmod(directory, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				return directory
+			},
+		},
+		{
+			name: "symlink",
+			setup: func(t *testing.T, directory string) string {
+				t.Helper()
+				link := filepath.Join(t.TempDir(), "projects")
+				if err := os.Symlink(directory, link); err != nil {
+					t.Fatal(err)
+				}
+				return link
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			directory := filepath.Join(t.TempDir(), "projects")
+			store, err := NewFileStore(directory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			record := fixtureRecord("project-a")
+			if err := store.Put(context.Background(), record); err != nil {
+				t.Fatal(err)
+			}
+			unsafePath := test.setup(t, directory)
+			readOnly, err := NewFileStore(unsafePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := readOnly.ListReadOnly(context.Background()); err == nil {
+				t.Fatal("ListReadOnly accepted an unsafe state directory")
+			}
+			if _, err := readOnly.GetReadOnly(context.Background(), record.ProjectID); err == nil {
+				t.Fatal("GetReadOnly accepted an unsafe state directory")
+			}
+		})
+	}
+}
+
+func TestFileStoreReadOnlyDoesNotCreateMissingStateDirectory(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "missing", "projects")
+	store, err := NewFileStore(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if records, err := store.ListReadOnly(context.Background()); err != nil || len(records) != 0 {
+		t.Fatalf("missing read-only list=%#v err=%v", records, err)
+	}
+	if _, err := store.GetReadOnly(context.Background(), "missing-id"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing read-only get error=%v", err)
+	}
+	if _, err := os.Lstat(directory); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read-only access created state directory: %v", err)
+	}
+}
+
 func TestFileStoreDeleteIsIdempotent(t *testing.T) {
 	store := newTestStore(t)
 	if err := store.Put(context.Background(), fixtureRecord("gone")); err != nil {
@@ -261,6 +330,30 @@ func TestProjectAdmissionUsesCanonicalNamesAndSerializesSources(t *testing.T) {
 	)
 	if err != nil || retried.ProjectID != "Subyard-2" {
 		t.Fatalf("admission after abort = %#v, %v", retried, err)
+	}
+}
+
+func TestProjectAdmissionPreviewDoesNotPublishReservation(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "projects")
+	store, err := NewFileStore(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.PreviewAdmission(
+		context.Background(), "/work/Demo", domain.ProjectSync, "Demo", false,
+	)
+	if err != nil || first.ProjectID != "Demo" || first.Name != "Demo" ||
+		first.Existing != nil || first.Reservation != nil {
+		t.Fatalf("preview=%#v err=%v", first, err)
+	}
+	second, err := store.PreviewAdmission(
+		context.Background(), "/work/Demo", domain.ProjectSync, "Demo", false,
+	)
+	if err != nil || second.ProjectID != first.ProjectID || second.Reservation != nil {
+		t.Fatalf("repeat preview=%#v err=%v", second, err)
+	}
+	if _, err := os.Lstat(directory); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("preview created project state: %v", err)
 	}
 }
 

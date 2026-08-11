@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
+# subyard-provision-check-v1
 # Install the pinned, headless Hermes runtime in one dedicated yard.
 set -euo pipefail
+
+check_only=0
+case "${1:-}" in
+  --check) check_only=1; shift ;;
+  "") ;;
+  *) printf 'hermes provision: unknown argument %s\n' "$1" >&2; exit 2 ;;
+esac
+[ "$#" -eq 0 ] || { printf 'hermes provision: unexpected argument\n' >&2; exit 2; }
 
 die() { printf 'hermes provision: %s\n' "$*" >&2; exit 1; }
 if [ "$(id -u)" -ne 0 ] && [ "${HERMES_TEST_ALLOW_NON_ROOT:-0}" != 1 ]; then
@@ -77,6 +86,53 @@ previous_runtime=""
 service_was_active=0
 service_was_enabled=0
 orphaned_rollback=0
+
+if [ "$check_only" -eq 1 ]; then
+  wanted_version="$HERMES_VERSION"
+  wanted_tag="$HERMES_TAG"
+  wanted_commit="$HERMES_COMMIT"
+  wanted_node="$HERMES_NODE_VERSION"
+  wanted_npm="$HERMES_NPM_VERSION"
+  wanted_browser="$HERMES_AGENT_BROWSER_VERSION"
+  wanted_playwright="$HERMES_PLAYWRIGHT_VERSION"
+  changed=0
+  [ ! -e "$transaction_marker" ] && [ ! -L "$transaction_marker" ] || changed=1
+  [ ! -e "$rollback_runtime" ] && [ ! -L "$rollback_runtime" ] || changed=1
+  if [ ! -r "$runtime_env" ] || [ -L "$runtime_env" ]; then
+    changed=1
+  elif ! (
+    # shellcheck disable=SC1090
+    . "$runtime_env"
+    [ "$HERMES_VERSION" = "$wanted_version" ] \
+      && [ "$HERMES_TAG" = "$wanted_tag" ] \
+      && [ "$HERMES_COMMIT" = "$wanted_commit" ] \
+      && [ "$HERMES_NODE_VERSION" = "$wanted_node" ] \
+      && [ "$HERMES_NPM_VERSION" = "$wanted_npm" ] \
+      && [ "$HERMES_AGENT_BROWSER_VERSION" = "$wanted_browser" ] \
+      && [ "$HERMES_PLAYWRIGHT_VERSION" = "$wanted_playwright" ] \
+      && [ "$HERMES_HOME" = "$state_root" ] \
+      && [ "$HERMES_INSTALL_ROOT" = "$install_root" ] \
+      && [ -x "$libexec_root/subyard-hermes-pin-check" ] \
+      && HERMES_RUNTIME_ENV="$runtime_env" \
+        "$libexec_root/subyard-hermes-pin-check" --runtime-only >/dev/null 2>&1
+  ); then
+    changed=1
+  fi
+  for pair in \
+    "hermes-pin-check:$libexec_root/subyard-hermes-pin-check" \
+    "verify-backup.py:$libexec_root/subyard-hermes-verify-backup" \
+    "hermes-provider-ready:$sbin_root/hermes-provider-ready" \
+    "hermes-backup-create:$sbin_root/hermes-backup-create" \
+    "hermes-backup-finalize:$sbin_root/hermes-backup-finalize" \
+    "hermes-restore:$sbin_root/hermes-restore"; do
+    source_path="$profile_dir/${pair%%:*}"
+    destination="${pair#*:}"
+    [ -f "$destination" ] && [ ! -L "$destination" ] \
+      && cmp -s -- "$source_path" "$destination" || changed=1
+  done
+  [ "$changed" -eq 0 ] && exit 0
+  exit 10
+fi
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq

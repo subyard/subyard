@@ -24,12 +24,17 @@ func TestRepositoryManifest(t *testing.T) {
 		t.Fatalf("unexpected public command count: %d", len(manifest.PublicNames()))
 	}
 	setup, ok := manifest.Lookup("setup")
-	if !ok || setup.Name != "init" || setup.Effect != EffectMutate || setup.Confirmation != ConfirmationRequired {
+	if !ok || setup.Name != "init" || setup.Effect != EffectMutate || setup.Confirmation != ConfirmationDynamic {
 		t.Fatalf("setup alias mismatch: %#v", setup)
 	}
 	list, ok := manifest.Lookup("list")
 	if !ok || list.Effect != EffectRead || list.Confirmation != ConfirmationNever || list.Remote != RemoteLocal {
 		t.Fatalf("list contract mismatch: %#v", list)
+	}
+	for _, definition := range manifest.Commands() {
+		if definition.Confirmation == Confirmation("required") {
+			t.Errorf("command %q uses legacy required confirmation", definition.Name)
+		}
 	}
 }
 
@@ -44,8 +49,11 @@ func TestManifestRejectsDuplicatesAndTraversal(t *testing.T) {
 	if _, err := Parse(strings.NewReader("one||../escape.sh||local|read|never|public|x|simple|one|first|||\n")); err == nil {
 		t.Fatal("handler traversal was accepted")
 	}
-	if _, err := Parse(strings.NewReader("one||one.sh||local|read|sometimes|public|x|simple|one|first|||\n")); err == nil {
+	if _, err := Parse(strings.NewReader("one||one.sh||local|read|sometimes|public|x|simple|one|first||\n")); err == nil {
 		t.Fatal("unknown confirmation policy was accepted")
+	}
+	if _, err := Parse(strings.NewReader("one||one.sh||local|mutate|required|hidden|x|simple|one|first||\n")); err == nil {
+		t.Fatal("legacy required confirmation policy was accepted")
 	}
 }
 

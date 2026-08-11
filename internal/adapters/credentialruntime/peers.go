@@ -404,28 +404,32 @@ func (runtime *Runtime) syncPeer(ctx context.Context, peerName string) error {
 	if err != nil {
 		return err
 	}
+	return runtime.syncPreparedPeer(ctx, peer)
+}
+
+func (runtime *Runtime) syncPreparedPeer(ctx context.Context, peer domain.CredentialPeer) error {
 	if role, err := peerRole(peer); err != nil || role != "active" {
 		if err != nil {
 			return err
 		}
-		return fmt.Errorf("peer %q is passive (respond-only)", peerName)
+		return fmt.Errorf("peer %q is passive (respond-only)", peer.Name)
 	}
 	head, err := runtime.syncPeerOnce(ctx, peer)
 	if err == nil {
-		if stateErr := runtime.writeState(peerName, true, "", head); stateErr != nil {
+		if stateErr := runtime.writeState(peer.Name, true, "", head); stateErr != nil {
 			return stateErr
 		}
-		fmt.Fprintf(runtime.config.Stderr, "  [ ok ] credential ledger synchronized with %q\n", peerName)
+		fmt.Fprintf(runtime.config.Stderr, "  [ ok ] credential ledger synchronized with %q\n", peer.Name)
 		return nil
 	}
 	message := strings.ReplaceAll(strings.TrimSpace(err.Error()), "\n", " ")
 	if len(message) > 300 {
 		message = message[:300]
 	}
-	if stateErr := runtime.writeState(peerName, false, message, ""); stateErr != nil {
+	if stateErr := runtime.writeState(peer.Name, false, message, ""); stateErr != nil {
 		return errors.Join(err, stateErr)
 	}
-	return fmt.Errorf("credential sync with %q failed: %s", peerName, message)
+	return fmt.Errorf("credential sync with %q failed: %s", peer.Name, message)
 }
 
 func (runtime *Runtime) syncPeerOnce(ctx context.Context, peer domain.CredentialPeer) (string, error) {

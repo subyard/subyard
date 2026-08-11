@@ -224,3 +224,47 @@ func TestRemotePreparePropagatesControlFailures(t *testing.T) {
 		t.Fatal("missing remote control port was accepted")
 	}
 }
+
+func TestRemoteActionPlanMapsPreparedVariantsWithoutReclassifyingMetadata(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		prepared    domain.RemotePrepared
+		wantAction  domain.ActionID
+		wantChanged bool
+		consequence string
+	}{
+		{
+			name: "list", prepared: domain.RemotePrepared{Action: domain.RemoteList},
+			wantAction: "remote.list",
+		},
+		{
+			name: "add", prepared: domain.RemotePrepared{
+				Action: domain.RemoteAdd, Spec: domain.RemoteSpec{Name: "demo", Destination: "owner"},
+				Scanned: []domain.RemoteKey{{Fingerprint: "SHA256:new"}},
+			},
+			wantAction: "remote.add", wantChanged: true, consequence: "SHA256:new",
+		},
+		{
+			name: "repair key", prepared: domain.RemotePrepared{
+				Action: domain.RemoteRepairKey, Spec: domain.RemoteSpec{Name: "demo"},
+				Recorded: []domain.RemoteKey{{Fingerprint: "SHA256:old"}},
+				Scanned:  []domain.RemoteKey{{Fingerprint: "SHA256:new"}},
+			},
+			wantAction: "remote.repair-key", wantChanged: true, consequence: "SHA256:new",
+		},
+		{
+			name: "remove", prepared: domain.RemotePrepared{
+				Action: domain.RemoteRemove, Spec: domain.RemoteSpec{Name: "demo"},
+			},
+			wantAction: "remote.remove", wantChanged: true, consequence: "remove local context",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			action, delta, err := RemoteActionPlan(test.prepared)
+			if err != nil || action != test.wantAction || delta.Changed != test.wantChanged ||
+				(test.consequence != "" && !strings.Contains(strings.Join(delta.Consequences, " "), test.consequence)) {
+				t.Fatalf("action=%q delta=%#v err=%v", action, delta, err)
+			}
+		})
+	}
+}

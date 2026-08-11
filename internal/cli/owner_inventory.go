@@ -22,8 +22,9 @@ import (
 )
 
 type cliOwnerSource struct {
-	cli    *CLI
-	loaded config.Loaded
+	cli      *CLI
+	loaded   config.Loaded
+	readOnly bool
 }
 
 func canonicalYardIdentity(loaded config.Loaded) (string, error) {
@@ -96,6 +97,13 @@ func (source cliOwnerSource) Yards(context.Context) ([]domain.Context, error) {
 }
 
 func (source cliOwnerSource) Projects(ctx context.Context, yard domain.Context) ([]domain.ProjectRecord, error) {
+	if source.readOnly {
+		store, err := openProjectStoreReadOnly(yard.Paths.StateDir)
+		if err != nil {
+			return nil, err
+		}
+		return store.List(ctx)
+	}
 	store, err := openProjectStore(ctx, yard.Paths.StateDir)
 	if err != nil {
 		return nil, err
@@ -118,6 +126,12 @@ func (source cliOwnerSource) State(ctx context.Context, yard domain.Context) (st
 func (cli *CLI) ownerInventory(ctx context.Context, loaded config.Loaded) (domain.OwnerInventory, error) {
 	return (application.OwnerInventoryBuilder{
 		Source: cliOwnerSource{cli: cli, loaded: loaded}, Clock: cli.options.Clock,
+	}).Read(ctx)
+}
+
+func (cli *CLI) ownerInventoryReadOnly(ctx context.Context, loaded config.Loaded) (domain.OwnerInventory, error) {
+	return (application.OwnerInventoryBuilder{
+		Source: cliOwnerSource{cli: cli, loaded: loaded, readOnly: true}, Clock: cli.options.Clock,
 	}).Read(ctx)
 }
 
@@ -360,6 +374,59 @@ func (cli *CLI) allOwnerInventories(
 	return append(results, remoteResults...)
 }
 
+// allOwnerInventoriesReadOnly resolves existing owner identities without
+// refreshing caches or persisting legacy-route normalization. It is used while
+// assessing a destructive project removal, before consent exists for any local
+// metadata write.
+func (cli *CLI) allOwnerInventoriesReadOnly(
+	ctx context.Context, loaded config.Loaded,
+) []ownerInventoryResult {
+	local, err := cli.ownerInventoryReadOnly(ctx, loaded)
+	results := []ownerInventoryResult{{inventory: local, fetchedAt: local.ObservedAt, err: err}}
+	root := loaded.Context.Paths.DataHome + "/owner-inventory"
+	connections, err := (ownerinventory.Connections{Root: root}).List()
+	if err != nil {
+		return append(results, ownerInventoryResult{err: err})
+	}
+	cache := ownerinventory.Cache{Root: root}
+	remote := make([]ownerInventoryResult, len(connections))
+	common, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	var wait sync.WaitGroup
+	for index, connection := range connections {
+		wait.Add(1)
+		go func(index int, connection ownerinventory.Connection) {
+			defer wait.Done()
+			process, transportErr := transport.SSH("ssh", connection.Destination, 3*time.Second)
+			if transportErr == nil {
+				inventory, fetchErr := (ownerinventory.Client{Transport: process}).Fetch(common, connection.HostID)
+				if fetchErr == nil {
+					fetchedAt := time.Now().UTC()
+					if cli.options.Clock != nil {
+						fetchedAt = cli.options.Clock.Now().UTC()
+					}
+					remote[index] = ownerInventoryResult{inventory: inventory, fetchedAt: fetchedAt}
+					return
+				}
+				transportErr = fetchErr
+			}
+			snapshot, cacheErr := cache.Read(connection.HostID)
+			if cacheErr == nil {
+				remote[index] = ownerInventoryResult{
+					inventory: snapshot.Inventory, fetchedAt: snapshot.FetchedAt, stale: true, err: transportErr,
+				}
+				return
+			}
+			remote[index].err = transportErr
+			if transportErr == nil {
+				remote[index].err = cacheErr
+			}
+		}(index, connection)
+	}
+	wait.Wait()
+	return append(results, remote...)
+}
+
 func mergeLegacyRoutes(
 	connection *ownerinventory.Connection, records []domain.RemoteRecord,
 ) (bool, error) {
@@ -504,9 +571,24 @@ func projectSelectorMatches(selector, project, yard, hostID string, fold bool) b
 }
 
 func (cli *CLI) resolveOwnerProject(
-	ctx context.Context, loaded config.Loaded, selector string, explicit bool, force bool,
+	ctx context.Context, loaded config.Loaded, selector string, explicit bool, force bool, readOnly bool,
 ) (state.Match, error) {
+	if readOnly {
+		results := cli.allOwnerInventoriesReadOnly(ctx, loaded)
+		return cli.resolveOwnerProjectFromInventories(ctx, loaded, selector, explicit, readOnly, results)
+	}
 	results := cli.allOwnerInventories(ctx, loaded, force)
+	return cli.resolveOwnerProjectFromInventories(ctx, loaded, selector, explicit, readOnly, results)
+}
+
+func (cli *CLI) resolveOwnerProjectFromInventories(
+	ctx context.Context,
+	loaded config.Loaded,
+	selector string,
+	explicit bool,
+	readOnly bool,
+	results []ownerInventoryResult,
+) (state.Match, error) {
 	for _, result := range results {
 		if result.err != nil && len(result.inventory.Yards) == 0 {
 			return state.Match{}, fmt.Errorf("refresh owner inventory: %w", result.err)
@@ -591,11 +673,20 @@ func (cli *CLI) resolveOwnerProject(
 	if err != nil {
 		return state.Match{}, err
 	}
-	store, err := openProjectStore(ctx, contextValue.Paths.StateDir)
-	if err != nil {
-		return state.Match{}, err
+	var record domain.ProjectRecord
+	if readOnly {
+		store, storeErr := openProjectStoreReadOnly(contextValue.Paths.StateDir)
+		if storeErr != nil {
+			return state.Match{}, storeErr
+		}
+		record, err = store.Get(ctx, selected.project.ProjectID)
+	} else {
+		store, storeErr := openProjectStore(ctx, contextValue.Paths.StateDir)
+		if storeErr != nil {
+			return state.Match{}, storeErr
+		}
+		record, err = store.Get(ctx, selected.project.ProjectID)
 	}
-	record, err := store.Get(ctx, selected.project.ProjectID)
 	if err != nil && !errors.Is(err, state.ErrNotFound) {
 		return state.Match{}, err
 	}

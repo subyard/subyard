@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
+	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
@@ -77,13 +78,20 @@ func TestRealInitPlatformCarriesOnlyPreparedSudoContext(t *testing.T) {
 }
 
 type initPlatformFixture struct {
-	converged      map[ports.ReconcileStageID]bool
-	applied        []ports.ReconcileStageID
-	preflightFresh []bool
-	preflightErr   error
-	applyErr       error
-	configs        int
-	teardowns      int
+	converged        map[ports.ReconcileStageID]bool
+	applied          []ports.ReconcileStageID
+	preflightFresh   []bool
+	preflightErr     error
+	applyErr         error
+	configs          int
+	configsConverged bool
+	configChecks     []bool
+	teardowns        int
+}
+
+func (fixture *initPlatformFixture) ConfigsConverged(context.Context) (bool, error) {
+	fixture.configChecks = append(fixture.configChecks, fixture.configsConverged)
+	return fixture.configsConverged, nil
 }
 
 func newInitPlatformFixture() *initPlatformFixture {
@@ -124,6 +132,101 @@ func TestParseInitProfile(t *testing.T) {
 				t.Fatalf("parseInitArguments(%v) error=%v, want %q", test.arguments, err, test.want)
 			}
 		})
+	}
+}
+
+func TestInitExecutionBuildsTypedActionDelta(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		execution initExecution
+		action    domain.ActionID
+		changed   bool
+	}{
+		{name: "converged", execution: initExecution{mode: initReconcile}, action: "yard.init.reconcile"},
+		{
+			name: "pending reconcile",
+			execution: initExecution{mode: initReconcile, plan: application.ReconcilePlan{
+				Steps: []application.ReconcileStep{{Stage: application.ReconcileStage{ID: "fixture", Label: "apply fixture"}}},
+			}},
+			action: "yard.init.reconcile", changed: true,
+		},
+		{name: "pending host identity", execution: initExecution{mode: initReconcile, hostIDPending: true}, action: "yard.init.reconcile", changed: true},
+		{name: "configs converged", execution: initExecution{mode: initConfigs}, action: "yard.init.configs"},
+		{name: "configs changed", execution: initExecution{mode: initConfigs, configsChanged: true}, action: "yard.init.configs", changed: true},
+		{name: "reset", execution: initExecution{mode: initReset}, action: "yard.init.reset", changed: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			action, delta, err := test.execution.actionPlan()
+			if err != nil || action != test.action || delta.Changed != test.changed {
+				t.Fatalf("action=%q delta=%#v err=%v", action, delta, err)
+			}
+			if test.changed && len(delta.Consequences) == 0 {
+				t.Fatal("changed init action has no consequences")
+			}
+		})
+	}
+}
+
+func TestPrepareInitConfigsUsesReadOnlyConvergence(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		converged bool
+		changed   bool
+	}{
+		{name: "converged", converged: true},
+		{name: "drifted", changed: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			platform := newInitPlatformFixture()
+			platform.configsConverged = test.converged
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard", Environment: environment,
+				WorkingDir: root, InitPlatform: platform,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := program.loadContext("default")
+			if err != nil {
+				t.Fatal(err)
+			}
+			execution, err := program.prepareInitExecution(
+				context.Background(), loaded, []string{"--configs"}, nil,
+			)
+			if err != nil || execution.configsChanged != test.changed {
+				t.Fatalf("execution=%#v err=%v", execution, err)
+			}
+		})
+	}
+}
+
+func TestInitConfigsRechecksConvergenceAfterConsent(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	if err := os.MkdirAll(filepath.Join(root, "state"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(root, "state", "host-id"), "5034c950-74d0-46c4-9428-b7835e602109\n", 0o600)
+	platform := newInitPlatformFixture()
+	platform.configsConverged = false
+	prompt := &callbackPrompt{callback: func() { platform.configsConverged = true }}
+	var stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Arguments: []string{"init", "--configs"},
+		Environment: environment, WorkingDir: root, InitPlatform: platform,
+		Prompt: prompt, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("post-consent config no-op failed: code=%d stderr=%q", code, stderr.String())
+	}
+	if len(prompt.requests) != 1 {
+		t.Fatalf("config action did not prompt once: %#v", prompt.requests)
+	}
+	if platform.configs != 0 {
+		t.Fatalf("converged configs were refreshed: %d checks=%v", platform.configs, platform.configChecks)
 	}
 }
 

@@ -30,11 +30,11 @@ type preparedConfigSyncPush struct {
 	remoteBranch   string
 	expectedHead   string
 	expectedRemote string
+	remoteURL      string
 	candidate      string
 	preview        configsync.Plan
 	options        configsync.Options
-	worktree       string
-	worktreeParent string
+	repository     *configGitCandidate
 	createdCommit  bool
 	pushRequired   bool
 }
@@ -74,44 +74,37 @@ func (cli *CLI) runConfigSyncPush(
 		fmt.Fprintln(cli.options.Stdout, "  commit: no new persistent configuration changes")
 	}
 	writeConfigSyncPlan(cli.options.Stdout, prepared.preview)
-	if !prepared.pushRequired && !prepared.preview.NeedsApply() {
-		fmt.Fprintln(cli.options.Stdout,
-			"config sync push: checkout, live configuration and upstream are already converged")
-		return 0
-	}
-
+	changed := prepared.pushRequired || prepared.preview.NeedsApply()
 	consequences := []string{}
-	if prepared.createdCommit {
+	if changed && prepared.createdCommit {
 		consequences = append(consequences,
 			"advance the registered checkout with one configuration commit")
 	}
-	if prepared.preview.InitializeHostID {
+	if changed && prepared.preview.InitializeHostID {
 		consequences = append(consequences,
 			"record owner host ID "+prepared.preview.HostID)
 	}
-	for _, change := range prepared.preview.Changes {
-		consequences = append(consequences, change.Action+" "+change.Path)
+	if changed {
+		for _, change := range prepared.preview.Changes {
+			consequences = append(consequences, change.Action+" "+change.Path)
+		}
+		if prepared.preview.ManifestChanged {
+			consequences = append(consequences,
+				"update versioned configuration manifest metadata")
+		}
 	}
-	if request.materialize && configSyncPlanNeedsMaterialization(prepared.preview) {
+	if changed && request.materialize && configSyncPlanNeedsMaterialization(prepared.preview) {
 		consequences = append(consequences,
 			"refresh affected file settings in running local yards")
 	}
-	if prepared.pushRequired {
+	if changed && prepared.pushRequired {
 		consequences = append(consequences,
 			"push HEAD to exact upstream "+prepared.upstream+" without force")
 	}
-	orchestrator := cli.operationOrchestrator(
-		cli.env["SUBYARD_OPERATION_ID"], loaded, nil, nil,
+	orchestrator, operation, err := cli.planConfigSyncOperation(
+		ctx, loaded, "config sync push", "config.sync.push", changed,
+		consequences, assumeYes,
 	)
-	operation, err := orchestrator.Prepare(loaded.Context, domain.CommandPolicy{
-		Name: "config sync push", Effect: domain.CommandMutate, Confirmation: domain.ConfirmationRequired,
-		RemotePolicy: domain.RemoteOnOwner, Consequences: consequences,
-	})
-	if err != nil {
-		cli.errorf("config sync push: %v", err)
-		return 1
-	}
-	operation, err = orchestrator.Confirm(ctx, operation, assumeYes)
 	if errors.Is(err, application.ErrDeclined) {
 		cli.errorf("config sync push: operation declined")
 		return 1
@@ -119,6 +112,11 @@ func (cli *CLI) runConfigSyncPush(
 	if err != nil {
 		cli.errorf("config sync push: %v", err)
 		return 1
+	}
+	if !changed {
+		fmt.Fprintln(cli.options.Stdout,
+			"config sync push: checkout, live configuration and upstream are already converged")
+		return 0
 	}
 	adapter := &configSyncPushAdapter{cli: cli, prepared: prepared}
 	orchestrator.Runner = adapter
@@ -224,7 +222,7 @@ func (cli *CLI) prepareConfigSyncPush(
 			cli.options.Program,
 		)
 	}
-	state := cli.inspectConfigGit(ctx, record.Checkout, true)
+	state := cli.inspectConfigGit(ctx, record.Checkout)
 	verifyConfigGitRegistration(record, &state)
 	if state.Problem != nil {
 		return nil, state.Problem
@@ -244,18 +242,9 @@ func (cli *CLI) prepareConfigSyncPush(
 			state.Worktree, record.Checkout,
 		)
 	}
-	if state.Behind != 0 {
-		return nil, fmt.Errorf(
-			"upstream is %s; run %s config sync pull before pushing",
-			state.Relation, cli.options.Program,
-		)
-	}
-	if state.Relation == "unknown" {
-		return nil, errors.New(
-			"cannot determine the exact relation to upstream",
-		)
-	}
-	if _, err := cli.configGitOutput(ctx, record.Checkout, "var", "GIT_AUTHOR_IDENT"); err != nil {
+	if _, err := cli.configGitInspectOutput(
+		ctx, record.Checkout, "var", "GIT_AUTHOR_IDENT",
+	); err != nil {
 		return nil, errors.New(
 			"Git author identity is not configured; set user.name and user.email for the operator account",
 		)
@@ -278,6 +267,18 @@ func (cli *CLI) prepareConfigSyncPush(
 			"an interrupted configuration transaction requires recovery with a normal config sync",
 		)
 	}
+	repository, err := cli.prepareConfigGitCandidate(ctx, record.Checkout, state)
+	if err != nil {
+		return nil, err
+	}
+	if repository.behind != 0 {
+		relation := configGitRelation(repository.ahead, repository.behind)
+		repository.cleanup()
+		return nil, fmt.Errorf(
+			"upstream is %s; run %s config sync pull before pushing",
+			relation, cli.options.Program,
+		)
+	}
 	options := configsync.Options{
 		SourceRoot:     record.Checkout,
 		ConfigHome:     loaded.Context.Paths.ConfigHome,
@@ -292,53 +293,37 @@ func (cli *CLI) prepareConfigSyncPush(
 		checkout: record.Checkout, branch: state.Branch,
 		upstream: state.Upstream, remote: state.RemoteName,
 		remoteBranch: remoteBranch, expectedHead: state.Head,
-		expectedRemote: state.UpstreamCommit, options: options,
-		pushRequired: state.Ahead != 0,
+		expectedRemote: repository.remoteCommit, remoteURL: state.RemoteRaw,
+		options: options, repository: repository,
+		pushRequired: repository.ahead != 0,
 	}
-	parent, err := os.MkdirTemp("", ".subyard-config-push-")
-	if err != nil {
-		return nil, err
-	}
-	if err := os.Chmod(parent, 0o700); err != nil {
-		_ = os.Remove(parent)
-		return nil, err
-	}
-	prepared.worktreeParent = parent
-	prepared.worktree = filepath.Join(parent, "candidate")
-	if err := cli.configGitRun(
-		ctx, record.Checkout, "worktree", "add", "--quiet", "--detach",
-		prepared.worktree, state.Head,
-	); err != nil {
-		prepared.cleanup(cli, ctx)
-		return nil, fmt.Errorf("prepare export candidate: %w", err)
-	}
-	if err := hardenConfigCandidate(prepared.worktree); err != nil {
+	if err := hardenConfigCandidate(repository.checkout); err != nil {
 		prepared.cleanup(cli, ctx)
 		return nil, fmt.Errorf("protect export candidate: %w", err)
 	}
 	if err := cli.exportPersistentConfig(
-		loaded, prepared.worktree, syncState.HostID,
+		loaded, repository.checkout, syncState.HostID,
 	); err != nil {
 		prepared.cleanup(cli, ctx)
 		return nil, fmt.Errorf("export persistent configuration: %w", err)
 	}
-	if err := hardenConfigCandidate(prepared.worktree); err != nil {
+	if err := hardenConfigCandidate(repository.checkout); err != nil {
 		prepared.cleanup(cli, ctx)
 		return nil, fmt.Errorf("protect exported configuration: %w", err)
 	}
 	if err := cli.configGitRun(
-		ctx, prepared.worktree, "add", "--all", "--", ".",
+		ctx, repository.checkout, "add", "--all", "--", ".",
 	); err != nil {
 		prepared.cleanup(cli, ctx)
 		return nil, fmt.Errorf("stage configuration export: %w", err)
 	}
 	staged, err := cli.configGitOutput(
-		ctx, prepared.worktree, "diff", "--cached", "--quiet", "--exit-code",
+		ctx, repository.checkout, "diff", "--cached", "--quiet", "--exit-code",
 	)
 	if err != nil {
 		_ = staged
 		if err := cli.configGitRun(
-			ctx, prepared.worktree, "commit", "--quiet", "-m", request.message,
+			ctx, repository.checkout, "commit", "--quiet", "-m", request.message,
 		); err != nil {
 			prepared.cleanup(cli, ctx)
 			return nil, fmt.Errorf("create configuration commit: %w", err)
@@ -347,7 +332,7 @@ func (cli *CLI) prepareConfigSyncPush(
 		prepared.pushRequired = true
 	}
 	prepared.candidate, err = cli.configGitOutput(
-		ctx, prepared.worktree, "rev-parse", "--verify", "HEAD",
+		ctx, repository.checkout, "rev-parse", "--verify", "HEAD",
 	)
 	if err != nil {
 		prepared.cleanup(cli, ctx)
@@ -355,7 +340,7 @@ func (cli *CLI) prepareConfigSyncPush(
 	}
 	prepared.candidate = strings.TrimSpace(prepared.candidate)
 	candidateOptions := options
-	candidateOptions.SourceRoot = prepared.worktree
+	candidateOptions.SourceRoot = repository.checkout
 	candidateOptions.SourceIdentityRoot = record.Checkout
 	prepared.preview, err = configsync.BuildPlan(candidateOptions)
 	if err != nil {
@@ -548,18 +533,13 @@ func configScalarLayerPath(loaded config.Loaded, scope string) string {
 }
 
 func (prepared *preparedConfigSyncPush) cleanup(cli *CLI, ctx context.Context) {
-	if prepared == nil || prepared.worktreeParent == "" {
+	_ = cli
+	_ = ctx
+	if prepared == nil || prepared.repository == nil {
 		return
 	}
-	if filepath.Dir(prepared.worktree) == prepared.worktreeParent &&
-		strings.HasPrefix(filepath.Base(prepared.worktreeParent), ".subyard-config-push-") {
-		_ = cli.configGitRun(
-			ctx, prepared.checkout, "worktree", "remove", "--force", prepared.worktree,
-		)
-		_ = os.RemoveAll(prepared.worktreeParent)
-	}
-	prepared.worktree = ""
-	prepared.worktreeParent = ""
+	prepared.repository.cleanup()
+	prepared.repository = nil
 }
 
 type configSyncPushAdapter struct {
@@ -587,15 +567,21 @@ func (adapter *configSyncPushAdapter) Run(
 			"checkout HEAD changed after preview; rerun push",
 		)
 	}
-	upstream, err := adapter.cli.configGitOutput(
-		ctx, prepared.checkout, "rev-parse", "--verify", "@{upstream}",
-	)
-	if err != nil || strings.TrimSpace(upstream) != prepared.expectedRemote {
-		return domain.AdapterResult{}, "", errors.New(
-			"upstream changed after preview; rerun push",
-		)
+	if err := adapter.cli.fetchRegisteredConfigUpstream(
+		ctx, prepared.checkout, prepared.remote, prepared.remoteURL,
+		prepared.expectedRemote,
+	); err != nil {
+		return domain.AdapterResult{}, "", err
 	}
 	if prepared.createdCommit {
+		if err := adapter.cli.configGitRun(
+			ctx, prepared.checkout, "fetch", "--quiet", "--no-tags", "--",
+			prepared.repository.checkout, prepared.candidate,
+		); err != nil {
+			return domain.AdapterResult{}, "", fmt.Errorf(
+				"import prepared configuration commit: %w", err,
+			)
+		}
 		if err := adapter.cli.configGitRun(
 			ctx, prepared.checkout, "merge", "--ff-only", "--no-edit",
 			prepared.candidate,

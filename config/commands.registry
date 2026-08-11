@@ -7,7 +7,7 @@
 # commands remain data-driven by config/profiles/*/resources/*.res and are appended by the engine.
 check||@check||forward|read|never|public|lifecycle|simple|check|verify the host can run a yard (read-only preflight)|--help|
 security||@security||forward|read|never|public|lifecycle|simple|security|validate static and live Incus host-boundary invariants|--quiet --require-live --help|
-init|setup|@init||forward|mutate|required|public|lifecycle|simple|init|install or reconcile Incus, the yard and its core configuration|--configs --reset --profile --yes --help|
+init|setup|@init||forward|mutate|dynamic|public|lifecycle|simple|init|install or reconcile Incus, the yard and its core configuration|--configs --reset --profile --yes --help|
 start||@lifecycle||forward|mutate|never|public|lifecycle|simple|start|start the yard|--yes --help|
 status||@status||local|read|never|public|lifecycle|status|status|summarize all yards or show one selected yard in detail|--all --yes --help|
 space||@space||local|read|never|public|lifecycle|simple|space|show disk usage for local yards|--refresh --help|
@@ -15,32 +15,32 @@ logs||@logs||forward|read|never|public|lifecycle|simple|logs|tail the yard runti
 usage||@usage||forward|read|never|public|lifecycle|simple|usage [args]|show coding-agent token usage|--help|
 keys||@keys||forward|mutate|dynamic|public|lifecycle|keys|keys [command]|manage the host-only encrypted and versioned credential ledger|--kind --zone --consumer --file --local-only --exclusive --dry-run --manual-only --all --now --yes --help|trust untrust add import list status history sync auto-sync materialize rotate rollback revoke delete resolve move
 shell||@shell||forward|mutate|never|public|lifecycle|project-shell|shell [project]|open a dev shell, optionally in a project directory|--root --yes --help|
-provision||@provision||forward|mutate|required|public|lifecycle|profiles|provision [profile]|install a profile toolchain into the yard|-l --list --yes --help|
+provision||@provision||forward|mutate|dynamic|public|lifecycle|profiles|provision [profile]|install a profile toolchain into the yard|-l --list --yes --help|
 test-vms||@test-vms||forward|mutate|dynamic|public|lifecycle|simple|test-vms <command>|manage leased nested VM slots and read the owner-wide broker log|--slot -n -f --yes --help|logs status revoke recover
-stop||@lifecycle||forward|mutate|required|public|lifecycle|stop|stop [--force]|stop the yard and protect active Remote-SSH sessions|--force --yes --help|
-teardown|uninstall|@teardown||forward|mutate|required|public|lifecycle|teardown|teardown|delete the yard; optionally keep persistent data|--keep-data --yes --help|
-sync||@project||local|mutate|required|public|projects|project-target|sync [path]|copy or refresh a project in the yard|--name --target --yes --help|
-bind||@project||deny|mutate|required|public|projects|project-target|bind [path]|explicitly mount a host project path into the yard|--name --target --yes --help|
-clone||@project||local|mutate|required|public|projects|clone|clone <url> [name]|clone a repository directly into the yard|--name --target --yes --help|
+stop||@lifecycle||forward|mutate|dynamic|public|lifecycle|stop|stop [--force]|stop the yard and protect active Remote-SSH sessions|--force --yes --help|
+teardown|uninstall|@teardown||forward|mutate|dynamic|public|lifecycle|teardown|teardown|delete the yard; optionally keep persistent data|--keep-data --yes --help|
+sync||@project||local|mutate|dynamic|public|projects|project-target|sync [path]|copy or refresh a project in the yard|--name --target --yes --help|
+bind||@project||deny|mutate|dynamic|public|projects|project-target|bind [path]|explicitly mount a host project path into the yard|--name --target --yes --help|
+clone||@project||local|mutate|dynamic|public|projects|clone|clone <url> [name]|clone a repository directly into the yard|--name --target --yes --help|
 list||@list||local|read|never|public|projects|simple|list|list projects currently registered in yards|--live --help|
 code||@project||local|mutate|never|public|projects|project|code [project]|open a project with VS Code Remote-SSH|--yes --help|
-export||@project||local|mutate|required|public|projects|path|export [path]|copy changes from a synced yard project back to the host|--yes --help|
-remove||@project||local|mutate|required|public|projects|remove|remove [project]|remove a project from the yard|--soft --yes --help|
-up||@project-env||forward|mutate|required|public|project_env|project-env-up|up [project]|build or start the optional project environment|--rebuild --yes --help|
-down||@project-env||forward|mutate|required|public|project_env|project-env|down [project]|stop the optional project environment|--yes --help|
+export||@project||local|mutate|dynamic|public|projects|path|export [path]|copy changes from a synced yard project back to the host|--yes --help|
+remove||@project||local|mutate|dynamic|public|projects|remove|remove [project]|remove a project from the yard|--soft --yes --help|
+up||@project-env||forward|mutate|dynamic|public|project_env|project-env-up|up [project]|build or start the optional project environment|--rebuild --yes --help|
+down||@project-env||forward|mutate|dynamic|public|project_env|project-env|down [project]|stop the optional project environment|--yes --help|
 info||@project-env||forward|read|never|public|project_env|project-env|info [project]|show the optional project environment contract|--yes --help|
 yards||@yards||local|read|never|public|lifecycle|simple|yards|list registered local and remote yards|--help|
 remote||@remote||local|mutate|dynamic|public|remote|remote|remote <command>|register, repair, remove or list remote yards|--yard --yes --help|add repair-key remove list
 update||@update||local|mutate|dynamic|public|lifecycle|simple|update|check, install or roll back the release runtime|--check --version --offline --rollback --force --yes --help|
-config||@config||local|mutate|required|public|lifecycle|config|config <command>|inspect, author, sync and reconcile Subyard settings|--all-local --check --adopt --host-id --checkout --offline --apply --init --scope -m --message --yes --help|fields show paths set unset import edit status apply sync
+config||@config||local|mutate|dynamic|public|lifecycle|config|config <command>|inspect, author, sync and reconcile Subyard settings|--all-local --check --adopt --host-id --checkout --offline --apply --init --scope -m --message --yes --help|fields show paths set unset import edit status apply sync
 help||@help||local|read|never|hidden|internal|none|help|show top-level help||
-rpc||@rpc||local|mutate|required|hidden|internal|none|rpc --stdio|serve the versioned local RPC protocol|--stdio|
-svc|resource|@resource||forward|mutate|required|hidden|internal|resource|svc <resource> <verb>|dispatch a profile resource by registry name|--yes --help|
+rpc||@rpc||local|mutate|dynamic|hidden|internal|none|rpc --stdio|serve the versioned local RPC protocol|--stdio|
+svc|resource|@resource||forward|mutate|dynamic|hidden|internal|resource|svc <resource> <verb>|dispatch a profile resource by registry name|--yes --help|
 _info||@info||local|read|never|hidden|internal|none|_info|machine-readable owner probe||
-_authorize||@authorize||forward|mutate|required|hidden|internal|none|_authorize|authorize a controller key inside a yard||
-_state||@state||local|mutate|required|hidden|internal|none|_state|native project state adapter||
-_project-state||@project-state||forward|mutate|required|hidden|internal|none|_project-state|converge owner-host project state||
-_migrate||@migrate||local|mutate|required|hidden|internal|none|_migrate|inspect, validate, apply, finalize, roll back or clean engine state migrations||paths check apply finalize rollback cleanup overlay-manifest
-_keys-exchange||@keys|_exchange|forward|mutate|required|hidden|internal|none|_keys-exchange|credential peer exchange endpoint||
-_keys-auto-sync||@keys|_auto-worker|forward|mutate|required|hidden|internal|none|_keys-auto-sync|credential auto-sync worker||
-_keys-init||@keys|_init-store|local|mutate|required|hidden|internal|none|_keys-init|initialize the host credential ledger||
+_authorize||@authorize||forward|mutate|dynamic|hidden|internal|none|_authorize|authorize a controller key inside a yard||
+_state||@state||local|mutate|dynamic|hidden|internal|none|_state|native project state adapter||
+_project-state||@project-state||forward|mutate|dynamic|hidden|internal|none|_project-state|converge owner-host project state||
+_migrate||@migrate||local|mutate|dynamic|hidden|internal|none|_migrate|inspect, validate, apply, finalize, roll back or clean engine state migrations||paths check apply finalize rollback cleanup overlay-manifest
+_keys-exchange||@keys|_exchange|forward|mutate|dynamic|hidden|internal|none|_keys-exchange|credential peer exchange endpoint||
+_keys-auto-sync||@keys|_auto-worker|forward|mutate|dynamic|hidden|internal|none|_keys-auto-sync|credential auto-sync worker||
+_keys-init||@keys|_init-store|local|mutate|dynamic|hidden|internal|none|_keys-init|initialize the host credential ledger||

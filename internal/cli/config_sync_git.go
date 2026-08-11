@@ -21,6 +21,7 @@ import (
 
 const maxConfigGitDiagnosticBytes = 4096
 const configGitFetchTimeout = 15 * time.Second
+const configGitCandidatePrefix = ".subyard-config-git-candidate-"
 
 type configGitState struct {
 	Checkout       string
@@ -42,6 +43,129 @@ type configGitState struct {
 	FetchState     string
 	LastFetch      string
 	Problem        error
+}
+
+type configGitCandidate struct {
+	parent       string
+	checkout     string
+	remoteCommit string
+	ahead        int
+	behind       int
+}
+
+func (cli *CLI) prepareConfigGitCandidate(
+	ctx context.Context,
+	registered string,
+	state configGitState,
+) (*configGitCandidate, error) {
+	if state.RemoteName == "" || state.RemoteRaw == "" {
+		return nil, errors.New("registered checkout has no readable Git upstream remote")
+	}
+	remoteBranch := strings.TrimPrefix(state.Upstream, state.RemoteName+"/")
+	if remoteBranch == state.Upstream || remoteBranch == "" ||
+		strings.HasPrefix(remoteBranch, "refs/") {
+		return nil, errors.New("upstream branch cannot be mapped to an exact remote branch")
+	}
+	parent, err := os.MkdirTemp("", configGitCandidatePrefix)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(parent, 0o700); err != nil {
+		_ = os.Remove(parent)
+		return nil, err
+	}
+	candidate := &configGitCandidate{
+		parent: parent, checkout: filepath.Join(parent, "checkout"),
+	}
+	if err := cli.cloneRegisteredConfigSource(
+		ctx, registered, candidate.checkout,
+	); err != nil {
+		candidate.cleanup()
+		return nil, fmt.Errorf("prepare isolated Git candidate: %w", err)
+	}
+	if err := cli.configGitRun(
+		ctx, candidate.checkout, "remote", "set-url", "origin", state.RemoteRaw,
+	); err != nil {
+		candidate.cleanup()
+		return nil, fmt.Errorf("configure isolated Git candidate remote: %w", err)
+	}
+	fetchContext, cancel := context.WithTimeout(ctx, configGitFetchTimeout)
+	defer cancel()
+	if err := cli.configGitRun(
+		fetchContext, candidate.checkout, "fetch", "--quiet", "--prune", "--", "origin",
+	); err != nil {
+		candidate.cleanup()
+		return nil, fmt.Errorf("fetch isolated Git candidate: %w", err)
+	}
+	head, err := cli.configGitOutput(
+		ctx, candidate.checkout, "rev-parse", "--verify", "HEAD",
+	)
+	if err != nil || strings.TrimSpace(head) != state.Head {
+		candidate.cleanup()
+		return nil, errors.New("registered checkout HEAD changed while preparing candidate")
+	}
+	candidate.remoteCommit, err = cli.configGitOutput(
+		ctx, candidate.checkout, "rev-parse", "--verify", "origin/"+remoteBranch,
+	)
+	if err != nil {
+		candidate.cleanup()
+		return nil, errors.New("cannot resolve the exact upstream in isolated candidate")
+	}
+	candidate.remoteCommit = strings.TrimSpace(candidate.remoteCommit)
+	counts, err := cli.configGitOutput(
+		ctx, candidate.checkout, "rev-list", "--left-right", "--count",
+		state.Head+"..."+candidate.remoteCommit,
+	)
+	fields := strings.Fields(counts)
+	if err != nil || len(fields) != 2 {
+		candidate.cleanup()
+		return nil, errors.New("cannot determine exact candidate relation to upstream")
+	}
+	candidate.ahead, err = strconv.Atoi(fields[0])
+	if err == nil {
+		candidate.behind, err = strconv.Atoi(fields[1])
+	}
+	if err != nil {
+		candidate.cleanup()
+		return nil, errors.New("cannot parse exact candidate relation to upstream")
+	}
+	return candidate, nil
+}
+
+func (candidate *configGitCandidate) cleanup() {
+	if candidate == nil || candidate.parent == "" ||
+		filepath.Dir(candidate.checkout) != candidate.parent ||
+		!strings.HasPrefix(filepath.Base(candidate.parent), configGitCandidatePrefix) {
+		return
+	}
+	_ = os.RemoveAll(candidate.parent)
+	candidate.parent = ""
+	candidate.checkout = ""
+}
+
+func (cli *CLI) fetchRegisteredConfigUpstream(
+	ctx context.Context,
+	checkout string,
+	remote string,
+	expectedURL string,
+	expectedCommit string,
+) error {
+	actualURL, err := cli.configGitOutput(ctx, checkout, "remote", "get-url", remote)
+	if err != nil || strings.TrimSpace(actualURL) != expectedURL {
+		return errors.New("upstream remote changed after preview")
+	}
+	if err := cli.configGitRun(
+		ctx, checkout, "fetch", "--quiet", "--prune", "--", remote,
+	); err != nil {
+		return fmt.Errorf("refresh upstream after consent: %w", err)
+	}
+	upstream, err := cli.configGitOutput(
+		ctx, checkout, "rev-parse", "--verify", "@{upstream}",
+	)
+	if err != nil || strings.TrimSpace(upstream) != expectedCommit {
+		return errors.New("upstream changed after preview; rerun operation")
+	}
+	return nil
 }
 
 func (cli *CLI) runConfigSyncStatus(
@@ -98,8 +222,11 @@ func (cli *CLI) runConfigSyncStatus(
 	fmt.Fprintln(cli.options.Stdout, "  registration: configured")
 	fmt.Fprintf(cli.options.Stdout, "  checkout: %s\n", record.Checkout)
 
-	gitState := cli.inspectConfigGit(ctx, record.Checkout, !offline)
+	gitState := cli.inspectConfigGit(ctx, record.Checkout)
 	verifyConfigGitRegistration(record, &gitState)
+	if !offline {
+		cli.refreshConfigGitStatus(ctx, &gitState)
+	}
 	writeConfigGitState(cli.options.Stdout, gitState)
 
 	recovery := "none"
@@ -187,8 +314,11 @@ func (cli *CLI) runPendingConfigSyncStatus(
 		fmt.Fprintln(cli.options.Stdout, "  versioned: yes")
 		fmt.Fprintln(cli.options.Stdout, "  registration: configured")
 		fmt.Fprintf(cli.options.Stdout, "  checkout: %s\n", record.Checkout)
-		state := cli.inspectConfigGit(ctx, record.Checkout, !offline)
+		state := cli.inspectConfigGit(ctx, record.Checkout)
 		verifyConfigGitRegistration(record, &state)
+		if !offline {
+			cli.refreshConfigGitStatus(ctx, &state)
+		}
 		writeConfigGitState(cli.options.Stdout, state)
 	}
 	fmt.Fprintln(cli.options.Stdout, "  recovery: required")
@@ -204,11 +334,10 @@ func (cli *CLI) runPendingConfigSyncStatus(
 func (cli *CLI) inspectConfigGit(
 	ctx context.Context,
 	checkout string,
-	fetch bool,
 ) configGitState {
 	state := configGitState{
 		Checkout: checkout, Worktree: "unknown", Relation: "unknown",
-		FetchState: "cached",
+		FetchState: "offline-cached",
 	}
 	info, err := os.Lstat(checkout)
 	if err != nil {
@@ -219,7 +348,7 @@ func (cli *CLI) inspectConfigGit(
 		state.Problem = errors.New("checkout is not a real directory")
 		return state
 	}
-	top, err := cli.configGitOutput(ctx, checkout, "rev-parse", "--show-toplevel")
+	top, err := cli.configGitInspectOutput(ctx, checkout, "rev-parse", "--show-toplevel")
 	if err != nil {
 		state.Problem = err
 		return state
@@ -229,13 +358,13 @@ func (cli *CLI) inspectConfigGit(
 		state.Problem = errors.New("checkout root does not match the registered path")
 		return state
 	}
-	state.Head, err = cli.configGitOutput(ctx, checkout, "rev-parse", "--verify", "HEAD")
+	state.Head, err = cli.configGitInspectOutput(ctx, checkout, "rev-parse", "--verify", "HEAD")
 	if err != nil {
 		state.Problem = err
 		return state
 	}
 	state.Head = strings.TrimSpace(state.Head)
-	branch, branchErr := cli.configGitOutput(
+	branch, branchErr := cli.configGitInspectOutput(
 		ctx, checkout, "symbolic-ref", "--quiet", "--short", "HEAD",
 	)
 	if branchErr == nil {
@@ -243,7 +372,7 @@ func (cli *CLI) inspectConfigGit(
 	} else {
 		state.Branch = "detached"
 	}
-	upstream, upstreamErr := cli.configGitOutput(
+	upstream, upstreamErr := cli.configGitInspectOutput(
 		ctx, checkout, "rev-parse", "--abbrev-ref", "--symbolic-full-name",
 		"@{upstream}",
 	)
@@ -254,7 +383,7 @@ func (cli *CLI) inspectConfigGit(
 		}
 	}
 	if state.RemoteName != "" {
-		raw, remoteErr := cli.configGitOutput(
+		raw, remoteErr := cli.configGitInspectOutput(
 			ctx, checkout, "remote", "get-url", state.RemoteName,
 		)
 		if remoteErr == nil {
@@ -262,38 +391,20 @@ func (cli *CLI) inspectConfigGit(
 			state.RemoteURL = sanitizeConfigGitURL(state.RemoteRaw)
 		}
 	}
-	if fetch && state.RemoteName != "" {
-		fetchContext, cancel := context.WithTimeout(ctx, configGitFetchTimeout)
-		defer cancel()
-		if err := cli.configGitRun(
-			fetchContext, checkout, "fetch", "--quiet", "--prune", "--", state.RemoteName,
-		); err != nil {
-			state.FetchState = "failed"
-			state.Problem = fmt.Errorf(
-				"fetch failed: %s", redactConfigGitDiagnostic(err.Error(), state),
-			)
-		} else {
-			state.FetchState = "fresh"
-		}
-	} else if fetch {
-		state.FetchState = "unavailable"
-	} else {
-		state.FetchState = "offline-cached"
-	}
 	state.LastFetch = cli.configGitLastFetch(ctx, checkout)
 
-	porcelain, statusErr := cli.configGitOutputBytes(
+	porcelain, statusErr := cli.configGitInspectOutputBytes(
 		ctx, checkout, "status", "--porcelain=v1", "-z", "--untracked-files=all",
 	)
 	if statusErr == nil {
 		parseConfigGitPorcelain(&state, porcelain)
 	}
 	if state.Upstream != "" {
-		state.UpstreamCommit, _ = cli.configGitOutput(
+		state.UpstreamCommit, _ = cli.configGitInspectOutput(
 			ctx, checkout, "rev-parse", "--verify", "@{upstream}",
 		)
 		state.UpstreamCommit = strings.TrimSpace(state.UpstreamCommit)
-		counts, countErr := cli.configGitOutput(
+		counts, countErr := cli.configGitInspectOutput(
 			ctx, checkout, "rev-list", "--left-right", "--count",
 			"HEAD...@{upstream}",
 		)
@@ -312,6 +423,31 @@ func (cli *CLI) inspectConfigGit(
 		state.Problem = statusErr
 	}
 	return state
+}
+
+func (cli *CLI) refreshConfigGitStatus(ctx context.Context, state *configGitState) {
+	if state.RemoteName == "" || state.RemoteRaw == "" {
+		state.FetchState = "unavailable"
+		return
+	}
+	if state.Problem != nil {
+		return
+	}
+	candidate, err := cli.prepareConfigGitCandidate(ctx, state.Checkout, *state)
+	if err != nil {
+		state.FetchState = "failed"
+		state.Problem = fmt.Errorf(
+			"fetch failed: %s", redactConfigGitDiagnostic(err.Error(), *state),
+		)
+		return
+	}
+	defer candidate.cleanup()
+	state.FetchState = "fresh"
+	state.LastFetch = cli.configGitLastFetch(ctx, candidate.checkout)
+	state.UpstreamCommit = candidate.remoteCommit
+	state.Ahead = candidate.ahead
+	state.Behind = candidate.behind
+	state.Relation = configGitRelation(state.Ahead, state.Behind)
 }
 
 func writeConfigGitState(output io.Writer, state configGitState) {
@@ -505,17 +641,48 @@ func (cli *CLI) configGitOutput(
 	return string(output), err
 }
 
+func (cli *CLI) configGitInspectOutput(
+	ctx context.Context,
+	checkout string,
+	arguments ...string,
+) (string, error) {
+	output, err := cli.configGitInspectOutputBytes(ctx, checkout, arguments...)
+	return string(output), err
+}
+
 func (cli *CLI) configGitOutputBytes(
 	ctx context.Context,
 	checkout string,
 	arguments ...string,
 ) ([]byte, error) {
+	return cli.configGitOutputBytesWithEnvironment(ctx, checkout, nil, arguments...)
+}
+
+func (cli *CLI) configGitInspectOutputBytes(
+	ctx context.Context,
+	checkout string,
+	arguments ...string,
+) ([]byte, error) {
+	// Registered-checkout inspection is action planning. Git status may
+	// otherwise refresh the index before consent or during a no-op.
+	return cli.configGitOutputBytesWithEnvironment(
+		ctx, checkout, configGitInspectionOverrides(), arguments...,
+	)
+}
+
+func configGitInspectionOverrides() map[string]string {
+	return map[string]string{"GIT_OPTIONAL_LOCKS": "0"}
+}
+
+func (cli *CLI) configGitOutputBytesWithEnvironment(
+	ctx context.Context,
+	checkout string,
+	overrides map[string]string,
+	arguments ...string,
+) ([]byte, error) {
 	commandArguments := append([]string{"-C", checkout}, arguments...)
 	command := exec.CommandContext(ctx, "git", commandArguments...)
-	command.Env = environmentList(cli.env, map[string]string{
-		"GIT_TERMINAL_PROMPT": "0",
-		"LC_ALL":              "C",
-	})
+	command.Env = cli.configGitEnvironment(overrides)
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
@@ -529,8 +696,19 @@ func (cli *CLI) configGitOutputBytes(
 	return stdout.Bytes(), nil
 }
 
+func (cli *CLI) configGitEnvironment(overrides map[string]string) []string {
+	environment := map[string]string{
+		"GIT_TERMINAL_PROMPT": "0",
+		"LC_ALL":              "C",
+	}
+	for name, value := range overrides {
+		environment[name] = value
+	}
+	return environmentList(cli.env, environment)
+}
+
 func (cli *CLI) configGitLastFetch(ctx context.Context, checkout string) string {
-	path, err := cli.configGitOutput(ctx, checkout, "rev-parse", "--git-path", "FETCH_HEAD")
+	path, err := cli.configGitInspectOutput(ctx, checkout, "rev-parse", "--git-path", "FETCH_HEAD")
 	if err != nil {
 		return "never"
 	}

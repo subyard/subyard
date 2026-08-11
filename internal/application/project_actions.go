@@ -291,10 +291,16 @@ func portablePatch(patch []byte, hostSnapshot, yardPath string) []byte {
 
 func (runner ProjectActionRunner) clone(ctx context.Context) error {
 	directory := filepath.Dir(runner.Project.YardPath)
-	if err := runner.execute(ctx, "remove stale workspace", ports.InstanceExecRequest{
-		Command: []string{"rm", "-rf", "--", directory},
-	}); err != nil {
-		return err
+	result, err := runner.Data.Execute(ctx, runner.Yard, ports.InstanceExecRequest{
+		Command: []string{
+			"sh", "-c", `[ ! -e "$1" ] && [ ! -L "$1" ]`, "subyard", directory,
+		},
+	})
+	if err != nil {
+		if result.ExitCode == 1 {
+			return fmt.Errorf("clone workspace already exists: %s", directory)
+		}
+		return executionError("inspect clone workspace", result, err)
 	}
 	create := ports.InstanceExecRequest{Command: []string{"install", "-d", "--", directory}}
 	if runner.Yard.YardType != domain.YardRemote {
@@ -320,6 +326,22 @@ func (runner ProjectActionRunner) clone(ctx context.Context) error {
 
 func (runner ProjectActionRunner) writeMetadata(ctx context.Context) error {
 	dev := uint32(runner.Yard.DevUID)
+	metadata, err := ProjectMetadata(runner.Project, runner.Yard.YardName)
+	if err != nil {
+		return err
+	}
+	directory := filepath.Dir(runner.Project.YardPath)
+	write := ports.InstanceExecRequest{
+		Command: []string{"tee", filepath.Join(directory, ".subyard-meta.json")},
+		Stdin:   metadata, User: dev, Group: dev,
+	}
+	if err := runner.execute(ctx, "write project metadata", write); err != nil {
+		return err
+	}
+	return nil
+}
+
+func ProjectMetadata(project domain.ProjectRecord, yardName string) ([]byte, error) {
 	metadata, err := json.Marshal(struct {
 		Schema          int                `json:"schema"`
 		IdentityVersion int                `json:"identityVersion,omitempty"`
@@ -330,22 +352,14 @@ func (runner ProjectActionRunner) writeMetadata(ctx context.Context) error {
 		Target          string             `json:"target,omitempty"`
 		ImportedAt      string             `json:"importedAt,omitempty"`
 	}{
-		1, runner.Project.IdentityVersion, runner.Yard.YardName,
-		runner.Project.ProjectID, runner.Project.Name, runner.Project.Mode,
-		runner.Project.Target, runner.Project.ImportedAt,
+		1, project.IdentityVersion, yardName,
+		project.ProjectID, project.Name, project.Mode,
+		project.Target, project.ImportedAt,
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
-	directory := filepath.Dir(runner.Project.YardPath)
-	write := ports.InstanceExecRequest{
-		Command: []string{"tee", filepath.Join(directory, ".subyard-meta.json")},
-		Stdin:   append(metadata, '\n'), User: dev, Group: dev,
-	}
-	if err := runner.execute(ctx, "write project metadata", write); err != nil {
-		return err
-	}
-	return nil
+	return append(metadata, '\n'), nil
 }
 
 func (runner ProjectActionRunner) sync(ctx context.Context) error {

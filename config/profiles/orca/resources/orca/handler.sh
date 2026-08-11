@@ -26,6 +26,8 @@ ORCA_READY="$ORCA_STATE/ready.json"
 ORCA_CAPTURE=/usr/local/libexec/subyard/orca-capture-ready
 ORCA_INGRESS=/usr/local/libexec/subyard/orca-ingress
 ORCA_SYNC=/usr/local/libexec/subyard/projects-changed.d/orca
+ORCA_CONTRACT_DIGEST=/usr/local/libexec/subyard/orca-contract.sha256
+ORCA_CONTRACT_VERSION=1
 ORCA_GUEST_PORT=6768
 ORCA_RUNTIME_CHANGED=0
 ORCA_TMP_DIR=
@@ -366,6 +368,16 @@ UNIT
   yexec install -m 0755 "$guest_capture" "$ORCA_CAPTURE"
   yexec install -m 0755 "$guest_sync" "$ORCA_SYNC"
   yexec install -m 0644 "$guest_unit" "/etc/systemd/system/$ORCA_UNIT"
+  yexec bash -se -- "$ORCA_CONTRACT_DIGEST" "$ORCA_CONTRACT_VERSION" \
+    "$ORCA_INGRESS" "$ORCA_CAPTURE" "$ORCA_SYNC" "/etc/systemd/system/$ORCA_UNIT" <<'YARD'
+set -euo pipefail
+marker="$1"; version="$2"; shift 2
+digest="$(sha256sum "$@" | sha256sum | awk '{print $1}')"
+temporary="$marker.$$"
+printf '%s:%s\n' "$version" "$digest" >"$temporary"
+chmod 0644 "$temporary"
+mv "$temporary" "$marker"
+YARD
   yexec bash -se -- "${DEV_USER:-dev}" "$ORCA_STATE" "$ORCA_READY" <<'YARD'
 set -euo pipefail
 dev_user="$1"
@@ -401,17 +413,69 @@ run_project_sync() {
   yexec runuser -u "${DEV_USER:-dev}" -- "$ORCA_SYNC"
 }
 
+runtime_contract_ready() {
+  if ! yexec bash -se -- "$ORCA_CONTRACT_DIGEST" "$ORCA_CONTRACT_VERSION" \
+    "$ORCA_INGRESS" "$ORCA_CAPTURE" "$ORCA_SYNC" "/etc/systemd/system/$ORCA_UNIT" <<'YARD'
+set -euo pipefail
+marker="$1"; version="$2"; shift 2
+[ -r "$marker" ]
+expected="$(cat "$marker")"
+digest="$(sha256sum "$@" | sha256sum | awk '{print $1}')"
+[ "$expected" = "$version:$digest" ]
+YARD
+  then
+    return 1
+  fi
+  yexec grep -Fqx \
+    "ExecStart=$ORCA_CAPTURE $ORCA_READY $ORCA_EXEC serve --port $ORCA_GUEST_PORT --pairing-address $ORCA_ADVERTISE_HOST:$ORCA_HOST_PORT --json" \
+    "/etc/systemd/system/$ORCA_UNIT" >/dev/null 2>&1
+}
+
+service_enabled() {
+  yexec systemctl is-enabled --quiet "$ORCA_UNIT" >/dev/null 2>&1
+}
+
+# Read-only comparison of canonical Subyard roots with the repos Orca already knows.
+projects_synced() {
+  yexec bash -se -- "${DEV_USER:-dev}" "$ORCA_EXEC" "$ORCA_STATE" <<'YARD'
+set -euo pipefail
+dev_user="$1"; orca_exec="$2"; state="$3"
+export HOME="/home/$dev_user"
+export XDG_CONFIG_HOME="$state/config"
+export XDG_DATA_HOME="$state/data"
+export XDG_STATE_HOME="$state/state"
+repos="$(runuser -u "$dev_user" -- "$orca_exec" repo list --json)"
+while IFS= read -r -d '' metadata; do
+  project_dir="${metadata%/.subyard-meta.json}"
+  project_id="${project_dir##*/}"
+  checkout="$project_dir/src"
+  jq -e --arg id "$project_id" \
+    '.schema == 1 and .projectId == $id' "$metadata" >/dev/null 2>&1 || continue
+  [ -d "$checkout" ] && [ ! -L "$checkout" ] || continue
+  [ "$(realpath -e "$checkout")" = "$checkout" ] || continue
+  jq -e --arg path "$checkout" \
+    '.ok == true and any(.result.repos[]?; .path == $path)' <<<"$repos" >/dev/null || exit 1
+done < <(
+  find /srv/workspaces -mindepth 2 -maxdepth 2 -type f \
+    -name .subyard-meta.json -print0 | sort -z
+)
+YARD
+}
+
+up_converged() {
+  release_ready && dependencies_ready && runtime_contract_ready && service_enabled &&
+    service_ready && ingress_active && route_matches && owner_endpoint_ready && projects_synced
+}
+
 cmd_up() {
   require_runtime_settings
   resolve_owner_address
   select_release
   refuse_port_collision
-  announce "Orca $ORCA_VERSION in $INSTANCE_NAME" \
-    "Install or verify the pinned stock deb and minimal headless dependencies." \
-    "Run as '${DEV_USER:-dev}' with persistent state under $ORCA_STATE." \
-    "Publish only $ORCA_OWNER_IP:$ORCA_HOST_PORT through an exact Incus proxy." \
-    "Register current Subyard project roots in Orca."
-  proceed_or_die
+  if up_converged; then
+    ok "Orca runtime, route and project registrations are already converged"
+    return 0
+  fi
   ensure_dependencies
   install_release
   stage_runtime_contract
@@ -438,11 +502,7 @@ cmd_up() {
 
 cmd_pair() {
   require_runtime_settings
-  yexec systemctl is-active --quiet "$ORCA_UNIT" \
-    || die "Orca is not running; run '$(yard_cmd_hint) orca up' first"
-  announce_confirm "Create a fresh Orca pairing link" \
-    "Restart $ORCA_UNIT, briefly interrupting connected clients." \
-    "Keep existing paired-client grants and issue one new single-client link."
+  service_ready || die "Orca is not ready; run '$(yard_cmd_hint) orca up' first"
   yexec systemctl restart "$ORCA_UNIT"
   wait_service_ready || die "Orca did not become ready after restart"
   yexec jq -er '
@@ -480,10 +540,6 @@ cmd_down() {
     ok "Orca already down"
     return 0
   fi
-  announce_confirm "Stop Orca in the selected yard" \
-    "Remove only the owned owner-host proxy." \
-    "Stop and disable $ORCA_UNIT and its owned L1 ingress guard." \
-    "Preserve the installed package, projects, sessions and paired-client state."
   remove_route
   yexec systemctl disable --now "$ORCA_UNIT" >/dev/null 2>&1 || true
   if yexec test -x "$ORCA_INGRESS"; then
@@ -492,37 +548,134 @@ cmd_down() {
   ok "Orca stopped and unpublished; state preserved"
 }
 
+emit_resource_assessment() { # <local-action> <true|false> [fixed consequence...]
+  local action="$1" changed="$2" separator=""
+  shift 2
+  printf '{"schema":"yard.resource-action-assessment.v1","action":"%s","changed":%s,"consequences":[' \
+    "$action" "$changed"
+  local consequence
+  for consequence in "$@"; do
+    printf '%s"%s"' "$separator" "$consequence"
+    separator=,
+  done
+  printf ']}\n'
+}
+
+require_no_resource_arguments() {
+  local verb="$1"
+  shift
+  [ "$#" -eq 0 ] || die "'$verb' does not accept additional arguments"
+}
+
+require_resource_apply() { # <expected-local-action>
+  local expected="$1"
+  [ "${SUBYARD_RESOURCE_MODE:-}" = apply ] || die "resource apply mode is required"
+  [ "${SUBYARD_RESOURCE_ACTION:-}" = "$expected" ] \
+    || die "prepared resource action mismatch (expected '$expected')"
+  [ -n "${SUBYARD_OPERATION_ID:-}" ] || die "resource apply operation ID is required"
+}
+
+prepare_resource() { # <public-verb>
+  local verb="$1" changed=false
+  shift
+  require_no_resource_arguments "$verb" "$@"
+  case "$verb" in
+    up)
+      svc_require_yard_running
+      require_runtime_settings
+      resolve_owner_address
+      select_release
+      refuse_port_collision
+      release_ready || changed=true
+      dependencies_ready || changed=true
+      runtime_contract_ready || changed=true
+      service_enabled || changed=true
+      service_ready || changed=true
+      ingress_active || changed=true
+      route_matches || changed=true
+      owner_endpoint_ready || changed=true
+      projects_synced || changed=true
+      if [ "$changed" = true ]; then
+        emit_resource_assessment up true \
+          "converge the pinned Orca package, dependencies and service contract" \
+          "publish the owned guarded endpoint for the selected yard" \
+          "register canonical Subyard project roots in Orca"
+      else
+        emit_resource_assessment up false
+      fi
+      ;;
+    pair)
+      svc_require_yard_running
+      require_runtime_settings
+      service_ready || die "Orca is not ready; run '$(yard_cmd_hint) orca up' first"
+      emit_resource_assessment pair true \
+        "restart the Orca service and issue one fresh single-client pairing link"
+      ;;
+    sync)
+      svc_require_yard_running
+      yexec systemctl is-active --quiet "$ORCA_UNIT" \
+        || die "Orca is not running; run '$(yard_cmd_hint) orca up' first"
+      if projects_synced; then
+        emit_resource_assessment sync false
+      else
+        emit_resource_assessment sync true "register missing canonical Subyard project roots in Orca"
+      fi
+      ;;
+    down)
+      svc_require_yard_running
+      if yexec systemctl is-active --quiet "$ORCA_UNIT" || ingress_active || device_exists; then
+        emit_resource_assessment down true \
+          "stop the Orca service and ingress guard and remove its owned owner-host proxy"
+      else
+        emit_resource_assessment down false
+      fi
+      ;;
+    is-up|status|logs)
+      emit_resource_assessment "$verb" false
+      ;;
+    *) die "unknown Orca resource verb '$verb'" ;;
+  esac
+}
+
+cmd_is_up() {
+  incus info "$INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1 || return 1
+  yexec systemctl is-active --quiet "$ORCA_UNIT" >/dev/null 2>&1
+}
+
 sub="${1:-}"
 shift || true
 
-if [ "$sub" = is-up ]; then
-  incus info "$INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1 || exit 1
-  yexec systemctl is-active --quiet "$ORCA_UNIT" >/dev/null 2>&1
-  exit $?
-fi
-
-case "$sub" in
-  up|status|pair|sync|logs|down) ;;
-  -h|--help|help|"")
-    printf 'Usage: %s orca <up|status|pair|sync|logs|down>\n' "${PROG:-yard}"
-    exit 0
+case "${SUBYARD_RESOURCE_MODE:-}" in
+  prepare)
+    [ -n "$sub" ] || die "resource verb is required"
+    prepare_resource "$sub" "$@"
     ;;
-  *) die "unknown Orca command '$sub'" ;;
-esac
-for argument in "$@"; do
-  case "$argument" in
-    -y|--yes) ;;
-    *) die "'$sub' does not accept argument '$argument'" ;;
-  esac
-done
-
-svc_require_yard_running
-
-case "$sub" in
-  up) cmd_up ;;
-  status) cmd_status ;;
-  pair) cmd_pair ;;
-  sync) cmd_sync ;;
-  logs) yexec journalctl --no-pager -u "$ORCA_UNIT" ;;
-  down) cmd_down ;;
+  apply)
+    case "$sub" in
+      up|is-up|status|pair|sync|logs|down) ;;
+      *) die "unknown Orca apply verb '$sub'" ;;
+    esac
+    require_no_resource_arguments "$sub" "$@"
+    require_resource_apply "$sub"
+    if [ "$sub" = is-up ]; then cmd_is_up; exit $?; fi
+    svc_require_yard_running
+    case "$sub" in
+      up) cmd_up ;;
+      status) cmd_status ;;
+      pair) cmd_pair ;;
+      sync) cmd_sync ;;
+      logs) yexec journalctl --no-pager -u "$ORCA_UNIT" ;;
+      down) cmd_down ;;
+    esac
+    ;;
+  '')
+    case "$sub" in
+      is-up) require_no_resource_arguments is-up "$@"; cmd_is_up ;;
+      -h|--help|help|"")
+        printf 'Usage: %s orca <up|is-up|status|pair|sync|logs|down>\n' "${PROG:-yard}"
+        ;;
+      *) die "typed resource dispatcher required for 'yard orca $sub'" ;;
+    esac
+    ;;
+  *) die "unknown resource execution mode '${SUBYARD_RESOURCE_MODE:-}'" ;;
 esac

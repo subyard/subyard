@@ -1,8 +1,10 @@
 # Pure or filesystem-local modules with no fake process boundary.
+android-provision-check.sh
 build-engine.sh
 docker-forwarding-convergence.sh
 emulator-process-identity.sh
 lib-power-network.sh
+openclaw-provision-check.sh
 p0-capacity.sh
 runtime-privilege-reexec.sh
 ssh-config.sh

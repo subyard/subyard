@@ -82,6 +82,37 @@ func (store *FileStore) List(ctx context.Context) ([]domain.ProjectRecord, error
 	return store.listUnlocked()
 }
 
+// ListReadOnly reads project records without creating the state directory or
+// lock file. Records are published atomically, so it is suitable for a
+// pre-confirmation observation that must not repair or migrate local state.
+func (store *FileStore) ListReadOnly(context.Context) ([]domain.ProjectRecord, error) {
+	exists, err := validateReadOnlyStateDirectory(store.directory)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return []domain.ProjectRecord{}, nil
+	}
+	entries, err := os.ReadDir(store.directory)
+	if err != nil {
+		return nil, fmt.Errorf("read state directory: %w", err)
+	}
+	records := make([]domain.ProjectRecord, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		id := strings.TrimSuffix(entry.Name(), ".json")
+		record, readErr := readRecordReadOnly(filepath.Join(store.directory, entry.Name()), id)
+		if readErr != nil {
+			return nil, fmt.Errorf("invalid project state: %w", readErr)
+		}
+		records = append(records, record)
+	}
+	sort.Slice(records, func(left, right int) bool { return records[left].ProjectID < records[right].ProjectID })
+	return records, nil
+}
+
 func (store *FileStore) listUnlocked() ([]domain.ProjectRecord, error) {
 	entries, err := os.ReadDir(store.directory)
 	if errors.Is(err, os.ErrNotExist) {
@@ -125,6 +156,64 @@ func (store *FileStore) Get(ctx context.Context, id string) (domain.ProjectRecor
 		return domain.ProjectRecord{}, fmt.Errorf("invalid project state: %w", err)
 	}
 	return record, err
+}
+
+func readRecordReadOnly(path, expectedID string) (domain.ProjectRecord, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return domain.ProjectRecord{}, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return domain.ProjectRecord{}, fmt.Errorf("project state is not a regular file: %s", path)
+	}
+	permissions := info.Mode().Perm()
+	if permissions&0o600 != 0o600 || permissions&^0o666 != 0 ||
+		info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
+		return domain.ProjectRecord{}, fmt.Errorf("project state permissions are unsafe: %o", permissions)
+	}
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return domain.ProjectRecord{}, err
+	}
+	defer file.Close()
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return domain.ProjectRecord{}, err
+	}
+	if !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
+		return domain.ProjectRecord{}, fmt.Errorf("project state changed while opening: %s", path)
+	}
+	stat, ok := openedInfo.Sys().(*syscall.Stat_t)
+	if !ok || int(stat.Uid) != os.Geteuid() {
+		return domain.ProjectRecord{}, fmt.Errorf("project state is not owned by the operator: %s", path)
+	}
+	if openedInfo.Size() > 1024*1024 {
+		return domain.ProjectRecord{}, fmt.Errorf("project state exceeds size limit: %s", path)
+	}
+	return decodeRecord(file, path, expectedID)
+}
+
+// GetReadOnly reads one project record without creating the state directory or
+// lock file. It deliberately performs no legacy permission or name repair.
+func (store *FileStore) GetReadOnly(_ context.Context, id string) (domain.ProjectRecord, error) {
+	if !domain.SafeID(id) {
+		return domain.ProjectRecord{}, fmt.Errorf("invalid project ID %q", id)
+	}
+	exists, err := validateReadOnlyStateDirectory(store.directory)
+	if err != nil {
+		return domain.ProjectRecord{}, err
+	}
+	if !exists {
+		return domain.ProjectRecord{}, fmt.Errorf("%w: %s", ErrNotFound, id)
+	}
+	record, err := readRecordReadOnly(store.path(id), id)
+	if errors.Is(err, os.ErrNotExist) {
+		return domain.ProjectRecord{}, fmt.Errorf("%w: %s", ErrNotFound, id)
+	}
+	if err != nil {
+		return domain.ProjectRecord{}, fmt.Errorf("invalid project state: %w", err)
+	}
+	return record, nil
 }
 
 func (store *FileStore) Put(ctx context.Context, record domain.ProjectRecord) error {
@@ -292,6 +381,27 @@ func ensurePrivateDirectory(path string) error {
 		return fmt.Errorf("create state directory: %w", err)
 	}
 	return os.Chmod(path, 0o700)
+}
+
+func validateReadOnlyStateDirectory(path string) (bool, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return false, errors.New("state path is not a real directory")
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return false, fmt.Errorf("state directory permissions are too broad: %o", info.Mode().Perm())
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || int(stat.Uid) != os.Geteuid() {
+		return false, errors.New("state directory is not owned by the operator")
+	}
+	return true, nil
 }
 
 func readRecord(path, expectedID string) (domain.ProjectRecord, error) {

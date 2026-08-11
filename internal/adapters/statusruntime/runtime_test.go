@@ -246,7 +246,7 @@ func TestRuntimeProbesPreparedResources(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(resources, "service.res"), []byte(
-		"COMMAND=svc\nHANDLER=resources/service/handler.sh\nTITLE=Service\nVERBS=up down\n"), 0o600); err != nil {
+		"COMMAND=svc\nHANDLER=resources/service/handler.sh\nTITLE=Service\nACTION=\"up up yard-change reversible\"\nACTION=\"down down yard-change reversible\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	handler := filepath.Join(resources, "service", "handler.sh")
@@ -284,7 +284,7 @@ func TestRuntimeBoundsProfileResourceProbe(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(resources, "service.res"), []byte(
-		"COMMAND=svc\nHANDLER=resources/service/handler.sh\nTITLE=Service\nVERBS=up down\n"), 0o600); err != nil {
+		"COMMAND=svc\nHANDLER=resources/service/handler.sh\nTITLE=Service\nACTION=\"up up yard-change reversible\"\nACTION=\"down down yard-change reversible\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	handler := filepath.Join(resources, "service", "handler.sh")

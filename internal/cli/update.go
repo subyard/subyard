@@ -46,7 +46,12 @@ func (cli *CLI) runUpdate(ctx context.Context, loaded config.Loaded, definition 
 		}
 	}
 	orchestrator := cli.operationOrchestrator(cli.env["SUBYARD_OPERATION_ID"], loaded, nil, &definition)
-	plan, err := orchestrator.Plan(ctx, loaded.Context, execution.policy(definition), assumeYes)
+	plan, err := orchestrator.PlanAction(
+		ctx, loaded.Context, definition.Name, domain.RemotePolicy(definition.Remote),
+		execution.prepared.Action, domain.ActionDelta{
+			Changed: execution.prepared.Changed, Consequences: execution.prepared.Consequences,
+		}, assumeYes,
+	)
 	if err != nil {
 		if errors.Is(err, application.ErrDeclined) {
 			cli.errorf("operation declined")
@@ -81,10 +86,17 @@ func (cli *CLI) prepareRelease(ctx context.Context, loaded config.Loaded, argume
 	return &releaseExecution{prepared: prepared, yard: loaded.Context.YardName}, nil
 }
 
-func (execution *releaseExecution) policy(definition command.Definition) domain.CommandPolicy {
-	return domain.CommandPolicy{Name: "update", Effect: execution.prepared.Effect,
-		Confirmation: resolveConfirmationPolicy(definition, execution.prepared.Effect),
-		RemotePolicy: domain.RemotePolicy(definition.Remote), Consequences: execution.prepared.Consequences}
+func (execution *releaseExecution) prepareAction(
+	orchestrator *application.Orchestrator,
+	loaded config.Loaded,
+	definition command.Definition,
+) (domain.OperationPlan, error) {
+	return orchestrator.PrepareAction(
+		loaded.Context, definition.Name, domain.RemotePolicy(definition.Remote),
+		execution.prepared.Action, domain.ActionDelta{
+			Changed: execution.prepared.Changed, Consequences: execution.prepared.Consequences,
+		},
+	)
 }
 
 func (cli *CLI) executeRelease(ctx context.Context, orchestrator *application.Orchestrator,

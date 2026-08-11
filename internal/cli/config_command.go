@@ -239,12 +239,6 @@ func (cli *CLI) runConfigSync(
 		}
 		source = record.Checkout
 	}
-	if !check {
-		if err := configsync.Recover(loaded.Context.Paths.ConfigHome); err != nil {
-			cli.errorf("config sync recovery: %v", err)
-			return 1
-		}
-	}
 	options := configsync.Options{
 		SourceRoot: source, ConfigHome: loaded.Context.Paths.ConfigHome,
 		RepositoryRoot: cli.options.RepositoryRoot,
@@ -270,38 +264,36 @@ func (cli *CLI) runConfigSync(
 		fmt.Fprintln(cli.options.Stdout, "config sync check: converged")
 		return 0
 	}
-	if plan.NeedsConfirmation() {
-		consequences := make([]string, 0, len(plan.Changes)+1)
+	changed := plan.NeedsApply()
+	consequences := make([]string, 0, len(plan.Changes)+1)
+	if changed {
 		if plan.InitializeHostID {
 			consequences = append(consequences, "record owner host ID "+plan.HostID)
 		}
 		for _, change := range plan.Changes {
 			consequences = append(consequences, change.Action+" "+change.Path)
 		}
+		if plan.ManifestChanged {
+			consequences = append(consequences,
+				"update versioned configuration manifest metadata")
+		}
 		if materialize && configSyncPlanNeedsMaterialization(plan) {
 			consequences = append(consequences,
 				"refresh affected file settings in running local yards")
 		}
-		orchestrator := cli.operationOrchestrator(
-			cli.env["SUBYARD_OPERATION_ID"], loaded, nil, nil,
-		)
-		operation, err := orchestrator.Prepare(loaded.Context, domain.CommandPolicy{
-			Name: "config sync", Effect: domain.CommandMutate, Confirmation: domain.ConfirmationRequired,
-			RemotePolicy: domain.RemoteOnOwner, Consequences: consequences,
-		})
-		if err != nil {
-			cli.errorf("config sync: %v", err)
-			return 1
-		}
-		operation, err = orchestrator.Confirm(ctx, operation, assumeYes)
-		if errors.Is(err, application.ErrDeclined) {
-			cli.errorf("config sync: operation declined")
-			return 1
-		}
-		if err != nil {
-			cli.errorf("config sync: %v", err)
-			return 1
-		}
+	}
+	orchestrator, operation, err := cli.planConfigSyncOperation(
+		ctx, loaded, "config sync", "config.sync", changed, consequences, assumeYes,
+	)
+	if errors.Is(err, application.ErrDeclined) {
+		cli.errorf("config sync: operation declined")
+		return 1
+	}
+	if err != nil {
+		cli.errorf("config sync: %v", err)
+		return 1
+	}
+	if changed {
 		orchestrator.Runner = configSyncAdapter{plan: plan}
 		if _, _, err := orchestrator.RunAdapter(ctx, operation, domain.AdapterRequest{
 			OperationID: operation.OperationID, Adapter: "config-sync", Action: "apply",
@@ -326,6 +318,28 @@ func (cli *CLI) runConfigSync(
 	}
 	cli.writeConfigSyncFollowups(loaded, plan, materialize)
 	return 0
+}
+
+func (cli *CLI) planConfigSyncOperation(
+	ctx context.Context,
+	loaded config.Loaded,
+	command string,
+	action domain.ActionID,
+	changed bool,
+	consequences []string,
+	assumeYes bool,
+) (*application.Orchestrator, domain.OperationPlan, error) {
+	if !changed {
+		consequences = nil
+	}
+	orchestrator := cli.operationOrchestrator(
+		cli.env["SUBYARD_OPERATION_ID"], loaded, nil, nil,
+	)
+	operation, err := orchestrator.PlanAction(
+		ctx, loaded.Context, command, domain.RemoteOnOwner, action,
+		domain.ActionDelta{Changed: changed, Consequences: consequences}, assumeYes,
+	)
+	return orchestrator, operation, err
 }
 
 func (cli *CLI) writeConfigSyncHelp() {
@@ -970,50 +984,39 @@ func (cli *CLI) applyConfig(ctx context.Context, targets []configTarget, assumeY
 		cli.errorf("config apply: %v", err)
 		return 1
 	}
-	running := make([]configTarget, 0, len(targets))
+	drifted := make([]configTarget, 0, len(targets))
 	for _, target := range targets {
 		if target.Loaded.Context.YardType == domain.YardRemote {
 			cli.errorf("config apply does not implicitly operate on remote yard %s", target.Name)
 			return 1
 		}
-		state, _, err := cli.configTargetDrift(ctx, target, false)
+		state, changed, err := cli.configTargetDrift(ctx, target, true)
 		if err != nil {
 			cli.errorf("config apply: yard %s: %v", target.Name, err)
 			return 1
 		}
-		if state == "running" || state == "drift" {
-			running = append(running, target)
+		if changed {
+			drifted = append(drifted, target)
 		} else {
 			fmt.Fprintf(cli.options.Stdout,
 				"yard %s materialized-config: %s; skipped\n", target.Name, state)
 		}
 	}
-	if len(running) == 0 {
+	if len(drifted) == 0 {
+		if !cli.planConfigAction(ctx, targets[0].Loaded, "apply", assumeYes, true,
+			"no running local yards have materialized configuration drift") {
+			return 1
+		}
 		fmt.Fprintln(cli.options.Stdout, "config apply: no running local yards to refresh")
 		return 0
 	}
-	if !assumeYes {
-		prompt := cli.options.Prompt
-		if prompt == nil {
-			prompt = streamPrompt{input: cli.options.Stdin, output: cli.options.Stderr}
-		}
-		names := make([]string, 0, len(running))
-		for _, target := range running {
-			names = append(names, target.Name)
-		}
-		accepted, err := prompt.Confirm(ctx, "Apply Subyard file settings",
-			[]string{
-				"refresh materialized agent configs in local running yards: " +
-					strings.Join(names, ", "),
-			})
-		if err != nil {
-			cli.errorf("config apply: %v", err)
-			return 1
-		}
-		if !accepted {
-			cli.errorf("config apply: operation declined")
-			return 1
-		}
+	names := make([]string, 0, len(drifted))
+	for _, target := range drifted {
+		names = append(names, target.Name)
+	}
+	if !cli.planConfigAction(ctx, targets[0].Loaded, "apply", assumeYes, false,
+		"refresh materialized agent configs in local running yards: "+strings.Join(names, ", ")) {
+		return 1
 	}
 	applier := cli.options.Config
 	if applier == nil {
@@ -1022,13 +1025,13 @@ func (cli *CLI) applyConfig(ctx context.Context, targets []configTarget, assumeY
 			stdout: cli.options.Stdout, stderr: cli.options.Stderr,
 		}
 	}
-	for _, target := range running {
+	for _, target := range drifted {
 		if err := applier.ApplyConfig(ctx, target.Name); err != nil {
 			cli.errorf("config apply: yard %s: %v", target.Name, err)
 			return 1
 		}
 	}
-	if err := cli.configStatus(ctx, running, true); err != nil {
+	if err := cli.configStatus(ctx, drifted, true); err != nil {
 		cli.errorf("config apply verification: %v", err)
 		return 1
 	}
@@ -1102,7 +1105,10 @@ func (cli *CLI) configTargetDrift(
 				User:    uint32(target.Loaded.Context.DevUID),
 				Group:   uint32(target.Loaded.Context.DevUID),
 			})
-		if err != nil || result.ExitCode != 0 {
+		if err != nil && result.ExitCode == 0 {
+			return "", false, err
+		}
+		if result.ExitCode != 0 {
 			return "drift", true, nil
 		}
 		fields := strings.Fields(string(result.Stdout))

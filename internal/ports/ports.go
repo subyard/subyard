@@ -161,7 +161,7 @@ type IDSource interface {
 }
 
 type Prompter interface {
-	Confirm(context.Context, string, []string) (bool, error)
+	Confirm(context.Context, domain.ConfirmationRequest) (bool, error)
 }
 
 type ConfigApplier interface {
@@ -201,6 +201,7 @@ type ReconcileStageRunner interface {
 type InitPlatform interface {
 	ReconcileStageRunner
 	Preflight(context.Context, bool) error
+	ConfigsConverged(context.Context) (bool, error)
 	RefreshConfigs(context.Context) error
 	Teardown(context.Context) error
 }

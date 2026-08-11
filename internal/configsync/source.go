@@ -598,7 +598,12 @@ func gitOutput(root string, arguments ...string) (string, error) {
 
 func gitOutputBytes(root string, arguments ...string) ([]byte, error) {
 	command := exec.Command("git", append([]string{"-C", root}, arguments...)...)
-	command.Env = append(os.Environ(), "LC_ALL=C")
+	// Source inspection is action planning. Git status may otherwise refresh
+	// the source checkout's index even when it reports a clean worktree.
+	command.Env = append(os.Environ(),
+		"GIT_OPTIONAL_LOCKS=0",
+		"LC_ALL=C",
+	)
 	output, err := command.Output()
 	if err != nil {
 		var exit *exec.ExitError

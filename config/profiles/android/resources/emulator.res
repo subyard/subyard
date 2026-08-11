@@ -5,6 +5,9 @@
 COMMAND=emu
 HANDLER=resources/emulator/handler.sh
 TITLE="Android emulator (in the yard; up/down include the host adb bridge)"
-VERBS="up down status view"
+ACTION="up up host-change reversible"
+ACTION="down down host-change reversible"
+ACTION="status status read-only not-needed"
+ACTION="view view session not-needed"
 BRINGUP=up
 SHUTDOWN=down

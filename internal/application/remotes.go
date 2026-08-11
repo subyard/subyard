@@ -114,6 +114,21 @@ func RemotePolicy(prepared domain.RemotePrepared) domain.CommandPolicy {
 	}
 }
 
+func RemoteActionPlan(prepared domain.RemotePrepared) (domain.ActionID, domain.ActionDelta, error) {
+	switch prepared.Action {
+	case domain.RemoteList:
+		return "remote.list", domain.ActionDelta{}, nil
+	case domain.RemoteAdd:
+		return "remote.add", domain.ActionDelta{Changed: true, Consequences: remoteConsequences(prepared)}, nil
+	case domain.RemoteRepairKey:
+		return "remote.repair-key", domain.ActionDelta{Changed: true, Consequences: remoteConsequences(prepared)}, nil
+	case domain.RemoteRemove:
+		return "remote.remove", domain.ActionDelta{Changed: true, Consequences: remoteConsequences(prepared)}, nil
+	default:
+		return "", domain.ActionDelta{}, fmt.Errorf("%w: unknown remote action %q", domain.ErrActionPolicyInvalid, prepared.Action)
+	}
+}
+
 func remoteConsequences(prepared domain.RemotePrepared) []string {
 	switch prepared.Action {
 	case domain.RemoteAdd:

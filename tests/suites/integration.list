@@ -4,6 +4,7 @@ ccusage-provision.sh
 codex-agent-defaults.sh
 codex-agent-provision.sh
 emulator-process-control.sh
+emulator-resource-protocol.sh
 engine-release.sh
 hermes-backup.sh
 hermes-e2e-contract.sh
@@ -13,6 +14,7 @@ key-tools-install.sh
 init-project-convergence.sh
 install-runtime-release-rollback.sh
 opencode-agent-provision.sh
+openclaw-resource-protocol.sh
 orca-profile-resource.sh
 paseo-project-sync.sh
 profile-resource-lifecycle.sh

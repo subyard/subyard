@@ -14,11 +14,12 @@ p0_capacity_init "$TOKEN"
 MARKER="subyard-p0-source-$TOKEN"
 OPERATOR="subyardp0$TOKEN"
 SOURCE_STATE_ROOT="$P0_CAPACITY_STATE_ROOT/source-upgrade"
-OPERATOR_HOME="$SOURCE_STATE_ROOT/operator-home"
+OPERATOR_HOME="/home/$OPERATOR"
+OPERATOR_HOME_MARKER="$OPERATOR_HOME/.subyard-p0-source-home"
 SOURCE_ROOT="$OPERATOR_HOME/src"
-RELEASE_ROOT="$SOURCE_STATE_ROOT/releases"
-PREPARED_CANDIDATE="$SOURCE_STATE_ROOT/prepared-candidate-b"
-OPERATOR_PARENT_MODE="$SOURCE_STATE_ROOT/operator-parent-mode"
+SHARED_ROOT="/var/tmp/subyard-p0-source-$TOKEN"
+RELEASE_ROOT="$SHARED_ROOT/releases"
+PREPARED_CANDIDATE="$SHARED_ROOT/prepared-candidate-b"
 SUDOERS="/etc/sudoers.d/subyard-p0-source-$TOKEN"
 YARD_NAME="e2e-yard"
 PROJECT="subyard-e2e-yard"
@@ -131,26 +132,6 @@ cleanup_owned_project() {
   sudo -n find "/srv/$project" -depth -delete 2>/dev/null || true
 }
 
-restore_operator_parent_access() {
-  local mode owner
-  [ -e "$OPERATOR_PARENT_MODE" ] || return 0
-  p0_capacity_assert_root_marker || return
-  [ -d "$SOURCE_STATE_ROOT" ] && [ ! -L "$SOURCE_STATE_ROOT" ] \
-    && [ "$(cat "$SOURCE_STATE_ROOT/.subyard-p0-marker" 2>/dev/null)" = \
-      "$P0_CAPACITY_MARKER" ] \
-    || die "refusing unmarked source state root $SOURCE_STATE_ROOT"
-  [ -f "$OPERATOR_PARENT_MODE" ] && [ ! -L "$OPERATOR_PARENT_MODE" ] \
-    || die "operator parent mode record is unsafe: $OPERATOR_PARENT_MODE"
-  owner="$(stat -c '%u' "$OPERATOR_PARENT_MODE")"
-  [ "$owner" = "$(id -u)" ] \
-    || die "operator parent mode record has an unexpected owner: $OPERATOR_PARENT_MODE"
-  mode="$(cat "$OPERATOR_PARENT_MODE")"
-  [[ "$mode" =~ ^[0-7]{3,4}$ ]] \
-    || die "operator parent mode record is invalid: $OPERATOR_PARENT_MODE"
-  sudo -n chmod "$mode" "$HOME"
-  find "$OPERATOR_PARENT_MODE" -delete
-}
-
 cleanup_fixture() {
   local power_unit_changed=0
   if sudo -n test -f "$POWER_RETRY_DROPIN"; then
@@ -188,14 +169,23 @@ cleanup_fixture() {
   fi
   sudo -n find "$SUDOERS" -delete 2>/dev/null || true
   if id "$OPERATOR" >/dev/null 2>&1; then
+    sudo -n test -d "$OPERATOR_HOME" && ! sudo -n test -L "$OPERATOR_HOME" \
+      && [ "$(sudo -n cat "$OPERATOR_HOME_MARKER" 2>/dev/null)" = "$MARKER" ] \
+      || die "refusing unmarked fixture operator cleanup: $OPERATOR_HOME"
     sudo -n userdel -r "$OPERATOR" >/dev/null
   fi
-  if [ -d "$RELEASE_ROOT" ]; then
-    [ "$(cat "$RELEASE_ROOT/.subyard-p0-marker" 2>/dev/null)" = "$MARKER" ] \
-      || die "refusing unmarked release root $RELEASE_ROOT"
-    sudo -n find "$RELEASE_ROOT" -depth -delete
+  if [ -e "$OPERATOR_HOME" ]; then
+    sudo -n test -d "$OPERATOR_HOME" && ! sudo -n test -L "$OPERATOR_HOME" \
+      && [ "$(sudo -n cat "$OPERATOR_HOME_MARKER" 2>/dev/null)" = "$MARKER" ] \
+      || die "refusing unmarked fixture home cleanup: $OPERATOR_HOME"
+    sudo -n find "$OPERATOR_HOME" -xdev -depth -delete
   fi
-  restore_operator_parent_access
+  if [ -e "$SHARED_ROOT" ]; then
+    [ -d "$SHARED_ROOT" ] && [ ! -L "$SHARED_ROOT" ] \
+      && [ "$(cat "$SHARED_ROOT/.subyard-p0-marker" 2>/dev/null)" = "$MARKER" ] \
+      || die "refusing unmarked shared fixture root $SHARED_ROOT"
+    find "$SHARED_ROOT" -xdev -depth -delete
+  fi
   p0_capacity_remove_subtree "$SOURCE_STATE_ROOT"
   p0_capacity_remove_build_cache
   p0_capacity_remove_root_if_empty
@@ -242,13 +232,11 @@ restore_operator_passwordless_sudo() {
 prepare_operator() {
   local uid
   ! id "$OPERATOR" >/dev/null 2>&1 || die "fixture user $OPERATOR already exists"
+  [ ! -e "$OPERATOR_HOME" ] || die "fixture home already exists: $OPERATOR_HOME"
   [ ! -e "$RELEASE_ROOT" ] || die "fixture release root already exists"
-  [ ! -e "$OPERATOR_PARENT_MODE" ] \
-    || die "operator parent mode record already exists: $OPERATOR_PARENT_MODE"
-  stat -c '%a' "$HOME" > "$OPERATOR_PARENT_MODE"
-  chmod 0600 "$OPERATOR_PARENT_MODE"
-  sudo -n chmod o+x "$HOME"
   sudo -n useradd --create-home --home-dir "$OPERATOR_HOME" --shell /bin/bash "$OPERATOR"
+  operator_env bash -c 'printf "%s\n" "$2" > "$1"; chmod 0600 "$1"' _ \
+    "$OPERATOR_HOME_MARKER" "$MARKER"
   sudo -n usermod -aG incus-admin "$OPERATOR"
   set_operator_sudo_policy passwordless
   sudo -n loginctl enable-linger "$OPERATOR"
@@ -791,6 +779,8 @@ prepare() {
   p0_capacity_reset_build_cache
   p0_capacity_prepare_subtree "$SOURCE_STATE_ROOT"
   chmod 0711 "$SOURCE_STATE_ROOT"
+  install -d -m 0711 "$SHARED_ROOT"
+  printf '%s\n' "$MARKER" > "$SHARED_ROOT/.subyard-p0-marker"
   prepare_operator
   package_candidates
   prepare_project
