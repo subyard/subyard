@@ -106,10 +106,18 @@ incus_preflight() {
 }
 
 incus_wait_instance_agent() {
-  local project="${1:?project required}" instance="${2:?instance required}" attempt
-  for ((attempt = 0; attempt < 120; attempt++)); do
-    incus exec "$instance" --project "$project" -- true >/dev/null 2>&1 && return 0
-    [ "$attempt" -eq 119 ] || sleep 1
+  local project="${1:?project required}" instance="${2:?instance required}"
+  local wait_timeout="${SUBYARD_INCUS_AGENT_WAIT_TIMEOUT:-120}" deadline remaining probe_timeout
+  [[ "$wait_timeout" =~ ^[1-9][0-9]*$ ]] || return 2
+  deadline=$((SECONDS + wait_timeout))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    remaining=$((deadline - SECONDS))
+    probe_timeout="$remaining"
+    [ "$probe_timeout" -le 5 ] || probe_timeout=5
+    timeout --foreground "$probe_timeout" \
+      incus exec "$instance" --project "$project" -- true >/dev/null 2>&1 \
+      && return 0
+    [ "$SECONDS" -ge "$deadline" ] || sleep 1
   done
   return 1
 }

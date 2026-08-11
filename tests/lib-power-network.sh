@@ -95,6 +95,10 @@ case "${1:-}" in
   start) printf 'start\n' >> "$MOCK_INCUS_LOG" ;;
   stop) printf 'stop\n' >> "$MOCK_INCUS_LOG"; exit "${MOCK_INCUS_STOP_RC:-0}" ;;
   exec)
+    if [ "${MOCK_INCUS_EXEC_HANG:-0}" = 1 ]; then
+      /bin/sleep 30
+      exit 1
+    fi
     if [[ " $* " = *" -- sh -eu -c "* ]]; then
       printf '%s\n' "${MOCK_INCUS_ETH0_ADDRESS:-}"
       exit 0
@@ -127,7 +131,7 @@ reset_case() {
   POWER_ERROR=''
   export MOCK_NM_STATE=active MOCK_UID=1000 MOCK_SUDO_V_RC=0 MOCK_SUDO_N_RC=0 \
     MOCK_SUDO_REQUIRE_V=1 MOCK_NM_MODE=valid MOCK_RELOAD_RC=0 MOCK_NMCLI_RC=1 \
-    MOCK_INCUS_STOP_RC=0 MOCK_INCUS_EXEC_READY_AFTER=1
+    MOCK_INCUS_STOP_RC=0 MOCK_INCUS_EXEC_READY_AFTER=1 MOCK_INCUS_EXEC_HANG=0
 }
 
 reset_case
@@ -212,6 +216,14 @@ reset_case
 MOCK_INCUS_EXEC_READY_AFTER=2
 incus_wait_instance_agent test-project test-yard || fail "instance agent did not become ready"
 [ "$(cat "$MOCK_INCUS_EXEC_COUNT")" = 2 ] || fail "instance agent wait did not retry"
+
+reset_case
+started=$SECONDS
+if MOCK_INCUS_EXEC_HANG=1 SUBYARD_INCUS_AGENT_WAIT_TIMEOUT=1 \
+  incus_wait_instance_agent test-project test-yard; then
+  fail "hung instance agent probe returned success"
+fi
+[ "$((SECONDS - started))" -le 2 ] || fail "hung instance agent probe exceeded its deadline"
 
 reset_case
 MOCK_UID=0
