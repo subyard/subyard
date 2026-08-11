@@ -9,7 +9,7 @@ PROFILE=openclaw
 # Toolchain image: a Dockerfile path INSIDE the source tree that builds the runner's toolchain
 # (node/pnpm/python). For a live-bind run it is built from the AGENT's tree => the agent's
 # toolchain version. Context defaults to the Dockerfile's dir; tag to subyard-staging-<zone>.
-# Empty => run the profile BASE_IMAGE directly (no toolchain — the gateway won't build/run).
+# Empty => run the profile PROJECT_ENV_BASE_IMAGE directly (no toolchain — the gateway won't build/run).
 #   IMAGE_DOCKERFILE=docker/<your-devcontainer>.Dockerfile
 # IMAGE_DOCKERFILE=""
 

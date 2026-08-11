@@ -38,7 +38,9 @@ shipped defaults
 are not arbitrary configuration trees.
 
 Public profiles remain in the immutable runtime. Set `YARD_TEMPLATE=<profile>` for a reusable yard
-template or `YARD_PROFILES="<profile> ..."` to limit project profiles. Run
+template, `ENVIRONMENT_PROFILES="<profile> ..."` to limit project EnvironmentProfiles, and
+`CODING_TOOL_INTEGRATIONS="<integration> ..."` independently for coding tools. Neither selection is
+derived from the yard name. Run
 `yard -Y <name> config show` to inspect effective settings and `yard config paths` to inspect storage
 roles. `yard config status --all-local` / `yard config apply --all-local` verify or refresh
 materialized agent files in local yards; remote yards are excluded from `--all-local`.

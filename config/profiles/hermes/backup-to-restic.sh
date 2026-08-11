@@ -56,7 +56,7 @@ effective_setting() {
   printf '%s\n' "$value"
 }
 
-instance="$(effective_setting INSTANCE_NAME)"
+instance="$(effective_setting YARD_INSTANCE_NAME)"
 project="$(effective_setting INCUS_PROJECT)"
 incus info "$instance" --project "$project" >/dev/null \
   || die "yard instance is unavailable"

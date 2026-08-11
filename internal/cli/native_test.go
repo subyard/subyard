@@ -229,7 +229,7 @@ func TestRPCResyncReturnsFullSnapshotAndContinuesMonotonicSessionEvents(t *testi
 	fakeIncus := &testkit.Incus{
 		ServerInfo: ports.ServerInfo{Environment: "incus", Version: "6.23", APIExtensions: []string{"projects"}},
 		Instances: map[string]ports.InstanceInfo{"subyard/yard": {
-			Name: "yard", Project: "subyard", Type: domain.InstanceContainer, Status: "Stopped",
+			Name: "yard", Project: "subyard", Type: domain.YardContainer, Status: "Stopped",
 			Config: map[string]string{}, Devices: map[string]map[string]string{},
 		}},
 	}
@@ -1388,11 +1388,11 @@ exit 90
 		t.Fatalf("structured adapter context lost engine version: %#v", contextValues)
 	}
 	remoteContext := loaded.Context
-	remoteContext.YardType = domain.YardRemote
-	remoteContext.RemoteDest = "dev@owner.example"
-	remoteContext.RemoteYard = "named"
+	remoteContext.AccessKind = domain.AccessRemote
+	remoteContext.OwnerEndpoint = "dev@owner.example"
+	remoteContext.OwnerYardName = "named"
 	remoteValues := structuredAdapterContext(remoteContext)
-	if remoteValues["REMOTE_DEST"] != remoteContext.RemoteDest || remoteValues["REMOTE_YARD"] != remoteContext.RemoteYard {
+	if remoteValues["OWNER_ENDPOINT"] != remoteContext.OwnerEndpoint || remoteValues["OWNER_YARD_NAME"] != remoteContext.OwnerYardName {
 		t.Fatalf("structured adapter context lost remote route: %#v", remoteValues)
 	}
 	commandValues := structuredCommandContext(config.Loaded{Context: loaded.Context, Environment: map[string]string{
@@ -1578,7 +1578,7 @@ func TestNativeOwnerInfoUsesTypedContextAndLiveInventory(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &info); err != nil {
 		t.Fatal(err)
 	}
-	if info.Name != "default" || info.State != "RUNNING" || info.SSHPort != 2222 ||
+	if info.YardName != "default" || info.State != "RUNNING" || info.SSHPort != 2222 ||
 		info.Projects == nil || *info.Projects != 1 {
 		t.Fatalf("unexpected owner info: %#v", info)
 	}
@@ -1637,7 +1637,7 @@ func TestNativeStatusUsesTypedPortsAndRendersParityFields(t *testing.T) {
 	fakeIncus := &testkit.Incus{
 		ServerInfo: ports.ServerInfo{Environment: "incus", Version: "6.23"},
 		Instances: map[string]ports.InstanceInfo{"subyard/yard": {
-			Name: "yard", Project: "subyard", Type: domain.InstanceContainer, Status: "Running",
+			Name: "yard", Project: "subyard", Type: domain.YardContainer, Status: "Running",
 			Config: map[string]string{
 				"user.subyard.desired_power": "running", "user.subyard.initialized": "true",
 				"boot.autostart": "false",
@@ -2002,11 +2002,11 @@ func TestStatusRoutesSummaryAndExplicitYardSelectors(t *testing.T) {
 			incus := &testkit.Incus{
 				Instances: map[string]ports.InstanceInfo{
 					"subyard/yard": {
-						Name: "yard", Project: "subyard", Type: domain.InstanceContainer,
+						Name: "yard", Project: "subyard", Type: domain.YardContainer,
 						Status: "Running", Config: map[string]string{}, Devices: map[string]map[string]string{},
 					},
 					"subyard-demo/yard-demo": {
-						Name: "yard-demo", Project: "subyard-demo", Type: domain.InstanceContainer,
+						Name: "yard-demo", Project: "subyard-demo", Type: domain.YardContainer,
 						Status: "Running", Config: map[string]string{}, Devices: map[string]map[string]string{},
 					},
 				},
@@ -2363,7 +2363,7 @@ func TestObserveProjectBindDetectsConvergenceAndConflicts(t *testing.T) {
 		SSHHost: "yard", Target: "yard",
 	}
 	loaded := config.Loaded{Context: domain.Context{
-		YardType: domain.YardLocal, IncusProject: "subyard", InstanceName: "yard",
+		AccessKind: domain.AccessLocal, IncusProject: "subyard", YardInstanceName: "yard",
 	}}
 	desired := map[string]string{
 		"type": "disk", "source": record.HostPath, "path": record.YardPath, "shift": "true",
@@ -2478,7 +2478,7 @@ func TestObserveProjectActionDetectsSyncAndEnvironmentNoOps(t *testing.T) {
 			t.Fatal(err)
 		}
 		existing := record
-		execution := &projectExecution{Loaded: config.Loaded{Context: domain.Context{YardType: domain.YardLocal}}, Record: record, PreviewExisting: &existing}
+		execution := &projectExecution{Loaded: config.Loaded{Context: domain.Context{AccessKind: domain.AccessLocal}}, Record: record, PreviewExisting: &existing}
 		if err := program.observeProjectAction(context.Background(), "sync", execution); err != nil {
 			t.Fatal(err)
 		}
@@ -2509,7 +2509,7 @@ func TestObserveProjectActionDetectsSyncAndEnvironmentNoOps(t *testing.T) {
 		}
 		existing := record
 		execution := &projectExecution{
-			Loaded: config.Loaded{Context: domain.Context{YardType: domain.YardLocal, YardName: "default"}},
+			Loaded: config.Loaded{Context: domain.Context{AccessKind: domain.AccessLocal, YardName: "default"}},
 			Record: record, PreviewExisting: &existing,
 		}
 		if err := program.observeProjectAction(context.Background(), "sync", execution); err != nil {
@@ -2550,7 +2550,7 @@ func TestObserveProjectActionDetectsSyncAndEnvironmentNoOps(t *testing.T) {
 				t.Fatal(err)
 			}
 			execution := &projectExecution{
-				Loaded: config.Loaded{Context: domain.Context{YardType: domain.YardLocal}},
+				Loaded: config.Loaded{Context: domain.Context{AccessKind: domain.AccessLocal}},
 				Record: record, OperationID: "operation-export-assessment",
 			}
 			if err := program.observeProjectAction(context.Background(), "export", execution); err != nil {
@@ -2576,7 +2576,7 @@ func TestObserveProjectActionDetectsSyncAndEnvironmentNoOps(t *testing.T) {
 		environmentRecord := record
 		environmentRecord.Target = "fixture"
 		execution := &projectExecution{
-			Loaded: config.Loaded{Context: domain.Context{YardType: domain.YardLocal}},
+			Loaded: config.Loaded{Context: domain.Context{AccessKind: domain.AccessLocal}},
 			Record: environmentRecord, Environment: map[string]string{},
 		}
 		err = program.observeProjectAction(context.Background(), "up", execution)
@@ -2602,7 +2602,7 @@ func TestObserveProjectActionDetectsSyncAndEnvironmentNoOps(t *testing.T) {
 		environmentRecord := record
 		environmentRecord.Target = "fixture"
 		execution := &projectExecution{
-			Loaded: config.Loaded{Context: domain.Context{YardType: domain.YardLocal}},
+			Loaded: config.Loaded{Context: domain.Context{AccessKind: domain.AccessLocal}},
 			Record: environmentRecord, Environment: map[string]string{},
 		}
 		err = program.observeProjectAction(context.Background(), "up", execution)
@@ -2647,7 +2647,7 @@ func TestObserveProjectActionDetectsSyncAndEnvironmentNoOps(t *testing.T) {
 				t.Fatal(err)
 			}
 			execution := &projectExecution{
-				Loaded: config.Loaded{Context: domain.Context{YardType: domain.YardLocal}},
+				Loaded: config.Loaded{Context: domain.Context{AccessKind: domain.AccessLocal}},
 				Record: environmentRecord, Environment: map[string]string{},
 			}
 			if test.rebuild {
@@ -2748,7 +2748,7 @@ printf '%s\n' '{"projectId":"Demo-2","name":"Demo-2","existing":null}'
 		env:     map[string]string{"PATH": fakeBin, "SUBYARD_OPERATION_ID": "preview-operation"},
 	}
 	loaded := config.Loaded{Context: domain.Context{
-		YardType: domain.YardRemote, RemoteDest: "dev@owner.example", SSHHost: "yard",
+		AccessKind: domain.AccessRemote, OwnerEndpoint: "dev@owner.example", SSHHost: "yard",
 	}}
 	admission, err := program.previewProjectAdmission(
 		context.Background(), loaded, nil, "/host/Demo", domain.ProjectSync, "Demo", false,
@@ -2774,7 +2774,7 @@ printf '%s\n' '{"projectId":"Demo-2","name":"Demo-2","reserved":true,"existing":
 	}
 	execution := &projectExecution{
 		Loaded: config.Loaded{Context: domain.Context{
-			YardType: domain.YardRemote, RemoteDest: "dev@owner.example", SSHHost: "yard",
+			AccessKind: domain.AccessRemote, OwnerEndpoint: "dev@owner.example", SSHHost: "yard",
 		}},
 		Commit: projectCommitPut, OperationID: "reserve-operation", RequestedName: "Demo",
 		Record: domain.ProjectRecord{
@@ -3126,7 +3126,7 @@ func TestParseShellArguments(t *testing.T) {
 
 func TestUsageAndShellExecArgumentsPreserveTypedBoundaries(t *testing.T) {
 	yard := domain.Context{
-		InstanceName: "yard", IncusProject: "subyard", DevUser: "dev", DevUID: 1000,
+		YardInstanceName: "yard", IncusProject: "subyard", DevUser: "dev", DevUID: 1000,
 	}
 	usageInput := []string{"daily", "--json", "space arg", "", "$(touch should-not-run)"}
 	filtered, help := parseUsageArguments(append([]string{"--yes"}, usageInput...))

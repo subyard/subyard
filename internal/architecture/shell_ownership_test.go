@@ -221,7 +221,7 @@ func TestPhysicalShellConsumesOnlyPreparedControlPlaneState(t *testing.T) {
 		"lib-power.sh": true, "host.sh": true, "ssh-config.sh": true,
 	}
 	forbidden := []string{
-		"SUBYARD_CONFIG_LOADED", "SUBYARD_PROFILES_DIR", "YARD_TEMPLATE", "REMOTE_DEST",
+		"SUBYARD_CONFIG_LOADED", "SUBYARD_PROFILES_DIR", "YARD_TEMPLATE", "OWNER_ENDPOINT",
 		"/config/yards", "resolve_project", "route_sync_target", "state_engine",
 		"stage_registry", "source_control_plane",
 	}

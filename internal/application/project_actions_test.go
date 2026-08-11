@@ -100,7 +100,7 @@ func TestProjectCloneOwnsSequenceAndMetadata(t *testing.T) {
 	runner := ProjectActionRunner{
 		Data: data,
 		Yard: domain.Context{
-			YardName: "default", YardType: domain.YardLocal, DevUser: "dev", DevUID: 1000,
+			YardName: "default", AccessKind: domain.AccessLocal, DevUser: "dev", DevUID: 1000,
 		},
 		Project: cloneRecord(),
 	}
@@ -126,7 +126,7 @@ func TestProjectCloneCleansPartialWorkspace(t *testing.T) {
 	data := &projectDataStub{failAt: 3}
 	runner := ProjectActionRunner{
 		Data:    data,
-		Yard:    domain.Context{YardType: domain.YardRemote, DevUser: "dev", DevUID: 1000},
+		Yard:    domain.Context{AccessKind: domain.AccessRemote, DevUser: "dev", DevUID: 1000},
 		Project: cloneRecord(),
 	}
 	if _, _, err := runner.Run(context.Background(), domain.AdapterRequest{
@@ -149,7 +149,7 @@ func TestProjectCloneRejectsUnownedExistingWorkspace(t *testing.T) {
 	}
 	runner := ProjectActionRunner{
 		Data:    data,
-		Yard:    domain.Context{YardType: domain.YardRemote, DevUser: "dev", DevUID: 1000},
+		Yard:    domain.Context{AccessKind: domain.AccessRemote, DevUser: "dev", DevUID: 1000},
 		Project: cloneRecord(),
 	}
 	if _, _, err := runner.Run(context.Background(), domain.AdapterRequest{
@@ -179,7 +179,7 @@ func TestProjectRemoveCleansEnvironmentBeforeWorkspace(t *testing.T) {
 	record := cloneRecord()
 	record.Mode = domain.ProjectSync
 	runner := ProjectActionRunner{
-		Data: data, Yard: domain.Context{YardType: domain.YardRemote}, Project: record,
+		Data: data, Yard: domain.Context{AccessKind: domain.AccessRemote}, Project: record,
 	}
 	if _, _, err := runner.Run(context.Background(), domain.AdapterRequest{
 		Schema: 1, OperationID: "operation-remove", Adapter: "project", Action: "remove",
@@ -198,7 +198,7 @@ func TestProjectRemoveFailureKeepsWorkspace(t *testing.T) {
 	record := cloneRecord()
 	record.Mode = domain.ProjectSync
 	runner := ProjectActionRunner{
-		Data: data, Yard: domain.Context{YardType: domain.YardRemote}, Project: record,
+		Data: data, Yard: domain.Context{AccessKind: domain.AccessRemote}, Project: record,
 	}
 	if _, _, err := runner.Run(context.Background(), domain.AdapterRequest{
 		Schema: 1, OperationID: "operation-remove", Adapter: "project", Action: "remove",
@@ -215,7 +215,7 @@ func TestProjectRemoveDetachesBindWithoutDeletingHostData(t *testing.T) {
 	record := cloneRecord()
 	record.Mode, record.Target = domain.ProjectBind, "yard"
 	runner := ProjectActionRunner{
-		Data: data, Devices: devices, Yard: domain.Context{YardType: domain.YardLocal}, Project: record,
+		Data: data, Devices: devices, Yard: domain.Context{AccessKind: domain.AccessLocal}, Project: record,
 	}
 	if _, _, err := runner.Run(context.Background(), domain.AdapterRequest{
 		Schema: 1, OperationID: "operation-remove", Adapter: "project", Action: "remove",
@@ -234,7 +234,7 @@ func TestProjectSyncStreamsArchiveAndWritesMetadata(t *testing.T) {
 	record.Mode, record.HostPath = domain.ProjectSync, "/host/demo"
 	runner := ProjectActionRunner{
 		Data: data, Archive: projectArchiveStub{payload: "archive"},
-		Yard: domain.Context{YardType: domain.YardRemote, DevUID: 1000}, Project: record,
+		Yard: domain.Context{AccessKind: domain.AccessRemote, DevUID: 1000}, Project: record,
 	}
 	if _, _, err := runner.Run(context.Background(), domain.AdapterRequest{
 		Schema: 1, OperationID: "operation-sync", Adapter: "project", Action: "sync",
@@ -254,7 +254,7 @@ func TestProjectBindUsesIncusDeviceAndWritesMetadata(t *testing.T) {
 	record.Mode, record.HostPath = domain.ProjectBind, "/host/demo"
 	runner := ProjectActionRunner{
 		Data: data, Devices: devices,
-		Yard: domain.Context{YardType: domain.YardLocal, DevUID: 1000}, Project: record,
+		Yard: domain.Context{AccessKind: domain.AccessLocal, DevUID: 1000}, Project: record,
 	}
 	if _, _, err := runner.Run(context.Background(), domain.AdapterRequest{
 		Schema: 1, OperationID: "operation-bind", Adapter: "project", Action: "bind",
@@ -278,7 +278,7 @@ func TestProjectHookFailureIsNonBlockingAndVisible(t *testing.T) {
 	}
 	runner := ProjectActionRunner{
 		Data:    data,
-		Yard:    domain.Context{YardType: domain.YardRemote, DevUser: "dev", DevUID: 1000},
+		Yard:    domain.Context{AccessKind: domain.AccessRemote, DevUser: "dev", DevUID: 1000},
 		Project: cloneRecord(),
 	}
 	result, message, err := runner.Run(context.Background(), domain.AdapterRequest{
@@ -305,7 +305,7 @@ func TestProjectExportUsesDataPlaneAndPublishesPortablePatch(t *testing.T) {
 	exports := &projectExportStub{path: "/data/exports/demo.patch"}
 	runner := ProjectActionRunner{
 		Data: data, Archive: projectArchiveStub{payload: "archive"}, Exports: exports,
-		Yard: domain.Context{YardType: domain.YardRemote}, Project: record,
+		Yard: domain.Context{AccessKind: domain.AccessRemote}, Project: record,
 	}
 	result, message, err := runner.Run(context.Background(), domain.AdapterRequest{
 		Schema: 1, OperationID: "operation-export", Adapter: "project", Action: "export",
@@ -344,7 +344,7 @@ func TestProjectCodeWritesRemoteWorkspaceAndOpensDescriptor(t *testing.T) {
 	runner := ProjectActionRunner{
 		Data: data, Instances: incus, VSCode: code,
 		WorkspaceDirectory: workspaceDirectory,
-		Yard:               domain.Context{YardType: domain.YardLocal, IncusProject: "subyard", InstanceName: "yard", DevUser: "dev", DevUID: 1000},
+		Yard:               domain.Context{AccessKind: domain.AccessLocal, IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev", DevUID: 1000},
 		Project:            record, Extensions: []string{"anthropic.claude-code"},
 		YardIdentity: "owner/default",
 	}
@@ -398,7 +398,7 @@ func TestProjectCodeWorkspaceNamespaceSeparatesHostAndProjectIdentity(t *testing
 		record.YardPath = "/srv/workspaces/" + identity.projectID + "/src"
 		runner := ProjectActionRunner{
 			Data: &projectDataStub{}, VSCode: code, WorkspaceDirectory: workspaceDirectory,
-			Yard: domain.Context{YardType: domain.YardRemote}, Project: record,
+			Yard: domain.Context{AccessKind: domain.AccessRemote}, Project: record,
 			YardIdentity: "owner/default",
 		}
 		if _, _, err := runner.Run(context.Background(), domain.AdapterRequest{
@@ -416,7 +416,7 @@ func TestProjectCodeRequiresCanonicalYardIdentity(t *testing.T) {
 	code := &vsCodeStub{}
 	runner := ProjectActionRunner{
 		Data: &projectDataStub{}, VSCode: code, WorkspaceDirectory: t.TempDir(),
-		Yard: domain.Context{YardType: domain.YardRemote}, Project: cloneRecord(),
+		Yard: domain.Context{AccessKind: domain.AccessRemote}, Project: cloneRecord(),
 	}
 	_, _, err := runner.Run(context.Background(), domain.AdapterRequest{
 		Schema: 1, OperationID: "operation-code", Adapter: "project", Action: "code",
@@ -431,7 +431,7 @@ func TestProjectCodeManualFallbackUsesPositionalControllerDescriptor(t *testing.
 	workspaceDirectory := filepath.Join(t.TempDir(), "directory with spaces")
 	runner := ProjectActionRunner{
 		Data: &projectDataStub{}, WorkspaceDirectory: workspaceDirectory,
-		Yard: domain.Context{YardType: domain.YardRemote}, Project: record,
+		Yard: domain.Context{AccessKind: domain.AccessRemote}, Project: record,
 		YardIdentity: "owner/default",
 	}
 	_, message, err := runner.Run(context.Background(), domain.AdapterRequest{

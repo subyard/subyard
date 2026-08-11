@@ -115,7 +115,7 @@ func TestPeerStorePreservesActiveRouteAndRejectsIdentityRotation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if peer.Transport != "ssh" || peer.Dest != "owner.example" || peer.RemoteYard != "inner" {
+	if peer.Transport != "ssh" || peer.Dest != "owner.example" || peer.OwnerYardName != "inner" {
 		t.Fatalf("active peer route was not stored: %#v", peer)
 	}
 	inbound, err := runtime.storePeer("controller-alias", identity, "inbound", "", "", true)
@@ -158,7 +158,7 @@ func TestPeerRoutesAssignmentsAndSyncState(t *testing.T) {
 		},
 		{
 			peer: domain.CredentialPeer{
-				Name: "remote", ActorID: "actor-remote", Transport: "ssh", RemoteYard: "inner",
+				Name: "remote", ActorID: "actor-remote", Transport: "ssh", OwnerYardName: "inner",
 			},
 			role: "active", assignment: "actor-remote/inner",
 		},

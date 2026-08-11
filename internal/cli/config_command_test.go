@@ -90,9 +90,9 @@ func TestConfigShowExplainsScalarDerivedAndFileSettingsWithoutSecrets(t *testing
 		},
 		{
 			name:      "derived setting",
-			arguments: []string{"-Y", "named", "config", "show", "INSTANCE_NAME"},
+			arguments: []string{"-Y", "named", "config", "show", "YARD_INSTANCE_NAME"},
 			contains: []string{
-				"setting: INSTANCE_NAME", "effective: yard-named", "derived from yard name",
+				"setting: YARD_INSTANCE_NAME", "effective: yard-named", "derived from yard name",
 			},
 		},
 		{
@@ -156,21 +156,21 @@ func TestConfigShowExplainsScalarDerivedAndFileSettingsWithoutSecrets(t *testing
 func TestConfigStatusAndApplyAllLocalExcludeRemoteYards(t *testing.T) {
 	root, _, configHome, environment := configCommandFixture(t)
 	environment = append(environment,
-		"SUBYARD_ENGINE_CONTEXT=1", "SUBYARD_CONFIG_LOADED=1", "YARD_TYPE=local")
+		"SUBYARD_ENGINE_CONTEXT=1", "SUBYARD_CONFIG_LOADED=1", "ACCESS_KIND=local")
 	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "named", "config.env"),
 		"SSH_PORT=3333\n")
 	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "remote", "config.env"),
-		"YARD_TYPE=remote\nREMOTE_DEST=owner.example\nREMOTE_YARD=inner\nSSH_PORT=4444\n")
+		"ACCESS_KIND=remote\nREMOTE_DEST=owner.example\nREMOTE_YARD=inner\nSSH_PORT=4444\n")
 
 	defaultLoaded := loadConfigCommandContext(t, root, environment, "default")
 	namedLoaded := loadConfigCommandContext(t, root, environment, "named")
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
-		defaultLoaded.Context.IncusProject + "/" + defaultLoaded.Context.InstanceName: {
-			Name: defaultLoaded.Context.InstanceName, Project: defaultLoaded.Context.IncusProject,
+		defaultLoaded.Context.IncusProject + "/" + defaultLoaded.Context.YardInstanceName: {
+			Name: defaultLoaded.Context.YardInstanceName, Project: defaultLoaded.Context.IncusProject,
 			Status: "Running",
 		},
-		namedLoaded.Context.IncusProject + "/" + namedLoaded.Context.InstanceName: {
-			Name: namedLoaded.Context.InstanceName, Project: namedLoaded.Context.IncusProject,
+		namedLoaded.Context.IncusProject + "/" + namedLoaded.Context.YardInstanceName: {
+			Name: namedLoaded.Context.YardInstanceName, Project: namedLoaded.Context.IncusProject,
 			Status: "Running",
 		},
 	}}
@@ -251,8 +251,8 @@ func TestConfigStatusDetectsGuestDriftWithoutPrintingContents(t *testing.T) {
 	root, _, _, environment := configCommandFixture(t)
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
-		loaded.Context.IncusProject + "/" + loaded.Context.InstanceName: {
-			Name: loaded.Context.InstanceName, Project: loaded.Context.IncusProject, Status: "Running",
+		loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {
+			Name: loaded.Context.YardInstanceName, Project: loaded.Context.IncusProject, Status: "Running",
 		},
 	}, ExecSteps: []testkit.IncusExecStep{{
 		Result: ports.InstanceExecResult{Stdout: []byte(strings.Repeat("0", 64) + "  file\n"), ExitCode: 0},
@@ -632,8 +632,8 @@ func TestConfigApplyConvergedSkipsPromptAndApplier(t *testing.T) {
 	root, _, _, environment := configCommandFixture(t)
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
-		loaded.Context.IncusProject + "/" + loaded.Context.InstanceName: {
-			Name: loaded.Context.InstanceName, Project: loaded.Context.IncusProject, Status: "Running",
+		loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {
+			Name: loaded.Context.YardInstanceName, Project: loaded.Context.IncusProject, Status: "Running",
 		},
 	}}
 	appendHashSteps(t, fake, loaded)
@@ -664,14 +664,14 @@ func TestConfigApplyAssessesDriftBeforeOneDefaultYesPrompt(t *testing.T) {
 	namedLoaded := loadConfigCommandContext(t, root, environment, "named")
 	stoppedLoaded := loadConfigCommandContext(t, root, environment, "stopped")
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
-		defaultLoaded.Context.IncusProject + "/" + defaultLoaded.Context.InstanceName: {
-			Name: defaultLoaded.Context.InstanceName, Project: defaultLoaded.Context.IncusProject, Status: "Running",
+		defaultLoaded.Context.IncusProject + "/" + defaultLoaded.Context.YardInstanceName: {
+			Name: defaultLoaded.Context.YardInstanceName, Project: defaultLoaded.Context.IncusProject, Status: "Running",
 		},
-		namedLoaded.Context.IncusProject + "/" + namedLoaded.Context.InstanceName: {
-			Name: namedLoaded.Context.InstanceName, Project: namedLoaded.Context.IncusProject, Status: "Running",
+		namedLoaded.Context.IncusProject + "/" + namedLoaded.Context.YardInstanceName: {
+			Name: namedLoaded.Context.YardInstanceName, Project: namedLoaded.Context.IncusProject, Status: "Running",
 		},
-		stoppedLoaded.Context.IncusProject + "/" + stoppedLoaded.Context.InstanceName: {
-			Name: stoppedLoaded.Context.InstanceName, Project: stoppedLoaded.Context.IncusProject, Status: "Stopped",
+		stoppedLoaded.Context.IncusProject + "/" + stoppedLoaded.Context.YardInstanceName: {
+			Name: stoppedLoaded.Context.YardInstanceName, Project: stoppedLoaded.Context.IncusProject, Status: "Stopped",
 		},
 	}, ExecSteps: []testkit.IncusExecStep{{
 		Result: ports.InstanceExecResult{Stdout: []byte(strings.Repeat("0", 64) + "  stale\n"), ExitCode: 0},
@@ -702,8 +702,8 @@ func TestConfigApplyDeclineLeavesApplierUntouched(t *testing.T) {
 	root, _, _, environment := configCommandFixture(t)
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
-		loaded.Context.IncusProject + "/" + loaded.Context.InstanceName: {
-			Name: loaded.Context.InstanceName, Project: loaded.Context.IncusProject, Status: "Running",
+		loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {
+			Name: loaded.Context.YardInstanceName, Project: loaded.Context.IncusProject, Status: "Running",
 		},
 	}, ExecSteps: []testkit.IncusExecStep{{
 		Result: ports.InstanceExecResult{Stdout: []byte(strings.Repeat("0", 64) + "  stale\n"), ExitCode: 0},
@@ -740,8 +740,8 @@ func TestConfigApplyExecErrorFailsPreflightWithAssumeYes(t *testing.T) {
 			loaded := loadConfigCommandContext(t, root, environment, "default")
 			fake := &testkit.Incus{
 				Instances: map[string]ports.InstanceInfo{
-					loaded.Context.IncusProject + "/" + loaded.Context.InstanceName: {
-						Name: loaded.Context.InstanceName, Project: loaded.Context.IncusProject,
+					loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {
+						Name: loaded.Context.YardInstanceName, Project: loaded.Context.IncusProject,
 						Status: "Running",
 					},
 				},
@@ -776,8 +776,8 @@ func TestConfigApplyCompletedNonzeroProbeRemainsDrift(t *testing.T) {
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	fake := &testkit.Incus{
 		Instances: map[string]ports.InstanceInfo{
-			loaded.Context.IncusProject + "/" + loaded.Context.InstanceName: {
-				Name: loaded.Context.InstanceName, Project: loaded.Context.IncusProject,
+			loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {
+				Name: loaded.Context.YardInstanceName, Project: loaded.Context.IncusProject,
 				Status: "Running",
 			},
 		},
@@ -1345,7 +1345,7 @@ func TestConfigSourceConnectOnboardsSharedOnlySource(t *testing.T) {
 	content, err := os.ReadFile(
 		filepath.Join(configHome, "overrides", "shared", "config.env"),
 	)
-	if err != nil || string(content) != "BASE_IMAGE=images:debian/13\n" {
+	if err != nil || string(content) != "YARD_IMAGE=images:debian/13\n" {
 		t.Fatalf("source connect did not apply shared settings: %q %v", content, err)
 	}
 	content, err = os.ReadFile(filepath.Join(configHome, "config.env"))
@@ -1615,7 +1615,7 @@ func TestConfigSourceConnectRejectsEmbeddedCredentialsAndRemoteForwards(t *testi
 
 	writeConfigCommandFile(t,
 		filepath.Join(configHome, "yards", "remote", "config.env"),
-		"YARD_TYPE=remote\nREMOTE_DEST=owner.example\nREMOTE_YARD=inner\nSSH_PORT=4444\n")
+		"ACCESS_KIND=remote\nREMOTE_DEST=owner.example\nREMOTE_YARD=inner\nSSH_PORT=4444\n")
 	fakeBin := filepath.Join(home, "fake-bin")
 	logPath := filepath.Join(home, "ssh-arguments")
 	writeConfigCommandFile(t, filepath.Join(fakeBin, "ssh"), `#!/bin/sh
@@ -1889,8 +1889,8 @@ func TestConfigSyncConnectApplyRefreshesAffectedRunningYardWithOnePrompt(t *test
 
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
-		loaded.Context.IncusProject + "/" + loaded.Context.InstanceName: {
-			Name:    loaded.Context.InstanceName,
+		loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {
+			Name:    loaded.Context.YardInstanceName,
 			Project: loaded.Context.IncusProject,
 			Status:  "Running",
 		},
@@ -2683,7 +2683,7 @@ func TestConfigSyncPushRejectsConcurrentRemoteAdvanceWithoutForce(t *testing.T) 
 	prompt := &callbackPrompt{callback: func() {
 		writeConfigCommandFile(t,
 			filepath.Join(publisher, "shared", "config.env"),
-			"BASE_IMAGE=images:debian/13\n")
+			"YARD_IMAGE=images:debian/13\n")
 		commitConfigSource(t, publisher, "concurrent remote change")
 		runConfigSyncGit(t, publisher, "push", "-q")
 	}}
@@ -2867,7 +2867,7 @@ func configSharedOnlyGitRepository(t *testing.T) string {
 	writeConfigCommandFile(t, filepath.Join(source, "subyard-config.json"),
 		"{\n  \"schemaVersion\": 1\n}\n")
 	writeConfigCommandFile(t, filepath.Join(source, "shared", "config.env"),
-		"BASE_IMAGE=images:debian/13\n")
+		"YARD_IMAGE=images:debian/13\n")
 	runConfigSyncGit(t, source, "init", "-q")
 	commitConfigSource(t, source, "shared only")
 	return source

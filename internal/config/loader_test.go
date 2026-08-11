@@ -22,8 +22,8 @@ func TestLoadNamedContext(t *testing.T) {
 	}
 	writeFixture(t, filepath.Join(shipped, "incus.project.env"), `: "${INCUS_PROJECT:=subyard}"
 : "${RESTRICTED_DISK_PATHS:=/srv/subyard}"`)
-	writeFixture(t, filepath.Join(shipped, "subyard.env"), `: "${INSTANCE_NAME:=yard}"
-: "${INSTANCE_TYPE:=container}"
+	writeFixture(t, filepath.Join(shipped, "subyard.env"), `: "${YARD_INSTANCE_NAME:=yard}"
+: "${YARD_KIND:=container}"
 : "${SHIFT_MODE:=shift}"
 : "${FORWARD_SSH_AGENT:=0}"
 : "${DEV_SUDO:=0}"
@@ -51,7 +51,7 @@ func TestLoadNamedContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := loaded.Context
-	if ctx.InstanceName != "fixture-yard" || ctx.IncusProject != "subyard-named" || ctx.SSHPort != 3333 {
+	if ctx.YardInstanceName != "fixture-yard" || ctx.IncusProject != "subyard-named" || ctx.SSHPort != 3333 {
 		t.Fatalf("named context mismatch: %#v", ctx)
 	}
 	if !ctx.NestedE2EVMs || ctx.ForwardSSHAgent {
@@ -73,8 +73,8 @@ func TestLoadNamedContext(t *testing.T) {
 	) {
 		t.Fatalf("normalized setting provenance omitted its transformation: %#v", hostBaseTrace)
 	}
-	if ctx.YardType != domain.YardLocal {
-		t.Fatalf("unexpected yard type: %s", ctx.YardType)
+	if ctx.AccessKind != domain.AccessLocal {
+		t.Fatalf("unexpected yard type: %s", ctx.AccessKind)
 	}
 }
 
@@ -91,8 +91,8 @@ func TestLoadExactYardSettingsFile(t *testing.T) {
 	}
 	writeFixture(t, filepath.Join(shipped, "incus.project.env"), `: "${INCUS_PROJECT:=subyard}"
 : "${RESTRICTED_DISK_PATHS:=/srv/subyard}"`)
-	writeFixture(t, filepath.Join(shipped, "subyard.env"), `: "${INSTANCE_NAME:=yard}"
-: "${INSTANCE_TYPE:=container}"
+	writeFixture(t, filepath.Join(shipped, "subyard.env"), `: "${YARD_INSTANCE_NAME:=yard}"
+: "${YARD_KIND:=container}"
 : "${SHIFT_MODE:=shift}"
 : "${FORWARD_SSH_AGENT:=0}"
 : "${DEV_SUDO:=0}"
@@ -103,7 +103,7 @@ func TestLoadExactYardSettingsFile(t *testing.T) {
 : "${SUBYARD_HOME:=$SUBYARD_OPERATOR_HOME/.subyard}"
 : "${STORAGE_PATH:=$SUBYARD_HOME/incus/storage}"
 : "${HOST_BASE:=${RESTRICTED_DISK_PATHS:-/srv/subyard}}"`)
-	writeFixture(t, preset, "YARD_PROFILES=hermes\nAGENTS=codex\nSSH_PORT=3333\n")
+	writeFixture(t, preset, "ENVIRONMENT_PROFILES=hermes\nAGENTS=codex\nSSH_PORT=3333\n")
 
 	loaded, err := Load(LoadOptions{
 		RepositoryRoot:   root,
@@ -120,7 +120,7 @@ func TestLoadExactYardSettingsFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	if loaded.Context.YardName != "custom-name" || loaded.Context.SSHPort != 3333 ||
-		loaded.Environment["YARD_PROFILES"] != "hermes" || loaded.Environment["AGENTS"] != "codex" {
+		loaded.Environment["ENVIRONMENT_PROFILES"] != "hermes" || loaded.Environment["CODING_TOOL_INTEGRATIONS"] != "codex" {
 		t.Fatalf("exact yard settings were not loaded: %#v %#v", loaded.Context, loaded.Environment)
 	}
 	assertEffectiveSetting(t, loaded.Settings["SSH_PORT"], "3333", "yard", "scalar settings", preset)
@@ -169,8 +169,8 @@ func TestLoadHostSettingsAndMigratedPrivateAssets(t *testing.T) {
 	}
 	writeFixture(t, filepath.Join(shipped, "incus.project.env"), `: "${INCUS_PROJECT:=subyard}"
 : "${RESTRICTED_DISK_PATHS:=/srv/subyard}"`)
-	writeFixture(t, filepath.Join(shipped, "subyard.env"), `: "${INSTANCE_NAME:=yard}"
-: "${INSTANCE_TYPE:=container}"
+	writeFixture(t, filepath.Join(shipped, "subyard.env"), `: "${YARD_INSTANCE_NAME:=yard}"
+: "${YARD_KIND:=container}"
 : "${SHIFT_MODE:=shift}"
 : "${FORWARD_SSH_AGENT:=0}"
 : "${DEV_SUDO:=0}"
@@ -242,7 +242,7 @@ func TestSettingsPrecedenceAndYardFileOverride(t *testing.T) {
 	external := filepath.Join(temp, "external.rules")
 	for path, value := range map[string]string{
 		shared: "shared\n", host: "host\n", yard: "yard\n", external: "external\n",
-		filepath.Join(configHome, "overrides", "shared", "config.env"): "BASE_IMAGE=shared:image\n",
+		filepath.Join(configHome, "overrides", "shared", "config.env"): "YARD_IMAGE=shared:image\n",
 		filepath.Join(configHome, "config.env"): "DEV_SUDO=1\nBASE_IMAGE=host:image\n" +
 			"AGENT_codex_RULES=" + external + "\n",
 		filepath.Join(configHome, "yards", "named", "config.env"): "DEV_SUDO=0\nSSH_PORT=3333\nBASE_IMAGE=yard:image\n",
@@ -277,7 +277,7 @@ func TestSettingsPrecedenceAndYardFileOverride(t *testing.T) {
 	withEnvironment := cloneStringMap(base)
 	withEnvironment["AGENT_codex_RULES"] = external
 	withEnvironment["DEV_SUDO"] = "1"
-	withEnvironment["BASE_IMAGE"] = "command:image"
+	withEnvironment["YARD_IMAGE"] = "command:image"
 	withEnvironment["SECRET_TOKEN"] = "must-not-be-traced"
 	environmentLoaded, err := Load(LoadOptions{
 		RepositoryRoot: root, OperatorHome: home, YardName: "named",
@@ -298,14 +298,14 @@ func TestSettingsPrecedenceAndYardFileOverride(t *testing.T) {
 		t, environmentLoaded.Settings["DEV_SUDO"], "1", "command", "command override", "environment",
 	)
 	assertEffectiveSetting(
-		t, environmentLoaded.Settings["BASE_IMAGE"], "command:image",
+		t, environmentLoaded.Settings["YARD_IMAGE"], "command:image",
 		"command", "command override", "environment",
 	)
 	assertEffectiveSetting(
 		t, namedLoaded.Settings["AGENT_codex_RULES"], yard, "yard", "file settings", yard,
 	)
 	assertEffectiveSetting(
-		t, namedLoaded.Settings["INSTANCE_NAME"], "yard-named", "yard", "derived", "",
+		t, namedLoaded.Settings["YARD_INSTANCE_NAME"], "yard-named", "yard", "derived", "",
 	)
 	if !settingTraceContains(
 		environmentLoaded.Settings["DEV_SUDO"], "host", "scalar settings",
@@ -317,7 +317,7 @@ func TestSettingsPrecedenceAndYardFileOverride(t *testing.T) {
 		t.Fatalf("scalar provenance omitted host or yard assignments: %#v",
 			environmentLoaded.Settings["DEV_SUDO"])
 	}
-	baseImage := environmentLoaded.Settings["BASE_IMAGE"]
+	baseImage := environmentLoaded.Settings["YARD_IMAGE"]
 	for _, expected := range []struct {
 		scope, path string
 	}{
@@ -334,7 +334,7 @@ func TestSettingsPrecedenceAndYardFileOverride(t *testing.T) {
 			}
 		}
 		if !found {
-			t.Fatalf("BASE_IMAGE trace omitted %s layer %s: %#v",
+			t.Fatalf("YARD_IMAGE trace omitted %s layer %s: %#v",
 				expected.scope, expected.path, baseImage)
 		}
 	}
@@ -345,8 +345,8 @@ func TestHermesYardFileClearsInheritedHostAndCapabilityWiring(t *testing.T) {
 	temp := t.TempDir()
 	home := filepath.Join(temp, "home")
 	configHome := filepath.Join(home, ".config", "subyard")
-	writeFixture(t, filepath.Join(configHome, "config.env"), `AGENTS="claude opencode pi"
-YARD_PROFILES=openclaw
+	writeFixture(t, filepath.Join(configHome, "config.env"), `CODING_TOOL_INTEGRATIONS="claude opencode pi"
+ENVIRONMENT_PROFILES=openclaw
 HOST_CLAUDE_MD=/tmp/CLAUDE.md
 HOST_CODEX_AGENTS_MD=/tmp/CODEX.md
 HOST_OPENCODE_AGENTS_MD=/tmp/OPENCODE.md
@@ -361,8 +361,8 @@ DEV_SUDO=1
 NESTED_E2E_VMS=1
 `)
 	writeFixture(t, filepath.Join(configHome, "yards", "hermes", "config.env"), `SSH_PORT=2224
-YARD_PROFILES=hermes
-AGENTS=codex
+ENVIRONMENT_PROFILES=hermes
+CODING_TOOL_INTEGRATIONS=codex
 HOST_CLAUDE_MD=
 HOST_CODEX_AGENTS_MD=
 HOST_OPENCODE_AGENTS_MD=
@@ -387,7 +387,7 @@ NESTED_E2E_VMS=0
 		t.Fatal(err)
 	}
 	for name, want := range map[string]string{
-		"YARD_PROFILES": "hermes", "AGENTS": "codex",
+		"ENVIRONMENT_PROFILES": "hermes", "CODING_TOOL_INTEGRATIONS": "codex",
 		"HOST_CLAUDE_MD": "", "HOST_CODEX_AGENTS_MD": "", "HOST_OPENCODE_AGENTS_MD": "",
 		"HOST_MOUNTS": "", "HOST_LINKS": "",
 		"YARD_CAPABILITIES": "", "YARD_CAPS": "", "YARD_DEVICES": "", "YARD_MOUNTS": "",
@@ -456,7 +456,7 @@ func TestResolveAgentDependencies(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			values := cloneEnvironment(test.values)
-			values["AGENTS"] = test.agents
+			values["CODING_TOOL_INTEGRATIONS"] = test.agents
 			err := resolveAgentDependencies(values)
 			if test.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
@@ -464,8 +464,8 @@ func TestResolveAgentDependencies(t *testing.T) {
 				}
 				return
 			}
-			if err != nil || values["AGENTS"] != test.want {
-				t.Fatalf("resolve = %q, %v; want %q", values["AGENTS"], err, test.want)
+			if err != nil || values["CODING_TOOL_INTEGRATIONS"] != test.want {
+				t.Fatalf("resolve = %q, %v; want %q", values["CODING_TOOL_INTEGRATIONS"], err, test.want)
 			}
 		})
 	}
@@ -480,7 +480,7 @@ func TestPersistentSettingsValidationFailsClosed(t *testing.T) {
 		{"wrong shared scope", "overrides/shared/config.env", "DEV_SUDO=1\n", "not allowed in shared scope"},
 		{"wrong type", "config.env", "SSH_PORT=70000\n", "must be in range"},
 		{"bad mount", "config.env", "HOST_MOUNTS=../escape:/mnt/cache:rw:0755\n", "invalid mount"},
-		{"secret-like", "config.env", "BASE_IMAGE=password=hidden\n", "secret material"},
+		{"secret-like", "config.env", "YARD_IMAGE=password=hidden\n", "secret material"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			temp := t.TempDir()
@@ -626,11 +626,11 @@ func TestNormalizeAgentPersistLinksUsesExactSelection(t *testing.T) {
 	defaults := tracker.addLayer("default", "shipped defaults", "agents.env", true, settingAny)
 	tracker.record(defaults, "HOST_LINKS", "all-agent-links", "agents.env", 1, "")
 	values := environment{
-		"AGENTS":                 "codex",
-		"HOST_LINKS":             "all-agent-links",
-		"AGENT_claude_PERSIST":   "claude-link\n",
-		"AGENT_codex_PERSIST":    "codex-link\n",
-		"AGENT_opencode_PERSIST": "opencode-link\n",
+		"CODING_TOOL_INTEGRATIONS": "codex",
+		"HOST_LINKS":               "all-agent-links",
+		"AGENT_claude_PERSIST":     "claude-link\n",
+		"AGENT_codex_PERSIST":      "codex-link\n",
+		"AGENT_opencode_PERSIST":   "opencode-link\n",
 	}
 	normalizeAgentPersistLinks(values, tracker, defaults)
 	if values["HOST_LINKS"] != "codex-link\n" {
@@ -648,13 +648,50 @@ func TestNormalizeAgentPersistLinksUsesExactSelection(t *testing.T) {
 
 func TestReadAssignmentsOverPreservesExplicitProfileOverrides(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "profile.conf")
-	writeFixture(t, file, "IMAGE_DOCKERFILE=\"${IMAGE_DOCKERFILE:-}\"\nBASE_IMAGE=ubuntu:24.04\n")
+	writeFixture(t, file, "IMAGE_DOCKERFILE=\"${IMAGE_DOCKERFILE:-}\"\nPROJECT_ENV_BASE_IMAGE=ubuntu:24.04\n")
 	values, err := ReadAssignmentsOver(file, map[string]string{"IMAGE_DOCKERFILE": "docker/dev.Dockerfile"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if values["IMAGE_DOCKERFILE"] != "docker/dev.Dockerfile" || values["BASE_IMAGE"] != "ubuntu:24.04" {
+	if values["IMAGE_DOCKERFILE"] != "docker/dev.Dockerfile" || values["PROJECT_ENV_BASE_IMAGE"] != "ubuntu:24.04" {
 		t.Fatalf("profile overlay changed precedence: %#v", values)
+	}
+}
+
+func TestLegacyYardSettingsNormalizeAtLayerBoundary(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "config.env")
+	writeFixture(t, file, "YARD_TYPE=remote\nINSTANCE_TYPE=vm\nINSTANCE_NAME=yard-demo\nREMOTE_DEST=dev@owner.example\nREMOTE_YARD=demo\nBASE_IMAGE=images:debian/13\nYARD_PROFILES=android\nAGENTS=codex\n")
+	values := environment{"ACCESS_KIND": "local", "YARD_KIND": "container"}
+	if err := applyEnvFileValidated(file, values, ScopeHost, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"ACCESS_KIND": "remote", "YARD_KIND": "vm", "YARD_INSTANCE_NAME": "yard-demo",
+		"OWNER_ENDPOINT": "dev@owner.example", "OWNER_YARD_NAME": "demo",
+		"YARD_IMAGE": "images:debian/13", "ENVIRONMENT_PROFILES": "android",
+		"CODING_TOOL_INTEGRATIONS": "codex",
+	}
+	for name, expected := range want {
+		if values[name] != expected {
+			t.Fatalf("normalized %s = %q, want %q; values=%#v", name, values[name], expected, values)
+		}
+	}
+	for _, legacy := range []string{
+		"YARD_TYPE", "INSTANCE_TYPE", "INSTANCE_NAME", "REMOTE_DEST", "REMOTE_YARD",
+		"BASE_IMAGE", "YARD_PROFILES", "AGENTS",
+	} {
+		if _, exists := values[legacy]; exists {
+			t.Fatalf("legacy setting %s escaped input boundary: %#v", legacy, values)
+		}
+	}
+}
+
+func TestLegacyAndCanonicalSettingConflictFailsClosed(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "config.env")
+	writeFixture(t, file, "ACCESS_KIND=local\nYARD_TYPE=remote\n")
+	if err := applyEnvFileValidated(file, environment{}, ScopeHost, false, nil); err == nil ||
+		!strings.Contains(err.Error(), "conflicting") {
+		t.Fatalf("conflicting canonical and legacy settings were accepted: %v", err)
 	}
 }
 
@@ -693,8 +730,8 @@ func TestEngineReexecDoesNotLeakPriorYardContext(t *testing.T) {
 	}
 	writeFixture(t, filepath.Join(root, "config", "incus.project.env"), `: "${INCUS_PROJECT:=subyard}"
 : "${RESTRICTED_DISK_PATHS:=/srv/subyard}"`)
-	writeFixture(t, filepath.Join(root, "config", "subyard.env"), `: "${INSTANCE_NAME:=yard}"
-: "${INSTANCE_TYPE:=container}"
+	writeFixture(t, filepath.Join(root, "config", "subyard.env"), `: "${YARD_INSTANCE_NAME:=yard}"
+: "${YARD_KIND:=container}"
 : "${SHIFT_MODE:=shift}"
 : "${FORWARD_SSH_AGENT:=0}"
 : "${DEV_SUDO:=0}"
@@ -711,9 +748,9 @@ func TestEngineReexecDoesNotLeakPriorYardContext(t *testing.T) {
 		RepositoryRoot: root, OperatorHome: operatorHome, YardName: "named", DisablePrivate: true,
 		Environment: map[string]string{
 			"SUBYARD_OPERATOR_HOME": operatorHome, "SUBYARD_CONFIG_HOME": configHome,
-			"SUBYARD_ENGINE_CONTEXT": "1", "INSTANCE_NAME": "yard", "INCUS_PROJECT": "subyard",
+			"SUBYARD_ENGINE_CONTEXT": "1", "YARD_INSTANCE_NAME": "yard", "INCUS_PROJECT": "subyard",
 			"SSH_HOST": "yard", "SSH_PORT": "2222", "RESTRICTED_DISK_PATHS": "/srv/subyard",
-			"HOST_BASE": "/srv/subyard", "INSTANCE_TYPE": "container", "SHIFT_MODE": "shift",
+			"HOST_BASE": "/srv/subyard", "YARD_KIND": "container", "SHIFT_MODE": "shift",
 			"FORWARD_SSH_AGENT": "0", "DEV_SUDO": "0", "DEV_UID": "1000",
 			"YARD_TEMPLATE": "stale", "NESTED_E2E_VMS": "1",
 		},
@@ -722,7 +759,7 @@ func TestEngineReexecDoesNotLeakPriorYardContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := loaded.Context
-	if ctx.InstanceName != "yard-named" || ctx.IncusProject != "subyard-named" || ctx.SSHHost != "yard-named" {
+	if ctx.YardInstanceName != "yard-named" || ctx.IncusProject != "subyard-named" || ctx.SSHHost != "yard-named" {
 		t.Fatalf("prior context leaked into named reload: %#v", ctx)
 	}
 	if ctx.NestedE2EVMs || loaded.Environment["YARD_TEMPLATE"] != "" {

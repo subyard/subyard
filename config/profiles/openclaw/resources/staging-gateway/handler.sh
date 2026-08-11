@@ -91,7 +91,7 @@ fi
 # return 0/1. "up" = any staging-runner box (any zone) has a live gateway pid (the box bind-mounts
 # its data root at the same path, so the pid is /srv/staging/<zone>/run/gateway.pid).
 if [ -z "${SUBYARD_RESOURCE_MODE:-}" ] && [ "$sub" = is-up ]; then
-  incus info "$INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1 || exit 1
+  incus info "$YARD_INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1 || exit 1
   if yexec sh -c '
         for c in $(docker ps -q --filter "label=subyard.staging=1" 2>/dev/null); do
           z="$(docker inspect -f "{{ index .Config.Labels \"subyard.zone\" }}" "$c" 2>/dev/null)"
@@ -358,7 +358,7 @@ prepare_resource() {
     up)
       # shellcheck disable=SC1090
       . "$pf"
-      : "${BASE_IMAGE:?profile $profile has no BASE_IMAGE}"
+      : "${PROJECT_ENV_BASE_IMAGE:?profile $profile has no PROJECT_ENV_BASE_IMAGE}"
       [ -z "$SOURCE_BIND" ] || yexec test -d "$SOURCE_BIND" \
         || die "SOURCE_BIND is not a directory in the yard"
       emit_resource_assessment up true \
@@ -436,8 +436,8 @@ case "$sub" in
   up)
     # shellcheck disable=SC1090
     . "$pf"
-    : "${BASE_IMAGE:?profile $profile has no BASE_IMAGE}"
-    df="${IMAGE_DOCKERFILE:-}"; run_image="$BASE_IMAGE"; ctx=""
+    : "${PROJECT_ENV_BASE_IMAGE:?profile $profile has no PROJECT_ENV_BASE_IMAGE}"
+    df="${IMAGE_DOCKERFILE:-}"; run_image="$PROJECT_ENV_BASE_IMAGE"; ctx=""
     if [ -n "$df" ]; then ctx="${IMAGE_CONTEXT:-$(dirname "$df")}"; run_image="${IMAGE_TAG:-subyard-staging-$zone}"; fi
 
     sf="$STAGING_GENERATED_DIR/$zone.env"; have_secrets=0
@@ -450,7 +450,7 @@ case "$sub" in
     if box_exists; then
       ydocker start "$cname" >/dev/null
       # keep the in-yard CLI fresh (zone.env/run-args were written on first up)
-      incus file push "$RESOURCE_DIR/sy-stage.sh" "$INSTANCE_NAME/usr/local/bin/sy-stage" "${PROJ[@]}" --mode 0755 --uid 0 --gid 0 >/dev/null 2>&1 || true
+      incus file push "$RESOURCE_DIR/sy-stage.sh" "$YARD_INSTANCE_NAME/usr/local/bin/sy-stage" "${PROJ[@]}" --mode 0755 --uid 0 --gid 0 >/dev/null 2>&1 || true
       ok "staging-runner zone '$zone' already exists — started (gateway down; '${PROG:-yard} staging start $zone' or in-yard 'sy-stage restart --zone $zone')"
       exit 0
     fi
@@ -477,7 +477,7 @@ case "$sub" in
 
     if [ "$have_secrets" = 1 ]; then
       yexec install -d -m 0700 -o "$DEV_UID" -g "$DEV_UID" "$(dirname "$ysecret")"
-      incus file push "$sf" "$INSTANCE_NAME$ysecret" "${PROJ[@]}" \
+      incus file push "$sf" "$YARD_INSTANCE_NAME$ysecret" "${PROJ[@]}" \
         --mode 0600 --uid "$DEV_UID" --gid "$DEV_UID" >/dev/null \
         || die "could not stage staging/$zone.env into the yard"
     fi
@@ -498,7 +498,7 @@ case "$sub" in
     [ -n "$CREDS_DEST" ] && mid+=(-v "$dataRoot/creds:$CREDS_DEST")
     while IFS= read -r k; do
       case "$k" in
-        PROFILE_NAME|BASE_IMAGE|CACHES|DEVICES|OPTIONAL_FEATURES|IMAGE_DOCKERFILE|IMAGE_CONTEXT|IMAGE_TAG|\
+        PROFILE_NAME|PROJECT_ENV_BASE_IMAGE|CACHES|DEVICES|OPTIONAL_FEATURES|IMAGE_DOCKERFILE|IMAGE_CONTEXT|IMAGE_TAG|\
         ENV_MOUNTS|YARD_MOUNTS|YARD_CAPS|YARD_DEVICES) continue ;;
       esac
       mid+=(-e "$k=${!k}")
@@ -530,9 +530,9 @@ ZENV
     # run-args — the reusable mid spec for 'sy-stage rebind' (one arg per line, preserves spaces).
     printf '%s\n' "${mid[@]}" | yexec sh -c 'cat > "$1"' _ "$dataRoot/run-args"
     # prod-fingerprints — the in-yard prod-guard reads this (deny-by-default stays effective).
-    [ -r "$PROD_FP_FILE" ] && incus file push "$PROD_FP_FILE" "$INSTANCE_NAME$dataRoot/prod-fingerprints" "${PROJ[@]}" --mode 0644 >/dev/null 2>&1 || true
+    [ -r "$PROD_FP_FILE" ] && incus file push "$PROD_FP_FILE" "$YARD_INSTANCE_NAME$dataRoot/prod-fingerprints" "${PROJ[@]}" --mode 0644 >/dev/null 2>&1 || true
     # install the in-yard CLI on the agent's PATH.
-    if incus file push "$RESOURCE_DIR/sy-stage.sh" "$INSTANCE_NAME/usr/local/bin/sy-stage" "${PROJ[@]}" --mode 0755 --uid 0 --gid 0 >/dev/null 2>&1; then
+    if incus file push "$RESOURCE_DIR/sy-stage.sh" "$YARD_INSTANCE_NAME/usr/local/bin/sy-stage" "${PROJ[@]}" --mode 0755 --uid 0 --gid 0 >/dev/null 2>&1; then
       ok "in-yard self-serve ready: in the yard the agent runs 'sy-stage restart --zone $zone' (reserve/restart/rebind/stop/status/logs)"
     else
       warn "could not install sy-stage into the yard — in-yard self-serve unavailable (operator-only via 'yard staging')"
@@ -648,7 +648,7 @@ MSG
   logs)
     require_box
     if [ "$follow" = 1 ]; then
-      exec incus exec "$INSTANCE_NAME" "${PROJ[@]}" -t -- docker exec "$cname" tail -n 200 -f "$ylog"
+      exec incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -t -- docker exec "$cname" tail -n 200 -f "$ylog"
     fi
     ydocker exec "$cname" sh -c '[ -r "$1" ] && tail -n 200 "$1" || echo "(no gateway log yet at $1)"' _ "$ylog"
     ;;
@@ -657,7 +657,7 @@ MSG
     require_box
     box_running && gateway_running \
       || die "staging gateway for zone '$zone' is not running — run: ${PROG:-yard} staging start $zone"
-    exec incus exec "$INSTANCE_NAME" "${PROJ[@]}" -t -- docker exec -it "$cname" bash
+    exec incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -t -- docker exec -it "$cname" bash
     ;;
 
   down)

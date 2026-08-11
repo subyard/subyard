@@ -23,7 +23,7 @@ func TestPrepareActionStoresAnIndependentJSONRoundTrippableAssessmentAndRequest(
 	}
 	delta := domain.ActionDelta{Changed: true, Consequences: []string{"register demo on owner", "record SHA256:new"}}
 	plan, err := orchestrator.PrepareAction(
-		domain.Context{YardType: domain.YardLocal}, "remote", domain.RemoteOnController, "remote.add", delta,
+		domain.Context{AccessKind: domain.AccessLocal}, "remote", domain.RemoteOnController, "remote.add", delta,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -74,7 +74,7 @@ func TestConfirmActionPlanUsesStoredRequestAndRejectsTamperingBeforeAssumeYes(t 
 	}
 	prepare := func() domain.OperationPlan {
 		plan, err := orchestrator.PrepareAction(
-			domain.Context{YardType: domain.YardLocal}, "remote", domain.RemoteOnController,
+			domain.Context{AccessKind: domain.AccessLocal}, "remote", domain.RemoteOnController,
 			"remote.add", domain.ActionDelta{Changed: true, Consequences: []string{"register demo on owner"}},
 		)
 		if err != nil {
@@ -125,7 +125,7 @@ func TestPlanActionReadIsConfirmedWithoutAPrompt(t *testing.T) {
 		Prompt: prompt, Actions: registry,
 	}
 	plan, err := orchestrator.PlanAction(
-		context.Background(), domain.Context{YardType: domain.YardLocal}, "remote", domain.RemoteOnController,
+		context.Background(), domain.Context{AccessKind: domain.AccessLocal}, "remote", domain.RemoteOnController,
 		"remote.list", domain.ActionDelta{}, false,
 	)
 	if err != nil || !plan.Confirmed || plan.Confirmation != domain.ConfirmationNever ||
@@ -146,7 +146,7 @@ func TestConfirmRejectsForgedPreconfirmedActionPlanBeforeAssumeYes(t *testing.T)
 		Prompt: prompt, Actions: registry,
 	}
 	plan, err := orchestrator.PrepareAction(
-		domain.Context{YardType: domain.YardLocal}, "remote", domain.RemoteOnController,
+		domain.Context{AccessKind: domain.AccessLocal}, "remote", domain.RemoteOnController,
 		"remote.add", domain.ActionDelta{Changed: true, Consequences: []string{"register demo on owner"}},
 	)
 	if err != nil {
@@ -178,7 +178,7 @@ func TestRunAdapterRequiresOrchestratorAuthorizationForActionPlans(t *testing.T)
 	prepare := func(t *testing.T, orchestrator *Orchestrator, action domain.ActionID, delta domain.ActionDelta) domain.OperationPlan {
 		t.Helper()
 		plan, err := orchestrator.PrepareAction(
-			domain.Context{YardType: domain.YardLocal}, "remote", domain.RemoteOnController, action, delta,
+			domain.Context{AccessKind: domain.AccessLocal}, "remote", domain.RemoteOnController, action, delta,
 		)
 		if err != nil {
 			t.Fatal(err)

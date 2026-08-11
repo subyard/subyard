@@ -19,13 +19,15 @@ type OwnerProject struct {
 }
 
 type OwnerYard struct {
-	Name     string         `json:"name"`
-	Kind     string         `json:"kind"`
-	Instance string         `json:"instance"`
-	State    string         `json:"state"`
-	SSHPort  int            `json:"sshPort"`
-	DevUser  string         `json:"devUser"`
-	Projects []OwnerProject `json:"projects"`
+	Name              string            `json:"name"`
+	Kind              string            `json:"kind"`
+	Instance          string            `json:"instance"`
+	State             string            `json:"state"`
+	SSHPort           int               `json:"sshPort"`
+	DevUser           string            `json:"devUser"`
+	YardImageRef      YardImageRef      `json:"yardImageRef,omitempty"`
+	ResolvedYardImage ResolvedYardImage `json:"resolvedYardImage,omitempty"`
+	Projects          []OwnerProject    `json:"projects"`
 }
 
 type OwnerInventory struct {
@@ -58,7 +60,7 @@ func (inventory OwnerInventory) Validate() error {
 			return fmt.Errorf("duplicate owner yard %q", yard.Name)
 		}
 		yards[yard.Name] = struct{}{}
-		if yard.Kind != string(InstanceContainer) && yard.Kind != string(InstanceVM) {
+		if yard.Kind != string(YardContainer) && yard.Kind != string(YardVM) {
 			return fmt.Errorf("invalid kind for owner yard %q", yard.Name)
 		}
 		if !SafeName(yard.Instance) || !SafeName(yard.DevUser) ||

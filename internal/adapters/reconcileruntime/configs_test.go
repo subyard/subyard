@@ -29,7 +29,7 @@ func TestRefreshConfigsUsesTypedAtomicGuestWrites(t *testing.T) {
 		return path
 	}
 	environment := []string{
-		"AGENTS=opencode",
+		"CODING_TOOL_INTEGRATIONS=opencode",
 		"HOST_CLAUDE_MD=" + source("CLAUDE.md", "claude\n"),
 		"HOST_CODEX_AGENTS_MD=" + source("CODEX.md", "codex\n"),
 		"HOST_OPENCODE_AGENTS_MD=" + source("OPENCODE.md", "opencode\n"),
@@ -43,7 +43,7 @@ func TestRefreshConfigsUsesTypedAtomicGuestWrites(t *testing.T) {
 	runtime := Runtime{
 		Environment: environment, Incus: incus, Executor: incus, Stdout: &output,
 		Yard: domain.Context{
-			IncusProject: "subyard", InstanceName: "yard", DevUser: "dev", DevUID: 1001,
+			IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev", DevUID: 1001,
 		},
 	}
 	if err := runtime.RefreshConfigs(context.Background()); err != nil {
@@ -109,9 +109,9 @@ func TestConfigsConvergedComparesSourceAndGuestHashesReadOnly(t *testing.T) {
 			incus := runningIncus(1)
 			incus.ExecSteps[0].Result.Stdout = []byte(test.stdout)
 			runtime := Runtime{
-				Environment: []string{"AGENTS=codex", "HOST_CODEX_AGENTS_MD=" + source},
+				Environment: []string{"CODING_TOOL_INTEGRATIONS=codex", "HOST_CODEX_AGENTS_MD=" + source},
 				Incus:       incus, Executor: incus,
-				Yard: domain.Context{IncusProject: "subyard", InstanceName: "yard", DevUser: "dev"},
+				Yard: domain.Context{IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev"},
 			}
 			got, err := runtime.ConfigsConverged(context.Background())
 			if err != nil || got != test.want {
@@ -136,13 +136,13 @@ func TestRefreshConfigsRejectsPathsOutsideDeveloperHome(t *testing.T) {
 	incus := runningIncus(0)
 	runtime := Runtime{
 		Environment: []string{
-			"AGENTS=opencode",
+			"CODING_TOOL_INTEGRATIONS=opencode",
 			"AGENT_opencode_CONFIG=" + config,
 			"AGENT_opencode_CONFIG_DEST=../../root/.config",
 		},
 		Incus: incus, Executor: incus,
 		Yard: domain.Context{
-			IncusProject: "subyard", InstanceName: "yard", DevUser: "dev",
+			IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev",
 		},
 	}
 	if err := runtime.RefreshConfigs(context.Background()); err == nil ||
@@ -167,13 +167,13 @@ func TestRefreshConfigsRejectsSymlinkSourceBeforeGuestMutation(t *testing.T) {
 	incus := runningIncus(0)
 	runtime := Runtime{
 		Environment: []string{
-			"AGENTS=codex",
+			"CODING_TOOL_INTEGRATIONS=codex",
 			"AGENT_codex_CONFIG=" + source,
 			"AGENT_codex_CONFIG_DEST=.codex/config.toml",
 		},
 		Incus: incus, Executor: incus,
 		Yard: domain.Context{
-			IncusProject: "subyard", InstanceName: "yard", DevUser: "dev",
+			IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev",
 		},
 	}
 	if err := runtime.RefreshConfigs(context.Background()); err == nil ||
@@ -205,10 +205,10 @@ func TestRefreshConfigsFollowsHostInstructionSymlink(t *testing.T) {
 	}
 	incus := runningIncus(1)
 	runtime := Runtime{
-		Environment: []string{"AGENTS=claude", "HOST_CLAUDE_MD=" + source},
+		Environment: []string{"CODING_TOOL_INTEGRATIONS=claude", "HOST_CLAUDE_MD=" + source},
 		Incus:       incus, Executor: incus,
 		Yard: domain.Context{
-			IncusProject: "subyard", InstanceName: "yard", DevUser: "dev",
+			IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev",
 		},
 	}
 	if err := runtime.RefreshConfigs(context.Background()); err != nil {
@@ -293,7 +293,7 @@ func TestApplyGitIdentityUsesTypedDeveloperCommands(t *testing.T) {
 		Environment: []string{"GIT_USER_NAME=Developer", "GIT_USER_EMAIL=dev@example.test"},
 		Incus:       incus, Executor: incus,
 		Yard: domain.Context{
-			IncusProject: "subyard", InstanceName: "yard", DevUser: "dev", DevUID: 1001,
+			IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev", DevUID: 1001,
 			Paths: domain.RuntimePaths{DataHome: t.TempDir()},
 		},
 	}
@@ -327,7 +327,7 @@ func TestApplyGitIdentityCopiesOperatorDropin(t *testing.T) {
 	runtime := Runtime{
 		Incus: incus, Executor: incus,
 		Yard: domain.Context{
-			IncusProject: "subyard", InstanceName: "yard", DevUser: "dev",
+			IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev",
 			Paths: domain.RuntimePaths{DataHome: dataHome},
 		},
 	}

@@ -188,7 +188,7 @@ func (cli *CLI) runConfigSync(
 		cli.writeConfigSyncHelp()
 		return 0
 	}
-	if loaded.Context.YardType == domain.YardRemote {
+	if loaded.Context.AccessKind == domain.AccessRemote {
 		forwarded := append([]string{"sync"}, arguments...)
 		if assumeYes {
 			forwarded = append(forwarded, "--yes")
@@ -460,7 +460,7 @@ func (cli *CLI) configSyncYardInUse(loaded config.Loaded) configsync.YardUseProb
 		}
 		incus, _ := cli.statusPorts()
 		_, err = incus.Instance(
-			context.Background(), target.Context.IncusProject, target.Context.InstanceName,
+			context.Background(), target.Context.IncusProject, target.Context.YardInstanceName,
 		)
 		if err == nil {
 			return "managed Incus yard exists", true, nil
@@ -548,7 +548,7 @@ func (cli *CLI) configSyncLocalYards(loaded config.Loaded) []string {
 	var result []string
 	for _, name := range names {
 		target, err := cli.loadInventoryLoaded(name, loaded)
-		if err == nil && target.Context.YardType != domain.YardRemote {
+		if err == nil && target.Context.AccessKind != domain.AccessRemote {
 			result = append(result, name)
 		}
 	}
@@ -595,7 +595,7 @@ func (cli *CLI) materializeConfigSyncPlan(
 			if loadErr != nil {
 				return fmt.Errorf("yard %s: %w", name, loadErr)
 			}
-			if target.Context.YardType != domain.YardRemote {
+			if target.Context.AccessKind != domain.AccessRemote {
 				targets = append(targets, configTarget{Name: name, Loaded: target})
 			}
 		}
@@ -929,7 +929,7 @@ func (cli *CLI) localConfigTargets(loaded config.Loaded, allLocal bool) ([]confi
 		if err != nil {
 			return nil, fmt.Errorf("yard %s: %w", name, err)
 		}
-		if targetLoaded.Context.YardType == domain.YardRemote {
+		if targetLoaded.Context.AccessKind == domain.AccessRemote {
 			continue
 		}
 		targets = append(targets, configTarget{Name: name, Loaded: targetLoaded})
@@ -986,7 +986,7 @@ func (cli *CLI) applyConfig(ctx context.Context, targets []configTarget, assumeY
 	}
 	drifted := make([]configTarget, 0, len(targets))
 	for _, target := range targets {
-		if target.Loaded.Context.YardType == domain.YardRemote {
+		if target.Loaded.Context.AccessKind == domain.AccessRemote {
 			cli.errorf("config apply does not implicitly operate on remote yard %s", target.Name)
 			return 1
 		}
@@ -1069,12 +1069,12 @@ func (cli *CLI) configTargetDrift(
 	target configTarget,
 	check bool,
 ) (string, bool, error) {
-	if target.Loaded.Context.YardType == domain.YardRemote {
+	if target.Loaded.Context.AccessKind == domain.AccessRemote {
 		return "remote (settings only; consumers not checked)", false, nil
 	}
 	incus, executor := cli.statusPorts()
 	info, err := incus.Instance(ctx, target.Loaded.Context.IncusProject,
-		target.Loaded.Context.InstanceName)
+		target.Loaded.Context.YardInstanceName)
 	if errors.Is(err, ports.ErrInstanceNotFound) {
 		return "absent", false, nil
 	}
@@ -1100,7 +1100,7 @@ func (cli *CLI) configTargetDrift(
 			return "", false, fmt.Errorf("%s: %w", asset.Name, err)
 		}
 		result, err := executor.Exec(ctx, target.Loaded.Context.IncusProject,
-			target.Loaded.Context.InstanceName, ports.InstanceExecRequest{
+			target.Loaded.Context.YardInstanceName, ports.InstanceExecRequest{
 				Command: []string{"sha256sum", "--", asset.Destination},
 				User:    uint32(target.Loaded.Context.DevUID),
 				Group:   uint32(target.Loaded.Context.DevUID),
@@ -1122,7 +1122,7 @@ func (cli *CLI) configTargetDrift(
 func effectiveConfigAssets(loaded config.Loaded) ([]configAsset, error) {
 	values := loaded.Environment
 	var result []configAsset
-	for _, agent := range strings.Fields(values["AGENTS"]) {
+	for _, agent := range strings.Fields(values["CODING_TOOL_INTEGRATIONS"]) {
 		if !domain.SafeName(agent) {
 			return nil, fmt.Errorf("invalid agent name %q", agent)
 		}

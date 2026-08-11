@@ -53,7 +53,7 @@ func (cli *CLI) runConfigSyncConnect(
 	arguments []string,
 	assumeYes bool,
 ) int {
-	if loaded.Context.YardType == domain.YardRemote {
+	if loaded.Context.AccessKind == domain.AccessRemote {
 		forwarded := append([]string{"sync", "connect"}, arguments...)
 		if assumeYes {
 			forwarded = append(forwarded, "--yes")
@@ -160,7 +160,7 @@ func (cli *CLI) runConfigSyncPath(
 	loaded config.Loaded,
 	arguments []string,
 ) int {
-	if loaded.Context.YardType == domain.YardRemote {
+	if loaded.Context.AccessKind == domain.AccessRemote {
 		return cli.forwardRemote(ctx, loaded.Context, "config", []string{"sync", "path"})
 	}
 	if len(arguments) != 0 {

@@ -37,7 +37,7 @@ subyard_require_engine_context
 # shellcheck source=scripts/lib/host.sh
 . "$SCRIPT_DIR/lib/host.sh"
 # shellcheck source=scripts/lib-service.sh
-. "$SCRIPT_DIR/lib-service.sh"   # yexec / svc_require_yard_running / PROJ / INSTANCE_NAME
+. "$SCRIPT_DIR/lib-service.sh"   # yexec / svc_require_yard_running / PROJ / YARD_INSTANCE_NAME
 
 DEV_UID="${DEV_UID:-1000}"
 : "${SUBYARD_CONFIG_HOST_DIR:?typed host config directory is required}"
@@ -92,7 +92,7 @@ require_secrets() {
 # Push secrets.env into the yard (0600 dev) so in-yard ops read it without it crossing argv.
 stage_secrets() {
   yexec install -d -m 0700 -o "$DEV_UID" -g "$DEV_UID" "$(dirname "$YSECRETS")"
-  incus file push "$SECRETS" "$INSTANCE_NAME$YSECRETS" "${PROJ[@]}" \
+  incus file push "$SECRETS" "$YARD_INSTANCE_NAME$YSECRETS" "${PROJ[@]}" \
     --mode 0600 --uid "$DEV_UID" --gid "$DEV_UID" >/dev/null \
     || die "could not stage secrets.env into the yard"
 }
@@ -154,7 +154,7 @@ cmd_up() {
       --label subyard.qa-broker=1 \
       -p "127.0.0.1:$CLOUD_PORT:3210" -p "127.0.0.1:$SITE_PORT:3211" \
       -v "$YDATA:/convex/data" \
-      -e "INSTANCE_NAME=openclaw-qa-broker" \
+      -e "YARD_INSTANCE_NAME=openclaw-qa-broker" \
       -e "INSTANCE_SECRET=$(yexec cat "$YINSTANCE")" \
       -e "CONVEX_CLOUD_ORIGIN=http://127.0.0.1:$CLOUD_PORT" \
       -e "CONVEX_SITE_ORIGIN=http://127.0.0.1:$SITE_PORT" \
@@ -245,7 +245,7 @@ cmd_seed() {
   box_running || die "broker is not running — ${PROG:-yard} qa-pool up"
   require_secrets
   stage_secrets
-  incus file push "$POOL" "$INSTANCE_NAME$YPOOL" "${PROJ[@]}" \
+  incus file push "$POOL" "$YARD_INSTANCE_NAME$YPOOL" "${PROJ[@]}" \
     --mode 0600 --uid "$DEV_UID" --gid "$DEV_UID" >/dev/null \
     || die "could not stage pool.jsonl into the yard"
   info "seeding the pool from pool.jsonl (deduped by note) …"
@@ -362,7 +362,7 @@ cmd_logs() {
   require_box
   local follow=0; for a in "$@"; do case "$a" in -f|--follow) follow=1 ;; esac; done
   if [ "$follow" = 1 ]; then
-    exec incus exec "$INSTANCE_NAME" "${PROJ[@]}" -t -- docker logs -n 200 -f "$CNAME"
+    exec incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -t -- docker logs -n 200 -f "$CNAME"
   fi
   ydocker logs -n 200 "$CNAME" 2>&1 || true
 }

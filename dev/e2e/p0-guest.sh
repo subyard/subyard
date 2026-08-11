@@ -412,8 +412,9 @@ owner_profile_migration_contract() {
   [ -f "$OWNER_YARD_DIR/test-yard.env" ] \
     || die 'runtime activation did not create the test-yard registration'
   yard_info="$(./bin/yard -Y test-yard _info)"
-  jq -e '.name == "test-yard" and .instance == "yard-test-yard" and
-    .project == "subyard-test-yard" and .sshHost == "yard-test-yard"' \
+  jq -e '.yardName == "test-yard" and .accessKind == "local" and
+    .yardInstanceName == "yard-test-yard" and .incusProject == "subyard-test-yard" and
+    .sshHost == "yard-test-yard"' \
     <<<"$yard_info" >/dev/null \
     || die "migrated test-yard context is wrong: $yard_info"
   ! incus project show subyard-e2e-yard >/dev/null 2>&1 \
@@ -1272,7 +1273,11 @@ peer_projects_offline() {
   rc=$?
   set -e
   mv -f "$owner_backup" "$owner_config"
-  [ "$rc" = 0 ] || die "aggregate list returned $rc for an offline owner"
+  if [ "$rc" != 0 ]; then
+    printf 'p0-guest: offline aggregate inventory (status=%s):\n%s\n' \
+      "$rc" "$inventory" >&2
+    die "aggregate list returned $rc for an offline owner"
+  fi
   grep -Fqi stale <<<"$inventory" \
     || die "offline owner did not expose its last snapshot as stale: $inventory"
   grep -Eq '(^|[[:space:]])project-2([[:space:]]|$)' <<<"$inventory" \

@@ -31,7 +31,7 @@ func (cli *CLI) runConfigSyncPull(
 	arguments []string,
 	assumeYes bool,
 ) int {
-	if loaded.Context.YardType == domain.YardRemote {
+	if loaded.Context.AccessKind == domain.AccessRemote {
 		forwarded := append([]string{"sync", "pull"}, arguments...)
 		if assumeYes {
 			forwarded = append(forwarded, "--yes")

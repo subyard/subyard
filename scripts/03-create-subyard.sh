@@ -17,10 +17,10 @@ subyard_require_engine_context
 . "$SCRIPT_DIR/lib/host.sh"
 
 INCUS_PROJECT="${INCUS_PROJECT:-subyard}"
-INSTANCE_NAME="${INSTANCE_NAME:-yard}"
-INSTANCE_TYPE="${INSTANCE_TYPE:-container}"
-BASE_IMAGE="${BASE_IMAGE:-images:debian/13}"
-BASE_IMAGE_FALLBACK="${BASE_IMAGE_FALLBACK:-images:ubuntu/24.04}"
+YARD_INSTANCE_NAME="${YARD_INSTANCE_NAME:-yard}"
+YARD_KIND="${YARD_KIND:-container}"
+YARD_IMAGE="${YARD_IMAGE:-images:debian/13}"
+YARD_IMAGE_FALLBACK="${YARD_IMAGE_FALLBACK:-images:ubuntu/24.04}"
 SRV_POOL="${SRV_POOL:-default}"
 SRV_VOLUME="${SRV_VOLUME:-yard-srv}"
 DEV_USER="${DEV_USER:-dev}"
@@ -30,9 +30,9 @@ desired_power="${SUBYARD_POWER_DESIRED:-}"
 case "$desired_power" in running | stopped) ;; *) die "prepared desired power is required" ;; esac
 
 PROJ=(--project "$INCUS_PROJECT")
-device_exists() { incus config device list "$INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null | grep -qx "$1"; }
-device_get() { incus config device get "$INSTANCE_NAME" "$1" "$2" "${PROJ[@]}" 2>/dev/null || true; }
-instance_get() { incus config get "$INSTANCE_NAME" "$1" "${PROJ[@]}" 2>/dev/null || true; }
+device_exists() { incus config device list "$YARD_INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null | grep -qx "$1"; }
+device_get() { incus config device get "$YARD_INSTANCE_NAME" "$1" "$2" "${PROJ[@]}" 2>/dev/null || true; }
+instance_get() { incus config get "$YARD_INSTANCE_NAME" "$1" "${PROJ[@]}" 2>/dev/null || true; }
 
 reconcile_e2e_route_mount() {
   # Do not mount below /run: systemd mounts its tmpfs there during container
@@ -47,9 +47,9 @@ reconcile_e2e_route_mount() {
       ok "shared E2E routes → $target unchanged"
       return
     fi
-    incus config device remove "$INSTANCE_NAME" subyard-e2e-routes "${PROJ[@]}" >/dev/null
+    incus config device remove "$YARD_INSTANCE_NAME" subyard-e2e-routes "${PROJ[@]}" >/dev/null
   fi
-  incus config device add "$INSTANCE_NAME" subyard-e2e-routes disk "${PROJ[@]}" \
+  incus config device add "$YARD_INSTANCE_NAME" subyard-e2e-routes disk "${PROJ[@]}" \
     source="$source" path="$target" readonly=true
   ok "shared E2E routes → $target (read-only)"
 }
@@ -60,15 +60,15 @@ incus project show "$INCUS_PROJECT" >/dev/null 2>&1 \
   || die "project '$INCUS_PROJECT' missing — run scripts/02-create-project.sh first"
 
 announce_confirm "Subyard Phase 2 — create yard instance" \
-  "Create Incus instance '$INSTANCE_NAME' ($INSTANCE_TYPE) from $BASE_IMAGE (fallback $BASE_IMAGE_FALLBACK)." \
+  "Create Incus instance '$YARD_INSTANCE_NAME' ($YARD_KIND) from $YARD_IMAGE (fallback $YARD_IMAGE_FALLBACK)." \
   "Pass /dev/kvm through (container) and attach a persistent '$SRV_VOLUME' volume at /srv." \
-  "Reversible: 'incus delete -f $INSTANCE_NAME ${PROJ[*]}' removes it."
+  "Reversible: 'incus delete -f $YARD_INSTANCE_NAME ${PROJ[*]}' removes it."
 power_nm_prepare_reader || die "$POWER_ERROR"
 
 # --- 1. create instance (idempotent) -----------------------------------------
 echo "Instance:"
 LAUNCH_FLAGS=()
-if [ "$INSTANCE_TYPE" = vm ]; then
+if [ "$YARD_KIND" = vm ]; then
   LAUNCH_FLAGS+=(--vm)
   # qemu-system only for vm mode — installed lazily.
   if ! dpkg -s qemu-system-x86 >/dev/null 2>&1 && ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
@@ -86,11 +86,11 @@ fi
 [ -n "${LIMITS_CPU:-}" ]    && LAUNCH_FLAGS+=(-c "limits.cpu=$LIMITS_CPU")
 [ -n "${LIMITS_MEMORY:-}" ] && LAUNCH_FLAGS+=(-c "limits.memory=$LIMITS_MEMORY")
 
-if incus info "$INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1; then
-  ok "instance '$INSTANCE_NAME' exists"
-  if [ "$INSTANCE_TYPE" = container ] \
-    && [ "$(incus config get "$INSTANCE_NAME" security.nesting "${PROJ[@]}" 2>/dev/null || true)" != true ]; then
-    incus config set "$INSTANCE_NAME" security.nesting true "${PROJ[@]}"
+if incus info "$YARD_INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1; then
+  ok "instance '$YARD_INSTANCE_NAME' exists"
+  if [ "$YARD_KIND" = container ] \
+    && [ "$(incus config get "$YARD_INSTANCE_NAME" security.nesting "${PROJ[@]}" 2>/dev/null || true)" != true ]; then
+    incus config set "$YARD_INSTANCE_NAME" security.nesting true "${PROJ[@]}"
     ok "reconciled security.nesting=true"
   fi
 else
@@ -102,19 +102,19 @@ else
     -c "$POWER_KEY_DESIRED=$desired_power"
     -c "$POWER_KEY_INITIALIZED=false"
   )
-  info "creating $INSTANCE_NAME from $BASE_IMAGE"
-  if err="$(incus init "$BASE_IMAGE" "$INSTANCE_NAME" "${PROJ[@]}" "${LAUNCH_FLAGS[@]}" 2>&1)"; then
-    ok "created $INSTANCE_NAME"
-  elif incus info "$INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1; then
-    warn "instance '$INSTANCE_NAME' was created with an initialization warning:"
+  info "creating $YARD_INSTANCE_NAME from $YARD_IMAGE"
+  if err="$(incus init "$YARD_IMAGE" "$YARD_INSTANCE_NAME" "${PROJ[@]}" "${LAUNCH_FLAGS[@]}" 2>&1)"; then
+    ok "created $YARD_INSTANCE_NAME"
+  elif incus info "$YARD_INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1; then
+    warn "instance '$YARD_INSTANCE_NAME' was created with an initialization warning:"
     printf '%s\n' "$err" >&2
   elif printf '%s' "$err" | grep -qiE 'image|not found|no such|remote'; then
     # Only the base image looks missing — try the fallback. Other failures (e.g. a
     # missing root device) would just repeat, so surface them instead of retrying.
-    warn "create from $BASE_IMAGE failed (image unavailable); trying fallback $BASE_IMAGE_FALLBACK"
-    incus init "$BASE_IMAGE_FALLBACK" "$INSTANCE_NAME" "${PROJ[@]}" "${LAUNCH_FLAGS[@]}" \
-      || die "instance creation failed (check image remotes and INSTANCE_TYPE)"
-    ok "created $INSTANCE_NAME (fallback image)"
+    warn "create from $YARD_IMAGE failed (image unavailable); trying fallback $YARD_IMAGE_FALLBACK"
+    incus init "$YARD_IMAGE_FALLBACK" "$YARD_INSTANCE_NAME" "${PROJ[@]}" "${LAUNCH_FLAGS[@]}" \
+      || die "instance creation failed (check image remotes and YARD_KIND)"
+    ok "created $YARD_INSTANCE_NAME (fallback image)"
   else
     printf '%s\n' "$err" >&2
     die "instance creation failed"
@@ -139,13 +139,13 @@ ensure_char_device() { # <name> <source>
       ok "$name → $source unchanged"
       return
     fi
-    incus config device remove "$INSTANCE_NAME" "$name" "${PROJ[@]}" >/dev/null
+    incus config device remove "$YARD_INSTANCE_NAME" "$name" "${PROJ[@]}" >/dev/null
   fi
-  if ! err="$(incus config device add "$INSTANCE_NAME" "$name" unix-char "${PROJ[@]}" \
+  if ! err="$(incus config device add "$YARD_INSTANCE_NAME" "$name" unix-char "${PROJ[@]}" \
         source="$source" path="$source" mode=0660 2>&1 >/dev/null)"; then
     case "$err" in
       *"nested container"*)
-        incus config device add "$INSTANCE_NAME" "$name" unix-char "${PROJ[@]}" \
+        incus config device add "$YARD_INSTANCE_NAME" "$name" unix-char "${PROJ[@]}" \
           source="$source" path="$source" >/dev/null
         warn "nested host: $name attached without an explicit mode" ;;
       *) printf '%s\n' "$err" >&2; die "could not attach $source for nested E2E VMs" ;;
@@ -175,43 +175,43 @@ else
 fi
 
 if [ "$nested_drift" = 1 ] \
-  && [ "$(power_state "$INCUS_PROJECT" "$INSTANCE_NAME")" = RUNNING ]; then
+  && [ "$(power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")" = RUNNING ]; then
   warn "nested E2E VM boundary changed — a guarded yard restart is required"
   "$SCRIPT_DIR/lifecycle-guard.sh" stop --reconcile \
     || die "could not safely stop the yard; close active SSH/VS Code sessions and re-run '$(yard_cmd_hint) init'"
 fi
 
 if [ "${NESTED_E2E_VMS:-0}" = 1 ]; then
-  incus config set "$INSTANCE_NAME" security.syscalls.intercept.bpf true "${PROJ[@]}"
-  incus config set "$INSTANCE_NAME" security.syscalls.intercept.bpf.devices true "${PROJ[@]}"
+  incus config set "$YARD_INSTANCE_NAME" security.syscalls.intercept.bpf true "${PROJ[@]}"
+  incus config set "$YARD_INSTANCE_NAME" security.syscalls.intercept.bpf.devices true "${PROJ[@]}"
   ensure_char_device kvm /dev/kvm
   ensure_char_device e2e-vsock /dev/vsock
   ensure_char_device e2e-vhost-vsock /dev/vhost-vsock
   ensure_char_device e2e-tun /dev/net/tun
 else
-  incus config unset "$INSTANCE_NAME" security.syscalls.intercept.bpf "${PROJ[@]}" 2>/dev/null || true
-  incus config unset "$INSTANCE_NAME" security.syscalls.intercept.bpf.devices "${PROJ[@]}" 2>/dev/null || true
+  incus config unset "$YARD_INSTANCE_NAME" security.syscalls.intercept.bpf "${PROJ[@]}" 2>/dev/null || true
+  incus config unset "$YARD_INSTANCE_NAME" security.syscalls.intercept.bpf.devices "${PROJ[@]}" 2>/dev/null || true
   for name in e2e-vsock e2e-vhost-vsock e2e-tun; do
     device_exists "$name" || continue
-    incus config device remove "$INSTANCE_NAME" "$name" "${PROJ[@]}" >/dev/null
+    incus config device remove "$YARD_INSTANCE_NAME" "$name" "${PROJ[@]}" >/dev/null
     ok "removed disabled nested-VM device '$name'"
   done
 fi
 
 # --- 3. /dev/kvm passthrough (container only) --------------------------------
 echo "KVM:"
-if [ "$INSTANCE_TYPE" = vm ]; then
+if [ "$YARD_KIND" = vm ]; then
   ok "vm mode uses nested virtualization — no unix-char passthrough"
 elif device_exists kvm; then
   ok "kvm device already attached"
 elif [ -e /dev/kvm ]; then
   # Nested hosts (this host is itself a container) reject the mode property on unix-char
   # devices — retry without it.
-  if ! err="$(incus config device add "$INSTANCE_NAME" kvm unix-char "${PROJ[@]}" \
+  if ! err="$(incus config device add "$YARD_INSTANCE_NAME" kvm unix-char "${PROJ[@]}" \
         source=/dev/kvm path=/dev/kvm mode=0660 2>&1 >/dev/null)"; then
     case "$err" in
       *"nested container"*)
-        incus config device add "$INSTANCE_NAME" kvm unix-char "${PROJ[@]}" \
+        incus config device add "$YARD_INSTANCE_NAME" kvm unix-char "${PROJ[@]}" \
           source=/dev/kvm path=/dev/kvm >/dev/null
         warn "nested host: /dev/kvm attached without an explicit mode" ;;
       *) printf '%s\n' "$err" >&2; die "could not attach /dev/kvm" ;;
@@ -232,28 +232,28 @@ else
 fi
 srv_drifted=0
 if device_exists srv; then
-  [ "$(incus config device get "$INSTANCE_NAME" srv pool "${PROJ[@]}" 2>/dev/null || true)" = "$SRV_POOL" ] \
-    && [ "$(incus config device get "$INSTANCE_NAME" srv source "${PROJ[@]}" 2>/dev/null || true)" = "$SRV_VOLUME" ] \
-    && [ "$(incus config device get "$INSTANCE_NAME" srv path "${PROJ[@]}" 2>/dev/null || true)" = /srv ] \
+  [ "$(incus config device get "$YARD_INSTANCE_NAME" srv pool "${PROJ[@]}" 2>/dev/null || true)" = "$SRV_POOL" ] \
+    && [ "$(incus config device get "$YARD_INSTANCE_NAME" srv source "${PROJ[@]}" 2>/dev/null || true)" = "$SRV_VOLUME" ] \
+    && [ "$(incus config device get "$YARD_INSTANCE_NAME" srv path "${PROJ[@]}" 2>/dev/null || true)" = /srv ] \
     || srv_drifted=1
   if [ "$srv_drifted" = 0 ]; then
     ok "srv device already attached"
   else
     warn "srv device drifted — re-attaching to '$SRV_VOLUME' at /srv"
-    incus config device remove "$INSTANCE_NAME" srv "${PROJ[@]}" >/dev/null
+    incus config device remove "$YARD_INSTANCE_NAME" srv "${PROJ[@]}" >/dev/null
   fi
 fi
 if ! device_exists srv; then
-  incus config device add "$INSTANCE_NAME" srv disk "${PROJ[@]}" \
+  incus config device add "$YARD_INSTANCE_NAME" srv disk "${PROJ[@]}" \
     pool="$SRV_POOL" source="$SRV_VOLUME" path=/srv >/dev/null
   ok "attached '$SRV_VOLUME' at /srv"
 fi
 
 # Attach boot devices before the first start. Incus 6.0 cannot hot-add virtiofs to a running VM
 # when its first PCI function is already occupied by the balloon device.
-state="$(power_state "$INCUS_PROJECT" "$INSTANCE_NAME")"
-[ "$state" = RUNNING ] || info "starting $INSTANCE_NAME temporarily (was: ${state:-unknown})"
-power_start_guarded "$INCUS_PROJECT" "$INSTANCE_NAME" "$BRIDGE" || die "$POWER_ERROR"
+state="$(power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")"
+[ "$state" = RUNNING ] || info "starting $YARD_INSTANCE_NAME temporarily (was: ${state:-unknown})"
+power_start_guarded "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" "$BRIDGE" || die "$POWER_ERROR"
 
 # --- summary -----------------------------------------------------------------
 echo
@@ -261,8 +261,8 @@ ok "Phase 2 (instance) done."
 cat <<MSG
 
 Verify:
-  incus list "${PROJ[@]}"                  # $INSTANCE_NAME is RUNNING
-  incus exec $INSTANCE_NAME "${PROJ[@]}" -- ls -l /dev/kvm   # present (container)
+  incus list "${PROJ[@]}"                  # $YARD_INSTANCE_NAME is RUNNING
+  incus exec $YARD_INSTANCE_NAME "${PROJ[@]}" -- ls -l /dev/kvm   # present (container)
 
 Next:
   - scripts/05-mount-host-paths.sh   (host dirs under $HOST_BASE + /mnt/host/* mounts)

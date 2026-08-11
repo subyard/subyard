@@ -21,7 +21,7 @@ subyard_require_engine_context
 . "$SCRIPT_DIR/lib/ssh-config.sh"
 
 INCUS_PROJECT="${INCUS_PROJECT:-subyard}"
-INSTANCE_NAME="${INSTANCE_NAME:-yard}"
+YARD_INSTANCE_NAME="${YARD_INSTANCE_NAME:-yard}"
 DEV_USER="${DEV_USER:-dev}"
 SSH_HOST="${SSH_HOST:-yard}"
 SSH_PORT="${SSH_PORT:-2222}"
@@ -29,14 +29,14 @@ SSH_PORT="${SSH_PORT:-2222}"
 # host keys without copying any private key into the yard.
 FORWARD_SSH_AGENT="${FORWARD_SSH_AGENT:-0}"
 PROJ=(--project "$INCUS_PROJECT")
-device_exists() { incus config device list "$INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null | grep -qx "$1"; }
-dev_get() { incus config device get "$INSTANCE_NAME" "$1" "$2" "${PROJ[@]}" 2>/dev/null || true; }
+device_exists() { incus config device list "$YARD_INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null | grep -qx "$1"; }
+dev_get() { incus config device get "$YARD_INSTANCE_NAME" "$1" "$2" "${PROJ[@]}" 2>/dev/null || true; }
 
 # --- preconditions -----------------------------------------------------------
 incus_preflight
-incus info "$INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1 \
-  || die "instance '$INSTANCE_NAME' missing — run '$(yard_cmd_hint) init' first"
-[ "$(incus list "$INSTANCE_NAME" "${PROJ[@]}" -f csv -c s 2>/dev/null)" = RUNNING ] \
+incus info "$YARD_INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1 \
+  || die "instance '$YARD_INSTANCE_NAME' missing — run '$(yard_cmd_hint) init' first"
+[ "$(incus list "$YARD_INSTANCE_NAME" "${PROJ[@]}" -f csv -c s 2>/dev/null)" = RUNNING ] \
   || die "yard is not running — start it: $(yard_cmd_hint) start"
 
 fwd_note=()
@@ -80,15 +80,15 @@ echo "SSH proxy:"
 proxy_connect=tcp:127.0.0.1:22
 proxy_nat=
 proxy_args=(bind=host)
-if [ "${INSTANCE_TYPE:-container}" = vm ]; then
+if [ "${YARD_KIND:-container}" = vm ]; then
   # Incus 6.0 requires a static NIC address for the VM-only NAT proxy mode. Keep the
   # address DHCP selected on first boot, then reserve it on the inherited eth0 device.
-  vm_ipv4="$(incus_instance_primary_ipv4 "$INCUS_PROJECT" "$INSTANCE_NAME")"
-  [ -n "$vm_ipv4" ] || die "VM '$INSTANCE_NAME' has no IPv4 address for its SSH proxy"
+  vm_ipv4="$(incus_instance_primary_ipv4 "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")"
+  [ -n "$vm_ipv4" ] || die "VM '$YARD_INSTANCE_NAME' has no IPv4 address for its SSH proxy"
   if device_exists eth0; then
-    incus config device set "$INSTANCE_NAME" eth0 ipv4.address="$vm_ipv4" "${PROJ[@]}"
+    incus config device set "$YARD_INSTANCE_NAME" eth0 ipv4.address="$vm_ipv4" "${PROJ[@]}"
   else
-    incus config device override "$INSTANCE_NAME" eth0 ipv4.address="$vm_ipv4" "${PROJ[@]}"
+    incus config device override "$YARD_INSTANCE_NAME" eth0 ipv4.address="$vm_ipv4" "${PROJ[@]}"
   fi
   proxy_connect="tcp:$vm_ipv4:22"
   proxy_nat=true
@@ -102,18 +102,18 @@ if device_exists ssh; then
     ok "proxy device 'ssh' already attached"
   else
     warn "proxy device 'ssh' drifted — re-attaching on 127.0.0.1:$SSH_PORT"
-    incus config device remove "$INSTANCE_NAME" ssh "${PROJ[@]}" >/dev/null
+    incus config device remove "$YARD_INSTANCE_NAME" ssh "${PROJ[@]}" >/dev/null
   fi
 fi
 if ! device_exists ssh; then
-  incus config device add "$INSTANCE_NAME" ssh proxy "${PROJ[@]}" \
+  incus config device add "$YARD_INSTANCE_NAME" ssh proxy "${PROJ[@]}" \
     listen="tcp:127.0.0.1:$SSH_PORT" connect="$proxy_connect" "${proxy_args[@]}" >/dev/null
   ok "added proxy 127.0.0.1:$SSH_PORT -> yard:22"
 fi
 
 # --- 3. authorize the key for dev in the yard (idempotent) -------------------
 echo "Authorized key:"
-incus exec "$INSTANCE_NAME" "${PROJ[@]}" --env PUBKEY="$PUBKEY" --env DEV_USER="$DEV_USER" \
+incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" --env PUBKEY="$PUBKEY" --env DEV_USER="$DEV_USER" \
   --env RESTRICT_TO_PROXY="${NESTED_E2E_VMS:-0}" -- sh -eu -c '
   home="$(getent passwd "$DEV_USER" | cut -d: -f6)"
   install -d -m 700 -o "$DEV_USER" -g "$DEV_USER" "$home/.ssh"
@@ -143,7 +143,7 @@ snip_name="$(basename "$snip")"
 # has a unique port, so entries never collide — one known_hosts is correct and intended.
 known="$SUBYARD_HOME/ssh/known_hosts"
 install -d -m 700 "$SUBYARD_HOME/ssh"
-yard_host_key="$(incus exec "$INSTANCE_NAME" "${PROJ[@]}" -- \
+yard_host_key="$(incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- \
   awk '$1 == "ssh-ed25519" && NF >= 2 { print $1 " " $2; exit }' \
   /etc/ssh/ssh_host_ed25519_key.pub)" \
   || die "could not read the yard's SSH host key through Incus"

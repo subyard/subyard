@@ -31,7 +31,7 @@ type Runtime struct {
 
 func (runtime Runtime) Lookup(_ context.Context, name string) (domain.RemoteRecord, bool, error) {
 	if name == "default" {
-		return domain.RemoteRecord{Spec: domain.RemoteSpec{Name: name}}, true, nil
+		return domain.RemoteRecord{Spec: domain.RemoteSpec{LegacyAlias: name}}, true, nil
 	}
 	var path string
 	for _, candidate := range config.YardFileCandidates(runtime.ConfigDir, runtime.ConfigHome, name) {
@@ -51,8 +51,13 @@ func (runtime Runtime) Lookup(_ context.Context, name string) (domain.RemoteReco
 	}
 	port, _ := strconv.Atoi(valueOr(values["REMOTE_SSH_PORT"], values["SSH_PORT"]))
 	record := domain.RemoteRecord{
-		Spec:   domain.RemoteSpec{Name: name, Destination: values["REMOTE_DEST"], OwnerYard: values["REMOTE_YARD"]},
-		Remote: values["YARD_TYPE"] == "remote", Path: path, SSHPort: port,
+		Spec: domain.RemoteSpec{
+			LegacyAlias:   name,
+			OwnerEndpoint: valueOr(values["OWNER_ENDPOINT"], values["REMOTE_DEST"]),
+			OwnerYardName: valueOr(values["OWNER_YARD_NAME"], values["REMOTE_YARD"]),
+		},
+		Remote: valueOr(values["ACCESS_KIND"], values["YARD_TYPE"]) == "remote",
+		Path:   path, SSHPort: port,
 	}
 	if _, lastProbe, err := runtime.readCache(name); err == nil {
 		record.LastProbe = lastProbe
@@ -79,7 +84,7 @@ func (runtime Runtime) List(ctx context.Context) ([]domain.RemoteRecord, error) 
 }
 
 func (runtime Runtime) ProbeOwner(ctx context.Context, spec domain.RemoteSpec) (domain.RemoteInfo, error) {
-	process, err := transport.SSHYard(runtime.SSH, spec.Destination, "", runtime.timeout())
+	process, err := transport.SSHYard(runtime.SSH, spec.OwnerEndpoint, "", runtime.timeout())
 	if err != nil {
 		return domain.RemoteInfo{}, err
 	}
@@ -88,7 +93,7 @@ func (runtime Runtime) ProbeOwner(ctx context.Context, spec domain.RemoteSpec) (
 	if err != nil {
 		return domain.RemoteInfo{}, err
 	}
-	yardName := spec.OwnerYard
+	yardName := spec.OwnerYardName
 	if yardName == "" {
 		yardName = "default"
 	}
@@ -98,8 +103,8 @@ func (runtime Runtime) ProbeOwner(ctx context.Context, spec domain.RemoteSpec) (
 		}
 		count := len(yard.Projects)
 		return domain.RemoteInfo{
-			Name: yard.Name, Type: string(domain.YardLocal), Version: "",
-			Instance: yard.Instance, State: yard.State, SSHPort: yard.SSHPort,
+			YardName: yard.Name, AccessKind: string(domain.AccessLocal), Version: "",
+			YardInstanceName: yard.Instance, State: yard.State, SSHPort: yard.SSHPort,
 			DevUser: yard.DevUser, Projects: &count,
 		}, nil
 	}
@@ -109,7 +114,7 @@ func (runtime Runtime) ProbeOwner(ctx context.Context, spec domain.RemoteSpec) (
 }
 
 func (runtime Runtime) ScanYardKeys(ctx context.Context, spec domain.RemoteSpec, port int) ([]domain.RemoteKey, error) {
-	payload, err := runtime.hostCall(ctx, spec.Destination, nil, "ssh-keyscan",
+	payload, err := runtime.hostCall(ctx, spec.OwnerEndpoint, nil, "ssh-keyscan",
 		"-T", strconv.Itoa(runtime.timeoutSeconds()), "-p", strconv.Itoa(port), "127.0.0.1")
 	if err != nil {
 		return nil, err
@@ -151,11 +156,11 @@ func (runtime Runtime) applyAdd(ctx context.Context, prepared domain.RemotePrepa
 	if _, err := runtime.ownerCall(ctx, prepared.Spec, publicKey, "_authorize"); err != nil {
 		return domain.RemoteResult{}, fmt.Errorf("authorize controller key: %w", err)
 	}
-	envPath := filepath.Join(runtime.ConfigHome, "yards", prepared.Spec.Name, "config.env")
+	envPath := filepath.Join(runtime.ConfigHome, "yards", prepared.Spec.LegacyAlias, "config.env")
 	if prepared.Existing != nil {
 		envPath = prepared.Existing.Path
 	}
-	snippet, sshConfig, known, cache := runtime.snippetPath(prepared.Spec.Name), runtime.sshConfigPath(), runtime.knownHostsPath(), runtime.cachePath(prepared.Spec.Name)
+	snippet, sshConfig, known, cache := runtime.snippetPath(prepared.Spec.LegacyAlias), runtime.sshConfigPath(), runtime.knownHostsPath(), runtime.cachePath(prepared.Spec.LegacyAlias)
 	err = transactional([]string{envPath, snippet, sshConfig, known, cache}, func() error {
 		current, err := readOptional(envPath)
 		if err != nil {
@@ -186,7 +191,7 @@ func (runtime Runtime) applyAdd(ctx context.Context, prepared domain.RemotePrepa
 		return domain.RemoteResult{}, classifyProbe(err)
 	}
 	return domain.RemoteResult{Message: fmt.Sprintf(
-		"remote yard %q is ready\nUse: yard -Y %s sync <project-dir>\nSecurity: the remote host can read everything explicitly synced into this yard", prepared.Spec.Name, prepared.Spec.Name)}, nil
+		"remote yard %q is ready\nUse: yard -Y %s sync <project-dir>\nSecurity: the remote host can read everything explicitly synced into this yard", prepared.Spec.LegacyAlias, prepared.Spec.LegacyAlias)}, nil
 }
 
 func (runtime Runtime) applyRepair(ctx context.Context, prepared domain.RemotePrepared) (domain.RemoteResult, error) {
@@ -199,7 +204,7 @@ func (runtime Runtime) applyRepair(ctx context.Context, prepared domain.RemotePr
 		if err != nil {
 			return err
 		}
-		if err := atomicWrite(known, removeKnownHost(payload, hostKeyAlias(prepared.Spec.Name)), 0o600); err != nil {
+		if err := atomicWrite(known, removeKnownHost(payload, hostKeyAlias(prepared.Spec.LegacyAlias)), 0o600); err != nil {
 			return err
 		}
 		return runtime.verifyData(ctx, prepared)
@@ -207,14 +212,14 @@ func (runtime Runtime) applyRepair(ctx context.Context, prepared domain.RemotePr
 	if err != nil {
 		return domain.RemoteResult{}, classifyProbe(err)
 	}
-	return domain.RemoteResult{Message: fmt.Sprintf("remote yard ssh key %q rotated and verified", hostKeyAlias(prepared.Spec.Name))}, nil
+	return domain.RemoteResult{Message: fmt.Sprintf("remote yard ssh key %q rotated and verified", hostKeyAlias(prepared.Spec.LegacyAlias))}, nil
 }
 
 func (runtime Runtime) applyRemove(ctx context.Context, prepared domain.RemotePrepared) (domain.RemoteResult, error) {
 	if err := runtime.verifyCurrent(ctx, prepared); err != nil {
 		return domain.RemoteResult{}, err
 	}
-	envPath, snippet, sshConfig, known, cache := prepared.Existing.Path, runtime.snippetPath(prepared.Spec.Name), runtime.sshConfigPath(), runtime.knownHostsPath(), runtime.cachePath(prepared.Spec.Name)
+	envPath, snippet, sshConfig, known, cache := prepared.Existing.Path, runtime.snippetPath(prepared.Spec.LegacyAlias), runtime.sshConfigPath(), runtime.knownHostsPath(), runtime.cachePath(prepared.Spec.LegacyAlias)
 	err := transactional([]string{envPath, snippet, sshConfig, known, cache}, func() error {
 		configData, err := readOptional(sshConfig)
 		if err != nil {
@@ -235,21 +240,21 @@ func (runtime Runtime) applyRemove(ctx context.Context, prepared domain.RemotePr
 			}
 		}
 		if len(knownData) != 0 {
-			return atomicWrite(known, removeKnownHost(knownData, hostKeyAlias(prepared.Spec.Name)), 0o600)
+			return atomicWrite(known, removeKnownHost(knownData, hostKeyAlias(prepared.Spec.LegacyAlias)), 0o600)
 		}
 		return nil
 	})
 	if err != nil {
 		return domain.RemoteResult{}, err
 	}
-	return domain.RemoteResult{Message: fmt.Sprintf("remote yard %q unregistered; local project state kept", prepared.Spec.Name)}, nil
+	return domain.RemoteResult{Message: fmt.Sprintf("remote yard %q unregistered; local project state kept", prepared.Spec.LegacyAlias)}, nil
 }
 
 func (runtime Runtime) verifyData(ctx context.Context, prepared domain.RemotePrepared) error {
-	if err := runtime.probeData(ctx, prepared.Spec.Name); err != nil {
+	if err := runtime.probeData(ctx, prepared.Spec.LegacyAlias); err != nil {
 		return err
 	}
-	accepted, err := runtime.RecordedYardKeys(ctx, prepared.Spec.Name)
+	accepted, err := runtime.RecordedYardKeys(ctx, prepared.Spec.LegacyAlias)
 	if err == nil && !domain.RemoteKeysOverlap(accepted, prepared.Scanned) {
 		return errors.New("key accepted through ProxyJump does not match the owner-host scan")
 	}
@@ -257,7 +262,7 @@ func (runtime Runtime) verifyData(ctx context.Context, prepared domain.RemotePre
 }
 
 func (runtime Runtime) verifyCurrent(ctx context.Context, prepared domain.RemotePrepared) error {
-	record, exists, err := runtime.Lookup(ctx, prepared.Spec.Name)
+	record, exists, err := runtime.Lookup(ctx, prepared.Spec.LegacyAlias)
 	if err != nil {
 		return err
 	}
@@ -275,12 +280,12 @@ func (runtime Runtime) verifyCurrent(ctx context.Context, prepared domain.Remote
 
 func (runtime Runtime) ownerCall(ctx context.Context, spec domain.RemoteSpec, stdin []byte, arguments ...string) ([]byte, error) {
 	owner := []string{"yard"}
-	if spec.OwnerYard != "" {
-		owner = append(owner, "-Y", spec.OwnerYard)
+	if spec.OwnerYardName != "" {
+		owner = append(owner, "-Y", spec.OwnerYardName)
 	}
 	owner = append(owner, arguments...)
 	command := shellquote.Command(owner)
-	return runtime.hostCall(ctx, spec.Destination, stdin, "bash", "-lc", shellquote.Word(command))
+	return runtime.hostCall(ctx, spec.OwnerEndpoint, stdin, "bash", "-lc", shellquote.Word(command))
 }
 
 func (runtime Runtime) hostCall(ctx context.Context, destination string, stdin []byte, arguments ...string) ([]byte, error) {
@@ -344,7 +349,7 @@ func (runtime Runtime) ensureIdentity(ctx context.Context) ([]byte, string, erro
 }
 
 func (runtime Runtime) renderSnippet(prepared domain.RemotePrepared, identity string) []byte {
-	return []byte(fmt.Sprintf("# Managed by Subyard; regenerated by 'yard remote add'.\nHost yard-%s\n    HostName 127.0.0.1\n    Port %d\n    User %s\n    ProxyJump %s\n    HostKeyAlias %s\n    IdentityFile %s\n    IdentitiesOnly yes\n    ForwardAgent no\n    ControlMaster auto\n    ControlPath ~/.ssh/subyard-cm-%%C\n    ControlPersist 60s\n    StrictHostKeyChecking accept-new\n    HashKnownHosts no\n    UserKnownHostsFile %s\n", prepared.Spec.Name, prepared.Owner.SSHPort, prepared.Owner.DevUser, prepared.Spec.Destination, hostKeyAlias(prepared.Spec.Name), identity, runtime.knownHostsPath()))
+	return []byte(fmt.Sprintf("# Managed by Subyard; regenerated by 'yard remote add'.\nHost yard-%s\n    HostName 127.0.0.1\n    Port %d\n    User %s\n    ProxyJump %s\n    HostKeyAlias %s\n    IdentityFile %s\n    IdentitiesOnly yes\n    ForwardAgent no\n    ControlMaster auto\n    ControlPath ~/.ssh/subyard-cm-%%C\n    ControlPersist 60s\n    StrictHostKeyChecking accept-new\n    HashKnownHosts no\n    UserKnownHostsFile %s\n", prepared.Spec.LegacyAlias, prepared.Owner.SSHPort, prepared.Owner.DevUser, prepared.Spec.OwnerEndpoint, hostKeyAlias(prepared.Spec.LegacyAlias), identity, runtime.knownHostsPath()))
 }
 
 func (runtime Runtime) writeCache(path string, info domain.RemoteInfo) error {
@@ -408,7 +413,11 @@ func renderContext(prepared domain.RemotePrepared, current []byte) []byte {
 	if _, tail, ok := strings.Cut(string(current), marker+"\n"); ok {
 		overrides = tail
 	} else {
-		managed := map[string]bool{"YARD_TYPE": true, "REMOTE_DEST": true, "REMOTE_YARD": true, "REMOTE_SSH_PORT": true, "REMOTE_DEV_USER": true, "SSH_PORT": true}
+		managed := map[string]bool{
+			"ACCESS_KIND": true, "OWNER_ENDPOINT": true, "OWNER_YARD_NAME": true,
+			"YARD_TYPE": true, "REMOTE_DEST": true, "REMOTE_YARD": true,
+			"REMOTE_SSH_PORT": true, "REMOTE_DEV_USER": true, "SSH_PORT": true,
+		}
 		for _, line := range strings.Split(string(current), "\n") {
 			name, _, ok := strings.Cut(line, "=")
 			if ok && !managed[name] && !(name == "FORWARD_SSH_AGENT" && line == "FORWARD_SSH_AGENT=0") {
@@ -416,7 +425,7 @@ func renderContext(prepared domain.RemotePrepared, current []byte) []byte {
 			}
 		}
 	}
-	return []byte(fmt.Sprintf("# Generated by 'yard remote add'.\nYARD_TYPE=remote\nREMOTE_DEST=%s\nREMOTE_YARD=%s\nREMOTE_SSH_PORT=%d\nREMOTE_DEV_USER=%s\nSSH_PORT=%d\nFORWARD_SSH_AGENT=0\n%s\n%s", prepared.Spec.Destination, prepared.Spec.OwnerYard, prepared.Owner.SSHPort, prepared.Owner.DevUser, prepared.Owner.SSHPort, marker, overrides))
+	return []byte(fmt.Sprintf("# Generated by 'yard remote add'.\nACCESS_KIND=remote\nOWNER_ENDPOINT=%s\nOWNER_YARD_NAME=%s\nREMOTE_SSH_PORT=%d\nREMOTE_DEV_USER=%s\nSSH_PORT=%d\nFORWARD_SSH_AGENT=0\n%s\n%s", prepared.Spec.OwnerEndpoint, prepared.Spec.OwnerYardName, prepared.Owner.SSHPort, prepared.Owner.DevUser, prepared.Owner.SSHPort, marker, overrides))
 }
 
 func addInclude(payload []byte, name string) []byte {

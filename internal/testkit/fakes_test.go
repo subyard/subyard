@@ -54,7 +54,7 @@ func TestIncusFakeSharesReadContract(t *testing.T) {
 	contracttest.IncusRead(t, &Incus{
 		ServerInfo: ports.ServerInfo{Environment: "incus", Version: "6.23"},
 		Instances: map[string]ports.InstanceInfo{"subyard/yard": {
-			Name: "yard", Project: "subyard", Type: domain.InstanceContainer, Status: "Running",
+			Name: "yard", Project: "subyard", Type: domain.YardContainer, Status: "Running",
 			Config:  map[string]string{"security.nesting": "true"},
 			Devices: map[string]map[string]string{"root": {"type": "disk"}},
 		}},

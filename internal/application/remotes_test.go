@@ -88,8 +88,8 @@ func TestRemotePrepareAddOwnsProbeKeyAndRebindPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if prepared.Action != domain.RemoteAdd || prepared.Spec.Name != "demo" ||
-		prepared.Spec.Destination != "owner.example" || prepared.Spec.OwnerYard != "inner" ||
+	if prepared.Action != domain.RemoteAdd || prepared.Spec.LegacyAlias != "demo" ||
+		prepared.Spec.OwnerEndpoint != "owner.example" || prepared.Spec.OwnerYardName != "inner" ||
 		prepared.Owner.DevUser != "dev" || len(prepared.Scanned) != 1 ||
 		fixture.lookupCalls != 1 || fixture.probeCalls != 1 || fixture.scanCalls != 1 {
 		t.Fatalf("remote add plan drifted: prepared=%#v fixture=%#v", prepared, fixture)
@@ -101,7 +101,7 @@ func TestRemotePrepareAddOwnsProbeKeyAndRebindPolicy(t *testing.T) {
 	}
 
 	fixture.record = domain.RemoteRecord{
-		Spec:   domain.RemoteSpec{Name: "demo", Destination: "other.example"},
+		Spec:   domain.RemoteSpec{LegacyAlias: "demo", OwnerEndpoint: "other.example"},
 		Remote: true,
 	}
 	fixture.exists = true
@@ -120,7 +120,7 @@ func TestRemotePrepareDetectsStatePortAndTrustDrift(t *testing.T) {
 	old := domain.RemoteKey{Material: "ssh-ed25519 old", Fingerprint: "SHA256:old"}
 	current := domain.RemoteKey{Material: "ssh-ed25519 current", Fingerprint: "SHA256:current"}
 	record := domain.RemoteRecord{
-		Spec:   domain.RemoteSpec{Name: "demo", Destination: "owner.example"},
+		Spec:   domain.RemoteSpec{LegacyAlias: "demo", OwnerEndpoint: "owner.example"},
 		Remote: true, Path: "/config/demo.env", SSHPort: 2222,
 	}
 	for name, test := range map[string]struct {
@@ -182,7 +182,7 @@ func TestRemotePrepareDetectsStatePortAndTrustDrift(t *testing.T) {
 
 func TestRemoteRemoveIsLocalAndRunnerConsumesExactPlan(t *testing.T) {
 	record := domain.RemoteRecord{
-		Spec:   domain.RemoteSpec{Name: "demo", Destination: "owner.example"},
+		Spec:   domain.RemoteSpec{LegacyAlias: "demo", OwnerEndpoint: "owner.example"},
 		Remote: true, Path: "/config/demo.env", SSHPort: 2222,
 	}
 	fixture := &remoteControlFixture{record: record, exists: true}
@@ -239,14 +239,14 @@ func TestRemoteActionPlanMapsPreparedVariantsWithoutReclassifyingMetadata(t *tes
 		},
 		{
 			name: "add", prepared: domain.RemotePrepared{
-				Action: domain.RemoteAdd, Spec: domain.RemoteSpec{Name: "demo", Destination: "owner"},
+				Action: domain.RemoteAdd, Spec: domain.RemoteSpec{LegacyAlias: "demo", OwnerEndpoint: "owner"},
 				Scanned: []domain.RemoteKey{{Fingerprint: "SHA256:new"}},
 			},
 			wantAction: "remote.add", wantChanged: true, consequence: "SHA256:new",
 		},
 		{
 			name: "repair key", prepared: domain.RemotePrepared{
-				Action: domain.RemoteRepairKey, Spec: domain.RemoteSpec{Name: "demo"},
+				Action: domain.RemoteRepairKey, Spec: domain.RemoteSpec{LegacyAlias: "demo"},
 				Recorded: []domain.RemoteKey{{Fingerprint: "SHA256:old"}},
 				Scanned:  []domain.RemoteKey{{Fingerprint: "SHA256:new"}},
 			},
@@ -254,7 +254,7 @@ func TestRemoteActionPlanMapsPreparedVariantsWithoutReclassifyingMetadata(t *tes
 		},
 		{
 			name: "remove", prepared: domain.RemotePrepared{
-				Action: domain.RemoteRemove, Spec: domain.RemoteSpec{Name: "demo"},
+				Action: domain.RemoteRemove, Spec: domain.RemoteSpec{LegacyAlias: "demo"},
 			},
 			wantAction: "remote.remove", wantChanged: true, consequence: "remove local context",
 		},

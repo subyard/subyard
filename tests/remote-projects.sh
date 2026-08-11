@@ -18,7 +18,7 @@ assert_projects() {
 mkdir -p "$TMP/bin" "$TMP/config/yards" "$TMP/config/yards/remote/projects" \
   "$TMP/shipped" "$TMP/subyard" "$TMP/state"
 for f in agents.env host.env ports.env; do : > "$TMP/shipped/$f"; done
-printf ': "${INSTANCE_NAME:=yard}"\n: "${INCUS_PROJECT:=subyard}"\n' > "$TMP/shipped/incus.project.env"
+printf ': "${YARD_INSTANCE_NAME:=yard}"\n: "${INCUS_PROJECT:=subyard}"\n' > "$TMP/shipped/incus.project.env"
 printf ': "${SSH_PORT:=2222}"\n' > "$TMP/shipped/subyard.env"
 
 cat > "$TMP/bin/incus" <<'MOCK'
@@ -100,7 +100,7 @@ chmod 755 "$TMP/bin/ssh"
 . "$ROOT/tests/helpers/test-context.sh"
 setup_test_context "$TMP"
 # Exercise resolver-owned registry paths and named-yard identity.
-unset SUBYARD_STATE_DIR YARD_TYPE INSTANCE_NAME INCUS_PROJECT SSH_HOST
+unset SUBYARD_STATE_DIR ACCESS_KIND YARD_INSTANCE_NAME INCUS_PROJECT SSH_HOST
 chmod 0700 "$TMP/config/yards/remote/projects"
 export PATH="$TMP/bin:$PATH"
 export HOME="$TMP/home"
@@ -122,9 +122,9 @@ jq -n '{
 chmod 0600 "$REMOTE_TEST_STATE/owner-config/projects/owner-demo-12345678.json"
 
 cat > "$SUBYARD_CONFIG_HOME/yards/remote.env" <<'ENV'
-YARD_TYPE=remote
-REMOTE_DEST=owner
-REMOTE_YARD=
+ACCESS_KIND=remote
+OWNER_ENDPOINT=owner
+OWNER_YARD_NAME=
 SSH_PORT=2222
 ENV
 

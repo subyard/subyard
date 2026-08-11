@@ -147,7 +147,7 @@ func TestPeerMergePreservesRouteAndRejectsIdentityRotation(t *testing.T) {
 	existing := domain.CredentialPeer{
 		SchemaVersion: 1, Name: "peer-local", ActorID: "actor-b", AgeRecipient: "age1fixture",
 		SigningPublic: "ssh-ed25519 AAAAfixture", Transport: "ssh", Dest: "owner.example",
-		RemoteYard: "named", Trusted: true,
+		OwnerYardName: "named", Trusted: true,
 	}
 	inbound := domain.CredentialPeer{
 		SchemaVersion: 1, Name: "remote-alias", ActorID: "actor-b", AgeRecipient: "age1fixture",

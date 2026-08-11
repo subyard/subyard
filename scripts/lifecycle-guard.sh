@@ -12,7 +12,7 @@ subyard_require_engine_context
 # shellcheck source=scripts/lib/host.sh
 . "$SCRIPT_DIR/lib/host.sh"
 INCUS_PROJECT="${INCUS_PROJECT:-subyard}"
-INSTANCE_NAME="${INSTANCE_NAME:-yard}"
+YARD_INSTANCE_NAME="${YARD_INSTANCE_NAME:-yard}"
 DEV_USER="${DEV_USER:-dev}"
 SSH_HOST="${SSH_HOST:-yard}"
 PROJ=(--project "$INCUS_PROJECT")
@@ -31,17 +31,17 @@ done
 [ "$reconcile" = 0 ] || case "$action" in start | stop) ;; *) die "--reconcile needs start or stop" ;; esac
 
 incus_preflight "$action"
-incus info "$INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1 \
-  || die "instance '$INSTANCE_NAME' missing — run '$(yard_cmd_hint) init' first"
+incus info "$YARD_INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1 \
+  || die "instance '$YARD_INSTANCE_NAME' missing — run '$(yard_cmd_hint) init' first"
 
-state() { incus list "$INSTANCE_NAME" "${PROJ[@]}" -f csv -c s 2>/dev/null; }
+state() { incus list "$YARD_INSTANCE_NAME" "${PROJ[@]}" -f csv -c s 2>/dev/null; }
 BRIDGE="${INCUS_BRIDGE:-${INCUS_NETWORK:-incusbr0}}"
 
 # A container stop cannot gracefully close desktop windows or SSH shells. Refuse to cross an active
 # session after closing the SSH listener to new connections.
 vscode_remote_state() {
   local result
-  if result="$(incus exec "$INSTANCE_NAME" "${PROJ[@]}" --env VSCODE_USER="$DEV_USER" -- \
+  if result="$(incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" --env VSCODE_USER="$DEV_USER" -- \
       sh -s -- check-active < "$SCRIPT_DIR/vscode-remote-maintenance.sh" 2>/dev/null)"; then
     result="${result##*$'\n'}"
     case "$result" in idle | active | unknown) printf '%s\n' "$result" ;; *) printf 'unknown\n' ;; esac
@@ -59,7 +59,7 @@ SSH_RESTORE_NEEDED=0
 # window can enter between the probe and `incus stop`.
 ssh_listener_quiesce() {
   local result rest
-  if ! result="$(incus exec "$INSTANCE_NAME" "${PROJ[@]}" -- sh -eu -c '
+  if ! result="$(incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- sh -eu -c '
     service=0; socket=0
     if systemctl is-active --quiet ssh; then service=1; fi
     if systemctl is-active --quiet ssh.socket; then socket=1; fi
@@ -81,7 +81,7 @@ ssh_listener_quiesce() {
     unsupported) return 2 ;;
     *) return 1 ;;
   esac
-  if ! incus exec "$INSTANCE_NAME" "${PROJ[@]}" \
+  if ! incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" \
       --env SERVICE="$SSH_SERVICE_WAS_ACTIVE" --env SOCKET="$SSH_SOCKET_WAS_ACTIVE" -- \
       sh -eu -c '
         [ "$SOCKET" = 0 ] || systemctl stop ssh.socket
@@ -98,7 +98,7 @@ ssh_listener_restore() {
     SSH_RESTORE_NEEDED=0
     return 0
   fi
-  if ! incus exec "$INSTANCE_NAME" "${PROJ[@]}" \
+  if ! incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" \
       --env SERVICE="$SSH_SERVICE_WAS_ACTIVE" --env SOCKET="$SSH_SOCKET_WAS_ACTIVE" -- \
       sh -eu -c '
         [ "$SOCKET" = 0 ] || systemctl start ssh.socket
@@ -120,11 +120,11 @@ trap restore_ssh_listener_on_exit EXIT
 case "$action" in
   start)
     power_nm_prepare_reader || die "$POWER_ERROR"
-    info "starting $INSTANCE_NAME"
-    power_start_guarded "$INCUS_PROJECT" "$INSTANCE_NAME" "$BRIDGE" || die "$POWER_ERROR"
-    info "waiting for $INSTANCE_NAME agent"
-    incus_wait_instance_agent "$INCUS_PROJECT" "$INSTANCE_NAME" \
-      || die "instance '$INSTANCE_NAME' agent did not become ready"
+    info "starting $YARD_INSTANCE_NAME"
+    power_start_guarded "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" "$BRIDGE" || die "$POWER_ERROR"
+    info "waiting for $YARD_INSTANCE_NAME agent"
+    incus_wait_instance_agent "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" \
+      || die "instance '$YARD_INSTANCE_NAME' agent did not become ready"
     ;;
   stop)
     cur="$(state)"
@@ -151,14 +151,14 @@ case "$action" in
       elif [ "$reconcile" = 0 ]; then
         warn "--force bypasses the active SSH / VS Code session guard"
       fi
-      info "stopping $INSTANCE_NAME"
-      if ! power_stop_instance "$INCUS_PROJECT" "$INSTANCE_NAME"; then
+      info "stopping $YARD_INSTANCE_NAME"
+      if ! power_stop_instance "$INCUS_PROJECT" "$YARD_INSTANCE_NAME"; then
         ssh_listener_restore
-        die "could not stop $INSTANCE_NAME"
+        die "could not stop $YARD_INSTANCE_NAME"
       fi
       SSH_RESTORE_NEEDED=0
     else
-      info "$INSTANCE_NAME already stopped (${cur:-unknown})"
+      info "$YARD_INSTANCE_NAME already stopped (${cur:-unknown})"
     fi
     ;;
   *)

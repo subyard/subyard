@@ -34,7 +34,7 @@ func (executor *blockingStatusExecutor) Exec(
 
 func TestStatusCombinesServiceAndVSCodeProbe(t *testing.T) {
 	yard := domain.Context{
-		IncusProject: "subyard", InstanceName: "yard", DevUser: "dev",
+		IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev",
 	}
 	incus := &testkit.Incus{
 		Instances: map[string]ports.InstanceInfo{"subyard/yard": {
@@ -60,7 +60,7 @@ func TestStatusCombinesServiceAndVSCodeProbe(t *testing.T) {
 }
 
 func TestStatusBoundsEachOptionalProbe(t *testing.T) {
-	yard := domain.Context{IncusProject: "subyard", InstanceName: "yard"}
+	yard := domain.Context{IncusProject: "subyard", YardInstanceName: "yard"}
 	incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"subyard/yard": {
 		Status: "Running", Config: map[string]string{}, Devices: map[string]map[string]string{},
 	}}}

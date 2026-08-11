@@ -45,7 +45,7 @@ func (runtime Runtime) RefreshConfigs(ctx context.Context) error {
 	if output == nil {
 		output = io.Discard
 	}
-	fmt.Fprintf(output, "Refresh agent instructions and configs in %s\n", runtime.Yard.InstanceName)
+	fmt.Fprintf(output, "Refresh agent instructions and configs in %s\n", runtime.Yard.YardInstanceName)
 	copied := make(map[string]bool)
 	for _, file := range files {
 		payload, err := file.readSource()
@@ -63,7 +63,7 @@ func (runtime Runtime) RefreshConfigs(ctx context.Context) error {
 		fmt.Fprintf(output, "  [ ok ] %s -> ~%s/%s\n",
 			file.label, runtime.devUser(), strings.TrimPrefix(file.destination, "/home/"+runtime.devUser()+"/"))
 	}
-	for _, agent := range strings.Fields(runtime.environmentValue("AGENTS")) {
+	for _, agent := range strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")) {
 		if !copied[agent+" config"] && !copied[agent+" rules"] {
 			fmt.Fprintf(output, "  [ ok ] %s: no default config — skipping\n", agent)
 		}
@@ -99,7 +99,7 @@ func (runtime Runtime) ConfigsConverged(ctx context.Context) (bool, error) {
 			return false, err
 		}
 		result, execErr := runtime.Executor.Exec(
-			ctx, runtime.Yard.IncusProject, runtime.Yard.InstanceName,
+			ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName,
 			ports.InstanceExecRequest{Command: []string{"sha256sum", "--", file.destination}},
 		)
 		if execErr != nil {
@@ -185,7 +185,7 @@ func (runtime Runtime) guestConfigFiles() ([]guestConfigFile, error) {
 		"opencode": {label: "OpenCode instructions", source: runtime.environmentValue("HOST_OPENCODE_AGENTS_MD"),
 			destination: home + "/.config/opencode/AGENTS.md", followSymlinks: true},
 	}
-	for _, agent := range strings.Fields(runtime.environmentValue("AGENTS")) {
+	for _, agent := range strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")) {
 		if !domain.SafeName(agent) {
 			return nil, fmt.Errorf("invalid agent name %q", agent)
 		}
@@ -310,7 +310,7 @@ func (runtime Runtime) runGuestAsDev(ctx context.Context, command []string) erro
 
 func (runtime Runtime) runGuest(ctx context.Context, request ports.InstanceExecRequest) error {
 	result, err := runtime.Executor.Exec(
-		ctx, runtime.Yard.IncusProject, runtime.Yard.InstanceName, request)
+		ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, request)
 	if err == nil && result.ExitCode == 0 {
 		return nil
 	}

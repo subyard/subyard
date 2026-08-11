@@ -39,11 +39,11 @@ func (runtime Runtime) Execute(
 	yard domain.Context,
 	request ports.InstanceExecRequest,
 ) (ports.InstanceExecResult, error) {
-	if yard.YardType != domain.YardRemote {
+	if yard.AccessKind != domain.AccessRemote {
 		if runtime.Executor == nil {
 			return ports.InstanceExecResult{}, errors.New("Incus executor is required")
 		}
-		return runtime.Executor.Exec(ctx, yard.IncusProject, yard.InstanceName, request)
+		return runtime.Executor.Exec(ctx, yard.IncusProject, yard.YardInstanceName, request)
 	}
 	return runtime.executeSSH(ctx, yard.SSHHost, request)
 }
@@ -54,11 +54,11 @@ func (runtime Runtime) Stream(
 	request ports.InstanceExecRequest,
 	stdin io.Reader,
 ) (ports.InstanceExecResult, error) {
-	if yard.YardType != domain.YardRemote {
+	if yard.AccessKind != domain.AccessRemote {
 		if runtime.Streamer == nil {
 			return ports.InstanceExecResult{}, errors.New("Incus stream executor is required")
 		}
-		return runtime.Streamer.StreamExec(ctx, yard.IncusProject, yard.InstanceName, request, stdin)
+		return runtime.Streamer.StreamExec(ctx, yard.IncusProject, yard.YardInstanceName, request, stdin)
 	}
 	return runtime.executeSSHReader(ctx, yard.SSHHost, request, stdin)
 }
@@ -138,7 +138,7 @@ func (runtime Runtime) Observe(
 		}
 	}
 
-	if yard.YardType == domain.YardRemote {
+	if yard.AccessKind == domain.AccessRemote {
 		if live {
 			execution, err := runtime.Execute(ctx, yard, ports.InstanceExecRequest{Command: metadataCommand})
 			if err == nil {
@@ -151,7 +151,7 @@ func (runtime Runtime) Observe(
 	}
 
 	if runtime.Incus != nil {
-		instance, err := runtime.Incus.Instance(ctx, yard.IncusProject, yard.InstanceName)
+		instance, err := runtime.Incus.Instance(ctx, yard.IncusProject, yard.YardInstanceName)
 		if err == nil && strings.EqualFold(instance.Status, "running") {
 			result.Running = true
 		}
@@ -264,7 +264,7 @@ func execBytes(
 	command []string,
 	stdin []byte,
 ) ([]byte, error) {
-	result, err := executor.Exec(ctx, yard.IncusProject, yard.InstanceName, ports.InstanceExecRequest{
+	result, err := executor.Exec(ctx, yard.IncusProject, yard.YardInstanceName, ports.InstanceExecRequest{
 		Command: command, Stdin: stdin,
 	})
 	return result.Stdout, err

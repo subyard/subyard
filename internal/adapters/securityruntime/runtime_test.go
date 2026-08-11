@@ -158,7 +158,7 @@ func testRuntime(t *testing.T) Runtime {
 		RepositoryRoot: root,
 		Environment:    map[string]string{"SUBYARD_SECURITY_SKIP_LIVE": "1"},
 		Yard: domain.Context{
-			IncusProject: "subyard", InstanceName: "yard",
+			IncusProject: "subyard", YardInstanceName: "yard",
 			Paths: domain.RuntimePaths{
 				ConfigHome: filepath.Join(operator, "config-home"),
 				HostBase:   filepath.Join(operator, "host"),

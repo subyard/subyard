@@ -29,8 +29,9 @@ remove||@project||local|mutate|dynamic|public|projects|remove|remove [project]|r
 up||@project-env||forward|mutate|dynamic|public|project_env|project-env-up|up [project]|build or start the optional project environment|--rebuild --yes --help|
 down||@project-env||forward|mutate|dynamic|public|project_env|project-env|down [project]|stop the optional project environment|--yes --help|
 info||@project-env||forward|read|never|public|project_env|project-env|info [project]|show the optional project environment contract|--yes --help|
-yards||@yards||local|read|never|public|lifecycle|simple|yards|list registered local and remote yards|--help|
-remote||@remote||local|mutate|dynamic|public|remote|remote|remote <command>|register, repair, remove or list remote yards|--yard --yes --help|add repair-key remove list
+yards||@yards||local|read|never|public|lifecycle|simple|yards|list registered local and remote yards|--verbose --json --help|
+host||@host||local|mutate|dynamic|public|remote|simple|host <command>|manage owner-host identity and controller registration|--yes --help|add list rename remove repair
+remote||@remote||local|mutate|dynamic|hidden|remote|remote|remote <command>|compatibility adapter for legacy remote-yard contexts|--yard --yes --help|add repair-key remove list
 update||@update||local|mutate|dynamic|public|lifecycle|simple|update|check, install or roll back the release runtime|--check --version --offline --rollback --force --yes --help|
 config||@config||local|mutate|dynamic|public|lifecycle|config|config <command>|inspect, author, sync and reconcile Subyard settings|--all-local --check --adopt --host-id --checkout --offline --apply --init --scope -m --message --yes --help|fields show paths set unset import edit status apply sync
 help||@help||local|read|never|hidden|internal|none|help|show top-level help||

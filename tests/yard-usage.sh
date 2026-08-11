@@ -70,7 +70,7 @@ set -e
 
 # Preserve named context in the repair hint.
 cat > "$SUBYARD_CONFIG_HOME/yards/usage-test.env" <<'ENV'
-YARD_TYPE=local
+ACCESS_KIND=local
 SSH_PORT=2299
 ENV
 export MOCK_CCUSAGE_BIN="$tmp/missing-ccusage"
@@ -93,9 +93,9 @@ grep -Fq 'repair with: yard -Y controller init' "$tmp/controller.err" \
 
 # Preserve the controller alias across remote forwarding.
 cat > "$SUBYARD_CONFIG_HOME/yards/usage-remote.env" <<'ENV'
-YARD_TYPE=remote
-REMOTE_DEST=owner.test
-REMOTE_YARD=inner
+ACCESS_KIND=remote
+OWNER_ENDPOINT=owner.test
+OWNER_YARD_NAME=inner
 ENV
 export SSH_LOG="$tmp/ssh.log"
 cat > "$tmp/bin/ssh" <<'SH'
@@ -103,7 +103,7 @@ cat > "$tmp/bin/ssh" <<'SH'
 printf '%s\0' "$@" > "$SSH_LOG"
 SH
 chmod +x "$tmp/bin/ssh"
-env -u YARD_TYPE "$ROOT/bin/yard" -Y usage-remote usage >/dev/null
+env -u ACCESS_KIND "$ROOT/bin/yard" -Y usage-remote usage >/dev/null
 mapfile -d '' -t ssh_args < "$SSH_LOG"
 payload="${ssh_args[-1]}"
 decoded="$(/bin/bash -c "printf '%s' $payload")"

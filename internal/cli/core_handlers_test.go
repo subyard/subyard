@@ -58,8 +58,8 @@ func TestTestVMsUsesTypedWorkerInvocation(t *testing.T) {
 
 func TestTestVMStatusIsReadOnly(t *testing.T) {
 	loaded := config.Loaded{Context: domain.Context{
-		NestedE2EVMs: true, InstanceType: domain.InstanceContainer,
-		IncusProject: "subyard", InstanceName: "yard",
+		NestedE2EVMs: true, YardKind: domain.YardContainer,
+		IncusProject: "subyard", YardInstanceName: "yard",
 	}}
 	program := &CLI{options: Options{Incus: &testkit.Incus{Instances: map[string]ports.InstanceInfo{
 		"subyard/yard": {Status: "Running"},
@@ -393,7 +393,7 @@ func TestLifecycleExecutionBuildsTypedStopDelta(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			action, delta, err := test.execution.actionPlan(command.Definition{Name: "stop"}, domain.Context{
-				IncusProject: "subyard", InstanceName: "yard",
+				IncusProject: "subyard", YardInstanceName: "yard",
 			})
 			if err != nil || action != test.action || delta.Changed != test.changed {
 				t.Fatalf("action=%q delta=%#v err=%v", action, delta, err)
@@ -428,7 +428,7 @@ func TestObserveLifecycleExecutionDetectsStoppedNoOp(t *testing.T) {
 			}
 			execution := &lifecycleExecution{action: "stop"}
 			if err := program.observeLifecycleExecution(context.Background(), domain.Context{
-				IncusProject: "subyard", InstanceName: "yard",
+				IncusProject: "subyard", YardInstanceName: "yard",
 			}, execution); err != nil {
 				t.Fatal(err)
 			}
@@ -452,7 +452,7 @@ func TestTeardownExecutionBuildsTypedActionDelta(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			action, delta, err := test.execution.actionPlan(command.Definition{Name: "teardown"}, domain.Context{
-				IncusProject: "subyard", InstanceName: "yard",
+				IncusProject: "subyard", YardInstanceName: "yard",
 			})
 			if err != nil || action != test.action || delta.Changed != test.changed {
 				t.Fatalf("action=%q delta=%#v err=%v", action, delta, err)

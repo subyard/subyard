@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -179,5 +180,57 @@ func TestSSHYardUsesLoginShellForUserInstalledCLI(t *testing.T) {
 	}
 	if !reflect.DeepEqual(process.Arguments, want) {
 		t.Fatalf("unexpected SSH arguments:\n got: %#v\nwant: %#v", process.Arguments, want)
+	}
+}
+
+func TestSSHPinnedUsesOnlyManagedKnownHosts(t *testing.T) {
+	process, err := SSHPinned("ssh", "owner-alias", "/state/owner.known_hosts", 3*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantOptions := []string{
+		"BatchMode=yes", "ConnectTimeout=3", "StrictHostKeyChecking=yes",
+		"UserKnownHostsFile=/state/owner.known_hosts", "GlobalKnownHostsFile=/dev/null",
+		"UpdateHostKeys=no",
+	}
+	for _, option := range wantOptions {
+		found := false
+		for index := 0; index+1 < len(process.Arguments); index++ {
+			if process.Arguments[index] == "-o" && process.Arguments[index+1] == option {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing strict SSH option %q in %#v", option, process.Arguments)
+		}
+	}
+}
+
+func TestSSHHostKeyAssessmentDelegatesAliasesToIsolatedOpenSSH(t *testing.T) {
+	process, err := SSHHostKeyAssessment("ssh", "configured-owner-alias", "/tmp/candidate.known_hosts", 4*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantOptions := []string{
+		"BatchMode=yes", "ConnectTimeout=4", "StrictHostKeyChecking=accept-new",
+		"UserKnownHostsFile=/tmp/candidate.known_hosts", "GlobalKnownHostsFile=/dev/null",
+		"HashKnownHosts=no", "UpdateHostKeys=no", "CheckHostIP=no",
+		"ControlMaster=no", "ControlPath=none", "PreferredAuthentications=none",
+	}
+	for _, option := range wantOptions {
+		found := false
+		for index := 0; index+1 < len(process.Arguments); index++ {
+			if process.Arguments[index] == "-o" && process.Arguments[index+1] == option {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing isolated assessment option %q in %#v", option, process.Arguments)
+		}
+	}
+	if !slices.Contains(process.Arguments, "configured-owner-alias") {
+		t.Fatalf("SSH alias was rewritten instead of delegated to OpenSSH: %#v", process.Arguments)
 	}
 }

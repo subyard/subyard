@@ -36,10 +36,10 @@ if [ "$mode" != apply ]; then
   power_host_safe "$BRIDGE" || exit 1
   [ "$ufw_active" = 0 ] || ufw_yard_rules_present "$BRIDGE" || exit 1
   instance_exists=0
-  incus info "$INSTANCE_NAME" --project "$INCUS_PROJECT" >/dev/null 2>&1 && instance_exists=1
+  incus info "$YARD_INSTANCE_NAME" --project "$INCUS_PROJECT" >/dev/null 2>&1 && instance_exists=1
   [ "$mode" != verify ] || [ "$instance_exists" = 1 ] || exit 0
   [ "$instance_exists" = 1 ] || exit 1
-  instance_state="$(power_state "$INCUS_PROJECT" "$INSTANCE_NAME")"
+  instance_state="$(power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")"
   # Desired power is restored by init's finalizer. A stopped instance is already safe for this
   # stage: network convergence owns the host NM/UFW/route guards, not physical lifecycle state.
   # A live instance still has to expose an address before the network stage can be considered ready.
@@ -56,14 +56,14 @@ if [ "$mode" != apply ]; then
     [ "$address_attempts" -ge 1 ] || exit 1
     address_attempt=1
     while [ "$address_attempt" -le "$address_attempts" ]; do
-      [ -z "$(incus list "$INSTANCE_NAME" --project "$INCUS_PROJECT" -c4 -fcsv 2>/dev/null)" ] \
+      [ -z "$(incus list "$YARD_INSTANCE_NAME" --project "$INCUS_PROJECT" -c4 -fcsv 2>/dev/null)" ] \
         || exit 0
       [ "$address_attempt" -eq "$address_attempts" ] || sleep 1
       address_attempt=$((address_attempt + 1))
     done
     exit 1
   fi
-  [ -n "$(incus list "$INSTANCE_NAME" --project "$INCUS_PROJECT" -c4 -fcsv 2>/dev/null)" ]
+  [ -n "$(incus list "$YARD_INSTANCE_NAME" --project "$INCUS_PROJECT" -c4 -fcsv 2>/dev/null)" ]
   exit
 fi
 

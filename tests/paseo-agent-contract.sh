@@ -7,11 +7,11 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 agents="$(
   SUBYARD_CONFIG_DIR="$ROOT/config" \
     bash -c '. "$1"; printf "%s\n%s\n%s\n%s\n%s\n" \
-      "$AGENTS" "$AGENT_paseo_PROVISION" "$AGENT_paseo_COMMAND" \
+      "$CODING_TOOL_INTEGRATIONS" "$AGENT_paseo_PROVISION" "$AGENT_paseo_COMMAND" \
       "$AGENT_paseo_CHECK" "$AGENT_paseo_PROJECTS_CHANGED"' _ "$ROOT/config/agents.env"
 )"
 mapfile -t values <<<"$agents"
-[[ " ${values[0]} " != *" paseo "* ]] || fail "Paseo entered the shipped default AGENTS"
+[[ " ${values[0]} " != *" paseo "* ]] || fail "Paseo entered the shipped default CODING_TOOL_INTEGRATIONS"
 [ "${values[1]}" = "$ROOT/config/agents/paseo/provision.sh" ] || fail "wrong Paseo provision hook"
 [ "${values[2]}" = paseo ] || fail "wrong Paseo command"
 [ "${values[3]}" = paseo-check ] || fail "wrong Paseo check"
@@ -82,7 +82,7 @@ pair_check_line="$(rg -n 'daemon pair .*--json' \
   || fail "Paseo generates a pairing offer before Codex capability readiness"
 rg -q 'ubuntu-24[.]04-arm' "$ROOT/.github/workflows/release.yml" \
   || fail "release has no native arm64 Paseo lane"
-rg -q 'AGENTS="paseo"' "$ROOT/docs/paseo.md" \
+rg -q 'CODING_TOOL_INTEGRATIONS="paseo"' "$ROOT/docs/paseo.md" \
   || fail "Paseo dependency-driven opt-in documentation is missing"
 rg -q 'ssh yard-<name> -- paseo-pair' "$ROOT/docs/paseo.md" \
   || fail "Paseo pairing documentation is missing"

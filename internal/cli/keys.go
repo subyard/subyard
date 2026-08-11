@@ -82,10 +82,10 @@ func (cli *CLI) credentialRuntimeWithStreams(
 			if err != nil {
 				return credentialruntime.Target{}, err
 			}
-			if targetLoaded.Context.YardType == domain.YardRemote {
+			if targetLoaded.Context.AccessKind == domain.AccessRemote {
 				return credentialruntime.Target{
-					Name: name, Transport: "ssh", Destination: targetLoaded.Context.RemoteDest,
-					RemoteYard: targetLoaded.Context.RemoteYard,
+					Name: name, Transport: "ssh", Destination: targetLoaded.Context.OwnerEndpoint,
+					OwnerYardName: targetLoaded.Context.OwnerYardName,
 				}, nil
 			}
 			return credentialruntime.Target{Name: name, Transport: "local"}, nil
@@ -214,11 +214,11 @@ func (cli *CLI) prepareRemoteKeys(
 	loaded config.Loaded,
 	arguments []string,
 ) (domain.OperationPlan, error) {
-	ownerYard := loaded.Context.RemoteYard
+	ownerYard := loaded.Context.OwnerYardName
 	if ownerYard == "" {
 		ownerYard = "default"
 	}
-	process, err := transport.SSHYard("ssh", loaded.Context.RemoteDest, ownerYard, 3*time.Second)
+	process, err := transport.SSHYard("ssh", loaded.Context.OwnerEndpoint, ownerYard, 3*time.Second)
 	if err != nil {
 		return domain.OperationPlan{}, err
 	}
@@ -244,7 +244,7 @@ func (cli *CLI) prepareRemoteKeys(
 	}); err != nil {
 		return domain.OperationPlan{}, err
 	}
-	response, err := process.Call(ctx, loaded.Context.RemoteDest, request.Bytes())
+	response, err := process.Call(ctx, loaded.Context.OwnerEndpoint, request.Bytes())
 	if err != nil {
 		return domain.OperationPlan{}, err
 	}

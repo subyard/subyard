@@ -85,35 +85,35 @@ func TestCanonicalYardIdentity(t *testing.T) {
 	}{
 		{
 			name: "local default",
-			yard: domain.Context{YardName: "default", YardType: domain.YardLocal},
+			yard: domain.Context{YardName: "default", AccessKind: domain.AccessLocal},
 			want: "local-owner/default",
 		},
 		{
 			name: "local named",
-			yard: domain.Context{YardName: "openclaw", YardType: domain.YardLocal},
+			yard: domain.Context{YardName: "openclaw", AccessKind: domain.AccessLocal},
 			want: "local-owner/openclaw",
 		},
 		{
 			name: "remote default explicit",
 			yard: domain.Context{
-				YardName: "default", YardType: domain.YardRemote,
-				RemoteDest: "dev@remote.example", RemoteYard: "default",
+				YardName: "default", AccessKind: domain.AccessRemote,
+				OwnerEndpoint: "dev@remote.example", OwnerYardName: "default",
 			},
 			want: "remote-owner/default",
 		},
 		{
 			name: "remote default implicit",
 			yard: domain.Context{
-				YardName: "local-route-name", YardType: domain.YardRemote,
-				RemoteDest: "dev@remote.example",
+				YardName: "local-route-name", AccessKind: domain.AccessRemote,
+				OwnerEndpoint: "dev@remote.example",
 			},
 			want: "remote-owner/default",
 		},
 		{
 			name: "remote named",
 			yard: domain.Context{
-				YardName: "openclaw", YardType: domain.YardRemote,
-				RemoteDest: "dev@remote.example", RemoteYard: "openclaw",
+				YardName: "openclaw", AccessKind: domain.AccessRemote,
+				OwnerEndpoint: "dev@remote.example", OwnerYardName: "openclaw",
 			},
 			want: "remote-owner/openclaw",
 		},
@@ -133,7 +133,7 @@ func TestCanonicalYardIdentity(t *testing.T) {
 func TestCanonicalYardIdentityRejectsUnknownRemoteOwner(t *testing.T) {
 	root := t.TempDir()
 	_, err := canonicalYardIdentity(config.Loaded{Context: domain.Context{
-		YardName: "default", YardType: domain.YardRemote, RemoteDest: "dev@missing.example",
+		YardName: "default", AccessKind: domain.AccessRemote, OwnerEndpoint: "dev@missing.example",
 		Paths: domain.RuntimePaths{
 			ConfigHome: filepath.Join(root, "config"),
 			DataHome:   filepath.Join(root, "data"),

@@ -22,9 +22,73 @@ var ErrIntegrity = errors.New("owner inventory integrity violation")
 type Client struct {
 	Transport ports.RemoteTransport
 	Target    string
+
+	verifiedFingerprint string
+}
+
+type FetchResult struct {
+	Inventory domain.OwnerInventory
+	Rename    *IdentityProof
 }
 
 func (client Client) Fetch(ctx context.Context, expectedHostID string) (domain.OwnerInventory, error) {
+	inventory, err := client.fetch(ctx)
+	if err != nil {
+		return domain.OwnerInventory{}, err
+	}
+	if expectedHostID != "" && inventory.HostID != expectedHostID {
+		return inventory, fmt.Errorf(
+			"%w: owner HostID mismatch: connection is %q, response is %q", ErrIntegrity,
+			expectedHostID, inventory.HostID,
+		)
+	}
+	return inventory, nil
+}
+
+func (client Client) FetchForConnection(ctx context.Context, connection Connection) (FetchResult, error) {
+	if err := connection.Validate(); err != nil {
+		return FetchResult{}, err
+	}
+	trust, err := connection.RequireTrust()
+	if err != nil || client.verifiedFingerprint == "" ||
+		client.verifiedFingerprint != trust.Fingerprint {
+		return FetchResult{}, fmt.Errorf(
+			"%w: owner refresh lacks verified SSH host trust", ErrIntegrity,
+		)
+	}
+	inventory, err := client.fetch(ctx)
+	if err != nil {
+		return FetchResult{}, err
+	}
+	result := FetchResult{Inventory: inventory}
+	if inventory.HostID == connection.HostID {
+		return result, nil
+	}
+	result.Rename = &IdentityProof{
+		ExpectedHostID: connection.HostID, ObservedHostID: inventory.HostID,
+		Destination: connection.Destination, TrustFingerprint: trust.Fingerprint,
+	}
+	return result, nil
+}
+
+func RefreshConnection(
+	ctx context.Context, client Client, store Connections, connection Connection, fetchedAt time.Time,
+) (domain.OwnerInventory, error) {
+	fetched, err := client.FetchForConnection(ctx, connection)
+	if err != nil {
+		return domain.OwnerInventory{}, err
+	}
+	if fetched.Rename != nil {
+		if err := store.AdoptHostID(*fetched.Rename, Snapshot{
+			FetchedAt: fetchedAt.UTC(), Inventory: fetched.Inventory,
+		}); err != nil {
+			return domain.OwnerInventory{}, fmt.Errorf("adopt owner HostID rename: %w", err)
+		}
+	}
+	return fetched.Inventory, nil
+}
+
+func (client Client) fetch(ctx context.Context) (domain.OwnerInventory, error) {
 	raw, err := client.call(ctx, "inventory", "owner.inventory", Capability)
 	if err != nil {
 		return domain.OwnerInventory{}, err
@@ -35,12 +99,6 @@ func (client Client) Fetch(ctx context.Context, expectedHostID string) (domain.O
 	}
 	if err := inventory.Validate(); err != nil {
 		return inventory, fmt.Errorf("%w: %v", ErrIntegrity, err)
-	}
-	if expectedHostID != "" && inventory.HostID != expectedHostID {
-		return inventory, fmt.Errorf(
-			"%w: owner HostID mismatch: connection is %q, response is %q", ErrIntegrity,
-			expectedHostID, inventory.HostID,
-		)
 	}
 	return inventory, nil
 }

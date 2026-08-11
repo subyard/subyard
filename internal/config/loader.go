@@ -82,6 +82,9 @@ func load(
 		return domain.Context{}, nil, fmt.Errorf("resolve repository root: %w", err)
 	}
 	values := environmentFrom(options.Environment)
+	if err := normalizeLegacyEnvironment(values); err != nil {
+		return domain.Context{}, nil, err
+	}
 	if values["SUBYARD_ENGINE_CONTEXT"] == "1" && values["SUBYARD_CONFIG_LOADED"] != "1" {
 		resetInheritedContext(values)
 	}
@@ -241,7 +244,7 @@ func load(
 		}
 		yardDerivationLayer := tracker.addLayer(
 			"yard", "derived", "yard name "+yardName, true, settingScalar,
-			"HOST_BASE", "INCUS_PROJECT", "INSTANCE_NAME", "RESTRICTED_DISK_PATHS",
+			"HOST_BASE", "INCUS_PROJECT", "YARD_INSTANCE_NAME", "RESTRICTED_DISK_PATHS",
 			"SRV_VOLUME", "SSH_HOST",
 		)
 		applyYardDerivations(yardName, values, tracker, yardDerivationLayer)
@@ -310,14 +313,14 @@ func load(
 	if err := resolveAgentDependencies(values); err != nil {
 		return domain.Context{}, nil, err
 	}
-	tracker.normalize("AGENTS", values["AGENTS"], "resolved agent dependencies")
+	tracker.normalize("CODING_TOOL_INTEGRATIONS", values["CODING_TOOL_INTEGRATIONS"], "resolved agent dependencies")
 	normalizeAgentPersistLinks(values, tracker, defaultLayer)
 	ctx, err := contextFrom(root, yardName, values, tracker, defaultLayer, normalizationLayer)
 	return ctx, values, err
 }
 
 func resolveAgentDependencies(values environment) error {
-	requested := strings.Fields(values["AGENTS"])
+	requested := strings.Fields(values["CODING_TOOL_INTEGRATIONS"])
 	selected := make(map[string]bool, len(requested))
 	for _, agent := range requested {
 		if selected[agent] {
@@ -373,7 +376,7 @@ func resolveAgentDependencies(values environment) error {
 			return err
 		}
 	}
-	values["AGENTS"] = strings.Join(resolved, " ")
+	values["CODING_TOOL_INTEGRATIONS"] = strings.Join(resolved, " ")
 	return nil
 }
 
@@ -387,11 +390,11 @@ func normalizeAgentPersistLinks(
 		return
 	}
 	var selected strings.Builder
-	for _, agent := range strings.Fields(values["AGENTS"]) {
+	for _, agent := range strings.Fields(values["CODING_TOOL_INTEGRATIONS"]) {
 		selected.WriteString(values["AGENT_"+agent+"_PERSIST"])
 	}
 	values["HOST_LINKS"] = selected.String()
-	tracker.normalize("HOST_LINKS", values["HOST_LINKS"], "derived from selected AGENTS")
+	tracker.normalize("HOST_LINKS", values["HOST_LINKS"], "derived from selected CODING_TOOL_INTEGRATIONS")
 }
 
 func cloneEnvironment(values environment) environment {
@@ -598,8 +601,8 @@ func sourceValuedAgentSetting(name string) bool {
 
 func resetInheritedContext(values environment) {
 	for _, name := range []string{
-		"YARD_NAME", "YARD_TYPE", "YARD_PROFILES", "INSTANCE_TYPE", "INSTANCE_NAME", "INCUS_PROJECT",
-		"INCUS_BRIDGE", "SSH_HOST", "SSH_PORT", "REMOTE_DEST", "REMOTE_YARD", "SHIFT_MODE",
+		"YARD_NAME", "ACCESS_KIND", "ENVIRONMENT_PROFILES", "YARD_KIND", "YARD_INSTANCE_NAME", "INCUS_PROJECT",
+		"INCUS_BRIDGE", "SSH_HOST", "SSH_PORT", "OWNER_ENDPOINT", "OWNER_YARD_NAME", "SHIFT_MODE",
 		"FORWARD_SSH_AGENT", "DEV_SUDO", "DEV_UID", "DEV_USER", "YARD_TEMPLATE", "NESTED_E2E_VMS",
 		"E2E_VM_IMAGE", "E2E_VM_CPU", "E2E_VM_MEMORY", "E2E_VM_DISK", "E2E_VM_SLOT_COUNT", "E2E_VM_BOOT_TIMEOUT",
 		"SUBYARD_STATE_DIR", "RESTRICTED_DISK_PATHS",
@@ -720,6 +723,34 @@ func applyEnvFileValidated(
 	}); err != nil {
 		return err
 	}
+	normalized := make([]observedAssignment, 0, len(assignments))
+	type layerValue struct {
+		input string
+		value string
+		line  int
+	}
+	seen := make(map[string]layerValue)
+	for _, assignment := range assignments {
+		canonical := canonicalSettingName(assignment.name)
+		if previous, exists := seen[canonical]; exists && previous.input != assignment.name &&
+			previous.value != assignment.value {
+			return fmt.Errorf(
+				"%s:%d: conflicting settings %s=%q and %s=%q",
+				path, assignment.line, previous.input, previous.value, assignment.name, assignment.value,
+			)
+		}
+		seen[canonical] = layerValue{input: assignment.name, value: assignment.value, line: assignment.line}
+		probe[canonical] = assignment.value
+		if canonical != assignment.name {
+			delete(probe, assignment.name)
+		}
+		assignment.name = canonical
+		normalized = append(normalized, assignment)
+	}
+	assignments = normalized
+	for legacy := range legacySettingNames {
+		delete(probe, legacy)
+	}
 	for _, assignment := range assignments {
 		if err := ValidateSetting(scope, assignment.name, assignment.value, requireSyncable); err != nil {
 			return fmt.Errorf("%s:%d: %w", path, assignment.line, err)
@@ -735,6 +766,43 @@ func applyEnvFileValidated(
 		for _, assignment := range assignments {
 			observer(assignment.name, assignment.value, assignment.line)
 		}
+	}
+	return nil
+}
+
+var legacySettingNames = map[string]string{
+	"YARD_TYPE":           "ACCESS_KIND",
+	"INSTANCE_TYPE":       "YARD_KIND",
+	"INSTANCE_NAME":       "YARD_INSTANCE_NAME",
+	"REMOTE_DEST":         "OWNER_ENDPOINT",
+	"REMOTE_YARD":         "OWNER_YARD_NAME",
+	"BASE_IMAGE":          "YARD_IMAGE",
+	"BASE_IMAGE_FALLBACK": "YARD_IMAGE_FALLBACK",
+	"YARD_PROFILES":       "ENVIRONMENT_PROFILES",
+	"AGENTS":              "CODING_TOOL_INTEGRATIONS",
+}
+
+func canonicalSettingName(name string) string {
+	if canonical, legacy := legacySettingNames[name]; legacy {
+		return canonical
+	}
+	return name
+}
+
+func normalizeLegacyEnvironment(values environment) error {
+	for legacy, canonical := range legacySettingNames {
+		legacyValue, hasLegacy := values[legacy]
+		if !hasLegacy {
+			continue
+		}
+		if canonicalValue, hasCanonical := values[canonical]; hasCanonical && canonicalValue != legacyValue {
+			return fmt.Errorf(
+				"conflicting command environment settings %s=%q and %s=%q",
+				canonical, canonicalValue, legacy, legacyValue,
+			)
+		}
+		values[canonical] = legacyValue
+		delete(values, legacy)
 	}
 	return nil
 }
@@ -830,7 +898,7 @@ func applyYardDerivations(
 	layer settingLayerID,
 ) {
 	values["YARD_NAME"] = name
-	setYardDefault(values, "INSTANCE_NAME", "yard", "yard-"+name, tracker, layer)
+	setYardDefault(values, "YARD_INSTANCE_NAME", "yard", "yard-"+name, tracker, layer)
 	setYardDefault(values, "INCUS_PROJECT", "subyard", "subyard-"+name, tracker, layer)
 	setYardDefault(values, "SSH_HOST", "yard", "yard-"+name, tracker, layer)
 	setYardDefault(values, "SRV_VOLUME", "yard-srv", "yard-srv-"+name, tracker, layer)
@@ -876,9 +944,9 @@ func contextFrom(
 	tracker *settingTracker,
 	defaultLayer, normalizationLayer settingLayerID,
 ) (domain.Context, error) {
-	setDefault(values, "YARD_TYPE", "local", tracker, defaultLayer)
-	setDefault(values, "INSTANCE_TYPE", "container", tracker, defaultLayer)
-	setDefault(values, "INSTANCE_NAME", "yard", tracker, defaultLayer)
+	setDefault(values, "ACCESS_KIND", "local", tracker, defaultLayer)
+	setDefault(values, "YARD_KIND", "container", tracker, defaultLayer)
+	setDefault(values, "YARD_INSTANCE_NAME", "yard", tracker, defaultLayer)
 	setDefault(values, "INCUS_PROJECT", "subyard", tracker, defaultLayer)
 	setDefault(values, "INCUS_BRIDGE", "incusbr0", tracker, defaultLayer)
 	setDefault(values, "SSH_HOST", "yard", tracker, defaultLayer)
@@ -945,22 +1013,23 @@ func contextFrom(
 		return domain.Context{}, err
 	}
 	ctx := domain.Context{
-		YardName:        yardName,
-		YardType:        domain.YardType(values["YARD_TYPE"]),
-		InstanceType:    domain.InstanceType(values["INSTANCE_TYPE"]),
-		InstanceName:    values["INSTANCE_NAME"],
-		IncusProject:    values["INCUS_PROJECT"],
-		IncusBridge:     values["INCUS_BRIDGE"],
-		SSHHost:         values["SSH_HOST"],
-		DevUser:         values["DEV_USER"],
-		SSHPort:         sshPort,
-		RemoteDest:      values["REMOTE_DEST"],
-		RemoteYard:      values["REMOTE_YARD"],
-		ShiftMode:       values["SHIFT_MODE"],
-		ForwardSSHAgent: forwardAgent,
-		DevSudo:         devSudo,
-		NestedE2EVMs:    nestedE2EVMs,
-		DevUID:          devUID,
+		YardName:         yardName,
+		AccessKind:       domain.AccessKind(values["ACCESS_KIND"]),
+		YardKind:         domain.YardKind(values["YARD_KIND"]),
+		YardInstanceName: values["YARD_INSTANCE_NAME"],
+		IncusProject:     values["INCUS_PROJECT"],
+		IncusBridge:      values["INCUS_BRIDGE"],
+		SSHHost:          values["SSH_HOST"],
+		DevUser:          values["DEV_USER"],
+		SSHPort:          sshPort,
+		OwnerEndpoint:    values["OWNER_ENDPOINT"],
+		OwnerYardName:    values["OWNER_YARD_NAME"],
+		YardImageRef:     domain.YardImageRef(values["YARD_IMAGE"]),
+		ShiftMode:        values["SHIFT_MODE"],
+		ForwardSSHAgent:  forwardAgent,
+		DevSudo:          devSudo,
+		NestedE2EVMs:     nestedE2EVMs,
+		DevUID:           devUID,
 		Paths: domain.RuntimePaths{
 			RepositoryRoot: root,
 			ConfigDir:      filepath.Clean(values["SUBYARD_CONFIG_DIR"]),
@@ -971,6 +1040,9 @@ func contextFrom(
 			HostBase:       hostBase,
 			StateDir:       stateDir,
 		},
+	}
+	if ctx.AccessKind == domain.AccessRemote && ctx.OwnerYardName == "" {
+		ctx.OwnerYardName = "default"
 	}
 	return domain.NormalizeContext(ctx)
 }

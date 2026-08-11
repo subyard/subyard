@@ -52,7 +52,7 @@ func (execution *lifecycleExecution) policy(
 ) domain.CommandPolicy {
 	consequences := []string{
 		fmt.Sprintf("%s Incus instance %s in project %s", execution.action,
-			yard.InstanceName, yard.IncusProject),
+			yard.YardInstanceName, yard.IncusProject),
 	}
 	if execution.action == "start" {
 		consequences = append(consequences,
@@ -102,7 +102,7 @@ func (cli *CLI) observeLifecycleExecution(
 		return nil
 	}
 	incusPort, _ := cli.statusPorts()
-	instance, err := incusPort.Instance(ctx, yard.IncusProject, yard.InstanceName)
+	instance, err := incusPort.Instance(ctx, yard.IncusProject, yard.YardInstanceName)
 	if err != nil {
 		return err
 	}
@@ -152,9 +152,9 @@ func (cli *CLI) executeLifecycle(
 	writeAdapterDiagnostics(diagnostics, stderr)
 	if err == nil && result.Status == "ok" {
 		if execution.action == "start" {
-			fmt.Fprintf(diagnostics, "  [ ok ] %s started (desired=running)\n", yard.InstanceName)
+			fmt.Fprintf(diagnostics, "  [ ok ] %s started (desired=running)\n", yard.YardInstanceName)
 		} else {
-			fmt.Fprintf(diagnostics, "  [ ok ] %s stopped (desired=stopped)\n", yard.InstanceName)
+			fmt.Fprintf(diagnostics, "  [ ok ] %s stopped (desired=stopped)\n", yard.YardInstanceName)
 		}
 	}
 	return result, err

@@ -60,7 +60,7 @@ func TestCreatePersistentFileRefusesExistingTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(configHome, "yards", "hermes", "config.env")
-	content := []byte("YARD_PROFILES=hermes\n")
+	content := []byte("ENVIRONMENT_PROFILES=hermes\n")
 	if err := CreatePersistentFile(configHome, path, content); err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func TestCreatePersistentFileRefusesExistingTarget(t *testing.T) {
 	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || string(stored) != string(content) {
 		t.Fatalf("unexpected persistent file: mode=%v content=%q", info.Mode(), stored)
 	}
-	if err := CreatePersistentFile(configHome, path, []byte("AGENTS=claude\n")); err == nil ||
+	if err := CreatePersistentFile(configHome, path, []byte("CODING_TOOL_INTEGRATIONS=claude\n")); err == nil ||
 		!strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("existing target error=%v", err)
 	}
@@ -88,7 +88,7 @@ func TestCreatePersistentFileRefusesExistingTarget(t *testing.T) {
 func TestCreatePersistentFileCreatesMissingConfigurationRoot(t *testing.T) {
 	configHome := filepath.Join(t.TempDir(), "missing")
 	path := filepath.Join(configHome, "yards", "hermes", "config.env")
-	content := []byte("YARD_PROFILES=hermes\n")
+	content := []byte("ENVIRONMENT_PROFILES=hermes\n")
 	if err := CreatePersistentFile(configHome, path, content); err != nil {
 		t.Fatal(err)
 	}

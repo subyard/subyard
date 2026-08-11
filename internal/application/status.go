@@ -26,7 +26,7 @@ func (service StatusService) Read(ctx context.Context, yard domain.Context) (dom
 	if _, err := service.Incus.Server(ctx); err != nil {
 		return domain.YardStatus{}, err
 	}
-	instance, err := service.Incus.Instance(ctx, yard.IncusProject, yard.InstanceName)
+	instance, err := service.Incus.Instance(ctx, yard.IncusProject, yard.YardInstanceName)
 	if err != nil {
 		return domain.YardStatus{}, err
 	}
@@ -41,10 +41,11 @@ func (service StatusService) Read(ctx context.Context, yard domain.Context) (dom
 	}
 	status := domain.YardStatus{
 		Context: yard, State: strings.ToUpper(instance.Status),
-		Desired:        valueOr(instance.Config["user.subyard.desired_power"], "unmanaged"),
-		Initialized:    valueOr(instance.Config["user.subyard.initialized"], "no"),
-		IncusAutostart: instance.Config["boot.autostart"],
-		ProjectCount:   len(records), Facts: facts,
+		ResolvedYardImage: domain.ResolvedYardImage(instance.Config["volatile.base_image"]),
+		Desired:           valueOr(instance.Config["user.subyard.desired_power"], "unmanaged"),
+		Initialized:       valueOr(instance.Config["user.subyard.initialized"], "no"),
+		IncusAutostart:    instance.Config["boot.autostart"],
+		ProjectCount:      len(records), Facts: facts,
 	}
 	_, status.SSHConfigured = instance.Devices["ssh"]
 	for name := range instance.Devices {
@@ -88,7 +89,7 @@ func (service StatusService) execLine(
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	result, err := service.Executor.Exec(probeCtx, yard.IncusProject, yard.InstanceName,
+	result, err := service.Executor.Exec(probeCtx, yard.IncusProject, yard.YardInstanceName,
 		ports.InstanceExecRequest{Command: command, Environment: environment})
 	if err != nil || result.ExitCode != 0 || probeCtx.Err() != nil {
 		return "?"

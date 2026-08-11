@@ -39,7 +39,7 @@ func (runner ProvisionRunner) Run(
 	if err != nil {
 		return domain.AdapterResult{}, "", fmt.Errorf("prepare power metadata: %w", err)
 	}
-	instance, err := runner.Power.Instances.Instance(ctx, runner.Yard.IncusProject, runner.Yard.InstanceName)
+	instance, err := runner.Power.Instances.Instance(ctx, runner.Yard.IncusProject, runner.Yard.YardInstanceName)
 	if err != nil {
 		return domain.AdapterResult{}, "", err
 	}

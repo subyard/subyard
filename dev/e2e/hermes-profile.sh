@@ -146,8 +146,8 @@ export REC_DISK_GIB=1
 install -d -m 0700 "$SUBYARD_CONFIG_HOME"
 {
   printf '%s\n' \
-    'YARD_PROFILES=openclaw' \
-    'AGENTS=claude' \
+    'ENVIRONMENT_PROFILES=openclaw' \
+    'CODING_TOOL_INTEGRATIONS=claude' \
     'YARD_CAPABILITIES=android' \
     'YARD_CAPS=fuse' \
     'YARD_DEVICES=gpu' \
@@ -309,7 +309,7 @@ cmp "$ROOT/config/profiles/hermes/yard.env" "$source_definition" \
 [ "$(stat -c %a "$source_definition")" = 600 ] \
   || die "profile bootstrap did not create a mode-0600 yard definition"
 for pair in \
-  'YARD_PROFILES=hermes' 'AGENTS=codex' \
+  'ENVIRONMENT_PROFILES=hermes' 'CODING_TOOL_INTEGRATIONS=codex' \
   'HOST_CLAUDE_MD=' 'HOST_CODEX_AGENTS_MD=' 'HOST_OPENCODE_AGENTS_MD=' \
   'HOST_MOUNTS=' 'HOST_LINKS=' \
   'YARD_CAPABILITIES=' 'YARD_CAPS=' 'YARD_DEVICES=' 'YARD_MOUNTS=' \
@@ -319,7 +319,7 @@ done
 set_yard_port "$SOURCE_YARD" "$source_ssh_port"
 yard "$SOURCE_YARD" provision --yes
 yard "$SOURCE_YARD" start --yes
-source_instance="$(setting "$SOURCE_YARD" INSTANCE_NAME)"
+source_instance="$(setting "$SOURCE_YARD" YARD_INSTANCE_NAME)"
 source_project="$(setting "$SOURCE_YARD" INCUS_PROJECT)"
 source_alias="$(setting "$SOURCE_YARD" SSH_HOST)"
 
@@ -544,7 +544,7 @@ yard "$RESTORE_YARD" init --profile hermes --yes
 set_yard_port "$RESTORE_YARD" "$restore_ssh_port"
 yard "$RESTORE_YARD" provision --yes
 yard "$RESTORE_YARD" start --yes
-restore_instance="$(setting "$RESTORE_YARD" INSTANCE_NAME)"
+restore_instance="$(setting "$RESTORE_YARD" YARD_INSTANCE_NAME)"
 restore_project="$(setting "$RESTORE_YARD" INCUS_PROJECT)"
 restore_alias="$(setting "$RESTORE_YARD" SSH_HOST)"
 assert_clean_yard_boundary "$restore_instance" "$restore_project"

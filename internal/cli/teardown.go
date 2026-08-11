@@ -38,7 +38,7 @@ func prepareTeardownExecution(arguments []string) (*teardownExecution, error) {
 
 func (execution *teardownExecution) policy(definition command.Definition, yard domain.Context) domain.CommandPolicy {
 	consequences := []string{
-		"delete yard instance " + yard.InstanceName,
+		"delete yard instance " + yard.YardInstanceName,
 		"remove this yard's SSH config and project state",
 	}
 	if execution.keepData {
@@ -84,7 +84,7 @@ func (cli *CLI) observeTeardownExecution(
 	}
 	incusPort, _ := cli.statusPorts()
 	incusState, err := incusPort.ReconcileState(
-		ctx, loaded.Context.IncusProject, loaded.Context.InstanceName,
+		ctx, loaded.Context.IncusProject, loaded.Context.YardInstanceName,
 		loaded.Environment["SRV_POOL"], loaded.Environment["SRV_VOLUME"],
 		loaded.Context.IncusBridge,
 	)
@@ -164,7 +164,7 @@ func (cli *CLI) executeTeardown(
 
 func hasOtherRegisteredLocalYard(current string, yards []domain.Context) bool {
 	for _, yard := range yards {
-		if yard.YardType == domain.YardLocal &&
+		if yard.AccessKind == domain.AccessLocal &&
 			yard.YardName != "default" && yard.YardName != current {
 			return true
 		}

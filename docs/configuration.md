@@ -115,8 +115,41 @@ Select a non-default yard with `-Y <yard>` before using `--scope yard`. Each wri
 catalog type and scope, rejects secret-looking content and asks before changing the persistent
 configuration. `config edit` requires `VISUAL` or `EDITOR` to name one executable.
 
-Remote yard definitions can be inspected with `yard -Y <remote> config show`. `--all-local` never
-changes remote owner hosts implicitly.
+Register a remote owner once with `yard host add <user@host-or-ssh-alias>`. The confirmation includes
+the concrete SSH server-key SHA256 fingerprint, authoritative HostID and discovered yards. Subsequent
+refreshes use a controller-managed strict host-key pin; they never silently accept a changed key.
+Use `yard host repair <HostID>` to review and explicitly accept a changed fingerprint (and an observed
+HostID rename, if both changed). `yard host list` shows registered OwnerHosts, while `yard yards`
+discovers their authoritative yards without creating controller-side yard aliases. `--all-local`
+never changes remote owner hosts implicitly. The old `remote` command is an input-only compatibility
+adapter for installations that still have per-yard contexts.
+Legacy discovery snapshots remain untrusted. Confirmed `yard host add` upgrades an exact
+same-endpoint, same-HostID snapshot atomically to managed SSH trust.
+
+## Entity and migration vocabulary
+
+Subyard uses `OwnerHost → Yard → Project → optional ProjectEnv`. A yard is identified as
+`<HostID>/<yard-name>`; `local` and `remote` describe access, while `container` and `vm` describe its
+runtime kind. The desired L1 Incus image is separate from the image fingerprint observed on a
+created instance. Project-environment Docker images are an L2 setting.
+
+Canonical configuration names are:
+
+| Legacy input (one-minor compatibility) | Canonical writer/output |
+|---|---|
+| `YARD_TYPE` | `ACCESS_KIND` |
+| `INSTANCE_TYPE` | `YARD_KIND` |
+| `INSTANCE_NAME` | `YARD_INSTANCE_NAME` |
+| `REMOTE_DEST` | `OWNER_ENDPOINT` |
+| `REMOTE_YARD` | `OWNER_YARD_NAME` |
+| `BASE_IMAGE`, `BASE_IMAGE_FALLBACK` | `YARD_IMAGE`, `YARD_IMAGE_FALLBACK` |
+| profile-level `BASE_IMAGE` | `PROJECT_ENV_BASE_IMAGE` |
+| `YARD_PROFILES` | `ENVIRONMENT_PROFILES` |
+| `AGENTS` | `CODING_TOOL_INTEGRATIONS` |
+
+Legacy names are accepted only while reading an old input. A file or command environment containing
+conflicting old and canonical values is rejected. `config set`, generated context, JSON and RPC
+writers emit canonical names only.
 
 ## Versioned private configuration
 

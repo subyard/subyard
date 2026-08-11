@@ -103,13 +103,35 @@ boundary consumes that view without sourcing config again. Migrated leaves fail 
 
 The validated context contract includes:
 
-- `YARD_TYPE=local|remote` and `INSTANCE_TYPE=container|vm`;
-- a valid local `SSH_PORT`, or `REMOTE_DEST` for a remote yard;
+- `ACCESS_KIND=local|remote` and `YARD_KIND=container|vm`;
+- a valid local `SSH_PORT`, or `OWNER_ENDPOINT` for a remote yard;
+- `YARD_IMAGE` as desired L1 input, distinct from the observed Incus image fingerprint and from the
+  L2 `PROJECT_ENV_BASE_IMAGE`;
+- independent `ENVIRONMENT_PROFILES` and `CODING_TOOL_INTEGRATIONS` selections;
 - absolute normalized runtime paths;
 - `HOST_BASE == RESTRICTED_DISK_PATHS`, never a broad host root;
 - validated UID, shift mode, sudo, and SSH-agent policy values.
 
 Source-only domain modules do not load configuration themselves.
+
+`HostID` is explicit owner-host identity. `yard host rename` changes it transactionally on the owner.
+`yard host add <owner-endpoint>` first lets OpenSSH resolve the endpoint (including ordinary aliases
+and proxy configuration), shows the concrete SSH server-key SHA256 fingerprint, HostID and discovered
+yards, then atomically stores the connection, strict host-key pin and initial inventory cache after
+confirmation. Controller refreshes use only that managed key with `StrictHostKeyChecking=yes`.
+
+When the pinned key is unchanged, an already registered controller adopts a new authoritative HostID
+automatically and atomically moves its connection, cache and HostID-scoped project-routing state.
+Collisions fail before mutation and the old HostID is not retained as an alias. A changed SSH key is
+an integrity failure: refresh preserves the last cache as stale data and instructs the operator to
+run `yard host repair <old-host-id>`. Repair shows the old/new fingerprints and old/observed HostIDs;
+one explicit confirmation may accept both changes through the same recoverable migration. `yard host
+remove` first performs a strict read-only authoritative inventory refresh, refuses live project
+references, and removes only controller-owned connection, trust, cache and routing state. Legacy
+remote-route records are a separate compatibility store and must be removed explicitly first.
+One-minor legacy discovery may retain an explicitly stale, untrusted inventory snapshot for offline
+listing. A later confirmed `yard host add` of the same endpoint and authoritative HostID upgrades that
+snapshot atomically to managed SSH trust; it does not require deletion or manual state repair.
 
 Structured system adapters are selected from the validated command manifest and receive only declared
 non-secret context keys. Metadata uses a dedicated file descriptor and protected input uses stdin.

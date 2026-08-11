@@ -254,7 +254,7 @@ func (runtime Runtime) instanceConverged(ctx context.Context) (bool, error) {
 		routeMount["readonly"] != "true" {
 		return false, nil
 	}
-	if runtime.Yard.InstanceType != domain.InstanceContainer {
+	if runtime.Yard.YardKind != domain.YardContainer {
 		return true, nil
 	}
 	config := state.Instance.LocalConfig
@@ -299,7 +299,7 @@ func (runtime Runtime) reconcileState(ctx context.Context) (ports.ReconcileState
 		bridge = runtime.environmentDefault("INCUS_BRIDGE", "incusbr0")
 	}
 	return runtime.Incus.ReconcileState(
-		ctx, runtime.Yard.IncusProject, runtime.Yard.InstanceName, pool, volume, bridge,
+		ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, pool, volume, bridge,
 	)
 }
 
@@ -479,7 +479,7 @@ func charDeviceMatches(device map[string]string, path string) bool {
 func (runtime Runtime) Preflight(ctx context.Context, fresh bool) error {
 	basePresent := false
 	if !fresh && runtime.Incus != nil {
-		if _, err := runtime.Incus.Instance(ctx, runtime.Yard.IncusProject, runtime.Yard.InstanceName); err == nil {
+		if _, err := runtime.Incus.Instance(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName); err == nil {
 			basePresent = true
 		}
 	}
@@ -504,7 +504,7 @@ func (runtime Runtime) Teardown(ctx context.Context) error {
 
 func hasOtherRegisteredLocalYard(current string, yards []domain.Context) bool {
 	for _, yard := range yards {
-		if yard.YardType == domain.YardLocal &&
+		if yard.AccessKind == domain.AccessLocal &&
 			yard.YardName != "default" && yard.YardName != current {
 			return true
 		}
@@ -518,7 +518,7 @@ func (runtime Runtime) powerImportsConverged(ctx context.Context) (bool, error) 
 		return false, err
 	}
 	for _, yard := range runtime.powerYards() {
-		if yard.YardType == domain.YardRemote {
+		if yard.AccessKind == domain.AccessRemote {
 			continue
 		}
 		converged, err := runtime.powerService().Converged(ctx, yard)
@@ -537,7 +537,7 @@ func (runtime Runtime) importPowerState(ctx context.Context) error {
 		return errors.New("Incus instance config writer is required")
 	}
 	for _, yard := range runtime.powerYards() {
-		if yard.YardType == domain.YardRemote {
+		if yard.AccessKind == domain.AccessRemote {
 			continue
 		}
 		intent, err := runtime.powerService().Ensure(ctx, yard)
@@ -561,7 +561,7 @@ func (runtime Runtime) powerService() application.PowerService {
 
 func (runtime Runtime) applyInstanceStage(ctx context.Context) error {
 	desired := application.InitialPower(runtime.Yard)
-	_, err := runtime.Incus.Instance(ctx, runtime.Yard.IncusProject, runtime.Yard.InstanceName)
+	_, err := runtime.Incus.Instance(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName)
 	if err == nil {
 		intent, ensureErr := runtime.powerService().Ensure(ctx, runtime.Yard)
 		if ensureErr != nil {
@@ -639,7 +639,7 @@ func (runtime Runtime) testVMBackend(desired string) *testvmsruntime.Backend {
 		DataHome:       runtime.Yard.Paths.DataHome,
 		Dispatcher:     environment["SUBYARD_DISPATCHER_PATH"],
 		Project:        runtime.Yard.IncusProject,
-		Instance:       runtime.Yard.InstanceName,
+		Instance:       runtime.Yard.YardInstanceName,
 		YardName:       runtime.Yard.YardName,
 		DesiredPower:   desired,
 		Environment:    environment,
@@ -660,9 +660,9 @@ func (runtime Runtime) extrasContext() (map[string]string, error) {
 	capabilities := map[string]bool{}
 	devices := map[string]bool{}
 	base := runtimeEnvironment(runtime.Environment)
-	for _, profile := range strings.Fields(base["YARD_PROFILES"]) {
+	for _, profile := range strings.Fields(base["ENVIRONMENT_PROFILES"]) {
 		if !domain.SafeName(profile) {
-			return nil, fmt.Errorf("invalid YARD_PROFILES entry %q", profile)
+			return nil, fmt.Errorf("invalid ENVIRONMENT_PROFILES entry %q", profile)
 		}
 		path := filepath.Join(runtime.RepositoryRoot,
 			"config", "profiles", profile, "profile.conf")
@@ -690,7 +690,7 @@ func (runtime Runtime) extrasContext() (map[string]string, error) {
 		}
 		for _, device := range strings.Fields(values["YARD_DEVICES"]) {
 			// The current extras adapter implements devices as container-only unix-char mounts.
-			if runtime.Yard.InstanceType == domain.InstanceVM {
+			if runtime.Yard.YardKind == domain.YardVM {
 				continue
 			}
 			switch device {
@@ -862,7 +862,7 @@ func (runtime Runtime) gitIdentityConverged(ctx context.Context) (bool, error) {
 	if runtime.Executor == nil {
 		return false, errors.New("Incus executor is required")
 	}
-	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.InstanceName,
+	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName,
 		ports.InstanceExecRequest{Command: []string{
 			"test", "-s", "/home/" + runtime.environmentDefault("DEV_USER", "dev") + "/.gitconfig",
 		}})
@@ -890,7 +890,7 @@ func (runtime Runtime) sshConverged(ctx context.Context) (bool, error) {
 	}
 	device := state.Instance.LocalDevices["ssh"]
 	connect := "tcp:127.0.0.1:22"
-	if runtime.Yard.InstanceType == domain.InstanceVM {
+	if runtime.Yard.YardKind == domain.YardVM {
 		address := state.Instance.LocalDevices["eth0"]["ipv4.address"]
 		if address == "" || device["nat"] != "true" {
 			return false, nil
@@ -963,7 +963,7 @@ func (runtime Runtime) sshConverged(ctx context.Context) (bool, error) {
 		request.Command = []string{"grep", "-q", `^from="127[.]0[.]0[.]1,::1" `,
 			"/home/" + user + "/.ssh/authorized_keys"}
 	}
-	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.InstanceName, request)
+	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, request)
 	if err == nil {
 		return true, nil
 	}
@@ -983,7 +983,7 @@ func (runtime Runtime) provisionConverged(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	codexSelected := false
-	for _, agent := range strings.Fields(runtime.environmentValue("AGENTS")) {
+	for _, agent := range strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")) {
 		if agent == "codex" {
 			codexSelected = true
 			break
@@ -1116,7 +1116,7 @@ jq -e '."ip-forward-no-drop" == true' /etc/docker/daemon.json >/dev/null \
 
 func (runtime Runtime) provisionAgentCommands() ([]string, error) {
 	commands := make([]string, 0)
-	for _, agent := range strings.Fields(runtime.environmentValue("AGENTS")) {
+	for _, agent := range strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")) {
 		provision := runtime.environmentValue("AGENT_" + agent + "_PROVISION")
 		if provision == "" {
 			continue
@@ -1135,7 +1135,7 @@ func (runtime Runtime) provisionAgentCommands() ([]string, error) {
 
 func (runtime Runtime) provisionAgentChecks() ([]string, error) {
 	checks := make([]string, 0)
-	for _, agent := range strings.Fields(runtime.environmentValue("AGENTS")) {
+	for _, agent := range strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")) {
 		check := runtime.environmentValue("AGENT_" + agent + "_CHECK")
 		if check == "" {
 			continue
@@ -1185,7 +1185,7 @@ func (runtime Runtime) guestObserve(
 	ctx context.Context,
 	command []string,
 ) (ports.InstanceExecResult, bool, error) {
-	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.InstanceName,
+	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName,
 		ports.InstanceExecRequest{Command: command})
 	if err == nil {
 		return result, true, nil

@@ -170,8 +170,8 @@ while ss -H -ltn "sport = :$ssh_port" 2>/dev/null | grep -q .; do
 done
 cat > "$SUBYARD_CONFIG_HOME/yards/$OUTER_YARD/config.env" <<EOF
 SSH_PORT=$ssh_port
-AGENTS=
-INSTANCE_TYPE=vm
+CODING_TOOL_INTEGRATIONS=
+YARD_KIND=vm
 LIMITS_CPU=4
 LIMITS_MEMORY=3GiB
 SRV_POOL=$OUTER_POOL
@@ -249,7 +249,7 @@ outer_dev sh -euc '
   printf "outer sentinel\n" > "$HOME/.subyard/workspaces/active.code-workspace"
   cd "$source"
   env \
-    AGENTS= HOST_MOUNTS= HOST_LINKS= FORWARD_SSH_AGENT=0 DEV_SUDO=0 \
+    CODING_TOOL_INTEGRATIONS= HOST_MOUNTS= HOST_LINKS= FORWARD_SSH_AGENT=0 DEV_SUDO=0 \
     NESTED_E2E_VMS=0 SSH_PORT=23222 MIN_DISK_GIB=1 REC_DISK_GIB=1 \
     SUBYARD_NO_AUDIT=1 SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 \
     HOST_CLAUDE_MD= HOST_CODEX_AGENTS_MD= HOST_OPENCODE_AGENTS_MD= \

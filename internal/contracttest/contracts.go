@@ -68,7 +68,7 @@ func IncusRead(t *testing.T, client ports.Incus) {
 		t.Fatalf("instance: %v", err)
 	}
 	if instance.Name != "yard" || instance.Project != "subyard" ||
-		instance.Type != domain.InstanceContainer || instance.Status != "Running" ||
+		instance.Type != domain.YardContainer || instance.Status != "Running" ||
 		instance.Config["security.nesting"] != "true" || instance.Devices["root"]["type"] != "disk" {
 		t.Fatalf("unexpected instance: %#v", instance)
 	}

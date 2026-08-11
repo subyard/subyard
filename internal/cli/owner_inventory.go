@@ -29,7 +29,7 @@ type cliOwnerSource struct {
 
 func canonicalYardIdentity(loaded config.Loaded) (string, error) {
 	yard := loaded.Context.YardName
-	if loaded.Context.YardType == domain.YardLocal {
+	if loaded.Context.AccessKind == domain.AccessLocal {
 		hostID, _, err := configsync.ResolveHostID(
 			loaded.Context.Paths.ConfigHome, loaded.Environment,
 		)
@@ -38,11 +38,11 @@ func canonicalYardIdentity(loaded config.Loaded) (string, error) {
 		}
 		return hostID + "/" + yard, nil
 	}
-	if loaded.Context.YardType != domain.YardRemote {
+	if loaded.Context.AccessKind != domain.AccessRemote {
 		return "", errors.New("canonical yard identity requires a local or remote yard")
 	}
-	if loaded.Context.RemoteYard != "" {
-		yard = loaded.Context.RemoteYard
+	if loaded.Context.OwnerYardName != "" {
+		yard = loaded.Context.OwnerYardName
 	} else {
 		yard = "default"
 	}
@@ -53,7 +53,7 @@ func canonicalYardIdentity(loaded config.Loaded) (string, error) {
 		return "", err
 	}
 	for _, connection := range connections {
-		if connection.Destination == loaded.Context.RemoteDest {
+		if connection.Destination == loaded.Context.OwnerEndpoint {
 			return connection.HostID + "/" + yard, nil
 		}
 	}
@@ -89,7 +89,7 @@ func (source cliOwnerSource) Yards(context.Context) ([]domain.Context, error) {
 			}
 			return nil, fmt.Errorf("load yard %q: %w", name, err)
 		}
-		if loaded.Context.YardType == domain.YardLocal {
+		if loaded.Context.AccessKind == domain.AccessLocal {
 			yards = append(yards, loaded.Context)
 		}
 	}
@@ -111,16 +111,20 @@ func (source cliOwnerSource) Projects(ctx context.Context, yard domain.Context) 
 	return store.List(ctx)
 }
 
-func (source cliOwnerSource) State(ctx context.Context, yard domain.Context) (string, error) {
+func (source cliOwnerSource) Runtime(
+	ctx context.Context, yard domain.Context,
+) (string, domain.ResolvedYardImage, error) {
 	incusPort, _ := source.cli.statusPorts()
-	instance, err := incusPort.Instance(ctx, yard.IncusProject, yard.InstanceName)
+	instance, err := incusPort.Instance(ctx, yard.IncusProject, yard.YardInstanceName)
 	if errors.Is(err, ports.ErrInstanceNotFound) {
-		return "NOT_CREATED", nil
+		return "NOT_CREATED", "", nil
 	}
 	if err != nil {
-		return "UNKNOWN", nil
+		return "UNKNOWN", "", nil
 	}
-	return instance.Status, nil
+	// Incus records the immutable fingerprint of the image actually used to
+	// create the instance. Never substitute the desired input when it is absent.
+	return instance.Status, domain.ResolvedYardImage(instance.Config["volatile.base_image"]), nil
 }
 
 func (cli *CLI) ownerInventory(ctx context.Context, loaded config.Loaded) (domain.OwnerInventory, error) {
@@ -136,11 +140,11 @@ func (cli *CLI) ownerInventoryReadOnly(ctx context.Context, loaded config.Loaded
 }
 
 func (cli *CLI) remoteYardStatus(ctx context.Context, yard domain.Context) (domain.YardStatus, error) {
-	ownerYard := yard.RemoteYard
+	ownerYard := yard.OwnerYardName
 	if ownerYard == "" {
 		ownerYard = "default"
 	}
-	process, err := transport.SSHYard("ssh", yard.RemoteDest, ownerYard, 3*time.Second)
+	process, err := transport.SSHYard("ssh", yard.OwnerEndpoint, ownerYard, 3*time.Second)
 	if err != nil {
 		return domain.YardStatus{}, err
 	}
@@ -178,7 +182,7 @@ func (cli *CLI) remoteOwnerYardStatus(
 }
 
 func (cli *CLI) invalidateOwnerInventory(loaded config.Loaded) error {
-	if loaded.Context.YardType != domain.YardRemote {
+	if loaded.Context.AccessKind != domain.AccessRemote {
 		return nil
 	}
 	root := loaded.Context.Paths.DataHome + "/owner-inventory"
@@ -187,7 +191,7 @@ func (cli *CLI) invalidateOwnerInventory(loaded config.Loaded) error {
 		return err
 	}
 	for _, connection := range connections {
-		if connection.Destination == loaded.Context.RemoteDest {
+		if connection.Destination == loaded.Context.OwnerEndpoint {
 			return (ownerinventory.Cache{Root: root}).Invalidate(connection.HostID)
 		}
 	}
@@ -197,7 +201,7 @@ func (cli *CLI) invalidateOwnerInventory(loaded config.Loaded) error {
 func (cli *CLI) cleanupObsoleteRemoteProjectState(
 	ctx context.Context, loaded config.Loaded, projectID string,
 ) error {
-	if loaded.Context.YardType != domain.YardRemote {
+	if loaded.Context.AccessKind != domain.AccessRemote {
 		return nil
 	}
 	connections, err := (ownerinventory.Connections{
@@ -208,7 +212,7 @@ func (cli *CLI) cleanupObsoleteRemoteProjectState(
 	}
 	names := make(map[string]struct{})
 	for _, connection := range connections {
-		if connection.Destination == loaded.Context.RemoteDest {
+		if connection.Destination == loaded.Context.OwnerEndpoint {
 			for _, name := range connection.LegacyNames {
 				names[name] = struct{}{}
 			}
@@ -285,11 +289,11 @@ func (cli *CLI) allOwnerInventories(
 	}
 	legacyByDestination := make(map[string][]string)
 	for _, record := range legacy {
-		if _, known := knownDestinations[record.Spec.Destination]; known {
+		if _, known := knownDestinations[record.Spec.OwnerEndpoint]; known {
 			continue
 		}
-		legacyByDestination[record.Spec.Destination] = append(
-			legacyByDestination[record.Spec.Destination], record.Spec.Name,
+		legacyByDestination[record.Spec.OwnerEndpoint] = append(
+			legacyByDestination[record.Spec.OwnerEndpoint], record.Spec.LegacyAlias,
 		)
 	}
 	type remoteRequest struct {
@@ -298,7 +302,9 @@ func (cli *CLI) allOwnerInventories(
 	}
 	requests := make([]remoteRequest, 0, len(connections)+len(legacyByDestination))
 	for _, connection := range connections {
-		requests = append(requests, remoteRequest{connection: connection})
+		requests = append(requests, remoteRequest{
+			connection: connection, discover: connection.Trust == nil,
+		})
 	}
 	for destination, aliases := range legacyByDestination {
 		connection := ownerinventory.Connection{
@@ -322,43 +328,51 @@ func (cli *CLI) allOwnerInventories(
 		wait.Add(1)
 		go func(index int, request remoteRequest) {
 			defer wait.Done()
-			process, err := transport.SSH("ssh", request.connection.Destination, 3*time.Second)
-			if err != nil {
-				remoteResults[index].err = err
-				return
-			}
-			client := ownerinventory.Client{Transport: process}
 			if request.discover {
-				inventory, fetchErr := client.Fetch(common, "")
-				if fetchErr != nil {
-					remoteResults[index].err = fetchErr
+				// Legacy discovery remains read-only. In particular, an inventory
+				// listing must never turn an unconfirmed TOFU observation into
+				// controller-managed SSH trust; explicit `yard host add` owns that
+				// confirmation and transaction.
+				process, clientErr := transport.SSH(
+					"ssh", request.connection.Destination, 3*time.Second,
+				)
+				if clientErr != nil {
+					remoteResults[index].err = clientErr
 					return
 				}
-				request.connection.HostID = inventory.HostID
-				if writeErr := connectionStore.Write(request.connection); writeErr != nil {
-					remoteResults[index].err = writeErr
-					return
-				}
-				fetchedAt := time.Now().UTC()
-				if cli.options.Clock != nil {
-					fetchedAt = cli.options.Clock.Now().UTC()
-				}
-				snapshot := ownerinventory.Snapshot{
-					FetchedAt: fetchedAt, Inventory: inventory,
-				}
-				if writeErr := (ownerinventory.Cache{Root: root}).Write(snapshot); writeErr != nil {
-					remoteResults[index].err = writeErr
-					return
+				client := ownerinventory.Client{Transport: process}
+				read := (ownerinventory.LegacyService{
+					Store: connectionStore, Clock: cli.options.Clock,
+					Fetch: func(fetchCtx context.Context, expected string) (domain.OwnerInventory, error) {
+						return client.Fetch(fetchCtx, expected)
+					},
+				}).Read(common, request.connection, force)
+				if read.Inventory.HostID == "" {
+					read.Inventory.HostID = request.connection.HostID
 				}
 				remoteResults[index] = ownerInventoryResult{
-					inventory: inventory, fetchedAt: snapshot.FetchedAt,
+					inventory: read.Inventory, fetchedAt: read.FetchedAt,
+					stale: read.Stale, err: read.Err,
 				}
+				return
+			}
+			client, clientErr := connectionStore.TrustedSSHClient(
+				request.connection, "ssh", 3*time.Second,
+			)
+			if clientErr != nil {
+				remoteResults[index].err = clientErr
 				return
 			}
 			service := ownerinventory.Service{
-				Cache: ownerinventory.Cache{Root: root}, Clock: cli.options.Clock,
+				Cache: ownerinventory.Cache{Root: root}, Store: &connectionStore, Clock: cli.options.Clock,
 				Fetch: func(fetchCtx context.Context, expected string) (domain.OwnerInventory, error) {
-					return client.Fetch(fetchCtx, expected)
+					fetchedAt := time.Now().UTC()
+					if cli.options.Clock != nil {
+						fetchedAt = cli.options.Clock.Now().UTC()
+					}
+					return ownerinventory.RefreshConnection(
+						fetchCtx, client, connectionStore, request.connection, fetchedAt,
+					)
 				},
 			}
 			read := service.Read(common, request.connection.HostID, force)
@@ -371,6 +385,13 @@ func (cli *CLI) allOwnerInventories(
 		}(index, request)
 	}
 	wait.Wait()
+	for index, request := range requests {
+		if !request.discover || remoteResults[index].err != nil || remoteResults[index].inventory.HostID == "" {
+			continue
+		}
+		request.connection.HostID = remoteResults[index].inventory.HostID
+		cli.discoveredOwners[request.connection.HostID] = request.connection
+	}
 	return append(results, remoteResults...)
 }
 
@@ -439,14 +460,14 @@ func mergeLegacyRoutes(
 		aliases[name] = struct{}{}
 	}
 	for _, record := range records {
-		if record.Spec.Destination != connection.Destination {
+		if record.Spec.OwnerEndpoint != connection.Destination {
 			continue
 		}
-		yard := record.Spec.OwnerYard
+		yard := record.Spec.OwnerYardName
 		if yard == "" {
 			yard = "default"
 		}
-		route := ownerinventory.YardRoute{SSHHost: "yard-" + record.Spec.Name}
+		route := ownerinventory.YardRoute{SSHHost: "yard-" + record.Spec.LegacyAlias}
 		if existing, exists := connection.Yards[yard]; exists && existing != route {
 			return false, fmt.Errorf(
 				"OwnerHost %q has conflicting transport routes for yard %q",
@@ -457,9 +478,9 @@ func mergeLegacyRoutes(
 			connection.Yards[yard] = route
 			changed = true
 		}
-		if _, exists := aliases[record.Spec.Name]; !exists {
-			connection.LegacyNames = append(connection.LegacyNames, record.Spec.Name)
-			aliases[record.Spec.Name] = struct{}{}
+		if _, exists := aliases[record.Spec.LegacyAlias]; !exists {
+			connection.LegacyNames = append(connection.LegacyNames, record.Spec.LegacyAlias)
+			aliases[record.Spec.LegacyAlias] = struct{}{}
 			changed = true
 		}
 	}
@@ -597,11 +618,11 @@ func (cli *CLI) resolveOwnerProjectFromInventories(
 	scopeHost, scopeYard := "", ""
 	if explicit {
 		scopeYard = loaded.Context.YardName
-		if loaded.Context.YardType == domain.YardLocal {
+		if loaded.Context.AccessKind == domain.AccessLocal {
 			scopeHost = results[0].inventory.HostID
 		} else {
-			if loaded.Context.RemoteYard != "" {
-				scopeYard = loaded.Context.RemoteYard
+			if loaded.Context.OwnerYardName != "" {
+				scopeYard = loaded.Context.OwnerYardName
 			} else {
 				scopeYard = "default"
 			}
@@ -612,7 +633,7 @@ func (cli *CLI) resolveOwnerProjectFromInventories(
 				return state.Match{}, err
 			}
 			for _, connection := range connections {
-				if connection.Destination == loaded.Context.RemoteDest {
+				if connection.Destination == loaded.Context.OwnerEndpoint {
 					scopeHost = connection.HostID
 					break
 				}
@@ -722,6 +743,10 @@ func (cli *CLI) ownerYardRoute(
 	if err != nil {
 		return "", domain.Context{}, err
 	}
+	discovered, legacyDiscovery := cli.discoveredOwners[hostID]
+	if legacyDiscovery {
+		connections = append(connections, discovered)
+	}
 	destination := ""
 	for _, connection := range connections {
 		if connection.HostID == hostID {
@@ -739,21 +764,25 @@ func (cli *CLI) ownerYardRoute(
 	if route.SSHHost != "" {
 		contextValue := loaded.Context
 		contextValue.YardName = yardName
-		contextValue.YardType = domain.YardRemote
-		contextValue.RemoteDest = destination
-		contextValue.RemoteYard = yardName
+		contextValue.AccessKind = domain.AccessRemote
+		contextValue.OwnerEndpoint = destination
+		contextValue.OwnerYardName = yardName
 		contextValue.SSHHost = route.SSHHost
-		contextValue.Paths.StateDir = filepath.Join(
-			contextValue.Paths.DataHome, "owner-inventory", "routing", hostID, yardName, "projects",
-		)
+		contextValue.Paths.StateDir = filepath.Join(contextValue.Paths.DataHome,
+			"owner-inventory", "routing", hostID, yardName, "projects")
+		if legacyDiscovery && len(discovered.LegacyNames) == 1 {
+			contextValue.Paths.StateDir = filepath.Join(
+				loaded.Context.Paths.ConfigHome, "yards", discovered.LegacyNames[0], "projects",
+			)
+		}
 		environment := make(map[string]string, len(loaded.Environment))
 		for key, value := range loaded.Environment {
 			environment[key] = value
 		}
 		environment["YARD_NAME"] = yardName
-		environment["YARD_TYPE"] = string(domain.YardRemote)
-		environment["REMOTE_DEST"] = destination
-		environment["REMOTE_YARD"] = yardName
+		environment["ACCESS_KIND"] = string(domain.AccessRemote)
+		environment["OWNER_ENDPOINT"] = destination
+		environment["OWNER_YARD_NAME"] = yardName
 		environment["SSH_HOST"] = route.SSHHost
 		environment["SUBYARD_STATE_DIR"] = contextValue.Paths.StateDir
 		routeKey := hostID + "/" + yardName

@@ -61,12 +61,12 @@ func (cli *CLI) printRemoteResult(result domain.AdapterResult) {
 		if !record.LastProbe.IsZero() {
 			seen = ageHuman(time.Since(record.LastProbe)) + " ago"
 		}
-		ownerYard := record.Spec.OwnerYard
+		ownerYard := record.Spec.OwnerYardName
 		if ownerYard == "" {
 			ownerYard = "<default>"
 		}
 		fmt.Fprintf(cli.options.Stdout, "%-14s %-22s %-12s %-6d %s\n",
-			record.Spec.Name, record.Spec.Destination, ownerYard, record.SSHPort, seen)
+			record.Spec.LegacyAlias, record.Spec.OwnerEndpoint, ownerYard, record.SSHPort, seen)
 	}
 	if len(records) == 0 {
 		fmt.Fprintln(cli.options.Stdout, "  [ .. ] no remote yards registered")

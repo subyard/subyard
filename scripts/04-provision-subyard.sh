@@ -16,7 +16,7 @@ subyard_require_engine_context
 . "$SCRIPT_DIR/lib/host.sh"
 
 INCUS_PROJECT="${INCUS_PROJECT:-subyard}"
-INSTANCE_NAME="${INSTANCE_NAME:-yard}"
+YARD_INSTANCE_NAME="${YARD_INSTANCE_NAME:-yard}"
 DEV_USER="${DEV_USER:-dev}"
 DEV_UID="${DEV_UID:-1000}"
 
@@ -26,10 +26,10 @@ PROJ=(--project "$INCUS_PROJECT")
 # incus_preflight distinguishes incus-absent / stale-group-session / unreachable, so a
 # shell that predates the incus-admin group gets the right hint, not a false "missing".
 incus_preflight "init"
-incus info "$INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1 \
-  || die "instance '$INSTANCE_NAME' missing — run scripts/03-create-subyard.sh first"
+incus info "$YARD_INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1 \
+  || die "instance '$YARD_INSTANCE_NAME' missing — run scripts/03-create-subyard.sh first"
 
-announce_confirm "Subyard Phase 3 — provision the yard ($INSTANCE_NAME)" \
+announce_confirm "Subyard Phase 3 — provision the yard ($YARD_INSTANCE_NAME)" \
   "Inside the yard: apt-get install core packages (ssh, git, build tools, python…; Node is per-profile)." \
   "Inside the yard: install Docker Engine + Compose via the get.docker.com script (downloads & runs it)." \
   "Inside the yard: create user '$DEV_USER' + groups (yard/kvm/docker), lay out /srv, enable ssh & docker." \
@@ -40,25 +40,25 @@ announce_confirm "Subyard Phase 3 — provision the yard ($INSTANCE_NAME)" \
   "This pulls packages from the network and changes the yard's userspace (not the host system)."
 
 # RUNNING precedes guest-agent readiness for VMs. Wait before the first mutating exec.
-info "waiting for $INSTANCE_NAME agent"
-incus_wait_instance_agent "$INCUS_PROJECT" "$INSTANCE_NAME" \
-  || die "instance '$INSTANCE_NAME' agent did not become ready"
+info "waiting for $YARD_INSTANCE_NAME agent"
+incus_wait_instance_agent "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" \
+  || die "instance '$YARD_INSTANCE_NAME' agent did not become ready"
 
-incus config set "$INSTANCE_NAME" user.subyard.ccusage_version pending "${PROJ[@]}" \
+incus config set "$YARD_INSTANCE_NAME" user.subyard.ccusage_version pending "${PROJ[@]}" \
   || die "could not invalidate ccusage convergence"
 _codex_selected=0
-for _agent in ${AGENTS:-}; do
+for _agent in ${CODING_TOOL_INTEGRATIONS:-}; do
   [ "$_agent" != codex ] || _codex_selected=1
 done
 if [ "$_codex_selected" = 1 ]; then
-  incus config set "$INSTANCE_NAME" user.subyard.codex_version pending "${PROJ[@]}" \
+  incus config set "$YARD_INSTANCE_NAME" user.subyard.codex_version pending "${PROJ[@]}" \
     || die "could not invalidate Codex convergence"
 fi
 
 # --- 1. provision inside the yard --------------------------------------------
 # Quoted heredoc: nothing expands on the host; vars arrive via --env.
-info "provisioning inside $INSTANCE_NAME (packages, Docker, user, /srv, services)"
-incus exec "$INSTANCE_NAME" "${PROJ[@]}" --env DEV_USER="$DEV_USER" --env DEV_UID="$DEV_UID" --env DEV_SUDO="${DEV_SUDO:-0}" --env AGENTS="${AGENTS:-}" --env HOST_LINKS="${HOST_LINKS:-}" -- bash -euo pipefail -s <<'EOS'
+info "provisioning inside $YARD_INSTANCE_NAME (packages, Docker, user, /srv, services)"
+incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" --env DEV_USER="$DEV_USER" --env DEV_UID="$DEV_UID" --env DEV_SUDO="${DEV_SUDO:-0}" --env CODING_TOOL_INTEGRATIONS="${CODING_TOOL_INTEGRATIONS:-}" --env HOST_LINKS="${HOST_LINKS:-}" -- bash -euo pipefail -s <<'EOS'
 export DEBIAN_FRONTEND=noninteractive
 # The yard bridge is IPv4-only (ipv6.address=none), so steer apt to IPv4 — mirrors that
 # resolve to AAAA records would otherwise be tried over an unreachable IPv6 path first.
@@ -150,7 +150,7 @@ dev_home="$(getent passwd "$DEV_USER" | cut -d: -f6)"
 
 # Selected credential homes are real rootfs dirs. Drop only their stale legacy symlinks;
 # reconciliation never creates or deletes homes for unselected agents.
-for agent in ${AGENTS:-}; do
+for agent in ${CODING_TOOL_INTEGRATIONS:-}; do
   case "$agent" in
     claude) d=.claude ;;
     codex) d=.codex ;;
@@ -210,11 +210,11 @@ EOS
 ok "in-yard provisioning complete"
 
 # --- 2. provision the core usage reporter -----------------------------------
-# Unconditional because usage is a core command rather than an AGENTS entry.
+# Unconditional because usage is a core command rather than an CODING_TOOL_INTEGRATIONS entry.
 [ -n "${CCUSAGE_PROVISION:-}" ] || die "ccusage provision hook is not configured"
 [ -r "$CCUSAGE_PROVISION" ] || die "ccusage provision hook missing: $CCUSAGE_PROVISION"
-info "provisioning native ccusage $CCUSAGE_VERSION in $INSTANCE_NAME"
-incus exec "$INSTANCE_NAME" "${PROJ[@]}" \
+info "provisioning native ccusage $CCUSAGE_VERSION in $YARD_INSTANCE_NAME"
+incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" \
   --env CCUSAGE_VERSION="$CCUSAGE_VERSION" \
   --env CCUSAGE_SHA256_AMD64="$CCUSAGE_SHA256_AMD64" \
   --env CCUSAGE_SHA256_ARM64="$CCUSAGE_SHA256_ARM64" \
@@ -225,12 +225,12 @@ ok "ccusage $CCUSAGE_VERSION ready"
 # --- 3. provision enabled agent CLIs ----------------------------------------
 # Hooks live under config/agents/<name> and run as root in the yard.
 echo "Agent CLIs:"
-for _agent in ${AGENTS:-}; do
+for _agent in ${CODING_TOOL_INTEGRATIONS:-}; do
   _provision_var="AGENT_${_agent}_PROVISION"
   _provision="${!_provision_var:-}"
   [ -n "$_provision" ] || continue
   [ -r "$_provision" ] || die "$_agent provision hook missing: $_provision"
-  info "provisioning $_agent CLI in $INSTANCE_NAME"
+  info "provisioning $_agent CLI in $YARD_INSTANCE_NAME"
   _agent_env=(
     --env DEV_USER="$DEV_USER"
     --env YARD_VERSION="${YARD_VERSION:-}"
@@ -238,14 +238,14 @@ for _agent in ${AGENTS:-}; do
     --env CODEX_SHA256_AMD64="$CODEX_SHA256_AMD64"
     --env CODEX_SHA256_ARM64="$CODEX_SHA256_ARM64"
   )
-  incus exec "$INSTANCE_NAME" "${PROJ[@]}" "${_agent_env[@]}" \
+  incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" "${_agent_env[@]}" \
     -- bash -euo pipefail -s < "$_provision" \
     || die "$_agent CLI provisioning failed"
   _check_var="AGENT_${_agent}_CHECK"
   _check="${!_check_var:-}"
   if [ -n "$_check" ]; then
     case "$_check" in *[!A-Za-z0-9._/-]*|'') die "$_agent check command is invalid" ;; esac
-    incus exec "$INSTANCE_NAME" "${PROJ[@]}" -- timeout 90 "$_check" \
+    incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- timeout 90 "$_check" \
       || die "$_agent package check failed"
   fi
   ok "$_agent CLI ready"
@@ -255,14 +255,14 @@ unset _agent _agent_env _check_var _check _provision_var _provision
 # Install one generic guest-side project lifecycle dispatcher. Enabled agents stay in the
 # generated list; opt-in shared resources own executable hooks in projects-changed.d.
 _project_hooks=()
-for _agent in ${AGENTS:-}; do
+for _agent in ${CODING_TOOL_INTEGRATIONS:-}; do
   _hook_var="AGENT_${_agent}_PROJECTS_CHANGED"
   _hook="${!_hook_var:-}"
   [ -n "$_hook" ] || continue
   case "$_hook" in *[!A-Za-z0-9._/-]*|'') die "$_agent project hook command is invalid" ;; esac
   _project_hooks+=("$_hook")
 done
-incus exec "$INSTANCE_NAME" "${PROJ[@]}" -- bash -euo pipefail -s <<'EOS'
+incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- bash -euo pipefail -s <<'EOS'
 install -d -m 0755 /etc/subyard /usr/local/libexec/subyard/projects-changed.d
 cat > /usr/local/libexec/subyard/projects-changed <<'DISPATCH'
 #!/usr/bin/env bash
@@ -282,7 +282,7 @@ chmod 0755 /usr/local/libexec/subyard/projects-changed
 chown root:root /usr/local/libexec/subyard/projects-changed
 EOS
 printf '%s\n' "${_project_hooks[@]}" \
-  | incus exec "$INSTANCE_NAME" "${PROJ[@]}" -- sh -euc '
+  | incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- sh -euc '
       temporary=$(mktemp /etc/subyard/.agent-project-hooks.XXXXXX)
       cleanup_project_hooks() {
         rm -f -- "$temporary"
@@ -298,12 +298,12 @@ unset _agent _hook_var _hook _project_hooks
 
 # --- 4. fix /dev/kvm device GID to the in-yard 'kvm' group --------------------
 echo "KVM gid:"
-if incus config device list "$INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null | grep -qx kvm; then
-  KVM_GID="$(incus exec "$INSTANCE_NAME" "${PROJ[@]}" -- getent group kvm | cut -d: -f3)"
+if incus config device list "$YARD_INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null | grep -qx kvm; then
+  KVM_GID="$(incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- getent group kvm | cut -d: -f3)"
   if [ -n "${KVM_GID:-}" ]; then
     # Nested hosts reject the gid property on unix-char devices — degrade with a warn
     # (KVM stays root-owned in the yard; the emulator then needs sudo/acl there).
-    if err="$(incus config device set "$INSTANCE_NAME" kvm gid "$KVM_GID" "${PROJ[@]}" 2>&1)"; then
+    if err="$(incus config device set "$YARD_INSTANCE_NAME" kvm gid "$KVM_GID" "${PROJ[@]}" 2>&1)"; then
       ok "set kvm device gid=$KVM_GID (matches in-yard 'kvm' group)"
     elif printf '%s' "$err" | grep -q "nested container"; then
       warn "nested host: kvm device gid not settable — /dev/kvm stays root-owned in the yard"
@@ -319,10 +319,10 @@ else
 fi
 
 # --- summary -----------------------------------------------------------------
-incus config set "$INSTANCE_NAME" user.subyard.ccusage_version "$CCUSAGE_VERSION" "${PROJ[@]}" \
+incus config set "$YARD_INSTANCE_NAME" user.subyard.ccusage_version "$CCUSAGE_VERSION" "${PROJ[@]}" \
   || die "could not record ccusage convergence"
 if [ "$_codex_selected" = 1 ]; then
-  incus config set "$INSTANCE_NAME" user.subyard.codex_version "$CODEX_VERSION" "${PROJ[@]}" \
+  incus config set "$YARD_INSTANCE_NAME" user.subyard.codex_version "$CODEX_VERSION" "${PROJ[@]}" \
     || die "could not record Codex convergence"
 fi
 unset _codex_selected
@@ -331,13 +331,13 @@ ok "Phase 3 done."
 cat <<MSG
 
 Verify:
-  incus exec $INSTANCE_NAME "${PROJ[@]}" -- systemctl --no-pager status ssh docker
-  incus exec $INSTANCE_NAME "${PROJ[@]}" -- docker compose version
-  incus exec $INSTANCE_NAME "${PROJ[@]}" -- id $DEV_USER          # groups: yard kvm docker
-  incus exec $INSTANCE_NAME "${PROJ[@]}" -- /usr/local/bin/ccusage --version
-  incus exec $INSTANCE_NAME "${PROJ[@]}" -- su - $DEV_USER -c '/usr/local/bin/ccusage --version'
-  incus exec $INSTANCE_NAME "${PROJ[@]}" -- opencode --version
-  incus exec $INSTANCE_NAME "${PROJ[@]}" -- ls -la /srv
+  incus exec $YARD_INSTANCE_NAME "${PROJ[@]}" -- systemctl --no-pager status ssh docker
+  incus exec $YARD_INSTANCE_NAME "${PROJ[@]}" -- docker compose version
+  incus exec $YARD_INSTANCE_NAME "${PROJ[@]}" -- id $DEV_USER          # groups: yard kvm docker
+  incus exec $YARD_INSTANCE_NAME "${PROJ[@]}" -- /usr/local/bin/ccusage --version
+  incus exec $YARD_INSTANCE_NAME "${PROJ[@]}" -- su - $DEV_USER -c '/usr/local/bin/ccusage --version'
+  incus exec $YARD_INSTANCE_NAME "${PROJ[@]}" -- opencode --version
+  incus exec $YARD_INSTANCE_NAME "${PROJ[@]}" -- ls -la /srv
 
 Next:
   - Phase 4: dependency profile (e.g. android) — caches into /srv/cache (per profile).

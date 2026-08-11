@@ -85,7 +85,7 @@ yard init --yes
 yard start --yes
 stage_candidate_check
 
-effective="$(yard config show AGENTS | sed -n 's/^effective: //p')"
+effective="$(yard config show CODING_TOOL_INTEGRATIONS | sed -n 's/^effective: //p')"
 [ "$effective" = 'codex paseo' ] \
   || die "effective agents are '$effective', expected 'codex paseo'"
 

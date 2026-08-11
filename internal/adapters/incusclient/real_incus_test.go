@@ -41,13 +41,13 @@ func TestRealIncusConformance(t *testing.T) {
 	socket := os.Getenv("SUBYARD_REAL_INCUS_SOCKET")
 	project := os.Getenv("SUBYARD_REAL_INCUS_PROJECT")
 	instanceName := os.Getenv("SUBYARD_REAL_INCUS_INSTANCE")
-	expectedType := domain.InstanceType(os.Getenv("SUBYARD_REAL_INCUS_TYPE"))
+	expectedType := domain.YardKind(os.Getenv("SUBYARD_REAL_INCUS_TYPE"))
 	if socket == "" || project == "" || instanceName == "" || expectedType == "" {
 		t.Skip("set SUBYARD_REAL_INCUS_SOCKET, SUBYARD_REAL_INCUS_PROJECT, " +
 			"SUBYARD_REAL_INCUS_INSTANCE and SUBYARD_REAL_INCUS_TYPE")
 	}
 	if !filepath.IsAbs(socket) || !domain.SafeName(project) || !domain.SafeName(instanceName) ||
-		(expectedType != domain.InstanceContainer && expectedType != domain.InstanceVM) {
+		(expectedType != domain.YardContainer && expectedType != domain.YardVM) {
 		t.Fatal("real Incus acceptance inputs are invalid")
 	}
 	client := New(socket, "projects")
@@ -289,7 +289,7 @@ func TestRealIncusEffectiveConfigAndPowerWriterContract(t *testing.T) {
 		config[unownedKey] = "keep"
 	})
 	yard := domain.Context{
-		YardName: "default", IncusProject: project, InstanceName: instanceName, IncusBridge: "incusbr0",
+		YardName: "default", IncusProject: project, YardInstanceName: instanceName, IncusBridge: "incusbr0",
 	}
 	power := application.PowerService{Instances: client, Config: client}
 	if _, err := power.Ensure(ctx, yard); err != nil {

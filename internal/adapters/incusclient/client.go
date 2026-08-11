@@ -573,9 +573,9 @@ func cloneDevices(source map[string]map[string]string) map[string]map[string]str
 }
 
 func instanceInfo(project string, instance *api.Instance) ports.InstanceInfo {
-	instanceType := domain.InstanceType(instance.Type)
+	instanceType := domain.YardKind(instance.Type)
 	if instanceType == "virtual-machine" {
-		instanceType = domain.InstanceVM
+		instanceType = domain.YardVM
 	}
 	return ports.InstanceInfo{
 		Name: instance.Name, Project: project, Type: instanceType, Status: instance.Status,

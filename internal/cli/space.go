@@ -36,7 +36,7 @@ func (cli *CLI) runSpace(
 
 	var yards []domain.Context
 	if cli.yardSelectionExplicit(loaded, explicit) {
-		if loaded.Context.YardType != domain.YardLocal {
+		if loaded.Context.AccessKind != domain.AccessLocal {
 			cli.errorf("space: remote yards are not supported")
 			return 1
 		}
@@ -91,7 +91,7 @@ func localYardState(
 	incusPort ports.Incus,
 	yard domain.Context,
 ) (string, error) {
-	instance, err := incusPort.Instance(ctx, yard.IncusProject, yard.InstanceName)
+	instance, err := incusPort.Instance(ctx, yard.IncusProject, yard.YardInstanceName)
 	if errors.Is(err, ports.ErrInstanceNotFound) {
 		return "NOT_CREATED", nil
 	}

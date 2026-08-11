@@ -63,16 +63,16 @@ func ValidatePeer(peer domain.CredentialPeer) error {
 	}
 	switch peer.Transport {
 	case "local":
-		if peer.Dest != "" || peer.RemoteYard != "" {
+		if peer.Dest != "" || peer.OwnerYardName != "" {
 			return errors.New("local peer has remote transport metadata")
 		}
 	case "ssh":
 		if peer.Dest == "" || strings.HasPrefix(peer.Dest, "-") || strings.ContainsAny(peer.Dest, "\r\n\x00") ||
-			(peer.RemoteYard != "" && !domain.SafeName(peer.RemoteYard)) {
+			(peer.OwnerYardName != "" && !domain.SafeName(peer.OwnerYardName)) {
 			return errors.New("SSH peer transport metadata is invalid")
 		}
 	case "inbound":
-		if peer.Dest != "" || peer.RemoteYard != "" || !peer.ManualOnly {
+		if peer.Dest != "" || peer.OwnerYardName != "" || !peer.ManualOnly {
 			return errors.New("inbound peer must be passive and route-free")
 		}
 	default:

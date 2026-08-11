@@ -13,7 +13,7 @@ assert_json() { jq -e "$2" "$1" >/dev/null || fail "unexpected state in $1: $2";
 
 mkdir -p "$TMP/bin" "$TMP/config/yards" "$TMP/shipped" "$TMP/subyard" "$TMP/state" "$TMP/home"
 for f in agents.env host.env ports.env; do : > "$TMP/shipped/$f"; done
-printf ': "${INSTANCE_NAME:=yard}"\n: "${INCUS_PROJECT:=subyard}"\n' > "$TMP/shipped/incus.project.env"
+printf ': "${YARD_INSTANCE_NAME:=yard}"\n: "${INCUS_PROJECT:=subyard}"\n' > "$TMP/shipped/incus.project.env"
 printf ': "${SSH_PORT:=2222}"\n' > "$TMP/shipped/subyard.env"
 
 cat > "$TMP/bin/ssh" <<'MOCK'
@@ -63,7 +63,7 @@ chmod 755 "$TMP/bin/ssh"
 . "$ROOT/tests/helpers/test-context.sh"
 setup_test_context "$TMP"
 # Exercise resolver-owned registry paths and named-yard identity.
-unset SUBYARD_STATE_DIR YARD_TYPE INSTANCE_NAME INCUS_PROJECT SSH_HOST
+unset SUBYARD_STATE_DIR ACCESS_KIND YARD_INSTANCE_NAME INCUS_PROJECT SSH_HOST
 export PATH="$TMP/bin:$PATH"
 export HOME="$TMP/home"
 export SUBYARD_CONFIG_DIR="$TMP/shipped"
@@ -133,9 +133,9 @@ assert_json "$named_state" '.sshHost == "yard-inner" and .hostPath == "" and .ta
 
 # A remote controller maps to that named owner yard.
 cat > "$SUBYARD_CONFIG_HOME/yards/remote.env" <<'ENV'
-YARD_TYPE=remote
-REMOTE_DEST=owner
-REMOTE_YARD=inner
+ACCESS_KIND=remote
+OWNER_ENDPOINT=owner
+OWNER_YARD_NAME=inner
 SSH_PORT=2222
 ENV
 mkdir -p "$TMP/projects/RemoteDemo"

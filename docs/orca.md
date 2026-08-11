@@ -1,7 +1,7 @@
 # Orca remote server
 
 Subyard can run a pinned stock Orca server inside a selected yard. Orca is an opt-in
-profile resource, not an `AGENTS` entry. Tailscale and SSH remain on the physical
+profile resource, not an `CODING_TOOL_INTEGRATIONS` entry. Tailscale and SSH remain on the physical
 owner host; Subyard does not install either inside the yard.
 
 ## Tailscale on the owner host

@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -9,18 +10,22 @@ import (
 	"time"
 )
 
-type YardType string
+type AccessKind string
 
 const (
-	YardLocal  YardType = "local"
-	YardRemote YardType = "remote"
+	AccessLocal  AccessKind = "local"
+	AccessRemote AccessKind = "remote"
 )
 
-type InstanceType string
+type YardKind string
+
+type YardImageRef string
+
+type ResolvedYardImage string
 
 const (
-	InstanceContainer InstanceType = "container"
-	InstanceVM        InstanceType = "vm"
+	YardContainer YardKind = "container"
+	YardVM        YardKind = "vm"
 )
 
 type RuntimePaths struct {
@@ -35,23 +40,89 @@ type RuntimePaths struct {
 }
 
 type Context struct {
-	YardName        string       `json:"yardName"`
-	YardType        YardType     `json:"yardType"`
-	InstanceType    InstanceType `json:"instanceType"`
-	InstanceName    string       `json:"instanceName"`
-	IncusProject    string       `json:"incusProject"`
-	IncusBridge     string       `json:"incusBridge"`
-	SSHHost         string       `json:"sshHost"`
-	DevUser         string       `json:"devUser"`
-	SSHPort         int          `json:"sshPort"`
-	RemoteDest      string       `json:"remoteDest,omitempty"`
-	RemoteYard      string       `json:"remoteYard,omitempty"`
-	ShiftMode       string       `json:"shiftMode"`
-	ForwardSSHAgent bool         `json:"forwardSshAgent"`
-	DevSudo         bool         `json:"devSudo"`
-	NestedE2EVMs    bool         `json:"nestedE2EVMs"`
-	DevUID          int          `json:"devUid"`
-	Paths           RuntimePaths `json:"paths"`
+	YardName         string       `json:"yardName"`
+	AccessKind       AccessKind   `json:"accessKind"`
+	YardKind         YardKind     `json:"yardKind"`
+	YardInstanceName string       `json:"yardInstanceName"`
+	IncusProject     string       `json:"incusProject"`
+	IncusBridge      string       `json:"incusBridge"`
+	SSHHost          string       `json:"sshHost"`
+	DevUser          string       `json:"devUser"`
+	SSHPort          int          `json:"sshPort"`
+	OwnerEndpoint    string       `json:"ownerEndpoint,omitempty"`
+	OwnerYardName    string       `json:"ownerYardName,omitempty"`
+	YardImageRef     YardImageRef `json:"yardImageRef,omitempty"`
+	ShiftMode        string       `json:"shiftMode"`
+	ForwardSSHAgent  bool         `json:"forwardSshAgent"`
+	DevSudo          bool         `json:"devSudo"`
+	NestedE2EVMs     bool         `json:"nestedE2EVMs"`
+	DevUID           int          `json:"devUid"`
+	Paths            RuntimePaths `json:"paths"`
+}
+
+func (ctx *Context) UnmarshalJSON(payload []byte) error {
+	type canonicalContext Context
+	var canonical canonicalContext
+	if err := json.Unmarshal(payload, &canonical); err != nil {
+		return err
+	}
+	var legacy struct {
+		AccessKind       *AccessKind `json:"yardType"`
+		YardKind         *YardKind   `json:"instanceType"`
+		YardInstanceName *string     `json:"instanceName"`
+		OwnerEndpoint    *string     `json:"remoteDest"`
+		OwnerYardName    *string     `json:"remoteYard"`
+	}
+	if err := json.Unmarshal(payload, &legacy); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		return err
+	}
+	if legacy.AccessKind != nil {
+		if _, exists := fields["accessKind"]; exists && canonical.AccessKind != *legacy.AccessKind {
+			return errors.New("context contains conflicting accessKind and legacy yardType")
+		}
+		if _, exists := fields["accessKind"]; !exists {
+			canonical.AccessKind = *legacy.AccessKind
+		}
+	}
+	if legacy.YardKind != nil {
+		if _, exists := fields["yardKind"]; exists && canonical.YardKind != *legacy.YardKind {
+			return errors.New("context contains conflicting yardKind and legacy instanceType")
+		}
+		if _, exists := fields["yardKind"]; !exists {
+			canonical.YardKind = *legacy.YardKind
+		}
+	}
+	if legacy.YardInstanceName != nil {
+		if _, exists := fields["yardInstanceName"]; exists &&
+			canonical.YardInstanceName != *legacy.YardInstanceName {
+			return errors.New("context contains conflicting yardInstanceName and legacy instanceName")
+		}
+		if _, exists := fields["yardInstanceName"]; !exists {
+			canonical.YardInstanceName = *legacy.YardInstanceName
+		}
+	}
+	if legacy.OwnerEndpoint != nil {
+		if _, exists := fields["ownerEndpoint"]; exists && canonical.OwnerEndpoint != *legacy.OwnerEndpoint {
+			return errors.New("context contains conflicting ownerEndpoint and legacy remoteDest")
+		}
+		if _, exists := fields["ownerEndpoint"]; !exists {
+			canonical.OwnerEndpoint = *legacy.OwnerEndpoint
+		}
+	}
+	if legacy.OwnerYardName != nil {
+		if _, exists := fields["ownerYardName"]; exists && canonical.OwnerYardName != *legacy.OwnerYardName {
+			return errors.New("context contains conflicting ownerYardName and legacy remoteYard")
+		}
+		if _, exists := fields["ownerYardName"]; !exists {
+			canonical.OwnerYardName = *legacy.OwnerYardName
+		}
+	}
+	*ctx = Context(canonical)
+	return nil
 }
 
 func NormalizeContext(ctx Context) (Context, error) {
@@ -95,16 +166,16 @@ func (ctx Context) Validate() error {
 	if ctx.YardName == "" {
 		return errors.New("yard name is required")
 	}
-	if ctx.YardType != YardLocal && ctx.YardType != YardRemote {
-		return fmt.Errorf("yard type must be %q or %q", YardLocal, YardRemote)
+	if ctx.AccessKind != AccessLocal && ctx.AccessKind != AccessRemote {
+		return fmt.Errorf("access kind must be %q or %q", AccessLocal, AccessRemote)
 	}
-	if ctx.InstanceType != InstanceContainer && ctx.InstanceType != InstanceVM {
-		return fmt.Errorf("instance type must be %q or %q", InstanceContainer, InstanceVM)
+	if ctx.YardKind != YardContainer && ctx.YardKind != YardVM {
+		return fmt.Errorf("yard kind must be %q or %q", YardContainer, YardVM)
 	}
-	if ctx.NestedE2EVMs && ctx.InstanceType != InstanceContainer {
+	if ctx.NestedE2EVMs && ctx.YardKind != YardContainer {
 		return errors.New("nested E2E VMs currently require a container yard")
 	}
-	if ctx.InstanceName == "" || ctx.IncusProject == "" || ctx.SSHHost == "" || ctx.DevUser == "" {
+	if ctx.YardInstanceName == "" || ctx.IncusProject == "" || ctx.SSHHost == "" || ctx.DevUser == "" {
 		return errors.New("instance name, Incus project, SSH host and dev user are required")
 	}
 	if ctx.ShiftMode != "shift" && ctx.ShiftMode != "acl" {
@@ -119,11 +190,14 @@ func (ctx Context) Validate() error {
 	if broadHostPath(ctx.Paths.HostBase, ctx.Paths.OperatorHome) {
 		return fmt.Errorf("host base is too broad: %s", ctx.Paths.HostBase)
 	}
-	if ctx.YardType == YardLocal && (ctx.SSHPort < 1 || ctx.SSHPort > 65535) {
+	if ctx.AccessKind == AccessLocal && (ctx.SSHPort < 1 || ctx.SSHPort > 65535) {
 		return errors.New("SSH port must be an integer from 1 to 65535")
 	}
-	if ctx.YardType == YardRemote && ctx.RemoteDest == "" {
-		return errors.New("remote yard context requires a remote destination")
+	if ctx.AccessKind == AccessRemote && ctx.OwnerEndpoint == "" {
+		return errors.New("remote yard context requires an owner endpoint")
+	}
+	if ctx.AccessKind == AccessRemote && !SafeName(ctx.OwnerYardName) {
+		return errors.New("remote yard context requires a canonical owner yard name")
 	}
 	return nil
 }
@@ -290,9 +364,37 @@ type CredentialPeer struct {
 	SigningPublic string `json:"signingPublic"`
 	Transport     string `json:"transport"`
 	Dest          string `json:"dest"`
-	RemoteYard    string `json:"remoteYard"`
+	OwnerYardName string `json:"ownerYardName"`
 	ManualOnly    bool   `json:"manualOnly"`
 	Trusted       bool   `json:"trusted"`
+}
+
+func (peer *CredentialPeer) UnmarshalJSON(payload []byte) error {
+	type canonical CredentialPeer
+	var value canonical
+	if err := json.Unmarshal(payload, &value); err != nil {
+		return err
+	}
+	var legacy struct {
+		OwnerYardName *string `json:"remoteYard"`
+	}
+	if err := json.Unmarshal(payload, &legacy); err != nil {
+		return err
+	}
+	if legacy.OwnerYardName != nil {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(payload, &fields); err != nil {
+			return err
+		}
+		if _, exists := fields["ownerYardName"]; exists && value.OwnerYardName != *legacy.OwnerYardName {
+			return errors.New("credential peer contains conflicting ownerYardName and legacy remoteYard")
+		}
+		if _, exists := fields["ownerYardName"]; !exists {
+			value.OwnerYardName = *legacy.OwnerYardName
+		}
+	}
+	*peer = CredentialPeer(value)
+	return nil
 }
 
 type CredentialSummary struct {

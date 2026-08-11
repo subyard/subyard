@@ -46,7 +46,7 @@ func TestObserveUsesInjectedIncusAndFallsBackFromSSH(t *testing.T) {
 	}
 	observation, err := (Runtime{Incus: fake, Executor: fake, SSHBinary: ssh}).Observe(
 		context.Background(), domain.Context{
-			YardType: domain.YardLocal, IncusProject: "subyard", InstanceName: "yard", SSHHost: "yard",
+			AccessKind: domain.AccessLocal, IncusProject: "subyard", YardInstanceName: "yard", SSHHost: "yard",
 		}, []domain.ProjectRecord{
 			{ProjectID: "known-12345678", YardPath: "/srv/workspaces/known-12345678/src"},
 			{ProjectID: "box-12345678", YardPath: "/srv/workspaces/box-12345678/src", Target: "openclaw"},

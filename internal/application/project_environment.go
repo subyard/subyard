@@ -240,7 +240,7 @@ func (runner ProjectEnvironmentRunner) validateBoxOwnership(ctx context.Context,
 
 func (runner ProjectEnvironmentRunner) validateProfile() error {
 	if runner.Profile.BaseImage == "" {
-		return fmt.Errorf("profile %q has no BASE_IMAGE", runner.Project.Target)
+		return fmt.Errorf("profile %q has no PROJECT_ENV_BASE_IMAGE", runner.Project.Target)
 	}
 	if !projectRelative(runner.Profile.Dockerfile) {
 		return errors.New("IMAGE_DOCKERFILE must stay inside the project workspace")

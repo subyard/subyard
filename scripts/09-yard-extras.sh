@@ -14,7 +14,7 @@ subyard_require_engine_context
 # shellcheck source=scripts/lib/host.sh
 . "$SCRIPT_DIR/lib/host.sh"
 INCUS_PROJECT="${INCUS_PROJECT:-subyard}"
-INSTANCE_NAME="${INSTANCE_NAME:-yard}"
+YARD_INSTANCE_NAME="${YARD_INSTANCE_NAME:-yard}"
 SHIFT_MODE="${SHIFT_MODE:-shift}"
 DEV_UID="${DEV_UID:-1000}"
 PROJ=(--project "$INCUS_PROJECT")
@@ -31,9 +31,9 @@ for arg in "$@"; do
   esac
 done
 
-device_exists() { incus config device list "$INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null | grep -qx "$1"; }
-dev_get() { incus config device get "$INSTANCE_NAME" "$1" "$2" "${PROJ[@]}" 2>/dev/null || true; }
-cfg_get() { incus config get "$INSTANCE_NAME" "$1" "${PROJ[@]}" 2>/dev/null || true; }
+device_exists() { incus config device list "$YARD_INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null | grep -qx "$1"; }
+dev_get() { incus config device get "$YARD_INSTANCE_NAME" "$1" "$2" "${PROJ[@]}" 2>/dev/null || true; }
+cfg_get() { incus config get "$YARD_INSTANCE_NAME" "$1" "${PROJ[@]}" 2>/dev/null || true; }
 case "$SHIFT_MODE" in shift) SHIFT_OPT="shift=true" ;; *) SHIFT_OPT="" ;; esac
 
 read -r -a u_mounts <<<"${SUBYARD_EXTRAS_MOUNTS:-}"
@@ -77,11 +77,11 @@ unix_char_matches() { # <device-name> <host-source>
 extras_converged() {
   command -v incus >/dev/null 2>&1 \
     && incus info >/dev/null 2>&1 \
-    && incus info "$INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1 \
+    && incus info "$YARD_INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1 \
     || return 1
 
   local listed devices entry name path access _mode dev actual_readonly want_readonly shift want_shift node
-  listed="$(incus config device list "$INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null)" || return 1
+  listed="$(incus config device list "$YARD_INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null)" || return 1
   devices=" $(printf '%s\n' "$listed" | tr '\n' ' ') "
 
   for entry in ${u_mounts[@]+"${u_mounts[@]}"}; do
@@ -151,15 +151,15 @@ summary=()
 [ "${#u_caps[@]}"   -gt 0 ] && summary+=("Capabilities: ${u_caps[*]} (may need a yard restart)")
 [ "${#u_devs[@]}"   -gt 0 ] && summary+=("Devices: ${u_devs[*]}")
 [ "${#summary[@]}" -gt 0 ] || summary+=("No extras requested; remove stale extras owned by Subyard.")
-announce "Subyard Phase 2b — yard extras requested by projects ($INSTANCE_NAME)" \
+announce "Subyard Phase 2b — yard extras requested by projects ($YARD_INSTANCE_NAME)" \
   "Reconcile the UNION of YARD_* across in-yard projects to the shared yard." \
   "${summary[@]}" \
   "Detach stale yx-* devices and clear capabilities no longer requested. The host is untouched."
 proceed_or_die
 
 incus_preflight
-incus info "$INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1 \
-  || die "instance '$INSTANCE_NAME' missing — run '$(yard_cmd_hint) init' first"
+incus info "$YARD_INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1 \
+  || die "instance '$YARD_INSTANCE_NAME' missing — run '$(yard_cmd_hint) init' first"
 
 # --- 1. mounts (yx-* devices, host dirs under HOST_BASE) ---------------------
 if [ "${#u_mounts[@]}" -gt 0 ]; then
@@ -183,12 +183,12 @@ for entry in ${u_mounts[@]+"${u_mounts[@]}"}; do
       ok "$dev → $mp (${mro:-rw}) unchanged"; continue
     fi
     warn "$dev drifted — re-attaching"
-    incus config device remove "$INSTANCE_NAME" "$dev" "${PROJ[@]}" >/dev/null
+    incus config device remove "$YARD_INSTANCE_NAME" "$dev" "${PROJ[@]}" >/dev/null
   fi
   opts=(source="$src" path="$mp")
   [ "$want_ro" = 1 ] && opts+=(readonly=true)
   [ -n "$SHIFT_OPT" ] && opts+=("$SHIFT_OPT")
-  incus config device add "$INSTANCE_NAME" "$dev" disk "${PROJ[@]}" "${opts[@]}" >/dev/null
+  incus config device add "$YARD_INSTANCE_NAME" "$dev" disk "${PROJ[@]}" "${opts[@]}" >/dev/null
   ok "$dev → $mp (${mro:-rw})"
 done
 
@@ -197,13 +197,13 @@ restart_needed=0
 set_cfg() {  # <key> <value> — set if it differs; flag restart
   local k="$1" v="$2"
   [ "$(cfg_get "$k")" = "$v" ] && { ok "$k=$v already"; return; }
-  incus config set "$INSTANCE_NAME" "$k" "$v" "${PROJ[@]}"
+  incus config set "$YARD_INSTANCE_NAME" "$k" "$v" "${PROJ[@]}"
   ok "set $k=$v"; restart_needed=1
 }
 unset_cfg() { # <key> — clear an extras-owned key if it is still present
   local k="$1"
   [ -n "$(cfg_get "$k")" ] || { ok "$k already unset"; return; }
-  incus config unset "$INSTANCE_NAME" "$k" "${PROJ[@]}"
+  incus config unset "$YARD_INSTANCE_NAME" "$k" "${PROJ[@]}"
   ok "unset $k"; restart_needed=1
 }
 for c in ${u_caps[@]+"${u_caps[@]}"}; do
@@ -236,15 +236,15 @@ ensure_unix_char() {  # <device-name> <host-source>
       return
     fi
     warn "$name drifted — re-attaching"
-    incus config device remove "$INSTANCE_NAME" "$name" "${PROJ[@]}" >/dev/null
+    incus config device remove "$YARD_INSTANCE_NAME" "$name" "${PROJ[@]}" >/dev/null
   fi
   # Nested hosts reject the mode property on unix-char devices — retry without it
   # (in-yard perms then follow the source node; consumers may need the device group).
-  if ! err="$(incus config device add "$INSTANCE_NAME" "$name" unix-char "${PROJ[@]}" \
+  if ! err="$(incus config device add "$YARD_INSTANCE_NAME" "$name" unix-char "${PROJ[@]}" \
         source="$source" path="$source" mode=0666 2>&1 >/dev/null)"; then
     case "$err" in
       *"nested container"*)
-        incus config device add "$INSTANCE_NAME" "$name" unix-char "${PROJ[@]}" \
+        incus config device add "$YARD_INSTANCE_NAME" "$name" unix-char "${PROJ[@]}" \
           source="$source" path="$source" >/dev/null
         warn "nested host: $name attached without an explicit mode" ;;
       *) printf '%s\n' "$err" >&2; die "could not attach device '$name'" ;;
@@ -276,12 +276,12 @@ done
 
 # One cleanup pass for every extras-owned device. Doing this after mounts and passthrough devices
 # are reconciled avoids detaching valid yx-dev-* entries just to add them again.
-mapfile -t attached_devices < <(incus config device list "$INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null)
+mapfile -t attached_devices < <(incus config device list "$YARD_INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null)
 for d in "${attached_devices[@]}"; do
   case "$d" in yx-*) ;; *) continue ;; esac
   case " $want_devices " in *" $d "*) continue ;; esac
   warn "detaching '$d' — no project requests it"
-  incus config device remove "$INSTANCE_NAME" "$d" "${PROJ[@]}" >/dev/null
+  incus config device remove "$YARD_INSTANCE_NAME" "$d" "${PROJ[@]}" >/dev/null
 done
 
 # --- summary -----------------------------------------------------------------

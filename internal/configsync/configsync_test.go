@@ -15,7 +15,7 @@ import (
 
 func TestVersionedConfigSyncAppliesOnlyTypedSelectedHostSettings(t *testing.T) {
 	fixture := newSyncFixture(t, "owner-a")
-	fixture.writeSource("shared/config.env", "BASE_IMAGE=images:debian/13\n")
+	fixture.writeSource("shared/config.env", "YARD_IMAGE=images:debian/13\n")
 	fixture.writeSource("hosts/owner-a/config.env", "SSH_PORT=2233\n")
 	fixture.writeSource("hosts/owner-a/yards/demo/config.env", "SSH_PORT=2234\n")
 	fixture.writeSource(
@@ -54,7 +54,7 @@ func TestVersionedConfigSyncAppliesOnlyTypedSelectedHostSettings(t *testing.T) {
 	assertSyncTestFile(t, filepath.Join(fixture.configHome, "config.env"), "SSH_PORT=2233\n", 0o600)
 	assertSyncTestFile(t,
 		filepath.Join(fixture.configHome, "overrides", "shared", "config.env"),
-		"BASE_IMAGE=images:debian/13\n", 0o600)
+		"YARD_IMAGE=images:debian/13\n", 0o600)
 	assertSyncTestFile(t,
 		filepath.Join(fixture.configHome, "yards", "demo", "config.env"),
 		"SSH_PORT=2234\n", 0o600)
@@ -114,7 +114,7 @@ func TestVersionedConfigSyncAllowsOptionalSharedAndSelectedHostScopes(t *testing
 
 	t.Run("shared-only without hosts", func(t *testing.T) {
 		fixture := newSyncFixture(t, "owner-a")
-		fixture.writeSource("shared/config.env", "BASE_IMAGE=images:debian/13\n")
+		fixture.writeSource("shared/config.env", "YARD_IMAGE=images:debian/13\n")
 		fixture.commit("shared only")
 
 		plan, err := BuildPlan(fixture.options(false))
@@ -130,7 +130,7 @@ func TestVersionedConfigSyncAllowsOptionalSharedAndSelectedHostScopes(t *testing
 		}
 		assertSyncTestFile(
 			t, filepath.Join(fixture.configHome, "overrides", "shared", "config.env"),
-			"BASE_IMAGE=images:debian/13\n", 0o600,
+			"YARD_IMAGE=images:debian/13\n", 0o600,
 		)
 	})
 
@@ -246,9 +246,9 @@ func TestVersionedConfigSyncKeepsOptionalScopeValidationFailClosed(t *testing.T)
 
 	t.Run("dirty shared scope", func(t *testing.T) {
 		fixture := newSyncFixture(t, "owner-a")
-		fixture.writeSource("shared/config.env", "BASE_IMAGE=images:debian/13\n")
+		fixture.writeSource("shared/config.env", "YARD_IMAGE=images:debian/13\n")
 		fixture.commit("shared only")
-		fixture.writeSource("shared/config.env", "BASE_IMAGE=images:ubuntu/24.04\n")
+		fixture.writeSource("shared/config.env", "YARD_IMAGE=images:ubuntu/24.04\n")
 		if _, err := BuildPlan(fixture.options(false)); err == nil ||
 			!strings.Contains(err.Error(), "changes in managed paths") {
 			t.Fatalf("dirty shared scope was accepted: %v", err)
@@ -261,7 +261,7 @@ func TestVersionedConfigSyncRejectsDirtyUnknownSecretAndLocalOnlySource(t *testi
 		name, content, want string
 	}{
 		{"unknown", "TYPO_SSH_PORT=2233\n", "unknown setting"},
-		{"secret-like", "BASE_IMAGE=password=not-config\n", "secret material"},
+		{"secret-like", "YARD_IMAGE=password=not-config\n", "secret material"},
 		{"local-only", "STORAGE_PATH=/srv/private\n", "local-only"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -676,7 +676,7 @@ func TestVersionedConfigSyncSourceFilesystemBoundary(t *testing.T) {
 
 func TestVersionedConfigSyncRejectsLiveSymlinkAncestor(t *testing.T) {
 	fixture := newSyncFixture(t, "owner-a")
-	fixture.writeSource("shared/config.env", "BASE_IMAGE=images:debian/13\n")
+	fixture.writeSource("shared/config.env", "YARD_IMAGE=images:debian/13\n")
 	fixture.writeSource("hosts/owner-a/config.env", "SSH_PORT=2233\n")
 	fixture.commit("initial")
 	if err := os.MkdirAll(fixture.configHome, 0o700); err != nil {
@@ -745,6 +745,120 @@ func TestEnsureHostIDRepairsLegacyConfigurationRootMode(t *testing.T) {
 	if resolved, pending, err := ResolveHostID(configHome, nil); err != nil || pending || resolved != "owner-a" {
 		t.Fatalf("persisted HostID did not resolve: hostID=%q pending=%v err=%v",
 			resolved, pending, err)
+	}
+}
+
+func TestHostIDRenameUpdatesIdentityAndManifestAtomically(t *testing.T) {
+	configHome := t.TempDir()
+	if err := os.Chmod(configHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeSyncTestFile(t, HostIDPath(configHome), "owner-a\n", 0o600)
+	manifest := Manifest{
+		SchemaVersion: manifestSchema, Generation: 3,
+		SourceID: strings.Repeat("a", 64), SourceCommit: strings.Repeat("b", 40),
+		HostID: "owner-a", SourceSchema: sourceSchema, SourceDigest: strings.Repeat("c", 64),
+	}
+	payload, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeSyncTestFile(t, ManifestPath(configHome), string(append(payload, '\n')), 0o600)
+
+	plan, err := PrepareHostIDRename(configHome, "owner-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.OldHostID != "owner-a" || plan.NewHostID != "owner-b" || !plan.ManifestChanged {
+		t.Fatalf("unexpected rename plan: %#v", plan)
+	}
+	if err := ApplyHostIDRename(plan); err != nil {
+		t.Fatal(err)
+	}
+	assertSyncTestFile(t, HostIDPath(configHome), "owner-b\n", 0o600)
+	updated, err := readManifest(configHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.HostID != "owner-b" || updated.Generation != 3 || updated.SourceDigest != manifest.SourceDigest {
+		t.Fatalf("manifest migration changed unrelated state: %#v", updated)
+	}
+	if err := ApplyHostIDRename(plan); !errors.Is(err, ErrPlanStale) {
+		t.Fatalf("stale rename plan was accepted: %v", err)
+	}
+}
+
+func TestHostIDRenameRejectsUnsafeAndNoopNames(t *testing.T) {
+	configHome := t.TempDir()
+	if err := os.Chmod(configHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeSyncTestFile(t, HostIDPath(configHome), "owner-a\n", 0o600)
+	for _, candidate := range []string{"owner-a", "", "../owner-b", "owner/b"} {
+		if _, err := PrepareHostIDRename(configHome, candidate); err == nil {
+			t.Fatalf("rename candidate %q was accepted", candidate)
+		}
+	}
+	assertSyncTestFile(t, HostIDPath(configHome), "owner-a\n", 0o600)
+}
+
+func TestHostIDRenameRecoveryUsesHostIDAsCommitPoint(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		published    bool
+		wantHostID   string
+		wantManifest string
+	}{
+		{name: "rollback before identity publish", wantHostID: "owner-a", wantManifest: "owner-a"},
+		{name: "finish after identity publish", published: true, wantHostID: "owner-b", wantManifest: "owner-b"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			configHome := t.TempDir()
+			if err := os.Chmod(configHome, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			writeSyncTestFile(t, HostIDPath(configHome), "owner-a\n", 0o600)
+			manifest := Manifest{
+				SchemaVersion: manifestSchema, Generation: 2,
+				SourceID: strings.Repeat("a", 64), SourceCommit: strings.Repeat("b", 40),
+				HostID: "owner-a", SourceSchema: sourceSchema, SourceDigest: strings.Repeat("c", 64),
+			}
+			payload, err := json.MarshalIndent(manifest, "", "  ")
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeSyncTestFile(t, ManifestPath(configHome), string(append(payload, '\n')), 0o600)
+			plan, err := PrepareHostIDRename(configHome, "owner-b")
+			if err != nil {
+				t.Fatal(err)
+			}
+			journal := hostIDRenameJournal{
+				SchemaVersion: hostIDRenameSchema, OldHostID: plan.OldHostID, NewHostID: plan.NewHostID,
+				HostIDDigest: plan.hostIDDigest, ManifestDigest: plan.manifestDigest,
+				ManifestWasPresent: true, ManifestBefore: plan.manifestBefore, ManifestAfter: plan.manifestAfter,
+			}
+			if err := writeHostIDRenameJournal(configHome, journal); err != nil {
+				t.Fatal(err)
+			}
+			writeSyncTestFile(t, ManifestPath(configHome), string(plan.manifestAfter), 0o600)
+			if test.published {
+				writeSyncTestFile(t, HostIDPath(configHome), "owner-b\n", 0o600)
+			}
+			if err := RecoverHostIDRename(configHome); err != nil {
+				t.Fatal(err)
+			}
+			resolved, pending, err := ResolveHostID(configHome, nil)
+			if err != nil || pending || resolved != test.wantHostID {
+				t.Fatalf("identity recovery = %q pending=%v err=%v", resolved, pending, err)
+			}
+			updated, err := readManifest(configHome)
+			if err != nil || updated.HostID != test.wantManifest {
+				t.Fatalf("manifest recovery = %#v err=%v", updated, err)
+			}
+			if _, err := os.Lstat(HostIDRenameTransactionPath(configHome)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("rename journal survived recovery: %v", err)
+			}
+		})
 	}
 }
 

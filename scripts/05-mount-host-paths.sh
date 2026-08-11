@@ -17,8 +17,8 @@ subyard_require_engine_context
 . "$SCRIPT_DIR/lib/host.sh"
 
 INCUS_PROJECT="${INCUS_PROJECT:-subyard}"
-INSTANCE_NAME="${INSTANCE_NAME:-yard}"
-INSTANCE_TYPE="${INSTANCE_TYPE:-container}"
+YARD_INSTANCE_NAME="${YARD_INSTANCE_NAME:-yard}"
+YARD_KIND="${YARD_KIND:-container}"
 SHIFT_MODE="${SHIFT_MODE:-shift}"
 DEV_USER="${DEV_USER:-dev}"
 DEV_UID="${DEV_UID:-1000}"
@@ -26,8 +26,8 @@ DEV_UID="${DEV_UID:-1000}"
 # above). Lines: "<name>:<yard-path>:<ro|rw>:<dir-mode>".
 
 PROJ=(--project "$INCUS_PROJECT")
-device_exists() { incus config device list "$INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null | grep -qx "$1"; }
-dev_get() { incus config device get "$INSTANCE_NAME" "$1" "$2" "${PROJ[@]}" 2>/dev/null || true; }
+device_exists() { incus config device list "$YARD_INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null | grep -qx "$1"; }
+dev_get() { incus config device get "$YARD_INSTANCE_NAME" "$1" "$2" "${PROJ[@]}" 2>/dev/null || true; }
 
 # Parse HOST_MOUNTS once into parallel arrays; build the announce summary too.
 m_name=(); m_path=(); m_ro=(); m_mode=(); mount_summary=()
@@ -38,7 +38,7 @@ while IFS=: read -r _n _p _ro _mode; do
 done < <(printf '%s\n' "$HOST_MOUNTS" | sed 's/[[:space:]]//g')
 
 # --- announce → confirm → sudo → checks → work -------------------------------
-announce "Subyard Phase 2 — host mounts ($INSTANCE_NAME)" \
+announce "Subyard Phase 2 — host mounts ($YARD_INSTANCE_NAME)" \
   "Create the narrow host area under $HOST_BASE (+ a host-side backups dir)." \
   "Reconcile host mounts → yard to HOST_MOUNTS: ${mount_summary[*]}." \
   "Detach any host-* mount no longer listed (the yard is rebuildable; the host is untouched)." \
@@ -48,8 +48,8 @@ proceed_or_die
 require_root "the steps above create directories under /srv and attach host mounts to the yard"
 
 incus_preflight
-incus info "$INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1 \
-  || die "instance '$INSTANCE_NAME' missing — run scripts/03-create-subyard.sh first"
+incus info "$YARD_INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1 \
+  || die "instance '$YARD_INSTANCE_NAME' missing — run scripts/03-create-subyard.sh first"
 
 # shift vs acl
 case "$SHIFT_MODE" in
@@ -57,7 +57,7 @@ case "$SHIFT_MODE" in
   acl)   SHIFT_OPT=""; warn "SHIFT_MODE=acl — mounts added without shift; apply POSIX ACLs separately" ;;
   *)     die "invalid SHIFT_MODE='$SHIFT_MODE' (expected: shift|acl)" ;;
 esac
-if [ "$INSTANCE_TYPE" = vm ]; then
+if [ "$YARD_KIND" = vm ]; then
   warn "vm mode uses virtiofs — 'shift' is not applicable; review host-file ownership and permissions before use"
 fi
 
@@ -88,13 +88,13 @@ reconcile_mount() {
       ok "$name → $path (${ro:-rw}) unchanged"; return
     fi
     warn "$name drifted from config — re-attaching"
-    incus config device remove "$INSTANCE_NAME" "$name" "${PROJ[@]}" >/dev/null
+    incus config device remove "$YARD_INSTANCE_NAME" "$name" "${PROJ[@]}" >/dev/null
   fi
   local opts=(source="$src" path="$path")
   [ "$want_ro" = 1 ] && opts+=(readonly=true)
   [ -n "$SHIFT_OPT" ] && opts+=("$SHIFT_OPT")
   local err
-  if ! err="$(incus config device add "$INSTANCE_NAME" "$name" disk "${PROJ[@]}" "${opts[@]}" 2>&1 >/dev/null)"; then
+  if ! err="$(incus config device add "$YARD_INSTANCE_NAME" "$name" disk "${PROJ[@]}" "${opts[@]}" 2>&1 >/dev/null)"; then
     # Kernels/hosts without idmapped-mount support (e.g. a nested host) reject shift
     # at ATTACH time with this exact cause — point at the documented fallback instead
     # of leaving a bare incus error.
@@ -118,8 +118,8 @@ while IFS= read -r dev; do
   case "$dev" in host-*) ;; *) continue ;; esac
   case "$wanted" in *" $dev "*) continue ;; esac
   warn "detaching '$dev' — no longer in HOST_MOUNTS (source $(dev_get "$dev" source))"
-  incus config device remove "$INSTANCE_NAME" "$dev" "${PROJ[@]}" >/dev/null
-done < <(incus config device list "$INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null)
+  incus config device remove "$YARD_INSTANCE_NAME" "$dev" "${PROJ[@]}" >/dev/null
+done < <(incus config device list "$YARD_INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null)
 # 'backups' stays host-side only (backup target) — not mounted into the yard.
 
 # --- summary -----------------------------------------------------------------
@@ -128,8 +128,8 @@ ok "Phase 2 (host mounts) done."
 cat <<MSG
 
 Verify:
-  incus exec $INSTANCE_NAME "${PROJ[@]}" -- ls -la /mnt/host
-  incus exec $INSTANCE_NAME "${PROJ[@]}" -- touch /mnt/host/secrets/x  # must FAIL (read-only)
+  incus exec $YARD_INSTANCE_NAME "${PROJ[@]}" -- ls -la /mnt/host
+  incus exec $YARD_INSTANCE_NAME "${PROJ[@]}" -- touch /mnt/host/secrets/x  # must FAIL (read-only)
 
 Next:
   - Phase 3 provisioning: packages, user '$DEV_USER', Docker, SSH, then the kvm gid fix.

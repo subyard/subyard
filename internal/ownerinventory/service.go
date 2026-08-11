@@ -20,6 +20,7 @@ type Result struct {
 
 type Service struct {
 	Cache Cache
+	Store *Connections
 	Clock Clock
 	Fetch FetchFunc
 	TTL   time.Duration
@@ -46,8 +47,14 @@ func (service Service) Read(ctx context.Context, hostID string, force bool) Resu
 		return staleResult(cached, cacheErr, err)
 	}
 	snapshot := Snapshot{FetchedAt: now.UTC(), Inventory: inventory}
-	if err := service.Cache.Write(snapshot); err != nil {
-		return staleResult(cached, cacheErr, err)
+	var writeErr error
+	if service.Store != nil {
+		writeErr = service.Store.WriteSnapshot(snapshot)
+	} else {
+		writeErr = service.Cache.Write(snapshot)
+	}
+	if writeErr != nil {
+		return staleResult(cached, cacheErr, writeErr)
 	}
 	return Result{Inventory: inventory, FetchedAt: snapshot.FetchedAt}
 }

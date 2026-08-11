@@ -28,7 +28,7 @@ func TestProvisionSelectionUsesYardThenProjectProfiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	loaded.Environment["YARD_PROFILES"] = "openclaw android"
+	loaded.Environment["ENVIRONMENT_PROFILES"] = "openclaw android"
 	execution, err := program.prepareProvisionExecution(loaded, nil, &projectExecution{
 		Environment: map[string]string{"SUBYARD_PROJECT_PROFILES": "android subyard-dev"},
 	})
@@ -38,7 +38,7 @@ func TestProvisionSelectionUsesYardThenProjectProfiles(t *testing.T) {
 	if !slices.Equal(execution.profiles, []string{"openclaw", "android", "subyard-dev"}) {
 		t.Fatalf("profiles=%v", execution.profiles)
 	}
-	loaded.Environment["YARD_PROFILES"] = "hermes"
+	loaded.Environment["ENVIRONMENT_PROFILES"] = "hermes"
 	execution, err = program.prepareProvisionExecution(loaded, nil, nil)
 	if err != nil {
 		t.Fatal(err)

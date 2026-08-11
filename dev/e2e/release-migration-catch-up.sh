@@ -295,7 +295,7 @@ prepare_operator() {
     "$OPERATOR_HOME/.local/bin"
   operator_env bash -c 'printf "%s" "$2" > "$1"' _ \
     "$OPERATOR_HOME/.config/subyard/config.env" \
-    $'AGENTS=none\n'
+    $'CODING_TOOL_INTEGRATIONS=none\n'
   base_image="$IMAGE_ALIAS"
   if ! host_incus image info "$base_image" --project default >/dev/null 2>&1; then
     base_image=images:debian/13
@@ -305,7 +305,7 @@ prepare_operator() {
     "$(printf '%s\n' \
       'YARD_TEMPLATE=test-vms' \
       'SSH_PORT=2223' \
-      'AGENTS=none' \
+      'CODING_TOOL_INTEGRATIONS=none' \
       'DEV_UID=1001' \
       'E2E_VM_CPU=1' \
       'E2E_VM_MEMORY=1GiB' \

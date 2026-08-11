@@ -90,9 +90,9 @@ func TestPowerImportIsNativeAcrossRegisteredLocalYards(t *testing.T) {
 	runtime := Runtime{
 		Incus: incus, ConfigWriter: incus,
 		PowerYards: []domain.Context{
-			{YardName: "default", IncusProject: "subyard", InstanceName: "yard", IncusBridge: "incusbr0"},
-			{YardName: "demo", IncusProject: "subyard-demo", InstanceName: "yard-demo", IncusBridge: "incusbr1"},
-			{YardName: "remote", YardType: domain.YardRemote},
+			{YardName: "default", IncusProject: "subyard", YardInstanceName: "yard", IncusBridge: "incusbr0"},
+			{YardName: "demo", IncusProject: "subyard-demo", YardInstanceName: "yard-demo", IncusBridge: "incusbr1"},
+			{YardName: "remote", AccessKind: domain.AccessRemote},
 		},
 	}
 	assertStage(t, runtime, "power-import", false, "pending native import")
@@ -123,7 +123,7 @@ func TestGitIdentityProbeUsesTypedInstanceState(t *testing.T) {
 	}
 	runtime := Runtime{
 		Incus: incus, Executor: incus,
-		Yard:        domain.Context{IncusProject: "subyard", InstanceName: "yard"},
+		Yard:        domain.Context{IncusProject: "subyard", YardInstanceName: "yard"},
 		Environment: []string{"DEV_USER=developer"},
 	}
 	assertStage(t, runtime, "git-identity", true, "running yard with git config")
@@ -332,7 +332,7 @@ func TestFinalizeMapsDesiredPowerToLifecycleAction(t *testing.T) {
 			runtime := Runtime{
 				RepositoryRoot: root, Environment: append(os.Environ(), "ARGUMENTS="+arguments),
 				Incus: incus, ConfigWriter: incus,
-				Yard: domain.Context{IncusProject: "subyard", InstanceName: "yard"},
+				Yard: domain.Context{IncusProject: "subyard", YardInstanceName: "yard"},
 			}
 			if err := runtime.ApplyStage(context.Background(), "finalize"); err != nil {
 				t.Fatal(err)
@@ -388,8 +388,8 @@ func TestSSHProbeOwnsProxyAndClientConfig(t *testing.T) {
 	runtime := Runtime{
 		Incus: incus, Executor: incus,
 		Yard: domain.Context{
-			YardName: "default", IncusProject: "subyard", InstanceName: "yard",
-			SSHHost: "yard", SSHPort: 2222, InstanceType: domain.InstanceContainer,
+			YardName: "default", IncusProject: "subyard", YardInstanceName: "yard",
+			SSHHost: "yard", SSHPort: 2222, YardKind: domain.YardContainer,
 			Paths: domain.RuntimePaths{OperatorHome: home, DataHome: subyardHome},
 		},
 		Environment: []string{"PATH=" + bin},
@@ -412,7 +412,7 @@ func TestSSHProbeOwnsProxyAndClientConfig(t *testing.T) {
 	runtime.Yard.YardName = "demo"
 	assertStage(t, runtime, "ssh", true, "matching named-yard SSH state")
 
-	runtime.Yard.InstanceType = domain.InstanceVM
+	runtime.Yard.YardKind = domain.YardVM
 	incus.Reconcile.Instance.LocalDevices["eth0"] = map[string]string{"ipv4.address": "10.0.0.2"}
 	incus.Reconcile.Instance.LocalDevices["ssh"] = map[string]string{
 		"type": "proxy", "listen": "tcp:127.0.0.1:2222",
@@ -449,9 +449,9 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 	}
 	runtime := Runtime{
 		Incus: incus, Executor: incus,
-		Yard: domain.Context{IncusProject: "subyard", InstanceName: "yard", DevUser: "dev"},
+		Yard: domain.Context{IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev"},
 		Environment: []string{
-			"AGENTS=opencode", "CCUSAGE_VERSION=1.2.3",
+			"CODING_TOOL_INTEGRATIONS=opencode", "CCUSAGE_VERSION=1.2.3",
 			"HOST_OPENCODE_AGENTS_MD=" + instructions,
 		},
 	}
@@ -470,14 +470,14 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime.Environment = []string{
-		"AGENTS=opencode", "CCUSAGE_VERSION=1.2.3",
+		"CODING_TOOL_INTEGRATIONS=opencode", "CCUSAGE_VERSION=1.2.3",
 		"HOST_OPENCODE_AGENTS_MD=" + linkedInstructions,
 	}
 	linkedDigest := fmt.Sprintf("%x", sha256.Sum256([]byte("updated\n")))
 	incus.ExecSteps = steps("regular file|755|0:0", linkedDigest)
 	assertStage(t, runtime, "provision", true, "symlinked host instructions")
 	runtime.Environment = []string{
-		"AGENTS=opencode", "CCUSAGE_VERSION=1.2.3",
+		"CODING_TOOL_INTEGRATIONS=opencode", "CCUSAGE_VERSION=1.2.3",
 		"HOST_OPENCODE_AGENTS_MD=" + instructions,
 	}
 	missing := steps("regular file|755|0:0", digest)
@@ -502,13 +502,13 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 	}}
 	assertStage(t, runtime, "provision", true, "matching stopped provision marker")
 	runtime.Environment = []string{
-		"AGENTS=codex", "CCUSAGE_VERSION=1.2.3", "CODEX_VERSION=0.147.0",
+		"CODING_TOOL_INTEGRATIONS=codex", "CCUSAGE_VERSION=1.2.3", "CODEX_VERSION=0.147.0",
 	}
 	assertStage(t, runtime, "provision", false, "missing stopped Codex version marker")
 	incus.Reconcile.Instance.Config["user.subyard.codex_version"] = "0.147.0"
 	assertStage(t, runtime, "provision", true, "matching stopped Codex version marker")
 	runtime.Environment = []string{
-		"AGENTS=opencode", "CCUSAGE_VERSION=1.2.4",
+		"CODING_TOOL_INTEGRATIONS=opencode", "CCUSAGE_VERSION=1.2.4",
 		"HOST_OPENCODE_AGENTS_MD=" + instructions,
 	}
 	assertStage(t, runtime, "provision", false, "stale stopped provision marker")
@@ -534,7 +534,7 @@ func TestProvisionAgentCommandsAreValidated(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime := Runtime{Environment: []string{
-		"AGENTS=opencode", "AGENT_opencode_PROVISION=" + hook, "AGENT_opencode_COMMAND=opencode",
+		"CODING_TOOL_INTEGRATIONS=opencode", "AGENT_opencode_PROVISION=" + hook, "AGENT_opencode_COMMAND=opencode",
 	}}
 	commands, err := runtime.provisionAgentCommands()
 	if err != nil || len(commands) != 1 || commands[0] != "opencode" {
@@ -548,7 +548,7 @@ func TestProvisionAgentCommandsAreValidated(t *testing.T) {
 
 func TestProvisionAgentChecksAreValidated(t *testing.T) {
 	runtime := Runtime{Environment: []string{
-		"AGENTS=paseo", "AGENT_paseo_CHECK=paseo-check",
+		"CODING_TOOL_INTEGRATIONS=paseo", "AGENT_paseo_CHECK=paseo-check",
 	}}
 	checks, err := runtime.provisionAgentChecks()
 	if err != nil || len(checks) != 1 || checks[0] != "paseo-check" {
@@ -579,7 +579,7 @@ func TestProjectProbeOwnsRestrictedPolicy(t *testing.T) {
 	}
 	runtime := Runtime{
 		Incus: incus,
-		Yard:  domain.Context{IncusProject: "subyard", InstanceType: domain.InstanceContainer},
+		Yard:  domain.Context{IncusProject: "subyard", YardKind: domain.YardContainer},
 	}
 	converged, err := runtime.CheckStage(context.Background(), "project")
 	if err != nil || !converged {
@@ -627,7 +627,7 @@ func TestInstanceProbeOwnsVolumeAndNestedBoundary(t *testing.T) {
 	runtime := Runtime{
 		Incus: incus,
 		Yard: domain.Context{
-			IncusProject: "subyard", InstanceName: "yard", InstanceType: domain.InstanceContainer,
+			IncusProject: "subyard", YardInstanceName: "yard", YardKind: domain.YardContainer,
 			Paths: domain.RuntimePaths{DataHome: "/data"},
 		},
 		HostDeviceRoot: deviceRoot,
@@ -665,7 +665,7 @@ func TestInstanceProbeOwnsVolumeAndNestedBoundary(t *testing.T) {
 	delete(incus.Reconcile.Instance.LocalDevices, "e2e-vhost-vsock")
 	assertStageConverged(t, runtime, false, "missing vhost-vsock mapping")
 
-	runtime.Yard.InstanceType = domain.InstanceVM
+	runtime.Yard.YardKind = domain.YardVM
 	incus.Reconcile.Instance.LocalConfig = nil
 	incus.Reconcile.Instance.LocalDevices = map[string]map[string]string{
 		"srv": {"source": "yard-srv", "path": "/srv", "pool": "default"},
@@ -713,7 +713,7 @@ func TestExtrasDesiredStateIsParsedAndValidatedInGo(t *testing.T) {
 	}
 	writeProfile("a", "YARD_MOUNTS='cache:/srv/cache:rw:0755'\nYARD_CAPS='fuse'\n")
 	writeProfile("b", "YARD_CAPS='rootless-docker fuse'\nYARD_DEVICES='gpu'\n")
-	runtime := Runtime{RepositoryRoot: root, Environment: []string{"YARD_PROFILES=a"}}
+	runtime := Runtime{RepositoryRoot: root, Environment: []string{"ENVIRONMENT_PROFILES=a"}}
 	values, err := runtime.extrasContext()
 	if err != nil {
 		t.Fatal(err)
@@ -723,7 +723,7 @@ func TestExtrasDesiredStateIsParsedAndValidatedInGo(t *testing.T) {
 		values["SUBYARD_EXTRAS_DEVICES"] != "" {
 		t.Fatalf("unselected profile leaked extras: %#v", values)
 	}
-	runtime.Environment = []string{"YARD_PROFILES=a b"}
+	runtime.Environment = []string{"ENVIRONMENT_PROFILES=a b"}
 	values, err = runtime.extrasContext()
 	if err != nil {
 		t.Fatal(err)
@@ -733,13 +733,13 @@ func TestExtrasDesiredStateIsParsedAndValidatedInGo(t *testing.T) {
 		values["SUBYARD_EXTRAS_DEVICES"] != "gpu" {
 		t.Fatalf("unexpected extras context: %#v", values)
 	}
-	runtime.Yard.InstanceType = domain.InstanceVM
+	runtime.Yard.YardKind = domain.YardVM
 	values, err = runtime.extrasContext()
 	if err != nil || values["SUBYARD_EXTRAS_DEVICES"] != "" {
 		t.Fatalf("VM inherited container-only device extras: %#v, %v", values, err)
 	}
 	writeProfile("bad", "YARD_MOUNTS='../escape:/srv/cache:rw:0755'\n")
-	runtime.Environment = []string{"YARD_PROFILES=bad"}
+	runtime.Environment = []string{"ENVIRONMENT_PROFILES=bad"}
 	if _, err := runtime.extrasContext(); err == nil {
 		t.Fatal("unsafe profile extras were accepted")
 	}

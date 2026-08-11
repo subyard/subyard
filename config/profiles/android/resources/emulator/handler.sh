@@ -54,14 +54,14 @@ EMU_LOG=/tmp/subyard-android-emu.log
 PROFILE_SRC="$SCRIPT_DIR/../config/profiles/android"
 EMU_CONTROL="$EMU_DIR/emulator-control.sh"
 
-device_exists() { incus config device list "$INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null | grep -qx "$1"; }
+device_exists() { incus config device list "$YARD_INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null | grep -qx "$1"; }
 
 proxy_exact() { # <device> <host-port> <yard-port>
   local dev="$1" host_port="$2" yard_port="$3"
   device_exists "$dev" &&
-    [ "$(incus config device get "$INSTANCE_NAME" "$dev" listen "${PROJ[@]}" 2>/dev/null || true)" = "tcp:127.0.0.1:$host_port" ] &&
-    [ "$(incus config device get "$INSTANCE_NAME" "$dev" connect "${PROJ[@]}" 2>/dev/null || true)" = "tcp:127.0.0.1:$yard_port" ] &&
-    [ "$(incus config device get "$INSTANCE_NAME" "$dev" bind "${PROJ[@]}" 2>/dev/null || true)" = host ]
+    [ "$(incus config device get "$YARD_INSTANCE_NAME" "$dev" listen "${PROJ[@]}" 2>/dev/null || true)" = "tcp:127.0.0.1:$host_port" ] &&
+    [ "$(incus config device get "$YARD_INSTANCE_NAME" "$dev" connect "${PROJ[@]}" 2>/dev/null || true)" = "tcp:127.0.0.1:$yard_port" ] &&
+    [ "$(incus config device get "$YARD_INSTANCE_NAME" "$dev" bind "${PROJ[@]}" 2>/dev/null || true)" = host ]
 }
 
 # Is something listening on the in-yard adb port? (emulator fully up). Best-effort; needs ss.
@@ -124,9 +124,9 @@ ensure_proxy() {
     return 0
   fi
   if device_exists "$dev"; then
-    incus config device remove "$INSTANCE_NAME" "$dev" "${PROJ[@]}" >/dev/null
+    incus config device remove "$YARD_INSTANCE_NAME" "$dev" "${PROJ[@]}" >/dev/null
   fi
-  incus config device add "$INSTANCE_NAME" "$dev" proxy "${PROJ[@]}" \
+  incus config device add "$YARD_INSTANCE_NAME" "$dev" proxy "${PROJ[@]}" \
     listen="tcp:127.0.0.1:$hport" connect="tcp:127.0.0.1:$yport" bind=host >/dev/null
   ok "added proxy 127.0.0.1:$hport -> yard:$yport"
 }
@@ -241,7 +241,7 @@ remove_bridge() {
   local removed=0 dev
   for dev in "$ADB_DEVICE" "$ADB_CONSOLE_DEVICE"; do
     if device_exists "$dev"; then
-      incus config device remove "$INSTANCE_NAME" "$dev" "${PROJ[@]}" >/dev/null
+      incus config device remove "$YARD_INSTANCE_NAME" "$dev" "${PROJ[@]}" >/dev/null
       ok "removed proxy device '$dev'"
       removed=1
     fi
@@ -256,11 +256,11 @@ stage_launcher() {
   [ -r "$PROFILE_SRC/emulator-run.sh" ] || die "launcher missing: $PROFILE_SRC/emulator-run.sh"
   [ -r "$PROFILE_SRC/emulator-control.sh" ] || die "controller missing: $PROFILE_SRC/emulator-control.sh"
   [ -r "$PROFILE_SRC/profile.conf" ]    || die "profile.conf missing: $PROFILE_SRC/profile.conf"
-  incus file push "$PROFILE_SRC/emulator-run.sh" "$INSTANCE_NAME$EMU_DIR/emulator-run.sh" \
+  incus file push "$PROFILE_SRC/emulator-run.sh" "$YARD_INSTANCE_NAME$EMU_DIR/emulator-run.sh" \
     "${PROJ[@]}" --create-dirs --mode 0755 >/dev/null
-  incus file push "$PROFILE_SRC/emulator-control.sh" "$INSTANCE_NAME$EMU_CONTROL" \
+  incus file push "$PROFILE_SRC/emulator-control.sh" "$YARD_INSTANCE_NAME$EMU_CONTROL" \
     "${PROJ[@]}" --mode 0755 >/dev/null
-  incus file push "$PROFILE_SRC/profile.conf" "$INSTANCE_NAME$EMU_DIR/profile.conf" \
+  incus file push "$PROFILE_SRC/profile.conf" "$YARD_INSTANCE_NAME$EMU_DIR/profile.conf" \
     "${PROJ[@]}" --mode 0644 >/dev/null
 }
 
@@ -280,7 +280,7 @@ cmd_up() {
     # A boot is already in progress — attach to it (wait), do NOT launch a second emulator.
     info "an emulator is already starting in the yard — waiting for the adb port (not launching another)…"
   else
-    info "starting the shared emulator runtime in yard '$INSTANCE_NAME'"
+    info "starting the shared emulator runtime in yard '$YARD_INSTANCE_NAME'"
     stage_launcher
     ok "launcher staged at $EMU_DIR (in the yard)"
     # Detached: setsid + redirect + </dev/null so it outlives this incus exec session. A
@@ -333,7 +333,7 @@ cmd_down() {
   # Emulator half, then the bridge half. Central typed consent already covered this apply. `down` is
   # the full reverse of `up`: nothing emulator-related stays behind.
   if emulator_listening || emulator_proc; then
-    info "stopping the shared emulator runtime in yard '$INSTANCE_NAME'"
+    info "stopping the shared emulator runtime in yard '$YARD_INSTANCE_NAME'"
     local controlled=0
     emulator_control_available && emu_control is-running >/dev/null 2>&1 && controlled=1
     # Clean shutdown via the console if reachable, then make sure the processes are gone.

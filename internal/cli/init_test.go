@@ -26,7 +26,7 @@ func TestPowerYardContextsAreDiscoveredWithoutChangingSelection(t *testing.T) {
 	}
 	writeCLIFile(t, filepath.Join(yardDirectory, "demo.env"), "SSH_PORT=2233\n", 0o600)
 	writeCLIFile(t, filepath.Join(yardDirectory, "remote.env"),
-		"YARD_TYPE=remote\nREMOTE_DEST=owner.example\nREMOTE_YARD=default\n", 0o600)
+		"ACCESS_KIND=remote\nREMOTE_DEST=owner.example\nREMOTE_YARD=default\n", 0o600)
 	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment})
 	if err != nil {
 		t.Fatal(err)
@@ -244,7 +244,7 @@ func TestLoadInitProfileUsesShippedPresetForUnknownYard(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(preset), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	content := "YARD_PROFILES=hermes\nAGENTS=codex\nSSH_PORT=2234\n"
+	content := "ENVIRONMENT_PROFILES=hermes\nAGENTS=codex\nSSH_PORT=2234\n"
 	writeCLIFile(t, preset, content, 0o600)
 	program, err := New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
@@ -260,7 +260,7 @@ func TestLoadInitProfileUsesShippedPresetForUnknownYard(t *testing.T) {
 		t.Fatal(err)
 	}
 	if loaded.Context.YardName != "custom-name" || loaded.Context.SSHPort != 2234 ||
-		loaded.Environment["YARD_PROFILES"] != "hermes" || loaded.Environment["AGENTS"] != "codex" {
+		loaded.Environment["ENVIRONMENT_PROFILES"] != "hermes" || loaded.Environment["CODING_TOOL_INTEGRATIONS"] != "codex" {
 		t.Fatalf("profile preset was not loaded for selected yard: %#v %#v", loaded.Context, loaded.Environment)
 	}
 	target := filepath.Join(root, "state", "yards", "custom-name", "config.env")
@@ -279,8 +279,8 @@ func TestLoadInitProfileRejectsCommandOverridesOfPresetSettings(t *testing.T) {
 		override string
 		want     string
 	}{
-		{name: "profiles", override: "YARD_PROFILES=openclaw", want: "YARD_PROFILES"},
-		{name: "agents", override: "AGENTS=claude", want: "AGENTS"},
+		{name: "profiles", override: "ENVIRONMENT_PROFILES=openclaw", want: "ENVIRONMENT_PROFILES"},
+		{name: "agents", override: "CODING_TOOL_INTEGRATIONS=claude", want: "CODING_TOOL_INTEGRATIONS"},
 		{name: "host mounts", override: "HOST_MOUNTS=/tmp:/mnt/host:ro:0755", want: "HOST_MOUNTS"},
 		{name: "host links", override: "HOST_LINKS=.claude/sessions:/mnt/host/agent-sessions/claude/sessions", want: "HOST_LINKS"},
 		{name: "Claude instructions", override: "HOST_CLAUDE_MD=/tmp/CLAUDE.md", want: "HOST_CLAUDE_MD"},
@@ -314,8 +314,8 @@ func TestLoadInitProfileRejectsCommandOverridesOfPresetSettings(t *testing.T) {
 			if err := os.MkdirAll(filepath.Dir(preset), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			writeCLIFile(t, preset, `YARD_PROFILES=hermes
-AGENTS=codex
+			writeCLIFile(t, preset, `ENVIRONMENT_PROFILES=hermes
+CODING_TOOL_INTEGRATIONS=codex
 HOST_MOUNTS=
 HOST_LINKS=
 HOST_CLAUDE_MD=
@@ -353,14 +353,14 @@ func TestLoadInitProfileAllowsMatchingCommandValue(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	environment = withoutCommandSetting(environment, "SSH_PORT")
 	environment = slices.DeleteFunc(environment, func(value string) bool {
-		return strings.HasPrefix(value, "AGENTS=")
+		return strings.HasPrefix(value, "CODING_TOOL_INTEGRATIONS=")
 	})
-	environment = append(environment, "AGENTS=codex")
+	environment = append(environment, "CODING_TOOL_INTEGRATIONS=codex")
 	preset := filepath.Join(root, "config", "profiles", "hermes", "yard.env")
 	if err := os.MkdirAll(filepath.Dir(preset), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	writeCLIFile(t, preset, "YARD_PROFILES=hermes\nAGENTS=codex\nSSH_PORT=2234\n", 0o600)
+	writeCLIFile(t, preset, "ENVIRONMENT_PROFILES=hermes\nAGENTS=codex\nSSH_PORT=2234\n", 0o600)
 	program, err := New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 	})
@@ -371,7 +371,7 @@ func TestLoadInitProfileAllowsMatchingCommandValue(t *testing.T) {
 	loaded, bootstrap, err := program.loadInitContext(
 		"custom-name", true, []string{"--profile", "hermes"},
 	)
-	if err != nil || bootstrap == nil || loaded.Environment["AGENTS"] != "codex" {
+	if err != nil || bootstrap == nil || loaded.Environment["CODING_TOOL_INTEGRATIONS"] != "codex" {
 		t.Fatalf("matching command value was rejected: loaded=%#v bootstrap=%#v err=%v",
 			loaded.Environment, bootstrap, err)
 	}
@@ -386,12 +386,12 @@ func TestInitProfileExistingDefinitionMustMatchPreset(t *testing.T) {
 		{
 			name: "semantic match",
 			existing: "# locally documented\n" +
-				"YARD_PROFILES='hermes'\nAGENTS=\"codex\"\nSSH_PORT=2234\n",
+				"ENVIRONMENT_PROFILES='hermes'\nAGENTS=\"codex\"\nSSH_PORT=2234\n",
 		},
 		{
 			name:     "conflict",
-			existing: "YARD_PROFILES=hermes\nAGENTS=claude\nSSH_PORT=2234\n",
-			wantErr:  "conflicts with profile \"hermes\" at setting AGENTS",
+			existing: "ENVIRONMENT_PROFILES=hermes\nAGENTS=claude\nSSH_PORT=2234\n",
+			wantErr:  "conflicts with profile \"hermes\" at setting CODING_TOOL_INTEGRATIONS",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -401,7 +401,7 @@ func TestInitProfileExistingDefinitionMustMatchPreset(t *testing.T) {
 			if err := os.MkdirAll(filepath.Dir(preset), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			writeCLIFile(t, preset, "YARD_PROFILES=hermes\nAGENTS=codex\nSSH_PORT=2234\n", 0o600)
+			writeCLIFile(t, preset, "ENVIRONMENT_PROFILES=hermes\nAGENTS=codex\nSSH_PORT=2234\n", 0o600)
 			target := filepath.Join(root, "state", "yards", "custom-name", "config.env")
 			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 				t.Fatal(err)
@@ -427,7 +427,7 @@ func TestInitProfileExistingDefinitionMustMatchPreset(t *testing.T) {
 				}
 				return
 			}
-			if err != nil || bootstrap != nil || loaded.Environment["AGENTS"] != "codex" {
+			if err != nil || bootstrap != nil || loaded.Environment["CODING_TOOL_INTEGRATIONS"] != "codex" {
 				t.Fatalf("matching definition was not reused: loaded=%#v bootstrap=%#v err=%v",
 					loaded.Environment, bootstrap, err)
 			}
@@ -444,7 +444,7 @@ func TestInitProfileReusesSupportedLegacyDefinition(t *testing.T) {
 			if err := os.MkdirAll(filepath.Dir(preset), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			content := "YARD_PROFILES=hermes\nAGENTS=codex\nSSH_PORT=2234\n"
+			content := "ENVIRONMENT_PROFILES=hermes\nAGENTS=codex\nSSH_PORT=2234\n"
 			writeCLIFile(t, preset, content, 0o600)
 			legacy := filepath.Join(root, "private", "yards", "custom-name.env")
 			if location == "flat config home" {
@@ -464,7 +464,7 @@ func TestInitProfileReusesSupportedLegacyDefinition(t *testing.T) {
 			loaded, bootstrap, err := program.loadInitContext(
 				"custom-name", true, []string{"--profile", "hermes"},
 			)
-			if err != nil || bootstrap != nil || loaded.Environment["AGENTS"] != "codex" {
+			if err != nil || bootstrap != nil || loaded.Environment["CODING_TOOL_INTEGRATIONS"] != "codex" {
 				t.Fatalf("legacy definition was not reused: loaded=%#v bootstrap=%#v err=%v",
 					loaded.Environment, bootstrap, err)
 			}
@@ -483,8 +483,8 @@ func TestInitProfileRejectsRemoteContextBeforeBootstrap(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(preset), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	writeCLIFile(t, preset, "YARD_PROFILES=hermes\nAGENTS=codex\nSSH_PORT=2234\n", 0o600)
-	environment = append(environment, "YARD_TYPE=remote", "REMOTE_DEST=operator@example.test")
+	writeCLIFile(t, preset, "ENVIRONMENT_PROFILES=hermes\nAGENTS=codex\nSSH_PORT=2234\n", 0o600)
+	environment = append(environment, "ACCESS_KIND=remote", "OWNER_ENDPOINT=operator@example.test")
 	program, err := New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 	})
@@ -790,7 +790,7 @@ func TestInitProfileCreatesDefinitionOnlyAfterConfirmationAndPreflight(t *testin
 			if err := os.MkdirAll(filepath.Dir(preset), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			content := "YARD_PROFILES=hermes\nAGENTS=codex\nSSH_PORT=2234\n"
+			content := "ENVIRONMENT_PROFILES=hermes\nAGENTS=codex\nSSH_PORT=2234\n"
 			writeCLIFile(t, preset, content, 0o600)
 			platform := newInitPlatformFixture()
 			platform.preflightErr = test.preflightErr

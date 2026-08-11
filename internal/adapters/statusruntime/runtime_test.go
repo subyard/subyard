@@ -46,7 +46,7 @@ func TestRuntimeReadsAndRefreshesSpaceSynchronously(t *testing.T) {
 	executor := &spaceExecutorStub{result: ports.InstanceExecResult{Stdout: []byte("3G\n")}}
 	runtime := Runtime{Executor: executor, Now: func() time.Time { return newTime }}
 	yard := domain.Context{
-		YardName: "demo", IncusProject: "subyard-demo", InstanceName: "yard-demo",
+		YardName: "demo", IncusProject: "subyard-demo", YardInstanceName: "yard-demo",
 		Paths: domain.RuntimePaths{DataHome: root},
 	}
 	cached, ok := runtime.ReadSpace(yard)
@@ -168,7 +168,7 @@ func TestRuntimeStartsAndReusesAsyncSpaceRefresh(t *testing.T) {
 	root := t.TempDir()
 	environment := fakeIncusEnvironment(t, "printf '1.5G\\n'\n")
 	yard := domain.Context{
-		YardName: "default", IncusProject: "subyard", InstanceName: "yard",
+		YardName: "default", IncusProject: "subyard", YardInstanceName: "yard",
 		Paths: domain.RuntimePaths{DataHome: root},
 	}
 	facts, err := (Runtime{
@@ -210,7 +210,7 @@ func TestRuntimeKeepsStaleSpaceWhenAsyncRefreshFails(t *testing.T) {
 		Environment: mapMerge(environment, map[string]string{"SPACE_TTL": "1"}),
 		Now:         func() time.Time { return measured.Add(2 * time.Minute) },
 	}).ReadStatusFacts(context.Background(), domain.Context{
-		YardName: "demo", IncusProject: "subyard-demo", InstanceName: "yard-demo",
+		YardName: "demo", IncusProject: "subyard-demo", YardInstanceName: "yard-demo",
 		Paths: domain.RuntimePaths{DataHome: root},
 	}, true)
 	if err != nil || facts.Space != "2G  (in-yard rootfs, 2m ago, refresh started)" {
@@ -231,7 +231,7 @@ func TestRuntimeSkipsRefreshWhenCacheCannotBeWritten(t *testing.T) {
 	}
 	facts, err := (Runtime{Environment: fakeIncusEnvironment(t, "printf '1G\\n'\n")}).
 		ReadStatusFacts(context.Background(), domain.Context{
-			YardName: "demo", IncusProject: "subyard-demo", InstanceName: "yard-demo",
+			YardName: "demo", IncusProject: "subyard-demo", YardInstanceName: "yard-demo",
 			Paths: domain.RuntimePaths{DataHome: filepath.Join(blocker, "data")},
 		}, true)
 	if err != nil || facts.Space != "in-yard size unavailable" {
@@ -265,7 +265,7 @@ func TestRuntimeProbesPreparedResources(t *testing.T) {
 		Environment: map[string]string{"PATH": "/usr/bin:/bin"},
 		Resources:   registry.Definitions(), Program: "yard", Security: securityStub{state: "live"},
 	}).ReadStatusFacts(context.Background(), domain.Context{
-		IncusProject: "subyard", InstanceName: "yard",
+		IncusProject: "subyard", YardInstanceName: "yard",
 		Paths: domain.RuntimePaths{DataHome: dataHome},
 	}, true)
 	if err != nil || len(facts.Shared) != 1 {
@@ -325,7 +325,7 @@ func TestRuntimeRunsOnlyOneConcurrentSpaceRefresh(t *testing.T) {
 	environment["SPACE_CALLS"] = calls
 	runtime := Runtime{Environment: environment}
 	yard := domain.Context{
-		YardName: "demo", IncusProject: "subyard-demo", InstanceName: "yard-demo",
+		YardName: "demo", IncusProject: "subyard-demo", YardInstanceName: "yard-demo",
 		Paths: domain.RuntimePaths{DataHome: root},
 	}
 	for range 3 {

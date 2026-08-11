@@ -155,10 +155,10 @@ func TestOperationPromptAcceptsInteractiveInputWithRedirectedOutput(t *testing.T
 	}
 	orchestrator := program.operationOrchestrator(
 		"operation-redirected-output",
-		config.Loaded{Context: domain.Context{YardType: domain.YardLocal}}, nil, nil,
+		config.Loaded{Context: domain.Context{AccessKind: domain.AccessLocal}}, nil, nil,
 	)
 	plan, err := orchestrator.Plan(
-		context.Background(), domain.Context{YardType: domain.YardLocal},
+		context.Background(), domain.Context{AccessKind: domain.AccessLocal},
 		domain.CommandPolicy{
 			Name: "Update configuration", Effect: domain.CommandMutate,
 			Confirmation: domain.ConfirmationPromptDefaultYes, RemotePolicy: domain.RemoteOnOwner,

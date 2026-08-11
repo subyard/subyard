@@ -140,7 +140,7 @@ func TestProvisionKeepsDesiredRunningYardStarted(t *testing.T) {
 }
 
 func provisionRunnerFixture(fixture *provisionFixture, names ...string) ProvisionRunner {
-	yard := domain.Context{YardName: "test", IncusProject: "subyard-test", InstanceName: "yard-test"}
+	yard := domain.Context{YardName: "test", IncusProject: "subyard-test", YardInstanceName: "yard-test"}
 	return ProvisionRunner{
 		Power: PowerService{Instances: fixture, Config: fixture}, Physical: fixture,
 		Yard: yard, Profiles: names,

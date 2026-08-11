@@ -385,7 +385,7 @@ func credentialCLIFixture(
 	hostBase := filepath.Join(temp, "yards")
 	loaded := config.Loaded{
 		Context: domain.Context{
-			YardName: "default", YardType: domain.YardLocal,
+			YardName: "default", AccessKind: domain.AccessLocal,
 			Paths: domain.RuntimePaths{
 				RepositoryRoot: root,
 				OperatorHome:   filepath.Join(temp, "home"),

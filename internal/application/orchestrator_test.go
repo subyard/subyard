@@ -15,7 +15,7 @@ func TestPlanRoutesAndConfirmsMutation(t *testing.T) {
 	clock := testkit.NewManualClock(time.Unix(100, 0))
 	prompt := &testkit.Prompt{Answers: []bool{true}}
 	orchestrator := &Orchestrator{Clock: clock, IDs: &testkit.IDs{Values: []string{"operation-1"}}, Prompt: prompt}
-	plan, err := orchestrator.Plan(context.Background(), domain.Context{YardType: domain.YardRemote}, domain.CommandPolicy{
+	plan, err := orchestrator.Plan(context.Background(), domain.Context{AccessKind: domain.AccessRemote}, domain.CommandPolicy{
 		Name: "start", Effect: domain.CommandMutate, Confirmation: domain.ConfirmationPromptDefaultYes,
 		RemotePolicy: domain.RemoteOnOwner,
 	}, false)
@@ -32,14 +32,14 @@ func TestPlanDeclineAndRemoteDeny(t *testing.T) {
 		Clock: testkit.NewManualClock(time.Unix(100, 0)), IDs: &testkit.IDs{Values: []string{"unused"}},
 		Prompt: &testkit.Prompt{Answers: []bool{false}},
 	}
-	_, err := orchestrator.Plan(context.Background(), domain.Context{YardType: domain.YardLocal}, domain.CommandPolicy{
+	_, err := orchestrator.Plan(context.Background(), domain.Context{AccessKind: domain.AccessLocal}, domain.CommandPolicy{
 		Name: "stop", Effect: domain.CommandMutate, Confirmation: domain.ConfirmationPromptDefaultYes,
 		RemotePolicy: domain.RemoteOnOwner,
 	}, false)
 	if !errors.Is(err, ErrDeclined) {
 		t.Fatalf("expected decline, got %v", err)
 	}
-	_, err = orchestrator.Plan(context.Background(), domain.Context{YardType: domain.YardRemote}, domain.CommandPolicy{
+	_, err = orchestrator.Plan(context.Background(), domain.Context{AccessKind: domain.AccessRemote}, domain.CommandPolicy{
 		Name: "bind", Effect: domain.CommandMutate, Confirmation: domain.ConfirmationPromptDefaultYes,
 		RemotePolicy: domain.RemoteDenied,
 	}, true)
@@ -52,7 +52,7 @@ func TestPlanRejectsInvalidRemotePolicyForLocalYard(t *testing.T) {
 	orchestrator := &Orchestrator{
 		Clock: testkit.NewManualClock(time.Unix(100, 0)), IDs: &testkit.IDs{Values: []string{"unused"}},
 	}
-	_, err := orchestrator.Plan(context.Background(), domain.Context{YardType: domain.YardLocal}, domain.CommandPolicy{
+	_, err := orchestrator.Plan(context.Background(), domain.Context{AccessKind: domain.AccessLocal}, domain.CommandPolicy{
 		Name: "status", Effect: domain.CommandRead, Confirmation: domain.ConfirmationNever,
 		RemotePolicy: "unknown",
 	}, false)
@@ -86,7 +86,7 @@ func TestPrepareKeepsMutationUnconfirmedUntilExplicitConfirmation(t *testing.T) 
 	orchestrator := &Orchestrator{
 		Clock: testkit.NewManualClock(time.Unix(100, 0)), IDs: &testkit.IDs{Values: []string{"operation-1"}},
 	}
-	plan, err := orchestrator.Prepare(domain.Context{YardType: domain.YardLocal}, domain.CommandPolicy{
+	plan, err := orchestrator.Prepare(domain.Context{AccessKind: domain.AccessLocal}, domain.CommandPolicy{
 		Name: "start", Effect: domain.CommandMutate, Confirmation: domain.ConfirmationPromptDefaultYes,
 		RemotePolicy: domain.RemoteOnOwner,
 		Consequences: []string{"start the fixture"},
@@ -113,19 +113,19 @@ func TestPlanSkipsPromptOnlyForExplicitNeverPolicy(t *testing.T) {
 		Clock: testkit.NewManualClock(time.Unix(100, 0)),
 		IDs:   &testkit.IDs{Values: []string{"operation-launch"}}, Prompt: prompt,
 	}
-	plan, err := orchestrator.Plan(context.Background(), domain.Context{YardType: domain.YardLocal}, domain.CommandPolicy{
+	plan, err := orchestrator.Plan(context.Background(), domain.Context{AccessKind: domain.AccessLocal}, domain.CommandPolicy{
 		Name: "code", Effect: domain.CommandMutate, Confirmation: domain.ConfirmationNever,
 		RemotePolicy: domain.RemoteOnController,
 	}, false)
 	if err != nil || !plan.Confirmed || len(prompt.Seen) != 0 {
 		t.Fatalf("prompt-free plan = %#v, prompts=%#v, err=%v", plan, prompt.Seen, err)
 	}
-	if _, err := orchestrator.Prepare(domain.Context{YardType: domain.YardLocal}, domain.CommandPolicy{
+	if _, err := orchestrator.Prepare(domain.Context{AccessKind: domain.AccessLocal}, domain.CommandPolicy{
 		Name: "missing", Effect: domain.CommandMutate, RemotePolicy: domain.RemoteOnOwner,
 	}); err == nil {
 		t.Fatal("missing confirmation policy was accepted")
 	}
-	if _, err := orchestrator.Prepare(domain.Context{YardType: domain.YardLocal}, domain.CommandPolicy{
+	if _, err := orchestrator.Prepare(domain.Context{AccessKind: domain.AccessLocal}, domain.CommandPolicy{
 		Name: "unknown", Effect: domain.CommandMutate, Confirmation: "unknown", RemotePolicy: domain.RemoteOnOwner,
 	}); err == nil {
 		t.Fatal("unknown confirmation policy was accepted")
@@ -137,7 +137,7 @@ func TestPrepareRejectsLegacyRequiredConfirmationPolicy(t *testing.T) {
 		Clock: testkit.NewManualClock(time.Unix(100, 0)),
 		IDs:   &testkit.IDs{Values: []string{"operation-legacy-policy"}},
 	}
-	_, err := orchestrator.Prepare(domain.Context{YardType: domain.YardLocal}, domain.CommandPolicy{
+	_, err := orchestrator.Prepare(domain.Context{AccessKind: domain.AccessLocal}, domain.CommandPolicy{
 		Name: "legacy mutation", Effect: domain.CommandMutate,
 		Confirmation: domain.ConfirmationPolicy("required"), RemotePolicy: domain.RemoteOnOwner,
 	})
@@ -161,7 +161,7 @@ func TestPlanMapsConfirmationPoliciesToTypedRequests(t *testing.T) {
 				Clock: testkit.NewManualClock(time.Unix(100, 0)),
 				IDs:   &testkit.IDs{Values: []string{"operation-typed-prompt"}}, Prompt: prompt,
 			}
-			plan, err := orchestrator.Plan(context.Background(), domain.Context{YardType: domain.YardLocal}, domain.CommandPolicy{
+			plan, err := orchestrator.Plan(context.Background(), domain.Context{AccessKind: domain.AccessLocal}, domain.CommandPolicy{
 				Name: "Update configuration", Effect: domain.CommandMutate, Confirmation: test.policy,
 				RemotePolicy: domain.RemoteOnOwner, Consequences: []string{"replace local settings"},
 			}, false)
@@ -192,7 +192,7 @@ func TestConfirmDeclineAndNonInteractiveErrorsPreventAdapterExecution(t *testing
 				Clock: testkit.NewManualClock(time.Unix(100, 0)),
 				IDs:   &testkit.IDs{Values: []string{"operation-blocked"}}, Prompt: test.prompt, Runner: runner,
 			}
-			plan, err := orchestrator.Prepare(domain.Context{YardType: domain.YardLocal}, domain.CommandPolicy{
+			plan, err := orchestrator.Prepare(domain.Context{AccessKind: domain.AccessLocal}, domain.CommandPolicy{
 				Name: "Update configuration", Effect: domain.CommandMutate,
 				Confirmation: domain.ConfirmationPromptDefaultYes, RemotePolicy: domain.RemoteOnOwner,
 			})

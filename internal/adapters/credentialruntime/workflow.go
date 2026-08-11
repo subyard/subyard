@@ -1009,7 +1009,7 @@ func (runtime *Runtime) prepareTrust(ctx context.Context, arguments []string) (P
 			if err != nil || !slices.Equal(currentHeads, expectedHeads) {
 				return fmt.Errorf("%w: credential heads changed while awaiting confirmation", domain.ErrPlanStale)
 			}
-			peer, err := runtime.storePeer(name, identity, target.Transport, target.Destination, target.RemoteYard, manual)
+			peer, err := runtime.storePeer(name, identity, target.Transport, target.Destination, target.OwnerYardName, manual)
 			if err != nil {
 				return fmt.Errorf("peer trust metadata was rejected: %w", err)
 			}
@@ -1153,7 +1153,7 @@ func (runtime *Runtime) planMove(ctx context.Context, credentialID, targetName s
 		}
 		plan.targetActor, plan.targetAssignment = peer.ActorID, assignment
 		plan.targetContext = strings.SplitN(assignment, "/", 2)[1]
-		target := Target{Name: peer.Name, Transport: peer.Transport, Destination: peer.Dest, RemoteYard: peer.RemoteYard}
+		target := Target{Name: peer.Name, Transport: peer.Transport, Destination: peer.Dest, OwnerYardName: peer.OwnerYardName}
 		plan.target, plan.expectedPeer = &target, &peer
 	} else if targetName == runtime.config.Context {
 		plan.targetActor, plan.targetContext = identity.ActorID, runtime.config.Context
@@ -1178,7 +1178,7 @@ func (runtime *Runtime) planMove(ctx context.Context, credentialID, targetName s
 				return movePlan{}, err
 			}
 			plan.targetActor = targetIdentity.ActorID
-			plan.targetContext = firstNonEmpty(target.RemoteYard, "default")
+			plan.targetContext = firstNonEmpty(target.OwnerYardName, "default")
 		}
 		plan.targetAssignment = plan.targetActor + "/" + plan.targetContext
 	}

@@ -12,13 +12,16 @@ import (
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
-type remoteControlStub struct{ applied int }
+type remoteControlStub struct {
+	applied int
+	records []domain.RemoteRecord
+}
 
 func (control *remoteControlStub) Lookup(context.Context, string) (domain.RemoteRecord, bool, error) {
 	return domain.RemoteRecord{}, false, nil
 }
 func (control *remoteControlStub) List(context.Context) ([]domain.RemoteRecord, error) {
-	return nil, nil
+	return control.records, nil
 }
 func (control *remoteControlStub) ProbeOwner(context.Context, domain.RemoteSpec) (domain.RemoteInfo, error) {
 	return domain.RemoteInfo{State: "RUNNING", SSHPort: 2222, DevUser: "dev"}, nil

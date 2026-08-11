@@ -45,7 +45,7 @@ func (cli *CLI) runConfigSyncPush(
 	arguments []string,
 	assumeYes bool,
 ) int {
-	if loaded.Context.YardType == domain.YardRemote {
+	if loaded.Context.AccessKind == domain.AccessRemote {
 		forwarded := append([]string{"sync", "push"}, arguments...)
 		if assumeYes {
 			forwarded = append(forwarded, "--yes")

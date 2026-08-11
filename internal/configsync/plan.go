@@ -374,7 +374,7 @@ func validateInventory(contexts []config.Loaded) error {
 	resources := map[string]owner{}
 	for _, loaded := range contexts {
 		ctx := loaded.Context
-		if ctx.YardType == domain.YardRemote {
+		if ctx.AccessKind == domain.AccessRemote {
 			continue
 		}
 		values := []struct {
@@ -382,7 +382,7 @@ func validateInventory(contexts []config.Loaded) error {
 		}{
 			{"SSH port", strconv.Itoa(ctx.SSHPort)},
 			{"Incus project", ctx.IncusProject},
-			{"instance", ctx.InstanceName},
+			{"instance", ctx.YardInstanceName},
 			{"host data root", ctx.Paths.HostBase},
 		}
 		for _, value := range values {

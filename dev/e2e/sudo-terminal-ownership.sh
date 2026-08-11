@@ -273,8 +273,8 @@ while ss -H -ltn "sport = :$real_ssh_port" 2>/dev/null | grep -q .; do
 done
 cat > "$real_config/yards/$real_yard.env" <<EOF
 SSH_PORT=$real_ssh_port
-YARD_PROFILES=sudo-smoke
-AGENTS=
+ENVIRONMENT_PROFILES=sudo-smoke
+CODING_TOOL_INTEGRATIONS=
 SRV_POOL=$E2E_POOL
 HOST_MOUNTS=sudo-host:/mnt/host/sudo:rw:0700
 HOST_BASE=$fixture_home/host-real

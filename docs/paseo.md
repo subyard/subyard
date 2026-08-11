@@ -6,14 +6,14 @@ agent defaults.
 
 ## Enable and pair
 
-Add `paseo` to the effective `AGENTS` setting for the selected yard:
+Add `paseo` to the effective `CODING_TOOL_INTEGRATIONS` setting for the selected yard:
 
 ```sh
-AGENTS="paseo"
+CODING_TOOL_INTEGRATIONS="paseo"
 ```
 
 Paseo declares Codex as a required provider. Subyard expands the dependency automatically and
-installs its pinned Codex package before Paseo, regardless of the order of entries in `AGENTS`.
+installs its pinned Codex package before Paseo, regardless of the order of entries in `CODING_TOOL_INTEGRATIONS`.
 Include other agents in the same setting when that yard should expose their command-line tools too.
 
 Put this in the host-wide Subyard settings for the default yard, or in the selected named-yard

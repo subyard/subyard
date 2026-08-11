@@ -173,7 +173,7 @@ func (cli *CLI) prepareTestVMExecution(
 	if !loaded.Context.NestedE2EVMs {
 		return nil, errors.New("nested E2E VMs are disabled for this yard")
 	}
-	if loaded.Context.InstanceType != domain.InstanceContainer {
+	if loaded.Context.YardKind != domain.YardContainer {
 		return nil, errors.New("nested E2E VMs require a container yard")
 	}
 	action := ""
@@ -219,16 +219,16 @@ func (cli *CLI) prepareTestVMExecution(
 	// A remote invocation is preflighted by the owner after forwarding. A local
 	// invocation must prove the yard can run the broker operation before any
 	// confirmation is requested.
-	if loaded.Context.YardType != domain.YardRemote {
+	if loaded.Context.AccessKind != domain.AccessRemote {
 		incusPort, _ := cli.statusPorts()
 		instance, err := incusPort.Instance(
-			ctx, loaded.Context.IncusProject, loaded.Context.InstanceName,
+			ctx, loaded.Context.IncusProject, loaded.Context.YardInstanceName,
 		)
 		if err != nil {
 			return nil, err
 		}
 		if !strings.EqualFold(instance.Status, "running") {
-			return nil, fmt.Errorf("yard %q must be running", loaded.Context.InstanceName)
+			return nil, fmt.Errorf("yard %q must be running", loaded.Context.YardInstanceName)
 		}
 	}
 	execution := &testVMExecution{action: action, slot: slot}
@@ -386,12 +386,12 @@ func (cli *CLI) executeTestVMs(
 		}, nil
 	}
 	incusPort, _ := cli.statusPorts()
-	instance, err := incusPort.Instance(ctx, loaded.Context.IncusProject, loaded.Context.InstanceName)
+	instance, err := incusPort.Instance(ctx, loaded.Context.IncusProject, loaded.Context.YardInstanceName)
 	if err != nil {
 		return domain.AdapterResult{}, err
 	}
 	if !strings.EqualFold(instance.Status, "running") {
-		return domain.AdapterResult{}, fmt.Errorf("yard %q must be running", loaded.Context.InstanceName)
+		return domain.AdapterResult{}, fmt.Errorf("yard %q must be running", loaded.Context.YardInstanceName)
 	}
 	argument := execution.action
 	if execution.action == "revoke" {

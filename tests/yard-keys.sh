@@ -445,7 +445,7 @@ yard_one keys sync @two --now --yes >/dev/null
 jq -e '.error == "" and .consecutiveFailures == 0 and .lastSuccess == .lastAttempt' \
   "$SUBYARD_KEYS_ROOT/one/state/two.json" >/dev/null || fail 'reconnect did not clear failure telemetry'
 
-# The SSH/REMOTE_YARD path is exercised host-free with a protocol-preserving ssh shim. Git still
+# The SSH/OWNER_YARD_NAME path is exercised host-free with a protocol-preserving ssh shim. Git still
 # invokes upload-pack/receive-pack, while owner-host helpers compose `yard -Y four` over control SSH.
 cat > "$SUBYARD_CONFIG_HOME/yards/three.env" <<EOF
 SSH_PORT=3223
@@ -458,9 +458,9 @@ SUBYARD_KEYS_ROOT=$SUBYARD_KEYS_ROOT/four
 SUBYARD_KEYS_CONSUMER_ROOT=$TMP/consumer-four
 EOF
 cat > "$SUBYARD_CONFIG_HOME/yards/srv4.env" <<'EOF'
-YARD_TYPE=remote
-REMOTE_DEST=fake-owner
-REMOTE_YARD=four
+ACCESS_KIND=remote
+OWNER_ENDPOINT=fake-owner
+OWNER_YARD_NAME=four
 SSH_PORT=3225
 EOF
 cat > "$HOME/.bash_profile" <<EOF
@@ -495,9 +495,9 @@ bootstrap_keys four >/dev/null
 yard_three keys trust @srv4 --yes >/dev/null
 printf 'remote-wire-dummy' | yard_three keys add remote-static --yes >/dev/null
 yard_three keys sync @srv4 --now --yes >/dev/null
-yard_four keys list | grep -Fq remote-static || fail 'REMOTE_YARD owner-host exchange did not converge'
+yard_four keys list | grep -Fq remote-static || fail 'OWNER_YARD_NAME owner-host exchange did not converge'
 grep -Fq 'ConnectTimeout=8' "$SUBYARD_TEST_SSH_LOG" || fail 'SSH/Git exchange omitted its bounded timeout'
-grep -Eq 'Y.*four' "$SUBYARD_TEST_SSH_LOG" || fail 'remote helper omitted REMOTE_YARD composition'
+grep -Eq 'Y.*four' "$SUBYARD_TEST_SSH_LOG" || fail 'remote helper omitted OWNER_YARD_NAME composition'
 
 # A correctly signed append containing corrupt ciphertext still fails decrypt/MAC validation and is
 # quarantined; trusting an actor never means trusting arbitrary record bytes from that actor.

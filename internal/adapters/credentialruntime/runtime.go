@@ -28,10 +28,10 @@ const (
 )
 
 type Target struct {
-	Name        string
-	Transport   string
-	Destination string
-	RemoteYard  string
+	Name          string
+	Transport     string
+	Destination   string
+	OwnerYardName string
 }
 
 type Resolver func(context.Context, string) (Target, error)

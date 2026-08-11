@@ -594,7 +594,7 @@ grep -Fq 'POWER_RETRY_WRAPPER=' "$ROOT/dev/e2e/p0-source-upgrade.sh" \
   || fail "P0 source-upgrade TEMPFAIL probe does not exercise the main reconciler process"
 ! grep -Fq '"$SOURCE_ROOT/config/qa-pool/"*' "$ROOT/dev/e2e/p0-source-upgrade.sh" \
   || fail "P0 source-upgrade fixture expands operator-private paths as the outer user"
-grep -Fq 'AGENTS=codex\nAGENT_codex_RULES=' "$ROOT/dev/e2e/p0-source-upgrade.sh" \
+grep -Fq 'CODING_TOOL_INTEGRATIONS=codex\nAGENT_codex_RULES=' "$ROOT/dev/e2e/p0-source-upgrade.sh" \
   || fail "P0 source-upgrade spends its legacy init deadline on unrelated agent downloads"
 grep -Fq 's/^YARD_TEMPLATE=e2e-vms$/YARD_TEMPLATE=test-vms/' \
   "$ROOT/dev/e2e/p0-source-upgrade.sh" \

@@ -15,8 +15,8 @@ profile provisioning as its own confirmed mutation:
 yard -Y hermes init --profile hermes
 yard -Y hermes provision
 
-yard -Y hermes config show YARD_PROFILES
-yard -Y hermes config show AGENTS
+yard -Y hermes config show ENVIRONMENT_PROFILES
+yard -Y hermes config show CODING_TOOL_INTEGRATIONS
 yard -Y hermes config show HOST_MOUNTS
 yard -Y hermes config show FORWARD_SSH_AGENT
 yard -Y hermes config show SSH_PORT
@@ -24,7 +24,7 @@ ss -H -ltn 'sport = :2224'
 ```
 
 `init` and `provision` are separate mutations and each displays its own plan and
-confirmation. Bare `provision` is deliberate: `YARD_PROFILES=hermes` limits the
+confirmation. Bare `provision` is deliberate: `ENVIRONMENT_PROFILES=hermes` limits the
 selection to this profile. The bootstrap validates the complete preset before
 creating its mode-0600 named-yard definition. To customize a setting afterwards,
 use the supported authoring command, for example
@@ -38,7 +38,7 @@ its bundled npm 10.9.3, locked `agent-browser` 0.26.0, and Chromium installed by
 Playwright 1.62.1. No manual Node or browser setup is required. Persistent Hermes
 state remains under `/srv/hermes`, so the reproducible Node/browser runtime does
 not inflate its backups. Re-provisioning the same pins preserves state and the
-dashboard session token. `AGENTS=codex` also installs the pinned Codex CLI and
+dashboard session token. `CODING_TOOL_INTEGRATIONS=codex` also installs the pinned Codex CLI and
 its config, but not Claude, OpenCode, pi, or Paseo. `HOST_LINKS=` keeps Codex
 authorization and sessions inside this yard rather than mounting owner-host
 state.

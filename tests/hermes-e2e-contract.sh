@@ -8,8 +8,8 @@ PRESET="$ROOT/config/profiles/hermes/yard.env"
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
 for setting in \
-  'YARD_PROFILES=hermes' \
-  'AGENTS=codex' \
+  'ENVIRONMENT_PROFILES=hermes' \
+  'CODING_TOOL_INTEGRATIONS=codex' \
   'HOST_CLAUDE_MD=' \
   'HOST_CODEX_AGENTS_MD=' \
   'HOST_OPENCODE_AGENTS_MD=' \
@@ -46,15 +46,15 @@ fi
 if grep -Fq 'SSH_PORT="$port"' "$E2E"; then
   fail "Hermes E2E leaks a selected-yard SSH port into all preflight yard contexts"
 fi
-grep -Fq "'YARD_PROFILES=openclaw'" "$E2E" \
+grep -Fq "'ENVIRONMENT_PROFILES=openclaw'" "$E2E" \
   || fail "Hermes E2E does not seed a hostile host profile selection"
-grep -Fq "'AGENTS=claude'" "$E2E" \
+grep -Fq "'CODING_TOOL_INTEGRATIONS=claude'" "$E2E" \
   || fail "Hermes E2E does not seed a hostile host agent selection"
 grep -Fq 'HOST_MOUNTS=host-fixture:/mnt/host-fixture:ro:0755' "$E2E" \
   || fail "Hermes E2E does not seed a hostile host mount"
 grep -Fq "'YARD_CAPABILITIES=android'" "$E2E" \
   || fail "Hermes E2E does not seed hostile host capabilities"
-if grep -Eq '^export (YARD_PROFILES|AGENTS|DEV_SUDO|FORWARD_SSH_AGENT|NESTED_E2E_VMS)=' \
+if grep -Eq '^export (ENVIRONMENT_PROFILES|CODING_TOOL_INTEGRATIONS|DEV_SUDO|FORWARD_SSH_AGENT|NESTED_E2E_VMS)=' \
   "$E2E"; then
   fail "Hermes E2E masks the shipped preset with command environment values"
 fi

@@ -118,8 +118,8 @@ exec /usr/bin/ssh -F $TMP/ssh_config "\$@"
 EOF
 chmod 0755 "$TMP/client-bin/ssh"
 cat > "$local_root/config/yards/remote-two.env" <<'EOF'
-YARD_TYPE=remote
-REMOTE_DEST=peer-two
+ACCESS_KIND=remote
+OWNER_ENDPOINT=peer-two
 SSH_PORT=3222
 EOF
 

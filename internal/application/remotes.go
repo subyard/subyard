@@ -28,27 +28,27 @@ func (service RemoteService) Prepare(ctx context.Context, arguments []string) (d
 		prepared.Records, err = service.Control.List(ctx)
 		return prepared, err
 	}
-	record, exists, err := service.Control.Lookup(ctx, spec.Name)
+	record, exists, err := service.Control.Lookup(ctx, spec.LegacyAlias)
 	if err != nil {
 		return prepared, err
 	}
 	if action == domain.RemoteAdd {
 		if exists {
 			if !record.Remote {
-				return prepared, fmt.Errorf("%q is a LOCAL yard — remote add cannot replace it", spec.Name)
+				return prepared, fmt.Errorf("%q is a LOCAL yard — remote add cannot replace it", spec.LegacyAlias)
 			}
-			if record.Spec.Destination != spec.Destination || record.Spec.OwnerYard != spec.OwnerYard {
-				return prepared, fmt.Errorf("remote yard %q is already mapped to %s — remove it before rebinding it", spec.Name, record.Spec.Destination)
+			if record.Spec.OwnerEndpoint != spec.OwnerEndpoint || record.Spec.OwnerYardName != spec.OwnerYardName {
+				return prepared, fmt.Errorf("remote yard %q is already mapped to %s — remove it before rebinding it", spec.LegacyAlias, record.Spec.OwnerEndpoint)
 			}
 			prepared.Existing = &record
 		}
 		return service.prepareOwner(ctx, prepared, false)
 	}
 	if !exists {
-		return prepared, fmt.Errorf("no such yard %q", spec.Name)
+		return prepared, fmt.Errorf("no such yard %q", spec.LegacyAlias)
 	}
 	if !record.Remote {
-		return prepared, fmt.Errorf("%q is a LOCAL yard, not a remote one", spec.Name)
+		return prepared, fmt.Errorf("%q is a LOCAL yard, not a remote one", spec.LegacyAlias)
 	}
 	prepared.Existing = &record
 	prepared.Spec = record.Spec
@@ -84,7 +84,7 @@ func (service RemoteService) prepareOwner(ctx context.Context, prepared domain.R
 		return prepared, errors.New("the owner host could not scan the yard sshd")
 	}
 	if prepared.Existing != nil {
-		prepared.Recorded, err = service.Control.RecordedYardKeys(ctx, prepared.Spec.Name)
+		prepared.Recorded, err = service.Control.RecordedYardKeys(ctx, prepared.Spec.LegacyAlias)
 		if err != nil {
 			return prepared, err
 		}
@@ -98,7 +98,7 @@ func (service RemoteService) prepareOwner(ctx context.Context, prepared domain.R
 			return prepared, errors.New("the recorded yard key already matches the owner-host scan; no rotation is needed")
 		}
 	} else if len(prepared.Recorded) != 0 && !matched {
-		return prepared, fmt.Errorf("yard ssh host key changed; refusing automatic replacement — run: yard remote repair-key %s", prepared.Spec.Name)
+		return prepared, fmt.Errorf("yard ssh host key changed; refusing automatic replacement — run: yard remote repair-key %s", prepared.Spec.LegacyAlias)
 	}
 	return prepared, nil
 }
@@ -137,7 +137,7 @@ func remoteConsequences(prepared domain.RemotePrepared) []string {
 			verb = "refresh"
 		}
 		lines := []string{
-			fmt.Sprintf("%s remote yard %s on %s", verb, prepared.Spec.Name, prepared.Spec.Destination),
+			fmt.Sprintf("%s remote yard %s on %s", verb, prepared.Spec.LegacyAlias, prepared.Spec.OwnerEndpoint),
 			"authorize this controller key and atomically install the context and SSH alias",
 			"verify the data plane and roll back local files on failure",
 		}
@@ -148,7 +148,7 @@ func remoteConsequences(prepared domain.RemotePrepared) []string {
 		return append(lines, "replace only this context's trust pin and restore it if verification fails")
 	case domain.RemoteRemove:
 		return []string{
-			fmt.Sprintf("remove local context and SSH alias for %s", prepared.Spec.Name),
+			fmt.Sprintf("remove local context and SSH alias for %s", prepared.Spec.LegacyAlias),
 			"remove only this yard SSH trust pin; leave the remote host and local project records untouched",
 		}
 	default:
@@ -204,30 +204,30 @@ func parseRemoteArguments(arguments []string) (domain.RemoteAction, domain.Remot
 			if index >= len(filtered) {
 				return "", spec, errors.New("--yard needs a name")
 			}
-			spec.OwnerYard = filtered[index]
+			spec.OwnerYardName = filtered[index]
 		case strings.HasPrefix(argument, "--yard="):
-			spec.OwnerYard = strings.TrimPrefix(argument, "--yard=")
+			spec.OwnerYardName = strings.TrimPrefix(argument, "--yard=")
 		case strings.HasPrefix(argument, "-"):
 			return "", spec, fmt.Errorf("unknown option %q", argument)
-		case spec.Name == "":
-			spec.Name = argument
-		case spec.Destination == "" && action == domain.RemoteAdd:
-			spec.Destination = argument
+		case spec.LegacyAlias == "":
+			spec.LegacyAlias = argument
+		case spec.OwnerEndpoint == "" && action == domain.RemoteAdd:
+			spec.OwnerEndpoint = argument
 		default:
 			return "", spec, fmt.Errorf("unexpected argument %q", argument)
 		}
 	}
-	if !domain.SafeName(spec.Name) {
-		return "", spec, fmt.Errorf("invalid remote context name %q", spec.Name)
+	if !domain.SafeName(spec.LegacyAlias) {
+		return "", spec, fmt.Errorf("invalid remote context name %q", spec.LegacyAlias)
 	}
-	if spec.OwnerYard != "" && !domain.SafeName(spec.OwnerYard) {
-		return "", spec, fmt.Errorf("invalid owner yard name %q", spec.OwnerYard)
+	if spec.OwnerYardName != "" && !domain.SafeName(spec.OwnerYardName) {
+		return "", spec, fmt.Errorf("invalid owner yard name %q", spec.OwnerYardName)
 	}
-	if action != domain.RemoteAdd && spec.OwnerYard != "" {
+	if action != domain.RemoteAdd && spec.OwnerYardName != "" {
 		return "", spec, errors.New("--yard is valid only with remote add")
 	}
-	if action == domain.RemoteAdd && !domain.SafeSSHTarget(spec.Destination) {
-		return "", spec, fmt.Errorf("invalid ssh destination %q", spec.Destination)
+	if action == domain.RemoteAdd && !domain.SafeSSHTarget(spec.OwnerEndpoint) {
+		return "", spec, fmt.Errorf("invalid ssh destination %q", spec.OwnerEndpoint)
 	}
 	return action, spec, nil
 }

@@ -159,7 +159,7 @@ func (runtime *Runtime) storePeer(
 	incoming := domain.CredentialPeer{
 		SchemaVersion: credentialSchema, Name: name, ActorID: identity.ActorID,
 		AgeRecipient: identity.AgeRecipient, SigningPublic: identity.SigningPublic,
-		Transport: transport, Dest: destination, RemoteYard: remoteYard,
+		Transport: transport, Dest: destination, OwnerYardName: remoteYard,
 		ManualOnly: manualOnly, Trusted: true,
 	}
 	merged, err := credential.MergePeer(incoming, existing)
@@ -222,7 +222,7 @@ func peerRole(peer domain.CredentialPeer) (string, error) {
 func peerAssignment(peer domain.CredentialPeer) (string, error) {
 	contextName := peer.Name
 	if peer.Transport == "ssh" {
-		contextName = firstNonEmpty(peer.RemoteYard, "default")
+		contextName = firstNonEmpty(peer.OwnerYardName, "default")
 	} else if peer.Transport != "local" {
 		return "", errors.New("passive peer has no assignment route")
 	}
@@ -254,12 +254,12 @@ func (runtime *Runtime) callTarget(
 		)
 	case "ssh":
 		if !domain.SafeSSHTarget(target.Destination) ||
-			target.RemoteYard != "" && !domain.SafeName(target.RemoteYard) {
+			target.OwnerYardName != "" && !domain.SafeName(target.OwnerYardName) {
 			return nil, errors.New("invalid SSH credential target")
 		}
 		remote := []string{"yard"}
-		if target.RemoteYard != "" {
-			remote = append(remote, "-Y", target.RemoteYard)
+		if target.OwnerYardName != "" {
+			remote = append(remote, "-Y", target.OwnerYardName)
 		}
 		remote = append(remote, arguments...)
 		command := shellquote.Command(remote)
@@ -289,7 +289,7 @@ func (runtime *Runtime) callPeer(
 		return nil, fmt.Errorf("peer %q has no reverse transport; sync it from its controller", peer.Name)
 	}
 	target := Target{
-		Name: peer.Name, Transport: peer.Transport, Destination: peer.Dest, RemoteYard: peer.RemoteYard,
+		Name: peer.Name, Transport: peer.Transport, Destination: peer.Dest, OwnerYardName: peer.OwnerYardName,
 	}
 	return runtime.callTarget(ctx, target, arguments, stdin)
 }
@@ -305,7 +305,7 @@ func (runtime *Runtime) callPeerContext(
 	}
 	target := Target{Name: contextName, Transport: peer.Transport, Destination: peer.Dest}
 	if peer.Transport == "ssh" && contextName != "default" {
-		target.RemoteYard = contextName
+		target.OwnerYardName = contextName
 	}
 	return runtime.callTarget(ctx, target, arguments, nil)
 }

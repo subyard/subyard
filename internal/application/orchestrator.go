@@ -280,7 +280,7 @@ func Route(yard domain.Context, policy domain.RemotePolicy) (domain.ExecutionTar
 	if policy != domain.RemoteOnController && policy != domain.RemoteOnOwner && policy != domain.RemoteDenied {
 		return "", errors.New("invalid remote command policy")
 	}
-	if yard.YardType != domain.YardRemote {
+	if yard.AccessKind != domain.AccessRemote {
 		return domain.TargetLocalOwner, nil
 	}
 	switch policy {

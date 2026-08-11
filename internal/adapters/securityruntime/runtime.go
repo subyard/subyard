@@ -171,7 +171,7 @@ func (runtime Runtime) liveState(ctx context.Context) (ports.ReconcileState, boo
 	pool := environmentDefault(runtime.Environment, "SRV_POOL", "default")
 	volume := environmentDefault(runtime.Environment, "SRV_VOLUME", "yard-srv")
 	state, err := runtime.Incus.ReconcileState(ctx, runtime.Yard.IncusProject,
-		runtime.Yard.InstanceName, pool, volume, runtime.Yard.IncusBridge)
+		runtime.Yard.YardInstanceName, pool, volume, runtime.Yard.IncusBridge)
 	if err != nil {
 		return ports.ReconcileState{}, false, fmt.Errorf("inspect live Incus policy: %w", err)
 	}
@@ -203,15 +203,15 @@ func (runtime Runtime) liveFindings(state ports.ReconcileState, requireLive bool
 		if requireLive {
 			result = append(result, finding{"fail",
 				fmt.Sprintf("instance %q is missing from project %q",
-					runtime.Yard.InstanceName, runtime.Yard.IncusProject)})
+					runtime.Yard.YardInstanceName, runtime.Yard.IncusProject)})
 		}
 		return append(result, finding{"warn",
-			fmt.Sprintf("instance %q is absent; project policy checked only", runtime.Yard.InstanceName)})
+			fmt.Sprintf("instance %q is absent; project policy checked only", runtime.Yard.YardInstanceName)})
 	}
 	instance := state.Instance
 	if instance.Config["security.privileged"] == "true" {
 		result = append(result, finding{"fail",
-			fmt.Sprintf("instance %q is privileged", runtime.Yard.InstanceName)})
+			fmt.Sprintf("instance %q is privileged", runtime.Yard.YardInstanceName)})
 	}
 	for name, device := range instance.Devices {
 		deviceType := device["type"]

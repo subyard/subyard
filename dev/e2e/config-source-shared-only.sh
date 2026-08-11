@@ -60,7 +60,7 @@ git -C "$bare" symbolic-ref HEAD refs/heads/main
 git -C "$seed" init -q -b main
 printf '%s\n' '{"schemaVersion":1}' >"$seed/subyard-config.json"
 install -d -m 0700 "$seed/shared"
-printf '%s\n' 'BASE_IMAGE=images:debian/13' >"$seed/shared/config.env"
+printf '%s\n' 'YARD_IMAGE=images:debian/13' >"$seed/shared/config.env"
 git -C "$seed" add subyard-config.json shared/config.env
 git -C "$seed" \
   -c user.name='Subyard E2E' -c user.email='e2e@invalid' \
@@ -159,7 +159,7 @@ if grep -Fq 'images:debian/13' "$connect_output"; then
 fi
 [ "$(cat "$config_home/host-id")" = e2e-shared-only ] ||
   fail "source connect did not persist local HostID"
-[ "$(cat "$config_home/overrides/shared/config.env")" = 'BASE_IMAGE=images:debian/13' ] ||
+[ "$(cat "$config_home/overrides/shared/config.env")" = 'YARD_IMAGE=images:debian/13' ] ||
   fail "source connect did not apply shared settings"
 [ ! -e "$checkout/hosts" ] || fail "source connect created a host entry in Git"
 [ -z "$(git -C "$checkout" status --porcelain=v1 --untracked-files=all)" ] ||
@@ -168,7 +168,7 @@ fi
   fail "registered source path is not authoritative"
 
 show_output="$test_root/show-shared.out"
-run_yard config show BASE_IMAGE >"$show_output"
+run_yard config show YARD_IMAGE >"$show_output"
 grep -Fq 'effective: images:debian/13' "$show_output" ||
   fail "shared setting is not effective"
 grep -Fq "$config_home/overrides/shared/config.env:1" "$show_output" ||
@@ -180,7 +180,7 @@ grep -Fq 'already converged' "$test_root/sync-converged.out" ||
 
 initial_checkout_commit="$(git -C "$checkout" rev-parse HEAD)"
 install -d -m 0700 "$seed/hosts/e2e-shared-only"
-printf '%s\n' 'BASE_IMAGE=images:ubuntu/24.04' \
+printf '%s\n' 'YARD_IMAGE=images:ubuntu/24.04' \
   >"$seed/hosts/e2e-shared-only/config.env"
 git -C "$seed" add hosts/e2e-shared-only/config.env
 git -C "$seed" \
@@ -203,7 +203,7 @@ grep -Fq 'changes required' "$host_check" ||
 grep -Fq 'config.env' "$host_check" ||
   fail "host overlay --check omitted its exact managed path"
 printf 'y\n' | run_yard config sync --adopt >"$test_root/sync-host.out" 2>&1
-run_yard config show BASE_IMAGE >"$test_root/show-host.out"
+run_yard config show YARD_IMAGE >"$test_root/show-host.out"
 grep -Fq 'effective: images:ubuntu/24.04' "$test_root/show-host.out" ||
   fail "selected host overlay did not override shared settings"
 grep -Fq "$config_home/config.env:1" "$test_root/show-host.out" ||
@@ -236,7 +236,7 @@ printf 'y\n' | run_yard config sync >"$test_root/sync-remove.out" 2>&1
   fail "previously managed host settings survived source removal"
 [ "$(cat "$config_home/local-only.keep")" = 'local sentinel' ] ||
   fail "sync removed unmanaged local data"
-run_yard config show BASE_IMAGE >"$test_root/show-restored-shared.out"
+run_yard config show YARD_IMAGE >"$test_root/show-restored-shared.out"
 grep -Fq 'effective: images:debian/13' "$test_root/show-restored-shared.out" ||
   fail "host overlay removal did not restore shared precedence"
 run_yard config sync --check >"$test_root/check-final.out"

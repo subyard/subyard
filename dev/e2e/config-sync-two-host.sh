@@ -127,7 +127,7 @@ case "$MODE" in
     "$yard" config sync connect \
       "file://$REMOTE_ROOT/remote.git" --host-id host-a \
       --checkout "$STATE/host-a/checkout" --init --yes
-    "$yard" config set BASE_IMAGE images:debian/12 --scope shared --yes
+    "$yard" config set YARD_IMAGE images:debian/12 --scope shared --yes
     "$yard" config sync push -m "Host A shared setting" --yes
     "$yard" config sync status --offline
     printf 'ok: host A initialized and pushed shared configuration\n'
@@ -142,10 +142,10 @@ case "$MODE" in
     wait_remote "$remote"
     "$yard" config sync connect "$remote" --host-id host-b \
       --checkout "$STATE/host-b/checkout" --yes
-    show_output="$("$yard" config show BASE_IMAGE)"
+    show_output="$("$yard" config show YARD_IMAGE)"
     grep -Fq 'effective: images:debian/12' <<<"$show_output" \
       || fail "host B did not import host A's shared setting"
-    "$yard" config set BASE_IMAGE images:debian/13 --scope shared --yes
+    "$yard" config set YARD_IMAGE images:debian/13 --scope shared --yes
     "$yard" config sync push -m "Host B shared setting" --yes
     "$yard" config sync status --offline
     printf 'ok: host B imported host A and pushed the reverse change\n'
@@ -162,7 +162,7 @@ case "$MODE" in
     grep -Fq 'relation: behind 1' "$status_output" \
       || fail "host A did not report the reverse remote change"
     "$yard" config sync pull --apply --yes
-    show_output="$("$yard" config show BASE_IMAGE)"
+    show_output="$("$yard" config show YARD_IMAGE)"
     grep -Fq 'effective: images:debian/13' <<<"$show_output" \
       || fail "host A did not import host B's shared setting"
     "$yard" config sync status --offline

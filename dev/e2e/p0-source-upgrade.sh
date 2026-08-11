@@ -261,9 +261,9 @@ prepare_operator() {
   # ten-minute init budget for that contract instead of downloading unrelated
   # agent CLIs from the network.
   operator_env bash -c 'printf "%s" "$2" > "$1"' _ "$SOURCE_ROOT/private/config.env" \
-    $'DEV_SUDO=1\nAGENTS=codex\nAGENT_codex_RULES="$SUBYARD_CONFIG_DIR/../private/agents/codex/repo.rules"\n'
+    $'DEV_SUDO=1\nCODING_TOOL_INTEGRATIONS=codex\nAGENT_codex_RULES="$SUBYARD_CONFIG_DIR/../private/agents/codex/repo.rules"\n'
   operator_env bash -c \
-    'printf "YARD_TEMPLATE=e2e-vms\nSSH_PORT=2223\nDEV_UID=1001\nBASE_IMAGE=%s\nBASE_IMAGE_FALLBACK=%s\n" "$2" "$2" > "$1"' \
+    'printf "YARD_TEMPLATE=e2e-vms\nSSH_PORT=2223\nDEV_UID=1001\nYARD_IMAGE=%s\nYARD_IMAGE_FALLBACK=%s\n" "$2" "$2" > "$1"' \
     _ "$SOURCE_ROOT/private/yards/e2e-yard.env" "$BASE_IMAGE"
   operator_env bash -c 'printf "source-upgrade-fixture\n" > "$1"' _ \
     "$SOURCE_ROOT/private/agents/codex/repo.rules"

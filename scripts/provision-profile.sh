@@ -32,7 +32,7 @@ while IFS= read -r name; do
   [ -z "$name" ] || env_args+=(--env "$name=${!name-}")
 done < <(grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' "$config" | sed 's/=$//' | sort -u)
 set +e
-tar -C "$bundle" -cf - . | incus exec "${INSTANCE_NAME:?}" --project "${INCUS_PROJECT:?}" \
+tar -C "$bundle" -cf - . | incus exec "${YARD_INSTANCE_NAME:?}" --project "${INCUS_PROJECT:?}" \
   "${env_args[@]}" -- bash -euo pipefail -c '
     profile_dir="$(mktemp -d /tmp/subyard-profile.XXXXXX)"
     trap '\''rm -rf -- "$profile_dir"'\'' EXIT

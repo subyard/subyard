@@ -39,7 +39,7 @@ cat > "$tmp/bin/yard" <<'YARD'
 set -euo pipefail
 setting="${*: -1}"
 case "$setting" in
-  INSTANCE_NAME) value=yard-hermes ;;
+  YARD_INSTANCE_NAME) value=yard-hermes ;;
   INCUS_PROJECT) value=subyard-hermes ;;
   *) exit 90 ;;
 esac

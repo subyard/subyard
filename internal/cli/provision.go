@@ -84,8 +84,8 @@ func (cli *CLI) prepareProvisionExecution(
 	switch {
 	case want != "":
 		selected = append(selected, want)
-	case loaded.Environment["YARD_PROFILES"] != "":
-		selected = append(selected, strings.Fields(loaded.Environment["YARD_PROFILES"])...)
+	case loaded.Environment["ENVIRONMENT_PROFILES"] != "":
+		selected = append(selected, strings.Fields(loaded.Environment["ENVIRONMENT_PROFILES"])...)
 		selected = append(selected, strings.Fields(projectProfiles)...)
 	case projectProfiles != "":
 		selected = append(selected, strings.Fields(projectProfiles)...)
@@ -156,7 +156,7 @@ func (execution *provisionExecution) policy(
 	return domain.CommandPolicy{
 		Name: definition.Name, Effect: domain.CommandEffect(definition.Effect),
 		RemotePolicy: domain.RemotePolicy(definition.Remote), Consequences: []string{
-			fmt.Sprintf("provision profiles [%s] in %s", strings.Join(profiles, ", "), yard.InstanceName),
+			fmt.Sprintf("provision profiles [%s] in %s", strings.Join(profiles, ", "), yard.YardInstanceName),
 			"temporarily start the yard if required and restore its desired power",
 		},
 	}
@@ -193,7 +193,7 @@ func (cli *CLI) observeProvisionExecution(
 	}
 	incusPort, _ := cli.statusPorts()
 	instance, err := incusPort.Instance(
-		ctx, loaded.Context.IncusProject, loaded.Context.InstanceName,
+		ctx, loaded.Context.IncusProject, loaded.Context.YardInstanceName,
 	)
 	if err != nil {
 		return err
@@ -263,7 +263,7 @@ func (cli *CLI) executeProvision(
 		}, nil
 	}
 	incusPort, _ := cli.statusPorts()
-	instance, err := incusPort.Instance(ctx, loaded.Context.IncusProject, loaded.Context.InstanceName)
+	instance, err := incusPort.Instance(ctx, loaded.Context.IncusProject, loaded.Context.YardInstanceName)
 	if err != nil {
 		return domain.AdapterResult{}, err
 	}

@@ -15,7 +15,7 @@ setup_test_context() { # <temp-root> [incus-project] [instance-name]
   export STORAGE_PATH="$SUBYARD_HOME/incus/storage"
   export HOST_BASE="$root/host-data"
   export RESTRICTED_DISK_PATHS="$HOST_BASE"
-  export INSTANCE_TYPE=container
+  export YARD_KIND=container
   export SHIFT_MODE=shift
   export FORWARD_SSH_AGENT=0
   export DEV_SUDO=0
@@ -29,8 +29,8 @@ setup_test_context() { # <temp-root> [incus-project] [instance-name]
   export E2E_VM_BOOT_TIMEOUT=300
   export INCUS_PROJECT="${2:-subyard}"
   export INCUS_BRIDGE=incusbr0
-  export INSTANCE_NAME="${3:-yard}"
-  export YARD_TYPE=local
+  export YARD_INSTANCE_NAME="${3:-yard}"
+  export ACCESS_KIND=local
   export SSH_HOST=yard
   export DEV_USER=dev
   export SSH_PORT=2222

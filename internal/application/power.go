@@ -35,7 +35,7 @@ func (service PowerService) Converged(
 	if service.Instances == nil {
 		return false, errors.New("Incus instance reader is required")
 	}
-	instance, err := service.Instances.Instance(ctx, yard.IncusProject, yard.InstanceName)
+	instance, err := service.Instances.Instance(ctx, yard.IncusProject, yard.YardInstanceName)
 	if err != nil {
 		return false, err
 	}
@@ -49,7 +49,7 @@ func (service PowerService) Ensure(
 	if service.Instances == nil || service.Config == nil {
 		return PowerIntent{}, errors.New("Incus instance reader and config writer are required")
 	}
-	instance, err := service.Instances.Instance(ctx, yard.IncusProject, yard.InstanceName)
+	instance, err := service.Instances.Instance(ctx, yard.IncusProject, yard.YardInstanceName)
 	if err != nil {
 		return PowerIntent{}, err
 	}
@@ -58,7 +58,7 @@ func (service PowerService) Ensure(
 		return PowerIntent{}, err
 	}
 	if err := service.Config.SetInstanceConfig(
-		ctx, yard.IncusProject, yard.InstanceName, values,
+		ctx, yard.IncusProject, yard.YardInstanceName, values,
 	); err != nil {
 		return PowerIntent{}, err
 	}
@@ -72,7 +72,7 @@ func (service PowerService) Intent(
 	if service.Instances == nil {
 		return PowerIntent{}, errors.New("Incus instance reader is required")
 	}
-	instance, err := service.Instances.Instance(ctx, yard.IncusProject, yard.InstanceName)
+	instance, err := service.Instances.Instance(ctx, yard.IncusProject, yard.YardInstanceName)
 	if err != nil {
 		return PowerIntent{}, err
 	}
@@ -82,7 +82,7 @@ func (service PowerService) Intent(
 	}
 	if !converged {
 		return PowerIntent{}, fmt.Errorf("%w: %s/%s", ErrPowerUnmanaged,
-			yard.IncusProject, yard.InstanceName)
+			yard.IncusProject, yard.YardInstanceName)
 	}
 	desired, _ := instance.EffectiveConfig("user.subyard.desired_power")
 	return PowerIntent{Desired: desired}, nil
@@ -108,7 +108,7 @@ func (service PowerService) Set(
 		return fmt.Errorf("invalid desired power %q", desired)
 	}
 	name, bridge := powerIdentity(yard)
-	return service.Config.SetInstanceConfig(ctx, yard.IncusProject, yard.InstanceName, map[string]string{
+	return service.Config.SetInstanceConfig(ctx, yard.IncusProject, yard.YardInstanceName, map[string]string{
 		"boot.autostart":             "false",
 		"user.subyard.managed":       "true",
 		"user.subyard.name":          name,
@@ -174,17 +174,17 @@ func powerMetadataConverged(instance ports.InstanceInfo, yard domain.Context) (b
 	}
 	if managed != "true" {
 		return false, fmt.Errorf("%s/%s has invalid managed power metadata %q",
-			yard.IncusProject, yard.InstanceName, managed)
+			yard.IncusProject, yard.YardInstanceName, managed)
 	}
 	desired, _ := instance.EffectiveConfig("user.subyard.desired_power")
 	if desired != PowerRunning && desired != PowerStopped {
 		return false, fmt.Errorf("%s/%s has invalid desired power %q",
-			yard.IncusProject, yard.InstanceName, desired)
+			yard.IncusProject, yard.YardInstanceName, desired)
 	}
 	initialized, _ := instance.EffectiveConfig("user.subyard.initialized")
 	if initialized != "true" && initialized != "false" {
 		return false, fmt.Errorf("%s/%s has invalid initialized power metadata %q",
-			yard.IncusProject, yard.InstanceName, initialized)
+			yard.IncusProject, yard.YardInstanceName, initialized)
 	}
 	name, bridge := powerIdentity(yard)
 	metadataName, _ := instance.EffectiveConfig("user.subyard.name")
@@ -211,7 +211,7 @@ func powerMetadataUpdate(
 	}
 	if managed != "" {
 		return nil, PowerIntent{}, fmt.Errorf("%s/%s has invalid managed power metadata %q",
-			yard.IncusProject, yard.InstanceName, managed)
+			yard.IncusProject, yard.YardInstanceName, managed)
 	}
 	desired := ""
 	switch strings.ToLower(instance.Status) {
@@ -221,7 +221,7 @@ func powerMetadataUpdate(
 		desired = PowerStopped
 	default:
 		return nil, PowerIntent{}, fmt.Errorf("cannot import %s/%s power state from %q",
-			yard.IncusProject, yard.InstanceName, instance.Status)
+			yard.IncusProject, yard.YardInstanceName, instance.Status)
 	}
 	values["user.subyard.managed"] = "true"
 	values["user.subyard.desired_power"] = desired

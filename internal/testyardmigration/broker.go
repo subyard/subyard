@@ -258,7 +258,7 @@ func inspectBrokerRuntime(
 		state:    BrokerRuntimeInactive,
 		yard:     backendYard,
 		project:  loaded.Context.IncusProject,
-		instance: loaded.Context.InstanceName,
+		instance: loaded.Context.YardInstanceName,
 	}
 	if backendYard != yard {
 		result.project = "subyard-" + backendYard

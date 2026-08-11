@@ -19,29 +19,29 @@ func TestLookupAndListReadRegistryAndCache(t *testing.T) {
 	runtime := remoteFixture(t)
 	contextPath := filepath.Join(runtime.ConfigHome, "yards", "demo", "config.env")
 	writeRemoteFile(t, contextPath, strings.Join([]string{
-		"YARD_TYPE=remote",
-		"REMOTE_DEST=owner.example",
-		"REMOTE_YARD=inner",
+		"ACCESS_KIND=remote",
+		"OWNER_ENDPOINT=owner.example",
+		"OWNER_YARD_NAME=inner",
 		"REMOTE_SSH_PORT=2233",
 		"",
 	}, "\n"), 0o600)
 	writeRemoteFile(t, filepath.Join(runtime.ConfigHome, "yards", "local", "config.env"),
-		"YARD_TYPE=local\nSSH_PORT=2244\n", 0o600)
+		"ACCESS_KIND=local\nSSH_PORT=2244\n", 0o600)
 	writeRemoteFile(t, runtime.cachePath("demo"),
 		"100\n{\"state\":\"RUNNING\",\"sshPort\":2233}\n", 0o600)
 
 	record, exists, err := runtime.Lookup(context.Background(), "demo")
 	if err != nil || !exists || !record.Remote || record.Path != contextPath ||
-		record.Spec.Destination != "owner.example" || record.Spec.OwnerYard != "inner" ||
+		record.Spec.OwnerEndpoint != "owner.example" || record.Spec.OwnerYardName != "inner" ||
 		record.SSHPort != 2233 || !record.LastProbe.Equal(time.Unix(100, 0)) {
 		t.Fatalf("unexpected lookup: record=%#v exists=%v err=%v", record, exists, err)
 	}
 	records, err := runtime.List(context.Background())
-	if err != nil || len(records) != 1 || records[0].Spec.Name != "demo" {
+	if err != nil || len(records) != 1 || records[0].Spec.LegacyAlias != "demo" {
 		t.Fatalf("unexpected remote list: %#v err=%v", records, err)
 	}
 	defaultRecord, exists, err := runtime.Lookup(context.Background(), "default")
-	if err != nil || !exists || defaultRecord.Spec.Name != "default" {
+	if err != nil || !exists || defaultRecord.Spec.LegacyAlias != "default" {
 		t.Fatalf("default lookup failed: %#v exists=%v err=%v", defaultRecord, exists, err)
 	}
 }
@@ -76,7 +76,7 @@ func TestApplyAddWritesIsolatedContextAndVerifiesPinnedKey(t *testing.T) {
 	prepared := domain.RemotePrepared{
 		Action: domain.RemoteAdd,
 		Spec: domain.RemoteSpec{
-			Name: "demo", Destination: "owner.example", OwnerYard: "inner",
+			LegacyAlias: "demo", OwnerEndpoint: "owner.example", OwnerYardName: "inner",
 		},
 		Owner: domain.RemoteInfo{
 			State: "RUNNING", SSHPort: 2233, DevUser: "dev", Projects: &projects,
@@ -97,9 +97,9 @@ func TestApplyAddWritesIsolatedContextAndVerifiesPinnedKey(t *testing.T) {
 		t.Fatalf("owner call did not use the login-shell contract: %#v", calls)
 	}
 	assertRemoteFileContains(t, filepath.Join(runtime.ConfigHome, "yards", "demo", "config.env"),
-		"REMOTE_DEST=owner.example")
+		"OWNER_ENDPOINT=owner.example")
 	assertRemoteFileContains(t, filepath.Join(runtime.ConfigHome, "yards", "demo", "config.env"),
-		"REMOTE_YARD=inner")
+		"OWNER_YARD_NAME=inner")
 	assertRemoteFileContains(t, runtime.snippetPath("demo"), "HostKeyAlias subyard-remote-demo")
 	assertRemoteFileContains(t, runtime.sshConfigPath(), "Include subyard-demo.config")
 	assertRemoteFileContains(t, runtime.knownHostsPath(), "local.example ")
@@ -111,7 +111,7 @@ func TestApplyAddWritesIsolatedContextAndVerifiesPinnedKey(t *testing.T) {
 
 func TestApplyAddRollsBackEveryLocalFileOnProbeFailure(t *testing.T) {
 	runtime := remoteFixture(t)
-	spec := domain.RemoteSpec{Name: "demo", Destination: "owner.example"}
+	spec := domain.RemoteSpec{LegacyAlias: "demo", OwnerEndpoint: "owner.example"}
 	envPath := filepath.Join(runtime.ConfigHome, "yards", "demo", "config.env")
 	existing := domain.RemoteRecord{Spec: spec, Remote: true, Path: envPath, SSHPort: 2222}
 	paths := []string{
@@ -157,7 +157,7 @@ func TestApplyAddRollsBackEveryLocalFileOnProbeFailure(t *testing.T) {
 
 func TestApplyRemoveDeletesOnlyTheSelectedRemote(t *testing.T) {
 	runtime := remoteFixture(t)
-	spec := domain.RemoteSpec{Name: "demo", Destination: "owner.example"}
+	spec := domain.RemoteSpec{LegacyAlias: "demo", OwnerEndpoint: "owner.example"}
 	envPath := filepath.Join(runtime.ConfigHome, "yards", "demo", "config.env")
 	existing := domain.RemoteRecord{Spec: spec, Remote: true, Path: envPath, SSHPort: 2222}
 	writeRemoteFile(t, envPath, string(renderContext(domain.RemotePrepared{
@@ -221,20 +221,20 @@ func TestTransactionalRestoresExistingFilesAndRemovesNewFiles(t *testing.T) {
 
 func TestRenderAndKeyHelpersPreserveUserState(t *testing.T) {
 	prepared := domain.RemotePrepared{
-		Spec:  domain.RemoteSpec{Name: "demo", Destination: "owner", OwnerYard: "inner"},
+		Spec:  domain.RemoteSpec{LegacyAlias: "demo", OwnerEndpoint: "owner", OwnerYardName: "inner"},
 		Owner: domain.RemoteInfo{SSHPort: 2233, DevUser: "dev"},
 	}
-	current := []byte("YARD_TYPE=remote\nREMOTE_DEST=old\nFORWARD_SSH_AGENT=1\nCUSTOM=value\n")
+	current := []byte("ACCESS_KIND=remote\nREMOTE_DEST=old\nFORWARD_SSH_AGENT=1\nCUSTOM=value\n")
 	rendered := string(renderContext(prepared, current))
 	for _, expected := range []string{
-		"REMOTE_DEST=owner", "REMOTE_YARD=inner", "REMOTE_SSH_PORT=2233",
+		"OWNER_ENDPOINT=owner", "OWNER_YARD_NAME=inner", "REMOTE_SSH_PORT=2233",
 		"FORWARD_SSH_AGENT=0", "FORWARD_SSH_AGENT=1", "CUSTOM=value",
 	} {
 		if !strings.Contains(rendered, expected) {
 			t.Fatalf("rendered context omitted %q:\n%s", expected, rendered)
 		}
 	}
-	if strings.Count(rendered, "CUSTOM=value") != 1 || strings.Contains(rendered, "REMOTE_DEST=old") {
+	if strings.Count(rendered, "CUSTOM=value") != 1 || strings.Contains(rendered, "OWNER_ENDPOINT=old") {
 		t.Fatalf("rendered context did not separate managed state from overrides:\n%s", rendered)
 	}
 

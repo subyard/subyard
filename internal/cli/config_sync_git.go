@@ -173,7 +173,7 @@ func (cli *CLI) runConfigSyncStatus(
 	loaded config.Loaded,
 	arguments []string,
 ) int {
-	if loaded.Context.YardType == domain.YardRemote {
+	if loaded.Context.AccessKind == domain.AccessRemote {
 		forwarded := append([]string{"sync", "status"}, arguments...)
 		return cli.forwardRemote(ctx, loaded.Context, "config", forwarded)
 	}

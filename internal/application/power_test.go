@@ -24,7 +24,7 @@ func validPowerMetadata() map[string]string {
 
 func TestPowerMetadataConvergencePhaseMatrix(t *testing.T) {
 	yard := domain.Context{
-		YardName: "default", IncusProject: "subyard", InstanceName: "yard", IncusBridge: "incusbr0",
+		YardName: "default", IncusProject: "subyard", YardInstanceName: "yard", IncusBridge: "incusbr0",
 	}
 	tests := []struct {
 		name    string
@@ -88,7 +88,7 @@ func TestPowerServiceImportTreatsMissingAndEmptyManagedAsUnmanaged(t *testing.T)
 			}}
 			service := PowerService{Instances: incus, Config: incus}
 			intent, err := service.Ensure(context.Background(), domain.Context{
-				YardName: "default", IncusProject: "subyard", InstanceName: "yard",
+				YardName: "default", IncusProject: "subyard", YardInstanceName: "yard",
 			})
 			if err != nil || !intent.Imported || intent.Desired != PowerStopped {
 				t.Fatalf("intent=%#v error=%v", intent, err)
@@ -112,7 +112,7 @@ func TestPowerServiceWriterShapesUseEffectiveConfigAndPreserveUnownedKeys(t *tes
 		},
 	}}
 	yard := domain.Context{
-		YardName: "default", IncusProject: "subyard", InstanceName: "yard", IncusBridge: "incusbr0",
+		YardName: "default", IncusProject: "subyard", YardInstanceName: "yard", IncusBridge: "incusbr0",
 	}
 	service := PowerService{Instances: incus, Config: incus}
 	intent, err := service.Ensure(context.Background(), yard)
@@ -152,7 +152,7 @@ func TestPowerServiceImportsAndCommitsAtomically(t *testing.T) {
 		"subyard/yard": {Name: "yard", Project: "subyard", Status: "Stopped"},
 	}}
 	yard := domain.Context{
-		YardName: "default", IncusProject: "subyard", InstanceName: "yard", IncusBridge: "incusbr0",
+		YardName: "default", IncusProject: "subyard", YardInstanceName: "yard", IncusBridge: "incusbr0",
 	}
 	service := PowerService{Instances: incus, Config: incus}
 	intent, err := service.Ensure(context.Background(), yard)
@@ -180,7 +180,7 @@ func TestInitialPowerAndInitFence(t *testing.T) {
 		"subyard-build/yard-build": {Name: "yard-build", Project: "subyard-build", Status: "Running"},
 	}}
 	yard := domain.Context{
-		YardName: "build", IncusProject: "subyard-build", InstanceName: "yard-build",
+		YardName: "build", IncusProject: "subyard-build", YardInstanceName: "yard-build",
 	}
 	service := PowerService{Instances: incus, Config: incus}
 	if err := service.Set(context.Background(), yard, PowerStopped, false); err != nil {
@@ -194,7 +194,7 @@ func TestInitialPowerAndInitFence(t *testing.T) {
 }
 
 func TestLifecycleRunnerCommitsOnlyAfterPhysicalSuccess(t *testing.T) {
-	yard := domain.Context{YardName: "default", IncusProject: "subyard", InstanceName: "yard"}
+	yard := domain.Context{YardName: "default", IncusProject: "subyard", YardInstanceName: "yard"}
 	newIncus := func() *testkit.Incus {
 		return &testkit.Incus{Instances: map[string]ports.InstanceInfo{"subyard/yard": {
 			Name: "yard", Project: "subyard", Status: "Stopped", Config: map[string]string{

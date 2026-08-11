@@ -23,7 +23,7 @@ type ServerInfo struct {
 type InstanceInfo struct {
 	Name         string                       `json:"name"`
 	Project      string                       `json:"project"`
-	Type         domain.InstanceType          `json:"type"`
+	Type         domain.YardKind              `json:"type"`
 	Status       string                       `json:"status"`
 	Config       map[string]string            `json:"config"`
 	Devices      map[string]map[string]string `json:"devices"`

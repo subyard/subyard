@@ -175,7 +175,7 @@ func (check HostCheck) evaluate(facts HostFacts, options CheckOptions) []finding
 
 	var duplicates []string
 	for _, yard := range check.Yards {
-		if yard.YardType == domain.YardRemote || yard.YardName == check.Yard.YardName {
+		if yard.AccessKind == domain.AccessRemote || yard.YardName == check.Yard.YardName {
 			continue
 		}
 		if yard.SSHPort == check.Yard.SSHPort {

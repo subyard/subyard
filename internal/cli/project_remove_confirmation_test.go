@@ -497,7 +497,7 @@ func TestCanonicalOwnerProjectRemovalDeclinePreservesRoutingMetadata(t *testing.
 	prompt := &testkit.Prompt{Answers: []bool{false}}
 	control := &projectRemovalRemoteControl{records: []domain.RemoteRecord{{
 		Spec: domain.RemoteSpec{
-			Name: "legacy-route", Destination: connection.Destination, OwnerYard: "default",
+			LegacyAlias: "legacy-route", OwnerEndpoint: connection.Destination, OwnerYardName: "default",
 		},
 		Remote: true,
 	}}}

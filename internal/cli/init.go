@@ -154,14 +154,14 @@ func (cli *CLI) loadInitContext(
 		if err != nil {
 			return config.Loaded{}, nil, err
 		}
-		if existing.Context.YardType != domain.YardLocal {
+		if existing.Context.AccessKind != domain.AccessLocal {
 			return config.Loaded{}, nil, errors.New("--profile is only supported for local yards")
 		}
 		preset, err := cli.resolveContextWithYardSettings(yard, source)
 		if err != nil {
 			return config.Loaded{}, nil, err
 		}
-		if preset.Context.YardType != domain.YardLocal {
+		if preset.Context.AccessKind != domain.AccessLocal {
 			return config.Loaded{}, nil, errors.New("--profile is only supported for local yards")
 		}
 		if name := firstInitProfileConflict(existing, existingPath, preset, source); name != "" {
@@ -185,7 +185,7 @@ func (cli *CLI) loadInitContext(
 	if err != nil {
 		return config.Loaded{}, nil, err
 	}
-	if loaded.Context.YardType != domain.YardLocal {
+	if loaded.Context.AccessKind != domain.AccessLocal {
 		return config.Loaded{}, nil, errors.New("--profile is only supported for local yards")
 	}
 	if name := firstInitProfileOverride(loaded, loaded, source); name != "" {
@@ -302,7 +302,7 @@ func (cli *CLI) powerYardContexts(current config.Loaded) ([]domain.Context, erro
 		if err != nil {
 			return nil, fmt.Errorf("load power context %q: %w", name, err)
 		}
-		if loaded.Context.YardType != domain.YardRemote {
+		if loaded.Context.AccessKind != domain.AccessRemote {
 			result = append(result, loaded.Context)
 		}
 	}

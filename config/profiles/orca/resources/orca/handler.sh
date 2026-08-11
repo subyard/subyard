@@ -56,12 +56,12 @@ cleanup() {
 trap cleanup EXIT
 
 device_exists() {
-  incus config device list "$INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null |
+  incus config device list "$YARD_INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null |
     grep -qx "$ORCA_DEVICE"
 }
 
 device_value() {
-  incus config device get "$INSTANCE_NAME" "$ORCA_DEVICE" "$1" "${PROJ[@]}" 2>/dev/null
+  incus config device get "$YARD_INSTANCE_NAME" "$ORCA_DEVICE" "$1" "${PROJ[@]}" 2>/dev/null
 }
 
 release_ready() {
@@ -228,7 +228,7 @@ install_release() {
   release_ready && { ok "Orca $ORCA_VERSION release already verified"; return 0; }
   download_release
   local guest_artifact="/tmp/subyard-orca-$ORCA_VERSION.deb"
-  incus file push "$ORCA_ARTIFACT" "$INSTANCE_NAME$guest_artifact" \
+  incus file push "$ORCA_ARTIFACT" "$YARD_INSTANCE_NAME$guest_artifact" \
     "${PROJ[@]}" --mode 0644 >/dev/null
   yexec env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$guest_artifact" >/dev/null
   yexec rm -f -- "$guest_artifact"
@@ -348,13 +348,13 @@ UMask=0077
 WantedBy=multi-user.target
 UNIT
   chmod 0755 "$ingress" "$capture" "$sync"
-  incus file push "$ingress" "$INSTANCE_NAME$guest_ingress" \
+  incus file push "$ingress" "$YARD_INSTANCE_NAME$guest_ingress" \
     "${PROJ[@]}" --mode 0755 >/dev/null
-  incus file push "$capture" "$INSTANCE_NAME$guest_capture" \
+  incus file push "$capture" "$YARD_INSTANCE_NAME$guest_capture" \
     "${PROJ[@]}" --mode 0755 >/dev/null
-  incus file push "$sync" "$INSTANCE_NAME$guest_sync" \
+  incus file push "$sync" "$YARD_INSTANCE_NAME$guest_sync" \
     "${PROJ[@]}" --mode 0755 >/dev/null
-  incus file push "$unit" "$INSTANCE_NAME$guest_unit" \
+  incus file push "$unit" "$YARD_INSTANCE_NAME$guest_unit" \
     "${PROJ[@]}" --mode 0644 >/dev/null
   if ! yexec cmp -s "$guest_ingress" "$ORCA_INGRESS" ||
     ! yexec cmp -s "$guest_capture" "$ORCA_CAPTURE" ||
@@ -395,7 +395,7 @@ YARD
 
 remove_route() {
   device_exists || return 0
-  incus config device remove "$INSTANCE_NAME" "$ORCA_DEVICE" "${PROJ[@]}" >/dev/null
+  incus config device remove "$YARD_INSTANCE_NAME" "$ORCA_DEVICE" "${PROJ[@]}" >/dev/null
 }
 
 ensure_route() {
@@ -404,7 +404,7 @@ ensure_route() {
     return 0
   fi
   remove_route
-  incus config device add "$INSTANCE_NAME" "$ORCA_DEVICE" proxy "${PROJ[@]}" \
+  incus config device add "$YARD_INSTANCE_NAME" "$ORCA_DEVICE" proxy "${PROJ[@]}" \
     "listen=tcp:$ORCA_OWNER_IP:$ORCA_HOST_PORT" \
     "connect=tcp:127.0.0.1:$ORCA_GUEST_PORT" bind=host >/dev/null
 }
@@ -638,7 +638,7 @@ prepare_resource() { # <public-verb>
 }
 
 cmd_is_up() {
-  incus info "$INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1 || return 1
+  incus info "$YARD_INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1 || return 1
   yexec systemctl is-active --quiet "$ORCA_UNIT" >/dev/null 2>&1
 }
 

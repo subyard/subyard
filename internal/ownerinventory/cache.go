@@ -17,7 +17,8 @@ type Snapshot struct {
 }
 
 type Cache struct {
-	Root string
+	Root   string
+	failIO func(string) error
 }
 
 func (cache Cache) Read(hostID string) (Snapshot, error) {
@@ -45,6 +46,11 @@ func (cache Cache) Read(hostID string) (Snapshot, error) {
 }
 
 func (cache Cache) Write(snapshot Snapshot) error {
+	if cache.failIO != nil {
+		if err := cache.failIO(ownerIOCacheWrite); err != nil {
+			return err
+		}
+	}
 	if err := snapshot.Inventory.Validate(); err != nil {
 		return err
 	}
@@ -80,7 +86,15 @@ func (cache Cache) Write(snapshot Snapshot) error {
 	if err := temporary.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tempPath, path)
+	if err := os.Rename(tempPath, path); err != nil {
+		return err
+	}
+	if cache.failIO != nil {
+		if err := cache.failIO(ownerIODirectorySync); err != nil {
+			return err
+		}
+	}
+	return syncOwnerDirectory(filepath.Dir(path))
 }
 
 func (cache Cache) Invalidate(hostID string) error {

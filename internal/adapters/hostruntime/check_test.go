@@ -54,7 +54,7 @@ func TestHostCheckRejectsListeningPortForFreshStrictInit(t *testing.T) {
 func TestHostCheckIgnoresRemotePortAndWarnsOutsideStrictMode(t *testing.T) {
 	var output bytes.Buffer
 	remote := testYard("remote", 2323)
-	remote.YardType = domain.YardRemote
+	remote.AccessKind = domain.AccessRemote
 	check := HostCheck{
 		Yard: testYard("alpha", 2323),
 		Yards: []domain.Context{
@@ -116,7 +116,7 @@ func TestHostCheckUsesLowerRepairFloorForExistingYard(t *testing.T) {
 
 func testYard(name string, port int) domain.Context {
 	return domain.Context{
-		YardName: name, YardType: domain.YardLocal, SSHPort: port,
+		YardName: name, AccessKind: domain.AccessLocal, SSHPort: port,
 		Paths: domain.RuntimePaths{StoragePath: "/storage"},
 	}
 }

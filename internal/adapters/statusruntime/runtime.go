@@ -113,7 +113,7 @@ func (runtime Runtime) startSpaceRefresh(yard domain.Context, cache string) bool
 	}
 	refresh := exec.Command(
 		"/bin/sh", "-c", spaceRefreshScript, "yard-space-refresh",
-		cache, yard.IncusProject, yard.InstanceName,
+		cache, yard.IncusProject, yard.YardInstanceName,
 	)
 	refresh.Env = environment(runtime.Environment)
 	refresh.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -166,7 +166,7 @@ func (runtime Runtime) RefreshSpace(
 	}
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 
-	result, err := runtime.Executor.Exec(ctx, yard.IncusProject, yard.InstanceName,
+	result, err := runtime.Executor.Exec(ctx, yard.IncusProject, yard.YardInstanceName,
 		ports.InstanceExecRequest{Command: []string{"sh", "-c", spaceMeasureCommand}})
 	if err != nil {
 		return SpaceMeasurement{}, fmt.Errorf("measure in-yard space: %w", err)

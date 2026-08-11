@@ -216,13 +216,13 @@ func (runner ProjectActionRunner) code(ctx context.Context) (string, error) {
 }
 
 func (runner ProjectActionRunner) codeTargetReady(ctx context.Context) error {
-	if runner.Yard.YardType == domain.YardRemote {
+	if runner.Yard.AccessKind == domain.AccessRemote {
 		return runner.execute(ctx, "reach remote yard", ports.InstanceExecRequest{Command: []string{"true"}})
 	}
 	if runner.Instances == nil {
 		return errors.New("Incus reader is required for VS Code")
 	}
-	instance, err := runner.Instances.Instance(ctx, runner.Yard.IncusProject, runner.Yard.InstanceName)
+	instance, err := runner.Instances.Instance(ctx, runner.Yard.IncusProject, runner.Yard.YardInstanceName)
 	if err != nil {
 		return err
 	}
@@ -303,7 +303,7 @@ func (runner ProjectActionRunner) clone(ctx context.Context) error {
 		return executionError("inspect clone workspace", result, err)
 	}
 	create := ports.InstanceExecRequest{Command: []string{"install", "-d", "--", directory}}
-	if runner.Yard.YardType != domain.YardRemote {
+	if runner.Yard.AccessKind != domain.AccessRemote {
 		uid := fmt.Sprint(runner.Yard.DevUID)
 		create.Command = []string{"install", "-d", "-o", uid, "-g", uid, "--", directory}
 	}
@@ -370,7 +370,7 @@ func (runner ProjectActionRunner) sync(ctx context.Context) error {
 	create := ports.InstanceExecRequest{
 		Command: []string{"install", "-d", "--", directory, runner.Project.YardPath},
 	}
-	if runner.Yard.YardType != domain.YardRemote {
+	if runner.Yard.AccessKind != domain.AccessRemote {
 		uid := fmt.Sprint(runner.Yard.DevUID)
 		create.Command = []string{"install", "-d", "-o", uid, "-g", uid, "--",
 			directory, runner.Project.YardPath}
@@ -397,7 +397,7 @@ func (runner ProjectActionRunner) sync(ctx context.Context) error {
 }
 
 func (runner ProjectActionRunner) bind(ctx context.Context) error {
-	if runner.Yard.YardType == domain.YardRemote {
+	if runner.Yard.AccessKind == domain.AccessRemote {
 		return errors.New("bind is host-local; use sync or clone")
 	}
 	if runner.Devices == nil {
@@ -412,14 +412,14 @@ func (runner ProjectActionRunner) bind(ctx context.Context) error {
 	}
 	device := state.WorkspaceDeviceFor(runner.Project)
 	changed, err := runner.Devices.EnsureDiskDevice(ctx, runner.Yard.IncusProject,
-		runner.Yard.InstanceName, device, runner.Project.HostPath, runner.Project.YardPath)
+		runner.Yard.YardInstanceName, device, runner.Project.HostPath, runner.Project.YardPath)
 	if err != nil {
 		return err
 	}
 	if err := runner.writeMetadata(ctx); err != nil {
 		if changed {
 			_, rollbackErr := runner.Devices.RemoveDevice(ctx, runner.Yard.IncusProject,
-				runner.Yard.InstanceName, device)
+				runner.Yard.YardInstanceName, device)
 			return errors.Join(err, rollbackErr)
 		}
 		return err
@@ -440,14 +440,14 @@ func (runner ProjectActionRunner) remove(ctx context.Context) error {
 		}
 	}
 	if runner.Project.Mode == domain.ProjectBind {
-		if runner.Yard.YardType == domain.YardRemote {
+		if runner.Yard.AccessKind == domain.AccessRemote {
 			return errors.New("remote yards cannot own bind projects")
 		}
 		if runner.Devices == nil {
 			return errors.New("Incus device manager is required for bind removal")
 		}
 		_, err := runner.Devices.RemoveDevice(ctx, runner.Yard.IncusProject,
-			runner.Yard.InstanceName, state.WorkspaceDeviceFor(runner.Project))
+			runner.Yard.YardInstanceName, state.WorkspaceDeviceFor(runner.Project))
 		return err
 	}
 	if runner.SoftRemove {

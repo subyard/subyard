@@ -185,12 +185,12 @@ func (cli *CLI) observeProjectAction(
 		}
 		return fmt.Errorf("compare project archive: %w", errors.Join(streamErr, closeErr))
 	case "bind":
-		if execution.Loaded.Context.YardType == domain.YardRemote {
+		if execution.Loaded.Context.AccessKind == domain.AccessRemote {
 			return errors.New("bind is host-local; use sync or clone")
 		}
 		incusPort, _ := cli.statusPorts()
 		instance, err := incusPort.Instance(
-			ctx, execution.Loaded.Context.IncusProject, execution.Loaded.Context.InstanceName,
+			ctx, execution.Loaded.Context.IncusProject, execution.Loaded.Context.YardInstanceName,
 		)
 		if err != nil {
 			return fmt.Errorf("inspect bind device: %w", err)
@@ -373,23 +373,23 @@ func (cli *CLI) prepareProjectRemoval(
 		return err
 	}
 	if execution.Record.Mode == domain.ProjectBind &&
-		execution.Loaded.Context.YardType == domain.YardRemote {
+		execution.Loaded.Context.AccessKind == domain.AccessRemote {
 		return errors.New("remote yards cannot own bind projects")
 	}
 
 	needsRuntime := action == "project.remove-workspace" ||
 		(execution.Record.Target != "" && execution.Record.Target != "yard")
 	needsInstance := needsRuntime || action == "project.bind-detach"
-	if execution.Loaded.Context.YardType != domain.YardRemote && needsInstance {
+	if execution.Loaded.Context.AccessKind != domain.AccessRemote && needsInstance {
 		incusPort, _ := cli.statusPorts()
 		instance, instanceErr := incusPort.Instance(
-			ctx, execution.Loaded.Context.IncusProject, execution.Loaded.Context.InstanceName,
+			ctx, execution.Loaded.Context.IncusProject, execution.Loaded.Context.YardInstanceName,
 		)
 		if instanceErr != nil {
 			return instanceErr
 		}
 		if needsRuntime && !strings.EqualFold(instance.Status, "running") {
-			return fmt.Errorf("yard %q must be running", execution.Loaded.Context.InstanceName)
+			return fmt.Errorf("yard %q must be running", execution.Loaded.Context.YardInstanceName)
 		}
 		if action == "project.bind-detach" {
 			execution.Removal.DeviceChecked = true
@@ -528,7 +528,7 @@ func (cli *CLI) prepareProjectImport(
 	if err != nil {
 		return nil, err
 	}
-	if name == "bind" && loaded.Context.YardType == domain.YardRemote {
+	if name == "bind" && loaded.Context.AccessKind == domain.AccessRemote {
 		return nil, errors.New("bind is host-local - use sync or clone")
 	}
 	hostPath := path
@@ -565,7 +565,7 @@ func (cli *CLI) prepareProjectImport(
 	if err != nil {
 		return nil, err
 	}
-	if name == "bind" && selectedLoaded.Context.YardType == domain.YardRemote {
+	if name == "bind" && selectedLoaded.Context.AccessKind == domain.AccessRemote {
 		return nil, errors.New("bind is host-local - use sync or clone")
 	}
 	store, err := openProjectStore(ctx, selectedLoaded.Context.Paths.StateDir)
@@ -696,7 +696,7 @@ func (cli *CLI) previewProjectAdmission(
 	requestedName string,
 	explicit bool,
 ) (state.Admission, error) {
-	if loaded.Context.YardType != domain.YardRemote {
+	if loaded.Context.AccessKind != domain.AccessRemote {
 		if store == nil {
 			return state.Admission{}, errors.New("project store is required")
 		}
@@ -806,7 +806,7 @@ func (cli *CLI) prepareExistingProject(
 		}
 	}
 	// Owner-forwarded commands receive a stable ID, never a controller-only host path.
-	if selectedLoaded.Context.YardType == domain.YardRemote &&
+	if selectedLoaded.Context.AccessKind == domain.AccessRemote &&
 		(name == "shell" || name == "up" || name == "down" || name == "info") {
 		execution.Arguments = replaceProjectSelector(name, arguments, match.Record.ProjectID)
 	}
@@ -814,7 +814,7 @@ func (cli *CLI) prepareExistingProject(
 }
 
 var projectEnvironmentControlKeys = map[string]struct{}{
-	"PROFILE_NAME": {}, "BASE_IMAGE": {}, "CACHES": {}, "DEVICES": {}, "OPTIONAL_FEATURES": {},
+	"PROFILE_NAME": {}, "PROJECT_ENV_BASE_IMAGE": {}, "CACHES": {}, "DEVICES": {}, "OPTIONAL_FEATURES": {},
 	"IMAGE_DOCKERFILE": {}, "IMAGE_CONTEXT": {}, "IMAGE_TAG": {}, "ENV_MOUNTS": {},
 	"YARD_MOUNTS": {}, "YARD_CAPS": {}, "YARD_DEVICES": {},
 }
@@ -843,7 +843,7 @@ func loadProjectEnvironmentProfile(
 		}
 	}
 	profile := application.ProjectEnvironmentProfile{
-		BaseImage: values["BASE_IMAGE"], Dockerfile: values["IMAGE_DOCKERFILE"],
+		BaseImage: values["PROJECT_ENV_BASE_IMAGE"], Dockerfile: values["IMAGE_DOCKERFILE"],
 		Context: values["IMAGE_CONTEXT"], Image: values["IMAGE_TAG"],
 		Caches: strings.Fields(values["CACHES"]), Features: strings.Fields(values["OPTIONAL_FEATURES"]),
 		Devices: strings.Fields(values["DEVICES"]), Mounts: strings.Fields(values["ENV_MOUNTS"]),
@@ -931,8 +931,8 @@ func (cli *CLI) activateProjectContext(name string, loaded config.Loaded) (confi
 		return config.Loaded{}, err
 	}
 	for _, key := range []string{
-		"YARD_NAME", "YARD_TYPE", "YARD_PROFILES", "INSTANCE_TYPE", "INSTANCE_NAME", "INCUS_PROJECT",
-		"INCUS_BRIDGE", "SSH_HOST", "SSH_PORT", "REMOTE_DEST", "REMOTE_YARD", "SHIFT_MODE",
+		"YARD_NAME", "ACCESS_KIND", "ENVIRONMENT_PROFILES", "YARD_KIND", "YARD_INSTANCE_NAME", "INCUS_PROJECT",
+		"INCUS_BRIDGE", "SSH_HOST", "SSH_PORT", "OWNER_ENDPOINT", "OWNER_YARD_NAME", "SHIFT_MODE",
 		"FORWARD_SSH_AGENT", "DEV_SUDO", "DEV_UID", "DEV_USER", "NESTED_E2E_VMS",
 		"SUBYARD_STATE_DIR", "RESTRICTED_DISK_PATHS", "HOST_BASE", "SRV_VOLUME",
 	} {
@@ -952,7 +952,7 @@ func (cli *CLI) commitProjectExecution(ctx context.Context, execution *projectEx
 	case projectCommitNone:
 		return nil
 	case projectCommitPut:
-		if execution.Loaded.Context.YardType == domain.YardRemote {
+		if execution.Loaded.Context.AccessKind == domain.AccessRemote {
 			action := "upsert"
 			arguments := []string{
 				action, execution.Record.ProjectID, execution.Record.Name,
@@ -1006,7 +1006,7 @@ func (cli *CLI) commitProjectExecution(ctx context.Context, execution *projectEx
 		}
 		return execution.Store.Put(ctx, execution.Record)
 	case projectCommitDelete:
-		if execution.Loaded.Context.YardType == domain.YardRemote {
+		if execution.Loaded.Context.AccessKind == domain.AccessRemote {
 			sourceKey := execution.Record.SourceKey
 			if sourceKey == "" && execution.Record.HostPath != "" {
 				sourceKey = state.SourceKey(execution.Record.HostPath)
@@ -1059,7 +1059,7 @@ func (cli *CLI) reserveRemoteProject(
 	execution *projectExecution,
 ) error {
 	if execution == nil || execution.Commit != projectCommitPut ||
-		execution.Loaded.Context.YardType != domain.YardRemote {
+		execution.Loaded.Context.AccessKind != domain.AccessRemote {
 		return nil
 	}
 	explicit := "0"
@@ -1144,7 +1144,7 @@ func (cli *CLI) reserveProjectExecution(
 	if execution == nil || execution.Commit != projectCommitPut {
 		return nil
 	}
-	if execution.Loaded.Context.YardType == domain.YardRemote {
+	if execution.Loaded.Context.AccessKind == domain.AccessRemote {
 		return cli.reserveRemoteProject(ctx, execution)
 	}
 	admission, err := execution.Store.Admit(
@@ -1176,8 +1176,8 @@ func (cli *CLI) remoteProjectStateCall(
 	arguments []string,
 ) ([]byte, error) {
 	remote := []string{"yard"}
-	if yard.RemoteYard != "" {
-		remote = append(remote, "-Y", yard.RemoteYard)
+	if yard.OwnerYardName != "" {
+		remote = append(remote, "-Y", yard.OwnerYardName)
 	}
 	remote = append(remote, "_project-state")
 	remote = append(remote, arguments...)
@@ -1188,7 +1188,7 @@ func (cli *CLI) remoteProjectStateCall(
 	line := "SUBYARD_OPERATION_ID=" + shellquote.Word(cli.env["SUBYARD_OPERATION_ID"]) +
 		" " + strings.Join(parts, " ")
 	command := exec.CommandContext(
-		ctx, "ssh", "-T", yard.RemoteDest, "--", "bash", "-lc", shellquote.Word(line),
+		ctx, "ssh", "-T", yard.OwnerEndpoint, "--", "bash", "-lc", shellquote.Word(line),
 	)
 	command.Dir = cli.options.WorkingDir
 	command.Env = environmentList(cli.env, nil)

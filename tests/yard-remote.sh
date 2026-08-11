@@ -185,7 +185,7 @@ assert_file_contains "$SUBYARD_HOME/ssh/known_hosts" '[127.0.0.1]:2222 '
 assert_file_contains "$SUBYARD_HOME/ssh/known_hosts" 'subyard-remote-one '
 assert_file_contains "$SUBYARD_HOME/ssh/known_hosts" 'subyard-remote-two '
 assert_file_contains "$SUBYARD_HOME/ssh/known_hosts" 'subyard-remote-named '
-assert_file_contains "$SUBYARD_CONFIG_HOME/yards/named/config.env" 'REMOTE_YARD=inner'
+assert_file_contains "$SUBYARD_CONFIG_HOME/yards/named/config.env" 'OWNER_YARD_NAME=inner'
 if output="$(run_add named owner-two --yard other 2>&1)"; then fail 'remote add allowed a remote-yard rebind'; fi
 assert_contains "$output" 'before rebinding it'
 

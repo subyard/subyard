@@ -20,7 +20,7 @@ OPERATOR_HOME="$(getent passwd "$OPERATOR_USER" | cut -d: -f6)"
 OPERATOR_GROUP="$(id -gn "$OPERATOR_USER" 2>/dev/null || printf '%s\n' "$OPERATOR_USER")"
 
 INCUS_PROJECT="${INCUS_PROJECT:-subyard}"
-INSTANCE_NAME="${INSTANCE_NAME:-yard}"
+YARD_INSTANCE_NAME="${YARD_INSTANCE_NAME:-yard}"
 SRV_POOL="${SRV_POOL:-default}"
 SRV_VOLUME="${SRV_VOLUME:-yard-srv}"
 STORAGE_POOL="${STORAGE_POOL:-$SRV_POOL}"
