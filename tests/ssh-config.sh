@@ -36,6 +36,14 @@ chmod 0600 "$legacy_temp"
 if find "$sshdir" -maxdepth 1 -name '.subyard-ssh-config.*' -print -quit | grep -q .; then
   fail 'atomic update left a staging file'
 fi
+ssh_config_remove_exact "$config" 'Include subyard-e2e-yard.config' \
+  || fail 'could not remove the exact managed Include'
+! grep -qxF 'Include subyard-e2e-yard.config' "$config" \
+  || fail 'managed Include remained after rollback'
+grep -qxF 'Host existing' "$config" \
+  || fail 'Include rollback removed unrelated SSH config'
+ssh_config_remove_exact "$config" 'Include subyard-e2e-yard.config' \
+  || fail 'idempotent Include rollback failed'
 
 known="$sshdir/known_hosts"
 ssh-keygen -q -t ed25519 -N '' -f "$TMP/host-one"
@@ -62,5 +70,13 @@ grep -Fq "unrelated.example $key_one" "$known" \
   || fail 'host-key removal removed an unrelated pin'
 [ "$(stat -c '%a' "$known")" = 600 ] || fail 'known_hosts removal changed its mode'
 [ ! -e "$known.old" ] || fail 'known_hosts removal left an ssh-keygen backup'
+
+# Teardown runs as root and supplies the operator identity. Its shared lock must be handed
+# back with known_hosts so a later unprivileged init is not poisoned by a root-owned lock.
+ssh_known_host_remove "$known" 'missing.example' "$(id -un)" "$(id -gn)" \
+  || fail 'owned host-key removal failed'
+[ "$(stat -c '%u:%g:%a' "$sshdir/.subyard-known-hosts.lock")" \
+    = "$(id -u):$(id -g):600" ] \
+  || fail 'owned host-key removal did not preserve an operator-owned lock'
 
 printf 'ok: SSH config and host-key pins are atomic, strict and idempotent\n'

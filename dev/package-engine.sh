@@ -83,6 +83,7 @@ install -m 0755 "$REPO/bin/yard" "$bundle_stage/bin/yard"
 runtime_list="$bundle_stage/.runtime-inputs"
 runtime_extras=(
   scripts/lib/engine-context.sh
+  scripts/install-ssh-relay.sh
   scripts/install-test-vms-host-sink.sh
   config/agents/codex/provision.sh
   config/profiles/hermes/hermes
@@ -113,6 +114,7 @@ install -m 0755 "$RUNTIME_INSTALLER" "$bundle_stage/scripts/install-runtime-rele
 install -m 0644 "$MIGRATION_REGISTRY" "$bundle_stage/config/migrations.json"
 for required in \
   scripts/install-runtime-release.sh \
+  scripts/install-ssh-relay.sh \
   scripts/install-test-vms-host-sink.sh \
   config/systemd/subyard-test-vms-host-sink.service.in \
   config/systemd/subyard-test-vms-host-sink.timer.in \

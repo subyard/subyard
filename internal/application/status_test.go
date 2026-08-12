@@ -54,8 +54,27 @@ func TestStatusCombinesServiceAndVSCodeProbe(t *testing.T) {
 		t.Fatal(err)
 	}
 	if status.IP != "10.0.0.2" || status.Services != "active/inactive" ||
-		status.VSCode != "key=yes server=yes git-id=no" || len(incus.ExecCalls) != 2 {
+		status.VSCode != "key=yes server=yes git-id=no" || status.SSHConfigured ||
+		len(incus.ExecCalls) != 2 {
 		t.Fatalf("combined optional probes changed: status=%#v calls=%#v", status, incus.ExecCalls)
+	}
+}
+
+func TestStatusReportsContainerSSHOnlyWithTransportDevice(t *testing.T) {
+	yard := domain.Context{IncusProject: "subyard", YardInstanceName: "yard", YardKind: domain.YardContainer}
+	incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"subyard/yard": {
+		Status: "Stopped", Config: map[string]string{}, Devices: map[string]map[string]string{
+			"ssh": {"type": "proxy"},
+		},
+	}}}
+	status, err := (StatusService{
+		Incus: incus, Store: testkit.NewMemoryState(), Facts: statusFacts{},
+	}).Read(context.Background(), yard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.SSHConfigured {
+		t.Fatal("container SSH proxy was not reported as configured")
 	}
 }
 

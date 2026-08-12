@@ -8,5 +8,6 @@ openclaw-provision-check.sh
 p0-capacity.sh
 runtime-privilege-reexec.sh
 ssh-config.sh
+ssh-transport-identity.sh
 teardown-runtime-preservation.sh
 zabbly-download.sh

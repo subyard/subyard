@@ -361,8 +361,19 @@ func TestSSHProbeOwnsProxyAndClientConfig(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	identity := filepath.Join(subyardHome, "ssh", "id_ed25519")
+	if output, err := exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", identity).CombinedOutput(); err != nil {
+		t.Fatalf("generate transport identity: %v: %s", err, output)
+	}
+	if err := os.Chmod(identity, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(identity+".pub", 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(home, ".ssh", "subyard.config"), []byte(
-		"Host yard\n    Port 2222\n    StrictHostKeyChecking yes\n"), 0o600); err != nil {
+		"Host yard\n    Port 2222\n    IdentityFile \""+identity+"\"\n"+
+			"    IdentitiesOnly yes\n    StrictHostKeyChecking yes\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(home, ".ssh", "config"), []byte("Include subyard.config\n"), 0o600); err != nil {
@@ -372,6 +383,9 @@ func TestSSHProbeOwnsProxyAndClientConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(bin, "ssh-keygen"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "systemctl"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	incus := &testkit.Incus{
@@ -395,6 +409,13 @@ func TestSSHProbeOwnsProxyAndClientConfig(t *testing.T) {
 		Environment: []string{"PATH=" + bin},
 	}
 	assertStage(t, runtime, "ssh", true, "matching SSH state")
+	if err := os.Chmod(identity, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	assertStage(t, runtime, "ssh", false, "unsafe transport identity")
+	if err := os.Chmod(identity, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	incus.Reconcile.Instance.LocalDevices["ssh"]["listen"] = "tcp:127.0.0.1:2299"
 	assertStage(t, runtime, "ssh", false, "drifted SSH proxy")
 	incus.Reconcile.Instance.LocalDevices["ssh"]["listen"] = "tcp:127.0.0.1:2222"
@@ -414,13 +435,47 @@ func TestSSHProbeOwnsProxyAndClientConfig(t *testing.T) {
 
 	runtime.Yard.YardKind = domain.YardVM
 	incus.Reconcile.Instance.LocalDevices["eth0"] = map[string]string{"ipv4.address": "10.0.0.2"}
-	incus.Reconcile.Instance.LocalDevices["ssh"] = map[string]string{
-		"type": "proxy", "listen": "tcp:127.0.0.1:2222",
-		"connect": "tcp:10.0.0.2:22", "nat": "true",
+	unitDir := filepath.Join(root, "systemd")
+	if err := os.Mkdir(unitDir, 0o700); err != nil {
+		t.Fatal(err)
 	}
-	assertStage(t, runtime, "ssh", true, "matching VM NAT proxy")
-	incus.Reconcile.Instance.LocalDevices["ssh"]["nat"] = "false"
-	assertStage(t, runtime, "ssh", false, "VM non-NAT proxy")
+	if err := os.WriteFile(filepath.Join(unitDir, "subyard-ssh-relay-2222.socket"), []byte(
+		"[Socket]\nListenStream=127.0.0.1:2222\nAccept=no\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	service := filepath.Join(unitDir, "subyard-ssh-relay-2222.service")
+	if err := os.WriteFile(service, []byte(
+		"[Service]\nExecStart=/usr/lib/systemd/systemd-socket-proxyd 10.0.0.2:22\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runtime.Environment = append(runtime.Environment, "SUBYARD_SSH_RELAY_UNIT_DIR="+unitDir,
+		fmt.Sprintf("SUBYARD_SSH_RELAY_EXPECTED_UID=%d", os.Geteuid()))
+	assertStage(t, runtime, "ssh", true, "matching VM loopback relay")
+	if err := os.WriteFile(service, []byte(
+		"[Service]\nExecStart=/usr/lib/systemd/systemd-socket-proxyd 10.0.0.3:22\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assertStage(t, runtime, "ssh", false, "VM relay targets another address")
+	if err := os.WriteFile(service, []byte(
+		"[Service]\nExecStart=/usr/lib/systemd/systemd-socket-proxyd 10.0.0.2:22\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	incus.Reconcile.Instance.Status = "Running"
+	incus.ExecSteps = []testkit.IncusExecStep{{Result: ports.InstanceExecResult{ExitCode: 1}}}
+	assertStage(t, runtime, "ssh", false, "guest missing canonical public key")
+	incus.ExecSteps = []testkit.IncusExecStep{{}}
+	assertStage(t, runtime, "ssh", true, "guest authorizes canonical public key")
+	last := incus.ExecCalls[len(incus.ExecCalls)-1].Request.Command
+	if len(last) < 4 || last[0] != "grep" || last[1] != "-qxF" {
+		t.Fatalf("guest authorization probe does not match the canonical public key: %q", last)
+	}
+	runtime.Yard.NestedE2EVMs = true
+	incus.ExecSteps = []testkit.IncusExecStep{{}}
+	assertStage(t, runtime, "ssh", true, "nested guest authorizes restricted canonical key")
+	last = incus.ExecCalls[len(incus.ExecCalls)-1].Request.Command
+	if len(last) < 4 || !strings.HasPrefix(last[3], `from="127.0.0.1,::1" ssh-ed25519 `) {
+		t.Fatalf("nested authorization probe is not exact and restricted: %q", last)
+	}
 }
 
 func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {

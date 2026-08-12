@@ -332,6 +332,7 @@ func productionShellContracts() map[string]shellContract {
 		"scripts/install-key-tools.sh":        {"leaf", goReconcile, `"install-key-tools.sh"`},
 		"scripts/install-keys-auto-sync.sh":   {"leaf", goReconcile, `"install-keys-auto-sync.sh"`},
 		"scripts/install-power-reconciler.sh": {"leaf", goReconcile, `"install-power-reconciler.sh"`},
+		"scripts/install-ssh-relay.sh":        {"embedded", "scripts/07-ssh-access.sh", `install-ssh-relay.sh`},
 		"scripts/install-test-vms-host-sink.sh": {
 			"leaf", goReconcile, `"install-test-vms-host-sink.sh"`,
 		},

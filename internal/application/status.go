@@ -47,7 +47,7 @@ func (service StatusService) Read(ctx context.Context, yard domain.Context) (dom
 		IncusAutostart:    instance.Config["boot.autostart"],
 		ProjectCount:      len(records), Facts: facts,
 	}
-	_, status.SSHConfigured = instance.Devices["ssh"]
+	status.SSHConfigured = localSSHConfigured(ctx, yard, instance)
 	for name := range instance.Devices {
 		if strings.HasPrefix(name, "host-") {
 			status.Mounts = append(status.Mounts, name)

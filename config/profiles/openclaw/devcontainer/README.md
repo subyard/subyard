@@ -34,7 +34,7 @@ OpenClaw devcontainer and cleaned to those rules.
   credentials are mounted here. Credentials live per-yard in the yard rootfs; only
   session transcripts are shared host<->yard (the `host-agent-sessions` entry in
   `HOST_MOUNTS`, `config/host.env`) so host-side token stats see the yard's usage.
-  The ssh-agent socket is forwarded into the yard by default (`FORWARD_SSH_AGENT=1`);
+  The ssh-agent socket is forwarded only when explicitly enabled (`FORWARD_SSH_AGENT=1`);
   see the commented line in `mounts` to use it from the container too.
 - **No project lifecycle hooks.** `initializeCommand`/`postCreateCommand` that
   reference a project's own scripts belong in that project's `.devcontainer/`,

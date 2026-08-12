@@ -22,6 +22,8 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/shellquote"
+	"github.com/Subyard/Subyard/internal/sshidentity"
+	"github.com/Subyard/Subyard/internal/sshrelay"
 )
 
 type Runtime struct {
@@ -892,12 +894,10 @@ func (runtime Runtime) sshConverged(ctx context.Context) (bool, error) {
 	connect := "tcp:127.0.0.1:22"
 	if runtime.Yard.YardKind == domain.YardVM {
 		address := state.Instance.LocalDevices["eth0"]["ipv4.address"]
-		if address == "" || device["nat"] != "true" {
+		if address == "" || !runtime.vmSSHRelayConverged(ctx, address, port) {
 			return false, nil
 		}
-		connect = "tcp:" + address + ":22"
-	}
-	if device["type"] != "proxy" || device["listen"] != "tcp:127.0.0.1:"+port ||
+	} else if device["type"] != "proxy" || device["listen"] != "tcp:127.0.0.1:"+port ||
 		device["connect"] != connect {
 		return false, nil
 	}
@@ -924,6 +924,9 @@ func (runtime Runtime) sshConverged(ctx context.Context) (bool, error) {
 	if runtime.Yard.ForwardSSHAgent != hasDirective(string(snippetContents), "ForwardAgent", "yes") {
 		return false, nil
 	}
+	if !hasDirective(string(snippetContents), "IdentitiesOnly", "yes") {
+		return false, nil
+	}
 	configContents, err := os.ReadFile(filepath.Join(home, ".ssh", "config"))
 	if err != nil || !hasLine(string(configContents), "Include "+filepath.Base(snippet)) {
 		return false, nil
@@ -931,6 +934,9 @@ func (runtime Runtime) sshConverged(ctx context.Context) (bool, error) {
 	subyardHome := runtime.Yard.Paths.DataHome
 	if subyardHome == "" {
 		subyardHome = runtime.environmentValue("SUBYARD_HOME")
+	}
+	if sshidentity.Classify(home, subyardHome, yardName) != sshidentity.Dedicated {
+		return false, nil
 	}
 	knownHosts := filepath.Join(subyardHome, "ssh", "known_hosts")
 	sshKeygen, err := runtime.executableFromPath("ssh-keygen")
@@ -956,21 +962,43 @@ func (runtime Runtime) sshConverged(ctx context.Context) (bool, error) {
 	if user == "" {
 		user = runtime.environmentDefault("DEV_USER", "dev")
 	}
-	request := ports.InstanceExecRequest{Command: []string{
-		"test", "-s", "/home/" + user + "/.ssh/authorized_keys",
-	}}
-	if runtime.Yard.NestedE2EVMs {
-		request.Command = []string{"grep", "-q", `^from="127[.]0[.]0[.]1,::1" `,
-			"/home/" + user + "/.ssh/authorized_keys"}
+	publicKey, valid := sshidentity.CanonicalPublicKey(subyardHome)
+	if !valid {
+		return false, nil
 	}
+	authorizedLine := publicKey
+	if runtime.Yard.NestedE2EVMs {
+		authorizedLine = `from="127.0.0.1,::1" ` + publicKey
+	}
+	request := ports.InstanceExecRequest{Command: []string{
+		"grep", "-qxF", "--", authorizedLine, "/home/" + user + "/.ssh/authorized_keys",
+	}}
 	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, request)
 	if err == nil {
-		return true, nil
+		return result.ExitCode == 0, nil
 	}
 	if result.ExitCode != 0 {
 		return false, nil
 	}
 	return false, err
+}
+
+func (runtime Runtime) vmSSHRelayConverged(ctx context.Context, address, port string) bool {
+	unitDir := runtime.environmentDefault("SUBYARD_SSH_RELAY_UNIT_DIR", "/etc/systemd/system")
+	systemctl, err := runtime.executableFromPath("systemctl")
+	if err != nil {
+		return false
+	}
+	expectedUID := 0
+	if raw := runtime.environmentValue("SUBYARD_SSH_RELAY_EXPECTED_UID"); raw != "" {
+		expectedUID, err = strconv.Atoi(raw)
+		if err != nil {
+			return false
+		}
+	}
+	portNumber, err := strconv.Atoi(port)
+	return err == nil && sshrelay.Ready(ctx, unitDir, expectedUID,
+		portNumber, address, systemctl)
 }
 
 func (runtime Runtime) provisionConverged(ctx context.Context) (bool, error) {

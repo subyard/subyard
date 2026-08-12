@@ -26,7 +26,7 @@ SRV_VOLUME="${SRV_VOLUME:-yard-srv}"
 STORAGE_POOL="${STORAGE_POOL:-$SRV_POOL}"
 BRIDGE="${INCUS_BRIDGE:-${INCUS_NETWORK:-incusbr0}}"
 
-YARD_SNIP="subyard${YARD_NAME:+-$YARD_NAME}.config"
+YARD_SNIP="$(ssh_yard_snippet_name "${YARD_NAME:-}")"
 YARD_STATE_DIR="${SUBYARD_STATE_DIR:-$SUBYARD_CONFIG_HOME/projects}"
 YARD_SPACE_CACHE="$SUBYARD_HOME/space${YARD_NAME:+-$YARD_NAME}.cache"
 
@@ -128,6 +128,9 @@ echo "Boot power reconciler:"
 "$SCRIPT_DIR/install-power-reconciler.sh" --remove-if-unused --yes
 
 echo "Host config:"
+if [ -n "${SSH_PORT:-}" ]; then
+  "$SCRIPT_DIR/install-ssh-relay.sh" --remove "$SSH_PORT"
+fi
 if command -v ufw >/dev/null 2>&1 && [ "$bridge_gone" = 1 ]; then
   ufw delete allow in on "$BRIDGE" to any port 67 proto udp >/dev/null 2>&1 || true
   ufw delete allow in on "$BRIDGE" to any port 53 >/dev/null 2>&1 || true

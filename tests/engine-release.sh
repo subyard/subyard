@@ -103,6 +103,7 @@ tar -tzf "$bundle_one" > "$bundle_list"
 grep -Fxq './bin/yard' "$bundle_list" \
   && grep -Fxq './bin/yard-engine' "$bundle_list" \
   && grep -Fxq './scripts/install-runtime-release.sh' "$bundle_list" \
+  && grep -Fxq './scripts/install-ssh-relay.sh' "$bundle_list" \
   && grep -Fxq './scripts/install-test-vms-host-sink.sh' "$bundle_list" \
   && grep -Fxq './config/systemd/subyard-test-vms-host-sink.service.in' "$bundle_list" \
   && grep -Fxq './config/systemd/subyard-test-vms-host-sink.timer.in' "$bundle_list" \

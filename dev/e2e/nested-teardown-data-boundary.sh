@@ -103,7 +103,7 @@ require_nested_memory_reserve() {
 }
 
 assert_outer_vm_ssh_address() {
-  local stage="$1" primary_interface eth0 foreign pinned connect
+  local stage="$1" primary_interface eth0 foreign pinned relay_unit relay_service listeners
   primary_interface="$(incus exec "$OUTER_INSTANCE" --project "$OUTER_PROJECT" -- \
     ip -4 route show default \
     | awk 'NR == 1 { for (i=1; i<=NF; i++) if ($i == "dev") { print $(i+1); exit } }')"
@@ -115,14 +115,24 @@ assert_outer_vm_ssh_address() {
     | awk 'NR == 1 { split($4, address, "/"); print address[1] }')"
   pinned="$(incus config device get "$OUTER_INSTANCE" eth0 ipv4.address \
     --project "$OUTER_PROJECT")"
-  connect="$(incus config device get "$OUTER_INSTANCE" ssh connect \
-    --project "$OUTER_PROJECT")"
   [ -n "$eth0" ] || die "$stage: outer VM eth0 has no global IPv4"
   [ -n "$foreign" ] || die "$stage: foreign IPv4 fixture is missing"
   [ "$eth0" != "$foreign" ] || die "$stage: primary and foreign interfaces share an IPv4"
   [ "$pinned" = "$eth0" ] || die "$stage: eth0 pinned $pinned instead of $eth0"
-  [ "$connect" = "tcp:$eth0:22" ] \
-    || die "$stage: SSH proxy connects to $connect instead of tcp:$eth0:22"
+  ! incus config device list "$OUTER_INSTANCE" --project "$OUTER_PROJECT" \
+    | grep -qx ssh || die "$stage: unsupported Incus VM proxy device is still attached"
+  relay_unit="subyard-ssh-relay-$ssh_port.socket"
+  relay_service="/etc/systemd/system/subyard-ssh-relay-$ssh_port.service"
+  systemctl is-active --quiet "$relay_unit" \
+    || die "$stage: VM SSH loopback relay is not active"
+  grep -qxF "ExecStart=/usr/lib/systemd/systemd-socket-proxyd $eth0:22" "$relay_service" \
+    || grep -qxF "ExecStart=/lib/systemd/systemd-socket-proxyd $eth0:22" "$relay_service" \
+    || die "$stage: VM SSH relay does not target $eth0:22"
+  listeners="$(ss -H -ltn "sport = :$ssh_port")"
+  grep -Eq "[[:space:]]127[.]0[.]0[.]1:${ssh_port}[[:space:]]" <<<"$listeners" \
+    || die "$stage: VM SSH relay is not listening on IPv4 loopback"
+  ! grep -Eq "[[:space:]](0[.]0[.]0[.]0|\*|\[::\]):${ssh_port}[[:space:]]" <<<"$listeners" \
+    || die "$stage: VM SSH relay escaped the loopback boundary"
   incus exec "$OUTER_INSTANCE" --project "$OUTER_PROJECT" -- true >/dev/null \
     || die "$stage: outer VM agent is unreachable"
 }
@@ -235,6 +245,44 @@ yard start --yes
   || die 'outer instance is not marker-owned'
 ensure_outer_foreign_ipv4
 assert_outer_vm_ssh_address fresh-init
+canonical_identity="$SUBYARD_HOME/ssh/id_ed25519"
+canonical_fingerprint="$(ssh-keygen -lf "$canonical_identity.pub" | awk '{print $2}')"
+legacy_identity="$STATE/legacy-operator-key"
+ssh-keygen -q -t ed25519 -N '' -C legacy-operator -f "$legacy_identity"
+legacy_public="$(awk 'NF >= 2 { print $1 " " $2; exit }' "$legacy_identity.pub")"
+incus exec "$OUTER_INSTANCE" --project "$OUTER_PROJECT" \
+  --env LEGACY_PUBLIC="$legacy_public" -- sh -eu -c '
+    grep -qxF "$LEGACY_PUBLIC" /home/dev/.ssh/authorized_keys \
+      || printf "%s\n" "$LEGACY_PUBLIC" >> /home/dev/.ssh/authorized_keys
+  '
+outer_snippet="$SUBYARD_OPERATOR_HOME/.ssh/subyard-$OUTER_YARD.config"
+cat > "$outer_snippet" <<EOF
+# Legacy fixture replaced by yard init.
+Host yard-$OUTER_YARD
+    HostName 127.0.0.1
+    Port $ssh_port
+    User dev
+    IdentityFile $legacy_identity
+    IdentitiesOnly yes
+    StrictHostKeyChecking yes
+    UserKnownHostsFile $SUBYARD_HOME/ssh/known_hosts
+    ForwardAgent no
+EOF
+chmod 0600 "$outer_snippet"
+SSH_AUTH_SOCK='' ssh -F /dev/null -o BatchMode=yes -o IdentitiesOnly=yes \
+  -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$SUBYARD_HOME/ssh/known_hosts" \
+  -o GlobalKnownHostsFile=/dev/null -o IdentityFile="$legacy_identity" \
+  -p "$ssh_port" dev@127.0.0.1 true \
+  || die 'legacy named-yard access fixture is not usable before migration'
+yard init --yes
+grep -qxF "    IdentityFile \"$canonical_identity\"" "$outer_snippet" \
+  || die 'named-yard migration did not switch to the canonical identity'
+incus exec "$OUTER_INSTANCE" --project "$OUTER_PROJECT" \
+  --env LEGACY_PUBLIC="$legacy_public" -- sh -eu -c \
+  'grep -qxF "$LEGACY_PUBLIC" /home/dev/.ssh/authorized_keys' \
+  || die 'named-yard migration removed the previous authorized key'
+[ "$(ssh-keygen -lf "$canonical_identity.pub" | awk '{print $2}')" = "$canonical_fingerprint" ] \
+  || die 'named-yard migration unexpectedly replaced the host-scoped identity'
 docker_pid_before="$(incus exec "$OUTER_INSTANCE" --project "$OUTER_PROJECT" -- \
   systemctl show docker.service --property=MainPID --value)"
 incus exec "$OUTER_INSTANCE" --project "$OUTER_PROJECT" -- \

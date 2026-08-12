@@ -229,7 +229,7 @@ func (runner ProjectActionRunner) codeTargetReady(ctx context.Context) error {
 	if !strings.EqualFold(instance.Status, "running") {
 		return errors.New("yard is not running")
 	}
-	if _, present := instance.Devices["ssh"]; !present {
+	if !localSSHConfigured(ctx, runner.Yard, instance) {
 		return errors.New("yard SSH access is not configured; run yard init")
 	}
 	return nil

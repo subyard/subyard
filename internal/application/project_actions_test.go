@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -473,6 +474,44 @@ func TestProjectCodeWritesRemoteWorkspaceAndOpensDescriptor(t *testing.T) {
 	}
 	if len(code.calls) != 1 || !slices.Equal(code.calls[0], []string{workspacePath}) {
 		t.Fatalf("VS Code workspace was not opened: %#v", code.calls)
+	}
+}
+
+func TestProjectCodeRejectsDedicatedIdentityWithoutVMLoopbackRelay(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	dataHome := filepath.Join(root, "data")
+	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dataHome, "ssh"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	identity := filepath.Join(dataHome, "ssh", "id_ed25519")
+	if output, err := exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", identity).CombinedOutput(); err != nil {
+		t.Fatalf("generate transport identity: %v: %s", err, output)
+	}
+	if err := os.Chmod(identity, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(identity+".pub", 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".ssh", "subyard.config"), []byte(
+		"Host yard\n    IdentityFile \""+identity+"\"\n    IdentitiesOnly yes\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+		"subyard/yard": {Status: "Running", Devices: map[string]map[string]string{}},
+	}}
+	runner := ProjectActionRunner{Instances: incus, Yard: domain.Context{
+		YardName: "default", YardKind: domain.YardVM, AccessKind: domain.AccessLocal,
+		IncusProject: "subyard", YardInstanceName: "yard",
+		Paths: domain.RuntimePaths{OperatorHome: home, DataHome: dataHome},
+	}}
+	if err := runner.codeTargetReady(context.Background()); err == nil ||
+		!strings.Contains(err.Error(), "SSH access is not configured") {
+		t.Fatalf("missing VM relay was accepted: %v", err)
 	}
 }
 

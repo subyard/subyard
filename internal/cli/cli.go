@@ -42,6 +42,7 @@ import (
 	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/rpc"
 	"github.com/Subyard/Subyard/internal/shellquote"
+	"github.com/Subyard/Subyard/internal/sshidentity"
 	"github.com/Subyard/Subyard/internal/state"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
@@ -858,6 +859,9 @@ func (cli *CLI) printYardStatus(ctx context.Context, loaded config.Loaded) int {
 		}
 		fmt.Fprintf(cli.options.Stdout, "  ip       %s\n", ip)
 	}
+	identityState := sshidentity.Classify(
+		status.Context.Paths.OperatorHome, status.Context.Paths.DataHome, status.Context.YardName,
+	)
 	if status.SSHConfigured {
 		fmt.Fprintf(cli.options.Stdout, "  ssh      127.0.0.1:%d  (ssh %s)\n",
 			status.Context.SSHPort, status.Context.SSHHost)
@@ -865,6 +869,7 @@ func (cli *CLI) printYardStatus(ctx context.Context, loaded config.Loaded) int {
 		fmt.Fprintf(cli.options.Stdout, "  ssh      not set up  (run: %s init)\n",
 			cli.yardHint(status.Context))
 	}
+	fmt.Fprintf(cli.options.Stdout, "  ssh-id   %s\n", identityState)
 	mounts := "none"
 	if len(status.Mounts) != 0 {
 		mounts = strings.Join(status.Mounts, " ")
