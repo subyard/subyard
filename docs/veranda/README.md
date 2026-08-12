@@ -10,6 +10,16 @@ until capability negotiation establishes its typed owner-side RPC support.
 
 Open [`wireframes.html`](wireframes.html) in a browser to review the approved low-fidelity screens.
 
+## Current implementation
+
+The first read-only local slice is implemented under [`../../veranda/`](../../veranda/). It uses
+`rpc.negotiate`, `context.get`, and `owner.inventory` to render the local owner host, its yards, and
+plain project names. The Rust boundary requires RPC v1 and `owner-inventory-v1`, validates the
+bounded inventory, and sends a narrower DTO to the frontend. It does not yet implement remote
+connections, mutations, project launch actions, profiles, or the broader diagnostic/settings
+surfaces illustrated below. Development and verification commands are documented in
+[`../../veranda/README.md`](../../veranda/README.md).
+
 ## Product model
 
 The interface is object-centric:

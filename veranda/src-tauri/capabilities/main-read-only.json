@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-read-only",
+  "description": "The main window can invoke the one registered read-only local fleet command.",
+  "windows": ["main"],
+  "permissions": []
+}

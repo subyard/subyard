@@ -22,6 +22,12 @@
 # prod-guard refuses against — operator-specific, host-only.
 /config/prod-fingerprints
 
+# Veranda frontend and Rust build artifacts.
+/veranda/node_modules/
+/veranda/.svelte-kit/
+/veranda/build/
+/veranda/src-tauri/target/
+
 # QA credential broker: the role secrets, the bot-token pool, and the (host-path-naming)
 # broker.conf stay host-only. Only the *.example templates are committed.
 /config/qa-pool/*
