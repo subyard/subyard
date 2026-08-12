@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -17,12 +16,47 @@ func (runtime *Runtime) HandleQuarantine(
 	cause error,
 ) error {
 	runtime.prepareDefaults()
+	if _, err := slotNumber(slotID, runtime.Config.SlotCount); err != nil {
+		return err
+	}
+	return withFileLock(runtime.slotLifecycleLock(slotID), func() error {
+		return runtime.handleQuarantineLocked(ctx, store, slotID, cause)
+	})
+}
+
+func (runtime *Runtime) QuarantineSlot(
+	ctx context.Context,
+	store LeaseStore,
+	grant LeaseGrant,
+	cause error,
+) error {
+	runtime.prepareDefaults()
+	if _, err := slotNumber(grant.SlotID, runtime.Config.SlotCount); err != nil {
+		return err
+	}
+	return withFileLock(runtime.slotLifecycleLock(grant.SlotID), func() error {
+		if err := store.Quarantine(grant, cause); err != nil {
+			return err
+		}
+		return runtime.handleQuarantineLocked(ctx, store, grant.SlotID, cause)
+	})
+}
+
+func (runtime *Runtime) handleQuarantineLocked(
+	ctx context.Context,
+	store LeaseStore,
+	slotID string,
+	cause error,
+) error {
 	slot, err := storeSlot(store, slotID)
 	if err != nil {
 		return err
 	}
 	if slot.State != SlotQuarantined && slot.State != SlotRecovering {
 		return fmt.Errorf("slot %s is %s, not quarantined", slotID, slot.State)
+	}
+	if runtime.finishQuarantine != nil {
+		return runtime.finishQuarantine(ctx, store, slot, cause)
 	}
 	number, err := slotNumber(slotID, runtime.Config.SlotCount)
 	if err != nil {
@@ -83,9 +117,49 @@ func (runtime *Runtime) RecoverScheduled(
 ) error {
 	runtime.prepareDefaults()
 	return withFileLock(
-		filepath.Join(runtime.Config.StateDir, "recovery", slotID+".lock"),
+		runtime.slotLifecycleLock(slotID),
 		func() error {
 			return runtime.recoverScheduledLocked(ctx, store, slotID, force)
+		},
+	)
+}
+
+func (runtime *Runtime) RecoverExpectedSlot(
+	ctx context.Context,
+	store LeaseStore,
+	expected LeaseIdentity,
+) error {
+	runtime.prepareDefaults()
+	if err := expected.validate(); err != nil {
+		return err
+	}
+	if _, err := slotNumber(expected.SlotID, runtime.Config.SlotCount); err != nil {
+		return err
+	}
+	return withFileLock(
+		runtime.slotLifecycleLock(expected.SlotID),
+		func() error {
+			startedSlot, started, err := store.BeginExpectedRecovery(expected)
+			if err != nil || !started {
+				return err
+			}
+			if startedSlot.IncidentID == "" {
+				cause := errors.New(startedSlot.FailureReason)
+				if strings.TrimSpace(startedSlot.FailureReason) == "" {
+					cause = errors.New("quarantined slot requires recovery")
+				}
+				if err := runtime.handleQuarantineLocked(
+					ctx, store, startedSlot.SlotID, cause,
+				); err != nil {
+					_, finishErr := store.FinishRecovery(startedSlot.SlotID, err, "", "")
+					return errors.Join(err, finishErr)
+				}
+				startedSlot, err = storeSlot(store, startedSlot.SlotID)
+				if err != nil {
+					return err
+				}
+			}
+			return runtime.completeRecovery(ctx, store, startedSlot)
 		},
 	)
 }
@@ -111,7 +185,7 @@ func (runtime *Runtime) recoverScheduledLocked(
 		if err := store.InterruptRecovery(slotID, interrupted); err != nil {
 			return err
 		}
-		if err := runtime.HandleQuarantine(ctx, store, slotID, interrupted); err != nil {
+		if err := runtime.handleQuarantineLocked(ctx, store, slotID, interrupted); err != nil {
 			return err
 		}
 		slot, err = storeSlot(store, slotID)
@@ -124,7 +198,7 @@ func (runtime *Runtime) recoverScheduledLocked(
 		if strings.TrimSpace(slot.FailureReason) == "" {
 			cause = errors.New("quarantined slot requires recovery")
 		}
-		if err := runtime.HandleQuarantine(ctx, store, slotID, cause); err != nil {
+		if err := runtime.handleQuarantineLocked(ctx, store, slotID, cause); err != nil {
 			return err
 		}
 	}
@@ -135,6 +209,18 @@ func (runtime *Runtime) recoverScheduledLocked(
 	if !started {
 		return nil
 	}
+	return runtime.completeRecovery(ctx, store, startedSlot)
+}
+
+func (runtime *Runtime) completeRecovery(
+	ctx context.Context,
+	store LeaseStore,
+	startedSlot LeaseSlot,
+) error {
+	if runtime.finishRecovery != nil {
+		return runtime.finishRecovery(ctx, store, startedSlot)
+	}
+	slotID := startedSlot.SlotID
 	startedAt := runtime.Now().UTC()
 	if _, err := runtime.eventRecorder().Record(BrokerEvent{
 		Kind:               "recovery.start",

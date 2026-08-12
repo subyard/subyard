@@ -16,16 +16,19 @@ import (
 )
 
 type Runtime struct {
-	Config         Config
-	ConfigPath     string
-	Runner         CommandRunner
-	Stdout         io.Writer
-	Stderr         io.Writer
-	Now            func() time.Time
-	Sleep          func(context.Context, time.Duration) error
-	AvailableBytes func(string) (uint64, error)
-	ExecutablePath string
-	Events         *EventRecorder
+	Config           Config
+	ConfigPath       string
+	Runner           CommandRunner
+	Stdout           io.Writer
+	Stderr           io.Writer
+	Now              func() time.Time
+	Sleep            func(context.Context, time.Duration) error
+	AvailableBytes   func(string) (uint64, error)
+	ExecutablePath   string
+	Events           *EventRecorder
+	finishDrain      func(context.Context, LeaseStore, LeaseSlot) error
+	finishQuarantine func(context.Context, LeaseStore, LeaseSlot, error) error
+	finishRecovery   func(context.Context, LeaseStore, LeaseSlot) error
 }
 
 func LoadRuntime(path string, stdout, stderr io.Writer) (*Runtime, error) {
@@ -72,12 +75,42 @@ func (runtime *Runtime) Run(ctx context.Context, arguments []string, environment
 		runtime.Events = &recorder
 	}
 	yes := false
+	var expectedGeneration uint64
+	var expectedEpoch uint64
+	expectedGenerationSet := false
+	expectedEpochSet := false
 	var positional []string
-	for _, argument := range arguments {
+	for index := 0; index < len(arguments); index++ {
+		argument := arguments[index]
 		switch argument {
 		case "-y", "--yes":
 			yes = true
+		case "--expect-resource-generation", "--expect-lease-epoch":
+			index++
+			if index >= len(arguments) {
+				return fmt.Errorf("%s requires a positive integer", argument)
+			}
+			value, err := strconv.ParseUint(arguments[index], 10, 64)
+			if err != nil || value == 0 {
+				return fmt.Errorf("%s requires a positive integer", argument)
+			}
+			if argument == "--expect-resource-generation" {
+				if expectedGenerationSet {
+					return errors.New("expected resource generation was provided more than once")
+				}
+				expectedGeneration = value
+				expectedGenerationSet = true
+			} else {
+				if expectedEpochSet {
+					return errors.New("expected lease epoch was provided more than once")
+				}
+				expectedEpoch = value
+				expectedEpochSet = true
+			}
 		default:
+			if strings.HasPrefix(argument, "-") {
+				return fmt.Errorf("unknown test-vms worker option %q", argument)
+			}
 			positional = append(positional, argument)
 		}
 	}
@@ -85,6 +118,14 @@ func (runtime *Runtime) Run(ctx context.Context, arguments []string, environment
 		return errors.New("test-vms worker requires exactly one command")
 	}
 	action := positional[0]
+	expectsLeaseIdentity := strings.HasPrefix(action, "revoke-slot-") ||
+		strings.HasPrefix(action, "recover-slot-")
+	if expectsLeaseIdentity && (!expectedGenerationSet || !expectedEpochSet) {
+		return errors.New("complete lease target identity is required")
+	}
+	if !expectsLeaseIdentity && (expectedGenerationSet || expectedEpochSet) {
+		return errors.New("lease target identity is only valid for revoke or recover")
+	}
 	if action == "doctor" {
 		return runtime.doctor(ctx, environment)
 	}
@@ -132,9 +173,17 @@ func (runtime *Runtime) Run(ctx context.Context, arguments []string, environment
 		if err != nil || number < 1 || number > runtime.Config.SlotCount {
 			return errors.New("invalid revoke slot")
 		}
-		return runtime.RevokeSlot(ctx, LeaseStore{
+		expected, err := expectedLeaseIdentity(
+			fmt.Sprintf("slot-%03d", number),
+			expectedGeneration, expectedGenerationSet,
+			expectedEpoch, expectedEpochSet,
+		)
+		if err != nil {
+			return err
+		}
+		return runtime.RevokeExpectedSlot(ctx, LeaseStore{
 			Path: runtime.Config.leaseState(), SlotCount: runtime.Config.SlotCount, Now: runtime.Now,
-		}, fmt.Sprintf("slot-%03d", number))
+		}, expected)
 	}
 	if strings.HasPrefix(action, "recover-slot-") {
 		if !yes {
@@ -143,6 +192,29 @@ func (runtime *Runtime) Run(ctx context.Context, arguments []string, environment
 		number, err := strconv.Atoi(strings.TrimPrefix(action, "recover-slot-"))
 		if err != nil || number < 1 || number > runtime.Config.SlotCount {
 			return errors.New("invalid recovery slot")
+		}
+		expected, err := expectedLeaseIdentity(
+			fmt.Sprintf("slot-%03d", number),
+			expectedGeneration, expectedGenerationSet,
+			expectedEpoch, expectedEpochSet,
+		)
+		if err != nil {
+			return err
+		}
+		return runtime.RecoverExpectedSlot(ctx, LeaseStore{
+			Path: runtime.Config.leaseState(), SlotCount: runtime.Config.SlotCount, Now: runtime.Now,
+		}, expected)
+	}
+	if strings.HasPrefix(action, "recover-corrupt-slot-") {
+		if !yes {
+			return errors.New("confirmation required (re-run with --yes for automation)")
+		}
+		if expectedGenerationSet || expectedEpochSet {
+			return errors.New("corrupt-state recovery does not accept a lease target identity")
+		}
+		number, err := strconv.Atoi(strings.TrimPrefix(action, "recover-corrupt-slot-"))
+		if err != nil || number < 1 || number > runtime.Config.SlotCount {
+			return errors.New("invalid corrupt-state recovery slot")
 		}
 		return runtime.RecoverSlot(ctx, LeaseStore{
 			Path: runtime.Config.leaseState(), SlotCount: runtime.Config.SlotCount, Now: runtime.Now,
@@ -175,6 +247,23 @@ func (runtime *Runtime) Run(ctx context.Context, arguments []string, environment
 	default:
 		return fmt.Errorf("unknown test-vms worker command %q", action)
 	}
+}
+
+func expectedLeaseIdentity(
+	slotID string,
+	resourceGeneration uint64,
+	resourceGenerationSet bool,
+	leaseEpoch uint64,
+	leaseEpochSet bool,
+) (LeaseIdentity, error) {
+	if !resourceGenerationSet || !leaseEpochSet {
+		return LeaseIdentity{}, errors.New("complete lease target identity is required")
+	}
+	return LeaseIdentity{
+		SlotID:             slotID,
+		ResourceGeneration: resourceGeneration,
+		LeaseEpoch:         leaseEpoch,
+	}, nil
 }
 
 func (runtime *Runtime) runGC(ctx context.Context) error {

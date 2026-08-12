@@ -30,6 +30,7 @@ LEASE_ID=""
 LEASE_EPOCH=""
 LEASE_CAPABILITY=""
 LEASE_KEEPER_PID=""
+LEASE_KEEPER_LOG=""
 LEASE_YARD=""
 LEASE_PROJECT=""
 LEASE_CHECKOUT=""
@@ -689,14 +690,24 @@ lease_keeper() {
   while sleep 60; do
     if ! response="$(facade_request "$(lease_command renew)")" ||
       [ "$(jq -r '.status // empty' <<<"$response")" != ok ]; then
+      [ -z "$LEASE_KEEPER_LOG" ] \
+        || printf '%s\tfailure\n' "$(date +%s)" >> "$LEASE_KEEPER_LOG"
       printf 'agent-e2e: lease lost; stopping payload transport\n' >&2
       kill -TERM "$owner_pid" >/dev/null 2>&1 || true
       return 1
     fi
+    [ -z "$LEASE_KEEPER_LOG" ] \
+      || printf '%s\tok\n' "$(date +%s)" >> "$LEASE_KEEPER_LOG"
   done
 }
 
 start_lease_keeper() {
+  if [ -n "$LOCAL_TEMP" ]; then
+    LEASE_KEEPER_LOG="$LOCAL_TEMP/lease-keeper.tsv"
+    : > "$LEASE_KEEPER_LOG"
+    chmod 0600 "$LEASE_KEEPER_LOG"
+    printf '%s\tstarted\n' "$(date +%s)" >> "$LEASE_KEEPER_LOG"
+  fi
   lease_keeper "$$" &
   LEASE_KEEPER_PID=$!
 }

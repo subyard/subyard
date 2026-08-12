@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -51,10 +52,10 @@ func main() {
 					return runtime.AcquireSlot(ctx, store, grant, publicKey)
 				},
 				OnRelease: func(grant testvmsruntime.LeaseGrant) error {
-					return runtime.ReleaseSlot(ctx, grant)
+					return runtime.ReleaseSlot(ctx, store, grant)
 				},
-				OnQuarantine: func(slotID string, cause error) error {
-					return runtime.HandleQuarantine(ctx, store, slotID, cause)
+				OnQuarantine: func(grant testvmsruntime.LeaseGrant, cause error) error {
+					return runtime.QuarantineSlot(ctx, store, grant, cause)
 				},
 			}).Run(os.Getenv("SSH_ORIGINAL_COMMAND"))
 		}
@@ -78,6 +79,9 @@ func main() {
 		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "test-vms: %v\n", err)
+			if errors.Is(err, testvmsruntime.ErrLeaseTargetStale) {
+				os.Exit(testvmsruntime.LeaseTargetStaleExitCode)
+			}
 			os.Exit(1)
 		}
 		return

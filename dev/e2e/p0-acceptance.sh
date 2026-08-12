@@ -24,6 +24,7 @@ CANDIDATE_HASH=''
 CAPACITY_LOG_DIR=''
 PEERS_ONLY="${SUBYARD_P0_PEERS_ONLY:-0}"
 BROKER_RECOVERY_ONLY="${SUBYARD_P0_BROKER_RECOVERY_ONLY:-0}"
+P0_NESTED_VM="${SUBYARD_P0_NESTED_VM:-1}"
 declare -A CAPACITY_PID=()
 declare -A CAPACITY_FLAG=()
 declare -A DEFAULT_BUILD_CACHE_BEFORE=()
@@ -33,6 +34,7 @@ P0_LANE=full
 P0_RESUME=0
 P0_CHECKPOINT=''
 P0_EVIDENCE=''
+P0_FAILURE_LOG=''
 P0_CURRENT_PHASE='startup'
 P0_PHASE_STARTED=0
 P0_CHILD_PIDS=()
@@ -90,6 +92,10 @@ parse_arguments() {
   if [ "$PEERS_ONLY" = 1 ] && [ "$lane_seen" = 0 ]; then
     P0_LANE=peer
   fi
+  case "$P0_NESTED_VM" in
+    1|2) ;;
+    *) die 'SUBYARD_P0_NESTED_VM must be 1 or 2' ;;
+  esac
 }
 parse_arguments "$@"
 public_tree_hash() {
@@ -158,13 +164,20 @@ mark_checkpoint_passed() {
   mv -f "$temp" "$P0_CHECKPOINT"
 }
 write_evidence() {
-  local phase="$1" status="$2" rc="$3" duration="$4" temp oldest
+  local phase="$1" status="$2" rc="$3" duration="$4" temp oldest capacity keeper
   [ -n "$P0_EVIDENCE" ] || return 0
+  capacity="$(capacity_evidence_json)"
+  keeper=''
+  if [ -n "$LEASE_KEEPER_LOG" ] && [ -r "$LEASE_KEEPER_LOG" ]; then
+    keeper="$(tail -n 1 "$LEASE_KEEPER_LOG" 2>/dev/null || true)"
+  fi
   temp="$(mktemp "$(dirname "$P0_EVIDENCE")/.evidence.XXXXXX")"
   jq -n --arg phase "$phase" --arg status "$status" --argjson rc "$rc" \
     --argjson duration "$duration" --arg lane "$P0_LANE" \
     --arg run "$LEASE_RUN" --arg slot "$LEASE_SLOT" \
-    --argjson generation "$LEASE_GENERATION" --arg bundle "$P0_BUNDLE_HASH" '
+    --argjson generation "$LEASE_GENERATION" --arg bundle "$P0_BUNDLE_HASH" \
+    --argjson capacity "$capacity" --arg keeper "$keeper" \
+    --arg failure_log "$P0_FAILURE_LOG" '
     {
       schema_version: 1,
       run: $run,
@@ -175,6 +188,9 @@ write_evidence() {
       status: $status,
       exit_status: $rc,
       duration_seconds: $duration,
+      capacity: $capacity,
+      lease_keeper_last: $keeper,
+      failure_log: (if $failure_log == "" then null else $failure_log end),
       resource_inventory: ["guest:vm1", "guest:vm2", "marker-owned-only"]
     }
   ' > "$temp"
@@ -183,8 +199,91 @@ write_evidence() {
   while [ "$(find "$(dirname "$P0_EVIDENCE")" -maxdepth 1 -type f -name 'p0-*.json' | wc -l)" -gt 20 ]; do
     oldest="$(find "$(dirname "$P0_EVIDENCE")" -maxdepth 1 -type f -name 'p0-*.json' -printf '%T@\t%p\n' | sort -n | head -n1 | cut -f2-)"
     [ -n "$oldest" ] || break
+    find "${oldest%.json}.failure.log" -delete 2>/dev/null || true
     find "$oldest" -delete
   done
+}
+
+capacity_evidence_json() {
+  local vm log values samples first last min_root min_memory last_memory failures first_unreachable
+  local summary='{}'
+  [ -n "$CAPACITY_LOG_DIR" ] && [ -d "$CAPACITY_LOG_DIR" ] \
+    || { printf '{}\n'; return; }
+  for vm in 1 2; do
+    log="$CAPACITY_LOG_DIR/vm$vm.tsv"
+    [ -r "$log" ] || continue
+    values="$(awk -F '\t' '
+      $2 == "unreachable" {
+        failures++
+        if (!first_unreachable) first_unreachable=$1
+      }
+      NF == 7 {
+        samples++
+        if (samples == 1) { first=$1; min_root=$3; min_memory=$7 }
+        last=$1; last_memory=$7
+        if ($3 < min_root) min_root=$3
+        if ($7 < min_memory) min_memory=$7
+      }
+      END {
+        print samples+0, first+0, last+0, min_root+0, min_memory+0, last_memory+0,
+          failures+0, first_unreachable+0
+      }
+    ' "$log")"
+    read -r samples first last min_root min_memory last_memory failures first_unreachable \
+      <<<"$values"
+    summary="$(jq -c --arg key "vm$vm" \
+      --argjson samples "$samples" --argjson first "$first" --argjson last "$last" \
+      --argjson min_root "$min_root" --argjson min_memory "$min_memory" \
+      --argjson last_memory "$last_memory" --argjson failures "$failures" \
+      --argjson first_unreachable "$first_unreachable" '
+      . + {($key): {
+        samples: $samples,
+        first_unix: $first,
+        last_unix: $last,
+        min_root_available_bytes: $min_root,
+        min_memory_available_bytes: $min_memory,
+        last_memory_available_bytes: $last_memory,
+        unreachable_samples: $failures,
+        first_unreachable_unix: $first_unreachable
+      }}
+    ' <<<"$summary")"
+  done
+  printf '%s\n' "$summary"
+}
+
+collect_failure_diagnostics() { # <stage> <truncate|append>
+  local stage="${1:?failure diagnostics stage is required}"
+  local write_mode="${2:?failure diagnostics write mode is required}" vm log
+  [ -n "$P0_EVIDENCE" ] || return 0
+  P0_FAILURE_LOG="${P0_EVIDENCE%.json}.failure.log"
+  umask 077
+  case "$write_mode" in
+    truncate) : > "$P0_FAILURE_LOG" ;;
+    append) [ -e "$P0_FAILURE_LOG" ] || : > "$P0_FAILURE_LOG" ;;
+    *) return 2 ;;
+  esac
+  {
+    printf '\n== %s snapshot ==\n' "$stage"
+    printf 'timestamp_utc=%s\nphase=%s\n' "$(date -u +%FT%TZ)" "$P0_CURRENT_PHASE"
+    printf '\n== lease keeper ==\n'
+    [ -z "$LEASE_KEEPER_LOG" ] || tail -n 20 "$LEASE_KEEPER_LOG" 2>/dev/null || true
+    printf '\n== broker status (redacted facade) ==\n'
+    facade_request status 2>&1 || true
+    for vm in 1 2; do
+      printf '\n== VM%s capacity tail ==\n' "$vm"
+      log="${CAPACITY_LOG_DIR:+$CAPACITY_LOG_DIR/vm$vm.tsv}"
+      [ -z "$log" ] || tail -n 20 "$log" 2>/dev/null || true
+      printf '\n== VM%s reachability and kernel memory ==\n' "$vm"
+      timeout --foreground 15 ssh -F "$CONFIG" -T -o ConnectTimeout=5 \
+        "e2e-vm-$vm" -- '
+          systemctl is-system-running 2>/dev/null || true
+          free -b 2>/dev/null || true
+          sudo -n journalctl -k -b --no-pager -o short-iso 2>/dev/null \
+            | grep -iE "out of memory|oom-kill|killed process" | tail -n 30 || true
+        ' 2>&1 || printf 'unreachable\n'
+    done
+  } >> "$P0_FAILURE_LOG"
+  chmod 0600 "$P0_FAILURE_LOG"
 }
 run_phase() {
   local phase="$1" started duration; shift
@@ -264,13 +363,17 @@ cleanup() {
   trap - EXIT INT TERM
   set +e
   if [ "$rc" -ne 0 ] && [ -n "$P0_EVIDENCE" ]; then
-    duration=$((SECONDS - P0_PHASE_STARTED))
-    write_evidence "$P0_CURRENT_PHASE" failed "$rc" "$duration"
-    printf '  [fail] phase=%s status=%s duration=%ss evidence=%s\n' \
-      "$P0_CURRENT_PHASE" "$rc" "$duration" "$P0_EVIDENCE" >&2
+    collect_failure_diagnostics failure-entry truncate
   fi
   stop_runner_children
   stop_capacity_monitors
+  if [ "$rc" -ne 0 ] && [ -n "$P0_EVIDENCE" ]; then
+    duration=$((SECONDS - P0_PHASE_STARTED))
+    collect_failure_diagnostics post-stop append
+    write_evidence "$P0_CURRENT_PHASE" failed "$rc" "$duration"
+    printf '  [fail] phase=%s status=%s duration=%ss evidence=%s diagnostics=%s\n' \
+      "$P0_CURRENT_PHASE" "$rc" "$duration" "$P0_EVIDENCE" "$P0_FAILURE_LOG" >&2
+  fi
   if [ -n "$PROBE_PID" ]; then
     kill -TERM -- "-$PROBE_PID" >/dev/null 2>&1
     wait "$PROBE_PID" >/dev/null 2>&1
@@ -323,26 +426,34 @@ capacity_cache_snapshot() {
 }
 
 capacity_monitor() {
-  local vm="$1" flag="$2" log="$3"
+  local vm="$1" flag="$2" log="$3" sample capacity_sample_command
+  local interval="${P0_E2E_CAPACITY_SAMPLE_SECONDS:-5}"
+  [[ "$interval" =~ ^[1-9][0-9]*$ ]] || interval=5
+  capacity_sample_command="$(quote_ssh_command bash -c '
+    read -r root_used root_available <<EOF
+$(df -B1 --output=used,avail / | awk "NR==2 {print \$1, \$2}")
+EOF
+    inode_used="$(df --output=iused / | awk "NR==2 {print \$1}")"
+    tmp_used="$(df -B1 --output=used /tmp | awk "NR==2 {print \$1}")"
+    read -r memory_used memory_available <<EOF
+$(awk "
+  /MemTotal:/ { total=\$2 }
+  /MemAvailable:/ { available=\$2 }
+  END { print (total-available)*1024, available*1024 }
+" /proc/meminfo)
+EOF
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+      "$(date +%s)" "$root_used" "$root_available" "$inode_used" "$tmp_used" \
+      "$memory_used" "$memory_available"
+  ')"
   while [ -e "$flag" ]; do
-    ssh -F "$CONFIG" -T -o ConnectTimeout=3 "e2e-vm-$vm" -- bash -c '
-      read -r root_used root_available < <(
-        df -B1 --output=used,avail / | awk "NR==2 {print \$1, \$2}"
-      )
-      inode_used="$(df --output=iused / | awk "NR==2 {print \$1}")"
-      tmp_used="$(df -B1 --output=used /tmp | awk "NR==2 {print \$1}")"
-      read -r memory_used memory_available < <(
-        awk "
-          /MemTotal:/ { total=\$2 }
-          /MemAvailable:/ { available=\$2 }
-          END { print (total-available)*1024, available*1024 }
-        " /proc/meminfo
-      )
-      printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
-        "$(date +%s)" "$root_used" "$root_available" "$inode_used" "$tmp_used" \
-        "$memory_used" "$memory_available"
-    ' >> "$log" 2>/dev/null || true
-    sleep 1
+    if sample="$(timeout --foreground 15 ssh -F "$CONFIG" -T -o ConnectTimeout=3 \
+      "e2e-vm-$vm" -- "$capacity_sample_command" 2>/dev/null)"; then
+      printf '%s\n' "$sample" >> "$log"
+    else
+      printf '%s\tunreachable\n' "$(date +%s)" >> "$log"
+    fi
+    sleep "$interval"
   done
 }
 
@@ -363,7 +474,7 @@ start_capacity_monitors() {
 capacity_report() {
   local vm log report root_used root_available inode_used tmp_used memory_used memory_available
   local min_root_available="${P0_E2E_MIN_PEAK_ROOT_RESERVE_BYTES:-1073741824}"
-  local min_memory_available="${P0_E2E_MIN_PEAK_MEMORY_RESERVE_BYTES:-67108864}"
+  local min_memory_available="${P0_E2E_MIN_PEAK_MEMORY_RESERVE_BYTES:-268435456}"
   stop_capacity_monitors
   for vm in 1 2; do
     log="$CAPACITY_LOG_DIR/vm$vm.tsv"
@@ -391,6 +502,22 @@ capacity_report() {
       "$vm" "$root_used" "$root_available" "$inode_used" "$tmp_used" \
       "$memory_used" "$memory_available"
   done
+}
+
+assert_capacity_transport_stable() {
+  local vm log first_unreachable
+  for vm in 1 2; do
+    log="$CAPACITY_LOG_DIR/vm$vm.tsv"
+    [ -r "$log" ] || die "VM$vm capacity monitor log is missing"
+    first_unreachable="$(awk -F '\t' '$2 == "unreachable" { print $1; exit }' "$log")"
+    [ -z "$first_unreachable" ] \
+      || die "VM$vm became unreachable during nested teardown at unix=$first_unreachable"
+  done
+}
+
+targeted_capacity_report() {
+  assert_capacity_transport_stable
+  capacity_report
 }
 
 verify_cache_lifecycle() {
@@ -612,10 +739,10 @@ dependency_lane() {
 }
 
 nested_teardown_lane() {
-  local vm
-  for vm in 1 2; do
-    run_vm "$vm" nested-teardown
-  done
+  # This is a host-boundary invariant, not a role-specific one. Duplicating a memory-intensive
+  # nested QEMU fixture in one lease adds no coverage and increases cumulative resident-pressure
+  # risk. Exercise one explicitly selectable VM and keep both under the capacity/transport canary.
+  run_vm "$P0_NESTED_VM" nested-teardown
 }
 
 source_upgrade_lane() {
@@ -746,8 +873,12 @@ case "$P0_LANE" in
   boundary) run_phase boundary verify_boundary ;;
   nested-teardown)
     run_phase capacity-preflight preflight_lane
+    start_capacity_monitors
     run_phase nested-teardown nested_teardown_lane
     run_phase cleanup cleanup_lane
+    run_phase capacity-report targeted_capacity_report
+    find "$CAPACITY_LOG_DIR" -depth -delete
+    CAPACITY_LOG_DIR=''
     ;;
   transport) run_phase transport transport_probes ;;
   dependencies) run_phase dependencies dependency_lane ;;

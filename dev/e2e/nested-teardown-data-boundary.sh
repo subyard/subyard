@@ -3,6 +3,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=scripts/lib-power.sh
+. "$ROOT/scripts/lib-power.sh"
 STATE=''
 OUTER_YARD=''
 OUTER_PROJECT=''
@@ -10,6 +12,9 @@ OUTER_INSTANCE=''
 OUTER_POOL=''
 OUTER_BRIDGE=''
 DEFAULT_POOL_BEFORE=''
+HOST_DEFAULT_ROUTE_BEFORE=''
+HOST_GLOBAL_IPV4_BEFORE=''
+BASELINE_BRIDGE=incusbr0
 
 die() { printf 'nested-teardown-boundary: %s\n' "$*" >&2; exit 2; }
 
@@ -64,6 +69,37 @@ assert_default_pool_unchanged() {
   before_hash="$(printf '%s' "$DEFAULT_POOL_BEFORE" | sha256sum | awk '{print $1}')"
   after_hash="$(printf '%s' "$after" | sha256sum | awk '{print $1}')"
   die "candidate lifecycle changed the default Incus pool: before=$before_hash after=$after_hash"
+}
+
+assert_host_network_unchanged() {
+  local routes addresses
+  routes="$(ip -4 route show default | sort)"
+  addresses="$(ip -4 -o address show scope global | awk '{print $2, $4}' | sort)"
+  [ "$routes" = "$HOST_DEFAULT_ROUTE_BEFORE" ] \
+    || die 'candidate lifecycle changed the allocated host default route'
+  [ "$addresses" = "$HOST_GLOBAL_IPV4_BEFORE" ] \
+    || die 'candidate lifecycle changed the allocated host global IPv4 addresses'
+  incus network show "$BASELINE_BRIDGE" --project default >/dev/null 2>&1 \
+    || die "candidate teardown removed surviving bridge $BASELINE_BRIDGE"
+  power_nm_prepare_reader \
+    || die "cannot prepare NetworkManager safety check: $POWER_ERROR"
+  power_host_safe "$BASELINE_BRIDGE" \
+    || die "allocated host is unsafe after candidate teardown: $POWER_ERROR"
+}
+
+require_nested_memory_reserve() {
+  local vm_budget="${NESTED_TEARDOWN_VM_MEMORY_BYTES:-2147483648}"
+  local host_reserve="${NESTED_TEARDOWN_POST_LAUNCH_RESERVE_BYTES:-1073741824}"
+  local minimum available
+  [[ "$vm_budget" =~ ^[1-9][0-9]*$ ]] \
+    || die 'nested VM memory budget must be a positive integer'
+  [[ "$host_reserve" =~ ^[1-9][0-9]*$ ]] \
+    || die 'post-launch host memory reserve must be a positive integer'
+  minimum=$((vm_budget + host_reserve))
+  available="$(awk '/MemAvailable:/ { printf "%.0f\n", $2 * 1024; exit }' /proc/meminfo)"
+  [[ "$available" =~ ^[0-9]+$ ]] || die 'could not inspect available host memory'
+  [ "$available" -ge "$minimum" ] \
+    || die "nested fixture needs $vm_budget bytes for its VM plus $host_reserve bytes host reserve; have $available"
 }
 
 assert_outer_vm_ssh_address() {
@@ -140,6 +176,10 @@ OUTER_INSTANCE="yard-$OUTER_YARD"
 OUTER_POOL="nested-e2e-$token"
 OUTER_BRIDGE="ne${token:0:8}br0"
 DEFAULT_POOL_BEFORE="$(default_pool_snapshot)"
+HOST_DEFAULT_ROUTE_BEFORE="$(ip -4 route show default | sort)"
+HOST_GLOBAL_IPV4_BEFORE="$(ip -4 -o address show scope global | awk '{print $2, $4}' | sort)"
+incus network show "$BASELINE_BRIDGE" --project default >/dev/null 2>&1 \
+  || die "baseline Incus bridge $BASELINE_BRIDGE is missing"
 
 incus project show "$OUTER_PROJECT" >/dev/null 2>&1 \
   && die "refusing existing project $OUTER_PROJECT"
@@ -172,8 +212,8 @@ cat > "$SUBYARD_CONFIG_HOME/yards/$OUTER_YARD/config.env" <<EOF
 SSH_PORT=$ssh_port
 CODING_TOOL_INTEGRATIONS=
 YARD_KIND=vm
-LIMITS_CPU=4
-LIMITS_MEMORY=3GiB
+LIMITS_CPU=2
+LIMITS_MEMORY=2GiB
 SRV_POOL=$OUTER_POOL
 INCUS_BRIDGE=$OUTER_BRIDGE
 HOST_MOUNTS=
@@ -185,6 +225,7 @@ DEV_SUDO=1
 NESTED_E2E_VMS=0
 EOF
 
+require_nested_memory_reserve
 printf '  [ .. ] creating the outer yard\n'
 yard init --yes
 incus network set "$OUTER_BRIDGE" user.subyard.owner=nested-teardown-e2e-v1 \
@@ -277,5 +318,6 @@ yard teardown --yes
 ! incus project show "$OUTER_PROJECT" >/dev/null 2>&1 \
   || die 'outer project remains after teardown'
 assert_default_pool_unchanged
+assert_host_network_unchanged
 
 printf 'ok: nested teardown preserves the outer yard boundary, foreign data and default pool\n'

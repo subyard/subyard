@@ -463,19 +463,40 @@ func (runner ProjectActionRunner) removeEnvironment(ctx context.Context) error {
 		return err
 	}
 	box := "subyard-box-" + state.ProjectTechnicalID(runner.Project)
-	if _, err := runner.Data.Execute(ctx, runner.Yard, ports.InstanceExecRequest{
-		Command: []string{"docker", "inspect", box},
-	}); err == nil {
+	result, err := runner.Data.Execute(ctx, runner.Yard, ports.InstanceExecRequest{
+		Command: []string{
+			"docker", "inspect", "-f", projectEnvironmentOwnershipFormat, box,
+		},
+	})
+	if err == nil {
+		containerID, ownershipErr := projectEnvironmentContainerID(runner.Project, result.Stdout)
+		if ownershipErr != nil {
+			return ownershipErr
+		}
 		if err := runner.execute(ctx, "remove project environment", ports.InstanceExecRequest{
-			Command: []string{"docker", "rm", "-f", box},
+			Command: []string{"docker", "rm", "-f", containerID},
 		}); err != nil {
 			return err
 		}
+	} else if !dockerEnvironmentMissing(result, err) {
+		return executionError("inspect project environment ownership", result, err)
 	}
 	return runner.execute(ctx, "remove staged project environment", ports.InstanceExecRequest{
 		Command: []string{"rm", "-rf", "--", "/srv/env-secrets/" + runner.Project.ProjectID,
 			"/srv/env-meta/" + runner.Project.ProjectID},
 	})
+}
+
+func dockerEnvironmentMissing(result ports.InstanceExecResult, err error) bool {
+	if result.ExitCode != 1 {
+		return false
+	}
+	diagnostic := string(result.Stderr)
+	if err != nil {
+		diagnostic += "\n" + err.Error()
+	}
+	diagnostic = strings.ToLower(diagnostic)
+	return strings.Contains(diagnostic, "no such object") || strings.Contains(diagnostic, "no such container")
 }
 
 func (runner ProjectActionRunner) execute(ctx context.Context, step string, request ports.InstanceExecRequest) error {

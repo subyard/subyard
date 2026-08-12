@@ -2743,6 +2743,9 @@ func (cli *CLI) runStructuredCommand(
 		testVMRun, err = cli.prepareTestVMExecution(ctx, loaded, arguments)
 		if err != nil {
 			cli.errorf("prepare test-vms: %v", err)
+			if errors.Is(err, domain.ErrPlanStale) {
+				return 1
+			}
 			return 2
 		}
 	}
@@ -2817,6 +2820,13 @@ func (cli *CLI) runStructuredCommand(
 	}
 	if plan.Target == domain.TargetRemoteOwner {
 		remoteArguments := append([]string(nil), arguments...)
+		if testVMRun != nil {
+			remoteArguments, err = testVMRun.remoteArguments(arguments)
+			if err != nil {
+				cli.errorf("prepare remote test-vms: %v", err)
+				return 1
+			}
+		}
 		hasYes := false
 		for _, argument := range remoteArguments {
 			hasYes = hasYes || argument == "-y" || argument == "--yes"

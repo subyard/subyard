@@ -768,3 +768,118 @@ func TestLeaseStoreRecoveryBackoffNeverBecomesTerminal(t *testing.T) {
 		t.Fatalf("eventual recovery = %#v", available)
 	}
 }
+
+func TestLeaseStoreExpectedDrainFencesOnlyTheSnapshottedLease(t *testing.T) {
+	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1}
+	original, err := store.Acquire("original", "SHA256:key", "", "stale-drain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := LeaseIdentity{
+		SlotID: original.SlotID, ResourceGeneration: original.ResourceGeneration,
+		LeaseEpoch: original.LeaseEpoch,
+	}
+	if err := store.BeginDrainSlot(original.SlotID, "fixture replacement"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinishDrain(original.SlotID, nil); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := store.AcquireSlot(
+		"replacement", "SHA256:key", "", "stale-drain", original.SlotID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if started, err := store.BeginExpectedDrain(expected, "operator revoke"); !errors.Is(err, ErrLeaseTargetStale) || started {
+		t.Fatalf("stale drain = %v, %v", started, err)
+	}
+	pool, err := store.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pool.Slots[0].State != SlotProvisioning ||
+		pool.Slots[0].LeaseEpoch != replacement.LeaseEpoch {
+		t.Fatalf("replacement was fenced: %#v", pool.Slots[0])
+	}
+}
+
+func TestLeaseStoreExpectedDrainStartsMatchingTargetAndSkipsCompletedTarget(t *testing.T) {
+	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1}
+	grant, err := store.Acquire("client", "SHA256:key", "", "exact-drain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := LeaseIdentity{
+		SlotID: grant.SlotID, ResourceGeneration: grant.ResourceGeneration,
+		LeaseEpoch: grant.LeaseEpoch,
+	}
+	started, err := store.BeginExpectedDrain(expected, "operator revoke")
+	if err != nil || !started {
+		t.Fatalf("matching drain = %v, %v", started, err)
+	}
+	if err := store.FinishDrain(grant.SlotID, nil); err != nil {
+		t.Fatal(err)
+	}
+	started, err = store.BeginExpectedDrain(expected, "operator revoke retry")
+	if err != nil || started {
+		t.Fatalf("completed drain retry = %v, %v", started, err)
+	}
+}
+
+func TestLeaseStoreExpectedRecoveryRejectsReplacementPair(t *testing.T) {
+	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1}
+	grant, err := store.Acquire("client", "SHA256:key", "", "stale-recovery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := LeaseIdentity{
+		SlotID: grant.SlotID, ResourceGeneration: grant.ResourceGeneration,
+		LeaseEpoch: grant.LeaseEpoch,
+	}
+	if err := store.Quarantine(grant, errors.New("fixture quarantine")); err != nil {
+		t.Fatal(err)
+	}
+	if _, started, err := store.BeginScheduledRecovery(grant.SlotID, true); err != nil || !started {
+		t.Fatalf("begin fixture recovery = %v, %v", started, err)
+	}
+	if _, err := store.FinishRecovery(grant.SlotID, nil, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, started, err := store.BeginExpectedRecovery(expected); !errors.Is(err, ErrLeaseTargetStale) || started {
+		t.Fatalf("stale recovery = %v, %v", started, err)
+	}
+	pool, err := store.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pool.Slots[0].State != SlotAvailable ||
+		pool.Slots[0].ResourceGeneration == expected.ResourceGeneration {
+		t.Fatalf("replacement pair was mutated: %#v", pool.Slots[0])
+	}
+}
+
+func TestLeaseStoreExpectedRecoveryStartsMatchingTargetAndDoesNotRestartIt(t *testing.T) {
+	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1}
+	grant, err := store.Acquire("client", "SHA256:key", "", "exact-recovery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Quarantine(grant, errors.New("fixture quarantine")); err != nil {
+		t.Fatal(err)
+	}
+	expected := LeaseIdentity{
+		SlotID: grant.SlotID, ResourceGeneration: grant.ResourceGeneration,
+		LeaseEpoch: grant.LeaseEpoch,
+	}
+	startedSlot, started, err := store.BeginExpectedRecovery(expected)
+	if err != nil || !started || startedSlot.State != SlotRecovering ||
+		startedSlot.RecoveryAttempt != 1 {
+		t.Fatalf("matching recovery = %#v, %v, %v", startedSlot, started, err)
+	}
+	retrySlot, started, err := store.BeginExpectedRecovery(expected)
+	if err != nil || started || retrySlot.State != SlotRecovering ||
+		retrySlot.RecoveryAttempt != 1 {
+		t.Fatalf("in-flight recovery retry = %#v, %v, %v", retrySlot, started, err)
+	}
+}

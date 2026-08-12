@@ -117,7 +117,7 @@ func TestProjectEnvironmentInfoAndDownUseDataPlane(t *testing.T) {
 		}
 		if len(request.Command) >= 3 && request.Command[0] == "docker" &&
 			request.Command[1] == "inspect" && request.Command[2] == "-f" {
-			return ports.InstanceExecResult{Stdout: []byte("1\tdemo-12345678\topenclaw\n")}, nil
+			return ports.InstanceExecResult{Stdout: []byte("sha256:owned\t1\tdemo-12345678\topenclaw\n")}, nil
 		}
 		return ports.InstanceExecResult{}, nil
 	}}
@@ -135,16 +135,88 @@ func TestProjectEnvironmentInfoAndDownUseDataPlane(t *testing.T) {
 		t.Fatalf("project environment down failed: output=%q err=%v", output, err)
 	}
 	last := data.requests[len(data.requests)-1].Command
-	if !slices.Equal(last, []string{"docker", "stop", "subyard-box-demo-12345678"}) {
+	if !slices.Equal(last, []string{"docker", "stop", "sha256:owned"}) {
 		t.Fatalf("unexpected down command: %#v", last)
 	}
+}
+
+func TestProjectEnvironmentExistingBoxUsesImmutableIDForStartAndSessionLinks(t *testing.T) {
+	data := &projectDataStub{run: func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+		command := request.Command
+		if len(command) >= 3 && command[0] == "docker" &&
+			command[1] == "inspect" && command[2] == "-f" {
+			return ports.InstanceExecResult{
+				Stdout: []byte("sha256:owned\t1\tdemo-12345678\topenclaw\n"),
+			}, nil
+		}
+		return ports.InstanceExecResult{}, nil
+	}}
+	runner := ProjectEnvironmentRunner{
+		Data: data, Yard: domain.Context{DevUID: 1000}, Project: cloneRecord(),
+		Profile:   ProjectEnvironmentProfile{BaseImage: "ubuntu:24.04"},
+		HostLinks: []string{".codex:/mnt/host/agent-sessions/codex:dir"},
+	}
+	if _, _, err := runner.Run(context.Background(), domain.AdapterRequest{
+		Schema: 1, OperationID: "operation-env-existing", Adapter: "project-env", Action: "up",
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	foundStart, foundLink := false, false
+	for _, request := range data.requests {
+		command := request.Command
+		if slices.Equal(command, []string{"docker", "start", "sha256:owned"}) {
+			foundStart = true
+		}
+		if len(command) >= 6 && command[0] == "docker" && command[1] == "exec" {
+			if command[4] != "sha256:owned" {
+				t.Fatalf("session link used reusable container name: %#v", command)
+			}
+			foundLink = true
+		}
+	}
+	if !foundStart || !foundLink {
+		t.Fatalf("immutable start/link commands missing: %#v", data.requests)
+	}
+}
+
+func TestProjectEnvironmentNewBoxUsesReturnedIDForSessionLinks(t *testing.T) {
+	data := &projectDataStub{run: func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+		command := request.Command
+		if slices.Equal(command, []string{"docker", "inspect", "subyard-box-demo-12345678"}) {
+			return ports.InstanceExecResult{ExitCode: 1}, errors.New("not found")
+		}
+		if len(command) >= 2 && command[0] == "docker" && command[1] == "run" {
+			return ports.InstanceExecResult{Stdout: []byte("sha256:new-container\n")}, nil
+		}
+		return ports.InstanceExecResult{}, nil
+	}}
+	runner := ProjectEnvironmentRunner{
+		Data: data, Yard: domain.Context{DevUID: 1000}, Project: cloneRecord(),
+		Profile:   ProjectEnvironmentProfile{BaseImage: "ubuntu:24.04"},
+		HostLinks: []string{".codex:/mnt/host/agent-sessions/codex:dir"},
+	}
+	if _, _, err := runner.Run(context.Background(), domain.AdapterRequest{
+		Schema: 1, OperationID: "operation-env-new", Adapter: "project-env", Action: "up",
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, request := range data.requests {
+		command := request.Command
+		if len(command) >= 6 && command[0] == "docker" && command[1] == "exec" {
+			if command[4] != "sha256:new-container" {
+				t.Fatalf("new box session link used reusable container name: %#v", command)
+			}
+			return
+		}
+	}
+	t.Fatalf("new box session link was not created: %#v", data.requests)
 }
 
 func TestProjectEnvironmentDownRejectsUnownedBox(t *testing.T) {
 	data := &projectDataStub{run: func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
 		if len(request.Command) >= 3 && request.Command[0] == "docker" &&
 			request.Command[1] == "inspect" && request.Command[2] == "-f" {
-			return ports.InstanceExecResult{Stdout: []byte("\t\t\n")}, nil
+			return ports.InstanceExecResult{Stdout: []byte("sha256:foreign\t\t\t\n")}, nil
 		}
 		return ports.InstanceExecResult{}, nil
 	}}
@@ -168,7 +240,7 @@ func TestProjectEnvironmentRebuildRecreatesOwnedBox(t *testing.T) {
 			return ports.InstanceExecResult{ExitCode: 1}, errors.New("missing")
 		}
 		if len(command) >= 3 && command[0] == "docker" && command[1] == "inspect" && command[2] == "-f" {
-			return ports.InstanceExecResult{Stdout: []byte("1\tdemo-12345678\topenclaw\n")}, nil
+			return ports.InstanceExecResult{Stdout: []byte("sha256:owned\t1\tdemo-12345678\topenclaw\n")}, nil
 		}
 		return ports.InstanceExecResult{}, nil
 	}}
@@ -187,6 +259,9 @@ func TestProjectEnvironmentRebuildRecreatesOwnedBox(t *testing.T) {
 		if len(command) >= 2 && command[0] == "docker" {
 			switch command[1] {
 			case "rm":
+				if !slices.Equal(command, []string{"docker", "rm", "-f", "sha256:owned"}) {
+					t.Fatalf("rebuild removal used reusable container name: %#v", command)
+				}
 				removeIndex = index
 			case "run":
 				runIndex = index
@@ -207,7 +282,7 @@ func TestProjectEnvironmentRebuildRejectsUnownedBox(t *testing.T) {
 			return ports.InstanceExecResult{ExitCode: 1}, errors.New("missing")
 		}
 		if len(command) >= 3 && command[0] == "docker" && command[1] == "inspect" && command[2] == "-f" {
-			return ports.InstanceExecResult{Stdout: []byte("\t\t\n")}, nil
+			return ports.InstanceExecResult{Stdout: []byte("sha256:foreign\t\t\t\n")}, nil
 		}
 		return ports.InstanceExecResult{}, nil
 	}}

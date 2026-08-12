@@ -197,7 +197,12 @@ func TestFacadeReleaseReplayAndWrongCredentialsReturnLeaseLost(t *testing.T) {
 			grant.ExpiresAt = expires
 			return grant, err
 		},
-		OnRelease: func(LeaseGrant) error { return nil },
+		OnRelease: func(grant LeaseGrant) error {
+			if err := store.BeginDrain(grant); err != nil {
+				return err
+			}
+			return store.FinishDrain(grant.SlotID, nil)
+		},
 	}
 	key := strings.Fields(fixturePublicKey(t))
 	if err := facade.Run("acquire client SHA256:key checkout tests " + key[0] + " " + key[1]); err != nil {

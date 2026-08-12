@@ -249,9 +249,40 @@ grep -Fq 'run_vm "$vm" capacity-preflight' "$ROOT/dev/e2e/p0-acceptance.sh" \
   && grep -Fq 'capacity-verify-cleanup' "$ROOT/dev/e2e/p0-acceptance.sh" \
   && grep -Fq 'capacity_report' "$ROOT/dev/e2e/p0-acceptance.sh" \
   || fail "P0 acceptance does not enforce capacity preflight, peak reporting and exact cleanup"
-grep -Fq 'P0_E2E_MIN_PEAK_MEMORY_RESERVE_BYTES:-67108864' \
+grep -Fq 'P0_E2E_MIN_PEAK_MEMORY_RESERVE_BYTES:-268435456' \
   "$ROOT/dev/e2e/p0-acceptance.sh" \
-  || fail "P0 acceptance does not keep only the 64 MiB minimum peak memory reserve"
+  || fail "P0 acceptance does not preserve a 256 MiB minimum peak memory reserve"
+grep -Fq 'first_unreachable_unix' "$ROOT/dev/e2e/p0-acceptance.sh" \
+  && grep -Fq 'collect_failure_diagnostics' "$ROOT/dev/e2e/p0-acceptance.sh" \
+  && grep -Fq 'lease_keeper_last' "$ROOT/dev/e2e/p0-acceptance.sh" \
+  || fail "P0 acceptance does not persist transport, capacity and lease failure evidence"
+grep -Fq 'P0_NESTED_VM="${SUBYARD_P0_NESTED_VM:-1}"' \
+  "$ROOT/dev/e2e/p0-acceptance.sh" \
+  && grep -Fq 'case "$P0_NESTED_VM" in' "$ROOT/dev/e2e/p0-acceptance.sh" \
+  && grep -Fq 'run_vm "$P0_NESTED_VM" nested-teardown' \
+    "$ROOT/dev/e2e/p0-acceptance.sh" \
+  || fail "P0 nested teardown repeats a host-boundary fixture across one shared allocation"
+grep -Fq 'run_phase capacity-report targeted_capacity_report' \
+  "$ROOT/dev/e2e/p0-acceptance.sh" \
+  && [ "$(grep -Fc '    start_capacity_monitors' \
+    "$ROOT/dev/e2e/p0-acceptance.sh")" -eq 2 ] \
+  || fail "targeted nested teardown does not monitor both allocated VMs through cleanup"
+grep -Fq 'assert_capacity_transport_stable' "$ROOT/dev/e2e/p0-acceptance.sh" \
+  || fail "targeted nested teardown can pass after losing an allocated VM"
+grep -Fq 'capacity_sample_command="$(quote_ssh_command bash -c' \
+  "$ROOT/dev/e2e/p0-acceptance.sh" \
+  || fail "P0 capacity monitor loses its remote bash command at the OpenSSH argv boundary"
+grep -Fq 'collect_failure_diagnostics failure-entry truncate' \
+  "$ROOT/dev/e2e/p0-acceptance.sh" \
+  && grep -Fq 'collect_failure_diagnostics post-stop append' \
+    "$ROOT/dev/e2e/p0-acceptance.sh" \
+  || fail "P0 failure evidence cannot distinguish failure-entry state from post-stop state"
+grep -Fq 'LIMITS_MEMORY=2GiB' "$ROOT/dev/e2e/nested-teardown-data-boundary.sh" \
+  && grep -Fq 'NESTED_TEARDOWN_VM_MEMORY_BYTES:-2147483648' \
+    "$ROOT/dev/e2e/nested-teardown-data-boundary.sh" \
+  && grep -Fq 'NESTED_TEARDOWN_POST_LAUNCH_RESERVE_BYTES:-1073741824' \
+    "$ROOT/dev/e2e/nested-teardown-data-boundary.sh" \
+  || fail "nested teardown fixture can exhaust its 4 GiB allocated host"
 lane_inventory="$("$ROOT/dev/e2e/p0-acceptance.sh" --list-lanes)"
 for lane in boundary nested-teardown transport dependencies real-incus profile-resource release source-upgrade \
   reboot-verify peer peer-cleanup cleanup; do

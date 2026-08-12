@@ -10,6 +10,13 @@ import (
 	"syscall"
 )
 
+var ErrPersistentTargetStale = errors.New("persistent configuration target is stale")
+
+type PersistentFileSnapshot struct {
+	Exists  bool
+	Content []byte
+}
+
 // WritePersistentAssignment updates one assignment without rewriting unrelated
 // comments or records. A nil value removes every assignment for name.
 func WritePersistentAssignment(
@@ -18,17 +25,44 @@ func WritePersistentAssignment(
 	name string,
 	value *string,
 ) error {
+	return writePersistentAssignment(configHome, path, name, value, nil)
+}
+
+// WritePersistentAssignmentIfUnchanged updates an assignment only when the
+// complete target still matches the bytes and existence observed at preview.
+func WritePersistentAssignmentIfUnchanged(
+	configHome string,
+	path string,
+	name string,
+	value *string,
+	expected PersistentFileSnapshot,
+) error {
+	return writePersistentAssignment(configHome, path, name, value, &expected)
+}
+
+func writePersistentAssignment(
+	configHome string,
+	path string,
+	name string,
+	value *string,
+	expected *PersistentFileSnapshot,
+) error {
+	if err := ensurePersistentRoot(configHome); err != nil {
+		return err
+	}
 	unlock, err := LockRoot(configHome, true)
 	if err != nil {
 		return err
 	}
 	defer unlock()
-	content, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		content = nil
-	} else if err != nil {
+	current, err := persistentFileSnapshot(path)
+	if err != nil {
 		return err
 	}
+	if expected != nil && !samePersistentFileSnapshot(current, *expected) {
+		return ErrPersistentTargetStale
+	}
+	content := current.Content
 	updated, err := EditPersistentAssignmentContent(path, content, name, value)
 	if err != nil {
 		return err
@@ -81,6 +115,56 @@ func WritePersistentFile(configHome, path string, content []byte) error {
 	}
 	defer unlock()
 	return writePersistentFile(configHome, path, content)
+}
+
+// WritePersistentFileIfUnchanged replaces a persistent file only when the
+// complete target still matches the bytes and existence observed at preview.
+func WritePersistentFileIfUnchanged(
+	configHome string,
+	path string,
+	expected PersistentFileSnapshot,
+	content []byte,
+) error {
+	if err := ensurePersistentRoot(configHome); err != nil {
+		return err
+	}
+	unlock, err := LockRoot(configHome, true)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	current, err := persistentFileSnapshot(path)
+	if err != nil {
+		return err
+	}
+	if !samePersistentFileSnapshot(current, expected) {
+		return ErrPersistentTargetStale
+	}
+	return writePersistentFile(configHome, path, content)
+}
+
+func persistentFileSnapshot(path string) (PersistentFileSnapshot, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return PersistentFileSnapshot{}, nil
+	}
+	if err != nil {
+		return PersistentFileSnapshot{}, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() > 8<<20 {
+		return PersistentFileSnapshot{}, errors.New(
+			"persistent setting target must be a bounded regular non-symlink file",
+		)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return PersistentFileSnapshot{}, err
+	}
+	return PersistentFileSnapshot{Exists: true, Content: content}, nil
+}
+
+func samePersistentFileSnapshot(current, expected PersistentFileSnapshot) bool {
+	return current.Exists == expected.Exists && bytes.Equal(current.Content, expected.Content)
 }
 
 // CreatePersistentFile atomically stores a new persistent file and refuses to

@@ -378,12 +378,15 @@ func TestUnavailableInnerIncusIsNotTreatedAsAnAbsentProject(t *testing.T) {
 
 func TestQuarantineLocalSpoolFailureBlocksDestructiveRecovery(t *testing.T) {
 	root := t.TempDir()
-	stateFile := filepath.Join(root, "state-is-a-file")
-	if err := os.WriteFile(stateFile, []byte("fixture"), 0o600); err != nil {
+	stateRoot := filepath.Join(root, "state")
+	if err := os.MkdirAll(stateRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateRoot, "spool"), []byte("fixture"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg := fixtureConfig(t)
-	cfg.StateDir = stateFile
+	cfg.StateDir = stateRoot
 	store := LeaseStore{
 		Path:      filepath.Join(root, "leases.json"),
 		SlotCount: 1,
@@ -952,6 +955,265 @@ func TestLeaseDataAccountPolicyIsAtomic(t *testing.T) {
 	authorized, _ = os.ReadFile(cfg.AgentAuthorizedKeys)
 	if strings.Contains(string(authorized), "port-forwarding") {
 		t.Fatal("down policy retained forwarding")
+	}
+}
+
+func TestRuntimeMutatingSlotCommandsRequireExpectedIdentity(t *testing.T) {
+	for _, action := range []string{"revoke-slot-1", "recover-slot-1"} {
+		t.Run(action, func(t *testing.T) {
+			runtime := Runtime{
+				Config: fixtureConfig(t), Runner: &fakeRunner{},
+				Stdout: io.Discard, Stderr: io.Discard,
+			}
+			err := runtime.Run(context.Background(), []string{action, "--yes"}, nil)
+			if err == nil || !strings.Contains(err.Error(), "complete lease target identity") {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
+
+func TestRuntimeRejectsStaleRevokeBeforePhysicalStop(t *testing.T) {
+	cfg := fixtureConfig(t)
+	store := LeaseStore{Path: cfg.leaseState(), SlotCount: cfg.SlotCount}
+	original, err := store.AcquireSlot("original", "SHA256:key", "", "stale", "slot-001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := LeaseIdentity{
+		SlotID: original.SlotID, ResourceGeneration: original.ResourceGeneration,
+		LeaseEpoch: original.LeaseEpoch,
+	}
+	if err := store.BeginDrainSlot(original.SlotID, "fixture replacement"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinishDrain(original.SlotID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AcquireSlot("replacement", "SHA256:key", "", "stale", "slot-001"); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{}
+	runtime := Runtime{Config: cfg, Runner: runner, Stdout: io.Discard, Stderr: io.Discard}
+	if err := runtime.RevokeExpectedSlot(context.Background(), store, expected); !errors.Is(err, ErrLeaseTargetStale) {
+		t.Fatalf("error = %v", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("stale revoke reached physical runner: %#v", runner.calls)
+	}
+}
+
+func TestRuntimeExpectedRevokeDoesNotReapUnrelatedDrainingSlot(t *testing.T) {
+	cfg := fixtureConfig(t)
+	store := LeaseStore{Path: cfg.leaseState(), SlotCount: cfg.SlotCount}
+	target, err := store.AcquireSlot("target", "SHA256:key", "", "targeted-revoke", "slot-001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unrelated, err := store.AcquireSlot("unrelated", "SHA256:key", "", "targeted-revoke", "slot-002")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BeginDrainSlot(unrelated.SlotID, "unrelated background drain"); err != nil {
+		t.Fatal(err)
+	}
+	runtime := Runtime{
+		Config: cfg, Runner: &fakeRunner{}, Stdout: io.Discard, Stderr: io.Discard,
+	}
+	err = runtime.RevokeExpectedSlot(context.Background(), store, LeaseIdentity{
+		SlotID: target.SlotID, ResourceGeneration: target.ResourceGeneration,
+		LeaseEpoch: target.LeaseEpoch,
+	})
+	if err == nil || !strings.Contains(err.Error(), "agent bastion account is missing") {
+		t.Fatalf("target fixture error = %v", err)
+	}
+	pool, err := store.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pool.Slots[0].State != SlotQuarantined {
+		t.Fatalf("target state = %s", pool.Slots[0].State)
+	}
+	if pool.Slots[1].State != SlotDraining || pool.Slots[1].LeaseEpoch != unrelated.LeaseEpoch {
+		t.Fatalf("unrelated slot was reaped by targeted revoke: %#v", pool.Slots[1])
+	}
+}
+
+func TestRuntimeSerializesReleaseWithBackgroundDrain(t *testing.T) {
+	cfg := fixtureConfig(t)
+	store := LeaseStore{Path: cfg.leaseState(), SlotCount: cfg.SlotCount}
+	grant, err := store.AcquireSlot("client", "SHA256:key", "", "release", "slot-001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.MarkHeld(grant); err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	allowFinish := make(chan struct{})
+	stops := 0
+	runtime := Runtime{
+		Config: cfg, Runner: &fakeRunner{}, Stdout: io.Discard, Stderr: io.Discard,
+	}
+	runtime.finishDrain = func(_ context.Context, store LeaseStore, slot LeaseSlot) error {
+		stops++
+		if stops == 1 {
+			close(entered)
+			<-allowFinish
+		}
+		return store.FinishDrain(slot.SlotID, nil)
+	}
+	releaseDone := make(chan error, 1)
+	go func() {
+		releaseDone <- runtime.ReleaseSlot(context.Background(), store, grant)
+	}()
+	<-entered
+	reapDone := make(chan error, 1)
+	go func() {
+		reapDone <- runtime.ReapExpired(context.Background(), store)
+	}()
+	close(allowFinish)
+	if err := <-releaseDone; err != nil {
+		t.Fatalf("release = %v", err)
+	}
+	if err := <-reapDone; err != nil {
+		t.Fatalf("reap = %v", err)
+	}
+	if stops != 1 {
+		t.Fatalf("physical stop count = %d, want 1", stops)
+	}
+	replacement, err := store.AcquireSlot(
+		"replacement", "SHA256:replacement", "", "replacement", "slot-001",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replacement.LeaseEpoch == grant.LeaseEpoch {
+		t.Fatal("replacement reused the released lease epoch")
+	}
+}
+
+func TestRuntimeSerializesQuarantineFencingBeforeRecovery(t *testing.T) {
+	cfg := fixtureConfig(t)
+	store := LeaseStore{Path: cfg.leaseState(), SlotCount: cfg.SlotCount}
+	grant, err := store.AcquireSlot("client", "SHA256:key", "", "quarantine", "slot-001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.MarkHeld(grant); err != nil {
+		t.Fatal(err)
+	}
+	cause := errors.New("fixture fencing failure")
+	if err := store.Quarantine(grant, cause); err != nil {
+		t.Fatal(err)
+	}
+	fencingStarted := make(chan struct{})
+	allowFencing := make(chan struct{})
+	recoveryStarted := make(chan struct{})
+	quarantineCalls := 0
+	runtime := Runtime{
+		Config: cfg, Runner: &fakeRunner{}, Stdout: io.Discard, Stderr: io.Discard,
+	}
+	runtime.finishQuarantine = func(
+		_ context.Context, store LeaseStore, slot LeaseSlot, _ error,
+	) error {
+		quarantineCalls++
+		close(fencingStarted)
+		<-allowFencing
+		return store.SetQuarantineIncident(
+			slot.SlotID,
+			"00000000000000000001-0123456789abcdef",
+			"00000000000000000002-fedcba9876543210",
+		)
+	}
+	runtime.finishRecovery = func(
+		_ context.Context, store LeaseStore, slot LeaseSlot,
+	) error {
+		close(recoveryStarted)
+		_, err := store.FinishRecovery(slot.SlotID, nil, "", "")
+		return err
+	}
+	fencingDone := make(chan error, 1)
+	go func() {
+		fencingDone <- runtime.HandleQuarantine(
+			context.Background(), store, grant.SlotID, cause,
+		)
+	}()
+	<-fencingStarted
+	recoveryDone := make(chan error, 1)
+	go func() {
+		recoveryDone <- runtime.RecoverScheduled(
+			context.Background(), store, grant.SlotID, true,
+		)
+	}()
+	select {
+	case <-recoveryStarted:
+		t.Fatal("recovery started before quarantine fencing completed")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(allowFencing)
+	if err := <-fencingDone; err != nil {
+		t.Fatalf("quarantine fencing = %v", err)
+	}
+	if err := <-recoveryDone; err != nil {
+		t.Fatalf("recovery = %v", err)
+	}
+	if quarantineCalls != 1 {
+		t.Fatalf("quarantine fencing calls = %d, want 1", quarantineCalls)
+	}
+	replacement, err := store.AcquireSlot(
+		"replacement", "SHA256:replacement", "", "replacement", "slot-001",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replacement.ResourceGeneration <= grant.ResourceGeneration {
+		t.Fatal("recovery did not publish a new resource generation")
+	}
+}
+
+func TestRuntimeRejectsStaleRecoveryBeforePhysicalRebuild(t *testing.T) {
+	cfg := fixtureConfig(t)
+	store := LeaseStore{Path: cfg.leaseState(), SlotCount: cfg.SlotCount}
+	original, err := store.AcquireSlot("original", "SHA256:key", "", "stale", "slot-001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := LeaseIdentity{
+		SlotID: original.SlotID, ResourceGeneration: original.ResourceGeneration,
+		LeaseEpoch: original.LeaseEpoch,
+	}
+	if err := store.Quarantine(original, errors.New("fixture quarantine")); err != nil {
+		t.Fatal(err)
+	}
+	if _, started, err := store.BeginScheduledRecovery(original.SlotID, true); err != nil || !started {
+		t.Fatalf("begin fixture recovery = %v, %v", started, err)
+	}
+	if _, err := store.FinishRecovery(original.SlotID, nil, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{}
+	runtime := Runtime{Config: cfg, Runner: runner, Stdout: io.Discard, Stderr: io.Discard}
+	if err := runtime.RecoverExpectedSlot(context.Background(), store, expected); !errors.Is(err, ErrLeaseTargetStale) {
+		t.Fatalf("error = %v", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("stale recovery reached physical runner: %#v", runner.calls)
+	}
+}
+
+func TestRuntimeRejectsInvalidExpectedRecoveryIdentityBeforeCreatingLockPath(t *testing.T) {
+	cfg := fixtureConfig(t)
+	store := LeaseStore{Path: cfg.leaseState(), SlotCount: cfg.SlotCount}
+	runtime := Runtime{Config: cfg, Runner: &fakeRunner{}, Stdout: io.Discard, Stderr: io.Discard}
+	err := runtime.RecoverExpectedSlot(context.Background(), store, LeaseIdentity{
+		SlotID: "../escape", ResourceGeneration: 1, LeaseEpoch: 1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "complete lease target identity") {
+		t.Fatalf("error = %v", err)
+	}
+	if _, err := os.Stat(cfg.StateDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid identity created recovery state: %v", err)
 	}
 }
 

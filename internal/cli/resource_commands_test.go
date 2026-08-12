@@ -8,11 +8,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
-func TestResourceCommandPlansOnceThenAppliesAuthorizedAction(t *testing.T) {
+func TestResourceCommandPreparesConfirmsRevalidatesThenApplies(t *testing.T) {
 	root, environment, applyLog := resourceCommandFixture(t)
+	prepareLog := filepath.Join(root, "resource-prepare.log")
 	prompt := &testkit.Prompt{Answers: []bool{true}}
 	var stdout, stderr bytes.Buffer
 	program, err := New(Options{
@@ -34,8 +36,92 @@ func TestResourceCommandPlansOnceThenAppliesAuthorizedAction(t *testing.T) {
 	if got := readResourceApplyLog(t, applyLog); got != "run\n" {
 		t.Fatalf("apply log=%q", got)
 	}
+	if got := readResourceApplyLog(t, prepareLog); got != "prepare\nprepare\n" {
+		t.Fatalf("prepare log=%q", got)
+	}
 	if !strings.Contains(stdout.String(), "applied run") {
 		t.Fatalf("stdout=%q", stdout.String())
+	}
+}
+
+func TestResourceCommandRejectsStaleAssessmentAfterConsent(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		argument  string
+		assumeYes bool
+	}{
+		{name: "action", argument: "--stale-action"},
+		{name: "consequences", argument: "--stale-consequence"},
+		{name: "automation consent", argument: "--stale-on-second", assumeYes: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, environment, applyLog := resourceCommandFixture(t)
+			arguments := []string{"demo", "run", test.argument}
+			var prompt ports.Prompter = &callbackPrompt{callback: func() {
+				writeCLIFile(t, filepath.Join(root, "resource-drift"), "changed\n", 0o600)
+			}}
+			if test.assumeYes {
+				arguments = append(arguments, "--yes")
+				prompt = &testkit.Prompt{}
+			}
+			var stderr bytes.Buffer
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard", Arguments: arguments,
+				Environment: environment, WorkingDir: root, Stderr: &stderr, Prompt: prompt,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code := program.Run(context.Background()); code != 1 ||
+				!strings.Contains(stderr.String(), "operation plan is stale") {
+				t.Fatalf("code=%d stderr=%q", code, stderr.String())
+			}
+			if _, err := os.Stat(applyLog); !os.IsNotExist(err) {
+				t.Fatalf("stale assessment reached apply: %v", err)
+			}
+		})
+	}
+}
+
+func TestResourceCommandSkipsMutationThatBecameNoOpAfterConsent(t *testing.T) {
+	root, environment, applyLog := resourceCommandFixture(t)
+	prompt := &callbackPrompt{callback: func() {
+		writeCLIFile(t, filepath.Join(root, "resource-drift"), "changed\n", 0o600)
+	}}
+	var stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments:   []string{"demo", "run", "--become-no-op"},
+		Environment: environment, WorkingDir: root, Stderr: &stderr, Prompt: prompt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if _, err := os.Stat(applyLog); !os.IsNotExist(err) {
+		t.Fatalf("post-consent no-op reached apply: %v", err)
+	}
+}
+
+func TestResourceCommandRejectsMalformedSecondPrepare(t *testing.T) {
+	root, environment, applyLog := resourceCommandFixture(t)
+	var stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments:   []string{"demo", "run", "--malformed-on-second", "--yes"},
+		Environment: environment, WorkingDir: root, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 ||
+		!strings.Contains(stderr.String(), "resource_plan_invalid") {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if _, err := os.Stat(applyLog); !os.IsNotExist(err) {
+		t.Fatalf("malformed second prepare reached apply: %v", err)
 	}
 }
 
@@ -359,6 +445,7 @@ func resourceCommandFixture(t *testing.T) (string, []string, string) {
 		"HANDLER=resources/demo/handler.sh",
 		"TITLE=Fixture resource",
 		`ACTION="run run host-change reversible"`,
+		`ACTION="run-purge run persistent-data-destruction irreversible"`,
 		`ACTION="purge purge persistent-data-destruction irreversible"`,
 		`ACTION="status status read-only not-needed"`,
 		`ACTION="view view session not-needed"`,
@@ -377,9 +464,31 @@ case "${SUBYARD_RESOURCE_MODE:-}" in
     [ -z "${SUBYARD_RESOURCE_ACTION:-}" ] || { echo leaked-action >&2; exit 72; }
     [ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}${XDG_RUNTIME_DIR:-}${DBUS_SESSION_BUS_ADDRESS:-}${XAUTHORITY:-}${TERM:-}${COLORTERM:-}" ] || { echo leaked-session-environment >&2; exit 78; }
     if IFS= read -r _input; then echo leaked-stdin >&2; exit 73; fi
+	printf 'prepare\n' >>"$SUBYARD_REPOSITORY_ROOT/resource-prepare.log"
+	prepare_count="$(wc -l <"$SUBYARD_REPOSITORY_ROOT/resource-prepare.log")"
     case "$verb:$*" in
       run:*--mismatch*) action=purge; changed=true; consequence='mismatched action' ;;
       run:*--no-op*) action=run; changed=false; consequence='' ;;
+	  run:*--stale-action*)
+		action=run; changed=true; consequence='start fixture runtime'
+		[ ! -e "$SUBYARD_REPOSITORY_ROOT/resource-drift" ] || action=run-purge
+		;;
+	  run:*--stale-consequence*)
+		action=run; changed=true; consequence='start fixture runtime'
+		[ ! -e "$SUBYARD_REPOSITORY_ROOT/resource-drift" ] || consequence='start fixture runtime and open host network access'
+		;;
+	  run:*--stale-on-second*)
+		action=run; changed=true; consequence='start fixture runtime'
+		[ "$prepare_count" -lt 2 ] || consequence='start fixture runtime and open host network access'
+		;;
+	  run:*--malformed-on-second*)
+		if [ "$prepare_count" -ge 2 ]; then printf 'not-json\n'; exit 0; fi
+		action=run; changed=true; consequence='start fixture runtime'
+		;;
+	  run:*--become-no-op*)
+		action=run; changed=true; consequence='start fixture runtime'
+		if [ -e "$SUBYARD_REPOSITORY_ROOT/resource-drift" ]; then changed=false; consequence=''; fi
+		;;
       run:*) action=run; changed=true; consequence='start fixture runtime' ;;
       purge:*) action=purge; changed=true; consequence='permanently erase fixture data' ;;
 	  status:*--malformed*) printf 'not-json\n'; exit 0 ;;

@@ -37,6 +37,8 @@ type ProjectEnvironmentRunner struct {
 	HasSecret bool
 }
 
+const projectEnvironmentOwnershipFormat = `{{.Id}}{{"\t"}}{{ index .Config.Labels "subyard.env" }}{{"\t"}}{{ index .Config.Labels "subyard.project" }}{{"\t"}}{{ index .Config.Labels "subyard.profile" }}`
+
 func (runner ProjectEnvironmentRunner) Run(
 	ctx context.Context,
 	request domain.AdapterRequest,
@@ -78,10 +80,13 @@ func (runner ProjectEnvironmentRunner) run(ctx context.Context, action string, p
 		if !runner.probe(ctx, []string{"docker", "inspect", box}) {
 			return "", fmt.Errorf("no box for %q", runner.Project.Name)
 		}
-		if err := runner.validateBoxOwnership(ctx, box); err != nil {
+		containerID, err := runner.validateBoxOwnership(ctx, box)
+		if err != nil {
 			return "", err
 		}
-		if err := runner.execute(ctx, "stop project environment", ports.InstanceExecRequest{Command: []string{"docker", "stop", box}}); err != nil {
+		if err := runner.execute(ctx, "stop project environment", ports.InstanceExecRequest{
+			Command: []string{"docker", "stop", containerID},
+		}); err != nil {
 			return "", err
 		}
 		return fmt.Sprintf("box %q stopped\n", runner.Project.Name), nil
@@ -112,20 +117,23 @@ func (runner ProjectEnvironmentRunner) up(
 	}
 	shareSessions := runner.probe(ctx, []string{"test", "-d", "/mnt/host/agent-sessions"})
 	if runner.probe(ctx, []string{"docker", "inspect", box}) {
-		if err := runner.validateBoxOwnership(ctx, box); err != nil {
+		containerID, err := runner.validateBoxOwnership(ctx, box)
+		if err != nil {
 			return "", err
 		}
 		if !runner.Rebuild {
-			if err := runner.execute(ctx, "start project environment", ports.InstanceExecRequest{Command: []string{"docker", "start", box}}); err != nil {
+			if err := runner.execute(ctx, "start project environment", ports.InstanceExecRequest{
+				Command: []string{"docker", "start", containerID},
+			}); err != nil {
 				return "", err
 			}
 			if shareSessions {
-				runner.linkSessions(ctx, box)
+				runner.linkSessions(ctx, containerID)
 			}
 			return fmt.Sprintf("box %q already exists — started (profile %s)\n", runner.Project.Name, runner.Project.Target), nil
 		}
 		if err := runner.execute(ctx, "remove project environment for rebuild", ports.InstanceExecRequest{
-			Command: []string{"docker", "rm", "-f", box},
+			Command: []string{"docker", "rm", "-f", containerID},
 		}); err != nil {
 			return "", err
 		}
@@ -210,32 +218,41 @@ func (runner ProjectEnvironmentRunner) up(
 		}
 	}
 	arguments = append(arguments, image, "sleep", "infinity")
-	if err := runner.execute(ctx, "start project environment", ports.InstanceExecRequest{Command: arguments}); err != nil {
+	result, err := runner.executeResult(ctx, "start project environment", ports.InstanceExecRequest{Command: arguments})
+	if err != nil {
 		return warnings.String(), err
 	}
 	if shareSessions {
-		runner.linkSessions(ctx, box)
+		containerID := strings.TrimSpace(string(result.Stdout))
+		if containerID == "" || strings.ContainsAny(containerID, " \t\r\n") {
+			return warnings.String(), errors.New("start project environment returned an invalid container ID")
+		}
+		runner.linkSessions(ctx, containerID)
 	}
 	fmt.Fprintf(&warnings, "box %q up (profile %s, image %s)\n", runner.Project.Name, runner.Project.Target, image)
 	return warnings.String(), nil
 }
 
-func (runner ProjectEnvironmentRunner) validateBoxOwnership(ctx context.Context, box string) error {
+func (runner ProjectEnvironmentRunner) validateBoxOwnership(ctx context.Context, box string) (string, error) {
 	result, err := runner.Data.Execute(ctx, runner.Yard, ports.InstanceExecRequest{Command: []string{
-		"docker", "inspect", "-f",
-		`{{ index .Config.Labels "subyard.env" }}{{ "\t" }}{{ index .Config.Labels "subyard.project" }}{{ "\t" }}{{ index .Config.Labels "subyard.profile" }}`,
-		box,
+		"docker", "inspect", "-f", projectEnvironmentOwnershipFormat, box,
 	}})
 	if err != nil {
-		return executionError("inspect project environment ownership", result, err)
+		return "", executionError("inspect project environment ownership", result, err)
 	}
-	labels := strings.Split(strings.TrimSpace(string(result.Stdout)), "\t")
-	if len(labels) != 3 || labels[0] != "1" ||
-		labels[1] != runner.Project.ProjectID || labels[2] != runner.Project.Target {
-		return fmt.Errorf("project environment %q is not owned by project %q and profile %q",
-			box, runner.Project.ProjectID, runner.Project.Target)
+	return projectEnvironmentContainerID(runner.Project, result.Stdout)
+}
+
+func projectEnvironmentContainerID(project domain.ProjectRecord, output []byte) (string, error) {
+	fields := strings.Split(strings.TrimSuffix(string(output), "\n"), "\t")
+	if len(fields) != 4 || fields[0] == "" {
+		return "", errors.New("project environment ownership response is invalid")
 	}
-	return nil
+	if fields[1] != "1" || fields[2] != project.ProjectID || fields[3] != project.Target {
+		return "", fmt.Errorf("project environment is not owned by project %q and profile %q",
+			project.ProjectID, project.Target)
+	}
+	return fields[0], nil
 }
 
 func (runner ProjectEnvironmentRunner) validateProfile() error {
@@ -356,9 +373,18 @@ func (runner ProjectEnvironmentRunner) probe(ctx context.Context, command []stri
 }
 
 func (runner ProjectEnvironmentRunner) execute(ctx context.Context, step string, request ports.InstanceExecRequest) error {
+	_, err := runner.executeResult(ctx, step, request)
+	return err
+}
+
+func (runner ProjectEnvironmentRunner) executeResult(
+	ctx context.Context,
+	step string,
+	request ports.InstanceExecRequest,
+) (ports.InstanceExecResult, error) {
 	result, err := runner.Data.Execute(ctx, runner.Yard, request)
 	if err == nil {
-		return nil
+		return result, nil
 	}
-	return executionError(step, result, err)
+	return result, executionError(step, result, err)
 }

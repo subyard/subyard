@@ -22,6 +22,7 @@ const (
 	LeaseRecoverySchemaVersion    = 1
 	LeaseAttributionSchemaVersion = 2
 	LeaseAttributionSchemaV1      = 1
+	LeaseTargetStaleExitCode      = 75
 	LeaseTTL                      = 10 * time.Minute
 	ProvisioningTTL               = 30 * time.Minute
 )
@@ -35,6 +36,8 @@ var (
 	ErrCorruptLeaseState     = errors.New("corrupt lease state")
 	ErrUnsupportedLeaseState = errors.New("unsupported lease state")
 	ErrLeaseBusy             = errors.New("busy")
+	ErrLeaseLost             = errors.New("lease lost")
+	ErrLeaseTargetStale      = errors.New("lease target is stale")
 )
 
 type SlotState string
@@ -111,6 +114,23 @@ type LeaseGrant struct {
 	Context            *LeaseContext `json:"context,omitempty"`
 	DataUser           string        `json:"data_user,omitempty"`
 	Targets            []LeaseTarget `json:"targets,omitempty"`
+}
+
+// LeaseIdentity is the non-secret identity of one concrete lease-backed VM pair.
+// Both counters are required so an operator action prepared for an earlier lease
+// cannot affect a replacement lease or a rebuilt pair that reused the slot name.
+type LeaseIdentity struct {
+	SlotID             string
+	ResourceGeneration uint64
+	LeaseEpoch         uint64
+}
+
+func (identity LeaseIdentity) validate() error {
+	if !brokerSlotID.MatchString(identity.SlotID) ||
+		identity.ResourceGeneration == 0 || identity.LeaseEpoch == 0 {
+		return errors.New("complete lease target identity is required")
+	}
+	return nil
 }
 
 type LeaseContext struct {
@@ -346,7 +366,7 @@ func (store LeaseStore) Renew(grant LeaseGrant) (time.Time, error) {
 	var expires time.Time
 	err := store.mutateOwned(grant, func(slot *LeaseSlot, now time.Time) error {
 		if slot.State != SlotHeld && slot.State != SlotProvisioning {
-			return errors.New("lease lost")
+			return ErrLeaseLost
 		}
 		slot.LastHeartbeatAt = now
 		slot.ExpiresAt = now.Add(LeaseTTL)
@@ -362,7 +382,7 @@ func (store LeaseStore) BeginDrain(grant LeaseGrant) error {
 			return nil
 		}
 		if slot.State != SlotHeld && slot.State != SlotProvisioning {
-			return errors.New("lease lost")
+			return ErrLeaseLost
 		}
 		slot.State = SlotDraining
 		return nil
@@ -427,6 +447,43 @@ func (store LeaseStore) BeginDrainSlot(slotID, reason string) error {
 			return fmt.Errorf("slot %s is %s", slotID, slot.State)
 		}
 	})
+}
+
+// BeginExpectedDrain atomically verifies the target observed during preflight
+// and fences only that lease. The returned bool says whether the caller should
+// continue the physical drain; an already completed matching lease is a no-op.
+func (store LeaseStore) BeginExpectedDrain(
+	expected LeaseIdentity,
+	reason string,
+) (bool, error) {
+	if err := expected.validate(); err != nil {
+		return false, err
+	}
+	started := false
+	err := store.withLock(true, func(pool *LeasePool) error {
+		slot, err := findSlot(pool, expected.SlotID)
+		if err != nil {
+			return err
+		}
+		if !slotMatchesLeaseIdentity(*slot, expected) {
+			return fmt.Errorf("%w: slot %s identity changed", ErrLeaseTargetStale, expected.SlotID)
+		}
+		switch slot.State {
+		case SlotAvailable:
+			return nil
+		case SlotHeld, SlotProvisioning:
+			slot.State = SlotDraining
+			slot.FailureReason = boundedReason(reason)
+			started = true
+			return nil
+		case SlotDraining:
+			started = true
+			return nil
+		default:
+			return fmt.Errorf("slot %s is %s", expected.SlotID, slot.State)
+		}
+	})
+	return started, err
 }
 
 func (store LeaseStore) BeginRecovery(slotID string) error {
@@ -523,6 +580,51 @@ func (store LeaseStore) BeginScheduledRecovery(
 	return snapshot, started, err
 }
 
+// BeginExpectedRecovery atomically verifies the target observed during
+// preflight and starts recovery only for that exact quarantined VM pair.
+// A matching recovery already in progress is left untouched.
+func (store LeaseStore) BeginExpectedRecovery(
+	expected LeaseIdentity,
+) (LeaseSlot, bool, error) {
+	if err := expected.validate(); err != nil {
+		return LeaseSlot{}, false, err
+	}
+	var snapshot LeaseSlot
+	started := false
+	err := store.withLock(true, func(pool *LeasePool) error {
+		slot, err := findSlot(pool, expected.SlotID)
+		if err != nil {
+			return err
+		}
+		if !slotMatchesLeaseIdentity(*slot, expected) {
+			return fmt.Errorf("%w: slot %s identity changed", ErrLeaseTargetStale, expected.SlotID)
+		}
+		switch slot.State {
+		case SlotAvailable, SlotRecovering:
+			snapshot = *slot
+			return nil
+		case SlotQuarantined:
+			now := store.now()
+			slot.State = SlotRecovering
+			slot.RecoveryAttempt++
+			slot.RecoveryStartedAt = now
+			slot.NextRecoveryAt = time.Time{}
+			snapshot = *slot
+			started = true
+			return nil
+		default:
+			return fmt.Errorf("slot %s is %s, not quarantined", expected.SlotID, slot.State)
+		}
+	})
+	return snapshot, started, err
+}
+
+func slotMatchesLeaseIdentity(slot LeaseSlot, expected LeaseIdentity) bool {
+	return slot.SlotID == expected.SlotID &&
+		slot.ResourceGeneration == expected.ResourceGeneration &&
+		slot.LeaseEpoch == expected.LeaseEpoch
+}
+
 func (store LeaseStore) FinishRecovery(
 	slotID string,
 	cause error,
@@ -596,7 +698,7 @@ func (store LeaseStore) mutateOwned(
 		}
 		if slot.LeaseID != grant.LeaseID || slot.LeaseEpoch != grant.LeaseEpoch ||
 			slot.CapabilityHash == "" || slot.CapabilityHash != capabilityDigest(grant.Capability) {
-			return errors.New("lease lost")
+			return ErrLeaseLost
 		}
 		return mutate(slot, store.now())
 	})

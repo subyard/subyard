@@ -28,6 +28,22 @@ func (runtime *Runtime) AcquireSlot(
 	if err != nil {
 		return grant, err
 	}
+	var acquired LeaseGrant
+	err = withFileLock(runtime.slotLifecycleLock(grant.SlotID), func() error {
+		var acquireErr error
+		acquired, acquireErr = runtime.acquireSlotLocked(ctx, store, grant, publicKey, slot)
+		return acquireErr
+	})
+	return acquired, err
+}
+
+func (runtime *Runtime) acquireSlotLocked(
+	ctx context.Context,
+	store LeaseStore,
+	grant LeaseGrant,
+	publicKey string,
+	slot int,
+) (LeaseGrant, error) {
 	child := runtime.slotRuntime(slot, publicKey)
 	if err := child.preflightSlotCapacity(ctx); err != nil {
 		return grant, err
@@ -95,18 +111,37 @@ func (runtime *Runtime) ensureSlotNetwork(ctx context.Context) error {
 	return nil
 }
 
-func (runtime *Runtime) ReleaseSlot(ctx context.Context, grant LeaseGrant) error {
+func (runtime *Runtime) ReleaseSlot(
+	ctx context.Context,
+	store LeaseStore,
+	grant LeaseGrant,
+) error {
 	runtime.prepareDefaults()
-	slot, err := slotNumber(grant.SlotID, runtime.Config.SlotCount)
-	if err != nil {
+	if _, err := slotNumber(grant.SlotID, runtime.Config.SlotCount); err != nil {
 		return err
 	}
-	snapshot, _ := storeSlot(LeaseStore{
-		Path: runtime.Config.leaseState(), SlotCount: runtime.Config.SlotCount, Now: runtime.Now,
-	}, grant.SlotID)
-	evidence, err := runtime.slotRuntime(slot, "").stopRetainedWithEvidence(ctx)
-	runtime.recordStopOutcome(snapshot, evidence, err)
-	return err
+	return withFileLock(
+		runtime.slotLifecycleLock(grant.SlotID),
+		func() error {
+			if err := store.BeginDrain(grant); err != nil {
+				return err
+			}
+			slot, err := storeSlot(store, grant.SlotID)
+			if err != nil {
+				return err
+			}
+			_, _ = runtime.eventRecorder().Record(BrokerEvent{
+				Kind:               "lease.release",
+				SlotID:             slot.SlotID,
+				ResourceGeneration: slot.ResourceGeneration,
+				LeaseEpoch:         slot.LeaseEpoch,
+				FromState:          SlotHeld,
+				ToState:            SlotDraining,
+				Context:            leaseContextFromSlot(slot),
+			})
+			return runtime.completeDrain(ctx, store, slot)
+		},
+	)
 }
 
 func (runtime *Runtime) ReapExpired(ctx context.Context, store LeaseStore) error {
@@ -120,64 +155,8 @@ func (runtime *Runtime) ReapExpired(ctx context.Context, store LeaseStore) error
 		if slot.State != SlotDraining {
 			continue
 		}
-		kind := "lease.fence"
-		fromState := SlotHeld
-		if slot.ReadyAt.IsZero() {
-			fromState = SlotProvisioning
-		}
-		if slot.FailureReason == heartbeatExpiredReason ||
-			slot.FailureReason == provisioningExpiredReason {
-			kind = "lease.expired"
-		}
-		_, _ = runtime.eventRecorder().Record(BrokerEvent{
-			Kind:               kind,
-			SlotID:             slot.SlotID,
-			ResourceGeneration: slot.ResourceGeneration,
-			LeaseEpoch:         slot.LeaseEpoch,
-			FromState:          fromState,
-			ToState:            SlotDraining,
-			Context:            leaseContextFromSlot(slot),
-		})
-		number, parseErr := slotNumber(slot.SlotID, runtime.Config.SlotCount)
-		if parseErr != nil {
-			result = errors.Join(result, parseErr)
-			continue
-		}
-		evidence, stopErr := runtime.slotRuntime(number, "").stopRetainedWithEvidence(ctx)
-		runtime.recordStopOutcome(slot, evidence, stopErr)
-		if finishErr := store.FinishDrain(slot.SlotID, stopErr); finishErr != nil {
-			result = errors.Join(result, finishErr)
-		}
-		if stopErr != nil {
-			_, _ = runtime.eventRecorder().Record(BrokerEvent{
-				Kind:               "lease.stop_failed",
-				SlotID:             slot.SlotID,
-				ResourceGeneration: slot.ResourceGeneration,
-				LeaseEpoch:         slot.LeaseEpoch,
-				FromState:          SlotDraining,
-				ToState:            SlotQuarantined,
-				Error:              stopErr.Error(),
-				Context:            leaseContextFromSlot(slot),
-			})
-			if incidentErr := runtime.HandleQuarantine(
-				ctx,
-				store,
-				slot.SlotID,
-				stopErr,
-			); incidentErr != nil {
-				result = errors.Join(result, incidentErr)
-			}
-			result = errors.Join(result, stopErr)
-		} else {
-			_, _ = runtime.eventRecorder().Record(BrokerEvent{
-				Kind:               "lease.available",
-				SlotID:             slot.SlotID,
-				ResourceGeneration: slot.ResourceGeneration,
-				LeaseEpoch:         slot.LeaseEpoch,
-				FromState:          SlotDraining,
-				ToState:            SlotAvailable,
-				Context:            leaseContextFromSlot(slot),
-			})
+		if drainErr := runtime.drainSlot(ctx, store, slot.SlotID); drainErr != nil {
+			result = errors.Join(result, drainErr)
 		}
 	}
 	pool, err = store.Status()
@@ -201,6 +180,100 @@ func (runtime *Runtime) ReapExpired(ctx context.Context, store LeaseStore) error
 	return result
 }
 
+func (runtime *Runtime) drainSlot(
+	ctx context.Context,
+	store LeaseStore,
+	slotID string,
+) error {
+	runtime.prepareDefaults()
+	if _, err := slotNumber(slotID, runtime.Config.SlotCount); err != nil {
+		return err
+	}
+	return withFileLock(
+		runtime.slotLifecycleLock(slotID),
+		func() error {
+			slot, err := storeSlot(store, slotID)
+			if err != nil {
+				return err
+			}
+			if slot.State != SlotDraining {
+				return nil
+			}
+			return runtime.completeDrain(ctx, store, slot)
+		},
+	)
+}
+
+func (runtime *Runtime) completeDrain(
+	ctx context.Context,
+	store LeaseStore,
+	slot LeaseSlot,
+) error {
+	if runtime.finishDrain != nil {
+		return runtime.finishDrain(ctx, store, slot)
+	}
+	return runtime.finishDrainingSlot(ctx, store, slot)
+}
+
+func (runtime *Runtime) finishDrainingSlot(
+	ctx context.Context,
+	store LeaseStore,
+	slot LeaseSlot,
+) error {
+	kind := "lease.fence"
+	fromState := SlotHeld
+	if slot.ReadyAt.IsZero() {
+		fromState = SlotProvisioning
+	}
+	if slot.FailureReason == heartbeatExpiredReason ||
+		slot.FailureReason == provisioningExpiredReason {
+		kind = "lease.expired"
+	}
+	_, _ = runtime.eventRecorder().Record(BrokerEvent{
+		Kind:               kind,
+		SlotID:             slot.SlotID,
+		ResourceGeneration: slot.ResourceGeneration,
+		LeaseEpoch:         slot.LeaseEpoch,
+		FromState:          fromState,
+		ToState:            SlotDraining,
+		Context:            leaseContextFromSlot(slot),
+	})
+	number, err := slotNumber(slot.SlotID, runtime.Config.SlotCount)
+	if err != nil {
+		return err
+	}
+	evidence, stopErr := runtime.slotRuntime(number, "").stopRetainedWithEvidence(ctx)
+	runtime.recordStopOutcome(slot, evidence, stopErr)
+	finishErr := store.FinishDrain(slot.SlotID, stopErr)
+	if stopErr == nil {
+		if finishErr != nil {
+			return finishErr
+		}
+		_, _ = runtime.eventRecorder().Record(BrokerEvent{
+			Kind:               "lease.available",
+			SlotID:             slot.SlotID,
+			ResourceGeneration: slot.ResourceGeneration,
+			LeaseEpoch:         slot.LeaseEpoch,
+			FromState:          SlotDraining,
+			ToState:            SlotAvailable,
+			Context:            leaseContextFromSlot(slot),
+		})
+		return nil
+	}
+	_, _ = runtime.eventRecorder().Record(BrokerEvent{
+		Kind:               "lease.stop_failed",
+		SlotID:             slot.SlotID,
+		ResourceGeneration: slot.ResourceGeneration,
+		LeaseEpoch:         slot.LeaseEpoch,
+		FromState:          SlotDraining,
+		ToState:            SlotQuarantined,
+		Error:              stopErr.Error(),
+		Context:            leaseContextFromSlot(slot),
+	})
+	incidentErr := runtime.handleQuarantineLocked(ctx, store, slot.SlotID, stopErr)
+	return errors.Join(finishErr, incidentErr, stopErr)
+}
+
 func (runtime *Runtime) DrainAll(ctx context.Context, store LeaseStore, reason string) error {
 	if err := store.BeginDrainAll(reason); err != nil {
 		return err
@@ -213,6 +286,41 @@ func (runtime *Runtime) RevokeSlot(ctx context.Context, store LeaseStore, slotID
 		return err
 	}
 	return runtime.ReapExpired(ctx, store)
+}
+
+func (runtime *Runtime) RevokeExpectedSlot(
+	ctx context.Context,
+	store LeaseStore,
+	expected LeaseIdentity,
+) error {
+	runtime.prepareDefaults()
+	if err := expected.validate(); err != nil {
+		return err
+	}
+	if _, err := slotNumber(expected.SlotID, runtime.Config.SlotCount); err != nil {
+		return err
+	}
+	return withFileLock(
+		runtime.slotLifecycleLock(expected.SlotID),
+		func() error {
+			shouldDrain, err := store.BeginExpectedDrain(expected, "operator revoke")
+			if err != nil || !shouldDrain {
+				return err
+			}
+			slot, err := storeSlot(store, expected.SlotID)
+			if err != nil {
+				return err
+			}
+			if !slotMatchesLeaseIdentity(slot, expected) || slot.State != SlotDraining {
+				return fmt.Errorf("%w: slot %s identity changed", ErrLeaseTargetStale, expected.SlotID)
+			}
+			return runtime.completeDrain(ctx, store, slot)
+		},
+	)
+}
+
+func (runtime *Runtime) slotLifecycleLock(slotID string) string {
+	return filepath.Join(runtime.Config.StateDir, "lifecycle", slotID+".lock")
 }
 
 func (runtime *Runtime) RecoverSlot(ctx context.Context, store LeaseStore, slotID string) error {

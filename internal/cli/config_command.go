@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -24,6 +26,48 @@ type configTarget struct {
 	Name   string
 	Loaded config.Loaded
 }
+
+type configTargetAssessment struct {
+	Target                  configTarget
+	State                   string
+	Changed                 bool
+	DesiredFingerprint      string
+	MaterializedFingerprint string
+}
+
+type configDesiredSnapshot struct {
+	Name             string                       `json:"name"`
+	AccessKind       domain.AccessKind            `json:"access_kind"`
+	YardKind         domain.YardKind              `json:"yard_kind"`
+	IncusProject     string                       `json:"incus_project"`
+	YardInstanceName string                       `json:"yard_instance_name"`
+	DevUser          string                       `json:"dev_user"`
+	DevUID           int                          `json:"dev_uid"`
+	Assets           []configDesiredAssetSnapshot `json:"assets,omitempty"`
+}
+
+type configDesiredAssetSnapshot struct {
+	Name        string `json:"name"`
+	Source      string `json:"source"`
+	Destination string `json:"destination"`
+	Scope       string `json:"scope,omitempty"`
+	Role        string `json:"role,omitempty"`
+	DesiredHash string `json:"desired_hash"`
+}
+
+type configMaterializedSnapshot struct {
+	State  string                            `json:"state"`
+	Assets []configMaterializedAssetSnapshot `json:"assets,omitempty"`
+}
+
+type configMaterializedAssetSnapshot struct {
+	Name        string `json:"name"`
+	GuestExit   int    `json:"guest_exit"`
+	GuestHash   string `json:"guest_hash,omitempty"`
+	GuestOutput string `json:"guest_output,omitempty"`
+}
+
+type configTargetSelector func() ([]configTarget, error)
 
 type configAsset struct {
 	Name        string
@@ -122,7 +166,10 @@ func (cli *CLI) runConfig(ctx context.Context, loaded config.Loaded, arguments [
 		}
 		return 0
 	}
-	return cli.applyConfig(ctx, targets, assumeYes)
+	selector := func() ([]configTarget, error) {
+		return cli.refreshLocalConfigTargets(loaded, allLocal)
+	}
+	return cli.applyConfig(ctx, targets, assumeYes, selector)
 }
 
 func (cli *CLI) writeConfigFields(loaded config.Loaded, requested string) int {
@@ -603,7 +650,25 @@ func (cli *CLI) materializeConfigSyncPlan(
 	if err != nil {
 		return err
 	}
-	if code := cli.applyConfig(ctx, targets, assumeYes); code != 0 {
+	selectedNames := make([]string, 0, len(targets))
+	for _, target := range targets {
+		selectedNames = append(selectedNames, target.Name)
+	}
+	selector := func() ([]configTarget, error) {
+		if all {
+			return cli.localConfigTargets(loaded, true)
+		}
+		refreshed := make([]configTarget, 0, len(selectedNames))
+		for _, name := range selectedNames {
+			target, err := cli.loadInventoryLoaded(name, loaded)
+			if err != nil {
+				return nil, fmt.Errorf("yard %s: %w", name, err)
+			}
+			refreshed = append(refreshed, configTarget{Name: name, Loaded: target})
+		}
+		return refreshed, nil
+	}
+	if code := cli.applyConfig(ctx, targets, assumeYes, selector); code != 0 {
 		return errors.New("materialized configuration refresh failed")
 	}
 	return nil
@@ -937,6 +1002,20 @@ func (cli *CLI) localConfigTargets(loaded config.Loaded, allLocal bool) ([]confi
 	return targets, nil
 }
 
+func (cli *CLI) refreshLocalConfigTargets(
+	loaded config.Loaded,
+	allLocal bool,
+) ([]configTarget, error) {
+	if allLocal {
+		return cli.localConfigTargets(loaded, true)
+	}
+	refreshed, err := cli.loadInventoryLoaded(loaded.Context.YardName, loaded)
+	if err != nil {
+		return nil, err
+	}
+	return []configTarget{{Name: loaded.Context.YardName, Loaded: refreshed}}, nil
+}
+
 func (cli *CLI) configStatus(
 	ctx context.Context,
 	targets []configTarget,
@@ -975,7 +1054,12 @@ func (cli *CLI) configStatus(
 	return nil
 }
 
-func (cli *CLI) applyConfig(ctx context.Context, targets []configTarget, assumeYes bool) int {
+func (cli *CLI) applyConfig(
+	ctx context.Context,
+	targets []configTarget,
+	assumeYes bool,
+	selector configTargetSelector,
+) int {
 	if len(targets) == 0 {
 		cli.errorf("config apply: no local yards selected")
 		return 1
@@ -984,22 +1068,24 @@ func (cli *CLI) applyConfig(ctx context.Context, targets []configTarget, assumeY
 		cli.errorf("config apply: %v", err)
 		return 1
 	}
-	drifted := make([]configTarget, 0, len(targets))
+	assessments := make([]configTargetAssessment, 0, len(targets))
+	drifted := make([]configTargetAssessment, 0, len(targets))
 	for _, target := range targets {
 		if target.Loaded.Context.AccessKind == domain.AccessRemote {
 			cli.errorf("config apply does not implicitly operate on remote yard %s", target.Name)
 			return 1
 		}
-		state, changed, err := cli.configTargetDrift(ctx, target, true)
+		assessment, err := cli.assessConfigTarget(ctx, target, true)
 		if err != nil {
 			cli.errorf("config apply: yard %s: %v", target.Name, err)
 			return 1
 		}
-		if changed {
-			drifted = append(drifted, target)
+		assessments = append(assessments, assessment)
+		if assessment.Changed {
+			drifted = append(drifted, assessment)
 		} else {
 			fmt.Fprintf(cli.options.Stdout,
-				"yard %s materialized-config: %s; skipped\n", target.Name, state)
+				"yard %s materialized-config: %s; skipped\n", target.Name, assessment.State)
 		}
 	}
 	if len(drifted) == 0 {
@@ -1011,12 +1097,68 @@ func (cli *CLI) applyConfig(ctx context.Context, targets []configTarget, assumeY
 		return 0
 	}
 	names := make([]string, 0, len(drifted))
-	for _, target := range drifted {
-		names = append(names, target.Name)
+	for _, assessment := range drifted {
+		names = append(names, assessment.Target.Name)
 	}
 	if !cli.planConfigAction(ctx, targets[0].Loaded, "apply", assumeYes, false,
 		"refresh materialized agent configs in local running yards: "+strings.Join(names, ", ")) {
 		return 1
+	}
+	if selector == nil {
+		cli.errorf("config apply: target selector is required")
+		return 1
+	}
+	refreshedTargets, err := selector()
+	if err != nil {
+		cli.errorf("config apply: revalidate targets: %v", err)
+		return 1
+	}
+	if !sameConfigTargetSet(assessments, refreshedTargets) {
+		cli.errorf("config apply: %v", fmt.Errorf(
+			"%w: selected local yard set changed after confirmation", domain.ErrPlanStale,
+		))
+		return 1
+	}
+	refreshedByName := make(map[string]configTargetAssessment, len(refreshedTargets))
+	for _, target := range refreshedTargets {
+		assessment, err := cli.assessConfigTarget(ctx, target, true)
+		if err != nil {
+			cli.errorf("config apply: revalidate yard %s: %v", target.Name, err)
+			return 1
+		}
+		refreshedByName[target.Name] = assessment
+	}
+	driftedTargets := make([]configTarget, 0, len(drifted))
+	for _, initial := range assessments {
+		refreshed := refreshedByName[initial.Target.Name]
+		if initial.DesiredFingerprint != refreshed.DesiredFingerprint {
+			cli.errorf("config apply: yard %s: %v", initial.Target.Name, fmt.Errorf(
+				"%w: desired configuration or target changed after confirmation",
+				domain.ErrPlanStale,
+			))
+			return 1
+		}
+		if initial.Changed && !refreshed.Changed {
+			fmt.Fprintf(cli.options.Stdout,
+				"yard %s materialized-config: %s after confirmation; skipped\n",
+				refreshed.Target.Name, refreshed.State)
+			continue
+		}
+		if initial.MaterializedFingerprint != refreshed.MaterializedFingerprint ||
+			initial.Changed != refreshed.Changed {
+			cli.errorf("config apply: yard %s: %v", initial.Target.Name, fmt.Errorf(
+				"%w: materialized configuration changed after confirmation",
+				domain.ErrPlanStale,
+			))
+			return 1
+		}
+		if refreshed.Changed {
+			driftedTargets = append(driftedTargets, refreshed.Target)
+		}
+	}
+	if len(driftedTargets) == 0 {
+		fmt.Fprintln(cli.options.Stdout, "config apply: drift converged after confirmation; nothing to refresh")
+		return 0
 	}
 	applier := cli.options.Config
 	if applier == nil {
@@ -1025,13 +1167,13 @@ func (cli *CLI) applyConfig(ctx context.Context, targets []configTarget, assumeY
 			stdout: cli.options.Stdout, stderr: cli.options.Stderr,
 		}
 	}
-	for _, target := range drifted {
+	for _, target := range driftedTargets {
 		if err := applier.ApplyConfig(ctx, target.Name); err != nil {
 			cli.errorf("config apply: yard %s: %v", target.Name, err)
 			return 1
 		}
 	}
-	if err := cli.configStatus(ctx, drifted, true); err != nil {
+	if err := cli.configStatus(ctx, driftedTargets, true); err != nil {
 		cli.errorf("config apply verification: %v", err)
 		return 1
 	}
@@ -1069,36 +1211,88 @@ func (cli *CLI) configTargetDrift(
 	target configTarget,
 	check bool,
 ) (string, bool, error) {
+	assessment, err := cli.assessConfigTarget(ctx, target, check)
+	return assessment.State, assessment.Changed, err
+}
+
+func (cli *CLI) assessConfigTarget(
+	ctx context.Context,
+	target configTarget,
+	check bool,
+) (configTargetAssessment, error) {
+	desired := configDesiredSnapshot{
+		Name:             target.Name,
+		AccessKind:       target.Loaded.Context.AccessKind,
+		YardKind:         target.Loaded.Context.YardKind,
+		IncusProject:     target.Loaded.Context.IncusProject,
+		YardInstanceName: target.Loaded.Context.YardInstanceName,
+		DevUser:          target.Loaded.Context.DevUser,
+		DevUID:           target.Loaded.Context.DevUID,
+	}
+	materialized := configMaterializedSnapshot{}
+	finish := func(state string, changed bool) (configTargetAssessment, error) {
+		materialized.State = state
+		desiredPayload, err := json.Marshal(desired)
+		if err != nil {
+			return configTargetAssessment{}, err
+		}
+		materializedPayload, err := json.Marshal(materialized)
+		if err != nil {
+			return configTargetAssessment{}, err
+		}
+		desiredDigest := sha256.Sum256(desiredPayload)
+		materializedDigest := sha256.Sum256(materializedPayload)
+		return configTargetAssessment{
+			Target: target, State: state, Changed: changed,
+			DesiredFingerprint:      fmt.Sprintf("%x", desiredDigest[:]),
+			MaterializedFingerprint: fmt.Sprintf("%x", materializedDigest[:]),
+		}, nil
+	}
 	if target.Loaded.Context.AccessKind == domain.AccessRemote {
-		return "remote (settings only; consumers not checked)", false, nil
+		return finish("remote (settings only; consumers not checked)", false)
+	}
+	var assets []configAsset
+	var desiredHashes []string
+	if check {
+		var err error
+		assets, err = effectiveConfigAssets(target.Loaded)
+		if err != nil {
+			return configTargetAssessment{}, err
+		}
+		desiredHashes = make([]string, 0, len(assets))
+		for _, asset := range assets {
+			hostHash, err := hashRegularFile(asset.Source)
+			if err != nil {
+				return configTargetAssessment{}, fmt.Errorf("%s: %w", asset.Name, err)
+			}
+			desired.Assets = append(desired.Assets, configDesiredAssetSnapshot{
+				Name: asset.Name, Source: asset.Source, Destination: asset.Destination,
+				Scope: asset.Scope, Role: asset.Role, DesiredHash: hostHash,
+			})
+			desiredHashes = append(desiredHashes, hostHash)
+		}
 	}
 	incus, executor := cli.statusPorts()
 	info, err := incus.Instance(ctx, target.Loaded.Context.IncusProject,
 		target.Loaded.Context.YardInstanceName)
 	if errors.Is(err, ports.ErrInstanceNotFound) {
-		return "absent", false, nil
+		return finish("absent", false)
 	}
 	if errors.Is(err, os.ErrNotExist) {
-		return "absent", false, nil
+		return finish("absent", false)
 	}
 	if err != nil {
-		return "", false, err
+		return configTargetAssessment{}, err
 	}
 	if !strings.EqualFold(info.Status, "running") {
-		return "stopped", false, nil
+		return finish("stopped", false)
 	}
 	if !check {
-		return "running", false, nil
+		return finish("running", false)
 	}
-	assets, err := effectiveConfigAssets(target.Loaded)
-	if err != nil {
-		return "", false, err
-	}
-	for _, asset := range assets {
-		hostHash, err := hashRegularFile(asset.Source)
-		if err != nil {
-			return "", false, fmt.Errorf("%s: %w", asset.Name, err)
-		}
+	changed := false
+	for index, asset := range assets {
+		hostHash := desiredHashes[index]
 		result, err := executor.Exec(ctx, target.Loaded.Context.IncusProject,
 			target.Loaded.Context.YardInstanceName, ports.InstanceExecRequest{
 				Command: []string{"sha256sum", "--", asset.Destination},
@@ -1106,17 +1300,57 @@ func (cli *CLI) configTargetDrift(
 				Group:   uint32(target.Loaded.Context.DevUID),
 			})
 		if err != nil && result.ExitCode == 0 {
-			return "", false, err
+			return configTargetAssessment{}, err
+		}
+		materializedAsset := configMaterializedAssetSnapshot{
+			Name: asset.Name, GuestExit: result.ExitCode,
 		}
 		if result.ExitCode != 0 {
-			return "drift", true, nil
+			materializedAsset.GuestOutput = "unavailable"
+			changed = true
+			materialized.Assets = append(materialized.Assets, materializedAsset)
+			continue
 		}
 		fields := strings.Fields(string(result.Stdout))
-		if len(fields) == 0 || fields[0] != hostHash {
-			return "drift", true, nil
+		if len(fields) == 0 {
+			materializedAsset.GuestOutput = "malformed"
+			changed = true
+		} else {
+			materializedAsset.GuestOutput = "sha256"
+			materializedAsset.GuestHash = fields[0]
+			if fields[0] != hostHash {
+				changed = true
+			}
 		}
+		materialized.Assets = append(materialized.Assets, materializedAsset)
 	}
-	return "converged", false, nil
+	if changed {
+		return finish("drift", true)
+	}
+	return finish("converged", false)
+}
+
+func sameConfigTargetSet(
+	initial []configTargetAssessment,
+	refreshed []configTarget,
+) bool {
+	if len(initial) != len(refreshed) {
+		return false
+	}
+	names := make(map[string]struct{}, len(initial))
+	for _, assessment := range initial {
+		if _, duplicate := names[assessment.Target.Name]; duplicate {
+			return false
+		}
+		names[assessment.Target.Name] = struct{}{}
+	}
+	for _, target := range refreshed {
+		if _, exists := names[target.Name]; !exists {
+			return false
+		}
+		delete(names, target.Name)
+	}
+	return len(names) == 0
 }
 
 func effectiveConfigAssets(loaded config.Loaded) ([]configAsset, error) {

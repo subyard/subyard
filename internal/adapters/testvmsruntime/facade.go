@@ -16,7 +16,7 @@ type Facade struct {
 	Events       *EventRecorder
 	OnAcquire    func(LeaseGrant, string) (LeaseGrant, error)
 	OnRelease    func(LeaseGrant) error
-	OnQuarantine func(string, error) error
+	OnQuarantine func(LeaseGrant, error) error
 }
 
 type facadeResponse struct {
@@ -104,21 +104,18 @@ func (facade Facade) Run(originalCommand string) error {
 			return facade.writeError("invalid_request", err.Error())
 		}
 		if eventErr := facade.recordSlot("lease.acquire", grant.SlotID, "", SlotProvisioning, nil); eventErr != nil {
-			_ = facade.Store.Quarantine(grant, eventErr)
-			_ = facade.quarantine(grant.SlotID, eventErr)
+			_ = facade.quarantine(grant, eventErr)
 			return facade.writeError("quarantined", "durable broker event failed")
 		}
 		if facade.OnAcquire != nil {
 			grant, err = facade.OnAcquire(grant, publicKey)
 			if err != nil {
-				_ = facade.Store.Quarantine(grant, err)
-				_ = facade.quarantine(grant.SlotID, err)
+				_ = facade.quarantine(grant, err)
 				return facade.writeError("quarantined", "slot provisioning failed")
 			}
 		}
 		if eventErr := facade.recordSlot("lease.held", grant.SlotID, SlotProvisioning, SlotHeld, nil); eventErr != nil {
-			_ = facade.Store.Quarantine(grant, eventErr)
-			_ = facade.quarantine(grant.SlotID, eventErr)
+			_ = facade.quarantine(grant, eventErr)
 			return facade.writeError("quarantined", "durable broker event failed")
 		}
 		return facade.write(facadeResponse{
@@ -142,39 +139,15 @@ func (facade Facade) Run(originalCommand string) error {
 		if err != nil {
 			return facade.writeError("invalid_request", err.Error())
 		}
-		if err := facade.Store.BeginDrain(grant); err != nil {
-			return facade.writeError("lease_lost", "lease is no longer current")
-		}
-		_ = facade.recordSlot("lease.release", grant.SlotID, SlotHeld, SlotDraining, nil)
 		if facade.OnRelease == nil {
 			return facade.writeError("unavailable", "physical lease lifecycle is unavailable")
 		}
 		if err := facade.OnRelease(grant); err != nil {
-			_ = facade.Store.FinishDrain(grant.SlotID, err)
-			_ = facade.recordSlot(
-				"lease.stop_failed",
-				grant.SlotID,
-				SlotDraining,
-				SlotQuarantined,
-				err,
-			)
-			_ = facade.quarantine(grant.SlotID, err)
+			if errors.Is(err, ErrLeaseLost) {
+				return facade.writeError("lease_lost", "lease is no longer current")
+			}
 			return facade.writeError("quarantined", "slot fencing or stop failed")
 		}
-		releasedSlot, err := storeSlot(facade.Store, grant.SlotID)
-		if err != nil {
-			return facade.writeError("unavailable", err.Error())
-		}
-		if err := facade.Store.FinishDrain(grant.SlotID, nil); err != nil {
-			return facade.writeError("unavailable", err.Error())
-		}
-		_ = facade.recordSlotSnapshot(
-			"lease.available",
-			releasedSlot,
-			SlotDraining,
-			SlotAvailable,
-			nil,
-		)
 		return facade.write(facadeResponse{
 			SchemaVersion: LeaseSchemaVersion, Status: "ok", Message: "released",
 		})
@@ -183,11 +156,11 @@ func (facade Facade) Run(originalCommand string) error {
 	}
 }
 
-func (facade Facade) quarantine(slotID string, cause error) error {
+func (facade Facade) quarantine(grant LeaseGrant, cause error) error {
 	if facade.OnQuarantine == nil {
-		return nil
+		return facade.Store.Quarantine(grant, cause)
 	}
-	return facade.OnQuarantine(slotID, cause)
+	return facade.OnQuarantine(grant, cause)
 }
 
 func (facade Facade) recordGrantFailure(

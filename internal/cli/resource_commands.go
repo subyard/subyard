@@ -90,6 +90,34 @@ func (cli *CLI) runResourceCommand(
 		(assessment.Effect == domain.ActionMutation || assessment.Effect == domain.ActionDestruction) {
 		return 0
 	}
+	if assessment.Changed &&
+		(assessment.Effect == domain.ActionMutation || assessment.Effect == domain.ActionDestruction) {
+		refreshedOutput, refreshErr := cli.prepareResource(ctx, loaded, definition, invocation.arguments)
+		if refreshErr != nil {
+			cli.errorf("%s: refresh assessment: %v", definition.Command, refreshErr)
+			return 1
+		}
+		refreshed, refreshErr := cli.resources.AssessPrepareResult(
+			cli.coreActions, definition.Command, invocation.verb, refreshedOutput,
+		)
+		if refreshErr != nil {
+			cli.errorf("%s: refresh assessment: %v", definition.Command, refreshErr)
+			return 1
+		}
+		if refreshed.Action != assessment.Action {
+			cli.errorf("%s: %v: resource action changed after confirmation",
+				definition.Command, domain.ErrPlanStale)
+			return 1
+		}
+		if !refreshed.Changed {
+			return 0
+		}
+		if !slices.Equal(refreshed.Consequences, assessment.Consequences) {
+			cli.errorf("%s: %v: resource consequences changed after confirmation",
+				definition.Command, domain.ErrPlanStale)
+			return 1
+		}
+	}
 
 	runner := &resourceApplyRunner{
 		cli: cli, loaded: loaded, definition: definition, verb: invocation.verb,

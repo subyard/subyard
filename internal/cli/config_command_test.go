@@ -254,9 +254,8 @@ func TestConfigStatusDetectsGuestDriftWithoutPrintingContents(t *testing.T) {
 		loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {
 			Name: loaded.Context.YardInstanceName, Project: loaded.Context.IncusProject, Status: "Running",
 		},
-	}, ExecSteps: []testkit.IncusExecStep{{
-		Result: ports.InstanceExecResult{Stdout: []byte(strings.Repeat("0", 64) + "  file\n"), ExitCode: 0},
-	}}}
+	}}
+	appendMismatchedHashSteps(t, fake, loaded, "0")
 	var stdout, stderr bytes.Buffer
 	program, err := New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "status"},
@@ -412,10 +411,6 @@ func TestConfigAuthoringNoOpsDoNotPromptOrRewriteTargets(t *testing.T) {
 			name: "equal set", initial: "SSH_PORT='2299'\n",
 			arguments: []string{"config", "set", "SSH_PORT", "2299", "--scope", "host"},
 		},
-		{
-			name: "absent unset", initial: "",
-			arguments: []string{"config", "unset", "SSH_PORT", "--scope", "host"},
-		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root, _, configHome, environment := configCommandFixture(t)
@@ -446,6 +441,34 @@ func TestConfigAuthoringNoOpsDoNotPromptOrRewriteTargets(t *testing.T) {
 				t.Fatalf("no-op prompted: %#v", prompt.Requests)
 			}
 		})
+	}
+}
+
+func TestConfigUnsetAbsentTargetDoesNotPrompt(t *testing.T) {
+	root, _, configHome, environment := configCommandFixture(t)
+	target := filepath.Join(configHome, "overrides", "shared", "config.env")
+	if err := os.Remove(target); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	prompt := &testkit.Prompt{}
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments:   []string{"config", "unset", "E2E_VM_CPU", "--scope", "shared"},
+		Environment: environment, WorkingDir: root, Prompt: prompt,
+		Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("absent unset failed: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("absent scalar target was created: %v", err)
+	}
+	if len(prompt.Requests) != 0 {
+		t.Fatalf("absent unset prompted: %#v", prompt.Requests)
 	}
 }
 
@@ -482,6 +505,38 @@ func TestConfigImportUnchangedDoesNotPromptOrRewriteTarget(t *testing.T) {
 	}
 	if len(prompt.Requests) != 0 {
 		t.Fatalf("unchanged import prompted: %#v", prompt.Requests)
+	}
+}
+
+func TestConfigImportEmptyContentCreatesMissingTarget(t *testing.T) {
+	root, _, configHome, environment := configCommandFixture(t)
+	source := filepath.Join(t.TempDir(), "config.toml")
+	writeConfigCommandFile(t, source, "")
+	target := filepath.Join(configHome, "overrides", "host", "agents", "codex", "config.toml")
+	if err := os.Remove(target); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	prompt := &testkit.Prompt{Answers: []bool{true}}
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments: []string{
+			"config", "import", "AGENT_codex_CONFIG", source, "--scope", "host",
+		},
+		Environment: environment, WorkingDir: root, Prompt: prompt,
+		Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("empty import failed: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if got, err := os.ReadFile(target); err != nil || len(got) != 0 {
+		t.Fatalf("empty target = %q err=%v", got, err)
+	}
+	if len(prompt.Requests) != 1 {
+		t.Fatalf("empty import prompts = %#v", prompt.Requests)
 	}
 }
 
@@ -605,6 +660,119 @@ func TestConfigSetChangedUsesOneDefaultYesPrompt(t *testing.T) {
 	}
 }
 
+func TestConfigUnsetExistingEmptyTargetRemovesIt(t *testing.T) {
+	root, _, configHome, environment := configCommandFixture(t)
+	target := filepath.Join(configHome, "config.env")
+	writeConfigCommandFile(t, target, "")
+	prompt := &testkit.Prompt{Answers: []bool{true}}
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments:   []string{"config", "unset", "SSH_PORT", "--scope", "host"},
+		Environment: environment, WorkingDir: root, Prompt: prompt,
+		Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("empty unset failed: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("empty scalar target still exists: %v", err)
+	}
+	if len(prompt.Requests) != 1 {
+		t.Fatalf("empty unset prompts = %#v", prompt.Requests)
+	}
+}
+
+func TestConfigSetRejectsConcurrentTargetChangeAfterConfirmation(t *testing.T) {
+	root, _, configHome, environment := configCommandFixture(t)
+	target := filepath.Join(configHome, "config.env")
+	writeConfigCommandFile(t, target, "SSH_PORT='2299'\n")
+	prompt := &callbackPrompt{callback: func() {
+		writeConfigCommandFile(t, target, "SSH_PORT='2400'\n# concurrent\n")
+	}}
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments:   []string{"config", "set", "SSH_PORT", "2300", "--scope", "host"},
+		Environment: environment, WorkingDir: root, Prompt: prompt,
+		Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 ||
+		!strings.Contains(stderr.String(), domain.ErrPlanStale.Error()) {
+		t.Fatalf("stale set: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if got, err := os.ReadFile(target); err != nil ||
+		string(got) != "SSH_PORT='2400'\n# concurrent\n" {
+		t.Fatalf("concurrent target = %q err=%v", got, err)
+	}
+}
+
+func TestConfigSetRejectsMissingTargetCreatedAfterConfirmation(t *testing.T) {
+	root, _, configHome, environment := configCommandFixture(t)
+	target := filepath.Join(configHome, "overrides", "shared", "config.env")
+	if err := os.Remove(target); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	prompt := &callbackPrompt{callback: func() {
+		writeConfigCommandFile(t, target, "E2E_VM_CPU=6\n")
+	}}
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments:   []string{"config", "set", "E2E_VM_CPU", "3", "--scope", "shared"},
+		Environment: environment, WorkingDir: root, Prompt: prompt,
+		Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 ||
+		!strings.Contains(stderr.String(), domain.ErrPlanStale.Error()) {
+		t.Fatalf("stale create: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != "E2E_VM_CPU=6\n" {
+		t.Fatalf("concurrent target = %q err=%v", got, err)
+	}
+}
+
+func TestConfigImportRejectsTargetRemovedAfterConfirmation(t *testing.T) {
+	root, _, configHome, environment := configCommandFixture(t)
+	target := filepath.Join(configHome, "overrides", "host", "agents", "codex", "config.toml")
+	writeConfigCommandFile(t, target, "model = \"before\"\n")
+	source := filepath.Join(t.TempDir(), "config.toml")
+	writeConfigCommandFile(t, source, "model = \"after\"\n")
+	prompt := &callbackPrompt{callback: func() {
+		if err := os.Remove(target); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments: []string{
+			"config", "import", "AGENT_codex_CONFIG", source, "--scope", "host",
+		},
+		Environment: environment, WorkingDir: root, Prompt: prompt,
+		Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 ||
+		!strings.Contains(stderr.String(), domain.ErrPlanStale.Error()) {
+		t.Fatalf("stale import: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("removed target was recreated: %v", err)
+	}
+}
+
 func TestConfigAuthoringNoOpWithAssumeYesStillSkipsWriterSafetyChecks(t *testing.T) {
 	root, _, configHome, environment := configCommandFixture(t)
 	target := filepath.Join(configHome, "config.env")
@@ -673,9 +841,10 @@ func TestConfigApplyAssessesDriftBeforeOneDefaultYesPrompt(t *testing.T) {
 		stoppedLoaded.Context.IncusProject + "/" + stoppedLoaded.Context.YardInstanceName: {
 			Name: stoppedLoaded.Context.YardInstanceName, Project: stoppedLoaded.Context.IncusProject, Status: "Stopped",
 		},
-	}, ExecSteps: []testkit.IncusExecStep{{
-		Result: ports.InstanceExecResult{Stdout: []byte(strings.Repeat("0", 64) + "  stale\n"), ExitCode: 0},
-	}}}
+	}}
+	appendMismatchedHashSteps(t, fake, defaultLoaded, "0")
+	appendHashSteps(t, fake, namedLoaded)
+	appendMismatchedHashSteps(t, fake, defaultLoaded, "0")
 	appendHashSteps(t, fake, namedLoaded)
 	appendHashSteps(t, fake, defaultLoaded)
 	prompt := &testkit.Prompt{Answers: []bool{true}}
@@ -705,9 +874,8 @@ func TestConfigApplyDeclineLeavesApplierUntouched(t *testing.T) {
 		loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {
 			Name: loaded.Context.YardInstanceName, Project: loaded.Context.IncusProject, Status: "Running",
 		},
-	}, ExecSteps: []testkit.IncusExecStep{{
-		Result: ports.InstanceExecResult{Stdout: []byte(strings.Repeat("0", 64) + "  stale\n"), ExitCode: 0},
-	}}}
+	}}
+	appendMismatchedHashSteps(t, fake, loaded, "0")
 	prompt := &testkit.Prompt{Answers: []bool{false}}
 	applier := &recordingConfigApplier{}
 	var stdout, stderr bytes.Buffer
@@ -724,6 +892,307 @@ func TestConfigApplyDeclineLeavesApplierUntouched(t *testing.T) {
 	}
 	if len(applier.yards) != 0 || len(prompt.Requests) != 1 || prompt.Requests[0].Default != domain.ConfirmationDefaultYes {
 		t.Fatalf("declined apply requests=%#v yards=%#v", prompt.Requests, applier.yards)
+	}
+}
+
+func TestConfigApplyRejectsMaterializedDriftChangeAfterConfirmation(t *testing.T) {
+	root, _, _, environment := configCommandFixture(t)
+	loaded := loadConfigCommandContext(t, root, environment, "default")
+	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+		loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {
+			Name: loaded.Context.YardInstanceName, Project: loaded.Context.IncusProject, Status: "Running",
+		},
+	}}
+	appendMismatchedHashSteps(t, fake, loaded, "0")
+	appendMismatchedHashSteps(t, fake, loaded, "1")
+	applier := &recordingConfigApplier{}
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "apply"},
+		Environment: environment, WorkingDir: root, Prompt: &callbackPrompt{},
+		Incus: fake, Executor: fake, Config: applier, Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 ||
+		!strings.Contains(stderr.String(), domain.ErrPlanStale.Error()) {
+		t.Fatalf("stale materialized state: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if len(applier.yards) != 0 {
+		t.Fatalf("stale apply reached applier: %#v", applier.yards)
+	}
+}
+
+func TestConfigApplyRejectsDesiredChangeAfterConfirmation(t *testing.T) {
+	root, _, configHome, environment := configCommandFixture(t)
+	source := filepath.Join(configHome, "overrides", "host", "agents", "codex", "config.toml")
+	writeConfigCommandFile(t, source, "model = \"before\"\n")
+	writeConfigCommandFile(t, filepath.Join(configHome, "config.env"),
+		"AGENTS=codex\n"+
+			"AGENT_codex_CONFIG='"+source+"'\n"+
+			"AGENT_codex_CONFIG_DEST='.codex/config.toml'\n")
+	loaded := loadConfigCommandContext(t, root, environment, "default")
+	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+		loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {
+			Name: loaded.Context.YardInstanceName, Project: loaded.Context.IncusProject, Status: "Running",
+		},
+	}}
+	appendMismatchedHashSteps(t, fake, loaded, "0")
+	appendMismatchedHashSteps(t, fake, loaded, "0")
+	prompt := &callbackPrompt{callback: func() {
+		writeConfigCommandFile(t, source, "model = \"after\"\n")
+	}}
+	applier := &recordingConfigApplier{}
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "apply"},
+		Environment: environment, WorkingDir: root, Prompt: prompt,
+		Incus: fake, Executor: fake, Config: applier, Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 ||
+		!strings.Contains(stderr.String(), domain.ErrPlanStale.Error()) {
+		t.Fatalf("stale desired state: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if len(applier.yards) != 0 {
+		t.Fatalf("stale apply reached applier: %#v", applier.yards)
+	}
+}
+
+func TestConfigApplySkipsDriftThatConvergedAfterConfirmation(t *testing.T) {
+	root, _, _, environment := configCommandFixture(t)
+	loaded := loadConfigCommandContext(t, root, environment, "default")
+	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+		loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {
+			Name: loaded.Context.YardInstanceName, Project: loaded.Context.IncusProject, Status: "Running",
+		},
+	}}
+	appendMismatchedHashSteps(t, fake, loaded, "0")
+	appendHashSteps(t, fake, loaded)
+	applier := &recordingConfigApplier{}
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "apply"},
+		Environment: environment, WorkingDir: root, Prompt: &callbackPrompt{},
+		Incus: fake, Executor: fake, Config: applier, Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("converged-after-consent: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if len(applier.yards) != 0 {
+		t.Fatalf("converged target reached applier: %#v", applier.yards)
+	}
+}
+
+func TestConfigApplySkipsDriftWhenTargetStopsOrDisappearsAfterConfirmation(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(map[string]ports.InstanceInfo, string)
+		state  string
+	}{
+		{
+			name: "stopped",
+			mutate: func(instances map[string]ports.InstanceInfo, key string) {
+				instance := instances[key]
+				instance.Status = "Stopped"
+				instances[key] = instance
+			},
+			state: "stopped",
+		},
+		{
+			name: "absent",
+			mutate: func(instances map[string]ports.InstanceInfo, key string) {
+				delete(instances, key)
+			},
+			state: "absent",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, _, _, environment := configCommandFixture(t)
+			loaded := loadConfigCommandContext(t, root, environment, "default")
+			key := loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName
+			fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+				key: {
+					Name:    loaded.Context.YardInstanceName,
+					Project: loaded.Context.IncusProject,
+					Status:  "Running",
+				},
+			}}
+			appendMismatchedHashSteps(t, fake, loaded, "0")
+			prompt := &callbackPrompt{callback: func() {
+				test.mutate(fake.Instances, key)
+			}}
+			applier := &recordingConfigApplier{}
+			var stdout, stderr bytes.Buffer
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "apply"},
+				Environment: environment, WorkingDir: root, Prompt: prompt,
+				Incus: fake, Executor: fake, Config: applier,
+				Stdout: &stdout, Stderr: &stderr,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code := program.Run(context.Background()); code != 0 {
+				t.Fatalf("%s after consent: code=%d stdout=%s stderr=%s",
+					test.name, code, stdout.String(), stderr.String())
+			}
+			if len(applier.yards) != 0 || len(prompt.requests) != 1 ||
+				!strings.Contains(stdout.String(), "materialized-config: "+test.state+" after confirmation; skipped") {
+				t.Fatalf("%s after consent: prompts=%#v yards=%#v stdout=%s stderr=%s",
+					test.name, prompt.requests, applier.yards, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+func TestConfigApplyRejectsDesiredChangeForStoppedTargetInConfirmedSet(t *testing.T) {
+	root, _, configHome, environment := configCommandFixture(t)
+	stoppedSource := filepath.Join(configHome, "overrides", "stopped-codex.toml")
+	writeConfigCommandFile(t, stoppedSource, "model = \"before\"\n")
+	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "stopped", "config.env"),
+		"SSH_PORT=2300\n"+
+			"CODING_TOOL_INTEGRATIONS=codex\n"+
+			"AGENT_codex_CONFIG='"+stoppedSource+"'\n"+
+			"AGENT_codex_CONFIG_DEST='.codex/config.toml'\n")
+	defaultLoaded := loadConfigCommandContext(t, root, environment, "default")
+	stoppedLoaded := loadConfigCommandContext(t, root, environment, "stopped")
+	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+		defaultLoaded.Context.IncusProject + "/" + defaultLoaded.Context.YardInstanceName: {
+			Name:    defaultLoaded.Context.YardInstanceName,
+			Project: defaultLoaded.Context.IncusProject,
+			Status:  "Running",
+		},
+		stoppedLoaded.Context.IncusProject + "/" + stoppedLoaded.Context.YardInstanceName: {
+			Name:    stoppedLoaded.Context.YardInstanceName,
+			Project: stoppedLoaded.Context.IncusProject,
+			Status:  "Stopped",
+		},
+	}}
+	appendMismatchedHashSteps(t, fake, defaultLoaded, "0")
+	appendMismatchedHashSteps(t, fake, defaultLoaded, "0")
+	appendHashSteps(t, fake, defaultLoaded)
+	prompt := &callbackPrompt{callback: func() {
+		writeConfigCommandFile(t, stoppedSource, "model = \"after\"\n")
+	}}
+	applier := &recordingConfigApplier{}
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments:   []string{"config", "apply", "--all-local"},
+		Environment: environment, WorkingDir: root, Prompt: prompt,
+		Incus: fake, Executor: fake, Config: applier,
+		Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 ||
+		!strings.Contains(stderr.String(), domain.ErrPlanStale.Error()) ||
+		!strings.Contains(stderr.String(), "yard stopped") {
+		t.Fatalf("stopped desired change: code=%d stdout=%s stderr=%s",
+			code, stdout.String(), stderr.String())
+	}
+	if len(applier.yards) != 0 {
+		t.Fatalf("stale stopped target reached applier: %#v", applier.yards)
+	}
+}
+
+func TestConfigApplyRejectsDesiredChangeThatConvergedAfterConfirmation(t *testing.T) {
+	root, _, configHome, environment := configCommandFixture(t)
+	source := filepath.Join(configHome, "overrides", "host", "agents", "codex", "config.toml")
+	after := "model = \"after\"\n"
+	writeConfigCommandFile(t, source, "model = \"before\"\n")
+	writeConfigCommandFile(t, filepath.Join(configHome, "config.env"),
+		"AGENTS=codex\n"+
+			"AGENT_codex_CONFIG='"+source+"'\n"+
+			"AGENT_codex_CONFIG_DEST='.codex/config.toml'\n")
+	loaded := loadConfigCommandContext(t, root, environment, "default")
+	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+		loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {
+			Name: loaded.Context.YardInstanceName, Project: loaded.Context.IncusProject, Status: "Running",
+		},
+	}}
+	appendMismatchedHashSteps(t, fake, loaded, "0")
+	assets, err := effectiveConfigAssets(loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, asset := range assets {
+		var hash string
+		if asset.Source == source {
+			digest := sha256.Sum256([]byte(after))
+			hash = fmt.Sprintf("%x", digest)
+		} else {
+			hash, err = hashRegularFile(asset.Source)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{
+			Result: ports.InstanceExecResult{
+				Stdout: []byte(fmt.Sprintf("%s  %s\n", hash, asset.Destination)), ExitCode: 0,
+			},
+		})
+	}
+	prompt := &callbackPrompt{callback: func() {
+		writeConfigCommandFile(t, source, after)
+	}}
+	applier := &recordingConfigApplier{}
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "apply"},
+		Environment: environment, WorkingDir: root, Prompt: prompt,
+		Incus: fake, Executor: fake, Config: applier, Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 ||
+		!strings.Contains(stderr.String(), domain.ErrPlanStale.Error()) {
+		t.Fatalf("changed desired converged: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if len(applier.yards) != 0 {
+		t.Fatalf("stale apply reached applier: %#v", applier.yards)
+	}
+}
+
+func TestConfigApplyRejectsExpandedAllLocalSelectionAfterConfirmation(t *testing.T) {
+	root, _, configHome, environment := configCommandFixture(t)
+	loaded := loadConfigCommandContext(t, root, environment, "default")
+	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+		loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {
+			Name: loaded.Context.YardInstanceName, Project: loaded.Context.IncusProject, Status: "Running",
+		},
+	}}
+	appendMismatchedHashSteps(t, fake, loaded, "0")
+	prompt := &callbackPrompt{callback: func() {
+		writeConfigCommandFile(t, filepath.Join(configHome, "yards", "named", "config.env"),
+			"SSH_PORT=2299\n")
+	}}
+	applier := &recordingConfigApplier{}
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments:   []string{"config", "apply", "--all-local"},
+		Environment: environment, WorkingDir: root, Prompt: prompt,
+		Incus: fake, Executor: fake, Config: applier, Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 ||
+		!strings.Contains(stderr.String(), domain.ErrPlanStale.Error()) {
+		t.Fatalf("expanded selection: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if len(applier.yards) != 0 {
+		t.Fatalf("expanded apply reached applier: %#v", applier.yards)
 	}
 }
 
@@ -781,11 +1250,9 @@ func TestConfigApplyCompletedNonzeroProbeRemainsDrift(t *testing.T) {
 				Status: "Running",
 			},
 		},
-		ExecSteps: []testkit.IncusExecStep{{
-			Result: ports.InstanceExecResult{ExitCode: 1},
-			Err:    errors.New("instance command exited with status 1"),
-		}},
 	}
+	appendUnavailableHashSteps(t, fake, loaded)
+	appendUnavailableHashSteps(t, fake, loaded)
 	appendHashSteps(t, fake, loaded)
 	prompt := &testkit.Prompt{}
 	applier := &recordingConfigApplier{}
@@ -2829,6 +3296,45 @@ func appendHashSteps(t *testing.T, fake *testkit.Incus, loaded config.Loaded) {
 			Result: ports.InstanceExecResult{
 				Stdout: []byte(fmt.Sprintf("%s  %s\n", hash, asset.Destination)), ExitCode: 0,
 			},
+		})
+	}
+}
+
+func appendMismatchedHashSteps(
+	t *testing.T,
+	fake *testkit.Incus,
+	loaded config.Loaded,
+	digit string,
+) {
+	t.Helper()
+	assets, err := effectiveConfigAssets(loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, asset := range assets {
+		fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{
+			Result: ports.InstanceExecResult{
+				Stdout:   []byte(strings.Repeat(digit, 64) + "  " + asset.Destination + "\n"),
+				ExitCode: 0,
+			},
+		})
+	}
+}
+
+func appendUnavailableHashSteps(
+	t *testing.T,
+	fake *testkit.Incus,
+	loaded config.Loaded,
+) {
+	t.Helper()
+	assets, err := effectiveConfigAssets(loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range assets {
+		fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{
+			Result: ports.InstanceExecResult{ExitCode: 1},
+			Err:    errors.New("instance command exited with status 1"),
 		})
 	}
 }

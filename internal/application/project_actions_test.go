@@ -175,7 +175,14 @@ func TestProjectMetadataIsCanonicalAndNewlineTerminated(t *testing.T) {
 }
 
 func TestProjectRemoveCleansEnvironmentBeforeWorkspace(t *testing.T) {
-	data := &projectDataStub{}
+	data := &projectDataStub{run: func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+		if len(request.Command) >= 2 && request.Command[0] == "docker" && request.Command[1] == "inspect" {
+			return ports.InstanceExecResult{
+				Stdout: []byte("sha256:owned-container\t1\tdemo-12345678\topenclaw\n"),
+			}, nil
+		}
+		return ports.InstanceExecResult{}, nil
+	}}
 	record := cloneRecord()
 	record.Mode = domain.ProjectSync
 	runner := ProjectActionRunner{
@@ -187,9 +194,92 @@ func TestProjectRemoveCleansEnvironmentBeforeWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(data.requests) != 6 || data.requests[0].Command[0] != "docker" ||
+		!slices.Equal(data.requests[2].Command, []string{"docker", "rm", "-f", "sha256:owned-container"}) ||
 		data.requests[4].Command[0] != "rm" || data.requests[4].Command[3] != "/srv/workspaces/demo-12345678" ||
 		data.requests[5].Command[4] != projectHooksDispatcher {
 		t.Fatalf("unexpected removal order: %#v", data.requests)
+	}
+}
+
+func TestProjectRemoveRejectsUnownedEnvironmentBeforeDestructiveSteps(t *testing.T) {
+	data := &projectDataStub{run: func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+		if len(request.Command) >= 2 && request.Command[0] == "docker" && request.Command[1] == "inspect" {
+			return ports.InstanceExecResult{
+				Stdout: []byte("sha256:foreign-container\t1\tother-project\topenclaw\n"),
+			}, nil
+		}
+		return ports.InstanceExecResult{}, nil
+	}}
+	record := cloneRecord()
+	record.Mode = domain.ProjectSync
+	runner := ProjectActionRunner{
+		Data: data, Yard: domain.Context{AccessKind: domain.AccessRemote}, Project: record,
+	}
+	if _, _, err := runner.Run(context.Background(), domain.AdapterRequest{
+		Schema: 1, OperationID: "operation-remove-unowned", Adapter: "project", Action: "remove",
+	}, nil); err == nil || !strings.Contains(err.Error(), "not owned") {
+		t.Fatalf("unowned environment was accepted: %v", err)
+	}
+	for _, request := range data.requests {
+		if len(request.Command) >= 2 &&
+			(request.Command[0] == "rm" || request.Command[0] == "docker" && request.Command[1] == "rm") {
+			t.Fatalf("unowned environment reached destructive request: %#v", request)
+		}
+	}
+}
+
+func TestProjectRemoveTreatsMissingEnvironmentAsIdempotent(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		result ports.InstanceExecResult
+		err    error
+	}{
+		{
+			name: "local stderr",
+			result: ports.InstanceExecResult{
+				ExitCode: 1, Stderr: []byte("Error: No such object: subyard-box-demo-12345678"),
+			},
+			err: errors.New("exit status 1"),
+		},
+		{
+			name:   "remote transport diagnostic",
+			result: ports.InstanceExecResult{ExitCode: 1},
+			err: errors.New(
+				"transport failed: Error response from daemon: No such container: subyard-box-demo-12345678",
+			),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			data := &projectDataStub{run: func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+				if len(request.Command) >= 2 && request.Command[0] == "docker" && request.Command[1] == "inspect" {
+					return test.result, test.err
+				}
+				return ports.InstanceExecResult{}, nil
+			}}
+			record := cloneRecord()
+			record.Mode = domain.ProjectSync
+			runner := ProjectActionRunner{
+				Data: data, Yard: domain.Context{AccessKind: domain.AccessRemote}, Project: record,
+			}
+			if _, _, err := runner.Run(context.Background(), domain.AdapterRequest{
+				Schema: 1, OperationID: "operation-remove-missing", Adapter: "project", Action: "remove",
+			}, nil); err != nil {
+				t.Fatal(err)
+			}
+			removedWorkspace := false
+			for _, request := range data.requests {
+				if len(request.Command) >= 2 && request.Command[0] == "docker" && request.Command[1] == "rm" {
+					t.Fatalf("missing environment reached docker rm: %#v", request)
+				}
+				if len(request.Command) >= 4 && request.Command[0] == "rm" &&
+					request.Command[3] == "/srv/workspaces/demo-12345678" {
+					removedWorkspace = true
+				}
+			}
+			if !removedWorkspace {
+				t.Fatalf("idempotent removal did not reach workspace cleanup: %#v", data.requests)
+			}
+		})
 	}
 }
 

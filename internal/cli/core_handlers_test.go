@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -31,7 +32,7 @@ func TestTestVMsUsesTypedWorkerInvocation(t *testing.T) {
 		Schema: 1, OperationID: "test-vms-revoke", Status: "ok",
 	}}}}
 	prompt := &testkit.Prompt{Answers: []bool{true}}
-	probe := &testVMStatusProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","state":"available"},{"slot_id":"slot-002","state":"held"}]}}`)}
+	probe := &testVMStatusProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":1,"state":"available"},{"slot_id":"slot-002","resource_generation":7,"lease_epoch":3,"state":"held"}]}}`)}
 	program, err := New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"test-vms", "revoke", "--slot", "2"},
@@ -46,13 +47,166 @@ func TestTestVMsUsesTypedWorkerInvocation(t *testing.T) {
 	}
 	if len(runner.Requests) != 1 || runner.Requests[0].Adapter != "test-vms" ||
 		runner.Requests[0].Action != "revoke" ||
-		!slices.Equal(runner.Requests[0].Arguments, []string{"revoke-slot-2", "--yes"}) {
+		!slices.Equal(runner.Requests[0].Arguments, []string{
+			"revoke-slot-2",
+			"--expect-resource-generation", "7",
+			"--expect-lease-epoch", "3",
+			"--yes",
+		}) {
 		t.Fatalf("requests=%#v", runner.Requests)
 	}
 	if len(prompt.Requests) != 1 ||
 		prompt.Requests[0].Summary != "Revoke test VM lease slot" ||
 		prompt.Requests[0].Default != domain.ConfirmationDefaultYes {
 		t.Fatalf("confirmation requests=%#v", prompt.Requests)
+	}
+}
+
+func TestTestVMsMapsWorkerStaleIdentityToPlanStale(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	environment = append(environment, "NESTED_E2E_VMS=1", "SUBYARD_OPERATION_ID=test-vms-stale")
+	incus := lifecycleIncus()
+	instance := incus.Instances["subyard/yard"]
+	instance.Status = "Running"
+	incus.Instances["subyard/yard"] = instance
+	workerErr := exec.Command("sh", "-c", "exit 75").Run()
+	runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Err: workerErr}}}
+	probe := &testVMStatusProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":1,"state":"available"},{"slot_id":"slot-002","resource_generation":7,"lease_epoch":3,"state":"held"}]}}`)}
+	var stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments:   []string{"test-vms", "revoke", "--slot", "2"},
+		Environment: environment, WorkingDir: root, Incus: incus, ProjectData: probe,
+		AdapterRunner: runner, Prompt: &testkit.Prompt{Answers: []bool{true}}, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 ||
+		!strings.Contains(stderr.String(), domain.ErrPlanStale.Error()) {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+}
+
+func TestRemoteTestVMsForwardsConfirmedLeaseIdentity(t *testing.T) {
+	root, environment, stateDirectory := nativeFixture(t)
+	configHome := filepath.Dir(stateDirectory)
+	if err := os.MkdirAll(filepath.Join(configHome, "yards", "remote"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(configHome, "yards", "remote", "config.env"),
+		"ACCESS_KIND=remote\nREMOTE_DEST=owner.example\nREMOTE_YARD=inner\n"+
+			"SSH_PORT=4444\nNESTED_E2E_VMS=1\n", 0o600)
+	fakeBin := filepath.Join(root, "fake-bin")
+	if err := os.MkdirAll(fakeBin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sshLog := filepath.Join(root, "remote-test-vms-ssh.log")
+	writeCLIFile(t, filepath.Join(fakeBin, "ssh"), `#!/bin/sh
+printf '%s\n' "$@" >"$SUBYARD_TEST_SSH_LOG"
+`, 0o700)
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+	environment = append(environment,
+		"PATH="+os.Getenv("PATH"),
+		"SUBYARD_TEST_SSH_LOG="+sshLog,
+		"SUBYARD_OPERATION_ID=remote-test-vms-revoke",
+	)
+	probe := &testVMStatusProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":1,"state":"available"},{"slot_id":"slot-002","resource_generation":7,"lease_epoch":3,"state":"held"}]}}`)}
+	prompt := &testkit.Prompt{Answers: []bool{true}}
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments:   []string{"-Y", "remote", "test-vms", "revoke", "--slot", "2"},
+		Environment: environment, WorkingDir: root, ProjectData: probe,
+		Prompt: prompt, Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("remote test-vms: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	forwarded, err := os.ReadFile(sshLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := string(forwarded)
+	for _, expected := range []string{
+		"owner.example", "test-vms", "revoke", "--slot", "2",
+		"--expect-resource-generation", "7", "--expect-lease-epoch", "3", "--yes",
+	} {
+		if !strings.Contains(command, expected) {
+			t.Fatalf("remote forwarding omitted %q:\n%s", expected, command)
+		}
+	}
+	if len(prompt.Requests) != 1 {
+		t.Fatalf("confirmation requests=%#v", prompt.Requests)
+	}
+}
+
+func TestTestVMsRejectsForwardedReplacementIdentity(t *testing.T) {
+	loaded := config.Loaded{Context: domain.Context{
+		NestedE2EVMs: true, AccessKind: domain.AccessLocal, YardKind: domain.YardContainer,
+		IncusProject: "subyard", YardInstanceName: "yard",
+	}}
+	probe := &testVMStatusProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":1,"state":"available"},{"slot_id":"slot-002","resource_generation":7,"lease_epoch":4,"state":"held"}]}}`)}
+	program := &CLI{options: Options{
+		Incus: &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+			"subyard/yard": {Name: "yard", Project: "subyard", Status: "Running"},
+		}},
+		ProjectData: probe,
+	}}
+	_, err := program.prepareTestVMExecution(context.Background(), loaded, []string{
+		"revoke", "--slot", "2",
+		"--expect-resource-generation", "7", "--expect-lease-epoch", "3", "--yes",
+	})
+	if !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatalf("replacement identity error = %v", err)
+	}
+}
+
+func TestRemoteTestVMsForwardsAvailableSlotSnapshot(t *testing.T) {
+	loaded := config.Loaded{Context: domain.Context{
+		NestedE2EVMs: true, AccessKind: domain.AccessRemote, YardKind: domain.YardContainer,
+	}}
+	probe := &testVMStatusProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":7,"lease_epoch":0,"state":"available"}]}}`)}
+	program := &CLI{options: Options{ProjectData: probe}}
+	execution, err := program.prepareTestVMExecution(
+		context.Background(), loaded, []string{"revoke", "--slot", "1"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forwarded, err := execution.remoteArguments([]string{"revoke", "--slot", "1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(forwarded, []string{
+		"revoke", "--slot", "1",
+		"--expect-resource-generation", "7", "--expect-lease-epoch", "0",
+	}) {
+		t.Fatalf("forwarded = %#v", forwarded)
+	}
+}
+
+func TestTestVMsRejectsAvailableSlotClaimedAfterRemoteNoOp(t *testing.T) {
+	loaded := config.Loaded{Context: domain.Context{
+		NestedE2EVMs: true, AccessKind: domain.AccessLocal, YardKind: domain.YardContainer,
+		IncusProject: "subyard", YardInstanceName: "yard",
+	}}
+	probe := &testVMStatusProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":7,"lease_epoch":1,"state":"held"}]}}`)}
+	program := &CLI{options: Options{
+		Incus: &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+			"subyard/yard": {Name: "yard", Project: "subyard", Status: "Running"},
+		}},
+		ProjectData: probe,
+	}}
+	_, err := program.prepareTestVMExecution(context.Background(), loaded, []string{
+		"revoke", "--slot", "1",
+		"--expect-resource-generation", "7", "--expect-lease-epoch", "0", "--yes",
+	})
+	if !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatalf("available replacement identity error = %v", err)
 	}
 }
 
@@ -139,7 +293,7 @@ func TestTestVMsDeclineLeavesWorkerUntouched(t *testing.T) {
 	incus.Instances["subyard/yard"] = instance
 	prompt := &testkit.Prompt{Answers: []bool{false}}
 	runner := &testkit.ScriptedAdapter{}
-	probe := &testVMStatusProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","state":"available"},{"slot_id":"slot-002","state":"held"}]}}`)}
+	probe := &testVMStatusProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":1,"state":"available"},{"slot_id":"slot-002","resource_generation":7,"lease_epoch":3,"state":"held"}]}}`)}
 	var stderr bytes.Buffer
 	program, err := New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"test-vms", "revoke", "--slot", "2"},
@@ -211,6 +365,32 @@ func TestTestVMRecoverAvailableSlotIsNoOpBeforeConfirmation(t *testing.T) {
 	}
 	if len(prompt.Requests) != 0 || len(runner.Requests) != 0 {
 		t.Fatalf("available recover was not a no-op: prompts=%#v requests=%#v", prompt.Requests, runner.Requests)
+	}
+}
+
+func TestTestVMRecoverInProgressIsNoOpBeforeConfirmation(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	environment = append(environment, "NESTED_E2E_VMS=1", "SUBYARD_OPERATION_ID=test-vms-recovering-noop")
+	incus := lifecycleIncus()
+	instance := incus.Instances["subyard/yard"]
+	instance.Status = "Running"
+	incus.Instances["subyard/yard"] = instance
+	probe := &testVMStatusProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":1,"state":"available"},{"slot_id":"slot-002","resource_generation":4,"lease_epoch":8,"state":"recovering"}]}}`)}
+	prompt := &testkit.Prompt{}
+	runner := &testkit.ScriptedAdapter{}
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Arguments: []string{"test-vms", "recover", "--slot", "2"},
+		Environment: environment, WorkingDir: root, Incus: incus, ProjectData: probe,
+		AdapterRunner: runner, Prompt: prompt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("test-vms returned %d", code)
+	}
+	if len(prompt.Requests) != 0 || len(runner.Requests) != 0 {
+		t.Fatalf("recovering slot was not a no-op: prompts=%#v requests=%#v", prompt.Requests, runner.Requests)
 	}
 }
 

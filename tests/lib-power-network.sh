@@ -70,6 +70,10 @@ printf '%s:%s\n' "$n" "${MOCK_NM_PRIVILEGED:-direct}" >> "$MOCK_NM_LOG"
 mode="${MOCK_NM_MODE:-valid}"
 [ "$mode" != valid-then-invalid ] || { if [ "$n" -eq 1 ]; then mode=valid; else mode=invalid; fi; }
 [ "$mode" != fail ] || exit 7
+if [ -n "${MOCK_NM_CONFIG_FILE:-}" ]; then
+  cat "$MOCK_NM_CONFIG_FILE"
+  exit 0
+fi
 if [ "$mode" = valid ]; then
   cat <<'CFG'
 [main]
@@ -92,6 +96,11 @@ cat > "$tmp/bin/incus" <<'SH'
 set -euo pipefail
 case "${1:-}" in
   list) printf 'STOPPED\n' ;;
+  network)
+    [ "${2:-}" = list ] || exit 90
+    [ "${MOCK_INCUS_NETWORK_RC:-0}" = 0 ] || exit "$MOCK_INCUS_NETWORK_RC"
+    printf '%s' "${MOCK_INCUS_NETWORKS:-}"
+    ;;
   start) printf 'start\n' >> "$MOCK_INCUS_LOG" ;;
   stop) printf 'stop\n' >> "$MOCK_INCUS_LOG"; exit "${MOCK_INCUS_STOP_RC:-0}" ;;
   exec)
@@ -122,6 +131,12 @@ export PATH="$tmp/bin:$PATH"
 . "$ROOT/scripts/lib-power.sh"
 power_nm_binary() { printf '%s\n' "$tmp/bin/NetworkManager"; }
 
+ROOT="$ROOT" bash -c '
+  set -euo pipefail
+  . "$ROOT/scripts/lib/host.sh"
+  declare -F power_nm_active >/dev/null
+' || fail "host adapter does not load its NetworkManager safety dependency"
+
 reset_case() {
   : > "$MOCK_SYSTEMCTL_LOG"
   : > "$MOCK_SUDO_LOG"
@@ -131,7 +146,8 @@ reset_case() {
   POWER_ERROR=''
   export MOCK_NM_STATE=active MOCK_UID=1000 MOCK_SUDO_V_RC=0 MOCK_SUDO_N_RC=0 \
     MOCK_SUDO_REQUIRE_V=1 MOCK_NM_MODE=valid MOCK_RELOAD_RC=0 MOCK_NMCLI_RC=1 \
-    MOCK_INCUS_STOP_RC=0 MOCK_INCUS_EXEC_READY_AFTER=1 MOCK_INCUS_EXEC_HANG=0
+    MOCK_INCUS_STOP_RC=0 MOCK_INCUS_EXEC_READY_AFTER=1 MOCK_INCUS_EXEC_HANG=0 \
+    MOCK_INCUS_NETWORK_RC=0 MOCK_INCUS_NETWORKS='' MOCK_NM_CONFIG_FILE=''
 }
 
 reset_case
@@ -234,6 +250,39 @@ nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null
 [ "$(wc -l < "$MOCK_SYSTEMCTL_LOG")" -eq 1 ] || fail "new guard was not reloaded"
 nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null
 [ "$(wc -l < "$MOCK_SYSTEMCTL_LOG")" -eq 2 ] || fail "unchanged guard did not retry reload"
+
+reset_case
+MOCK_UID=0 MOCK_NM_CONFIG_FILE="$guard_conf"
+MOCK_INCUS_NETWORKS=$'incusbr0,bridge\n'
+nm_unmanaged_guard nestedbr0 "$guard_conf" >/dev/null
+grep -Fq 'interface-name:incusbr0' "$guard_conf" \
+  || fail "guard omitted the surviving default bridge"
+grep -Fq 'interface-name:nestedbr0' "$guard_conf" \
+  || fail "guard omitted the requested nested bridge"
+MOCK_INCUS_NETWORKS=$'incusbr0,bridge\n'
+nm_unmanaged_guard_reconcile "$guard_conf" >/dev/null
+grep -Fq 'interface-name:incusbr0' "$guard_conf" \
+  || fail "reconcile removed the surviving default bridge"
+if grep -Fq 'interface-name:nestedbr0' "$guard_conf"; then
+  fail "reconcile retained a deleted nested bridge"
+fi
+guard_before="$(sha256sum "$guard_conf" | awk '{print $1}')"
+MOCK_INCUS_NETWORK_RC=7
+if nm_unmanaged_guard_reconcile "$guard_conf" >/dev/null 2>&1; then
+  fail "reconcile accepted a failed Incus bridge inventory"
+fi
+[ "$(sha256sum "$guard_conf" | awk '{print $1}')" = "$guard_before" ] \
+  || fail "failed inventory changed the fail-closed guard"
+mv "$tmp/bin/incus" "$tmp/bin/incus.off"
+if nm_unmanaged_guard_reconcile "$guard_conf" >/dev/null 2>&1; then
+  fail "reconcile accepted a missing Incus inventory command"
+fi
+[ "$(sha256sum "$guard_conf" | awk '{print $1}')" = "$guard_before" ] \
+  || fail "missing Incus inventory changed the fail-closed guard"
+mv "$tmp/bin/incus.off" "$tmp/bin/incus"
+MOCK_INCUS_NETWORK_RC=0 MOCK_INCUS_NETWORKS=
+nm_unmanaged_guard_reconcile "$guard_conf" >/dev/null
+[ ! -e "$guard_conf" ] || fail "final bridge removal retained the guard"
 
 reset_case
 MOCK_UID=0 MOCK_NM_STATE=error

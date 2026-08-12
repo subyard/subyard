@@ -80,6 +80,10 @@ if [[ "$joined" == *'yard-remote'*'docker inspect "$1"'* ]]; then
   [[ "$joined" != *'printf present'* ]] || printf 'present'
   exit 0
 fi
+if [[ "$joined" == *'yard-remote'*"'docker' 'inspect' '-f'"* ]]; then
+  printf 'sha256:owned-container\t1\tdemo-12345678\topenclaw\n'
+  exit 0
+fi
 if [[ "$joined" == *'yard-remote'*"'docker' 'rm'"* || "$joined" == *'/srv/env-secrets/'* ]]; then
   : > "$REMOTE_TEST_STATE/data-cleanup"
   exit 0

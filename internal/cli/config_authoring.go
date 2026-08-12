@@ -71,7 +71,7 @@ func (cli *CLI) runConfigAuthoring(
 			cli.errorf("config %s: %v", action, err)
 			return 2
 		}
-		content, err := readConfigAuthoringTarget(path)
+		snapshot, err := readConfigAuthoringTarget(path)
 		if err != nil {
 			cli.errorf("config %s: %v", action, err)
 			return 1
@@ -80,23 +80,33 @@ func (cli *CLI) runConfigAuthoring(
 		if action == "set" {
 			value = &request.value
 		}
-		candidate, err := config.EditPersistentAssignmentContent(path, content, request.name, value)
+		candidate, err := config.EditPersistentAssignmentContent(
+			path, snapshot.Content, request.name, value,
+		)
 		if err != nil {
 			cli.errorf("config %s: %v", action, err)
 			return 1
 		}
-		if !cli.planConfigAction(ctx, loaded, request.action, request.assumeYes, bytes.Equal(content, candidate),
+		intended := config.PersistentFileSnapshot{Exists: true, Content: candidate}
+		if action == "unset" && len(candidate) == 0 {
+			intended = config.PersistentFileSnapshot{Exists: false}
+		}
+		unchanged := sameConfigAuthoringSnapshot(snapshot, intended)
+		if !cli.planConfigAction(ctx, loaded, request.action, request.assumeYes, unchanged,
 			fmt.Sprintf("%s %s in persistent %s settings at %s",
 				action, request.name, request.scope, path)) {
 			return 1
 		}
-		if bytes.Equal(content, candidate) {
+		if unchanged {
 			fmt.Fprintf(cli.options.Stdout, "config %s: already current\n", action)
 			return 0
 		}
-		if err := config.WritePersistentAssignment(
-			loaded.Context.Paths.ConfigHome, path, request.name, value,
+		if err := config.WritePersistentAssignmentIfUnchanged(
+			loaded.Context.Paths.ConfigHome, path, request.name, value, snapshot,
 		); err != nil {
+			if errors.Is(err, config.ErrPersistentTargetStale) {
+				err = fmt.Errorf("%w: persistent configuration changed after confirmation", domain.ErrPlanStale)
+			}
 			cli.errorf("config %s: %v", action, err)
 			return 1
 		}
@@ -115,7 +125,7 @@ func (cli *CLI) runConfigAuthoring(
 		cli.errorf("config %s: %v", action, err)
 		return 2
 	}
-	current, err := readConfigAuthoringTarget(target)
+	snapshot, err := readConfigAuthoringTarget(target)
 	if err != nil {
 		cli.errorf("config %s: %v", action, err)
 		return 1
@@ -128,7 +138,7 @@ func (cli *CLI) runConfigAuthoring(
 		}
 		content, err = readConfigAuthoringFile(source)
 	} else {
-		content, err = cli.editConfigAuthoringFile(ctx, current)
+		content, err = cli.editConfigAuthoringFile(ctx, snapshot.Content)
 	}
 	if err != nil {
 		cli.errorf("config %s: %v", action, err)
@@ -138,23 +148,32 @@ func (cli *CLI) runConfigAuthoring(
 		cli.errorf("config %s: %v", action, err)
 		return 1
 	}
-	if !cli.planConfigAction(ctx, loaded, request.action, request.assumeYes, bytes.Equal(current, content),
+	intended := config.PersistentFileSnapshot{Exists: true, Content: content}
+	unchanged := sameConfigAuthoringSnapshot(snapshot, intended)
+	if !cli.planConfigAction(ctx, loaded, request.action, request.assumeYes, unchanged,
 		fmt.Sprintf("replace persistent %s file setting %s at %s",
 			request.scope, request.name, target)) {
 		return 1
 	}
-	if bytes.Equal(current, content) {
+	if unchanged {
 		fmt.Fprintf(cli.options.Stdout, "config %s: already current\n", action)
 		return 0
 	}
-	if err := config.WritePersistentFile(
-		loaded.Context.Paths.ConfigHome, target, content,
+	if err := config.WritePersistentFileIfUnchanged(
+		loaded.Context.Paths.ConfigHome, target, snapshot, content,
 	); err != nil {
+		if errors.Is(err, config.ErrPersistentTargetStale) {
+			err = fmt.Errorf("%w: persistent configuration changed after confirmation", domain.ErrPlanStale)
+		}
 		cli.errorf("config %s: %v", action, err)
 		return 1
 	}
 	fmt.Fprintf(cli.options.Stdout, "config %s: updated %s\n", action, target)
 	return 0
+}
+
+func sameConfigAuthoringSnapshot(left, right config.PersistentFileSnapshot) bool {
+	return left.Exists == right.Exists && bytes.Equal(left.Content, right.Content)
 }
 
 func parseConfigAuthoringRequest(
@@ -292,12 +311,15 @@ func (cli *CLI) planConfigAction(
 	return true
 }
 
-func readConfigAuthoringTarget(path string) ([]byte, error) {
+func readConfigAuthoringTarget(path string) (config.PersistentFileSnapshot, error) {
 	content, err := readConfigAuthoringFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
+		return config.PersistentFileSnapshot{}, nil
 	}
-	return content, err
+	if err != nil {
+		return config.PersistentFileSnapshot{}, err
+	}
+	return config.PersistentFileSnapshot{Exists: true, Content: content}, nil
 }
 
 func readConfigAuthoringFile(path string) ([]byte, error) {

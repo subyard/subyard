@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -150,9 +151,11 @@ func (cli *CLI) runTestVMLogs(ctx context.Context, arguments []string) int {
 }
 
 type testVMExecution struct {
-	action string
-	slot   int
-	noOp   bool
+	action      string
+	slot        int
+	identity    testvmsruntime.LeaseIdentity
+	hasSnapshot bool
+	noOp        bool
 }
 
 const testVMStatusMaxBytes = 64 << 10
@@ -178,6 +181,8 @@ func (cli *CLI) prepareTestVMExecution(
 	}
 	action := ""
 	slot := 0
+	var expectedGeneration, expectedEpoch uint64
+	var expectedGenerationSet, expectedEpochSet bool
 	for index := 0; index < len(arguments); index++ {
 		argument := arguments[index]
 		switch argument {
@@ -193,6 +198,27 @@ func (cli *CLI) prepareTestVMExecution(
 			slot, err = strconv.Atoi(arguments[index])
 			if err != nil || slot < 1 {
 				return nil, errors.New("--slot requires a positive integer")
+			}
+		case "--expect-resource-generation", "--expect-lease-epoch":
+			option := argument
+			index++
+			if index >= len(arguments) {
+				return nil, fmt.Errorf("%s requires a non-negative integer", option)
+			}
+			value, err := strconv.ParseUint(arguments[index], 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("%s requires a non-negative integer", option)
+			}
+			if option == "--expect-resource-generation" {
+				if expectedGenerationSet {
+					return nil, fmt.Errorf("%s may be specified only once", option)
+				}
+				expectedGeneration, expectedGenerationSet = value, true
+			} else {
+				if expectedEpochSet {
+					return nil, fmt.Errorf("%s may be specified only once", option)
+				}
+				expectedEpoch, expectedEpochSet = value, true
 			}
 		default:
 			if strings.HasPrefix(argument, "-") {
@@ -216,6 +242,12 @@ func (cli *CLI) prepareTestVMExecution(
 	default:
 		return nil, fmt.Errorf("unknown test-vms command %q", action)
 	}
+	if expectedGenerationSet != expectedEpochSet {
+		return nil, errors.New("forwarded test VM target identity requires generation and epoch")
+	}
+	if expectedGenerationSet && action != "revoke" && action != "recover" {
+		return nil, errors.New("forwarded test VM target identity requires revoke or recover")
+	}
 	// A remote invocation is preflighted by the owner after forwarding. A local
 	// invocation must prove the yard can run the broker operation before any
 	// confirmation is requested.
@@ -233,9 +265,24 @@ func (cli *CLI) prepareTestVMExecution(
 	}
 	execution := &testVMExecution{action: action, slot: slot}
 	if action == "revoke" || action == "recover" {
-		slotState, err := cli.probeTestVMSlot(ctx, loaded, slot)
+		slotSnapshot, err := cli.probeTestVMSlot(ctx, loaded, slot)
 		if err != nil {
 			return nil, err
+		}
+		slotState := slotSnapshot.State
+		execution.identity = testvmsruntime.LeaseIdentity{
+			SlotID:             slotSnapshot.SlotID,
+			ResourceGeneration: slotSnapshot.ResourceGeneration,
+			LeaseEpoch:         slotSnapshot.LeaseEpoch,
+		}
+		execution.hasSnapshot = true
+		if expectedGenerationSet &&
+			(slotSnapshot.ResourceGeneration != expectedGeneration ||
+				slotSnapshot.LeaseEpoch != expectedEpoch) {
+			return nil, fmt.Errorf(
+				"%w: test VM lease target changed after remote confirmation",
+				domain.ErrPlanStale,
+			)
 		}
 		switch action {
 		case "revoke":
@@ -248,55 +295,83 @@ func (cli *CLI) prepareTestVMExecution(
 			}
 		case "recover":
 			switch slotState {
-			case testvmsruntime.SlotAvailable:
+			case testvmsruntime.SlotAvailable, testvmsruntime.SlotRecovering:
 				execution.noOp = true
-			case testvmsruntime.SlotQuarantined, testvmsruntime.SlotRecovering:
+			case testvmsruntime.SlotQuarantined:
 			default:
 				return nil, fmt.Errorf("test VM slot %d cannot be recovered while %s", slot, slotState)
+			}
+		}
+		if !execution.noOp {
+			if slotSnapshot.ResourceGeneration == 0 || slotSnapshot.LeaseEpoch == 0 {
+				return nil, errors.New("test VM broker returned an incomplete lease target identity")
 			}
 		}
 	}
 	return execution, nil
 }
 
+func (execution *testVMExecution) remoteArguments(arguments []string) ([]string, error) {
+	if execution == nil || execution.action == "status" {
+		return append([]string(nil), arguments...), nil
+	}
+	if !execution.hasSnapshot {
+		return nil, errors.New("test VM target snapshot is required for remote forwarding")
+	}
+	forwarded := make([]string, 0, len(arguments)+4)
+	for index := 0; index < len(arguments); index++ {
+		switch arguments[index] {
+		case "--expect-resource-generation", "--expect-lease-epoch":
+			index++
+		default:
+			forwarded = append(forwarded, arguments[index])
+		}
+	}
+	forwarded = append(forwarded,
+		"--expect-resource-generation", strconv.FormatUint(execution.identity.ResourceGeneration, 10),
+		"--expect-lease-epoch", strconv.FormatUint(execution.identity.LeaseEpoch, 10),
+	)
+	return forwarded, nil
+}
+
 func (cli *CLI) probeTestVMSlot(
 	ctx context.Context,
 	loaded config.Loaded,
 	slot int,
-) (testvmsruntime.SlotState, error) {
+) (testvmsruntime.LeaseSlot, error) {
 	probeContext, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	result, err := cli.projectDataPlane().Execute(probeContext, loaded.Context, ports.InstanceExecRequest{
 		Command: []string{testvmsruntime.DefaultInstalledPath, "_test-vms-worker", "status"},
 	})
 	if err != nil {
-		return "", fmt.Errorf("read test VM broker status: %w", err)
+		return testvmsruntime.LeaseSlot{}, fmt.Errorf("read test VM broker status: %w", err)
 	}
 	if result.ExitCode != 0 {
-		return "", fmt.Errorf("read test VM broker status: exit status %d", result.ExitCode)
+		return testvmsruntime.LeaseSlot{}, fmt.Errorf("read test VM broker status: exit status %d", result.ExitCode)
 	}
 	if len(result.Stdout) > testVMStatusMaxBytes {
-		return "", errors.New("test VM broker status exceeds the safe probe limit")
+		return testvmsruntime.LeaseSlot{}, errors.New("test VM broker status exceeds the safe probe limit")
 	}
 	var response testVMStatusResponse
 	if err := json.Unmarshal(result.Stdout, &response); err != nil {
-		return "", fmt.Errorf("decode test VM broker status: %w", err)
+		return testvmsruntime.LeaseSlot{}, fmt.Errorf("decode test VM broker status: %w", err)
 	}
 	if response.SchemaVersion != testvmsruntime.LeaseSchemaVersion || response.Status != "ok" ||
 		response.Pool == nil || response.Pool.SchemaVersion != testvmsruntime.LeaseSchemaVersion ||
 		response.Pool.ResourceType != "agent-e2e" || response.Pool.ResourceID != "test-vms" {
-		return "", errors.New("test VM broker returned an invalid status response")
+		return testvmsruntime.LeaseSlot{}, errors.New("test VM broker returned an invalid status response")
 	}
 	if err := validateTestVMStatusSlots(response.Pool.Slots); err != nil {
-		return "", errors.New("test VM broker returned an invalid status response")
+		return testvmsruntime.LeaseSlot{}, errors.New("test VM broker returned an invalid status response")
 	}
 	wanted := fmt.Sprintf("slot-%03d", slot)
 	for _, candidate := range response.Pool.Slots {
 		if candidate.SlotID == wanted {
-			return candidate.State, nil
+			return candidate, nil
 		}
 	}
-	return "", fmt.Errorf("test VM slot %d is not configured", slot)
+	return testvmsruntime.LeaseSlot{}, fmt.Errorf("test VM slot %d is not configured", slot)
 }
 
 func validateTestVMStatusSlots(slots []testvmsruntime.LeaseSlot) error {
@@ -401,7 +476,11 @@ func (cli *CLI) executeTestVMs(
 	}
 	arguments := []string{argument}
 	if execution.action != "status" {
-		arguments = append(arguments, "--yes")
+		arguments = append(arguments,
+			"--expect-resource-generation", strconv.FormatUint(execution.identity.ResourceGeneration, 10),
+			"--expect-lease-epoch", strconv.FormatUint(execution.identity.LeaseEpoch, 10),
+			"--yes",
+		)
 	}
 	request := domain.AdapterRequest{
 		Schema: shelladapter.ProtocolSchema, OperationID: plan.OperationID,
@@ -410,5 +489,13 @@ func (cli *CLI) executeTestVMs(
 	}
 	result, stderr, err := orchestrator.RunAdapter(ctx, plan, request, nil)
 	writeAdapterDiagnostics(diagnostics, stderr)
+	var exitErr *exec.ExitError
+	if err != nil && errors.As(err, &exitErr) &&
+		exitErr.ExitCode() == testvmsruntime.LeaseTargetStaleExitCode {
+		return result, fmt.Errorf(
+			"%w: test VM lease target changed after confirmation",
+			domain.ErrPlanStale,
+		)
+	}
 	return result, err
 }

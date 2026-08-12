@@ -183,21 +183,10 @@ else
   warn "kept $STORAGE_PATH and shared $SUBYARD_HOME/{ssh,logs} — another yard still uses the pool"
 fi
 
-bridge_link_gone=0
-ip link show "$BRIDGE" >/dev/null 2>&1 || bridge_link_gone=1
-if [ "$KEEP_DATA" = 0 ] && [ "$bridge_gone" = 1 ] && [ "$bridge_link_gone" = 1 ]; then
+if [ "$KEEP_DATA" = 0 ]; then
   echo "NetworkManager guard:"
-  rm -f /etc/NetworkManager/conf.d/zz-subyard-unmanaged.conf 2>/dev/null || true
-  rm -f /etc/NetworkManager/conf.d/99-subyard-unmanaged.conf 2>/dev/null || true
-  if command -v nmcli >/dev/null 2>&1 && systemctl is-active --quiet NetworkManager 2>/dev/null; then
-    systemctl reload NetworkManager 2>/dev/null || nmcli general reload 2>/dev/null || true
-    ok "removed NetworkManager guard + reloaded NM"
-  else
-    ok "removed NetworkManager guard file (NM not active)"
-  fi
-elif [ "$KEEP_DATA" = 0 ]; then
-  echo "NetworkManager guard:"
-  warn "kept the NetworkManager guard — bridge '$BRIDGE' still present (removing it now could let NM hijack the route)"
+  nm_unmanaged_guard_reconcile \
+    || warn "kept the NetworkManager guard because surviving Incus bridges could not be verified"
 fi
 
 echo
