@@ -136,7 +136,13 @@ else
     || die "incus install failed (the distro repos may carry it; Zabbly LTS-6.0 is the >= $MIN_INCUS_VER source)"
   apt-get clean
   ok "incus installed ($(_iver))"
-  _irecent || warn "installed incus $(_iver) < $MIN_INCUS_VER — nested Docker will fail until you upgrade (re-run with --zabbly)"
+  if ! _irecent; then
+    if [ "$USE_ZABBLY" = 1 ]; then
+      die "installed incus $(_iver) < $MIN_INCUS_VER even after adding the Zabbly repo — check 'apt-cache policy incus'"
+    else
+      warn "installed incus $(_iver) < $MIN_INCUS_VER — nested Docker will fail until you upgrade (re-run with --zabbly)"
+    fi
+  fi
 fi
 
 # --upgrade-only: ensuring the version is all this run does — group/storage/init are 'yard init's job.

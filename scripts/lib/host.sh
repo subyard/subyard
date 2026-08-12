@@ -325,6 +325,14 @@ Signed-By: $key"
   else
     ok "Zabbly LTS-6.0 apt source already present (suite=$suite)"
   fi
+  local pin=/etc/apt/preferences.d/zabbly-incus.pref
+  local want_pin="Package: incus incus-client
+Pin: origin pkgs.zabbly.com
+Pin-Priority: 700"
+  if [ ! -f "$pin" ] || ! printf '%s\n' "$want_pin" | cmp -s - "$pin"; then
+    printf '%s\n' "$want_pin" > "$pin"
+    ok "pinned Zabbly incus packages (priority 700) ($pin)"
+  fi
   info "apt-get update (Zabbly)"
   apt-get update -qq || { warn "apt-get update failed after adding the Zabbly repo"; return 1; }
 }
