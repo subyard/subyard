@@ -313,9 +313,92 @@ func TestProjectRemoveDetachesBindWithoutDeletingHostData(t *testing.T) {
 	}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if len(data.requests) != 1 || len(devices.removed) != 1 || devices.removed[0] != "ws-demo-12345678" ||
-		data.requests[0].Command[4] != projectHooksDispatcher {
+	cleanup := data.requests[len(data.requests)-2].Command
+	if len(devices.removed) != 1 || devices.removed[0] != "ws-demo-12345678" ||
+		cleanup[0] != "sh" || cleanup[len(cleanup)-1] != "yard" ||
+		!strings.Contains(cleanup[2], `(.target // "yard") == $target`) ||
+		!strings.Contains(cleanup[2], `rmdir -- "$src"`) ||
+		strings.Contains(cleanup[2], "docker") || strings.Contains(cleanup[2], "rm -rf") ||
+		data.requests[len(data.requests)-1].Command[4] != projectHooksDispatcher {
 		t.Fatalf("bind removal crossed the data boundary: calls=%#v devices=%#v", data.requests, devices.removed)
+	}
+}
+
+func TestBindWorkspaceCleanupUsesTrustedProfileTarget(t *testing.T) {
+	record := cloneRecord()
+	record.Mode, record.Target = domain.ProjectBind, "openclaw"
+	command := bindWorkspaceCleanupCommand(record, "default")
+	if command[len(command)-1] != "openclaw" ||
+		!strings.Contains(command[2], `(.target // "yard") == $target`) {
+		t.Fatalf("bind cleanup target guard drifted: %#v", command)
+	}
+}
+
+func TestBindWorkspaceCleanupResumesSafeIntermediateStates(t *testing.T) {
+	for _, tool := range []string{"jq", "findmnt"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s is required: %v", tool, err)
+		}
+	}
+	for _, state := range []string{"full", "metadata-only", "empty", "missing"} {
+		t.Run(state, func(t *testing.T) {
+			id := "demo-12345678"
+			root := filepath.Join(t.TempDir(), id)
+			if state != "missing" {
+				if err := os.Mkdir(root, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if state == "full" {
+				if err := os.Mkdir(filepath.Join(root, "src"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if state == "full" || state == "metadata-only" {
+				metadata := []byte(`{"schema":1,"projectId":"demo-12345678","mode":"bind","target":"openclaw"}`)
+				if err := os.WriteFile(filepath.Join(root, ".subyard-meta.json"), metadata, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			record := cloneRecord()
+			record.ProjectID, record.YardPath = id, filepath.Join(root, "src")
+			record.Mode, record.Target = domain.ProjectBind, "openclaw"
+			command := bindWorkspaceCleanupCommand(record, "default")
+			output, err := exec.Command(command[0], command[1:]...).CombinedOutput()
+			if err != nil || (string(output) != "present" && string(output) != "missing") {
+				t.Fatalf("cleanup state %s: output=%q err=%v", state, output, err)
+			}
+			if _, err := os.Lstat(root); !os.IsNotExist(err) {
+				t.Fatalf("cleanup state %s left root: %v", state, err)
+			}
+		})
+	}
+}
+
+func TestBindWorkspaceCleanupRejectsUnexpectedContent(t *testing.T) {
+	for _, tool := range []string{"jq", "findmnt"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s is required: %v", tool, err)
+		}
+	}
+	id := "demo-12345678"
+	root := filepath.Join(t.TempDir(), id)
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	foreign := filepath.Join(root, "keep")
+	if err := os.WriteFile(foreign, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := cloneRecord()
+	record.ProjectID, record.YardPath = id, filepath.Join(root, "src")
+	record.Mode, record.Target = domain.ProjectBind, "yard"
+	command := bindWorkspaceCleanupCommand(record, "default")
+	if output, err := exec.Command(command[0], command[1:]...).CombinedOutput(); err == nil {
+		t.Fatalf("unexpected wrapper content was accepted: %q", output)
+	}
+	if value, err := os.ReadFile(foreign); err != nil || string(value) != "keep" {
+		t.Fatalf("unexpected content changed: value=%q err=%v", value, err)
 	}
 }
 

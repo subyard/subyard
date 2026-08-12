@@ -800,6 +800,32 @@ func TestExtrasDesiredStateIsParsedAndValidatedInGo(t *testing.T) {
 	}
 }
 
+func TestExtrasAcceptsResourceOnlyProfileAndRejectsUnknownProfile(t *testing.T) {
+	root := t.TempDir()
+	resources := filepath.Join(root, "config", "profiles", "orca", "resources")
+	if err := os.MkdirAll(resources, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(resources, "orca.res"), []byte("resource\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runtime := Runtime{RepositoryRoot: root, Environment: []string{"ENVIRONMENT_PROFILES=orca"}}
+	values, err := runtime.extrasContext()
+	if err != nil {
+		t.Fatalf("resource-only profile was rejected: %v", err)
+	}
+	if values["SUBYARD_EXTRAS_MOUNTS"] != "" ||
+		values["SUBYARD_EXTRAS_CAPABILITIES"] != "" ||
+		values["SUBYARD_EXTRAS_DEVICES"] != "" {
+		t.Fatalf("resource-only profile produced extras: %#v", values)
+	}
+
+	runtime.Environment = []string{"ENVIRONMENT_PROFILES=missing"}
+	if _, err := runtime.extrasContext(); err == nil {
+		t.Fatal("unknown profile was accepted")
+	}
+}
+
 func assertStageConverged(t *testing.T, runtime Runtime, want bool, label string) {
 	assertStage(t, runtime, "instance", want, label)
 }

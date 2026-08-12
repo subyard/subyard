@@ -125,7 +125,6 @@ func (check HostCheck) evaluate(facts HostFacts, options CheckOptions) []finding
 
 	minimum := uint64(environmentInt(check.Environment, "MIN_DISK_GIB", 2))
 	resumeMinimum := uint64(environmentInt(check.Environment, "RESUME_MIN_DISK_GIB", 1))
-	recommended := uint64(environmentInt(check.Environment, "REC_DISK_GIB", 50))
 	floor := minimum
 	resume := options.BasePresent && resumeMinimum < minimum
 	if resume {
@@ -136,17 +135,13 @@ func (check HostCheck) evaluate(facts HostFacts, options CheckOptions) []finding
 	case !facts.StorageKnown:
 		add("Storage ("+check.Yard.Paths.StoragePath+")", "warn",
 			"cannot determine free space for "+facts.StoragePath)
-	case free >= recommended:
+	case free >= minimum:
 		add("Storage ("+check.Yard.Paths.StoragePath+")", "ok",
 			fmt.Sprintf("%d GiB free on %s (fs: %s)", free, facts.StoragePath, facts.StorageFS))
 	case free >= floor && resume && free < minimum:
 		add("Storage ("+check.Yard.Paths.StoragePath+")", "warn",
 			fmt.Sprintf("%d GiB free on %s — enough to repair this managed yard; a new yard needs >= %d GiB (fs: %s)",
 				free, facts.StoragePath, minimum, facts.StorageFS))
-	case free >= floor:
-		add("Storage ("+check.Yard.Paths.StoragePath+")", "warn",
-			fmt.Sprintf("%d GiB free on %s — enough for a base yard; the android profile wants >= %d GiB (fs: %s)",
-				free, facts.StoragePath, recommended, facts.StorageFS))
 	default:
 		add("Storage ("+check.Yard.Paths.StoragePath+")", "fail",
 			fmt.Sprintf("only %d GiB free on %s; need >= %d GiB (fs: %s)",

@@ -142,7 +142,6 @@ export STORAGE_PATH="$STATE/storage"
 export SUBYARD_NO_AUDIT=1
 export SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1
 export MIN_DISK_GIB=1
-export REC_DISK_GIB=1
 install -d -m 0700 "$SUBYARD_CONFIG_HOME"
 {
   printf '%s\n' \

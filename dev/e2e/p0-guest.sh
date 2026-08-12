@@ -1704,7 +1704,10 @@ capacity_verify_cleanup() {
     bash dev/e2e/nested-teardown-data-boundary.sh
     ;;
   real-incus) bash dev/e2e/p0-real-incus.sh ;;
-  profile-resource) profile_resource ;;
+  profile-resource)
+    profile_resource
+    bash dev/e2e/bind-resource-profile.sh
+    ;;
   owner) owner ;;
   owner-migration) owner_migration ;;
   broker-recovery-owner) broker_recovery_owner ;;

@@ -670,6 +670,16 @@ func (runtime Runtime) extrasContext() (map[string]string, error) {
 			"config", "profiles", profile, "profile.conf")
 		values, err := config.ReadAssignmentsOver(path, base)
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				resources, globErr := filepath.Glob(filepath.Join(runtime.RepositoryRoot,
+					"config", "profiles", profile, "resources", "*.res"))
+				if globErr != nil {
+					return nil, globErr
+				}
+				if len(resources) > 0 {
+					continue
+				}
+			}
 			return nil, err
 		}
 		for _, mount := range strings.Fields(values["YARD_MOUNTS"]) {

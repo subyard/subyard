@@ -448,12 +448,85 @@ func (runner ProjectActionRunner) remove(ctx context.Context) error {
 		}
 		_, err := runner.Devices.RemoveDevice(ctx, runner.Yard.IncusProject,
 			runner.Yard.YardInstanceName, state.WorkspaceDeviceFor(runner.Project))
-		return err
+		if err != nil {
+			return err
+		}
+		return runner.cleanupBindWorkspace(ctx)
 	}
 	if runner.SoftRemove {
 		return nil
 	}
 	return runner.cleanup(ctx, filepath.Dir(runner.Project.YardPath))
+}
+
+func (runner ProjectActionRunner) cleanupBindWorkspace(ctx context.Context) error {
+	return runner.execute(ctx, "clean empty bind wrapper", ports.InstanceExecRequest{
+		Command: bindWorkspaceCleanupCommand(runner.Project, runner.Yard.YardName),
+	})
+}
+
+func bindWorkspaceCleanupCommand(project domain.ProjectRecord, yardName string) []string {
+	target := project.Target
+	if target == "" {
+		target = "yard"
+	}
+	script := `set -eu
+root=$1
+id=$2
+yard=$3
+target=$4
+src=$root/src
+metadata=$root/.subyard-meta.json
+if [ ! -e "$root" ] && [ ! -L "$root" ]; then printf missing; exit 0; fi
+command -v findmnt >/dev/null
+[ -d "$root" ] && [ ! -L "$root" ]
+if findmnt --mountpoint "$root" >/dev/null 2>&1; then
+  echo "bind workspace wrapper is still mounted: $root" >&2
+  exit 74
+fi
+validate_metadata() {
+  command -v jq >/dev/null
+  [ -f "$metadata" ] && [ ! -L "$metadata" ]
+  [ "$(wc -c <"$metadata")" -le 1048576 ]
+  jq -e --arg id "$id" --arg yard "$yard" --arg target "$target" '
+    .schema == 1 and .projectId == $id and .mode == "bind" and
+    ((.identityVersion // 0) == 0 or (.identityVersion == 2 and .yard == $yard)) and
+    ((.target // "yard") == $target)
+  ' "$metadata" >/dev/null
+}
+entries=$(find "$root" -mindepth 1 -maxdepth 1 -printf "%f\n" | LC_ALL=C sort)
+case "$entries" in
+  "$(printf ".subyard-meta.json\nsrc")")
+    validate_metadata
+    [ -d "$src" ] && [ ! -L "$src" ]
+    [ -z "$(find "$src" -mindepth 1 -maxdepth 1 -print -quit)" ]
+    if findmnt --mountpoint "$src" >/dev/null 2>&1; then
+      echo "bind workspace is still mounted: $src" >&2
+      exit 74
+    fi
+    rmdir -- "$src"
+    rm -- "$metadata"
+    ;;
+  ".subyard-meta.json")
+    validate_metadata
+    [ ! -e "$src" ] && [ ! -L "$src" ]
+    rm -- "$metadata"
+    ;;
+  "")
+    [ ! -e "$src" ] && [ ! -L "$src" ]
+    [ ! -e "$metadata" ] && [ ! -L "$metadata" ]
+    ;;
+  *)
+    echo "bind workspace wrapper has unexpected content: $root" >&2
+    exit 74
+    ;;
+esac
+rmdir -- "$root"
+printf present`
+	return []string{
+		"sh", "-c", script, "subyard", filepath.Dir(project.YardPath), project.ProjectID, yardName,
+		target,
+	}
 }
 
 func (runner ProjectActionRunner) removeEnvironment(ctx context.Context) error {

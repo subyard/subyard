@@ -96,7 +96,7 @@ func TestHostCheckUsesLowerRepairFloorForExistingYard(t *testing.T) {
 	facts.StorageFree = 100 << 30
 	check := HostCheck{
 		Yard: testYard("alpha", 2323), Yards: []domain.Context{testYard("alpha", 2323)},
-		Environment: map[string]string{"MIN_DISK_GIB": "999999", "REC_DISK_GIB": "999999"},
+		Environment: map[string]string{"MIN_DISK_GIB": "999999"},
 		Probe: func(context.Context, HostCheck) (HostFacts, error) {
 			return facts, nil
 		},
@@ -111,6 +111,29 @@ func TestHostCheckUsesLowerRepairFloorForExistingYard(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "enough to repair this managed yard") {
 		t.Fatalf("missing repair-floor diagnostic:\n%s", output.String())
+	}
+}
+
+func TestHostCheckDoesNotRecommendStorageCapacity(t *testing.T) {
+	facts := readyFacts()
+	facts.StorageFree = 32 << 30
+	var output bytes.Buffer
+	check := HostCheck{
+		Yard: testYard("alpha", 2323), Yards: []domain.Context{testYard("alpha", 2323)},
+		Output: &output,
+		Probe: func(context.Context, HostCheck) (HostFacts, error) {
+			return facts, nil
+		},
+	}
+	if err := check.Run(context.Background(), CheckOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	got := output.String()
+	if !strings.Contains(got, "[ ok ] 32 GiB free on / (fs: test)") {
+		t.Fatalf("storage fact was not reported as ready:\n%s", got)
+	}
+	if strings.Contains(got, "50 GiB") || strings.Contains(got, "android profile wants") {
+		t.Fatalf("storage recommendation leaked into host check:\n%s", got)
 	}
 }
 

@@ -71,7 +71,6 @@ export STORAGE_PATH="$HOME/.cache/subyard-e2e-platform/incus/incus/storage"
 export SUBYARD_NO_AUDIT=1
 export SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1
 export MIN_DISK_GIB=1
-export REC_DISK_GIB=1
 install -d -m 0700 "$SUBYARD_CONFIG_HOME"
 
 # The candidate source is dirty, but the Paseo deploy artifact is release-owned.
