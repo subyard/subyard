@@ -1,631 +1,372 @@
 #!/usr/bin/env bash
-# Hermes profile checks with fake downloads, uv and systemd.
+# Host-free behavior contract for the thin official Hermes bootstrap.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILE_DIR="$ROOT/config/profiles/hermes"
-PROFILE="$PROFILE_DIR/profile.conf"
 HOOK="$PROFILE_DIR/provision.sh"
+TMP="$(mktemp -d)"
+trap 'rm -rf -- "$TMP"' EXIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
-[ -x "$HOOK" ] || fail "Hermes provision hook is not executable"
-# shellcheck source=config/profiles/hermes/profile.conf
-. "$PROFILE"
-[ "$PROFILE_NAME" = hermes ] || fail "profile name drifted"
-[ "$HERMES_VERSION" = 0.19.0 ] || fail "Hermes version is not pinned"
-[[ "$HERMES_COMMIT" =~ ^[0-9a-f]{40}$ ]] || fail "Hermes commit is not a full SHA"
-[[ "$HERMES_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail "source hash is invalid"
-[ "$HERMES_NODE_VERSION" = 22.20.0 ] || fail "Node.js version is not pinned"
-[ "$HERMES_NPM_VERSION" = 10.9.3 ] || fail "npm version is not pinned"
-[ "$HERMES_AGENT_BROWSER_VERSION" = 0.26.0 ] \
-  || fail "agent-browser version is not pinned"
-[[ "$HERMES_AGENT_BROWSER_SHA256" =~ ^[0-9a-f]{64}$ ]] \
-  || fail "agent-browser package hash is invalid"
-[ "$HERMES_PLAYWRIGHT_VERSION" = 1.62.1 ] \
-  || fail "Playwright version is not pinned"
-[[ "$HERMES_NODE_AMD64_SHA256" =~ ^[0-9a-f]{64}$ ]] \
-  || fail "Node.js amd64 hash is invalid"
-[[ "$HERMES_NODE_ARM64_SHA256" =~ ^[0-9a-f]{64}$ ]] \
-  || fail "Node.js arm64 hash is invalid"
-[ "$HERMES_HOME" = /srv/hermes ] || fail "persistent home drifted"
-[ "$HERMES_PORT" = 9119 ] || fail "loopback port drifted"
+[ -x "$HOOK" ] || fail 'Hermes provision hook is not executable'
+mkdir -p "$TMP/bin" "$TMP/home" "$TMP/root"
+LOG="$TMP/commands.log"
+INSTALLER_LOG="$TMP/installer.log"
+export HERMES_TEST_LOG="$LOG" HERMES_TEST_INSTALLER_LOG="$INSTALLER_LOG"
 
-tmp="$(mktemp -d)"
-trap 'rm -rf -- "$tmp"' EXIT
-mkdir -p "$tmp/bin" "$tmp/source/hermes-fixture" \
-  "$tmp/uv/uv-x86_64-unknown-linux-gnu" \
-  "$tmp/uv/uv-aarch64-unknown-linux-gnu" \
-  "$tmp/node/node-v22.20.0-linux-x64/bin" \
-  "$tmp/agent-browser/package/bin" "$tmp/root"
-printf 'fixture lock\n' > "$tmp/source/hermes-fixture/uv.lock"
-printf '[project]\nname="fixture"\n' > "$tmp/source/hermes-fixture/pyproject.toml"
-printf '{"name":"hermes-fixture","version":"1.0.0"}\n' \
-  > "$tmp/source/hermes-fixture/package.json"
-printf '%s\n' \
-  '{"name":"hermes-fixture","lockfileVersion":3,"packages":{"node_modules/agent-browser":{"version":"0.26.0"}}}' \
-  > "$tmp/source/hermes-fixture/package-lock.json"
-tar -czf "$tmp/source.tar.gz" -C "$tmp/source" hermes-fixture
-
-cat > "$tmp/agent-browser/package/bin/agent-browser.js" <<'AGENT_BROWSER'
-#!/usr/bin/env bash
-if [ -n "${HERMES_TEST_EXPECTED_NODE_BIN:-}" ]; then
-  [ "${PATH%%:*}" = "$HERMES_TEST_EXPECTED_NODE_BIN" ] || exit 83
-fi
-if [ -n "${HERMES_TEST_AGENT_BROWSER_ENV_LOG:-}" ]; then
-  printf 'browsers=%s\nexecutable=%s\n' \
-    "${PLAYWRIGHT_BROWSERS_PATH:-}" "${AGENT_BROWSER_EXECUTABLE_PATH:-}" \
-    > "$HERMES_TEST_AGENT_BROWSER_ENV_LOG"
-fi
-if [ "${1:-}" = --version ]; then printf 'agent-browser 0.26.0\n'; exit; fi
-exit 88
-AGENT_BROWSER
-printf '%s\n' '{"name":"agent-browser","version":"0.26.0"}' \
-  > "$tmp/agent-browser/package/package.json"
-chmod +x "$tmp/agent-browser/package/bin/agent-browser.js"
-tar -czf "$tmp/agent-browser.tar.gz" -C "$tmp/agent-browser" package
-
-cat > "$tmp/node/node-v22.20.0-linux-x64/bin/node" <<'NODE'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then printf 'v22.20.0\n'; exit; fi
-exit 90
-NODE
-cat > "$tmp/node/node-v22.20.0-linux-x64/bin/npm" <<'NPM'
+cat >"$TMP/release.json" <<'JSON'
+{"tag_name":"v2026.8.13","html_url":"https://github.com/NousResearch/hermes-agent/releases/tag/v2026.8.13","draft":false,"prerelease":false,"published_at":"2026-08-13T20:37:37Z"}
+JSON
+cat >"$TMP/official-install.sh" <<'INSTALLER'
 #!/usr/bin/env bash
 set -euo pipefail
-if [ -n "${HERMES_TEST_EXPECTED_NODE_BIN:-}" ]; then
-  [ "${PATH%%:*}" = "$HERMES_TEST_EXPECTED_NODE_BIN" ] || exit 84
-fi
-if [ "${1:-}" = --version ]; then printf '10.9.3\n'; exit; fi
-printf '%s\n' "$*" >> "$HERMES_TEST_NPM_LOG"
-exit 89
-NPM
-cat > "$tmp/node/node-v22.20.0-linux-x64/bin/npx" <<'NPX'
-#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\n' "$*" >> "$HERMES_TEST_NPX_LOG"
-[ "$*" = '--yes playwright@1.62.1 install --with-deps chromium' ] || exit 87
-[ -n "${PLAYWRIGHT_BROWSERS_PATH:-}" ] || exit 86
-mkdir -p "$PLAYWRIGHT_BROWSERS_PATH/chromium-fixture"
-printf '#!/usr/bin/env bash\nexit 0\n' > "$PLAYWRIGHT_BROWSERS_PATH/chromium-fixture/chrome"
-chmod +x "$PLAYWRIGHT_BROWSERS_PATH/chromium-fixture/chrome"
-NPX
-chmod +x "$tmp/node/node-v22.20.0-linux-x64/bin/node" \
-  "$tmp/node/node-v22.20.0-linux-x64/bin/npm" \
-  "$tmp/node/node-v22.20.0-linux-x64/bin/npx"
-tar -cJf "$tmp/node.tar.xz" -C "$tmp/node" node-v22.20.0-linux-x64
-: > "$tmp/npm.log"
+[ "$PWD" = "$HERMES_TEST_EXPECTED_CWD" ]
+printf 'user=%s\nhome=%s\nhermes_home=%s\n' \
+  "${HERMES_EFFECTIVE_USER:-}" "$HOME" "${HERMES_HOME:-}" >>"$HERMES_TEST_INSTALLER_LOG"
+printf 'node_deps_timeout=%s\n' "${NODE_DEPS_TIMEOUT:-}" >>"$HERMES_TEST_INSTALLER_LOG"
+printf 'argv=' >>"$HERMES_TEST_INSTALLER_LOG"
+printf ' <%s>' "$@" >>"$HERMES_TEST_INSTALLER_LOG"
+printf '\n' >>"$HERMES_TEST_INSTALLER_LOG"
 
-cat > "$tmp/uv/uv-x86_64-unknown-linux-gnu/uv" <<'UV'
+state="$HOME/.hermes"
+source="$state/hermes-agent"
+mkdir -p "$source/.git" "$source/venv/bin" "$HOME/.local/bin" "$state/node/bin" \
+  "$state/cron" "$state/sessions" "$state/logs" "$state/memories" "$state/skills"
+printf 'git\n' >"$source/.install_method"
+cat >"$source/venv/bin/python" <<'PYTHON'
 #!/usr/bin/env bash
-set -euo pipefail
-printf '%s\n' "$*" >> "$HERMES_TEST_UV_LOG"
-if [ "${1:-}" = --version ]; then
-  printf 'uv %s (x86_64-unknown-linux-gnu)\n' "$HERMES_UV_VERSION"
-  exit
-fi
-if [ "${1:-}" = python ] && [ "${2:-}" = install ]; then
-  exit
-fi
-if [ "${1:-}" = sync ]; then
-  mkdir -p "$UV_PROJECT_ENVIRONMENT/bin"
-  cat > "$UV_PROJECT_ENVIRONMENT/bin/hermes" <<'HERMES'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then
-  printf 'hermes 0.19.0\n'
-  exit
-fi
-printf 'home=%s\nlazy=%s\nnode_path=%s\nbrowsers=%s\nexecutable=%s\nargs=%s\n' \
-  "${HERMES_HOME:-}" "${HERMES_DISABLE_LAZY_INSTALLS:-}" \
-  "${PATH%%:*}" "${PLAYWRIGHT_BROWSERS_PATH:-}" \
-  "${AGENT_BROWSER_EXECUTABLE_PATH:-}" "$*" \
-  > "$HERMES_TEST_LAUNCH_LOG"
-HERMES
-  cat > "$UV_PROJECT_ENVIRONMENT/bin/python" <<'PYTHON'
-#!/usr/bin/env bash
-if [ "${1:-}" = -c ]; then
-  printf '0.19.0\n'
-  exit
-fi
 exec python3 "$@"
 PYTHON
-  chmod +x "$UV_PROJECT_ENVIRONMENT/bin/hermes" "$UV_PROJECT_ENVIRONMENT/bin/python"
-  exit
-fi
-exit 91
-UV
-cp "$tmp/uv/uv-x86_64-unknown-linux-gnu/uv" \
-  "$tmp/uv/uv-aarch64-unknown-linux-gnu/uv"
-chmod +x "$tmp/uv/uv-x86_64-unknown-linux-gnu/uv" \
-  "$tmp/uv/uv-aarch64-unknown-linux-gnu/uv"
-tar -czf "$tmp/uv.tar.gz" -C "$tmp/uv" \
-  uv-x86_64-unknown-linux-gnu uv-aarch64-unknown-linux-gnu
-source_sha="$(sha256sum "$tmp/source.tar.gz" | awk '{print $1}')"
-uv_sha="$(sha256sum "$tmp/uv.tar.gz" | awk '{print $1}')"
-
-cat > "$tmp/bin/apt-get" <<'APT'
+chmod 0755 "$source/venv/bin/python"
+printf '#!/usr/bin/env python3\n' >"$source/hermes"
+cat >"$HOME/.local/bin/hermes" <<HERMES
 #!/usr/bin/env bash
-printf '%s\n' "$*" >> "$HERMES_TEST_APT_LOG"
+unset PYTHONPATH
+unset PYTHONHOME
+exec "$source/venv/bin/python" "$source/hermes" "\$@"
+HERMES
+chmod 0755 "$HOME/.local/bin/hermes"
+cat >"$state/node/bin/npx" <<'UNTRUSTED'
+#!/usr/bin/env bash
+printf 'dev-owned-npx-executed\n' >>"$HERMES_TEST_LOG"
+exit 97
+UNTRUSTED
+chmod 0755 "$state/node/bin/npx"
+# These files are deliberately created by the upstream fixture. Subyard must preserve them opaquely.
+printf 'UPSTREAM_PLACEHOLDER=\n' >"$state/.env"
+chmod 0600 "$state/.env"
+printf 'config_version: 1\n' >"$state/config.yaml"
+printf 'upstream-owned\n' >"$state/skills/seeded-by-installer"
+INSTALLER
+chmod 0755 "$TMP/official-install.sh"
+
+cat >"$TMP/bin/apt-get" <<'APT'
+#!/usr/bin/env bash
+printf 'apt-get' >>"$HERMES_TEST_LOG"
+printf ' <%s>' "$@" >>"$HERMES_TEST_LOG"
+printf '\n' >>"$HERMES_TEST_LOG"
 APT
-cat > "$tmp/bin/curl" <<'CURL'
+
+cat >"$TMP/bin/curl" <<'CURL'
 #!/usr/bin/env bash
 set -euo pipefail
-url=""
-output=""
+output=
+url=
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    http*) url="$1"; shift ;;
-    -o) output="$2"; shift 2 ;;
+    -o|--output) output="$2"; shift 2 ;;
+    http://*|https://*) url="$1"; shift ;;
     *) shift ;;
   esac
 done
-[ -n "$url" ] && [ -n "$output" ]
-case "$url" in
-  *codeload.github.com*) cp "$HERMES_TEST_SOURCE_ARCHIVE" "$output" ;;
-  *astral-sh/uv*) cp "$HERMES_TEST_UV_ARCHIVE" "$output" ;;
-  *nodejs.org*) cp "$HERMES_TEST_NODE_ARCHIVE" "$output" ;;
-  *registry.npmjs.org/agent-browser*) cp "$HERMES_TEST_AGENT_BROWSER_ARCHIVE" "$output" ;;
-  *) exit 92 ;;
-esac
-printf '%s\n' "$url" >> "$HERMES_TEST_CURL_LOG"
+[ -n "$output" ] && [ -n "$url" ]
+printf 'curl <%s>\n' "$url" >>"$HERMES_TEST_LOG"
+cp "$HERMES_TEST_INSTALLER_FIXTURE" "$output"
 CURL
-cat > "$tmp/bin/systemctl" <<'SYSTEMCTL'
+
+cat >"$TMP/bin/git" <<'GIT'
 #!/usr/bin/env bash
 set -euo pipefail
-printf '%s\n' "$*" >> "$HERMES_TEST_SYSTEMCTL_LOG"
-active="$HERMES_TEST_SYSTEMCTL_STATE.active"
-enabled="$HERMES_TEST_SYSTEMCTL_STATE.enabled"
-[ -e "$active" ] || printf '%s\n' "${HERMES_TEST_SERVICE_ACTIVE:-0}" > "$active"
-[ -e "$enabled" ] || printf '%s\n' "${HERMES_TEST_SERVICE_ENABLED:-0}" > "$enabled"
-case "${1:-}" in
-  is-active) [ "$(<"$active")" = 1 ] ;;
-  is-enabled) [ "$(<"$enabled")" = 1 ] ;;
-  start|restart) printf '1\n' > "$active" ;;
-  stop) printf '0\n' > "$active" ;;
-  try-restart) : ;;
-  enable)
-    printf '1\n' > "$enabled"
-    for argument in "$@"; do
-      [ "$argument" != --now ] || printf '1\n' > "$active"
-    done
-    ;;
-  disable)
-    printf '0\n' > "$enabled"
-    for argument in "$@"; do
-      [ "$argument" != --now ] || printf '0\n' > "$active"
-    done
+printf 'git' >>"$HERMES_TEST_LOG"
+printf ' <%s>' "$@" >>"$HERMES_TEST_LOG"
+printf '\n' >>"$HERMES_TEST_LOG"
+if [ "${1:-}" = -C ] && [ "${3:-}" = remote ] && [ "${4:-}" = get-url ]; then
+  printf '%s\n' "${HERMES_TEST_GIT_ORIGIN:-https://github.com/NousResearch/hermes-agent.git}"
+  exit 0
+fi
+if [ "${1:-}" = ls-remote ]; then
+  if [ "${HERMES_TEST_GIT_HANG:-0}" = 1 ]; then
+    trap '' TERM
+    while :; do sleep 1; done
+  fi
+  printf '%s\trefs/tags/v2026.8.13\n' 0123456789abcdef0123456789abcdef01234567
+  printf '%s\trefs/tags/v2026.8.13^{}\n' 89abcdef0123456789abcdef0123456789abcdef
+  exit 0
+fi
+if [ "${1:-}" = clone ]; then
+  destination="${!#}"
+  mkdir -p "$destination/scripts"
+  cp "$HERMES_TEST_INSTALLER_FIXTURE" "$destination/scripts/install.sh"
+  chmod 0755 "$destination/scripts/install.sh"
+  exit 0
+fi
+if [ "${1:-}" = -C ] && [ "${3:-}" = rev-parse ] && [ "${4:-}" = HEAD ]; then
+  printf '%s\n' 89abcdef0123456789abcdef0123456789abcdef
+  exit 0
+fi
+exit 91
+GIT
+
+cat >"$TMP/bin/runuser" <<'RUNUSER'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "${1:-}" = -u ]
+user="$2"
+shift 2
+[ "${1:-}" = -- ]
+shift
+printf 'runuser <%s>' "$user" >>"$HERMES_TEST_LOG"
+printf ' <%s>' "$@" >>"$HERMES_TEST_LOG"
+printf '\n' >>"$HERMES_TEST_LOG"
+exec env HERMES_EFFECTIVE_USER="$user" "$@"
+RUNUSER
+
+cat >"$TMP/bin/install" <<'INSTALL'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${HERMES_TEST_REQUIRE_DEV_STATE_MUTATION:-0}" = 1 ] \
+  && [ "${!#}" = "${HERMES_TEST_STATE_ROOT:?}" ] \
+  && [ -z "${HERMES_EFFECTIVE_USER:-}" ]; then
+  printf 'state-root install escaped the dev privilege boundary\n' >&2
+  exit 96
+fi
+exec /usr/bin/install "$@"
+INSTALL
+
+cat >"$TMP/bin/chmod" <<'CHMOD'
+#!/usr/bin/env bash
+set -euo pipefail
+for argument in "$@"; do
+  if [ "${HERMES_TEST_REQUIRE_DEV_STATE_MUTATION:-0}" = 1 ] \
+    && [ "$argument" = "${HERMES_TEST_STATE_ROOT:?}" ] \
+    && [ -z "${HERMES_EFFECTIVE_USER:-}" ]; then
+    printf 'state-root chmod escaped the dev privilege boundary\n' >&2
+    exit 97
+  fi
+  case "$argument" in
+    /var/tmp/subyard-hermes-bootstrap.*)
+      if [ "${HERMES_TEST_REQUIRE_DEV_STATE_MUTATION:-0}" = 1 ] \
+        && [ -e "${HERMES_TEST_BOOTSTRAP_CHOWNED:?}" ] \
+        && [ -z "${HERMES_EFFECTIVE_USER:-}" ]; then
+        printf 'bootstrap chmod ran as root after dev ownership transfer\n' >&2
+        exit 98
+      fi
+      ;;
+  esac
+done
+exec /usr/bin/chmod "$@"
+CHMOD
+
+cat >"$TMP/bin/chown" <<'CHOWN'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${!#}" in
+  /var/tmp/subyard-hermes-bootstrap.*)
+    : >"${HERMES_TEST_BOOTSTRAP_CHOWNED:?}"
     ;;
 esac
-SYSTEMCTL
-chmod +x "$tmp/bin/apt-get" "$tmp/bin/curl" "$tmp/bin/systemctl"
+exec /usr/bin/chown "$@"
+CHOWN
 
-common_env=(
-  PATH="$tmp/bin:$PATH"
-  HERMES_TEST_ALLOW_NON_ROOT=1
-  HERMES_TEST_ROOT="$tmp/root"
-  HERMES_TEST_SOURCE_ARCHIVE="$tmp/source.tar.gz"
-  HERMES_TEST_UV_ARCHIVE="$tmp/uv.tar.gz"
-  HERMES_TEST_NODE_ARCHIVE="$tmp/node.tar.xz"
-  HERMES_TEST_AGENT_BROWSER_ARCHIVE="$tmp/agent-browser.tar.gz"
-  HERMES_TEST_APT_LOG="$tmp/apt.log"
-  HERMES_TEST_CURL_LOG="$tmp/curl.log"
-  HERMES_TEST_SYSTEMCTL_LOG="$tmp/systemctl.log"
-  HERMES_TEST_SYSTEMCTL_STATE="$tmp/systemctl-state"
-  HERMES_TEST_UV_LOG="$tmp/uv.log"
-  HERMES_TEST_NPM_LOG="$tmp/npm.log"
-  HERMES_TEST_NPX_LOG="$tmp/npx.log"
-  HERMES_TEST_AGENT_BROWSER_ENV_LOG="$tmp/agent-browser-env.log"
-  HERMES_TEST_LAUNCH_LOG="$tmp/launch.log"
-  HERMES_TEST_EXPECTED_NODE_BIN="$tmp/root/opt/hermes-agent/node/bin"
-  DEV_USER="$(id -un)"
-  DEV_GROUP="$(id -gn)"
-  HERMES_DEV_HOME="$tmp/home"
-  HERMES_VERSION="$HERMES_VERSION"
-  HERMES_TAG="$HERMES_TAG"
-  HERMES_COMMIT="$HERMES_COMMIT"
-  HERMES_SOURCE_SHA256="$source_sha"
-  HERMES_PYTHON_VERSION="$HERMES_PYTHON_VERSION"
-  HERMES_UV_VERSION="$HERMES_UV_VERSION"
-  HERMES_UV_AMD64_SHA256="$uv_sha"
-  HERMES_UV_ARM64_SHA256="$uv_sha"
-  HERMES_NODE_VERSION="$HERMES_NODE_VERSION"
-  HERMES_NPM_VERSION="$HERMES_NPM_VERSION"
-  HERMES_NODE_AMD64_SHA256="$(sha256sum "$tmp/node.tar.xz" | awk '{print $1}')"
-  HERMES_NODE_ARM64_SHA256="$(sha256sum "$tmp/node.tar.xz" | awk '{print $1}')"
-  HERMES_AGENT_BROWSER_VERSION="$HERMES_AGENT_BROWSER_VERSION"
-  HERMES_AGENT_BROWSER_SHA256="$(sha256sum "$tmp/agent-browser.tar.gz" | awk '{print $1}')"
-  HERMES_PLAYWRIGHT_VERSION="$HERMES_PLAYWRIGHT_VERSION"
-  HERMES_HOME="$HERMES_HOME"
-  HERMES_PORT="$HERMES_PORT"
-)
-
-env "${common_env[@]}" bash "$HOOK" >/dev/null
-install_root="$tmp/root/opt/hermes-agent"
-state_root="$tmp/root/srv/hermes"
-[ "$(<"$install_root/.subyard-commit")" = "$HERMES_COMMIT" ] \
-  || fail "runtime commit marker drifted"
-[ -x "$install_root/venv/bin/hermes" ] || fail "runtime entrypoint was not installed"
-[ "$($install_root/node/bin/node --version)" = "v$HERMES_NODE_VERSION" ] \
-  || fail "pinned Node.js runtime was not installed"
-[ "$($install_root/node/bin/npm --version)" = "$HERMES_NPM_VERSION" ] \
-  || fail "pinned npm runtime was not installed"
-agent_browser="$install_root/agent-browser/bin/agent-browser.js"
-[ "$($agent_browser --version)" = "agent-browser $HERMES_AGENT_BROWSER_VERSION" ] \
-  || fail "locked agent-browser runtime was not installed"
-[ -x "$install_root/playwright/chromium-fixture/chrome" ] \
-  || fail "pinned Playwright Chromium was not installed"
-[ ! -s "$tmp/npm.log" ] \
-  || fail "provision installed unrelated Hermes JavaScript dependencies"
-grep -Fq "agent-browser/-/agent-browser-$HERMES_AGENT_BROWSER_VERSION.tgz" \
-  "$tmp/curl.log" || fail "exact agent-browser package was not downloaded"
-grep -Fxq -- "--yes playwright@$HERMES_PLAYWRIGHT_VERSION install --with-deps chromium" \
-  "$tmp/npx.log" || fail "Playwright Chromium install was not exact or lacked OS dependencies"
-grep -Fq "node-v$HERMES_NODE_VERSION-linux-x64.tar.xz" "$tmp/curl.log" \
-  || fail "pinned Node.js archive was not downloaded"
-for command in node npm npx; do
-  command_path="$tmp/root/usr/local/bin/$command"
-  [ -L "$command_path" ] || fail "$command canonical path is not a managed symlink"
-done
-[ "$(readlink "$tmp/root/usr/local/bin/node")" = "$install_root/node/bin/node" ] \
-  || fail "canonical Node.js target drifted"
-agent_browser_command="$tmp/root/usr/local/bin/agent-browser"
-[ -f "$agent_browser_command" ] && [ ! -L "$agent_browser_command" ] \
-  && [ -x "$agent_browser_command" ] \
-  || fail "canonical agent-browser wrapper was not installed"
-[ "$(HERMES_TEST_AGENT_BROWSER_ENV_LOG="$tmp/agent-browser-env.log" \
-  "$agent_browser_command" --version)" = \
-  "agent-browser $HERMES_AGENT_BROWSER_VERSION" ] \
-  || fail "canonical agent-browser wrapper failed"
-browser_env="$(<"$tmp/agent-browser-env.log")"
-[ "$browser_env" = "browsers=$install_root/playwright
-executable=$install_root/playwright/chromium-fixture/chrome" ] \
-  || fail "canonical agent-browser browser env drifted: $browser_env"
-launcher="$tmp/root/usr/local/bin/hermes"
-[ -x "$launcher" ] || fail "yard-wide Hermes launcher was not installed"
-[ "$(stat -c %a "$launcher")" = 755 ] || fail "Hermes launcher mode is not 0755"
-expected_owner="$(id -u):$(id -g)"
-[ "$(stat -c %u:%g "$launcher")" = "$expected_owner" ] \
-  || fail "Hermes launcher owner drifted"
-env HERMES_HOME=/tmp/wrong HERMES_DISABLE_LAZY_INSTALLS=0 \
-  HERMES_TEST_LAUNCH_LOG="$tmp/launch.log" "$launcher" chat --fixture
-grep -Fxq "home=$state_root" "$tmp/launch.log" \
-  || fail "launcher did not force the persistent Hermes home"
-grep -Fxq 'lazy=1' "$tmp/launch.log" \
-  || fail "launcher did not disable lazy installs"
-grep -Fxq "node_path=$install_root/node/bin" "$tmp/launch.log" \
-  || fail "launcher did not prefer the pinned Node.js runtime"
-grep -Fxq "browsers=$install_root/playwright" "$tmp/launch.log" \
-  || fail "launcher did not select the pinned browser runtime"
-grep -Fxq "executable=$install_root/playwright/chromium-fixture/chrome" \
-  "$tmp/launch.log" \
-  || fail "launcher did not select the pinned Chromium executable"
-grep -Fxq 'args=chat --fixture' "$tmp/launch.log" \
-  || fail "launcher did not preserve arguments"
-[ -x "$tmp/root/usr/local/sbin/hermes-provider-ready" ] \
-  || fail "provider-ready helper was not installed"
-[ -x "$tmp/root/usr/local/sbin/hermes-backup-create" ] \
-  || fail "backup helper was not installed"
-[ -x "$tmp/root/usr/local/sbin/hermes-restore" ] \
-  || fail "restore helper was not installed"
-[ -f "$tmp/root/etc/systemd/system/hermes-serve.service" ] \
-  || fail "systemd unit was not installed"
-grep -Fq 'HERMES_DISABLE_LAZY_INSTALLS=1' \
-  "$tmp/root/etc/systemd/system/hermes-serve.service" \
-  || fail "service does not seal runtime dependencies"
-grep -Fq 'Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/hermes-agent/playwright' \
-  "$tmp/root/etc/systemd/system/hermes-serve.service" \
-  || fail "service does not select the pinned browser runtime"
-grep -Fq "Environment=AGENT_BROWSER_EXECUTABLE_PATH=$install_root/playwright/chromium-fixture/chrome" \
-  "$tmp/root/etc/systemd/system/hermes-serve.service" \
-  || fail "service does not select the pinned Chromium executable"
-grep -Fq 'Environment=PATH=/opt/hermes-agent/node/bin:/opt/hermes-agent/agent-browser/bin:' \
-  "$tmp/root/etc/systemd/system/hermes-serve.service" \
-  || fail "service does not prefer the pinned Node.js/browser commands"
-grep -Fq 'ExecStart=/opt/hermes-agent/venv/bin/hermes serve --host 127.0.0.1 --port 9119 --skip-build' \
-  "$tmp/root/etc/systemd/system/hermes-serve.service" \
-  || fail "service bind or command drifted"
-[ "$(stat -c %a "$state_root")" = 700 ] || fail "Hermes home is not private"
-[ "$(stat -c %a "$state_root/.serve.env")" = 600 ] \
-  || fail "session token file mode is not 0600"
-token_hash="$(sha256sum "$state_root/.serve.env")"
-grep -Eq '^HERMES_DASHBOARD_SESSION_TOKEN=[0-9a-f]{64}$' "$state_root/.serve.env" \
-  || fail "session token file is malformed"
-grep -Fq 'sync --locked --no-dev --python' "$tmp/uv.log" \
-  || fail "uv sync is not locked or includes development dependencies"
-
-pin_check="$tmp/root/usr/local/libexec/subyard-hermes-pin-check"
-runtime_env="$tmp/root/etc/subyard/hermes-runtime.env"
-curl_lines="$(wc -l < "$tmp/curl.log")"
-systemctl_lines="$(wc -l < "$tmp/systemctl.log")"
-env "${common_env[@]}" bash "$HOOK" --check >/dev/null \
-  || fail "converged Hermes provision check failed"
-[ "$(wc -l < "$tmp/curl.log")" -eq "$curl_lines" ] \
-  || fail "Hermes provision check downloaded content"
-[ "$(wc -l < "$tmp/systemctl.log")" -eq "$systemctl_lines" ] \
-  || fail "Hermes provision check changed service state"
-printf '%s\n' 0000000000000000000000000000000000000000 > "$install_root/.subyard-commit"
-set +e
-env "${common_env[@]}" bash "$HOOK" --check >/dev/null 2>&1
-check_status=$?
-set -e
-[ "$check_status" -eq 10 ] || fail "drifted Hermes provision check returned $check_status, want 10"
-printf '%s\n' "$HERMES_COMMIT" > "$install_root/.subyard-commit"
-grep -Fxq "HERMES_BROWSER_EXECUTABLE=$install_root/playwright/chromium-fixture/chrome" \
-  "$runtime_env" || fail "runtime contract omitted the Chromium executable"
-grep -Fq 'PLAYWRIGHT_BROWSERS_PATH="$HERMES_PLAYWRIGHT_BROWSERS_PATH"' \
-  "$tmp/root/usr/local/sbin/hermes-provider-ready" \
-  || fail "provider approval does not expose the Playwright browser root to Hermes doctor"
-grep -Fq 'AGENT_BROWSER_EXECUTABLE_PATH="$HERMES_BROWSER_EXECUTABLE"' \
-  "$tmp/root/usr/local/sbin/hermes-provider-ready" \
-  || fail "provider approval does not expose Chromium to Hermes doctor"
-grep -Fq 'PATH="$(dirname "$HERMES_NODE"):$HERMES_VENV/bin:' \
-  "$tmp/root/usr/local/sbin/hermes-provider-ready" \
-  || fail "provider approval does not expose pinned Node.js to Hermes doctor"
-HERMES_RUNTIME_ENV="$runtime_env" "$pin_check" --runtime-only \
-  || fail "installed runtime-only pin check failed"
-browser_marker="$install_root/.subyard-browser-runtime"
-browser_contract="$(<"$browser_marker")"
-printf '%s\n' 'node=0.0.0 npm=0.0.0 agent-browser=0.0.0 playwright=0.0.0' \
-  > "$browser_marker"
-if HERMES_RUNTIME_ENV="$runtime_env" "$pin_check" --runtime-only >/dev/null 2>&1; then
-  fail "pin check accepted a browser runtime contract mismatch"
-fi
-printf '%s\n' "$browser_contract" > "$browser_marker"
-mv "$launcher" "$launcher.missing"
-if HERMES_RUNTIME_ENV="$runtime_env" "$pin_check" --runtime-only >/dev/null 2>&1; then
-  fail "pin check accepted a missing yard-wide launcher"
-fi
-mv "$launcher.missing" "$launcher"
-chmod 0777 "$launcher"
-if HERMES_RUNTIME_ENV="$runtime_env" "$pin_check" --runtime-only >/dev/null 2>&1; then
-  fail "pin check accepted unsafe launcher permissions"
-fi
-chmod 0755 "$launcher"
-if HERMES_RUNTIME_ENV="$runtime_env" "$pin_check" >/dev/null 2>&1; then
-  fail "pin check accepted a missing provider-ready marker"
-fi
-printf '%s\n' "$HERMES_COMMIT" > "$state_root/.provider-ready"
-HERMES_RUNTIME_ENV="$runtime_env" "$pin_check" \
-  || fail "commit-bound provider-ready marker was rejected"
-printf '%s\n' 0000000000000000000000000000000000000000 \
-  > "$install_root/.subyard-commit"
-if HERMES_RUNTIME_ENV="$runtime_env" "$pin_check" --runtime-only >/dev/null 2>&1; then
-  fail "pin check accepted a runtime commit mismatch"
-fi
-printf '%s\n' "$HERMES_COMMIT" > "$install_root/.subyard-commit"
-rm -f "$state_root/.provider-ready"
-
-curl_count="$(wc -l < "$tmp/curl.log")"
-npm_count="$(wc -l < "$tmp/npm.log")"
-npx_count="$(wc -l < "$tmp/npx.log")"
-env "${common_env[@]}" bash "$HOOK" >/dev/null
-[ "$(sha256sum "$state_root/.serve.env")" = "$token_hash" ] \
-  || fail "re-provision rotated the session token"
-[ "$(wc -l < "$tmp/curl.log")" -eq "$curl_count" ] \
-  || fail "re-provision downloaded an already pinned runtime"
-[ "$(wc -l < "$tmp/npm.log")" -eq "$npm_count" ] \
-  || fail "re-provision reinstalled an already locked browser runtime"
-[ "$(wc -l < "$tmp/npx.log")" -eq "$npx_count" ] \
-  || fail "re-provision downloaded an already pinned Chromium runtime"
-
-cat > "$install_root/node/bin/node" <<'DRIFTED_NODE'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then printf 'v0.0.0\n'; exit; fi
-exit 85
-DRIFTED_NODE
-chmod +x "$install_root/node/bin/node"
-printf '%s\n' "$HERMES_COMMIT" > "$state_root/.provider-ready"
-printf '1\n' > "$tmp/systemctl-state.active"
-printf '1\n' > "$tmp/systemctl-state.enabled"
-env "${common_env[@]}" bash "$HOOK" >/dev/null
-[ "$($install_root/node/bin/node --version)" = "v$HERMES_NODE_VERSION" ] \
-  || fail "same-pin provision did not repair Node.js version drift"
-[ "$(<"$tmp/systemctl-state.active")" = 1 ] \
-  || fail "same-pin repair did not restart the previously active service"
-[ "$(<"$tmp/systemctl-state.enabled")" = 1 ] \
-  || fail "same-pin repair changed the enabled service state"
-[ "$(wc -l < "$tmp/curl.log")" -gt "$curl_count" ] \
-  || fail "same-pin runtime drift did not trigger a verified rebuild"
-
-cat > "$install_root/node/bin/node" <<'DRIFTED_NODE'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then printf 'v0.0.0\n'; exit; fi
-exit 85
-DRIFTED_NODE
-chmod +x "$install_root/node/bin/node"
-printf '%s\n' "$HERMES_COMMIT" > "$state_root/.provider-ready"
-printf '1\n' > "$tmp/systemctl-state.active"
-printf '1\n' > "$tmp/systemctl-state.enabled"
-if env "${common_env[@]}" HERMES_TEST_ABORT_AFTER_SERVICE_STOP=1 \
-  bash "$HOOK" >"$tmp/aborted-after-stop.out" 2>&1; then
-  fail "pre-move interruption unexpectedly succeeded"
-fi
-[ "$(<"$tmp/systemctl-state.active")" = 0 ] \
-  || fail "pre-move interruption did not occur after service stop"
-[ -d "$install_root/.subyard-rollback-state" ] \
-  && [ -f "$install_root.transaction" ] \
-  || fail "pre-move interruption did not retain recoverable transaction state"
-env "${common_env[@]}" bash "$HOOK" >/dev/null
-[ "$(<"$tmp/systemctl-state.active")" = 1 ] \
-  || fail "pre-move interruption recovery did not restore the active service"
-[ "$(<"$tmp/systemctl-state.enabled")" = 1 ] \
-  || fail "pre-move interruption recovery did not restore the enabled service"
-[ "$($install_root/node/bin/node --version)" = "v$HERMES_NODE_VERSION" ] \
-  || fail "pre-move interruption recovery did not converge the runtime"
-[ ! -e "$install_root.rollback" ] && [ ! -e "$install_root.transaction" ] \
-  || fail "pre-move interruption recovery retained transaction state"
-
-next_commit=1111111111111111111111111111111111111111
-printf 'commit=%s\nsnapshot=fixture-transaction\n' "$HERMES_COMMIT" \
-  > "$state_root/.last-verified-backup"
-printf '%s\n' "$HERMES_COMMIT" > "$state_root/.provider-ready"
-runtime_env_hash="$(sha256sum "$runtime_env" | awk '{print $1}')"
-launcher_hash="$(sha256sum "$launcher" | awk '{print $1}')"
-unit_hash="$(sha256sum "$tmp/root/etc/systemd/system/hermes-serve.service" | awk '{print $1}')"
-
-if env "${common_env[@]}" HERMES_COMMIT="$next_commit" \
-  HERMES_TEST_FAIL_AFTER_PUBLICATION=1 HERMES_TEST_ABORT_AFTER_RUNTIME_RESTORE=1 \
-  bash "$HOOK" >"$tmp/aborted-runtime-restore.out" 2>&1; then
-  fail "rollback-restore interruption unexpectedly succeeded"
-fi
-[ -d "$install_root/.subyard-rollback-state" ] \
-  && [ -f "$install_root.transaction" ] \
-  || fail "rollback-restore interruption did not retain recoverable state"
-env "${common_env[@]}" bash "$HOOK" >/dev/null
-[ "$(<"$install_root/.subyard-commit")" = "$HERMES_COMMIT" ] \
-  || fail "rollback-restore interruption did not recover the previous runtime"
-[ "$(sha256sum "$runtime_env" | awk '{print $1}')" = "$runtime_env_hash" ] \
-  || fail "rollback-restore interruption did not recover managed files"
-[ "$(<"$tmp/systemctl-state.active")" = 1 ] \
-  && [ "$(<"$tmp/systemctl-state.enabled")" = 1 ] \
-  || fail "rollback-restore interruption did not recover service state"
-[ ! -e "$install_root.rollback" ] && [ ! -e "$install_root.transaction" ] \
-  || fail "rollback-restore interruption recovery retained transaction state"
-
-: > "$tmp/systemctl.log"
-if env "${common_env[@]}" HERMES_COMMIT="$next_commit" \
-  HERMES_TEST_SERVICE_ACTIVE=1 HERMES_TEST_FAIL_AFTER_PUBLICATION=1 \
-  bash "$HOOK" >"$tmp/failed-publication.out" 2>&1; then
-  fail "post-publication failure did not abort provisioning"
-fi
-if [ "$(<"$install_root/.subyard-commit")" != "$HERMES_COMMIT" ]; then
-  sed -n '1,160p' "$tmp/failed-publication.out" >&2
-  fail "post-publication failure did not restore the previous runtime"
-fi
-[ "$(sha256sum "$runtime_env" | awk '{print $1}')" = "$runtime_env_hash" ] \
-  || fail "post-publication failure did not restore the runtime environment"
-[ "$(sha256sum "$launcher" | awk '{print $1}')" = "$launcher_hash" ] \
-  || fail "post-publication failure did not restore the Hermes launcher"
-[ "$(sha256sum "$tmp/root/etc/systemd/system/hermes-serve.service" | awk '{print $1}')" = \
-  "$unit_hash" ] || fail "post-publication failure did not restore the systemd unit"
-[ "$(<"$state_root/.provider-ready")" = "$HERMES_COMMIT" ] \
-  || fail "post-publication failure did not restore provider approval"
-grep -Fxq 'stop hermes-serve.service' "$tmp/systemctl.log" \
-  || fail "runtime replacement did not stop the active service"
-grep -Fxq 'start hermes-serve.service' "$tmp/systemctl.log" \
-  || fail "failed runtime replacement did not restart the previously active service"
-[ "$(<"$tmp/systemctl-state.active")" = 1 ] \
-  || fail "failed runtime replacement did not restore active service state"
-[ "$(<"$tmp/systemctl-state.enabled")" = 1 ] \
-  || fail "failed runtime replacement did not restore enabled service state"
-[ ! -e "$install_root.rollback" ] && [ ! -e "$install_root.transaction" ] \
-  || fail "failed runtime replacement left transaction state behind"
-
-for service_case in enabled-only active-only; do
-  case "$service_case" in
-    enabled-only) expected_active=0; expected_enabled=1 ;;
-    active-only) expected_active=1; expected_enabled=0 ;;
+cat >"$TMP/bin/bash" <<'BASH'
+#!/bin/bash
+set -euo pipefail
+if [ "${1:-}" = -n ]; then
+  case "${2:-}" in
+    /var/tmp/subyard-hermes-bootstrap.*)
+      if [ "${HERMES_TEST_REQUIRE_DEV_STATE_MUTATION:-0}" = 1 ] \
+        && [ -z "${HERMES_EFFECTIVE_USER:-}" ]; then
+        printf 'bootstrap installer validation escaped the dev privilege boundary\n' >&2
+        exit 99
+      fi
+      ;;
   esac
-  printf '%s\n' "$expected_active" > "$tmp/systemctl-state.active"
-  printf '%s\n' "$expected_enabled" > "$tmp/systemctl-state.enabled"
-  printf '%s\n' "$HERMES_COMMIT" > "$state_root/.provider-ready"
-  if env "${common_env[@]}" HERMES_COMMIT="$next_commit" \
-    HERMES_TEST_FAIL_AFTER_PUBLICATION=1 \
-    bash "$HOOK" >"$tmp/failed-$service_case.out" 2>&1; then
-    fail "$service_case rollback fixture did not abort provisioning"
+fi
+exec /usr/bin/bash "$@"
+BASH
+chmod 0755 "$TMP/bin/"*
+
+dev_user="$(id -un)"
+dev_group="$(id -gn)"
+common_env=(
+  PATH="$TMP/bin:$PATH"
+  DEV_USER="$dev_user"
+  HERMES_DEV_HOME="$TMP/home"
+  HERMES_TEST_ROOT="$TMP"
+  HERMES_RELEASE_API_FILE="$TMP/release.json"
+  HERMES_TEST_INSTALLER_FIXTURE="$TMP/official-install.sh"
+  HERMES_TEST_EXPECTED_CWD="$TMP/home"
+  HERMES_TEST_STATE_ROOT="$TMP/home/.hermes"
+  HERMES_TEST_BOOTSTRAP_CHOWNED="$TMP/bootstrap-chowned"
+  HERMES_TEST_ALLOW_NON_ROOT=1
+)
+
+state="$TMP/home/.hermes"
+launcher="$TMP/home/.local/bin/hermes"
+mkdir -p "$state"
+chmod 0700 "$state"
+printf 'operator-state-before-timeout\n' >"$state/operator-owned.opaque"
+chmod 0600 "$state/operator-owned.opaque"
+state_signature() {
+  {
+    find "$state" -xdev -printf '%P %y %m %U:%G\n'
+    find "$state" -xdev -type f -exec sha256sum {} \;
+    if [ -e "$launcher" ] || [ -L "$launcher" ]; then
+      find "$launcher" -maxdepth 0 -printf '%p %y %m %U:%G %l\n'
+      [ ! -f "$launcher" ] || sha256sum "$launcher"
+    else
+      printf '%s missing\n' "$launcher"
+    fi
+  } | sort | sha256sum
+}
+effect_count() {
+  local pattern="$1" file="$2"
+  grep -Ec -- "$pattern" "$file" 2>/dev/null || true
+}
+check_effect_signature() {
+  printf '%s %s %s %s\n' \
+    "$(effect_count '^apt-get' "$LOG")" \
+    "$(effect_count '^git <ls-remote>' "$LOG")" \
+    "$(effect_count '^git <clone>' "$LOG")" \
+    "$(effect_count '^argv=' "$INSTALLER_LOG")"
+}
+timeout_state_before="$(state_signature)"
+set +e
+env "${common_env[@]}" \
+  HERMES_TEST_GIT_HANG=1 \
+  HERMES_TEST_RELEASE_LOOKUP_TIMEOUT=0.1s \
+  HERMES_TEST_RELEASE_LOOKUP_KILL_AFTER=0.1s \
+  bash "$HOOK" >/dev/null 2>"$TMP/lookup-timeout.err"
+status=$?
+set -e
+[ "$status" -ne 0 ] || fail 'release-tag lookup timeout did not fail provision'
+[ "$(state_signature)" = "$timeout_state_before" ] \
+  || fail 'release-tag lookup timeout changed opaque Hermes state'
+grep -Fq 'official release tag lookup failed or exceeded 0.1s' "$TMP/lookup-timeout.err" \
+  || fail 'release-tag lookup timeout did not emit a contextual diagnostic'
+if grep -Fq 'git <clone>' "$LOG"; then
+  fail 'release-tag lookup timeout continued to clone the release'
+fi
+[ ! -e "$INSTALLER_LOG" ] || fail 'release-tag lookup timeout ran the official installer'
+
+apt_effects_before_install="$(effect_count '^apt-get' "$LOG")"
+if ! (cd "$TMP/root" && env "${common_env[@]}" \
+  HERMES_TEST_REQUIRE_DEV_STATE_MUTATION=1 bash "$HOOK" >/dev/null); then
+  fail 'profile hook mutated the dev-owned state root outside the dev privilege boundary'
+fi
+
+source="$state/hermes-agent"
+[ -d "$source/.git" ] || fail 'official installer did not produce canonical source checkout'
+[ -x "$source/venv/bin/python" ] || fail 'official installer did not produce source-local venv interpreter'
+[ -f "$source/hermes" ] || fail 'official installer did not produce the checked-in entrypoint'
+[ -x "$launcher" ] || fail 'official installer did not produce the canonical launcher'
+[ "$(stat -c %a "$state")" = 700 ] || fail 'Hermes state root is not private mode 0700'
+[ "$(stat -c %U:%G "$state")" = "$dev_user:$dev_group" ] \
+  || fail 'Hermes state root has the wrong owner'
+
+grep -Fq 'git <clone> <--quiet> <--depth> <1> <--branch> <v2026.8.13> <https://github.com/NousResearch/hermes-agent.git>' "$LOG" \
+  || fail 'bootstrap script was not read from an official release-tag checkout'
+if grep -Fq 'raw.githubusercontent.com/NousResearch/hermes-agent' "$LOG"; then
+  fail 'bootstrap depended on the rate-limited raw file endpoint'
+fi
+grep -Fq "runuser <$dev_user>" "$LOG" || fail 'official installer was not launched as the yard user'
+for bootstrap_access in \
+  '<test> <-f> </var/tmp/subyard-hermes-bootstrap\.[^/]+/source/scripts/install\.sh>' \
+  '<test> <!> <-L> </var/tmp/subyard-hermes-bootstrap\.[^/]+/source/scripts/install\.sh>' \
+  '<bash> <-n> </var/tmp/subyard-hermes-bootstrap\.[^/]+/source/scripts/install\.sh>' \
+  '<rm> <-rf> <--> </var/tmp/subyard-hermes-bootstrap\.[^/]+>'; do
+  grep -Eq "^runuser <${dev_user}> .* ${bootstrap_access}$" "$LOG" \
+    || fail "bootstrap access escaped the dev privilege boundary: $bootstrap_access"
+done
+grep -Fxq 'apt-get <update> <-qq>' "$LOG" \
+  || fail 'profile did not run the exact generic package-index refresh'
+grep -Fxq 'apt-get <install> <-y> <-qq> <build-essential> <ca-certificates> <curl> <git> <libffi-dev> <python3-dev> <xz-utils>' \
+  "$LOG" || fail 'profile package bootstrap escaped the generic OS prerequisite allowlist'
+[ "$(effect_count '^apt-get' "$LOG")" -eq "$((apt_effects_before_install + 2))" ] \
+  || fail 'profile ran an unexpected package-manager command'
+if grep -Eqi 'playwright|chromium|whisper|telegram|faster-whisper|ffmpeg|ripgrep|npx|npm' \
+  "$HOOK"; then
+  fail 'profile hook contains a Hermes component-specific prerequisite'
+fi
+grep -Fxq "user=$dev_user" "$INSTALLER_LOG" || fail 'official installer observed the wrong user'
+grep -Fxq "home=$TMP/home" "$INSTALLER_LOG" || fail 'official installer observed the wrong HOME'
+grep -Fxq "hermes_home=$TMP/home/.hermes" "$INSTALLER_LOG" \
+  || fail 'official installer observed a non-canonical HERMES_HOME'
+grep -Fxq 'node_deps_timeout=1200' "$INSTALLER_LOG" \
+  || fail 'official installer did not receive the bounded slow-link Node dependency budget'
+grep -Fq ' <--branch> <v2026.8.13>' "$INSTALLER_LOG" \
+  || fail 'official installer did not receive the latest stable release tag'
+grep -Fq ' <--commit> <89abcdef0123456789abcdef0123456789abcdef>' "$INSTALLER_LOG" \
+  || fail 'official installer did not receive the immutable release commit'
+grep -Fq ' <--force-commit>' "$INSTALLER_LOG" \
+  || fail 'official installer was not forced to converge on the selected release commit'
+grep -Fq ' <--skip-setup>' "$INSTALLER_LOG" \
+  || fail 'Subyard did not defer interactive Hermes setup to the operator'
+grep -Fq ' <--non-interactive>' "$INSTALLER_LOG" \
+  || fail 'official bootstrap was not explicitly non-interactive'
+for forbidden in --skip-browser --skip-computer-use --no-skills; do
+  if grep -Fq " <$forbidden>" "$INSTALLER_LOG"; then
+    fail "Subyard selected Hermes components via $forbidden"
   fi
-  [ "$(<"$tmp/systemctl-state.active")" = "$expected_active" ] \
-    || fail "$service_case rollback changed active service state"
-  [ "$(<"$tmp/systemctl-state.enabled")" = "$expected_enabled" ] \
-    || fail "$service_case rollback changed enabled service state"
-  [ "$(<"$install_root/.subyard-commit")" = "$HERMES_COMMIT" ] \
-    || fail "$service_case rollback did not restore the previous runtime"
-  [ ! -e "$install_root.rollback" ] && [ ! -e "$install_root.transaction" ] \
-    || fail "$service_case rollback retained transaction state"
 done
 
-cat > "$install_root/node/bin/node" <<'DRIFTED_NODE'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then printf 'v0.0.0\n'; exit; fi
-exit 85
-DRIFTED_NODE
-chmod +x "$install_root/node/bin/node"
-if (env "${common_env[@]}" HERMES_TEST_ABORT_DURING_RUNTIME=1 \
-  bash "$HOOK") >"$tmp/aborted-runtime.out" 2>&1; then
-  fail "interrupted runtime replacement unexpectedly succeeded"
+printf 'operator-opaque-state\n' >"$state/operator-owned.opaque"
+chmod 0600 "$state/operator-owned.opaque"
+before="$(state_signature)"
+installer_calls_before="$(grep -c '^argv=' "$INSTALLER_LOG")"
+env "${common_env[@]}" bash "$HOOK" >/dev/null
+after="$(state_signature)"
+[ "$before" = "$after" ] || fail 'repeat provision changed opaque Hermes state'
+[ "$(grep -c '^argv=' "$INSTALLER_LOG")" = "$installer_calls_before" ] \
+  || fail 'repeat provision reran the official installer'
+[ ! -e "$TMP/var/lib/subyard/hermes-playwright-deps-v1" ] \
+  || fail 'Subyard recorded component-specific prerequisite state'
+if grep -Eq 'playwright|chromium|admin_cwd=|^npx=' "$INSTALLER_LOG"; then
+  fail 'Subyard invoked a Hermes-owned component prerequisite'
 fi
-env "${common_env[@]}" bash "$HOOK" >/dev/null
-[ "$(<"$install_root/.subyard-commit")" = "$HERMES_COMMIT" ] \
-  || fail "provision did not recover an interrupted runtime replacement"
-[ "$($install_root/node/bin/node --version)" = "v$HERMES_NODE_VERSION" ] \
-  || fail "interrupted runtime recovery did not rebuild the pinned Node.js runtime"
-[ ! -e "$install_root.rollback" ] && [ ! -e "$install_root.transaction" ] \
-  || fail "successful recovery retained transaction state"
-
-mkdir "$install_root.rollback"
-printf 'partial committed cleanup\n' > "$install_root.rollback/partial"
-env "${common_env[@]}" bash "$HOOK" >/dev/null
-[ ! -e "$install_root.rollback" ] \
-  || fail "provision did not resume interrupted post-commit rollback cleanup"
-
-mkdir "$install_root/.subyard-rollback-state"
-: > "$install_root/.subyard-rollback-state/item-0.present"
-env "${common_env[@]}" bash "$HOOK" >/dev/null
-[ ! -e "$install_root/.subyard-rollback-state" ] \
-  || fail "provision did not resume interrupted restored-state cleanup"
-[ -L "$tmp/root/usr/local/bin/node" ] \
-  || fail "partial restored-state cleanup was incorrectly replayed"
-
-rm -f "$state_root/.last-verified-backup"
-if env "${common_env[@]}" HERMES_COMMIT="$next_commit" bash "$HOOK" \
-  >"$tmp/unverified-update.out" 2>&1; then
-  fail "pin update proceeded without a verified backup"
+if grep -Fq 'dev-owned-npx-executed' "$LOG"; then
+  fail 'provision executed a dev-owned Hermes component with profile-hook authority'
 fi
-grep -Fq "pin update requires a verified backup of commit $HERMES_COMMIT" \
-  "$tmp/unverified-update.out" || fail "unverified update error is unclear"
-printf 'commit=%s\nsnapshot=fixture-old\n' "$HERMES_COMMIT" \
-  > "$state_root/.last-verified-backup"
-printf '%s\n' "$HERMES_COMMIT" > "$state_root/.provider-ready"
-env "${common_env[@]}" HERMES_COMMIT="$next_commit" bash "$HOOK" >/dev/null
-[ "$(<"$install_root/.subyard-commit")" = "$next_commit" ] \
-  || fail "verified pin update did not install the reviewed commit"
-[ ! -e "$state_root/.provider-ready" ] \
-  || fail "pin update retained stale provider approval"
 
-printf 'commit=%s\nsnapshot=fixture-new\n' "$next_commit" \
-  > "$state_root/.last-verified-backup"
-env "${common_env[@]}" bash "$HOOK" >/dev/null
-[ "$(<"$install_root/.subyard-commit")" = "$HERMES_COMMIT" ] \
-  || fail "verified rollback did not restore the exact old commit"
+before_check="$after"
+before_check_effects="$(check_effect_signature)"
+env "${common_env[@]}" bash "$HOOK" --check >/dev/null
+after_check="$(state_signature)"
+[ "$before_check" = "$after_check" ] || fail 'provision check mutated Hermes state'
+[ "$(check_effect_signature)" = "$before_check_effects" ] \
+  || fail 'healthy provision check performed an install, package or network effect'
 
-cat > "$tmp/bin/incus" <<'INCUS'
-#!/usr/bin/env bash
-printf '%s\n' "$*" > "$HERMES_TEST_INCUS_ARGS"
-tar -tf - > "$HERMES_TEST_BUNDLE_LOG"
-INCUS
-chmod +x "$tmp/bin/incus"
-engine_env=(
-  PATH="$tmp/bin:$PATH"
-  HERMES_TEST_INCUS_ARGS="$tmp/incus.args"
-  HERMES_TEST_BUNDLE_LOG="$tmp/bundle.log"
-  SUBYARD_ENGINE_CONTEXT=1
-  SUBYARD_ENGINE_CONTEXT_SCHEMA=1
-  SUBYARD_OPERATOR_HOME="$tmp/home"
-  SUBYARD_CONFIG_DIR="$tmp/config"
-  SUBYARD_CONFIG_HOME="$tmp/config-home"
-  SUBYARD_HOME="$ROOT"
-  STORAGE_PATH="$tmp/storage"
-  HOST_BASE="$tmp/host"
-  RESTRICTED_DISK_PATHS=""
-  ACCESS_KIND=local
-  YARD_KIND=container
-  YARD_INSTANCE_NAME=yard-hermes
-  INCUS_PROJECT=subyard-hermes
-  INCUS_BRIDGE=incusbr0
-  SSH_HOST=yard-hermes
-  DEV_USER=dev
-  DEV_UID=1000
-  DEV_SUDO=1
-  FORWARD_SSH_AGENT=0
-  NESTED_E2E_VMS=0
-)
-env "${engine_env[@]}" bash "$ROOT/scripts/provision-profile.sh" hermes
-grep -Fxq './provision.sh' "$tmp/bundle.log" \
-  || fail "profile bundle omitted provision.sh"
-grep -Fxq './hermes' "$tmp/bundle.log" \
-  || fail "profile bundle omitted the canonical launcher"
-grep -Fxq './hermes-serve.service' "$tmp/bundle.log" \
-  || fail "profile bundle omitted the systemd unit"
-grep -Fxq './hermes-backup-create' "$tmp/bundle.log" \
-  || fail "profile bundle omitted a runtime helper"
+before_ssh_check_effects="$(check_effect_signature)"
+env "${common_env[@]}" HERMES_TEST_GIT_ORIGIN=git@github.com:NousResearch/hermes-agent.git \
+  bash "$HOOK" --check >/dev/null \
+  || fail 'health check rejected the official SSH remote form'
+[ "$(state_signature)" = "$before_check" ] \
+  || fail 'SSH-origin provision check mutated canonical Hermes state'
+[ "$(check_effect_signature)" = "$before_ssh_check_effects" ] \
+  || fail 'SSH-origin provision check performed an install, package or network effect'
 
-printf 'ok: Hermes pinned provision and profile bundle\n'
+rm "$source/.install_method"
+before_drift_check="$(state_signature)"
+before_drift_check_effects="$(check_effect_signature)"
+set +e
+env "${common_env[@]}" bash "$HOOK" --check >/dev/null
+status=$?
+set -e
+[ "$status" -eq 10 ] || fail "drift check status=$status, want 10"
+[ "$(state_signature)" = "$before_drift_check" ] \
+  || fail 'drifted provision check mutated canonical Hermes state'
+[ "$(check_effect_signature)" = "$before_drift_check_effects" ] \
+  || fail 'drifted provision check performed an install, package or network effect'
+
+printf 'ok: Hermes uses official per-user bootstrap and preserves opaque canonical state\n'

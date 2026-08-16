@@ -171,6 +171,40 @@ printf 'stderr\n' >&2
 	}
 }
 
+func TestRunnerCapturesDirectProbeOutputWithLiveDiagnosticsConfigured(t *testing.T) {
+	runner := fixtureRunner(t, "#!/bin/sh\nprintf 'changed\\n'\n")
+	action := runner.Actions["fixture"]["run"]
+	action.Direct = true
+	action.Capture = true
+	runner.Actions["fixture"]["run"] = action
+	var live bytes.Buffer
+	runner.Diagnostics = &live
+
+	_, diagnostics, err := runner.Run(context.Background(), fixtureRequest(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diagnostics != "changed\n" {
+		t.Fatalf("captured diagnostics changed: %q", diagnostics)
+	}
+	if live.Len() != 0 {
+		t.Fatalf("captured probe leaked into live diagnostics: %q", live.String())
+	}
+}
+
+func TestRunnerActionTimeoutOverridesTheDefault(t *testing.T) {
+	runner := fixtureRunner(t, "#!/bin/sh\nsleep 0.1\n")
+	runner.Timeout = 20 * time.Millisecond
+	action := runner.Actions["fixture"]["run"]
+	action.Direct = true
+	action.Timeout = time.Second
+	runner.Actions["fixture"]["run"] = action
+
+	if _, _, err := runner.Run(context.Background(), fixtureRequest(), nil); err != nil {
+		t.Fatalf("action-specific timeout was not honored: %v", err)
+	}
+}
+
 func fixtureRunner(t *testing.T, script string) Runner {
 	t.Helper()
 	root := t.TempDir()

@@ -1,169 +1,112 @@
-# Hermes Agent profile
+# Hermes Agent yard
 
-The `hermes` profile installs a pinned, headless Hermes Agent in a dedicated
-named yard. Hermes listens only on the yard's loopback interface. Remote access
-uses the existing Subyard SSH path and a localhost-only forward; the profile
-does not install Hermes Desktop, expose port 9119 on the owner host, or run the
-Hermes gateway.
+The `hermes` profile provides a private, persistent Linux yard for an upstream-managed Hermes
+Agent. Subyard owns the container boundary and the optional owner-host route. Hermes owns its
+components, configuration, credentials, services and application behavior.
 
-## Create and provision the yard
-
-Bootstrap the named yard from the shipped, non-secret Hermes preset, then run
-profile provisioning as its own confirmed mutation:
+## Create the yard
 
 ```sh
 yard -Y hermes init --profile hermes
 yard -Y hermes provision
+```
 
+The shipped preset deliberately selects no coding-tool integration, host mount, host link,
+capability, device or forwarded SSH agent. The `dev` user has no passwordless sudo and Tailscale is
+not installed inside the yard. Inspect the effective boundary with:
+
+```sh
 yard -Y hermes config show ENVIRONMENT_PROFILES
 yard -Y hermes config show CODING_TOOL_INTEGRATIONS
 yard -Y hermes config show HOST_MOUNTS
+yard -Y hermes config show HOST_LINKS
 yard -Y hermes config show FORWARD_SSH_AGENT
-yard -Y hermes config show SSH_PORT
-ss -H -ltn 'sport = :2224'
+yard -Y hermes security --require-live
 ```
 
-`init` and `provision` are separate mutations and each displays its own plan and
-confirmation. Bare `provision` is deliberate: `ENVIRONMENT_PROFILES=hermes` limits the
-selection to this profile. The bootstrap validates the complete preset before
-creating its mode-0600 named-yard definition. To customize a setting afterwards,
-use the supported authoring command, for example
-`yard -Y hermes config set SSH_PORT 2225 --scope yard`, then run plain
-`yard -Y hermes init`.
+Provisioning resolves the latest non-draft, non-prerelease GitHub release, verifies its immutable
+tag commit, and reads `scripts/install.sh` from a shallow checkout of that exact release. It runs
+the installer as `dev` with the supported non-root layout and defers interactive setup. Subyard
+does not execute anything from the user-owned Hermes tree as root, select individual Hermes
+components, or add its own package, model, plugin, launcher, updater or service policy.
 
-The profile installs Hermes Agent 0.19.0 from an exact source commit, uses a
-pinned `uv` and Python, and resolves only the committed lock file. The
-root-owned runtime under `/opt/hermes-agent` also includes Node.js 22.20.0 with
-its bundled npm 10.9.3, locked `agent-browser` 0.26.0, and Chromium installed by
-Playwright 1.62.1. No manual Node or browser setup is required. Persistent Hermes
-state remains under `/srv/hermes`, so the reproducible Node/browser runtime does
-not inflate its backups. Re-provisioning the same pins preserves state and the
-dashboard session token. `CODING_TOOL_INTEGRATIONS=codex` also installs the pinned Codex CLI and
-its config, but not Claude, OpenCode, pi, or Paseo. `HOST_LINKS=` keeps Codex
-authorization and sessions inside this yard rather than mounting owner-host
-state.
+The resulting upstream paths are:
 
-Verify the profile-owned browser runtime from an ordinary yard shell:
+| Purpose | Path |
+| --- | --- |
+| Hermes state and installation root | `/home/dev/.hermes` |
+| Source checkout | `/home/dev/.hermes/hermes-agent` |
+| Python environment and CLI | `/home/dev/.hermes/hermes-agent/venv` |
+| User-facing CLI launcher | `/home/dev/.local/bin/hermes` |
 
-```sh
-node --version
-npm --version
-agent-browser --version
-agent-browser doctor --offline --quick
-agent-browser --session hermes-smoke open about:blank
-agent-browser --session hermes-smoke close
-```
+These paths live inside the yard's persistent filesystem. Repeat provision, stop/start and an
+instance restart preserve them. A confirmed `yard teardown` destroys the yard and its state while
+retaining the reusable named-yard definition.
 
-Provisioning leaves `hermes-serve.service` disabled until a provider has been
-configured and tested. Enter the yard as `dev`, authorize the yard-local Codex
-CLI, and let Hermes import that authorization for its native `openai-codex`
-provider:
+The official installer may create its own configuration skeleton and directories. That is upstream
+behavior: Subyard neither creates nor interprets Hermes `.env`, `config.yaml`, credentials,
+memories, sessions, skills or task data. Run the normal upstream setup from an ordinary shell after
+provisioning:
 
 ```sh
 yard -Y hermes shell
-cd /srv/hermes/workspace
-codex login --device-auth
-codex login status
-hermes setup model
-hermes doctor
-hermes chat
+hermes setup
 ```
 
-Choose `openai-codex` during model setup and import the current Codex CLI
-authorization. `hermes chat` must complete one real inference. Then leave the
-interactive shell and approve the service through Subyard's explicit root
-surface (the yard has `DEV_SUDO=0`):
+Use upstream Hermes commands for subsequent setup, component installation and updates. Repeat
+`yard provision` only reconciles the substrate and leaves a healthy existing installation and its
+state untouched.
+
+## Optional browser route over Tailscale
+
+The yard can publish an already-running Hermes loopback endpoint through the owner host. The owner
+host must have Tailscale; the yard does not receive Tailscale credentials or a Tailscale device.
+
+After the operator has used upstream Hermes setup to provide an authenticated browser endpoint on
+`127.0.0.1:9119`, select one active owner-host Tailscale hostname or IPv4 address and a unique host
+port:
 
 ```sh
-yard -Y hermes shell --root -- hermes-provider-ready --inference-ok
-yard -Y hermes shell -- systemctl is-enabled hermes-serve.service
-yard -Y hermes shell -- systemctl is-active hermes-serve.service
-yard -Y hermes shell -- curl -fsS http://127.0.0.1:9119/api/status
+yard -Y hermes config set HERMES_DASHBOARD_ADVERTISE_HOST owner.example-tailnet.ts.net --scope yard
+yard -Y hermes config set HERMES_DASHBOARD_HOST_PORT 19119 --scope yard
+yard -Y hermes dashboard up
 ```
 
-Codex authorization remains in `/home/dev/.codex`; never copy or mount the
-owner host's Codex home into this yard. The Hermes backup contract does not
-include that CLI authorization, so a restored yard must run the login/status
-and provider import steps again.
+The operator can then open `http://owner.example-tailnet.ts.net:19119/` from a browser on an
+authorized tailnet device.
 
-The approval marker is bound to the installed commit. A restore or pin change
-invalidates it.
+The resource adds one typed Incus proxy:
 
-## Connect Hermes Desktop
+```text
+tcp:<exact-owner-tailscale-ip>:19119 -> tcp:127.0.0.1:9119 (bind=host)
+```
 
-On the client machine, register the remote owner host using its existing SSH
-alias:
+It refuses wildcard, non-Tailscale and ambiguous owner addresses, requires the guest loopback port
+to be listening, and records an owner-side fingerprint of the exact device it creates. That durable
+ownership record lets the route be safely replaced or removed after its hostname or port setting
+changes without authorizing deletion of a foreign same-name device. The resource does not start,
+stop or reconfigure Hermes. Application authentication remains an upstream/operator responsibility.
+Remove only the owned route with:
 
 ```sh
-yard remote add hermes OWNER_SSH_ALIAS --yard hermes
-ssh -NT \
-  -o ExitOnForwardFailure=yes \
-  -o ServerAliveInterval=30 \
-  -o ServerAliveCountMax=3 \
-  -L 127.0.0.1:19119:127.0.0.1:9119 \
-  yard-hermes
+yard -Y hermes dashboard down
 ```
-
-Set the official Hermes Desktop Remote URL to
-`http://127.0.0.1:19119`. Transfer the value from
-`/srv/hermes/.serve.env` through a separate secure operator channel and enter
-it as the remote session token. Do not paste the token into shell arguments,
-configuration repositories, task files, or logs. Closing the foreground SSH
-process closes remote access.
-
-## Encrypted backups
-
-Hermes disaster-recovery backups are stopped-service full backups. The
-profile-owned owner-host helper validates the archive twice and commits the ZIP
-and metadata to an already initialized, encrypted restic repository:
-
-```sh
-runtime_root="$(cd "$(dirname "$(readlink -f "$(command -v yard)")")/.." && pwd)"
-sudo "$runtime_root/config/profiles/hermes/backup-to-restic.sh" \
-  --yard hermes \
-  --restic-env /root/.config/subyard/hermes-restic.env \
-  --type scheduled
-```
-
-The selected environment file must be root-owned, non-symlinked, and mode
-`0600` or stricter. It supplies normal `RESTIC_REPOSITORY` and password-source
-variables. Keep the repository outside the yard's removable storage,
-preferably off-host. The helper reports a verified snapshot ID and applies
-retention of 7 daily, 4 weekly, and 6 monthly snapshots for that yard. Schedule
-regular `restic check` separately.
-
-Create a `pre-update` backup before changing the pin and a `pre-teardown`
-backup before destructive teardown. Provision refuses a commit change without
-a verified backup marker for the currently installed commit.
-
-For a restore, provision a clean yard with the same exact profile commit, copy
-the verified ZIP into that yard, then run:
-
-```sh
-yard -Y hermes shell --root -- hermes-restore /path/to/hermes-backup.zip EXPECTED_SHA256
-```
-
-The restore leaves the service disabled and removes provider approval. Recheck
-external credentials, repeat `codex login --device-auth`, verify `codex login
-status`, import `openai-codex` again, run `hermes doctor`, make a real inference,
-and approve the provider again. Do not use cross-version import as rollback:
-restore the old runtime pin and its matching backup together.
 
 ## Maintainer acceptance
 
-The disposable-host acceptance creates two isolated named yards, verifies
-loopback REST/WebSocket authentication and SSH tunnel closure/reconnect, writes
-representative persistent state, commits a stopped-service backup to an
-encrypted restic repository, and restores it into the second clean yard:
+The real-host lane installs through the official release bootstrap, verifies the canonical paths
+and isolation, writes opaque state, and proves it survives repeat provision, stop/start and an
+instance restart. It checks the typed Tailscale route with an application-neutral loopback fixture;
+it does not run Hermes setup or test Hermes features.
 
 ```sh
-dev/agent-e2e.sh --purpose hermes-profile --vm 1 -- \
+dev/agent-e2e.sh --prepare
+dev/agent-e2e.sh --purpose hermes-profile --vm both -- \
   ./dev/e2e/hermes-profile.sh
 ```
 
-That default lane uses a provider fixture. A release candidate must also pass
-the secure maintainer lane with `HERMES_E2E_REQUIRE_CODEX=1`: stage the
-maintainer's Codex auth only inside the same disposable lease and outside the
-filtered worktree archive, never as an argument or environment value and never
-in tracked files or logs. The lane performs a real terminal-tool inference
-both before backup and after clean restore.
+Upstream references:
+
+- [Linux installation guide](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/getting-started/installation.md)
+- [Official installer](https://github.com/NousResearch/hermes-agent/blob/main/scripts/install.sh)
+- [GitHub releases](https://github.com/NousResearch/hermes-agent/releases)

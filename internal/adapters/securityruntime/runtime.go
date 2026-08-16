@@ -5,26 +5,33 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/resource"
 )
 
 var ErrContract = errors.New("security contract failed")
 
 type Runtime struct {
-	RepositoryRoot string
-	Environment    map[string]string
-	Yard           domain.Context
-	Incus          ports.Incus
-	Stdout         io.Writer
-	Stderr         io.Writer
-	State          func(context.Context, Runtime) (ports.ReconcileState, bool, error)
+	RepositoryRoot      string
+	Environment         map[string]string
+	Yard                domain.Context
+	Incus               ports.Incus
+	Stdout              io.Writer
+	Stderr              io.Writer
+	State               func(context.Context, Runtime) (ports.ReconcileState, bool, error)
+	ProxyContracts      []resource.ProxyContract
+	ResolveOwnerAddress func(context.Context, string) (string, error)
 }
 
 type finding struct {
@@ -49,7 +56,7 @@ func (runtime Runtime) CheckSecurity(
 		}
 		findings = append(findings, finding{"warn", "live Incus state unavailable; static contract checked only"})
 	} else {
-		findings = append(findings, runtime.liveFindings(state, requireLive)...)
+		findings = append(findings, runtime.liveFindings(ctx, state, requireLive)...)
 	}
 	failures, warnings := render(runtime.Stdout, runtime.Stderr, findings, quiet)
 	if failures != 0 {
@@ -178,7 +185,7 @@ func (runtime Runtime) liveState(ctx context.Context) (ports.ReconcileState, boo
 	return state, state.ProjectFound, nil
 }
 
-func (runtime Runtime) liveFindings(state ports.ReconcileState, requireLive bool) []finding {
+func (runtime Runtime) liveFindings(ctx context.Context, state ports.ReconcileState, requireLive bool) []finding {
 	var result []finding
 	project := state.ProjectConfig
 	if project["restricted"] != "true" {
@@ -244,9 +251,13 @@ func (runtime Runtime) liveFindings(state ports.ReconcileState, requireLive bool
 					fmt.Sprintf("unix-char device %q is outside the supported allowlist: %s", name, source)})
 			}
 		}
-		if deviceType == "proxy" && !loopbackProxy(device["listen"]) {
+		if runtime.proxyContract(name) != nil {
+			if err := runtime.checkOwnedProxy(ctx, name, device, instance.LocalConfig); err != nil {
+				result = append(result, finding{"fail", err.Error()})
+			}
+		} else if deviceType == "proxy" && !loopbackProxy(device["listen"]) {
 			result = append(result, finding{"fail",
-				fmt.Sprintf("proxy device %q is not loopback-only: %s", name, device["listen"])})
+				fmt.Sprintf("proxy device %q is not loopback-only or declared by an active resource: %s", name, device["listen"])})
 		}
 	}
 	bpf := instance.LocalConfig["security.syscalls.intercept.bpf"]
@@ -261,6 +272,187 @@ func (runtime Runtime) liveFindings(state ports.ReconcileState, requireLive bool
 			"device-cgroup BPF interception is enabled while NESTED_E2E_VMS is disabled"})
 	}
 	return result
+}
+
+func (runtime Runtime) checkOwnedProxy(
+	ctx context.Context,
+	name string,
+	device map[string]string,
+	instanceConfig map[string]string,
+) error {
+	contract := runtime.proxyContract(name)
+	if contract == nil {
+		return fmt.Errorf("proxy device %q is not loopback-only or declared by an active resource: %s", name, device["listen"])
+	}
+	if device["type"] != "proxy" {
+		return fmt.Errorf("device %q does not have the proxy type required by its typed resource contract", name)
+	}
+	if !exactProxyOptions(device) {
+		return fmt.Errorf("proxy device %q contains options outside its typed resource contract", name)
+	}
+	if contract.OwnershipMetadata &&
+		instanceConfig[contract.OwnershipKey()] != contract.OwnershipValue(device) {
+		return fmt.Errorf("proxy device %q is missing matching owner-side resource metadata", name)
+	}
+	host := runtime.Environment[contract.AdvertiseHostSetting]
+	portText := runtime.Environment[contract.HostPortSetting]
+	port, err := strconv.Atoi(portText)
+	if host == "" || err != nil || port < 1 || port > 65535 || strconv.Itoa(port) != portText {
+		return fmt.Errorf("proxy device %q has incomplete typed owner endpoint settings", name)
+	}
+	resolver := runtime.ResolveOwnerAddress
+	if resolver == nil {
+		resolver = resolveOwnerAddress
+	}
+	address, err := resolver(ctx, host)
+	if err != nil {
+		return fmt.Errorf("proxy device %q owner address is not trusted: %v", name, err)
+	}
+	parsed := net.ParseIP(address)
+	if parsed == nil || parsed.To4() == nil || parsed.IsUnspecified() || parsed.IsMulticast() {
+		return fmt.Errorf("proxy device %q resolved to an unsafe owner address", name)
+	}
+	switch contract.AddressPolicy {
+	case resource.ProxyAddressTailscaleOnly:
+		if parsed.IsLoopback() {
+			return fmt.Errorf("proxy device %q requires a non-loopback Tailscale owner address", name)
+		}
+	case resource.ProxyAddressLoopbackOrTailscale:
+	default:
+		return fmt.Errorf("proxy device %q has no valid typed owner-address policy", name)
+	}
+	wantListen := "tcp:" + address + ":" + portText
+	if device["listen"] != wantListen || device["connect"] != contract.Connect || device["bind"] != "host" {
+		return fmt.Errorf("proxy device %q does not match its typed resource contract", name)
+	}
+	return nil
+}
+
+func exactProxyOptions(device map[string]string) bool {
+	if len(device) != 4 {
+		return false
+	}
+	for _, key := range []string{"type", "listen", "connect", "bind"} {
+		if _, ok := device[key]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func (runtime Runtime) proxyContract(name string) *resource.ProxyContract {
+	for index := range runtime.ProxyContracts {
+		if runtime.ProxyContracts[index].Device == name {
+			return &runtime.ProxyContracts[index]
+		}
+	}
+	return nil
+}
+
+func resolveOwnerAddress(ctx context.Context, host string) (string, error) {
+	if host == "127.0.0.1" || host == "localhost" {
+		return "127.0.0.1", nil
+	}
+	if !safeOwnerHost(host) {
+		return "", errors.New("advertise host must be a hostname or IPv4 address without scheme, path, or port")
+	}
+	command := exec.CommandContext(ctx, "tailscale", "ip", "-4")
+	output, err := command.Output()
+	if err != nil {
+		return "", errors.New("tailscale CLI did not report an active IPv4 address")
+	}
+	tailscale := make(map[string]struct{})
+	for _, value := range strings.Fields(string(output)) {
+		ip := net.ParseIP(value)
+		if ip != nil && ip.To4() != nil && !ip.IsLoopback() && !ip.IsUnspecified() {
+			tailscale[ip.String()] = struct{}{}
+		}
+	}
+	if len(tailscale) == 0 {
+		return "", errors.New("owner host has no active Tailscale IPv4 address")
+	}
+	resolved, err := net.DefaultResolver.LookupHost(ctx, host)
+	if err != nil {
+		return "", errors.New("advertise host did not resolve")
+	}
+	active, err := activeIPv4Addresses()
+	if err != nil {
+		return "", err
+	}
+	return selectOwnerAddress(resolved, tailscale, active)
+}
+
+func selectOwnerAddress(
+	resolved []string,
+	tailscale map[string]struct{},
+	active map[string]struct{},
+) (string, error) {
+	unique := make(map[string]struct{})
+	for _, value := range resolved {
+		ip := net.ParseIP(value)
+		if ip == nil || ip.To4() == nil {
+			continue
+		}
+		unique[ip.String()] = struct{}{}
+	}
+	addresses := make([]string, 0, len(unique))
+	for address := range unique {
+		addresses = append(addresses, address)
+	}
+	sort.Strings(addresses)
+	if len(addresses) != 1 {
+		return "", errors.New("advertise host must have exactly one IPv4 DNS answer")
+	}
+	candidate := addresses[0]
+	if _, ok := tailscale[candidate]; !ok {
+		return "", errors.New("advertise host is not an active Tailscale IPv4 address")
+	}
+	if _, ok := active[candidate]; !ok {
+		return "", errors.New("advertise host is not active on the owner host")
+	}
+	return candidate, nil
+}
+
+func activeIPv4Addresses() (map[string]struct{}, error) {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil, errors.New("could not inspect active owner-host addresses")
+	}
+	result := make(map[string]struct{})
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+		addresses, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, address := range addresses {
+			value := address.String()
+			if host, _, ok := strings.Cut(value, "/"); ok {
+				value = host
+			}
+			ip := net.ParseIP(value)
+			if ip != nil && ip.To4() != nil {
+				result[ip.String()] = struct{}{}
+			}
+		}
+	}
+	return result, nil
+}
+
+func safeOwnerHost(value string) bool {
+	if value == "" || len(value) > 253 {
+		return false
+	}
+	for _, character := range value {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') || character == '.' || character == '-' {
+			continue
+		}
+		return false
+	}
+	return value[0] != '-' && value[len(value)-1] != '-'
 }
 
 func mountFindings(kind, entry string) []finding {

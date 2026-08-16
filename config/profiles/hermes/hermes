@@ -1,9 +1,0 @@
-#!/usr/bin/env bash
-# Canonical yard-local Hermes entrypoint. Paths are filled by profile provisioning.
-set -euo pipefail
-export HERMES_HOME='@HERMES_HOME@'
-export HERMES_DISABLE_LAZY_INSTALLS=1
-export PATH='@HERMES_NODE_BIN@:@HERMES_BROWSER_BIN@':"$PATH"
-export PLAYWRIGHT_BROWSERS_PATH='@HERMES_PLAYWRIGHT_BROWSERS@'
-export AGENT_BROWSER_EXECUTABLE_PATH='@HERMES_BROWSER_EXECUTABLE@'
-exec '@HERMES_ENTRYPOINT@' "$@"

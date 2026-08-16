@@ -264,6 +264,85 @@ SHUTDOWN=destroy
 	}
 }
 
+func TestLoadDerivesOwnedProxyContract(t *testing.T) {
+	root := t.TempDir()
+	writeTestResource(t, root, "sample", "dashboard", `
+COMMAND=dashboard
+HANDLER=resources/dashboard/handler.sh
+TITLE="Sample dashboard"
+PROXY="sample-dashboard SAMPLE_ADVERTISE_HOST SAMPLE_HOST_PORT tcp:127.0.0.1:9119 owner-metadata-v1 tailscale-only"
+ACTION="up up security-change reversible"
+ACTION="status status read-only not-needed"
+ACTION="down down security-change reversible"
+BRINGUP=up
+SHUTDOWN=down
+`)
+
+	registry, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []ProxyContract{{
+		Profile: "sample", Resource: "dashboard", Device: "sample-dashboard",
+		AdvertiseHostSetting: "SAMPLE_ADVERTISE_HOST", HostPortSetting: "SAMPLE_HOST_PORT",
+		Connect: "tcp:127.0.0.1:9119", AddressPolicy: ProxyAddressTailscaleOnly,
+		OwnershipMetadata: true,
+	}}
+	if got := registry.ProxyContracts([]string{"sample"}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("proxy contracts = %#v, want %#v", got, want)
+	}
+	if got := registry.ProxyContracts([]string{"other"}); len(got) != 0 {
+		t.Fatalf("inactive profile proxy contracts = %#v", got)
+	}
+	if got := registry.ProxyContracts(nil); len(got) != 0 {
+		t.Fatalf("empty active profile set enabled proxy contracts = %#v", got)
+	}
+	device := map[string]string{
+		"type": "proxy", "listen": "tcp:100.64.1.20:19119",
+		"connect": "tcp:127.0.0.1:9119", "bind": "host",
+	}
+	if got := want[0].OwnershipKey(); got != "user.subyard.resource.sample-dashboard" {
+		t.Fatalf("proxy ownership key = %q", got)
+	}
+	if got := want[0].OwnershipValue(device); got != "v1:d839b683e89c7f8706a2e0131fe0c5fd421031a09781e01b0ffede6239c54f26" {
+		t.Fatalf("proxy ownership value = %q", got)
+	}
+}
+
+func TestLoadRejectsInvalidOwnedProxyContract(t *testing.T) {
+	tests := []string{
+		"too-few HOST PORT",
+		"device HOST PORT tcp:127.0.0.1:9119",
+		"../device HOST PORT tcp:127.0.0.1:9119 tailscale-only",
+		"device bad-name PORT tcp:127.0.0.1:9119 tailscale-only",
+		"device HOST bad-port tcp:127.0.0.1:9119 tailscale-only",
+		"device HOST PORT tcp:0.0.0.0:9119 tailscale-only",
+		"device HOST PORT tcp:127.0.0.1:0 tailscale-only",
+		"device HOST PORT udp:127.0.0.1:9119 tailscale-only",
+		"device HOST PORT tcp:127.0.0.1:9119 unknown-mode",
+		"device HOST PORT tcp:127.0.0.1:9119 owner-metadata-v1 extra",
+		"device HOST PORT tcp:127.0.0.1:9119 owner-metadata-v1 owner-metadata-v1",
+		"device HOST PORT tcp:127.0.0.1:9119 tailscale-only loopback-or-tailscale",
+		"device HOST PORT tcp:127.0.0.1:9119 owner-metadata-v1 tailscale-only extra",
+	}
+	for _, record := range tests {
+		t.Run(strings.ReplaceAll(record, " ", "_"), func(t *testing.T) {
+			root := t.TempDir()
+			writeTestResource(t, root, "sample", "dashboard", fmt.Sprintf(`
+COMMAND=dashboard
+HANDLER=resources/dashboard/handler.sh
+TITLE="Sample dashboard"
+PROXY=%q
+ACTION="up up security-change reversible"
+ACTION="down down security-change reversible"
+`, record))
+			if _, err := Load(root); err == nil {
+				t.Fatalf("invalid PROXY record %q was accepted", record)
+			}
+		})
+	}
+}
+
 func TestLoadRejectsInvalidActionDescriptors(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -371,6 +450,11 @@ func TestRepositoryResourceActionMatrix(t *testing.T) {
 		{resource: "orca", localID: "sync", verb: "sync", effect: domain.ActionBoundedWrite, recovery: domain.RecoveryNotNeeded},
 		{resource: "orca", localID: "logs", verb: "logs", effect: domain.ActionRead, recovery: domain.RecoveryNotNeeded},
 		{resource: "orca", localID: "down", verb: "down", effect: domain.ActionMutation, impacts: []domain.ActionImpact{domain.ImpactHostOS}, recovery: domain.RecoveryReversible},
+
+		{resource: "dashboard", localID: "up", verb: "up", effect: domain.ActionMutation, impacts: []domain.ActionImpact{domain.ImpactAccess, domain.ImpactSecurity, domain.ImpactTrust}, recovery: domain.RecoveryReversible},
+		{resource: "dashboard", localID: "is-up", verb: "is-up", effect: domain.ActionRead, recovery: domain.RecoveryNotNeeded},
+		{resource: "dashboard", localID: "status", verb: "status", effect: domain.ActionRead, recovery: domain.RecoveryNotNeeded},
+		{resource: "dashboard", localID: "down", verb: "down", effect: domain.ActionMutation, impacts: []domain.ActionImpact{domain.ImpactAccess, domain.ImpactSecurity, domain.ImpactTrust}, recovery: domain.RecoveryReversible},
 	}
 
 	definitions := make(map[domain.ActionID]domain.ActionDefinition)
@@ -405,6 +489,7 @@ func TestRepositoryResourceActionMatrix(t *testing.T) {
 		"qa-bot-broker":   {"up", "seed", "expose", "status", "logs", "smoke", "down", "destroy"},
 		"staging-gateway": {"up", "start", "stop", "status", "logs", "shell", "down", "destroy", "list"},
 		"orca":            {"up", "is-up", "status", "pair", "sync", "logs", "down"},
+		"dashboard":       {"up", "is-up", "status", "down"},
 	}
 	for resourceName, verbs := range wantVerbs {
 		definition, ok := registry.Lookup(resourceName)
@@ -428,6 +513,7 @@ func TestRepositoryResourceActionMatrix(t *testing.T) {
 		"config/profiles/openclaw/resources/qa-bot-broker.res",
 		"config/profiles/openclaw/resources/staging-gateway.res",
 		"config/profiles/orca/resources/orca.res",
+		"config/profiles/hermes/resources/dashboard.res",
 	} {
 		content, err := os.ReadFile(filepath.Join(root, descriptor))
 		if err != nil {

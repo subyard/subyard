@@ -39,8 +39,10 @@ type Runner struct {
 }
 
 type Action struct {
-	Path   string
-	Direct bool
+	Path    string
+	Direct  bool
+	Capture bool
+	Timeout time.Duration
 }
 
 func (runner Runner) Run(ctx context.Context, request domain.AdapterRequest, secret io.Reader) (domain.AdapterResult, string, error) {
@@ -66,8 +68,12 @@ func (runner Runner) Run(ctx context.Context, request domain.AdapterRequest, sec
 
 	callContext := ctx
 	cancel := func() {}
-	if runner.Timeout > 0 {
-		callContext, cancel = context.WithTimeout(ctx, runner.Timeout)
+	timeout := runner.Timeout
+	if action.Timeout > 0 {
+		timeout = action.Timeout
+	}
+	if timeout > 0 {
+		callContext, cancel = context.WithTimeout(ctx, timeout)
 	}
 	defer cancel()
 	direct := action.Direct
@@ -112,7 +118,7 @@ func (runner Runner) Run(ctx context.Context, request domain.AdapterRequest, sec
 	stdout := &limitedBuffer{limit: limit}
 	stderr := &limitedBuffer{limit: limit}
 	var liveDiagnostics io.Writer
-	if runner.Diagnostics != nil && len(secretBytes) == 0 && direct {
+	if runner.Diagnostics != nil && len(secretBytes) == 0 && direct && !action.Capture {
 		liveDiagnostics = &lockedWriter{writer: runner.Diagnostics}
 	}
 	if direct && liveDiagnostics != nil {

@@ -6,10 +6,9 @@ codex-agent-provision.sh
 emulator-process-control.sh
 emulator-resource-protocol.sh
 engine-release.sh
-hermes-backup.sh
+hermes-dashboard-resource.sh
 hermes-e2e-contract.sh
 hermes-provision.sh
-hermes-restic.sh
 key-tools-install.sh
 init-project-convergence.sh
 install-runtime-release-rollback.sh

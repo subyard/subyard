@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/Subyard/Subyard/internal/adapters/securityruntime"
 	"github.com/Subyard/Subyard/internal/config"
@@ -39,6 +40,7 @@ func (cli *CLI) runSecurity(
 		Incus:          incusPort,
 		Stdout:         cli.options.Stdout,
 		Stderr:         cli.options.Stderr,
+		ProxyContracts: cli.resources.ProxyContracts(strings.Fields(loaded.Environment["ENVIRONMENT_PROFILES"])),
 	}
 	if _, err := checker.CheckSecurity(ctx, requireLive, quiet); err != nil {
 		if !quiet {

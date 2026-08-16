@@ -21,6 +21,7 @@ import (
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/sshidentity"
 	"github.com/Subyard/Subyard/internal/sshrelay"
@@ -834,6 +835,10 @@ func (runtime Runtime) credentialRuntime() (*credentialruntime.Runtime, error) {
 }
 
 func (runtime Runtime) securityRuntime() securityruntime.Runtime {
+	var contracts []resource.ProxyContract
+	if registry, err := resource.Load(runtime.RepositoryRoot); err == nil {
+		contracts = registry.ProxyContracts(strings.Fields(runtime.environmentValue("ENVIRONMENT_PROFILES")))
+	}
 	return securityruntime.Runtime{
 		RepositoryRoot: runtime.RepositoryRoot,
 		Environment:    runtimeEnvironment(runtime.Environment),
@@ -841,6 +846,7 @@ func (runtime Runtime) securityRuntime() securityruntime.Runtime {
 		Incus:          runtime.Incus,
 		Stdout:         runtime.Stdout,
 		Stderr:         runtime.Stderr,
+		ProxyContracts: contracts,
 	}
 }
 

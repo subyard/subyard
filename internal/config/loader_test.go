@@ -362,7 +362,7 @@ NESTED_E2E_VMS=1
 `)
 	writeFixture(t, filepath.Join(configHome, "yards", "hermes", "config.env"), `SSH_PORT=2224
 ENVIRONMENT_PROFILES=hermes
-CODING_TOOL_INTEGRATIONS=codex
+CODING_TOOL_INTEGRATIONS=
 HOST_CLAUDE_MD=
 HOST_CODEX_AGENTS_MD=
 HOST_OPENCODE_AGENTS_MD=
@@ -387,7 +387,7 @@ NESTED_E2E_VMS=0
 		t.Fatal(err)
 	}
 	for name, want := range map[string]string{
-		"ENVIRONMENT_PROFILES": "hermes", "CODING_TOOL_INTEGRATIONS": "codex",
+		"ENVIRONMENT_PROFILES": "hermes", "CODING_TOOL_INTEGRATIONS": "",
 		"HOST_CLAUDE_MD": "", "HOST_CODEX_AGENTS_MD": "", "HOST_OPENCODE_AGENTS_MD": "",
 		"HOST_MOUNTS": "", "HOST_LINKS": "",
 		"YARD_CAPABILITIES": "", "YARD_CAPS": "", "YARD_DEVICES": "", "YARD_MOUNTS": "",
@@ -399,9 +399,8 @@ NESTED_E2E_VMS=0
 	if loaded.Context.ForwardSSHAgent || loaded.Context.DevSudo || loaded.Context.NestedE2EVMs {
 		t.Fatalf("Hermes security boundary drifted: %#v", loaded.Context)
 	}
-	if loaded.Context.SSHPort != 2224 || loaded.Environment["AGENT_codex_COMMAND"] != "codex" ||
-		loaded.Environment["AGENT_codex_CHECK"] != "codex-check" {
-		t.Fatalf("Hermes Codex selection drifted: %#v", loaded.Environment)
+	if loaded.Context.SSHPort != 2224 {
+		t.Fatalf("Hermes agent-free substrate drifted: %#v", loaded.Environment)
 	}
 }
 

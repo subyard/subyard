@@ -86,7 +86,9 @@ runtime_extras=(
   scripts/install-ssh-relay.sh
   scripts/install-test-vms-host-sink.sh
   config/agents/codex/provision.sh
-  config/profiles/hermes/hermes
+  config/profiles/hermes/hermes-release-resolve.py
+  config/profiles/hermes/resources/dashboard.res
+  config/profiles/hermes/resources/dashboard/handler.sh
   config/profiles/hermes/yard.env
   config/systemd/subyard-test-vms-host-sink.service.in
   config/systemd/subyard-test-vms-host-sink.timer.in

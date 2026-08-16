@@ -727,6 +727,7 @@ func (cli *CLI) statusFacts(loaded config.Loaded) ports.StatusFactsReader {
 		Security: securityruntime.Runtime{
 			RepositoryRoot: cli.options.RepositoryRoot, Environment: loaded.Environment,
 			Yard: loaded.Context, Incus: incusPort, Stdout: io.Discard, Stderr: io.Discard,
+			ProxyContracts: cli.resources.ProxyContracts(strings.Fields(loaded.Environment["ENVIRONMENT_PROFILES"])),
 		},
 	}
 }
@@ -2492,8 +2493,8 @@ func (cli *CLI) operationOrchestrator(
 					"start": {Path: path, Direct: true}, "stop": {Path: path, Direct: true},
 				}
 				actions["provision"] = map[string]shelladapter.Action{
-					"profile":       {Path: filepath.Join(cli.options.RepositoryRoot, "scripts/provision-profile.sh"), Direct: true},
-					"profile-check": {Path: filepath.Join(cli.options.RepositoryRoot, "scripts/provision-profile.sh"), Direct: true},
+					"profile":       {Path: filepath.Join(cli.options.RepositoryRoot, "scripts/provision-profile.sh"), Direct: true, Timeout: 45 * time.Minute},
+					"profile-check": {Path: filepath.Join(cli.options.RepositoryRoot, "scripts/provision-profile.sh"), Direct: true, Capture: true},
 				}
 			} else if definition.Handler == "@test-vms" {
 				path := filepath.Join(cli.options.RepositoryRoot, "scripts/e2e-lab/invoke.sh")

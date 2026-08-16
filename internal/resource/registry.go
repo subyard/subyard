@@ -2,10 +2,13 @@ package resource
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/domain"
@@ -20,8 +23,48 @@ type Definition struct {
 	Shutdown string
 	Verbs    []string
 	Title    string
+	Proxy    *ProxyContract
 	path     string
 	actions  []actionDeclaration
+}
+
+// ProxyContract describes one profile-owned owner-host proxy. The resource handler
+// still owns lifecycle and address validation; the typed metadata lets the global
+// security checker distinguish that exact route from an arbitrary public proxy.
+type ProxyContract struct {
+	Profile              string
+	Resource             string
+	Device               string
+	AdvertiseHostSetting string
+	HostPortSetting      string
+	Connect              string
+	AddressPolicy        ProxyAddressPolicy
+	OwnershipMetadata    bool
+}
+
+type ProxyAddressPolicy string
+
+const (
+	ProxyAddressTailscaleOnly       ProxyAddressPolicy = "tailscale-only"
+	ProxyAddressLoopbackOrTailscale ProxyAddressPolicy = "loopback-or-tailscale"
+)
+
+func (contract ProxyContract) OwnershipKey() string {
+	return "user.subyard.resource." + contract.Device
+}
+
+func (contract ProxyContract) OwnershipValue(device map[string]string) string {
+	keys := make([]string, 0, len(device))
+	for key := range device {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var record strings.Builder
+	record.WriteString("v1\n")
+	for _, key := range keys {
+		fmt.Fprintf(&record, "%s=%s\n", key, device[key])
+	}
+	return fmt.Sprintf("v1:%x", sha256.Sum256([]byte(record.String())))
 }
 
 func (definition Definition) HandlerPath() string { return definition.path }
@@ -52,6 +95,7 @@ func Load(root string) (Registry, error) {
 	}
 	registry := Registry{byCommand: make(map[string]int), byName: make(map[string]int)}
 	qualifiedActions := make(map[domain.ActionID]struct{})
+	proxyDevices := make(map[string]struct{})
 	for _, file := range files {
 		definition, actionDefinitions, err := loadDefinition(root, file)
 		if err != nil {
@@ -69,6 +113,12 @@ func Load(root string) (Registry, error) {
 			}
 			qualifiedActions[action.Action] = struct{}{}
 		}
+		if definition.Proxy != nil {
+			if _, duplicate := proxyDevices[definition.Proxy.Device]; duplicate {
+				return Registry{}, fmt.Errorf("duplicate resource proxy device %q", definition.Proxy.Device)
+			}
+			proxyDevices[definition.Proxy.Device] = struct{}{}
+		}
 		index := len(registry.definitions)
 		registry.byCommand[definition.Command] = index
 		registry.byName[definition.Name] = index
@@ -76,6 +126,17 @@ func Load(root string) (Registry, error) {
 		registry.actionDefinitions = append(registry.actionDefinitions, actionDefinitions...)
 	}
 	return registry, nil
+}
+
+func (registry Registry) ProxyContracts(profiles []string) []ProxyContract {
+	var contracts []ProxyContract
+	for _, definition := range registry.definitions {
+		if definition.Proxy == nil || !slices.Contains(profiles, definition.Profile) {
+			continue
+		}
+		contracts = append(contracts, *definition.Proxy)
+	}
+	return contracts
 }
 
 func (registry Registry) Definitions() []Definition {
@@ -131,6 +192,10 @@ func (registry Registry) definition(value string) (Definition, bool) {
 func cloneDefinition(definition Definition) Definition {
 	definition.Verbs = slices.Clone(definition.Verbs)
 	definition.actions = slices.Clone(definition.actions)
+	if definition.Proxy != nil {
+		proxy := *definition.Proxy
+		definition.Proxy = &proxy
+	}
 	return definition
 }
 
@@ -149,6 +214,10 @@ func loadDefinition(root, path string) (Definition, []domain.ActionDefinition, e
 	shutdown := defaultValue(values.singletons["SHUTDOWN"], "down")
 	handler := values.singletons["HANDLER"]
 	title := values.singletons["TITLE"]
+	proxy, err := parseProxyContract(profile, name, values.singletons["PROXY"], path)
+	if err != nil {
+		return Definition{}, nil, err
+	}
 	if !domain.SafeName(command) || !domain.SafeName(bringUp) || !domain.SafeName(shutdown) ||
 		handler == "" || title == "" || len(values.actions) == 0 {
 		return Definition{}, nil, fmt.Errorf("resource descriptor is incomplete: %s", path)
@@ -223,8 +292,66 @@ func loadDefinition(root, path string) (Definition, []domain.ActionDefinition, e
 	return Definition{
 		Profile: profile, Name: name, Command: command, Handler: handler,
 		BringUp: bringUp, Shutdown: shutdown, Verbs: verbs, Title: title, path: resolvedHandlerPath,
-		actions: declarations,
+		Proxy: proxy, actions: declarations,
 	}, actionDefinitions, nil
+}
+
+func parseProxyContract(profile, resourceName, record, path string) (*ProxyContract, error) {
+	if record == "" {
+		return nil, nil
+	}
+	fields := strings.Fields(record)
+	if len(fields) < 5 || len(fields) > 6 {
+		return nil, fmt.Errorf("invalid PROXY record %q in %s", record, path)
+	}
+	device, advertiseSetting, portSetting, connect := fields[0], fields[1], fields[2], fields[3]
+	ownershipMetadata := false
+	var addressPolicy ProxyAddressPolicy
+	for _, option := range fields[4:] {
+		switch ProxyAddressPolicy(option) {
+		case ProxyAddressTailscaleOnly, ProxyAddressLoopbackOrTailscale:
+			if addressPolicy != "" {
+				return nil, fmt.Errorf("duplicate PROXY address policy in %s", path)
+			}
+			addressPolicy = ProxyAddressPolicy(option)
+		case "owner-metadata-v1":
+			if ownershipMetadata {
+				return nil, fmt.Errorf("duplicate PROXY ownership mode in %s", path)
+			}
+			ownershipMetadata = true
+		default:
+			return nil, fmt.Errorf("invalid PROXY option %q in %s", option, path)
+		}
+	}
+	if addressPolicy == "" {
+		return nil, fmt.Errorf("PROXY address policy is required in %s", path)
+	}
+	if !domain.SafeName(device) || !safeSettingName(advertiseSetting) || !safeSettingName(portSetting) {
+		return nil, fmt.Errorf("invalid PROXY identity %q in %s", record, path)
+	}
+	portText, ok := strings.CutPrefix(connect, "tcp:127.0.0.1:")
+	port, err := strconv.Atoi(portText)
+	if !ok || err != nil || port < 1 || port > 65535 || strconv.Itoa(port) != portText {
+		return nil, fmt.Errorf("PROXY connect must be exact tcp loopback in %s: %s", path, connect)
+	}
+	return &ProxyContract{
+		Profile: profile, Resource: resourceName, Device: device,
+		AdvertiseHostSetting: advertiseSetting, HostPortSetting: portSetting, Connect: connect,
+		AddressPolicy: addressPolicy, OwnershipMetadata: ownershipMetadata,
+	}, nil
+}
+
+func safeSettingName(value string) bool {
+	if value == "" || value[0] < 'A' || value[0] > 'Z' {
+		return false
+	}
+	for _, character := range value {
+		if (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || character == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func assessmentClass(value string) (domain.ActionEffect, []domain.ActionImpact, bool) {
@@ -271,6 +398,7 @@ func readDescriptor(path string) (descriptorValues, error) {
 	defer file.Close()
 	allowed := map[string]struct{}{
 		"COMMAND": {}, "HANDLER": {}, "TITLE": {}, "ACTION": {}, "BRINGUP": {}, "SHUTDOWN": {},
+		"PROXY": {},
 	}
 	values := descriptorValues{singletons: make(map[string]string)}
 	scanner := bufio.NewScanner(file)
