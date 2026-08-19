@@ -196,7 +196,7 @@ reclaim_held_pair_capacity() {
   local config="$1" label="$2" vm available
   for vm in 1 2; do
     ssh -F "$config" -T "e2e-vm-$vm" -- \
-      "sh -eu -c 'apt-get clean; find /var/cache/apt/archives -type f -delete; find /var/lib/apt/lists -type f -delete; sync; fstrim -av >/dev/null 2>&1 || true'"
+      "sh -eu -c 'sync; fstrim -av >/dev/null 2>&1 || true'"
   done
   available="$(outer_root \
     df -B1 --output=avail /var/lib/subyard/test-vms/slots \

@@ -293,10 +293,7 @@ prepare_slot_lease() (
   start_lease_keeper
   for vm in 1 2; do
     guest "$vm" sh -eu -c \
-      'apt-get clean
-       find /var/cache/apt/archives -type f -delete
-       find /var/lib/apt/lists -type f -delete
-       sync
+      'sync
        fstrim -av >/dev/null 2>&1 || true'
   done
 )

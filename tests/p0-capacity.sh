@@ -40,7 +40,7 @@ printf '%s\n' \
   '#!/bin/bash' \
   'set -euo pipefail' \
   'case "$*" in' \
-  '  "-n apt-get clean"|"-n find /var/lib/apt/lists -xdev -type f -delete"|"-n systemctl restart incus.service")' \
+  '  "-n systemctl restart incus.service")' \
   '    printf "%s\n" "$*" >> "$P0_FAKE_SUDO_LOG"' \
   '    ;;' \
   '  *) exit 2 ;;' \
@@ -88,15 +88,11 @@ install -d -m 0755 "$P0_CAPACITY_MODULE_CACHE/cache/download"
 printf 'module\n' > "$P0_CAPACITY_MODULE_CACHE/cache/download/fixture"
 : > "$P0_FAKE_GO_LOG"
 : > "$P0_FAKE_SUDO_LOG"
-SUBYARD_E2E_VM=1 p0_capacity_reclaim_dependency_caches >/dev/null
+SUBYARD_E2E_VM=1 p0_capacity_reclaim_go_module_cache >/dev/null
 [ ! -e "$P0_CAPACITY_MODULE_CACHE" ] \
   || fail "P0 dependency reclaim left the reusable module cache behind"
 grep -Fxq 'clean -modcache' "$P0_FAKE_GO_LOG" \
   || fail "P0 dependency reclaim did not use the Go module-cache cleanup"
-grep -Fxq -- '-n apt-get clean' "$P0_FAKE_SUDO_LOG" \
-  && grep -Fxq -- '-n find /var/lib/apt/lists -xdev -type f -delete' \
-    "$P0_FAKE_SUDO_LOG" \
-  || fail "P0 dependency reclaim did not remove disposable APT caches"
 
 : > "$P0_FAKE_TIMEOUT_LOG"
 export P0_FAKE_TIMEOUT_FAIL_ONCE=1

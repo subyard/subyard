@@ -34,8 +34,9 @@ changes it. Stopping the outer yard drains all active slots before shutdown.
 `E2E_VM_SLOT_COUNT` defaults to `2` and may be overridden through normal yard/operator config
 precedence. Each slot consumes two VMs. Increasing the count adds empty slots; the VMs are created
 only on first acquire. Shrink is fail-closed while a retiring slot is held, provisioning, draining
-or quarantined. Retained resources are removed only by the confirmed operator configuration
-reconcile, never by lease release or age-based GC.
+or quarantined. Lease release and age-based GC never remove retained resources. They are removed
+only by confirmed operator configuration reconcile, destructive quarantine recovery described
+below or outer-yard teardown.
 
 Nested VM disks are thin-provisioned. Capacity checks do not reserve the sum of their virtual
 maximum sizes: before creating a missing VM, the broker requires 1 GiB of initial headroom per
@@ -57,8 +58,10 @@ custom image that could silently drift from `images:debian/13/cloud`. Before eve
 the broker verifies a versioned baseline and reconciles it with bounded APT retries/timeouts. The
 baseline includes the Go bootstrap, compiler/build utilities, ShellCheck, Git, curl, jq, ripgrep,
 SSH and archive tools. Its revision marker changes with the package contract. Go's exact toolchain
-and modules remain selected by `go.mod`; reusable module/toolchain and APT caches survive with the
-retained disk, while every P0 run owns and removes its separate Go build cache.
+and modules remain selected by `go.mod`. APT archives and repository metadata survive with the
+retained disk; P0 may separately reclaim its disposable Go build and module caches. Dependency
+reconciliation still runs the normal `apt-get update`; automated provisioning and capacity helpers
+do not purge APT data to reclaim space.
 
 ## Agent workflow
 
@@ -212,7 +215,8 @@ an immutable incident with the available project, VM and service diagnostics to 
 spool. It then verifies the managed project and every existing VM marker, refuses projects with
 foreign instances, deletes both VM disks in the slot pair, provisions both guests through the
 normal fresh-acquire path, verifies their stop and increments `resource_generation` before making
-the slot `available`. Failure to persist the local incident or any ambiguous ownership evidence
+the slot `available`. Deleting the disks also deletes their APT caches; ordinary release and
+reacquire retain both. Failure to persist the local incident or any ambiguous ownership evidence
 leaves the slot quarantined without deletion.
 
 The root reaper starts recovery immediately after the incident is durable. Failed rebuilds retry
@@ -269,8 +273,9 @@ dev/agent-e2e.sh --verify-boundary
 ```
 
 The operator owns outer `start`, `stop` and teardown. Agents use only leases allocated by the
-broker. An unavailable outer yard produces the stable `test environment unavailable` error instead
-of attempting recovery.
+broker. Outer-yard teardown removes the retained VM disks and their APT caches with the containing
+yard storage. An unavailable outer yard produces the stable `test environment unavailable` error
+instead of attempting recovery.
 
 A runtime release automatically installs the compatible physical-host sink before updating an
 enabled producer. When the outer `test-yard` and broker service are active, it then verifies the

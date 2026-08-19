@@ -44,8 +44,6 @@ grep -Fq 'slot_home_has_managed_marker' "$PROVISION" \
   || fail "slot data-account ownership markers are not validated fail-closed"
 grep -Fq 'apt-get install -y -qq --no-install-recommends' "$PROVISION" \
   || fail "inner VM backend installs optional QEMU desktop packages"
-grep -Fq 'apt-get clean' "$PROVISION" \
-  || fail "inner VM backend leaves the package cache on the disposable disk"
 grep -Fq 'run_with_progress "installing inner Incus and QEMU"' "$PROVISION" \
   && grep -Fq 'still working, %ss elapsed' "$PROVISION" \
   || fail "inner VM backend package installation has no periodic progress"

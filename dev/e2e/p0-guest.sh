@@ -509,12 +509,6 @@ ensure_owner_base_image() {
 reclaim_broker_recovery_capacity() {
   local available capacity_path=/var/lib/subyard/test-vms/slots
   local minimum=$((7 * 1024 * 1024 * 1024))
-  incus exec yard-test-yard --project subyard-test-yard -- \
-    sh -eu -c '
-      apt-get clean
-      find /var/cache/apt/archives -type f -delete
-      find /var/lib/apt/lists -type f -delete
-    '
   if [ "$OWNER_BASE_IMAGE_CREATED" = 1 ]; then
     incus image delete "$OWNER_BASE_IMAGE" --project default >/dev/null
     OWNER_BASE_IMAGE_CREATED=0
@@ -542,12 +536,6 @@ reclaim_owner_lease_capacity() {
   # The migration and real-Incus contracts have completed. Reclaim only their
   # marker-owned source/release outputs and images that were absent from the
   # pre-lane baseline before retaining four nested VM disks concurrently.
-  incus exec yard-test-yard --project subyard-test-yard -- \
-    sh -eu -c '
-      apt-get clean
-      find /var/cache/apt/archives -type f -delete
-      find /var/lib/apt/lists -type f -delete
-    '
   for path in \
     "$RENAME_BASE_ROOT" \
     "$ROOT/.build/p0-current-base-release" \
@@ -571,7 +559,7 @@ reclaim_owner_lease_capacity() {
   default_build_before="$(p0_capacity_cache_bytes "$P0_CAPACITY_DEFAULT_BUILD_CACHE")"
   env -u GOCACHE go clean -cache
   default_build_after="$(p0_capacity_cache_bytes "$P0_CAPACITY_DEFAULT_BUILD_CACHE")"
-  p0_capacity_reclaim_dependency_caches
+  p0_capacity_reclaim_go_module_cache
   p0_capacity_remove_build_cache
   p0_capacity_use_build_cache
   while ! incus exec yard-test-yard --project subyard-test-yard -- \

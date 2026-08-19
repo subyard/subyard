@@ -192,12 +192,12 @@ p0_capacity_remove_build_cache() {
   p0_capacity_remove_root_if_empty
 }
 
-p0_capacity_reclaim_dependency_caches() {
+p0_capacity_reclaim_go_module_cache() {
   local home_path module_path module_before module_after
   [ "${SUBYARD_E2E_VM:-}" = 1 ] \
-    || p0_capacity_die 'dependency-cache reclaim is restricted to P0 VM1' || return
+    || p0_capacity_die 'Go module-cache reclaim is restricted to P0 VM1' || return
   home_path="$(realpath -e -- "$HOME")" \
-    || p0_capacity_die 'cannot resolve P0 home for dependency-cache reclaim' || return
+    || p0_capacity_die 'cannot resolve P0 home for Go module-cache reclaim' || return
   module_path="$(realpath -m -- "$P0_CAPACITY_MODULE_CACHE")" \
     || p0_capacity_die 'cannot resolve the Go module cache' || return
   case "$module_path" in
@@ -207,10 +207,8 @@ p0_capacity_reclaim_dependency_caches() {
 
   module_before="$(p0_capacity_cache_bytes "$P0_CAPACITY_MODULE_CACHE")"
   go clean -modcache
-  sudo -n apt-get clean
-  sudo -n find /var/lib/apt/lists -xdev -type f -delete
   module_after="$(p0_capacity_cache_bytes "$P0_CAPACITY_MODULE_CACHE")"
-  printf '  [ ok ] reclaimed disposable dependency caches module=%s->%s and APT\n' \
+  printf '  [ ok ] reclaimed disposable Go module cache module=%s->%s\n' \
     "$module_before" "$module_after"
 }
 

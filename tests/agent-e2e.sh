@@ -320,7 +320,7 @@ grep -Fq 'go build -cover' "$ROOT/dev/process-coverage.sh" \
   || fail 'process coverage does not merge an instrumented yard with Shell inventory evidence'
 grep -Fq 'reclaim_owner_lease_capacity' "$ROOT/dev/e2e/p0-guest.sh" \
   && grep -Fq 'owner lease fixture pool reserve' "$ROOT/dev/e2e/p0-guest.sh" \
-  && grep -Fq 'p0_capacity_reclaim_dependency_caches' "$ROOT/dev/e2e/p0-guest.sh" \
+  && grep -Fq 'p0_capacity_reclaim_go_module_cache' "$ROOT/dev/e2e/p0-guest.sh" \
   && grep -Fq 'OWNER_BASELINE_IMAGES' "$ROOT/dev/e2e/p0-guest.sh" \
   || fail "P0 owner lane does not reclaim only test-owned migration capacity"
 grep -Fq '/tmp/subyard-hermes-profile.*/storage' "$ROOT/dev/e2e/p0-guest.sh" \

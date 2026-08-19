@@ -528,7 +528,6 @@ run_with_progress "updating inner VM backend packages" apt-get update -qq
 run_with_progress "installing inner Incus and QEMU" \
   apt-get install -y -qq --no-install-recommends \
     incus qemu-system-x86 qemu-utils ovmf openssh-client nftables
-apt-get clean
 version_ok || { printf 'Incus 6.0.6 or newer is required inside the yard\n' >&2; exit 1; }
 # AppArmor 4.1 userspace emits AF_UNIX rules that the 6.8 kernel rejects with a type/protocol ABI
 # mismatch. Disable only the inner daemon's per-instance profiles. The trusted L1 container remains
