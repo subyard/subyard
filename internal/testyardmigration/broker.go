@@ -341,6 +341,15 @@ func inspectBrokerRuntime(
 		result.state = BrokerRuntimeActive
 		return result, nil
 	case "inactive", "failed", "deactivating", "unknown":
+		if strings.EqualFold(strings.TrimSpace(
+			instances[0].Config["user.subyard.desired_power"],
+		), "running") {
+			// Preserve the durable activation intent when the service is
+			// temporarily down during an update. Commit will reconcile and
+			// verify the broker against the selected release.
+			result.state = BrokerRuntimeActive
+			return result, nil
+		}
 		if yard == LegacyYard {
 			loadState, loadErr := runIncus(
 				ctx,
@@ -391,7 +400,7 @@ func inspectBrokerRuntime(
 }
 
 func loadBrokerYard(options Options, yard string) (config.Loaded, error) {
-	environment := environmentMap(options.Environment)
+	environment := environmentMap(selectedYardEnvironment(options.Environment))
 	environment["SUBYARD_CONFIG_HOME"] = options.ConfigHome
 	environment["SUBYARD_HOME"] = options.DataHome
 	operatorHome := environment["SUBYARD_OPERATOR_HOME"]

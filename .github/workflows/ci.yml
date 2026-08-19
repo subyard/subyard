@@ -9,7 +9,9 @@ permissions:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    # Ubuntu 24.04 carries systemd 255, whose real parser guards the oldest
+    # supported RestartForceExitStatus=/Type= compatibility boundary.
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4

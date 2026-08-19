@@ -25,6 +25,7 @@ import (
 	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/sshidentity"
 	"github.com/Subyard/Subyard/internal/sshrelay"
+	"github.com/Subyard/Subyard/internal/systemdunit"
 )
 
 type Runtime struct {
@@ -1312,6 +1313,14 @@ func (runtime Runtime) powerReconcilerConverged(ctx context.Context) bool {
 	}
 	systemctl, err := runtime.executableFromPath("systemctl")
 	if err != nil {
+		return false
+	}
+	if err := systemdunit.RequireFreshLoaded(
+		ctx,
+		systemctl,
+		runtime.Environment,
+		filepath.Base(unit),
+	); err != nil {
 		return false
 	}
 	command := exec.CommandContext(ctx, systemctl, "is-enabled", "--quiet", filepath.Base(unit))

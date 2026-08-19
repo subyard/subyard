@@ -6,9 +6,23 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
-const guestDependencyRevision = "subyard-test-vms-dependencies-v2"
+const (
+	guestDependencyRevision = "subyard-test-vms-dependencies-v2"
+	guestToolchainTimeout   = 30 * time.Minute
+	guestToolchainKillAfter = 10 * time.Second
+)
+
+func guestToolchainCommand(script string, deadline, killAfter time.Duration) []string {
+	return []string{
+		"timeout", "--signal=TERM",
+		fmt.Sprintf("--kill-after=%.0f", killAfter.Seconds()),
+		fmt.Sprintf("%.0f", deadline.Seconds()),
+		"sh", "-eu", "-c", script,
+	}
+}
 
 func (runtime *Runtime) cloudConfig() string {
 	publicKey, _ := os.ReadFile(runtime.Config.keyPath() + ".pub")
@@ -141,8 +155,8 @@ command -v zsh >/dev/null`
 		if err := runtime.progress(ctx, "installing test toolchain in "+vm, func() error {
 			const install = `export DEBIAN_FRONTEND=noninteractive
 apt_options='Acquire::Retries=3'
-timeout --foreground 900 apt-get -o "$apt_options" -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update -qq
-timeout --foreground 900 apt-get -o "$apt_options" -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y -qq --no-install-recommends \
+apt-get -o "$apt_options" -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update -qq
+apt-get -o "$apt_options" -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y -qq --no-install-recommends \
   build-essential ca-certificates curl expect git golang-go jq make openssh-client openssh-server ripgrep shellcheck sudo tar xz-utils zsh
 install -d -m 0755 /var/lib/subyard
 temp="$(mktemp /var/lib/subyard/.e2e-dependencies.XXXXXX)"
@@ -151,7 +165,10 @@ printf '%s\n' "$DEPENDENCY_REVISION" > "$temp"
 chmod 0644 "$temp"
 mv -f "$temp" /var/lib/subyard/e2e-dependencies.revision
 trap - EXIT`
-			_, err := runtime.guest(ctx, vm, dependencyEnvironment, "sh", "-eu", "-c", install)
+			command := guestToolchainCommand(
+				install, guestToolchainTimeout, guestToolchainKillAfter,
+			)
+			_, err := runtime.guest(ctx, vm, dependencyEnvironment, command...)
 			return err
 		}); err != nil {
 			return err

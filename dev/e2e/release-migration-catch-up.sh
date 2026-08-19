@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MODE="${1:-auto}"
 VM="${SUBYARD_E2E_VM:-}"
+RUN_ID="${SUBYARD_E2E_RUN_ID:-}"
 OLD_VERSION=0.3.1
 MISSED_VERSION=0.4.0
 BROKEN_VERSION=0.4.1
@@ -37,6 +38,8 @@ LEGACY_INSTANCE='yard-e2e-yard'
 CURRENT_PROJECT=subyard-test-yard
 CURRENT_INSTANCE='yard-test-yard'
 IMAGE_ALIAS=subyard-e2e-debian-13-cloud-container
+POWER_RECONCILER=/usr/local/libexec/subyard/yard-boot-reconcile
+POWER_UNIT=/etc/systemd/system/subyard-power-reconcile.service
 PLATFORM_ROOT="$HOME/.cache/subyard-release-catchup-platform-vm${VM:-unknown}"
 PLATFORM_STORAGE="$PLATFORM_ROOT/data/incus/storage"
 PLATFORM_OWNED=0
@@ -157,6 +160,13 @@ assert_state_root() {
     || die "refusing unmarked state root $STATE_ROOT"
 }
 
+seal_state_root() {
+  assert_state_root
+  touch "$STATE_ROOT/public-worktree.tar.gz"
+  sudo -n chown root:root "$STATE_ROOT" "$STATE_ROOT/.marker"
+  sudo -n chmod 0644 "$STATE_ROOT/.marker"
+}
+
 mark_outer_project_for_cleanup() {
   local project="$1" instance="$2" yard="$3" registration
   host_incus project show "$project" >/dev/null 2>&1 || return 0
@@ -165,7 +175,8 @@ mark_outer_project_for_cleanup() {
     return 0
   fi
   registration="$OPERATOR_HOME/.config/subyard/yards/$yard/config.env"
-  [ -f "$registration" ] && grep -qx 'YARD_TEMPLATE=test-vms' "$registration" \
+  operator_env test -f "$registration" \
+    && operator_env grep -qx 'YARD_TEMPLATE=test-vms' "$registration" \
     || die "refusing unregistered outer project $project"
   [ "$(host_incus config get "$instance" user.subyard.managed \
     --project "$project" 2>/dev/null)" = true ] \
@@ -223,7 +234,7 @@ cleanup() {
   sudo -n find "$SUDOERS" -delete 2>/dev/null || true
   if [ -d "$STATE_ROOT" ]; then
     assert_state_root
-    find "$STATE_ROOT" -depth -delete
+    sudo -n find "$STATE_ROOT" -depth -delete
   fi
   [ "$cleanup_failed" = 0 ] || rc=3
   exit "$rc"
@@ -233,6 +244,8 @@ trap cleanup EXIT INT TERM
 prepare_host() {
   [ "$VM" = 1 ] || [ "$VM" = 2 ] \
     || die "run through dev/agent-e2e.sh on VM1 or VM2"
+  [[ "$RUN_ID" =~ ^[0-9a-f]{8}$ ]] \
+    || die 'run through an allocated lease with an eight-character run ID'
   case "$MODE" in
     auto) [ "$VM" = 1 ] && MODE=direct || MODE=missed ;;
     direct) [ "$VM" = 1 ] || die "the direct lane is pinned to VM1" ;;
@@ -295,7 +308,7 @@ prepare_operator() {
     "$OPERATOR_HOME/.local/bin"
   operator_env bash -c 'printf "%s" "$2" > "$1"' _ \
     "$OPERATOR_HOME/.config/subyard/config.env" \
-    $'CODING_TOOL_INTEGRATIONS=none\n'
+    $'AGENTS=\n'
   base_image="$IMAGE_ALIAS"
   if ! host_incus image info "$base_image" --project default >/dev/null 2>&1; then
     base_image=images:debian/13
@@ -305,7 +318,7 @@ prepare_operator() {
     "$(printf '%s\n' \
       'YARD_TEMPLATE=test-vms' \
       'SSH_PORT=2223' \
-      'CODING_TOOL_INTEGRATIONS=none' \
+      'AGENTS=' \
       'DEV_UID=1001' \
       'E2E_VM_CPU=1' \
       'E2E_VM_MEMORY=1GiB' \
@@ -831,13 +844,13 @@ EXPECT
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || die "published $FAILED_HOTFIX_VERSION unexpectedly succeeded"
-  [ "$(grep -Fc '[sudo] password' "$transcript")" = 1 ] \
+  [ "$(operator_env grep -Fc '[sudo] password' "$transcript")" = 1 ] \
     || die "published $FAILED_HOTFIX_VERSION rollback did not request sudo exactly once"
   for expected in \
     "sudo authorization is required for root steps in init" \
     "init stage \"test-vms\" completed but did not converge" \
     "migration commit and recovery both failed"; do
-    grep -Fq "$expected" "$transcript" \
+    operator_env grep -Fq "$expected" "$transcript" \
       || die "published $FAILED_HOTFIX_VERSION failure omitted: $expected"
   done
   assert_hotfix_runtime_links "$RELEASE_042_TARGET" "$RELEASE_040_TARGET"
@@ -1005,7 +1018,8 @@ upgrade_through_missed_release() {
   operator_yard update --version "$MISSED_VERSION" --yes
   [ "$(operator_yard --version)" = "yard $MISSED_VERSION" ] \
     || die "published $MISSED_VERSION runtime is not active"
-  [ -f "$OPERATOR_HOME/.config/subyard/yards/e2e-yard/config.env" ] \
+  operator_env test -f \
+    "$OPERATOR_HOME/.config/subyard/yards/e2e-yard/config.env" \
     || die "$MISSED_VERSION unexpectedly migrated the legacy registration"
   host_incus project show "$LEGACY_PROJECT" >/dev/null \
     || die "$MISSED_VERSION unexpectedly migrated the legacy project"
@@ -1049,11 +1063,11 @@ exit [lindex $result 3]
 EXPECT
   case "$expected_prompt" in
     absent)
-      ! grep -Fq '[sudo] password' "$transcript" \
+      ! operator_env grep -Fq '[sudo] password' "$transcript" \
         || die "bounded candidate migration unexpectedly requested sudo"
       ;;
     present)
-      [ "$(grep -Fc '[sudo] password' "$transcript")" = 1 ] \
+      [ "$(operator_env grep -Fc '[sudo] password' "$transcript")" = 1 ] \
         || die "root-bearing candidate migration did not request sudo exactly once"
       ;;
     *) die "invalid candidate sudo prompt expectation" ;;
@@ -1082,9 +1096,11 @@ require_operator_password_sudo() {
 
 verify_control_plane() {
   local actual_start source="$OPERATOR_HOME/.subyard/e2e/routes"
-  [ ! -e "$OPERATOR_HOME/.config/subyard/yards/e2e-yard" ] \
+  operator_env test ! -e \
+    "$OPERATOR_HOME/.config/subyard/yards/e2e-yard" \
     || die "legacy registration directory remains"
-  [ -f "$OPERATOR_HOME/.config/subyard/yards/test-yard/config.env" ] \
+  operator_env test -f \
+    "$OPERATOR_HOME/.config/subyard/yards/test-yard/config.env" \
     || die "canonical registration is unavailable"
   ! host_incus project show "$LEGACY_PROJECT" >/dev/null 2>&1 \
     || die "legacy owner project remains"
@@ -1113,16 +1129,113 @@ verify_control_plane() {
   operator_test_vms_status \
     | jq -e '.pool.slots | length == 2 and all(.state == "available")' >/dev/null
   operator_env jq -e \
-    '.layout == 3 and
-      .applied == ["migrate-test-yard-owner", "refresh-test-vm-broker"]' \
+    '.layout == 5 and
+      .applied == [
+        "migrate-test-yard-owner",
+        "refresh-test-vm-broker",
+        "refresh-power-reconciler",
+        "repair-power-reconciler-systemd-compat"
+      ]' \
     "$OPERATOR_HOME/.config/subyard/migrations/state.json" >/dev/null
   ok "owner, route publication, live consumer and layout converged without restart"
+}
+
+assert_power_runtime_matches_current_release() {
+  operator_env cmp "$OPERATOR_RUNTIME/current/bin/yard-engine" "$POWER_RECONCILER" \
+    || die 'installed power reconciler payload does not match the active release'
+  operator_env sed "s|@SUBYARD_POWER_RECONCILER@|$POWER_RECONCILER|g" \
+    "$OPERATOR_RUNTIME/current/config/systemd/subyard-power-reconcile.service.in" \
+    | sudo -n cmp - "$POWER_UNIT" \
+    || die 'installed power reconciler unit does not match the active release'
+  sudo -n systemctl is-enabled --quiet subyard-power-reconcile.service \
+    || die 'installed power reconciler unit is not enabled'
+}
+
+assert_candidate_power_transaction() {
+  local phase="$1" transaction
+  transaction="$(hotfix_transaction_directory "$CANDIDATE_VERSION")" \
+    || die 'candidate catch-up transaction is missing or ambiguous'
+  operator_env jq -e --arg phase "$phase" '
+    .fromLayout == 1 and .toLayout == 5 and .phase == $phase and
+    .migrations == [
+      "migrate-test-yard-owner",
+      "refresh-test-vm-broker",
+      "refresh-power-reconciler",
+      "repair-power-reconciler-systemd-compat"
+    ] and
+    (.operations | map([.migrationId, .operationId, .kind])) == [
+      ["migrate-test-yard-owner", "test-yard-owner", "test-yard-owner-v1"],
+      ["migrate-test-yard-owner", "test-yard-route-consumers",
+       "test-yard-route-consumers-v1"],
+      ["refresh-test-vm-broker", "test-vm-broker-runtime", "test-vm-broker-runtime-v1"],
+      ["refresh-power-reconciler", "power-reconciler-runtime",
+       "power-reconciler-runtime-v1"],
+      ["repair-power-reconciler-systemd-compat", "power-reconciler-systemd-compat",
+       "power-reconciler-systemd-compat-v1"]
+    ] and
+    all(.operations[]; .phase == $phase)
+  ' "$transaction/transaction.json" >/dev/null \
+    || die "candidate catch-up transaction is not $phase"
+}
+
+verify_legacy_power_rollback_cycle() {
+  local candidate_target previous_target actual_start
+  [ "$MODE" = direct ] || return 0
+  candidate_target="$(operator_env readlink "$OPERATOR_RUNTIME/current")"
+  previous_target="$(operator_env readlink "$OPERATOR_RUNTIME/previous")"
+  assert_candidate_power_transaction committed
+
+  info "rolling the layout-1 catch-up back to published $OLD_VERSION"
+  operator_yard update --rollback --yes
+  [ "$(operator_yard --version)" = "yard $OLD_VERSION" ] \
+    || die 'ordinary catch-up rollback did not restore the published runtime'
+  assert_hotfix_runtime_links "$previous_target" "$candidate_target"
+  if ! operator_env jq -e --arg release "$previous_target" '
+    .layout == 1 and (.applied // []) == [] and .currentRelease == $release
+  ' "$OPERATOR_HOME/.config/subyard/migrations/state.json" >/dev/null; then
+    operator_env jq -c '{layout, applied, currentRelease}' \
+      "$OPERATOR_HOME/.config/subyard/migrations/state.json" >&2 || true
+    die 'ordinary catch-up rollback did not restore layout 1'
+  fi
+  assert_candidate_power_transaction rolled-back
+  assert_power_runtime_matches_current_release
+  operator_env test -f \
+    "$OPERATOR_HOME/.config/subyard/yards/e2e-yard/config.env" \
+    && operator_env test ! -e \
+      "$OPERATOR_HOME/.config/subyard/yards/test-yard" \
+    && host_incus project show "$LEGACY_PROJECT" >/dev/null \
+    && ! host_incus project show "$CURRENT_PROJECT" >/dev/null 2>&1 \
+    || die 'ordinary catch-up rollback did not restore the legacy owner'
+  ! host_incus config device get "$CONSUMER_INSTANCE" subyard-e2e-routes type \
+    --project "$CONSUMER_PROJECT" >/dev/null 2>&1 \
+    || die 'ordinary catch-up rollback retained the canonical route mount'
+  actual_start="$(host_incus exec "$CONSUMER_INSTANCE" --project "$CONSUMER_PROJECT" -- \
+    awk '{print $22}' /proc/1/stat)"
+  [ "$actual_start" = "$(cat "$STATE_ROOT/consumer-starttime")" ] \
+    || die 'ordinary catch-up rollback restarted the existing consumer'
+  operator_yard -Y e2e-yard status >/dev/null
+  operator_yard -Y e2e-yard check
+  [ "$(host_incus config get "$LEGACY_INSTANCE" user.subyard.desired_power \
+    --project "$LEGACY_PROJECT")" = running ] \
+    || die 'ordinary catch-up rollback did not restore legacy desired power'
+
+  info 'rolling the same candidate forward after layout-1 rollback'
+  upgrade_candidate
+  [ "$(operator_env readlink "$OPERATOR_RUNTIME/current")" = "$candidate_target" ] \
+    || die 'catch-up roll-forward selected a different candidate runtime'
+  assert_hotfix_runtime_links "$candidate_target" "$previous_target"
+  assert_candidate_power_transaction committed
+  verify_control_plane
+  assert_power_runtime_matches_current_release
 }
 
 verify_data_plane() {
   local bundle="$STATE_ROOT/public-worktree.tar.gz"
   local guest_bundle=/tmp/subyard-release-catchup.tar.gz
-  local guest_source=/tmp/subyard-release-catchup-src
+  local guest_project="/srv/workspaces/Subyard-release-catchup-${RUN_ID}-vm${VM:-unknown}"
+  local guest_source="$guest_project/src"
+  local guest_marker="$guest_project/.subyard-release-catchup-owner"
+  local guest_marker_value="$MARKER run=$RUN_ID"
   info "running standard broker acquire from the pre-existing consumer"
   host_incus exec "$CONSUMER_INSTANCE" --project "$CONSUMER_PROJECT" -- \
     sh -c 'id dev >/dev/null 2>&1 || useradd --create-home --shell /bin/bash dev'
@@ -1135,19 +1248,36 @@ verify_data_plane() {
   host_incus file push "$bundle" "$CONSUMER_INSTANCE$guest_bundle" \
     --project "$CONSUMER_PROJECT" >/dev/null
   host_incus exec "$CONSUMER_INSTANCE" --project "$CONSUMER_PROJECT" -- \
-    install -d -m 0755 "$guest_source"
+    sh -c '
+      test ! -e "$1" && test ! -L "$1" || exit 1
+      install -d -m 0755 "$2"
+      printf "%s\n" "$3" > "$4"
+      chmod 0444 "$4"
+    ' _ "$guest_project" "$guest_source" "$guest_marker_value" "$guest_marker"
   host_incus exec "$CONSUMER_INSTANCE" --project "$CONSUMER_PROJECT" -- \
     tar -xzf "$guest_bundle" -C "$guest_source"
   host_incus exec "$CONSUMER_INSTANCE" --project "$CONSUMER_PROJECT" -- \
     find "$guest_bundle" -delete
   host_incus exec "$CONSUMER_INSTANCE" --project "$CONSUMER_PROJECT" -- \
-    chown -R dev:dev "$guest_source"
+    sh -c '
+      test -d "$1" && test ! -L "$1" \
+        && test -f "$2" && test ! -L "$2" \
+        && test "$(cat "$2")" = "$3"
+    ' _ "$guest_project" "$guest_marker" "$guest_marker_value"
+  host_incus exec "$CONSUMER_INSTANCE" --project "$CONSUMER_PROJECT" -- \
+    find "$guest_source" -xdev -exec chown -h dev:dev '{}' +
   host_incus exec "$CONSUMER_INSTANCE" --project "$CONSUMER_PROJECT" -- \
     runuser -u dev -- env \
       HOME=/home/dev USER=dev LOGNAME=dev SUBYARD_E2E_CONSUMER_FIXTURE=1 \
       bash "$guest_source/dev/e2e/release-migration-consumer.sh"
   host_incus exec "$CONSUMER_INSTANCE" --project "$CONSUMER_PROJECT" -- \
-    find "$guest_source" -depth -delete
+    sh -c '
+      test -d "$1" && test ! -L "$1" \
+        && test -f "$2" && test ! -L "$2" \
+        && test "$(cat "$2")" = "$3"
+    ' _ "$guest_project" "$guest_marker" "$guest_marker_value"
+  host_incus exec "$CONSUMER_INSTANCE" --project "$CONSUMER_PROJECT" -- \
+    find "$guest_project" -xdev -depth -delete
   operator_test_vms_status \
     | jq -e '.pool.slots | all(.state == "available")' >/dev/null
   host_incus exec "$CURRENT_INSTANCE" --project "$CURRENT_PROJECT" -- \
@@ -1164,6 +1294,8 @@ prepare_operator
 prepare_candidate
 install_old_runtime
 prepare_consumer
+seal_state_root
+
 if [ "$MODE" = hotfix ]; then
   prepare_hotfix_current_owner
   seed_hotfix_static_key
@@ -1203,7 +1335,8 @@ if [ "$MODE" = hotfix-legacy ]; then
   operator_yard update --version "$MISSED_VERSION" --yes
   [ "$(operator_yard --version)" = "yard $MISSED_VERSION" ] \
     || die "published $MISSED_VERSION runtime is not active"
-  [ -f "$OPERATOR_HOME/.config/subyard/yards/e2e-yard/config.env" ] \
+  operator_env test -f \
+    "$OPERATOR_HOME/.config/subyard/yards/e2e-yard/config.env" \
     || die "published $MISSED_VERSION unexpectedly migrated the legacy registration"
   host_incus project show "$LEGACY_PROJECT" >/dev/null \
     || die "published $MISSED_VERSION unexpectedly migrated the legacy project"
@@ -1239,5 +1372,6 @@ prepare_legacy_owner
 upgrade_through_missed_release
 upgrade_candidate
 verify_control_plane
+verify_legacy_power_rollback_cycle
 verify_data_plane
 printf 'ok: published %s %s lane converged through the candidate\n' "$OLD_VERSION" "$MODE"

@@ -210,6 +210,8 @@ func Commit(ctx context.Context, options Options, before State) error {
 	recover := func(cause error) error {
 		return recoverLegacy(
 			runYard,
+			runYard,
+			nil,
 			prepareProject,
 			oldRegistration,
 			currentRegistration,
@@ -332,10 +334,42 @@ func VerifyRollback(options Options, before State) error {
 	return nil
 }
 
-// Rollback restores the legacy registration when this operation migrated it.
+// Rollback restores the legacy registration with the same runtime that removes
+// the temporary canonical owner.
 func Rollback(ctx context.Context, options Options, before State) error {
+	return RollbackWithLegacyRuntime(ctx, options, options, before)
+}
+
+// RollbackWithLegacyRuntime lets the active migration runtime remove the
+// temporary canonical owner while the retained source runtime recreates and
+// validates the legacy owner it understands.
+func RollbackWithLegacyRuntime(
+	ctx context.Context,
+	options Options,
+	legacyOptions Options,
+	before State,
+) error {
+	return RollbackWithLegacyRuntimeAndPower(ctx, options, legacyOptions, before, "")
+}
+
+// RollbackWithLegacyRuntimeAndPower also restores the legacy broker's durable
+// power intent after the retained runtime recreates its owner. This keeps a
+// resumed layout-1 migration faithful to the original broker state.
+func RollbackWithLegacyRuntimeAndPower(
+	ctx context.Context,
+	options Options,
+	legacyOptions Options,
+	before State,
+	desiredPower string,
+) error {
 	if err := validateOptions(&options); err != nil {
 		return err
+	}
+	if err := validateOptions(&legacyOptions); err != nil {
+		return err
+	}
+	if desiredPower != "" && desiredPower != "running" && desiredPower != "stopped" {
+		return fmt.Errorf("invalid legacy desired power %q", desiredPower)
 	}
 	if before == StateAbsent || before == StateCurrent {
 		return nil
@@ -351,6 +385,28 @@ func Rollback(ctx context.Context, options Options, before State) error {
 	runYard := func(yard string, arguments ...string) error {
 		return run(ctx, options, yard, nil, arguments...)
 	}
+	runLegacyYard := func(yard string, arguments ...string) error {
+		return run(ctx, legacyOptions, yard, nil, arguments...)
+	}
+	restoreLegacyPower := func() error {
+		if desiredPower == "" {
+			return nil
+		}
+		if _, err := runIncus(
+			ctx,
+			options,
+			"config",
+			"set",
+			"yard-e2e-yard",
+			"user.subyard.desired_power",
+			desiredPower,
+			"--project",
+			"subyard-e2e-yard",
+		); err != nil {
+			return fmt.Errorf("restore legacy test VM broker desired power: %w", err)
+		}
+		return nil
+	}
 	oldRegistration, currentRegistration := registrationPaths(options, shape)
 	if observed.legacy && !observed.current {
 		if !equivalentLegacyState(observed.legacyState, before) ||
@@ -360,10 +416,7 @@ func Rollback(ctx context.Context, options Options, before State) error {
 		if adoptCurrent {
 			return nil
 		}
-		if err := runYard(LegacyYard, "init", "--yes"); err != nil {
-			return fmt.Errorf("recreate legacy test yard: %w", err)
-		}
-		return runYard(LegacyYard, "check")
+		return finishLegacyRollback(runLegacyYard, restoreLegacyPower)
 	}
 	if !observed.current {
 		return errors.New("cannot roll back test-yard migration without a current registration")
@@ -388,6 +441,8 @@ func Rollback(ctx context.Context, options Options, before State) error {
 	}
 	return recoverLegacy(
 		runYard,
+		runLegacyYard,
+		restoreLegacyPower,
 		prepareProject,
 		oldRegistration,
 		currentRegistration,
@@ -571,11 +626,7 @@ func run(
 ) error {
 	commandArguments := append([]string{"-Y", yard}, arguments...)
 	command := exec.CommandContext(ctx, options.Executable, commandArguments...)
-	command.Env = withEnvironment(
-		options.Environment,
-		"SUBYARD_INTERNAL_MIGRATION_CHILD",
-		"1",
-	)
+	command.Env = migrationChildEnvironment(options.Environment)
 	command.Stdin = strings.NewReader("")
 	if stdout == nil {
 		stdout = options.Stdout
@@ -594,6 +645,32 @@ func withEnvironment(environment []string, name, value string) []string {
 		result = append(result, assignment)
 	}
 	return append(result, prefix+value)
+}
+
+func withoutEnvironment(environment []string, name string) []string {
+	result := make([]string, 0, len(environment))
+	prefix := name + "="
+	for _, assignment := range environment {
+		if strings.HasPrefix(assignment, prefix) {
+			continue
+		}
+		result = append(result, assignment)
+	}
+	return result
+}
+
+func selectedYardEnvironment(environment []string) []string {
+	result := withoutEnvironment(environment, "SUBYARD_CONFIG_LOADED")
+	result = withEnvironment(result, "SUBYARD_ENGINE_CONTEXT", "1")
+	return withEnvironment(result, "SUBYARD_ENGINE_CONTEXT_SCHEMA", "1")
+}
+
+func migrationChildEnvironment(environment []string) []string {
+	return withEnvironment(
+		selectedYardEnvironment(environment),
+		"SUBYARD_INTERNAL_MIGRATION_CHILD",
+		"1",
+	)
 }
 
 type projectSet struct {
@@ -1004,11 +1081,7 @@ func runCaptured(
 ) ([]byte, error) {
 	commandArguments := append([]string{"-Y", yard}, arguments...)
 	command := exec.CommandContext(ctx, options.Executable, commandArguments...)
-	command.Env = withEnvironment(
-		options.Environment,
-		"SUBYARD_INTERNAL_MIGRATION_CHILD",
-		"1",
-	)
+	command.Env = migrationChildEnvironment(options.Environment)
 	command.Stdin = strings.NewReader("")
 	var output bytes.Buffer
 	command.Stdout, command.Stderr = &output, &output
@@ -1157,6 +1230,8 @@ func finishCurrent(
 
 func recoverLegacy(
 	run func(string, ...string) error,
+	runLegacy func(string, ...string) error,
+	restoreLegacyPower func() error,
 	prepareProject func(string) error,
 	oldRegistration, newRegistration string,
 	registrationCopied, preserveCurrent bool,
@@ -1200,14 +1275,32 @@ func recoverLegacy(
 		if err := prepareProject(LegacyYard); err != nil {
 			recovery = append(recovery, err)
 		}
-		if err := run(LegacyYard, "init", "--yes"); err != nil {
-			recovery = append(recovery, fmt.Errorf("recreate legacy test yard: %w", err))
+		if err := finishLegacyRollback(runLegacy, restoreLegacyPower); err != nil {
+			recovery = append(recovery, err)
 		}
 	}
 	if len(recovery) > 0 {
 		return errors.Join(cause, fmt.Errorf("test-yard migration recovery failed: %w", errors.Join(recovery...)))
 	}
 	return cause
+}
+
+func finishLegacyRollback(
+	runLegacy func(string, ...string) error,
+	restoreLegacyPower func() error,
+) error {
+	if err := runLegacy(LegacyYard, "init", "--yes"); err != nil {
+		return fmt.Errorf("recreate legacy test yard: %w", err)
+	}
+	if restoreLegacyPower != nil {
+		if err := restoreLegacyPower(); err != nil {
+			return err
+		}
+	}
+	if err := runLegacy(LegacyYard, "check"); err != nil {
+		return fmt.Errorf("validate legacy test yard: %w", err)
+	}
+	return nil
 }
 
 func restorePreparedAuxiliaryState(

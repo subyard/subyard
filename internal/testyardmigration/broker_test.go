@@ -165,6 +165,67 @@ func TestBrokerRuntimeOperationRetainsDesiredRunningAcrossOwnerMigration(t *test
 	}
 }
 
+func TestBrokerRuntimeOperationReloadsTheSelectedYardContext(t *testing.T) {
+	options, _ := brokerRuntimeFixtureForYard(
+		t,
+		CurrentYard,
+		"RUNNING",
+		"active",
+		"loaded",
+	)
+	options.Environment = withEnvironment(
+		options.Environment,
+		"SUBYARD_CONFIG_LOADED",
+		"1",
+	)
+	options.Environment = withEnvironment(
+		options.Environment,
+		"SUBYARD_ENGINE_CONTEXT",
+		"1",
+	)
+	options.Environment = withEnvironment(
+		options.Environment,
+		"INCUS_PROJECT",
+		"subyard-"+LegacyYard,
+	)
+	options.Environment = withEnvironment(
+		options.Environment,
+		"YARD_INSTANCE_NAME",
+		"yard-"+LegacyYard,
+	)
+
+	before, err := PrepareBrokerRuntime(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before != BrokerRuntimeActive {
+		t.Fatalf("reloaded broker state = %q, want %q", before, BrokerRuntimeActive)
+	}
+}
+
+func TestBrokerRuntimeOperationRetainsDesiredRunningWhenServiceStops(t *testing.T) {
+	options, _ := brokerRuntimeFixtureForYardWithDesiredPower(
+		t,
+		CurrentYard,
+		"RUNNING",
+		"inactive",
+		"loaded",
+		"running",
+	)
+
+	before, err := PrepareBrokerRuntime(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before != BrokerRuntimeActive {
+		t.Fatalf(
+			"desired-running broker state = %q, want %q",
+			before,
+			BrokerRuntimeActive,
+		)
+	}
+}
+
 func TestBrokerRuntimeOperationRejectsUnsupportedDesiredPower(t *testing.T) {
 	options, _ := brokerRuntimeFixtureForYardWithDesiredPower(
 		t,

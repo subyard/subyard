@@ -155,6 +155,10 @@ export P0_FAKE_INCUS_STATE="$TMP/incus-state"
 export P0_FAKE_INCUS_LOG="$TMP/incus-log"
 export P0_FAKE_INCUS_PROJECT="$TMP/incus-project"
 export P0_FAKE_INCUS_MARKER=
+export P0_FAKE_INCUS_PROJECT_NAME=subyard-e2e-yard
+export P0_FAKE_INCUS_INSTANCE_NAME=yard-e2e-yard
+export P0_FAKE_INCUS_VOLUME_NAME=yard-srv-e2e-yard
+export P0_FAKE_INCUS_TEST_VMS_REVISION=1:fixture:test-yard
 export P0_FAKE_INCUS_INSTANCES=yard-e2e-yard
 export P0_FAKE_INCUS_VOLUMES=$'container,yard-e2e-yard\ncustom,yard-srv-e2e-yard'
 printf '%s\n' \
@@ -170,26 +174,39 @@ printf '%s\n' \
   '    printf "%s\\n" "$*" >> "$P0_FAKE_INCUS_LOG"' \
   '    find "$P0_FAKE_INCUS_STATE" -delete' \
   '    ;;' \
-  '  "project show subyard-e2e-yard") [ -e "$P0_FAKE_INCUS_PROJECT" ] ;;' \
-  '  "project show subyard-test-yard") exit 1 ;;' \
-  '  "project get subyard-e2e-yard user.subyard.p0-image-cache")' \
+  '  "project show subyard-e2e-yard")' \
+  '    [ "$P0_FAKE_INCUS_PROJECT_NAME" = subyard-e2e-yard ] && [ -e "$P0_FAKE_INCUS_PROJECT" ]' \
+  '    ;;' \
+  '  "project show subyard-test-yard")' \
+  '    [ "$P0_FAKE_INCUS_PROJECT_NAME" = subyard-test-yard ] && [ -e "$P0_FAKE_INCUS_PROJECT" ]' \
+  '    ;;' \
+  '  "project get subyard-e2e-yard user.subyard.p0-image-cache"|"project get subyard-test-yard user.subyard.p0-image-cache")' \
   '    printf "%s\\n" "$P0_FAKE_INCUS_MARKER"' \
   '    ;;' \
-  '  "list --project subyard-e2e-yard --format csv -c n")' \
+  '  "project get subyard-e2e-yard restricted"|"project get subyard-test-yard restricted") printf "true\\n" ;;' \
+  '  "list --project subyard-e2e-yard --format csv -c n"|"list --project subyard-test-yard --format csv -c n")' \
   '    printf "%s\\n" "$P0_FAKE_INCUS_INSTANCES"' \
   '    ;;' \
-  '  "storage volume list default --project subyard-e2e-yard --format csv -c t,n")' \
+  '  "storage volume list default --project subyard-e2e-yard --format csv -c t,n"|"storage volume list default --project subyard-test-yard --format csv -c t,n")' \
   '    printf "%s\\n" "$P0_FAKE_INCUS_VOLUMES"' \
   '    ;;' \
   '  "config show yard-e2e-yard --project subyard-e2e-yard") exit 0 ;;' \
-  '  "delete yard-e2e-yard --project subyard-e2e-yard --force")' \
+  '  "config show yard-test-yard --project subyard-test-yard") exit 0 ;;' \
+  '  "config get yard-test-yard user.subyard.managed --project subyard-test-yard") printf "true\\n" ;;' \
+  '  "config get yard-test-yard user.subyard.name --project subyard-test-yard") printf "test-yard\\n" ;;' \
+  '  "config get yard-test-yard user.subyard.initialized --project subyard-test-yard") printf "true\\n" ;;' \
+  '  "config get yard-test-yard user.subyard.test_vms_revision --project subyard-test-yard")' \
+  '    printf "%s\\n" "$P0_FAKE_INCUS_TEST_VMS_REVISION"' \
+  '    ;;' \
+  '  "delete yard-e2e-yard --project subyard-e2e-yard --force"|"delete yard-test-yard --project subyard-test-yard --force")' \
   '    printf "%s\\n" "$*" >> "$P0_FAKE_INCUS_LOG"' \
   '    ;;' \
   '  "storage volume show default yard-srv-e2e-yard --project subyard-e2e-yard") exit 0 ;;' \
-  '  "storage volume delete default yard-srv-e2e-yard --project subyard-e2e-yard")' \
+  '  "storage volume show default yard-srv-test-yard --project subyard-test-yard") exit 0 ;;' \
+  '  "storage volume delete default yard-srv-e2e-yard --project subyard-e2e-yard"|"storage volume delete default yard-srv-test-yard --project subyard-test-yard")' \
   '    printf "%s\\n" "$*" >> "$P0_FAKE_INCUS_LOG"' \
   '    ;;' \
-  '  "project delete subyard-e2e-yard")' \
+  '  "project delete subyard-e2e-yard"|"project delete subyard-test-yard")' \
   '    printf "%s\\n" "$*" >> "$P0_FAKE_INCUS_LOG"' \
   '    source="$(source_path)"' \
   '    printf "config:\\n  source: %s\\nused_by:\\n- /1.0/profiles/default\\nstatus: Unavailable\\n" "$source" > "$P0_FAKE_INCUS_STATE"' \
@@ -230,6 +247,53 @@ printf '%s\n' subyard-p0-121 > "$stale_pool_root/.subyard-p0-marker"
 run_recovery_preflight 125 "$stale_pool_root/owner/subyard/incus/storage"
 [ ! -e "$stale_pool_root" ] || fail "recovered stale P0 root survived preflight"
 
+current_missing_pool_root="$HOME/.cache/subyard-p0-137"
+install -d -m 0700 "$current_missing_pool_root"
+printf '%s\n' subyard-p0-137 > "$current_missing_pool_root/.subyard-p0-marker"
+printf 'config:\n  source: %s\nstatus: Unavailable\nused_by: []\n' \
+  "$current_missing_pool_root/owner/subyard/incus/storage" > "$P0_FAKE_INCUS_STATE"
+: > "$P0_FAKE_INCUS_LOG"
+set +e
+SUBYARD_E2E_VM=1 \
+P0_E2E_MIN_ROOT_AVAILABLE_BYTES=1 \
+P0_E2E_MIN_AVAILABLE_INODES=1 \
+P0_E2E_MIN_TMP_SIZE_BYTES=1 \
+P0_E2E_MIN_TMP_AVAILABLE_BYTES=1 \
+  bash "$ROOT/dev/e2e/p0-guest.sh" capacity-preflight 137 >/dev/null 2>&1
+current_missing_pool_rc=$?
+set -e
+[ "$current_missing_pool_rc" -ne 0 ] \
+  || fail "current-token missing pool source was recovered as stale"
+[ ! -s "$P0_FAKE_INCUS_LOG" ] \
+  || fail "current-token missing pool source caused cleanup mutations"
+[ -e "$P0_FAKE_INCUS_STATE" ] \
+  || fail "current-token missing pool state was deleted"
+find "$current_missing_pool_root" "$P0_FAKE_INCUS_STATE" -depth -delete
+
+current_existing_pool_root="$HOME/.cache/subyard-p0-138"
+current_existing_pool_source="$current_existing_pool_root/owner/subyard/incus/storage"
+install -d -m 0700 "$current_existing_pool_source"
+printf '%s\n' subyard-p0-138 > "$current_existing_pool_root/.subyard-p0-marker"
+printf 'config:\n  source: %s\nstatus: Created\nused_by: []\n' \
+  "$current_existing_pool_source" > "$P0_FAKE_INCUS_STATE"
+: > "$P0_FAKE_INCUS_LOG"
+set +e
+SUBYARD_E2E_VM=1 \
+P0_E2E_MIN_ROOT_AVAILABLE_BYTES=1 \
+P0_E2E_MIN_AVAILABLE_INODES=1 \
+P0_E2E_MIN_TMP_SIZE_BYTES=1 \
+P0_E2E_MIN_TMP_AVAILABLE_BYTES=1 \
+  bash "$ROOT/dev/e2e/p0-guest.sh" capacity-preflight 138 >/dev/null 2>&1
+current_existing_pool_rc=$?
+set -e
+[ "$current_existing_pool_rc" -ne 0 ] \
+  || fail "current-token existing pool source passed a dirty preflight"
+[ ! -s "$P0_FAKE_INCUS_LOG" ] \
+  || fail "current-token existing pool source caused cleanup mutations"
+[ -e "$P0_FAKE_INCUS_STATE" ] \
+  || fail "current-token existing pool state was deleted"
+find "$current_existing_pool_root" "$P0_FAKE_INCUS_STATE" -depth -delete
+
 existing_source_root="/var/tmp/subyard-nested-teardown.existing-$$"
 EXTERNAL_TEST_ROOT="$existing_source_root"
 existing_source="$existing_source_root/storage"
@@ -255,10 +319,10 @@ write_active_pool_state() {
   'config:' \
   "  source: $root/owner/subyard/incus/storage" \
   'used_by:' \
-  '- /1.0/instances/yard-e2e-yard?project=subyard-e2e-yard' \
+  "- /1.0/instances/$P0_FAKE_INCUS_INSTANCE_NAME?project=$P0_FAKE_INCUS_PROJECT_NAME" \
   '- /1.0/profiles/default' \
-  '- /1.0/profiles/default?project=subyard-e2e-yard' \
-  '- /1.0/storage-pools/default/volumes/custom/yard-srv-e2e-yard?project=subyard-e2e-yard' \
+  "- /1.0/profiles/default?project=$P0_FAKE_INCUS_PROJECT_NAME" \
+  "- /1.0/storage-pools/default/volumes/custom/$P0_FAKE_INCUS_VOLUME_NAME?project=$P0_FAKE_INCUS_PROJECT_NAME" \
     "status: $status" > "$P0_FAKE_INCUS_STATE"
 }
 
@@ -316,6 +380,124 @@ export P0_FAKE_INCUS_VOLUMES=$'container,yard-e2e-yard\ncustom,yard-srv-e2e-yard
 assert_unsafe_active_residue 133 "$unexpected_volume_root" 'pool with an unexpected storage volume'
 export P0_FAKE_INCUS_VOLUMES=$'container,yard-e2e-yard\ncustom,yard-srv-e2e-yard'
 find "$unexpected_volume_root" -depth -delete
+
+existing_stale_pool_root="$HOME/.cache/subyard-p0-114"
+install -d -m 0700 "$existing_stale_pool_root/owner/subyard/incus/storage"
+printf '%s\n' subyard-p0-114 > "$existing_stale_pool_root/.subyard-p0-marker"
+export P0_FAKE_INCUS_MARKER=subyard-p0-114
+: > "$P0_FAKE_INCUS_PROJECT"
+write_active_pool_state "$existing_stale_pool_root" Created
+: > "$P0_FAKE_INCUS_LOG"
+if ! SUBYARD_E2E_VM=1 \
+  P0_E2E_MIN_ROOT_AVAILABLE_BYTES=1 \
+  P0_E2E_MIN_AVAILABLE_INODES=1 \
+  P0_E2E_MIN_TMP_SIZE_BYTES=1 \
+  P0_E2E_MIN_TMP_AVAILABLE_BYTES=1 \
+    bash "$ROOT/dev/e2e/p0-guest.sh" capacity-preflight 136 >/dev/null; then
+  fail "marker-owned stale P0 pool with an existing source did not converge"
+fi
+grep -Fxq 'storage delete default --project default' "$P0_FAKE_INCUS_LOG" \
+  || fail "marker-owned stale P0 pool with an existing source was not deleted"
+grep -Fxq 'delete yard-e2e-yard --project subyard-e2e-yard --force' \
+    "$P0_FAKE_INCUS_LOG" \
+  || fail "marker-owned stale P0 instance with an existing source was not deleted"
+[ ! -e "$existing_stale_pool_root" ] \
+  || fail "marker-owned stale P0 source root survived recovery"
+find "$HOME/.cache/subyard-p0-136" -depth -delete
+
+markerless_migrated_root="$HOME/.cache/subyard-p0-113"
+install -d -m 0700 "$markerless_migrated_root/owner/subyard/incus/storage"
+install -d -m 0700 "$markerless_migrated_root/owner/config/yards"
+printf '%s\n' subyard-p0-113 > "$markerless_migrated_root/.subyard-p0-marker"
+printf '# %s\nYARD_TEMPLATE=test-vms\n' subyard-p0-113 \
+  > "$markerless_migrated_root/owner/config/yards/test-yard.env"
+export P0_FAKE_INCUS_PROJECT_NAME=subyard-test-yard
+export P0_FAKE_INCUS_INSTANCE_NAME=yard-test-yard
+export P0_FAKE_INCUS_VOLUME_NAME=yard-srv-test-yard
+export P0_FAKE_INCUS_INSTANCES=yard-test-yard
+export P0_FAKE_INCUS_VOLUMES=$'container,yard-test-yard\ncustom,yard-srv-test-yard'
+export P0_FAKE_INCUS_MARKER=
+: > "$P0_FAKE_INCUS_PROJECT"
+write_active_pool_state "$markerless_migrated_root" Created
+: > "$P0_FAKE_INCUS_LOG"
+if ! SUBYARD_E2E_VM=1 \
+  P0_E2E_MIN_ROOT_AVAILABLE_BYTES=1 \
+  P0_E2E_MIN_AVAILABLE_INODES=1 \
+  P0_E2E_MIN_TMP_SIZE_BYTES=1 \
+  P0_E2E_MIN_TMP_AVAILABLE_BYTES=1 \
+    bash "$ROOT/dev/e2e/p0-guest.sh" capacity-preflight 139 >/dev/null; then
+  fail "exact markerless migrated P0 project did not converge"
+fi
+grep -Fxq 'delete yard-test-yard --project subyard-test-yard --force' \
+    "$P0_FAKE_INCUS_LOG" \
+  && grep -Fxq 'storage delete default --project default' "$P0_FAKE_INCUS_LOG" \
+  || fail "exact markerless migrated P0 resources were not deleted"
+[ ! -e "$markerless_migrated_root" ] \
+  || fail "markerless migrated P0 source root survived recovery"
+find "$HOME/.cache/subyard-p0-139" -depth -delete
+
+unbound_markerless_root="$HOME/.cache/subyard-p0-112"
+install -d -m 0700 "$unbound_markerless_root/owner/subyard/incus/storage"
+install -d -m 0700 "$unbound_markerless_root/owner/config/yards"
+printf '%s\n' subyard-p0-112 > "$unbound_markerless_root/.subyard-p0-marker"
+printf '# %s\nYARD_TEMPLATE=test-vms\n' subyard-p0-999 \
+  > "$unbound_markerless_root/owner/config/yards/test-yard.env"
+: > "$P0_FAKE_INCUS_PROJECT"
+write_active_pool_state "$unbound_markerless_root" Created
+: > "$P0_FAKE_INCUS_LOG"
+if SUBYARD_E2E_VM=1 \
+  P0_E2E_MIN_ROOT_AVAILABLE_BYTES=1 \
+  P0_E2E_MIN_AVAILABLE_INODES=1 \
+  P0_E2E_MIN_TMP_SIZE_BYTES=1 \
+  P0_E2E_MIN_TMP_AVAILABLE_BYTES=1 \
+    bash "$ROOT/dev/e2e/p0-guest.sh" capacity-preflight 140 >/dev/null 2>&1; then
+  fail "markerless project with a foreign migration marker was recovered"
+fi
+[ ! -s "$P0_FAKE_INCUS_LOG" ] \
+  || fail "unbound markerless migrated project caused cleanup mutations"
+[ -e "$P0_FAKE_INCUS_PROJECT" ] && [ -e "$P0_FAKE_INCUS_STATE" ] \
+  || fail "unbound markerless migrated project state was deleted"
+for unbound_markerless_path in \
+  "$unbound_markerless_root" "$HOME/.cache/subyard-p0-140" \
+  "$P0_FAKE_INCUS_PROJECT" "$P0_FAKE_INCUS_STATE"; do
+  [ ! -e "$unbound_markerless_path" ] \
+    || find "$unbound_markerless_path" -depth -delete
+done
+
+unsafe_markerless_root="$HOME/.cache/subyard-p0-111"
+install -d -m 0700 "$unsafe_markerless_root/owner/subyard/incus/storage"
+install -d -m 0700 "$unsafe_markerless_root/owner/config/yards"
+printf '%s\n' subyard-p0-111 > "$unsafe_markerless_root/.subyard-p0-marker"
+printf '# %s\nYARD_TEMPLATE=test-vms\n' subyard-p0-111 \
+  > "$unsafe_markerless_root/owner/config/yards/test-yard.env"
+export P0_FAKE_INCUS_TEST_VMS_REVISION=foreign-revision
+: > "$P0_FAKE_INCUS_PROJECT"
+write_active_pool_state "$unsafe_markerless_root" Created
+: > "$P0_FAKE_INCUS_LOG"
+if SUBYARD_E2E_VM=1 \
+  P0_E2E_MIN_ROOT_AVAILABLE_BYTES=1 \
+  P0_E2E_MIN_AVAILABLE_INODES=1 \
+  P0_E2E_MIN_TMP_SIZE_BYTES=1 \
+  P0_E2E_MIN_TMP_AVAILABLE_BYTES=1 \
+    bash "$ROOT/dev/e2e/p0-guest.sh" capacity-preflight 141 >/dev/null 2>&1; then
+  fail "markerless project with a foreign broker revision was recovered"
+fi
+[ ! -s "$P0_FAKE_INCUS_LOG" ] \
+  || fail "unsafe markerless migrated project caused cleanup mutations"
+[ -e "$P0_FAKE_INCUS_PROJECT" ] && [ -e "$P0_FAKE_INCUS_STATE" ] \
+  || fail "unsafe markerless migrated project state was deleted"
+for unsafe_markerless_path in \
+  "$unsafe_markerless_root" "$HOME/.cache/subyard-p0-141" \
+  "$P0_FAKE_INCUS_PROJECT" "$P0_FAKE_INCUS_STATE"; do
+  [ ! -e "$unsafe_markerless_path" ] \
+    || find "$unsafe_markerless_path" -depth -delete
+done
+export P0_FAKE_INCUS_TEST_VMS_REVISION=1:fixture:test-yard
+export P0_FAKE_INCUS_PROJECT_NAME=subyard-e2e-yard
+export P0_FAKE_INCUS_INSTANCE_NAME=yard-e2e-yard
+export P0_FAKE_INCUS_VOLUME_NAME=yard-srv-e2e-yard
+export P0_FAKE_INCUS_INSTANCES=yard-e2e-yard
+export P0_FAKE_INCUS_VOLUMES=$'container,yard-e2e-yard\ncustom,yard-srv-e2e-yard'
 
 active_stale_root="$HOME/.cache/subyard-p0-120"
 install -d -m 0700 "$active_stale_root"

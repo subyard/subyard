@@ -126,11 +126,14 @@ a fresh-install release result.
 | `./tests/run.sh` | Go toolchain; bounded by CI | temporary host-free roots and `.build/yard` | required host-free gate |
 | `dev/process-coverage.sh` | Go toolchain; selected host-free process contracts | `.build/coverage` and test-owned temporary roots | diagnostic coverage gate |
 | `boundary` | one broker lease; SSH connect deadlines | read-only facade, routes and negative probes | required inside continuous P0 |
+| `transport` | both allocated VMs; bounded SSH disconnect probe | one marker-owned remote sleep and temporary controller log | required inside continuous P0 |
+| `nested-teardown` | VM2, KVM and nested Incus; bounded install, boot and cleanup waits | marker-owned outer VM, nested yard and data-boundary fixtures | required inside continuous P0 |
 | `dependencies` | retained guest baseline; 20-minute cold Go download deadline | marker-owned cold caches only | periodic targeted bootstrap diagnostic |
 | `real-incus` | VM1, KVM, persistent Incus pool; 15-minute mutation deadlines | marked project, container, VM and image aliases | required through `release` in continuous P0 |
 | `profile-resource` | VM1 and current candidate | temporary dependency-free resource/state | required through `release` in continuous P0 |
 | `release` | both VMs, capacity preflight; bounded nested install/boot deadlines | fresh candidate yards, current and legacy convergence | targeted diagnostic; required inside continuous P0 |
-| `source-upgrade` | VM1 and two bounded reboots | marked source-install/migration fixture | targeted diagnostic; required inside continuous P0 |
+| `source-upgrade` | VM1 when targeted; VM2 worker in full; two bounded reboots | marked source-install/migration fixture | targeted diagnostic; required inside continuous P0 |
+| `power-systemd` | VM1 when targeted; VM2 worker in full; real Incus, Ubuntu 24.04/systemd 255; 300-second image launch and bounded TERM-to-KILL Incus commands | marker-owned parser project plus snapshotted/restored host power runtime | targeted diagnostic; required inside continuous P0 |
 | `reboot-verify` | held VM1 lease; two 3-minute boot windows | guest reboot only | targeted transport/recovery diagnostic |
 | `peer` | both VMs and synthetic keys | marked cross-owner RPC, project and credential fixtures | targeted diagnostic; required inside continuous P0 |
 | `peer-cleanup`, `cleanup` | same retained allocation | exact marked fixtures and run worktrees | standalone idempotent cleanup/verifier |
@@ -145,7 +148,24 @@ List or run one lane:
 dev/e2e/p0-acceptance.sh --list-lanes
 dev/e2e/p0-acceptance.sh --lane peer
 SUBYARD_P0_SLOT=1 dev/e2e/p0-acceptance.sh --lane source-upgrade --resume
+SUBYARD_P0_WAIT_SECONDS=1200 dev/e2e/p0-acceptance.sh --lane power-systemd
 ```
+
+`SUBYARD_P0_WAIT_SECONDS` is a non-negative number of seconds passed to the atomic broker acquire;
+zero keeps the fail-fast default. The `power-systemd` fixture is fully ephemeral: the lane removes
+its marker-owned systemd-255 project and restores the snapshotted host unit/runtime before the phase
+is checkpointed. Its checkpoint resource inventory therefore records the fixture identity, but
+`--resume` never depends on retaining its mutable resources.
+
+The continuous gate keeps the long owner/release chain on VM1. VM2 independently runs nested
+teardown, the controller suite, a real-Incus platform check, source upgrade and power-systemd in
+that order. The two chains are joined before peer checks and cleanup. Their four logical phase
+checkpoints are committed atomically only after both chains pass. The parallel matrix has a
+210-minute kernel-monotonic work deadline by default (`SUBYARD_P0_FULL_MATRIX_TIMEOUT_SECONDS`).
+The controller reads `/proc/uptime`, so host wall-clock corrections cannot expire the matrix or its
+shutdown grace periods early. On expiry, runner children get a bounded 30-second TERM grace and
+10-second KILL grace before evidence and marker-guarded cleanup continue, leaving the remaining
+broker lease time for final checks.
 
 Each phase prints its bundle hash and duration. The runner keeps one bounded, redacted JSON evidence
 record per public run and one checkpoint per slot under its private controller state. A checkpoint

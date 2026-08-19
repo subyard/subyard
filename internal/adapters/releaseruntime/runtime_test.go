@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -77,6 +78,41 @@ func TestPrepareRollbackFailsBeforePlanningWithoutValidPreviousRuntime(t *testin
 	})
 	if err == nil || !strings.Contains(err.Error(), "previous") {
 		t.Fatalf("rollback precondition error = %v", err)
+	}
+}
+
+func TestPrepareRollbackSelfCheckIsolatesThePreviousRuntimeFromCurrentConfig(t *testing.T) {
+	root := t.TempDir()
+	runtimeRoot := filepath.Join(root, "runtime")
+	prepareRollbackRuntime(t, runtimeRoot, "current-a", "previous-b")
+	probeHome := filepath.Join(runtimeRoot, "releases", "previous-b")
+	capture := filepath.Join(root, "previous-environment")
+	probe := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "${HOME-}" "${SUBYARD_HOME-unset}" "${CODING_TOOL_INTEGRATIONS-unset}" > %q
+printf 'yard 1.2.3\n'
+`, capture)
+	if err := os.WriteFile(
+		filepath.Join(probeHome, "bin", "yard-engine"), []byte(probe), 0o700,
+	); err != nil {
+		t.Fatal(err)
+	}
+	release := New(Config{Environment: map[string]string{
+		"HOME": root, "SUBYARD_HOME": filepath.Join(root, "live-data"),
+		"CODING_TOOL_INTEGRATIONS": "none",
+	}, Stdout: &bytes.Buffer{}})
+
+	if _, err := release.Prepare(context.Background(), []string{
+		"--runtime-root", runtimeRoot, "--rollback",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	actual, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := probeHome + "\nunset\nunset\n"
+	if string(actual) != want {
+		t.Fatalf("previous runtime self-check environment = %q, want %q", actual, want)
 	}
 }
 

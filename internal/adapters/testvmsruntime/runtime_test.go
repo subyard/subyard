@@ -11,7 +11,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -99,6 +102,8 @@ func TestCloudConfigLeavesToolchainToExplicitReconciliation(t *testing.T) {
 func TestEnsureGuestToolsReconcilesZshOnRetainedVM(t *testing.T) {
 	cfg := fixtureConfig(t)
 	var checkedZsh, installedZsh, usedCurrentRevision bool
+	var installArguments []string
+	installCommands := 0
 	runner := &fakeRunner{handler: func(
 		_ string, arguments, _ []string, _ io.Reader,
 	) ([]byte, []byte, error) {
@@ -111,6 +116,8 @@ func TestEnsureGuestToolsReconcilesZshOnRetainedVM(t *testing.T) {
 				"DEPENDENCY_REVISION=subyard-test-vms-dependencies-v2")
 			return nil, nil, errors.New("retained VM is missing zsh")
 		case strings.Contains(joined, "apt-get") && strings.Contains(joined, "build-essential"):
+			installCommands++
+			installArguments = append([]string(nil), arguments...)
 			installedZsh = strings.Contains(joined, " zsh")
 			if !installedZsh {
 				return nil, nil, errors.New("toolchain install omitted zsh")
@@ -131,9 +138,69 @@ func TestEnsureGuestToolsReconcilesZshOnRetainedVM(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !checkedZsh || !installedZsh || !usedCurrentRevision {
-		t.Fatalf("zsh reconciliation is incomplete: checked=%t installed=%t current-revision=%t",
+		t.Fatalf("toolchain reconciliation is incomplete: checked-zsh=%t installed-zsh=%t current-revision=%t",
 			checkedZsh, installedZsh, usedCurrentRevision)
 	}
+	if installCommands != 1 {
+		t.Fatalf("toolchain install commands=%d, want 1", installCommands)
+	}
+	timeoutIndex := slices.Index(installArguments, "timeout")
+	if timeoutIndex < 0 || timeoutIndex+5 > len(installArguments) || !slices.Equal(
+		installArguments[timeoutIndex:timeoutIndex+5],
+		[]string{"timeout", "--signal=TERM", "--kill-after=10", "1800", "sh"},
+	) {
+		t.Fatalf("toolchain command has no hard 1800-second wrapper: %q", installArguments)
+	}
+	script := installArguments[len(installArguments)-1]
+	if strings.Count(script, "apt-get") != 2 ||
+		!strings.Contains(script, " update -qq") ||
+		!strings.Contains(script, " install -y -qq") ||
+		strings.Contains(script, "timeout ") {
+		t.Fatalf("bounded toolchain script does not contain one update+install phase: %s", script)
+	}
+}
+
+func TestGuestToolchainTimeoutKillsTermIgnoringDescendant(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	const script = `trap '' TERM
+sleep 30 &
+child=$!
+printf '%s\n' "$child" > "$PID_FILE"
+wait "$child"`
+	command := guestToolchainCommand(script, time.Second, time.Second)
+	started := time.Now()
+	_, _, err := (ProcessRunner{}).Run(
+		context.Background(), command[0], command[1:], []string{"PID_FILE=" + pidFile}, nil,
+	)
+	if err == nil {
+		t.Fatal("toolchain timeout unexpectedly accepted a TERM-ignoring descendant")
+	}
+	if elapsed := time.Since(started); elapsed > 4*time.Second {
+		t.Fatalf("toolchain timeout elapsed=%s, want at most 4s", elapsed)
+	}
+	payload, readErr := os.ReadFile(pidFile)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	pid, parseErr := strconv.Atoi(strings.TrimSpace(string(payload)))
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	for attempt := 0; attempt < 20; attempt++ {
+		if killErr := syscall.Kill(pid, 0); errors.Is(killErr, syscall.ESRCH) {
+			return
+		}
+		stat, statErr := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+		if errors.Is(statErr, os.ErrNotExist) {
+			return
+		}
+		if closingParen := bytes.LastIndex(stat, []byte(") ")); statErr == nil &&
+			closingParen >= 0 && len(stat) > closingParen+2 && stat[closingParen+2] == 'Z' {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("TERM-ignoring toolchain descendant %d survived the KILL deadline", pid)
 }
 
 func TestEnsureVMRetriesTransientRemoteImageLookup(t *testing.T) {

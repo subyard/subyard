@@ -17,6 +17,8 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 )
 
+const provisioningSafetyMargin = 30 * time.Minute
+
 const (
 	LeaseSchemaVersion            = 1
 	LeaseRecoverySchemaVersion    = 1
@@ -24,7 +26,8 @@ const (
 	LeaseAttributionSchemaV1      = 1
 	LeaseTargetStaleExitCode      = 75
 	LeaseTTL                      = 10 * time.Minute
-	ProvisioningTTL               = 30 * time.Minute
+	ProvisioningTTL               = provisionedGuestCount*guestToolchainTimeout +
+		provisioningSafetyMargin
 )
 
 const (

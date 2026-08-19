@@ -22,7 +22,13 @@ die() { printf 'nested-teardown-boundary: %s\n' "$*" >&2; exit 2; }
 for command in go incus jq sudo timeout; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
-COMMAND_TIMEOUT="${NESTED_TEARDOWN_COMMAND_TIMEOUT:-1800}"
+COMMAND_TIMEOUT="${NESTED_TEARDOWN_COMMAND_TIMEOUT:-2700}"
+COMMAND_KILL_AFTER_SECONDS="${NESTED_TEARDOWN_COMMAND_KILL_AFTER_SECONDS:-10}"
+[[ "$COMMAND_TIMEOUT" =~ ^[1-9][0-9]{0,3}$ ]] && [ "$COMMAND_TIMEOUT" -le 3600 ] \
+  || die 'nested command timeout must be an integer from 1 through 3600 seconds'
+[[ "$COMMAND_KILL_AFTER_SECONDS" =~ ^[1-9][0-9]?$ ]] \
+  && [ "$COMMAND_KILL_AFTER_SECONDS" -le 60 ] \
+  || die 'nested command kill grace must be an integer from 1 through 60 seconds'
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
   command -v apt-get >/dev/null 2>&1 || die 'qemu-system-x86_64 or apt-get is required'
   printf '  [ .. ] installing QEMU for the outer VM fixture\n'
@@ -34,8 +40,26 @@ if [ ! -x "$ROOT/.build/yard" ]; then
   "$ROOT/dev/build-engine.sh"
 fi
 
+bounded_command() {
+  local label="$1" rc
+  shift
+  if timeout --signal=TERM --kill-after="$COMMAND_KILL_AFTER_SECONDS" \
+    "$COMMAND_TIMEOUT" "$@"; then
+    return 0
+  else
+    rc=$?
+  fi
+  case "$rc" in
+    124|137)
+      printf 'nested-teardown-boundary: %s exceeded the %ss command deadline\n' \
+        "$label" "$COMMAND_TIMEOUT" >&2
+      ;;
+  esac
+  return "$rc"
+}
+
 yard() {
-  timeout --foreground "$COMMAND_TIMEOUT" "$ROOT/.build/yard" -Y "$OUTER_YARD" "$@"
+  bounded_command yard "$ROOT/.build/yard" -Y "$OUTER_YARD" "$@"
 }
 
 setting() {
@@ -87,19 +111,61 @@ assert_host_network_unchanged() {
     || die "allocated host is unsafe after candidate teardown: $POWER_ERROR"
 }
 
+nested_decimal_at_most() {
+  local value="$1" limit="$2"
+  [ "${#value}" -lt "${#limit}" ] \
+    || { [ "${#value}" -eq "${#limit}" ] \
+      && [[ "$value" == "$limit" || "$value" < "$limit" ]]; }
+}
+
+nested_monotonic_seconds() {
+  local uptime
+  read -r uptime _ < /proc/uptime
+  [[ "${uptime%%.*}" =~ ^[0-9]+$ ]] || die 'could not inspect monotonic uptime'
+  printf '%s\n' "${uptime%%.*}"
+}
+
+nested_memory_available_bytes() {
+  awk '/MemAvailable:/ { printf "%.0f\n", $2 * 1024; exit }' /proc/meminfo
+}
+
 require_nested_memory_reserve() {
   local vm_budget="${NESTED_TEARDOWN_VM_MEMORY_BYTES:-2147483648}"
   local host_reserve="${NESTED_TEARDOWN_POST_LAUNCH_RESERVE_BYTES:-1073741824}"
-  local minimum available
+  local wait_seconds="${NESTED_TEARDOWN_MEMORY_WAIT_SECONDS:-300}"
+  local poll_seconds="${NESTED_TEARDOWN_MEMORY_POLL_SECONDS:-5}"
+  local signed_max=9223372036854775807 minimum available deadline now remaining delay warned=0
   [[ "$vm_budget" =~ ^[1-9][0-9]*$ ]] \
     || die 'nested VM memory budget must be a positive integer'
   [[ "$host_reserve" =~ ^[1-9][0-9]*$ ]] \
     || die 'post-launch host memory reserve must be a positive integer'
+  [[ "$wait_seconds" =~ ^[0-9]+$ ]] && [ "$wait_seconds" -le 900 ] \
+    || die 'nested memory wait must be an integer from 0 through 900 seconds'
+  [[ "$poll_seconds" =~ ^[1-9][0-9]*$ ]] && [ "$poll_seconds" -le 30 ] \
+    || die 'nested memory poll must be an integer from 1 through 30 seconds'
+  nested_decimal_at_most "$vm_budget" "$signed_max" \
+    && nested_decimal_at_most "$host_reserve" "$((signed_max - vm_budget))" \
+    || die 'nested memory requirement exceeds the supported range'
   minimum=$((vm_budget + host_reserve))
-  available="$(awk '/MemAvailable:/ { printf "%.0f\n", $2 * 1024; exit }' /proc/meminfo)"
-  [[ "$available" =~ ^[0-9]+$ ]] || die 'could not inspect available host memory'
-  [ "$available" -ge "$minimum" ] \
-    || die "nested fixture needs $vm_budget bytes for its VM plus $host_reserve bytes host reserve; have $available"
+  now="$(nested_monotonic_seconds)"
+  deadline=$((now + wait_seconds))
+  while :; do
+    available="$(nested_memory_available_bytes)"
+    [[ "$available" =~ ^[0-9]+$ ]] || die 'could not inspect available host memory'
+    [ "$available" -lt "$minimum" ] || return 0
+    now="$(nested_monotonic_seconds)"
+    [ "$now" -lt "$deadline" ] \
+      || die "nested fixture needs $vm_budget bytes for its VM plus $host_reserve bytes host reserve; have $available after waiting ${wait_seconds}s"
+    if [ "$warned" = 0 ]; then
+      printf '  [ .. ] waiting up to %ss for nested fixture memory reserve (have %s, need %s)\n' \
+        "$wait_seconds" "$available" "$minimum"
+      warned=1
+    fi
+    remaining=$((deadline - now))
+    delay="$poll_seconds"
+    [ "$delay" -le "$remaining" ] || delay="$remaining"
+    sleep "$delay"
+  done
 }
 
 assert_outer_vm_ssh_address() {
@@ -326,7 +392,7 @@ jq -e \
   || die 'workspace descriptor does not select the expected Remote-SSH workspace'
 
 outer_dev() {
-  timeout --foreground "$COMMAND_TIMEOUT" incus exec "$OUTER_INSTANCE" --project "$OUTER_PROJECT" \
+  bounded_command outer-dev incus exec "$OUTER_INSTANCE" --project "$OUTER_PROJECT" \
     --user 1000 --group 1000 --env HOME=/home/dev --env USER=dev --env LOGNAME=dev -- "$@"
 }
 

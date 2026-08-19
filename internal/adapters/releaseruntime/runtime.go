@@ -181,7 +181,7 @@ func (runtime *Runtime) inspectRuntimeLinks(
 	}
 	previousEngine := filepath.Join(root, previous.target, "bin", "yard-engine")
 	command := exec.CommandContext(ctx, previousEngine, "--version")
-	command.Env = commandEnvironment(runtime.config.Environment)
+	command.Env = []string{"HOME=" + filepath.Dir(filepath.Dir(previousEngine))}
 	if err := command.Run(); err != nil {
 		return runtimeLinkSnapshot{}, fmt.Errorf("previous runtime self-check failed: %w", err)
 	}

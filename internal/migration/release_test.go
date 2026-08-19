@@ -488,9 +488,9 @@ func TestShippedRegistryOrdersLifecycleRefreshes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(registry.Migrations) != 3 || registry.CurrentLayout != 4 {
+	if len(registry.Migrations) != 4 || registry.CurrentLayout != 5 {
 		t.Fatalf(
-			"shipped registry layout=%d migrations=%d, want layout 4 with 3 migrations",
+			"shipped registry layout=%d migrations=%d, want layout 5 with 4 migrations",
 			registry.CurrentLayout,
 			len(registry.Migrations),
 		)
@@ -513,6 +513,125 @@ func TestShippedRegistryOrdersLifecycleRefreshes(t *testing.T) {
 		power.Operations[0].Kind != OperationKindPowerReconcilerRuntimeV1 {
 		t.Fatalf("shipped power reconciler migration = %#v", power)
 	}
+	compatibility := registry.Migrations[3]
+	if compatibility.ID != "repair-power-reconciler-systemd-compat" ||
+		compatibility.FromLayout != 4 || compatibility.ToLayout != 5 ||
+		!slices.Equal(compatibility.Resources, []string{"power-reconciler-runtime"}) ||
+		len(compatibility.Operations) != 1 ||
+		compatibility.Operations[0].ID != "power-reconciler-systemd-compat" ||
+		compatibility.Operations[0].Kind != OperationKindPowerReconcilerSystemdCompatV1 {
+		t.Fatalf("shipped power reconciler compatibility migration = %#v", compatibility)
+	}
+}
+
+func TestReleaseRollbackFromCatchUpLayoutsUsesCandidateForCompatibility(t *testing.T) {
+	for fromLayout := 1; fromLayout <= 3; fromLayout++ {
+		t.Run("layout "+string(rune('0'+fromLayout)), func(t *testing.T) {
+			fixture := powerReconcilerRollbackFixture(t, false)
+			options := fixture.options
+			options.ConfigHome = filepath.Join(t.TempDir(), "config-home")
+			options.Version = "5.0.0-test"
+			registry := Registry{
+				SchemaVersion: 1,
+				MinimumLayout: 1,
+				CurrentLayout: 5,
+				Migrations: []Definition{
+					powerReconcilerDefinition(1, OperationKindPowerReconcilerRuntimeV1),
+					powerReconcilerDefinition(2, OperationKindPowerReconcilerRuntimeV1),
+					powerReconcilerDefinition(3, OperationKindPowerReconcilerRuntimeV1),
+					powerReconcilerDefinition(4, OperationKindPowerReconcilerSystemdCompatV1),
+				},
+			}
+			if err := os.MkdirAll(
+				filepath.Join(options.RepositoryRoot, "config"), 0o700,
+			); err != nil {
+				t.Fatal(err)
+			}
+			options.RegistryPath = filepath.Join(
+				options.RepositoryRoot, "config", "migrations.json",
+			)
+			writeRegistryFixture(t, options.RegistryPath, registry)
+			candidateRuntime := filepath.Join("releases", "candidate-release")
+			if err := os.Symlink(
+				candidateRuntime, filepath.Join(options.RuntimeRoot, "current"),
+			); err != nil {
+				t.Fatal(err)
+			}
+			previousRuntime := filepath.Join("releases", "previous-release")
+			allIDs := []string{
+				"refresh-power-reconciler-1",
+				"refresh-power-reconciler-2",
+				"refresh-power-reconciler-3",
+				"refresh-power-reconciler-4",
+			}
+			if err := writeAppliedState(options.ConfigHome, appliedState{
+				Layout:         5,
+				Applied:        allIDs,
+				CurrentRelease: candidateRuntime,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			operations := flattenOperations(registry.Migrations)
+			for index := range operations {
+				operations[index].Before = powerReconcilerInstalled
+				operations[index].Phase = operationCommitted
+			}
+			if err := writeTransaction(options.ConfigHome, transaction{
+				FromLayout:  fromLayout,
+				ToLayout:    5,
+				FromRuntime: previousRuntime,
+				ToRelease:   options.Version,
+				ToRuntime:   candidateRuntime,
+				Phase:       "committed",
+				Migrations:  allIDs[fromLayout-1:],
+				Operations:  operations,
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			report, err := RollbackRelease(context.Background(), options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !report.Changed || report.Layout != fromLayout {
+				t.Fatalf("catch-up rollback report = %#v", report)
+			}
+			state, err := readAppliedState(options.ConfigHome, registry.MinimumLayout)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state.Layout != fromLayout || state.CurrentRelease != previousRuntime ||
+				!slices.Equal(state.Applied, allIDs[:fromLayout-1]) {
+				t.Fatalf("catch-up rollback state = %#v", state)
+			}
+			assertFileContents(t, fixture.runnerCalls,
+				strings.Repeat(
+					"candidate|"+fixture.candidateRepository+"|"+
+						fixture.previousRepository+"|set\n",
+					5-fromLayout,
+				))
+			assertFileContents(t, fixture.reconciler,
+				string(mustReadPowerMigrationFile(t, fixture.previousEngine)))
+			assertFileContents(t, fixture.unit,
+				materializedPowerUnit(t, fixture.previousTemplate, fixture.reconciler))
+		})
+	}
+}
+
+func powerReconcilerDefinition(fromLayout int, kind string) Definition {
+	id := "refresh-power-reconciler-" + string(rune('0'+fromLayout))
+	return Definition{
+		ID:             id,
+		FromLayout:     fromLayout,
+		ToLayout:       fromLayout + 1,
+		Resources:      []string{"power-reconciler-runtime"},
+		FinalizePolicy: orderedFinalizePolicy,
+		RollbackPolicy: orderedRollbackPolicy,
+		Operations: []Operation{{
+			ID:   "power-reconciler-" + string(rune('0'+fromLayout)),
+			Kind: kind,
+		}},
+	}
 }
 
 func TestSourceUpgradeFixtureExtendsExactShippedRegistry(t *testing.T) {
@@ -521,7 +640,7 @@ func TestSourceUpgradeFixtureExtendsExactShippedRegistry(t *testing.T) {
 		t.Fatal(err)
 	}
 	fixture, err := LoadRegistry(filepath.Join(
-		"..", "..", "tests", "fixtures", "migrations", "layout-5-production-prefix.json",
+		"..", "..", "tests", "fixtures", "migrations", "layout-6-production-prefix.json",
 	))
 	if err != nil {
 		t.Fatal(err)
@@ -1121,6 +1240,173 @@ func TestReleaseRollbackResumesCanonicalOwner(t *testing.T) {
 	}
 }
 
+func TestReleaseRollbackResumesPreviousOwnerAfterDeferredLayoutOneBroker(t *testing.T) {
+	options, legacyRegistration, currentRegistration, calls :=
+		typedReleaseMigrationFixture(t, "0")
+	registry, err := LoadRegistry(options.RegistryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry.CurrentLayout = 3
+	registry.Migrations = append(registry.Migrations, Definition{
+		ID:             "refresh-test-vm-broker",
+		FromLayout:     2,
+		ToLayout:       3,
+		Resources:      []string{"test-vm-broker-runtime"},
+		FinalizePolicy: orderedFinalizePolicy,
+		RollbackPolicy: orderedRollbackPolicy,
+		Operations: []Operation{{
+			ID: "test-vm-broker-runtime", Kind: OperationKindTestVMBrokerRuntimeV1,
+		}},
+	})
+	writeRegistryFixture(t, options.RegistryPath, registry)
+
+	if err := os.RemoveAll(filepath.Dir(legacyRegistration)); err != nil {
+		t.Fatal(err)
+	}
+	writeMigrationFixture(t, currentRegistration, "YARD_TEMPLATE=test-vms\n")
+	projectState := filepath.Join(filepath.Dir(options.Executable), "incus-state")
+	writeMigrationFixture(t, projectState, "current\n")
+	activateFixtureRelease(t, options)
+	candidateRuntime := currentRuntimeTarget(options.RuntimeRoot)
+	previousRuntime := runtimeLinkTarget(options.RuntimeRoot, "previous")
+	if err := writeAppliedState(options.ConfigHome, appliedState{
+		Layout:         3,
+		Applied:        []string{"migrate-test-yard-owner", "refresh-test-vm-broker"},
+		CurrentRelease: candidateRuntime,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tx := transaction{
+		FromLayout:  1,
+		ToLayout:    3,
+		FromRuntime: previousRuntime,
+		ToRelease:   options.Version,
+		ToRuntime:   candidateRuntime,
+		Phase:       "committed",
+		Migrations:  []string{"migrate-test-yard-owner", "refresh-test-vm-broker"},
+		Operations: []transactionOperation{
+			{
+				MigrationID: "migrate-test-yard-owner",
+				OperationID: "test-yard-owner",
+				Kind:        OperationKindTestYardOwnerV1,
+				Before:      "legacy-directory",
+				Phase:       operationCommitted,
+			},
+			{
+				MigrationID: "refresh-test-vm-broker",
+				OperationID: "test-vm-broker-runtime",
+				Kind:        OperationKindTestVMBrokerRuntimeV1,
+				Before:      "active",
+				Phase:       operationCommitted,
+			},
+		},
+	}
+	if err := writeTransaction(options.ConfigHome, tx); err != nil {
+		t.Fatal(err)
+	}
+
+	executablePayload, err := os.ReadFile(options.Executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostRuntimeWriter := filepath.Join(filepath.Dir(calls), "host-runtime-writer")
+	options.Environment = append(
+		options.Environment,
+		"MIGRATION_HOST_RUNTIME_WRITER="+hostRuntimeWriter,
+	)
+	candidatePayload := string(executablePayload) + `
+if [ "$*" = "-Y e2e-yard init --yes" ]; then
+  printf 'candidate\n' > "$MIGRATION_HOST_RUNTIME_WRITER"
+fi
+`
+	writeMigrationFixture(t, options.Executable, candidatePayload)
+	if err := os.Chmod(options.Executable, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	previousExecutable := filepath.Join(
+		options.RuntimeRoot,
+		previousRuntime,
+		"bin",
+		"yard-engine",
+	)
+	previousPayload := strings.Replace(
+		string(executablePayload),
+		"printf '%s\\n' \"$*\" >> \"$MIGRATION_CALLS\"",
+		"printf 'previous|%s\\n' \"$*\" >> \"$MIGRATION_CALLS\"",
+		1,
+	)
+	if previousPayload == string(executablePayload) {
+		t.Fatal("previous owner fixture did not mark its runner")
+	}
+	previousPayload += `
+if [ "$*" = "-Y e2e-yard init --yes" ]; then
+  printf 'previous\n' > "$MIGRATION_HOST_RUNTIME_WRITER"
+fi
+`
+	writeMigrationFixture(t, previousExecutable, "#!/bin/sh\nexit 99\n")
+	if err := os.Chmod(previousExecutable, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RollbackRelease(context.Background(), options); err == nil {
+		t.Fatal("previous owner rollback failure did not interrupt the transaction")
+	}
+	tx, exists, err := readTransaction(options.ConfigHome, options.Version)
+	if err != nil || !exists || tx.Phase != "rolling-back" ||
+		tx.Operations[0].Phase != operationRollingBack ||
+		tx.Operations[1].Phase != operationRolledBack {
+		t.Fatalf("interrupted deferred broker transaction = %#v, exists=%v err=%v",
+			tx, exists, err)
+	}
+	if payload, err := os.ReadFile(calls); err == nil &&
+		strings.Contains(string(payload), "reconcile-test-vm-broker") {
+		t.Fatalf("layout-1 deferred rollback invoked broker runtime:\n%s", payload)
+	}
+
+	writeMigrationFixture(t, previousExecutable, previousPayload)
+	if err := os.Chmod(previousExecutable, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	report, err := RollbackRelease(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Changed || report.Layout != 1 {
+		t.Fatalf("resumed deferred broker rollback report = %#v", report)
+	}
+	state, err := readAppliedState(options.ConfigHome, registry.MinimumLayout)
+	if err != nil || state.Layout != 1 || state.CurrentRelease != previousRuntime ||
+		len(state.Applied) != 0 {
+		t.Fatalf("resumed deferred broker rollback state = %#v, err=%v", state, err)
+	}
+	tx, exists, err = readTransaction(options.ConfigHome, options.Version)
+	if err != nil || !exists || tx.Phase != "rolled-back" ||
+		tx.Operations[0].Phase != operationRolledBack ||
+		tx.Operations[1].Phase != operationRolledBack {
+		t.Fatalf("resumed deferred broker transaction = %#v, exists=%v err=%v",
+			tx, exists, err)
+	}
+	if _, err := os.Stat(legacyRegistration); err != nil {
+		t.Fatalf("resumed owner rollback did not restore legacy registration: %v", err)
+	}
+	if _, err := os.Lstat(currentRegistration); !os.IsNotExist(err) {
+		t.Fatalf("resumed owner rollback retained current registration: %v", err)
+	}
+	assertFileContents(t, hostRuntimeWriter, "previous\n")
+	payload, err := os.ReadFile(calls)
+	callLog := string(payload)
+	candidateTeardown := strings.Index(callLog, "-Y test-yard teardown --yes")
+	previousInit := strings.Index(callLog, "previous|-Y e2e-yard init --yes")
+	desiredPower := strings.Index(callLog, "desired-power|running")
+	previousCheck := strings.Index(callLog, "previous|-Y e2e-yard check")
+	if err != nil || candidateTeardown < 0 || previousInit < 0 ||
+		desiredPower < 0 || previousCheck < 0 || candidateTeardown >= previousInit ||
+		previousInit >= desiredPower || desiredPower >= previousCheck ||
+		strings.Contains(callLog, "reconcile-test-vm-broker") {
+		t.Fatalf("resumed layout-1 rollback calls = %q, err=%v", payload, err)
+	}
+}
+
 func TestReleaseMigrationReopensCommittedNoopAfterSourceIngress(t *testing.T) {
 	options, legacyRegistration, currentRegistration, _ := typedReleaseMigrationFixture(t, "0")
 	if err := os.Remove(legacyRegistration); err != nil {
@@ -1325,7 +1611,10 @@ case "$*" in
     update_projects remove-legacy
     find "$MIGRATION_CONFIG_HOME/yards/e2e-yard/projects" -depth -delete 2>/dev/null || :
     ;;
-  "-Y test-yard teardown --yes") update_projects remove-current ;;
+  "-Y test-yard teardown --yes")
+    [ "$SUBYARD_REPOSITORY_ROOT" = "$MIGRATION_CANDIDATE_REPOSITORY" ]
+    update_projects remove-current
+    ;;
   "-Y e2e-yard init --yes")
     update_projects add-legacy
     install -d -m 0700 "$MIGRATION_CONFIG_HOME/yards/e2e-yard/projects"
@@ -1344,6 +1633,21 @@ if [ "${3:-}" = test-vms ] && [ "${4:-}" = status ]; then
 fi
 `)
 	if err := os.Chmod(executable, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	previousExecutable := filepath.Join(
+		runtimeRoot,
+		"releases",
+		"1.0.0-test-release",
+		"bin",
+		"yard-engine",
+	)
+	executablePayload, err := os.ReadFile(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeMigrationFixture(t, previousExecutable, string(executablePayload))
+	if err := os.Chmod(previousExecutable, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	incus := filepath.Join(root, "incus")
@@ -1382,6 +1686,9 @@ case "$*" in
       legacy) printf 'both\n' > "$MIGRATION_INCUS_STATE" ;;
     esac
     ;;
+  "config set yard-e2e-yard user.subyard.desired_power running --project subyard-e2e-yard")
+    printf 'desired-power|running\n' >> "$MIGRATION_CALLS"
+    ;;
   *) exit 2 ;;
 esac
 `)
@@ -1403,6 +1710,9 @@ esac
 			"MIGRATION_CONFIG_HOME="+configHome,
 			"MIGRATION_TTL="+ttl,
 			"MIGRATION_INCUS_STATE="+projectState,
+			"MIGRATION_CANDIDATE_REPOSITORY="+repositoryRoot,
+			"SUBYARD_REPOSITORY_ROOT="+repositoryRoot,
+			"SUBYARD_CONFIG_DIR="+filepath.Join(repositoryRoot, "config"),
 		),
 	}, legacyRegistration, currentRegistration, calls
 }

@@ -31,7 +31,7 @@ done
 
 if [ "$action" = install ]; then
   announce "Subyard — install guarded yard boot reconciliation" \
-    "Install a root-owned systemd oneshot that restores only yards with desired=running after Incus/network guards are ready." \
+    "Install a root-owned systemd service that restores only yards with desired=running after Incus/network guards are ready." \
     "Keep Incus boot.autostart=false; validate NetworkManager and host default routes before and after every yard start."
 else
   announce "Subyard — remove unused yard boot reconciliation" \
@@ -84,5 +84,7 @@ else
   ok "$UNIT_NAME already current"
 fi
 systemctl daemon-reload
-systemctl enable "$UNIT_NAME" >/dev/null
+if ! systemctl is-enabled --quiet "$UNIT_NAME"; then
+  systemctl enable "$UNIT_NAME" >/dev/null
+fi
 ok "$UNIT_NAME enabled (it runs on boot; not started during setup)"

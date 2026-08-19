@@ -310,7 +310,9 @@ func TestLeaseStoreHeldDeadlineStartsAfterProvisioning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := now.Add(ProvisioningTTL); !grant.ExpiresAt.Equal(want) {
+	// A cold pair provisions two VMs serially and can exceed 60 minutes when
+	// image pulls and package installation share a constrained P0 host.
+	if want := now.Add(90 * time.Minute); !grant.ExpiresAt.Equal(want) {
 		t.Fatalf("provisioning expiry=%s, want %s", grant.ExpiresAt, want)
 	}
 	now = now.Add(LeaseTTL)
@@ -329,6 +331,21 @@ func TestLeaseStoreHeldDeadlineStartsAfterProvisioning(t *testing.T) {
 	if pool.Slots[0].State != SlotDraining ||
 		pool.Slots[0].FailureReason != heartbeatExpiredReason {
 		t.Fatalf("expired held slot=%#v", pool.Slots[0])
+	}
+}
+
+func TestProvisioningDeadlineContainsColdToolchainBudget(t *testing.T) {
+	want := time.Duration(provisionedGuestCount)*guestToolchainTimeout +
+		provisioningSafetyMargin
+	if ProvisioningTTL != want {
+		t.Fatalf("provisioning TTL=%s, cold pair budget with margin=%s",
+			ProvisioningTTL, want)
+	}
+	if guestToolchainTimeout != 30*time.Minute ||
+		provisioningSafetyMargin != 30*time.Minute ||
+		ProvisioningTTL != 90*time.Minute {
+		t.Fatalf("unexpected deadline contract: guest=%s margin=%s lease=%s",
+			guestToolchainTimeout, provisioningSafetyMargin, ProvisioningTTL)
 	}
 }
 

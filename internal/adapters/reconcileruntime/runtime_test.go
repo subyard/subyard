@@ -206,7 +206,16 @@ func TestPowerProbeSeparatesInstallFromFinalMetadata(t *testing.T) {
 	write(filepath.Join(root, "config", "systemd", "subyard-power-reconcile.service.in"),
 		template, 0o600)
 	write(unit, strings.ReplaceAll(template, "@SUBYARD_POWER_RECONCILER@", reconciler), 0o600)
-	write(filepath.Join(bin, "systemctl"), "#!/bin/sh\nexit 0\n", 0o700)
+	write(filepath.Join(bin, "systemctl"), `#!/bin/sh
+set -eu
+case "$*" in
+  "show subyard-power-reconcile.service --property=LoadState --property=NeedDaemonReload")
+    printf 'LoadState=%s\nNeedDaemonReload=%s\n' "$POWER_LOAD_STATE" "$POWER_NEED_RELOAD"
+    ;;
+  "is-enabled --quiet subyard-power-reconcile.service") ;;
+  *) exit 2 ;;
+esac
+`, 0o700)
 
 	incus := &testkit.Incus{
 		ServerInfo: ports.ServerInfo{Environment: "incus"},
@@ -221,8 +230,30 @@ func TestPowerProbeSeparatesInstallFromFinalMetadata(t *testing.T) {
 	runtime := Runtime{RepositoryRoot: root, Incus: incus, Environment: []string{
 		"PATH=" + bin, "SUBYARD_POWER_RECONCILER_PATH=" + reconciler,
 		"SUBYARD_POWER_ENGINE_SOURCE=" + reconcilerSource, "SUBYARD_POWER_UNIT_PATH=" + unit,
+		"POWER_LOAD_STATE=loaded", "POWER_NEED_RELOAD=no",
 	}}
 	assertStage(t, runtime, "power", true, "installed and finalized power state")
+	for _, test := range []struct {
+		name       string
+		loadState  string
+		needReload string
+		want       bool
+	}{
+		{name: "bad setting", loadState: "bad-setting", needReload: "no"},
+		{name: "daemon reload pending", loadState: "loaded", needReload: "yes"},
+		{name: "fresh loaded unit", loadState: "loaded", needReload: "no", want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runtime.Environment[4] = "POWER_LOAD_STATE=" + test.loadState
+			runtime.Environment[5] = "POWER_NEED_RELOAD=" + test.needReload
+			verified, err := runtime.VerifyStage(context.Background(), "power")
+			if err != nil || verified != test.want {
+				t.Fatalf("manager state verified=%v error=%v, want %v", verified, err, test.want)
+			}
+		})
+	}
+	runtime.Environment[4] = "POWER_LOAD_STATE=loaded"
+	runtime.Environment[5] = "POWER_NEED_RELOAD=no"
 	incus.Reconcile.Instance.Config["user.subyard.initialized"] = "false"
 	assertStage(t, runtime, "power", false, "unfinished desired-power transaction")
 	verified, err := runtime.VerifyStage(context.Background(), "power")

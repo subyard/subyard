@@ -6,6 +6,7 @@ init-extras-convergence.sh
 init-network-convergence.sh
 opencode-agent-defaults.sh
 paseo-agent-contract.sh
+power-reconciler-systemd.sh
 prompt-contract.sh
 provision-profile-check.sh
 test-vms.sh

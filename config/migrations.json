@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "minimumLayout": 1,
-  "currentLayout": 4,
+  "currentLayout": 5,
   "migrations": [
     {
       "id": "migrate-test-yard-owner",
@@ -46,6 +46,20 @@
         {
           "id": "power-reconciler-runtime",
           "kind": "power-reconciler-runtime-v1"
+        }
+      ]
+    },
+    {
+      "id": "repair-power-reconciler-systemd-compat",
+      "fromLayout": 4,
+      "toLayout": 5,
+      "resources": ["power-reconciler-runtime"],
+      "finalizePolicy": "ordered-after-active-verify",
+      "rollbackPolicy": "reverse-before-runtime-swap",
+      "operations": [
+        {
+          "id": "power-reconciler-systemd-compat",
+          "kind": "power-reconciler-systemd-compat-v1"
         }
       ]
     }

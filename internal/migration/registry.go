@@ -52,10 +52,11 @@ type Operation struct {
 }
 
 const (
-	OperationKindTestYardOwnerV1          = "test-yard-owner-v1"
-	OperationKindTestYardRouteConsumersV1 = "test-yard-route-consumers-v1"
-	OperationKindTestVMBrokerRuntimeV1    = "test-vm-broker-runtime-v1"
-	OperationKindPowerReconcilerRuntimeV1 = "power-reconciler-runtime-v1"
+	OperationKindTestYardOwnerV1                = "test-yard-owner-v1"
+	OperationKindTestYardRouteConsumersV1       = "test-yard-route-consumers-v1"
+	OperationKindTestVMBrokerRuntimeV1          = "test-vm-broker-runtime-v1"
+	OperationKindPowerReconcilerRuntimeV1       = "power-reconciler-runtime-v1"
+	OperationKindPowerReconcilerSystemdCompatV1 = "power-reconciler-systemd-compat-v1"
 
 	fileFinalizePolicy    = "remove-source-after-active-verify"
 	fileRollbackPolicy    = "restore-recovery-before-runtime-swap"
@@ -182,7 +183,8 @@ func validateDefinitionOperations(definition Definition) error {
 		case OperationKindTestYardOwnerV1,
 			OperationKindTestYardRouteConsumersV1,
 			OperationKindTestVMBrokerRuntimeV1,
-			OperationKindPowerReconcilerRuntimeV1:
+			OperationKindPowerReconcilerRuntimeV1,
+			OperationKindPowerReconcilerSystemdCompatV1:
 		default:
 			return fmt.Errorf("operation %q has unsupported kind %q", operation.ID, operation.Kind)
 		}

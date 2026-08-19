@@ -8,6 +8,33 @@ import (
 	"testing"
 )
 
+func TestMigrationChildReloadsTheSelectedYardContext(t *testing.T) {
+	root := t.TempDir()
+	executable := filepath.Join(root, "yard")
+	write(t, executable, `#!/bin/sh
+set -eu
+[ "$SUBYARD_INTERNAL_MIGRATION_CHILD" = 1 ]
+[ "$SUBYARD_ENGINE_CONTEXT" = 1 ]
+[ "$SUBYARD_ENGINE_CONTEXT_SCHEMA" = 1 ]
+[ "${SUBYARD_CONFIG_LOADED+x}" != x ]
+[ "$MIGRATION_PRESERVED" = yes ]
+`)
+	if err := os.Chmod(executable, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	err := run(context.Background(), Options{
+		Executable: executable,
+		Environment: []string{
+			"SUBYARD_CONFIG_LOADED=1",
+			"YARD_INSTANCE_NAME=yard",
+			"MIGRATION_PRESERVED=yes",
+		},
+	}, LegacyYard, nil, "check")
+	if err != nil {
+		t.Fatalf("migration child retained the caller's loaded yard context: %v", err)
+	}
+}
+
 func TestApplyRecreatesCanonicalTestYardAndRemovesLegacyController(t *testing.T) {
 	root := t.TempDir()
 	configHome := filepath.Join(root, "config")
@@ -128,6 +155,58 @@ func TestApplyDiscardsLegacyProjectStateAndRollbackRecreatesIt(t *testing.T) {
 	}
 	if _, err := os.Lstat(newLock); !os.IsNotExist(err) {
 		t.Fatalf("rollback retained canonical project state: %v", err)
+	}
+}
+
+func TestRollbackUsesRetainedRuntimeToInitializeAndCheckLegacyYard(t *testing.T) {
+	root := t.TempDir()
+	configHome := filepath.Join(root, "config")
+	dataHome := filepath.Join(root, "data")
+	write(t, filepath.Join(configHome, "yards", LegacyYard, "config.env"),
+		"YARD_TEMPLATE=test-vms\n")
+	currentCalls := filepath.Join(root, "current-calls")
+	legacyCalls := filepath.Join(root, "legacy-calls")
+	options := Options{
+		Executable: fakeExecutable(t, root), Incus: fakeIncus(t, root),
+		ConfigHome: configHome, DataHome: dataHome,
+		Environment: append(
+			os.Environ(),
+			"MIGRATION_CALLS="+currentCalls,
+			"MIGRATION_CONFIG_HOME="+configHome,
+		),
+	}
+	if err := applyForTest(context.Background(), options); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(currentCalls); err != nil {
+		t.Fatal(err)
+	}
+	legacyOptions := options
+	legacyOptions.Environment = append(
+		os.Environ(),
+		"MIGRATION_CALLS="+legacyCalls,
+		"MIGRATION_CONFIG_HOME="+configHome,
+	)
+	if err := RollbackWithLegacyRuntimeAndPower(
+		context.Background(),
+		options,
+		legacyOptions,
+		StateLegacyDirectory,
+		"running",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if current := read(t, currentCalls); current != "-Y test-yard teardown --yes\n" {
+		t.Fatalf("current rollback runtime calls = %q", current)
+	}
+	if legacy := read(t, legacyCalls); legacy !=
+		"-Y e2e-yard init --yes\n-Y e2e-yard check\n" {
+		t.Fatalf("retained rollback runtime calls = %q", legacy)
+	}
+	if incusCalls := read(t, filepath.Join(root, "incus-calls")); !strings.Contains(incusCalls,
+		"config set yard-e2e-yard user.subyard.desired_power running "+
+			"--project subyard-e2e-yard\n") {
+		t.Fatalf("rollback did not restore legacy desired power:\n%s", incusCalls)
 	}
 }
 
@@ -659,6 +738,8 @@ case "$*" in
 			legacy) printf 'both\n' > "$MIGRATION_INCUS_STATE" ;;
 			current|both) ;;
 		esac
+		;;
+	"config set yard-e2e-yard user.subyard.desired_power running --project subyard-e2e-yard")
 		;;
 	*)
 		exit 2

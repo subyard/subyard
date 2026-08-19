@@ -121,17 +121,22 @@ func (reconciler BootPowerReconciler) waitForManaged(
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
+	readinessContext, cancelReadiness := context.WithTimeout(ctx, timeout)
+	defer cancelReadiness()
 	deadline := clock.Now().Add(timeout)
 	var lastErr error
 	for {
-		instances, err := reconciler.Inventory.ListInstances(ctx)
+		instances, err := reconciler.Inventory.ListInstances(readinessContext)
 		if err == nil {
 			return filterManagedInstances(instances, validate)
 		}
 		lastErr = err
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		remaining := deadline.Sub(clock.Now())
-		if remaining <= 0 {
-			return nil, fmt.Errorf("Incus did not become ready within %s: %w", timeout, lastErr)
+		if remaining <= 0 || errors.Is(readinessContext.Err(), context.DeadlineExceeded) {
+			return nil, incusReadinessTimeout(timeout, lastErr)
 		}
 		delay := time.Second
 		if remaining < delay {
@@ -140,9 +145,23 @@ func (reconciler BootPowerReconciler) waitForManaged(
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
+		case <-readinessContext.Done():
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return nil, incusReadinessTimeout(timeout, lastErr)
 		case <-clock.After(delay):
 		}
 	}
+}
+
+func incusReadinessTimeout(timeout time.Duration, lastErr error) error {
+	return fmt.Errorf(
+		"Incus did not become ready within %s: %w: %v",
+		timeout,
+		ports.ErrIncusUnavailable,
+		lastErr,
+	)
 }
 
 type bootWallClock struct{}

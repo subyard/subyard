@@ -21,6 +21,12 @@ for workflow in "$CI_WORKFLOW" "$RELEASE_WORKFLOW"; do
     || fail "$(basename "$workflow") bypasses the prepared-context runner"
 done
 
+[ "$(grep -Fc 'runs-on: ubuntu-24.04' "$CI_WORKFLOW")" -eq 1 ] \
+  || fail 'CI verify must run the systemd parser contract on Ubuntu 24.04'
+grep -A4 '^  publish:' "$RELEASE_WORKFLOW" \
+  | grep -Fq 'runs-on: ubuntu-latest' \
+  || fail 'tag publish must verify the release on the latest Ubuntu runner'
+
 line_of() {
   grep -nF "$2" "$1" | head -n1 | cut -d: -f1
 }

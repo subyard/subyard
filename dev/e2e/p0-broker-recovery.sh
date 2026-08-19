@@ -14,6 +14,12 @@ FAULT_ROOT=/run/subyard-p0-incus-fault
 FAULT_INSTALLED=0
 REAPER_MASKED=0
 REAPER_TIMER_STOPPED=0
+# The 100-minute default contains the 90-minute provisioning lease plus a
+# 10-minute cleanup/reaper margin. The 120-minute override ceiling remains bounded.
+RECOVERY_POLL_SECONDS=2
+RECOVERY_WAIT_SECONDS="${P0_BROKER_RECOVERY_WAIT_SECONDS:-6000}"
+RECOVERY_STATUS_TIMEOUT_SECONDS="${P0_BROKER_RECOVERY_STATUS_TIMEOUT_SECONDS:-30}"
+RECOVERY_STATUS_KILL_AFTER_SECONDS=10
 
 die() { printf 'p0-broker-recovery: %s\n' "$*" >&2; exit 2; }
 
@@ -138,7 +144,10 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 status() {
-  SUBYARD_E2E_STATE_DIR="$STATE_PARENT/probe" "$RUNNER" --yard "$YARD" --status --json
+  local request_timeout="${1:-$RECOVERY_STATUS_TIMEOUT_SECONDS}"
+  timeout --signal=TERM --kill-after="$RECOVERY_STATUS_KILL_AFTER_SECONDS" \
+    "$request_timeout" env SUBYARD_E2E_STATE_DIR="$STATE_PARENT/probe" \
+    "$RUNNER" --yard "$YARD" --status --json
 }
 
 wait_for_ready() {
@@ -247,19 +256,45 @@ rollback_candidate_update() {
 }
 
 wait_for_slot_state() {
-  local slot="$1" wanted="$2" attempts="$3" payload state
-  for _ in $(seq 1 "$attempts"); do
-    payload="$(status)"
-    state="$(jq -r --arg slot "$slot" \
-      '.pool.slots[] | select(.slot_id == $slot) | .state' <<<"$payload")"
-    if [ "$state" = "$wanted" ]; then
-      printf '%s\n' "$payload"
-      return 0
+  local slot="$1" wanted="$2" wait_seconds="$3" payload='' state
+  local now deadline remaining request_timeout sleep_seconds
+  now="$(recovery_monotonic_seconds)"
+  deadline=$((now + wait_seconds))
+  while true; do
+    now="$(recovery_monotonic_seconds)"
+    remaining=$((deadline - now))
+    [ "$remaining" -gt "$RECOVERY_STATUS_KILL_AFTER_SECONDS" ] || break
+    request_timeout="$RECOVERY_STATUS_TIMEOUT_SECONDS"
+    if [ "$request_timeout" -gt "$((remaining - RECOVERY_STATUS_KILL_AFTER_SECONDS))" ]; then
+      request_timeout=$((remaining - RECOVERY_STATUS_KILL_AFTER_SECONDS))
     fi
-    sleep 2
+    if payload="$(status "$request_timeout")"; then
+      state="$(jq -r --arg slot "$slot" \
+        '.pool.slots[] | select(.slot_id == $slot) | .state' <<<"$payload")"
+      if [ "$state" = "$wanted" ]; then
+        printf '%s\n' "$payload"
+        return 0
+      fi
+    fi
+    now="$(recovery_monotonic_seconds)"
+    remaining=$((deadline - now))
+    [ "$remaining" -gt 0 ] || break
+    sleep_seconds="$RECOVERY_POLL_SECONDS"
+    [ "$sleep_seconds" -le "$remaining" ] || sleep_seconds="$remaining"
+    sleep "$sleep_seconds"
   done
   printf '%s\n' "$payload" >&2
   return 1
+}
+
+recovery_monotonic_seconds() {
+  local uptime _
+  IFS=' ' read -r uptime _ < /proc/uptime \
+    || die 'cannot read the kernel monotonic clock'
+  uptime="${uptime%%.*}"
+  [[ "$uptime" =~ ^[0-9]+$ ]] \
+    || die 'kernel monotonic clock returned an invalid value'
+  printf '%s\n' "$uptime"
 }
 
 report_slot_diagnostics() {
@@ -306,6 +341,14 @@ report_slot_diagnostics() {
 command -v jq >/dev/null 2>&1 || die 'jq is required'
 command -v incus >/dev/null 2>&1 || die 'Incus is required'
 command -v go >/dev/null 2>&1 || die 'Go is required'
+command -v timeout >/dev/null 2>&1 || die 'timeout is required'
+[[ "$RECOVERY_WAIT_SECONDS" =~ ^[1-9][0-9]{1,4}$ ]] \
+  && [ "$RECOVERY_WAIT_SECONDS" -ge 60 ] \
+  && [ "$RECOVERY_WAIT_SECONDS" -le 7200 ] \
+  || die 'broker recovery wait must be an integer from 60 through 7200 seconds'
+[[ "$RECOVERY_STATUS_TIMEOUT_SECONDS" =~ ^[1-9][0-9]?$ ]] \
+  && [ "$RECOVERY_STATUS_TIMEOUT_SECONDS" -le 60 ] \
+  || die 'broker status timeout must be an integer from 1 through 60 seconds'
 STATE_PARENT="$(mktemp -d /tmp/subyard-p0-broker-recovery.XXXXXX)"
 for client in neighbor victim probe next; do
   SUBYARD_E2E_STATE_DIR="$STATE_PARENT/$client" \
@@ -336,7 +379,7 @@ while true; do
     "victim provisioning attempt $victim_attempt failed"
   [ "$victim_attempt" -lt 3 ] \
     || die 'victim lease did not become ready after 3 automatic rebuilds'
-  wait_for_slot_state slot-001 available 450 >/dev/null \
+  wait_for_slot_state slot-001 available "$RECOVERY_WAIT_SECONDS" >/dev/null \
     || { report_slot_diagnostics slot-001 'victim automatic rebuild timed out';
          die 'victim provisioning quarantine did not recover'; }
   for marker in \
@@ -372,7 +415,7 @@ while true; do
     "neighbor provisioning attempt $neighbor_attempt failed"
   [ "$neighbor_attempt" -lt 3 ] \
     || die 'neighbor lease did not become ready after 3 automatic rebuilds'
-  wait_for_slot_state slot-002 available 450 >/dev/null \
+  wait_for_slot_state slot-002 available "$RECOVERY_WAIT_SECONDS" >/dev/null \
     || { report_slot_diagnostics slot-002 'neighbor automatic rebuild timed out';
          die 'neighbor provisioning quarantine did not recover'; }
   for marker in \
@@ -464,7 +507,7 @@ outer_root systemctl start subyard-test-vms-lease-reaper.timer
 REAPER_TIMER_STOPPED=0
 outer_root systemctl start --no-block subyard-test-vms-lease-reaper.service
 
-available="$(wait_for_slot_state slot-001 available 450)" \
+available="$(wait_for_slot_state slot-001 available "$RECOVERY_WAIT_SECONDS")" \
   || { report_slot_diagnostics slot-001 'automatic rebuild timed out';
        die 'root reaper did not automatically rebuild slot-001'; }
 new_generation="$(jq -r '

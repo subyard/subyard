@@ -20,6 +20,15 @@ SOURCE_ARCHIVE_REMOTE=''
 SOURCE_HASH=''
 SOURCE_COMMIT=''
 SOURCE_HOST_STARTED=0
+SOURCE_LANE_VM=1
+POWER_SYSTEMD_STARTED=0
+POWER_SYSTEMD_LANE_VM=1
+POWER_RECONCILE_VM=1
+FULL_AUX_STAGE_FILE=''
+FULL_SOURCE_ARM_FILE=''
+FULL_POWER_ARM_FILE=''
+FULL_OWNER_DURATION=0
+FULL_AUX_DURATION=0
 CANDIDATE_HASH=''
 CAPACITY_LOG_DIR=''
 PEERS_ONLY="${SUBYARD_P0_PEERS_ONLY:-0}"
@@ -38,7 +47,8 @@ P0_FAILURE_LOG=''
 P0_CURRENT_PHASE='startup'
 P0_PHASE_STARTED=0
 P0_CHILD_PIDS=()
-FULL_P0_LANES=(boundary nested-teardown transport release source-upgrade peer cleanup)
+P0_STARTED_PID=''
+FULL_P0_LANES=(boundary transport nested-teardown release source-upgrade power-systemd peer cleanup)
 
 # Reuse one ordinary broker lease for the full matrix. This avoids the retired raw SSH-config
 # export and ensures every direct and bundled command addresses the same retained pair.
@@ -46,6 +56,29 @@ FULL_P0_LANES=(boundary nested-teardown transport release source-upgrade peer cl
 . "$ROOT/dev/agent-e2e.sh"
 
 die() { printf 'p0-acceptance: %s\n' "$*" >&2; exit 2; }
+p0_monotonic_seconds() {
+  local uptime _
+  IFS=' ' read -r uptime _ < /proc/uptime \
+    || die 'cannot read the kernel monotonic clock'
+  uptime="${uptime%%.*}"
+  [[ "$uptime" =~ ^[0-9]+$ ]] \
+    || die 'kernel monotonic clock returned an invalid value'
+  printf '%s\n' "$uptime"
+}
+WAIT_SECONDS="${SUBYARD_P0_WAIT_SECONDS:-0}"
+POWER_RECONCILE_WINDOW_SECONDS=900
+POWER_RECONCILE_START_WAIT_SECONDS=30
+POWER_RECONCILE_PROBE_TIMEOUT=10
+POWER_RECONCILE_STARTED_MICROS=0
+POWER_RECONCILE_UPTIME_SECONDS=0
+POWER_RECONCILE_TERMINAL_FAILURE=0
+FULL_MATRIX_TIMEOUT_SECONDS="${SUBYARD_P0_FULL_MATRIX_TIMEOUT_SECONDS:-12600}"
+RUNNER_STOP_GRACE_SECONDS=30
+RUNNER_KILL_GRACE_SECONDS=10
+[[ "$WAIT_SECONDS" =~ ^[0-9]+$ ]] \
+  || die 'SUBYARD_P0_WAIT_SECONDS must be a non-negative integer'
+[[ "$FULL_MATRIX_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
+  || die 'SUBYARD_P0_FULL_MATRIX_TIMEOUT_SECONDS must be a positive integer'
 usage() {
   cat <<'EOF'
 Usage:
@@ -61,6 +94,7 @@ EOF
 list_lanes() {
   printf '%s\n' \
     boundary nested-teardown transport dependencies real-incus profile-resource release source-upgrade \
+    power-systemd \
     reboot-verify peer peer-cleanup cleanup
   printf 'full\t%s\n' "${FULL_P0_LANES[*]}"
 }
@@ -82,7 +116,7 @@ parse_arguments() {
     esac
   done
   case "$P0_LANE" in
-    boundary|nested-teardown|transport|dependencies|real-incus|profile-resource|release|source-upgrade|reboot-verify|peer|peer-cleanup|cleanup|full) ;;
+    boundary|nested-teardown|transport|dependencies|real-incus|profile-resource|release|source-upgrade|power-systemd|reboot-verify|peer|peer-cleanup|cleanup|full) ;;
     *) die "unknown lane '$P0_LANE'" ;;
   esac
   [ "$P0_LANE" = full ] || [ "$BROKER_RECOVERY_ONLY" = 0 ] \
@@ -146,7 +180,8 @@ prepare_run_records() {
       resource_inventory: [
         ("marker:" + $marker),
         "guest:vm1", "guest:vm2",
-        "fixture:peer", "fixture:source-upgrade", "fixture:real-incus"
+        "fixture:peer", "fixture:source-upgrade", "fixture:real-incus",
+        "fixture:power-systemd"
       ]
     }
   ' > "$temp"
@@ -160,6 +195,24 @@ mark_checkpoint_passed() {
   local lane="$1" temp
   temp="$(mktemp "$(dirname "$P0_CHECKPOINT")/.checkpoint.XXXXXX")"
   jq --arg lane "$lane" '.lanes[$lane] = "passed"' "$P0_CHECKPOINT" > "$temp"
+  chmod 0600 "$temp"
+  mv -f "$temp" "$P0_CHECKPOINT"
+}
+full_matrix_checkpoint_passed() {
+  local phase
+  for phase in nested-teardown release source-upgrade power-systemd; do
+    checkpoint_passed "$phase" || return 1
+  done
+}
+mark_full_matrix_passed() {
+  local temp
+  temp="$(mktemp "$(dirname "$P0_CHECKPOINT")/.checkpoint.XXXXXX")"
+  jq '
+    .lanes["nested-teardown"] = "passed" |
+    .lanes["release"] = "passed" |
+    .lanes["source-upgrade"] = "passed" |
+    .lanes["power-systemd"] = "passed"
+  ' "$P0_CHECKPOINT" > "$temp"
   chmod 0600 "$temp"
   mv -f "$temp" "$P0_CHECKPOINT"
 }
@@ -177,7 +230,9 @@ write_evidence() {
     --arg run "$LEASE_RUN" --arg slot "$LEASE_SLOT" \
     --argjson generation "$LEASE_GENERATION" --arg bundle "$P0_BUNDLE_HASH" \
     --argjson capacity "$capacity" --arg keeper "$keeper" \
-    --arg failure_log "$P0_FAILURE_LOG" '
+    --arg failure_log "$P0_FAILURE_LOG" \
+    --argjson full_owner_duration "$FULL_OWNER_DURATION" \
+    --argjson full_aux_duration "$FULL_AUX_DURATION" '
     {
       schema_version: 1,
       run: $run,
@@ -190,6 +245,10 @@ write_evidence() {
       duration_seconds: $duration,
       capacity: $capacity,
       lease_keeper_last: $keeper,
+      full_matrix_durations: {
+        owner_seconds: $full_owner_duration,
+        auxiliary_seconds: $full_aux_duration
+      },
       failure_log: (if $failure_log == "" then null else $failure_log end),
       resource_inventory: ["guest:vm1", "guest:vm2", "marker-owned-only"]
     }
@@ -286,31 +345,73 @@ collect_failure_diagnostics() { # <stage> <truncate|append>
   chmod 0600 "$P0_FAILURE_LOG"
 }
 run_phase() {
-  local phase="$1" started duration; shift
+  local phase="$1" started duration now; shift
   if [ "$P0_RESUME" = 1 ] && checkpoint_passed "$phase"; then
     printf '  [ ok ] phase=%s skipped from matching checkpoint bundle=%s\n' \
       "$phase" "$P0_BUNDLE_HASH"
     return 0
   fi
   P0_CURRENT_PHASE="$phase"
-  P0_PHASE_STARTED=$SECONDS
-  started=$SECONDS
+  started="$(p0_monotonic_seconds)"
+  P0_PHASE_STARTED="$started"
   printf '  [ .. ] phase=%s bundle=%s\n' "$phase" "$P0_BUNDLE_HASH"
   "$@"
-  duration=$((SECONDS - started))
+  now="$(p0_monotonic_seconds)"
+  duration=$((now - started))
   mark_checkpoint_passed "$phase"
   write_evidence "$phase" passed 0 "$duration"
   printf '  [ ok ] phase=%s duration=%ss\n' "$phase" "$duration"
 }
+start_runner_child() {
+  # Bash job-control mode gives each background runner its own process group. Disable it again
+  # immediately so the rest of the non-interactive controller keeps its usual semantics.
+  set -m
+  (set +m; "$@") &
+  P0_STARTED_PID=$!
+  set +m
+  P0_CHILD_PIDS+=("$P0_STARTED_PID")
+}
 stop_runner_children() {
-  local pid
-  for pid in "${P0_CHILD_PIDS[@]}"; do
-    kill -0 "$pid" >/dev/null 2>&1 || continue
-    pkill -TERM -P "$pid" >/dev/null 2>&1 || true
-    kill -TERM "$pid" >/dev/null 2>&1 || true
+  local root stop_deadline kill_deadline now alive=0
+  for root in "${P0_CHILD_PIDS[@]}"; do
+    kill -0 -- "-$root" >/dev/null 2>&1 || continue
+    kill -TERM -- "-$root" >/dev/null 2>&1 || true
   done
-  for pid in "${P0_CHILD_PIDS[@]}"; do
-    wait "$pid" >/dev/null 2>&1 || true
+  now="$(p0_monotonic_seconds)"
+  stop_deadline=$((now + RUNNER_STOP_GRACE_SECONDS))
+  while :; do
+    now="$(p0_monotonic_seconds)"
+    [ "$now" -lt "$stop_deadline" ] || break
+    alive=0
+    for root in "${P0_CHILD_PIDS[@]}"; do
+      kill -0 -- "-$root" >/dev/null 2>&1 && alive=1
+    done
+    [ "$alive" = 1 ] || break
+    sleep 1
+  done
+  for root in "${P0_CHILD_PIDS[@]}"; do
+    kill -0 -- "-$root" >/dev/null 2>&1 || continue
+    kill -KILL -- "-$root" >/dev/null 2>&1 || true
+  done
+  now="$(p0_monotonic_seconds)"
+  kill_deadline=$((now + RUNNER_KILL_GRACE_SECONDS))
+  while :; do
+    now="$(p0_monotonic_seconds)"
+    [ "$now" -lt "$kill_deadline" ] || break
+    alive=0
+    for root in "${P0_CHILD_PIDS[@]}"; do
+      kill -0 -- "-$root" >/dev/null 2>&1 && alive=1
+    done
+    [ "$alive" = 1 ] || break
+    sleep 1
+  done
+  for root in "${P0_CHILD_PIDS[@]}"; do
+    if kill -0 -- "-$root" >/dev/null 2>&1; then
+      printf '  [warn] runner process group %s survived bounded TERM/KILL shutdown\n' \
+        "$root" >&2
+      continue
+    fi
+    wait "$root" >/dev/null 2>&1 || true
   done
   P0_CHILD_PIDS=()
 }
@@ -332,11 +433,21 @@ direct_vm() {
     bash "/tmp/subyard-p0-peer-$TOKEN/src/dev/e2e/p0-guest.sh" "$mode" "$TOKEN" "$@"
 }
 run_source_vm() {
-  local mode="$1" rc=0; shift
-  run_guest 1 "$P0_BUNDLE" "$P0_BUNDLE_HASH" \
+  local vm="$1" mode="$2" rc=0; shift 2
+  run_guest "$vm" "$P0_BUNDLE" "$P0_BUNDLE_HASH" \
     bash dev/e2e/p0-source-upgrade.sh "$mode" "$TOKEN" "$@" || rc=$?
-  cleanup_guest 1 || return 3
+  cleanup_guest "$vm" || return 3
   return "$rc"
+}
+run_power_systemd_vm() {
+  local vm="$1" script="$2" rc=0; shift 2
+  run_guest "$vm" "$P0_BUNDLE" "$P0_BUNDLE_HASH" bash "$script" "$@" || rc=$?
+  cleanup_guest "$vm" || return 3
+  return "$rc"
+}
+clean_power_systemd_host() {
+  local vm="${1:-$POWER_SYSTEMD_LANE_VM}"
+  run_power_systemd_vm "$vm" dev/e2e/power-reconciler-upgrade.sh clean "$TOKEN"
 }
 clean_peers() {
   local rc=0
@@ -345,7 +456,46 @@ clean_peers() {
   return "$rc"
 }
 clean_source_host() {
-  run_source_vm clean
+  local vm="${1:-$SOURCE_LANE_VM}"
+  run_source_vm "$vm" clean
+}
+arm_full_fixture() {
+  local path="$1" vm="$2" temp
+  case "$vm" in 1|2) ;; *) return 2 ;; esac
+  temp="$(mktemp "$LOCAL_TEMP/.fixture-arm.XXXXXX")"
+  printf '%s\n' "$vm" > "$temp"
+  chmod 0600 "$temp"
+  mv -f "$temp" "$path"
+}
+armed_fixture_vm() {
+  local path="$1" vm
+  [ -r "$path" ] || return 1
+  IFS= read -r vm < "$path"
+  case "$vm" in 1|2) printf '%s\n' "$vm" ;; *) return 2 ;; esac
+}
+cleanup_full_source_arm() {
+  local vm
+  vm="$(armed_fixture_vm "$FULL_SOURCE_ARM_FILE")" || return $?
+  clean_source_host "$vm" || return $?
+  p0_guest "$vm" sh -c '[ ! -e "$1" ] || find "$1" -delete' \
+    _ "/tmp/subyard-p0-source-$TOKEN.tar.gz" || return $?
+  [ -z "$SOURCE_ARCHIVE" ] || [ ! -e "$SOURCE_ARCHIVE" ] \
+    || find "$SOURCE_ARCHIVE" -delete || return $?
+  find "$FULL_SOURCE_ARM_FILE" -delete
+}
+cleanup_full_power_arm() {
+  local vm
+  vm="$(armed_fixture_vm "$FULL_POWER_ARM_FILE")" || return $?
+  clean_power_systemd_host "$vm" || return $?
+  find "$FULL_POWER_ARM_FILE" -delete
+}
+cleanup_armed_full_fixtures() {
+  local rc=0
+  [ -z "$FULL_POWER_ARM_FILE" ] || [ ! -e "$FULL_POWER_ARM_FILE" ] \
+    || cleanup_full_power_arm || rc=1
+  [ -z "$FULL_SOURCE_ARM_FILE" ] || [ ! -e "$FULL_SOURCE_ARM_FILE" ] \
+    || cleanup_full_source_arm || rc=1
+  return "$rc"
 }
 stop_capacity_monitors() {
   local vm pid
@@ -359,16 +509,18 @@ stop_capacity_monitors() {
   done
 }
 cleanup() {
-  local rc=$? cleanup_failed=0 duration
+  local rc=$? cleanup_failed=0 duration now
   trap - EXIT INT TERM
   set +e
   if [ "$rc" -ne 0 ] && [ -n "$P0_EVIDENCE" ]; then
     collect_failure_diagnostics failure-entry truncate
   fi
   stop_runner_children
+  cleanup_armed_full_fixtures >/dev/null 2>&1 || cleanup_failed=1
   stop_capacity_monitors
   if [ "$rc" -ne 0 ] && [ -n "$P0_EVIDENCE" ]; then
-    duration=$((SECONDS - P0_PHASE_STARTED))
+    now="$(p0_monotonic_seconds)"
+    duration=$((now - P0_PHASE_STARTED))
     collect_failure_diagnostics post-stop append
     write_evidence "$P0_CURRENT_PHASE" failed "$rc" "$duration"
     printf '  [fail] phase=%s status=%s duration=%ss evidence=%s diagnostics=%s\n' \
@@ -385,9 +537,14 @@ cleanup() {
     p0_guest 1 find "$PROBE_MARKER" -delete >/dev/null 2>&1 || cleanup_failed=1
   fi
   [ "$PEERS_READY" = 0 ] || clean_peers >/dev/null 2>&1 || cleanup_failed=1
-  [ "$SOURCE_HOST_STARTED" = 0 ] || clean_source_host >/dev/null 2>&1 || cleanup_failed=1
+  [ "$SOURCE_HOST_STARTED" = 0 ] \
+    || clean_source_host "$SOURCE_LANE_VM" >/dev/null 2>&1 \
+    || cleanup_failed=1
+  [ "$POWER_SYSTEMD_STARTED" = 0 ] \
+    || clean_power_systemd_host "$POWER_SYSTEMD_LANE_VM" >/dev/null 2>&1 \
+    || cleanup_failed=1
   if [ -n "$SOURCE_ARCHIVE_REMOTE" ]; then
-    p0_guest 1 \
+    p0_guest "$SOURCE_LANE_VM" \
       sh -c '[ ! -e "$1" ] || find "$1" -delete' _ "$SOURCE_ARCHIVE_REMOTE" \
       >/dev/null 2>&1 || cleanup_failed=1
   fi
@@ -535,7 +692,7 @@ verify_cache_lifecycle() {
 }
 
 prepare_source_archive() {
-  local revision commit hash remote_hash
+  local vm="$1" revision commit hash remote_hash
   revision="${SUBYARD_P0_SOURCE_REVISION:-7c67ee3}"
   commit="$(git -C "$ROOT" rev-parse --verify "$revision^{commit}")" \
     || die "source revision $revision is unavailable"
@@ -543,34 +700,78 @@ prepare_source_archive() {
   git -C "$ROOT" archive --format=tar "$commit" | gzip -n > "$SOURCE_ARCHIVE"
   hash="$(sha256sum "$SOURCE_ARCHIVE" | cut -d' ' -f1)"
   SOURCE_ARCHIVE_REMOTE="/tmp/subyard-p0-source-$TOKEN.tar.gz"
-  p0_guest 1 \
+  p0_guest "$vm" \
     sh -c 'umask 077; dd of="$1" status=none' _ "$SOURCE_ARCHIVE_REMOTE" \
     < "$SOURCE_ARCHIVE"
-  remote_hash="$(ssh -F "$CONFIG" -T e2e-vm-1 -- \
+  remote_hash="$(ssh -F "$CONFIG" -T "e2e-vm-$vm" -- \
     sha256sum "$SOURCE_ARCHIVE_REMOTE" | awk '{print $1}')"
   [ "$remote_hash" = "$hash" ] || die 'source archive changed in transport'
   SOURCE_HASH="$hash"
   SOURCE_COMMIT="$commit"
 }
 
-reboot_vm1() {
-  local before_boot after_boot='' down=0 host_state up=0 unit_result='' route
-  before_boot="$(ssh -F "$CONFIG" -T e2e-vm-1 -- cat /proc/sys/kernel/random/boot_id)" \
-    || die 'cannot read VM1 boot ID before reboot'
+power_reconcile_ssh() {
+  timeout --foreground "$POWER_RECONCILE_PROBE_TIMEOUT" \
+    ssh -F "$CONFIG" -T -o ConnectTimeout=3 -o ConnectionAttempts=1 \
+      -o ServerAliveInterval=2 -o ServerAliveCountMax=2 \
+      "e2e-vm-$POWER_RECONCILE_VM" -- "$@"
+}
+
+boot_power_reconciler_succeeded() {
+  local snapshot started uptime_seconds
+  POWER_RECONCILE_STARTED_MICROS=0
+  POWER_RECONCILE_UPTIME_SECONDS=0
+  POWER_RECONCILE_TERMINAL_FAILURE=0
+  snapshot="$(power_reconcile_ssh systemctl show \
+    subyard-power-reconcile.service \
+      --property=ActiveState --property=SubState --property=Result \
+      --property=ExecMainStatus --property=ExecMainStartTimestampMonotonic)" \
+    || return 1
+  started="$(sed -n 's/^ExecMainStartTimestampMonotonic=//p' <<<"$snapshot")"
+  [[ "$started" =~ ^[1-9][0-9]*$ ]] || return 1
+  uptime_seconds="$(power_reconcile_ssh cut -d. -f1 /proc/uptime)" || return 1
+  [[ "$uptime_seconds" =~ ^[0-9]+$ ]] || return 1
+  POWER_RECONCILE_STARTED_MICROS="$started"
+  POWER_RECONCILE_UPTIME_SECONDS="$uptime_seconds"
+  if grep -Fxq 'ActiveState=failed' <<<"$snapshot"; then
+    # During RestartSec the unit is activating/auto-restart. Once systemd exhausts the
+    # start limit it becomes failed/failed while retaining exit status 75.
+    if grep -Fxq 'SubState=failed' <<<"$snapshot" \
+      || ! { grep -Fxq 'Result=exit-code' <<<"$snapshot" \
+        && grep -Fxq 'ExecMainStatus=75' <<<"$snapshot"; }; then
+      POWER_RECONCILE_TERMINAL_FAILURE=1
+    fi
+  fi
+  grep -Fxq 'ActiveState=inactive' <<<"$snapshot" \
+    && grep -Fxq 'SubState=dead' <<<"$snapshot" \
+    && grep -Fxq 'Result=success' <<<"$snapshot" \
+    && grep -Fxq 'ExecMainStatus=0' <<<"$snapshot"
+}
+
+reboot_vm() {
+  local vm="$1"
+  local before_boot after_boot='' down=0 host_state up=0 unit_complete=0 route
+  local start_wait_deadline policy_deadline=0 local_policy_deadline=0
+  local started_seconds remaining now
+  POWER_RECONCILE_VM="$vm"
+  before_boot="$(ssh -F "$CONFIG" -T "e2e-vm-$vm" -- \
+    cat /proc/sys/kernel/random/boot_id)" \
+    || die "cannot read VM$vm boot ID before reboot"
   set +e
-  ssh -F "$CONFIG" -T e2e-vm-1 -- sudo -n systemctl reboot >/dev/null 2>&1
+  ssh -F "$CONFIG" -T "e2e-vm-$vm" -- \
+    sudo -n systemctl reboot >/dev/null 2>&1
   set -e
   for _ in $(seq 1 60); do
-    if ! ssh -F "$CONFIG" -T -o ConnectTimeout=2 e2e-vm-1 -- true \
+    if ! ssh -F "$CONFIG" -T -o ConnectTimeout=2 "e2e-vm-$vm" -- true \
       >/dev/null 2>&1; then
       down=1
       break
     fi
     sleep 1
   done
-  [ "$down" = 1 ] || die 'VM1 did not go down for reboot'
+  [ "$down" = 1 ] || die "VM$vm did not go down for reboot"
   for _ in $(seq 1 180); do
-    after_boot="$(ssh -F "$CONFIG" -T -o ConnectTimeout=3 e2e-vm-1 -- \
+    after_boot="$(ssh -F "$CONFIG" -T -o ConnectTimeout=3 "e2e-vm-$vm" -- \
       cat /proc/sys/kernel/random/boot_id 2>/dev/null)" || after_boot=''
     if [ -n "$after_boot" ] && [ "$after_boot" != "$before_boot" ]; then
       up=1
@@ -578,32 +779,66 @@ reboot_vm1() {
     fi
     sleep 1
   done
-  [ "$up" = 1 ] || die 'VM1 did not return with a new boot ID'
+  [ "$up" = 1 ] || die "VM$vm did not return with a new boot ID"
   set +e
-  host_state="$(ssh -F "$CONFIG" -T e2e-vm-1 -- \
+  host_state="$(ssh -F "$CONFIG" -T "e2e-vm-$vm" -- \
     timeout 180 systemctl is-system-running --wait 2>/dev/null)"
   set -e
   case "$host_state" in
     running | degraded) ;;
-    *) die "VM1 boot did not reach a terminal systemd state: ${host_state:-unknown}" ;;
+    *) die "VM$vm boot did not reach a terminal systemd state: ${host_state:-unknown}" ;;
   esac
-  for _ in $(seq 1 180); do
-    unit_result="$(ssh -F "$CONFIG" -T e2e-vm-1 -- \
-      systemctl show subyard-power-reconcile.service --property=Result --value)"
-    [ "$unit_result" != success ] || break
+  # Anchor the observation deadline to the unit's current-boot monotonic start. This covers the
+  # complete production policy window even when activation begins after the host becomes ready.
+  # The local deadline is a fail-safe for subsequent SSH or systemd transport failures.
+  now="$(p0_monotonic_seconds)"
+  start_wait_deadline=$((now + POWER_RECONCILE_START_WAIT_SECONDS))
+  while :; do
+    if boot_power_reconciler_succeeded; then
+      unit_complete=1
+      break
+    fi
+    if [ "$POWER_RECONCILE_TERMINAL_FAILURE" = 1 ]; then
+      break
+    fi
+    if [ "$POWER_RECONCILE_STARTED_MICROS" -gt 0 ] \
+      && [ "$POWER_RECONCILE_UPTIME_SECONDS" -ge 0 ]; then
+      if [ "$policy_deadline" -eq 0 ]; then
+        started_seconds=$(((POWER_RECONCILE_STARTED_MICROS + 999999) / 1000000))
+        policy_deadline=$((started_seconds + POWER_RECONCILE_WINDOW_SECONDS))
+        remaining=$((policy_deadline - POWER_RECONCILE_UPTIME_SECONDS))
+        [ "$remaining" -ge 0 ] || remaining=0
+        now="$(p0_monotonic_seconds)"
+        local_policy_deadline=$((now + remaining + POWER_RECONCILE_PROBE_TIMEOUT))
+      fi
+      # This unsuccessful sample occurred at or after the complete service policy window.
+      if [ "$POWER_RECONCILE_UPTIME_SECONDS" -ge "$policy_deadline" ]; then
+        break
+      fi
+    fi
+    now="$(p0_monotonic_seconds)"
+    if [ "$policy_deadline" -eq 0 ]; then
+      [ "$now" -lt "$start_wait_deadline" ] || break
+    elif [ "$now" -ge "$local_policy_deadline" ]; then
+      # Take one final bounded sample after the fallback deadline before reporting failure.
+      if boot_power_reconciler_succeeded; then
+        unit_complete=1
+      fi
+      break
+    fi
     sleep 1
   done
-  if [ "$unit_result" != success ]; then
-    ssh -F "$CONFIG" -T e2e-vm-1 -- \
-      systemctl show subyard-power-reconcile.service \
+  if [ "$unit_complete" != 1 ]; then
+    power_reconcile_ssh systemctl show subyard-power-reconcile.service \
         --property=LoadState --property=ActiveState --property=SubState \
-        --property=Result --property=NRestarts >&2 || true
-    ssh -F "$CONFIG" -T e2e-vm-1 -- \
-      journalctl -b -u subyard-power-reconcile.service --no-pager -n 120 >&2 || true
-    die "VM1 boot power reconciliation failed: ${unit_result:-unknown}"
+        --property=Result --property=ExecMainStatus \
+        --property=ExecMainStartTimestampMonotonic --property=NRestarts >&2 || true
+    power_reconcile_ssh journalctl -b -u subyard-power-reconcile.service \
+      --no-pager -n 120 >&2 || true
+    die "VM$vm boot power reconciliation did not reach terminal success"
   fi
-  route="$(ssh -F "$CONFIG" -T e2e-vm-1 -- ip -4 route show default)"
-  [ -n "$route" ] || die 'VM1 lost its default route after reboot'
+  route="$(ssh -F "$CONFIG" -T "e2e-vm-$vm" -- ip -4 route show default)"
+  [ -n "$route" ] || die "VM$vm lost its default route after reboot"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -711,9 +946,11 @@ transport_probes() {
 
 run_lanes() {
   local owner_pid controller_pid owner_rc controller_rc
-  run_vm 1 owner & owner_pid=$!
-  run_vm 2 controller & controller_pid=$!
-  P0_CHILD_PIDS=("$owner_pid" "$controller_pid")
+  P0_CHILD_PIDS=()
+  start_runner_child run_vm 1 owner
+  owner_pid="$P0_STARTED_PID"
+  start_runner_child run_vm 2 controller
+  controller_pid="$P0_STARTED_PID"
   set +e
   wait "$owner_pid"; owner_rc=$?
   wait "$controller_pid"; controller_rc=$?
@@ -722,6 +959,145 @@ run_lanes() {
   [ "$owner_rc" != 3 ] && [ "$controller_rc" != 3 ] || return 3
   [ "$owner_rc" != 2 ] && [ "$controller_rc" != 2 ] || return 2
   [ "$owner_rc" = 0 ] && [ "$controller_rc" = 0 ] || return 1
+}
+
+run_full_aux_stage() {
+  local stage="$1" started now; shift
+  started="$(p0_monotonic_seconds)"
+  printf '%s\n' "$stage" > "$FULL_AUX_STAGE_FILE"
+  printf '  [ .. ] full auxiliary stage=%s vm=2\n' "$stage"
+  "$@"
+  now="$(p0_monotonic_seconds)"
+  printf '  [ ok ] full auxiliary stage=%s duration=%ss\n' \
+    "$stage" "$((now - started))"
+}
+
+full_aux_cleanup() {
+  local rc=0
+  cleanup_armed_full_fixtures >/dev/null 2>&1 || rc=1
+  [ -z "$SOURCE_ARCHIVE" ] || [ ! -e "$SOURCE_ARCHIVE" ] \
+    || find "$SOURCE_ARCHIVE" -delete >/dev/null 2>&1 \
+    || rc=1
+  return "$rc"
+}
+
+full_aux_exit() {
+  local rc="$1" cleanup_rc
+  trap - EXIT TERM
+  set +e
+  full_aux_cleanup
+  cleanup_rc=$?
+  if [ "$rc" != 0 ]; then
+    exit "$rc"
+  fi
+  exit "$cleanup_rc"
+}
+
+full_aux_lane() (
+  trap 'full_aux_exit "$?"' EXIT
+  trap 'exit 143' TERM
+  run_full_aux_stage nested-teardown run_vm 2 nested-teardown
+  run_full_aux_stage controller run_vm 2 controller
+  run_full_aux_stage fixture-platform run_vm 2 real-incus
+  run_full_aux_stage source-upgrade source_upgrade_lane 2 prepared
+  find "$FULL_SOURCE_ARM_FILE" -delete
+  run_full_aux_stage power-systemd power_systemd_lane 2
+  find "$FULL_POWER_ARM_FILE" -delete
+)
+
+full_parallel_matrix() {
+  local owner_pid aux_pid owner_rc=0 aux_rc=0 owner_done=0 aux_done=0
+  local started deadline stage now
+  started="$(p0_monotonic_seconds)"
+  deadline=$((started + FULL_MATRIX_TIMEOUT_SECONDS))
+  printf '  [ .. ] full owner stage=release vm=1\n'
+  P0_CHILD_PIDS=()
+  start_runner_child run_vm 1 owner
+  owner_pid="$P0_STARTED_PID"
+  start_runner_child full_aux_lane
+  aux_pid="$P0_STARTED_PID"
+
+  while [ "$owner_done" = 0 ] || [ "$aux_done" = 0 ]; do
+    if [ "$owner_done" = 0 ] && ! kill -0 "$owner_pid" >/dev/null 2>&1; then
+      set +e
+      wait "$owner_pid"; owner_rc=$?
+      set -e
+      owner_done=1
+      now="$(p0_monotonic_seconds)"
+      FULL_OWNER_DURATION=$((now - started))
+      if [ "$owner_rc" != 0 ]; then
+        P0_CURRENT_PHASE='parallel-matrix/release'
+        stop_runner_children
+        case "$owner_rc" in
+          3) return 3 ;;
+          2) return 2 ;;
+          *) return 1 ;;
+        esac
+      fi
+      printf '  [ ok ] full owner stage=release duration=%ss\n' "$FULL_OWNER_DURATION"
+    fi
+    if [ "$aux_done" = 0 ] && ! kill -0 "$aux_pid" >/dev/null 2>&1; then
+      set +e
+      wait "$aux_pid"; aux_rc=$?
+      set -e
+      aux_done=1
+      now="$(p0_monotonic_seconds)"
+      FULL_AUX_DURATION=$((now - started))
+      if [ "$aux_rc" != 0 ]; then
+        stage="$(sed -n '1p' "$FULL_AUX_STAGE_FILE" 2>/dev/null || true)"
+        P0_CURRENT_PHASE="parallel-matrix/${stage:-auxiliary}"
+        stop_runner_children
+        case "$aux_rc" in
+          3) return 3 ;;
+          2) return 2 ;;
+          *) return 1 ;;
+        esac
+      fi
+      printf '  [ ok ] full auxiliary chain duration=%ss\n' "$FULL_AUX_DURATION"
+    fi
+    if [ "$owner_done" = 0 ] || [ "$aux_done" = 0 ]; then
+      now="$(p0_monotonic_seconds)"
+      if [ "$now" -ge "$deadline" ]; then
+        stage="$(sed -n '1p' "$FULL_AUX_STAGE_FILE" 2>/dev/null || true)"
+        P0_CURRENT_PHASE="parallel-matrix/timeout-${stage:-auxiliary}"
+        stop_runner_children
+        return 2
+      fi
+      sleep 1
+    fi
+  done
+  P0_CHILD_PIDS=()
+}
+
+run_full_matrix_phase() {
+  local started duration now
+  if [ "$P0_RESUME" = 1 ] && full_matrix_checkpoint_passed; then
+    printf '  [ ok ] parallel release matrix skipped from matching checkpoint bundle=%s\n' \
+      "$P0_BUNDLE_HASH"
+    return 0
+  fi
+  P0_CURRENT_PHASE=parallel-matrix
+  started="$(p0_monotonic_seconds)"
+  P0_PHASE_STARTED="$started"
+  FULL_AUX_STAGE_FILE="$LOCAL_TEMP/full-aux-stage"
+  FULL_SOURCE_ARM_FILE="$LOCAL_TEMP/full-source-vm"
+  FULL_POWER_ARM_FILE="$LOCAL_TEMP/full-power-vm"
+  SOURCE_LANE_VM=2
+  POWER_SYSTEMD_LANE_VM=2
+  arm_full_fixture "$FULL_SOURCE_ARM_FILE" 2
+  arm_full_fixture "$FULL_POWER_ARM_FILE" 2
+  prepare_source_archive 2
+  printf '  [ .. ] phase=parallel-matrix bundle=%s timeout=%ss\n' \
+    "$P0_BUNDLE_HASH" "$FULL_MATRIX_TIMEOUT_SECONDS"
+  full_parallel_matrix
+  [ ! -e "$FULL_SOURCE_ARM_FILE" ] && [ ! -e "$FULL_POWER_ARM_FILE" ] \
+    || die 'parallel release matrix retained an armed fixture after success'
+  mark_full_matrix_passed
+  now="$(p0_monotonic_seconds)"
+  duration=$((now - started))
+  write_evidence parallel-matrix passed 0 "$duration"
+  printf '  [ ok ] phase=parallel-matrix duration=%ss owner=%ss auxiliary=%ss\n' \
+    "$duration" "$FULL_OWNER_DURATION" "$FULL_AUX_DURATION"
 }
 
 preflight_lane() {
@@ -746,23 +1122,44 @@ nested_teardown_lane() {
 }
 
 source_upgrade_lane() {
-  prepare_source_archive
+  local vm="${1:-1}" archive_state="${2:-create}"
+  SOURCE_LANE_VM="$vm"
   SOURCE_HOST_STARTED=1
-  run_source_vm prepare "$SOURCE_ARCHIVE_REMOTE" "$SOURCE_HASH" "$SOURCE_COMMIT"
-  p0_guest 1 sh -c '[ ! -e "$1" ] || find "$1" -delete' _ "$SOURCE_ARCHIVE_REMOTE"
+  case "$archive_state" in
+    create) prepare_source_archive "$vm" ;;
+    prepared)
+      [ -n "$SOURCE_ARCHIVE" ] && [ -r "$SOURCE_ARCHIVE" ] \
+        && [ -n "$SOURCE_ARCHIVE_REMOTE" ] \
+        && [ -n "$SOURCE_HASH" ] && [ -n "$SOURCE_COMMIT" ] \
+        || die 'prepared source archive state is incomplete'
+      ;;
+    *) die "unknown source archive state: $archive_state" ;;
+  esac
+  run_source_vm "$vm" prepare "$SOURCE_ARCHIVE_REMOTE" "$SOURCE_HASH" "$SOURCE_COMMIT"
+  p0_guest "$vm" sh -c '[ ! -e "$1" ] || find "$1" -delete' _ "$SOURCE_ARCHIVE_REMOTE"
   SOURCE_ARCHIVE_REMOTE=''
   find "$SOURCE_ARCHIVE" -delete
   SOURCE_ARCHIVE=''
-  reboot_vm1
-  run_source_vm resume
-  reboot_vm1
-  run_source_vm finish
+  reboot_vm "$vm"
+  run_source_vm "$vm" resume
+  reboot_vm "$vm"
+  run_source_vm "$vm" finish
   SOURCE_HOST_STARTED=0
 }
 
+power_systemd_lane() {
+  local vm="${1:-1}"
+  POWER_SYSTEMD_LANE_VM="$vm"
+  run_power_systemd_vm "$vm" dev/e2e/power-reconciler-systemd-255.sh
+  run_power_systemd_vm "$vm" dev/e2e/power-reconciler-systemd.sh
+  POWER_SYSTEMD_STARTED=1
+  run_power_systemd_vm "$vm" dev/e2e/power-reconciler-upgrade.sh run "$TOKEN"
+  POWER_SYSTEMD_STARTED=0
+}
+
 reboot_verify_lane() {
-  reboot_vm1
-  reboot_vm1
+  reboot_vm 1
+  reboot_vm 1
 }
 
 peer_lane() {
@@ -898,7 +1295,14 @@ case "$P0_LANE" in
     ;;
   source-upgrade)
     run_phase capacity-preflight run_vm 1 capacity-preflight
-    run_phase source-upgrade source_upgrade_lane
+    run_phase source-upgrade-platform run_vm 1 real-incus
+    run_phase source-upgrade source_upgrade_lane 1
+    run_phase cleanup cleanup_lane
+    ;;
+  power-systemd)
+    run_phase capacity-preflight run_vm 1 capacity-preflight
+    run_phase power-systemd-platform run_vm 1 real-incus
+    run_phase power-systemd power_systemd_lane 1
     run_phase cleanup cleanup_lane
     ;;
   reboot-verify) run_phase reboot-verify reboot_verify_lane ;;
@@ -918,14 +1322,12 @@ case "$P0_LANE" in
     run_phase capacity-preflight preflight_lane
     start_capacity_monitors
     run_phase boundary verify_boundary
-    run_phase nested-teardown nested_teardown_lane
     run_phase transport transport_probes
-    run_phase release run_lanes
-    run_phase source-upgrade source_upgrade_lane
+    run_full_matrix_phase
     run_phase peer peer_lane
     run_phase cleanup cleanup_lane
     P0_CURRENT_PHASE=final-verify
-    P0_PHASE_STARTED=$SECONDS
+    P0_PHASE_STARTED="$(p0_monotonic_seconds)"
     for vm in 1 2; do
       [ "$(home_state "$vm")" = "${HOME_STATE_BEFORE[$vm]}" ] \
         || die "VM$vm operator home permissions or ownership changed"

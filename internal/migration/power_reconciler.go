@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/Subyard/Subyard/internal/systemdunit"
 )
 
 const (
@@ -53,7 +55,7 @@ func commitPowerReconciler(
 	if before == powerReconcilerAbsent {
 		return verifyPowerReconciler(ctx, options, before)
 	}
-	if err := runPowerReconcilerMigration(ctx, options, powerReconcilerExecutable(options)); err != nil {
+	if err := runPowerReconcilerMigration(ctx, options, options); err != nil {
 		return fmt.Errorf("update host power reconciler: %w", err)
 	}
 	if err := verifyPowerReconciler(ctx, options, before); err != nil {
@@ -67,6 +69,23 @@ func verifyPowerReconciler(
 	ctx context.Context,
 	options ReleaseOptions,
 	before string,
+) error {
+	return verifyPowerReconcilerManagerState(ctx, options, before, false)
+}
+
+func verifyRestoredPowerReconciler(
+	ctx context.Context,
+	options ReleaseOptions,
+	before string,
+) error {
+	return verifyPowerReconcilerManagerState(ctx, options, before, true)
+}
+
+func verifyPowerReconcilerManagerState(
+	ctx context.Context,
+	options ReleaseOptions,
+	before string,
+	allowSettledPrevious bool,
 ) error {
 	if err := validatePowerReconcilerState(before); err != nil {
 		return err
@@ -106,6 +125,13 @@ func verifyPowerReconciler(
 		return errors.New("installed host power reconciler unit is stale")
 	}
 
+	managerVerifier := systemdunit.RequireFreshLoaded
+	if allowSettledPrevious {
+		managerVerifier = systemdunit.RequireSettledPrevious
+	}
+	if err := managerVerifier(ctx, "systemctl", options.Environment, filepath.Base(unit)); err != nil {
+		return fmt.Errorf("installed host power reconciler manager state is stale: %w", err)
+	}
 	command := exec.CommandContext(ctx, "systemctl", "is-enabled", "--quiet", filepath.Base(unit))
 	command.Env = options.Environment
 	command.Stdin, command.Stdout, command.Stderr = nil, io.Discard, io.Discard
@@ -119,6 +145,8 @@ func rollbackPowerReconciler(
 	ctx context.Context,
 	options ReleaseOptions,
 	before string,
+	usePreviousRunner bool,
+	allowSettledPrevious bool,
 ) error {
 	if err := validatePowerReconcilerState(before); err != nil {
 		return err
@@ -126,15 +154,21 @@ func rollbackPowerReconciler(
 	if before == powerReconcilerAbsent {
 		return verifyPowerReconciler(ctx, options, before)
 	}
-	previous, err := previousPowerReconcilerOptions(options)
+	previous, err := previousRuntimeOptions(options)
 	if err != nil {
 		return err
 	}
-	// The retained release predates this migration action. Run the rollback
-	// through the active candidate while sourcing the installed payload and unit
-	// from the retained release.
-	runErr := runPowerReconcilerMigration(ctx, previous, powerReconcilerExecutable(options))
-	verifyErr := verifyPowerReconciler(ctx, previous, before)
+	previous.Environment = powerReconcilerEnvironment(previous, previous.RepositoryRoot)
+	runnerOptions := options
+	if usePreviousRunner {
+		runnerOptions = previous
+	}
+	runErr := runPowerReconcilerMigration(ctx, runnerOptions, previous)
+	verify := verifyPowerReconciler
+	if allowSettledPrevious {
+		verify = verifyRestoredPowerReconciler
+	}
+	verifyErr := verify(ctx, previous, before)
 	if verifyErr == nil {
 		return nil
 	}
@@ -156,13 +190,29 @@ func validatePowerReconcilerState(state string) error {
 
 func runPowerReconcilerMigration(
 	ctx context.Context,
-	options ReleaseOptions,
-	runner string,
+	runnerOptions ReleaseOptions,
+	payloadOptions ReleaseOptions,
 ) error {
-	command := exec.CommandContext(ctx, runner, "_migrate", "reconcile-power-reconciler")
-	command.Env = powerReconcilerEnvironment(options, options.RepositoryRoot)
+	command := exec.CommandContext(
+		ctx,
+		powerReconcilerExecutable(runnerOptions),
+		"_migrate",
+		"reconcile-power-reconciler",
+	)
+	command.Env = powerReconcilerEnvironment(runnerOptions, runnerOptions.RepositoryRoot)
+	command.Env = removePowerReconcilerEnvironment(
+		command.Env, "SUBYARD_POWER_MIGRATION_PAYLOAD_ROOT",
+	)
+	if filepath.Clean(runnerOptions.RepositoryRoot) != filepath.Clean(payloadOptions.RepositoryRoot) {
+		command.Env = replacePowerReconcilerEnvironment(
+			command.Env,
+			"SUBYARD_POWER_MIGRATION_PAYLOAD_ROOT",
+			payloadOptions.RepositoryRoot,
+		)
+	}
 	command.Stdin = strings.NewReader("")
-	command.Stdout, command.Stderr = powerReconcilerOutput(options), powerReconcilerError(options)
+	command.Stdout = powerReconcilerOutput(runnerOptions)
+	command.Stderr = powerReconcilerError(runnerOptions)
 	return command.Run()
 }
 
@@ -173,7 +223,7 @@ func powerReconcilerExecutable(options ReleaseOptions) string {
 	return filepath.Join(options.RepositoryRoot, "bin", "yard-engine")
 }
 
-func previousPowerReconcilerOptions(options ReleaseOptions) (ReleaseOptions, error) {
+func previousRuntimeOptions(options ReleaseOptions) (ReleaseOptions, error) {
 	if options.RuntimeRoot == "" || !filepath.IsAbs(options.RuntimeRoot) {
 		return ReleaseOptions{}, errors.New("absolute runtime root is required for power reconciler rollback")
 	}
@@ -193,7 +243,31 @@ func previousPowerReconcilerOptions(options ReleaseOptions) (ReleaseOptions, err
 	result := options
 	result.RepositoryRoot = previous
 	result.Executable = filepath.Join(previous, "bin", "yard-engine")
-	result.Environment = powerReconcilerEnvironment(result, previous)
+	executableInfo, err := os.Lstat(result.Executable)
+	if err != nil {
+		return ReleaseOptions{}, fmt.Errorf("inspect previous runtime executable: %w", err)
+	}
+	if !executableInfo.Mode().IsRegular() {
+		return ReleaseOptions{}, errors.New("previous runtime executable is not a regular file")
+	}
+	if executableInfo.Mode().Perm()&0o111 == 0 {
+		return ReleaseOptions{}, errors.New("previous runtime executable is not executable")
+	}
+	result.Environment = append([]string(nil), result.Environment...)
+	result.Environment = removePowerReconcilerEnvironment(
+		result.Environment,
+		"SUBYARD_POWER_MIGRATION_PAYLOAD_ROOT",
+	)
+	result.Environment = replacePowerReconcilerEnvironment(
+		result.Environment,
+		"SUBYARD_REPOSITORY_ROOT",
+		previous,
+	)
+	result.Environment = replacePowerReconcilerEnvironment(
+		result.Environment,
+		"SUBYARD_CONFIG_DIR",
+		filepath.Join(previous, "config"),
+	)
 	return result, nil
 }
 
@@ -204,16 +278,25 @@ func powerReconcilerEnvironment(options ReleaseOptions, repositoryRoot string) [
 		"SUBYARD_REPOSITORY_ROOT":          repositoryRoot,
 		"SUBYARD_CONFIG_DIR":               filepath.Join(repositoryRoot, "config"),
 	} {
-		prefix := name + "="
-		filtered := environment[:0]
-		for _, assignment := range environment {
-			if !strings.HasPrefix(assignment, prefix) {
-				filtered = append(filtered, assignment)
-			}
-		}
-		environment = append(filtered, prefix+value)
+		environment = replacePowerReconcilerEnvironment(environment, name, value)
 	}
 	return environment
+}
+
+func replacePowerReconcilerEnvironment(environment []string, name, value string) []string {
+	environment = removePowerReconcilerEnvironment(environment, name)
+	return append(environment, name+"="+value)
+}
+
+func removePowerReconcilerEnvironment(environment []string, name string) []string {
+	prefix := name + "="
+	filtered := environment[:0]
+	for _, assignment := range environment {
+		if !strings.HasPrefix(assignment, prefix) {
+			filtered = append(filtered, assignment)
+		}
+	}
+	return filtered
 }
 
 func powerReconcilerPath(options ReleaseOptions, name, fallback string) string {

@@ -14,7 +14,7 @@ On Debian, install the normal build prerequisites with:
 
 ```sh
 sudo apt-get update
-sudo apt-get install -y golang-go gcc make shellcheck jq
+sudo apt-get install -y golang-go gcc make shellcheck jq systemd
 ```
 
 Inside a yard dedicated to Subyard development, enable the `subyard-dev` profile and run `yard
@@ -62,7 +62,8 @@ is recovered fail-closed before the installer retries it.
 
 `./tests/run.sh` is the single unprivileged gate. It runs formatting, vet, race-enabled Go tests, a
 short parser fuzz smoke, the static binary build, and all Bash unit/contract/integration tests. It
-does not require root, the host Incus socket, real credentials, systemd, SSH peers, or external
+requires the `systemd-analyze` binary for unprivileged unit parsing, but does not require root, a
+running systemd manager/PID 1, the host Incus socket, real credentials, SSH peers, or external
 services.
 
 CI additionally installs `openssh-server`, downloads the pinned age/SOPS artifacts through the

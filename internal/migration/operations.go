@@ -33,7 +33,8 @@ func prepareTypedOperation(
 	case OperationKindTestVMBrokerRuntimeV1:
 		state, err := testyardmigration.PrepareBrokerRuntime(ctx, testYardOptions(options))
 		return string(state), err
-	case OperationKindPowerReconcilerRuntimeV1:
+	case OperationKindPowerReconcilerRuntimeV1,
+		OperationKindPowerReconcilerSystemdCompatV1:
 		return preparePowerReconciler(options)
 	default:
 		return "", fmt.Errorf("unsupported migration operation kind %q", operation.Kind)
@@ -65,7 +66,8 @@ func commitTypedOperation(
 			testYardOptions(options),
 			testyardmigration.BrokerRuntimeState(before),
 		)
-	case OperationKindPowerReconcilerRuntimeV1:
+	case OperationKindPowerReconcilerRuntimeV1,
+		OperationKindPowerReconcilerSystemdCompatV1:
 		return commitPowerReconciler(ctx, options, before)
 	default:
 		return fmt.Errorf("unsupported migration operation kind %q", operation.Kind)
@@ -96,7 +98,8 @@ func verifyTypedOperation(
 			testYardOptions(options),
 			testyardmigration.BrokerRuntimeState(before),
 		)
-	case OperationKindPowerReconcilerRuntimeV1:
+	case OperationKindPowerReconcilerRuntimeV1,
+		OperationKindPowerReconcilerSystemdCompatV1:
 		return verifyPowerReconciler(ctx, options, before)
 	default:
 		return fmt.Errorf("unsupported migration operation kind %q", operation.Kind)
@@ -108,11 +111,46 @@ func rollbackTypedOperation(
 	options ReleaseOptions,
 	operation Operation,
 	before string,
+	fromLayout int,
+) error {
+	return rollbackTypedOperationWithLegacyPower(
+		ctx,
+		options,
+		operation,
+		before,
+		fromLayout,
+		"",
+	)
+}
+
+func rollbackTypedOperationWithLegacyPower(
+	ctx context.Context,
+	options ReleaseOptions,
+	operation Operation,
+	before string,
+	fromLayout int,
+	legacyDesiredPower string,
 ) error {
 	switch operation.Kind {
 	case OperationKindTestYardOwnerV1:
 		state := testyardmigration.State(before)
-		if err := testyardmigration.Rollback(ctx, testYardOptions(options), state); err != nil {
+		current := testYardOptions(options)
+		legacy := current
+		if fromLayout == 1 && state != testyardmigration.StateAbsent &&
+			state != testyardmigration.StateCurrent {
+			previous, err := previousRuntimeOptions(options)
+			if err != nil {
+				return err
+			}
+			legacy = testYardOptions(previous)
+		}
+		if err := testyardmigration.RollbackWithLegacyRuntimeAndPower(
+			ctx,
+			current,
+			legacy,
+			state,
+			legacyDesiredPower,
+		); err != nil {
 			return err
 		}
 		return testyardmigration.VerifyRollback(testYardOptions(options), state)
@@ -130,16 +168,53 @@ func rollbackTypedOperation(
 			before,
 		)
 	case OperationKindTestVMBrokerRuntimeV1:
+		disposition, err := brokerRollbackPolicy(fromLayout)
+		if err != nil {
+			return fmt.Errorf("operation %q: %w", operation.ID, err)
+		}
+		if disposition == brokerRollbackDeferredToOwner {
+			return nil
+		}
 		return testyardmigration.RollbackBrokerRuntime(
 			ctx,
 			testYardOptions(options),
 			testyardmigration.BrokerRuntimeState(before),
 		)
 	case OperationKindPowerReconcilerRuntimeV1:
-		return rollbackPowerReconciler(ctx, options, before)
+		return rollbackPowerReconciler(ctx, options, before, false, false)
+	case OperationKindPowerReconcilerSystemdCompatV1:
+		switch fromLayout {
+		case 1, 2, 3:
+			return rollbackPowerReconciler(ctx, options, before, false, false)
+		case 4:
+			return rollbackPowerReconciler(ctx, options, before, true, true)
+		default:
+			return fmt.Errorf(
+				"unsupported compatibility layout %d for operation %q",
+				fromLayout,
+				operation.ID,
+			)
+		}
 	default:
 		return fmt.Errorf("unsupported migration operation kind %q", operation.Kind)
 	}
+}
+
+type brokerRollbackDisposition uint8
+
+const (
+	brokerRollbackDeferredToOwner brokerRollbackDisposition = iota
+	brokerRollbackWithPrevious
+)
+
+func brokerRollbackPolicy(fromLayout int) (brokerRollbackDisposition, error) {
+	if fromLayout < 1 {
+		return 0, fmt.Errorf("unsupported broker rollback layout %d", fromLayout)
+	}
+	if fromLayout == 1 {
+		return brokerRollbackDeferredToOwner, nil
+	}
+	return brokerRollbackWithPrevious, nil
 }
 
 func reprepareTypedOperation(
@@ -210,7 +285,8 @@ func reprepareTypedOperation(
 			return "", false, err
 		}
 		return string(current), true, nil
-	case OperationKindPowerReconcilerRuntimeV1:
+	case OperationKindPowerReconcilerRuntimeV1,
+		OperationKindPowerReconcilerSystemdCompatV1:
 		current, err := preparePowerReconciler(options)
 		if err != nil {
 			return "", false, err
@@ -289,7 +365,8 @@ func validateOperationState(operation transactionOperation) error {
 				err,
 			)
 		}
-	case OperationKindPowerReconcilerRuntimeV1:
+	case OperationKindPowerReconcilerRuntimeV1,
+		OperationKindPowerReconcilerSystemdCompatV1:
 		if err := validatePowerReconcilerState(operation.Before); err != nil {
 			return fmt.Errorf(
 				"typed migration operation has invalid prepared state: %w",

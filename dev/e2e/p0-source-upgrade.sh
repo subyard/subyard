@@ -33,7 +33,7 @@ MIGRATION_SOURCE="$OPERATOR_HOME/.config/subyard/migration-fixture/legacy/config
 MIGRATION_DESTINATION="$OPERATOR_HOME/.config/subyard/migration-fixture/current/config.env"
 MIGRATION_STATE="$OPERATOR_HOME/.config/subyard/migrations/state.json"
 LEGACY_INSTALLER="$ROOT/tests/fixtures/migrations/v0.1.0-install-runtime-release.sh"
-LAYOUT_FIVE_REGISTRY="$ROOT/tests/fixtures/migrations/layout-5-production-prefix.json"
+LAYOUT_SIX_REGISTRY="$ROOT/tests/fixtures/migrations/layout-6-production-prefix.json"
 POWER_RETRY_RUNTIME="subyard-p0-source-power-retry-$TOKEN"
 POWER_RETRY_PROBE="/run/$POWER_RETRY_RUNTIME/failed-once"
 POWER_RETRY_DROPIN="/etc/systemd/system/subyard-power-reconcile.service.d/p0-source-$TOKEN.conf"
@@ -41,8 +41,10 @@ POWER_RETRY_WRAPPER="/usr/local/libexec/subyard/p0-source-power-retry-$TOKEN"
 
 die() { printf 'p0-source-upgrade: %s\n' "$*" >&2; exit 2; }
 [[ "$TOKEN" =~ ^[0-9]+$ ]] || die 'allocation token must be numeric'
-[ -n "${SUBYARD_E2E_VM:-}" ] && [ "$SUBYARD_E2E_VM" = 1 ] \
-  || die 'run on allocated VM1 through dev/agent-e2e.sh'
+case "${SUBYARD_E2E_VM:-}" in
+  1|2) ;;
+  *) die 'run on an allocated P0 worker VM through dev/agent-e2e.sh' ;;
+esac
 
 # A pristine VM adds the current agent user to incus-admin while this shell is
 # already running. Use the disposable VM's passwordless sudo until the next
@@ -99,6 +101,19 @@ operator_no_go() {
 }
 operator_yard() {
   operator_no_go "$OPERATOR_HOME/.local/bin/yard" "$@"
+}
+
+relax_fixture_init_deadline() {
+  local timeout_file="$SOURCE_ROOT/internal/cli/cli.go"
+  [ "$(operator_env grep -Fc $'\t\t\tTimeout:        10 * time.Minute,' "$timeout_file")" = 1 ] \
+    && [ "$(operator_env grep -Fc $'\t\t\tTimeout:        30 * time.Minute,' "$timeout_file")" = 0 ] \
+    || die 'source-upgrade adapter timeout fixture no longer matches its source'
+  operator_env sed -i \
+    $'s/^\t\t\tTimeout:        10 \\* time.Minute,$/\t\t\tTimeout:        30 * time.Minute,/' \
+    "$timeout_file"
+  [ "$(operator_env grep -Fc $'\t\t\tTimeout:        10 * time.Minute,' "$timeout_file")" = 0 ] \
+    && [ "$(operator_env grep -Fc $'\t\t\tTimeout:        30 * time.Minute,' "$timeout_file")" = 1 ] \
+    || die 'source-upgrade adapter timeout fixture was not applied'
 }
 
 assert_fixture_project() {
@@ -257,11 +272,10 @@ prepare_operator() {
     "$SOURCE_ROOT/config/profiles/openclaw" "$SOURCE_ROOT/config/staging" \
     "$SOURCE_ROOT/config/qa-pool" \
     "$OPERATOR_HOME/.local/bin"
-  # This fixture verifies the private Codex asset migration. Keep the legacy
-  # ten-minute init budget for that contract instead of downloading unrelated
-  # agent CLIs from the network.
+  # This fixture verifies the private Codex asset migration without downloading
+  # unrelated agent CLIs from the network.
   operator_env bash -c 'printf "%s" "$2" > "$1"' _ "$SOURCE_ROOT/private/config.env" \
-    $'DEV_SUDO=1\nCODING_TOOL_INTEGRATIONS=codex\nAGENT_codex_RULES="$SUBYARD_CONFIG_DIR/../private/agents/codex/repo.rules"\n'
+    $'DEV_SUDO=1\nAGENTS=codex\nCODING_TOOL_INTEGRATIONS=codex\nAGENT_codex_RULES="$SUBYARD_CONFIG_DIR/../private/agents/codex/repo.rules"\n'
   operator_env bash -c \
     'printf "YARD_TEMPLATE=e2e-vms\nSSH_PORT=2223\nDEV_UID=1001\nYARD_IMAGE=%s\nYARD_IMAGE_FALLBACK=%s\n" "$2" "$2" > "$1"' \
     _ "$SOURCE_ROOT/private/yards/e2e-yard.env" "$BASE_IMAGE"
@@ -289,6 +303,10 @@ prepare_operator() {
     "$SOURCE_ROOT/config/qa-pool/secrets.env" \
     "$SOURCE_ROOT/config/qa-pool/pool.jsonl" \
     "$SOURCE_ROOT/config/qa-pool/operator-note.local"
+  # Clean network provisioning can exceed the production ten-minute adapter
+  # deadline under the full parallel matrix. Relax only this disposable source
+  # build; the shipped CLI keeps its production deadline.
+  relax_fixture_init_deadline
   operator_env env YARD_BUILD_VERSION="source-$SOURCE_REVISION" \
     "$SOURCE_ROOT/scripts/build-engine.sh" --force
   operator_env ln -s "$SOURCE_ROOT/bin/yard" "$OPERATOR_HOME/.local/bin/yard"
@@ -331,14 +349,14 @@ package_candidates() {
   "$ROOT/dev/package-engine.sh" --output-dir "$RELEASE_ROOT/a" --version "$VERSION_A" \
     --runtime-installer "$LEGACY_INSTALLER" >/dev/null
   "$ROOT/dev/package-engine.sh" --output-dir "$RELEASE_ROOT/b" --version "$VERSION_B" \
-    --migration-registry "$LAYOUT_FIVE_REGISTRY" >/dev/null
+    --migration-registry "$LAYOUT_SIX_REGISTRY" >/dev/null
   case "$(uname -m)" in
     x86_64) arch=amd64 ;;
     aarch64 | arm64) arch=arm64 ;;
     *) die "unsupported live migration architecture: $(uname -m)" ;;
   esac
   bundle="$RELEASE_ROOT/b/subyard-$VERSION_B-linux-$arch.tar.gz"
-  [ -f "$bundle" ] || die 'layout-five candidate bundle is unavailable'
+  [ -f "$bundle" ] || die 'layout-six candidate bundle is unavailable'
   install -d -m 0755 "$PREPARED_CANDIDATE"
   tar -xzf "$bundle" -C "$PREPARED_CANDIDATE"
   chmod -R a+rX "$RELEASE_ROOT"
@@ -450,22 +468,24 @@ seed_versioned_migration_input() {
   operator_env test ! -e "$MIGRATION_DESTINATION" \
     || die 'synthetic migration destination already exists'
   jq -e '
-    .layout == 4 and
+    .layout == 5 and
     .applied == [
       "migrate-test-yard-owner",
       "refresh-test-vm-broker",
-      "refresh-power-reconciler"
+      "refresh-power-reconciler",
+      "repair-power-reconciler-systemd-compat"
     ]
   ' < <(operator_env cat "$MIGRATION_STATE") >/dev/null \
     || die 'production migration history is unavailable before synthetic migration'
   state_before="$(operator_env sha256sum "$MIGRATION_STATE" | awk '{print $1}')"
   report="$(candidate_migrate check)"
   if ! jq -e '
-    .layout == 4 and .targetLayout == 5 and .pending == true and
+    .layout == 5 and .targetLayout == 6 and .pending == true and
     .phase == "reconcile" and
     .requiredMigrations == [
       "refresh-test-vm-broker",
       "refresh-power-reconciler",
+      "repair-power-reconciler-systemd-compat",
       "move-legacy-assignments"
     ] and
     .affectedResources == [
@@ -490,18 +510,19 @@ verify_prepared_versioned_migration() {
   operator_env cmp "$MIGRATION_SOURCE" "$MIGRATION_DESTINATION" \
     || die 'prepared migration did not retain matching old and new consumer inputs'
   jq -e '
-    .layout == 4 and
+    .layout == 5 and
     .applied == [
       "migrate-test-yard-owner",
       "refresh-test-vm-broker",
-      "refresh-power-reconciler"
+      "refresh-power-reconciler",
+      "repair-power-reconciler-systemd-compat"
     ]
   ' < <(operator_env cat "$MIGRATION_STATE") >/dev/null \
     || die 'prepared migration advanced the applied layout'
   transaction="$(migration_transaction_directory "$VERSION_B")"
   journal="$(operator_env cat "$transaction/transaction.json")"
   if ! jq -e --arg version "$VERSION_B" '
-    .phase == "prepared" and .fromLayout == 4 and .toLayout == 5 and
+    .phase == "prepared" and .fromLayout == 5 and .toLayout == 6 and
     .toRelease == $version and (.entries | length) == 1 and
     (.operations | map([.migrationId, .operationId, .kind])) == [
       ["migrate-test-yard-owner", "test-yard-owner", "test-yard-owner-v1"],
@@ -510,7 +531,9 @@ verify_prepared_versioned_migration() {
       ["refresh-test-vm-broker", "test-vm-broker-runtime",
        "test-vm-broker-runtime-v1"],
       ["refresh-power-reconciler", "power-reconciler-runtime",
-       "power-reconciler-runtime-v1"]
+       "power-reconciler-runtime-v1"],
+      ["repair-power-reconciler-systemd-compat", "power-reconciler-systemd-compat",
+       "power-reconciler-systemd-compat-v1"]
     ]
   ' <<<"$journal" >/dev/null; then
     jq -c --arg version "$VERSION_B" '{
@@ -525,7 +548,7 @@ verify_prepared_versioned_migration() {
   fi
   report="$(candidate_migrate check)"
   jq -e '
-    .layout == 4 and .targetLayout == 5 and .pending == true and .phase == "prepared"
+    .layout == 5 and .targetLayout == 6 and .pending == true and .phase == "prepared"
   ' <<<"$report" >/dev/null || die 'prepared migration does not resume deterministically'
   verify_protected_migration_state
 }
@@ -539,18 +562,19 @@ verify_committed_versioned_migration() {
     && operator_env grep -Fxq 'TOKEN=synthetic-layout' "$MIGRATION_DESTINATION" \
     || die 'committed migration retained the old active path or lost consumer data'
   jq -e '
-    .layout == 5 and
+    .layout == 6 and
     .applied == [
       "migrate-test-yard-owner",
       "refresh-test-vm-broker",
       "refresh-power-reconciler",
+      "repair-power-reconciler-systemd-compat",
       "move-legacy-assignments"
     ]
   ' < <(operator_env cat "$MIGRATION_STATE") >/dev/null \
     || die 'committed migration did not advance the applied layout'
   transaction="$(migration_transaction_directory "$VERSION_B")"
   jq -e --arg version "$VERSION_B" '
-    .phase == "committed" and .fromLayout == 4 and .toLayout == 5 and
+    .phase == "committed" and .fromLayout == 5 and .toLayout == 6 and
     .toRelease == $version and (.entries | length) == 1 and
     (.operations | map([.migrationId, .operationId, .kind])) == [
       ["migrate-test-yard-owner", "test-yard-owner", "test-yard-owner-v1"],
@@ -559,13 +583,15 @@ verify_committed_versioned_migration() {
       ["refresh-test-vm-broker", "test-vm-broker-runtime",
        "test-vm-broker-runtime-v1"],
       ["refresh-power-reconciler", "power-reconciler-runtime",
-       "power-reconciler-runtime-v1"]
+       "power-reconciler-runtime-v1"],
+      ["repair-power-reconciler-systemd-compat", "power-reconciler-systemd-compat",
+       "power-reconciler-systemd-compat-v1"]
     ]
   ' < <(operator_env cat "$transaction/transaction.json") >/dev/null \
     || die 'committed migration journal is inconsistent'
   report="$(candidate_migrate check)"
   jq -e '
-    .layout == 5 and .targetLayout == 5 and (.pending // false) == false and
+    .layout == 6 and .targetLayout == 6 and (.pending // false) == false and
     .phase == "committed"
   ' <<<"$report" >/dev/null || die 'committed migration does not resume deterministically'
   verify_protected_migration_state
@@ -580,16 +606,17 @@ verify_rolled_back_versioned_migration() {
     && operator_env test ! -L "$MIGRATION_DESTINATION" \
     || die 'runtime rollback did not restore the previous consumer path'
   jq -e '
-    .layout == 4 and
+    .layout == 5 and
     .applied == [
       "migrate-test-yard-owner",
       "refresh-test-vm-broker",
-      "refresh-power-reconciler"
+      "refresh-power-reconciler",
+      "repair-power-reconciler-systemd-compat"
     ]
   ' < <(operator_env cat "$MIGRATION_STATE") >/dev/null \
     || die 'runtime rollback did not restore the previous data layout'
   transaction="$(migration_transaction_directory "$VERSION_B")"
-  jq -e '.phase == "rolled-back" and .fromLayout == 4 and .toLayout == 5' \
+  jq -e '.phase == "rolled-back" and .fromLayout == 5 and .toLayout == 6' \
     < <(operator_env cat "$transaction/transaction.json") >/dev/null \
     || die 'rolled-back migration journal is inconsistent'
   verify_protected_migration_state
@@ -651,22 +678,26 @@ verify_without_source_checkout() {
   operator_env mv "$unavailable" "$SOURCE_ROOT"
 }
 
-wait_for_running_instance() {
-  local project="$1" instance="$2" _ state=''
+wait_for_desired_yards() {
+  local expected_named="$1" expected_default="$2" _ named_state='' default_state=''
   for _ in $(seq 1 60); do
-    state="$(incus list "$instance" --project "$project" -f csv -c s 2>/dev/null)" \
-      || state=''
-    [ "$state" = RUNNING ] && return 0
+    named_state="$(incus list "$INSTANCE" --project "$PROJECT" -f csv -c s 2>/dev/null)" \
+      || named_state=''
+    default_state="$(incus list "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" \
+      -f csv -c s 2>/dev/null)" || default_state=''
+    [ "$named_state" = "$expected_named" ] \
+      && [ "$default_state" = "$expected_default" ] \
+      && return 0
     sleep 1
   done
+  printf 'named project=%s instance=%s state=%s expected=%s\n' \
+    "$PROJECT" "$INSTANCE" "${named_state:-unavailable}" "$expected_named" >&2
+  printf 'default project=%s instance=%s state=%s expected=%s\n' \
+    "$DEFAULT_PROJECT" "$DEFAULT_INSTANCE" "${default_state:-unavailable}" \
+    "$expected_default" >&2
   sudo -n systemctl --no-pager --full status subyard-power-reconcile.service >&2 || true
   sudo -n journalctl -u subyard-power-reconcile.service -b --no-pager -n 120 >&2 || true
   return 1
-}
-
-wait_for_running_yards() {
-  wait_for_running_instance "$PROJECT" "$INSTANCE" \
-    && wait_for_running_instance "$DEFAULT_PROJECT" "$DEFAULT_INSTANCE"
 }
 
 install_power_retry_probe() {
@@ -815,14 +846,18 @@ prepare() {
   verify_config_workflow
   verify_without_source_checkout
   prepare_default_yard
+  operator_yard stop --yes
 
   seed_versioned_migration_input
   candidate_migrate apply >/dev/null
   verify_prepared_versioned_migration
   [ "$(incus config get "$INSTANCE" user.subyard.desired_power --project "$PROJECT")" = running ] \
     && [ "$(incus config get "$DEFAULT_INSTANCE" user.subyard.desired_power \
-      --project "$DEFAULT_PROJECT")" = running ] \
-    || die 'default and named yard desired power is not persisted before reboot'
+      --project "$DEFAULT_PROJECT")" = stopped ] \
+    && [ "$(incus config get "$INSTANCE" boot.autostart --project "$PROJECT")" = false ] \
+    && [ "$(incus config get "$DEFAULT_INSTANCE" boot.autostart \
+      --project "$DEFAULT_PROJECT")" = false ] \
+    || die 'named running and default stopped desired power is not persisted before reboot'
   operator_env test ! -e "$OPERATOR_HOME/go-invoked" \
     || die 'production operator cycle invoked Go'
   require_operator_password_sudo
@@ -844,7 +879,12 @@ load_rebooted_fixture() {
 
 resume() {
   load_rebooted_fixture
-  wait_for_running_yards || die 'boot reconciler did not restore default and named yards'
+  wait_for_desired_yards RUNNING STOPPED \
+    || die 'boot reconciler did not restore named running/default stopped states'
+  [ "$(incus config get "$INSTANCE" boot.autostart --project "$PROJECT")" = false ] \
+    && [ "$(incus config get "$DEFAULT_INSTANCE" boot.autostart \
+      --project "$DEFAULT_PROJECT")" = false ] \
+    || die 'boot reconciler changed boot.autostart during the first reboot'
   restore_operator_passwordless_sudo
   verify_prepared_versioned_migration
   candidate_migrate apply >/dev/null
@@ -860,10 +900,15 @@ resume() {
   verify_config_workflow
   operator_env chmod 0600 \
     "$OPERATOR_HOME/.config/subyard/yards/test-yard/config.env"
-  [ "$(incus config get "$INSTANCE" user.subyard.desired_power --project "$PROJECT")" = running ] \
+  operator_yard -Y "$YARD_NAME" stop --yes
+  operator_yard start --yes
+  [ "$(incus config get "$INSTANCE" user.subyard.desired_power --project "$PROJECT")" = stopped ] \
     && [ "$(incus config get "$DEFAULT_INSTANCE" user.subyard.desired_power \
       --project "$DEFAULT_PROJECT")" = running ] \
-    || die 'default and named yard desired power is not persisted before committed-state reboot'
+    && [ "$(incus config get "$INSTANCE" boot.autostart --project "$PROJECT")" = false ] \
+    && [ "$(incus config get "$DEFAULT_INSTANCE" boot.autostart \
+      --project "$DEFAULT_PROJECT")" = false ] \
+    || die 'named stopped and default running desired power is not persisted before committed-state reboot'
   operator_env test ! -e "$OPERATOR_HOME/go-invoked" \
     || die 'v0.1-style update invoked Go'
   install_power_retry_probe
@@ -876,15 +921,20 @@ finish() {
   load_rebooted_fixture
   [ "$(operator_yard --version)" = "yard $VERSION_B" ] \
     || die 'runtime entrypoint did not survive reboot'
-  wait_for_running_yards || die 'updated boot reconciler did not restore default and named yards'
-  [ "$(incus config get "$INSTANCE" user.subyard.desired_power --project "$PROJECT")" = running ] \
+  wait_for_desired_yards STOPPED RUNNING \
+    || die 'updated boot reconciler did not restore named stopped/default running states'
+  [ "$(incus config get "$INSTANCE" user.subyard.desired_power --project "$PROJECT")" = stopped ] \
     && [ "$(incus config get "$DEFAULT_INSTANCE" user.subyard.desired_power \
       --project "$DEFAULT_PROJECT")" = running ] \
-    || die 'default or named desired power changed across reboot'
+    && [ "$(incus config get "$INSTANCE" boot.autostart --project "$PROJECT")" = false ] \
+    && [ "$(incus config get "$DEFAULT_INSTANCE" boot.autostart \
+      --project "$DEFAULT_PROJECT")" = false ] \
+    || die 'default/named desired power or boot.autostart changed across reboot'
   [ "$(sudo -n systemctl show subyard-power-reconcile.service --property=Result --value)" = success ] \
     || die 'updated boot power reconciliation did not finish successfully'
   verify_power_retry_probe
   restore_operator_passwordless_sudo
+  operator_yard -Y "$YARD_NAME" start --yes
   operator_yard status >/dev/null
   operator_yard check
   operator_yard -Y "$YARD_NAME" status >/dev/null
@@ -892,7 +942,7 @@ finish() {
   operator_yard -Y "$YARD_NAME" init --yes
   verify_committed_versioned_migration
   finalize_report="$(candidate_migrate finalize)"
-  jq -e '.changed == false and .layout == 5 and .phase == "committed"' \
+  jq -e '.changed == false and .layout == 6 and .phase == "committed"' \
     <<<"$finalize_report" >/dev/null \
     || die 'repeated committed migration command was not idempotent'
   verify_config_workflow

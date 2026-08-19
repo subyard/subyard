@@ -15,6 +15,8 @@ import (
 	"time"
 )
 
+const provisionedGuestCount = 2
+
 type Runtime struct {
 	Config           Config
 	ConfigPath       string
@@ -310,7 +312,7 @@ func (runtime *Runtime) provisionPair(ctx context.Context) (err error) {
 	if err = writePrivateFile(cfg.knownHosts(), nil); err != nil {
 		return err
 	}
-	for index := 1; index <= 2; index++ {
+	for index := 1; index <= provisionedGuestCount; index++ {
 		if err = runtime.ensureVM(ctx, cfg.vm(index)); err != nil {
 			return err
 		}
@@ -318,12 +320,12 @@ func (runtime *Runtime) provisionPair(ctx context.Context) (err error) {
 	if err = runtime.tightenProject(ctx); err != nil {
 		return err
 	}
-	for index := 1; index <= 2; index++ {
+	for index := 1; index <= provisionedGuestCount; index++ {
 		if err = runtime.startVM(ctx, cfg.vm(index)); err != nil {
 			return err
 		}
 	}
-	for index := 1; index <= 2; index++ {
+	for index := 1; index <= provisionedGuestCount; index++ {
 		vm := cfg.vm(index)
 		if err = runtime.waitAgent(ctx, vm); err != nil {
 			return err
@@ -344,7 +346,7 @@ func (runtime *Runtime) provisionPair(ctx context.Context) (err error) {
 	if err = runtime.ensurePeerTrust(ctx); err != nil {
 		return err
 	}
-	for index := 1; index <= 2; index++ {
+	for index := 1; index <= provisionedGuestCount; index++ {
 		if err = runtime.sshSmoke(ctx, cfg.vm(index)); err != nil {
 			return err
 		}

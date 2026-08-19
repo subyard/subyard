@@ -16,6 +16,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/testyardmigration"
 )
 
 const (
@@ -661,6 +662,10 @@ func rollbackDefinition(
 	definition Definition,
 	tx *transaction,
 ) error {
+	legacyDesiredPower, err := layoutOneLegacyDesiredPower(*tx)
+	if err != nil {
+		return err
+	}
 	for operationIndex := len(definition.Operations) - 1; operationIndex >= 0; operationIndex-- {
 		expected := definition.Operations[operationIndex]
 		index := transactionOperationIndex(*tx, definition.ID, expected.ID)
@@ -703,7 +708,14 @@ func rollbackDefinition(
 		if err := writeTransaction(options.ConfigHome, *tx); err != nil {
 			return err
 		}
-		if err := rollbackTypedOperation(ctx, options, expected, operation.Before); err != nil {
+		if err := rollbackTypedOperationWithLegacyPower(
+			ctx,
+			options,
+			expected,
+			operation.Before,
+			tx.FromLayout,
+			legacyDesiredPower,
+		); err != nil {
 			return fmt.Errorf(
 				"roll back migration %q operation %q: %w",
 				definition.ID,
@@ -751,6 +763,43 @@ func rollbackDefinition(
 		}
 	}
 	return nil
+}
+
+// layoutOneLegacyDesiredPower derives the durable legacy intent from the
+// broker operation prepared before the candidate replaced the layout-1 owner.
+// The owner rollback is the final writer for that legacy topology, so it must
+// restore this value after the retained runtime recreates the instance.
+func layoutOneLegacyDesiredPower(tx transaction) (string, error) {
+	if tx.FromLayout != 1 {
+		return "", nil
+	}
+	var desired string
+	for _, operation := range tx.Operations {
+		if operation.Kind != OperationKindTestVMBrokerRuntimeV1 || operation.Before == "" {
+			continue
+		}
+		var candidate string
+		switch testyardmigration.BrokerRuntimeState(operation.Before) {
+		case testyardmigration.BrokerRuntimeActive:
+			candidate = "running"
+		case testyardmigration.BrokerRuntimeInactive:
+			candidate = "stopped"
+		case testyardmigration.BrokerRuntimeAbsent:
+			candidate = ""
+		default:
+			return "", fmt.Errorf(
+				"invalid layout-1 broker rollback state %q",
+				operation.Before,
+			)
+		}
+		if desired != "" && candidate != "" && candidate != desired {
+			return "", errors.New("conflicting layout-1 broker rollback states")
+		}
+		if candidate != "" {
+			desired = candidate
+		}
+	}
+	return desired, nil
 }
 
 func transactionOperationIndex(tx transaction, migrationID, operationID string) int {

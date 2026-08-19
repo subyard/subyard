@@ -81,18 +81,19 @@ type Options struct {
 }
 
 type CLI struct {
-	options             Options
-	env                 map[string]string
-	baseEnv             map[string]string
-	manifest            command.Manifest
-	resources           resource.Registry
-	inventoryRoutes     map[string]config.Loaded
-	discoveredOwners    map[string]ownerinventory.Connection
-	coreActions         *domain.ActionRegistry
-	promptInputTerminal func() bool
-	operatorTerminal    func() bool
-	openTerminal        func() (*os.File, error)
-	effectiveUID        func() int
+	options                      Options
+	env                          map[string]string
+	baseEnv                      map[string]string
+	manifest                     command.Manifest
+	resources                    resource.Registry
+	inventoryRoutes              map[string]config.Loaded
+	discoveredOwners             map[string]ownerinventory.Connection
+	coreActions                  *domain.ActionRegistry
+	promptInputTerminal          func() bool
+	operatorTerminal             func() bool
+	openTerminal                 func() (*os.File, error)
+	effectiveUID                 func() int
+	retainedAdapterCompatibility bool
 }
 
 func New(options Options) (*CLI, error) {
@@ -1706,16 +1707,28 @@ func (cli *CLI) runMigration(ctx context.Context, yard string, arguments []strin
 		cli.errorf("internal: invalid _migrate action")
 		return 2
 	}
+	repositoryRoot := cli.options.RepositoryRoot
+	if arguments[0] == "reconcile-power-reconciler" {
+		payloadRepositoryRoot, payloadErr := powerMigrationRepositoryRoot(
+			repositoryRoot,
+			cli.baseEnv,
+		)
+		if payloadErr != nil {
+			cli.errorf("state migration power reconciler payload: %v", payloadErr)
+			return 1
+		}
+		repositoryRoot = payloadRepositoryRoot
+	}
 	migrationEnvironment := freshMigrationEnvironment(
 		cli.baseEnv,
-		cli.options.RepositoryRoot,
+		repositoryRoot,
 	)
 	operatorHome := migrationEnvironment["SUBYARD_OPERATOR_HOME"]
 	if operatorHome == "" {
 		operatorHome = migrationEnvironment["HOME"]
 	}
 	loaded, err := config.Load(config.LoadOptions{
-		RepositoryRoot: cli.options.RepositoryRoot,
+		RepositoryRoot: repositoryRoot,
 		OperatorHome:   operatorHome,
 		YardName:       yard,
 		Environment:    migrationEnvironment,
@@ -1808,10 +1821,20 @@ func (cli *CLI) runMigration(ctx context.Context, yard string, arguments []strin
 			}
 			// Rollback is dispatched by the active runtime, but the root-owned
 			// helper must come from the selected retained release.
-			cli.options.DispatcherPath = filepath.Join(
-				cli.options.RepositoryRoot, "bin", "yard-engine",
-			)
-			platform = cli.initPlatform(loaded, []domain.Context{loaded.Context})
+			platform = func() ports.InitPlatform {
+				activeRepositoryRoot := cli.options.RepositoryRoot
+				activeDispatcherPath := cli.options.DispatcherPath
+				activeCompatibility := cli.retainedAdapterCompatibility
+				defer func() {
+					cli.options.RepositoryRoot = activeRepositoryRoot
+					cli.options.DispatcherPath = activeDispatcherPath
+					cli.retainedAdapterCompatibility = activeCompatibility
+				}()
+				cli.options.RepositoryRoot = repositoryRoot
+				cli.options.DispatcherPath = filepath.Join(repositoryRoot, "bin", "yard-engine")
+				cli.retainedAdapterCompatibility = repositoryRoot != activeRepositoryRoot
+				return cli.initPlatform(loaded, []domain.Context{loaded.Context})
+			}()
 		}
 		if err := platform.ApplyStage(ctx, ports.ReconcileStagePower); err != nil {
 			cli.errorf("state migration power reconciler: %v", err)
@@ -1910,6 +1933,48 @@ func freshMigrationEnvironment(
 	}
 	environment["SUBYARD_REPOSITORY_ROOT"] = repositoryRoot
 	return environment
+}
+
+func powerMigrationRepositoryRoot(
+	activeRepositoryRoot string,
+	environment map[string]string,
+) (string, error) {
+	payloadRoot := environment["SUBYARD_POWER_MIGRATION_PAYLOAD_ROOT"]
+	if payloadRoot == "" {
+		return activeRepositoryRoot, nil
+	}
+	return retainedMigrationPayloadRoot(payloadRoot, environment)
+}
+
+func retainedMigrationPayloadRoot(
+	payloadRoot string,
+	environment map[string]string,
+) (string, error) {
+	runtimeRoot := environment["YARD_RUNTIME_ROOT"]
+	if runtimeRoot == "" || !filepath.IsAbs(runtimeRoot) {
+		return "", errors.New("absolute runtime root is required")
+	}
+	resolvedRuntimeRoot, err := filepath.EvalSymlinks(runtimeRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolve runtime root: %w", err)
+	}
+	resolvedPrevious, err := filepath.EvalSymlinks(filepath.Join(resolvedRuntimeRoot, "previous"))
+	if err != nil {
+		return "", fmt.Errorf("resolve retained previous release: %w", err)
+	}
+	resolvedPayload, err := filepath.EvalSymlinks(payloadRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolve migration payload: %w", err)
+	}
+	if resolvedPayload != resolvedPrevious {
+		return "", errors.New("migration payload is not the retained previous release")
+	}
+	relative, err := filepath.Rel(filepath.Join(resolvedRuntimeRoot, "releases"), resolvedPrevious)
+	if err != nil || relative == "." || relative == ".." ||
+		strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
+		return "", errors.New("retained previous release escapes the runtime release store")
+	}
+	return resolvedPrevious, nil
 }
 
 func (cli *CLI) finalizeActiveMigration(ctx context.Context) error {
@@ -2585,6 +2650,24 @@ func structuredAdapterContext(yard domain.Context) map[string]string {
 		"RESTRICTED_DISK_PATHS":         yard.Paths.HostBase,
 		"ASSUME_YES":                    "1",
 		"PROG":                          cliProgramName,
+	}
+}
+
+var legacyAdapterAliases = map[string]string{
+	"YARD_TYPE":           "ACCESS_KIND",
+	"INSTANCE_TYPE":       "YARD_KIND",
+	"INSTANCE_NAME":       "YARD_INSTANCE_NAME",
+	"REMOTE_DEST":         "OWNER_ENDPOINT",
+	"REMOTE_YARD":         "OWNER_YARD_NAME",
+	"BASE_IMAGE":          "YARD_IMAGE",
+	"BASE_IMAGE_FALLBACK": "YARD_IMAGE_FALLBACK",
+	"YARD_PROFILES":       "ENVIRONMENT_PROFILES",
+	"AGENTS":              "CODING_TOOL_INTEGRATIONS",
+}
+
+func addLegacyAdapterAliases(environment map[string]string) {
+	for legacy, canonical := range legacyAdapterAliases {
+		environment[legacy] = environment[canonical]
 	}
 }
 

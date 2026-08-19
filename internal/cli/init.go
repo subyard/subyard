@@ -258,6 +258,9 @@ func (cli *CLI) initPlatform(loaded config.Loaded, powerYards []domain.Context) 
 		return cli.options.InitPlatform
 	}
 	environment := structuredCommandContext(loaded)
+	if cli.retainedAdapterCompatibility {
+		addLegacyAdapterAliases(environment)
+	}
 	environment["SUBYARD_DISPATCHER_PATH"] = cli.options.DispatcherPath
 	environment["SUBYARD_POWER_ENGINE_SOURCE"] = cli.options.DispatcherPath
 	incusPort, executor := cli.statusPorts()

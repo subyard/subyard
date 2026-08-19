@@ -713,6 +713,178 @@ func TestMigrationPowerReconcileIsBoundedToPowerStage(t *testing.T) {
 	}
 }
 
+func TestMigrationPowerReconcileUsesRetainedPayloadWithActiveCLI(t *testing.T) {
+	active := repositoryRoot(t)
+	home := t.TempDir()
+	runtimeRoot := filepath.Join(home, "runtime")
+	previous := filepath.Join(runtimeRoot, "releases", "legacy-release")
+	if err := os.MkdirAll(filepath.Dir(previous), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.CopyFS(filepath.Join(previous, "config"), os.DirFS(filepath.Join(active, "config"))); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(previous, "config", "commands.registry"),
+		"legacy|manifest|with|thirteen|fields|that|the|active|parser|must|not|read|here\n",
+		0o600)
+	marker := filepath.Join(home, "retained-power-adapter")
+	if err := os.MkdirAll(filepath.Join(previous, "scripts"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	retainedAdapter := strings.NewReplacer(
+		"@PREVIOUS@", previous,
+		"@MARKER@", marker,
+	).Replace(`#!/bin/sh
+set -eu
+[ "$*" = "--yes" ]
+[ "$PWD" = "@PREVIOUS@" ]
+[ "$SUBYARD_DISPATCHER_PATH" = "@PREVIOUS@/bin/yard-engine" ]
+[ "$SUBYARD_POWER_ENGINE_SOURCE" = "@PREVIOUS@/bin/yard-engine" ]
+[ "$ACCESS_KIND" = local ]
+[ "$YARD_TYPE" = "$ACCESS_KIND" ]
+[ "$INSTANCE_TYPE" = "$YARD_KIND" ]
+[ "$INSTANCE_NAME" = "$YARD_INSTANCE_NAME" ]
+[ "$REMOTE_DEST" = "$OWNER_ENDPOINT" ]
+[ "$REMOTE_YARD" = "$OWNER_YARD_NAME" ]
+[ "$BASE_IMAGE" = "$YARD_IMAGE" ]
+[ "$BASE_IMAGE_FALLBACK" = "$YARD_IMAGE_FALLBACK" ]
+[ "$YARD_PROFILES" = "${ENVIRONMENT_PROFILES:-}" ]
+[ "$AGENTS" = "${CODING_TOOL_INTEGRATIONS:-}" ]
+printf 'retained-adapter-ok\n' > "@MARKER@"
+`)
+	writeCLIFile(t, filepath.Join(previous, "scripts", "install-power-reconciler.sh"),
+		retainedAdapter, 0o700)
+	if err := os.Symlink(
+		filepath.Join("releases", "legacy-release"),
+		filepath.Join(runtimeRoot, "previous"),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	activeDispatcher := filepath.Join(active, "bin", "yard-engine")
+	var stderr bytes.Buffer
+	environment := []string{
+		"HOME=" + home,
+		"SUBYARD_OPERATOR_HOME=" + home,
+		"SUBYARD_CONFIG_HOME=" + filepath.Join(home, ".config", "subyard"),
+		"SUBYARD_HOME=" + filepath.Join(home, ".subyard"),
+		"SUBYARD_NO_AUDIT=1",
+		"SUBYARD_INTERNAL_MIGRATION_CHILD=1",
+		"YARD_RUNTIME_ROOT=" + runtimeRoot,
+	}
+	program, err := New(Options{
+		RepositoryRoot: active,
+		DispatcherPath: activeDispatcher,
+		Program:        "yard",
+		Arguments:      []string{"_migrate", "reconcile-power-reconciler"},
+		Environment:    append(environment, "SUBYARD_POWER_MIGRATION_PAYLOAD_ROOT="+previous),
+		Stderr:         &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	program.effectiveUID = func() int { return 0 }
+
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("power reconcile failed: code=%d stderr=%q", code, stderr.String())
+	}
+	if program.options.RepositoryRoot != active || program.options.DispatcherPath != activeDispatcher {
+		t.Fatalf("active CLI options were not restored: root %q dispatcher %q",
+			program.options.RepositoryRoot, program.options.DispatcherPath)
+	}
+	if program.retainedAdapterCompatibility {
+		t.Fatal("retained adapter compatibility leaked into the active CLI")
+	}
+	ordinaryLoaded, err := program.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordinaryPlatform, ok := program.initPlatform(
+		ordinaryLoaded, []domain.Context{ordinaryLoaded.Context},
+	).(reconcileruntime.Runtime)
+	if !ok {
+		t.Fatalf("ordinary init platform = %T", ordinaryPlatform)
+	}
+	for alias := range legacyAdapterAliases {
+		prefix := alias + "="
+		if slices.ContainsFunc(ordinaryPlatform.Environment, func(assignment string) bool {
+			return strings.HasPrefix(assignment, prefix)
+		}) {
+			t.Fatalf("ordinary current platform retained legacy alias %s", alias)
+		}
+	}
+	contents, err := os.ReadFile(marker)
+	if err != nil || string(contents) != "retained-adapter-ok\n" {
+		t.Fatalf("retained power adapter marker = %q, %v", contents, err)
+	}
+
+	foreign := filepath.Join(home, "foreign-release")
+	if err := os.Mkdir(foreign, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stderr.Reset()
+	program, err = New(Options{
+		RepositoryRoot: active,
+		DispatcherPath: activeDispatcher,
+		Program:        "yard",
+		Arguments:      []string{"_migrate", "reconcile-power-reconciler"},
+		Environment:    append(environment, "SUBYARD_POWER_MIGRATION_PAYLOAD_ROOT="+foreign),
+		Stderr:         &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code == 0 ||
+		!strings.Contains(stderr.String(), "not the retained previous release") {
+		t.Fatalf("foreign power payload accepted: code=%d stderr=%q", code, stderr.String())
+	}
+}
+
+func TestPowerMigrationRepositoryRootAcceptsOnlyRetainedPreviousRelease(t *testing.T) {
+	root := t.TempDir()
+	active := filepath.Join(root, "active")
+	runtimeRoot := filepath.Join(root, "runtime")
+	previous := filepath.Join(runtimeRoot, "releases", "previous-release")
+	foreign := filepath.Join(root, "foreign")
+	for _, directory := range []string{active, previous, foreign} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(
+		filepath.Join("releases", "previous-release"),
+		filepath.Join(runtimeRoot, "previous"),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name        string
+		payloadRoot string
+		want        string
+		wantError   bool
+	}{
+		{name: "active release by default", want: active},
+		{name: "exact retained previous release", payloadRoot: previous, want: previous},
+		{name: "foreign payload", payloadRoot: foreign, wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			environment := map[string]string{"YARD_RUNTIME_ROOT": runtimeRoot}
+			if test.payloadRoot != "" {
+				environment["SUBYARD_POWER_MIGRATION_PAYLOAD_ROOT"] = test.payloadRoot
+			}
+			got, err := powerMigrationRepositoryRoot(active, environment)
+			if (err != nil) != test.wantError {
+				t.Fatalf("repository root error = %v, want error %v", err, test.wantError)
+			}
+			if err == nil && got != test.want {
+				t.Fatalf("repository root = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func (fixture *initPlatformFixture) Teardown(context.Context) error {
 	fixture.teardowns++
 	for stage := range fixture.converged {

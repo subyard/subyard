@@ -17,22 +17,137 @@ real_incus() { timeout --foreground "${P0_REAL_INCUS_COMMAND_TIMEOUT:-900}" incu
 real_incus_quiet() { real_incus "$@" >/dev/null; }
 project_exists() { real_incus project show "$PROJECT" >/dev/null 2>&1; }
 
+real_incus_observe() {
+  P0_REAL_INCUS_COMMAND_TIMEOUT="${P0_REAL_INCUS_OBSERVE_TIMEOUT:-30}" real_incus "$@"
+}
+
+p0_monotonic_seconds() {
+  local uptime
+  read -r uptime _ < /proc/uptime
+  printf '%s\n' "${uptime%%.*}"
+}
+
+cleanup_real_incus() {
+  local deadline="$1" now remaining
+  shift
+  now="$(p0_monotonic_seconds)"
+  remaining=$((deadline - now))
+  [ "$remaining" -gt 0 ] || return 124
+  if [ "$remaining" -lt "${P0_REAL_INCUS_OBSERVE_TIMEOUT:-30}" ]; then
+    P0_REAL_INCUS_COMMAND_TIMEOUT="$remaining" real_incus "$@"
+  else
+    real_incus_observe "$@"
+  fi
+}
+
+cleanup_sleep() {
+  local deadline="$1" requested="$2" now remaining delay
+  [ "$requested" -gt 0 ] || return 0
+  now="$(p0_monotonic_seconds)"
+  remaining=$((deadline - now))
+  [ "$remaining" -gt 0 ] || return 124
+  delay="$requested"
+  [ "$delay" -le "$remaining" ] || delay="$remaining"
+  sleep "$delay"
+}
+
+active_instance_operation_ids() {
+  local deadline="$1" name="$2" operations resource
+  resource="/1.0/instances/$name"
+  if operations="$(
+    cleanup_real_incus "$deadline" operation list --project "$PROJECT" --format json
+  )"; then
+    :
+  else
+    return
+  fi
+  jq -r --arg resource "$resource" '
+    if type != "array" or any(.[];
+      type != "object" or
+      (.id | type) != "string" or .id == "" or
+      (.status_code | type) != "number" or .status_code < 100 or
+      (.resources | type) != "object" or
+      ((.resources.instances? // []) | type) != "array" or
+      ((.resources.instances? // []) | any(.[]; type != "string")))
+    then error("unexpected Incus operation inventory")
+    else
+      .[]
+      | select(.status_code < 200)
+      | select(any((.resources.instances? // [])[]; . == $resource))
+      | .id
+    end
+  ' <<<"$operations"
+}
+
 delete_marked_instance() {
-  local name="$1" attempt
-  for attempt in 1 2 3; do
-    real_incus config show "$name" --project "$PROJECT" >/dev/null 2>&1 || return
-    [ "$(real_incus config get "$name" user.subyard.p0 --project "$PROJECT")" = "$MARKER" ] \
-      || die "refusing to delete unmarked instance $name"
-    if real_incus delete "$name" --project "$PROJECT" --force >/dev/null; then
+  local name="$1" instance_marker instance_names operation_ids project_marker now
+  local delete_attempt=0
+  local wait_seconds="${P0_REAL_INCUS_CLEANUP_WAIT_SECONDS:-900}"
+  local poll_seconds="${P0_REAL_INCUS_CLEANUP_POLL_SECONDS:-5}"
+  local delete_retry_seconds="${P0_REAL_INCUS_DELETE_RETRY_SECONDS:-2}"
+  local deadline
+  [[ "$wait_seconds" =~ ^[1-9][0-9]*$ ]] && [ "$wait_seconds" -le 900 ] \
+    || die "invalid real-Incus cleanup wait: $wait_seconds"
+  [[ "$poll_seconds" =~ ^[0-9]+$ ]] && [ "$poll_seconds" -le 30 ] \
+    || die "invalid real-Incus cleanup poll interval: $poll_seconds"
+  [[ "$delete_retry_seconds" =~ ^[0-9]+$ ]] && [ "$delete_retry_seconds" -le 30 ] \
+    || die "invalid real-Incus delete retry interval: $delete_retry_seconds"
+  now="$(p0_monotonic_seconds)"
+  deadline=$((now + wait_seconds))
+  if project_marker="$(
+    cleanup_real_incus "$deadline" project get "$PROJECT" user.subyard.p0
+  )"; then
+    [ "$project_marker" = "$MARKER" ] \
+      || die "refusing to clean unmarked project $PROJECT"
+  else
+    return
+  fi
+  while :; do
+    now="$(p0_monotonic_seconds)"
+    [ "$now" -lt "$deadline" ] \
+      || die "could not settle marked instance $name within ${wait_seconds}s"
+    if instance_names="$(
+      cleanup_real_incus "$deadline" list "$name" --project "$PROJECT" -f csv -c n
+    )"; then
+      case "$instance_names" in
+        '') ;;
+        "$name") ;;
+        *) return 2 ;;
+      esac
+    else
       return
     fi
-    real_incus config show "$name" --project "$PROJECT" >/dev/null 2>&1 || return
-    [ "$attempt" -lt 3 ] || die "could not delete marked instance $name after 3 attempts"
+    if operation_ids="$(active_instance_operation_ids "$deadline" "$name")"; then
+      :
+    else
+      return
+    fi
+    if [ -n "$operation_ids" ]; then
+      printf '  [warn] waiting for active Incus operation on %s: %s\n' \
+        "$name" "$(tr '\n' ' ' <<<"$operation_ids")"
+      cleanup_sleep "$deadline" "$poll_seconds" || return
+      continue
+    fi
+    [ -n "$instance_names" ] || return 0
+    if instance_marker="$(
+      cleanup_real_incus "$deadline" config get "$name" user.subyard.p0 --project "$PROJECT"
+    )"; then
+      [ "$instance_marker" = "$MARKER" ] \
+        || die "refusing to delete unmarked instance $name"
+    else
+      return
+    fi
+    delete_attempt=$((delete_attempt + 1))
+    if cleanup_real_incus "$deadline" delete \
+      "$name" --project "$PROJECT" --force >/dev/null; then
+      continue
+    fi
+    [ "$delete_attempt" -lt 3 ] || die "could not delete marked instance $name after 3 attempts"
     # A failed Incus VM stop can leave AppArmor teardown/reload briefly in
     # flight. Keep recovery bounded and revalidate ownership before every try.
     printf '  [warn] cleanup delete of %s failed; retrying (%s/3)\n' \
-      "$name" "$((attempt + 1))"
-    sleep 2
+      "$name" "$((delete_attempt + 1))"
+    cleanup_sleep "$deadline" "$delete_retry_seconds" || return
   done
 }
 
@@ -69,13 +184,7 @@ cleanup() {
   if project_exists; then
     [ "$(real_incus project get "$PROJECT" user.subyard.p0 2>/dev/null)" = "$MARKER" ] \
       || die "refusing to clean unmarked project $PROJECT"
-    for name in p0-container p0-vm; do
-      if real_incus config show "$name" --project "$PROJECT" >/dev/null 2>&1; then
-        [ "$(real_incus config get "$name" user.subyard.p0 --project "$PROJECT")" = "$MARKER" ] \
-          || die "refusing to clean unmarked instance $name"
-        delete_marked_instance "$name"
-      fi
-    done
+    for name in p0-container p0-vm; do delete_marked_instance "$name"; done
     [ -z "$(real_incus list --project "$PROJECT" -f csv -c n)" ] \
       || die "unexpected instance remains in $PROJECT"
     real_incus project delete "$PROJECT" >/dev/null
@@ -87,7 +196,7 @@ cleanup() {
 trap cleanup EXIT
 
 [ -n "${SUBYARD_E2E_VM:-}" ] || die 'run through dev/agent-e2e.sh'
-for command in go incus sudo; do command -v "$command" >/dev/null || die "$command is required"; done
+for command in go incus jq sudo; do command -v "$command" >/dev/null || die "$command is required"; done
 sudo -n true || die 'passwordless sudo is required in a disposable test VM'
 [ -S /var/lib/incus/unix.socket ] || die 'Incus socket is unavailable'
 project_exists && cleanup

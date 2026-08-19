@@ -1,15 +1,13 @@
 [Unit]
 Description=Restore guarded Subyard desired power state
-Wants=network-online.target incus.service incus.socket
+Wants=network-online.target
 After=network-online.target NetworkManager.service incus.service incus.socket
-StartLimitIntervalSec=15min
-StartLimitBurst=6
+StartLimitIntervalSec=0
 
 [Service]
-Type=exec
+Type=oneshot
 ExecStart=@SUBYARD_POWER_RECONCILER@ _power-reconcile
 TimeoutStartSec=120
-RuntimeMaxSec=120
 Restart=no
 RestartForceExitStatus=75
 RestartSec=10s

@@ -251,3 +251,29 @@ func TestBootPowerReconcilerTimesOutWaitingForIncus(t *testing.T) {
 		t.Fatalf("expected readiness timeout, got %v", err)
 	}
 }
+
+func TestBootPowerReconcilerBoundsBlockedIncusInventory(t *testing.T) {
+	reconciler := BootPowerReconciler{
+		Inventory: inventoryFunc(func(ctx context.Context) ([]ports.InstanceInfo, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}),
+		Instances: &testkit.Incus{}, Power: &testkit.Incus{},
+		Network:   networkGuardFunc(func(context.Context, []string) error { return nil }),
+		IncusWait: 20 * time.Millisecond,
+	}
+	result := make(chan error, 1)
+	go func() {
+		_, err := reconciler.Run(context.Background())
+		result <- err
+	}()
+	select {
+	case err := <-result:
+		if !errors.Is(err, ports.ErrIncusUnavailable) ||
+			!strings.Contains(err.Error(), "within 20ms") {
+			t.Fatalf("blocked readiness error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("blocked Incus inventory outlived its readiness budget")
+	}
+}

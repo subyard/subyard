@@ -9,6 +9,8 @@ PEER_PUBLIC_KEY="${4:-}"
 PEER_HOST_KEY="${5:-}"
 # shellcheck source=dev/e2e/lib-p0-capacity.sh
 . "$ROOT/dev/e2e/lib-p0-capacity.sh"
+# shellcheck source=dev/e2e/lib-p0-init-retry.sh
+. "$ROOT/dev/e2e/lib-p0-init-retry.sh"
 p0_capacity_init "$TOKEN"
 
 PEER_ROOT="/tmp/subyard-p0-peer-$TOKEN"
@@ -249,9 +251,9 @@ install_rename_base_runtime() {
   timeout_file="$RENAME_BASE_ROOT/internal/cli/cli.go"
   [ "$(grep -Fc 'Timeout:        10 * time.Minute,' "$timeout_file")" -eq 1 ] \
     || die 'rename-base adapter timeout fixture no longer matches its source'
-  sed -i 's/Timeout:        10 \* time.Minute,/Timeout:        20 * time.Minute,/' \
+  sed -i 's/Timeout:        10 \* time.Minute,/Timeout:        30 * time.Minute,/' \
     "$timeout_file"
-  grep -Fqx $'\t\t\tTimeout:        20 * time.Minute,' "$timeout_file" \
+  grep -Fqx $'\t\t\tTimeout:        30 * time.Minute,' "$timeout_file" \
     || die 'rename-base adapter timeout fixture was not applied'
   git -C "$RENAME_BASE_ROOT" diff --check
   arch="$(go env GOARCH)"
@@ -323,7 +325,7 @@ canonical_broker_release_migration_contract() {
   # Exercise the dedicated layout 2 -> 3 broker operation independently from
   # the owner rename, once stopped and once active.
   write_owner_registration test-yard test-vms 2224
-  "$old_yard" -Y test-yard init --yes
+  p0_retry_init_after_plan_stale "$old_yard" -Y test-yard init --yes
   "$old_yard" -Y test-yard stop --yes
   state="$(incus list yard-test-yard --project subyard-test-yard -f csv -c s)"
   [ "$state" = STOPPED ] || die 'inactive broker fixture did not remain stopped'
@@ -347,7 +349,7 @@ canonical_broker_release_migration_contract() {
   SUBYARD_REPOSITORY_ROOT="$candidate_runtime" \
     "$candidate_runtime/bin/yard-engine" _migrate cleanup >/dev/null
   "$old_yard" -Y test-yard start --yes
-  "$old_yard" -Y test-yard init --yes
+  p0_retry_init_after_plan_stale "$old_yard" -Y test-yard init --yes
   active_old_hash="$(incus exec yard-test-yard --project subyard-test-yard -- \
     sha256sum /usr/local/libexec/subyard/test-vms-inner | awk '{print $1}')"
 
@@ -384,7 +386,7 @@ canonical_broker_release_migration_contract() {
 }
 
 owner_profile_migration_contract() {
-  local old_yard runtime_root="${SUBYARD_HOME:-$HOME/.subyard}/runtime" yard_info
+  local old_yard runtime_root="${SUBYARD_HOME:-$HOME/.subyard}/runtime" yard_info project_marker
   install_current_base_runtime
   old_yard="$runtime_root/current/bin/yard"
   [ "$("$old_yard" --version)" = 'yard p0-current-base' ] \
@@ -397,7 +399,7 @@ owner_profile_migration_contract() {
     || die 'pre-rename runtime was not installed'
   prepare_owner_image_cache_project subyard-e2e-yard
   write_owner_registration e2e-yard e2e-vms 2224
-  "$old_yard" -Y e2e-yard init --yes
+  p0_retry_init_after_plan_stale "$old_yard" -Y e2e-yard init --yes
   "$old_yard" -Y e2e-yard check
   "$old_yard" -Y e2e-yard start --yes
   "$old_yard" -Y e2e-yard status >/dev/null
@@ -417,6 +419,13 @@ owner_profile_migration_contract() {
     .sshHost == "yard-test-yard"' \
     <<<"$yard_info" >/dev/null \
     || die "migrated test-yard context is wrong: $yard_info"
+  project_marker="$(incus project get subyard-test-yard \
+    user.subyard.p0-image-cache 2>/dev/null)"
+  [ -z "$project_marker" ] || [ "$project_marker" = "$MARKER" ] \
+    || die 'migrated test-yard project has a foreign P0 marker'
+  incus project set subyard-test-yard user.subyard.p0-image-cache="$MARKER"
+  [ "$(incus project get subyard-test-yard user.subyard.p0-image-cache)" = "$MARKER" ] \
+    || die 'migrated test-yard project lost its P0 marker'
   ! incus project show subyard-e2e-yard >/dev/null 2>&1 \
     || die 'old e2e-yard project remains after migrated teardown'
   [ ! -e "${SUBYARD_CONFIG_HOME:-$HOME/.config/subyard}/yards/e2e-yard/projects" ] \
@@ -428,8 +437,31 @@ owner_profile_migration_contract() {
   printf 'ok: runtime upgrade recreated e2e-yard as test-yard automatically\n'
 }
 
+is_markerless_migrated_owner_project() {
+  local project="$1" instance="$2" expected_marker="$3" registration="$4" revision
+  [ "$project" = subyard-test-yard ] && [ "$instance" = yard-test-yard ] \
+    && [ -f "$registration" ] && [ ! -L "$registration" ] && [ -O "$registration" ] \
+    && [ "$(grep -Fxc -- "# $expected_marker" "$registration")" -eq 1 ] \
+    && [ "$(grep -Fxc 'YARD_TEMPLATE=test-vms' "$registration")" -eq 1 ] \
+    && [ "$(incus project get "$project" restricted 2>/dev/null)" = true ] \
+    && [ "$(incus config get "$instance" user.subyard.managed \
+      --project "$project" 2>/dev/null)" = true ] \
+    && [ "$(incus config get "$instance" user.subyard.name \
+      --project "$project" 2>/dev/null)" = test-yard ] \
+    && [ "$(incus config get "$instance" user.subyard.initialized \
+      --project "$project" 2>/dev/null)" = true ] \
+    || return 1
+  revision="$(incus config get "$instance" user.subyard.test_vms_revision \
+    --project "$project" 2>/dev/null)"
+  case "$revision" in
+    1:*:test-yard) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 reclaim_owner_project_residue() {
-  local project="$1" instance volume marker unexpected
+  local project="$1" expected_marker="${2:-}" markerless_registration="${3:-}"
+  local instance volume marker unexpected
   case "$project" in
     subyard-e2e-yard)
       instance='yard-e2e-yard'
@@ -442,8 +474,18 @@ reclaim_owner_project_residue() {
     *) die "unsafe owner residue project $project" ;;
   esac
   marker="$(incus project get "$project" user.subyard.p0-image-cache 2>/dev/null)"
-  [[ "$marker" =~ ^subyard-p0-[0-9]+$ ]] \
-    || die "refusing non-P0 owner project $project"
+  if [ -n "$expected_marker" ]; then
+    if [ "$marker" != "$expected_marker" ]; then
+      [ -z "$marker" ] && [ -n "$markerless_registration" ] \
+        && is_markerless_migrated_owner_project \
+          "$project" "$instance" "$expected_marker" "$markerless_registration" \
+        || die "refusing non-P0 owner project $project"
+      marker="$expected_marker:markerless-migrated"
+    fi
+  else
+    [[ "$marker" =~ ^subyard-p0-[0-9]+$ ]] \
+      || die "refusing non-P0 owner project $project"
+  fi
   unexpected="$(incus list --project "$project" --format csv -c n \
     | awk -v expected="$instance" '$0 != expected { print }')"
   [ -z "$unexpected" ] \
@@ -601,9 +643,9 @@ owner() (
   ./bin/yard -Y test-yard start --yes
   SUBYARD_E2E_LEGACY_FIXTURE=1 \
     bash dev/e2e/seed-test-vms-legacy-state.sh subyard-test-yard yard-test-yard
-  ./bin/yard -Y test-yard init --yes
+  p0_retry_init_after_plan_stale ./bin/yard -Y test-yard init --yes
   ./bin/yard -Y test-yard check
-  ./bin/yard -Y test-yard init --yes
+  p0_retry_init_after_plan_stale ./bin/yard -Y test-yard init --yes
   ! incus exec yard-test-yard --project subyard-test-yard -- \
     test -s /var/lib/subyard/e2e-agent/.ssh/authorized_keys \
     || die 'legacy static controller key survived test-vms reconciliation'
@@ -681,6 +723,8 @@ controller() (
     dev/e2e/lib-p0-capacity.sh dev/e2e/p1-lease-acceptance.sh \
     dev/e2e/p0-broker-recovery.sh \
     dev/e2e/p0-real-incus.sh dev/e2e/p0-source-upgrade.sh \
+    dev/e2e/power-reconciler-systemd-255.sh \
+    dev/e2e/power-reconciler-systemd.sh dev/e2e/power-reconciler-upgrade.sh \
     dev/build-engine.sh tests/build-engine.sh \
     tests/agent-e2e.sh tests/real-host/incus-contract.sh
   ./tests/run.sh
@@ -1015,7 +1059,7 @@ peer_yard_start() {
   install -d -m 0700 "$PEER_ROOT/config"
   printf 'SSH_PORT=3222\nDEV_UID=1001\nBASE_IMAGE=%s\nBASE_IMAGE_FALLBACK=%s\n' \
     "$base_image" "$base_image" > "$PEER_ROOT/config/config.env"
-  timeout --foreground "${P0_PEER_YARD_TIMEOUT:-600}" "$PEER_YARD_ENTRY" init --yes
+  timeout --foreground "${P0_PEER_YARD_TIMEOUT:-1800}" "$PEER_YARD_ENTRY" init --yes
   "$PEER_YARD_ENTRY" start --yes
   printf 'ok: VM2 release-installed remote yard is running\n'
 }
@@ -1352,9 +1396,121 @@ peer_clean() {
   clean_tree "$PEER_ROOT" "$MARKER"
 }
 
+source_upgrade_project_inventory() {
+  local query_timeout="${P0_E2E_INCUS_QUERY_TIMEOUT:-30}" inventory rc
+  [[ "$query_timeout" =~ ^[1-9][0-9]{0,2}$ ]] && [ "$query_timeout" -le 120 ] \
+    || die 'Incus query timeout is invalid'
+  set +e
+  inventory="$(timeout --foreground "$query_timeout" \
+    incus project list --format csv -c n 2>/dev/null)"
+  rc=$?
+  set -e
+  case "$rc" in
+    0) printf '%s\n' "$inventory" ;;
+    124|137) die "Incus project inventory exceeded ${query_timeout}s" ;;
+    *) return 0 ;;
+  esac
+}
+
+source_upgrade_project_marker() {
+  local project="$1" query_timeout="${P0_E2E_INCUS_QUERY_TIMEOUT:-30}" marker rc
+  set +e
+  marker="$(timeout --foreground "$query_timeout" \
+    incus project get "$project" user.subyard.p0-source 2>/dev/null)"
+  rc=$?
+  set -e
+  case "$rc" in
+    0) printf '%s\n' "$marker" ;;
+    124|137) die "Incus source marker query exceeded ${query_timeout}s for $project" ;;
+    *) die "cannot inspect the source-upgrade marker on $project" ;;
+  esac
+}
+
+source_upgrade_process_matches() {
+  local pattern="$1" query_timeout="${P0_SOURCE_RECOVERY_QUERY_TIMEOUT_SECONDS:-10}" rc
+  [[ "$query_timeout" =~ ^[1-9][0-9]?$ ]] && [ "$query_timeout" -le 60 ] \
+    || die 'source-upgrade recovery query timeout must be an integer from 1 through 60 seconds'
+  if timeout --foreground "$query_timeout" pgrep -f -- "$pattern" >/dev/null 2>&1; then
+    return 0
+  else
+    rc=$?
+  fi
+  case "$rc" in
+    1) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
+source_upgrade_fixture_active() {
+  local token="$1" pattern rc
+  local patterns=(
+    "p0-source-upgrade[.]sh (prepare|resume|finish|clean) $token([[:space:]]|$)"
+    "$HOME/[.]cache/subyard-p0-$token/source-upgrade(/|[[:space:]]|$)"
+    "/home/subyardp0$token(/|[[:space:]]|$)"
+    "/var/tmp/subyard-p0-source-$token(/|[[:space:]]|$)"
+  )
+  [[ "$token" =~ ^[0-9]+$ ]] || return 2
+  for pattern in "${patterns[@]}"; do
+    if source_upgrade_process_matches "$pattern"; then
+      return 0
+    else
+      rc=$?
+    fi
+    [ "$rc" = 1 ] || return 2
+  done
+  return 1
+}
+
+p0_source_fixture_cleanup_token() {
+  local token="$1" cleanup_timeout="${P0_SOURCE_RECOVERY_TIMEOUT_SECONDS:-900}"
+  local kill_after="${P0_SOURCE_RECOVERY_KILL_AFTER_SECONDS:-10}"
+  [[ "$token" =~ ^[0-9]+$ ]] || die 'source-upgrade recovery token is invalid'
+  [[ "$cleanup_timeout" =~ ^[1-9][0-9]{0,3}$ ]] && [ "$cleanup_timeout" -le 1800 ] \
+    || die 'source-upgrade recovery timeout must be an integer from 1 through 1800 seconds'
+  [[ "$kill_after" =~ ^[1-9][0-9]?$ ]] && [ "$kill_after" -le 60 ] \
+    || die 'source-upgrade recovery kill grace must be an integer from 1 through 60 seconds'
+  timeout --signal=TERM --kill-after="$kill_after" "$cleanup_timeout" \
+    bash "$ROOT/dev/e2e/p0-source-upgrade.sh" clean "$token"
+}
+
+recover_stale_source_upgrade_fixture() {
+  local inventory project marker candidate token='' active_rc
+  command -v incus >/dev/null 2>&1 || return 0
+  inventory="$(source_upgrade_project_inventory)"
+  for project in subyard-e2e-yard subyard-test-yard subyard; do
+    grep -Fxq "$project" <<<"$inventory" || continue
+    marker="$(source_upgrade_project_marker "$project")"
+    [ -n "$marker" ] || continue
+    case "$marker" in
+      subyard-p0-source-*)
+        candidate="${marker#subyard-p0-source-}"
+        [[ "$candidate" =~ ^[0-9]+$ ]] \
+          || die "refusing malformed source-upgrade marker on $project"
+        ;;
+      *) die "refusing foreign source-upgrade marker on $project" ;;
+    esac
+    [ -z "$token" ] || [ "$token" = "$candidate" ] \
+      || die 'refusing source-upgrade projects with conflicting fixture markers'
+    token="$candidate"
+  done
+  [ -n "$token" ] || return 0
+  if source_upgrade_fixture_active "$token"; then
+    die "source-upgrade fixture still has an active process: subyard-p0-source-$token"
+  else
+    active_rc=$?
+  fi
+  [ "$active_rc" = 1 ] \
+    || die "cannot determine whether source-upgrade fixture is active: subyard-p0-source-$token"
+  printf '  [ .. ] VM%s: recovering marker-owned stale source-upgrade fixture %s\n' \
+    "$SUBYARD_E2E_VM" "subyard-p0-source-$token"
+  p0_source_fixture_cleanup_token "$token"
+}
+
 recover_stale_test_default_pool() {
-  local source state status used_by used_by_entries rc project project_marker
-  local stale_root='' marker='' expected_marker='' name token=''
+  local source state status used_by used_by_entries rc project
+  local stale_root='' marker='' expected_marker='' markerless_registration=''
+  local name token=''
+  local recover_existing_p0=0
   local query_timeout="${P0_E2E_INCUS_QUERY_TIMEOUT:-30}"
   command -v incus >/dev/null 2>&1 || return 0
   [[ "$query_timeout" =~ ^[1-9][0-9]*$ ]] || die 'Incus query timeout is invalid'
@@ -1369,10 +1525,12 @@ recover_stale_test_default_pool() {
     *) return 0 ;;
   esac
   source="$(sed -n 's/^  source: //p' <<<"$state")"
-  [ ! -e "$source" ] || return 0
   case "$source" in
-    /tmp/subyard-hermes-profile.*/storage) ;;
+    /tmp/subyard-hermes-profile.*/storage)
+      [ ! -e "$source" ] || return 0
+      ;;
     /var/tmp/subyard-nested-teardown.*/storage)
+      [ ! -e "$source" ] || return 0
       stale_root="${source%/storage}"
       marker="$stale_root/.marker"
       expected_marker=nested-teardown-e2e-v1
@@ -1383,8 +1541,17 @@ recover_stale_test_default_pool() {
       token="${name#subyard-p0-}"
       [[ "$token" =~ ^[0-9]+$ ]] \
         || die "refusing stale P0 pool with an invalid allocation path at $source"
+      [ "$token" != "$P0_CAPACITY_TOKEN" ] || return 0
       marker="$stale_root/.subyard-p0-marker"
       expected_marker="subyard-p0-$token"
+      markerless_registration="$stale_root/owner/config/yards/test-yard.env"
+      if [ -e "$source" ] || [ -L "$source" ]; then
+        [ -d "$source" ] && [ ! -L "$source" ] \
+          || die "refusing unsafe stale P0 pool source at $source"
+        ! pgrep -u "$(id -u)" -f "$stale_root" >/dev/null 2>&1 \
+          || die "stale P0 pool still has an active process: $stale_root"
+        recover_existing_p0=1
+      fi
       ;;
     *) return 0 ;;
   esac
@@ -1394,15 +1561,17 @@ recover_stale_test_default_pool() {
       || die "refusing unmarked stale test pool root at $stale_root"
   fi
   status="$(sed -n 's/^status: //p' <<<"$state")"
-  [ "$status" = Unavailable ] \
-    || die "refusing to recover an active stale test pool at $source"
+  case "$status" in
+    Unavailable) ;;
+    Created) [ "$recover_existing_p0" = 1 ] \
+      || die "refusing to recover an active stale test pool at $source" ;;
+    *) die "refusing to recover an active stale test pool at $source" ;;
+  esac
   if [ -n "$token" ]; then
     for project in subyard-e2e-yard subyard-test-yard; do
       incus project show "$project" >/dev/null 2>&1 || continue
-      project_marker="$(incus project get "$project" user.subyard.p0-image-cache 2>/dev/null)"
-      [ "$project_marker" = "$expected_marker" ] \
-        || die "refusing stale P0 pool with foreign project $project"
-      reclaim_owner_project_residue "$project"
+      reclaim_owner_project_residue \
+        "$project" "$expected_marker" "$markerless_registration"
     done
     state="$(timeout --foreground "$query_timeout" \
       incus storage show default --project default 2>/dev/null)"
@@ -1417,14 +1586,21 @@ recover_stale_test_default_pool() {
   fi
   status="$(sed -n 's/^status: //p' <<<"$state")"
   used_by="$(sed -n 's/^used_by: //p' <<<"$state")"
-  [ "$status" = Unavailable ] && [ "$used_by" = '[]' ] \
+  [ "$used_by" = '[]' ] \
     || die "refusing to recover an active stale test pool at $source"
+  case "$status" in
+    Unavailable) ;;
+    Created) [ "$recover_existing_p0" = 1 ] \
+      || die "refusing to recover an active stale test pool at $source" ;;
+    *) die "refusing to recover an active stale test pool at $source" ;;
+  esac
   printf '  [ .. ] VM%s: removing unused stale test pool at %s\n' \
     "$SUBYARD_E2E_VM" "$source"
   timeout --foreground 120 incus storage delete default --project default >/dev/null
 }
 
 capacity_preflight() {
+  recover_stale_source_upgrade_fixture
   recover_stale_test_default_pool
   p0_capacity_preflight
 }
@@ -1640,13 +1816,30 @@ capacity_verify_cleanup() {
     "/tmp/subyard-p0-rename-base-$TOKEN" \
     "/tmp/subyard-p0-go-cache-$TOKEN" \
     "/tmp/subyard-p0-source-$TOKEN.tar.gz" \
-    "/var/tmp/subyard-p0-source-release-$TOKEN"; do
-    [ ! -e "$path" ] || die "legacy or transient P0 state remains after cleanup: $path"
+    "/var/tmp/subyard-p0-source-release-$TOKEN" \
+    "/var/tmp/subyard-p0-power-systemd-$TOKEN"; do
+    [ ! -e "$path" ] && [ ! -L "$path" ] \
+      || die "legacy or transient P0 state remains after cleanup: $path"
   done
   [ -z "$(find /tmp -maxdepth 1 -name 'subyard-p0-incus.*' -print -quit)" ] \
     || die 'real-Incus transient directory remains after cleanup'
   [ -z "$(find /var/tmp -maxdepth 1 -type d -name 'subyard-nested-teardown.*' -print -quit)" ] \
     || die 'nested-teardown transient directory remains after cleanup'
+  [ -z "$(find /tmp -maxdepth 1 -type d -name 'subyard-e2e-systemd255.*' -print -quit)" ] \
+    || die 'systemd 255 transient directory remains after cleanup'
+  [ -z "$(find /tmp -maxdepth 1 \
+    -name "subyard-p0-power-sudoers-$TOKEN.*" -print -quit)" ] \
+    || die 'power-systemd temporary sudoers file remains after cleanup'
+  [ -z "$(find /run/systemd/system -maxdepth 1 \
+    -name 'subyard-e2e-power-reconciler-systemd-*' -print -quit)" ] \
+    || die 'power reconciler systemd unit residue remains after cleanup'
+  [ -z "$(find /run -maxdepth 1 \
+    \( -name 'subyard-e2e-power-reconciler-systemd-*' \
+       -o -name 'subyard-e2e-power-reconciler-systemd-*.sh' \) -print -quit)" ] \
+    || die 'power reconciler runtime residue remains after cleanup'
+  [ -z "$(find /usr/local/libexec -maxdepth 1 \
+    -name 'subyard-e2e-power-reconciler-systemd-*.sh' -print -quit 2>/dev/null)" ] \
+    || die 'power reconciler executable residue remains after cleanup'
   if command -v incus >/dev/null 2>&1 && incus info >/dev/null 2>&1; then
     leftover="$(incus project list --format csv -c n \
       | awk '/^subyard-nested-e2e-/ { print; exit }')"
@@ -1663,16 +1856,28 @@ capacity_verify_cleanup() {
       ! incus project show "$project" >/dev/null 2>&1 \
         || die "P0 Incus project remains after cleanup: $project"
     done
+    leftover="$(incus project list --format csv -c n \
+      | awk '/^subyard-systemd255-/ { print; exit }')"
+    [ -z "$leftover" ] || die "systemd 255 project remains after cleanup: $leftover"
     if incus storage show default --project default >/dev/null 2>&1; then
       p0_capacity_require_persistent_path \
         "$(incus storage get default source --project default)" incus-default-pool
     fi
   fi
-  if [ "$SUBYARD_E2E_VM" = 1 ]; then
-    ! id "subyardp0$TOKEN" >/dev/null 2>&1 \
-      || die "source-upgrade fixture user remains after cleanup: subyardp0$TOKEN"
-    [ ! -e "/etc/sudoers.d/subyard-p0-source-$TOKEN" ] \
-      || die 'source-upgrade sudoers fixture remains after cleanup'
+  ! id "subyardp0$TOKEN" >/dev/null 2>&1 \
+    || die "source-upgrade fixture user remains after cleanup: subyardp0$TOKEN"
+  [ ! -e "/etc/sudoers.d/subyard-p0-source-$TOKEN" ] \
+    || die 'source-upgrade sudoers fixture remains after cleanup'
+  ! id "subyardpower$TOKEN" >/dev/null 2>&1 \
+    || die "power-systemd fixture user remains after cleanup: subyardpower$TOKEN"
+  [ ! -e "/etc/sudoers.d/subyard-p0-power-systemd-$TOKEN" ] \
+    && [ ! -L "/etc/sudoers.d/subyard-p0-power-systemd-$TOKEN" ] \
+    || die 'power-systemd sudoers fixture remains after cleanup'
+  [ ! -e "/home/subyardpower$TOKEN" ] && [ ! -L "/home/subyardpower$TOKEN" ] \
+    || die 'power-systemd fixture home remains after cleanup'
+  if [ -L /etc/systemd/system/multi-user.target.wants/subyard-power-reconcile.service ]; then
+    [ -e /etc/systemd/system/multi-user.target.wants/subyard-power-reconcile.service ] \
+      || die 'dangling power reconciler enablement remains after cleanup'
   fi
   printf '  [ ok ] Go caches after lane reusable_modules=%s default_build=%s\n' \
     "$(p0_capacity_cache_bytes "$P0_CAPACITY_MODULE_CACHE")" \
@@ -1691,7 +1896,11 @@ capacity_verify_cleanup() {
     ensure_owner_incus nested-teardown
     bash dev/e2e/nested-teardown-data-boundary.sh
     ;;
-  real-incus) bash dev/e2e/p0-real-incus.sh ;;
+  real-incus)
+    p0_capacity_use_build_cache
+    ensure_owner_incus real-incus
+    bash dev/e2e/p0-real-incus.sh
+    ;;
   profile-resource)
     profile_resource
     bash dev/e2e/bind-resource-profile.sh
