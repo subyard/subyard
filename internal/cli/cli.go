@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -94,6 +95,15 @@ type CLI struct {
 	openTerminal                 func() (*os.File, error)
 	effectiveUID                 func() int
 	retainedAdapterCompatibility bool
+}
+
+func (cli *CLI) rpcOperation(operationID string) *CLI {
+	operation := *cli
+	operation.env = maps.Clone(cli.env)
+	operation.env["SUBYARD_OPERATION_ID"] = operationID
+	operation.inventoryRoutes = maps.Clone(cli.inventoryRoutes)
+	operation.discoveredOwners = maps.Clone(cli.discoveredOwners)
+	return &operation
 }
 
 func New(options Options) (*CLI, error) {
@@ -3575,6 +3585,7 @@ type rpcHandler struct {
 }
 
 type rpcPlannedOperation struct {
+	CLI        *CLI
 	Plan       domain.OperationPlan
 	Definition command.Definition
 	Arguments  []string
@@ -3632,10 +3643,8 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		if !ok || definition.Visibility != command.VisibilityPublic {
 			return nil, &rpc.Error{Code: "command_not_found", Message: "keys"}
 		}
-		previousOperationID := handler.cli.env["SUBYARD_OPERATION_ID"]
-		handler.cli.env["SUBYARD_OPERATION_ID"] = call.OperationID
-		defer func() { handler.cli.env["SUBYARD_OPERATION_ID"] = previousOperationID }()
-		credentialRuntime, err := handler.cli.credentialRuntimeWithStreams(
+		operationCLI := handler.cli.rpcOperation(call.OperationID)
+		credentialRuntime, err := operationCLI.credentialRuntimeWithStreams(
 			handler.loaded, strings.NewReader(""), io.Discard, io.Discard,
 		)
 		if err != nil {
@@ -3647,7 +3656,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		if err != nil {
 			return nil, operationRPCError("plan_failed", err)
 		}
-		orchestrator := handler.cli.operationOrchestrator(call.OperationID, handler.loaded, nil, &definition)
+		orchestrator := operationCLI.operationOrchestrator(call.OperationID, handler.loaded, nil, &definition)
 		plan, err := orchestrator.PrepareAction(
 			handler.loaded.Context, publicKeysCommandName(params.Arguments),
 			domain.RemotePolicy(definition.Remote), prepared.Action,
@@ -3675,19 +3684,17 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		if definition.Name != "update" && !structuredCommandSupported(definition.Name) {
 			return nil, &rpc.Error{Code: "interactive_or_payload_command", Message: params.Command}
 		}
-		previousOperationID := handler.cli.env["SUBYARD_OPERATION_ID"]
-		handler.cli.env["SUBYARD_OPERATION_ID"] = call.OperationID
-		project, err := handler.cli.prepareProjectExecution(
+		operationCLI := handler.cli.rpcOperation(call.OperationID)
+		project, err := operationCLI.prepareProjectExecution(
 			ctx, handler.loaded, definition, params.Arguments, true,
 		)
-		handler.cli.env["SUBYARD_OPERATION_ID"] = previousOperationID
 		if err != nil {
 			return nil, operationRPCError("invalid_params", err)
 		}
 		keepProjectReservation := false
 		defer func() {
 			if !keepProjectReservation {
-				handler.cli.abortProjectExecution(context.Background(), project)
+				operationCLI.abortProjectExecution(context.Background(), project)
 			}
 		}()
 		loaded := handler.loaded
@@ -3698,21 +3705,21 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		}
 		var remote *domain.RemotePrepared
 		if definition.Name == "remote" {
-			remote, err = handler.cli.prepareRemoteExecution(ctx, loaded, arguments)
+			remote, err = operationCLI.prepareRemoteExecution(ctx, loaded, arguments)
 			if err != nil {
 				return nil, operationRPCError("invalid_params", err)
 			}
 		}
 		var initRun *initExecution
 		if definition.Handler == "@init" && loaded.Context.AccessKind != domain.AccessRemote {
-			initRun, err = handler.cli.prepareInitExecution(ctx, loaded, arguments, nil)
+			initRun, err = operationCLI.prepareInitExecution(ctx, loaded, arguments, nil)
 			if err != nil {
 				return nil, operationRPCError("plan_failed", err)
 			}
 		}
 		var releaseRun *releaseExecution
 		if definition.Handler == "@update" {
-			releaseRun, err = handler.cli.prepareRelease(ctx, loaded, arguments)
+			releaseRun, err = operationCLI.prepareRelease(ctx, loaded, arguments)
 			if err != nil {
 				return nil, operationRPCError("plan_failed", err)
 			}
@@ -3726,14 +3733,14 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		}
 		var provisionRun *provisionExecution
 		if definition.Handler == "@provision" {
-			provisionRun, err = handler.cli.prepareProvisionExecution(loaded, arguments, project)
+			provisionRun, err = operationCLI.prepareProvisionExecution(loaded, arguments, project)
 			if err != nil {
 				return nil, operationRPCError("invalid_params", err)
 			}
 		}
 		var testVMRun *testVMExecution
 		if definition.Handler == "@test-vms" {
-			testVMRun, err = handler.cli.prepareTestVMExecution(ctx, loaded, arguments)
+			testVMRun, err = operationCLI.prepareTestVMExecution(ctx, loaded, arguments)
 			if err != nil {
 				return nil, operationRPCError("invalid_params", err)
 			}
@@ -3758,16 +3765,16 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		if teardownRun != nil {
 			policy = teardownRun.policy(definition, loaded.Context)
 		}
-		action, delta, typedAction, actionErr := handler.cli.assessStructuredAction(
+		action, delta, typedAction, actionErr := operationCLI.assessStructuredAction(
 			ctx, loaded, definition, project, initRun, lifecycleRun, provisionRun, teardownRun,
 		)
 		if actionErr != nil {
 			return nil, operationRPCError("plan_failed", actionErr)
 		}
-		orchestrator := handler.cli.operationOrchestrator(call.OperationID, loaded, nil, nil)
+		orchestrator := operationCLI.operationOrchestrator(call.OperationID, loaded, nil, nil)
 		var plan domain.OperationPlan
 		if remote != nil {
-			plan, err = handler.cli.prepareRemoteOperation(orchestrator, loaded, *remote)
+			plan, err = operationCLI.prepareRemoteOperation(orchestrator, loaded, *remote)
 		} else if releaseRun != nil {
 			plan, err = releaseRun.prepareAction(orchestrator, loaded, definition)
 		} else if testVMRun != nil {
@@ -3797,7 +3804,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			return nil, &rpc.Error{Code: "too_many_plans", Message: "execute an existing plan or start a new RPC session"}
 		}
 		handler.plans[plan.OperationID] = rpcPlannedOperation{
-			Plan: plan, Definition: definition, Arguments: arguments, Loaded: loaded, Project: project,
+			CLI: operationCLI, Plan: plan, Definition: definition, Arguments: arguments, Loaded: loaded, Project: project,
 			Remote: remote, Init: initRun, Lifecycle: lifecycleRun, Provision: provisionRun,
 			TestVMs: testVMRun, Teardown: teardownRun, Release: releaseRun,
 		}
@@ -3823,11 +3830,11 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		if !ok {
 			return nil, &rpc.Error{Code: "plan_not_found", Message: call.OperationID}
 		}
-		defer handler.cli.abortProjectExecution(context.Background(), planned.Project)
+		defer planned.CLI.abortProjectExecution(context.Background(), planned.Project)
 		if planned.Plan.Target == domain.TargetRemoteOwner {
 			return nil, &rpc.Error{Code: "remote_owner_required", Message: "execute this plan through owner-host SSH stdio"}
 		}
-		orchestrator := handler.cli.operationOrchestrator(
+		orchestrator := planned.CLI.operationOrchestrator(
 			call.OperationID, planned.Loaded, rpcOperationEvents{emit: emit}, &planned.Definition,
 		)
 		plan, err := orchestrator.Confirm(ctx, planned.Plan, true)
@@ -3836,12 +3843,12 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		}
 		var result domain.AdapterResult
 		if planned.Release != nil {
-			result, err = handler.cli.executeRelease(ctx, orchestrator, plan, planned.Release)
+			result, err = planned.CLI.executeRelease(ctx, orchestrator, plan, planned.Release)
 		} else {
-			result, err = handler.cli.executeStructuredCommand(
+			result, err = planned.CLI.executeStructuredCommand(
 				ctx, orchestrator, planned.Loaded, planned.Definition, planned.Arguments,
 				plan, planned.Project, planned.Remote, planned.Init, planned.Lifecycle,
-				planned.Provision, planned.TestVMs, planned.Teardown, handler.cli.options.Stderr,
+				planned.Provision, planned.TestVMs, planned.Teardown, planned.CLI.options.Stderr,
 			)
 		}
 		if err != nil {
@@ -3855,7 +3862,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			return nil, &rpc.Error{Code: "adapter_failed", Message: result.ErrorCode}
 		}
 		if planned.Project != nil && !operationPlanNoOp(plan) {
-			if err := handler.cli.commitProjectExecution(ctx, planned.Project); err != nil {
+			if err := planned.CLI.commitProjectExecution(ctx, planned.Project); err != nil {
 				return nil, &rpc.Error{Code: "state_commit_failed", Message: err.Error()}
 			}
 		}

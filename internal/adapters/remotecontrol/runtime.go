@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Subyard/Subyard/internal/adapters/transport"
@@ -132,17 +133,69 @@ func (runtime Runtime) RecordedYardKeys(_ context.Context, name string) ([]domai
 
 func (runtime Runtime) Apply(ctx context.Context, prepared domain.RemotePrepared) (domain.RemoteResult, error) {
 	switch prepared.Action {
+	case domain.RemoteList:
+		return domain.RemoteResult{Records: prepared.Records}, nil
+	case domain.RemoteAdd, domain.RemoteRepairKey, domain.RemoteRemove:
+	default:
+		return domain.RemoteResult{}, errors.New("unknown prepared remote action")
+	}
+	unlock, err := runtime.lockMutation(ctx)
+	if err != nil {
+		return domain.RemoteResult{}, err
+	}
+	defer unlock()
+	if err := ctx.Err(); err != nil {
+		return domain.RemoteResult{}, fmt.Errorf("apply remote mutation: %w", context.Cause(ctx))
+	}
+	switch prepared.Action {
 	case domain.RemoteAdd:
 		return runtime.applyAdd(ctx, prepared)
 	case domain.RemoteRepairKey:
 		return runtime.applyRepair(ctx, prepared)
-	case domain.RemoteRemove:
-		return runtime.applyRemove(ctx, prepared)
-	case domain.RemoteList:
-		return domain.RemoteResult{Records: prepared.Records}, nil
 	default:
-		return domain.RemoteResult{}, errors.New("unknown prepared remote action")
+		return runtime.applyRemove(ctx, prepared)
 	}
+}
+
+func (runtime Runtime) lockMutation(ctx context.Context) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("lock remote mutation: %w", context.Cause(ctx))
+	}
+	directory := filepath.Join(runtime.Home, ".ssh")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return nil, fmt.Errorf("prepare remote mutation lock: %w", err)
+	}
+	path := filepath.Join(directory, ".subyard-remote.lock")
+	fd, err := syscall.Open(path,
+		syscall.O_CREAT|syscall.O_RDWR|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open remote mutation lock: %w", err)
+	}
+	file := os.NewFile(uintptr(fd), path)
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("secure remote mutation lock: %w", err)
+	}
+	for {
+		err = syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			_ = file.Close()
+			return nil, fmt.Errorf("lock remote mutation: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			_ = file.Close()
+			return nil, fmt.Errorf("lock remote mutation: %w", context.Cause(ctx))
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	return func() {
+		_ = syscall.Flock(fd, syscall.LOCK_UN)
+		_ = file.Close()
+	}, nil
 }
 
 func (runtime Runtime) applyAdd(ctx context.Context, prepared domain.RemotePrepared) (domain.RemoteResult, error) {

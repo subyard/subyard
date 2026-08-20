@@ -155,6 +155,127 @@ func TestApplyAddRollsBackEveryLocalFileOnProbeFailure(t *testing.T) {
 	}
 }
 
+func TestApplySerializesMutationsForTheSameOperatorHome(t *testing.T) {
+	first := remoteFixture(t)
+	second := first
+	firstEntered := make(chan struct{}, 1)
+	secondEntered := make(chan struct{}, 1)
+	releaseFirst := make(chan struct{})
+	first.processCall = func(context.Context, string, []string, []byte) ([]byte, error) {
+		firstEntered <- struct{}{}
+		<-releaseFirst
+		return nil, errors.New("first authorization stopped")
+	}
+	second.processCall = func(context.Context, string, []string, []byte) ([]byte, error) {
+		secondEntered <- struct{}{}
+		return nil, errors.New("second authorization stopped")
+	}
+	prepared := func(alias string) domain.RemotePrepared {
+		return domain.RemotePrepared{
+			Action: domain.RemoteAdd,
+			Spec:   domain.RemoteSpec{LegacyAlias: alias, OwnerEndpoint: "owner.example"},
+		}
+	}
+	firstDone := make(chan error, 1)
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := first.Apply(context.Background(), prepared("first"))
+		firstDone <- err
+	}()
+	select {
+	case <-firstEntered:
+	case <-time.After(time.Second):
+		t.Fatal("first mutation did not reach owner authorization")
+	}
+	go func() {
+		_, err := second.Apply(context.Background(), prepared("second"))
+		secondDone <- err
+	}()
+	early := false
+	select {
+	case <-secondEntered:
+		early = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseFirst)
+	for index, done := range []<-chan error{firstDone, secondDone} {
+		select {
+		case err := <-done:
+			if err == nil || !strings.Contains(err.Error(), "authorization stopped") {
+				t.Fatalf("mutation %d returned %v", index, err)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("mutation %d did not finish", index)
+		}
+	}
+	if early {
+		t.Fatal("second mutation entered owner authorization before the first mutation finished")
+	}
+}
+
+func TestRemoteMutationLockStopsWaitingWhenContextEnds(t *testing.T) {
+	runtime := remoteFixture(t)
+	unlock, err := runtime.lockMutation(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		secondUnlock, err := runtime.lockMutation(ctx)
+		if err == nil {
+			secondUnlock()
+		}
+		done <- err
+	}()
+	var waitErr error
+	returnedBeforeUnlock := false
+	select {
+	case waitErr = <-done:
+		returnedBeforeUnlock = true
+	case <-time.After(200 * time.Millisecond):
+	}
+	unlock()
+	if !returnedBeforeUnlock {
+		select {
+		case waitErr = <-done:
+		case <-time.After(time.Second):
+			t.Fatal("lock waiter did not finish after release")
+		}
+	}
+	if !returnedBeforeUnlock || !errors.Is(waitErr, context.DeadlineExceeded) {
+		t.Fatalf("lock wait ignored context: returned=%v err=%v", returnedBeforeUnlock, waitErr)
+	}
+}
+
+func TestApplyRejectsCanceledMutationBeforeChangingFiles(t *testing.T) {
+	runtime := remoteFixture(t)
+	spec := domain.RemoteSpec{LegacyAlias: "demo", OwnerEndpoint: "owner.example"}
+	envPath := filepath.Join(runtime.ConfigHome, "yards", "demo", "config.env")
+	payload := renderContext(domain.RemotePrepared{
+		Spec: spec, Owner: domain.RemoteInfo{SSHPort: 2222, DevUser: "dev"},
+	}, nil)
+	writeRemoteFile(t, envPath, string(payload), 0o600)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := runtime.Apply(ctx, domain.RemotePrepared{
+		Action: domain.RemoteRemove,
+		Spec:   spec,
+		Existing: &domain.RemoteRecord{
+			Spec: spec, Remote: true, Path: envPath, SSHPort: 2222,
+		},
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled mutation returned %v", err)
+	}
+	current, readErr := os.ReadFile(envPath)
+	if readErr != nil || string(current) != string(payload) {
+		t.Fatalf("canceled mutation changed the remote context: payload=%q err=%v", current, readErr)
+	}
+}
+
 func TestApplyRemoveDeletesOnlyTheSelectedRemote(t *testing.T) {
 	runtime := remoteFixture(t)
 	spec := domain.RemoteSpec{LegacyAlias: "demo", OwnerEndpoint: "owner.example"}
