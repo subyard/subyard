@@ -110,11 +110,12 @@ grep -Fxq './bin/yard' "$bundle_list" \
   && grep -Fxq './config/commands.registry' "$bundle_list" \
   && grep -Fxq './config/migrations.json' "$bundle_list" \
   && grep -Fxq './config/agents/codex/provision.sh' "$bundle_list" \
-  && grep -Fxq './config/profiles/hermes/hermes-release-resolve.py' "$bundle_list" \
   && grep -Fxq './config/profiles/hermes/resources/dashboard.res' "$bundle_list" \
   && grep -Fxq './config/profiles/hermes/resources/dashboard/handler.sh' "$bundle_list" \
   && grep -Fxq './config/profiles/hermes/yard.env' "$bundle_list" \
   || fail 'runtime bundle does not contain the complete launcher contract'
+! grep -Fxq './config/profiles/hermes/hermes-release-resolve.py' "$bundle_list" \
+  || fail 'runtime bundle contains the retired Hermes release resolver'
 grep -Fxq './runtime-files.sha256' "$bundle_list" \
   || fail 'runtime bundle exact file manifest is missing'
 ! grep -Fq "$(basename "$staging_canary")" "$bundle_list" \

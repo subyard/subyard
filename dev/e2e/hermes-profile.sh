@@ -199,7 +199,7 @@ yard "$YARD" config set SSH_PORT "$ssh_port" --scope yard --yes
 yard "$YARD" start --yes
 yard "$YARD" init --yes
 
-printf '  [ .. ] delegating installation to the latest stable official installer\n'
+printf '  [ .. ] provisioning only the generic Hermes substrate\n'
 yard "$YARD" provision --yes
 yard "$YARD" start --yes
 instance="$(setting "$YARD" YARD_INSTANCE_NAME)"
@@ -211,33 +211,19 @@ dev_gid="$(incus exec "$instance" --project "$project" -- id -g dev)" \
 [[ "$dev_uid" =~ ^[0-9]+$ && "$dev_gid" =~ ^[0-9]+$ ]] \
   || die "guest dev identity is invalid"
 
+incus exec "$instance" --project "$project" -- sh -euc '
+fail() { printf "Hermes substrate assertion failed: %s\n" "$*" >&2; exit 1; }
+for package in build-essential ca-certificates curl git libffi-dev python3-dev xz-utils; do
+  test "$(dpkg-query -W -f="\${Status}" "$package")" = "install ok installed" \
+    || fail "generic prerequisite $package"
+done
+'
 incus exec "$instance" --project "$project" --user "$dev_uid" --group "$dev_gid" \
   --env HOME=/home/dev -- sh -euc '
 fail() { printf "Hermes substrate assertion failed: %s\n" "$*" >&2; exit 1; }
-state=$HOME/.hermes
-source=$state/hermes-agent
-launcher=$HOME/.local/bin/hermes
-test -d "$state" && test ! -L "$state" || fail "canonical state directory"
-test "$(stat -c %a "$state")" = 700 || fail "canonical state mode"
-test "$(stat -c %u:%g "$state")" = "$(id -u dev):$(id -g dev)" \
-  || fail "canonical state owner"
-test -d "$source/.git" && test ! -L "$source" || fail "official source checkout"
-test -x "$source/venv/bin/python" || fail "source-local virtual environment"
-test -f "$source/hermes" || fail "official source entrypoint"
-test "$(cat "$source/.install_method")" = git || fail "official git install marker"
-case "$(git -C "$source" remote get-url origin)" in
-  https://github.com/NousResearch/hermes-agent.git|git@github.com:NousResearch/hermes-agent.git) ;;
-  *) fail "official source origin" ;;
-esac
-release_tag="$(git -C "$source" describe --tags --exact-match HEAD)" \
-  || fail "checkout HEAD is not an exact release tag"
-printf "%s\n" "$release_tag" \
-  | grep -Eq "^v[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}(\.[0-9]+)?$" \
-  || fail "checkout tag is not a stable release tag"
-test "$(git -C "$source" rev-list -n 1 "$release_tag^{commit}")" \
-  = "$(git -C "$source" rev-parse HEAD)" \
-  || fail "stable release tag does not resolve to checkout HEAD"
-test -x "$launcher" || fail "canonical launcher"
+test ! -e "$HOME/.hermes" && test ! -L "$HOME/.hermes" || fail "Subyard created Hermes state"
+test ! -e "$HOME/.local/bin/hermes" && test ! -L "$HOME/.local/bin/hermes" \
+  || fail "Subyard installed a Hermes launcher"
 ! command -v tailscale >/dev/null 2>&1 || fail "Tailscale leaked into the guest"
 test ! -S /run/host-services/ssh-auth.sock || fail "host SSH agent leaked into the guest"
 if command -v sudo >/dev/null 2>&1 && sudo -n true; then
@@ -247,7 +233,7 @@ if systemctl list-unit-files --no-legend 2>/dev/null | awk "{print \$1}" | grep 
   fail "Subyard-owned Hermes service installed"
 fi
 '
-printf '  [ ok ] canonical upstream layout and guest isolation verified\n'
+printf '  [ ok ] generic prerequisites, software independence and guest isolation verified\n'
 
 expanded="$(incus config show "$instance" --project "$project" --expanded)"
 printf '%s\n' "$expanded" | grep -Fq 'security.privileged: "true"' \
@@ -275,12 +261,14 @@ done
 yard "$YARD" security --require-live --quiet \
   || die "live isolation policy rejected the Hermes yard"
 
-printf '  [ .. ] creating opaque state at the canonical upstream path\n'
+printf '  [ .. ] creating independently managed opaque Hermes state\n'
 incus exec "$instance" --project "$project" --user "$dev_uid" --group "$dev_gid" \
   --env HOME=/home/dev --env OPAQUE_TOKEN="$token" -- sh -euc '
-install -d -m 0700 "$HOME/.hermes/operator-opaque"
+install -d -m 0700 "$HOME/.hermes/operator-opaque" "$HOME/.local/bin"
 printf "opaque-substrate-e2e-%s\n" "$OPAQUE_TOKEN" >"$HOME/.hermes/operator-opaque/state.bin"
+printf "#!/usr/bin/env sh\nexit 0\n" >"$HOME/.local/bin/hermes"
 chmod 0600 "$HOME/.hermes/operator-opaque/state.bin"
+chmod 0755 "$HOME/.local/bin/hermes"
 '
 
 state_signature() {
@@ -289,7 +277,6 @@ state_signature() {
     --env HOME=/home/dev -- sh -euc '
 file=$HOME/.hermes/operator-opaque/state.bin
 test -f "$file" && test ! -L "$file"
-test -x "$HOME/.hermes/hermes-agent/venv/bin/python"
 test -x "$HOME/.local/bin/hermes"
 cd "$HOME"
 LC_ALL=C tar --sort=name --numeric-owner --one-file-system --format=gnu \
@@ -298,10 +285,10 @@ LC_ALL=C tar --sort=name --numeric-owner --one-file-system --format=gnu \
 }
 
 before="$(state_signature)"
-printf '  [ .. ] proving repeat provision preserves installation and opaque state\n'
+printf '  [ .. ] proving repeat provision preserves operator-managed Hermes state\n'
 yard "$YARD" provision --yes
 [ "$(state_signature)" = "$before" ] \
-  || die "repeat provision changed the installation or opaque state"
+  || die "repeat provision changed operator-managed Hermes state"
 
 printf '  [ .. ] proving stop/start and container restart preserve opaque state\n'
 yard "$YARD" stop --yes
@@ -437,4 +424,4 @@ fi
 [ ! -e "$state_dir" ] && [ ! -L "$state_dir" ] \
   || die "Hermes project state survived teardown"
 YARD=""
-printf '  [ ok ] official layout, isolation, persistence and typed Tailscale route verified\n'
+printf '  [ ok ] substrate isolation, software independence, persistence and typed route verified\n'

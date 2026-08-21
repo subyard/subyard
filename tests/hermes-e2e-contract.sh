@@ -32,11 +32,15 @@ for required in \
   'yard "$YARD" provision --yes' \
   'dev_uid="$(incus exec' \
   '--user "$dev_uid" --group "$dev_gid"' \
+  'dpkg-query -W' \
+  'build-essential ca-certificates curl git libffi-dev python3-dev xz-utils' \
+  'test ! -e "$HOME/.hermes" && test ! -L "$HOME/.hermes"' \
+  'test ! -e "$HOME/.local/bin/hermes" && test ! -L "$HOME/.local/bin/hermes"' \
   '$HOME/.hermes' \
   '$HOME/.local/bin/hermes' \
   'operator-opaque/state.bin' \
   'tar --sort=name --numeric-owner --one-file-system' \
-  'repeat provision changed the installation or opaque state' \
+  'repeat provision changed operator-managed Hermes state' \
   'yard "$YARD" stop --yes' \
   'yard "$YARD" start --yes' \
   'incus restart "$instance"' \
@@ -88,7 +92,7 @@ grep -Fq "'CODING_TOOL_INTEGRATIONS=claude'" "$E2E" \
   || fail 'real lane does not seed a hostile host agent selection'
 grep -Fq 'HOST_MOUNTS=host-fixture:/mnt/host-fixture:ro:0755' "$E2E" \
   || fail 'real lane does not seed a hostile host mount'
-if grep -Eq 'hermes (doctor|setup|model|gateway|cron|update)|faster[_-]whisper|telegram|config\.yaml|/srv/hermes|HERMES_DASHBOARD_BASIC|HERMES_PROVIDER' \
+if grep -Eq 'hermes (doctor|setup|model|gateway|cron|update)|hermes-agent\.git|scripts/install\.sh|release_tag|faster[_-]whisper|telegram|config\.yaml|/srv/hermes|HERMES_DASHBOARD_BASIC|HERMES_PROVIDER' \
   "$E2E"; then
   fail 'real lane validates or configures Hermes application behavior'
 fi

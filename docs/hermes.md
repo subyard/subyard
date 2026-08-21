@@ -24,38 +24,29 @@ yard -Y hermes config show FORWARD_SSH_AGENT
 yard -Y hermes security --require-live
 ```
 
-Provisioning resolves the latest non-draft, non-prerelease GitHub release, verifies its immutable
-tag commit, and reads `scripts/install.sh` from a shallow checkout of that exact release. It runs
-the installer as `dev` with the supported non-root layout and defers interactive setup. Subyard
-does not execute anything from the user-owned Hermes tree as root, select individual Hermes
-components, or add its own package, model, plugin, launcher, updater or service policy.
+Provisioning installs only these generic OS prerequisites:
 
-The resulting upstream paths are:
+```text
+build-essential ca-certificates curl git libffi-dev python3-dev xz-utils
+```
 
-| Purpose | Path |
-| --- | --- |
-| Hermes state and installation root | `/home/dev/.hermes` |
-| Source checkout | `/home/dev/.hermes/hermes-agent` |
-| Python environment and CLI | `/home/dev/.hermes/hermes-agent/venv` |
-| User-facing CLI launcher | `/home/dev/.local/bin/hermes` |
+Subyard does not install, locate, validate or update Hermes software. It does not select a Hermes
+release or component, run an upstream installer, assume an installation layout, or create a
+launcher, configuration or service. Installation, setup and updates remain independent of the
+Subyard release lifecycle and belong to Hermes and the operator.
 
-These paths live inside the yard's persistent filesystem. Repeat provision, stop/start and an
-instance restart preserve them. A confirmed `yard teardown` destroys the yard and its state while
-retaining the reusable named-yard definition.
-
-The official installer may create its own configuration skeleton and directories. That is upstream
-behavior: Subyard neither creates nor interprets Hermes `.env`, `config.yaml`, credentials,
-memories, sessions, skills or task data. Run the normal upstream setup from an ordinary shell after
-provisioning:
+Install and manage Hermes with the current upstream instructions as the ordinary `dev` user after
+provisioning the yard:
 
 ```sh
 yard -Y hermes shell
-hermes setup
+# Follow the upstream Hermes installation and setup instructions here.
 ```
 
-Use upstream Hermes commands for subsequent setup, component installation and updates. Repeat
-`yard provision` only reconciles the substrate and leaves a healthy existing installation and its
-state untouched.
+The yard root filesystem is persistent. Files installed or created independently by the operator
+survive repeat provision, stop/start and an instance restart. Repeat `yard provision` reconciles
+only the generic prerequisites and does not inspect or change Hermes-owned files. A confirmed
+`yard teardown` destroys the yard and its state while retaining the reusable named-yard definition.
 
 ## Optional browser route over Tailscale
 
@@ -94,10 +85,10 @@ yard -Y hermes dashboard down
 
 ## Maintainer acceptance
 
-The real-host lane installs through the official release bootstrap, verifies the canonical paths
-and isolation, writes opaque state, and proves it survives repeat provision, stop/start and an
-instance restart. It checks the typed Tailscale route with an application-neutral loopback fixture;
-it does not run Hermes setup or test Hermes features.
+The real-host lane verifies the generic prerequisites, proves that fresh provision does not install
+Hermes, and checks isolation. It then creates opaque operator-managed state and proves that repeat
+provision, stop/start and an instance restart preserve it. The lane checks the typed Tailscale route
+with an application-neutral loopback fixture; it does not install, configure or test Hermes.
 
 ```sh
 dev/agent-e2e.sh --prepare

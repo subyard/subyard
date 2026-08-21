@@ -3,7 +3,6 @@ android-provision-check.sh
 build-engine.sh
 docker-forwarding-convergence.sh
 emulator-process-identity.sh
-hermes-release-resolver.sh
 lib-power-network.sh
 openclaw-provision-check.sh
 p0-capacity.sh
