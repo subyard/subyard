@@ -664,6 +664,7 @@ run_source_recovery_case() {
     SUBYARD_E2E_VM=2
     cleanup_token=
     die() { printf "%s\n" "$*" >&2; return 2; }
+    incus() { :; }
     source_upgrade_project_inventory() { printf "%s\n" "$SOURCE_RECOVERY_INVENTORY"; }
     source_upgrade_project_marker() {
       case "$1" in
