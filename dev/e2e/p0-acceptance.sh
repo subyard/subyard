@@ -1153,7 +1153,11 @@ power_systemd_lane() {
   run_power_systemd_vm "$vm" dev/e2e/power-reconciler-systemd-255.sh
   run_power_systemd_vm "$vm" dev/e2e/power-reconciler-systemd.sh
   POWER_SYSTEMD_STARTED=1
-  run_power_systemd_vm "$vm" dev/e2e/power-reconciler-upgrade.sh run "$TOKEN"
+  run_power_systemd_vm "$vm" dev/e2e/power-reconciler-upgrade.sh prepare "$TOKEN"
+  reboot_vm "$vm"
+  run_power_systemd_vm "$vm" dev/e2e/power-reconciler-upgrade.sh resume "$TOKEN"
+  reboot_vm "$vm"
+  run_power_systemd_vm "$vm" dev/e2e/power-reconciler-upgrade.sh finish "$TOKEN"
   POWER_SYSTEMD_STARTED=0
 }
 

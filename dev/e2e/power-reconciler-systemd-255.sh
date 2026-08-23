@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Reproduce the v0.7.2 parser failure and candidate load on Ubuntu 24.04/systemd 255.
+# Reproduce the published v0.8.0 parser failure and candidate boot on Ubuntu 24.04/systemd 255.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -7,13 +7,15 @@ RUN_ID="${SUBYARD_E2E_RUN_ID:-}"
 PROJECT="subyard-systemd255-$RUN_ID"
 INSTANCE="systemd255-$RUN_ID"
 MARKER="subyard-e2e-systemd255-v1 run=$RUN_ID"
-OLD_TEMPLATE="$ROOT/tests/fixtures/systemd/subyard-power-reconcile-v0.7.2.service.in"
+OLD_TEMPLATE="$ROOT/tests/fixtures/systemd/subyard-power-reconcile-v0.8.0.service.in"
 CANDIDATE_TEMPLATE="$ROOT/config/systemd/subyard-power-reconcile.service.in"
-OLD_UNIT="subyard-e2e-power-v072-$RUN_ID.service"
+OLD_UNIT="subyard-e2e-power-v080-$RUN_ID.service"
 CANDIDATE_UNIT="subyard-e2e-power-candidate-$RUN_ID.service"
 INSTALL_UNIT="subyard-e2e-power-install-$RUN_ID.service"
-INSTALL_ROOT="/run/subyard-e2e-power-install-$RUN_ID"
+INSTALL_UNIT_PATH="/etc/systemd/system/$INSTALL_UNIT"
+INSTALL_ROOT="/var/tmp/subyard-e2e-power-install-$RUN_ID"
 INSTALL_ARCHIVE="$INSTALL_ROOT.tar.gz"
+INSTALL_RECONCILER_PATH="/usr/local/libexec/subyard-e2e-power-$RUN_ID/reconciler"
 TEMPORARY=''
 PROJECT_CREATED=0
 INCUS_COMMAND_TIMEOUT="${SUBYARD_SYSTEMD255_INCUS_TIMEOUT_SECONDS:-30}"
@@ -52,6 +54,7 @@ run_incus() {
 
 bounded_incus() { run_incus "$INCUS_COMMAND_TIMEOUT" "$@"; }
 launch_incus() { run_incus "$INCUS_LAUNCH_TIMEOUT" launch "$@"; }
+restart_incus() { run_incus "$INCUS_LAUNCH_TIMEOUT" restart "$@"; }
 
 assert_owned_project() {
   [ "$(bounded_incus project get "$PROJECT" user.subyard.systemd255 2>/dev/null)" = \
@@ -178,7 +181,7 @@ bounded_incus file push "$TEMPORARY/$OLD_UNIT" \
 bounded_incus file push "$TEMPORARY/$CANDIDATE_UNIT" \
   "$INSTANCE/run/systemd/system/$CANDIDATE_UNIT" --project "$PROJECT" >/dev/null
 bounded_incus file push "$TEMPORARY/$INSTALL_UNIT" \
-  "$INSTANCE/run/systemd/system/$INSTALL_UNIT" --project "$PROJECT" >/dev/null
+  "$INSTANCE$INSTALL_UNIT_PATH" --project "$PROJECT" >/dev/null
 bounded_incus file push "$TEMPORARY/product.tar.gz" \
   "$INSTANCE$INSTALL_ARCHIVE" \
   --project "$PROJECT" >/dev/null
@@ -195,10 +198,10 @@ diagnostics="$(bounded_incus exec "$INSTANCE" --project "$PROJECT" -- \
   systemd-analyze verify "/run/systemd/system/$OLD_UNIT" 2>&1)"
 verify_rc=$?
 set -e
-[ "$verify_rc" -ne 0 ] || die 'systemd 255 unexpectedly verified the v0.7.2 unit'
+[ "$verify_rc" -ne 0 ] || die 'systemd 255 unexpectedly verified the published v0.8.0 unit'
 grep -Fq "RestartForceExitStatus= set, which isn't allowed for Type=oneshot services" \
   <<<"$diagnostics" \
-  || die 'systemd 255 omitted the expected v0.7.2 parser diagnostic'
+  || die 'systemd 255 omitted the expected published v0.8.0 parser diagnostic'
 bounded_incus exec "$INSTANCE" --project "$PROJECT" -- \
   systemd-analyze verify "/run/systemd/system/$CANDIDATE_UNIT"
 
@@ -210,7 +213,7 @@ bounded_incus exec "$INSTANCE" --project "$PROJECT" -- \
   || die 'systemd 255 production-installer fixture is not enabled before upgrade'
 [ "$(bounded_incus exec "$INSTANCE" --project "$PROJECT" -- \
   systemctl show "$OLD_UNIT" --property=LoadState --value)" = bad-setting ] \
-  || die 'systemd 255 did not reproduce v0.7.2 LoadState=bad-setting'
+  || die 'systemd 255 did not reproduce published v0.8.0 LoadState=bad-setting'
 [ "$(bounded_incus exec "$INSTANCE" --project "$PROJECT" -- \
   systemctl show "$CANDIDATE_UNIT" --property=LoadState --value)" = loaded ] \
   || die 'systemd 255 did not load the candidate unit'
@@ -241,9 +244,9 @@ bounded_incus exec "$INSTANCE" --project "$PROJECT" -- env \
   FORWARD_SSH_AGENT=1 \
   NESTED_E2E_VMS=0 \
   SUBYARD_POWER_ENGINE_SOURCE=/bin/true \
-  SUBYARD_POWER_LIBEXEC_DIR="/run/subyard-e2e-power-$RUN_ID" \
-  SUBYARD_POWER_RECONCILER_PATH="/run/subyard-e2e-power-$RUN_ID/reconciler" \
-  SUBYARD_POWER_UNIT_PATH="/run/systemd/system/$INSTALL_UNIT" \
+  SUBYARD_POWER_LIBEXEC_DIR="$(dirname "$INSTALL_RECONCILER_PATH")" \
+  SUBYARD_POWER_RECONCILER_PATH="$INSTALL_RECONCILER_PATH" \
+  SUBYARD_POWER_UNIT_PATH="$INSTALL_UNIT_PATH" \
   /bin/bash "$INSTALL_ROOT/scripts/install-power-reconciler.sh" --yes
 manager_state="$(bounded_incus exec "$INSTANCE" --project "$PROJECT" -- \
   systemctl show "$INSTALL_UNIT" \
@@ -252,4 +255,47 @@ grep -Fxq 'LoadState=loaded' <<<"$manager_state" \
   && grep -Fxq 'NeedDaemonReload=no' <<<"$manager_state" \
   || die "production installer left stale systemd 255 manager state: ${manager_state//$'\n'/, }"
 
-printf 'ok: Ubuntu 24.04/systemd 255 rejects v0.7.2 and production installer loads the candidate unit\n'
+before_boot="$(bounded_incus exec "$INSTANCE" --project "$PROJECT" -- \
+  cat /proc/sys/kernel/random/boot_id)"
+restart_incus "$INSTANCE" --project "$PROJECT" >/dev/null
+for _ in $(seq 1 120); do
+  bounded_incus exec "$INSTANCE" --project "$PROJECT" -- true >/dev/null 2>&1 && break
+  sleep 1
+done
+bounded_incus exec "$INSTANCE" --project "$PROJECT" -- true >/dev/null 2>&1 \
+  || die 'Ubuntu 24.04 systemd fixture did not return after restart'
+after_boot="$(bounded_incus exec "$INSTANCE" --project "$PROJECT" -- \
+  cat /proc/sys/kernel/random/boot_id)"
+[ -n "$after_boot" ] && [ "$after_boot" != "$before_boot" ] \
+  || die 'boot ID did not change across the systemd 255 fixture restart'
+
+manager_state=''
+for _ in $(seq 1 60); do
+  manager_state="$(bounded_incus exec "$INSTANCE" --project "$PROJECT" -- \
+    systemctl show "$INSTALL_UNIT" \
+      --property=LoadState --property=NeedDaemonReload \
+      --property=ActiveState --property=SubState --property=Result \
+      --property=ExecMainStatus --property=ExecMainStartTimestampMonotonic)" \
+    || manager_state=''
+  started="$(sed -n 's/^ExecMainStartTimestampMonotonic=//p' <<<"$manager_state")"
+  if grep -Fxq 'LoadState=loaded' <<<"$manager_state" \
+    && grep -Fxq 'NeedDaemonReload=no' <<<"$manager_state" \
+    && grep -Fxq 'ActiveState=inactive' <<<"$manager_state" \
+    && grep -Fxq 'SubState=dead' <<<"$manager_state" \
+    && grep -Fxq 'Result=success' <<<"$manager_state" \
+    && grep -Fxq 'ExecMainStatus=0' <<<"$manager_state" \
+    && [[ "$started" =~ ^[1-9][0-9]*$ ]]; then
+    break
+  fi
+  sleep 1
+done
+grep -Fxq 'LoadState=loaded' <<<"$manager_state" \
+  && grep -Fxq 'NeedDaemonReload=no' <<<"$manager_state" \
+  && grep -Fxq 'ActiveState=inactive' <<<"$manager_state" \
+  && grep -Fxq 'SubState=dead' <<<"$manager_state" \
+  && grep -Fxq 'Result=success' <<<"$manager_state" \
+  && grep -Fxq 'ExecMainStatus=0' <<<"$manager_state" \
+  && [[ "$started" =~ ^[1-9][0-9]*$ ]] \
+  || die "systemd 255 candidate did not reach current-boot terminal success: ${manager_state//$'\n'/, }"
+
+printf 'ok: Ubuntu 24.04/systemd 255 rejects published v0.8.0 and starts the persistent candidate after restart\n'

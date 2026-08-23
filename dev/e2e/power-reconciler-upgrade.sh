@@ -28,7 +28,13 @@ UNIT_LINK=/etc/systemd/system/multi-user.target.wants/subyard-power-reconcile.se
 BEFORE_ROOT="$STATE_ROOT/before"
 SNAPSHOT_COMPLETE="$BEFORE_ROOT/.complete"
 PROJECT_MUTATION_ARMED="$STATE_ROOT/.project-mutation-armed"
+PHASE_STATE="$STATE_ROOT/phase"
+BOOT_ID_STATE="$STATE_ROOT/boot-id"
+DEFAULT_ROUTE_STATE="$STATE_ROOT/default-route"
+OLD_RELEASE_TARGET_STATE="$STATE_ROOT/old-release-target"
+CANDIDATE_RELEASE_TARGET_STATE="$STATE_ROOT/candidate-release-target"
 CLEANUP_ARMED=0
+PRESERVE_FIXTURE=0
 OLD_RELEASE_TARGET=''
 CANDIDATE_RELEASE_TARGET=''
 INCUS_COMMAND_TIMEOUT="${SUBYARD_POWER_SYSTEMD_INCUS_TIMEOUT_SECONDS:-60}"
@@ -120,7 +126,7 @@ restore_host_runtime() {
     state="$(cat "$BEFORE_ROOT/$name.state" 2>/dev/null || true)"
     case "$state" in
       present)
-        sudo -n install -o root -g root \
+        sudo -n install -D -o root -g root \
           -m "$(stat -c %a "$BEFORE_ROOT/$name")" "$BEFORE_ROOT/$name" "$path" \
           || return 1
         ;;
@@ -150,6 +156,13 @@ restore_host_runtime() {
       sudo -n systemctl start subyard-power-reconcile.service >/dev/null || return 1
       ;;
     inactive) ;;
+    failed)
+      sudo -n systemctl reset-failed subyard-power-reconcile.service >/dev/null \
+        || return 1
+      # Restoring a failed service is intentionally best-effort at start: the exact
+      # pre-fixture unit must fail again, and the state assertion below proves it did.
+      sudo -n systemctl start subyard-power-reconcile.service >/dev/null 2>&1 || true
+      ;;
     *) return 1 ;;
   esac
   restored_enabled="$(sudo -n systemctl is-enabled subyard-power-reconcile.service \
@@ -160,7 +173,10 @@ restore_host_runtime() {
   esac
   restored_active="$(sudo -n systemctl show subyard-power-reconcile.service \
     --property=ActiveState --value 2>/dev/null)" || return 1
-  [ "$restored_active" = "$(cat "$BEFORE_ROOT/unit-active")" ] || return 1
+  case "$(cat "$BEFORE_ROOT/unit-active"):$restored_active" in
+    active:active|inactive:inactive|failed:failed) ;;
+    *) return 1 ;;
+  esac
   for path in "$RECONCILER" "$UNIT"; do
     name="$(basename "$path")"
     [ "$(cat "$BEFORE_ROOT/$name.state")" != absent ] \
@@ -192,6 +208,9 @@ delete_owned_project() {
 cleanup() {
   local rc=$? cleanup_failed=0 home_owned=0 project_owned=0 project_presence_rc=0
   trap - EXIT INT TERM
+  if [ "$rc" = 0 ] && [ "$PRESERVE_FIXTURE" = 1 ]; then
+    exit 0
+  fi
   set +e
   if [ "$CLEANUP_ARMED" != 1 ]; then
     p0_capacity_remove_build_cache || cleanup_failed=1
@@ -304,7 +323,7 @@ snapshot_host_runtime() {
     --property=ActiveState --value 2>/dev/null)" \
     || die 'cannot query initial power reconciler active state'
   case "$active_state" in
-    active|inactive) ;;
+    active|inactive|failed) ;;
     *) die "unsupported initial power reconciler active state: ${active_state:-query-error}" ;;
   esac
   printf '%s\n' "$active_state" > "$BEFORE_ROOT/unit-active"
@@ -470,6 +489,176 @@ verify_update_check_is_read_only() {
   [ "$before" = "$after" ] || die 'yard update --check mutated runtime, migration state or unit'
 }
 
+write_fixture_value() {
+  local path="$1" value="$2" temporary
+  case "$path" in
+    "$STATE_ROOT"/*) ;;
+    *) die "refusing fixture state outside $STATE_ROOT: $path" ;;
+  esac
+  temporary="$(mktemp "$STATE_ROOT/.state.XXXXXX")"
+  printf '%s\n' "$value" > "$temporary"
+  chmod 0600 "$temporary"
+  mv -f -- "$temporary" "$path"
+}
+
+read_fixture_value() {
+  local path="$1" value lines
+  [ -f "$path" ] && [ ! -L "$path" ] \
+    || die "fixture state is missing or unsafe: $path"
+  lines="$(wc -l < "$path")"
+  [ "$lines" = 1 ] || die "fixture state is not one line: $path"
+  IFS= read -r value < "$path"
+  [ -n "$value" ] || die "fixture state is empty: $path"
+  printf '%s\n' "$value"
+}
+
+assert_fixture_phase() {
+  local expected="$1" actual
+  actual="$(read_fixture_value "$PHASE_STATE")"
+  [ "$actual" = "$expected" ] \
+    || die "fixture phase is $actual, expected $expected"
+}
+
+load_release_targets() {
+  OLD_RELEASE_TARGET="$(read_fixture_value "$OLD_RELEASE_TARGET_STATE")"
+  CANDIDATE_RELEASE_TARGET="$(read_fixture_value "$CANDIDATE_RELEASE_TARGET_STATE")"
+}
+
+record_reboot_baseline() {
+  local boot_id route_temporary
+  boot_id="$(cat /proc/sys/kernel/random/boot_id)"
+  [ -n "$boot_id" ] || die 'host boot ID is empty'
+  write_fixture_value "$BOOT_ID_STATE" "$boot_id"
+  route_temporary="$(mktemp "$STATE_ROOT/.default-route.XXXXXX")"
+  ip -4 route show default > "$route_temporary"
+  [ -s "$route_temporary" ] || die 'host default route is empty before reboot'
+  chmod 0600 "$route_temporary"
+  mv -f -- "$route_temporary" "$DEFAULT_ROUTE_STATE"
+}
+
+assert_post_reboot_candidate() {
+  local previous_boot current_boot current_route manager_state started instance_state
+  previous_boot="$(read_fixture_value "$BOOT_ID_STATE")"
+  current_boot="$(cat /proc/sys/kernel/random/boot_id)"
+  [ -n "$current_boot" ] && [ "$current_boot" != "$previous_boot" ] \
+    || die 'power reconciler fixture did not cross a host reboot'
+  [ -f "$DEFAULT_ROUTE_STATE" ] && [ ! -L "$DEFAULT_ROUTE_STATE" ] \
+    || die 'pre-reboot default-route state is missing or unsafe'
+  current_route="$(mktemp "$STATE_ROOT/.default-route-current.XXXXXX")"
+  ip -4 route show default > "$current_route"
+  if ! cmp -s "$DEFAULT_ROUTE_STATE" "$current_route"; then
+    printf 'power-reconciler-upgrade: default route changed across reboot\n' >&2
+    diff -u "$DEFAULT_ROUTE_STATE" "$current_route" >&2 || true
+    find "$current_route" -delete
+    return 2
+  fi
+  find "$current_route" -delete
+
+  load_release_targets
+  assert_release_state "$CANDIDATE_VERSION" 5 \
+    "$ROOT/config/systemd/subyard-power-reconcile.service.in" loaded
+  assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
+  assert_candidate_transaction committed
+  manager_state="$(sudo -n systemctl show subyard-power-reconcile.service \
+    --property=LoadState --property=NeedDaemonReload \
+    --property=ActiveState --property=SubState --property=Result \
+    --property=ExecMainStatus --property=ExecMainStartTimestampMonotonic)" \
+    || die 'cannot observe current-boot power reconciler result'
+  started="$(sed -n 's/^ExecMainStartTimestampMonotonic=//p' <<<"$manager_state")"
+  grep -Fxq 'LoadState=loaded' <<<"$manager_state" \
+    && grep -Fxq 'NeedDaemonReload=no' <<<"$manager_state" \
+    && grep -Fxq 'ActiveState=inactive' <<<"$manager_state" \
+    && grep -Fxq 'SubState=dead' <<<"$manager_state" \
+    && grep -Fxq 'Result=success' <<<"$manager_state" \
+    && grep -Fxq 'ExecMainStatus=0' <<<"$manager_state" \
+    && [[ "$started" =~ ^[1-9][0-9]*$ ]] \
+    || die "candidate did not reconcile successfully in the current boot: ${manager_state//$'\n'/, }"
+  instance_state="$(incus list "$INSTANCE" --project "$PROJECT" --format csv -c s)"
+  [ "$instance_state" = RUNNING ] \
+    || die "desired-running yard is $instance_state after reboot"
+}
+
+prepare_candidate() {
+  local systemd_version old_load
+  [ ! -e "$STATE_ROOT" ] && [ ! -L "$STATE_ROOT" ] \
+    || die "fixture state already exists: $STATE_ROOT"
+  ! id "$OPERATOR" >/dev/null 2>&1 || die "fixture operator already exists: $OPERATOR"
+  [ ! -e "$OPERATOR_HOME" ] && [ ! -L "$OPERATOR_HOME" ] \
+    || die "fixture operator home already exists: $OPERATOR_HOME"
+  sudo -n test ! -e "$SUDOERS" && sudo -n test ! -L "$SUDOERS" \
+    || die "fixture sudoers path already exists: $SUDOERS"
+  ! incus project show "$PROJECT" >/dev/null 2>&1 \
+    || die "fixture project already exists: $PROJECT"
+
+  install -d -m 0711 "$STATE_ROOT"
+  printf '%s\n' "$MARKER" > "$STATE_ROOT/.marker"
+  snapshot_host_runtime
+  CLEANUP_ARMED=1
+  prepare_operator
+
+  p0_capacity_reset_build_cache
+  info "packaging local layout-5 candidate $CANDIDATE_VERSION"
+  "$ROOT/dev/package-engine.sh" --output-dir "$RELEASE_ROOT" \
+    --version "$CANDIDATE_VERSION" >/dev/null
+  chmod -R a+rX "$RELEASE_ROOT"
+
+  info 'installing exact published v0.8.0 runtime'
+  curl -fsSL --proto '=https' --tlsv1.2 \
+    "https://github.com/Subyard/Subyard/releases/download/v$OLD_VERSION/subyard-install.sh" \
+    -o "$INSTALLER"
+  [ "$(sha256sum "$INSTALLER" | awk '{print $1}')" = "$OLD_INSTALLER_SHA256" ] \
+    || die 'published v0.8.0 installer checksum changed'
+  chmod 0755 "$INSTALLER"
+  operator_env env YARD_RELEASE_VERSION="$OLD_VERSION" \
+    "$INSTALLER" --version "$OLD_VERSION" --yes
+
+  printf '%s\n' "$MARKER" > "$PROJECT_MUTATION_ARMED"
+  incus project create "$PROJECT" \
+    -c features.images=false -c user.subyard.p0-power-systemd="$MARKER" >/dev/null
+  operator_yard init --yes
+  operator_yard start --yes
+  systemd_version="$(systemd-analyze --version | awk 'NR == 1 {print $2}')"
+  if [ "$systemd_version" -lt 256 ]; then old_load=bad-setting; else old_load=loaded; fi
+  assert_release_state "$OLD_VERSION" 4 "$OLD_UNIT_FIXTURE" "$old_load"
+  OLD_RELEASE_TARGET="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
+  write_fixture_value "$OLD_RELEASE_TARGET_STATE" "$OLD_RELEASE_TARGET"
+  ok 'published v0.8.0 layout and installed incompatible unit reproduced'
+
+  info 'running ordinary yard update to the local candidate'
+  verify_update_check_is_read_only
+  operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
+    "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" --yes
+  assert_release_state "$CANDIDATE_VERSION" 5 \
+    "$ROOT/config/systemd/subyard-power-reconcile.service.in" loaded
+  CANDIDATE_RELEASE_TARGET="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
+  write_fixture_value "$CANDIDATE_RELEASE_TARGET_STATE" "$CANDIDATE_RELEASE_TARGET"
+  assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
+  assert_candidate_transaction committed
+  ok 'ordinary update applied the append-only compatibility migration'
+}
+
+finish_candidate_flow() {
+  local systemd_version old_load
+  load_release_targets
+  systemd_version="$(systemd-analyze --version | awk 'NR == 1 {print $2}')"
+  if [ "$systemd_version" -lt 256 ]; then old_load=bad-setting; else old_load=loaded; fi
+  info 'rolling back to the exact published v0.8.0 runtime and unit'
+  operator_yard update --rollback --yes
+  assert_release_state "$OLD_VERSION" 4 "$OLD_UNIT_FIXTURE" "$old_load"
+  assert_runtime_links "$OLD_RELEASE_TARGET" "$CANDIDATE_RELEASE_TARGET"
+  assert_candidate_transaction rolled-back
+  ok 'rollback restored the exact v0.8.0 runtime and unit'
+
+  info 'rolling forward to the local candidate again'
+  operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
+    "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" --yes
+  assert_release_state "$CANDIDATE_VERSION" 5 \
+    "$ROOT/config/systemd/subyard-power-reconcile.service.in" loaded
+  assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
+  assert_candidate_transaction committed
+  ok 'roll-forward restored the compatible candidate runtime and unit'
+}
+
 for command in sudo systemctl timeout; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
@@ -497,85 +686,52 @@ case "$MODE" in
     CLEANUP_ARMED=1
     exit 0
     ;;
-  run) ;;
-  *) die 'expected run or clean mode' ;;
+  run|prepare|resume|finish) ;;
+  *) die 'expected run, prepare, resume, finish or clean mode' ;;
 esac
-for command in curl go incus jq sed sha256sum systemd-analyze; do
+for command in cmp curl diff go incus ip jq sed sha256sum systemd-analyze; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
 incus info >/dev/null || die 'initialized Incus is required'
-incus image info subyard-e2e-debian-13-cloud-container --project default >/dev/null \
-  || die 'the P0 Debian image cache is required'
 [ "$(sha256sum "$OLD_UNIT_FIXTURE" | awk '{print $1}')" = \
   36692bddc0de036c9ec7393b86a6883e7cde59f33a25e352ec2ee7b694890aaf ] \
   || die 'the exact v0.8.0 unit fixture changed'
-[ ! -e "$STATE_ROOT" ] && [ ! -L "$STATE_ROOT" ] \
-  || die "fixture state already exists: $STATE_ROOT"
-! id "$OPERATOR" >/dev/null 2>&1 || die "fixture operator already exists: $OPERATOR"
-[ ! -e "$OPERATOR_HOME" ] && [ ! -L "$OPERATOR_HOME" ] \
-  || die "fixture operator home already exists: $OPERATOR_HOME"
-sudo -n test ! -e "$SUDOERS" && sudo -n test ! -L "$SUDOERS" \
-  || die "fixture sudoers path already exists: $SUDOERS"
-! incus project show "$PROJECT" >/dev/null 2>&1 || die "fixture project already exists: $PROJECT"
 
-install -d -m 0711 "$STATE_ROOT"
-printf '%s\n' "$MARKER" > "$STATE_ROOT/.marker"
-snapshot_host_runtime
-CLEANUP_ARMED=1
-prepare_operator
-
-p0_capacity_reset_build_cache
-info "packaging local layout-5 candidate $CANDIDATE_VERSION"
-"$ROOT/dev/package-engine.sh" --output-dir "$RELEASE_ROOT" \
-  --version "$CANDIDATE_VERSION" >/dev/null
-chmod -R a+rX "$RELEASE_ROOT"
-
-info 'installing exact published v0.8.0 runtime'
-curl -fsSL --proto '=https' --tlsv1.2 \
-  "https://github.com/Subyard/Subyard/releases/download/v$OLD_VERSION/subyard-install.sh" \
-  -o "$INSTALLER"
-[ "$(sha256sum "$INSTALLER" | awk '{print $1}')" = "$OLD_INSTALLER_SHA256" ] \
-  || die 'published v0.8.0 installer checksum changed'
-chmod 0755 "$INSTALLER"
-operator_env env YARD_RELEASE_VERSION="$OLD_VERSION" \
-  "$INSTALLER" --version "$OLD_VERSION" --yes
-
-printf '%s\n' "$MARKER" > "$PROJECT_MUTATION_ARMED"
-incus project create "$PROJECT" \
-  -c features.images=false -c user.subyard.p0-power-systemd="$MARKER" >/dev/null
-operator_yard init --yes
-operator_yard start --yes
-systemd_version="$(systemd-analyze --version | awk 'NR == 1 {print $2}')"
-if [ "$systemd_version" -lt 256 ]; then old_load=bad-setting; else old_load=loaded; fi
-assert_release_state "$OLD_VERSION" 4 "$OLD_UNIT_FIXTURE" "$old_load"
-OLD_RELEASE_TARGET="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
-ok 'published v0.8.0 layout and installed incompatible unit reproduced'
-
-info 'running ordinary yard update to the local candidate'
-verify_update_check_is_read_only
-operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
-  "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" --yes
-assert_release_state "$CANDIDATE_VERSION" 5 \
-  "$ROOT/config/systemd/subyard-power-reconcile.service.in" loaded
-CANDIDATE_RELEASE_TARGET="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
-assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
-assert_candidate_transaction committed
-ok 'ordinary update applied the append-only compatibility migration'
-
-info 'rolling back to the exact published v0.8.0 runtime and unit'
-operator_yard update --rollback --yes
-assert_release_state "$OLD_VERSION" 4 "$OLD_UNIT_FIXTURE" "$old_load"
-assert_runtime_links "$OLD_RELEASE_TARGET" "$CANDIDATE_RELEASE_TARGET"
-assert_candidate_transaction rolled-back
-ok 'rollback restored the exact v0.8.0 runtime and unit'
-
-info 'rolling forward to the local candidate again'
-operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
-  "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" --yes
-assert_release_state "$CANDIDATE_VERSION" 5 \
-  "$ROOT/config/systemd/subyard-power-reconcile.service.in" loaded
-assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
-assert_candidate_transaction committed
-ok 'roll-forward restored the compatible candidate runtime and unit'
-
-printf 'ok: exact published v0.8.0 power reconciler update, rollback and roll-forward passed\n'
+case "$MODE" in
+  run|prepare)
+    incus image info subyard-e2e-debian-13-cloud-container --project default >/dev/null \
+      || die 'the P0 Debian image cache is required'
+    prepare_candidate
+    if [ "$MODE" = prepare ]; then
+      record_reboot_baseline
+      write_fixture_value "$PHASE_STATE" candidate-ready
+      PRESERVE_FIXTURE=1
+      printf 'ok: exact published v0.8.0 update is ready for reboot verification\n'
+      exit 0
+    fi
+    finish_candidate_flow
+    printf 'ok: exact published v0.8.0 power reconciler update, rollback and roll-forward passed\n'
+    ;;
+  resume)
+    assert_state_root
+    CLEANUP_ARMED=1
+    assert_fixture_phase candidate-ready
+    assert_post_reboot_candidate
+    info 're-running yard init to prove idempotent boot reconciliation convergence'
+    operator_yard init --yes
+    assert_release_state "$CANDIDATE_VERSION" 5 \
+      "$ROOT/config/systemd/subyard-power-reconcile.service.in" loaded
+    record_reboot_baseline
+    write_fixture_value "$PHASE_STATE" candidate-reconciled
+    PRESERVE_FIXTURE=1
+    printf 'ok: candidate survived reboot and idempotent init; ready for second reboot\n'
+    ;;
+  finish)
+    assert_state_root
+    CLEANUP_ARMED=1
+    assert_fixture_phase candidate-reconciled
+    assert_post_reboot_candidate
+    finish_candidate_flow
+    printf 'ok: exact published v0.8.0 update survived two reboots, rollback and roll-forward\n'
+    ;;
+esac

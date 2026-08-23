@@ -1259,13 +1259,88 @@ grep -Fq 'POWER_RETRY_WRAPPER=' "$ROOT/dev/e2e/p0-source-upgrade.sh" \
     "$ROOT/dev/e2e/p0-source-upgrade.sh" \
   && ! grep -Fq 'ExecStartPre=' "$ROOT/dev/e2e/p0-source-upgrade.sh" \
   || fail "P0 source-upgrade TEMPFAIL probe does not exercise the main reconciler process"
+power_systemd_lane_body="$(sed -n '/^power_systemd_lane() {/,/^}/p' \
+  "$ROOT/dev/e2e/p0-acceptance.sh")"
 grep -Fq 'run_power_systemd_vm "$vm" dev/e2e/power-reconciler-systemd.sh' \
-  "$ROOT/dev/e2e/p0-acceptance.sh" \
+    <<<"$power_systemd_lane_body" \
   && grep -Fq 'run_power_systemd_vm "$vm" dev/e2e/power-reconciler-systemd-255.sh' \
-    "$ROOT/dev/e2e/p0-acceptance.sh" \
-  && grep -Fq 'run_power_systemd_vm "$vm" dev/e2e/power-reconciler-upgrade.sh run "$TOKEN"' \
-    "$ROOT/dev/e2e/p0-acceptance.sh" \
-  || fail "P0 acceptance gate does not exercise real systemd and exact v0.8.0 migration"
+    <<<"$power_systemd_lane_body" \
+  || fail "P0 acceptance gate does not exercise real systemd before the release migration"
+power_prepare_line="$(grep -nF \
+  'run_power_systemd_vm "$vm" dev/e2e/power-reconciler-upgrade.sh prepare "$TOKEN"' \
+  <<<"$power_systemd_lane_body" | cut -d: -f1 || true)"
+power_first_reboot_line="$(grep -nF 'reboot_vm "$vm"' <<<"$power_systemd_lane_body" \
+  | sed -n '1p' | cut -d: -f1 || true)"
+power_resume_line="$(grep -nF \
+  'run_power_systemd_vm "$vm" dev/e2e/power-reconciler-upgrade.sh resume "$TOKEN"' \
+  <<<"$power_systemd_lane_body" | cut -d: -f1 || true)"
+power_second_reboot_line="$(grep -nF 'reboot_vm "$vm"' <<<"$power_systemd_lane_body" \
+  | sed -n '2p' | cut -d: -f1 || true)"
+power_finish_line="$(grep -nF \
+  'run_power_systemd_vm "$vm" dev/e2e/power-reconciler-upgrade.sh finish "$TOKEN"' \
+  <<<"$power_systemd_lane_body" | cut -d: -f1 || true)"
+[[ "$power_prepare_line" =~ ^[0-9]+$ ]] \
+  && [[ "$power_first_reboot_line" =~ ^[0-9]+$ ]] \
+  && [[ "$power_resume_line" =~ ^[0-9]+$ ]] \
+  && [[ "$power_second_reboot_line" =~ ^[0-9]+$ ]] \
+  && [[ "$power_finish_line" =~ ^[0-9]+$ ]] \
+  && [ "$power_prepare_line" -lt "$power_first_reboot_line" ] \
+  && [ "$power_first_reboot_line" -lt "$power_resume_line" ] \
+  && [ "$power_resume_line" -lt "$power_second_reboot_line" ] \
+  && [ "$power_second_reboot_line" -lt "$power_finish_line" ] \
+  || fail "P0 exact v0.8.0 migration is not verified across two ordered host reboots"
+upgrade_dispatcher="$(awk '
+  /^case "\$MODE" in$/ { block = ""; capture = 1 }
+  capture { block = block $0 ORS }
+  END { printf "%s", block }
+' "$ROOT/dev/e2e/power-reconciler-upgrade.sh")"
+for dispatcher_mode in prepare resume finish; do
+  dispatcher_log="$TMP/power-dispatcher-$dispatcher_mode.log"
+  set +e
+  UPGRADE_DISPATCHER="$upgrade_dispatcher" DISPATCHER_MODE="$dispatcher_mode" \
+    DISPATCHER_LOG="$dispatcher_log" bash -c '
+      set -euo pipefail
+      MODE="$DISPATCHER_MODE"
+      STATE_ROOT=/state
+      PHASE_STATE=/state/phase
+      CANDIDATE_VERSION=candidate
+      ROOT=/candidate
+      PRESERVE_FIXTURE=0
+      CLEANUP_ARMED=0
+      log() { printf "%s\n" "$*" >> "$DISPATCHER_LOG"; }
+      incus() { log "incus $*"; }
+      die() { log "die $*"; exit 2; }
+      info() { :; }
+      prepare_candidate() { log prepare_candidate; }
+      record_reboot_baseline() { log record_reboot_baseline; }
+      write_fixture_value() { log "write_fixture_value $*"; }
+      finish_candidate_flow() { log finish_candidate_flow; }
+      assert_state_root() { log assert_state_root; }
+      assert_fixture_phase() { log "assert_fixture_phase $*"; }
+      assert_post_reboot_candidate() { log assert_post_reboot_candidate; }
+      operator_yard() { log "operator_yard $*"; }
+      assert_release_state() { log "assert_release_state $*"; }
+      trap '\''log "exit preserve=$PRESERVE_FIXTURE cleanup=$CLEANUP_ARMED"'\'' EXIT
+      eval "$UPGRADE_DISPATCHER"
+    ' >/dev/null 2>&1
+  dispatcher_rc=$?
+  set -e
+  [ "$dispatcher_rc" = 0 ] \
+    || fail "power reconciler $dispatcher_mode dispatcher rejected its valid phase"
+  case "$dispatcher_mode" in
+    prepare)
+      dispatcher_expected=$'incus image info subyard-e2e-debian-13-cloud-container --project default\nprepare_candidate\nrecord_reboot_baseline\nwrite_fixture_value /state/phase candidate-ready\nexit preserve=1 cleanup=0'
+      ;;
+    resume)
+      dispatcher_expected=$'assert_state_root\nassert_fixture_phase candidate-ready\nassert_post_reboot_candidate\noperator_yard init --yes\nassert_release_state candidate 5 /candidate/config/systemd/subyard-power-reconcile.service.in loaded\nrecord_reboot_baseline\nwrite_fixture_value /state/phase candidate-reconciled\nexit preserve=1 cleanup=1'
+      ;;
+    finish)
+      dispatcher_expected=$'assert_state_root\nassert_fixture_phase candidate-reconciled\nassert_post_reboot_candidate\nfinish_candidate_flow\nexit preserve=0 cleanup=1'
+      ;;
+  esac
+  [ "$(cat "$dispatcher_log")" = "$dispatcher_expected" ] \
+    || fail "power reconciler $dispatcher_mode dispatcher lost its ordered incident flow"
+done
 grep -Fq 'OLD_VERSION=0.8.0' "$ROOT/dev/e2e/power-reconciler-upgrade.sh" \
   && grep -Fq \
     'OLD_INSTALLER_SHA256=5bd3c61e3dd39cb2d258be5cd75237383f00eff0512c77a3a5ca75d96e6b992b' \
@@ -1276,6 +1351,157 @@ grep -Fq 'OLD_VERSION=0.8.0' "$ROOT/dev/e2e/power-reconciler-upgrade.sh" \
     "$ROOT/dev/e2e/power-reconciler-upgrade.sh" \
   && grep -Fq 'update --rollback --yes' "$ROOT/dev/e2e/power-reconciler-upgrade.sh" \
   || fail "power reconciler migration E2E lost exact release rollback coverage"
+grep -Fq 'active|inactive|failed' "$ROOT/dev/e2e/power-reconciler-upgrade.sh" \
+  && grep -Fq 'failed:failed' "$ROOT/dev/e2e/power-reconciler-upgrade.sh" \
+  || fail 'power reconciler migration E2E cannot preserve a pre-existing failed host unit'
+grep -Fq 'sudo -n install -D -o root -g root' \
+    "$ROOT/dev/e2e/power-reconciler-upgrade.sh" \
+  || fail 'power reconciler migration cleanup cannot restore a removed runtime directory'
+grep -Fq 'assert_post_reboot_candidate()' \
+    "$ROOT/dev/e2e/power-reconciler-upgrade.sh" \
+  && grep -Fq 'BOOT_ID_STATE="$STATE_ROOT/boot-id"' \
+    "$ROOT/dev/e2e/power-reconciler-upgrade.sh" \
+  && grep -Fq 'DEFAULT_ROUTE_STATE="$STATE_ROOT/default-route"' \
+    "$ROOT/dev/e2e/power-reconciler-upgrade.sh" \
+  && grep -Fq 'ExecMainStartTimestampMonotonic' \
+    "$ROOT/dev/e2e/power-reconciler-upgrade.sh" \
+  && grep -Fq 'PRESERVE_FIXTURE=1' \
+    "$ROOT/dev/e2e/power-reconciler-upgrade.sh" \
+  && grep -Fq 'operator_yard init --yes' \
+    "$ROOT/dev/e2e/power-reconciler-upgrade.sh" \
+  || fail 'power reconciler reboot fixture does not prove current-boot success and idempotent convergence'
+fixture_state_functions="$(
+  sed -n '/^write_fixture_value() {/,/^}/p' "$ROOT/dev/e2e/power-reconciler-upgrade.sh"
+  sed -n '/^read_fixture_value() {/,/^}/p' "$ROOT/dev/e2e/power-reconciler-upgrade.sh"
+  sed -n '/^assert_fixture_phase() {/,/^}/p' "$ROOT/dev/e2e/power-reconciler-upgrade.sh"
+)"
+(
+  STATE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/subyard-power-phase.XXXXXX")"
+  PHASE_STATE="$STATE_ROOT/phase"
+  trap 'find "$STATE_ROOT" -depth -delete' EXIT
+  die() { return 2; }
+  eval "$fixture_state_functions"
+  write_fixture_value "$PHASE_STATE" candidate-ready
+  assert_fixture_phase candidate-ready
+  set +e
+  assert_fixture_phase candidate-reconciled >/dev/null 2>&1
+  wrong_phase_rc=$?
+  set -e
+  [ "$wrong_phase_rc" -ne 0 ] \
+    || fail 'power reconciler phase guard accepted an out-of-order resume'
+  write_fixture_value "$PHASE_STATE" candidate-reconciled
+  assert_fixture_phase candidate-reconciled
+) || fail 'power reconciler persisted phase state is not enforced behaviorally'
+
+cleanup_function="$(sed -n '/^cleanup() {/,/^}/p' \
+  "$ROOT/dev/e2e/power-reconciler-upgrade.sh")"
+cleanup_log="$TMP/power-cleanup.log"
+: > "$cleanup_log"
+set +e
+CLEANUP_FUNCTION="$cleanup_function" CLEANUP_LOG="$cleanup_log" bash -c '
+  set -u
+  eval "$CLEANUP_FUNCTION"
+  PRESERVE_FIXTURE=1
+  CLEANUP_ARMED=1
+  p0_capacity_remove_build_cache() { printf "build\n" >> "$CLEANUP_LOG"; }
+  p0_capacity_remove_root_if_empty() { printf "root\n" >> "$CLEANUP_LOG"; }
+  cleanup
+' >/dev/null 2>&1
+preserve_cleanup_rc=$?
+set -e
+[ "$preserve_cleanup_rc" = 0 ] && [ ! -s "$cleanup_log" ] \
+  || fail 'successful power phase did not preserve its reboot fixture'
+: > "$cleanup_log"
+set +e
+CLEANUP_FUNCTION="$cleanup_function" CLEANUP_LOG="$cleanup_log" bash -c '
+  set +e
+  set -u
+  eval "$CLEANUP_FUNCTION"
+  PRESERVE_FIXTURE=1
+  CLEANUP_ARMED=0
+  p0_capacity_remove_build_cache() { printf "build\n" >> "$CLEANUP_LOG"; }
+  p0_capacity_remove_root_if_empty() { printf "root\n" >> "$CLEANUP_LOG"; }
+  false
+  cleanup
+' >/dev/null 2>&1
+failed_cleanup_rc=$?
+set -e
+[ "$failed_cleanup_rc" -ne 0 ] \
+  && grep -Fxq build "$cleanup_log" \
+  && grep -Fxq root "$cleanup_log" \
+  || fail 'failed power phase preserved state instead of entering cleanup'
+find "$cleanup_log" -delete
+
+assert_post_reboot_function="$(sed -n '/^assert_post_reboot_candidate() {/,/^}/p' \
+  "$ROOT/dev/e2e/power-reconciler-upgrade.sh")"
+for evidence_scenario in success same-boot route-change manager-failure yard-stopped; do
+  set +e
+  ASSERT_POST_REBOOT_FUNCTION="$assert_post_reboot_function" \
+    EVIDENCE_SCENARIO="$evidence_scenario" bash -c '
+      set -euo pipefail
+      eval "$ASSERT_POST_REBOOT_FUNCTION"
+      STATE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/subyard-power-evidence.XXXXXX")"
+      BOOT_ID_STATE="$STATE_ROOT/boot-id"
+      DEFAULT_ROUTE_STATE="$STATE_ROOT/default-route"
+      CANDIDATE_VERSION=candidate
+      ROOT=/candidate
+      PROJECT=subyard
+      INSTANCE=yard
+      printf "default via 192.0.2.1 dev eth0\n" > "$DEFAULT_ROUTE_STATE"
+      trap '\''find "$STATE_ROOT" -depth -delete'\'' EXIT
+      die() { exit 2; }
+      read_fixture_value() { printf "old-boot\n"; }
+      cat() {
+        if [ "$EVIDENCE_SCENARIO" = same-boot ]; then
+          printf "old-boot\n"
+        else
+          printf "new-boot\n"
+        fi
+      }
+      ip() {
+        if [ "$EVIDENCE_SCENARIO" = route-change ]; then
+          printf "default via 192.0.2.254 dev eth0\n"
+        else
+          printf "default via 192.0.2.1 dev eth0\n"
+        fi
+      }
+      load_release_targets() {
+        OLD_RELEASE_TARGET=/runtime/old
+        CANDIDATE_RELEASE_TARGET=/runtime/candidate
+      }
+      assert_release_state() { :; }
+      assert_runtime_links() { :; }
+      assert_candidate_transaction() { :; }
+      sudo() {
+        if [ "$EVIDENCE_SCENARIO" = manager-failure ]; then
+          printf "%s\n" \
+            LoadState=loaded NeedDaemonReload=no ActiveState=failed SubState=failed \
+            Result=exit-code ExecMainStatus=75 ExecMainStartTimestampMonotonic=1000000
+        else
+          printf "%s\n" \
+            LoadState=loaded NeedDaemonReload=no ActiveState=inactive SubState=dead \
+            Result=success ExecMainStatus=0 ExecMainStartTimestampMonotonic=1000000
+        fi
+      }
+      incus() {
+        if [ "$EVIDENCE_SCENARIO" = yard-stopped ]; then
+          printf "STOPPED\n"
+        else
+          printf "RUNNING\n"
+        fi
+      }
+      assert_post_reboot_candidate
+    ' >/dev/null 2>&1
+  evidence_rc=$?
+  set -e
+  if [ "$evidence_scenario" = success ]; then
+    [ "$evidence_rc" = 0 ] \
+      || fail 'valid power reconciler reboot evidence was rejected'
+  else
+    [ "$evidence_rc" -ne 0 ] \
+      || fail "power reconciler accepted invalid reboot evidence: $evidence_scenario"
+  fi
+done
 grep -Fq 'subyard-power-reconcile-v0.7.2.service.in' \
   "$ROOT/tests/power-reconciler-systemd.sh" \
   || fail 'systemd 255 historical parser regression lost the v0.7.2 fixture'
@@ -1482,6 +1708,19 @@ grep -Fq 'scripts/install-power-reconciler.sh' \
   && grep -Fq 'production installer left stale systemd 255 manager state' \
     "$ROOT/dev/e2e/power-reconciler-systemd-255.sh" \
   || fail 'systemd-255 lane does not exercise production reload and manager freshness'
+grep -Fq 'INSTALL_UNIT_PATH="/etc/systemd/system/$INSTALL_UNIT"' \
+    "$ROOT/dev/e2e/power-reconciler-systemd-255.sh" \
+  && grep -Fq 'subyard-power-reconcile-v0.8.0.service.in' \
+    "$ROOT/dev/e2e/power-reconciler-systemd-255.sh" \
+  && grep -Fq 'restart_incus "$INSTANCE" --project "$PROJECT"' \
+    "$ROOT/dev/e2e/power-reconciler-systemd-255.sh" \
+  && grep -Fq 'boot ID did not change across the systemd 255 fixture restart' \
+    "$ROOT/dev/e2e/power-reconciler-systemd-255.sh" \
+  && grep -Fq 'ExecMainStartTimestampMonotonic' \
+    "$ROOT/dev/e2e/power-reconciler-systemd-255.sh" \
+  && grep -Fq 'systemd 255 candidate did not reach current-boot terminal success' \
+    "$ROOT/dev/e2e/power-reconciler-systemd-255.sh" \
+  || fail 'systemd-255 fixture does not prove the persistent candidate starts after PID1 restart'
 grep -Fq 'if ! systemctl is-enabled --quiet "$UNIT_NAME"; then' \
     "$ROOT/scripts/install-power-reconciler.sh" \
   || fail 'power reconciler installer can hide a missing daemon-reload behind redundant enablement'
