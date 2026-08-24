@@ -92,7 +92,9 @@ with an application-neutral loopback fixture; it does not install, configure or 
 
 ```sh
 dev/agent-e2e.sh --prepare
-dev/agent-e2e.sh --purpose hermes-profile --vm both -- \
+dev/agent-e2e.sh --status
+slot=1  # Choose an available configured slot from status.
+dev/agent-e2e.sh --slot "$slot" --purpose hermes-profile --vm both -- \
   ./dev/e2e/hermes-profile.sh
 ```
 

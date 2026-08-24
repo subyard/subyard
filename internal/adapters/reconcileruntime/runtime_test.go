@@ -692,6 +692,14 @@ func TestProjectProbeOwnsRestrictedPolicy(t *testing.T) {
 
 func TestInstanceProbeOwnsVolumeAndNestedBoundary(t *testing.T) {
 	deviceRoot := t.TempDir()
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "systemctl"), []byte(`#!/bin/sh
+set -eu
+[ "$*" = "show incus.service -p Environment --value" ] || exit 2
+printf '%s\n' "${INCUS_SERVICE_ENV:-}"
+`), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	incus := &testkit.Incus{
 		ServerInfo: ports.ServerInfo{Environment: "incus"},
 		Reconcile: ports.ReconcileState{
@@ -711,7 +719,8 @@ func TestInstanceProbeOwnsVolumeAndNestedBoundary(t *testing.T) {
 		},
 	}
 	runtime := Runtime{
-		Incus: incus,
+		Incus:       incus,
+		Environment: []string{"PATH=" + bin, "INCUS_SERVICE_ENV="},
 		Yard: domain.Context{
 			IncusProject: "subyard", YardInstanceName: "yard", YardKind: domain.YardContainer,
 			Paths: domain.RuntimePaths{DataHome: "/data"},
@@ -719,6 +728,17 @@ func TestInstanceProbeOwnsVolumeAndNestedBoundary(t *testing.T) {
 		HostDeviceRoot: deviceRoot,
 	}
 	assertStageConverged(t, runtime, true, "matching instance")
+	runtime.Environment[1] = "INCUS_SERVICE_ENV=INCUS_SECURITY_APPARMOR=false"
+	assertStageConverged(t, runtime, false, "missing disabled-Incus AppArmor mask")
+	incus.Reconcile.Instance.LocalDevices["subyard-docker-apparmor"] = map[string]string{
+		"type": "disk", "source": "/dev/null",
+		"path": "/sys/module/apparmor/parameters/enabled", "readonly": "true",
+	}
+	assertStageConverged(t, runtime, true, "disabled-Incus AppArmor mask")
+	runtime.Environment[1] = "INCUS_SERVICE_ENV="
+	assertStageConverged(t, runtime, false, "stale restored-Incus AppArmor mask")
+	delete(incus.Reconcile.Instance.LocalDevices, "subyard-docker-apparmor")
+	assertStageConverged(t, runtime, true, "restored Incus AppArmor")
 	incus.Reconcile.Instance.LocalDevices["subyard-e2e-routes"]["path"] = "/run/subyard/e2e-routes"
 	assertStageConverged(t, runtime, false, "boot-hidden route mount")
 	incus.Reconcile.Instance.LocalDevices["subyard-e2e-routes"]["path"] =
@@ -761,6 +781,11 @@ func TestInstanceProbeOwnsVolumeAndNestedBoundary(t *testing.T) {
 		},
 	}
 	assertStageConverged(t, runtime, true, "VM volume")
+	incus.Reconcile.Instance.LocalDevices["subyard-docker-apparmor"] = map[string]string{
+		"type": "disk", "source": "/dev/null",
+		"path": "/sys/module/apparmor/parameters/enabled", "readonly": "true",
+	}
+	assertStageConverged(t, runtime, false, "stale container AppArmor mask on VM")
 }
 
 func TestMountProbeDetectsMissingDriftedAndStaleDevices(t *testing.T) {

@@ -71,14 +71,14 @@ not contain executable command lines and do not run them.
 | T1 | Affected host-free package, race, shell, CLI, frontend, or Rust checks. Typical target: at most 3 minutes; registry metadata identifies larger explicit budgets. |
 | T2 | The core host-free gate, `./tests/run.sh`. It remains required by the merge workflow and is not narrowed by the selector. The `host-free:all` fallback composite also includes Veranda checks. |
 | T3 | Existing targeted E2E lanes or real-host checks for affected physical boundaries. |
-| T4 | A fresh full P0: `dev/e2e/p0-acceptance.sh` with no lane and without `--resume`. |
+| T4 | A fresh full P0: `dev/e2e/p0-acceptance.sh --slot N` with no lane and without `--resume`. |
 
 Run the applicable T0 check while developing, then use the selector to identify the T1 and T3
 lower bound. Run T2 when the merge workflow requires it. If `full_p0.required` is true, run T4 in
 addition to every selected check.
 
 Targeted evidence shows that the selected contracts and physical boundaries passed for the analyzed
-change. It is not full release evidence. The continuous no-argument P0 run remains the external
+change. It is not full release evidence. The continuous full P0 run remains the external
 release gate, even when every targeted recommendation passes. A release candidate or tag, an
 operator request or override, or runtime coupling discovered by a targeted E2E check can require a
 fresh full P0 independently of the selector's static result.

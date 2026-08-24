@@ -219,17 +219,19 @@ prepare_owner_go_cache() {
   export SUBYARD_CONFIG_HOME="$OWNER_CONFIG_HOME"
 }
 
-write_owner_registration() { # <yard> <template> <ssh-port>
-  local yard="$1" template="$2" port="$3" registration
+write_owner_registration() { # <yard> <template> <ssh-port> [slot-count]
+  local yard="$1" template="$2" port="$3" slots="${4:-2}" registration
+  [[ "$slots" =~ ^[1-9][0-9]{0,2}$ ]] \
+    || die "invalid diagnostic slot count $slots"
   registration="$OWNER_YARD_DIR/$yard.env"
   install -d -m 0700 "$OWNER_YARD_DIR"
   if [ -e "$registration" ]; then
     grep -Fqx "# $MARKER" "$registration" \
       || die "refusing to replace unrelated registration $registration"
   fi
-  printf '# %s\nYARD_TEMPLATE=%s\nSSH_PORT=%s\nAGENTS=none\nDEV_UID=%s\nE2E_VM_CPU=1\nE2E_VM_MEMORY=%s\nE2E_VM_DISK=10GiB\nE2E_VM_BOOT_TIMEOUT=%s\nBASE_IMAGE=%s\nBASE_IMAGE_FALLBACK=%s\n' \
+  printf '# %s\nYARD_TEMPLATE=%s\nSSH_PORT=%s\nAGENTS=none\nDEV_UID=%s\nE2E_VM_CPU=1\nE2E_VM_MEMORY=%s\nE2E_VM_DISK=10GiB\nE2E_VM_SLOT_COUNT=%s\nE2E_VM_BOOT_TIMEOUT=%s\nBASE_IMAGE=%s\nBASE_IMAGE_FALLBACK=%s\n' \
     "$MARKER" "$template" "$port" "$OWNER_DIAGNOSTIC_DEV_UID" "$OWNER_DIAGNOSTIC_VM_MEMORY" \
-    "$OWNER_DIAGNOSTIC_VM_BOOT_TIMEOUT" \
+    "$slots" "$OWNER_DIAGNOSTIC_VM_BOOT_TIMEOUT" \
     "$OWNER_BASE_IMAGE" "$OWNER_BASE_IMAGE" \
     > "$registration"
 }
@@ -640,6 +642,7 @@ owner() (
 	profile_resource
   prepare_owner_image_cache_project subyard-test-yard
   owner_profile_migration_contract
+  write_owner_registration test-yard test-vms 2224 1
   ./bin/yard -Y test-yard start --yes
   SUBYARD_E2E_LEGACY_FIXTURE=1 \
     bash dev/e2e/seed-test-vms-legacy-state.sh subyard-test-yard yard-test-yard
@@ -660,6 +663,11 @@ owner() (
   p0_capacity_reset_build_cache
   reclaim_owner_lease_capacity
   run_nested_broker_acceptance dev/e2e/p1-lease-acceptance.sh
+  write_owner_registration test-yard test-vms 2224 3
+  p0_retry_init_after_plan_stale ./bin/yard -Y test-yard init --yes
+  run_nested_broker_acceptance dev/e2e/p1-lease-acceptance.sh
+  write_owner_registration test-yard test-vms 2224 2
+  p0_retry_init_after_plan_stale ./bin/yard -Y test-yard init --yes
   run_nested_broker_acceptance dev/e2e/p0-broker-recovery.sh
   owner_project_contract
   env PATH=/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin ./bin/yard --version >/dev/null

@@ -1,13 +1,18 @@
 # E2E VM acceptance
 
-The default `./tests/run.sh` is host-free. Live acceptance automatically leases one retained
-two-VM slot from the operator-owned running `test-yard`:
+The default `./tests/run.sh` is host-free. For live acceptance, inspect redacted broker status,
+choose an available configured slot, and pass that slot explicitly to the continuous P0 gate. For
+example, after choosing slot 1:
 
 ```sh
-dev/e2e/p0-acceptance.sh
-# For a coordinated exact-slot run:
-SUBYARD_P0_SLOT=1 dev/e2e/p0-acceptance.sh
+dev/agent-e2e.sh --status
+slot=1
+dev/e2e/p0-acceptance.sh --slot "$slot"
 ```
+
+Targeted P0 lanes also require `--slot`; `--list-lanes` remains slotless. The broker never selects
+another slot. A bounded wait retries only the chosen slot, an unknown or invalid slot fails
+immediately, and an acquire with an unknown outcome is not retried.
 
 The broker owns inner pair start/stop and the runner releases in a trap. The agent does not change
 outer-yard lifecycle or work in the privileged outer yard. Never run these checks on the operator
@@ -42,7 +47,7 @@ inside each selected running instance.
 Run the shared-only source gate on an allocated VM:
 
 ```sh
-dev/agent-e2e.sh --vm 1 -- bash ./dev/e2e/config-source-shared-only.sh
+dev/agent-e2e.sh --slot "$slot" --vm 1 -- bash ./dev/e2e/config-source-shared-only.sh
 ```
 
 The gate uses a marked temporary root and a loopback OpenSSH Git remote. It verifies declined and

@@ -258,11 +258,23 @@ func (runtime Runtime) instanceConverged(ctx context.Context) (bool, error) {
 		routeMount["readonly"] != "true" {
 		return false, nil
 	}
+	dockerAppArmor, dockerAppArmorPresent := devices["subyard-docker-apparmor"]
 	if runtime.Yard.YardKind != domain.YardContainer {
-		return true, nil
+		return !dockerAppArmorPresent, nil
 	}
 	config := state.Instance.LocalConfig
 	if config["security.nesting"] != "true" {
+		return false, nil
+	}
+	if runtime.incusAppArmorDisabled(ctx) {
+		if !dockerAppArmorPresent ||
+			dockerAppArmor["type"] != "disk" ||
+			dockerAppArmor["source"] != "/dev/null" ||
+			dockerAppArmor["path"] != "/sys/module/apparmor/parameters/enabled" ||
+			dockerAppArmor["readonly"] != "true" {
+			return false, nil
+		}
+	} else if dockerAppArmorPresent {
 		return false, nil
 	}
 	if runtime.Yard.NestedE2EVMs {
@@ -294,6 +306,27 @@ func (runtime Runtime) instanceConverged(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	return true, nil
+}
+
+func (runtime Runtime) incusAppArmorDisabled(ctx context.Context) bool {
+	systemctl, err := runtime.executableFromPath("systemctl")
+	if err != nil {
+		return false
+	}
+	command := exec.CommandContext(
+		ctx, systemctl, "show", "incus.service", "-p", "Environment", "--value",
+	)
+	command.Env = runtime.Environment
+	output, err := command.Output()
+	if err != nil {
+		return false
+	}
+	for _, field := range strings.Fields(string(output)) {
+		if strings.Trim(field, `"'`) == "INCUS_SECURITY_APPARMOR=false" {
+			return true
+		}
+	}
+	return false
 }
 
 func (runtime Runtime) reconcileState(ctx context.Context) (ports.ReconcileState, error) {

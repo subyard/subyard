@@ -20,14 +20,17 @@ type Facade struct {
 }
 
 type facadeResponse struct {
-	SchemaVersion int         `json:"schema_version"`
-	Status        string      `json:"status"`
-	Capabilities  []string    `json:"capabilities,omitempty"`
-	Code          string      `json:"code,omitempty"`
-	Message       string      `json:"message,omitempty"`
-	Pool          *LeasePool  `json:"pool,omitempty"`
-	Grant         *LeaseGrant `json:"grant,omitempty"`
-	ExpiresAt     *time.Time  `json:"expires_at,omitempty"`
+	SchemaVersion int                 `json:"schema_version"`
+	Status        string              `json:"status"`
+	Capabilities  []string            `json:"capabilities,omitempty"`
+	Code          string              `json:"code,omitempty"`
+	State         SlotState           `json:"state,omitempty"`
+	Reason        string              `json:"reason,omitempty"`
+	Owner         *LeaseOwnerSnapshot `json:"owner,omitempty"`
+	Message       string              `json:"message,omitempty"`
+	Pool          *LeasePool          `json:"pool,omitempty"`
+	Grant         *LeaseGrant         `json:"grant,omitempty"`
+	ExpiresAt     *time.Time          `json:"expires_at,omitempty"`
 }
 
 func (facade Facade) Run(originalCommand string) error {
@@ -52,54 +55,37 @@ func (facade Facade) Run(originalCommand string) error {
 			SchemaVersion: LeaseSchemaVersion, Status: "ok",
 			Capabilities: []string{"attribution-v2"}, Pool: &pool,
 		})
-	case "acquire", "acquire-v2":
+	case "acquire":
+		return facade.writeAcquireError("invalid_request", "unsupported_acquire",
+			"legacy acquire is unsupported; use acquire-v2")
+	case "acquire-v2":
 		var grant LeaseGrant
 		var err error
-		publicKey := ""
-		exact := false
-		if fields[0] == "acquire" {
-			if len(fields) != 7 && len(fields) != 8 {
-				return facade.writeError("invalid_request",
-					"acquire requires client_id fingerprint label purpose key_type key_blob [slot_id]")
-			}
-			publicKey = fields[5] + " " + fields[6]
-			if _, keyErr := normalizedPublicKey(publicKey); keyErr != nil || fields[5] != "ssh-ed25519" {
-				return facade.writeError("invalid_request", "lease key must be Ed25519")
-			}
-			exact = len(fields) == 8
-			if exact {
-				grant, err = facade.Store.AcquireSlot(
-					fields[1], fields[2], fields[3], fields[4], fields[7],
-				)
-			} else {
-				grant, err = facade.Store.Acquire(fields[1], fields[2], fields[3], fields[4])
-			}
-		} else {
-			if len(fields) != 9 && len(fields) != 10 {
-				return facade.writeError("invalid_request",
-					"acquire-v2 requires client_id fingerprint yard project run purpose key_type key_blob [slot_id]")
-			}
-			publicKey = fields[7] + " " + fields[8]
-			if _, keyErr := normalizedPublicKey(publicKey); keyErr != nil || fields[7] != "ssh-ed25519" {
-				return facade.writeError("invalid_request", "lease key must be Ed25519")
-			}
-			exact = len(fields) == 10
-			if exact {
-				grant, err = facade.Store.AcquireV2Slot(
-					fields[1], fields[2], fields[3], fields[4], fields[5], fields[6], fields[9],
-				)
-			} else {
-				grant, err = facade.Store.AcquireV2(
-					fields[1], fields[2], fields[3], fields[4], fields[5], fields[6],
-				)
-			}
+		if len(fields) == 9 {
+			return facade.writeAcquireError("invalid_request", "missing_slot_id",
+				"acquire-v2 requires client_id fingerprint yard project run purpose key_type key_blob slot_id")
 		}
+		if len(fields) != 10 {
+			return facade.writeError("invalid_request",
+				"acquire-v2 requires client_id fingerprint yard project run purpose key_type key_blob slot_id")
+		}
+		publicKey := fields[7] + " " + fields[8]
+		if _, keyErr := normalizedPublicKey(publicKey); keyErr != nil || fields[7] != "ssh-ed25519" {
+			return facade.writeError("invalid_request", "lease key must be Ed25519")
+		}
+		grant, err = facade.Store.AcquireV2Slot(
+			fields[1], fields[2], fields[3], fields[4], fields[5], fields[6], fields[9],
+		)
 		if err != nil {
+			var unavailable *SlotUnavailableError
+			if errors.As(err, &unavailable) {
+				return facade.writeUnavailableError(unavailable)
+			}
+			if errors.Is(err, ErrInvalidSlot) {
+				return facade.writeAcquireError("invalid_request", "invalid_slot", "invalid slot_id")
+			}
 			if errors.Is(err, ErrLeaseBusy) {
-				if exact {
-					return facade.writeError("busy", "requested slot is busy or unavailable")
-				}
-				return facade.writeError("busy", "all configured slots are busy or unavailable")
+				return facade.writeError("busy", "requested slot is busy or unavailable")
 			}
 			return facade.writeError("invalid_request", err.Error())
 		}
@@ -258,6 +244,21 @@ func (facade Facade) writeError(code, message string) error {
 	return facade.write(facadeResponse{
 		SchemaVersion: LeaseSchemaVersion, Status: "error", Code: code,
 		Message: boundedReason(message),
+	})
+}
+
+func (facade Facade) writeAcquireError(code, reason, message string) error {
+	return facade.write(facadeResponse{
+		SchemaVersion: LeaseSchemaVersion, Status: "error", Code: code,
+		Reason: reason, Message: boundedReason(message),
+	})
+}
+
+func (facade Facade) writeUnavailableError(unavailable *SlotUnavailableError) error {
+	return facade.write(facadeResponse{
+		SchemaVersion: LeaseSchemaVersion, Status: "error", Code: "busy",
+		State: unavailable.State, Reason: unavailable.Reason, Owner: unavailable.Owner,
+		Message: "requested slot is unavailable",
 	})
 }
 

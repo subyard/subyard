@@ -1,11 +1,30 @@
 # Agent E2E VM pool
 
-The `test-vms` profile runs a root-owned lease broker inside a trusted outer yard. The default pool
-has two slots. Each slot owns an isolated inner Incus project, network and a retained pair of VMs.
-The VM disks survive release; the pair is stopped whenever it has no lease.
+The `test-vms` profile runs a root-owned lease broker inside a trusted outer yard. Its configured
+pool contains one or more slots and defaults to two. Each slot owns an isolated inner Incus project,
+network and a retained pair of VMs. The VM disks survive release; the pair is stopped whenever it
+has no lease.
 
 The outer yard remains operator-owned. Agents can acquire inner slots, but cannot start a stopped
 outer yard, enter its shell, reach its Incus socket or invoke arbitrary lifecycle commands.
+
+## Running tests
+
+Run the host-free build and test gates from the current public worktree:
+
+```sh
+make build
+./tests/run.sh
+```
+
+`make build` compiles the development binary at `.build/yard`; `go.mod` selects the Go toolchain.
+Run `./tests/run.sh` before finishing shell or CLI changes. CI additionally runs
+`shellcheck -x -S warning` over the CLI, scripts, provision hooks, tests and Bash completion.
+
+If there is any doubt that behavior is covered or a problem is reproduced, use an allocated
+`test-vms` slot to reproduce and verify it on real GNU/Linux hosts. A green host-free test is not a
+substitute for the available VM check. The operator owns outer-yard start, stop and teardown; the
+root broker owns inner slot create, start and stop; agents acquire leases only.
 
 ## Operator setup
 
@@ -71,9 +90,12 @@ Prepare the persistent controller identity once:
 dev/agent-e2e.sh --prepare
 ```
 
+The persistent controller key stays under the agent user's `~/.subyard/e2e/`; every lease uses a
+separate ephemeral guest key.
+
 A standard caller reaches the outer yard through the provisioned yard-to-yard route. Any valid
 Ed25519 controller key is admitted only to the versioned forced facade
-(`status/acquire/renew/release`). It never receives an L1 shell, PTY, file transfer, arbitrary
+(`status/acquire-v2/renew/release`). It never receives an L1 shell, PTY, file transfer, arbitrary
 forwarding or Incus access.
 
 Inspect the redacted pool without acquiring:
@@ -100,30 +122,54 @@ quarantined or recovering slot instead exposes bounded recovery metadata:
 `last_failure_event_id`, `incident_id`, `recovery_attempt` and `next_recovery_at`. For an available
 retained slot, the attribution columns are empty.
 
-New runners discover the broker's `attribution-v2` capability through read-only status and use the
-typed `acquire-v2` command. During a rolling update, a new broker continues to accept legacy
-schema-1 acquire requests. A new runner falls back to an opaque `<project>+<run>` legacy label only
-after the old broker explicitly rejects the unsupported command before allocation; transport
-failures and unknown outcomes are never retried.
+The runner requires the broker's `attribution-v2` capability from read-only status before it sends
+the exact `acquire-v2` request. Legacy acquire is not supported, and the runner never downgrades in
+response to status or acquire failure. Only a typed busy response plus bounded `--wait` permits
+another request for the same slot; a transport failure or any other unknown outcome ends the
+attempt. A `held` busy response
+contains exactly the safe owner fields `display_label`, `yard`, `project`, `run`, `purpose`,
+`acquired_at` and `expires_at`. Other unavailable states carry no owner object. The runner validates
+the complete response before retrying; a missing, extra or malformed owner field makes the outcome
+unknown and prevents another acquire.
 
-Run against both VMs of one automatically selected slot:
+Use redacted status to inspect the configured pool, explicitly choose an available slot number, then
+run against the two VMs in only that slot. For example, after choosing slot 1:
 
 ```sh
-dev/agent-e2e.sh --purpose host-free-suite -- ./tests/run.sh
-dev/agent-e2e.sh --wait 20m --purpose host-free-suite -- ./tests/run.sh
-dev/e2e/p0-acceptance.sh
-dev/agent-e2e.sh --purpose real-host-check --vm 1 -- ./tests/some-real-host-check.sh
+slot=1
+dev/agent-e2e.sh --slot "$slot" --purpose host-free-suite -- ./tests/run.sh
+dev/agent-e2e.sh --slot "$slot" --wait 20m --purpose host-free-suite -- ./tests/run.sh
+dev/e2e/p0-acceptance.sh --slot "$slot"
+dev/agent-e2e.sh --slot "$slot" --purpose real-host-check --vm 1 -- \
+  ./tests/some-real-host-check.sh
 ```
+
+The runner filters private and ignored files, verifies the worktree bundle and removes its guest
+worktree. Every lease-taking invocation prints `yard + project + run + purpose` for attribution.
+
+The default pool has slots 1 and 2, but callers must use the configured capacity reported by status.
+The live lease acceptance always exercises one exact slot and, when a second exists, adds concurrent
+cross-slot isolation. Additional slots remain unselected and must retain the same state, lease epoch
+and resource generation throughout the run.
 
 ### Test lanes and gates
 
-`dev/e2e/p0-acceptance.sh` without arguments is the only continuous P0 release gate. Addressable
-lanes are diagnostics: they shorten a rerun after a late failure but never turn a partial pass into
-a fresh-install release result.
+`dev/e2e/p0-acceptance.sh --slot N` is the continuous P0 release gate. Addressable lanes require the
+same explicit selector and are diagnostics: they shorten a rerun after a late failure but never turn
+a partial pass into a fresh-install release result. `--list-lanes` does not acquire and needs no slot.
+
+Before current `yard init`, VM1 seeds the legacy convergence fixture with:
+
+```sh
+SUBYARD_E2E_LEGACY_FIXTURE=1 \
+  dev/e2e/seed-test-vms-legacy-state.sh subyard-test-yard yard-test-yard
+```
+
+This fixture is restricted to disposable VM1 candidate yards.
 
 Use the advisory [change-impact testing workflow](testing.md) to select affected host-free checks
 and targeted lanes for a diff. The selector only recommends checks; targeted evidence does not
-replace this section's continuous no-argument P0 release gate.
+replace this section's continuous full P0 release gate.
 
 | Lane | Prerequisites and timeout | Mutable scope | Classification |
 | --- | --- | --- | --- |
@@ -141,7 +187,7 @@ replace this section's continuous no-argument P0 release gate.
 | `reboot-verify` | held VM1 lease; two 3-minute boot windows | guest reboot only | targeted transport/recovery diagnostic |
 | `peer` | both VMs and synthetic keys | marked cross-owner RPC, project and credential fixtures | targeted diagnostic; required inside continuous P0 |
 | `peer-cleanup`, `cleanup` | same retained allocation | exact marked fixtures and run worktrees | standalone idempotent cleanup/verifier |
-| no argument (`full`) | all prerequisites above | union of the marked scopes | mandatory continuous release gate |
+| `--slot N` (`full`) | all prerequisites above | union of the marked scopes | mandatory continuous release gate |
 
 Android/GPU, real credentials and external-service profiles use separate explicitly prerequisite-
 gated lanes. A generic dependency-free resource pass does not report those handlers green.
@@ -150,9 +196,10 @@ List or run one lane:
 
 ```sh
 dev/e2e/p0-acceptance.sh --list-lanes
-dev/e2e/p0-acceptance.sh --lane peer
-SUBYARD_P0_SLOT=1 dev/e2e/p0-acceptance.sh --lane source-upgrade --resume
-SUBYARD_P0_WAIT_SECONDS=1200 dev/e2e/p0-acceptance.sh --lane power-systemd
+dev/e2e/p0-acceptance.sh --slot "$slot" --lane peer
+dev/e2e/p0-acceptance.sh --slot "$slot" --lane source-upgrade --resume
+SUBYARD_P0_WAIT_SECONDS=1200 \
+  dev/e2e/p0-acceptance.sh --slot "$slot" --lane power-systemd
 ```
 
 `SUBYARD_P0_WAIT_SECONDS` is a non-negative number of seconds passed to the atomic broker acquire;
@@ -178,35 +225,47 @@ fails closed after slot rebuild, selection of another slot or any public worktre
 never contains lease credentials, guest endpoints, command payloads, controller paths or ambient
 environment. The latest 20 records are retained.
 
-Request one exact broker slot when a coordinated run requires it:
+Every lease-taking runner call requests one exact broker slot:
 
 ```sh
-dev/agent-e2e.sh --slot 1 --purpose coordinated-check --vm 1 -- ./tests/some-real-host-check.sh
-SUBYARD_P0_SLOT=1 dev/e2e/p0-acceptance.sh
+dev/agent-e2e.sh --slot "$slot" --purpose coordinated-check --vm 1 -- \
+  ./tests/some-real-host-check.sh
+dev/e2e/p0-acceptance.sh --slot "$slot"
 ```
 
-The exact selector is part of atomic lease acquisition. A busy, quarantined, unavailable or unknown
-slot fails explicitly without selecting a neighbor. The runner also verifies the returned `slot_id`
-before opening guest transport and releases a mismatched grant without guest access.
+The exact selector is part of atomic lease acquisition. A busy, quarantined or otherwise unavailable
+slot fails explicitly without selecting a neighbor unless bounded `--wait` was requested; waiting
+retries only that same slot. An unknown or invalid slot fails immediately. An acquire with an unknown
+outcome is not retried. The runner also verifies the returned `slot_id` before opening guest
+transport and releases a mismatched grant without guest access.
 
 Open an unrestricted root guest session or run a root command:
 
 ```sh
-dev/agent-e2e.sh --ssh 1
-dev/agent-e2e.sh --ssh 2 -- id -u
+dev/agent-e2e.sh --slot "$slot" --ssh 1
+dev/agent-e2e.sh --slot "$slot" --ssh 2 -- id -u
 ```
 
 The wrapper creates an ephemeral Ed25519 key per lease, starts a keeper that renews once per minute,
 and releases in its exit trap. Ten minutes without a successful heartbeat expires the lease. With
-no `--wait`, an exhausted pool returns a distinct busy exit; `--wait` retries with a bounded timeout.
-Busy output shows bounded holder attribution and wait progress without exposing credentials. The
+no `--wait`, an unavailable requested slot returns a distinct busy exit; `--wait` retries that slot
+with a bounded timeout. For a held slot, immediate busy, wait progress and timeout diagnostics use
+the bounded form `owner=YARD/PROJECT run=RUN purpose=PURPOSE acquired=TIME expires=TIME label=LABEL`.
+They never include a controller identity, lease credential, endpoint, host key or private path. The
 raw OpenSSH config and lease capability are internal temporary files and are not an agent API.
 
-Every wrapper invocation is a new lease and may receive a different physical slot. The printed
-`e2e-vm-1` and `e2e-vm-2` selectors always mean the two guests in the current lease, never global
-slot names. Stateful multi-step work must stay in one script invocation or one interactive SSH
-session. `--slot N` requests only the corresponding broker lease; it never enables direct VM, Incus
-or raw SSH access.
+Every wrapper invocation is a new lease for only the requested slot. The printed `e2e-vm-1` and
+`e2e-vm-2` selectors always mean the two guests inside that outer pair, never global slot names.
+Stateful multi-step work must stay in one script invocation or one interactive SSH session. Once
+leased, the agent has unrestricted root in both guests and may create arbitrary nested yards,
+brokers and leases. Nested slots are a separate namespace: inspect the nested broker's local status
+and choose its slot locally instead of copying the outer `SUBYARD_E2E_SLOT`. `--slot N` requests only
+the corresponding broker lease; it never enables direct VM, Incus or raw SSH access.
+
+If configured capacity provides multiple available pairs, test them independently with separate
+top-level runner processes. Give each process a different explicitly chosen slot and purpose, and
+let each wrapper own its bounded keeper, release trap and cleanup. Do not combine allocations into
+one request or use one slot as affinity for another.
 
 Before guest access, the runner prints the exact assignment and the broker installs the same public
 context at `/run/subyard-e2e-lease.json`. Normal payloads also receive
@@ -249,7 +308,7 @@ or capacity failure delays recovery; it does not turn quarantine into a permanen
 The manual command starts the same full-pair workflow immediately:
 
 ```sh
-yard -Y test-yard test-vms recover --slot 2
+yard -Y test-yard test-vms recover --slot "$slot"
 ```
 
 ## Broker diagnostics
@@ -265,7 +324,7 @@ Read the host-wide structured log without selecting or starting a yard:
 
 ```sh
 yard test-vms logs
-yard test-vms logs -n 50 --slot 2
+yard test-vms logs -n 50 --slot "$slot"
 yard test-vms logs -f
 ```
 
@@ -293,7 +352,7 @@ receive the `NESTED_E2E_VMS=1` devices and policy required to run the operator-o
 Run the negative transport checks after changes to routing, admission or SSH policy:
 
 ```sh
-dev/agent-e2e.sh --verify-boundary
+dev/agent-e2e.sh --slot "$slot" --verify-boundary
 ```
 
 The operator owns outer `start`, `stop` and teardown. Agents use only leases allocated by the

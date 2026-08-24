@@ -6,6 +6,28 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 # shellcheck source=dev/agent-e2e.sh
 . "$ROOT/dev/agent-e2e.sh"
 
+usage() {
+  printf 'Usage: dev/e2e/entity-naming-acceptance.sh --slot N\n'
+}
+parse_arguments() {
+  local slot_seen=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --slot)
+        [ "$#" -ge 2 ] || die '--slot needs a number from 1 to 999'
+        [ "$slot_seen" = 0 ] || die '--slot may be specified only once'
+        set_requested_slot "$2" --slot
+        slot_seen=1
+        shift 2
+        ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown argument '$1'" ;;
+    esac
+  done
+  [ -n "$LEASE_REQUESTED_SLOT" ] || die '--slot N is required'
+}
+parse_arguments "$@"
+
 LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
 LEASE_PURPOSE=entity-naming-lifecycle
 cleanup_acceptance() {

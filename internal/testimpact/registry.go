@@ -73,7 +73,8 @@ func BuiltInRegistry() (Registry, error) {
 	shellTests := []string{
 		"agent-e2e", "agent-selection", "android-provision-check", "build-engine",
 		"ccusage-provision", "cli-contract", "codex-agent-defaults", "codex-agent-provision",
-		"command-registry", "docker-forwarding-convergence", "emulator-process-control",
+		"command-registry", "create-subyard-docker-apparmor", "docker-forwarding-convergence",
+		"emulator-process-control",
 		"emulator-process-identity", "emulator-resource-protocol", "engine-release",
 		"hermes-dashboard-resource", "hermes-e2e-contract", "hermes-provision",
 		"init-extras-convergence", "init-network-convergence", "init-project-convergence",

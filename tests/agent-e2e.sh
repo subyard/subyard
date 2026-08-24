@@ -50,11 +50,11 @@ if "$ROOT/dev/agent-e2e.sh" --slot 0 --prepare >/dev/null 2>&1; then
   fail "agent runner accepted an invalid exact slot"
 fi
 LEASE_REQUESTED_SLOT=''
-set_requested_slot 1 SUBYARD_P0_SLOT
+set_requested_slot 1 --slot
 [ "$LEASE_REQUESTED_SLOT" = slot-001 ] \
-  || fail "P0 exact-slot environment did not resolve slot-001"
-if (set_requested_slot 0 SUBYARD_P0_SLOT) >/dev/null 2>&1; then
-  fail "P0 exact-slot environment accepted slot zero"
+  || fail "exact --slot did not resolve slot-001"
+if (set_requested_slot 0 --slot) >/dev/null 2>&1; then
+  fail "exact --slot accepted slot zero"
 fi
 LEASE_REQUESTED_SLOT=''
 
@@ -103,27 +103,18 @@ run_b="$(new_run_id)"
   || fail "explicit purpose was not normalized"
 LEASE_YARD=default
 LEASE_PROJECT=Subyard-2
-LEASE_CHECKOUT=
 LEASE_RUN="$run_a"
 LEASE_PURPOSE=contract-tests
 LEASE_GENERATION=7
-BROKER_ATTRIBUTION_V2=1
+LEASE_REQUESTED_SLOT='slot-002'
 lease_request="$(lease_acquire_request client SHA256:key ssh-ed25519 keyblob)"
 [ "$lease_request" = \
-    "acquire-v2 client SHA256:key default Subyard-2 $run_a contract-tests ssh-ed25519 keyblob" ] \
+    "acquire-v2 client SHA256:key default Subyard-2 $run_a contract-tests ssh-ed25519 keyblob slot-002" ] \
   || fail "runner did not carry canonical attribution through acquire-v2"
-LEASE_REQUESTED_SLOT='slot-002'
 exact_request="$(lease_acquire_request client SHA256:key ssh-ed25519 keyblob)"
 [ "$exact_request" = \
   "acquire-v2 client SHA256:key default Subyard-2 $run_a contract-tests ssh-ed25519 keyblob slot-002" ] \
   || fail "runner did not retain the existing exact-slot acquire protocol"
-BROKER_ATTRIBUTION_V2=0
-LEASE_REQUESTED_SLOT=
-legacy_request="$(lease_acquire_request client SHA256:key ssh-ed25519 keyblob)"
-[ "$legacy_request" = \
-  "acquire client SHA256:key Subyard-2+$run_a contract-tests ssh-ed25519 keyblob" ] \
-  || fail "old-broker fallback did not use an opaque no-checkout label"
-BROKER_ATTRIBUTION_V2=1
 LEASE_REQUESTED_SLOT='slot-002'
 LEASE_SLOT='slot-002'
 lease_grant_matches_request || fail "matching exact-slot grant was rejected"
@@ -239,9 +230,120 @@ printf '%s\n' "$direct_ssh_stdin" | grep -Fq -- '-T e2e-vm-1 --' \
 grep -Fq 'p0_guest "$vm" \' "$ROOT/dev/e2e/p0-acceptance.sh" \
   && grep -Fq 'dd of="$1" status=none' "$ROOT/dev/e2e/p0-acceptance.sh" \
   || fail "P0 source archive does not use the lease-local stdin transport"
-grep -Fq 'set_requested_slot "$SUBYARD_P0_SLOT" SUBYARD_P0_SLOT' \
-  "$ROOT/dev/e2e/p0-acceptance.sh" \
-  || fail "P0 exact-slot environment does not reach the atomic lease request"
+
+cli_fixture_bin="$TMP/acceptance-cli-bin"
+cli_mktemp_log="$TMP/acceptance-cli-mktemp.log"
+cli_output="$TMP/acceptance-cli-output.log"
+mkdir -p "$cli_fixture_bin" "$TMP/acceptance-cli-tmp"
+cat > "$cli_fixture_bin/mktemp" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$CLI_MKTEMP_LOG"
+exec /usr/bin/mktemp "$@"
+EOF
+chmod +x "$cli_fixture_bin/mktemp"
+
+run_p0_cli_fixture() {
+  : > "$cli_mktemp_log"
+  : > "$cli_output"
+  set +e
+  PATH="$cli_fixture_bin:$PATH" \
+    CLI_MKTEMP_LOG="$cli_mktemp_log" \
+    TMPDIR="$TMP/acceptance-cli-tmp" \
+    SUBYARD_E2E_STATE_DIR="$TMP/p0-cli-state" \
+    "$ROOT/dev/e2e/p0-acceptance.sh" "$@" >"$cli_output" 2>&1
+  P0_CLI_RC=$?
+  set -e
+}
+
+run_p0_cli_fixture --help
+[ "$P0_CLI_RC" = 0 ] && [ ! -s "$cli_mktemp_log" ] \
+  || fail 'P0 help requires a slot or initializes lease state'
+run_p0_cli_fixture --list-lanes
+[ "$P0_CLI_RC" = 0 ] && [ ! -s "$cli_mktemp_log" ] \
+  || fail 'P0 lane listing requires a slot or initializes lease state'
+p0_lane_inventory="$(cat "$cli_output")"
+
+run_p0_cli_fixture
+[ "$P0_CLI_RC" = 2 ] \
+  && grep -Fq -- '--slot N is required' "$cli_output" \
+  && [ ! -s "$cli_mktemp_log" ] \
+  || fail 'P0 full mode reached temporary or lease state without --slot N'
+while IFS=$'\t' read -r p0_lane _; do
+  [ -n "$p0_lane" ] || continue
+  [ "$p0_lane" != full ] || continue
+  run_p0_cli_fixture --lane "$p0_lane"
+  [ "$P0_CLI_RC" = 2 ] \
+    && grep -Fq -- '--slot N is required' "$cli_output" \
+    && [ ! -s "$cli_mktemp_log" ] \
+    || fail "P0 lane $p0_lane reached temporary or lease state without --slot N"
+done <<<"$p0_lane_inventory"
+
+run_p0_cli_fixture --slot
+[ "$P0_CLI_RC" = 2 ] \
+  && grep -Fq -- '--slot needs a number from 1 to 999' "$cli_output" \
+  && [ ! -s "$cli_mktemp_log" ] \
+  || fail 'P0 accepted a missing --slot value'
+run_p0_cli_fixture --slot 0
+[ "$P0_CLI_RC" = 2 ] \
+  && grep -Fq -- '--slot needs a number from 1 to 999' "$cli_output" \
+  && [ ! -s "$cli_mktemp_log" ] \
+  || fail 'P0 accepted an invalid --slot value'
+run_p0_cli_fixture --slot 1 --slot 2
+[ "$P0_CLI_RC" = 2 ] \
+  && grep -Fq -- '--slot may be specified only once' "$cli_output" \
+  && [ ! -s "$cli_mktemp_log" ] \
+  || fail 'P0 accepted duplicate --slot values'
+
+: > "$cli_mktemp_log"
+set +e
+PATH="$cli_fixture_bin:$PATH" \
+  CLI_MKTEMP_LOG="$cli_mktemp_log" \
+  TMPDIR="$TMP/acceptance-cli-tmp" \
+  SUBYARD_E2E_STATE_DIR="$TMP/p0-cli-state" \
+  SUBYARD_P0_SLOT=2 \
+  "$ROOT/dev/e2e/p0-acceptance.sh" --lane cleanup >"$cli_output" 2>&1
+p0_env_slot_rc=$?
+set -e
+[ "$p0_env_slot_rc" = 2 ] \
+  && grep -Fq -- '--slot N is required' "$cli_output" \
+  && [ ! -s "$cli_mktemp_log" ] \
+  || fail 'P0 retained the SUBYARD_P0_SLOT compatibility path'
+
+p0_source_without_comments="$(sed '/^[[:space:]]*#/d' "$ROOT/dev/e2e/p0-acceptance.sh")"
+[ "$(grep -Ec '^[[:space:]]*acquire_lease([[:space:]]|$)' \
+  <<<"$p0_source_without_comments")" = 1 ] \
+  && ! grep -Fq 'SUBYARD_P0_SLOT' <<<"$p0_source_without_comments" \
+  && ! grep -Eq 'LEASE_(EXCLUDED|EXCLUSION)|exclude_.*slot|slot_.*exclude' \
+    <<<"$p0_source_without_comments" \
+  || fail 'P0 does not have exactly one explicit outer acquire or retains slot exclusion'
+
+run_entity_cli_fixture() {
+  : > "$cli_mktemp_log"
+  : > "$cli_output"
+  set +e
+  PATH="$cli_fixture_bin:$PATH" \
+    CLI_MKTEMP_LOG="$cli_mktemp_log" \
+    TMPDIR="$TMP/acceptance-cli-tmp" \
+    SUBYARD_E2E_STATE_DIR="$TMP/entity-cli-state" \
+    "$ROOT/dev/e2e/entity-naming-acceptance.sh" "$@" >"$cli_output" 2>&1
+  ENTITY_CLI_RC=$?
+  set -e
+}
+
+run_entity_cli_fixture
+[ "$ENTITY_CLI_RC" = 2 ] \
+  && grep -Fq -- '--slot N is required' "$cli_output" \
+  && [ ! -s "$cli_mktemp_log" ] \
+  && [ ! -e "$TMP/entity-cli-state/id_ed25519" ] \
+  || fail 'entity naming acceptance initialized temp/key state before requiring --slot N'
+run_entity_cli_fixture --slot 0
+[ "$ENTITY_CLI_RC" = 2 ] \
+  && grep -Fq -- '--slot needs a number from 1 to 999' "$cli_output" \
+  && [ ! -s "$cli_mktemp_log" ] \
+  && [ ! -e "$TMP/entity-cli-state/id_ed25519" ] \
+  || fail 'entity naming acceptance initialized temp/key state before rejecting an invalid slot'
+
 grep -Fq 'run_guest "$vm" "$P0_BUNDLE" "$P0_BUNDLE_HASH" \' \
   "$ROOT/dev/e2e/p0-acceptance.sh" \
   || fail "P0 acceptance repeats the leased runner's dev privilege transition"
@@ -591,14 +693,32 @@ grep -Fq 'P0_CURRENT_PHASE=final-verify' "$ROOT/dev/e2e/p0-acceptance.sh" \
   && grep -Fq 'run_phase cleanup cleanup_lane' "$ROOT/dev/e2e/p0-acceptance.sh" \
   && [ "$(grep -c '^    verify_boundary$' "$ROOT/dev/e2e/p0-acceptance.sh")" -eq 1 ] \
   || fail 'continuous P0 can skip final cleanup or boundary verification'
-grep -Fq 'prepare_slot "$slot"' "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
+grep -Fq 'mapfile -t SLOT_IDS' "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
+  && grep -Fq 'prepare_slot "$TARGET_SLOT"' "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
+  && grep -Fq 'prepare_slot "$PEER_SLOT"' "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
   && grep -Fq 'LEASE_PURPOSE=acceptance-prepare' \
     "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
   && grep -Fq 'acquire_lease' "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
   && grep -Fq 'guest "$vm" sh -eu -c' "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
   && grep -Fq 'fstrim -av' "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
+  && grep -Fq 'assert_untouched_slots' "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
   && grep -Fq 'dump_broker_diagnostics' "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
-  || fail "P1 acceptance does not prepare first-boot slots sequentially with diagnostics"
+  || fail "P1 acceptance does not discover and prepare target slots with neighbor diagnostics"
+! grep -Fq '(.pool.slots | length) == 2' "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
+  && grep -Fq -- '--wait 2s' "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
+  && grep -Fq 'owner=$A_YARD/$A_PROJECT run=$A_RUN purpose=holder-a' \
+    "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
+  || fail 'P1 acceptance still assumes two slots or omits bounded owner-aware wait coverage'
+grep -Fq 'E2E_VM_SLOT_COUNT=%s' "$ROOT/dev/e2e/p0-guest.sh" \
+  && awk '
+    /write_owner_registration test-yard test-vms 2224 1/ { one = NR }
+    /write_owner_registration test-yard test-vms 2224 3/ { three = NR }
+    /write_owner_registration test-yard test-vms 2224 2/ { two = NR }
+    END { exit !(one && three && two && one < three && three < two) }
+  ' "$ROOT/dev/e2e/p0-guest.sh" \
+  && [ "$(grep -c 'run_nested_broker_acceptance dev/e2e/p1-lease-acceptance.sh' \
+    "$ROOT/dev/e2e/p0-guest.sh")" -eq 2 ] \
+  || fail 'continuous P0 does not exercise one-slot and extra-slot lease capacity before recovery'
 grep -Fq 'systemctl is-enabled --quiet subyard-e2e-lease-context.service' \
   "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
   && grep -Fq '/proc/sys/kernel/random/boot_id' "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
@@ -855,24 +975,27 @@ grep -Fq '"$candidate_yard" _migrate finalize' \
 ensure_identity
 lease_blob="$(awk '{print $2}' "$IDENTITY.pub")"
 lease_response="$(printf '{"schema_version":1,"status":"ok","grant":{"slot_id":"slot-001","resource_generation":5,"lease_id":"aabb","capability":"ccdd","lease_epoch":3,"data_user":"subyard-e2e-slot-1","targets":[{"selector":1,"name":"e2e-vm-1","address":"10.42.1.11","host_key_type":"ssh-ed25519","host_key_blob":"%s"},{"selector":2,"name":"e2e-vm-2","address":"10.42.1.12","host_key_type":"ssh-ed25519","host_key_blob":"%s"}]}}' "$lease_blob" "$lease_blob")"
-parse_lease_grant "$lease_response" \
-  || fail "valid lease grant was rejected"
-[ "$LEASE_SLOT" = slot-001 ] && [ "$DATA_USER" = subyard-e2e-slot-1 ] \
-  && [ "$LEASE_GENERATION" = 5 ] \
-  && [ "${VM_IP[1]}" = 10.42.1.11 ] && [ "${VM_IP[2]}" = 10.42.1.12 ] \
-  || fail "lease grant did not materialize exact fenced transport state"
+if (parse_lease_grant "$lease_response") >/dev/null 2>&1; then
+  fail "contextless lease grant was accepted"
+fi
 if (parse_lease_grant '{"status":"ok","grant":{"capability":"secret"}}') >/dev/null 2>&1; then
   fail "incomplete lease grant was accepted"
 fi
+LEASE_YARD=default
 LEASE_PROJECT=Subyard/Attribution
-LEASE_CHECKOUT='checkout-a'
 LEASE_RUN='run-a'
 LEASE_PURPOSE=contract-tests
-structured_response="$(printf '{"schema_version":1,"status":"ok","grant":{"slot_id":"slot-002","lease_id":"eeff","capability":"1122","lease_epoch":4,"context":{"schema_version":1,"project":"Subyard/Attribution","checkout":"checkout-a","run":"run-a","purpose":"contract-tests"},"data_user":"subyard-e2e-slot-2","targets":[{"selector":1,"name":"e2e-vm-1","address":"10.42.2.11","host_key_type":"ssh-ed25519","host_key_blob":"%s"},{"selector":2,"name":"e2e-vm-2","address":"10.42.2.12","host_key_type":"ssh-ed25519","host_key_blob":"%s"}]}}' "$lease_blob" "$lease_blob")"
+structured_response="$(printf '{"schema_version":1,"status":"ok","grant":{"slot_id":"slot-002","resource_generation":5,"lease_id":"eeff","capability":"1122","lease_epoch":4,"context":{"schema_version":2,"yard":"default","project":"Subyard/Attribution","run":"run-a","purpose":"contract-tests"},"data_user":"subyard-e2e-slot-2","targets":[{"selector":1,"name":"e2e-vm-1","address":"10.42.2.11","host_key_type":"ssh-ed25519","host_key_blob":"%s"},{"selector":2,"name":"e2e-vm-2","address":"10.42.2.12","host_key_type":"ssh-ed25519","host_key_blob":"%s"}]}}' "$lease_blob" "$lease_blob")"
 parse_lease_grant "$structured_response" \
   || fail "structured lease grant was rejected"
-[ "$LEASE_SLOT" = slot-002 ] \
-  || fail "structured lease context was lost"
+[ "$LEASE_SLOT" = slot-002 ] && [ "$DATA_USER" = subyard-e2e-slot-2 ] \
+  && [ "$LEASE_GENERATION" = 5 ] \
+  && [ "${VM_IP[1]}" = 10.42.2.11 ] && [ "${VM_IP[2]}" = 10.42.2.12 ] \
+  || fail "lease grant did not materialize exact attributed transport state"
+legacy_context="$(jq -c '.grant.context = {schema_version:1, project:"Subyard/Attribution", checkout:"checkout-a", run:"run-a", purpose:"contract-tests"}' <<<"$structured_response")"
+if (parse_lease_grant "$legacy_context") >/dev/null 2>&1; then
+  fail "legacy lease attribution was accepted"
+fi
 changed_context="$(jq -c '.grant.context.project = "Foreign/Project"' <<<"$structured_response")"
 if (parse_lease_grant "$changed_context") >/dev/null 2>&1; then
   fail "facade attribution mismatch was accepted"
@@ -948,6 +1071,281 @@ long_rendered_status="$(render_pool_status "$long_status")"
 grep -Fq "$long_project" <<<"$long_rendered_status" \
   || fail "human pool status truncated an attribution identifier"
 
+# Run end-to-end runner fixtures from the synthetic managed workspace too. Using the
+# caller checkout here would make these tests pass only when that checkout itself
+# happens to live below /srv/workspaces.
+RUNNER_UNDER_TEST="$fixture/dev/agent-e2e.sh"
+mkdir -p "$fixture/dev" "$fixture/scripts/lib"
+cp "$ROOT/dev/agent-e2e.sh" "$RUNNER_UNDER_TEST"
+cp "$ROOT/scripts/lib/runtime.sh" "$fixture/scripts/lib/runtime.sh"
+
+new_runner_fixture() {
+  local name="$1" key
+  RUNNER_FIXTURE="$TMP/runner-$name"
+  mkdir -p "$RUNNER_FIXTURE/bin" "$RUNNER_FIXTURE/client/yards/test-yard" \
+    "$RUNNER_FIXTURE/routes/test-yard/current"
+  ssh-keygen -q -t ed25519 -N '' -f "$RUNNER_FIXTURE/client/id_ed25519"
+  ssh-keygen -q -t ed25519 -N '' -f "$RUNNER_FIXTURE/bastion-key"
+  key="$(normalized_public_key_file "$RUNNER_FIXTURE/bastion-key.pub")"
+  cat > "$RUNNER_FIXTURE/routes/test-yard/current/route.tsv" <<'EOF'
+subyard-e2e-route-v1
+hostname	127.0.0.1
+port	22
+host_key_alias	subyard-e2e-bastion
+EOF
+  printf 'subyard-e2e-bastion %s\n' "$key" \
+    > "$RUNNER_FIXTURE/routes/test-yard/current/known_hosts"
+  : > "$RUNNER_FIXTURE/facade.log"
+  cat > "$RUNNER_FIXTURE/bin/ssh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+command="${!#}"
+busy='{"schema_version":1,"status":"error","code":"busy","state":"held","reason":"busy","owner":{"display_label":"Subyard-2#run-a","yard":"test-yard","project":"Subyard-2","run":"run-a","purpose":"contract-tests","acquired_at":"2026-08-24T12:00:00Z","expires_at":"2026-08-24T12:10:00Z"},"message":"requested slot is unavailable"}'
+busy_missing_owner='{"schema_version":1,"status":"error","code":"busy","state":"held","reason":"busy","message":"missing owner"}'
+busy_extra_owner='{"schema_version":1,"status":"error","code":"busy","state":"held","reason":"busy","owner":{"display_label":"Subyard-2#run-a","yard":"test-yard","project":"Subyard-2","run":"run-a","purpose":"contract-tests","acquired_at":"2026-08-24T12:00:00Z","expires_at":"2026-08-24T12:10:00Z","client_id":"secret"},"message":"extra owner field"}'
+busy_extra_top_level='{"schema_version":1,"status":"error","code":"busy","state":"held","reason":"busy","owner":{"display_label":"Subyard-2#run-a","yard":"test-yard","project":"Subyard-2","run":"run-a","purpose":"contract-tests","acquired_at":"2026-08-24T12:00:00Z","expires_at":"2026-08-24T12:10:00Z"},"message":"requested slot is unavailable","capability":"secret"}'
+busy_bad_owner_time='{"schema_version":1,"status":"error","code":"busy","state":"held","reason":"busy","owner":{"display_label":"Subyard-2#run-a","yard":"test-yard","project":"Subyard-2","run":"run-a","purpose":"contract-tests","acquired_at":"later","expires_at":"earlier"},"message":"bad owner time"}'
+busy_nonheld_owner='{"schema_version":1,"status":"error","code":"busy","state":"provisioning","reason":"provisioning","owner":{"display_label":"Subyard-2#run-a","yard":"test-yard","project":"Subyard-2","run":"run-a","purpose":"contract-tests","acquired_at":"2026-08-24T12:00:00Z","expires_at":"2026-08-24T12:10:00Z"},"message":"unexpected owner"}'
+busy_mismatch='{"schema_version":1,"status":"error","code":"busy","state":"held","reason":"provisioning","message":"untrusted mismatch"}'
+busy_unknown_schema='{"schema_version":2,"status":"error","code":"busy","state":"held","reason":"busy","message":"untrusted schema"}'
+invalid='{"schema_version":1,"status":"error","code":"invalid_request","reason":"invalid_slot","message":"invalid slot_id"}'
+status='{"schema_version":1,"status":"ok","capabilities":["attribution-v2"],"pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-002","resource_generation":1,"lease_epoch":1,"state":"held"}]}}'
+status_without_v2='{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-002","resource_generation":1,"lease_epoch":1,"state":"available"}]}}'
+grant='{"schema_version":1,"status":"ok","grant":{"slot_id":"slot-002","resource_generation":1,"lease_id":"aabbccdd","lease_epoch":2,"capability":"eeff0011","data_user":"subyard-e2e-slot-2","targets":[{"selector":1,"name":"e2e-vm-1","address":"10.42.2.11","host_key_type":"ssh-ed25519","host_key_blob":"YWJjZA=="},{"selector":2,"name":"e2e-vm-2","address":"10.42.2.12","host_key_type":"ssh-ed25519","host_key_blob":"YWJjZA=="}]}}'
+wrong_grant='{"schema_version":1,"status":"ok","grant":{"slot_id":"slot-001","resource_generation":1,"lease_id":"badc0ffe","lease_epoch":3,"capability":"facefeed","data_user":"subyard-e2e-slot-1","targets":[{"selector":1,"name":"e2e-vm-1","address":"10.42.1.11","host_key_type":"ssh-ed25519","host_key_blob":"YWJjZA=="},{"selector":2,"name":"e2e-vm-2","address":"10.42.1.12","host_key_type":"ssh-ed25519","host_key_blob":"YWJjZA=="}]}}'
+case "$command" in
+  status)
+    printf '%s\n' "$command" >> "$FAKE_FACADE_LOG"
+    if [ "$FAKE_SCENARIO" = status-without-v2 ]; then
+      printf '%s\n' "$status_without_v2"
+    else
+      printf '%s\n' "$status"
+    fi
+    ;;
+  acquire-v2\ *|acquire\ *)
+    printf '%s\n' "$command" >> "$FAKE_FACADE_LOG"
+    read -r _ _ _ request_yard request_project request_run request_purpose _ _ _ <<<"$command"
+    grant="$(jq -c --arg yard "$request_yard" --arg project "$request_project" \
+      --arg run "$request_run" --arg purpose "$request_purpose" \
+      '.grant.context = {schema_version:2, yard:$yard, project:$project, run:$run, purpose:$purpose}' \
+      <<<"$grant")"
+    wrong_grant="$(jq -c --arg yard "$request_yard" --arg project "$request_project" \
+      --arg run "$request_run" --arg purpose "$request_purpose" \
+      '.grant.context = {schema_version:2, yard:$yard, project:$project, run:$run, purpose:$purpose}' \
+      <<<"$wrong_grant")"
+    count=0
+    [ ! -r "$FAKE_ACQUIRE_COUNT" ] || count="$(cat "$FAKE_ACQUIRE_COUNT")"
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$FAKE_ACQUIRE_COUNT"
+    case "$FAKE_SCENARIO" in
+      invalid) printf '%s\n' "$invalid" ;;
+      busy-missing-owner) printf '%s\n' "$busy_missing_owner" ;;
+      busy-extra-owner) printf '%s\n' "$busy_extra_owner" ;;
+      busy-extra-top-level) printf '%s\n' "$busy_extra_top_level" ;;
+      busy-bad-owner-time) printf '%s\n' "$busy_bad_owner_time" ;;
+      busy-nonheld-owner) printf '%s\n' "$busy_nonheld_owner" ;;
+      busy-mismatch) printf '%s\n' "$busy_mismatch" ;;
+      busy-unknown-schema) printf '%s\n' "$busy_unknown_schema" ;;
+      late-grant) sleep 2; printf '%s\n' "$grant" ;;
+      outcome-unknown) exit 255 ;;
+      wrong-grant) printf '%s\n' "$wrong_grant" ;;
+      wait-success) [ "$count" -eq 1 ] && printf '%s\n' "$busy" || printf '%s\n' "$grant" ;;
+      *) printf '%s\n' "$busy" ;;
+    esac
+    ;;
+  release\ *)
+    printf '%s\n' "$command" >> "$FAKE_FACADE_LOG"
+    printf '%s\n' '{"schema_version":1,"status":"ok","message":"released"}'
+    ;;
+  *) printf 'other %s\n' "$command" >> "$FAKE_FACADE_LOG"; exit 0 ;;
+esac
+EOF
+  chmod +x "$RUNNER_FIXTURE/bin/ssh"
+}
+
+run_runner_fixture() {
+  local scenario="$1"
+  shift
+  PATH="$RUNNER_FIXTURE/bin:$PATH" \
+    SUBYARD_E2E_TEST_MODE=1 \
+    SUBYARD_E2E_STATE_DIR="$RUNNER_FIXTURE/client" \
+    SUBYARD_E2E_ROUTE_REGISTRY="$RUNNER_FIXTURE/routes" \
+    FAKE_FACADE_LOG="$RUNNER_FIXTURE/facade.log" \
+    FAKE_ACQUIRE_COUNT="$RUNNER_FIXTURE/acquire-count" \
+    FAKE_SCENARIO="$scenario" \
+    "$RUNNER_UNDER_TEST" "$@"
+}
+
+# The lease invariant must survive sourcing: no key creation or facade probe without an exact slot.
+new_runner_fixture source-invariant
+set +e
+source_invariant_output="$(
+  PATH="$RUNNER_FIXTURE/bin:$PATH" \
+    SUBYARD_E2E_TEST_MODE=0 \
+    SUBYARD_E2E_STATE_DIR="$RUNNER_FIXTURE/client" \
+    SUBYARD_E2E_ROUTE_REGISTRY="$RUNNER_FIXTURE/routes" \
+    FAKE_FACADE_LOG="$RUNNER_FIXTURE/facade.log" \
+    FAKE_ACQUIRE_COUNT="$RUNNER_FIXTURE/acquire-count" \
+    FAKE_SCENARIO=busy \
+    bash -c '
+      set -euo pipefail
+      . "$1/dev/agent-e2e.sh"
+      LOCAL_TEMP="$2/local"
+      mkdir -p "$LOCAL_TEMP"
+      acquire_lease
+    ' _ "$fixture" "$RUNNER_FIXTURE" 2>&1
+)"
+source_invariant_rc=$?
+set -e
+[ "$source_invariant_rc" = 2 ] \
+  && grep -Fq 'an exact --slot is required' <<<"$source_invariant_output" \
+  && [ ! -e "$RUNNER_FIXTURE/local/lease_id_ed25519" ] \
+  && [ ! -s "$RUNNER_FIXTURE/facade.log" ] \
+  || fail "sourced acquire_lease bypassed the exact-slot invariant: $source_invariant_output"
+
+# Every lease-taking mode needs an exact slot before it contacts the facade.
+for runner_mode in \
+  '--ssh 1 -- true' \
+  '--ssh-stdin 1 -- true' \
+  '--verify-boundary' \
+  '-- true'; do
+  new_runner_fixture "missing-slot-${runner_mode%% *}"
+  set +e
+  missing_slot_output="$(run_runner_fixture busy $runner_mode 2>&1)"
+  missing_slot_rc=$?
+  set -e
+  [ "$missing_slot_rc" = 2 ] \
+    && grep -Fq 'an exact --slot is required' <<<"$missing_slot_output" \
+    && [ ! -s "$RUNNER_FIXTURE/facade.log" ] \
+    || fail "runner accepted a slotless lease mode ($runner_mode): $missing_slot_output"
+done
+
+# Informational modes remain slotless and status never issues an acquire request.
+new_runner_fixture slotless-info
+run_runner_fixture busy --help >/dev/null
+run_runner_fixture busy --prepare >/dev/null
+status_json="$(run_runner_fixture busy --status --json)"
+grep -Fq '"status":"ok"' <<<"$status_json" \
+  && [ "$(cat "$RUNNER_FIXTURE/facade.log")" = status ] \
+  || fail "slotless informational mode acquired a lease or failed"
+
+# Exact unavailable and invalid responses are reported immediately with their redacted contract fields.
+new_runner_fixture attribution-v2-required
+set +e
+missing_capability_output="$(
+  run_runner_fixture status-without-v2 --slot 2 --ssh 1 -- true 2>&1
+)"
+missing_capability_rc=$?
+set -e
+[ "$missing_capability_rc" = 2 ] \
+  && grep -Fq 'broker does not support required attribution-v2 acquire' \
+    <<<"$missing_capability_output" \
+  && [ "$(grep -c '^status$' "$RUNNER_FIXTURE/facade.log")" = 1 ] \
+  && ! grep -q '^acquire' "$RUNNER_FIXTURE/facade.log" \
+  || fail "runner downgraded to legacy acquire: $missing_capability_output"
+
+new_runner_fixture exact-busy
+set +e
+busy_output="$(run_runner_fixture busy --slot 2 --ssh 1 -- true 2>&1)"
+busy_rc=$?
+set -e
+[ "$busy_rc" = 2 ] \
+  && grep -Fq 'state=held reason=busy' <<<"$busy_output" \
+  && grep -Fq 'owner=test-yard/Subyard-2 run=run-a purpose=contract-tests' <<<"$busy_output" \
+  && ! grep -Fq 'client_id' <<<"$busy_output" \
+  && [ "$(grep -c '^acquire' "$RUNNER_FIXTURE/facade.log")" = 1 ] \
+  && grep -Eq '^acquire.* slot-002$' "$RUNNER_FIXTURE/facade.log" \
+  || fail "exact busy response was not immediate, redacted, and slot-pinned: $busy_output"
+
+new_runner_fixture exact-invalid
+set +e
+invalid_output="$(run_runner_fixture invalid --slot 2 --ssh 1 -- true 2>&1)"
+invalid_rc=$?
+set -e
+[ "$invalid_rc" = 2 ] \
+  && grep -Fq 'invalid_request: invalid_slot' <<<"$invalid_output" \
+  && [ "$(grep -c '^acquire' "$RUNNER_FIXTURE/facade.log")" = 1 ] \
+  && grep -Eq '^acquire.* slot-002$' "$RUNNER_FIXTURE/facade.log" \
+  || fail "invalid exact slot response retried or lost its typed reason: $invalid_output"
+
+# A mismatched successful grant is released with its returned credentials before guest access.
+new_runner_fixture wrong-grant
+set +e
+wrong_grant_output="$(run_runner_fixture wrong-grant --slot 2 --ssh 1 -- true 2>&1)"
+wrong_grant_rc=$?
+set -e
+[ "$wrong_grant_rc" = 2 ] \
+  && grep -Fq 'broker returned a slot other than the exact requested slot' <<<"$wrong_grant_output" \
+  && [ "$(grep -c '^acquire' "$RUNNER_FIXTURE/facade.log")" = 1 ] \
+  && [ "$(grep -c '^release slot-001 badc0ffe 3 facefeed$' "$RUNNER_FIXTURE/facade.log")" = 1 ] \
+  && ! grep -q '^other ' "$RUNNER_FIXTURE/facade.log" \
+  || fail "wrong-slot grant was not released before guest access: $wrong_grant_output"
+
+# Bounded waits retry the same slot only after a typed busy response, then use that exact grant.
+new_runner_fixture exact-wait-success
+set +e
+wait_output="$(run_runner_fixture wait-success --slot 2 --wait 10s --ssh 1 -- true 2>&1)"
+wait_rc=$?
+set -e
+[ "$wait_rc" = 0 ] \
+  && [ "$(grep -c '^acquire' "$RUNNER_FIXTURE/facade.log")" = 2 ] \
+  && [ "$(grep '^acquire' "$RUNNER_FIXTURE/facade.log" | grep -vc ' slot-002$')" = 0 ] \
+  || fail "bounded exact wait did not retry and acquire only slot-002: $wait_output"
+
+new_runner_fixture exact-wait-timeout
+set +e
+timeout_output="$(run_runner_fixture busy --slot 2 --wait 1s --ssh 1 -- true 2>&1)"
+timeout_rc=$?
+set -e
+[ "$timeout_rc" = 4 ] \
+  && grep -Fq 'state=held reason=busy' <<<"$timeout_output" \
+  && grep -Fq 'owner=test-yard/Subyard-2 run=run-a purpose=contract-tests' <<<"$timeout_output" \
+  && [ "$(grep -c '^acquire' "$RUNNER_FIXTURE/facade.log")" -ge 1 ] \
+  && [ "$(grep '^acquire' "$RUNNER_FIXTURE/facade.log" | grep -vc ' slot-002$')" = 0 ] \
+  || fail "bounded exact wait did not return busy with its last redacted state: $timeout_output"
+
+# A transport failure may hide a successful allocation, so it must never be retried.
+new_runner_fixture exact-outcome-unknown
+set +e
+unknown_output="$(run_runner_fixture outcome-unknown --slot 2 --wait 6s --ssh 1 -- true 2>&1)"
+unknown_rc=$?
+set -e
+[ "$unknown_rc" = 2 ] \
+  && grep -Fq 'lease acquire outcome is unknown; refusing a second allocation' <<<"$unknown_output" \
+  && [ "$(grep -c '^acquire' "$RUNNER_FIXTURE/facade.log")" = 1 ] \
+  && grep -Eq '^acquire.* slot-002$' "$RUNNER_FIXTURE/facade.log" \
+  || fail "outcome-unknown acquire was retried or lost exact-slot pinning: $unknown_output"
+
+# Only the exact broker schema and stable state/reason pairs prove that no allocation occurred.
+for malformed_busy_scenario in \
+  busy-missing-owner busy-extra-owner busy-extra-top-level busy-bad-owner-time busy-nonheld-owner \
+  busy-mismatch busy-unknown-schema; do
+  new_runner_fixture "exact-$malformed_busy_scenario"
+  set +e
+  malformed_busy_output="$(
+    run_runner_fixture "$malformed_busy_scenario" --slot 2 --wait 1s --ssh 1 -- true 2>&1
+  )"
+  malformed_busy_rc=$?
+  set -e
+  [ "$malformed_busy_rc" = 2 ] \
+    && grep -Fq 'lease acquire outcome is unknown; refusing a second allocation' \
+      <<<"$malformed_busy_output" \
+    && [ "$(grep -c '^acquire' "$RUNNER_FIXTURE/facade.log")" = 1 ] \
+    || fail "non-contract busy response was retried ($malformed_busy_scenario): $malformed_busy_output"
+done
+
+# A grant that arrives after the bounded deadline is released without guest access.
+new_runner_fixture exact-late-grant
+set +e
+late_grant_output="$(run_runner_fixture late-grant --slot 2 --wait 1s --ssh 1 -- true 2>&1)"
+late_grant_rc=$?
+set -e
+[ "$late_grant_rc" = 4 ] \
+  && grep -Fq 'deadline elapsed before the lease grant arrived' <<<"$late_grant_output" \
+  && [ "$(grep -c '^acquire' "$RUNNER_FIXTURE/facade.log")" = 1 ] \
+  && [ "$(grep -c '^release' "$RUNNER_FIXTURE/facade.log")" = 1 ] \
+  || fail "late exact-slot grant was accepted or not released: $late_grant_output"
+
 # Model direct guest SSH and cleanup locally.
 guest() {
   shift
@@ -994,6 +1392,47 @@ if sed '/^[[:space:]]*#/d' "$ROOT/dev/e2e/p0-acceptance.sh" \
   | grep -Eq 'test-vms[[:space:]]+(up|down)|yard[[:space:]].*(start|stop)'; then
   fail "P0 acceptance contains an allocation lifecycle call"
 fi
+
+# Public operational examples and direct script calls must keep the exact-slot boundary visible.
+slotless_public_callers=''
+while IFS=: read -r caller_path caller_line caller_source; do
+  trimmed_source="${caller_source#"${caller_source%%[![:space:]]*}"}"
+  caller_kind=''
+  case "$caller_path" in
+    *.sh)
+      case "$trimmed_source" in
+        dev/agent-e2e.sh\ *) caller_kind=runner ;;
+        dev/e2e/p0-acceptance.sh*) caller_kind=p0 ;;
+        *'"$RUNNER" '*) caller_kind=runner ;;
+      esac
+      ;;
+    *.md)
+      case "$trimmed_source" in
+        dev/agent-e2e.sh\ *|*'`dev/agent-e2e.sh '*) caller_kind=runner ;;
+        dev/e2e/p0-acceptance.sh*|*'`dev/e2e/p0-acceptance.sh'*) caller_kind=p0 ;;
+      esac
+      ;;
+  esac
+  case "$caller_kind" in
+    runner)
+      case "$caller_source" in
+        *--slot*|*--prepare*|*--status*|*--help*) ;;
+        *) slotless_public_callers+="${caller_path}:${caller_line}:${caller_source}"$'\n' ;;
+      esac
+      ;;
+    p0)
+      case "$caller_source" in
+        *--slot*|*--list-lanes*|*--help*) ;;
+        *) slotless_public_callers+="${caller_path}:${caller_line}:${caller_source}"$'\n' ;;
+      esac
+      ;;
+  esac
+done < <(git -C "$ROOT" grep -n -E \
+  'dev/agent-e2e\.sh|dev/e2e/p0-acceptance\.sh|\$RUNNER' -- \
+  AGENTS.md 'docs/*.md' 'dev/*.sh' 'dev/e2e/*.sh')
+[ -z "$slotless_public_callers" ] \
+  || fail "public lease-taking caller lacks exact --slot:\n$slotless_public_callers"
+
 grep -Fq 'trap owner_cleanup EXIT' "$ROOT/dev/e2e/p0-guest.sh" \
   || fail "P0 owner lane does not clean its candidate after failure"
 grep -Fq 'prepare_owner_go_cache' "$ROOT/dev/e2e/p0-guest.sh" \
@@ -1568,10 +2007,20 @@ grep -Fq 'project_presence()' "$ROOT/dev/e2e/power-reconciler-upgrade.sh" \
     set -e
   } 2>/dev/null
   child_pid="$(cat "$pid_file")"
+  timeout_elapsed=$((SECONDS - started))
+  timeout_child_state=''
+  timeout_child_stopped=0
+  for _ in {1..20}; do
+    timeout_child_state="$(awk '{print $3}' "/proc/$child_pid/stat" 2>/dev/null || true)"
+    case "$timeout_child_state" in
+      ''|Z|X) timeout_child_stopped=1; break ;;
+    esac
+    sleep 0.1
+  done
   [ "$timeout_rc" = 137 ] \
-    && [ "$((SECONDS - started))" -le 4 ] \
-    && ! kill -0 "$child_pid" >/dev/null 2>&1 \
-    || fail 'TERM-ignoring timeout fixture or descendant escaped the KILL deadline'
+    && [ "$timeout_elapsed" -le 10 ] \
+    && [ "$timeout_child_stopped" = 1 ] \
+    || fail "TERM-ignoring timeout fixture or descendant escaped the KILL deadline: rc=$timeout_rc elapsed=${timeout_elapsed}s child_state=${timeout_child_state:-gone}"
   child_pid=''
 )
 grep -Fq '. "$ROOT/dev/e2e/lib-p0-capacity.sh"' \
@@ -1920,11 +2369,80 @@ grep -Fq 'require_operator_password_sudo' \
   && [ "$(grep -Fc '  require_operator_password_sudo' \
     "$ROOT/dev/e2e/p0-source-upgrade.sh")" -eq 2 ] \
   || fail "P0 source-upgrade reboots do not preserve a password-required operator boundary"
-grep -Fq 'dev/agent-e2e.sh --wait 20m --vm both' \
-  "$ROOT/dev/e2e/release-migration-consumer.sh" \
-  && grep -Fq 'dev/agent-e2e.sh --verify-boundary' \
-    "$ROOT/dev/e2e/release-migration-consumer.sh" \
-  || fail "release catch-up consumer bypasses the standard broker facade"
+consumer_fixture="$TMP/release-consumer"
+consumer_registry="$consumer_fixture/routes"
+consumer_log="$consumer_fixture/runner.log"
+mkdir -p "$consumer_fixture/dev/e2e" "$consumer_registry/test-yard/current"
+cp "$ROOT/dev/e2e/release-migration-consumer.sh" "$consumer_fixture/dev/e2e/"
+touch "$consumer_registry/test-yard/current/route.tsv" \
+  "$consumer_registry/test-yard/current/known_hosts"
+git -C "$consumer_fixture" init -q
+cat > "$consumer_fixture/dev/agent-e2e.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$CONSUMER_RUNNER_LOG"
+case "${1:-}" in
+  --prepare) exit 0 ;;
+  --status)
+    [ "${2:-}" = --json ] || exit 91
+    printf '%s\n' "$CONSUMER_BROKER_STATUS"
+    ;;
+  --slot)
+    [ "${2:-}" = 3 ] || exit 92
+    shift 2
+    case "${1:-}" in
+      --wait) [ "${2:-}" = 20m ] || exit 93 ;;
+      *) exit 94 ;;
+    esac
+    ;;
+  *) exit 95 ;;
+esac
+EOF
+chmod +x "$consumer_fixture/dev/agent-e2e.sh"
+consumer_status='{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":2,"lease_epoch":7,"state":"held"},{"slot_id":"slot-003","resource_generation":4,"lease_epoch":9,"state":"available"}]}}'
+: > "$consumer_log"
+SUBYARD_E2E_CONSUMER_FIXTURE=1 \
+  SUBYARD_E2E_ROUTE_REGISTRY="$consumer_registry" \
+  SUBYARD_E2E_SLOT=slot-001 \
+  CONSUMER_RUNNER_LOG="$consumer_log" \
+  CONSUMER_BROKER_STATUS="$consumer_status" \
+  "$consumer_fixture/dev/e2e/release-migration-consumer.sh" \
+  || fail 'release consumer rejected an available broker-local exact slot'
+[ "$(sed -n '1p' "$consumer_log")" = --prepare ] \
+  && [ "$(sed -n '2p' "$consumer_log")" = '--status --json' ] \
+  && grep -Eq '^--slot 3 --wait 20m --vm both -- sh -c ' "$consumer_log" \
+  && grep -Fxq -- '--slot 3 --wait 20m --verify-boundary' "$consumer_log" \
+  && ! grep -Eq '^--slot 1([[:space:]]|$)' "$consumer_log" \
+  || fail 'release consumer inherited its outer slot or omitted its broker-local exact slot'
+
+for consumer_failure in no-available malformed-slot; do
+  case "$consumer_failure" in
+    no-available)
+      failure_status='{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":2,"lease_epoch":7,"state":"held"}]}}'
+      failure_message='no available broker-local slot'
+      ;;
+    malformed-slot)
+      failure_status='{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-03","resource_generation":2,"lease_epoch":0,"state":"available"}]}}'
+      failure_message='invalid broker-local slot id'
+      ;;
+  esac
+  : > "$consumer_log"
+  set +e
+  consumer_failure_output="$(
+    SUBYARD_E2E_CONSUMER_FIXTURE=1 \
+      SUBYARD_E2E_ROUTE_REGISTRY="$consumer_registry" \
+      SUBYARD_E2E_SLOT=slot-001 \
+      CONSUMER_RUNNER_LOG="$consumer_log" \
+      CONSUMER_BROKER_STATUS="$failure_status" \
+      "$consumer_fixture/dev/e2e/release-migration-consumer.sh" 2>&1
+  )"
+  consumer_failure_rc=$?
+  set -e
+  [ "$consumer_failure_rc" = 2 ] \
+    && grep -Fq "$failure_message" <<<"$consumer_failure_output" \
+    && ! grep -Eq '^--slot [0-9]+ ' "$consumer_log" \
+    || fail "release consumer did not fail closed for $consumer_failure"
+done
 grep -Fq 'select(.slot_id == $slot)' "$ROOT/dev/agent-e2e.sh" \
   && grep -Fq 'current lease slot is absent from pool status' "$ROOT/dev/agent-e2e.sh" \
   || fail "agent E2E boundary verification is coupled to unrelated concurrent slots"

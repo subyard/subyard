@@ -82,13 +82,13 @@ RUNNER_KILL_GRACE_SECONDS=10
 usage() {
   cat <<'EOF'
 Usage:
-  dev/e2e/p0-acceptance.sh
-  dev/e2e/p0-acceptance.sh --lane NAME [--resume]
+  dev/e2e/p0-acceptance.sh --slot N
+  dev/e2e/p0-acceptance.sh --slot N --lane NAME [--resume]
   dev/e2e/p0-acceptance.sh --list-lanes
 
-The no-argument form is the continuous release gate. Targeted lanes are diagnostics and do not
+The --slot N form is the continuous release gate. Targeted lanes are diagnostics and do not
 replace it. --resume reuses passed checkpoints only for the same slot resource generation and exact
-worktree bundle hash; use SUBYARD_P0_SLOT=N to request that retained allocation again.
+worktree bundle hash; pass the same --slot N to request that retained allocation again.
 EOF
 }
 list_lanes() {
@@ -99,9 +99,16 @@ list_lanes() {
   printf 'full\t%s\n' "${FULL_P0_LANES[*]}"
 }
 parse_arguments() {
-  local lane_seen=0
+  local lane_seen=0 slot_seen=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
+      --slot)
+        [ "$#" -ge 2 ] || die '--slot needs a number from 1 to 999'
+        [ "$slot_seen" = 0 ] || die '--slot may be specified only once'
+        set_requested_slot "$2" --slot
+        slot_seen=1
+        shift 2
+        ;;
       --lane)
         [ "$#" -ge 2 ] || die '--lane needs a name'
         [ "$lane_seen" = 0 ] || die '--lane may be specified only once'
@@ -123,6 +130,8 @@ parse_arguments() {
     || die 'broker-recovery-only cannot be combined with --lane'
   [ "$P0_RESUME" = 0 ] || [ "$P0_LANE" != cleanup ] \
     || die '--resume is not meaningful for cleanup'
+  [ -n "$LEASE_REQUESTED_SLOT" ] \
+    || die '--slot N is required for every executable P0 lane'
   if [ "$PEERS_ONLY" = 1 ] && [ "$lane_seen" = 0 ]; then
     P0_LANE=peer
   fi
@@ -1231,9 +1240,6 @@ cleanup_lane() {
   assert_no_worktrees
 }
 
-if [ -n "${SUBYARD_P0_SLOT:-}" ]; then
-  set_requested_slot "$SUBYARD_P0_SLOT" SUBYARD_P0_SLOT
-fi
 LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
 LEASE_PURPOSE="p0-$P0_LANE"
 [ "$P0_LANE" != full ] || LEASE_PURPOSE=p0-acceptance

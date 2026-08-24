@@ -33,6 +33,16 @@ PROJ=(--project "$INCUS_PROJECT")
 device_exists() { incus config device list "$YARD_INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null | grep -qx "$1"; }
 device_get() { incus config device get "$YARD_INSTANCE_NAME" "$1" "$2" "${PROJ[@]}" 2>/dev/null || true; }
 instance_get() { incus config get "$YARD_INSTANCE_NAME" "$1" "${PROJ[@]}" 2>/dev/null || true; }
+incus_apparmor_disabled() {
+  local service_environment
+  command -v systemctl >/dev/null 2>&1 || return 1
+  service_environment="$(systemctl show incus.service -p Environment --value 2>/dev/null)" \
+    || return 1
+  case " $service_environment " in
+    *' INCUS_SECURITY_APPARMOR=false '*) return 0 ;;
+  esac
+  return 1
+}
 
 reconcile_e2e_route_mount() {
   # Do not mount below /run: systemd mounts its tmpfs there during container
@@ -124,6 +134,48 @@ fi
 # Every yard receives the same non-secret route/host-key registry. The test-vms backend writes it
 # on the owner host; no project enrollment or checkout-local artifact is involved.
 reconcile_e2e_route_mount
+
+# When the Incus daemon deliberately has AppArmor disabled, an unprivileged yard still sees the
+# host kernel's AppArmor indicator but cannot read its securityfs profile inventory. Docker then
+# mistakes that partial visibility for usable AppArmor and refuses to start any container. Hide
+# only the indicator in that compatibility mode; on ordinary AppArmor-enabled hosts Docker keeps
+# its normal docker-default confinement.
+docker_apparmor_device=subyard-docker-apparmor
+docker_apparmor_required=0
+if [ "$YARD_KIND" = container ] && incus_apparmor_disabled; then
+  docker_apparmor_required=1
+fi
+docker_apparmor_drift=0
+if [ "$docker_apparmor_required" = 1 ]; then
+  device_exists "$docker_apparmor_device" \
+    && [ "$(device_get "$docker_apparmor_device" type)" = disk ] \
+    && [ "$(device_get "$docker_apparmor_device" source)" = /dev/null ] \
+    && [ "$(device_get "$docker_apparmor_device" path)" = /sys/module/apparmor/parameters/enabled ] \
+    && [ "$(device_get "$docker_apparmor_device" readonly)" = true ] \
+    || docker_apparmor_drift=1
+elif device_exists "$docker_apparmor_device"; then
+  docker_apparmor_drift=1
+fi
+
+if [ "$docker_apparmor_drift" = 1 ] \
+  && [ "$(power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")" = RUNNING ]; then
+  warn "Docker AppArmor compatibility changed — a guarded yard restart is required"
+  "$SCRIPT_DIR/lifecycle-guard.sh" stop --reconcile \
+    || die "could not safely stop the yard; close active SSH/VS Code sessions and re-run '$(yard_cmd_hint) init'"
+fi
+if [ "$docker_apparmor_required" = 1 ]; then
+  if device_exists "$docker_apparmor_device" && [ "$docker_apparmor_drift" = 1 ]; then
+    incus config device remove "$YARD_INSTANCE_NAME" "$docker_apparmor_device" "${PROJ[@]}" >/dev/null
+  fi
+  if ! device_exists "$docker_apparmor_device"; then
+    incus config device add "$YARD_INSTANCE_NAME" "$docker_apparmor_device" disk "${PROJ[@]}" \
+      source=/dev/null path=/sys/module/apparmor/parameters/enabled readonly=true >/dev/null
+    ok "Docker sees AppArmor as disabled with the Incus daemon"
+  fi
+elif device_exists "$docker_apparmor_device"; then
+  incus config device remove "$YARD_INSTANCE_NAME" "$docker_apparmor_device" "${PROJ[@]}" >/dev/null
+  ok "restored Docker AppArmor detection"
+fi
 
 # --- 2. trusted nested-VM capability (container only, opt-in) ----------------
 # These settings belong to the L0/L1 boundary and must be present before the

@@ -259,7 +259,7 @@ func TestAcquireSlotRejectsInsufficientCapacityBeforeMutation(t *testing.T) {
 		return nil, nil, fmt.Errorf("unexpected mutation: %s", joined)
 	}}
 	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 2}
-	grant, err := store.Acquire("client", "SHA256:key", "", "")
+	grant, err := store.AcquireSlot("client", "SHA256:key", "", "", "slot-001")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -458,7 +458,9 @@ func TestQuarantineLocalSpoolFailureBlocksDestructiveRecovery(t *testing.T) {
 		Path:      filepath.Join(root, "leases.json"),
 		SlotCount: 1,
 	}
-	grant, err := store.Acquire("client", "SHA256:key", "", "fsync-gate")
+	grant, err := store.AcquireSlot(
+		"client", "SHA256:key", "", "fsync-gate", "slot-001",
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -506,7 +508,9 @@ func TestFailedRecoveryKeepsTheOriginalIncidentTimeline(t *testing.T) {
 	cfg.SlotCount = 1
 	cfg.BrokerSource = "test-yard"
 	store := LeaseStore{Path: cfg.leaseState(), SlotCount: 1}
-	grant, err := store.Acquire("client", "SHA256:key", "", "recovery")
+	grant, err := store.AcquireSlot(
+		"client", "SHA256:key", "", "recovery", "slot-001",
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -2,6 +2,7 @@
 agent-e2e.sh
 cli-contract.sh
 command-registry.sh
+create-subyard-docker-apparmor.sh
 init-extras-convergence.sh
 init-network-convergence.sh
 opencode-agent-defaults.sh

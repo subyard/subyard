@@ -38,6 +38,7 @@ const (
 var (
 	ErrCorruptLeaseState     = errors.New("corrupt lease state")
 	ErrUnsupportedLeaseState = errors.New("unsupported lease state")
+	ErrInvalidSlot           = errors.New("invalid slot")
 	ErrLeaseBusy             = errors.New("busy")
 	ErrLeaseLost             = errors.New("lease lost")
 	ErrLeaseTargetStale      = errors.New("lease target is stale")
@@ -54,6 +55,36 @@ const (
 	SlotRecovering   SlotState = "recovering"
 	SlotUnavailable  SlotState = "unavailable"
 )
+
+// SlotUnavailableError reports the exact configured slot state observed while
+// holding the broker lock. Reason is a stable, redacted machine value; it
+// deliberately never carries the slot's persisted failure diagnostics.
+type SlotUnavailableError struct {
+	State  SlotState
+	Reason string
+	Owner  *LeaseOwnerSnapshot
+}
+
+func (err *SlotUnavailableError) Error() string {
+	return "requested slot is unavailable"
+}
+
+func (err *SlotUnavailableError) Unwrap() error {
+	return ErrLeaseBusy
+}
+
+// LeaseOwnerSnapshot is the bounded, non-secret attribution published when an exact
+// acquire observes a held slot. It deliberately omits controller and lease
+// credentials, guest endpoints and persisted failure diagnostics.
+type LeaseOwnerSnapshot struct {
+	DisplayLabel string    `json:"display_label"`
+	Yard         string    `json:"yard"`
+	Project      string    `json:"project"`
+	Run          string    `json:"run"`
+	Purpose      string    `json:"purpose"`
+	AcquiredAt   time.Time `json:"acquired_at"`
+	ExpiresAt    time.Time `json:"expires_at"`
+}
 
 type LeaseSlot struct {
 	SlotID                string    `json:"slot_id"`
@@ -219,35 +250,15 @@ func validateLeaseSlotInventory(slots []LeaseSlot) error {
 	return nil
 }
 
-func (store LeaseStore) Acquire(clientID, fingerprint, label, purpose string) (LeaseGrant, error) {
-	context := legacyLeaseContext(label, purpose)
-	return store.acquire(clientID, fingerprint, label, purpose, context, "")
-}
-
 func (store LeaseStore) AcquireSlot(
 	clientID, fingerprint, label, purpose, slotID string,
 ) (LeaseGrant, error) {
 	number, err := slotNumber(slotID, store.SlotCount)
 	if err != nil || slotID != fmt.Sprintf("slot-%03d", number) {
-		return LeaseGrant{}, fmt.Errorf("invalid slot id %q", slotID)
+		return LeaseGrant{}, fmt.Errorf("%w: %q", ErrInvalidSlot, slotID)
 	}
 	context := legacyLeaseContext(label, purpose)
-	return store.acquire(clientID, fingerprint, label, purpose, context, slotID)
-}
-
-func (store LeaseStore) AcquireV2(
-	clientID, fingerprint, yard, project, run, purpose string,
-) (LeaseGrant, error) {
-	context := LeaseContext{
-		SchemaVersion: LeaseAttributionSchemaVersion,
-		Yard:          yard, Project: project, Run: run, Purpose: purpose,
-	}
-	if err := validateLeaseContext(context); err != nil {
-		return LeaseGrant{}, err
-	}
-	return store.acquire(
-		clientID, fingerprint, contextDisplayLabel(context), purpose, &context, "",
-	)
+	return store.acquireSlot(clientID, fingerprint, label, purpose, context, slotID)
 }
 
 func (store LeaseStore) AcquireV2Slot(
@@ -255,7 +266,7 @@ func (store LeaseStore) AcquireV2Slot(
 ) (LeaseGrant, error) {
 	number, err := slotNumber(slotID, store.SlotCount)
 	if err != nil || slotID != fmt.Sprintf("slot-%03d", number) {
-		return LeaseGrant{}, fmt.Errorf("invalid slot id %q", slotID)
+		return LeaseGrant{}, fmt.Errorf("%w: %q", ErrInvalidSlot, slotID)
 	}
 	context := LeaseContext{
 		SchemaVersion: LeaseAttributionSchemaVersion,
@@ -264,15 +275,18 @@ func (store LeaseStore) AcquireV2Slot(
 	if err := validateLeaseContext(context); err != nil {
 		return LeaseGrant{}, err
 	}
-	return store.acquire(
+	return store.acquireSlot(
 		clientID, fingerprint, contextDisplayLabel(context), purpose, &context, slotID,
 	)
 }
 
-func (store LeaseStore) acquire(
+func (store LeaseStore) acquireSlot(
 	clientID, fingerprint, label, purpose string, context *LeaseContext,
 	requestedSlot string,
 ) (LeaseGrant, error) {
+	if requestedSlot == "" {
+		return LeaseGrant{}, fmt.Errorf("%w: exact slot is required", ErrInvalidSlot)
+	}
 	if !safeLeaseText(clientID, 96) || clientID == "" {
 		return LeaseGrant{}, errors.New("invalid client_id")
 	}
@@ -292,14 +306,14 @@ func (store LeaseStore) acquire(
 		expireStale(pool, now)
 		for index := range pool.Slots {
 			slot := &pool.Slots[index]
-			if requestedSlot != "" && slot.SlotID != requestedSlot {
+			if slot.SlotID != requestedSlot {
 				continue
 			}
 			if slot.State != SlotAvailable {
-				if requestedSlot != "" {
-					return fmt.Errorf("%w: %s is %s", ErrLeaseBusy, slot.SlotID, slot.State)
+				return &SlotUnavailableError{
+					State: slot.State, Reason: unavailableSlotReason(slot.State),
+					Owner: leaseOwnerSnapshot(*slot),
 				}
-				continue
 			}
 			leaseID, err := randomToken(16)
 			if err != nil {
@@ -344,9 +358,43 @@ func (store LeaseStore) acquire(
 			}
 			return nil
 		}
-		return ErrLeaseBusy
+		return fmt.Errorf("%w: %q", ErrInvalidSlot, requestedSlot)
 	})
 	return grant, err
+}
+
+func leaseOwnerSnapshot(slot LeaseSlot) *LeaseOwnerSnapshot {
+	if slot.State != SlotHeld {
+		return nil
+	}
+	return &LeaseOwnerSnapshot{
+		DisplayLabel: slot.DisplayLabel,
+		Yard:         slot.Yard,
+		Project:      slot.Project,
+		Run:          slot.Run,
+		Purpose:      slot.Purpose,
+		AcquiredAt:   slot.AcquiredAt,
+		ExpiresAt:    slot.ExpiresAt,
+	}
+}
+
+func unavailableSlotReason(state SlotState) string {
+	switch state {
+	case SlotHeld:
+		return "busy"
+	case SlotProvisioning:
+		return "provisioning"
+	case SlotDraining:
+		return "draining"
+	case SlotQuarantined:
+		return "quarantined"
+	case SlotRecovering:
+		return "recovering"
+	case SlotUnavailable:
+		return "unavailable"
+	default:
+		return "unavailable"
+	}
 }
 
 func (store LeaseStore) MarkHeld(grant LeaseGrant) (time.Time, error) {

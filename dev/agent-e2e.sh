@@ -33,11 +33,9 @@ LEASE_KEEPER_PID=""
 LEASE_KEEPER_LOG=""
 LEASE_YARD=""
 LEASE_PROJECT=""
-LEASE_CHECKOUT=""
 LEASE_RUN=""
 LEASE_PURPOSE=""
 LEASE_REQUESTED_SLOT=""
-BROKER_ATTRIBUTION_V2=0
 WAIT_SECONDS=0
 declare -A GUEST_DIRS=()
 declare -A VM_IP=()
@@ -65,10 +63,10 @@ usage() {
 Usage:
   dev/agent-e2e.sh [--yard NAME] --prepare
   dev/agent-e2e.sh [--yard NAME] --status [--json]
-  dev/agent-e2e.sh [--yard NAME] [--slot N] [--wait DURATION] [--purpose LABEL] [--vm 1|2|both] -- COMMAND [ARG...]
-  dev/agent-e2e.sh [--yard NAME] [--slot N] [--purpose LABEL] --ssh 1|2 [-- COMMAND [ARG...]]
-  dev/agent-e2e.sh [--yard NAME] [--slot N] [--purpose LABEL] --ssh-stdin 1|2 -- COMMAND [ARG...]
-  dev/agent-e2e.sh [--yard NAME] [--slot N] --verify-boundary
+  dev/agent-e2e.sh [--yard NAME] --slot N [--wait DURATION] [--purpose LABEL] [--vm 1|2|both] -- COMMAND [ARG...]
+  dev/agent-e2e.sh [--yard NAME] --slot N [--purpose LABEL] --ssh 1|2 [-- COMMAND [ARG...]]
+  dev/agent-e2e.sh [--yard NAME] --slot N [--purpose LABEL] --ssh-stdin 1|2 -- COMMAND [ARG...]
+  dev/agent-e2e.sh [--yard NAME] --slot N --verify-boundary
 
 The normal form copies the current tracked, dirty and non-ignored public worktree to each selected
 VM, runs COMMAND as dev, streams output and removes every run directory. A direct ./bin/yard command
@@ -84,8 +82,8 @@ separate ephemeral guest key.
 The operator owns the outer test yard. Acquire creates or starts only the selected inner slot pair;
 release fences access and stops that pair without deleting its disks. e2e-vm-1 and e2e-vm-2 are
 lease-relative selectors, not physical slot names. Every invocation acquires a new lease; use one
-script or one interactive SSH session when several steps must share mutable guest state. Optional
---slot N atomically requests one broker slot and fails without falling back to another slot.
+script or one interactive SSH session when several steps must share mutable guest state. Every
+lease-taking mode requires --slot N, atomically requests that broker slot and never falls back.
 EOF
 }
 
@@ -404,28 +402,11 @@ derive_purpose() {
 }
 
 lease_acquire_request() {
-  local client="$1" fingerprint="$2" key_type="$3" key_blob="$4" label
-  if [ "$BROKER_ATTRIBUTION_V2" = 1 ]; then
-    if [ -n "$LEASE_REQUESTED_SLOT" ]; then
-      printf 'acquire-v2 %s %s %s %s %s %s %s %s %s\n' \
-        "$client" "$fingerprint" "$LEASE_YARD" "$LEASE_PROJECT" "$LEASE_RUN" \
-        "$LEASE_PURPOSE" "$key_type" "$key_blob" "$LEASE_REQUESTED_SLOT"
-      return
-    fi
-    printf 'acquire-v2 %s %s %s %s %s %s %s %s\n' \
-      "$client" "$fingerprint" "$LEASE_YARD" "$LEASE_PROJECT" "$LEASE_RUN" \
-      "$LEASE_PURPOSE" "$key_type" "$key_blob"
-    return
-  fi
-  label="$LEASE_PROJECT+$LEASE_RUN"
-  if [ -n "$LEASE_REQUESTED_SLOT" ]; then
-    printf 'acquire %s %s %s %s %s %s %s\n' \
-      "$client" "$fingerprint" "$label" "$LEASE_PURPOSE" \
-      "$key_type" "$key_blob" "$LEASE_REQUESTED_SLOT"
-    return
-  fi
-  printf 'acquire %s %s %s %s %s %s\n' \
-    "$client" "$fingerprint" "$label" "$LEASE_PURPOSE" "$key_type" "$key_blob"
+  local client="$1" fingerprint="$2" key_type="$3" key_blob="$4"
+  [ -n "$LEASE_REQUESTED_SLOT" ] || die "an exact --slot is required before acquiring an E2E lease"
+  printf 'acquire-v2 %s %s %s %s %s %s %s %s %s\n' \
+    "$client" "$fingerprint" "$LEASE_YARD" "$LEASE_PROJECT" "$LEASE_RUN" \
+    "$LEASE_PURPOSE" "$key_type" "$key_blob" "$LEASE_REQUESTED_SLOT"
 }
 
 facade_request() {
@@ -496,21 +477,65 @@ render_pool_status() {
   ' <<<"$response")
 }
 
-report_busy_pool() {
-  local started="$1" response elapsed remaining
+validate_exact_busy_response() {
+  local response="$1"
+  jq -e '
+    def safe_label($maximum):
+      type == "string" and length >= 1 and length <= $maximum and
+      (startswith("/") | not) and (endswith("/") | not) and
+      (contains("//") | not) and
+      (split("/") | all(. != "." and . != "..")) and
+      test("^[A-Za-z0-9._/+:-]+$");
+    def safe_project:
+      type == "string" and length >= 1 and length <= 50 and
+      test("^[A-Za-z0-9._-]+$") and . != "." and . != ".." and
+      (startswith("-") | not);
+    def safe_time:
+      type == "string" and
+      test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?Z$");
+    .schema_version == 1 and .status == "error" and .code == "busy" and
+    .message == "requested slot is unavailable" and
+    if .state == "held" and .reason == "busy" then
+      ((keys | sort) ==
+        ["code", "message", "owner", "reason", "schema_version", "state", "status"]) and
+      (.owner | type == "object") and
+      ((.owner | keys | sort) ==
+        ["acquired_at", "display_label", "expires_at", "project", "purpose", "run", "yard"]) and
+      (.owner.display_label | type == "string" and length >= 1 and length <= 80) and
+      (.owner.yard | type == "string" and length >= 1 and length <= 32 and
+        test("^[a-z0-9][a-z0-9_-]*$")) and
+      (.owner.project | safe_project) and
+      (.owner.run | safe_label(24)) and
+      (.owner.purpose | safe_label(80)) and
+      (.owner.display_label == (.owner.project + "#" + .owner.run)) and
+      (.owner.acquired_at | safe_time) and (.owner.expires_at | safe_time)
+    else
+      (((keys | sort) ==
+         ["code", "message", "reason", "schema_version", "state", "status"]) and
+       ((.state == "provisioning" and .reason == "provisioning") or
+        (.state == "draining" and .reason == "draining") or
+        (.state == "quarantined" and .reason == "quarantined") or
+        (.state == "recovering" and .reason == "recovering") or
+        (.state == "unavailable" and .reason == "unavailable")) and
+       (has("owner") | not))
+    end
+  ' <<<"$response" >/dev/null 2>&1
+}
+
+report_exact_slot_wait() {
+  local started="$1" state="$2" reason="$3" owner_summary="$4" elapsed remaining
   elapsed=$((SECONDS - started))
   remaining=$((WAIT_SECONDS - elapsed))
   [ "$remaining" -ge 0 ] || remaining=0
-  printf 'agent-e2e: pool busy; waited %s, deadline in %s, next retry in 5s\n' \
+  printf 'agent-e2e: requested slot %s unavailable: state=%s reason=%s; waited %s, deadline in %s\n' \
+    "$LEASE_REQUESTED_SLOT" "$state" "$reason" \
     "$(format_duration "$elapsed")" "$(format_duration "$remaining")" >&2
-  if response="$(facade_request status 2>/dev/null)"; then
-    render_pool_status "$response" >&2 || true
-  fi
+  [ -z "$owner_summary" ] || printf 'agent-e2e: %s\n' "$owner_summary" >&2
 }
 
 parse_lease_grant() {
   local response="$1" count selector name address key_type key_blob
-  local response_schema response_yard response_project response_checkout response_run response_purpose
+  local response_yard response_project response_run response_purpose
   [ "$(jq -r '.status // empty' <<<"$response")" = ok ] || return 1
   LEASE_SLOT="$(jq -r '.grant.slot_id // empty' <<<"$response")"
   LEASE_GENERATION="$(jq -r '.grant.resource_generation // empty' <<<"$response")"
@@ -522,30 +547,22 @@ parse_lease_grant() {
   [[ "$LEASE_SLOT" =~ ^slot-[0-9]{3}$ && "$LEASE_ID" =~ ^[0-9a-f]+$ \
     && "$LEASE_EPOCH" =~ ^[1-9][0-9]*$ && "$LEASE_CAPABILITY" =~ ^[0-9a-f]+$ ]] \
     || die "facade returned invalid lease credentials"
-  response_schema="$(jq -r '.grant.context.schema_version // empty' <<<"$response")"
+  jq -e '
+    (.grant.context | type == "object") and
+    ((.grant.context | keys | sort) ==
+      ["project", "purpose", "run", "schema_version", "yard"]) and
+    .grant.context.schema_version == 2
+  ' <<<"$response" >/dev/null 2>&1 \
+    || die "facade returned invalid or missing v2 lease attribution"
   response_yard="$(jq -r '.grant.context.yard // empty' <<<"$response")"
   response_project="$(jq -r '.grant.context.project // empty' <<<"$response")"
-  response_checkout="$(jq -r '.grant.context.checkout // empty' <<<"$response")"
   response_run="$(jq -r '.grant.context.run // empty' <<<"$response")"
   response_purpose="$(jq -r '.grant.context.purpose // empty' <<<"$response")"
-  if [ -n "$response_schema$response_yard$response_project$response_checkout$response_run$response_purpose" ]; then
-    if [ "$response_schema" = 2 ]; then
-      [ "$response_yard" = "$LEASE_YARD" ] \
-        && [ "$response_project" = "$LEASE_PROJECT" ] \
-        && [ -z "$response_checkout" ] \
-        && [ "$response_run" = "$LEASE_RUN" ] \
-        && [ "$response_purpose" = "$LEASE_PURPOSE" ] \
-        || die "facade changed the requested lease attribution"
-    elif [ "$response_schema" = 1 ]; then
-      [ "$response_project" = "$LEASE_PROJECT" ] \
-        && [ "$response_checkout" = "$LEASE_CHECKOUT" ] \
-        && [ "$response_run" = "$LEASE_RUN" ] \
-        && [ "$response_purpose" = "$LEASE_PURPOSE" ] \
-        || die "facade changed the requested legacy lease attribution"
-    else
-      die "facade returned an unsupported lease attribution schema"
-    fi
-  fi
+  [ "$response_yard" = "$LEASE_YARD" ] \
+    && [ "$response_project" = "$LEASE_PROJECT" ] \
+    && [ "$response_run" = "$LEASE_RUN" ] \
+    && [ "$response_purpose" = "$LEASE_PURPOSE" ] \
+    || die "facade changed the requested lease attribution"
   count="$(jq '.grant.targets | length' <<<"$response")"
   [ "$count" = 2 ] || die "facade returned an incomplete VM pair"
   VM_IP=(); VM_HOST_KEY=()
@@ -589,8 +606,13 @@ lease_grant_matches_request() {
 }
 
 acquire_lease() {
-  local client fingerprint type blob response code message started last_report request
-  local status_response workspace_context fallback_used=0
+  local client fingerprint type blob response code reason state started last_report request
+  local status_response workspace_context elapsed sleep_seconds attempt=0 last_state='' last_reason=''
+  local owner_display='' owner_yard='' owner_project='' owner_run='' owner_purpose=''
+  local owner_acquired='' owner_expires='' owner_acquired_epoch='' owner_expires_epoch=''
+  local owner_summary='' last_owner_summary=''
+  [ -n "$LEASE_REQUESTED_SLOT" ] \
+    || die "an exact --slot is required before acquiring an E2E lease"
   command -v jq >/dev/null 2>&1 || die "jq is required"
   [ -n "$LOCAL_TEMP" ] || die "lease temporary directory is not initialized"
   CLIENT_CONFIG="$LOCAL_TEMP/ssh_config"
@@ -603,28 +625,45 @@ acquire_lease() {
   fingerprint="$(ssh-keygen -lf "$IDENTITY.pub" -E sha256 | awk '{print $2}')"
   workspace_context="$(resolve_workspace_attribution "$REPO_ROOT")"
   IFS=$'\t' read -r LEASE_YARD LEASE_PROJECT <<<"$workspace_context"
-  LEASE_CHECKOUT=""
   [ -n "$LEASE_RUN" ] || LEASE_RUN="$(new_run_id)"
   [[ "$LEASE_RUN" =~ ^[0-9a-f]{8}$ ]] || die "invalid E2E run identity"
   [ -n "$LEASE_PURPOSE" ] || LEASE_PURPOSE=agent-e2e
   if ! status_response="$(facade_request status)"; then
     die "broker capability probe failed"
   fi
-  if jq -e '.status == "ok" and (.capabilities // [] | index("attribution-v2") != null)' \
-    <<<"$status_response" >/dev/null; then
-    BROKER_ATTRIBUTION_V2=1
-  else
-    BROKER_ATTRIBUTION_V2=0
-  fi
+  jq -e 'type == "object" and .schema_version == 1 and .status == "ok" and
+    (.capabilities | type == "array" and index("attribution-v2") != null)' \
+    <<<"$status_response" >/dev/null \
+    || die "broker does not support required attribution-v2 acquire"
   request="$(lease_acquire_request "$client" "$fingerprint" "$type" "$blob")"
   started=$SECONDS
   last_report=-30
   while true; do
+    elapsed=$((SECONDS - started))
+    if [ "$attempt" -gt 0 ] && [ "$elapsed" -ge "$WAIT_SECONDS" ]; then
+      printf 'agent-e2e: timed out waiting for %s: state=%s reason=%s\n' \
+        "$LEASE_REQUESTED_SLOT" "$last_state" "$last_reason" >&2
+      [ -z "$last_owner_summary" ] || printf 'agent-e2e: %s\n' "$last_owner_summary" >&2
+      return 4
+    fi
+    attempt=$((attempt + 1))
     if ! response="$(facade_request "$request")"; then
       die "lease acquire outcome is unknown; refusing a second allocation"
     fi
+    jq -e 'type == "object" and .schema_version == 1 and
+      (.status == "ok" or .status == "error")' \
+      <<<"$response" >/dev/null 2>&1 \
+      || die "lease acquire outcome is unknown; refusing a second allocation"
     code="$(jq -r '.code // empty' <<<"$response")"
     if parse_lease_grant "$response"; then
+      elapsed=$((SECONDS - started))
+      if [ "$WAIT_SECONDS" -gt 0 ] && [ "$elapsed" -ge "$WAIT_SECONDS" ]; then
+        printf 'agent-e2e: deadline elapsed before the lease grant arrived; releasing %s without guest access\n' \
+          "$LEASE_REQUESTED_SLOT" >&2
+        release_lease \
+          || die "late lease grant could not be released safely"
+        return 4
+      fi
       if ! lease_grant_matches_request; then
         printf 'agent-e2e: broker granted %s instead of requested %s; releasing without guest access\n' \
           "$LEASE_SLOT" "$LEASE_REQUESTED_SLOT" >&2
@@ -639,27 +678,50 @@ acquire_lease() {
       printf '\n' >&2
       return 0
     fi
-    message="$(jq -r '.message // "invalid response"' <<<"$response")"
-    if [ "$BROKER_ATTRIBUTION_V2" = 1 ] && [ "$fallback_used" = 0 ] &&
-      [ "$code" = invalid_request ] &&
-      [[ "$message" == *"unknown facade operation"* || "$message" == *"unsupported"* ]]; then
-      BROKER_ATTRIBUTION_V2=0
-      fallback_used=1
-      request="$(lease_acquire_request "$client" "$fingerprint" "$type" "$blob")"
-      continue
-    fi
+    reason="$(jq -r '.reason // empty' <<<"$response")"
+    state="$(jq -r '.state // empty' <<<"$response")"
     if [ "$code" != busy ]; then
-      die "lease acquire failed (${code:-invalid_response}: $message)"
+      die "lease acquire failed (${code:-invalid_response}: ${reason:-unspecified})"
     fi
-    [ -z "$LEASE_REQUESTED_SLOT" ] \
-      || die "requested E2E slot $LEASE_REQUESTED_SLOT is not available"
+    validate_exact_busy_response "$response" \
+      || die "lease acquire outcome is unknown; refusing a second allocation"
+    owner_summary=''
+    if [ "$state" = held ]; then
+      owner_display="$(jq -r '.owner.display_label' <<<"$response")"
+      owner_yard="$(jq -r '.owner.yard' <<<"$response")"
+      owner_project="$(jq -r '.owner.project' <<<"$response")"
+      owner_run="$(jq -r '.owner.run' <<<"$response")"
+      owner_purpose="$(jq -r '.owner.purpose' <<<"$response")"
+      owner_acquired="$(jq -r '.owner.acquired_at' <<<"$response")"
+      owner_expires="$(jq -r '.owner.expires_at' <<<"$response")"
+      owner_acquired_epoch="$(date -u -d "$owner_acquired" +%s 2>/dev/null)" \
+        || die "lease acquire outcome is unknown; refusing a second allocation"
+      owner_expires_epoch="$(date -u -d "$owner_expires" +%s 2>/dev/null)" \
+        || die "lease acquire outcome is unknown; refusing a second allocation"
+      [ "$owner_acquired_epoch" -le "$owner_expires_epoch" ] \
+        || die "lease acquire outcome is unknown; refusing a second allocation"
+      owner_summary="owner=$owner_yard/$owner_project run=$owner_run purpose=$owner_purpose acquired=$owner_acquired expires=$owner_expires label=$owner_display"
+    fi
+    last_state="$state"
+    last_reason="$reason"
+    last_owner_summary="$owner_summary"
+    if [ "$WAIT_SECONDS" -eq 0 ]; then
+      die "requested E2E slot $LEASE_REQUESTED_SLOT is unavailable: state=$state reason=$reason${owner_summary:+; $owner_summary}"
+    fi
+    elapsed=$((SECONDS - started))
+    if [ "$elapsed" -ge "$WAIT_SECONDS" ]; then
+      printf 'agent-e2e: timed out waiting for %s: state=%s reason=%s\n' \
+        "$LEASE_REQUESTED_SLOT" "$state" "$reason" >&2
+      [ -z "$owner_summary" ] || printf 'agent-e2e: %s\n' "$owner_summary" >&2
+      return 4
+    fi
     if [ "$((SECONDS - last_report))" -ge 30 ]; then
-      report_busy_pool "$started"
+      report_exact_slot_wait "$started" "$state" "$reason" "$owner_summary"
       last_report=$SECONDS
     fi
-    [ "$WAIT_SECONDS" -gt 0 ] && [ "$((SECONDS - started))" -lt "$WAIT_SECONDS" ] \
-      || return 4
-    sleep 5
+    sleep_seconds=$((WAIT_SECONDS - elapsed))
+    [ "$sleep_seconds" -le 5 ] || sleep_seconds=5
+    sleep "$sleep_seconds"
   done
 }
 
@@ -1053,6 +1115,12 @@ main() {
     [ "$mode" != status ] && [ "$mode" != prepare ] \
       || die "--slot is valid only for commands that acquire a lease"
   }
+  case "$mode" in
+    run|ssh|verify)
+      [ -n "$LEASE_REQUESTED_SLOT" ] \
+        || die "an exact --slot is required before acquiring an E2E lease"
+      ;;
+  esac
   LEASE_PURPOSE="$(derive_purpose "$mode" "$purpose_override" "${command[@]}")"
   case "$mode" in
     prepare)

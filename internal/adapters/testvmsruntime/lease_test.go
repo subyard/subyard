@@ -20,17 +20,19 @@ func TestLeaseStoreConfiguredCapacityMatrix(t *testing.T) {
 			}
 			var grants []LeaseGrant
 			for index := 0; index < count; index++ {
-				grant, err := store.Acquire(
-					fmt.Sprintf("client-%d", index), "SHA256:key", "", "",
+				slotID := fmt.Sprintf("slot-%03d", index+1)
+				grant, err := store.AcquireSlot(
+					fmt.Sprintf("client-%d", index), "SHA256:key", "", "", slotID,
 				)
 				if err != nil {
 					t.Fatal(err)
 				}
 				grants = append(grants, grant)
 			}
-			if _, err := store.Acquire("overflow", "SHA256:key", "", ""); err == nil ||
-				err.Error() != "busy" {
-				t.Fatalf("N+1 acquire error = %v", err)
+			if _, err := store.AcquireSlot(
+				"overflow", "SHA256:key", "", "", fmt.Sprintf("slot-%03d", count+1),
+			); !errors.Is(err, ErrInvalidSlot) {
+				t.Fatalf("out-of-pool exact acquire error = %v", err)
 			}
 			seen := map[string]bool{}
 			for _, grant := range grants {
@@ -90,17 +92,92 @@ func TestLeaseStoreAcquireSlotDoesNotFallback(t *testing.T) {
 	); !errors.Is(err, ErrLeaseBusy) {
 		t.Fatalf("quarantined exact acquire error = %v", err)
 	}
-	automatic, err := store.Acquire("automatic", "SHA256:key", "", "")
+	neighbor, err := store.AcquireSlot(
+		"neighbor", "SHA256:key", "", "", "slot-001",
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if automatic.SlotID != "slot-001" {
-		t.Fatalf("automatic acquire returned %s", automatic.SlotID)
+	if neighbor.SlotID != "slot-001" {
+		t.Fatalf("neighbor exact acquire returned %s", neighbor.SlotID)
 	}
 	if _, err := store.AcquireSlot(
 		"invalid", "SHA256:key", "", "", "slot-2",
 	); err == nil || errors.Is(err, ErrLeaseBusy) {
 		t.Fatalf("non-canonical slot error = %v", err)
+	}
+}
+
+func TestLeaseStoreExactBusyOwnerTracksHeldLeaseLifecycle(t *testing.T) {
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	store := LeaseStore{
+		Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1,
+		Now: func() time.Time { return now },
+	}
+	grant, err := store.AcquireV2Slot(
+		"owner", "SHA256:controller", "test-yard", "Subyard-2", "run-a", "unit-tests",
+		"slot-001",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Minute)
+	heldExpires, err := store.MarkHeld(grant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertBusyOwner := func(wantExpires time.Time) {
+		t.Helper()
+		_, acquireErr := store.AcquireV2Slot(
+			"contender", "SHA256:other", "test-yard", "Subyard-3", "run-b", "other-tests",
+			"slot-001",
+		)
+		var unavailable *SlotUnavailableError
+		if !errors.As(acquireErr, &unavailable) {
+			t.Fatalf("exact held acquire error = %v", acquireErr)
+		}
+		if unavailable.State != SlotHeld || unavailable.Reason != "busy" ||
+			unavailable.Owner == nil {
+			t.Fatalf("exact held result = %#v", unavailable)
+		}
+		owner := unavailable.Owner
+		if owner.DisplayLabel != "Subyard-2#run-a" || owner.Yard != "test-yard" ||
+			owner.Project != "Subyard-2" || owner.Run != "run-a" ||
+			owner.Purpose != "unit-tests" || !owner.AcquiredAt.Equal(grant.ExpiresAt.Add(-ProvisioningTTL)) ||
+			!owner.ExpiresAt.Equal(wantExpires) {
+			t.Fatalf("exact held owner = %#v, want expiry %s", owner, wantExpires)
+		}
+	}
+	assertBusyOwner(heldExpires)
+
+	now = now.Add(time.Minute)
+	renewedExpires, err := store.Renew(grant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertBusyOwner(renewedExpires)
+
+	now = renewedExpires.Add(time.Second)
+	_, err = store.AcquireV2Slot(
+		"late", "SHA256:late", "test-yard", "Subyard-3", "run-c", "late-tests", "slot-001",
+	)
+	var expired *SlotUnavailableError
+	if !errors.As(err, &expired) || expired.State != SlotDraining ||
+		expired.Reason != "draining" || expired.Owner != nil {
+		t.Fatalf("expired held result = %#v, error=%v", expired, err)
+	}
+	if err := store.FinishDrain("slot-001", nil); err != nil {
+		t.Fatal(err)
+	}
+	pool, err := store.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	slot := pool.Slots[0]
+	if slot.State != SlotAvailable || slot.DisplayLabel != "" || slot.Yard != "" ||
+		slot.Project != "" || slot.Run != "" || slot.Purpose != "" ||
+		!slot.AcquiredAt.IsZero() || !slot.ExpiresAt.IsZero() {
+		t.Fatalf("released slot retained owner attribution: %#v", slot)
 	}
 }
 
@@ -196,19 +273,20 @@ func TestLeaseStoreConcurrentCapacityAndFencing(t *testing.T) {
 	var wait sync.WaitGroup
 	results := make(chan LeaseGrant, 3)
 	failures := make(chan error, 3)
-	for index := 0; index < 3; index++ {
+	requestedSlots := []string{"slot-001", "slot-002", "slot-001"}
+	for index, slotID := range requestedSlots {
 		wait.Add(1)
-		go func(index int) {
+		go func(index int, slotID string) {
 			defer wait.Done()
-			grant, err := store.Acquire(
-				string(rune('a'+index)), "SHA256:controller", "checkout", "test",
+			grant, err := store.AcquireSlot(
+				string(rune('a'+index)), "SHA256:controller", "checkout", "test", slotID,
 			)
 			if err != nil {
 				failures <- err
 			} else {
 				results <- grant
 			}
-		}(index)
+		}(index, slotID)
 	}
 	wait.Wait()
 	close(results)
@@ -240,7 +318,9 @@ func TestLeaseStoreConcurrentCapacityAndFencing(t *testing.T) {
 	if err := store.FinishDrain(grants[0].SlotID, nil); err != nil {
 		t.Fatalf("replayed successful fencing was not idempotent: %v", err)
 	}
-	next, err := store.Acquire("next", "SHA256:controller", "", "")
+	next, err := store.AcquireSlot(
+		"next", "SHA256:controller", "", "", grants[0].SlotID,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +336,7 @@ func TestLeaseStoreExpiryShrinkAndQuarantine(t *testing.T) {
 	now := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
 	path := filepath.Join(t.TempDir(), "leases.json")
 	store := LeaseStore{Path: path, SlotCount: 3, Now: func() time.Time { return now }}
-	grant, err := store.Acquire("client", "SHA256:key", "", "")
+	grant, err := store.AcquireSlot("client", "SHA256:key", "", "", "slot-001")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +386,7 @@ func TestLeaseStoreHeldDeadlineStartsAfterProvisioning(t *testing.T) {
 		SlotCount: 1,
 		Now:       func() time.Time { return now },
 	}
-	grant, err := store.Acquire("client", "SHA256:key", "", "")
+	grant, err := store.AcquireSlot("client", "SHA256:key", "", "", "slot-001")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -353,8 +433,9 @@ func TestLeaseStoreBlockedShrinkDoesNotMutateState(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "leases.json")
 	store := LeaseStore{Path: path, SlotCount: 3}
 	for index := 0; index < 3; index++ {
-		if _, err := store.Acquire(
+		if _, err := store.AcquireSlot(
 			fmt.Sprintf("client-%d", index), "SHA256:key", "", "",
+			fmt.Sprintf("slot-%03d", index+1),
 		); err != nil {
 			t.Fatal(err)
 		}
@@ -379,7 +460,9 @@ func TestLeaseStoreBlockedShrinkDoesNotMutateState(t *testing.T) {
 
 func TestLeaseStoreRedactsCapability(t *testing.T) {
 	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1}
-	grant, err := store.Acquire("client", "SHA256:key", "label", "purpose")
+	grant, err := store.AcquireSlot(
+		"client", "SHA256:key", "label", "purpose", "slot-001",
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -421,8 +504,9 @@ func TestLeaseStoreCorruptStateRecoveryKeepsOtherSlotsQuarantined(t *testing.T) 
 
 func TestLeaseStoreCombinedLabelPublishesOnlyCurrentAttribution(t *testing.T) {
 	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1}
-	grant, err := store.Acquire(
+	grant, err := store.AcquireSlot(
 		"client", "SHA256:key", "Subyard/Subyard@checkout-a#run-a", "unit-tests",
+		"slot-001",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -464,8 +548,9 @@ func TestLeaseStoreCombinedLabelPublishesOnlyCurrentAttribution(t *testing.T) {
 
 func TestLeaseStoreV2PublishesCanonicalProjectWithoutCheckout(t *testing.T) {
 	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1}
-	grant, err := store.AcquireV2(
+	grant, err := store.AcquireV2Slot(
 		"client", "SHA256:key", "default", "Subyard-2", "run-a", "unit-tests",
+		"slot-001",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -495,8 +580,8 @@ func TestLeaseStoreV2PublishesCanonicalProjectWithoutCheckout(t *testing.T) {
 func TestLeaseStoreRejectsUnsafeAttributionBeforeMutation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "leases.json")
 	store := LeaseStore{Path: path, SlotCount: 1}
-	if _, err := store.Acquire(
-		"client", "SHA256:key", "/home/dev/private@checkout#run", "tests",
+	if _, err := store.AcquireSlot(
+		"client", "SHA256:key", "/home/dev/private@checkout#run", "tests", "slot-001",
 	); err == nil {
 		t.Fatal("unsafe attribution was accepted")
 	}
@@ -550,7 +635,9 @@ func TestLeaseRecoveryJournalSurvivesPreviousProducerRewrite(t *testing.T) {
 		SlotCount: 1,
 		Now:       func() time.Time { return now },
 	}
-	grant, err := store.Acquire("client", "SHA256:key", "", "rollback")
+	grant, err := store.AcquireSlot(
+		"client", "SHA256:key", "", "rollback", "slot-001",
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -626,11 +713,12 @@ func TestLeaseStoreRecoveryScheduleGenerationAndFencing(t *testing.T) {
 		SlotCount: 1,
 		Now:       func() time.Time { return now },
 	}
-	grant, err := store.Acquire(
+	grant, err := store.AcquireSlot(
 		"client",
 		"SHA256:key",
 		"Subyard/Subyard@checkout-a#run-a",
 		"recovery",
+		"slot-001",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -701,7 +789,9 @@ func TestInterruptedRecoveryReturnsToImmediateQuarantine(t *testing.T) {
 		SlotCount: 1,
 		Now:       func() time.Time { return now },
 	}
-	grant, err := store.Acquire("client", "SHA256:key", "", "crash-retry")
+	grant, err := store.AcquireSlot(
+		"client", "SHA256:key", "", "crash-retry", "slot-001",
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -739,7 +829,9 @@ func TestLeaseStoreRecoveryBackoffNeverBecomesTerminal(t *testing.T) {
 		SlotCount: 1,
 		Now:       func() time.Time { return now },
 	}
-	grant, err := store.Acquire("client", "SHA256:key", "", "repeated-recovery")
+	grant, err := store.AcquireSlot(
+		"client", "SHA256:key", "", "repeated-recovery", "slot-001",
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -788,7 +880,9 @@ func TestLeaseStoreRecoveryBackoffNeverBecomesTerminal(t *testing.T) {
 
 func TestLeaseStoreExpectedDrainFencesOnlyTheSnapshottedLease(t *testing.T) {
 	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1}
-	original, err := store.Acquire("original", "SHA256:key", "", "stale-drain")
+	original, err := store.AcquireSlot(
+		"original", "SHA256:key", "", "stale-drain", "slot-001",
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -823,7 +917,9 @@ func TestLeaseStoreExpectedDrainFencesOnlyTheSnapshottedLease(t *testing.T) {
 
 func TestLeaseStoreExpectedDrainStartsMatchingTargetAndSkipsCompletedTarget(t *testing.T) {
 	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1}
-	grant, err := store.Acquire("client", "SHA256:key", "", "exact-drain")
+	grant, err := store.AcquireSlot(
+		"client", "SHA256:key", "", "exact-drain", "slot-001",
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -846,7 +942,9 @@ func TestLeaseStoreExpectedDrainStartsMatchingTargetAndSkipsCompletedTarget(t *t
 
 func TestLeaseStoreExpectedRecoveryRejectsReplacementPair(t *testing.T) {
 	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1}
-	grant, err := store.Acquire("client", "SHA256:key", "", "stale-recovery")
+	grant, err := store.AcquireSlot(
+		"client", "SHA256:key", "", "stale-recovery", "slot-001",
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -878,7 +976,9 @@ func TestLeaseStoreExpectedRecoveryRejectsReplacementPair(t *testing.T) {
 
 func TestLeaseStoreExpectedRecoveryStartsMatchingTargetAndDoesNotRestartIt(t *testing.T) {
 	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1}
-	grant, err := store.Acquire("client", "SHA256:key", "", "exact-recovery")
+	grant, err := store.AcquireSlot(
+		"client", "SHA256:key", "", "exact-recovery", "slot-001",
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

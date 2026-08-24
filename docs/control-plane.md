@@ -260,8 +260,18 @@ contain no real secret. The opt-in E2E VM subset is documented in
 ## E2E VM acceptance lane
 
 Host-free fakes cannot prove Incus, kernel, network, mount, systemd, or real SSH behavior. The
-operator allocates two disposable E2E VMs; the agent runs `dev/e2e/p0-acceptance.sh` without changing
-their lifecycle. Do not run this lane on the operator host or in the privileged outer yard.
+operator maintains a configurable pool of disposable two-VM pairs. The agent inspects
+`dev/agent-e2e.sh --status`, explicitly chooses an available configured slot `N`, and runs
+`dev/e2e/p0-acceptance.sh --slot N` without changing outer-yard lifecycle. Targeted lanes require
+the same selector; only `--list-lanes` remains slotless. Do not run this lane on the operator host or
+in the privileged outer yard.
+
+Each top-level runner owns one exact slot and never selects a neighbor. `--wait` retries only that
+slot; unknown or invalid selectors fail immediately, and outcome-unknown acquire attempts are not
+retried. `--vm 1|2|both` selects guests inside the chosen pair. Guest root may create arbitrary
+nested yards, brokers and leases, but a nested broker has an independent slot namespace that must be
+inspected and selected locally. Independent multi-pair tests use separate top-level workers with
+different explicit slots and purposes, each with its own bounded cleanup.
 
 1. For both a container and VM context: `yard -Y <context> init`, rerun it as a no-op, introduce one
    safe managed drift (for example the ccusage convergence marker), rerun to repair it, then reboot
