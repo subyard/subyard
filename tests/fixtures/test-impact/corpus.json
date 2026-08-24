@@ -1,0 +1,353 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "history-01",
+      "changes": [
+        {"status":"M","similarity":null,"old_path":"dev/e2e/p0-acceptance.sh","new_path":"dev/e2e/p0-acceptance.sh","old_mode":"100755","new_mode":"100755"},
+        {"status":"M","similarity":null,"old_path":"dev/e2e/power-reconciler-systemd-255.sh","new_path":"dev/e2e/power-reconciler-systemd-255.sh","old_mode":"100755","new_mode":"100755"},
+        {"status":"M","similarity":null,"old_path":"dev/e2e/power-reconciler-upgrade.sh","new_path":"dev/e2e/power-reconciler-upgrade.sh","old_mode":"100755","new_mode":"100755"},
+        {"status":"M","similarity":null,"old_path":"tests/agent-e2e.sh","new_path":"tests/agent-e2e.sh","old_mode":"100755","new_mode":"100755"}
+      ],
+      "category": "known_high_risk",
+      "expected_full": true,
+      "required_check_sets": ["go:adapters/reconcileruntime", "go:application", "go:migration", "go:systemdunit", "host-free:core", "p0:boundary", "p0:power-systemd", "p0:reboot-verify", "shell:agent-e2e", "shell:lib-power-network", "shell:p0-capacity", "shell:power-reconciler-systemd", "shell:test-vms"],
+      "required_e2e_checks": ["p0:boundary", "p0:power-systemd", "p0:reboot-verify"]
+    },
+    {
+      "id": "history-02",
+      "changes": [
+        {"status":"M","similarity":null,"old_path":"dev/e2e/lib-p0-capacity.sh","new_path":"dev/e2e/lib-p0-capacity.sh","old_mode":"100644","new_mode":"100644"},
+        {"status":"M","similarity":null,"old_path":"dev/e2e/p0-guest.sh","new_path":"dev/e2e/p0-guest.sh","old_mode":"100755","new_mode":"100755"},
+        {"status":"M","similarity":null,"old_path":"tests/agent-e2e.sh","new_path":"tests/agent-e2e.sh","old_mode":"100755","new_mode":"100755"},
+        {"status":"M","similarity":null,"old_path":"tests/p0-capacity.sh","new_path":"tests/p0-capacity.sh","old_mode":"100755","new_mode":"100755"}
+      ],
+      "category": "known_high_risk",
+      "expected_full": true,
+      "required_check_sets": ["go:adapters/testvmsruntime", "go:migration", "go:testyardmigration", "host-free:core", "p0:boundary", "shell:agent-e2e", "shell:p0-capacity", "shell:test-vms"],
+      "required_e2e_checks": ["p0:boundary"]
+    },
+    {
+      "id": "history-03",
+      "changes": [
+        {"status":"M","similarity":null,"old_path":"scripts/lib/host.sh","new_path":"scripts/lib/host.sh","old_mode":"100644","new_mode":"100644"},
+        {"status":"M","similarity":null,"old_path":"scripts/teardown-physical.sh","new_path":"scripts/teardown-physical.sh","old_mode":"100755","new_mode":"100755"},
+        {"status":"M","similarity":null,"old_path":"tests/teardown-runtime-preservation.sh","new_path":"tests/teardown-runtime-preservation.sh","old_mode":"100644","new_mode":"100644"}
+      ],
+      "category": "known_high_risk",
+      "expected_full": true,
+      "required_check_sets": ["go:adapters/testvmsruntime", "go:migration", "go:testyardmigration", "host-free:core", "p0:boundary", "shell:agent-e2e", "shell:lifecycle-guard", "shell:p0-capacity", "shell:teardown-runtime-preservation", "shell:test-vms"],
+      "required_e2e_checks": ["p0:boundary"]
+    },
+    {
+      "id": "history-04",
+      "changes": [
+        {"status":"M","similarity":null,"old_path":"dev/e2e/nested-teardown-data-boundary.sh","new_path":"dev/e2e/nested-teardown-data-boundary.sh","old_mode":"100755","new_mode":"100755"},
+        {"status":"M","similarity":null,"old_path":"internal/application/project_actions.go","new_path":"internal/application/project_actions.go","old_mode":"100644","new_mode":"100644"},
+        {"status":"M","similarity":null,"old_path":"internal/application/project_actions_test.go","new_path":"internal/application/project_actions_test.go","old_mode":"100644","new_mode":"100644"}
+      ],
+      "category": "known_high_risk",
+      "expected_full": true,
+      "required_check_sets": ["go:adapters/testvmsruntime", "go:application", "go:audit", "go:cli", "go:command", "go:domain", "go:migration", "go:rpc", "go:testyardmigration", "p0:boundary", "shell:agent-e2e", "shell:cli-contract", "shell:command-registry", "shell:p0-capacity", "shell:prompt-contract", "shell:test-vms", "shell:yard-usage"],
+      "required_e2e_checks": ["p0:boundary"]
+    },
+    {
+      "id": "history-05",
+      "changes": [
+        {"status":"M","similarity":null,"old_path":"dev/e2e/p0-source-upgrade.sh","new_path":"dev/e2e/p0-source-upgrade.sh","old_mode":"100755","new_mode":"100755"},
+        {"status":"M","similarity":null,"old_path":"tests/agent-e2e.sh","new_path":"tests/agent-e2e.sh","old_mode":"100755","new_mode":"100755"}
+      ],
+      "category": "known_high_risk",
+      "expected_full": true,
+      "required_check_sets": ["go:adapters/releaseruntime", "go:migration", "go:testyardmigration", "host-free:core", "p0:release", "p0:source-upgrade", "shell:engine-release", "shell:install-runtime-release-rollback"],
+      "required_e2e_checks": ["p0:release", "p0:source-upgrade"]
+    },
+    {
+      "id": "history-06",
+      "changes": [
+        {"status":"M","similarity":null,"old_path":"dev/agent-e2e.sh","new_path":"dev/agent-e2e.sh","old_mode":"100755","new_mode":"100755"},
+        {"status":"M","similarity":null,"old_path":"tests/agent-e2e.sh","new_path":"tests/agent-e2e.sh","old_mode":"100755","new_mode":"100755"}
+      ],
+      "category": "known_high_risk",
+      "expected_full": true,
+      "required_check_sets": ["go:adapters/testvmsruntime", "go:migration", "go:testyardmigration", "host-free:core", "p0:boundary", "shell:agent-e2e", "shell:p0-capacity", "shell:test-vms"],
+      "required_e2e_checks": ["p0:boundary"]
+    },
+    {
+      "id": "history-07",
+      "changes": [
+        {"status":"M","similarity":null,"old_path":"internal/adapters/testvmsruntime/lease.go","new_path":"internal/adapters/testvmsruntime/lease.go","old_mode":"100644","new_mode":"100644"}
+      ],
+      "category": "known_high_risk",
+      "expected_full": true,
+      "required_check_sets": ["go:adapters/testvmsruntime", "go:migration", "go:testyardmigration", "p0:boundary", "shell:agent-e2e", "shell:p0-capacity", "shell:test-vms"],
+      "required_e2e_checks": ["p0:boundary"]
+    },
+    {
+      "id": "history-08",
+      "changes": [
+        {"status":"M","similarity":null,"old_path":"dev/agent-e2e.sh","new_path":"dev/agent-e2e.sh","old_mode":"100755","new_mode":"100755"},
+        {"status":"M","similarity":null,"old_path":"internal/adapters/testvmsruntime/access.go","new_path":"internal/adapters/testvmsruntime/access.go","old_mode":"100644","new_mode":"100644"},
+        {"status":"M","similarity":null,"old_path":"internal/adapters/testvmsruntime/runtime_test.go","new_path":"internal/adapters/testvmsruntime/runtime_test.go","old_mode":"100644","new_mode":"100644"}
+      ],
+      "category": "known_high_risk",
+      "expected_full": true,
+      "required_check_sets": ["go:adapters/testvmsruntime", "go:migration", "go:testyardmigration", "p0:boundary", "shell:agent-e2e", "shell:p0-capacity", "shell:test-vms"],
+      "required_e2e_checks": ["p0:boundary"]
+    },
+    {
+      "id": "history-09",
+      "changes": [
+        {"status":"M","similarity":null,"old_path":"dev/agent-e2e.sh","new_path":"dev/agent-e2e.sh","old_mode":"100755","new_mode":"100755"},
+        {"status":"M","similarity":null,"old_path":"dev/e2e/lib-p0-capacity.sh","new_path":"dev/e2e/lib-p0-capacity.sh","old_mode":"100644","new_mode":"100644"},
+        {"status":"M","similarity":null,"old_path":"dev/e2e/p0-acceptance.sh","new_path":"dev/e2e/p0-acceptance.sh","old_mode":"100755","new_mode":"100755"},
+        {"status":"M","similarity":null,"old_path":"dev/e2e/p0-guest.sh","new_path":"dev/e2e/p0-guest.sh","old_mode":"100755","new_mode":"100755"},
+        {"status":"M","similarity":null,"old_path":"internal/adapters/testvmsruntime/lease.go","new_path":"internal/adapters/testvmsruntime/lease.go","old_mode":"100644","new_mode":"100644"},
+        {"status":"M","similarity":null,"old_path":"internal/adapters/testvmsruntime/lease_test.go","new_path":"internal/adapters/testvmsruntime/lease_test.go","old_mode":"100644","new_mode":"100644"},
+        {"status":"M","similarity":null,"old_path":"tests/p0-capacity.sh","new_path":"tests/p0-capacity.sh","old_mode":"100755","new_mode":"100755"}
+      ],
+      "category": "known_high_risk",
+      "expected_full": true,
+      "required_check_sets": ["go:adapters/testvmsruntime", "go:migration", "go:testyardmigration", "host-free:core", "p0:boundary", "shell:agent-e2e", "shell:p0-capacity", "shell:test-vms"],
+      "required_e2e_checks": ["p0:boundary"]
+    },
+    {
+      "id": "history-10",
+      "changes": [
+        {"status":"M","similarity":null,"old_path":"dev/e2e/p1-lease-acceptance.sh","new_path":"dev/e2e/p1-lease-acceptance.sh","old_mode":"100755","new_mode":"100755"},
+        {"status":"M","similarity":null,"old_path":"internal/adapters/testvmsruntime/guest.go","new_path":"internal/adapters/testvmsruntime/guest.go","old_mode":"100644","new_mode":"100644"},
+        {"status":"M","similarity":null,"old_path":"internal/adapters/testvmsruntime/lifecycle.go","new_path":"internal/adapters/testvmsruntime/lifecycle.go","old_mode":"100644","new_mode":"100644"},
+        {"status":"M","similarity":null,"old_path":"internal/adapters/testvmsruntime/runtime_test.go","new_path":"internal/adapters/testvmsruntime/runtime_test.go","old_mode":"100644","new_mode":"100644"}
+      ],
+      "category": "known_high_risk",
+      "expected_full": true,
+      "required_check_sets": ["go:adapters/testvmsruntime", "go:migration", "go:testyardmigration", "p0:boundary", "shell:agent-e2e", "shell:p0-capacity", "shell:test-vms"],
+      "required_e2e_checks": ["p0:boundary"]
+    },
+    {
+      "id": "history-11",
+      "changes": [{"status":"M","similarity":null,"old_path":"tests/agent-e2e.sh","new_path":"tests/agent-e2e.sh","old_mode":"100755","new_mode":"100755"}],
+      "category": "leaf", "expected_full": false,
+      "required_check_sets": ["host-free:core"], "required_e2e_checks": []
+    },
+    {
+      "id": "history-12",
+      "changes": [
+        {"status":"A","similarity":null,"old_path":null,"new_path":"docs/veranda/README.md","old_mode":"000000","new_mode":"100644"},
+        {"status":"A","similarity":null,"old_path":null,"new_path":"docs/veranda/wireframes.html","old_mode":"000000","new_mode":"100644"}
+      ],
+      "category": "leaf", "expected_full": false,
+      "required_check_sets": [], "required_e2e_checks": []
+    },
+    {
+      "id": "history-13",
+      "changes": [
+        {"status":"M","similarity":null,"old_path":"config/profiles/orca/resources/orca/handler.sh","new_path":"config/profiles/orca/resources/orca/handler.sh","old_mode":"100755","new_mode":"100755"},
+        {"status":"M","similarity":null,"old_path":"tests/orca-profile-resource.sh","new_path":"tests/orca-profile-resource.sh","old_mode":"100755","new_mode":"100755"},
+        {"status":"M","similarity":null,"old_path":"tests/real-host/orca-resource.sh","new_path":"tests/real-host/orca-resource.sh","old_mode":"100755","new_mode":"100755"}
+      ],
+      "category": "leaf", "expected_full": false,
+      "required_check_sets": ["e2e:orca-resource", "go:resource", "host-free:core", "p0:profile-resource", "shell:orca-profile-resource", "shell:profile-resource-lifecycle", "shell:provision-profile-check"],
+      "required_e2e_checks": ["e2e:orca-resource", "p0:profile-resource"]
+    },
+    {
+      "id": "history-14",
+      "changes": [
+        {"status":"M","similarity":null,"old_path":"internal/cli/config_command.go","new_path":"internal/cli/config_command.go","old_mode":"100644","new_mode":"100644"},
+        {"status":"M","similarity":null,"old_path":"tests/engine-release.sh","new_path":"tests/engine-release.sh","old_mode":"100755","new_mode":"100755"}
+      ],
+      "category": "leaf", "expected_full": false,
+      "required_check_sets": ["go:application", "go:audit", "go:cli", "go:command", "go:domain", "go:rpc", "host-free:core", "shell:cli-contract", "shell:command-registry", "shell:prompt-contract", "shell:yard-usage"], "required_e2e_checks": []
+    },
+    {
+      "id": "history-15",
+      "changes": [
+        {"status":"M","similarity":null,"old_path":"internal/application/project_actions.go","new_path":"internal/application/project_actions.go","old_mode":"100644","new_mode":"100644"},
+        {"status":"M","similarity":null,"old_path":"internal/application/project_actions_test.go","new_path":"internal/application/project_actions_test.go","old_mode":"100644","new_mode":"100644"},
+        {"status":"M","similarity":null,"old_path":"internal/cli/native_test.go","new_path":"internal/cli/native_test.go","old_mode":"100644","new_mode":"100644"}
+      ],
+      "category": "leaf", "expected_full": false,
+      "required_check_sets": ["go:application", "go:audit", "go:cli", "go:command", "go:domain", "go:rpc", "shell:cli-contract", "shell:command-registry", "shell:prompt-contract", "shell:yard-usage"], "required_e2e_checks": []
+    },
+    {
+      "id": "history-16",
+      "changes": [
+        {"status":"M","similarity":null,"old_path":".github/workflows/release.yml","new_path":".github/workflows/release.yml","old_mode":"100644","new_mode":"100644"},
+        {"status":"M","similarity":null,"old_path":"tests/cli-contract.sh","new_path":"tests/cli-contract.sh","old_mode":"100755","new_mode":"100755"}
+      ],
+      "category": "known_high_risk", "expected_full": true,
+      "required_check_sets": ["host-free:all", "host-free:core", "p0:release", "p0:source-upgrade", "shell:engine-release", "shell:install-runtime-release-rollback"],
+      "required_e2e_checks": ["p0:release", "p0:source-upgrade"]
+    },
+    {
+      "id": "history-17",
+      "changes": [
+        {"status":"M","similarity":null,"old_path":"internal/testyardmigration/broker.go","new_path":"internal/testyardmigration/broker.go","old_mode":"100644","new_mode":"100644"},
+        {"status":"M","similarity":null,"old_path":"internal/testyardmigration/broker_test.go","new_path":"internal/testyardmigration/broker_test.go","old_mode":"100644","new_mode":"100644"}
+      ],
+      "category": "leaf", "expected_full": false,
+      "required_check_sets": ["go:migration", "go:testyardmigration", "p0:source-upgrade", "shell:init-project-convergence"], "required_e2e_checks": ["p0:source-upgrade"]
+    },
+    {
+      "id": "history-18",
+      "changes": [
+        {"status":"M","similarity":null,"old_path":"internal/cli/native_test.go","new_path":"internal/cli/native_test.go","old_mode":"100644","new_mode":"100644"},
+        {"status":"M","similarity":null,"old_path":"internal/cli/owner_inventory.go","new_path":"internal/cli/owner_inventory.go","old_mode":"100644","new_mode":"100644"},
+        {"status":"M","similarity":null,"old_path":"internal/cli/owner_inventory_test.go","new_path":"internal/cli/owner_inventory_test.go","old_mode":"100644","new_mode":"100644"},
+        {"status":"M","similarity":null,"old_path":"tests/cli-contract.sh","new_path":"tests/cli-contract.sh","old_mode":"100755","new_mode":"100755"}
+      ],
+      "category": "leaf", "expected_full": false,
+      "required_check_sets": ["go:application", "go:audit", "go:cli", "go:command", "go:domain", "go:rpc", "host-free:core", "shell:cli-contract", "shell:command-registry", "shell:prompt-contract", "shell:yard-usage"], "required_e2e_checks": []
+    },
+    {
+      "id": "history-19",
+      "changes": [
+        {"status":"M","similarity":null,"old_path":"docs/keys.md","new_path":"docs/keys.md","old_mode":"100644","new_mode":"100644"},
+        {"status":"M","similarity":null,"old_path":"internal/cli/cli.go","new_path":"internal/cli/cli.go","old_mode":"100644","new_mode":"100644"},
+        {"status":"M","similarity":null,"old_path":"internal/cli/native_test.go","new_path":"internal/cli/native_test.go","old_mode":"100644","new_mode":"100644"}
+      ],
+      "category": "leaf", "expected_full": false,
+      "required_check_sets": ["go:application", "go:audit", "go:cli", "go:command", "go:domain", "go:rpc", "shell:cli-contract", "shell:command-registry", "shell:prompt-contract", "shell:yard-usage"], "required_e2e_checks": []
+    },
+    {
+      "id": "history-20",
+      "changes": [
+        {"status":"M","similarity":null,"old_path":"internal/cli/cli.go","new_path":"internal/cli/cli.go","old_mode":"100644","new_mode":"100644"},
+        {"status":"M","similarity":null,"old_path":"internal/cli/native_test.go","new_path":"internal/cli/native_test.go","old_mode":"100644","new_mode":"100644"},
+        {"status":"M","similarity":null,"old_path":"internal/cli/owner_inventory.go","new_path":"internal/cli/owner_inventory.go","old_mode":"100644","new_mode":"100644"},
+        {"status":"M","similarity":null,"old_path":"internal/cli/owner_inventory_test.go","new_path":"internal/cli/owner_inventory_test.go","old_mode":"100644","new_mode":"100644"}
+      ],
+      "category": "leaf", "expected_full": false,
+      "required_check_sets": ["go:application", "go:audit", "go:cli", "go:command", "go:domain", "go:rpc", "shell:cli-contract", "shell:command-registry", "shell:prompt-contract", "shell:yard-usage"], "required_e2e_checks": []
+    },
+    {
+      "id": "history-21",
+      "changes": [
+        {"status":"M","similarity":null,"old_path":"internal/application/reconcile.go","new_path":"internal/application/reconcile.go","old_mode":"100644","new_mode":"100644"},
+        {"status":"M","similarity":null,"old_path":"internal/application/reconcile_test.go","new_path":"internal/application/reconcile_test.go","old_mode":"100644","new_mode":"100644"},
+        {"status":"M","similarity":null,"old_path":"internal/cli/init_test.go","new_path":"internal/cli/init_test.go","old_mode":"100644","new_mode":"100644"}
+      ],
+      "category": "leaf", "expected_full": false,
+      "required_check_sets": ["go:application", "go:audit", "go:cli", "go:command", "go:domain", "go:rpc", "shell:cli-contract", "shell:command-registry", "shell:prompt-contract", "shell:yard-usage"], "required_e2e_checks": []
+    },
+    {
+      "id": "history-22",
+      "changes": [
+        {"status":"M","similarity":null,"old_path":"internal/cli/cli.go","new_path":"internal/cli/cli.go","old_mode":"100644","new_mode":"100644"},
+        {"status":"M","similarity":null,"old_path":"internal/cli/native_test.go","new_path":"internal/cli/native_test.go","old_mode":"100644","new_mode":"100644"}
+      ],
+      "category": "leaf", "expected_full": false,
+      "required_check_sets": ["go:application", "go:audit", "go:cli", "go:command", "go:domain", "go:rpc", "shell:cli-contract", "shell:command-registry", "shell:prompt-contract", "shell:yard-usage"], "required_e2e_checks": []
+    },
+    {
+      "id": "history-23",
+      "changes": [
+        {"status":"M","similarity":null,"old_path":"internal/adapters/remotecontrol/runtime.go","new_path":"internal/adapters/remotecontrol/runtime.go","old_mode":"100644","new_mode":"100644"},
+        {"status":"M","similarity":null,"old_path":"tests/yard-remote.sh","new_path":"tests/yard-remote.sh","old_mode":"100755","new_mode":"100755"}
+      ],
+      "category": "leaf", "expected_full": false,
+      "required_check_sets": ["e2e:ssh-rpc", "go:adapters/remotecontrol", "go:adapters/transport", "go:rpc", "go:sshidentity", "go:sshrelay", "host-free:core", "p0:peer", "p0:transport", "shell:remote-projects", "shell:ssh-config", "shell:ssh-transport-identity", "shell:yard-remote"],
+      "required_e2e_checks": ["e2e:ssh-rpc", "p0:peer", "p0:transport"]
+    },
+    {
+      "id": "history-24",
+      "changes": [{"status":"M","similarity":null,"old_path":"tests/opencode-agent-defaults.sh","new_path":"tests/opencode-agent-defaults.sh","old_mode":"100755","new_mode":"100755"}],
+      "category": "leaf", "expected_full": false,
+      "required_check_sets": ["host-free:core"], "required_e2e_checks": []
+    },
+    {
+      "id": "history-25",
+      "changes": [
+        {"status":"M","similarity":null,"old_path":"config/agents/codex/config.toml","new_path":"config/agents/codex/config.toml","old_mode":"100644","new_mode":"100644"},
+        {"status":"M","similarity":null,"old_path":"tests/opencode-agent-defaults.sh","new_path":"tests/opencode-agent-defaults.sh","old_mode":"100755","new_mode":"100755"}
+      ],
+      "category": "leaf", "expected_full": false,
+      "required_check_sets": ["host-free:core"], "required_e2e_checks": []
+    },
+    {
+      "id": "history-26",
+      "changes": [
+        {"status":"M","similarity":null,"old_path":"config/profiles/subyard-dev/provision.sh","new_path":"config/profiles/subyard-dev/provision.sh","old_mode":"100755","new_mode":"100755"},
+        {"status":"M","similarity":null,"old_path":"tests/subyard-dev-provision.sh","new_path":"tests/subyard-dev-provision.sh","old_mode":"100755","new_mode":"100755"}
+      ],
+      "category": "leaf", "expected_full": false,
+      "required_check_sets": ["go:resource", "host-free:core", "p0:profile-resource", "shell:profile-resource-lifecycle", "shell:provision-profile-check"],
+      "required_e2e_checks": ["p0:profile-resource"]
+    },
+    {
+      "id": "history-27",
+      "changes": [{"status":"M","similarity":null,"old_path":"README.md","new_path":"README.md","old_mode":"100644","new_mode":"100644"}],
+      "category": "leaf", "expected_full": false,
+      "required_check_sets": [], "required_e2e_checks": []
+    },
+    {
+      "id": "history-28",
+      "changes": [
+        {"status":"M","similarity":null,"old_path":"config/profiles/openclaw/profile.conf","new_path":"config/profiles/openclaw/profile.conf","old_mode":"100644","new_mode":"100644"},
+        {"status":"M","similarity":null,"old_path":"config/profiles/openclaw/provision.sh","new_path":"config/profiles/openclaw/provision.sh","old_mode":"100755","new_mode":"100755"}
+      ],
+      "category": "leaf", "expected_full": false,
+      "required_check_sets": ["go:resource", "p0:profile-resource", "shell:openclaw-provision-check", "shell:openclaw-resource-protocol", "shell:profile-resource-lifecycle", "shell:provision-profile-check"],
+      "required_e2e_checks": ["p0:profile-resource"]
+    },
+    {
+      "id": "history-29",
+      "changes": [{"status":"M","similarity":null,"old_path":"config/profiles/openclaw/provision.sh","new_path":"config/profiles/openclaw/provision.sh","old_mode":"100755","new_mode":"100755"}],
+      "category": "leaf", "expected_full": false,
+      "required_check_sets": ["go:resource", "p0:profile-resource", "shell:openclaw-provision-check", "shell:openclaw-resource-protocol", "shell:profile-resource-lifecycle", "shell:provision-profile-check"],
+      "required_e2e_checks": ["p0:profile-resource"]
+    },
+    {
+      "id": "history-30",
+      "changes": [
+        {"status":"M","similarity":null,"old_path":"config/agents/paseo/sync-projects.mjs","new_path":"config/agents/paseo/sync-projects.mjs","old_mode":"100755","new_mode":"100755"},
+        {"status":"M","similarity":null,"old_path":"docs/paseo.md","new_path":"docs/paseo.md","old_mode":"100644","new_mode":"100644"},
+        {"status":"M","similarity":null,"old_path":"tests/paseo-project-sync.sh","new_path":"tests/paseo-project-sync.sh","old_mode":"100755","new_mode":"100755"}
+      ],
+      "category": "leaf", "expected_full": false,
+      "required_check_sets": ["host-free:core"], "required_e2e_checks": []
+    },
+    {
+      "id": "history-31",
+      "changes": [
+        {"status":"M","similarity":null,"old_path":"completions/yard.zsh","new_path":"completions/yard.zsh","old_mode":"100644","new_mode":"100644"},
+        {"status":"M","similarity":null,"old_path":"tests/cli-contract.sh","new_path":"tests/cli-contract.sh","old_mode":"100755","new_mode":"100755"},
+        {"status":"M","similarity":null,"old_path":"tests/engine-release.sh","new_path":"tests/engine-release.sh","old_mode":"100755","new_mode":"100755"},
+        {"status":"A","similarity":null,"old_path":null,"new_path":"tests/helpers/zsh-completion-buffers.zsh","old_mode":"000000","new_mode":"100644"}
+      ],
+      "category": "leaf", "expected_full": false,
+      "required_check_sets": ["go:application", "go:audit", "go:cli", "go:command", "go:domain", "go:rpc", "host-free:core", "shell:cli-contract", "shell:command-registry", "shell:prompt-contract", "shell:yard-usage"],
+      "required_e2e_checks": []
+    },
+    {
+      "id": "history-32",
+      "changes": [{"status":"M","similarity":null,"old_path":"scripts/yard-usage.sh","new_path":"scripts/yard-usage.sh","old_mode":"100755","new_mode":"100755"}],
+      "category": "leaf", "expected_full": false,
+      "required_check_sets": ["host-free:core"], "required_e2e_checks": []
+    },
+    {
+      "id": "history-33",
+      "changes": [{"status":"M","similarity":null,"old_path":"scripts/project-sync.sh","new_path":"scripts/project-sync.sh","old_mode":"100755","new_mode":"100755"}],
+      "category": "leaf", "expected_full": false,
+      "required_check_sets": ["host-free:core"], "required_e2e_checks": []
+    },
+    {
+      "id": "history-34",
+      "changes": [{"status":"M","similarity":null,"old_path":"tests/paseo-project-sync.sh","new_path":"tests/paseo-project-sync.sh","old_mode":"100755","new_mode":"100755"}],
+      "category": "leaf", "expected_full": false,
+      "required_check_sets": ["host-free:core"], "required_e2e_checks": []
+    },
+    {
+      "id": "history-35",
+      "changes": [{"status":"M","similarity":null,"old_path":"tests/native/paseo-headless.sh","new_path":"tests/native/paseo-headless.sh","old_mode":"100755","new_mode":"100755"}],
+      "category": "leaf", "expected_full": false,
+      "required_check_sets": ["host-free:core"], "required_e2e_checks": []
+    },
+    {
+      "id": "history-36",
+      "changes": [{"status":"M","similarity":null,"old_path":"dev/build-paseo-headless.sh","new_path":"dev/build-paseo-headless.sh","old_mode":"100755","new_mode":"100755"}],
+      "category": "leaf", "expected_full": false,
+      "required_check_sets": ["host-free:core"], "required_e2e_checks": []
+    }
+  ]
+}

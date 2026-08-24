@@ -13,6 +13,10 @@ Run `make build` to compile the development binary at `.build/yard`; `go.mod` se
 toolchain. Run `./tests/run.sh` before finishing shell or CLI changes. CI additionally runs
 `shellcheck -x -S warning` over the CLI, scripts, provision hooks, tests, and Bash completion.
 
+Before choosing change-specific checks, use the advisory selector described in
+[`docs/testing.md`](docs/testing.md). It recommends checks without executing them; required
+validation and the existing E2E/release gates still apply.
+
 ## Agent E2E workflow
 
 The operator owns outer-yard `start`, `stop` and teardown. The root broker owns inner slot

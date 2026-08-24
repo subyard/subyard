@@ -20,6 +20,10 @@ connections, mutations, project launch actions, profiles, or the broader diagnos
 surfaces illustrated below. Development and verification commands are documented in
 [`../../veranda/README.md`](../../veranda/README.md).
 
+The advisory [change-impact testing workflow](../testing.md) may recommend Veranda unit tests,
+static checks, the production build, and Rust tests without desktop features. It recommends these
+host-free checks without executing them.
+
 ## Product model
 
 The interface is object-centric:

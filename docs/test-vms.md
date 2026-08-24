@@ -121,6 +121,10 @@ dev/agent-e2e.sh --purpose real-host-check --vm 1 -- ./tests/some-real-host-chec
 lanes are diagnostics: they shorten a rerun after a late failure but never turn a partial pass into
 a fresh-install release result.
 
+Use the advisory [change-impact testing workflow](testing.md) to select affected host-free checks
+and targeted lanes for a diff. The selector only recommends checks; targeted evidence does not
+replace this section's continuous no-argument P0 release gate.
+
 | Lane | Prerequisites and timeout | Mutable scope | Classification |
 | --- | --- | --- | --- |
 | `./tests/run.sh` | Go toolchain; bounded by CI | temporary host-free roots and `.build/yard` | required host-free gate |

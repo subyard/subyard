@@ -1,0 +1,814 @@
+{
+  "schema_version": 1,
+  "check_sets": {
+    "android-profile": [
+      "shell:android-provision-check",
+      "shell:emulator-process-control",
+      "shell:emulator-process-identity",
+      "shell:emulator-resource-protocol",
+      "p0:profile-resource"
+    ],
+    "boot-power": [
+      "go:application",
+      "go:migration",
+      "go:adapters/reconcileruntime",
+      "go:systemdunit",
+      "shell:lib-power-network",
+      "shell:power-reconciler-systemd",
+      "p0:power-systemd",
+      "p0:reboot-verify"
+    ],
+    "broker-runtime": [
+      "go:adapters/testvmsruntime",
+      "go:migration",
+      "go:testyardmigration",
+      "shell:agent-e2e",
+      "shell:p0-capacity",
+      "shell:test-vms",
+      "p0:boundary"
+    ],
+    "cli-control": [
+      "go:application",
+      "go:audit",
+      "go:cli",
+      "go:command",
+      "go:domain",
+      "go:rpc",
+      "shell:cli-contract",
+      "shell:command-registry",
+      "shell:prompt-contract",
+      "shell:yard-usage"
+    ],
+    "config-core": [
+      "go:config",
+      "go:command",
+      "shell:command-registry",
+      "shell:init-extras-convergence"
+    ],
+    "credential-profile": [
+      "go:credential",
+      "go:adapters/credentialmeta",
+      "go:adapters/credentialruntime",
+      "go:adapters/securityruntime",
+      "shell:key-tools-install",
+      "shell:yard-keys",
+      "e2e:credential-tools",
+      "e2e:ssh-credential-peer",
+      "p0:peer"
+    ],
+    "dependencies": [
+      "host-free:all",
+      "p0:dependencies",
+      "p0:real-incus"
+    ],
+    "e2e-infrastructure": [
+      "host-free:core",
+      "shell:agent-e2e",
+      "shell:p0-capacity",
+      "shell:test-vms",
+      "p0:boundary"
+    ],
+    "go-adapters-hostruntime": ["go:adapters/hostruntime"],
+    "go-adapters-incusclient": ["go:adapters/incusclient"],
+    "go-adapters-projectruntime": ["go:adapters/projectruntime"],
+    "go-adapters-reconcileruntime": ["go:adapters/reconcileruntime"],
+    "go-adapters-releaseruntime": ["go:adapters/releaseruntime"],
+    "go-adapters-shelladapter": ["go:adapters/shelladapter"],
+    "go-adapters-statusruntime": ["go:adapters/statusruntime"],
+    "go-application": ["go:application"],
+    "go-architecture": ["go:architecture", "host-free:core"],
+    "go-audit": ["go:audit"],
+    "go-cli": ["go:cli"],
+    "go-command": ["go:command"],
+    "go-config": ["go:config"],
+    "go-configsync": ["go:configsync"],
+    "go-contracttest": ["go:contracttest", "host-free:core"],
+    "go-domain": ["go:domain"],
+    "go-ownerinventory": ["go:ownerinventory"],
+    "go-ports": ["go:ports"],
+    "go-resource": ["go:resource"],
+    "go-shellquote": ["go:shellquote"],
+    "go-state": ["go:state"],
+    "go-testkit": ["go:testkit", "host-free:core"],
+    "hermes-profile": [
+      "e2e:hermes-profile",
+      "shell:hermes-dashboard-resource",
+      "shell:hermes-e2e-contract",
+      "shell:hermes-provision",
+      "p0:profile-resource"
+    ],
+    "host-free-all": ["host-free:all"],
+    "host-free-core": ["host-free:core"],
+    "incus-real": [
+      "go:adapters/incusclient",
+      "p0:real-incus"
+    ],
+    "migration-core": [
+      "go:migration",
+      "go:testyardmigration",
+      "shell:init-project-convergence",
+      "p0:source-upgrade"
+    ],
+    "migration-release": [
+      "go:migration",
+      "go:testyardmigration",
+      "go:adapters/releaseruntime",
+      "shell:engine-release",
+      "shell:install-runtime-release-rollback",
+      "p0:release",
+      "p0:source-upgrade"
+    ],
+    "openclaw-profile": [
+      "shell:openclaw-provision-check",
+      "shell:openclaw-resource-protocol",
+      "p0:profile-resource"
+    ],
+    "orca-profile": [
+      "shell:orca-profile-resource",
+      "e2e:orca-resource",
+      "p0:profile-resource"
+    ],
+    "profile-generic": [
+      "go:resource",
+      "shell:profile-resource-lifecycle",
+      "shell:provision-profile-check",
+      "p0:profile-resource"
+    ],
+    "project-runtime": [
+      "go:adapters/projectruntime",
+      "go:application",
+      "shell:init-project-convergence",
+      "shell:project-registry-convergence",
+      "p0:real-incus"
+    ],
+    "release-tools": [
+      "host-free:all",
+      "shell:engine-release",
+      "shell:install-runtime-release-rollback",
+      "p0:release",
+      "p0:source-upgrade"
+    ],
+    "real-adapter-contract": ["e2e:adapter-contracts"],
+    "real-credential-contract": ["e2e:credential-tools"],
+    "real-orca-contract": ["e2e:orca-resource"],
+    "real-ssh-credential-contract": ["e2e:ssh-credential-peer"],
+    "real-ssh-rpc-contract": ["e2e:ssh-rpc"],
+    "selector-self": [
+      "go:test-impact-cli",
+      "go:testimpact",
+      "shell:test-impact"
+    ],
+    "ssh-transport": [
+      "go:adapters/remotecontrol",
+      "go:adapters/transport",
+      "go:rpc",
+      "go:sshidentity",
+      "go:sshrelay",
+      "shell:remote-projects",
+      "shell:ssh-config",
+      "shell:ssh-transport-identity",
+      "shell:yard-remote",
+      "e2e:ssh-rpc",
+      "p0:peer",
+      "p0:transport"
+    ],
+    "test-cleanup-contracts": [
+      "shell:lifecycle-guard",
+      "shell:teardown-runtime-preservation"
+    ],
+    "veranda-frontend": [
+      "veranda:build",
+      "veranda:check",
+      "veranda:test"
+    ],
+    "veranda-rust": ["veranda:rust-test"]
+  },
+  "risk_domains": [
+    "allocation-fencing-lease-identity",
+    "android-profile",
+    "boot-lifecycle",
+    "broker-admission",
+    "checkpoint-resume",
+    "command-control",
+    "config-state",
+    "credential-profile",
+    "dependency-compatibility",
+    "durable-layout",
+    "external-service-profile",
+    "full-matrix-composition",
+    "host-bootstrap",
+    "incus-runtime",
+    "marker-owned-cleanup",
+    "migration",
+    "orca-gpu-profile",
+    "profile-resource",
+    "project-lifecycle",
+    "release-runner",
+    "ssh-remote-transport",
+    "veranda"
+  ],
+  "risk_suppressions": [
+    {
+      "id": "co-located-go-tests",
+      "kind": "go-test-file"
+    }
+  ],
+  "rules": [
+    {
+      "id": "selector-self",
+      "priority": 1000,
+      "pattern": "^(internal/testimpact/.*|cmd/test-impact/.*|dev/test-impact\\.sh|tests/(impact-map\\.json|test-impact\\.sh))$",
+      "check_sets": ["selector-self"],
+      "risk_domains": []
+    },
+    {
+      "id": "p0-full-matrix-runner",
+      "priority": 990,
+      "pattern": "^dev/e2e/p0-acceptance\\.sh$",
+      "check_sets": ["e2e-infrastructure"],
+      "risk_domains": ["checkpoint-resume", "full-matrix-composition"]
+    },
+    {
+      "id": "p0-guest-matrix-implementation",
+      "priority": 989,
+      "pattern": "^dev/e2e/p0-guest\\.sh$",
+      "check_sets": ["e2e-infrastructure"],
+      "risk_domains": ["full-matrix-composition"]
+    },
+    {
+      "id": "p0-real-incus-lane",
+      "priority": 988,
+      "pattern": "^dev/e2e/p0-real-incus\\.sh$",
+      "check_sets": ["incus-real"],
+      "risk_domains": ["incus-runtime"]
+    },
+    {
+      "id": "source-upgrade-and-release-migration-e2e",
+      "priority": 987,
+      "pattern": "^dev/e2e/(p0-source-upgrade|release-migration-catch-up|release-migration-consumer)\\.sh$",
+      "check_sets": ["migration-release"],
+      "risk_domains": ["durable-layout", "release-runner"]
+    },
+    {
+      "id": "hermes-profile-e2e",
+      "priority": 986,
+      "pattern": "^dev/e2e/hermes-profile\\.sh$",
+      "check_sets": ["hermes-profile", "profile-generic"],
+      "risk_domains": ["external-service-profile", "profile-resource"]
+    },
+    {
+      "id": "release-migration-test-fixtures",
+      "priority": 985,
+      "pattern": "^tests/fixtures/migrations/.*$",
+      "check_sets": ["migration-release"],
+      "risk_domains": []
+    },
+    {
+      "id": "real-adapter-contract-test",
+      "priority": 984,
+      "pattern": "^tests/real-host/adapter-contracts\\.sh$",
+      "check_sets": ["real-adapter-contract"],
+      "risk_domains": []
+    },
+    {
+      "id": "real-credential-contract-test",
+      "priority": 983,
+      "pattern": "^tests/real-host/credential-tools\\.sh$",
+      "check_sets": ["real-credential-contract"],
+      "risk_domains": []
+    },
+    {
+      "id": "real-incus-contract-test",
+      "priority": 982,
+      "pattern": "^tests/real-host/incus-contract\\.sh$",
+      "check_sets": ["incus-real"],
+      "risk_domains": []
+    },
+    {
+      "id": "real-orca-contract-test",
+      "priority": 981,
+      "pattern": "^tests/real-host/orca-resource\\.sh$",
+      "check_sets": ["real-orca-contract"],
+      "risk_domains": []
+    },
+    {
+      "id": "real-ssh-credential-contract-test",
+      "priority": 979,
+      "pattern": "^tests/real-host/ssh-credential-peer\\.sh$",
+      "check_sets": ["real-ssh-credential-contract"],
+      "risk_domains": []
+    },
+    {
+      "id": "real-ssh-rpc-contract-test",
+      "priority": 978,
+      "pattern": "^tests/real-host/ssh-rpc\\.sh$",
+      "check_sets": ["real-ssh-rpc-contract"],
+      "risk_domains": []
+    },
+    {
+      "id": "test-only-cleanup-contracts",
+      "priority": 977,
+      "pattern": "^tests/(lifecycle-guard|teardown-runtime-preservation)\\.sh$",
+      "check_sets": ["test-cleanup-contracts"],
+      "risk_domains": []
+    },
+    {
+      "id": "allocation-and-lease-identity",
+      "priority": 980,
+      "pattern": "^(dev/agent-e2e\\.sh|internal/adapters/testvmsruntime/(access|facade|guest|lease|runner|runtime)\\.go|config/qa-pool/.*)$",
+      "check_sets": ["broker-runtime"],
+      "risk_domains": ["allocation-fencing-lease-identity", "broker-admission"]
+    },
+    {
+      "id": "marker-owned-cleanup",
+      "priority": 970,
+      "pattern": "^(scripts/(lifecycle-guard|teardown-physical)\\.sh|dev/e2e/.*(cleanup|teardown).*)$",
+      "check_sets": ["broker-runtime"],
+      "risk_domains": ["marker-owned-cleanup"]
+    },
+    {
+      "id": "checkpoint-resume-fixtures",
+      "priority": 960,
+      "pattern": "^dev/e2e/(lib-p0-init-retry|p0-broker-recovery)\\.sh$",
+      "check_sets": ["e2e-infrastructure"],
+      "risk_domains": ["checkpoint-resume"]
+    },
+    {
+      "id": "android-profile",
+      "priority": 950,
+      "pattern": "^config/profiles/android/.*$",
+      "check_sets": ["android-profile", "profile-generic"],
+      "risk_domains": ["android-profile", "profile-resource"]
+    },
+    {
+      "id": "orca-gpu-profile",
+      "priority": 940,
+      "pattern": "^config/profiles/orca/.*$",
+      "check_sets": ["orca-profile", "profile-generic"],
+      "risk_domains": ["orca-gpu-profile", "profile-resource"]
+    },
+    {
+      "id": "hermes-external-service-profile",
+      "priority": 930,
+      "pattern": "^config/profiles/hermes/.*$",
+      "check_sets": ["hermes-profile", "profile-generic"],
+      "risk_domains": ["external-service-profile", "profile-resource"]
+    },
+    {
+      "id": "openclaw-external-service-profile",
+      "priority": 920,
+      "pattern": "^config/profiles/openclaw/.*$",
+      "check_sets": ["openclaw-profile", "profile-generic"],
+      "risk_domains": ["external-service-profile", "profile-resource"]
+    },
+    {
+      "id": "credential-configuration",
+      "priority": 910,
+      "pattern": "^(config/keys/.*|scripts/(install-key-tools|install-keys-auto-sync)\\.sh)$",
+      "check_sets": ["credential-profile"],
+      "risk_domains": ["credential-profile"]
+    },
+    {
+      "id": "release-migration-files",
+      "priority": 900,
+      "pattern": "^(internal/migration/(registry|release|source_overlay|source_install_script_test)\\.go|config/migrations\\.json)$",
+      "check_sets": ["migration-release"],
+      "risk_domains": ["durable-layout", "release-runner"]
+    },
+    {
+      "id": "durable-release-scripts",
+      "priority": 891,
+      "pattern": "^scripts/(install-runtime-release|migrate-source-install|restore-source-install)\\.sh$",
+      "check_sets": ["release-tools"],
+      "risk_domains": ["durable-layout", "release-runner"]
+    },
+    {
+      "id": "release-packaging-tools",
+      "priority": 890,
+      "pattern": "^dev/(package-engine|release-assets)\\.sh$",
+      "check_sets": ["release-tools"],
+      "risk_domains": ["dependency-compatibility", "release-runner"]
+    },
+    {
+      "id": "release-workflow",
+      "priority": 880,
+      "pattern": "^\\.github/workflows/release\\.yml$",
+      "check_sets": ["release-tools"],
+      "risk_domains": ["dependency-compatibility", "release-runner"]
+    },
+    {
+      "id": "boot-migration-power-reconciler",
+      "priority": 871,
+      "pattern": "^internal/migration/power_reconciler(_test)?\\.go$",
+      "check_sets": ["boot-power"],
+      "risk_domains": ["boot-lifecycle", "migration"]
+    },
+    {
+      "id": "boot-power-systemd",
+      "priority": 870,
+      "pattern": "^(config/systemd/.*|scripts/(install-power-reconciler|lib-power|lib-service)\\.sh|dev/e2e/power-reconciler-.*)$",
+      "check_sets": ["boot-power"],
+      "risk_domains": ["boot-lifecycle"]
+    },
+    {
+      "id": "transport-scripts",
+      "priority": 860,
+      "pattern": "^(scripts/(install-ssh-relay|07-ssh-access)\\.sh|dev/e2e/(config-sync-two-host|entity-naming-acceptance|entity-naming-lifecycle|status-fast-acceptance|sudo-terminal-ownership)\\.sh)$",
+      "check_sets": ["ssh-transport"],
+      "risk_domains": ["ssh-remote-transport"]
+    },
+    {
+      "id": "broker-e2e-infrastructure",
+      "priority": 850,
+      "pattern": "^dev/e2e/(lib-p0-capacity|p1-lease-acceptance)\\.sh$",
+      "check_sets": ["broker-runtime"],
+      "risk_domains": ["broker-admission"]
+    },
+    {
+      "id": "generic-profile-configuration",
+      "priority": 840,
+      "pattern": "^(config/profiles/(default|subyard-dev)/.*|scripts/provision-profile\\.sh)$",
+      "check_sets": ["profile-generic"],
+      "risk_domains": ["profile-resource"]
+    },
+    {
+      "id": "agent-profile-configuration",
+      "priority": 830,
+      "pattern": "^config/agents/.*$",
+      "check_sets": ["host-free-core"],
+      "risk_domains": ["external-service-profile"]
+    },
+    {
+      "id": "staging-external-service",
+      "priority": 820,
+      "pattern": "^config/staging/.*$",
+      "check_sets": ["openclaw-profile"],
+      "risk_domains": ["external-service-profile"]
+    },
+    {
+      "id": "dependency-manifests",
+      "priority": 810,
+      "pattern": "^(go\\.mod|go\\.sum)$",
+      "check_sets": ["dependencies"],
+      "risk_domains": ["dependency-compatibility", "release-runner"]
+    },
+    {
+      "id": "internal-migration",
+      "priority": 800,
+      "pattern": "^internal/migration/.*$",
+      "check_sets": ["migration-core"],
+      "risk_domains": ["migration"]
+    },
+    {
+      "id": "internal-testyardmigration",
+      "priority": 790,
+      "pattern": "^internal/testyardmigration/.*$",
+      "check_sets": ["migration-core"],
+      "risk_domains": ["migration"]
+    },
+    {
+      "id": "internal-testvmsruntime",
+      "priority": 780,
+      "pattern": "^internal/adapters/testvmsruntime/.*$",
+      "check_sets": ["broker-runtime"],
+      "risk_domains": ["broker-admission"]
+    },
+    {
+      "id": "internal-transport",
+      "priority": 770,
+      "pattern": "^internal/adapters/transport/.*$",
+      "check_sets": ["ssh-transport"],
+      "risk_domains": ["ssh-remote-transport"]
+    },
+    {
+      "id": "internal-remotecontrol",
+      "priority": 760,
+      "pattern": "^internal/adapters/remotecontrol/.*$",
+      "check_sets": ["ssh-transport"],
+      "risk_domains": ["ssh-remote-transport"]
+    },
+    {
+      "id": "internal-credentialmeta",
+      "priority": 750,
+      "pattern": "^internal/adapters/credentialmeta/.*$",
+      "check_sets": ["credential-profile"],
+      "risk_domains": ["credential-profile"]
+    },
+    {
+      "id": "internal-credentialruntime",
+      "priority": 740,
+      "pattern": "^internal/adapters/credentialruntime/.*$",
+      "check_sets": ["credential-profile"],
+      "risk_domains": ["credential-profile"]
+    },
+    {
+      "id": "internal-securityruntime",
+      "priority": 730,
+      "pattern": "^internal/adapters/securityruntime/.*$",
+      "check_sets": ["credential-profile"],
+      "risk_domains": ["credential-profile"]
+    },
+    {
+      "id": "internal-releaseruntime",
+      "priority": 720,
+      "pattern": "^internal/adapters/releaseruntime/.*$",
+      "check_sets": ["migration-release"],
+      "risk_domains": ["release-runner"]
+    },
+    {
+      "id": "internal-reconcileruntime",
+      "priority": 710,
+      "pattern": "^internal/adapters/reconcileruntime/.*$",
+      "check_sets": ["boot-power"],
+      "risk_domains": ["boot-lifecycle"]
+    },
+    {
+      "id": "internal-incusclient",
+      "priority": 700,
+      "pattern": "^internal/adapters/incusclient/.*$",
+      "check_sets": ["go-adapters-incusclient", "project-runtime"],
+      "risk_domains": ["incus-runtime"]
+    },
+    {
+      "id": "internal-projectruntime",
+      "priority": 690,
+      "pattern": "^internal/adapters/projectruntime/.*$",
+      "check_sets": ["project-runtime"],
+      "risk_domains": ["project-lifecycle"]
+    },
+    {
+      "id": "internal-hostruntime",
+      "priority": 680,
+      "pattern": "^internal/adapters/hostruntime/.*$",
+      "check_sets": ["go-adapters-hostruntime", "host-free-core"],
+      "risk_domains": ["host-bootstrap"]
+    },
+    {
+      "id": "internal-shelladapter",
+      "priority": 670,
+      "pattern": "^internal/adapters/shelladapter/.*$",
+      "check_sets": ["go-adapters-shelladapter", "host-free-core"],
+      "risk_domains": ["command-control"]
+    },
+    {
+      "id": "internal-statusruntime",
+      "priority": 660,
+      "pattern": "^internal/adapters/statusruntime/.*$",
+      "check_sets": ["go-adapters-statusruntime", "host-free-core"],
+      "risk_domains": ["command-control"]
+    },
+    {
+      "id": "internal-application",
+      "priority": 650,
+      "pattern": "^internal/application/.*$",
+      "check_sets": ["go-application", "cli-control"],
+      "risk_domains": ["command-control"]
+    },
+    {
+      "id": "internal-audit",
+      "priority": 640,
+      "pattern": "^internal/audit/.*$",
+      "check_sets": ["go-audit", "cli-control"],
+      "risk_domains": ["command-control"]
+    },
+    {
+      "id": "internal-cli",
+      "priority": 630,
+      "pattern": "^internal/cli/.*$",
+      "check_sets": ["go-cli", "cli-control"],
+      "risk_domains": ["command-control"]
+    },
+    {
+      "id": "internal-command",
+      "priority": 620,
+      "pattern": "^internal/command/.*$",
+      "check_sets": ["go-command", "cli-control"],
+      "risk_domains": ["command-control"]
+    },
+    {
+      "id": "internal-domain",
+      "priority": 610,
+      "pattern": "^internal/domain/.*$",
+      "check_sets": ["go-domain", "cli-control"],
+      "risk_domains": ["command-control"]
+    },
+    {
+      "id": "internal-rpc",
+      "priority": 600,
+      "pattern": "^internal/rpc/.*$",
+      "check_sets": ["cli-control", "ssh-transport"],
+      "risk_domains": ["ssh-remote-transport"]
+    },
+    {
+      "id": "internal-sshidentity",
+      "priority": 590,
+      "pattern": "^internal/sshidentity/.*$",
+      "check_sets": ["ssh-transport"],
+      "risk_domains": ["ssh-remote-transport"]
+    },
+    {
+      "id": "internal-sshrelay",
+      "priority": 580,
+      "pattern": "^internal/sshrelay/.*$",
+      "check_sets": ["ssh-transport"],
+      "risk_domains": ["ssh-remote-transport"]
+    },
+    {
+      "id": "internal-credential",
+      "priority": 570,
+      "pattern": "^internal/credential/.*$",
+      "check_sets": ["credential-profile"],
+      "risk_domains": ["credential-profile"]
+    },
+    {
+      "id": "internal-resource",
+      "priority": 560,
+      "pattern": "^internal/resource/.*$",
+      "check_sets": ["go-resource", "profile-generic"],
+      "risk_domains": ["profile-resource"]
+    },
+    {
+      "id": "internal-configsync",
+      "priority": 550,
+      "pattern": "^internal/configsync/.*$",
+      "check_sets": ["go-configsync", "host-free-core"],
+      "risk_domains": ["config-state"]
+    },
+    {
+      "id": "internal-ownerinventory",
+      "priority": 540,
+      "pattern": "^internal/ownerinventory/.*$",
+      "check_sets": ["go-ownerinventory", "broker-runtime"],
+      "risk_domains": ["broker-admission"]
+    },
+    {
+      "id": "internal-config",
+      "priority": 530,
+      "pattern": "^internal/config/.*$",
+      "check_sets": ["go-config", "config-core"],
+      "risk_domains": ["config-state"]
+    },
+    {
+      "id": "internal-ports",
+      "priority": 520,
+      "pattern": "^internal/ports/.*$",
+      "check_sets": ["go-ports", "host-free-core"],
+      "risk_domains": ["config-state"]
+    },
+    {
+      "id": "internal-state",
+      "priority": 510,
+      "pattern": "^internal/state/.*$",
+      "check_sets": ["go-state", "host-free-core"],
+      "risk_domains": ["durable-layout"]
+    },
+    {
+      "id": "internal-systemdunit",
+      "priority": 500,
+      "pattern": "^internal/systemdunit/.*$",
+      "check_sets": ["boot-power"],
+      "risk_domains": ["boot-lifecycle"]
+    },
+    {
+      "id": "internal-shellquote",
+      "priority": 490,
+      "pattern": "^internal/shellquote/.*$",
+      "check_sets": ["go-shellquote", "host-free-core"],
+      "risk_domains": ["command-control"]
+    },
+    {
+      "id": "internal-architecture",
+      "priority": 480,
+      "pattern": "^internal/architecture/.*$",
+      "check_sets": ["go-architecture"],
+      "risk_domains": []
+    },
+    {
+      "id": "internal-contracttest",
+      "priority": 470,
+      "pattern": "^internal/contracttest/.*$",
+      "check_sets": ["go-contracttest"],
+      "risk_domains": []
+    },
+    {
+      "id": "internal-testkit",
+      "priority": 460,
+      "pattern": "^internal/testkit/.*$",
+      "check_sets": ["go-testkit"],
+      "risk_domains": []
+    },
+    {
+      "id": "internal-other-adapters",
+      "priority": 450,
+      "pattern": "^internal/adapters/(projectruntime|reconcileruntime|releaseruntime|shelladapter|statusruntime)/.*$",
+      "check_sets": ["host-free-core"],
+      "risk_domains": ["command-control"]
+    },
+    {
+      "id": "yard-command",
+      "priority": 440,
+      "pattern": "^(bin/yard|cmd/yard/.*|completions/.*)$",
+      "check_sets": ["cli-control"],
+      "risk_domains": ["command-control"]
+    },
+    {
+      "id": "config-system",
+      "priority": 430,
+      "pattern": "^config/.*$",
+      "check_sets": ["config-core", "host-free-core"],
+      "risk_domains": ["config-state"]
+    },
+    {
+      "id": "bootstrap-scripts",
+      "priority": 420,
+      "pattern": "^scripts/.*$",
+      "check_sets": ["host-free-core"],
+      "risk_domains": ["host-bootstrap"]
+    },
+    {
+      "id": "e2e-infrastructure",
+      "priority": 410,
+      "pattern": "^dev/e2e/.*$",
+      "check_sets": ["e2e-infrastructure"],
+      "risk_domains": ["project-lifecycle"]
+    },
+    {
+      "id": "development-tools",
+      "priority": 400,
+      "pattern": "^dev/.*$",
+      "check_sets": ["host-free-core"],
+      "risk_domains": []
+    },
+    {
+      "id": "shell-tests",
+      "priority": 390,
+      "pattern": "^tests/.*$",
+      "check_sets": ["host-free-core"],
+      "risk_domains": []
+    },
+    {
+      "id": "veranda-rust",
+      "priority": 380,
+      "pattern": "^veranda/src-tauri/.*$",
+      "check_sets": ["veranda-rust"],
+      "risk_domains": ["veranda"]
+    },
+    {
+      "id": "veranda-frontend",
+      "priority": 370,
+      "pattern": "^veranda/.*$",
+      "check_sets": ["veranda-frontend"],
+      "risk_domains": ["veranda"]
+    },
+    {
+      "id": "ci-workflows",
+      "priority": 360,
+      "pattern": "^\\.github/.*$",
+      "check_sets": ["host-free-all"],
+      "risk_domains": []
+    },
+    {
+      "id": "root-build-files",
+      "priority": 350,
+      "pattern": "^Makefile$",
+      "check_sets": ["host-free-all"],
+      "risk_domains": ["dependency-compatibility"]
+    },
+    {
+      "id": "documentation-and-metadata",
+      "priority": 340,
+      "pattern": "^(docs/.*|README\\.md|AGENTS\\.md|CLAUDE\\.md|LICENSE|\\.gitignore)$",
+      "check_sets": [],
+      "risk_domains": []
+    }
+  ],
+  "standalone_full_domains": [
+    "allocation-fencing-lease-identity",
+    "checkpoint-resume",
+    "full-matrix-composition",
+    "marker-owned-cleanup"
+  ],
+  "high_risk_combinations": [
+    ["boot-lifecycle", "migration"],
+    ["broker-admission", "ssh-remote-transport"],
+    ["durable-layout", "release-runner"]
+  ],
+  "default_multi_domain_full": true,
+  "safe_multi_domain_combinations": [
+    {
+      "domains": ["android-profile", "profile-resource"],
+      "contract": "Android provision and emulator resource contracts",
+      "rationale": "The named Android checks cover both the specialized profile and generic resource protocol."
+    },
+    {
+      "domains": ["external-service-profile", "profile-resource"],
+      "contract": "Named external-service provision and resource contracts",
+      "rationale": "Hermes and OpenClaw rules select their named contracts in addition to the generic resource lifecycle."
+    },
+    {
+      "domains": ["orca-gpu-profile", "profile-resource"],
+      "contract": "Orca host-free and real-host resource contracts",
+      "rationale": "The Orca rule selects its dedicated resource contract and the generic profile-resource lane."
+    }
+  ]
+}

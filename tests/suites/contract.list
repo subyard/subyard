@@ -9,6 +9,7 @@ paseo-agent-contract.sh
 power-reconciler-systemd.sh
 prompt-contract.sh
 provision-profile-check.sh
+test-impact.sh
 test-vms.sh
 workflow-real-adapter-gate.sh
 yard-extras-convergence.sh

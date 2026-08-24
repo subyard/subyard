@@ -197,10 +197,16 @@ func TestCriticalShellCallerGraphIsExact(t *testing.T) {
 
 func TestShellTestsStayOutsideProductionTrees(t *testing.T) {
 	root := filepath.Clean(filepath.Join("..", ".."))
+	productionCommands := map[string]bool{
+		filepath.Join(root, "dev", "test-impact.sh"): true,
+	}
 	for _, directory := range []string{"scripts", "config", "dev"} {
 		err := filepath.WalkDir(filepath.Join(root, directory), func(path string, entry os.DirEntry, err error) error {
 			if err != nil {
 				return err
+			}
+			if productionCommands[path] {
+				return nil
 			}
 			if !entry.IsDir() && strings.HasPrefix(entry.Name(), "test-") &&
 				strings.HasSuffix(entry.Name(), ".sh") {
