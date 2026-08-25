@@ -470,10 +470,13 @@ func (runtime *Runtime) latestTag(ctx context.Context, repository string) (strin
 		return "", errors.New("could not resolve the stable release")
 	}
 	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("GitHub latest release request returned %s", response.Status)
+	}
 	var payload struct {
 		Tag string `json:"tag_name"`
 	}
-	if response.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&payload) != nil || payload.Tag == "" {
+	if json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&payload) != nil || payload.Tag == "" {
 		return "", errors.New("latest release has no valid tag")
 	}
 	return payload.Tag, nil

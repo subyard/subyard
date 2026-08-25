@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -14,6 +16,12 @@ import (
 
 	"github.com/Subyard/Subyard/internal/domain"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return function(request)
+}
 
 func TestPrepareReturnsTypedReleaseActions(t *testing.T) {
 	home := t.TempDir()
@@ -67,6 +75,24 @@ func TestPrepareReturnsTypedReleaseActions(t *testing.T) {
 	}
 	if err := (Prepared{}).Execute(context.Background()); err == nil {
 		t.Fatal("empty prepared release operation was executable")
+	}
+}
+
+func TestPrepareReportsGitHubLatestReleaseHTTPStatus(t *testing.T) {
+	release := New(Config{
+		Environment: map[string]string{"HOME": t.TempDir()},
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Status:     "403 Forbidden",
+				Body:       io.NopCloser(strings.NewReader(`{"message":"rate limit exceeded"}`)),
+			}, nil
+		})},
+	})
+
+	_, err := release.Prepare(context.Background(), nil)
+	if err == nil || err.Error() != "GitHub latest release request returned 403 Forbidden" {
+		t.Fatalf("latest release error = %v", err)
 	}
 }
 
