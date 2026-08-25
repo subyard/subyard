@@ -1922,7 +1922,7 @@ func freshMigrationEnvironment(
 ) map[string]string {
 	environment := make(map[string]string, len(inherited)+1)
 	for name, value := range inherited {
-		if _, setting := config.LookupSetting(name); setting {
+		if _, setting := config.LookupSetting(name); setting || config.IsLegacySetting(name) {
 			continue
 		}
 		switch name {
@@ -2660,24 +2660,6 @@ func structuredAdapterContext(yard domain.Context) map[string]string {
 		"RESTRICTED_DISK_PATHS":         yard.Paths.HostBase,
 		"ASSUME_YES":                    "1",
 		"PROG":                          cliProgramName,
-	}
-}
-
-var legacyAdapterAliases = map[string]string{
-	"YARD_TYPE":           "ACCESS_KIND",
-	"INSTANCE_TYPE":       "YARD_KIND",
-	"INSTANCE_NAME":       "YARD_INSTANCE_NAME",
-	"REMOTE_DEST":         "OWNER_ENDPOINT",
-	"REMOTE_YARD":         "OWNER_YARD_NAME",
-	"BASE_IMAGE":          "YARD_IMAGE",
-	"BASE_IMAGE_FALLBACK": "YARD_IMAGE_FALLBACK",
-	"YARD_PROFILES":       "ENVIRONMENT_PROFILES",
-	"AGENTS":              "CODING_TOOL_INTEGRATIONS",
-}
-
-func addLegacyAdapterAliases(environment map[string]string) {
-	for legacy, canonical := range legacyAdapterAliases {
-		environment[legacy] = environment[canonical]
 	}
 }
 

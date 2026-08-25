@@ -782,6 +782,17 @@ var legacySettingNames = map[string]string{
 	"AGENTS":              "CODING_TOOL_INTEGRATIONS",
 }
 
+func IsLegacySetting(name string) bool {
+	_, legacy := legacySettingNames[name]
+	return legacy
+}
+
+func AddLegacySettingAliases(values map[string]string) {
+	for legacy, canonical := range legacySettingNames {
+		values[legacy] = values[canonical]
+	}
+}
+
 func canonicalSettingName(name string) string {
 	if canonical, legacy := legacySettingNames[name]; legacy {
 		return canonical

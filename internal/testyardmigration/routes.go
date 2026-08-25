@@ -5,13 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
-	"golang.org/x/crypto/ssh"
+	"github.com/Subyard/Subyard/internal/adapters/testvmsruntime"
 )
 
 const (
@@ -39,11 +38,6 @@ type managedYard struct {
 	Yard     string
 	Status   string
 	Mounted  bool
-}
-
-type routeIdentity struct {
-	Hostname string
-	HostKey  string
 }
 
 // PrepareRouteConsumers snapshots every existing non-owner local yard before
@@ -101,18 +95,16 @@ func CommitRouteConsumers(ctx context.Context, options Options, before string) e
 	if !prepared.Active {
 		return VerifyRouteConsumers(ctx, options, before)
 	}
-	if err := validateCommitInventory(ctx, options, prepared, false); err != nil {
+	yards, err := validateCommitInventory(ctx, options, prepared, false)
+	if err != nil {
 		return err
 	}
 	routeReady, err := inspectCurrentRoute(options)
 	if err != nil {
 		return err
 	}
-	yards, err := inspectManagedYards(ctx, options)
-	if err != nil {
-		return err
-	}
-	if !routeReady || !hasManagedYard(yards, CurrentYard) {
+	if !routeReady || !hasManagedYard(yards, CurrentYard) ||
+		managedYardRunning(yards, CurrentYard) {
 		if err := run(
 			ctx,
 			options,
@@ -124,12 +116,10 @@ func CommitRouteConsumers(ctx context.Context, options Options, before string) e
 			return fmt.Errorf("publish canonical test-yard route: %w", err)
 		}
 	}
-	if routeReady, err = inspectCurrentRoute(options); err != nil {
+	if err := validateRouteSource(options); err != nil {
 		return err
-	} else if !routeReady {
-		return errors.New("test-yard broker reconcile did not publish the canonical route")
 	}
-	yards, err = inspectManagedYards(ctx, options)
+	yards, err = validateCommitInventory(ctx, options, prepared, true)
 	if err != nil {
 		return err
 	}
@@ -137,16 +127,6 @@ func CommitRouteConsumers(ctx context.Context, options Options, before string) e
 		if err := validateCurrentRouteIdentity(ctx, options); err != nil {
 			return err
 		}
-	}
-	if err := validateRouteSource(options); err != nil {
-		return err
-	}
-	if err := validateCommitInventory(ctx, options, prepared, true); err != nil {
-		return err
-	}
-	yards, err = inspectManagedYards(ctx, options)
-	if err != nil {
-		return err
 	}
 	for _, yard := range yards {
 		if yard.Yard == LegacyYard || yard.Mounted {
@@ -368,31 +348,31 @@ func validateCommitInventory(
 	options Options,
 	prepared routeConsumersState,
 	requireCurrent bool,
-) error {
+) ([]managedYard, error) {
 	registration, err := inspectRegistration(options)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if registration.state != StateCurrent {
-		return fmt.Errorf(
+		return nil, fmt.Errorf(
 			"route consumer operation must follow owner migration; found %s registration",
 			registration.state,
 		)
 	}
 	yards, err := inspectManagedYards(ctx, options)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if hasManagedYard(yards, LegacyYard) {
-		return errors.New("legacy e2e-yard instance remains before route reconciliation")
+		return nil, errors.New("legacy e2e-yard instance remains before route reconciliation")
 	}
 	if requireCurrent && !hasManagedYard(yards, CurrentYard) {
-		return errors.New("canonical test-yard instance is absent after route publication")
+		return nil, errors.New("canonical test-yard instance is absent after route publication")
 	}
 	if err := validatePreparedSet(prepared.Consumers, nonOwnerYards(yards), true); err != nil {
-		return fmt.Errorf("route consumer inventory changed before commit: %w", err)
+		return nil, fmt.Errorf("route consumer inventory changed before commit: %w", err)
 	}
-	return nil
+	return yards, nil
 }
 
 func managedYardRunning(yards []managedYard, name string) bool {
@@ -511,179 +491,39 @@ func inspectManagedYards(ctx context.Context, options Options) ([]managedYard, e
 }
 
 func inspectCurrentRoute(options Options) (bool, error) {
-	ready, _, err := inspectCurrentRouteIdentity(options)
+	_, ready, err := testvmsruntime.ReadPublishedRoute(
+		filepath.Join(routeSource(options), CurrentYard),
+	)
 	return ready, err
 }
 
-func inspectCurrentRouteIdentity(options Options) (bool, routeIdentity, error) {
-	identity := routeIdentity{}
-	root := filepath.Join(routeSource(options), CurrentYard)
-	current := filepath.Join(root, "current")
-	target, err := os.Readlink(current)
-	if errors.Is(err, os.ErrNotExist) {
-		return false, identity, nil
-	}
-	if err != nil {
-		return false, identity, fmt.Errorf("inspect canonical test-yard route: %w", err)
-	}
-	if filepath.Base(target) != target || !strings.HasPrefix(target, ".route-") {
-		return false, identity, errors.New("canonical test-yard route has an unsafe generation link")
-	}
-	generation := filepath.Join(root, target)
-	info, err := os.Lstat(generation)
-	if err != nil {
-		return false, identity, fmt.Errorf("inspect canonical test-yard route generation: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return false, identity, errors.New("canonical test-yard route generation is not a directory")
-	}
-	route, err := readRouteFile(filepath.Join(generation, "route.tsv"))
-	if err != nil {
-		return false, identity, err
-	}
-	lines := strings.Split(strings.TrimSuffix(string(route), "\n"), "\n")
-	if len(lines) != 4 || lines[0] != "subyard-e2e-route-v1" {
-		return false, identity, errors.New("canonical test-yard route payload is invalid")
-	}
-	values := map[string]string{}
-	for _, line := range lines[1:] {
-		fields := strings.Split(line, "\t")
-		if len(fields) != 2 || values[fields[0]] != "" {
-			return false, identity, errors.New("canonical test-yard route fields are invalid")
-		}
-		values[fields[0]] = fields[1]
-	}
-	if ip := net.ParseIP(values["hostname"]); ip == nil || ip.To4() == nil ||
-		values["port"] != "22" ||
-		values["host_key_alias"] != "subyard-e2e-bastion" {
-		return false, identity, errors.New("canonical test-yard route values are invalid")
-	}
-	knownHosts, err := readRouteFile(filepath.Join(generation, "known_hosts"))
-	if err != nil {
-		return false, identity, err
-	}
-	fields := strings.Fields(string(knownHosts))
-	if len(fields) != 3 || fields[0] != "subyard-e2e-bastion" ||
-		fields[1] != ssh.KeyAlgoED25519 {
-		return false, identity, errors.New("canonical test-yard host-key pin is invalid")
-	}
-	if _, _, _, _, err := ssh.ParseAuthorizedKey([]byte(fields[1] + " " + fields[2])); err != nil {
-		return false, identity, errors.New("canonical test-yard host-key pin cannot be parsed")
-	}
-	identity.Hostname = values["hostname"]
-	identity.HostKey = fields[1] + " " + fields[2]
-	return true, identity, nil
-}
-
 func validateCurrentRouteIdentity(ctx context.Context, options Options) error {
-	ready, expected, err := inspectCurrentRouteIdentity(options)
+	expected, ready, err := testvmsruntime.ReadPublishedRoute(
+		filepath.Join(routeSource(options), CurrentYard),
+	)
 	if err != nil {
 		return err
 	}
 	if !ready {
 		return errors.New("canonical test-yard route is unavailable")
 	}
-	routes, err := runIncus(
-		ctx,
-		options,
-		"exec",
-		"yard-"+CurrentYard,
-		"--project",
-		"subyard-"+CurrentYard,
-		"--",
-		"ip",
-		"-4",
-		"-o",
-		"route",
-		"show",
-		"default",
-	)
+	observed, err := testvmsruntime.ObserveRoute(func(arguments ...string) (string, error) {
+		incusArguments := []string{
+			"exec", "yard-" + CurrentYard, "--project", "subyard-" + CurrentYard, "--",
+		}
+		payload, err := runIncus(ctx, options, append(incusArguments, arguments...)...)
+		return string(payload), err
+	})
 	if err != nil {
-		return fmt.Errorf("inspect canonical test-yard route device: %w", err)
+		return fmt.Errorf("inspect canonical test-yard route identity: %w", err)
 	}
-	var devices []string
-	for _, line := range strings.Split(string(routes), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) == 0 || fields[0] != "default" {
-			continue
-		}
-		for index := 0; index+1 < len(fields); index++ {
-			if fields[index] == "dev" {
-				devices = append(devices, fields[index+1])
-			}
-		}
-	}
-	if len(devices) != 1 {
-		return errors.New("canonical test-yard route device is ambiguous")
-	}
-	addresses, err := runIncus(
-		ctx,
-		options,
-		"exec",
-		"yard-"+CurrentYard,
-		"--project",
-		"subyard-"+CurrentYard,
-		"--",
-		"ip",
-		"-4",
-		"-o",
-		"address",
-		"show",
-		"dev",
-		devices[0],
-		"scope",
-		"global",
-	)
-	if err != nil {
-		return fmt.Errorf("inspect canonical test-yard route address: %w", err)
-	}
-	var found []string
-	for _, line := range strings.Split(string(addresses), "\n") {
-		fields := strings.Fields(line)
-		for index := 0; index+1 < len(fields); index++ {
-			if fields[index] == "inet" {
-				found = append(found, strings.SplitN(fields[index+1], "/", 2)[0])
-			}
-		}
-	}
-	if len(found) != 1 || found[0] != expected.Hostname {
+	if observed.Hostname != expected.Hostname {
 		return errors.New("canonical test-yard route points to a stale outer-yard address")
 	}
-	hostKey, err := runIncus(
-		ctx,
-		options,
-		"exec",
-		"yard-"+CurrentYard,
-		"--project",
-		"subyard-"+CurrentYard,
-		"--",
-		"cat",
-		"/etc/ssh/ssh_host_ed25519_key.pub",
-	)
-	if err != nil {
-		return fmt.Errorf("inspect canonical test-yard host key: %w", err)
-	}
-	fields := strings.Fields(string(hostKey))
-	if len(fields) < 2 || fields[0] != ssh.KeyAlgoED25519 ||
-		fields[0]+" "+fields[1] != expected.HostKey {
+	if observed.HostKey != expected.HostKey {
 		return errors.New("canonical test-yard route contains a stale host-key pin")
 	}
 	return nil
-}
-
-func readRouteFile(path string) ([]byte, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return nil, fmt.Errorf("inspect route artifact %s: %w", filepath.Base(path), err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("route artifact %s is not a regular file", filepath.Base(path))
-	}
-	payload, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read route artifact %s: %w", filepath.Base(path), err)
-	}
-	return payload, nil
 }
 
 func validateRouteSource(options Options) error {

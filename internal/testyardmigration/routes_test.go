@@ -61,19 +61,24 @@ func TestRouteConsumersPrepareRejectsForeignDevice(t *testing.T) {
 	}
 }
 
-func TestRouteConsumersCommitRejectsStaleCanonicalRoute(t *testing.T) {
+func TestRouteConsumersCommitReconcilesStaleCanonicalRoute(t *testing.T) {
 	options, state := routeConsumerFixture(t, StateCurrent, true)
 	before, err := PrepareRouteConsumers(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
 	write(t, state.ownerAddress, "10.0.0.9\n")
-	if err := CommitRouteConsumers(context.Background(), options, before); err == nil ||
-		!strings.Contains(err.Error(), "stale outer-yard address") {
-		t.Fatalf("stale canonical route commit = %v", err)
+	if err := CommitRouteConsumers(context.Background(), options, before); err != nil {
+		t.Fatal(err)
 	}
-	if got := strings.TrimSpace(read(t, state.defaultDevice)); got != "missing" {
-		t.Fatalf("stale route reached consumer mutation: %q", got)
+	if got := strings.TrimSpace(read(t, state.defaultDevice)); got != "correct" {
+		t.Fatalf("stale route was not reconciled before consumer mutation: %q", got)
+	}
+	if !strings.Contains(
+		read(t, state.yardCalls),
+		"-Y test-yard _migrate reconcile-test-vm-broker\n",
+	) {
+		t.Fatal("stale canonical route did not trigger bounded broker reconcile")
 	}
 }
 
@@ -186,6 +191,9 @@ func TestRouteConsumersSkipOwnerGuestProbeForStoppedCanonicalYard(t *testing.T) 
 	if strings.Contains(calls, "exec yard-test-yard --project subyard-test-yard --") {
 		t.Fatal("stopped canonical yard received an in-guest route identity probe")
 	}
+	if calls, err := os.ReadFile(state.yardCalls); err == nil && len(calls) != 0 {
+		t.Fatalf("stopped canonical yard was reconciled: %s", calls)
+	}
 }
 
 type routeFixtureState struct {
@@ -246,7 +254,13 @@ set -eu
 printf '%s\n' "$*" >> "$ROUTE_YARD_CALLS"
 case "$*" in
   "-Y test-yard _migrate reconcile-test-vm-broker")
-    [ -L "$ROUTE_ROOT/current" ] || ln -s .route-test "$ROUTE_ROOT/current"
+    generation="$ROUTE_ROOT/.route-reconciled"
+    mkdir -p "$generation"
+    printf 'subyard-e2e-route-v1\nhostname\t%s\nport\t22\nhost_key_alias\tsubyard-e2e-bastion\n' \
+      "$(cat "$ROUTE_OWNER_ADDRESS")" > "$generation/route.tsv"
+    cp "$ROUTE_ROOT/.route-test/known_hosts" "$generation/known_hosts"
+    ln -s .route-reconciled "$ROUTE_ROOT/.current-new"
+    mv -Tf "$ROUTE_ROOT/.current-new" "$ROUTE_ROOT/current"
     ;;
   *) exit 2 ;;
 esac

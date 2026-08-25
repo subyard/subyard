@@ -101,7 +101,9 @@ func TestBackendApplyInstallsCurrentEngineAndPublishesRoute(t *testing.T) {
 	if strings.Join(power, ",") != "start,stop" {
 		t.Fatalf("temporary power = %v", power)
 	}
-	current, err := currentRouteDirectory(backend.Environment["SUBYARD_E2E_CLIENT_EXPORT_DIR"])
+	current, err := PublishedRouteDirectory(
+		backend.Environment["SUBYARD_E2E_CLIENT_EXPORT_DIR"],
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +127,7 @@ func TestBackendApplyInstallsCurrentEngineAndPublishesRoute(t *testing.T) {
 	}
 }
 
-func TestStoppedBackendConvergenceUsesExactBundleMarker(t *testing.T) {
+func TestBackendConvergenceUsesExactBundleAndLiveRoute(t *testing.T) {
 	backend := fixtureBackend(t)
 	state, err := backend.state()
 	if err != nil {
@@ -135,23 +137,37 @@ func TestStoppedBackendConvergenceUsesExactBundleMarker(t *testing.T) {
 	if err := os.MkdirAll(generation, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(generation, "route.tsv"),
-		[]byte("subyard-e2e-route-v1\nhostname\tfixture\nport\t22\nhost_key_alias\tfixture\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(generation, "route.tsv"), []byte(
+		"subyard-e2e-route-v1\nhostname\t10.10.0.4\nport\t22\n"+
+			"host_key_alias\tsubyard-e2e-bastion\n",
+	), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	hostKey := fixturePublicKey(t)
 	if err := os.WriteFile(filepath.Join(generation, "known_hosts"),
-		[]byte("subyard-e2e-bastion "+fixturePublicKey(t)+"\n"), 0o644); err != nil {
+		[]byte("subyard-e2e-bastion "+hostKey+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Base(generation), filepath.Join(state.clientDirectory, "current")); err != nil {
+	if err := os.Symlink(filepath.Base(generation),
+		filepath.Join(state.clientDirectory, "current")); err != nil {
 		t.Fatal(err)
 	}
+	outer := "STOPPED"
 	runner := &fakeRunner{handler: func(_ string, arguments, _ []string, _ io.Reader) ([]byte, []byte, error) {
 		switch strings.Join(arguments, " ") {
 		case "config get yard-test user.subyard.test_vms_revision --project subyard-test":
 			return []byte(state.marker + "\n"), nil, nil
 		case "list yard-test --project subyard-test -f csv -c s":
-			return []byte("STOPPED\n"), nil, nil
+			return []byte(outer + "\n"), nil, nil
+		case "exec yard-test --project subyard-test -- ip -4 -o route show default":
+			return []byte("default via 10.10.0.1 dev eth0\n"), nil, nil
+		case "exec yard-test --project subyard-test -- ip -4 -o address show dev eth0 scope global":
+			return []byte("2: eth0 inet 10.10.0.5/24 scope global eth0\n"), nil, nil
+		case "exec yard-test --project subyard-test -- cat /etc/ssh/ssh_host_ed25519_key.pub":
+			return []byte(hostKey + " fixture\n"), nil, nil
+		case "exec yard-test --project subyard-test --env WANT_ENABLED=1 --env WANT_ENGINE_HASH=" +
+			state.engineHash + " -- " + DefaultInstalledPath + " _test-vms-worker doctor":
+			return nil, nil, nil
 		default:
 			return nil, nil, fmt.Errorf("unexpected call: %v", arguments)
 		}
@@ -163,6 +179,14 @@ func TestStoppedBackendConvergenceUsesExactBundleMarker(t *testing.T) {
 	}
 	if !converged {
 		t.Fatal("exact stopped backend was not converged")
+	}
+	outer = "RUNNING"
+	converged, err = backend.Converged(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if converged {
+		t.Fatal("stale running route was accepted")
 	}
 	if err := os.WriteFile(backend.Dispatcher, []byte("drift"), 0o755); err != nil {
 		t.Fatal(err)
@@ -201,7 +225,6 @@ func TestStoppedBackendConvergenceUsesExactBundleMarker(t *testing.T) {
 		t.Fatal("physical VM limit drift was accepted")
 	}
 }
-
 func TestDisabledBackendRemovesPublishedRoute(t *testing.T) {
 	backend := fixtureBackend(t)
 	backend.Environment["NESTED_E2E_VMS"] = "0"

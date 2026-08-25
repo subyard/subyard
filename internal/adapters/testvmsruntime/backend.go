@@ -10,8 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"golang.org/x/crypto/ssh"
 )
 
 type Backend struct {
@@ -58,12 +56,12 @@ func (backend *Backend) Converged(ctx context.Context) (bool, error) {
 	if err != nil || strings.TrimSpace(marker) != state.marker {
 		return false, nil
 	}
-	if ok, err := backend.routeConverged(state); err != nil || !ok {
-		return false, err
-	}
 	outer, err := backend.outerState(ctx)
 	if err != nil {
 		return false, nil
+	}
+	if ok, err := backend.routeConverged(ctx, state, outer == "RUNNING"); err != nil || !ok {
+		return false, err
 	}
 	if outer != "RUNNING" {
 		return outer == "STOPPED" && backend.DesiredPower == "stopped", nil
@@ -240,82 +238,42 @@ func (backend *Backend) state() (backendState, error) {
 	return state, nil
 }
 
-func (backend *Backend) routeConverged(state backendState) (bool, error) {
-	current, err := currentRouteDirectory(state.clientDirectory)
-	if err != nil && !os.IsNotExist(err) {
-		return false, err
-	}
-	route := filepath.Join(current, "route.tsv")
-	known := filepath.Join(current, "known_hosts")
+func (backend *Backend) routeConverged(
+	ctx context.Context,
+	state backendState,
+	running bool,
+) (bool, error) {
 	if state.enabled != "1" {
 		_, err := os.Lstat(filepath.Join(state.clientDirectory, "current"))
 		return os.IsNotExist(err), nil
 	}
-	routePayload, err := os.ReadFile(route)
-	if err != nil || !strings.HasPrefix(string(routePayload), "subyard-e2e-route-v1\n") {
-		return false, nil
+	published, exists, err := ReadPublishedRoute(state.clientDirectory)
+	if err != nil || !exists {
+		return false, err
 	}
-	knownPayload, err := os.ReadFile(known)
+	if !running {
+		return true, nil
+	}
+	observed, err := backend.observeRoute(ctx)
 	if err != nil {
-		return false, nil
+		return false, err
 	}
-	fields := strings.Fields(string(knownPayload))
-	if len(fields) != 3 || fields[0] != "subyard-e2e-bastion" || fields[1] != ssh.KeyAlgoED25519 {
-		return false, nil
-	}
-	_, _, _, _, err = ssh.ParseAuthorizedKey([]byte(fields[1] + " " + fields[2]))
-	return err == nil, nil
+	return published == observed, nil
+}
+
+func (backend *Backend) observeRoute(ctx context.Context) (RouteIdentity, error) {
+	return ObserveRoute(func(arguments ...string) (string, error) {
+		incusArguments := []string{
+			"exec", backend.Instance, "--project", backend.Project, "--",
+		}
+		return backend.incus(ctx, append(incusArguments, arguments...)...)
+	})
 }
 
 func (backend *Backend) publishRoute(ctx context.Context, state backendState) error {
-	routes, err := backend.incus(ctx, "exec", backend.Instance, "--project", backend.Project,
-		"--", "ip", "-4", "-o", "route", "show", "default")
+	identity, err := backend.observeRoute(ctx)
 	if err != nil {
 		return err
-	}
-	interfaces := map[string]bool{}
-	for _, line := range strings.Split(routes, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) == 0 || fields[0] != "default" {
-			continue
-		}
-		for index := 0; index+1 < len(fields); index++ {
-			if fields[index] == "dev" {
-				interfaces[fields[index+1]] = true
-			}
-		}
-	}
-	if len(interfaces) != 1 {
-		return errors.New("could not resolve the agent route to the outer yard")
-	}
-	var device string
-	for device = range interfaces {
-	}
-	addresses, err := backend.incus(ctx, "exec", backend.Instance, "--project", backend.Project,
-		"--", "ip", "-4", "-o", "address", "show", "dev", device, "scope", "global")
-	if err != nil {
-		return err
-	}
-	var addressesFound []string
-	for _, line := range strings.Split(addresses, "\n") {
-		fields := strings.Fields(line)
-		for index := 0; index+1 < len(fields); index++ {
-			if fields[index] == "inet" {
-				addressesFound = append(addressesFound, strings.SplitN(fields[index+1], "/", 2)[0])
-			}
-		}
-	}
-	if len(addressesFound) != 1 || !safeIPv4(addressesFound[0]) {
-		return errors.New("unsafe outer-yard IPv4 address")
-	}
-	hostKeyPayload, err := backend.incus(ctx, "exec", backend.Instance, "--project", backend.Project,
-		"--", "cat", "/etc/ssh/ssh_host_ed25519_key.pub")
-	if err != nil {
-		return err
-	}
-	hostKey, err := normalizedPublicKey(hostKeyPayload)
-	if err != nil {
-		return errors.New("invalid outer-yard SSH host key")
 	}
 	if err := os.MkdirAll(state.clientDirectory, 0o755); err != nil {
 		return err
@@ -334,13 +292,13 @@ func (backend *Backend) publishRoute(ctx context.Context, state backendState) er
 			_ = os.RemoveAll(generation)
 		}
 	}()
-	route := "subyard-e2e-route-v1\n" +
-		"hostname\t" + addressesFound[0] + "\nport\t22\nhost_key_alias\tsubyard-e2e-bastion\n"
+	route, knownHosts := RoutePayload(identity)
 	if err := writeAtomic(filepath.Join(generation, "route.tsv"), []byte(route), 0o644); err != nil {
 		return err
 	}
-	known := "subyard-e2e-bastion " + hostKey + "\n"
-	if err := writeAtomic(filepath.Join(generation, "known_hosts"), []byte(known), 0o644); err != nil {
+	if err := writeAtomic(
+		filepath.Join(generation, "known_hosts"), []byte(knownHosts), 0o644,
+	); err != nil {
 		return err
 	}
 	link := filepath.Join(state.clientDirectory, ".current-new")
@@ -362,18 +320,6 @@ func (backend *Backend) removeRoute(state backendState) error {
 		return err
 	}
 	return nil
-}
-
-func currentRouteDirectory(root string) (string, error) {
-	link := filepath.Join(root, "current")
-	target, err := os.Readlink(link)
-	if err != nil {
-		return "", err
-	}
-	if filepath.Base(target) != target || !strings.HasPrefix(target, ".route-") {
-		return "", errors.New("unsafe test-vms route generation")
-	}
-	return filepath.Join(root, target), nil
 }
 
 func removeInactiveRouteGenerations(root, active string) error {

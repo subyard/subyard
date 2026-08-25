@@ -805,7 +805,10 @@ printf 'retained-adapter-ok\n' > "@MARKER@"
 	if !ok {
 		t.Fatalf("ordinary init platform = %T", ordinaryPlatform)
 	}
-	for alias := range legacyAdapterAliases {
+	for _, alias := range strings.Fields(
+		"YARD_TYPE INSTANCE_TYPE INSTANCE_NAME REMOTE_DEST REMOTE_YARD " +
+			"BASE_IMAGE BASE_IMAGE_FALLBACK YARD_PROFILES AGENTS",
+	) {
 		prefix := alias + "="
 		if slices.ContainsFunc(ordinaryPlatform.Environment, func(assignment string) bool {
 			return strings.HasPrefix(assignment, prefix)
