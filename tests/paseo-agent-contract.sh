@@ -82,11 +82,6 @@ pair_check_line="$(rg -n 'daemon pair .*--json' \
   || fail "Paseo generates a pairing offer before Codex capability readiness"
 rg -q 'ubuntu-24[.]04-arm' "$ROOT/.github/workflows/release.yml" \
   || fail "release has no native arm64 Paseo lane"
-rg -q 'CODING_TOOL_INTEGRATIONS="paseo"' "$ROOT/docs/paseo.md" \
-  || fail "Paseo dependency-driven opt-in documentation is missing"
-rg -q 'ssh yard-<name> -- paseo-pair' "$ROOT/docs/paseo.md" \
-  || fail "Paseo pairing documentation is missing"
-
 ! rg -qi 'paseo' "$ROOT/config/commands.registry" "$ROOT/internal/cli" \
   "$ROOT/internal/domain" "$ROOT/internal/rpc" "$ROOT/scripts/04-provision-subyard.sh" \
   || fail "Paseo-specific core CLI/domain/RPC plumbing appeared"

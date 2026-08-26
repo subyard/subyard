@@ -1,7 +1,7 @@
 {
-  // Subyard default devcontainer for the `openclaw` profile.
-  // Public/committed: generic, no host paths, no secrets. A project may override
-  // any of this with its own .devcontainer/. See ../README.md.
+  // Copyable reference devcontainer for projects using the `openclaw` profile.
+  // Public/committed: generic, no host paths, no secrets. Copy and review this
+  // template in the project before use. See ../README.md.
   "name": "${localWorkspaceFolderBasename}",
   "build": {
     "dockerfile": "../docker/dev.Dockerfile",
@@ -40,8 +40,8 @@
   // (VS Code Remote-SSH), not in this container.
   "mounts": [
     "source=subyard-${localWorkspaceFolderBasename}-home,target=/home/dev,type=volume"
-    // ssh-agent: forwarded into the yard by default (FORWARD_SSH_AGENT=1). To use
-    // it from this container too, bind the forwarded socket:
+    // ssh-agent: when explicitly forwarded into the yard (FORWARD_SSH_AGENT=1),
+    // bind the forwarded socket to use it from this container too:
     //   "source=${localEnv:SSH_AUTH_SOCK},target=/ssh-agent,type=bind"  // + containerEnv SSH_AUTH_SOCK=/ssh-agent
   ],
   "runArgs": [

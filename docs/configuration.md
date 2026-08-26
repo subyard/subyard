@@ -272,14 +272,15 @@ To roll back desired settings, check out or revert the intended Git revision and
 and sync commands. An interrupted confirmed transaction is recovered before the next mutating sync;
 `--check` reports pending recovery without changing the live root.
 
-When invoked for a registered remote yard, the `config sync` family runs on that owner host:
+When invoked for a registered remote yard, the `config sync` family runs on that owner host. For
+example, for HostID `owner-host` and its `default` yard:
 
 ```sh
-yard -Y remote config sync connect \
+yard -Y owner-host/default config sync connect \
   git@github.com:you/subyard-config.git \
-  --host-id remote-owner
-yard -Y remote config sync status
-yard -Y remote config sync pull --apply
+  --host-id owner-host
+yard -Y owner-host/default config sync status
+yard -Y owner-host/default config sync pull --apply
 ```
 
 The checkout and Git authentication stay on the owner host; the controller does not upload or cache

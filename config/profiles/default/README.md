@@ -1,10 +1,7 @@
-# `default` — fallback profile assets
+# `default` — reserved profile assets
 
-Shared defaults a profile inherits when its own folder does not provide them.
-Resolution: a profile uses `config/profiles/<name>/devcontainer/` if present,
-otherwise `config/profiles/default/devcontainer/`.
+This directory is reserved for future profile-wide assets. It is intentionally empty today.
 
-Empty for now (placeholder). When a generic, toolchain-agnostic default
-devcontainer is needed (for a profile that ships none of its own), add it here as
-`default/devcontainer/`. Profile-specific devcontainers live in their own profile
-folder — e.g. `config/profiles/openclaw/devcontainer/`.
+The current runtime does not select, copy, or stage a default devcontainer from this path. Projects
+that use VS Code Dev Containers must carry their own `.devcontainer/`. The OpenClaw profile contains
+a [manual reference template](../openclaw/devcontainer/README.md), not an automatic fallback.

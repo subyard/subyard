@@ -6,22 +6,28 @@ agent defaults.
 
 ## Enable and pair
 
-Add `paseo` to the effective `CODING_TOOL_INTEGRATIONS` setting for the selected yard:
+Add `paseo` to the complete `CODING_TOOL_INTEGRATIONS` setting through the typed configuration
+writer. Inspect the current value first, then submit that full list with `paseo` added. Use host scope
+for the default yard and host-wide fallback, or yard scope for one named yard:
 
 ```sh
-CODING_TOOL_INTEGRATIONS="paseo"
+yard config show CODING_TOOL_INTEGRATIONS
+yard config set CODING_TOOL_INTEGRATIONS "claude codex opencode pi paseo" --scope host
+
+yard -Y demo config show CODING_TOOL_INTEGRATIONS
+yard -Y demo config set CODING_TOOL_INTEGRATIONS "codex paseo" --scope yard
 ```
 
 Paseo declares Codex as a required provider. Subyard expands the dependency automatically and
 installs its pinned Codex package before Paseo, regardless of the order of entries in `CODING_TOOL_INTEGRATIONS`.
 Include other agents in the same setting when that yard should expose their command-line tools too.
 
-Put this in the host-wide Subyard settings for the default yard, or in the selected named-yard
-settings. Apply it with the normal provisioning command:
+The quoted lists are examples; preserve the integrations reported by `config show`. Run only the
+writer for the intended scope, then apply the result with the normal provisioning command:
 
 ```sh
 yard init
-yard -Y <name> init
+yard -Y demo init
 ```
 
 Provisioning installs the pinned headless runtime, starts it as the yard's `dev` user, checks its

@@ -232,15 +232,20 @@ A resource descriptor is `config/profiles/<profile>/resources/<name>.res` with:
 COMMAND=<yard-command>
 HANDLER=resources/<name>/handler.sh
 TITLE="..."
-VERBS="..."
+ACTION="<local-id> <public-verb> <assessment-class> <recovery-class>"
+ACTION="..."
 BRINGUP=<verb>
 SHUTDOWN=<verb>
+PROXY="..."                       # optional typed owner-host proxy contract
 ```
 
-`HANDLER` is relative to the owning profile. Registry validation rejects path traversal, duplicate
-names/commands, collisions with core commands, invalid verbs, and missing executables. The handler
+`ACTION` is repeatable and is the source of the public verb list. Its assessment and recovery classes
+bind each operation to the shared typed confirmation policy. At least one action is required, and the
+`BRINGUP` and `SHUTDOWN` verbs must be declared by actions. `HANDLER` is relative to the owning profile.
+Registry validation rejects unknown descriptor fields, path traversal, duplicate names/commands or
+local action IDs, collisions with core commands, invalid actions, and missing executables. The handler
 owns every lifecycle verb including the silent `is-up` probe. Core code may only discover, dispatch,
-probe, and render hints from the descriptor.
+probe, and render hints from the descriptor. See the shipped `.res` files for complete examples.
 
 ## Test topology
 
@@ -260,18 +265,10 @@ contain no real secret. The opt-in E2E VM subset is documented in
 ## E2E VM acceptance lane
 
 Host-free fakes cannot prove Incus, kernel, network, mount, systemd, or real SSH behavior. The
-operator maintains a configurable pool of disposable two-VM pairs. The agent inspects
-`dev/agent-e2e.sh --status`, explicitly chooses an available configured slot `N`, and runs
-`dev/e2e/p0-acceptance.sh --slot N` without changing outer-yard lifecycle. Targeted lanes require
-the same selector; only `--list-lanes` remains slotless. Do not run this lane on the operator host or
-in the privileged outer yard.
-
-Each top-level runner owns one exact slot and never selects a neighbor. `--wait` retries only that
-slot; unknown or invalid selectors fail immediately, and outcome-unknown acquire attempts are not
-retried. `--vm 1|2|both` selects guests inside the chosen pair. Guest root may create arbitrary
-nested yards, brokers and leases, but a nested broker has an independent slot namespace that must be
-inspected and selected locally. Independent multi-pair tests use separate top-level workers with
-different explicit slots and purposes, each with its own bounded cleanup.
+operator maintains a configurable pool of disposable two-VM pairs. The canonical pool, exact-slot,
+lease, nested-slot, and cleanup contract lives in [Agent E2E VM pool](test-vms.md). The continuous
+gate is `dev/e2e/p0-acceptance.sh --slot N`; do not run it on the operator host or in the privileged
+outer yard.
 
 1. For both a container and VM context: `yard -Y <context> init`, rerun it as a no-op, introduce one
    safe managed drift (for example the ccusage convergence marker), rerun to repair it, then reboot

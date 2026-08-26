@@ -225,20 +225,6 @@ fails closed after slot rebuild, selection of another slot or any public worktre
 never contains lease credentials, guest endpoints, command payloads, controller paths or ambient
 environment. The latest 20 records are retained.
 
-Every lease-taking runner call requests one exact broker slot:
-
-```sh
-dev/agent-e2e.sh --slot "$slot" --purpose coordinated-check --vm 1 -- \
-  ./tests/some-real-host-check.sh
-dev/e2e/p0-acceptance.sh --slot "$slot"
-```
-
-The exact selector is part of atomic lease acquisition. A busy, quarantined or otherwise unavailable
-slot fails explicitly without selecting a neighbor unless bounded `--wait` was requested; waiting
-retries only that same slot. An unknown or invalid slot fails immediately. An acquire with an unknown
-outcome is not retried. The runner also verifies the returned `slot_id` before opening guest
-transport and releases a mismatched grant without guest access.
-
 Open an unrestricted root guest session or run a root command:
 
 ```sh
@@ -247,12 +233,11 @@ dev/agent-e2e.sh --slot "$slot" --ssh 2 -- id -u
 ```
 
 The wrapper creates an ephemeral Ed25519 key per lease, starts a keeper that renews once per minute,
-and releases in its exit trap. Ten minutes without a successful heartbeat expires the lease. With
-no `--wait`, an unavailable requested slot returns a distinct busy exit; `--wait` retries that slot
-with a bounded timeout. For a held slot, immediate busy, wait progress and timeout diagnostics use
-the bounded form `owner=YARD/PROJECT run=RUN purpose=PURPOSE acquired=TIME expires=TIME label=LABEL`.
-They never include a controller identity, lease credential, endpoint, host key or private path. The
-raw OpenSSH config and lease capability are internal temporary files and are not an agent API.
+and releases in its exit trap. Ten minutes without a successful heartbeat expires the lease. For a
+held slot, immediate busy, wait progress and timeout diagnostics use the bounded form
+`owner=YARD/PROJECT run=RUN purpose=PURPOSE acquired=TIME expires=TIME label=LABEL`. They never include
+a controller identity, lease credential, endpoint, host key or private path. The raw OpenSSH config
+and lease capability are internal temporary files and are not an agent API.
 
 Every wrapper invocation is a new lease for only the requested slot. The printed `e2e-vm-1` and
 `e2e-vm-2` selectors always mean the two guests inside that outer pair, never global slot names.

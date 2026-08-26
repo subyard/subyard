@@ -1,15 +1,13 @@
-# Devcontainer — `openclaw` profile
+# Reference devcontainer — `openclaw` profile
 
-The `openclaw` profile's devcontainer, alongside its contract in
-[`profile.conf`](../profile.conf): `profile.conf` says *what toolchain* an agent
-container needs; this is the ready-to-use `.devcontainer/` that delivers it for the
-"Reopen in Container" flow (`yard code .` → Remote-SSH into the yard → Reopen in
-Container).
+This directory is a copyable reference for projects that use the toolchain described by
+[`profile.conf`](../profile.conf). The current Subyard runtime does not select, copy, or stage these
+files automatically. To use the template, copy its `.devcontainer/` and `docker/` directories into
+the project, review the resource limits and tool versions, then use the normal "Reopen in Container"
+flow after `yard code .` connects through Remote-SSH.
 
-A profile uses the devcontainer in its own folder if present; otherwise it falls
-back to `config/profiles/default/devcontainer/`. A project may also ship its own
-`.devcontainer/`, which overrides both. This is the committed source for the
-devcontainer template staged at `/srv/stacks/devcontainers/templates/openclaw-default/`.
+`profile.conf` remains the source for `yard up` project environments. This reference is independent
+of that runtime path, so a project that copies it owns future updates to its copy.
 
 ## Public-repo rules applied here
 This file lives in the **public** repo, so it is generic and English, with **no
@@ -38,7 +36,7 @@ OpenClaw devcontainer and cleaned to those rules.
   see the commented line in `mounts` to use it from the container too.
 - **No project lifecycle hooks.** `initializeCommand`/`postCreateCommand` that
   reference a project's own scripts belong in that project's `.devcontainer/`,
-  not in this default.
+  not in this reference.
 - **Caches are workspace-local.** The profile's shared `/srv/cache/*` caches are
   for project-env boxes (`yard up`); wire them in per project if you want cross-container
   sharing here.

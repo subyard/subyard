@@ -22,28 +22,18 @@ yard yards
 `-Y default`, requests detailed status for exactly one yard; `yard status --all` remains the
 explicit summary form.
 
-Scalar-setting precedence is:
-
-```text
-shipped defaults
-  -> explicitly shareable scalar settings
-  -> host-wide config.env
-  -> yard derivations + selected shipped profile
-  -> yards/<name>/config.env
-  -> command environment
-```
-
-`overrides/shared/config.env` is the typed shared scalar layer. The other files below
-`overrides/shared`, `overrides/host` and yard `overrides` replace catalog-known file settings; they
-are not arbitrary configuration trees.
+Named yards use the same typed scopes, precedence and file-setting rules as the default yard. See
+[Subyard configuration](../../docs/configuration.md) for that canonical contract. Run
+`yard -Y <name> config show` to inspect effective settings and `yard config paths` to inspect their
+storage roles.
 
 Public profiles remain in the immutable runtime. Set `YARD_TEMPLATE=<profile>` for a reusable yard
 template, `ENVIRONMENT_PROFILES="<profile> ..."` to limit project EnvironmentProfiles, and
 `CODING_TOOL_INTEGRATIONS="<integration> ..."` independently for coding tools. Neither selection is
-derived from the yard name. Run
-`yard -Y <name> config show` to inspect effective settings and `yard config paths` to inspect storage
-roles. `yard config status --all-local` / `yard config apply --all-local` verify or refresh
-materialized agent files in local yards; remote yards are excluded from `--all-local`.
+derived from the yard name. If a shipped profile includes a named-yard preset, `yard -Y <name> init
+--profile <profile>` creates the persistent yard definition from that preset; later runs use plain
+`yard -Y <name> init`. `yard config status --all-local` / `yard config apply --all-local` verify or
+refresh materialized agent files in local yards; remote yards are excluded from `--all-local`.
 
 `yard teardown` removes only the selected yard and preserves the host credential ledger. Managed
 mounts stay under that yard's `HOST_BASE`; `yard bind` is the explicit exception.
@@ -57,5 +47,4 @@ SSH_PORT=2223
 
 For an isolated Hermes backend, see the [Hermes profile guide](../../docs/hermes.md).
 
-See [Subyard configuration](../../docs/configuration.md), [`docs/test-vms.md`](../../docs/test-vms.md)
-and [`docs/keys.md`](../../docs/keys.md).
+See also [`docs/test-vms.md`](../../docs/test-vms.md) and [`docs/keys.md`](../../docs/keys.md).

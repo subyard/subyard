@@ -34,9 +34,6 @@ exec "$SHELL" -l
 yard check
 yard init
 
-yard sync .
-yard code .
-yard status
 ```
 
 The runtime contains the engine, public profiles/config, completions and host adapters, but no
@@ -49,11 +46,6 @@ Upgrade with `yard update`; use `yard update --rollback` to swap back to the ret
 runtime.
 
 Run `yard --help` or `yard <command> --help` for complete command usage.
-See the [control-plane architecture](docs/control-plane.md) for module ownership, stable extension
-contracts, test topology, and the real-host acceptance lane. Paseo Desktop support is available as
-an [opt-in agent package](docs/paseo.md). A pinned
-[Orca remote server](docs/orca.md) is available as an opt-in profile resource.
-For a dedicated Hermes backend, see the [Hermes profile guide](docs/hermes.md).
 
 ## Everyday commands
 
@@ -69,8 +61,21 @@ yard provision [profile]           Apply a project profile
 yard test-vms <command>            Manage two disposable nested test VMs (opt-in)
 yard up | down | info [project]    Manage an L2 project environment
 yard keys <command>                Manage the host-side encrypted credential ledger
+yard host <command>                Register and manage remote owner hosts
 yard config <command>              Inspect or sync settings and refresh file consumers
 ```
+
+## Documentation
+
+- Operators: [configuration](docs/configuration.md), [named yards](config/yards/README.md), and the
+  [credential ledger](docs/keys.md).
+- Optional integrations: [Paseo Desktop](docs/paseo.md), [Orca remote server](docs/orca.md), and a
+  dedicated [Hermes yard](docs/hermes.md).
+- Desktop client: the current [Veranda implementation](veranda/README.md) and its
+  [UX contract](docs/veranda/README.md).
+- Contributors: [development](docs/development.md), [test selection](docs/testing.md), the
+  [E2E VM pool](docs/test-vms.md), [live acceptance](docs/real-host-acceptance.md), and the
+  [control-plane architecture](docs/control-plane.md).
 
 ## Multiple and remote yards
 
@@ -85,10 +90,13 @@ yard @default status
 yard space
 yard @openclaw space --refresh
 
-yard remote add srv1 me@srv1
+yard host add me@srv1
+yard host list
 yard list
 yard -Y owner-host/default list
 ```
+
+Replace `owner-host` with the authoritative HostID reported by `yard host add`.
 
 `yard space` reads the latest cached measurement for every local yard. Use
 `yard space --refresh` to synchronously recalculate all running local yards, or

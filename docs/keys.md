@@ -21,17 +21,20 @@ is never mounted wholesale into a yard. `yard teardown` preserves it. Back it up
 with `$SUBYARD_CONFIG_HOME`; losing the age identity makes old revisions undecryptable. Treat a copied
 identity as credential compromise and rotate every upstream credential it could decrypt.
 
-`yard remote add` and project `sync` remain secret-free. One confirmed `yard keys trust @peer`
-exchanges both owner hosts' public age recipients and signing identities, creating reciprocal
-cryptographic trust without transferring either private identity. The side with the known local/SSH
-route is `active` and initiates automatic ciphertext sync unless `--manual-only` is selected. The
-reciprocal side is `passive` (`respond-only`) when it has no reverse route. If that side later enrolls
-its own route, both sides may be active; an inbound refresh never erases an existing active route.
+Credential trust currently resolves a safe-name remote-yard context rather than an OwnerHost
+inventory selector. Create that compatibility route with `yard remote add`; the command and project
+`sync` remain secret-free. One confirmed `yard keys trust @peer` exchanges both owner hosts' public
+age recipients and signing identities, creating reciprocal cryptographic trust without transferring
+either private identity. The side with the known local/SSH route is `active` and initiates automatic
+ciphertext sync unless `--manual-only` is selected. The reciprocal side is `passive` (`respond-only`)
+when it has no reverse route. If that side later enrolls its own route, both sides may be active; an
+inbound refresh never erases an existing active route.
 
 ## Typical workflow
 
 ```bash
 yard init
+yard remote add srv1 me@srv1
 yard -Y srv1 init
 yard keys trust @srv1
 

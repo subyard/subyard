@@ -11,6 +11,10 @@ yard -Y hermes init --profile hermes
 yard -Y hermes provision
 ```
 
+`init --profile hermes` is a one-time bootstrap: it creates the persistent `hermes` named-yard
+definition from the shipped preset. Later reconciliation uses plain `yard -Y hermes init`; it does
+not depend on repeating `--profile`.
+
 The shipped preset deliberately selects no coding-tool integration, host mount, host link,
 capability, device or forwarded SSH agent. The `dev` user has no passwordless sudo and Tailscale is
 not installed inside the yard. Inspect the effective boundary with:

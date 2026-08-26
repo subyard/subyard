@@ -1,8 +1,9 @@
 # E2E VM acceptance
 
-The default `./tests/run.sh` is host-free. For live acceptance, inspect redacted broker status,
-choose an available configured slot, and pass that slot explicitly to the continuous P0 gate. For
-example, after choosing slot 1:
+The default `./tests/run.sh` is host-free. Live acceptance uses the disposable pool documented in
+[Agent E2E VM pool](test-vms.md#agent-workflow); that guide is the source of truth for setup,
+exact-slot selection, leases, recovery, and the outer-yard boundary. After choosing an available
+slot from redacted status, pass it explicitly to the continuous P0 gate:
 
 ```sh
 dev/agent-e2e.sh --status
@@ -10,13 +11,7 @@ slot=1
 dev/e2e/p0-acceptance.sh --slot "$slot"
 ```
 
-Targeted P0 lanes also require `--slot`; `--list-lanes` remains slotless. The broker never selects
-another slot. A bounded wait retries only the chosen slot, an unknown or invalid slot fails
-immediately, and an acquire with an unknown outcome is not retried.
-
-The broker owns inner pair start/stop and the runner releases in a trap. The agent does not change
-outer-yard lifecycle or work in the privileged outer yard. Never run these checks on the operator
-host or a working yard.
+Never run these checks on the operator host, in the privileged outer yard, or in a working yard.
 
 ## Official Incus client contract
 

@@ -1,4 +1,4 @@
-# Subyard default dev image — `openclaw` profile (Node + Python).
+# Copyable reference dev image — `openclaw` profile (Node + Python).
 #
 # Genericized from a proven OpenClaw devcontainer. Public/committed: no secrets,
 # no host paths, no private naming. Carries only the OS toolchain — project tools
