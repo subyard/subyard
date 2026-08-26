@@ -47,6 +47,7 @@ case "${1:-}" in
         : > "$state_root/legacy-stopped" ;;
       *' dpkg --print-architecture '*) printf 'amd64\n' ;;
       *' dpkg-query -W '*orca-ide*) printf '1.4.159\n' ;;
+      *' bash -se -- dev /usr/bin/orca-ide /srv/agents/orca ') printf '0 0\n' ;;
       *' docker inspect -f '*) printf 'true\n' ;;
     esac ;;
   file) : ;;
@@ -136,12 +137,16 @@ ORCA_ADVERTISE_HOST=127.0.0.1 ORCA_HOST_PORT=17678 SUBYARD_RESOURCE_MODE=prepare
   "$orca_handler" up >"$TMP/orca-up-plan.json" </dev/null
 ORCA_ADVERTISE_HOST=127.0.0.1 ORCA_HOST_PORT=17678 SUBYARD_RESOURCE_MODE=prepare \
   "$orca_handler" pair >"$TMP/orca-pair-plan.json" </dev/null
+SUBYARD_RESOURCE_MODE=prepare \
+  "$orca_handler" restart >"$TMP/orca-restart-plan.json" </dev/null
 SUBYARD_RESOURCE_MODE=prepare "$orca_handler" sync >"$TMP/orca-sync-plan.json" </dev/null
 SUBYARD_RESOURCE_MODE=prepare "$orca_handler" down >"$TMP/orca-down-plan.json" </dev/null
 SUBYARD_RESOURCE_MODE=prepare "$orca_handler" is-up >"$TMP/orca-is-up-plan.json" </dev/null
 SUBYARD_RESOURCE_MODE=prepare "$orca_handler" logs >"$TMP/orca-logs-plan.json" </dev/null
 grep -Fq '"action":"up","changed":true' "$TMP/orca-up-plan.json" || fail 'Orca up action is unreachable'
 grep -Fq '"action":"pair","changed":true' "$TMP/orca-pair-plan.json" || fail 'Orca pair action is unreachable'
+grep -Fq '"action":"restart","changed":true' "$TMP/orca-restart-plan.json" \
+  || fail 'Orca restart action is unreachable'
 grep -Fq '"action":"sync","changed":false' "$TMP/orca-sync-plan.json" || fail 'converged Orca sync is not a no-op'
 grep -Fq '"action":"down","changed":true' "$TMP/orca-down-plan.json" || fail 'Orca down action is unreachable'
 grep -Fq '"action":"is-up","changed":false' "$TMP/orca-is-up-plan.json" || fail 'Orca is-up read is unreachable'

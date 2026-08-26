@@ -447,6 +447,7 @@ func TestRepositoryResourceActionMatrix(t *testing.T) {
 		{resource: "orca", localID: "is-up", verb: "is-up", effect: domain.ActionRead, recovery: domain.RecoveryNotNeeded},
 		{resource: "orca", localID: "status", verb: "status", effect: domain.ActionRead, recovery: domain.RecoveryNotNeeded},
 		{resource: "orca", localID: "pair", verb: "pair", effect: domain.ActionMutation, impacts: []domain.ActionImpact{domain.ImpactExternalSystem}, recovery: domain.RecoveryReversible},
+		{resource: "orca", localID: "restart", verb: "restart", effect: domain.ActionMutation, impacts: []domain.ActionImpact{domain.ImpactYardRuntime}, recovery: domain.RecoveryReversible},
 		{resource: "orca", localID: "sync", verb: "sync", effect: domain.ActionBoundedWrite, recovery: domain.RecoveryNotNeeded},
 		{resource: "orca", localID: "logs", verb: "logs", effect: domain.ActionRead, recovery: domain.RecoveryNotNeeded},
 		{resource: "orca", localID: "down", verb: "down", effect: domain.ActionMutation, impacts: []domain.ActionImpact{domain.ImpactHostOS}, recovery: domain.RecoveryReversible},
@@ -488,7 +489,7 @@ func TestRepositoryResourceActionMatrix(t *testing.T) {
 		"emulator":        {"up", "down", "status", "view"},
 		"qa-bot-broker":   {"up", "seed", "expose", "status", "logs", "smoke", "down", "destroy"},
 		"staging-gateway": {"up", "start", "stop", "status", "logs", "shell", "down", "destroy", "list"},
-		"orca":            {"up", "is-up", "status", "pair", "sync", "logs", "down"},
+		"orca":            {"up", "is-up", "status", "pair", "restart", "sync", "logs", "down"},
 		"dashboard":       {"up", "is-up", "status", "down"},
 	}
 	for resourceName, verbs := range wantVerbs {

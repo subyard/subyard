@@ -92,6 +92,23 @@ for id in alpha-12345678 beta-12345678; do
   chown dev:dev "$root/.subyard-meta.json"
   runuser -u dev -- git -C "$root/src" init -q
 done
+install -d -m 0755 /etc/subyard /usr/local/libexec/subyard/projects-changed.d
+: > /etc/subyard/agent-project-hooks
+cat > /usr/local/libexec/subyard/projects-changed <<'DISPATCH'
+#!/usr/bin/env bash
+set -euo pipefail
+status=0
+for hook in /usr/local/libexec/subyard/projects-changed.d/*; do
+  [ -x "$hook" ] || continue
+  "$hook" || status=1
+done
+while IFS= read -r hook; do
+  [ -n "$hook" ] || continue
+  "$hook" || status=1
+done < /etc/subyard/agent-project-hooks
+exit "$status"
+DISPATCH
+chmod 0755 /usr/local/libexec/subyard/projects-changed
 YARD
 if "${incus[@]}" exec "$instance" -- command -v tailscale >/dev/null 2>&1; then
   die 'Tailscale unexpectedly exists inside the yard'
@@ -151,6 +168,8 @@ printf '%s\n' "$advertise" >"$work/advertise"
 setup_test_context "$work/context" "$project" "$instance"
 export PATH="$fakebin:$PATH"
 export ORCA_ADVERTISE_HOST="$advertise" ORCA_HOST_PORT="$host_port" ASSUME_YES=1
+export YARD_ENGINE_PATH="$ROOT/.build/yard"
+bash "$ROOT/dev/build-engine.sh" >/dev/null
 
 run_orca() {
   "$ROOT/bin/yard" orca "$@" --yes
@@ -250,13 +269,6 @@ stage 'pairing two independent clients and reconnecting the first'
 first_pair="$("${incus[@]}" exec "$instance" -- \
   jq -er '.pairing | select(.available == true) | .url' /srv/agents/orca/ready.json)"
 client_status "$first_pair" client-a
-second_pair="$(run_orca pair | tail -n1)"
-[ "$first_pair" != "$second_pair" ] || die 'pair restart reused the old offer'
-client_status "$second_pair" client-b
-client_status "$first_pair" client-a
-assert_repos
-
-stage 'adding a project through stock repo sync'
 "${incus[@]}" exec "$instance" -- bash -se <<'YARD'
 id=gamma-12345678
 root="/srv/workspaces/$id"
@@ -266,9 +278,56 @@ printf '{"schema":1,"projectId":"%s","name":"%s","mode":"sync"}\n' \
 chown dev:dev "$root/.subyard-meta.json"
 runuser -u dev -- git -C "$root/src" init -q
 YARD
+second_pair="$(run_orca pair | tail -n1)"
+[ "$first_pair" != "$second_pair" ] || die 'pair restart reused the old offer'
+client_status "$second_pair" client-b
+client_status "$first_pair" client-a
+assert_all_repos
+ENVIRONMENT_PROFILES=orca run_orca status >"$work/status.out"
+grep -Fq 'Orca profile selected for yard init' "$work/status.out" \
+  || die 'status did not confirm the selected Orca profile'
+grep -Fq 'automatic project hook ready' "$work/status.out" \
+  || die 'status did not confirm automatic project hook readiness'
+grep -Fq 'projects registered: 3/3' "$work/status.out" \
+  || die 'status did not report canonical project registration counts'
+restart_output="$(run_orca restart)"
+case "$restart_output" in
+  *orca://*) die 'restart returned a pairing capability' ;;
+esac
+client_status "$first_pair" client-a
+client_status "$second_pair" client-b
+assert_all_repos
+
+stage 'checking bounded and explicit-follow journal access'
+run_orca logs >"$work/logs.out"
+[ "$(wc -l <"$work/logs.out")" -le 18000 ] \
+  || die 'bounded logs returned more than 18000 lines'
+case "$(cat "$work/logs.out")" in
+  *orca://*) die 'bounded logs returned a pairing capability' ;;
+esac
+set +e
+timeout --signal=TERM --kill-after=2s 3s \
+  "$ROOT/bin/yard" orca logs --follow --yes >"$work/logs-follow.out" 2>&1
+follow_status=$?
+set -e
+[ "$follow_status" -eq 124 ] || die "logs --follow exited with status $follow_status before timeout"
+case "$(cat "$work/logs-follow.out")" in
+  *orca://*) die 'followed logs returned a pairing capability' ;;
+esac
+
+stage 'adding a project through stock repo sync'
+"${incus[@]}" exec "$instance" -- bash -se <<'YARD'
+id=delta-12345678
+root="/srv/workspaces/$id"
+install -d -o dev -g dev "$root/src"
+printf '{"schema":1,"projectId":"%s","name":"%s","mode":"sync"}\n' \
+  "$id" "$id" >"$root/.subyard-meta.json"
+chown dev:dev "$root/.subyard-meta.json"
+runuser -u dev -- git -C "$root/src" init -q
+YARD
 run_orca sync >/dev/null
 server_cli repo list --json |
-  jq -e '.result.repos | any(.path == "/srv/workspaces/gamma-12345678/src")' >/dev/null
+  jq -e '.result.repos | any(.path == "/srv/workspaces/delta-12345678/src")' >/dev/null
 
 stage 'verifying exact owner route and SSH-loopback mode'
 [ "$("${incus[@]}" config device get "$instance" orca-server listen)" = \

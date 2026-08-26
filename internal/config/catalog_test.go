@@ -47,6 +47,39 @@ func TestPublicSettingsExampleCoversStaticCatalog(t *testing.T) {
 	}
 }
 
+func TestPublicEnvironmentProfilesExampleIsCopyable(t *testing.T) {
+	_, file, _, _ := runtime.Caller(0)
+	examplePath := filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", "config", "settings.env.example"))
+	content, err := os.ReadFile(examplePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var assignment string
+	for _, line := range strings.Split(string(content), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "# ENVIRONMENT_PROFILES=") {
+			assignment = strings.TrimSpace(strings.TrimPrefix(line, "#"))
+			break
+		}
+	}
+	if assignment == "" {
+		t.Fatal("public settings example is missing ENVIRONMENT_PROFILES")
+	}
+
+	path := filepath.Join(t.TempDir(), "config.env")
+	if err := os.WriteFile(path, []byte(assignment+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	values, err := ReadAssignments(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := values["ENVIRONMENT_PROFILES"]; got != "openclaw" {
+		t.Fatalf("copyable ENVIRONMENT_PROFILES = %q, want %q", got, "openclaw")
+	}
+}
+
 func TestCodexReleasePinsAreTypedYardInitSettings(t *testing.T) {
 	definitions := make(map[string]SettingDefinition)
 	for _, definition := range SettingCatalog() {

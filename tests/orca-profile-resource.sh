@@ -150,6 +150,15 @@ case "${1:-}" in
         ;;
       *' jq -e '*) [ ! -e "$state_root/fail-service-ready" ] ;;
       *' jq -er '*) printf 'orca://pair?code=test-fixture\n' ;;
+      *' bash -se -- dev /usr/bin/orca-ide /srv/agents/orca ')
+        if [ -e "$state_root/project-counts-fail" ]; then
+          exit 1
+        elif [ -e "$state_root/project-counts-drift" ]; then
+          printf '1 2\n'
+        else
+          printf '2 2\n'
+        fi
+        ;;
     esac
     ;;
 esac
@@ -235,6 +244,8 @@ grep -Fq '.result.repos[]?' "$ORCA_TEST_CAPTURE/orca-sync" \
   || fail 'project hook does not use the stock repo list contract'
 grep -Fq 'repo add --path "$checkout" --json' "$ORCA_TEST_CAPTURE/orca-sync" \
   || fail 'project hook does not add canonical roots'
+grep -Fq '<<<"$add_result"' "$ORCA_TEST_CAPTURE/orca-sync" \
+  || fail 'project hook does not validate the stock repo add result'
 if grep -Eqi 'nodejs|npm|AppImage|squashfs|APPDIR|SHA512' \
   "$ROOT/config/profiles/orca/resources/orca/handler.sh" "$ROOT/config/profiles/orca/release.env"; then
   fail 'removed SSH/AppImage dependencies returned'
@@ -248,11 +259,75 @@ if grep -Fq 'apt-get install -y -qq /tmp/subyard-orca' "$ORCA_TEST_LOG"; then
   fail 'repeated up reinstalled the already verified Orca release'
 fi
 
+pairing_field_read_count="$(count_log '.pairing.url')"
+ENVIRONMENT_PROFILES=orca run_orca status >"$TMP/status.out"
+grep -Fq 'Orca profile selected for yard init' "$TMP/status.out" \
+  || fail 'status did not confirm the selected Orca profile'
+grep -Fq 'automatic project hook ready' "$TMP/status.out" \
+  || fail 'status did not report automatic project hook readiness'
+grep -Fq 'projects registered: 2/2' "$TMP/status.out" \
+  || fail 'status did not report bounded project registration counts'
+if grep -Fq 'orca://pair?' "$TMP/status.out"; then
+  fail 'status exposed a pairing capability'
+fi
+ENVIRONMENT_PROFILES='' run_orca status >"$TMP/status-unselected.out"
+grep -Fq 'Orca profile is not selected in ENVIRONMENT_PROFILES' "$TMP/status-unselected.out" \
+  || fail 'status did not warn that yard init will omit the Orca profile'
+[ "$(count_log '.pairing.url')" -eq "$pairing_field_read_count" ] \
+  || fail 'status read a pairing capability from readiness state'
+grep -Fq 'for hook in /usr/local/libexec/subyard/projects-changed.d/*; do' \
+  "$ORCA_TEST_LOG" \
+  || fail 'status did not verify automatic project hook wiring'
+touch "$TMP/project-counts-fail"
+ENVIRONMENT_PROFILES=orca run_orca status >"$TMP/status-counts-fail.out"
+grep -Fq 'project registration counts unavailable' "$TMP/status-counts-fail.out" \
+  || fail 'status did not report unavailable project registration counts'
+if grep -Fq 'while service is not ready' "$TMP/status-counts-fail.out"; then
+  fail 'status blamed service readiness for an independent project count failure'
+fi
+rm -f "$TMP/project-counts-fail"
+
+restart_count="$(count_log 'systemctl restart subyard-orca.service')"
+run_orca restart --yes >"$TMP/restart.out"
+[ "$(count_log 'systemctl restart subyard-orca.service')" -eq $((restart_count + 1)) ] \
+  || fail 'restart did not restart the existing Orca service'
+grep -Fq 'Orca service restarted' "$TMP/restart.out" \
+  || fail 'restart did not confirm recovery'
+if grep -Fq 'orca://pair?' "$TMP/restart.out"; then
+  fail 'restart exposed a pairing capability'
+fi
+[ "$(count_log '.pairing.url')" -eq "$pairing_field_read_count" ] \
+  || fail 'restart read a pairing capability from readiness state'
+
+run_orca logs >"$TMP/logs.out"
+grep -Fq 'journalctl --no-pager -u subyard-orca.service -n 18000' "$ORCA_TEST_LOG" \
+  || fail 'logs did not bound journal output to the latest 18000 lines'
+run_orca logs --follow >"$TMP/logs-follow.out"
+grep -Fq 'journalctl --no-pager -u subyard-orca.service -n 18000 --follow' \
+  "$ORCA_TEST_LOG" \
+  || fail 'logs --follow did not request bounded history followed by live output'
+if run_orca logs --tail >"$TMP/logs-invalid.out" 2>&1; then
+  fail 'logs accepted an unsupported option'
+fi
+
+touch "$TMP/project-counts-drift"
+if run_orca pair --yes >"$TMP/pair-drift.out" 2>&1; then
+  fail 'pair returned a link while canonical project registration was incomplete'
+fi
+if grep -Fq 'orca://pair?' "$TMP/pair-drift.out"; then
+  fail 'pair exposed a capability before project registration converged'
+fi
+rm -f "$TMP/project-counts-drift"
+
+sync_count="$(count_log 'runuser -u dev -- /usr/local/libexec/subyard/projects-changed.d/orca')"
 pairing="$(run_orca pair --yes | tail -n1)"
 [ "$pairing" = 'orca://pair?code=test-fixture' ] \
   || fail 'pair did not return only the stock startup link'
 grep -Fq 'systemctl restart subyard-orca.service' "$ORCA_TEST_LOG" \
   || fail 'pair did not mint a fresh startup offer'
+[ "$(count_log 'runuser -u dev -- /usr/local/libexec/subyard/projects-changed.d/orca')" \
+  -eq $((sync_count + 1)) ] \
+  || fail 'pair did not reconcile canonical project roots before returning the link'
 run_orca sync >/dev/null
 grep -Fq 'runuser -u dev -- /usr/local/libexec/subyard/projects-changed.d/orca' "$ORCA_TEST_LOG" \
   || fail 'sync did not invoke the resource-owned project hook as dev'

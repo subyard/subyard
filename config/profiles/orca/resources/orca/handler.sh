@@ -78,10 +78,13 @@ readiness_ready() {
   ' "$ORCA_READY" >/dev/null 2>&1
 }
 
-service_ready() {
+service_endpoint_ready() {
   yexec systemctl is-active --quiet "$ORCA_UNIT" >/dev/null 2>&1 &&
-    yexec bash -c "exec 3<>/dev/tcp/127.0.0.1/$ORCA_GUEST_PORT" >/dev/null 2>&1 &&
-    readiness_ready
+    yexec bash -c "exec 3<>/dev/tcp/127.0.0.1/$ORCA_GUEST_PORT" >/dev/null 2>&1
+}
+
+service_ready() {
+  service_endpoint_ready && readiness_ready
 }
 
 owner_endpoint_ready() {
@@ -98,6 +101,15 @@ wait_service_ready() {
   local _
   for _ in $(seq 1 120); do
     service_ready && return 0
+    sleep 1
+  done
+  return 1
+}
+
+wait_service_endpoint_ready() {
+  local _
+  for _ in $(seq 1 120); do
+    service_endpoint_ready && return 0
     sleep 1
   done
   return 1
@@ -300,6 +312,7 @@ SYNC_HEAD
   cat >>"$sync" <<'SYNC'
 systemctl is-active --quiet "$ORCA_UNIT" || exit 0
 repos="$("$ORCA_EXEC" repo list --json)"
+jq -e '.ok == true and (.result.repos | type == "array")' <<<"$repos" >/dev/null
 while IFS= read -r -d '' metadata; do
   project_dir="${metadata%/.subyard-meta.json}"
   project_id="${project_dir##*/}"
@@ -310,8 +323,10 @@ while IFS= read -r -d '' metadata; do
   [ "$(realpath -e "$checkout")" = "$checkout" ] || continue
   if ! jq -e --arg path "$checkout" \
     '.ok == true and any(.result.repos[]?; .path == $path)' <<<"$repos" >/dev/null; then
-    "$ORCA_EXEC" repo add --path "$checkout" --json >/dev/null
+    add_result="$("$ORCA_EXEC" repo add --path "$checkout" --json)"
+    jq -e '.ok == true' <<<"$add_result" >/dev/null
     repos="$("$ORCA_EXEC" repo list --json)"
+    jq -e '.ok == true and (.result.repos | type == "array")' <<<"$repos" >/dev/null
   fi
 done < <(
   find /srv/workspaces -mindepth 2 -maxdepth 2 -type f \
@@ -435,9 +450,11 @@ service_enabled() {
   yexec systemctl is-enabled --quiet "$ORCA_UNIT" >/dev/null 2>&1
 }
 
-# Read-only comparison of canonical Subyard roots with the repos Orca already knows.
-projects_synced() {
-  yexec bash -se -- "${DEV_USER:-dev}" "$ORCA_EXEC" "$ORCA_STATE" <<'YARD'
+# Prints only bounded aggregate counts: registered canonical roots, then total canonical roots.
+project_registration_counts() {
+  local counts registered total
+  counts="$(
+    yexec bash -se -- "${DEV_USER:-dev}" "$ORCA_EXEC" "$ORCA_STATE" <<'YARD'
 set -euo pipefail
 dev_user="$1"; orca_exec="$2"; state="$3"
 export HOME="/home/$dev_user"
@@ -445,6 +462,9 @@ export XDG_CONFIG_HOME="$state/config"
 export XDG_DATA_HOME="$state/data"
 export XDG_STATE_HOME="$state/state"
 repos="$(runuser -u "$dev_user" -- "$orca_exec" repo list --json)"
+jq -e '.ok == true and (.result.repos | type == "array")' <<<"$repos" >/dev/null
+registered=0
+total=0
 while IFS= read -r -d '' metadata; do
   project_dir="${metadata%/.subyard-meta.json}"
   project_id="${project_dir##*/}"
@@ -453,13 +473,53 @@ while IFS= read -r -d '' metadata; do
     '.schema == 1 and .projectId == $id' "$metadata" >/dev/null 2>&1 || continue
   [ -d "$checkout" ] && [ ! -L "$checkout" ] || continue
   [ "$(realpath -e "$checkout")" = "$checkout" ] || continue
-  jq -e --arg path "$checkout" \
-    '.ok == true and any(.result.repos[]?; .path == $path)' <<<"$repos" >/dev/null || exit 1
+  total=$((total + 1))
+  if jq -e --arg path "$checkout" \
+    '.ok == true and any(.result.repos[]?; .path == $path)' <<<"$repos" >/dev/null; then
+    registered=$((registered + 1))
+  fi
 done < <(
   find /srv/workspaces -mindepth 2 -maxdepth 2 -type f \
     -name .subyard-meta.json -print0 | sort -z
 )
+printf '%d %d\n' "$registered" "$total"
 YARD
+  )" || return 1
+  [[ "$counts" =~ ^([0-9]+)\ ([0-9]+)$ ]] || return 1
+  registered="${BASH_REMATCH[1]}"
+  total="${BASH_REMATCH[2]}"
+  [ "$registered" -le "$total" ] || return 1
+  printf '%s %s\n' "$registered" "$total"
+}
+
+# Read-only comparison of canonical Subyard roots with the repos Orca already knows.
+projects_synced() {
+  local counts registered total
+  counts="$(project_registration_counts)" || return 1
+  read -r registered total <<<"$counts"
+  [ "$registered" -eq "$total" ]
+}
+
+orca_profile_selected() {
+  local profile
+  local -a profiles=()
+  if [ -n "${ENVIRONMENT_PROFILES:-}" ]; then
+    read -r -a profiles <<<"$ENVIRONMENT_PROFILES"
+  fi
+  for profile in "${profiles[@]}"; do
+    [ "$profile" = orca ] && return 0
+  done
+  return 1
+}
+
+automatic_project_hook_ready() {
+  local dispatcher=/usr/local/libexec/subyard/projects-changed
+  yexec test -x "$dispatcher" >/dev/null 2>&1 &&
+    yexec test -x "$ORCA_SYNC" >/dev/null 2>&1 &&
+    yexec grep -Fqx \
+      'for hook in /usr/local/libexec/subyard/projects-changed.d/*; do' \
+      "$dispatcher" >/dev/null 2>&1 &&
+    yexec grep -Fqx '  "$hook" || status=1' "$dispatcher" >/dev/null 2>&1
 }
 
 up_converged() {
@@ -505,6 +565,8 @@ cmd_pair() {
   service_ready || die "Orca is not ready; run '$(yard_cmd_hint) orca up' first"
   yexec systemctl restart "$ORCA_UNIT"
   wait_service_ready || die "Orca did not become ready after restart"
+  run_project_sync
+  projects_synced || die "Orca project registrations did not converge"
   yexec jq -er '
     select(.type == "orca_server_ready" and .schemaVersion == 1) |
     .pairing | select(.available == true) | .url
@@ -518,17 +580,61 @@ cmd_sync() {
   ok "Subyard project roots are registered in Orca"
 }
 
+cmd_restart() {
+  yexec systemctl is-active --quiet "$ORCA_UNIT" \
+    || die "Orca is not running; run '$(yard_cmd_hint) orca up' first"
+  yexec systemctl restart "$ORCA_UNIT"
+  wait_service_endpoint_ready || die "Orca did not become ready after restart"
+  ok "Orca service restarted"
+}
+
 cmd_status() {
+  local counts registered total service_is_ready=0
   select_release
   printf 'Orca %s in yard %s\n' "$ORCA_VERSION" "${YARD_NAME:-default}"
+  if orca_profile_selected; then
+    ok "Orca profile selected for yard init"
+  else
+    warn "Orca profile is not selected in ENVIRONMENT_PROFILES; yard init will omit it"
+  fi
   if release_ready; then ok "pinned release verified"; else warn "pinned release missing or corrupt"; fi
-  if service_ready; then ok "service ready"; else warn "service inactive or not ready"; fi
+  if service_endpoint_ready; then service_is_ready=1; ok "service ready"; else warn "service inactive or not ready"; fi
   if ingress_active; then ok "L1 ingress guard active"; else warn "L1 ingress guard inactive"; fi
   if device_exists; then
     ok "owner route: $(device_value listen) -> $(device_value connect)"
   else
     warn "owner route absent"
   fi
+  if automatic_project_hook_ready; then
+    ok "automatic project hook ready"
+  else
+    warn "automatic project hook missing; run '$(yard_cmd_hint) init'"
+  fi
+  if [ "$service_is_ready" -eq 1 ]; then
+    if counts="$(project_registration_counts)"; then
+      read -r registered total <<<"$counts"
+      if [ "$registered" -eq "$total" ]; then
+        ok "projects registered: $registered/$total"
+      else
+        warn "projects registered: $registered/$total; run '$(yard_cmd_hint) orca sync'"
+      fi
+    else
+      warn "project registration counts unavailable; inspect the Orca repo state"
+    fi
+  else
+    warn "project registration counts unavailable while service is not ready"
+  fi
+}
+
+cmd_logs() {
+  case "$#" in
+    0) yexec journalctl --no-pager -u "$ORCA_UNIT" -n 18000 ;;
+    1)
+      [ "$1" = --follow ] || die "'logs' accepts only '--follow'"
+      yexec journalctl --no-pager -u "$ORCA_UNIT" -n 18000 --follow
+      ;;
+    *) die "'logs' accepts only '--follow'" ;;
+  esac
 }
 
 cmd_down() {
@@ -567,6 +673,20 @@ require_no_resource_arguments() {
   [ "$#" -eq 0 ] || die "'$verb' does not accept additional arguments"
 }
 
+validate_resource_arguments() {
+  local verb="$1"
+  shift
+  if [ "$verb" = logs ]; then
+    case "$#" in
+      0) return 0 ;;
+      1) [ "$1" = --follow ] || die "'logs' accepts only '--follow'" ;;
+      *) die "'logs' accepts only '--follow'" ;;
+    esac
+    return 0
+  fi
+  require_no_resource_arguments "$verb" "$@"
+}
+
 require_resource_apply() { # <expected-local-action>
   local expected="$1"
   [ "${SUBYARD_RESOURCE_MODE:-}" = apply ] || die "resource apply mode is required"
@@ -578,7 +698,7 @@ require_resource_apply() { # <expected-local-action>
 prepare_resource() { # <public-verb>
   local verb="$1" changed=false
   shift
-  require_no_resource_arguments "$verb" "$@"
+  validate_resource_arguments "$verb" "$@"
   case "$verb" in
     up)
       svc_require_yard_running
@@ -609,7 +729,14 @@ prepare_resource() { # <public-verb>
       require_runtime_settings
       service_ready || die "Orca is not ready; run '$(yard_cmd_hint) orca up' first"
       emit_resource_assessment pair true \
-        "restart the Orca service and issue one fresh single-client pairing link"
+        "restart the Orca service, reconcile canonical project roots and issue one fresh single-client pairing link"
+      ;;
+    restart)
+      svc_require_yard_running
+      yexec systemctl is-active --quiet "$ORCA_UNIT" \
+        || die "Orca is not running; run '$(yard_cmd_hint) orca up' first"
+      emit_resource_assessment restart true \
+        "restart the existing Orca service without returning a pairing capability"
       ;;
     sync)
       svc_require_yard_running
@@ -652,10 +779,10 @@ case "${SUBYARD_RESOURCE_MODE:-}" in
     ;;
   apply)
     case "$sub" in
-      up|is-up|status|pair|sync|logs|down) ;;
+      up|is-up|status|pair|restart|sync|logs|down) ;;
       *) die "unknown Orca apply verb '$sub'" ;;
     esac
-    require_no_resource_arguments "$sub" "$@"
+    validate_resource_arguments "$sub" "$@"
     require_resource_apply "$sub"
     if [ "$sub" = is-up ]; then cmd_is_up; exit $?; fi
     svc_require_yard_running
@@ -663,8 +790,9 @@ case "${SUBYARD_RESOURCE_MODE:-}" in
       up) cmd_up ;;
       status) cmd_status ;;
       pair) cmd_pair ;;
+      restart) cmd_restart ;;
       sync) cmd_sync ;;
-      logs) yexec journalctl --no-pager -u "$ORCA_UNIT" ;;
+      logs) cmd_logs "$@" ;;
       down) cmd_down ;;
     esac
     ;;
@@ -672,7 +800,7 @@ case "${SUBYARD_RESOURCE_MODE:-}" in
     case "$sub" in
       is-up) require_no_resource_arguments is-up "$@"; cmd_is_up ;;
       -h|--help|help|"")
-        printf 'Usage: %s orca <up|is-up|status|pair|sync|logs|down>\n' "${PROG:-yard}"
+        printf 'Usage: %s orca <up|is-up|status|pair|restart|sync|logs|down>\n' "${PROG:-yard}"
         ;;
       *) die "typed resource dispatcher required for 'yard orca $sub'" ;;
     esac
