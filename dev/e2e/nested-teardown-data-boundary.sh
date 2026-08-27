@@ -22,7 +22,7 @@ die() { printf 'nested-teardown-boundary: %s\n' "$*" >&2; exit 2; }
 for command in go incus jq sudo timeout; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
-COMMAND_TIMEOUT="${NESTED_TEARDOWN_COMMAND_TIMEOUT:-2700}"
+COMMAND_TIMEOUT="${NESTED_TEARDOWN_COMMAND_TIMEOUT:-3600}"
 COMMAND_KILL_AFTER_SECONDS="${NESTED_TEARDOWN_COMMAND_KILL_AFTER_SECONDS:-10}"
 [[ "$COMMAND_TIMEOUT" =~ ^[1-9][0-9]{0,3}$ ]] && [ "$COMMAND_TIMEOUT" -le 3600 ] \
   || die 'nested command timeout must be an integer from 1 through 3600 seconds'

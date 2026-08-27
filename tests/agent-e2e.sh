@@ -479,7 +479,7 @@ set -e
   && grep -Fq 'nested memory requirement exceeds the supported range' \
     <<<"$memory_overflow_output" \
   || fail "nested teardown memory arithmetic overflowed fail-open: rc=$memory_overflow_rc output=$memory_overflow_output"
-grep -Fq 'NESTED_TEARDOWN_COMMAND_TIMEOUT:-2700' \
+grep -Fq 'NESTED_TEARDOWN_COMMAND_TIMEOUT:-3600' \
   "$ROOT/dev/e2e/nested-teardown-data-boundary.sh" \
   && grep -Fq 'NESTED_TEARDOWN_COMMAND_KILL_AFTER_SECONDS:-10' \
     "$ROOT/dev/e2e/nested-teardown-data-boundary.sh" \
@@ -1648,7 +1648,7 @@ P0_REAL_INCUS_CLEANUP_FUNCTIONS="$real_incus_cleanup_functions" \
             > "$P0_REAL_INCUS_RACE_STATE/operation-queries"
           if [ "$operation_queries" = 1 ]; then
             printf "%s\n" \
-              "[{\"id\":\"create-p0-vm\",\"status_code\":103,\"resources\":{\"instances\":[\"/1.0/instances/p0-vm\"]}}]"
+              "[{\"id\":\"create-p0-vm\",\"status_code\":103,\"resources\":{\"instances\":[\"/1.0/instances/p0-vm?project=subyard-p0-real-incus\"]}}]"
           else
             printf "%s\n" "[]"
             touch "$P0_REAL_INCUS_RACE_STATE/settled"

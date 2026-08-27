@@ -183,7 +183,7 @@ replace this section's continuous full P0 release gate.
 | `profile-resource` | VM1 and current candidate | temporary dependency-free resource/state | required through `release` in continuous P0 |
 | `release` | both VMs, capacity preflight; bounded nested install/boot deadlines | fresh candidate yards, current and legacy convergence | targeted diagnostic; required inside continuous P0 |
 | `source-upgrade` | VM1 when targeted; VM2 worker in full; two bounded reboots | marked source-install/migration fixture | targeted diagnostic; required inside continuous P0 |
-| `power-systemd` | VM1 when targeted; VM2 worker in full; real Incus, Ubuntu 24.04/systemd 255; 300-second image launch and bounded TERM-to-KILL Incus commands | marker-owned parser project plus snapshotted/restored host power runtime | targeted diagnostic; required inside continuous P0 |
+| `power-systemd` | VM1 when targeted; VM2 worker in full; real Incus, Ubuntu 24.04/systemd 255; 900-second image-cache fill, 600-second local launch, 300-second restart and bounded TERM-to-KILL Incus commands | test-owned image alias, marker-owned parser project plus snapshotted/restored host power runtime | targeted diagnostic; required inside continuous P0 |
 | `reboot-verify` | held VM1 lease; two 3-minute boot windows | guest reboot only | targeted transport/recovery diagnostic |
 | `peer` | both VMs and synthetic keys | marked cross-owner RPC, project and credential fixtures | targeted diagnostic; required inside continuous P0 |
 | `peer-cleanup`, `cleanup` | same retained allocation | exact marked fixtures and run worktrees | standalone idempotent cleanup/verifier |
@@ -203,10 +203,18 @@ SUBYARD_P0_WAIT_SECONDS=1200 \
 ```
 
 `SUBYARD_P0_WAIT_SECONDS` is a non-negative number of seconds passed to the atomic broker acquire;
-zero keeps the fail-fast default. The `power-systemd` fixture is fully ephemeral: the lane removes
-its marker-owned systemd-255 project and restores the snapshotted host unit/runtime before the phase
-is checkpointed. Its checkpoint resource inventory therefore records the fixture identity, but
-`--resume` never depends on retaining its mutable resources.
+zero keeps the fail-fast default. The `power-systemd` parser project is fully ephemeral: the lane
+removes its marker-owned project and restores the snapshotted host unit/runtime before the phase is
+checkpointed. The fixed `subyard-e2e-*` Ubuntu image alias is retained in the disposable allocation's
+default Incus project, just like the real-Incus base-image aliases, so a later launch does not include
+an unbounded remote transfer. Outer allocation teardown removes the alias with the Incus pool.
+`--resume` never depends on retaining the parser project's mutable resources.
+
+The cache fill and local launch both emit progress. Their independent positive-integer overrides are
+`SUBYARD_SYSTEMD255_IMAGE_TIMEOUT_SECONDS` and
+`SUBYARD_SYSTEMD255_LAUNCH_TIMEOUT_SECONDS`; restart uses
+`SUBYARD_SYSTEMD255_RESTART_TIMEOUT_SECONDS`. A timed-out cache fill or launch fails once with its
+operation and limit. The fixture never starts a second remote pull or launch after a timeout.
 
 The continuous gate keeps the long owner/release chain on VM1. VM2 independently runs nested
 teardown, the controller suite, a real-Incus platform check, source upgrade and power-systemd in

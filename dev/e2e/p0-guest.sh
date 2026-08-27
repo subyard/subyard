@@ -656,6 +656,7 @@ owner() (
     || die 'nested state permissions did not converge'
   ! incus exec yard-test-yard --project subyard-test-yard -- id -nG dev | tr ' ' '\n' \
     | grep -Eq '^(incus-admin|yard)$' || die 'dev retained a privileged L1 group'
+  bash tests/engine-release.sh
   # All migration and recovery fixtures have finished compiling. Drop only
   # this run's disposable Go cache before retaining both nested VM pairs;
   # production broker memory and capacity defaults remain unchanged.
@@ -673,7 +674,6 @@ owner() (
   env PATH=/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin ./bin/yard --version >/dev/null
   env PATH=/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin ./bin/yard -Y test-yard list >/dev/null
   env PATH=/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin ./bin/yard -Y test-yard status >/dev/null
-  bash tests/engine-release.sh
   ./bin/yard -Y test-yard teardown --yes
   ! incus project show subyard-test-yard >/dev/null 2>&1 || die 'candidate project remains after teardown'
   [ -x "$SUBYARD_HOME/runtime/current/bin/yard" ] \

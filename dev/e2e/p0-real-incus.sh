@@ -53,7 +53,7 @@ cleanup_sleep() {
 
 active_instance_operation_ids() {
   local deadline="$1" name="$2" operations resource
-  resource="/1.0/instances/$name"
+  resource="/1.0/instances/$name?project=$PROJECT"
   if operations="$(
     cleanup_real_incus "$deadline" operation list --project "$PROJECT" --format json
   )"; then

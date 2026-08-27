@@ -7,6 +7,8 @@ RUN_ID="${SUBYARD_E2E_RUN_ID:-}"
 PROJECT="subyard-systemd255-$RUN_ID"
 INSTANCE="systemd255-$RUN_ID"
 MARKER="subyard-e2e-systemd255-v1 run=$RUN_ID"
+IMAGE_SOURCE="images:ubuntu/24.04/cloud"
+IMAGE_ALIAS="subyard-e2e-ubuntu-24.04-systemd255-container"
 OLD_TEMPLATE="$ROOT/tests/fixtures/systemd/subyard-power-reconcile-v0.8.0.service.in"
 CANDIDATE_TEMPLATE="$ROOT/config/systemd/subyard-power-reconcile.service.in"
 OLD_UNIT="subyard-e2e-power-v080-$RUN_ID.service"
@@ -19,8 +21,11 @@ INSTALL_RECONCILER_PATH="/usr/local/libexec/subyard-e2e-power-$RUN_ID/reconciler
 TEMPORARY=''
 PROJECT_CREATED=0
 INCUS_COMMAND_TIMEOUT="${SUBYARD_SYSTEMD255_INCUS_TIMEOUT_SECONDS:-30}"
-INCUS_LAUNCH_TIMEOUT=300
+INCUS_IMAGE_TIMEOUT="${SUBYARD_SYSTEMD255_IMAGE_TIMEOUT_SECONDS:-900}"
+INCUS_LAUNCH_TIMEOUT="${SUBYARD_SYSTEMD255_LAUNCH_TIMEOUT_SECONDS:-600}"
+INCUS_RESTART_TIMEOUT="${SUBYARD_SYSTEMD255_RESTART_TIMEOUT_SECONDS:-300}"
 INCUS_KILL_AFTER_SECONDS=10
+INCUS_BINARY=''
 
 die() { printf 'power-reconciler-systemd-255: %s\n' "$*" >&2; exit 2; }
 
@@ -33,16 +38,23 @@ esac
 for command in incus sed sudo tar; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
+INCUS_BINARY="$(command -v incus)"
 sudo -n true || die 'passwordless sudo is required on the disposable VM'
 [ -r "$OLD_TEMPLATE" ] && [ -r "$CANDIDATE_TEMPLATE" ] \
   || die 'power reconciler unit templates are unavailable'
 [[ "$INCUS_COMMAND_TIMEOUT" =~ ^[1-9][0-9]*$ ]] \
   || die 'SUBYARD_SYSTEMD255_INCUS_TIMEOUT_SECONDS must be a positive integer'
+[[ "$INCUS_IMAGE_TIMEOUT" =~ ^[1-9][0-9]*$ ]] \
+  || die 'SUBYARD_SYSTEMD255_IMAGE_TIMEOUT_SECONDS must be a positive integer'
+[[ "$INCUS_LAUNCH_TIMEOUT" =~ ^[1-9][0-9]*$ ]] \
+  || die 'SUBYARD_SYSTEMD255_LAUNCH_TIMEOUT_SECONDS must be a positive integer'
+[[ "$INCUS_RESTART_TIMEOUT" =~ ^[1-9][0-9]*$ ]] \
+  || die 'SUBYARD_SYSTEMD255_RESTART_TIMEOUT_SECONDS must be a positive integer'
 
 run_incus() {
   local deadline="$1"
   shift
-  local binary=/usr/bin/incus socket=/var/lib/incus/unix.socket
+  local binary="$INCUS_BINARY" socket=/var/lib/incus/unix.socket
   if [ -S "$socket" ] && [ ! -w "$socket" ]; then
     timeout --signal=TERM --kill-after="$INCUS_KILL_AFTER_SECONDS" "$deadline" \
       sudo -n "$binary" "$@" </dev/null
@@ -53,8 +65,35 @@ run_incus() {
 }
 
 bounded_incus() { run_incus "$INCUS_COMMAND_TIMEOUT" "$@"; }
+cache_image_incus() {
+  run_incus "$INCUS_IMAGE_TIMEOUT" image copy "$IMAGE_SOURCE" local: \
+    --alias "$IMAGE_ALIAS" --target-project default
+}
 launch_incus() { run_incus "$INCUS_LAUNCH_TIMEOUT" launch "$@"; }
-restart_incus() { run_incus "$INCUS_LAUNCH_TIMEOUT" restart "$@"; }
+restart_incus() { run_incus "$INCUS_RESTART_TIMEOUT" restart "$@"; }
+
+run_with_progress() {
+  local label="$1" interval="${E2E_PROGRESS_INTERVAL:-10}" ticker rc started=$SECONDS
+  shift
+  printf '  [ .. ] %s\n' "$label"
+  (
+    local sleeper=''
+    trap '[ -z "$sleeper" ] || kill "$sleeper" 2>/dev/null; exit 0' TERM
+    while :; do
+      sleep "$interval" &
+      sleeper=$!
+      wait "$sleeper" || exit 0
+      sleeper=''
+      printf '  [ .. ] %s (still working, %ss elapsed)\n' \
+        "$label" "$((SECONDS - started))"
+    done
+  ) &
+  ticker=$!
+  if "$@"; then rc=0; else rc=$?; fi
+  kill "$ticker" 2>/dev/null || true
+  wait "$ticker" 2>/dev/null || true
+  return "$rc"
+}
 
 assert_owned_project() {
   [ "$(bounded_incus project get "$PROJECT" user.subyard.systemd255 2>/dev/null)" = \
@@ -95,7 +134,7 @@ delete_marked_instance() {
 }
 
 cleanup() {
-  local rc=$? cleanup_failed=0 fingerprint fingerprints=''
+  local rc=$? cleanup_failed=0
   trap - EXIT INT TERM
   set +e
   if [ -n "$TEMPORARY" ]; then
@@ -118,17 +157,6 @@ cleanup() {
         delete_marked_instance || cleanup_failed=1
       fi
       if [ "$cleanup_failed" = 0 ]; then
-        fingerprints="$(bounded_incus image list --project "$PROJECT" --format csv -c f)" \
-          || cleanup_failed=1
-      fi
-      if [ "$cleanup_failed" = 0 ]; then
-        while IFS= read -r fingerprint; do
-          [ -n "$fingerprint" ] || continue
-          bounded_incus image delete "$fingerprint" --project "$PROJECT" >/dev/null \
-            || cleanup_failed=1
-        done <<<"$fingerprints"
-      fi
-      if [ "$cleanup_failed" = 0 ]; then
         assert_owned_project \
           && bounded_incus project delete "$PROJECT" >/dev/null \
           || cleanup_failed=1
@@ -142,10 +170,34 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+image_info=''
+if image_info="$(bounded_incus image info "$IMAGE_ALIAS" --project default 2>/dev/null)"; then
+  grep -Fqx 'Type: container' <<<"$image_info" \
+    || die "cached systemd 255 fixture image $IMAGE_ALIAS is not a container image"
+else
+  image_rc=0
+  run_with_progress 'caching Ubuntu 24.04/systemd 255 fixture image' \
+    cache_image_incus || image_rc=$?
+  if [ "$image_rc" -ne 0 ]; then
+    case "$image_rc" in
+      124|137)
+        die "timed out after ${INCUS_IMAGE_TIMEOUT}s while caching Ubuntu 24.04/systemd 255 fixture image"
+        ;;
+      *)
+        die "failed to cache Ubuntu 24.04/systemd 255 fixture image within ${INCUS_IMAGE_TIMEOUT}s (exit $image_rc)"
+        ;;
+    esac
+  fi
+  image_info="$(bounded_incus image info "$IMAGE_ALIAS" --project default 2>/dev/null)" \
+    || die "cached systemd 255 fixture image $IMAGE_ALIAS is unavailable after copy"
+  grep -Fqx 'Type: container' <<<"$image_info" \
+    || die "cached systemd 255 fixture image $IMAGE_ALIAS is not a container image"
+fi
+
 ! bounded_incus project show "$PROJECT" >/dev/null 2>&1 \
   || die "fixture project already exists: $PROJECT"
 bounded_incus project create "$PROJECT" \
-  -c features.images=true \
+  -c features.images=false \
   -c features.profiles=true \
   -c features.storage.volumes=true \
   -c user.subyard.systemd255="$MARKER" >/dev/null
@@ -154,8 +206,21 @@ bounded_incus profile device add default root disk path=/ pool=default \
   --project "$PROJECT" >/dev/null
 bounded_incus profile device add default eth0 nic name=eth0 network=incusbr0 \
   --project "$PROJECT" >/dev/null
-launch_incus images:ubuntu/24.04/cloud "$INSTANCE" --project "$PROJECT" \
-  -c user.subyard.systemd255="$MARKER" >/dev/null
+launch_rc=0
+run_with_progress 'launching Ubuntu 24.04/systemd 255 fixture from local cache' \
+  launch_incus "$IMAGE_ALIAS" "$INSTANCE" --project "$PROJECT" \
+    -c user.subyard.systemd255="$MARKER" \
+  || launch_rc=$?
+if [ "$launch_rc" -ne 0 ]; then
+  case "$launch_rc" in
+    124|137)
+      die "timed out after ${INCUS_LAUNCH_TIMEOUT}s while launching Ubuntu 24.04/systemd 255 fixture"
+      ;;
+    *)
+      die "failed to launch Ubuntu 24.04/systemd 255 fixture within ${INCUS_LAUNCH_TIMEOUT}s (exit $launch_rc)"
+      ;;
+  esac
+fi
 
 for _ in $(seq 1 120); do
   bounded_incus exec "$INSTANCE" --project "$PROJECT" -- true >/dev/null 2>&1 && break

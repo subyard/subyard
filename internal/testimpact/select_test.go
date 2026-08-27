@@ -275,12 +275,16 @@ func TestSelectRequiresFullP0ForCombinedBootMigrationImplementation(t *testing.T
 	for _, path := range []string{
 		"config/systemd/subyard-power-reconcile.service.in",
 		"scripts/install-power-reconciler.sh",
+		"dev/e2e/power-reconciler-systemd-255.sh",
 		"dev/e2e/power-reconciler-systemd.sh",
 	} {
 		t.Run(path+" remains boot-only", func(t *testing.T) {
 			bootOnly := Select(policy, registry, ChangeSet{SchemaVersion: 1, Changes: []Change{modifiedChange(path)}})
 			if !reflect.DeepEqual(bootOnly.RiskDomains, []string{"boot-lifecycle"}) || bootOnly.FullP0.Required {
 				t.Fatalf("ordinary boot path gained migration risk: domains=%v full=%#v", bootOnly.RiskDomains, bootOnly.FullP0)
+			}
+			if !slices.Contains(recommendationIDs(bootOnly.HostFreeChecks), "shell:power-reconciler-systemd-255-launch") {
+				t.Fatalf("ordinary boot path omitted the systemd-255 launch contract: checks=%v", recommendationIDs(bootOnly.HostFreeChecks))
 			}
 		})
 	}

@@ -14,6 +14,7 @@
       "go:adapters/reconcileruntime",
       "go:systemdunit",
       "shell:lib-power-network",
+      "shell:power-reconciler-systemd-255-launch",
       "shell:power-reconciler-systemd",
       "p0:power-systemd",
       "p0:reboot-verify"
