@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,8 +14,226 @@ import (
 var ErrPersistentTargetStale = errors.New("persistent configuration target is stale")
 
 type PersistentFileSnapshot struct {
-	Exists  bool
-	Content []byte
+	Exists   bool
+	Content  []byte
+	Identity PersistentFileIdentity
+}
+
+// PersistentFileIdentity binds a protected observation to the exact inode and
+// security metadata that was inspected. It is deliberately excluded from the
+// desired semantic fingerprint: a successful atomic replacement has a new
+// inode, while an unexpected same-bytes replacement must still fail CAS.
+type PersistentFileIdentity struct {
+	Device uint64
+	Inode  uint64
+	Mode   uint32
+	UID    uint32
+	GID    uint32
+	Links  uint64
+}
+
+// PersistentAssignment describes one assignment observed in exact file order.
+// Direct is false for assignments produced by a declarative parameter default
+// rather than by the record's left-hand side. Dynamic marks any assignment
+// whose value depended on expansion. Migration classifiers use both fields to
+// reject ambiguous ownership instead of guessing from the effective value.
+type PersistentAssignment struct {
+	Name    string
+	Value   string
+	Line    int
+	Direct  bool
+	Dynamic bool
+}
+
+// ReadPersistentFileSnapshot observes an operator-owned persistent file
+// without creating the configuration root or any metadata.
+func ReadPersistentFileSnapshot(
+	configHome string,
+	path string,
+) (PersistentFileSnapshot, error) {
+	if !filepath.IsAbs(configHome) || !filepath.IsAbs(path) {
+		return PersistentFileSnapshot{}, errors.New("persistent setting paths must be absolute")
+	}
+	configHome = filepath.Clean(configHome)
+	path = filepath.Clean(path)
+	relative, err := filepath.Rel(configHome, path)
+	if err != nil || relative == "." || filepath.IsAbs(relative) ||
+		relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return PersistentFileSnapshot{}, errors.New("persistent setting path escaped the configuration root")
+	}
+	file, exists, err := openPersistentFileAt(configHome, relative)
+	if err != nil || !exists {
+		return PersistentFileSnapshot{}, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return PersistentFileSnapshot{}, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() ||
+		info.Mode().Perm()&0o022 != 0 || info.Size() > 8<<20 {
+		return PersistentFileSnapshot{}, errors.New(
+			"persistent setting target must be a protected bounded regular non-symlink file",
+		)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != uint32(os.Getuid()) || stat.Nlink != 1 {
+		return PersistentFileSnapshot{}, errors.New(
+			"persistent setting target has unsafe ownership or hard links",
+		)
+	}
+	content, err := io.ReadAll(io.LimitReader(file, (8<<20)+1))
+	if err != nil {
+		return PersistentFileSnapshot{}, err
+	}
+	if len(content) > 8<<20 {
+		return PersistentFileSnapshot{}, errors.New("persistent setting target exceeds its size bound")
+	}
+	return PersistentFileSnapshot{
+		Exists: true, Content: content, Identity: persistentFileIdentity(stat),
+	}, nil
+}
+
+func openPersistentFileAt(
+	configHome string,
+	relative string,
+) (*os.File, bool, error) {
+	rootFD, err := syscall.Open(
+		configHome,
+		syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC,
+		0,
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	current := os.NewFile(uintptr(rootFD), configHome)
+	if err := validateOpenedPersistentDirectory(current, configHome); err != nil {
+		current.Close()
+		return nil, false, err
+	}
+	parts := strings.Split(relative, string(filepath.Separator))
+	for _, part := range parts[:len(parts)-1] {
+		fd, openErr := syscall.Openat(
+			int(current.Fd()),
+			part,
+			syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC,
+			0,
+		)
+		if errors.Is(openErr, syscall.ENOENT) {
+			current.Close()
+			return nil, false, nil
+		}
+		if openErr != nil {
+			current.Close()
+			return nil, false, openErr
+		}
+		next := os.NewFile(uintptr(fd), filepath.Join(current.Name(), part))
+		if err := validateOpenedPersistentDirectory(next, next.Name()); err != nil {
+			next.Close()
+			current.Close()
+			return nil, false, err
+		}
+		current.Close()
+		current = next
+	}
+	fd, err := syscall.Openat(
+		int(current.Fd()),
+		parts[len(parts)-1],
+		syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC,
+		0,
+	)
+	current.Close()
+	if errors.Is(err, syscall.ENOENT) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return os.NewFile(uintptr(fd), filepath.Join(configHome, relative)), true, nil
+}
+
+func validateOpenedPersistentDirectory(file *os.File, path string) error {
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("persistent setting directory is unsafe: %s", path)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != uint32(os.Getuid()) {
+		return fmt.Errorf("persistent setting directory is not operator-owned: %s", path)
+	}
+	return nil
+}
+
+// ParsePersistentAssignments parses bounded in-memory env content while
+// preserving duplicates, line provenance, and implicit/dynamic assignments.
+func ParsePersistentAssignments(
+	path string,
+	content []byte,
+) ([]PersistentAssignment, error) {
+	if len(content) > 8<<20 {
+		return nil, errors.New("persistent setting content exceeds its size bound")
+	}
+	lines := bytes.SplitAfter(content, []byte{'\n'})
+	values := environment{}
+	var assignments []PersistentAssignment
+	var current bytes.Buffer
+	quote := byte(0)
+	lineNumber := 0
+	recordLine := 0
+	for _, line := range lines {
+		if len(line) == 0 {
+			continue
+		}
+		lineNumber++
+		if current.Len() == 0 {
+			recordLine = lineNumber
+		}
+		current.Write(line)
+		quote = scanQuote(strings.TrimSuffix(string(line), "\n"), quote)
+		if quote != 0 {
+			continue
+		}
+		record := strings.TrimSpace(current.String())
+		current.Reset()
+		if record == "" || strings.HasPrefix(record, "#") {
+			continue
+		}
+		direct, dynamic := persistentDirectAssignment(record)
+		if err := applyRecord(record, values, func(name, value string) {
+			isDirect := direct != "" && name == direct
+			assignments = append(assignments, PersistentAssignment{
+				Name: name, Value: value, Line: recordLine,
+				Direct: isDirect, Dynamic: dynamic || !isDirect,
+			})
+		}); err != nil {
+			return nil, fmt.Errorf("%s:%d: %w", path, recordLine, err)
+		}
+	}
+	if quote != 0 || current.Len() != 0 {
+		return nil, fmt.Errorf("%s:%d: unterminated quoted assignment", path, recordLine)
+	}
+	return assignments, nil
+}
+
+func persistentDirectAssignment(record string) (string, bool) {
+	record = strings.TrimSpace(record)
+	if strings.HasPrefix(record, ":") {
+		return "", true
+	}
+	if strings.HasPrefix(record, "export ") {
+		record = strings.TrimSpace(strings.TrimPrefix(record, "export "))
+	}
+	separator := strings.IndexByte(record, '=')
+	if separator < 1 {
+		return "", true
+	}
+	name := strings.TrimSpace(record[:separator])
+	raw := strings.TrimSpace(record[separator+1:])
+	_, expands := decodeValue(raw)
+	return name, expands && strings.ContainsRune(raw, '$')
 }
 
 // WritePersistentAssignment updates one assignment without rewriting unrelated
@@ -151,20 +370,40 @@ func persistentFileSnapshot(path string) (PersistentFileSnapshot, error) {
 	if err != nil {
 		return PersistentFileSnapshot{}, err
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() > 8<<20 {
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() ||
+		info.Mode().Perm()&0o022 != 0 || info.Size() > 8<<20 {
 		return PersistentFileSnapshot{}, errors.New(
 			"persistent setting target must be a bounded regular non-symlink file",
+		)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != uint32(os.Getuid()) || stat.Nlink != 1 {
+		return PersistentFileSnapshot{}, errors.New(
+			"persistent setting target has unsafe ownership or hard links",
 		)
 	}
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return PersistentFileSnapshot{}, err
 	}
-	return PersistentFileSnapshot{Exists: true, Content: content}, nil
+	return PersistentFileSnapshot{
+		Exists: true, Content: content, Identity: persistentFileIdentity(stat),
+	}, nil
 }
 
 func samePersistentFileSnapshot(current, expected PersistentFileSnapshot) bool {
-	return current.Exists == expected.Exists && bytes.Equal(current.Content, expected.Content)
+	if current.Exists != expected.Exists || !bytes.Equal(current.Content, expected.Content) {
+		return false
+	}
+	return !expected.Exists || expected.Identity == (PersistentFileIdentity{}) ||
+		current.Identity == expected.Identity
+}
+
+func persistentFileIdentity(stat *syscall.Stat_t) PersistentFileIdentity {
+	return PersistentFileIdentity{
+		Device: uint64(stat.Dev), Inode: stat.Ino, Mode: stat.Mode,
+		UID: stat.Uid, GID: stat.Gid, Links: uint64(stat.Nlink),
+	}
 }
 
 // CreatePersistentFile atomically stores a new persistent file and refuses to

@@ -82,36 +82,6 @@ func TestRouteConsumersCommitReconcilesStaleCanonicalRoute(t *testing.T) {
 	}
 }
 
-func TestRouteConsumersRollbackRestoresOnlyAddedMounts(t *testing.T) {
-	for name, initial := range map[string]string{
-		"missing":  "missing",
-		"existing": "correct",
-	} {
-		t.Run(name, func(t *testing.T) {
-			options, state := routeConsumerFixture(t, StateCurrent, true)
-			write(t, state.defaultDevice, initial+"\n")
-			before, err := PrepareRouteConsumers(context.Background(), options)
-			if err != nil {
-				t.Fatal(err)
-			}
-			write(t, state.defaultDevice, "correct\n")
-			if err := RollbackRouteConsumers(context.Background(), options, before); err != nil {
-				t.Fatal(err)
-			}
-			if err := VerifyRouteConsumersRollback(
-				context.Background(),
-				options,
-				before,
-			); err != nil {
-				t.Fatal(err)
-			}
-			if got := strings.TrimSpace(read(t, state.defaultDevice)); got != initial {
-				t.Fatalf("rolled-back device state = %q, want %q", got, initial)
-			}
-		})
-	}
-}
-
 func TestRouteConsumerSnapshotSurvivesOwnerTransitionAndRejectsNewYard(t *testing.T) {
 	options, state := routeConsumerFixture(t, StateLegacyDirectory, true)
 	beforeLegacy, err := PrepareRouteConsumers(context.Background(), options)

@@ -19,61 +19,6 @@ const (
 	operationRolledBack  = "rolled-back"
 )
 
-func prepareTypedOperation(
-	ctx context.Context,
-	options ReleaseOptions,
-	operation Operation,
-) (string, error) {
-	switch operation.Kind {
-	case OperationKindTestYardOwnerV1:
-		state, err := testyardmigration.Prepare(ctx, testYardOptions(options))
-		return string(state), err
-	case OperationKindTestYardRouteConsumersV1:
-		return testyardmigration.PrepareRouteConsumers(ctx, testYardOptions(options))
-	case OperationKindTestVMBrokerRuntimeV1:
-		state, err := testyardmigration.PrepareBrokerRuntime(ctx, testYardOptions(options))
-		return string(state), err
-	case OperationKindPowerReconcilerRuntimeV1,
-		OperationKindPowerReconcilerSystemdCompatV1:
-		return preparePowerReconciler(options)
-	default:
-		return "", fmt.Errorf("unsupported migration operation kind %q", operation.Kind)
-	}
-}
-
-func commitTypedOperation(
-	ctx context.Context,
-	options ReleaseOptions,
-	operation Operation,
-	before string,
-) error {
-	switch operation.Kind {
-	case OperationKindTestYardOwnerV1:
-		state := testyardmigration.State(before)
-		if err := testyardmigration.Commit(ctx, testYardOptions(options), state); err != nil {
-			return err
-		}
-		return testyardmigration.Verify(testYardOptions(options), state)
-	case OperationKindTestYardRouteConsumersV1:
-		return testyardmigration.CommitRouteConsumers(
-			ctx,
-			testYardOptions(options),
-			before,
-		)
-	case OperationKindTestVMBrokerRuntimeV1:
-		return testyardmigration.CommitBrokerRuntime(
-			ctx,
-			testYardOptions(options),
-			testyardmigration.BrokerRuntimeState(before),
-		)
-	case OperationKindPowerReconcilerRuntimeV1,
-		OperationKindPowerReconcilerSystemdCompatV1:
-		return commitPowerReconciler(ctx, options, before)
-	default:
-		return fmt.Errorf("unsupported migration operation kind %q", operation.Kind)
-	}
-}
-
 func verifyTypedOperation(
 	ctx context.Context,
 	options ReleaseOptions,
@@ -82,21 +27,12 @@ func verifyTypedOperation(
 ) error {
 	switch operation.Kind {
 	case OperationKindTestYardOwnerV1:
-		return testyardmigration.Verify(
-			testYardOptions(options),
-			testyardmigration.State(before),
-		)
+		return testyardmigration.VerifyState(testYardOptions(options), testyardmigration.State(before))
 	case OperationKindTestYardRouteConsumersV1:
-		return testyardmigration.VerifyRouteConsumers(
-			ctx,
-			testYardOptions(options),
-			before,
-		)
+		return testyardmigration.VerifyRouteConsumers(ctx, testYardOptions(options), before)
 	case OperationKindTestVMBrokerRuntimeV1:
 		return testyardmigration.VerifyBrokerRuntime(
-			ctx,
-			testYardOptions(options),
-			testyardmigration.BrokerRuntimeState(before),
+			ctx, testYardOptions(options), testyardmigration.BrokerRuntimeState(before),
 		)
 	case OperationKindPowerReconcilerRuntimeV1,
 		OperationKindPowerReconcilerSystemdCompatV1:
@@ -106,195 +42,53 @@ func verifyTypedOperation(
 	}
 }
 
-func rollbackTypedOperation(
+func verifyTypedOperationRollback(
 	ctx context.Context,
 	options ReleaseOptions,
 	operation Operation,
 	before string,
 	fromLayout int,
-) error {
-	return rollbackTypedOperationWithLegacyPower(
-		ctx,
-		options,
-		operation,
-		before,
-		fromLayout,
-		"",
-	)
-}
-
-func rollbackTypedOperationWithLegacyPower(
-	ctx context.Context,
-	options ReleaseOptions,
-	operation Operation,
-	before string,
-	fromLayout int,
-	legacyDesiredPower string,
 ) error {
 	switch operation.Kind {
 	case OperationKindTestYardOwnerV1:
-		state := testyardmigration.State(before)
-		current := testYardOptions(options)
-		legacy := current
-		if fromLayout == 1 && state != testyardmigration.StateAbsent &&
-			state != testyardmigration.StateCurrent {
-			previous, err := previousRuntimeOptions(options)
-			if err != nil {
-				return err
-			}
-			legacy = testYardOptions(previous)
-		}
-		if err := testyardmigration.RollbackWithLegacyRuntimeAndPower(
-			ctx,
-			current,
-			legacy,
-			state,
-			legacyDesiredPower,
-		); err != nil {
-			return err
-		}
-		return testyardmigration.VerifyRollback(testYardOptions(options), state)
+		return testyardmigration.VerifyRollback(testYardOptions(options), testyardmigration.State(before))
 	case OperationKindTestYardRouteConsumersV1:
-		if err := testyardmigration.RollbackRouteConsumers(
-			ctx,
-			testYardOptions(options),
-			before,
-		); err != nil {
-			return err
-		}
-		return testyardmigration.VerifyRouteConsumersRollback(
-			ctx,
-			testYardOptions(options),
-			before,
-		)
+		return testyardmigration.VerifyRouteConsumersRollback(ctx, testYardOptions(options), before)
 	case OperationKindTestVMBrokerRuntimeV1:
-		disposition, err := brokerRollbackPolicy(fromLayout)
-		if err != nil {
+		if err := validateBrokerRollbackLayout(fromLayout); err != nil {
 			return fmt.Errorf("operation %q: %w", operation.ID, err)
 		}
-		if disposition == brokerRollbackDeferredToOwner {
-			return nil
+		previous, err := previousRuntimeOptions(options)
+		if err != nil {
+			return err
 		}
-		return testyardmigration.RollbackBrokerRuntime(
-			ctx,
-			testYardOptions(options),
-			testyardmigration.BrokerRuntimeState(before),
+		return testyardmigration.VerifyBrokerRuntime(
+			ctx, testYardOptions(previous), testyardmigration.BrokerRuntimeState(before),
 		)
-	case OperationKindPowerReconcilerRuntimeV1:
-		return rollbackPowerReconciler(ctx, options, before, false, false)
-	case OperationKindPowerReconcilerSystemdCompatV1:
-		switch fromLayout {
-		case 1, 2, 3:
-			return rollbackPowerReconciler(ctx, options, before, false, false)
-		case 4:
-			return rollbackPowerReconciler(ctx, options, before, true, true)
-		default:
-			return fmt.Errorf(
-				"unsupported compatibility layout %d for operation %q",
-				fromLayout,
-				operation.ID,
-			)
+	case OperationKindPowerReconcilerRuntimeV1,
+		OperationKindPowerReconcilerSystemdCompatV1:
+		if before == powerReconcilerAbsent {
+			return verifyPowerReconciler(ctx, options, before)
 		}
+		previous, err := previousRuntimeOptions(options)
+		if err != nil {
+			return err
+		}
+		previous.Environment = powerReconcilerEnvironment(previous, previous.RepositoryRoot)
+		if operation.Kind == OperationKindPowerReconcilerSystemdCompatV1 && fromLayout == 4 {
+			return verifyRestoredPowerReconciler(ctx, previous, before)
+		}
+		return verifyPowerReconciler(ctx, previous, before)
 	default:
 		return fmt.Errorf("unsupported migration operation kind %q", operation.Kind)
 	}
 }
 
-type brokerRollbackDisposition uint8
-
-const (
-	brokerRollbackDeferredToOwner brokerRollbackDisposition = iota
-	brokerRollbackWithPrevious
-)
-
-func brokerRollbackPolicy(fromLayout int) (brokerRollbackDisposition, error) {
+func validateBrokerRollbackLayout(fromLayout int) error {
 	if fromLayout < 1 {
-		return 0, fmt.Errorf("unsupported broker rollback layout %d", fromLayout)
+		return fmt.Errorf("unsupported broker rollback layout %d", fromLayout)
 	}
-	if fromLayout == 1 {
-		return brokerRollbackDeferredToOwner, nil
-	}
-	return brokerRollbackWithPrevious, nil
-}
-
-func reprepareTypedOperation(
-	ctx context.Context,
-	options ReleaseOptions,
-	operation Operation,
-	before string,
-) (string, bool, error) {
-	if err := verifyTypedOperation(ctx, options, operation, before); err == nil {
-		return before, false, nil
-	}
-	switch operation.Kind {
-	case OperationKindTestYardOwnerV1:
-		previous := testyardmigration.State(before)
-		current, err := testyardmigration.Prepare(ctx, testYardOptions(options))
-		if err != nil {
-			return "", false, err
-		}
-		switch current {
-		case testyardmigration.StateAbsent:
-			return string(current), false, nil
-		case testyardmigration.StateLegacyDirectory,
-			testyardmigration.StateLegacyDirectoryProjects,
-			testyardmigration.StateLegacyDirectoryOverrides,
-			testyardmigration.StateLegacyDirectoryState,
-			testyardmigration.StateLegacyFlat,
-			testyardmigration.StateLegacyDirectoryAdoptCurrent,
-			testyardmigration.StateLegacyFlatAdoptCurrent,
-			testyardmigration.StateCurrent:
-			if current == testyardmigration.StateCurrent {
-				return "", false, fmt.Errorf(
-					"typed migration postcondition changed after commit from %q",
-					before,
-				)
-			}
-			if previous != testyardmigration.StateAbsent &&
-				previous != testyardmigration.StateCurrent &&
-				current != previous {
-				return "", false, fmt.Errorf(
-					"typed migration postcondition changed from %q to %q",
-					before,
-					current,
-				)
-			}
-			return string(current), true, nil
-		default:
-			return "", false, fmt.Errorf(
-				"typed migration postcondition changed from %q to %q",
-				before,
-				current,
-			)
-		}
-	case OperationKindTestYardRouteConsumersV1:
-		current, err := testyardmigration.PrepareRouteConsumers(
-			ctx,
-			testYardOptions(options),
-		)
-		if err != nil {
-			return "", false, err
-		}
-		return current, true, nil
-	case OperationKindTestVMBrokerRuntimeV1:
-		current, err := testyardmigration.PrepareBrokerRuntime(
-			ctx,
-			testYardOptions(options),
-		)
-		if err != nil {
-			return "", false, err
-		}
-		return string(current), true, nil
-	case OperationKindPowerReconcilerRuntimeV1,
-		OperationKindPowerReconcilerSystemdCompatV1:
-		current, err := preparePowerReconciler(options)
-		if err != nil {
-			return "", false, err
-		}
-		return current, current == powerReconcilerInstalled, nil
-	default:
-		return "", false, fmt.Errorf("unsupported migration operation kind %q", operation.Kind)
-	}
+	return nil
 }
 
 func testYardOptions(options ReleaseOptions) testyardmigration.Options {
@@ -315,15 +109,10 @@ func testYardOptions(options ReleaseOptions) testyardmigration.Options {
 		stderr = io.Discard
 	}
 	return testyardmigration.Options{
-		Executable:     executable,
-		RepositoryRoot: options.RepositoryRoot,
-		RuntimeRoot:    options.RuntimeRoot,
-		Incus:          options.Incus,
-		ConfigHome:     options.ConfigHome,
-		DataHome:       options.DataHome,
-		Environment:    environment,
-		Stdout:         diagnostics,
-		Stderr:         stderr,
+		Executable: executable, RepositoryRoot: options.RepositoryRoot,
+		Incus:      options.Incus,
+		ConfigHome: options.ConfigHome, DataHome: options.DataHome,
+		Environment: environment, Stdout: diagnostics, Stderr: stderr,
 	}
 }
 
@@ -344,43 +133,31 @@ func validateOperationState(operation transactionOperation) error {
 			testyardmigration.StateLegacyFlatAdoptCurrent,
 			testyardmigration.StateCurrent:
 		default:
-			return fmt.Errorf(
-				"typed migration operation has invalid prepared state %q",
-				operation.Before,
-			)
+			return fmt.Errorf("typed migration operation has invalid prepared state %q", operation.Before)
 		}
 	case OperationKindTestYardRouteConsumersV1:
 		if err := testyardmigration.ValidateRouteConsumersState(operation.Before); err != nil {
-			return fmt.Errorf(
-				"typed migration operation has invalid prepared state: %w",
-				err,
-			)
+			return fmt.Errorf("typed migration operation has invalid prepared state: %w", err)
 		}
 	case OperationKindTestVMBrokerRuntimeV1:
-		if err := testyardmigration.ValidateBrokerRuntimeState(
-			testyardmigration.BrokerRuntimeState(operation.Before),
-		); err != nil {
-			return fmt.Errorf(
-				"typed migration operation has invalid prepared state: %w",
-				err,
-			)
+		switch testyardmigration.BrokerRuntimeState(operation.Before) {
+		case testyardmigration.BrokerRuntimeAbsent,
+			testyardmigration.BrokerRuntimeInactive,
+			testyardmigration.BrokerRuntimeActive:
+		default:
+			return fmt.Errorf("typed migration operation has invalid prepared state %q", operation.Before)
 		}
 	case OperationKindPowerReconcilerRuntimeV1,
 		OperationKindPowerReconcilerSystemdCompatV1:
-		if err := validatePowerReconcilerState(operation.Before); err != nil {
-			return fmt.Errorf(
-				"typed migration operation has invalid prepared state: %w",
-				err,
-			)
-		}
+		return validatePowerReconcilerState(operation.Before)
 	default:
 		return fmt.Errorf("unsupported migration operation kind %q", operation.Kind)
 	}
 	switch operation.Phase {
-	case operationPrepared, operationCommitting, operationCommitted,
+	case "", operationPrepared, operationCommitting, operationCommitted,
 		operationRollingBack, operationRolledBack:
 		return nil
 	default:
-		return fmt.Errorf("typed migration operation has unknown phase %q", operation.Phase)
+		return fmt.Errorf("typed migration operation has invalid phase %q", operation.Phase)
 	}
 }

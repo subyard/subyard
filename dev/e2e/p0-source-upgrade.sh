@@ -19,7 +19,6 @@ OPERATOR_HOME_MARKER="$OPERATOR_HOME/.subyard-p0-source-home"
 SOURCE_ROOT="$OPERATOR_HOME/src"
 SHARED_ROOT="/var/tmp/subyard-p0-source-$TOKEN"
 RELEASE_ROOT="$SHARED_ROOT/releases"
-PREPARED_CANDIDATE="$SHARED_ROOT/prepared-candidate-b"
 SUDOERS="/etc/sudoers.d/subyard-p0-source-$TOKEN"
 YARD_NAME="e2e-yard"
 PROJECT="subyard-e2e-yard"
@@ -29,11 +28,6 @@ DEFAULT_INSTANCE="yard"
 BASE_IMAGE="${P0_REAL_INCUS_CONTAINER_CACHE_ALIAS:-subyard-e2e-debian-13-cloud-container}"
 VERSION_A="p0-source-a-$TOKEN"
 VERSION_B="p0-source-b-$TOKEN"
-MIGRATION_SOURCE="$OPERATOR_HOME/.config/subyard/migration-fixture/legacy/config.env"
-MIGRATION_DESTINATION="$OPERATOR_HOME/.config/subyard/migration-fixture/current/config.env"
-MIGRATION_STATE="$OPERATOR_HOME/.config/subyard/migrations/state.json"
-LEGACY_INSTALLER="$ROOT/tests/fixtures/migrations/v0.1.0-install-runtime-release.sh"
-LAYOUT_SIX_REGISTRY="$ROOT/tests/fixtures/migrations/layout-6-production-prefix.json"
 POWER_RETRY_RUNTIME="subyard-p0-source-power-retry-$TOKEN"
 POWER_RETRY_PROBE="/run/$POWER_RETRY_RUNTIME/failed-once"
 POWER_RETRY_DROPIN="/etc/systemd/system/subyard-power-reconcile.service.d/p0-source-$TOKEN.conf"
@@ -117,9 +111,53 @@ relax_fixture_init_deadline() {
 }
 
 assert_fixture_project() {
-  local project="${1:-$PROJECT}"
-  [ "$(incus project get "$project" user.subyard.p0-source 2>/dev/null)" = "$MARKER" ] \
+  local project="${1:-$PROJECT}" marker
+  marker="$(incus project get "$project" user.subyard.p0-source 2>/dev/null)"
+  [ "$marker" = "$MARKER" ] && return 0
+  [ -z "$marker" ] && is_markerless_migrated_fixture_project "$project" \
     || die "refusing unmarked Incus project $project"
+}
+
+is_markerless_migrated_fixture_project() {
+  local project="$1" registration uid initialized revision instances volumes
+  registration="$OPERATOR_HOME/.config/subyard/yards/test-yard/config.env"
+  [ "$project" = subyard-test-yard ] \
+    && [ -d "$SHARED_ROOT" ] && [ ! -L "$SHARED_ROOT" ] && [ -O "$SHARED_ROOT" ] \
+    && [ "$(cat "$SHARED_ROOT/.subyard-p0-marker" 2>/dev/null)" = "$MARKER" ] \
+    && id "$OPERATOR" >/dev/null 2>&1 \
+    && sudo -n test -d "$OPERATOR_HOME" && ! sudo -n test -L "$OPERATOR_HOME" \
+    && [ "$(sudo -n cat "$OPERATOR_HOME_MARKER" 2>/dev/null)" = "$MARKER" ] \
+    && sudo -n test -f "$registration" && ! sudo -n test -L "$registration" \
+    || return 1
+  uid="$(id -u "$OPERATOR")"
+  [ "$(sudo -n stat -c %u "$registration")" = "$uid" ] \
+    && [ "$(sudo -n grep -Fxc 'YARD_TEMPLATE=test-vms' "$registration")" = 1 ] \
+    && [ "$(incus project get "$project" restricted 2>/dev/null)" = true ] \
+    && [ "$(incus project get "$project" features.images 2>/dev/null)" = false ] \
+    || return 1
+  instances="$(incus list --project "$project" --format csv -c n)"
+  [ -z "$(awk '$0 != "yard-test-yard" { print }' <<<"$instances")" ] \
+    || return 1
+  volumes="$(incus storage volume list default --project "$project" --format csv -c t,n)"
+  [ -z "$(awk -F, '
+    !(($1 == "container" && $2 == "yard-test-yard") ||
+      ($1 == "custom" && $2 == "yard-srv-test-yard")) { print }
+  ' <<<"$volumes")" ] || return 1
+  if incus config show yard-test-yard --project "$project" >/dev/null 2>&1; then
+    [ "$(incus config get yard-test-yard user.subyard.managed \
+      --project "$project" 2>/dev/null)" = true ] \
+      && [ "$(incus config get yard-test-yard user.subyard.name \
+        --project "$project" 2>/dev/null)" = test-yard ] \
+      || return 1
+    initialized="$(incus config get yard-test-yard user.subyard.initialized \
+      --project "$project" 2>/dev/null)"
+    revision="$(incus config get yard-test-yard user.subyard.test_vms_revision \
+      --project "$project" 2>/dev/null)"
+    case "$initialized:$revision" in
+      true:1:*:test-yard | false:) ;;
+      *) return 1 ;;
+    esac
+  fi
 }
 
 cleanup_owned_project() {
@@ -334,7 +372,7 @@ seed_previous_migration_inputs() {
 }
 
 package_candidates() {
-  local arch bundle fstype
+  local fstype
   install -d -m 0700 "$RELEASE_ROOT/a" "$RELEASE_ROOT/b"
   fstype="$(findmnt -n -o FSTYPE --target "$RELEASE_ROOT")" \
     || die "cannot identify release fixture filesystem"
@@ -343,24 +381,9 @@ package_candidates() {
   esac
   printf '%s\n' "$MARKER" > "$RELEASE_ROOT/.subyard-p0-marker"
   printf '%s\n' "$SOURCE_REVISION" > "$RELEASE_ROOT/source-revision"
-  [ "$(sha256sum "$LEGACY_INSTALLER" | cut -d' ' -f1)" = \
-    168dbaa00dfe3d86471358993e63d6b50c02d5af4bb136a6da3c4e39229780dd ] \
-    || die 'the pinned v0.1.0 runtime installer fixture changed'
-  "$ROOT/dev/package-engine.sh" --output-dir "$RELEASE_ROOT/a" --version "$VERSION_A" \
-    --runtime-installer "$LEGACY_INSTALLER" >/dev/null
-  "$ROOT/dev/package-engine.sh" --output-dir "$RELEASE_ROOT/b" --version "$VERSION_B" \
-    --migration-registry "$LAYOUT_SIX_REGISTRY" >/dev/null
-  case "$(uname -m)" in
-    x86_64) arch=amd64 ;;
-    aarch64 | arm64) arch=arm64 ;;
-    *) die "unsupported live migration architecture: $(uname -m)" ;;
-  esac
-  bundle="$RELEASE_ROOT/b/subyard-$VERSION_B-linux-$arch.tar.gz"
-  [ -f "$bundle" ] || die 'layout-six candidate bundle is unavailable'
-  install -d -m 0755 "$PREPARED_CANDIDATE"
-  tar -xzf "$bundle" -C "$PREPARED_CANDIDATE"
+  "$ROOT/dev/package-engine.sh" --output-dir "$RELEASE_ROOT/a" --version "$VERSION_A" >/dev/null
+  "$ROOT/dev/package-engine.sh" --output-dir "$RELEASE_ROOT/b" --version "$VERSION_B" >/dev/null
   chmod -R a+rX "$RELEASE_ROOT"
-  chmod -R a+rX "$PREPARED_CANDIDATE"
 }
 
 bootstrap_candidate() {
@@ -412,214 +435,22 @@ verify_migration() {
     || die 'guarded source recovery was not retained'
 }
 
-candidate_migrate() {
-  operator_no_go env SUBYARD_REPOSITORY_ROOT="$PREPARED_CANDIDATE" \
-    "$PREPARED_CANDIDATE/bin/yard-engine" _migrate "$1"
-}
-
-migration_transaction_directory() {
-  local version="${1:?migration transaction release version is required}"
-  operator_env bash -c '
-    set -euo pipefail
-    root="$1"
-    version="$2"
-    [ -d "$root" ] && [ ! -L "$root" ]
-    selected=
-    shopt -s nullglob
-    for transaction in "$root"/*; do
-      [ -d "$transaction" ] && [ ! -L "$transaction" ]
-      journal="$transaction/transaction.json"
-      [ -f "$journal" ] && [ ! -L "$journal" ]
-      to_release="$(jq -er ".toRelease | select(type == \"string\" and length > 0)" "$journal")"
-      [ "$to_release" = "$version" ] || continue
-      [ -z "$selected" ]
-      selected="$transaction"
-    done
-    [ -n "$selected" ]
-    printf "%s\n" "$selected"
-  ' _ "$OPERATOR_HOME/.config/subyard/migrations/transactions" "$version"
-}
-
-verify_protected_migration_state() {
-  local transaction
-  transaction="$(migration_transaction_directory "$VERSION_B")" \
-    || die 'migration transaction directory is missing or ambiguous'
-  operator_env bash -c '
-    set -euo pipefail
-    owner="$(id -u)"
-    for directory in "$1" "$1/transactions" "$2" "$2/recovery"; do
-      [ -d "$directory" ] && [ ! -L "$directory" ]
-      [ "$(stat -c "%a:%u" "$directory")" = "700:$owner" ]
-    done
-    for file in "$1/state.json" "$2/transaction.json" "$2/recovery/0000"; do
-      [ -f "$file" ] && [ ! -L "$file" ]
-      [ "$(stat -c "%a:%u:%h" "$file")" = "600:$owner:1" ]
-    done
-    ! find "$1" -xdev -type l -print -quit | grep -q .
-  ' _ "$OPERATOR_HOME/.config/subyard/migrations" "$transaction" \
-    || die 'migration journal or recovery permissions are unsafe'
-}
-
-seed_versioned_migration_input() {
-  local report state_before
-  operator_env install -d -m 0700 "$(dirname "$MIGRATION_SOURCE")"
-  operator_env bash -c 'printf "TOKEN=synthetic-layout\n" > "$1"' _ "$MIGRATION_SOURCE"
-  operator_env chmod 0600 "$MIGRATION_SOURCE"
-  operator_env test ! -e "$MIGRATION_DESTINATION" \
-    || die 'synthetic migration destination already exists'
+verify_v2_release_transition() { # <version>
+  local expected="$1"
+  [ "$(operator_yard --version)" = "yard $expected" ] \
+    || die "release transition did not activate $expected"
   jq -e '
-    .layout == 5 and
-    .applied == [
-      "migrate-test-yard-owner",
-      "refresh-test-vm-broker",
-      "refresh-power-reconciler",
-      "repair-power-reconciler-systemd-compat"
-    ]
-  ' < <(operator_env cat "$MIGRATION_STATE") >/dev/null \
-    || die 'production migration history is unavailable before synthetic migration'
-  state_before="$(operator_env sha256sum "$MIGRATION_STATE" | awk '{print $1}')"
-  report="$(candidate_migrate check)"
-  if ! jq -e '
-    .layout == 5 and .targetLayout == 6 and .pending == true and
-    .phase == "reconcile" and
-    .requiredMigrations == [
-      "refresh-test-vm-broker",
-      "refresh-power-reconciler",
-      "repair-power-reconciler-systemd-compat",
-      "move-legacy-assignments"
-    ] and
-    .affectedResources == [
-      "test-vm-broker-runtime",
-      "power-reconciler-runtime",
-      "migration-fixture-assignments"
-    ]
-  ' <<<"$report" >/dev/null; then
-    jq -c . <<<"$report" >&2
-    die 'candidate returned the wrong live migration plan'
-  fi
-  [ "$state_before" = "$(operator_env sha256sum "$MIGRATION_STATE" | awk '{print $1}')" ] \
-    && operator_env test -f "$MIGRATION_SOURCE" \
-    && operator_env test ! -e "$MIGRATION_DESTINATION" \
-    || die 'live migration check changed operator state'
-}
-
-verify_prepared_versioned_migration() {
-  local report transaction journal
-  [ "$(operator_yard --version)" = "yard $VERSION_A" ] \
-    || die 'prepared migration changed the active runtime'
-  operator_env cmp "$MIGRATION_SOURCE" "$MIGRATION_DESTINATION" \
-    || die 'prepared migration did not retain matching old and new consumer inputs'
-  jq -e '
-    .layout == 5 and
-    .applied == [
-      "migrate-test-yard-owner",
-      "refresh-test-vm-broker",
-      "refresh-power-reconciler",
-      "repair-power-reconciler-systemd-compat"
-    ]
-  ' < <(operator_env cat "$MIGRATION_STATE") >/dev/null \
-    || die 'prepared migration advanced the applied layout'
-  transaction="$(migration_transaction_directory "$VERSION_B")"
-  journal="$(operator_env cat "$transaction/transaction.json")"
-  if ! jq -e --arg version "$VERSION_B" '
-    .phase == "prepared" and .fromLayout == 5 and .toLayout == 6 and
-    .toRelease == $version and (.entries | length) == 1 and
-    (.operations | map([.migrationId, .operationId, .kind])) == [
-      ["migrate-test-yard-owner", "test-yard-owner", "test-yard-owner-v1"],
-      ["migrate-test-yard-owner", "test-yard-route-consumers",
-       "test-yard-route-consumers-v1"],
-      ["refresh-test-vm-broker", "test-vm-broker-runtime",
-       "test-vm-broker-runtime-v1"],
-      ["refresh-power-reconciler", "power-reconciler-runtime",
-       "power-reconciler-runtime-v1"],
-      ["repair-power-reconciler-systemd-compat", "power-reconciler-systemd-compat",
-       "power-reconciler-systemd-compat-v1"]
-    ]
-  ' <<<"$journal" >/dev/null; then
-    jq -c --arg version "$VERSION_B" '{
-      expectedToRelease: $version,
-      actual: {
-        phase, fromLayout, toLayout, toRelease,
-        entries: ((.entries // []) | length),
-        operations: ((.operations // []) | length)
-      }
-    }' <<<"$journal" >&2
-    die 'prepared migration journal is inconsistent'
-  fi
-  report="$(candidate_migrate check)"
-  jq -e '
-    .layout == 5 and .targetLayout == 6 and .pending == true and .phase == "prepared"
-  ' <<<"$report" >/dev/null || die 'prepared migration does not resume deterministically'
-  verify_protected_migration_state
-}
-
-verify_committed_versioned_migration() {
-  local report transaction
-  [ "$(operator_yard --version)" = "yard $VERSION_B" ] \
-    || die 'committed migration runtime is not active'
-  operator_env test ! -e "$MIGRATION_SOURCE" \
-    && operator_env test ! -L "$MIGRATION_SOURCE" \
-    && operator_env grep -Fxq 'TOKEN=synthetic-layout' "$MIGRATION_DESTINATION" \
-    || die 'committed migration retained the old active path or lost consumer data'
-  jq -e '
-    .layout == 6 and
-    .applied == [
-      "migrate-test-yard-owner",
-      "refresh-test-vm-broker",
-      "refresh-power-reconciler",
-      "repair-power-reconciler-systemd-compat",
-      "move-legacy-assignments"
-    ]
-  ' < <(operator_env cat "$MIGRATION_STATE") >/dev/null \
-    || die 'committed migration did not advance the applied layout'
-  transaction="$(migration_transaction_directory "$VERSION_B")"
-  jq -e --arg version "$VERSION_B" '
-    .phase == "committed" and .fromLayout == 5 and .toLayout == 6 and
-    .toRelease == $version and (.entries | length) == 1 and
-    (.operations | map([.migrationId, .operationId, .kind])) == [
-      ["migrate-test-yard-owner", "test-yard-owner", "test-yard-owner-v1"],
-      ["migrate-test-yard-owner", "test-yard-route-consumers",
-       "test-yard-route-consumers-v1"],
-      ["refresh-test-vm-broker", "test-vm-broker-runtime",
-       "test-vm-broker-runtime-v1"],
-      ["refresh-power-reconciler", "power-reconciler-runtime",
-       "power-reconciler-runtime-v1"],
-      ["repair-power-reconciler-systemd-compat", "power-reconciler-systemd-compat",
-       "power-reconciler-systemd-compat-v1"]
-    ]
-  ' < <(operator_env cat "$transaction/transaction.json") >/dev/null \
-    || die 'committed migration journal is inconsistent'
-  report="$(candidate_migrate check)"
-  jq -e '
-    .layout == 6 and .targetLayout == 6 and (.pending // false) == false and
-    .phase == "committed"
-  ' <<<"$report" >/dev/null || die 'committed migration does not resume deterministically'
-  verify_protected_migration_state
-}
-
-verify_rolled_back_versioned_migration() {
-  local transaction
-  [ "$(operator_yard --version)" = "yard $VERSION_A" ] \
-    || die 'runtime rollback did not restore the v0.1-style runtime'
-  operator_env grep -Fxq 'TOKEN=synthetic-layout' "$MIGRATION_SOURCE" \
-    && operator_env test ! -e "$MIGRATION_DESTINATION" \
-    && operator_env test ! -L "$MIGRATION_DESTINATION" \
-    || die 'runtime rollback did not restore the previous consumer path'
-  jq -e '
-    .layout == 5 and
-    .applied == [
-      "migrate-test-yard-owner",
-      "refresh-test-vm-broker",
-      "refresh-power-reconciler",
-      "repair-power-reconciler-systemd-compat"
-    ]
-  ' < <(operator_env cat "$MIGRATION_STATE") >/dev/null \
-    || die 'runtime rollback did not restore the previous data layout'
-  transaction="$(migration_transaction_directory "$VERSION_B")"
-  jq -e '.phase == "rolled-back" and .fromLayout == 5 and .toLayout == 6' \
-    < <(operator_env cat "$transaction/transaction.json") >/dev/null \
-    || die 'rolled-back migration journal is inconsistent'
-  verify_protected_migration_state
+    .schemaVersion == 2 and .domains.settings.epoch == 2 and
+    .domains.settings.applied == ["canonicalize-test-vms-settings-v2"]
+  ' < <(operator_env cat \
+    "$OPERATOR_HOME/.config/subyard/release-transition/v2/ledger.json") >/dev/null \
+    || die 'release transition domain ledger is not at the verified fixed point'
+  jq -e --arg version "$expected" '
+    .schemaVersion == 2 and .checkpoint == "complete" and
+    (.goal.target | startswith($version + "-"))
+  ' < <(operator_env cat \
+    "$OPERATOR_HOME/.config/subyard/release-transition/v2/journal.json") >/dev/null \
+    || die 'release transition journal is not complete for the expected runtime'
 }
 
 verify_config_workflow() {
@@ -848,9 +679,7 @@ prepare() {
   prepare_default_yard
   operator_yard stop --yes
 
-  seed_versioned_migration_input
-  candidate_migrate apply >/dev/null
-  verify_prepared_versioned_migration
+  verify_v2_release_transition "$VERSION_A"
   [ "$(incus config get "$INSTANCE" user.subyard.desired_power --project "$PROJECT")" = running ] \
     && [ "$(incus config get "$DEFAULT_INSTANCE" user.subyard.desired_power \
       --project "$DEFAULT_PROJECT")" = stopped ] \
@@ -886,9 +715,7 @@ resume() {
       --project "$DEFAULT_PROJECT")" = false ] \
     || die 'boot reconciler changed boot.autostart during the first reboot'
   restore_operator_passwordless_sudo
-  verify_prepared_versioned_migration
-  candidate_migrate apply >/dev/null
-  verify_prepared_versioned_migration
+  verify_v2_release_transition "$VERSION_A"
 
   operator_env chmod 0755 "$OPERATOR_HOME/.config/subyard/yards/test-yard"
   operator_env chmod 0640 \
@@ -896,7 +723,7 @@ resume() {
 
   operator_no_go env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT/b" \
     "$OPERATOR_HOME/.local/bin/yard" update --version "$VERSION_B" --yes
-  verify_committed_versioned_migration
+  verify_v2_release_transition "$VERSION_B"
   verify_config_workflow
   operator_env chmod 0600 \
     "$OPERATOR_HOME/.config/subyard/yards/test-yard/config.env"
@@ -917,7 +744,6 @@ resume() {
 }
 
 finish() {
-  local finalize_report
   load_rebooted_fixture
   [ "$(operator_yard --version)" = "yard $VERSION_B" ] \
     || die 'runtime entrypoint did not survive reboot'
@@ -940,29 +766,23 @@ finish() {
   operator_yard -Y "$YARD_NAME" status >/dev/null
   operator_yard -Y "$YARD_NAME" check
   operator_yard -Y "$YARD_NAME" init --yes
-  verify_committed_versioned_migration
-  finalize_report="$(candidate_migrate finalize)"
-  jq -e '.changed == false and .layout == 6 and .phase == "committed"' \
-    <<<"$finalize_report" >/dev/null \
-    || die 'repeated committed migration command was not idempotent'
+  verify_v2_release_transition "$VERSION_B"
   verify_config_workflow
 
   operator_yard update --rollback --yes
-  verify_rolled_back_versioned_migration
+  verify_v2_release_transition "$VERSION_A"
   verify_config_workflow
   operator_no_go env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT/b" \
     "$OPERATOR_HOME/.local/bin/yard" update --version "$VERSION_B" --yes
-  verify_committed_versioned_migration
+  verify_v2_release_transition "$VERSION_B"
   verify_config_workflow
 
-  operator_no_go "$OPERATOR_HOME/.subyard/recovery/pre-go-source/restore.sh" >/dev/null
-  [ "$(operator_env readlink -f "$OPERATOR_HOME/.local/bin/yard")" = "$SOURCE_ROOT/bin/yard" ] \
-    || die 'guarded recovery did not restore the source entrypoint'
-  [ "$(operator_no_go "$SOURCE_ROOT/bin/yard" --version)" = "yard source-$SOURCE_REVISION" ] \
-    || die 'recovered source entrypoint is not operational without Go'
-  bootstrap_candidate "$RELEASE_ROOT/b" "$VERSION_B"
+  if operator_no_go \
+    "$OPERATOR_HOME/.subyard/recovery/pre-go-source/restore.sh" >/dev/null 2>&1; then
+    die 'committed source import allowed a restore that invalidates v2 history'
+  fi
   [ "$(operator_yard --version)" = "yard $VERSION_B" ] \
-    || die 'standalone installer could not re-enter the runtime after recovery'
+    || die 'rejected source restore changed the active runtime'
   verify_migration
   operator_yard -Y "$YARD_NAME" init --yes
   operator_yard -Y "$YARD_NAME" check
@@ -976,7 +796,7 @@ finish() {
   operator_env test ! -e "$OPERATOR_HOME/go-invoked" \
     || die 'post-reboot operator cycle invoked Go'
   cleanup_fixture
-  printf 'ok: source upgrade survived reboot, recovery and repeat installation\n'
+  printf 'ok: source upgrade survived reboot, rollback and sealed recovery\n'
 }
 
 case "$MODE" in

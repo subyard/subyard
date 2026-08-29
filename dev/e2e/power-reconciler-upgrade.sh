@@ -33,6 +33,7 @@ BOOT_ID_STATE="$STATE_ROOT/boot-id"
 DEFAULT_ROUTE_STATE="$STATE_ROOT/default-route"
 OLD_RELEASE_TARGET_STATE="$STATE_ROOT/old-release-target"
 CANDIDATE_RELEASE_TARGET_STATE="$STATE_ROOT/candidate-release-target"
+LEGACY_STATE_SHA_STATE="$STATE_ROOT/legacy-state.sha256"
 CLEANUP_ARMED=0
 PRESERVE_FIXTURE=0
 OLD_RELEASE_TARGET=''
@@ -398,22 +399,14 @@ assert_unit_matches() {
     || die 'installed power reconciler unit is not enabled'
 }
 
-assert_release_state() {
-  local version="$1" layout="$2" unit_template="$3" expected_load="$4"
+assert_runtime_state() {
+  local version="$1" unit_template="$2" expected_load="$3" manager_layout="$4"
+  local reconciler_target="$5"
   [ "$(operator_yard --version)" = "yard $version" ] \
     || die "active runtime is not yard $version"
-  operator_env jq -e --argjson layout "$layout" '
-    .layout == $layout and
-    .applied == (if $layout == 4 then
-      ["migrate-test-yard-owner", "refresh-test-vm-broker", "refresh-power-reconciler"]
-    else
-      ["migrate-test-yard-owner", "refresh-test-vm-broker", "refresh-power-reconciler",
-       "repair-power-reconciler-systemd-compat"]
-    end)
-  ' "$OPERATOR_HOME/.config/subyard/migrations/state.json" >/dev/null \
-    || die "migration state did not converge to layout $layout"
-  assert_unit_matches "$unit_template" "$expected_load" "$layout"
-  operator_env cmp "$OPERATOR_HOME/.subyard/runtime/current/bin/yard-engine" "$RECONCILER" \
+  assert_unit_matches "$unit_template" "$expected_load" "$manager_layout"
+  operator_env cmp \
+    "$OPERATOR_HOME/.subyard/runtime/$reconciler_target/bin/yard-engine" "$RECONCILER" \
     || die 'installed power reconciler executable is stale'
   [ "$(incus config get "$INSTANCE" boot.autostart --project "$PROJECT")" = false ] \
     || die 'update changed boot.autostart=false'
@@ -422,42 +415,52 @@ assert_release_state() {
   operator_yard check
 }
 
-assert_candidate_transaction() {
-  local phase="$1" transaction
-  transaction="$(operator_env bash -c '
-    set -euo pipefail
-    for journal in "$1"/*/transaction.json; do
-      [ -f "$journal" ] || continue
-      [ "$(jq -r .toRelease "$journal")" = "$2" ] || continue
-      printf "%s\n" "$journal"
-    done
-  ' _ "$OPERATOR_HOME/.config/subyard/migrations/transactions" "$CANDIDATE_VERSION")"
-  [ "$(wc -l <<<"$transaction")" = 1 ] || die 'candidate migration journal is missing or ambiguous'
-  if operator_env jq -e --arg phase "$phase" '
-    .phase == $phase and .fromLayout == 4 and .toLayout == 5 and
-    (.operations | map([.migrationId, .operationId, .kind])) == [
-      ["migrate-test-yard-owner", "test-yard-owner", "test-yard-owner-v1"],
-      ["migrate-test-yard-owner", "test-yard-route-consumers", "test-yard-route-consumers-v1"],
-      ["refresh-test-vm-broker", "test-vm-broker-runtime", "test-vm-broker-runtime-v1"],
-      ["refresh-power-reconciler", "power-reconciler-runtime", "power-reconciler-runtime-v1"],
-      ["repair-power-reconciler-systemd-compat", "power-reconciler-systemd-compat",
-       "power-reconciler-systemd-compat-v1"]
-    ] and
-    if $phase == "committed" then
-      all(.operations[]; .phase == "committed")
-    else
-      $phase == "rolled-back" and
-      all(.operations[0:4][]; .phase == "committed") and
-      .operations[4].phase == "rolled-back"
-    end
-  ' "$transaction" >/dev/null; then
-    return
-  fi
-  operator_env jq '{
-    phase, fromLayout, toLayout,
-    operations: [.operations[] | {migrationId, operationId, kind, phase}]
-  }' "$transaction" >&2 || true
-  die 'candidate migration journal does not match the compatibility-repair transaction'
+assert_published_v1_history() {
+  operator_env jq -e '
+    .layout == 4 and
+    .applied == ["migrate-test-yard-owner", "refresh-test-vm-broker", "refresh-power-reconciler"]
+  ' "$OPERATOR_HOME/.config/subyard/migrations/state.json" >/dev/null \
+    || die 'published v0.8.0 migration history is not the exact layout-4 fixed point'
+}
+
+record_published_v1_history() {
+  local digest
+  assert_published_v1_history
+  digest="$(operator_env sha256sum \
+    "$OPERATOR_HOME/.config/subyard/migrations/state.json" | awk '{print $1}')"
+  write_fixture_value "$LEGACY_STATE_SHA_STATE" "$digest"
+}
+
+assert_published_v1_history_unchanged() {
+  local expected actual
+  assert_published_v1_history
+  expected="$(read_fixture_value "$LEGACY_STATE_SHA_STATE")"
+  actual="$(operator_env sha256sum \
+    "$OPERATOR_HOME/.config/subyard/migrations/state.json" | awk '{print $1}')"
+  [ "$actual" = "$expected" ] \
+    || die 'candidate-owned v2 transition rewrote the superseded v1 migration history'
+}
+
+assert_v2_transition() {
+  local direction="$1" target="${2#releases/}"
+  operator_env jq -e '
+    .schemaVersion == 2 and
+    .domains["owner-registration"] == {
+      "epoch": 2, "applied": ["canonicalize-test-yard-owner-v2"]
+    } and
+    .domains["power-metadata"] == {"epoch": 1, "applied": []} and
+    .domains["project-state"] == {"epoch": 1, "applied": []} and
+    .domains.settings == {
+      "epoch": 2, "applied": ["canonicalize-test-vms-settings-v2"]
+    }
+  ' "$OPERATOR_HOME/.config/subyard/release-transition/v2/ledger.json" >/dev/null \
+    || die 'candidate v2 migration ledger is not at its exact per-domain fixed point'
+  operator_env jq -e --arg direction "$direction" --arg target "$target" '
+    .schemaVersion == 2 and .checkpoint == "complete" and
+    .goal == {"target": $target, "direction": $direction} and
+    .releases.target == $target and all(.steps[]; .checkpoint == "verified")
+  ' "$OPERATOR_HOME/.config/subyard/release-transition/v2/journal.json" >/dev/null \
+    || die 'candidate v2 transition journal is not complete for the exact release goal'
 }
 
 assert_runtime_links() {
@@ -467,8 +470,16 @@ assert_runtime_links() {
     || die "runtime links are not current=$current previous=$previous"
 }
 
-verify_update_check_is_read_only() {
-  local before after
+assert_candidate_state() {
+  assert_runtime_state "$CANDIDATE_VERSION" \
+    "$ROOT/config/systemd/subyard-power-reconcile.service.in" loaded 5 \
+    "$CANDIDATE_RELEASE_TARGET"
+  assert_published_v1_history_unchanged
+  assert_v2_transition activate-target "$CANDIDATE_RELEASE_TARGET"
+}
+
+verify_bridge_plan_is_read_only() {
+  local before after output rc
   before="$(operator_env bash -c '
     set -euo pipefail
     sha256sum "$1" "$2"
@@ -476,9 +487,14 @@ verify_update_check_is_read_only() {
     if [ -L "$4" ]; then readlink "$4"; else printf "absent\n"; fi
   ' _ "$OPERATOR_HOME/.config/subyard/migrations/state.json" "$UNIT" \
     "$OPERATOR_HOME/.subyard/runtime/current" "$OPERATOR_HOME/.subyard/runtime/previous")"
-  operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
-    "$OPERATOR_HOME/.local/bin/yard" update --check \
-      --version "$CANDIDATE_VERSION" --yes >/dev/null
+  set +e
+  output="$(operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
+    "$RELEASE_ROOT/subyard-install.sh" --version "$CANDIDATE_VERSION" \
+      </dev/null 2>&1 >/dev/null)"
+  rc=$?
+  set -e
+  [ "$rc" = 1 ] && grep -Fq 'confirmation required: interactive terminal required' <<<"$output" \
+    || die "unconfirmed standalone bridge did not stop at its candidate-owned plan: $output"
   after="$(operator_env bash -c '
     set -euo pipefail
     sha256sum "$1" "$2"
@@ -486,7 +502,8 @@ verify_update_check_is_read_only() {
     if [ -L "$4" ]; then readlink "$4"; else printf "absent\n"; fi
   ' _ "$OPERATOR_HOME/.config/subyard/migrations/state.json" "$UNIT" \
     "$OPERATOR_HOME/.subyard/runtime/current" "$OPERATOR_HOME/.subyard/runtime/previous")"
-  [ "$before" = "$after" ] || die 'yard update --check mutated runtime, migration state or unit'
+  [ "$before" = "$after" ] \
+    || die 'unconfirmed standalone bridge mutated stable links, migration state or unit'
 }
 
 write_fixture_value() {
@@ -555,10 +572,8 @@ assert_post_reboot_candidate() {
   find "$current_route" -delete
 
   load_release_targets
-  assert_release_state "$CANDIDATE_VERSION" 5 \
-    "$ROOT/config/systemd/subyard-power-reconcile.service.in" loaded
+  assert_candidate_state
   assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
-  assert_candidate_transaction committed
   manager_state="$(sudo -n systemctl show subyard-power-reconcile.service \
     --property=LoadState --property=NeedDaemonReload \
     --property=ActiveState --property=SubState --property=Result \
@@ -619,43 +634,41 @@ prepare_candidate() {
   operator_yard start --yes
   systemd_version="$(systemd-analyze --version | awk 'NR == 1 {print $2}')"
   if [ "$systemd_version" -lt 256 ]; then old_load=bad-setting; else old_load=loaded; fi
-  assert_release_state "$OLD_VERSION" 4 "$OLD_UNIT_FIXTURE" "$old_load"
   OLD_RELEASE_TARGET="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
   write_fixture_value "$OLD_RELEASE_TARGET_STATE" "$OLD_RELEASE_TARGET"
+  assert_runtime_state "$OLD_VERSION" "$OLD_UNIT_FIXTURE" "$old_load" 4 \
+    "$OLD_RELEASE_TARGET"
+  record_published_v1_history
   ok 'published v0.8.0 layout and installed incompatible unit reproduced'
 
-  info 'running ordinary yard update to the local candidate'
-  verify_update_check_is_read_only
+  info 'running the candidate-owned standalone bridge from the published predecessor'
+  verify_bridge_plan_is_read_only
   operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
-    "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" --yes
-  assert_release_state "$CANDIDATE_VERSION" 5 \
-    "$ROOT/config/systemd/subyard-power-reconcile.service.in" loaded
+    "$RELEASE_ROOT/subyard-install.sh" --version "$CANDIDATE_VERSION" --yes
   CANDIDATE_RELEASE_TARGET="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
   write_fixture_value "$CANDIDATE_RELEASE_TARGET_STATE" "$CANDIDATE_RELEASE_TARGET"
+  assert_candidate_state
   assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
-  assert_candidate_transaction committed
-  ok 'ordinary update applied the append-only compatibility migration'
+  ok 'candidate-owned bridge reached the v2 fixed point without rewriting v1 history'
 }
 
 finish_candidate_flow() {
-  local systemd_version old_load
   load_release_targets
-  systemd_version="$(systemd-analyze --version | awk 'NR == 1 {print $2}')"
-  if [ "$systemd_version" -lt 256 ]; then old_load=bad-setting; else old_load=loaded; fi
-  info 'rolling back to the exact published v0.8.0 runtime and unit'
+  info 'rolling back to the exact published v0.8.0 runtime under the active v2 owner'
   operator_yard update --rollback --yes
-  assert_release_state "$OLD_VERSION" 4 "$OLD_UNIT_FIXTURE" "$old_load"
+  assert_runtime_state "$OLD_VERSION" \
+    "$ROOT/config/systemd/subyard-power-reconcile.service.in" loaded 5 \
+    "$CANDIDATE_RELEASE_TARGET"
+  assert_published_v1_history_unchanged
+  assert_v2_transition activate-previous "$OLD_RELEASE_TARGET"
   assert_runtime_links "$OLD_RELEASE_TARGET" "$CANDIDATE_RELEASE_TARGET"
-  assert_candidate_transaction rolled-back
-  ok 'rollback restored the exact v0.8.0 runtime and unit'
+  ok 'rollback activated v0.8.0 while retaining the compatible v2-owned power runtime'
 
   info 'rolling forward to the local candidate again'
   operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
-    "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" --yes
-  assert_release_state "$CANDIDATE_VERSION" 5 \
-    "$ROOT/config/systemd/subyard-power-reconcile.service.in" loaded
+    "$RELEASE_ROOT/subyard-install.sh" --version "$CANDIDATE_VERSION" --yes
+  assert_candidate_state
   assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
-  assert_candidate_transaction committed
   ok 'roll-forward restored the compatible candidate runtime and unit'
 }
 
@@ -719,8 +732,7 @@ case "$MODE" in
     assert_post_reboot_candidate
     info 're-running yard init to prove idempotent boot reconciliation convergence'
     operator_yard init --yes
-    assert_release_state "$CANDIDATE_VERSION" 5 \
-      "$ROOT/config/systemd/subyard-power-reconcile.service.in" loaded
+    assert_candidate_state
     record_reboot_baseline
     write_fixture_value "$PHASE_STATE" candidate-reconciled
     PRESERVE_FIXTURE=1

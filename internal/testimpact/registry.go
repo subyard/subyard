@@ -47,7 +47,7 @@ func BuiltInRegistry() (Registry, error) {
 
 	goPackages := []string{
 		"application", "audit", "cli", "command", "config", "configsync", "credential",
-		"domain", "migration", "ownerinventory", "ports", "resource", "rpc", "shellquote",
+		"domain", "migration", "ownerinventory", "ports", "releasetransition", "resource", "rpc", "shellquote",
 		"sshidentity", "sshrelay", "state", "systemdunit", "testyardmigration",
 		"adapters/credentialmeta", "adapters/credentialruntime", "adapters/hostruntime",
 		"adapters/incusclient", "adapters/projectruntime", "adapters/reconcileruntime",

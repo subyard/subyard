@@ -32,6 +32,16 @@ func testVMLogsInvocation(arguments []string) bool {
 	return false
 }
 
+func testVMStatusInvocation(arguments []string) bool {
+	for _, argument := range arguments {
+		if argument == "-y" || argument == "--yes" {
+			continue
+		}
+		return argument == "status"
+	}
+	return false
+}
+
 func (cli *CLI) runTestVMLogs(ctx context.Context, arguments []string) int {
 	lines := 200
 	follow := false

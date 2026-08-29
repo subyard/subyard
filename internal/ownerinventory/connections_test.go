@@ -1,6 +1,7 @@
 package ownerinventory
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
@@ -13,6 +14,42 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"golang.org/x/crypto/ssh"
 )
+
+func TestConnectionsListReadOnlyDoesNotCreateOrRecoverStore(t *testing.T) {
+	t.Run("absent store", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "missing-owner-inventory")
+		connections, err := (Connections{Root: root}).ListReadOnly()
+		if err != nil || len(connections) != 0 {
+			t.Fatalf("read absent store: connections=%#v err=%v", connections, err)
+		}
+		if _, err := os.Lstat(root); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("read-only list created owner inventory root: %v", err)
+		}
+	})
+
+	t.Run("pending recovery", func(t *testing.T) {
+		root := t.TempDir()
+		journalPath := filepath.Join(root, "registration.json")
+		journal := []byte("{invalid-recovery\n")
+		if err := os.WriteFile(journalPath, journal, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		connections, err := (Connections{Root: root}).ListReadOnly()
+		if err != nil || len(connections) != 0 {
+			t.Fatalf("read pending store: connections=%#v err=%v", connections, err)
+		}
+		got, err := os.ReadFile(journalPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, journal) {
+			t.Fatalf("read-only list changed recovery journal: got %q, want %q", got, journal)
+		}
+		if _, err := os.Lstat(filepath.Join(root, ".lock")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("read-only list created owner inventory lock: %v", err)
+		}
+	})
+}
 
 func testSSHHostTrust(t *testing.T, host string) SSHHostTrust {
 	t.Helper()

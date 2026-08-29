@@ -26,8 +26,6 @@ MARKER="subyard-release-catchup-vm${VM:-unknown}"
 OPERATOR="subyardmigrate${VM:-x}"
 OPERATOR_HOME="$STATE_ROOT/operator-home"
 OPERATOR_RUNTIME="$OPERATOR_HOME/.subyard/runtime"
-HOTFIX_BACKUP="$OPERATOR_HOME/.subyard/recovery/0.4.1-transaction.before-repair.json"
-FAILED_HOTFIX_BACKUP="$OPERATOR_HOME/.subyard/recovery/0.4.2-transaction.before-repair.json"
 CANDIDATE_RELEASE="$STATE_ROOT/candidate"
 INSTALLER="$STATE_ROOT/subyard-install-0.3.1.sh"
 SUDOERS="/etc/sudoers.d/$MARKER"
@@ -739,57 +737,63 @@ reproduce_broken_update() {
   ok "published 0.4.1 reproduced the exact rolling-back transaction"
 }
 
-repair_broken_update() {
-  local before_hash report transaction journal
-  transaction="$(hotfix_transaction_directory "$BROKEN_VERSION")"
-  journal="$transaction/transaction.json"
-  before_hash="$(operator_env sha256sum "$journal" | awk '{print $1}')"
-  operator_env install -d -m 0700 "$(dirname "$HOTFIX_BACKUP")"
-  operator_env test ! -e "$HOTFIX_BACKUP" \
-    || die "refusing to replace an existing migration recovery backup"
-  operator_env install -m 0600 "$journal" "$HOTFIX_BACKUP"
-  [ "$(operator_env sha256sum "$HOTFIX_BACKUP" | awk '{print $1}')" = "$before_hash" ] \
-    || die "migration recovery backup changed during copy"
-  operator_env bash -c '
-    set -euo pipefail
-    journal="$1"
-    temporary="$(mktemp "$(dirname "$journal")/.transaction.XXXXXX")"
-    trap "rm -f -- \"$temporary\"" EXIT
-    jq "
-      (.operations[] |
-        select(.migrationId == \"migrate-test-yard-owner\" and
-          .operationId == \"test-yard-owner\" and
-          .kind == \"test-yard-owner-v1\" and
-          .before == \"current\" and
-          .phase == \"rolling-back\") |
-        .phase) = \"rolled-back\"
-    " "$journal" > "$temporary"
-    chmod 0600 "$temporary"
-    sync -f "$temporary"
-    mv -fT -- "$temporary" "$journal"
-    sync -f "$(dirname "$journal")"
-    trap - EXIT
-  ' _ "$journal"
-  validate_hotfix_transaction rolling-back rolled-back
-  operator_env jq -e --slurpfile original "$HOTFIX_BACKUP" '
-    . == ($original[0] | (.operations[0].phase) = "rolled-back")
-  ' "$journal" >/dev/null \
-    || die "journal repair changed more than the canonical owner phase"
-  report="$(hotfix_migrate rollback)"
-  jq -e '
-    .layout == 1 and .targetLayout == 2 and
-    .phase == "rolled-back" and .changed == true
-  ' <<<"$report" >/dev/null \
-    || die "guarded journal repair did not finish migration rollback"
-  report="$(hotfix_migrate rollback)"
-  jq -e '
-    .layout == 1 and .targetLayout == 2 and
-    (has("phase") | not) and .changed == false
-  ' <<<"$report" >/dev/null \
-    || die "completed migration rollback is not idempotent"
+attempt_candidate_compatibility_recovery() {
+  local expected_prompt="$1" prompt_count rc transcript
+  transcript="$OPERATOR_HOME/candidate-compatibility-recovery.typescript"
+  info "letting candidate recovery resume the published migration"
+  operator_env sudo -k
+  set +e
+  operator_env env \
+    YARD_RELEASE_BASE_URL="file://$CANDIDATE_RELEASE" \
+    SUBYARD_FIXTURE_PASSWORD='subyard-disposable-migration-fixture' \
+    SUBYARD_UPDATE_TRANSCRIPT="$transcript" \
+    SUBYARD_CANDIDATE_VERSION="$CANDIDATE_VERSION" \
+    SUBYARD_YARD_BIN="$OPERATOR_HOME/.local/bin/yard" \
+    expect <<'EXPECT'
+set timeout 1200
+log_file -noappend $env(SUBYARD_UPDATE_TRANSCRIPT)
+spawn -noecho $env(SUBYARD_YARD_BIN) update \
+  --version $env(SUBYARD_CANDIDATE_VERSION) --yes
+set password_sent 0
+expect {
+  -re {\[sudo\] password for [^:]+:} {
+    if {$password_sent} {
+      exit 125
+    }
+    set password_sent 1
+    send -- "$env(SUBYARD_FIXTURE_PASSWORD)\r"
+    exp_continue
+  }
+  eof {}
+  timeout { exit 124 }
+}
+set result [wait]
+exit [lindex $result 3]
+EXPECT
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || die "candidate recovery unexpectedly activated the new target in the compatibility pass"
+  prompt_count="$(operator_env grep -Fc '[sudo] password' "$transcript" || true)"
+  case "$expected_prompt" in
+    absent) [ "$prompt_count" = 0 ] \
+      || die "bounded compatibility recovery unexpectedly requested sudo" ;;
+    present) [ "$prompt_count" = 1 ] \
+      || die "root-bearing compatibility recovery did not request sudo exactly once" ;;
+    *) die "invalid compatibility sudo prompt expectation" ;;
+  esac
+  for expected in \
+    "transition migration-required" \
+    "code=transition-required" \
+    "next: run yard update"; do
+    operator_env grep -Fq "$expected" "$transcript" \
+      || die "candidate compatibility recovery omitted: $expected"
+  done
+}
+
+recover_broken_update_with_candidate() {
+  local report
+  attempt_candidate_compatibility_recovery absent
   validate_hotfix_transaction rolled-back rolled-back
-  operator_env "$OPERATOR_RUNTIME/current/scripts/install-runtime-release.sh" \
-    --runtime-root "$OPERATOR_RUNTIME" --rollback
   assert_hotfix_runtime_links "$RELEASE_040_TARGET" "$RELEASE_041_TARGET"
   [ "$(operator_yard --version)" = "yard $MISSED_VERSION" ] \
     || die "runtime rollback did not restore published $MISSED_VERSION"
@@ -798,14 +802,14 @@ repair_broken_update() {
   assert_hotfix_static_key present
   ! host_incus config device get "$CONSUMER_INSTANCE" subyard-e2e-routes type \
     --project "$CONSUMER_PROJECT" >/dev/null 2>&1 \
-    || die "manual recovery unexpectedly mounted the consumer route"
+    || die "compatibility recovery unexpectedly mounted the consumer route"
   report="$(hotfix_migrate check)"
   jq -e '
     .layout == 1 and .targetLayout == 1 and
     ((.requiredMigrations // []) | length) == 0
   ' <<<"$report" >/dev/null \
     || die "restored 0.4.0 runtime does not accept the recovered layout"
-  ok "guarded journal repair and runtime rollback restored usable 0.4.0"
+  ok "candidate compatibility recovery and explicit rollback restored usable 0.4.0"
 }
 
 reproduce_failed_hotfix_update() {
@@ -905,72 +909,11 @@ EXPECT
   ok "published 0.4.2 reproduced the server's rolling-back broker transaction"
 }
 
-repair_failed_hotfix_operation() {
-  local operation_id="$1" transaction journal
-  transaction="$(hotfix_transaction_directory "$FAILED_HOTFIX_VERSION")"
-  journal="$transaction/transaction.json"
-  operator_env bash -c '
-    set -euo pipefail
-    journal="$1"
-    operation_id="$2"
-    temporary="$(mktemp "$(dirname "$journal")/.transaction.XXXXXX")"
-    trap "rm -f -- \"$temporary\"" EXIT
-    jq -e --arg operation_id "$operation_id" "
-      if ([.operations[] |
-        select(.operationId == \$operation_id and
-          .phase == \"rolling-back\")] | length) == 1 then
-        (.operations[] |
-          select(.operationId == \$operation_id) |
-          .phase) = \"rolled-back\"
-      else
-        error(\"unexpected operation phase\")
-      end
-    " "$journal" > "$temporary"
-    chmod 0600 "$temporary"
-    sync -f "$temporary"
-    mv -fT -- "$temporary" "$journal"
-    sync -f "$(dirname "$journal")"
-    trap - EXIT
-  ' _ "$journal" "$operation_id"
-}
-
-repair_failed_hotfix_update() {
-  local before_hash report transaction journal
-  transaction="$(hotfix_transaction_directory "$FAILED_HOTFIX_VERSION")"
-  journal="$transaction/transaction.json"
-  before_hash="$(operator_env sha256sum "$journal" | awk '{print $1}')"
-  operator_env install -d -m 0700 "$(dirname "$FAILED_HOTFIX_BACKUP")"
-  operator_env test ! -e "$FAILED_HOTFIX_BACKUP" \
-    || die "refusing to replace an existing 0.4.2 migration recovery backup"
-  operator_env install -m 0600 "$journal" "$FAILED_HOTFIX_BACKUP"
-  [ "$(operator_env sha256sum "$FAILED_HOTFIX_BACKUP" | awk '{print $1}')" = "$before_hash" ] \
-    || die "0.4.2 migration recovery backup changed during copy"
-
-  repair_failed_hotfix_operation test-vm-broker-runtime
-  validate_failed_hotfix_transaction \
-    rolling-back committed committed rolled-back
-  operator_env jq -e --slurpfile original "$FAILED_HOTFIX_BACKUP" '
-    . == ($original[0] | (.operations[2].phase) = "rolled-back")
-  ' "$journal" >/dev/null \
-    || die "broker journal repair changed more than its operation phase"
-
-  report="$(hotfix_migrate rollback)"
-  jq -e '
-    .layout == 1 and .targetLayout == 3 and
-    .phase == "rolled-back" and .changed == true
-  ' <<<"$report" >/dev/null \
-    || die "guarded 0.4.2 journal repair did not finish migration rollback"
-  report="$(hotfix_migrate rollback)"
-  jq -e '
-    .layout == 1 and .targetLayout == 3 and
-    (has("phase") | not) and .changed == false
-  ' <<<"$report" >/dev/null \
-    || die "completed 0.4.2 migration rollback is not idempotent"
+recover_failed_hotfix_update_with_candidate() {
+  local report
+  attempt_candidate_compatibility_recovery present
   validate_failed_hotfix_transaction \
     rolled-back rolled-back rolled-back rolled-back
-
-  operator_env "$OPERATOR_RUNTIME/current/scripts/install-runtime-release.sh" \
-    --runtime-root "$OPERATOR_RUNTIME" --rollback
   assert_hotfix_runtime_links "$RELEASE_040_TARGET" "$RELEASE_042_TARGET"
   [ "$(operator_yard --version)" = "yard $MISSED_VERSION" ] \
     || die "runtime rollback did not restore published $MISSED_VERSION"
@@ -979,14 +922,14 @@ repair_failed_hotfix_update() {
   assert_hotfix_static_key present
   ! host_incus config device get "$CONSUMER_INSTANCE" subyard-e2e-routes type \
     --project "$CONSUMER_PROJECT" >/dev/null 2>&1 \
-    || die "manual 0.4.2 recovery retained the consumer route"
+    || die "0.4.2 compatibility recovery retained the consumer route"
   report="$(hotfix_migrate check)"
   jq -e '
     .layout == 1 and .targetLayout == 1 and
     ((.requiredMigrations // []) | length) == 0
   ' <<<"$report" >/dev/null \
     || die "restored 0.4.0 runtime does not accept the recovered 0.4.2 layout"
-  ok "guarded 0.4.2 journal repair and runtime rollback restored usable 0.4.0"
+  ok "candidate 0.4.2 compatibility recovery and explicit rollback restored usable 0.4.0"
 }
 
 verify_hotfix_boundary() {
@@ -1301,7 +1244,7 @@ if [ "$MODE" = hotfix ]; then
   seed_hotfix_static_key
   remove_hotfix_route
   reproduce_broken_update
-  repair_broken_update
+  recover_broken_update_with_candidate
   require_operator_password_sudo
   upgrade_candidate present
   verify_control_plane
@@ -1357,7 +1300,7 @@ if [ "$MODE" = hotfix-broken-042 ]; then
   seed_hotfix_static_key
   require_operator_password_sudo
   reproduce_failed_hotfix_update
-  repair_failed_hotfix_update
+  recover_failed_hotfix_update_with_candidate
   upgrade_candidate present
   verify_control_plane
   verify_hotfix_boundary

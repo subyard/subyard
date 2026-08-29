@@ -30,55 +30,15 @@ type brokerRuntime struct {
 	instance string
 }
 
-// PrepareBrokerRuntime records whether the configured broker is active or is
-// desired to be active. The state stays stable when an earlier operation
-// renames or recreates e2e-yard as test-yard in the same release transaction.
-func PrepareBrokerRuntime(
+// PrepareBrokerRuntimeTarget returns the exact registered/backend yard that a
+// release activation must observe. During the one-time owner migration this
+// may be e2e-yard before commit and test-yard afterwards.
+func PrepareBrokerRuntimeTarget(
 	ctx context.Context,
 	options Options,
-) (BrokerRuntimeState, error) {
+) (BrokerRuntimeState, string, error) {
 	observed, err := inspectBrokerRuntime(ctx, options)
-	return observed.state, err
-}
-
-// CommitBrokerRuntime refreshes an active broker from the newly active release.
-// Configured but stopped or absent brokers remain untouched.
-func CommitBrokerRuntime(
-	ctx context.Context,
-	options Options,
-	before BrokerRuntimeState,
-) error {
-	if err := validateOptions(&options); err != nil {
-		return err
-	}
-	if err := ValidateBrokerRuntimeState(before); err != nil {
-		return err
-	}
-	if before != BrokerRuntimeActive {
-		return VerifyBrokerRuntime(ctx, options, before)
-	}
-	// A preceding owner/route operation may already have reconciled the
-	// candidate while publishing the canonical route. Avoid a second reconcile,
-	// while retaining this operation as the sole refresh owner when the route
-	// was already ready.
-	if err := VerifyBrokerRuntime(ctx, options, before); err == nil {
-		return nil
-	}
-	if err := run(
-		ctx,
-		options,
-		CurrentYard,
-		nil,
-		"_migrate",
-		"reconcile-test-vm-broker",
-	); err != nil {
-		return fmt.Errorf("update active test VM broker: %w", err)
-	}
-	if err := VerifyBrokerRuntime(ctx, options, before); err != nil {
-		return err
-	}
-	fmt.Fprintln(options.Stdout, "updated active test VM broker")
-	return nil
+	return observed.state, observed.yard, err
 }
 
 // VerifyBrokerRuntime checks both liveness and the exact engine shipped by the
@@ -162,47 +122,6 @@ func hostSinkPath(options Options) string {
 		}
 	}
 	return fallback
-}
-
-// RollbackBrokerRuntime restores the engine from the retained previous release
-// before the stable runtime links are switched back.
-func RollbackBrokerRuntime(
-	ctx context.Context,
-	options Options,
-	before BrokerRuntimeState,
-) error {
-	if err := validateOptions(&options); err != nil {
-		return err
-	}
-	if err := ValidateBrokerRuntimeState(before); err != nil {
-		return err
-	}
-	if before != BrokerRuntimeActive {
-		return VerifyBrokerRuntime(ctx, options, before)
-	}
-	previous, err := previousRuntimeOptions(options)
-	if err != nil {
-		return err
-	}
-	runErr := run(
-		ctx,
-		previous,
-		CurrentYard,
-		nil,
-		"_migrate",
-		"reconcile-test-vm-broker",
-	)
-	verifyErr := VerifyBrokerRuntime(ctx, previous, before)
-	if verifyErr == nil {
-		return nil
-	}
-	if runErr != nil {
-		return errors.Join(
-			fmt.Errorf("restore previous active test VM broker: %w", runErr),
-			fmt.Errorf("verify previous active test VM broker: %w", verifyErr),
-		)
-	}
-	return verifyErr
 }
 
 func ValidateBrokerRuntimeState(state BrokerRuntimeState) error {
@@ -418,40 +337,6 @@ func loadBrokerYard(options Options, yard string) (config.Loaded, error) {
 		return config.Loaded{}, fmt.Errorf("load %s for broker migration: %w", yard, err)
 	}
 	return loaded, nil
-}
-
-func previousRuntimeOptions(options Options) (Options, error) {
-	if options.RuntimeRoot == "" || !filepath.IsAbs(options.RuntimeRoot) {
-		return Options{}, errors.New("absolute runtime root is required for broker rollback")
-	}
-	root, err := filepath.EvalSymlinks(options.RuntimeRoot)
-	if err != nil {
-		return Options{}, fmt.Errorf("resolve runtime root: %w", err)
-	}
-	previous, err := filepath.EvalSymlinks(filepath.Join(root, "previous"))
-	if err != nil {
-		return Options{}, fmt.Errorf("resolve previous runtime: %w", err)
-	}
-	relative, err := filepath.Rel(filepath.Join(root, "releases"), previous)
-	if err != nil || relative == "." || relative == ".." ||
-		strings.HasPrefix(relative, ".."+string(filepath.Separator)) ||
-		filepath.IsAbs(relative) {
-		return Options{}, errors.New("previous runtime escapes the release store")
-	}
-	result := options
-	result.RepositoryRoot = previous
-	result.Executable = filepath.Join(previous, "bin", "yard-engine")
-	result.Environment = withEnvironment(
-		result.Environment,
-		"SUBYARD_REPOSITORY_ROOT",
-		previous,
-	)
-	result.Environment = withEnvironment(
-		result.Environment,
-		"SUBYARD_CONFIG_DIR",
-		filepath.Join(previous, "config"),
-	)
-	return result, nil
 }
 
 func environmentMap(source []string) map[string]string {

@@ -44,27 +44,6 @@ func preparePowerReconciler(options ReleaseOptions) (string, error) {
 	return powerReconcilerAbsent, nil
 }
 
-func commitPowerReconciler(
-	ctx context.Context,
-	options ReleaseOptions,
-	before string,
-) error {
-	if err := validatePowerReconcilerState(before); err != nil {
-		return err
-	}
-	if before == powerReconcilerAbsent {
-		return verifyPowerReconciler(ctx, options, before)
-	}
-	if err := runPowerReconcilerMigration(ctx, options, options); err != nil {
-		return fmt.Errorf("update host power reconciler: %w", err)
-	}
-	if err := verifyPowerReconciler(ctx, options, before); err != nil {
-		return err
-	}
-	fmt.Fprintln(powerReconcilerOutput(options), "updated host power reconciler")
-	return nil
-}
-
 func verifyPowerReconciler(
 	ctx context.Context,
 	options ReleaseOptions,
@@ -141,79 +120,11 @@ func verifyPowerReconcilerManagerState(
 	return nil
 }
 
-func rollbackPowerReconciler(
-	ctx context.Context,
-	options ReleaseOptions,
-	before string,
-	usePreviousRunner bool,
-	allowSettledPrevious bool,
-) error {
-	if err := validatePowerReconcilerState(before); err != nil {
-		return err
-	}
-	if before == powerReconcilerAbsent {
-		return verifyPowerReconciler(ctx, options, before)
-	}
-	previous, err := previousRuntimeOptions(options)
-	if err != nil {
-		return err
-	}
-	previous.Environment = powerReconcilerEnvironment(previous, previous.RepositoryRoot)
-	runnerOptions := options
-	if usePreviousRunner {
-		runnerOptions = previous
-	}
-	runErr := runPowerReconcilerMigration(ctx, runnerOptions, previous)
-	verify := verifyPowerReconciler
-	if allowSettledPrevious {
-		verify = verifyRestoredPowerReconciler
-	}
-	verifyErr := verify(ctx, previous, before)
-	if verifyErr == nil {
-		return nil
-	}
-	if runErr != nil {
-		return errors.Join(
-			fmt.Errorf("restore previous host power reconciler: %w", runErr),
-			fmt.Errorf("verify previous host power reconciler: %w", verifyErr),
-		)
-	}
-	return verifyErr
-}
-
 func validatePowerReconcilerState(state string) error {
 	if state != powerReconcilerAbsent && state != powerReconcilerInstalled {
 		return fmt.Errorf("invalid prepared host power reconciler state %q", state)
 	}
 	return nil
-}
-
-func runPowerReconcilerMigration(
-	ctx context.Context,
-	runnerOptions ReleaseOptions,
-	payloadOptions ReleaseOptions,
-) error {
-	command := exec.CommandContext(
-		ctx,
-		powerReconcilerExecutable(runnerOptions),
-		"_migrate",
-		"reconcile-power-reconciler",
-	)
-	command.Env = powerReconcilerEnvironment(runnerOptions, runnerOptions.RepositoryRoot)
-	command.Env = removePowerReconcilerEnvironment(
-		command.Env, "SUBYARD_POWER_MIGRATION_PAYLOAD_ROOT",
-	)
-	if filepath.Clean(runnerOptions.RepositoryRoot) != filepath.Clean(payloadOptions.RepositoryRoot) {
-		command.Env = replacePowerReconcilerEnvironment(
-			command.Env,
-			"SUBYARD_POWER_MIGRATION_PAYLOAD_ROOT",
-			payloadOptions.RepositoryRoot,
-		)
-	}
-	command.Stdin = strings.NewReader("")
-	command.Stdout = powerReconcilerOutput(runnerOptions)
-	command.Stderr = powerReconcilerError(runnerOptions)
-	return command.Run()
 }
 
 func powerReconcilerExecutable(options ReleaseOptions) string {
@@ -336,18 +247,4 @@ func readRegularFile(path string, executable bool) ([]byte, error) {
 		return nil, errors.New("file is not executable")
 	}
 	return os.ReadFile(path)
-}
-
-func powerReconcilerOutput(options ReleaseOptions) io.Writer {
-	if options.Diagnostics != nil {
-		return options.Diagnostics
-	}
-	return io.Discard
-}
-
-func powerReconcilerError(options ReleaseOptions) io.Writer {
-	if options.Stderr != nil {
-		return options.Stderr
-	}
-	return io.Discard
 }

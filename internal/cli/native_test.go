@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,8 +20,10 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/rpc"
 	"github.com/Subyard/Subyard/internal/state"
 	"github.com/Subyard/Subyard/internal/testkit"
@@ -491,12 +494,14 @@ func TestUpdateUsesThePreparedReleaseAcrossRPCPlanAndExecute(t *testing.T) {
 	for _, suffix := range []string{"", ".sha256", ".manifest.json", ".provenance.json"} {
 		writeCLIFile(t, filepath.Join(assets, name+suffix), "fixture", 0o600)
 	}
-	writeCLIFile(t, filepath.Join(root, "scripts", "install-runtime-release.sh"),
-		"#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" > \"$RELEASE_CAPTURE\"\n", 0o700)
+	writeCLIUpdateInstaller(t, root)
+	prepareCLIOldRelease(t, runtimeRoot)
 	environment = append(environment,
 		"YARD_RELEASE_BASE_URL=file://"+assets,
 		"YARD_RELEASE_CACHE="+cache,
 		"RELEASE_CAPTURE="+capture,
+		"ACTIVE_CAPTURE="+filepath.Join(root, "active-launcher.log"),
+		"MIGRATION_FINALIZE_CAPTURE="+filepath.Join(root, "migration-finalize.log"),
 	)
 	configApplier := &recordingConfigApplier{}
 	program, err := New(Options{
@@ -540,7 +545,7 @@ func TestUpdateUsesThePreparedReleaseAcrossRPCPlanAndExecute(t *testing.T) {
 		t.Fatal(err)
 	}
 	arguments, err := os.ReadFile(capture)
-	if err != nil || slices.Contains(strings.Fields(string(arguments)), "--check") ||
+	if err != nil || !slices.Contains(strings.Fields(string(arguments)), "--publish-only") ||
 		!slices.Equal(events, []string{"operation.started", "operation.finished"}) ||
 		!slices.Equal(configApplier.yards, []string{"default"}) {
 		t.Fatalf("release RPC bypassed its prepared operation: args=%q events=%q configs=%q err=%v",
@@ -552,9 +557,7 @@ func TestUpdateTypedConfirmationSeparatesCheckActivationAndRollbackPreflight(t *
 	t.Run("check is bounded and never prompts or activates", func(t *testing.T) {
 		root, environment, runtimeRoot := updateReleaseFixture(t)
 		capture := filepath.Join(root, "check-installer.args")
-		writeCLIFile(t, filepath.Join(root, "scripts", "install-runtime-release.sh"),
-			"#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" > \"$CHECK_CAPTURE\"\n", 0o700)
-		environment = append(environment, "CHECK_CAPTURE="+capture)
+		environment = append(environment, "RELEASE_CAPTURE="+capture)
 		prompt := &testkit.Prompt{}
 		configs := &recordingConfigApplier{}
 		var stderr bytes.Buffer
@@ -574,15 +577,16 @@ func TestUpdateTypedConfirmationSeparatesCheckActivationAndRollbackPreflight(t *
 			t.Fatalf("check prompted or refreshed: prompt=%#v configs=%#v", prompt.Requests, configs.yards)
 		}
 		arguments, err := os.ReadFile(capture)
-		if err != nil || !slices.Contains(strings.Fields(string(arguments)), "--check") {
+		if err != nil || !slices.Contains(strings.Fields(string(arguments)), "--publish-only") {
 			t.Fatalf("check installer args=%q err=%v", arguments, err)
 		}
-		if _, err := os.Lstat(filepath.Join(runtimeRoot, "current")); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("check activated runtime: %v", err)
+		if target, err := os.Readlink(filepath.Join(runtimeRoot, "current")); err != nil ||
+			target != "releases/release-old" {
+			t.Fatalf("check changed active runtime: target=%q err=%v", target, err)
 		}
 	})
 
-	t.Run("declined activation does not download install or refresh", func(t *testing.T) {
+	t.Run("declined activation leaves published candidate inactive", func(t *testing.T) {
 		root, environment, runtimeRoot := updateReleaseFixture(t)
 		prompt := &testkit.Prompt{Answers: []bool{false}}
 		configs := &recordingConfigApplier{}
@@ -600,12 +604,12 @@ func TestUpdateTypedConfirmationSeparatesCheckActivationAndRollbackPreflight(t *
 			prompt.Requests[0].Default != domain.ConfirmationDefaultYes {
 			t.Fatalf("code=%d prompt=%#v stderr=%q", code, prompt.Requests, stderr.String())
 		}
-		cache := environmentValue(environment, "YARD_RELEASE_CACHE")
-		if _, err := os.Stat(cache); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("decline wrote release cache: %v", err)
+		if target, err := os.Readlink(filepath.Join(runtimeRoot, "current")); err != nil ||
+			target != "releases/release-old" {
+			t.Fatalf("decline changed active runtime: target=%q err=%v", target, err)
 		}
-		if _, err := os.Stat(runtimeRoot); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("decline wrote runtime root: %v", err)
+		if _, err := os.Stat(filepath.Join(runtimeRoot, "releases", "1.2.3-f16d05ec6b29")); err != nil {
+			t.Fatalf("decline lost the safely published inspected candidate: %v", err)
 		}
 		if len(configs.yards) != 0 {
 			t.Fatalf("decline refreshed configs: %#v", configs.yards)
@@ -633,6 +637,66 @@ func TestUpdateTypedConfirmationSeparatesCheckActivationAndRollbackPreflight(t *
 				t.Fatalf("code=%d prompt=%#v stderr=%q", code, prompt.Requests, stderr.String())
 			}
 		})
+	}
+}
+
+func TestUpdateCheckReturnsZeroForBlockedV2Inspection(t *testing.T) {
+	root, environment, runtimeRoot := updateReleaseFixture(t)
+	environment = append(environment, "UPDATE_BLOCK_INSPECTION=1")
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments: []string{
+			"update", "--check", "--version", "1.2.3", "--runtime-root", runtimeRoot,
+		},
+		Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 || stderr.Len() != 0 {
+		t.Fatalf("blocked update check: code=%d stdout=%q stderr=%q",
+			code, stdout.String(), stderr.String())
+	}
+	var output struct {
+		Outcome *releasetransition.Outcome `json:"outcome"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &output); err != nil ||
+		output.Outcome == nil ||
+		output.Outcome.Status != releasetransition.StatusOperatorActionRequired ||
+		output.Outcome.Code != releasetransition.CodeMigrationStale ||
+		output.Outcome.Active != "release-old" ||
+		output.Outcome.Target != "1.2.3-f16d05ec6b29" ||
+		output.Outcome.Transaction == nil ||
+		output.Outcome.Retry != "run yard update --check" {
+		t.Fatalf("blocked update check outcome=%#v stdout=%q err=%v",
+			output.Outcome, stdout.String(), err)
+	}
+}
+
+func TestRollbackDoesNotExecuteRetainedEngineBeforeVerification(t *testing.T) {
+	root, environment, runtimeRoot := updateReleaseFixture(t)
+	prepareCLIReleaseLinks(t, runtimeRoot, true)
+	marker := filepath.Join(root, "unverified-retained-engine-ran")
+	engine := filepath.Join(runtimeRoot, "releases", "previous-b", "bin", "yard-engine")
+	writeCLIFile(t, engine, fmt.Sprintf("#!/bin/sh\n: > %q\nprintf 'yard-engine 1.2.3\\n'\n", marker), 0o700)
+	var stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root,
+		Program:        "yard",
+		Arguments:      []string{"update", "--yes", "--runtime-root", runtimeRoot, "--rollback"},
+		Environment:    environment,
+		WorkingDir:     root,
+		Stderr:         &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 {
+		t.Fatalf("tampered rollback exit=%d stderr=%q", code, stderr.String())
+	}
+	if _, err := os.Lstat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rollback executed an unverified retained engine: %v", err)
 	}
 }
 
@@ -672,6 +736,7 @@ func TestUpdateRefreshesConfigsWithActivatedRuntimeLauncher(t *testing.T) {
 			root, environment, runtimeRoot := updateReleaseFixture(t)
 			if test.defaultRoot {
 				runtimeRoot = filepath.Join(root, "data", "runtime")
+				prepareCLIOldRelease(t, runtimeRoot)
 			}
 			if test.sameVersion {
 				prepareCLIReleaseLinks(t, runtimeRoot, false)
@@ -688,15 +753,20 @@ func TestUpdateRefreshesConfigsWithActivatedRuntimeLauncher(t *testing.T) {
 				environment = append(environment, "YARD_ENGINE_PATH="+oldDispatcher)
 			}
 
+			var stderr bytes.Buffer
 			program, err := New(Options{
 				RepositoryRoot: root, DispatcherPath: oldDispatcher, Program: "yard",
 				Arguments: test.arguments(runtimeRoot), Environment: environment, WorkingDir: root,
+				Stderr: &stderr,
 			})
 			if err != nil {
 				t.Fatal(err)
 			}
 			if code := program.Run(context.Background()); code != 0 {
-				t.Fatalf("update failed: code=%d", code)
+				t.Fatalf("update failed: code=%d stderr=%q", code, stderr.String())
+			}
+			if finalized, finalizeErr := os.ReadFile(filepath.Join(root, "migration-finalize.log")); !errors.Is(finalizeErr, os.ErrNotExist) {
+				t.Fatalf("update invoked legacy migration finalization: payload=%q err=%v", finalized, finalizeErr)
 			}
 			activeArguments, err := os.ReadFile(activeLog)
 			if err != nil || string(activeArguments) != "config apply --yes\n" {
@@ -713,18 +783,76 @@ func TestUpdateRefreshesConfigsWithActivatedRuntimeLauncher(t *testing.T) {
 
 func prepareCLIReleaseLinks(t *testing.T, root string, withPrevious bool) {
 	t.Helper()
-	names := []string{"current-a"}
+	for _, name := range []string{"current", "previous"} {
+		if err := os.Remove(filepath.Join(root, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+	}
+	current := "1.2.3-f16d05ec6b29"
+	if withPrevious {
+		current = "current-a"
+	}
+	names := []string{current}
 	if withPrevious {
 		names = append(names, "previous-b")
 	}
 	for _, name := range names {
-		engine := filepath.Join(root, "releases", name, "bin", "yard-engine")
-		if err := os.MkdirAll(filepath.Dir(engine), 0o700); err != nil {
+		releaseRoot := filepath.Join(root, "releases", name)
+		bin := filepath.Join(releaseRoot, "bin")
+		if err := os.MkdirAll(bin, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		writeCLIFile(t, engine, "#!/bin/sh\nprintf 'yard 1.2.3\\n'\n", 0o700)
+		writeCLIFile(t, filepath.Join(bin, "yard-engine"), `#!/bin/sh
+set -eu
+case "${1:-}" in
+  --version) printf 'yard-engine 1.2.3\n' ;;
+  _migrate) [ "${2:-}" = check ]; printf '%s\n' '{"targetLayout":1,"changed":false}' ;;
+  _release-transition)
+    request=$(cat)
+    mode=$(printf '%s' "$request" | jq -r .mode)
+	    runtime_root=$(printf '%s' "$request" | jq -r .runtimeRoot)
+	    target_release=$(printf '%s' "$request" | jq -r .target)
+	    if [ "$mode" = inspect ]; then
+	      active=$(readlink "$runtime_root/current")
+	      active_release=${active#releases/}
+	      printf '{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["activate retained runtime"]},"outcome":{"status":"migration-required","reachedGoal":false,"active":"%s","target":"%s","code":"transition-required","message":"the retained release transition has not started","retry":"run yard update"}}}\n' "$active_release" "$target_release"
+	      exit 0
+	    fi
+	    old=$(readlink "$runtime_root/current")
+	    old_release=${old#releases/}
+	    if [ "$old_release" = "$target_release" ]; then
+	      printf '{"schemaVersion":1,"outcome":{"status":"ready","reachedGoal":true,"active":"%s","target":"%s","code":"ready","message":"verified","transaction":"tx-0123456789abcdef"}}\n' "$target_release" "$target_release"
+	    else
+	      rm -f "$runtime_root/current" "$runtime_root/previous"
+	      ln -s "releases/$target_release" "$runtime_root/current"
+	      ln -s "$old" "$runtime_root/previous"
+	      printf '{"schemaVersion":1,"outcome":{"status":"ready","reachedGoal":true,"active":"%s","previous":"%s","target":"%s","code":"ready","message":"verified","transaction":"tx-0123456789abcdef"}}\n' "$target_release" "$old_release" "$target_release"
+	    fi
+    ;;
+  *) exit 64 ;;
+esac
+`, 0o700)
+		writeCLIFile(t, filepath.Join(bin, "yard"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$ACTIVE_CAPTURE\"\n", 0o700)
+		registry := []byte("{}\n")
+		if err := os.MkdirAll(filepath.Join(releaseRoot, "config"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeCLIFile(t, filepath.Join(releaseRoot, "config", "release-transition.json"),
+			string(registry), 0o600)
+		var manifest strings.Builder
+		for _, relative := range []string{
+			"bin/yard", "bin/yard-engine", "config/release-transition.json",
+		} {
+			payload, err := os.ReadFile(filepath.Join(releaseRoot, relative))
+			if err != nil {
+				t.Fatal(err)
+			}
+			digest := sha256.Sum256(payload)
+			fmt.Fprintf(&manifest, "%x  ./%s\n", digest, relative)
+		}
+		writeCLIFile(t, filepath.Join(root, "releases", name, "runtime-files.sha256"), manifest.String(), 0o600)
 	}
-	if err := os.Symlink("releases/current-a", filepath.Join(root, "current")); err != nil {
+	if err := os.Symlink(filepath.Join("releases", current), filepath.Join(root, "current")); err != nil {
 		t.Fatal(err)
 	}
 	if withPrevious {
@@ -917,22 +1045,101 @@ func updateReleaseFixture(t *testing.T) (string, []string, string) {
 	for _, suffix := range []string{"", ".sha256", ".manifest.json", ".provenance.json"} {
 		writeCLIFile(t, filepath.Join(assets, name+suffix), "fixture", 0o600)
 	}
-	writeCLIFile(t, filepath.Join(root, "scripts", "install-runtime-release.sh"), `#!/bin/sh
-set -eu
-while [ "$#" -gt 0 ]; do
-	case "$1" in
-	--runtime-root) root="$2"; shift 2 ;;
-	*) shift ;;
-	esac
-done
-mkdir -p "$root/current/bin"
-printf '%s\n' '#!/bin/sh' 'if [ -n "${YARD_ENGINE_PATH:-}" ]; then exec "$YARD_ENGINE_PATH" "$@"; fi' 'printf "%s\\n" "$*" >> "$ACTIVE_CAPTURE"' > "$root/current/bin/yard"
-chmod 700 "$root/current/bin/yard"
-`, 0o700)
+	writeCLIUpdateInstaller(t, root)
+	prepareCLIOldRelease(t, runtimeRoot)
 	return root, append(environment,
 		"YARD_RELEASE_BASE_URL=file://"+assets,
 		"YARD_RELEASE_CACHE="+cache,
+		"MIGRATION_FINALIZE_CAPTURE="+filepath.Join(root, "migration-finalize.log"),
 	), runtimeRoot
+}
+
+func prepareCLIOldRelease(t *testing.T, runtimeRoot string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(runtimeRoot, "releases", "release-old"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("releases/release-old", filepath.Join(runtimeRoot, "current")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeCLIUpdateInstaller(t *testing.T, repositoryRoot string) {
+	t.Helper()
+	script := strings.ReplaceAll(`#!/bin/sh
+set -eu
+if [ -n "${RELEASE_CAPTURE:-}" ]; then
+	printf '%s\n' "$@" > "$RELEASE_CAPTURE"
+fi
+rollback=false
+publish_only=false
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+	--runtime-root) root="$2"; shift 2 ;;
+	--rollback) rollback=true; shift ;;
+	--publish-only) publish_only=true; shift ;;
+	*) shift ;;
+	esac
+done
+if [ "$rollback" = true ]; then
+	current=$(readlink "$root/current")
+	previous=$(readlink "$root/previous")
+	rm -f "$root/current" "$root/previous"
+	ln -s "$previous" "$root/current"
+	ln -s "$current" "$root/previous"
+	exit 0
+fi
+target='__RELEASE_TARGET__'
+destination="$root/$target"
+mkdir -p "$destination/bin" "$destination/config"
+chmod 700 "$destination" "$destination/bin" "$destination/config"
+cat > "$destination/bin/yard-engine" <<'ENGINE'
+#!/bin/sh
+set -eu
+case "${1:-}" in
+  --version) printf 'yard-engine 1.2.3\n' ;;
+  _migrate) [ "${2:-}" = check ]; printf '%s\n' '{"targetLayout":1,"changed":false}' ;;
+  _release-transition)
+    request=$(cat)
+    mode=$(printf '%s' "$request" | jq -r .mode)
+    runtime_root=$(printf '%s' "$request" | jq -r .runtimeRoot)
+    target_release=$(printf '%s' "$request" | jq -r .target)
+    if [ "$mode" = inspect ]; then
+      if [ "${UPDATE_BLOCK_INSPECTION:-}" = 1 ]; then
+        printf '%s\n' '{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["inspect blocked candidate"]},"blockers":[{"code":"migration-stale","resource":"yard.fixture","message":"the candidate resource changed","retry":"run yard update --check"}],"outcome":{"status":"operator-action-required","reachedGoal":false,"active":"release-old","target":"1.2.3-f16d05ec6b29","code":"migration-stale","message":"the candidate resource changed","retry":"run yard update --check","transaction":"tx-0123456789abcdef"}}}'
+        exit 0
+      fi
+	      active=$(readlink "$runtime_root/current")
+	      active_release=${active#releases/}
+	      printf '{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["activate verified runtime 1.2.3"]},"outcome":{"status":"migration-required","reachedGoal":false,"active":"%s","target":"%s","code":"transition-required","message":"the inspected release transition has not started","retry":"run yard update"}}}\n' "$active_release" "$target_release"
+      exit 0
+    fi
+	    old=''
+	    if [ -L "$runtime_root/current" ]; then old=$(readlink "$runtime_root/current"); fi
+	    old_release=${old#releases/}
+    if [ -n "$old" ] && [ "$old" != "releases/$target_release" ]; then
+      rm -f "$runtime_root/previous"
+      ln -s "$old" "$runtime_root/previous"
+    fi
+    rm -f "$runtime_root/current"
+    ln -s "releases/$target_release" "$runtime_root/current"
+	    if [ "$old_release" = "$target_release" ]; then
+	      printf '{"schemaVersion":1,"outcome":{"status":"ready","reachedGoal":true,"active":"%s","target":"%s","code":"ready","message":"verified","transaction":"tx-0123456789abcdef"}}\n' "$target_release" "$target_release"
+	    else
+	      printf '{"schemaVersion":1,"outcome":{"status":"ready","reachedGoal":true,"active":"%s","previous":"%s","target":"%s","code":"ready","message":"verified","transaction":"tx-0123456789abcdef"}}\n' "$target_release" "$old_release" "$target_release"
+	    fi
+    ;;
+  *) exit 64 ;;
+esac
+ENGINE
+printf '%s\n' '#!/bin/sh' 'if [ -n "${YARD_ENGINE_PATH:-}" ]; then exec "$YARD_ENGINE_PATH" "$@"; fi' 'printf "%s\\n" "$*" >> "$ACTIVE_CAPTURE"' > "$destination/bin/yard"
+chmod 700 "$destination/bin/yard-engine" "$destination/bin/yard"
+printf '{}\n' > "$destination/config/release-transition.json"
+(cd "$destination" && sha256sum ./bin/yard ./bin/yard-engine ./config/release-transition.json > runtime-files.sha256)
+[ "$publish_only" = true ] || exit 64
+printf '%s\n' "$target"
+`, "__RELEASE_TARGET__", "releases/1.2.3-f16d05ec6b29")
+	writeCLIFile(t, filepath.Join(repositoryRoot, "scripts", "install-runtime-release.sh"), script, 0o700)
 }
 
 func TestNetworkManagerPrivilegesAuthorizeBeforeBoundedAdapter(t *testing.T) {
@@ -1677,6 +1884,1312 @@ func TestNativeStatusUsesTypedPortsAndRendersParityFields(t *testing.T) {
 	}
 }
 
+func TestReadQueriesDoNotFinalizeInvalidPendingReleaseMigration(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+	sum := sha256.Sum256([]byte(Version))
+	journalPath := filepath.Join(
+		configHome,
+		"migrations",
+		"transactions",
+		fmt.Sprintf("%x", sum[:16]),
+		"transaction.json",
+	)
+	if err := os.MkdirAll(filepath.Dir(journalPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	journal := []byte("{not-json\n")
+	writeCLIFile(t, journalPath, string(journal), 0o600)
+
+	for _, test := range []struct {
+		name      string
+		arguments []string
+		want      string
+	}{
+		{name: "version", arguments: []string{"--version"}, want: "yard " + Version + "\n"},
+		{name: "status", arguments: []string{"status"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+				"subyard/yard": {
+					Name: "yard", Project: "subyard", Type: domain.YardContainer,
+					Status: "Running", Config: map[string]string{}, Devices: map[string]map[string]string{},
+				},
+			}}
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard", Arguments: test.arguments,
+				Environment: append(environment, "SUBYARD_HOST_ID=owner-a"), WorkingDir: root,
+				Stdout: &stdout, Stderr: &stderr, Incus: incus, Executor: incus,
+				StatusFacts: statusFactsStub{value: domain.StatusFacts{Security: "live", Space: "unknown"}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code := program.Run(context.Background()); code != 0 {
+				t.Fatalf("read query failed: code=%d stderr=%q", code, stderr.String())
+			}
+			if test.want != "" && stdout.String() != test.want {
+				t.Fatalf("read query output = %q, want %q", stdout.String(), test.want)
+			}
+			got, err := os.ReadFile(journalPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, journal) {
+				t.Fatalf("read query changed pending migration journal: got %q, want %q", got, journal)
+			}
+		})
+	}
+}
+
+func TestReadOnlyCoreInvocationsDoNotRecoverPendingOwnerState(t *testing.T) {
+	for _, recovery := range []struct {
+		name string
+		path func([]string) string
+	}{
+		{
+			name: "owner inventory",
+			path: func(environment []string) string {
+				return filepath.Join(
+					environmentValue(environment, "SUBYARD_HOME"),
+					"owner-inventory",
+					"registration.json",
+				)
+			},
+		},
+		{
+			name: "HostID rename",
+			path: func(environment []string) string {
+				return configsync.HostIDRenameTransactionPath(
+					environmentValue(environment, "SUBYARD_CONFIG_HOME"),
+				)
+			},
+		},
+	} {
+		for _, invocation := range []struct {
+			name      string
+			arguments []string
+		}{
+			{name: "global version", arguments: []string{"--version"}},
+			{name: "read command", arguments: []string{"status"}},
+			{name: "project list", arguments: []string{"list"}},
+			{name: "yard list", arguments: []string{"yards"}},
+			{name: "command help", arguments: []string{"update", "--help"}},
+		} {
+			t.Run(recovery.name+"/"+invocation.name, func(t *testing.T) {
+				root, environment, _ := nativeFixture(t)
+				environment = append(environment, "SUBYARD_HOST_ID=owner-a")
+				journalPath := recovery.path(environment)
+				journal := []byte("{invalid-recovery\n")
+				if err := os.MkdirAll(filepath.Dir(journalPath), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				writeCLIFile(t, journalPath, string(journal), 0o600)
+
+				var stdout, stderr bytes.Buffer
+				incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+					"subyard/yard": {
+						Name: "yard", Project: "subyard", Type: domain.YardContainer,
+						Status: "Running", Config: map[string]string{}, Devices: map[string]map[string]string{},
+					},
+				}}
+				program, err := New(Options{
+					RepositoryRoot: root, Program: "yard", Arguments: invocation.arguments,
+					Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
+					Incus: incus, Executor: incus,
+					StatusFacts: statusFactsStub{value: domain.StatusFacts{Security: "live", Space: "unknown"}},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if code := program.Run(context.Background()); code != 0 {
+					t.Fatalf("read-only invocation failed: code=%d stderr=%q", code, stderr.String())
+				}
+				got, err := os.ReadFile(journalPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(got, journal) {
+					t.Fatalf("read-only invocation changed recovery journal: got %q, want %q", got, journal)
+				}
+			})
+		}
+	}
+}
+
+func TestMutationStillRequiresOwnerInventoryRecovery(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	journalPath := filepath.Join(
+		environmentValue(environment, "SUBYARD_HOME"),
+		"owner-inventory",
+		"registration.json",
+	)
+	if err := os.MkdirAll(filepath.Dir(journalPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	journal := []byte("{invalid-recovery\n")
+	writeCLIFile(t, journalPath, string(journal), 0o600)
+
+	var stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Arguments: []string{"start"},
+		Environment: environment, WorkingDir: root, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 ||
+		!strings.Contains(stderr.String(), "recover owner inventory transaction") {
+		t.Fatalf("mutation bypassed recovery gate: code=%d stderr=%q", code, stderr.String())
+	}
+	got, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, journal) {
+		t.Fatalf("failed recovery changed invalid journal: got %q, want %q", got, journal)
+	}
+}
+
+func installUnfinishedMutationGateFixture(
+	t *testing.T, root string, environment []string, runtimeRoot string,
+) string {
+	t.Helper()
+	registry := `{
+  "schemaVersion": 1,
+  "minimumLayout": 1,
+  "currentLayout": 2,
+  "migrations": [{
+    "id": "move-fixture-settings",
+    "fromLayout": 1,
+    "toLayout": 2,
+    "resources": ["fixture-settings"],
+    "finalizePolicy": "remove-source-after-active-verify",
+    "rollbackPolicy": "restore-recovery-before-runtime-swap",
+    "moves": [{
+      "scope": "config-home",
+      "source": "legacy/settings.env",
+      "destination": "current/settings.env",
+      "consumer": "assignments"
+    }]
+  }]
+}`
+	writeCLIFile(t, filepath.Join(root, "config", "migrations.json"), registry, 0o600)
+	if err := os.MkdirAll(runtimeRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, target := range map[string]string{
+		"current": "releases/0.0.9", "previous": "releases/0.0.8",
+	} {
+		if err := os.MkdirAll(filepath.Join(runtimeRoot, target), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(runtimeRoot, name)
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	transaction := map[string]any{
+		"schemaVersion": 1,
+		"fromLayout":    1,
+		"toLayout":      2,
+		"toRelease":     Version,
+		"phase":         "preparing",
+		"migrations":    []string{"move-fixture-settings"},
+		"entries": []map[string]any{{
+			"migrationId": "move-fixture-settings",
+			"scope":       "config-home",
+			"source":      "legacy/settings.env",
+			"destination": "current/settings.env",
+			"consumer":    "assignments",
+			"recovery":    "recovery/0000",
+		}},
+	}
+	payload, err := json.Marshal(transaction)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte(Version))
+	transactionID := fmt.Sprintf("%x", sum[:16])
+	transactionPath := filepath.Join(
+		environmentValue(environment, "SUBYARD_CONFIG_HOME"),
+		"migrations", "transactions", transactionID, "transaction.json",
+	)
+	if err := os.MkdirAll(filepath.Dir(transactionPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, transactionPath, string(payload), 0o600)
+	return transactionID
+}
+
+func TestMutationGatePrecedesOwnerRecoveryAndReturnsStructuredOutcome(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	runtimeRoot := filepath.Join(root, "runtime")
+	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot)
+	installUnfinishedMutationGateFixture(t, root, environment, runtimeRoot)
+
+	ownerJournalPath := filepath.Join(
+		environmentValue(environment, "SUBYARD_HOME"), "owner-inventory", "registration.json",
+	)
+	if err := os.MkdirAll(filepath.Dir(ownerJournalPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ownerJournal := []byte("{invalid-owner-recovery\n")
+	writeCLIFile(t, ownerJournalPath, string(ownerJournal), 0o640)
+	beforeInfo, err := os.Stat(ownerJournalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Arguments: []string{"start"},
+		Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 {
+		t.Fatalf("gated mutation exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	var outcome struct {
+		Status      string  `json:"status"`
+		Code        string  `json:"code"`
+		Active      string  `json:"active"`
+		Previous    *string `json:"previous"`
+		Target      string  `json:"target"`
+		Transaction *string `json:"transaction"`
+		Action      string  `json:"action"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(stderr.Bytes()), &outcome); err != nil {
+		t.Fatalf("mutation gate output is not structured JSON: %q: %v", stderr.String(), err)
+	}
+	if outcome.Status != "recovering" || outcome.Code != "recovery-pending" ||
+		outcome.Active != "0.0.9" || outcome.Previous == nil || *outcome.Previous != "0.0.8" ||
+		outcome.Target != Version || outcome.Transaction == nil ||
+		!strings.HasPrefix(*outcome.Transaction, "v1-") ||
+		outcome.Action != "run yard update" {
+		t.Fatalf("mutation gate outcome=%#v", outcome)
+	}
+	got, err := os.ReadFile(ownerJournalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterInfo, err := os.Stat(ownerJournalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, ownerJournal) || !os.SameFile(beforeInfo, afterInfo) ||
+		afterInfo.Mode().Perm() != beforeInfo.Mode().Perm() {
+		t.Fatalf("gate touched owner journal: bytes=%q same=%v before=%o after=%o",
+			got, os.SameFile(beforeInfo, afterInfo), beforeInfo.Mode().Perm(), afterInfo.Mode().Perm())
+	}
+}
+
+func installUnfinishedV2MutationGateFixture(
+	t *testing.T,
+	root string,
+	environment []string,
+	runtimeRoot string,
+) (string, string) {
+	t.Helper()
+	target := "1.2.3-aaaaaaaaaaaa"
+	registry := []byte(`{"schemaVersion":2,"minimumEpochs":{"settings":1},"currentEpochs":{"settings":1},"migrations":[]}`)
+	writeCLIFile(t, filepath.Join(root, "config", "release-transition.json"), string(registry), 0o600)
+	for _, release := range []string{"release-a", target} {
+		if err := os.MkdirAll(filepath.Join(runtimeRoot, "releases", release, "bin"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("releases/release-a", filepath.Join(runtimeRoot, "current")); err != nil {
+		t.Fatal(err)
+	}
+	links, err := releasetransition.NewRuntimeLinkStore(runtimeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+	if err := os.MkdirAll(configHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	capture := filepath.Join(root, "v2-candidate-inspections")
+	engine := filepath.Join(runtimeRoot, "releases", target, "bin", "yard-engine")
+	writeCLIFile(t, engine, `#!/bin/sh
+case "${1:-}" in
+--version) printf 'yard-engine 1.2.3\n' ;;
+_release-transition)
+request=$(cat)
+config_home=$(printf '%s' "$request" | jq -r .configHome)
+target_release=$(printf '%s' "$request" | jq -r .target)
+journal="$config_home/release-transition/v2/journal.json"
+resume_plan=$(jq -r .resumePlan "$journal")
+transaction=$(jq -r .transaction "$journal")
+printf called >> "$V2_GATE_CAPTURE"
+printf '{"schemaVersion":1,"activationReconciliationOwned":false,"inspection":{"plan":"%s","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["resume the transition"]},"resume":"%s","outcome":{"status":"recovering","reachedGoal":false,"active":"release-a","target":"%s","code":"recovery-pending","message":"the authorized release transition can resume from observed facts","retry":"run yard update","transaction":"%s"}}}\n' "$resume_plan" "$transaction" "$target_release" "$transaction"
+;;
+*) exit 64 ;;
+esac
+`, 0o700)
+	payload, err := os.ReadFile(engine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(payload)
+	if err := os.MkdirAll(
+		filepath.Join(runtimeRoot, "releases", target, "config"), 0o700,
+	); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t,
+		filepath.Join(runtimeRoot, "releases", target, "config", "release-transition.json"),
+		string(registry), 0o600,
+	)
+	registryDigest := sha256.Sum256(registry)
+	manifest := fmt.Sprintf("%x  ./bin/yard-engine\n%x  ./config/release-transition.json\n",
+		digest, registryDigest)
+	writeCLIFile(t, filepath.Join(runtimeRoot, "releases", target, "runtime-files.sha256"),
+		manifest, 0o600)
+	manifestDigest := sha256.Sum256([]byte(manifest))
+	transaction := releasetransition.TransactionID("tx-0123456789abcdef")
+	transition, err := releasetransition.NewV2Transition(releasetransition.V2Options{
+		ConfigHome: configHome,
+		Releases: releasetransition.ReleasePair{
+			From: "release-a", Target: releasetransition.ReleaseID(target),
+		},
+		ObserveLinks: func(context.Context) (releasetransition.ReleaseLinks, error) {
+			return links.Observe()
+		},
+		ActivateLinks: func(
+			context.Context,
+			releasetransition.ReleasePair,
+		) (releasetransition.ReleaseLinks, error) {
+			observed, observeErr := links.Observe()
+			if observeErr != nil {
+				return releasetransition.ReleaseLinks{}, observeErr
+			}
+			return observed, errors.New("fixture activation interruption")
+		},
+		RegistryPayload:  registry,
+		ArtifactDigest:   releasetransition.Fingerprint(fmt.Sprintf("%x", manifestDigest)),
+		NewTransactionID: func() releasetransition.TransactionID { return transaction },
+		VerifyAuthorization: func(
+			releasetransition.PlanToken,
+			releasetransition.Authorization,
+		) bool {
+			return true
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	goal := releasetransition.Goal{
+		Target: releasetransition.ReleaseID(target), Direction: releasetransition.DirectionActivateTarget,
+	}
+	inspection, err := transition.Inspect(context.Background(), goal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := transition.Converge(context.Background(), releasetransition.Execution{
+		Plan: inspection.Plan, Authorization: "fixture-authorization",
+	})
+	if err != nil || outcome.Status != releasetransition.StatusRecovering ||
+		outcome.Transaction == nil || *outcome.Transaction != transaction {
+		t.Fatalf("unfinished v2 fixture outcome = %#v, err=%v", outcome, err)
+	}
+	return filepath.Join(configHome, "release-transition", "v2", "journal.json"), capture
+}
+
+func TestV2MutationGateBlocksLifecycleWhileStatusRemainsReadOnly(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	runtimeRoot := filepath.Join(root, "runtime-v2")
+	capture := filepath.Join(root, "v2-candidate-inspections")
+	environment = append(environment,
+		"YARD_RUNTIME_ROOT="+runtimeRoot,
+		"V2_GATE_CAPTURE="+capture,
+	)
+	journalPath, _ := installUnfinishedV2MutationGateFixture(
+		t, root, environment, runtimeRoot,
+	)
+	before, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeInfo, err := os.Lstat(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{
+		Schema: 1, OperationID: "unexpected-v2-mutation", Status: "ok",
+	}}}}
+	var stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Arguments: []string{"start"},
+		Environment: environment, WorkingDir: root, Stdout: &bytes.Buffer{}, Stderr: &stderr,
+		AdapterRunner: runner, Incus: lifecycleIncus(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 || len(runner.Requests) != 0 {
+		t.Fatalf("v2 gated mutation: code=%d requests=%#v stderr=%q",
+			code, runner.Requests, stderr.String())
+	}
+	var gated struct {
+		Status      string  `json:"status"`
+		Code        string  `json:"code"`
+		Active      string  `json:"active"`
+		Target      string  `json:"target"`
+		Transaction *string `json:"transaction"`
+		Action      string  `json:"action"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(stderr.Bytes()), &gated); err != nil ||
+		gated.Status != "recovering" || gated.Code != "recovery-pending" ||
+		gated.Active != "release-a" || gated.Target != "1.2.3-aaaaaaaaaaaa" ||
+		gated.Transaction == nil || *gated.Transaction != "tx-0123456789abcdef" ||
+		gated.Action != "run yard update" {
+		t.Fatalf("v2 gate outcome=%#v stderr=%q err=%v", gated, stderr.String(), err)
+	}
+
+	var statusStderr bytes.Buffer
+	status, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Arguments: []string{"status"},
+		Environment: environment, WorkingDir: root, Stdout: &bytes.Buffer{}, Stderr: &statusStderr,
+		Incus: lifecycleIncus(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := status.Run(context.Background()); code != 0 {
+		t.Fatalf("status during v2 recovery: code=%d stderr=%q", code, statusStderr.String())
+	}
+	testVMRunner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{
+		Schema: 1, OperationID: "v2-read-only-test-vms-status", Status: "ok",
+	}}}}
+	testVMIncus := lifecycleIncus()
+	testVMInstance := testVMIncus.Instances["subyard/yard"]
+	testVMInstance.Status = "Running"
+	testVMIncus.Instances["subyard/yard"] = testVMInstance
+	var testVMStderr bytes.Buffer
+	testVMStatus, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Arguments: []string{"test-vms", "status"},
+		Environment: append(environment,
+			"NESTED_E2E_VMS=1", "SUBYARD_OPERATION_ID=v2-read-only-test-vms-status",
+		),
+		WorkingDir: root, Stdout: &bytes.Buffer{}, Stderr: &testVMStderr,
+		AdapterRunner: testVMRunner, Incus: testVMIncus,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := testVMStatus.Run(context.Background()); code != 0 || len(testVMRunner.Requests) != 1 {
+		t.Fatalf("test-vms status during v2 recovery: code=%d requests=%#v stderr=%q",
+			code, testVMRunner.Requests, testVMStderr.String())
+	}
+	after, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterInfo, err := os.Lstat(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) || !os.SameFile(beforeInfo, afterInfo) ||
+		afterInfo.Mode() != beforeInfo.Mode() {
+		t.Fatal("mutation gate or read-only status changed the protected v2 journal")
+	}
+	if calls, err := os.ReadFile(capture); err != nil || string(calls) != "called" {
+		t.Fatalf("candidate inspection calls=%q err=%v", calls, err)
+	}
+}
+
+func TestV2MutationGateOwnsRecoveryWhileImportingV1Journal(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	runtimeRoot := filepath.Join(root, "runtime-v2-with-v1")
+	capture := filepath.Join(root, "v2-with-v1-candidate-inspections")
+	environment = append(environment,
+		"YARD_RUNTIME_ROOT="+runtimeRoot,
+		"V2_GATE_CAPTURE="+capture,
+	)
+	installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
+	installUnfinishedMutationGateFixture(t, root, environment, runtimeRoot)
+	program, err := New(Options{
+		RepositoryRoot: root,
+		Program:        "yard",
+		Environment:    environment,
+		WorkingDir:     root,
+		Stderr:         &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := program.inspectMutationGate(context.Background(), "default")
+	if err != nil || outcome == nil || outcome.Status != releasetransition.StatusRecovering ||
+		outcome.Transaction == nil || *outcome.Transaction != "tx-0123456789abcdef" {
+		t.Fatalf("v2 did not own related v1 recovery: outcome=%#v err=%v", outcome, err)
+	}
+}
+
+func TestV2MutationGateRedactsCandidateVerificationPathsForCLIAndRPC(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	runtimeRoot := filepath.Join(root, "runtime-v2-redaction")
+	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot)
+	installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
+	candidate := filepath.Join(runtimeRoot, "releases", "1.2.3-aaaaaaaaaaaa")
+	relocated := filepath.Join(root, "private-candidate-location")
+	if err := os.Rename(candidate, relocated); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(relocated, candidate); err != nil {
+		t.Fatal(err)
+	}
+	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+
+	t.Run("CLI", func(t *testing.T) {
+		var stderr bytes.Buffer
+		program, err := New(Options{
+			RepositoryRoot: root, Program: "yard", Arguments: []string{"start"},
+			Environment: environment, WorkingDir: root,
+			Stdout: &bytes.Buffer{}, Stderr: &stderr, Incus: lifecycleIncus(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code := program.Run(context.Background()); code != 1 ||
+			strings.Contains(stderr.String(), runtimeRoot) || strings.Contains(stderr.String(), configHome) {
+			t.Fatalf("redacted CLI gate: code=%d stderr=%q", code, stderr.String())
+		}
+		var outcome mutationGateOutcome
+		if err := json.Unmarshal(bytes.TrimSpace(stderr.Bytes()), &outcome); err != nil ||
+			outcome.Status != releasetransition.StatusOperatorActionRequired ||
+			outcome.Code != releasetransition.CodeDependencyUnavailable ||
+			outcome.Active != "release-a" || outcome.Target != "1.2.3-aaaaaaaaaaaa" ||
+			outcome.Transaction == nil || *outcome.Transaction != "tx-0123456789abcdef" ||
+			outcome.Action != "restore the journal-selected release, then run yard update --check" {
+			t.Fatalf("structured CLI gate: outcome=%#v stderr=%q err=%v",
+				outcome, stderr.String(), err)
+		}
+	})
+
+	t.Run("RPC", func(t *testing.T) {
+		program, err := New(Options{
+			RepositoryRoot: root, Program: "yard", Environment: environment,
+			WorkingDir: root, Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := program.loadContext("default")
+		if err != nil {
+			t.Fatal(err)
+		}
+		handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]rpcPlannedOperation)}
+		params, err := json.Marshal(map[string]any{"command": "start", "arguments": []string{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = handler.Handle(context.Background(), rpc.Call{
+			Method: "operation.plan", OperationID: "rpc-redacted-gate", Params: params,
+		}, nil)
+		fault, ok := err.(*rpc.Error)
+		if !ok || fault.Code != "dependency-unavailable" ||
+			strings.Contains(fault.Message, runtimeRoot) || strings.Contains(fault.Message, configHome) {
+			t.Fatalf("redacted RPC gate error=%#v", err)
+		}
+		var outcome mutationGateOutcome
+		if unmarshalErr := json.Unmarshal([]byte(fault.Message), &outcome); unmarshalErr != nil ||
+			outcome.Status != releasetransition.StatusOperatorActionRequired ||
+			outcome.Code != releasetransition.CodeDependencyUnavailable ||
+			outcome.Active != "release-a" || outcome.Target != "1.2.3-aaaaaaaaaaaa" ||
+			outcome.Transaction == nil || *outcome.Transaction != "tx-0123456789abcdef" ||
+			outcome.Action != "restore the journal-selected release, then run yard update --check" {
+			t.Fatalf("structured RPC gate: outcome=%#v error=%#v err=%v",
+				outcome, fault, unmarshalErr)
+		}
+	})
+}
+
+func TestV2MutationGateReportsCorruptJournalAsStructuredOutcome(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	runtimeRoot := filepath.Join(root, "runtime-v2-corrupt-journal")
+	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot)
+	journal, _ := installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
+	writeCLIFile(t, journal, `{`, 0o600)
+
+	var stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Arguments: []string{"start"},
+		Environment: environment, WorkingDir: root,
+		Stdout: &bytes.Buffer{}, Stderr: &stderr, Incus: lifecycleIncus(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 {
+		t.Fatalf("corrupt journal gate: code=%d stderr=%q", code, stderr.String())
+	}
+	var outcome mutationGateOutcome
+	if err := json.Unmarshal(bytes.TrimSpace(stderr.Bytes()), &outcome); err != nil ||
+		outcome.Status != releasetransition.StatusOperatorActionRequired ||
+		outcome.Code != releasetransition.CodeJournalInvalid ||
+		outcome.Active != "release-a" || outcome.Previous != nil || outcome.Target != "unknown" ||
+		outcome.Transaction != nil ||
+		outcome.Action != "restore protected release metadata from backup, then run yard update --check" {
+		t.Fatalf("corrupt journal outcome=%#v stderr=%q err=%v", outcome, stderr.String(), err)
+	}
+
+	var stdout bytes.Buffer
+	stderr.Reset()
+	program, err = New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments:   []string{"update", "--check", "--runtime-root", runtimeRoot},
+		Environment: environment, WorkingDir: root,
+		Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("corrupt journal update check: code=%d stdout=%q stderr=%q",
+			code, stdout.String(), stderr.String())
+	}
+	var check struct {
+		Outcome *releasetransition.Outcome `json:"outcome"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &check); err != nil ||
+		check.Outcome == nil || check.Outcome.Code != releasetransition.CodeJournalInvalid ||
+		check.Outcome.Status != releasetransition.StatusOperatorActionRequired ||
+		check.Outcome.Active != "release-a" || check.Outcome.Target != "unknown" ||
+		check.Outcome.Retry != "restore protected release metadata from backup, then run yard update --check" ||
+		stderr.Len() != 0 || strings.Contains(stdout.String(), runtimeRoot) {
+		t.Fatalf("corrupt journal update check outcome=%#v stdout=%q stderr=%q err=%v",
+			check.Outcome, stdout.String(), stderr.String(), err)
+	}
+}
+
+func TestRPCUpdateDifferentTargetIsGatedBeforePublication(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	runtimeRoot := filepath.Join(root, "runtime-v2-rpc-update")
+	cache := filepath.Join(root, "rpc-update-cache")
+	gateCapture := filepath.Join(root, "rpc-update-gate-inspection")
+	publicationCapture := filepath.Join(root, "rpc-update-publication")
+	environment = append(environment,
+		"YARD_RUNTIME_ROOT="+runtimeRoot,
+		"YARD_RELEASE_CACHE="+cache,
+		"YARD_RELEASE_BASE_URL=file://"+filepath.Join(root, "missing-release-assets"),
+		"V2_GATE_CAPTURE="+gateCapture,
+	)
+	installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
+	writeCLIFile(t, filepath.Join(root, "scripts", "install-runtime-release.sh"),
+		"#!/bin/sh\n# --publish-only\nprintf called > \"$RPC_UPDATE_PUBLICATION_CAPTURE\"\nexit 91\n", 0o700)
+	environment = append(environment, "RPC_UPDATE_PUBLICATION_CAPTURE="+publicationCapture)
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
+		Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := program.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]rpcPlannedOperation)}
+	params, err := json.Marshal(map[string]any{
+		"command":   "update",
+		"arguments": []string{"--version", "9.9.9", "--runtime-root", runtimeRoot},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = handler.Handle(context.Background(), rpc.Call{
+		Method: "operation.plan", OperationID: "rpc-different-update", Params: params,
+	}, nil)
+	fault, ok := err.(*rpc.Error)
+	if !ok || fault.Code != "plan_failed" || !strings.Contains(fault.Message, "exact") {
+		t.Fatalf("different-target RPC update error = %#v", err)
+	}
+	if _, err := os.Lstat(publicationCapture); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("different-target RPC update invoked publication: %v", err)
+	}
+	if _, err := os.Lstat(cache); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("different-target RPC update created release cache: %v", err)
+	}
+}
+
+func TestV2MutationGateFailsClosedOnTamperedJournal(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	runtimeRoot := filepath.Join(root, "runtime-v2-tampered")
+	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot)
+	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+	journalPath := filepath.Join(configHome, "release-transition", "v2", "journal.json")
+	if err := os.MkdirAll(filepath.Dir(journalPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, journalPath, `{"schemaVersion":2,"checkpoint":"authorized"}`, 0o600)
+	runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{
+		Schema: 1, OperationID: "unexpected-tampered-mutation", Status: "ok",
+	}}}}
+	var stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Arguments: []string{"start"},
+		Environment: environment, WorkingDir: root, Stdout: &bytes.Buffer{}, Stderr: &stderr,
+		AdapterRunner: runner, Incus: lifecycleIncus(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 || len(runner.Requests) != 0 ||
+		strings.Contains(stderr.String(), `"status":"recovering"`) ||
+		strings.Contains(stderr.String(), `"action":"run yard update"`) {
+		t.Fatalf("tampered v2 gate: code=%d requests=%#v stderr=%q",
+			code, runner.Requests, stderr.String())
+	}
+}
+
+func TestMutationGateDoesNotHideTamperedV2BehindV1Recovery(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	runtimeRoot := filepath.Join(root, "runtime-combined-tamper")
+	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot)
+	installUnfinishedMutationGateFixture(t, root, environment, runtimeRoot)
+	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+	journalPath := filepath.Join(configHome, "release-transition", "v2", "journal.json")
+	if err := os.MkdirAll(filepath.Dir(journalPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, journalPath, `{"schemaVersion":2,"checkpoint":"authorized"}`, 0o600)
+	runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{
+		Schema: 1, OperationID: "unexpected-combined-mutation", Status: "ok",
+	}}}}
+	var stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Arguments: []string{"start"},
+		Environment: environment, WorkingDir: root, Stdout: &bytes.Buffer{}, Stderr: &stderr,
+		AdapterRunner: runner, Incus: lifecycleIncus(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 || len(runner.Requests) != 0 ||
+		strings.Contains(stderr.String(), `"status":"recovering"`) ||
+		strings.Contains(stderr.String(), `"action":"run yard update"`) {
+		t.Fatalf("combined tampered gate: code=%d requests=%#v stderr=%q",
+			code, runner.Requests, stderr.String())
+	}
+}
+
+func TestRPCMutationGateBlocksPlanAndRechecksExecute(t *testing.T) {
+	t.Run("plan before project preparation", func(t *testing.T) {
+		root, environment, stateDirectory := nativeFixture(t)
+		runtimeRoot := filepath.Join(root, "runtime")
+		environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot)
+		store, err := state.NewFileStore(stateDirectory)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Put(context.Background(), domain.ProjectRecord{
+			Schema: 1, IdentityVersion: 2, ProjectID: "Demo", Name: "Demo",
+			HostPath: "/host/Demo", SourceKey: state.SourceKey("/host/Demo"),
+			YardPath: state.YardPath("Demo"), Mode: domain.ProjectSync, SSHHost: "yard", Target: "yard",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		projectJournalPath := filepath.Join(stateDirectory, ".name-migration")
+		projectJournal := []byte("{invalid-project-recovery\n")
+		writeCLIFile(t, projectJournalPath, string(projectJournal), 0o600)
+		installUnfinishedMutationGateFixture(t, root, environment, runtimeRoot)
+
+		program, err := New(Options{
+			RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := program.loadContext("default")
+		if err != nil {
+			t.Fatal(err)
+		}
+		handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]rpcPlannedOperation)}
+		_, err = handler.Handle(context.Background(), rpc.Call{
+			Method: "operation.plan", OperationID: "gated-project-plan",
+			Params: json.RawMessage(`{"command":"code","arguments":["Demo"]}`),
+		}, nil)
+		fault, ok := err.(*rpc.Error)
+		if !ok || fault.Code != "recovery-pending" {
+			t.Fatalf("gated plan error=%#v", err)
+		}
+		got, readErr := os.ReadFile(projectJournalPath)
+		if readErr != nil || !bytes.Equal(got, projectJournal) {
+			t.Fatalf("gated plan reached project preparation: bytes=%q err=%v", got, readErr)
+		}
+	})
+
+	t.Run("execute recheck", func(t *testing.T) {
+		root, environment, _ := nativeFixture(t)
+		runtimeRoot := filepath.Join(root, "runtime")
+		environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot)
+		runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{
+			Schema: 1, OperationID: "gated-execute", Status: "ok",
+		}}}}
+		program, err := New(Options{
+			RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
+			AdapterRunner: runner, Incus: lifecycleIncus(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := program.loadContext("default")
+		if err != nil {
+			t.Fatal(err)
+		}
+		handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]rpcPlannedOperation)}
+		result, err := handler.Handle(context.Background(), rpc.Call{
+			Method: "operation.plan", OperationID: "gated-execute",
+			Params: json.RawMessage(`{"command":"start","arguments":[]}`),
+		}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan := result.(domain.OperationPlan)
+		installUnfinishedMutationGateFixture(t, root, environment, runtimeRoot)
+		_, err = handler.Handle(context.Background(), rpc.Call{
+			Method: "operation.execute", OperationID: plan.OperationID,
+			Params: json.RawMessage(`{"confirmed":true}`),
+		}, func(string, any) (uint64, error) { return 1, nil })
+		fault, ok := err.(*rpc.Error)
+		if !ok || fault.Code != "recovery-pending" || len(runner.Requests) != 0 {
+			t.Fatalf("execute gate error=%#v requests=%#v", err, runner.Requests)
+		}
+	})
+}
+
+func TestCurrentEngineRejectsSupersededMutatingMigrationVerbs(t *testing.T) {
+	program, err := New(Options{RepositoryRoot: repositoryRoot(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, ok := program.manifest.Lookup("_migrate")
+	if !ok {
+		t.Fatal("_migrate command is missing")
+	}
+	for _, verb := range []string{"apply", "finalize", "rollback", "cleanup"} {
+		if slices.Contains(definition.Verbs, verb) {
+			t.Errorf("_migrate manifest still advertises superseded verb %q", verb)
+		}
+		t.Run(verb, func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			var stderr bytes.Buffer
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard",
+				Environment: environment, WorkingDir: root,
+				Stdout: &bytes.Buffer{}, Stderr: &stderr,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code := program.runMigration(context.Background(), "default", []string{verb}); code != 2 ||
+				!strings.Contains(stderr.String(), "superseded") {
+				t.Fatalf("_migrate %s result: code=%d stderr=%q", verb, code, stderr.String())
+			}
+		})
+	}
+}
+
+func TestMutatingUpdateIsExemptFromMutationGate(t *testing.T) {
+	root, environment, runtimeRoot := updateReleaseFixture(t)
+	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot)
+	installUnfinishedMutationGateFixture(t, root, environment, runtimeRoot)
+	capture := filepath.Join(root, "update-exempt-called")
+	writeCLIFile(t, filepath.Join(root, "scripts", "install-runtime-release.sh"),
+		"#!/bin/sh\n# --publish-only\nprintf called > \"$UPDATE_EXEMPT_CAPTURE\"\nexit 17\n", 0o700)
+	environment = append(environment, "UPDATE_EXEMPT_CAPTURE="+capture)
+	var stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments:   []string{"update", "--yes", "--version", "1.2.3", "--runtime-root", runtimeRoot},
+		Environment: environment, WorkingDir: root, Stdout: &bytes.Buffer{}, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 {
+		t.Fatalf("update failure exit=%d stderr=%q", code, stderr.String())
+	}
+	if payload, err := os.ReadFile(capture); err != nil || string(payload) != "called" {
+		t.Fatalf("mutating update did not pass its gate exemption: payload=%q err=%v stderr=%q",
+			payload, err, stderr.String())
+	}
+}
+
+func TestMutationGateSkipsMissingMetadataButNotInternalChild(t *testing.T) {
+	t.Run("operator home unavailable", func(t *testing.T) {
+		root, _, _ := nativeFixture(t)
+		program, err := New(Options{
+			RepositoryRoot: root, Program: "yard", WorkingDir: root,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		outcome, err := program.inspectMutationGate(context.Background(), "default")
+		if err != nil || outcome != nil {
+			t.Fatalf("operator-home-free mutation gate outcome=%#v err=%v", outcome, err)
+		}
+	})
+
+	t.Run("missing metadata", func(t *testing.T) {
+		root, environment, _ := nativeFixture(t)
+		configHome := filepath.Join(root, "missing-config-home")
+		environment = append(environment, "SUBYARD_CONFIG_HOME="+configHome)
+		program, err := New(Options{
+			RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		outcome, err := program.inspectMutationGate(context.Background(), "default")
+		if err != nil || outcome != nil {
+			t.Fatalf("missing mutation metadata outcome=%#v err=%v", outcome, err)
+		}
+		if _, err := os.Lstat(configHome); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("mutation gate created missing config home: %v", err)
+		}
+	})
+
+	t.Run("internal migration child", func(t *testing.T) {
+		root, environment, _ := nativeFixture(t)
+		runtimeRoot := filepath.Join(root, "runtime")
+		environment = append(environment,
+			"YARD_RUNTIME_ROOT="+runtimeRoot,
+			"SUBYARD_INTERNAL_MIGRATION_CHILD=1",
+		)
+		installUnfinishedMutationGateFixture(t, root, environment, runtimeRoot)
+		program, err := New(Options{
+			RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		outcome, err := program.inspectMutationGate(context.Background(), "default")
+		if err != nil || outcome == nil || outcome.Status != releasetransition.StatusRecovering {
+			t.Fatalf("caller-controlled child marker bypassed mutation gate: outcome=%#v err=%v",
+				outcome, err)
+		}
+	})
+}
+
+func TestTrustedInProcessReleaseTransitionChildBypassesMutationGate(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join([]string{
+		"SHIFT_MODE=shift",
+		"FORWARD_SSH_AGENT=0",
+		"DEV_SUDO=0",
+		"DEV_UID=1000",
+		"DEV_USER=dev",
+		"SSH_PORT=2222",
+		"HOST_BASE=" + filepath.Join(root, "host"),
+		"RESTRICTED_DISK_PATHS=" + filepath.Join(root, "host"),
+	}, "\n")+"\n", 0o600)
+	runtimeRoot := filepath.Join(root, "runtime")
+	environment = append(environment,
+		"YARD_RUNTIME_ROOT="+runtimeRoot,
+		"SUBYARD_OPERATION_ID=trusted-release-child",
+	)
+	installUnfinishedMutationGateFixture(t, root, environment, runtimeRoot)
+	runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{
+		Schema: 1, OperationID: "trusted-release-child", Status: "ok",
+	}}}}
+	var stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Environment: environment, WorkingDir: root, Stderr: &stderr,
+		AdapterRunner: runner, Incus: lifecycleIncus(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := program.runReleaseTransitionYardCommand(
+		context.Background(), "default", &stderr, "start",
+	); err != nil || len(runner.Requests) != 1 {
+		t.Fatalf("trusted release child: err=%v requests=%#v stderr=%q",
+			err, runner.Requests, stderr.String())
+	}
+}
+
+func TestReleaseTransitionChildUsesCandidateDispatcher(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join([]string{
+		"SHIFT_MODE=shift",
+		"FORWARD_SSH_AGENT=0",
+		"DEV_SUDO=0",
+		"DEV_UID=1000",
+		"DEV_USER=dev",
+		"SSH_PORT=2222",
+		"HOST_BASE=" + filepath.Join(root, "host"),
+		"RESTRICTED_DISK_PATHS=" + filepath.Join(root, "host"),
+	}, "\n")+"\n", 0o600)
+	registryPath := filepath.Join(root, "config", "commands.registry")
+	registry, err := os.ReadFile(registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, registryPath, string(registry)+
+		"probe-dispatch||probe-dispatch.sh||local|read|never|public|lifecycle|simple|probe-dispatch|probe dispatcher|--help|\n", 0o600)
+	writeCLIFile(t, filepath.Join(root, "scripts", "probe-dispatch.sh"),
+		"#!/bin/sh\nprintf '%s\\n' \"$SUBYARD_DISPATCH_PATH\"\n", 0o700)
+	if err := os.MkdirAll(filepath.Join(root, "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	candidateDispatcher := filepath.Join(root, "bin", "yard-engine")
+	writeCLIFile(t, candidateDispatcher, "#!/bin/sh\nexit 0\n", 0o700)
+	program, err := New(Options{
+		RepositoryRoot: root, DispatcherPath: filepath.Join(root, "removed-candidate"),
+		Program: "yard", Environment: environment, WorkingDir: root,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := program.runReleaseTransitionYardCommand(
+		context.Background(), "default", &output, "probe-dispatch",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(output.String()); got != candidateDispatcher {
+		t.Fatalf("release transition child dispatcher=%q, want %q", got, candidateDispatcher)
+	}
+}
+
+func TestCoreReadCommandsDoNotRecoverProjectStore(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		arguments []string
+	}{
+		{name: "status summary", arguments: []string{"status"}},
+		{name: "status detail", arguments: []string{"-Y", "default", "status"}},
+		{name: "project list", arguments: []string{"list"}},
+		{name: "yard list", arguments: []string{"yards"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, environment, stateDirectory := nativeFixture(t)
+			environment = append(environment, "SUBYARD_HOST_ID=owner-a")
+			if err := os.MkdirAll(stateDirectory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			journalPath := filepath.Join(stateDirectory, ".name-migration")
+			journal := []byte("{invalid-project-recovery\n")
+			writeCLIFile(t, journalPath, string(journal), 0o600)
+			incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+				"subyard/yard": {
+					Name: "yard", Project: "subyard", Type: domain.YardContainer,
+					Status: "Stopped", Config: map[string]string{}, Devices: map[string]map[string]string{},
+				},
+			}}
+			var stdout, stderr bytes.Buffer
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard", Arguments: test.arguments,
+				Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
+				Incus: incus, Executor: incus,
+				StatusFacts: statusFactsStub{value: domain.StatusFacts{Security: "live", Space: "unknown"}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code := program.Run(context.Background()); code != 0 {
+				t.Fatalf("read command recovered project state: code=%d stderr=%q", code, stderr.String())
+			}
+			got, err := os.ReadFile(journalPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, journal) {
+				t.Fatalf("read command changed project recovery journal: got %q, want %q", got, journal)
+			}
+			if _, err := os.Lstat(filepath.Join(stateDirectory, ".lock")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("read command created project state lock: %v", err)
+			}
+		})
+	}
+}
+
+func TestProjectInfoDoesNotRecoverOwnerOrProjectJournals(t *testing.T) {
+	root, environment, projectDirectory := nativeFixture(t)
+	environment = append(environment,
+		"SUBYARD_HOST_ID=owner-a",
+		"SUBYARD_OPERATION_ID=read-project-info",
+	)
+	registryPath := filepath.Join(root, "config", "commands.registry")
+	registry, err := os.ReadFile(registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry = append(registry,
+		[]byte("info||@project-env||forward|read|never|public|project_env|project-env|info [project]|info|--yes --help|\n")...,
+	)
+	writeCLIFile(t, registryPath, string(registry), 0o600)
+
+	projectStore, err := state.NewFileStore(projectDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := projectStore.Put(context.Background(), domain.ProjectRecord{
+		Schema: 1, IdentityVersion: 2, ProjectID: "Remote", Name: "Remote",
+		HostPath: "/host/Remote", SourceKey: state.SourceKey("/host/Remote"),
+		YardPath: state.YardPath("Remote"), Mode: domain.ProjectSync,
+		SSHHost: "yard", Target: "go",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ownerRoot := filepath.Join(environmentValue(environment, "SUBYARD_HOME"), "owner-inventory")
+	if err := os.MkdirAll(ownerRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ownerJournalPath := filepath.Join(ownerRoot, "registration.json")
+	projectJournalPath := filepath.Join(projectDirectory, ".name-migration")
+	ownerJournal := []byte("{invalid-owner-recovery\n")
+	projectJournal := []byte("{invalid-project-recovery\n")
+	writeCLIFile(t, ownerJournalPath, string(ownerJournal), 0o600)
+	writeCLIFile(t, projectJournalPath, string(projectJournal), 0o600)
+
+	var stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments:   []string{"info", "Remote"},
+		Environment: environment, WorkingDir: root, Stdout: &bytes.Buffer{}, Stderr: &stderr,
+		ProjectData: projectActionObservationProbe{execute: func(ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+			return ports.InstanceExecResult{ExitCode: 0, Stdout: []byte("{}\n")}, nil
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("project info failed: code=%d stderr=%q", code, stderr.String())
+	}
+	for path, want := range map[string][]byte{
+		ownerJournalPath: ownerJournal, projectJournalPath: projectJournal,
+	} {
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("read-only info changed %s: got %q, want %q", path, got, want)
+		}
+	}
+}
+
+func TestRPCReadsDoNotRecoverProjectStore(t *testing.T) {
+	for _, method := range []string{"project.list", "yard.status"} {
+		t.Run(method, func(t *testing.T) {
+			root, environment, stateDirectory := nativeFixture(t)
+			environment = append(environment, "SUBYARD_HOST_ID=owner-a")
+			if err := os.MkdirAll(stateDirectory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			journalPath := filepath.Join(stateDirectory, ".name-migration")
+			journal := []byte("{invalid-project-recovery\n")
+			writeCLIFile(t, journalPath, string(journal), 0o600)
+			incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+				"subyard/yard": {
+					Name: "yard", Project: "subyard", Type: domain.YardContainer,
+					Status: "Stopped", Config: map[string]string{}, Devices: map[string]map[string]string{},
+				},
+			}}
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard", Environment: environment,
+				WorkingDir: root, Incus: incus, Executor: incus,
+				StatusFacts: statusFactsStub{value: domain.StatusFacts{Security: "live", Space: "unknown"}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := program.loadContext("default")
+			if err != nil {
+				t.Fatal(err)
+			}
+			handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]rpcPlannedOperation)}
+			if _, err := handler.Handle(context.Background(), rpc.Call{
+				Method: method, OperationID: "read-project-state", Params: json.RawMessage(`{}`),
+			}, nil); err != nil {
+				t.Fatalf("RPC read recovered project state: %v", err)
+			}
+			got, err := os.ReadFile(journalPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, journal) {
+				t.Fatalf("RPC read changed project recovery journal: got %q, want %q", got, journal)
+			}
+			if _, err := os.Lstat(filepath.Join(stateDirectory, ".lock")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("RPC read created project state lock: %v", err)
+			}
+		})
+	}
+}
+
+func TestUpdateCheckDoesNotRecoverUnrelatedOwnerState(t *testing.T) {
+	for _, recovery := range []struct {
+		name string
+		path func([]string) string
+	}{
+		{
+			name: "owner inventory",
+			path: func(environment []string) string {
+				return filepath.Join(
+					environmentValue(environment, "SUBYARD_HOME"),
+					"owner-inventory",
+					"registration.json",
+				)
+			},
+		},
+		{
+			name: "HostID rename",
+			path: func(environment []string) string {
+				return configsync.HostIDRenameTransactionPath(
+					environmentValue(environment, "SUBYARD_CONFIG_HOME"),
+				)
+			},
+		},
+	} {
+		t.Run(recovery.name, func(t *testing.T) {
+			root, environment, runtimeRoot := updateReleaseFixture(t)
+			environment = append(environment, "SUBYARD_HOST_ID=owner-a")
+			journalPath := recovery.path(environment)
+			journal := []byte("{invalid-owner-recovery\n")
+			if err := os.MkdirAll(filepath.Dir(journalPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			writeCLIFile(t, journalPath, string(journal), 0o600)
+
+			var stderr bytes.Buffer
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard",
+				Arguments: []string{
+					"update", "--check", "--version", "1.2.3", "--runtime-root", runtimeRoot,
+				},
+				Environment: environment, WorkingDir: root, Stdout: &bytes.Buffer{}, Stderr: &stderr,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code := program.Run(context.Background()); code != 0 {
+				t.Fatalf("update check recovered owner state: code=%d stderr=%q", code, stderr.String())
+			}
+			got, err := os.ReadFile(journalPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, journal) {
+				t.Fatalf("update check changed recovery journal: got %q, want %q", got, journal)
+			}
+		})
+	}
+}
+
 func TestSpaceListsEveryLocalYardFromCache(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
@@ -2080,7 +3593,7 @@ func TestNativeLiveListDoesNotImportL1Metadata(t *testing.T) {
 	}
 }
 
-func TestNativeListRepairsLegacyProjectPermissions(t *testing.T) {
+func TestNativeListPreservesLegacyProjectPermissions(t *testing.T) {
 	root, environment, stateDirectory := nativeFixture(t)
 	store, err := state.NewFileStore(stateDirectory)
 	if err != nil {
@@ -2114,8 +3627,8 @@ func TestNativeListRepairsLegacyProjectPermissions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("legacy state mode = %o, want 600", info.Mode().Perm())
+	if info.Mode().Perm() != 0o664 {
+		t.Fatalf("read-only list changed legacy state mode: got %o, want 664", info.Mode().Perm())
 	}
 }
 
@@ -2342,7 +3855,7 @@ func TestExistingProjectExportCarriesOperationIDIntoAssessment(t *testing.T) {
 		t.Fatal(err)
 	}
 	execution, err := program.prepareExistingProject(
-		context.Background(), loaded, "export", []string{"Demo"}, false,
+		context.Background(), loaded, "export", []string{"Demo"}, false, false,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2954,7 +4467,7 @@ func TestProjectSelectionRoutesAcrossYardsBeforeAdapter(t *testing.T) {
 		t.Fatal(err)
 	}
 	execution, err := program.prepareExistingProject(
-		context.Background(), loaded, "code", []string{"Demo"}, false,
+		context.Background(), loaded, "code", []string{"Demo"}, false, false,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -3045,7 +4558,7 @@ func TestProjectSelectorsDoNotLetBareNamesBeShadowedByHostPaths(t *testing.T) {
 
 	for _, command := range []string{"shell", "code", "up", "down", "info", "remove"} {
 		execution, prepareErr := program.prepareExistingProject(
-			context.Background(), loaded, command, []string{"Subyard"}, false,
+			context.Background(), loaded, command, []string{"Subyard"}, false, command == "info",
 		)
 		if prepareErr != nil || execution.Record.ProjectID != registered.ProjectID {
 			t.Fatalf("%s selected %#v: %v", command, execution, prepareErr)

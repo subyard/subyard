@@ -32,7 +32,9 @@ local_root="$TMP/local"
 remote_root="$TMP/remote"
 local_keys="$local_root/keys"
 remote_keys="$remote_root/keys"
-mkdir -p "$local_root/home" "$local_root/config/yards" "$remote_root/home" "$remote_root/config"
+install -d -m 0700 \
+  "$local_root/home" "$local_root/config" "$local_root/config/yards" \
+  "$remote_root/home" "$remote_root/config"
 
 bootstrap_keys() { # context-root keys-root
   HOME="$1/home" SUBYARD_OPERATOR_HOME="$1/home" SUBYARD_CONFIG_HOME="$1/config" \

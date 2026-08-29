@@ -18,6 +18,11 @@ const (
 
 type RouteIdentity struct{ Hostname, HostKey string }
 
+type routeConflictError struct{ message string }
+
+func (failure routeConflictError) Error() string    { return failure.message }
+func (routeConflictError) ActivationConflict() bool { return true }
+
 func ReadPublishedRoute(root string) (RouteIdentity, bool, error) {
 	identity := RouteIdentity{}
 	generation, err := PublishedRouteDirectory(root)
@@ -86,8 +91,11 @@ func ObserveRoute(run func(arguments ...string) (string, error)) (RouteIdentity,
 			}
 		}
 	}
+	if len(devices) == 0 {
+		return RouteIdentity{}, errors.New("outer-yard default route is unavailable")
+	}
 	if len(devices) != 1 {
-		return RouteIdentity{}, errors.New("outer-yard route device is ambiguous")
+		return RouteIdentity{}, routeConflictError{"outer-yard route device is ambiguous"}
 	}
 	var device string
 	for device = range devices {
@@ -107,8 +115,11 @@ func ObserveRoute(run func(arguments ...string) (string, error)) (RouteIdentity,
 			}
 		}
 	}
+	if len(found) == 0 {
+		return RouteIdentity{}, errors.New("outer-yard IPv4 address is unavailable")
+	}
 	if len(found) != 1 {
-		return RouteIdentity{}, errors.New("outer-yard IPv4 address is ambiguous")
+		return RouteIdentity{}, routeConflictError{"outer-yard IPv4 address is ambiguous"}
 	}
 	var hostname string
 	for hostname = range found {

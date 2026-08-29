@@ -3,18 +3,19 @@ package releaseruntime
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
-	"slices"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/releasetransition"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -23,64 +24,29 @@ func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, 
 	return function(request)
 }
 
-func TestPrepareReturnsTypedReleaseActions(t *testing.T) {
-	home := t.TempDir()
-	var output bytes.Buffer
-	release := New(Config{Environment: map[string]string{"HOME": home}, Stdout: &output})
-	defaults, _, err := release.parse([]string{"--version", "1.2.3"})
-	if err != nil || defaults.repository != "Subyard/Subyard" {
-		t.Fatalf("invalid default release repository: %q, %v", defaults.repository, err)
+func TestSourceIngressRequestFromEnvironmentIsAllOrNothing(t *testing.T) {
+	values := map[string]string{
+		"SUBYARD_SOURCE_INGRESS_V1_ROOT":     "/home/operator/source",
+		"SUBYARD_SOURCE_INGRESS_V1_DATA":     "/home/operator/.subyard",
+		"SUBYARD_SOURCE_INGRESS_V1_BIN":      "/home/operator/.local/bin",
+		"SUBYARD_SOURCE_INGRESS_V1_RC":       "/home/operator/.bashrc",
+		"SUBYARD_SOURCE_INGRESS_V1_LOGIN_RC": "/home/operator/.profile",
 	}
-
-	help, err := release.Prepare(context.Background(), []string{"--help"})
-	if err != nil || help.Action != "update.help" || help.Changed || help.Execute(context.Background()) != nil ||
-		!strings.Contains(output.String(), "Usage: yard update") {
-		t.Fatalf("invalid help operation: %#v, %q, %v", help, output.String(), err)
+	request, err := sourceIngressRequestFromEnvironment(values)
+	if err != nil || request == nil || request.SourceRoot != values["SUBYARD_SOURCE_INGRESS_V1_ROOT"] {
+		t.Fatalf("sourceIngressRequestFromEnvironment() = %#v, %v", request, err)
 	}
-	check, err := release.Prepare(context.Background(), []string{"--version", "1.2.3", "--check"})
-	if err != nil || check.Action != "update.check" || !check.Changed || check.RefreshConfigs {
-		t.Fatalf("update check must be a typed bounded write: %#v, %v", check, err)
+	delete(values, "SUBYARD_SOURCE_INGRESS_V1_RC")
+	if _, err := sourceIngressRequestFromEnvironment(values); err == nil {
+		t.Fatal("partial source ingress environment was accepted")
 	}
-	update, err := release.Prepare(context.Background(), []string{"--version", "1.2.3"})
-	if err != nil || update.Action != "update.activate" || !update.Changed || !update.RefreshConfigs ||
-		update.ActiveLauncher != filepath.Join(home, ".subyard", "runtime", "current", "bin", "yard") ||
-		!strings.Contains(strings.Join(update.Consequences, " "), "lifecycle migration") ||
-		strings.Contains(strings.Join(check.Consequences, " "), "lifecycle migration") {
-		t.Fatalf("release migration consequences are incomplete: update=%#v check=%#v err=%v",
-			update.Consequences, check.Consequences, err)
-	}
-	explicitRoot := filepath.Join(home, "explicit-runtime")
-	explicit, err := release.Prepare(context.Background(), []string{
-		"--version", "1.2.3", "--runtime-root", explicitRoot,
-	})
-	if err != nil || explicit.ActiveLauncher != filepath.Join(explicitRoot, "current", "bin", "yard") {
-		t.Fatalf("explicit runtime launcher is invalid: %#v, %v", explicit, err)
-	}
-	prepareRollbackRuntime(t, explicitRoot, "current-a", "previous-b")
-	rollback, err := release.Prepare(context.Background(), []string{"--runtime-root", explicitRoot, "--rollback"})
-	if err != nil || rollback.Action != "update.rollback" || !rollback.Changed || !rollback.RefreshConfigs ||
-		rollback.ActiveLauncher != filepath.Join(explicitRoot, "current", "bin", "yard") {
-		t.Fatalf("rollback must refresh materialized config: %#v, %v", rollback, err)
-	}
-	for _, arguments := range [][]string{
-		{"--offline"},
-		{"--runtime-root", "relative", "--version", "1"},
-		{"--version", "bad/version"},
-		{"--rollback", "--check"},
-		{"--channel", "edge", "--version", "1"},
-	} {
-		if _, err := release.Prepare(context.Background(), arguments); err == nil {
-			t.Fatalf("invalid arguments were accepted: %q", arguments)
-		}
-	}
-	if err := (Prepared{}).Execute(context.Background()); err == nil {
-		t.Fatal("empty prepared release operation was executable")
+	if request, err := sourceIngressRequestFromEnvironment(nil); err != nil || request != nil {
+		t.Fatalf("empty source ingress environment = %#v, %v", request, err)
 	}
 }
 
-func TestPrepareReportsGitHubLatestReleaseHTTPStatus(t *testing.T) {
+func TestLatestTagReportsGitHubHTTPStatus(t *testing.T) {
 	release := New(Config{
-		Environment: map[string]string{"HOME": t.TempDir()},
 		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 			return &http.Response{
 				StatusCode: http.StatusForbidden,
@@ -90,441 +56,1548 @@ func TestPrepareReportsGitHubLatestReleaseHTTPStatus(t *testing.T) {
 		})},
 	})
 
-	_, err := release.Prepare(context.Background(), nil)
+	_, err := release.latestTag(context.Background(), "Subyard/Subyard")
 	if err == nil || err.Error() != "GitHub latest release request returned 403 Forbidden" {
 		t.Fatalf("latest release error = %v", err)
 	}
 }
 
-func TestPrepareRollbackFailsBeforePlanningWithoutValidPreviousRuntime(t *testing.T) {
-	root := t.TempDir()
-	release := New(Config{Environment: map[string]string{"HOME": root}, Stdout: &bytes.Buffer{}})
-	_, err := release.Prepare(context.Background(), []string{
-		"--runtime-root", filepath.Join(root, "runtime"), "--rollback",
-	})
-	if err == nil || !strings.Contains(err.Error(), "previous") {
-		t.Fatalf("rollback precondition error = %v", err)
-	}
-}
-
-func TestPrepareRollbackSelfCheckIsolatesThePreviousRuntimeFromCurrentConfig(t *testing.T) {
-	root := t.TempDir()
-	runtimeRoot := filepath.Join(root, "runtime")
-	prepareRollbackRuntime(t, runtimeRoot, "current-a", "previous-b")
-	probeHome := filepath.Join(runtimeRoot, "releases", "previous-b")
-	capture := filepath.Join(root, "previous-environment")
-	probe := fmt.Sprintf(`#!/bin/sh
-printf '%%s\n' "${HOME-}" "${SUBYARD_HOME-unset}" "${CODING_TOOL_INTEGRATIONS-unset}" > %q
-printf 'yard 1.2.3\n'
-`, capture)
-	if err := os.WriteFile(
-		filepath.Join(probeHome, "bin", "yard-engine"), []byte(probe), 0o700,
-	); err != nil {
-		t.Fatal(err)
-	}
-	release := New(Config{Environment: map[string]string{
-		"HOME": root, "SUBYARD_HOME": filepath.Join(root, "live-data"),
-		"CODING_TOOL_INTEGRATIONS": "none",
-	}, Stdout: &bytes.Buffer{}})
-
-	if _, err := release.Prepare(context.Background(), []string{
-		"--runtime-root", runtimeRoot, "--rollback",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	actual, err := os.ReadFile(capture)
+func TestProductionTransitionPathDoesNotDelegateToLegacyMutation(t *testing.T) {
+	source, err := os.ReadFile("runtime.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := probeHome + "\nunset\nunset\n"
-	if string(actual) != want {
-		t.Fatalf("previous runtime self-check environment = %q, want %q", actual, want)
+	start := bytes.Index(source, []byte("func (runtime *Runtime) PrepareTransition("))
+	end := bytes.Index(source, []byte("func (runtime *Runtime) prepareRetainedTransition("))
+	if start < 0 || end <= start {
+		t.Fatal("could not isolate production release transition entry point")
+	}
+	entrypoint := source[start:end]
+	for _, forbidden := range [][]byte{
+		[]byte("runtime.Prepare(ctx, arguments)"),
+		[]byte("_migrate\", \"apply"),
+		[]byte("_migrate\", \"finalize"),
+		[]byte("_migrate\", \"rollback"),
+		[]byte("_migrate\", \"cleanup"),
+	} {
+		if bytes.Contains(entrypoint, forbidden) {
+			t.Fatalf("production transition entry point contains superseded delegation %q", forbidden)
+		}
+	}
+
+	installer, err := os.ReadFile(filepath.Join("..", "..", "..", "scripts", "install-runtime-release.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, verb := range []string{"apply", "finalize", "rollback", "cleanup"} {
+		if bytes.Contains(installer, []byte("_migrate "+verb)) {
+			t.Fatalf("current installer still invokes mutating _migrate %s", verb)
+		}
 	}
 }
 
-func TestPrepareRejectsUnsafeReleaseRootsBeforePlanning(t *testing.T) {
+func TestCandidateBlockedInspectionCheckReturnsStructuredPublicOutcome(t *testing.T) {
 	root := t.TempDir()
-	external := filepath.Join(root, "external")
-	if err := os.MkdirAll(external, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	cacheLink := filepath.Join(root, "cache-link")
-	if err := os.Symlink(external, cacheLink); err != nil {
-		t.Fatal(err)
-	}
-	runtimeLink := filepath.Join(root, "runtime-link")
-	if err := os.Symlink(external, runtimeLink); err != nil {
-		t.Fatal(err)
-	}
-	unsafeCache := filepath.Join(root, "unsafe-cache")
-	if err := os.Mkdir(unsafeCache, 0o770); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(unsafeCache, 0o770); err != nil {
-		t.Fatal(err)
+	response := `{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["inspect the blocked transition"]},"blockers":[{"code":"migration-stale","resource":"yard.fixture","message":"the resource changed","retry":"run yard update --check"}],"outcome":{"status":"operator-action-required","reachedGoal":false,"active":"release-a","previous":"release-z","target":"release-b","code":"migration-stale","message":"the resource changed","retry":"run yard update --check","transaction":"tx-0123456789abcdef"}}}`
+	candidate := writeRuntimeCandidateFixture(t, root, response)
+	request := releasetransition.ProcessRequest{
+		SchemaVersion: releasetransition.ProcessProtocolSchemaV1,
+		Mode:          releasetransition.ProcessInspect,
+		RuntimeRoot:   root,
+		ConfigHome:    root,
+		Target:        "release-b",
+		Direction:     releasetransition.DirectionActivateTarget,
 	}
 
+	t.Run("check", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		runtime := New(Config{Stdout: &stdout, Stderr: &stderr})
+		prepared, err := prepareCandidateTransitionForTest(runtime,
+			context.Background(), options{check: true, root: root}, candidate, request,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if prepared.Action != "update.check" || prepared.Changed || prepared.RefreshConfigs {
+			t.Fatalf("prepared check = %#v", prepared)
+		}
+		if err := prepared.Execute(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		var output struct {
+			Outcome *releasetransition.Outcome `json:"outcome"`
+		}
+		if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &output); err != nil {
+			t.Fatalf("check output = %q: %v", stdout.String(), err)
+		}
+		if output.Outcome == nil ||
+			output.Outcome.Status != releasetransition.StatusOperatorActionRequired ||
+			output.Outcome.Code != releasetransition.CodeMigrationStale ||
+			output.Outcome.Active != "release-a" || output.Outcome.Previous == nil ||
+			*output.Outcome.Previous != "release-z" || output.Outcome.Target != "release-b" ||
+			output.Outcome.Transaction == nil || output.Outcome.Retry != "run yard update --check" {
+			t.Fatalf("check public outcome = %#v", output.Outcome)
+		}
+	})
+
+	t.Run("mutation", func(t *testing.T) {
+		runtime := New(Config{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+		_, err := prepareCandidateTransitionForTest(runtime,
+			context.Background(), options{root: root}, candidate, request,
+		)
+		if err == nil || !strings.Contains(err.Error(),
+			"release transition operator-action-required: code=migration-stale active=release-a previous=release-z target=release-b transaction=tx-0123456789abcdef") ||
+			!strings.Contains(err.Error(), "next: run yard update --check") {
+			t.Fatalf("mutating blocked preparation error = %v", err)
+		}
+	})
+}
+
+func TestCandidateInvalidRegistryOutcomeStaysStructured(t *testing.T) {
+	root := t.TempDir()
+	response := `{"schemaVersion":1,"outcome":{"status":"operator-action-required","reachedGoal":false,"active":"release-a","previous":"release-z","target":"release-b","code":"registry-invalid","message":"the candidate release transition registry is invalid","retry":"install a release with a valid transition registry, then run yard update --check"}}`
+	candidate := writeRuntimeCandidateFixture(t, root, response)
+	request := releasetransition.ProcessRequest{
+		SchemaVersion: releasetransition.ProcessProtocolSchemaV1,
+		Mode:          releasetransition.ProcessInspect,
+		RuntimeRoot:   root, ConfigHome: root,
+		Target: "release-b", Direction: releasetransition.DirectionActivateTarget,
+	}
+
+	t.Run("check", func(t *testing.T) {
+		var stdout bytes.Buffer
+		runtime := New(Config{Stdout: &stdout, Stderr: &bytes.Buffer{}})
+		prepared, err := prepareCandidateTransitionForTest(runtime,
+			context.Background(), options{check: true, root: root}, candidate, request,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := prepared.Execute(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		for _, field := range []string{
+			`"code":"registry-invalid"`, `"active":"release-a"`,
+			`"previous":"release-z"`, `"target":"release-b"`,
+		} {
+			if !strings.Contains(stdout.String(), field) {
+				t.Fatalf("invalid registry check output = %q", stdout.String())
+			}
+		}
+	})
+
+	t.Run("mutation", func(t *testing.T) {
+		runtime := New(Config{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+		_, err := prepareCandidateTransitionForTest(runtime,
+			context.Background(), options{root: root}, candidate, request,
+		)
+		if err == nil || !strings.Contains(err.Error(),
+			"code=registry-invalid active=release-a previous=release-z target=release-b") ||
+			!strings.Contains(err.Error(), "next: install a release with a valid transition registry") {
+			t.Fatalf("invalid registry mutation error = %v", err)
+		}
+	})
+}
+
+func TestRollbackFailuresHaveStructuredPublicOutcomes(t *testing.T) {
 	for _, test := range []struct {
-		name        string
-		cache       string
-		runtimeRoot string
-		arguments   []string
+		name             string
+		withPrevious     bool
+		code             releasetransition.OutcomeCode
+		target, previous string
 	}{
 		{
-			name: "relative check cache", cache: "relative-cache",
-			arguments: []string{"--check", "--version", "1.2.3"},
+			name: "retention expired", code: releasetransition.CodeRollbackExpired,
+			target: "unknown", previous: "none",
 		},
 		{
-			name: "filesystem root check cache", cache: string(filepath.Separator),
-			arguments: []string{"--check", "--version", "1.2.3"},
-		},
-		{
-			name: "symlink ancestor check cache", cache: filepath.Join(cacheLink, "releases"),
-			arguments: []string{"--check", "--version", "1.2.3"},
-		},
-		{
-			name: "writable check cache", cache: unsafeCache,
-			arguments: []string{"--check", "--version", "1.2.3"},
-		},
-		{
-			name: "symlink activation runtime root", cache: filepath.Join(root, "cache"),
-			runtimeRoot: runtimeLink, arguments: []string{"--version", "1.2.3"},
+			name: "retained runtime incompatible", withPrevious: true,
+			code:   releasetransition.CodeRollbackIncompatible,
+			target: "release-b", previous: "release-b",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			runtimeRoot := test.runtimeRoot
-			if runtimeRoot == "" {
-				runtimeRoot = filepath.Join(root, "runtime")
+			root := t.TempDir()
+			runtimeRoot := filepath.Join(root, "runtime")
+			cache := filepath.Join(root, "cache")
+			for _, directory := range []string{
+				filepath.Join(runtimeRoot, "releases", "release-a", "bin"), cache,
+			} {
+				if err := os.MkdirAll(directory, 0o700); err != nil {
+					t.Fatal(err)
+				}
 			}
-			environment := map[string]string{
-				"HOME": root, "SUBYARD_HOME": root,
-				"YARD_RELEASE_CACHE": test.cache,
-				"YARD_RUNTIME_ROOT":  runtimeRoot,
+			if err := os.WriteFile(
+				filepath.Join(runtimeRoot, "releases", "release-a", "bin", "yard-engine"),
+				[]byte("#!/bin/sh\nexit 0\n"), 0o700,
+			); err != nil {
+				t.Fatal(err)
 			}
-			release := New(Config{Environment: environment, Stdout: &bytes.Buffer{}})
-			if _, err := release.Prepare(context.Background(), test.arguments); err == nil {
-				t.Fatal("unsafe release roots were accepted")
+			if err := os.Symlink("releases/release-a", filepath.Join(runtimeRoot, "current")); err != nil {
+				t.Fatal(err)
+			}
+			if test.withPrevious {
+				if err := os.MkdirAll(filepath.Join(runtimeRoot, "releases", "release-b"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink("releases/release-b", filepath.Join(runtimeRoot, "previous")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			runtime := New(Config{
+				Environment: map[string]string{"HOME": root, "YARD_RELEASE_CACHE": cache},
+				Stdout:      &bytes.Buffer{}, Stderr: &bytes.Buffer{},
+			})
+
+			_, err := runtime.PrepareTransition(
+				context.Background(), []string{"--rollback", "--runtime-root", runtimeRoot},
+				filepath.Join(root, "config"), "default", nil,
+			)
+			if err == nil || !strings.Contains(err.Error(),
+				"release transition operator-action-required: code="+string(test.code)+
+					" active=release-a previous="+test.previous+" target="+test.target) ||
+				!strings.Contains(err.Error(), "next: ") {
+				t.Fatalf("rollback failure = %v", err)
 			}
 		})
 	}
 }
 
-func TestPreparedReleaseRejectsStaleRuntimeLinksBeforeInstaller(t *testing.T) {
+func TestRollbackToRetainedPreV2ReleaseUsesVerifiedActiveTransitionOwner(t *testing.T) {
 	root := t.TempDir()
 	runtimeRoot := filepath.Join(root, "runtime")
-	prepareRollbackRuntime(t, runtimeRoot, "current-a", "previous-b")
-	capture := filepath.Join(root, "installer-ran")
-	installer := filepath.Join(root, "installer.sh")
-	if err := os.WriteFile(installer, []byte("#!/bin/sh\ntouch \"$RELEASE_CAPTURE\"\n"), 0o700); err != nil {
+	configHome := filepath.Join(root, "config")
+	capture := filepath.Join(root, "transition-requests.jsonl")
+	legacyUnexpected := filepath.Join(root, "legacy-transition-called")
+	inspection := `{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["roll back through the verified active transition owner"]},"outcome":{"status":"migration-required","reachedGoal":false,"active":"release-b","previous":"release-a","target":"release-a","code":"transition-required","message":"the rollback transition has not started","retry":"run yard update --rollback"}}}`
+	ready := `{"schemaVersion":1,"outcome":{"status":"ready","reachedGoal":true,"active":"release-a","previous":"release-b","target":"release-a","code":"ready","message":"verified","transaction":"tx-0123456789abcdef"}}`
+	ownerPayload := fmt.Sprintf(`#!/bin/sh
+case "${1:-}" in
+  --version) printf 'yard-engine 1.2.3\n' ;;
+  _release-transition)
+    request=$(cat)
+    printf '%%s\n' "$request" >> %q
+    case "$request" in
+      *'"mode":"inspect"'*) printf '%%s\n' %q ;;
+      *'"mode":"converge"'*) printf '%%s\n' %q ;;
+      *) exit 64 ;;
+    esac
+    ;;
+  *) exit 64 ;;
+esac
+`, capture, inspection, ready)
+	owner := writeRuntimeCandidatePayload(t, runtimeRoot, ownerPayload)
+	legacyRoot := filepath.Join(runtimeRoot, "releases", "release-a")
+	if err := os.MkdirAll(filepath.Join(legacyRoot, "bin"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	release := New(Config{Environment: map[string]string{
-		"HOME": root, "RELEASE_CAPTURE": capture,
-	}, Installer: installer, Stdout: &bytes.Buffer{}})
-	prepared, err := release.Prepare(context.Background(), []string{
-		"--runtime-root", runtimeRoot, "--rollback",
-	})
-	if err != nil {
+	legacyPayload := fmt.Sprintf(`#!/bin/sh
+case "${1:-}" in
+  --version) printf 'yard-engine 0.8.0\n' ;;
+  _release-transition) : > %q; exit 93 ;;
+  *) exit 64 ;;
+esac
+`, legacyUnexpected)
+	legacyEngine := filepath.Join(legacyRoot, "bin", "yard-engine")
+	if err := os.WriteFile(legacyEngine, []byte(legacyPayload), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(filepath.Join(runtimeRoot, "previous")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink("releases/previous-c", filepath.Join(runtimeRoot, "previous")); err != nil {
-		t.Fatal(err)
-	}
-	if err := prepared.Execute(context.Background()); !errors.Is(err, domain.ErrPlanStale) {
-		t.Fatalf("stale release error = %v", err)
-	}
-	if _, err := os.Stat(capture); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("stale release reached installer: %v", err)
-	}
-}
-
-func TestPreparedCheckRejectsReleaseCacheBoundaryDriftBeforeWrite(t *testing.T) {
-	for _, drift := range []string{"symlink", "permissions"} {
-		t.Run(drift, func(t *testing.T) {
-			root := t.TempDir()
-			cache := filepath.Join(root, "cache")
-			runtimeRoot := filepath.Join(root, "runtime")
-			if drift == "permissions" {
-				if err := os.Mkdir(cache, 0o700); err != nil {
-					t.Fatal(err)
-				}
-			}
-			capture := filepath.Join(root, "installer-ran")
-			installer := filepath.Join(root, "installer.sh")
-			if err := os.WriteFile(installer, []byte("#!/bin/sh\ntouch \"$RELEASE_CAPTURE\"\n"), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			release := New(Config{Environment: map[string]string{
-				"HOME": root, "YARD_RELEASE_CACHE": cache, "YARD_RUNTIME_ROOT": runtimeRoot,
-				"YARD_RELEASE_BASE_URL": "file://" + filepath.Join(root, "missing-assets"),
-				"RELEASE_CAPTURE":       capture,
-			}, Installer: installer, Stdout: &bytes.Buffer{}})
-			prepared, err := release.Prepare(context.Background(), []string{
-				"--check", "--version", "1.2.3",
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			switch drift {
-			case "symlink":
-				external := filepath.Join(root, "external-cache")
-				if err := os.Mkdir(external, 0o700); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Symlink(external, cache); err != nil {
-					t.Fatal(err)
-				}
-			case "permissions":
-				if err := os.Chmod(cache, 0o770); err != nil {
-					t.Fatal(err)
-				}
-			}
-
-			if err := prepared.Execute(context.Background()); !errors.Is(err, domain.ErrPlanStale) {
-				t.Fatalf("release cache %s drift error = %v", drift, err)
-			}
-			if _, err := os.Stat(filepath.Join(cache, "1.2.3")); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("release cache %s drift wrote cache data: %v", drift, err)
-			}
-			if _, err := os.Stat(capture); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("release cache %s drift reached installer: %v", drift, err)
-			}
-		})
-	}
-}
-
-func TestPreparedActivationRejectsRuntimeRootBoundaryDriftBeforeEffects(t *testing.T) {
-	for _, drift := range []string{"symlink", "permissions"} {
-		t.Run(drift, func(t *testing.T) {
-			root := t.TempDir()
-			cache := filepath.Join(root, "cache")
-			runtimeRoot := filepath.Join(root, "runtime")
-			if err := os.Mkdir(runtimeRoot, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			capture := filepath.Join(root, "installer-ran")
-			installer := filepath.Join(root, "installer.sh")
-			if err := os.WriteFile(installer, []byte("#!/bin/sh\ntouch \"$RELEASE_CAPTURE\"\n"), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			release := New(Config{Environment: map[string]string{
-				"HOME": root, "YARD_RELEASE_CACHE": cache, "YARD_RUNTIME_ROOT": runtimeRoot,
-				"YARD_RELEASE_BASE_URL": "file://" + filepath.Join(root, "missing-assets"),
-				"RELEASE_CAPTURE":       capture,
-			}, Installer: installer, Stdout: &bytes.Buffer{}})
-			prepared, err := release.Prepare(context.Background(), []string{"--version", "1.2.3"})
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			switch drift {
-			case "symlink":
-				external := filepath.Join(root, "external-runtime")
-				if err := os.Mkdir(external, 0o700); err != nil {
-					t.Fatal(err)
-				}
-				original := filepath.Join(root, "prepared-runtime")
-				if err := os.Rename(runtimeRoot, original); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Symlink(external, runtimeRoot); err != nil {
-					t.Fatal(err)
-				}
-			case "permissions":
-				if err := os.Chmod(runtimeRoot, 0o770); err != nil {
-					t.Fatal(err)
-				}
-			}
-
-			if err := prepared.Execute(context.Background()); !errors.Is(err, domain.ErrPlanStale) {
-				t.Fatalf("activation runtime root %s drift error = %v", drift, err)
-			}
-			if _, err := os.Stat(cache); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("activation runtime root %s drift populated cache: %v", drift, err)
-			}
-			if _, err := os.Stat(capture); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("activation runtime root %s drift reached installer: %v", drift, err)
-			}
-		})
-	}
-}
-
-func TestPreparedRollbackRejectsRuntimeRootBoundaryDriftBeforeEngineOrInstaller(t *testing.T) {
-	for _, drift := range []string{"symlink", "permissions"} {
-		t.Run(drift, func(t *testing.T) {
-			root := t.TempDir()
-			runtimeRoot := filepath.Join(root, "runtime")
-			prepareRollbackRuntime(t, runtimeRoot, "current-a", "previous-b")
-			engineCapture := filepath.Join(root, "engine-ran-after-prepare")
-			installerCapture := filepath.Join(root, "installer-ran")
-			installer := filepath.Join(root, "installer.sh")
-			if err := os.WriteFile(installer, []byte("#!/bin/sh\ntouch \"$INSTALLER_CAPTURE\"\n"), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			release := New(Config{Environment: map[string]string{
-				"HOME": root, "ENGINE_CAPTURE": engineCapture, "INSTALLER_CAPTURE": installerCapture,
-			}, Installer: installer, Stdout: &bytes.Buffer{}})
-			prepared, err := release.Prepare(context.Background(), []string{
-				"--runtime-root", runtimeRoot, "--rollback",
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			probeEngine := []byte("#!/bin/sh\ntouch \"$ENGINE_CAPTURE\"\nprintf 'yard 1.2.3\\n'\n")
-			switch drift {
-			case "symlink":
-				external := filepath.Join(root, "external-runtime")
-				prepareRollbackRuntime(t, external, "current-a", "previous-b")
-				if err := os.WriteFile(filepath.Join(external, "releases", "previous-b", "bin", "yard-engine"), probeEngine, 0o700); err != nil {
-					t.Fatal(err)
-				}
-				original := filepath.Join(root, "prepared-runtime")
-				if err := os.Rename(runtimeRoot, original); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Symlink(external, runtimeRoot); err != nil {
-					t.Fatal(err)
-				}
-			case "permissions":
-				if err := os.WriteFile(filepath.Join(runtimeRoot, "releases", "previous-b", "bin", "yard-engine"), probeEngine, 0o700); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Chmod(runtimeRoot, 0o770); err != nil {
-					t.Fatal(err)
-				}
-			}
-
-			if err := prepared.Execute(context.Background()); !errors.Is(err, domain.ErrPlanStale) {
-				t.Fatalf("rollback runtime root %s drift error = %v", drift, err)
-			}
-			if _, err := os.Stat(engineCapture); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("rollback runtime root %s drift executed engine: %v", drift, err)
-			}
-			if _, err := os.Stat(installerCapture); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("rollback runtime root %s drift reached installer: %v", drift, err)
-			}
-		})
-	}
-}
-
-func prepareRollbackRuntime(t *testing.T, root, current, previous string) {
-	t.Helper()
-	for _, name := range []string{current, previous} {
-		engine := filepath.Join(root, "releases", name, "bin", "yard-engine")
-		if err := os.MkdirAll(filepath.Dir(engine), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(engine, []byte("#!/bin/sh\nprintf 'yard 1.2.3\\n'\n"), 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.Symlink("releases/"+current, filepath.Join(root, "current")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink("releases/"+previous, filepath.Join(root, "previous")); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestExecuteDownloadsAssetsAndPassesValidatedEnvironment(t *testing.T) {
-	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64" {
-		t.Skip("release runtime supports Linux amd64/arm64")
-	}
-	root := t.TempDir()
-	assets := filepath.Join(root, "assets")
-	cache := filepath.Join(root, "cache")
-	runtimeRoot := filepath.Join(root, "runtime")
-	if err := os.MkdirAll(assets, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	name := "subyard-1.2.3-linux-" + runtime.GOARCH + ".tar.gz"
-	for _, suffix := range []string{"", ".sha256", ".manifest.json", ".provenance.json"} {
-		if err := os.WriteFile(filepath.Join(assets, name+suffix), []byte("fixture"+suffix), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	capture := filepath.Join(root, "installer.args")
-	installer := filepath.Join(root, "installer.sh")
-	if err := os.WriteFile(installer, []byte("#!/bin/sh\nset -eu\n[ \"$RELEASE_SENTINEL\" = fixture ]\nprintf '%s\\n' \"$@\" > \"$RELEASE_CAPTURE\"\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("RELEASE_SENTINEL", "ambient-must-not-leak")
-	var output bytes.Buffer
-	release := New(Config{
-		Environment: map[string]string{
-			"HOME": root, "SUBYARD_HOME": root, "YARD_RELEASE_BASE_URL": "file://" + assets,
-			"YARD_RELEASE_CACHE": cache, "RELEASE_SENTINEL": "fixture", "RELEASE_CAPTURE": capture,
-		},
-		Installer: installer, Stdout: &output, Stderr: &output,
-	})
-	prepared, err := release.Prepare(context.Background(), []string{
-		"--runtime-root", runtimeRoot, "--version", "1.2.3", "--check",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := prepared.Execute(context.Background()); err != nil {
-		t.Fatalf("execute release: %v (%s)", err, output.String())
-	}
-	arguments, err := os.ReadFile(capture)
-	if err != nil {
-		t.Fatal(err)
-	}
-	lines := strings.Fields(string(arguments))
-	for _, required := range []string{"--runtime-root", runtimeRoot, "--check"} {
-		if !slices.Contains(lines, required) {
-			t.Fatalf("installer arguments omit %q: %q", required, lines)
-		}
-	}
-	for _, suffix := range []string{"", ".sha256", ".manifest.json", ".provenance.json"} {
-		path := filepath.Join(cache, "1.2.3", name+suffix)
-		info, err := os.Stat(path)
-		if err != nil || info.Mode().Perm() != 0o600 {
-			t.Fatalf("cached asset is missing or unsafe: %s (%v)", path, err)
-		}
-	}
-	if !strings.Contains(output.String(), "available=1.2.3") {
-		t.Fatalf("release status was not reported: %q", output.String())
-	}
-
-	currentEngine := filepath.Join(runtimeRoot, "releases", "current-a", "bin", "yard-engine")
-	if err := os.MkdirAll(filepath.Dir(currentEngine), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	legacyDigest := sha256.Sum256([]byte(legacyPayload))
+	legacyManifest := fmt.Sprintf("%x  ./bin/yard-engine\n", legacyDigest)
 	if err := os.WriteFile(
-		currentEngine,
-		[]byte("#!/bin/sh\nprintf 'yard 1.2.3\\n'\n"),
-		0o700,
+		filepath.Join(legacyRoot, "runtime-files.sha256"), []byte(legacyManifest), 0o600,
 	); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink("releases/current-a", filepath.Join(runtimeRoot, "current")); err != nil {
+	if err := os.Symlink("releases/"+string(owner.release), filepath.Join(runtimeRoot, "current")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(capture); err != nil {
+	if err := os.Symlink("releases/release-a", filepath.Join(runtimeRoot, "previous")); err != nil {
 		t.Fatal(err)
 	}
-	prepared, err = release.Prepare(context.Background(), []string{
-		"--runtime-root", runtimeRoot, "--version", "1.2.3",
+
+	release := New(Config{
+		Environment: map[string]string{"HOME": root},
+		Stdout:      &bytes.Buffer{}, Stderr: &bytes.Buffer{},
 	})
+	prepared, err := release.PrepareTransition(
+		context.Background(), []string{"--rollback", "--runtime-root", runtimeRoot},
+		configHome, "default", nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.Action != "update.rollback" || !prepared.Changed {
+		t.Fatalf("legacy rollback preparation = %#v", prepared)
+	}
+	if err := prepared.Execute(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(legacyUnexpected); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("retained pre-v2 engine owned the transition: %v", err)
+	}
+	payload, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := bytes.Split(bytes.TrimSpace(payload), []byte{'\n'})
+	if len(lines) != 2 {
+		t.Fatalf("transition request count=%d payload=%q", len(lines), payload)
+	}
+	wantArtifact := sha256.Sum256([]byte(legacyManifest))
+	for index, line := range lines {
+		var request releasetransition.ProcessRequest
+		if err := json.Unmarshal(line, &request); err != nil {
+			t.Fatalf("request %d: %v", index, err)
+		}
+		if request.Target != "release-a" ||
+			request.Direction != releasetransition.DirectionActivatePrevious ||
+			request.ArtifactDigest != releasetransition.Fingerprint(fmt.Sprintf("%x", wantArtifact)) ||
+			request.RegistryDigest == "" {
+			t.Fatalf("request %d = %#v", index, request)
+		}
+	}
+}
+
+func TestProtectedPreV2RollbackIsInspectedByRetainedTransitionOwner(t *testing.T) {
+	fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalComplete)
+	ownerRelease := fixture.target
+	oldRelease := releasetransition.ReleaseID("0.8.0-aaaaaaaaaaaa")
+	oldRoot := filepath.Join(fixture.runtimeRoot, "releases", string(oldRelease))
+	if err := os.MkdirAll(filepath.Join(oldRoot, "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldTransitionCalled := filepath.Join(filepath.Dir(fixture.runtimeRoot), "old-transition-called")
+	oldPayload := fmt.Sprintf(`#!/bin/sh
+case "${1:-}" in
+  --version) printf 'yard-engine 0.8.0\n' ;;
+  _release-transition) : > %q; exit 93 ;;
+  *) exit 64 ;;
+esac
+`, oldTransitionCalled)
+	oldEngineDigest := sha256.Sum256([]byte(oldPayload))
+	oldManifest := fmt.Sprintf("%x  ./bin/yard-engine\n", oldEngineDigest)
+	if err := os.WriteFile(filepath.Join(oldRoot, "bin", "yard-engine"), []byte(oldPayload), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(oldRoot, "runtime-files.sha256"), []byte(oldManifest), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	requestCapture := filepath.Join(filepath.Dir(fixture.runtimeRoot), "rollback-inspection.json")
+	readyInspection := fmt.Sprintf(
+		`{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":false,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible"},"outcome":{"status":"ready","reachedGoal":true,"active":%q,"previous":%q,"target":%q,"code":"ready","message":"verified","transaction":%q}}}`,
+		oldRelease, ownerRelease, oldRelease, fixture.transaction,
+	)
+	ownerPayload := fmt.Sprintf(`#!/bin/sh
+case "${1:-}" in
+  --version) printf 'yard-engine 1.2.3\n' ;;
+  _release-transition) cat > %q; printf '%%s\n' %q ;;
+  *) exit 64 ;;
+esac
+`, requestCapture, readyInspection)
+	if err := os.WriteFile(fixture.engine, []byte(ownerPayload), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ownerEngineDigest := sha256.Sum256([]byte(ownerPayload))
+	registryPath := filepath.Join(
+		fixture.runtimeRoot, "releases", ownerRelease, "config", "release-transition.json",
+	)
+	registry, err := os.ReadFile(registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registryDigest := sha256.Sum256(registry)
+	ownerManifest := fmt.Sprintf("%x  ./bin/yard-engine\n%x  ./config/release-transition.json\n",
+		ownerEngineDigest, registryDigest)
+	if err := os.WriteFile(
+		filepath.Join(fixture.runtimeRoot, "releases", ownerRelease, "runtime-files.sha256"),
+		[]byte(ownerManifest), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Remove(filepath.Join(fixture.runtimeRoot, "current")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(fixture.runtimeRoot, "previous")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("releases/"+string(oldRelease), filepath.Join(fixture.runtimeRoot, "current")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("releases/"+ownerRelease, filepath.Join(fixture.runtimeRoot, "previous")); err != nil {
+		t.Fatal(err)
+	}
+
+	journalPayload, err := os.ReadFile(fixture.journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal, err := releasetransition.ParseJournal(journalPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := oldRelease
+	journal.Goal = releasetransition.Goal{
+		Target: oldRelease, Direction: releasetransition.DirectionActivatePrevious,
+	}
+	journal.Releases = releasetransition.ReleasePair{
+		From: releasetransition.ReleaseID(ownerRelease), Previous: &previous, Target: oldRelease,
+	}
+	oldManifestDigest := sha256.Sum256([]byte(oldManifest))
+	journal.ArtifactDigest = releasetransition.Fingerprint(fmt.Sprintf("%x", oldManifestDigest))
+	journal.RegistryDigest = releasetransition.Fingerprint(fmt.Sprintf("%x", registryDigest))
+	journalPayload, err = releasetransition.MarshalJournal(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.journalPath, journalPayload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	runtime := New(Config{
+		Environment: fixture.environment(), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
+	})
+	outcome, err := runtime.InspectMutationGate(
+		context.Background(), fixture.runtimeRoot, fixture.configHome, "default", nil,
+	)
+	if err != nil || outcome != nil {
+		t.Fatalf("protected rollback inspection outcome=%#v err=%v", outcome, err)
+	}
+	if _, err := os.Stat(oldTransitionCalled); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("pre-v2 target owned protected rollback inspection: %v", err)
+	}
+	requestPayload, err := os.ReadFile(requestCapture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request releasetransition.ProcessRequest
+	if err := json.Unmarshal(requestPayload, &request); err != nil {
+		t.Fatal(err)
+	}
+	if request.Target != oldRelease || request.RegistryDigest != journal.RegistryDigest ||
+		request.ArtifactDigest != journal.ArtifactDigest {
+		t.Fatalf("protected rollback request = %#v", request)
+	}
+}
+
+func TestCandidateTransitionRejectsTrailingResponseJSON(t *testing.T) {
+	root := t.TempDir()
+	candidate := writeRuntimeCandidateFixture(t, root, `{"schemaVersion":1}{}`)
+	runtime := New(Config{Stderr: &bytes.Buffer{}})
+	verified, err := runtime.verifyPublishedCandidate(
+		context.Background(), candidate, root, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer verified.Close()
+	_, err = runtime.invokeVerifiedCandidateTransition(
+		context.Background(), verified,
+		releasetransition.ProcessRequest{SchemaVersion: 1},
+		"",
+	)
+	if err == nil || !strings.Contains(err.Error(), "invalid release transition response") {
+		t.Fatalf("candidate trailing response error = %v", err)
+	}
+}
+
+func TestVerifiedCandidateRootDescriptorSurvivesAncestorReplacement(t *testing.T) {
+	parent := t.TempDir()
+	runtimeRoot := filepath.Join(parent, "runtime")
+	candidateRoot := filepath.Join(runtimeRoot, "releases", "release-b")
+	if err := os.MkdirAll(candidateRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(candidateRoot, "marker"), []byte("original\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	candidate := publishedCandidate{release: "release-b", root: candidateRoot}
+	root, err := openVerifiedCandidateRoot(candidate, runtimeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	if err := os.Rename(runtimeRoot, filepath.Join(parent, "displaced-runtime")); err != nil {
+		t.Fatal(err)
+	}
+	replacement := filepath.Join(runtimeRoot, "releases", "release-b")
+	if err := os.MkdirAll(replacement, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(replacement, "marker"), []byte("replacement\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	marker, err := openCandidateFile(int(root.Fd()), "marker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer marker.Close()
+	payload, err := io.ReadAll(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(payload) != "original\n" {
+		t.Fatalf("pinned candidate marker = %q", payload)
+	}
+}
+
+func TestVerifiedCandidateInvocationBindsRegistryDigest(t *testing.T) {
+	root := t.TempDir()
+	capture := filepath.Join(filepath.Dir(root), "candidate-request.json")
+	response := `{"schemaVersion":1}`
+	payload := fmt.Sprintf(`#!/bin/sh
+case "${1:-}" in
+  --version) printf 'yard-engine 1.2.3\n' ;;
+  _release-transition) cat > %q; printf '%%s\n' %q ;;
+  *) exit 64 ;;
+esac
+`, capture, response)
+	candidate := writeRuntimeCandidatePayload(t, root, payload)
+	registry := []byte("{}\n")
+	runtime := New(Config{Stderr: &bytes.Buffer{}})
+	verified, err := runtime.verifyPublishedCandidate(
+		context.Background(), candidate, root, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer verified.Close()
+	if _, err := runtime.invokeVerifiedCandidateTransition(
+		context.Background(), verified,
+		releasetransition.ProcessRequest{
+			SchemaVersion: releasetransition.ProcessProtocolSchemaV1,
+			RuntimeRoot:   root,
+		},
+		"",
+	); err != nil {
+		t.Fatal(err)
+	}
+	captured, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request releasetransition.ProcessRequest
+	if err := json.Unmarshal(captured, &request); err != nil {
+		t.Fatal(err)
+	}
+	want := sha256.Sum256(registry)
+	if request.RegistryDigest != releasetransition.Fingerprint(fmt.Sprintf("%x", want)) {
+		t.Fatalf("registry digest = %q", request.RegistryDigest)
+	}
+}
+
+func TestCandidateProtocolRejectsLegacyManifestWithoutV2Registry(t *testing.T) {
+	root := t.TempDir()
+	candidate := writeRuntimeCandidateFixture(t, root, `{"schemaVersion":1}`)
+	if err := os.RemoveAll(filepath.Join(candidate.root, "config")); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := os.ReadFile(filepath.Join(candidate.root, "bin", "yard-engine"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(engine)
+	if err := os.WriteFile(
+		filepath.Join(candidate.root, "runtime-files.sha256"),
+		[]byte(fmt.Sprintf("%x  ./bin/yard-engine\n", digest)), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	runtime := New(Config{Stderr: &bytes.Buffer{}})
+	verified, err := runtime.verifyPublishedCandidate(context.Background(), candidate, root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer verified.Close()
+	_, err = runtime.invokeVerifiedCandidateTransition(
+		context.Background(), verified,
+		releasetransition.ProcessRequest{SchemaVersion: 1}, "",
+	)
+	if err == nil || !strings.Contains(err.Error(), "does not bind release transition registry") {
+		t.Fatalf("legacy candidate protocol boundary error = %v", err)
+	}
+}
+
+func TestPrepareTransitionUsesExactPublishedRecoveryWithoutLatestOrPublication(t *testing.T) {
+	fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalAuthorized)
+	transport := &countingErrorTransport{}
+	runtime := New(Config{
+		Environment: fixture.environment(), Installer: fixture.installer,
+		Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
+		HTTPClient: &http.Client{Transport: transport},
+	})
+
+	prepared, err := runtime.PrepareTransition(
+		context.Background(), []string{"--runtime-root", fixture.runtimeRoot},
+		fixture.configHome, "default", nil,
+	)
+	if err != nil {
+		cause := err
+		for errors.Unwrap(cause) != nil {
+			cause = errors.Unwrap(cause)
+		}
+		t.Fatalf("prepare exact recovery: %v (cause: %v)", err, cause)
+	}
+	if prepared.Action != "update.activate" || prepared.Changed {
+		t.Fatalf("exact recovery preparation = %#v", prepared)
+	}
+	if transport.calls != 0 {
+		t.Fatalf("exact recovery resolved or downloaded a release: calls=%d", transport.calls)
+	}
+	if _, err := os.Lstat(fixture.publicationCapture); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("exact recovery invoked publication: %v", err)
+	}
+	if _, err := os.Lstat(fixture.cache); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("exact recovery created the release cache: %v", err)
+	}
+}
+
+func TestPrepareTransitionCheckOfProtectedRecoveryIsReadOnly(t *testing.T) {
+	fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalAuthorized)
+	before, err := os.ReadFile(fixture.journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeInfo, err := os.Lstat(fixture.journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := &countingErrorTransport{}
+	var stdout bytes.Buffer
+	runtime := New(Config{
+		Environment: fixture.environment(), Installer: fixture.installer,
+		Stdout: &stdout, Stderr: &bytes.Buffer{},
+		HTTPClient: &http.Client{Transport: transport},
+	})
+
+	prepared, err := runtime.PrepareTransition(
+		context.Background(), []string{"--check", "--runtime-root", fixture.runtimeRoot},
+		fixture.configHome, "default", nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.Action != "update.check" || prepared.Changed || prepared.RefreshConfigs {
+		t.Fatalf("protected recovery check preparation = %#v", prepared)
+	}
+	if err := prepared.Execute(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), `"status":"recovering"`) ||
+		!strings.Contains(stdout.String(), `"target":"1.2.3-aaaaaaaaaaaa"`) {
+		t.Fatalf("protected recovery check output = %q", stdout.String())
+	}
+	after, err := os.ReadFile(fixture.journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterInfo, err := os.Lstat(fixture.journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) || !os.SameFile(beforeInfo, afterInfo) ||
+		beforeInfo.Mode() != afterInfo.Mode() {
+		t.Fatal("protected recovery check changed its journal")
+	}
+	if transport.calls != 0 {
+		t.Fatalf("protected recovery check used the network: calls=%d", transport.calls)
+	}
+	if _, err := os.Lstat(fixture.publicationCapture); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("protected recovery check invoked publication: %v", err)
+	}
+	if _, err := os.Lstat(fixture.cache); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("protected recovery check created the release cache: %v", err)
+	}
+}
+
+func TestPrepareTransitionReportsProtectedInspectionFailuresAsPublicOutcomes(t *testing.T) {
+	for _, test := range []struct {
+		name                string
+		tamper              func(*testing.T, protectedRuntimeTransitionFixture)
+		code                releasetransition.OutcomeCode
+		target, transaction string
+		retry               string
+	}{
+		{
+			name: "corrupt journal",
+			tamper: func(t *testing.T, fixture protectedRuntimeTransitionFixture) {
+				t.Helper()
+				if err := os.WriteFile(fixture.journalPath, []byte("{\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			code: releasetransition.CodeJournalInvalid, target: "unknown",
+			retry: "restore protected release metadata from backup, then run yard update --check",
+		},
+		{
+			name: "journal selected candidate unavailable",
+			tamper: func(t *testing.T, fixture protectedRuntimeTransitionFixture) {
+				t.Helper()
+				if err := os.Remove(fixture.engine); err != nil {
+					t.Fatal(err)
+				}
+			},
+			code:   releasetransition.CodeDependencyUnavailable,
+			target: "1.2.3-aaaaaaaaaaaa", transaction: "tx-0123456789abcdef",
+			retry: "restore the journal-selected release, then run yard update --check",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalAuthorized)
+			test.tamper(t, fixture)
+			var stdout bytes.Buffer
+			runtime := New(Config{
+				Environment: fixture.environment(), Installer: fixture.installer,
+				Stdout: &stdout, Stderr: &bytes.Buffer{},
+			})
+			prepared, err := runtime.PrepareTransition(
+				context.Background(), []string{"--check", "--runtime-root", fixture.runtimeRoot},
+				fixture.configHome, "default", nil,
+			)
+			if err != nil {
+				t.Fatalf("prepare public check: %v", err)
+			}
+			if prepared.Action != "update.check" || prepared.Changed {
+				t.Fatalf("public check preparation = %#v", prepared)
+			}
+			if err := prepared.Execute(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			var response struct {
+				Outcome *releasetransition.Outcome `json:"outcome"`
+			}
+			if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &response); err != nil ||
+				response.Outcome == nil ||
+				response.Outcome.Status != releasetransition.StatusOperatorActionRequired ||
+				response.Outcome.Code != test.code || string(response.Outcome.Target) != test.target ||
+				response.Outcome.Retry != test.retry ||
+				(response.Outcome.Transaction == nil) != (test.transaction == "") ||
+				(response.Outcome.Transaction != nil && string(*response.Outcome.Transaction) != test.transaction) ||
+				strings.Contains(stdout.String(), fixture.runtimeRoot) ||
+				strings.Contains(stdout.String(), fixture.configHome) {
+				t.Fatalf("public check outcome=%#v output=%q err=%v", response.Outcome, stdout.String(), err)
+			}
+
+			_, err = runtime.PrepareTransition(
+				context.Background(), []string{"--runtime-root", fixture.runtimeRoot},
+				fixture.configHome, "default", nil,
+			)
+			if err == nil || !strings.Contains(err.Error(),
+				"release transition operator-action-required: code="+string(test.code)) ||
+				!strings.Contains(err.Error(), "target="+test.target) ||
+				!strings.Contains(err.Error(), "next: "+test.retry) ||
+				strings.Contains(err.Error(), fixture.runtimeRoot) ||
+				strings.Contains(err.Error(), fixture.configHome) {
+				t.Fatalf("public mutation error = %v", err)
+			}
+		})
+	}
+}
+
+func TestPrepareTransitionRejectsDifferentTargetBeforePublication(t *testing.T) {
+	fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalAuthorized)
+	runtime := New(Config{
+		Environment: fixture.environment(), Installer: fixture.installer,
+		Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
+	})
+
+	_, err := runtime.PrepareTransition(
+		context.Background(), []string{
+			"--version", "9.9.9", "--runtime-root", fixture.runtimeRoot,
+		},
+		fixture.configHome, "default", nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "exact") {
+		t.Fatalf("different-target update error = %v", err)
+	}
+	if _, err := os.Lstat(fixture.publicationCapture); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("different-target update invoked publication: %v", err)
+	}
+	if _, err := os.Lstat(fixture.cache); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("different-target update created the release cache: %v", err)
+	}
+}
+
+func TestMutationGateVerifiesJournalSelectedEngineBeforeExecution(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		tamper func(*testing.T, protectedRuntimeTransitionFixture, string)
+	}{
+		{
+			name: "modified engine",
+			tamper: func(t *testing.T, fixture protectedRuntimeTransitionFixture, payload string) {
+				t.Helper()
+				if err := os.WriteFile(fixture.engine, []byte(payload), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "symlinked engine",
+			tamper: func(t *testing.T, fixture protectedRuntimeTransitionFixture, payload string) {
+				t.Helper()
+				external := filepath.Join(filepath.Dir(fixture.runtimeRoot), "replacement-engine")
+				if err := os.WriteFile(external, []byte(payload), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(fixture.engine); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(external, fixture.engine); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "non-executable engine",
+			tamper: func(t *testing.T, fixture protectedRuntimeTransitionFixture, payload string) {
+				t.Helper()
+				if err := os.WriteFile(fixture.engine, []byte(payload), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(fixture.engine, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "modified engine and replaced manifest",
+			tamper: func(t *testing.T, fixture protectedRuntimeTransitionFixture, payload string) {
+				t.Helper()
+				if err := os.WriteFile(fixture.engine, []byte(payload), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				digest := sha256.Sum256([]byte(payload))
+				manifest := fmt.Sprintf("%x  ./bin/yard-engine\n", digest)
+				if err := os.WriteFile(
+					filepath.Join(filepath.Dir(filepath.Dir(fixture.engine)), "runtime-files.sha256"),
+					[]byte(manifest), 0o600,
+				); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalAuthorized)
+			capture := filepath.Join(filepath.Dir(fixture.runtimeRoot), "unverified-engine-called")
+			payload := fmt.Sprintf("#!/bin/sh\nprintf called > %q\ncat >/dev/null\nprintf '%%s\\n' %q\n",
+				capture, fixture.recoveringResponse())
+			test.tamper(t, fixture, payload)
+			runtime := New(Config{
+				Environment: fixture.environment(), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
+			})
+
+			outcome, err := runtime.InspectMutationGate(
+				context.Background(), fixture.runtimeRoot, fixture.configHome, "default", nil,
+			)
+			if err != nil || outcome == nil ||
+				outcome.Status != releasetransition.StatusOperatorActionRequired ||
+				outcome.Code != releasetransition.CodeDependencyUnavailable ||
+				outcome.Active != "release-a" || outcome.Target != releasetransition.ReleaseID(fixture.target) ||
+				outcome.Transaction == nil || string(*outcome.Transaction) != fixture.transaction ||
+				outcome.Retry != "restore the journal-selected release, then run yard update --check" {
+				t.Fatalf("unverified candidate gate outcome=%#v err=%v", outcome, err)
+			}
+			if _, err := os.Lstat(capture); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("unverified candidate engine executed: %v", err)
+			}
+		})
+	}
+}
+
+func TestMutationGateExecutesTheVerifiedEngineAcrossPathReplacement(t *testing.T) {
+	fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalAuthorized)
+	started := filepath.Join(filepath.Dir(fixture.runtimeRoot), "verified-engine-started")
+	proceed := filepath.Join(filepath.Dir(fixture.runtimeRoot), "verified-engine-proceed")
+	replacementCalled := filepath.Join(filepath.Dir(fixture.runtimeRoot), "replacement-engine-called")
+	original := fmt.Sprintf(`#!/bin/sh
+case "${1:-}" in
+  --version)
+    : > %q
+    while [ ! -e %q ]; do sleep 0.01; done
+    printf 'yard-engine 1.2.3\n'
+    ;;
+  _release-transition) cat >/dev/null; printf '%%s\n' %q ;;
+  *) exit 64 ;;
+esac
+`, started, proceed, fixture.recoveringResponse())
+	writeProtectedRuntimeFixtureEngine(t, fixture, original)
+	replacement := filepath.Join(filepath.Dir(fixture.engine), "replacement-yard-engine")
+	replacementPayload := fmt.Sprintf(`#!/bin/sh
+case "${1:-}" in
+  --version) printf 'yard-engine 1.2.3\n' ;;
+  _release-transition)
+    : > %q
+    cat >/dev/null
+    printf '%%s\n' %q
+    ;;
+  *) exit 64 ;;
+esac
+`, replacementCalled, fixture.recoveringResponse())
+	if err := os.WriteFile(replacement, []byte(replacementPayload), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runtime := New(Config{
+		Environment: fixture.environment(), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
+	})
+	type gateResult struct {
+		outcome *releasetransition.Outcome
+		err     error
+	}
+	result := make(chan gateResult, 1)
+	go func() {
+		outcome, err := runtime.InspectMutationGate(
+			context.Background(), fixture.runtimeRoot, fixture.configHome, "default", nil,
+		)
+		result <- gateResult{outcome: outcome, err: err}
+	}()
+	deadline := time.After(5 * time.Second)
+	for {
+		if _, err := os.Stat(started); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		select {
+		case <-deadline:
+			t.Fatal("verified engine did not reach its version boundary")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if err := os.Rename(replacement, fixture.engine); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(proceed, []byte("continue\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case observed := <-result:
+		if observed.err != nil || observed.outcome == nil ||
+			observed.outcome.Status != releasetransition.StatusRecovering {
+			cause := observed.err
+			for cause != nil && errors.Unwrap(cause) != nil {
+				cause = errors.Unwrap(cause)
+			}
+			t.Fatalf("replacement race outcome=%#v err=%v cause=%v",
+				observed.outcome, observed.err, cause)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("mutation gate did not finish after releasing the verified engine")
+	}
+	if _, err := os.Stat(replacementCalled); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("replacement engine executed after verification: %v", err)
+	}
+}
+
+func TestCandidateTransitionRejectsContradictoryInspectionOutcome(t *testing.T) {
+	root := t.TempDir()
+	response := `{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata"],"recovery":"reversible"},"blockers":[{"code":"migration-stale","resource":"yard.fixture","message":"the resource changed","retry":"run yard update --check"}],"outcome":{"status":"ready","reachedGoal":true,"active":"release-b","target":"release-b","code":"ready","message":"verified"}}}`
+	candidate := writeRuntimeCandidateFixture(t, root, response)
+	request := releasetransition.ProcessRequest{
+		SchemaVersion: releasetransition.ProcessProtocolSchemaV1,
+		Mode:          releasetransition.ProcessInspect, RuntimeRoot: root, ConfigHome: root,
+		Target: "release-b", Direction: releasetransition.DirectionActivateTarget,
+	}
+	for _, check := range []bool{true, false} {
+		runtime := New(Config{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+		_, err := prepareCandidateTransitionForTest(
+			runtime, context.Background(), options{check: check, root: root}, candidate, request,
+		)
+		if err == nil || !strings.Contains(err.Error(), "inconsistent") {
+			t.Fatalf("contradictory candidate check=%v error=%v", check, err)
+		}
+	}
+}
+
+func TestCandidateTransitionRejectsSemanticallyInvalidReadyOutcome(t *testing.T) {
+	root := t.TempDir()
+	inspection := `{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the exact typed migration and release activation plan"]},"outcome":{"status":"migration-required","reachedGoal":false,"active":"release-a","target":"release-b","code":"transition-required","message":"the release transition has not started","retry":"run yard update"}}}`
+	invalid := `{"schemaVersion":1,"outcome":{"status":"ready","reachedGoal":true,"active":"release-a","target":"release-b","code":"ready","message":"verified","transaction":"tx-0123456789abcdef"}}`
+	payload := fmt.Sprintf(`#!/bin/sh
+case "${1:-}" in
+  --version) printf 'yard-engine 1.2.3\n' ;;
+  _release-transition)
+    request=$(cat)
+    case "$request" in
+      *'"mode":"inspect"'*) printf '%%s\n' %q ;;
+      *'"mode":"converge"'*) printf '%%s\n' %q ;;
+      *) exit 64 ;;
+    esac
+    ;;
+  *) exit 64 ;;
+esac
+`, inspection, invalid)
+	candidate := writeRuntimeCandidatePayload(t, root, payload)
+	runtime := New(Config{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+	prepared, err := prepareCandidateTransitionForTest(runtime,
+		context.Background(), options{root: root}, candidate,
+		releasetransition.ProcessRequest{
+			SchemaVersion: releasetransition.ProcessProtocolSchemaV1,
+			Mode:          releasetransition.ProcessInspect, RuntimeRoot: root, ConfigHome: root,
+			Target: "release-b", Direction: releasetransition.DirectionActivateTarget,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := prepared.Execute(context.Background()); err == nil ||
+		!strings.Contains(err.Error(), "inconsistent release transition outcome") {
+		t.Fatalf("invalid ready convergence error = %v", err)
+	}
+}
+
+func TestCandidateTransitionPrintsValidatedReadyWarnings(t *testing.T) {
+	root := t.TempDir()
+	inspection := `{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the exact typed migration and release activation plan"]},"outcome":{"status":"migration-required","reachedGoal":false,"active":"release-a","target":"release-b","code":"transition-required","message":"the release transition has not started","retry":"run yard update"}}}`
+	ready := `{"schemaVersion":1,"outcome":{"status":"ready","reachedGoal":true,"active":"release-b","previous":"release-a","target":"release-b","code":"ready","message":"verified","transaction":"tx-0123456789abcdef","warnings":["recovery cleanup is pending"]}}`
+	payload := fmt.Sprintf(`#!/bin/sh
+case "${1:-}" in
+  --version) printf 'yard-engine 1.2.3\n' ;;
+  _release-transition)
+    request=$(cat)
+    case "$request" in
+      *'"mode":"inspect"'*) printf '%%s\n' %q ;;
+      *'"mode":"converge"'*) printf '%%s\n' %q ;;
+      *) exit 64 ;;
+    esac
+    ;;
+  *) exit 64 ;;
+esac
+`, inspection, ready)
+	candidate := writeRuntimeCandidatePayload(t, root, payload)
+	var stderr bytes.Buffer
+	runtime := New(Config{Stdout: &bytes.Buffer{}, Stderr: &stderr})
+	prepared, err := prepareCandidateTransitionForTest(runtime,
+		context.Background(), options{root: root}, candidate,
+		releasetransition.ProcessRequest{
+			SchemaVersion: releasetransition.ProcessProtocolSchemaV1,
+			Mode:          releasetransition.ProcessInspect, RuntimeRoot: root, ConfigHome: root,
+			Target: "release-b", Direction: releasetransition.DirectionActivateTarget,
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := prepared.Execute(context.Background()); err != nil {
-		t.Fatalf("execute same-version release: %v (%s)", err, output.String())
+		t.Fatal(err)
 	}
-	arguments, err = os.ReadFile(capture)
+	if got := stderr.String(); got != "warning: release transition: recovery cleanup is pending\n" {
+		t.Fatalf("ready warnings = %q", got)
+	}
+}
+
+func TestCandidateTransitionReinspectsPlanStaleOutcomeBeforeReturning(t *testing.T) {
+	initial := `{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the exact typed migration and release activation plan"]},"outcome":{"status":"migration-required","reachedGoal":false,"active":"release-a","target":"release-b","code":"transition-required","message":"the release transition has not started","retry":"run yard update"}}}`
+	stale := `{"schemaVersion":1,"outcome":{"status":"operator-action-required","reachedGoal":false,"active":"release-b","previous":"release-a","target":"release-b","code":"plan-stale","message":"the inspected release transition changed before convergence","retry":"run yard update --check"}}`
+	ready := `{"schemaVersion":1,"inspection":{"plan":"plan-v1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","assessment":{"action":"release.transition.v2","effect":"mutation","changed":false,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible"},"outcome":{"status":"ready","reachedGoal":true,"active":"release-b","previous":"release-a","target":"release-b","code":"ready","message":"verified"}}}`
+	wrongReady := `{"schemaVersion":1,"inspection":{"plan":"plan-v1-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","assessment":{"action":"release.transition.v2","effect":"mutation","changed":false,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible"},"outcome":{"status":"ready","reachedGoal":true,"active":"release-a","target":"release-b","code":"ready","message":"verified"}}}`
+	pending := `{"schemaVersion":1,"inspection":{"plan":"plan-v1-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the exact typed migration and release activation plan"]},"outcome":{"status":"migration-required","reachedGoal":false,"active":"release-a","target":"release-b","code":"transition-required","message":"the release transition is still pending","retry":"run yard update"}}}`
+
+	for _, test := range []struct {
+		name         string
+		reinspection string
+		wantError    string
+	}{
+		{name: "externally reached fixed point", reinspection: ready},
+		{name: "state is still pending", reinspection: pending, wantError: "code=transition-required"},
+		{name: "false ready active release", reinspection: wrongReady, wantError: "inconsistent release reinspection"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			settled := filepath.Join(t.TempDir(), "settled")
+			payload := fmt.Sprintf(`#!/bin/sh
+marker=%q
+case "${1:-}" in
+  --version) printf 'yard-engine 1.2.3\n' ;;
+  _release-transition)
+    request=$(cat)
+    case "$request" in
+      *'"mode":"inspect"'*)
+        if [ -e "$marker" ]; then printf '%%s\n' %q; else printf '%%s\n' %q; fi
+        ;;
+      *'"mode":"converge"'*)
+        : > "$marker"
+        printf '%%s\n' %q
+        ;;
+      *) exit 64 ;;
+    esac
+    ;;
+  *) exit 64 ;;
+esac
+`, settled, test.reinspection, initial, stale)
+			candidate := writeRuntimeCandidatePayload(t, root, payload)
+			runtime := New(Config{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+			prepared, err := prepareCandidateTransitionForTest(runtime,
+				context.Background(), options{root: root}, candidate,
+				releasetransition.ProcessRequest{
+					SchemaVersion: releasetransition.ProcessProtocolSchemaV1,
+					Mode:          releasetransition.ProcessInspect,
+					RuntimeRoot:   root,
+					ConfigHome:    root,
+					Target:        "release-b",
+					Direction:     releasetransition.DirectionActivateTarget,
+				},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = prepared.Execute(context.Background())
+			if test.wantError == "" && err != nil {
+				t.Fatalf("externally settled transition error = %v", err)
+			}
+			if test.wantError != "" && (err == nil || !strings.Contains(err.Error(), test.wantError)) {
+				t.Fatalf("pending transition error = %v", err)
+			}
+		})
+	}
+}
+
+func TestCandidateTransitionValidatesNonReadyOutcomeAtProcessBoundary(t *testing.T) {
+	execute := func(t *testing.T, inspection, convergence string) error {
+		t.Helper()
+		root := t.TempDir()
+		payload := fmt.Sprintf(`#!/bin/sh
+case "${1:-}" in
+  --version) printf 'yard-engine 1.2.3\n' ;;
+  _release-transition)
+    request=$(cat)
+    case "$request" in
+      *'"mode":"inspect"'*) printf '%%s\n' %q ;;
+      *'"mode":"converge"'*) printf '%%s\n' %q ;;
+      *) exit 64 ;;
+    esac
+    ;;
+  *) exit 64 ;;
+esac
+`, inspection, convergence)
+		candidate := writeRuntimeCandidatePayload(t, root, payload)
+		runtime := New(Config{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+		prepared, err := prepareCandidateTransitionForTest(runtime,
+			context.Background(), options{root: root}, candidate,
+			releasetransition.ProcessRequest{
+				SchemaVersion: releasetransition.ProcessProtocolSchemaV1,
+				Mode:          releasetransition.ProcessInspect, RuntimeRoot: root, ConfigHome: root,
+				Target: "release-b", Direction: releasetransition.DirectionActivateTarget,
+			},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return prepared.Execute(context.Background())
+	}
+
+	t.Run("unknown post-mutation links remain structured", func(t *testing.T) {
+		inspection := `{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the exact typed migration and release activation plan"]},"outcome":{"status":"migration-required","reachedGoal":false,"active":"release-a","target":"release-b","code":"transition-required","message":"the release transition has not started","retry":"run yard update"}}}`
+		convergence := `{"schemaVersion":1,"outcome":{"status":"operator-action-required","reachedGoal":false,"active":"","target":"release-b","code":"recovery-ambiguous","message":"release facts cannot be observed","retry":"run yard update --check","transaction":"tx-0123456789abcdef"}}`
+		err := execute(t, inspection, convergence)
+		if err == nil || !strings.Contains(err.Error(),
+			"release transition operator-action-required: code=recovery-ambiguous active=") ||
+			strings.Contains(err.Error(), "inconsistent release transition outcome") {
+			t.Fatalf("unknown-link convergence error = %v", err)
+		}
+	})
+
+	t.Run("foreign resume transaction is rejected", func(t *testing.T) {
+		inspection := `{"schemaVersion":1,"inspection":{"plan":"resume-v1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["resume the protected transition"]},"resume":"tx-0123456789abcdef","outcome":{"status":"recovering","reachedGoal":false,"active":"release-a","target":"release-b","code":"recovery-pending","message":"the transition can resume","retry":"run yard update","transaction":"tx-0123456789abcdef"}}}`
+		convergence := `{"schemaVersion":1,"outcome":{"status":"recovering","reachedGoal":false,"active":"release-a","target":"release-b","code":"recovery-pending","message":"the transition can resume","retry":"run yard update","transaction":"tx-fedcba9876543210"}}`
+		err := execute(t, inspection, convergence)
+		if err == nil || !strings.Contains(err.Error(), "inconsistent release transition outcome") {
+			t.Fatalf("foreign recovery convergence error = %v", err)
+		}
+	})
+
+	for _, test := range []struct {
+		name        string
+		convergence string
+		code        string
+	}{
+		{
+			name:        "interrupted staged checkpoint remains structured",
+			convergence: `{"schemaVersion":1,"outcome":{"status":"recovering","reachedGoal":false,"active":"release-a","previous":"release-b","target":"release-b","code":"verification-failed","message":"the release transition was interrupted after a durable mutation checkpoint","retry":"run yard update","transaction":"tx-0123456789abcdef"}}`,
+			code:        "verification-failed",
+		},
+		{
+			name:        "retryable dependency remains structured",
+			convergence: `{"schemaVersion":1,"outcome":{"status":"recovering","reachedGoal":false,"active":"release-a","target":"release-b","code":"dependency-unavailable","message":"activation reconciliation is temporarily unavailable","retry":"run yard update","transaction":"tx-0123456789abcdef"}}`,
+			code:        "dependency-unavailable",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			inspection := `{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the exact typed migration and release activation plan"]},"outcome":{"status":"migration-required","reachedGoal":false,"active":"release-a","target":"release-b","code":"transition-required","message":"the release transition has not started","retry":"run yard update"}}}`
+			err := execute(t, inspection, test.convergence)
+			if err == nil || !strings.Contains(err.Error(), "code="+test.code) ||
+				strings.Contains(err.Error(), "inconsistent release transition outcome") {
+				t.Fatalf("intermediate convergence error = %v", err)
+			}
+		})
+	}
+}
+
+func TestMutationGateInspectsSemanticallyUnsafeCompleteJournal(t *testing.T) {
+	fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalComplete)
+	runtime := New(Config{
+		Environment: fixture.environment(), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
+	})
+
+	outcome, err := runtime.InspectMutationGate(
+		context.Background(), fixture.runtimeRoot, fixture.configHome, "default", nil,
+	)
 	if err != nil {
-		t.Fatal("same-version update skipped the installer")
+		t.Fatal(err)
 	}
-	if slices.Contains(strings.Fields(string(arguments)), "--check") ||
-		!strings.Contains(output.String(), "runtime is already current; checking migrations") {
-		t.Fatalf("same-version update did not check migrations: args=%q output=%q",
-			arguments, output.String())
+	if outcome == nil || outcome.Status != releasetransition.StatusOperatorActionRequired ||
+		outcome.Code != releasetransition.CodePlanStale {
+		t.Fatalf("unsafe complete journal gate outcome = %#v", outcome)
 	}
+}
+
+func TestMutationGateRestoresSourceIngressFromTheProtectedJournal(t *testing.T) {
+	fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalAuthorized)
+	payload, err := os.ReadFile(fixture.journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal, err := releasetransition.ParseJournal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Dir(fixture.runtimeRoot)
+	descriptor := releasetransition.SourceIngressRequest{
+		SchemaVersion: releasetransition.SourceIngressRequestSchemaV1,
+		Kind:          releasetransition.SourceIngressPreGoV1,
+		SourceRoot:    filepath.Join(home, "source"),
+		DataHome:      filepath.Join(home, "data"),
+		BinDir:        filepath.Join(home, "bin"),
+		RC:            filepath.Join(home, ".bashrc"),
+		LoginRC:       filepath.Join(home, ".profile"),
+	}
+	journal.SourceIngress = &descriptor
+	encoded, err := releasetransition.MarshalJournal(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.journalPath, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	capture := filepath.Join(home, "source-ingress-request.json")
+	engine := fmt.Sprintf(`#!/bin/sh
+case "${1:-}" in
+  --version) printf 'yard-engine 1.2.3\n' ;;
+  _release-transition) cat > %q; printf '%%s\n' %q ;;
+  *) exit 64 ;;
+esac
+`, capture, fixture.recoveringResponse())
+	writeProtectedRuntimeFixtureEngine(t, fixture, engine)
+
+	runtime := New(Config{
+		Environment: fixture.environment(), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
+	})
+	if _, err := runtime.InspectMutationGate(
+		context.Background(), fixture.runtimeRoot, fixture.configHome, "default", nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+	requestPayload, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request releasetransition.ProcessRequest
+	if err := json.Unmarshal(requestPayload, &request); err != nil {
+		t.Fatal(err)
+	}
+	if request.SourceIngress == nil || *request.SourceIngress != descriptor {
+		t.Fatalf("restored source ingress = %#v", request.SourceIngress)
+	}
+}
+
+type countingErrorTransport struct{ calls int }
+
+func (transport *countingErrorTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	transport.calls++
+	return nil, errors.New("unexpected network request")
+}
+
+type protectedRuntimeTransitionFixture struct {
+	runtimeRoot, configHome, cache, installer, publicationCapture string
+	target, transaction, resumePlan                               string
+	artifactDigest                                                string
+	journalPath, engine                                           string
+}
+
+func newProtectedRuntimeTransitionFixture(
+	t *testing.T,
+	checkpoint releasetransition.JournalCheckpoint,
+) protectedRuntimeTransitionFixture {
+	t.Helper()
+	root := t.TempDir()
+	fixture := protectedRuntimeTransitionFixture{
+		runtimeRoot: filepath.Join(root, "runtime"), configHome: filepath.Join(root, "config"),
+		cache: filepath.Join(root, "cache"), installer: filepath.Join(root, "installer"),
+		publicationCapture: filepath.Join(root, "publication-called"),
+		target:             "1.2.3-aaaaaaaaaaaa", transaction: "tx-0123456789abcdef",
+		resumePlan: "resume-v1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+	}
+	for _, directory := range []string{
+		fixture.runtimeRoot, filepath.Join(fixture.runtimeRoot, "releases", "release-a"),
+		filepath.Join(fixture.runtimeRoot, "releases", fixture.target, "bin"), fixture.configHome,
+	} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	current := "release-a"
+	if checkpoint == releasetransition.JournalComplete {
+		current = fixture.target
+	}
+	if err := os.Symlink(filepath.Join("releases", current), filepath.Join(fixture.runtimeRoot, "current")); err != nil {
+		t.Fatal(err)
+	}
+	if checkpoint == releasetransition.JournalComplete {
+		if err := os.Symlink("releases/release-a", filepath.Join(fixture.runtimeRoot, "previous")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fixture.engine = filepath.Join(fixture.runtimeRoot, "releases", fixture.target, "bin", "yard-engine")
+	response := fixture.recoveringResponse()
+	if checkpoint == releasetransition.JournalComplete {
+		response = fixture.unsafeCompleteResponse()
+	}
+	engine := fmt.Sprintf(`#!/bin/sh
+case "${1:-}" in
+  --version) printf 'yard-engine 1.2.3\n' ;;
+  _release-transition) cat >/dev/null; printf '%%s\n' %q ;;
+  *) exit 64 ;;
+esac
+`, response)
+	if err := os.WriteFile(fixture.engine, []byte(engine), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	registry := []byte("{}\n")
+	registryPath := filepath.Join(
+		fixture.runtimeRoot, "releases", fixture.target, "config", "release-transition.json",
+	)
+	if err := os.MkdirAll(filepath.Dir(registryPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(registryPath, registry, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := os.ReadFile(fixture.engine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(payload)
+	registryDigest := sha256.Sum256(registry)
+	manifest := fmt.Sprintf("%x  ./bin/yard-engine\n%x  ./config/release-transition.json\n",
+		digest, registryDigest)
+	manifestDigest := sha256.Sum256([]byte(manifest))
+	fixture.artifactDigest = fmt.Sprintf("%x", manifestDigest)
+	if err := os.WriteFile(
+		filepath.Join(fixture.runtimeRoot, "releases", fixture.target, "runtime-files.sha256"),
+		[]byte(manifest), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.installer, []byte(fmt.Sprintf(
+		"#!/bin/sh\n# --publish-only\nprintf called > %q\nexit 91\n", fixture.publicationCapture,
+	)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	authorizationPlan := releasetransition.PlanToken("plan-v1-" + strings.Repeat("a", 64))
+	resumePlan := releasetransition.PlanToken(fixture.resumePlan)
+	observationScope := releasetransition.Fingerprint(strings.Repeat("d", 64))
+	intentPayload, err := json.Marshal(struct {
+		AuthorizationPlan releasetransition.PlanToken     `json:"authorizationPlan"`
+		ResumePlan        releasetransition.PlanToken     `json:"resumePlan"`
+		ObservationScope  releasetransition.Fingerprint   `json:"observationScope"`
+		Steps             []releasetransition.JournalStep `json:"steps"`
+	}{authorizationPlan, resumePlan, observationScope, []releasetransition.JournalStep{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	intentDigest := sha256.Sum256(intentPayload)
+	journal := releasetransition.JournalRecord{
+		SchemaVersion: releasetransition.JournalSchemaV2,
+		Transaction:   releasetransition.TransactionID(fixture.transaction),
+		Goal: releasetransition.Goal{
+			Target:    releasetransition.ReleaseID(fixture.target),
+			Direction: releasetransition.DirectionActivateTarget,
+		},
+		Releases: releasetransition.ReleasePair{
+			From: "release-a", Target: releasetransition.ReleaseID(fixture.target),
+		},
+		AuthorizationPlan: authorizationPlan, ResumePlan: resumePlan,
+		ArtifactDigest:      releasetransition.Fingerprint(fixture.artifactDigest),
+		RegistryDigest:      releasetransition.Fingerprint(fmt.Sprintf("%x", registryDigest)),
+		CatalogDigest:       releasetransition.Fingerprint(strings.Repeat("c", 64)),
+		ObservationScope:    observationScope,
+		AuthorizationDigest: releasetransition.Fingerprint(strings.Repeat("e", 64)),
+		IntentDigest:        releasetransition.Fingerprint(fmt.Sprintf("%x", intentDigest)),
+		Checkpoint:          checkpoint, Steps: []releasetransition.JournalStep{},
+	}
+	journalPayload, err := releasetransition.MarshalJournal(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.journalPath = filepath.Join(fixture.configHome, "release-transition", "v2", "journal.json")
+	if err := os.MkdirAll(filepath.Dir(fixture.journalPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.journalPath, journalPayload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return fixture
+}
+
+func (fixture protectedRuntimeTransitionFixture) environment() map[string]string {
+	return map[string]string{
+		"HOME": filepath.Dir(fixture.runtimeRoot), "YARD_RELEASE_CACHE": fixture.cache,
+		"YARD_RELEASE_BASE_URL": "file://" + filepath.Join(filepath.Dir(fixture.runtimeRoot), "missing-assets"),
+	}
+}
+
+func (fixture protectedRuntimeTransitionFixture) recoveringResponse() string {
+	return fmt.Sprintf(
+		`{"schemaVersion":1,"inspection":{"plan":%q,"assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["resume the protected transition"]},"resume":%q,"outcome":{"status":"recovering","reachedGoal":false,"active":"release-a","target":%q,"code":"recovery-pending","message":"the authorized release transition can resume from observed facts","retry":"run yard update","transaction":%q}}}`,
+		fixture.resumePlan, fixture.transaction, fixture.target, fixture.transaction,
+	)
+}
+
+func (fixture protectedRuntimeTransitionFixture) unsafeCompleteResponse() string {
+	return fmt.Sprintf(
+		`{"schemaVersion":1,"inspection":{"plan":"plan-v1-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","assessment":{"action":"release.transition.v2","effect":"mutation","changed":false,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible"},"outcome":{"status":"operator-action-required","reachedGoal":false,"active":%q,"previous":"release-a","target":%q,"code":"plan-stale","message":"the complete journal bindings do not match the verified release","retry":"run yard update --check","transaction":%q}}}`,
+		fixture.target, fixture.target, fixture.transaction,
+	)
+}
+
+func writeProtectedRuntimeFixtureEngine(
+	t *testing.T,
+	fixture protectedRuntimeTransitionFixture,
+	payload string,
+) {
+	t.Helper()
+	if err := os.WriteFile(fixture.engine, []byte(payload), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	engineDigest := sha256.Sum256([]byte(payload))
+	registry, err := os.ReadFile(filepath.Join(
+		filepath.Dir(filepath.Dir(fixture.engine)), "config", "release-transition.json",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	registryDigest := sha256.Sum256(registry)
+	manifest := fmt.Sprintf("%x  ./bin/yard-engine\n%x  ./config/release-transition.json\n",
+		engineDigest, registryDigest)
+	if err := os.WriteFile(
+		filepath.Join(filepath.Dir(filepath.Dir(fixture.engine)), "runtime-files.sha256"),
+		[]byte(manifest), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	manifestDigest := sha256.Sum256([]byte(manifest))
+	snapshot, err := os.ReadFile(fixture.journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal, err := releasetransition.ParseJournal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal.ArtifactDigest = releasetransition.Fingerprint(fmt.Sprintf("%x", manifestDigest))
+	encoded, err := releasetransition.MarshalJournal(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.journalPath, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeRuntimeCandidateFixture(
+	t *testing.T,
+	root string,
+	transitionResponse string,
+) publishedCandidate {
+	t.Helper()
+	payload := fmt.Sprintf(`#!/bin/sh
+case "${1:-}" in
+  --version) printf 'yard-engine 1.2.3\n' ;;
+  _release-transition) cat >/dev/null; printf '%%s\n' %q ;;
+  *) exit 64 ;;
+esac
+`, transitionResponse)
+	return writeRuntimeCandidatePayload(t, root, payload)
+}
+
+func prepareCandidateTransitionForTest(
+	runtime *Runtime,
+	ctx context.Context,
+	parsed options,
+	candidate publishedCandidate,
+	request releasetransition.ProcessRequest,
+) (Prepared, error) {
+	var expected *releasetransition.Fingerprint
+	if request.ArtifactDigest != "" {
+		expected = &request.ArtifactDigest
+	}
+	verified, err := runtime.verifyPublishedCandidate(ctx, candidate, request.RuntimeRoot, expected)
+	if err != nil {
+		return Prepared{}, err
+	}
+	defer verified.Close()
+	if request.ArtifactDigest == "" {
+		request.ArtifactDigest = verified.manifestDigest
+	}
+	return runtime.prepareVerifiedCandidateTransition(ctx, parsed, verified, request)
+}
+
+func writeRuntimeCandidatePayload(
+	t *testing.T,
+	root string,
+	payload string,
+) publishedCandidate {
+	t.Helper()
+	candidateRoot := filepath.Join(root, "releases", "release-b")
+	if err := os.MkdirAll(filepath.Join(candidateRoot, "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := validateReleaseRoot(candidateRoot, "candidate fixture"); err != nil {
+		t.Fatalf("candidate fixture root: %v", err)
+	}
+	engine := filepath.Join(candidateRoot, "bin", "yard-engine")
+	if err := os.WriteFile(engine, []byte(payload), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	registry := []byte("{}\n")
+	registryPath := filepath.Join(candidateRoot, "config", "release-transition.json")
+	if err := os.MkdirAll(filepath.Dir(registryPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(registryPath, registry, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256([]byte(payload))
+	registryDigest := sha256.Sum256(registry)
+	manifest := fmt.Sprintf("%x  ./bin/yard-engine\n%x  ./config/release-transition.json\n",
+		digest, registryDigest)
+	if err := os.WriteFile(filepath.Join(candidateRoot, "runtime-files.sha256"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return publishedCandidate{release: "release-b", root: candidateRoot}
+}
+
+func releaseIDPointer(value releasetransition.ReleaseID) *releasetransition.ReleaseID {
+	return &value
 }

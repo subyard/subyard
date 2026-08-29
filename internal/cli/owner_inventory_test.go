@@ -3,7 +3,9 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +17,7 @@ import (
 	"github.com/Subyard/Subyard/internal/ownerinventory"
 	"github.com/Subyard/Subyard/internal/rpc"
 	"github.com/Subyard/Subyard/internal/state"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func inventoryResult(hostID, yard, project string) ownerInventoryResult {
@@ -181,7 +184,7 @@ func TestReadOnlyOwnerInventoriesDoNotRefreshOrMigrateConnections(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	results := program.allOwnerInventoriesReadOnly(context.Background(), loaded)
+	results := program.allOwnerInventoriesReadOnly(context.Background(), loaded, false)
 	if len(results) != 2 || !results[1].stale || results[1].err == nil ||
 		len(results[1].inventory.Yards) != 1 || results[1].inventory.Yards[0].Projects[0].Name != "Remote" {
 		t.Fatalf("read-only inventories=%#v", results)
@@ -196,6 +199,141 @@ func TestReadOnlyOwnerInventoriesDoNotRefreshOrMigrateConnections(t *testing.T) 
 	}
 	if !bytes.Equal(afterConnection, beforeConnection) || !bytes.Equal(afterCache, beforeCache) {
 		t.Fatal("read-only project resolution rewrote owner inventory state")
+	}
+}
+
+func TestReadOnlyProjectListHonorsFreshCacheAndLiveForce(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		arguments []string
+		wantSSH   bool
+	}{
+		{name: "default uses fresh cache", arguments: []string{"list"}},
+		{name: "live forces refresh", arguments: []string{"list", "--live"}, wantSSH: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			now := time.Unix(1_000, 0).UTC()
+			ownerRoot := filepath.Join(environmentValue(environment, "SUBYARD_HOME"), "owner-inventory")
+			connections := ownerinventory.Connections{Root: ownerRoot}
+			if err := connections.Write(ownerinventory.Connection{
+				HostID: "remote-owner", Destination: "dev@remote.example",
+				Yards: map[string]ownerinventory.YardRoute{"default": {SSHHost: "yard-remote"}},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			cache := ownerinventory.Cache{Root: ownerRoot}
+			if err := cache.Write(ownerinventory.Snapshot{
+				FetchedAt: now, Inventory: inventoryResult("remote-owner", "default", "Remote").inventory,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			cachePath := filepath.Join(ownerRoot, "owners", "remote-owner.json")
+			beforeCache, err := os.ReadFile(cachePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			bin := filepath.Join(root, "fake-bin")
+			if err := os.MkdirAll(bin, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			sshLog := filepath.Join(root, "ssh-called")
+			liveInventory := inventoryResult("remote-owner", "default", "Live").inventory
+			var response bytes.Buffer
+			codec := rpc.NewCodec(bytes.NewReader(nil), &response)
+			if err := codec.Write(rpc.Response{
+				Version: rpc.ProtocolVersion, Type: "response", ID: "negotiate",
+				Result: map[string]any{"capabilities": []string{ownerinventory.Capability}},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := codec.Write(rpc.Response{
+				Version: rpc.ProtocolVersion, Type: "response", ID: "inventory", Result: liveInventory,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			encodedResponse := base64.StdEncoding.EncodeToString(response.Bytes())
+			writeCLIFile(t, filepath.Join(bin, "ssh"),
+				"#!/bin/sh\nprintf x >> \"$SUBYARD_TEST_SSH_LOG\"\nprintf '%s' '"+encodedResponse+"' | /usr/bin/base64 -d\n",
+				0o700,
+			)
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("SUBYARD_TEST_SSH_LOG", sshLog)
+
+			var stdout, stderr bytes.Buffer
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard", Arguments: test.arguments,
+				Environment: append(environment, "SUBYARD_HOST_ID=owner-a"), WorkingDir: root,
+				Stdout: &stdout, Stderr: &stderr, Clock: testkit.NewManualClock(now),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code := program.Run(context.Background()); code != 0 {
+				t.Fatalf("list failed: code=%d stderr=%q", code, stderr.String())
+			}
+			_, sshErr := os.Lstat(sshLog)
+			if test.wantSSH && sshErr != nil {
+				t.Fatalf("--live did not force an owner inventory fetch: %v", sshErr)
+			}
+			if !test.wantSSH && !errors.Is(sshErr, os.ErrNotExist) {
+				t.Fatalf("default list fetched despite a fresh cache: %v", sshErr)
+			}
+			if test.wantSSH && !strings.Contains(stdout.String(), "Live") {
+				t.Fatalf("--live did not use the fetched inventory:\n%s", stdout.String())
+			}
+			afterCache, err := os.ReadFile(cachePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(afterCache, beforeCache) {
+				t.Fatal("read-only list rewrote the owner inventory cache")
+			}
+		})
+	}
+}
+
+func TestCanonicalReadOnlyInvocationDoesNotRecoverOwnerRoute(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	environment = append(environment, "SUBYARD_HOST_ID=owner-a")
+	ownerRoot := filepath.Join(environmentValue(environment, "SUBYARD_HOME"), "owner-inventory")
+	if err := (ownerinventory.Connections{Root: ownerRoot}).Write(ownerinventory.Connection{
+		HostID: "remote-owner", Destination: "dev@remote.example",
+		Yards: map[string]ownerinventory.YardRoute{"default": {SSHHost: "yard-remote"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := (ownerinventory.Cache{Root: ownerRoot}).Write(ownerinventory.Snapshot{
+		FetchedAt: time.Now().UTC(), Inventory: inventoryResult("remote-owner", "default", "").inventory,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	journalPath := filepath.Join(ownerRoot, "registration.json")
+	journal := []byte("{invalid-owner-recovery\n")
+	writeCLIFile(t, journalPath, string(journal), 0o600)
+
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments:   []string{"-Y", "remote-owner/default", "space", "--help"},
+		Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("canonical read failed: code=%d stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Usage: yard space") {
+		t.Fatalf("canonical read output=%q", stdout.String())
+	}
+	got, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, journal) {
+		t.Fatalf("canonical read changed owner route journal: got %q, want %q", got, journal)
 	}
 }
 

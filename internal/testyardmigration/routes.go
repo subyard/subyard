@@ -176,57 +176,6 @@ func VerifyRouteConsumers(ctx context.Context, options Options, before string) e
 	return verifyRouteConsumers(ctx, options, false, prepared)
 }
 
-// RollbackRouteConsumers restores only the non-owner devices recorded by this
-// operation. The following owner rollback restores the legacy route publisher.
-func RollbackRouteConsumers(ctx context.Context, options Options, before string) error {
-	if err := validateOptions(&options); err != nil {
-		return err
-	}
-	prepared, err := decodeRouteConsumersState(before)
-	if err != nil {
-		return err
-	}
-	if !prepared.Active {
-		return nil
-	}
-	yards, err := inspectManagedYards(ctx, options)
-	if err != nil {
-		return err
-	}
-	actual := nonOwnerYards(yards)
-	if err := validatePreparedSet(prepared.Consumers, actual, true); err != nil {
-		return fmt.Errorf("route consumer inventory changed before rollback: %w", err)
-	}
-	for _, consumer := range prepared.Consumers {
-		if consumer.Mounted {
-			continue
-		}
-		yard := actual[consumerKey(consumer.Project, consumer.Instance)]
-		if !yard.Mounted {
-			continue
-		}
-		if _, err := runIncus(
-			ctx,
-			options,
-			"config",
-			"device",
-			"remove",
-			yard.Instance,
-			routeDeviceName,
-			"--project",
-			yard.Project,
-		); err != nil {
-			return fmt.Errorf(
-				"restore shared E2E route mount on %s/%s: %w",
-				yard.Project,
-				yard.Instance,
-				err,
-			)
-		}
-	}
-	return nil
-}
-
 // VerifyRouteConsumersRollback checks the exact non-owner mount snapshot.
 func VerifyRouteConsumersRollback(ctx context.Context, options Options, before string) error {
 	if err := validateOptions(&options); err != nil {

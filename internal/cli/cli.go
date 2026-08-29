@@ -26,6 +26,7 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/credentialmeta"
 	"github.com/Subyard/Subyard/internal/adapters/incusclient"
 	"github.com/Subyard/Subyard/internal/adapters/projectruntime"
+	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/adapters/securityruntime"
 	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
 	"github.com/Subyard/Subyard/internal/adapters/statusruntime"
@@ -40,6 +41,7 @@ import (
 	"github.com/Subyard/Subyard/internal/migration"
 	"github.com/Subyard/Subyard/internal/ownerinventory"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/rpc"
 	"github.com/Subyard/Subyard/internal/shellquote"
@@ -95,6 +97,7 @@ type CLI struct {
 	openTerminal                 func() (*os.File, error)
 	effectiveUID                 func() int
 	retainedAdapterCompatibility bool
+	releaseTransitionChild       bool
 }
 
 func (cli *CLI) rpcOperation(operationID string) *CLI {
@@ -104,6 +107,132 @@ func (cli *CLI) rpcOperation(operationID string) *CLI {
 	operation.inventoryRoutes = maps.Clone(cli.inventoryRoutes)
 	operation.discoveredOwners = maps.Clone(cli.discoveredOwners)
 	return &operation
+}
+
+func (cli *CLI) runReleaseTransitionYardCommand(
+	ctx context.Context,
+	yard string,
+	output io.Writer,
+	arguments ...string,
+) error {
+	operation := cli.rpcOperation(cli.ensureOperationID())
+	operation.baseEnv = maps.Clone(cli.baseEnv)
+	for _, environment := range []map[string]string{operation.env, operation.baseEnv} {
+		delete(environment, "SUBYARD_CONFIG_LOADED")
+		environment["SUBYARD_ENGINE_CONTEXT"] = "1"
+		environment["SUBYARD_ENGINE_CONTEXT_SCHEMA"] = "1"
+		environment["SUBYARD_INTERNAL_MIGRATION_CHILD"] = "1"
+	}
+	operation.options.Arguments = append([]string{"-Y", yard}, arguments...)
+	operation.options.DispatcherPath = filepath.Join(cli.options.RepositoryRoot, "bin", "yard-engine")
+	operation.options.Stdin = strings.NewReader("")
+	operation.options.Stdout = output
+	operation.options.Stderr = output
+	operation.releaseTransitionChild = true
+	if code := operation.Run(ctx); code != 0 {
+		return fmt.Errorf("yard command exited with status %d", code)
+	}
+	return nil
+}
+
+type mutationGateOutcome struct {
+	Status      releasetransition.PublicStatus   `json:"status"`
+	Code        releasetransition.OutcomeCode    `json:"code"`
+	Active      releasetransition.ReleaseID      `json:"active"`
+	Previous    *releasetransition.ReleaseID     `json:"previous"`
+	Target      releasetransition.ReleaseID      `json:"target"`
+	Transaction *releasetransition.TransactionID `json:"transaction"`
+	Action      string                           `json:"action"`
+}
+
+func publicMutationGateOutcome(outcome releasetransition.Outcome) mutationGateOutcome {
+	return mutationGateOutcome{
+		Status: outcome.Status, Code: outcome.Code,
+		Active: outcome.Active, Previous: outcome.Previous, Target: outcome.Target,
+		Transaction: outcome.Transaction, Action: outcome.Retry,
+	}
+}
+
+func (cli *CLI) mutationGateReleaseOptions() (migration.ReleaseOptions, bool, error) {
+	operatorHome := cli.env["SUBYARD_OPERATOR_HOME"]
+	if operatorHome == "" {
+		operatorHome = cli.env["HOME"]
+	}
+	if operatorHome == "" {
+		return migration.ReleaseOptions{}, false, nil
+	}
+	configHome, err := config.ResolveConfigHome(operatorHome, cli.env)
+	if err != nil {
+		return migration.ReleaseOptions{}, false, err
+	}
+	dataHome := cli.env["SUBYARD_HOME"]
+	if dataHome == "" {
+		dataHome = filepath.Join(operatorHome, ".subyard")
+	}
+	runtimeRoot := cli.env["YARD_RUNTIME_ROOT"]
+	if runtimeRoot == "" {
+		runtimeRoot = filepath.Join(dataHome, "runtime")
+	}
+	if !filepath.IsAbs(dataHome) || filepath.Clean(dataHome) == string(filepath.Separator) {
+		return migration.ReleaseOptions{}, false,
+			errors.New("mutation gate operator data home must be an absolute non-root path")
+	}
+	if !filepath.IsAbs(runtimeRoot) || filepath.Clean(runtimeRoot) == string(filepath.Separator) {
+		return migration.ReleaseOptions{}, false,
+			errors.New("mutation gate runtime root must be an absolute non-root path")
+	}
+	runtimeRoot = runtimeRootForRepository(cli.options.RepositoryRoot, filepath.Clean(runtimeRoot))
+	return migration.ReleaseOptions{
+		RegistryPath:   filepath.Join(cli.options.RepositoryRoot, "config", "migrations.json"),
+		RepositoryRoot: cli.options.RepositoryRoot,
+		RuntimeRoot:    runtimeRoot,
+		ConfigHome:     configHome,
+		DataHome:       filepath.Clean(dataHome),
+		Version:        Version,
+		Executable:     cli.options.DispatcherPath,
+		Incus:          "incus",
+		Environment:    environmentList(cli.env, nil),
+		Diagnostics:    cli.options.Stderr,
+		Stderr:         cli.options.Stderr,
+	}, true, nil
+}
+
+func (cli *CLI) inspectMutationGate(
+	ctx context.Context,
+	yard string,
+) (*releasetransition.Outcome, error) {
+	options, available, err := cli.mutationGateReleaseOptions()
+	if err != nil || !available {
+		return nil, err
+	}
+	runtime := releaseruntime.New(releaseruntime.Config{
+		Environment: cli.env,
+		Stderr:      cli.options.Stderr,
+	})
+	defer runtime.Close()
+	v2, err := runtime.InspectMutationGate(
+		ctx, options.RuntimeRoot, options.ConfigHome, yard,
+		cli.releaseTransitionInheritedSettingIDs(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	if v2 != nil {
+		return v2, nil
+	}
+	legacy, err := migration.InspectMutationGate(ctx, options)
+	if err != nil {
+		return nil, err
+	}
+	return legacy, nil
+}
+
+func mutationGateRPCError(outcome releasetransition.Outcome) *rpc.Error {
+	payload, err := json.Marshal(publicMutationGateOutcome(outcome))
+	if err != nil {
+		return &rpc.Error{Code: string(outcome.Code), Message: outcome.Message}
+	}
+	return &rpc.Error{Code: string(outcome.Code), Message: string(payload)}
 }
 
 func New(options Options) (*CLI, error) {
@@ -191,12 +320,6 @@ func (cli *CLI) Run(ctx context.Context) int {
 		cli.usage()
 		return 0
 	}
-	if remaining[0] != "_migrate" && cli.env["SUBYARD_INTERNAL_MIGRATION_CHILD"] != "1" {
-		if err := cli.finalizeActiveMigration(ctx); err != nil {
-			cli.errorf("finish interrupted runtime migration: %v", err)
-			return 1
-		}
-	}
 	if code, handled := cli.globalQuery(remaining); handled {
 		return code
 	}
@@ -211,6 +334,15 @@ func (cli *CLI) Run(ctx context.Context) int {
 		cli.errorf("unknown command %q\nTry %q.", name, cli.options.Program+" --help")
 		return 2
 	}
+	configSync, configSyncCheck, configSyncStatus := false, false, false
+	if core && definition.Handler == "@config" {
+		configSync, configSyncCheck, configSyncStatus = configSyncInvocation(commandArguments)
+	}
+	readOnlyInvocation := commandHelpRequested(commandArguments) ||
+		(core && definition.Effect == command.EffectRead) ||
+		(core && definition.Handler == "@config" && (configSyncCheck || configSyncStatus)) ||
+		(core && definition.Handler == "@test-vms" && testVMStatusInvocation(commandArguments)) ||
+		(core && definition.Handler == "@update" && slices.Contains(commandArguments, "--check"))
 	if explicit {
 		cli.env["SUBYARD_YARD_EXPLICIT"] = "1"
 	}
@@ -231,12 +363,31 @@ func (cli *CLI) Run(ctx context.Context) int {
 	if core && definition.Handler == "@migrate" {
 		return cli.runMigration(ctx, yard, commandArguments)
 	}
+	if core && definition.Handler == "@release-transition" {
+		return cli.runReleaseTransition(ctx, commandArguments)
+	}
 	if core && definition.Handler == "@test-vms" &&
 		testVMLogsInvocation(commandArguments) {
 		if cli.env["SUBYARD_NO_AUDIT"] == "" {
 			cli.audit(name, commandArguments, "", "")
 		}
 		return cli.runTestVMLogs(ctx, commandArguments)
+	}
+	if !readOnlyInvocation && !cli.releaseTransitionChild &&
+		(!core || definition.Name != "update") {
+		outcome, gateErr := cli.inspectMutationGate(ctx, yard)
+		if gateErr != nil {
+			cli.errorf("inspect release transition: %v", gateErr)
+			return 1
+		}
+		if outcome != nil {
+			if encodeErr := json.NewEncoder(cli.options.Stderr).Encode(
+				publicMutationGateOutcome(*outcome),
+			); encodeErr != nil {
+				cli.errorf("write release transition outcome: %v", encodeErr)
+			}
+			return 1
+		}
 	}
 	ownerDataHome := cli.env["SUBYARD_HOME"]
 	if ownerDataHome == "" {
@@ -248,17 +399,15 @@ func (cli *CLI) Run(ctx context.Context) int {
 			ownerDataHome = filepath.Join(operatorHome, ".subyard")
 		}
 	}
-	if ownerDataHome != "" {
+	if ownerDataHome != "" && !readOnlyInvocation {
 		if err := (ownerinventory.Connections{Root: filepath.Join(ownerDataHome, "owner-inventory")}).Recover(); err != nil {
 			cli.errorf("recover owner inventory transaction: %v", err)
 			return 1
 		}
 	}
-	configSync, configSyncCheck, configSyncStatus := false, false, false
 	configSyncHome := ""
 	configSyncPending := false
 	if core && definition.Handler == "@config" {
-		configSync, configSyncCheck, configSyncStatus = configSyncInvocation(commandArguments)
 		if configSync {
 			operatorHome := cli.env["SUBYARD_OPERATOR_HOME"]
 			if operatorHome == "" {
@@ -303,9 +452,10 @@ func (cli *CLI) Run(ctx context.Context) int {
 		if baseErr != nil {
 			err = baseErr
 		} else {
+			readOnlyRoute := readOnlyInvocation || (core && definition.Name == "remove")
 			var results []ownerInventoryResult
-			if core && definition.Name == "remove" {
-				results = cli.allOwnerInventoriesReadOnly(ctx, base)
+			if readOnlyRoute {
+				results = cli.allOwnerInventoriesReadOnly(ctx, base, false)
 			} else {
 				results = cli.allOwnerInventories(ctx, base, false)
 			}
@@ -315,7 +465,13 @@ func (cli *CLI) Run(ctx context.Context) int {
 			} else {
 				hostID := selected[0].inventory.HostID
 				yardName := selected[0].inventory.Yards[0].Name
-				routeName, _, routeErr := cli.ownerYardRoute(ctx, base, hostID, yardName)
+				var routeName string
+				var routeErr error
+				if readOnlyRoute {
+					routeName, _, routeErr = cli.ownerYardRouteReadOnly(ctx, base, hostID, yardName)
+				} else {
+					routeName, _, routeErr = cli.ownerYardRoute(ctx, base, hostID, yardName)
+				}
 				if routeErr != nil {
 					err = routeErr
 				} else if dynamic, ok := cli.inventoryRoutes[routeName]; ok {
@@ -337,14 +493,14 @@ func (cli *CLI) Run(ctx context.Context) int {
 		cli.errorf("%v", err)
 		return 2
 	}
-	if err := configsync.RecoverHostIDRename(loaded.Context.Paths.ConfigHome); err != nil {
-		cli.errorf("recover owner HostID rename: %v", err)
-		return 1
+	if !readOnlyInvocation {
+		if err := configsync.RecoverHostIDRename(loaded.Context.Paths.ConfigHome); err != nil {
+			cli.errorf("recover owner HostID rename: %v", err)
+			return 1
+		}
 	}
 	loadedContext := loaded.Context
-	if cli.env["SUBYARD_OPERATION_ID"] == "" {
-		cli.env["SUBYARD_OPERATION_ID"] = newOperationID()
-	}
+	cli.ensureOperationID()
 	if core && definition.Handler == "@test-vms" && testVMLogsInvocation(commandArguments) {
 		orchestrator := cli.operationOrchestrator(
 			cli.env["SUBYARD_OPERATION_ID"], loaded, nil, &definition,
@@ -372,7 +528,9 @@ func (cli *CLI) Run(ctx context.Context) int {
 	var projectRun *projectExecution
 	var remoteRun *domain.RemotePrepared
 	if !commandHelpRequested(commandArguments) {
-		projectRun, err = cli.prepareProjectExecution(ctx, loaded, definition, commandArguments, explicit)
+		projectRun, err = cli.prepareProjectExecution(
+			ctx, loaded, definition, commandArguments, explicit, readOnlyInvocation,
+		)
 		if err != nil {
 			cli.errorf("prepare %s: %v", name, err)
 			return 1
@@ -770,7 +928,7 @@ With -Y/--yard or @<yard>, show detailed status for that one yard.
 	}
 	if !all {
 		if selector := cli.env["SUBYARD_INVENTORY_SELECTOR"]; selector != "" {
-			results := cli.allOwnerInventories(ctx, loaded, false)
+			results := cli.allOwnerInventoriesReadOnly(ctx, loaded, false)
 			selected, _, err := selectOwnerYards(results, selector)
 			if err != nil {
 				cli.errorf("status: %v", err)
@@ -813,7 +971,7 @@ With -Y/--yard or @<yard>, show detailed status for that one yard.
 		}
 		return cli.printYardStatus(ctx, loaded)
 	}
-	results := cli.allOwnerInventories(ctx, loaded, false)
+	results := cli.allOwnerInventoriesReadOnly(ctx, loaded, false)
 	code := 0
 	first := true
 	for _, result := range results {
@@ -837,7 +995,7 @@ With -Y/--yard or @<yard>, show detailed status for that one yard.
 }
 
 func (cli *CLI) printYardStatus(ctx context.Context, loaded config.Loaded) int {
-	store, err := openProjectStore(ctx, loaded.Context.Paths.StateDir)
+	store, err := openProjectStoreReadOnly(loaded.Context.Paths.StateDir)
 	if err != nil {
 		cli.errorf("open project state: %v", err)
 		return 1
@@ -979,7 +1137,7 @@ func (cli *CLI) runYards(ctx context.Context, loaded config.Loaded, arguments []
 		cli.errorf("yards --verbose and --json are mutually exclusive")
 		return 2
 	}
-	results := cli.allOwnerInventories(ctx, loaded, false)
+	results := cli.allOwnerInventoriesReadOnly(ctx, loaded, false)
 	type yardOutput struct {
 		YardRef           domain.YardRef           `json:"yardRef"`
 		AccessKind        domain.AccessKind        `json:"accessKind"`
@@ -1000,7 +1158,7 @@ func (cli *CLI) runYards(ctx context.Context, loaded config.Loaded, arguments []
 	endpoints := make(map[string]string)
 	connections, connectionErr := (ownerinventory.Connections{
 		Root: loaded.Context.Paths.DataHome + "/owner-inventory",
-	}).List()
+	}).ListReadOnly()
 	if connectionErr == nil {
 		for _, connection := range connections {
 			endpoints[connection.HostID] = connection.Destination
@@ -1385,7 +1543,7 @@ func (cli *CLI) runProjectList(
 			return 2
 		}
 	}
-	results := cli.allOwnerInventories(ctx, loaded, live)
+	results := cli.allOwnerInventoriesReadOnly(ctx, loaded, live)
 	if completion != "" {
 		printOwnerCompletions(cli.options.Stdout, results, completion)
 		return 0
@@ -1717,6 +1875,14 @@ func (cli *CLI) runMigration(ctx context.Context, yard string, arguments []strin
 		cli.errorf("internal: invalid _migrate action")
 		return 2
 	}
+	switch arguments[0] {
+	case "apply", "finalize", "rollback", "cleanup":
+		cli.errorf(
+			"state migration %s: superseded mutation endpoint; use yard update",
+			arguments[0],
+		)
+		return 2
+	}
 	repositoryRoot := cli.options.RepositoryRoot
 	if arguments[0] == "reconcile-power-reconciler" {
 		payloadRepositoryRoot, payloadErr := powerMigrationRepositoryRoot(
@@ -1852,58 +2018,37 @@ func (cli *CLI) runMigration(ctx context.Context, yard string, arguments []strin
 		}
 		return 0
 	}
-	keysRoot := environment["SUBYARD_KEYS_ROOT"]
-	if keysRoot == "" {
-		keysRoot = filepath.Join(configHome, "keys")
-	}
 	runtimeRoot := environment["YARD_RUNTIME_ROOT"]
 	if runtimeRoot == "" {
 		runtimeRoot = filepath.Join(environment["SUBYARD_HOME"], "runtime")
 	}
 	runtimeRoot = runtimeRootForRepository(cli.options.RepositoryRoot, runtimeRoot)
-	releaseOptions := migration.ReleaseOptions{
-		RegistryPath:       filepath.Join(cli.options.RepositoryRoot, "config", "migrations.json"),
-		RepositoryRoot:     cli.options.RepositoryRoot,
-		RuntimeRoot:        runtimeRoot,
-		ConfigHome:         configHome,
-		DataHome:           environment["SUBYARD_HOME"],
-		Version:            Version,
-		ProjectDirectories: projectDirectories,
-		Credentials:        credentialmeta.Reader{Root: keysRoot},
-		Executable:         cli.options.DispatcherPath,
-		Incus:              "incus",
-		Environment:        environmentList(migrationEnvironment, nil),
-		Diagnostics:        cli.options.Stderr,
-		Stderr:             cli.options.Stderr,
-	}
-	var report migration.Report
-	switch arguments[0] {
-	case "apply":
-		report, err = migration.ApplyRelease(ctx, releaseOptions)
-	case "finalize":
-		var changed bool
-		changed, err = migration.FinalizeActive(ctx, releaseOptions)
-		if err == nil {
-			report, err = migration.CheckRelease(ctx, releaseOptions)
-			report.Changed = changed
-		}
-	case "rollback":
-		report, err = migration.RollbackRelease(ctx, releaseOptions)
-	case "cleanup":
-		var removed int
-		removed, err = migration.CleanupRelease(releaseOptions)
-		if err == nil {
-			report, err = migration.CheckRelease(ctx, releaseOptions)
-			report.Changed = removed > 0
-		}
-	default:
-		report, err = migration.CheckRelease(ctx, releaseOptions)
-	}
+	outcome, err := migration.InspectMutationGate(ctx, migration.ReleaseOptions{
+		RegistryPath:   filepath.Join(cli.options.RepositoryRoot, "config", "migrations.json"),
+		RepositoryRoot: cli.options.RepositoryRoot,
+		RuntimeRoot:    runtimeRoot,
+		ConfigHome:     configHome,
+		DataHome:       environment["SUBYARD_HOME"],
+		Version:        Version,
+		Executable:     cli.options.DispatcherPath,
+		Incus:          "incus",
+		Environment:    environmentList(migrationEnvironment, nil),
+		Diagnostics:    cli.options.Stderr,
+		Stderr:         cli.options.Stderr,
+	})
 	if err != nil {
 		cli.errorf("state migration %s: %v", arguments[0], err)
 		return 1
 	}
-	if err := json.NewEncoder(cli.options.Stdout).Encode(report); err != nil {
+	if outcome == nil {
+		outcome = &releasetransition.Outcome{
+			Status:  releasetransition.StatusReady,
+			Code:    releasetransition.CodeReady,
+			Target:  releasetransition.ReleaseID(Version),
+			Message: "no unfinished v1 release transition was found",
+		}
+	}
+	if err := json.NewEncoder(cli.options.Stdout).Encode(outcome); err != nil {
 		cli.errorf("state migration report: %v", err)
 		return 1
 	}
@@ -1985,43 +2130,6 @@ func retainedMigrationPayloadRoot(
 		return "", errors.New("retained previous release escapes the runtime release store")
 	}
 	return resolvedPrevious, nil
-}
-
-func (cli *CLI) finalizeActiveMigration(ctx context.Context) error {
-	operatorHome := cli.env["SUBYARD_OPERATOR_HOME"]
-	if operatorHome == "" {
-		operatorHome = cli.env["HOME"]
-	}
-	if operatorHome == "" {
-		return nil
-	}
-	configHome := cli.env["SUBYARD_CONFIG_HOME"]
-	if configHome == "" {
-		configHome = filepath.Join(operatorHome, ".config", "subyard")
-	}
-	dataHome := cli.env["SUBYARD_HOME"]
-	if dataHome == "" {
-		dataHome = filepath.Join(operatorHome, ".subyard")
-	}
-	runtimeRoot := cli.env["YARD_RUNTIME_ROOT"]
-	if runtimeRoot == "" {
-		runtimeRoot = filepath.Join(dataHome, "runtime")
-	}
-	runtimeRoot = runtimeRootForRepository(cli.options.RepositoryRoot, runtimeRoot)
-	_, err := migration.FinalizeActive(ctx, migration.ReleaseOptions{
-		RegistryPath:   filepath.Join(cli.options.RepositoryRoot, "config", "migrations.json"),
-		RepositoryRoot: cli.options.RepositoryRoot,
-		RuntimeRoot:    runtimeRoot,
-		ConfigHome:     filepath.Clean(configHome),
-		DataHome:       filepath.Clean(dataHome),
-		Version:        Version,
-		Executable:     cli.options.DispatcherPath,
-		Incus:          "incus",
-		Environment:    environmentList(cli.env, nil),
-		Diagnostics:    cli.options.Stderr,
-		Stderr:         cli.options.Stderr,
-	})
-	return err
 }
 
 func runtimeRootForRepository(repositoryRoot, fallback string) string {
@@ -3465,6 +3573,13 @@ func newOperationID() string {
 	return "op-" + hex.EncodeToString(hash[:16])
 }
 
+func (cli *CLI) ensureOperationID() string {
+	if cli.env["SUBYARD_OPERATION_ID"] == "" {
+		cli.env["SUBYARD_OPERATION_ID"] = newOperationID()
+	}
+	return cli.env["SUBYARD_OPERATION_ID"]
+}
+
 func (cli *CLI) errorf(format string, arguments ...any) {
 	fmt.Fprintf(cli.options.Stderr, "%s: ", cli.options.Program)
 	fmt.Fprintf(cli.options.Stderr, format, arguments...)
@@ -3544,6 +3659,7 @@ func (cli *CLI) serveRPC(ctx context.Context, yard string, arguments []string) i
 	// remote-owner route, never as an implicit context switch inside the session.
 	cli.env["SUBYARD_YARD_EXPLICIT"] = "1"
 	handler := &rpcHandler{cli: cli, loaded: loaded, plans: make(map[string]rpcPlannedOperation)}
+	defer handler.closeReleasePlans()
 	session := rpc.Session{Handler: handler, EngineVersion: Version, Capabilities: []string{
 		"snapshot", "ordered-events", "cancellation", "deadlines", "commands", "context",
 		"projects", "yard-status", "credential-metadata", "credential-status",
@@ -3564,6 +3680,17 @@ type rpcHandler struct {
 	loaded  config.Loaded
 	plansMu sync.Mutex
 	plans   map[string]rpcPlannedOperation
+}
+
+func (handler *rpcHandler) closeReleasePlans() {
+	handler.plansMu.Lock()
+	defer handler.plansMu.Unlock()
+	for id, planned := range handler.plans {
+		if planned.Release != nil {
+			_ = planned.Release.Close()
+		}
+		delete(handler.plans, id)
+	}
 }
 
 type rpcPlannedOperation struct {
@@ -3666,9 +3793,20 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		if definition.Name != "update" && !structuredCommandSupported(definition.Name) {
 			return nil, &rpc.Error{Code: "interactive_or_payload_command", Message: params.Command}
 		}
+		if definition.Name != "update" {
+			outcome, gateErr := handler.cli.inspectMutationGate(
+				ctx, handler.loaded.Context.YardName,
+			)
+			if gateErr != nil {
+				return nil, operationRPCError("mutation_gate_failed", gateErr)
+			}
+			if outcome != nil {
+				return nil, mutationGateRPCError(*outcome)
+			}
+		}
 		operationCLI := handler.cli.rpcOperation(call.OperationID)
 		project, err := operationCLI.prepareProjectExecution(
-			ctx, handler.loaded, definition, params.Arguments, true,
+			ctx, handler.loaded, definition, params.Arguments, true, false,
 		)
 		if err != nil {
 			return nil, operationRPCError("invalid_params", err)
@@ -3700,6 +3838,12 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			}
 		}
 		var releaseRun *releaseExecution
+		keepRelease := false
+		defer func() {
+			if releaseRun != nil && !keepRelease {
+				_ = releaseRun.Close()
+			}
+		}()
 		if definition.Handler == "@update" {
 			releaseRun, err = operationCLI.prepareRelease(ctx, loaded, arguments)
 			if err != nil {
@@ -3790,6 +3934,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			Remote: remote, Init: initRun, Lifecycle: lifecycleRun, Provision: provisionRun,
 			TestVMs: testVMRun, Teardown: teardownRun, Release: releaseRun,
 		}
+		keepRelease = true
 		handler.plansMu.Unlock()
 		keepProjectReservation = true
 		return plan, nil
@@ -3812,7 +3957,21 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		if !ok {
 			return nil, &rpc.Error{Code: "plan_not_found", Message: call.OperationID}
 		}
+		if planned.Release != nil {
+			defer planned.Release.Close()
+		}
 		defer planned.CLI.abortProjectExecution(context.Background(), planned.Project)
+		if planned.Definition.Name != "update" {
+			outcome, gateErr := planned.CLI.inspectMutationGate(
+				ctx, handler.loaded.Context.YardName,
+			)
+			if gateErr != nil {
+				return nil, operationRPCError("mutation_gate_failed", gateErr)
+			}
+			if outcome != nil {
+				return nil, mutationGateRPCError(*outcome)
+			}
+		}
 		if planned.Plan.Target == domain.TargetRemoteOwner {
 			return nil, &rpc.Error{Code: "remote_owner_required", Message: "execute this plan through owner-host SSH stdio"}
 		}
@@ -4011,7 +4170,7 @@ func (handler *rpcHandler) commands() []map[string]any {
 }
 
 func (handler *rpcHandler) projects(ctx context.Context, live bool) (rpcProjectList, error) {
-	store, err := openProjectStore(ctx, handler.loaded.Context.Paths.StateDir)
+	store, err := openProjectStoreReadOnly(handler.loaded.Context.Paths.StateDir)
 	if err != nil {
 		return rpcProjectList{}, err
 	}
@@ -4021,7 +4180,7 @@ func (handler *rpcHandler) projects(ctx context.Context, live bool) (rpcProjectL
 }
 
 func (handler *rpcHandler) status(ctx context.Context) (domain.YardStatus, error) {
-	store, err := openProjectStore(ctx, handler.loaded.Context.Paths.StateDir)
+	store, err := openProjectStoreReadOnly(handler.loaded.Context.Paths.StateDir)
 	if err != nil {
 		return domain.YardStatus{}, err
 	}

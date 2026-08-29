@@ -246,9 +246,46 @@ p0_capacity_require_persistent_path() {
     "$label" "$fstype" "$source" "$target"
 }
 
+p0_capacity_query_default_pool() {
+  local output_name="${1:?output variable is required}"
+  local query_timeout="${2:-${P0_E2E_INCUS_QUERY_TIMEOUT:-120}}"
+  local query_state='' pool_rc query_attempt
+  [[ "$query_timeout" =~ ^[1-9][0-9]*$ ]] \
+    || p0_capacity_die 'Incus query timeout is invalid' || return
+  for query_attempt in 1 2; do
+    set +e
+    query_state="$(timeout --foreground "$query_timeout" \
+      incus storage show default --project default 2>/dev/null)"
+    pool_rc=$?
+    set -e
+    case "$pool_rc" in
+      0)
+        printf -v "$output_name" '%s' "$query_state"
+        return 0
+        ;;
+      124|137)
+        if [ "$query_attempt" -lt 2 ]; then
+          printf '  [ .. ] Incus default-pool query timed out; retrying cold activation\n'
+          case "${SUBYARD_E2E_VM:-}" in
+            1|2)
+              timeout --foreground "$query_timeout" \
+                sudo -n systemctl restart incus.service \
+                || p0_capacity_die 'failed to restart the stuck Incus daemon' || return
+              ;;
+          esac
+          continue
+        fi
+        p0_capacity_die "Incus default-pool query exceeded ${query_timeout}s twice"
+        return
+        ;;
+      *) return 1 ;;
+    esac
+  done
+}
+
 p0_capacity_preflight() {
   local root_available inode_available tmp_size tmp_available pool_source='' stale=''
-  local pool_state='' pool_rc query_attempt query_timeout="${P0_E2E_INCUS_QUERY_TIMEOUT:-120}"
+  local pool_state='' pool_rc query_timeout="${P0_E2E_INCUS_QUERY_TIMEOUT:-120}"
   local min_root="${P0_E2E_MIN_ROOT_AVAILABLE_BYTES:-3221225472}"
   local min_inodes="${P0_E2E_MIN_AVAILABLE_INODES:-100000}"
   local min_tmp_size="${P0_E2E_MIN_TMP_SIZE_BYTES:-536870912}"
@@ -268,35 +305,12 @@ p0_capacity_preflight() {
   else
     p0_capacity_require_persistent_path "$HOME/.cache" platform-parent || return
   fi
-  [[ "$query_timeout" =~ ^[1-9][0-9]*$ ]] \
-    || p0_capacity_die 'Incus query timeout is invalid' || return
   if command -v incus >/dev/null 2>&1; then
-    for query_attempt in 1 2; do
-      set +e
-      pool_state="$(timeout --foreground "$query_timeout" \
-        incus storage show default --project default 2>/dev/null)"
+    p0_capacity_query_default_pool pool_state "$query_timeout" || {
       pool_rc=$?
-      set -e
-      case "$pool_rc" in
-        0) break ;;
-        124|137)
-          if [ "$query_attempt" -lt 2 ]; then
-            printf '  [ .. ] Incus default-pool query timed out; retrying cold activation\n'
-            case "${SUBYARD_E2E_VM:-}" in
-              1|2)
-                timeout --foreground "$query_timeout" \
-                  sudo -n systemctl restart incus.service \
-                  || p0_capacity_die 'failed to restart the stuck Incus daemon' || return
-                ;;
-            esac
-            continue
-          fi
-          p0_capacity_die "Incus default-pool query exceeded ${query_timeout}s twice"
-          return
-          ;;
-        *) pool_state=''; break ;;
-      esac
-    done
+      [ "$pool_rc" = 1 ] || return "$pool_rc"
+      pool_state=''
+    }
   fi
   if [ -n "$pool_state" ]; then
     pool_source="$(sed -n 's/^  source: //p' <<<"$pool_state")"

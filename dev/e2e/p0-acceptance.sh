@@ -69,6 +69,7 @@ WAIT_SECONDS="${SUBYARD_P0_WAIT_SECONDS:-0}"
 POWER_RECONCILE_WINDOW_SECONDS=900
 POWER_RECONCILE_START_WAIT_SECONDS=30
 POWER_RECONCILE_PROBE_TIMEOUT=10
+REBOOT_REQUEST_TIMEOUT_SECONDS=20
 POWER_RECONCILE_STARTED_MICROS=0
 POWER_RECONCILE_UPTIME_SECONDS=0
 POWER_RECONCILE_TERMINAL_FAILURE=0
@@ -767,8 +768,14 @@ reboot_vm() {
     cat /proc/sys/kernel/random/boot_id)" \
     || die "cannot read VM$vm boot ID before reboot"
   set +e
-  ssh -F "$CONFIG" -T "e2e-vm-$vm" -- \
-    sudo -n systemctl reboot >/dev/null 2>&1
+  # A guest can complete shutdown before SSH observes channel close. Bound the request itself;
+  # the down/new-boot probes below are the authoritative reboot outcome.
+  timeout --foreground "$REBOOT_REQUEST_TIMEOUT_SECONDS" \
+    ssh -F "$CONFIG" -T \
+      -o ConnectTimeout=3 -o ConnectionAttempts=1 \
+      -o ServerAliveInterval=2 -o ServerAliveCountMax=2 \
+      "e2e-vm-$vm" -- sudo -n systemctl reboot \
+      </dev/null >/dev/null 2>&1
   set -e
   for _ in $(seq 1 60); do
     if ! ssh -F "$CONFIG" -T -o ConnectTimeout=2 "e2e-vm-$vm" -- true \

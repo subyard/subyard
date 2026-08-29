@@ -230,6 +230,19 @@ func TestTestVMStatusIsReadOnly(t *testing.T) {
 	}
 }
 
+func TestTestVMStatusInvocationBypassesMutationGate(t *testing.T) {
+	for _, arguments := range [][]string{{"status"}, {"--yes", "status"}, {"-y", "status"}} {
+		if !testVMStatusInvocation(arguments) {
+			t.Errorf("test-vms %v was not classified as read-only", arguments)
+		}
+	}
+	for _, arguments := range [][]string{nil, {"recover"}, {"--yes", "revoke"}} {
+		if testVMStatusInvocation(arguments) {
+			t.Errorf("test-vms %v was classified as read-only", arguments)
+		}
+	}
+}
+
 func TestTestVMStatusExecutesReadOnlyWorkerWithoutConfirmation(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	environment = append(environment, "NESTED_E2E_VMS=1", "SUBYARD_OPERATION_ID=test-vms-status")

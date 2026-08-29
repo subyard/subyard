@@ -343,7 +343,7 @@ func productionShellContracts() map[string]shellContract {
 			"leaf", goReconcile, `"install-test-vms-host-sink.sh"`,
 		},
 		"scripts/install-runtime-release.sh":   {"bootstrap", "internal/cli/update.go", `"install-runtime-release.sh"`},
-		"scripts/migrate-source-install.sh":    {"bootstrap", "dev/bootstrap-runtime.sh", `migrate-source-install.sh`},
+		"scripts/migrate-source-install.sh":    {"bootstrap", "internal/migration/v2_source_ingress.go", `migrate-source-install.sh`},
 		"scripts/restore-source-install.sh":    {"embedded", "scripts/migrate-source-install.sh", `restore-source-install.sh`},
 		"scripts/lib-power.sh":                 {"library", "scripts/lifecycle-guard.sh", `lib-power.sh`},
 		"scripts/lib-service.sh":               {"library", "config/profiles/android/resources/emulator/handler.sh", `lib-service.sh`},

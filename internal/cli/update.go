@@ -7,6 +7,7 @@ import (
 	"io"
 	"maps"
 	"path/filepath"
+	"sort"
 
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
@@ -21,6 +22,16 @@ type releaseAdapter struct{ prepared releaseruntime.Prepared }
 type releaseExecution struct {
 	prepared releaseruntime.Prepared
 	yard     string
+	runtime  *releaseruntime.Runtime
+}
+
+func (execution *releaseExecution) Close() error {
+	if execution == nil || execution.runtime == nil {
+		return nil
+	}
+	runtime := execution.runtime
+	execution.runtime = nil
+	return runtime.Close()
 }
 
 func (adapter releaseAdapter) Run(ctx context.Context, request domain.AdapterRequest, _ io.Reader) (domain.AdapterResult, string, error) {
@@ -28,7 +39,7 @@ func (adapter releaseAdapter) Run(ctx context.Context, request domain.AdapterReq
 		return domain.AdapterResult{}, "", errors.New("unsupported release adapter request")
 	}
 	if err := adapter.prepared.Execute(ctx); err != nil {
-		return domain.AdapterResult{}, "", err
+		return domain.AdapterResult{}, "", fmt.Errorf("execute prepared release: %w", err)
 	}
 	return domain.AdapterResult{Schema: shelladapter.ProtocolSchema, OperationID: request.OperationID, Status: "ok"}, "", nil
 }
@@ -39,6 +50,7 @@ func (cli *CLI) runUpdate(ctx context.Context, loaded config.Loaded, definition 
 		cli.errorf("update: %v", err)
 		return 1
 	}
+	defer execution.Close()
 	assumeYes := cli.env["ASSUME_YES"] == "1"
 	for _, argument := range arguments {
 		if argument == "-y" || argument == "--yes" {
@@ -73,17 +85,36 @@ func (cli *CLI) runUpdate(ctx context.Context, loaded config.Loaded, definition 
 }
 
 func (cli *CLI) prepareRelease(ctx context.Context, loaded config.Loaded, arguments []string) (*releaseExecution, error) {
+	releaseEnvironment := maps.Clone(loaded.Environment)
+	releaseEnvironment["SUBYARD_OPERATION_ID"] = cli.env["SUBYARD_OPERATION_ID"]
 	runtime := releaseruntime.New(releaseruntime.Config{
-		Environment: loaded.Environment,
+		Environment: releaseEnvironment,
 		Installer:   filepath.Join(cli.options.RepositoryRoot, "scripts", "install-runtime-release.sh"),
 		Stdout:      cli.options.Stdout,
 		Stderr:      cli.options.Stderr,
 	})
-	prepared, err := runtime.Prepare(ctx, arguments)
+	prepared, err := runtime.PrepareTransition(
+		ctx, arguments, loaded.Environment["SUBYARD_CONFIG_HOME"],
+		loaded.Context.YardName, cli.releaseTransitionInheritedSettingIDs(),
+	)
 	if err != nil {
+		_ = runtime.Close()
 		return nil, err
 	}
-	return &releaseExecution{prepared: prepared, yard: loaded.Context.YardName}, nil
+	return &releaseExecution{
+		prepared: prepared, yard: loaded.Context.YardName, runtime: runtime,
+	}, nil
+}
+
+func (cli *CLI) releaseTransitionInheritedSettingIDs() []string {
+	inheritedSettingIDs := make([]string, 0)
+	for name := range cli.baseEnv {
+		if _, setting := config.LookupSetting(name); setting {
+			inheritedSettingIDs = append(inheritedSettingIDs, name)
+		}
+	}
+	sort.Strings(inheritedSettingIDs)
+	return inheritedSettingIDs
 }
 
 func (execution *releaseExecution) prepareAction(

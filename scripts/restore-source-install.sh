@@ -83,11 +83,20 @@ if [ -e "$RECOVERY_ROOT/transaction" ] || [ -L "$RECOVERY_ROOT/transaction" ]; t
     || fail "recovery transaction is incomplete"
   case "$transaction_phase:$transaction_step" in
     prepared:none|applying:config-import|applying:legacy-archive|applying:state-migration|\
+applying:source-import-ready|\
 applying:shell-integration|applying:entrypoint-switch|complete:complete) ;;
     *) fail "invalid recovery transaction phase/step" ;;
   esac
 else
   transaction_phase=legacy-complete
+fi
+if [ -e "$RECOVERY_ROOT/source-import.state" ] ||
+  [ -L "$RECOVERY_ROOT/source-import.state" ]; then
+  protected_regular "$RECOVERY_ROOT/source-import.state" \
+    || fail "source import seal is unsafe"
+  IFS= read -r import_state < "$RECOVERY_ROOT/source-import.state"
+  [ "$import_state" = committed ] || fail "source import seal is invalid"
+  fail "source import is committed; restore would invalidate release migration history"
 fi
 if [ "$INCOMPLETE" = 1 ]; then
   case "$transaction_phase" in prepared|applying) ;; *)

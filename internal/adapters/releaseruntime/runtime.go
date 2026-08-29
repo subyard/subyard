@@ -1,7 +1,11 @@
 package releaseruntime
 
 import (
+	"bytes"
 	"context"
+	crand "crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,11 +15,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/releasetransition"
 )
 
 type Config struct {
@@ -42,7 +48,11 @@ func (prepared Prepared) Execute(ctx context.Context) error {
 	return prepared.run(ctx)
 }
 
-type Runtime struct{ config Config }
+type Runtime struct {
+	config                 Config
+	pinnedCandidateRoot    *os.File
+	pinnedCandidateRelease releasetransition.ReleaseID
+}
 
 func New(config Config) *Runtime {
 	if config.HTTPClient == nil {
@@ -51,95 +61,887 @@ func New(config Config) *Runtime {
 	return &Runtime{config: config}
 }
 
+func (runtime *Runtime) Close() error {
+	if runtime == nil || runtime.pinnedCandidateRoot == nil {
+		return nil
+	}
+	root := runtime.pinnedCandidateRoot
+	runtime.pinnedCandidateRoot = nil
+	runtime.pinnedCandidateRelease = ""
+	return root.Close()
+}
+
+type protectedTransitionInspection struct {
+	journal                       releasetransition.JournalRecord
+	owner                         candidateVerification
+	target                        candidateVerification
+	request                       releasetransition.ProcessRequest
+	inspection                    releasetransition.Inspection
+	activationReconciliationOwned bool
+}
+
+type redactedReleaseInspectionError struct{ cause error }
+
+type publicReleaseInspectionError struct {
+	cause   error
+	outcome releasetransition.Outcome
+}
+
+func (err publicReleaseInspectionError) Error() string { return err.cause.Error() }
+
+func (err publicReleaseInspectionError) Unwrap() error { return err.cause }
+
+func (err redactedReleaseInspectionError) Error() string {
+	return "release transition inspection failed"
+}
+
+func (err redactedReleaseInspectionError) Unwrap() error { return err.cause }
+
+func redactReleaseInspectionError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return redactedReleaseInspectionError{cause: err}
+}
+
+// InspectMutationGate reads an existing protected v2 transition and delegates
+// its exact read-only inspection to the verified transition owner. A nil
+// outcome means there is no v2 journal or its complete state is semantically ready.
+func (runtime *Runtime) InspectMutationGate(
+	ctx context.Context,
+	runtimeRoot string,
+	configHome string,
+	yard string,
+	inheritedSettingIDs []string,
+) (*releasetransition.Outcome, error) {
+	inspection, err := runtime.inspectProtectedTransition(
+		ctx, runtimeRoot, configHome, yard, inheritedSettingIDs,
+	)
+	if err != nil {
+		var public publicReleaseInspectionError
+		if errors.As(err, &public) {
+			return &public.outcome, nil
+		}
+		return nil, redactReleaseInspectionError(err)
+	}
+	if inspection == nil {
+		return nil, nil
+	}
+	outcome := *inspection.inspection.Outcome
+	if outcome.Status == releasetransition.StatusReady {
+		return nil, nil
+	}
+	return &outcome, nil
+}
+
+func (runtime *Runtime) inspectProtectedTransition(
+	ctx context.Context,
+	runtimeRoot string,
+	configHome string,
+	yard string,
+	inheritedSettingIDs []string,
+) (*protectedTransitionInspection, error) {
+	store, err := releasetransition.NewPOSIXV2Store(configHome)
+	if err != nil {
+		return nil, err
+	}
+	snapshot, err := store.ReadCurrentJournal()
+	if err != nil {
+		return nil, newPublicReleaseInspectionError(
+			err, runtimeRoot, "unknown", nil, releasetransition.CodeJournalInvalid,
+			"the protected release transition journal cannot be inspected safely",
+			"restore protected release metadata from backup, then run yard update --check",
+		)
+	}
+	if !snapshot.Exists {
+		return nil, nil
+	}
+	journal, err := releasetransition.ParseJournal(snapshot.Payload)
+	if err != nil {
+		return nil, newPublicReleaseInspectionError(
+			err, runtimeRoot, "unknown", nil, releasetransition.CodeJournalInvalid,
+			"the protected release transition journal is invalid",
+			"restore protected release metadata from backup, then run yard update --check",
+		)
+	}
+	root, err := validateReleaseRoot(runtimeRoot, "runtime root")
+	if err != nil {
+		return nil, newPublicReleaseInspectionError(
+			err, runtimeRoot, journal.Goal.Target, &journal.Transaction,
+			releasetransition.CodeDependencyUnavailable,
+			"the journal-selected release store cannot be inspected safely",
+			"restore the journal-selected release, then run yard update --check",
+		)
+	}
+	target := publishedCandidate{
+		release: journal.Goal.Target,
+		root:    filepath.Join(root, "releases", string(journal.Goal.Target)),
+	}
+	verifiedTarget, err := runtime.verifyPublishedCandidate(
+		ctx, target, root, &journal.ArtifactDigest,
+	)
+	if err != nil {
+		return nil, newPublicReleaseInspectionError(
+			fmt.Errorf("verify journal-selected release: %w", err), runtimeRoot,
+			journal.Goal.Target, &journal.Transaction,
+			releasetransition.CodeDependencyUnavailable,
+			"the journal-selected release is unavailable or unverified",
+			"restore the journal-selected release, then run yard update --check",
+		)
+	}
+	defer verifiedTarget.Close()
+	if !strings.HasPrefix(string(target.release), verifiedTarget.version+"-") {
+		return nil, newPublicReleaseInspectionError(
+			errors.New("published release name does not match the verified engine version"),
+			runtimeRoot, journal.Goal.Target, &journal.Transaction,
+			releasetransition.CodeDependencyUnavailable,
+			"the journal-selected release identity is inconsistent",
+			"restore the journal-selected release, then run yard update --check",
+		)
+	}
+	publicCandidateFailure := func(cause error) error {
+		return newPublicReleaseInspectionError(
+			cause, runtimeRoot, journal.Goal.Target, &journal.Transaction,
+			releasetransition.CodeDependencyUnavailable,
+			"the journal-selected release cannot provide a valid transition inspection",
+			"restore the journal-selected release, then run yard update --check",
+		)
+	}
+	verifiedOwner := verifiedTarget
+	owner := target
+	if verifiedTarget.registryDigest != journal.RegistryDigest {
+		if journal.Goal.Direction != releasetransition.DirectionActivatePrevious {
+			return nil, publicCandidateFailure(
+				errors.New("journal target does not own the protected transition registry"),
+			)
+		}
+		owner = publishedCandidate{
+			release: journal.Releases.From,
+			root:    filepath.Join(root, "releases", string(journal.Releases.From)),
+		}
+		verifiedOwner, err = runtime.verifyPublishedCandidate(ctx, owner, root, nil)
+		if err != nil {
+			return nil, publicCandidateFailure(
+				fmt.Errorf("verify journal transition owner: %w", err),
+			)
+		}
+		defer verifiedOwner.Close()
+		if !strings.HasPrefix(string(owner.release), verifiedOwner.version+"-") ||
+			verifiedOwner.registryDigest != journal.RegistryDigest {
+			return nil, publicCandidateFailure(
+				errors.New("journal transition owner does not match the protected registry"),
+			)
+		}
+	}
+	request := releasetransition.ProcessRequest{
+		SchemaVersion:       releasetransition.ProcessProtocolSchemaV1,
+		Mode:                releasetransition.ProcessInspect,
+		RuntimeRoot:         root,
+		ConfigHome:          configHome,
+		Yard:                yard,
+		Target:              journal.Goal.Target,
+		Direction:           journal.Goal.Direction,
+		ArtifactDigest:      journal.ArtifactDigest,
+		RegistryDigest:      journal.RegistryDigest,
+		InheritedSettingIDs: slices.Clone(inheritedSettingIDs),
+		SourceIngress:       journal.SourceIngress,
+	}
+	response, err := runtime.invokeVerifiedCandidateTransition(ctx, verifiedOwner, request, "")
+	if err != nil {
+		return nil, publicCandidateFailure(err)
+	}
+	if response.Inspection == nil || response.Outcome != nil {
+		return nil, publicCandidateFailure(errors.New("candidate returned an invalid release inspection"))
+	}
+	inspection := response.Inspection
+	if err := inspection.ValidateOutcome(journal.Goal); err != nil {
+		return nil, publicCandidateFailure(
+			fmt.Errorf("candidate returned an inconsistent release inspection: %w", err),
+		)
+	}
+	if inspection.Outcome.Transaction == nil ||
+		*inspection.Outcome.Transaction != journal.Transaction {
+		return nil, publicCandidateFailure(
+			errors.New("candidate returned an inconsistent release inspection transaction"),
+		)
+	}
+	if journal.Checkpoint != releasetransition.JournalComplete {
+		if inspection.Resume == nil || *inspection.Resume != journal.Transaction ||
+			inspection.Plan != journal.ResumePlan {
+			return nil, publicCandidateFailure(
+				errors.New("candidate returned an inconsistent release inspection resume plan"),
+			)
+		}
+	} else if inspection.Resume != nil {
+		return nil, publicCandidateFailure(
+			errors.New("candidate returned a resume plan for a complete release transition"),
+		)
+	}
+	return &protectedTransitionInspection{
+		journal: journal,
+		owner: candidateVerification{
+			candidate: owner, digest: verifiedOwner.manifestDigest, version: verifiedOwner.version,
+		},
+		target: candidateVerification{
+			candidate: target, digest: verifiedTarget.manifestDigest, version: verifiedTarget.version,
+		},
+		request: request, inspection: *inspection,
+		activationReconciliationOwned: response.ActivationReconciliationOwned,
+	}, nil
+}
+
+func newPublicReleaseInspectionError(
+	cause error,
+	runtimeRoot string,
+	target releasetransition.ReleaseID,
+	transaction *releasetransition.TransactionID,
+	code releasetransition.OutcomeCode,
+	message string,
+	retry string,
+) error {
+	outcome := observedPublicReleaseOutcome(
+		runtimeRoot, target, transaction, code, message, retry,
+	)
+	return publicReleaseInspectionError{cause: cause, outcome: outcome}
+}
+
+func observedPublicReleaseOutcome(
+	runtimeRoot string,
+	target releasetransition.ReleaseID,
+	transaction *releasetransition.TransactionID,
+	code releasetransition.OutcomeCode,
+	message string,
+	retry string,
+) releasetransition.Outcome {
+	links := releasetransition.ReleaseLinks{}
+	if store, err := releasetransition.NewRuntimeLinkStore(runtimeRoot); err == nil {
+		if observed, observeErr := store.Observe(); observeErr == nil {
+			links = observed
+		}
+	}
+	return publicReleaseOutcome(links, target, transaction, code, message, retry)
+}
+
+func publicReleaseOutcome(
+	links releasetransition.ReleaseLinks,
+	target releasetransition.ReleaseID,
+	transaction *releasetransition.TransactionID,
+	code releasetransition.OutcomeCode,
+	message string,
+	retry string,
+) releasetransition.Outcome {
+	return releasetransition.Outcome{
+		Status: releasetransition.StatusOperatorActionRequired,
+		Active: links.Active, Previous: links.Previous, Target: target,
+		Code: code, Message: message, Retry: retry, Transaction: transaction,
+	}
+}
+
+// PrepareTransition performs download, verification, immutable publication and
+// candidate-owned inspection before the caller asks for confirmation. Execute
+// then carries only the exact inspected plan and a fresh opaque confirmation
+// grant into candidate-owned convergence.
+func (runtime *Runtime) PrepareTransition(
+	ctx context.Context,
+	arguments []string,
+	configHome string,
+	yard string,
+	inheritedSettingIDs []string,
+) (Prepared, error) {
+	parsed, help, err := runtime.parse(arguments)
+	if err != nil {
+		return Prepared{}, err
+	}
+	if help {
+		return runtime.prepareHelp(), nil
+	}
+	if !filepath.IsAbs(configHome) {
+		return Prepared{}, errors.New("release transition config home must be absolute")
+	}
+	protected, err := runtime.inspectProtectedTransition(
+		ctx, parsed.root, configHome, yard, inheritedSettingIDs,
+	)
+	if err != nil {
+		var public publicReleaseInspectionError
+		if errors.As(err, &public) {
+			if parsed.check {
+				return runtime.preparePublicInspectionOutcome(public.outcome), nil
+			}
+			return Prepared{}, transitionOutcomeError(public.outcome)
+		}
+		return Prepared{}, redactReleaseInspectionError(err)
+	}
+	if protected != nil {
+		unfinished := protected.journal.Checkpoint != releasetransition.JournalComplete ||
+			protected.inspection.Outcome.Status != releasetransition.StatusReady
+		exactCompletedTarget := !parsed.offline && protected.journal.SourceIngress != nil &&
+			parsed.version != "" && parsed.version == protected.target.version &&
+			(parsed.tag == "" || parsed.tag == "v"+protected.target.version) && !parsed.rollback && !parsed.force
+		if unfinished || exactCompletedTarget {
+			return runtime.prepareProtectedTransition(parsed, protected)
+		}
+	}
+	if parsed.rollback {
+		return runtime.prepareRetainedTransition(
+			ctx, parsed, configHome, yard, inheritedSettingIDs,
+		)
+	}
+	sourceIngress, err := sourceIngressRequestFromEnvironment(runtime.config.Environment)
+	if err != nil {
+		return Prepared{}, err
+	}
+	current, err := inspectRuntimeLink(parsed.root, "current")
+	if err != nil {
+		return Prepared{}, err
+	}
+	if !current.present {
+		return Prepared{}, errors.New(
+			"release-transition-uninitialized: current runtime is missing; use the verified bootstrap installer",
+		)
+	}
+	publishOnly, err := installerSupportsPublishOnly(runtime.config.Installer)
+	if err != nil {
+		return Prepared{}, err
+	}
+	if !publishOnly {
+		return Prepared{}, errors.New(
+			"release-transition-unsupported: active runtime requires a bridge release with immutable publication support",
+		)
+	}
+	if parsed.version == "" {
+		if parsed.offline {
+			return Prepared{}, errors.New("offline mode requires --version")
+		}
+		parsed.tag, err = runtime.latestTag(ctx, parsed.repository)
+		if err != nil {
+			return Prepared{}, err
+		}
+		parsed.version = strings.TrimPrefix(parsed.tag, "v")
+	} else if parsed.tag == "" {
+		parsed.tag = "v" + parsed.version
+	}
+	if !safeVersion(parsed.version) {
+		return Prepared{}, fmt.Errorf("unsafe version %q", parsed.version)
+	}
+	if err := requirePreparedReleaseRoots(parsed, true); err != nil {
+		return Prepared{}, err
+	}
+	candidate, _, err := runtime.publishCandidate(ctx, parsed)
+	if err != nil {
+		return Prepared{}, err
+	}
+	verified, err := runtime.verifyPublishedCandidate(ctx, candidate, parsed.root, nil)
+	if err != nil {
+		return Prepared{}, fmt.Errorf("published runtime is not verified: %w", err)
+	}
+	defer verified.Close()
+	if verified.version != parsed.version {
+		return Prepared{}, errors.New("published runtime version does not match the requested release")
+	}
+	if !strings.HasPrefix(string(candidate.release), verified.version+"-") {
+		return Prepared{}, errors.New("published release name does not match the verified engine version")
+	}
+	request := releasetransition.ProcessRequest{
+		SchemaVersion: releasetransition.ProcessProtocolSchemaV1,
+		Mode:          releasetransition.ProcessInspect,
+		RuntimeRoot:   parsed.root, ConfigHome: configHome, Yard: yard,
+		Target: candidate.release, Direction: releasetransition.DirectionActivateTarget,
+		ArtifactDigest:      verified.manifestDigest,
+		InheritedSettingIDs: slices.Clone(inheritedSettingIDs),
+		SourceIngress:       sourceIngress,
+	}
+	prepared, err := runtime.prepareVerifiedCandidateTransition(ctx, parsed, verified, request)
+	if err == nil {
+		return prepared, nil
+	}
+	var public publicReleaseInspectionError
+	if errors.As(err, &public) {
+		if parsed.check {
+			return runtime.preparePublicInspectionOutcome(public.outcome), nil
+		}
+		return Prepared{}, transitionOutcomeError(public.outcome)
+	}
+	outcome := observedPublicReleaseOutcome(
+		parsed.root, request.Target, nil,
+		releasetransition.CodeDependencyUnavailable,
+		"the verified candidate cannot provide a valid release transition inspection",
+		"install a compatible release, then run yard update --check",
+	)
+	if parsed.check {
+		return runtime.preparePublicInspectionOutcome(outcome), nil
+	}
+	return Prepared{}, transitionOutcomeError(outcome)
+}
+
+func sourceIngressRequestFromEnvironment(
+	environment map[string]string,
+) (*releasetransition.SourceIngressRequest, error) {
+	roles := []struct {
+		name string
+		set  func(*releasetransition.SourceIngressRequest, string)
+	}{
+		{"SUBYARD_SOURCE_INGRESS_V1_ROOT", func(value *releasetransition.SourceIngressRequest, path string) { value.SourceRoot = path }},
+		{"SUBYARD_SOURCE_INGRESS_V1_DATA", func(value *releasetransition.SourceIngressRequest, path string) { value.DataHome = path }},
+		{"SUBYARD_SOURCE_INGRESS_V1_BIN", func(value *releasetransition.SourceIngressRequest, path string) { value.BinDir = path }},
+		{"SUBYARD_SOURCE_INGRESS_V1_RC", func(value *releasetransition.SourceIngressRequest, path string) { value.RC = path }},
+		{"SUBYARD_SOURCE_INGRESS_V1_LOGIN_RC", func(value *releasetransition.SourceIngressRequest, path string) { value.LoginRC = path }},
+	}
+	request := &releasetransition.SourceIngressRequest{
+		SchemaVersion: releasetransition.SourceIngressRequestSchemaV1,
+		Kind:          releasetransition.SourceIngressPreGoV1,
+	}
+	present := 0
+	for _, role := range roles {
+		if path := environment[role.name]; path != "" {
+			role.set(request, path)
+			present++
+		}
+	}
+	if present == 0 {
+		return nil, nil
+	}
+	if present != len(roles) {
+		return nil, errors.New("source ingress environment is incomplete")
+	}
+	if err := request.Validate(); err != nil {
+		return nil, fmt.Errorf("source ingress environment is invalid: %w", err)
+	}
+	return request, nil
+}
+
+func (runtime *Runtime) prepareProtectedTransition(
+	parsed options,
+	protected *protectedTransitionInspection,
+) (Prepared, error) {
+	exactTag := "v" + protected.target.version
+	if parsed.rollback || parsed.force ||
+		(parsed.version != "" && parsed.version != protected.target.version) ||
+		(parsed.tag != "" && parsed.tag != exactTag) {
+		return Prepared{}, fmt.Errorf(
+			"an unfinished or unsafe release transition permits only exact target %s; run yard update --check",
+			protected.target.candidate.release,
+		)
+	}
+	return runtime.prepareInspectedCandidateTransition(
+		parsed, protected.owner, protected.target,
+		protected.request, protected.inspection,
+		protected.activationReconciliationOwned,
+	)
+}
+
+func (runtime *Runtime) prepareRetainedTransition(
+	ctx context.Context,
+	parsed options,
+	configHome string,
+	yard string,
+	inheritedSettingIDs []string,
+) (Prepared, error) {
+	if err := requirePreparedReleaseRoots(parsed, false); err != nil {
+		return Prepared{}, err
+	}
+	links, err := runtime.inspectRuntimeLinks(parsed.root)
+	observed := releaseLinksFromRuntimeSnapshot(links)
+	if err != nil {
+		return Prepared{}, transitionOutcomeError(publicReleaseOutcome(
+			observed, "unknown", nil,
+			releasetransition.CodeRollbackIncompatible,
+			"the runtime links do not provide a safe rollback horizon",
+			"restore valid runtime links, then run yard update --rollback",
+		))
+	}
+	if !links.current.present {
+		return Prepared{}, transitionOutcomeError(publicReleaseOutcome(
+			observed, "unknown", nil, releasetransition.CodeRollbackIncompatible,
+			"the active release is unavailable for rollback",
+			"restore the active release, then run yard update --rollback",
+		))
+	}
+	if !links.previous.present {
+		return Prepared{}, transitionOutcomeError(publicReleaseOutcome(
+			observed, "unknown", nil, releasetransition.CodeRollbackExpired,
+			"the retained previous release is no longer available for rollback",
+			"install a new release to establish a fresh rollback horizon",
+		))
+	}
+	release := releasetransition.ReleaseID(strings.TrimPrefix(links.previous.target, "releases/"))
+	for _, state := range []runtimeLinkState{links.current, links.previous} {
+		if err := validateRuntimeEngine(parsed.root, state); err != nil {
+			return Prepared{}, transitionOutcomeError(publicReleaseOutcome(
+				observed, release, nil, releasetransition.CodeRollbackIncompatible,
+				"the retained rollback horizon is not executable",
+				"restore a compatible retained release, then run yard update --rollback",
+			))
+		}
+	}
+	candidate := publishedCandidate{
+		release: release,
+		root:    filepath.Join(parsed.root, links.previous.target),
+	}
+	verified, err := runtime.verifyPublishedCandidate(ctx, candidate, parsed.root, nil)
+	if err != nil {
+		return Prepared{}, transitionOutcomeError(publicReleaseOutcome(
+			observed, release, nil, releasetransition.CodeRollbackIncompatible,
+			"the retained release is not verified for rollback",
+			"restore a compatible retained release, then run yard update --rollback",
+		))
+	}
+	defer verified.Close()
+	request := releasetransition.ProcessRequest{
+		SchemaVersion: releasetransition.ProcessProtocolSchemaV1,
+		Mode:          releasetransition.ProcessInspect,
+		RuntimeRoot:   parsed.root, ConfigHome: configHome, Yard: yard,
+		Target: release, Direction: releasetransition.DirectionActivatePrevious,
+		ArtifactDigest:      verified.manifestDigest,
+		InheritedSettingIDs: slices.Clone(inheritedSettingIDs),
+	}
+	owner := verified
+	var active *verifiedPublishedCandidate
+	// A pre-v2 target remains the verified rollback artifact, but it has no
+	// transition registry. The verified active v2 release owns that exact goal.
+	if verified.registryDigest == "" {
+		activeCandidate := publishedCandidate{
+			release: releasetransition.ReleaseID(
+				strings.TrimPrefix(links.current.target, "releases/"),
+			),
+			root: filepath.Join(parsed.root, links.current.target),
+		}
+		active, err = runtime.verifyPublishedCandidate(ctx, activeCandidate, parsed.root, nil)
+		if err != nil || active.registryDigest == "" {
+			if active != nil {
+				active.Close()
+			}
+			return Prepared{}, transitionOutcomeError(publicReleaseOutcome(
+				observed, release, nil, releasetransition.CodeRollbackIncompatible,
+				"the active release cannot own a transition to the retained release",
+				"restore a compatible retained release, then run yard update --rollback",
+			))
+		}
+		defer active.Close()
+		owner = active
+	}
+	prepared, err := runtime.prepareVerifiedTransition(ctx, parsed, owner, verified, request)
+	if err != nil {
+		return Prepared{}, transitionOutcomeError(publicReleaseOutcome(
+			observed, release, nil, releasetransition.CodeRollbackIncompatible,
+			"the retained release cannot provide a safe rollback plan",
+			"restore a compatible retained release, then run yard update --rollback",
+		))
+	}
+	return prepared, nil
+}
+
+type candidateVerification struct {
+	candidate publishedCandidate
+	digest    releasetransition.Fingerprint
+	version   string
+}
+
+func (runtime *Runtime) prepareVerifiedCandidateTransition(
+	ctx context.Context,
+	parsed options,
+	verified *verifiedPublishedCandidate,
+	request releasetransition.ProcessRequest,
+) (Prepared, error) {
+	return runtime.prepareVerifiedTransition(ctx, parsed, verified, verified, request)
+}
+
+func (runtime *Runtime) prepareVerifiedTransition(
+	ctx context.Context,
+	parsed options,
+	owner *verifiedPublishedCandidate,
+	target *verifiedPublishedCandidate,
+	request releasetransition.ProcessRequest,
+) (Prepared, error) {
+	response, err := runtime.invokeVerifiedCandidateTransition(ctx, owner, request, "")
+	if err != nil {
+		return Prepared{}, err
+	}
+	if response.Outcome != nil {
+		if response.Inspection != nil {
+			return Prepared{}, errors.New("candidate returned an invalid release inspection")
+		}
+		goal := releasetransition.Goal{Target: request.Target, Direction: request.Direction}
+		if err := response.Outcome.ValidateInspection(goal); err != nil {
+			return Prepared{}, fmt.Errorf("candidate returned an inconsistent release outcome: %w", err)
+		}
+		if parsed.check {
+			return runtime.preparePublicInspectionOutcome(*response.Outcome), nil
+		}
+		return Prepared{}, publicReleaseInspectionError{
+			cause: transitionOutcomeError(*response.Outcome), outcome: *response.Outcome,
+		}
+	}
+	if response.Inspection == nil {
+		return Prepared{}, errors.New("candidate returned an invalid release inspection")
+	}
+	return runtime.prepareInspectedCandidateTransition(
+		parsed,
+		candidateVerification{
+			candidate: owner.candidate, digest: owner.manifestDigest, version: owner.version,
+		},
+		candidateVerification{
+			candidate: target.candidate, digest: target.manifestDigest, version: target.version,
+		},
+		request, *response.Inspection,
+		response.ActivationReconciliationOwned,
+	)
+}
+
+func (runtime *Runtime) prepareInspectedCandidateTransition(
+	parsed options,
+	owner candidateVerification,
+	target candidateVerification,
+	request releasetransition.ProcessRequest,
+	inspection releasetransition.Inspection,
+	activationReconciliationOwned bool,
+) (Prepared, error) {
+	if err := inspection.ValidateOutcome(releasetransition.Goal{
+		Target: request.Target, Direction: request.Direction,
+	}); err != nil {
+		return Prepared{}, fmt.Errorf("candidate returned an inconsistent release inspection: %w", err)
+	}
+	if parsed.check {
+		return Prepared{
+			Action: "update.check", Changed: false, Consequences: nil,
+			ActiveLauncher: filepath.Join(parsed.root, "current", "bin", "yard"),
+			run: func(context.Context) error {
+				return json.NewEncoder(runtime.config.Stdout).Encode(inspection)
+			},
+		}, nil
+	}
+	if inspection.Outcome.Status == releasetransition.StatusOperatorActionRequired {
+		return Prepared{}, publicReleaseInspectionError{
+			cause: transitionOutcomeError(*inspection.Outcome), outcome: *inspection.Outcome,
+		}
+	}
+	consequences := slices.Clone(inspection.Assessment.Consequences)
+	if request.Direction == releasetransition.DirectionActivatePrevious {
+		consequences = append([]string{"reactivate the verified retained previous runtime"}, consequences...)
+	}
+	for _, decision := range inspection.Decisions {
+		consequence := fmt.Sprintf("%s %s setting %s", decision.Decision, decision.Scope, decision.Resource)
+		if decision.Result != "" {
+			consequence += " to " + decision.Result
+		}
+		consequences = append(consequences, consequence)
+	}
+	changed := inspection.Assessment.Changed
+	if inspection.Resume != nil {
+		changed = false
+	}
+	return Prepared{
+		Action: map[bool]domain.ActionID{
+			true: "update.rollback", false: "update.activate",
+		}[request.Direction == releasetransition.DirectionActivatePrevious],
+		Changed: changed, Consequences: consequences,
+		RefreshConfigs: !activationReconciliationOwned,
+		ActiveLauncher: filepath.Join(parsed.root, "current", "bin", "yard"),
+		run: func(ctx context.Context) error {
+			if err := requirePreparedReleaseRoots(parsed, false); err != nil {
+				return err
+			}
+			verifiedTarget, err := runtime.verifyPublishedCandidate(
+				ctx, target.candidate, request.RuntimeRoot, &target.digest,
+			)
+			if err != nil {
+				return fmt.Errorf("reverify target runtime: %w", err)
+			}
+			defer verifiedTarget.Close()
+			if verifiedTarget.version != target.version {
+				return fmt.Errorf("%w: target runtime version changed after inspection", domain.ErrPlanStale)
+			}
+			verifiedOwner := verifiedTarget
+			if owner.candidate.release != target.candidate.release {
+				verifiedOwner, err = runtime.verifyPublishedCandidate(
+					ctx, owner.candidate, request.RuntimeRoot, &owner.digest,
+				)
+				if err != nil {
+					return fmt.Errorf("reverify transition owner: %w", err)
+				}
+				defer verifiedOwner.Close()
+				if verifiedOwner.version != owner.version {
+					return fmt.Errorf("%w: transition owner version changed after inspection", domain.ErrPlanStale)
+				}
+			}
+			grant := releasetransition.Authorization("")
+			if inspection.Resume == nil && inspection.Assessment.Changed {
+				var grantErr error
+				grant, grantErr = newReleaseTransitionGrant()
+				if grantErr != nil {
+					return grantErr
+				}
+			}
+			request.Mode = releasetransition.ProcessConverge
+			request.Execution = &releasetransition.Execution{
+				Plan: inspection.Plan, Authorization: grant,
+			}
+			converged, convergeErr := runtime.invokeVerifiedCandidateTransition(
+				ctx, verifiedOwner, request, grant,
+			)
+			if convergeErr != nil {
+				return convergeErr
+			}
+			if converged.Outcome == nil || converged.Inspection != nil {
+				return errors.New("candidate returned an invalid release transition outcome")
+			}
+			goal := releasetransition.Goal{
+				Target: request.Target, Direction: request.Direction,
+			}
+			if err := converged.Outcome.ValidateConvergence(goal, inspection); err != nil {
+				return fmt.Errorf("candidate returned an inconsistent release transition outcome: %w", err)
+			}
+			if converged.Outcome.Status != releasetransition.StatusReady {
+				if converged.Outcome.Code == releasetransition.CodePlanStale {
+					request.Mode = releasetransition.ProcessInspect
+					request.Execution = nil
+					rechecked, recheckErr := runtime.invokeVerifiedCandidateTransition(
+						ctx, verifiedOwner, request, "",
+					)
+					if recheckErr != nil {
+						return recheckErr
+					}
+					if rechecked.Inspection == nil || rechecked.Outcome != nil {
+						return errors.New("candidate returned an invalid release reinspection")
+					}
+					if err := rechecked.Inspection.ValidateOutcome(goal); err != nil {
+						return fmt.Errorf("candidate returned an inconsistent release reinspection: %w", err)
+					}
+					if rechecked.Inspection.Outcome.Status == releasetransition.StatusReady {
+						return nil
+					}
+					return transitionOutcomeError(*rechecked.Inspection.Outcome)
+				}
+				return transitionOutcomeError(*converged.Outcome)
+			}
+			for _, warning := range converged.Outcome.Warnings {
+				if runtime.config.Stderr != nil {
+					fmt.Fprintf(runtime.config.Stderr, "warning: release transition: %s\n", warning)
+				}
+			}
+			return nil
+		},
+	}, nil
+}
+
+func (runtime *Runtime) preparePublicInspectionOutcome(outcome releasetransition.Outcome) Prepared {
+	return Prepared{
+		Action: "update.check",
+		run: func(context.Context) error {
+			return json.NewEncoder(runtime.config.Stdout).Encode(struct {
+				Outcome releasetransition.Outcome `json:"outcome"`
+			}{Outcome: outcome})
+		},
+	}
+}
+
+func installerSupportsPublishOnly(path string) (bool, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return false, err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return false, errors.New("runtime installer is not a regular file")
+	}
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return false, err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(info, opened) {
+		return false, errors.New("runtime installer changed while opening")
+	}
+	payload, err := io.ReadAll(io.LimitReader(file, 1<<20+1))
+	if err != nil {
+		return false, err
+	}
+	if len(payload) > 1<<20 {
+		return false, errors.New("runtime installer is too large")
+	}
+	return bytes.Contains(payload, []byte("--publish-only")), nil
+}
+
+type publishedCandidate struct {
+	release releasetransition.ReleaseID
+	root    string
+}
+
+func (runtime *Runtime) publishCandidate(
+	ctx context.Context,
+	options options,
+) (publishedCandidate, string, error) {
+	osName, arch := goruntime.GOOS, goruntime.GOARCH
+	if osName != "linux" || arch != "amd64" && arch != "arm64" {
+		return publishedCandidate{}, "", fmt.Errorf("unsupported platform %s/%s", osName, arch)
+	}
+	name := fmt.Sprintf("subyard-%s-%s-%s.tar.gz", options.version, osName, arch)
+	directory := filepath.Join(options.cache, options.version)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return publishedCandidate{}, "", err
+	}
+	paths := make([]string, 4)
+	for index, suffix := range []string{"", ".sha256", ".manifest.json", ".provenance.json"} {
+		paths[index] = filepath.Join(directory, name+suffix)
+		if err := runtime.fetch(ctx, options, name+suffix, paths[index]); err != nil {
+			return publishedCandidate{}, "", fmt.Errorf(
+				"release download failed; current runtime was not changed: %w", err,
+			)
+		}
+	}
+	target, digest, err := releaseBundleIdentity(options.version, paths[0])
+	if err != nil {
+		return publishedCandidate{}, "", fmt.Errorf("derive downloaded release identity: %w", err)
+	}
+	var output bytes.Buffer
+	if err := runtime.installWithOutput(ctx, &output,
+		"--runtime-root", options.root, "--publish-only",
+		"--bundle", paths[0], "--checksum", paths[1],
+		"--manifest", paths[2], "--provenance", paths[3],
+	); err != nil {
+		return publishedCandidate{}, "", err
+	}
+	if strings.TrimSpace(output.String()) != target {
+		return publishedCandidate{}, "", errors.New("installer returned an unexpected published release identity")
+	}
+	release := releasetransition.ReleaseID(strings.TrimPrefix(target, "releases/"))
+	root := filepath.Join(options.root, target)
+	return publishedCandidate{release: release, root: root}, digest, nil
+}
+
+func newReleaseTransitionGrant() (releasetransition.Authorization, error) {
+	var value [32]byte
+	if _, err := crand.Read(value[:]); err != nil {
+		return "", fmt.Errorf("generate release transition authorization: %w", err)
+	}
+	return releasetransition.Authorization("grant-v1-" + hex.EncodeToString(value[:])), nil
+}
+
+func transitionOutcomeError(outcome releasetransition.Outcome) error {
+	previous := "none"
+	if outcome.Previous != nil {
+		previous = string(*outcome.Previous)
+	}
+	transaction := "none"
+	if outcome.Transaction != nil {
+		transaction = string(*outcome.Transaction)
+	}
+	return fmt.Errorf(
+		"release transition %s: code=%s active=%s previous=%s target=%s transaction=%s; %s; next: %s",
+		outcome.Status, outcome.Code, outcome.Active, previous, outcome.Target,
+		transaction, outcome.Message, outcome.Retry,
+	)
+}
+
 type options struct {
 	channel, version, root, cache, repository, baseURL, tag string
 	offline, check, rollback, force                         bool
 }
 
-func (runtime *Runtime) Prepare(ctx context.Context, arguments []string) (Prepared, error) {
-	options, help, err := runtime.parse(arguments)
-	if err != nil {
-		return Prepared{}, err
-	}
-	if help {
-		return Prepared{Action: "update.help", run: func(context.Context) error {
-			fmt.Fprintln(runtime.config.Stdout, "Usage: yard update [--check] [--version VERSION] [--offline] [--rollback] [--force]")
-			return nil
-		}}, nil
-	}
-	if options.rollback {
-		expected, err := runtime.inspectRuntimeLinks(ctx, options.root, true)
-		if err != nil {
-			return Prepared{}, err
-		}
-		return Prepared{Action: "update.rollback", Changed: true, Consequences: []string{
-			"verify and reactivate the previous immutable runtime",
-			"refresh materialized agent configuration",
-		}, run: func(ctx context.Context) error {
-			if err := requirePreparedReleaseRoots(options, false); err != nil {
-				return err
-			}
-			if err := runtime.requireRuntimeLinks(ctx, options.root, expected, true); err != nil {
-				return err
-			}
-			return runtime.install(ctx, "--runtime-root", options.root, "--rollback")
-		}, RefreshConfigs: true, ActiveLauncher: filepath.Join(options.root, "current", "bin", "yard")}, nil
-	}
-	if options.version == "" {
-		if options.offline {
-			return Prepared{}, errors.New("offline mode requires --version")
-		}
-		options.tag, err = runtime.latestTag(ctx, options.repository)
-		if err != nil {
-			return Prepared{}, err
-		}
-		options.version = strings.TrimPrefix(options.tag, "v")
-	} else if options.tag == "" {
-		options.tag = "v" + options.version
-	}
-	if !safeVersion(options.version) {
-		return Prepared{}, fmt.Errorf("unsafe version %q", options.version)
-	}
-	consequences := []string{
-		fmt.Sprintf("download and verify runtime %s for %s/%s", options.version, goruntime.GOOS, goruntime.GOARCH),
-		map[bool]string{true: "verify compatibility without activation", false: "atomically activate it and retain the previous runtime"}[options.check],
-	}
-	if !options.check {
-		consequences = append(
-			consequences,
-			"apply every required ordered config and lifecycle migration",
-			"refresh materialized agent configuration",
-		)
-	}
-	action := domain.ActionID("update.activate")
-	if options.check {
-		action = "update.check"
-	}
-	var expected runtimeLinkSnapshot
-	if !options.check {
-		expected, err = runtime.inspectRuntimeLinks(ctx, options.root, false)
-		if err != nil {
-			return Prepared{}, err
-		}
-	}
-	return Prepared{
-		Action:         action,
-		Changed:        true,
-		Consequences:   consequences,
-		RefreshConfigs: !options.check,
-		ActiveLauncher: filepath.Join(options.root, "current", "bin", "yard"),
-		run: func(ctx context.Context) error {
-			if err := requirePreparedReleaseRoots(options, true); err != nil {
-				return err
-			}
-			if !options.check {
-				if err := runtime.requireRuntimeLinks(ctx, options.root, expected, false); err != nil {
-					return err
-				}
-			}
-			return runtime.execute(ctx, options)
-		},
-	}, nil
+func (runtime *Runtime) prepareHelp() Prepared {
+	return Prepared{Action: "update.help", run: func(context.Context) error {
+		fmt.Fprintln(runtime.config.Stdout, "Usage: yard update [--check] [--version VERSION] [--offline] [--rollback] [--force]")
+		return nil
+	}}
 }
 
 type runtimeLinkState struct {
@@ -152,54 +954,37 @@ type runtimeLinkSnapshot struct {
 	previous runtimeLinkState
 }
 
-func (runtime *Runtime) inspectRuntimeLinks(
-	ctx context.Context,
-	root string,
-	requireRollback bool,
-) (runtimeLinkSnapshot, error) {
+func (runtime *Runtime) inspectRuntimeLinks(root string) (runtimeLinkSnapshot, error) {
 	current, err := inspectRuntimeLink(root, "current")
 	if err != nil {
 		return runtimeLinkSnapshot{}, err
 	}
 	previous, err := inspectRuntimeLink(root, "previous")
 	if err != nil {
-		return runtimeLinkSnapshot{}, err
+		return runtimeLinkSnapshot{current: current}, err
 	}
 	snapshot := runtimeLinkSnapshot{current: current, previous: previous}
-	if !requireRollback {
-		return snapshot, nil
-	}
-	if !current.present || !previous.present {
-		return runtimeLinkSnapshot{}, errors.New("valid current and previous runtimes are required for rollback")
-	}
-	for _, state := range []runtimeLinkState{current, previous} {
-		engine := filepath.Join(root, state.target, "bin", "yard-engine")
-		info, err := os.Lstat(engine)
-		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o111 == 0 {
-			return runtimeLinkSnapshot{}, fmt.Errorf("runtime %q has no executable yard-engine", state.target)
-		}
-	}
-	previousEngine := filepath.Join(root, previous.target, "bin", "yard-engine")
-	command := exec.CommandContext(ctx, previousEngine, "--version")
-	command.Env = []string{"HOME=" + filepath.Dir(filepath.Dir(previousEngine))}
-	if err := command.Run(); err != nil {
-		return runtimeLinkSnapshot{}, fmt.Errorf("previous runtime self-check failed: %w", err)
-	}
 	return snapshot, nil
 }
 
-func (runtime *Runtime) requireRuntimeLinks(
-	ctx context.Context,
-	root string,
-	expected runtimeLinkSnapshot,
-	requireRollback bool,
-) error {
-	actual, err := runtime.inspectRuntimeLinks(ctx, root, requireRollback)
-	if err != nil || actual != expected {
-		if err != nil {
-			return fmt.Errorf("%w: runtime links changed: %v", domain.ErrPlanStale, err)
-		}
-		return fmt.Errorf("%w: runtime links changed", domain.ErrPlanStale)
+func releaseLinksFromRuntimeSnapshot(snapshot runtimeLinkSnapshot) releasetransition.ReleaseLinks {
+	links := releasetransition.ReleaseLinks{}
+	if snapshot.current.present {
+		links.Active = releasetransition.ReleaseID(strings.TrimPrefix(snapshot.current.target, "releases/"))
+	}
+	if snapshot.previous.present {
+		previous := releasetransition.ReleaseID(strings.TrimPrefix(snapshot.previous.target, "releases/"))
+		links.Previous = &previous
+	}
+	return links
+}
+
+func validateRuntimeEngine(root string, state runtimeLinkState) error {
+	engine := filepath.Join(root, state.target, "bin", "yard-engine")
+	info, err := os.Lstat(engine)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 ||
+		info.Mode().Perm()&0o111 == 0 {
+		return fmt.Errorf("runtime %q has no executable yard-engine", state.target)
 	}
 	return nil
 }
@@ -359,39 +1144,58 @@ func requirePreparedReleaseRoots(options options, requireCache bool) error {
 	return nil
 }
 
-func (runtime *Runtime) execute(ctx context.Context, options options) error {
-	osName, arch := goruntime.GOOS, goruntime.GOARCH
-	if osName != "linux" || arch != "amd64" && arch != "arm64" {
-		return fmt.Errorf("unsupported platform %s/%s", osName, arch)
+func releaseBundleIdentity(version, bundle string) (string, string, error) {
+	info, err := os.Lstat(bundle)
+	if err != nil {
+		return "", "", err
 	}
-	name := fmt.Sprintf("subyard-%s-%s-%s.tar.gz", options.version, osName, arch)
-	directory := filepath.Join(options.cache, options.version)
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		return err
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return "", "", errors.New("downloaded release bundle is not a regular file")
 	}
-	paths := make([]string, 4)
-	for index, suffix := range []string{"", ".sha256", ".manifest.json", ".provenance.json"} {
-		paths[index] = filepath.Join(directory, name+suffix)
-		if err := runtime.fetch(ctx, options, name+suffix, paths[index]); err != nil {
-			return fmt.Errorf("release download failed; current runtime was not changed: %w", err)
+	file, err := os.OpenFile(bundle, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return "", "", err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil {
+		return "", "", err
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
+		return "", "", errors.New("downloaded release bundle changed while opening")
+	}
+	digest := sha256.New()
+	if _, err := io.Copy(digest, file); err != nil {
+		return "", "", err
+	}
+	encoded := hex.EncodeToString(digest.Sum(nil))
+	return filepath.Join("releases", version+"-"+encoded[:12]), encoded, nil
+}
+
+func releaseMigrationEnvironment(
+	values map[string]string,
+	repositoryRoot string,
+	runtimeRoot string,
+) []string {
+	environment := make(map[string]string)
+	if values == nil {
+		for _, assignment := range os.Environ() {
+			name, value, ok := strings.Cut(assignment, "=")
+			if ok {
+				environment[name] = value
+			}
+		}
+	} else {
+		for name, value := range values {
+			environment[name] = value
 		}
 	}
-	current := "none"
-	engine := filepath.Join(options.root, "current", "bin", "yard-engine")
-	if output, err := exec.CommandContext(ctx, engine, "--version").Output(); err == nil {
-		fields := strings.Fields(string(output))
-		if len(fields) > 1 {
-			current = fields[1]
-		}
-	}
-	fmt.Fprintf(runtime.config.Stdout, "channel=%s current=%s available=%s platform=%s/%s\n", options.channel, current, options.version, osName, arch)
-	arguments := []string{"--runtime-root", options.root, "--bundle", paths[0], "--checksum", paths[1], "--manifest", paths[2], "--provenance", paths[3]}
-	if options.check {
-		arguments = append(arguments, "--check")
-	} else if !options.force && current == options.version {
-		fmt.Fprintln(runtime.config.Stdout, "runtime is already current; checking migrations")
-	}
-	return runtime.install(ctx, arguments...)
+	delete(environment, "YARD_ENGINE_PATH")
+	delete(environment, "SUBYARD_RELEASE_TRANSITION_GRANT_FD")
+	environment["SUBYARD_REPOSITORY_ROOT"] = repositoryRoot
+	environment["YARD_RUNTIME_ROOT"] = runtimeRoot
+	environment["SUBYARD_INTERNAL_MIGRATION_CHILD"] = "1"
+	return commandEnvironment(environment)
 }
 
 func (runtime *Runtime) fetch(ctx context.Context, options options, name, destination string) error {
@@ -482,10 +1286,14 @@ func (runtime *Runtime) latestTag(ctx context.Context, repository string) (strin
 	return payload.Tag, nil
 }
 
-func (runtime *Runtime) install(ctx context.Context, arguments ...string) error {
+func (runtime *Runtime) installWithOutput(
+	ctx context.Context,
+	stdout io.Writer,
+	arguments ...string,
+) error {
 	command := exec.CommandContext(ctx, runtime.config.Installer, arguments...)
 	command.Env = commandEnvironment(runtime.config.Environment)
-	command.Stdout = runtime.config.Stdout
+	command.Stdout = stdout
 	command.Stderr = runtime.config.Stderr
 	return command.Run()
 }

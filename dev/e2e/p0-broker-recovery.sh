@@ -20,6 +20,9 @@ RECOVERY_POLL_SECONDS=2
 RECOVERY_WAIT_SECONDS="${P0_BROKER_RECOVERY_WAIT_SECONDS:-6000}"
 RECOVERY_STATUS_TIMEOUT_SECONDS="${P0_BROKER_RECOVERY_STATUS_TIMEOUT_SECONDS:-30}"
 RECOVERY_STATUS_KILL_AFTER_SECONDS=10
+HOLDER_STOP_GRACE_SECONDS=30
+HOLDER_KILL_GRACE_SECONDS=10
+HOLDER_STARTED_PID=''
 
 die() { printf 'p0-broker-recovery: %s\n' "$*" >&2; exit 2; }
 
@@ -128,8 +131,7 @@ cleanup() {
     [ -z "$STATE_PARENT" ] || : > "$STATE_PARENT/$client.release"
   done
   for pid in "$VICTIM_PID" "$NEIGHBOR_PID"; do
-    [ -z "$pid" ] || kill "$pid" >/dev/null 2>&1 || true
-    [ -z "$pid" ] || wait "$pid" >/dev/null 2>&1 || true
+    [ -z "$pid" ] || stop_holder_child "$pid" >/dev/null 2>&1 || rc=3
   done
   if [ -n "$STATE_PARENT" ]; then
     case "$STATE_PARENT" in
@@ -165,6 +167,45 @@ wait_for_ready() {
   done
   tail -n 240 "$STATE_PARENT/$client.log" >&2
   return 1
+}
+
+start_holder_child() {
+  set -m
+  (set +m; "$@") &
+  HOLDER_STARTED_PID=$!
+  set +m
+}
+
+stop_holder_child() {
+  local root="$1" now stop_deadline kill_deadline
+  if ! kill -0 -- "-$root" >/dev/null 2>&1; then
+    wait "$root" >/dev/null 2>&1 || true
+    return 0
+  fi
+  kill -TERM -- "-$root" >/dev/null 2>&1 || true
+  now="$(recovery_monotonic_seconds)"
+  stop_deadline=$((now + HOLDER_STOP_GRACE_SECONDS))
+  while kill -0 -- "-$root" >/dev/null 2>&1; do
+    now="$(recovery_monotonic_seconds)"
+    [ "$now" -lt "$stop_deadline" ] || break
+    sleep 1
+  done
+  if kill -0 -- "-$root" >/dev/null 2>&1; then
+    kill -KILL -- "-$root" >/dev/null 2>&1 || true
+  fi
+  now="$(recovery_monotonic_seconds)"
+  kill_deadline=$((now + HOLDER_KILL_GRACE_SECONDS))
+  while kill -0 -- "-$root" >/dev/null 2>&1; do
+    now="$(recovery_monotonic_seconds)"
+    [ "$now" -lt "$kill_deadline" ] || break
+    sleep 1
+  done
+  if kill -0 -- "-$root" >/dev/null 2>&1; then
+    printf 'p0-broker-recovery: holder process group %s survived bounded shutdown\n' \
+      "$root" >&2
+    return 1
+  fi
+  wait "$root" >/dev/null 2>&1 || true
 }
 
 hold_lease() (
@@ -221,10 +262,10 @@ reclaim_held_pair_capacity() {
 }
 
 install_candidate_update() {
-  local arch release artifact runtime_root
-  artifact="${P0_BROKER_RECOVERY_UPDATE_ARTIFACT:-}"
-  if [ -z "$artifact" ]; then
-    arch="$(go env GOARCH)"
+	local arch release artifact runtime_root release_cache
+	artifact="${P0_BROKER_RECOVERY_UPDATE_ARTIFACT:-}"
+	if [ -z "$artifact" ]; then
+		arch="$(go env GOARCH)"
     release="$ROOT/.build/p0-broker-recovery-update"
     artifact="$release/subyard-p0-broker-recovery-update-linux-$arch"
     dev/package-engine.sh \
@@ -237,22 +278,26 @@ install_candidate_update() {
     "$artifact.tar.gz.sha256" \
     "$artifact.tar.gz.manifest.json" \
     "$artifact.tar.gz.provenance.json"; do
-    [ -f "$input" ] && [ ! -L "$input" ] \
-      || die "prepared candidate update input is unavailable: $input"
-  done
-  runtime_root="${SUBYARD_HOME:-$HOME/.subyard}/runtime"
-  scripts/install-runtime-release.sh \
-    --runtime-root "$runtime_root" \
-    --bundle "$artifact.tar.gz" \
-    --checksum "$artifact.tar.gz.sha256" \
-    --manifest "$artifact.tar.gz.manifest.json" \
-    --provenance "$artifact.tar.gz.provenance.json" >/dev/null
+		[ -f "$input" ] && [ ! -L "$input" ] \
+			|| die "prepared candidate update input is unavailable: $input"
+	done
+	release="$(dirname "$artifact")"
+	runtime_root="${SUBYARD_HOME:-$HOME/.subyard}/runtime"
+	release_cache="${SUBYARD_HOME:-$HOME/.subyard}/releases"
+	YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_CACHE="$release_cache" \
+		"$runtime_root/current/bin/yard" update \
+		--runtime-root "$runtime_root" --version p0-broker-recovery-update \
+		--check >/dev/null
+	YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_CACHE="$release_cache" \
+		"$runtime_root/current/bin/yard" update \
+		--runtime-root "$runtime_root" --version p0-broker-recovery-update \
+		--yes >/dev/null
 }
 
 rollback_candidate_update() {
-  local runtime_root="${SUBYARD_HOME:-$HOME/.subyard}/runtime"
-  "$runtime_root/current/scripts/install-runtime-release.sh" \
-    --runtime-root "$runtime_root" --rollback >/dev/null
+	local runtime_root="${SUBYARD_HOME:-$HOME/.subyard}/runtime"
+	"$runtime_root/current/bin/yard" update \
+		--runtime-root "$runtime_root" --rollback --yes >/dev/null
 }
 
 wait_for_slot_state() {
@@ -367,13 +412,14 @@ initial_generation="$(jq -r '
 
 victim_attempt=1
 while true; do
-  hold_lease victim quarantine-victim slot-001 \
-    >"$STATE_PARENT/victim.log" 2>&1 &
-  VICTIM_PID=$!
+  start_holder_child hold_lease victim quarantine-victim slot-001 \
+    >"$STATE_PARENT/victim.log" 2>&1
+  VICTIM_PID="$HOLDER_STARTED_PID"
   if wait_for_ready victim "$VICTIM_PID"; then
     break
   fi
-  wait "$VICTIM_PID" >/dev/null 2>&1 || true
+  stop_holder_child "$VICTIM_PID" \
+    || die 'victim holder did not stop after its readiness timeout'
   VICTIM_PID=''
   report_slot_diagnostics slot-001 \
     "victim provisioning attempt $victim_attempt failed"
@@ -403,13 +449,14 @@ stop_slot_pair 1
 
 neighbor_attempt=1
 while true; do
-  hold_lease neighbor held-neighbor slot-002 \
-    >"$STATE_PARENT/neighbor.log" 2>&1 &
-  NEIGHBOR_PID=$!
+  start_holder_child hold_lease neighbor held-neighbor slot-002 \
+    >"$STATE_PARENT/neighbor.log" 2>&1
+  NEIGHBOR_PID="$HOLDER_STARTED_PID"
   if wait_for_ready neighbor "$NEIGHBOR_PID"; then
     break
   fi
-  wait "$NEIGHBOR_PID" >/dev/null 2>&1 || true
+  stop_holder_child "$NEIGHBOR_PID" \
+    || die 'neighbor holder did not stop after its readiness timeout'
   NEIGHBOR_PID=''
   report_slot_diagnostics slot-002 \
     "neighbor provisioning attempt $neighbor_attempt failed"

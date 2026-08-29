@@ -8,6 +8,7 @@ OUTPUT_DIR="$REPO/.build/release"
 VERSION="${YARD_BUILD_VERSION:-0.1.0-dev}"
 TARGET_ARCH="$(go env GOARCH 2>/dev/null || true)"
 MIGRATION_REGISTRY="$REPO/config/migrations.json"
+RELEASE_TRANSITION_REGISTRY="$REPO/config/release-transition.json"
 RUNTIME_INSTALLER="$REPO/scripts/install-runtime-release.sh"
 
 while [ $# -gt 0 ]; do
@@ -27,7 +28,7 @@ command -v git >/dev/null 2>&1 || { printf 'package-engine: Git is required\n' >
 command -v jq >/dev/null 2>&1 || { printf 'package-engine: jq is required\n' >&2; exit 2; }
 command -v sha256sum >/dev/null 2>&1 || { printf 'package-engine: sha256sum is required\n' >&2; exit 2; }
 case "$TARGET_ARCH" in amd64 | arm64) ;; *) printf 'package-engine: unsupported architecture: %s\n' "$TARGET_ARCH" >&2; exit 2 ;; esac
-for package_input in "$MIGRATION_REGISTRY" "$RUNTIME_INSTALLER"; do
+for package_input in "$MIGRATION_REGISTRY" "$RELEASE_TRANSITION_REGISTRY" "$RUNTIME_INSTALLER"; do
   [ -f "$package_input" ] && [ ! -L "$package_input" ] \
     || { printf 'package-engine: package override must be a regular non-symlink file: %s\n' "$package_input" >&2; exit 2; }
 done
@@ -113,6 +114,7 @@ done < "$runtime_list"
 rm -f -- "$runtime_list"
 install -m 0755 "$RUNTIME_INSTALLER" "$bundle_stage/scripts/install-runtime-release.sh"
 install -m 0644 "$MIGRATION_REGISTRY" "$bundle_stage/config/migrations.json"
+install -m 0644 "$RELEASE_TRANSITION_REGISTRY" "$bundle_stage/config/release-transition.json"
 for required in \
   scripts/install-runtime-release.sh \
   scripts/install-ssh-relay.sh \
@@ -121,6 +123,7 @@ for required in \
   config/systemd/subyard-test-vms-host-sink.timer.in \
   config/commands.registry \
   config/migrations.json \
+  config/release-transition.json \
   completions/yard.bash; do
   [ -f "$bundle_stage/$required" ] \
     || { printf 'package-engine: runtime allowlist omitted %s\n' "$required" >&2; exit 1; }

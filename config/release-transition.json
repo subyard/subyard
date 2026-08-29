@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 2,
+  "minimumEpochs": {
+    "owner-registration": 1,
+    "power-metadata": 1,
+    "project-state": 1,
+    "settings": 1
+  },
+  "currentEpochs": {
+    "owner-registration": 2,
+    "power-metadata": 1,
+    "project-state": 1,
+    "settings": 2
+  },
+  "migrations": [
+    {
+      "id": "canonicalize-test-vms-settings-v2",
+      "domain": "settings",
+      "fromEpoch": 1,
+      "toEpoch": 2,
+      "kind": "test-vms-settings-v1-to-v2"
+    },
+    {
+      "id": "canonicalize-test-yard-owner-v2",
+      "domain": "owner-registration",
+      "fromEpoch": 1,
+      "toEpoch": 2,
+      "kind": "test-yard-owner-v1-to-v2",
+      "dependsOn": ["canonicalize-test-vms-settings-v2"]
+    }
+  ]
+}

@@ -154,8 +154,8 @@ invalid targets, and unknown schema versions. Writes use a mode-0600 candidate i
 directory, validate it, then atomically rename it over the prior record. When a store is opened,
 valid owner-owned schema-1 records whose mode matches the original Bash writer's `0666 & umask`
 output are tightened in place to `0600` through a no-follow file descriptor; symlinks, malformed
-records and anomalous modes remain fail-closed. The same repair is registered in `_migrate apply`
-for release upgrades.
+records and anomalous modes remain fail-closed. Release upgrades do not replay this repair as a
+perpetual desired-state guard; opening the native store remains the owner of that invariant.
 Store open also converges legacy duplicate display names deterministically without changing their
 IDs or paths. Incus and Docker consumers derive collision-free technical names with byte-wise
 `_hh` escaping; Docker image suffixes add a leading `p` and escape uppercase and punctuation so
@@ -163,20 +163,40 @@ the repository name stays lowercase-safe. These encodings are not project identi
 
 ### Release migrations
 
-Release-owned transitions are declared in
-[`config/migrations.json`](../config/migrations.json). The
-[`internal/migration`](../internal/migration) package validates the registry and owns protected
-state/recovery; `_migrate check` is read-only. The
-[runtime installer](../scripts/install-runtime-release.sh) prepares data before activation,
-finalizes it only after the candidate is active, and restores the previous layout on rollback.
-Every required transition from the persisted layout is applied in registry order, including typed
-lifecycle transitions. Migrations cannot execute registry-supplied commands or leave compatibility
-symlinks at old paths.
-After activation, the dedicated test-yard migration reconciles a configured broker only when its
-outer yard and broker service are already active, then verifies the installed engine and facade
-status. It never starts a stopped, disabled or never-initialized broker as an update side effect.
-A running legacy fixed-VM backend that predates the broker unit is treated as the active predecessor
-during the one-time owner migration.
+Release-owned one-time transitions are declared in
+[`config/release-transition.json`](../config/release-transition.json). The
+[`internal/releasetransition`](../internal/releasetransition) module owns read-only inspection,
+authorization binding, protected evidence, per-domain epoch advancement, stable runtime links,
+forward recovery and post-activation reconciliation. A completed one-time migration is durable
+history and is never reopened to repair later drift.
+Each compiled capability classifies its bounded resources as preserve, transform, canonicalize,
+reset or block before confirmation. An authorized reset is a successful, journaled one-time result;
+unknown or ambiguous state produces a structured operator-action outcome without overwriting it.
+
+The [runtime installer](../scripts/install-runtime-release.sh) verifies, unpacks and publishes an
+immutable candidate. It may create the first `current` link during a clean bootstrap, but it does
+not activate an update, perform rollback, or invoke mutating `_migrate` verbs. Installed update,
+same-version retry, source import and explicit rollback all use the candidate-owned
+`_release-transition` process contract. Rollback is a newly inspected `activate-previous` goal and
+requires an intact retained runtime within its compatibility horizon.
+
+An installed runtime whose bundled installer predates immutable `--publish-only` cannot be changed
+retroactively. Re-running the verified standalone bootstrap is its one-time bridge: the downloaded
+installer publishes the candidate without touching stable links, then the candidate performs the
+ordinary assessed `ReleaseTransition`. The superseded runtime is never allowed to call mutating
+`_migrate` verbs against the candidate.
+
+Registry v2 contains only compiled, typed one-time capabilities. Activation reconcilers separately
+refresh materialized config, an already-active test-VM broker and an installed host power runtime;
+they do not change the migration ledger and never start an inactive service as an update side
+effect. The old `config/migrations.json` reader remains only as a bounded compatibility seam for
+recognized unfinished release journals until the minimum supported release is advanced.
+
+When an explicit rollback targets a retained pre-v2 runtime, that verified runtime remains the
+artifact target while the verified active v2 runtime owns inspection, convergence and recovery.
+The superseded global v1 layout remains immutable history. Compatibility-sensitive materialized
+runtime such as the host power reconciler stays at the v2 owner's verified form instead of
+reinstalling a known-incompatible pre-v2 unit during rollback.
 
 Before a project adapter starts, Go resolves paths/names/qualified selectors across yards, loads the
 owning context, validates the typed record and supplies a `SUBYARD_PROJECT_*` snapshot. Physical

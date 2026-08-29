@@ -254,6 +254,14 @@ func yardAssignments(loaded config.Loaded, path string) map[string]string {
 }
 
 func (cli *CLI) initPlatform(loaded config.Loaded, powerYards []domain.Context) ports.InitPlatform {
+	return cli.initPlatformWithDispatcher(loaded, powerYards, cli.options.DispatcherPath)
+}
+
+func (cli *CLI) initPlatformWithDispatcher(
+	loaded config.Loaded,
+	powerYards []domain.Context,
+	dispatcherPath string,
+) ports.InitPlatform {
 	if cli.options.InitPlatform != nil {
 		return cli.options.InitPlatform
 	}
@@ -261,8 +269,8 @@ func (cli *CLI) initPlatform(loaded config.Loaded, powerYards []domain.Context) 
 	if cli.retainedAdapterCompatibility {
 		config.AddLegacySettingAliases(environment)
 	}
-	environment["SUBYARD_DISPATCHER_PATH"] = cli.options.DispatcherPath
-	environment["SUBYARD_POWER_ENGINE_SOURCE"] = cli.options.DispatcherPath
+	environment["SUBYARD_DISPATCHER_PATH"] = dispatcherPath
+	environment["SUBYARD_POWER_ENGINE_SOURCE"] = dispatcherPath
 	incusPort, executor := cli.statusPorts()
 	configWriter, _ := incusPort.(ports.InstanceConfigWriter)
 	return reconcileruntime.Runtime{
@@ -296,6 +304,9 @@ func (cli *CLI) powerYardContexts(current config.Loaded) ([]domain.Context, erro
 		for key, value := range cli.baseEnv {
 			environment[key] = value
 		}
+		environment["SUBYARD_OPERATOR_HOME"] = operatorHome
+		environment["SUBYARD_CONFIG_HOME"] = current.Context.Paths.ConfigHome
+		environment["SUBYARD_HOME"] = current.Context.Paths.DataHome
 		loaded, err := config.Load(config.LoadOptions{
 			RepositoryRoot: cli.options.RepositoryRoot,
 			OperatorHome:   operatorHome,

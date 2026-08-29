@@ -212,6 +212,41 @@ ensure_outer_foreign_ipv4() {
   '
 }
 
+remove_owned_outer_backend() {
+  local failed=0 owner used_by
+  if [ -n "$OUTER_POOL" ] \
+    && incus storage show "$OUTER_POOL" --project default >/dev/null 2>&1; then
+    owner="$(incus storage get "$OUTER_POOL" user.subyard.owner \
+      --project default 2>/dev/null)"
+    if [ "$owner" != nested-teardown-e2e-v1 ]; then
+      printf 'nested-teardown-boundary: refusing non-owned pool %s\n' \
+        "$OUTER_POOL" >&2
+      failed=1
+    elif ! incus storage delete "$OUTER_POOL" --project default >/dev/null; then
+      failed=1
+    fi
+  fi
+  if [ -n "$OUTER_BRIDGE" ] \
+    && incus network show "$OUTER_BRIDGE" --project default >/dev/null 2>&1; then
+    owner="$(incus network get "$OUTER_BRIDGE" user.subyard.owner \
+      --project default 2>/dev/null)"
+    used_by="$(incus network show "$OUTER_BRIDGE" --project default \
+      --format json | jq -r '.used_by | length')"
+    if [ "$owner" != nested-teardown-e2e-v1 ]; then
+      printf 'nested-teardown-boundary: refusing non-owned network %s\n' \
+        "$OUTER_BRIDGE" >&2
+      failed=1
+    elif [ "$used_by" != 0 ]; then
+      printf 'nested-teardown-boundary: refusing network %s with active users\n' \
+        "$OUTER_BRIDGE" >&2
+      failed=1
+    elif ! incus network delete "$OUTER_BRIDGE" --project default >/dev/null; then
+      failed=1
+    fi
+  fi
+  return "$failed"
+}
+
 cleanup() {
   local rc=$?
   trap - EXIT INT TERM
@@ -219,22 +254,7 @@ cleanup() {
   if [ -n "$OUTER_PROJECT" ] && incus project show "$OUTER_PROJECT" >/dev/null 2>&1; then
     yard teardown --yes >/dev/null 2>&1 || rc=3
   fi
-  if [ -n "$OUTER_POOL" ] && incus storage show "$OUTER_POOL" --project default >/dev/null 2>&1 \
-    && [ "$(incus storage get "$OUTER_POOL" user.subyard.owner --project default 2>/dev/null)" = \
-      nested-teardown-e2e-v1 ]; then
-    incus storage delete "$OUTER_POOL" --project default >/dev/null 2>&1 || rc=3
-  fi
-  if [ -n "$OUTER_BRIDGE" ] \
-    && incus network show "$OUTER_BRIDGE" --project default >/dev/null 2>&1; then
-    if [ "$(incus network get "$OUTER_BRIDGE" user.subyard.owner \
-      --project default 2>/dev/null)" = nested-teardown-e2e-v1 ] \
-      && [ "$(incus network show "$OUTER_BRIDGE" --project default \
-        | sed -n 's/^used_by: //p')" = '[]' ]; then
-      incus network delete "$OUTER_BRIDGE" --project default >/dev/null 2>&1 || rc=3
-    else
-      rc=3
-    fi
-  fi
+  remove_owned_outer_backend || rc=3
   if [ -n "$STATE" ] && [[ "$STATE" = /var/tmp/subyard-nested-teardown.* ]] \
     && [ -f "$STATE/.marker" ] && [ "$(<"$STATE/.marker")" = nested-teardown-e2e-v1 ]; then
     sudo -n find "$STATE" -depth -delete || rc=3
@@ -430,6 +450,7 @@ printf '  [ .. ] tearing down the outer yard and checking the default pool\n'
 yard teardown --yes
 ! incus project show "$OUTER_PROJECT" >/dev/null 2>&1 \
   || die 'outer project remains after teardown'
+remove_owned_outer_backend || die 'could not remove the marker-owned outer backend'
 assert_default_pool_unchanged
 assert_host_network_unchanged
 

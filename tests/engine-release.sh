@@ -10,6 +10,8 @@ export SUBYARD_INCUS_SOCKET="$TMP/missing-incus.socket"
 export SUBYARD_OPERATOR_HOME="$TMP/home"
 export SUBYARD_CONFIG_HOME="$TMP/config"
 export SUBYARD_HOME="$TMP/data"
+export SUBYARD_POWER_RECONCILER_PATH="$TMP/missing-power-reconciler"
+export SUBYARD_POWER_UNIT_PATH="$TMP/missing-power-unit"
 
 fail() { printf 'engine release: %s\n' "$*" >&2; exit 1; }
 yard_update() { YARD_ENGINE_PATH="$release_engine" "$ROOT/bin/yard" update --yes "$@"; }
@@ -78,8 +80,11 @@ legacy_031_installer="$ROOT/tests/fixtures/migrations/v0.3.1-install-runtime-rel
 [ "$(sha256sum "$legacy_031_installer" | cut -d' ' -f1)" = \
   04673421c42ac8a1bfed1e8fa547fd6aabd05011bc82bad951856df1e9c87193 ] \
   || fail 'the pinned v0.3.1 runtime installer fixture changed'
+if grep -Eq '_migrate[[:space:]]+(apply|finalize|rollback|cleanup)' \
+  "$ROOT/scripts/install-runtime-release.sh"; then
+  fail 'current runtime installer still owns superseded migration choreography'
+fi
 artifact_one="$("$ROOT/dev/package-engine.sh" --output-dir "$release" --version 1.0.0-test \
-  --runtime-installer "$legacy_installer" \
   --migration-registry "$ROOT/tests/fixtures/migrations/layout-1.json")"
 bundle_one="$release/subyard-1.0.0-test-linux-amd64.tar.gz"
 [ -x "$release/subyard-install.sh" ] \
@@ -109,6 +114,7 @@ grep -Fxq './bin/yard' "$bundle_list" \
   && grep -Fxq './config/systemd/subyard-test-vms-host-sink.timer.in' "$bundle_list" \
   && grep -Fxq './config/commands.registry' "$bundle_list" \
   && grep -Fxq './config/migrations.json' "$bundle_list" \
+  && grep -Fxq './config/release-transition.json' "$bundle_list" \
   && grep -Fxq './config/agents/codex/provision.sh' "$bundle_list" \
   && grep -Fxq './config/profiles/hermes/resources/dashboard.res' "$bundle_list" \
   && grep -Fxq './config/profiles/hermes/resources/dashboard/handler.sh' "$bundle_list" \
@@ -230,225 +236,135 @@ while IFS= read -r publish_asset; do
     || fail "release allowlist contains an invalid asset: $publish_asset"
 done < "$publish_list"
 
-legacy_state="$SUBYARD_CONFIG_HOME/projects/legacy-12345678.json"
-install -d -m 0700 "$(dirname "$legacy_state")"
-printf '%s\n' '{"schema":1,"projectId":"legacy-12345678","name":"Legacy","hostPath":"/host/Legacy","yardPath":"/srv/workspaces/legacy-12345678/src","mode":"sync","sshHost":"yard"}' > "$legacy_state"
-chmod 0664 "$legacy_state"
-
 artifact_two="$("$ROOT/dev/package-engine.sh" --output-dir "$release" --version 1.1.0-test \
-  --migration-registry "$ROOT/tests/fixtures/migrations/layout-2.json")"
+  --migration-registry "$ROOT/tests/fixtures/migrations/layout-1.json")"
 bundle_two="$release/subyard-1.1.0-test-linux-amd64.tar.gz"
 release_engine="$artifact_two"
 jq -e '.version == "1.1.0-test" and .rpc.min == 1 and .rpc.max == 1 and
-  .migrationSchema == 1 and .minimumConfigLayout == 1 and .configLayout == 2' \
+  .migrationSchema == 1 and .minimumConfigLayout == 1 and .configLayout == 1' \
   "$artifact_two.manifest.json" >/dev/null
 rpc_negotiate "$artifact_two" 1.1.0-test 1 compatible artifact-two-v1
 
-# The public updater publishes a complete runtime, atomically switches stable links and can reuse
-# its exact cache offline without touching a working current release.
+# A verified standalone bootstrap is the one-time bridge for an active runtime
+# whose installed release installer predates immutable publish-only support.
+# The candidate must own the transition; the legacy installer is never asked
+# to run the superseded mutating _migrate protocol.
+legacy_bridge_release="$TMP/legacy-bridge-release"
+"$ROOT/dev/package-engine.sh" \
+  --output-dir "$legacy_bridge_release" --version 0.3.1-test \
+  --migration-registry "$ROOT/tests/fixtures/migrations/layout-1.json" \
+  --runtime-installer "$legacy_031_installer" >/dev/null
+legacy_bridge_bundle="$legacy_bridge_release/subyard-0.3.1-test-linux-amd64.tar.gz"
+legacy_bridge_home="$TMP/legacy-bridge-home"
+legacy_bridge_runtime="$legacy_bridge_home/.subyard/runtime"
+legacy_bridge_bin="$legacy_bridge_home/bin"
+install -d "$legacy_bridge_home" "$legacy_bridge_bin" \
+  "$legacy_bridge_home/.config/subyard"
+"$ROOT/scripts/install-runtime-release.sh" \
+  --runtime-root "$legacy_bridge_runtime" \
+  --bundle "$legacy_bridge_bundle" --checksum "$legacy_bridge_bundle.sha256" \
+  --manifest "$legacy_bridge_bundle.manifest.json" \
+  --provenance "$legacy_bridge_bundle.provenance.json" >/dev/null
+legacy_bridge_initial="$(readlink "$legacy_bridge_runtime/current")"
+grep -Fq -- '--publish-only' \
+  "$legacy_bridge_runtime/current/scripts/install-runtime-release.sh" \
+  && fail 'legacy bridge fixture unexpectedly supports immutable publication'
+HOME="$legacy_bridge_home" SUBYARD_HOME="$legacy_bridge_home/.subyard" \
+  SUBYARD_CONFIG_HOME="$legacy_bridge_home/.config/subyard" \
+  YARD_RUNTIME_ROOT="$legacy_bridge_runtime" YARD_BIN_DIR="$legacy_bridge_bin" \
+  YARD_SHELL_RC="$legacy_bridge_home/.bashrc" YARD_LOGIN_RC="$legacy_bridge_home/.profile" \
+  YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_VERSION=1.1.0-test \
+  "$release/subyard-install.sh" --yes >/dev/null
+[ "$("$legacy_bridge_runtime/current/bin/yard" --version | awk '{print $2}')" = 1.1.0-test ] \
+  && [ "$(readlink "$legacy_bridge_runtime/previous")" = "$legacy_bridge_initial" ] \
+  || fail 'standalone bootstrap did not bridge a pre-transition runtime through ReleaseTransition'
+
+# Publication is intentionally separate from activation. The transition module
+# must be able to inspect an immutable verified candidate while the old runtime
+# remains the exact active release.
+publish_only_root="$TMP/publish-only-runtime"
+published_release="$("$ROOT/scripts/install-runtime-release.sh" \
+  --runtime-root "$publish_only_root" --publish-only \
+  --bundle "$bundle_two" --checksum "$bundle_two.sha256" \
+  --manifest "$bundle_two.manifest.json" --provenance "$bundle_two.provenance.json")"
+case "$published_release" in
+  releases/1.1.0-test-*) ;;
+  *) fail "publish-only returned an invalid release identity: $published_release" ;;
+esac
+[ -d "$publish_only_root/$published_release" ] \
+  && [ ! -e "$publish_only_root/current" ] && [ ! -L "$publish_only_root/current" ] \
+  && [ ! -e "$publish_only_root/previous" ] && [ ! -L "$publish_only_root/previous" ] \
+  || fail 'publish-only changed stable runtime links or omitted the immutable release'
+
+# Installed release ingress: bootstrap creates only the first link; every
+# subsequent activation, same-version retry, and explicit rollback is owned by
+# the candidate ReleaseTransition module.
 runtime_root="$TMP/update-runtime"
-YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_CACHE="$TMP/cache" \
-  yard_update --runtime-root "$runtime_root" --version 1.0.0-test >/dev/null
+install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/hermes"
+printf '%s\n' '# retained' 'YARD_TEMPLATE=e2e-vms' 'NESTED_E2E_VMS=0' 'SSH_PORT=2224' \
+  > "$SUBYARD_CONFIG_HOME/yards/hermes/config.env"
+chmod 0600 "$SUBYARD_CONFIG_HOME/yards/hermes/config.env"
+"$ROOT/scripts/install-runtime-release.sh" \
+  --runtime-root "$runtime_root" \
+  --bundle "$bundle_one" --checksum "$bundle_one.sha256" \
+  --manifest "$bundle_one.manifest.json" --provenance "$bundle_one.provenance.json" >/dev/null
+initial_target="$(readlink "$runtime_root/current")"
 [ "$("$runtime_root/current/bin/yard" --version | awk '{print $2}')" = 1.0.0-test ] \
-  || fail 'yard update did not install the selected release'
-[ "$(stat -c '%a' "$legacy_state")" = 600 ] \
-  || fail 'runtime install did not migrate legacy project permissions'
-[ -x "$runtime_root/current/scripts/install-runtime-release.sh" ] \
-  && [ -r "$runtime_root/current/config/commands.registry" ] \
-  && [ -r "$runtime_root/current/completions/yard.bash" ] \
-  || fail 'yard update installed an incomplete runtime'
-YARD_RELEASE_CACHE="$TMP/cache" yard_update \
-  --runtime-root "$runtime_root" --version 1.0.0-test --offline --check >/dev/null \
-  || fail 'offline update check did not use the verified cache'
-cached_bundle="$TMP/cache/1.0.0-test/$(basename "$bundle_one")"
+  && [ ! -e "$runtime_root/previous" ] && [ ! -L "$runtime_root/previous" ] \
+  || fail 'verified bootstrap did not create the initial runtime boundary'
+
+YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_CACHE="$TMP/cache" \
+  installed_update --runtime-root "$runtime_root" --version 1.1.0-test >/dev/null
+candidate_target="$(readlink "$runtime_root/current")"
+[ "$("$runtime_root/current/bin/yard" --version | awk '{print $2}')" = 1.1.0-test ] \
+  && [ "$(readlink "$runtime_root/previous")" = "$initial_target" ] \
+  && [ "$candidate_target" != "$initial_target" ] \
+  || fail 'release transition did not activate and retain the exact release pair'
+grep -Fxq '# retained' "$SUBYARD_CONFIG_HOME/yards/hermes/config.env" \
+  && grep -Fxq "YARD_TEMPLATE='test-vms'" "$SUBYARD_CONFIG_HOME/yards/hermes/config.env" \
+  && grep -Fxq 'SSH_PORT=2224' "$SUBYARD_CONFIG_HOME/yards/hermes/config.env" \
+  && ! grep -Fq 'NESTED_E2E_VMS' "$SUBYARD_CONFIG_HOME/yards/hermes/config.env" \
+  || fail 'planned v2 canonicalize/reset did not reach its declared result'
+ledger="$SUBYARD_CONFIG_HOME/release-transition/v2/ledger.json"
+journal="$SUBYARD_CONFIG_HOME/release-transition/v2/journal.json"
+jq -e '.schemaVersion == 2 and .domains.settings.epoch == 2 and
+  .domains.settings.applied == ["canonicalize-test-vms-settings-v2"]' "$ledger" >/dev/null \
+  && jq -e '.schemaVersion == 2 and .checkpoint == "complete"' "$journal" >/dev/null \
+  || fail 'v2 transition did not record a completed per-domain fixed point'
+[ ! -e "$SUBYARD_CONFIG_HOME/migrations/state.json" ] \
+  || fail 'production release transition wrote the superseded global layout'
+
+same_output="$(YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_CACHE="$TMP/cache" \
+  installed_update --runtime-root "$runtime_root" --version 1.1.0-test)"
+[ "$(readlink "$runtime_root/current")" = "$candidate_target" ] \
+  && [ "$(readlink "$runtime_root/previous")" = "$initial_target" ] \
+  || fail 'same-version transition changed the retained release pair'
+! grep -Fq '{"schemaVersion"' <<<"$same_output" \
+  || fail 'candidate process protocol leaked into public update output'
+
+installed_update --runtime-root "$runtime_root" --rollback >/dev/null
+[ "$(readlink "$runtime_root/current")" = "$initial_target" ] \
+  && [ "$(readlink "$runtime_root/previous")" = "$candidate_target" ] \
+  && [ "$("$runtime_root/current/bin/yard" --version | awk '{print $2}')" = 1.0.0-test ] \
+  || fail 'explicit rollback did not assess and activate the retained runtime'
+
+YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_CACHE="$TMP/cache" \
+  installed_update --runtime-root "$runtime_root" --version 1.1.0-test >/dev/null
+[ "$(readlink "$runtime_root/current")" = "$candidate_target" ] \
+  && [ "$(readlink "$runtime_root/previous")" = "$initial_target" ] \
+  || fail 'forward retry after rollback did not converge to the exact pair'
+
+YARD_RELEASE_CACHE="$TMP/cache" installed_update \
+  --runtime-root "$runtime_root" --version 1.1.0-test --offline --check >/dev/null \
+  || fail 'offline transition inspection did not use the verified cache'
+cached_bundle="$TMP/cache/1.1.0-test/$(basename "$bundle_two")"
 printf 'truncated\n' >> "$cached_bundle"
-if YARD_RELEASE_CACHE="$TMP/cache" yard_update \
-  --runtime-root "$runtime_root" --version 1.0.0-test --offline --check >/dev/null 2>&1; then
-  fail 'offline update check accepted a corrupt cached bundle'
+if YARD_RELEASE_CACHE="$TMP/cache" installed_update \
+  --runtime-root "$runtime_root" --version 1.1.0-test --offline --check >/dev/null 2>&1; then
+  fail 'offline transition inspection accepted a corrupt cached bundle'
 fi
-[ "$("$runtime_root/current/bin/yard" --version | awk '{print $2}')" = 1.0.0-test ] \
-  || fail 'failed offline check changed the current runtime'
+[ "$(readlink "$runtime_root/current")" = "$candidate_target" ] \
+  && [ "$(readlink "$runtime_root/previous")" = "$initial_target" ] \
+  || fail 'failed inspection changed stable runtime links'
 
-# A historical updater knows only the generic candidate-owned _migrate
-# contract. It must still apply the production typed transition without any
-# migration-specific installer hook.
-typed_base_artifact="$("$ROOT/dev/package-engine.sh" --output-dir "$release" \
-  --version 1.0.0-typed-base --runtime-installer "$legacy_031_installer" \
-  --migration-registry "$ROOT/tests/fixtures/migrations/layout-1.json")"
-typed_artifact="$("$ROOT/dev/package-engine.sh" --output-dir "$release" \
-  --version 1.0.1-test \
-  --migration-registry "$ROOT/tests/fixtures/migrations/layout-2-production.json")"
-jq -e '.version == "1.0.1-test" and .migrationSchema == 1 and
-  .minimumConfigLayout == 1 and .configLayout == 2' \
-  "$typed_artifact.manifest.json" >/dev/null \
-  || fail 'typed migration candidate changed the v0.3.1-compatible manifest contract'
-typed_runtime_root="$TMP/typed-update-runtime"
-typed_config_home="$TMP/typed-config"
-typed_data_home="$TMP/typed-data"
-SUBYARD_CONFIG_HOME="$typed_config_home" SUBYARD_HOME="$typed_data_home" \
-  YARD_ENGINE_PATH="$typed_base_artifact" YARD_RELEASE_BASE_URL="file://$release" \
-  YARD_RELEASE_CACHE="$TMP/typed-cache" \
-  "$ROOT/bin/yard" update --yes --runtime-root "$typed_runtime_root" \
-  --version 1.0.0-typed-base >/dev/null
-SUBYARD_CONFIG_HOME="$typed_config_home" SUBYARD_HOME="$typed_data_home" \
-  YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_CACHE="$TMP/typed-cache" \
-  "$typed_runtime_root/current/bin/yard" update --yes \
-  --runtime-root "$typed_runtime_root" --version 1.0.1-test >/dev/null
-[ "$("$typed_runtime_root/current/bin/yard" --version | awk '{print $2}')" = 1.0.1-test ] \
-  && jq -e '.layout == 2 and .applied == ["migrate-test-yard-owner"]' \
-    "$typed_config_home/migrations/state.json" >/dev/null \
-  || fail 'historical updater did not commit the candidate-owned typed migration'
-SUBYARD_CONFIG_HOME="$typed_config_home" SUBYARD_HOME="$typed_data_home" \
-  "$typed_runtime_root/current/bin/yard" update --yes \
-  --runtime-root "$typed_runtime_root" --rollback >/dev/null
-[ "$("$typed_runtime_root/current/bin/yard" --version | awk '{print $2}')" = 1.0.0-typed-base ] \
-  && jq -e '.layout == 1 and (.applied // []) == []' \
-    "$typed_config_home/migrations/state.json" >/dev/null \
-  || fail 'typed migration rollback did not restore the historical layout'
-SUBYARD_CONFIG_HOME="$typed_config_home" SUBYARD_HOME="$typed_data_home" \
-  YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_CACHE="$TMP/typed-cache" \
-  "$typed_runtime_root/current/bin/yard" update --yes \
-  --runtime-root "$typed_runtime_root" --version 1.0.1-test >/dev/null
-[ "$("$typed_runtime_root/current/bin/yard" --version | awk '{print $2}')" = 1.0.1-test ] \
-  && jq -e '.layout == 2 and .applied == ["migrate-test-yard-owner"]' \
-    "$typed_config_home/migrations/state.json" >/dev/null \
-  || fail 'historical updater did not roll the typed migration forward again'
-SUBYARD_CONFIG_HOME="$typed_config_home" SUBYARD_HOME="$typed_data_home" \
-  "$typed_runtime_root/current/bin/yard-engine" _migrate-test-yard >/dev/null \
-  || fail 'typed migration candidate dropped the v0.4.0 installer compatibility shim'
-
-# A later candidate must preserve every already-applied registry definition as
-# an exact prefix before appending a new transition.
-typed_history_artifact="$("$ROOT/dev/package-engine.sh" --output-dir "$release" \
-  --version 1.0.2-typed-history \
-  --migration-registry "$ROOT/tests/fixtures/migrations/layout-3-production-prefix.json")"
-jq -e '.version == "1.0.2-typed-history" and .configLayout == 3' \
-  "$typed_history_artifact.manifest.json" >/dev/null \
-  || fail 'production-prefix fixture did not publish layout 3'
-typed_history_source="$typed_config_home/migration-fixture/legacy/config.env"
-typed_history_destination="$typed_config_home/migration-fixture/current/config.env"
-install -d -m 0700 "$(dirname "$typed_history_source")"
-printf 'TOKEN=production-prefix\n' > "$typed_history_source"
-chmod 0600 "$typed_history_source"
-typed_state_before="$(sha256sum "$typed_config_home/migrations/state.json")"
-if SUBYARD_CONFIG_HOME="$typed_config_home" SUBYARD_HOME="$typed_data_home" \
-  YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_CACHE="$TMP/typed-cache" \
-  "$typed_runtime_root/current/bin/yard" update --yes --check \
-  --runtime-root "$typed_runtime_root" --version 1.1.0-test >/dev/null 2>&1; then
-  fail 'candidate accepted rewritten applied migration history'
-fi
-[ "$typed_state_before" = "$(sha256sum "$typed_config_home/migrations/state.json")" ] \
-  && [ -f "$typed_history_source" ] && [ ! -e "$typed_history_destination" ] \
-  || fail 'rejected registry history changed typed migration state'
-SUBYARD_CONFIG_HOME="$typed_config_home" SUBYARD_HOME="$typed_data_home" \
-  YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_CACHE="$TMP/typed-cache" \
-  "$typed_runtime_root/current/bin/yard" update --yes \
-  --runtime-root "$typed_runtime_root" --version 1.0.2-typed-history >/dev/null
-[ "$("$typed_runtime_root/current/bin/yard" --version | awk '{print $2}')" = \
-    1.0.2-typed-history ] \
-  && [ ! -e "$typed_history_source" ] \
-  && grep -Fxq 'TOKEN=production-prefix' "$typed_history_destination" \
-  && jq -e '
-    .layout == 3 and
-    .applied == ["migrate-test-yard-owner", "move-legacy-assignments"]
-  ' "$typed_config_home/migrations/state.json" >/dev/null \
-  || fail 'extended registry did not preserve and append migration history'
-SUBYARD_CONFIG_HOME="$typed_config_home" SUBYARD_HOME="$typed_data_home" \
-  "$typed_runtime_root/current/bin/yard" update --yes \
-  --runtime-root "$typed_runtime_root" --rollback >/dev/null
-[ "$("$typed_runtime_root/current/bin/yard" --version | awk '{print $2}')" = 1.0.1-test ] \
-  && [ -f "$typed_history_source" ] && [ ! -e "$typed_history_destination" ] \
-  && jq -e '
-    .layout == 2 and .applied == ["migrate-test-yard-owner"]
-  ' "$typed_config_home/migrations/state.json" >/dev/null \
-  || fail 'extended registry rollback did not restore the applied prefix'
-
-migration_source="$SUBYARD_CONFIG_HOME/migration-fixture/legacy/config.env"
-migration_destination="$SUBYARD_CONFIG_HOME/migration-fixture/current/config.env"
-migration_final="$SUBYARD_CONFIG_HOME/migration-fixture/final/config.env"
-install -d -m 0700 "$(dirname "$migration_source")"
-printf 'TOKEN=synthetic-layout\n' > "$migration_source"
-chmod 0600 "$migration_source"
-state_before_check="$(sha256sum "$SUBYARD_CONFIG_HOME/migrations/state.json")"
-YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_CACHE="$TMP/cache" \
-  installed_update --runtime-root "$runtime_root" --version 1.1.0-test --check >/dev/null
-[ "$state_before_check" = "$(sha256sum "$SUBYARD_CONFIG_HOME/migrations/state.json")" ] \
-  && [ -f "$migration_source" ] && [ ! -e "$migration_destination" ] \
-  || fail 'update check changed config or migration state'
-
-partial="$TMP/partial"; install -d "$partial"
-install -m 0644 "$bundle_two" "$partial/$(basename "$bundle_two")"
-install -m 0644 "$bundle_two.sha256" "$bundle_two.manifest.json" "$partial/"
-if YARD_RELEASE_BASE_URL="file://$partial" YARD_RELEASE_CACHE="$TMP/partial-cache" \
-  yard_update --runtime-root "$runtime_root" --version 1.1.0-test >/dev/null 2>&1; then
-  fail 'incomplete release unexpectedly installed'
-fi
-[ "$("$runtime_root/current/bin/yard" --version | awk '{print $2}')" = 1.0.0-test ] \
-  || fail 'interrupted/incomplete update replaced the current runtime'
-
-# Exercise the pinned v0.1 updater; candidate startup must finalize its prepared migration.
-installed_update --runtime-root "$runtime_root" --version 1.1.0-test >/dev/null
-[ "$("$runtime_root/current/bin/yard" --version | awk '{print $2}')" = 1.1.0-test ] \
-  || fail 'runtime upgrade did not switch current'
-[ "$("$runtime_root/previous/bin/yard" --version | awk '{print $2}')" = 1.0.0-test ] \
-  || fail 'runtime upgrade did not retain previous'
-[ ! -e "$migration_source" ] && [ ! -L "$migration_source" ] \
-  && grep -Fxq 'TOKEN=synthetic-layout' "$migration_destination" \
-  && jq -e '.layout == 2' "$SUBYARD_CONFIG_HOME/migrations/state.json" >/dev/null \
-  || fail 'v0.1-style update did not commit the synthetic layout migration'
-installed_update --runtime-root "$runtime_root" --rollback >/dev/null
-[ "$("$runtime_root/current/bin/yard" --version | awk '{print $2}')" = 1.0.0-test ] \
-  || fail 'runtime rollback did not restore previous'
-[ "$("$runtime_root/previous/bin/yard" --version | awk '{print $2}')" = 1.1.0-test ] \
-  || fail 'runtime rollback did not retain the replaced release'
-[ -f "$migration_source" ] && [ ! -e "$migration_destination" ] \
-  && jq -e '.layout == 1' "$SUBYARD_CONFIG_HOME/migrations/state.json" >/dev/null \
-  || fail 'runtime rollback did not restore the previous data layout'
-
-installed_update --runtime-root "$runtime_root" --version 1.1.0-test >/dev/null
-[ "$("$runtime_root/current/bin/yard" --version | awk '{print $2}')" = 1.1.0-test ] \
-  && [ ! -e "$migration_source" ] && [ -f "$migration_destination" ] \
-  && jq -e '.layout == 2' "$SUBYARD_CONFIG_HOME/migrations/state.json" >/dev/null \
-  || fail 'roll-forward through the same release pair was not idempotent'
-same_current_target="$(readlink "$runtime_root/current")"
-same_previous_target="$(readlink "$runtime_root/previous")"
-same_version_output="$(installed_update --runtime-root "$runtime_root" --version 1.1.0-test)"
-[ "$(readlink "$runtime_root/current")" = "$same_current_target" ] \
-  && [ "$(readlink "$runtime_root/previous")" = "$same_previous_target" ] \
-  || fail 'same-version update changed the current/previous rollback pair'
-grep -Fxq 'runtime yard-engine 1.1.0-test and migrations are current' \
-  <<<"$same_version_output" \
-  && ! grep -Fq 'installed runtime' <<<"$same_version_output" \
-  && ! grep -Fq '{"schema_version"' <<<"$same_version_output" \
-  || fail "clean same-version update was noisy or misleading: $same_version_output"
-
-chmod 0664 "$legacy_state"
-same_reconcile_output="$(installed_update --runtime-root "$runtime_root" --version 1.1.0-test)"
-grep -Fxq 'reconciled runtime yard-engine 1.1.0-test' <<<"$same_reconcile_output" \
-  && [ "$(stat -c '%a' "$legacy_state")" = 600 ] \
-  || fail "same-version update did not report its real repair: $same_reconcile_output"
-[ "$(readlink "$runtime_root/current")" = "$same_current_target" ] \
-  && [ "$(readlink "$runtime_root/previous")" = "$same_previous_target" ] \
-  || fail 'same-version reconcile changed the current/previous rollback pair'
-
-artifact_three="$("$ROOT/dev/package-engine.sh" --output-dir "$release" --version 1.2.0-test \
-  --migration-registry "$ROOT/tests/fixtures/migrations/layout-3.json")"
-jq -e '.version == "1.2.0-test" and .configLayout == 3' \
-  "$artifact_three.manifest.json" >/dev/null \
-  || fail 'third runtime did not publish layout 3'
-installed_update --runtime-root "$runtime_root" --version 1.2.0-test >/dev/null
-[ "$("$runtime_root/current/bin/yard" --version | awk '{print $2}')" = 1.2.0-test ] \
-  && [ ! -e "$migration_destination" ] && [ ! -L "$migration_destination" ] \
-  && grep -Fxq 'TOKEN=synthetic-layout' "$migration_final" \
-  && jq -e '.layout == 3' "$SUBYARD_CONFIG_HOME/migrations/state.json" >/dev/null \
-  || fail 'second migration rotation did not commit layout 3'
-[ "$(find "$SUBYARD_CONFIG_HOME/migrations/transactions" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1 ] \
-  || fail 'stale recovery was not removed after the next successful rotation'
-
-installed_update --runtime-root "$runtime_root" --rollback >/dev/null
-[ "$("$runtime_root/current/bin/yard" --version | awk '{print $2}')" = 1.1.0-test ] \
-  && [ -f "$migration_destination" ] && [ ! -e "$migration_final" ] \
-  && jq -e '.layout == 2' "$SUBYARD_CONFIG_HOME/migrations/state.json" >/dev/null \
-  || fail 'layout 3 rollback did not restore runtime and data layout 2'
-
-printf 'ok: release runtimes and versioned migrations are verified, offline-safe and rollback-capable\n'
+printf 'ok: release publication and resumable v2 activation ingress are verified\n'

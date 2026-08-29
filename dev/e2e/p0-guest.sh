@@ -23,6 +23,7 @@ PEER_KEYS_CONSUMER_ROOT="$PEER_STATE_ROOT/consumer"
 MARKER="subyard-p0-$TOKEN"
 PEER_INCUS_MARKER="$PEER_STATE_ROOT/.subyard-p0-incus-init"
 PEER_INCUS_POOL="subyard-p0-$TOKEN"
+P0_INCUS_APPARMOR_DROPIN="${P0_E2E_INCUS_APPARMOR_DROPIN:-/etc/systemd/system/incus.service.d/subyard-p0-e2e.conf}"
 OWNER_ROOT="$P0_CAPACITY_STATE_ROOT/owner"
 OWNER_DATA_ROOT="$OWNER_ROOT/subyard"
 OWNER_CONFIG_HOME="$OWNER_ROOT/config"
@@ -49,6 +50,27 @@ OWNER_DIAGNOSTIC_DEV_UID="${P0_E2E_DIAGNOSTIC_DEV_UID:-1001}"
 die() { printf 'p0-guest: %s\n' "$*" >&2; exit 2; }
 valid_token() { [[ "$1" =~ ^[0-9]+$ ]]; }
 valid_ip() { [[ "$1" =~ ^[0-9a-fA-F:.]+$ ]]; }
+wait_for_outer_default_route() {
+  local yard="$1" project="$2" attempt routes device_count
+  for ((attempt = 1; attempt <= 30; attempt++)); do
+    routes="$(incus exec "$yard" --project "$project" -- \
+      ip -4 -o route show default 2>/dev/null || true)"
+    device_count="$(awk '
+      $1 == "default" {
+        for (field = 1; field < NF; field++) {
+          if ($field == "dev") devices[$(field + 1)] = 1
+        }
+      }
+      END {
+        for (device in devices) count++
+        print count+0
+      }
+    ' <<<"$routes")"
+    [ "$device_count" = 1 ] && return 0
+    sleep 1
+  done
+  die "outer yard $yard did not converge to one default route"
+}
 normalized_ed25519() {
   local value="$1" type blob rest
   read -r type blob rest <<<"$value"
@@ -234,6 +256,7 @@ write_owner_registration() { # <yard> <template> <ssh-port> [slot-count]
     "$slots" "$OWNER_DIAGNOSTIC_VM_BOOT_TIMEOUT" \
     "$OWNER_BASE_IMAGE" "$OWNER_BASE_IMAGE" \
     > "$registration"
+  chmod 0600 "$registration"
 }
 
 install_rename_base_runtime() {
@@ -253,9 +276,9 @@ install_rename_base_runtime() {
   timeout_file="$RENAME_BASE_ROOT/internal/cli/cli.go"
   [ "$(grep -Fc 'Timeout:        10 * time.Minute,' "$timeout_file")" -eq 1 ] \
     || die 'rename-base adapter timeout fixture no longer matches its source'
-  sed -i 's/Timeout:        10 \* time.Minute,/Timeout:        30 * time.Minute,/' \
+  sed -i 's/Timeout:        10 \* time.Minute,/Timeout:        60 * time.Minute,/' \
     "$timeout_file"
-  grep -Fqx $'\t\t\tTimeout:        30 * time.Minute,' "$timeout_file" \
+  grep -Fqx $'\t\t\tTimeout:        60 * time.Minute,' "$timeout_file" \
     || die 'rename-base adapter timeout fixture was not applied'
   git -C "$RENAME_BASE_ROOT" diff --check
   arch="$(go env GOARCH)"
@@ -289,16 +312,44 @@ install_current_base_runtime() {
 }
 
 install_owner_runtime() {
-  local arch release artifact
+  local arch release artifact release_cache name suffix active_installer
+  local runtime_root="${SUBYARD_HOME:-$HOME/.subyard}/runtime"
   arch="$(go env GOARCH)"
   release="$ROOT/.build/p0-owner-release"
   artifact="$release/subyard-p0-owner-linux-$arch"
   dev/package-engine.sh --output-dir "$release" --version p0-owner --arch "$arch" >/dev/null
-  scripts/install-runtime-release.sh \
-    --bundle "$artifact.tar.gz" \
-    --checksum "$artifact.tar.gz.sha256" \
-    --manifest "$artifact.tar.gz.manifest.json" \
-    --provenance "$artifact.tar.gz.provenance.json" >/dev/null
+  release_cache="$SUBYARD_HOME/releases/p0-owner"
+  name="$(basename "$artifact").tar.gz"
+  install -d -m 0700 "$release_cache"
+  for suffix in '' .sha256 .manifest.json .provenance.json; do
+    install -m 0600 "$artifact.tar.gz$suffix" "$release_cache/$name$suffix"
+  done
+  active_installer="$runtime_root/current/scripts/install-runtime-release.sh"
+  if grep -Fq -- '--publish-only' "$active_installer"; then
+    "$runtime_root/current/bin/yard" update --yes \
+      --runtime-root "$runtime_root" --version p0-owner --offline >/dev/null
+    return
+  fi
+  for name in subyard-install-runtime-release.sh subyard-install-runtime-release.sh.sha256; do
+    install -m 0600 "$release/$name" "$release_cache/$name"
+  done
+  YARD_RELEASE_CACHE="$SUBYARD_HOME/releases" \
+    YARD_BIN_DIR="$SUBYARD_HOME/bin" \
+    YARD_SHELL_RC="$SUBYARD_CONFIG_HOME/p0-bootstrap.bashrc" \
+    YARD_LOGIN_RC="$SUBYARD_CONFIG_HOME/p0-bootstrap.profile" \
+    dev/bootstrap-runtime.sh --yes --runtime-root "$runtime_root" \
+      --version p0-owner --offline >/dev/null
+}
+
+p0_apply_release_update() {
+  local yard="$1" version="$2" release
+  local runtime_root="${SUBYARD_HOME:-$HOME/.subyard}/runtime"
+  case "$version" in p0-current-base | p0-owner) ;; *) die "unsupported P0 release $version" ;; esac
+  release="$ROOT/.build/$version-release"
+  YARD_RELEASE_BASE_URL="file://$release" \
+    "$yard" update --runtime-root "$runtime_root" --version "$version" --check >/dev/null
+  YARD_RELEASE_BASE_URL="file://$release" \
+    "$yard" update --runtime-root "$runtime_root" --version "$version" --yes >/dev/null
 }
 
 prepare_broker_recovery_update() {
@@ -316,7 +367,7 @@ prepare_broker_recovery_update() {
 
 canonical_broker_release_migration_contract() {
   local runtime_root="${SUBYARD_HOME:-$HOME/.subyard}/runtime"
-  local active_old_hash active_new_hash candidate_runtime expected_hash inactive_marker
+  local active_old_hash active_new_hash expected_hash inactive_marker
   local rolled_back_hash
   local current_registration old_yard state
 
@@ -342,15 +393,19 @@ canonical_broker_release_migration_contract() {
     --project subyard-test-yard)" = "$inactive_marker" ] \
     || die 'release migration rewrote an inactive broker'
 
-  "$runtime_root/current/scripts/install-runtime-release.sh" \
-    --runtime-root "$runtime_root" --rollback >/dev/null
+  "$runtime_root/current/bin/yard" update \
+    --runtime-root "$runtime_root" --rollback --yes >/dev/null
   [ "$("$runtime_root/current/bin/yard" --version)" = 'yard p0-current-base' ] \
     || die 'active broker fixture did not restore the previous runtime'
   old_yard="$runtime_root/current/bin/yard"
-  candidate_runtime="$runtime_root/previous"
-  SUBYARD_REPOSITORY_ROOT="$candidate_runtime" \
-    "$candidate_runtime/bin/yard-engine" _migrate cleanup >/dev/null
   "$old_yard" -Y test-yard start --yes
+  # The outer yard reports its agent before DHCP has necessarily installed the
+  # default route used by the broker route artifact. Wait for that exact
+  # read-only prerequisite before inspecting the activation-repair plan.
+  wait_for_outer_default_route yard-test-yard subyard-test-yard
+  # Starting the previously inactive broker creates a new activation-repair
+  # impact. Inspect and apply it before any other mutation.
+  p0_apply_release_update "$old_yard" p0-current-base
   p0_retry_init_after_plan_stale "$old_yard" -Y test-yard init --yes
   active_old_hash="$(incus exec yard-test-yard --project subyard-test-yard -- \
     sha256sum /usr/local/libexec/subyard/test-vms-inner | awk '{print $1}')"
@@ -367,17 +422,14 @@ canonical_broker_release_migration_contract() {
   "$runtime_root/current/bin/yard" -Y test-yard test-vms status >/dev/null \
     || die 'release migration did not restore broker facade status'
 
-  "$runtime_root/current/scripts/install-runtime-release.sh" \
-    --runtime-root "$runtime_root" --rollback >/dev/null
+  "$runtime_root/current/bin/yard" update \
+    --runtime-root "$runtime_root" --rollback --yes >/dev/null
   [ "$("$runtime_root/current/bin/yard" --version)" = 'yard p0-current-base' ] \
     || die 'canonical fixture did not restore its layout-2 runtime'
   rolled_back_hash="$(incus exec yard-test-yard --project subyard-test-yard -- \
     sha256sum /usr/local/libexec/subyard/test-vms-inner | awk '{print $1}')"
   [ "$rolled_back_hash" = "$active_old_hash" ] \
     || die 'runtime rollback did not restore the previous active broker engine'
-  candidate_runtime="$runtime_root/previous"
-  SUBYARD_REPOSITORY_ROOT="$candidate_runtime" \
-    "$candidate_runtime/bin/yard-engine" _migrate cleanup >/dev/null
   old_yard="$runtime_root/current/bin/yard"
   "$old_yard" -Y test-yard teardown --yes
   current_registration="$OWNER_YARD_DIR/test-yard.env"
@@ -388,26 +440,38 @@ canonical_broker_release_migration_contract() {
 }
 
 owner_profile_migration_contract() {
-  local old_yard runtime_root="${SUBYARD_HOME:-$HOME/.subyard}/runtime" yard_info project_marker
+	local old_yard runtime_root="${SUBYARD_HOME:-$HOME/.subyard}/runtime" yard_info project_marker
+	local transition_fixture_root="$OWNER_CONFIG_HOME/release-transition/v2"
   install_current_base_runtime
   old_yard="$runtime_root/current/bin/yard"
   [ "$("$old_yard" --version)" = 'yard p0-current-base' ] \
     || die 'canonical layout-2 runtime was not installed'
 
   canonical_broker_release_migration_contract
+	# The canonical broker and pre-rename owner cases are independent
+	# predecessor histories. Do not manufacture post-completion drift in the
+	# second case: reset only this disposable lane's v2 metadata before seeding
+	# the older owner topology.
+	[ "$SUBYARD_CONFIG_HOME" = "$OWNER_CONFIG_HOME" ] \
+		|| die 'owner transition fixture is outside the disposable P0 config root'
+	[ ! -L "$transition_fixture_root" ] \
+		|| die 'owner transition fixture root is a symbolic link'
+	if [ -e "$transition_fixture_root" ]; then
+		find "$transition_fixture_root" -depth -delete
+	fi
   install_rename_base_runtime
   old_yard="$runtime_root/current/bin/yard"
   [ "$("$old_yard" --version)" = 'yard p0-rename-base' ] \
     || die 'pre-rename runtime was not installed'
   prepare_owner_image_cache_project subyard-e2e-yard
-  write_owner_registration e2e-yard e2e-vms 2224
+  write_owner_registration e2e-yard e2e-vms 2224 1
   p0_retry_init_after_plan_stale "$old_yard" -Y e2e-yard init --yes
   "$old_yard" -Y e2e-yard check
   "$old_yard" -Y e2e-yard start --yes
   "$old_yard" -Y e2e-yard status >/dev/null
 
   # Source migration normalizes the retired profile before runtime activation.
-  write_owner_registration e2e-yard test-vms 2224
+  write_owner_registration e2e-yard test-vms 2224 1
   install_owner_runtime
   [ "$("$runtime_root/current/bin/yard" --version)" = 'yard p0-owner' ] \
     || die 'current runtime was not installed over the pre-rename runtime'
@@ -577,13 +641,12 @@ reclaim_owner_lease_capacity() {
   local default_build_before default_build_after
   local minimum=$((7 * 1024 * 1024 * 1024))
 
-  # The migration and real-Incus contracts have completed. Reclaim only their
-  # marker-owned source/release outputs and images that were absent from the
-  # pre-lane baseline before retaining four nested VM disks concurrently.
+  # The predecessor migration and real-Incus contracts have completed. Reclaim
+  # only outputs that later owner updates no longer read before retaining four
+  # nested VM disks concurrently.
   for path in \
     "$RENAME_BASE_ROOT" \
-    "$ROOT/.build/p0-current-base-release" \
-    "$ROOT/.build/p0-owner-release"; do
+    "$ROOT/.build/p0-current-base-release"; do
     [ ! -e "$path" ] || {
       case "$path" in
         "$P0_CAPACITY_STATE_ROOT"/* | "$ROOT"/.build/p0-*-release) ;;
@@ -646,6 +709,7 @@ owner() (
   ./bin/yard -Y test-yard start --yes
   SUBYARD_E2E_LEGACY_FIXTURE=1 \
     bash dev/e2e/seed-test-vms-legacy-state.sh subyard-test-yard yard-test-yard
+  p0_apply_release_update ./bin/yard p0-owner
   p0_retry_init_after_plan_stale ./bin/yard -Y test-yard init --yes
   ./bin/yard -Y test-yard check
   p0_retry_init_after_plan_stale ./bin/yard -Y test-yard init --yes
@@ -665,9 +729,11 @@ owner() (
   reclaim_owner_lease_capacity
   run_nested_broker_acceptance dev/e2e/p1-lease-acceptance.sh
   write_owner_registration test-yard test-vms 2224 3
+  p0_apply_release_update ./bin/yard p0-owner
   p0_retry_init_after_plan_stale ./bin/yard -Y test-yard init --yes
   run_nested_broker_acceptance dev/e2e/p1-lease-acceptance.sh
   write_owner_registration test-yard test-vms 2224 2
+  p0_apply_release_update ./bin/yard p0-owner
   p0_retry_init_after_plan_stale ./bin/yard -Y test-yard init --yes
   run_nested_broker_acceptance dev/e2e/p0-broker-recovery.sh
   owner_project_contract
@@ -878,6 +944,51 @@ run_incus_installer() {
   )
 }
 
+expected_p0_incus_apparmor_dropin() {
+  printf '%s\n' \
+    '# Managed by Subyard P0: the retained KVM guest is the outer security boundary.' \
+    '[Service]' \
+    'Environment=INCUS_SECURITY_APPARMOR=false' \
+    'TimeoutStartSec=45s'
+}
+
+reconcile_p0_incus_apparmor_compat() {
+  local current expected temporary
+  expected="$(expected_p0_incus_apparmor_dropin)"
+  if sudo -n test -e "$P0_INCUS_APPARMOR_DROPIN"; then
+    current="$(sudo -n cat "$P0_INCUS_APPARMOR_DROPIN")"
+    [ "$current" = "$expected" ] \
+      || die "refusing foreign Incus compatibility drop-in $P0_INCUS_APPARMOR_DROPIN"
+  fi
+  temporary="$(mktemp "$P0_CAPACITY_STATE_ROOT/.incus-compat.XXXXXX")"
+  printf '%s\n' "$expected" > "$temporary"
+  sudo -n install -d -m 0755 "$(dirname "$P0_INCUS_APPARMOR_DROPIN")"
+  sudo -n install -m 0644 "$temporary" "$P0_INCUS_APPARMOR_DROPIN"
+  find "$temporary" -delete
+  sudo -n systemctl daemon-reload
+  timeout --foreground 120 sudo -n systemctl restart incus.service \
+    || die 'failed to restart Incus with the P0 AppArmor compatibility boundary'
+  timeout --foreground 120 incus admin waitready \
+    || die 'Incus did not become ready with the P0 AppArmor compatibility boundary'
+}
+
+restore_p0_incus_apparmor_default() {
+  local current expected
+  sudo -n test -e "$P0_INCUS_APPARMOR_DROPIN" || return 0
+  expected="$(expected_p0_incus_apparmor_dropin)"
+  current="$(sudo -n cat "$P0_INCUS_APPARMOR_DROPIN")"
+  [ "$current" = "$expected" ] \
+    || die "refusing foreign Incus compatibility drop-in $P0_INCUS_APPARMOR_DROPIN"
+  sudo -n find "$P0_INCUS_APPARMOR_DROPIN" -delete
+  sudo -n systemctl daemon-reload
+  if sudo -n systemctl is-active --quiet incus.service; then
+    timeout --foreground 120 sudo -n systemctl restart incus.service \
+      || die 'failed to restore the default Incus AppArmor boundary'
+    timeout --foreground 120 incus admin waitready \
+      || die 'Incus did not become ready with its default AppArmor boundary'
+  fi
+}
+
 ensure_incus() {
 	local state_root="$1" install_marker="${2:-}" resume_mode="$3"
 	if command -v incus >/dev/null 2>&1 \
@@ -918,9 +1029,11 @@ ensure_owner_incus() {
   local resume_mode="${1:-owner}"
   p0_capacity_prepare_platform_root
   ensure_incus "$P0_CAPACITY_PLATFORM_ROOT/incus" '' "$resume_mode"
+  reconcile_p0_incus_apparmor_compat
 }
 ensure_peer_incus() {
   ensure_incus "$PEER_STATE_ROOT/incus-home" "$PEER_INCUS_MARKER" peer-prepare-resume
+  reconcile_p0_incus_apparmor_compat
 }
 
 ensure_peer_snapshot_fixture() {
@@ -1434,6 +1547,26 @@ source_upgrade_project_marker() {
   esac
 }
 
+source_upgrade_shared_root_tokens() {
+  local root token marker nullglob_was_set=0
+  local -a roots=()
+  shopt -q nullglob && nullglob_was_set=1
+  shopt -s nullglob
+  roots=(/var/tmp/subyard-p0-source-*)
+  [ "$nullglob_was_set" = 1 ] || shopt -u nullglob
+  for root in "${roots[@]}"; do
+    token="${root##*/subyard-p0-source-}"
+    [[ "$token" =~ ^[0-9]+$ ]] \
+      || die "refusing malformed durable source-upgrade root $root"
+    [ -d "$root" ] && [ ! -L "$root" ] \
+      || die "refusing unsafe durable source-upgrade root $root"
+    marker="$(cat "$root/.subyard-p0-marker" 2>/dev/null)"
+    [ "$marker" = "subyard-p0-source-$token" ] \
+      || die "refusing unmarked durable source-upgrade root $root"
+    printf '%s\n' "$token"
+  done
+}
+
 source_upgrade_process_matches() {
   local pattern="$1" query_timeout="${P0_SOURCE_RECOVERY_QUERY_TIMEOUT_SECONDS:-10}" rc
   [[ "$query_timeout" =~ ^[1-9][0-9]?$ ]] && [ "$query_timeout" -le 60 ] \
@@ -1501,6 +1634,12 @@ recover_stale_source_upgrade_fixture() {
       || die 'refusing source-upgrade projects with conflicting fixture markers'
     token="$candidate"
   done
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    [ -z "$token" ] || [ "$token" = "$candidate" ] \
+      || die 'refusing source-upgrade projects with conflicting fixture markers'
+    token="$candidate"
+  done < <(source_upgrade_shared_root_tokens)
   [ -n "$token" ] || return 0
   if source_upgrade_fixture_active "$token"; then
     die "source-upgrade fixture still has an active process: subyard-p0-source-$token"
@@ -1519,17 +1658,16 @@ recover_stale_test_default_pool() {
   local stale_root='' marker='' expected_marker='' markerless_registration=''
   local name token=''
   local recover_existing_p0=0
-  local query_timeout="${P0_E2E_INCUS_QUERY_TIMEOUT:-30}"
+  local query_timeout="${P0_E2E_INCUS_QUERY_TIMEOUT:-120}"
   command -v incus >/dev/null 2>&1 || return 0
-  [[ "$query_timeout" =~ ^[1-9][0-9]*$ ]] || die 'Incus query timeout is invalid'
-  set +e
-  state="$(timeout --foreground "$query_timeout" \
-    incus storage show default --project default 2>/dev/null)"
-  rc=$?
-  set -e
+  if p0_capacity_query_default_pool state "$query_timeout"; then
+    rc=0
+  else
+    rc=$?
+  fi
   case "$rc" in
     0) ;;
-    124|137) die "Incus default-pool query exceeded ${query_timeout}s" ;;
+    2) return "$rc" ;;
     *) return 0 ;;
   esac
   source="$(sed -n 's/^  source: //p' <<<"$state")"
@@ -1553,6 +1691,40 @@ recover_stale_test_default_pool() {
       marker="$stale_root/.subyard-p0-marker"
       expected_marker="subyard-p0-$token"
       markerless_registration="$stale_root/owner/config/yards/test-yard.env"
+      if [ -e "$source" ] || [ -L "$source" ]; then
+        [ -d "$source" ] && [ ! -L "$source" ] \
+          || die "refusing unsafe stale P0 pool source at $source"
+        ! pgrep -u "$(id -u)" -f "$stale_root" >/dev/null 2>&1 \
+          || die "stale P0 pool still has an active process: $stale_root"
+        recover_existing_p0=1
+      fi
+      ;;
+    "$HOME"/.cache/subyard-p0-*/peer/incus-home/storage)
+      stale_root="${source%/peer/incus-home/storage}"
+      name="${stale_root##*/}"
+      token="${name#subyard-p0-}"
+      [[ "$token" =~ ^[0-9]+$ ]] \
+        || die "refusing stale P0 pool with an invalid allocation path at $source"
+      [ "$token" != "$P0_CAPACITY_TOKEN" ] || return 0
+      marker="$stale_root/.subyard-p0-marker"
+      expected_marker="subyard-p0-$token"
+      if [ -e "$source" ] || [ -L "$source" ]; then
+        [ -d "$source" ] && [ ! -L "$source" ] \
+          || die "refusing unsafe stale P0 pool source at $source"
+        ! pgrep -u "$(id -u)" -f "$stale_root" >/dev/null 2>&1 \
+          || die "stale P0 pool still has an active process: $stale_root"
+        recover_existing_p0=1
+      fi
+      ;;
+    "$HOME"/.cache/subyard-p0-*/peer/incus-home/incus/storage)
+      stale_root="${source%/peer/incus-home/incus/storage}"
+      name="${stale_root##*/}"
+      token="${name#subyard-p0-}"
+      [[ "$token" =~ ^[0-9]+$ ]] \
+        || die "refusing stale P0 pool with an invalid allocation path at $source"
+      [ "$token" != "$P0_CAPACITY_TOKEN" ] || return 0
+      marker="$stale_root/.subyard-p0-marker"
+      expected_marker="subyard-p0-$token"
       if [ -e "$source" ] || [ -L "$source" ]; then
         [ -d "$source" ] && [ ! -L "$source" ] \
           || die "refusing unsafe stale P0 pool source at $source"
@@ -1814,6 +1986,7 @@ EOF
 
 capacity_verify_cleanup() {
   local path project leftover
+  restore_p0_incus_apparmor_default
   [ ! -e "$P0_CAPACITY_STATE_ROOT" ] \
     || die "P0 state root remains after cleanup: $P0_CAPACITY_STATE_ROOT"
   [ ! -e "$HOME/.cache/subyard-p0-peer-$TOKEN" ] \
@@ -1908,6 +2081,8 @@ capacity_verify_cleanup() {
     p0_capacity_use_build_cache
     ensure_owner_incus real-incus
     bash dev/e2e/p0-real-incus.sh
+    p0_capacity_remove_build_cache
+    p0_capacity_remove_root_if_empty
     ;;
   profile-resource)
     profile_resource

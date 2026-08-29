@@ -21,7 +21,7 @@ func main() {
 	defer stop()
 	if len(os.Args) > 1 && os.Args[1] == "_migrate-test-yard" {
 		// Compatibility shim for the released 0.4.0 installer. The ordered
-		// candidate-owned _migrate finalize path now performs this transition.
+		// v1 adapter is the only supported reader of that historical handoff.
 		return
 	}
 	if len(os.Args) > 1 && os.Args[1] == "_test-vms-facade" {

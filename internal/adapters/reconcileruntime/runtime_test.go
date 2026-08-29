@@ -260,6 +260,18 @@ esac
 	if err != nil || !verified {
 		t.Fatalf("fresh install did not verify before finalization: %v, %v", verified, err)
 	}
+	incus.Reconcile = ports.ReconcileState{}
+	verified, err = runtime.VerifyStage(context.Background(), "power")
+	if err != nil || !verified {
+		t.Fatalf("host service did not verify without the selected yard instance: %v, %v", verified, err)
+	}
+	incus.Reconcile = ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{
+		Config: map[string]string{
+			"user.subyard.managed": "true", "user.subyard.initialized": "false",
+			"user.subyard.desired_power": "running", "user.subyard.bridge": "incusbr0",
+			"boot.autostart": "false",
+		},
+	}}
 	incus.Reconcile.Instance.Config["user.subyard.initialized"] = "true"
 	incus.Reconcile.Instance.Config["user.subyard.desired_power"] = "paused"
 	assertStage(t, runtime, "power", false, "malformed desired power")

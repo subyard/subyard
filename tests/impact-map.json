@@ -88,6 +88,7 @@
     "go-ownerinventory": ["go:ownerinventory"],
     "go-ports": ["go:ports"],
     "go-resource": ["go:resource"],
+    "go-releasetransition": ["go:releasetransition"],
     "go-shellquote": ["go:shellquote"],
     "go-state": ["go:state"],
     "go-testkit": ["go:testkit", "host-free:core"],
@@ -112,6 +113,7 @@
     ],
     "migration-release": [
       "go:migration",
+      "go:releasetransition",
       "go:testyardmigration",
       "go:adapters/releaseruntime",
       "shell:engine-release",
@@ -508,6 +510,13 @@
       "pattern": "^internal/adapters/securityruntime/.*$",
       "check_sets": ["credential-profile"],
       "risk_domains": ["credential-profile"]
+    },
+    {
+      "id": "internal-release-transition",
+      "priority": 525,
+      "pattern": "^internal/releasetransition/.*$",
+      "check_sets": ["migration-release"],
+      "risk_domains": ["durable-layout", "release-runner"]
     },
     {
       "id": "internal-releaseruntime",

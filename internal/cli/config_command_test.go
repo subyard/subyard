@@ -1599,6 +1599,75 @@ func TestConfigSyncNamedStatusLeavesRecoveryPending(t *testing.T) {
 	}
 }
 
+func TestConfigSyncReadOnlyModesDoNotRecoverUnrelatedOwnerState(t *testing.T) {
+	for _, recovery := range []struct {
+		name string
+		path func(string, []string) string
+	}{
+		{
+			name: "owner inventory",
+			path: func(_ string, environment []string) string {
+				return filepath.Join(
+					environmentValue(environment, "SUBYARD_HOME"),
+					"owner-inventory",
+					"registration.json",
+				)
+			},
+		},
+		{
+			name: "HostID rename",
+			path: func(configHome string, _ []string) string {
+				return configsync.HostIDRenameTransactionPath(configHome)
+			},
+		},
+	} {
+		for _, invocation := range []struct {
+			name      string
+			arguments []string
+			wantCode  int
+			wantText  string
+		}{
+			{
+				name: "status", arguments: []string{"config", "sync", "status", "--offline"},
+				wantCode: 1, wantText: "Versioned configuration sync status",
+			},
+			{
+				name: "check", arguments: []string{"config", "sync", "--check"},
+				wantCode: 2, wantText: "no checkout was provided or registered",
+			},
+		} {
+			t.Run(recovery.name+"/"+invocation.name, func(t *testing.T) {
+				root, _, configHome, environment := configCommandFixture(t)
+				environment = append(environment, "SUBYARD_HOST_ID=owner-a")
+				journalPath := recovery.path(configHome, environment)
+				journal := []byte("{invalid-owner-recovery\n")
+				writeConfigCommandFile(t, journalPath, string(journal))
+
+				var stdout, stderr bytes.Buffer
+				program, err := New(Options{
+					RepositoryRoot: root, Program: "yard", Arguments: invocation.arguments,
+					Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				code := program.Run(context.Background())
+				output := stdout.String() + stderr.String()
+				if code != invocation.wantCode || !strings.Contains(output, invocation.wantText) {
+					t.Fatalf("config sync read-only mode: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+				}
+				got, err := os.ReadFile(journalPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(got, journal) {
+					t.Fatalf("config sync read-only mode changed recovery journal: got %q, want %q", got, journal)
+				}
+			})
+		}
+	}
+}
+
 func TestConfigSyncRemoteRoutingIgnoresLocalRecoveryJournal(t *testing.T) {
 	for _, test := range []struct {
 		name      string

@@ -171,6 +171,7 @@ launch_with_retry() {
   local name="$1" label="$2" attempt=1
   shift 2
   while ! run_with_progress "$label" "$@"; do
+    real_incus_observe info "$name" --project "$PROJECT" --show-log >&2 || true
     [ "$attempt" -lt 3 ] || return 1
     printf '  [warn] %s failed; cleaning the marked instance and retrying (%s/3)\n' \
       "$label" "$((attempt + 1))"

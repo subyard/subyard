@@ -3,6 +3,7 @@ package testyardmigration
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/Subyard/Subyard/internal/config"
 )
 
 const (
@@ -21,18 +24,38 @@ const (
 )
 
 type Options struct {
-	Executable     string
-	RepositoryRoot string
-	RuntimeRoot    string
-	Incus          string
-	ConfigHome     string
-	DataHome       string
-	Environment    []string
-	Stdout         io.Writer
-	Stderr         io.Writer
+	Executable              string
+	RepositoryRoot          string
+	Incus                   string
+	ConfigHome              string
+	DataHome                string
+	Environment             []string
+	Stdout                  io.Writer
+	Stderr                  io.Writer
+	RunYard                 func(context.Context, string, io.Writer, ...string) error
+	fault                   func(string) error
+	syncRegistrationFile    func(*os.File) error
+	openRegistrationStaging func(int, string) (int, error)
+	syncOwnerDirectory      func(string, int) error
+	RecoveryToken           string
+	TerminalCleanup         bool
 }
 
 type State string
+
+// Prepared binds the exact legacy registration bytes and project image
+// namespace observed before the outer transition authorizes mutation.
+type Prepared struct {
+	State              State
+	RegistrationDigest string
+	OverridesDigest    string
+	ControllerDigest   string
+	SharedImages       bool
+}
+
+// Progress is the closed set of owner-migration states that an authorized
+// release transition may observe while resuming a previously prepared state.
+type Progress string
 
 const (
 	StateAbsent                      State = "absent"
@@ -44,6 +67,12 @@ const (
 	StateLegacyDirectoryAdoptCurrent State = "legacy-directory-adopt-current"
 	StateLegacyFlatAdoptCurrent      State = "legacy-flat-adopt-current"
 	StateCurrent                     State = "current"
+)
+
+const (
+	ProgressExpected   Progress = "expected"
+	ProgressInProgress Progress = "in-progress"
+	ProgressDesired    Progress = "desired"
 )
 
 type registration struct {
@@ -62,50 +91,129 @@ type registrationSet struct {
 
 // Prepare validates registration, Incus topology and live lease state without
 // changing them.
-func Prepare(ctx context.Context, options Options) (State, error) {
+func Prepare(ctx context.Context, options Options) (Prepared, error) {
 	if err := validateOptions(&options); err != nil {
-		return "", err
+		return Prepared{}, err
 	}
 	observed, err := inspectRegistration(options)
 	if err != nil {
-		return "", err
+		return Prepared{}, err
 	}
+	return prepareObserved(ctx, options, observed, "")
+}
+
+// PrepareProspective assesses the exact legacy registration content that
+// preceding transition work will publish. It reads all other owner facts from
+// their live locations and does not write the prospective registration.
+func PrepareProspective(
+	ctx context.Context,
+	options Options,
+	readSnapshot func(string) (config.PersistentFileSnapshot, error),
+) (Prepared, error) {
+	if err := validateOptions(&options); err != nil {
+		return Prepared{}, err
+	}
+	if readSnapshot == nil {
+		return Prepared{}, errors.New("prospective owner registration reader is unavailable")
+	}
+	actual, err := inspectRegistration(options)
+	if err != nil {
+		return Prepared{}, err
+	}
+	if actual.state == StateCurrent {
+		return prepareObserved(ctx, options, actual, "")
+	}
+	observed := actual
+	if actual.state == StateAbsent {
+		yardsRoot := filepath.Join(options.ConfigHome, "yards")
+		directory := filepath.Join(yardsRoot, LegacyYard)
+		state := StateLegacyDirectory
+		if exists, existsErr := pathExists(directory); existsErr != nil {
+			return Prepared{}, existsErr
+		} else if exists {
+			state, err = inspectLegacyDirectoryState(directory)
+			if err != nil {
+				return Prepared{}, err
+			}
+		}
+		observed = registration{
+			state: state, oldRegistration: filepath.Join(directory, "config.env"),
+			currentRegistration: filepath.Join(yardsRoot, CurrentYard, "config.env"),
+		}
+	} else if _, _, migrates := preparedLegacyState(actual.state); !migrates {
+		return Prepared{}, errors.New("prospective owner registration conflicts with live registration")
+	}
+	snapshot, err := readSnapshot(observed.oldRegistration)
+	if err != nil {
+		return Prepared{}, err
+	}
+	if !snapshot.Exists {
+		return prepareObserved(ctx, options, actual, "")
+	}
+	if !selectsTestVMs(string(snapshot.Content)) {
+		return Prepared{}, errors.New("prospective owner registration does not select YARD_TEMPLATE=test-vms")
+	}
+	digest := sha256.Sum256(snapshot.Content)
+	return prepareObserved(ctx, options, observed, fmt.Sprintf("%x", digest[:]))
+}
+
+func prepareObserved(
+	ctx context.Context,
+	options Options,
+	observed registration,
+	prospectiveDigest string,
+) (Prepared, error) {
 	if observed.state == StateAbsent {
-		return observed.state, nil
+		return Prepared{State: observed.state}, nil
 	}
 	projects, err := inspectProjects(ctx, options)
 	if err != nil {
-		return "", err
+		return Prepared{}, err
 	}
 	if projects.legacy && projects.current {
-		return "", errors.New("both legacy and current test-yard Incus projects exist; refusing migration")
+		return Prepared{}, errors.New("both legacy and current test-yard Incus projects exist; refusing migration")
 	}
 	switch observed.state {
 	case StateCurrent:
+		if err := validateNoLegacyOwnerState(options); err != nil {
+			return Prepared{}, err
+		}
 		if projects.legacy {
-			return "", errors.New("legacy test-yard Incus project conflicts with current registration")
+			return Prepared{}, errors.New("legacy test-yard Incus project conflicts with current registration")
+		}
+		prepared, prepareErr := preparedObservedRegistration(
+			observed.state, observed.currentRegistration, prospectiveDigest,
+		)
+		if prepareErr != nil {
+			return Prepared{}, prepareErr
+		}
+		if err := bindPreparedAuxiliaryFacts(
+			options, observed.currentRegistration, &prepared,
+		); err != nil {
+			return Prepared{}, err
 		}
 		if projects.current {
-			if _, err := sharedImageNamespace(ctx, options, CurrentYard); err != nil {
-				return "", err
+			prepared.SharedImages, err = sharedImageNamespace(ctx, options, CurrentYard)
+			if err != nil {
+				return Prepared{}, err
 			}
 		}
-		return observed.state, nil
+		return prepared, nil
 	case StateLegacyDirectory, StateLegacyDirectoryProjects,
 		StateLegacyDirectoryOverrides, StateLegacyDirectoryState,
 		StateLegacyFlat:
 	default:
-		return "", fmt.Errorf("unknown test-yard registration state %q", observed.state)
+		return Prepared{}, fmt.Errorf("unknown test-yard registration state %q", observed.state)
 	}
 	adoptCurrent := projects.current && !projects.legacy
 	if !adoptCurrent && !projects.legacy {
-		return "", errors.New("legacy test-yard Incus project is unavailable")
+		return Prepared{}, errors.New("legacy test-yard Incus project is unavailable")
 	}
 	if err := validateCurrentStateDirectory(observed.currentRegistration, adoptCurrent); err != nil {
-		return "", err
+		return Prepared{}, err
 	}
 	if adoptCurrent && hasLegacyAuxiliaryState(observed.state) {
-		return "", errors.New(
+		return Prepared{}, errors.New(
 			"legacy e2e-yard state conflicts with the existing canonical test-yard state",
 		)
 	}
@@ -113,36 +221,315 @@ func Prepare(ctx context.Context, options Options) (State, error) {
 	if adoptCurrent {
 		imageProject = CurrentYard
 	}
-	if _, err := sharedImageNamespace(ctx, options, imageProject); err != nil {
-		return "", err
+	sharedImages, err := sharedImageNamespace(ctx, options, imageProject)
+	if err != nil {
+		return Prepared{}, err
 	}
+	prepared, err := preparedObservedRegistration(
+		observed.state, observed.oldRegistration, prospectiveDigest,
+	)
+	if err != nil {
+		return Prepared{}, err
+	}
+	if err := bindPreparedAuxiliaryFacts(options, observed.oldRegistration, &prepared); err != nil {
+		return Prepared{}, err
+	}
+	prepared.SharedImages = sharedImages
 	if adoptCurrent {
-		return adoptState(observed.state), nil
+		prepared.State = adoptState(observed.state)
+		return prepared, nil
 	}
 	if err := preflightLegacyLease(ctx, options, false); err != nil {
+		return Prepared{}, err
+	}
+	return prepared, nil
+}
+
+func preparedObservedRegistration(state State, path, prospectiveDigest string) (Prepared, error) {
+	if prospectiveDigest != "" {
+		return Prepared{State: state, RegistrationDigest: prospectiveDigest}, nil
+	}
+	return preparedRegistration(state, path)
+}
+
+func preparedRegistration(state State, path string) (Prepared, error) {
+	digest, err := registrationDigest(path)
+	if err != nil {
+		return Prepared{}, err
+	}
+	return Prepared{State: state, RegistrationDigest: digest}, nil
+}
+
+func registrationDigest(path string) (string, error) {
+	payload, err := os.ReadFile(path)
+	if err != nil {
 		return "", err
 	}
-	return observed.state, nil
+	digest := sha256.Sum256(payload)
+	return fmt.Sprintf("%x", digest[:]), nil
+}
+
+func absentStateDigest() string {
+	digest := sha256.Sum256([]byte("subyard-owner-state:absent-v1"))
+	return fmt.Sprintf("%x", digest[:])
+}
+
+func overridesStateDigest(path string) (string, error) {
+	return overridesStateDigestWithOptions(Options{}, path)
+}
+
+func bindPreparedAuxiliaryFacts(
+	options Options,
+	registrationPath string,
+	prepared *Prepared,
+) error {
+	overrides := filepath.Join(filepath.Dir(registrationPath), "overrides")
+	if filepath.Base(registrationPath) != "config.env" {
+		overrides = ""
+	}
+	var err error
+	if overrides == "" {
+		prepared.OverridesDigest = absentStateDigest()
+	} else {
+		prepared.OverridesDigest, err = overridesStateDigestWithOptions(options, overrides)
+		if err != nil {
+			return fmt.Errorf("inspect owner overrides state: %w", err)
+		}
+	}
+	controller, err := controllerStateDigest(options, filepath.Join(
+		options.DataHome, "e2e", "controllers", LegacyYard,
+	))
+	if err != nil {
+		return fmt.Errorf("inspect legacy controller state: %w", err)
+	}
+	prepared.ControllerDigest = controller
+	return nil
+}
+
+// ObserveProgress validates the exact owner topology against the prepared
+// legacy state without mutating it. Intermediate states are deliberately
+// available only with that durable before-state binding; fresh inspection
+// continues to use Prepare and rejects mixed registrations.
+func ObserveProgress(ctx context.Context, options Options, before Prepared) (Progress, error) {
+	if err := validateOptions(&options); err != nil {
+		return "", err
+	}
+	if err := validatePrepared(before); err != nil {
+		return "", err
+	}
+	shape, adoptCurrent, migrates := preparedLegacyState(before.State)
+	if !migrates {
+		return "", fmt.Errorf("unknown prepared test-yard state %q", before.State)
+	}
+	registrations, err := inspectRegistrationSet(options)
+	if err != nil {
+		return "", err
+	}
+	projects, err := inspectProjects(ctx, options)
+	if err != nil {
+		return "", err
+	}
+	if err := validatePreparedImageNamespaces(ctx, options, projects, before); err != nil {
+		return "", err
+	}
+	oldRegistration, currentRegistration := registrationPaths(options, shape)
+	if registrations.legacy && registrations.oldRegistration != oldRegistration {
+		return "", errors.New("journaled legacy test-yard registration path changed")
+	}
+	if registrations.current && registrations.currentRegistration != currentRegistration {
+		return "", errors.New("journaled current test-yard registration path changed")
+	}
+	if registrations.legacy && !registrations.current {
+		if err := validatePreparedAuxiliaryState(
+			options, oldRegistration, currentRegistration, before, auxiliaryAtSource,
+		); err != nil {
+			return "", err
+		}
+		if !equivalentLegacyState(registrations.legacyState, before.State) {
+			return "", errors.New("owner migration facts do not match the prepared state")
+		}
+		if err := registrationMatches(registrations.oldRegistration, before); err != nil {
+			return "", err
+		}
+		if !expectedOwnerProjects(projects, adoptCurrent) {
+			if !adoptCurrent && !projects.legacy && !projects.current {
+				return ProgressInProgress, nil
+			}
+			return "", errors.New("owner migration facts do not match the prepared state")
+		}
+		return ProgressExpected, nil
+	}
+	if !registrations.current {
+		return "", errors.New("owner migration registrations are unavailable")
+	}
+	if registrations.legacy {
+		if err := validatePreparedAuxiliaryState(
+			options, oldRegistration, currentRegistration, before, auxiliaryInProgress,
+		); err != nil {
+			return "", err
+		}
+		projectsResumable := resumableOwnerProjects(projects, adoptCurrent) ||
+			(!adoptCurrent && !projects.legacy && !projects.current)
+		if !resumableLegacyState(before.State, registrations.legacyState) || !projectsResumable {
+			return "", errors.New("owner migration intermediate facts are not authorized")
+		}
+		if err := registrationMatches(registrations.oldRegistration, before); err != nil {
+			return "", err
+		}
+		if err := registrationMatches(currentRegistration, before); err != nil {
+			return "", err
+		}
+		return ProgressInProgress, nil
+	}
+	if err := registrationMatches(registrations.currentRegistration, before); err != nil {
+		return "", err
+	}
+	if err := validatePreparedAuxiliaryState(
+		options, oldRegistration, currentRegistration, before, auxiliaryInProgress,
+	); err != nil {
+		return "", err
+	}
+	if projects.legacy {
+		return "", errors.New("owner migration current registration has conflicting projects")
+	}
+	if !projects.current {
+		return ProgressInProgress, nil
+	}
+	if err := run(ctx, options, CurrentYard, io.Discard, "check"); err != nil {
+		return ProgressInProgress, nil
+	}
+	legacyController := filepath.Join(options.DataHome, "e2e", "controllers", LegacyYard)
+	if exists, err := pathExists(legacyController); err != nil {
+		return "", err
+	} else if exists {
+		return ProgressInProgress, nil
+	}
+	if err := validatePreparedAuxiliaryState(
+		options, oldRegistration, currentRegistration, before, auxiliaryDesired,
+	); err != nil {
+		return "", err
+	}
+	return ProgressDesired, nil
+}
+
+func validatePrepared(prepared Prepared) error {
+	if err := validateStateDigest(prepared.RegistrationDigest, "prepared registration identity"); err != nil {
+		return err
+	}
+	if err := validateStateDigest(prepared.OverridesDigest, "prepared overrides identity"); err != nil {
+		return err
+	}
+	if err := validateStateDigest(prepared.ControllerDigest, "prepared controller identity"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateStateDigest(value, label string) error {
+	if len(value) != sha256.Size*2 || strings.Trim(value, "0123456789abcdef") != "" {
+		return fmt.Errorf("%s is invalid", label)
+	}
+	return nil
+}
+
+func registrationMatches(path string, prepared Prepared) error {
+	digest, err := registrationDigest(path)
+	if err != nil {
+		return err
+	}
+	if digest != prepared.RegistrationDigest {
+		return errors.New("owner registration bytes changed outside the authorized transition")
+	}
+	return nil
+}
+
+func expectedOwnerProjects(projects projectSet, adoptCurrent bool) bool {
+	return adoptCurrent && projects.current && !projects.legacy ||
+		!adoptCurrent && projects.legacy && !projects.current
+}
+
+func validatePreparedImageNamespaces(
+	ctx context.Context,
+	options Options,
+	projects projectSet,
+	prepared Prepared,
+) error {
+	for _, project := range []struct {
+		exists bool
+		yard   string
+	}{
+		{exists: projects.legacy, yard: LegacyYard},
+		{exists: projects.current, yard: CurrentYard},
+	} {
+		if !project.exists {
+			continue
+		}
+		sharedImages, err := sharedImageNamespace(ctx, options, project.yard)
+		if err != nil {
+			return err
+		}
+		if sharedImages != prepared.SharedImages {
+			return errors.New("test-yard project image namespace changed outside the authorized transition")
+		}
+	}
+	return nil
+}
+
+func resumableOwnerProjects(projects projectSet, adoptCurrent bool) bool {
+	return adoptCurrent && projects.current && !projects.legacy ||
+		!adoptCurrent && (projects.legacy || projects.current)
+}
+
+func resumableLegacyState(before, actual State) bool {
+	expected := expectedLegacyState(before)
+	return actual == expected ||
+		actual == StateLegacyDirectory && (expected == StateLegacyDirectoryProjects ||
+			expected == StateLegacyDirectoryOverrides || expected == StateLegacyDirectoryState) ||
+		actual == StateLegacyDirectoryOverrides && expected == StateLegacyDirectoryState
 }
 
 // Commit performs the prepared transition. Its precondition is persisted by
 // the caller before this method runs, so interrupted teardown can resume
 // without requiring the legacy yard to remain live.
-func Commit(ctx context.Context, options Options, before State) error {
+func Commit(ctx context.Context, options Options, before Prepared) error {
 	if err := validateOptions(&options); err != nil {
 		return err
 	}
-	shape, adoptCurrent, migrates := preparedLegacyState(before)
+	if before.State != StateAbsent && before.State != StateCurrent {
+		if err := validatePrepared(before); err != nil {
+			return err
+		}
+	}
+	if options.TerminalCleanup {
+		if err := validateRecoveryToken(options.RecoveryToken); err != nil {
+			return err
+		}
+		progress, err := ObserveProgress(ctx, options, before)
+		if err != nil {
+			return err
+		}
+		if progress != ProgressDesired {
+			return errors.New("owner recovery cleanup requires verified desired state")
+		}
+		return cleanupPreparedOwnerArchives(options, before)
+	}
+	shape, adoptCurrent, migrates := preparedLegacyState(before.State)
 	if !migrates {
 		return Verify(options, before)
+	}
+	if err := validateRecoveryToken(options.RecoveryToken); err != nil {
+		return err
 	}
 	observed, err := inspectRegistrationSet(options)
 	if err != nil {
 		return err
 	}
 	oldRegistration, currentRegistration := registrationPaths(options, shape)
-	if observed.legacy && (observed.legacyState != expectedLegacyState(before) ||
-		observed.oldRegistration != oldRegistration) {
+	legacyStateMatches := equivalentLegacyState(observed.legacyState, before.State)
+	if observed.current {
+		legacyStateMatches = resumableLegacyState(before.State, observed.legacyState)
+	}
+	if observed.legacy && (!legacyStateMatches || observed.oldRegistration != oldRegistration) {
 		return errors.New("prepared legacy registration shape changed before commit")
 	}
 	if observed.current && observed.currentRegistration != currentRegistration {
@@ -150,6 +537,54 @@ func Commit(ctx context.Context, options Options, before State) error {
 	}
 	if !observed.legacy && !observed.current {
 		return errors.New("prepared test-yard registration disappeared before commit")
+	}
+	if observed.legacy {
+		if err := registrationMatches(observed.oldRegistration, before); err != nil {
+			return err
+		}
+	}
+	if observed.current {
+		if err := registrationMatches(observed.currentRegistration, before); err != nil {
+			return err
+		}
+		if err := repairAuthorizedRegistrationPublication(
+			options, observed.currentRegistration, before,
+		); err != nil {
+			return err
+		}
+	}
+	auxiliaryStage := auxiliaryInProgress
+	if observed.legacy && !observed.current {
+		auxiliaryStage = auxiliaryAtSource
+	}
+	if err := validatePreparedAuxiliaryState(
+		options, oldRegistration, currentRegistration, before, auxiliaryStage,
+	); err != nil {
+		return err
+	}
+	var retainedRegistration *boundRegistration
+	if observed.legacy {
+		retainedRegistration, err = openBoundPublishedRegistration(oldRegistration, before)
+		if err != nil {
+			return err
+		}
+		defer retainedRegistration.close()
+	}
+	var retainedOverrides *boundOverrides
+	if observed.legacy && hasPreparedOverrides(before.State) {
+		overridesPath := filepath.Join(filepath.Dir(oldRegistration), "overrides")
+		if exists, existsErr := pathExists(overridesPath); existsErr != nil {
+			return existsErr
+		} else if exists {
+			retainedOverrides, err = openBoundOverrides(options, overridesPath)
+			if err != nil {
+				return err
+			}
+			defer retainedOverrides.close()
+			if retainedOverrides.digest != before.OverridesDigest {
+				return errors.New("owner overrides state changed outside the authorized transition")
+			}
+		}
 	}
 	runYard := func(yard string, arguments ...string) error {
 		return run(ctx, options, yard, nil, arguments...)
@@ -164,7 +599,17 @@ func Commit(ctx context.Context, options Options, before State) error {
 		}
 	} else {
 		if !projects.legacy && !projects.current {
-			return errors.New("prepared test-yard Incus projects disappeared before commit")
+			if observed.current {
+				// features.images=true deliberately has no precreated canonical
+				// project after legacy teardown. Canonical init below recreates it.
+			} else if err := restoreLegacyOwnerForResume(ctx, options, runYard, before); err != nil {
+				return err
+			} else {
+				projects, err = inspectProjects(ctx, options)
+				if err != nil {
+					return err
+				}
+			}
 		}
 		if projects.current && !projects.legacy && !observed.current {
 			return errors.New("legacy test-yard project changed before registration copy")
@@ -174,12 +619,26 @@ func Commit(ctx context.Context, options Options, before State) error {
 		}
 	}
 	if observed.current && !observed.legacy {
-		if filepath.Base(oldRegistration) == "config.env" {
-			if err := removeEmptyDirectory(filepath.Dir(oldRegistration)); err != nil {
-				return err
+		if err := repairPreparedRegistrationArchive(options, before); err != nil {
+			return err
+		}
+		return finishCurrent(
+			runYard, options, !adoptCurrent, oldRegistration, currentRegistration, before,
+		)
+	}
+	if !adoptCurrent && projects.legacy && observed.legacy && !observed.current {
+		_, instanceExists, inspectErr := legacyInstanceStatus(ctx, options)
+		if inspectErr != nil {
+			return inspectErr
+		}
+		if !instanceExists {
+			if err := runYard(LegacyYard, "init", "--yes"); err != nil {
+				return fmt.Errorf("resume compensated legacy test yard: %w", err)
+			}
+			if err := runYard(LegacyYard, "check"); err != nil {
+				return fmt.Errorf("validate compensated legacy test yard: %w", err)
 			}
 		}
-		return finishCurrent(runYard, options, !adoptCurrent)
 	}
 	if !adoptCurrent && projects.legacy {
 		if err := preflightLegacyLease(ctx, options, true); err != nil {
@@ -190,29 +649,44 @@ func Commit(ctx context.Context, options Options, before State) error {
 	if !projects.legacy {
 		imageYard = CurrentYard
 	}
-	sharedImages, err := sharedImageNamespace(ctx, options, imageYard)
-	if err != nil {
-		return err
+	sharedImages := before.SharedImages
+	if projects.legacy || projects.current {
+		actualSharedImages, sharedErr := sharedImageNamespace(ctx, options, imageYard)
+		if sharedErr != nil {
+			return sharedErr
+		}
+		if actualSharedImages != before.SharedImages {
+			return errors.New("test-yard project image namespace changed outside the authorized transition")
+		}
 	}
-	prepareProject := func(yard string) error {
-		return ensureProject(ctx, options, yard, sharedImages)
-	}
+	prepareProject := func(yard string) error { return ensureProject(ctx, options, yard, sharedImages) }
 	registrationCopied := observed.current
 	if !registrationCopied {
-		if err := validateCurrentStateDirectory(currentRegistration, adoptCurrent); err != nil {
+		if err := validatePreparedAuxiliaryState(
+			options, oldRegistration, currentRegistration, before, auxiliaryAtSource,
+		); err != nil {
 			return err
 		}
-		if err := copyRegistration(oldRegistration, currentRegistration); err != nil {
+		if err := validateAuthorizedCurrentStateDirectory(
+			currentRegistration, adoptCurrent, options.RecoveryToken,
+		); err != nil {
+			return err
+		}
+		if retainedRegistration == nil {
+			return errors.New("legacy owner registration disappeared before publication")
+		}
+		if err := copyBoundRegistration(
+			options, retainedRegistration, currentRegistration, before,
+		); err != nil {
 			return err
 		}
 		registrationCopied = true
 	}
 	recover := func(cause error) error {
 		return recoverLegacy(
+			ctx,
+			options,
 			runYard,
-			runYard,
-			nil,
-			prepareProject,
 			oldRegistration,
 			currentRegistration,
 			registrationCopied,
@@ -225,22 +699,44 @@ func Commit(ctx context.Context, options Options, before State) error {
 		if err := prepareProject(CurrentYard); err != nil {
 			return recover(err)
 		}
+		if err := inject(options, "after-current-project-prepare"); err != nil {
+			return err
+		}
 		if err := runYard(LegacyYard, "teardown", "--yes"); err != nil {
 			return recover(fmt.Errorf("teardown legacy test yard: %w", err))
 		}
-	}
-	if err := movePreparedAuxiliaryState(oldRegistration, currentRegistration, before); err != nil {
-		return recover(err)
-	}
-	if err := os.Remove(oldRegistration); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return recover(err)
-	}
-	if filepath.Base(oldRegistration) == "config.env" {
-		if err := removeEmptyDirectory(filepath.Dir(oldRegistration)); err != nil {
-			return recover(err)
+		if err := inject(options, "after-legacy-teardown"); err != nil {
+			return err
 		}
 	}
-	if err := finishCurrent(runYard, options, !adoptCurrent); err != nil {
+	if err := removeEmptyFlatLegacyDirectory(oldRegistration, before); err != nil {
+		return recover(err)
+	}
+	if err := movePreparedAuxiliaryState(
+		options, oldRegistration, currentRegistration, before, retainedOverrides,
+	); err != nil {
+		return recover(err)
+	}
+	if hasPreparedOverrides(before.State) {
+		if err := inject(options, "after-auxiliary-state-move"); err != nil {
+			return err
+		}
+	}
+	if retainedRegistration == nil {
+		return recover(errors.New("legacy owner registration disappeared before removal"))
+	}
+	if err := archivePreparedRegistration(options, retainedRegistration, before); err != nil {
+		if isInjectedFault(err) || isResumableOwnerMutationError(err) {
+			return err
+		}
+		return recover(err)
+	}
+	if err := finishCurrent(
+		runYard, options, !adoptCurrent, oldRegistration, currentRegistration, before,
+	); err != nil {
+		if isInjectedFault(err) || isResumableOwnerMutationError(err) {
+			return err
+		}
 		return recover(err)
 	}
 	fmt.Fprintln(options.Stdout, "migrated test VM yard e2e-yard -> test-yard")
@@ -248,7 +744,37 @@ func Commit(ctx context.Context, options Options, before State) error {
 }
 
 // Verify checks the exact postcondition associated with a prepared state.
-func Verify(options Options, before State) error {
+func Verify(options Options, before Prepared) error {
+	if err := verifyState(options, before.State); err != nil {
+		return err
+	}
+	if before.State == StateAbsent {
+		return nil
+	}
+	observed, err := inspectRegistration(options)
+	if err != nil {
+		return err
+	}
+	if err := registrationMatches(observed.currentRegistration, before); err != nil {
+		return err
+	}
+	shape, _, migrates := preparedLegacyState(before.State)
+	if !migrates {
+		return nil
+	}
+	oldRegistration, currentRegistration := registrationPaths(options, shape)
+	return validatePreparedAuxiliaryState(
+		options, oldRegistration, currentRegistration, before, auxiliaryDesired,
+	)
+}
+
+// VerifyState retains the categorical read-only verifier for imported v1
+// journals that predate exact owner-registration evidence.
+func VerifyState(options Options, before State) error {
+	return verifyState(options, before)
+}
+
+func verifyState(options Options, before State) error {
 	if err := validateOptions(&options); err != nil {
 		return err
 	}
@@ -256,26 +782,23 @@ func Verify(options Options, before State) error {
 	if err != nil {
 		return err
 	}
-	switch before {
-	case StateAbsent:
+	if before == StateAbsent {
 		if observed.state != StateAbsent {
 			return fmt.Errorf("test-yard migration expected no registration, found %s", observed.state)
 		}
-	case StateCurrent:
-		if observed.state != StateCurrent {
-			return fmt.Errorf("test-yard migration expected current registration, found %s", observed.state)
-		}
-	case StateLegacyDirectory, StateLegacyDirectoryProjects,
-		StateLegacyDirectoryOverrides, StateLegacyDirectoryState,
-		StateLegacyFlat,
-		StateLegacyDirectoryAdoptCurrent, StateLegacyFlatAdoptCurrent:
-		if observed.state != StateCurrent {
-			return fmt.Errorf("test-yard migration did not converge: found %s", observed.state)
-		}
-	default:
+		return nil
+	}
+	_, _, migrates := preparedLegacyState(before)
+	if before != StateCurrent && !migrates {
 		return fmt.Errorf("unknown prepared test-yard state %q", before)
 	}
-	return nil
+	if observed.state != StateCurrent {
+		if before == StateCurrent {
+			return fmt.Errorf("test-yard migration expected current registration, found %s", observed.state)
+		}
+		return fmt.Errorf("test-yard migration did not converge: found %s", observed.state)
+	}
+	return validateNoLegacyOwnerState(options)
 }
 
 // VerifyRollback checks that rollback restored the exact registration shape.
@@ -283,24 +806,17 @@ func VerifyRollback(options Options, before State) error {
 	if err := validateOptions(&options); err != nil {
 		return err
 	}
+	observed, err := inspectRegistration(options)
+	if err != nil {
+		return err
+	}
 	if before == StateCurrent {
-		observed, err := inspectRegistration(options)
-		if err != nil {
-			return err
-		}
 		if observed.state != StateCurrent {
-			return fmt.Errorf(
-				"test-yard no-op rollback expected current registration, found %s",
-				observed.state,
-			)
+			return fmt.Errorf("test-yard no-op rollback expected current registration, found %s", observed.state)
 		}
 		return nil
 	}
 	if before == StateAbsent {
-		observed, err := inspectRegistration(options)
-		if err != nil {
-			return err
-		}
 		switch observed.state {
 		case StateAbsent,
 			StateLegacyDirectory,
@@ -310,147 +826,17 @@ func VerifyRollback(options Options, before State) error {
 			StateLegacyFlat:
 			return nil
 		default:
-			return fmt.Errorf(
-				"test-yard no-op rollback found migrated state %s",
-				observed.state,
-			)
+			return fmt.Errorf("test-yard no-op rollback found migrated state %s", observed.state)
 		}
 	}
 	_, _, migrates := preparedLegacyState(before)
 	if migrates {
 		before = expectedLegacyState(before)
 	}
-	observed, err := inspectRegistration(options)
-	if err != nil {
-		return err
-	}
 	if !equivalentLegacyState(observed.state, before) {
-		return fmt.Errorf(
-			"test-yard rollback expected registration state %s, found %s",
-			before,
-			observed.state,
-		)
+		return fmt.Errorf("test-yard rollback expected registration state %s, found %s", before, observed.state)
 	}
 	return nil
-}
-
-// Rollback restores the legacy registration with the same runtime that removes
-// the temporary canonical owner.
-func Rollback(ctx context.Context, options Options, before State) error {
-	return RollbackWithLegacyRuntime(ctx, options, options, before)
-}
-
-// RollbackWithLegacyRuntime lets the active migration runtime remove the
-// temporary canonical owner while the retained source runtime recreates and
-// validates the legacy owner it understands.
-func RollbackWithLegacyRuntime(
-	ctx context.Context,
-	options Options,
-	legacyOptions Options,
-	before State,
-) error {
-	return RollbackWithLegacyRuntimeAndPower(ctx, options, legacyOptions, before, "")
-}
-
-// RollbackWithLegacyRuntimeAndPower also restores the legacy broker's durable
-// power intent after the retained runtime recreates its owner. This keeps a
-// resumed layout-1 migration faithful to the original broker state.
-func RollbackWithLegacyRuntimeAndPower(
-	ctx context.Context,
-	options Options,
-	legacyOptions Options,
-	before State,
-	desiredPower string,
-) error {
-	if err := validateOptions(&options); err != nil {
-		return err
-	}
-	if err := validateOptions(&legacyOptions); err != nil {
-		return err
-	}
-	if desiredPower != "" && desiredPower != "running" && desiredPower != "stopped" {
-		return fmt.Errorf("invalid legacy desired power %q", desiredPower)
-	}
-	if before == StateAbsent || before == StateCurrent {
-		return nil
-	}
-	shape, adoptCurrent, migrates := preparedLegacyState(before)
-	if !migrates {
-		return fmt.Errorf("unknown prepared test-yard state %q", before)
-	}
-	observed, err := inspectRegistrationSet(options)
-	if err != nil {
-		return err
-	}
-	runYard := func(yard string, arguments ...string) error {
-		return run(ctx, options, yard, nil, arguments...)
-	}
-	runLegacyYard := func(yard string, arguments ...string) error {
-		return run(ctx, legacyOptions, yard, nil, arguments...)
-	}
-	restoreLegacyPower := func() error {
-		if desiredPower == "" {
-			return nil
-		}
-		if _, err := runIncus(
-			ctx,
-			options,
-			"config",
-			"set",
-			"yard-e2e-yard",
-			"user.subyard.desired_power",
-			desiredPower,
-			"--project",
-			"subyard-e2e-yard",
-		); err != nil {
-			return fmt.Errorf("restore legacy test VM broker desired power: %w", err)
-		}
-		return nil
-	}
-	oldRegistration, currentRegistration := registrationPaths(options, shape)
-	if observed.legacy && !observed.current {
-		if !equivalentLegacyState(observed.legacyState, before) ||
-			observed.oldRegistration != oldRegistration {
-			return errors.New("rollback found a different legacy registration shape")
-		}
-		if adoptCurrent {
-			return nil
-		}
-		return finishLegacyRollback(runLegacyYard, restoreLegacyPower)
-	}
-	if !observed.current {
-		return errors.New("cannot roll back test-yard migration without a current registration")
-	}
-	if observed.currentRegistration != currentRegistration {
-		return errors.New("rollback found a different current registration shape")
-	}
-	projects, err := inspectProjects(ctx, options)
-	if err != nil {
-		return err
-	}
-	imageYard := CurrentYard
-	if !projects.current && projects.legacy {
-		imageYard = LegacyYard
-	}
-	sharedImages, err := sharedImageNamespace(ctx, options, imageYard)
-	if err != nil {
-		return err
-	}
-	prepareProject := func(yard string) error {
-		return ensureProject(ctx, options, yard, sharedImages)
-	}
-	return recoverLegacy(
-		runYard,
-		runLegacyYard,
-		restoreLegacyPower,
-		prepareProject,
-		oldRegistration,
-		currentRegistration,
-		true,
-		adoptCurrent,
-		before,
-		nil,
-	)
 }
 
 func validateOptions(options *Options) error {
@@ -484,10 +870,11 @@ func inspectRegistration(options Options) (registration, error) {
 		return registration{}, errors.New("test-yard already exists; refusing to replace either yard")
 	}
 	if found.legacy {
+		_, currentRegistration := registrationPaths(options, found.legacyState)
 		return registration{
 			state:               found.legacyState,
 			oldRegistration:     found.oldRegistration,
-			currentRegistration: expectedCurrentRegistration(options, found.legacyState),
+			currentRegistration: currentRegistration,
 		}, nil
 	}
 	if found.current {
@@ -523,14 +910,21 @@ func inspectRegistrationSet(options Options) (registrationSet, error) {
 	}
 	var foundLegacy, foundCurrent []candidate
 	for _, group := range []struct {
-		source []candidate
-		target *[]candidate
+		source           []candidate
+		target           *[]candidate
+		publishedCurrent bool
 	}{
-		{legacy, &foundLegacy},
-		{current, &foundCurrent},
+		{legacy, &foundLegacy, false},
+		{current, &foundCurrent, true},
 	} {
 		for _, entry := range group.source {
-			exists, err := ownedRegular(entry.path)
+			var exists bool
+			var err error
+			if group.publishedCurrent {
+				exists, err = ownedCurrentRegistration(entry.path)
+			} else {
+				exists, err = ownedRegular(entry.path)
+			}
 			if err != nil {
 				return registrationSet{}, err
 			}
@@ -624,13 +1018,16 @@ func run(
 	stdout io.Writer,
 	arguments ...string,
 ) error {
+	if stdout == nil {
+		stdout = options.Stdout
+	}
+	if options.RunYard != nil {
+		return options.RunYard(ctx, yard, stdout, arguments...)
+	}
 	commandArguments := append([]string{"-Y", yard}, arguments...)
 	command := exec.CommandContext(ctx, options.Executable, commandArguments...)
 	command.Env = migrationChildEnvironment(options.Environment)
 	command.Stdin = strings.NewReader("")
-	if stdout == nil {
-		stdout = options.Stdout
-	}
 	command.Stdout, command.Stderr = stdout, options.Stderr
 	return command.Run()
 }
@@ -679,45 +1076,37 @@ type projectSet struct {
 }
 
 func preparedLegacyState(state State) (State, bool, bool) {
-	switch state {
+	shape := expectedLegacyState(state)
+	adoptCurrent := shape != state
+	switch shape {
 	case StateLegacyDirectory, StateLegacyDirectoryProjects,
 		StateLegacyDirectoryOverrides, StateLegacyDirectoryState:
-		return StateLegacyDirectory, false, true
+		return StateLegacyDirectory, adoptCurrent, true
 	case StateLegacyFlat:
-		return StateLegacyFlat, false, true
-	case StateLegacyDirectoryAdoptCurrent:
-		return StateLegacyDirectory, true, true
-	case StateLegacyFlatAdoptCurrent:
-		return StateLegacyFlat, true, true
+		return StateLegacyFlat, adoptCurrent, true
 	default:
 		return "", false, false
 	}
 }
 
 func adoptState(state State) State {
-	switch state {
-	case StateLegacyDirectory:
+	if state == StateLegacyDirectory {
 		return StateLegacyDirectoryAdoptCurrent
-	case StateLegacyDirectoryProjects,
-		StateLegacyDirectoryOverrides,
-		StateLegacyDirectoryState:
-		return state
-	case StateLegacyFlat:
-		return StateLegacyFlatAdoptCurrent
-	default:
-		return state
 	}
+	if state == StateLegacyFlat {
+		return StateLegacyFlatAdoptCurrent
+	}
+	return state
 }
 
 func expectedLegacyState(state State) State {
-	switch state {
-	case StateLegacyDirectoryAdoptCurrent:
+	if state == StateLegacyDirectoryAdoptCurrent {
 		return StateLegacyDirectory
-	case StateLegacyFlatAdoptCurrent:
-		return StateLegacyFlat
-	default:
-		return state
 	}
+	if state == StateLegacyFlatAdoptCurrent {
+		return StateLegacyFlat
+	}
+	return state
 }
 
 // Project registration state is generated by yard init and disposable. A
@@ -725,18 +1114,11 @@ func expectedLegacyState(state State) State {
 // accepting that init may recreate the projects directory.
 func equivalentLegacyState(observed, expected State) bool {
 	expected = expectedLegacyState(expected)
-	switch expected {
-	case StateLegacyDirectory, StateLegacyDirectoryProjects:
-		return observed == StateLegacyDirectory ||
-			observed == StateLegacyDirectoryProjects
-	case StateLegacyDirectoryOverrides, StateLegacyDirectoryState:
-		return observed == StateLegacyDirectoryOverrides ||
-			observed == StateLegacyDirectoryState
-	case StateLegacyFlat:
-		return observed == StateLegacyFlat
-	default:
-		return false
-	}
+	return observed == expected ||
+		(observed == StateLegacyDirectory || observed == StateLegacyDirectoryProjects) &&
+			(expected == StateLegacyDirectory || expected == StateLegacyDirectoryProjects) ||
+		(observed == StateLegacyDirectoryOverrides || observed == StateLegacyDirectoryState) &&
+			(expected == StateLegacyDirectoryOverrides || expected == StateLegacyDirectoryState)
 }
 
 func inspectLegacyDirectoryState(directory string) (State, error) {
@@ -840,60 +1222,125 @@ func hasLegacyAuxiliaryState(state State) bool {
 }
 
 func preparedAuxiliaryState(state State) (projects, overrides bool) {
-	switch state {
-	case StateLegacyDirectoryProjects:
-		return true, false
-	case StateLegacyDirectoryOverrides:
-		return false, true
-	case StateLegacyDirectoryState:
-		return true, true
-	default:
-		return false, false
-	}
+	return state == StateLegacyDirectoryProjects || state == StateLegacyDirectoryState,
+		state == StateLegacyDirectoryOverrides || state == StateLegacyDirectoryState
 }
 
-func movePreparedAuxiliaryState(oldRegistration, currentRegistration string, state State) error {
-	if filepath.Base(oldRegistration) != "config.env" {
-		return nil
-	}
+func hasPreparedOverrides(state State) bool {
 	_, overrides := preparedAuxiliaryState(state)
-	if !overrides {
-		return nil
+	return overrides
+}
+
+type auxiliaryValidationStage uint8
+
+const (
+	auxiliaryAtSource auxiliaryValidationStage = iota
+	auxiliaryInProgress
+	auxiliaryDesired
+)
+
+func validatePreparedAuxiliaryState(
+	options Options,
+	oldRegistration, currentRegistration string,
+	prepared Prepared,
+	stage auxiliaryValidationStage,
+) error {
+	oldOverrides, currentOverrides := "", ""
+	if filepath.Base(oldRegistration) == "config.env" {
+		oldOverrides = filepath.Join(filepath.Dir(oldRegistration), "overrides")
+		currentOverrides = filepath.Join(filepath.Dir(currentRegistration), "overrides")
 	}
-	if err := moveAuxiliaryDirectory(
-		filepath.Join(filepath.Dir(oldRegistration), "overrides"),
-		filepath.Join(filepath.Dir(currentRegistration), "overrides"),
-	); err != nil {
-		return fmt.Errorf(
-			"move legacy e2e-yard overrides state: %w",
-			err,
-		)
+	oldDigest, currentDigest := absentStateDigest(), absentStateDigest()
+	var err error
+	if oldOverrides != "" {
+		oldDigest, err = overridesStateDigest(oldOverrides)
+		if err != nil {
+			return fmt.Errorf("inspect legacy owner overrides state: %w", err)
+		}
+		currentDigest, err = overridesStateDigest(currentOverrides)
+		if err != nil {
+			return fmt.Errorf("inspect canonical owner overrides state: %w", err)
+		}
+	}
+	want := prepared.OverridesDigest
+	absent := absentStateDigest()
+	switch stage {
+	case auxiliaryAtSource:
+		if oldDigest != want || currentDigest != absent {
+			return errors.New("owner overrides state changed outside the authorized transition")
+		}
+	case auxiliaryInProgress:
+		valid := false
+		if want == absent {
+			valid = oldDigest == absent && currentDigest == absent
+		} else {
+			valid = (oldDigest == want && currentDigest == absent) ||
+				(oldDigest == absent && currentDigest == want)
+		}
+		if !valid {
+			return errors.New("owner overrides state changed outside the authorized transition")
+		}
+	case auxiliaryDesired:
+		if oldDigest != absent || currentDigest != want {
+			return errors.New("owner overrides state did not converge to the authorized state")
+		}
+	default:
+		return errors.New("unknown auxiliary validation stage")
+	}
+
+	if err := validatePreparedRegistrationArchive(options, oldRegistration, prepared, stage); err != nil {
+		return err
+	}
+	if err := validatePreparedControllerState(options, prepared, stage); err != nil {
+		return fmt.Errorf("inspect legacy controller state: %w", err)
 	}
 	return nil
 }
 
-func moveAuxiliaryDirectory(source, destination string) error {
-	sourceExists, err := pathExists(source)
-	if err != nil {
+func movePreparedAuxiliaryState(
+	options Options,
+	oldRegistration, currentRegistration string,
+	prepared Prepared,
+	retained *boundOverrides,
+) error {
+	if filepath.Base(oldRegistration) != "config.env" {
+		return nil
+	}
+	_, overrides := preparedAuxiliaryState(prepared.State)
+	if !overrides {
+		return nil
+	}
+	if err := validatePreparedAuxiliaryState(
+		options, oldRegistration, currentRegistration, prepared, auxiliaryInProgress,
+	); err != nil {
 		return err
 	}
-	destinationExists, err := pathExists(destination)
-	if err != nil {
-		return err
-	}
-	switch {
-	case sourceExists && destinationExists:
-		return errors.New("both source and destination state directories exist")
-	case sourceExists:
-		if err := ownedDirectory(source); err != nil {
+	source := filepath.Join(filepath.Dir(oldRegistration), "overrides")
+	destination := filepath.Join(filepath.Dir(currentRegistration), "overrides")
+	if retained == nil {
+		sourceExists, err := pathExists(source)
+		if err != nil {
 			return err
 		}
-		return os.Rename(source, destination)
-	case destinationExists:
-		return ownedDirectory(destination)
-	default:
-		return errors.New("prepared state directory disappeared")
+		if sourceExists {
+			return errors.New("prepared owner overrides source is not retained")
+		}
+		destinationDigest, err := overridesStateDigest(destination)
+		if err != nil {
+			return err
+		}
+		if destinationDigest != prepared.OverridesDigest {
+			return errors.New("prepared owner overrides destination changed")
+		}
+		return repairMovedOwnerState(options, source, destination, "override-move")
 	}
+	if err := moveBoundOverrides(
+		options, retained, destination, prepared.OverridesDigest,
+		"before-auxiliary-state-move-cas",
+	); err != nil {
+		return fmt.Errorf("move legacy e2e-yard overrides state: %w", err)
+	}
+	return nil
 }
 
 func registrationPaths(options Options, shape State) (string, string) {
@@ -909,51 +1356,34 @@ func registrationPaths(options Options, shape State) (string, string) {
 		filepath.Join(yardsRoot, CurrentYard+".env")
 }
 
-func expectedCurrentRegistration(options Options, shape State) string {
-	_, current := registrationPaths(options, shape)
-	return current
-}
-
-func validateCurrentStateDirectory(currentRegistration string, adoptCurrent bool) error {
-	if filepath.Base(currentRegistration) != "config.env" {
+func inject(options Options, point string) error {
+	if options.fault == nil {
 		return nil
 	}
-	directory := filepath.Dir(currentRegistration)
-	exists, err := pathExists(directory)
-	if err != nil || !exists {
-		return err
-	}
-	if !adoptCurrent {
-		return errors.New("test-yard directory already exists; refusing to replace it")
-	}
-	if err := ownedDirectory(directory); err != nil {
-		return fmt.Errorf("existing test-yard state directory is unsafe: %w", err)
+	if err := options.fault(point); err != nil {
+		return injectedFault{err: err}
 	}
 	return nil
 }
 
-func copyRegistration(source, destination string) error {
-	payload, err := os.ReadFile(source)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
-		return err
-	}
-	file, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return err
-	}
-	if _, err = file.Write(payload); err == nil {
-		err = file.Close()
-	} else {
-		_ = file.Close()
-	}
-	if err != nil {
-		_ = os.Remove(destination)
-		_ = removeEmptyDirectory(filepath.Dir(destination))
-	}
-	return err
+type injectedFault struct{ err error }
+
+func (fault injectedFault) Error() string { return fault.err.Error() }
+func (fault injectedFault) Unwrap() error { return fault.err }
+
+func isInjectedFault(err error) bool {
+	var fault injectedFault
+	return errors.As(err, &fault)
+}
+
+type resumableOwnerMutationError struct{ err error }
+
+func (failure resumableOwnerMutationError) Error() string { return failure.err.Error() }
+func (failure resumableOwnerMutationError) Unwrap() error { return failure.err }
+
+func isResumableOwnerMutationError(err error) bool {
+	var failure resumableOwnerMutationError
+	return errors.As(err, &failure)
 }
 
 func preflightLegacyLease(
@@ -1000,36 +1430,21 @@ func temporarilyStartStoppedLegacyYard(
 	options Options,
 	startStopped bool,
 ) (func() error, bool, error) {
-	payload, err := runIncus(
-		ctx,
-		options,
-		"list",
-		"yard-"+LegacyYard,
-		"--project",
-		"subyard-"+LegacyYard,
-		"--format=json",
-	)
+	status, exists, err := legacyInstanceStatus(ctx, options)
 	if err != nil {
-		return nil, false, fmt.Errorf("inspect legacy test-yard instance state: %w", err)
+		return nil, false, err
 	}
-	var instances []struct {
-		Name   string `json:"name"`
-		Status string `json:"status"`
-	}
-	if err := json.Unmarshal(payload, &instances); err != nil {
-		return nil, false, fmt.Errorf("decode legacy test-yard instance state: %w", err)
-	}
-	if len(instances) != 1 || instances[0].Name != "yard-"+LegacyYard {
+	if !exists {
 		return nil, false, errors.New("legacy test-yard instance inventory is not canonical")
 	}
-	switch strings.ToUpper(instances[0].Status) {
+	switch status {
 	case "RUNNING":
 		return nil, true, nil
 	case "STOPPED":
 	default:
 		return nil, false, fmt.Errorf(
 			"legacy test-yard instance is in unsupported state %q",
-			instances[0].Status,
+			status,
 		)
 	}
 	desired, err := runIncus(
@@ -1073,17 +1488,50 @@ func temporarilyStartStoppedLegacyYard(
 	}, true, nil
 }
 
+func legacyInstanceStatus(ctx context.Context, options Options) (string, bool, error) {
+	payload, err := runIncus(
+		ctx,
+		options,
+		"list",
+		"yard-"+LegacyYard,
+		"--project",
+		"subyard-"+LegacyYard,
+		"--format=json",
+	)
+	if err != nil {
+		return "", false, fmt.Errorf("inspect legacy test-yard instance state: %w", err)
+	}
+	var instances []struct {
+		Name   string `json:"name"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(payload, &instances); err != nil {
+		return "", false, fmt.Errorf("decode legacy test-yard instance state: %w", err)
+	}
+	if len(instances) == 0 {
+		return "", false, nil
+	}
+	if len(instances) != 1 || instances[0].Name != "yard-"+LegacyYard {
+		return "", false, errors.New("legacy test-yard instance inventory is not canonical")
+	}
+	return strings.ToUpper(instances[0].Status), true, nil
+}
+
 func runCaptured(
 	ctx context.Context,
 	options Options,
 	yard string,
 	arguments ...string,
 ) ([]byte, error) {
+	var output bytes.Buffer
+	if options.RunYard != nil {
+		err := options.RunYard(ctx, yard, &output, arguments...)
+		return output.Bytes(), err
+	}
 	commandArguments := append([]string{"-Y", yard}, arguments...)
 	command := exec.CommandContext(ctx, options.Executable, commandArguments...)
 	command.Env = migrationChildEnvironment(options.Environment)
 	command.Stdin = strings.NewReader("")
-	var output bytes.Buffer
 	command.Stdout, command.Stderr = &output, &output
 	err := command.Run()
 	return output.Bytes(), err
@@ -1212,70 +1660,112 @@ func finishCurrent(
 	run func(string, ...string) error,
 	options Options,
 	initialize bool,
+	oldRegistration, currentRegistration string,
+	prepared Prepared,
 ) error {
 	if initialize {
 		if err := run(CurrentYard, "init", "--yes"); err != nil {
 			return fmt.Errorf("initialize test-yard: %w", err)
 		}
+		if err := inject(options, "after-current-init"); err != nil {
+			return err
+		}
 	}
 	if err := run(CurrentYard, "check"); err != nil {
 		return fmt.Errorf("validate test-yard: %w", err)
 	}
+	if err := inject(options, "after-current-check"); err != nil {
+		return err
+	}
+	if err := validatePreparedAuxiliaryState(
+		options, oldRegistration, currentRegistration, prepared, auxiliaryInProgress,
+	); err != nil {
+		return err
+	}
 	legacyController := filepath.Join(options.DataHome, "e2e", "controllers", LegacyYard)
-	if err := removeManagedLegacyController(legacyController); err != nil {
-		return fmt.Errorf("remove legacy controller state: %w", err)
+	if err := archivePreparedController(options, legacyController, prepared); err != nil {
+		return resumableOwnerMutationError{
+			err: fmt.Errorf("remove legacy controller state: %w", err),
+		}
+	}
+	return nil
+}
+
+func restoreLegacyOwnerForResume(
+	ctx context.Context,
+	options Options,
+	runYard func(string, ...string) error,
+	prepared Prepared,
+) error {
+	if err := ensureProject(ctx, options, LegacyYard, prepared.SharedImages); err != nil {
+		return err
+	}
+	if err := runYard(LegacyYard, "init", "--yes"); err != nil {
+		return fmt.Errorf("resume legacy test yard recreation: %w", err)
+	}
+	if err := runYard(LegacyYard, "check"); err != nil {
+		return fmt.Errorf("validate resumed legacy test yard: %w", err)
 	}
 	return nil
 }
 
 func recoverLegacy(
+	ctx context.Context,
+	options Options,
 	run func(string, ...string) error,
-	runLegacy func(string, ...string) error,
-	restoreLegacyPower func() error,
-	prepareProject func(string) error,
 	oldRegistration, newRegistration string,
 	registrationCopied, preserveCurrent bool,
-	prepared State,
+	prepared Prepared,
 	cause error,
 ) error {
 	var recovery []error
 	if registrationCopied {
-		if exists, err := pathExists(oldRegistration); err != nil {
-			recovery = append(recovery, err)
-		} else if !exists {
-			payload, readErr := os.ReadFile(newRegistration)
-			if readErr != nil {
-				recovery = append(recovery, readErr)
-			} else if mkdirErr := os.MkdirAll(filepath.Dir(oldRegistration), 0o700); mkdirErr != nil {
-				recovery = append(recovery, mkdirErr)
-			} else if writeErr := os.WriteFile(oldRegistration, payload, 0o600); writeErr != nil {
-				recovery = append(recovery, writeErr)
+		retainedCurrent, err := openBoundRegistration(newRegistration, prepared)
+		if err != nil {
+			return errors.Join(cause, fmt.Errorf("retain current registration for recovery: %w", err))
+		}
+		defer retainedCurrent.close()
+		if err := restorePreparedRegistration(options, prepared); err != nil {
+			if isInjectedFault(err) || isResumableOwnerMutationError(err) {
+				return errors.Join(cause, err)
 			}
+			recovery = append(recovery, err)
 		}
 		if !preserveCurrent {
 			if err := run(CurrentYard, "teardown", "--yes"); err != nil {
 				recovery = append(recovery, fmt.Errorf("teardown failed test-yard: %w", err))
+			} else if err := inject(options, "after-compensation-current-teardown"); err != nil {
+				return errors.Join(cause, err)
 			}
 		}
 		if !preserveCurrent {
 			if err := restorePreparedAuxiliaryState(
+				options,
 				oldRegistration,
 				newRegistration,
 				prepared,
 			); err != nil {
 				recovery = append(recovery, err)
+			} else if hasPreparedOverrides(prepared.State) {
+				if err := inject(options, "after-compensation-auxiliary-restore"); err != nil {
+					return errors.Join(cause, err)
+				}
+			}
+			if err := parkBoundRegistration(options, retainedCurrent, newRegistration, prepared); err != nil {
+				if isInjectedFault(err) || isResumableOwnerMutationError(err) {
+					return errors.Join(cause, err)
+				}
+				recovery = append(recovery, err)
 			}
 		}
-		if err := os.Remove(newRegistration); err != nil && !errors.Is(err, os.ErrNotExist) {
-			recovery = append(recovery, err)
-		}
-		_ = removeEmptyDirectory(filepath.Dir(newRegistration))
 	}
 	if !preserveCurrent {
-		if err := prepareProject(LegacyYard); err != nil {
+		if err := ensureProject(ctx, options, LegacyYard, prepared.SharedImages); err != nil {
 			recovery = append(recovery, err)
+		} else if err := inject(options, "after-compensation-legacy-project-recreation"); err != nil {
+			return errors.Join(cause, err)
 		}
-		if err := finishLegacyRollback(runLegacy, restoreLegacyPower); err != nil {
+		if err := finishLegacyRollback(options, run); err != nil {
 			recovery = append(recovery, err)
 		}
 	}
@@ -1286,40 +1776,67 @@ func recoverLegacy(
 }
 
 func finishLegacyRollback(
+	options Options,
 	runLegacy func(string, ...string) error,
-	restoreLegacyPower func() error,
 ) error {
 	if err := runLegacy(LegacyYard, "init", "--yes"); err != nil {
 		return fmt.Errorf("recreate legacy test yard: %w", err)
 	}
-	if restoreLegacyPower != nil {
-		if err := restoreLegacyPower(); err != nil {
-			return err
-		}
+	if err := inject(options, "after-compensation-legacy-init"); err != nil {
+		return err
 	}
 	if err := runLegacy(LegacyYard, "check"); err != nil {
 		return fmt.Errorf("validate legacy test yard: %w", err)
+	}
+	if err := inject(options, "after-compensation-legacy-check"); err != nil {
+		return err
 	}
 	return nil
 }
 
 func restorePreparedAuxiliaryState(
+	options Options,
 	oldRegistration, newRegistration string,
-	prepared State,
+	prepared Prepared,
 ) error {
 	if filepath.Base(oldRegistration) != "config.env" {
 		return nil
+	}
+	if err := validatePreparedAuxiliaryState(
+		options, oldRegistration, newRegistration, prepared, auxiliaryInProgress,
+	); err != nil {
+		return err
 	}
 	if err := removeGeneratedProjectState(
 		filepath.Join(filepath.Dir(newRegistration), "projects"),
 	); err != nil {
 		return err
 	}
-	_, overrides := preparedAuxiliaryState(prepared)
+	_, overrides := preparedAuxiliaryState(prepared.State)
 	source := filepath.Join(filepath.Dir(newRegistration), "overrides")
 	destination := filepath.Join(filepath.Dir(oldRegistration), "overrides")
 	if overrides {
-		if err := moveAuxiliaryDirectory(source, destination); err != nil {
+		retained, err := openBoundOverrides(options, source)
+		if errors.Is(err, os.ErrNotExist) {
+			digest, digestErr := overridesStateDigest(destination)
+			if digestErr != nil {
+				return digestErr
+			}
+			if digest == prepared.OverridesDigest {
+				return repairMovedOwnerState(options, source, destination, "override-move")
+			}
+		}
+		if err != nil {
+			return err
+		}
+		defer retained.close()
+		if retained.digest != prepared.OverridesDigest {
+			return errors.New("owner overrides state changed before compensation")
+		}
+		if err := moveBoundOverrides(
+			options, retained, destination, prepared.OverridesDigest,
+			"before-compensation-auxiliary-restore-cas",
+		); err != nil {
 			return fmt.Errorf("restore legacy e2e-yard overrides state: %w", err)
 		}
 		return nil
@@ -1371,72 +1888,22 @@ func removeGeneratedProjectState(path string) error {
 	return os.Remove(path)
 }
 
-func removeManagedLegacyController(path string) error {
-	info, err := os.Lstat(path)
-	if os.IsNotExist(err) {
+func removeEmptyFlatLegacyDirectory(registration string, prepared Prepared) error {
+	if prepared.State != StateLegacyFlat || filepath.Base(registration) == "config.env" {
 		return nil
 	}
-	if err != nil {
+	directory := filepath.Join(filepath.Dir(registration), LegacyYard)
+	exists, err := pathExists(directory)
+	if err != nil || !exists {
 		return err
 	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() ||
-		info.Mode().Perm()&0o077 != 0 || stat.Uid != uint32(os.Geteuid()) {
-		return errors.New("legacy controller path is not an owned private directory")
-	}
-	entries, err := os.ReadDir(path)
-	if err != nil {
+	if err := ownedDirectory(directory); err != nil {
 		return err
 	}
-	if len(entries) == 0 {
-		return os.Remove(path)
+	if err := os.Remove(directory); err != nil {
+		return fmt.Errorf("remove empty flat owner directory: %w", err)
 	}
-	allowed := map[string]bool{
-		".operator-enrollment-v1": true,
-		"agent-access.pub":        true,
-		"route.tsv":               true,
-		"known_hosts":             true,
-	}
-	markerFound := false
-	for _, entry := range entries {
-		if !allowed[entry.Name()] {
-			return fmt.Errorf("unexpected legacy controller artifact %q", entry.Name())
-		}
-		artifact := filepath.Join(path, entry.Name())
-		artifactInfo, err := os.Lstat(artifact)
-		if err != nil {
-			return err
-		}
-		artifactStat, ok := artifactInfo.Sys().(*syscall.Stat_t)
-		if !ok || artifactInfo.Mode()&os.ModeSymlink != 0 ||
-			!artifactInfo.Mode().IsRegular() || artifactStat.Nlink != 1 ||
-			artifactStat.Uid != uint32(os.Geteuid()) {
-			return fmt.Errorf("legacy controller artifact %q is unsafe", entry.Name())
-		}
-		if entry.Name() == ".operator-enrollment-v1" {
-			payload, err := os.ReadFile(artifact)
-			if err != nil || string(payload) != "managed\n" ||
-				artifactInfo.Mode().Perm() != 0o600 {
-				return errors.New("legacy controller marker is invalid")
-			}
-			markerFound = true
-		}
-	}
-	if !markerFound {
-		return errors.New("legacy controller marker is missing")
-	}
-	for _, entry := range entries {
-		if entry.Name() == ".operator-enrollment-v1" {
-			continue
-		}
-		if err := os.Remove(filepath.Join(path, entry.Name())); err != nil {
-			return err
-		}
-	}
-	if err := os.Remove(filepath.Join(path, ".operator-enrollment-v1")); err != nil {
-		return err
-	}
-	return os.Remove(path)
+	return nil
 }
 
 func ownedRegular(path string) (bool, error) {
@@ -1453,6 +1920,28 @@ func ownedRegular(path string) (bool, error) {
 		return false, errors.New("legacy test-yard registration is not an owned regular file")
 	}
 	return true, nil
+}
+
+func ownedCurrentRegistration(path string) (bool, error) {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || !ok ||
+		!safePublishedRegistrationMode(stat.Mode) ||
+		stat.Uid != uint32(os.Geteuid()) || stat.Nlink != 1 {
+		return false, errors.New("current test-yard registration is not an owned safe-mode regular file")
+	}
+	return true, nil
+}
+
+func safePublishedRegistrationMode(mode uint32) bool {
+	permissions := mode & 0o7777
+	return permissions == 0o600 || permissions == 0o640 || permissions == 0o644
 }
 
 func ownedDirectory(path string) error {
@@ -1476,6 +1965,23 @@ func pathExists(path string) (bool, error) {
 	return err == nil, err
 }
 
+func validateNoLegacyOwnerState(options Options) error {
+	for _, path := range []string{
+		filepath.Join(options.ConfigHome, "yards", LegacyYard),
+		filepath.Join(options.ConfigHome, "yards", LegacyYard+".env"),
+		filepath.Join(options.DataHome, "e2e", "controllers", LegacyYard),
+	} {
+		exists, err := pathExists(path)
+		if err != nil {
+			return err
+		}
+		if exists {
+			return errors.New("legacy owner state remains beside the canonical registration")
+		}
+	}
+	return nil
+}
+
 func selectsTestVMs(payload string) bool {
 	for _, line := range strings.Split(payload, "\n") {
 		line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "export "))
@@ -1485,12 +1991,4 @@ func selectsTestVMs(payload string) bool {
 		}
 	}
 	return false
-}
-
-func removeEmptyDirectory(path string) error {
-	err := os.Remove(path)
-	if os.IsNotExist(err) || errors.Is(err, syscall.ENOTEMPTY) {
-		return nil
-	}
-	return err
 }

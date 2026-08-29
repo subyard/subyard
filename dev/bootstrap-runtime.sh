@@ -6,6 +6,7 @@ REPOSITORY="${YARD_RELEASE_REPOSITORY:-Subyard/Subyard}"
 CHANNEL=stable
 VERSION="${YARD_RELEASE_VERSION:-}"
 DATA_HOME="${SUBYARD_HOME:-$HOME/.subyard}"
+CONFIG_HOME="${SUBYARD_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/subyard}"
 RUNTIME_ROOT="${YARD_RUNTIME_ROOT:-$DATA_HOME/runtime}"
 CACHE_ROOT="${YARD_RELEASE_CACHE:-$DATA_HOME/releases}"
 BIN_DIR="${YARD_BIN_DIR:-$HOME/.local/bin}"
@@ -29,6 +30,10 @@ done
 [ "$CHANNEL" = stable ] || { printf 'bootstrap-runtime: unsupported channel: %s\n' "$CHANNEL" >&2; exit 2; }
 case "$RUNTIME_ROOT" in /*) ;; *) printf 'bootstrap-runtime: runtime root must be absolute\n' >&2; exit 2 ;; esac
 [ "$RUNTIME_ROOT" != / ] || { printf 'bootstrap-runtime: refusing filesystem root\n' >&2; exit 2; }
+existing_runtime=0
+if [ -e "$RUNTIME_ROOT/current" ] || [ -L "$RUNTIME_ROOT/current" ]; then
+  existing_runtime=1
+fi
 
 case "$(uname -s)/$(uname -m)" in
   Linux/x86_64) os=linux; arch=amd64 ;;
@@ -87,6 +92,80 @@ case "$RC" in
   *zsh*) completion="$RUNTIME_ROOT/current/completions/yard.zsh" ;;
   *) completion="$RUNTIME_ROOT/current/completions/yard.bash" ;;
 esac
+
+# Detect the bounded pre-Go source ingress before any installation mutation.
+# The verified candidate repeats ownership, containment and manifest checks.
+SOURCE_INGRESS_ROOT=''
+yard_link="$BIN_DIR/yard"
+sy_link="$BIN_DIR/sy"
+if [ -L "$yard_link" ] && [ -L "$sy_link" ]; then
+  yard_target="$(readlink -f -- "$yard_link")" || yard_target=''
+  sy_target="$(readlink -f -- "$sy_link")" || sy_target=''
+  if [ -n "$yard_target" ] && [ "$yard_target" = "$sy_target" ]; then
+    case "$yard_target" in
+      "$RUNTIME_ROOT"/*) ;;
+      */bin/yard)
+        candidate_source="$(cd "$(dirname "$yard_target")/.." && pwd -P)"
+        if [ "$yard_target" = "$candidate_source/bin/yard" ] &&
+           [ -f "$candidate_source/config/commands.registry" ] &&
+           [ -f "$candidate_source/completions/yard.bash" ] &&
+           { grep -Fq 'thin dispatcher over scripts/' "$yard_target" ||
+             grep -Fq 'Stable launcher for a release-installed native Go control-plane engine.' \
+               "$yard_target"; }; then
+          SOURCE_INGRESS_ROOT="$candidate_source"
+        fi
+        ;;
+    esac
+  fi
+fi
+# A crash while switching the two launchers can leave a recognized recovery
+# journal but no longer leave two equal source links. Recover the descriptor
+# from its operator-owned manifest; the verified candidate revalidates every
+# path and resource before it mutates anything.
+source_recovery="$DATA_HOME/recovery/pre-go-source"
+source_manifest="$source_recovery/source-install-manifest.json"
+source_transaction="$source_recovery/transaction"
+if [ -z "$SOURCE_INGRESS_ROOT" ] &&
+   { [ -e "$source_recovery" ] || [ -L "$source_recovery" ]; }; then
+  if [ ! -d "$source_recovery" ] || [ -L "$source_recovery" ] || [ ! -O "$source_recovery" ] ||
+     [ ! -f "$source_manifest" ] || [ -L "$source_manifest" ] || [ ! -O "$source_manifest" ] ||
+     [ ! -f "$source_transaction" ] || [ -L "$source_transaction" ] ||
+     [ ! -O "$source_transaction" ]; then
+    printf 'bootstrap-runtime: source recovery metadata is unsafe or invalid\n' >&2
+    exit 1
+  fi
+  source_recovery_state="$(<"$source_transaction")"
+  case "$source_recovery_state" in
+    $'schema=1\nphase=complete\nstep=complete') ;;
+    $'schema=1\nphase=prepared\nstep=none'|\
+    $'schema=1\nphase=applying\nstep=config-import'|\
+    $'schema=1\nphase=applying\nstep=legacy-archive'|\
+    $'schema=1\nphase=applying\nstep=state-migration'|\
+    $'schema=1\nphase=applying\nstep=source-import-ready'|\
+    $'schema=1\nphase=applying\nstep=shell-integration'|\
+    $'schema=1\nphase=applying\nstep=entrypoint-switch')
+      recovered_source="$(jq -er --arg data "$DATA_HOME" --arg config "$CONFIG_HOME" '
+        select(.schemaVersion == 2 and .dataHome == $data and .configHome == $config) |
+        .sourceRoot | select(type == "string" and startswith("/"))
+      ' "$source_manifest" 2>/dev/null)" || recovered_source=''
+      case "$recovered_source" in
+        *$'\n'*|*$'\t'*|'')
+          printf 'bootstrap-runtime: source recovery metadata is unsafe or invalid\n' >&2
+          exit 1
+          ;;
+        "$HOME"/*) SOURCE_INGRESS_ROOT="$recovered_source" ;;
+        *)
+          printf 'bootstrap-runtime: source recovery metadata is unsafe or invalid\n' >&2
+          exit 1
+          ;;
+      esac
+      ;;
+    *)
+      printf 'bootstrap-runtime: source recovery metadata is unsafe or invalid\n' >&2
+      exit 1
+      ;;
+  esac
+fi
 need_path_line=1
 case ":$PATH:" in *":$BIN_DIR:"*) need_path_line=0 ;; esac
 if [ -f "$RC" ] && grep -qF "export PATH=\"$BIN_DIR:" "$RC"; then
@@ -98,8 +177,11 @@ printf '  - download and verify Subyard %s for %s/%s;\n' "$VERSION" "$os" "$arch
 printf '  - install the immutable runtime under %s;\n' "$RUNTIME_ROOT"
 printf '  - link yard and sy under %s;\n' "$BIN_DIR"
 printf '  - configure login PATH and shell completion.\n'
-printf '  - migrate a recognized source install and retain recovery.\n'
-if [ "$ASSUME_YES" != 1 ]; then
+if [ -n "$SOURCE_INGRESS_ROOT" ]; then
+  printf '  - migrate the recognized source install through the release transition.\n'
+fi
+if [ "$ASSUME_YES" != 1 ] && [ "$existing_runtime" = 0 ] &&
+   [ -z "$SOURCE_INGRESS_ROOT" ]; then
   if [ ! -t 1 ] || [ ! -r /dev/tty ]; then
     printf 'bootstrap-runtime: confirmation requires a terminal; rerun with --yes for automation\n' >&2
     exit 1
@@ -158,22 +240,49 @@ installer_actual="$(sha256sum "$installer" | cut -d' ' -f1)"
 chmod 0700 "$installer"
 
 printf 'channel=%s available=%s platform=%s/%s\n' "$CHANNEL" "$VERSION" "$os" "$arch"
-"$installer" --runtime-root "$RUNTIME_ROOT" \
-  --bundle "$bundle" --checksum "$checksum" --manifest "$manifest" --provenance "$provenance"
-
-migrated_source=0
-# Required pre-0.1 compatibility ingress; its removal gate lives in the runtime script.
-if "$RUNTIME_ROOT/current/scripts/migrate-source-install.sh" \
-  --runtime-root "$RUNTIME_ROOT" --bin-dir "$BIN_DIR" --rc "$RC" --login-rc "$LOGIN_RC" \
-  --data-home "$DATA_HOME"; then
-  migrated_source=1
+run_transition=0
+if [ "$existing_runtime" = 0 ]; then
+  install -d -m 0700 "$CONFIG_HOME"
+  "$installer" --runtime-root "$RUNTIME_ROOT" \
+    --bundle "$bundle" --checksum "$checksum" --manifest "$manifest" --provenance "$provenance"
+  candidate="$(readlink -f -- "$RUNTIME_ROOT/current")"
+  [ -z "$SOURCE_INGRESS_ROOT" ] || run_transition=1
 else
-  migration_status=$?
-  [ "$migration_status" = 3 ] \
-    || { printf 'bootstrap-runtime: source migration failed; existing entrypoints were preserved\n' >&2; exit "$migration_status"; }
+  published_release="$("$installer" --runtime-root "$RUNTIME_ROOT" --publish-only \
+    --bundle "$bundle" --checksum "$checksum" --manifest "$manifest" --provenance "$provenance")"
+  case "$published_release" in
+    releases/"$VERSION"-*) ;;
+    *) printf 'bootstrap-runtime: installer returned an invalid published release identity\n' >&2; exit 1 ;;
+  esac
+  candidate="$RUNTIME_ROOT/$published_release"
+  [ -x "$candidate/bin/yard" ] \
+    || { printf 'bootstrap-runtime: published candidate launcher is unavailable\n' >&2; exit 1; }
+  run_transition=1
 fi
 
-if [ "$migrated_source" = 0 ]; then
+if [ "$run_transition" = 1 ]; then
+  transition_arguments=(update --runtime-root "$RUNTIME_ROOT" --version "$VERSION" --offline)
+  transition_environment=(
+    "YARD_RELEASE_CACHE=$CACHE_ROOT"
+    "YARD_RUNTIME_ROOT=$RUNTIME_ROOT"
+  )
+  if [ "$ASSUME_YES" = 1 ]; then
+    transition_arguments+=(--yes)
+  fi
+  if [ -n "$SOURCE_INGRESS_ROOT" ]; then
+    transition_environment+=(
+      "SUBYARD_SOURCE_INGRESS_V1_ROOT=$SOURCE_INGRESS_ROOT"
+      "SUBYARD_SOURCE_INGRESS_V1_DATA=$DATA_HOME"
+      "SUBYARD_SOURCE_INGRESS_V1_BIN=$BIN_DIR"
+      "SUBYARD_SOURCE_INGRESS_V1_RC=$RC"
+      "SUBYARD_SOURCE_INGRESS_V1_LOGIN_RC=$LOGIN_RC"
+    )
+  fi
+  env "${transition_environment[@]}" \
+    "$candidate/bin/yard" "${transition_arguments[@]}"
+fi
+
+if [ -z "$SOURCE_INGRESS_ROOT" ]; then
   install -d "$BIN_DIR"
   ln -sfn "$RUNTIME_ROOT/current/bin/yard" "$BIN_DIR/yard"
   ln -sfn "$RUNTIME_ROOT/current/bin/yard" "$BIN_DIR/sy"

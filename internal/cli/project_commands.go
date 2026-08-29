@@ -472,6 +472,7 @@ func (cli *CLI) prepareProjectExecution(
 	definition command.Definition,
 	arguments []string,
 	explicit bool,
+	readOnly bool,
 ) (*projectExecution, error) {
 	switch definition.Name {
 	case "init", "provision":
@@ -481,7 +482,7 @@ func (cli *CLI) prepareProjectExecution(
 	case "clone":
 		return cli.prepareProjectClone(ctx, loaded, arguments)
 	case "code", "export", "remove", "shell", "up", "down", "info":
-		return cli.prepareExistingProject(ctx, loaded, definition.Name, arguments, explicit)
+		return cli.prepareExistingProject(ctx, loaded, definition.Name, arguments, explicit, readOnly)
 	default:
 		return nil, nil
 	}
@@ -681,10 +682,7 @@ func (cli *CLI) prepareProjectClone(
 }
 
 func (cli *CLI) projectOperationID() string {
-	if cli.env["SUBYARD_OPERATION_ID"] == "" {
-		cli.env["SUBYARD_OPERATION_ID"] = newOperationID()
-	}
-	return cli.env["SUBYARD_OPERATION_ID"]
+	return cli.ensureOperationID()
 }
 
 func (cli *CLI) previewProjectAdmission(
@@ -742,6 +740,7 @@ func (cli *CLI) prepareExistingProject(
 	name string,
 	arguments []string,
 	explicit bool,
+	readOnly bool,
 ) (*projectExecution, error) {
 	selector, present, err := parseProjectSelector(name, arguments)
 	if err != nil {
@@ -751,8 +750,9 @@ func (cli *CLI) prepareExistingProject(
 		return nil, nil
 	}
 	revalidate := name != "shell" && name != "info"
+	readOnlyProject := readOnly || name == "remove"
 	match, err := cli.resolveProjectForCommand(
-		ctx, loaded, selector, explicit, revalidate, name == "remove",
+		ctx, loaded, selector, explicit, revalidate, readOnlyProject,
 	)
 	if err != nil {
 		return nil, err
@@ -769,7 +769,7 @@ func (cli *CLI) prepareExistingProject(
 		}
 	}
 	var store *state.FileStore
-	if name == "remove" {
+	if readOnlyProject {
 		readOnlyStore, storeErr := openProjectStoreReadOnly(selectedLoaded.Context.Paths.StateDir)
 		if storeErr != nil {
 			return nil, storeErr

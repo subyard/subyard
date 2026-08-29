@@ -3,27 +3,43 @@
 # Removal requires a separate compatibility review no earlier than 2026-10-24.
 set -euo pipefail
 
-RUNTIME_ROOT=''; BIN_DIR=''; RC=''; LOGIN_RC=''; DATA_HOME=''
+RUNTIME_ROOT=''; CANDIDATE_ROOT=''; SOURCE_ROOT=''; BIN_DIR=''; RC=''; LOGIN_RC=''; DATA_HOME=''
+OPERATION=''; OUTER_TRANSACTION=''; OUTER_PLAN=''; SOURCE_PLAN=''
 while [ $# -gt 0 ]; do
   case "$1" in
     --runtime-root) [ $# -ge 2 ] || exit 2; RUNTIME_ROOT="$2"; shift 2 ;;
+    --candidate-root) [ $# -ge 2 ] || exit 2; CANDIDATE_ROOT="$2"; shift 2 ;;
+    --source-root) [ $# -ge 2 ] || exit 2; SOURCE_ROOT="$2"; shift 2 ;;
     --bin-dir) [ $# -ge 2 ] || exit 2; BIN_DIR="$2"; shift 2 ;;
     --rc) [ $# -ge 2 ] || exit 2; RC="$2"; shift 2 ;;
     --login-rc) [ $# -ge 2 ] || exit 2; LOGIN_RC="$2"; shift 2 ;;
     --data-home) [ $# -ge 2 ] || exit 2; DATA_HOME="$2"; shift 2 ;;
+    --operation) [ $# -ge 2 ] || exit 2; OPERATION="$2"; shift 2 ;;
+    --transaction) [ $# -ge 2 ] || exit 2; OUTER_TRANSACTION="$2"; shift 2 ;;
+    --plan) [ $# -ge 2 ] || exit 2; OUTER_PLAN="$2"; shift 2 ;;
+    --source-plan) [ $# -ge 2 ] || exit 2; SOURCE_PLAN="$2"; shift 2 ;;
     *) printf 'migrate-source-install: unknown option: %s\n' "$1" >&2; exit 2 ;;
   esac
 done
 
 fail() { printf 'migrate-source-install: %s\n' "$*" >&2; exit 1; }
-for value in RUNTIME_ROOT BIN_DIR RC LOGIN_RC DATA_HOME; do
+for value in RUNTIME_ROOT CANDIDATE_ROOT SOURCE_ROOT BIN_DIR RC LOGIN_RC DATA_HOME OPERATION OUTER_TRANSACTION OUTER_PLAN SOURCE_PLAN; do
   [ -n "${!value}" ] || fail "missing --${value,,}"
+done
+for value in RUNTIME_ROOT CANDIDATE_ROOT SOURCE_ROOT BIN_DIR RC LOGIN_RC DATA_HOME; do
   case "${!value}" in /*) ;; *) fail "$value must be absolute" ;; esac
 done
-for path in "$RUNTIME_ROOT" "$BIN_DIR" "$RC" "$LOGIN_RC" "$DATA_HOME"; do
+case "$OPERATION" in import|entrypoints) ;; *) fail "unknown operation: $OPERATION" ;; esac
+case "$OUTER_TRANSACTION:$OUTER_PLAN" in
+  *[!A-Za-z0-9._:-]*) fail "outer transition binding is unsafe" ;;
+esac
+case "$SOURCE_PLAN" in *[!0-9a-f]*|'') fail "source plan binding is invalid" ;; esac
+[ "${#SOURCE_PLAN}" = 64 ] || fail "source plan binding is invalid"
+for path in "$RUNTIME_ROOT" "$CANDIDATE_ROOT" "$SOURCE_ROOT" "$BIN_DIR" "$RC" "$LOGIN_RC" "$DATA_HOME"; do
   case "$path" in *$'\n'*|*$'\t'*) fail "paths containing tabs or newlines are unsupported" ;; esac
 done
-[ "$RUNTIME_ROOT" != / ] && [ "$BIN_DIR" != / ] && [ "$DATA_HOME" != / ] \
+[ "$RUNTIME_ROOT" != / ] && [ "$CANDIDATE_ROOT" != / ] && [ "$SOURCE_ROOT" != / ] &&
+  [ "$BIN_DIR" != / ] && [ "$DATA_HOME" != / ] \
   || fail "refusing a filesystem-root migration path"
 
 uid="$(id -u)"
@@ -65,6 +81,108 @@ persist() {
 persist_file() {
   sync -d -- "$1" || fail "could not persist source migration file: $1"
 }
+fault_after() {
+  [ "${SUBYARD_SOURCE_MIGRATION_FAULT_AFTER:-}" != "$1" ] || {
+    printf 'migrate-source-install: fault injection after %s\n' "$1" >&2
+    kill -KILL "$$"
+  }
+}
+
+seal_source_import() { # <recovery-root>
+  local root="$1" temporary="$1/.source-import.state.$$"
+  printf 'committed\n' > "$temporary"
+  chmod 0600 "$temporary"
+  mv -fT -- "$temporary" "$root/source-import.state"
+  persist "$root"
+}
+
+write_recovery_transaction() { # <recovery-root> <phase> <step>
+  local root="$1" phase="$2" step="$3" temporary="$1/.transaction.resume.$$"
+  {
+    printf 'schema=1\n'
+    printf 'phase=%s\n' "$phase"
+    printf 'step=%s\n' "$step"
+  } > "$temporary"
+  chmod 0600 "$temporary"
+  mv -fT -- "$temporary" "$root/transaction"
+  persist "$root"
+}
+
+resume_source_file() { # <recovery-root> <label> <destination> <temporary>
+  local root="$1" label="$2" destination="$3" temporary="$4" state
+  state="$(<"$root/$label.state")"
+  owned_regular "$root/$label.after" || fail "source recovery has no safe $label result"
+  if [ -e "$destination" ] || [ -L "$destination" ]; then
+    owned_regular "$destination" || fail "source recovery $label destination is unsafe"
+    if cmp -s -- "$root/$label.after" "$destination"; then
+      return
+    fi
+    [ "$state" = present ] && owned_regular "$root/$label.before" &&
+      cmp -s -- "$root/$label.before" "$destination" \
+      || fail "source recovery $label destination changed concurrently"
+  else
+    [ "$state" = absent ] || fail "source recovery $label destination disappeared"
+  fi
+  if [ -e "$temporary" ] || [ -L "$temporary" ]; then
+    owned_regular "$temporary" && cmp -s -- "$root/$label.after" "$temporary" \
+      || fail "source recovery $label temporary is ambiguous"
+  else
+    install -m "$(stat -c '%a' -- "$root/$label.after")" "$root/$label.after" "$temporary"
+    persist_file "$temporary"
+    fault_after shell-integration-temporary
+  fi
+  mv -fT -- "$temporary" "$destination"
+  persist "$(dirname "$destination")"
+}
+
+resume_source_link() { # <recovery-root> <name> <destination> <temporary>
+  local root="$1" name="$2" destination="$3" temporary="$4" desired original actual
+  desired="$(<"$root/runtime-launcher")"
+  original="$(<"$root/$name.target")"
+  if [ -L "$destination" ]; then
+    actual="$(readlink -- "$destination")"
+    [ "$actual" = "$desired" ] && return
+    [ "$actual" = "$original" ] || fail "source recovery $name link changed concurrently"
+  elif [ -e "$destination" ]; then
+    fail "source recovery $name link is unsafe"
+  fi
+  if [ -e "$temporary" ] || [ -L "$temporary" ]; then
+    [ -L "$temporary" ] && [ "$(readlink -- "$temporary")" = "$desired" ] \
+      || fail "source recovery $name temporary link is ambiguous"
+  else
+    ln -s -- "$desired" "$temporary"
+    fault_after entrypoint-switch-temporary
+  fi
+  mv -fT -- "$temporary" "$destination"
+  persist "$(dirname "$destination")"
+}
+
+resume_source_after_import() { # <recovery-root>
+  local root="$1" rc_path login_path bin_dir rc_temp login_temp yard_temp sy_temp
+  rc_path="$(<"$root/rc.path")"
+  login_path="$(<"$root/login-rc.path")"
+  bin_dir="$(<"$root/bin-dir")"
+  rc_temp="$(<"$root/rc.temp")"
+  login_temp="$(<"$root/login-rc.temp")"
+  yard_temp="$(<"$root/yard.temp")"
+  sy_temp="$(<"$root/sy.temp")"
+  write_recovery_transaction "$root" applying shell-integration
+  resume_source_file "$root" rc "$rc_path" "$rc_temp"
+  fault_after shell-integration-rc
+  if [ "$login_path" != "$rc_path" ]; then
+    resume_source_file "$root" login-rc "$login_path" "$login_temp"
+  fi
+  fault_after shell-integration
+  write_recovery_transaction "$root" applying entrypoint-switch
+  resume_source_link "$root" sy "$bin_dir/sy" "$sy_temp"
+  fault_after entrypoint-switch-sy
+  resume_source_link "$root" yard "$bin_dir/yard" "$yard_temp"
+  fault_after entrypoint-switch
+  write_recovery_transaction "$root" complete complete
+  printf 'migrate-source-install: completed source entrypoint recovery\n' >&2
+  printf 'migrated source installation from %s\n' "$(<"$root/source-root")"
+  printf 'one-time source recovery: %s/restore.sh\n' "$root"
+}
 
 read_transaction() {
   local transaction="$1" key value
@@ -86,6 +204,7 @@ read_transaction() {
     || fail "source recovery transaction is incomplete"
   case "$transaction_phase:$transaction_step" in
     prepared:none|applying:config-import|applying:legacy-archive|applying:state-migration|\
+applying:source-import-ready|\
 applying:shell-integration|applying:entrypoint-switch|complete:complete) ;;
     *) fail "invalid source recovery transaction phase/step" ;;
   esac
@@ -96,25 +215,76 @@ if [ -e "$recovery_root" ] || [ -L "$recovery_root" ]; then
     || fail "source recovery is not an operator-owned real directory: $recovery_root"
   if [ -e "$recovery_root/transaction" ] || [ -L "$recovery_root/transaction" ]; then
     read_transaction "$recovery_root/transaction"
-    case "$transaction_phase" in
-      prepared|applying)
-        case "$transaction_step" in
-          state-migration|shell-integration|entrypoint-switch)
-            "$RUNTIME_ROOT/current/bin/yard" _migrate rollback >/dev/null \
-              || fail "incomplete source migration could not roll back release migrations"
-            ;;
-        esac
-        owned_regular "$recovery_root/restore.sh" && [ -x "$recovery_root/restore.sh" ] \
-          || fail "incomplete source recovery has no trusted restore entrypoint"
-        "$recovery_root/restore.sh" --recovery-root "$recovery_root" --incomplete \
-          || fail "incomplete source migration requires operator recovery at $recovery_root"
-        printf 'migrate-source-install: recovered incomplete source migration; retrying\n' >&2
-        ;;
-      complete) ;;
-      *) fail "unknown source recovery transaction phase: $transaction_phase" ;;
-    esac
+    if [ ! -e "$recovery_root/source-plan" ] && [ ! -L "$recovery_root/source-plan" ]; then
+      for binding in outer-transaction outer-plan source-import.state; do
+        [ ! -e "$recovery_root/$binding" ] && [ ! -L "$recovery_root/$binding" ] \
+          || fail "predecessor source recovery has a partial outer transition binding"
+      done
+      [ "$OPERATION" = import ] \
+        || fail "predecessor source recovery must be imported before entrypoint convergence"
+      case "$transaction_phase" in
+        prepared|applying)
+          owned_regular "$recovery_root/restore.sh" && [ -x "$recovery_root/restore.sh" ] \
+            || fail "predecessor source recovery has no trusted restore entrypoint"
+          "$recovery_root/restore.sh" --recovery-root "$recovery_root" --incomplete \
+            || fail "predecessor source migration requires operator recovery at $recovery_root"
+          printf 'migrate-source-install: recovered predecessor source migration; retrying\n' >&2
+          ;;
+        *) fail "predecessor source recovery is not unfinished" ;;
+      esac
+    else
+      owned_regular "$recovery_root/outer-transaction" &&
+        owned_regular "$recovery_root/outer-plan" &&
+        owned_regular "$recovery_root/source-plan" \
+        || fail "source recovery has no protected outer transition binding"
+      [ "$transaction_step" != state-migration ] \
+        || fail "source recovery mixes predecessor and current transition metadata"
+      [ "$(<"$recovery_root/outer-transaction")" = "$OUTER_TRANSACTION" ] &&
+        [ "$(<"$recovery_root/outer-plan")" = "$OUTER_PLAN" ] &&
+        [ "$(<"$recovery_root/source-plan")" = "$SOURCE_PLAN" ] \
+        || fail "source recovery belongs to a different release transition"
+      case "$transaction_phase" in
+        prepared|applying)
+          case "$transaction_step" in
+            source-import-ready)
+              if owned_regular "$recovery_root/source-import.state" &&
+                [ "$(<"$recovery_root/source-import.state")" = committed ]; then
+                if [ "$OPERATION" = entrypoints ]; then
+                  resume_source_after_import "$recovery_root"
+                fi
+                exit 0
+              fi
+              [ ! -e "$recovery_root/source-import.state" ] &&
+                [ ! -L "$recovery_root/source-import.state" ] \
+                || fail "source import checkpoint is unsafe"
+              ;;
+            shell-integration|entrypoint-switch)
+              if [ "$OPERATION" = entrypoints ]; then
+                resume_source_after_import "$recovery_root"
+                exit 0
+              fi
+              owned_regular "$recovery_root/source-import.state" &&
+                [ "$(<"$recovery_root/source-import.state")" = committed ] \
+                || fail "source import checkpoint is not sealed"
+              exit 0
+              ;;
+          esac
+          [ "$OPERATION" = import ] \
+            || fail "source import must complete before entrypoint convergence"
+          owned_regular "$recovery_root/restore.sh" && [ -x "$recovery_root/restore.sh" ] \
+            || fail "incomplete source recovery has no trusted restore entrypoint"
+          "$recovery_root/restore.sh" --recovery-root "$recovery_root" --incomplete \
+            || fail "incomplete source migration requires operator recovery at $recovery_root"
+          printf 'migrate-source-install: recovered incomplete source migration; retrying\n' >&2
+          ;;
+        complete) [ "$OPERATION" = entrypoints ] && exit 0 || exit 3 ;;
+        *) fail "unknown source recovery transaction phase: $transaction_phase" ;;
+      esac
+    fi
   fi
 fi
+
+[ "$OPERATION" = import ] || fail "source import recovery is unavailable"
 
 if [ ! -e "$yard_link" ] && [ ! -L "$yard_link" ] &&
    [ ! -e "$sy_link" ] && [ ! -L "$sy_link" ]; then
@@ -132,6 +302,7 @@ case "$LOGIN_RC" in "$HOME"/*) ;; *) fail "login shell rc must be inside the ope
 
 source_launcher="$yard_target"
 source_root="$(cd "$(dirname "$source_launcher")/.." && pwd -P)"
+[ "$source_root" = "$SOURCE_ROOT" ] || fail "source root differs from the outer transition descriptor"
 [ "$source_launcher" = "$source_root/bin/yard" ] \
   || fail "launcher does not resolve to a source checkout bin/yard"
 for required in \
@@ -149,14 +320,12 @@ else
   fail "linked checkout is not a recognized source-installed Subyard version"
 fi
 
-candidate_yard="$RUNTIME_ROOT/current/bin/yard"
-candidate_engine="$RUNTIME_ROOT/current/bin/yard-engine"
+candidate_yard="$CANDIDATE_ROOT/bin/yard"
+candidate_engine="$CANDIDATE_ROOT/bin/yard-engine"
 [ -x "$candidate_yard" ] && [ -x "$candidate_engine" ] \
   || fail "verified candidate runtime is incomplete"
 "$candidate_yard" --version >/dev/null \
   || fail "candidate runtime self-check failed"
-"$candidate_yard" _migrate check >/dev/null \
-  || fail "candidate rejected existing state before import"
 
 bootstrap_paths="$("$candidate_yard" _migrate paths)" \
   || fail "candidate could not resolve bootstrap config paths"
@@ -195,20 +364,15 @@ done
 install -d -m 0700 "$DATA_HOME" "$recovery_parent"
 work="$(mktemp -d "$recovery_parent/.pre-go-source.XXXXXX")"
 published=0
-release_migration_started=0
+source_import_committed=0
 cleanup() {
-  local status=$? migration_recovered=1
+  local status=$?
   trap - EXIT
   if [ "$status" -ne 0 ]; then
     if [ "$published" = 1 ]; then
-      if [ "$release_migration_started" = 1 ] &&
-         ! "$candidate_yard" _migrate rollback >/dev/null; then
-        printf 'migrate-source-install: release migration rollback failed; journal retained at %s\n' \
-          "$recovery_root" >&2
-        migration_recovered=0
-      fi
-      if [ "$migration_recovered" = 1 ] &&
-         ! "$recovery_root/restore.sh" --recovery-root "$recovery_root" --incomplete; then
+      if [ "$source_import_committed" = 1 ]; then
+        printf 'migrate-source-install: source entrypoint convergence is resumable; retry the update\n' >&2
+      elif ! "$recovery_root/restore.sh" --recovery-root "$recovery_root" --incomplete; then
         printf 'migrate-source-install: automatic recovery failed; journal retained at %s\n' \
           "$recovery_root" >&2
       fi
@@ -258,6 +422,9 @@ write_value runtime-launcher "$RUNTIME_ROOT/current/bin/yard"
 write_value data-home "$DATA_HOME"
 write_value config-home "$config_home"
 write_value source-root "$source_root"
+write_value outer-transaction "$OUTER_TRANSACTION"
+write_value outer-plan "$OUTER_PLAN"
+write_value source-plan "$SOURCE_PLAN"
 
 prepare_legacy_data() {
   local path="$1" label="$2"
@@ -390,12 +557,6 @@ record_directory() {
     append_record "$created_directories" "$1"
     persist "$work"
   fi
-}
-fault_after() {
-  [ "${SUBYARD_SOURCE_MIGRATION_FAULT_AFTER:-}" != "$1" ] || {
-    printf 'migrate-source-install: fault injection after %s\n' "$1" >&2
-    kill -KILL "$$"
-  }
 }
 fault_after prepared
 
@@ -550,73 +711,13 @@ effective_config_home="$(jq -er '.configHome | select(type == "string" and start
 [ "$effective_config_home" = "$config_home" ] \
   || fail "legacy config changes SUBYARD_CONFIG_HOME; rerun with SUBYARD_CONFIG_HOME=$effective_config_home"
 
-mapfile -t yard_names < <(jq -r \
-  '.entries[] | select(.kind == "yard-config" or .kind == "flat-yard-config") | .destination |
-   split("/")[-2]' <<<"$manifest_json" | sort -u)
-mapfile -t project_directories < <(jq -r '.projectDirectories[]?' <<<"$paths_json")
-for directory in "${project_directories[@]}"; do
-  case "$directory" in /*) ;; *) fail "candidate returned an invalid project state directory" ;; esac
-  case "$directory" in *$'\n'*|*$'\t'*) fail "candidate returned an unsafe project state directory" ;; esac
-done
-
-write_transaction applying state-migration
-release_migration_started=1
-"$candidate_yard" _migrate apply >/dev/null \
-  || fail "candidate could not migrate default and registered state"
-for name in "${yard_names[@]}"; do
-  "$candidate_yard" -Y "$name" _migrate apply >/dev/null \
-    || fail "candidate could not migrate yard $name"
-  "$candidate_yard" -Y "$name" _migrate check >/dev/null \
-    || fail "candidate rejected migrated yard $name"
-done
-"$candidate_yard" _migrate finalize >/dev/null \
-  || fail "candidate could not finalize versioned host migrations"
+write_transaction applying source-import-ready
+fault_after source-import-transaction
+seal_source_import "$work"
+source_import_committed=1
 persist "$config_home"
-for directory in "${project_directories[@]}"; do
-  [ ! -d "$directory" ] || persist "$directory"
-done
-fault_after state-migration
-
-atomic_install() {
-  local source="$1" destination="$2" temporary="$3" mode
-  mode="$(stat -c '%a' -- "$source")"
-  [ ! -e "$temporary" ] && [ ! -L "$temporary" ] \
-    || fail "migration temporary path appeared during apply: $temporary"
-  install -m "$mode" "$source" "$temporary"
-  persist_file "$temporary"
-  fault_after shell-integration-temporary
-  mv -fT -- "$temporary" "$destination"
-  persist "$(dirname "$destination")"
-}
-
-write_transaction applying shell-integration
-atomic_install "$work/rc.after" "$RC" "$rc_temp"
-fault_after shell-integration-rc
-if [ "$LOGIN_RC" != "$RC" ]; then
-  atomic_install "$work/login-rc.after" "$LOGIN_RC" "$login_rc_temp"
-fi
-fault_after shell-integration
-
-atomic_link() {
-  local target="$1" destination="$2" temporary="$3"
-  [ ! -e "$temporary" ] && [ ! -L "$temporary" ] \
-    || fail "migration temporary link appeared during apply: $temporary"
-  ln -s -- "$target" "$temporary"
-  fault_after entrypoint-switch-temporary
-  mv -fT -- "$temporary" "$destination"
-  persist "$(dirname "$destination")"
-}
-
-write_transaction applying entrypoint-switch
-atomic_link "$RUNTIME_ROOT/current/bin/yard" "$sy_link" "$sy_temp"
-fault_after entrypoint-switch-sy
-atomic_link "$RUNTIME_ROOT/current/bin/yard" "$yard_link" "$yard_temp"
-fault_after entrypoint-switch
-
-write_transaction complete complete
+fault_after source-import-ready
 trap - EXIT
-"$candidate_yard" _migrate cleanup >/dev/null \
-  || printf 'migrate-source-install: source migration completed, but stale release recovery cleanup failed\n' >&2
 
-printf 'migrated source installation from %s\n' "$source_root"
+printf 'imported source installation from %s\n' "$source_root"
 printf 'one-time source recovery: %s/restore.sh\n' "$recovery_root"

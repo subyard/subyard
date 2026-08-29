@@ -203,6 +203,14 @@ func (store Connections) List() ([]Connection, error) {
 	return store.list()
 }
 
+// ListReadOnly reads only atomically published connection files. It neither
+// creates a lock file nor resumes an interrupted owner-inventory transaction.
+func (store Connections) ListReadOnly() ([]Connection, error) {
+	connectionsMu.Lock()
+	defer connectionsMu.Unlock()
+	return store.list()
+}
+
 func (store Connections) list() ([]Connection, error) {
 	directory := filepath.Join(store.Root, "connections")
 	entries, err := os.ReadDir(directory)

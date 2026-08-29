@@ -247,6 +247,12 @@ printf '%s\n' subyard-p0-121 > "$stale_pool_root/.subyard-p0-marker"
 run_recovery_preflight 125 "$stale_pool_root/owner/subyard/incus/storage"
 [ ! -e "$stale_pool_root" ] || fail "recovered stale P0 root survived preflight"
 
+stale_peer_pool_root="$HOME/.cache/subyard-p0-119"
+install -d -m 0700 "$stale_peer_pool_root"
+printf '%s\n' subyard-p0-119 > "$stale_peer_pool_root/.subyard-p0-marker"
+run_recovery_preflight 126 "$stale_peer_pool_root/peer/incus-home/incus/storage"
+[ ! -e "$stale_peer_pool_root" ] || fail "recovered stale peer P0 root survived preflight"
+
 current_missing_pool_root="$HOME/.cache/subyard-p0-137"
 install -d -m 0700 "$current_missing_pool_root"
 printf '%s\n' subyard-p0-137 > "$current_missing_pool_root/.subyard-p0-marker"
@@ -572,10 +578,25 @@ printf '%s\n' \
   '  --version) printf "6.0.6\n" ;;' \
   '  "storage show default --project default") ;;' \
   '  "network show incusbr0 --project default") ;;' \
+  '  "admin waitready") ;;' \
   '  *) exit 2 ;;' \
   'esac' \
   > "$nested_bin/incus"
 chmod 0700 "$nested_bin/incus"
+printf '%s\n' \
+  '#!/bin/bash' \
+  'set -euo pipefail' \
+  '[ "${1:-}" = -n ] && shift' \
+  'case "${1:-}" in' \
+  '  test|cat|install|find) exec "$@" ;;' \
+  '  systemctl)' \
+  '    case "${*:2}" in daemon-reload|"restart incus.service") exit 0 ;; esac' \
+  '    exit 2' \
+  '    ;;' \
+  '  *) exit 2 ;;' \
+  'esac' \
+  > "$nested_bin/sudo"
+chmod 0700 "$nested_bin/sudo"
 printf '%s\n' \
   '#!/bin/bash' \
   'set -euo pipefail' \
@@ -589,11 +610,15 @@ printf '%s\n' \
 chmod 0700 "$nested_bin/bash"
 if ! env -u GOCACHE -u GOMODCACHE \
   PATH="$nested_bin:$PATH" P0_NESTED_CACHE_PROBE="$nested_probe" SUBYARD_E2E_VM=2 \
+  P0_E2E_INCUS_APPARMOR_DROPIN="$TMP/p0-incus.service.d/compat.conf" \
   /bin/bash "$ROOT/dev/e2e/p0-guest.sh" nested-teardown 134 >/dev/null; then
   fail "nested teardown did not use its allocation-scoped Go cache"
 fi
 [ "$(cat "$nested_probe" 2>/dev/null)" = ok ] \
   || fail "nested teardown cache probe did not run"
+grep -Fqx 'Environment=INCUS_SECURITY_APPARMOR=false' \
+  "$TMP/p0-incus.service.d/compat.conf" \
+  || fail "nested teardown did not install its reversible Incus compatibility boundary"
 find "$HOME/.cache/subyard-p0-134" -depth -delete
 
 printf 'ok: P0 capacity layout is persistent and marker-guarded\n'

@@ -258,6 +258,10 @@ render_client_config() {
         printf '    BatchMode yes\n'
         printf '    ForwardAgent no\n'
         printf '    ProxyJump subyard-e2e-data\n'
+        printf '    ConnectTimeout 10\n'
+        printf '    ConnectionAttempts 1\n'
+        printf '    ServerAliveInterval 15\n'
+        printf '    ServerAliveCountMax 3\n'
         printf '    HostKeyAlias %s\n' "$alias"
         printf '    StrictHostKeyChecking yes\n'
         printf '    UserKnownHostsFile '; ssh_config_value "$GUEST_KNOWN_HOSTS"; printf '\n'

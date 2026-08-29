@@ -18,9 +18,6 @@ func TestSourceInstallMigrationAndRecovery(t *testing.T) {
 	requireJQ(t)
 	fixture := newSourceInstallFixture(t,
 		"# Stable launcher for a release-installed native Go control-plane engine.")
-	rcBefore := readTestFile(t, fixture.rc)
-	loginBefore := readTestFile(t, fixture.login)
-
 	output, err := fixture.migrate()
 	if err != nil {
 		t.Fatalf("migration failed: %v\n%s", err, output)
@@ -89,37 +86,52 @@ func TestSourceInstallMigrationAndRecovery(t *testing.T) {
 	recovery := filepath.Join(fixture.data, "recovery/pre-go-source/restore.sh")
 	command := exec.Command(recovery)
 	command.Env = append(os.Environ(), "HOME="+fixture.home, "SUBYARD_HOME="+fixture.data)
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("source recovery failed: %v\n%s", err, output)
+	if output, err := command.CombinedOutput(); err == nil ||
+		!strings.Contains(string(output), "restore would invalidate release migration history") {
+		t.Fatalf("committed source import allowed legacy restore: %v\n%s", err, output)
 	}
-	for _, name := range []string{"yard", "sy"} {
-		target, err := filepath.EvalSymlinks(filepath.Join(fixture.bin, name))
-		if err != nil || target != filepath.Join(fixture.source, "bin/yard") {
-			t.Fatalf("%s did not recover source launcher: target=%q err=%v", name, target, err)
-		}
-	}
-	if string(readTestFile(t, fixture.rc)) != string(rcBefore) ||
-		string(readTestFile(t, fixture.login)) != string(loginBefore) {
-		t.Fatal("recovery did not restore exact shell files")
-	}
+	assertRuntimeEntrypoints(t, fixture)
 	assertSameFile(t, filepath.Join(fixture.source, "private/config.env"),
-		filepath.Join(fixture.data, "config.env"))
-	if string(readTestFile(t, filepath.Join(fixture.data,
-		"operator-overlay/private/agents/claude/settings.json"))) != "{\"fixture\":true}\n" {
-		t.Fatal("recovery did not restore the previous operator overlay")
-	}
-	for _, path := range []string{
-		filepath.Join(fixture.config, "config.env"),
-		filepath.Join(fixture.config, "yards/named/config.env"),
-		filepath.Join(fixture.config, "overrides/host/agents/codex/repo.rules"),
-		filepath.Join(fixture.config, "secrets/legacy/staging/canonical.env"),
-	} {
-		if _, err := os.Lstat(path); !os.IsNotExist(err) {
-			t.Fatalf("recovery retained imported file %s: %v", path, err)
-		}
-	}
+		filepath.Join(fixture.config, "config.env"))
 	if info, err := os.Stat(runtimeLauncher); err != nil || info.Mode()&0o111 == 0 {
 		t.Fatalf("recovery damaged verified runtime: %v", err)
+	}
+}
+
+func TestSourceInstallLeafDoesNotOwnReleaseAuthorizationOrJournal(t *testing.T) {
+	payload, err := os.ReadFile(filepath.Join("..", "..", "scripts", "migrate-source-install.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{
+		"_release-transition", "SUBYARD_RELEASE_TRANSITION_GRANT", "grant-v1-",
+		"release_transition()", "write_transaction applying state-migration",
+		"_migrate rollback",
+	} {
+		if strings.Contains(string(payload), forbidden) {
+			t.Fatalf("source leaf still owns outer transition behavior %q", forbidden)
+		}
+	}
+}
+
+func TestBootstrapRediscoversInterruptedSourceIngressFromRecovery(t *testing.T) {
+	payload, err := os.ReadFile(filepath.Join("..", "..", "dev", "bootstrap-runtime.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(payload)
+	for _, required := range []string{
+		`source_recovery="$DATA_HOME/recovery/pre-go-source"`,
+		`source-install-manifest.json`,
+		`$'schema=1\nphase=complete\nstep=complete'`,
+		`$'schema=1\nphase=applying\nstep=entrypoint-switch'`,
+		`.sourceRoot | select(type == "string" and startswith("/"))`,
+		`SOURCE_INGRESS_ROOT="$recovered_source"`,
+		`source recovery metadata is unsafe or invalid`,
+	} {
+		if !strings.Contains(source, required) {
+			t.Fatalf("bootstrap omits interrupted source recovery binding %q", required)
+		}
 	}
 }
 
@@ -149,8 +161,8 @@ func TestSourceRecoveryAcceptsCanonicalTestYardRename(t *testing.T) {
 	}
 
 	restoreFixture(t, fixture)
-	if _, err := os.Lstat(newFile); !os.IsNotExist(err) {
-		t.Fatalf("recovery retained canonically renamed test-yard config: %v", err)
+	if _, err := os.Stat(newFile); err != nil {
+		t.Fatalf("sealed recovery changed canonically renamed test-yard config: %v", err)
 	}
 }
 
@@ -176,10 +188,16 @@ func TestSourceInstallMigrationSkipsCustomRuntimeDataHome(t *testing.T) {
 		command := exec.Command(
 			filepath.Join(root, "scripts/migrate-source-install.sh"),
 			"--runtime-root", runtimeRoot,
+			"--candidate-root", filepath.Join(home, "candidate"),
+			"--source-root", filepath.Join(home, "source"),
 			"--bin-dir", bin,
 			"--rc", rc,
 			"--login-rc", login,
 			"--data-home", data,
+			"--operation", "import",
+			"--transaction", "tx-source-test-001",
+			"--plan", "plan-source-test-001",
+			"--source-plan", strings.Repeat("a", 64),
 		)
 		command.Env = append(os.Environ(), "HOME="+home)
 		output, err := command.CombinedOutput()
@@ -211,7 +229,8 @@ func TestSourceInstallMigrationRecoversInterruptedPhases(t *testing.T) {
 		{"config-import-temporary", "applying", "config-import"},
 		{"config-import", "applying", "config-import"},
 		{"legacy-archive", "applying", "legacy-archive"},
-		{"state-migration", "applying", "state-migration"},
+		{"source-import-transaction", "applying", "source-import-ready"},
+		{"source-import-ready", "applying", "source-import-ready"},
 		{"shell-integration-temporary", "applying", "shell-integration"},
 		{"shell-integration-rc", "applying", "shell-integration"},
 		{"shell-integration", "applying", "shell-integration"},
@@ -222,9 +241,6 @@ func TestSourceInstallMigrationRecoversInterruptedPhases(t *testing.T) {
 		t.Run(test.fault, func(t *testing.T) {
 			fixture := newSourceInstallFixture(t,
 				"# Stable launcher for a release-installed native Go control-plane engine.")
-			rcBefore := readTestFile(t, fixture.rc)
-			loginBefore := readTestFile(t, fixture.login)
-
 			output, err := fixture.migrateWithFault(test.fault)
 			if err == nil || !strings.Contains(string(output), "fault injection after "+test.fault) {
 				t.Fatalf("fault point did not interrupt migration: err=%v output=%s", err, output)
@@ -244,7 +260,8 @@ func TestSourceInstallMigrationRecoversInterruptedPhases(t *testing.T) {
 			if err != nil {
 				t.Fatalf("installer did not recover and retry: %v\n%s", err, output)
 			}
-			if !strings.Contains(string(output), "recovered incomplete source migration; retrying") ||
+			if (!strings.Contains(string(output), "recovered incomplete source migration; retrying") &&
+				!strings.Contains(string(output), "completed source entrypoint recovery")) ||
 				!strings.Contains(string(output), "migrated source installation") {
 				t.Fatalf("installer did not report deterministic recovery: %s", output)
 			}
@@ -262,13 +279,9 @@ func TestSourceInstallMigrationRecoversInterruptedPhases(t *testing.T) {
 			}
 
 			restoreFixture(t, fixture)
-			assertSourceEntrypoints(t, fixture)
-			if string(readTestFile(t, fixture.rc)) != string(rcBefore) ||
-				string(readTestFile(t, fixture.login)) != string(loginBefore) {
-				t.Fatal("recovery after interruption did not restore exact shell files")
-			}
+			assertRuntimeEntrypoints(t, fixture)
 			assertSameFile(t, filepath.Join(fixture.source, "private/config.env"),
-				filepath.Join(fixture.data, "config.env"))
+				filepath.Join(fixture.config, "config.env"))
 		})
 	}
 }
@@ -309,7 +322,7 @@ func TestSourceInstallCompletedRecoveryRefusesOperatorDrift(t *testing.T) {
 	command := exec.Command(recovery)
 	command.Env = append(os.Environ(), "HOME="+fixture.home, "SUBYARD_HOME="+fixture.data)
 	output, err := command.CombinedOutput()
-	if err == nil || !strings.Contains(string(output), "shell file changed after migration") {
+	if err == nil || !strings.Contains(string(output), "restore would invalidate release migration history") {
 		t.Fatalf("completed recovery overwrote operator drift: err=%v output=%s", err, output)
 	}
 	assertRuntimeEntrypoints(t, fixture)
@@ -333,10 +346,10 @@ func TestSourceInstallRecoveryRemovesCreatedConfigRoot(t *testing.T) {
 	}
 
 	restoreFixture(t, fixture)
-	if _, err := os.Lstat(fixture.config); !os.IsNotExist(err) {
-		t.Fatalf("recovery retained the migration-created config root: %v", err)
+	if _, err := os.Stat(fixture.config); err != nil {
+		t.Fatalf("sealed recovery removed the migration-created config root: %v", err)
 	}
-	assertSourceEntrypoints(t, fixture)
+	assertRuntimeEntrypoints(t, fixture)
 }
 
 func TestSourceInstallRejectsUnknownTransactionStep(t *testing.T) {
@@ -395,8 +408,9 @@ func TestSourceInstallMigrationConflictAndExistingIdenticalTarget(t *testing.T) 
 		recovery := filepath.Join(fixture.data, "recovery/pre-go-source/restore.sh")
 		command := exec.Command(recovery)
 		command.Env = append(os.Environ(), "HOME="+fixture.home, "SUBYARD_HOME="+fixture.data)
-		if output, err := command.CombinedOutput(); err != nil {
-			t.Fatalf("recovery failed: %v\n%s", err, output)
+		if output, err := command.CombinedOutput(); err == nil ||
+			!strings.Contains(string(output), "restore would invalidate release migration history") {
+			t.Fatalf("committed restore was not sealed: %v\n%s", err, output)
 		}
 		if _, err := os.Stat(target); err != nil {
 			t.Fatalf("recovery removed a pre-existing identical destination: %v", err)
@@ -504,6 +518,7 @@ func newSourceInstallFixture(t *testing.T, marker string) sourceInstallFixture {
 	fixture.config = filepath.Join(fixture.home, ".config/subyard")
 	fixture.rc = filepath.Join(fixture.home, ".bashrc")
 	fixture.login = filepath.Join(fixture.home, ".profile")
+	candidateRoot := filepath.Join(fixture.data, "runtime/releases/release-current")
 	for _, directory := range []string{
 		filepath.Join(fixture.source, "bin"),
 		filepath.Join(fixture.source, "scripts"),
@@ -516,14 +531,17 @@ func newSourceInstallFixture(t *testing.T, marker string) sourceInstallFixture {
 		filepath.Join(fixture.source, "config/qa-pool"),
 		filepath.Join(fixture.data, "operator-overlay/private/agents/claude"),
 		fixture.bin,
-		filepath.Join(fixture.data, "runtime/current/bin"),
-		filepath.Join(fixture.data, "runtime/current/scripts"),
-		filepath.Join(fixture.data, "runtime/current/completions"),
+		filepath.Join(candidateRoot, "bin"),
+		filepath.Join(candidateRoot, "scripts"),
+		filepath.Join(candidateRoot, "completions"),
 		fixture.config,
 	} {
 		if err := os.MkdirAll(directory, 0o700); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := os.Symlink("releases/release-current", filepath.Join(fixture.data, "runtime/current")); err != nil {
+		t.Fatal(err)
 	}
 	writeTestFile(t, filepath.Join(fixture.source, "bin/yard"), 0o700,
 		"#!/bin/sh\n"+marker+"\nexit 0\n")
@@ -574,12 +592,12 @@ func newSourceInstallFixture(t *testing.T, marker string) sourceInstallFixture {
 	writeTestFile(t, candidate, 0o700, `#!/bin/sh
 case "$*" in
   --version) printf 'yard fixture\n' ;;
-  '_migrate check'|'_migrate apply'|'_migrate finalize'|'_migrate rollback'|'_migrate cleanup'|'-Y named _migrate check'|'-Y named _migrate apply') ;;
+  '_migrate check'|'_migrate apply'|'_migrate finalize'|'_migrate cleanup'|'-Y named _migrate check'|'-Y named _migrate apply') ;;
 	  '_migrate paths') printf '{"dataHome":"%s","configHome":"%s"}\n' "$TEST_DATA_HOME" "$TEST_CONFIG_HOME" ;;
 	  _migrate\ overlay-manifest\ *)
 	    printf '%s\n' '{"schemaVersion":2,"sourceRoot":"'"$TEST_SOURCE_ROOT"'","dataHome":"'"$TEST_DATA_HOME"'","configHome":"'"$TEST_CONFIG_HOME"'","entries":['\
-'{"sourceBase":"source-root","source":"private/config.env","destinationRoot":"config-home","destination":"config.env","kind":"host-config","mode":"0600","conflictPolicy":"identical-or-fail"},'\
 '{"sourceBase":"data-home","source":"config.env","destinationRoot":"config-home","destination":"config.env","kind":"previous-host-config","mode":"0600","conflictPolicy":"identical-or-fail"},'\
+'{"sourceBase":"source-root","source":"private/config.env","destinationRoot":"config-home","destination":"config.env","kind":"host-config","mode":"0600","conflictPolicy":"identical-or-fail"},'\
 '{"sourceBase":"source-root","source":"private/yards/named.env","destinationRoot":"config-home","destination":"yards/named/config.env","kind":"yard-config","mode":"0600","conflictPolicy":"identical-or-fail","contentTransform":"yard-template-e2e-vms-to-test-vms"},'\
 '{"sourceBase":"source-root","source":"private/agents/codex/repo.rules","destinationRoot":"config-home","destination":"overrides/host/agents/codex/repo.rules","kind":"agent-asset","mode":"0600","conflictPolicy":"identical-or-fail"},'\
 '{"sourceBase":"data-home","source":"operator-overlay/private/agents/claude/settings.json","destinationRoot":"config-home","destination":"overrides/host/agents/claude/settings.json","kind":"agent-asset","mode":"0600","conflictPolicy":"identical-or-fail"},'\
@@ -600,7 +618,25 @@ case "$*" in
 esac
 `)
 	writeTestFile(t, filepath.Join(fixture.data, "runtime/current/bin/yard-engine"), 0o700,
-		"#!/bin/sh\nexit 0\n")
+		`#!/bin/sh
+set -eu
+case "${1:-}" in
+  --version) printf 'yard-engine fixture\n' ;;
+  _release-transition)
+    request=$(cat)
+    mode=$(printf '%s' "$request" | jq -r .mode)
+    target=$(printf '%s' "$request" | jq -r .target)
+    if [ "$mode" = inspect ]; then
+      printf '%s\n' '{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["converge imported state"]}}}'
+      exit 0
+    fi
+    printf '{"schemaVersion":1,"outcome":{"status":"ready","reachedGoal":true,"active":"%s","target":"%s","code":"ready","message":"verified"}}\n' "$target" "$target"
+    ;;
+  *) exit 64 ;;
+esac
+`)
+	writeTestFile(t, filepath.Join(fixture.data, "runtime/current/runtime-files.sha256"), 0o600,
+		"fixture release identity\n")
 	writeTestFile(t, filepath.Join(fixture.data, "runtime/current/completions/yard.bash"), 0o600,
 		"fixture\n")
 	for _, name := range []string{"migrate-source-install.sh", "restore-source-install.sh"} {
@@ -616,13 +652,37 @@ func (fixture sourceInstallFixture) migrate() ([]byte, error) {
 }
 
 func (fixture sourceInstallFixture) migrateWithFault(fault string) ([]byte, error) {
+	entrypointFault := strings.HasPrefix(fault, "shell-integration") ||
+		strings.HasPrefix(fault, "entrypoint-switch")
+	importFault := fault
+	if entrypointFault {
+		importFault = ""
+	}
+	output, err := fixture.runSourceOperation("import", importFault)
+	if err != nil {
+		return output, err
+	}
+	entrypointOutput, err := fixture.runSourceOperation("entrypoints", map[bool]string{
+		true: fault, false: "",
+	}[entrypointFault])
+	return append(output, entrypointOutput...), err
+}
+
+func (fixture sourceInstallFixture) runSourceOperation(operation, fault string) ([]byte, error) {
+	candidateRoot := filepath.Join(fixture.data, "runtime/releases/release-current")
 	command := exec.Command(
 		filepath.Join(fixture.data, "runtime/current/scripts/migrate-source-install.sh"),
 		"--runtime-root", filepath.Join(fixture.data, "runtime"),
+		"--candidate-root", candidateRoot,
+		"--source-root", fixture.source,
 		"--bin-dir", fixture.bin,
 		"--rc", fixture.rc,
 		"--login-rc", fixture.login,
 		"--data-home", fixture.data,
+		"--operation", operation,
+		"--transaction", "tx-source-test-001",
+		"--plan", "plan-source-test-001",
+		"--source-plan", strings.Repeat("a", 64),
 	)
 	command.Env = append(os.Environ(),
 		"HOME="+fixture.home,
@@ -641,8 +701,9 @@ func restoreFixture(t *testing.T, fixture sourceInstallFixture) {
 	recovery := filepath.Join(fixture.data, "recovery/pre-go-source/restore.sh")
 	command := exec.Command(recovery)
 	command.Env = append(os.Environ(), "HOME="+fixture.home, "SUBYARD_HOME="+fixture.data)
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("source recovery failed: %v\n%s", err, output)
+	if output, err := command.CombinedOutput(); err == nil ||
+		!strings.Contains(string(output), "restore would invalidate release migration history") {
+		t.Fatalf("committed source recovery was not sealed: %v\n%s", err, output)
 	}
 }
 

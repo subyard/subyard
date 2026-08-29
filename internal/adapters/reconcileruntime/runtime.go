@@ -1301,6 +1301,9 @@ func instanceIntentionallyStopped(instance ports.InstanceInfo) bool {
 }
 
 func (runtime Runtime) powerConverged(ctx context.Context, requireMetadata bool) (bool, error) {
+	if !requireMetadata {
+		return runtime.powerReconcilerConverged(ctx), nil
+	}
 	ready, err := runtime.incusReady(ctx)
 	if err != nil || !ready {
 		return false, err
@@ -1309,20 +1312,18 @@ func (runtime Runtime) powerConverged(ctx context.Context, requireMetadata bool)
 	if err != nil || !state.InstanceFound {
 		return false, err
 	}
-	if requireMetadata {
-		instance := state.Instance
-		managed, _ := instance.EffectiveConfig("user.subyard.managed")
-		initialized, _ := instance.EffectiveConfig("user.subyard.initialized")
-		desired, _ := instance.EffectiveConfig("user.subyard.desired_power")
-		instanceBridge, _ := instance.EffectiveConfig("user.subyard.bridge")
-		autostart, _ := instance.EffectiveConfig("boot.autostart")
-		bridge := runtime.environmentDefault("INCUS_BRIDGE",
-			runtime.environmentDefault("INCUS_NETWORK", "incusbr0"))
-		if managed != "true" || initialized != "true" ||
-			(desired != "running" && desired != "stopped") ||
-			instanceBridge != bridge || autostart != "false" {
-			return false, nil
-		}
+	instance := state.Instance
+	managed, _ := instance.EffectiveConfig("user.subyard.managed")
+	initialized, _ := instance.EffectiveConfig("user.subyard.initialized")
+	desired, _ := instance.EffectiveConfig("user.subyard.desired_power")
+	instanceBridge, _ := instance.EffectiveConfig("user.subyard.bridge")
+	autostart, _ := instance.EffectiveConfig("boot.autostart")
+	bridge := runtime.environmentDefault("INCUS_BRIDGE",
+		runtime.environmentDefault("INCUS_NETWORK", "incusbr0"))
+	if managed != "true" || initialized != "true" ||
+		(desired != "running" && desired != "stopped") ||
+		instanceBridge != bridge || autostart != "false" {
+		return false, nil
 	}
 	return runtime.powerReconcilerConverged(ctx), nil
 }

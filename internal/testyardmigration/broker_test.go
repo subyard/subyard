@@ -8,48 +8,6 @@ import (
 	"testing"
 )
 
-func TestBrokerRuntimeOperationRefreshesOnlyAnActiveBroker(t *testing.T) {
-	options, state := brokerRuntimeFixture(t, "RUNNING", "active")
-	write(t, state.installedHash, strings.Repeat("0", 64)+"\n")
-
-	before, err := PrepareBrokerRuntime(context.Background(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if before != BrokerRuntimeActive {
-		t.Fatalf("prepared broker state = %q", before)
-	}
-	if err := VerifyBrokerRuntime(context.Background(), options, before); err == nil {
-		t.Fatal("stale active broker passed release verification")
-	}
-	if err := CommitBrokerRuntime(context.Background(), options, before); err != nil {
-		t.Fatal(err)
-	}
-	expected, err := fileDigest(filepath.Join(options.RepositoryRoot, "bin", "yard-engine"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if actual := strings.TrimSpace(read(t, state.installedHash)); actual != expected {
-		t.Fatalf("installed broker hash = %s, want %s", actual, expected)
-	}
-	calls := read(t, state.yardCalls)
-	for _, expectedCall := range []string{
-		"-Y test-yard _migrate reconcile-test-vm-broker\n",
-		"-Y test-yard test-vms status\n",
-	} {
-		if !strings.Contains(calls, expectedCall) {
-			t.Fatalf("active broker operation omitted %q:\n%s", expectedCall, calls)
-		}
-	}
-
-	// The operation remains a release reconciliation hook after layout 3:
-	// another runtime binary must make verification drift until it is applied.
-	writeBrokerExecutable(t, filepath.Join(options.RepositoryRoot, "bin", "yard-engine"))
-	if err := VerifyBrokerRuntime(context.Background(), options, before); err == nil {
-		t.Fatal("later runtime update did not detect an old active broker")
-	}
-}
-
 func TestBrokerRuntimeOperationSkipsAnAlreadyCurrentActiveBroker(t *testing.T) {
 	options, state := brokerRuntimeFixture(t, "RUNNING", "active")
 	var output strings.Builder
@@ -60,11 +18,11 @@ func TestBrokerRuntimeOperationSkipsAnAlreadyCurrentActiveBroker(t *testing.T) {
 	}
 	write(t, state.installedHash, expected+"\n")
 
-	before, err := PrepareBrokerRuntime(context.Background(), options)
+	before, _, err := PrepareBrokerRuntimeTarget(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := CommitBrokerRuntime(context.Background(), options, before); err != nil {
+	if err := VerifyBrokerRuntime(context.Background(), options, before); err != nil {
 		t.Fatal(err)
 	}
 	calls := read(t, state.yardCalls)
@@ -120,14 +78,14 @@ func TestBrokerRuntimeOperationLeavesStoppedBrokerUntouched(t *testing.T) {
 	original := strings.Repeat("1", 64) + "\n"
 	write(t, state.installedHash, original)
 
-	before, err := PrepareBrokerRuntime(context.Background(), options)
+	before, _, err := PrepareBrokerRuntimeTarget(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if before != BrokerRuntimeInactive {
 		t.Fatalf("prepared broker state = %q", before)
 	}
-	if err := CommitBrokerRuntime(context.Background(), options, before); err != nil {
+	if err := VerifyBrokerRuntime(context.Background(), options, before); err != nil {
 		t.Fatal(err)
 	}
 	if actual := read(t, state.installedHash); actual != original {
@@ -150,7 +108,7 @@ func TestBrokerRuntimeOperationRetainsDesiredRunningAcrossOwnerMigration(t *test
 				"running",
 			)
 
-			before, err := PrepareBrokerRuntime(context.Background(), options)
+			before, _, err := PrepareBrokerRuntimeTarget(context.Background(), options)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -194,12 +152,30 @@ func TestBrokerRuntimeOperationReloadsTheSelectedYardContext(t *testing.T) {
 		"yard-"+LegacyYard,
 	)
 
-	before, err := PrepareBrokerRuntime(context.Background(), options)
+	before, _, err := PrepareBrokerRuntimeTarget(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if before != BrokerRuntimeActive {
 		t.Fatalf("reloaded broker state = %q, want %q", before, BrokerRuntimeActive)
+	}
+}
+
+func TestBrokerRuntimeOperationAcceptsSourceUpgradeRegistrationPermissions(t *testing.T) {
+	options, _ := brokerRuntimeFixture(t, "RUNNING", "active")
+	directory := filepath.Join(options.ConfigHome, "yards", CurrentYard)
+	registration := filepath.Join(directory, "config.env")
+	if err := os.Chmod(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(registration, 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	state, yard, err := PrepareBrokerRuntimeTarget(context.Background(), options)
+	if err != nil || state != BrokerRuntimeActive || yard != CurrentYard {
+		t.Fatalf("protected source-upgrade registration = %q/%q, err=%v",
+			state, yard, err)
 	}
 }
 
@@ -213,7 +189,7 @@ func TestBrokerRuntimeOperationRetainsDesiredRunningWhenServiceStops(t *testing.
 		"running",
 	)
 
-	before, err := PrepareBrokerRuntime(context.Background(), options)
+	before, _, err := PrepareBrokerRuntimeTarget(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +212,7 @@ func TestBrokerRuntimeOperationRejectsUnsupportedDesiredPower(t *testing.T) {
 		"paused",
 	)
 
-	_, err := PrepareBrokerRuntime(context.Background(), options)
+	_, _, err := PrepareBrokerRuntimeTarget(context.Background(), options)
 	if err == nil || !strings.Contains(err.Error(), "unsupported desired power") {
 		t.Fatalf("unsupported desired power error = %v", err)
 	}
@@ -251,7 +227,7 @@ func TestBrokerRuntimeOperationNormalizesRunningLegacyBackend(t *testing.T) {
 		"not-found",
 	)
 
-	before, err := PrepareBrokerRuntime(context.Background(), options)
+	before, _, err := PrepareBrokerRuntimeTarget(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +253,7 @@ func TestBrokerRuntimeOperationAdoptsCanonicalBackendAfterSourceRecovery(t *test
 		t.Fatal(err)
 	}
 
-	before, err := PrepareBrokerRuntime(context.Background(), options)
+	before, _, err := PrepareBrokerRuntimeTarget(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +271,7 @@ func TestBrokerRuntimeOperationKeepsStoppedLegacyServiceInactive(t *testing.T) {
 		"loaded",
 	)
 
-	before, err := PrepareBrokerRuntime(context.Background(), options)
+	before, _, err := PrepareBrokerRuntimeTarget(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,7 +283,7 @@ func TestBrokerRuntimeOperationKeepsStoppedLegacyServiceInactive(t *testing.T) {
 func TestBrokerRuntimeOperationTreatsActivatingServiceAsActive(t *testing.T) {
 	options, _ := brokerRuntimeFixture(t, "RUNNING", "activating")
 
-	before, err := PrepareBrokerRuntime(context.Background(), options)
+	before, _, err := PrepareBrokerRuntimeTarget(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,144 +305,15 @@ func TestBrokerRuntimeOperationIsNoopWithoutRegistration(t *testing.T) {
 			"SUBYARD_OPERATOR_HOME="+root,
 		),
 	}
-	before, err := PrepareBrokerRuntime(context.Background(), options)
+	before, _, err := PrepareBrokerRuntimeTarget(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if before != BrokerRuntimeAbsent {
 		t.Fatalf("prepared broker state = %q", before)
 	}
-	if err := CommitBrokerRuntime(context.Background(), options, before); err != nil {
+	if err := VerifyBrokerRuntime(context.Background(), options, before); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestBrokerRuntimeRollbackRestoresPreviousReleaseEngine(t *testing.T) {
-	options, state := brokerRuntimeFixture(t, "RUNNING", "active")
-	runtimeRoot := filepath.Join(filepath.Dir(options.RepositoryRoot), "runtime")
-	previous := brokerRepository(
-		t,
-		filepath.Join(runtimeRoot, "releases", "previous-release"),
-	)
-	writeBrokerExecutable(t, filepath.Join(previous, "bin", "yard-engine"))
-	writeBrokerExecutable(t, filepath.Join(previous, "bin", "yard-engine"))
-	if err := os.Symlink(
-		filepath.Join("releases", "previous-release"),
-		filepath.Join(runtimeRoot, "previous"),
-	); err != nil {
-		t.Fatal(err)
-	}
-	options.RuntimeRoot = runtimeRoot
-	candidateHash, err := fileDigest(filepath.Join(options.RepositoryRoot, "bin", "yard-engine"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	write(t, state.installedHash, candidateHash+"\n")
-
-	if err := RollbackBrokerRuntime(
-		context.Background(),
-		options,
-		BrokerRuntimeActive,
-	); err != nil {
-		t.Fatal(err)
-	}
-	previousHash, err := fileDigest(filepath.Join(previous, "bin", "yard-engine"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if actual := strings.TrimSpace(read(t, state.installedHash)); actual != previousHash {
-		t.Fatalf("rolled-back broker hash = %s, want %s", actual, previousHash)
-	}
-	if !strings.Contains(read(t, state.yardCalls), previous+"/bin/yard-engine ") {
-		t.Fatal("broker rollback did not invoke the retained previous runtime")
-	}
-}
-
-func TestBrokerRuntimeRollbackAcceptsItsOwnedPostconditionAfterReconcileDrift(t *testing.T) {
-	options, state := brokerRuntimeFixture(t, "RUNNING", "active")
-	runtimeRoot := filepath.Join(filepath.Dir(options.RepositoryRoot), "runtime")
-	previous := brokerRepository(
-		t,
-		filepath.Join(runtimeRoot, "releases", "previous-release"),
-	)
-	writeBrokerExecutable(t, filepath.Join(previous, "bin", "yard-engine"))
-	writeBrokerExecutable(t, filepath.Join(previous, "bin", "yard-engine"))
-	if err := os.Symlink(
-		filepath.Join("releases", "previous-release"),
-		filepath.Join(runtimeRoot, "previous"),
-	); err != nil {
-		t.Fatal(err)
-	}
-	options.RuntimeRoot = runtimeRoot
-	options.Environment = append(options.Environment, "BROKER_INIT_RC=1")
-	candidateHash, err := fileDigest(filepath.Join(options.RepositoryRoot, "bin", "yard-engine"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	write(t, state.installedHash, candidateHash+"\n")
-
-	if err := RollbackBrokerRuntime(
-		context.Background(),
-		options,
-		BrokerRuntimeActive,
-	); err != nil {
-		t.Fatal(err)
-	}
-	previousHash, err := fileDigest(filepath.Join(previous, "bin", "yard-engine"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if actual := strings.TrimSpace(read(t, state.installedHash)); actual != previousHash {
-		t.Fatalf("rolled-back broker hash = %s, want %s", actual, previousHash)
-	}
-}
-
-func TestBrokerRuntimeCommitDoesNotHideReconcileFailure(t *testing.T) {
-	options, state := brokerRuntimeFixture(t, "RUNNING", "active")
-	options.Environment = append(options.Environment, "BROKER_INIT_RC=1")
-	write(t, state.installedHash, strings.Repeat("0", 64)+"\n")
-
-	if err := CommitBrokerRuntime(
-		context.Background(),
-		options,
-		BrokerRuntimeActive,
-	); err == nil || !strings.Contains(err.Error(), "update active test VM broker") {
-		t.Fatalf("broker commit hid init failure: %v", err)
-	}
-}
-
-func TestBrokerRuntimeRollbackRetainsReconcileAndVerificationFailures(t *testing.T) {
-	options, state := brokerRuntimeFixture(t, "RUNNING", "active")
-	runtimeRoot := filepath.Join(filepath.Dir(options.RepositoryRoot), "runtime")
-	previous := brokerRepository(
-		t,
-		filepath.Join(runtimeRoot, "releases", "previous-release"),
-	)
-	writeBrokerExecutable(t, filepath.Join(previous, "bin", "yard-engine"))
-	writeBrokerExecutable(t, filepath.Join(previous, "bin", "yard-engine"))
-	if err := os.Symlink(
-		filepath.Join("releases", "previous-release"),
-		filepath.Join(runtimeRoot, "previous"),
-	); err != nil {
-		t.Fatal(err)
-	}
-	options.RuntimeRoot = runtimeRoot
-	options.Environment = append(
-		options.Environment,
-		"BROKER_INIT_RC=1",
-		"BROKER_SKIP_INSTALL=1",
-	)
-	candidateHash, err := fileDigest(filepath.Join(options.RepositoryRoot, "bin", "yard-engine"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	write(t, state.installedHash, candidateHash+"\n")
-
-	err = RollbackBrokerRuntime(context.Background(), options, BrokerRuntimeActive)
-	if err == nil ||
-		!strings.Contains(err.Error(), "restore previous active test VM broker") ||
-		!strings.Contains(err.Error(), "verify previous active test VM broker") {
-		t.Fatalf("broker rollback lost failure context: %v", err)
 	}
 }
 

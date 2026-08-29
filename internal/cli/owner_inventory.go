@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -158,7 +159,7 @@ func (cli *CLI) remoteOwnerYardStatus(
 ) (domain.YardStatus, error) {
 	connections, err := (ownerinventory.Connections{
 		Root: loaded.Context.Paths.DataHome + "/owner-inventory",
-	}).List()
+	}).ListReadOnly()
 	if err != nil {
 		return domain.YardStatus{}, err
 	}
@@ -396,19 +397,47 @@ func (cli *CLI) allOwnerInventories(
 }
 
 // allOwnerInventoriesReadOnly resolves existing owner identities without
-// refreshing caches or persisting legacy-route normalization. It is used while
-// assessing a destructive project removal, before consent exists for any local
-// metadata write.
+// persisting cache refreshes or legacy-route normalization. A normal read uses
+// a fresh cache; force performs a live fetch while still leaving the cache
+// untouched.
 func (cli *CLI) allOwnerInventoriesReadOnly(
-	ctx context.Context, loaded config.Loaded,
+	ctx context.Context, loaded config.Loaded, force bool,
 ) []ownerInventoryResult {
 	local, err := cli.ownerInventoryReadOnly(ctx, loaded)
 	results := []ownerInventoryResult{{inventory: local, fetchedAt: local.ObservedAt, err: err}}
 	root := loaded.Context.Paths.DataHome + "/owner-inventory"
-	connections, err := (ownerinventory.Connections{Root: root}).List()
+	connections, err := (ownerinventory.Connections{Root: root}).ListReadOnly()
 	if err != nil {
 		return append(results, ownerInventoryResult{err: err})
 	}
+	legacy, err := cli.remoteControl(loaded, 0).List(ctx)
+	if err != nil {
+		return append(results, ownerInventoryResult{err: err})
+	}
+	knownDestinations := make(map[string]struct{}, len(connections))
+	for index := range connections {
+		if _, mergeErr := mergeLegacyRoutes(&connections[index], legacy); mergeErr != nil {
+			return append(results, ownerInventoryResult{err: mergeErr})
+		}
+		knownDestinations[connections[index].Destination] = struct{}{}
+	}
+	for _, record := range legacy {
+		if _, known := knownDestinations[record.Spec.OwnerEndpoint]; known {
+			continue
+		}
+		connection := ownerinventory.Connection{
+			Destination: record.Spec.OwnerEndpoint,
+			LegacyNames: []string{record.Spec.LegacyAlias},
+		}
+		if _, mergeErr := mergeLegacyRoutes(&connection, legacy); mergeErr != nil {
+			return append(results, ownerInventoryResult{err: mergeErr})
+		}
+		connections = append(connections, connection)
+		knownDestinations[record.Spec.OwnerEndpoint] = struct{}{}
+	}
+	sort.Slice(connections, func(i, j int) bool {
+		return connections[i].Destination < connections[j].Destination
+	})
 	cache := ownerinventory.Cache{Root: root}
 	remote := make([]ownerInventoryResult, len(connections))
 	common, cancel := context.WithTimeout(ctx, 8*time.Second)
@@ -418,34 +447,68 @@ func (cli *CLI) allOwnerInventoriesReadOnly(
 		wait.Add(1)
 		go func(index int, connection ownerinventory.Connection) {
 			defer wait.Done()
+			if connection.HostID == "" {
+				process, transportErr := transport.SSH(
+					"ssh", connection.Destination, 3*time.Second,
+				)
+				if transportErr != nil {
+					remote[index].err = transportErr
+					return
+				}
+				inventory, fetchErr := (ownerinventory.Client{Transport: process}).Fetch(common, "")
+				if fetchErr != nil {
+					remote[index].err = fetchErr
+					return
+				}
+				remote[index] = ownerInventoryResult{inventory: inventory, fetchedAt: nowUTC(cli)}
+				return
+			}
+			snapshot, cacheErr := cache.Read(connection.HostID)
+			now := nowUTC(cli)
+			if cacheErr == nil && !force && now.Sub(snapshot.FetchedAt) <= ownerinventory.Freshness {
+				remote[index] = ownerInventoryResult{
+					inventory: snapshot.Inventory, fetchedAt: snapshot.FetchedAt,
+				}
+				return
+			}
 			process, transportErr := transport.SSH("ssh", connection.Destination, 3*time.Second)
 			if transportErr == nil {
 				inventory, fetchErr := (ownerinventory.Client{Transport: process}).Fetch(common, connection.HostID)
 				if fetchErr == nil {
-					fetchedAt := time.Now().UTC()
-					if cli.options.Clock != nil {
-						fetchedAt = cli.options.Clock.Now().UTC()
-					}
-					remote[index] = ownerInventoryResult{inventory: inventory, fetchedAt: fetchedAt}
+					remote[index] = ownerInventoryResult{inventory: inventory, fetchedAt: now}
 					return
 				}
 				transportErr = fetchErr
 			}
-			snapshot, cacheErr := cache.Read(connection.HostID)
 			if cacheErr == nil {
 				remote[index] = ownerInventoryResult{
 					inventory: snapshot.Inventory, fetchedAt: snapshot.FetchedAt, stale: true, err: transportErr,
 				}
 				return
 			}
-			remote[index].err = transportErr
-			if transportErr == nil {
-				remote[index].err = cacheErr
+			if errors.Is(cacheErr, os.ErrNotExist) {
+				cacheErr = nil
 			}
+			remote[index].err = errors.Join(transportErr, cacheErr)
 		}(index, connection)
 	}
 	wait.Wait()
+	for index, connection := range connections {
+		if connection.HostID != "" || remote[index].err != nil ||
+			remote[index].inventory.HostID == "" {
+			continue
+		}
+		connection.HostID = remote[index].inventory.HostID
+		cli.discoveredOwners[connection.HostID] = connection
+	}
 	return append(results, remote...)
+}
+
+func nowUTC(cli *CLI) time.Time {
+	if cli != nil && cli.options.Clock != nil {
+		return cli.options.Clock.Now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 func mergeLegacyRoutes(
@@ -595,7 +658,7 @@ func (cli *CLI) resolveOwnerProject(
 	ctx context.Context, loaded config.Loaded, selector string, explicit bool, force bool, readOnly bool,
 ) (state.Match, error) {
 	if readOnly {
-		results := cli.allOwnerInventoriesReadOnly(ctx, loaded)
+		results := cli.allOwnerInventoriesReadOnly(ctx, loaded, force)
 		return cli.resolveOwnerProjectFromInventories(ctx, loaded, selector, explicit, readOnly, results)
 	}
 	results := cli.allOwnerInventories(ctx, loaded, force)
@@ -626,9 +689,16 @@ func (cli *CLI) resolveOwnerProjectFromInventories(
 			} else {
 				scopeYard = "default"
 			}
-			connections, err := (ownerinventory.Connections{
+			connectionStore := ownerinventory.Connections{
 				Root: loaded.Context.Paths.DataHome + "/owner-inventory",
-			}).List()
+			}
+			var connections []ownerinventory.Connection
+			var err error
+			if readOnly {
+				connections, err = connectionStore.ListReadOnly()
+			} else {
+				connections, err = connectionStore.List()
+			}
 			if err != nil {
 				return state.Match{}, err
 			}
@@ -690,7 +760,18 @@ func (cli *CLI) resolveOwnerProjectFromInventories(
 			state.ErrAmbiguous, strings.Join(candidates, ", "))
 	}
 	selected := matches[0]
-	contextName, contextValue, err := cli.ownerYardRoute(ctx, loaded, selected.hostID, selected.yard.Name)
+	var contextName string
+	var contextValue domain.Context
+	var err error
+	if readOnly {
+		contextName, contextValue, err = cli.ownerYardRouteReadOnly(
+			ctx, loaded, selected.hostID, selected.yard.Name,
+		)
+	} else {
+		contextName, contextValue, err = cli.ownerYardRoute(
+			ctx, loaded, selected.hostID, selected.yard.Name,
+		)
+	}
 	if err != nil {
 		return state.Match{}, err
 	}
@@ -727,6 +808,18 @@ func (cli *CLI) resolveOwnerProjectFromInventories(
 func (cli *CLI) ownerYardRoute(
 	ctx context.Context, loaded config.Loaded, hostID, yardName string,
 ) (string, domain.Context, error) {
+	return cli.ownerYardRouteWithMode(ctx, loaded, hostID, yardName, false)
+}
+
+func (cli *CLI) ownerYardRouteReadOnly(
+	ctx context.Context, loaded config.Loaded, hostID, yardName string,
+) (string, domain.Context, error) {
+	return cli.ownerYardRouteWithMode(ctx, loaded, hostID, yardName, true)
+}
+
+func (cli *CLI) ownerYardRouteWithMode(
+	ctx context.Context, loaded config.Loaded, hostID, yardName string, readOnly bool,
+) (string, domain.Context, error) {
 	localHostID, _, err := configsync.ResolveHostID(
 		loaded.Context.Paths.ConfigHome, loaded.Environment,
 	)
@@ -737,9 +830,15 @@ func (cli *CLI) ownerYardRoute(
 		contextValue, err := cli.loadInventoryContext(yardName, loaded)
 		return yardName, contextValue, err
 	}
-	connections, err := (ownerinventory.Connections{
+	connectionStore := ownerinventory.Connections{
 		Root: loaded.Context.Paths.DataHome + "/owner-inventory",
-	}).List()
+	}
+	var connections []ownerinventory.Connection
+	if readOnly {
+		connections, err = connectionStore.ListReadOnly()
+	} else {
+		connections, err = connectionStore.List()
+	}
 	if err != nil {
 		return "", domain.Context{}, err
 	}
