@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
@@ -777,23 +776,13 @@ func (store LeaseStore) withLock(write bool, operation func(*LeasePool) error) e
 }
 
 func (store LeaseStore) withPoolLock(operation func(*LeasePool) error) error {
-	if err := os.MkdirAll(filepath.Dir(store.Path), 0o700); err != nil {
-		return err
-	}
-	lock, err := os.OpenFile(store.Path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return err
-	}
-	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
-		return err
-	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) //nolint:errcheck
-	pool, err := store.load()
-	if err != nil {
-		return err
-	}
-	return operation(&pool)
+	return withFileLock(store.Path+".lock", func() error {
+		pool, err := store.load()
+		if err != nil {
+			return err
+		}
+		return operation(&pool)
+	})
 }
 
 func (store LeaseStore) load() (LeasePool, error) {
@@ -958,19 +947,7 @@ func (store LeaseStore) rebuildCorruptPoolForRecovery(slotID string) error {
 }
 
 func (store LeaseStore) withRawLock(operation func() error) error {
-	if err := os.MkdirAll(filepath.Dir(store.Path), 0o700); err != nil {
-		return err
-	}
-	lock, err := os.OpenFile(store.Path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return err
-	}
-	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
-		return err
-	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) //nolint:errcheck
-	return operation()
+	return withFileLock(store.Path+".lock", operation)
 }
 
 func reconcileSlotCount(pool *LeasePool, count int) error {

@@ -5,6 +5,7 @@ command-registry.sh
 create-subyard-docker-apparmor.sh
 init-extras-convergence.sh
 init-network-convergence.sh
+install-incus-data-home.sh
 opencode-agent-defaults.sh
 paseo-agent-contract.sh
 power-reconciler-systemd-255-launch.sh

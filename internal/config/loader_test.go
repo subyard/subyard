@@ -78,6 +78,24 @@ func TestLoadNamedContext(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsBroadDataHome(t *testing.T) {
+	operatorHome := t.TempDir()
+	_, err := Load(LoadOptions{
+		RepositoryRoot: filepath.Clean(filepath.Join("..", "..")),
+		OperatorHome:   operatorHome,
+		DisablePrivate: true,
+		Environment: map[string]string{
+			"HOME":                  operatorHome,
+			"SUBYARD_OPERATOR_HOME": operatorHome,
+			"SUBYARD_CONFIG_HOME":   filepath.Join(operatorHome, ".config", "subyard"),
+			"SUBYARD_HOME":          "/",
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "data home is too broad") {
+		t.Fatalf("Load accepted broad data home: %v", err)
+	}
+}
+
 func TestLoadExactYardSettingsFile(t *testing.T) {
 	root := t.TempDir()
 	operatorHome := filepath.Join(root, "home")

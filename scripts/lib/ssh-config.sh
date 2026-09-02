@@ -173,7 +173,12 @@ ssh_config_prepend_once() (
 ssh_config_remove_exact() (
   local config="${1:?ssh_config_remove_exact needs a config path}"
   local line="${2:?ssh_config_remove_exact needs a line}"
-  local directory temp
+  local directory temp grep_status
+
+  if [ ! -e "$config" ] && [ ! -L "$config" ]; then
+    return 0
+  fi
+  [ -f "$config" ] && [ ! -L "$config" ] || return 1
 
   directory="$(dirname "$config")"
   (umask 077; : >> "$directory/.subyard-config.lock") || return 1
@@ -183,7 +188,13 @@ ssh_config_remove_exact() (
   exec 9>>"$directory/.subyard-config.lock" || return 1
   flock 9 || return 1
   [ -f "$config" ] && [ ! -L "$config" ] || return 1
-  grep -qxF "$line" "$config" 2>/dev/null || return 0
+  if grep -qxF "$line" "$config" 2>/dev/null; then
+    :
+  else
+    grep_status=$?
+    [ "$grep_status" -eq 1 ] && return 0
+    return "$grep_status"
+  fi
   temp="$(mktemp "$directory/.subyard-ssh-config.XXXXXX")" || return 1
   if ! grep -vxF "$line" "$config" > "$temp"; then
     [ ! -s "$temp" ] || { rm -f -- "$temp"; return 1; }

@@ -106,10 +106,34 @@ func TestContextRejectsUnsafeBoundaries(t *testing.T) {
 		"broad host base": func() Context { value := valid; value.Paths.HostBase = "/"; return value }(),
 		"invalid port":    func() Context { value := valid; value.SSHPort = 70000; return value }(),
 	}
+	for _, dataHome := range []string{
+		"/", "/boot", "/dev", "/etc", "/home", "/opt", "/proc", "/root", "/run", "/srv", "/sys", "/usr", "/var",
+		valid.Paths.OperatorHome,
+	} {
+		value := valid
+		value.Paths.DataHome = dataHome
+		tests["broad data home "+dataHome] = value
+	}
 	for name, value := range tests {
 		if _, err := NormalizeContext(value); err == nil {
 			t.Errorf("%s was accepted", name)
 		}
+	}
+}
+
+func TestContextValidateRejectsUnnormalizedDataHome(t *testing.T) {
+	context := Context{
+		YardName: "default", AccessKind: AccessLocal, YardKind: YardContainer,
+		YardInstanceName: "yard", IncusProject: "subyard", SSHHost: "yard", DevUser: "dev",
+		SSHPort: 2222, ShiftMode: "shift", DevUID: 1000,
+		Paths: RuntimePaths{
+			RepositoryRoot: "/repo", ConfigDir: "/repo/config", OperatorHome: "/home/dev",
+			ConfigHome: "/home/dev/.config/subyard", DataHome: "/home/dev/.subyard/..",
+			StoragePath: "/home/dev/.subyard/incus", HostBase: "/srv/subyard", StateDir: "/state",
+		},
+	}
+	if err := context.Validate(); err == nil {
+		t.Fatal("unnormalized data home was accepted")
 	}
 }
 

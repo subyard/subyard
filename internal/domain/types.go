@@ -187,8 +187,14 @@ func (ctx Context) Validate() error {
 	if ctx.Paths.HostBase != filepath.Clean(ctx.Paths.HostBase) {
 		return errors.New("host base must be normalized")
 	}
+	if ctx.Paths.DataHome != filepath.Clean(ctx.Paths.DataHome) {
+		return errors.New("data home must be normalized")
+	}
 	if broadHostPath(ctx.Paths.HostBase, ctx.Paths.OperatorHome) {
 		return fmt.Errorf("host base is too broad: %s", ctx.Paths.HostBase)
+	}
+	if broadHostPath(ctx.Paths.DataHome, ctx.Paths.OperatorHome) {
+		return fmt.Errorf("data home is too broad: %s", ctx.Paths.DataHome)
 	}
 	if ctx.AccessKind == AccessLocal && (ctx.SSHPort < 1 || ctx.SSHPort > 65535) {
 		return errors.New("SSH port must be an integer from 1 to 65535")

@@ -21,6 +21,22 @@ type Call struct {
 // monotonic revision. Adapter-local revisions remain in typed event data.
 type Emit func(event string, data any) (uint64, error)
 
+type orderedEventSequencer struct {
+	mu   sync.Mutex
+	next uint64
+}
+
+func (sequencer *orderedEventSequencer) publish(
+	response Response, enqueue func(Response) error,
+) (uint64, error) {
+	sequencer.mu.Lock()
+	defer sequencer.mu.Unlock()
+	sequencer.next++
+	response.Sequence = sequencer.next
+	response.Revision = sequencer.next
+	return sequencer.next, enqueue(response)
+}
+
 type Handler interface {
 	Handle(context.Context, Call, Emit) (any, error)
 }
@@ -83,7 +99,7 @@ func (session Session) Serve(ctx context.Context, input io.Reader, output io.Wri
 	}()
 
 	var negotiated atomic.Bool
-	var sequence atomic.Uint64
+	var eventSequence orderedEventSequencer
 	var workers sync.WaitGroup
 	operations := make(map[string]context.CancelCauseFunc)
 	var operationsMu sync.Mutex
@@ -184,11 +200,9 @@ func (session Session) Serve(ctx context.Context, input io.Reader, output io.Wri
 				if err != nil {
 					return 0, fmt.Errorf("encode RPC event: %w", err)
 				}
-				revision := sequence.Add(1)
-				err = enqueue(Response{Version: ProtocolVersion, Type: "event", ID: request.ID,
+				return eventSequence.publish(Response{Version: ProtocolVersion, Type: "event", ID: request.ID,
 					OperationID: operationID,
-					Sequence:    revision, Revision: revision, Event: event, Data: encoded})
-				return revision, err
+					Event:       event, Data: encoded}, enqueue)
 			}
 			result, err := session.Handler.Handle(operationContext, Call{
 				ID: request.ID, OperationID: operationID, Method: request.Method, Params: request.Params,

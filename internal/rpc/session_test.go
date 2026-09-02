@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -299,6 +300,105 @@ func TestSessionsGiveSecondClientIndependentOrderedStream(t *testing.T) {
 		if err := <-done; err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestOrderedEventSequencerSerializesRevisionAndEnqueue(t *testing.T) {
+	const eventCount = 64
+	var sequencer orderedEventSequencer
+	var frames []Response
+	start := make(chan struct{})
+	errs := make(chan error, eventCount)
+	var workers sync.WaitGroup
+	for range eventCount {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			_, err := sequencer.publish(Response{Type: "event"}, func(response Response) error {
+				frames = append(frames, response)
+				return nil
+			})
+			if err != nil {
+				errs <- err
+			}
+		}()
+	}
+	close(start)
+	workers.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	if len(frames) != eventCount {
+		t.Fatalf("published %d events, want %d", len(frames), eventCount)
+	}
+	for index, frame := range frames {
+		want := uint64(index + 1)
+		if frame.Sequence != want || frame.Revision != want {
+			t.Fatalf("event %d has out-of-order revision: %#v", index, frame)
+		}
+	}
+}
+
+func TestSessionConcurrentEventsFollowRevisionOrder(t *testing.T) {
+	const operationCount = 64
+	ready := atomic.Int32{}
+	release := make(chan struct{})
+	handler := HandlerFunc(func(_ context.Context, _ Call, emit Emit) (any, error) {
+		if ready.Add(1) == operationCount {
+			close(release)
+		}
+		<-release
+		_, err := emit("progress", map[string]any{"ok": true})
+		return map[string]any{"done": true}, err
+	})
+	client, server := net.Pipe()
+	done := make(chan error, 1)
+	go func() {
+		done <- (Session{
+			Handler:      handler,
+			Capabilities: []string{"ordered-events"},
+			Buffer:       operationCount * 2,
+		}).Serve(context.Background(), server, server)
+	}()
+	codec := NewCodec(client, client)
+	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "n", Method: "rpc.negotiate"})
+	if response := readResponse(t, codec); response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	for index := range operationCount {
+		operationID := fmt.Sprintf("operation-%d", index)
+		writeRequest(t, codec, Request{
+			Version: 1, Type: "request", ID: operationID, OperationID: operationID, Method: "events",
+		})
+	}
+	events := 0
+	responses := 0
+	for range operationCount * 2 {
+		response := readResponse(t, codec)
+		switch response.Type {
+		case "event":
+			want := uint64(events + 1)
+			if response.Sequence != want || response.Revision != want {
+				t.Fatalf("wire event %d has out-of-order revision: %#v", events, response)
+			}
+			events++
+		case "response":
+			if response.Error != nil {
+				t.Fatalf("operation failed: %#v", response)
+			}
+			responses++
+		default:
+			t.Fatalf("unexpected frame: %#v", response)
+		}
+	}
+	if events != operationCount || responses != operationCount {
+		t.Fatalf("received %d events and %d responses, want %d of each", events, responses, operationCount)
+	}
+	_ = client.Close()
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }
 

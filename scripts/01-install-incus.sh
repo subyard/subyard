@@ -44,6 +44,24 @@ OPERATOR_GROUP="$(id -gn "$OPERATOR_USER")"
 STORAGE_POOL="${STORAGE_POOL:-default}"
 INCUS_BRIDGE="${INCUS_BRIDGE:-incusbr0}"
 
+prepare_operator_data_home() {
+  subyard_home_validate_root "$SUBYARD_HOME" \
+    || die "Subyard data home must be an absolute, non-broad directory"
+  SUBYARD_HOME="$SUBYARD_VALIDATED_HOME"
+
+  local operator_uid actual_owner
+  operator_uid="$(id -u "$OPERATOR_USER")"
+  if [ "$(id -u)" -ne 0 ] && [ ! -e "$SUBYARD_HOME" ]; then
+    install -d -m 0700 -- "$SUBYARD_HOME" \
+      || die "could not create operator data home: $SUBYARD_HOME"
+  fi
+  [ -d "$SUBYARD_HOME" ] \
+    || die "operator data home must be created by the operator before root installation: $SUBYARD_HOME"
+  actual_owner="$(stat -c '%u' -- "$SUBYARD_HOME")"
+  [ "$actual_owner" = "$operator_uid" ] \
+    || die "operator data home must be owned by the operator before root installation: $SUBYARD_HOME"
+}
+
 if [ "$UPGRADE_ONLY" = 1 ]; then
   announce "Subyard — upgrade Incus to >= $MIN_INCUS_VER (Zabbly LTS-6.0)" \
     "Add the Zabbly LTS-6.0 apt repo (keyring + source), if not already present." \
@@ -62,6 +80,7 @@ else
     "Create the storage pool directory: $STORAGE_PATH" \
     "Run 'incus admin init': dir pool '$STORAGE_POOL' + bridge '$INCUS_BRIDGE' (only if not already initialized)."
   proceed_or_die
+  prepare_operator_data_home
   require_root "the steps above install packages, edit group membership, and initialize Incus"
 fi
 
@@ -164,11 +183,8 @@ else
 fi
 
 # --- 3. storage dir ----------------------------------------------------------
-# Keep $SUBYARD_HOME operator-owned (chown even if it pre-exists — Incus may have shifted
-# it to nobody:nogroup in a prior run, which locks operator steps out of their own state).
+prepare_operator_data_home
 echo "Storage:"
-install -d "$SUBYARD_HOME"
-chown "$OPERATOR_USER:$OPERATOR_GROUP" "$SUBYARD_HOME"
 if [ ! -d "$STORAGE_PATH" ]; then
   install -d -o "$OPERATOR_USER" -g "$OPERATOR_GROUP" "$STORAGE_PATH"
   ok "created $STORAGE_PATH"

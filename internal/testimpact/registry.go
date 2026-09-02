@@ -78,7 +78,7 @@ func BuiltInRegistry() (Registry, error) {
 		"emulator-process-identity", "emulator-resource-protocol", "engine-release",
 		"hermes-dashboard-resource", "hermes-e2e-contract", "hermes-provision",
 		"init-extras-convergence", "init-network-convergence", "init-project-convergence",
-		"install-runtime-release-rollback", "key-tools-install", "lib-power-network",
+		"install-incus-data-home", "install-runtime-release-rollback", "key-tools-install", "lib-power-network",
 		"lifecycle-guard", "openclaw-provision-check", "openclaw-resource-protocol",
 		"opencode-agent-defaults", "opencode-agent-provision", "orca-profile-resource",
 		"p0-capacity", "paseo-agent-contract", "paseo-project-sync",

@@ -111,6 +111,18 @@ assert_host_network_unchanged() {
     || die "allocated host is unsafe after candidate teardown: $POWER_ERROR"
 }
 
+outer_data_home_metadata() {
+  [ -d "$SUBYARD_HOME" ] && [ ! -L "$SUBYARD_HOME" ] \
+    || die "outer data home is not a real directory: $SUBYARD_HOME"
+  stat -c '%u:%g:%a' -- "$SUBYARD_HOME"
+}
+
+assert_outer_data_home_metadata() {
+  local stage="$1"
+  [ "$(outer_data_home_metadata)" = "$OUTER_DATA_HOME_METADATA" ] \
+    || die "outer data home metadata changed after $stage"
+}
+
 nested_decimal_at_most() {
   local value="$1" limit="$2"
   [ "${#value}" -lt "${#limit}" ] \
@@ -323,6 +335,7 @@ EOF
 require_nested_memory_reserve
 printf '  [ .. ] creating the outer yard\n'
 yard init --yes
+OUTER_DATA_HOME_METADATA="$(outer_data_home_metadata)"
 incus network set "$OUTER_BRIDGE" user.subyard.owner=nested-teardown-e2e-v1 \
   --project default >/dev/null
 yard start --yes
@@ -360,6 +373,7 @@ SSH_AUTH_SOCK='' ssh -F /dev/null -o BatchMode=yes -o IdentitiesOnly=yes \
   -p "$ssh_port" dev@127.0.0.1 true \
   || die 'legacy named-yard access fixture is not usable before migration'
 yard init --yes
+assert_outer_data_home_metadata named-yard-init
 grep -qxF "    IdentityFile \"$canonical_identity\"" "$outer_snippet" \
   || die 'named-yard migration did not switch to the canonical identity'
 incus exec "$OUTER_INSTANCE" --project "$OUTER_PROJECT" \
@@ -373,6 +387,7 @@ docker_pid_before="$(incus exec "$OUTER_INSTANCE" --project "$OUTER_PROJECT" -- 
 incus exec "$OUTER_INSTANCE" --project "$OUTER_PROJECT" -- \
   iptables -P FORWARD DROP
 yard init --yes
+assert_outer_data_home_metadata repeated-init
 assert_outer_vm_ssh_address repeated-init
 [ "$(incus exec "$OUTER_INSTANCE" --project "$OUTER_PROJECT" -- \
   iptables -S FORWARD | head -n 1)" = '-P FORWARD ACCEPT' ] \
@@ -384,6 +399,7 @@ yard stop --yes
 yard start --yes
 ensure_outer_foreign_ipv4
 yard init --yes
+assert_outer_data_home_metadata restart-init
 assert_outer_vm_ssh_address restart-init
 
 printf '  [ .. ] syncing the exact candidate into the outer yard\n'
@@ -447,9 +463,34 @@ yard shell "$project_id" --yes -- true \
   || die 'inner teardown or agent data deletion broke outer SSH transport'
 
 printf '  [ .. ] tearing down the outer yard and checking the default pool\n'
+outer_config="$SUBYARD_OPERATOR_HOME/.ssh/config"
+outer_include="Include subyard-$OUTER_YARD.config"
+grep -qxF "$outer_include" "$outer_config" \
+  || die 'outer SSH config is missing the managed Include before teardown'
+teardown_canary="$STATE/teardown-config-tmp-canary"
+sudo -n install -o root -g root -m 0600 /dev/null "$teardown_canary"
+printf 'teardown config.tmp canary\n' | sudo -n tee "$teardown_canary" >/dev/null
+teardown_canary_digest="$(sudo -n sha256sum "$teardown_canary" | awk '{print $1}')"
+teardown_canary_metadata="$(stat -c '%u:%g:%a' "$teardown_canary")"
+operator_user="$(stat -c '%U' "$outer_config")"
+[ "$operator_user" != UNKNOWN ] || die 'could not resolve the outer SSH config owner'
+legacy_config_tmp="$outer_config.tmp"
+sudo -n -u "$operator_user" -- ln -s "$teardown_canary" "$legacy_config_tmp"
+
 yard teardown --yes
 ! incus project show "$OUTER_PROJECT" >/dev/null 2>&1 \
   || die 'outer project remains after teardown'
+[ "$(sudo -n sha256sum "$teardown_canary" | awk '{print $1}')" = "$teardown_canary_digest" ] \
+  && [ "$(stat -c '%u:%g:%a' "$teardown_canary")" = "$teardown_canary_metadata" ] \
+  || die 'outer teardown changed the root-owned config.tmp canary'
+! grep -qxF "$outer_include" "$outer_config" \
+  || die 'outer teardown retained the managed SSH Include'
+[ "$(stat -c %u "$outer_config")" != 0 ] \
+  && [ "$(stat -c %u "$SUBYARD_OPERATOR_HOME/.ssh/.subyard-config.lock")" != 0 ] \
+  || die 'outer teardown left the SSH config or lock root-owned'
+[ -L "$legacy_config_tmp" ] && [ "$(readlink "$legacy_config_tmp")" = "$teardown_canary" ] \
+  || die 'outer teardown changed the legacy config.tmp symlink'
+sudo -n -u "$operator_user" -- rm -f -- "$legacy_config_tmp"
 remove_owned_outer_backend || die 'could not remove the marker-owned outer backend'
 assert_default_pool_unchanged
 assert_host_network_unchanged

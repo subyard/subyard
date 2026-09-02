@@ -126,6 +126,30 @@ grep -Fq '.subyard-snippet.XXXXXX' "$access_script" \
 teardown_script="$ROOT/scripts/teardown-physical.sh"
 ! grep -Eq 'rm .*(id_ed25519|/ssh(["[:space:]]|$))' "$teardown_script" \
   || fail 'teardown removes the shared transport identity'
+legacy_config_tmp_pattern="\$cfg.tmp"
+typed_ssh_dir="sshdir=\"\$SUBYARD_OPERATOR_HOME/.ssh\""
+typed_ssh_paths="snip=\"\$sshdir/\$YARD_SNIP\"; cfg=\"\$sshdir/config\""
+root_snippet_remove="rm -f \"\$snip\""
+remove_helper_call="rm -f -- \"\$2\" && ssh_config_remove_exact \"\$3\" \"\$4\""
+operator_identity_drop="sudo -n -u \"\$OPERATOR_USER\" -- bash -c"
+positional_helper_arguments="subyard-ssh-config \"\$SCRIPT_DIR/lib/ssh-config.sh\" \"\$snip\" \"\$cfg\" \"Include \$YARD_SNIP\""
+! grep -Fq "$legacy_config_tmp_pattern" "$teardown_script" \
+  || fail 'teardown still writes or renames through predictable config.tmp'
+if ! grep -Fq "$typed_ssh_dir" "$teardown_script" \
+  || ! grep -Fq "$typed_ssh_paths" "$teardown_script"; then
+  fail 'teardown does not use the typed operator home for SSH cleanup'
+fi
+! grep -Fq 'OPERATOR_HOME=' "$teardown_script" \
+  || fail 'teardown recomputes the typed operator home from passwd'
+! grep -Fq "$root_snippet_remove" "$teardown_script" \
+  || fail 'teardown root still removes the operator SSH snippet'
+grep -Fq "$remove_helper_call" "$teardown_script" \
+  || fail 'teardown does not remove the snippet and Include in one operator child'
+grep -Fq "$operator_identity_drop" "$teardown_script" \
+  || fail 'teardown does not drop non-interactively to the operator for SSH cleanup'
+grep -Fq "$positional_helper_arguments" \
+  "$teardown_script" \
+  || fail 'teardown does not pass both operator SSH paths positionally'
 grep -Fq ': "${FORWARD_SSH_AGENT:=0}"' "$ROOT/config/subyard.env" \
   || fail 'ssh-agent forwarding is not opt-in by default'
 

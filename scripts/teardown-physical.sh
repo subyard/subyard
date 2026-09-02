@@ -15,8 +15,6 @@ subyard_require_engine_context
 . "$SCRIPT_DIR/lib/ssh-config.sh"
 
 OPERATOR_USER="${SUBYARD_USER:-${SUDO_USER:-${USER:-root}}}"
-OPERATOR_HOME="$(getent passwd "$OPERATOR_USER" | cut -d: -f6)"
-[ -n "$OPERATOR_HOME" ] || OPERATOR_HOME="$HOME"
 OPERATOR_GROUP="$(id -gn "$OPERATOR_USER" 2>/dev/null || printf '%s\n' "$OPERATOR_USER")"
 
 INCUS_PROJECT="${INCUS_PROJECT:-subyard}"
@@ -142,13 +140,15 @@ if command -v ufw >/dev/null 2>&1 && [ "$bridge_gone" = 1 ]; then
 elif command -v ufw >/dev/null 2>&1; then
   ok "kept ufw rules for '$BRIDGE' (bridge still exists — shared with other yards)"
 fi
-snip="$OPERATOR_HOME/.ssh/$YARD_SNIP"; cfg="$OPERATOR_HOME/.ssh/config"
-rm -f "$snip" && ok "removed ~/.ssh/$YARD_SNIP (if present)"
-if [ -f "$cfg" ] && grep -qxF "Include $YARD_SNIP" "$cfg"; then
-  grep -vxF "Include $YARD_SNIP" "$cfg" > "$cfg.tmp" && mv -f "$cfg.tmp" "$cfg"
-  chown "$OPERATOR_USER:$OPERATOR_GROUP" "$cfg" 2>/dev/null || true
-  ok "removed 'Include $YARD_SNIP' from ~/.ssh/config"
+sshdir="$SUBYARD_OPERATOR_HOME/.ssh"
+snip="$sshdir/$YARD_SNIP"; cfg="$sshdir/config"
+if ! sudo -n -u "$OPERATOR_USER" -- bash -c \
+  '. "$1"; rm -f -- "$2" && ssh_config_remove_exact "$3" "$4"' \
+  subyard-ssh-config "$SCRIPT_DIR/lib/ssh-config.sh" "$snip" "$cfg" "Include $YARD_SNIP"; then
+  die "could not remove this yard's operator SSH config"
 fi
+ok "removed ~/.ssh/$YARD_SNIP (if present)"
+ok "removed 'Include $YARD_SNIP' from ~/.ssh/config (if present)"
 known="$SUBYARD_HOME/ssh/known_hosts"
 if [ -f "$known" ] && [ -n "${SSH_PORT:-}" ]; then
   ssh_known_host_remove "$known" "[127.0.0.1]:$SSH_PORT" "$OPERATOR_USER" "$OPERATOR_GROUP" \
