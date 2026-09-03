@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -11,13 +12,17 @@ import (
 )
 
 // YardNames returns the configured yard names without evaluating their files.
-// The default context is always first; duplicate private/user entries collapse.
-func YardNames(directories ...string) ([]string, error) {
-	seen := map[string]struct{}{"default": {}}
-	names := []string{"default"}
-	var discovered []string
-	for _, directory := range directories {
-		entries, err := os.ReadDir(directory)
+// The default context is always first; duplicate private/installed entries collapse.
+func YardNames(configDir, configHome string) ([]string, error) {
+	seen := map[string]struct{}{}
+	for _, root := range []struct {
+		directory   string
+		allowNested bool
+	}{
+		{directory: filepath.Join(configDir, "..", "private", "yards")},
+		{directory: filepath.Join(configHome, "yards"), allowNested: true},
+	} {
+		entries, err := os.ReadDir(root.directory)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
@@ -26,25 +31,36 @@ func YardNames(directories ...string) ([]string, error) {
 		}
 		for _, entry := range entries {
 			name := ""
-			if entry.IsDir() {
-				if info, statErr := os.Lstat(filepath.Join(directory, entry.Name(), "config.env")); statErr == nil && info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 {
-					name = entry.Name()
-				}
+			if root.allowNested && entry.IsDir() {
+				name = entry.Name()
 			} else if strings.HasSuffix(entry.Name(), ".env") {
 				name = strings.TrimSuffix(entry.Name(), ".env")
 			}
 			if name == "" || !domain.SafeName(name) {
 				continue
 			}
-			if _, exists := seen[name]; exists {
-				continue
-			}
 			seen[name] = struct{}{}
-			discovered = append(discovered, name)
 		}
 	}
+	discovered := make([]string, 0, len(seen))
+	for name := range seen {
+		if name == "default" {
+			continue
+		}
+		discovered = append(discovered, name)
+	}
 	sort.Strings(discovered)
-	return append(names, discovered...), nil
+	names := []string{"default"}
+	for _, name := range discovered {
+		if _, err := FindYardRegistrationFile(configDir, configHome, name); err != nil {
+			if errors.Is(err, ErrUnknownYard) {
+				continue
+			}
+			return nil, err
+		}
+		names = append(names, name)
+	}
+	return names, nil
 }
 
 func YardFileCandidates(configDir, configHome, name string) []string {
@@ -55,9 +71,40 @@ func YardFileCandidates(configDir, configHome, name string) []string {
 	}
 }
 
-func RegistryDirectories(configDir, configHome string) []string {
-	return []string{
-		filepath.Join(configDir, "..", "private", "yards"),
-		filepath.Join(configHome, "yards"),
+// FindYardRegistrationFile returns the highest-precedence regular,
+// non-symlink definition for a named yard.
+func FindYardRegistrationFile(configDir, configHome, name string) (string, error) {
+	if name == "default" || !domain.SafeName(name) {
+		return "", fmt.Errorf("%w %q", ErrUnknownYard, name)
 	}
+	return findFirstYardFile(YardFileCandidates(configDir, configHome, name), name)
+}
+
+func findFirstYardFile(candidates []string, name string) (string, error) {
+	for _, candidate := range candidates {
+		if filepath.Base(candidate) == "config.env" {
+			info, err := os.Lstat(filepath.Dir(candidate))
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				return "", err
+			}
+			if !info.Mode().IsDir() {
+				continue
+			}
+		}
+		info, err := os.Lstat(candidate)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		return candidate, nil
+	}
+	return "", fmt.Errorf("%w %q", ErrUnknownYard, name)
 }

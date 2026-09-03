@@ -585,10 +585,9 @@ func (cli *CLI) writeConfigSyncFollowups(
 }
 
 func (cli *CLI) configSyncLocalYards(loaded config.Loaded) []string {
-	directories := config.RegistryDirectories(
+	names, err := config.YardNames(
 		loaded.Context.Paths.ConfigDir, loaded.Context.Paths.ConfigHome,
 	)
-	names, err := config.YardNames(directories...)
 	if err != nil {
 		return []string{"default"}
 	}
@@ -960,36 +959,14 @@ func (cli *CLI) localConfigTargets(loaded config.Loaded, allLocal bool) ([]confi
 	if !allLocal {
 		return []configTarget{{Name: loaded.Context.YardName, Loaded: loaded}}, nil
 	}
-	names := map[string]struct{}{"default": {}}
-	yardsRoot := filepath.Join(loaded.Context.Paths.ConfigHome, "yards")
-	entries, err := os.ReadDir(yardsRoot)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
+	names, err := config.YardNames(
+		loaded.Context.Paths.ConfigDir, loaded.Context.Paths.ConfigHome,
+	)
+	if err != nil {
 		return nil, err
 	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() {
-			if domain.SafeName(name) {
-				if info, statErr := os.Lstat(filepath.Join(yardsRoot, name, "config.env")); statErr == nil && info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 {
-					names[name] = struct{}{}
-				}
-			}
-			continue
-		}
-		if filepath.Ext(name) == ".env" {
-			legacy := strings.TrimSuffix(name, ".env")
-			if domain.SafeName(legacy) {
-				names[legacy] = struct{}{}
-			}
-		}
-	}
-	sorted := make([]string, 0, len(names))
-	for name := range names {
-		sorted = append(sorted, name)
-	}
-	sort.Strings(sorted)
-	targets := make([]configTarget, 0, len(sorted))
-	for _, name := range sorted {
+	targets := make([]configTarget, 0, len(names))
+	for _, name := range names {
 		targetLoaded, err := cli.loadInventoryLoaded(name, loaded)
 		if err != nil {
 			return nil, fmt.Errorf("yard %s: %w", name, err)

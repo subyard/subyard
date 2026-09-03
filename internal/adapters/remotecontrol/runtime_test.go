@@ -46,6 +46,27 @@ func TestLookupAndListReadRegistryAndCache(t *testing.T) {
 	}
 }
 
+func TestLookupFallsBackFromSymlinkedHigherPrecedenceEntry(t *testing.T) {
+	runtime := remoteFixture(t)
+	target := filepath.Join(t.TempDir(), "target.env")
+	writeRemoteFile(t, target, "ACCESS_KIND=remote\nOWNER_ENDPOINT=unsafe.example\n", 0o600)
+	nested := filepath.Join(runtime.ConfigHome, "yards", "demo", "config.env")
+	if err := os.MkdirAll(filepath.Dir(nested), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, nested); err != nil {
+		t.Fatal(err)
+	}
+	privateFlat := filepath.Join(runtime.ConfigDir, "..", "private", "yards", "demo.env")
+	writeRemoteFile(t, privateFlat, "ACCESS_KIND=remote\nOWNER_ENDPOINT=owner.example\n", 0o600)
+
+	record, exists, err := runtime.Lookup(context.Background(), "demo")
+	if err != nil || !exists || record.Path != privateFlat ||
+		record.Spec.OwnerEndpoint != "owner.example" {
+		t.Fatalf("unexpected fallback lookup: record=%#v exists=%v err=%v", record, exists, err)
+	}
+}
+
 func TestApplyAddWritesIsolatedContextAndVerifiesPinnedKey(t *testing.T) {
 	runtime := remoteFixture(t)
 	writeRemoteFile(t, runtime.sshConfigPath(), "Host local\n", 0o600)

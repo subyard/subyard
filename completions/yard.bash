@@ -20,34 +20,57 @@ _yard_profiles() {
   for f in "$d"/*/profile.conf; do [ -r "$f" ] && basename "$(dirname "$f")"; done
 }
 
-# Registry yard names: 'default' plus the basename of every *.env under private/yards/ and
-# ~/.config/subyard/yards/ — read cheaply in the shell (NEVER invoke incus). $2, if set, is a
-# prefix emitted before each name (e.g. '@' for the first-token sugar). Mirrors registry.sh's
-# Keep discovery aligned with the CLI yard registry.
+# Registry yard names come from the CLI. The compatibility fallback mirrors its supported
+# private-flat and installed nested/flat layouts without following symlinks. $2, if set, is a
+# prefix emitted before each name (e.g. '@' for the first-token sugar).
 _yard_yards() {
-  local repo pfx="${2:-}" d f n home inventory
+  local config_dir private_dir pfx="${2:-}" entry kind f n home inventory parent emitted=$'\ndefault\n'
+  local -a files=()
   if inventory="$("${1:-yard}" list --complete-yards 2>/dev/null)" && [ -n "$inventory" ]; then
     while IFS= read -r n; do printf '%s%s\n' "$pfx" "$n"; done <<<"$inventory"
     return 0
   fi
   printf '%s%s\n' "$pfx" default
-  repo="$(_yard_repo "$1")" || return 0
-  local dirs=( "$repo/private/yards" )
+  config_dir="$(_yard_config_dir "$1")" || config_dir=""
+  if [ -n "$config_dir" ]; then
+    private_dir="$(dirname "$config_dir")/private/yards"
+    for f in "$private_dir"/*.env; do files+=( "flat:$f" ); done
+  fi
   home="$(_yard_config_home "$1")" || home=""
-  [ -n "$home" ] && dirs+=( "$home/yards" )
-  for d in "${dirs[@]}"; do
-    [ -d "$d" ] || continue
-    for f in "$d"/*.env; do
-      [ -e "$f" ] || continue
-      n="$(basename "$f" .env)"; printf '%s%s\n' "$pfx" "$n"
-    done
+  if [ -n "$home" ]; then
+    for f in "$home/yards"/*.env; do files+=( "flat:$f" ); done
+    for f in "$home/yards"/*/config.env; do files+=( "nested:$f" ); done
+  fi
+  for entry in "${files[@]}"; do
+    kind="${entry%%:*}"
+    f="${entry#*:}"
+    if [ ! -f "$f" ] || [ -L "$f" ]; then continue; fi
+    if [ "$kind" = nested ]; then
+      parent="$(dirname "$f")"
+      [ ! -L "$parent" ] || continue
+      n="$(basename "$parent")"
+    else
+      n="$(basename "$f" .env)"
+    fi
+    case "$n" in ""|*[!a-z0-9_-]*|[!a-z0-9]*) continue ;; esac
+    case "$emitted" in *$'\n'"$n"$'\n'*) continue ;; esac
+    emitted+="$n"$'\n'
+    printf '%s%s\n' "$pfx" "$n"
   done
+}
+
+# Shipped config root: honor the same environment override as the native loader.
+_yard_config_dir() {
+  if [ -n "${SUBYARD_CONFIG_DIR:-}" ]; then printf '%s\n' "$SUBYARD_CONFIG_DIR"; return 0; fi
+  local repo; repo="$(_yard_repo "$1")" || return 1
+  printf '%s\n' "$repo/config"
 }
 
 # Host-side state home: honor an explicit override, else derive the same default as
 # config/host.env (so completion and the CLI can never disagree on where state lives).
 _yard_config_home() {
   if [ -n "${SUBYARD_CONFIG_HOME:-}" ]; then printf '%s\n' "$SUBYARD_CONFIG_HOME"; return 0; fi
+  if [ -n "${XDG_CONFIG_HOME:-}" ]; then printf '%s/subyard\n' "$XDG_CONFIG_HOME"; return 0; fi
   local repo; repo="$(_yard_repo "$1")" || return 1
   [ -r "$repo/config/host.env" ] || return 1
   ( . "$repo/config/host.env" >/dev/null 2>&1; printf '%s\n' "${SUBYARD_CONFIG_HOME:-}" )

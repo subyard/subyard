@@ -476,6 +476,38 @@ func TestInitProfileReusesSupportedLegacyDefinition(t *testing.T) {
 	}
 }
 
+func TestInitProfileReusesPrivateDefinitionFromEffectiveConfigDir(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	environment = withoutCommandSetting(environment, "SSH_PORT")
+	preset := filepath.Join(root, "config", "profiles", "hermes", "yard.env")
+	if err := os.MkdirAll(filepath.Dir(preset), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	content := "ENVIRONMENT_PROFILES=hermes\nAGENTS=codex\nSSH_PORT=2234\n"
+	writeCLIFile(t, preset, content, 0o600)
+	alternateConfig := filepath.Join(root, "installed", "config")
+	environment = append(environment, "SUBYARD_CONFIG_DIR="+alternateConfig)
+	legacy := filepath.Join(root, "installed", "private", "yards", "custom-name.env")
+	if err := os.MkdirAll(filepath.Dir(legacy), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, legacy, content, 0o600)
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, bootstrap, err := program.loadInitContext(
+		"custom-name", true, []string{"--profile", "hermes"},
+	)
+	if err != nil || bootstrap != nil || loaded.Environment["CODING_TOOL_INTEGRATIONS"] != "codex" {
+		t.Fatalf("effective private definition was not reused: loaded=%#v bootstrap=%#v err=%v",
+			loaded.Environment, bootstrap, err)
+	}
+}
+
 func TestInitProfileRejectsRemoteContextBeforeBootstrap(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	environment = withoutCommandSetting(environment, "SSH_PORT")

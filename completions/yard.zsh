@@ -20,27 +20,53 @@ _yard_profiles() {
   print -r -l -- $profiles
 }
 
-# Registry yard names: 'default' plus every *.env basename under private/yards/ and
-# ~/.config/subyard/yards/ — read cheaply in the shell (NEVER invoke incus). Mirrors registry.sh's
-# Keep discovery aligned with the CLI yard registry.
+# Registry yard names come from the CLI. The compatibility fallback mirrors its supported
+# private-flat and installed nested/flat layouts without following symlinks.
 _yard_yards() {
-  local repo home d f inventory
-  local -a names dirs
+  local config_dir private_dir home entry kind f n parent inventory
+  local -a names files
+  local -A seen
   inventory="$(yard list --complete-yards 2>/dev/null)"
   if [[ -n $inventory ]]; then
     print -r -- "$inventory"
     return 0
   fi
   names=( default )
-  repo="$(_yard_repo)" || repo=""
-  [[ -n $repo ]] && dirs=( "$repo/private/yards" )
+  seen[default]=1
+  config_dir="$(_yard_config_dir)" || config_dir=""
+  if [[ -n $config_dir ]]; then
+    private_dir="${config_dir:h}/private/yards"
+    for f in $private_dir/*.env(N); do files+=( "flat:$f" ); done
+  fi
   home="$(_yard_config_home)" || home=""
-  [[ -n $home ]] && dirs+=( "$home/yards" )
-  for d in $dirs; do
-    [[ -d $d ]] || continue
-    for f in $d/*.env(N); do names+=( ${f:t:r} ); done
+  if [[ -n $home ]]; then
+    for f in $home/yards/*.env(N); do files+=( "flat:$f" ); done
+    for f in $home/yards/*/config.env(N); do files+=( "nested:$f" ); done
+  fi
+  for entry in $files; do
+    kind=${entry%%:*}
+    f=${entry#*:}
+    [[ -f $f && ! -L $f ]] || continue
+    if [[ $kind == nested ]]; then
+      parent=${f:h}
+      [[ ! -L $parent ]] || continue
+      n=${parent:t}
+    else
+      n=${f:t:r}
+    fi
+    case "$n" in ""|*[!a-z0-9_-]*|[!a-z0-9]*) continue ;; esac
+    [[ -z ${seen[$n]:-} ]] || continue
+    seen[$n]=1
+    names+=( $n )
   done
-  print -r -l -- ${(u)names}
+  print -r -l -- $names
+}
+
+# Shipped config root: honor the same environment override as the native loader.
+_yard_config_dir() {
+  if [[ -n ${SUBYARD_CONFIG_DIR:-} ]]; then print -r -- "$SUBYARD_CONFIG_DIR"; return 0; fi
+  local repo; repo="$(_yard_repo)" || return 1
+  print -r -- "$repo/config"
 }
 
 # _arguments action: complete a yard name for -Y/--yard.
@@ -53,6 +79,7 @@ _yard_yard_names() {
 # config/host.env (so completion and the CLI agree on where state lives).
 _yard_config_home() {
   if [[ -n ${SUBYARD_CONFIG_HOME:-} ]]; then print -r -- "$SUBYARD_CONFIG_HOME"; return 0; fi
+  if [[ -n ${XDG_CONFIG_HOME:-} ]]; then print -r -- "$XDG_CONFIG_HOME/subyard"; return 0; fi
   local repo; repo="$(_yard_repo)" || return 1
   [[ -r $repo/config/host.env ]] || return 1
   ( source "$repo/config/host.env" >/dev/null 2>&1; print -r -- "${SUBYARD_CONFIG_HOME:-}" )

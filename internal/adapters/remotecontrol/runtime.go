@@ -34,17 +34,12 @@ func (runtime Runtime) Lookup(_ context.Context, name string) (domain.RemoteReco
 	if name == "default" {
 		return domain.RemoteRecord{Spec: domain.RemoteSpec{LegacyAlias: name}}, true, nil
 	}
-	var path string
-	for _, candidate := range config.YardFileCandidates(runtime.ConfigDir, runtime.ConfigHome, name) {
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			path = candidate
-			break
-		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return domain.RemoteRecord{}, false, err
-		}
-	}
-	if path == "" {
+	path, err := config.FindYardRegistrationFile(runtime.ConfigDir, runtime.ConfigHome, name)
+	if errors.Is(err, config.ErrUnknownYard) {
 		return domain.RemoteRecord{}, false, nil
+	}
+	if err != nil {
+		return domain.RemoteRecord{}, false, err
 	}
 	values, err := config.ReadAssignments(path)
 	if err != nil {
@@ -67,7 +62,7 @@ func (runtime Runtime) Lookup(_ context.Context, name string) (domain.RemoteReco
 }
 
 func (runtime Runtime) List(ctx context.Context) ([]domain.RemoteRecord, error) {
-	names, err := config.YardNames(config.RegistryDirectories(runtime.ConfigDir, runtime.ConfigHome)...)
+	names, err := config.YardNames(runtime.ConfigDir, runtime.ConfigHome)
 	if err != nil {
 		return nil, err
 	}

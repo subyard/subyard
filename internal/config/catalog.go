@@ -298,7 +298,7 @@ func agentSettingDefinition(name string) (SettingDefinition, bool) {
 	}
 	for _, suffix := range []string{
 		"_CONFIG_DEST", "_RULES_DEST", "_COMMAND", "_CONFIG", "_PERSIST",
-		"_PROJECTS_CHANGED", "_PROVISION", "_RULES", "_CHECK",
+		"_PROJECTS_CHANGED", "_PROVISION", "_DEPENDS", "_RULES", "_CHECK",
 	} {
 		agent, found := strings.CutSuffix(strings.TrimPrefix(name, "AGENT_"), suffix)
 		if !found || !domain.SafeName(agent) {

@@ -870,36 +870,30 @@ func environmentFrom(explicit map[string]string) environment {
 // FindYardSettingsFile returns the highest-precedence supported definition for
 // a named yard.
 func FindYardSettingsFile(root, name, configHome string) (string, error) {
-	return findYardFileAt(root, name, configHome, nil)
+	return FindYardRegistrationFile(filepath.Join(root, "config"), configHome, name)
 }
 
 func findYardFile(root, name string, values environment, explicit []string) (string, error) {
+	if len(explicit) == 0 {
+		return FindYardRegistrationFile(
+			values["SUBYARD_CONFIG_DIR"], values["SUBYARD_CONFIG_HOME"], name,
+		)
+	}
 	return findYardFileAt(root, name, values["SUBYARD_CONFIG_HOME"], explicit)
 }
 
 func findYardFileAt(root, name, configHome string, explicit []string) (string, error) {
+	if len(explicit) == 0 {
+		return FindYardRegistrationFile(filepath.Join(root, "config"), configHome, name)
+	}
 	var candidates []string
-	if len(explicit) != 0 {
-		for _, directory := range explicit {
-			candidates = append(candidates,
-				filepath.Join(directory, name, "config.env"),
-				filepath.Join(directory, name+".env"),
-			)
-		}
-	} else {
-		privateYards := filepath.Join(root, "private", "yards")
-		candidates = []string{
-			filepath.Join(configHome, "yards", name, "config.env"),
-			privateYards + string(filepath.Separator) + name + ".env",
-			filepath.Join(configHome, "yards", name+".env"),
-		}
+	for _, directory := range explicit {
+		candidates = append(candidates,
+			filepath.Join(directory, name, "config.env"),
+			filepath.Join(directory, name+".env"),
+		)
 	}
-	for _, candidate := range candidates {
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			return candidate, nil
-		}
-	}
-	return "", fmt.Errorf("%w %q", ErrUnknownYard, name)
+	return findFirstYardFile(candidates, name)
 }
 
 func applyYardDerivations(

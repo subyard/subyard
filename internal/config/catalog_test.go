@@ -39,7 +39,8 @@ func TestPublicSettingsExampleCoversStaticCatalog(t *testing.T) {
 	for _, pattern := range []string{
 		"AGENT_<name>_CONFIG", "AGENT_<name>_RULES", "AGENT_<name>_CONFIG_DEST",
 		"AGENT_<name>_RULES_DEST", "AGENT_<name>_PROVISION", "AGENT_<name>_COMMAND",
-		"AGENT_<name>_CHECK", "AGENT_<name>_PROJECTS_CHANGED", "AGENT_<name>_PERSIST",
+		"AGENT_<name>_CHECK", "AGENT_<name>_PROJECTS_CHANGED", "AGENT_<name>_DEPENDS",
+		"AGENT_<name>_PERSIST",
 	} {
 		if !strings.Contains(string(content), pattern) {
 			t.Errorf("public settings example is missing dynamic pattern %s", pattern)
@@ -101,5 +102,28 @@ func TestCodexReleasePinsAreTypedYardInitSettings(t *testing.T) {
 		if definition.Application != SettingYardInit || !definition.Syncable {
 			t.Errorf("%s must be a syncable yard-init setting", name)
 		}
+	}
+}
+
+func TestAgentDependencySettingAcceptsDeclaredScopes(t *testing.T) {
+	const name = "AGENT_paseo_DEPENDS"
+	for _, scope := range []SettingScope{ScopeShipped, ScopeHost, ScopeYard, ScopeCommand} {
+		if err := ValidateSetting(scope, name, "codex opencode", false); err != nil {
+			t.Errorf("ValidateSetting(%s, %s) returned %v", scope, name, err)
+		}
+	}
+	if err := ValidateSetting(ScopeShared, name, "codex", false); err == nil {
+		t.Error("shared dependency override was accepted")
+	}
+	if err := ValidateSetting(ScopeHost, name, "../codex", false); err == nil {
+		t.Error("unsafe dependency ID was accepted")
+	}
+
+	definition, err := ValidateSettingName(ScopeHost, name, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if definition.Type != SettingNameList || definition.Application != SettingYardInit || definition.Syncable {
+		t.Fatalf("unexpected dependency definition: %+v", definition)
 	}
 }

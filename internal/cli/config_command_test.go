@@ -24,6 +24,7 @@ import (
 
 func TestConfigPathsShowsEffectiveLayersWithoutValues(t *testing.T) {
 	root, home, configHome, environment := configCommandFixture(t)
+	configDir := loadConfigCommandContext(t, root, environment, "default").Context.Paths.ConfigDir
 	hostRule := filepath.Join(configHome, "overrides", "host", "agents", "codex", "rules", "repo.rules")
 	writeConfigCommandFile(t, hostRule, "private-canary-value\n")
 	writeConfigCommandFile(t, filepath.Join(configHome, "config.env"),
@@ -41,7 +42,7 @@ func TestConfigPathsShowsEffectiveLayersWithoutValues(t *testing.T) {
 	}
 	output := stdout.String()
 	for _, expected := range []string{
-		"shipped-defaults: " + filepath.Join(root, "config"),
+		"shipped-defaults: " + configDir,
 		"configuration-root: " + configHome,
 		"source host-scalar-settings: " + filepath.Join(configHome, "config.env") + " (present)",
 		"file-setting codex.rules: " + hostRule + " (scope=host, role=file settings, consumer=",
@@ -161,9 +162,12 @@ func TestConfigStatusAndApplyAllLocalExcludeRemoteYards(t *testing.T) {
 		"SSH_PORT=3333\n")
 	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "remote", "config.env"),
 		"ACCESS_KIND=remote\nREMOTE_DEST=owner.example\nREMOTE_YARD=inner\nSSH_PORT=4444\n")
-
 	defaultLoaded := loadConfigCommandContext(t, root, environment, "default")
+	writeConfigCommandFile(t, filepath.Join(
+		defaultLoaded.Context.Paths.ConfigDir, "..", "private", "yards", "private.env",
+	), "SSH_PORT=5555\n")
 	namedLoaded := loadConfigCommandContext(t, root, environment, "named")
+	privateLoaded := loadConfigCommandContext(t, root, environment, "private")
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
 		defaultLoaded.Context.IncusProject + "/" + defaultLoaded.Context.YardInstanceName: {
 			Name: defaultLoaded.Context.YardInstanceName, Project: defaultLoaded.Context.IncusProject,
@@ -173,9 +177,14 @@ func TestConfigStatusAndApplyAllLocalExcludeRemoteYards(t *testing.T) {
 			Name: namedLoaded.Context.YardInstanceName, Project: namedLoaded.Context.IncusProject,
 			Status: "Running",
 		},
+		privateLoaded.Context.IncusProject + "/" + privateLoaded.Context.YardInstanceName: {
+			Name: privateLoaded.Context.YardInstanceName, Project: privateLoaded.Context.IncusProject,
+			Status: "Running",
+		},
 	}}
 	appendHashSteps(t, fake, defaultLoaded)
 	appendHashSteps(t, fake, namedLoaded)
+	appendHashSteps(t, fake, privateLoaded)
 	var stdout, stderr bytes.Buffer
 	program, err := New(Options{
 		RepositoryRoot: root, Program: "yard",
@@ -191,6 +200,7 @@ func TestConfigStatusAndApplyAllLocalExcludeRemoteYards(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "yard default materialized-config: converged") ||
 		!strings.Contains(stdout.String(), "yard named materialized-config: converged") ||
+		!strings.Contains(stdout.String(), "yard private materialized-config: converged") ||
 		strings.Contains(stdout.String(), "yard remote materialized-config:") {
 		t.Fatalf("all-local selection is wrong:\n%s", stdout.String())
 	}
@@ -198,6 +208,7 @@ func TestConfigStatusAndApplyAllLocalExcludeRemoteYards(t *testing.T) {
 	fake.ExecSteps = nil
 	appendHashSteps(t, fake, defaultLoaded)
 	appendHashSteps(t, fake, namedLoaded)
+	appendHashSteps(t, fake, privateLoaded)
 	applier := &recordingConfigApplier{}
 	stdout.Reset()
 	stderr.Reset()
@@ -3296,16 +3307,21 @@ func configCommandFixture(t *testing.T) (string, string, string, []string) {
 	temp := t.TempDir()
 	home := filepath.Join(temp, "home")
 	configHome := filepath.Join(home, ".config", "subyard")
-	for _, directory := range []string{home, configHome} {
+	configDir := filepath.Join(temp, "source", "config")
+	for _, directory := range []string{home, configHome, filepath.Dir(configDir)} {
 		if err := os.MkdirAll(directory, 0o700); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := os.Symlink(filepath.Join(root, "config"), configDir); err != nil {
+		t.Fatal(err)
 	}
 	writeConfigCommandFile(t, filepath.Join(configHome, "config.env"), "")
 	environment := []string{
 		"HOME=" + home,
 		"SUBYARD_OPERATOR_HOME=" + home,
 		"SUBYARD_CONFIG_HOME=" + configHome,
+		"SUBYARD_CONFIG_DIR=" + configDir,
 		"SUBYARD_HOME=" + filepath.Join(home, ".subyard"),
 		"SUBYARD_NO_AUDIT=1",
 	}

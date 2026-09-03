@@ -73,9 +73,9 @@ func (source cliOwnerSource) HostID(context.Context) (string, error) {
 }
 
 func (source cliOwnerSource) Yards(context.Context) ([]domain.Context, error) {
-	names, err := config.YardNames(config.RegistryDirectories(
+	names, err := config.YardNames(
 		source.loaded.Context.Paths.ConfigDir, source.loaded.Context.Paths.ConfigHome,
-	)...)
+	)
 	if err != nil {
 		return nil, err
 	}

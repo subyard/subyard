@@ -72,6 +72,12 @@ project_selectors="$({
 # fallback must still emit safe, working project-first selectors instead of greedy JSON tails.
 mkdir -p "$CLI_TMP/config/projects" "$CLI_TMP/config/yards/dev/projects"
 printf '%s\n' 'fixture' >"$CLI_TMP/config/yards/dev.env"
+mkdir -p "$CLI_TMP/config/yards/nested" "$CLI_TMP/config/yards/directory.env"
+printf '%s\n' 'fixture' >"$CLI_TMP/config/yards/nested/config.env"
+printf '%s\n' 'fixture' >"$CLI_TMP/config/yards/default.env"
+printf '%s\n' 'fixture' >"$CLI_TMP/config/yards/config.env"
+printf '%s\n' 'fixture' >"$CLI_TMP/config/yards/bad name.env"
+ln -s "$CLI_TMP/config/yards/dev.env" "$CLI_TMP/config/yards/linked.env"
 printf '%s\n' 'CarbonX1' >"$CLI_TMP/config/host-id"
 printf '%s\n' \
   '{"schema":1,"projectId":"subyard-12345678","name":"Subyard","hostPath":"/host/Subyard","target":"yard"}' \
@@ -191,6 +197,16 @@ zsh_native_yards="$(TEST_ROOT="$ROOT" zsh -fc '
 [ "$zsh_native_yards" = $'default\nowner/dev' ] ||
   fail "Zsh native yard records were not preserved: $zsh_native_yards"
 
+bash_fallback_yards="$(TEST_ROOT="$ROOT" TEST_CONFIG_HOME="$CLI_TMP/config" bash -c '
+  yard() { return 2; }
+  source "$TEST_ROOT/completions/yard.bash"
+  _yard_repo() { return 1; }
+  _yard_config_home() { printf "%s\\n" "$TEST_CONFIG_HOME"; }
+  _yard_yards yard
+' | sort)"
+[ "$bash_fallback_yards" = $'config\ndefault\ndev\nnested' ] ||
+  fail "Bash fallback yard records were not filtered: $bash_fallback_yards"
+
 zsh_fallback_yards="$(TEST_ROOT="$ROOT" TEST_CONFIG_HOME="$CLI_TMP/config" zsh -fc '
   yard() { return 2 }
   source "$TEST_ROOT/completions/yard.zsh"
@@ -198,8 +214,88 @@ zsh_fallback_yards="$(TEST_ROOT="$ROOT" TEST_CONFIG_HOME="$CLI_TMP/config" zsh -
   _yard_config_home() { print -r -- "$TEST_CONFIG_HOME" }
   _yard_yards
 ' | sort)"
-[ "$zsh_fallback_yards" = $'default\ndev' ] ||
+[ "$zsh_fallback_yards" = $'config\ndefault\ndev\nnested' ] ||
   fail "Zsh fallback yard records were not preserved: $zsh_fallback_yards"
+
+# The fallback derives private registrations from the effective config directory, just like the
+# native registry. It must not silently switch back to the executable's repository root.
+mkdir -p "$CLI_TMP/alternate/private/yards" "$CLI_TMP/config-target/config" \
+  "$CLI_TMP/config-target/private/yards" "$CLI_TMP/unrelated/private/yards" \
+  "$CLI_TMP/empty-home"
+ln -s "$CLI_TMP/config-target/config" "$CLI_TMP/alternate/config"
+printf '%s\n' fixture >"$CLI_TMP/alternate/private/yards/wanted.env"
+printf '%s\n' fixture >"$CLI_TMP/config-target/private/yards/symlink-target.env"
+printf '%s\n' fixture >"$CLI_TMP/unrelated/private/yards/unrelated.env"
+for shell in bash zsh; do
+  alternate_yards="$(
+    if [ "$shell" = bash ]; then
+      TEST_ROOT="$ROOT" TEST_REPO="$CLI_TMP/unrelated" \
+        SUBYARD_CONFIG_DIR="$CLI_TMP/alternate/config" \
+        SUBYARD_CONFIG_HOME="$CLI_TMP/empty-home" bash -c '
+          yard() { return 2; }
+          source "$TEST_ROOT/completions/yard.bash"
+          _yard_repo() { printf "%s\\n" "$TEST_REPO"; }
+          _yard_yards yard
+        '
+    else
+      TEST_ROOT="$ROOT" TEST_REPO="$CLI_TMP/unrelated" \
+        SUBYARD_CONFIG_DIR="$CLI_TMP/alternate/config" \
+        SUBYARD_CONFIG_HOME="$CLI_TMP/empty-home" zsh -fc '
+          yard() { return 2 }
+          source "$TEST_ROOT/completions/yard.zsh"
+          _yard_repo() { print -r -- "$TEST_REPO" }
+          _yard_yards
+        '
+    fi
+  )"
+  [ "$alternate_yards" = $'default\nwanted' ] ||
+    fail "$shell fallback ignored SUBYARD_CONFIG_DIR: $alternate_yards"
+done
+
+# With no explicit Subyard state root, fallback completion follows the loader's XDG placement.
+for shell in bash zsh; do
+  if [ "$shell" = bash ]; then
+    xdg_config_home="$(
+      env -u SUBYARD_CONFIG_HOME -u SUBYARD_OPERATOR_HOME \
+        TEST_ROOT="$ROOT" HOME="$CLI_TMP/home" XDG_CONFIG_HOME="$CLI_TMP/xdg" bash -c '
+          source "$TEST_ROOT/completions/yard.bash"
+          _yard_repo() { printf "%s\\n" "$TEST_ROOT"; }
+          _yard_config_home yard
+        '
+    )"
+  else
+    xdg_config_home="$(
+      env -u SUBYARD_CONFIG_HOME -u SUBYARD_OPERATOR_HOME \
+        TEST_ROOT="$ROOT" HOME="$CLI_TMP/home" XDG_CONFIG_HOME="$CLI_TMP/xdg" zsh -fc '
+          source "$TEST_ROOT/completions/yard.zsh"
+          _yard_repo() { print -r -- "$TEST_ROOT" }
+          _yard_config_home
+        '
+    )"
+  fi
+  [ "$xdg_config_home" = "$CLI_TMP/xdg/subyard" ] ||
+    fail "$shell fallback ignored XDG_CONFIG_HOME: $xdg_config_home"
+
+  if [ "$shell" = bash ]; then
+    explicit_config_home="$(
+      SUBYARD_CONFIG_HOME="$CLI_TMP/explicit" XDG_CONFIG_HOME="$CLI_TMP/xdg" \
+        TEST_ROOT="$ROOT" bash -c '
+          source "$TEST_ROOT/completions/yard.bash"
+          _yard_config_home yard
+        '
+    )"
+  else
+    explicit_config_home="$(
+      SUBYARD_CONFIG_HOME="$CLI_TMP/explicit" XDG_CONFIG_HOME="$CLI_TMP/xdg" \
+        TEST_ROOT="$ROOT" zsh -fc '
+          source "$TEST_ROOT/completions/yard.zsh"
+          _yard_config_home
+        '
+    )"
+  fi
+  [ "$explicit_config_home" = "$CLI_TMP/explicit" ] ||
+    fail "$shell fallback did not prefer SUBYARD_CONFIG_HOME: $explicit_config_home"
+done
 
 zsh_fallback="$(TEST_ROOT="$ROOT" SUBYARD_CONFIG_HOME="$CLI_TMP/config" zsh -fc '
     yard() { return 2 }

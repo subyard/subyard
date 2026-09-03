@@ -2192,7 +2192,7 @@ func (cli *CLI) resolveLocalProject(
 }
 
 func (cli *CLI) projectStores(ctx context.Context, yard domain.Context) (map[string]ports.ProjectStore, error) {
-	names, err := config.YardNames(config.RegistryDirectories(yard.Paths.ConfigDir, yard.Paths.ConfigHome)...)
+	names, err := config.YardNames(yard.Paths.ConfigDir, yard.Paths.ConfigHome)
 	if err != nil {
 		return nil, err
 	}
@@ -2218,7 +2218,7 @@ func (cli *CLI) projectStores(ctx context.Context, yard domain.Context) (map[str
 func (cli *CLI) projectStoresReadOnly(
 	ctx context.Context, yard domain.Context,
 ) (map[string]ports.ProjectStore, error) {
-	names, err := config.YardNames(config.RegistryDirectories(yard.Paths.ConfigDir, yard.Paths.ConfigHome)...)
+	names, err := config.YardNames(yard.Paths.ConfigDir, yard.Paths.ConfigHome)
 	if err != nil {
 		return nil, err
 	}
