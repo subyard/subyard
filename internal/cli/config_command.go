@@ -48,7 +48,6 @@ type configDesiredSnapshot struct {
 
 type configDesiredAssetSnapshot struct {
 	Name        string `json:"name"`
-	Source      string `json:"source"`
 	Destination string `json:"destination"`
 	Scope       string `json:"scope,omitempty"`
 	Role        string `json:"role,omitempty"`
@@ -1243,7 +1242,7 @@ func (cli *CLI) assessConfigTarget(
 				return configTargetAssessment{}, fmt.Errorf("%s: %w", asset.Name, err)
 			}
 			desired.Assets = append(desired.Assets, configDesiredAssetSnapshot{
-				Name: asset.Name, Source: asset.Source, Destination: asset.Destination,
+				Name: asset.Name, Destination: asset.Destination,
 				Scope: asset.Scope, Role: asset.Role, DesiredHash: hostHash,
 			})
 			desiredHashes = append(desiredHashes, hostHash)

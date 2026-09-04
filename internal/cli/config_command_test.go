@@ -56,6 +56,58 @@ func TestConfigPathsShowsEffectiveLayersWithoutValues(t *testing.T) {
 	}
 }
 
+func TestConfigDesiredFingerprintIgnoresReleaseRootAlias(t *testing.T) {
+	root, _, _, environment := configCommandFixture(t)
+	loaded := loadConfigCommandContext(t, root, environment, "default")
+	aliasOne := filepath.Join(t.TempDir(), "release-one", "agents", "codex", "config.toml")
+	aliasTwo := filepath.Join(t.TempDir(), "release-two", "agents", "codex", "config.toml")
+	writeConfigCommandFile(t, aliasOne, "model = \"stable\"\n")
+	writeConfigCommandFile(t, aliasTwo, "model = \"stable\"\n")
+
+	targetFor := func(source string) configTarget {
+		targetLoaded := loaded
+		targetLoaded.Environment = make(map[string]string, len(loaded.Environment))
+		for name, value := range loaded.Environment {
+			targetLoaded.Environment[name] = value
+		}
+		targetLoaded.Environment["CODING_TOOL_INTEGRATIONS"] = "codex"
+		targetLoaded.Environment["AGENT_codex_CONFIG"] = source
+		targetLoaded.Environment["AGENT_codex_CONFIG_DEST"] = ".codex/config.toml"
+		targetLoaded.Environment["AGENT_codex_RULES"] = ""
+		return configTarget{Name: "default", Loaded: targetLoaded}
+	}
+	program, err := New(Options{
+		RepositoryRoot: root,
+		Environment:    environment,
+		Incus:          &testkit.Incus{Instances: map[string]ports.InstanceInfo{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := program.assessConfigTarget(context.Background(), targetFor(aliasOne), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := program.assessConfigTarget(context.Background(), targetFor(aliasTwo), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.DesiredFingerprint != second.DesiredFingerprint {
+		t.Fatalf("same asset bytes through release aliases produced fingerprints %q and %q",
+			first.DesiredFingerprint, second.DesiredFingerprint)
+	}
+
+	writeConfigCommandFile(t, aliasTwo, "model = \"changed\"\n")
+	changed, err := program.assessConfigTarget(context.Background(), targetFor(aliasTwo), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.DesiredFingerprint == changed.DesiredFingerprint {
+		t.Fatal("changed asset bytes did not change the desired fingerprint")
+	}
+}
+
 func TestConfigShowExplainsScalarDerivedAndFileSettingsWithoutSecrets(t *testing.T) {
 	root, _, configHome, environment := configCommandFixture(t)
 	hostRule := filepath.Join(

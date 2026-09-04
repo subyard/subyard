@@ -115,8 +115,24 @@ func (cli *CLI) runReleaseTransitionYardCommand(
 	output io.Writer,
 	arguments ...string,
 ) error {
-	operation := cli.rpcOperation(cli.ensureOperationID())
-	operation.baseEnv = maps.Clone(cli.baseEnv)
+	return cli.runReleaseTransitionYardCommandIO(
+		ctx, yard, output, output, arguments...,
+	)
+}
+
+func (cli *CLI) runReleaseTransitionYardCommandIO(
+	ctx context.Context,
+	yard string,
+	stdout io.Writer,
+	stderr io.Writer,
+	arguments ...string,
+) error {
+	operationID := cli.ensureOperationID()
+	operation := cli.rpcOperation(operationID)
+	environment := freshMigrationEnvironment(cli.baseEnv, cli.options.RepositoryRoot)
+	operation.env = maps.Clone(environment)
+	operation.env["SUBYARD_OPERATION_ID"] = operationID
+	operation.baseEnv = maps.Clone(environment)
 	for _, environment := range []map[string]string{operation.env, operation.baseEnv} {
 		delete(environment, "SUBYARD_CONFIG_LOADED")
 		environment["SUBYARD_ENGINE_CONTEXT"] = "1"
@@ -126,8 +142,8 @@ func (cli *CLI) runReleaseTransitionYardCommand(
 	operation.options.Arguments = append([]string{"-Y", yard}, arguments...)
 	operation.options.DispatcherPath = filepath.Join(cli.options.RepositoryRoot, "bin", "yard-engine")
 	operation.options.Stdin = strings.NewReader("")
-	operation.options.Stdout = output
-	operation.options.Stderr = output
+	operation.options.Stdout = stdout
+	operation.options.Stderr = stderr
 	operation.releaseTransitionChild = true
 	if code := operation.Run(ctx); code != 0 {
 		return fmt.Errorf("yard command exited with status %d", code)

@@ -18,6 +18,7 @@ import (
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/Subyard/Subyard/internal/testyardmigration"
 )
 
@@ -772,6 +773,116 @@ func TestPowerActivationUsesPinnedCandidateEngine(t *testing.T) {
 	}
 	if program.options.DispatcherPath != dispatcher {
 		t.Fatalf("power platform changed active dispatcher to %q", program.options.DispatcherPath)
+	}
+}
+
+func TestMaterializedConfigReconcileUsesTargetContextForRevalidation(t *testing.T) {
+	root := repositoryRoot(t)
+	home := t.TempDir()
+	configHome := filepath.Join(home, ".config", "subyard")
+	staleRoot := filepath.Join(home, "releases", "stale", "config")
+	staleSource := filepath.Join(home, "releases", "stale", "resolved", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(staleRoot), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, "config"), staleRoot); err != nil {
+		t.Fatal(err)
+	}
+	writeReleaseTransitionTestFile(t, staleSource, []byte("model = \"stale\"\n"), 0o600)
+	writeReleaseTransitionTestFile(t, filepath.Join(configHome, "config.env"),
+		[]byte("CODING_TOOL_INTEGRATIONS=codex\n"), 0o600)
+
+	var stdout, stderr bytes.Buffer
+	applier := &recordingConfigApplier{}
+	program, err := New(Options{
+		RepositoryRoot: root,
+		Environment: []string{
+			"HOME=" + home,
+			"SUBYARD_OPERATOR_HOME=" + home,
+			"SUBYARD_CONFIG_HOME=" + configHome,
+			"SUBYARD_HOME=" + filepath.Join(home, ".subyard"),
+			"SUBYARD_CONFIG_DIR=" + staleRoot,
+			"SUBYARD_CONFIG_LOADED=1",
+			"SUBYARD_ENGINE_CONTEXT=1",
+			"CODING_TOOL_INTEGRATIONS=codex",
+			"AGENT_codex_CONFIG=" + staleSource,
+			"AGENT_codex_CONFIG_DEST=.codex/config.toml",
+		},
+		Config: applier, Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	program.ensureOperationID()
+	targetLoaded, err := program.resolveReleaseTransitionContext("default", configHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+		targetLoaded.Context.IncusProject + "/" + targetLoaded.Context.YardInstanceName: {
+			Name: targetLoaded.Context.YardInstanceName, Project: targetLoaded.Context.IncusProject,
+			Status: "Running",
+		},
+	}}
+	appendMismatchedHashSteps(t, fake, targetLoaded, "0")
+	appendMismatchedHashSteps(t, fake, targetLoaded, "0")
+	appendMismatchedHashSteps(t, fake, targetLoaded, "0")
+	appendHashSteps(t, fake, targetLoaded)
+	appendHashSteps(t, fake, targetLoaded)
+	program.options.Incus = fake
+	program.options.Executor = fake
+
+	reconciler := &materializedConfigActivationReconciler{
+		cli: program, yard: "default", configHome: configHome,
+	}
+	initial, err := reconciler.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.Reconcile(context.Background(), releasetransition.ReleaseLinks{}); err != nil {
+		t.Fatalf("reconcile with stale inherited context: %v; stdout=%s stderr=%s", err, stdout.String(), stderr.String())
+	}
+	refreshed, err := reconciler.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if initial.Desired != refreshed.Desired {
+		t.Fatalf("desired fingerprint changed from %q to %q", initial.Desired, refreshed.Desired)
+	}
+	if !slices.Equal(applier.yards, []string{"default"}) {
+		t.Fatalf("applied yards = %v, want [default]", applier.yards)
+	}
+}
+
+func TestMaterializedConfigReconcileUsesTrustedCandidateChild(t *testing.T) {
+	candidateRoot := "/proc/123/fd/9"
+	sealedDispatcher := "/memfd:subyard-verified-yard-engine"
+	program := &CLI{options: Options{
+		RepositoryRoot: candidateRoot,
+		DispatcherPath: sealedDispatcher,
+	}}
+	reconciler := &materializedConfigActivationReconciler{cli: program}
+
+	nested := reconciler.reconcileCLI()
+	want := filepath.Join(candidateRoot, "bin", "yard-engine")
+	if nested == program || nested.options.DispatcherPath != want {
+		t.Fatalf("nested materialized-config dispatcher = %q, want %q",
+			nested.options.DispatcherPath, want)
+	}
+	if program.options.DispatcherPath != sealedDispatcher {
+		t.Fatalf("materialized-config reconcile changed the sealed parent dispatcher to %q",
+			program.options.DispatcherPath)
+	}
+	applier, ok := nested.options.Config.(releaseTransitionConfigApplier)
+	if !ok || applier.cli != nested {
+		t.Fatalf("materialized-config reconcile applier = %#v, want trusted in-process child", nested.options.Config)
+	}
+
+	injected := &recordingConfigApplier{}
+	program.options.Config = injected
+	if got := reconciler.reconcileCLI(); got.options.Config != injected ||
+		got.options.DispatcherPath != sealedDispatcher {
+		t.Fatalf("injected config applier was replaced: %#v", got.options)
 	}
 }
 

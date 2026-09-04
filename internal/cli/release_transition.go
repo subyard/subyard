@@ -648,28 +648,63 @@ type materializedConfigActivationReconciler struct {
 	configHome string
 }
 
+type releaseTransitionConfigApplier struct{ cli *CLI }
+
+func (applier releaseTransitionConfigApplier) ApplyConfig(
+	ctx context.Context,
+	yard string,
+) error {
+	if applier.cli == nil {
+		return errors.New("release transition config applier is unavailable")
+	}
+	return applier.cli.runReleaseTransitionYardCommandIO(
+		ctx,
+		yard,
+		applier.cli.options.Stdout,
+		applier.cli.options.Stderr,
+		"init",
+		"--configs",
+		"--yes",
+	)
+}
+
 func (*materializedConfigActivationReconciler) ID() string { return "materialized-config" }
 
-func (reconciler *materializedConfigActivationReconciler) Observe(
-	ctx context.Context,
-	_ releasetransition.ReleasePair,
-	_ releasetransition.ReleaseLinks,
-) (releasetransition.V2ActivationObservation, error) {
+func (reconciler *materializedConfigActivationReconciler) targets() ([]configTarget, error) {
 	if reconciler == nil || reconciler.cli == nil {
-		return releasetransition.V2ActivationObservation{}, errors.New("materialized config reconciler is unavailable")
+		return nil, errors.New("materialized config reconciler is unavailable")
 	}
 	yard := reconciler.yard
 	if yard == "" {
 		yard = "default"
 	}
 	if !domain.SafeName(yard) {
-		return releasetransition.V2ActivationObservation{}, errors.New("materialized config yard is invalid")
+		return nil, errors.New("materialized config yard is invalid")
 	}
 	loaded, err := reconciler.cli.resolveReleaseTransitionContext(yard, reconciler.configHome)
 	if err != nil {
-		return releasetransition.V2ActivationObservation{}, err
+		return nil, err
 	}
-	targets, err := reconciler.cli.localConfigTargets(loaded, false)
+	return reconciler.cli.localConfigTargets(loaded, false)
+}
+
+func (reconciler *materializedConfigActivationReconciler) reconcileCLI() *CLI {
+	operation := *reconciler.cli
+	if operation.options.Config == nil {
+		operation.options.DispatcherPath = filepath.Join(
+			operation.options.RepositoryRoot, "bin", "yard-engine",
+		)
+		operation.options.Config = releaseTransitionConfigApplier{cli: &operation}
+	}
+	return &operation
+}
+
+func (reconciler *materializedConfigActivationReconciler) Observe(
+	ctx context.Context,
+	_ releasetransition.ReleasePair,
+	_ releasetransition.ReleaseLinks,
+) (releasetransition.V2ActivationObservation, error) {
+	targets, err := reconciler.targets()
 	if err != nil {
 		return releasetransition.V2ActivationObservation{}, err
 	}
@@ -721,22 +756,11 @@ func (reconciler *materializedConfigActivationReconciler) Reconcile(
 	ctx context.Context,
 	_ releasetransition.ReleaseLinks,
 ) error {
-	yard := reconciler.yard
-	if yard == "" {
-		yard = "default"
-	}
-	loaded, err := reconciler.cli.resolveReleaseTransitionContext(yard, reconciler.configHome)
+	targets, err := reconciler.targets()
 	if err != nil {
 		return err
 	}
-	targets, err := reconciler.cli.localConfigTargets(loaded, false)
-	if err != nil {
-		return err
-	}
-	selector := func() ([]configTarget, error) {
-		return reconciler.cli.refreshLocalConfigTargets(loaded, false)
-	}
-	if code := reconciler.cli.applyConfig(ctx, targets, true, selector); code != 0 {
+	if code := reconciler.reconcileCLI().applyConfig(ctx, targets, true, reconciler.targets); code != 0 {
 		return fmt.Errorf("materialized config reconcile returned status %d", code)
 	}
 	return nil
