@@ -195,9 +195,29 @@ if grep -qs " /srv " /proc/mounts; then
   srv_device="$(stat -c %d /srv 2>/dev/null)" || exit
   [ "$root_device" = "$srv_device" ] || set -- "$@" /srv
 fi
+storage_source=/srv/incus-e2e/storage
+storage_alias=/var/lib/incus/storage-pools/default
+storage_exclude=
+is_device_inode() {
+  case "$1" in
+    *[!0-9:]*|*:*:*|:*|*:) return 1 ;;
+    *:*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+source_identity="$(stat -c %d:%i "$storage_source" 2>/dev/null)" || source_identity=
+alias_identity="$(stat -c %d:%i "$storage_alias" 2>/dev/null)" || alias_identity=
+if is_device_inode "$source_identity" && is_device_inode "$alias_identity" &&
+  [ "$source_identity" = "$alias_identity" ]; then
+  storage_exclude="--exclude=$storage_alias"
+fi
 total=0
 for path do
-  output="$(du -skx "$path" 2>/dev/null)" || exit
+  if [ "$path" = / ] && [ -n "$storage_exclude" ]; then
+    output="$(du -skx "$storage_exclude" "$path" 2>/dev/null)" || exit
+  else
+    output="$(du -skx "$path" 2>/dev/null)" || exit
+  fi
   size="$(printf "%s\n" "$output" | awk "NR == 1 { print \$1 }")"
   case "$size" in ""|*[!0-9]*) exit 1 ;; esac
   total=$((total + size))
@@ -237,8 +257,7 @@ if [ -n "${SUBYARD_INCUS_SOCKET:-}" ]; then
 fi
 figure="$(
   timeout --signal=TERM --kill-after=1s 10s \
-    incus exec "$instance" --project "$project" -- sh -c '
-` + spaceMeasureCommand + `'
+    incus exec "$instance" --project "$project" -- sh -c '` + spaceMeasureCommand + `'
 )" || exit 0
 printf '%s\n' "$figure" | grep -Eq '^` + spaceFigurePattern + `$' || exit 0
 [ -e "$lock" ] || exit 0

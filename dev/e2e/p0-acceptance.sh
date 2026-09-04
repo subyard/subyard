@@ -569,7 +569,7 @@ cleanup() {
     wait "$LEASE_KEEPER_PID" >/dev/null 2>&1 || true
     LEASE_KEEPER_PID=''
   fi
-  release_lease >/dev/null 2>&1 || cleanup_failed=1
+  release_lease >/dev/null || cleanup_failed=1
   if [ -n "$LOCAL_TEMP" ]; then
     case "$LOCAL_TEMP" in /tmp/subyard-agent-e2e.*|"${TMPDIR:-/tmp}"/subyard-agent-e2e.*)
       find "$LOCAL_TEMP" -depth -delete >/dev/null 2>&1 || cleanup_failed=1

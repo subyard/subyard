@@ -3,7 +3,8 @@
 The `test-vms` profile runs a root-owned lease broker inside a trusted outer yard. Its configured
 pool contains one or more slots and defaults to two. Each slot owns an isolated inner Incus project,
 network and a retained pair of VMs. The VM disks survive release; the pair is stopped whenever it
-has no lease.
+has no lease. Before stopping a running retained guest, release best-effort trims free guest blocks
+back to the storage pool. A trim failure does not weaken fencing or fail release.
 
 The outer yard remains operator-owned. Agents can acquire inner slots, but cannot start a stopped
 outer yard, enter its shell, reach its Incus socket or invoke arbitrary lifecycle commands.
@@ -275,8 +276,13 @@ Release, heartbeat expiry, operator drain or outer stop:
 
 1. removes the data-account forwarding key and kills that account's sessions;
 2. removes the ephemeral key from both guest root accounts when their agents are reachable;
-3. stops both VMs;
-4. publishes `available` only after stop is verified.
+3. for each running guest, best-effort runs bounded `sync` and `fstrim -av` to return free blocks
+   to the pool;
+4. stops both VMs;
+5. publishes `available` only after stop is verified.
+
+The pair shares one bounded trim budget. A slow first trim therefore reduces the time available to
+the second trim instead of consuming the request time reserved for both verified stops.
 
 If a guest is rebooting and its agent is temporarily unavailable, the already-fenced data route
 still permits a verified stop. The next acquire replaces every guest lease key before it publishes

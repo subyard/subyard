@@ -1087,6 +1087,39 @@ grep -Fq 'FAULT_ROOT=/run/subyard-p0-incus-fault' \
     }
   ' "$ROOT/dev/e2e/p0-broker-recovery.sh" \
   || fail "P0 broker recovery does not isolate its targeted fault before rebuilding"
+remove_reclaim_fixture_source="$(sed -n \
+  '/^remove_reclaim_fixture() {/,/^}/p' \
+  "$ROOT/dev/e2e/p0-broker-recovery.sh")"
+reclaim_cleanup_attempts="$TMP/reclaim-cleanup-attempts"
+: > "$reclaim_cleanup_attempts"
+set +e
+REMOVE_RECLAIM_FIXTURE_SOURCE="$remove_reclaim_fixture_source" \
+  RECLAIM_CLEANUP_ATTEMPTS="$reclaim_cleanup_attempts" bash -c '
+    set -u
+    eval "$REMOVE_RECLAIM_FIXTURE_SOURCE"
+    RECLAIM_MARKER=subyard-p0-release-reclaim-v1:1234abcd
+    RECLAIM_FIXTURE=/var/tmp/subyard-p0-release-reclaim
+    ssh() {
+      target=
+      for argument do
+        case "$argument" in e2e-vm-[12]) target=$argument ;; esac
+      done
+      printf "%s\n" "$target" >> "$RECLAIM_CLEANUP_ATTEMPTS"
+      [ "$target" != e2e-vm-1 ]
+    }
+    remove_reclaim_fixture fixture-config
+  '
+reclaim_cleanup_rc=$?
+set -e
+[ "$reclaim_cleanup_rc" -ne 0 ] \
+  && [ "$(cat "$reclaim_cleanup_attempts")" = $'e2e-vm-1\ne2e-vm-2' ] \
+  || fail "reclaim cleanup did not preserve VM1 failure while attempting VM2: rc=$reclaim_cleanup_rc"
+awk '
+  /^RECLAIM_MARKER="subyard-p0-release-reclaim-v1:\$neighbor_run"$/ { armed = NR }
+  /^stage_reclaim_fixture "\$NEIGHBOR_CONFIG" 1$/ { staged = NR }
+  END { exit !(armed && staged && armed + 1 == staged) }
+' "$ROOT/dev/e2e/p0-broker-recovery.sh" \
+  || fail 'reclaim cleanup marker is armed before a fixture can exist'
 grep -Fq '"$runtime_root/current/bin/yard" update \' \
   "$ROOT/dev/e2e/p0-broker-recovery.sh" \
   && ! grep -Fq 'scripts/install-runtime-release.sh' \

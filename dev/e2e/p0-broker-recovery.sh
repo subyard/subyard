@@ -10,6 +10,10 @@ OUTER_INSTANCE="yard-$YARD"
 STATE_PARENT=''
 NEIGHBOR_PID=''
 VICTIM_PID=''
+NEIGHBOR_CONFIG=''
+RECLAIM_MARKER=''
+RECLAIM_FIXTURE=/var/tmp/subyard-p0-release-reclaim
+RECLAIM_FIXTURE_BYTES=$((512 * 1024 * 1024))
 FAULT_ROOT=/run/subyard-p0-incus-fault
 FAULT_INSTALLED=0
 REAPER_MASKED=0
@@ -112,10 +116,21 @@ stop_slot_pair() {
   done
 }
 
+start_slot_pair() {
+  local slot="$1" vm project
+  project="subyard-e2e-vms-slot-$slot"
+  for vm in e2e-vm-1 e2e-vm-2; do
+    outer_root incus start "$vm" --project "$project"
+  done
+}
+
 cleanup() {
   local rc=$?
   trap - EXIT INT TERM
   set +e
+  if [ -n "$NEIGHBOR_CONFIG" ] && [ -n "$RECLAIM_MARKER" ]; then
+    remove_reclaim_fixture "$NEIGHBOR_CONFIG" >/dev/null 2>&1 || rc=3
+  fi
   restore_targeted_incus_failure >/dev/null 2>&1
   if [ "$REAPER_MASKED" = 1 ]; then
     outer_root systemctl unmask --runtime \
@@ -261,6 +276,125 @@ reclaim_held_pair_capacity() {
     "$label" "$available"
 }
 
+wait_for_pair_ssh() {
+  local config="$1" vm attempt ready
+  for vm in 1 2; do
+    ready=0
+    for attempt in $(seq 1 120); do
+      if ssh -F "$config" -T -o ConnectTimeout=3 "e2e-vm-$vm" -- true \
+        </dev/null >/dev/null 2>&1; then
+        ready=1
+        break
+      fi
+      sleep 1
+    done
+    [ "$ready" = 1 ] || die "held slot VM$vm did not return after restart"
+  done
+}
+
+resolve_root_image() {
+  local slot="$1" vm="$2" project
+  [[ "$slot" =~ ^[1-9][0-9]*$ ]] && [[ "$vm" =~ ^e2e-vm-[12]$ ]] \
+    || die 'refusing unsafe retained VM path inputs'
+  project="subyard-e2e-vms-slot-$slot"
+  outer_root sh -eu -s -- "$project" "$vm" <<'EOF'
+project=$1
+vm=$2
+source=/srv/incus-e2e/storage
+alias=/var/lib/incus/storage-pools/default
+[ "$(incus storage get default source)" = "$source" ]
+[ "$(incus project get "$project" user.subyard.managed)" = test-vms-v1 ]
+[ "$(incus config get "$vm" user.subyard.managed --project "$project")" = test-vms-v1 ]
+[ "$(stat -c %d:%i "$source")" = "$(stat -c %d:%i "$alias")" ]
+relative="virtual-machines/${project}_${vm}/root.img"
+candidate=$source/$relative
+published=$alias/$relative
+[ -f "$candidate" ] && [ ! -L "$candidate" ]
+[ -f "$published" ] && [ ! -L "$published" ]
+[ "$(readlink -f -- "$candidate")" = "$candidate" ]
+[ "$(stat -c %d:%i "$candidate")" = "$(stat -c %d:%i "$published")" ]
+printf '%s\n' "$candidate"
+EOF
+}
+
+root_image_allocated_bytes() {
+  local path="$1" metadata blocks block_size
+  [[ "$path" =~ ^/srv/incus-e2e/storage/virtual-machines/subyard-e2e-vms-slot-[1-9][0-9]*_e2e-vm-[12]/root\.img$ ]] \
+    || die "refusing unsafe retained root image path $path"
+  metadata="$(outer_root stat -c '%b %B' -- "$path")"
+  read -r blocks block_size <<<"$metadata"
+  [[ "$blocks" =~ ^[0-9]+$ ]] && [[ "$block_size" =~ ^[1-9][0-9]*$ ]] \
+    || die "could not measure allocated blocks for $path"
+  [ "$blocks" -le $((9223372036854775807 / block_size)) ] \
+    || die "allocated block measurement overflow for $path"
+  printf '%s\n' "$((blocks * block_size))"
+}
+
+stage_reclaim_fixture() {
+  local config="$1" vm="$2"
+  [[ "$vm" =~ ^[12]$ ]] || die 'refusing an unsafe reclaim fixture VM selector'
+  [[ "$RECLAIM_MARKER" =~ ^subyard-p0-release-reclaim-v1:[0-9a-f]{8}$ ]] \
+    || die 'refusing an unsafe reclaim fixture marker'
+  ssh -F "$config" -T "e2e-vm-$vm" -- \
+    sh -eu -s -- "$RECLAIM_FIXTURE" "$RECLAIM_MARKER" "$RECLAIM_FIXTURE_BYTES" <<'EOF'
+root=$1
+expected=$2
+bytes=$3
+[ ! -e "$root" ] && [ ! -L "$root" ]
+install -d -m 0700 "$root"
+printf '%s\n' "$expected" > "$root/.subyard-p0-release-reclaim"
+dd if=/dev/urandom of="$root/allocated-fixture" bs=1M count="$((bytes / 1024 / 1024))" status=none
+sync "$root/allocated-fixture" "$root/.subyard-p0-release-reclaim"
+EOF
+}
+
+remove_reclaim_fixture() {
+  local config="$1" vm rc=0
+  [[ "$RECLAIM_MARKER" =~ ^subyard-p0-release-reclaim-v1:[0-9a-f]{8}$ ]] \
+    || return 1
+  for vm in 1 2; do
+    if ! ssh -F "$config" -T "e2e-vm-$vm" -- \
+      sh -eu -s -- "$RECLAIM_FIXTURE" "$RECLAIM_MARKER" <<'EOF'
+root=$1
+expected=$2
+[ -e "$root" ] || exit 0
+marker=$root/.subyard-p0-release-reclaim
+[ -d "$root" ] && [ ! -L "$root" ]
+[ -f "$marker" ] && [ ! -L "$marker" ]
+[ "$(cat "$marker")" = "$expected" ]
+find "$root" -xdev -depth -delete
+sync
+EOF
+    then
+      rc=1
+    fi
+  done
+  return "$rc"
+}
+
+slot_pair_identity() {
+  local slot="$1" vm project uuid
+  project="subyard-e2e-vms-slot-$slot"
+  for vm in e2e-vm-1 e2e-vm-2; do
+    uuid="$(outer_root incus config get "$vm" volatile.uuid --project "$project")"
+    [[ "$uuid" =~ ^[0-9a-f-]{36}$ ]] \
+      || die "retained $vm has no stable VM identity"
+    printf '%s=%s\n' "$vm" "$uuid"
+  done
+}
+
+assert_slot_pair_stopped() {
+  local slot="$1" project inventory
+  project="subyard-e2e-vms-slot-$slot"
+  inventory="$(outer_root incus list --project "$project" --format json)"
+  jq -e '
+    length == 2 and
+    ([.[].name] | sort) == ["e2e-vm-1", "e2e-vm-2"] and
+    all(.[]; .status == "Stopped")
+  ' <<<"$inventory" >/dev/null \
+    || die "slot-$slot retained pair was deleted, replaced or left running"
+}
+
 install_candidate_update() {
 	local arch release artifact runtime_root release_cache
 	artifact="${P0_BROKER_RECOVERY_UPDATE_ARTIFACT:-}"
@@ -395,7 +529,7 @@ command -v timeout >/dev/null 2>&1 || die 'timeout is required'
   && [ "$RECOVERY_STATUS_TIMEOUT_SECONDS" -le 60 ] \
   || die 'broker status timeout must be an integer from 1 through 60 seconds'
 STATE_PARENT="$(mktemp -d /tmp/subyard-p0-broker-recovery.XXXXXX)"
-for client in neighbor victim probe next; do
+for client in neighbor victim probe next reuse; do
   SUBYARD_E2E_STATE_DIR="$STATE_PARENT/$client" \
     "$RUNNER" --yard "$YARD" --prepare >/dev/null
 done
@@ -474,7 +608,7 @@ while true; do
   neighbor_attempt=$((neighbor_attempt + 1))
 done
 IFS=$'\t' read -r NEIGHBOR_SLOT NEIGHBOR_CONFIG NEIGHBOR_PROJECT \
-  _neighbor_run _neighbor_purpose \
+  neighbor_run _neighbor_purpose \
   < "$STATE_PARENT/neighbor.ready"
 [ "$NEIGHBOR_SLOT" = slot-002 ] || die "neighbor received $NEIGHBOR_SLOT"
 [ -n "$NEIGHBOR_PROJECT" ] && [ "$NEIGHBOR_PROJECT" = "$VICTIM_PROJECT" ] \
@@ -619,16 +753,93 @@ new_neighbor_heartbeat="$(jq -r '
 ' <<<"$after_renew")"
 [ "$new_neighbor_heartbeat" != "$neighbor_heartbeat" ] \
   || die 'held neighbor heartbeat did not advance across update/recovery'
+
+# The held neighbor was stopped above to preserve recovery headroom. Restart it
+# without changing the lease, then stage reclaimable data after all manual
+# capacity trims so only the normal product release can satisfy this assertion.
+start_slot_pair 2
+wait_for_pair_ssh "$NEIGHBOR_CONFIG"
+neighbor_generation="$(jq -r '
+  .pool.slots[] | select(.slot_id == "slot-002") | .resource_generation
+' <<<"$after_renew")"
+pair_identity_before="$(slot_pair_identity 2)"
+vm1_root_image="$(resolve_root_image 2 e2e-vm-1)"
+vm2_root_image="$(resolve_root_image 2 e2e-vm-2)"
+vm1_baseline="$(root_image_allocated_bytes "$vm1_root_image")"
+vm2_baseline="$(root_image_allocated_bytes "$vm2_root_image")"
+RECLAIM_MARKER="subyard-p0-release-reclaim-v1:$neighbor_run"
+stage_reclaim_fixture "$NEIGHBOR_CONFIG" 1
+stage_reclaim_fixture "$NEIGHBOR_CONFIG" 2
+vm1_with_fixture="$(root_image_allocated_bytes "$vm1_root_image")"
+vm2_with_fixture="$(root_image_allocated_bytes "$vm2_root_image")"
+vm1_fixture_delta=$((vm1_with_fixture - vm1_baseline))
+vm2_fixture_delta=$((vm2_with_fixture - vm2_baseline))
+# Random writes must materialize most of each guest file in its own sparse
+# root.img. Requiring half the requested bytes rejects an unobservable fixture
+# while allowing for filesystem and image-cluster accounting differences.
+minimum_observable_delta=$((RECLAIM_FIXTURE_BYTES / 2))
+[ "$vm1_fixture_delta" -ge "$minimum_observable_delta" ] \
+  || die "VM1 fixture allocation was not observable: baseline=$vm1_baseline fixture=$vm1_with_fixture requested=$RECLAIM_FIXTURE_BYTES"
+[ "$vm2_fixture_delta" -ge "$minimum_observable_delta" ] \
+  || die "VM2 fixture allocation was not observable: baseline=$vm2_baseline fixture=$vm2_with_fixture requested=$RECLAIM_FIXTURE_BYTES"
+remove_reclaim_fixture "$NEIGHBOR_CONFIG"
+RECLAIM_MARKER=''
+vm1_before_release="$(root_image_allocated_bytes "$vm1_root_image")"
+vm2_before_release="$(root_image_allocated_bytes "$vm2_root_image")"
+# Derive each release threshold from that VM's observed growth. The one-half
+# allowance covers bounded guest shutdown writes after fstrim while remaining
+# large enough that an unrelated metadata decrease cannot satisfy the check.
+vm1_minimum_reclaim=$(((vm1_fixture_delta + 1) / 2))
+vm2_minimum_reclaim=$(((vm2_fixture_delta + 1) / 2))
+[ "$((vm1_before_release - vm1_baseline))" -ge "$vm1_minimum_reclaim" ] \
+  || die "VM1 deleted fixture left too few observable blocks for release: baseline=$vm1_baseline fixture=$vm1_with_fixture before=$vm1_before_release minimum=$vm1_minimum_reclaim"
+[ "$((vm2_before_release - vm2_baseline))" -ge "$vm2_minimum_reclaim" ] \
+  || die "VM2 deleted fixture left too few observable blocks for release: baseline=$vm2_baseline fixture=$vm2_with_fixture before=$vm2_before_release minimum=$vm2_minimum_reclaim"
+
 : > "$STATE_PARENT/neighbor.release"
 wait "$NEIGHBOR_PID" \
   || { report_slot_diagnostics slot-002 'held neighbor release failed';
        sed -n '1,240p' "$STATE_PARENT/neighbor.log" >&2;
        die 'held neighbor did not release cleanly'; }
 NEIGHBOR_PID=''
-final="$(wait_for_slot_state slot-002 available 60)" \
+released="$(wait_for_slot_state slot-002 available 60)" \
   || { report_slot_diagnostics slot-002 'held neighbor did not return to the pool';
        die 'held neighbor did not return to the pool'; }
-jq -e 'all(.pool.slots[]; .state == "available")' <<<"$final" >/dev/null \
-  || die 'candidate pool was not fully reusable after acceptance'
+jq -e --argjson generation "$neighbor_generation" '
+  (.pool.slots[] | select(.slot_id == "slot-002")) as $slot |
+  all(.pool.slots[]; .state == "available") and
+  $slot.resource_generation == $generation
+' <<<"$released" >/dev/null \
+  || die 'normal release rebuilt the retained pair or left the pool unavailable'
+vm1_after_release="$(root_image_allocated_bytes "$vm1_root_image")"
+vm2_after_release="$(root_image_allocated_bytes "$vm2_root_image")"
+vm1_release_delta=$((vm1_before_release - vm1_after_release))
+vm2_release_delta=$((vm2_before_release - vm2_after_release))
+[ "$vm1_release_delta" -ge "$vm1_minimum_reclaim" ] \
+  || die "normal release reclaimed too few VM1 root.img blocks: before=$vm1_before_release after=$vm1_after_release observed_fixture=$vm1_fixture_delta minimum=$vm1_minimum_reclaim"
+[ "$vm2_release_delta" -ge "$vm2_minimum_reclaim" ] \
+  || die "normal release reclaimed too few VM2 root.img blocks: before=$vm2_before_release after=$vm2_after_release observed_fixture=$vm2_fixture_delta minimum=$vm2_minimum_reclaim"
+[ "$(slot_pair_identity 2)" = "$pair_identity_before" ] \
+  || die 'normal release replaced the retained VM pair'
+assert_slot_pair_stopped 2
 
-printf 'ok: host-wide broker log, immutable incident, held rollback and automatic clean rebuild\n'
+SUBYARD_E2E_STATE_DIR="$STATE_PARENT/reuse" \
+  "$RUNNER" --yard "$YARD" --slot 2 --purpose retained-pair-reuse --vm both -- \
+  test ! -e "$RECLAIM_FIXTURE"
+final="$(wait_for_slot_state slot-002 available 60)" \
+  || { report_slot_diagnostics slot-002 'retained pair was not reusable';
+       die 'retained pair was not reusable'; }
+jq -e --argjson generation "$neighbor_generation" '
+  (.pool.slots[] | select(.slot_id == "slot-002")) as $slot |
+  all(.pool.slots[]; .state == "available") and
+  $slot.resource_generation == $generation
+' <<<"$final" >/dev/null \
+  || die 'candidate pool was not fully reusable after acceptance'
+assert_slot_pair_stopped 2
+[ "$(slot_pair_identity 2)" = "$pair_identity_before" ] \
+  || die 'retained VM pair identity changed during reuse'
+
+printf '  [ ok ] release reclaimed VM1=%s/observed-%s and VM2=%s/observed-%s allocated root.img bytes without replacing retained VMs\n' \
+  "$vm1_release_delta" "$vm1_fixture_delta" \
+  "$vm2_release_delta" "$vm2_fixture_delta"
+printf 'ok: host-wide broker log, immutable incident, held rollback, automatic clean rebuild and retained-disk reclaim\n'

@@ -151,6 +151,129 @@ func TestSpaceMeasureCommandDoesNotDoubleCountSameDeviceSrv(t *testing.T) {
 	}
 }
 
+func TestSpaceMeasureCommandExcludesOnlyVerifiedInnerIncusStorageAlias(t *testing.T) {
+	directory := t.TempDir()
+	calls := filepath.Join(directory, "calls")
+	for name, script := range map[string]string{
+		"grep": "#!/bin/sh\nexit 0\n",
+		"stat": `#!/bin/sh
+		case "$*" in
+		  *"%d:%i /srv/incus-e2e/storage"|*"%d:%i /var/lib/incus/storage-pools/default") printf '7:11\n' ;;
+		  */srv) printf '2\n' ;;
+		  *) printf '1\n' ;;
+		esac
+`,
+		"du": `#!/bin/sh
+		printf '%s\n' "$*" >>"$SPACE_CALLS"
+		printf '512\tpath\n'
+`,
+	} {
+		if err := os.WriteFile(filepath.Join(directory, name), []byte(script), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	output, err := runSpaceMeasureCommand(directory, calls)
+	if err != nil || string(output) != "1M\n" {
+		t.Fatalf("measurement output=%q err=%v", output, err)
+	}
+	payload, err := os.ReadFile(calls)
+	lines := strings.Split(strings.TrimSpace(string(payload)), "\n")
+	if err != nil || len(lines) != 2 || strings.Count(string(payload), "--exclude=") != 1 ||
+		lines[0] != "-skx --exclude=/var/lib/incus/storage-pools/default /" ||
+		lines[1] != "-skx /srv" {
+		t.Fatalf("du calls=%q err=%v", payload, err)
+	}
+}
+
+func TestSpaceMeasureCommandDoesNotExcludeUnverifiedInnerIncusStorageAlias(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		statScript string
+	}{
+		{
+			name:       "different identities",
+			statScript: "#!/bin/sh\ncase \"$*\" in *'/srv/incus-e2e/storage') printf '7:11\\n' ;; *'/var/lib/incus/storage-pools/default') printf '7:12\\n' ;; */srv) printf '2\\n' ;; *) printf '1\\n' ;; esac\n",
+		},
+		{
+			name:       "absent alias",
+			statScript: "#!/bin/sh\ncase \"$*\" in *'/var/lib/incus/storage-pools/default') exit 1 ;; */srv) printf '2\\n' ;; *) printf '1\\n' ;; esac\n",
+		},
+		{
+			name:       "absent source",
+			statScript: "#!/bin/sh\ncase \"$*\" in *'/srv/incus-e2e/storage') exit 1 ;; */srv) printf '2\\n' ;; *) printf '1\\n' ;; esac\n",
+		},
+		{
+			name:       "failed identity probe",
+			statScript: "#!/bin/sh\ncase \"$*\" in *'%d:%i'*) exit 1 ;; */srv) printf '2\\n' ;; *) printf '1\\n' ;; esac\n",
+		},
+		{
+			name:       "malformed identical identities",
+			statScript: "#!/bin/sh\ncase \"$*\" in *'%d:%i'*) printf '1\\n' ;; */srv) printf '2\\n' ;; *) printf '1\\n' ;; esac\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			directory := t.TempDir()
+			calls := filepath.Join(directory, "calls")
+			for name, script := range map[string]string{
+				"grep": "#!/bin/sh\nexit 0\n",
+				"stat": test.statScript,
+				"du":   "#!/bin/sh\nprintf '%s\\n' \"$*\" >>\"$SPACE_CALLS\"\nprintf '512\\tpath\\n'\n",
+			} {
+				if err := os.WriteFile(filepath.Join(directory, name), []byte(script), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			output, err := runSpaceMeasureCommand(directory, calls)
+			if err != nil || string(output) != "1M\n" {
+				t.Fatalf("measurement output=%q err=%v", output, err)
+			}
+			payload, err := os.ReadFile(calls)
+			if err != nil || strings.Count(string(payload), "\n") != 2 || strings.Contains(string(payload), "--exclude=") {
+				t.Fatalf("du calls=%q err=%v", payload, err)
+			}
+		})
+	}
+}
+
+func TestRuntimeUsesTheSameMeasurementCommandForSyncAndAsyncRefresh(t *testing.T) {
+	root := t.TempDir()
+	commandPath := filepath.Join(root, "async-command")
+	executor := &spaceExecutorStub{result: ports.InstanceExecResult{Stdout: []byte("1G\n")}}
+	yard := domain.Context{IncusProject: "subyard", YardInstanceName: "yard", Paths: domain.RuntimePaths{DataHome: root}}
+	runtime := Runtime{Executor: executor, Environment: fakeIncusEnvironment(t, `
+		for argument do command=$argument; done
+		printf '%s' "$command" >"$SPACE_COMMAND"
+		printf '1G\n'
+	`)}
+	if _, err := runtime.RefreshSpace(context.Background(), yard); err != nil {
+		t.Fatal(err)
+	}
+	runtime.Environment["SPACE_COMMAND"] = commandPath
+	if !runtime.startSpaceRefresh(yard, filepath.Join(root, "async-space.cache")) {
+		t.Fatal("async refresh did not start")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if payload, err := os.ReadFile(commandPath); err == nil {
+			if got, want := string(payload), executor.calls[0].Command[2]; got != want {
+				t.Fatalf("async measurement command = %q, want %q", got, want)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("async refresh did not execute the measurement command")
+}
+
+func runSpaceMeasureCommand(directory, calls string) ([]byte, error) {
+	command := exec.Command("sh", "-c", spaceMeasureCommand)
+	command.Env = append(os.Environ(),
+		"PATH="+directory+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPACE_CALLS="+calls,
+	)
+	return command.CombinedOutput()
+}
+
 func TestValidSpaceFigureUsesStrictGrammar(t *testing.T) {
 	for _, value := range []string{"0", "1G", "1.5GiB", "12MB"} {
 		if !validSpaceFigure(value) {

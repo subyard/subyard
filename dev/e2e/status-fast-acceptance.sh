@@ -12,6 +12,8 @@ DEFAULT_PROJECT=subyard
 NAMED_PROJECT=subyard-demo
 DEFAULT_INSTANCE=yard
 NAMED_INSTANCE=yard-demo
+STORAGE_SOURCE=/srv/incus-e2e/storage
+STORAGE_ALIAS=/var/lib/incus/storage-pools/default
 
 fail() {
   printf 'status-fast-acceptance: %s\n' "$*" >&2
@@ -19,10 +21,16 @@ fail() {
 }
 
 cleanup() {
+  if incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" -- sh -eu -c '
+    marker=$1/.subyard-status-storage-fixture
+    [ -f "$marker" ] && [ "$(cat "$marker")" = "$2" ]
+  ' _ "$STORAGE_SOURCE" "$RUN_ID" >/dev/null 2>&1; then
+    incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" -- \
+      umount "$STORAGE_ALIAS" >/dev/null 2>&1 || true
+  fi
   incus delete -f "$NAMED_INSTANCE" --project "$NAMED_PROJECT" >/dev/null 2>&1 || true
   incus delete -f "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" >/dev/null 2>&1 || true
   incus storage volume delete default yard-srv-demo --project "$NAMED_PROJECT" >/dev/null 2>&1 || true
-  incus storage volume delete default yard-srv --project "$DEFAULT_PROJECT" >/dev/null 2>&1 || true
   incus project delete "$NAMED_PROJECT" >/dev/null 2>&1 || true
   incus project delete "$DEFAULT_PROJECT" >/dev/null 2>&1 || true
   if [ -f "$FIXTURE/.subyard-status-fixture" ] \
@@ -65,13 +73,10 @@ for project in "$DEFAULT_PROJECT" "$NAMED_PROJECT"; do
   incus profile device add default root disk pool=default path=/ --project "$project" >/dev/null
   incus profile device add default eth0 nic network=incusbr0 --project "$project" >/dev/null
 done
-incus storage volume create default yard-srv --project "$DEFAULT_PROJECT" >/dev/null
 incus storage volume create default yard-srv-demo --project "$NAMED_PROJECT" >/dev/null
 
 incus init images:debian/13 "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" \
   -c security.nesting=true >/dev/null
-incus config device add "$DEFAULT_INSTANCE" srv disk --project "$DEFAULT_PROJECT" \
-  pool=default source=yard-srv path=/srv >/dev/null
 incus start "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT"
 
 incus init images:alpine/3.22 "$NAMED_INSTANCE" --vm --project "$NAMED_PROJECT" \
@@ -97,6 +102,18 @@ for target in "$DEFAULT_PROJECT/$DEFAULT_INSTANCE" "$NAMED_PROJECT/$NAMED_INSTAN
      fallocate -l 128M /srv/status-srv
      sync'
 done
+
+incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" -- sh -eu -c '
+source=$1
+alias=$2
+run_id=$3
+[ ! -e "$source" ] && [ ! -e "$alias" ]
+install -d -m 0700 "$source" "$alias"
+printf "%s\n" "$run_id" > "$source/.subyard-status-storage-fixture"
+fallocate -l 1G "$source/allocated-fixture"
+mount --bind "$source" "$alias"
+sync
+' _ "$STORAGE_SOURCE" "$STORAGE_ALIAS" "$RUN_ID"
 
 cd "$ROOT"
 ./dev/build-engine.sh
@@ -174,18 +191,17 @@ grep -Eq '^demo[[:space:]]+RUNNING[[:space:]]+' <<<"$refreshed" \
 [ "$(awk 'NF == 2 { print $2 }' "$DATA_HOME/space-demo.cache")" -gt "$named_before" ] \
   || fail "space refresh did not update named cache"
 
-assert_cache_includes_srv() {
+assert_cache_includes_separate_srv() {
   local name="$1" project="$2" instance="$3" cache="$4"
   local root_device srv_device root_figure total_figure cached_figure
   root_device="$(incus exec "$instance" --project "$project" -- stat -c %d /)"
   srv_device="$(incus exec "$instance" --project "$project" -- stat -c %d /srv)"
+  [ "$root_device" != "$srv_device" ] \
+    || fail "$name /srv fixture is not on a separate device"
   root_figure="$(measure_figure "$project" "$instance" /)"
-  total_figure="$root_figure"
-  if [ "$root_device" != "$srv_device" ]; then
-    total_figure="$(measure_figure "$project" "$instance" / /srv)"
-    [ "$total_figure" != "$root_figure" ] \
-      || fail "$name fixture does not distinguish /srv: root=$root_figure total=$total_figure"
-  fi
+  total_figure="$(measure_figure "$project" "$instance" / /srv)"
+  [ "$total_figure" != "$root_figure" ] \
+    || fail "$name fixture does not distinguish /srv: root=$root_figure total=$total_figure"
   cached_figure="$(awk 'NF == 2 { print $1 }' "$cache")"
   [ "$cached_figure" = "$total_figure" ] \
     || fail "$name cache does not include /srv: cache=$cached_figure total=$total_figure"
@@ -195,14 +211,13 @@ measure_figure() {
   local project="$1" instance="$2"
   shift 2
   incus exec "$instance" --project "$project" -- sh -c '
-total=0
-for path do
-  output="$(du -skx "$path" 2>/dev/null)" || exit
-  size="$(printf "%s\n" "$output" | awk "NR == 1 { print \$1 }")"
-  case "$size" in ""|*[!0-9]*) exit 1 ;; esac
-  total=$((total + size))
-done
-awk -v size="$total" "
+output="$(du -skx "$@" 2>/dev/null)" || exit
+size="$(printf "%s\n" "$output" | awk "
+  NF != 2 || \$1 !~ /^[0-9]+$/ { exit 1 }
+  { total += \$1 }
+  END { if (NR == 0) exit 1; print total }
+")" || exit
+awk -v size="$size" "
 BEGIN {
   split(\"K M G T P E Z Y\", units)
   unit = 1
@@ -217,8 +232,52 @@ BEGIN {
 }"' space-measure "$@"
 }
 
-assert_cache_includes_srv default "$DEFAULT_PROJECT" "$DEFAULT_INSTANCE" "$DATA_HOME/space.cache"
-assert_cache_includes_srv named-vm "$NAMED_PROJECT" "$NAMED_INSTANCE" "$DATA_HOME/space-demo.cache"
+assert_unique_incus_storage_alias() {
+  local project="$1" instance="$2" cache="$3"
+  local root_device source_identity alias_identity measurements raw_kib unique_kib
+  local raw_figure unique_figure cached_figure
+  root_device="$(incus exec "$instance" --project "$project" -- stat -c %d /)"
+  source_identity="$(incus exec "$instance" --project "$project" -- \
+    stat -c %d:%i "$STORAGE_SOURCE")"
+  alias_identity="$(incus exec "$instance" --project "$project" -- \
+    stat -c %d:%i "$STORAGE_ALIAS")"
+  [[ "$source_identity" =~ ^[0-9]+:[0-9]+$ ]] \
+    && [ "$source_identity" = "$alias_identity" ] \
+    || fail "Incus storage source and alias are not the same device/inode: source=$source_identity alias=$alias_identity"
+  [ "${source_identity%%:*}" = "$root_device" ] \
+    || fail "Incus storage alias fixture is not on the root device"
+
+  measurements="$(incus exec "$instance" --project "$project" -- sh -eu -c '
+    raw="$(du -skx / | awk "NR == 1 { print \$1 }")"
+    unique="$(du -skx --exclude="$1" / | awk "NR == 1 { print \$1 }")"
+    printf "%s %s\n" "$raw" "$unique"
+  ' _ "$STORAGE_ALIAS")"
+  read -r raw_kib unique_kib <<<"$measurements"
+  [[ "$raw_kib" =~ ^[0-9]+$ ]] && [[ "$unique_kib" =~ ^[0-9]+$ ]] \
+    && [ "$raw_kib" -gt "$unique_kib" ] \
+    || fail "same-inode fixture was not observable: raw=${raw_kib:-unknown} unique=${unique_kib:-unknown}"
+
+  raw_figure="$(measure_figure "$project" "$instance" /)"
+  unique_figure="$(measure_figure "$project" "$instance" \
+    "--exclude=$STORAGE_ALIAS" /)"
+  [ "$raw_figure" != "$unique_figure" ] \
+    || fail "same-inode fixture would not distinguish double counting: raw=$raw_figure unique=$unique_figure"
+  cached_figure="$(awk 'NF == 2 { print $1 }' "$cache")"
+  [ "$cached_figure" = "$unique_figure" ] \
+    || fail "space refresh did not report the unique allocation once: cache=$cached_figure unique=$unique_figure raw=$raw_figure"
+  awk -v expected="$unique_figure" '
+    $1 == "default" && $2 == "RUNNING" && $3 == expected { found = 1 }
+    END { exit !found }
+  ' <<<"$refreshed" \
+    || fail "space refresh output did not render the unique allocation $unique_figure"
+  printf 'same-inode Incus storage alias counted once (raw=%sKiB unique=%sKiB)\n' \
+    "$raw_kib" "$unique_kib"
+}
+
+assert_unique_incus_storage_alias \
+  "$DEFAULT_PROJECT" "$DEFAULT_INSTANCE" "$DATA_HOME/space.cache"
+assert_cache_includes_separate_srv \
+  named-vm "$NAMED_PROJECT" "$NAMED_INSTANCE" "$DATA_HOME/space-demo.cache"
 
 selected_space="$(yard @demo space)"
 grep -Eq '^demo[[:space:]]+RUNNING[[:space:]]+' <<<"$selected_space" \
@@ -318,4 +377,4 @@ grep -Fq 'remote-owner/remote' "$FIXTURE/stale.out" \
 grep -Fq 'Warning: owner inventory refresh:' "$FIXTURE/stale.err" \
   || fail "stale remote inventory warning was lost"
 
-printf 'ok: status routing, all-yard space refresh, cache-first container/VM detail and scoped RPC\n'
+printf 'ok: status routing, unique-allocation space refresh, cache-first container/VM detail and scoped RPC\n'

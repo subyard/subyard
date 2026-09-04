@@ -18,6 +18,10 @@ const (
 	// VM disks are thin-provisioned; preserve real host headroom instead of summing virtual maxima.
 	HostReserveBytes       = uint64(5 * 1024 * 1024 * 1024)
 	InitialVMHeadroomBytes = uint64(1024 * 1024 * 1024)
+
+	// Keep best-effort trim below the facade request lifetime so verified stop retains its budget.
+	retainedGuestTrimTimeout      = 15 * time.Second
+	retainedGuestTrimTotalTimeout = 30 * time.Second
 )
 
 func (runtime *Runtime) AcquireSlot(
@@ -576,6 +580,8 @@ func (runtime *Runtime) stopRetainedWithEvidence(ctx context.Context) (stopEvide
 	if err := runtime.requireProjectMarker(ctx); err != nil {
 		return evidence, err
 	}
+	trimCtx, cancelTrim := context.WithTimeout(ctx, retainedGuestTrimTotalTimeout)
+	defer cancelTrim()
 	for selector := 1; selector <= 2; selector++ {
 		vm := runtime.Config.vm(selector)
 		if !runtime.vmExists(ctx, vm) {
@@ -592,6 +598,7 @@ func (runtime *Runtime) stopRetainedWithEvidence(ctx context.Context) (stopEvide
 				runtime.installManagedGuestKeys(ctx, vm),
 				runtime.removeLeaseContext(ctx, vm),
 			)
+			runtime.trimRetainedGuest(trimCtx, vm)
 			stopErr := runtime.stopRunningVM(ctx, vm)
 			if stopErr != nil {
 				return evidence, errors.Join(keyCleanupErr, stopErr)
@@ -614,6 +621,16 @@ func (runtime *Runtime) stopRetainedWithEvidence(ctx context.Context) (stopEvide
 		}
 	}
 	return evidence, nil
+}
+
+func (runtime *Runtime) trimRetainedGuest(ctx context.Context, vm string) {
+	_, err := runtime.guest(ctx, vm, nil,
+		"timeout", "--signal=TERM", "--kill-after=10",
+		fmt.Sprintf("%.0f", retainedGuestTrimTimeout.Seconds()),
+		"sh", "-eu", "-c", "sync\nfstrim -av")
+	if err != nil {
+		fmt.Fprintln(runtime.Stderr, "test-vms: retained guest disk trim failed; continuing to stop")
+	}
 }
 
 func (runtime *Runtime) recordStopOutcome(

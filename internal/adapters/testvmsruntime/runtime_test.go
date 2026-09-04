@@ -22,13 +22,187 @@ import (
 )
 
 type fakeRunner struct {
-	calls   [][]string
-	handler func(string, []string, []string, io.Reader) ([]byte, []byte, error)
-	missing map[string]bool
+	calls    [][]string
+	contexts []context.Context
+	handler  func(string, []string, []string, io.Reader) ([]byte, []byte, error)
+	missing  map[string]bool
+}
+
+type requestDeadlineRunner struct {
+	project         string
+	requestDeadline time.Time
+	cancelRequest   context.CancelFunc
+	trimDeadline    time.Time
+	trimTimedOut    bool
+	stopAttempted   bool
+	stopContextErr  error
+	stopped         bool
+}
+
+type pairRequestBudgetRunner struct {
+	project           string
+	cancelRequest     context.CancelFunc
+	facadeLimit       time.Duration
+	firstTrimDeadline time.Time
+	elapsed           time.Duration
+	trimAttempts      []string
+	stopAttempts      []string
+	stopContextErr    error
+	stopped           map[string]bool
+	verifiedStops     []string
+}
+
+func (runner *pairRequestBudgetRunner) consume(ctx context.Context, duration time.Duration) error {
+	if duration > 0 {
+		runner.elapsed += duration
+	}
+	if runner.elapsed >= runner.facadeLimit {
+		runner.cancelRequest()
+	}
+	return context.Cause(ctx)
+}
+
+func (runner *pairRequestBudgetRunner) Run(
+	ctx context.Context,
+	_ string,
+	arguments []string,
+	_ []string,
+	_ io.Reader,
+) ([]byte, []byte, error) {
+	joined := strings.Join(arguments, " ")
+	if strings.Contains(joined, "fstrim -av") {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			return nil, nil, errors.New("trim command has no outer deadline")
+		}
+		vm := arguments[1]
+		runner.trimAttempts = append(runner.trimAttempts, vm)
+		trimBudget := time.Until(deadline)
+		if runner.firstTrimDeadline.IsZero() {
+			runner.firstTrimDeadline = deadline
+		} else if deadline.Equal(runner.firstTrimDeadline) {
+			// The first trim already consumed this shared virtual deadline.
+			trimBudget = 0
+		}
+		if err := runner.consume(ctx, trimBudget); err != nil {
+			return []byte("sensitive guest trim output"), nil, err
+		}
+		return []byte("sensitive guest trim output"), nil, context.DeadlineExceeded
+	}
+	for _, vm := range []string{"e2e-vm-1", "e2e-vm-2"} {
+		if joined == "stop "+vm+" --project "+runner.project+" --timeout 60" {
+			runner.stopAttempts = append(runner.stopAttempts, vm)
+			if err := context.Cause(ctx); err != nil {
+				runner.stopContextErr = err
+				return nil, nil, err
+			}
+			if err := runner.consume(ctx, 5*time.Second); err != nil {
+				runner.stopContextErr = err
+				return nil, nil, err
+			}
+			runner.stopped[vm] = true
+			return nil, nil, nil
+		}
+	}
+	if err := context.Cause(ctx); err != nil {
+		return nil, nil, err
+	}
+	switch joined {
+	case "project list --format csv -c n":
+		return []byte(runner.project + "\n"), nil, nil
+	case "project get " + runner.project + " user.subyard.managed":
+		return []byte(managedMarker + "\n"), nil, nil
+	case "info e2e-vm-1 --project " + runner.project,
+		"info e2e-vm-2 --project " + runner.project:
+		return nil, nil, nil
+	case "list e2e-vm-1 --project " + runner.project + " -f csv -c s":
+		return runner.vmState(ctx, "e2e-vm-1")
+	case "list e2e-vm-2 --project " + runner.project + " -f csv -c s":
+		return runner.vmState(ctx, "e2e-vm-2")
+	}
+	if len(arguments) > 0 && arguments[0] == "exec" {
+		return nil, nil, nil
+	}
+	return nil, nil, fmt.Errorf("unexpected call: %s", joined)
+}
+
+func (runner *pairRequestBudgetRunner) vmState(
+	ctx context.Context,
+	vm string,
+) ([]byte, []byte, error) {
+	if !runner.stopped[vm] {
+		return []byte("RUNNING\n"), nil, nil
+	}
+	if err := runner.consume(ctx, 5*time.Second); err != nil {
+		return nil, nil, err
+	}
+	runner.verifiedStops = append(runner.verifiedStops, vm)
+	return []byte("STOPPED\n"), nil, nil
+}
+
+func (*pairRequestBudgetRunner) LookPath(name string) (string, error) {
+	return "/fixture/" + name, nil
+}
+
+func (runner *requestDeadlineRunner) Run(
+	ctx context.Context,
+	_ string,
+	arguments []string,
+	_ []string,
+	_ io.Reader,
+) ([]byte, []byte, error) {
+	joined := strings.Join(arguments, " ")
+	if strings.Contains(joined, "fstrim -av") {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			return nil, nil, errors.New("trim command has no outer deadline")
+		}
+		runner.trimDeadline = deadline
+		runner.trimTimedOut = true
+		if deadline.After(runner.requestDeadline.Add(-20 * time.Second)) {
+			runner.cancelRequest()
+		}
+		return nil, nil, context.DeadlineExceeded
+	}
+	if joined == "stop e2e-vm-1 --project "+runner.project+" --timeout 60" {
+		runner.stopAttempted = true
+		runner.stopContextErr = context.Cause(ctx)
+		if runner.stopContextErr != nil {
+			return nil, nil, runner.stopContextErr
+		}
+		runner.stopped = true
+		return nil, nil, nil
+	}
+	if err := context.Cause(ctx); err != nil {
+		return nil, nil, err
+	}
+	switch joined {
+	case "project list --format csv -c n":
+		return []byte(runner.project + "\n"), nil, nil
+	case "project get " + runner.project + " user.subyard.managed":
+		return []byte(managedMarker + "\n"), nil, nil
+	case "info e2e-vm-1 --project " + runner.project:
+		return nil, nil, nil
+	case "info e2e-vm-2 --project " + runner.project:
+		return nil, nil, errors.New("not found")
+	case "list e2e-vm-1 --project " + runner.project + " -f csv -c s":
+		if runner.stopped {
+			return []byte("STOPPED\n"), nil, nil
+		}
+		return []byte("RUNNING\n"), nil, nil
+	}
+	if len(arguments) > 0 && arguments[0] == "exec" {
+		return nil, nil, nil
+	}
+	return nil, nil, fmt.Errorf("unexpected call: %s", joined)
+}
+
+func (*requestDeadlineRunner) LookPath(name string) (string, error) {
+	return "/fixture/" + name, nil
 }
 
 func (runner *fakeRunner) Run(
-	_ context.Context,
+	ctx context.Context,
 	name string,
 	arguments []string,
 	environment []string,
@@ -36,6 +210,7 @@ func (runner *fakeRunner) Run(
 ) ([]byte, []byte, error) {
 	call := append([]string{name}, arguments...)
 	runner.calls = append(runner.calls, call)
+	runner.contexts = append(runner.contexts, ctx)
 	if runner.handler != nil {
 		return runner.handler(name, arguments, environment, stdin)
 	}
@@ -404,6 +579,366 @@ func TestReleaseStopsRebootingGuestWhenKeyCleanupIsTemporarilyUnavailable(t *tes
 	}
 	if !strings.Contains(warnings.String(), "guest lease cleanup deferred") {
 		t.Fatalf("deferred cleanup warning = %q", warnings.String())
+	}
+}
+
+func TestReleaseTrimsRunningRetainedVMAfterCleanupBeforeVerifiedStop(t *testing.T) {
+	cfg := fixtureConfig(t)
+	cfg.Project += "-slot-1"
+	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg.keyPath()+".pub",
+		[]byte(fixturePublicKey(t)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(cfg.AgentAuthorizedKeys), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg.AgentAuthorizedKeys, []byte("still-reachable\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stopped := false
+	trace := []string{}
+	runner := &fakeRunner{handler: func(
+		_ string, arguments, _ []string, _ io.Reader,
+	) ([]byte, []byte, error) {
+		switch strings.Join(arguments, " ") {
+		case "project list --format csv -c n":
+			return []byte(cfg.Project + "\n"), nil, nil
+		case "project get " + cfg.Project + " user.subyard.managed":
+			return []byte(managedMarker + "\n"), nil, nil
+		case "info e2e-vm-1 --project " + cfg.Project:
+			return nil, nil, nil
+		case "info e2e-vm-2 --project " + cfg.Project:
+			return nil, nil, errors.New("not found")
+		case "list e2e-vm-1 --project " + cfg.Project + " -f csv -c s":
+			if stopped {
+				trace = append(trace, "stopped-verified")
+				return []byte("STOPPED\n"), nil, nil
+			}
+			return []byte("RUNNING\n"), nil, nil
+		case "stop e2e-vm-1 --project " + cfg.Project + " --timeout 60":
+			stopped = true
+			trace = append(trace, "stop")
+			return nil, nil, nil
+		}
+		if len(arguments) > 0 && arguments[0] == "exec" {
+			payload, err := os.ReadFile(cfg.AgentAuthorizedKeys)
+			if err != nil || strings.Contains(string(payload), "port-forwarding") ||
+				strings.Contains(string(payload), "still-reachable") {
+				return nil, nil, fmt.Errorf("guest command ran before host fence: %q, %v", payload, err)
+			}
+			if len(trace) == 0 {
+				trace = append(trace, "host-fenced")
+			}
+			joined := strings.Join(arguments, " ")
+			switch {
+			case strings.Contains(joined, "WORKER_KEY="):
+				trace = append(trace, "managed-key-dev")
+			case strings.Contains(joined, "ssh_dir=/root/.ssh"):
+				trace = append(trace, "managed-key-root")
+			case strings.Contains(joined, "/run/subyard-e2e-lease.json"):
+				trace = append(trace, "lease-context")
+			case strings.Contains(joined, "fstrim -av"):
+				trace = append(trace, "trim")
+			}
+			return nil, nil, nil
+		}
+		return nil, nil, fmt.Errorf("unexpected call: %s", strings.Join(arguments, " "))
+	}}
+	runtime := &Runtime{Config: cfg, Runner: runner, Stdout: io.Discard, Stderr: io.Discard}
+	if err := runtime.stopRetained(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if payload, err := os.ReadFile(cfg.AgentAuthorizedKeys); err != nil ||
+		strings.Contains(string(payload), "port-forwarding") ||
+		strings.Contains(string(payload), "still-reachable") {
+		t.Fatalf("host access fence = %q, %v", payload, err)
+	}
+	if !strings.Contains(callsText(runner.calls), "incus exec e2e-vm-1 --project "+cfg.Project+
+		" -- timeout --signal=TERM --kill-after=10 15 sh -eu -c sync\nfstrim -av") {
+		t.Fatalf("trim command was not bounded sync plus fstrim:\n%s", callsText(runner.calls))
+	}
+	if want := []string{
+		"host-fenced", "managed-key-dev", "managed-key-root", "lease-context",
+		"trim", "stop", "stopped-verified",
+	}; !slices.Equal(trace, want) {
+		t.Fatalf("release trace = %v, want %v", trace, want)
+	}
+}
+
+func TestReleaseContinuesAfterRetainedGuestTrimDeadlineWithoutGuestOutput(t *testing.T) {
+	cfg := fixtureConfig(t)
+	cfg.Project += "-slot-1"
+	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg.keyPath()+".pub",
+		[]byte(fixturePublicKey(t)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stopped := false
+	runner := &fakeRunner{handler: func(
+		_ string, arguments, _ []string, _ io.Reader,
+	) ([]byte, []byte, error) {
+		switch strings.Join(arguments, " ") {
+		case "project list --format csv -c n":
+			return []byte(cfg.Project + "\n"), nil, nil
+		case "project get " + cfg.Project + " user.subyard.managed":
+			return []byte(managedMarker + "\n"), nil, nil
+		case "info e2e-vm-1 --project " + cfg.Project:
+			return nil, nil, nil
+		case "info e2e-vm-2 --project " + cfg.Project:
+			return nil, nil, errors.New("not found")
+		case "list e2e-vm-1 --project " + cfg.Project + " -f csv -c s":
+			if stopped {
+				return []byte("STOPPED\n"), nil, nil
+			}
+			return []byte("RUNNING\n"), nil, nil
+		case "stop e2e-vm-1 --project " + cfg.Project + " --timeout 60":
+			stopped = true
+			return nil, nil, nil
+		}
+		if len(arguments) > 0 && arguments[0] == "exec" {
+			if strings.Contains(strings.Join(arguments, " "), "fstrim -av") {
+				return []byte("secret guest output"), nil, context.DeadlineExceeded
+			}
+			return nil, nil, nil
+		}
+		return nil, nil, fmt.Errorf("unexpected call: %s", strings.Join(arguments, " "))
+	}}
+	var warnings bytes.Buffer
+	runtime := &Runtime{Config: cfg, Runner: runner, Stdout: io.Discard, Stderr: &warnings}
+	if err := runtime.stopRetained(context.Background()); err != nil {
+		t.Fatalf("trim deadline prevented release: %v", err)
+	}
+	trimIndex := -1
+	for index, call := range runner.calls {
+		if strings.Contains(strings.Join(call, " "), "fstrim -av") {
+			trimIndex = index
+			break
+		}
+	}
+	if trimIndex < 0 {
+		t.Fatal("release did not attempt retained guest trim")
+	}
+	deadline, ok := runner.contexts[trimIndex].Deadline()
+	if !ok {
+		t.Fatal("retained guest trim Incus execution has no outer deadline")
+	}
+	if remaining := time.Until(deadline); remaining < retainedGuestTrimTotalTimeout-time.Second ||
+		remaining > retainedGuestTrimTotalTimeout+time.Second {
+		t.Fatalf("retained guest trim outer deadline remaining=%s, want about %s",
+			remaining, retainedGuestTrimTotalTimeout)
+	}
+	if got, want := warnings.String(), "test-vms: retained guest disk trim failed; continuing to stop\n"; got != want {
+		t.Fatalf("trim warning = %q, want %q", got, want)
+	}
+	if strings.Contains(warnings.String(), "secret guest output") {
+		t.Fatalf("trim warning leaked guest output: %q", warnings.String())
+	}
+	if !strings.Contains(callsText(runner.calls),
+		"incus stop e2e-vm-1 --project "+cfg.Project+" --timeout 60") {
+		t.Fatal("trim deadline did not continue to verified stop")
+	}
+}
+
+func TestRetainedGuestTrimTimeoutLeavesRequestContextForVerifiedStop(t *testing.T) {
+	cfg := fixtureConfig(t)
+	cfg.Project += "-slot-1"
+	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg.keyPath()+".pub",
+		[]byte(fixturePublicKey(t)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := &requestDeadlineRunner{project: cfg.Project}
+	runtime := &Runtime{Config: cfg, Runner: runner, Stdout: io.Discard, Stderr: io.Discard}
+	requestDeadline := time.Now().Add(time.Minute)
+	ctx, cancel := context.WithDeadline(context.Background(), requestDeadline)
+	defer cancel()
+	runner.requestDeadline = requestDeadline
+	runner.cancelRequest = cancel
+	if err := runtime.stopRetained(ctx); err != nil {
+		t.Fatalf("trim timeout consumed the stop context: %v", err)
+	}
+	if !runner.trimTimedOut {
+		t.Fatal("fixture trim did not reach its bounded deadline")
+	}
+	if reserve := runner.requestDeadline.Sub(runner.trimDeadline); reserve < 20*time.Second {
+		t.Fatalf("trim left %s of the request lifetime for stop, want at least 20s", reserve)
+	}
+	if !runner.stopAttempted {
+		t.Fatal("trim timeout prevented stop")
+	}
+	if runner.stopContextErr != nil {
+		t.Fatalf("stop inherited an exhausted request context: %v", runner.stopContextErr)
+	}
+	if !runner.stopped {
+		t.Fatal("stop was not verified")
+	}
+}
+
+func TestRetainedGuestPairTrimBudgetsLeaveTimeForBothVerifiedStops(t *testing.T) {
+	cfg := fixtureConfig(t)
+	cfg.Project += "-slot-1"
+	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg.keyPath()+".pub",
+		[]byte(fixturePublicKey(t)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := &pairRequestBudgetRunner{
+		project:     cfg.Project,
+		facadeLimit: time.Minute,
+		stopped:     map[string]bool{},
+	}
+	runtime := &Runtime{Config: cfg, Runner: runner, Stdout: io.Discard}
+	var warnings bytes.Buffer
+	runtime.Stderr = &warnings
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(runner.facadeLimit))
+	defer cancel()
+	runner.cancelRequest = cancel
+	if err := runtime.stopRetained(ctx); err != nil {
+		t.Fatalf("cumulative trim budgets exhausted the request before both verified stops: %v", err)
+	}
+	if got, want := runner.trimAttempts, []string{"e2e-vm-1", "e2e-vm-2"}; !slices.Equal(got, want) {
+		t.Fatalf("trim attempts = %v, want %v", got, want)
+	}
+	if got, want := runner.stopAttempts, []string{"e2e-vm-1", "e2e-vm-2"}; !slices.Equal(got, want) {
+		t.Fatalf("stop attempts = %v, want %v", got, want)
+	}
+	if got, want := runner.verifiedStops, []string{"e2e-vm-1", "e2e-vm-2"}; !slices.Equal(got, want) {
+		t.Fatalf("verified stops = %v, want %v", got, want)
+	}
+	if runner.stopContextErr != nil {
+		t.Fatalf("stop inherited an exhausted request context: %v", runner.stopContextErr)
+	}
+	if runner.elapsed >= runner.facadeLimit {
+		t.Fatalf("pair release consumed %s, facade limit %s", runner.elapsed, runner.facadeLimit)
+	}
+	if got, want := warnings.String(), strings.Repeat(
+		"test-vms: retained guest disk trim failed; continuing to stop\n", 2,
+	); got != want {
+		t.Fatalf("trim warnings = %q, want %q", got, want)
+	}
+	if strings.Contains(warnings.String(), "sensitive guest trim output") {
+		t.Fatalf("trim warning leaked guest output: %q", warnings.String())
+	}
+}
+
+func TestReleaseSlotContinuesAfterOrdinaryRetainedGuestTrimCommandError(t *testing.T) {
+	cfg := fixtureConfig(t)
+	cfg.Project += "-slot-1"
+	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg.keyPath()+".pub",
+		[]byte(fixturePublicKey(t)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := LeaseStore{Path: cfg.leaseState(), SlotCount: cfg.SlotCount}
+	grant, err := store.AcquireSlot("client", "SHA256:key", "", "trim-command-error", "slot-001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.MarkHeld(grant); err != nil {
+		t.Fatal(err)
+	}
+	stopped := false
+	runner := &fakeRunner{handler: func(
+		_ string, arguments, _ []string, _ io.Reader,
+	) ([]byte, []byte, error) {
+		switch strings.Join(arguments, " ") {
+		case "project list --format csv -c n":
+			return []byte(cfg.Project + "\n"), nil, nil
+		case "project get " + cfg.Project + " user.subyard.managed":
+			return []byte(managedMarker + "\n"), nil, nil
+		case "info e2e-vm-1 --project " + cfg.Project:
+			return nil, nil, nil
+		case "info e2e-vm-2 --project " + cfg.Project:
+			return nil, nil, errors.New("not found")
+		case "list e2e-vm-1 --project " + cfg.Project + " -f csv -c s":
+			if stopped {
+				return []byte("STOPPED\n"), nil, nil
+			}
+			return []byte("RUNNING\n"), nil, nil
+		case "stop e2e-vm-1 --project " + cfg.Project + " --timeout 60":
+			stopped = true
+			return nil, nil, nil
+		}
+		if len(arguments) > 0 && arguments[0] == "exec" {
+			if strings.Contains(strings.Join(arguments, " "), "fstrim -av") {
+				return []byte("sensitive guest output"), nil, &CommandError{
+					Name: "incus", Args: append([]string(nil), arguments...), ExitCode: 1,
+					Message: "ordinary guest trim command failure",
+				}
+			}
+			return nil, nil, nil
+		}
+		return nil, nil, fmt.Errorf("unexpected call: %s", strings.Join(arguments, " "))
+	}}
+	var warnings bytes.Buffer
+	runtime := &Runtime{Config: cfg, Runner: runner, Stdout: io.Discard, Stderr: &warnings}
+	runtime.finishDrain = func(ctx context.Context, store LeaseStore, slot LeaseSlot) error {
+		evidence, stopErr := runtime.stopRetainedWithEvidence(ctx)
+		runtime.recordStopOutcome(slot, evidence, stopErr)
+		return store.FinishDrain(slot.SlotID, stopErr)
+	}
+	if err := runtime.ReleaseSlot(context.Background(), store, grant); err != nil {
+		t.Fatalf("ordinary trim command error prevented release: %v", err)
+	}
+	if got, want := warnings.String(), "test-vms: retained guest disk trim failed; continuing to stop\n"; got != want {
+		t.Fatalf("trim warning = %q, want %q", got, want)
+	}
+	for _, secret := range []string{"sensitive guest output", "ordinary guest trim command failure"} {
+		if strings.Contains(warnings.String(), secret) {
+			t.Fatalf("trim warning leaked guest detail %q: %q", secret, warnings.String())
+		}
+	}
+	if !strings.Contains(callsText(runner.calls),
+		"incus stop e2e-vm-1 --project "+cfg.Project+" --timeout 60") {
+		t.Fatal("ordinary trim command error did not continue to stop")
+	}
+	pool, err := store.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := pool.Slots[0].State; got != SlotAvailable {
+		t.Fatalf("slot state after ordinary trim command error = %s, want %s", got, SlotAvailable)
+	}
+}
+
+func TestReleaseDoesNotTrimStoppedRetainedVM(t *testing.T) {
+	cfg := fixtureConfig(t)
+	cfg.Project += "-slot-1"
+	runner := &fakeRunner{handler: func(
+		_ string, arguments, _ []string, _ io.Reader,
+	) ([]byte, []byte, error) {
+		switch strings.Join(arguments, " ") {
+		case "project list --format csv -c n":
+			return []byte(cfg.Project + "\n"), nil, nil
+		case "project get " + cfg.Project + " user.subyard.managed":
+			return []byte(managedMarker + "\n"), nil, nil
+		case "info e2e-vm-1 --project " + cfg.Project:
+			return nil, nil, nil
+		case "info e2e-vm-2 --project " + cfg.Project:
+			return nil, nil, errors.New("not found")
+		case "list e2e-vm-1 --project " + cfg.Project + " -f csv -c s":
+			return []byte("STOPPED\n"), nil, nil
+		}
+		return nil, nil, fmt.Errorf("unexpected call: %s", strings.Join(arguments, " "))
+	}}
+	runtime := &Runtime{Config: cfg, Runner: runner, Stdout: io.Discard, Stderr: io.Discard}
+	if err := runtime.stopRetained(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(callsText(runner.calls), "fstrim -av") ||
+		strings.Contains(callsText(runner.calls), "incus stop e2e-vm-1") {
+		t.Fatalf("stopped retained VM received trim or stop:\n%s", callsText(runner.calls))
 	}
 }
 
