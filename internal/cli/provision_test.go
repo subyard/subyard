@@ -160,7 +160,7 @@ func TestProvisionCLIAndRPCUseNativeRunner(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]rpcPlannedOperation)}
+			handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]*preparedCommand)}
 			if _, err := handler.Handle(context.Background(), rpc.Call{
 				ID: "plan", OperationID: operationID, Method: "operation.plan",
 				Params: json.RawMessage(`{"command":"provision","arguments":[]}`),

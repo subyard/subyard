@@ -370,7 +370,7 @@ func TestRPCOwnerInventoryPreservesLegacyProjectState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]rpcPlannedOperation)}
+	handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]*preparedCommand)}
 	result, err := handler.Handle(context.Background(), rpc.Call{
 		Method: "owner.inventory", Params: json.RawMessage(`{}`),
 	}, nil)

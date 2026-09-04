@@ -440,7 +440,7 @@ func TestStructuredStartSharesPlanAndAdapterAcrossCLIAndRPC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]rpcPlannedOperation)}
+	handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]*preparedCommand)}
 	planResult, err := handler.Handle(context.Background(), rpc.Call{
 		ID: "plan", OperationID: "operation-rpc", Method: "operation.plan",
 		Params: json.RawMessage(`{"command":"start","arguments":[]}`),
@@ -515,7 +515,7 @@ func TestUpdateUsesThePreparedReleaseAcrossRPCPlanAndExecute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]rpcPlannedOperation)}
+	handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]*preparedCommand)}
 	params, _ := json.Marshal(map[string]any{
 		"command": "update", "arguments": []string{
 			"--version", "1.2.3", "--runtime-root", runtimeRoot,
@@ -1440,7 +1440,7 @@ func TestStructuredMutationSharesTypedAdapterAcrossCLIAndRPC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]rpcPlannedOperation)}
+	handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]*preparedCommand)}
 	planResult, err := handler.Handle(context.Background(), rpc.Call{
 		ID: "plan-stop", OperationID: "operation-stop-rpc", Method: "operation.plan",
 		Params: json.RawMessage(`{"command":"stop","arguments":["--force"]}`),
@@ -2487,7 +2487,7 @@ func TestV2MutationGateRedactsCandidateVerificationPathsForCLIAndRPC(t *testing.
 		if err != nil {
 			t.Fatal(err)
 		}
-		handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]rpcPlannedOperation)}
+		handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]*preparedCommand)}
 		params, err := json.Marshal(map[string]any{"command": "start", "arguments": []string{}})
 		if err != nil {
 			t.Fatal(err)
@@ -2598,7 +2598,7 @@ func TestRPCUpdateDifferentTargetIsGatedBeforePublication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]rpcPlannedOperation)}
+	handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]*preparedCommand)}
 	params, err := json.Marshal(map[string]any{
 		"command":   "update",
 		"arguments": []string{"--version", "9.9.9", "--runtime-root", runtimeRoot},
@@ -2713,7 +2713,7 @@ func TestRPCMutationGateBlocksPlanAndRechecksExecute(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]rpcPlannedOperation)}
+		handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]*preparedCommand)}
 		_, err = handler.Handle(context.Background(), rpc.Call{
 			Method: "operation.plan", OperationID: "gated-project-plan",
 			Params: json.RawMessage(`{"command":"code","arguments":["Demo"]}`),
@@ -2746,7 +2746,7 @@ func TestRPCMutationGateBlocksPlanAndRechecksExecute(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]rpcPlannedOperation)}
+		handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]*preparedCommand)}
 		result, err := handler.Handle(context.Background(), rpc.Call{
 			Method: "operation.plan", OperationID: "gated-execute",
 			Params: json.RawMessage(`{"command":"start","arguments":[]}`),
@@ -3111,7 +3111,7 @@ func TestRPCReadsDoNotRecoverProjectStore(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]rpcPlannedOperation)}
+			handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]*preparedCommand)}
 			if _, err := handler.Handle(context.Background(), rpc.Call{
 				Method: method, OperationID: "read-project-state", Params: json.RawMessage(`{}`),
 			}, nil); err != nil {

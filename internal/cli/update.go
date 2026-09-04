@@ -44,46 +44,6 @@ func (adapter releaseAdapter) Run(ctx context.Context, request domain.AdapterReq
 	return domain.AdapterResult{Schema: shelladapter.ProtocolSchema, OperationID: request.OperationID, Status: "ok"}, "", nil
 }
 
-func (cli *CLI) runUpdate(ctx context.Context, loaded config.Loaded, definition command.Definition, arguments []string) int {
-	execution, err := cli.prepareRelease(ctx, loaded, arguments)
-	if err != nil {
-		cli.errorf("update: %v", err)
-		return 1
-	}
-	defer execution.Close()
-	assumeYes := cli.env["ASSUME_YES"] == "1"
-	for _, argument := range arguments {
-		if argument == "-y" || argument == "--yes" {
-			assumeYes = true
-		}
-	}
-	orchestrator := cli.operationOrchestrator(cli.env["SUBYARD_OPERATION_ID"], loaded, nil, &definition)
-	plan, err := orchestrator.PlanAction(
-		ctx, loaded.Context, definition.Name, domain.RemotePolicy(definition.Remote),
-		execution.prepared.Action, domain.ActionDelta{
-			Changed: execution.prepared.Changed, Consequences: execution.prepared.Consequences,
-		}, assumeYes,
-	)
-	if err != nil {
-		if errors.Is(err, application.ErrDeclined) {
-			cli.errorf("operation declined")
-		} else {
-			cli.errorf("plan update: %v", err)
-		}
-		return 1
-	}
-	result, err := cli.executeRelease(ctx, orchestrator, plan, execution)
-	if err != nil {
-		cli.errorf("update: %v", err)
-		return 1
-	}
-	if result.Status != "ok" {
-		cli.errorf("update returned %s", result.Status)
-		return 1
-	}
-	return 0
-}
-
 func (cli *CLI) prepareRelease(ctx context.Context, loaded config.Loaded, arguments []string) (*releaseExecution, error) {
 	releaseEnvironment := maps.Clone(loaded.Environment)
 	releaseEnvironment["SUBYARD_OPERATION_ID"] = cli.env["SUBYARD_OPERATION_ID"]

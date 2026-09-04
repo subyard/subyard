@@ -50,7 +50,7 @@ func TestRPCRemotePlanContainsPreparedFingerprintBeforeApply(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]rpcPlannedOperation)}
+	handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]*preparedCommand)}
 	params, _ := json.Marshal(map[string]any{
 		"command": "remote", "arguments": []string{"add", "demo", "owner"},
 	})
@@ -102,7 +102,7 @@ func TestDirectAndRPCRemoteAddUseEquivalentOwnerActionPlans(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]rpcPlannedOperation)}
+	handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]*preparedCommand)}
 	params, _ := json.Marshal(map[string]any{
 		"command": "remote", "arguments": []string{"add", "demo", "owner"},
 	})
@@ -142,7 +142,7 @@ func TestRPCOperationPlanMapsActionPolicyInvalid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]rpcPlannedOperation)}
+	handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]*preparedCommand)}
 	params, _ := json.Marshal(map[string]any{
 		"command": "remote", "arguments": []string{"add", "demo", "owner"},
 	})
@@ -168,7 +168,7 @@ func TestRPCOperationExecuteMapsActionPolicyInvalid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]rpcPlannedOperation)}
+	handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]*preparedCommand)}
 	params, _ := json.Marshal(map[string]any{
 		"command": "remote", "arguments": []string{"add", "demo", "owner"},
 	})

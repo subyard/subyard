@@ -164,7 +164,7 @@ func TestKeysReadOperationSkipsConfirmation(t *testing.T) {
 func TestRPCKeysPrepareBuildsOwnerPlanWithoutReadingProtectedInput(t *testing.T) {
 	input := &credentialInputProbe{reader: strings.NewReader("protected-value")}
 	program, loaded, _, _ := credentialCLIFixture(t, input, &testkit.Prompt{}, true)
-	handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]rpcPlannedOperation)}
+	handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]*preparedCommand)}
 	params, err := json.Marshal(map[string]any{"arguments": []string{"add", "fixture"}})
 	if err != nil {
 		t.Fatal(err)

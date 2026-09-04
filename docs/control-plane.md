@@ -14,6 +14,7 @@ bin/yard                                source-tree and release-runtime launcher
 cmd/yard                                native CLI/RPC entrypoint
 internal/
   ├── command, config, domain           manifest and immutable context
+  ├── cli/prepared_command.go           shared core-command prepare/execute ownership
   ├── application, credential           routing/reconciliation and credential DAG policy
   ├── state, migration, rpc              atomic state, schema checks and framed sessions
   └── adapters/                          Incus, release, metadata and local/SSH transports
@@ -62,6 +63,24 @@ name|aliases|handler|arg0|remote|effect|confirmation|visibility|section|completi
 Profile resource commands use the separate `.res` interface below because profiles own those
 commands and mechanics.
 
+Core command metadata and executable behavior deliberately have different owners. The external
+manifest remains the source of aliases, visibility, routing, effects, help and completion. One Go
+resolver maps its reserved handler families to executable behavior, and one prepared command owns
+the canonical arguments, selected context, operation-specific state, plan, execution and cleanup:
+
+```text
+commands.registry → resolve behavior → prepare command → plan → confirm → execute
+                                            │                    │
+                                            ├─ direct CLI prompt ┤
+                                            └─ RPC single-use ID ┘
+```
+
+Direct CLI and RPC branch only at their public confirmation and transport boundaries. Startup
+validation rejects a new public mutating handler unless it is owned by this pipeline or has an
+explicit dedicated-transport exclusion. Interactive sessions, protected credential payloads and
+profile resources keep their purpose-built paths. Host and config commands also remain on their
+dedicated non-RPC handlers.
+
 ### RPC
 
 `yard rpc --stdio` is the only machine protocol. Each frame is a four-byte big-endian length
@@ -77,10 +96,11 @@ revisions remain typed event data and cannot make the RPC revision move backward
 The switched surface exposes `command.list`, `context.get`, `operation.route`, `operation.plan`,
 `operation.execute`, `project.list`, `owner.inventory`, `yard.status`, `credential.list`, `credential.status`,
 `incus.events`, `system.snapshot`, `system.resync` and `system.ping`. `operation.plan` accepts every
-non-interactive mutating command backed by the structured adapter allowlist. Interactive terminal and
-protected credential-payload commands keep their dedicated transport rather than treating human
-stdin/stdout as a typed result. Its server-side plan is bounded and single-use; execution requires an
-explicit `confirmed=true` and emits correlated start/final events. The full
+eligible public mutating core command selected by the same manifest-derived behavior resolver used by
+the direct CLI. Interactive terminal and protected credential-payload commands keep their dedicated
+transport rather than treating human stdin/stdout as a typed result. The server stores the exact
+prepared command, including its cleanup ownership, in a bounded single-use table; execution requires
+an explicit `confirmed=true` and emits correlated start/final events. The full
 snapshot contains one revision over context, public commands, project inventory, yard status and
 redacted credential metadata; `snapshot.ready` and Incus events use the same ordered event channel.
 Human CLI output is never parsed as a fallback API. Secret-like fields are rejected recursively from
