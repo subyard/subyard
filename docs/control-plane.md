@@ -206,6 +206,29 @@ installer publishes the candidate without touching stable links, then the candid
 ordinary assessed `ReleaseTransition`. The superseded runtime is never allowed to call mutating
 `_migrate` verbs against the candidate.
 
+A v0.11.1 runtime can stop after activation with journal checkpoint `reconciling` and blocker
+resource `transition.observation-scope`. That exact state is recovered only by the standalone
+installer from a newer supported patch release; the active v0.11.1 command remains fail-closed.
+Until that patch is published, do not delete the journal, ledger, transaction evidence, or runtime
+links, and do not retry mutating commands. Download the official HTTPS asset and let its verified
+candidate own the replacement plan, archive, compare-and-swap, reconciliation, and link update:
+
+```bash
+PATCH_VERSION=0.11.2 # or a later supported patch release
+(
+  set -eu
+  installer="$(mktemp)"
+  trap 'rm -f -- "$installer"' EXIT
+  curl -fsSL --proto '=https' --tlsv1.2 \
+    "https://github.com/Subyard/Subyard/releases/download/v${PATCH_VERSION}/subyard-install.sh" \
+    -o "$installer"
+  bash "$installer" --version "$PATCH_VERSION"
+)
+```
+
+The command is interactive by default. Add `--yes` only for an intentional non-interactive run
+after reviewing the reported changes.
+
 Registry v2 contains only compiled, typed one-time capabilities. Activation reconcilers separately
 refresh materialized config, an already-active test-VM broker and an installed host power runtime;
 they do not change the migration ledger and never start an inactive service as an update side

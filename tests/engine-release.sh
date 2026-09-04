@@ -367,4 +367,330 @@ fi
   && [ "$(readlink "$runtime_root/previous")" = "$initial_target" ] \
   || fail 'failed inspection changed stable runtime links'
 
+# v0.11.1 could durably activate and then strand an exact transition at
+# reconciliation when the next process observed a different activation scope.
+# Seed that state through the public transition API, then exercise the same
+# standalone bootstrap operators use: immutable publication followed by the
+# exact packaged candidate runtime.
+recovery_release="$TMP/v0111-recovery-release"
+recovery_previous_bundle="$recovery_release/subyard-0.9.1-linux-amd64.tar.gz"
+recovery_older_source_bundle="$recovery_release/subyard-0.11.0-linux-amd64.tar.gz"
+recovery_source_bundle="$recovery_release/subyard-0.11.1-linux-amd64.tar.gz"
+recovery_candidate_bundle="$recovery_release/subyard-0.11.2-linux-amd64.tar.gz"
+"$ROOT/dev/package-engine.sh" --output-dir "$recovery_release" --version 0.9.1 >/dev/null
+"$ROOT/dev/package-engine.sh" --output-dir "$recovery_release" --version 0.11.0 >/dev/null
+"$ROOT/dev/package-engine.sh" --output-dir "$recovery_release" --version 0.11.1 >/dev/null
+"$ROOT/dev/package-engine.sh" --output-dir "$recovery_release" --version 0.11.2 >/dev/null
+recovery_fixture="$TMP/release-transition-fixture"
+go build -o "$recovery_fixture" "$ROOT/tests/helpers/release-transition-fixture"
+recovery_home="$TMP/v0111-recovery-home"
+recovery_runtime="$recovery_home/runtime"
+recovery_config="$recovery_home/config"
+recovery_cache="$recovery_home/cache"
+install -d -m 0700 "$recovery_home" "$recovery_config/yards/recovery-yard"
+printf '%s\n' 'YARD_TEMPLATE=test-vms' 'SSH_PORT=2293' 'AGENTS=' \
+  > "$recovery_config/yards/recovery-yard/config.env"
+chmod 0600 "$recovery_config/yards/recovery-yard/config.env"
+"$ROOT/scripts/install-runtime-release.sh" \
+  --runtime-root "$recovery_runtime" \
+  --bundle "$recovery_previous_bundle" --checksum "$recovery_previous_bundle.sha256" \
+  --manifest "$recovery_previous_bundle.manifest.json" \
+  --provenance "$recovery_previous_bundle.provenance.json" >/dev/null
+recovery_previous_path="$(readlink "$recovery_runtime/current")"
+recovery_previous="${recovery_previous_path#releases/}"
+recovery_source_path="$("$ROOT/scripts/install-runtime-release.sh" \
+  --runtime-root "$recovery_runtime" --publish-only \
+  --bundle "$recovery_source_bundle" --checksum "$recovery_source_bundle.sha256" \
+  --manifest "$recovery_source_bundle.manifest.json" \
+  --provenance "$recovery_source_bundle.provenance.json")"
+recovery_source="${recovery_source_path#releases/}"
+"$recovery_fixture" seed \
+  "$recovery_runtime" "$recovery_config" "$recovery_previous" "$recovery_source" >/dev/null
+recovery_source_journal="$recovery_config/release-transition/v2/journal.json"
+recovery_ledger="$recovery_config/release-transition/v2/ledger.json"
+jq -e '.checkpoint == "reconciling" and .transaction == "tx-source-v0111" and
+  (.steps | length) == 2 and all(.steps[]; .checkpoint == "verified")' \
+  "$recovery_source_journal" >/dev/null \
+  || fail 'public fixture did not produce the exact v0.11.1 post-activation journal'
+source_blocker="$TMP/v0111-source-blocker.json"
+HOME="$recovery_home" SUBYARD_HOME="$recovery_home/data" \
+  SUBYARD_CONFIG_HOME="$recovery_config" SUBYARD_YARD=recovery-yard \
+  YARD_RELEASE_CACHE="$recovery_cache" \
+  SUBYARD_POWER_RECONCILER_PATH="$TMP/missing-power-reconciler" \
+  SUBYARD_POWER_UNIT_PATH="$TMP/missing-power-unit" \
+  "$recovery_runtime/current/bin/yard" update --check --offline --version 0.11.1 \
+    --runtime-root "$recovery_runtime" > "$source_blocker"
+jq -s -e 'map(select(type == "object" and has("blockers"))) as $inspections |
+  ($inspections | length) == 1 and ($inspections[0].blockers | length) == 1 and
+  $inspections[0].blockers[0].resource == "transition.observation-scope"' \
+  "$source_blocker" >/dev/null \
+  || fail 'v0.11.1 process did not reproduce the post-activation scope blocker'
+recovery_baseline="$TMP/v0111-recovery-baseline"
+install -d "$recovery_baseline"
+cp -a "$recovery_runtime" "$recovery_baseline/runtime"
+cp -a "$recovery_config" "$recovery_baseline/config"
+cp "$recovery_ledger" "$recovery_baseline/ledger.json"
+
+# Source-version admission is a runtime fact, not a journal field. Build a
+# second otherwise-equivalent protected fixture whose verified source process
+# reports v0.11.0, so the standalone bridge must reject it independently of
+# the newer candidate version.
+source_version_home="$TMP/v0110-source-home"
+source_version_runtime="$source_version_home/runtime"
+source_version_config="$source_version_home/config"
+install -d -m 0700 "$source_version_home" "$source_version_config/yards/recovery-yard"
+cp "$recovery_config/yards/recovery-yard/config.env" \
+  "$source_version_config/yards/recovery-yard/config.env"
+"$ROOT/scripts/install-runtime-release.sh" \
+  --runtime-root "$source_version_runtime" \
+  --bundle "$recovery_previous_bundle" --checksum "$recovery_previous_bundle.sha256" \
+  --manifest "$recovery_previous_bundle.manifest.json" \
+  --provenance "$recovery_previous_bundle.provenance.json" >/dev/null
+source_version_previous_path="$(readlink "$source_version_runtime/current")"
+source_version_previous="${source_version_previous_path#releases/}"
+source_version_source_path="$("$ROOT/scripts/install-runtime-release.sh" \
+  --runtime-root "$source_version_runtime" --publish-only \
+  --bundle "$recovery_older_source_bundle" --checksum "$recovery_older_source_bundle.sha256" \
+  --manifest "$recovery_older_source_bundle.manifest.json" \
+  --provenance "$recovery_older_source_bundle.provenance.json")"
+source_version_source="${source_version_source_path#releases/}"
+"$recovery_fixture" seed \
+  "$source_version_runtime" "$source_version_config" \
+  "$source_version_previous" "$source_version_source" >/dev/null
+source_version_baseline="$TMP/v0110-source-baseline"
+install -d "$source_version_baseline"
+cp -a "$source_version_runtime" "$source_version_baseline/runtime"
+cp -a "$source_version_config" "$source_version_baseline/config"
+
+# Inspect the already-published candidate directly before the standalone
+# bootstrap mutates links or transition state. This is the exact Plan the
+# terminal replacement journal and immutable archive must retain.
+recovery_candidate_path="$("$ROOT/scripts/install-runtime-release.sh" \
+  --runtime-root "$recovery_runtime" --publish-only \
+  --bundle "$recovery_candidate_bundle" --checksum "$recovery_candidate_bundle.sha256" \
+  --manifest "$recovery_candidate_bundle.manifest.json" \
+  --provenance "$recovery_candidate_bundle.provenance.json")"
+case "$recovery_candidate_path" in
+  releases/0.11.2-*) ;;
+  *) fail "publish-only returned an invalid recovery candidate: $recovery_candidate_path" ;;
+esac
+recovery_source_snapshot="$TMP/v0111-source-journal.json"
+cp "$recovery_source_journal" "$recovery_source_snapshot"
+recovery_plan_output="$TMP/v0111-recovery-plan.json"
+HOME="$recovery_home" SUBYARD_HOME="$recovery_home/data" \
+  SUBYARD_CONFIG_HOME="$recovery_config" SUBYARD_YARD=recovery-yard \
+  YARD_RELEASE_CACHE="$recovery_cache" \
+  SUBYARD_POWER_RECONCILER_PATH="$TMP/missing-power-reconciler" \
+  SUBYARD_POWER_UNIT_PATH="$TMP/missing-power-unit" \
+  "$recovery_runtime/$recovery_candidate_path/bin/yard" update --check --offline \
+    --version 0.11.2 --runtime-root "$recovery_runtime" > "$recovery_plan_output"
+cmp -s "$recovery_source_journal" "$recovery_source_snapshot" \
+  || fail 'candidate recovery inspection changed the protected source journal'
+recovery_plan="$(jq -sr '
+  map(select(type == "object") | (.inspection // .)) |
+  map(select(has("plan") and .assessment.changed == true and
+    ((.blockers // []) | length) == 0)) |
+  select(length == 1) | .[0].plan' "$recovery_plan_output")"
+case "$recovery_plan" in
+  plan-v1-*) ;;
+  *) fail 'candidate recovery inspection did not return one unblocked exact Plan' ;;
+esac
+
+trace_environment="$TMP/v0111-xtrace-env"
+trace_output="$TMP/v0111-bootstrap.trace"
+printf '%s\n' "PS4='TRACE '" 'set -x' > "$trace_environment"
+HOME="$recovery_home" SUBYARD_HOME="$recovery_home/data" \
+  SUBYARD_CONFIG_HOME="$recovery_config" SUBYARD_YARD=recovery-yard \
+  YARD_RUNTIME_ROOT="$recovery_runtime" \
+  YARD_RELEASE_CACHE="$recovery_cache" YARD_BIN_DIR="$recovery_home/bin" \
+  YARD_SHELL_RC="$recovery_home/.bashrc" YARD_LOGIN_RC="$recovery_home/.profile" \
+  YARD_RELEASE_BASE_URL="file://$recovery_release" YARD_RELEASE_VERSION=0.11.2 \
+  SUBYARD_POWER_RECONCILER_PATH="$TMP/missing-power-reconciler" \
+  SUBYARD_POWER_UNIT_PATH="$TMP/missing-power-unit" \
+  BASH_ENV="$trace_environment" BASH_XTRACEFD=9 \
+  "$recovery_release/subyard-install.sh" --yes >/dev/null 9>"$trace_output"
+recovery_candidate_target="$(readlink "$recovery_runtime/current")"
+recovery_candidate="${recovery_candidate_target#releases/}"
+grep -F -- "--runtime-root $recovery_runtime --publish-only" "$trace_output" >/dev/null \
+  || fail 'standalone bootstrap did not use immutable publish-only installation'
+grep -F -- "$recovery_runtime/$recovery_candidate_target/bin/yard update --runtime-root $recovery_runtime --version 0.11.2 --offline --yes" \
+  "$trace_output" >/dev/null \
+  || fail 'standalone bootstrap did not invoke the exact candidate runtime and arguments'
+! grep -Fq "$recovery_config/release-transition/v2" "$trace_output" \
+  && ! grep -Eq '_migrate[[:space:]]+(apply|finalize|rollback|cleanup)' "$trace_output" \
+  || fail 'standalone bootstrap touched protected transition state or a mutating legacy endpoint'
+recovery_terminal_journal="$recovery_config/release-transition/v2/journal.json"
+recovery_transaction="$(jq -er '.transaction' "$recovery_terminal_journal")"
+recovery_archive="$recovery_config/release-transition/v2/transactions/$recovery_transaction/superseded-journal.json"
+[ "$(readlink "$recovery_runtime/previous")" = "releases/$recovery_source" ] \
+  && [ "$recovery_candidate" != "$recovery_source" ] \
+  && jq -e --arg plan "$recovery_plan" \
+    '.checkpoint == "complete" and (.steps | length) == 0 and
+    .authorizationPlan == $plan' \
+    "$recovery_terminal_journal" >/dev/null \
+  && jq -e --arg plan "$recovery_plan" \
+    '.journal.transaction == "tx-source-v0111" and
+    .replacement.reason == "post-activation-scope-v0.11.1" and
+    .authorizationPlan == $plan' "$recovery_archive" >/dev/null \
+  && [ -d "$recovery_config/release-transition/v2/transactions/tx-source-v0111/evidence" ] \
+  && [ "$(find "$recovery_config/release-transition/v2/transactions" \
+    -type f -name superseded-journal.json | wc -l)" -eq 1 ] \
+  && cmp -s "$recovery_ledger" "$recovery_baseline/ledger.json" \
+  || fail 'standalone v0.11.1 recovery did not preserve the terminal journal, archive, CAS, and links'
+recovery_repeat_output="$TMP/v0111-repeat-check.json"
+HOME="$recovery_home" SUBYARD_HOME="$recovery_home/data" \
+  SUBYARD_CONFIG_HOME="$recovery_config" SUBYARD_YARD=recovery-yard \
+  YARD_RELEASE_CACHE="$recovery_cache" \
+  SUBYARD_POWER_RECONCILER_PATH="$TMP/missing-power-reconciler" \
+  SUBYARD_POWER_UNIT_PATH="$TMP/missing-power-unit" \
+  "$recovery_runtime/current/bin/yard" update --check --offline --version 0.11.2 \
+    --runtime-root "$recovery_runtime" > "$recovery_repeat_output" \
+  || fail 'same-version recovery check did not remain readable and terminal'
+jq -s -e --arg active "$recovery_candidate" '
+  map(select(type == "object") | (.inspection // .)) |
+  map(select(has("outcome") and has("assessment"))) as $reports |
+  ($reports | length) == 1 and
+  $reports[0].outcome.status == "ready" and
+  $reports[0].outcome.reachedGoal == true and
+  $reports[0].outcome.active == $active and
+  $reports[0].outcome.target == $active and
+  $reports[0].assessment.changed == false and
+  (($reports[0].blockers // []) | length) == 0' "$recovery_repeat_output" >/dev/null \
+  || fail 'same-version recovery check did not report the structured ready fixed point'
+[ "$("$recovery_runtime/current/bin/yard" --version)" = 'yard 0.11.2' ] \
+  || fail 'terminal recovery runtime is not readable'
+
+snapshot_recovery_state() { # <runtime-root> <config-home>
+  local snapshot_runtime="$1" snapshot_config="$2"
+
+  printf 'current\t%s\nprevious\t%s\n' \
+    "$(snapshot_runtime_link "$snapshot_runtime/current")" \
+    "$(snapshot_runtime_link "$snapshot_runtime/previous")"
+  find "$snapshot_config/release-transition/v2" -type f -print0 \
+    | sort -z | xargs -0 sha256sum
+}
+
+snapshot_runtime_link() { # <link>
+  if [ -L "$1" ]; then
+    readlink "$1"
+  else
+    printf '<absent>\n'
+  fi
+}
+
+recovery_negative_mutations='source-version candidate-version checkpoint topology-current
+topology-previous direction source-ingress step-checkpoint step-resource embedded-evidence
+evidence-captured evidence-applied evidence-verified evidence-extra ledger recovery
+recovery-extra registry catalog replacement-transaction replacement-fingerprint
+transaction-artifact blocker-count blocker-code'
+recovery_baseline_before="$TMP/v0111-recovery-baseline.sha256"
+source_version_baseline_before="$TMP/v0111-source-version-baseline.sha256"
+snapshot_recovery_state "$recovery_baseline/runtime" "$recovery_baseline/config" \
+  > "$recovery_baseline_before"
+snapshot_recovery_state "$source_version_baseline/runtime" "$source_version_baseline/config" \
+  > "$source_version_baseline_before"
+for recovery_mutation in $recovery_negative_mutations; do
+  negative_root="$TMP/v0111-negative-$recovery_mutation"
+  negative_baseline="$recovery_baseline"
+  negative_release_version=0.11.2
+  if [ "$recovery_mutation" = source-version ]; then
+    negative_baseline="$source_version_baseline"
+  fi
+  # Runtime verification requires every protected release file to have one
+  # link. Keep each case a real copy, then discard it before the next case so
+  # the matrix has bounded disk use on constrained E2E /tmp filesystems.
+  cp -a "$negative_baseline" "$negative_root"
+  negative_runtime="$negative_root/runtime"
+  negative_config="$negative_root/config"
+  negative_power_reconciler="$TMP/missing-power-reconciler"
+  process_guard_only=0
+  process_guard_candidate=
+  case "$recovery_mutation" in
+    source-version) ;;
+    candidate-version)
+      negative_release_version=0.11.0
+      ;;
+    blocker-count)
+      negative_power_reconciler="$negative_root/power-reconciler"
+      ln -s "$negative_root/missing-power-reconciler-target" "$negative_power_reconciler"
+      blocker_count_output="$negative_root/blocker-count.json"
+      HOME="$negative_root/home" SUBYARD_HOME="$negative_root/data" \
+        SUBYARD_CONFIG_HOME="$negative_config" SUBYARD_YARD=recovery-yard \
+        YARD_RELEASE_CACHE="$negative_root/cache" \
+        SUBYARD_POWER_RECONCILER_PATH="$negative_power_reconciler" \
+        SUBYARD_POWER_UNIT_PATH="$TMP/missing-power-unit" \
+        "$negative_runtime/current/bin/yard" update --check --offline --version 0.11.1 \
+          --runtime-root "$negative_runtime" > "$blocker_count_output" \
+        || fail 'blocker-count fixture could not be inspected by the verified source'
+      jq -s -e 'map(select(type == "object" and has("blockers"))) as $inspections |
+        ($inspections | length) == 1 and ($inspections[0].blockers | length) > 1' \
+        "$blocker_count_output" >/dev/null \
+        || fail 'blocker-count fixture did not independently add a second blocker'
+      ;;
+    replacement-transaction|replacement-fingerprint|blocker-code)
+      if [ "$recovery_mutation" = blocker-code ]; then
+        "$recovery_fixture" mutate \
+          "$negative_runtime" "$negative_config" "$recovery_mutation"
+      fi
+      process_guard_candidate="$("$ROOT/scripts/install-runtime-release.sh" \
+        --runtime-root "$negative_runtime" --publish-only \
+        --bundle "$recovery_candidate_bundle" \
+        --checksum "$recovery_candidate_bundle.sha256" \
+        --manifest "$recovery_candidate_bundle.manifest.json" \
+        --provenance "$recovery_candidate_bundle.provenance.json")"
+      process_guard_candidate="${process_guard_candidate#releases/}"
+      process_guard_only=1
+      ;;
+    *)
+      "$recovery_fixture" mutate \
+        "$negative_runtime" "$negative_config" "$recovery_mutation"
+      ;;
+  esac
+  negative_before="$negative_root/before.sha256"
+  snapshot_recovery_state "$negative_runtime" "$negative_config" > "$negative_before"
+  if [ "$process_guard_only" = 1 ]; then
+    # The production runtime constructs replacement identity itself, so its
+    # safe bootstrap cannot emit a corrupt request. Exercise those typed
+    # request guards, and an alternate sole blocker code, in a separate
+    # candidate transition process after the exact immutable publication.
+    "$recovery_fixture" guard \
+      "$negative_runtime" "$negative_config" \
+      "$process_guard_candidate" "$recovery_mutation"
+    find "$negative_runtime/releases" -mindepth 1 -maxdepth 1 -type d \
+      -name '0.11.2-*' -print -quit | grep -q . \
+      || fail "ineligible v0.11.1 $recovery_mutation fixture was not publication-only"
+    snapshot_recovery_state "$negative_runtime" "$negative_config" \
+      | cmp -s "$negative_before" - \
+      || fail "ineligible v0.11.1 $recovery_mutation fixture changed protected state"
+    rm -rf -- "$negative_root"
+    continue
+  fi
+  negative_run_output="$negative_root/standalone.out"
+  if HOME="$negative_root/home" SUBYARD_HOME="$negative_root/data" \
+    SUBYARD_CONFIG_HOME="$negative_config" SUBYARD_YARD=recovery-yard \
+    YARD_RUNTIME_ROOT="$negative_runtime" \
+    YARD_RELEASE_CACHE="$negative_root/cache" YARD_BIN_DIR="$negative_root/bin" \
+    YARD_SHELL_RC="$negative_root/.bashrc" YARD_LOGIN_RC="$negative_root/.profile" \
+    YARD_RELEASE_BASE_URL="file://$recovery_release" \
+    YARD_RELEASE_VERSION="$negative_release_version" \
+    SUBYARD_POWER_RECONCILER_PATH="$negative_power_reconciler" \
+    SUBYARD_POWER_UNIT_PATH="$TMP/missing-power-unit" \
+    "$recovery_release/subyard-install.sh" --yes > "$negative_run_output" 2>&1; then
+    fail "ineligible v0.11.1 $recovery_mutation fixture was recovered"
+  fi
+  find "$negative_runtime/releases" -mindepth 1 -maxdepth 1 -type d \
+    -name "$negative_release_version-*" -print -quit | grep -q . \
+    || fail "ineligible v0.11.1 $recovery_mutation fixture was not publication-only"
+  snapshot_recovery_state "$negative_runtime" "$negative_config" \
+    | cmp -s "$negative_before" - \
+    || fail "ineligible v0.11.1 $recovery_mutation fixture changed protected state"
+  rm -rf -- "$negative_root"
+done
+snapshot_recovery_state "$recovery_baseline/runtime" "$recovery_baseline/config" \
+  | cmp -s "$recovery_baseline_before" - \
+  || fail 'v0.11.1 recovery negative matrix changed its shared baseline'
+snapshot_recovery_state "$source_version_baseline/runtime" "$source_version_baseline/config" \
+  | cmp -s "$source_version_baseline_before" - \
+  || fail 'v0.11.1 source-version negative case changed its shared baseline'
+
 printf 'ok: release publication and resumable v2 activation ingress are verified\n'

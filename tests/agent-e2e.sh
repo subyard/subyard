@@ -1229,6 +1229,388 @@ grep -Fq 'export SUBYARD_POWER_RECONCILER_PATH="$TMP/missing-power-reconciler"' 
   && grep -Fq 'export SUBYARD_POWER_UNIT_PATH="$TMP/missing-power-unit"' \
     "$ROOT/tests/engine-release.sh" \
   || fail "host-free engine release can observe the physical host power reconciler"
+v0111_recovery="$ROOT/dev/e2e/release-transition-v0111-recovery.sh"
+v0111_observer="$ROOT/dev/e2e/release-transition-post-cas-observer.py"
+grep -Fq 'OLD_VERSION=0.9.1' "$v0111_recovery" \
+  && grep -Fq 'SOURCE_VERSION=0.11.1' "$v0111_recovery" \
+  && grep -Fq 'CANDIDATE_VERSION=0.11.2' "$v0111_recovery" \
+  && grep -Fq '5bd3c61e3dd39cb2d258be5cd75237383f00eff0512c77a3a5ca75d96e6b992b' \
+    "$v0111_recovery" \
+  && grep -Fq '41acb799e55cf82cdbbef8e7f75e8e17c2df344c1ceeb748181fb6aec7ea6f8d' \
+    "$v0111_recovery" \
+  && [ "$(grep -Fc 'https://github.com/Subyard/Subyard/releases/download/v$version/subyard-install.sh' \
+    "$v0111_recovery")" -eq 1 ] \
+  || fail 'v0.11.1 recovery fixture does not bind both official predecessor installers'
+v0111_fixture_env="$(bash -c '
+  set -euo pipefail
+  source "$1"
+  TOKEN=123
+  STATE_ROOT="$2"
+  SUCCESS_ROOT="$STATE_ROOT/success"
+  SUCCESS_YARD=v0111-success-123
+  MARKER=subyard-p0-v0111-123
+  select_fixture success
+  fixture_env sh -c '\''printf "%s|%s|%s|%s\n" \
+    "${SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE:-}" \
+    "${SUBYARD_TEST_VMS_SINK_PATH:-}" \
+    "${SUBYARD_TEST_VMS_SINK_SERVICE_PATH:-}" \
+    "${SUBYARD_TEST_VMS_SINK_TIMER_PATH:-}"'\''
+' _ "$v0111_recovery" "$TMP/v0111-env")"
+[ "$v0111_fixture_env" = \
+  '1|/usr/local/libexec/subyard/subyard-p0-v0111-success-123-test-vms-sink|/etc/systemd/system/subyard-p0-v0111-success-123-test-vms-host-sink.service|/etc/systemd/system/subyard-p0-v0111-success-123-test-vms-host-sink.timer' ] \
+  || fail 'v0.11.1 fixture does not isolate optional user timers and the root host sink'
+grep -Fq 'sed -i '\''s/^AGENTS=$/AGENTS=codex/'\'' "$CONFIG_HOME/yards/$YARD_NAME/config.env"' \
+    "$v0111_recovery" \
+  && grep -Fq 'assert_source_dead_end' "$v0111_recovery" \
+  && grep -Fq '.blockers[0].resource == "transition.observation-scope"' "$v0111_recovery" \
+  && grep -Fq 'SUBYARD_YARD="$YARD_NAME"' "$v0111_recovery" \
+  && ! grep -Fq 'release-transition-fixture' "$v0111_recovery" \
+  && ! grep -Fq 'MarshalJournal' "$v0111_recovery" \
+  || fail 'real v0.11.1 fixture is synthetic or omits the materialized-config dead-end'
+grep -Fq 'SUCCESS_ROOT="$STATE_ROOT/success"' "$v0111_recovery" \
+  && grep -Fq 'POST_CAS_ROOT="$STATE_ROOT/post-cas"' "$v0111_recovery" \
+  && grep -Fq 'v0111-success-$TOKEN' "$v0111_recovery" \
+  && grep -Fq 'v0111-post-cas-$TOKEN' "$v0111_recovery" \
+  && [ "$(grep -Fc 'reproduce_official_dead_end' "$v0111_recovery")" -ge 3 ] \
+  && ! grep -Fq 'copy_dead_end_for_crash' "$v0111_recovery" \
+  || fail 'success and post-CAS fixtures are not independent official histories'
+grep -Fq 'setsid env' "$v0111_recovery" \
+  && grep -Fq 'python3 "$POST_CAS_OBSERVER"' "$v0111_recovery" \
+  && grep -Fq 'POST_CAS_OBSERVATION_MARKER=' "$v0111_recovery" \
+  && grep -Fq 'test ! -e "$1" && test ! -L "$1"' "$v0111_recovery" \
+  && grep -Fq 'wait "$POST_CAS_TRANSITION_PID"' "$v0111_recovery" \
+  && grep -Fq '.transaction != $source and .checkpoint != "complete"' "$v0111_recovery" \
+  && grep -Fq '[ "$transition_rc" = 137 ]' "$v0111_recovery" \
+  && grep -Fq 'ordinary post-CAS resume requested a second confirmation' "$v0111_recovery" \
+  && ! grep -Fq 'P0_V0111_REAL_INCUS' "$v0111_recovery" \
+  || fail 'v0.11.1 recovery fixture omits exact post-CAS interruption and ordinary resume'
+[ -f "$v0111_observer" ] \
+  && grep -Fq 'inotify_init1' "$v0111_observer" \
+  && grep -Fq 'IN_MOVED_TO' "$v0111_observer" \
+  && grep -Fq 'os.O_NOFOLLOW' "$v0111_observer" \
+  && grep -Fq 'os.getpid() != os.getpgrp()' "$v0111_observer" \
+  && grep -Fq 'os.getpgid(child.pid) != os.getpgrp()' "$v0111_observer" \
+  && grep -Fq '"activation-intent", "target-active", "reconciling"' "$v0111_observer" \
+  && grep -Fq 'journal.get("goal", {}).get("target") != args.candidate_target' \
+    "$v0111_observer" \
+  && grep -Fq 'kill_isolated_group(signal.SIGKILL)' "$v0111_observer" \
+  && grep -Fq 'os.killpg(os.getpgrp(), signum)' "$v0111_observer" \
+  || fail 'v0.11.1 post-CAS observer does not bind the atomic link event to SIGKILL'
+v0111_observer_probe="$TMP/v0111-post-cas-observer"
+mkdir -p "$v0111_observer_probe/runtime/releases/source" \
+  "$v0111_observer_probe/runtime/releases/0.11.2-candidate"
+ln -s releases/source "$v0111_observer_probe/runtime/current"
+printf '{"transaction":"source","checkpoint":"reconciling"}\n' \
+  > "$v0111_observer_probe/journal.json"
+v0111_observer_rc=0
+setsid python3 "$v0111_observer" \
+  --runtime-root "$v0111_observer_probe/runtime" \
+  --journal "$v0111_observer_probe/journal.json" \
+  --source-transaction source --candidate-target 0.11.2-candidate \
+  --marker "$v0111_observer_probe/observed.json" --timeout 5 -- \
+  sh -c '
+    sleep 0.05
+    printf "{\"transaction\":\"candidate\",\"checkpoint\":\"activation-intent\",\"goal\":{\"target\":\"0.11.2-candidate\",\"direction\":\"activate-target\"},\"releases\":{\"from\":\"source\",\"target\":\"0.11.2-candidate\"}}\\n" \
+      > "$1/journal.next"
+    mv "$1/journal.next" "$1/journal.json"
+    ln -s releases/0.11.2-candidate "$1/runtime/current.next"
+    mv -T "$1/runtime/current.next" "$1/runtime/current"
+    sleep 5
+  ' _ "$v0111_observer_probe" \
+  >/dev/null 2>"$v0111_observer_probe/stderr" &
+v0111_observer_pid=$!
+if wait "$v0111_observer_pid"; then
+  v0111_observer_rc=0
+else
+  v0111_observer_rc=$?
+fi
+[ "$v0111_observer_rc" = 137 ] \
+  && [ "$(stat -c '%a' "$v0111_observer_probe/observed.json")" = 600 ] \
+  && jq -e '.transaction == "candidate" and
+    .checkpoint == "activation-intent" and
+    .active == "releases/0.11.2-candidate"' \
+    "$v0111_observer_probe/observed.json" >/dev/null \
+  || fail 'v0.11.1 post-CAS observer did not interrupt its synthetic link activation'
+v0111_unisolated_rc=0
+python3 "$v0111_observer" \
+  --runtime-root "$v0111_observer_probe/runtime" \
+  --journal "$v0111_observer_probe/journal.json" \
+  --source-transaction source --candidate-target 0.11.2-candidate \
+  --marker "$v0111_observer_probe/unisolated.json" --timeout 1 -- true \
+  >/dev/null 2>"$v0111_observer_probe/unisolated.stderr" \
+  || v0111_unisolated_rc=$?
+[ "$v0111_unisolated_rc" = 2 ] \
+  && grep -Fq 'observer must be an isolated process-group leader' \
+    "$v0111_observer_probe/unisolated.stderr" \
+  || fail 'v0.11.1 post-CAS observer accepts an unisolated process group'
+v0111_timeout_probe="$TMP/v0111-post-cas-timeout"
+mkdir -p "$v0111_timeout_probe/runtime/releases/source"
+ln -s releases/source "$v0111_timeout_probe/runtime/current"
+printf '{"transaction":"source","checkpoint":"reconciling"}\n' \
+  > "$v0111_timeout_probe/journal.json"
+v0111_timeout_rc=0
+setsid python3 "$v0111_observer" \
+  --runtime-root "$v0111_timeout_probe/runtime" \
+  --journal "$v0111_timeout_probe/journal.json" \
+  --source-transaction source --candidate-target 0.11.2-candidate \
+  --marker "$v0111_timeout_probe/observed.json" --timeout 0.2 -- \
+  sh -c '
+    while :; do
+      printf "mutation\n" >> "$1/mutations"
+      sleep 0.02
+    done
+  ' _ "$v0111_timeout_probe" \
+  >/dev/null 2>"$v0111_timeout_probe/stderr" &
+v0111_timeout_pid=$!
+if wait "$v0111_timeout_pid"; then
+  v0111_timeout_rc=0
+else
+  v0111_timeout_rc=$?
+fi
+for _ in $(seq 1 100); do
+  kill -0 -- "-$v0111_timeout_pid" 2>/dev/null || break
+  sleep 0.05
+done
+[ "$v0111_timeout_rc" = 137 ] \
+  && ! kill -0 -- "-$v0111_timeout_pid" 2>/dev/null \
+  && [ ! -e "$v0111_timeout_probe/observed.json" ] \
+  && [ ! -L "$v0111_timeout_probe/observed.json" ] \
+  || fail 'v0.11.1 post-CAS observer timeout did not fence its process group'
+v0111_timeout_before="$(sha256sum "$v0111_timeout_probe/mutations")"
+sleep 0.2
+v0111_timeout_after="$(sha256sum "$v0111_timeout_probe/mutations")"
+[ "$v0111_timeout_after" = "$v0111_timeout_before" ] \
+  || fail 'v0.11.1 post-CAS observer timeout left a mutating descendant alive'
+v0111_exception_probe="$TMP/v0111-post-cas-exception"
+mkdir -p "$v0111_exception_probe/runtime/releases/source" \
+  "$v0111_exception_probe/runtime/releases/0.11.2-candidate"
+ln -s releases/source "$v0111_exception_probe/runtime/current"
+printf '{"transaction":"source","checkpoint":"reconciling"}\n' \
+  > "$v0111_exception_probe/journal.json"
+v0111_exception_rc=0
+setsid python3 "$v0111_observer" \
+  --runtime-root "$v0111_exception_probe/runtime" \
+  --journal "$v0111_exception_probe/journal.json" \
+  --source-transaction source --candidate-target 0.11.2-candidate \
+  --marker "$v0111_exception_probe/observed.json" --timeout 5 -- \
+  sh -c '
+    : > "$1/mutations"
+    sleep 0.05
+    printf "{\"transaction\":\"candidate\",\"checkpoint\":\"activation-intent\",\"goal\":null,\"releases\":{\"target\":\"0.11.2-candidate\"}}\\n" \
+      > "$1/journal.next"
+    mv "$1/journal.next" "$1/journal.json"
+    ln -s releases/0.11.2-candidate "$1/runtime/current.next"
+    mv -T "$1/runtime/current.next" "$1/runtime/current"
+    while :; do
+      printf "mutation\n" >> "$1/mutations"
+      sleep 0.02
+    done
+  ' _ "$v0111_exception_probe" \
+  >/dev/null 2>"$v0111_exception_probe/stderr" &
+v0111_exception_pid=$!
+if wait "$v0111_exception_pid"; then
+  v0111_exception_rc=0
+else
+  v0111_exception_rc=$?
+fi
+for _ in $(seq 1 100); do
+  kill -0 -- "-$v0111_exception_pid" 2>/dev/null || break
+  sleep 0.05
+done
+if [ "$v0111_exception_rc" != 137 ] \
+  || kill -0 -- "-$v0111_exception_pid" 2>/dev/null \
+  || [ -e "$v0111_exception_probe/observed.json" ] \
+  || [ -L "$v0111_exception_probe/observed.json" ]; then
+  kill -KILL -- "-$v0111_exception_pid" 2>/dev/null || true
+  fail 'v0.11.1 post-CAS observer exception did not fence its process group'
+fi
+v0111_exception_before="$(sha256sum "$v0111_exception_probe/mutations")"
+sleep 0.2
+v0111_exception_after="$(sha256sum "$v0111_exception_probe/mutations")"
+[ "$v0111_exception_after" = "$v0111_exception_before" ] \
+  || fail 'v0.11.1 post-CAS observer exception left a mutating descendant alive'
+v0111_queued_probe="$TMP/v0111-post-cas-queued-exit"
+mkdir -p "$v0111_queued_probe/runtime/releases/source" \
+  "$v0111_queued_probe/runtime/releases/0.11.2-candidate"
+ln -s releases/source "$v0111_queued_probe/runtime/current"
+printf '{"transaction":"source","checkpoint":"reconciling"}\n' \
+  > "$v0111_queued_probe/journal.json"
+v0111_queued_rc=0
+setsid python3 "$v0111_observer" \
+  --runtime-root "$v0111_queued_probe/runtime" \
+  --journal "$v0111_queued_probe/journal.json" \
+  --source-transaction source --candidate-target 0.11.2-candidate \
+  --marker "$v0111_queued_probe/observed.json" --timeout 5 -- \
+  sh -c 'printf "ready\n" > "$1/ready"; sleep 0.5; exit 23' \
+  _ "$v0111_queued_probe" \
+  >/dev/null 2>"$v0111_queued_probe/stderr" &
+v0111_queued_pid=$!
+for _ in $(seq 1 100); do
+  [ -s "$v0111_queued_probe/ready" ] && break
+  sleep 0.01
+done
+[ -s "$v0111_queued_probe/ready" ] \
+  || fail 'v0.11.1 queued-event probe child did not start'
+kill -STOP "$v0111_queued_pid"
+sleep 0.7
+printf '{"transaction":"candidate","checkpoint":"activation-intent","goal":{"target":"0.11.2-candidate","direction":"activate-target"},"releases":{"from":"source","target":"0.11.2-candidate"}}\n' \
+  > "$v0111_queued_probe/journal.next"
+mv "$v0111_queued_probe/journal.next" "$v0111_queued_probe/journal.json"
+ln -s releases/0.11.2-candidate "$v0111_queued_probe/runtime/current.next"
+mv -T "$v0111_queued_probe/runtime/current.next" \
+  "$v0111_queued_probe/runtime/current"
+kill -CONT "$v0111_queued_pid"
+if wait "$v0111_queued_pid"; then
+  v0111_queued_rc=0
+else
+  v0111_queued_rc=$?
+fi
+[ "$v0111_queued_rc" = 137 ] \
+  && [ ! -e "$v0111_queued_probe/observed.json" ] \
+  && [ ! -L "$v0111_queued_probe/observed.json" ] \
+  && grep -Fq 'transition exited with status 23 before exact activation' \
+    "$v0111_queued_probe/stderr" \
+  || fail 'v0.11.1 observer accepted a queued activation after transition exit'
+grep -Fq 'POST_CAS_TRANSITION_PID=' "$v0111_recovery" \
+  && grep -Fq 'stop_post_cas_transition' "$v0111_recovery" \
+  && grep -Fq 'kill -TERM -- "-$POST_CAS_TRANSITION_PID"' "$v0111_recovery" \
+  && grep -Fq 'wait "$POST_CAS_TRANSITION_PID"' "$v0111_recovery" \
+  || fail 'v0.11.1 cleanup does not fence an interrupted post-CAS process group'
+v0111_cleanup_probe="$TMP/v0111-cleanup-probe"
+mkdir -p "$v0111_cleanup_probe"
+v0111_cleanup_rc=0
+bash -c '
+  set -euo pipefail
+  source "$1"
+  probe=$2
+  CLEANUP_ARMED=0
+  trap cleanup EXIT
+  trap "handle_signal 130" INT
+  trap "handle_signal 143" TERM
+  setsid sh -c '\''
+    while :; do
+      for resource in project unit reconciler fixture; do
+        printf "mutation\n" >> "$1/$resource"
+      done
+      sleep 0.02
+    done
+  '\'' _ "$probe" &
+  POST_CAS_TRANSITION_PID=$!
+  printf "%s\n" "$POST_CAS_TRANSITION_PID" > "$probe/pid"
+  for _ in $(seq 1 100); do
+    [ -s "$probe/fixture" ] && break
+    sleep 0.01
+  done
+  [ -s "$probe/fixture" ]
+  kill -TERM "$$"
+' _ "$v0111_recovery" "$v0111_cleanup_probe" || v0111_cleanup_rc=$?
+[ "$v0111_cleanup_rc" = 143 ] \
+  || fail 'v0.11.1 cleanup swallowed TERM instead of reporting cancellation'
+v0111_cleanup_pid="$(cat "$v0111_cleanup_probe/pid")"
+! kill -0 -- "-$v0111_cleanup_pid" 2>/dev/null \
+  || fail 'v0.11.1 cleanup left its post-CAS process group alive'
+v0111_cleanup_before="$(sha256sum \
+  "$v0111_cleanup_probe/project" "$v0111_cleanup_probe/unit" \
+  "$v0111_cleanup_probe/reconciler" "$v0111_cleanup_probe/fixture")"
+sleep 0.2
+v0111_cleanup_after="$(sha256sum \
+  "$v0111_cleanup_probe/project" "$v0111_cleanup_probe/unit" \
+  "$v0111_cleanup_probe/reconciler" "$v0111_cleanup_probe/fixture")"
+[ "$v0111_cleanup_after" = "$v0111_cleanup_before" ] \
+  || fail 'v0.11.1 post-CAS process mutated resources after cleanup'
+v0111_normal_probe="$TMP/v0111-normal-stop-probe"
+mkdir -p "$v0111_normal_probe"
+bash -c '
+  set -euo pipefail
+  source "$1"
+  probe=$2
+  CLEANUP_ARMED=0
+  trap cleanup EXIT
+  setsid sh -c '\''
+    trap "" TERM
+    while :; do
+      printf "mutation\n" >> "$1/fixture"
+      sleep 0.02
+    done
+  '\'' _ "$probe" &
+  POST_CAS_TRANSITION_PID=$!
+  printf "%s\n" "$POST_CAS_TRANSITION_PID" > "$probe/pid"
+  for _ in $(seq 1 100); do
+    [ -s "$probe/fixture" ] && break
+    sleep 0.01
+  done
+  [ -s "$probe/fixture" ]
+  stop_post_cas_transition KILL
+  [ -z "$POST_CAS_TRANSITION_PID" ]
+' _ "$v0111_recovery" "$v0111_normal_probe"
+v0111_normal_pid="$(cat "$v0111_normal_probe/pid")"
+! kill -0 -- "-$v0111_normal_pid" 2>/dev/null \
+  || fail 'normal post-CAS interruption left its process group alive'
+v0111_normal_before="$(sha256sum "$v0111_normal_probe/fixture")"
+sleep 0.2
+v0111_normal_after="$(sha256sum "$v0111_normal_probe/fixture")"
+[ "$v0111_normal_after" = "$v0111_normal_before" ] \
+  || fail 'normal post-CAS process mutated fixture state after being cleared'
+v0111_reaped_probe="$TMP/v0111-reaped-leader-probe"
+mkdir -p "$v0111_reaped_probe"
+bash -c '
+  set -euo pipefail
+  source "$1"
+  probe=$2
+  CLEANUP_ARMED=0
+  trap cleanup EXIT
+  setsid sh -c '\''
+    while :; do
+      printf "mutation\n" >> "$1/fixture"
+      sleep 0.02
+    done &
+    sleep 0.05
+    exit 23
+  '\'' _ "$probe" &
+  POST_CAS_TRANSITION_PID=$!
+  observed_rc=0
+  wait "$POST_CAS_TRANSITION_PID" || observed_rc=$?
+  fence_reaped_post_cas_transition "$observed_rc"
+  [ "$POST_CAS_TRANSITION_STATUS" = 23 ]
+  [ -z "$POST_CAS_TRANSITION_PID" ]
+' _ "$v0111_recovery" "$v0111_reaped_probe"
+v0111_reaped_before="$(sha256sum "$v0111_reaped_probe/fixture")"
+sleep 0.2
+v0111_reaped_after="$(sha256sum "$v0111_reaped_probe/fixture")"
+[ "$v0111_reaped_after" = "$v0111_reaped_before" ] \
+  || fail 'reaped post-CAS observer left its mutating process group alive'
+grep -Fq 'STATE_ROOT="/var/tmp/subyard-p0-v0111-$TOKEN"' "$v0111_recovery" \
+  && grep -Fq -- '-c features.images=false -c user.subyard.p0="$FIXTURE_MARKER"' "$v0111_recovery" \
+  && grep -Fq 'assert_state_root' "$v0111_recovery" \
+  && grep -Fq 'assert_fixture_root' "$v0111_recovery" \
+  && grep -Fq 'assert_project_marker' "$v0111_recovery" \
+  || fail 'v0.11.1 recovery fixture mutations are not marker-bounded'
+grep -Fq 'POWER_UNIT="/etc/systemd/system/subyard-p0-v0111-$FIXTURE-$TOKEN.service"' \
+    "$v0111_recovery" \
+  && grep -Fq 'cleanup_power_runtime' "$v0111_recovery" \
+  && grep -Fq 'systemctl disable --now "$POWER_UNIT_NAME"' "$v0111_recovery" \
+  && ! grep -Fq 'SUBYARD_POWER_UNIT_PATH=/etc/systemd/system/subyard-power-reconcile.service' \
+  "$v0111_recovery" \
+  || fail 'v0.11.1 fixture power runtime is not unique, systemd-visible, and cleanup-owned'
+grep -Fq 'cleanup_test_vms_sink' "$v0111_recovery" \
+  && grep -Fq 'systemctl disable --now "$TEST_VMS_SINK_TIMER_NAME"' "$v0111_recovery" \
+  && grep -Fq 'sudo -n find "$FIXTURE_ROOT" -depth -delete' "$v0111_recovery" \
+  || fail 'v0.11.1 fixture does not stop its unique sink before privileged marked-root cleanup'
+grep -Fq 'capture_recovery_plan' "$v0111_recovery" \
+  && grep -Fq '.authorizationPlan == $plan' "$v0111_recovery" \
+  && grep -Fq '.outcome.status == "ready"' "$v0111_recovery" \
+  && grep -Fq '.assessment.changed == false' "$v0111_recovery" \
+  && ! grep -Fq 'config apply --check' "$v0111_recovery" \
+  && ! grep -Fq 'grep -Fc -- '\''--yes'\''' "$v0111_recovery" \
+  || fail 'v0.11.1 fixture lacks structured plan, terminal, or fixed-point evidence'
+v0111_host_free="$ROOT/internal/adapters/releaseruntime/runtime_v0111_recovery_test.go"
+grep -Fq 'request.Yard != os.Getenv("SUBYARD_TEST_V0111_YARD")' "$v0111_host_free" \
+  && grep -Fq 'fixture.configHome, "recovery-yard", nil' "$v0111_host_free" \
+  || fail 'host-free v0.11.1 recovery does not prove the named-yard process request'
+[ "$(grep -Fc 'bash dev/e2e/release-transition-v0111-recovery.sh "$TOKEN"' \
+  "$ROOT/dev/e2e/p0-guest.sh")" -eq 1 ] \
+  && grep -Fq '"/var/tmp/subyard-p0-v0111-$TOKEN"' "$ROOT/dev/e2e/p0-guest.sh" \
+  || fail 'existing P0 release lane does not own and clean the v0.11.1 recovery fixture'
 
 ensure_identity
 lease_blob="$(awk '{print $2}' "$IDENTITY.pub")"
@@ -2474,6 +2856,11 @@ grep -Fq 'operator_yard -Y "$YARD_NAME" stop --yes' \
   && grep -Fq 'verify_power_retry_probe' \
     "$ROOT/dev/e2e/p0-source-upgrade.sh" \
   || fail 'source-upgrade does not cover v2 completion and complementary reboot power reconciliation'
+grep -Fq '# shellcheck source=dev/e2e/lib-p0-init-retry.sh' \
+    "$ROOT/dev/e2e/p0-source-upgrade.sh" \
+  && [ "$(grep -Fc 'p0_retry_init_after_plan_stale operator_yard' \
+    "$ROOT/dev/e2e/p0-source-upgrade.sh")" = 5 ] \
+  || fail 'source-upgrade init calls do not tolerate a freshly reassessed network plan'
 ! grep -Fq '"$SOURCE_ROOT/config/qa-pool/"*' "$ROOT/dev/e2e/p0-source-upgrade.sh" \
   || fail "P0 source-upgrade fixture expands operator-private paths as the outer user"
 grep -Fq 'AGENTS=codex\nCODING_TOOL_INTEGRATIONS=codex\nAGENT_codex_RULES=' \

@@ -702,6 +702,8 @@ owner() (
 	OWNER_BASELINE_IMAGES="$(incus image list --project default --format csv -c f)"
   OWNER_BASELINE_CAPTURED=1
 	bash dev/e2e/p0-real-incus.sh
+	P0_V0111_BASE_IMAGE="$OWNER_BASE_IMAGE" \
+	  bash dev/e2e/release-transition-v0111-recovery.sh "$TOKEN"
 	profile_resource
   prepare_owner_image_cache_project subyard-test-yard
   owner_profile_migration_contract
@@ -797,6 +799,7 @@ controller() (
     dev/e2e/lib-p0-capacity.sh dev/e2e/p1-lease-acceptance.sh \
     dev/e2e/p0-broker-recovery.sh \
     dev/e2e/p0-real-incus.sh dev/e2e/p0-source-upgrade.sh \
+    dev/e2e/release-transition-v0111-recovery.sh \
     dev/e2e/power-reconciler-systemd-255.sh \
     dev/e2e/power-reconciler-systemd.sh dev/e2e/power-reconciler-upgrade.sh \
     dev/build-engine.sh tests/build-engine.sh \
@@ -1998,6 +2001,7 @@ capacity_verify_cleanup() {
     "/tmp/subyard-p0-go-cache-$TOKEN" \
     "/tmp/subyard-p0-source-$TOKEN.tar.gz" \
     "/var/tmp/subyard-p0-source-release-$TOKEN" \
+    "/var/tmp/subyard-p0-v0111-$TOKEN" \
     "/var/tmp/subyard-p0-power-systemd-$TOKEN"; do
     [ ! -e "$path" ] && [ ! -L "$path" ] \
       || die "legacy or transient P0 state remains after cleanup: $path"

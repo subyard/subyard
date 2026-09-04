@@ -9,6 +9,8 @@ ARCHIVE_SHA256="${4:-}"
 SOURCE_REVISION="${5:-}"
 # shellcheck source=dev/e2e/lib-p0-capacity.sh
 . "$ROOT/dev/e2e/lib-p0-capacity.sh"
+# shellcheck source=dev/e2e/lib-p0-init-retry.sh
+. "$ROOT/dev/e2e/lib-p0-init-retry.sh"
 p0_capacity_init "$TOKEN"
 
 MARKER="subyard-p0-source-$TOKEN"
@@ -588,7 +590,7 @@ prepare_project() {
 
 prepare_default_yard() {
   prepare_project "$DEFAULT_PROJECT"
-  operator_yard init --yes
+  p0_retry_init_after_plan_stale operator_yard init --yes
   operator_yard start --yes
   operator_yard check
   [ "$(incus config get "$DEFAULT_INSTANCE" user.subyard.desired_power \
@@ -649,7 +651,7 @@ prepare() {
 
   [ "$(operator_no_go "$SOURCE_ROOT/bin/yard" --version)" = "yard source-$SOURCE_REVISION" ] \
     || die 'exact source-linked CLI is not operational without Go'
-  operator_yard -Y "$YARD_NAME" init --yes
+  p0_retry_init_after_plan_stale operator_yard -Y "$YARD_NAME" init --yes
   operator_yard -Y "$YARD_NAME" start --yes
   operator_yard -Y "$YARD_NAME" check
   seed_previous_migration_inputs
@@ -673,7 +675,7 @@ prepare() {
   [ "$(incus config get "$INSTANCE" user.subyard.desired_power --project "$PROJECT")" = running ] \
     || die 'test-yard migration did not establish desired=running'
   operator_yard -Y "$YARD_NAME" check
-  operator_yard -Y "$YARD_NAME" init --yes
+  p0_retry_init_after_plan_stale operator_yard -Y "$YARD_NAME" init --yes
   verify_config_workflow
   verify_without_source_checkout
   prepare_default_yard
@@ -765,7 +767,7 @@ finish() {
   operator_yard check
   operator_yard -Y "$YARD_NAME" status >/dev/null
   operator_yard -Y "$YARD_NAME" check
-  operator_yard -Y "$YARD_NAME" init --yes
+  p0_retry_init_after_plan_stale operator_yard -Y "$YARD_NAME" init --yes
   verify_v2_release_transition "$VERSION_B"
   verify_config_workflow
 
@@ -784,7 +786,7 @@ finish() {
   [ "$(operator_yard --version)" = "yard $VERSION_B" ] \
     || die 'rejected source restore changed the active runtime'
   verify_migration
-  operator_yard -Y "$YARD_NAME" init --yes
+  p0_retry_init_after_plan_stale operator_yard -Y "$YARD_NAME" init --yes
   operator_yard -Y "$YARD_NAME" check
   verify_config_workflow
   operator_yard -Y "$YARD_NAME" teardown --yes
