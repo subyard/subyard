@@ -94,6 +94,21 @@ func TestCandidateProcessRejectsUnsafeSourceIngressDescriptor(t *testing.T) {
 	}
 }
 
+func TestCandidateTransitionOptionsCarryTrustedRecoveryInputs(t *testing.T) {
+	replacement := &releasetransition.JournalReplacement{
+		Transaction:   "tx-source-v0111",
+		Fingerprint:   releasetransition.Fingerprint(strings.Repeat("a", 64)),
+		Reason:        releasetransition.JournalReplacementPostActivationScopeV0111,
+		SourceVersion: "0.11.1",
+	}
+	request := releasetransition.ProcessRequest{Replacement: replacement}
+	options := candidateTransitionOptions(request, releasetransition.V2Options{})
+	if options.CandidateVersion != Version || options.Replacement == nil ||
+		*options.Replacement != *replacement {
+		t.Fatalf("candidate transition options = %#v", options)
+	}
+}
+
 func TestCandidateProcessRejectsRegistryOutsideVerifiedManifest(t *testing.T) {
 	repositoryRoot := t.TempDir()
 	registry := []byte("{}\n")

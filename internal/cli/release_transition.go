@@ -866,7 +866,7 @@ func executeReleaseTransitionRequest(
 			return releasetransition.ProcessResponse{}, err
 		}
 	}
-	transition, err := releasetransition.NewV2Transition(releasetransition.V2Options{
+	transitionOptions := candidateTransitionOptions(request, releasetransition.V2Options{
 		ConfigHome: request.ConfigHome, Releases: releases, Direction: request.Direction,
 		ObserveLinks: func(context.Context) (releasetransition.ReleaseLinks, error) {
 			return links.Observe()
@@ -875,12 +875,12 @@ func executeReleaseTransitionRequest(
 			return links.Activate(pair)
 		},
 		Reconcilers: reconcilers, OwnerRegistration: ownerRegistration, Ingress: ingress,
-		SourceIngress:       request.SourceIngress,
 		RegistryPayload:     registry,
 		ArtifactDigest:      request.ArtifactDigest,
 		InheritedSettingIDs: request.InheritedSettingIDs,
 		VerifyAuthorization: verifyAuthorization,
 	})
+	transition, err := releasetransition.NewV2Transition(transitionOptions)
 	if err != nil {
 		if errors.Is(err, releasetransition.ErrRegistryInvalid) {
 			response.Outcome = &releasetransition.Outcome{
@@ -916,6 +916,16 @@ func executeReleaseTransitionRequest(
 		response.Outcome = &outcome
 	}
 	return response, nil
+}
+
+func candidateTransitionOptions(
+	request releasetransition.ProcessRequest,
+	options releasetransition.V2Options,
+) releasetransition.V2Options {
+	options.SourceIngress = request.SourceIngress
+	options.Replacement = request.Replacement
+	options.CandidateVersion = Version
+	return options
 }
 
 func readReleaseTransitionGrant() (releasetransition.Authorization, error) {

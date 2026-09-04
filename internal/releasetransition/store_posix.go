@@ -6,11 +6,15 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"golang.org/x/sys/unix"
 )
 
-const MaxProtectedRecordBytes = 1 << 20
+const (
+	MaxProtectedRecordBytes    = 1 << 20
+	maxTransactionGraphEntries = 256
+)
 
 var (
 	ErrProtectedStoreStale  = errors.New("protected release transition record is stale")
@@ -77,6 +81,145 @@ func (store *POSIXV2Store) CreateCheckpointEvidence(
 	)
 }
 
+func (store *POSIXV2Store) ReadCheckpointEvidence(
+	transaction TransactionID,
+	step string,
+	checkpoint EvidenceCheckpoint,
+) (ProtectedSnapshot, error) {
+	name, err := checkpointEvidenceName(transaction, step, checkpoint)
+	if err != nil {
+		return ProtectedSnapshot{}, err
+	}
+	return store.readRecord(
+		[]string{"release-transition", "v2", "transactions", string(transaction), "evidence"},
+		name,
+	)
+}
+
+func (store *POSIXV2Store) ReadSupersededJournal(
+	transaction TransactionID,
+) (ProtectedSnapshot, error) {
+	if err := validateTransactionID(transaction); err != nil {
+		return ProtectedSnapshot{}, err
+	}
+	return store.readRecord(
+		[]string{"release-transition", "v2", "transactions", string(transaction)},
+		"superseded-journal.json",
+	)
+}
+
+func (store *POSIXV2Store) CreateSupersededJournal(
+	transaction TransactionID,
+	payload []byte,
+) error {
+	if err := validateTransactionID(transaction); err != nil {
+		return err
+	}
+	return store.createImmutable(
+		[]string{"release-transition", "v2", "transactions", string(transaction)},
+		"superseded-journal.json", payload,
+	)
+}
+
+// ResolveSupersededJournalTransaction admits a proposed successor only after
+// validating the complete immutable archive graph with its new predecessor
+// edge. An exact pre-CAS archive is reused across process restarts.
+func (store *POSIXV2Store) ResolveSupersededJournalTransaction(
+	proposed TransactionID,
+	replacement JournalReplacement,
+	authorizationPlan PlanToken,
+) (TransactionID, error) {
+	if store == nil {
+		return "", errors.New("release transition store is required")
+	}
+	if err := validateTransactionID(proposed); err != nil {
+		return "", err
+	}
+	if err := replacement.Validate(); err != nil {
+		return "", err
+	}
+	if replacement.Reason != JournalReplacementPostActivationScopeV0111 {
+		return "", invalid("superseded journal requires post-activation replacement")
+	}
+	if err := validatePlanToken(authorizationPlan); err != nil {
+		return "", err
+	}
+	graph, err := store.readTransactionGraph()
+	if err != nil {
+		return "", err
+	}
+	if graph == nil {
+		graph = &v2TransactionGraph{
+			directories: map[TransactionID]struct{}{},
+			known:       map[TransactionID]struct{}{},
+			archives:    map[TransactionID]SupersededJournalRecord{},
+			edges:       map[TransactionID]TransactionID{},
+			successors:  map[TransactionID]TransactionID{},
+		}
+	}
+	if err := graph.validateMissingPredecessors(); err != nil {
+		return "", err
+	}
+	if successor, exists := graph.successors[replacement.Transaction]; exists {
+		archive := graph.archives[successor]
+		if archive.AuthorizationPlan == authorizationPlan && archive.Replacement == replacement {
+			return successor, nil
+		}
+		return "", errors.New("journal replacement source already has a different successor")
+	}
+	if _, exists := graph.edges[replacement.Transaction]; exists {
+		return "", errors.New("journal replacement source already has a predecessor")
+	}
+	if proposed == replacement.Transaction {
+		return "", errors.New("journal replacement transaction would form a cycle")
+	}
+	if _, exists := graph.known[proposed]; exists {
+		matches, matchErr := store.pendingSupersededJournalMatches(
+			proposed, replacement, authorizationPlan,
+		)
+		if matchErr != nil {
+			return "", matchErr
+		}
+		if matches {
+			return proposed, nil
+		}
+		return "", errors.New("journal replacement transaction already exists")
+	}
+	if len(graph.entries)+1 > maxTransactionGraphEntries {
+		return "", errors.New("release transition recovery transaction graph is too large")
+	}
+	return proposed, nil
+}
+
+func (store *POSIXV2Store) pendingSupersededJournalMatches(
+	transaction TransactionID,
+	replacement JournalReplacement,
+	authorizationPlan PlanToken,
+) (bool, error) {
+	root := filepath.Join(
+		store.configHome, "release-transition", "v2", "transactions", string(transaction),
+	)
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return false, err
+	}
+	const pendingName = ".superseded-journal.json.pending"
+	if len(entries) != 1 || entries[0].Name() != pendingName {
+		return false, nil
+	}
+	snapshot, err := store.readRecord(
+		[]string{"release-transition", "v2", "transactions", string(transaction)}, pendingName,
+	)
+	if err != nil || !snapshot.Exists {
+		return false, err
+	}
+	archive, err := ParseSupersededJournal(snapshot.Payload)
+	if err != nil {
+		return false, err
+	}
+	return archive.AuthorizationPlan == authorizationPlan && archive.Replacement == replacement, nil
+}
+
 func (store *POSIXV2Store) ReadCompatibilityEvidence(
 	identity Fingerprint,
 ) (ProtectedSnapshot, error) {
@@ -129,6 +272,63 @@ func (store *POSIXV2Store) CreateRecovery(
 	)
 }
 
+// postActivationJournalArtifactsMatch verifies that an eligible source
+// transaction contains only the checkpoint evidence named by its journal and
+// no recovery payload. Individual evidence bytes are validated by the caller
+// after this bounded directory-shape check.
+func (store *POSIXV2Store) postActivationJournalArtifactsMatch(
+	journal JournalRecord,
+) (bool, error) {
+	if store == nil {
+		return false, errors.New("release transition store is required")
+	}
+	if err := journal.Validate(); err != nil {
+		return false, err
+	}
+	expectedEvidence := make(map[string]struct{}, len(journal.Steps)*3)
+	for _, step := range journal.Steps {
+		for _, checkpoint := range []EvidenceCheckpoint{
+			EvidenceCaptured, EvidenceApplied, EvidenceVerified,
+		} {
+			name, err := checkpointEvidenceName(journal.Transaction, step.ID, checkpoint)
+			if err != nil {
+				return false, err
+			}
+			expectedEvidence[name] = struct{}{}
+		}
+	}
+	transactionParts := []string{
+		"release-transition", "v2", "transactions", string(journal.Transaction),
+	}
+	rootEntries, present, err := store.readDirectoryEntries(transactionParts, 2)
+	if err != nil || !present || len(rootEntries) == 0 || len(rootEntries) > 2 {
+		return false, err
+	}
+	for _, entry := range rootEntries {
+		if entry.Name() != "evidence" && entry.Name() != "recovery" {
+			return false, nil
+		}
+	}
+	evidenceEntries, present, err := store.readDirectoryEntries(
+		append(slices.Clone(transactionParts), "evidence"), len(expectedEvidence),
+	)
+	if err != nil || !present || len(evidenceEntries) != len(expectedEvidence) {
+		return false, err
+	}
+	for _, entry := range evidenceEntries {
+		if _, expected := expectedEvidence[entry.Name()]; !expected {
+			return false, nil
+		}
+	}
+	recoveryEntries, present, err := store.readDirectoryEntries(
+		append(slices.Clone(transactionParts), "recovery"), 0,
+	)
+	if err != nil || (present && len(recoveryEntries) != 0) {
+		return false, err
+	}
+	return true, nil
+}
+
 // CleanupTransactions removes a bounded number of superseded recovery
 // transactions. The verified current transaction is retained as the active
 // compatibility horizon. Cleanup is deliberately separate from correctness:
@@ -140,6 +340,25 @@ func (store *POSIXV2Store) CleanupTransactions(current TransactionID) error {
 	if err := validateTransactionID(current); err != nil {
 		return err
 	}
+	var currentJournal *JournalRecord
+	snapshot, err := store.ReadCurrentJournal()
+	if err != nil {
+		return err
+	}
+	if snapshot.Exists {
+		journal, parseErr := ParseJournal(snapshot.Payload)
+		if parseErr != nil {
+			return parseErr
+		}
+		if journal.Transaction != current || journal.Checkpoint != JournalComplete {
+			return errors.New("release transition cleanup journal is not the completed current transaction")
+		}
+		currentJournal = &journal
+	}
+	graph, err := store.inspectTransactionGraph(current, currentJournal)
+	if err != nil || graph == nil {
+		return err
+	}
 	parent, present, err := store.openParent(
 		[]string{"release-transition", "v2", "transactions"}, false,
 	)
@@ -148,38 +367,201 @@ func (store *POSIXV2Store) CleanupTransactions(current TransactionID) error {
 	}
 	defer unix.Close(parent)
 	root := filepath.Join(store.configHome, "release-transition", "v2", "transactions")
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return err
-	}
 	const cleanupLimit = 32
-	removed := 0
-	for _, entry := range entries {
-		if entry.Name() == string(current) {
-			continue
-		}
-		if removed == cleanupLimit {
-			break
-		}
-		if err := validateTransactionID(TransactionID(entry.Name())); err != nil {
-			return errors.New("release transition recovery directory contains an invalid transaction")
-		}
-		info, err := entry.Info()
-		if err != nil {
+	deletions := graph.cleanupOrder(cleanupLimit)
+	for _, transaction := range deletions {
+		if err := os.RemoveAll(filepath.Join(root, string(transaction))); err != nil {
 			return err
 		}
-		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 {
-			return errors.New("release transition recovery transaction has an unsafe type or mode")
-		}
-		if err := os.RemoveAll(filepath.Join(root, entry.Name())); err != nil {
-			return err
-		}
-		removed++
 	}
-	if removed != 0 {
+	if len(deletions) != 0 {
 		return unix.Fsync(parent)
 	}
 	return nil
+}
+
+type v2TransactionGraph struct {
+	entries     []os.DirEntry
+	directories map[TransactionID]struct{}
+	known       map[TransactionID]struct{}
+	archives    map[TransactionID]SupersededJournalRecord
+	edges       map[TransactionID]TransactionID
+	successors  map[TransactionID]TransactionID
+	protected   map[string]struct{}
+}
+
+// cleanupOrder selects complete unrelated graph components and removes each
+// successor before its predecessor. Thus the deletion bound, or a partial
+// filesystem failure, cannot leave a retained archive with a missing source.
+func (graph *v2TransactionGraph) cleanupOrder(limit int) []TransactionID {
+	visited := make(map[TransactionID]struct{}, len(graph.known))
+	deletions := make([]TransactionID, 0, limit)
+	for _, entry := range graph.entries {
+		transaction := TransactionID(entry.Name())
+		if _, seen := visited[transaction]; seen {
+			continue
+		}
+		component := []TransactionID{transaction}
+		if predecessor, exists := graph.edges[transaction]; exists {
+			component = []TransactionID{transaction}
+			if _, present := graph.directories[predecessor]; present {
+				component = append(component, predecessor)
+			}
+		} else if successor, exists := graph.successors[transaction]; exists {
+			component = []TransactionID{successor, transaction}
+		}
+		retained := false
+		for _, member := range component {
+			visited[member] = struct{}{}
+			if _, protected := graph.protected[string(member)]; protected {
+				retained = true
+			}
+		}
+		if retained || len(deletions)+len(component) > limit {
+			continue
+		}
+		deletions = append(deletions, component...)
+	}
+	return deletions
+}
+
+func (graph *v2TransactionGraph) validateMissingPredecessors() error {
+	for _, predecessor := range graph.edges {
+		if _, exists := graph.directories[predecessor]; exists {
+			continue
+		}
+		return errors.New("superseded journal references a missing source transaction")
+	}
+	return nil
+}
+
+// validateCurrentSupersession verifies immutable predecessor records only
+// when the current transaction is itself a journal replacement. Ordinary
+// journals do not depend on unrelated transaction history.
+func (store *POSIXV2Store) validateCurrentSupersession(current JournalRecord) error {
+	if store == nil {
+		return errors.New("release transition store is required")
+	}
+	archive, err := store.ReadSupersededJournal(current.Transaction)
+	if err != nil || !archive.Exists {
+		return err
+	}
+	_, err = store.inspectTransactionGraph(current.Transaction, &current)
+	return err
+}
+
+func (store *POSIXV2Store) inspectTransactionGraph(
+	current TransactionID,
+	currentJournal *JournalRecord,
+) (*v2TransactionGraph, error) {
+	graph, err := store.readTransactionGraph()
+	if err != nil || graph == nil {
+		return graph, err
+	}
+	if err := graph.validateMissingPredecessors(); err != nil {
+		return nil, err
+	}
+	graph.protected = map[string]struct{}{string(current): {}}
+	if predecessor, exists := graph.edges[current]; exists {
+		archive := graph.archives[current]
+		if currentJournal == nil || archive.AuthorizationPlan != currentJournal.AuthorizationPlan {
+			return nil, errors.New("superseded journal does not match the current authorization plan")
+		}
+		graph.protected[string(predecessor)] = struct{}{}
+	}
+	return graph, nil
+}
+
+func (store *POSIXV2Store) readTransactionGraph() (*v2TransactionGraph, error) {
+	root := filepath.Join(store.configHome, "release-transition", "v2", "transactions")
+	entries, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(entries) > maxTransactionGraphEntries {
+		return nil, errors.New("release transition recovery transaction graph is too large")
+	}
+	directories := make(map[TransactionID]struct{}, len(entries))
+	known := make(map[TransactionID]struct{}, len(entries))
+	for _, entry := range entries {
+		transaction := TransactionID(entry.Name())
+		if err := validateTransactionID(transaction); err != nil {
+			return nil, errors.New("release transition recovery directory contains an invalid transaction")
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return nil, err
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 {
+			return nil, errors.New("release transition recovery transaction has an unsafe type or mode")
+		}
+		directories[transaction] = struct{}{}
+		known[transaction] = struct{}{}
+	}
+	archives := make(map[TransactionID]SupersededJournalRecord)
+	edges := make(map[TransactionID]TransactionID)
+	successors := make(map[TransactionID]TransactionID)
+	for transaction := range directories {
+		snapshot, err := store.ReadSupersededJournal(transaction)
+		if err != nil {
+			return nil, err
+		}
+		if !snapshot.Exists {
+			continue
+		}
+		archive, err := ParseSupersededJournal(snapshot.Payload)
+		if err != nil {
+			return nil, err
+		}
+		predecessor := archive.Replacement.Transaction
+		known[predecessor] = struct{}{}
+		archives[transaction] = archive
+		edges[transaction] = predecessor
+		if _, exists := successors[predecessor]; exists {
+			return nil, errors.New("superseded journal graph has a shared predecessor")
+		}
+		successors[predecessor] = transaction
+	}
+	const (
+		unvisited = iota
+		visiting
+		visited
+	)
+	states := make(map[TransactionID]int, len(known))
+	var visit func(TransactionID) error
+	visit = func(transaction TransactionID) error {
+		switch states[transaction] {
+		case visiting:
+			return errors.New("superseded journal graph contains a cycle")
+		case visited:
+			return nil
+		}
+		states[transaction] = visiting
+		if predecessor, exists := edges[transaction]; exists {
+			if err := visit(predecessor); err != nil {
+				return err
+			}
+		}
+		states[transaction] = visited
+		return nil
+	}
+	for transaction := range known {
+		if err := visit(transaction); err != nil {
+			return nil, err
+		}
+	}
+	for _, predecessor := range edges {
+		if _, nested := edges[predecessor]; nested {
+			return nil, errors.New("superseded journal graph has more than one predecessor")
+		}
+	}
+	return &v2TransactionGraph{
+		entries: entries, directories: directories, known: known,
+		archives: archives, edges: edges, successors: successors,
+	}, nil
 }
 
 // Lock acquires the compatibility-horizon update lock also used by migration
@@ -351,6 +733,30 @@ func (store *POSIXV2Store) readRecord(parents []string, name string) (ProtectedS
 	}
 	defer unix.Close(parent)
 	return readProtectedAt(parent, name)
+}
+
+func (store *POSIXV2Store) readDirectoryEntries(
+	parts []string,
+	maximum int,
+) ([]os.DirEntry, bool, error) {
+	if maximum < 0 {
+		return nil, false, errors.New("protected directory entry limit is invalid")
+	}
+	directory, present, err := store.openParent(parts, false)
+	if err != nil || !present {
+		return nil, present, err
+	}
+	file := os.NewFile(uintptr(directory), "release-transition-directory")
+	if file == nil {
+		_ = unix.Close(directory)
+		return nil, false, errors.New("open protected directory stream")
+	}
+	defer file.Close()
+	entries, err := file.ReadDir(maximum + 1)
+	if errors.Is(err, io.EOF) {
+		err = nil
+	}
+	return entries, true, err
 }
 
 func (store *POSIXV2Store) openParent(parts []string, create bool) (int, bool, error) {

@@ -1,15 +1,23 @@
 package releasetransition
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
+)
+
+const (
+	v2PostActivationPreviousRelease  ReleaseID = "0.9.1-a1b2c3d4e5f6"
+	v2PostActivationSourceRelease    ReleaseID = "0.11.1-b2c3d4e5f6a7"
+	v2PostActivationCandidateRelease ReleaseID = "0.11.2-c3d4e5f6a7b8"
 )
 
 func TestV2TransitionCanonicalizesAndResetsOnce(t *testing.T) {
@@ -445,7 +453,7 @@ func TestV2TransitionResumesOwnerRegistrationFromIntermediateProgress(t *testing
 
 func TestV2NewOwnerImpactReplacesUnmutatedPreActivationJournal(t *testing.T) {
 	activeFault := true
-	transition, _, _ := v2TransitionFixture(t, func(point string) error {
+	transition, configHome, _ := v2TransitionFixture(t, func(point string) error {
 		if activeFault && point == "after-journal-authorized" {
 			return errors.New("stop after the first authorization")
 		}
@@ -486,6 +494,69 @@ func TestV2NewOwnerImpactReplacesUnmutatedPreActivationJournal(t *testing.T) {
 	if err != nil || outcome.Status != StatusReady || outcome.Transaction == nil ||
 		*outcome.Transaction != "tx-test-002" || owner.state != OwnerRegistrationCurrent {
 		t.Fatalf("owner replacement outcome = %#v owner=%#v err=%v", outcome, owner, err)
+	}
+	archive, err := transition.store.ReadSupersededJournal("tx-test-002")
+	if err != nil || archive.Exists {
+		t.Fatalf("pre-activation replacement archive = %#v, err=%v", archive, err)
+	}
+	if _, err := os.Stat(filepath.Join(
+		configHome, "release-transition", "v2", "transactions", "tx-test-001",
+	)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unmutated source transaction unexpectedly has artifacts: %v", err)
+	}
+
+	owner.state = OwnerRegistrationLegacyDirectory
+	laterOptions := transition.options
+	laterLinks := &ReleaseLinks{Active: "release-a"}
+	laterOptions.Releases = ReleasePair{From: "release-a", Target: "release-b"}
+	laterOptions.ObserveLinks = func(context.Context) (ReleaseLinks, error) { return *laterLinks, nil }
+	laterOptions.ActivateLinks = func(
+		_ context.Context,
+		pair ReleasePair,
+	) (ReleaseLinks, error) {
+		*laterLinks = ReleaseLinks{Active: pair.Target, Previous: releaseIDPointer(pair.From)}
+		return *laterLinks, nil
+	}
+	laterOptions.NewTransactionID = func() TransactionID { return "tx-test-003" }
+	later, err := NewV2Transition(laterOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledgerSnapshot, err := later.store.ReadLedger()
+	if err != nil {
+		t.Fatal(err)
+	}
+	baselinePayload, _, err := MarshalLedgerV2(BaselineLedgerV2(later.registry), later.registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := later.store.CompareAndSwapLedger(ledgerSnapshot, baselinePayload); err != nil {
+		t.Fatal(err)
+	}
+	laterGoal := Goal{Target: "release-b", Direction: DirectionActivateTarget}
+	laterInspection, err := later.Inspect(context.Background(), laterGoal)
+	if err != nil || laterInspection.Outcome == nil ||
+		laterInspection.Outcome.Status != StatusMigrationRequired {
+		t.Fatalf("later transition inspection = %#v, outcome=%#v, err=%v", laterInspection, laterInspection.Outcome, err)
+	}
+	laterOutcome, err := later.Converge(context.Background(), Execution{
+		Plan: laterInspection.Plan, Authorization: v2TestAuthorization(laterInspection.Plan),
+	})
+	if err != nil || laterOutcome.Status != StatusReady || laterOutcome.Transaction == nil ||
+		*laterOutcome.Transaction != "tx-test-003" || len(laterOutcome.Warnings) != 0 {
+		t.Fatalf("later transition outcome = %#v, err=%v", laterOutcome, err)
+	}
+	if _, err := later.Inspect(context.Background(), laterGoal); err != nil {
+		t.Fatalf("historical logical predecessor blocked later inspection: %v", err)
+	}
+	oldArchive, err := later.store.ReadSupersededJournal("tx-test-002")
+	if err != nil || oldArchive.Exists {
+		t.Fatalf("historical component was not cleaned up: %#v, err=%v", oldArchive, err)
+	}
+	if _, err := os.Stat(filepath.Join(
+		configHome, "release-transition", "v2", "transactions", "tx-test-003",
+	)); err != nil {
+		t.Fatalf("current transaction was not retained: %v", err)
 	}
 }
 
@@ -540,6 +611,995 @@ func TestV2NewOwnerImpactFailsClosedAfterAuthorizedMigrationMutation(t *testing.
 	if err != nil || ledger.Domains["owner-registration"].Epoch != 1 {
 		t.Fatalf("owner ledger advanced past new impact: %#v, err=%v", ledger, err)
 	}
+}
+
+func TestV2TransitionReplacesExactV0111PostActivationScopeFailure(t *testing.T) {
+	configHome := settingsV2Fixture(t, map[string]string{
+		"yards/hermes/config.env": "YARD_TEMPLATE='test-vms'\n",
+	})
+	sourcePair := ReleasePair{
+		From: v2PostActivationPreviousRelease, Target: v2PostActivationSourceRelease,
+	}
+	links := ReleaseLinks{
+		Active:   v2PostActivationSourceRelease,
+		Previous: releaseIDPointer(v2PostActivationPreviousRelease),
+	}
+	sourceOptions := V2Options{
+		ConfigHome: configHome, Releases: sourcePair,
+		ObserveLinks:        func(context.Context) (ReleaseLinks, error) { return links, nil },
+		RegistryPayload:     v2RegistryPayload(t),
+		ArtifactDigest:      digestA,
+		OwnerRegistration:   &v2TestOwnerRegistration{state: OwnerRegistrationAbsent},
+		NewTransactionID:    func() TransactionID { return "tx-source-v0111" },
+		VerifyAuthorization: func(PlanToken, Authorization) bool { return false },
+	}
+	source, err := NewV2Transition(sourceOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal, sourceSnapshot, ledgerPayload := seedV0111PostActivationJournal(t, source)
+
+	ordinary, err := NewV2Transition(sourceOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldInspection, err := ordinary.Inspect(context.Background(), journal.Goal)
+	if err != nil || oldInspection.Resume == nil || oldInspection.Outcome == nil ||
+		oldInspection.Outcome.Status != StatusOperatorActionRequired ||
+		oldInspection.Outcome.Code != CodePlanStale || len(oldInspection.Blockers) != 1 ||
+		oldInspection.Blockers[0].Code != CodePlanStale ||
+		oldInspection.Blockers[0].Resource != "transition.observation-scope" {
+		t.Fatalf("ordinary v0.11.1 inspection = %#v, err=%v", oldInspection, err)
+	}
+
+	replacement := &JournalReplacement{
+		Transaction: journal.Transaction, Fingerprint: sourceSnapshot.Fingerprint,
+		Reason: JournalReplacementPostActivationScopeV0111, SourceVersion: "0.11.1",
+	}
+	candidateOptions := sourceOptions
+	candidateOptions.Releases = ReleasePair{
+		From: v2PostActivationSourceRelease, Previous: releaseIDPointer(v2PostActivationPreviousRelease),
+		Target: v2PostActivationCandidateRelease,
+	}
+	candidateOptions.CandidateVersion = "0.11.2"
+	candidateOptions.ArtifactDigest = digestB
+	candidateOptions.Replacement = replacement
+	candidateOptions.NewTransactionID = func() TransactionID { return "tx-recovery-v0112" }
+	candidate, err := NewV2Transition(candidateOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goal := Goal{Target: v2PostActivationCandidateRelease, Direction: DirectionActivateTarget}
+	inspection, err := candidate.Inspect(context.Background(), goal)
+	if err != nil || inspection.Resume != nil || inspection.Outcome == nil ||
+		inspection.Outcome.Status != StatusMigrationRequired ||
+		inspection.Outcome.Code != CodeTransitionRequired || !inspection.Assessment.Changed {
+		t.Fatalf("post-activation replacement inspection = %#v, err=%v", inspection, err)
+	}
+	observation, err := candidate.observe(context.Background(), goal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observation.replacement == nil || *observation.replacement != *replacement ||
+		observation.journal != nil || len(observation.intents) != 0 || len(observation.work) != 0 {
+		t.Fatalf("post-activation replacement observation = %#v", observation)
+	}
+	if !releasePairsEqual(journal.Releases, sourcePair) ||
+		!releasePairsEqual(candidate.options.Releases, candidateOptions.Releases) ||
+		observation.links.Active != v2PostActivationSourceRelease ||
+		observation.links.Previous == nil ||
+		*observation.links.Previous != v2PostActivationPreviousRelease {
+		t.Fatalf("opaque release identities changed: source=%#v candidate=%#v links=%#v",
+			journal.Releases, candidate.options.Releases, observation.links)
+	}
+	expectedPlan, err := BindPlan(candidate.planFacts(observation))
+	if err != nil || expectedPlan != inspection.Plan {
+		t.Fatalf("replacement Plan binding = %q, want %q, err=%v", inspection.Plan, expectedPlan, err)
+	}
+	current, err := candidate.store.ReadCurrentJournal()
+	if err != nil || !sameProtectedSnapshot(current, sourceSnapshot) {
+		t.Fatalf("read-only replacement inspection changed source journal: %#v, err=%v", current, err)
+	}
+	ledger, err := candidate.store.ReadLedger()
+	if err != nil || !ledger.Exists || string(ledger.Payload) != string(ledgerPayload) {
+		t.Fatalf("read-only replacement inspection changed ledger: %#v, err=%v", ledger, err)
+	}
+}
+
+func TestV2TransitionPostActivationReplacementAcceptsAnyLaterSemver(t *testing.T) {
+	for _, version := range []string{"0.11.2", "0.12.0", "1.0.0", "0.11.2-rc.1"} {
+		t.Run(version, func(t *testing.T) {
+			fixture := newV2PostActivationRecoveryFixture(t)
+			fixture.transition.options.CandidateVersion = version
+			inspection, err := fixture.transition.Inspect(context.Background(), fixture.goal)
+			if err != nil || inspection.Resume != nil || inspection.Outcome == nil ||
+				inspection.Outcome.Status != StatusMigrationRequired ||
+				inspection.Outcome.Code != CodeTransitionRequired {
+				t.Fatalf("candidate %q inspection = %#v, err=%v", version, inspection, err)
+			}
+		})
+	}
+}
+
+func TestV2TransitionPostActivationReplacementEligibilityFailsClosed(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*v2PostActivationRecoveryFixture)
+	}{
+		{name: "source version", mutate: func(f *v2PostActivationRecoveryFixture) {
+			f.transition.options.Replacement.SourceVersion = "0.11.0"
+		}},
+		{name: "missing candidate version", mutate: func(f *v2PostActivationRecoveryFixture) {
+			f.transition.options.CandidateVersion = ""
+		}},
+		{name: "malformed candidate version", mutate: func(f *v2PostActivationRecoveryFixture) {
+			f.transition.options.CandidateVersion = "not-semver"
+		}},
+		{name: "equal candidate version", mutate: func(f *v2PostActivationRecoveryFixture) {
+			f.transition.options.CandidateVersion = "0.11.1"
+		}},
+		{name: "lower candidate version", mutate: func(f *v2PostActivationRecoveryFixture) {
+			f.transition.options.CandidateVersion = "0.11.0"
+		}},
+		{name: "journal checkpoint", mutate: func(f *v2PostActivationRecoveryFixture) {
+			f.rewriteJournal(func(journal *JournalRecord) { journal.Checkpoint = JournalTargetActive })
+		}},
+		{name: "candidate source ingress", mutate: func(f *v2PostActivationRecoveryFixture) {
+			f.transition.options.SourceIngress = &SourceIngressRequest{
+				SchemaVersion: SourceIngressRequestSchemaV1,
+				Kind:          SourceIngressPreGoV1,
+				SourceRoot:    "/home/operator/source",
+				DataHome:      "/home/operator/.subyard",
+				BinDir:        "/home/operator/.local/bin",
+				RC:            "/home/operator/.bashrc",
+				LoginRC:       "/home/operator/.profile",
+			}
+		}},
+		{name: "current link", mutate: func(f *v2PostActivationRecoveryFixture) {
+			f.links.Active = "foreign"
+		}},
+		{name: "previous link", mutate: func(f *v2PostActivationRecoveryFixture) {
+			f.links.Previous = nil
+		}},
+		{name: "direction", mutate: func(f *v2PostActivationRecoveryFixture) {
+			f.transition.options.Direction = DirectionActivatePrevious
+			f.goal.Direction = DirectionActivatePrevious
+		}},
+		{name: "step checkpoint", mutate: func(f *v2PostActivationRecoveryFixture) {
+			f.rewriteJournal(func(journal *JournalRecord) {
+				journal.Checkpoint = JournalMigrating
+				journal.Steps[0].Checkpoint = StepApplied
+				applied := *journal.Steps[0].Evidence
+				applied.Checkpoint = EvidenceApplied
+				journal.Steps[0].Evidence = &applied
+			})
+		}},
+		{name: "step resource", mutate: func(f *v2PostActivationRecoveryFixture) {
+			f.rewriteJournal(func(journal *JournalRecord) { journal.Steps[0].Resource = "yard.fixture" })
+		}},
+		{name: "embedded evidence", mutate: func(f *v2PostActivationRecoveryFixture) {
+			f.rewriteJournal(func(journal *JournalRecord) { journal.Steps[0].Evidence.Recovery = digestA })
+		}},
+		{name: "stored captured evidence", mutate: func(f *v2PostActivationRecoveryFixture) {
+			f.removeEvidence(f.sourceJournal.Steps[0].ID, EvidenceCaptured)
+		}},
+		{name: "stored applied evidence", mutate: func(f *v2PostActivationRecoveryFixture) {
+			f.removeEvidence(f.sourceJournal.Steps[0].ID, EvidenceApplied)
+		}},
+		{name: "stored verified evidence", mutate: func(f *v2PostActivationRecoveryFixture) {
+			f.removeEvidence(f.sourceJournal.Steps[0].ID, EvidenceVerified)
+		}},
+		{name: "unjournaled evidence", mutate: func(f *v2PostActivationRecoveryFixture) {
+			if err := f.transition.store.CreateCheckpointEvidence(
+				f.sourceJournal.Transaction, "unknown-ledger", EvidenceVerified, []byte("unknown\n"),
+			); err != nil {
+				f.t.Fatal(err)
+			}
+		}},
+		{name: "unjournaled transaction artifact", mutate: func(f *v2PostActivationRecoveryFixture) {
+			path := filepath.Join(
+				f.configHome, "release-transition", "v2", "transactions",
+				string(f.sourceJournal.Transaction), "unknown.json",
+			)
+			if err := os.WriteFile(path, []byte("unknown\n"), 0o600); err != nil {
+				f.t.Fatal(err)
+			}
+		}},
+		{name: "ledger bytes", mutate: func(f *v2PostActivationRecoveryFixture) {
+			var value any
+			if err := json.Unmarshal(f.ledgerPayload, &value); err != nil {
+				f.t.Fatal(err)
+			}
+			payload, err := json.MarshalIndent(value, "", "  ")
+			if err != nil {
+				f.t.Fatal(err)
+			}
+			payload = append(payload, '\n')
+			current, err := f.transition.store.ReadLedger()
+			if err != nil {
+				f.t.Fatal(err)
+			}
+			if err := f.transition.store.CompareAndSwapLedger(current, payload); err != nil {
+				f.t.Fatal(err)
+			}
+		}},
+		{name: "recovery payload", mutate: func(f *v2PostActivationRecoveryFixture) {
+			if err := f.transition.store.CreateRecovery(
+				f.sourceJournal.Transaction, f.sourceJournal.Steps[0].ID, []byte("recovery\n"),
+			); err != nil {
+				f.t.Fatal(err)
+			}
+		}},
+		{name: "unjournaled recovery payload", mutate: func(f *v2PostActivationRecoveryFixture) {
+			if err := f.transition.store.CreateRecovery(
+				f.sourceJournal.Transaction, "unknown-ledger", []byte("recovery\n"),
+			); err != nil {
+				f.t.Fatal(err)
+			}
+		}},
+		{name: "registry digest", mutate: func(f *v2PostActivationRecoveryFixture) {
+			f.rewriteJournal(func(journal *JournalRecord) { journal.RegistryDigest = digestA })
+		}},
+		{name: "catalog digest", mutate: func(f *v2PostActivationRecoveryFixture) {
+			f.rewriteJournal(func(journal *JournalRecord) { journal.CatalogDigest = digestA })
+		}},
+		{name: "replacement transaction", mutate: func(f *v2PostActivationRecoveryFixture) {
+			f.transition.options.Replacement.Transaction = "tx-other"
+		}},
+		{name: "replacement fingerprint", mutate: func(f *v2PostActivationRecoveryFixture) {
+			f.transition.options.Replacement.Fingerprint = digestA
+		}},
+		{name: "noncanonical source fingerprint", mutate: func(f *v2PostActivationRecoveryFixture) {
+			current, err := f.transition.store.ReadCurrentJournal()
+			if err != nil {
+				f.t.Fatal(err)
+			}
+			payload := append(append([]byte(nil), current.Payload...), '\n')
+			if err := f.transition.store.CompareAndSwapCurrentJournal(current, payload); err != nil {
+				f.t.Fatal(err)
+			}
+			updated, err := f.transition.store.ReadCurrentJournal()
+			if err != nil {
+				f.t.Fatal(err)
+			}
+			f.transition.options.Replacement.Fingerprint = updated.Fingerprint
+		}},
+		{name: "blocker count", mutate: func(f *v2PostActivationRecoveryFixture) {
+			scope, err := f.transition.bindObservationScope(nil)
+			if err != nil {
+				f.t.Fatal(err)
+			}
+			f.rewriteJournal(func(journal *JournalRecord) { journal.ObservationScope = scope })
+		}},
+		{name: "blocker code", mutate: func(f *v2PostActivationRecoveryFixture) {
+			f.transition.options.Reconcilers = []V2ActivationReconciler{
+				v2ObservationErrorReconciler{id: "blocked", err: errors.New("temporarily unavailable")},
+			}
+		}},
+		{name: "candidate release identity", mutate: func(f *v2PostActivationRecoveryFixture) {
+			f.transition.options.Releases.Target = v2PostActivationSourceRelease
+			f.goal.Target = v2PostActivationSourceRelease
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newV2PostActivationRecoveryFixture(t)
+			test.mutate(fixture)
+			before := snapshotV2ProtectedTree(t, fixture.configHome)
+			linksBefore := ReleaseLinks{
+				Active: fixture.links.Active, Previous: cloneReleaseID(fixture.links.Previous),
+			}
+			inspection, err := fixture.transition.Inspect(context.Background(), fixture.goal)
+			if err != nil || inspection.Outcome == nil ||
+				inspection.Outcome.Status != StatusOperatorActionRequired {
+				t.Fatalf("ineligible replacement inspection = %#v, err=%v", inspection, err)
+			}
+			after := snapshotV2ProtectedTree(t, fixture.configHome)
+			if !bytes.Equal(after, before) {
+				t.Fatalf("ineligible inspection changed protected tree\nbefore:\n%s\nafter:\n%s", before, after)
+			}
+			if !linksEqual(*fixture.links, linksBefore) {
+				t.Fatalf("ineligible inspection changed links: before=%#v after=%#v", linksBefore, *fixture.links)
+			}
+		})
+	}
+}
+
+func TestV2TransitionPostActivationReplacementRequiresExactConfirmationAndSourceCAS(t *testing.T) {
+	t.Run("missing and foreign grants do not write", func(t *testing.T) {
+		fixture := newV2PostActivationRecoveryFixture(t)
+		inspection, err := fixture.transition.Inspect(context.Background(), fixture.goal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := snapshotV2ProtectedTree(t, fixture.configHome)
+		for name, authorization := range map[string]Authorization{
+			"missing": "",
+			"foreign": v2TestAuthorization(PlanToken("plan-v1-" + strings.Repeat("f", 64))),
+		} {
+			t.Run(name, func(t *testing.T) {
+				outcome, err := fixture.transition.Converge(context.Background(), Execution{
+					Plan: inspection.Plan, Authorization: authorization,
+				})
+				if err != nil || outcome.Status != StatusOperatorActionRequired ||
+					outcome.Code != CodeConfirmationRequired {
+					t.Fatalf("confirmation outcome = %#v, err=%v", outcome, err)
+				}
+				after := snapshotV2ProtectedTree(t, fixture.configHome)
+				if !bytes.Equal(after, before) {
+					t.Fatalf("unauthorized convergence changed protected tree\nbefore:\n%s\nafter:\n%s", before, after)
+				}
+				lockPath := filepath.Join(fixture.configHome, "migrations", "update.lock")
+				if _, statErr := os.Lstat(lockPath); !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatalf("unauthorized convergence created update lock: %v", statErr)
+				}
+			})
+		}
+	})
+
+	t.Run("source change after confirmation is stale before archive", func(t *testing.T) {
+		fixture := newV2PostActivationRecoveryFixture(t)
+		inspection, err := fixture.transition.Inspect(context.Background(), fixture.goal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixture.transition.options.VerifyAuthorization = func(plan PlanToken, authorization Authorization) bool {
+			if authorization != v2TestAuthorization(plan) {
+				return false
+			}
+			current, readErr := fixture.transition.store.ReadCurrentJournal()
+			if readErr != nil {
+				fixture.t.Fatal(readErr)
+			}
+			journal, parseErr := ParseJournal(current.Payload)
+			if parseErr != nil {
+				fixture.t.Fatal(parseErr)
+			}
+			journal.AuthorizationDigest = digestD
+			payload, marshalErr := MarshalJournal(journal)
+			if marshalErr != nil {
+				fixture.t.Fatal(marshalErr)
+			}
+			if swapErr := fixture.transition.store.CompareAndSwapCurrentJournal(current, payload); swapErr != nil {
+				fixture.t.Fatal(swapErr)
+			}
+			return true
+		}
+		outcome, err := fixture.transition.Converge(context.Background(), Execution{
+			Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
+		})
+		if err != nil || outcome.Status != StatusOperatorActionRequired || outcome.Code != CodePlanStale {
+			t.Fatalf("post-confirmation stale outcome = %#v, err=%v", outcome, err)
+		}
+		archive, err := fixture.transition.store.ReadSupersededJournal("tx-recovery-v0112")
+		if err != nil || archive.Exists {
+			t.Fatalf("stale source reached immutable archive: %#v, err=%v", archive, err)
+		}
+	})
+
+	t.Run("exact grant archives before journal replacement", func(t *testing.T) {
+		fixture := newV2PostActivationRecoveryFixture(t)
+		fixture.transition.options.ActivateLinks = func(
+			_ context.Context,
+			pair ReleasePair,
+		) (ReleaseLinks, error) {
+			*fixture.links = ReleaseLinks{
+				Active: pair.Target, Previous: releaseIDPointer(pair.From),
+			}
+			return *fixture.links, nil
+		}
+		inspection, err := fixture.transition.Inspect(context.Background(), fixture.goal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		outcome, err := fixture.transition.Converge(context.Background(), Execution{
+			Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
+		})
+		if err != nil || outcome.Status != StatusReady || outcome.Transaction == nil ||
+			*outcome.Transaction != "tx-recovery-v0112" {
+			t.Fatalf("replacement convergence = %#v, err=%v", outcome, err)
+		}
+		current, err := fixture.transition.store.ReadCurrentJournal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		newJournal, err := ParseJournal(current.Payload)
+		if err != nil || newJournal.Transaction != "tx-recovery-v0112" || len(newJournal.Steps) != 0 {
+			t.Fatalf("replacement journal = %#v, err=%v", newJournal, err)
+		}
+		if !releasePairsEqual(newJournal.Releases, fixture.transition.options.Releases) ||
+			newJournal.Goal.Target != v2PostActivationCandidateRelease ||
+			fixture.links.Active != v2PostActivationCandidateRelease ||
+			fixture.links.Previous == nil ||
+			*fixture.links.Previous != v2PostActivationSourceRelease {
+			t.Fatalf("replacement changed opaque release identities: journal=%#v links=%#v",
+				newJournal, *fixture.links)
+		}
+		archiveSnapshot, err := fixture.transition.store.ReadSupersededJournal(newJournal.Transaction)
+		if err != nil || !archiveSnapshot.Exists {
+			t.Fatalf("superseded journal archive = %#v, err=%v", archiveSnapshot, err)
+		}
+		archive, err := ParseSupersededJournal(archiveSnapshot.Payload)
+		if err != nil || archive.AuthorizationPlan != newJournal.AuthorizationPlan ||
+			archive.Replacement != *fixture.transition.options.Replacement {
+			t.Fatalf("superseded journal record = %#v, err=%v", archive, err)
+		}
+		if !releasePairsEqual(archive.Journal.Releases, fixture.sourceJournal.Releases) ||
+			archive.Journal.Releases.From != v2PostActivationPreviousRelease ||
+			archive.Journal.Releases.Target != v2PostActivationSourceRelease {
+			t.Fatalf("archive changed opaque source release identities: %#v", archive.Journal.Releases)
+		}
+		archivedJournal, err := MarshalJournal(archive.Journal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sourceJournal, err := MarshalJournal(fixture.sourceJournal)
+		if err != nil || !bytes.Equal(archivedJournal, sourceJournal) {
+			t.Fatalf("archive does not preserve exact source journal: %v", err)
+		}
+		ledger, err := fixture.transition.store.ReadLedger()
+		if err != nil || !bytes.Equal(ledger.Payload, fixture.ledgerPayload) {
+			t.Fatalf("replacement changed ledger bytes: %#v, err=%v", ledger, err)
+		}
+	})
+}
+
+func TestV2TransitionPostActivationReplacementResumesEveryDurableBoundary(t *testing.T) {
+	tests := []struct {
+		point   string
+		postCAS bool
+	}{
+		{point: "after-superseded-journal"},
+		{point: "before-replacement-journal-cas"},
+		{point: "after-replacement-journal-cas", postCAS: true},
+		{point: "after-activation-intent", postCAS: true},
+		{point: "after-target-active", postCAS: true},
+		{point: "before-reconciler-0", postCAS: true},
+		{point: "after-reconciler-0", postCAS: true},
+		{point: "before-reconciler-1", postCAS: true},
+		{point: "after-reconciler-1", postCAS: true},
+		{point: "before-journal-complete", postCAS: true},
+	}
+	for _, test := range tests {
+		t.Run(test.point, func(t *testing.T) {
+			fixture := newV2PostActivationRecoveryFixture(t)
+			fixture.transition.options.Reconcilers = []V2ActivationReconciler{
+				v2NamedReconciler("first-runtime"), v2NamedReconciler("second-runtime"),
+			}
+			fixture.transition.options.ActivateLinks = func(
+				_ context.Context,
+				pair ReleasePair,
+			) (ReleaseLinks, error) {
+				*fixture.links = ReleaseLinks{
+					Active: pair.Target, Previous: releaseIDPointer(pair.From),
+				}
+				return *fixture.links, nil
+			}
+			authorizationChecks := 0
+			fixture.transition.options.VerifyAuthorization = func(
+				plan PlanToken,
+				authorization Authorization,
+			) bool {
+				authorizationChecks++
+				return authorization == v2TestAuthorization(plan)
+			}
+			activeFault := test.point
+			fixture.transition.options.fault = func(point string) error {
+				if point == activeFault {
+					return errors.New("injected post-activation replacement fault")
+				}
+				return nil
+			}
+			inspection, err := fixture.transition.Inspect(context.Background(), fixture.goal)
+			if err != nil || inspection.Resume != nil {
+				t.Fatalf("replacement inspection = %#v, err=%v", inspection, err)
+			}
+			_, _ = fixture.transition.Converge(context.Background(), Execution{
+				Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
+			})
+			current, err := fixture.transition.store.ReadCurrentJournal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			journal, err := ParseJournal(current.Payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantTransaction := fixture.sourceJournal.Transaction
+			if test.postCAS {
+				wantTransaction = "tx-recovery-v0112"
+			}
+			if journal.Transaction != wantTransaction {
+				t.Fatalf("current transaction at %s = %q, want %q", test.point, journal.Transaction, wantTransaction)
+			}
+			if test.postCAS && journal.SourceIngress != nil {
+				t.Fatalf("post-CAS replacement journal retained source ingress: %#v", journal.SourceIngress)
+			}
+
+			activeFault = ""
+			resume, err := fixture.transition.Inspect(context.Background(), fixture.goal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			execution := Execution{Plan: resume.Plan}
+			checksBeforeResume := authorizationChecks
+			if !test.postCAS {
+				if resume.Resume != nil || resume.Plan != inspection.Plan {
+					t.Fatalf("pre-CAS retry inspection = %#v", resume)
+				}
+				execution.Authorization = v2TestAuthorization(resume.Plan)
+			} else if resume.Resume == nil || *resume.Resume != "tx-recovery-v0112" ||
+				resume.Plan == inspection.Plan {
+				t.Fatalf("post-CAS resume inspection = %#v", resume)
+			}
+			outcome, err := fixture.transition.Converge(context.Background(), execution)
+			if err != nil || outcome.Status != StatusReady || !outcome.ReachedGoal {
+				t.Fatalf("resumed replacement outcome = %#v, err=%v", outcome, err)
+			}
+			if test.postCAS && authorizationChecks != checksBeforeResume {
+				t.Fatalf("post-CAS resume requested a second confirmation: before=%d after=%d", checksBeforeResume, authorizationChecks)
+			}
+			ledger, err := fixture.transition.store.ReadLedger()
+			if err != nil || !bytes.Equal(ledger.Payload, fixture.ledgerPayload) {
+				t.Fatalf("fault recovery changed ledger bytes: %#v, err=%v", ledger, err)
+			}
+		})
+	}
+}
+
+func TestV2TransitionPostActivationReplacementConvergesAcrossStorePublicationFaults(t *testing.T) {
+	tests := []struct {
+		name       string
+		point      string
+		occurrence int
+		postCAS    bool
+	}{
+		{name: "archive pending", point: "after-pending-fsync", occurrence: 1},
+		{name: "archive published", point: "after-publish-before-dir-fsync", occurrence: 1},
+		{name: "journal pending", point: "after-pending-fsync", occurrence: 2},
+		{name: "journal published", point: "after-publish-before-dir-fsync", occurrence: 2, postCAS: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newV2PostActivationRecoveryFixture(t)
+			fixture.transition.options.ActivateLinks = func(
+				_ context.Context,
+				pair ReleasePair,
+			) (ReleaseLinks, error) {
+				*fixture.links = ReleaseLinks{Active: pair.Target, Previous: releaseIDPointer(pair.From)}
+				return *fixture.links, nil
+			}
+			seen := 0
+			fixture.transition.store.fault = func(point string) error {
+				if point != test.point {
+					return nil
+				}
+				seen++
+				if seen == test.occurrence {
+					return errors.New("injected protected publication fault")
+				}
+				return nil
+			}
+			inspection, err := fixture.transition.Inspect(context.Background(), fixture.goal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = fixture.transition.Converge(context.Background(), Execution{
+				Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
+			})
+			current, err := fixture.transition.store.ReadCurrentJournal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			journal, err := ParseJournal(current.Payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := fixture.sourceJournal.Transaction
+			if test.postCAS {
+				want = "tx-recovery-v0112"
+			}
+			if journal.Transaction != want {
+				t.Fatalf("current transaction after store fault = %q, want %q", journal.Transaction, want)
+			}
+
+			fixture.transition.store.fault = nil
+			resume, err := fixture.transition.Inspect(context.Background(), fixture.goal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			execution := Execution{Plan: resume.Plan}
+			if !test.postCAS {
+				execution.Authorization = v2TestAuthorization(resume.Plan)
+			} else if resume.Resume == nil || *resume.Resume != "tx-recovery-v0112" {
+				t.Fatalf("published journal was not resumable: %#v", resume)
+			}
+			outcome, err := fixture.transition.Converge(context.Background(), execution)
+			if err != nil || outcome.Status != StatusReady {
+				t.Fatalf("store fault retry outcome = %#v, err=%v", outcome, err)
+			}
+			ledger, err := fixture.transition.store.ReadLedger()
+			if err != nil || !bytes.Equal(ledger.Payload, fixture.ledgerPayload) {
+				t.Fatalf("store fault retry changed ledger: %#v, err=%v", ledger, err)
+			}
+		})
+	}
+}
+
+func TestV2TransitionPostActivationReplacementReusesPreCASArchiveAcrossRestart(t *testing.T) {
+	fixture := newV2PostActivationRecoveryFixture(t)
+	fixture.transition.options.NewTransactionID = func() TransactionID { return "tx-recovery-first" }
+	fixture.transition.options.ActivateLinks = func(
+		_ context.Context,
+		pair ReleasePair,
+	) (ReleaseLinks, error) {
+		*fixture.links = ReleaseLinks{Active: pair.Target, Previous: releaseIDPointer(pair.From)}
+		return *fixture.links, nil
+	}
+	fixture.transition.options.fault = func(point string) error {
+		if point == "after-superseded-journal" {
+			return errors.New("process stopped after durable archive")
+		}
+		return nil
+	}
+	inspection, err := fixture.transition.Inspect(context.Background(), fixture.goal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = fixture.transition.Converge(context.Background(), Execution{
+		Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
+	})
+	archive, err := fixture.transition.store.ReadSupersededJournal("tx-recovery-first")
+	if err != nil || !archive.Exists {
+		t.Fatalf("first process archive = %#v, err=%v", archive, err)
+	}
+
+	options := fixture.transition.options
+	options.fault = nil
+	options.NewTransactionID = func() TransactionID { return "tx-recovery-second" }
+	restarted, err := NewV2Transition(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reinspection, err := restarted.Inspect(context.Background(), fixture.goal)
+	if err != nil || reinspection.Resume != nil || reinspection.Plan != inspection.Plan {
+		t.Fatalf("restart inspection = %#v, err=%v", reinspection, err)
+	}
+	outcome, err := restarted.Converge(context.Background(), Execution{
+		Plan: reinspection.Plan, Authorization: v2TestAuthorization(reinspection.Plan),
+	})
+	if err != nil || outcome.Status != StatusReady || outcome.Transaction == nil ||
+		*outcome.Transaction != "tx-recovery-first" {
+		t.Fatalf("restart outcome = %#v, err=%v", outcome, err)
+	}
+	second, err := restarted.store.ReadSupersededJournal("tx-recovery-second")
+	if err != nil || second.Exists {
+		t.Fatalf("restart created a second predecessor edge: %#v, err=%v", second, err)
+	}
+}
+
+func TestV2TransitionPostActivationReplacementRejectsUnsafeArchiveGraphBeforeMutation(t *testing.T) {
+	tests := []struct {
+		name              string
+		eligibleAtInspect bool
+		setup             func(*v2PostActivationRecoveryFixture)
+	}{
+		{name: "source already has predecessor", setup: func(f *v2PostActivationRecoveryFixture) {
+			createStoreTransaction(f.t, f.transition.store, "tx-older")
+			createStoreSupersession(
+				f.t, f.transition.store, f.sourceJournal.Transaction, "tx-older",
+				f.sourceJournal.AuthorizationPlan,
+			)
+		}},
+		{name: "foreign successor already points to source", eligibleAtInspect: true, setup: func(f *v2PostActivationRecoveryFixture) {
+			createStoreSupersession(
+				f.t, f.transition.store, "tx-foreign", f.sourceJournal.Transaction,
+				PlanToken("plan-v1-"+strings.Repeat("d", 64)),
+			)
+		}},
+		{name: "allocation exceeds graph bound", eligibleAtInspect: true, setup: func(f *v2PostActivationRecoveryFixture) {
+			for index := 0; index < maxTransactionGraphEntries-1; index++ {
+				createStoreTransaction(
+					f.t, f.transition.store, TransactionID(fmt.Sprintf("tx-bound-%03d", index)),
+				)
+			}
+		}},
+		{name: "proposed transaction collides", eligibleAtInspect: true, setup: func(f *v2PostActivationRecoveryFixture) {
+			createStoreTransaction(f.t, f.transition.store, "tx-recovery-v0112")
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newV2PostActivationRecoveryFixture(t)
+			test.setup(fixture)
+			before := snapshotV2ProtectedTree(t, fixture.configHome)
+			inspection, err := fixture.transition.Inspect(context.Background(), fixture.goal)
+			if err != nil || inspection.Outcome == nil {
+				t.Fatalf("replacement inspection = %#v, err=%v", inspection, err)
+			}
+			if !test.eligibleAtInspect {
+				if inspection.Outcome.Status != StatusOperatorActionRequired {
+					t.Fatalf("unsafe source graph inspection = %#v", inspection)
+				}
+				if after := snapshotV2ProtectedTree(t, fixture.configHome); !bytes.Equal(after, before) {
+					t.Fatalf("failed graph inspection changed protected state\nbefore:\n%s\nafter:\n%s", before, after)
+				}
+				return
+			}
+			if inspection.Outcome.Status != StatusMigrationRequired {
+				t.Fatalf("replacement inspection = %#v", inspection)
+			}
+			outcome, err := fixture.transition.Converge(context.Background(), Execution{
+				Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
+			})
+			if err == nil && outcome.Status != StatusOperatorActionRequired {
+				t.Fatalf("unsafe archive graph convergence = %#v, err=%v", outcome, err)
+			}
+			after := snapshotV2ProtectedTree(t, fixture.configHome)
+			if !bytes.Equal(after, before) {
+				t.Fatalf("failed archive admission changed protected state\nbefore:\n%s\nafter:\n%s", before, after)
+			}
+		})
+	}
+}
+
+func TestV2TransitionOrdinaryInspectionIgnoresUnrelatedTransactionGraph(t *testing.T) {
+	transition, _, _ := v2TransitionFixture(t, nil)
+	goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
+	inspection, err := transition.Inspect(context.Background(), goal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := transition.Converge(context.Background(), Execution{
+		Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
+	})
+	if err != nil || outcome.Status != StatusReady {
+		t.Fatalf("initial convergence = %#v, err=%v", outcome, err)
+	}
+	for index := 0; index <= maxTransactionGraphEntries; index++ {
+		createStoreTransaction(
+			t, transition.store, TransactionID(fmt.Sprintf("tx-unrelated-%03d", index)),
+		)
+	}
+
+	reinspection, err := transition.Inspect(context.Background(), goal)
+	if err != nil || reinspection.Outcome == nil || reinspection.Outcome.Status != StatusReady {
+		t.Fatalf("ordinary inspection = %#v, err=%v", reinspection, err)
+	}
+}
+
+type v2PostActivationRecoveryFixture struct {
+	t             *testing.T
+	transition    *V2Transition
+	configHome    string
+	links         *ReleaseLinks
+	goal          Goal
+	sourceJournal JournalRecord
+	ledgerPayload []byte
+}
+
+func newV2PostActivationRecoveryFixture(t *testing.T) *v2PostActivationRecoveryFixture {
+	t.Helper()
+	configHome := settingsV2Fixture(t, map[string]string{
+		"yards/hermes/config.env": "YARD_TEMPLATE='test-vms'\n",
+	})
+	links := &ReleaseLinks{
+		Active:   v2PostActivationSourceRelease,
+		Previous: releaseIDPointer(v2PostActivationPreviousRelease),
+	}
+	sourceOptions := V2Options{
+		ConfigHome: configHome, Releases: ReleasePair{
+			From: v2PostActivationPreviousRelease, Target: v2PostActivationSourceRelease,
+		},
+		ObserveLinks:        func(context.Context) (ReleaseLinks, error) { return *links, nil },
+		RegistryPayload:     v2RegistryPayload(t),
+		ArtifactDigest:      digestA,
+		OwnerRegistration:   &v2TestOwnerRegistration{state: OwnerRegistrationAbsent},
+		NewTransactionID:    func() TransactionID { return "tx-source-v0111" },
+		VerifyAuthorization: func(PlanToken, Authorization) bool { return false },
+	}
+	source, err := NewV2Transition(sourceOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal, sourceSnapshot, ledgerPayload := seedV0111PostActivationJournal(t, source)
+	replacement := &JournalReplacement{
+		Transaction: journal.Transaction, Fingerprint: sourceSnapshot.Fingerprint,
+		Reason: JournalReplacementPostActivationScopeV0111, SourceVersion: "0.11.1",
+	}
+	candidateOptions := sourceOptions
+	candidateOptions.Releases = ReleasePair{
+		From: v2PostActivationSourceRelease, Previous: releaseIDPointer(v2PostActivationPreviousRelease),
+		Target: v2PostActivationCandidateRelease,
+	}
+	candidateOptions.CandidateVersion = "0.11.2"
+	candidateOptions.ArtifactDigest = digestB
+	candidateOptions.Replacement = replacement
+	candidateOptions.NewTransactionID = func() TransactionID { return "tx-recovery-v0112" }
+	candidateOptions.VerifyAuthorization = func(plan PlanToken, authorization Authorization) bool {
+		return authorization == v2TestAuthorization(plan)
+	}
+	candidate, err := NewV2Transition(candidateOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &v2PostActivationRecoveryFixture{
+		t: t, transition: candidate, configHome: configHome, links: links,
+		goal:          Goal{Target: v2PostActivationCandidateRelease, Direction: DirectionActivateTarget},
+		sourceJournal: journal, ledgerPayload: ledgerPayload,
+	}
+}
+
+func (fixture *v2PostActivationRecoveryFixture) rewriteJournal(change func(*JournalRecord)) {
+	fixture.t.Helper()
+	current, err := fixture.transition.store.ReadCurrentJournal()
+	if err != nil {
+		fixture.t.Fatal(err)
+	}
+	journal, err := ParseJournal(current.Payload)
+	if err != nil {
+		fixture.t.Fatal(err)
+	}
+	change(&journal)
+	journal.IntentDigest = bindJournalIntent(
+		journal.AuthorizationPlan, journal.ResumePlan, journal.ObservationScope, journal.Steps,
+	)
+	payload, err := MarshalJournal(journal)
+	if err != nil {
+		fixture.t.Fatal(err)
+	}
+	if err := fixture.transition.store.CompareAndSwapCurrentJournal(current, payload); err != nil {
+		fixture.t.Fatal(err)
+	}
+	updated, err := fixture.transition.store.ReadCurrentJournal()
+	if err != nil {
+		fixture.t.Fatal(err)
+	}
+	fixture.sourceJournal = journal
+	fixture.transition.options.Replacement.Transaction = journal.Transaction
+	fixture.transition.options.Replacement.Fingerprint = updated.Fingerprint
+}
+
+func (fixture *v2PostActivationRecoveryFixture) removeEvidence(
+	step string,
+	checkpoint EvidenceCheckpoint,
+) {
+	fixture.t.Helper()
+	name, err := checkpointEvidenceName(fixture.sourceJournal.Transaction, step, checkpoint)
+	if err != nil {
+		fixture.t.Fatal(err)
+	}
+	path := filepath.Join(
+		fixture.configHome, "release-transition", "v2", "transactions",
+		string(fixture.sourceJournal.Transaction), "evidence", name,
+	)
+	if err := os.Remove(path); err != nil {
+		fixture.t.Fatal(err)
+	}
+}
+
+func snapshotV2ProtectedTree(t *testing.T, configHome string) []byte {
+	t.Helper()
+	root := filepath.Join(configHome, "release-transition", "v2")
+	var snapshot bytes.Buffer
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		snapshot.WriteString(relative)
+		snapshot.WriteByte('\t')
+		snapshot.WriteString(info.Mode().String())
+		snapshot.WriteByte('\n')
+		if info.Mode().IsRegular() {
+			payload, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			snapshot.Write(payload)
+			snapshot.WriteByte('\n')
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snapshot.Bytes()
+}
+
+func seedV0111PostActivationJournal(
+	t *testing.T,
+	transition *V2Transition,
+) (JournalRecord, ProtectedSnapshot, []byte) {
+	t.Helper()
+	pair := transition.options.Releases
+	ledger := BaselineLedgerV2(transition.registry)
+	ledgerSnapshot := absentProtectedSnapshot()
+	steps := make([]JournalStep, 0, len(transition.registry.Migrations))
+	for _, migration := range transition.registry.Migrations {
+		advanced, err := ledger.Advance(transition.registry, migration)
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload, desired, err := MarshalLedgerV2(advanced, transition.registry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		step := JournalStep{
+			ID: migration.ID + ".ledger", Migration: migration.ID,
+			Resource: "ledger." + migration.Domain, Decision: DecisionTransform,
+			Expected: ledgerSnapshot.Fingerprint, Desired: desired, Checkpoint: StepVerified,
+		}
+		evidence := EvidenceRecord{
+			SchemaVersion: JournalSchemaV2, Transaction: "tx-source-v0111",
+			Releases: pair, Step: step.ID, Expected: step.Expected, Desired: step.Desired,
+			Observed: step.Desired, Checkpoint: EvidenceVerified,
+		}
+		step.Evidence = &evidence
+		steps = append(steps, step)
+		ledger, ledgerSnapshot = advanced, protectedSnapshotFromPayload(payload)
+	}
+	journal := JournalRecord{
+		SchemaVersion: JournalSchemaV2, Transaction: "tx-source-v0111",
+		Goal: Goal{Target: pair.Target, Direction: DirectionActivateTarget}, Releases: pair,
+		AuthorizationPlan: PlanToken("plan-v1-" + strings.Repeat("a", 64)),
+		ResumePlan:        PlanToken("resume-v1-" + strings.Repeat("b", 64)),
+		ArtifactDigest:    transition.options.ArtifactDigest,
+		RegistryDigest:    transition.registryDigest, CatalogDigest: transition.catalog.Digest(),
+		ObservationScope: digestD, AuthorizationDigest: digestC,
+		Checkpoint: JournalReconciling, Steps: steps,
+	}
+	journal.IntentDigest = bindJournalIntent(
+		journal.AuthorizationPlan, journal.ResumePlan, journal.ObservationScope, journal.Steps,
+	)
+	if err := transition.store.CompareAndSwapLedger(absentProtectedSnapshot(), ledgerSnapshot.Payload); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range journal.Steps {
+		for _, checkpoint := range []EvidenceCheckpoint{EvidenceCaptured, EvidenceApplied, EvidenceVerified} {
+			observed := step.Desired
+			if checkpoint == EvidenceCaptured {
+				observed = step.Expected
+			}
+			evidence := EvidenceRecord{
+				SchemaVersion: JournalSchemaV2, Transaction: journal.Transaction,
+				Releases: pair, Step: step.ID, Expected: step.Expected, Desired: step.Desired,
+				Observed: observed, Checkpoint: checkpoint,
+			}
+			payload, err := MarshalEvidence(evidence)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := transition.store.CreateCheckpointEvidence(
+				journal.Transaction, step.ID, checkpoint, payload,
+			); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	payload, err := MarshalJournal(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing, err := transition.store.ReadCurrentJournal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := transition.store.CompareAndSwapCurrentJournal(missing, payload); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := transition.store.ReadCurrentJournal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return journal, snapshot, ledgerSnapshot.Payload
 }
 
 func TestV2TransitionResumesEveryDurableCheckpointWithoutNewAuthorization(t *testing.T) {

@@ -74,6 +74,62 @@ func TestPlanTokenBindsEveryMaterialInspectionFact(t *testing.T) {
 	}
 }
 
+func TestPlanTokenBindsTypedJournalReplacement(t *testing.T) {
+	base := basePlanFacts()
+	base.Replacement = &JournalReplacement{
+		Transaction: "tx-source", Fingerprint: digestA,
+		Reason: JournalReplacementPostActivationScopeV0111, SourceVersion: "0.11.1",
+	}
+	want, err := BindPlan(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, change := range map[string]func(*JournalReplacement){
+		"transaction": func(value *JournalReplacement) { value.Transaction = "tx-other" },
+		"fingerprint": func(value *JournalReplacement) { value.Fingerprint = digestB },
+		"reason": func(value *JournalReplacement) {
+			value.Reason = JournalReplacementPreActivationPlanStale
+			value.SourceVersion = ""
+		},
+		"source version": func(value *JournalReplacement) { value.SourceVersion = "0.11.0" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := clonePlanFacts(base)
+			replacement := *base.Replacement
+			change(&replacement)
+			changed.Replacement = &replacement
+			got, err := BindPlan(changed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got == want {
+				t.Fatalf("replacement %s was not bound into Plan", name)
+			}
+		})
+	}
+	for name, replacement := range map[string]JournalReplacement{
+		"unknown reason": {
+			Transaction: "tx-source", Fingerprint: digestA, Reason: "unknown",
+		},
+		"pre-activation source version": {
+			Transaction: "tx-source", Fingerprint: digestA,
+			Reason: JournalReplacementPreActivationPlanStale, SourceVersion: "0.11.1",
+		},
+		"missing post-activation source version": {
+			Transaction: "tx-source", Fingerprint: digestA,
+			Reason: JournalReplacementPostActivationScopeV0111,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := clonePlanFacts(base)
+			changed.Replacement = &replacement
+			if _, err := BindPlan(changed); err == nil {
+				t.Fatalf("invalid replacement was accepted: %#v", replacement)
+			}
+		})
+	}
+}
+
 func TestResumePlanBindsEveryImmutableRecoveryFact(t *testing.T) {
 	authorizationPlan, err := BindPlan(basePlanFacts())
 	if err != nil {

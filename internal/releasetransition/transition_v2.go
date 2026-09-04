@@ -1,6 +1,7 @@
 package releasetransition
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/blang/semver/v4"
 )
 
 const v2ActionID domain.ActionID = "release.transition.v2"
@@ -46,18 +48,21 @@ func assessV2Action(
 }
 
 type V2Options struct {
-	ConfigHome          string
-	Releases            ReleasePair
-	Direction           Direction
-	ObserveLinks        func(context.Context) (ReleaseLinks, error)
-	ActivateLinks       func(context.Context, ReleasePair) (ReleaseLinks, error)
-	Reconcilers         []V2ActivationReconciler
-	OwnerRegistration   V2OwnerRegistration
-	Ingress             V2Ingress
-	RegistryPayload     []byte
-	ArtifactDigest      Fingerprint
+	ConfigHome        string
+	Releases          ReleasePair
+	Direction         Direction
+	ObserveLinks      func(context.Context) (ReleaseLinks, error)
+	ActivateLinks     func(context.Context, ReleasePair) (ReleaseLinks, error)
+	Reconcilers       []V2ActivationReconciler
+	OwnerRegistration V2OwnerRegistration
+	Ingress           V2Ingress
+	RegistryPayload   []byte
+	ArtifactDigest    Fingerprint
+	// CandidateVersion is the trusted compiled runtime semver; ReleaseIDs remain opaque identities.
+	CandidateVersion    string
 	InheritedSettingIDs []string
 	SourceIngress       *SourceIngressRequest
+	Replacement         *JournalReplacement
 	NewTransactionID    func() TransactionID
 	VerifyAuthorization func(PlanToken, Authorization) bool
 	fault               func(string) error
@@ -109,22 +114,23 @@ type v2Work struct {
 }
 
 type v2Observation struct {
-	goal             Goal
-	links            ReleaseLinks
-	ledger           LedgerV2
-	ledgerSnapshot   ProtectedSnapshot
-	journal          *JournalRecord
-	journalSnapshot  ProtectedSnapshot
-	assessment       domain.ActionAssessment
-	decisions        []RedactedDecision
-	blockers         []Blocker
-	observations     []ResourceObservation
-	intents          []PlannerStepIntent
-	work             []v2Work
-	activationScope  []v2ActivationScope
-	observationScope Fingerprint
-	activationFixed  bool
-	replacement      *JournalReplacement
+	goal              Goal
+	links             ReleaseLinks
+	ledger            LedgerV2
+	ledgerSnapshot    ProtectedSnapshot
+	journal           *JournalRecord
+	journalSnapshot   ProtectedSnapshot
+	assessment        domain.ActionAssessment
+	decisions         []RedactedDecision
+	blockers          []Blocker
+	observations      []ResourceObservation
+	intents           []PlannerStepIntent
+	work              []v2Work
+	activationScope   []v2ActivationScope
+	observationScope  Fingerprint
+	activationFixed   bool
+	replacement       *JournalReplacement
+	supersededJournal *JournalRecord
 }
 
 type v2ActivationScope struct {
@@ -167,6 +173,11 @@ func NewV2Transition(options V2Options) (*V2Transition, error) {
 			return nil, errors.New("source ingress descriptor has no compatibility adapter")
 		}
 	}
+	if options.Replacement != nil {
+		if err := options.Replacement.Validate(); err != nil {
+			return nil, err
+		}
+	}
 	store, err := NewPOSIXV2Store(options.ConfigHome)
 	if err != nil {
 		return nil, err
@@ -180,10 +191,10 @@ func NewV2Transition(options V2Options) (*V2Transition, error) {
 		if parseErr != nil {
 			return nil, parseErr
 		}
-		if journal.Checkpoint != JournalComplete ||
+		if options.Replacement == nil && (journal.Checkpoint != JournalComplete ||
 			(journal.Goal.Target == options.Releases.Target &&
 				journal.Goal.Direction == options.Direction &&
-				journal.ArtifactDigest == options.ArtifactDigest) {
+				journal.ArtifactDigest == options.ArtifactDigest)) {
 			// The protected journal owns the immutable release pair while it is
 			// unfinished and for an exact completed-goal reinspection.
 			// A genuinely new target keeps the observed pair.
@@ -211,6 +222,7 @@ func NewV2Transition(options V2Options) (*V2Transition, error) {
 	options.RegistryPayload = slices.Clone(options.RegistryPayload)
 	options.InheritedSettingIDs = slices.Clone(options.InheritedSettingIDs)
 	options.Reconcilers = slices.Clone(options.Reconcilers)
+	options.Replacement = cloneJournalReplacement(options.Replacement)
 	return &V2Transition{
 		options: options, store: store, catalog: catalog, registry: registry,
 		registryDigest: registryDigest, policy: policy, cache: make(map[PlanToken]Goal),
@@ -304,12 +316,133 @@ func (transition *V2Transition) inspectionOutcome(observation v2Observation) Out
 	return Evaluate(facts)
 }
 
+func (transition *V2Transition) preflightConverge(
+	ctx context.Context,
+	execution Execution,
+) (PlanToken, *Outcome, error) {
+	currentSnapshot, err := transition.store.ReadCurrentJournal()
+	if err != nil {
+		return "", nil, err
+	}
+	var current *JournalRecord
+	if currentSnapshot.Exists {
+		parsed, parseErr := ParseJournal(currentSnapshot.Payload)
+		if parseErr != nil {
+			return "", nil, parseErr
+		}
+		current = &parsed
+	}
+	goal, found := transition.resolveConvergeGoal(ctx, execution, current)
+	if !found {
+		links, linksErr := transition.options.ObserveLinks(ctx)
+		if linksErr != nil {
+			return "", nil, linksErr
+		}
+		outcome := v2OperatorOutcome(links, transition.options.Releases.Target, nil,
+			CodePlanStale, "the release transition plan was not inspected by this engine",
+			"run yard update --check")
+		return "", &outcome, nil
+	}
+	observation, err := transition.observe(ctx, goal)
+	if err != nil {
+		return "", nil, err
+	}
+	if len(observation.blockers) != 0 {
+		blocker := observation.blockers[0]
+		var transaction *TransactionID
+		if observation.journal != nil &&
+			(observation.journal.Checkpoint != JournalComplete ||
+				observation.journal.Goal == observation.goal) {
+			transaction = transactionIDPointer(observation.journal.Transaction)
+		}
+		outcome := v2OperatorOutcome(
+			observation.links, goal.Target, transaction,
+			blocker.Code, blocker.Message, blocker.Retry,
+		)
+		return "", &outcome, nil
+	}
+	if observation.journal != nil && observation.journal.Checkpoint == JournalComplete &&
+		observation.journal.Goal == observation.goal {
+		return "", nil, nil
+	}
+	if observation.journal != nil && observation.journal.Checkpoint != JournalComplete {
+		if execution.Plan != observation.journal.ResumePlan {
+			outcome := v2OperatorOutcome(observation.links, goal.Target,
+				transactionIDPointer(observation.journal.Transaction), CodePlanStale,
+				"the authorized release transition bindings changed",
+				"run yard update --check")
+			return "", &outcome, nil
+		}
+		return "", nil, nil
+	}
+	plan, err := BindPlan(transition.planFacts(observation))
+	if err != nil {
+		return "", nil, err
+	}
+	if plan != execution.Plan {
+		outcome := v2OperatorOutcome(observation.links, goal.Target, nil,
+			CodePlanStale, "the inspected release transition changed before convergence",
+			"run yard update --check")
+		return "", &outcome, nil
+	}
+	if len(observation.work) == 0 && transition.fixedPoint(observation) {
+		outcome := readyOutcome(Outcome{
+			Active: observation.links.Active, Previous: cloneReleaseID(observation.links.Previous),
+			Target: goal.Target,
+		})
+		return "", &outcome, nil
+	}
+	if !transition.options.VerifyAuthorization(plan, execution.Authorization) {
+		outcome := v2OperatorOutcome(observation.links, goal.Target, nil,
+			CodeConfirmationRequired, "the exact release transition plan is not authorized",
+			"review and confirm the update plan")
+		return "", &outcome, nil
+	}
+	return plan, nil, nil
+}
+
+func (transition *V2Transition) resolveConvergeGoal(
+	ctx context.Context,
+	execution Execution,
+	current *JournalRecord,
+) (Goal, bool) {
+	goal, found := transition.cachedGoal(execution.Plan)
+	if current != nil && current.Checkpoint != JournalComplete &&
+		execution.Plan == current.ResumePlan {
+		return current.Goal, true
+	}
+	if found || (current != nil && current.Checkpoint != JournalComplete &&
+		transition.options.Replacement == nil) {
+		return goal, found
+	}
+	candidate := Goal{
+		Target:    transition.options.Releases.Target,
+		Direction: transition.options.Direction,
+	}
+	observation, err := transition.observe(ctx, candidate)
+	if err != nil {
+		return Goal{}, false
+	}
+	plan, err := BindPlan(transition.planFacts(observation))
+	if err != nil || plan != execution.Plan {
+		return Goal{}, false
+	}
+	return candidate, true
+}
+
 func (transition *V2Transition) Converge(
 	ctx context.Context,
 	execution Execution,
 ) (outcome Outcome, resultErr error) {
 	if transition == nil {
 		return Outcome{}, errors.New("v2 transition is required")
+	}
+	authorizedPlan, preflightOutcome, err := transition.preflightConverge(ctx, execution)
+	if err != nil {
+		return Outcome{}, err
+	}
+	if preflightOutcome != nil {
+		return *preflightOutcome, nil
 	}
 	var recoverableJournal *JournalRecord
 	unlock, err := transition.store.Lock()
@@ -330,6 +463,16 @@ func (transition *V2Transition) Converge(
 	if err != nil {
 		return Outcome{}, err
 	}
+	if authorizedPlan != "" && transition.options.Replacement != nil &&
+		currentSnapshot.Fingerprint != transition.options.Replacement.Fingerprint {
+		links, linksErr := transition.options.ObserveLinks(ctx)
+		if linksErr != nil {
+			return Outcome{}, linksErr
+		}
+		return v2OperatorOutcome(links, transition.options.Releases.Target, nil,
+			CodePlanStale, "the journal selected for replacement changed after confirmation",
+			"run yard update --check"), nil
+	}
 	var current *JournalRecord
 	if currentSnapshot.Exists {
 		parsed, parseErr := ParseJournal(currentSnapshot.Payload)
@@ -341,23 +484,7 @@ func (transition *V2Transition) Converge(
 			recoverableJournal = current
 		}
 	}
-	goal, found := transition.cachedGoal(execution.Plan)
-	if current != nil && current.Checkpoint != JournalComplete &&
-		execution.Plan == current.ResumePlan {
-		goal, found = current.Goal, true
-	}
-	if !found && (current == nil || current.Checkpoint == JournalComplete) {
-		candidate := Goal{
-			Target:    transition.options.Releases.Target,
-			Direction: transition.options.Direction,
-		}
-		observation, observeErr := transition.observe(ctx, candidate)
-		if observeErr == nil {
-			if plan, bindErr := BindPlan(transition.planFacts(observation)); bindErr == nil && plan == execution.Plan {
-				goal, found = candidate, true
-			}
-		}
-	}
+	goal, found := transition.resolveConvergeGoal(ctx, execution, current)
 	if !found {
 		links, linksErr := transition.options.ObserveLinks(ctx)
 		if linksErr != nil {
@@ -412,10 +539,21 @@ func (transition *V2Transition) Converge(
 				Target: goal.Target,
 			}), nil
 		}
-		if !transition.options.VerifyAuthorization(plan, execution.Authorization) {
+		if authorizedPlan != plan {
 			return v2OperatorOutcome(observation.links, goal.Target, nil,
 				CodeConfirmationRequired, "the exact release transition plan is not authorized",
 				"review and confirm the update plan"), nil
+		}
+		if observation.replacement != nil {
+			current, readErr := transition.store.ReadCurrentJournal()
+			if readErr != nil {
+				return Outcome{}, readErr
+			}
+			if !sameProtectedSnapshot(current, journalSnapshot) {
+				return v2OperatorOutcome(observation.links, goal.Target, nil,
+					CodePlanStale, "the journal selected for replacement changed after confirmation",
+					"run yard update --check"), nil
+			}
 		}
 		created, createErr := transition.newJournal(observation, plan, execution.Authorization)
 		if createErr != nil {
@@ -426,11 +564,55 @@ func (transition *V2Transition) Converge(
 			return Outcome{}, marshalErr
 		}
 		journal = &created
-		recoverableJournal = journal
+		if requiresSupersededJournalArchive(observation.replacement) {
+			if observation.supersededJournal == nil {
+				return Outcome{}, invalid("replacement source journal is missing")
+			}
+			archive, archiveErr := MarshalSupersededJournal(SupersededJournalRecord{
+				SchemaVersion: SupersededJournalSchemaV1, AuthorizationPlan: created.AuthorizationPlan,
+				Replacement: *observation.replacement, Journal: *observation.supersededJournal,
+			})
+			if archiveErr != nil {
+				return Outcome{}, archiveErr
+			}
+			if archiveErr := transition.store.CreateSupersededJournal(created.Transaction, archive); archiveErr != nil {
+				return Outcome{}, archiveErr
+			}
+			if err := transition.inject("after-superseded-journal"); err != nil {
+				return Outcome{}, err
+			}
+			current, readErr := transition.store.ReadCurrentJournal()
+			if readErr != nil {
+				return Outcome{}, readErr
+			}
+			if !sameProtectedSnapshot(current, journalSnapshot) {
+				return v2OperatorOutcome(observation.links, goal.Target, nil,
+					CodePlanStale, "the journal selected for replacement changed before publication",
+					"run yard update --check"), nil
+			}
+			if err := transition.inject("before-replacement-journal-cas"); err != nil {
+				return Outcome{}, err
+			}
+		}
 		if err := transition.store.CompareAndSwapCurrentJournal(journalSnapshot, payload); err != nil {
+			if errors.Is(err, ErrProtectedStoreStale) && observation.replacement != nil {
+				return v2OperatorOutcome(observation.links, goal.Target, nil,
+					CodePlanStale, "the journal selected for replacement changed before publication",
+					"run yard update --check"), nil
+			}
+			published, readErr := transition.store.ReadCurrentJournal()
+			if readErr == nil && published.Exists && bytes.Equal(published.Payload, payload) {
+				recoverableJournal = journal
+			}
 			return Outcome{}, err
 		}
+		recoverableJournal = journal
 		journalSnapshot = protectedSnapshotFromPayload(payload)
+		if observation.replacement != nil {
+			if err := transition.inject("after-replacement-journal-cas"); err != nil {
+				return Outcome{}, err
+			}
+		}
 		if err := transition.inject("after-journal-authorized"); err != nil {
 			return Outcome{}, err
 		}
@@ -541,6 +723,9 @@ func (transition *V2Transition) Converge(
 			ctx, *journal,
 		); reconcileErr != nil || outcome.Code != "" {
 			return outcome, reconcileErr
+		}
+		if err := transition.inject("before-journal-complete"); err != nil {
+			return Outcome{}, err
 		}
 		journal.Checkpoint = JournalComplete
 		if err := transition.persistJournal(journal, &journalSnapshot); err != nil {
@@ -756,6 +941,9 @@ func (transition *V2Transition) observe(ctx context.Context, goal Goal) (v2Obser
 		if parseErr != nil {
 			return v2Observation{}, parseErr
 		}
+		if graphErr := transition.store.validateCurrentSupersession(parsed); graphErr != nil {
+			return v2Observation{}, graphErr
+		}
 		journal = &parsed
 	}
 	observation := v2Observation{
@@ -765,19 +953,26 @@ func (transition *V2Transition) observe(ctx context.Context, goal Goal) (v2Obser
 	completedHistory := journal != nil && journal.Checkpoint == JournalComplete &&
 		transition.completedJournalMatches(observation)
 	if journal != nil && journal.Checkpoint != JournalComplete {
-		if journal.Goal != goal || !releasePairsEqual(journal.Releases, transition.options.Releases) {
+		replaced, replaceErr := transition.observePostActivationReplacement(ctx, &observation)
+		if replaceErr != nil {
+			return v2Observation{}, replaceErr
+		}
+		if !replaced && (journal.Goal != goal || !releasePairsEqual(journal.Releases, transition.options.Releases)) {
 			observation.blockers = []Blocker{{
 				Code: CodeRecoveryAmbiguous, Resource: "transition.active",
 				Message: "another release transition must be recovered before this goal",
 				Retry:   "run yard update --check",
 			}}
 		}
-		if err := transition.observeResume(ctx, &observation); err != nil {
-			return v2Observation{}, err
+		if !replaced {
+			if err := transition.observeResume(ctx, &observation); err != nil {
+				return v2Observation{}, err
+			}
 		}
-		if transition.canReplacePreActivationJournal(observation) {
+		if !replaced && transition.canReplacePreActivationJournal(observation) {
 			replacement := &JournalReplacement{
 				Transaction: journal.Transaction, Fingerprint: journalSnapshot.Fingerprint,
+				Reason: JournalReplacementPreActivationPlanStale,
 			}
 			observation = v2Observation{
 				goal: goal, links: links, ledger: ledger, ledgerSnapshot: ledgerSnapshot,
@@ -805,7 +1000,7 @@ func (transition *V2Transition) observe(ctx context.Context, goal Goal) (v2Obser
 		// drift belongs to ordinary reconciliation, not migration recovery.
 		observation.activationFixed = true
 		observation.observationScope = journal.ObservationScope
-	} else {
+	} else if observation.observationScope == "" {
 		if err := transition.observeActivation(ctx, &observation); err != nil {
 			return v2Observation{}, err
 		}
@@ -834,6 +1029,159 @@ func (transition *V2Transition) observe(ctx context.Context, goal Goal) (v2Obser
 	}
 	observation.assessment = assessment
 	return observation, nil
+}
+
+func (transition *V2Transition) observePostActivationReplacement(
+	ctx context.Context,
+	observation *v2Observation,
+) (bool, error) {
+	request := transition.options.Replacement
+	journal := observation.journal
+	if request == nil || journal == nil ||
+		request.Reason != JournalReplacementPostActivationScopeV0111 ||
+		request.SourceVersion != "0.11.1" ||
+		request.Transaction != journal.Transaction ||
+		request.Fingerprint != observation.journalSnapshot.Fingerprint ||
+		transition.options.SourceIngress != nil ||
+		transition.options.Direction != DirectionActivateTarget ||
+		observation.goal.Direction != DirectionActivateTarget ||
+		journal.Goal.Direction != DirectionActivateTarget ||
+		journal.Checkpoint != JournalReconciling || journal.SourceIngress != nil ||
+		journal.RegistryDigest != transition.registryDigest ||
+		journal.CatalogDigest != transition.catalog.Digest() ||
+		transition.options.Releases.From != journal.Releases.Target ||
+		transition.options.Releases.Target == journal.Releases.Target ||
+		!releaseIDsEqual(transition.options.Releases.Previous, releaseIDPointer(journal.Releases.From)) ||
+		!activatedReleaseLinks(observation.links, journal.Releases) {
+		return false, nil
+	}
+	canonicalJournal, err := MarshalJournal(*journal)
+	if err != nil {
+		return false, err
+	}
+	if fingerprintPayload(canonicalJournal) != request.Fingerprint {
+		return false, nil
+	}
+	sourceVersion, err := semver.Parse(request.SourceVersion)
+	if err != nil {
+		return false, nil
+	}
+	candidateVersion, err := semver.Parse(transition.options.CandidateVersion)
+	if err != nil || candidateVersion.String() != transition.options.CandidateVersion ||
+		!candidateVersion.GT(sourceVersion) {
+		return false, nil
+	}
+	eligible, err := transition.postActivationLedgerEvidenceMatches(*journal, observation.ledgerSnapshot)
+	if err != nil || !eligible {
+		return false, err
+	}
+	candidate := v2Observation{
+		goal: observation.goal, links: observation.links,
+		ledger: observation.ledger, ledgerSnapshot: observation.ledgerSnapshot,
+		journalSnapshot:   observation.journalSnapshot,
+		replacement:       cloneJournalReplacement(request),
+		supersededJournal: journal,
+	}
+	if err := transition.observeActivation(ctx, &candidate); err != nil {
+		return false, err
+	}
+	if len(candidate.blockers) != 0 {
+		return false, nil
+	}
+	candidate.observationScope, err = transition.bindObservationScope(candidate.activationScope)
+	if err != nil {
+		return false, err
+	}
+	if candidate.observationScope == journal.ObservationScope {
+		return false, nil
+	}
+	*observation = candidate
+	return true, nil
+}
+
+func (transition *V2Transition) postActivationLedgerEvidenceMatches(
+	journal JournalRecord,
+	ledgerSnapshot ProtectedSnapshot,
+) (bool, error) {
+	if !ledgerSnapshot.Exists || len(journal.Steps) == 0 {
+		return false, nil
+	}
+	artifactsMatch, err := transition.store.postActivationJournalArtifactsMatch(journal)
+	if err != nil || !artifactsMatch {
+		return false, err
+	}
+	ledger := BaselineLedgerV2(transition.registry)
+	reconstructed := absentProtectedSnapshot()
+	for _, step := range journal.Steps {
+		migration, exists := transition.migration(step.Migration)
+		if !exists || step.ID != migration.ID+".ledger" ||
+			step.Resource != "ledger."+migration.Domain || step.Decision != DecisionTransform ||
+			step.Checkpoint != StepVerified || step.Expected != reconstructed.Fingerprint ||
+			step.Evidence == nil || step.Evidence.Recovery != "" {
+			return false, nil
+		}
+		advanced, err := ledger.Advance(transition.registry, migration)
+		if err != nil {
+			return false, nil
+		}
+		payload, desired, err := MarshalLedgerV2(advanced, transition.registry)
+		if err != nil || step.Desired != desired {
+			return false, err
+		}
+		for _, checkpoint := range []EvidenceCheckpoint{
+			EvidenceCaptured, EvidenceApplied, EvidenceVerified,
+		} {
+			snapshot, readErr := transition.store.ReadCheckpointEvidence(
+				journal.Transaction, step.ID, checkpoint,
+			)
+			if readErr != nil || !snapshot.Exists {
+				return false, nil
+			}
+			evidence, parseErr := ParseEvidence(snapshot.Payload)
+			if parseErr != nil || !postActivationEvidenceMatches(journal, step, checkpoint, evidence) {
+				return false, nil
+			}
+			if checkpoint == EvidenceVerified && !evidenceRecordsEqual(evidence, *step.Evidence) {
+				return false, nil
+			}
+		}
+		recovery, readErr := transition.store.ReadRecovery(journal.Transaction, step.ID)
+		if readErr != nil || recovery.Exists {
+			return false, nil
+		}
+		ledger, reconstructed = advanced, protectedSnapshotFromPayload(payload)
+	}
+	pending, err := transition.registry.PendingPath(ledger)
+	if err != nil {
+		return false, err
+	}
+	return len(pending) == 0 && bytes.Equal(reconstructed.Payload, ledgerSnapshot.Payload), nil
+}
+
+func postActivationEvidenceMatches(
+	journal JournalRecord,
+	step JournalStep,
+	checkpoint EvidenceCheckpoint,
+	evidence EvidenceRecord,
+) bool {
+	observed := step.Desired
+	if checkpoint == EvidenceCaptured {
+		observed = step.Expected
+	}
+	return evidence.SchemaVersion == JournalSchemaV2 &&
+		evidence.Transaction == journal.Transaction &&
+		releasePairsEqual(evidence.Releases, journal.Releases) &&
+		evidence.Step == step.ID && evidence.Expected == step.Expected &&
+		evidence.Desired == step.Desired && evidence.Observed == observed &&
+		evidence.Recovery == "" && evidence.Checkpoint == checkpoint
+}
+
+func evidenceRecordsEqual(left, right EvidenceRecord) bool {
+	return left.SchemaVersion == right.SchemaVersion && left.Transaction == right.Transaction &&
+		releasePairsEqual(left.Releases, right.Releases) && left.Step == right.Step &&
+		left.Expected == right.Expected && left.Desired == right.Desired &&
+		left.Observed == right.Observed && left.Recovery == right.Recovery &&
+		left.Checkpoint == right.Checkpoint
 }
 
 func (transition *V2Transition) canReplacePreActivationJournal(
@@ -1550,6 +1898,15 @@ func (transition *V2Transition) newJournal(
 	authorization Authorization,
 ) (JournalRecord, error) {
 	transaction := transition.options.NewTransactionID()
+	if requiresSupersededJournalArchive(observation.replacement) {
+		resolved, err := transition.store.ResolveSupersededJournalTransaction(
+			transaction, *observation.replacement, authorizationPlan,
+		)
+		if err != nil {
+			return JournalRecord{}, err
+		}
+		transaction = resolved
+	}
 	if err := validateTransactionID(transaction); err != nil {
 		return JournalRecord{}, err
 	}
@@ -1588,6 +1945,11 @@ func (transition *V2Transition) newJournal(
 		record.AuthorizationPlan, record.ResumePlan, record.ObservationScope, record.Steps,
 	)
 	return record, record.Validate()
+}
+
+func requiresSupersededJournalArchive(replacement *JournalReplacement) bool {
+	return replacement != nil &&
+		replacement.Reason == JournalReplacementPostActivationScopeV0111
 }
 
 func (transition *V2Transition) planFacts(observation v2Observation) PlanFacts {
@@ -2045,6 +2407,9 @@ func (transition *V2Transition) reconcileActivation(
 		}
 		id := reconciler.ID()
 		if err := validateSafeID(id, "activation reconciler ID"); err != nil {
+			return Outcome{}, err
+		}
+		if err := transition.inject(fmt.Sprintf("before-reconciler-%d", index)); err != nil {
 			return Outcome{}, err
 		}
 		links, guardOutcome, guardErr := transition.guardJournalLinks(ctx, journal)

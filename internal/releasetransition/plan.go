@@ -7,6 +7,7 @@ import (
 	"slices"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/blang/semver/v4"
 )
 
 const MaxPlanItems = 256
@@ -42,12 +43,21 @@ type PlanFacts struct {
 	Replacement      *JournalReplacement     `json:"replacement,omitempty"`
 }
 
+type JournalReplacementReason string
+
+const (
+	JournalReplacementPreActivationPlanStale   JournalReplacementReason = "pre-activation-plan-stale"
+	JournalReplacementPostActivationScopeV0111 JournalReplacementReason = "post-activation-scope-v0.11.1"
+)
+
 // JournalReplacement binds a newly assessed plan to the exact unfinished
-// pre-activation journal it supersedes. The journal itself remains immutable
-// evidence; only the protected current-journal pointer is replaced by CAS.
+// journal it supersedes. The journal itself remains immutable evidence; only
+// the protected current-journal pointer is replaced by CAS.
 type JournalReplacement struct {
-	Transaction TransactionID `json:"transaction"`
-	Fingerprint Fingerprint   `json:"fingerprint"`
+	Transaction   TransactionID            `json:"transaction"`
+	Fingerprint   Fingerprint              `json:"fingerprint"`
+	Reason        JournalReplacementReason `json:"reason"`
+	SourceVersion string                   `json:"sourceVersion,omitempty"`
 }
 
 // ResumePlanFacts bind only immutable recovery facts. Current release links and
@@ -140,16 +150,44 @@ func (facts PlanFacts) Validate() error {
 		}
 	}
 	if facts.Replacement != nil {
-		if err := validateTransactionID(facts.Replacement.Transaction); err != nil {
-			return err
-		}
-		if err := validateFingerprint(
-			facts.Replacement.Fingerprint, "replacement journal fingerprint",
-		); err != nil {
+		if err := facts.Replacement.Validate(); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (replacement JournalReplacement) Validate() error {
+	if err := validateTransactionID(replacement.Transaction); err != nil {
+		return err
+	}
+	if err := validateFingerprint(
+		replacement.Fingerprint, "replacement journal fingerprint",
+	); err != nil {
+		return err
+	}
+	switch replacement.Reason {
+	case JournalReplacementPreActivationPlanStale:
+		if replacement.SourceVersion != "" {
+			return invalid("pre-activation journal replacement has a source version")
+		}
+	case JournalReplacementPostActivationScopeV0111:
+		version, err := semver.Parse(replacement.SourceVersion)
+		if err != nil || version.String() != replacement.SourceVersion {
+			return invalid("post-activation journal replacement has an invalid source version")
+		}
+	default:
+		return invalid("unknown journal replacement reason %q", replacement.Reason)
+	}
+	return nil
+}
+
+func cloneJournalReplacement(replacement *JournalReplacement) *JournalReplacement {
+	if replacement == nil {
+		return nil
+	}
+	clone := *replacement
+	return &clone
 }
 
 func (facts ResumePlanFacts) Validate() error {

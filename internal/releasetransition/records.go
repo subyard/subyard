@@ -10,9 +10,10 @@ import (
 )
 
 const (
-	JournalSchemaV2 = 2
-	MaxJournalSteps = 256
-	MaxJournalBytes = 1 << 20
+	JournalSchemaV2           = 2
+	SupersededJournalSchemaV1 = 1
+	MaxJournalSteps           = 256
+	MaxJournalBytes           = 1 << 20
 )
 
 type JournalCheckpoint string
@@ -91,6 +92,16 @@ type EvidenceRecord struct {
 	Observed      Fingerprint        `json:"observedFingerprint"`
 	Recovery      Fingerprint        `json:"recoveryFingerprint,omitempty"`
 	Checkpoint    EvidenceCheckpoint `json:"checkpoint"`
+}
+
+// SupersededJournalRecord preserves the exact canonical source journal behind
+// a post-activation recovery transaction. It is immutable predecessor
+// evidence, not a new current-journal schema.
+type SupersededJournalRecord struct {
+	SchemaVersion     int                `json:"schemaVersion"`
+	AuthorizationPlan PlanToken          `json:"authorizationPlan"`
+	Replacement       JournalReplacement `json:"replacement"`
+	Journal           JournalRecord      `json:"journal"`
 }
 
 const CompatibilityEvidenceSchemaV1 = 1
@@ -316,6 +327,57 @@ func MarshalEvidence(record EvidenceRecord) ([]byte, error) {
 		return nil, err
 	}
 	return append(payload, '\n'), nil
+}
+
+func ParseSupersededJournal(payload []byte) (SupersededJournalRecord, error) {
+	var record SupersededJournalRecord
+	if err := decodeBoundedRecord(payload, MaxJournalBytes, &record); err != nil {
+		return SupersededJournalRecord{}, fmt.Errorf("decode superseded release transition journal: %w", err)
+	}
+	if err := record.validate(); err != nil {
+		return SupersededJournalRecord{}, err
+	}
+	return record, nil
+}
+
+func MarshalSupersededJournal(record SupersededJournalRecord) ([]byte, error) {
+	if err := record.validate(); err != nil {
+		return nil, err
+	}
+	payload, err := json.Marshal(record)
+	if err != nil {
+		return nil, err
+	}
+	return append(payload, '\n'), nil
+}
+
+func (record SupersededJournalRecord) validate() error {
+	if record.SchemaVersion != SupersededJournalSchemaV1 {
+		return invalid("unsupported superseded journal schema %d", record.SchemaVersion)
+	}
+	if err := validatePlanToken(record.AuthorizationPlan); err != nil {
+		return err
+	}
+	if err := record.Replacement.Validate(); err != nil {
+		return err
+	}
+	if record.Replacement.Reason != JournalReplacementPostActivationScopeV0111 {
+		return invalid("superseded journal requires post-activation replacement")
+	}
+	if err := record.Journal.Validate(); err != nil {
+		return err
+	}
+	if record.Replacement.Transaction != record.Journal.Transaction {
+		return invalid("superseded journal transaction does not match replacement")
+	}
+	payload, err := MarshalJournal(record.Journal)
+	if err != nil {
+		return err
+	}
+	if record.Replacement.Fingerprint != fingerprintPayload(payload) {
+		return invalid("superseded journal fingerprint does not match canonical journal")
+	}
+	return nil
 }
 
 func ParseCompatibilityEvidence(payload []byte) (CompatibilityEvidence, error) {

@@ -52,6 +52,7 @@ type ProcessRequest struct {
 	RegistryDigest      Fingerprint           `json:"registryDigest,omitempty"`
 	InheritedSettingIDs []string              `json:"inheritedSettingIds,omitempty"`
 	SourceIngress       *SourceIngressRequest `json:"sourceIngress,omitempty"`
+	Replacement         *JournalReplacement   `json:"replacement,omitempty"`
 	Execution           *Execution            `json:"execution,omitempty"`
 }
 

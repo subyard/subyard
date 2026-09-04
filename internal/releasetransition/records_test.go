@@ -1,6 +1,7 @@
 package releasetransition
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -138,6 +139,73 @@ func TestCompatibilityEvidenceRoundTripsAndRejectsRebinding(t *testing.T) {
 		if _, err := MarshalCompatibilityEvidence(changed); err == nil {
 			t.Fatalf("compatibility evidence accepted %#v", changed)
 		}
+	}
+}
+
+func TestSupersededJournalRoundTripsAndRejectsRebinding(t *testing.T) {
+	source := validJournal(ReleasePair{
+		From: v2PostActivationPreviousRelease, Target: v2PostActivationSourceRelease,
+	})
+	source.Transaction = "tx-source"
+	for index := range source.Steps {
+		source.Steps[index].Evidence = nil
+	}
+	source.IntentDigest = bindJournalIntent(
+		source.AuthorizationPlan, source.ResumePlan, source.ObservationScope, source.Steps,
+	)
+	sourcePayload, err := MarshalJournal(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := SupersededJournalRecord{
+		SchemaVersion:     SupersededJournalSchemaV1,
+		AuthorizationPlan: PlanToken("plan-v1-" + strings.Repeat("c", 64)),
+		Replacement: JournalReplacement{
+			Transaction: source.Transaction, Fingerprint: fingerprintPayload(sourcePayload),
+			Reason: JournalReplacementPostActivationScopeV0111, SourceVersion: "0.11.1",
+		},
+		Journal: source,
+	}
+	payload, err := MarshalSupersededJournal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseSupersededJournal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsedJournal, err := MarshalJournal(parsed.Journal)
+	if err != nil || !bytes.Equal(parsedJournal, sourcePayload) || parsed.Replacement != record.Replacement ||
+		parsed.AuthorizationPlan != record.AuthorizationPlan {
+		t.Fatalf("superseded journal round trip = %#v, err=%v", parsed, err)
+	}
+
+	for name, corrupt := range map[string]func(*SupersededJournalRecord){
+		"schema":        func(value *SupersededJournalRecord) { value.SchemaVersion++ },
+		"authorization": func(value *SupersededJournalRecord) { value.AuthorizationPlan = "plain" },
+		"transaction":   func(value *SupersededJournalRecord) { value.Replacement.Transaction = "tx-other" },
+		"fingerprint":   func(value *SupersededJournalRecord) { value.Replacement.Fingerprint = digestA },
+		"reason": func(value *SupersededJournalRecord) {
+			value.Replacement.Reason = JournalReplacementPreActivationPlanStale
+			value.Replacement.SourceVersion = ""
+		},
+		"source version": func(value *SupersededJournalRecord) { value.Replacement.SourceVersion = "not-semver" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := record
+			corrupt(&changed)
+			if _, err := MarshalSupersededJournal(changed); err == nil {
+				t.Fatalf("superseded journal accepted %#v", changed)
+			}
+		})
+	}
+	unknown := append([]byte(nil), payload[:len(payload)-2]...)
+	unknown = append(unknown, []byte(`,"unknown":true}\n`)...)
+	if _, err := ParseSupersededJournal(unknown); err == nil {
+		t.Fatal("superseded journal accepted an unknown field")
+	}
+	if _, err := ParseSupersededJournal([]byte(strings.Repeat("x", MaxJournalBytes+1))); err == nil {
+		t.Fatal("superseded journal accepted oversized input")
 	}
 }
 
