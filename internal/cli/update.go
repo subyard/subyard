@@ -47,12 +47,7 @@ func (adapter releaseAdapter) Run(ctx context.Context, request domain.AdapterReq
 func (cli *CLI) prepareRelease(ctx context.Context, loaded config.Loaded, arguments []string) (*releaseExecution, error) {
 	releaseEnvironment := maps.Clone(loaded.Environment)
 	releaseEnvironment["SUBYARD_OPERATION_ID"] = cli.env["SUBYARD_OPERATION_ID"]
-	runtime := releaseruntime.New(releaseruntime.Config{
-		Environment: releaseEnvironment,
-		Installer:   filepath.Join(cli.options.RepositoryRoot, "scripts", "install-runtime-release.sh"),
-		Stdout:      cli.options.Stdout,
-		Stderr:      cli.options.Stderr,
-	})
+	runtime := releaseruntime.New(cli.releaseRuntimeConfig(releaseEnvironment))
 	prepared, err := runtime.PrepareTransition(
 		ctx, arguments, loaded.Environment["SUBYARD_CONFIG_HOME"],
 		loaded.Context.YardName, cli.releaseTransitionInheritedSettingIDs(),
@@ -64,6 +59,16 @@ func (cli *CLI) prepareRelease(ctx context.Context, loaded config.Loaded, argume
 	return &releaseExecution{
 		prepared: prepared, yard: loaded.Context.YardName, runtime: runtime,
 	}, nil
+}
+
+func (cli *CLI) releaseRuntimeConfig(environment map[string]string) releaseruntime.Config {
+	return releaseruntime.Config{
+		Environment:    environment,
+		Installer:      filepath.Join(cli.options.RepositoryRoot, "scripts", "install-runtime-release.sh"),
+		RepositoryRoot: cli.options.RepositoryRoot,
+		Stdout:         cli.options.Stdout,
+		Stderr:         cli.options.Stderr,
+	}
 }
 
 func (cli *CLI) releaseTransitionInheritedSettingIDs() []string {

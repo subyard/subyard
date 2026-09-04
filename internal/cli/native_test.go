@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/config"
@@ -550,6 +551,78 @@ func TestUpdateUsesThePreparedReleaseAcrossRPCPlanAndExecute(t *testing.T) {
 		!slices.Equal(configApplier.yards, []string{"default"}) {
 		t.Fatalf("release RPC bypassed its prepared operation: args=%q events=%q configs=%q err=%v",
 			arguments, events, configApplier.yards, err)
+	}
+}
+
+func TestReleaseRuntimeConfigCarriesExactRepositoryRoot(t *testing.T) {
+	repositoryRoot := filepath.Join(t.TempDir(), "runtime", "releases", "0.11.2-candidate")
+	program := &CLI{options: Options{
+		RepositoryRoot: repositoryRoot,
+		Stdout:         &bytes.Buffer{},
+		Stderr:         &bytes.Buffer{},
+	}}
+	config := program.releaseRuntimeConfig(map[string]string{"HOME": t.TempDir()})
+	if config.RepositoryRoot != repositoryRoot {
+		t.Fatalf("release runtime repository root = %q, want %q", config.RepositoryRoot, repositoryRoot)
+	}
+}
+
+func TestV0111RecoveryPreparedActionUsesOneDefaultYesPrompt(t *testing.T) {
+	const recoveryConsequence = "supersede the verified v0.11.1 recovery journal with the standalone candidate plan"
+	countRecoveryConsequence := func(consequences []string) int {
+		count := 0
+		for _, consequence := range consequences {
+			if consequence == recoveryConsequence {
+				count++
+			}
+		}
+		return count
+	}
+	for _, assumeYes := range []bool{false, true} {
+		t.Run(fmt.Sprintf("assume yes=%v", assumeYes), func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			prompt := &testkit.Prompt{Answers: []bool{true}}
+			program, err := New(Options{
+				RepositoryRoot: root, Environment: environment, Prompt: prompt,
+				Clock: testkit.NewManualClock(time.Unix(100, 0)),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := program.loadContext("default")
+			if err != nil {
+				t.Fatal(err)
+			}
+			prepared := releaseruntime.Prepared{
+				Action: "update.activate", Changed: true,
+				Consequences: []string{
+					recoveryConsequence,
+					"apply the exact typed migration and release activation plan",
+				},
+			}
+			plan, err := program.operationOrchestrator(
+				"operation-v0111-recovery", loaded, nil, nil,
+			).PlanAction(
+				context.Background(), loaded.Context, "update", domain.RemoteOnController,
+				prepared.Action, domain.ActionDelta{
+					Changed: prepared.Changed, Consequences: prepared.Consequences,
+				}, assumeYes,
+			)
+			if err != nil || !plan.Confirmed || countRecoveryConsequence(plan.Consequences) != 1 {
+				t.Fatalf("recovery plan=%#v err=%v", plan, err)
+			}
+			if assumeYes {
+				if len(prompt.Requests) != 0 {
+					t.Fatalf("--yes prompted: %#v", prompt.Requests)
+				}
+				return
+			}
+			if len(prompt.Requests) != 1 ||
+				prompt.Requests[0].Default != domain.ConfirmationDefaultYes ||
+				countRecoveryConsequence(prompt.Requests[0].Consequences) != 1 {
+				t.Fatalf("interactive recovery prompt=%#v", prompt.Requests)
+			}
+		})
 	}
 }
 
@@ -2890,6 +2963,7 @@ func TestTrustedInProcessReleaseTransitionChildBypassesMutationGate(t *testing.T
 		"DEV_UID=1000",
 		"DEV_USER=dev",
 		"SSH_PORT=2222",
+		"STORAGE_PATH=" + filepath.Join(root, "data", "storage"),
 		"HOST_BASE=" + filepath.Join(root, "host"),
 		"RESTRICTED_DISK_PATHS=" + filepath.Join(root, "host"),
 	}, "\n")+"\n", 0o600)
@@ -2919,8 +2993,21 @@ func TestTrustedInProcessReleaseTransitionChildBypassesMutationGate(t *testing.T
 	}
 }
 
-func TestReleaseTransitionChildUsesCandidateDispatcher(t *testing.T) {
+func TestReleaseTransitionChildUsesSanitizedCandidateContext(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
+	candidateConfig := filepath.Join(root, "config", "agents", "codex", "config.toml")
+	previousConfig := filepath.Join(root, "previous-runtime", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(candidateConfig), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(previousConfig), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, candidateConfig, "candidate\n", 0o600)
+	writeCLIFile(t, previousConfig, "previous\n", 0o600)
+	writeCLIFile(t, filepath.Join(root, "config", "agents.env"),
+		"AGENT_codex_CONFIG="+candidateConfig+"\n", 0o600)
+	environment = append(environment, "AGENT_codex_CONFIG="+previousConfig)
 	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join([]string{
 		"SHIFT_MODE=shift",
 		"FORWARD_SSH_AGENT=0",
@@ -2928,6 +3015,7 @@ func TestReleaseTransitionChildUsesCandidateDispatcher(t *testing.T) {
 		"DEV_UID=1000",
 		"DEV_USER=dev",
 		"SSH_PORT=2222",
+		"STORAGE_PATH=" + filepath.Join(root, "data", "storage"),
 		"HOST_BASE=" + filepath.Join(root, "host"),
 		"RESTRICTED_DISK_PATHS=" + filepath.Join(root, "host"),
 	}, "\n")+"\n", 0o600)
@@ -2939,7 +3027,7 @@ func TestReleaseTransitionChildUsesCandidateDispatcher(t *testing.T) {
 	writeCLIFile(t, registryPath, string(registry)+
 		"probe-dispatch||probe-dispatch.sh||local|read|never|public|lifecycle|simple|probe-dispatch|probe dispatcher|--help|\n", 0o600)
 	writeCLIFile(t, filepath.Join(root, "scripts", "probe-dispatch.sh"),
-		"#!/bin/sh\nprintf '%s\\n' \"$SUBYARD_DISPATCH_PATH\"\n", 0o700)
+		"#!/bin/sh\nprintf '%s|%s\\n' \"$SUBYARD_DISPATCH_PATH\" \"$AGENT_codex_CONFIG\"\n", 0o700)
 	if err := os.MkdirAll(filepath.Join(root, "bin"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -2958,8 +3046,9 @@ func TestReleaseTransitionChildUsesCandidateDispatcher(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.TrimSpace(output.String()); got != candidateDispatcher {
-		t.Fatalf("release transition child dispatcher=%q, want %q", got, candidateDispatcher)
+	want := candidateDispatcher + "|" + candidateConfig
+	if got := strings.TrimSpace(output.String()); got != want {
+		t.Fatalf("release transition child context=%q, want %q", got, want)
 	}
 }
 

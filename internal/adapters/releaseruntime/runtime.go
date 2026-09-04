@@ -22,14 +22,16 @@ import (
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/blang/semver/v4"
 )
 
 type Config struct {
-	Environment map[string]string
-	Installer   string
-	Stdout      io.Writer
-	Stderr      io.Writer
-	HTTPClient  *http.Client
+	Environment    map[string]string
+	Installer      string
+	RepositoryRoot string
+	Stdout         io.Writer
+	Stderr         io.Writer
+	HTTPClient     *http.Client
 }
 
 type Prepared struct {
@@ -73,6 +75,7 @@ func (runtime *Runtime) Close() error {
 
 type protectedTransitionInspection struct {
 	journal                       releasetransition.JournalRecord
+	journalSnapshot               releasetransition.ProtectedSnapshot
 	owner                         candidateVerification
 	target                        candidateVerification
 	request                       releasetransition.ProcessRequest
@@ -278,7 +281,7 @@ func (runtime *Runtime) inspectProtectedTransition(
 		)
 	}
 	return &protectedTransitionInspection{
-		journal: journal,
+		journal: journal, journalSnapshot: snapshot,
 		owner: candidateVerification{
 			candidate: owner, digest: verifiedOwner.manifestDigest, version: verifiedOwner.version,
 		},
@@ -378,6 +381,15 @@ func (runtime *Runtime) PrepareTransition(
 			parsed.version != "" && parsed.version == protected.target.version &&
 			(parsed.tag == "" || parsed.tag == "v"+protected.target.version) && !parsed.rollback && !parsed.force
 		if unfinished || exactCompletedTarget {
+			if recovery, qualified := runtime.qualifyV0111StandaloneRecovery(
+				ctx, parsed, protected,
+			); qualified {
+				defer recovery.candidate.Close()
+				return runtime.prepareVerifiedReplacementTransition(
+					ctx, parsed, recovery.candidate, recovery.request, recovery.revalidation,
+				)
+			}
+			runtime.setV0111StandaloneRetry(ctx, parsed.root, protected)
 			return runtime.prepareProtectedTransition(parsed, protected)
 		}
 	}
@@ -473,6 +485,130 @@ func (runtime *Runtime) PrepareTransition(
 	return Prepared{}, transitionOutcomeError(outcome)
 }
 
+type qualifiedReplacementRecovery struct {
+	candidate    *verifiedPublishedCandidate
+	request      releasetransition.ProcessRequest
+	revalidation replacementRevalidation
+}
+
+type replacementRevalidation struct {
+	source          candidateVerification
+	journalSnapshot releasetransition.ProtectedSnapshot
+}
+
+const v0111RecoveryConsequence = "supersede the verified v0.11.1 recovery journal with the standalone candidate plan"
+
+func (runtime *Runtime) qualifyV0111StandaloneRecovery(
+	ctx context.Context,
+	parsed options,
+	protected *protectedTransitionInspection,
+) (qualifiedReplacementRecovery, bool) {
+	if !isV0111ScopeBlocker(protected) ||
+		!parsed.offline || !parsed.versionExplicit || parsed.version == "" ||
+		parsed.rollback || parsed.force ||
+		(parsed.tag != "" && parsed.tag != "v"+parsed.version) ||
+		runtime.config.RepositoryRoot == "" {
+		return qualifiedReplacementRecovery{}, false
+	}
+	verified, qualified := runtime.verifiedStandaloneCandidateRoot(ctx, parsed.root)
+	if !qualified {
+		return qualifiedReplacementRecovery{}, false
+	}
+	if verified.version != parsed.version {
+		verified.Close()
+		return qualifiedReplacementRecovery{}, false
+	}
+	request := releasetransition.ProcessRequest{
+		SchemaVersion:       releasetransition.ProcessProtocolSchemaV1,
+		Mode:                releasetransition.ProcessInspect,
+		RuntimeRoot:         parsed.root,
+		ConfigHome:          protected.request.ConfigHome,
+		Yard:                protected.request.Yard,
+		Target:              verified.candidate.release,
+		Direction:           releasetransition.DirectionActivateTarget,
+		ArtifactDigest:      verified.manifestDigest,
+		InheritedSettingIDs: slices.Clone(protected.request.InheritedSettingIDs),
+		Replacement: &releasetransition.JournalReplacement{
+			Transaction:   protected.journal.Transaction,
+			Fingerprint:   protected.journalSnapshot.Fingerprint,
+			Reason:        releasetransition.JournalReplacementPostActivationScopeV0111,
+			SourceVersion: protected.target.version,
+		},
+	}
+	return qualifiedReplacementRecovery{
+		candidate: verified,
+		request:   request,
+		revalidation: replacementRevalidation{
+			source: protected.target, journalSnapshot: protected.journalSnapshot,
+		},
+	}, true
+}
+
+func (runtime *Runtime) verifiedStandaloneCandidateRoot(
+	ctx context.Context,
+	runtimeRoot string,
+) (*verifiedPublishedCandidate, bool) {
+	if runtime.config.RepositoryRoot == "" {
+		return nil, false
+	}
+	repositoryRoot, err := filepath.EvalSymlinks(runtime.config.RepositoryRoot)
+	if err != nil || !filepath.IsAbs(repositoryRoot) {
+		return nil, false
+	}
+	releaseID := releasetransition.ReleaseID(filepath.Base(repositoryRoot))
+	if repositoryRoot != filepath.Join(runtimeRoot, "releases", string(releaseID)) {
+		return nil, false
+	}
+	candidate := publishedCandidate{release: releaseID, root: repositoryRoot}
+	verified, err := runtime.verifyPublishedCandidate(ctx, candidate, runtimeRoot, nil)
+	if err != nil {
+		return nil, false
+	}
+	if verified.registryDigest == "" {
+		verified.Close()
+		return nil, false
+	}
+	version, err := semver.Parse(verified.version)
+	if err != nil || version.String() != verified.version ||
+		!version.GT(semver.MustParse("0.11.1")) {
+		verified.Close()
+		return nil, false
+	}
+	return verified, true
+}
+
+func (runtime *Runtime) setV0111StandaloneRetry(
+	ctx context.Context,
+	runtimeRoot string,
+	protected *protectedTransitionInspection,
+) {
+	if !isV0111ScopeBlocker(protected) {
+		return
+	}
+	retry := "install a verified standalone release newer than v0.11.1, then run it with --offline and its exact --version"
+	if candidate, available := runtime.verifiedStandaloneCandidateRoot(ctx, runtimeRoot); available {
+		candidate.Close()
+		retry = "run the verified standalone release with --offline and its exact --version"
+	}
+	protected.inspection.Blockers[0].Retry = retry
+	protected.inspection.Outcome.Retry = retry
+}
+
+func isV0111ScopeBlocker(protected *protectedTransitionInspection) bool {
+	return protected != nil && protected.target.version == "0.11.1" &&
+		protected.journal.Checkpoint == releasetransition.JournalReconciling &&
+		protected.journal.SourceIngress == nil &&
+		protected.journal.Goal.Direction == releasetransition.DirectionActivateTarget &&
+		protected.inspection.Resume != nil &&
+		*protected.inspection.Resume == protected.journal.Transaction &&
+		protected.inspection.Outcome != nil &&
+		protected.inspection.Outcome.Status == releasetransition.StatusOperatorActionRequired &&
+		protected.inspection.Outcome.Code == releasetransition.CodePlanStale &&
+		len(protected.inspection.Blockers) == 1 &&
+		protected.inspection.Blockers[0].Code == releasetransition.CodePlanStale &&
+		protected.inspection.Blockers[0].Resource == "transition.observation-scope"
+}
+
 func sourceIngressRequestFromEnvironment(
 	environment map[string]string,
 ) (*releasetransition.SourceIngressRequest, error) {
@@ -517,15 +653,19 @@ func (runtime *Runtime) prepareProtectedTransition(
 	if parsed.rollback || parsed.force ||
 		(parsed.version != "" && parsed.version != protected.target.version) ||
 		(parsed.tag != "" && parsed.tag != exactTag) {
+		retry := "restore the verified journal-selected release before retrying"
+		if protected.inspection.Outcome != nil && protected.inspection.Outcome.Retry != "" {
+			retry = protected.inspection.Outcome.Retry
+		}
 		return Prepared{}, fmt.Errorf(
-			"an unfinished or unsafe release transition permits only exact target %s; run yard update --check",
-			protected.target.candidate.release,
+			"an unfinished or unsafe release transition permits only exact target %s; next: %s",
+			protected.target.candidate.release, retry,
 		)
 	}
 	return runtime.prepareInspectedCandidateTransition(
 		parsed, protected.owner, protected.target,
 		protected.request, protected.inspection,
-		protected.activationReconciliationOwned,
+		protected.activationReconciliationOwned, nil,
 	)
 }
 
@@ -619,7 +759,7 @@ func (runtime *Runtime) prepareRetainedTransition(
 		defer active.Close()
 		owner = active
 	}
-	prepared, err := runtime.prepareVerifiedTransition(ctx, parsed, owner, verified, request)
+	prepared, err := runtime.prepareVerifiedTransition(ctx, parsed, owner, verified, request, nil)
 	if err != nil {
 		return Prepared{}, transitionOutcomeError(publicReleaseOutcome(
 			observed, release, nil, releasetransition.CodeRollbackIncompatible,
@@ -642,7 +782,19 @@ func (runtime *Runtime) prepareVerifiedCandidateTransition(
 	verified *verifiedPublishedCandidate,
 	request releasetransition.ProcessRequest,
 ) (Prepared, error) {
-	return runtime.prepareVerifiedTransition(ctx, parsed, verified, verified, request)
+	return runtime.prepareVerifiedTransition(ctx, parsed, verified, verified, request, nil)
+}
+
+func (runtime *Runtime) prepareVerifiedReplacementTransition(
+	ctx context.Context,
+	parsed options,
+	verified *verifiedPublishedCandidate,
+	request releasetransition.ProcessRequest,
+	revalidation replacementRevalidation,
+) (Prepared, error) {
+	return runtime.prepareVerifiedTransition(
+		ctx, parsed, verified, verified, request, &revalidation,
+	)
 }
 
 func (runtime *Runtime) prepareVerifiedTransition(
@@ -651,6 +803,7 @@ func (runtime *Runtime) prepareVerifiedTransition(
 	owner *verifiedPublishedCandidate,
 	target *verifiedPublishedCandidate,
 	request releasetransition.ProcessRequest,
+	revalidation *replacementRevalidation,
 ) (Prepared, error) {
 	response, err := runtime.invokeVerifiedCandidateTransition(ctx, owner, request, "")
 	if err != nil {
@@ -683,7 +836,7 @@ func (runtime *Runtime) prepareVerifiedTransition(
 			candidate: target.candidate, digest: target.manifestDigest, version: target.version,
 		},
 		request, *response.Inspection,
-		response.ActivationReconciliationOwned,
+		response.ActivationReconciliationOwned, revalidation,
 	)
 }
 
@@ -694,11 +847,19 @@ func (runtime *Runtime) prepareInspectedCandidateTransition(
 	request releasetransition.ProcessRequest,
 	inspection releasetransition.Inspection,
 	activationReconciliationOwned bool,
+	revalidation *replacementRevalidation,
 ) (Prepared, error) {
-	if err := inspection.ValidateOutcome(releasetransition.Goal{
-		Target: request.Target, Direction: request.Direction,
-	}); err != nil {
+	goal := releasetransition.Goal{Target: request.Target, Direction: request.Direction}
+	if err := inspection.ValidateOutcome(goal); err != nil {
 		return Prepared{}, fmt.Errorf("candidate returned an inconsistent release inspection: %w", err)
+	}
+	if revalidation != nil {
+		inspection.Assessment.Consequences = v0111RecoveryConsequences(
+			inspection.Assessment.Consequences,
+		)
+		if err := inspection.ValidateOutcome(goal); err != nil {
+			return Prepared{}, fmt.Errorf("augmented recovery inspection is invalid: %w", err)
+		}
 	}
 	if parsed.check {
 		return Prepared{
@@ -763,6 +924,30 @@ func (runtime *Runtime) prepareInspectedCandidateTransition(
 					return fmt.Errorf("%w: transition owner version changed after inspection", domain.ErrPlanStale)
 				}
 			}
+			if revalidation != nil {
+				verifiedSource, verifyErr := runtime.verifyPublishedCandidate(
+					ctx, revalidation.source.candidate, request.RuntimeRoot,
+					&revalidation.source.digest,
+				)
+				if verifyErr != nil {
+					return fmt.Errorf("reverify recovery source runtime: %w", verifyErr)
+				}
+				defer verifiedSource.Close()
+				if verifiedSource.version != revalidation.source.version {
+					return fmt.Errorf("%w: recovery source runtime version changed after inspection", domain.ErrPlanStale)
+				}
+				store, storeErr := releasetransition.NewPOSIXV2Store(request.ConfigHome)
+				if storeErr != nil {
+					return storeErr
+				}
+				journal, readErr := store.ReadCurrentJournal()
+				if readErr != nil {
+					return fmt.Errorf("revalidate recovery source journal: %w", readErr)
+				}
+				if !sameProtectedSnapshot(journal, revalidation.journalSnapshot) {
+					return fmt.Errorf("%w: recovery source journal changed after inspection", domain.ErrPlanStale)
+				}
+			}
 			grant := releasetransition.Authorization("")
 			if inspection.Resume == nil && inspection.Assessment.Changed {
 				var grantErr error
@@ -821,6 +1006,25 @@ func (runtime *Runtime) prepareInspectedCandidateTransition(
 			return nil
 		},
 	}, nil
+}
+
+func v0111RecoveryConsequences(candidate []string) []string {
+	consequences := make([]string, 0, len(candidate)+1)
+	consequences = append(consequences, v0111RecoveryConsequence)
+	for _, consequence := range candidate {
+		if consequence != v0111RecoveryConsequence {
+			consequences = append(consequences, consequence)
+		}
+	}
+	return consequences
+}
+
+func sameProtectedSnapshot(
+	left releasetransition.ProtectedSnapshot,
+	right releasetransition.ProtectedSnapshot,
+) bool {
+	return left.Exists == right.Exists && left.Fingerprint == right.Fingerprint &&
+		bytes.Equal(left.Payload, right.Payload)
 }
 
 func (runtime *Runtime) preparePublicInspectionOutcome(outcome releasetransition.Outcome) Prepared {
@@ -934,7 +1138,7 @@ func transitionOutcomeError(outcome releasetransition.Outcome) error {
 
 type options struct {
 	channel, version, root, cache, repository, baseURL, tag string
-	offline, check, rollback, force                         bool
+	offline, check, rollback, force, versionExplicit        bool
 }
 
 func (runtime *Runtime) prepareHelp() Prepared {
@@ -1045,6 +1249,7 @@ func (runtime *Runtime) parse(arguments []string) (options, bool, error) {
 				result.channel = arguments[index]
 			case "--version":
 				result.version = arguments[index]
+				result.versionExplicit = true
 			case "--runtime-root":
 				result.root = arguments[index]
 			}
