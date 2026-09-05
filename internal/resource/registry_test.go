@@ -309,6 +309,60 @@ SHUTDOWN=down
 	}
 }
 
+func TestLoadDerivesExplicitDashboardContract(t *testing.T) {
+	root := t.TempDir()
+	writeTestResource(t, root, "sample", "dashboard", `
+COMMAND=dashboard
+HANDLER=resources/dashboard/handler.sh
+TITLE="Sample dashboard"
+DASHBOARD="http SAMPLE_ADVERTISE_HOST SAMPLE_HOST_PORT /ui/"
+ACTION="up up security-change reversible"
+ACTION="down down security-change reversible"
+`)
+
+	registry, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, ok := registry.Lookup("dashboard")
+	if !ok || definition.Dashboard == nil {
+		t.Fatalf("dashboard metadata missing: %#v", definition)
+	}
+	want := DashboardContract{
+		Scheme: "http", HostSetting: "SAMPLE_ADVERTISE_HOST",
+		PortSetting: "SAMPLE_HOST_PORT", Path: "/ui/",
+	}
+	if got := *definition.Dashboard; !reflect.DeepEqual(got, want) {
+		t.Fatalf("dashboard = %#v, want %#v", got, want)
+	}
+}
+
+func TestLoadRejectsInvalidDashboardContract(t *testing.T) {
+	for _, record := range []string{
+		"http HOST PORT",
+		"ftp HOST PORT /",
+		"http bad-name PORT /",
+		"http HOST bad-port /",
+		"http HOST PORT relative",
+		"http HOST PORT //authority",
+	} {
+		t.Run(strings.ReplaceAll(record, " ", "_"), func(t *testing.T) {
+			root := t.TempDir()
+			writeTestResource(t, root, "sample", "dashboard", fmt.Sprintf(`
+COMMAND=dashboard
+HANDLER=resources/dashboard/handler.sh
+TITLE="Sample dashboard"
+DASHBOARD=%q
+ACTION="up up security-change reversible"
+ACTION="down down security-change reversible"
+`, record))
+			if _, err := Load(root); err == nil {
+				t.Fatalf("invalid DASHBOARD record %q was accepted", record)
+			}
+		})
+	}
+}
+
 func TestLoadRejectsInvalidOwnedProxyContract(t *testing.T) {
 	tests := []string{
 		"too-few HOST PORT",

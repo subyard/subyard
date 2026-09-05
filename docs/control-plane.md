@@ -330,6 +330,7 @@ ACTION="..."
 BRINGUP=<verb>
 SHUTDOWN=<verb>
 PROXY="..."                       # optional typed owner-host proxy contract
+DASHBOARD="http HOST_SETTING PORT_SETTING /path" # optional browser endpoint metadata
 ```
 
 `ACTION` is repeatable and is the source of the public verb list. Its assessment and recovery classes
@@ -339,6 +340,9 @@ Registry validation rejects unknown descriptor fields, path traversal, duplicate
 local action IDs, collisions with core commands, invalid actions, and missing executables. The handler
 owns every lifecycle verb including the silent `is-up` probe. Core code may only discover, dispatch,
 probe, and render hints from the descriptor. See the shipped `.res` files for complete examples.
+`DASHBOARD` is explicit because a TCP proxy does not imply HTTP. Detailed status publishes its URL
+only while the resource's `is-up` probe succeeds and the referenced host and port settings are
+valid.
 
 ## Test topology
 

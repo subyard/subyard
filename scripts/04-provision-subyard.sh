@@ -14,6 +14,8 @@ subyard_require_engine_context
 . "$SCRIPT_DIR/lib/ui.sh"
 # shellcheck source=scripts/lib/host.sh
 . "$SCRIPT_DIR/lib/host.sh"
+# shellcheck source=scripts/lib/ai-observer-proxy.sh
+. "$SCRIPT_DIR/lib/ai-observer-proxy.sh"
 
 INCUS_PROJECT="${INCUS_PROJECT:-subyard}"
 YARD_INSTANCE_NAME="${YARD_INSTANCE_NAME:-yard}"
@@ -35,6 +37,7 @@ announce_confirm "Subyard Phase 3 — provision the yard ($YARD_INSTANCE_NAME)" 
   "Inside the yard: create user '$DEV_USER' + groups (yard/kvm/docker), lay out /srv, enable ssh & docker." \
   "Inside the yard: install the pinned native ccusage reporter." \
   "Inside the yard: bootstrap enabled agent CLIs when missing." \
+  "On the host: reconcile the selected AI Observer dashboard on loopback (containers only)." \
   "On the host: set the /dev/kvm device GID to the in-yard 'kvm' group." \
   "On the host: copy instructions for enabled agents into the yard, if present." \
   "This pulls packages from the network and changes the yard's userspace (not the host system)."
@@ -225,14 +228,24 @@ ok "ccusage $CCUSAGE_VERSION ready"
 # --- 3. provision enabled agent CLIs ----------------------------------------
 # Hooks live under config/agents/<name> and run as root in the yard.
 echo "Agent CLIs:"
+_aiobserver_selected=0
 for _agent in ${CODING_TOOL_INTEGRATIONS:-}; do
+  [ "$_agent" != aiobserver ] || _aiobserver_selected=1
   _provision_var="AGENT_${_agent}_PROVISION"
   _provision="${!_provision_var:-}"
   [ -n "$_provision" ] || continue
   [ -r "$_provision" ] || die "$_agent provision hook missing: $_provision"
+  if [ "$_agent" = aiobserver ]; then
+    [[ "${AI_OBSERVER_CONTEXT:-}" =~ ^[0-9a-f]{64}$ ]] \
+      || die "prepared AI Observer context is required"
+    incus config set "$YARD_INSTANCE_NAME" user.subyard.ai_observer_provision pending "${PROJ[@]}" \
+      || die "could not invalidate AI Observer convergence"
+  fi
   info "provisioning $_agent CLI in $YARD_INSTANCE_NAME"
   _agent_env=(
     --env DEV_USER="$DEV_USER"
+    --env CODING_TOOL_INTEGRATIONS="${CODING_TOOL_INTEGRATIONS:-}"
+    --env AI_OBSERVER_CONTEXT="${AI_OBSERVER_CONTEXT:-}"
     --env YARD_VERSION="${YARD_VERSION:-}"
     --env CODEX_VERSION="$CODEX_VERSION"
     --env CODEX_SHA256_AMD64="$CODEX_SHA256_AMD64"
@@ -251,6 +264,20 @@ for _agent in ${CODING_TOOL_INTEGRATIONS:-}; do
   ok "$_agent CLI ready"
 done
 unset _agent _agent_env _check_var _check _provision_var _provision
+
+# Stop a previously managed observer when it is removed from the exact agent list.
+if [ "$_aiobserver_selected" = 0 ]; then
+  incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- sh -eu -c '
+    if [ -f /etc/subyard/ai-observer/managed ]; then
+      /usr/local/bin/ai-observer disable
+    fi
+  ' || die "could not disable the deselected AI Observer"
+fi
+subyard_ai_observer_proxy "$_aiobserver_selected" || die "AI Observer dashboard route did not converge"
+subyard_ai_observer_provision_marker \
+  "$_aiobserver_selected" "${AI_OBSERVER_CONTEXT:-}" \
+  || die "could not update AI Observer convergence marker"
+unset _aiobserver_selected
 
 # Install one generic guest-side project lifecycle dispatcher. Enabled agents stay in the
 # generated list; opt-in shared resources own executable hooks in projects-changed.d.

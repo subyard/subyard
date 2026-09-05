@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -916,9 +918,10 @@ func (cli *CLI) statusFacts(loaded config.Loaded) ports.StatusFactsReader {
 			return !slices.Contains(profiles, definition.Profile)
 		})
 	}
-	incusPort, _ := cli.statusPorts()
+	incusPort, executor := cli.statusPorts()
 	return statusruntime.Runtime{
 		Environment: environment, Resources: definitions, Program: cli.options.Program,
+		Incus: incusPort, Executor: executor,
 		Security: securityruntime.Runtime{
 			RepositoryRoot: cli.options.RepositoryRoot, Environment: loaded.Environment,
 			Yard: loaded.Context, Incus: incusPort, Stdout: io.Discard, Stderr: io.Discard,
@@ -971,7 +974,7 @@ With -Y/--yard or @<yard>, show detailed status for that one yard.
 				}
 				return cli.printYardStatus(ctx, local)
 			}
-			status, statusErr := cli.remoteOwnerYardStatus(ctx, loaded, hostID, yard.Name)
+			status, ownerEndpoint, statusErr := cli.remoteOwnerYardStatus(ctx, loaded, hostID, yard.Name)
 			if statusErr != nil {
 				cli.errorf("remote status: %v", statusErr)
 				return 1
@@ -980,6 +983,7 @@ With -Y/--yard or @<yard>, show detailed status for that one yard.
 			fmt.Fprintf(cli.options.Stdout, "  projects %d\n", status.ProjectCount)
 			fmt.Fprintf(cli.options.Stdout, "  ssh      %s:%d\n",
 				status.Context.DevUser, status.Context.SSHPort)
+			cli.printRemoteStatusFacts(status, ownerEndpoint)
 			return 0
 		}
 		if loaded.Context.AccessKind == domain.AccessRemote {
@@ -993,6 +997,7 @@ With -Y/--yard or @<yard>, show detailed status for that one yard.
 			fmt.Fprintf(cli.options.Stdout, "  projects %d\n", status.ProjectCount)
 			fmt.Fprintf(cli.options.Stdout, "  ssh      %s:%d\n",
 				status.Context.DevUser, status.Context.SSHPort)
+			cli.printRemoteStatusFacts(status, loaded.Context.OwnerEndpoint)
 			return 0
 		}
 		return cli.printYardStatus(ctx, loaded)
@@ -1081,17 +1086,34 @@ func (cli *CLI) printYardStatus(ctx context.Context, loaded config.Loaded) int {
 			status.VSCode, forward)
 	}
 	fmt.Fprintf(cli.options.Stdout, "  projects %d  (%s list)\n", status.ProjectCount, cli.yardHint(status.Context))
+	profiles := "all"
+	if len(status.Facts.Profiles) != 0 {
+		profiles = strings.Join(status.Facts.Profiles, " ")
+	}
+	fmt.Fprintf(cli.options.Stdout, "  profiles %s\n", profiles)
+	if len(status.Facts.Agents) == 0 {
+		fmt.Fprintln(cli.options.Stdout, "  agents   none")
+	} else {
+		fmt.Fprintln(cli.options.Stdout, "  agents:")
+		for _, agent := range status.Facts.Agents {
+			cli.printAgentStatus(status.Context, agent, "")
+		}
+	}
 	if len(status.Facts.Shared) == 0 {
 		fmt.Fprintln(cli.options.Stdout, "  shared   none")
 	} else {
 		fmt.Fprintln(cli.options.Stdout, "  shared:")
 		for _, shared := range status.Facts.Shared {
-			if shared.Hint == "" {
-				fmt.Fprintf(cli.options.Stdout, "    %-9s %-16s %s\n", shared.Profile, shared.Name, shared.State)
-			} else {
-				fmt.Fprintf(cli.options.Stdout, "    %-9s %-16s %-5s (%s)\n",
-					shared.Profile, shared.Name, shared.State, shared.Hint)
+			detail := shared.Hint
+			if shared.URL != "" {
+				detail = shared.URL
 			}
+			if detail == "" {
+				fmt.Fprintf(cli.options.Stdout, "    %-9s %-16s %s\n", shared.Profile, shared.Name, shared.State)
+				continue
+			}
+			fmt.Fprintf(cli.options.Stdout, "    %-9s %-16s %-5s (%s)\n",
+				shared.Profile, shared.Name, shared.State, detail)
 		}
 	}
 	switch status.Facts.Security {
@@ -1104,6 +1126,105 @@ func (cli *CLI) printYardStatus(ctx context.Context, loaded config.Loaded) int {
 	}
 	fmt.Fprintf(cli.options.Stdout, "  space    %s\n", status.Facts.Space)
 	return 0
+}
+
+func aiObserverTunnelArguments(
+	yard domain.Context, agent domain.AgentStatus, ownerEndpoint string,
+) []string {
+	port := strconv.Itoa(agent.DashboardPort)
+	options := []string{"-o", "ExitOnForwardFailure=yes"}
+	if yard.YardKind == domain.YardVM && ownerEndpoint != "" && yard.SSHHost != "" {
+		nested := shellquote.Command(append(
+			[]string{"ssh", "-N"},
+			append(options, "-L", port+":127.0.0.1:8080", yard.SSHHost)...,
+		))
+		outer := append([]string{"ssh", "-T"}, options...)
+		outer = append(outer, "-L", port+":127.0.0.1:"+port, ownerEndpoint, nested)
+		return outer
+	}
+	if yard.YardKind == domain.YardVM && yard.SSHHost != "" {
+		return append([]string{"ssh", "-N"}, append(options,
+			"-L", port+":127.0.0.1:8080", yard.SSHHost)...)
+	}
+	if agent.URL != "" && ownerEndpoint != "" {
+		arguments := append([]string{"ssh", "-N"}, options...)
+		return append(arguments, "-L", port+":127.0.0.1:"+port, ownerEndpoint)
+	}
+	return nil
+}
+
+func (cli *CLI) printAgentStatus(
+	yard domain.Context, agent domain.AgentStatus, ownerEndpoint string,
+) {
+	detail := agent.Hint
+	if agent.Name == "aiobserver" && agent.State == "up" && agent.DashboardPort != 0 {
+		port := strconv.Itoa(agent.DashboardPort)
+		openURL := "http://127.0.0.1:" + port + "/"
+		if arguments := aiObserverTunnelArguments(yard, agent, ownerEndpoint); len(arguments) != 0 {
+			detail = "open " + openURL + " after: " + shellquote.Command(arguments)
+		} else if agent.URL != "" {
+			detail = agent.URL
+		}
+	} else if agent.URL != "" {
+		detail = agent.URL
+	}
+	if detail == "" {
+		fmt.Fprintf(cli.options.Stdout, "    %-16s %s\n", agent.Name, agent.State)
+		return
+	}
+	fmt.Fprintf(cli.options.Stdout, "    %-16s %-7s (%s)\n", agent.Name, agent.State, detail)
+}
+
+func remoteDashboardDetail(rawURL, ownerEndpoint string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Hostname() == "" || parsed.Port() == "" {
+		return rawURL
+	}
+	host := parsed.Hostname()
+	ip := net.ParseIP(host)
+	if !strings.EqualFold(host, "localhost") && (ip == nil || !ip.IsLoopback()) {
+		return rawURL
+	}
+	local := *parsed
+	local.Host = net.JoinHostPort("127.0.0.1", parsed.Port())
+	arguments := []string{
+		"ssh", "-N", "-o", "ExitOnForwardFailure=yes",
+		"-L", parsed.Port() + ":" + net.JoinHostPort(host, parsed.Port()), ownerEndpoint,
+	}
+	return "open " + local.String() + " after: " + shellquote.Command(arguments)
+}
+
+func (cli *CLI) printRemoteStatusFacts(status domain.YardStatus, ownerEndpoint string) {
+	profiles := "all"
+	if len(status.Facts.Profiles) != 0 {
+		profiles = strings.Join(status.Facts.Profiles, " ")
+	}
+	fmt.Fprintf(cli.options.Stdout, "  profiles %s\n", profiles)
+	if len(status.Facts.Agents) == 0 {
+		fmt.Fprintln(cli.options.Stdout, "  agents   none")
+	} else {
+		fmt.Fprintln(cli.options.Stdout, "  agents:")
+		for _, agent := range status.Facts.Agents {
+			cli.printAgentStatus(status.Context, agent, ownerEndpoint)
+		}
+	}
+	if len(status.Facts.Shared) == 0 {
+		fmt.Fprintln(cli.options.Stdout, "  shared   none")
+		return
+	}
+	fmt.Fprintln(cli.options.Stdout, "  shared:")
+	for _, shared := range status.Facts.Shared {
+		detail := shared.Hint
+		if shared.URL != "" {
+			detail = remoteDashboardDetail(shared.URL, ownerEndpoint)
+		}
+		if detail == "" {
+			fmt.Fprintf(cli.options.Stdout, "    %-9s %-16s %s\n", shared.Profile, shared.Name, shared.State)
+			continue
+		}
+		fmt.Fprintf(cli.options.Stdout, "    %-9s %-16s %-5s (%s)\n",
+			shared.Profile, shared.Name, shared.State, detail)
+	}
 }
 
 type ownerInfo = domain.RemoteInfo

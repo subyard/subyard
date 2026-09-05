@@ -81,6 +81,8 @@ var catalog = map[string]SettingDefinition{
 		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand), numberRange(1, 65535)),
 	"ADB_PROXY_PORT": scalar("port", SettingPort, SettingNextCommand, true,
 		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand), numberRange(1, 65535)),
+	"AI_OBSERVER_HOST_PORT": scalar("agent-integration", SettingPort, SettingYardInit, true,
+		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand), optionalRange(1024, 65535)),
 	"CODING_TOOL_INTEGRATIONS": scalar("coding-tool-integration", SettingNameList, SettingYardInit, true,
 		scopes(ScopeShipped, ScopeShared, ScopeHost, ScopeYard, ScopeCommand)),
 	"YARD_IMAGE": scalar("yard-runtime", SettingImageReference, SettingYardInit, true,

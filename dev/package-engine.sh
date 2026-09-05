@@ -83,10 +83,12 @@ install -m 0755 "$artifact" "$bundle_stage/bin/yard-engine"
 install -m 0755 "$REPO/bin/yard" "$bundle_stage/bin/yard"
 runtime_list="$bundle_stage/.runtime-inputs"
 runtime_extras=(
+  scripts/lib/ai-observer-proxy.sh
   scripts/lib/engine-context.sh
   scripts/install-ssh-relay.sh
   scripts/install-test-vms-host-sink.sh
   config/agents/codex/provision.sh
+  config/agents/aiobserver/provision.sh
   config/profiles/hermes/resources/dashboard.res
   config/profiles/hermes/resources/dashboard/handler.sh
   config/profiles/hermes/yard.env

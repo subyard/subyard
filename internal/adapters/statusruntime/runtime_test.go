@@ -2,9 +2,12 @@ package statusruntime
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +15,7 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/resource"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 type securityStub struct{ state string }
@@ -24,6 +28,14 @@ type spaceExecutorStub struct {
 	result ports.InstanceExecResult
 	err    error
 	calls  []ports.InstanceExecRequest
+}
+
+type statusExecutorFunc func(context.Context, string, string, ports.InstanceExecRequest) (ports.InstanceExecResult, error)
+
+func (function statusExecutorFunc) Exec(
+	ctx context.Context, project, instance string, request ports.InstanceExecRequest,
+) (ports.InstanceExecResult, error) {
+	return function(ctx, project, instance, request)
 }
 
 func (stub *spaceExecutorStub) Exec(
@@ -369,7 +381,7 @@ func TestRuntimeProbesPreparedResources(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(resources, "service.res"), []byte(
-		"COMMAND=svc\nHANDLER=resources/service/handler.sh\nTITLE=Service\nACTION=\"up up yard-change reversible\"\nACTION=\"down down yard-change reversible\"\n"), 0o600); err != nil {
+		"COMMAND=svc\nHANDLER=resources/service/handler.sh\nTITLE=Service\nDASHBOARD=\"https SERVICE_HOST SERVICE_PORT /ui/\"\nACTION=\"up up yard-change reversible\"\nACTION=\"down down yard-change reversible\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	handler := filepath.Join(resources, "service", "handler.sh")
@@ -385,8 +397,10 @@ func TestRuntimeProbesPreparedResources(t *testing.T) {
 		t.Fatal(err)
 	}
 	facts, err := (Runtime{
-		Environment: map[string]string{"PATH": "/usr/bin:/bin"},
-		Resources:   registry.Definitions(), Program: "yard", Security: securityStub{state: "live"},
+		Environment: map[string]string{
+			"PATH": "/usr/bin:/bin", "SERVICE_HOST": "dashboard.example", "SERVICE_PORT": "8443",
+		},
+		Resources: registry.Definitions(), Program: "yard", Security: securityStub{state: "live"},
 	}).ReadStatusFacts(context.Background(), domain.Context{
 		IncusProject: "subyard", YardInstanceName: "yard",
 		Paths: domain.RuntimePaths{DataHome: dataHome},
@@ -395,8 +409,145 @@ func TestRuntimeProbesPreparedResources(t *testing.T) {
 		t.Fatalf("resource status failed: %#v err=%v", facts, err)
 	}
 	status := facts.Shared[0]
-	if status.Profile != "demo" || status.Name != "service" || status.State != "up" || status.Hint != "yard svc down" {
+	if status.Profile != "demo" || status.Name != "service" || status.State != "up" ||
+		status.Hint != "yard svc down" || status.URL != "https://dashboard.example:8443/ui/" {
 		t.Fatalf("unexpected resource status: %#v", status)
+	}
+}
+
+func TestRuntimeReportsSelectedProfilesAndAgentsWithVerifiedDashboard(t *testing.T) {
+	root := t.TempDir()
+	dataHome := filepath.Join(root, "data")
+	if err := writeSpaceCache(filepath.Join(dataHome, "space.cache"), "1G", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	executor := &spaceExecutorStub{result: ports.InstanceExecResult{ExitCode: 0}}
+	incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+		"subyard/yard": {
+			Name: "yard", Project: "subyard", Status: "Running",
+			Config: map[string]string{"user.subyard.ai_observer_proxy": "v1:18080"},
+			Devices: map[string]map[string]string{"ai-observer": {
+				"type": "proxy", "listen": "tcp:127.0.0.1:18080",
+				"connect": "tcp:127.0.0.1:8080", "bind": "host",
+			}},
+		},
+	}}
+	facts, err := (Runtime{
+		Environment: map[string]string{
+			"ENVIRONMENT_PROFILES": "android orca", "CODING_TOOL_INTEGRATIONS": "codex aiobserver",
+			"AI_OBSERVER_HOST_PORT": "18080",
+		},
+		Executor: executor, Incus: incus,
+	}).ReadStatusFacts(context.Background(), domain.Context{
+		YardName: "default", YardKind: domain.YardContainer,
+		IncusProject: "subyard", YardInstanceName: "yard",
+		Paths: domain.RuntimePaths{DataHome: dataHome},
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(facts.Profiles, []string{"android", "orca"}) {
+		t.Fatalf("profiles = %#v", facts.Profiles)
+	}
+	wantAgents := []domain.AgentStatus{
+		{Name: "codex", State: "enabled"},
+		{Name: "aiobserver", State: "up", URL: "http://127.0.0.1:18080/", DashboardPort: 18080},
+	}
+	if !reflect.DeepEqual(facts.Agents, wantAgents) {
+		t.Fatalf("agents = %#v, want %#v", facts.Agents, wantAgents)
+	}
+	if len(executor.calls) != 1 || !slices.Equal(executor.calls[0].Command, []string{"/usr/local/bin/ai-observer-check"}) {
+		t.Fatalf("AI Observer probes = %#v", executor.calls)
+	}
+}
+
+func TestRuntimeDoesNotPublishUnverifiedAIObserverDashboard(t *testing.T) {
+	tests := []struct {
+		name      string
+		yardKind  domain.YardKind
+		result    ports.InstanceExecResult
+		execErr   error
+		device    map[string]string
+		marker    string
+		port      string
+		wantState string
+	}{
+		{
+			name: "service down", result: ports.InstanceExecResult{ExitCode: 1},
+			execErr: errors.New("instance exec exited with status 1"), wantState: "down",
+		},
+		{name: "probe failed", execErr: errors.New("transport failed"), wantState: "?"},
+		{
+			name: "container route divergent", result: ports.InstanceExecResult{ExitCode: 0},
+			device: map[string]string{
+				"type": "proxy", "listen": "tcp:127.0.0.1:18081",
+				"connect": "tcp:127.0.0.1:8080", "bind": "host",
+			}, wantState: "up",
+		},
+		{
+			name: "container route pending", result: ports.InstanceExecResult{ExitCode: 0},
+			device: map[string]string{
+				"type": "proxy", "listen": "tcp:127.0.0.1:18080",
+				"connect": "tcp:127.0.0.1:8080", "bind": "host",
+			}, marker: "v1:pending:18080", wantState: "up",
+		},
+		{name: "vm needs tunnel", yardKind: domain.YardVM, result: ports.InstanceExecResult{ExitCode: 0}, wantState: "up"},
+		{
+			name: "privileged host port", result: ports.InstanceExecResult{ExitCode: 0}, port: "80",
+			device: map[string]string{
+				"type": "proxy", "listen": "tcp:127.0.0.1:80",
+				"connect": "tcp:127.0.0.1:8080", "bind": "host",
+			}, marker: "v1:80", wantState: "up",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			yardKind := test.yardKind
+			if yardKind == "" {
+				yardKind = domain.YardContainer
+			}
+			root := t.TempDir()
+			if err := writeSpaceCache(filepath.Join(root, "space.cache"), "1G", time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+				"subyard/yard": {Name: "yard", Project: "subyard", Status: "Running", Devices: map[string]map[string]string{}},
+			}}
+			if test.device != nil {
+				incus.Instances["subyard/yard"].Devices["ai-observer"] = test.device
+			}
+			if test.marker != "" {
+				instance := incus.Instances["subyard/yard"]
+				instance.Config = map[string]string{
+					"user.subyard.ai_observer_proxy": test.marker,
+				}
+				incus.Instances["subyard/yard"] = instance
+			}
+			port := test.port
+			if port == "" {
+				port = "18080"
+			}
+			facts, err := (Runtime{
+				Environment: map[string]string{
+					"CODING_TOOL_INTEGRATIONS": "aiobserver", "AI_OBSERVER_HOST_PORT": port,
+				},
+				Executor: &spaceExecutorStub{result: test.result, err: test.execErr}, Incus: incus,
+			}).ReadStatusFacts(context.Background(), domain.Context{
+				YardKind: yardKind, IncusProject: "subyard", YardInstanceName: "yard",
+				Paths: domain.RuntimePaths{DataHome: root},
+			}, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantPort := 18080
+			if test.port == "80" {
+				wantPort = 0
+			}
+			if len(facts.Agents) != 1 || facts.Agents[0].State != test.wantState ||
+				facts.Agents[0].URL != "" || facts.Agents[0].DashboardPort != wantPort {
+				t.Fatalf("agent status = %#v", facts.Agents)
+			}
+		})
 	}
 }
 

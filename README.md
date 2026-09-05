@@ -69,6 +69,7 @@ yard config <command>              Inspect or sync settings and refresh file con
 
 - Operators: [configuration](docs/configuration.md), [named yards](config/yards/README.md), and the
   [credential ledger](docs/keys.md).
+- Agent usage dashboard: [AI Observer](docs/ai-observer.md), enabled by default for Claude and Codex session files.
 - Optional integrations: [Paseo Desktop](docs/paseo.md), [Orca remote server](docs/orca.md), and a
   dedicated [Hermes yard](docs/hermes.md).
 - Desktop client: the current [Veranda implementation](veranda/README.md) and its

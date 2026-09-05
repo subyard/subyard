@@ -22,6 +22,12 @@ yard yards
 `-Y default`, requests detailed status for exactly one yard; `yard status --all` remains the
 explicit summary form.
 
+Detailed status lists the effective environment-profile selection, enabled coding-tool
+integrations, and the live state of selected shared resources. Browser URLs appear only after the
+corresponding service and its exact owner-host route pass their read-only probes. For a remote
+owner or a VM-only guest endpoint, status prints the SSH tunnel command required before opening the
+loopback URL; it does not start a tunnel.
+
 Named yards use the same typed scopes, precedence and file-setting rules as the default yard. See
 [Subyard configuration](../../docs/configuration.md) for that canonical contract. Run
 `yard -Y <name> config show` to inspect effective settings and `yard config paths` to inspect their

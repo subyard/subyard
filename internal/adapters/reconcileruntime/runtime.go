@@ -133,7 +133,12 @@ func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStag
 	case ports.ReconcileStageSSH:
 		return runtime.runScript(ctx, runtime.Stderr, "07-ssh-access.sh", "--yes")
 	case ports.ReconcileStageProvision:
-		if err := runtime.runScript(ctx, runtime.Stderr, "04-provision-subyard.sh", "--yes"); err != nil {
+		observerIdentity, err := runtime.aiObserverProvisionIdentity()
+		if err != nil {
+			return err
+		}
+		if err := runtime.runScriptEnvironment(ctx, runtime.Stderr,
+			map[string]string{"AI_OBSERVER_CONTEXT": observerIdentity}, "04-provision-subyard.sh", "--yes"); err != nil {
 			return err
 		}
 		return runtime.RefreshConfigs(ctx)
@@ -1078,6 +1083,9 @@ func (runtime Runtime) provisionConverged(ctx context.Context) (bool, error) {
 	instance := state.Instance
 	marker, _ := instance.EffectiveConfig("user.subyard.ccusage_version")
 	codexMarker, _ := instance.EffectiveConfig("user.subyard.codex_version")
+	if observerReady, err := runtime.aiObserverConverged(instance); err != nil || !observerReady {
+		return false, err
+	}
 	if strings.EqualFold(instance.Status, "stopped") {
 		return instanceIntentionallyStopped(instance) && marker == version &&
 			(!codexSelected || codexMarker == codexVersion), nil

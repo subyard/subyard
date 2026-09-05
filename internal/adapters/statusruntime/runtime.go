@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,6 +26,7 @@ type Runtime struct {
 	Resources    []resource.Definition
 	Program      string
 	Security     ports.SecurityChecker
+	Incus        ports.Incus
 	Executor     ports.InstanceExecutor
 	Now          func() time.Time
 	ProbeTimeout time.Duration
@@ -46,9 +49,98 @@ func (runtime Runtime) ReadStatusFacts(
 			security, _ = runtime.Security.CheckSecurity(ctx, false, true)
 		}
 	}
-	result := domain.StatusFacts{Security: security, Space: runtime.space(ctx, yard, running)}
+	result := domain.StatusFacts{
+		Profiles: strings.Fields(runtime.Environment["ENVIRONMENT_PROFILES"]),
+		Security: security,
+		Space:    runtime.space(ctx, yard, running),
+	}
+	result.Agents = runtime.agentStatus(ctx, yard, running)
 	result.Shared = runtime.resourceStatus(ctx, running)
 	return result, nil
+}
+
+func (runtime Runtime) agentStatus(
+	ctx context.Context,
+	yard domain.Context,
+	running bool,
+) []domain.AgentStatus {
+	agents := strings.Fields(runtime.Environment["CODING_TOOL_INTEGRATIONS"])
+	result := make([]domain.AgentStatus, 0, len(agents))
+	for _, name := range agents {
+		status := domain.AgentStatus{Name: name, State: "enabled"}
+		if name != "aiobserver" {
+			result = append(result, status)
+			continue
+		}
+		status.State = "?"
+		if port, err := strconv.Atoi(runtime.Environment["AI_OBSERVER_HOST_PORT"]); err == nil &&
+			port >= 1024 && port <= 65535 && strconv.Itoa(port) == runtime.Environment["AI_OBSERVER_HOST_PORT"] {
+			status.DashboardPort = port
+		}
+		if running && runtime.Executor != nil {
+			probeCtx, cancel := context.WithTimeout(ctx, runtime.probeTimeout())
+			probe, err := runtime.Executor.Exec(
+				probeCtx, yard.IncusProject, yard.YardInstanceName,
+				ports.InstanceExecRequest{Command: []string{"/usr/local/bin/ai-observer-check"}},
+			)
+			timedOut := probeCtx.Err() != nil
+			cancel()
+			switch {
+			case timedOut:
+				status.State = "?"
+			case probe.ExitCode != 0:
+				status.State = "down"
+				status.Hint = runtime.program() + " init"
+			case err != nil:
+				status.State = "?"
+			default:
+				status.State = "up"
+				if yard.YardKind == domain.YardContainer && runtime.aiObserverRouteReady(ctx, yard) {
+					status.URL = "http://127.0.0.1:" + runtime.Environment["AI_OBSERVER_HOST_PORT"] + "/"
+				} else if yard.YardKind == domain.YardContainer {
+					status.Hint = runtime.program() + " init"
+				}
+			}
+		}
+		result = append(result, status)
+	}
+	return result
+}
+
+func (runtime Runtime) aiObserverRouteReady(ctx context.Context, yard domain.Context) bool {
+	port, err := strconv.Atoi(runtime.Environment["AI_OBSERVER_HOST_PORT"])
+	if err != nil || port < 1024 || port > 65535 || strconv.Itoa(port) != runtime.Environment["AI_OBSERVER_HOST_PORT"] ||
+		runtime.Incus == nil {
+		return false
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, runtime.probeTimeout())
+	defer cancel()
+	instance, err := runtime.Incus.Instance(probeCtx, yard.IncusProject, yard.YardInstanceName)
+	if err != nil {
+		return false
+	}
+	device := instance.Devices["ai-observer"]
+	if len(device) != 4 {
+		return false
+	}
+	return instance.Config["user.subyard.ai_observer_proxy"] == "v1:"+strconv.Itoa(port) &&
+		device["type"] == "proxy" && device["bind"] == "host" &&
+		device["listen"] == "tcp:127.0.0.1:"+strconv.Itoa(port) &&
+		device["connect"] == "tcp:127.0.0.1:8080"
+}
+
+func (runtime Runtime) probeTimeout() time.Duration {
+	if runtime.ProbeTimeout > 0 {
+		return runtime.ProbeTimeout
+	}
+	return 2 * time.Second
+}
+
+func (runtime Runtime) program() string {
+	if runtime.Program != "" {
+		return runtime.Program
+	}
+	return "yard"
 }
 
 func (runtime Runtime) space(ctx context.Context, yard domain.Context, running bool) string {
@@ -356,6 +448,7 @@ func (runtime Runtime) resourceStatus(ctx context.Context, running bool) []domai
 			if err == nil {
 				status.State = "up"
 				status.Hint = program + " " + definition.Command + " " + definition.Shutdown
+				status.URL = runtime.dashboardURL(definition)
 			} else {
 				status.State = "down"
 				status.Hint = program + " " + definition.Command + " " + definition.BringUp
@@ -364,6 +457,28 @@ func (runtime Runtime) resourceStatus(ctx context.Context, running bool) []domai
 		result = append(result, status)
 	}
 	return result
+}
+
+var dashboardHostname = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$`)
+
+func (runtime Runtime) dashboardURL(definition resource.Definition) string {
+	if definition.Dashboard == nil {
+		return ""
+	}
+	host := runtime.Environment[definition.Dashboard.HostSetting]
+	if net.ParseIP(host) == nil && !dashboardHostname.MatchString(host) {
+		return ""
+	}
+	portText := runtime.Environment[definition.Dashboard.PortSetting]
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 || strconv.Itoa(port) != portText {
+		return ""
+	}
+	return (&url.URL{
+		Scheme: definition.Dashboard.Scheme,
+		Host:   net.JoinHostPort(host, portText),
+		Path:   definition.Dashboard.Path,
+	}).String()
 }
 
 func environment(values map[string]string) []string {

@@ -156,12 +156,12 @@ func (cli *CLI) remoteYardStatus(ctx context.Context, yard domain.Context) (doma
 
 func (cli *CLI) remoteOwnerYardStatus(
 	ctx context.Context, loaded config.Loaded, hostID, yardName string,
-) (domain.YardStatus, error) {
+) (domain.YardStatus, string, error) {
 	connections, err := (ownerinventory.Connections{
 		Root: loaded.Context.Paths.DataHome + "/owner-inventory",
 	}).ListReadOnly()
 	if err != nil {
-		return domain.YardStatus{}, err
+		return domain.YardStatus{}, "", err
 	}
 	destination := ""
 	for _, connection := range connections {
@@ -171,15 +171,16 @@ func (cli *CLI) remoteOwnerYardStatus(
 		}
 	}
 	if destination == "" {
-		return domain.YardStatus{}, fmt.Errorf("OwnerHost %q has no registered connection", hostID)
+		return domain.YardStatus{}, "", fmt.Errorf("OwnerHost %q has no registered connection", hostID)
 	}
 	process, err := transport.SSHYard("ssh", destination, yardName, 3*time.Second)
 	if err != nil {
-		return domain.YardStatus{}, err
+		return domain.YardStatus{}, "", err
 	}
 	callContext, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
-	return (ownerinventory.Client{Transport: process}).YardStatus(callContext)
+	status, err := (ownerinventory.Client{Transport: process}).YardStatus(callContext)
+	return status, destination, err
 }
 
 func (cli *CLI) invalidateOwnerInventory(loaded config.Loaded) error {

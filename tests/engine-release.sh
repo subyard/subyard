@@ -116,6 +116,8 @@ grep -Fxq './bin/yard' "$bundle_list" \
   && grep -Fxq './config/migrations.json' "$bundle_list" \
   && grep -Fxq './config/release-transition.json' "$bundle_list" \
   && grep -Fxq './config/agents/codex/provision.sh' "$bundle_list" \
+  && grep -Fxq './config/agents/aiobserver/provision.sh' "$bundle_list" \
+  && grep -Fxq './scripts/lib/ai-observer-proxy.sh' "$bundle_list" \
   && grep -Fxq './config/profiles/hermes/resources/dashboard.res' "$bundle_list" \
   && grep -Fxq './config/profiles/hermes/resources/dashboard/handler.sh' "$bundle_list" \
   && grep -Fxq './config/profiles/hermes/yard.env' "$bundle_list" \

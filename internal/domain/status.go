@@ -5,9 +5,20 @@ type SharedResourceStatus struct {
 	Name    string `json:"name"`
 	State   string `json:"state"`
 	Hint    string `json:"hint,omitempty"`
+	URL     string `json:"url,omitempty"`
+}
+
+type AgentStatus struct {
+	Name          string `json:"name"`
+	State         string `json:"state"`
+	Hint          string `json:"hint,omitempty"`
+	URL           string `json:"url,omitempty"`
+	DashboardPort int    `json:"dashboardPort,omitempty"`
 }
 
 type StatusFacts struct {
+	Profiles []string               `json:"profiles"`
+	Agents   []AgentStatus          `json:"agents"`
 	Shared   []SharedResourceStatus `json:"shared"`
 	Security string                 `json:"security"`
 	Space    string                 `json:"space"`

@@ -15,17 +15,28 @@ import (
 )
 
 type Definition struct {
-	Profile  string
-	Name     string
-	Command  string
-	Handler  string
-	BringUp  string
-	Shutdown string
-	Verbs    []string
-	Title    string
-	Proxy    *ProxyContract
-	path     string
-	actions  []actionDeclaration
+	Profile   string
+	Name      string
+	Command   string
+	Handler   string
+	BringUp   string
+	Shutdown  string
+	Verbs     []string
+	Title     string
+	Proxy     *ProxyContract
+	Dashboard *DashboardContract
+	path      string
+	actions   []actionDeclaration
+}
+
+// DashboardContract describes an HTTP endpoint that is useful to a person.
+// It is deliberately separate from ProxyContract because an arbitrary TCP
+// proxy does not imply a browser-safe URL.
+type DashboardContract struct {
+	Scheme      string
+	HostSetting string
+	PortSetting string
+	Path        string
 }
 
 // ProxyContract describes one profile-owned owner-host proxy. The resource handler
@@ -196,6 +207,10 @@ func cloneDefinition(definition Definition) Definition {
 		proxy := *definition.Proxy
 		definition.Proxy = &proxy
 	}
+	if definition.Dashboard != nil {
+		dashboard := *definition.Dashboard
+		definition.Dashboard = &dashboard
+	}
 	return definition
 }
 
@@ -215,6 +230,10 @@ func loadDefinition(root, path string) (Definition, []domain.ActionDefinition, e
 	handler := values.singletons["HANDLER"]
 	title := values.singletons["TITLE"]
 	proxy, err := parseProxyContract(profile, name, values.singletons["PROXY"], path)
+	if err != nil {
+		return Definition{}, nil, err
+	}
+	dashboard, err := parseDashboardContract(values.singletons["DASHBOARD"], path)
 	if err != nil {
 		return Definition{}, nil, err
 	}
@@ -292,8 +311,27 @@ func loadDefinition(root, path string) (Definition, []domain.ActionDefinition, e
 	return Definition{
 		Profile: profile, Name: name, Command: command, Handler: handler,
 		BringUp: bringUp, Shutdown: shutdown, Verbs: verbs, Title: title, path: resolvedHandlerPath,
-		Proxy: proxy, actions: declarations,
+		Proxy: proxy, Dashboard: dashboard, actions: declarations,
 	}, actionDefinitions, nil
+}
+
+func parseDashboardContract(record, path string) (*DashboardContract, error) {
+	if record == "" {
+		return nil, nil
+	}
+	fields := strings.Fields(record)
+	if len(fields) != 4 {
+		return nil, fmt.Errorf("invalid DASHBOARD record %q in %s", record, path)
+	}
+	scheme, hostSetting, portSetting, dashboardPath := fields[0], fields[1], fields[2], fields[3]
+	if (scheme != "http" && scheme != "https") || !safeSettingName(hostSetting) ||
+		!safeSettingName(portSetting) || !strings.HasPrefix(dashboardPath, "/") ||
+		strings.HasPrefix(dashboardPath, "//") || strings.ContainsAny(dashboardPath, "?#") {
+		return nil, fmt.Errorf("invalid DASHBOARD record %q in %s", record, path)
+	}
+	return &DashboardContract{
+		Scheme: scheme, HostSetting: hostSetting, PortSetting: portSetting, Path: dashboardPath,
+	}, nil
 }
 
 func parseProxyContract(profile, resourceName, record, path string) (*ProxyContract, error) {
@@ -398,7 +436,7 @@ func readDescriptor(path string) (descriptorValues, error) {
 	defer file.Close()
 	allowed := map[string]struct{}{
 		"COMMAND": {}, "HANDLER": {}, "TITLE": {}, "ACTION": {}, "BRINGUP": {}, "SHUTDOWN": {},
-		"PROXY": {},
+		"PROXY": {}, "DASHBOARD": {},
 	}
 	values := descriptorValues{singletons: make(map[string]string)}
 	scanner := bufio.NewScanner(file)

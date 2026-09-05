@@ -71,7 +71,7 @@ func BuiltInRegistry() (Registry, error) {
 	)
 
 	shellTests := []string{
-		"agent-e2e", "agent-selection", "android-provision-check", "build-engine",
+		"agent-e2e", "agent-selection", "aiobserver-provision", "aiobserver-proxy", "android-provision-check", "build-engine",
 		"ccusage-provision", "cli-contract", "codex-agent-defaults", "codex-agent-provision",
 		"command-registry", "create-subyard-docker-apparmor", "docker-forwarding-convergence",
 		"emulator-process-control",

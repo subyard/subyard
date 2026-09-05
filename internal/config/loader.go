@@ -316,7 +316,32 @@ func load(
 	tracker.normalize("CODING_TOOL_INTEGRATIONS", values["CODING_TOOL_INTEGRATIONS"], "resolved agent dependencies")
 	normalizeAgentPersistLinks(values, tracker, defaultLayer)
 	ctx, err := contextFrom(root, yardName, values, tracker, defaultLayer, normalizationLayer)
+	if err == nil {
+		err = normalizeAIObserverPort(values, tracker, ctx.SSHPort)
+	}
 	return ctx, values, err
+}
+
+// A yard already needs a distinct SSH port on its owner. Offset that port into
+// the unprivileged range so default-enabled observers do not all claim one port.
+// An explicit override handles collisions with unrelated host services.
+func normalizeAIObserverPort(values environment, tracker *settingTracker, sshPort int) error {
+	if values["AI_OBSERVER_HOST_PORT"] == "" {
+		values["AI_OBSERVER_HOST_PORT"] = strconv.Itoa(1024 + (sshPort+20000-1024)%64512)
+		tracker.normalize("AI_OBSERVER_HOST_PORT", values["AI_OBSERVER_HOST_PORT"], "derived from SSH_PORT")
+	}
+	selected := false
+	for _, agent := range strings.Fields(values["CODING_TOOL_INTEGRATIONS"]) {
+		selected = selected || agent == "aiobserver"
+	}
+	if selected {
+		for _, name := range []string{"SSH_PORT", "ADB_PROXY_PORT", "ADB_CONSOLE_PROXY_PORT", "ORCA_HOST_PORT", "HERMES_DASHBOARD_HOST_PORT"} {
+			if values[name] == values["AI_OBSERVER_HOST_PORT"] {
+				return fmt.Errorf("AI_OBSERVER_HOST_PORT collides with %s; choose another port", name)
+			}
+		}
+	}
+	return nil
 }
 
 func resolveAgentDependencies(values environment) error {

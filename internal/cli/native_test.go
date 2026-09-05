@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strings"
@@ -1936,7 +1937,14 @@ func TestNativeStatusUsesTypedPortsAndRendersParityFields(t *testing.T) {
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"-Y", "default", "status"}, Environment: environment,
 		WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Incus: fakeIncus, Executor: fakeIncus,
 		StatusFacts: statusFactsStub{value: domain.StatusFacts{
-			Shared:   []domain.SharedResourceStatus{{Profile: "android", Name: "emulator", State: "up", Hint: "yard emu down"}},
+			Profiles: []string{"android", "orca"},
+			Agents: []domain.AgentStatus{
+				{Name: "codex", State: "enabled"},
+				{Name: "aiobserver", State: "up", URL: "http://127.0.0.1:18080/"},
+			},
+			Shared: []domain.SharedResourceStatus{{
+				Profile: "android", Name: "emulator", State: "up", Hint: "yard emu down",
+			}},
 			Security: "static-only", Space: "1G  (in-yard rootfs, 1s ago)",
 		}},
 	})
@@ -1949,10 +1957,136 @@ func TestNativeStatusUsesTypedPortsAndRendersParityFields(t *testing.T) {
 	for _, expected := range []string{
 		"yard  RUNNING", "desired  running", "ip       10.0.0.2", "host-demo",
 		"services ssh/docker = active/active", "vscode   key=yes server=yes git-id=yes",
-		"projects 1", "android   emulator", "security static-only", "space    1G",
+		"projects 1", "profiles android orca", "codex", "enabled", "aiobserver", "up",
+		"http://127.0.0.1:18080/", "android   emulator", "security static-only", "space    1G",
 	} {
 		if !strings.Contains(stdout.String(), expected) {
 			t.Fatalf("status omitted %q:\n%s", expected, stdout.String())
+		}
+	}
+}
+
+func TestAIObserverStatusRendersWorkingLocalAndRemoteTunnelHints(t *testing.T) {
+	tests := []struct {
+		name          string
+		yard          domain.Context
+		agent         domain.AgentStatus
+		ownerEndpoint string
+		want          []string
+	}{
+		{
+			name: "local container direct route",
+			yard: domain.Context{YardKind: domain.YardContainer, SSHHost: "yard"},
+			agent: domain.AgentStatus{
+				Name: "aiobserver", State: "up", DashboardPort: 18080,
+				URL: "http://127.0.0.1:18080/",
+			},
+			want: []string{"http://127.0.0.1:18080/"},
+		},
+		{
+			name:  "local vm guest tunnel",
+			yard:  domain.Context{YardKind: domain.YardVM, SSHHost: "yard-demo"},
+			agent: domain.AgentStatus{Name: "aiobserver", State: "up", DashboardPort: 18080},
+			want: []string{
+				"http://127.0.0.1:18080/",
+				"'ssh' '-N' '-o' 'ExitOnForwardFailure=yes' '-L' '18080:127.0.0.1:8080' 'yard-demo'",
+			},
+		},
+		{
+			name: "remote container owner tunnel",
+			yard: domain.Context{YardKind: domain.YardContainer, SSHHost: "yard"},
+			agent: domain.AgentStatus{
+				Name: "aiobserver", State: "up", DashboardPort: 18080,
+				URL: "http://127.0.0.1:18080/",
+			},
+			ownerEndpoint: "operator@owner.example",
+			want: []string{
+				"http://127.0.0.1:18080/",
+				"'ssh' '-N' '-o' 'ExitOnForwardFailure=yes' '-L' '18080:127.0.0.1:18080' 'operator@owner.example'",
+			},
+		},
+		{
+			name:          "remote vm nested tunnel",
+			yard:          domain.Context{YardKind: domain.YardVM, SSHHost: "yard-demo"},
+			agent:         domain.AgentStatus{Name: "aiobserver", State: "up", DashboardPort: 18080},
+			ownerEndpoint: "operator@owner.example",
+			want: []string{
+				"http://127.0.0.1:18080/",
+				"'ssh' '-T' '-o' 'ExitOnForwardFailure=yes' '-L' '18080:127.0.0.1:18080' 'operator@owner.example'",
+				"yard-demo",
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var output bytes.Buffer
+			program := &CLI{options: Options{Stdout: &output}}
+			program.printAgentStatus(test.yard, test.agent, test.ownerEndpoint)
+			for _, want := range test.want {
+				if !strings.Contains(output.String(), want) {
+					t.Fatalf("agent status omitted %q: %s", want, output.String())
+				}
+			}
+		})
+	}
+}
+
+func TestAIObserverRemoteVMTunnelRunsNestedSSHThroughOwner(t *testing.T) {
+	got := aiObserverTunnelArguments(
+		domain.Context{YardKind: domain.YardVM, SSHHost: "yard-demo"},
+		domain.AgentStatus{Name: "aiobserver", State: "up", DashboardPort: 18080},
+		"operator@owner.example",
+	)
+	want := []string{
+		"ssh", "-T", "-o", "ExitOnForwardFailure=yes",
+		"-L", "18080:127.0.0.1:18080", "operator@owner.example",
+		"'ssh' '-N' '-o' 'ExitOnForwardFailure=yes' '-L' '18080:127.0.0.1:8080' 'yard-demo'",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("remote VM tunnel arguments = %#v, want %#v", got, want)
+	}
+}
+
+func TestRemoteStatusFactsTunnelLoopbackResourceDashboard(t *testing.T) {
+	var output bytes.Buffer
+	program := &CLI{options: Options{Stdout: &output}}
+	status := domain.YardStatus{Facts: domain.StatusFacts{Shared: []domain.SharedResourceStatus{{
+		Profile: "demo", Name: "dashboard", State: "up", URL: "http://localhost:19119/ui",
+	}}}}
+	program.printRemoteStatusFacts(status, "operator@owner.example")
+	want := "open http://127.0.0.1:19119/ui after: 'ssh' '-N' '-o' 'ExitOnForwardFailure=yes' '-L' '19119:localhost:19119' 'operator@owner.example'"
+	if !strings.Contains(output.String(), want) {
+		t.Fatalf("remote loopback dashboard was not rendered through owner tunnel:\n%s", output.String())
+	}
+	if strings.Contains(output.String(), "'-p' '2222'") {
+		t.Fatalf("REMOTE_SSH_PORT must not be used for the owner transport:\n%s", output.String())
+	}
+}
+
+func TestRemoteStatusFactsPreserveProfilesAgentsAndResources(t *testing.T) {
+	var output bytes.Buffer
+	program := &CLI{options: Options{Stdout: &output}}
+	status := domain.YardStatus{
+		Context: domain.Context{YardKind: domain.YardContainer, SSHHost: "yard"},
+		Facts: domain.StatusFacts{
+			Profiles: []string{"hermes"},
+			Agents: []domain.AgentStatus{{
+				Name: "aiobserver", State: "up", DashboardPort: 18080,
+				URL: "http://127.0.0.1:18080/",
+			}},
+			Shared: []domain.SharedResourceStatus{{
+				Profile: "hermes", Name: "dashboard", State: "up",
+				URL: "http://owner.tailnet.ts.net:19119/",
+			}},
+		},
+	}
+	program.printRemoteStatusFacts(status, "operator@owner.example")
+	for _, want := range []string{
+		"profiles hermes", "aiobserver", "operator@owner.example", "hermes", "dashboard",
+		"http://owner.tailnet.ts.net:19119/",
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("remote facts omitted %q: %s", want, output.String())
 		}
 	}
 }
