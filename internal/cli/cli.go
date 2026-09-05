@@ -286,8 +286,10 @@ func New(options Options) (*CLI, error) {
 	if closeErr != nil {
 		return nil, closeErr
 	}
-	if err := validatePreparedCommandManifest(manifest); err != nil {
-		return nil, err
+	for _, definition := range manifest.Commands() {
+		if _, err := resolveCoreCommand(definition); err != nil {
+			return nil, err
+		}
 	}
 	resources, err := resource.Load(root)
 	if err != nil {
@@ -546,27 +548,35 @@ func (cli *CLI) Run(ctx context.Context) int {
 		}
 		return cli.runTestVMLogs(ctx, commandArguments)
 	}
-	var (
-		prepared   *preparedCommand
-		projectRun *projectExecution
-	)
-	preparation := resolveCommandPreparation(definition)
-	if core && preparation.Direct &&
-		(!commandHelpRequested(commandArguments) || preparation.Family == preparedCommandRelease) {
-		prepared, err = cli.prepareCommand(ctx, prepareCommandRequest{
-			Loaded: loaded, Definition: definition, Arguments: commandArguments,
-			ExplicitYard: explicit, ReadOnly: readOnlyInvocation, Direct: true, Bootstrap: bootstrap,
-		})
-		if err != nil {
-			cli.errorf("%s", preparedCommandDirectMessage(name, err))
-			return preparedCommandDirectExit(err)
+	if core && !commandHelpRequested(commandArguments) {
+		behavior, resolveErr := resolveCoreCommand(definition)
+		if resolveErr != nil {
+			cli.errorf("%v", resolveErr)
+			return 2
 		}
-		defer prepared.Close()
-		projectRun = prepared.Project
-		loaded = prepared.Loaded
-		loadedContext = loaded.Context
-		commandArguments = prepared.Arguments
-	} else if !commandHelpRequested(commandArguments) {
+		if behavior.prepare != nil {
+			prepared, prepareErr := cli.prepareCommand(ctx, prepareCommandRequest{
+				Loaded: loaded, Definition: definition, Arguments: commandArguments,
+				ExplicitYard: explicit, ReadOnly: readOnlyInvocation, Bootstrap: bootstrap,
+				OnResolved: func(resolved config.Loaded, arguments []string) {
+					remote := ""
+					if resolved.Context.AccessKind == domain.AccessRemote {
+						remote = resolved.Context.OwnerEndpoint
+					}
+					if cli.env["SUBYARD_NO_AUDIT"] == "" {
+						cli.audit(name, arguments, yard, remote)
+					}
+				},
+			})
+			if prepareErr != nil {
+				return cli.reportPreparationError(definition, prepareErr)
+			}
+			defer prepared.Close()
+			return cli.runPreparedCommand(ctx, prepared, yes || cli.env["ASSUME_YES"] == "1")
+		}
+	}
+	var projectRun *projectExecution
+	if !commandHelpRequested(commandArguments) {
 		projectRun, err = cli.prepareProjectExecution(
 			ctx, loaded, definition, commandArguments, explicit, readOnlyInvocation,
 		)
@@ -574,14 +584,15 @@ func (cli *CLI) Run(ctx context.Context) int {
 			cli.errorf("prepare %s: %v", name, err)
 			return 1
 		}
-		if projectRun != nil {
-			defer cli.abortProjectExecution(context.Background(), projectRun)
-			loaded = projectRun.Loaded
-			loadedContext = loaded.Context
-			commandArguments = projectRun.Arguments
-			for key, value := range projectRun.Environment {
-				cli.env[key] = value
-			}
+
+	}
+	if projectRun != nil {
+		defer cli.abortProjectExecution(context.Background(), projectRun)
+		loaded = projectRun.Loaded
+		loadedContext = loaded.Context
+		commandArguments = projectRun.Arguments
+		for key, value := range projectRun.Environment {
+			cli.env[key] = value
 		}
 	}
 	remote := ""
@@ -591,9 +602,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 	if name != "_info" && cli.env["SUBYARD_NO_AUDIT"] == "" {
 		cli.audit(name, commandArguments, yard, remote)
 	}
-	if prepared != nil {
-		return prepared.runDirect(ctx, yes || cli.env["ASSUME_YES"] == "1")
-	}
+
 	target, routeErr := application.Route(loadedContext, domain.RemotePolicy(remotePlane))
 	if routeErr != nil {
 		if remotePlane == command.RemoteDeny {
@@ -652,6 +661,8 @@ func (cli *CLI) Run(ctx context.Context) int {
 		return cli.runSecurity(ctx, loaded, commandArguments)
 	case "@keys":
 		return cli.runKeys(ctx, loaded, definition, commandArguments)
+	case "@update":
+		return cli.runUpdate(ctx, loaded, definition, commandArguments)
 	case "@config":
 		return cli.runConfig(ctx, loaded, commandArguments)
 	case "@status":
@@ -2813,37 +2824,12 @@ func (cli *CLI) operationOrchestrator(
 		}
 		actions := map[string]map[string]shelladapter.Action{}
 		if definition != nil {
-			adapter, handler := "command", definition.Handler
-			if definition.Handler == "@lifecycle" {
-				adapter, handler = "lifecycle", "lifecycle-guard.sh"
-			}
-			if definition.Handler == "@provision" {
-				path := filepath.Join(cli.options.RepositoryRoot, "scripts", "lifecycle-guard.sh")
-				actions["lifecycle"] = map[string]shelladapter.Action{
-					"start": {Path: path, Direct: true}, "stop": {Path: path, Direct: true},
-				}
-				actions["provision"] = map[string]shelladapter.Action{
-					"profile":       {Path: filepath.Join(cli.options.RepositoryRoot, "scripts/provision-profile.sh"), Direct: true, Timeout: 45 * time.Minute},
-					"profile-check": {Path: filepath.Join(cli.options.RepositoryRoot, "scripts/provision-profile.sh"), Direct: true, Capture: true},
-				}
-			} else if definition.Handler == "@test-vms" {
-				path := filepath.Join(cli.options.RepositoryRoot, "scripts/e2e-lab/invoke.sh")
-				actions["test-vms"] = map[string]shelladapter.Action{
-					"up": {Path: path, Direct: true}, "status": {Path: path, Direct: true},
-					"down": {Path: path, Direct: true}, "revoke": {Path: path, Direct: true},
-					"recover": {Path: path, Direct: true},
-				}
-			} else if definition.Handler == "@teardown" {
-				path := filepath.Join(cli.options.RepositoryRoot, "scripts/teardown-physical.sh")
-				actions["teardown"] = map[string]shelladapter.Action{
-					"apply": {Path: path, Direct: true},
-				}
-			} else {
-				actions[adapter] = map[string]shelladapter.Action{definition.Name: {
-					Path: filepath.Join(cli.options.RepositoryRoot, "scripts", handler), Direct: true,
-				}}
+			behavior, err := resolveCoreCommand(*definition)
+			if err == nil && behavior.shellActions != nil {
+				actions = behavior.shellActions(cli.options.RepositoryRoot)
 			}
 		}
+
 		runner = shelladapter.Runner{
 			RepositoryRoot: cli.options.RepositoryRoot,
 			Actions:        actions,
@@ -2964,11 +2950,7 @@ func commandPolicy(
 	yard domain.Context,
 	arguments []string,
 	project *projectExecution,
-	remote *domain.RemotePrepared,
 ) domain.CommandPolicy {
-	if remote != nil {
-		return application.RemotePolicy(*remote)
-	}
 	consequences := []string{
 		fmt.Sprintf("%s in yard %s", definition.Summary, yard.YardName),
 		"publish typed operation events and an audit result",
@@ -3014,10 +2996,6 @@ func writeAdapterDiagnostics(output io.Writer, value string) {
 	if !strings.HasSuffix(value, "\n") {
 		_, _ = io.WriteString(output, "\n")
 	}
-}
-
-func structuredCommandNeedsSudo(name string) bool {
-	return name == "teardown"
 }
 
 func (cli *CLI) prepareSudoPrivileges(
@@ -3458,7 +3436,7 @@ func (cli *CLI) serveRPC(ctx context.Context, yard string, arguments []string) i
 	// remote-owner route, never as an implicit context switch inside the session.
 	cli.env["SUBYARD_YARD_EXPLICIT"] = "1"
 	handler := &rpcHandler{cli: cli, loaded: loaded, plans: make(map[string]*preparedCommand)}
-	defer handler.closePreparedCommands()
+	defer handler.closePlans()
 	session := rpc.Session{Handler: handler, EngineVersion: Version, Capabilities: []string{
 		"snapshot", "ordered-events", "cancellation", "deadlines", "commands", "context",
 		"projects", "yard-status", "credential-metadata", "credential-status",
@@ -3481,13 +3459,10 @@ type rpcHandler struct {
 	plans   map[string]*preparedCommand
 }
 
-func (handler *rpcHandler) closePreparedCommands() {
+func (handler *rpcHandler) closePlans() {
 	handler.plansMu.Lock()
-	plans := make([]*preparedCommand, 0, len(handler.plans))
-	for id, prepared := range handler.plans {
-		plans = append(plans, prepared)
-		delete(handler.plans, id)
-	}
+	plans := handler.plans
+	handler.plans = nil
 	handler.plansMu.Unlock()
 	for _, prepared := range plans {
 		_ = prepared.Close()
@@ -3575,8 +3550,11 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		if definition.Effect != command.EffectMutate {
 			return nil, &rpc.Error{Code: "command_not_mutating", Message: params.Command}
 		}
-		preparation := resolveCommandPreparation(definition)
-		if !preparation.RPC {
+		behavior, err := resolveCoreCommand(definition)
+		if err != nil {
+			return nil, operationRPCError("invalid_params", err)
+		}
+		if behavior.prepare == nil {
 			return nil, &rpc.Error{Code: "interactive_or_payload_command", Message: params.Command}
 		}
 		if definition.Name != "update" {
@@ -3596,25 +3574,33 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			ExplicitYard: true,
 		})
 		if err != nil {
-			return nil, operationRPCError(preparedCommandRPCCode(err, "plan_failed"), err)
+			return nil, preparationRPCError(definition, err)
 		}
+		keep := false
+		defer func() {
+			if !keep {
+				_ = prepared.Close()
+			}
+		}()
+		if prepared.displayOnly != nil {
+			return nil, operationRPCError("plan_failed", errors.New("provision execution is required"))
+		}
+		plan := prepared.Plan
 		handler.plansMu.Lock()
+		defer handler.plansMu.Unlock()
 		if handler.plans == nil {
 			handler.plans = make(map[string]*preparedCommand)
 		}
-		if _, exists := handler.plans[prepared.Plan.OperationID]; exists {
-			handler.plansMu.Unlock()
-			_ = prepared.Close()
-			return nil, &rpc.Error{Code: "duplicate_plan", Message: prepared.Plan.OperationID}
+		if _, exists := handler.plans[plan.OperationID]; exists {
+			return nil, &rpc.Error{Code: "duplicate_plan", Message: plan.OperationID}
 		}
 		if len(handler.plans) >= 64 {
-			handler.plansMu.Unlock()
-			_ = prepared.Close()
 			return nil, &rpc.Error{Code: "too_many_plans", Message: "execute an existing plan or start a new RPC session"}
 		}
-		handler.plans[prepared.Plan.OperationID] = prepared
-		handler.plansMu.Unlock()
-		return prepared.Plan, nil
+		handler.plans[plan.OperationID] = prepared
+		keep = true
+		return plan, nil
+
 	case "operation.execute":
 		var params struct {
 			Confirmed bool `json:"confirmed"`
@@ -3659,9 +3645,9 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		planned.Plan = plan
 		result, err := planned.Execute(ctx, orchestrator, planned.CLI.options.Stderr)
 		if err != nil {
-			var commitErr *preparedCommandCommitError
+			var commitErr *commandCommitError
 			if errors.As(err, &commitErr) {
-				return nil, &rpc.Error{Code: "state_commit_failed", Message: commitErr.err.Error()}
+				return nil, &rpc.Error{Code: "state_commit_failed", Message: err.Error()}
 			}
 			if errors.Is(err, domain.ErrPlanStale) || errors.Is(err, domain.ErrActionPolicyInvalid) ||
 				domain.ActionPolicyErrorClass(err) == domain.ActionPolicyInvalid {
@@ -3672,6 +3658,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		if result.Status != "ok" {
 			return nil, &rpc.Error{Code: "adapter_failed", Message: result.ErrorCode}
 		}
+
 		return map[string]any{"plan": plan, "result": result}, nil
 	case "operation.route":
 		var params struct {

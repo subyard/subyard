@@ -102,13 +102,14 @@ func TestProvisionAssessmentChecksRunningProfilesReadOnly(t *testing.T) {
 	if !ok {
 		t.Fatal("provision definition is missing")
 	}
-	action, delta, typed, err := program.assessStructuredAction(
-		context.Background(), loaded, definition, nil, nil, nil, execution, nil,
-	)
-	if err != nil || !typed || action != "yard.provision" || !delta.Changed ||
+	if err := program.observeProvisionExecution(context.Background(), loaded, definition, execution); err != nil {
+		t.Fatal(err)
+	}
+	action, delta, err := execution.actionPlan(definition, loaded.Context)
+	if err != nil || action != "yard.provision" || !delta.Changed ||
 		!slices.Equal(execution.changedProfiles, []string{"openclaw"}) {
-		t.Fatalf("action=%q delta=%#v typed=%t changed=%v err=%v",
-			action, delta, typed, execution.changedProfiles, err)
+		t.Fatalf("action=%q delta=%#v changed=%v err=%v",
+			action, delta, execution.changedProfiles, err)
 	}
 	if len(runner.Requests) != 2 || runner.Requests[0].Action != "profile-check" ||
 		!slices.Equal(runner.Requests[0].Arguments, []string{"--check", "android"}) {

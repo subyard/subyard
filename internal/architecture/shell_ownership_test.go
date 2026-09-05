@@ -139,12 +139,12 @@ func TestCriticalShellCallerGraphIsExact(t *testing.T) {
 		},
 		"lifecycle-guard.sh": {
 			"internal/adapters/reconcileruntime/runtime.go",
-			"internal/cli/cli.go",
+			"internal/cli/prepared_command.go",
 			"scripts/03-create-subyard.sh",
 		},
 		"teardown-physical.sh": {
 			"internal/adapters/reconcileruntime/runtime.go",
-			"internal/cli/cli.go",
+			"internal/cli/prepared_command.go",
 		},
 	}
 
@@ -320,7 +320,7 @@ type shellContract struct {
 
 func productionShellContracts() map[string]shellContract {
 	goReconcile := "internal/adapters/reconcileruntime/runtime.go"
-	goCLI := "internal/cli/cli.go"
+	goPrepared := "internal/cli/prepared_command.go"
 	return map[string]shellContract{
 		"scripts/lib/ai-observer-proxy.sh":      {"library", "scripts/04-provision-subyard.sh", `lib/ai-observer-proxy.sh`},
 		"config/agents/aiobserver/provision.sh": {"profile", "config/agents.env", `agents/aiobserver/provision.sh`},
@@ -336,7 +336,7 @@ func productionShellContracts() map[string]shellContract {
 		"scripts/06-network.sh":                 {"leaf", goReconcile, `"06-network.sh"`},
 		"scripts/07-ssh-access.sh":              {"leaf", goReconcile, `"07-ssh-access.sh"`},
 		"scripts/09-yard-extras.sh":             {"leaf", goReconcile, `"09-yard-extras.sh"`},
-		"scripts/e2e-lab/invoke.sh":             {"leaf", goCLI, `e2e-lab/invoke.sh`},
+		"scripts/e2e-lab/invoke.sh":             {"leaf", goPrepared, `e2e-lab/invoke.sh`},
 		"scripts/e2e-lab/provision.sh":          {"embedded", "internal/adapters/testvmsruntime/backend.go", `"provision.sh"`},
 		"scripts/install-key-tools.sh":          {"leaf", goReconcile, `"install-key-tools.sh"`},
 		"scripts/install-keys-auto-sync.sh":     {"leaf", goReconcile, `"install-keys-auto-sync.sh"`},
@@ -356,9 +356,9 @@ func productionShellContracts() map[string]shellContract {
 		"scripts/lib/runtime.sh":               {"library", "scripts/01-install-incus.sh", `lib/runtime.sh`},
 		"scripts/lib/ssh-config.sh":            {"library", "scripts/07-ssh-access.sh", `lib/ssh-config.sh`},
 		"scripts/lib/ui.sh":                    {"library", "scripts/01-install-incus.sh", `lib/ui.sh`},
-		"scripts/lifecycle-guard.sh":           {"leaf", goCLI, `"lifecycle-guard.sh"`},
-		"scripts/provision-profile.sh":         {"profile", goCLI, `"scripts/provision-profile.sh"`},
-		"scripts/teardown-physical.sh":         {"leaf", goCLI, `"scripts/teardown-physical.sh"`},
+		"scripts/lifecycle-guard.sh":           {"leaf", goPrepared, `"lifecycle-guard.sh"`},
+		"scripts/provision-profile.sh":         {"profile", goPrepared, `"scripts/provision-profile.sh"`},
+		"scripts/teardown-physical.sh":         {"leaf", goPrepared, `"scripts/teardown-physical.sh"`},
 		"scripts/vscode-remote-maintenance.sh": {"embedded", "scripts/lifecycle-guard.sh", `vscode-remote-maintenance.sh`},
 
 		"config/profiles/android/emulator-control.sh":                    {"profile", "config/profiles/android/resources/emulator/handler.sh", `emulator-control.sh`},

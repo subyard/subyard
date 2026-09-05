@@ -16,7 +16,6 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
 	"github.com/Subyard/Subyard/internal/adapters/testvmsruntime"
 	"github.com/Subyard/Subyard/internal/application"
-	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -438,20 +437,6 @@ func (execution *testVMExecution) actionPlan() (domain.ActionID, domain.ActionDe
 			"%w: unknown test-vms action %q", domain.ErrActionPolicyInvalid, execution.action,
 		)
 	}
-}
-
-func (execution *testVMExecution) prepareAction(
-	orchestrator *application.Orchestrator,
-	loaded config.Loaded,
-	definition command.Definition,
-) (domain.OperationPlan, error) {
-	action, delta, err := execution.actionPlan()
-	if err != nil {
-		return domain.OperationPlan{}, err
-	}
-	return orchestrator.PrepareAction(
-		loaded.Context, definition.Name, domain.RemotePolicy(definition.Remote), action, delta,
-	)
 }
 
 func (cli *CLI) executeTestVMs(

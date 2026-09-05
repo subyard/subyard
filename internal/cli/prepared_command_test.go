@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -77,30 +76,29 @@ func TestPreparedCommandResolverContract(t *testing.T) {
 	}
 
 	tests := []struct {
-		name   string
-		family preparedCommandFamily
-		direct bool
-		rpc    bool
+		name     string
+		prepared bool
+		rpc      bool
 	}{
-		{name: "init", family: preparedCommandInit, direct: true, rpc: true},
-		{name: "start", family: preparedCommandLifecycle, direct: true, rpc: true},
-		{name: "provision", family: preparedCommandProvision, direct: true, rpc: true},
-		{name: "test-vms", family: preparedCommandTestVMs, direct: true, rpc: true},
-		{name: "stop", family: preparedCommandLifecycle, direct: true, rpc: true},
-		{name: "teardown", family: preparedCommandTeardown, direct: true, rpc: true},
-		{name: "sync", family: preparedCommandProject, direct: true, rpc: true},
-		{name: "bind", family: preparedCommandProject, direct: true, rpc: true},
-		{name: "clone", family: preparedCommandProject, direct: true, rpc: true},
-		{name: "code", family: preparedCommandProject, direct: true, rpc: true},
-		{name: "export", family: preparedCommandProject, direct: true, rpc: true},
-		{name: "remove", family: preparedCommandProject, direct: true, rpc: true},
-		{name: "up", family: preparedCommandProjectEnvironment, direct: true, rpc: true},
-		{name: "down", family: preparedCommandProjectEnvironment, direct: true, rpc: true},
-		{name: "info", family: preparedCommandProjectEnvironment, direct: true, rpc: false},
-		{name: "remote", family: preparedCommandRemote, direct: true, rpc: false},
-		{name: "update", family: preparedCommandRelease, direct: true, rpc: true},
-		{name: "keys", direct: false, rpc: false},
-		{name: "svc", direct: false, rpc: false},
+		{name: "init", prepared: true, rpc: true},
+		{name: "start", prepared: true, rpc: true},
+		{name: "provision", prepared: true, rpc: true},
+		{name: "test-vms", prepared: true, rpc: true},
+		{name: "stop", prepared: true, rpc: true},
+		{name: "teardown", prepared: true, rpc: true},
+		{name: "sync", prepared: true, rpc: true},
+		{name: "bind", prepared: true, rpc: true},
+		{name: "clone", prepared: true, rpc: true},
+		{name: "code", prepared: true, rpc: true},
+		{name: "export", prepared: true, rpc: true},
+		{name: "remove", prepared: true, rpc: true},
+		{name: "up", prepared: true, rpc: true},
+		{name: "down", prepared: true, rpc: true},
+		{name: "info", prepared: true, rpc: false},
+		{name: "remote", prepared: true, rpc: false},
+		{name: "update", prepared: true, rpc: true},
+		{name: "keys", rpc: false},
+		{name: "svc", rpc: false},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -108,21 +106,18 @@ func TestPreparedCommandResolverContract(t *testing.T) {
 			if !ok {
 				t.Fatalf("command %q is missing from the manifest", test.name)
 			}
-			resolved := resolveCommandPreparation(definition)
-			if resolved.Direct != test.direct {
-				t.Fatalf("direct=%v, want %v", resolved.Direct, test.direct)
+			behavior, err := resolveCoreCommand(definition)
+			if err != nil {
+				t.Fatal(err)
 			}
-			if !resolved.Direct {
-				if resolved.RPC {
-					t.Fatal("unsupported direct command became RPC-plannable")
-				}
-				return
+			if (behavior.prepare != nil) != test.prepared {
+				t.Fatalf("prepared=%v, want %v (reason=%q)", behavior.prepare != nil, test.prepared, behavior.nonRPCReason)
 			}
-			if resolved.Family != test.family {
-				t.Fatalf("family=%q, want %q", resolved.Family, test.family)
-			}
-			if resolved.RPC != test.rpc {
-				t.Fatalf("rpc=%v, want %v", resolved.RPC, test.rpc)
+			rpcEligible := definition.Visibility == command.VisibilityPublic &&
+				definition.Effect == command.EffectMutate && behavior.prepare != nil &&
+				behavior.nonRPCReason == ""
+			if rpcEligible != test.rpc {
+				t.Fatalf("rpc=%v, want %v", rpcEligible, test.rpc)
 			}
 		})
 	}
@@ -177,206 +172,6 @@ func TestPrepareCommandOwnsCanonicalStopPlan(t *testing.T) {
 		!prepared.Plan.Assessment.Changed || prepared.Plan.Confirmed {
 		t.Fatalf("prepared stop lost canonical plan inputs: %#v", prepared)
 	}
-}
-
-func TestPrepareCommandDirectAndRPCPlanInputsMatch(t *testing.T) {
-	tests := []struct {
-		name  string
-		setup func(*testing.T) (*CLI, prepareCommandRequest)
-	}{
-		{name: "stop --force", setup: prepareStopParityFixture},
-		{name: "remove --soft", setup: prepareRemoveParityFixture},
-		{name: "up --rebuild", setup: prepareUpParityFixture},
-		{name: "teardown --keep-data", setup: prepareTeardownParityFixture},
-		{name: "test-vms revoke --slot 1", setup: prepareTestVMParityFixture},
-		{name: "no-op init", setup: prepareInitParityFixture},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			program, request := test.setup(t)
-			request.Direct = true
-			direct, err := program.prepareCommand(context.Background(), request)
-			if err != nil {
-				t.Fatalf("prepare direct command: %v", err)
-			}
-			defer direct.Close()
-
-			request.Direct = false
-			rpc, err := program.prepareCommand(context.Background(), request)
-			if err != nil {
-				t.Fatalf("prepare RPC command: %v", err)
-			}
-			defer rpc.Close()
-
-			if !slices.Equal(direct.Arguments, rpc.Arguments) {
-				t.Fatalf("canonical arguments differ: direct=%v RPC=%v", direct.Arguments, rpc.Arguments)
-			}
-			if direct.Plan.Command != rpc.Plan.Command || direct.Plan.Target != rpc.Plan.Target ||
-				direct.Plan.Effect != rpc.Plan.Effect || direct.Plan.Confirmation != rpc.Plan.Confirmation ||
-				!slices.Equal(direct.Plan.Consequences, rpc.Plan.Consequences) ||
-				!reflect.DeepEqual(direct.Plan.Assessment, rpc.Plan.Assessment) ||
-				!reflect.DeepEqual(direct.Plan.ConfirmationRequest, rpc.Plan.ConfirmationRequest) {
-				t.Fatalf("plan inputs differ:\ndirect=%#v\nRPC=%#v", direct.Plan, rpc.Plan)
-			}
-		})
-	}
-}
-
-func preparedParityFixture(
-	t *testing.T,
-	name string,
-	arguments []string,
-	configure func(string, string, *[]string, *Options),
-) (*CLI, prepareCommandRequest) {
-	t.Helper()
-	root, environment, stateDirectory := nativeFixture(t)
-	options := Options{
-		RepositoryRoot: root,
-		Environment: append(environment,
-			"SUBYARD_OPERATION_ID=prepared-parity",
-		),
-		WorkingDir: root,
-		Clock:      testkit.NewManualClock(time.Unix(100, 0)),
-	}
-	if configure != nil {
-		configure(root, stateDirectory, &options.Environment, &options)
-	}
-	program, err := New(options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	loaded, err := program.loadContext("default")
-	if err != nil {
-		t.Fatal(err)
-	}
-	definition, ok := program.manifest.Lookup(name)
-	if !ok {
-		t.Fatalf("command %q is missing from the fixture manifest", name)
-	}
-	return program, prepareCommandRequest{
-		Loaded: loaded, Definition: definition, Arguments: arguments, ExplicitYard: true,
-	}
-}
-
-func prepareStopParityFixture(t *testing.T) (*CLI, prepareCommandRequest) {
-	return preparedParityFixture(t, "stop", []string{"--force"}, func(
-		_ string, _ string, _ *[]string, options *Options,
-	) {
-		incus := lifecycleIncus()
-		instance := incus.Instances["subyard/yard"]
-		instance.Status = "Running"
-		incus.Instances["subyard/yard"] = instance
-		options.Incus = incus
-	})
-}
-
-func prepareRemoveParityFixture(t *testing.T) (*CLI, prepareCommandRequest) {
-	return preparedParityFixture(t, "remove", []string{"--soft"}, func(
-		root string, stateDirectory string, _ *[]string, options *Options,
-	) {
-		projectPath := filepath.Join(root, "Demo")
-		if err := os.MkdirAll(projectPath, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		record := projectRemovalRecord(domain.ProjectSync)
-		record.HostPath = projectPath
-		record.SourceKey = state.SourceKey(projectPath)
-		store, err := state.NewFileStore(stateDirectory)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := store.Put(context.Background(), record); err != nil {
-			t.Fatal(err)
-		}
-		options.WorkingDir = projectPath
-		options.Incus = lifecycleIncus()
-	})
-}
-
-func prepareUpParityFixture(t *testing.T) (*CLI, prepareCommandRequest) {
-	return preparedParityFixture(t, "up", []string{"--rebuild"}, func(
-		root string, stateDirectory string, _ *[]string, options *Options,
-	) {
-		manifestPath := filepath.Join(root, "config", "commands.registry")
-		manifest, err := os.ReadFile(manifestPath)
-		if err != nil {
-			t.Fatal(err)
-		}
-		writeCLIFile(t, manifestPath, string(manifest)+
-			"up||@project-env||forward|mutate|dynamic|public|project_env|project-env-up|up [project]|up|--rebuild --yes --help|\n", 0o600)
-		projectPath := filepath.Join(root, "Demo")
-		if err := os.MkdirAll(projectPath, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		record := projectRemovalRecord(domain.ProjectSync)
-		record.HostPath = projectPath
-		record.SourceKey = state.SourceKey(projectPath)
-		record.Target = "fixture"
-		record.Profile = "fixture"
-		store, err := state.NewFileStore(stateDirectory)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := store.Put(context.Background(), record); err != nil {
-			t.Fatal(err)
-		}
-		profileDirectory := filepath.Join(root, "config", "profiles", "fixture")
-		if err := os.MkdirAll(profileDirectory, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		writeCLIFile(t, filepath.Join(profileDirectory, "profile.conf"),
-			"PROFILE_NAME=fixture\nPROJECT_ENV_BASE_IMAGE=debian:13\n", 0o600)
-		incus := lifecycleIncus()
-		instance := incus.Instances["subyard/yard"]
-		instance.Status = "Running"
-		incus.Instances["subyard/yard"] = instance
-		options.WorkingDir = projectPath
-		options.Incus = incus
-		options.ProjectData = &testVMStatusProbe{output: []byte("missing")}
-	})
-}
-
-func prepareTeardownParityFixture(t *testing.T) (*CLI, prepareCommandRequest) {
-	return preparedParityFixture(t, "teardown", []string{"--keep-data"}, func(
-		_ string, _ string, _ *[]string, options *Options,
-	) {
-		incus := lifecycleIncus()
-		incus.Reconcile.InstanceFound = true
-		options.Incus = incus
-	})
-}
-
-func prepareTestVMParityFixture(t *testing.T) (*CLI, prepareCommandRequest) {
-	return preparedParityFixture(t, "test-vms", []string{"revoke", "--slot", "1"}, func(
-		_ string, _ string, environment *[]string, options *Options,
-	) {
-		*environment = append(*environment, "NESTED_E2E_VMS=1")
-		incus := lifecycleIncus()
-		instance := incus.Instances["subyard/yard"]
-		instance.Status = "Running"
-		incus.Instances["subyard/yard"] = instance
-		options.Incus = incus
-		options.ProjectData = &testVMStatusProbe{output: []byte(
-			`{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":7,"lease_epoch":1,"state":"held"}]}}`,
-		)}
-	})
-}
-
-func prepareInitParityFixture(t *testing.T) (*CLI, prepareCommandRequest) {
-	return preparedParityFixture(t, "init", nil, func(
-		root string, _ string, _ *[]string, options *Options,
-	) {
-		configHome := filepath.Join(root, "state")
-		if err := os.MkdirAll(configHome, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		writeCLIFile(t, filepath.Join(configHome, "host-id"), "owner-fixture\n", 0o600)
-		platform := newInitPlatformFixture()
-		for stage := range platform.converged {
-			platform.converged[stage] = true
-		}
-		options.InitPlatform = platform
-	})
 }
 
 func TestPreparedCommandExecutesItsCapturedStopPlan(t *testing.T) {
@@ -474,7 +269,7 @@ func TestPreparedCommandClassifiesProjectCommitFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = prepared.Execute(context.Background(), orchestrator, io.Discard)
-	var commitErr *preparedCommandCommitError
+	var commitErr *commandCommitError
 	if !errors.As(err, &commitErr) || !strings.Contains(err.Error(), "invalid project ID") {
 		t.Fatalf("project commit error was not classified: %v", err)
 	}
@@ -532,15 +327,15 @@ func TestRPCHandlerCloseReleasesEveryPreparedCommand(t *testing.T) {
 	release := &releaseExecution{runtime: releaseruntime.New(releaseruntime.Config{})}
 	handler := &rpcHandler{plans: map[string]*preparedCommand{
 		"operation-rpc-one": {
-			CLI:     &CLI{},
-			Release: release,
+			CLI:           &CLI{},
+			closeResource: release.Close,
 			Project: &projectExecution{
 				Store:       store,
 				Reservation: reservation.Reservation,
 			},
 		},
 	}}
-	handler.closePreparedCommands()
+	handler.closePlans()
 	if len(handler.plans) != 0 {
 		t.Fatalf("closed handler retained %d plans", len(handler.plans))
 	}
@@ -567,25 +362,25 @@ func secureTempDirectory(t *testing.T) string {
 func TestPreparedCommandResolverRejectsUnknownHandler(t *testing.T) {
 	definition := command.Definition{
 		Name:       "future",
-		Handler:    "future-handler.sh",
+		Handler:    "@future",
 		Effect:     command.EffectMutate,
 		Visibility: command.VisibilityPublic,
 	}
-	resolved := resolveCommandPreparation(definition)
-	if resolved.Direct || resolved.Family != preparedCommandUnknown || resolved.RPC {
-		t.Fatalf("unknown handler resolved as %#v", resolved)
+	if _, err := resolveCoreCommand(definition); err == nil {
+		t.Fatal("unknown internal handler was accepted")
 	}
 }
 
 func TestPreparedCommandManifestCompletenessRejectsUnownedMutation(t *testing.T) {
 	manifest, err := command.Parse(strings.NewReader(
-		"future||future-handler.sh||local|mutate|dynamic|public|lifecycle|simple|future|future command||\n",
+		"future||@future||local|mutate|dynamic|public|lifecycle|simple|future|future command||\n",
 	))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := validatePreparedCommandManifest(manifest); err == nil ||
-		!strings.Contains(err.Error(), "future") {
+	definition := manifest.Commands()[0]
+	if _, err := resolveCoreCommand(definition); err == nil ||
+		!strings.Contains(err.Error(), "@future") {
 		t.Fatalf("unowned mutating handler passed validation: %v", err)
 	}
 }
@@ -595,7 +390,9 @@ func TestRepositoryPreparedCommandManifestIsComplete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := validatePreparedCommandManifest(program.manifest); err != nil {
-		t.Fatal(err)
+	for _, definition := range program.manifest.Commands() {
+		if _, err := resolveCoreCommand(definition); err != nil {
+			t.Fatalf("command %q: %v", definition.Name, err)
+		}
 	}
 }

@@ -44,6 +44,15 @@ func (adapter releaseAdapter) Run(ctx context.Context, request domain.AdapterReq
 	return domain.AdapterResult{Schema: shelladapter.ProtocolSchema, OperationID: request.OperationID, Status: "ok"}, "", nil
 }
 
+func (cli *CLI) runUpdate(ctx context.Context, loaded config.Loaded, definition command.Definition, arguments []string) int {
+	prepared, err := cli.prepareCommand(ctx, prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: arguments})
+	if err != nil {
+		return cli.reportPreparationError(definition, err)
+	}
+	defer prepared.Close()
+	return cli.runPreparedCommand(ctx, prepared, cli.env["ASSUME_YES"] == "1")
+}
+
 func (cli *CLI) prepareRelease(ctx context.Context, loaded config.Loaded, arguments []string) (*releaseExecution, error) {
 	releaseEnvironment := maps.Clone(loaded.Environment)
 	releaseEnvironment["SUBYARD_OPERATION_ID"] = cli.env["SUBYARD_OPERATION_ID"]
@@ -80,19 +89,6 @@ func (cli *CLI) releaseTransitionInheritedSettingIDs() []string {
 	}
 	sort.Strings(inheritedSettingIDs)
 	return inheritedSettingIDs
-}
-
-func (execution *releaseExecution) prepareAction(
-	orchestrator *application.Orchestrator,
-	loaded config.Loaded,
-	definition command.Definition,
-) (domain.OperationPlan, error) {
-	return orchestrator.PrepareAction(
-		loaded.Context, definition.Name, domain.RemotePolicy(definition.Remote),
-		execution.prepared.Action, domain.ActionDelta{
-			Changed: execution.prepared.Changed, Consequences: execution.prepared.Consequences,
-		},
-	)
 }
 
 func (cli *CLI) executeRelease(ctx context.Context, orchestrator *application.Orchestrator,

@@ -51,9 +51,10 @@ name|aliases|handler|arg0|remote|effect|confirmation|visibility|section|completi
 
 - `remote` is `local`, `forward`, or `deny`.
 - `effect` is conservatively `read` or `mutate`; a mixed command is `mutate`.
-- `confirmation` is `never`, `required`, or `dynamic`. Missing and unknown values fail closed.
-  `code`, `shell`, and `start` are explicit prompt-free launch/session actions; `--yes` only skips
-  an action whose resolved policy is `required`.
+- `confirmation` is a manifest marker: `never` or `dynamic`. Missing and unknown values fail closed.
+  Typed action assessment resolves the concrete policy to `never`, `prompt-default-yes`, or
+  `prompt-default-no`. Launch/session actions such as `code`, `shell`, and `start` do not prompt.
+  `--yes` supplies confirmation consent; it does not bypass preconditions, stale checks, or guards.
 - `handler` is a script under `scripts/`, or a reserved dispatcher adapter such as `@help`/`@rpc`.
 - `completion` names a provider consumed by both Bash and Zsh completion; `options` and `verbs`
   carry their shared token lists.
@@ -63,23 +64,27 @@ name|aliases|handler|arg0|remote|effect|confirmation|visibility|section|completi
 Profile resource commands use the separate `.res` interface below because profiles own those
 commands and mechanics.
 
-Core command metadata and executable behavior deliberately have different owners. The external
-manifest remains the source of aliases, visibility, routing, effects, help and completion. One Go
-resolver maps its reserved handler families to executable behavior, and one prepared command owns
-the canonical arguments, selected context, operation-specific state, plan, execution and cleanup:
+Core commands share one preparation and execution pipeline in `internal/cli/prepared_command.go`:
 
 ```text
-commands.registry → resolve behavior → prepare command → plan → confirm → execute
-                                            │                    │
-                                            ├─ direct CLI prompt ┤
-                                            └─ RPC single-use ID ┘
+CLI / operation.plan → manifest → resolveCoreCommand → prepareCommand
+                                                        ↓
+                                                preparedCommand
+                                                        ↓
+                         CLI prompt / operation.execute confirmation
+                                                        ↓
+                                    Execute → stale check → reserve → apply → commit
+                                                        ↓
+                                                      Close
 ```
 
-Direct CLI and RPC branch only at their public confirmation and transport boundaries. Startup
-validation rejects a new public mutating handler unless it is owned by this pipeline or has an
-explicit dedicated-transport exclusion. Interactive sessions, protected credential payloads and
-profile resources keep their purpose-built paths. Host and config commands also remain on their
-dedicated non-RPC handlers.
+The handler-family resolver binds preparation and physical leaves in one place. Startup rejects
+unknown internal handlers. A prepared command owns canonical arguments, resolved context, the
+unconfirmed operation plan and one execution closure capturing its typed state. Its idempotent
+cleanup releases an outstanding project reservation and any retained release handle. CLI and RPC
+share assessment, execution and successful project-state commit; CLI owns human previews and
+prompts, while RPC owns bounded session storage, events and protocol errors. Dedicated query,
+terminal, configuration and credential workflows retain explicit resolver classifications.
 
 ### RPC
 
@@ -96,12 +101,17 @@ revisions remain typed event data and cannot make the RPC revision move backward
 The switched surface exposes `command.list`, `context.get`, `operation.route`, `operation.plan`,
 `operation.execute`, `project.list`, `owner.inventory`, `yard.status`, `credential.list`, `credential.status`,
 `incus.events`, `system.snapshot`, `system.resync` and `system.ping`. `operation.plan` accepts every
-eligible public mutating core command selected by the same manifest-derived behavior resolver used by
-the direct CLI. Interactive terminal and protected credential-payload commands keep their dedicated
-transport rather than treating human stdin/stdout as a typed result. The server stores the exact
-prepared command, including its cleanup ownership, in a bounded single-use table; execution requires
-an explicit `confirmed=true` and emits correlated start/final events. The full
-snapshot contains one revision over context, public commands, project inventory, yard status and
+public mutating core command whose handler family supports preparation. Interactive terminal and
+protected credential-payload commands keep their dedicated transport rather than treating human
+stdin/stdout as a typed result. Its server-side plan is bounded and single-use; execution requires an
+explicit `confirmed=true` and emits correlated start/final events. The operation protocol does not
+yet expose a general plan digest or plan expiry; request deadlines are separate. Execute currently
+refuses a stored plan routed to a remote owner with `remote_owner_required`. The client must plan
+again in the owner's SSH stdio session and execute there; controller-side plans are not transferable.
+Command-specific stale checks and the release-transition authorization contract remain distinct
+from this session-level plan storage.
+
+The full snapshot contains one revision over context, public commands, project inventory, yard status and
 redacted credential metadata; `snapshot.ready` and Incus events use the same ordered event channel.
 Human CLI output is never parsed as a fallback API. Secret-like fields are rejected recursively from
 RPC parameters, Incus event metadata is allowlisted, and stdout contains frames only.

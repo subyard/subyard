@@ -34,19 +34,6 @@ func (cli *CLI) prepareRemoteExecution(ctx context.Context, loaded config.Loaded
 	return &prepared, err
 }
 
-func (cli *CLI) prepareRemoteOperation(
-	orchestrator *application.Orchestrator,
-	loaded config.Loaded,
-	prepared domain.RemotePrepared,
-) (domain.OperationPlan, error) {
-	action, delta, err := application.RemoteActionPlan(prepared)
-	if err != nil {
-		return domain.OperationPlan{}, err
-	}
-	policy := application.RemotePolicy(prepared)
-	return orchestrator.PrepareAction(loaded.Context, policy.Name, policy.RemotePolicy, action, delta)
-}
-
 func (cli *CLI) printRemoteResult(result domain.AdapterResult) {
 	if message, ok := result.Output["message"].(string); ok && message != "" {
 		fmt.Fprintln(cli.options.Stdout, message)

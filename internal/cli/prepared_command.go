@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
 	"github.com/Subyard/Subyard/internal/application"
@@ -18,39 +19,87 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 )
 
-type preparedCommandFamily string
+// coreCommandBehavior binds a handler family to its preparation and physical
+// leaves. User-facing metadata continues to come from the command manifest.
+type coreCommandBehavior struct {
+	prepare        func(*preparedCommand, context.Context, *initBootstrap) error
+	shellActions   func(string) map[string]map[string]shelladapter.Action
+	nonRPCReason   string
+	prepareExit    int
+	prepareRPCCode string
+}
 
-const (
-	preparedCommandUnknown            preparedCommandFamily = ""
-	preparedCommandInit               preparedCommandFamily = "init"
-	preparedCommandLifecycle          preparedCommandFamily = "lifecycle"
-	preparedCommandProvision          preparedCommandFamily = "provision"
-	preparedCommandTestVMs            preparedCommandFamily = "test-vms"
-	preparedCommandTeardown           preparedCommandFamily = "teardown"
-	preparedCommandProject            preparedCommandFamily = "project"
-	preparedCommandProjectEnvironment preparedCommandFamily = "project-environment"
-	preparedCommandRemote             preparedCommandFamily = "remote"
-	preparedCommandRelease            preparedCommandFamily = "release"
-)
+func resolveCoreCommand(definition command.Definition) (coreCommandBehavior, error) {
+	behavior := coreCommandBehavior{prepareExit: 2, prepareRPCCode: "invalid_params"}
+	switch definition.Handler {
+	case "@init":
+		behavior.prepare = (*preparedCommand).prepareInit
+		behavior.prepareExit, behavior.prepareRPCCode = 1, "plan_failed"
+	case "@lifecycle":
+		behavior.prepare = (*preparedCommand).prepareLifecycle
+		behavior.shellActions = lifecycleShellActions
+	case "@provision":
+		behavior.prepare = (*preparedCommand).prepareProvision
+		behavior.shellActions = func(root string) map[string]map[string]shelladapter.Action {
+			actions := lifecycleShellActions(root)
+			actions["provision"] = map[string]shelladapter.Action{
+				"profile":       {Path: filepath.Join(root, "scripts/provision-profile.sh"), Direct: true, Timeout: 45 * time.Minute},
+				"profile-check": {Path: filepath.Join(root, "scripts/provision-profile.sh"), Direct: true, Capture: true},
+			}
+			return actions
+		}
+	case "@test-vms":
+		behavior.prepare = (*preparedCommand).prepareTestVMs
+		behavior.shellActions = func(root string) map[string]map[string]shelladapter.Action {
+			path := filepath.Join(root, "scripts/e2e-lab/invoke.sh")
+			return map[string]map[string]shelladapter.Action{"test-vms": {
+				"up": {Path: path, Direct: true}, "status": {Path: path, Direct: true},
+				"down": {Path: path, Direct: true}, "revoke": {Path: path, Direct: true},
+				"recover": {Path: path, Direct: true},
+			}}
+		}
+	case "@teardown":
+		behavior.prepare = (*preparedCommand).prepareTeardown
+		behavior.shellActions = func(root string) map[string]map[string]shelladapter.Action {
+			return map[string]map[string]shelladapter.Action{"teardown": {
+				"apply": {Path: filepath.Join(root, "scripts/teardown-physical.sh"), Direct: true},
+			}}
+		}
+	case "@project", "@project-env":
+		behavior.prepare = (*preparedCommand).prepareProject
+	case "@remote":
+		behavior.prepare = (*preparedCommand).prepareRemote
+		behavior.prepareExit = 1
+	case "@update":
+		behavior.prepare = (*preparedCommand).prepareUpdate
+		behavior.prepareExit, behavior.prepareRPCCode = 1, "plan_failed"
+	case "@keys":
+		behavior.nonRPCReason = "protected credential transport"
+	case "@shell":
+		behavior.nonRPCReason = "interactive terminal session"
+	case "@config", "@host":
+		behavior.nonRPCReason = "dedicated configuration and registration workflow"
+	case "@resource":
+		behavior.nonRPCReason = "profile resource pipeline"
+	case "@check", "@security", "@status", "@space", "@info", "@yards", "@logs", "@usage", "@list", "@help":
+		behavior.nonRPCReason = "read-only query"
+	case "@rpc", "@authorize", "@state", "@project-state", "@migrate", "@release-transition":
+		behavior.nonRPCReason = "dedicated internal protocol"
+	default:
+		if !strings.HasPrefix(definition.Handler, "@") && definition.Handler != "" {
+			behavior.nonRPCReason = "legacy physical script dispatch"
+			break
+		}
+		return coreCommandBehavior{}, fmt.Errorf("unsupported core handler %q", definition.Handler)
+	}
+	return behavior, nil
+}
 
-type preparedCommand struct {
-	CLI        *CLI
-	Family     preparedCommandFamily
-	Plan       domain.OperationPlan
-	Definition command.Definition
-	Arguments  []string
-	Loaded     config.Loaded
-	Project    *projectExecution
-	Remote     *domain.RemotePrepared
-	Init       *initExecution
-	Lifecycle  *lifecycleExecution
-	Provision  *provisionExecution
-	TestVMs    *testVMExecution
-	Teardown   *teardownExecution
-	Release    *releaseExecution
-
-	closeOnce sync.Once
-	closeErr  error
+func lifecycleShellActions(root string) map[string]map[string]shelladapter.Action {
+	path := filepath.Join(root, "scripts", "lifecycle-guard.sh")
+	return map[string]map[string]shelladapter.Action{"lifecycle": {
+		"start": {Path: path, Direct: true}, "stop": {Path: path, Direct: true},
+	}}
 }
 
 type prepareCommandRequest struct {
@@ -59,67 +108,108 @@ type prepareCommandRequest struct {
 	Arguments    []string
 	ExplicitYard bool
 	ReadOnly     bool
-	Direct       bool
 	Bootstrap    *initBootstrap
+	// OnResolved lets the direct boundary audit canonical inputs before assessment.
+	OnResolved func(config.Loaded, []string)
 }
 
-type prepareCommandError struct {
-	err         error
-	directExit  int
-	rpcCode     string
-	directStage string
+type commandAssessment func(context.Context) (domain.ActionID, domain.ActionDelta, error)
+
+// A prepared command owns one execution closure and its captured typed state.
+// Project admission is shared lifecycle state, not a second execution variant.
+type preparedCommand struct {
+	CLI             *CLI
+	Definition      command.Definition
+	Arguments       []string
+	Loaded          config.Loaded
+	Plan            domain.OperationPlan
+	Project         *projectExecution
+	policy          domain.CommandPolicy
+	assess          commandAssessment
+	refresh         commandAssessment
+	execute         func(context.Context, *application.Orchestrator, io.Writer) (domain.AdapterResult, error)
+	closeResource   func() error
+	preview         func()
+	displayOnly     func()
+	printResult     func(domain.AdapterResult)
+	remoteArguments func([]string) ([]string, error)
+	executeNoOp     bool
+	closed          bool
+	executed        bool
+	closeOnce       sync.Once
+	closeErr        error
 }
 
-type preparedCommandCommitError struct{ err error }
-
-func (err *preparedCommandCommitError) Error() string { return err.err.Error() }
-func (err *preparedCommandCommitError) Unwrap() error { return err.err }
-
-func (err *prepareCommandError) Error() string { return err.err.Error() }
-func (err *prepareCommandError) Unwrap() error { return err.err }
-
-func commandPreparationError(err error, directExit int, rpcCode string, directStage ...string) error {
-	if err == nil {
-		return nil
-	}
-	stage := ""
-	if len(directStage) != 0 {
-		stage = directStage[0]
-	}
-	return &prepareCommandError{
-		err: err, directExit: directExit, rpcCode: rpcCode, directStage: stage,
-	}
+type commandPreparationError struct {
+	phase string
+	err   error
 }
 
-func preparedCommandDirectExit(err error) int {
-	var preparation *prepareCommandError
-	if errors.As(err, &preparation) && preparation.directExit != 0 {
-		return preparation.directExit
-	}
-	return 1
-}
+func (failure *commandPreparationError) Error() string { return failure.err.Error() }
+func (failure *commandPreparationError) Unwrap() error { return failure.err }
 
-func preparedCommandDirectMessage(name string, err error) string {
-	var preparation *prepareCommandError
-	if errors.As(err, &preparation) {
-		switch preparation.directStage {
-		case "action":
-			return fmt.Sprintf("prepare %s action: %v", name, preparation.err)
-		case "plan":
-			return fmt.Sprintf("plan %s: %v", name, preparation.err)
-		case "command":
-			return fmt.Sprintf("%s: %v", name, preparation.err)
+type commandCommitError struct{ err error }
+
+func (failure *commandCommitError) Error() string { return failure.err.Error() }
+func (failure *commandCommitError) Unwrap() error { return failure.err }
+
+func (cli *CLI) prepareCommand(ctx context.Context, request prepareCommandRequest) (_ *preparedCommand, err error) {
+	behavior, err := resolveCoreCommand(request.Definition)
+	if err != nil {
+		return nil, err
+	}
+	if behavior.prepare == nil {
+		return nil, fmt.Errorf("command has no prepared execution: %s", behavior.nonRPCReason)
+	}
+	operationID := cli.ensureOperationID()
+	prepared := &preparedCommand{CLI: cli, Definition: request.Definition,
+		Arguments: slices.Clone(request.Arguments), Loaded: request.Loaded}
+	defer func() {
+		if err != nil {
+			_ = prepared.Close()
+		}
+	}()
+	prepared.Project, err = cli.prepareProjectExecution(ctx, prepared.Loaded, prepared.Definition,
+		prepared.Arguments, request.ExplicitYard, request.ReadOnly)
+	if err != nil {
+		return nil, &commandPreparationError{phase: "project", err: err}
+	}
+	if prepared.Project != nil {
+		prepared.Loaded = prepared.Project.Loaded
+		prepared.Arguments = slices.Clone(prepared.Project.Arguments)
+		for name, value := range prepared.Project.Environment {
+			cli.env[name] = value
 		}
 	}
-	return fmt.Sprintf("prepare %s: %v", name, err)
-}
-
-func preparedCommandRPCCode(err error, fallback string) string {
-	var preparation *prepareCommandError
-	if errors.As(err, &preparation) && preparation.rpcCode != "" {
-		return preparation.rpcCode
+	if request.OnResolved != nil {
+		request.OnResolved(prepared.Loaded, slices.Clone(prepared.Arguments))
 	}
-	return fallback
+	prepared.policy = commandPolicy(prepared.Definition, prepared.Loaded.Context, prepared.Arguments, prepared.Project)
+	if err = behavior.prepare(prepared, ctx, request.Bootstrap); err != nil {
+		return nil, &commandPreparationError{phase: "prepare", err: err}
+	}
+	if prepared.displayOnly != nil {
+		return prepared, nil
+	}
+	if prepared.execute == nil {
+		return nil, errors.New("prepared command has no execution")
+	}
+	orchestrator := cli.operationOrchestrator(operationID, prepared.Loaded, nil, nil)
+	if prepared.assess != nil {
+		action, delta, assessErr := prepared.assess(ctx)
+		if assessErr != nil {
+			return nil, &commandPreparationError{phase: "assessment", err: assessErr}
+		}
+		prepared.Plan, err = orchestrator.PrepareAction(prepared.Loaded.Context,
+			prepared.policy.Name, prepared.policy.RemotePolicy, action, delta)
+	} else {
+		prepared.Plan, err = orchestrator.Prepare(prepared.Loaded.Context,
+			resolveCommandConfirmation(prepared.Definition, prepared.policy))
+	}
+	if err != nil {
+		return nil, &commandPreparationError{phase: "plan", err: err}
+	}
+	return prepared, nil
 }
 
 func (prepared *preparedCommand) Close() error {
@@ -127,505 +217,278 @@ func (prepared *preparedCommand) Close() error {
 		return nil
 	}
 	prepared.closeOnce.Do(func() {
+		prepared.closed = true
 		if prepared.CLI != nil {
 			prepared.CLI.abortProjectExecution(context.Background(), prepared.Project)
 		}
-		if prepared.Release != nil {
-			prepared.closeErr = prepared.Release.Close()
+		if prepared.closeResource != nil {
+			prepared.closeErr = prepared.closeResource()
 		}
 	})
 	return prepared.closeErr
 }
 
-func (prepared *preparedCommand) Execute(
-	ctx context.Context,
-	orchestrator *application.Orchestrator,
-	diagnostics io.Writer,
-) (domain.AdapterResult, error) {
-	if prepared == nil || prepared.CLI == nil || orchestrator == nil || prepared.Plan.OperationID == "" {
-		return domain.AdapterResult{}, errors.New("prepared command is incomplete")
+func (prepared *preparedCommand) Execute(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (domain.AdapterResult, error) {
+	if prepared.closed || prepared.executed || prepared.execute == nil {
+		return domain.AdapterResult{}, errors.New("prepared command is not executable")
 	}
-	var (
-		result domain.AdapterResult
-		err    error
-	)
-	if prepared.Release != nil {
-		result, err = prepared.CLI.executeRelease(
-			ctx, orchestrator, prepared.Plan, prepared.Release,
-		)
-	} else {
-		result, err = prepared.executeAdapter(ctx, orchestrator, diagnostics)
+	if !prepared.Plan.Confirmed {
+		return domain.AdapterResult{}, domain.ErrConfirmationRequired
 	}
-	if err != nil || result.Status != "ok" || prepared.Project == nil || operationPlanNoOp(prepared.Plan) {
-		return result, err
+	prepared.executed = true
+	noOp := func() (domain.AdapterResult, error) {
+		return domain.AdapterResult{Schema: shelladapter.ProtocolSchema, OperationID: prepared.Plan.OperationID, Status: "ok"}, nil
 	}
-	if err := prepared.CLI.commitProjectExecution(ctx, prepared.Project); err != nil {
-		return result, &preparedCommandCommitError{err: err}
+	if !prepared.executeNoOp && operationPlanNoOp(prepared.Plan) {
+		return noOp()
 	}
-	return result, nil
-}
-
-func (prepared *preparedCommand) executeAdapter(
-	ctx context.Context,
-	orchestrator *application.Orchestrator,
-	diagnostics io.Writer,
-) (domain.AdapterResult, error) {
-	plan := prepared.Plan
-	if operationPlanNoOp(plan) {
-		return domain.AdapterResult{
-			Schema: shelladapter.ProtocolSchema, OperationID: plan.OperationID, Status: "ok",
-		}, nil
-	}
-	if plan.Assessment != nil && prepared.Remote == nil && prepared.TestVMs == nil &&
-		(prepared.Project != nil || prepared.Init != nil || prepared.Lifecycle != nil ||
-			prepared.Provision != nil || prepared.Teardown != nil) {
-		if prepared.Init != nil {
-			if err := prepared.Init.refreshAssessment(ctx); err != nil {
-				return domain.AdapterResult{}, err
-			}
-		}
-		action, delta, typed, err := prepared.CLI.assessStructuredAction(
-			ctx, prepared.Loaded, prepared.Definition, prepared.Project, prepared.Init,
-			prepared.Lifecycle, prepared.Provision, prepared.Teardown,
-		)
+	if prepared.Plan.Assessment != nil && prepared.refresh != nil {
+		action, delta, err := prepared.refresh(ctx)
 		if err != nil {
 			return domain.AdapterResult{}, err
 		}
-		if !typed || action != plan.Assessment.Action {
-			return domain.AdapterResult{}, fmt.Errorf(
-				"%w: structured action changed after confirmation", domain.ErrPlanStale,
-			)
+		if action != prepared.Plan.Assessment.Action {
+			return domain.AdapterResult{}, fmt.Errorf("%w: structured action changed after confirmation", domain.ErrPlanStale)
 		}
 		if !delta.Changed {
-			return domain.AdapterResult{
-				Schema: shelladapter.ProtocolSchema, OperationID: plan.OperationID, Status: "ok",
-			}, nil
+			return prepared.commitResult(ctx, noOp)
 		}
-		if !slices.Equal(delta.Consequences, plan.Assessment.Consequences) {
-			return domain.AdapterResult{}, fmt.Errorf(
-				"%w: action consequences changed after confirmation", domain.ErrPlanStale,
-			)
+		if !slices.Equal(delta.Consequences, prepared.Plan.Assessment.Consequences) {
+			return domain.AdapterResult{}, fmt.Errorf("%w: action consequences changed after confirmation", domain.ErrPlanStale)
 		}
 	}
 	if err := prepared.CLI.reserveProjectExecution(ctx, prepared.Project); err != nil {
 		return domain.AdapterResult{}, err
 	}
-	if prepared.Remote != nil {
-		orchestrator.Runner = application.RemoteRunner{
-			Control:  prepared.CLI.remoteService(prepared.Loaded).Control,
-			Prepared: *prepared.Remote,
-		}
-		request := domain.AdapterRequest{
-			Schema: shelladapter.ProtocolSchema, OperationID: plan.OperationID,
-			Adapter: "remote", Action: string(prepared.Remote.Action),
-		}
-		result, _, err := orchestrator.RunAdapter(ctx, plan, request, nil)
-		return result, err
-	}
-	if prepared.Init != nil {
-		if prepared.CLI.options.InitPlatform == nil && prepared.Init.mode != initConfigs {
-			if err := prepared.CLI.prepareSudoPrivileges(
-				ctx, diagnostics, prepared.CLI.effectiveUID(), prepared.Definition.Name,
-			); err != nil {
-				return domain.AdapterResult{}, err
-			}
-			prepared.Init.platform = prepared.CLI.initPlatform(
-				prepared.Init.loaded, prepared.Init.powerYards,
-			)
-		}
-		orchestrator.Runner = initAdapter{
-			execution: prepared.Init, cli: prepared.CLI, output: diagnostics,
-		}
-		request := domain.AdapterRequest{
-			Schema: shelladapter.ProtocolSchema, OperationID: plan.OperationID,
-			Adapter: "init", Action: "reconcile",
-		}
-		result, _, err := orchestrator.RunAdapter(ctx, plan, request, nil)
-		return result, err
-	}
-	if prepared.Lifecycle != nil {
-		return prepared.CLI.executeLifecycle(
-			ctx, orchestrator, prepared.Loaded.Context, plan, prepared.Lifecycle, diagnostics,
-		)
-	}
-	if prepared.Provision != nil {
-		return prepared.CLI.executeProvision(
-			ctx, orchestrator, prepared.Loaded, plan, prepared.Provision, diagnostics,
-		)
-	}
-	if prepared.TestVMs != nil {
-		return prepared.CLI.executeTestVMs(
-			ctx, orchestrator, prepared.Loaded, plan, prepared.TestVMs, diagnostics,
-		)
-	}
-	if prepared.Teardown != nil {
-		return prepared.CLI.executeTeardown(
-			ctx, orchestrator, prepared.Loaded, plan, prepared.Teardown, diagnostics,
-		)
-	}
-	if prepared.Project != nil && prepared.Family == preparedCommandProject {
-		incusPort, _ := prepared.CLI.statusPorts()
-		orchestrator.Runner = application.ProjectActionRunner{
-			Data: prepared.CLI.projectDataPlane(), Devices: prepared.CLI.projectDeviceManager(),
-			Archive: prepared.CLI.projectArchiver(), Exports: prepared.CLI.projectExportStore(prepared.Loaded),
-			Instances: incusPort, VSCode: prepared.CLI.projectVSCode(),
-			Extensions:         strings.Fields(prepared.CLI.env["CODE_RECOMMENDED_EXTENSIONS"]),
-			WorkspaceDirectory: filepath.Join(prepared.Loaded.Context.Paths.ConfigHome, "workspaces"),
-			Yard:               prepared.Loaded.Context,
-			Project:            prepared.Project.Record,
-			YardIdentity:       prepared.Project.YardIdentity,
-			SoftRemove:         prepared.Project.Environment["SUBYARD_PROJECT_REMOVE_SOFT"] == "1",
-		}
-		request := domain.AdapterRequest{
-			Schema: shelladapter.ProtocolSchema, OperationID: plan.OperationID,
-			Adapter: "project", Action: prepared.Definition.Name,
-		}
-		result, stderr, err := orchestrator.RunAdapter(ctx, plan, request, nil)
-		writeAdapterDiagnostics(diagnostics, stderr)
-		return result, err
-	}
-	if prepared.Project != nil && prepared.Family == preparedCommandProjectEnvironment {
-		var protected io.ReadCloser
-		if prepared.Project.SecretPath != "" {
-			file, err := os.Open(prepared.Project.SecretPath)
-			if err != nil {
-				return domain.AdapterResult{}, err
-			}
-			protected = file
-			defer protected.Close()
-		}
-		orchestrator.Runner = application.ProjectEnvironmentRunner{
-			Data: prepared.CLI.projectDataPlane(), Yard: prepared.Loaded.Context,
-			Project: prepared.Project.Record, Profile: prepared.Project.Profile,
-			HostLinks: prepared.Project.HostLinks,
-			Rebuild:   prepared.Project.Environment["SUBYARD_PROJECT_REBUILD"] == "1",
-			HasSecret: prepared.Project.SecretPath != "",
-		}
-		request := domain.AdapterRequest{
-			Schema: shelladapter.ProtocolSchema, OperationID: plan.OperationID,
-			Adapter: "project-env", Action: prepared.Definition.Name,
-		}
-		result, stderr, err := orchestrator.RunAdapter(ctx, plan, request, protected)
-		writeAdapterDiagnostics(diagnostics, stderr)
-		return result, err
-	}
-	handlerArguments := append([]string(nil), prepared.Arguments...)
-	if prepared.Definition.Arg0 != "" {
-		handlerArguments = append([]string{prepared.Definition.Arg0}, handlerArguments...)
-	}
-	contextValues := structuredCommandContext(prepared.Loaded)
-	if structuredCommandNeedsSudo(prepared.Definition.Name) {
-		if prepared.CLI.options.AdapterRunner == nil {
-			if err := prepared.CLI.prepareSudoPrivileges(
-				ctx, diagnostics, prepared.CLI.effectiveUID(), prepared.Definition.Name,
-			); err != nil {
-				return domain.AdapterResult{}, err
-			}
-		}
-		if prepared.CLI.env["SUBYARD_SUDO_PREAUTHORIZED"] == "1" {
-			contextValues["SUBYARD_SUDO_PREAUTHORIZED"] = "1"
+	return prepared.commitResult(ctx, func() (domain.AdapterResult, error) { return prepared.execute(ctx, orchestrator, diagnostics) })
+}
+
+func (prepared *preparedCommand) commitResult(ctx context.Context, execute func() (domain.AdapterResult, error)) (domain.AdapterResult, error) {
+	result, err := execute()
+	if err == nil && result.Status == "ok" && prepared.Project != nil && !operationPlanNoOp(prepared.Plan) {
+		if commitErr := prepared.CLI.commitProjectExecution(ctx, prepared.Project); commitErr != nil {
+			return result, &commandCommitError{err: commitErr}
 		}
 	}
-	if prepared.Project != nil {
-		for key, value := range prepared.Project.Environment {
-			contextValues[key] = value
-		}
-	}
-	request := domain.AdapterRequest{
-		Schema: shelladapter.ProtocolSchema, OperationID: plan.OperationID,
-		Adapter: "command", Action: prepared.Definition.Name,
-		Arguments: handlerArguments, Context: contextValues,
-	}
-	result, stderr, err := orchestrator.RunAdapter(ctx, plan, request, nil)
-	writeAdapterDiagnostics(diagnostics, stderr)
 	return result, err
 }
 
-func (prepared *preparedCommand) runDirect(ctx context.Context, assumeYes bool) int {
-	for _, argument := range prepared.Arguments {
-		if argument == "-y" || argument == "--yes" {
-			assumeYes = true
+func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *initBootstrap) error {
+	if prepared.Loaded.Context.AccessKind == domain.AccessRemote {
+		prepared.execute = func(context.Context, *application.Orchestrator, io.Writer) (domain.AdapterResult, error) {
+			return domain.AdapterResult{}, errors.New("init requires the owner host")
 		}
+		return nil
 	}
-	if prepared.Init != nil {
-		prepared.CLI.printInitPlan(prepared.Init)
-	}
-	if prepared.Provision != nil && prepared.Provision.list {
-		prepared.Provision.printList(prepared.CLI.options.Stdout)
-		return 0
-	}
-	orchestrator := prepared.CLI.operationOrchestrator(
-		prepared.Plan.OperationID, prepared.Loaded, nil, &prepared.Definition,
-	)
-	plan, err := orchestrator.Confirm(ctx, prepared.Plan, assumeYes)
+	cli := prepared.CLI
+	execution, err := cli.prepareInitExecution(ctx, prepared.Loaded, prepared.Arguments, bootstrap)
 	if err != nil {
-		if errors.Is(err, application.ErrDeclined) {
-			prepared.CLI.errorf("operation declined")
-		} else {
-			prepared.CLI.errorf("plan %s: %v", prepared.Definition.Name, err)
+		return err
+	}
+	prepared.policy.Consequences = execution.consequences()
+	prepared.assess = func(context.Context) (domain.ActionID, domain.ActionDelta, error) { return execution.actionPlan() }
+	prepared.refresh = func(ctx context.Context) (domain.ActionID, domain.ActionDelta, error) {
+		if err := execution.refreshAssessment(ctx); err != nil {
+			return "", domain.ActionDelta{}, err
 		}
-		return 1
+		return execution.actionPlan()
 	}
-	prepared.Plan = plan
-	if operationPlanNoOp(plan) && prepared.Init != nil && prepared.Init.mode == initReconcile {
-		fmt.Fprintln(prepared.CLI.options.Stdout, "  [ ok ] Everything is already set up")
+	prepared.preview = func() {
+		cli.printInitPlan(execution)
+		if operationPlanNoOp(prepared.Plan) && execution.mode == initReconcile {
+			fmt.Fprintln(cli.options.Stdout, "  [ ok ] Everything is already set up")
+		}
 	}
-	if plan.Target == domain.TargetRemoteOwner {
-		remoteArguments := append([]string(nil), prepared.Arguments...)
-		if prepared.TestVMs != nil {
-			remoteArguments, err = prepared.TestVMs.remoteArguments(prepared.Arguments)
-			if err != nil {
-				prepared.CLI.errorf("prepare remote test-vms: %v", err)
-				return 1
+	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (domain.AdapterResult, error) {
+		if cli.options.InitPlatform == nil && execution.mode != initConfigs {
+			if err := cli.prepareSudoPrivileges(ctx, diagnostics, cli.effectiveUID(), prepared.Definition.Name); err != nil {
+				return domain.AdapterResult{}, err
 			}
+			execution.platform = cli.initPlatform(execution.loaded, execution.powerYards)
 		}
-		hasYes := false
-		for _, argument := range remoteArguments {
-			hasYes = hasYes || argument == "-y" || argument == "--yes"
-		}
-		if !hasYes {
-			remoteArguments = append([]string{"--yes"}, remoteArguments...)
-		}
-		return prepared.CLI.forwardRemote(
-			ctx, prepared.Loaded.Context, prepared.Definition.Name, remoteArguments,
-		)
-	}
-	result, err := prepared.Execute(ctx, orchestrator, prepared.CLI.options.Stdout)
-	if err != nil {
-		var commitErr *preparedCommandCommitError
-		if errors.As(err, &commitErr) {
-			prepared.CLI.errorf("commit %s: %v", prepared.Definition.Name, commitErr.err)
-		} else {
-			prepared.CLI.errorf("%s: %v", prepared.Definition.Name, err)
-		}
-		return 1
-	}
-	if result.Status != "ok" {
-		prepared.CLI.errorf(
-			"%s adapter returned %s (%s)",
-			prepared.Definition.Name, result.Status, result.ErrorCode,
-		)
-		return 1
-	}
-	if prepared.Remote != nil {
-		prepared.CLI.printRemoteResult(result)
-	}
-	return 0
-}
-
-type commandPreparation struct {
-	Family       preparedCommandFamily
-	Direct       bool
-	RPC          bool
-	RPCExclusion string
-}
-
-func resolveCommandPreparation(definition command.Definition) commandPreparation {
-	resolution := commandPreparation{}
-	switch definition.Handler {
-	case "@init":
-		resolution.Family, resolution.Direct = preparedCommandInit, true
-	case "@lifecycle":
-		resolution.Family, resolution.Direct = preparedCommandLifecycle, true
-	case "@provision":
-		resolution.Family, resolution.Direct = preparedCommandProvision, true
-	case "@test-vms":
-		resolution.Family, resolution.Direct = preparedCommandTestVMs, true
-	case "@teardown":
-		resolution.Family, resolution.Direct = preparedCommandTeardown, true
-	case "@project":
-		resolution.Family, resolution.Direct = preparedCommandProject, true
-	case "@project-env":
-		resolution.Family, resolution.Direct = preparedCommandProjectEnvironment, true
-	case "@remote":
-		resolution.Family, resolution.Direct = preparedCommandRemote, true
-	case "@update":
-		resolution.Family, resolution.Direct = preparedCommandRelease, true
-	case "@keys":
-		resolution.RPCExclusion = "protected-payload"
-	case "@shell":
-		resolution.RPCExclusion = "interactive-session"
-	case "@host", "@config":
-		resolution.RPCExclusion = "dedicated-handler"
-	}
-	if !resolution.Direct {
-		return resolution
-	}
-	if definition.Visibility != command.VisibilityPublic {
-		resolution.RPCExclusion = "not-public"
-		return resolution
-	}
-	if definition.Effect != command.EffectMutate {
-		resolution.RPCExclusion = "not-mutating"
-		return resolution
-	}
-	resolution.RPC = true
-	return resolution
-}
-
-func validatePreparedCommandManifest(manifest command.Manifest) error {
-	for _, definition := range manifest.Commands() {
-		if definition.Visibility != command.VisibilityPublic || definition.Effect != command.EffectMutate {
-			continue
-		}
-		resolution := resolveCommandPreparation(definition)
-		if resolution.RPC || resolution.RPCExclusion != "" {
-			continue
-		}
-		return fmt.Errorf(
-			"public mutating command %q has no prepared-command behavior or RPC exclusion",
-			definition.Name,
-		)
+		orchestrator.Runner = initAdapter{execution: execution, cli: cli, output: diagnostics}
+		result, _, err := orchestrator.RunAdapter(ctx, prepared.Plan, domain.AdapterRequest{
+			Schema: shelladapter.ProtocolSchema, OperationID: prepared.Plan.OperationID, Adapter: "init", Action: "reconcile",
+		}, nil)
+		return result, err
 	}
 	return nil
 }
 
-func (cli *CLI) prepareCommand(
-	ctx context.Context,
-	request prepareCommandRequest,
-) (prepared *preparedCommand, err error) {
-	resolution := resolveCommandPreparation(request.Definition)
-	if !resolution.Direct {
-		return nil, fmt.Errorf("command %q does not support prepared execution", request.Definition.Name)
-	}
-	family := resolution.Family
-	operationCLI := cli.rpcOperation(cli.ensureOperationID())
-	prepared = &preparedCommand{
-		CLI:        operationCLI,
-		Family:     family,
-		Definition: request.Definition,
-		Arguments:  append([]string(nil), request.Arguments...),
-		Loaded:     request.Loaded,
-	}
-	owned := prepared
-	defer func() {
-		if err != nil {
-			_ = owned.Close()
-		}
-	}()
-
-	prepared.Project, err = operationCLI.prepareProjectExecution(
-		ctx, prepared.Loaded, prepared.Definition, prepared.Arguments,
-		request.ExplicitYard, request.ReadOnly,
-	)
+func (prepared *preparedCommand) prepareLifecycle(_ context.Context, _ *initBootstrap) error {
+	execution, err := prepareLifecycleExecution(prepared.Definition, prepared.Arguments)
 	if err != nil {
-		return nil, commandPreparationError(err, 1, "invalid_params")
+		return err
 	}
-	if prepared.Project != nil {
-		prepared.Loaded = prepared.Project.Loaded
-		prepared.Arguments = append([]string(nil), prepared.Project.Arguments...)
-		for key, value := range prepared.Project.Environment {
-			operationCLI.env[key] = value
+	prepared.policy = execution.policy(prepared.Definition, prepared.Loaded.Context)
+	if execution.action == "stop" {
+		prepared.assess = func(ctx context.Context) (domain.ActionID, domain.ActionDelta, error) {
+			if err := prepared.CLI.observeLifecycleExecution(ctx, prepared.Loaded.Context, execution); err != nil {
+				return "", domain.ActionDelta{}, err
+			}
+			return execution.actionPlan(prepared.Definition, prepared.Loaded.Context)
 		}
+		prepared.refresh = prepared.assess
 	}
+	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (domain.AdapterResult, error) {
+		return prepared.CLI.executeLifecycle(ctx, orchestrator, prepared.Loaded.Context, prepared.Plan, execution, diagnostics)
+	}
+	return nil
+}
 
-	switch family {
-	case preparedCommandInit:
-		if prepared.Loaded.Context.AccessKind != domain.AccessRemote {
-			prepared.Init, err = operationCLI.prepareInitExecution(
-				ctx, prepared.Loaded, prepared.Arguments, request.Bootstrap,
-			)
-		}
-	case preparedCommandLifecycle:
-		prepared.Lifecycle, err = prepareLifecycleExecution(prepared.Definition, prepared.Arguments)
-	case preparedCommandProvision:
-		prepared.Provision, err = operationCLI.prepareProvisionExecution(
-			prepared.Loaded, prepared.Arguments, prepared.Project,
-		)
-	case preparedCommandTestVMs:
-		prepared.TestVMs, err = operationCLI.prepareTestVMExecution(
-			ctx, prepared.Loaded, prepared.Arguments,
-		)
-	case preparedCommandTeardown:
-		prepared.Teardown, err = prepareTeardownExecution(prepared.Arguments)
-	case preparedCommandRemote:
-		prepared.Remote, err = operationCLI.prepareRemoteExecution(
-			ctx, prepared.Loaded, prepared.Arguments,
-		)
-	case preparedCommandRelease:
-		prepared.Release, err = operationCLI.prepareRelease(
-			ctx, prepared.Loaded, prepared.Arguments,
-		)
-	case preparedCommandProject, preparedCommandProjectEnvironment:
-	}
+func (prepared *preparedCommand) prepareProvision(_ context.Context, _ *initBootstrap) error {
+	execution, err := prepared.CLI.prepareProvisionExecution(prepared.Loaded, prepared.Arguments, prepared.Project)
 	if err != nil {
-		directExit, rpcCode := 1, "plan_failed"
-		switch family {
-		case preparedCommandLifecycle, preparedCommandProvision, preparedCommandTestVMs,
-			preparedCommandTeardown:
-			directExit, rpcCode = 2, "invalid_params"
-		}
-		if family == preparedCommandTestVMs && errors.Is(err, domain.ErrPlanStale) {
-			directExit = 1
-		}
-		if family == preparedCommandRemote {
-			rpcCode = "invalid_params"
-		}
-		directStage := ""
-		if family == preparedCommandRelease {
-			directStage = "command"
-		}
-		return nil, commandPreparationError(err, directExit, rpcCode, directStage)
+		return err
 	}
-	if prepared.Provision != nil && prepared.Provision.list {
-		if request.Direct {
-			return prepared, nil
-		}
-		return nil, commandPreparationError(
-			errors.New("provision execution is required"), 2, "plan_failed",
-		)
+	if execution.list {
+		prepared.displayOnly = func() { execution.printList(prepared.CLI.options.Stdout) }
+		return nil
 	}
+	prepared.policy = execution.policy(prepared.Definition, prepared.Loaded.Context)
+	prepared.assess = func(ctx context.Context) (domain.ActionID, domain.ActionDelta, error) {
+		if err := prepared.CLI.observeProvisionExecution(ctx, prepared.Loaded, prepared.Definition, execution); err != nil {
+			return "", domain.ActionDelta{}, err
+		}
+		return execution.actionPlan(prepared.Definition, prepared.Loaded.Context)
+	}
+	prepared.refresh = prepared.assess
+	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (domain.AdapterResult, error) {
+		return prepared.CLI.executeProvision(ctx, orchestrator, prepared.Loaded, prepared.Plan, execution, diagnostics)
+	}
+	return nil
+}
 
-	policy := commandPolicy(
-		prepared.Definition, prepared.Loaded.Context, prepared.Arguments,
-		prepared.Project, prepared.Remote,
-	)
-	if prepared.Init != nil {
-		policy.Consequences = prepared.Init.consequences()
-	}
-	if prepared.Lifecycle != nil {
-		policy = prepared.Lifecycle.policy(prepared.Definition, prepared.Loaded.Context)
-	}
-	if prepared.Provision != nil {
-		policy = prepared.Provision.policy(prepared.Definition, prepared.Loaded.Context)
-	}
-	if prepared.Teardown != nil {
-		policy = prepared.Teardown.policy(prepared.Definition, prepared.Loaded.Context)
-	}
-	action, delta, typedAction, actionErr := operationCLI.assessStructuredAction(
-		ctx, prepared.Loaded, prepared.Definition, prepared.Project, prepared.Init,
-		prepared.Lifecycle, prepared.Provision, prepared.Teardown,
-	)
-	if actionErr != nil {
-		return nil, commandPreparationError(actionErr, 1, "plan_failed", "action")
-	}
-	orchestrator := operationCLI.operationOrchestrator(
-		operationCLI.env["SUBYARD_OPERATION_ID"], prepared.Loaded, nil, &prepared.Definition,
-	)
-	switch {
-	case prepared.Remote != nil:
-		prepared.Plan, err = operationCLI.prepareRemoteOperation(
-			orchestrator, prepared.Loaded, *prepared.Remote,
-		)
-	case prepared.Release != nil:
-		prepared.Plan, err = prepared.Release.prepareAction(
-			orchestrator, prepared.Loaded, prepared.Definition,
-		)
-	case prepared.TestVMs != nil:
-		prepared.Plan, err = prepared.TestVMs.prepareAction(
-			orchestrator, prepared.Loaded, prepared.Definition,
-		)
-	case typedAction:
-		prepared.Plan, err = orchestrator.PrepareAction(
-			prepared.Loaded.Context, prepared.Definition.Name,
-			domain.RemotePolicy(prepared.Definition.Remote), action, delta,
-		)
-	default:
-		policy = resolveCommandConfirmation(prepared.Definition, policy)
-		prepared.Plan, err = orchestrator.Prepare(prepared.Loaded.Context, policy)
-	}
+func (prepared *preparedCommand) prepareTestVMs(ctx context.Context, _ *initBootstrap) error {
+	execution, err := prepared.CLI.prepareTestVMExecution(ctx, prepared.Loaded, prepared.Arguments)
 	if err != nil {
-		return nil, commandPreparationError(err, 1, "plan_failed", "plan")
+		return err
 	}
-	return prepared, nil
+	prepared.assess = func(context.Context) (domain.ActionID, domain.ActionDelta, error) { return execution.actionPlan() }
+	prepared.remoteArguments = execution.remoteArguments
+	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (domain.AdapterResult, error) {
+		return prepared.CLI.executeTestVMs(ctx, orchestrator, prepared.Loaded, prepared.Plan, execution, diagnostics)
+	}
+	return nil
+}
+
+func (prepared *preparedCommand) prepareTeardown(_ context.Context, _ *initBootstrap) error {
+	execution, err := prepareTeardownExecution(prepared.Arguments)
+	if err != nil {
+		return err
+	}
+	prepared.policy = execution.policy(prepared.Definition, prepared.Loaded.Context)
+	prepared.assess = func(ctx context.Context) (domain.ActionID, domain.ActionDelta, error) {
+		if err := prepared.CLI.observeTeardownExecution(ctx, prepared.Loaded, execution); err != nil {
+			return "", domain.ActionDelta{}, err
+		}
+		return execution.actionPlan(prepared.Definition, prepared.Loaded.Context)
+	}
+	prepared.refresh = prepared.assess
+	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (domain.AdapterResult, error) {
+		return prepared.CLI.executeTeardown(ctx, orchestrator, prepared.Loaded, prepared.Plan, execution, diagnostics)
+	}
+	return nil
+}
+
+func (prepared *preparedCommand) prepareRemote(ctx context.Context, _ *initBootstrap) error {
+	execution, err := prepared.CLI.prepareRemoteExecution(ctx, prepared.Loaded, prepared.Arguments)
+	if err != nil {
+		return err
+	}
+	prepared.policy = application.RemotePolicy(*execution)
+	prepared.assess = func(context.Context) (domain.ActionID, domain.ActionDelta, error) {
+		return application.RemoteActionPlan(*execution)
+	}
+	prepared.printResult = prepared.CLI.printRemoteResult
+	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, _ io.Writer) (domain.AdapterResult, error) {
+		orchestrator.Runner = application.RemoteRunner{Control: prepared.CLI.remoteService(prepared.Loaded).Control, Prepared: *execution}
+		result, _, err := orchestrator.RunAdapter(ctx, prepared.Plan, domain.AdapterRequest{
+			Schema: shelladapter.ProtocolSchema, OperationID: prepared.Plan.OperationID, Adapter: "remote", Action: string(execution.Action),
+		}, nil)
+		return result, err
+	}
+	return nil
+}
+
+func (prepared *preparedCommand) prepareUpdate(ctx context.Context, _ *initBootstrap) error {
+	execution, err := prepared.CLI.prepareRelease(ctx, prepared.Loaded, prepared.Arguments)
+	if err != nil {
+		return err
+	}
+	prepared.closeResource = execution.Close
+	prepared.executeNoOp = true
+	prepared.assess = func(context.Context) (domain.ActionID, domain.ActionDelta, error) {
+		return execution.prepared.Action, domain.ActionDelta{Changed: execution.prepared.Changed, Consequences: execution.prepared.Consequences}, nil
+	}
+	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, _ io.Writer) (domain.AdapterResult, error) {
+		return prepared.CLI.executeRelease(ctx, orchestrator, prepared.Plan, execution)
+	}
+	return nil
+}
+
+func (prepared *preparedCommand) prepareProject(_ context.Context, _ *initBootstrap) error {
+	project := prepared.Project
+	if project == nil {
+		return errors.New("project execution is required")
+	}
+	cli, loaded, definition := prepared.CLI, prepared.Loaded, prepared.Definition
+	switch definition.Name {
+	case "remove":
+		prepared.assess = func(ctx context.Context) (domain.ActionID, domain.ActionDelta, error) {
+			if err := cli.prepareProjectRemoval(ctx, project); err != nil {
+				return "", domain.ActionDelta{}, err
+			}
+			return project.removeActionPlan()
+		}
+	case "sync", "bind", "clone", "export", "up", "down":
+		prepared.assess = func(ctx context.Context) (domain.ActionID, domain.ActionDelta, error) {
+			if err := cli.observeProjectAction(ctx, definition.Name, project); err != nil {
+				return "", domain.ActionDelta{}, err
+			}
+			return project.actionPlan(definition.Name)
+		}
+	}
+	prepared.refresh = prepared.assess
+	if definition.Handler == "@project" {
+		prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (domain.AdapterResult, error) {
+			incusPort, _ := cli.statusPorts()
+			orchestrator.Runner = application.ProjectActionRunner{
+				Data: cli.projectDataPlane(), Devices: cli.projectDeviceManager(), Archive: cli.projectArchiver(),
+				Exports: cli.projectExportStore(loaded), Instances: incusPort, VSCode: cli.projectVSCode(),
+				Extensions:         strings.Fields(cli.env["CODE_RECOMMENDED_EXTENSIONS"]),
+				WorkspaceDirectory: filepath.Join(loaded.Context.Paths.ConfigHome, "workspaces"),
+				Yard:               loaded.Context, Project: project.Record, YardIdentity: project.YardIdentity,
+				SoftRemove: project.Environment["SUBYARD_PROJECT_REMOVE_SOFT"] == "1",
+			}
+			result, stderr, err := orchestrator.RunAdapter(ctx, prepared.Plan, domain.AdapterRequest{
+				Schema: shelladapter.ProtocolSchema, OperationID: prepared.Plan.OperationID, Adapter: "project", Action: definition.Name,
+			}, nil)
+			writeAdapterDiagnostics(diagnostics, stderr)
+			return result, err
+		}
+	} else {
+		prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (domain.AdapterResult, error) {
+			var protected io.ReadCloser
+			if project.SecretPath != "" {
+				file, err := os.Open(project.SecretPath)
+				if err != nil {
+					return domain.AdapterResult{}, err
+				}
+				protected = file
+				defer protected.Close()
+			}
+			orchestrator.Runner = application.ProjectEnvironmentRunner{
+				Data: cli.projectDataPlane(), Yard: loaded.Context, Project: project.Record,
+				Profile: project.Profile, HostLinks: project.HostLinks,
+				Rebuild: project.Environment["SUBYARD_PROJECT_REBUILD"] == "1", HasSecret: project.SecretPath != "",
+			}
+			result, stderr, err := orchestrator.RunAdapter(ctx, prepared.Plan, domain.AdapterRequest{
+				Schema: shelladapter.ProtocolSchema, OperationID: prepared.Plan.OperationID, Adapter: "project-env", Action: definition.Name,
+			}, protected)
+			writeAdapterDiagnostics(diagnostics, stderr)
+			return result, err
+		}
+	}
+	return nil
 }

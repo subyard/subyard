@@ -4164,11 +4164,12 @@ func TestAssessStructuredActionUsesTypedCoreAssessment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	action, delta, typed, err := program.assessStructuredAction(
-		context.Background(), loaded, definition, nil, nil, lifecycle, nil, nil,
-	)
-	if err != nil || !typed || action != "yard.stop-force" || !delta.Changed {
-		t.Fatalf("action=%q delta=%#v typed=%t err=%v", action, delta, typed, err)
+	if err := program.observeLifecycleExecution(context.Background(), loaded.Context, lifecycle); err != nil {
+		t.Fatal(err)
+	}
+	action, delta, err := lifecycle.actionPlan(definition, loaded.Context)
+	if err != nil || action != "yard.stop-force" || !delta.Changed {
+		t.Fatalf("action=%q delta=%#v err=%v", action, delta, err)
 	}
 }
 
