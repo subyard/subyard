@@ -498,7 +498,7 @@ func TestCandidateTransitionRejectsTrailingResponseJSON(t *testing.T) {
 	defer verified.Close()
 	_, err = runtime.invokeVerifiedCandidateTransition(
 		context.Background(), verified,
-		releasetransition.ProcessRequest{SchemaVersion: 1},
+		candidateProtocolRequest(verified, root),
 		"",
 	)
 	if err == nil || !strings.Contains(err.Error(), "invalid release transition response") {
@@ -551,7 +551,7 @@ func TestVerifiedCandidateRootDescriptorSurvivesAncestorReplacement(t *testing.T
 func TestVerifiedCandidateInvocationBindsRegistryDigest(t *testing.T) {
 	root := t.TempDir()
 	capture := filepath.Join(filepath.Dir(root), "candidate-request.json")
-	response := `{"schemaVersion":1}`
+	response := candidateProtocolFixtureResponse
 	payload := fmt.Sprintf(`#!/bin/sh
 case "${1:-}" in
   --version) printf 'yard-engine 1.2.3\n' ;;
@@ -571,10 +571,7 @@ esac
 	defer verified.Close()
 	if _, err := runtime.invokeVerifiedCandidateTransition(
 		context.Background(), verified,
-		releasetransition.ProcessRequest{
-			SchemaVersion: releasetransition.ProcessProtocolSchemaV1,
-			RuntimeRoot:   root,
-		},
+		candidateProtocolRequest(verified, root),
 		"",
 	); err != nil {
 		t.Fatal(err)
@@ -1554,7 +1551,7 @@ esac
 
 func TestCandidateTransitionRejectsContradictoryInspectionOutcome(t *testing.T) {
 	root := t.TempDir()
-	response := `{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata"],"recovery":"reversible"},"blockers":[{"code":"migration-stale","resource":"yard.fixture","message":"the resource changed","retry":"run yard update --check"}],"outcome":{"status":"ready","reachedGoal":true,"active":"release-b","target":"release-b","code":"ready","message":"verified"}}}`
+	response := `{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the inspected release transition"]},"blockers":[{"code":"migration-stale","resource":"yard.fixture","message":"the resource changed","retry":"run yard update --check"}],"outcome":{"status":"ready","reachedGoal":true,"active":"release-b","target":"release-b","code":"ready","message":"verified"}}}`
 	candidate := writeRuntimeCandidateFixture(t, root, response)
 	request := releasetransition.ProcessRequest{
 		SchemaVersion: releasetransition.ProcessProtocolSchemaV1,

@@ -60,6 +60,17 @@ leaf publishes recovery facts before importing config and later switches shell e
 not authorize, activate or roll back a release. An interruption resumes from the protected outer
 journal and observed facts.
 
+Verify a built candidate with the unmodified supported updater before release:
+
+```sh
+python3 dev/verify-release-upgrades.py --release-dir .build/release --version <candidate-version>
+```
+
+This Linux check needs Python 3 and downloads a checksum-pinned v0.11.2 runtime for the local
+architecture. It confines all state to a temporary directory and interrupts only its own update
+process group. Use `--baseline-dir PATH` to reuse previously downloaded official bundle, checksum,
+manifest and provenance files. Publication runs this check after building the release assets.
+
 `./tests/run.sh` is the single unprivileged gate. It runs formatting, vet, race-enabled Go tests, a
 short parser fuzz smoke, the static binary build, and all Bash unit/contract/integration tests. It
 requires the `systemd-analyze` binary for unprivileged unit parsing, but does not require root, a

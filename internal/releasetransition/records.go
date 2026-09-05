@@ -286,25 +286,27 @@ func (record EvidenceRecord) validate() error {
 }
 
 func ParseJournal(payload []byte) (JournalRecord, error) {
-	var record JournalRecord
-	if err := decodeBoundedRecord(payload, MaxJournalBytes, &record); err != nil {
-		return JournalRecord{}, fmt.Errorf("decode release transition journal: %w", err)
-	}
-	if err := record.Validate(); err != nil {
-		return JournalRecord{}, err
-	}
-	return record, nil
+	return parseJournalV2(payload)
 }
 
 func MarshalJournal(record JournalRecord) ([]byte, error) {
-	if err := record.Validate(); err != nil {
-		return nil, err
-	}
-	payload, err := json.Marshal(record)
+	payload, err := marshalJournalV2JSON(record)
 	if err != nil {
 		return nil, err
 	}
 	return append(payload, '\n'), nil
+}
+
+// MarshalJSON keeps embedded JournalRecord values on the frozen journal-v2
+// wire shape instead of exposing future internal fields.
+func (record JournalRecord) MarshalJSON() ([]byte, error) {
+	return marshalJournalV2JSON(record)
+}
+
+// UnmarshalJSON applies the frozen journal-v2 decoder to embedded journals as
+// well as to standalone durable journal payloads.
+func (record *JournalRecord) UnmarshalJSON(payload []byte) error {
+	return unmarshalJournalV2JSON(payload, record)
 }
 
 func ParseEvidence(payload []byte) (EvidenceRecord, error) {
@@ -330,53 +332,27 @@ func MarshalEvidence(record EvidenceRecord) ([]byte, error) {
 }
 
 func ParseSupersededJournal(payload []byte) (SupersededJournalRecord, error) {
-	var record SupersededJournalRecord
-	if err := decodeBoundedRecord(payload, MaxJournalBytes, &record); err != nil {
-		return SupersededJournalRecord{}, fmt.Errorf("decode superseded release transition journal: %w", err)
-	}
-	if err := record.validate(); err != nil {
-		return SupersededJournalRecord{}, err
-	}
-	return record, nil
+	return parseSupersededJournalV1(payload)
 }
 
 func MarshalSupersededJournal(record SupersededJournalRecord) ([]byte, error) {
-	if err := record.validate(); err != nil {
-		return nil, err
-	}
-	payload, err := json.Marshal(record)
+	payload, err := marshalSupersededJournalV1JSON(record)
 	if err != nil {
 		return nil, err
 	}
 	return append(payload, '\n'), nil
 }
 
-func (record SupersededJournalRecord) validate() error {
-	if record.SchemaVersion != SupersededJournalSchemaV1 {
-		return invalid("unsupported superseded journal schema %d", record.SchemaVersion)
-	}
-	if err := validatePlanToken(record.AuthorizationPlan); err != nil {
-		return err
-	}
-	if err := record.Replacement.Validate(); err != nil {
-		return err
-	}
-	if record.Replacement.Reason != JournalReplacementPostActivationScopeV0111 {
-		return invalid("superseded journal requires post-activation replacement")
-	}
-	if err := record.Journal.Validate(); err != nil {
-		return err
-	}
-	if record.Replacement.Transaction != record.Journal.Transaction {
-		return invalid("superseded journal transaction does not match replacement")
-	}
-	payload, err := MarshalJournal(record.Journal)
+func (record SupersededJournalRecord) MarshalJSON() ([]byte, error) {
+	return marshalSupersededJournalV1JSON(record)
+}
+
+func (record *SupersededJournalRecord) UnmarshalJSON(payload []byte) error {
+	parsed, err := parseSupersededJournalV1(payload)
 	if err != nil {
 		return err
 	}
-	if record.Replacement.Fingerprint != fingerprintPayload(payload) {
-		return invalid("superseded journal fingerprint does not match canonical journal")
-	}
+	*record = parsed
 	return nil
 }
 

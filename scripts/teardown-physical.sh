@@ -142,9 +142,13 @@ elif command -v ufw >/dev/null 2>&1; then
 fi
 sshdir="$SUBYARD_OPERATOR_HOME/.ssh"
 snip="$sshdir/$YARD_SNIP"; cfg="$sshdir/config"
-if ! sudo -n -u "$OPERATOR_USER" -- bash -c \
-  '. "$1"; rm -f -- "$2" && ssh_config_remove_exact "$3" "$4"' \
-  subyard-ssh-config "$SCRIPT_DIR/lib/ssh-config.sh" "$snip" "$cfg" "Include $YARD_SNIP"; then
+# A verified runtime may be pinned through a root process's /proc/PID/fd.
+# Send the already-loaded helper; the operator cannot reopen that source path.
+# shellcheck disable=SC2016
+if ! {
+  declare -f ssh_config_remove_exact &&
+    printf '%s\n' 'rm -f -- "$1" && ssh_config_remove_exact "$2" "$3"'
+} | sudo -n -u "$OPERATOR_USER" -- bash -s -- "$snip" "$cfg" "Include $YARD_SNIP"; then
   die "could not remove this yard's operator SSH config"
 fi
 ok "removed ~/.ssh/$YARD_SNIP (if present)"

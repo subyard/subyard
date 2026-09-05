@@ -206,6 +206,36 @@ installer publishes the candidate without touching stable links, then the candid
 ordinary assessed `ReleaseTransition`. The superseded runtime is never allowed to call mutating
 `_migrate` verbs against the candidate.
 
+The cross-release contract is independent of migration implementation types. The frozen
+[`protocol/v1`](../internal/releasetransition/protocol/v1) module defines the exact JSON fields,
+enum values, bounds and confirmation semantics understood by the released v0.11.2 updater.
+Explicit adapters project internal requests and results onto that contract. A V1 request receives
+a V1 response; adding internal fields or outcomes must not silently extend the V1 wire format.
+Unknown protocol versions are rejected before authorization-channel access or transition work.
+Strict decoding remains part of the contract.
+
+The frozen [`journal/v2`](../internal/releasetransition/journal/v2) module similarly owns the existing
+durable journal representation, including nested evidence and archived predecessor journals.
+Canonical field order, omitted fields and the trailing newline are preserved because fingerprints
+bind those bytes. An old updater must still be able to read the journal and select its verified
+transition owner after interruption or rollback. New migration internals do not add fields to that
+shared representation automatically; runtime-specific recovery changes require an explicit,
+compatible storage design.
+
+Introduce a new protocol by first shipping support alongside V1 while continuing to send V1.
+Only a subsequent release may start using the new protocol with owners that support it. Retain
+the old reader, writer and semantics throughout the supported upgrade, retained-runtime rollback
+and unfinished-transaction recovery horizon. A runtime version bump alone never changes these
+contracts. Do not weaken validation or silently discard a new safety requirement to fit an old
+response: the compatibility adapter must preserve its meaning.
+
+Before publication, `dev/verify-release-upgrades.py` runs the unmodified, checksum-pinned v0.11.2
+updater against the built candidate on the runner's architecture. It verifies inspection, activation,
+the completed fixed point, rollback and forward retry. It also kills a real update after journaled
+activation and uses the old updater to resume the same authorized candidate transaction. This
+released-binary check complements tests of the frozen codecs; rebuilding both ends from current
+source does not establish cross-release compatibility.
+
 A v0.11.1 runtime can stop after activation with journal checkpoint `reconciling` and blocker
 resource `transition.observation-scope`. That exact state is recovered only by the standalone
 installer from a newer supported patch release; the active v0.11.1 command remains fail-closed.

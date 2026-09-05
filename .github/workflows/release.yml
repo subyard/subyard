@@ -69,6 +69,8 @@ jobs:
           for arch in amd64 arm64; do
             dev/package-engine.sh --output-dir .build/release --version "$version" --arch "$arch"
           done
+      - name: Verify released updater compatibility
+        run: python3 dev/verify-release-upgrades.py --release-dir .build/release --version "${GITHUB_REF_NAME#v}"
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}

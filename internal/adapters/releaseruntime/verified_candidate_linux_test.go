@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/releasetransition"
@@ -60,19 +61,13 @@ case "${1:-}" in
         sh -c 'test -f "$1/config/release-transition.json"' child "$repository_root" || exit 74
         ;;
     esac
-    printf '{"schemaVersion":1}\n'
+	    printf '%%s\n' '%s'
     ;;
   *) exit 64 ;;
 esac
-`, capture, capture)
+`, capture, capture, candidateProtocolFixtureResponse)
 	candidate := writeRuntimeCandidatePayload(t, root, payload)
 	runtime := New(Config{})
-	request := releasetransition.ProcessRequest{
-		SchemaVersion: releasetransition.ProcessProtocolSchemaV1,
-		Mode:          releasetransition.ProcessInspect,
-		RuntimeRoot:   root,
-	}
-
 	for _, mode := range []releasetransition.ProcessMode{
 		releasetransition.ProcessInspect,
 		releasetransition.ProcessConverge,
@@ -83,7 +78,13 @@ esac
 		if err != nil {
 			t.Fatal(err)
 		}
+		request := candidateProtocolRequest(verified, root)
 		request.Mode = mode
+		if mode == releasetransition.ProcessConverge {
+			request.Execution = &releasetransition.Execution{
+				Plan: releasetransition.PlanToken("plan-v1-" + strings.Repeat("a", 64)),
+			}
+		}
 		_, invokeErr := runtime.invokeVerifiedCandidateTransition(
 			context.Background(), verified, request, "",
 		)

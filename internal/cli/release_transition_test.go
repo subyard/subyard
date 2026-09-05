@@ -686,7 +686,7 @@ func TestReleaseTransitionEstablishesOperationContextBeforeExecution(t *testing.
 	program, err := New(Options{
 		RepositoryRoot: repositoryRoot(t),
 		Environment:    []string{"HOME=" + home},
-		Stdin:          strings.NewReader("{}"),
+		Stdin:          strings.NewReader(operationContextProtocolRequest(t, home)),
 		Stderr:         &stderr,
 	})
 	if err != nil {
@@ -709,7 +709,7 @@ func TestReleaseTransitionRejectsInvalidInheritedOperationContext(t *testing.T) 
 			"HOME=" + home,
 			"SUBYARD_OPERATION_ID=invalid/context",
 		},
-		Stdin:  strings.NewReader("{}"),
+		Stdin:  strings.NewReader(operationContextProtocolRequest(t, home)),
 		Stderr: &stderr,
 	})
 	if err != nil {

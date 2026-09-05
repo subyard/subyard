@@ -257,7 +257,7 @@ func (runtime *Runtime) inspectProtectedTransition(
 		return nil, publicCandidateFailure(errors.New("candidate returned an invalid release inspection"))
 	}
 	inspection := response.Inspection
-	if err := inspection.ValidateOutcome(journal.Goal); err != nil {
+	if err := releasetransition.ValidateProcessInspection(journal.Goal, *inspection); err != nil {
 		return nil, publicCandidateFailure(
 			fmt.Errorf("candidate returned an inconsistent release inspection: %w", err),
 		)
@@ -814,7 +814,7 @@ func (runtime *Runtime) prepareVerifiedTransition(
 			return Prepared{}, errors.New("candidate returned an invalid release inspection")
 		}
 		goal := releasetransition.Goal{Target: request.Target, Direction: request.Direction}
-		if err := response.Outcome.ValidateInspection(goal); err != nil {
+		if err := releasetransition.ValidateProcessOutcome(goal, *response.Outcome); err != nil {
 			return Prepared{}, fmt.Errorf("candidate returned an inconsistent release outcome: %w", err)
 		}
 		if parsed.check {
@@ -850,14 +850,14 @@ func (runtime *Runtime) prepareInspectedCandidateTransition(
 	revalidation *replacementRevalidation,
 ) (Prepared, error) {
 	goal := releasetransition.Goal{Target: request.Target, Direction: request.Direction}
-	if err := inspection.ValidateOutcome(goal); err != nil {
+	if err := releasetransition.ValidateProcessInspection(goal, inspection); err != nil {
 		return Prepared{}, fmt.Errorf("candidate returned an inconsistent release inspection: %w", err)
 	}
 	if revalidation != nil {
 		inspection.Assessment.Consequences = v0111RecoveryConsequences(
 			inspection.Assessment.Consequences,
 		)
-		if err := inspection.ValidateOutcome(goal); err != nil {
+		if err := releasetransition.ValidateProcessInspection(goal, inspection); err != nil {
 			return Prepared{}, fmt.Errorf("augmented recovery inspection is invalid: %w", err)
 		}
 	}
@@ -972,7 +972,7 @@ func (runtime *Runtime) prepareInspectedCandidateTransition(
 			goal := releasetransition.Goal{
 				Target: request.Target, Direction: request.Direction,
 			}
-			if err := converged.Outcome.ValidateConvergence(goal, inspection); err != nil {
+			if err := releasetransition.ValidateProcessConvergence(goal, inspection, *converged.Outcome); err != nil {
 				return fmt.Errorf("candidate returned an inconsistent release transition outcome: %w", err)
 			}
 			if converged.Outcome.Status != releasetransition.StatusReady {
@@ -988,7 +988,7 @@ func (runtime *Runtime) prepareInspectedCandidateTransition(
 					if rechecked.Inspection == nil || rechecked.Outcome != nil {
 						return errors.New("candidate returned an invalid release reinspection")
 					}
-					if err := rechecked.Inspection.ValidateOutcome(goal); err != nil {
+					if err := releasetransition.ValidateProcessInspection(goal, *rechecked.Inspection); err != nil {
 						return fmt.Errorf("candidate returned an inconsistent release reinspection: %w", err)
 					}
 					if rechecked.Inspection.Outcome.Status == releasetransition.StatusReady {
