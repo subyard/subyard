@@ -92,6 +92,12 @@ case "${1:-}" in
     ;;
   exec)
     case " $* " in
+      *' test -x /usr/local/libexec/subyard/projects-changed '*)
+        [ ! -e "$state_root/missing-dispatcher" ]
+        ;;
+      *' runuser -u dev -- /usr/local/libexec/subyard/projects-changed.d/orca '*)
+        [ ! -e "$state_root/project-sync-fail" ]
+        ;;
       *' mktemp -d /tmp/subyard-orca.XXXXXX '*)
         counter="$(cat "$stage_counter_file" 2>/dev/null || printf 0)"
         counter=$((counter + 1))
@@ -150,13 +156,14 @@ case "${1:-}" in
         ;;
       *' jq -e '*) [ ! -e "$state_root/fail-service-ready" ] ;;
       *' jq -er '*) printf 'orca://pair?code=test-fixture\n' ;;
-      *' bash -se -- dev /usr/bin/orca-ide /srv/agents/orca ')
+      *' /usr/bin/python3 -B /usr/local/libexec/subyard/orca-registration/main.py status ')
         if [ -e "$state_root/project-counts-fail" ]; then
           exit 1
         elif [ -e "$state_root/project-counts-drift" ]; then
-          printf '1 2\n'
+          printf '%s\n' '{"ready":false,"registered":1,"total":2,"errors":["nested checkout has the wrong group"],"warnings":[]}'
+          exit 1
         else
-          printf '2 2\n'
+          printf '%s\n' '{"ready":true,"registered":2,"total":2,"errors":[],"warnings":[]}'
         fi
         ;;
     esac
@@ -240,12 +247,10 @@ cmp -s "$ORCA_TEST_CAPTURE/subyard-orca.service" \
 if grep -Fq -- '--no-pairing' "$ORCA_TEST_CAPTURE/subyard-orca.service"; then
   fail 'service disabled stock startup pairing'
 fi
-grep -Fq '.result.repos[]?' "$ORCA_TEST_CAPTURE/orca-sync" \
-  || fail 'project hook does not use the stock repo list contract'
-grep -Fq 'repo add --path "$checkout" --json' "$ORCA_TEST_CAPTURE/orca-sync" \
-  || fail 'project hook does not add canonical roots'
-grep -Fq '<<<"$add_result"' "$ORCA_TEST_CAPTURE/orca-sync" \
-  || fail 'project hook does not validate the stock repo add result'
+for source in "$ROOT"/config/profiles/orca/resources/orca/registration/*.py; do
+  cmp -s "$source" "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration/${source##*/}" \
+    || fail 'registration component was not installed intact'
+done
 if grep -Eqi 'nodejs|npm|AppImage|squashfs|APPDIR|SHA512' \
   "$ROOT/config/profiles/orca/resources/orca/handler.sh" "$ROOT/config/profiles/orca/release.env"; then
   fail 'removed SSH/AppImage dependencies returned'
@@ -259,13 +264,26 @@ if grep -Fq 'apt-get install -y -qq /tmp/subyard-orca' "$ORCA_TEST_LOG"; then
   fail 'repeated up reinstalled the already verified Orca release'
 fi
 
+touch "$TMP/missing-dispatcher"
+if run_orca up --yes >"$TMP/missing-dispatcher.out" 2>&1; then
+  fail 'up reported full readiness with a missing automatic dispatcher'
+fi
+grep -Fq 'init' "$TMP/missing-dispatcher.out" || fail 'missing dispatcher recovery was not actionable'
+rm -f "$TMP/missing-dispatcher"
+
+touch "$TMP/project-sync-fail"
+if run_orca sync >"$TMP/sync-failure.out" 2>&1; then
+  fail 'explicit sync skipped the hook and concealed its failure'
+fi
+rm -f "$TMP/project-sync-fail"
+
 pairing_field_read_count="$(count_log '.pairing.url')"
 ENVIRONMENT_PROFILES=orca run_orca status >"$TMP/status.out"
 grep -Fq 'Orca profile selected for yard init' "$TMP/status.out" \
   || fail 'status did not confirm the selected Orca profile'
 grep -Fq 'automatic project hook ready' "$TMP/status.out" \
   || fail 'status did not report automatic project hook readiness'
-grep -Fq 'projects registered: 2/2' "$TMP/status.out" \
+grep -Fq 'checkouts registered: 2/2' "$TMP/status.out" \
   || fail 'status did not report bounded project registration counts'
 if grep -Fq 'orca://pair?' "$TMP/status.out"; then
   fail 'status exposed a pairing capability'
@@ -275,12 +293,9 @@ grep -Fq 'Orca profile is not selected in ENVIRONMENT_PROFILES' "$TMP/status-uns
   || fail 'status did not warn that yard init will omit the Orca profile'
 [ "$(count_log '.pairing.url')" -eq "$pairing_field_read_count" ] \
   || fail 'status read a pairing capability from readiness state'
-grep -Fq 'for hook in /usr/local/libexec/subyard/projects-changed.d/*; do' \
-  "$ORCA_TEST_LOG" \
-  || fail 'status did not verify automatic project hook wiring'
 touch "$TMP/project-counts-fail"
 ENVIRONMENT_PROFILES=orca run_orca status >"$TMP/status-counts-fail.out"
-grep -Fq 'project registration counts unavailable' "$TMP/status-counts-fail.out" \
+grep -Fq 'project registration status unavailable' "$TMP/status-counts-fail.out" \
   || fail 'status did not report unavailable project registration counts'
 if grep -Fq 'while service is not ready' "$TMP/status-counts-fail.out"; then
   fail 'status blamed service readiness for an independent project count failure'
@@ -392,7 +407,7 @@ fi
 grep -Fq 'without scheme, path or port' "$TMP/invalid.out" \
   || fail 'unsafe hostname failure was not actionable'
 
-grep -Fq 'projects-changed.d/*' "$ROOT/scripts/04-provision-subyard.sh" \
-  || fail 'project lifecycle dispatcher does not include shared-resource hooks'
+# Run the profile component's filesystem, wire and reconciliation contract tests in the core gate.
+python3 -B -m unittest discover -s "$ROOT/tests/orca_registration"
 
 printf 'ok: Orca repeatably stages, pairs, rolls back and preserves state across exact routes\n'

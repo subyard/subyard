@@ -491,10 +491,13 @@ fi
 
 ready=0
 for _ in $(seq 1 30); do
-  if "$CHECK_PATH" >/dev/null 2>&1; then ready=1; break; fi
+  if "$CHECK_PATH" >/dev/null 2>"$temporary/readiness-error"; then ready=1; break; fi
   sleep 1
 done
 if [ "$ready" != 1 ]; then
+  # Keep the generated check's fixed diagnostic before rollback removes the candidate.
+  # Raw subprocess stderr can contain private paths or settings and stays in the temp file.
+  sed -n '/^ai-observer-check: /{p;q;}' "$temporary/readiness-error" >&2
   rollback
   die 'readiness failed; previous runtime restored'
 fi

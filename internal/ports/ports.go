@@ -203,6 +203,8 @@ type InitPlatform interface {
 	Preflight(context.Context, bool) error
 	ConfigsConverged(context.Context) (bool, error)
 	RefreshConfigs(context.Context) error
+	ProjectHooksApplicable(context.Context) (bool, error)
+	RunProjectHooks(context.Context) error
 	Teardown(context.Context) error
 }
 

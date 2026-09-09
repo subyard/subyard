@@ -26,8 +26,9 @@ ORCA_READY="$ORCA_STATE/ready.json"
 ORCA_CAPTURE=/usr/local/libexec/subyard/orca-capture-ready
 ORCA_INGRESS=/usr/local/libexec/subyard/orca-ingress
 ORCA_SYNC=/usr/local/libexec/subyard/projects-changed.d/orca
+ORCA_REGISTRATION=/usr/local/libexec/subyard/orca-registration
 ORCA_CONTRACT_DIGEST=/usr/local/libexec/subyard/orca-contract.sha256
-ORCA_CONTRACT_VERSION=1
+ORCA_CONTRACT_VERSION=2
 ORCA_GUEST_PORT=6768
 ORCA_RUNTIME_CHANGED=0
 ORCA_TMP_DIR=
@@ -219,7 +220,7 @@ download_release() {
 
 dependencies_ready() {
   yexec bash -se <<'YARD'
-for package in file jq nftables zlib1g-dev \
+for package in file git python3 jq nftables zlib1g-dev \
   libasound2t64 libgbm1 libgtk-3-0t64 libnss3; do
   [ "$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null)" = 'install ok installed' ] || exit 1
 done
@@ -231,7 +232,7 @@ ensure_dependencies() {
   info "installing Orca headless dependencies"
   yexec apt-get update -qq
   yexec env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-    file jq nftables zlib1g-dev \
+    file git python3 jq nftables zlib1g-dev \
     libasound2t64 libgbm1 libgtk-3-0t64 libnss3 >/dev/null
   dependencies_ready || die "Orca headless dependencies did not converge"
 }
@@ -255,6 +256,10 @@ stage_runtime_contract() {
   local capture="$ORCA_TMP_DIR/orca-capture-ready"
   local sync="$ORCA_TMP_DIR/orca-sync"
   local unit="$ORCA_TMP_DIR/$ORCA_UNIT"
+  local source guest_helper helper contract_version
+  local -a helpers=()
+  mapfile -t helpers < <(registration_files)
+  contract_version="$(registration_contract_version)" || die "Orca registration helper contract unavailable"
   ORCA_GUEST_TMP_DIR="$(yexec mktemp -d /tmp/subyard-orca.XXXXXX)"
   valid_guest_tmp_dir "$ORCA_GUEST_TMP_DIR" \
     || die "Orca guest staging returned an unsafe temporary path"
@@ -301,38 +306,18 @@ CAPTURE
   cat >"$sync" <<SYNC_HEAD
 #!/usr/bin/env bash
 set -euo pipefail
-ORCA_EXEC=$ORCA_EXEC
-ORCA_UNIT=$ORCA_UNIT
-export HOME=/home/${DEV_USER:-dev}
-export XDG_CONFIG_HOME=$ORCA_STATE/config
-export XDG_DATA_HOME=$ORCA_STATE/data
-export XDG_STATE_HOME=$ORCA_STATE/state
-cd /srv/workspaces
+systemctl is-active --quiet $ORCA_UNIT || exit 0
+status=0
+report="\$(/usr/bin/python3 -B $ORCA_REGISTRATION/main.py sync)" || status=\$?
+if ! jq -e '(.ready | type == "boolean") and (.errors | type == "array") and (.warnings | type == "array")' <<<"\$report" >/dev/null; then
+  printf 'Orca project registration failed; run yard orca status\n' >&2
+  exit 1
+fi
+jq -r '(.errors[] | "Orca registration error: " + .), (.warnings[] | "Orca registration warning: " + .)' <<<"\$report" >&2
+jq -r '"Orca checkouts registered: \(.registered)/\(.total)"' <<<"\$report"
+jq -e '.ready' <<<"\$report" >/dev/null || status=1
+exit "\$status"
 SYNC_HEAD
-  cat >>"$sync" <<'SYNC'
-systemctl is-active --quiet "$ORCA_UNIT" || exit 0
-repos="$("$ORCA_EXEC" repo list --json)"
-jq -e '.ok == true and (.result.repos | type == "array")' <<<"$repos" >/dev/null
-while IFS= read -r -d '' metadata; do
-  project_dir="${metadata%/.subyard-meta.json}"
-  project_id="${project_dir##*/}"
-  checkout="$project_dir/src"
-  jq -e --arg id "$project_id" \
-    '.schema == 1 and .projectId == $id' "$metadata" >/dev/null 2>&1 || continue
-  [ -d "$checkout" ] && [ ! -L "$checkout" ] || continue
-  [ "$(realpath -e "$checkout")" = "$checkout" ] || continue
-  if ! jq -e --arg path "$checkout" \
-    '.ok == true and any(.result.repos[]?; .path == $path)' <<<"$repos" >/dev/null; then
-    add_result="$("$ORCA_EXEC" repo add --path "$checkout" --json)"
-    jq -e '.ok == true' <<<"$add_result" >/dev/null
-    repos="$("$ORCA_EXEC" repo list --json)"
-    jq -e '.ok == true and (.result.repos | type == "array")' <<<"$repos" >/dev/null
-  fi
-done < <(
-  find /srv/workspaces -mindepth 2 -maxdepth 2 -type f \
-    -name .subyard-meta.json -print0 | sort -z
-)
-SYNC
   cat >"$unit" <<UNIT
 [Unit]
 Description=Subyard Orca remote server
@@ -371,6 +356,15 @@ UNIT
     "${PROJ[@]}" --mode 0755 >/dev/null
   incus file push "$unit" "$YARD_INSTANCE_NAME$guest_unit" \
     "${PROJ[@]}" --mode 0644 >/dev/null
+  yexec install -d -m 0755 "$ORCA_REGISTRATION"
+  for source in "$RESOURCE_DIR"/registration/*.py; do
+    guest_helper="$ORCA_GUEST_TMP_DIR/${source##*/}"
+    helper="$ORCA_REGISTRATION/${source##*/}"
+    incus file push "$source" "$YARD_INSTANCE_NAME$guest_helper" \
+      "${PROJ[@]}" --mode 0644 >/dev/null
+    yexec cmp -s "$guest_helper" "$helper" || ORCA_RUNTIME_CHANGED=1
+    yexec install -m 0644 "$guest_helper" "$helper"
+  done
   if ! yexec cmp -s "$guest_ingress" "$ORCA_INGRESS" ||
     ! yexec cmp -s "$guest_capture" "$ORCA_CAPTURE" ||
     ! yexec cmp -s "$guest_sync" "$ORCA_SYNC" ||
@@ -383,8 +377,8 @@ UNIT
   yexec install -m 0755 "$guest_capture" "$ORCA_CAPTURE"
   yexec install -m 0755 "$guest_sync" "$ORCA_SYNC"
   yexec install -m 0644 "$guest_unit" "/etc/systemd/system/$ORCA_UNIT"
-  yexec bash -se -- "$ORCA_CONTRACT_DIGEST" "$ORCA_CONTRACT_VERSION" \
-    "$ORCA_INGRESS" "$ORCA_CAPTURE" "$ORCA_SYNC" "/etc/systemd/system/$ORCA_UNIT" <<'YARD'
+  yexec bash -se -- "$ORCA_CONTRACT_DIGEST" "$contract_version" \
+    "$ORCA_INGRESS" "$ORCA_CAPTURE" "$ORCA_SYNC" "/etc/systemd/system/$ORCA_UNIT" "${helpers[@]}" <<'YARD'
 set -euo pipefail
 marker="$1"; version="$2"; shift 2
 digest="$(sha256sum "$@" | sha256sum | awk '{print $1}')"
@@ -429,8 +423,12 @@ run_project_sync() {
 }
 
 runtime_contract_ready() {
-  if ! yexec bash -se -- "$ORCA_CONTRACT_DIGEST" "$ORCA_CONTRACT_VERSION" \
-    "$ORCA_INGRESS" "$ORCA_CAPTURE" "$ORCA_SYNC" "/etc/systemd/system/$ORCA_UNIT" <<'YARD'
+  local contract_version
+  local -a helpers=()
+  mapfile -t helpers < <(registration_files)
+  contract_version="$(registration_contract_version)" || return 1
+  if ! yexec bash -se -- "$ORCA_CONTRACT_DIGEST" "$contract_version" \
+    "$ORCA_INGRESS" "$ORCA_CAPTURE" "$ORCA_SYNC" "/etc/systemd/system/$ORCA_UNIT" "${helpers[@]}" <<'YARD'
 set -euo pipefail
 marker="$1"; version="$2"; shift 2
 [ -r "$marker" ]
@@ -450,54 +448,38 @@ service_enabled() {
   yexec systemctl is-enabled --quiet "$ORCA_UNIT" >/dev/null 2>&1
 }
 
-# Prints only bounded aggregate counts: registered canonical roots, then total canonical roots.
-project_registration_counts() {
-  local counts registered total
-  counts="$(
-    yexec bash -se -- "${DEV_USER:-dev}" "$ORCA_EXEC" "$ORCA_STATE" <<'YARD'
-set -euo pipefail
-dev_user="$1"; orca_exec="$2"; state="$3"
-export HOME="/home/$dev_user"
-export XDG_CONFIG_HOME="$state/config"
-export XDG_DATA_HOME="$state/data"
-export XDG_STATE_HOME="$state/state"
-repos="$(runuser -u "$dev_user" -- "$orca_exec" repo list --json)"
-jq -e '.ok == true and (.result.repos | type == "array")' <<<"$repos" >/dev/null
-registered=0
-total=0
-while IFS= read -r -d '' metadata; do
-  project_dir="${metadata%/.subyard-meta.json}"
-  project_id="${project_dir##*/}"
-  checkout="$project_dir/src"
-  jq -e --arg id "$project_id" \
-    '.schema == 1 and .projectId == $id' "$metadata" >/dev/null 2>&1 || continue
-  [ -d "$checkout" ] && [ ! -L "$checkout" ] || continue
-  [ "$(realpath -e "$checkout")" = "$checkout" ] || continue
-  total=$((total + 1))
-  if jq -e --arg path "$checkout" \
-    '.ok == true and any(.result.repos[]?; .path == $path)' <<<"$repos" >/dev/null; then
-    registered=$((registered + 1))
-  fi
-done < <(
-  find /srv/workspaces -mindepth 2 -maxdepth 2 -type f \
-    -name .subyard-meta.json -print0 | sort -z
-)
-printf '%d %d\n' "$registered" "$total"
-YARD
-  )" || return 1
-  [[ "$counts" =~ ^([0-9]+)\ ([0-9]+)$ ]] || return 1
-  registered="${BASH_REMATCH[1]}"
-  total="${BASH_REMATCH[2]}"
-  [ "$registered" -le "$total" ] || return 1
-  printf '%s %s\n' "$registered" "$total"
+# Read-only discovery, kind and group checks use the same component as the project hook.
+project_registration_report() {
+  local report
+  report="$(yexec runuser -u "${DEV_USER:-dev}" -- /usr/bin/python3 -B \
+    "$ORCA_REGISTRATION/main.py" status)" || true
+  jq -e '(.ready | type == "boolean") and
+    (.registered | type == "number") and (.total | type == "number") and
+    .registered >= 0 and .registered <= .total and
+    (.errors | type == "array") and (.warnings | type == "array")' \
+    <<<"$report" >/dev/null || return 1
+  printf '%s\n' "$report"
 }
 
-# Read-only comparison of canonical Subyard roots with the repos Orca already knows.
 projects_synced() {
-  local counts registered total
-  counts="$(project_registration_counts)" || return 1
-  read -r registered total <<<"$counts"
-  [ "$registered" -eq "$total" ]
+  local report
+  report="$(project_registration_report)" || return 1
+  jq -e '.ready == true' <<<"$report" >/dev/null
+}
+
+# A source digest makes a new profile helper invalidate an otherwise intact installed contract.
+registration_contract_version() {
+  local digest
+  digest="$(cd "$RESOURCE_DIR/registration" && sha256sum ./*.py | sha256sum | cut -d ' ' -f 1)" || return 1
+  printf '%s:%s\n' "$ORCA_CONTRACT_VERSION" "$digest"
+}
+
+registration_files() {
+  local source
+  for source in "$RESOURCE_DIR"/registration/*.py; do
+    [ -f "$source" ] || return 1
+    printf '%s/%s\n' "$ORCA_REGISTRATION" "${source##*/}"
+  done
 }
 
 orca_profile_selected() {
@@ -512,19 +494,27 @@ orca_profile_selected() {
   return 1
 }
 
+project_dispatcher_ready() {
+  local expected
+  expected="$(sha256sum "$SUBYARD_ROOT/config/projects-changed.sh" | cut -d ' ' -f 1)" || return 1
+  yexec test -x /usr/local/libexec/subyard/projects-changed >/dev/null 2>&1 || return 1
+  yexec bash -se -- "$expected" <<'YARD'
+set -euo pipefail
+[ "$(sha256sum /usr/local/libexec/subyard/projects-changed | cut -d ' ' -f 1)" = "$1" ]
+[ -r /etc/subyard/agent-project-hooks ]
+[ -d /usr/local/libexec/subyard/projects-changed.d ]
+YARD
+}
+
 automatic_project_hook_ready() {
-  local dispatcher=/usr/local/libexec/subyard/projects-changed
-  yexec test -x "$dispatcher" >/dev/null 2>&1 &&
-    yexec test -x "$ORCA_SYNC" >/dev/null 2>&1 &&
-    yexec grep -Fqx \
-      'for hook in /usr/local/libexec/subyard/projects-changed.d/*; do' \
-      "$dispatcher" >/dev/null 2>&1 &&
-    yexec grep -Fqx '  "$hook" || status=1' "$dispatcher" >/dev/null 2>&1
+  project_dispatcher_ready &&
+    yexec test -x "$ORCA_SYNC" >/dev/null 2>&1 && runtime_contract_ready
 }
 
 up_converged() {
   release_ready && dependencies_ready && runtime_contract_ready && service_enabled &&
-    service_ready && ingress_active && route_matches && owner_endpoint_ready && projects_synced
+    service_ready && ingress_active && route_matches && owner_endpoint_ready &&\
+    automatic_project_hook_ready && projects_synced
 }
 
 cmd_up() {
@@ -532,6 +522,7 @@ cmd_up() {
   resolve_owner_address
   select_release
   refuse_port_collision
+  project_dispatcher_ready || die "automatic project dispatcher missing or stale; run '$(yard_cmd_hint) init'"
   if up_converged; then
     ok "Orca runtime, route and project registrations are already converged"
     return 0
@@ -557,6 +548,7 @@ cmd_up() {
     die "Orca owner endpoint failed readiness; route and service were rolled back"
   fi
   run_project_sync
+  automatic_project_hook_ready && projects_synced || die "Orca project registration did not converge"
   ok "Orca ready through $ORCA_TRANSPORT at $ORCA_ADVERTISE_HOST:$ORCA_HOST_PORT"
 }
 
@@ -577,7 +569,8 @@ cmd_sync() {
   yexec systemctl is-active --quiet "$ORCA_UNIT" \
     || die "Orca is not running; run '$(yard_cmd_hint) orca up' first"
   run_project_sync
-  ok "Subyard project roots are registered in Orca"
+  projects_synced || die "Orca project registration did not converge"
+  ok "Subyard roots and nested Git checkouts are registered in their Orca project groups"
 }
 
 cmd_restart() {
@@ -589,7 +582,7 @@ cmd_restart() {
 }
 
 cmd_status() {
-  local counts registered total service_is_ready=0
+  local report registered total diagnostic service_is_ready=0
   select_release
   printf 'Orca %s in yard %s\n' "$ORCA_VERSION" "${YARD_NAME:-default}"
   if orca_profile_selected; then
@@ -607,22 +600,28 @@ cmd_status() {
   fi
   if automatic_project_hook_ready; then
     ok "automatic project hook ready"
+  elif project_dispatcher_ready; then
+    warn "Orca project hook missing or stale; run '$(yard_cmd_hint) orca up'"
   else
-    warn "automatic project hook missing; run '$(yard_cmd_hint) init'"
+    warn "automatic project dispatcher missing or stale; run '$(yard_cmd_hint) init'"
   fi
   if [ "$service_is_ready" -eq 1 ]; then
-    if counts="$(project_registration_counts)"; then
-      read -r registered total <<<"$counts"
-      if [ "$registered" -eq "$total" ]; then
-        ok "projects registered: $registered/$total"
+    if report="$(project_registration_report)"; then
+      registered="$(jq -r '.registered' <<<"$report")"
+      total="$(jq -r '.total' <<<"$report")"
+      if jq -e '.ready' <<<"$report" >/dev/null; then
+        ok "checkouts registered: $registered/$total (project groups and kinds verified)"
       else
-        warn "projects registered: $registered/$total; run '$(yard_cmd_hint) orca sync'"
+        warn "checkouts registered: $registered/$total; registration incomplete; run '$(yard_cmd_hint) orca sync'"
       fi
+      while IFS= read -r diagnostic; do
+        warn "$diagnostic"
+      done < <(jq -r '.errors[], .warnings[]' <<<"$report")
     else
-      warn "project registration counts unavailable; inspect the Orca repo state"
+      warn "project registration status unavailable; run '$(yard_cmd_hint) orca up'"
     fi
   else
-    warn "project registration counts unavailable while service is not ready"
+    warn "project registration status unavailable while service is not ready"
   fi
 }
 
@@ -714,12 +713,13 @@ prepare_resource() { # <public-verb>
       ingress_active || changed=true
       route_matches || changed=true
       owner_endpoint_ready || changed=true
+      automatic_project_hook_ready || changed=true
       projects_synced || changed=true
       if [ "$changed" = true ]; then
         emit_resource_assessment up true \
           "converge the pinned Orca package, dependencies and service contract" \
           "publish the owned guarded endpoint for the selected yard" \
-          "register canonical Subyard project roots in Orca"
+          "register Subyard roots and nested Git checkouts in their project groups"
       else
         emit_resource_assessment up false
       fi
@@ -729,7 +729,7 @@ prepare_resource() { # <public-verb>
       require_runtime_settings
       service_ready || die "Orca is not ready; run '$(yard_cmd_hint) orca up' first"
       emit_resource_assessment pair true \
-        "restart the Orca service, reconcile canonical project roots and issue one fresh single-client pairing link"
+        "restart the Orca service, reconcile project groups and checkouts and issue one fresh single-client pairing link"
       ;;
     restart)
       svc_require_yard_running
@@ -742,11 +742,8 @@ prepare_resource() { # <public-verb>
       svc_require_yard_running
       yexec systemctl is-active --quiet "$ORCA_UNIT" \
         || die "Orca is not running; run '$(yard_cmd_hint) orca up' first"
-      if projects_synced; then
-        emit_resource_assessment sync false
-      else
-        emit_resource_assessment sync true "register missing canonical Subyard project roots in Orca"
-      fi
+      # Always run an explicit scan, including diagnostics for stale paths on an otherwise ready catalog.
+      emit_resource_assessment sync true "reconcile Subyard project groups, roots and nested Git checkouts"
       ;;
     down)
       svc_require_yard_running

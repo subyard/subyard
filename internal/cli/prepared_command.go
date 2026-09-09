@@ -291,16 +291,26 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 		if err := execution.refreshAssessment(ctx); err != nil {
 			return "", domain.ActionDelta{}, err
 		}
+		// Another init can finish provisioning while this broader action awaits approval.
+		// Keep its authorized upper bound; execution now performs only the bounded hook retry.
+		if execution.hooksOnly() && prepared.Plan.Assessment.Action == "yard.init.reconcile" {
+			return "yard.init.reconcile", domain.ActionDelta{
+				Changed: execution.hooksApplicable, Consequences: slices.Clone(prepared.Plan.Assessment.Consequences),
+			}, nil
+		}
 		return execution.actionPlan()
 	}
 	prepared.preview = func() {
 		cli.printInitPlan(execution)
-		if operationPlanNoOp(prepared.Plan) && execution.mode == initReconcile {
+		if execution.hooksOnly() {
 			fmt.Fprintln(cli.options.Stdout, "  [ ok ] Everything is already set up")
+			if execution.hooksApplicable {
+				fmt.Fprintln(cli.options.Stdout, "  [ .. ] retry installed project hooks")
+			}
 		}
 	}
 	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (domain.AdapterResult, error) {
-		if cli.options.InitPlatform == nil && execution.mode != initConfigs {
+		if cli.options.InitPlatform == nil && execution.mode != initConfigs && !execution.hooksOnly() {
 			if err := cli.prepareSudoPrivileges(ctx, diagnostics, cli.effectiveUID(), prepared.Definition.Name); err != nil {
 				return domain.AdapterResult{}, err
 			}

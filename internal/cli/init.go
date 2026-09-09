@@ -39,15 +39,16 @@ type initBootstrap struct {
 }
 
 type initExecution struct {
-	loaded         config.Loaded
-	mode           initMode
-	bootstrap      *initBootstrap
-	plan           application.ReconcilePlan
-	platform       ports.InitPlatform
-	powerYards     []domain.Context
-	hostID         string
-	hostIDPending  bool
-	configsChanged bool
+	loaded          config.Loaded
+	mode            initMode
+	bootstrap       *initBootstrap
+	plan            application.ReconcilePlan
+	platform        ports.InitPlatform
+	powerYards      []domain.Context
+	hostID          string
+	hostIDPending   bool
+	configsChanged  bool
+	hooksApplicable bool
 }
 
 type initReporter struct{ output io.Writer }
@@ -380,10 +381,19 @@ func (cli *CLI) prepareInitExecution(
 			return nil, fmt.Errorf("host preflight failed: %w", err)
 		}
 	}
+	if execution.hooksOnly() {
+		execution.hooksApplicable, err = execution.platform.ProjectHooksApplicable(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return execution, nil
 }
 
 func (execution *initExecution) consequences() []string {
+	if execution.hooksOnly() {
+		return []string{"retry installed project hooks once for active resources"}
+	}
 	hostIDConsequences := []string{}
 	if execution.bootstrap != nil {
 		hostIDConsequences = append(hostIDConsequences,
@@ -420,6 +430,9 @@ func (execution *initExecution) actionPlan() (domain.ActionID, domain.ActionDelt
 	changed := execution.plan.Pending() != 0 || execution.bootstrap != nil || execution.hostIDPending
 	switch execution.mode {
 	case initReconcile:
+		if execution.hooksOnly() {
+			action, changed = "yard.init.project-hooks", execution.hooksApplicable
+		}
 	case initConfigs:
 		action = "yard.init.configs"
 		changed = execution.configsChanged || execution.bootstrap != nil || execution.hostIDPending
@@ -434,6 +447,11 @@ func (execution *initExecution) actionPlan() (domain.ActionID, domain.ActionDelt
 		delta.Consequences = execution.consequences()
 	}
 	return action, delta, nil
+}
+
+func (execution *initExecution) hooksOnly() bool {
+	return execution.mode == initReconcile && execution.plan.Pending() == 0 &&
+		execution.bootstrap == nil && !execution.hostIDPending
 }
 
 func (execution *initExecution) refreshAssessment(ctx context.Context) error {
@@ -463,6 +481,12 @@ func (execution *initExecution) refreshAssessment(ctx context.Context) error {
 			return err
 		}
 		execution.plan = plan
+		if execution.hooksOnly() {
+			execution.hooksApplicable, err = execution.platform.ProjectHooksApplicable(ctx)
+			if err != nil {
+				return err
+			}
+		}
 	case initReset:
 	default:
 		return errors.New("invalid init mode")
@@ -486,6 +510,10 @@ func (cli *CLI) printInitPlan(execution *initExecution) {
 }
 
 func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Writer) error {
+	if execution.hooksOnly() {
+		execution.retryProjectHooks(ctx, output)
+		return nil
+	}
 	if execution.bootstrap != nil {
 		if err := config.CreatePersistentFile(
 			execution.loaded.Context.Paths.ConfigHome,
@@ -517,6 +545,7 @@ func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Wri
 	if err := reconciler.Apply(ctx); err != nil {
 		return err
 	}
+	execution.retryProjectHooks(ctx, output)
 	if err := cli.printInitProvisionHint(ctx, execution, output); err != nil {
 		return err
 	}
@@ -529,6 +558,12 @@ func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Wri
 	}
 	fmt.Fprintln(output, "  [ ok ] Subyard initialized")
 	return nil
+}
+
+func (execution *initExecution) retryProjectHooks(ctx context.Context, output io.Writer) {
+	if err := execution.platform.RunProjectHooks(ctx); err != nil {
+		fmt.Fprintf(output, "  [warn] %s\n", err)
+	}
 }
 
 func reconcileMigrationTestVMs(ctx context.Context, platform ports.InitPlatform) error {

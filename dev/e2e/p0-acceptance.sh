@@ -1165,9 +1165,16 @@ source_upgrade_lane() {
 
 power_systemd_lane() {
   local vm="${1:-1}"
-  POWER_SYSTEMD_LANE_VM="$vm"
   run_power_systemd_vm "$vm" dev/e2e/power-reconciler-systemd-255.sh
   run_power_systemd_vm "$vm" dev/e2e/power-reconciler-systemd.sh
+  reboot_verify_lane "$vm"
+}
+
+reboot_verify_lane() {
+  local vm="${1:-1}"
+  # Retained workers may have no power unit after the last yard teardown. Reuse
+  # the owned upgrade fixture, including its runtime snapshot and restoration.
+  POWER_SYSTEMD_LANE_VM="$vm"
   POWER_SYSTEMD_STARTED=1
   run_power_systemd_vm "$vm" dev/e2e/power-reconciler-upgrade.sh prepare "$TOKEN"
   reboot_vm "$vm"
@@ -1175,11 +1182,6 @@ power_systemd_lane() {
   reboot_vm "$vm"
   run_power_systemd_vm "$vm" dev/e2e/power-reconciler-upgrade.sh finish "$TOKEN"
   POWER_SYSTEMD_STARTED=0
-}
-
-reboot_verify_lane() {
-  reboot_vm 1
-  reboot_vm 1
 }
 
 peer_lane() {
@@ -1322,7 +1324,12 @@ case "$P0_LANE" in
     run_phase power-systemd power_systemd_lane 1
     run_phase cleanup cleanup_lane
     ;;
-  reboot-verify) run_phase reboot-verify reboot_verify_lane ;;
+  reboot-verify)
+    run_phase capacity-preflight run_vm 1 capacity-preflight
+    run_phase reboot-verify-platform run_vm 1 real-incus
+    run_phase reboot-verify reboot_verify_lane 1
+    run_phase cleanup cleanup_lane
+    ;;
   peer)
     run_phase capacity-preflight preflight_lane
     run_phase peer peer_lane

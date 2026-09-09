@@ -179,6 +179,7 @@ func TestCoreActionRegistryClassifiesRemainingPublicCommandVariants(t *testing.T
 		default_ domain.ConfirmationDefault
 	}{
 		{action: "yard.init.reconcile", effect: domain.ActionMutation, recovery: domain.RecoveryRecreatable, policy: domain.ActionConfirmationPromptDefaultYes, default_: domain.ConfirmationDefaultYes},
+		{action: "yard.init.project-hooks", effect: domain.ActionBoundedWrite, recovery: domain.RecoveryNotNeeded, policy: domain.ActionConfirmationNever},
 		{action: "yard.init.configs", effect: domain.ActionMutation, recovery: domain.RecoveryReversible, policy: domain.ActionConfirmationPromptDefaultYes, default_: domain.ConfirmationDefaultYes},
 		{action: "yard.init.reset", effect: domain.ActionDestruction, recovery: domain.RecoveryIrreversible, policy: domain.ActionConfirmationPromptDefaultNo, default_: domain.ConfirmationDefaultNo},
 		{action: "yard.provision", effect: domain.ActionMutation, recovery: domain.RecoveryRecreatable, policy: domain.ActionConfirmationPromptDefaultYes, default_: domain.ConfirmationDefaultYes},

@@ -94,22 +94,9 @@ for id in alpha-12345678 beta-12345678; do
 done
 install -d -m 0755 /etc/subyard /usr/local/libexec/subyard/projects-changed.d
 : > /etc/subyard/agent-project-hooks
-cat > /usr/local/libexec/subyard/projects-changed <<'DISPATCH'
-#!/usr/bin/env bash
-set -euo pipefail
-status=0
-for hook in /usr/local/libexec/subyard/projects-changed.d/*; do
-  [ -x "$hook" ] || continue
-  "$hook" || status=1
-done
-while IFS= read -r hook; do
-  [ -n "$hook" ] || continue
-  "$hook" || status=1
-done < /etc/subyard/agent-project-hooks
-exit "$status"
-DISPATCH
-chmod 0755 /usr/local/libexec/subyard/projects-changed
 YARD
+"${incus[@]}" file push "$ROOT/config/projects-changed.sh" \
+  "$instance/usr/local/libexec/subyard/projects-changed" --mode 0755
 if "${incus[@]}" exec "$instance" -- command -v tailscale >/dev/null 2>&1; then
   die 'Tailscale unexpectedly exists inside the yard'
 fi
@@ -288,7 +275,7 @@ grep -Fq 'Orca profile selected for yard init' "$work/status.out" \
   || die 'status did not confirm the selected Orca profile'
 grep -Fq 'automatic project hook ready' "$work/status.out" \
   || die 'status did not confirm automatic project hook readiness'
-grep -Fq 'projects registered: 3/3' "$work/status.out" \
+grep -Fq 'checkouts registered: 3/3' "$work/status.out" \
   || die 'status did not report canonical project registration counts'
 restart_output="$(run_orca restart)"
 case "$restart_output" in

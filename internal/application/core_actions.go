@@ -115,6 +115,11 @@ func NewCoreActionRegistry() (*domain.ActionRegistry, error) {
 			Recovery: domain.RecoveryRecreatable,
 		},
 		{
+			Action: "yard.init.project-hooks", Summary: "Retry installed project hooks", Effect: domain.ActionBoundedWrite,
+			Impacts:  []domain.ActionImpact{domain.ImpactYardRuntime},
+			Recovery: domain.RecoveryNotNeeded,
+		},
+		{
 			Action: "yard.init.configs", Summary: "Refresh yard agent configuration", Effect: domain.ActionMutation,
 			Impacts:  []domain.ActionImpact{domain.ImpactYardRuntime},
 			Recovery: domain.RecoveryReversible,

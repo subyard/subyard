@@ -178,7 +178,10 @@ set -euo pipefail
 printf 'curl' >>"${FAKE_LOG:?}"
 printf ' %q' "$@" >>"$FAKE_LOG"
 printf '\n' >>"$FAKE_LOG"
-[ "${AI_OBSERVER_FAKE_HTTP_FAIL:-0}" != 1 ] || exit 22
+if [ "${AI_OBSERVER_FAKE_HTTP_FAIL:-0}" = 1 ]; then
+  printf 'probe-output-should-stay-private\n' >&2
+  exit 22
+fi
 [ "$(cat "${AI_OBSERVER_FAKE_ROOT:?}/containers/subyard-ai-observer/running" 2>/dev/null)" = true ]
 [ "${*: -1}" = http://127.0.0.1:8080/health ]
 printf '{"status":"ok"}\n'
@@ -320,6 +323,25 @@ fi
 printf 'tampered\n' >"$container/spec"
 if "$check" >/dev/null 2>&1; then fail 'check accepted container configuration drift'; fi
 printf 'stale-spec\n' >"$container/spec"
+
+cat >"$TMP/bin/sleep" <<'SH'
+#!/usr/bin/env bash
+# Keep the failed-readiness retry regression independent of wall-clock waiting.
+exit 0
+SH
+chmod +x "$TMP/bin/sleep"
+if AI_OBSERVER_FAKE_HTTP_FAIL=1 run_hook "$test_root" "$dev_home" \
+  'claude codex aiobserver' >"$TMP/readiness-failure.log" 2>&1; then
+  fail 'unhealthy replacement unexpectedly passed readiness'
+fi
+grep -Fxq 'ai-observer-check: HTTP readiness failed' "$TMP/readiness-failure.log" \
+  || fail 'failed provision omitted the final readiness predicate before rollback'
+! grep -Fq 'probe-output-should-stay-private' "$TMP/readiness-failure.log" \
+  || fail 'failed provision exposed raw probe output'
+[ "$(cat "$container/spec")" = stale-spec ] \
+  || fail 'readiness failure did not restore the previous container'
+[ "$(cat "$state/data/sentinel")" = 'persistent data' ] \
+  || fail 'readiness failure damaged persistent data'
 
 printf 'foreign\n' >"$container/owner"
 : >"$FAKE_LOG"

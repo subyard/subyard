@@ -289,25 +289,17 @@ for _agent in ${CODING_TOOL_INTEGRATIONS:-}; do
   case "$_hook" in *[!A-Za-z0-9._/-]*|'') die "$_agent project hook command is invalid" ;; esac
   _project_hooks+=("$_hook")
 done
-incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- bash -euo pipefail -s <<'EOS'
-install -d -m 0755 /etc/subyard /usr/local/libexec/subyard/projects-changed.d
-cat > /usr/local/libexec/subyard/projects-changed <<'DISPATCH'
-#!/usr/bin/env bash
-set -euo pipefail
-status=0
-for hook in /usr/local/libexec/subyard/projects-changed.d/*; do
-  [ -x "$hook" ] || continue
-  "$hook" || status=1
-done
-while IFS= read -r hook; do
-  [ -n "$hook" ] || continue
-  "$hook" || status=1
-done < /etc/subyard/agent-project-hooks
-exit "$status"
-DISPATCH
-chmod 0755 /usr/local/libexec/subyard/projects-changed
-chown root:root /usr/local/libexec/subyard/projects-changed
-EOS
+incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- sh -euc '
+  install -d -m 0755 /etc/subyard /usr/local/libexec/subyard/projects-changed.d
+  temporary=$(mktemp /usr/local/libexec/subyard/.projects-changed.XXXXXX)
+  cleanup_dispatcher() { rm -f -- "$temporary"; }
+  trap cleanup_dispatcher EXIT HUP INT TERM
+  cat >"$temporary"
+  chmod 0755 "$temporary"
+  chown root:root "$temporary"
+  mv -f -- "$temporary" /usr/local/libexec/subyard/projects-changed
+  trap - EXIT HUP INT TERM
+' < "$SCRIPT_DIR/../config/projects-changed.sh" || die "could not install project lifecycle dispatcher"
 printf '%s\n' "${_project_hooks[@]}" \
   | incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- sh -euc '
       temporary=$(mktemp /etc/subyard/.agent-project-hooks.XXXXXX)

@@ -147,7 +147,7 @@ grep -Fq '"action":"up","changed":true' "$TMP/orca-up-plan.json" || fail 'Orca u
 grep -Fq '"action":"pair","changed":true' "$TMP/orca-pair-plan.json" || fail 'Orca pair action is unreachable'
 grep -Fq '"action":"restart","changed":true' "$TMP/orca-restart-plan.json" \
   || fail 'Orca restart action is unreachable'
-grep -Fq '"action":"sync","changed":false' "$TMP/orca-sync-plan.json" || fail 'converged Orca sync is not a no-op'
+grep -Fq '"action":"sync","changed":true' "$TMP/orca-sync-plan.json" || fail 'explicit Orca sync must run its bounded reconciliation'
 grep -Fq '"action":"down","changed":true' "$TMP/orca-down-plan.json" || fail 'Orca down action is unreachable'
 grep -Fq '"action":"is-up","changed":false' "$TMP/orca-is-up-plan.json" || fail 'Orca is-up read is unreachable'
 grep -Fq '"action":"logs","changed":false' "$TMP/orca-logs-plan.json" || fail 'Orca logs action is unreachable'

@@ -87,8 +87,8 @@ func TestDirectAndRPCPreparationParity(t *testing.T) {
 			setup: preparationHeldTestVMSlot,
 		},
 		{
-			name: "converged init", command: "init", action: "yard.init.reconcile",
-			changed: false, target: domain.TargetLocalOwner, setup: preparationConvergedInit, noPrompt: true,
+			name: "converged init", command: "init", action: "yard.init.project-hooks",
+			changed: true, target: domain.TargetLocalOwner, setup: preparationConvergedInit, noPrompt: true,
 		},
 	}
 

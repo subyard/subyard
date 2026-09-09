@@ -139,6 +139,10 @@ func TestRegistryNamedE2EChecksUsePreparedRunnableEntrypoints(t *testing.T) {
 			"dev/agent-e2e.sh", "--purpose", "orca-resource", "--vm", "1", "--",
 			"env", "SUBYARD_E2E_ORCA_RESOURCE=1", "./tests/real-host/orca-resource.sh",
 		},
+		"e2e:orca-projects": {
+			"dev/agent-e2e.sh", "--purpose", "orca-projects", "--vm", "1", "--",
+			"env", "SUBYARD_E2E_ORCA_PROJECTS=1", "./tests/real-host/orca-projects.sh",
+		},
 		"e2e:ssh-credential-peer": {
 			"dev/agent-e2e.sh", "--purpose", "ssh-credential-peer", "--vm", "1", "--",
 			"bash", "tests/real-host/adapter-contracts.sh", "--check", "ssh-credential-peer",
@@ -588,6 +592,9 @@ func TestPolicyRealHostTestPathsSelectOwningChecksWithoutRiskDomains(t *testing.
 		{"tests/real-host/credential-tools.sh", "e2e:credential-tools"},
 		{"tests/real-host/incus-contract.sh", "p0:real-incus"},
 		{"tests/real-host/orca-resource.sh", "e2e:orca-resource"},
+		{"tests/real-host/orca-projects.sh", "e2e:orca-projects"},
+		{"tests/real-host/orca-projects-helper.py", "e2e:orca-projects"},
+		{"tests/orca_registration/test_reconcile.py", "shell:orca-profile-resource"},
 		{"tests/real-host/ssh-credential-peer.sh", "e2e:ssh-credential-peer"},
 		{"tests/real-host/ssh-rpc.sh", "e2e:ssh-rpc"},
 	}

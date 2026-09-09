@@ -1051,6 +1051,91 @@ grep -Fq 'OWNER_DIAGNOSTIC_DEV_UID="${P0_E2E_DIAGNOSTIC_DEV_UID:-1001}"' \
   && grep -Fq 'chown -R "$OWNER_DIAGNOSTIC_DEV_UID:$OWNER_DIAGNOSTIC_DEV_UID" "$bound"' \
     "$ROOT/dev/e2e/p0-guest.sh" \
   || fail "P0 bind fixture is not owned by its configured diagnostic yard UID"
+owner_sink_cleanup_function="$(sed -n '/^cleanup_owner_test_vms_sink() {/,/^}/p' \
+  "$ROOT/dev/e2e/p0-guest.sh")"
+owner_capacity_cleanup_function="$(sed -n '/^cleanup_owner_capacity_state() {/,/^}/p' \
+  "$ROOT/dev/e2e/p0-guest.sh")"
+for owner_sink_scenario in success absent timer-failure service-failure foreign-service foreign-timer missing-service; do
+  owner_sink_fixture="$TMP/owner-sink-$owner_sink_scenario"
+  install -d -m 0700 "$owner_sink_fixture"
+  OWNER_SINK_SCENARIO="$owner_sink_scenario" OWNER_SINK_FIXTURE="$owner_sink_fixture" \
+    OWNER_SINK_CLEANUP_FUNCTION="$owner_sink_cleanup_function" \
+    OWNER_CAPACITY_CLEANUP_FUNCTION="$owner_capacity_cleanup_function" \
+    OWNER_SINK_TIMER_TEMPLATE="$ROOT/config/systemd/subyard-test-vms-host-sink.timer.in" bash -c '
+      set -euo pipefail
+      OWNER_ROOT="$OWNER_SINK_FIXTURE/state"
+      OWNER_DATA_ROOT="$OWNER_ROOT/subyard"
+      OWNER_TEST_VMS_SINK="$OWNER_SINK_FIXTURE/test-vms-host-sink"
+      OWNER_TEST_VMS_SINK_SERVICE_NAME=subyard-test-vms-host-sink.service
+      OWNER_TEST_VMS_SINK_SERVICE="$OWNER_SINK_FIXTURE/$OWNER_TEST_VMS_SINK_SERVICE_NAME"
+      OWNER_TEST_VMS_SINK_TIMER_NAME=subyard-test-vms-host-sink.timer
+      OWNER_TEST_VMS_SINK_TIMER="$OWNER_SINK_FIXTURE/$OWNER_TEST_VMS_SINK_TIMER_NAME"
+      OWNER_TEST_VMS_SINK_TIMER_TEMPLATE="$OWNER_SINK_TIMER_TEMPLATE"
+      OWNER_SINK_LOG="$OWNER_SINK_FIXTURE/calls"
+      install -d -m 0700 "$OWNER_DATA_ROOT"
+      case "$OWNER_SINK_SCENARIO" in
+        absent) ;;
+        missing-service) cp "$OWNER_TEST_VMS_SINK_TIMER_TEMPLATE" "$OWNER_TEST_VMS_SINK_TIMER" ;;
+        *)
+          : > "$OWNER_TEST_VMS_SINK"
+          cp "$OWNER_TEST_VMS_SINK_TIMER_TEMPLATE" "$OWNER_TEST_VMS_SINK_TIMER"
+          printf "%s\n" \
+            "Environment=\"SUBYARD_HOME=$OWNER_DATA_ROOT\"" \
+            "ExecStart=$OWNER_TEST_VMS_SINK _test-vms-host-sink sync" \
+            > "$OWNER_TEST_VMS_SINK_SERVICE"
+          ;;
+      esac
+      if [ "$OWNER_SINK_SCENARIO" = foreign-service ]; then
+        sed -i "s|$OWNER_DATA_ROOT|$OWNER_SINK_FIXTURE/foreign|" \
+          "$OWNER_TEST_VMS_SINK_SERVICE"
+      fi
+      if [ "$OWNER_SINK_SCENARIO" = foreign-timer ]; then
+        printf "\n[Timer]\nUnit=unrelated.service\n" >> "$OWNER_TEST_VMS_SINK_TIMER"
+      fi
+      stat() { printf "0:0\n"; }
+      sudo() {
+        printf "%s\n" "$*" >> "$OWNER_SINK_LOG"
+        case "$*" in
+          "-n systemctl disable --now $OWNER_TEST_VMS_SINK_TIMER_NAME")
+            [ "$OWNER_SINK_SCENARIO" != timer-failure ]
+            ;;
+          "-n systemctl stop $OWNER_TEST_VMS_SINK_SERVICE_NAME")
+            [ "$OWNER_SINK_SCENARIO" != service-failure ]
+            ;;
+          "-n systemctl daemon-reload") ;;
+          "-n find "*) shift 2; command find "$@" ;;
+          *) return 97 ;;
+        esac
+      }
+      p0_capacity_remove_subtree() { printf "remove-subtree\n" >> "$OWNER_SINK_LOG"; }
+      p0_capacity_remove_build_cache() { printf "remove-build-cache\n" >> "$OWNER_SINK_LOG"; }
+      p0_capacity_remove_root_if_empty() { printf "remove-root\n" >> "$OWNER_SINK_LOG"; }
+      eval "$OWNER_SINK_CLEANUP_FUNCTION"
+      eval "$OWNER_CAPACITY_CLEANUP_FUNCTION"
+      set +e
+      cleanup_owner_capacity_state 2> "$OWNER_SINK_FIXTURE/stderr"
+      cleanup_rc=$?
+      set -e
+      case "$OWNER_SINK_SCENARIO" in
+        success)
+          [ "$cleanup_rc" = 0 ]
+          [ ! -e "$OWNER_TEST_VMS_SINK" ] \
+            && [ ! -e "$OWNER_TEST_VMS_SINK_SERVICE" ] \
+            && [ ! -e "$OWNER_TEST_VMS_SINK_TIMER" ]
+          [ "$(grep -c "^remove-" "$OWNER_SINK_LOG")" = 3 ]
+          ;;
+        absent)
+          [ "$cleanup_rc" = 0 ]
+          [ "$(grep -c "^remove-" "$OWNER_SINK_LOG")" = 3 ]
+          ;;
+        *)
+          [ "$cleanup_rc" -ne 0 ]
+          ! grep -q "^remove-" "$OWNER_SINK_LOG" 2>/dev/null
+          [ -d "$OWNER_ROOT" ]
+          ;;
+      esac
+    ' || fail "P0 owner sink cleanup violated $owner_sink_scenario isolation"
+done
 grep -Fq 'systemctl start subyard-test-vms-host-sink.service' \
   "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
   && grep -Fq 'test-vms-broker-incidents' "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
@@ -2357,8 +2442,87 @@ grep -Fq 'POWER_RETRY_WRAPPER=' "$ROOT/dev/e2e/p0-source-upgrade.sh" \
     "$ROOT/dev/e2e/p0-source-upgrade.sh" \
   && ! grep -Fq 'ExecStartPre=' "$ROOT/dev/e2e/p0-source-upgrade.sh" \
   || fail "P0 source-upgrade TEMPFAIL probe does not exercise the main reconciler process"
-power_systemd_lane_body="$(sed -n '/^power_systemd_lane() {/,/^}/p' \
-  "$ROOT/dev/e2e/p0-acceptance.sh")"
+# Exercise the actual standalone dispatch with VM boundaries replaced by a strict
+# fixture state machine. An unprepared reboot must fail, even on an empty host.
+reboot_lane_dispatch="$(awk '
+  /^case "\$P0_LANE" in$/ { block = ""; capture = 1 }
+  capture { block = block $0 ORS }
+  /^esac$/ { if (capture) { result = block; capture = 0 } }
+  END { printf "%s", result }
+' "$ROOT/dev/e2e/p0-acceptance.sh")"
+reboot_lane_function="$(sed -n '/^reboot_verify_lane() {/,/^}/p' "$ROOT/dev/e2e/p0-acceptance.sh")"
+power_systemd_lane_body="$(sed -n '/^power_systemd_lane() {/,/^}/p' "$ROOT/dev/e2e/p0-acceptance.sh")"
+for reboot_scenario in reboot-verify:none power-systemd:none reboot-verify:prepare reboot-verify:reboot reboot-verify:resume reboot-verify:finish; do
+  reboot_failure="${reboot_scenario#*:}"
+  reboot_fixture_log="$TMP/reboot-fixture-$reboot_scenario.log"
+  set +e
+  REBOOT_LANE_DISPATCH="$reboot_lane_dispatch" REBOOT_LANE_FUNCTION="$reboot_lane_function" \
+    POWER_LANE_FUNCTION="$power_systemd_lane_body" REBOOT_FAILURE="$reboot_failure" \
+    REBOOT_LANE="${reboot_scenario%%:*}" bash -c '
+      set -euo pipefail
+      P0_LANE="$REBOOT_LANE"
+      TOKEN=123
+      POWER_SYSTEMD_STARTED=0
+      POWER_SYSTEMD_LANE_VM=1
+      platform=0
+      fixture=absent
+      reboots=0
+      run_phase() { shift; "$@"; }
+      run_vm() {
+        case "$*" in
+          "1 capacity-preflight") printf "capacity\n" ;;
+          "1 real-incus") platform=1; printf "platform\n" ;;
+          *) exit 41 ;;
+        esac
+      }
+      run_power_systemd_vm() {
+        case "$*" in
+          "1 dev/e2e/power-reconciler-systemd-255.sh") printf "systemd255\n"; return ;;
+          "1 dev/e2e/power-reconciler-systemd.sh") printf "systemd\n"; return ;;
+        esac
+        [ "$1" = 1 ] && [ "$2" = dev/e2e/power-reconciler-upgrade.sh ] && [ "$4" = 123 ] || exit 42
+        [ "$platform" = 1 ] && [ "$POWER_SYSTEMD_STARTED" = 1 ] || exit 43
+        printf "%s\n" "$3"
+        [ "$REBOOT_FAILURE" != "$3" ] || exit 45
+        case "$3:$fixture:$reboots" in
+          prepare:absent:0) fixture=prepared ;;
+          resume:prepared:1) fixture=resumed ;;
+          finish:resumed:2) fixture=restored ;;
+          *) exit 44 ;;
+        esac
+      }
+      reboot_vm() {
+        [ "$1" = 1 ] && [ "$POWER_SYSTEMD_STARTED" = 1 ] || exit 46
+        case "$fixture:$reboots" in prepared:0|resumed:1) ;; *) exit 47 ;; esac
+        printf "reboot\n"
+        [ "$REBOOT_FAILURE" != reboot ] || exit 45
+        reboots=$((reboots + 1))
+      }
+      cleanup_lane() {
+        [ "$fixture" = restored ] && [ "$POWER_SYSTEMD_STARTED" = 0 ] || exit 48
+        printf "cleanup\n"
+      }
+      trap '\''printf "exit=%s armed=%s\n" "$?" "$POWER_SYSTEMD_STARTED"'\'' EXIT
+      eval "$REBOOT_LANE_FUNCTION"
+      eval "$POWER_LANE_FUNCTION"
+      eval "$REBOOT_LANE_DISPATCH"
+    ' >"$reboot_fixture_log" 2>&1
+  reboot_fixture_rc=$?
+  set -e
+  if [ "$reboot_failure" = none ]; then
+    [ "$reboot_fixture_rc" = 0 ] \
+      || fail 'standalone reboot lane did not prepare its own power fixture before rebooting'
+    reboot_expected=$'capacity\nplatform\n'
+    [ "${reboot_scenario%%:*}" != power-systemd ] || reboot_expected+=$'systemd255\nsystemd\n'
+    reboot_expected+=$'prepare\nreboot\nresume\nreboot\nfinish\ncleanup\nexit=0 armed=0'
+    [ "$(cat "$reboot_fixture_log")" = "$reboot_expected" ] \
+      || fail 'standalone reboot lane lost ordered preparation, two reboots, or runtime restoration'
+  else
+    [ "$reboot_fixture_rc" = 45 ] && tail -n 1 "$reboot_fixture_log" | grep -Fxq 'exit=45 armed=1' \
+      || fail "standalone reboot lane concealed $reboot_failure failure or disarmed fixture recovery"
+  fi
+done
+
 grep -Fq 'run_power_systemd_vm "$vm" dev/e2e/power-reconciler-systemd.sh' \
     <<<"$power_systemd_lane_body" \
   && grep -Fq 'run_power_systemd_vm "$vm" dev/e2e/power-reconciler-systemd-255.sh' \
@@ -2376,17 +2540,17 @@ grep -Fq '"$RELEASE_ROOT/subyard-install.sh" --version "$CANDIDATE_VERSION" --ye
   || fail "P0 pre-v2 upgrade does not use the candidate-owned v2 bridge"
 power_prepare_line="$(grep -nF \
   'run_power_systemd_vm "$vm" dev/e2e/power-reconciler-upgrade.sh prepare "$TOKEN"' \
-  <<<"$power_systemd_lane_body" | cut -d: -f1 || true)"
-power_first_reboot_line="$(grep -nF 'reboot_vm "$vm"' <<<"$power_systemd_lane_body" \
+  <<<"$reboot_lane_function" | cut -d: -f1 || true)"
+power_first_reboot_line="$(grep -nF 'reboot_vm "$vm"' <<<"$reboot_lane_function" \
   | sed -n '1p' | cut -d: -f1 || true)"
 power_resume_line="$(grep -nF \
   'run_power_systemd_vm "$vm" dev/e2e/power-reconciler-upgrade.sh resume "$TOKEN"' \
-  <<<"$power_systemd_lane_body" | cut -d: -f1 || true)"
-power_second_reboot_line="$(grep -nF 'reboot_vm "$vm"' <<<"$power_systemd_lane_body" \
+  <<<"$reboot_lane_function" | cut -d: -f1 || true)"
+power_second_reboot_line="$(grep -nF 'reboot_vm "$vm"' <<<"$reboot_lane_function" \
   | sed -n '2p' | cut -d: -f1 || true)"
 power_finish_line="$(grep -nF \
   'run_power_systemd_vm "$vm" dev/e2e/power-reconciler-upgrade.sh finish "$TOKEN"' \
-  <<<"$power_systemd_lane_body" | cut -d: -f1 || true)"
+  <<<"$reboot_lane_function" | cut -d: -f1 || true)"
 [[ "$power_prepare_line" =~ ^[0-9]+$ ]] \
   && [[ "$power_first_reboot_line" =~ ^[0-9]+$ ]] \
   && [[ "$power_resume_line" =~ ^[0-9]+$ ]] \

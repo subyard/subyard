@@ -1197,6 +1197,9 @@ jq -e '."ip-forward-no-drop" == true' /etc/docker/daemon.json >/dev/null \
 	if exists && strings.TrimSpace(string(link.Stdout)) == "/mnt/host/agent-sessions/opencode/storage" {
 		return false, nil
 	}
+	if ok, err := runtime.projectHooksConverged(ctx); err != nil || !ok {
+		return false, err
+	}
 	return marker == version && (!codexSelected || codexMarker == codexVersion), nil
 }
 

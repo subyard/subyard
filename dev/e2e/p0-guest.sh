@@ -28,6 +28,12 @@ OWNER_ROOT="$P0_CAPACITY_STATE_ROOT/owner"
 OWNER_DATA_ROOT="$OWNER_ROOT/subyard"
 OWNER_CONFIG_HOME="$OWNER_ROOT/config"
 OWNER_YARD_DIR="$OWNER_CONFIG_HOME/yards"
+OWNER_TEST_VMS_SINK="/usr/local/libexec/subyard/test-vms-host-sink"
+OWNER_TEST_VMS_SINK_SERVICE_NAME="subyard-test-vms-host-sink.service"
+OWNER_TEST_VMS_SINK_SERVICE="/etc/systemd/system/$OWNER_TEST_VMS_SINK_SERVICE_NAME"
+OWNER_TEST_VMS_SINK_TIMER_NAME="subyard-test-vms-host-sink.timer"
+OWNER_TEST_VMS_SINK_TIMER="/etc/systemd/system/$OWNER_TEST_VMS_SINK_TIMER_NAME"
+OWNER_TEST_VMS_SINK_TIMER_TEMPLATE="$ROOT/config/systemd/subyard-test-vms-host-sink.timer.in"
 RENAME_BASE_REVISION="7c67ee3f423cf9f1596c2f5191f462d2b70adcdc"
 RENAME_BASE_ROOT="$OWNER_ROOT/rename-base"
 PEER_SSH_DIR="$PEER_ROOT/ssh"
@@ -227,11 +233,64 @@ owner_cleanup() {
         || cleanup_failed=1
     done < <(incus image list --project default --format csv -c f)
   fi
-  p0_capacity_remove_subtree "$OWNER_ROOT" || cleanup_failed=1
-  p0_capacity_remove_build_cache || cleanup_failed=1
-  p0_capacity_remove_root_if_empty || cleanup_failed=1
+  cleanup_owner_capacity_state || cleanup_failed=1
   [ "$cleanup_failed" = 0 ] || rc=3
   exit "$rc"
+}
+
+cleanup_owner_test_vms_sink() {
+  local path present=0 touched=0 unsafe=0
+  for path in "$OWNER_TEST_VMS_SINK" "$OWNER_TEST_VMS_SINK_SERVICE" \
+    "$OWNER_TEST_VMS_SINK_TIMER"; do
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      present=1
+      [ -f "$path" ] && [ ! -L "$path" ] \
+        && [ "$(stat -c '%u:%g' "$path" 2>/dev/null)" = 0:0 ] \
+        || unsafe=1
+    fi
+  done
+  if [ "$present" = 1 ]; then
+    [ -e "$OWNER_TEST_VMS_SINK_SERVICE" ] \
+      || unsafe=1
+  fi
+  if [ -e "$OWNER_TEST_VMS_SINK_TIMER" ]; then
+    cmp -s "$OWNER_TEST_VMS_SINK_TIMER_TEMPLATE" "$OWNER_TEST_VMS_SINK_TIMER" \
+      || unsafe=1
+  fi
+  if [ -e "$OWNER_TEST_VMS_SINK_SERVICE" ] && [ "$unsafe" = 0 ]; then
+    grep -Fqx "Environment=\"SUBYARD_HOME=$OWNER_DATA_ROOT\"" \
+      "$OWNER_TEST_VMS_SINK_SERVICE" \
+      && grep -Fqx "ExecStart=$OWNER_TEST_VMS_SINK _test-vms-host-sink sync" \
+        "$OWNER_TEST_VMS_SINK_SERVICE" \
+      || unsafe=1
+  fi
+  [ "$unsafe" = 0 ] \
+    || { printf 'p0-guest: refusing unsafe owner test-vms sink artifacts\n' >&2; return 1; }
+  if [ -e "$OWNER_TEST_VMS_SINK_TIMER" ]; then
+    sudo -n systemctl disable --now "$OWNER_TEST_VMS_SINK_TIMER_NAME" >/dev/null 2>&1 \
+      || return 1
+    touched=1
+  fi
+  if [ -e "$OWNER_TEST_VMS_SINK_SERVICE" ]; then
+    sudo -n systemctl stop "$OWNER_TEST_VMS_SINK_SERVICE_NAME" >/dev/null 2>&1 \
+      || return 1
+    touched=1
+  fi
+  for path in "$OWNER_TEST_VMS_SINK_TIMER" "$OWNER_TEST_VMS_SINK_SERVICE" \
+    "$OWNER_TEST_VMS_SINK"; do
+    if [ -e "$path" ]; then
+      sudo -n find "$path" -maxdepth 0 -type f -delete || return 1
+      touched=1
+    fi
+  done
+  [ "$touched" = 0 ] || sudo -n systemctl daemon-reload >/dev/null 2>&1
+}
+
+cleanup_owner_capacity_state() {
+  cleanup_owner_test_vms_sink || return
+  p0_capacity_remove_subtree "$OWNER_ROOT" || return
+  p0_capacity_remove_build_cache || return
+  p0_capacity_remove_root_if_empty
 }
 
 prepare_owner_go_cache() {

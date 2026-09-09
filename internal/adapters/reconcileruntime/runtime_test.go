@@ -529,7 +529,7 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 			{Result: ports.InstanceExecResult{Stdout: []byte(" 7f 45 4c 46\n")}},
 			{Result: ports.InstanceExecResult{Stdout: []byte("ccusage 1.2.3\n")}},
 			{Result: ports.InstanceExecResult{Stdout: []byte(configHash + "  config\n")}},
-			{}, {Result: ports.InstanceExecResult{ExitCode: 1}, Err: errors.New("not a link")},
+			{}, {Result: ports.InstanceExecResult{ExitCode: 1}, Err: errors.New("not a link")}, {},
 		}
 	}
 	instructions := filepath.Join(t.TempDir(), "AGENTS.md")
@@ -547,7 +547,8 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 	}
 	runtime := Runtime{
 		Incus: incus, Executor: incus,
-		Yard: domain.Context{IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev"},
+		RepositoryRoot: "../../..",
+		Yard:           domain.Context{IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev"},
 		Environment: []string{
 			"CODING_TOOL_INTEGRATIONS=opencode", "CCUSAGE_VERSION=1.2.3",
 			"HOST_OPENCODE_AGENTS_MD=" + instructions,
@@ -593,6 +594,14 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 
 	incus.ExecSteps = steps("regular file|777|0:0", digest)
 	assertStage(t, runtime, "provision", false, "wrong ccusage mode")
+	incus.ExecSteps = steps("regular file|755|0:0", linkedDigest)
+	assertStage(t, runtime, "provision", true, "other provisioning facts remain ready")
+	incus.ExecSteps = steps("regular file|755|0:0", linkedDigest)
+	incus.ExecSteps[len(incus.ExecSteps)-1] = testkit.IncusExecStep{
+		Result: ports.InstanceExecResult{ExitCode: 1},
+		Err:    errors.New("dispatcher drift"),
+	}
+	assertStage(t, runtime, "provision", false, "missing or stale project dispatcher")
 
 	incus.Reconcile.Instance = ports.InstanceInfo{Status: "Stopped", Config: map[string]string{
 		"user.subyard.managed": "true", "user.subyard.initialized": "true",

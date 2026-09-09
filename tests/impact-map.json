@@ -129,6 +129,7 @@
     "orca-profile": [
       "shell:orca-profile-resource",
       "e2e:orca-resource",
+      "e2e:orca-projects",
       "p0:profile-resource"
     ],
     "profile-generic": [
@@ -154,6 +155,8 @@
     "real-adapter-contract": ["e2e:adapter-contracts"],
     "real-credential-contract": ["e2e:credential-tools"],
     "real-orca-contract": ["e2e:orca-resource"],
+    "real-orca-projects": ["e2e:orca-projects"],
+    "orca-registration-tests": ["shell:orca-profile-resource"],
     "real-ssh-credential-contract": ["e2e:ssh-credential-peer"],
     "real-ssh-rpc-contract": ["e2e:ssh-rpc"],
     "selector-self": [
@@ -292,6 +295,20 @@
       "priority": 981,
       "pattern": "^tests/real-host/orca-resource\\.sh$",
       "check_sets": ["real-orca-contract"],
+      "risk_domains": []
+    },
+    {
+      "id": "real-orca-projects-test",
+      "priority": 980,
+      "pattern": "^tests/real-host/orca-projects(-helper)?\\.(sh|py)$",
+      "check_sets": ["real-orca-projects"],
+      "risk_domains": []
+    },
+    {
+      "id": "orca-registration-test",
+      "priority": 980,
+      "pattern": "^tests/orca_registration/.*\\.py$",
+      "check_sets": ["orca-registration-tests"],
       "risk_domains": []
     },
     {

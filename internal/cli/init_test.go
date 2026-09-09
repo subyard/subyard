@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -87,6 +88,18 @@ type initPlatformFixture struct {
 	configsConverged bool
 	configChecks     []bool
 	teardowns        int
+	projectHooks     int
+	projectHooksErr  error
+	hooksApplicable  bool
+}
+
+func (fixture *initPlatformFixture) ProjectHooksApplicable(context.Context) (bool, error) {
+	return fixture.hooksApplicable, nil
+}
+
+func (fixture *initPlatformFixture) RunProjectHooks(context.Context) error {
+	fixture.projectHooks++
+	return fixture.projectHooksErr
 }
 
 func (fixture *initPlatformFixture) ConfigsConverged(context.Context) (bool, error) {
@@ -106,7 +119,7 @@ func newInitPlatformFixture() *initPlatformFixture {
 		converged[id] = true
 	}
 	converged[ports.ReconcileStageProject] = false
-	return &initPlatformFixture{converged: converged}
+	return &initPlatformFixture{converged: converged, hooksApplicable: true}
 }
 
 func TestParseInitProfile(t *testing.T) {
@@ -142,7 +155,8 @@ func TestInitExecutionBuildsTypedActionDelta(t *testing.T) {
 		action    domain.ActionID
 		changed   bool
 	}{
-		{name: "converged", execution: initExecution{mode: initReconcile}, action: "yard.init.reconcile"},
+		{name: "converged infrastructure retries hooks", execution: initExecution{mode: initReconcile, hooksApplicable: true}, action: "yard.init.project-hooks", changed: true},
+		{name: "stopped yard skips hooks", execution: initExecution{mode: initReconcile}, action: "yard.init.project-hooks"},
 		{
 			name: "pending reconcile",
 			execution: initExecution{mode: initReconcile, plan: application.ReconcilePlan{
@@ -954,9 +968,13 @@ func TestNativeInitOwnsPlanResumeAndFinalization(t *testing.T) {
 		!strings.Contains(stdout.String(), "[do  ] Provision the yard") {
 		t.Fatalf("init plan omitted live stage state:\n%s", stdout.String())
 	}
+	if platform.projectHooks != 1 {
+		t.Fatalf("successful init did not retry project hooks once: %d", platform.projectHooks)
+	}
 
 	stdout.Reset()
 	stderr.Reset()
+	platform.projectHooksErr = errors.New("optional hook failed")
 	program, err = New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"init", "--yes"},
 		Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
@@ -971,6 +989,10 @@ func TestNativeInitOwnsPlanResumeAndFinalization(t *testing.T) {
 	}
 	if len(platform.applied) != 2 {
 		t.Fatalf("no-op init reapplied stages: %v", platform.applied)
+	}
+	if platform.projectHooks != 2 || !strings.Contains(stdout.String()+stderr.String(), "[warn] optional hook failed") {
+		t.Fatalf("no-op init did not retry with a non-blocking warning: attempts=%d stdout=%q stderr=%q",
+			platform.projectHooks, stdout.String(), stderr.String())
 	}
 }
 
@@ -1100,5 +1122,45 @@ func TestNativeInitModesStayInOneConfirmedWorkflow(t *testing.T) {
 	if platform.configs != 1 || platform.teardowns != 1 ||
 		!slices.Contains(platform.preflightFresh, true) {
 		t.Fatalf("init modes bypassed native workflow: %#v", platform)
+	}
+}
+
+func TestPreparedInitAllowsShrinkToHooksAndRejectsExpansion(t *testing.T) {
+	for _, shrink := range []bool{true, false} {
+		t.Run(fmt.Sprintf("shrink=%t", shrink), func(t *testing.T) {
+			root, environment, stateDirectory := preparationParityFixture(t)
+			environment, incus, data, fixture := preparationConvergedInit(t, root, environment, stateDirectory)
+			platform := fixture.(*initPlatformFixture)
+			platform.converged[ports.ReconcileStageProject] = !shrink
+			program, err := New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root,
+				Incus: incus, ProjectData: data, InitPlatform: platform})
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := program.loadContext("default")
+			if err != nil {
+				t.Fatal(err)
+			}
+			definition, _ := program.manifest.Lookup("init")
+			prepared, err := program.prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer prepared.Close()
+			orchestrator := program.operationOrchestrator(prepared.Plan.OperationID, prepared.Loaded, nil, &prepared.Definition)
+			prepared.Plan, err = orchestrator.Confirm(context.Background(), prepared.Plan, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			platform.converged[ports.ReconcileStageProject] = shrink
+			_, err = prepared.Execute(context.Background(), orchestrator, io.Discard)
+			if shrink {
+				if err != nil || platform.projectHooks != 1 || len(platform.applied) != 0 {
+					t.Fatalf("safe shrink did not run only hooks: error=%v hooks=%d applied=%v", err, platform.projectHooks, platform.applied)
+				}
+			} else if !errors.Is(err, domain.ErrPlanStale) || platform.projectHooks != 0 || len(platform.applied) != 0 {
+				t.Fatalf("unconfirmed expansion was accepted: error=%v hooks=%d applied=%v", err, platform.projectHooks, platform.applied)
+			}
+		})
 	}
 }

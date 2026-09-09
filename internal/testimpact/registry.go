@@ -171,6 +171,16 @@ func BuiltInRegistry() (Registry, error) {
 			BudgetSeconds: 1800,
 			Rationale:     "opt-in Orca resource acceptance on a disposable leased VM",
 		},
+		Check{
+			ID:   "e2e:orca-projects",
+			Tier: "T3",
+			Argv: []string{
+				"dev/agent-e2e.sh", "--purpose", "orca-projects", "--vm", "1", "--",
+				"env", "SUBYARD_E2E_ORCA_PROJECTS=1", "./tests/real-host/orca-projects.sh",
+			},
+			BudgetSeconds: 3600,
+			Rationale:     "production local and SSH project lifecycle, grouped checkout diffs and persistence on stock Orca",
+		},
 	)
 
 	return ValidateRegistry(checks)
