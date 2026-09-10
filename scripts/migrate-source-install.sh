@@ -623,7 +623,7 @@ valid_relative() {
 
 copy_manifest_scope() {
   local scope="$1" root="$2" source_base source destination transform source_root_path
-  local install_source normalize_index=0
+  local install_source normalize_index=0 normalized_pending normalized_temporary mode
   while IFS=$'\t' read -r source_base source destination transform; do
     [ -n "$source" ] || continue
     valid_relative "$source" && valid_relative "$destination" \
@@ -636,11 +636,27 @@ copy_manifest_scope() {
     esac
     install_source="$source_root_path/$source"
     if [ "$transform" = "yard-template-e2e-vms-to-test-vms" ]; then
+      owned_regular "$install_source" \
+        || fail "migration source is not an operator-owned regular file: $install_source"
+      mode="$(stat -c '%a' -- "$install_source")"
+      (( (8#$mode & 8#022) == 0 )) \
+        || fail "migration source is group/world writable: $install_source"
       normalize_index=$((normalize_index + 1))
-      install_source="$work/normalized-yard-$normalize_index.env"
-      "$candidate_yard" _migrate normalize-yard-config \
-        "$source_root_path/$source" "$install_source" \
+      normalized_pending="$work/normalized-yard-$normalize_index.pending"
+      normalized_temporary="$normalized_pending.tmp.$$"
+      [ ! -e "$normalized_pending" ] && [ ! -L "$normalized_pending" ] &&
+        [ ! -e "$normalized_temporary" ] && [ ! -L "$normalized_temporary" ] \
+        || fail "normalized yard config pending path already exists"
+      install -m 0600 /dev/null "$normalized_temporary"
+      "$candidate_yard" _migrate normalize-yard-config < "$install_source" > "$normalized_temporary" \
         || fail "candidate could not normalize retired yard config: $source"
+      persist_file "$normalized_temporary"
+      fault_after normalized-pending-temporary
+      mv -fT -- "$normalized_temporary" "$normalized_pending"
+      persist_file "$normalized_pending"
+      persist "$work"
+      fault_after normalized-pending-publish
+      install_source="$normalized_pending"
     elif [ -n "$transform" ]; then
       fail "candidate manifest contains an unknown content transform"
     fi

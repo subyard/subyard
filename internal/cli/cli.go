@@ -358,6 +358,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		return 2
 	}
 	configSync, configSyncCheck, configSyncStatus := false, false, false
+	registrationRepair := core && definition.Handler == "@config" && configRegistrationRepairInvocation(commandArguments)
 	if core && definition.Handler == "@config" {
 		configSync, configSyncCheck, configSyncStatus = configSyncInvocation(commandArguments)
 	}
@@ -396,7 +397,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		}
 		return cli.runTestVMLogs(ctx, commandArguments)
 	}
-	if !readOnlyInvocation && !cli.releaseTransitionChild &&
+	if !readOnlyInvocation && !registrationRepair && !cli.releaseTransitionChild &&
 		(!core || definition.Name != "update") {
 		outcome, gateErr := cli.inspectMutationGate(ctx, yard)
 		if gateErr != nil {
@@ -422,7 +423,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 			ownerDataHome = filepath.Join(operatorHome, ".subyard")
 		}
 	}
-	if ownerDataHome != "" && !readOnlyInvocation {
+	if ownerDataHome != "" && !readOnlyInvocation && !registrationRepair {
 		if err := (ownerinventory.Connections{Root: filepath.Join(ownerDataHome, "owner-inventory")}).Recover(); err != nil {
 			cli.errorf("recover owner inventory transaction: %v", err)
 			return 1
@@ -475,7 +476,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		if baseErr != nil {
 			err = baseErr
 		} else {
-			readOnlyRoute := readOnlyInvocation || (core && definition.Name == "remove")
+			readOnlyRoute := readOnlyInvocation || registrationRepair || (core && definition.Name == "remove")
 			var results []ownerInventoryResult
 			if readOnlyRoute {
 				results = cli.allOwnerInventoriesReadOnly(ctx, base, false)
@@ -516,7 +517,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		cli.errorf("%v", err)
 		return 2
 	}
-	if !readOnlyInvocation {
+	if !readOnlyInvocation && !registrationRepair {
 		if err := configsync.RecoverHostIDRename(loaded.Context.Paths.ConfigHome); err != nil {
 			cli.errorf("recover owner HostID rename: %v", err)
 			return 1
@@ -1997,8 +1998,18 @@ func (cli *CLI) runProjectState(
 }
 
 func (cli *CLI) runMigration(ctx context.Context, yard string, arguments []string) int {
-	if len(arguments) == 3 && arguments[0] == "normalize-yard-config" {
-		if err := migration.NormalizeLegacyYardConfig(arguments[1], arguments[2]); err != nil {
+	if len(arguments) == 1 && arguments[0] == "normalize-yard-config" {
+		payload, err := io.ReadAll(io.LimitReader(cli.options.Stdin, migration.MaxLegacyYardConfigBytes+1))
+		if err != nil {
+			cli.errorf("source-install yard config normalization: %v", err)
+			return 1
+		}
+		normalized, err := migration.NormalizeLegacyYardConfigContent(payload)
+		if err != nil {
+			cli.errorf("source-install yard config normalization: %v", err)
+			return 1
+		}
+		if _, err := cli.options.Stdout.Write(normalized); err != nil {
 			cli.errorf("source-install yard config normalization: %v", err)
 			return 1
 		}
@@ -2036,8 +2047,10 @@ func (cli *CLI) runMigration(ctx context.Context, yard string, arguments []strin
 	switch arguments[0] {
 	case "apply", "finalize", "rollback", "cleanup":
 		cli.errorf(
-			"state migration %s: superseded mutation endpoint; use yard update",
-			arguments[0],
+			"state migration %s: superseded mutation endpoint; use yard update from a supported runtime. "+
+				"For a legacy updater, run the pinned standalone installer:\n"+
+				"curl -fsSL https://github.com/Subyard/Subyard/releases/download/v%s/subyard-install.sh | bash -s -- --version %s --yes",
+			arguments[0], Version, Version,
 		)
 		return 2
 	}

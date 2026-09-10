@@ -43,6 +43,8 @@ printf '%s\n' \
   '  "-n systemctl restart incus.service")' \
   '    printf "%s\n" "$*" >> "$P0_FAKE_SUDO_LOG"' \
   '    ;;' \
+  '  "-n systemctl disable --now subyard-test-vms-host-sink.timer"|"-n systemctl stop subyard-test-vms-host-sink.service")' \
+  '    shift; exec "$@" ;;' \
   '  *) exit 2 ;;' \
   'esac' > "$TMP/bin/sudo"
 chmod 0700 "$TMP/bin/sudo"
@@ -65,6 +67,34 @@ printf '%s\n' \
   '# Keep this host-free unit isolated from any retained real-host Incus daemon.' \
   'exit 1' > "$TMP/bin/incus"
 chmod 0700 "$TMP/bin/incus"
+cat > "$TMP/bin/systemctl" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  'show subyard-test-vms-host-sink.service -p LoadState --value')
+    printf '%s\n' "${P0_FAKE_SINK_STATE:-not-found}" ;;
+  'show subyard-test-vms-host-sink.service -p Environment --value')
+    printf '%s\n' "${P0_FAKE_SINK_ENV:-SUBYARD_HOME=$P0_FAKE_SINK_HOME SUBYARD_OPERATOR_GID=1000}" ;;
+  'show subyard-test-vms-host-sink.service -p ExecStart --value')
+    printf '{ path=%s ; argv[]=%s _test-vms-host-sink sync ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }\n' \
+      "$P0_FAKE_SINK_EXEC" "$P0_FAKE_SINK_EXEC" ;;
+  'show subyard-test-vms-host-sink.service -p EnvironmentFiles --value'|\
+  'show subyard-test-vms-host-sink.service -p ExecStartPre --value'|\
+  'show subyard-test-vms-host-sink.service -p ExecStartPost --value'|\
+  'show subyard-test-vms-host-sink.service -p ExecStop --value'|\
+  'show subyard-test-vms-host-sink.service -p ExecStopPost --value'|\
+  'show subyard-test-vms-host-sink.service -p DropInPaths --value'|\
+  'show subyard-test-vms-host-sink.timer -p DropInPaths --value')
+    printf '%s\n' "${P0_FAKE_SINK_OVERRIDE:-}" ;;
+  'show subyard-test-vms-host-sink.timer -p Unit --value')
+    printf 'subyard-test-vms-host-sink.service\n' ;;
+  'disable --now subyard-test-vms-host-sink.timer'|'stop subyard-test-vms-host-sink.service')
+    [ -d "$P0_FAKE_SINK_FIXTURE" ] || exit 2
+    printf '%s\n' "$*" >> "$P0_FAKE_SINK_LOG" ;;
+  *) exit 2 ;;
+esac
+SCRIPT
+chmod 0700 "$TMP/bin/systemctl"
 
 # shellcheck source=dev/e2e/lib-p0-capacity.sh
 . "$ROOT/dev/e2e/lib-p0-capacity.sh"
@@ -139,6 +169,45 @@ printf '%s\n' subyard-p0-122 > "$stale_root/.subyard-p0-marker"
 chmod 0555 "$stale_root/cache"
 p0_capacity_recover_stale_roots >/dev/null
 [ ! -e "$stale_root" ] || fail "marker-owned stale allocation cache survived recovery"
+
+export P0_FAKE_SINK_STATE=loaded
+export P0_FAKE_SINK_EXEC=/usr/local/libexec/subyard/test-vms-host-sink
+export P0_FAKE_SINK_LOG="$TMP/sink.log"
+export P0_FAKE_SINK_FIXTURE="$HOME/.cache/subyard-p0-122"
+for sink_case in matching foreign unsafe-command unsafe-override unsafe-quoted-home; do
+  install -d -m 0700 "$P0_FAKE_SINK_FIXTURE/owner/subyard"
+  printf 'subyard-p0-122\n' > "$P0_FAKE_SINK_FIXTURE/.subyard-p0-marker"
+  export P0_FAKE_SINK_HOME="$P0_FAKE_SINK_FIXTURE/owner/subyard"
+  export P0_FAKE_SINK_EXEC=/usr/local/libexec/subyard/test-vms-host-sink
+  export P0_FAKE_SINK_OVERRIDE=''
+  export P0_FAKE_SINK_ENV=''
+  : > "$P0_FAKE_SINK_LOG"
+  case "$sink_case" in
+    foreign) P0_FAKE_SINK_HOME="$TMP/foreign" ;;
+    unsafe-command) P0_FAKE_SINK_EXEC=/foreign/sink ;;
+    unsafe-override) P0_FAKE_SINK_OVERRIDE=/foreign/override.conf ;;
+    unsafe-quoted-home)
+      P0_FAKE_SINK_ENV="SUBYARD_HOME=/foreign \"NOTE= SUBYARD_HOME=$P0_FAKE_SINK_HOME \"" ;;
+  esac
+  if [[ "$sink_case" = unsafe-* ]]; then
+    if p0_capacity_recover_stale_roots >/dev/null 2>&1; then
+      fail "$sink_case was accepted before fixture removal"
+    fi
+    [ -d "$P0_FAKE_SINK_FIXTURE" ] && [ ! -s "$P0_FAKE_SINK_LOG" ] \
+      || fail "$sink_case changed the sink or deleted the fixture"
+    find "$P0_FAKE_SINK_FIXTURE" -depth -delete
+    continue
+  fi
+  p0_capacity_recover_stale_roots >/dev/null
+  [ ! -e "$P0_FAKE_SINK_FIXTURE" ] || fail "$sink_case fixture survived cleanup"
+  if [ "$sink_case" = matching ]; then
+    [ "$(cat "$P0_FAKE_SINK_LOG")" = $'disable --now subyard-test-vms-host-sink.timer\nstop subyard-test-vms-host-sink.service' ] \
+      || fail 'matching sink was not retired in order before fixture removal'
+  else
+    [ ! -s "$P0_FAKE_SINK_LOG" ] || fail 'foreign sink was changed'
+  fi
+done
+unset P0_FAKE_SINK_STATE
 
 install -d -m 0700 "$P0_CAPACITY_STATE_ROOT"
 printf 'foreign\n' > "$P0_CAPACITY_STATE_ROOT/data"

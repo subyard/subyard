@@ -35,6 +35,25 @@ func TestProcessRequestV1AdapterRoundTripsEveryFrozenField(t *testing.T) {
 	}
 }
 
+func TestRollbackProcessRequestUsesFrozenV1Fields(t *testing.T) {
+	const wire = `{"schemaVersion":1,"mode":"inspect","runtimeRoot":"/runtime","configHome":"/config","yard":"default","target":"0.8.0-aaaaaaaaaaaa","direction":"activate-previous","artifactDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`
+	var request ProcessRequest
+	if err := json.Unmarshal([]byte(wire), &request); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(request)
+	if err != nil || string(payload) != wire {
+		t.Fatalf("rollback wire = %s, %v", payload, err)
+	}
+	if _, err := protocolv1.DecodeRequest(strings.NewReader(string(payload))); err != nil {
+		t.Fatal(err)
+	}
+	extended := strings.TrimSuffix(wire, "}") + `,"rollbackTarget":{"version":"0.8.0"}}`
+	if err := json.Unmarshal([]byte(extended), &request); err == nil {
+		t.Fatal("rollback accepted target facts outside frozen V1")
+	}
+}
+
 func TestProcessResponseV1AdapterRoundTripsEveryFrozenField(t *testing.T) {
 	const inspectionWire = `{"schemaVersion":1,"activationReconciliationOwned":true,"inspection":{"plan":"resume-v1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the exact typed migration and release activation plan"]},"decisions":[{"resource":"settings.power-mode","scope":"yard","decision":"transform","result":"canonical-v2"}],"blockers":[{"code":"precondition-blocked","resource":"settings.power-mode","message":"resource is busy","retry":"run yard update --check"}],"resume":"tx-0123456789abcdef","outcome":{"status":"operator-action-required","reachedGoal":false,"active":"release-a","previous":"release-z","target":"release-b","code":"precondition-blocked","message":"resource is busy","retry":"run yard update --check","transaction":"tx-0123456789abcdef","warnings":["warning a","warning b"]}}}`
 	const outcomeWire = `{"schemaVersion":1,"activationReconciliationOwned":false,"outcome":{"status":"ready","reachedGoal":true,"active":"release-b","previous":"release-a","target":"release-b","code":"ready","message":"verified","transaction":"tx-0123456789abcdef","warnings":["warning a","warning b"]}}`

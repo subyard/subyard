@@ -790,20 +790,12 @@ func sourceIngressEntryPayload(
 		return nil, err
 	}
 	if entry.ContentTransform == ContentTransformRetiredE2EVMTemplate {
-		payload = normalizeLegacyYardPayload(payload)
-	}
-	return payload, nil
-}
-
-func normalizeLegacyYardPayload(payload []byte) []byte {
-	lines := strings.Split(string(payload), "\n")
-	for index, line := range lines {
-		if retiredE2EVMTemplateAssignment.MatchString(line) {
-			indent := retiredE2EVMTemplateAssignment.FindStringSubmatch(line)[1]
-			lines[index] = indent + "YARD_TEMPLATE=test-vms"
+		payload, err = NormalizeLegacyYardConfigContent(payload)
+		if err != nil {
+			return nil, err
 		}
 	}
-	return []byte(strings.Join(lines, "\n"))
+	return payload, nil
 }
 
 type sourceSettingsView struct {

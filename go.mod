@@ -5,6 +5,7 @@ go 1.25.6
 toolchain go1.26.6
 
 require (
+	github.com/blang/semver/v4 v4.0.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/lxc/incus/v6 v6.23.0
 	golang.org/x/crypto v0.52.0
@@ -15,7 +16,6 @@ require (
 require (
 	github.com/AdaLogics/go-fuzz-headers v0.0.0-20240806141605-e8a1dd7889d6 // indirect
 	github.com/apex/log v1.9.0 // indirect
-	github.com/blang/semver/v4 v4.0.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/containerd/log v0.1.0 // indirect
 	github.com/containerd/platforms v0.2.1 // indirect

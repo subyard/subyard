@@ -36,6 +36,8 @@ OWNER_TEST_VMS_SINK_TIMER="/etc/systemd/system/$OWNER_TEST_VMS_SINK_TIMER_NAME"
 OWNER_TEST_VMS_SINK_TIMER_TEMPLATE="$ROOT/config/systemd/subyard-test-vms-host-sink.timer.in"
 RENAME_BASE_REVISION="7c67ee3f423cf9f1596c2f5191f462d2b70adcdc"
 RENAME_BASE_ROOT="$OWNER_ROOT/rename-base"
+P0_CURRENT_BASE_VERSION=0.8.1-p0.current-base
+P0_OWNER_VERSION=0.11.1-p0.owner
 PEER_SSH_DIR="$PEER_ROOT/ssh"
 PEER_YARD_ENTRY="$HOME/.local/bin/yard"
 PEER_YARD_BACKUP="$PEER_ROOT/user-yard-entry.backup"
@@ -233,7 +235,16 @@ owner_cleanup() {
         || cleanup_failed=1
     done < <(incus image list --project default --format csv -c f)
   fi
-  cleanup_owner_capacity_state || cleanup_failed=1
+  if [ ! -e "$OWNER_ROOT" ] && [ ! -L "$OWNER_ROOT" ] || {
+    p0_capacity_assert_root_marker \
+      && [ -d "$OWNER_ROOT" ] && [ ! -L "$OWNER_ROOT" ] \
+      && [ "$(cat "$OWNER_ROOT/.subyard-p0-marker" 2>/dev/null)" = "$MARKER" ] \
+      && p0_capacity_retire_fixture_sink "$OWNER_ROOT/subyard"
+  }; then
+    cleanup_owner_capacity_state || cleanup_failed=1
+  else
+    cleanup_failed=1
+  fi
   [ "$cleanup_failed" = 0 ] || rc=3
   exit "$rc"
 }
@@ -356,10 +367,10 @@ install_current_base_runtime() {
   local arch release artifact
   arch="$(go env GOARCH)"
   release="$ROOT/.build/p0-current-base-release"
-  artifact="$release/subyard-p0-current-base-linux-$arch"
+  artifact="$release/subyard-$P0_CURRENT_BASE_VERSION-linux-$arch"
   dev/package-engine.sh \
     --output-dir "$release" \
-    --version p0-current-base \
+    --version "$P0_CURRENT_BASE_VERSION" \
     --arch "$arch" \
     --migration-registry \
       "$ROOT/tests/fixtures/migrations/layout-2-production.json" >/dev/null
@@ -375,9 +386,10 @@ install_owner_runtime() {
   local runtime_root="${SUBYARD_HOME:-$HOME/.subyard}/runtime"
   arch="$(go env GOARCH)"
   release="$ROOT/.build/p0-owner-release"
-  artifact="$release/subyard-p0-owner-linux-$arch"
-  dev/package-engine.sh --output-dir "$release" --version p0-owner --arch "$arch" >/dev/null
-  release_cache="$SUBYARD_HOME/releases/p0-owner"
+  artifact="$release/subyard-$P0_OWNER_VERSION-linux-$arch"
+  dev/package-engine.sh \
+    --output-dir "$release" --version "$P0_OWNER_VERSION" --arch "$arch" >/dev/null
+  release_cache="$SUBYARD_HOME/releases/$P0_OWNER_VERSION"
   name="$(basename "$artifact").tar.gz"
   install -d -m 0700 "$release_cache"
   for suffix in '' .sha256 .manifest.json .provenance.json; do
@@ -386,7 +398,7 @@ install_owner_runtime() {
   active_installer="$runtime_root/current/scripts/install-runtime-release.sh"
   if grep -Fq -- '--publish-only' "$active_installer"; then
     "$runtime_root/current/bin/yard" update --yes \
-      --runtime-root "$runtime_root" --version p0-owner --offline >/dev/null
+      --runtime-root "$runtime_root" --version "$P0_OWNER_VERSION" --offline >/dev/null
     return
   fi
   for name in subyard-install-runtime-release.sh subyard-install-runtime-release.sh.sha256; do
@@ -397,14 +409,17 @@ install_owner_runtime() {
     YARD_SHELL_RC="$SUBYARD_CONFIG_HOME/p0-bootstrap.bashrc" \
     YARD_LOGIN_RC="$SUBYARD_CONFIG_HOME/p0-bootstrap.profile" \
     dev/bootstrap-runtime.sh --yes --runtime-root "$runtime_root" \
-      --version p0-owner --offline >/dev/null
+      --version "$P0_OWNER_VERSION" --offline >/dev/null
 }
 
 p0_apply_release_update() {
   local yard="$1" version="$2" release
   local runtime_root="${SUBYARD_HOME:-$HOME/.subyard}/runtime"
-  case "$version" in p0-current-base | p0-owner) ;; *) die "unsupported P0 release $version" ;; esac
-  release="$ROOT/.build/$version-release"
+  case "$version" in
+    "$P0_CURRENT_BASE_VERSION") release="$ROOT/.build/p0-current-base-release" ;;
+    "$P0_OWNER_VERSION") release="$ROOT/.build/p0-owner-release" ;;
+    *) die "unsupported P0 release $version" ;;
+  esac
   YARD_RELEASE_BASE_URL="file://$release" \
     "$yard" update --runtime-root "$runtime_root" --version "$version" --check >/dev/null
   YARD_RELEASE_BASE_URL="file://$release" \
@@ -430,7 +445,7 @@ canonical_broker_release_migration_contract() {
   local rolled_back_hash
   local current_registration old_yard state
 
-  [ "$("$runtime_root/current/bin/yard" --version)" = 'yard p0-current-base' ] \
+  [ "$("$runtime_root/current/bin/yard" --version)" = "yard $P0_CURRENT_BASE_VERSION" ] \
     || die 'broker migration fixture requires the canonical layout-2 runtime'
   old_yard="$runtime_root/current/bin/yard"
 
@@ -454,7 +469,7 @@ canonical_broker_release_migration_contract() {
 
   "$runtime_root/current/bin/yard" update \
     --runtime-root "$runtime_root" --rollback --yes >/dev/null
-  [ "$("$runtime_root/current/bin/yard" --version)" = 'yard p0-current-base' ] \
+  [ "$("$runtime_root/current/bin/yard" --version)" = "yard $P0_CURRENT_BASE_VERSION" ] \
     || die 'active broker fixture did not restore the previous runtime'
   old_yard="$runtime_root/current/bin/yard"
   "$old_yard" -Y test-yard start --yes
@@ -464,7 +479,7 @@ canonical_broker_release_migration_contract() {
   wait_for_outer_default_route yard-test-yard subyard-test-yard
   # Starting the previously inactive broker creates a new activation-repair
   # impact. Inspect and apply it before any other mutation.
-  p0_apply_release_update "$old_yard" p0-current-base
+  p0_apply_release_update "$old_yard" "$P0_CURRENT_BASE_VERSION"
   p0_retry_init_after_plan_stale "$old_yard" -Y test-yard init --yes
   active_old_hash="$(incus exec yard-test-yard --project subyard-test-yard -- \
     sha256sum /usr/local/libexec/subyard/test-vms-inner | awk '{print $1}')"
@@ -483,7 +498,7 @@ canonical_broker_release_migration_contract() {
 
   "$runtime_root/current/bin/yard" update \
     --runtime-root "$runtime_root" --rollback --yes >/dev/null
-  [ "$("$runtime_root/current/bin/yard" --version)" = 'yard p0-current-base' ] \
+  [ "$("$runtime_root/current/bin/yard" --version)" = "yard $P0_CURRENT_BASE_VERSION" ] \
     || die 'canonical fixture did not restore its layout-2 runtime'
   rolled_back_hash="$(incus exec yard-test-yard --project subyard-test-yard -- \
     sha256sum /usr/local/libexec/subyard/test-vms-inner | awk '{print $1}')"
@@ -503,7 +518,7 @@ owner_profile_migration_contract() {
 	local transition_fixture_root="$OWNER_CONFIG_HOME/release-transition/v2"
   install_current_base_runtime
   old_yard="$runtime_root/current/bin/yard"
-  [ "$("$old_yard" --version)" = 'yard p0-current-base' ] \
+  [ "$("$old_yard" --version)" = "yard $P0_CURRENT_BASE_VERSION" ] \
     || die 'canonical layout-2 runtime was not installed'
 
   canonical_broker_release_migration_contract
@@ -532,7 +547,7 @@ owner_profile_migration_contract() {
   # Source migration normalizes the retired profile before runtime activation.
   write_owner_registration e2e-yard test-vms 2224 1
   install_owner_runtime
-  [ "$("$runtime_root/current/bin/yard" --version)" = 'yard p0-owner' ] \
+  [ "$("$runtime_root/current/bin/yard" --version)" = "yard $P0_OWNER_VERSION" ] \
     || die 'current runtime was not installed over the pre-rename runtime'
   [ ! -e "$OWNER_YARD_DIR/e2e-yard.env" ] \
     || die 'runtime activation retained the old e2e-yard registration'
@@ -756,7 +771,7 @@ owner() (
   [ "$SUBYARD_E2E_VM" = 1 ] || die 'owner lane requires VM1'
 	trap owner_cleanup EXIT
   prepare_owner_go_cache
-	YARD_BUILD_VERSION=p0-owner dev/build-engine.sh --force >/dev/null
+	YARD_BUILD_VERSION="$P0_OWNER_VERSION" dev/build-engine.sh --force >/dev/null
 	ensure_owner_incus
 	OWNER_BASELINE_IMAGES="$(incus image list --project default --format csv -c f)"
   OWNER_BASELINE_CAPTURED=1
@@ -770,7 +785,7 @@ owner() (
   ./bin/yard -Y test-yard start --yes
   SUBYARD_E2E_LEGACY_FIXTURE=1 \
     bash dev/e2e/seed-test-vms-legacy-state.sh subyard-test-yard yard-test-yard
-  p0_apply_release_update ./bin/yard p0-owner
+  p0_apply_release_update ./bin/yard "$P0_OWNER_VERSION"
   p0_retry_init_after_plan_stale ./bin/yard -Y test-yard init --yes
   ./bin/yard -Y test-yard check
   p0_retry_init_after_plan_stale ./bin/yard -Y test-yard init --yes
@@ -790,11 +805,11 @@ owner() (
   reclaim_owner_lease_capacity
   run_nested_broker_acceptance dev/e2e/p1-lease-acceptance.sh
   write_owner_registration test-yard test-vms 2224 3
-  p0_apply_release_update ./bin/yard p0-owner
+  p0_apply_release_update ./bin/yard "$P0_OWNER_VERSION"
   p0_retry_init_after_plan_stale ./bin/yard -Y test-yard init --yes
   run_nested_broker_acceptance dev/e2e/p1-lease-acceptance.sh
   write_owner_registration test-yard test-vms 2224 2
-  p0_apply_release_update ./bin/yard p0-owner
+  p0_apply_release_update ./bin/yard "$P0_OWNER_VERSION"
   p0_retry_init_after_plan_stale ./bin/yard -Y test-yard init --yes
   run_nested_broker_acceptance dev/e2e/p0-broker-recovery.sh
   owner_project_contract
@@ -815,7 +830,7 @@ owner_migration() (
   [ "$SUBYARD_E2E_VM" = 1 ] || die 'owner migration lane requires VM1'
   trap owner_cleanup EXIT
   prepare_owner_go_cache
-  YARD_BUILD_VERSION=p0-owner dev/build-engine.sh --force >/dev/null
+  YARD_BUILD_VERSION="$P0_OWNER_VERSION" dev/build-engine.sh --force >/dev/null
   ensure_owner_incus
   OWNER_BASELINE_IMAGES="$(incus image list --project default --format csv -c f)"
   OWNER_BASELINE_CAPTURED=1
@@ -830,7 +845,7 @@ broker_recovery_owner() (
   [ "$SUBYARD_E2E_VM" = 1 ] || die 'broker recovery owner lane requires VM1'
   trap owner_cleanup EXIT
   prepare_owner_go_cache
-  YARD_BUILD_VERSION=p0-owner dev/build-engine.sh --force >/dev/null
+  YARD_BUILD_VERSION="$P0_OWNER_VERSION" dev/build-engine.sh --force >/dev/null
   ensure_owner_incus
   OWNER_BASELINE_IMAGES="$(incus image list --project default --format csv -c f)"
   OWNER_BASELINE_CAPTURED=1

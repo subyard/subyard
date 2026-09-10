@@ -380,7 +380,11 @@ func (capability *testVMSettingsV2Capability) inspectYard(
 		return nil, nil, settingsV2YardBlocker(yard, "persistent yard settings are unsafe")
 	}
 	if nested.Exists && legacy.Exists {
-		return nil, nil, settingsV2YardBlocker(yard, "persistent yard setting ownership is ambiguous")
+		return nil, nil, &Blocker{
+			Code: CodePreconditionBlocked, Resource: "yard." + yard,
+			Message: fmt.Sprintf("yard %s has duplicate registrations: yards/%s/config.env and yards/%s.env", yard, yard, yard),
+			Retry:   fmt.Sprintf("run the verified candidate's yard -Y default config repair-registration %s, then run yard update --check", yard),
+		}
 	}
 	if !nested.Exists && !legacy.Exists {
 		return nil, nil, nil

@@ -72,6 +72,53 @@ func TestV2SourceIngressPlansProspectiveSettingsAndResumesItsTwoLeafSteps(t *tes
 	assertRuntimeEntrypoints(t, fixture)
 }
 
+func TestV2TransitionRejectsOversizedProspectiveSourceYardConfig(t *testing.T) {
+	fixture := newSourceInstallFixture(t,
+		"# Stable launcher for a release-installed native Go control-plane engine.")
+	writeTestFile(t, filepath.Join(fixture.source, "private/config.env"), 0o600, "DEV_SUDO=1\n")
+	writeTestFile(t, filepath.Join(fixture.data, "config.env"), 0o600, "DEV_SUDO=1\n")
+	payload := strings.Repeat("# padding\n", 120000) + "YARD_TEMPLATE=e2e-vms\n"
+	writeTestFile(t, filepath.Join(fixture.source, "private/yards/named.env"), 0o600, payload)
+	ingress, err := newV2SourceIngress(V2SourceIngressOptions{
+		Descriptor: sourceIngressDescriptor(fixture),
+		RepositoryRoot: filepath.Join(
+			fixture.data, "runtime/releases/release-current",
+		),
+		RuntimeRoot: filepath.Join(fixture.data, "runtime"), ConfigHome: fixture.config,
+	}, fixture.home, func(context.Context, releasetransition.V2IngressStep) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := []byte(`{"schemaVersion":2,"minimumEpochs":{"owner-registration":1,"power-metadata":1,"project-state":1,"settings":1},"currentEpochs":{"owner-registration":1,"power-metadata":1,"project-state":1,"settings":2},"migrations":[{"id":"canonicalize-test-vms-settings-v2","domain":"settings","fromEpoch":1,"toEpoch":2,"kind":"test-vms-settings-v1-to-v2"}]}`)
+	transition, err := releasetransition.NewV2Transition(releasetransition.V2Options{
+		ConfigHome: fixture.config,
+		Releases: releasetransition.ReleasePair{
+			From: "release-old", Target: "release-current",
+		},
+		Direction: releasetransition.DirectionActivateTarget,
+		ObserveLinks: func(context.Context) (releasetransition.ReleaseLinks, error) {
+			return releasetransition.ReleaseLinks{Active: "release-old"}, nil
+		},
+		ActivateLinks: func(context.Context, releasetransition.ReleasePair) (releasetransition.ReleaseLinks, error) {
+			return releasetransition.ReleaseLinks{}, nil
+		},
+		VerifyAuthorization: func(releasetransition.PlanToken, releasetransition.Authorization) bool {
+			return true
+		},
+		Ingress: ingress, RegistryPayload: registry,
+		ArtifactDigest: releasetransition.Fingerprint(strings.Repeat("a", 64)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = transition.Inspect(context.Background(), releasetransition.Goal{
+		Target: "release-current", Direction: releasetransition.DirectionActivateTarget,
+	})
+	if err == nil || !strings.Contains(err.Error(), "legacy yard config exceeds its size bound") {
+		t.Fatalf("oversized source yard inspection error = %v", err)
+	}
+}
+
 func TestV2SourceIngressReportsPendingOperationsMissingFromOuterBinding(t *testing.T) {
 	requireJQ(t)
 	fixture := newSourceInstallFixture(t,

@@ -760,9 +760,9 @@ boot_power_reconciler_succeeded() {
 
 reboot_vm() {
   local vm="$1"
-  local before_boot after_boot='' down=0 host_state up=0 unit_complete=0 route
+  local before_boot after_boot='' down=0 host_state='' up=0 unit_complete=0 route
   local start_wait_deadline policy_deadline=0 local_policy_deadline=0
-  local started_seconds remaining now
+  local started_seconds remaining now host_deadline host_ready=0 host_state_rc=0
   POWER_RECONCILE_VM="$vm"
   before_boot="$(ssh -F "$CONFIG" -T "e2e-vm-$vm" -- \
     cat /proc/sys/kernel/random/boot_id)" \
@@ -796,14 +796,35 @@ reboot_vm() {
     sleep 1
   done
   [ "$up" = 1 ] || die "VM$vm did not return with a new boot ID"
-  set +e
-  host_state="$(ssh -F "$CONFIG" -T "e2e-vm-$vm" -- \
-    timeout 180 systemctl is-system-running --wait 2>/dev/null)"
-  set -e
-  case "$host_state" in
-    running | degraded) ;;
-    *) die "VM$vm boot did not reach a terminal systemd state: ${host_state:-unknown}" ;;
-  esac
+  # A new boot ID can precede stable SSH/systemd readiness. Keep every probe and retry
+  # inside one local monotonic budget, including a transport that stops responding.
+  host_deadline=$(($(p0_monotonic_seconds) + 180))
+  while :; do
+    remaining=$((host_deadline - $(p0_monotonic_seconds)))
+    [ "$remaining" -gt 0 ] || break
+    [ "$remaining" -le 10 ] || remaining=10
+    host_state_rc=0
+    host_state="$(timeout --foreground --signal=KILL "$remaining" \
+      ssh -F "$CONFIG" -T -o ConnectTimeout=3 -o ConnectionAttempts=1 \
+        -o ServerAliveInterval=2 -o ServerAliveCountMax=2 \
+        "e2e-vm-$vm" -- systemctl is-system-running 2>/dev/null)" \
+      || host_state_rc=$?
+    case "$host_state:$host_state_rc" in
+      running:0 | degraded:1) host_ready=1; break ;;
+      initializing:1 | starting:1 | :0 | :1 | *:255 | *:124 | *:137) ;;
+      *) break ;;
+    esac
+    [ "$(p0_monotonic_seconds)" -lt "$host_deadline" ] || break
+    sleep 1
+  done
+  if [ "$host_ready" != 1 ]; then
+    # Do not print raw transport output or SSH configuration in failure evidence.
+    case "$host_state" in
+      initializing | starting | running | degraded | maintenance | stopping | offline | unknown) ;;
+      *) host_state=unknown ;;
+    esac
+    die "VM$vm boot did not reach a terminal systemd state: $host_state (probe_status=$host_state_rc)"
+  fi
   # Anchor the observation deadline to the unit's current-boot monotonic start. This covers the
   # complete production policy window even when activation begins after the host becomes ready.
   # The local deadline is a fail-safe for subsequent SSH or systemd transport failures.
@@ -1309,8 +1330,12 @@ case "$P0_LANE" in
     ;;
   release)
     run_phase capacity-preflight preflight_lane
+    start_capacity_monitors
     run_phase release run_lanes
     run_phase cleanup cleanup_lane
+    run_phase capacity-report targeted_capacity_report
+    find "$CAPACITY_LOG_DIR" -depth -delete
+    CAPACITY_LOG_DIR=''
     ;;
   source-upgrade)
     run_phase capacity-preflight run_vm 1 capacity-preflight

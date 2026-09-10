@@ -34,6 +34,14 @@ DEFAULT_ROUTE_STATE="$STATE_ROOT/default-route"
 OLD_RELEASE_TARGET_STATE="$STATE_ROOT/old-release-target"
 CANDIDATE_RELEASE_TARGET_STATE="$STATE_ROOT/candidate-release-target"
 LEGACY_STATE_SHA_STATE="$STATE_ROOT/legacy-state.sha256"
+ACTIVATION_LEDGER_BASELINE="$STATE_ROOT/activation-ledger.before"
+ACTIVATION_JOURNAL_BASELINE="$STATE_ROOT/activation-journal.before"
+ACTIVATION_FAULT_PROBE="$OPERATOR_HOME/.subyard-p0-activation-reconcile-interrupted"
+ACTIVATION_SYSTEMCTL_WRAPPER="$OPERATOR_HOME/.local/bin/systemctl"
+ACTIVATION_SYSTEMCTL_DELEGATE=/usr/bin/systemctl
+V2_STATE_ROOT="$OPERATOR_HOME/.config/subyard/release-transition/v2"
+V2_LEDGER="$V2_STATE_ROOT/ledger.json"
+V2_JOURNAL="$V2_STATE_ROOT/journal.json"
 CLEANUP_ARMED=0
 PRESERVE_FIXTURE=0
 OLD_RELEASE_TARGET=''
@@ -442,7 +450,12 @@ assert_published_v1_history_unchanged() {
 }
 
 assert_v2_transition() {
-  local direction="$1" target="${2#releases/}"
+  local direction="$1" target="${2#releases/}" expected_catalog="${3:-}"
+  local runtime="$OPERATOR_HOME/.subyard/runtime" artifact_digest registry_digest
+  artifact_digest="$(operator_env sha256sum "$runtime/releases/$target/runtime-files.sha256" | awk '{print $1}')" \
+    || die 'target artifact manifest is unavailable'
+  registry_digest="$(operator_env sha256sum "$runtime/$CANDIDATE_RELEASE_TARGET/config/release-transition.json" | awk '{print $1}')" \
+    || die 'candidate transition owner registry is unavailable'
   operator_env jq -e '
     .schemaVersion == 2 and
     .domains["owner-registration"] == {
@@ -455,10 +468,18 @@ assert_v2_transition() {
     }
   ' "$OPERATOR_HOME/.config/subyard/release-transition/v2/ledger.json" >/dev/null \
     || die 'candidate v2 migration ledger is not at its exact per-domain fixed point'
-  operator_env jq -e --arg direction "$direction" --arg target "$target" '
+  operator_env jq -e \
+    --arg direction "$direction" --arg target "$target" \
+    --arg artifact "$artifact_digest" --arg registry "$registry_digest" \
+    --arg catalog "$expected_catalog" '
     .schemaVersion == 2 and .checkpoint == "complete" and
     .goal == {"target": $target, "direction": $direction} and
-    .releases.target == $target and all(.steps[]; .checkpoint == "verified")
+    .releases.target == $target and
+    (has("rollbackTarget") | not) and
+    .artifactDigest == $artifact and .registryDigest == $registry and
+    (.catalogDigest | type == "string" and test("^[a-f0-9]{64}$")) and
+    ($direction != "activate-previous" or .catalogDigest == $catalog) and
+    (.steps | type == "array") and all(.steps[]; .checkpoint == "verified")
   ' "$OPERATOR_HOME/.config/subyard/release-transition/v2/journal.json" >/dev/null \
     || die 'candidate v2 transition journal is not complete for the exact release goal'
 }
@@ -476,6 +497,145 @@ assert_candidate_state() {
     "$CANDIDATE_RELEASE_TARGET"
   assert_published_v1_history_unchanged
   assert_v2_transition activate-target "$CANDIDATE_RELEASE_TARGET"
+}
+
+assert_activation_only_journal() {
+  local checkpoint="$1" transaction="$2" authorization="$3"
+  local target="${CANDIDATE_RELEASE_TARGET#releases/}"
+  operator_env jq -e \
+    --arg checkpoint "$checkpoint" \
+    --arg transaction "$transaction" \
+    --arg authorization "$authorization" \
+    --arg target "$target" '
+      .schemaVersion == 2 and
+      .checkpoint == $checkpoint and
+      .transaction == $transaction and
+      .authorizationDigest == $authorization and
+      .goal == {"target": $target, "direction": "activate-target"} and
+      .releases.from == $target and .releases.target == $target and
+      (.steps | length) == 0
+    ' "$V2_JOURNAL" >/dev/null \
+    || die "activation-only journal is not at checkpoint $checkpoint"
+}
+
+assert_activation_ledger_unchanged() {
+  sudo -n cmp "$ACTIVATION_LEDGER_BASELINE" "$V2_LEDGER" \
+    || die 'activation-only repair changed the exact v2 ledger bytes'
+  assert_published_v1_history_unchanged
+}
+
+install_activation_reconcile_fault() {
+  local temporary
+  temporary="$(mktemp "$STATE_ROOT/.activation-systemctl.XXXXXX")"
+  printf '%s\n' \
+    '#!/bin/sh' \
+    'set -eu' \
+    "journal=$V2_JOURNAL" \
+    "probe=$ACTIVATION_FAULT_PROBE" \
+    "delegate=$ACTIVATION_SYSTEMCTL_DELEGATE" \
+    'if [ "${1:-}" = show ] &&' \
+    '  [ "${2:-}" = subyard-power-reconcile.service ] &&' \
+    '  /usr/bin/jq -e ".schemaVersion == 2 and .checkpoint == \"reconciling\"" "$journal" >/dev/null 2>&1; then' \
+    '  failures=0' \
+    '  [ ! -r "$probe" ] || failures=$(wc -l < "$probe")' \
+    '  if [ "$failures" = 0 ]; then' \
+    '    printf "%s\n" "injected activation reconciler post-apply interruption" >&2' \
+    '    printf "%s\n" "reconciling post-apply failure" >> "$probe"' \
+    '    exit 75' \
+    '  fi' \
+    'fi' \
+    'exec "$delegate" "$@"' \
+    > "$temporary"
+  sudo -n install -o "$OPERATOR" -g "$OPERATOR" -m 0755 \
+    "$temporary" "$ACTIVATION_SYSTEMCTL_WRAPPER"
+  find "$temporary" -delete
+}
+
+exercise_activation_only_repair() {
+  local completed_transaction repair_transaction repair_authorization
+  local candidate_unit="$STATE_ROOT/candidate-activation.service"
+  local drift_unit="$STATE_ROOT/drifted-activation.service"
+  local unconfirmed_output unconfirmed_rc interrupted_output interrupted_rc
+  local fault_count resumed_output
+
+  load_release_targets
+  completed_transaction="$(operator_env jq -er '.transaction' "$V2_JOURNAL")" \
+    || die 'completed candidate transaction is unavailable'
+  sudo -n install -m 0600 "$V2_LEDGER" "$ACTIVATION_LEDGER_BASELINE"
+  materialize_unit "$ROOT/config/systemd/subyard-power-reconcile.service.in" "$candidate_unit"
+  materialize_unit "$OLD_UNIT_FIXTURE" "$drift_unit"
+  sudo -n install -o root -g root -m 0644 "$drift_unit" "$UNIT"
+  sudo -n systemctl daemon-reload
+  sudo -n cmp "$drift_unit" "$UNIT" >/dev/null \
+    || die 'release-owned activation drift was not installed exactly'
+  if sudo -n cmp -s "$candidate_unit" "$UNIT"; then
+    die 'release-owned activation resource did not enter drift'
+  fi
+
+  sudo -n install -m 0600 "$V2_JOURNAL" "$ACTIVATION_JOURNAL_BASELINE"
+  set +e
+  unconfirmed_output="$(
+    operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
+      "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" \
+      </dev/null 2>&1
+  )"
+  unconfirmed_rc=$?
+  set -e
+  [ "$unconfirmed_rc" = 1 ] \
+    && [ "$(grep -Fc 'confirmation required: interactive terminal required' \
+      <<<"$unconfirmed_output")" = 1 ] \
+    || die "unconfirmed activation repair did not stop at confirmation: $unconfirmed_output"
+  sudo -n cmp "$ACTIVATION_JOURNAL_BASELINE" "$V2_JOURNAL" \
+    || die 'unconfirmed activation repair changed the exact journal bytes'
+  sudo -n cmp "$drift_unit" "$UNIT" \
+    || die 'unconfirmed activation repair changed the release-owned resource'
+  assert_activation_ledger_unchanged
+
+  install_activation_reconcile_fault
+  set +e
+  interrupted_output="$(
+    operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
+      "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" --yes \
+      </dev/null 2>&1
+  )"
+  interrupted_rc=$?
+  set -e
+  [ "$interrupted_rc" -ne 0 ] \
+    || die 'injected activation reconciliation unexpectedly completed'
+  if ! operator_env test -f "$ACTIVATION_FAULT_PROBE"; then
+    printf '%s\n' "$interrupted_output" >&2
+    die 'activation reconciliation did not reach the injected post-apply checkpoint'
+  fi
+  fault_count="$(operator_env wc -l "$ACTIVATION_FAULT_PROBE" | awk '{print $1}')"
+  [ "$fault_count" = 1 ] \
+    || die "activation reconciliation injected failures=$fault_count, want exactly 1"
+  ! grep -Fq 'confirmation required: interactive terminal required' <<<"$interrupted_output" \
+    || die 'authorized activation reconciliation requested confirmation again'
+  operator_env find "$ACTIVATION_SYSTEMCTL_WRAPPER" -delete
+
+  repair_transaction="$(operator_env jq -er '.transaction' "$V2_JOURNAL")" \
+    || die 'activation repair transaction is unavailable after interruption'
+  repair_authorization="$(operator_env jq -er '.authorizationDigest' "$V2_JOURNAL")" \
+    || die 'activation repair authorization is unavailable after interruption'
+  [ "$repair_transaction" != "$completed_transaction" ] \
+    || die 'activation drift reused the completed migration transaction'
+  assert_activation_only_journal reconciling "$repair_transaction" "$repair_authorization"
+  assert_activation_ledger_unchanged
+  sudo -n cmp "$candidate_unit" "$UNIT" >/dev/null \
+    || die 'interrupted reconciler did not restore the exact candidate activation resource'
+
+  if ! resumed_output="$(
+    operator_yard update --version "$CANDIDATE_VERSION" </dev/null 2>&1
+  )"; then
+    die 'activation-only same-version update did not resume'
+  fi
+  ! grep -Eq 'Proceed\?|confirmation required' <<<"$resumed_output" \
+    || die 'activation-only resume requested a second confirmation'
+  assert_activation_only_journal complete "$repair_transaction" "$repair_authorization"
+  assert_activation_ledger_unchanged
+  assert_candidate_state
+  assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
+  ok 'same-version activation-only repair resumed without replaying migration history'
 }
 
 verify_bridge_plan_is_read_only() {
@@ -653,14 +813,21 @@ prepare_candidate() {
 }
 
 finish_candidate_flow() {
+  local rollback_catalog rollback_ledger
   load_release_targets
+  rollback_catalog="$(operator_env jq -er '.catalogDigest | select(type == "string" and test("^[a-f0-9]{64}$"))' "$V2_JOURNAL")" \
+    || die 'candidate transition catalog binding is unavailable before rollback'
+  rollback_ledger="$(operator_env sha256sum "$V2_LEDGER" | awk '{print $1}')" \
+    || die 'candidate migration ledger is unavailable before rollback'
   info 'rolling back to the exact published v0.8.0 runtime under the active v2 owner'
   operator_yard update --rollback --yes
   assert_runtime_state "$OLD_VERSION" \
     "$ROOT/config/systemd/subyard-power-reconcile.service.in" loaded 5 \
     "$CANDIDATE_RELEASE_TARGET"
   assert_published_v1_history_unchanged
-  assert_v2_transition activate-previous "$OLD_RELEASE_TARGET"
+  assert_v2_transition activate-previous "$OLD_RELEASE_TARGET" "$rollback_catalog"
+  [ "$(operator_env sha256sum "$V2_LEDGER" | awk '{print $1}')" = "$rollback_ledger" ] \
+    || die 'rollback changed the exact v2 migration ledger bytes'
   assert_runtime_links "$OLD_RELEASE_TARGET" "$CANDIDATE_RELEASE_TARGET"
   ok 'rollback activated v0.8.0 while retaining the compatible v2-owned power runtime'
 
@@ -715,6 +882,7 @@ case "$MODE" in
     incus image info subyard-e2e-debian-13-cloud-container --project default >/dev/null \
       || die 'the P0 Debian image cache is required'
     prepare_candidate
+    exercise_activation_only_repair
     if [ "$MODE" = prepare ]; then
       record_reboot_baseline
       write_fixture_value "$PHASE_STATE" candidate-ready

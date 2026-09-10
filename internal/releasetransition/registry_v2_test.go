@@ -134,6 +134,11 @@ func TestCapabilityCatalogDigestIsCanonicalAndRejectsDuplicates(t *testing.T) {
 	if _, err := NewCapabilityCatalog([]CapabilityDescriptor{{Kind: "bad", Domain: "settings", Version: 0}}); err == nil {
 		t.Fatal("invalid catalog version was accepted")
 	}
+	if _, err := NewCapabilityCatalog([]CapabilityDescriptor{{
+		Kind: "bad", Domain: "settings", Version: 1, RollbackCompatibility: "unknown",
+	}}); err == nil {
+		t.Fatal("unknown compiled rollback policy was accepted")
+	}
 }
 
 func TestCapabilityCatalogDigestBindsCompiledImplementationVersion(t *testing.T) {
@@ -150,6 +155,37 @@ func TestCapabilityCatalogDigestBindsCompiledImplementationVersion(t *testing.T)
 	}
 	if catalog.Digest() == baseline.Digest() {
 		t.Fatal("catalog digest did not bind the compiled implementation version")
+	}
+}
+
+func TestCapabilityCatalogDigestBindsCompiledRollbackPolicy(t *testing.T) {
+	base := CapabilityDescriptor{
+		Kind: "settings-v1", Domain: "settings", Version: 1,
+		RollbackCompatibility: RollbackCompatibilityBackwardCompatibleNoOp,
+		LegacyMinimumVersion:  "0.8.0",
+	}
+	baseline, err := NewCapabilityCatalog([]CapabilityDescriptor{base})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, change := range map[string]func(*CapabilityDescriptor){
+		"policy": func(value *CapabilityDescriptor) {
+			value.RollbackCompatibility = ""
+			value.LegacyMinimumVersion = ""
+		},
+		"legacy minimum": func(value *CapabilityDescriptor) { value.LegacyMinimumVersion = "0.9.0" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := base
+			change(&changed)
+			catalog, err := NewCapabilityCatalog([]CapabilityDescriptor{changed})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if catalog.Digest() == baseline.Digest() {
+				t.Fatalf("catalog digest did not bind compiled rollback %s", name)
+			}
+		})
 	}
 }
 

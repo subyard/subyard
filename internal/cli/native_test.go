@@ -2397,6 +2397,136 @@ func TestMutationGatePrecedesOwnerRecoveryAndReturnsStructuredOutcome(t *testing
 	}
 }
 
+func TestNormalizeLegacyYardConfigDoesNotWritePathsDuringRecovery(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	runtimeRoot := filepath.Join(root, "runtime-v2")
+	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot)
+	journalPath, _ := installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
+
+	pathRoot := filepath.Join(environmentValue(environment, "HOME"), "normalization")
+	if err := os.MkdirAll(pathRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	binRoot := filepath.Join(environmentValue(environment, "HOME"), ".local", "bin")
+	if err := os.MkdirAll(binRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"yard", "sy"} {
+		if err := os.Symlink("before-"+name, filepath.Join(binRoot, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	destination := filepath.Join(pathRoot, "unexpected-write.env")
+	beforeTree := nativeTreeSnapshot(t, root)
+	beforeJournal, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeJournalInfo, err := os.Lstat(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeLinks := map[string]string{}
+	for _, name := range []string{"yard", "sy"} {
+		beforeLinks[name], err = os.Readlink(filepath.Join(binRoot, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	run := func(input string, arguments []string) (int, string, string) {
+		var stdout, stderr bytes.Buffer
+		program, newErr := New(Options{
+			RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
+			Stdin: strings.NewReader(input), Stdout: &stdout, Stderr: &stderr,
+		})
+		if newErr != nil {
+			t.Fatal(newErr)
+		}
+		return program.runMigration(context.Background(), "default", arguments), stdout.String(), stderr.String()
+	}
+	if code, stdout, stderr := run("YARD_TEMPLATE=e2e-vms\nSSH_PORT=3333\n", []string{"normalize-yard-config"}); code != 0 || stdout != "YARD_TEMPLATE=test-vms\nSSH_PORT=3333\n" || stderr != "" {
+		t.Fatalf("accepted normalization code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	if code, stdout, stderr := run("YARD_TEMPLATE=e2e-vms\n", []string{
+		"normalize-yard-config", filepath.Join(pathRoot, "legacy.env"), destination,
+	}); code != 2 || stdout != "" || stderr == "" {
+		t.Fatalf("path normalization code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	for _, input := range []string{
+		"PROFILE=e2e-vms\nYARD_TEMPLATE=$PROFILE\n",
+		strings.Repeat("x", (1<<20)+1),
+	} {
+		if code, stdout, stderr := run(input, []string{"normalize-yard-config"}); code != 1 || stdout != "" || stderr == "" {
+			t.Fatalf("invalid normalization code=%d stdout=%q stderr=%q", code, stdout, stderr)
+		}
+	}
+	if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("path normalization created destination: %v", err)
+	}
+	if afterTree := nativeTreeSnapshot(t, root); !slices.Equal(beforeTree, afterTree) {
+		t.Fatalf("normalization changed filesystem tree:\nbefore=%#v\nafter=%#v", beforeTree, afterTree)
+	}
+	afterJournal, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterJournalInfo, err := os.Lstat(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(beforeJournal, afterJournal) || !os.SameFile(beforeJournalInfo, afterJournalInfo) ||
+		beforeJournalInfo.Mode() != afterJournalInfo.Mode() {
+		t.Fatal("normalization changed transition journal metadata")
+	}
+	for name, beforeLink := range beforeLinks {
+		afterLink, readErr := os.Readlink(filepath.Join(binRoot, name))
+		if readErr != nil || afterLink != beforeLink {
+			t.Fatalf("normalization changed %s entrypoint: target=%q err=%v", name, afterLink, readErr)
+		}
+	}
+}
+
+func nativeTreeSnapshot(t *testing.T, root string) []string {
+	t.Helper()
+	var snapshot []string
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		record := fmt.Sprintf("%s|%s|%d", relative, info.Mode(), info.Size())
+		switch {
+		case info.Mode()&os.ModeSymlink != 0:
+			target, readErr := os.Readlink(path)
+			if readErr != nil {
+				return readErr
+			}
+			record += "|" + target
+		case info.Mode().IsRegular():
+			contents, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return readErr
+			}
+			digest := sha256.Sum256(contents)
+			record += fmt.Sprintf("|%x", digest)
+		}
+		snapshot = append(snapshot, record)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
+}
+
 func installUnfinishedV2MutationGateFixture(
 	t *testing.T,
 	root string,
@@ -3001,6 +3131,11 @@ func TestCurrentEngineRejectsSupersededMutatingMigrationVerbs(t *testing.T) {
 			if code := program.runMigration(context.Background(), "default", []string{verb}); code != 2 ||
 				!strings.Contains(stderr.String(), "superseded") {
 				t.Fatalf("_migrate %s result: code=%d stderr=%q", verb, code, stderr.String())
+			}
+			instruction := "curl -fsSL https://github.com/Subyard/Subyard/releases/download/v" + Version +
+				"/subyard-install.sh | bash -s -- --version " + Version + " --yes"
+			if !strings.Contains(stderr.String(), instruction) {
+				t.Fatalf("legacy updater lacks pinned standalone instruction: %s", stderr.String())
 			}
 		})
 	}

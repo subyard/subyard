@@ -1556,8 +1556,14 @@ func inspectProjects(ctx context.Context, options Options) (projectSet, error) {
 	if err := json.Unmarshal(payload, &projects); err != nil {
 		return projectSet{}, fmt.Errorf("decode test-yard Incus projects: %w", err)
 	}
+	if projects == nil {
+		return projectSet{}, errors.New("test-yard Incus project inventory must be a JSON array")
+	}
 	result := projectSet{}
 	for _, project := range projects {
+		if project.Name == "" {
+			return projectSet{}, errors.New("test-yard Incus project inventory has an incomplete identity")
+		}
 		switch project.Name {
 		case "subyard-" + LegacyYard:
 			if result.legacy {

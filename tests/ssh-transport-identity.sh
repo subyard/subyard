@@ -126,7 +126,7 @@ grep -Fq '.subyard-snippet.XXXXXX' "$access_script" \
 teardown_script="$ROOT/scripts/teardown-physical.sh"
 # The verified runtime can be reachable only through a privileged parent's
 # /proc/PID/fd directory. The operator child must use already-loaded code.
-cleanup_home="$TMP/operator home"
+cleanup_home="$TMP/"'operator home $(touch injected)'
 mkdir -m 0700 "$cleanup_home"
 mkdir -m 0700 "$cleanup_home/.ssh"
 printf 'Include subyard-demo.config\nHost retained\n' > "$cleanup_home/.ssh/config"
@@ -143,6 +143,8 @@ cleanup_block="$(sed -n '/^sshdir=/,/^known=/p' "$teardown_script" | sed '$d')"
   sudo() {
     [ "$1" = -n ] && [ "$2" = -u ] && [ "$3" = "$OPERATOR_USER" ] && [ "$4" = -- ] \
       || return 1
+    [ -f "$SUBYARD_OPERATOR_HOME/.ssh/$YARD_SNIP" ] \
+      || fail 'operator snippet was removed before the identity drop'
     shift 4
     "$@"
   }
@@ -151,6 +153,8 @@ cleanup_block="$(sed -n '/^sshdir=/,/^known=/p' "$teardown_script" | sed '$d')"
   eval "$cleanup_block"
 ) || fail 'operator SSH cleanup reopened the inaccessible runtime'
 [ ! -e "$cleanup_home/.ssh/subyard-demo.config" ] || fail 'operator snippet remains'
+[ ! -e "$TMP/injected" ] && [ ! -e "$ROOT/injected" ] \
+  || fail 'operator SSH cleanup evaluated a literal path as shell code'
 [ "$(cat "$cleanup_home/.ssh/config")" = 'Host retained' ] \
   || fail 'operator cleanup did not preserve unrelated SSH config'
 [ "$(stat -c '%u:%a' "$cleanup_home/.ssh/config")" = "$(id -u):600" ] \

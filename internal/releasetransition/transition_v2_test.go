@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/domain"
 	"golang.org/x/sys/unix"
 )
 
@@ -19,6 +21,276 @@ const (
 	v2PostActivationSourceRelease    ReleaseID = "0.11.1-b2c3d4e5f6a7"
 	v2PostActivationCandidateRelease ReleaseID = "0.11.2-c3d4e5f6a7b8"
 )
+
+func TestV2RollbackCompatibilityBlocksBeforeAssessmentAuthorizationOrMutation(t *testing.T) {
+	incompatibleRegistry := []byte(`{
+  "schemaVersion": 2,
+  "minimumEpochs": {"owner-registration": 1, "power-metadata": 1, "project-state": 1, "settings": 1},
+  "currentEpochs": {"owner-registration": 1, "power-metadata": 1, "project-state": 1, "settings": 1},
+  "migrations": []
+}
+`)
+	for _, test := range []struct {
+		name            string
+		version         string
+		registryPayload []byte
+		registryDigest  Fingerprint
+		removePolicy    string
+		ledgerState     string
+		privateVersion  string
+	}{
+		{name: "legacy target is older than compiled floor", version: "0.7.9", privateVersion: "0.7.9"},
+		{name: "applied capability has no compiled policy", version: "0.8.0", removePolicy: "test-vms-settings-v1-to-v2"},
+		{name: "absent ledger target below floor", version: "0.7.9", ledgerState: "absent"},
+		{name: "baseline ledger target below floor", version: "0.7.9", ledgerState: "baseline"},
+		{name: "partial ledger target below floor", version: "0.7.9", ledgerState: "partial"},
+		{name: "absent ledger pending capability has no policy", version: "0.8.0", ledgerState: "absent", removePolicy: "test-yard-owner-v1-to-v2"},
+		{name: "baseline ledger pending capability has no policy", version: "0.8.0", ledgerState: "baseline", removePolicy: "test-yard-owner-v1-to-v2"},
+		{name: "partial ledger pending capability has no policy", version: "0.8.0", ledgerState: "partial", removePolicy: "test-yard-owner-v1-to-v2"},
+		{
+			name: "v2 target registry rejects current ledger prefix", version: "0.9.0",
+			registryPayload: incompatibleRegistry, registryDigest: fingerprintPayload(incompatibleRegistry),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newV2RollbackBoundaryFixtureWithLedger(
+				t, test.version, test.registryDigest, test.registryPayload, test.ledgerState,
+			)
+			if test.removePolicy != "" {
+				descriptors := slices.Clone(BuiltinCapabilityCatalog().descriptors)
+				for index := range descriptors {
+					if descriptors[index].Kind == test.removePolicy {
+						descriptors[index].RollbackCompatibility = ""
+						descriptors[index].LegacyMinimumVersion = ""
+					}
+				}
+				catalog, err := NewCapabilityCatalog(descriptors)
+				if err != nil {
+					t.Fatal(err)
+				}
+				fixture.transition.catalog = catalog
+			}
+			goal := Goal{Target: "release-a", Direction: DirectionActivatePrevious}
+			inspection, err := fixture.transition.Inspect(context.Background(), goal)
+			if err != nil || inspection.Outcome == nil ||
+				inspection.Outcome.Status != StatusOperatorActionRequired ||
+				inspection.Outcome.Code != CodeRollbackIncompatible ||
+				len(inspection.Blockers) != 1 || inspection.Assessment.Changed ||
+				inspection.Assessment.Recovery != domain.RecoveryNotNeeded ||
+				inspection.Assessment.Effect != domain.ActionRead {
+				t.Fatalf("blocked rollback inspection = %#v, err=%v", inspection, err)
+			}
+			payload, err := json.Marshal(inspection)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.privateVersion != "" && strings.Contains(string(payload), test.privateVersion) {
+				t.Fatalf("public rollback diagnostic leaked target version: %s", payload)
+			}
+			outcome, err := fixture.transition.Converge(context.Background(), Execution{
+				Plan: inspection.Plan, Authorization: "must-not-be-checked",
+			})
+			if err != nil || outcome.Status != StatusOperatorActionRequired ||
+				outcome.Code != CodeRollbackIncompatible {
+				t.Fatalf("blocked rollback convergence = %#v, err=%v", outcome, err)
+			}
+			fixture.assertUnchanged(t, true)
+		})
+	}
+}
+
+func TestV2RollbackCompatibilityAllowsPendingMigrationsAtPublishedLegacyFloor(t *testing.T) {
+	for _, state := range []string{"absent", "baseline", "partial"} {
+		for _, version := range []string{"0.8.0", "0.8.1"} {
+			t.Run(state+"/"+version, func(t *testing.T) {
+				fixture := newV2RollbackBoundaryFixtureWithLedger(t, version, "", nil, state)
+				goal := Goal{Target: "release-a", Direction: DirectionActivatePrevious}
+				inspection, err := fixture.transition.Inspect(context.Background(), goal)
+				if err != nil || len(inspection.Blockers) != 0 || inspection.Outcome == nil ||
+					inspection.Outcome.Status != StatusMigrationRequired || !inspection.Assessment.Changed {
+					t.Fatalf("compatible rollback inspection = %#v, err=%v", inspection, err)
+				}
+				outcome, err := fixture.transition.Converge(context.Background(), Execution{
+					Plan: inspection.Plan, Authorization: "confirmed",
+				})
+				if err != nil || outcome.Status != StatusReady || outcome.Active != "release-a" {
+					t.Fatalf("compatible rollback convergence = %#v, err=%v", outcome, err)
+				}
+				if *fixture.authorizes != 1 || *fixture.activations != 1 {
+					t.Fatalf("rollback authorizations=%d activations=%d", *fixture.authorizes, *fixture.activations)
+				}
+				inspection, err = fixture.transition.Inspect(context.Background(), goal)
+				if err != nil || len(inspection.Blockers) != 0 || inspection.Outcome == nil ||
+					inspection.Outcome.Status != StatusReady || inspection.Assessment.Changed {
+					t.Fatalf("completed rollback inspection = %#v, err=%v", inspection, err)
+				}
+			})
+		}
+	}
+}
+
+func TestV2RollbackCompatibilityAllowsPublishedLegacyFloorAndBindsStaleTarget(t *testing.T) {
+	fixture := newV2RollbackBoundaryFixture(t, "0.8.0", "", nil)
+	goal := Goal{Target: "release-a", Direction: DirectionActivatePrevious}
+	inspection, err := fixture.transition.Inspect(context.Background(), goal)
+	if err != nil || inspection.Outcome == nil ||
+		inspection.Outcome.Status != StatusMigrationRequired ||
+		inspection.Assessment.Recovery != domain.RecoveryReversible ||
+		!slices.Contains(inspection.Assessment.Consequences, v2RollbackNoOpConsequence) {
+		t.Fatalf("allowed legacy rollback inspection = %#v, err=%v", inspection, err)
+	}
+	fixture.transition.options.RollbackTarget.Version = "0.8.1"
+	outcome, err := fixture.transition.Converge(context.Background(), Execution{
+		Plan: inspection.Plan, Authorization: "must-not-be-checked",
+	})
+	if err != nil || outcome.Status != StatusOperatorActionRequired ||
+		outcome.Code != CodePlanStale {
+		t.Fatalf("stale exact rollback target = %#v, err=%v", outcome, err)
+	}
+	fixture.assertUnchanged(t, false)
+}
+
+type v2RollbackBoundaryFixture struct {
+	transition  *V2Transition
+	configHome  string
+	links       *ReleaseLinks
+	ledger      ProtectedSnapshot
+	reconciler  *v2TestReconciler
+	owner       *v2TestOwnerRegistration
+	activations *int
+	authorizes  *int
+}
+
+func newV2RollbackBoundaryFixture(
+	t *testing.T,
+	version string,
+	targetRegistryDigest Fingerprint,
+	registryPayload []byte,
+) v2RollbackBoundaryFixture {
+	t.Helper()
+	return newV2RollbackBoundaryFixtureWithLedger(t, version, targetRegistryDigest, registryPayload, "")
+}
+
+func newV2RollbackBoundaryFixtureWithLedger(
+	t *testing.T,
+	version string,
+	targetRegistryDigest Fingerprint,
+	registryPayload []byte,
+	ledgerState string,
+) v2RollbackBoundaryFixture {
+	t.Helper()
+	configHome := settingsV2Fixture(t, map[string]string{
+		"yards/hermes/config.env": "YARD_TEMPLATE=e2e-vms\nNESTED_E2E_VMS=0\n",
+	})
+	switch ledgerState {
+	case "absent":
+	case "baseline":
+		seedV2LedgerPrefix(t, configHome, 0)
+	case "partial":
+		seedV2LedgerPrefix(t, configHome, 1)
+	case "":
+		seedAppliedV2Ledger(t, configHome)
+	default:
+		t.Fatalf("unknown ledger fixture state %q", ledgerState)
+	}
+	if registryPayload == nil {
+		registryPayload = v2RegistryPayload(t)
+	}
+	links := &ReleaseLinks{Active: "release-b", Previous: releaseIDPointer("release-a")}
+	reconciler := &v2TestReconciler{}
+	owner := &v2TestOwnerRegistration{state: OwnerRegistrationAbsent}
+	activations, authorizes := 0, 0
+	transition, err := NewV2Transition(V2Options{
+		ConfigHome: configHome,
+		Releases: ReleasePair{
+			From: "release-b", Previous: releaseIDPointer("release-a"), Target: "release-a",
+		},
+		Direction: DirectionActivatePrevious,
+		RollbackTarget: &RollbackTarget{
+			Version: version, RegistryDigest: targetRegistryDigest,
+		},
+		ObserveLinks: func(context.Context) (ReleaseLinks, error) { return *links, nil },
+		ActivateLinks: func(_ context.Context, pair ReleasePair) (ReleaseLinks, error) {
+			activations++
+			*links = ReleaseLinks{Active: pair.Target, Previous: releaseIDPointer(pair.From)}
+			return *links, nil
+		},
+		Reconcilers: []V2ActivationReconciler{reconciler}, OwnerRegistration: owner,
+		RegistryPayload: registryPayload, ArtifactDigest: digestA,
+		NewTransactionID: func() TransactionID { return "tx-rollback-001" },
+		VerifyAuthorization: func(PlanToken, Authorization) bool {
+			authorizes++
+			return true
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := transition.store.ReadLedger()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v2RollbackBoundaryFixture{
+		transition: transition, configHome: configHome, links: links, ledger: ledger,
+		reconciler: reconciler, owner: owner, activations: &activations, authorizes: &authorizes,
+	}
+}
+
+func seedAppliedV2Ledger(t *testing.T, configHome string) {
+	t.Helper()
+	seedV2LedgerPrefix(t, configHome, len(v2TestRegistry(t).Migrations))
+}
+
+func seedV2LedgerPrefix(t *testing.T, configHome string, count int) {
+	t.Helper()
+	registry := v2TestRegistry(t)
+	ledger := BaselineLedgerV2(registry)
+	var err error
+	for _, migration := range registry.Migrations[:count] {
+		ledger, err = ledger.Advance(registry, migration)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	payload, _, err := MarshalLedgerV2(ledger, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewPOSIXV2Store(configHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.ReadLedger()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompareAndSwapLedger(before, payload); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (fixture v2RollbackBoundaryFixture) assertUnchanged(t *testing.T, requireNoObservation bool) {
+	t.Helper()
+	if *fixture.activations != 0 || *fixture.authorizes != 0 ||
+		(requireNoObservation && fixture.reconciler.observes != 0) || fixture.reconciler.reconciles != 0 ||
+		fixture.owner.prepares != 0 || fixture.owner.observes != 0 || fixture.owner.commits != 0 ||
+		!linksEqual(*fixture.links, ReleaseLinks{Active: "release-b", Previous: releaseIDPointer("release-a")}) {
+		t.Fatalf("rollback crossed proof boundary: activations=%d authorizes=%d links=%#v reconciler=%#v owner=%#v",
+			*fixture.activations, *fixture.authorizes, *fixture.links, fixture.reconciler, fixture.owner)
+	}
+	ledger, err := fixture.transition.store.ReadLedger()
+	if err != nil || ledger.Exists != fixture.ledger.Exists || !bytes.Equal(ledger.Payload, fixture.ledger.Payload) {
+		t.Fatalf("rollback changed ledger: before=%q after=%q err=%v", fixture.ledger.Payload, ledger.Payload, err)
+	}
+	journal, err := fixture.transition.store.ReadCurrentJournal()
+	if err != nil || journal.Exists {
+		t.Fatalf("rollback published journal: %#v, err=%v", journal, err)
+	}
+	settings, err := os.ReadFile(filepath.Join(fixture.configHome, "yards", "hermes", "config.env"))
+	if err != nil || string(settings) != "YARD_TEMPLATE=e2e-vms\nNESTED_E2E_VMS=0\n" {
+		t.Fatalf("rollback changed settings: %q, err=%v", settings, err)
+	}
+}
 
 func TestV2TransitionCanonicalizesAndResetsOnce(t *testing.T) {
 	transition, configHome, path := v2TransitionFixture(t, nil)
@@ -721,6 +993,79 @@ func TestV2TransitionPostActivationReplacementAcceptsAnyLaterSemver(t *testing.T
 	}
 }
 
+func TestV2TransitionPostActivationReplacementAcceptsPublishedV0111Catalog(t *testing.T) {
+	fixture := newV2PostActivationRecoveryFixture(t)
+	historical := publishedV0111CatalogFixture(t)
+	if fixture.sourceJournal.CatalogDigest != historical.Digest() {
+		t.Fatal("source fixture does not bind the published v0.11.1 catalog")
+	}
+	inspection, err := fixture.transition.Inspect(context.Background(), fixture.goal)
+	if err != nil || inspection.Outcome == nil ||
+		inspection.Outcome.Status != StatusMigrationRequired || inspection.Resume != nil {
+		t.Fatalf("historical catalog recovery inspection = %#v, err=%v", inspection, err)
+	}
+	observation, err := fixture.transition.observe(context.Background(), fixture.goal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts := fixture.transition.planFacts(observation)
+	if facts.CatalogDigest != fixture.transition.catalog.Digest() || facts.CatalogDigest == historical.Digest() {
+		t.Fatalf("candidate plan lost current rollback policy binding: %q", facts.CatalogDigest)
+	}
+	facts.CatalogDigest = historical.Digest()
+	oldCatalogPlan, err := BindPlan(facts)
+	if err != nil || oldCatalogPlan == inspection.Plan {
+		t.Fatalf("candidate plan does not bind rollback policy: %q, err=%v", oldCatalogPlan, err)
+	}
+	outcome, err := fixture.transition.Converge(context.Background(), Execution{
+		Plan: inspection.Plan, Authorization: v2TestAuthorization(oldCatalogPlan),
+	})
+	if err != nil || outcome.Code != CodeConfirmationRequired {
+		t.Fatalf("historical plan grant accepted = %#v, err=%v", outcome, err)
+	}
+}
+
+func TestV2TransitionPublishedV0111RecoveryRejectsChangedMigrationCatalog(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func([]CapabilityDescriptor) []CapabilityDescriptor
+	}{
+		{name: "kind", mutate: func(descriptors []CapabilityDescriptor) []CapabilityDescriptor {
+			descriptors[0].Kind = "different-migration"
+			return descriptors
+		}},
+		{name: "domain", mutate: func(descriptors []CapabilityDescriptor) []CapabilityDescriptor {
+			descriptors[0].Domain = "different-domain"
+			return descriptors
+		}},
+		{name: "version", mutate: func(descriptors []CapabilityDescriptor) []CapabilityDescriptor {
+			descriptors[0].Version++
+			return descriptors
+		}},
+		{name: "additional capability", mutate: func(descriptors []CapabilityDescriptor) []CapabilityDescriptor {
+			return append(descriptors, CapabilityDescriptor{Kind: "new-migration", Domain: "settings", Version: 1})
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newV2PostActivationRecoveryFixture(t)
+			catalog, err := NewCapabilityCatalog(test.mutate(slices.Clone(fixture.transition.catalog.descriptors)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			fixture.transition.catalog = catalog
+			before := snapshotV2ProtectedTree(t, fixture.configHome)
+			inspection, err := fixture.transition.Inspect(context.Background(), fixture.goal)
+			if err != nil || inspection.Outcome == nil ||
+				inspection.Outcome.Status != StatusOperatorActionRequired {
+				t.Fatalf("changed migration catalog inspection = %#v, err=%v", inspection, err)
+			}
+			if !bytes.Equal(before, snapshotV2ProtectedTree(t, fixture.configHome)) {
+				t.Fatal("changed migration catalog inspection mutated protected state")
+			}
+		})
+	}
+}
+
 func TestV2TransitionPostActivationReplacementEligibilityFailsClosed(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -1402,6 +1747,7 @@ func newV2PostActivationRecoveryFixture(t *testing.T) *v2PostActivationRecoveryF
 	if err != nil {
 		t.Fatal(err)
 	}
+	source.catalog = publishedV0111CatalogFixture(t)
 	journal, sourceSnapshot, ledgerPayload := seedV0111PostActivationJournal(t, source)
 	replacement := &JournalReplacement{
 		Transaction: journal.Transaction, Fingerprint: sourceSnapshot.Fingerprint,
@@ -1428,6 +1774,19 @@ func newV2PostActivationRecoveryFixture(t *testing.T) *v2PostActivationRecoveryF
 		goal:          Goal{Target: v2PostActivationCandidateRelease, Direction: DirectionActivateTarget},
 		sourceJournal: journal, ledgerPayload: ledgerPayload,
 	}
+}
+
+func publishedV0111CatalogFixture(t *testing.T) CapabilityCatalog {
+	t.Helper()
+	// Frozen from the published v0.11.1 descriptors, before rollback metadata.
+	catalog, err := NewCapabilityCatalog([]CapabilityDescriptor{
+		{Kind: "test-vms-settings-v1-to-v2", Domain: "settings", Version: 1},
+		{Kind: "test-yard-owner-v1-to-v2", Domain: "owner-registration", Version: 1},
+	})
+	if err != nil || catalog.Digest() != "49e4c86efea0f1be557a43569728d9eb7f9df519379b0bdf45edd91ac5c93cf2" {
+		t.Fatalf("published v0.11.1 catalog = %q, err=%v", catalog.Digest(), err)
+	}
+	return catalog
 }
 
 func (fixture *v2PostActivationRecoveryFixture) rewriteJournal(change func(*JournalRecord)) {
@@ -2060,13 +2419,98 @@ func TestV2TransitionGuardsCheckpointLinksBeforeMutation(t *testing.T) {
 	}
 }
 
-func TestV2TransitionDoesNotReopenCompletedMigrationForReconcilerDrift(t *testing.T) {
+func TestV2TransitionCompletedHistoryNormalizesStaleCallerPairBeforeDriftRepair(t *testing.T) {
+	links := ReleaseLinks{Active: "release-a"}
+	transition, _, _ := v2TransitionFixtureWithReleases(
+		t, nil, ReleasePair{From: "release-a", Target: "release-b"}, links,
+	)
+	reconciler := &v2TestReconciler{}
+	transition.options.Reconcilers = []V2ActivationReconciler{reconciler}
+	transition.options.ObserveLinks = func(context.Context) (ReleaseLinks, error) { return links, nil }
+	transition.options.ActivateLinks = func(_ context.Context, pair ReleasePair) (ReleaseLinks, error) {
+		links = ReleaseLinks{Active: pair.Target, Previous: releaseIDPointer(pair.From)}
+		return links, nil
+	}
+	goal := Goal{Target: "release-b", Direction: DirectionActivateTarget}
+	inspection, err := transition.Inspect(context.Background(), goal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed, err := transition.Converge(context.Background(), Execution{
+		Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
+	})
+	if err != nil || completed.Status != StatusReady {
+		t.Fatalf("initial convergence = %#v, err=%v", completed, err)
+	}
+	ledgerBefore, err := transition.store.ReadLedger()
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := transition.options
+	options.Releases = ReleasePair{From: "historical-release", Target: goal.Target}
+	options.NewTransactionID = func() TransactionID { return "tx-test-002" }
+	options.ActivateLinks = func(context.Context, ReleasePair) (ReleaseLinks, error) {
+		t.Fatal("activation-only repair must not switch release links")
+		return ReleaseLinks{}, nil
+	}
+	fresh, err := NewV2Transition(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready, err := fresh.Inspect(context.Background(), goal)
+	if err != nil || ready.Outcome == nil || ready.Outcome.Status != StatusReady ||
+		!ready.Outcome.ReachedGoal || ready.Assessment.Changed || ready.Resume != nil {
+		t.Fatalf("completed history inspection = %#v, err=%v", ready, err)
+	}
+	links.Previous = releaseIDPointer("foreign-release")
+	blocked, err := fresh.Inspect(context.Background(), goal)
+	if err != nil || blocked.Outcome == nil ||
+		blocked.Outcome.Status != StatusOperatorActionRequired ||
+		blocked.Outcome.Code != CodeActivationAmbiguous {
+		t.Fatalf("foreign previous link inspection = %#v, err=%v", blocked, err)
+	}
+	links.Previous = releaseIDPointer("release-a")
+	reconciler.converged = false
+	repair, err := fresh.Inspect(context.Background(), goal)
+	if err != nil || repair.Outcome == nil || repair.Outcome.Status != StatusMigrationRequired ||
+		!repair.Assessment.Changed || repair.Resume != nil || repair.Outcome.Transaction != nil {
+		t.Fatalf("drift inspection = %#v, err=%v", repair, err)
+	}
+	outcome, err := fresh.Converge(context.Background(), Execution{
+		Plan: repair.Plan, Authorization: v2TestAuthorization(repair.Plan),
+	})
+	if err != nil || outcome.Status != StatusReady || outcome.Transaction == nil ||
+		*outcome.Transaction != "tx-test-002" {
+		t.Fatalf("drift repair = %#v, err=%v", outcome, err)
+	}
+	ledgerAfter, err := fresh.store.ReadLedger()
+	if err != nil || ledgerAfter.Fingerprint != ledgerBefore.Fingerprint {
+		t.Fatalf("activation-only repair changed migration ledger: %v", err)
+	}
+	snapshot, err := fresh.store.ReadCurrentJournal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal, err := ParseJournal(snapshot.Payload)
+	if err != nil || len(journal.Steps) != 0 || journal.Releases.From != goal.Target ||
+		journal.Releases.Target != goal.Target || journal.Releases.Previous == nil ||
+		*journal.Releases.Previous != "release-a" {
+		t.Fatalf("activation-only journal = %#v, err=%v", journal, err)
+	}
+}
+
+func TestV2TransitionRepairsActivationDriftAfterCompletedMigration(t *testing.T) {
 	links := ReleaseLinks{Active: "release-a"}
 	reconciler := &v2TestReconciler{}
-	transition, configHome, _ := v2TransitionFixtureWithReleases(
+	transition, configHome, settingsPath := v2TransitionFixtureWithReleases(
 		t, nil, ReleasePair{From: "release-a", Target: "release-a"}, links,
 	)
 	transition.options.Reconcilers = []V2ActivationReconciler{reconciler}
+	activateCalls := 0
+	transition.options.ActivateLinks = func(context.Context, ReleasePair) (ReleaseLinks, error) {
+		activateCalls++
+		return ReleaseLinks{}, errors.New("same-release activation must not switch links")
+	}
 	goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
 	inspection, err := transition.Inspect(context.Background(), goal)
 	if err != nil {
@@ -2082,23 +2526,162 @@ func TestV2TransitionDoesNotReopenCompletedMigrationForReconcilerDrift(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	observes := reconciler.observes
-	reconciles := reconciler.reconciles
+	settingsBefore, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := transition.options.OwnerRegistration.(*v2TestOwnerRegistration)
+	ownerCalls := [3]int{owner.prepares, owner.observes, owner.commits}
+	transition.options.NewTransactionID = func() TransactionID { return "tx-test-002" }
 	reconciler.converged = false
 	repeat, err := transition.Inspect(context.Background(), goal)
-	if err != nil || repeat.Outcome == nil || repeat.Outcome.Status != StatusReady ||
-		repeat.Assessment.Changed || repeat.Outcome.Transaction == nil ||
-		*repeat.Outcome.Transaction != "tx-test-001" {
+	if err != nil || repeat.Resume != nil || repeat.Outcome == nil ||
+		repeat.Outcome.Status != StatusMigrationRequired || !repeat.Assessment.Changed ||
+		repeat.Outcome.Transaction != nil {
 		t.Fatalf("drift inspection = %#v, err=%v", repeat, err)
 	}
+	firstDriftPlan := repeat.Plan
+	reconciler.drift = digestC
+	repeat, err = transition.Inspect(context.Background(), goal)
+	if err != nil || repeat.Plan == firstDriftPlan {
+		t.Fatalf("activation observation is not bound into plan: first=%q repeat=%#v err=%v",
+			firstDriftPlan, repeat, err)
+	}
+	reconciles := reconciler.reconciles
 	outcome, err := transition.Converge(context.Background(), Execution{Plan: repeat.Plan})
-	if err != nil || outcome.Status != StatusReady || reconciler.converged ||
-		reconciler.observes != observes || reconciler.reconciles != reconciles {
+	if err != nil || outcome.Status != StatusOperatorActionRequired ||
+		outcome.Code != CodeConfirmationRequired || reconciler.reconciles != reconciles {
+		t.Fatalf("unauthorized repair = %#v reconciler=%#v err=%v", outcome, reconciler, err)
+	}
+	outcome, err = transition.Converge(context.Background(), Execution{
+		Plan: repeat.Plan, Authorization: v2TestAuthorization(repeat.Plan),
+	})
+	if err != nil || outcome.Status != StatusReady || !reconciler.converged ||
+		reconciler.reconciles != reconciles+1 || outcome.Transaction == nil ||
+		*outcome.Transaction != "tx-test-002" || activateCalls != 0 {
 		t.Fatalf("drift outcome = %#v reconciler=%#v err=%v", outcome, reconciler, err)
 	}
 	after, err := store.ReadLedger()
-	if err != nil || before.Fingerprint != after.Fingerprint {
+	if err != nil || !bytes.Equal(before.Payload, after.Payload) {
 		t.Fatalf("ledger changed during reconcile: before=%#v after=%#v err=%v", before, after, err)
+	}
+	settingsAfter, err := os.ReadFile(settingsPath)
+	if err != nil || !bytes.Equal(settingsBefore, settingsAfter) ||
+		ownerCalls != [3]int{owner.prepares, owner.observes, owner.commits} {
+		t.Fatalf("migration capability ran during repair: settings before=%q after=%q owner=%#v err=%v",
+			settingsBefore, settingsAfter, owner, err)
+	}
+	journalSnapshot, err := store.ReadCurrentJournal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal, err := ParseJournal(journalSnapshot.Payload)
+	if err != nil || journal.Transaction != "tx-test-002" ||
+		journal.Checkpoint != JournalComplete || len(journal.Steps) != 0 {
+		t.Fatalf("activation-only journal = %#v, err=%v", journal, err)
+	}
+}
+
+func TestV2TransitionResumesDurableActivationOnlyRepairAtEveryCheckpoint(t *testing.T) {
+	for _, faultPoint := range []string{
+		"after-journal-authorized",
+		"before-reconciler-0", "after-reconciler-0",
+		"before-reconciler-1", "after-reconciler-1",
+		"before-journal-complete",
+	} {
+		t.Run(faultPoint, func(t *testing.T) {
+			injected := errors.New("injected activation-only repair fault")
+			activeFault := ""
+			transition, configHome, settingsPath := v2TransitionFixture(t, func(point string) error {
+				if point == activeFault {
+					return injected
+				}
+				return nil
+			})
+			reconcilers := []*v2TestReconciler{{id: "test-runtime-0"}, {id: "test-runtime-1"}}
+			transition.options.Reconcilers = []V2ActivationReconciler{reconcilers[0], reconcilers[1]}
+			activateCalls := 0
+			transition.options.ActivateLinks = func(context.Context, ReleasePair) (ReleaseLinks, error) {
+				activateCalls++
+				return ReleaseLinks{}, errors.New("same-release activation must not switch links")
+			}
+			authorizations := 0
+			transition.options.VerifyAuthorization = func(plan PlanToken, authorization Authorization) bool {
+				authorizations++
+				return authorization == v2TestAuthorization(plan)
+			}
+			goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
+			initial, err := transition.Inspect(context.Background(), goal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			completed, err := transition.Converge(context.Background(), Execution{
+				Plan: initial.Plan, Authorization: v2TestAuthorization(initial.Plan),
+			})
+			if err != nil || completed.Status != StatusReady {
+				t.Fatalf("initial convergence = %#v, err=%v", completed, err)
+			}
+			store, err := NewPOSIXV2Store(configHome)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ledgerBefore, err := store.ReadLedger()
+			if err != nil {
+				t.Fatal(err)
+			}
+			settingsBefore, err := os.ReadFile(settingsPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			owner := transition.options.OwnerRegistration.(*v2TestOwnerRegistration)
+			ownerCalls := [3]int{owner.prepares, owner.observes, owner.commits}
+			transition.options.NewTransactionID = func() TransactionID { return "tx-test-002" }
+			for _, reconciler := range reconcilers {
+				reconciler.converged = false
+			}
+			repair, err := transition.Inspect(context.Background(), goal)
+			if err != nil || repair.Resume != nil || !repair.Assessment.Changed {
+				t.Fatalf("repair inspection = %#v, err=%v", repair, err)
+			}
+			activeFault = faultPoint
+			interrupted, err := transition.Converge(context.Background(), Execution{
+				Plan: repair.Plan, Authorization: v2TestAuthorization(repair.Plan),
+			})
+			if err != nil || interrupted.Status != StatusRecovering ||
+				interrupted.Transaction == nil || *interrupted.Transaction != "tx-test-002" {
+				t.Fatalf("interrupted repair = %#v, err=%v", interrupted, err)
+			}
+			journalSnapshot, err := store.ReadCurrentJournal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			journal, err := ParseJournal(journalSnapshot.Payload)
+			if err != nil || journal.Transaction != "tx-test-002" || len(journal.Steps) != 0 {
+				t.Fatalf("durable repair journal = %#v, err=%v", journal, err)
+			}
+			resumePlan := journal.ResumePlan
+			activeFault = ""
+			resume, err := transition.Inspect(context.Background(), goal)
+			if err != nil || resume.Resume == nil || *resume.Resume != "tx-test-002" ||
+				resume.Plan != resumePlan || resume.Outcome == nil ||
+				resume.Outcome.Status != StatusRecovering {
+				t.Fatalf("repair resume inspection = %#v, err=%v", resume, err)
+			}
+			settled, err := transition.Converge(context.Background(), Execution{Plan: resume.Plan})
+			if err != nil || settled.Status != StatusReady || settled.Transaction == nil ||
+				*settled.Transaction != "tx-test-002" || authorizations != 2 || activateCalls != 0 {
+				t.Fatalf("resumed repair = %#v authorizations=%d activate=%d err=%v",
+					settled, authorizations, activateCalls, err)
+			}
+			ledgerAfter, err := store.ReadLedger()
+			settingsAfter, settingsErr := os.ReadFile(settingsPath)
+			if err != nil || settingsErr != nil || !bytes.Equal(ledgerBefore.Payload, ledgerAfter.Payload) ||
+				!bytes.Equal(settingsBefore, settingsAfter) ||
+				ownerCalls != [3]int{owner.prepares, owner.observes, owner.commits} {
+				t.Fatalf("repair changed migration state: ledger before=%q after=%q settings before=%q after=%q owner=%#v err=%v settingsErr=%v",
+					ledgerBefore.Payload, ledgerAfter.Payload, settingsBefore, settingsAfter, owner, err, settingsErr)
+			}
+		})
 	}
 }
 
@@ -2147,6 +2730,88 @@ func TestV2TransitionReconcilesDriftForNextReleaseAfterCompletedMigration(t *tes
 	if err != nil || outcome.Status != StatusReady || outcome.Active != "release-b" ||
 		!reconciler.converged || reconciler.reconciles != reconciles+1 {
 		t.Fatalf("next release convergence = %#v reconciler=%#v err=%v", outcome, reconciler, err)
+	}
+}
+
+func TestV2TransitionForwardAfterPublishedRollbackHistoryRequiresFreshAuthorization(t *testing.T) {
+	links := ReleaseLinks{Active: "release-a"}
+	completed, _, _ := v2TransitionFixtureWithReleases(t, nil,
+		ReleasePair{From: "release-a", Target: "release-a"}, links)
+	initial, err := completed.Inspect(context.Background(), Goal{Target: "release-a", Direction: DirectionActivateTarget})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome, err := completed.Converge(context.Background(), Execution{
+		Plan: initial.Plan, Authorization: v2TestAuthorization(initial.Plan),
+	}); err != nil || outcome.Status != StatusReady {
+		t.Fatalf("initial migration = %#v, %v", outcome, err)
+	}
+	snapshot, err := completed.store.ReadCurrentJournal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	history, err := ParseJournal(snapshot.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	history.Goal.Direction = DirectionActivatePrevious
+	history.Releases.From = "release-old"
+	history.Releases.Previous = releaseIDPointer("release-a")
+	history.CatalogDigest = "49e4c86efea0f1be557a43569728d9eb7f9df519379b0bdf45edd91ac5c93cf2"
+	history.Steps = []JournalStep{}
+	history.IntentDigest = bindJournalIntent(history.AuthorizationPlan, history.ResumePlan, history.ObservationScope, history.Steps)
+	// The published writer omitted rollbackTarget; do not synthesize old proof.
+	payload, err := json.Marshal(history)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := completed.store.CompareAndSwapCurrentJournal(snapshot, payload); err != nil {
+		t.Fatal(err)
+	}
+	ledgerBefore, err := completed.store.ReadLedger()
+	if err != nil {
+		t.Fatal(err)
+	}
+	links.Previous = releaseIDPointer("release-old")
+	options := completed.options
+	options.Releases = ReleasePair{From: "release-a", Previous: links.Previous, Target: "release-b"}
+	options.ObserveLinks = func(context.Context) (ReleaseLinks, error) { return links, nil }
+	options.ActivateLinks = func(_ context.Context, pair ReleasePair) (ReleaseLinks, error) {
+		links = ReleaseLinks{Active: pair.Target, Previous: releaseIDPointer(pair.From)}
+		return links, nil
+	}
+	options.NewTransactionID = func() TransactionID { return "tx-new-forward" }
+	next, err := NewV2Transition(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inspection, err := next.Inspect(context.Background(), Goal{Target: "release-b", Direction: DirectionActivateTarget})
+	if err != nil || inspection.Outcome == nil || inspection.Outcome.Status != StatusMigrationRequired || inspection.Resume != nil {
+		t.Fatalf("forward inspection = %#v, %v", inspection, err)
+	}
+	for _, execution := range []Execution{
+		{Plan: history.ResumePlan},
+		{Plan: history.AuthorizationPlan, Authorization: v2TestAuthorization(history.AuthorizationPlan)},
+		{Plan: inspection.Plan, Authorization: v2TestAuthorization(history.AuthorizationPlan)},
+	} {
+		if outcome, err := next.Converge(context.Background(), execution); err == nil && outcome.Status == StatusReady {
+			t.Fatal("historical authorization executed the new forward action")
+		}
+	}
+	unchanged, err := next.store.ReadCurrentJournal()
+	if err != nil || !bytes.Equal(unchanged.Payload, payload) || links.Active != "release-a" {
+		t.Fatalf("inspection/rejected grants changed historical state: %v", err)
+	}
+	outcome, err := next.Converge(context.Background(), Execution{
+		Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
+	})
+	if err != nil || outcome.Status != StatusReady || outcome.Active != "release-b" ||
+		outcome.Transaction == nil || *outcome.Transaction != "tx-new-forward" {
+		t.Fatalf("freshly authorized forward action = %#v, %v", outcome, err)
+	}
+	ledgerAfter, err := next.store.ReadLedger()
+	if err != nil || !bytes.Equal(ledgerAfter.Payload, ledgerBefore.Payload) {
+		t.Fatalf("forward action replayed the completed migration ledger: %v", err)
 	}
 }
 
@@ -2302,7 +2967,7 @@ func TestV2TransitionReportsActivationObservationFailureAsBlocker(t *testing.T) 
 	}
 }
 
-func TestV2TransitionDoesNotReopenCompletedMigrationForActivationObservationFailure(t *testing.T) {
+func TestV2TransitionReportsCompletedActivationObservationFailureAsBlocker(t *testing.T) {
 	transition, _, _ := v2TransitionFixture(t, nil)
 	transition.options.Reconcilers = []V2ActivationReconciler{&v2TestReconciler{}}
 	goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
@@ -2321,10 +2986,11 @@ func TestV2TransitionDoesNotReopenCompletedMigrationForActivationObservationFail
 	}
 	reinspection, err := transition.Inspect(context.Background(), goal)
 	if err != nil || reinspection.Outcome == nil ||
-		reinspection.Outcome.Status != StatusReady ||
-		reinspection.Outcome.Code != CodeReady || reinspection.Assessment.Changed ||
+		reinspection.Outcome.Status != StatusOperatorActionRequired ||
+		reinspection.Outcome.Code != CodeDependencyUnavailable || !reinspection.Assessment.Changed ||
 		reinspection.Outcome.Transaction == nil ||
 		*reinspection.Outcome.Transaction != "tx-test-001" ||
+		len(reinspection.Blockers) != 1 ||
 		strings.Contains(reinspection.Outcome.Message, "private completed detail") {
 		t.Fatalf("completed activation inspection = %#v, err=%v", reinspection, err)
 	}
@@ -2704,7 +3370,9 @@ func TestV2TransitionDoesNotFabricateLinksWhenPostMutationObservationFails(t *te
 }
 
 type v2TestReconciler struct {
+	id         string
 	converged  bool
+	drift      Fingerprint
 	observes   int
 	reconciles int
 }
@@ -2730,6 +3398,8 @@ func (v2ActivationConflictError) ActivationConflict() bool { return true }
 type v2TestOwnerRegistration struct {
 	state           OwnerRegistrationState
 	registration    Fingerprint
+	prepares        int
+	observes        int
 	commits         int
 	cleanups        int
 	cleanupErr      error
@@ -2761,6 +3431,7 @@ func (owner *v2TestOwnerRegistration) Prepare(
 	_ context.Context,
 	_ V2SettingsSnapshotView,
 ) (OwnerRegistrationObservation, error) {
+	owner.prepares++
 	if owner.intermediate {
 		return OwnerRegistrationObservation{}, errors.New("owner registration has authorized intermediate state")
 	}
@@ -2771,6 +3442,7 @@ func (owner *v2TestOwnerRegistration) Observe(
 	_ context.Context,
 	before OwnerRegistrationObservation,
 ) (OwnerRegistrationProgress, error) {
+	owner.observes++
 	actual := owner.observation()
 	if actual.Registration != before.Registration || actual.Overrides != before.Overrides ||
 		actual.Controller != before.Controller || actual.SharedImages != before.SharedImages {
@@ -2889,7 +3561,12 @@ func (reconciler *v2FailingReconciler) Reconcile(context.Context, ReleaseLinks) 
 	return reconciler.reconcileErr
 }
 
-func (*v2TestReconciler) ID() string { return "test-runtime" }
+func (reconciler *v2TestReconciler) ID() string {
+	if reconciler.id != "" {
+		return reconciler.id
+	}
+	return "test-runtime"
+}
 
 func (reconciler *v2PostErrorReconciler) ID() string { return "post-error-runtime" }
 
@@ -2936,7 +3613,11 @@ func (v2NamedReconciler) Reconcile(context.Context, ReleaseLinks) error { return
 
 func (reconciler *v2TestReconciler) Observe(context.Context, ReleasePair, ReleaseLinks) (V2ActivationObservation, error) {
 	reconciler.observes++
-	return V2ActivationObservation{Actual: map[bool]Fingerprint{true: digestA, false: digestB}[reconciler.converged], Desired: digestA, Converged: reconciler.converged}, nil
+	drift := reconciler.drift
+	if drift == "" {
+		drift = digestB
+	}
+	return V2ActivationObservation{Actual: map[bool]Fingerprint{true: digestA, false: drift}[reconciler.converged], Desired: digestA, Converged: reconciler.converged}, nil
 }
 
 func (reconciler *v2TestReconciler) Reconcile(context.Context, ReleaseLinks) error {

@@ -92,6 +92,7 @@ func (cli *CLI) runConfig(ctx context.Context, loaded config.Loaded, arguments [
 				"  unset   remove a persistent scalar setting\n"+
 				"  import  replace a typed persistent file setting from a file\n"+
 				"  edit    edit a typed persistent file setting with VISUAL or EDITOR\n"+
+				"  repair-registration <yard> [--check] [--yes]  preserve a shadowed flat registration in recovery\n"+
 				"  status  check materialized file settings in running local yards (read-only)\n"+
 				"  apply   refresh materialized file settings in running local yards\n"+
 				"  sync    connect, inspect, pull, push or import versioned non-secret settings\n",
@@ -128,6 +129,8 @@ func (cli *CLI) runConfig(ctx context.Context, loaded config.Loaded, arguments [
 		return cli.writeConfigPaths(loaded)
 	case "sync":
 		return cli.runConfigSync(ctx, loaded, arguments[1:], assumeYes)
+	case "repair-registration":
+		return cli.runConfigRegistrationRepair(ctx, loaded, arguments[1:], assumeYes)
 	case "set", "unset", "import", "edit":
 		return cli.runConfigAuthoring(
 			ctx, loaded, action, arguments[1:], assumeYes,

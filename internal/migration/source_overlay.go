@@ -21,6 +21,8 @@ const (
 	SourceBaseDataHome   = "data-home"
 	SourceBaseConfigHome = "config-home"
 
+	MaxLegacyYardConfigBytes = 1 << 20
+
 	DestinationConfigHome = "config-home"
 
 	ContentTransformRetiredE2EVMTemplate = "yard-template-e2e-vms-to-test-vms"
@@ -161,34 +163,34 @@ var retiredE2EVMTemplateAssignment = regexp.MustCompile(
 	`^([ \t]*)(?:export[ \t]+)?YARD_TEMPLATE[ \t]*=[ \t]*(?:"e2e-vms"|'e2e-vms'|e2e-vms)[ \t]*$`,
 )
 
-// NormalizeLegacyYardConfig writes a protected copy with the retired test VM
-// template replaced by its canonical name. It is only used in the
-// source-install transaction before the new config becomes active.
-func NormalizeLegacyYardConfig(source, destination string) error {
-	if err := validateSourceFile(source); err != nil {
-		return err
+// NormalizeLegacyYardConfigContent replaces exactly one direct, static retired
+// template assignment while preserving every other byte of the config.
+func NormalizeLegacyYardConfigContent(payload []byte) ([]byte, error) {
+	if len(payload) > MaxLegacyYardConfigBytes {
+		return nil, errors.New("legacy yard config exceeds its size bound")
 	}
-	values, err := config.ReadAssignments(source)
+	assignments, err := config.ParsePersistentAssignments("legacy yard config", payload)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if values["YARD_TEMPLATE"] != "e2e-vms" {
-		return errors.New("yard config does not select the retired e2e-vms template")
-	}
-	parent, err := realOwnedDirectory(filepath.Dir(destination), true)
-	if err != nil {
-		return fmt.Errorf("normalization destination: %w", err)
-	}
-	destination = filepath.Join(parent, filepath.Base(destination))
-	if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
-		if err == nil {
-			return errors.New("normalization destination already exists")
+	found := false
+	for _, assignment := range assignments {
+		if assignment.Name != "YARD_TEMPLATE" {
+			continue
 		}
-		return err
+		if !assignment.Direct || assignment.Dynamic {
+			return nil, errors.New("retired YARD_TEMPLATE assignment must be direct and static")
+		}
+		if assignment.Value != "e2e-vms" {
+			return nil, errors.New("yard config does not select the retired e2e-vms template")
+		}
+		if found {
+			return nil, errors.New("yard config has duplicate retired YARD_TEMPLATE assignments")
+		}
+		found = true
 	}
-	payload, err := os.ReadFile(source)
-	if err != nil {
-		return err
+	if !found {
+		return nil, errors.New("yard config does not select the retired e2e-vms template")
 	}
 	lines := bytes.SplitAfter(payload, []byte("\n"))
 	replaced := 0
@@ -205,28 +207,10 @@ func NormalizeLegacyYardConfig(source, destination string) error {
 		}
 		normalized.Write(line)
 	}
-	if replaced == 0 {
-		return errors.New("retired YARD_TEMPLATE assignment uses an unsupported form")
+	if replaced != 1 {
+		return nil, errors.New("retired YARD_TEMPLATE assignment uses an unsupported form")
 	}
-	file, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return err
-	}
-	remove := true
-	defer func() {
-		if remove {
-			_ = os.Remove(destination)
-		}
-	}()
-	if _, err := file.Write(normalized.Bytes()); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	remove = false
-	return nil
+	return normalized.Bytes(), nil
 }
 
 type manifestAdd func(

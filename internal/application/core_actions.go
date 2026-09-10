@@ -46,6 +46,11 @@ func NewCoreActionRegistry() (*domain.ActionRegistry, error) {
 			Recovery: domain.RecoveryReversible,
 		},
 		{
+			Action: "config.repair-registration", Summary: "Repair duplicate yard registration", Effect: domain.ActionMutation,
+			Impacts:  []domain.ActionImpact{domain.ImpactLocalMetadata},
+			Recovery: domain.RecoveryReversible,
+		},
+		{
 			Action: "config.apply", Summary: "Apply Subyard file settings", Effect: domain.ActionMutation,
 			Impacts:  []domain.ActionImpact{domain.ImpactYardRuntime},
 			Recovery: domain.RecoveryRecreatable,

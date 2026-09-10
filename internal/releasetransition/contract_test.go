@@ -24,6 +24,7 @@ func TestPlanTokenBindsEveryMaterialInspectionFact(t *testing.T) {
 	cases := map[string]func(*PlanFacts){
 		"goal": func(facts *PlanFacts) {
 			facts.Goal.Direction = DirectionActivatePrevious
+			facts.RollbackTarget = &RollbackTarget{Version: "0.8.0"}
 		},
 		"release pair": func(facts *PlanFacts) {
 			facts.Releases.Previous = releasePtr("0.8.0")
@@ -130,6 +131,47 @@ func TestPlanTokenBindsTypedJournalReplacement(t *testing.T) {
 	}
 }
 
+func TestPlanTokenBindsExactRollbackTarget(t *testing.T) {
+	base := basePlanFacts()
+	base.Goal.Direction = DirectionActivatePrevious
+	base.RollbackTarget = &RollbackTarget{Version: "0.8.0"}
+	for name, test := range map[string]struct {
+		prepare func(*RollbackTarget)
+		change  func(*RollbackTarget)
+	}{
+		"version": {
+			change: func(target *RollbackTarget) { target.Version = "0.8.1" },
+		},
+		"registry presence": {
+			change: func(target *RollbackTarget) { target.RegistryDigest = digestA },
+		},
+		"registry digest": {
+			prepare: func(target *RollbackTarget) { target.RegistryDigest = digestA },
+			change:  func(target *RollbackTarget) { target.RegistryDigest = digestB },
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			baseline := clonePlanFacts(base)
+			if test.prepare != nil {
+				test.prepare(baseline.RollbackTarget)
+			}
+			want, err := BindPlan(baseline)
+			if err != nil {
+				t.Fatal(err)
+			}
+			changed := clonePlanFacts(baseline)
+			test.change(changed.RollbackTarget)
+			got, err := BindPlan(changed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got == want {
+				t.Fatalf("BindPlan(changed target %s) = unchanged token %q", name, got)
+			}
+		})
+	}
+}
+
 func TestResumePlanBindsEveryImmutableRecoveryFact(t *testing.T) {
 	authorizationPlan, err := BindPlan(basePlanFacts())
 	if err != nil {
@@ -141,7 +183,10 @@ func TestResumePlanBindsEveryImmutableRecoveryFact(t *testing.T) {
 		t.Fatal(err)
 	}
 	cases := map[string]func(*ResumePlanFacts){
-		"goal":         func(facts *ResumePlanFacts) { facts.Goal.Direction = DirectionActivatePrevious },
+		"goal": func(facts *ResumePlanFacts) {
+			facts.Goal.Direction = DirectionActivatePrevious
+			facts.RollbackTarget = &RollbackTarget{Version: "0.8.0"}
+		},
 		"release pair": func(facts *ResumePlanFacts) { facts.Releases.Previous = releasePtr("0.8.0") },
 		"artifact":     func(facts *ResumePlanFacts) { facts.ArtifactDigest = digestC },
 		"registry":     func(facts *ResumePlanFacts) { facts.RegistryDigest = digestC },
@@ -173,6 +218,51 @@ func TestResumePlanBindsEveryImmutableRecoveryFact(t *testing.T) {
 			}
 			if got == want {
 				t.Fatalf("BindResumePlan(changed %s) = unchanged token %q", name, got)
+			}
+		})
+	}
+}
+
+func TestResumePlanBindsExactRollbackTarget(t *testing.T) {
+	authorizationPlan, err := BindPlan(basePlanFacts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := baseResumePlanFacts(authorizationPlan, "tx-A")
+	base.Goal.Direction = DirectionActivatePrevious
+	base.RollbackTarget = &RollbackTarget{Version: "0.8.0"}
+	for name, test := range map[string]struct {
+		prepare func(*RollbackTarget)
+		change  func(*RollbackTarget)
+	}{
+		"version": {
+			change: func(target *RollbackTarget) { target.Version = "0.8.1" },
+		},
+		"registry presence": {
+			change: func(target *RollbackTarget) { target.RegistryDigest = digestA },
+		},
+		"registry digest": {
+			prepare: func(target *RollbackTarget) { target.RegistryDigest = digestA },
+			change:  func(target *RollbackTarget) { target.RegistryDigest = digestB },
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			baseline := cloneResumePlanFacts(base)
+			if test.prepare != nil {
+				test.prepare(baseline.RollbackTarget)
+			}
+			want, err := BindResumePlan(baseline)
+			if err != nil {
+				t.Fatal(err)
+			}
+			changed := cloneResumePlanFacts(baseline)
+			test.change(changed.RollbackTarget)
+			got, err := BindResumePlan(changed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got == want {
+				t.Fatalf("BindResumePlan(changed target %s) = unchanged token %q", name, got)
 			}
 		})
 	}
@@ -268,6 +358,7 @@ func clonePlanFacts(facts PlanFacts) PlanFacts {
 	facts.Intents = clonePlannerIntents(facts.Intents)
 	facts.Blockers = append([]Blocker(nil), facts.Blockers...)
 	facts.Assessment = facts.Assessment.Clone()
+	facts.RollbackTarget = cloneRollbackTarget(facts.RollbackTarget)
 	return facts
 }
 
@@ -290,6 +381,7 @@ func cloneResumePlanFacts(facts ResumePlanFacts) ResumePlanFacts {
 	facts.Decisions = cloneDecisions(facts.Decisions)
 	facts.Intents = clonePlannerIntents(facts.Intents)
 	facts.Blockers = slicesCloneBlockers(facts.Blockers)
+	facts.RollbackTarget = cloneRollbackTarget(facts.RollbackTarget)
 	return facts
 }
 

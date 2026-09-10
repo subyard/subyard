@@ -112,6 +112,58 @@ func TestParseJournalAcceptsSemanticallyEqualEmbeddedEvidenceReleasePair(t *test
 	}
 }
 
+func TestPublishedRollbackJournalRetainsFrozenShape(t *testing.T) {
+	// Published v0.11.2 JournalRecord has no rollbackTarget field. Its terminal
+	// records remain readable; the process boundary freshly verifies target facts.
+	payload := []byte(`{
+  "schemaVersion":2,"transaction":"tx-001",
+  "goal":{"target":"0.11.1-aaaaaaaaaaaa","direction":"activate-previous"},
+  "releases":{"from":"0.11.2-bbbbbbbbbbbb","previous":"0.11.1-aaaaaaaaaaaa","target":"0.11.1-aaaaaaaaaaaa"},
+  "authorizationPlan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "resumePlan":"resume-v1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "artifactDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "registryDigest":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "catalogDigest":"49e4c86efea0f1be557a43569728d9eb7f9df519379b0bdf45edd91ac5c93cf2",
+  "observationScope":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "authorizationDigest":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "intentDigest":"cffbd21069e88c37c6f18c83e9ac8643a98488e7b8be6ad5c8767c75eceef4b9",
+  "checkpoint":"complete","steps":[]
+}`)
+	parsed, err := ParseJournal(payload)
+	if err != nil || parsed.Checkpoint != JournalComplete {
+		t.Fatalf("published rollback history = %#v, %v", parsed, err)
+	}
+	for _, checkpoint := range []JournalCheckpoint{
+		JournalAuthorized, JournalMigrating, JournalActivationIntent, JournalTargetActive, JournalReconciling,
+	} {
+		record := parsed
+		record.Checkpoint = checkpoint
+		pending, err := json.Marshal(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ParseJournal(pending); err != nil {
+			t.Fatalf("published rollback checkpoint %q rejected: %v", checkpoint, err)
+		}
+	}
+	canonical, err := MarshalJournal(parsed)
+	if err != nil || bytes.Contains(canonical, []byte("rollbackTarget")) {
+		t.Fatalf("journal extended frozen fields: %s, %v", canonical, err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(canonical, &fields); err != nil {
+		t.Fatal(err)
+	}
+	fields["rollbackTarget"] = json.RawMessage(`{"version":"0.8.0"}`)
+	malformed, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseJournal(malformed); err == nil {
+		t.Fatal("journal accepted a new rollback field outside frozen v2")
+	}
+}
+
 func TestCompatibilityEvidenceRoundTripsAndRejectsRebinding(t *testing.T) {
 	record := CompatibilityEvidence{
 		SchemaVersion: CompatibilityEvidenceSchemaV1,

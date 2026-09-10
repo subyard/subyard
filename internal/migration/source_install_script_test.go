@@ -1,6 +1,7 @@
 package migration
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -34,12 +35,31 @@ func TestSourceInstallMigrationAndRecovery(t *testing.T) {
 	}
 	assertSameFile(t, filepath.Join(fixture.source, "private/config.env"),
 		filepath.Join(fixture.config, "config.env"))
-	assertSameFile(t, filepath.Join(fixture.config, "yards/named/config.env"),
-		filepath.Join(fixture.data, "recovery/pre-go-source/normalized-yard-1.env"))
-	if got := string(readTestFile(t,
-		filepath.Join(fixture.config, "yards/named/config.env"))); got !=
+	normalized := filepath.Join(fixture.data, "recovery/pre-go-source/normalized-yard-1.pending")
+	if got := string(readTestFile(t, filepath.Join(fixture.config, "yards/named/config.env"))); got !=
 		"YARD_TEMPLATE=test-vms\nSSH_PORT=3333\n" {
 		t.Fatalf("retired yard template was not normalized: %q", got)
+	}
+	if got := string(readTestFile(t, normalized)); got != "YARD_TEMPLATE=test-vms\nSSH_PORT=3333\n" {
+		t.Fatalf("normalized pending payload = %q", got)
+	}
+	info, err := os.Stat(normalized)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("normalized pending payload mode=%v", info.Mode())
+	}
+	targetInfo, err := os.Stat(filepath.Join(fixture.config, "yards/named/config.env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendingInfo, err := os.Stat(normalized)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(targetInfo, pendingInfo) {
+		t.Fatal("normalized pending payload was reused as the final destination")
 	}
 	assertSameFile(t, filepath.Join(fixture.source, "private/agents/codex/repo.rules"),
 		filepath.Join(fixture.config, "overrides/host/agents/codex/repo.rules"))
@@ -226,6 +246,8 @@ func TestSourceInstallMigrationRecoversInterruptedPhases(t *testing.T) {
 		fault, phase, step string
 	}{
 		{"prepared", "prepared", "none"},
+		{"normalized-pending-temporary", "applying", "config-import"},
+		{"normalized-pending-publish", "applying", "config-import"},
 		{"config-import-temporary", "applying", "config-import"},
 		{"config-import", "applying", "config-import"},
 		{"legacy-archive", "applying", "legacy-archive"},
@@ -241,6 +263,7 @@ func TestSourceInstallMigrationRecoversInterruptedPhases(t *testing.T) {
 		t.Run(test.fault, func(t *testing.T) {
 			fixture := newSourceInstallFixture(t,
 				"# Stable launcher for a release-installed native Go control-plane engine.")
+			exactSource := string(readTestFile(t, filepath.Join(fixture.source, "private/yards/named.env")))
 			output, err := fixture.migrateWithFault(test.fault)
 			if err == nil || !strings.Contains(string(output), "fault injection after "+test.fault) {
 				t.Fatalf("fault point did not interrupt migration: err=%v output=%s", err, output)
@@ -254,6 +277,28 @@ func TestSourceInstallMigrationRecoversInterruptedPhases(t *testing.T) {
 			assertRecognizedEntrypoints(t, fixture)
 			if _, err := os.Stat(filepath.Join(fixture.source, "bin/yard")); err != nil {
 				t.Fatalf("interruption damaged the source checkout: %v", err)
+			}
+			if got := string(readTestFile(t, filepath.Join(fixture.source, "private/yards/named.env"))); got != exactSource {
+				t.Fatalf("interruption changed normalized source: got %q want %q", got, exactSource)
+			}
+			if strings.HasPrefix(test.fault, "normalized-pending") {
+				target := filepath.Join(fixture.config, "yards/named/config.env")
+				if _, err := os.Lstat(target); !os.IsNotExist(err) {
+					t.Fatalf("pending normalization published final config before install_copy: err=%v", err)
+				}
+				if test.fault == "normalized-pending-publish" {
+					pending := filepath.Join(recoveryRoot, "normalized-yard-1.pending")
+					if got := string(readTestFile(t, pending)); got != "YARD_TEMPLATE=test-vms\nSSH_PORT=3333\n" {
+						t.Fatalf("published normalized pending payload = %q", got)
+					}
+					info, err := os.Stat(pending)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if info.Mode().Perm() != 0o600 {
+						t.Fatalf("published normalized pending mode=%v", info.Mode())
+					}
+				}
 			}
 
 			output, err = fixture.migrate()
@@ -272,6 +317,10 @@ func TestSourceInstallMigrationRecoversInterruptedPhases(t *testing.T) {
 			}
 			assertRuntimeEntrypoints(t, fixture)
 			assertNoMigrationTemps(t, fixture)
+			if got := string(readTestFile(t, filepath.Join(fixture.config, "yards/named/config.env"))); got !=
+				"YARD_TEMPLATE=test-vms\nSSH_PORT=3333\n" {
+				t.Fatalf("resumed normalized config = %q", got)
+			}
 			if repeatOutput, repeatErr := fixture.migrate(); repeatErr == nil ||
 				exitStatus(repeatErr) != 3 || len(repeatOutput) != 0 {
 				t.Fatalf("completed retry was not idempotent: status=%d output=%s",
@@ -282,6 +331,59 @@ func TestSourceInstallMigrationRecoversInterruptedPhases(t *testing.T) {
 			assertRuntimeEntrypoints(t, fixture)
 			assertSameFile(t, filepath.Join(fixture.source, "private/config.env"),
 				filepath.Join(fixture.config, "config.env"))
+		})
+	}
+}
+
+func TestSourceInstallPersistsNormalizedPendingDirectoryBeforeFault(t *testing.T) {
+	requireJQ(t)
+	fixture := newSourceInstallFixture(t,
+		"# Stable launcher for a release-installed native Go control-plane engine.")
+	syncBin := filepath.Join(fixture.home, "sync-bin")
+	if err := os.MkdirAll(syncBin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(fixture.home, "normalized-pending-directory-synced")
+	writeTestFile(t, filepath.Join(syncBin, "sync"), 0o700, `#!/bin/sh
+if [ "$1" = -f ] && [ "$2" = -- ] && [ -f "$3/normalized-yard-1.pending" ]; then
+  : > "$SYNC_MARKER"
+fi
+exec /usr/bin/sync "$@"
+`)
+	t.Setenv("PATH", syncBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("SYNC_MARKER", marker)
+	output, err := fixture.migrateWithFault("normalized-pending-publish")
+	if err == nil || !strings.Contains(string(output), "fault injection after normalized-pending-publish") {
+		t.Fatalf("pending publish fault did not interrupt migration: err=%v output=%s", err, output)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("pending directory was not persisted before fault: %v", err)
+	}
+}
+
+func TestSourceInstallMigrationRejectsInvalidNormalizedYardInput(t *testing.T) {
+	requireJQ(t)
+	for _, test := range []struct {
+		name     string
+		contents []byte
+	}{
+		{name: "oversized", contents: bytes.Repeat([]byte{'x'}, (1<<20)+1)},
+		{name: "dynamic", contents: []byte("PROFILE=e2e-vms\nYARD_TEMPLATE=$PROFILE\n")},
+		{name: "duplicate", contents: []byte("YARD_TEMPLATE=e2e-vms\nYARD_TEMPLATE=e2e-vms\n")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newSourceInstallFixture(t,
+				"# Stable launcher for a release-installed native Go control-plane engine.")
+			writeTestFile(t, filepath.Join(fixture.source, "private/yards/named.env"), 0o600,
+				string(test.contents))
+			output, err := fixture.migrate()
+			if err == nil || !strings.Contains(string(output), "could not normalize retired yard config") {
+				t.Fatalf("invalid normalized input was accepted: err=%v output=%s", err, output)
+			}
+			if _, err := os.Lstat(filepath.Join(fixture.config, "yards/named/config.env")); !os.IsNotExist(err) {
+				t.Fatalf("invalid normalized input created final config: err=%v", err)
+			}
+			assertSourceEntrypoints(t, fixture)
 		})
 	}
 }
@@ -610,9 +712,13 @@ case "$*" in
 '{"sourceBase":"source-root","source":"config/qa-pool/pool.jsonl","destinationRoot":"config-home","destination":"secrets/legacy/qa-pool/pool.jsonl","kind":"legacy-qa-pool","mode":"0600","conflictPolicy":"identical-or-fail"}'\
 ']}'
     ;;
-  _migrate\ normalize-yard-config\ *)
-    sed 's/^YARD_TEMPLATE=e2e-vms$/YARD_TEMPLATE=test-vms/' "$3" > "$4"
-    chmod 0600 "$4"
+  _migrate\ normalize-yard-config)
+    [ "$#" = 2 ] || exit 64
+    input=$(cat)
+    [ "$(printf %s "$input" | wc -c)" -le $((1 << 20)) ] || exit 1
+    [ "$(printf '%s\n' "$input" | grep -c '^YARD_TEMPLATE=')" = 1 ] || exit 1
+    case "$input" in *'YARD_TEMPLATE=$'*) exit 1 ;; esac
+    printf '%s\n' "$input" | sed 's/^YARD_TEMPLATE=e2e-vms$/YARD_TEMPLATE=test-vms/'
     ;;
   *) exit 64 ;;
 esac

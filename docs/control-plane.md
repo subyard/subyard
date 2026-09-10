@@ -246,6 +246,48 @@ activation and uses the old updater to resume the same authorized candidate tran
 released-binary check complements tests of the frozen codecs; rebuilding both ends from current
 source does not establish cross-release compatibility.
 
+### Legacy upgrades
+
+Runtimes older than v0.11.0 use a legacy updater that cannot authorize the current release
+transition. Its rejected migration endpoint prints a standalone installer command pinned to the
+candidate version. The old invocation leaves runtime links and protected settings unchanged.
+Use that exact version in both the download URL and installer arguments. When piping the installer
+to Bash, pass `--yes` explicitly after reviewing the intended upgrade:
+
+```bash
+VERSION=<candidate-version>
+curl -fsSL "https://github.com/Subyard/Subyard/releases/download/v${VERSION}/subyard-install.sh" \
+  | bash -s -- --version "$VERSION" --yes
+```
+
+Without explicit consent, a noninteractive pipe is rejected. Alternatively, download the same
+pinned installer to a file and run it from an interactive terminal. The standalone installer
+publishes and verifies the candidate before the candidate plans the transition. `--yes` does not
+bypass compatibility, configuration ownership or stale-plan checks.
+
+If both `yards/<name>/config.env` and `yards/<name>.env` exist, the transition names both paths and
+stops before changing configuration. Inspect them locally to confirm that the nested registration
+is the intended active configuration. Run the published candidate's `bin/yard` command using its
+exact path under the configured runtime root:
+
+```bash
+"<runtime-root>/releases/<candidate-release>/bin/yard" -Y default config repair-registration <name> --check
+"<runtime-root>/releases/<candidate-release>/bin/yard" -Y default config repair-registration <name>
+```
+
+`-Y default` selects the local owner context even when the ambient yard uses a retired template.
+The repair shows its exact scope and asks once. It keeps the nested file unchanged and atomically
+moves the flat file to `recovery/yard-registrations/<name>.env` under the configuration root, without
+printing its contents or overwriting an existing archive. A changed registration invalidates the
+plan; an unfinished release transition blocks repair. Rerun the pinned installer afterward to
+inspect and authorize the now-unambiguous upgrade.
+
+`dev/verify-release-upgrades.py` also runs the unchanged, checksum-pinned v0.9.1 updater to verify
+the refusal instruction, noninteractive consent, duplicate registration repair and completed
+standalone transition.
+
+### Interrupted release recovery
+
 A v0.11.1 runtime can stop after activation with journal checkpoint `reconciling` and blocker
 resource `transition.observation-scope`. That exact state is recovered only by the standalone
 installer from a newer supported patch release; the active v0.11.1 command remains fail-closed.

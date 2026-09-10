@@ -123,6 +123,11 @@ func TestTestVMSettingsV2BlocksAmbiguousOwnership(t *testing.T) {
 		if err != nil || len(plan.Blockers) != 1 || len(plan.Files) != 0 {
 			t.Fatalf("plan = %#v, err=%v", plan, err)
 		}
+		for _, detail := range []string{"hermes", "yards/hermes/config.env", "yards/hermes.env", "config repair-registration hermes"} {
+			if !strings.Contains(plan.Blockers[0].Message+plan.Blockers[0].Retry, detail) {
+				t.Fatalf("duplicate registration diagnostic omits %q: %#v", detail, plan.Blockers[0])
+			}
+		}
 	})
 
 	for _, test := range []struct {

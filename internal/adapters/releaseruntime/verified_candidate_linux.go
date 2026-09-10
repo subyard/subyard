@@ -115,6 +115,15 @@ func (runtime *Runtime) verifyPublishedCandidate(
 	if verified.engine == nil {
 		return fail(errors.New("published runtime manifest does not bind yard-engine"))
 	}
+	if verified.registryDigest == "" {
+		registry, err := openCandidateFile(rootFD, "config/release-transition.json")
+		if registry != nil {
+			registry.Close()
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return fail(errors.New("published runtime registry is not bound by its manifest"))
+		}
+	}
 	version, err := runtime.runVerifiedCandidateVersion(ctx, verified, runtimeRoot)
 	if err != nil {
 		return fail(err)

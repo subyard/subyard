@@ -34,6 +34,7 @@ type PlanFacts struct {
 	ArtifactDigest   Fingerprint             `json:"artifactDigest"`
 	RegistryDigest   Fingerprint             `json:"registryDigest"`
 	CatalogDigest    Fingerprint             `json:"catalogDigest"`
+	RollbackTarget   *RollbackTarget         `json:"rollbackTarget,omitempty"`
 	ObservationScope Fingerprint             `json:"observationScope"`
 	Assessment       domain.ActionAssessment `json:"assessment"`
 	Decisions        []RedactedDecision      `json:"decisions"`
@@ -69,6 +70,7 @@ type ResumePlanFacts struct {
 	ArtifactDigest    Fingerprint             `json:"artifactDigest"`
 	RegistryDigest    Fingerprint             `json:"registryDigest"`
 	CatalogDigest     Fingerprint             `json:"catalogDigest"`
+	RollbackTarget    *RollbackTarget         `json:"rollbackTarget,omitempty"`
 	ObservationScope  Fingerprint             `json:"observationScope"`
 	Assessment        domain.ActionAssessment `json:"assessment"`
 	Decisions         []RedactedDecision      `json:"decisions"`
@@ -131,7 +133,8 @@ func BindResumePlan(facts ResumePlanFacts) (PlanToken, error) {
 func (facts PlanFacts) Validate() error {
 	if err := validateImmutablePlanFacts(
 		facts.Goal, facts.Releases, facts.ArtifactDigest, facts.RegistryDigest,
-		facts.CatalogDigest, facts.Assessment, facts.Decisions, facts.Intents, facts.Blockers,
+		facts.CatalogDigest, facts.RollbackTarget, facts.Assessment, facts.Decisions,
+		facts.Intents, facts.Blockers,
 	); err != nil {
 		return err
 	}
@@ -193,7 +196,8 @@ func cloneJournalReplacement(replacement *JournalReplacement) *JournalReplacemen
 func (facts ResumePlanFacts) Validate() error {
 	if err := validateImmutablePlanFacts(
 		facts.Goal, facts.Releases, facts.ArtifactDigest, facts.RegistryDigest,
-		facts.CatalogDigest, facts.Assessment, facts.Decisions, facts.Intents, facts.Blockers,
+		facts.CatalogDigest, facts.RollbackTarget, facts.Assessment, facts.Decisions,
+		facts.Intents, facts.Blockers,
 	); err != nil {
 		return err
 	}
@@ -210,6 +214,7 @@ func validateImmutablePlanFacts(
 	goal Goal,
 	releases ReleasePair,
 	artifactDigest, registryDigest, catalogDigest Fingerprint,
+	rollbackTarget *RollbackTarget,
 	assessment domain.ActionAssessment,
 	decisions []RedactedDecision,
 	intents []PlannerStepIntent,
@@ -223,6 +228,9 @@ func validateImmutablePlanFacts(
 	}
 	if goal.Target != releases.Target {
 		return invalid("goal target does not match the exact release pair")
+	}
+	if err := validateRollbackTarget(goal.Direction, rollbackTarget); err != nil {
+		return err
 	}
 	for field, value := range map[string]Fingerprint{
 		"artifact digest": artifactDigest,

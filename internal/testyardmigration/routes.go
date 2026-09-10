@@ -40,6 +40,68 @@ type managedYard struct {
 	Mounted  bool
 }
 
+// PrepareRouteConsumerActivation distinguishes a retained registration from a
+// live owner backend. Teardown may retain settings, a project and data volumes;
+// release activation must not recreate its removed compute backend. The one-time
+// migration's Prepare/Commit/VerifyRouteConsumers contract remains unchanged.
+func PrepareRouteConsumerActivation(ctx context.Context, options Options) (State, error) {
+	if err := validateOptions(&options); err != nil {
+		return "", err
+	}
+	prepared, err := Prepare(ctx, options)
+	if err != nil || prepared.State != StateCurrent {
+		return prepared.State, err
+	}
+	projects, err := inspectProjects(ctx, options)
+	if err != nil {
+		return "", err
+	}
+	if projects.legacy {
+		return "", errors.New("legacy project conflicts with canonical route activation")
+	}
+	payload, err := runIncus(ctx, options, "list", "--all-projects", "--format=json")
+	if err != nil {
+		return "", fmt.Errorf("inspect route activation backend: %w", err)
+	}
+	var instances []struct {
+		Name    string            `json:"name"`
+		Project string            `json:"project"`
+		Status  string            `json:"status"`
+		Config  map[string]string `json:"config"`
+	}
+	if err := json.Unmarshal(payload, &instances); err != nil || instances == nil {
+		return "", errors.New("route activation backend inventory must be a JSON array")
+	}
+	found := false
+	seenInstances := make(map[string]bool)
+	for _, instance := range instances {
+		key := consumerKey(instance.Project, instance.Name)
+		if instance.Project == "" || instance.Name == "" || seenInstances[key] {
+			return "", errors.New("route activation backend inventory is duplicated or incomplete")
+		}
+		seenInstances[key] = true
+		yard := instance.Config["user.subyard.name"]
+		if instance.Project != "subyard-test-yard" && instance.Project != "subyard-e2e-yard" &&
+			instance.Name != "yard-test-yard" && instance.Name != "yard-e2e-yard" &&
+			yard != CurrentYard && yard != LegacyYard {
+			continue
+		}
+		if found || !projects.current || instance.Project != "subyard-test-yard" ||
+			instance.Name != "yard-test-yard" || yard != CurrentYard ||
+			instance.Config["user.subyard.managed"] != "true" {
+			return "", errors.New("route activation backend has a conflicting or foreign identity")
+		}
+		if !strings.EqualFold(instance.Status, "running") && !strings.EqualFold(instance.Status, "stopped") {
+			return "", errors.New("route activation backend has an unsupported instance state")
+		}
+		found = true
+	}
+	if !found {
+		return StateAbsent, nil
+	}
+	return StateCurrent, nil
+}
+
 // PrepareRouteConsumers snapshots every existing non-owner local yard before
 // the preceding owner operation changes e2e-yard into test-yard.
 func PrepareRouteConsumers(ctx context.Context, options Options) (string, error) {

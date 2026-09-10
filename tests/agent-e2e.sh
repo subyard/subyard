@@ -23,6 +23,175 @@ grep -Fq 'target=/var/lib/subyard/e2e-routes' "$ROOT/scripts/03-create-subyard.s
 [ "$IDENTITY" = "$TMP/client/id_ed25519" ] \
   || fail "controller identity is not shared outside yard-scoped state"
 
+staging_bundle="$TMP/staging-bundle.tar.gz"
+unreachable_sentinel="$TMP/unreachable-finalization"
+late_staging_path="$TMP/late-staging-path"
+late_cleanup_path="$TMP/late-cleanup-path"
+command_transfer_state="$TMP/command-transfer-state"
+cleanup_retry_state="$TMP/cleanup-retry-state"
+: > "$staging_bundle"
+set +e
+(
+  GUEST_DIRS=()
+  guest() { return 255; }
+  helper_rc=0
+  run_guest 2 "$staging_bundle" ignored true || helper_rc=$?
+  printf '%s\n' cleanup release > "$unreachable_sentinel"
+  [ "$helper_rc" = 2 ]
+) >"$TMP/unreachable-staging.log" 2>&1
+unreachable_rc=$?
+(
+  GUEST_DIRS=()
+  staged=/tmp/subyard-worktree.staging-failure
+  guest() {
+    local vm="$1"
+    shift
+    case "${1:-}" in
+      mktemp) printf '%s\n' "$staged" ;;
+      dd) return 23 ;;
+      sudo)
+        [ "$*" = "sudo -n find $staged -depth -delete" ] || return 97
+        printf '%s\n' "$staged" > "$late_cleanup_path"
+        ;;
+      *) return 98 ;;
+    esac
+  }
+  helper_rc=0
+  run_guest 2 "$staging_bundle" ignored true || helper_rc=$?
+  printf '%s\n' "${GUEST_DIRS[2]:-}" > "$late_staging_path"
+  cleanup_guest 2
+  [ "$helper_rc" = 2 ] && [ -z "${GUEST_DIRS[2]:-}" ]
+) >"$TMP/late-staging.log" 2>&1
+late_staging_rc=$?
+(
+  GUEST_DIRS=()
+  staged=/tmp/subyard-worktree.command-transfer
+  guest() {
+    local vm="$1"
+    shift
+    case "${1:-}" in
+      mktemp) printf '%s\n' "$staged" ;;
+      dd)
+        case "$*" in
+          *"of=$staged/worktree.tar.gz"*) return 0 ;;
+          *"of=$staged/run.sh"*) return 23 ;;
+          *) return 97 ;;
+        esac
+        ;;
+      sha256sum) printf 'expected  %s/worktree.tar.gz\n' "$staged" ;;
+      mkdir|tar) return 0 ;;
+      test) return 1 ;;
+      sudo)
+        [ "$*" = "sudo -n find $staged -depth -delete" ] || return 98
+        return 0
+        ;;
+      *) return 99 ;;
+    esac
+  }
+  helper_rc=0
+  run_guest 2 "$staging_bundle" expected true || helper_rc=$?
+  staged_before_cleanup="${GUEST_DIRS[2]:-}"
+  cleanup_guest 2
+  printf '%s|%s|%s\n' \
+    "$helper_rc" "$staged_before_cleanup" "${GUEST_DIRS[2]:-}" > "$command_transfer_state"
+) >"$TMP/command-transfer.log" 2>&1
+command_transfer_rc=$?
+(
+  GUEST_DIRS=([2]=/tmp/subyard-worktree.cleanup-retry)
+  cleanup_attempts=0
+  guest() {
+    local vm="$1"
+    shift
+    [ "$vm" = 2 ] \
+      && [ "$*" = "sudo -n find /tmp/subyard-worktree.cleanup-retry -depth -delete" ] \
+      || return 97
+    cleanup_attempts=$((cleanup_attempts + 1))
+    [ "$cleanup_attempts" -gt 1 ] || return 255
+  }
+  first_rc=0
+  cleanup_guest 2 || first_rc=$?
+  printf '%s|%s\n' "$first_rc" "${GUEST_DIRS[2]:-}" > "$cleanup_retry_state"
+  second_rc=0
+  cleanup_guest 2 || second_rc=$?
+  printf '%s|%s\n' "$second_rc" "${GUEST_DIRS[2]:-}" >> "$cleanup_retry_state"
+  printf 'attempts=%s\n' "$cleanup_attempts" >> "$cleanup_retry_state"
+) >"$TMP/cleanup-retry.log" 2>&1
+cleanup_retry_rc=$?
+set -e
+[ "$unreachable_rc" = 0 ] \
+  && [ "$(cat "$unreachable_sentinel" 2>/dev/null || true)" = $'cleanup\nrelease' ] \
+  && [ "$late_staging_rc" = 0 ] \
+  && [ "$(cat "$late_staging_path" 2>/dev/null || true)" = /tmp/subyard-worktree.staging-failure ] \
+  && [ "$(cat "$late_cleanup_path" 2>/dev/null || true)" = /tmp/subyard-worktree.staging-failure ] \
+  && [ "$command_transfer_rc" = 0 ] \
+  && [ "$(cat "$command_transfer_state" 2>/dev/null || true)" = \
+    '2|/tmp/subyard-worktree.command-transfer|' ] \
+  && [ "$cleanup_retry_rc" = 0 ] \
+  && [ "$(cat "$cleanup_retry_state" 2>/dev/null || true)" = \
+    $'255|/tmp/subyard-worktree.cleanup-retry\n0|\nattempts=2' ] \
+  || fail "guest staging failure aborts caller-owned cleanup or loses its staged path"
+
+p0_cleanup_function_source="$(
+  for function_name in run_source_vm clean_source_host armed_fixture_vm \
+    cleanup_full_source_arm cleanup_armed_full_fixtures cleanup; do
+    sed -n "/^${function_name}() {/,/^}/p" "$ROOT/dev/e2e/p0-acceptance.sh"
+  done
+)"
+p0_cleanup_events="$TMP/p0-cleanup-events"
+p0_source_arm="$TMP/p0-source-arm"
+printf '2\n' > "$p0_source_arm"
+set +e
+# These variables are consumed by the extracted P0 cleanup functions.
+# shellcheck disable=SC2034
+(
+  set +e
+  eval "$p0_cleanup_function_source"
+  GUEST_DIRS=()
+  P0_BUNDLE="$staging_bundle"
+  P0_BUNDLE_HASH=ignored
+  TOKEN=cleanup-fixture
+  FULL_SOURCE_ARM_FILE="$p0_source_arm"
+  FULL_POWER_ARM_FILE=
+  SOURCE_LANE_VM=2
+  SOURCE_ARCHIVE=
+  SOURCE_ARCHIVE_REMOTE=
+  P0_EVIDENCE="$TMP/p0-evidence.json"
+  P0_FAILURE_LOG="$TMP/p0-failure.log"
+  P0_CURRENT_PHASE=fixture
+  P0_PHASE_STARTED=5
+  PROBE_PID=
+  PROBE_NAME=
+  PROBE_MARKER=
+  PEERS_READY=0
+  SOURCE_HOST_STARTED=0
+  POWER_SYSTEMD_STARTED=0
+  POWER_SYSTEMD_LANE_VM=2
+  PROBE_LOG=
+  CAPACITY_LOG_DIR=
+  LEASE_KEEPER_PID=
+  LOCAL_TEMP=
+  export P0_BUNDLE P0_BUNDLE_HASH TOKEN FULL_SOURCE_ARM_FILE FULL_POWER_ARM_FILE \
+    SOURCE_LANE_VM SOURCE_ARCHIVE SOURCE_ARCHIVE_REMOTE P0_EVIDENCE P0_FAILURE_LOG \
+    P0_CURRENT_PHASE P0_PHASE_STARTED PROBE_PID PROBE_NAME PROBE_MARKER PEERS_READY \
+    SOURCE_HOST_STARTED POWER_SYSTEMD_STARTED POWER_SYSTEMD_LANE_VM PROBE_LOG \
+    CAPACITY_LOG_DIR
+  guest() { return 255; }
+  collect_failure_diagnostics() { printf 'diagnostics:%s\n' "$*" >> "$p0_cleanup_events"; }
+  stop_runner_children() { printf 'stop-runners\n' >> "$p0_cleanup_events"; }
+  stop_capacity_monitors() { printf 'stop-capacity\n' >> "$p0_cleanup_events"; }
+  p0_monotonic_seconds() { printf '10\n'; }
+  write_evidence() { printf 'evidence:%s\n' "$*" >> "$p0_cleanup_events"; }
+  release_lease() { printf 'release\n' >> "$p0_cleanup_events"; }
+  false
+  cleanup
+) >"$TMP/p0-cleanup.log" 2>&1
+p0_cleanup_rc=$?
+set -e
+[ "$p0_cleanup_rc" = 3 ] \
+  && [ "$(cat "$p0_cleanup_events" 2>/dev/null || true)" = \
+    $'diagnostics:failure-entry truncate\nstop-runners\nstop-capacity\ndiagnostics:post-stop append\nevidence:fixture failed 1 5\nrelease' ] \
+  || fail "P0 armed-fixture staging failure bypasses post-stop evidence or lease release"
+
 scope_snapshot="$(
   env -u SUBYARD_E2E_BASTION_ROUTE \
     -u SUBYARD_E2E_STATE_DIR -u SUBYARD_E2E_YARD_STATE_DIR -u SUBYARD_E2E_IDENTITY \
@@ -367,8 +536,8 @@ grep -Fq 'P0_NESTED_VM="${SUBYARD_P0_NESTED_VM:-1}"' \
 grep -Fq 'run_phase capacity-report targeted_capacity_report' \
   "$ROOT/dev/e2e/p0-acceptance.sh" \
   && [ "$(grep -Fc '    start_capacity_monitors' \
-    "$ROOT/dev/e2e/p0-acceptance.sh")" -eq 2 ] \
-  || fail "targeted nested teardown does not monitor both allocated VMs through cleanup"
+    "$ROOT/dev/e2e/p0-acceptance.sh")" -eq 3 ] \
+  || fail "targeted nested teardown and release do not monitor both allocated VMs through cleanup"
 grep -Fq 'assert_capacity_transport_stable' "$ROOT/dev/e2e/p0-acceptance.sh" \
   || fail "targeted nested teardown can pass after losing an allocated VM"
 grep -Fq 'capacity_sample_command="$(quote_ssh_command bash -c' \
@@ -685,9 +854,14 @@ grep -Fq 'p0_retry_init_after_plan_stale ./bin/yard -Y test-yard init --yes' \
   && [ "$(grep -Fc 'p0_retry_init_after_plan_stale "$old_yard" -Y e2e-yard init --yes' \
     "$ROOT/dev/e2e/p0-guest.sh")" -eq 1 ] \
   || fail 'P0 owner release fixtures bypass the bounded stale-plan retry'
-grep -Fq 'p0_apply_release_update "$old_yard" p0-current-base' \
+grep -Fq 'P0_CURRENT_BASE_VERSION=0.8.1-p0.current-base' \
   "$ROOT/dev/e2e/p0-guest.sh" \
-  && [ "$(grep -Fc 'p0_apply_release_update ./bin/yard p0-owner' \
+  && grep -Fq 'P0_OWNER_VERSION=0.11.1-p0.owner' \
+    "$ROOT/dev/e2e/p0-guest.sh" \
+  || fail 'P0 owner fixtures do not use canonical synthetic SemVer releases'
+grep -Fq 'p0_apply_release_update "$old_yard" "$P0_CURRENT_BASE_VERSION"' \
+  "$ROOT/dev/e2e/p0-guest.sh" \
+  && [ "$(grep -Fc 'p0_apply_release_update ./bin/yard "$P0_OWNER_VERSION"' \
     "$ROOT/dev/e2e/p0-guest.sh")" -eq 3 ] \
   && [ "$(grep -Fc 'p0_apply_release_update ' \
     "$ROOT/dev/e2e/p0-guest.sh")" -eq 4 ] \
@@ -706,20 +880,36 @@ release_update_log="$TMP/release-update.log"
 chmod +x "$release_update_mock"
 (
   eval "$release_update_source"
+  P0_CURRENT_BASE_VERSION=0.8.1-p0.current-base
+  P0_OWNER_VERSION=0.11.1-p0.owner
   export ROOT SUBYARD_HOME="$TMP/release-update-home"
   export P0_RELEASE_UPDATE_LOG="$release_update_log"
-  p0_apply_release_update "$release_update_mock" p0-owner
-  p0_apply_release_update "$release_update_mock" p0-current-base
+  p0_apply_release_update "$release_update_mock" "$P0_OWNER_VERSION"
+  p0_apply_release_update "$release_update_mock" "$P0_CURRENT_BASE_VERSION"
 )
+set +e
+(
+  eval "$release_update_source"
+  P0_CURRENT_BASE_VERSION=0.8.1-p0.current-base
+  P0_OWNER_VERSION=0.11.1-p0.owner
+  export ROOT SUBYARD_HOME="$TMP/release-update-home"
+  export P0_RELEASE_UPDATE_LOG="$release_update_log"
+  die() { exit 2; }
+  p0_apply_release_update "$release_update_mock" 0.11.1-p0.foreign
+) >/dev/null 2>&1
+unsupported_release_rc=$?
+set -e
+[ "$unsupported_release_rc" = 2 ] && [ "$(wc -l < "$release_update_log")" = 4 ] \
+  || fail 'P0 release-impact update accepts an unowned synthetic release'
 [ "$(cat "$release_update_log")" = "$(printf '%s\t%s\n' \
   "file://$ROOT/.build/p0-owner-release" \
-  "update --runtime-root $TMP/release-update-home/runtime --version p0-owner --check" \
+  "update --runtime-root $TMP/release-update-home/runtime --version 0.11.1-p0.owner --check" \
   "file://$ROOT/.build/p0-owner-release" \
-  "update --runtime-root $TMP/release-update-home/runtime --version p0-owner --yes" \
+  "update --runtime-root $TMP/release-update-home/runtime --version 0.11.1-p0.owner --yes" \
   "file://$ROOT/.build/p0-current-base-release" \
-  "update --runtime-root $TMP/release-update-home/runtime --version p0-current-base --check" \
+  "update --runtime-root $TMP/release-update-home/runtime --version 0.8.1-p0.current-base --check" \
   "file://$ROOT/.build/p0-current-base-release" \
-  "update --runtime-root $TMP/release-update-home/runtime --version p0-current-base --yes")" ] \
+  "update --runtime-root $TMP/release-update-home/runtime --version 0.8.1-p0.current-base --yes")" ] \
   || fail 'P0 release-impact update does not use its exact local synthetic release'
 owner_capacity_reclaim_source="$(awk '
   /^reclaim_owner_lease_capacity\(\)/ { copying=1 }
@@ -2174,13 +2364,13 @@ grep -Fq 'dev/build-engine.sh --force' "$ROOT/dev/e2e/p0-guest.sh" \
   || fail "P0 owner lane does not build an explicit source candidate"
 grep -Fq 'scripts/install-runtime-release.sh' "$ROOT/dev/e2e/p0-guest.sh" \
   || fail "P0 owner lane does not install an immutable candidate runtime"
-grep -Fq 'release_cache="$SUBYARD_HOME/releases/p0-owner"' \
+grep -Fq 'release_cache="$SUBYARD_HOME/releases/$P0_OWNER_VERSION"' \
   "$ROOT/dev/e2e/p0-guest.sh" \
   && grep -Fq 'install -d -m 0700 "$release_cache"' \
     "$ROOT/dev/e2e/p0-guest.sh" \
   && grep -Fq "grep -Fq -- '--publish-only' \"\$active_installer\"" \
     "$ROOT/dev/e2e/p0-guest.sh" \
-  && grep -Fq -- '--runtime-root "$runtime_root" --version p0-owner --offline' \
+  && grep -Fq -- '--runtime-root "$runtime_root" --version "$P0_OWNER_VERSION" --offline' \
     "$ROOT/dev/e2e/p0-guest.sh" \
   && grep -Fq 'dev/bootstrap-runtime.sh --yes --runtime-root "$runtime_root"' \
     "$ROOT/dev/e2e/p0-guest.sh" \
@@ -2523,6 +2713,8 @@ for reboot_scenario in reboot-verify:none power-systemd:none reboot-verify:prepa
   fi
 done
 
+power_prepare_candidate_body="$(sed -n '/^prepare_candidate() {/,/^}/p' \
+  "$ROOT/dev/e2e/power-reconciler-upgrade.sh")"
 grep -Fq 'run_power_systemd_vm "$vm" dev/e2e/power-reconciler-systemd.sh' \
     <<<"$power_systemd_lane_body" \
   && grep -Fq 'run_power_systemd_vm "$vm" dev/e2e/power-reconciler-systemd-255.sh' \
@@ -2536,7 +2728,7 @@ grep -Fq '"$RELEASE_ROOT/subyard-install.sh" --version "$CANDIDATE_VERSION" --ye
   && grep -Fq 'assert_published_v1_history_unchanged' "$ROOT/dev/e2e/power-reconciler-upgrade.sh" \
   && ! grep -Fq 'assert_candidate_transaction' "$ROOT/dev/e2e/power-reconciler-upgrade.sh" \
   && ! grep -Fq '"$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION"' \
-    "$ROOT/dev/e2e/power-reconciler-upgrade.sh" \
+    <<<"$power_prepare_candidate_body" \
   || fail "P0 pre-v2 upgrade does not use the candidate-owned v2 bridge"
 power_prepare_line="$(grep -nF \
   'run_power_systemd_vm "$vm" dev/e2e/power-reconciler-upgrade.sh prepare "$TOKEN"' \
@@ -2584,6 +2776,7 @@ for dispatcher_mode in prepare resume finish; do
       die() { log "die $*"; exit 2; }
       info() { :; }
       prepare_candidate() { log prepare_candidate; }
+      exercise_activation_only_repair() { log exercise_activation_only_repair; }
       record_reboot_baseline() { log record_reboot_baseline; }
       write_fixture_value() { log "write_fixture_value $*"; }
       finish_candidate_flow() { log finish_candidate_flow; }
@@ -2601,7 +2794,7 @@ for dispatcher_mode in prepare resume finish; do
     || fail "power reconciler $dispatcher_mode dispatcher rejected its valid phase"
   case "$dispatcher_mode" in
     prepare)
-      dispatcher_expected=$'incus image info subyard-e2e-debian-13-cloud-container --project default\nprepare_candidate\nrecord_reboot_baseline\nwrite_fixture_value /state/phase candidate-ready\nexit preserve=1 cleanup=0'
+      dispatcher_expected=$'incus image info subyard-e2e-debian-13-cloud-container --project default\nprepare_candidate\nexercise_activation_only_repair\nrecord_reboot_baseline\nwrite_fixture_value /state/phase candidate-ready\nexit preserve=1 cleanup=0'
       ;;
     resume)
       dispatcher_expected=$'assert_state_root\nassert_fixture_phase candidate-ready\nassert_post_reboot_candidate\noperator_yard init --yes\nassert_candidate_state\nrecord_reboot_baseline\nwrite_fixture_value /state/phase candidate-reconciled\nexit preserve=1 cleanup=1'
@@ -2612,6 +2805,206 @@ for dispatcher_mode in prepare resume finish; do
   esac
   [ "$(cat "$dispatcher_log")" = "$dispatcher_expected" ] \
     || fail "power reconciler $dispatcher_mode dispatcher lost its ordered incident flow"
+done
+activation_repair_functions="$(
+  sed -n '/^materialize_unit() {/,/^}/p' "$ROOT/dev/e2e/power-reconciler-upgrade.sh"
+  sed -n '/^assert_activation_only_journal() {/,/^}/p' \
+    "$ROOT/dev/e2e/power-reconciler-upgrade.sh"
+  sed -n '/^assert_activation_ledger_unchanged() {/,/^}/p' \
+    "$ROOT/dev/e2e/power-reconciler-upgrade.sh"
+  sed -n '/^install_activation_reconcile_fault() {/,/^}/p' \
+    "$ROOT/dev/e2e/power-reconciler-upgrade.sh"
+  sed -n '/^exercise_activation_only_repair() {/,/^}/p' \
+    "$ROOT/dev/e2e/power-reconciler-upgrade.sh"
+)"
+run_activation_repair_contract() (
+  set -euo pipefail
+  local scenario="$1"
+  local fixture="$TMP/power-activation-$scenario"
+  STATE_ROOT="$fixture/state"
+  ROOT="$fixture/candidate-root"
+  OPERATOR_HOME="$fixture/operator"
+  RELEASE_ROOT="$fixture/release"
+  RECONCILER="$fixture/yard-boot-reconcile"
+  UNIT="$fixture/subyard-power-reconcile.service"
+  OLD_UNIT_FIXTURE="$fixture/v0.8.service.in"
+  ACTIVATION_LEDGER_BASELINE="$STATE_ROOT/activation-ledger.before"
+  ACTIVATION_JOURNAL_BASELINE="$STATE_ROOT/activation-journal.before"
+  ACTIVATION_FAULT_PROBE="$OPERATOR_HOME/activation-faults"
+  ACTIVATION_SYSTEMCTL_WRAPPER="$OPERATOR_HOME/.local/bin/systemctl"
+  ACTIVATION_SYSTEMCTL_DELEGATE="$fixture/systemctl-real"
+  V2_STATE_ROOT="$OPERATOR_HOME/.config/subyard/release-transition/v2"
+  V2_LEDGER="$V2_STATE_ROOT/ledger.json"
+  V2_JOURNAL="$V2_STATE_ROOT/journal.json"
+  CANDIDATE_RELEASE_TARGET=releases/candidate-aaaaaaaaaaaa
+  OLD_RELEASE_TARGET=releases/0.8.0-bbbbbbbbbbbb
+  CANDIDATE_VERSION=candidate
+  OPERATOR='fixture-operator'
+  FAKE_YARD_CALLS="$fixture/yard-calls"
+  DELEGATE_LOG="$fixture/systemctl-delegate"
+  V1_HISTORY_LOG="$fixture/v1-history"
+  CANDIDATE_UNIT="$STATE_ROOT/candidate-activation.service"
+  ACTIVATION_SCENARIO="$scenario"
+  export ACTIVATION_FAULT_PROBE ACTIVATION_SCENARIO ACTIVATION_SYSTEMCTL_DELEGATE
+  export ACTIVATION_SYSTEMCTL_WRAPPER CANDIDATE_UNIT DELEGATE_LOG FAKE_YARD_CALLS
+  export ACTIVATION_JOURNAL_BASELINE ACTIVATION_LEDGER_BASELINE CANDIDATE_VERSION
+  export OPERATOR RECONCILER UNIT V2_JOURNAL V2_LEDGER
+
+  mkdir -p "$STATE_ROOT" "$ROOT/config/systemd" "$OPERATOR_HOME/.local/bin" \
+    "$V2_STATE_ROOT" "$RELEASE_ROOT"
+  printf 'ExecStart=@SUBYARD_POWER_RECONCILER@\nGeneration=candidate\n' \
+    > "$ROOT/config/systemd/subyard-power-reconcile.service.in"
+  printf 'ExecStart=@SUBYARD_POWER_RECONCILER@\nGeneration=v0.8\n' > "$OLD_UNIT_FIXTURE"
+  printf '{"ledger":"stable"}\n' > "$V2_LEDGER"
+  printf '%s\n' \
+    '{"schemaVersion":2,"transaction":"completed-transaction","authorizationDigest":"completed-authorization","goal":{"target":"candidate-aaaaaaaaaaaa","direction":"activate-target"},"releases":{"from":"candidate-aaaaaaaaaaaa","target":"candidate-aaaaaaaaaaaa"},"checkpoint":"complete","steps":[]}' \
+    > "$V2_JOURNAL"
+  : > "$FAKE_YARD_CALLS"
+  : > "$DELEGATE_LOG"
+  : > "$V1_HISTORY_LOG"
+  printf '%s\n' \
+    '#!/bin/sh' \
+    'set -eu' \
+    'printf "%s\n" "$*" >> "$DELEGATE_LOG"' \
+    > "$ACTIVATION_SYSTEMCTL_DELEGATE"
+  chmod 0755 "$ACTIVATION_SYSTEMCTL_DELEGATE"
+  printf '%s\n' \
+    '#!/bin/sh' \
+    'set -eu' \
+    'calls=$(wc -l < "$FAKE_YARD_CALLS")' \
+    'case "$calls" in' \
+    '  0)' \
+    '    case " $* " in *" --yes "*) exit 66 ;; esac' \
+    '    printf "unconfirmed:%s\n" "$*" >> "$FAKE_YARD_CALLS"' \
+    '    case "$ACTIVATION_SCENARIO" in' \
+    '      unconfirmed-unit-mutation) printf "unauthorized mutation\n" >> "$UNIT" ;;' \
+    '      unconfirmed-journal-mutation)' \
+    '        jq '\''.checkpoint = "unauthorized-mutation"'\'' "$V2_JOURNAL" > "$V2_JOURNAL.next"' \
+    '        mv "$V2_JOURNAL.next" "$V2_JOURNAL"' \
+    '        ;;' \
+    '      unconfirmed-ledger-mutation) printf "unauthorized mutation\n" >> "$V2_LEDGER" ;;' \
+    '    esac' \
+    '    printf "confirmation required: interactive terminal required\n" >&2' \
+    '    exit 1' \
+    '    ;;' \
+    '  1)' \
+    '    case " $* " in *" --yes "*) ;; *) exit 67 ;; esac' \
+    '    printf "authorized:%s\n" "$*" >> "$FAKE_YARD_CALLS"' \
+    '    [ "$ACTIVATION_SCENARIO" != unconfirmed-ledger-mutation ] || cp "$ACTIVATION_LEDGER_BASELINE" "$V2_LEDGER"' \
+    '    cp "$CANDIDATE_UNIT" "$UNIT"' \
+    '    jq '\''.transaction = "repair-transaction" | .authorizationDigest = "repair-authorization" | .checkpoint = "reconciling"'\'' "$V2_JOURNAL" > "$V2_JOURNAL.next"' \
+    '    mv "$V2_JOURNAL.next" "$V2_JOURNAL"' \
+    '    set +e' \
+    '    "$ACTIVATION_SYSTEMCTL_WRAPPER" show subyard-power-reconcile.service --property=LoadState >/dev/null 2>&1' \
+    '    fault_rc=$?' \
+    '    set -e' \
+    '    [ "$fault_rc" = 75 ] || exit 68' \
+    '    if [ -f "$ACTIVATION_FAULT_PROBE" ] &&' \
+    '      [ "$(wc -l < "$ACTIVATION_FAULT_PROBE")" = 1 ]; then' \
+    '      "$ACTIVATION_SYSTEMCTL_WRAPPER" show subyard-power-reconcile.service --property=LoadState >/dev/null' \
+    '    fi' \
+    '    exit 75' \
+    '    ;;' \
+    '  2)' \
+    '    case " $* " in *" --yes "*) exit 69 ;; esac' \
+    '    printf "resume:%s\n" "$*" >> "$FAKE_YARD_CALLS"' \
+    '    jq '\''.checkpoint = "complete"'\'' "$V2_JOURNAL" > "$V2_JOURNAL.next"' \
+    '    mv "$V2_JOURNAL.next" "$V2_JOURNAL"' \
+    '    ;;' \
+    '  *) exit 70 ;;' \
+    'esac' \
+    > "$OPERATOR_HOME/.local/bin/yard"
+  chmod 0755 "$OPERATOR_HOME/.local/bin/yard"
+
+  eval "$activation_repair_functions"
+  die() { printf 'activation fixture: %s\n' "$*" >&2; exit 2; }
+  ok() { :; }
+  load_release_targets() { :; }
+  operator_env() { "$@"; }
+  operator_yard() { operator_env "$OPERATOR_HOME/.local/bin/yard" "$@"; }
+  sudo() {
+    [ "${1:-}" != -n ] || shift
+    if [ "${1:-}" = systemctl ]; then
+      [ "${2:-}" = daemon-reload ] || return 71
+      return 0
+    fi
+    if [ "${1:-}" = install ]; then
+      shift
+      local -a arguments=()
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          -o|-g) shift 2 ;;
+          *) arguments+=("$1"); shift ;;
+        esac
+      done
+      command install "${arguments[@]}"
+      return
+    fi
+    command "$@"
+  }
+  assert_published_v1_history_unchanged() { printf 'checked\n' >> "$V1_HISTORY_LOG"; }
+  assert_candidate_state() { cmp "$CANDIDATE_UNIT" "$UNIT"; }
+  assert_runtime_links() {
+    [ "$1" = "$CANDIDATE_RELEASE_TARGET" ] && [ "$2" = "$OLD_RELEASE_TARGET" ]
+  }
+
+  install_activation_reconcile_fault
+  "$ACTIVATION_SYSTEMCTL_WRAPPER" show subyard-power-reconcile.service \
+    --property=LoadState >/dev/null || exit 72
+  [ ! -e "$ACTIVATION_FAULT_PROBE" ] || exit 73
+  grep -Fxq 'show subyard-power-reconcile.service --property=LoadState' "$DELEGATE_LOG" \
+    || exit 74
+  : > "$DELEGATE_LOG"
+  find "$ACTIVATION_SYSTEMCTL_WRAPPER" -delete
+
+  exercise_activation_only_repair
+  [ "$(cat "$FAKE_YARD_CALLS")" = "$(printf '%s\n%s\n%s' \
+    'unconfirmed:update --version candidate' \
+    'authorized:update --version candidate --yes' \
+    'resume:update --version candidate')" ] || exit 75
+  [ "$(wc -l < "$ACTIVATION_FAULT_PROBE")" = 1 ] || exit 76
+  grep -Fxq 'show subyard-power-reconcile.service --property=LoadState' "$DELEGATE_LOG" \
+    || exit 77
+  [ "$(wc -l < "$V1_HISTORY_LOG")" = 3 ] || exit 78
+  jq -e '.transaction == "repair-transaction" and
+    .authorizationDigest == "repair-authorization" and
+    .checkpoint == "complete" and (.steps | length) == 0' \
+    "$V2_JOURNAL" >/dev/null || exit 79
+  cmp "$CANDIDATE_UNIT" "$UNIT" || exit 80
+
+  cp "$V2_JOURNAL" "$V2_JOURNAL.valid"
+  jq '.steps = [{"id":"unexpected-replay"}]' \
+    "$V2_JOURNAL.valid" > "$V2_JOURNAL"
+  set +e
+  ( assert_activation_only_journal complete repair-transaction repair-authorization ) \
+    >/dev/null 2>&1
+  activation_journal_guard_rc=$?
+  set -e
+  [ "$activation_journal_guard_rc" -ne 0 ] || exit 81
+  cp "$V2_JOURNAL.valid" "$V2_JOURNAL"
+
+  cp "$V2_LEDGER" "$V2_LEDGER.valid"
+  printf 'unexpected mutation\n' >> "$V2_LEDGER"
+  set +e
+  ( assert_activation_ledger_unchanged ) >/dev/null 2>&1
+  activation_ledger_guard_rc=$?
+  set -e
+  [ "$activation_ledger_guard_rc" -ne 0 ] || exit 82
+  cp "$V2_LEDGER.valid" "$V2_LEDGER"
+)
+set +e
+run_activation_repair_contract success
+activation_repair_rc=$?
+set -e
+[ "$activation_repair_rc" = 0 ] \
+  || fail 'activation-only repair helper does not enforce its durable incident flow'
+for activation_mutation in unit journal ledger; do
+  set +e
+  run_activation_repair_contract "unconfirmed-$activation_mutation-mutation" >/dev/null 2>&1
+  activation_mutation_rc=$?
+  set -e
+  [ "$activation_mutation_rc" -ne 0 ] \
+    || fail "activation-only repair helper accepted $activation_mutation mutation before confirmation"
 done
 grep -Fq 'OLD_VERSION=0.8.0' "$ROOT/dev/e2e/power-reconciler-upgrade.sh" \
   && grep -Fq \
@@ -2625,6 +3018,78 @@ grep -Fq 'OLD_VERSION=0.8.0' "$ROOT/dev/e2e/power-reconciler-upgrade.sh" \
     "$ROOT/dev/e2e/power-reconciler-upgrade.sh" \
   && grep -Fq 'update --rollback --yes' "$ROOT/dev/e2e/power-reconciler-upgrade.sh" \
   || fail "power reconciler migration E2E lost exact v2 release rollback coverage"
+assert_v2_transition_function="$(sed -n '/^assert_v2_transition() {/,/^}/p' \
+  "$ROOT/dev/e2e/power-reconciler-upgrade.sh")"
+(
+  set -euo pipefail
+  export OLD_VERSION=0.8.0
+  OPERATOR_HOME="$TMP/power-rollback/operator"
+  rollback_state="$OPERATOR_HOME/.config/subyard/release-transition/v2"
+  rollback_target=0.8.0-bbbbbbbbbbbb
+  CANDIDATE_RELEASE_TARGET=releases/0.11.3-aaaaaaaaaaaa
+  runtime="$OPERATOR_HOME/.subyard/runtime"
+  mkdir -p "$rollback_state" "$runtime/releases/$rollback_target" \
+    "$runtime/$CANDIDATE_RELEASE_TARGET/config"
+  printf 'published target manifest\n' > "$runtime/releases/$rollback_target/runtime-files.sha256"
+  printf 'candidate owner registry\n' > "$runtime/$CANDIDATE_RELEASE_TARGET/config/release-transition.json"
+  artifact_digest="$(sha256sum "$runtime/releases/$rollback_target/runtime-files.sha256" | awk '{print $1}')"
+  registry_digest="$(sha256sum "$runtime/$CANDIDATE_RELEASE_TARGET/config/release-transition.json" | awk '{print $1}')"
+  catalog_digest=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+  jq -n '{
+    schemaVersion: 2,
+    domains: {
+      "owner-registration": {epoch: 2, applied: ["canonicalize-test-yard-owner-v2"]},
+      "power-metadata": {epoch: 1, applied: []},
+      "project-state": {epoch: 1, applied: []},
+      settings: {epoch: 2, applied: ["canonicalize-test-vms-settings-v2"]}
+    }
+  }' > "$rollback_state/ledger.json"
+  # Published V2 shape: authorization/intent tokens use the frozen complete
+  # rollback fixture in records_test.go; target facts are not durable fields.
+  jq -n --arg target "$rollback_target" \
+    --arg artifact "$artifact_digest" --arg registry "$registry_digest" --arg catalog "$catalog_digest" '{
+    schemaVersion: 2, transaction: "tx-001", checkpoint: "complete",
+    goal: {target: $target, direction: "activate-previous"},
+    releases: {from: "0.11.3-aaaaaaaaaaaa", previous: $target, target: $target},
+    authorizationPlan: "plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    resumePlan: "resume-v1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    artifactDigest: $artifact, registryDigest: $registry, catalogDigest: $catalog,
+    observationScope: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    authorizationDigest: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    intentDigest: "cffbd21069e88c37c6f18c83e9ac8643a98488e7b8be6ad5c8767c75eceef4b9",
+    steps: []
+  }' > "$rollback_state/journal.json"
+  cp "$rollback_state/journal.json" "$rollback_state/journal.valid"
+  eval "$assert_v2_transition_function"
+  operator_env() { "$@"; }
+  die() { return 2; }
+  assert_v2_transition activate-previous "releases/$rollback_target" "$catalog_digest" \
+    || fail 'power rollback rejected a completed frozen V2 journal'
+  for rollback_mutation in wrong-target wrong-direction incomplete wrong-artifact wrong-registry \
+    wrong-catalog missing-artifact missing-registry missing-catalog missing-steps unverified-step new-field; do
+    case "$rollback_mutation" in
+      wrong-target) filter='.goal.target = "foreign"' ;;
+      wrong-direction) filter='.goal.direction = "activate-target"' ;;
+      incomplete) filter='.checkpoint = "reconciling"' ;;
+      wrong-artifact) filter='.artifactDigest = .catalogDigest' ;;
+      wrong-registry) filter='.registryDigest = .catalogDigest' ;;
+      wrong-catalog) filter='.catalogDigest = .artifactDigest' ;;
+      missing-artifact) filter='del(.artifactDigest)' ;;
+      missing-registry) filter='del(.registryDigest)' ;;
+      missing-catalog) filter='del(.catalogDigest)' ;;
+      missing-steps) filter='del(.steps)' ;;
+      unverified-step) filter='.steps = [{checkpoint: "intent"}]' ;;
+      new-field) filter='.rollbackTarget = {version: "0.8.0"}' ;;
+    esac
+    jq "$filter" "$rollback_state/journal.valid" > "$rollback_state/journal.json"
+    set +e
+    assert_v2_transition activate-previous "releases/$rollback_target" "$catalog_digest" >/dev/null 2>&1
+    rollback_assert_rc=$?
+    set -e
+    [ "$rollback_assert_rc" -ne 0 ] \
+      || fail "power rollback evidence accepted $rollback_mutation"
+  done
+) || fail 'power rollback journal lost frozen artifact and owner bindings'
 grep -Fq 'active|inactive|failed' "$ROOT/dev/e2e/power-reconciler-upgrade.sh" \
   && grep -Fq 'failed:failed' "$ROOT/dev/e2e/power-reconciler-upgrade.sh" \
   || fail 'power reconciler migration E2E cannot preserve a pre-existing failed host unit'
@@ -2917,6 +3382,99 @@ grep -Fq 'boot_power_reconciler_succeeded()' "$ROOT/dev/e2e/p0-acceptance.sh" \
   && ! grep -Fq '[ "$unit_result" != success ] || break' \
     "$ROOT/dev/e2e/p0-acceptance.sh" \
   || fail 'P0 reboot can treat an active Type=exec reconciler as completed'
+reboot_vm_function="$(sed -n '/^reboot_vm() {/,/^}/p' \
+  "$ROOT/dev/e2e/p0-acceptance.sh")"
+for reboot_scenario in transient empty degraded exhausted maintenance false-running; do
+  reboot_probe_dir="$TMP/reboot-$reboot_scenario"
+  mkdir -p "$reboot_probe_dir"
+  printf '0\n' > "$reboot_probe_dir/clock"
+  printf '0\n' > "$reboot_probe_dir/probes"
+  set +e
+  REBOOT_VM_FUNCTION="$reboot_vm_function" REBOOT_PROBE_DIR="$reboot_probe_dir" \
+    REBOOT_SCENARIO="$reboot_scenario" bash -c '
+      set -euo pipefail
+      eval "$REBOOT_VM_FUNCTION"
+      CONFIG=/fixture/ssh-config
+      REBOOT_REQUEST_TIMEOUT_SECONDS=15
+      POWER_RECONCILE_START_WAIT_SECONDS=30
+      die() { printf "%s\n" "$*" >&2; exit 1; }
+      p0_monotonic_seconds() { cat "$REBOOT_PROBE_DIR/clock"; }
+      sleep() {
+        local now
+        now="$(cat "$REBOOT_PROBE_DIR/clock")"
+        printf "%s\n" "$((now + $1))" > "$REBOOT_PROBE_DIR/clock"
+      }
+      timeout() {
+        local bound
+        while [[ "$1" = --* ]]; do shift; done
+        bound="$1"
+        shift
+        if [[ "$*" = *is-system-running* ]]; then
+          [ "$bound" -gt 0 ] && [ "$bound" -le 10 ] || exit 91
+          [ "$bound" -le "$((180 - $(p0_monotonic_seconds)))" ] || exit 92
+          [[ "$*" = *ConnectTimeout=3*ConnectionAttempts=1*ServerAliveInterval=2*ServerAliveCountMax=2* ]] || exit 93
+          printf "%s\n" "$bound" >> "$REBOOT_PROBE_DIR/bounds"
+        fi
+        "$@"
+      }
+      ssh() {
+        local probe
+        case "$*" in
+          *"sudo -n systemctl reboot") return 0 ;;
+          *"-- true") return 255 ;;
+          *boot_id*)
+            if [ -e "$REBOOT_PROBE_DIR/boot-read" ]; then
+              printf "new-boot\n"
+            else
+              touch "$REBOOT_PROBE_DIR/boot-read"
+              printf "old-boot\n"
+            fi ;;
+          *is-system-running*)
+            probe="$(cat "$REBOOT_PROBE_DIR/probes")"
+            printf "%s\n" "$((probe + 1))" > "$REBOOT_PROBE_DIR/probes"
+            case "$REBOOT_SCENARIO" in
+              transient)
+                [ "$probe" -gt 0 ] || return 255
+                if [ "$probe" = 1 ]; then printf "starting\n"; return 1; fi
+                printf "running\n" ;;
+              empty) [ "$probe" -gt 0 ] || return 0; printf "running\n" ;;
+              degraded) printf "degraded\n"; return 1 ;;
+              exhausted) sleep "$bound"; return 255 ;;
+              maintenance) printf "maintenance\n"; return 1 ;;
+              false-running) printf "running\n"; return 255 ;;
+            esac ;;
+          *"ip -4 route show default") printf "default via fixture\n" ;;
+          *) exit 94 ;;
+        esac
+      }
+      boot_power_reconciler_succeeded() {
+        touch "$REBOOT_PROBE_DIR/power-verified"
+        return 0
+      }
+      reboot_vm 2
+    ' > "$reboot_probe_dir/output" 2>&1
+  reboot_probe_rc=$?
+  set -e
+  case "$reboot_scenario" in
+    transient|empty|degraded)
+      [ "$reboot_probe_rc" = 0 ] && [ -e "$reboot_probe_dir/power-verified" ] \
+        && [ -s "$reboot_probe_dir/bounds" ] \
+        || fail "P0 reboot rejected bounded terminal readiness: $reboot_scenario"
+      if [ "$reboot_scenario" = transient ]; then
+        [ "$(cat "$reboot_probe_dir/probes")" = 3 ] \
+          || fail 'P0 reboot did not retry transport and starting observations'
+      fi ;;
+    *)
+      [ "$reboot_probe_rc" != 0 ] && [ ! -e "$reboot_probe_dir/power-verified" ] \
+        || fail "P0 reboot accepted unsafe host readiness: $reboot_scenario"
+      grep -Fq 'probe_status=' "$reboot_probe_dir/output" \
+        || fail 'P0 reboot failure omitted safe probe status diagnostics'
+      if [ "$reboot_scenario" = exhausted ]; then
+        [ "$(cat "$reboot_probe_dir/clock")" = 180 ] \
+          || fail 'P0 reboot reset or exceeded the terminal readiness deadline'
+      fi ;;
+  esac
+done
 boot_power_reconciler_function="$(sed -n \
   '/^boot_power_reconciler_succeeded() {/,/^}/p' \
   "$ROOT/dev/e2e/p0-acceptance.sh")"
@@ -3020,6 +3578,11 @@ grep -Fq 'operator_yard -Y "$YARD_NAME" stop --yes' \
   && grep -Fq 'verify_power_retry_probe' \
     "$ROOT/dev/e2e/p0-source-upgrade.sh" \
   || fail 'source-upgrade does not cover v2 completion and complementary reboot power reconciliation'
+grep -Fq 'VERSION_A="0.11.2-p0.source.a.run$TOKEN"' \
+    "$ROOT/dev/e2e/p0-source-upgrade.sh" \
+  && grep -Fq 'VERSION_B="0.11.2-p0.source.b.run$TOKEN"' \
+    "$ROOT/dev/e2e/p0-source-upgrade.sh" \
+  || fail 'source-upgrade rollback candidates are not canonical semantic versions'
 grep -Fq '# shellcheck source=dev/e2e/lib-p0-init-retry.sh' \
     "$ROOT/dev/e2e/p0-source-upgrade.sh" \
   && [ "$(grep -Fc 'p0_retry_init_after_plan_stale operator_yard' \
@@ -3099,6 +3662,215 @@ done
 grep -Fq 's/^YARD_TEMPLATE=e2e-vms$/YARD_TEMPLATE=test-vms/' \
   "$ROOT/dev/e2e/p0-source-upgrade.sh" \
   || fail "P0 source-upgrade lane does not verify the retired template migration"
+grep -Fq 'chmod 0755 "$CANDIDATE_A_REPOSITORY"' \
+    "$ROOT/dev/e2e/p0-source-upgrade.sh" \
+  && grep -Fq 'operator_env test -x "$CANDIDATE_A_ENGINE"' \
+    "$ROOT/dev/e2e/p0-source-upgrade.sh" \
+  || fail 'P0 source-upgrade does not preserve operator access to the extracted candidate runtime'
+source_normalizer_line="$(grep -nF '  assert_direct_normalizer_is_pure' \
+  "$ROOT/dev/e2e/p0-source-upgrade.sh" | cut -d: -f1 || true)"
+source_ingress_line="$(grep -nF '  bootstrap_candidate "$RELEASE_ROOT/a" "$VERSION_A"' \
+  "$ROOT/dev/e2e/p0-source-upgrade.sh" | sed -n '1p' | cut -d: -f1 || true)"
+source_repeat_ingress_line="$(grep -nF '  bootstrap_candidate "$RELEASE_ROOT/a" "$VERSION_A"' \
+  "$ROOT/dev/e2e/p0-source-upgrade.sh" | sed -n '2p' | cut -d: -f1 || true)"
+source_ingress_evidence_line="$(grep -nF '  verify_authorized_source_ingress' \
+  "$ROOT/dev/e2e/p0-source-upgrade.sh" | cut -d: -f1 || true)"
+[[ "$source_normalizer_line" =~ ^[0-9]+$ ]] \
+  && [[ "$source_ingress_line" =~ ^[0-9]+$ ]] \
+  && [ "$source_normalizer_line" -lt "$source_ingress_line" ] \
+  || fail 'P0 source-upgrade runs direct normalization after authorized ingress'
+[[ "$source_repeat_ingress_line" =~ ^[0-9]+$ ]] \
+  && [[ "$source_ingress_evidence_line" =~ ^[0-9]+$ ]] \
+  && [ "$source_ingress_line" -lt "$source_ingress_evidence_line" ] \
+  && [ "$source_ingress_evidence_line" -lt "$source_repeat_ingress_line" ] \
+  || fail 'P0 source-upgrade checks source ingress after activation-only history replacement'
+source_normalizer_function="$(sed -n '/^assert_direct_normalizer_is_pure() {/,/^}/p' \
+  "$ROOT/dev/e2e/p0-source-upgrade.sh")"
+run_source_normalizer_contract() (
+  set -euo pipefail
+  local scenario="$1"
+  local fixture="$TMP/source-normalizer-$scenario"
+  SOURCE_ROOT="$fixture/operator/src"
+  OPERATOR_HOME="$fixture/operator"
+  SHARED_ROOT="$fixture/shared"
+  RELEASE_ROOT="$SHARED_ROOT/releases"
+  CANDIDATE_A_REPOSITORY="$SHARED_ROOT/candidate-a-runtime"
+  CANDIDATE_A_ENGINE="$CANDIDATE_A_REPOSITORY/bin/yard-engine"
+  NORMALIZER_SCRATCH="$fixture/scratch"
+  NORMALIZER_CALLS="$fixture/normalizer-calls"
+  NORMALIZER_SCENARIO="$scenario"
+  EXPECTED_CANDIDATE_REPOSITORY="$CANDIDATE_A_REPOSITORY"
+  export EXPECTED_CANDIDATE_REPOSITORY NORMALIZER_CALLS NORMALIZER_SCENARIO \
+    NORMALIZER_SCRATCH OPERATOR_HOME
+  mkdir -p "$SOURCE_ROOT/bin" "$SOURCE_ROOT/private/yards" \
+    "$CANDIDATE_A_REPOSITORY/bin" "$CANDIDATE_A_REPOSITORY/config" \
+    "$OPERATOR_HOME/.config/subyard/yards/test-yard" "$OPERATOR_HOME/.local/bin" \
+    "$SHARED_ROOT" "$NORMALIZER_SCRATCH"
+  printf 'ALPHA=1\nYARD_TEMPLATE=e2e-vms\nOMEGA=2\n' \
+    > "$SOURCE_ROOT/private/yards/e2e-yard.env"
+  : > "$NORMALIZER_CALLS"
+  printf '%s\n' \
+    '#!/bin/sh' \
+    'set -eu' \
+    '[ "${SUBYARD_REPOSITORY_ROOT:-}" = "$EXPECTED_CANDIDATE_REPOSITORY" ] || exit 65' \
+    '[ -f "$SUBYARD_REPOSITORY_ROOT/config/commands.registry" ] || exit 66' \
+    '[ "${1:-}" = _migrate ] && [ "${2:-}" = normalize-yard-config ] || exit 63' \
+    'printf "invoke:%s\n" "$*" >> "$NORMALIZER_CALLS"' \
+    'shift 2' \
+    'if [ "$#" -ne 0 ]; then' \
+    '  [ "$NORMALIZER_SCENARIO" != reject-stdout ] || printf "leaked rejected output\n"' \
+    '  printf "path arguments rejected\n" >&2' \
+    '  exit 64' \
+    'fi' \
+    'input="$NORMALIZER_SCRATCH/input"' \
+    'cp /dev/stdin "$input"' \
+    'bytes=$(wc -c < "$input")' \
+    'printf "%s:read\n" "$bytes" >> "$NORMALIZER_CALLS"' \
+    'if [ "$bytes" -gt 1048576 ] && [ "$NORMALIZER_SCENARIO" != oversized-accept ]; then' \
+    '  if [ "$NORMALIZER_SCENARIO" = oversized-wrong-diagnostic ]; then' \
+    '    printf "bash: oversized.env: Permission denied\n" >&2' \
+    '  else' \
+    '    printf "%s: source-install yard config normalization: legacy yard config exceeds its size bound\n" "${0##*/}" >&2' \
+    '  fi' \
+    '  exit 1' \
+    'fi' \
+    '[ "$NORMALIZER_SCENARIO" != mutate-tree ] || printf "mutated\n" > "$OPERATOR_HOME/.local/bin/unexpected"' \
+    'if [ "$NORMALIZER_SCENARIO" = strip-newline ]; then' \
+    '  normalized=$(sed "s/^YARD_TEMPLATE=e2e-vms$/YARD_TEMPLATE=test-vms/" "$input")' \
+    '  printf "%s" "$normalized"' \
+    'else' \
+    '  sed "s/^YARD_TEMPLATE=e2e-vms$/YARD_TEMPLATE=test-vms/" "$input"' \
+    'fi' \
+    > "$CANDIDATE_A_ENGINE"
+  printf 'fixture command registry\n' \
+    > "$CANDIDATE_A_REPOSITORY/config/commands.registry"
+  printf '%s\n' \
+    '#!/bin/sh' \
+    'printf "yard: internal: _migrate expects check or apply\n" >&2' \
+    'exit 2' \
+    > "$SOURCE_ROOT/bin/yard"
+  chmod 0755 "$SOURCE_ROOT/bin/yard" "$CANDIDATE_A_ENGINE"
+  eval "$source_normalizer_function"
+  operator_env() {
+    local argument
+    for argument in "$@"; do
+      if [ "$argument" = "$SHARED_ROOT/direct-normalizer-evidence/oversized.env" ]; then
+        printf 'bash: %s: Permission denied\n' "$argument" >&2
+        return 126
+      fi
+    done
+    "$@"
+  }
+  die() { printf 'source normalizer fixture: %s\n' "$*" >&2; exit 2; }
+  assert_direct_normalizer_is_pure
+  [ "$(grep -c '^invoke:' "$NORMALIZER_CALLS")" = 3 ]
+  grep -Fxq '1048577:read' "$NORMALIZER_CALLS"
+)
+run_source_normalizer_contract valid \
+  || fail 'source normalizer helper rejected the exact pure boundary behavior'
+for source_normalizer_scenario in strip-newline reject-stdout oversized-accept \
+  oversized-wrong-diagnostic mutate-tree; do
+  set +e
+  run_source_normalizer_contract "$source_normalizer_scenario" >/dev/null 2>&1
+  source_normalizer_rc=$?
+  set -e
+  [ "$source_normalizer_rc" -ne 0 ] \
+    || fail "source normalizer helper missed $source_normalizer_scenario boundary drift"
+done
+
+source_ingress_function="$(sed -n '/^verify_authorized_source_ingress() {/,/^}/p' \
+  "$ROOT/dev/e2e/p0-source-upgrade.sh")"
+(
+  set -euo pipefail
+  OPERATOR_HOME="$TMP/source-ingress/operator"
+  SOURCE_ROOT="$OPERATOR_HOME/src"
+  V2_JOURNAL="$OPERATOR_HOME/.config/subyard/release-transition/v2/journal.json"
+  mkdir -p "$(dirname "$V2_JOURNAL")"
+  source_digest_a=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  source_digest_b=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  source_digest_c=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+  source_digest_d=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+  jq -n \
+    --arg source "$SOURCE_ROOT" --arg data "$OPERATOR_HOME/.subyard" \
+    --arg bin "$OPERATOR_HOME/.local/bin" --arg rc "$OPERATOR_HOME/.bashrc" \
+    --arg login "$OPERATOR_HOME/.profile" \
+    --arg a "$source_digest_a" --arg b "$source_digest_b" \
+    --arg c "$source_digest_c" --arg d "$source_digest_d" '
+      {
+        schemaVersion: 2,
+        transaction: "source-transaction",
+        releases: {from: "source-old", target: "source-candidate"},
+        checkpoint: "complete",
+        sourceIngress: {
+          schemaVersion: 1, kind: "pre-go-source-v1", sourceRoot: $source,
+          dataHome: $data, binDir: $bin, rc: $rc, loginRC: $login
+        },
+        steps: [
+          {
+            id: "source-install.import", migration: "source-install-v1",
+            resource: "source-install.config", decision: "canonicalize",
+            expectedFingerprint: $a, desiredFingerprint: $b, checkpoint: "verified",
+            evidence: {
+              schemaVersion: 2, transaction: "source-transaction",
+              releases: {from: "source-old", target: "source-candidate"},
+              step: "source-install.import", expectedFingerprint: $a,
+              desiredFingerprint: $b, observedFingerprint: $b, checkpoint: "verified"
+            }
+          },
+          {
+            id: "source-install.entrypoints", migration: "source-install-v1",
+            resource: "source-install.entrypoints", decision: "canonicalize",
+            expectedFingerprint: $c, desiredFingerprint: $d, checkpoint: "verified",
+            evidence: {
+              schemaVersion: 2, transaction: "source-transaction",
+              releases: {from: "source-old", target: "source-candidate"},
+              step: "source-install.entrypoints", expectedFingerprint: $c,
+              desiredFingerprint: $d, observedFingerprint: $d, checkpoint: "verified"
+            }
+          }
+        ]
+      }
+    ' > "$V2_JOURNAL"
+  cp "$V2_JOURNAL" "$V2_JOURNAL.valid"
+  eval "$source_ingress_function"
+  operator_env() { "$@"; }
+  die() { return 2; }
+  verify_authorized_source_ingress
+  for source_ingress_mutation in foreign-role wrong-step wrong-decision \
+    wrong-evidence unexpected-recovery duplicate-step; do
+    case "$source_ingress_mutation" in
+      foreign-role)
+        jq '.sourceIngress.dataHome += "-foreign"' "$V2_JOURNAL.valid" > "$V2_JOURNAL"
+        ;;
+      wrong-step)
+        jq '.steps[0].resource = "source-install.foreign"' \
+          "$V2_JOURNAL.valid" > "$V2_JOURNAL"
+        ;;
+      wrong-decision)
+        jq '.steps[0].decision = "retain"' \
+          "$V2_JOURNAL.valid" > "$V2_JOURNAL"
+        ;;
+      wrong-evidence)
+        jq '.steps[0].evidence.observedFingerprint = .steps[0].expectedFingerprint' \
+          "$V2_JOURNAL.valid" > "$V2_JOURNAL"
+        ;;
+      unexpected-recovery)
+        jq '.steps[0].evidence.recoveryFingerprint =
+          "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"' \
+          "$V2_JOURNAL.valid" > "$V2_JOURNAL"
+        ;;
+      duplicate-step)
+        jq '.steps += [.steps[0]]' "$V2_JOURNAL.valid" > "$V2_JOURNAL"
+        ;;
+    esac
+    set +e
+    verify_authorized_source_ingress >/dev/null 2>&1
+    source_ingress_rc=$?
+    set -e
+    [ "$source_ingress_rc" -ne 0 ] \
+      || fail "source ingress helper accepted $source_ingress_mutation journal evidence"
+  done
+) || fail 'P0 source-upgrade does not behaviorally verify its authorized source ingress'
 grep -Fq 'verify_v2_release_transition()' \
   "$ROOT/dev/e2e/p0-source-upgrade.sh" \
   && grep -Fq '.goal.target | startswith($version + "-")' \

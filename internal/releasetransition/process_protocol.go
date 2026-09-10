@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"unicode"
+
+	"github.com/blang/semver/v4"
 )
 
 const ProcessProtocolSchemaV1 = 1
@@ -54,6 +56,46 @@ type ProcessRequest struct {
 	SourceIngress       *SourceIngressRequest `json:"sourceIngress,omitempty"`
 	Replacement         *JournalReplacement   `json:"replacement,omitempty"`
 	Execution           *Execution            `json:"execution,omitempty"`
+}
+
+// RollbackTarget is internal compatibility proof derived from the sealed
+// retained runtime. Version is the engine semantic version without a v prefix;
+// an empty registry digest proves that the target predates registry v2.
+type RollbackTarget struct {
+	Version        string      `json:"version"`
+	RegistryDigest Fingerprint `json:"registryDigest,omitempty"`
+}
+
+func (target RollbackTarget) Validate() error {
+	version, err := semver.Parse(target.Version)
+	if err != nil || version.String() != target.Version {
+		return invalid("rollback target version is not canonical semantic version")
+	}
+	if target.RegistryDigest != "" {
+		return validateFingerprint(target.RegistryDigest, "rollback target registry digest")
+	}
+	return nil
+}
+
+func validateRollbackTarget(direction Direction, target *RollbackTarget) error {
+	if direction == DirectionActivatePrevious {
+		if target == nil {
+			return invalid("rollback target facts are required")
+		}
+		return target.Validate()
+	}
+	if target != nil {
+		return invalid("rollback target facts are forbidden for a forward goal")
+	}
+	return nil
+}
+
+func cloneRollbackTarget(target *RollbackTarget) *RollbackTarget {
+	if target == nil {
+		return nil
+	}
+	clone := *target
+	return &clone
 }
 
 type ProcessResponse struct {

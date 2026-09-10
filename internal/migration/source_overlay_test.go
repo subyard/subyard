@@ -1,6 +1,7 @@
 package migration
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -158,24 +159,33 @@ func TestDiscoverSourceInstallIncludesPreviousOverlayAndFlatYards(t *testing.T) 
 	}
 }
 
-func TestNormalizeLegacyYardConfig(t *testing.T) {
-	root := ownedOverlayTempDir(t)
-	source := filepath.Join(root, "legacy.env")
-	destination := filepath.Join(root, "normalized.env")
-	writeOverlayFixture(t, source,
-		"# retained\nexport YARD_TEMPLATE = 'e2e-vms'\nSSH_PORT=3333\n")
-	if err := NormalizeLegacyYardConfig(source, destination); err != nil {
-		t.Fatal(err)
-	}
-	payload, err := os.ReadFile(destination)
+func TestNormalizeLegacyYardConfigContent(t *testing.T) {
+	payload, err := NormalizeLegacyYardConfigContent(
+		[]byte("# retained\nexport YARD_TEMPLATE = 'e2e-vms'\nSSH_PORT=3333\n"),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(payload) != "# retained\nYARD_TEMPLATE=test-vms\nSSH_PORT=3333\n" {
-		t.Fatalf("normalized yard config = %q", payload)
+	if got, want := string(payload), "# retained\nYARD_TEMPLATE=test-vms\nSSH_PORT=3333\n"; got != want {
+		t.Fatalf("normalized yard config = %q, want %q", got, want)
 	}
-	if info, err := os.Stat(destination); err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("normalized yard config mode=%v err=%v", info.Mode(), err)
+}
+
+func TestNormalizeLegacyYardConfigContentRejectsAmbiguousInput(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		payload []byte
+	}{
+		{name: "oversized", payload: bytes.Repeat([]byte{'x'}, MaxLegacyYardConfigBytes+1)},
+		{name: "dynamic", payload: []byte("PROFILE=e2e-vms\nYARD_TEMPLATE=$PROFILE\n")},
+		{name: "duplicate", payload: []byte("YARD_TEMPLATE=e2e-vms\nYARD_TEMPLATE=e2e-vms\n")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			payload, err := NormalizeLegacyYardConfigContent(test.payload)
+			if err == nil || payload != nil {
+				t.Fatalf("NormalizeLegacyYardConfigContent() = %q, %v; want nil output and error", payload, err)
+			}
+		})
 	}
 }
 

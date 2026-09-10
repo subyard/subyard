@@ -200,6 +200,25 @@ func TestCandidateInvalidRegistryOutcomeStaysStructured(t *testing.T) {
 	})
 }
 
+func TestRollbackStandaloneBlockedOutcomeStaysStructured(t *testing.T) {
+	root := t.TempDir()
+	response := `{"schemaVersion":1,"outcome":{"status":"operator-action-required","reachedGoal":false,"active":"release-a","previous":"release-b","target":"release-b","code":"rollback-incompatible","message":"retained runtime is outside the supported horizon","retry":"restore a compatible retained release"}}`
+	candidate := writeRuntimeCandidateFixture(t, root, response)
+	request := releasetransition.ProcessRequest{
+		SchemaVersion: releasetransition.ProcessProtocolSchemaV1, Mode: releasetransition.ProcessInspect,
+		RuntimeRoot: root, ConfigHome: root, Target: "release-b", Direction: releasetransition.DirectionActivatePrevious,
+	}
+	runtime := New(Config{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+	prepared, err := prepareCandidateTransitionForTest(runtime, context.Background(), options{root: root}, candidate, request)
+	if err == nil || !strings.Contains(err.Error(), "code=rollback-incompatible") || prepared.run != nil {
+		t.Fatalf("blocked rollback preparation = %#v, %v", prepared, err)
+	}
+	var public publicReleaseInspectionError
+	if !errors.As(err, &public) || public.outcome.Code != releasetransition.CodeRollbackIncompatible {
+		t.Fatalf("blocked rollback lost public outcome: %v", err)
+	}
+}
+
 func TestRollbackFailuresHaveStructuredPublicOutcomes(t *testing.T) {
 	for _, test := range []struct {
 		name             string
@@ -354,7 +373,7 @@ esac
 		if request.Target != "release-a" ||
 			request.Direction != releasetransition.DirectionActivatePrevious ||
 			request.ArtifactDigest != releasetransition.Fingerprint(fmt.Sprintf("%x", wantArtifact)) ||
-			request.RegistryDigest == "" {
+			request.RegistryDigest == "" || bytes.Contains(line, []byte("rollbackTarget")) {
 			t.Fatalf("request %d = %#v", index, request)
 		}
 	}
@@ -482,6 +501,184 @@ esac
 	if request.Target != oldRelease || request.RegistryDigest != journal.RegistryDigest ||
 		request.ArtifactDigest != journal.ArtifactDigest {
 		t.Fatalf("protected rollback request = %#v", request)
+	}
+}
+
+func TestRollbackFactsRequireExactSealedArtifact(t *testing.T) {
+	for _, scenario := range []string{"valid", "legacy", "unmanifested-registry", "manifest", "engine", "registry", "version", "missing"} {
+		t.Run(scenario, func(t *testing.T) {
+			fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalComplete)
+			digest := releasetransition.Fingerprint(fixture.artifactDigest)
+			root := filepath.Dir(filepath.Dir(fixture.engine))
+			switch scenario {
+			case "legacy", "unmanifested-registry":
+				engine, err := os.ReadFile(fixture.engine)
+				if err != nil {
+					t.Fatal(err)
+				}
+				manifest := []byte(fmt.Sprintf("%x  ./bin/yard-engine\n", sha256.Sum256(engine)))
+				if err := os.WriteFile(filepath.Join(root, "runtime-files.sha256"), manifest, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				digest = releasetransition.Fingerprint(fmt.Sprintf("%x", sha256.Sum256(manifest)))
+				if scenario == "legacy" {
+					if err := os.Remove(filepath.Join(root, "config", "release-transition.json")); err != nil {
+						t.Fatal(err)
+					}
+				}
+			case "manifest":
+				if err := os.WriteFile(filepath.Join(root, "runtime-files.sha256"), []byte("changed\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "engine":
+				if err := os.WriteFile(fixture.engine, []byte("changed"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			case "registry":
+				if err := os.WriteFile(filepath.Join(root, "config", "release-transition.json"), []byte("changed"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "version":
+				writeProtectedRuntimeFixtureEngine(t, fixture, "#!/bin/sh\nprintf 'yard-engine 1.2.4\\n'\n")
+				manifest, err := os.ReadFile(filepath.Join(root, "runtime-files.sha256"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				digest = releasetransition.Fingerprint(fmt.Sprintf("%x", sha256.Sum256(manifest)))
+			case "missing":
+				if err := os.Remove(fixture.engine); err != nil {
+					t.Fatal(err)
+				}
+			}
+			facts, err := VerifyRollbackTarget(context.Background(), fixture.runtimeRoot, releasetransition.ReleaseID(fixture.target), digest)
+			if scenario == "valid" || scenario == "legacy" {
+				if err != nil || facts == nil || facts.Version != "1.2.3" || (facts.RegistryDigest == "") != (scenario == "legacy") {
+					t.Fatalf("verified rollback facts = %#v, %v", facts, err)
+				}
+			} else if err == nil || facts != nil {
+				t.Fatalf("unsafe rollback %s returned facts %#v, %v", scenario, facts, err)
+			}
+		})
+	}
+}
+
+func TestProtectedPublishedRollbackCompletionRemainsReadOnly(t *testing.T) {
+	for _, scenario := range []string{"ready", "same-release", "pending", "artifact", "owner", "current", "previous", "reported-previous", "blocked", "blocked-foreign-transaction", "blocked-foreign-links", "standalone-ready"} {
+		t.Run(scenario, func(t *testing.T) {
+			fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalComplete)
+			capture := filepath.Join(filepath.Dir(fixture.runtimeRoot), "historical-request")
+			reportedPrevious := "release-a"
+			if scenario == "reported-previous" {
+				reportedPrevious = "foreign"
+			}
+			response := fmt.Sprintf(`{"schemaVersion":1,"inspection":{"plan":"plan-v1-%s","assessment":{"action":"release.transition.v2","effect":"mutation","changed":false,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible"},"outcome":{"status":"ready","reachedGoal":true,"active":%q,"previous":%q,"target":%q,"code":"ready","message":"verified","transaction":%q}}}`,
+				strings.Repeat("a", 64), fixture.target, reportedPrevious, fixture.target, fixture.transaction)
+			if strings.HasPrefix(scenario, "blocked") || scenario == "standalone-ready" {
+				previous := releasetransition.ReleaseID("release-a")
+				transaction := releasetransition.TransactionID(fixture.transaction)
+				outcome := releasetransition.Outcome{
+					Status: releasetransition.StatusOperatorActionRequired,
+					Active: releasetransition.ReleaseID(fixture.target), Previous: &previous,
+					Target: releasetransition.ReleaseID(fixture.target), Code: releasetransition.CodeRollbackIncompatible,
+					Transaction: &transaction, Message: "rollback horizon is incompatible", Retry: "restore compatible retained runtime",
+				}
+				switch scenario {
+				case "blocked-foreign-transaction":
+					transaction = "tx-foreign"
+				case "blocked-foreign-links":
+					previous = "foreign"
+				case "standalone-ready":
+					outcome.Status = releasetransition.StatusReady
+					outcome.Code = releasetransition.CodeReady
+					outcome.ReachedGoal = true
+					outcome.Retry = ""
+				}
+				payload, err := json.Marshal(releasetransition.ProcessResponse{SchemaVersion: 1, Outcome: &outcome})
+				if err != nil {
+					t.Fatal(err)
+				}
+				response = string(payload)
+			}
+			writeProtectedRuntimeFixtureEngine(t, fixture, fmt.Sprintf(`#!/bin/sh
+case "${1:-}" in
+  --version) printf 'yard-engine 1.2.3\n' ;;
+  _release-transition)
+    cat > %q
+    jq -e '.mode == "inspect" and (has("rollbackTarget") | not)' %q >/dev/null || exit 93
+    printf '%%s\n' %q ;;
+  *) exit 64 ;;
+esac
+`, capture, capture, response))
+			payload, err := os.ReadFile(fixture.journalPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			journal, err := releasetransition.ParseJournal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			journal.Goal.Direction = releasetransition.DirectionActivatePrevious
+			previous := releasetransition.ReleaseID(fixture.target)
+			journal.Releases.Previous = &previous
+			if scenario == "same-release" {
+				journal.Releases.From = journal.Goal.Target
+				previous = "release-a"
+			}
+			if scenario == "pending" {
+				journal.Checkpoint = releasetransition.JournalReconciling
+			}
+			if scenario == "owner" {
+				journal.RegistryDigest = releasetransition.Fingerprint(strings.Repeat("f", 64))
+			}
+			// Encode the published shape directly: old writers had no target-facts
+			// field. A pending journal still needs a consistent recovering response.
+			payload, err = json.Marshal(journal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(fixture.journalPath, payload, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "artifact" {
+				if err := os.WriteFile(fixture.engine, []byte("changed"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if scenario == "current" || scenario == "previous" {
+				path := filepath.Join(fixture.runtimeRoot, scenario)
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink("releases/foreign", path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			runtime := New(Config{Environment: fixture.environment(), Installer: fixture.installer, Stderr: &bytes.Buffer{}})
+			defer runtime.Close()
+			inspection, err := runtime.inspectProtectedTransition(context.Background(), fixture.runtimeRoot, fixture.configHome, "default", nil)
+			if scenario == "ready" || scenario == "same-release" {
+				if err != nil || inspection == nil || inspection.inspection.Outcome.Status != releasetransition.StatusReady {
+					t.Fatalf("historical completion inspection = %#v, %v", inspection, err)
+				}
+				_, publicationErr := runtime.PrepareTransition(context.Background(),
+					[]string{"--runtime-root", fixture.runtimeRoot, "--version", "2.0.0"}, fixture.configHome, "default", nil,
+				)
+				if publicationErr == nil || !strings.Contains(publicationErr.Error(), "release download failed; current runtime was not changed") {
+					t.Fatalf("completed rollback history blocked fresh forward publication: %v", publicationErr)
+				}
+			} else if scenario == "blocked" {
+				var public publicReleaseInspectionError
+				if !errors.As(err, &public) || public.outcome.Code != releasetransition.CodeRollbackIncompatible {
+					t.Fatalf("protected rollback lost structured compatibility blocker: %v", err)
+				}
+			} else if err == nil {
+				t.Fatalf("unsafe historical completion %s was accepted", scenario)
+			}
+			after, err := os.ReadFile(fixture.journalPath)
+			if err != nil || !bytes.Equal(payload, after) {
+				t.Fatalf("historical journal changed under read: %v", err)
+			}
+		})
 	}
 }
 
@@ -653,6 +850,207 @@ func TestPrepareTransitionUsesExactPublishedRecoveryWithoutLatestOrPublication(t
 	}
 	if _, err := os.Lstat(fixture.cache); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("exact recovery created the release cache: %v", err)
+	}
+}
+
+func TestPrepareTransitionRepairsCompletedActivationDriftWithOneGrant(t *testing.T) {
+	fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalComplete)
+	marker := filepath.Join(filepath.Dir(fixture.runtimeRoot), "repair-started")
+	grants := filepath.Join(filepath.Dir(fixture.runtimeRoot), "repair-grants")
+	repairTransaction := "tx-fedcba9876543210"
+	repairPlan := "plan-v1-" + strings.Repeat("f", 64)
+	resumePlan := "resume-v1-" + strings.Repeat("9", 64)
+	driftInspection := fmt.Sprintf(
+		`{"schemaVersion":1,"activationReconciliationOwned":true,"inspection":{"plan":%q,"assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the exact typed migration and release activation plan"]},"outcome":{"status":"migration-required","reachedGoal":false,"active":%q,"previous":"release-a","target":%q,"code":"transition-required","message":"the inspected release transition has not started","retry":"run yard update"}}}`,
+		repairPlan, fixture.target, fixture.target,
+	)
+	recoveringInspection := fmt.Sprintf(
+		`{"schemaVersion":1,"activationReconciliationOwned":true,"inspection":{"plan":%q,"assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the exact typed migration and release activation plan"]},"resume":%q,"outcome":{"status":"recovering","reachedGoal":false,"active":%q,"previous":"release-a","target":%q,"code":"recovery-pending","message":"the authorized release transition can resume from observed facts","retry":"run yard update","transaction":%q}}}`,
+		resumePlan, repairTransaction, fixture.target, fixture.target, repairTransaction,
+	)
+	interrupted := fmt.Sprintf(
+		`{"schemaVersion":1,"activationReconciliationOwned":true,"outcome":{"status":"recovering","reachedGoal":false,"active":%q,"previous":"release-a","target":%q,"code":"verification-failed","message":"the release transition was interrupted after a durable mutation checkpoint","retry":"run yard update","transaction":%q}}`,
+		fixture.target, fixture.target, repairTransaction,
+	)
+	ready := fmt.Sprintf(
+		`{"schemaVersion":1,"activationReconciliationOwned":true,"outcome":{"status":"ready","reachedGoal":true,"active":%q,"previous":"release-a","target":%q,"code":"ready","message":"verified","transaction":%q}}`,
+		fixture.target, fixture.target, repairTransaction,
+	)
+	engine := fmt.Sprintf(`#!/bin/sh
+case "${1:-}" in
+  --version) printf 'yard-engine 1.2.3\n' ;;
+  _release-transition)
+    request=$(cat)
+    case "$request" in
+      *'"mode":"inspect"'*)
+        if [ -e %q ]; then printf '%%s\n' %q; else printf '%%s\n' %q; fi
+        ;;
+      *'"mode":"converge"'*)
+        if [ "${SUBYARD_RELEASE_TRANSITION_GRANT_FD:-}" = 3 ]; then
+          IFS= read -r grant <&3
+        else
+          grant=none
+        fi
+        printf '%%s\n' "$grant" >> %q
+        if [ -e %q ]; then
+          printf '%%s\n' %q
+        else
+          : > %q
+          printf '%%s\n' %q
+        fi
+        ;;
+      *) exit 64 ;;
+    esac
+    ;;
+  *) exit 64 ;;
+esac
+`, marker, recoveringInspection, driftInspection, grants, marker, ready, marker, interrupted)
+	writeProtectedRuntimeFixtureEngine(t, fixture, engine)
+	runtime := New(Config{
+		Environment: fixture.environment(), Installer: fixture.installer,
+		Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
+	})
+
+	prepared, err := runtime.PrepareTransition(
+		context.Background(), []string{"--runtime-root", fixture.runtimeRoot},
+		fixture.configHome, "default", nil,
+	)
+	if err != nil {
+		t.Fatalf("prepare completed activation repair: %v", err)
+	}
+	if prepared.Action != "update.activate" || !prepared.Changed {
+		t.Fatalf("completed activation repair preparation = %#v", prepared)
+	}
+	if err := prepared.Execute(context.Background()); err == nil ||
+		!strings.Contains(err.Error(), "verification-failed") {
+		t.Fatalf("interrupted activation repair error = %v", err)
+	}
+
+	journalPayload, err := os.ReadFile(fixture.journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal, err := releasetransition.ParseJournal(journalPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := releasetransition.ReleaseID("release-a")
+	journal.Transaction = releasetransition.TransactionID(repairTransaction)
+	journal.Releases = releasetransition.ReleasePair{
+		From: releasetransition.ReleaseID(fixture.target), Previous: &previous,
+		Target: releasetransition.ReleaseID(fixture.target),
+	}
+	journal.AuthorizationPlan = releasetransition.PlanToken(repairPlan)
+	journal.ResumePlan = releasetransition.PlanToken(resumePlan)
+	journal.AuthorizationDigest = releasetransition.Fingerprint(strings.Repeat("8", 64))
+	journal.Checkpoint = releasetransition.JournalReconciling
+	intentPayload, err := json.Marshal(struct {
+		AuthorizationPlan releasetransition.PlanToken     `json:"authorizationPlan"`
+		ResumePlan        releasetransition.PlanToken     `json:"resumePlan"`
+		ObservationScope  releasetransition.Fingerprint   `json:"observationScope"`
+		Steps             []releasetransition.JournalStep `json:"steps"`
+	}{journal.AuthorizationPlan, journal.ResumePlan, journal.ObservationScope, journal.Steps})
+	if err != nil {
+		t.Fatal(err)
+	}
+	intentDigest := sha256.Sum256(intentPayload)
+	journal.IntentDigest = releasetransition.Fingerprint(fmt.Sprintf("%x", intentDigest))
+	journalPayload, err = releasetransition.MarshalJournal(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.journalPath, journalPayload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	resumed, err := runtime.PrepareTransition(
+		context.Background(), []string{"--runtime-root", fixture.runtimeRoot},
+		fixture.configHome, "default", nil,
+	)
+	if err != nil {
+		t.Fatalf("prepare activation repair resume: %v", err)
+	}
+	if resumed.Action != "update.activate" || resumed.Changed {
+		t.Fatalf("activation repair resume preparation = %#v", resumed)
+	}
+	if err := resumed.Execute(context.Background()); err != nil {
+		t.Fatalf("execute activation repair resume: %v", err)
+	}
+	grantPayload, err := os.ReadFile(grants)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grantLines := strings.Split(strings.TrimSpace(string(grantPayload)), "\n")
+	if len(grantLines) != 2 || !strings.HasPrefix(grantLines[0], "grant-v1-") ||
+		grantLines[1] != "none" {
+		t.Fatalf("activation repair grants = %q", grantPayload)
+	}
+}
+
+func TestProtectedTransitionTransactionExceptionIsFailClosed(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		checkpoint  releasetransition.JournalCheckpoint
+		response    func(protectedRuntimeTransitionFixture, string) string
+		transaction string
+	}{
+		{
+			name: "completed ready missing transaction", checkpoint: releasetransition.JournalComplete,
+			response: func(fixture protectedRuntimeTransitionFixture, _ string) string {
+				return fmt.Sprintf(`{"schemaVersion":1,"inspection":{"plan":"plan-v1-%s","assessment":{"action":"release.transition.v2","effect":"mutation","changed":false,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible"},"outcome":{"status":"ready","reachedGoal":true,"active":%q,"previous":"release-a","target":%q,"code":"ready","message":"verified"}}}`, strings.Repeat("1", 64), fixture.target, fixture.target)
+			},
+		},
+		{
+			name: "completed ready foreign transaction", checkpoint: releasetransition.JournalComplete,
+			transaction: "tx-foreign-ready-01",
+			response: func(fixture protectedRuntimeTransitionFixture, transaction string) string {
+				return fmt.Sprintf(`{"schemaVersion":1,"inspection":{"plan":"plan-v1-%s","assessment":{"action":"release.transition.v2","effect":"mutation","changed":false,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible"},"outcome":{"status":"ready","reachedGoal":true,"active":%q,"previous":"release-a","target":%q,"code":"ready","message":"verified","transaction":%q}}}`, strings.Repeat("2", 64), fixture.target, fixture.target, transaction)
+			},
+		},
+		{
+			name: "completed blocked missing transaction", checkpoint: releasetransition.JournalComplete,
+			response: func(fixture protectedRuntimeTransitionFixture, _ string) string {
+				return fmt.Sprintf(`{"schemaVersion":1,"inspection":{"plan":"plan-v1-%s","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["inspect activation"]},"blockers":[{"code":"dependency-unavailable","resource":"activation.runtime","message":"activation cannot be observed","retry":"run yard update --check"}],"outcome":{"status":"operator-action-required","reachedGoal":false,"active":%q,"previous":"release-a","target":%q,"code":"dependency-unavailable","message":"activation cannot be observed","retry":"run yard update --check"}}}`, strings.Repeat("3", 64), fixture.target, fixture.target)
+			},
+		},
+		{
+			name: "completed blocked foreign transaction", checkpoint: releasetransition.JournalComplete,
+			transaction: "tx-foreign-blocked-01",
+			response: func(fixture protectedRuntimeTransitionFixture, transaction string) string {
+				return fmt.Sprintf(`{"schemaVersion":1,"inspection":{"plan":"plan-v1-%s","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["inspect activation"]},"blockers":[{"code":"dependency-unavailable","resource":"activation.runtime","message":"activation cannot be observed","retry":"run yard update --check"}],"outcome":{"status":"operator-action-required","reachedGoal":false,"active":%q,"previous":"release-a","target":%q,"code":"dependency-unavailable","message":"activation cannot be observed","retry":"run yard update --check","transaction":%q}}}`, strings.Repeat("4", 64), fixture.target, fixture.target, transaction)
+			},
+		},
+		{
+			name: "unfinished recovery missing transaction", checkpoint: releasetransition.JournalAuthorized,
+			response: func(fixture protectedRuntimeTransitionFixture, _ string) string {
+				return fmt.Sprintf(`{"schemaVersion":1,"inspection":{"plan":%q,"assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["resume the protected transition"]},"resume":%q,"outcome":{"status":"recovering","reachedGoal":false,"active":"release-a","target":%q,"code":"recovery-pending","message":"resume","retry":"run yard update"}}}`, fixture.resumePlan, fixture.transaction, fixture.target)
+			},
+		},
+		{
+			name: "unfinished recovery foreign transaction", checkpoint: releasetransition.JournalAuthorized,
+			transaction: "tx-foreign-resume-01",
+			response: func(fixture protectedRuntimeTransitionFixture, transaction string) string {
+				return fmt.Sprintf(`{"schemaVersion":1,"inspection":{"plan":"resume-v1-%s","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["resume the protected transition"]},"resume":%q,"outcome":{"status":"recovering","reachedGoal":false,"active":"release-a","target":%q,"code":"recovery-pending","message":"resume","retry":"run yard update","transaction":%q}}}`, strings.Repeat("5", 64), transaction, fixture.target, transaction)
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newProtectedRuntimeTransitionFixture(t, test.checkpoint)
+			response := test.response(fixture, test.transaction)
+			writeProtectedRuntimeFixtureEngine(t, fixture, fmt.Sprintf(`#!/bin/sh
+case "${1:-}" in
+  --version) printf 'yard-engine 1.2.3\n' ;;
+  _release-transition) cat >/dev/null; printf '%%s\n' %q ;;
+  *) exit 64 ;;
+esac
+`, response))
+			runtime := New(Config{Environment: fixture.environment(), Stderr: &bytes.Buffer{}})
+			if inspection, err := runtime.inspectProtectedTransition(
+				context.Background(), fixture.runtimeRoot, fixture.configHome, "default", nil,
+			); err == nil || inspection != nil {
+				t.Fatalf("unsafe protected inspection accepted: inspection=%#v err=%v", inspection, err)
+			}
+		})
 	}
 }
 

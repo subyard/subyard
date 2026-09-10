@@ -907,7 +907,7 @@ cleanup_guest() {
   local vm="$1" directory="${GUEST_DIRS[$1]:-}"
   [ -n "$directory" ] || return 0
   case "$directory" in /tmp/subyard-worktree.*) ;; *) return 1 ;; esac
-  guest "$vm" sudo -n find "$directory" -depth -delete </dev/null
+  guest "$vm" sudo -n find "$directory" -depth -delete </dev/null || return $?
   unset 'GUEST_DIRS[$vm]'
 }
 
@@ -995,19 +995,24 @@ write_guest_command() {
 prepare_guest() {
   local vm="$1" bundle="$2" expected_hash="$3" directory actual_hash
   directory="$(guest "$vm" mktemp -d /tmp/subyard-worktree.XXXXXX </dev/null)" \
-    || die "VM$vm did not create a run directory"
-  case "$directory" in /tmp/subyard-worktree.*) ;; *) die "VM$vm returned an unsafe run directory" ;; esac
+    || { printf 'agent-e2e: VM%s did not create a run directory\n' "$vm" >&2; return 2; }
+  case "$directory" in
+    /tmp/subyard-worktree.*) ;;
+    *) printf 'agent-e2e: VM%s returned an unsafe run directory\n' "$vm" >&2; return 2 ;;
+  esac
   GUEST_DIRS[$vm]="$directory"
 
   info "VM$vm: streaming current worktree" >&2
   guest "$vm" dd "of=$directory/worktree.tar.gz" status=none < "$bundle" \
-    || die "VM$vm worktree transfer failed"
+    || { printf 'agent-e2e: VM%s worktree transfer failed\n' "$vm" >&2; return 2; }
   actual_hash="$(guest "$vm" sha256sum "$directory/worktree.tar.gz" </dev/null | awk '{print $1}')" \
-    || die "VM$vm checksum query failed"
-  [ "$actual_hash" = "$expected_hash" ] || die "VM$vm worktree checksum mismatch"
-  guest "$vm" mkdir "$directory/src" </dev/null || die "VM$vm source directory creation failed"
+    || { printf 'agent-e2e: VM%s checksum query failed\n' "$vm" >&2; return 2; }
+  [ "$actual_hash" = "$expected_hash" ] \
+    || { printf 'agent-e2e: VM%s worktree checksum mismatch\n' "$vm" >&2; return 2; }
+  guest "$vm" mkdir "$directory/src" </dev/null \
+    || { printf 'agent-e2e: VM%s source directory creation failed\n' "$vm" >&2; return 2; }
   guest "$vm" tar -xzf "$directory/worktree.tar.gz" -C "$directory/src" </dev/null \
-    || die "VM$vm worktree extraction failed"
+    || { printf 'agent-e2e: VM%s worktree extraction failed\n' "$vm" >&2; return 2; }
   if guest "$vm" test -f "$directory/src/.subyard-e2e-index" </dev/null; then
     guest "$vm" bash -c '
       root="$1"
@@ -1015,7 +1020,8 @@ prepare_guest() {
       git -C "$root" init -q
       xargs -0 -r git -C "$root" --literal-pathspecs add -f -- < "$inventory"
       rm -f -- "$inventory"
-    ' _ "$directory/src" </dev/null || die "VM$vm Git index reconstruction failed"
+    ' _ "$directory/src" </dev/null \
+      || { printf 'agent-e2e: VM%s Git index reconstruction failed\n' "$vm" >&2; return 2; }
   fi
   PREPARED_DIRECTORY="$directory"
 }
@@ -1026,9 +1032,9 @@ run_guest() {
   directory="$PREPARED_DIRECTORY"
   write_guest_command "$vm" "$directory" "$@" \
     | guest "$vm" dd "of=$directory/run.sh" status=none \
-    || die "VM$vm command transfer failed"
+    || { printf 'agent-e2e: VM%s command transfer failed\n' "$vm" >&2; return 2; }
   guest "$vm" chmod 0700 "$directory/run.sh" </dev/null \
-    || die "VM$vm command preparation failed"
+    || { printf 'agent-e2e: VM%s command preparation failed\n' "$vm" >&2; return 2; }
   printf '\n== e2e-vm-%s ==\n' "$vm"
   guest "$vm" "$directory/run.sh" </dev/null 2>&1 | normalize_terminal_progress
 }

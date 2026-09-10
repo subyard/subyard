@@ -202,6 +202,8 @@ func (runtime *Runtime) inspectProtectedTransition(
 			"restore the journal-selected release, then run yard update --check",
 		)
 	}
+	completedRollback := journal.Goal.Direction == releasetransition.DirectionActivatePrevious &&
+		journal.Checkpoint == releasetransition.JournalComplete
 	publicCandidateFailure := func(cause error) error {
 		return newPublicReleaseInspectionError(
 			cause, runtimeRoot, journal.Goal.Target, &journal.Transaction,
@@ -209,6 +211,22 @@ func (runtime *Runtime) inspectProtectedTransition(
 			"the journal-selected release cannot provide a valid transition inspection",
 			"restore the journal-selected release, then run yard update --check",
 		)
+	}
+	var completedLinks runtimeLinkSnapshot
+	if completedRollback {
+		completedLinks.current = runtimeLinkState{present: true, target: "releases/" + string(journal.Goal.Target)}
+		previous := journal.Releases.Previous
+		if journal.Releases.From != journal.Releases.Target {
+			from := journal.Releases.From
+			previous = &from
+		}
+		if previous != nil {
+			completedLinks.previous = runtimeLinkState{present: true, target: "releases/" + string(*previous)}
+		}
+		observed, err := runtime.inspectRuntimeLinks(root)
+		if err != nil || observed != completedLinks {
+			return nil, publicCandidateFailure(errors.New("completed rollback completion does not match actual runtime links"))
+		}
 	}
 	verifiedOwner := verifiedTarget
 	owner := target
@@ -253,6 +271,22 @@ func (runtime *Runtime) inspectProtectedTransition(
 	if err != nil {
 		return nil, publicCandidateFailure(err)
 	}
+	if response.Inspection == nil && response.Outcome != nil &&
+		journal.Goal.Direction == releasetransition.DirectionActivatePrevious {
+		outcome := *response.Outcome
+		if outcome.Status == releasetransition.StatusOperatorActionRequired &&
+			outcome.Code == releasetransition.CodeRollbackIncompatible &&
+			outcome.Transaction != nil && *outcome.Transaction == journal.Transaction &&
+			releasetransition.ValidateProcessOutcome(journal.Goal, outcome) == nil {
+			observed, err := runtime.inspectRuntimeLinks(root)
+			actual := releaseLinksFromRuntimeSnapshot(observed)
+			if err == nil && outcome.Active == actual.Active &&
+				(outcome.Previous == nil) == (actual.Previous == nil) &&
+				(outcome.Previous == nil || *outcome.Previous == *actual.Previous) {
+				return nil, publicReleaseInspectionError{cause: transitionOutcomeError(outcome), outcome: outcome}
+			}
+		}
+	}
 	if response.Inspection == nil || response.Outcome != nil {
 		return nil, publicCandidateFailure(errors.New("candidate returned an invalid release inspection"))
 	}
@@ -262,8 +296,21 @@ func (runtime *Runtime) inspectProtectedTransition(
 			fmt.Errorf("candidate returned an inconsistent release inspection: %w", err),
 		)
 	}
-	if inspection.Outcome.Transaction == nil ||
-		*inspection.Outcome.Transaction != journal.Transaction {
+	if completedRollback {
+		observed, err := runtime.inspectRuntimeLinks(root)
+		expected := releaseLinksFromRuntimeSnapshot(completedLinks)
+		outcome := inspection.Outcome
+		if err != nil || observed != completedLinks || outcome.Active != expected.Active ||
+			(outcome.Previous == nil) != (expected.Previous == nil) ||
+			(outcome.Previous != nil && *outcome.Previous != *expected.Previous) {
+			return nil, publicCandidateFailure(errors.New("completed rollback inspection does not report the actual runtime links"))
+		}
+	}
+	completedRepair := journal.Checkpoint == releasetransition.JournalComplete &&
+		inspection.Outcome.Status == releasetransition.StatusMigrationRequired &&
+		inspection.Outcome.Transaction == nil
+	if !completedRepair && (inspection.Outcome.Transaction == nil ||
+		*inspection.Outcome.Transaction != journal.Transaction) {
 		return nil, publicCandidateFailure(
 			errors.New("candidate returned an inconsistent release inspection transaction"),
 		)
@@ -284,9 +331,11 @@ func (runtime *Runtime) inspectProtectedTransition(
 		journal: journal, journalSnapshot: snapshot,
 		owner: candidateVerification{
 			candidate: owner, digest: verifiedOwner.manifestDigest, version: verifiedOwner.version,
+			registryDigest: verifiedOwner.registryDigest,
 		},
 		target: candidateVerification{
 			candidate: target, digest: verifiedTarget.manifestDigest, version: verifiedTarget.version,
+			registryDigest: verifiedTarget.registryDigest,
 		},
 		request: request, inspection: *inspection,
 		activationReconciliationOwned: response.ActivationReconciliationOwned,
@@ -771,9 +820,34 @@ func (runtime *Runtime) prepareRetainedTransition(
 }
 
 type candidateVerification struct {
-	candidate publishedCandidate
-	digest    releasetransition.Fingerprint
-	version   string
+	candidate      publishedCandidate
+	digest         releasetransition.Fingerprint
+	version        string
+	registryDigest releasetransition.Fingerprint
+}
+
+// VerifyRollbackTarget derives internal compatibility facts from the exact sealed
+// artifact. V1 requests and V2 journals bind that artifact digest without adding
+// fields their retained readers cannot understand.
+func VerifyRollbackTarget(ctx context.Context, runtimeRoot string, target releasetransition.ReleaseID,
+	artifactDigest releasetransition.Fingerprint,
+) (*releasetransition.RollbackTarget, error) {
+	runtime := New(Config{})
+	verified, err := runtime.verifyPublishedCandidate(ctx, publishedCandidate{
+		release: target, root: filepath.Join(runtimeRoot, "releases", string(target)),
+	}, runtimeRoot, &artifactDigest)
+	if err != nil {
+		return nil, fmt.Errorf("verify rollback target: %w", err)
+	}
+	defer verified.Close()
+	if !strings.HasPrefix(string(target), verified.version+"-") {
+		return nil, errors.New("rollback target identity does not match its sealed version")
+	}
+	facts := &releasetransition.RollbackTarget{Version: verified.version, RegistryDigest: verified.registryDigest}
+	if err := facts.Validate(); err != nil {
+		return nil, err
+	}
+	return facts, nil
 }
 
 func (runtime *Runtime) prepareVerifiedCandidateTransition(
@@ -831,9 +905,11 @@ func (runtime *Runtime) prepareVerifiedTransition(
 		parsed,
 		candidateVerification{
 			candidate: owner.candidate, digest: owner.manifestDigest, version: owner.version,
+			registryDigest: owner.registryDigest,
 		},
 		candidateVerification{
 			candidate: target.candidate, digest: target.manifestDigest, version: target.version,
+			registryDigest: target.registryDigest,
 		},
 		request, *response.Inspection,
 		response.ActivationReconciliationOwned, revalidation,
@@ -910,6 +986,9 @@ func (runtime *Runtime) prepareInspectedCandidateTransition(
 			defer verifiedTarget.Close()
 			if verifiedTarget.version != target.version {
 				return fmt.Errorf("%w: target runtime version changed after inspection", domain.ErrPlanStale)
+			}
+			if verifiedTarget.registryDigest != target.registryDigest {
+				return fmt.Errorf("%w: target runtime registry changed after inspection", domain.ErrPlanStale)
 			}
 			verifiedOwner := verifiedTarget
 			if owner.candidate.release != target.candidate.release {

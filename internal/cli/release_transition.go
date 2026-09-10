@@ -8,10 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
 
+	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/migration"
@@ -56,6 +58,11 @@ func (cli *CLI) runReleaseTransition(ctx context.Context, arguments []string) in
 	reconcilers := []releasetransition.V2ActivationReconciler{
 		&materializedConfigActivationReconciler{
 			cli: cli, yard: request.Yard, configHome: request.ConfigHome,
+			goal: releasetransition.Goal{
+				Target: request.Target, Direction: request.Direction,
+			},
+			artifactDigest: request.ArtifactDigest,
+			registryDigest: request.RegistryDigest,
 		},
 		cli.brokerActivationReconciler(request),
 		cli.routeConsumerActivationReconciler(request),
@@ -284,8 +291,8 @@ type testYardRouteConsumerActivation struct {
 func (activation *testYardRouteConsumerActivation) PrepareOwner(
 	ctx context.Context,
 ) (string, error) {
-	state, err := testyardmigration.Prepare(ctx, activation.options)
-	return string(state.State), err
+	state, err := testyardmigration.PrepareRouteConsumerActivation(ctx, activation.options)
+	return string(state), err
 }
 
 func (activation *testYardRouteConsumerActivation) Prepare(ctx context.Context) (string, error) {
@@ -643,9 +650,14 @@ func inspectPowerActivationApplicability(
 }
 
 type materializedConfigActivationReconciler struct {
-	cli        *CLI
-	yard       string
-	configHome string
+	cli            *CLI
+	yard           string
+	configHome     string
+	goal           releasetransition.Goal
+	artifactDigest releasetransition.Fingerprint
+	registryDigest releasetransition.Fingerprint
+	allLocal       bool
+	scopeResolved  bool
 }
 
 type releaseTransitionConfigApplier struct{ cli *CLI }
@@ -670,41 +682,44 @@ func (applier releaseTransitionConfigApplier) ApplyConfig(
 
 func (*materializedConfigActivationReconciler) ID() string { return "materialized-config" }
 
-func (reconciler *materializedConfigActivationReconciler) targets() ([]configTarget, error) {
+func (reconciler *materializedConfigActivationReconciler) operation() *CLI {
+	operation := *reconciler.cli
+	environment := freshMigrationEnvironment(
+		reconciler.cli.baseEnv,
+		reconciler.cli.options.RepositoryRoot,
+	)
+	if operationID := reconciler.cli.env["SUBYARD_OPERATION_ID"]; operationID != "" {
+		environment["SUBYARD_OPERATION_ID"] = operationID
+	}
+	operation.baseEnv = environment
+	operation.env = maps.Clone(environment)
+	return &operation
+}
+
+func (reconciler *materializedConfigActivationReconciler) Observe(
+	ctx context.Context,
+	releases releasetransition.ReleasePair,
+	_ releasetransition.ReleaseLinks,
+) (releasetransition.V2ActivationObservation, error) {
 	if reconciler == nil || reconciler.cli == nil {
-		return nil, errors.New("materialized config reconciler is unavailable")
+		return releasetransition.V2ActivationObservation{}, errors.New("materialized config reconciler is unavailable")
 	}
 	yard := reconciler.yard
 	if yard == "" {
 		yard = "default"
 	}
 	if !domain.SafeName(yard) {
-		return nil, errors.New("materialized config yard is invalid")
+		return releasetransition.V2ActivationObservation{}, errors.New("materialized config yard is invalid")
 	}
-	loaded, err := reconciler.cli.resolveReleaseTransitionContext(yard, reconciler.configHome)
+	operation := reconciler.operation()
+	loaded, err := operation.resolveReleaseTransitionContext(yard, reconciler.configHome)
 	if err != nil {
-		return nil, err
+		return releasetransition.V2ActivationObservation{}, err
 	}
-	return reconciler.cli.localConfigTargets(loaded, false)
-}
-
-func (reconciler *materializedConfigActivationReconciler) reconcileCLI() *CLI {
-	operation := *reconciler.cli
-	if operation.options.Config == nil {
-		operation.options.DispatcherPath = filepath.Join(
-			operation.options.RepositoryRoot, "bin", "yard-engine",
-		)
-		operation.options.Config = releaseTransitionConfigApplier{cli: &operation}
+	if err := reconciler.resolveScope(releases); err != nil {
+		return releasetransition.V2ActivationObservation{}, err
 	}
-	return &operation
-}
-
-func (reconciler *materializedConfigActivationReconciler) Observe(
-	ctx context.Context,
-	_ releasetransition.ReleasePair,
-	_ releasetransition.ReleaseLinks,
-) (releasetransition.V2ActivationObservation, error) {
-	targets, err := reconciler.targets()
+	targets, err := operation.localConfigTargets(loaded, reconciler.allLocal)
 	if err != nil {
 		return releasetransition.V2ActivationObservation{}, err
 	}
@@ -717,7 +732,7 @@ func (reconciler *materializedConfigActivationReconciler) Observe(
 	actual := make([]targetFingerprint, 0, len(targets))
 	converged := true
 	for _, target := range targets {
-		assessment, assessErr := reconciler.cli.assessConfigTarget(ctx, target, true)
+		assessment, assessErr := operation.assessConfigTarget(ctx, target, true)
 		if assessErr != nil {
 			return releasetransition.V2ActivationObservation{}, assessErr
 		}
@@ -752,15 +767,81 @@ func (reconciler *materializedConfigActivationReconciler) Observe(
 	}, nil
 }
 
+func (reconciler *materializedConfigActivationReconciler) resolveScope(
+	releases releasetransition.ReleasePair,
+) error {
+	if reconciler.scopeResolved {
+		return nil
+	}
+	if releases.From != releases.Target {
+		reconciler.scopeResolved = true
+		return nil
+	}
+	store, err := releasetransition.NewPOSIXV2Store(reconciler.configHome)
+	if err != nil {
+		return err
+	}
+	snapshot, err := store.ReadCurrentJournal()
+	if err != nil {
+		return err
+	}
+	if !snapshot.Exists {
+		reconciler.scopeResolved = true
+		return nil
+	}
+	journal, err := releasetransition.ParseJournal(snapshot.Payload)
+	if err != nil {
+		return err
+	}
+	reconciler.scopeResolved = true
+	if journal.Goal != reconciler.goal ||
+		journal.ArtifactDigest != reconciler.artifactDigest ||
+		(reconciler.registryDigest != "" && journal.RegistryDigest != reconciler.registryDigest) {
+		return nil
+	}
+	// Completed source work makes materialized readiness a release-wide fixed
+	// point. A zero-step same-release journal is its durable activation-only
+	// repair and must retain that scope when resumed by a fresh process.
+	reconciler.allLocal = journal.Checkpoint == releasetransition.JournalComplete ||
+		(len(journal.Steps) == 0 && journal.Releases.From == journal.Releases.Target)
+	return nil
+}
+
+func (reconciler *materializedConfigActivationReconciler) reconcileCLI() *CLI {
+	operation := reconciler.operation()
+	if operation.options.Config == nil {
+		operation.options.DispatcherPath = filepath.Join(
+			operation.options.RepositoryRoot, "bin", "yard-engine",
+		)
+		operation.options.Config = releaseTransitionConfigApplier{cli: operation}
+	}
+	return operation
+}
+
 func (reconciler *materializedConfigActivationReconciler) Reconcile(
 	ctx context.Context,
 	_ releasetransition.ReleaseLinks,
 ) error {
-	targets, err := reconciler.targets()
+	if reconciler == nil || reconciler.cli == nil {
+		return errors.New("materialized config reconciler is unavailable")
+	}
+	operation := reconciler.reconcileCLI()
+	yard := reconciler.yard
+	if yard == "" {
+		yard = "default"
+	}
+	loaded, err := operation.resolveReleaseTransitionContext(yard, reconciler.configHome)
 	if err != nil {
 		return err
 	}
-	if code := reconciler.reconcileCLI().applyConfig(ctx, targets, true, reconciler.targets); code != 0 {
+	targets, err := operation.localConfigTargets(loaded, reconciler.allLocal)
+	if err != nil {
+		return err
+	}
+	selector := func() ([]configTarget, error) {
+		return operation.refreshLocalConfigTargets(loaded, reconciler.allLocal)
+	}
+	if code := operation.applyConfig(ctx, targets, true, selector); code != 0 {
 		return fmt.Errorf("materialized config reconcile returned status %d", code)
 	}
 	return nil
@@ -833,6 +914,14 @@ func executeReleaseTransitionRequest(
 		!filepath.IsAbs(request.ConfigHome) {
 		return releasetransition.ProcessResponse{}, errors.New("release transition roots must be absolute")
 	}
+	var rollbackTarget *releasetransition.RollbackTarget
+	if request.Direction == releasetransition.DirectionActivatePrevious {
+		var err error
+		rollbackTarget, err = releaseruntime.VerifyRollbackTarget(ctx, request.RuntimeRoot, request.Target, request.ArtifactDigest)
+		if err != nil {
+			return releasetransition.ProcessResponse{}, err
+		}
+	}
 	registry, err := os.ReadFile(filepath.Join(repositoryRoot, "config", "release-transition.json"))
 	if err != nil {
 		return releasetransition.ProcessResponse{}, fmt.Errorf("read release transition registry: %w", err)
@@ -877,6 +966,7 @@ func executeReleaseTransitionRequest(
 		Reconcilers: reconcilers, OwnerRegistration: ownerRegistration, Ingress: ingress,
 		RegistryPayload:     registry,
 		ArtifactDigest:      request.ArtifactDigest,
+		RollbackTarget:      rollbackTarget,
 		InheritedSettingIDs: request.InheritedSettingIDs,
 		VerifyAuthorization: verifyAuthorization,
 	})
@@ -904,7 +994,14 @@ func executeReleaseTransitionRequest(
 		if inspectErr != nil {
 			return releasetransition.ProcessResponse{}, inspectErr
 		}
-		response.Inspection = &inspection
+		// V1 has no read-only rollback-compatibility assessment. Its existing
+		// standalone blocked outcome preserves the failure without granting a plan.
+		if inspection.Outcome != nil && inspection.Outcome.Code == releasetransition.CodeRollbackIncompatible &&
+			inspection.Outcome.Status == releasetransition.StatusOperatorActionRequired {
+			response.Outcome = inspection.Outcome
+		} else {
+			response.Inspection = &inspection
+		}
 	case releasetransition.ProcessConverge:
 		if request.Execution == nil {
 			return releasetransition.ProcessResponse{}, errors.New("converge request has no execution")

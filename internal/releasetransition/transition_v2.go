@@ -19,32 +19,48 @@ import (
 )
 
 const v2ActionID domain.ActionID = "release.transition.v2"
+const v2RollbackBlockedActionID domain.ActionID = "release.transition.v2.rollback-compatibility"
 
 const v2ChangedConsequence = "apply the exact typed migration and release activation plan"
+const v2RollbackNoOpConsequence = "preserve applied migrations as backward-compatible no-ops"
 
 func newV2ActionPolicy() (*domain.ActionRegistry, error) {
-	return domain.NewActionRegistry([]domain.ActionDefinition{{
-		Action:  v2ActionID,
-		Summary: "apply the inspected release transition",
-		Effect:  domain.ActionMutation,
-		Impacts: []domain.ActionImpact{
-			domain.ImpactLocalMetadata, domain.ImpactPersistentData, domain.ImpactYardRuntime,
+	return domain.NewActionRegistry([]domain.ActionDefinition{
+		{
+			Action:  v2ActionID,
+			Summary: "apply the inspected release transition",
+			Effect:  domain.ActionMutation,
+			Impacts: []domain.ActionImpact{
+				domain.ImpactLocalMetadata, domain.ImpactPersistentData, domain.ImpactYardRuntime,
+			},
+			Recovery: domain.RecoveryReversible,
 		},
-		Recovery: domain.RecoveryReversible,
-	}})
+		{
+			Action: v2RollbackBlockedActionID, Summary: "inspect rollback compatibility",
+			Effect: domain.ActionRead, Recovery: domain.RecoveryNotNeeded,
+		},
+	})
 }
 
 func assessV2Action(
 	policy *domain.ActionRegistry,
 	changed bool,
+	legacyRollbackCompatible bool,
 ) (domain.ActionAssessment, error) {
 	consequences := []string(nil)
 	if changed {
 		consequences = []string{v2ChangedConsequence}
+		if legacyRollbackCompatible {
+			consequences = append(consequences, v2RollbackNoOpConsequence)
+		}
 	}
 	return policy.Assess(v2ActionID, domain.ActionDelta{
 		Changed: changed, Consequences: consequences,
 	})
+}
+
+func assessV2BlockedRollback(policy *domain.ActionRegistry) (domain.ActionAssessment, error) {
+	return policy.Assess(v2RollbackBlockedActionID, domain.ActionDelta{})
 }
 
 type V2Options struct {
@@ -60,6 +76,7 @@ type V2Options struct {
 	ArtifactDigest    Fingerprint
 	// CandidateVersion is the trusted compiled runtime semver; ReleaseIDs remain opaque identities.
 	CandidateVersion    string
+	RollbackTarget      *RollbackTarget
 	InheritedSettingIDs []string
 	SourceIngress       *SourceIngressRequest
 	Replacement         *JournalReplacement
@@ -162,6 +179,9 @@ func NewV2Transition(options V2Options) (*V2Transition, error) {
 	if !validDirection(options.Direction) {
 		return nil, invalid("unknown release transition direction %q", options.Direction)
 	}
+	if err := validateRollbackTarget(options.Direction, options.RollbackTarget); err != nil {
+		return nil, err
+	}
 	if err := options.Releases.Validate(); err != nil {
 		return nil, err
 	}
@@ -191,15 +211,24 @@ func NewV2Transition(options V2Options) (*V2Transition, error) {
 		if parseErr != nil {
 			return nil, parseErr
 		}
-		if options.Replacement == nil && (journal.Checkpoint != JournalComplete ||
-			(journal.Goal.Target == options.Releases.Target &&
-				journal.Goal.Direction == options.Direction &&
-				journal.ArtifactDigest == options.ArtifactDigest)) {
+		if options.Replacement == nil && journal.Checkpoint != JournalComplete {
 			// The protected journal owns the immutable release pair while it is
-			// unfinished and for an exact completed-goal reinspection.
-			// A genuinely new target keeps the observed pair.
+			// unfinished. Completed journals are history; a later activation-only
+			// repair uses the currently observed release pair.
 			// Current links may already describe staged or target-active topology.
 			options.Releases = journal.Releases
+		} else if options.Replacement == nil && journal.Checkpoint == JournalComplete &&
+			journal.Goal.Target == options.Releases.Target &&
+			journal.Goal.Direction == options.Direction &&
+			journal.ArtifactDigest == options.ArtifactDigest {
+			// Reinspect completed work against its expected active pair, even
+			// when a recovering caller still supplies the historical source.
+			// Observe validates the actual links and drift starts a new plan.
+			options.Releases = journal.Releases
+			if options.Releases.From != options.Releases.Target {
+				options.Releases.Previous = releaseIDPointer(options.Releases.From)
+				options.Releases.From = options.Releases.Target
+			}
 		}
 	}
 	if err := validateFingerprint(options.ArtifactDigest, "artifact digest"); err != nil {
@@ -220,6 +249,7 @@ func NewV2Transition(options V2Options) (*V2Transition, error) {
 		return nil, err
 	}
 	options.RegistryPayload = slices.Clone(options.RegistryPayload)
+	options.RollbackTarget = cloneRollbackTarget(options.RollbackTarget)
 	options.InheritedSettingIDs = slices.Clone(options.InheritedSettingIDs)
 	options.Reconcilers = slices.Clone(options.Reconcilers)
 	options.Replacement = cloneJournalReplacement(options.Replacement)
@@ -267,6 +297,7 @@ func (transition *V2Transition) Inspect(ctx context.Context, goal Goal) (Inspect
 
 func (transition *V2Transition) inspectionOutcome(observation v2Observation) Outcome {
 	journal := observation.journal
+	completedHistory := transition.completedJournalMatches(observation)
 	if journal != nil && journal.Checkpoint == JournalComplete && journal.Goal != observation.goal {
 		// A completed journal for another exact goal is immutable history, not
 		// recovery state for a new forward target or explicit rollback.
@@ -282,6 +313,21 @@ func (transition *V2Transition) inspectionOutcome(observation v2Observation) Out
 			observation.links, observation.goal.Target, transaction,
 			blocker.Code, blocker.Message, blocker.Retry,
 		)
+	}
+	if completedHistory {
+		base := Outcome{
+			Active: observation.links.Active, Previous: cloneReleaseID(observation.links.Previous),
+			Target: observation.goal.Target,
+		}
+		if transition.fixedPoint(observation) {
+			base.Transaction = transaction
+			return readyOutcome(base)
+		}
+		base.Status = StatusMigrationRequired
+		base.Code = CodeTransitionRequired
+		base.Message = "the inspected release transition has not started"
+		base.Retry = "run yard update"
+		return base
 	}
 	if journal != nil && journal.Checkpoint != JournalComplete {
 		return v2RecoveringOutcome(
@@ -362,7 +408,8 @@ func (transition *V2Transition) preflightConverge(
 		return "", &outcome, nil
 	}
 	if observation.journal != nil && observation.journal.Checkpoint == JournalComplete &&
-		observation.journal.Goal == observation.goal {
+		observation.journal.Goal == observation.goal &&
+		(!transition.completedJournalMatches(observation) || transition.fixedPoint(observation)) {
 		return "", nil, nil
 	}
 	if observation.journal != nil && observation.journal.Checkpoint != JournalComplete {
@@ -512,12 +559,13 @@ func (transition *V2Transition) Converge(
 		), nil
 	}
 
+	completedHistory := transition.completedJournalMatches(observation)
 	if observation.journal != nil && observation.journal.Checkpoint == JournalComplete &&
-		observation.journal.Goal == observation.goal {
+		observation.journal.Goal == observation.goal && !completedHistory {
+		return transition.inspectionOutcome(observation), nil
+	}
+	if completedHistory && transition.fixedPoint(observation) {
 		outcome := transition.inspectionOutcome(observation)
-		if outcome.Status != StatusReady {
-			return outcome, nil
-		}
 		return transition.cleanupReady(ctx, observation.journal.Transaction, outcome), nil
 	}
 
@@ -925,10 +973,22 @@ func (transition *V2Transition) observe(ctx context.Context, goal Goal) (v2Obser
 		return v2Observation{}, err
 	}
 	ledger := BaselineLedgerV2(transition.registry)
-	if ledgerSnapshot.Exists {
+	var rollbackBlocker *Blocker
+	if transition.options.Direction == DirectionActivatePrevious &&
+		(transition.options.RollbackTarget == nil ||
+			(transition.options.RollbackTarget.RegistryDigest != "" &&
+				transition.options.RollbackTarget.RegistryDigest != transition.registryDigest)) {
+		rollbackBlocker = rollbackIncompatibleBlocker()
+	}
+	if ledgerSnapshot.Exists && rollbackBlocker == nil {
 		ledger, _, err = ParseLedgerV2(ledgerSnapshot.Payload, transition.registry)
 		if err != nil {
-			return v2Observation{}, err
+			if transition.options.Direction != DirectionActivatePrevious ||
+				transition.options.RollbackTarget == nil ||
+				transition.options.RollbackTarget.RegistryDigest == "" {
+				return v2Observation{}, err
+			}
+			rollbackBlocker = rollbackIncompatibleBlocker()
 		}
 	}
 	journalSnapshot, err := transition.store.ReadCurrentJournal()
@@ -949,6 +1009,22 @@ func (transition *V2Transition) observe(ctx context.Context, goal Goal) (v2Obser
 	observation := v2Observation{
 		goal: goal, links: links, ledger: ledger, ledgerSnapshot: ledgerSnapshot,
 		journal: journal, journalSnapshot: journalSnapshot,
+	}
+	if rollbackBlocker == nil {
+		rollbackBlocker = transition.rollbackCompatibilityBlocker()
+	}
+	if rollbackBlocker != nil {
+		observation.blockers = []Blocker{*rollbackBlocker}
+		observation.observations = []ResourceObservation{{
+			Resource: "transition.rollback-compatibility", Class: "rollback-compatibility-v1",
+			Fingerprint: ledgerSnapshot.Fingerprint,
+		}}
+		observation.observationScope, err = transition.bindObservationScope(nil)
+		if err != nil {
+			return v2Observation{}, err
+		}
+		observation.assessment, err = assessV2BlockedRollback(transition.policy)
+		return observation, err
 	}
 	completedHistory := journal != nil && journal.Checkpoint == JournalComplete &&
 		transition.completedJournalMatches(observation)
@@ -995,12 +1071,7 @@ func (transition *V2Transition) observe(ctx context.Context, goal Goal) (v2Obser
 			}
 		}
 	}
-	if completedHistory {
-		// The matching completed journal is immutable history. Later runtime
-		// drift belongs to ordinary reconciliation, not migration recovery.
-		observation.activationFixed = true
-		observation.observationScope = journal.ObservationScope
-	} else if observation.observationScope == "" {
+	if observation.observationScope == "" {
 		if err := transition.observeActivation(ctx, &observation); err != nil {
 			return v2Observation{}, err
 		}
@@ -1023,7 +1094,10 @@ func (transition *V2Transition) observe(ctx context.Context, goal Goal) (v2Obser
 	if journal != nil && journal.Checkpoint != JournalComplete {
 		changed = true
 	}
-	assessment, err := assessV2Action(transition.policy, changed)
+	legacyRollbackCompatible := transition.options.Direction == DirectionActivatePrevious &&
+		transition.options.RollbackTarget != nil &&
+		transition.options.RollbackTarget.RegistryDigest == ""
+	assessment, err := assessV2Action(transition.policy, changed, legacyRollbackCompatible)
 	if err != nil {
 		return v2Observation{}, err
 	}
@@ -1048,7 +1122,7 @@ func (transition *V2Transition) observePostActivationReplacement(
 		journal.Goal.Direction != DirectionActivateTarget ||
 		journal.Checkpoint != JournalReconciling || journal.SourceIngress != nil ||
 		journal.RegistryDigest != transition.registryDigest ||
-		journal.CatalogDigest != transition.catalog.Digest() ||
+		!transition.catalog.supportsV0111PostActivationRecovery(journal.CatalogDigest) ||
 		transition.options.Releases.From != journal.Releases.Target ||
 		transition.options.Releases.Target == journal.Releases.Target ||
 		!releaseIDsEqual(transition.options.Releases.Previous, releaseIDPointer(journal.Releases.From)) ||
@@ -1182,6 +1256,44 @@ func evidenceRecordsEqual(left, right EvidenceRecord) bool {
 		left.Expected == right.Expected && left.Desired == right.Desired &&
 		left.Observed == right.Observed && left.Recovery == right.Recovery &&
 		left.Checkpoint == right.Checkpoint
+}
+
+func (transition *V2Transition) rollbackCompatibilityBlocker() *Blocker {
+	if transition.options.Direction != DirectionActivatePrevious {
+		return nil
+	}
+	target := transition.options.RollbackTarget
+	if target == nil {
+		return rollbackIncompatibleBlocker()
+	}
+	if target.RegistryDigest != "" {
+		return nil
+	}
+	version, err := semver.Parse(target.Version)
+	if err != nil {
+		return rollbackIncompatibleBlocker()
+	}
+	// The validated applied prefix plus PendingPath covers the whole registry.
+	// Prove compatibility with that resulting ledger before planning any work.
+	for _, migration := range transition.registry.Migrations {
+		descriptor, exists := transition.catalog.descriptor(migration.Kind)
+		if !exists || descriptor.RollbackCompatibility != RollbackCompatibilityBackwardCompatibleNoOp {
+			return rollbackIncompatibleBlocker()
+		}
+		minimum, parseErr := semver.Parse(descriptor.LegacyMinimumVersion)
+		if parseErr != nil || version.LT(minimum) {
+			return rollbackIncompatibleBlocker()
+		}
+	}
+	return nil
+}
+
+func rollbackIncompatibleBlocker() *Blocker {
+	return &Blocker{
+		Code: CodeRollbackIncompatible, Resource: "transition.rollback-compatibility",
+		Message: "the retained release cannot safely accept the current migration ledger",
+		Retry:   "install a compatible retained release, then run yard update --check",
+	}
 }
 
 func (transition *V2Transition) canReplacePreActivationJournal(
@@ -1914,6 +2026,7 @@ func (transition *V2Transition) newJournal(
 		Goal: observation.goal, Releases: transition.options.Releases,
 		ArtifactDigest: transition.options.ArtifactDigest,
 		RegistryDigest: transition.registryDigest, CatalogDigest: transition.catalog.Digest(),
+		RollbackTarget:   cloneRollbackTarget(transition.options.RollbackTarget),
 		ObservationScope: observation.observationScope,
 		Assessment:       observation.assessment.Clone(), Decisions: slices.Clone(observation.decisions),
 		Intents: slices.Clone(observation.intents), Blockers: []Blocker{},
@@ -1957,6 +2070,7 @@ func (transition *V2Transition) planFacts(observation v2Observation) PlanFacts {
 		Goal: observation.goal, Releases: transition.options.Releases, Links: observation.links,
 		ArtifactDigest: transition.options.ArtifactDigest,
 		RegistryDigest: transition.registryDigest, CatalogDigest: transition.catalog.Digest(),
+		RollbackTarget:   cloneRollbackTarget(transition.options.RollbackTarget),
 		ObservationScope: observation.observationScope,
 		Assessment:       observation.assessment.Clone(), Decisions: slices.Clone(observation.decisions),
 		Observations: slices.Clone(observation.observations), Intents: slices.Clone(observation.intents),
@@ -2298,16 +2412,21 @@ func (transition *V2Transition) completedJournalMatches(observation v2Observatio
 	journal := observation.journal
 	if journal == nil || journal.Checkpoint != JournalComplete ||
 		journal.Goal != observation.goal ||
-		!releasePairsEqual(journal.Releases, transition.options.Releases) ||
 		journal.ArtifactDigest != transition.options.ArtifactDigest ||
 		journal.RegistryDigest != transition.registryDigest ||
 		journal.CatalogDigest != transition.catalog.Digest() {
 		return false
 	}
-	if journal.Releases.From == journal.Releases.Target {
-		return initialReleaseLinks(observation.links, journal.Releases)
+	if releasePairsEqual(journal.Releases, transition.options.Releases) {
+		if journal.Releases.From == journal.Releases.Target {
+			return initialReleaseLinks(observation.links, journal.Releases)
+		}
+		return activatedReleaseLinks(observation.links, journal.Releases)
 	}
-	return activatedReleaseLinks(observation.links, journal.Releases)
+	return transition.options.Releases.From == journal.Releases.Target &&
+		transition.options.Releases.Target == journal.Releases.Target &&
+		initialReleaseLinks(observation.links, transition.options.Releases) &&
+		activatedReleaseLinks(observation.links, journal.Releases)
 }
 
 func (transition *V2Transition) observeActivation(

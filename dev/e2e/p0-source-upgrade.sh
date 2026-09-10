@@ -21,6 +21,8 @@ OPERATOR_HOME_MARKER="$OPERATOR_HOME/.subyard-p0-source-home"
 SOURCE_ROOT="$OPERATOR_HOME/src"
 SHARED_ROOT="/var/tmp/subyard-p0-source-$TOKEN"
 RELEASE_ROOT="$SHARED_ROOT/releases"
+CANDIDATE_A_REPOSITORY="$SHARED_ROOT/candidate-a-runtime"
+CANDIDATE_A_ENGINE="$CANDIDATE_A_REPOSITORY/bin/yard-engine"
 SUDOERS="/etc/sudoers.d/subyard-p0-source-$TOKEN"
 YARD_NAME="e2e-yard"
 PROJECT="subyard-e2e-yard"
@@ -28,8 +30,8 @@ INSTANCE="yard-e2e-yard"
 DEFAULT_PROJECT="subyard"
 DEFAULT_INSTANCE="yard"
 BASE_IMAGE="${P0_REAL_INCUS_CONTAINER_CACHE_ALIAS:-subyard-e2e-debian-13-cloud-container}"
-VERSION_A="p0-source-a-$TOKEN"
-VERSION_B="p0-source-b-$TOKEN"
+VERSION_A="0.11.2-p0.source.a.run$TOKEN"
+VERSION_B="0.11.2-p0.source.b.run$TOKEN"
 POWER_RETRY_RUNTIME="subyard-p0-source-power-retry-$TOKEN"
 POWER_RETRY_PROBE="/run/$POWER_RETRY_RUNTIME/failed-once"
 POWER_RETRY_DROPIN="/etc/systemd/system/subyard-power-reconcile.service.d/p0-source-$TOKEN.conf"
@@ -227,12 +229,14 @@ cleanup_fixture() {
     sudo -n test -d "$OPERATOR_HOME" && ! sudo -n test -L "$OPERATOR_HOME" \
       && [ "$(sudo -n cat "$OPERATOR_HOME_MARKER" 2>/dev/null)" = "$MARKER" ] \
       || die "refusing unmarked fixture operator cleanup: $OPERATOR_HOME"
+    p0_capacity_retire_fixture_sink "$OPERATOR_HOME/.subyard" || return
     sudo -n userdel -r "$OPERATOR" >/dev/null
   fi
   if [ -e "$OPERATOR_HOME" ]; then
     sudo -n test -d "$OPERATOR_HOME" && ! sudo -n test -L "$OPERATOR_HOME" \
       && [ "$(sudo -n cat "$OPERATOR_HOME_MARKER" 2>/dev/null)" = "$MARKER" ] \
       || die "refusing unmarked fixture home cleanup: $OPERATOR_HOME"
+    p0_capacity_retire_fixture_sink "$OPERATOR_HOME/.subyard" || return
     sudo -n find "$OPERATOR_HOME" -xdev -depth -delete
   fi
   if [ -e "$SHARED_ROOT" ]; then
@@ -374,7 +378,7 @@ seed_previous_migration_inputs() {
 }
 
 package_candidates() {
-  local fstype
+  local candidate_a_artifact candidate_a_bundle candidate_a_platform fstype
   install -d -m 0700 "$RELEASE_ROOT/a" "$RELEASE_ROOT/b"
   fstype="$(findmnt -n -o FSTYPE --target "$RELEASE_ROOT")" \
     || die "cannot identify release fixture filesystem"
@@ -383,7 +387,34 @@ package_candidates() {
   esac
   printf '%s\n' "$MARKER" > "$RELEASE_ROOT/.subyard-p0-marker"
   printf '%s\n' "$SOURCE_REVISION" > "$RELEASE_ROOT/source-revision"
-  "$ROOT/dev/package-engine.sh" --output-dir "$RELEASE_ROOT/a" --version "$VERSION_A" >/dev/null
+  candidate_a_artifact="$(
+    "$ROOT/dev/package-engine.sh" --output-dir "$RELEASE_ROOT/a" --version "$VERSION_A"
+  )" || die 'could not package candidate A'
+  [ -f "$candidate_a_artifact" ] && [ ! -L "$candidate_a_artifact" ] \
+    && [ -x "$candidate_a_artifact" ] \
+    || die 'candidate A artifact is not an executable regular file'
+  candidate_a_platform="${candidate_a_artifact##*/yard-$VERSION_A-}"
+  case "$candidate_a_platform" in
+    linux-amd64 | linux-arm64) ;;
+    *) die 'candidate A artifact has an unexpected platform suffix' ;;
+  esac
+  candidate_a_bundle="$RELEASE_ROOT/a/subyard-$VERSION_A-$candidate_a_platform.tar.gz"
+  [ -f "$candidate_a_bundle" ] && [ ! -L "$candidate_a_bundle" ] \
+    || die 'candidate A runtime bundle is not a regular file'
+  install -d -m 0755 "$CANDIDATE_A_REPOSITORY"
+  tar -xzf "$candidate_a_bundle" -C "$CANDIDATE_A_REPOSITORY"
+  chmod 0755 "$CANDIDATE_A_REPOSITORY"
+  [ -f "$CANDIDATE_A_ENGINE" ] && [ ! -L "$CANDIDATE_A_ENGINE" ] \
+    && [ -x "$CANDIDATE_A_ENGINE" ] \
+    && [ -f "$CANDIDATE_A_REPOSITORY/config/commands.registry" ] \
+    && [ ! -L "$CANDIDATE_A_REPOSITORY/config/commands.registry" ] \
+    || die 'candidate A runtime root is incomplete'
+  (cd "$CANDIDATE_A_REPOSITORY" && sha256sum -c runtime-files.sha256 >/dev/null) \
+    || die 'candidate A runtime root failed its file manifest'
+  operator_env test -x "$CANDIDATE_A_REPOSITORY" \
+    && operator_env test -x "$CANDIDATE_A_ENGINE" \
+    && operator_env test -r "$CANDIDATE_A_REPOSITORY/config/commands.registry" \
+    || die 'candidate A runtime root is inaccessible to the fixture operator'
   "$ROOT/dev/package-engine.sh" --output-dir "$RELEASE_ROOT/b" --version "$VERSION_B" >/dev/null
   chmod -R a+rX "$RELEASE_ROOT"
 }
@@ -395,6 +426,102 @@ bootstrap_candidate() {
     "$release/subyard-install.sh" --yes
   operator_env test ! -e "$OPERATOR_HOME/go-invoked" \
     || die 'standalone installer invoked Go'
+}
+
+assert_direct_normalizer_is_pure() {
+  local legacy_yard="$SOURCE_ROOT/private/yards/e2e-yard.env"
+  local candidate_repository="$CANDIDATE_A_REPOSITORY"
+  local normalized_target="$OPERATOR_HOME/.config/subyard/yards/test-yard/config.env"
+  local evidence="$SHARED_ROOT/direct-normalizer-evidence"
+  local before_tree="$evidence/operator-tree.before"
+  local after_tree="$evidence/operator-tree.after"
+  local normalized="$evidence/normalized.stdout"
+  local normalized_stderr="$evidence/normalized.stderr"
+  local expected="$evidence/normalized.expected"
+  local rejected_stdout="$evidence/rejected.stdout"
+  local rejected_stderr="$evidence/rejected.stderr"
+  local oversized="$evidence/oversized.env"
+  local oversized_stdout="$evidence/oversized.stdout"
+  local oversized_stderr="$evidence/oversized.stderr"
+  local oversized_expected="$evidence/oversized.expected"
+  local rejected_rc oversized_rc
+
+  snapshot_operator_tree() {
+    operator_env bash -c '
+      set -euo pipefail
+      for path in "$@"; do
+        if [ -e "$path" ] || [ -L "$path" ]; then
+          find "$path" -xdev -printf "node\t%p\t%y\t%m\t%U\t%G\t%s\t%l\n"
+          find "$path" -xdev -type f -exec sha256sum {} \; \
+            | sed "s/^/file\t/"
+        else
+          printf "absent\t%s\n" "$path"
+        fi
+      done | LC_ALL=C sort
+    ' _ \
+      "$SOURCE_ROOT" \
+      "$CANDIDATE_A_REPOSITORY" \
+      "$OPERATOR_HOME/.subyard" \
+      "$OPERATOR_HOME/.config/subyard" \
+      "$OPERATOR_HOME/.local/bin" \
+      "$OPERATOR_HOME/.bashrc" \
+      "$OPERATOR_HOME/.profile"
+  }
+
+  install -d -m 0700 "$evidence"
+  operator_env test ! -e "$normalized_target" \
+    && operator_env test ! -L "$normalized_target" \
+    || die 'normalized target exists before the authorized source ingress'
+  snapshot_operator_tree > "$before_tree"
+  if ! operator_env env SUBYARD_REPOSITORY_ROOT="$candidate_repository" bash -c '
+    exec "$1" _migrate normalize-yard-config < "$2"
+  ' _ "$CANDIDATE_A_ENGINE" "$legacy_yard" \
+    > "$normalized" 2> "$normalized_stderr"; then
+    sed -n '1,20p' "$normalized_stderr" >&2
+    die 'direct stdin-to-stdout normalization failed'
+  fi
+  operator_env sed 's/^YARD_TEMPLATE=e2e-vms$/YARD_TEMPLATE=test-vms/' \
+    "$legacy_yard" > "$expected"
+  cmp "$normalized" "$expected" \
+    || die 'direct normalizer did not remain a pure stdin-to-stdout transform'
+  [ ! -s "$normalized_stderr" ] \
+    || die 'successful direct normalization wrote diagnostics to stderr'
+  operator_env test ! -e "$normalized_target" \
+    && operator_env test ! -L "$normalized_target" \
+    || die 'direct stdin-to-stdout normalization mutated the target'
+
+  set +e
+  operator_env env SUBYARD_REPOSITORY_ROOT="$candidate_repository" \
+    "$CANDIDATE_A_ENGINE" _migrate normalize-yard-config \
+    "$legacy_yard" "$normalized_target" \
+    > "$rejected_stdout" 2> "$rejected_stderr"
+  rejected_rc=$?
+  set -e
+  [ "$rejected_rc" -ne 0 ] && [ ! -s "$rejected_stdout" ] \
+    && [ -s "$rejected_stderr" ] \
+    || die 'direct normalizer accepted its retired path-to-path form'
+  operator_env test ! -e "$normalized_target" \
+    && operator_env test ! -L "$normalized_target" \
+    || die 'rejected direct path normalization mutated the target'
+
+  head -c 1048577 /dev/zero | tr '\0' x > "$oversized"
+  printf '%s: source-install yard config normalization: legacy yard config exceeds its size bound\n' \
+    "${CANDIDATE_A_ENGINE##*/}" \
+    > "$oversized_expected"
+  set +e
+  operator_env env SUBYARD_REPOSITORY_ROOT="$candidate_repository" \
+    "$CANDIDATE_A_ENGINE" _migrate normalize-yard-config \
+    < "$oversized" \
+    > "$oversized_stdout" 2> "$oversized_stderr"
+  oversized_rc=$?
+  set -e
+  [ "$oversized_rc" = 1 ] && [ ! -s "$oversized_stdout" ] \
+    && cmp "$oversized_expected" "$oversized_stderr" \
+    || die 'direct normalizer did not return the exact bound-plus-one diagnostic'
+
+  snapshot_operator_tree > "$after_tree"
+  cmp "$before_tree" "$after_tree" \
+    || die 'direct normalization changed the scoped operator tree'
 }
 
 verify_migration() {
@@ -453,6 +580,52 @@ verify_v2_release_transition() { # <version>
   ' < <(operator_env cat \
     "$OPERATOR_HOME/.config/subyard/release-transition/v2/journal.json") >/dev/null \
     || die 'release transition journal is not complete for the expected runtime'
+}
+
+verify_authorized_source_ingress() {
+  operator_env jq -e \
+    --arg source "$SOURCE_ROOT" \
+    --arg data "$OPERATOR_HOME/.subyard" \
+    --arg bin "$OPERATOR_HOME/.local/bin" \
+    --arg rc "$OPERATOR_HOME/.bashrc" \
+    --arg login "$OPERATOR_HOME/.profile" '
+    def fingerprint:
+      type == "string" and test("^[0-9a-f]{64}$");
+    def exact_source_step($id; $resource; $transaction; $releases):
+      [.steps[] | select(.id == $id)] as $matches |
+      ($matches | length) == 1 and
+      ($matches[0] |
+        .migration == "source-install-v1" and
+        .resource == $resource and
+        .decision == "canonicalize" and
+        .checkpoint == "verified" and
+        (.expectedFingerprint | fingerprint) and
+        (.desiredFingerprint | fingerprint) and
+        .expectedFingerprint as $expected |
+        .desiredFingerprint as $desired |
+        .evidence.schemaVersion == 2 and
+        .evidence.transaction == $transaction and
+        .evidence.releases == $releases and
+        .evidence.step == $id and
+        (.evidence | has("recoveryFingerprint") | not) and
+        .evidence.expectedFingerprint == $expected and
+        .evidence.desiredFingerprint == $desired and
+        .evidence.observedFingerprint == $desired and
+        .evidence.checkpoint == "verified"
+      );
+    .transaction as $transaction |
+    .releases as $releases |
+    .schemaVersion == 2 and .checkpoint == "complete" and
+    .sourceIngress == {
+      schemaVersion: 1, kind: "pre-go-source-v1", sourceRoot: $source,
+      dataHome: $data, binDir: $bin, rc: $rc, loginRC: $login
+    } and
+    exact_source_step("source-install.import"; "source-install.config";
+      $transaction; $releases) and
+    exact_source_step("source-install.entrypoints"; "source-install.entrypoints";
+      $transaction; $releases)
+  ' "$OPERATOR_HOME/.config/subyard/release-transition/v2/journal.json" >/dev/null \
+    || die 'normalized source state was not committed by the authorized outer ingress'
 }
 
 verify_config_workflow() {
@@ -661,12 +834,15 @@ prepare() {
   [ "$(incus list "$INSTANCE" --project "$PROJECT" -f csv -c s)" = STOPPED ] \
     || die 'legacy yard did not enter the stopped desired-running upgrade fixture'
 
+  assert_direct_normalizer_is_pure
   bootstrap_candidate "$RELEASE_ROOT/a" "$VERSION_A"
   select_current_test_yard
   incus project set "$PROJECT" user.subyard.p0-source="$MARKER"
   verify_migration
   [ "$(operator_yard --version)" = "yard $VERSION_A" ] \
     || die 'first candidate runtime is not active'
+  verify_v2_release_transition "$VERSION_A"
+  verify_authorized_source_ingress
   bootstrap_candidate "$RELEASE_ROOT/a" "$VERSION_A"
   [ "$(operator_env grep -Fc '# Subyard CLI completion' "$OPERATOR_HOME/.bashrc")" = 1 ] \
     || die 'repeated bootstrap duplicated shell integration'
@@ -746,6 +922,9 @@ resume() {
 }
 
 finish() {
+  local transaction_before target_before previous_before
+  local transition_root="$OPERATOR_HOME/.config/subyard/release-transition/v2"
+  local ledger_before="$SHARED_ROOT/post-reboot-ledger.before"
   load_rebooted_fixture
   [ "$(operator_yard --version)" = "yard $VERSION_B" ] \
     || die 'runtime entrypoint did not survive reboot'
@@ -767,6 +946,26 @@ finish() {
   operator_yard check
   operator_yard -Y "$YARD_NAME" status >/dev/null
   operator_yard -Y "$YARD_NAME" check
+  # Starting a stopped owner exposes live activation drift. Authorize its exact
+  # retained release before init, without replaying the completed migrations.
+  verify_v2_release_transition "$VERSION_B"
+  operator_env cat "$transition_root/ledger.json" > "$ledger_before"
+  transaction_before="$(operator_env jq -er '.transaction' "$transition_root/journal.json")"
+  target_before="$(operator_env jq -er '.goal.target' "$transition_root/journal.json")"
+  previous_before="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/previous")"
+  operator_no_go env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT/b" \
+    "$OPERATOR_HOME/.local/bin/yard" update --version "$VERSION_B" --yes
+  verify_v2_release_transition "$VERSION_B"
+  operator_env cat "$transition_root/ledger.json" | cmp "$ledger_before" - \
+    || die 'post-reboot activation repair changed the one-time migration ledger'
+  operator_env jq -e --arg transaction "$transaction_before" --arg target "$target_before" '
+    .goal == {target:$target,direction:"activate-target"} and .releases.target == $target and
+    (.transaction == $transaction or (.steps == [] and .releases.from == $target))
+  ' "$transition_root/journal.json" >/dev/null \
+    || die 'post-reboot repair replayed migrations or changed the release target'
+  [ "$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")" = "releases/$target_before" ] \
+    && [ "$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/previous")" = "$previous_before" ] \
+    || die 'post-reboot activation repair changed the runtime pair'
   p0_retry_init_after_plan_stale operator_yard -Y "$YARD_NAME" init --yes
   verify_v2_release_transition "$VERSION_B"
   verify_config_workflow

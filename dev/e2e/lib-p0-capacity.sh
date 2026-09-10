@@ -95,6 +95,46 @@ p0_capacity_prepare_subtree() {
   fi
 }
 
+# Call only after proving ownership of the fixture containing this data home.
+# Preserve the units: the next candidate installer enables the timer again.
+p0_capacity_retire_fixture_sink() {
+  local data_home="${1:?fixture data home is required}" state environment execution property value
+  local service=subyard-test-vms-host-sink.service timer=subyard-test-vms-host-sink.timer
+  local environment_pattern='^SUBYARD_HOME=(/[A-Za-z0-9_./-]+) SUBYARD_OPERATOR_GID=[0-9]+$'
+  local command_pattern='^\{ path=/usr/local/libexec/subyard/test-vms-host-sink ; argv\[\]=/usr/local/libexec/subyard/test-vms-host-sink _test-vms-host-sink sync ; ignore_errors=no ; [^{}]* \}$'
+  command -v systemctl >/dev/null 2>&1 || return 0
+  state="$(systemctl show "$service" -p LoadState --value)" \
+    || { p0_capacity_die 'cannot inspect fixture host sink'; return; }
+  [ "$state" != not-found ] || return 0
+  environment="$(systemctl show "$service" -p Environment --value)" \
+    || { p0_capacity_die 'cannot inspect fixture host sink data home'; return; }
+  [[ "$environment" =~ $environment_pattern ]] \
+    || { p0_capacity_die 'fixture host sink environment has an unexpected shape'; return; }
+  [ "${BASH_REMATCH[1]}" = "$data_home" ] || return 0
+  [ "$state" = loaded ] \
+    || { p0_capacity_die 'matching fixture host sink is not loaded safely'; return; }
+  execution="$(systemctl show "$service" -p ExecStart --value)" \
+    || { p0_capacity_die 'cannot inspect matching fixture host sink command'; return; }
+  [[ "$execution" =~ $command_pattern ]] \
+    || { p0_capacity_die 'matching fixture host sink has an unexpected command'; return; }
+  for property in DropInPaths EnvironmentFiles ExecStartPre ExecStartPost ExecStop ExecStopPost; do
+    value="$(systemctl show "$service" -p "$property" --value)" \
+      || { p0_capacity_die 'cannot inspect matching fixture host sink overrides'; return; }
+    [ -z "$value" ] \
+      || { p0_capacity_die 'matching fixture host sink has unexpected overrides'; return; }
+  done
+  value="$(systemctl show "$timer" -p DropInPaths --value)" \
+    || { p0_capacity_die 'cannot inspect matching fixture host sink timer'; return; }
+  [ -z "$value" ] \
+    || { p0_capacity_die 'matching fixture host sink timer has overrides'; return; }
+  value="$(systemctl show "$timer" -p Unit --value)" \
+    || { p0_capacity_die 'cannot inspect matching fixture host sink timer target'; return; }
+  [ "$value" = "$service" ] \
+    || { p0_capacity_die 'matching fixture host sink timer has an unexpected target'; return; }
+  sudo -n systemctl disable --now "$timer" || return
+  sudo -n systemctl stop "$service"
+}
+
 p0_capacity_delete_tree() {
   local path="${1:?tree path is required}" owner
   owner="$(id -u)"
@@ -126,6 +166,7 @@ p0_capacity_recover_stale_roots() {
       return
     fi
     printf '  [ .. ] recovering marker-owned stale P0 state %s\n' "$name"
+    p0_capacity_retire_fixture_sink "$path/owner/subyard" || return
     p0_capacity_delete_tree "$path" || return
   done
 }
