@@ -24,6 +24,7 @@ import (
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ownerinventory"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/rpc"
@@ -4040,6 +4041,128 @@ func TestNativeListBoundsOnlyOwnerDisplay(t *testing.T) {
 	}
 	if want := "Demo\nDemo/" + hostID + "\n"; stdout.String() != want {
 		t.Fatalf("completion changed owner identity: got %q, want %q", stdout.String(), want)
+	}
+}
+
+func TestNativeCompletionProvidersReturnPartialOwnerInventoryWithoutWrites(t *testing.T) {
+	root, environment, stateDirectory := nativeFixture(t)
+	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+	dataHome := environmentValue(environment, "SUBYARD_HOME")
+	now := time.Unix(1_000, 0).UTC()
+
+	if err := os.MkdirAll(configHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(configHome, "host-id"), "local-owner\n", 0o600)
+	if err := os.MkdirAll(filepath.Join(configHome, "yards", "dev"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(configHome, "yards", "dev", "config.env"), "SSH_PORT=3333\n", 0o600)
+	putProject := func(directory, id, name string) {
+		t.Helper()
+		store, err := state.NewFileStore(directory)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Put(context.Background(), domain.ProjectRecord{
+			Schema: 1, ProjectID: id, Name: name, HostPath: "/host/" + name,
+			YardPath: state.YardPath(id), Mode: domain.ProjectSync, SSHHost: "yard", Target: "yard",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(directory, id+".json")
+		if err := os.Chmod(path, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		writeCLIFile(t, filepath.Join(directory, ".name-migration"), "{unfinished\n", 0o600)
+	}
+	putProject(stateDirectory, "local-12345678", "Local")
+	putProject(filepath.Join(configHome, "yards", "dev", "projects"), "shared-12345678", "Shared")
+
+	ownerRoot := filepath.Join(dataHome, "owner-inventory")
+	connections := ownerinventory.Connections{Root: ownerRoot}
+	for _, connection := range []ownerinventory.Connection{
+		{HostID: "remote-owner", Destination: "remote.example"},
+		{HostID: "failed-owner", Destination: "failed.example"},
+	} {
+		if err := connections.Write(connection); err != nil {
+			t.Fatal(err)
+		}
+	}
+	remoteInventory := domain.OwnerInventory{
+		Schema: domain.OwnerInventorySchema, HostID: "remote-owner", ObservedAt: now,
+		Yards: []domain.OwnerYard{
+			{
+				Name: "dev", Kind: string(domain.YardContainer), Instance: "yard-dev",
+				State: "RUNNING", SSHPort: 2222, DevUser: "dev",
+				Projects: []domain.OwnerProject{{
+					ProjectID: "shared-remote-12345678", Name: "Shared", Mode: "sync", Target: "yard",
+				}},
+			},
+			{
+				Name: "ops", Kind: string(domain.YardContainer), Instance: "yard-ops",
+				State: "RUNNING", SSHPort: 2223, DevUser: "dev",
+				Projects: []domain.OwnerProject{{
+					ProjectID: "remote-12345678", Name: "Remote", Mode: "sync", Target: "yard",
+				}},
+			},
+		},
+	}
+	if err := (ownerinventory.Cache{Root: ownerRoot}).Write(ownerinventory.Snapshot{
+		FetchedAt: now, Inventory: remoteInventory,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(ownerRoot, "registration.json"), "{unfinished\n", 0o600)
+
+	transportRoot := t.TempDir()
+	sshLog := filepath.Join(transportRoot, "ssh.log")
+	writeCLIFile(t, filepath.Join(transportRoot, "ssh"), `#!/bin/sh
+printf 'called\n' >> "$SUBYARD_TEST_SSH_LOG"
+exit 17
+	`, 0o700)
+	t.Setenv("PATH", transportRoot)
+	t.Setenv("SUBYARD_TEST_SSH_LOG", sshLog)
+	environment = append(environment,
+		"PATH="+transportRoot,
+		"SUBYARD_TEST_SSH_LOG="+sshLog,
+	)
+
+	incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+		"subyard/yard":         {Status: "Running"},
+		"subyard-dev/yard-dev": {Status: "Stopped"},
+	}}
+	before := nativeTreeSnapshot(t, root)
+	runCompletion := func(flag, want string) {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		program, err := New(Options{
+			RepositoryRoot: root, Program: "yard", Arguments: []string{"list", flag},
+			Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
+			Incus: incus, Clock: testkit.NewManualClock(now),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code := program.Run(context.Background()); code != 0 {
+			t.Fatalf("%s failed: code=%d stdout=%q stderr=%q", flag, code, stdout.String(), stderr.String())
+		}
+		if stdout.String() != want || stderr.Len() != 0 {
+			t.Fatalf("%s output drifted: stdout=%q, want %q, stderr=%q", flag, stdout.String(), want, stderr.String())
+		}
+	}
+	runCompletion("--complete-yards", "default\nlocal-owner/default\nlocal-owner/dev\nops\nremote-owner/dev\nremote-owner/ops\n")
+	runCompletion("--complete-projects", "Local\nLocal/local-owner\nRemote\nRemote/ops/remote-owner\nShared/dev/local-owner\nShared/dev/remote-owner\n")
+
+	sshCalls, err := os.ReadFile(sshLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(sshCalls), "called\n"); got != 2 {
+		t.Fatalf("failed remote inventory attempts = %d, want 2", got)
+	}
+	if after := nativeTreeSnapshot(t, root); !slices.Equal(after, before) {
+		t.Fatalf("completion mutated identity/config/cache/state:\nbefore=%#v\nafter=%#v", before, after)
 	}
 }
 

@@ -64,6 +64,21 @@ name|aliases|handler|arg0|remote|effect|confirmation|visibility|section|completi
 Profile resource commands use the separate `.res` interface below because profiles own those
 commands and mechanics.
 
+Bash and Zsh completion obtain yard and project candidates exclusively from the read-only
+`yard list --complete-yards` and `yard list --complete-projects` providers. They preserve successful
+newline-delimited records. An unavailable, failing or empty provider yields only `default` for
+yards and no dynamic project candidates. Completion never reads yard registrations, project state,
+HostID or configuration files. Profile discovery still reads shipped `config/profiles/*/profile.conf`
+until it shares the component resolver.
+
+The installer configures both shells' startup files, including Zsh's `ZDOTDIR` when set; explicit
+`YARD_SHELL_RC` and `YARD_LOGIN_RC` overrides limit installation to the selected startup files.
+Interactive completion initialization binds Tab to forward menu completion and Shift-Tab to
+backward menu completion in Emacs and Vi insert modes, without changing the selected editing mode
+or Enter. Ambiguous matches are listed while cycling. These bindings apply throughout the shell
+and are safe to initialize repeatedly.
+New sessions use the stable runtime `current` path, so upgrades load the matching completion files.
+
 Core commands share one preparation and execution pipeline in `internal/cli/prepared_command.go`:
 
 ```text

@@ -72,14 +72,14 @@ case "$VERSION" in ''|*[!A-Za-z0-9._+-]*) printf 'bootstrap-runtime: unsafe vers
 RC="${YARD_SHELL_RC:-}"
 if [ -z "$RC" ]; then
   case "${SHELL:-}" in
-    *zsh) RC="$HOME/.zshrc" ;;
+    *zsh) RC="${ZDOTDIR:-$HOME}/.zshrc" ;;
     *) RC="$HOME/.bashrc" ;;
   esac
 fi
 LOGIN_RC="${YARD_LOGIN_RC:-}"
 if [ -z "$LOGIN_RC" ]; then
   case "${SHELL:-}" in
-    *zsh) LOGIN_RC="$HOME/.zprofile" ;;
+    *zsh) LOGIN_RC="${ZDOTDIR:-$HOME}/.zprofile" ;;
     *)
       if [ -f "$HOME/.bash_profile" ]; then LOGIN_RC="$HOME/.bash_profile"
       elif [ -f "$HOME/.bash_login" ]; then LOGIN_RC="$HOME/.bash_login"
@@ -88,10 +88,37 @@ if [ -z "$LOGIN_RC" ]; then
       ;;
   esac
 fi
-case "$RC" in
-  *zsh*) completion="$RUNTIME_ROOT/current/completions/yard.zsh" ;;
-  *) completion="$RUNTIME_ROOT/current/completions/yard.bash" ;;
+case "${RC##*/}" in
+  *zsh*) primary_shell=zsh ;;
+  *bash*) primary_shell=bash ;;
+  *) case "${SHELL:-}" in *zsh) primary_shell=zsh ;; *) primary_shell=bash ;; esac ;;
 esac
+completion="$RUNTIME_ROOT/current/completions/yard.$primary_shell"
+
+# Configure both supported shells by default. Explicit startup-file overrides remain scoped to
+# the selected files, including the bounded source-install migration entrypoints below.
+shell_rcs=("$RC")
+shell_completions=("$completion")
+login_rcs=("$LOGIN_RC")
+login_shells=("$primary_shell")
+if [ -z "${YARD_SHELL_RC:-}" ]; then
+  case "${SHELL:-}" in
+    *zsh) shell_rcs+=("$HOME/.bashrc"); shell_completions+=("$RUNTIME_ROOT/current/completions/yard.bash") ;;
+    *) shell_rcs+=("${ZDOTDIR:-$HOME}/.zshrc"); shell_completions+=("$RUNTIME_ROOT/current/completions/yard.zsh") ;;
+  esac
+fi
+if [ -z "${YARD_LOGIN_RC:-}" ]; then
+  case "${SHELL:-}" in
+    *zsh)
+      if [ -f "$HOME/.bash_profile" ]; then login_rcs+=("$HOME/.bash_profile")
+      elif [ -f "$HOME/.bash_login" ]; then login_rcs+=("$HOME/.bash_login")
+      else login_rcs+=("$HOME/.profile")
+      fi
+      login_shells+=(bash)
+      ;;
+    *) login_rcs+=("${ZDOTDIR:-$HOME}/.zprofile"); login_shells+=(zsh) ;;
+  esac
+fi
 
 # Detect the bounded pre-Go source ingress before any installation mutation.
 # The verified candidate repeats ownership, containment and manifest checks.
@@ -286,26 +313,44 @@ if [ -z "$SOURCE_INGRESS_ROOT" ]; then
   install -d "$BIN_DIR"
   ln -sfn "$RUNTIME_ROOT/current/bin/yard" "$BIN_DIR/yard"
   ln -sfn "$RUNTIME_ROOT/current/bin/yard" "$BIN_DIR/sy"
+fi
 
-  if [ -f "$LOGIN_RC" ] && grep -qF 'Subyard CLI login PATH' "$LOGIN_RC"; then
+for index in "${!login_rcs[@]}"; do
+  # Source ingress owns its primary startup files and their sealed recovery digests.
+  if [ -n "$SOURCE_INGRESS_ROOT" ] && [ "$index" = 0 ]; then continue; fi
+  login_rc="${login_rcs[index]}"
+  install -d "$(dirname "$login_rc")"
+  if [ -f "$login_rc" ] && grep -qF 'Subyard CLI login PATH' "$login_rc"; then
     :
   else
-    printf '\n# Subyard CLI login PATH\nexport PATH="%s:$PATH"\n' "$BIN_DIR" >> "$LOGIN_RC"
+    printf '\n# Subyard CLI login PATH\nexport PATH="%s:$PATH"\n' "$BIN_DIR" >> "$login_rc"
   fi
-  if [ "$need_path_line" = 1 ]; then
-    if [ -f "$RC" ] && grep -qF 'Subyard CLI interactive PATH' "$RC"; then
-      :
-    else
-      printf '\n# Subyard CLI interactive PATH\nexport PATH="%s:$PATH"\n' "$BIN_DIR" >> "$RC"
-    fi
+  # Bash login shells do not necessarily read .bashrc. Keep .profile POSIX-compatible and
+  # restrict Readline setup to interactive Bash even when another shell reads this file.
+  if [ "${login_shells[index]}" = bash ] &&
+     ! grep -qF 'Subyard CLI login completion' "$login_rc"; then
+    printf '\n# Subyard CLI login completion\nif [ -n "${BASH_VERSION:-}" ]; then\n  case $- in\n    *i*) [ -f "%s" ] && . "%s" ;;\n  esac\nfi\n' \
+      "$RUNTIME_ROOT/current/completions/yard.bash" \
+      "$RUNTIME_ROOT/current/completions/yard.bash" >> "$login_rc"
   fi
-  if [ -f "$RC" ] && grep -qF 'Subyard CLI completion' "$RC"; then
+done
+for index in "${!shell_rcs[@]}"; do
+  if [ -n "$SOURCE_INGRESS_ROOT" ] && [ "$index" = 0 ]; then continue; fi
+  shell_rc="${shell_rcs[index]}"
+  completion="${shell_completions[index]}"
+  install -d "$(dirname "$shell_rc")"
+  if [ -f "$shell_rc" ] && grep -qF "export PATH=\"$BIN_DIR:" "$shell_rc"; then
+    :
+  else
+    printf '\n# Subyard CLI interactive PATH\nexport PATH="%s:$PATH"\n' "$BIN_DIR" >> "$shell_rc"
+  fi
+  if [ -f "$shell_rc" ] && grep -qF 'Subyard CLI completion' "$shell_rc"; then
     :
   else
     printf '\n# Subyard CLI completion\n[ -f "%s" ] && source "%s"\n' \
-      "$completion" "$completion" >> "$RC"
+      "$completion" "$completion" >> "$shell_rc"
   fi
-fi
+done
 
 printf 'yard installed: %s/yard\n' "$BIN_DIR"
 if [ "$need_path_line" = 1 ]; then

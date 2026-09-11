@@ -443,12 +443,18 @@ prepare_legacy_data() {
 prepare_legacy_data "$DATA_HOME/config.env" legacy-data-config
 prepare_legacy_data "$DATA_HOME/operator-overlay" legacy-operator-overlay
 
+# Source ingress binds the RC path in its plan. Keep shell selection deterministic from that
+# path; neutral names retain the legacy Bash default regardless of the replay environment.
+case "${RC##*/}" in
+  *zsh*) completion_shell=zsh ;;
+  *) completion_shell=bash ;;
+esac
+
 rewrite_completion() {
   local path="$1" output="$2" line next marker=0
   local old_bash="[ -f \"$source_root/completions/yard.bash\" ] && source \"$source_root/completions/yard.bash\""
   local old_zsh="[ -f \"$source_root/completions/yard.zsh\" ] && source \"$source_root/completions/yard.zsh\""
-  local completion="$RUNTIME_ROOT/current/completions/yard.bash"
-  case "$path" in *zsh*) completion="$RUNTIME_ROOT/current/completions/yard.zsh" ;; esac
+  local completion="$RUNTIME_ROOT/current/completions/yard.$completion_shell"
   local replacement="[ -f \"$completion\" ] && source \"$completion\""
   : > "$output"
   if [ -e "$path" ]; then
@@ -473,6 +479,9 @@ rewrite_completion() {
 }
 
 rewrite_completion "$RC" "$work/rc.after"
+if ! grep -qF "export PATH=\"$BIN_DIR:" "$work/rc.after"; then
+  printf '\n# Subyard CLI interactive PATH\nexport PATH="%s:$PATH"\n' "$BIN_DIR" >> "$work/rc.after"
+fi
 chmod --reference="${RC:-$work/rc.after}" "$work/rc.after" 2>/dev/null || chmod 0600 "$work/rc.after"
 if ! grep -qF 'Subyard CLI login PATH' "$LOGIN_RC" 2>/dev/null; then
   if [ "$LOGIN_RC" = "$RC" ]; then
@@ -483,6 +492,15 @@ if ! grep -qF 'Subyard CLI login PATH' "$LOGIN_RC" 2>/dev/null; then
   fi
 elif [ "$LOGIN_RC" != "$RC" ]; then
   cp -p -- "$LOGIN_RC" "$work/login-rc.after"
+fi
+if [ "$completion_shell" = bash ]; then
+  login_output="$work/login-rc.after"
+  [ "$LOGIN_RC" != "$RC" ] || login_output="$work/rc.after"
+  if ! grep -qF 'Subyard CLI login completion' "$login_output"; then
+    printf '\n# Subyard CLI login completion\nif [ -n "${BASH_VERSION:-}" ]; then\n  case $- in\n    *i*) [ -f "%s" ] && . "%s" ;;\n  esac\nfi\n' \
+      "$RUNTIME_ROOT/current/completions/yard.bash" \
+      "$RUNTIME_ROOT/current/completions/yard.bash" >> "$login_output"
+  fi
 fi
 if [ "$LOGIN_RC" != "$RC" ]; then
   chmod --reference="${LOGIN_RC:-$work/login-rc.after}" "$work/login-rc.after" 2>/dev/null \

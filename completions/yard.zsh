@@ -20,53 +20,15 @@ _yard_profiles() {
   print -r -l -- $profiles
 }
 
-# Registry yard names come from the CLI. The compatibility fallback mirrors its supported
-# private-flat and installed nested/flat layouts without following symlinks.
+# The native inventory owns yard/project discovery. A missing or incompatible engine
+# fails soft; never rediscover registrations or project state in the shell.
 _yard_yards() {
-  local config_dir private_dir home entry kind f n parent inventory
-  local -a names files
-  local -A seen
-  inventory="$(yard list --complete-yards 2>/dev/null)"
-  if [[ -n $inventory ]]; then
+  local inventory
+  if inventory="$(yard list --complete-yards 2>/dev/null)" && [[ -n $inventory ]]; then
     print -r -- "$inventory"
-    return 0
+  else
+    print -r -- default
   fi
-  names=( default )
-  seen[default]=1
-  config_dir="$(_yard_config_dir)" || config_dir=""
-  if [[ -n $config_dir ]]; then
-    private_dir="${config_dir:h}/private/yards"
-    for f in $private_dir/*.env(N); do files+=( "flat:$f" ); done
-  fi
-  home="$(_yard_config_home)" || home=""
-  if [[ -n $home ]]; then
-    for f in $home/yards/*.env(N); do files+=( "flat:$f" ); done
-    for f in $home/yards/*/config.env(N); do files+=( "nested:$f" ); done
-  fi
-  for entry in $files; do
-    kind=${entry%%:*}
-    f=${entry#*:}
-    [[ -f $f && ! -L $f ]] || continue
-    if [[ $kind == nested ]]; then
-      parent=${f:h}
-      [[ ! -L $parent ]] || continue
-      n=${parent:t}
-    else
-      n=${f:t:r}
-    fi
-    case "$n" in ""|*[!a-z0-9_-]*|[!a-z0-9]*) continue ;; esac
-    [[ -z ${seen[$n]:-} ]] || continue
-    seen[$n]=1
-    names+=( $n )
-  done
-  print -r -l -- $names
-}
-
-# Shipped config root: honor the same environment override as the native loader.
-_yard_config_dir() {
-  if [[ -n ${SUBYARD_CONFIG_DIR:-} ]]; then print -r -- "$SUBYARD_CONFIG_DIR"; return 0; fi
-  local repo; repo="$(_yard_repo)" || return 1
-  print -r -- "$repo/config"
 }
 
 # _arguments action: complete a yard name for -Y/--yard.
@@ -75,51 +37,11 @@ _yard_yard_names() {
   compadd -a n
 }
 
-# Host-side state home: honor an explicit override, else derive the same default as
-# config/host.env (so completion and the CLI agree on where state lives).
-_yard_config_home() {
-  if [[ -n ${SUBYARD_CONFIG_HOME:-} ]]; then print -r -- "$SUBYARD_CONFIG_HOME"; return 0; fi
-  if [[ -n ${XDG_CONFIG_HOME:-} ]]; then print -r -- "$XDG_CONFIG_HOME/subyard"; return 0; fi
-  local repo; repo="$(_yard_repo)" || return 1
-  [[ -r $repo/config/host.env ]] || return 1
-  ( source "$repo/config/host.env" >/dev/null 2>&1; print -r -- "${SUBYARD_CONFIG_HOME:-}" )
-}
-
-# Project selectors from the native bounded inventory. If an older/missing engine cannot provide
-# it, fall back to local state and qualify every project with the local HostID so duplicate names
-# still resolve. Project names are SafeProjectName values, so they never contain JSON escapes.
 _yard_projects() {
-  local home d f name inventory host_id='' yard
-  local -A emitted
+  local inventory
   if inventory="$(yard list --complete-projects 2>/dev/null)" && [[ -n $inventory ]]; then
     print -r -- "$inventory"
-    return 0
   fi
-  home="$(_yard_config_home)" || return 0
-  [[ -n $home ]] || return 0
-  [[ ! -r $home/host-id ]] || IFS= read -r host_id < "$home/host-id"
-  d="$home/projects"
-  for f in $d/*.json(N); do
-    name="$(sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"\\]*\)".*/\1/p' "$f" | head -n1)"
-    [[ -n $name ]] || continue
-    if [[ -n $host_id ]]; then
-      print -r -- "$name/$host_id"
-    elif [[ -z ${emitted[$name]:-} ]]; then
-      emitted[$name]=1; print -r -- "$name"
-    fi
-  done
-  for d in "$home"/yards/*/projects(N/); do
-    yard="$(basename "$(dirname "$d")")"
-    for f in $d/*.json(N); do
-      name="$(sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"\\]*\)".*/\1/p' "$f" | head -n1)"
-      [[ -n $name ]] || continue
-      if [[ -n $host_id ]]; then
-        print -r -- "$name/$yard/$host_id"
-      elif [[ -z ${emitted[$name]:-} ]]; then
-        emitted[$name]=1; print -r -- "$name"
-      fi
-    done
-  done
 }
 
 # `yard code` target: a known project name or a directory path.
@@ -134,11 +56,17 @@ _yard() {
   local -a cmds
   cmds=( ${(f)"$(yard --list 2>/dev/null)"} )
 
+  # Parse a completed @ selector as the equivalent option without changing the buffer.
+  local -a words=( "${words[@]}" )
+  if (( CURRENT > 2 )) && [[ ${words[2]:-} == @?* ]]; then
+    words[2]="--yard=${words[2]#@}"
+  fi
+
   local curcontext="$curcontext" state line
   typeset -A opt_args
 
   _arguments -C \
-    '(-Y --yard)'{-Y,--yard}'[run the command against a named yard]:yard:_yard_yard_names' \
+    '(-Y --yard)'{-Y,--yard=}'[run the command against a named yard]:yard:_yard_yard_names' \
     '(-h --help)'{-h,--help}'[show help]' \
     '(-l --list)'{-l,--list}'[list command names]' \
     '--resources[list profile resource commands and verbs]' \
@@ -289,7 +217,18 @@ _yard() {
 
 # Register. Works whether this file is autoloaded on $fpath or sourced from
 # .zshrc. When sourced before compinit ran, bootstrap it so compdef exists.
-if (( ! $+functions[compdef] )); then
+if [[ -o interactive ]] && (( ! $+functions[compdef] )); then
   autoload -Uz compinit && compinit
 fi
-compdef _yard yard sy 2>/dev/null
+if (( $+functions[compdef] )); then
+  compdef _yard yard sy 2>/dev/null
+fi
+
+# These ZLE bindings apply shell-wide. Configure both insert keymaps without
+# switching the user's editing mode; Enter keeps its normal accept-line behavior.
+if [[ -o interactive ]]; then
+  bindkey -M emacs '^I' menu-complete
+  bindkey -M emacs '^[[Z' reverse-menu-complete
+  bindkey -M viins '^I' menu-complete
+  bindkey -M viins '^[[Z' reverse-menu-complete
+fi

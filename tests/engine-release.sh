@@ -173,7 +173,7 @@ fi
   || fail 'declined standalone bootstrap created a runtime'
 HOME="$standalone_home" SUBYARD_HOME="$standalone_home/.subyard" \
   SUBYARD_CONFIG_HOME="$standalone_home/.config/subyard" YARD_BIN_DIR="$standalone_bin" \
-  YARD_SHELL_RC="$standalone_home/.bashrc" YARD_LOGIN_RC="$standalone_home/.profile" \
+  SHELL=/bin/bash ZDOTDIR="$standalone_home" YARD_SHELL_RC='' YARD_LOGIN_RC='' \
   YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_VERSION=1.0.0-test \
   PATH="$standalone_no_go:$PATH" \
   "$release/subyard-install.sh" --yes >/dev/null
@@ -187,24 +187,76 @@ grep -Fq 'Subyard CLI login PATH' "$standalone_home/.profile" \
 HOME="$standalone_home" PATH=/usr/bin:/bin SHELL=/bin/bash bash -lc \
   'command -v yard >/dev/null && yard --version >/dev/null' \
   || fail 'standalone installer is not available to a new login shell'
+HOME="$standalone_home" PATH=/usr/bin:/bin SHELL=/bin/bash bash -lic \
+  'complete -p yard >/dev/null' >/dev/null 2>&1 \
+  || fail 'standalone installer did not automatically activate login Bash completion'
 HOME="$standalone_home" PATH=/usr/bin:/bin SHELL=/bin/bash \
   bash --noprofile --rcfile "$standalone_home/.bashrc" -ic \
   'command -v yard >/dev/null && complete -p yard >/dev/null' >/dev/null 2>&1 \
   || fail 'standalone installer did not activate Bash completion'
+HOME="$standalone_home" ZDOTDIR="$standalone_home" PATH=/usr/bin:/bin SHELL=/bin/zsh \
+  zsh -ic 'command -v yard >/dev/null && (( $+functions[_yard] ))' >/dev/null 2>&1 \
+  || fail 'standalone installer did not automatically activate Zsh completion'
 zsh -f "$ROOT/tests/helpers/zsh-completion-buffers.zsh" \
   "$standalone_home/.subyard/runtime/current/completions/yard.zsh" \
   "$standalone_home/.subyard/runtime/current" \
   || fail 'standalone runtime Zsh completion corrupted the command buffer'
 HOME="$standalone_home" SUBYARD_HOME="$standalone_home/.subyard" \
   SUBYARD_CONFIG_HOME="$standalone_home/.config/subyard" YARD_BIN_DIR="$standalone_bin" \
-  YARD_SHELL_RC="$standalone_home/.bashrc" YARD_LOGIN_RC="$standalone_home/.profile" \
+  SHELL=/bin/bash ZDOTDIR="$standalone_home" YARD_SHELL_RC='' YARD_LOGIN_RC='' \
   YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_VERSION=1.0.0-test \
   PATH="$standalone_no_go:$PATH" \
   "$release/subyard-install.sh" --yes >/dev/null
 [ "$(grep -cF 'Subyard CLI login PATH' "$standalone_home/.profile")" -eq 1 ] \
   && [ "$(grep -cF 'Subyard CLI interactive PATH' "$standalone_home/.bashrc")" -eq 1 ] \
   && [ "$(grep -cF 'Subyard CLI completion' "$standalone_home/.bashrc")" -eq 1 ] \
+  && [ "$(grep -cF 'Subyard CLI completion' "$standalone_home/.zshrc")" -eq 1 ] \
+  && [ "$(grep -cF 'Subyard CLI interactive PATH' "$standalone_home/.zshrc")" -eq 1 ] \
+  && [ "$(grep -cF 'Subyard CLI login PATH' "$standalone_home/.zprofile")" -eq 1 ] \
+  && [ "$(grep -cF 'Subyard CLI login completion' "$standalone_home/.profile")" -eq 1 ] \
   || fail 'standalone shell integration is not idempotent'
+for completion_shell in bash zsh; do
+  zsh -f "$ROOT/tests/helpers/shell-completion-interaction.zsh" "$completion_shell" \
+    "$standalone_home/.subyard/runtime/current/completions/yard.$completion_shell" \
+    "$standalone_home/.subyard/runtime/current" "$standalone_home" \
+    || fail "installed $completion_shell Tab selection or Enter execution failed"
+done
+
+# Selecting Zsh still prepares Bash, including an existing Bash login file. Startup PATH must
+# work independently of whether the installation process already had the bin directory on PATH.
+zsh_home="$TMP/zsh-home"
+zsh_startup="$zsh_home/.config/zsh"
+mkdir -p "$zsh_home"
+printf '%s\n' '# Existing operator login settings' > "$zsh_home/.bash_profile"
+HOME="$zsh_home" SUBYARD_HOME="$zsh_home/.subyard" \
+  SUBYARD_CONFIG_HOME="$zsh_home/.config/subyard" YARD_BIN_DIR="$zsh_home/.local/bin" \
+  SHELL=/bin/zsh ZDOTDIR="$zsh_startup" YARD_SHELL_RC='' YARD_LOGIN_RC='' \
+  YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_VERSION=1.0.0-test \
+  PATH="$zsh_home/.local/bin:$PATH" "$release/subyard-install.sh" --yes >/dev/null
+HOME="$zsh_home" ZDOTDIR="$zsh_startup" PATH=/usr/bin:/bin SHELL=/bin/zsh \
+  zsh -lic 'command -v yard >/dev/null && (( $+functions[_yard] ))' >/dev/null 2>&1 \
+  || fail 'standalone installer did not honor ZDOTDIR for login Zsh'
+HOME="$zsh_home" PATH=/usr/bin:/bin SHELL=/bin/bash bash -lic \
+  'command -v yard >/dev/null && complete -p yard >/dev/null' >/dev/null 2>&1 \
+  || fail 'Zsh installation did not prepare login Bash'
+grep -Fxq '# Existing operator login settings' "$zsh_home/.bash_profile" \
+  || fail 'standalone installer replaced existing login settings'
+
+override_home="$TMP/override-home"
+mkdir -p "$override_home"
+HOME="$override_home" SUBYARD_HOME="$override_home/.subyard" \
+  SUBYARD_CONFIG_HOME="$override_home/.config/subyard" YARD_BIN_DIR="$override_home/.local/bin" \
+  SHELL=/bin/zsh ZDOTDIR="$override_home" \
+  YARD_SHELL_RC="$override_home/custom.rc" YARD_LOGIN_RC="$override_home/custom.profile" \
+  YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_VERSION=1.0.0-test \
+  "$release/subyard-install.sh" --yes >/dev/null
+[ -s "$override_home/custom.rc" ] && [ -s "$override_home/custom.profile" ] \
+  && [ ! -e "$override_home/.bashrc" ] && [ ! -e "$override_home/.zshrc" ] \
+  && [ ! -e "$override_home/.profile" ] && [ ! -e "$override_home/.zprofile" ] \
+  || fail 'explicit startup overrides unexpectedly changed default shell files'
+HOME="$override_home" ZDOTDIR="$override_home" SHELL=/bin/zsh \
+  zsh -fic 'source "$1"; (( $+functions[_yard] ))' zsh "$override_home/custom.rc" \
+  >/dev/null 2>&1 || fail 'neutral startup override filename selected the wrong shell completion'
 
 bad_release="$TMP/bad-standalone-release"
 cp -a "$release" "$bad_release"

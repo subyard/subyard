@@ -2,6 +2,7 @@ package migration
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -13,6 +14,40 @@ import (
 
 type sourceInstallFixture struct {
 	home, source, bin, data, config, rc, login string
+}
+
+func TestSourceInstallOwnsLoginCompletionBeforeSealing(t *testing.T) {
+	requireJQ(t)
+	for _, shared := range []bool{false, true} {
+		t.Run(fmt.Sprintf("shared-startup-file-%t", shared), func(t *testing.T) {
+			fixture := newSourceInstallFixture(t,
+				"# Stable launcher for a release-installed native Go control-plane engine.")
+			if shared {
+				fixture.login = fixture.rc
+			}
+			completion := readTestFile(t, filepath.Join("..", "..", "completions", "yard.bash"))
+			writeTestFile(t, filepath.Join(fixture.data, "runtime/current/completions/yard.bash"),
+				0o600, string(completion))
+			if output, err := fixture.migrate(); err != nil {
+				t.Fatalf("migration failed: %v\n%s", err, output)
+			}
+			command := exec.Command("bash", "--noprofile", "--norc", "-ic",
+				`. "$1"; complete -p yard >/dev/null`, "bash", fixture.login)
+			command.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + fixture.home, "INPUTRC=/dev/null"}
+			if output, err := command.CombinedOutput(); err != nil {
+				t.Fatalf("migrated login file does not load completion: %v\n%s", err, output)
+			}
+			actual := fmt.Sprintf("%x", sha256.Sum256(readTestFile(t, fixture.login)))
+			sealed := strings.TrimSpace(string(readTestFile(t,
+				filepath.Join(fixture.data, "recovery/pre-go-source/login-rc.after.sha256"))))
+			if actual != sealed {
+				t.Fatal("login completion changed after the source migration was sealed")
+			}
+			if output, err := fixture.migrate(); err != nil && exitStatus(err) != 3 {
+				t.Fatalf("completed migration did not remain idempotent: %v\n%s", err, output)
+			}
+		})
+	}
 }
 
 func TestSourceInstallMigrationAndRecovery(t *testing.T) {
