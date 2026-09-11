@@ -12,6 +12,7 @@ import (
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/state"
 )
 
@@ -93,6 +94,9 @@ func TestPreparedProjectExecutionOwnsReservationAndCommitLifecycle(t *testing.T)
 			program, err := New(Options{
 				RepositoryRoot: root, Program: "yard", Environment: append(environment, "SUBYARD_OPERATION_ID=project-lifecycle"),
 				WorkingDir: root, Incus: lifecycleIncus(), Stdout: io.Discard, Stderr: io.Discard,
+				ProjectData: projectActionObservationProbe{execute: func(ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+					return ports.InstanceExecResult{}, nil
+				}},
 			})
 			if err != nil {
 				t.Fatal(err)

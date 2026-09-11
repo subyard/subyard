@@ -49,6 +49,8 @@ type projectExecution struct {
 	RemoteReserved  bool
 	PreviewExisting *domain.ProjectRecord
 	ActionChanged   bool
+	WorkspaceNames  []string
+	SyncObserved    bool
 	Removal         projectRemovalObservation
 }
 
@@ -120,6 +122,12 @@ func (execution *projectExecution) actionPlan(commandName string) (
 		return action, delta, nil
 	}
 	delta.Consequences = application.ProjectConsequences(commandName, execution.Record, false)
+	if commandName == "sync" && !execution.ExplicitName {
+		delta.Consequences = []string{fmt.Sprintf(
+			"copy %s to a new yard-owned snapshot with an available name based on %s",
+			execution.Record.HostPath, execution.RequestedName,
+		)}
+	}
 	if commandName == "down" {
 		delta.Consequences = []string{"stop the project environment"}
 	}
@@ -142,48 +150,7 @@ func (cli *CLI) observeProjectAction(
 	}
 	switch commandName {
 	case "sync":
-		if execution.PreviewExisting == nil {
-			execution.ActionChanged = true
-			return nil
-		}
-		if execution.PreviewExisting.Target != execution.Record.Target ||
-			execution.PreviewExisting.Profile != execution.Record.Profile {
-			execution.ActionChanged = true
-			return nil
-		}
-		data := cli.projectDataPlane()
-		present, err := probeProjectRemovalPresence(ctx, data, execution.Loaded.Context, []string{
-			"sh", "-c", `if [ -d "$1" ]; then printf present; else printf missing; fi`,
-			"subyard", execution.Record.YardPath,
-		})
-		if err != nil {
-			return fmt.Errorf("inspect sync workspace: %w", err)
-		}
-		if !present {
-			execution.ActionChanged = true
-			return nil
-		}
-		archive, err := cli.projectArchiver().Open(ctx, execution.Record.HostPath)
-		if err != nil {
-			return fmt.Errorf("read project archive for comparison: %w", err)
-		}
-		result, streamErr := data.Stream(ctx, execution.Loaded.Context, ports.InstanceExecRequest{
-			Command: []string{"tar", "-C", execution.Record.YardPath, "--compare", "--file=-"},
-		}, archive)
-		closeErr := archive.Close()
-		if streamErr == nil && result.ExitCode == 0 && closeErr == nil {
-			converged, metadataErr := cli.projectMetadataConverged(ctx, execution)
-			if metadataErr != nil {
-				return metadataErr
-			}
-			execution.ActionChanged = !converged
-			return nil
-		}
-		if result.ExitCode == 1 && closeErr == nil {
-			execution.ActionChanged = true
-			return nil
-		}
-		return fmt.Errorf("compare project archive: %w", errors.Join(streamErr, closeErr))
+		return cli.observeSyncCopy(ctx, execution)
 	case "bind":
 		if execution.Loaded.Context.AccessKind == domain.AccessRemote {
 			return errors.New("bind is host-local; use sync or clone")
@@ -693,20 +660,21 @@ func (cli *CLI) previewProjectAdmission(
 	mode domain.ProjectMode,
 	requestedName string,
 	explicit bool,
+	workspaceNames ...string,
 ) (state.Admission, error) {
 	if loaded.Context.AccessKind != domain.AccessRemote {
 		if store == nil {
 			return state.Admission{}, errors.New("project store is required")
 		}
-		return store.PreviewAdmission(ctx, source, mode, requestedName, explicit)
+		return store.PreviewAdmission(ctx, source, mode, requestedName, explicit, workspaceNames...)
 	}
 	explicitValue := "0"
 	if explicit {
 		explicitValue = "1"
 	}
-	output, err := cli.remoteProjectStateCall(ctx, loaded.Context, []string{
+	output, err := cli.remoteProjectStateCall(ctx, loaded.Context, append([]string{
 		"preview", source, string(mode), requestedName, explicitValue,
-	})
+	}, workspaceNames...))
 	if err != nil {
 		return state.Admission{}, fmt.Errorf("preview project identity on owner: %w", err)
 	}
@@ -720,6 +688,9 @@ func (cli *CLI) previewProjectAdmission(
 	}
 	if !domain.SafeProjectName(response.ProjectID) || response.Name != response.ProjectID {
 		return state.Admission{}, errors.New("owner returned an invalid canonical project preview")
+	}
+	if response.Existing != nil && mode == domain.ProjectSync {
+		return state.Admission{}, errors.New("owner does not support independent sync copies; update the owner runtime")
 	}
 	if response.Existing != nil {
 		if err := response.Existing.Validate(response.ProjectID); err != nil {
@@ -1066,10 +1037,10 @@ func (cli *CLI) reserveRemoteProject(
 	if execution.ExplicitName {
 		explicit = "1"
 	}
-	output, err := cli.remoteProjectStateCall(ctx, execution.Loaded.Context, []string{
+	output, err := cli.remoteProjectStateCall(ctx, execution.Loaded.Context, append([]string{
 		"reserve", execution.OperationID, execution.Record.HostPath,
 		string(execution.Record.Mode), execution.RequestedName, explicit,
-	})
+	}, execution.WorkspaceNames...))
 	if err != nil {
 		return fmt.Errorf("reserve project identity on owner: %w", err)
 	}
@@ -1084,6 +1055,9 @@ func (cli *CLI) reserveRemoteProject(
 	}
 	if response.Existing == nil && !response.Reserved {
 		return errors.New("owner returned neither an existing project nor a reservation")
+	}
+	if response.Existing != nil && execution.Record.Mode == domain.ProjectSync {
+		return errors.New("owner does not support independent sync copies; update the owner runtime")
 	}
 	if response.Existing != nil {
 		if err := response.Existing.Validate(response.ProjectID); err != nil ||
@@ -1111,6 +1085,10 @@ func (cli *CLI) reserveRemoteProject(
 		(response.Existing == nil) != (execution.PreviewExisting == nil)
 	if !stale && response.Existing != nil {
 		stale = *response.Existing != *execution.PreviewExisting
+	}
+	if stale && execution.automaticSyncCopy() && response.Reserved && response.Existing == nil {
+		execution.setCopyIdentity(response.ProjectID, response.Name)
+		stale = false
 	}
 	if stale {
 		if response.Reserved {
@@ -1149,7 +1127,7 @@ func (cli *CLI) reserveProjectExecution(
 	}
 	admission, err := execution.Store.Admit(
 		ctx, execution.OperationID, execution.Record.HostPath, execution.Record.Mode,
-		execution.RequestedName, execution.ExplicitName,
+		execution.RequestedName, execution.ExplicitName, execution.WorkspaceNames...,
 	)
 	if err != nil {
 		return fmt.Errorf("reserve project identity: %w", err)
@@ -1159,6 +1137,10 @@ func (cli *CLI) reserveProjectExecution(
 		(admission.Existing == nil) != (execution.PreviewExisting == nil)
 	if !stale && admission.Existing != nil {
 		stale = *admission.Existing != *execution.PreviewExisting
+	}
+	if stale && execution.automaticSyncCopy() && admission.Reservation != nil && admission.Existing == nil {
+		execution.setCopyIdentity(admission.ProjectID, admission.Name)
+		stale = false
 	}
 	if stale {
 		if admission.Reservation != nil {

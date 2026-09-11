@@ -1,6 +1,8 @@
 package application
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,6 +18,46 @@ import (
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
+
+type projectProcessExecutor struct{}
+
+func (projectProcessExecutor) Execute(
+	ctx context.Context,
+	_ domain.Context,
+	request ports.InstanceExecRequest,
+) (ports.InstanceExecResult, error) {
+	return executeProjectProcess(ctx, request, bytes.NewReader(request.Stdin))
+}
+
+func (projectProcessExecutor) Stream(
+	ctx context.Context,
+	_ domain.Context,
+	request ports.InstanceExecRequest,
+	input io.Reader,
+) (ports.InstanceExecResult, error) {
+	return executeProjectProcess(ctx, request, input)
+}
+
+func executeProjectProcess(
+	ctx context.Context,
+	request ports.InstanceExecRequest,
+	input io.Reader,
+) (ports.InstanceExecResult, error) {
+	command := exec.CommandContext(ctx, request.Command[0], request.Command[1:]...)
+	command.Stdin = input
+	command.Env = os.Environ()
+	for key, value := range request.Environment {
+		command.Env = append(command.Env, key+"="+value)
+	}
+	var stdout, stderr bytes.Buffer
+	command.Stdout, command.Stderr = &stdout, &stderr
+	err := command.Run()
+	result := ports.InstanceExecResult{Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}
+	if exitErr := new(exec.ExitError); errors.As(err, &exitErr) {
+		result.ExitCode = exitErr.ExitCode()
+	}
+	return result, err
+}
 
 type projectDataStub struct {
 	requests []ports.InstanceExecRequest
@@ -415,11 +457,136 @@ func TestProjectSyncStreamsArchiveAndWritesMetadata(t *testing.T) {
 	}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if len(data.requests) != 4 || data.requests[1].Command[0] != "tar" ||
-		string(data.requests[1].Stdin) != "archive" || data.requests[2].Command[0] != "tee" ||
-		data.requests[3].Command[4] != projectHooksDispatcher {
+	if len(data.requests) != 5 || data.requests[0].Command[0] != "mkdir" ||
+		data.requests[1].Command[0] != "install" || data.requests[2].Command[0] != "tar" ||
+		string(data.requests[2].Stdin) != "archive" || data.requests[3].Command[0] != "tee" ||
+		data.requests[4].Command[4] != projectHooksDispatcher {
 		t.Fatalf("unexpected sync sequence: %#v", data.requests)
 	}
+}
+
+func TestProjectSyncReservesLocalWorkspaceAsRootBeforeAssigningOwnership(t *testing.T) {
+	data := &projectDataStub{}
+	record := cloneRecord()
+	record.Mode, record.HostPath = domain.ProjectSync, "/host/demo"
+	runner := ProjectActionRunner{
+		Data: data, Archive: projectArchiveStub{payload: "archive"},
+		Yard: domain.Context{AccessKind: domain.AccessLocal, DevUID: 1234}, Project: record,
+	}
+	if err := runner.sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Dir(record.YardPath)
+	if got := data.requests[0]; !slices.Equal(got.Command, []string{"mkdir", "--", root}) ||
+		got.User != 0 || got.Group != 0 {
+		t.Fatalf("local reservation was not privileged and exclusive: %#v", got)
+	}
+	wantOwnership := []string{
+		"install", "-d", "-o", "1234", "-g", "1234", "--", root, record.YardPath,
+	}
+	if got := data.requests[1]; !slices.Equal(got.Command, wantOwnership) ||
+		got.User != 0 || got.Group != 0 {
+		t.Fatalf("local workspace ownership was not assigned by root: %#v", got)
+	}
+}
+
+func TestProjectSyncRejectsExistingPhysicalWorkspaceBeforeOpeningArchive(t *testing.T) {
+	for _, existing := range []string{"directory", "symlink"} {
+		t.Run(existing, func(t *testing.T) {
+			base := t.TempDir()
+			workspace := filepath.Join(base, "Demo")
+			kept := filepath.Join(base, "kept")
+			if err := os.Mkdir(kept, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if existing == "directory" {
+				if err := os.Mkdir(workspace, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.Symlink(kept, workspace); err != nil {
+				t.Fatal(err)
+			}
+
+			archive := &countingProjectArchive{payload: validProjectArchive(t, "copied")}
+			record := cloneRecord()
+			record.Mode, record.HostPath, record.YardPath = domain.ProjectSync, "/host/demo", filepath.Join(workspace, "src")
+			runner := ProjectActionRunner{
+				Data: projectProcessExecutor{}, Archive: archive,
+				Yard: domain.Context{AccessKind: domain.AccessRemote, DevUID: os.Getuid()}, Project: record,
+			}
+			if err := runner.sync(context.Background()); err == nil {
+				t.Fatal("sync accepted an existing physical workspace")
+			}
+			if archive.opens != 0 {
+				t.Fatalf("archive opened before workspace reservation: %d", archive.opens)
+			}
+			if _, err := os.Stat(kept); err != nil {
+				t.Fatalf("preexisting target changed: %v", err)
+			}
+		})
+	}
+}
+
+func TestProjectSyncFailedTransferLeavesReservationAndRetryUsesDistinctWorkspace(t *testing.T) {
+	base := t.TempDir()
+	firstRoot := filepath.Join(base, "Demo")
+	first := cloneRecord()
+	first.Mode, first.HostPath, first.YardPath = domain.ProjectSync, "/host/demo", filepath.Join(firstRoot, "src")
+	failed := ProjectActionRunner{
+		Data: projectProcessExecutor{}, Archive: projectArchiveStub{payload: "not a tar archive"},
+		Yard: domain.Context{AccessKind: domain.AccessRemote, DevUID: os.Getuid()}, Project: first,
+	}
+	if err := failed.sync(context.Background()); err == nil {
+		t.Fatal("invalid transfer unexpectedly succeeded")
+	}
+	marker := filepath.Join(firstRoot, "reserved-after-failure")
+	if err := os.WriteFile(marker, []byte("keep"), 0o600); err != nil {
+		t.Fatalf("failed workspace was not retained: %v", err)
+	}
+
+	second := first
+	second.ProjectID, second.Name = "Demo-2", "Demo-2"
+	second.YardPath = filepath.Join(base, "Demo-2", "src")
+	retry := ProjectActionRunner{
+		Data: projectProcessExecutor{}, Archive: &countingProjectArchive{payload: validProjectArchive(t, "second-copy")},
+		Yard: domain.Context{YardName: "default", AccessKind: domain.AccessRemote, DevUID: os.Getuid()}, Project: second,
+	}
+	if err := retry.sync(context.Background()); err != nil {
+		t.Fatalf("retry in distinct workspace failed: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(second.YardPath, "content.txt")); err != nil || string(got) != "second-copy" {
+		t.Fatalf("retry content: %q, %v", got, err)
+	}
+	if got, err := os.ReadFile(marker); err != nil || string(got) != "keep" {
+		t.Fatalf("retry changed failed workspace: %q, %v", got, err)
+	}
+}
+
+type countingProjectArchive struct {
+	payload []byte
+	opens   int
+}
+
+func (archive *countingProjectArchive) Open(context.Context, string) (io.ReadCloser, error) {
+	archive.opens++
+	return io.NopCloser(bytes.NewReader(archive.payload)), nil
+}
+
+func validProjectArchive(t *testing.T, content string) []byte {
+	t.Helper()
+	var payload bytes.Buffer
+	w := tar.NewWriter(&payload)
+	data := []byte(content)
+	if err := w.WriteHeader(&tar.Header{Name: "content.txt", Mode: 0o600, Size: int64(len(data))}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return payload.Bytes()
 }
 
 func TestProjectBindUsesIncusDeviceAndWritesMetadata(t *testing.T) {

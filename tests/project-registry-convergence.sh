@@ -27,14 +27,26 @@ fi
 if [[ "$joined" == *'_project-state'* ]]; then
   printf '%s\n' "$joined" >> "$REGISTRY_TEST_STATE/owner-calls"
   [ ! -e "$REGISTRY_TEST_STATE/fail-owner" ]
+  if [[ "$joined" == *finalize* && "$joined" == *RemoteDemo* ]]; then
+    finalized="$(cat "$REGISTRY_TEST_STATE/remote-sync-count" 2>/dev/null || printf 0)"
+    printf '%s\n' "$((finalized + 1))" > "$REGISTRY_TEST_STATE/remote-sync-count"
+  fi
   if [[ "$joined" == *preview* && "$joined" == *RemoteDemo* ]]; then
-    printf '%s\n' '{"projectId":"RemoteDemo","name":"RemoteDemo"}'
+    finalized="$(cat "$REGISTRY_TEST_STATE/remote-sync-count" 2>/dev/null || printf 0)"
+    case "$finalized" in
+      0) allocated=RemoteDemo ;;
+      1) allocated=RemoteDemo-2 ;;
+      *) allocated=RemoteDemo-3 ;;
+    esac
+    printf '%s\n' "$allocated" > "$REGISTRY_TEST_STATE/remote-sync-next"
+    printf '{"projectId":"%s","name":"%s"}\n' "$allocated" "$allocated"
   elif [[ "$joined" == *preview* && "$joined" == *StaleDemo* ]]; then
     printf '%s\n' '{"projectId":"StaleDemo-3","name":"StaleDemo-3"}'
   elif [[ "$joined" == *preview* && "$joined" == *ForeignClone* ]]; then
     printf '%s\n' '{"projectId":"ForeignClone","name":"ForeignClone"}'
   elif [[ "$joined" == *reserve* && "$joined" == *RemoteDemo* ]]; then
-    printf '%s\n' '{"projectId":"RemoteDemo","name":"RemoteDemo","reserved":true}'
+    allocated="$(cat "$REGISTRY_TEST_STATE/remote-sync-next")"
+    printf '{"projectId":"%s","name":"%s","reserved":true}\n' "$allocated" "$allocated"
   elif [[ "$joined" == *reserve* && "$joined" == *StaleDemo* ]]; then
     printf '%s\n' '{"projectId":"StaleDemo-3","name":"StaleDemo-3","reserved":true}'
   elif [[ "$joined" == *reserve* && "$joined" == *ForeignClone* ]]; then
@@ -51,7 +63,9 @@ if [[ "$joined" == *'.subyard-meta.json'* ]]; then
   exit 0
 fi
 if [[ "$joined" == *"'-xf' '-'"* ]]; then
-  cat >/dev/null
+  finalized="$(cat "$REGISTRY_TEST_STATE/remote-sync-count" 2>/dev/null || printf 0)"
+  stream_index=$((finalized + 1))
+  cat > "$REGISTRY_TEST_STATE/tar-stream-$stream_index.tar"
   : > "$REGISTRY_TEST_STATE/tar-stream"
   exit 0
 fi
@@ -148,10 +162,26 @@ remote_state="$SUBYARD_CONFIG_HOME/yards/remote/projects/$remote_id.json"
 jq -e '.projectId == $id and .target == "yard"' --arg id "$remote_id" \
   "$REGISTRY_TEST_STATE/yard-meta.json" >/dev/null || fail 'yard metadata omitted the project target'
 [ -e "$REGISTRY_TEST_STATE/tar-stream" ] || fail 'native sync did not stream the project archive'
+cp "$REGISTRY_TEST_STATE/yard-meta.json" "$REGISTRY_TEST_STATE/yard-meta-first.json"
 
 rm -f "$REGISTRY_TEST_STATE/tar-stream"
+printf 'second\n' > "$TMP/projects/RemoteDemo/file.txt"
 "$ROOT/bin/yard" -Y remote sync "$TMP/projects/RemoteDemo" --target yard --yes >/dev/null
-[ -e "$REGISTRY_TEST_STATE/tar-stream" ] || fail 'native sync refresh did not stream the project archive'
+[ -e "$REGISTRY_TEST_STATE/tar-stream" ] || fail 'second native sync did not stream the project archive'
+jq -e '.projectId == "RemoteDemo-2" and .name == "RemoteDemo-2"' \
+  "$REGISTRY_TEST_STATE/yard-meta.json" >/dev/null \
+  || fail 'second native sync reused the first owner identity'
+printf 'third\n' > "$TMP/projects/RemoteDemo/file.txt"
+"$ROOT/bin/yard" -Y remote sync "$TMP/projects/RemoteDemo" --target yard --yes >/dev/null
+jq -e '.projectId == "RemoteDemo-3" and .name == "RemoteDemo-3"' \
+  "$REGISTRY_TEST_STATE/yard-meta.json" >/dev/null \
+  || fail 'third native sync reused an earlier owner identity'
+jq -e '.projectId == "RemoteDemo"' "$REGISTRY_TEST_STATE/yard-meta-first.json" >/dev/null \
+  || fail 'later native sync changed the first owner identity'
+[ "$(tar -xOf "$REGISTRY_TEST_STATE/tar-stream-1.tar" ./file.txt)" = demo ] \
+  && [ "$(tar -xOf "$REGISTRY_TEST_STATE/tar-stream-2.tar" ./file.txt)" = second ] \
+  && [ "$(tar -xOf "$REGISTRY_TEST_STATE/tar-stream-3.tar" ./file.txt)" = third ] \
+  || fail 'same-source sync snapshots did not preserve invocation contents'
 
 # A stale controller allocation is discarded before planning; the owner-returned
 # identity drives the physical operation and metadata on the first attempt.

@@ -2578,7 +2578,7 @@ func (cli *CLI) runOwnerProjectState(
 	}
 	switch arguments[0] {
 	case "preview":
-		if len(arguments) != 5 {
+		if len(arguments) < 5 {
 			cli.errorf("internal: _project-state preview needs <source> <mode> <name> <explicit>")
 			return 2
 		}
@@ -2589,7 +2589,7 @@ func (cli *CLI) runOwnerProjectState(
 		}
 		admission, err := store.PreviewAdmission(
 			ctx, arguments[1], domain.ProjectMode(arguments[2]),
-			arguments[3], arguments[4] == "1",
+			arguments[3], arguments[4] == "1", arguments[5:]...,
 		)
 		if err != nil {
 			cli.errorf("preview owner project identity: %v", err)
@@ -2605,7 +2605,7 @@ func (cli *CLI) runOwnerProjectState(
 			return 1
 		}
 	case "reserve":
-		if len(arguments) != 6 {
+		if len(arguments) < 6 {
 			cli.errorf("internal: _project-state reserve needs <operation> <source> <mode> <name> <explicit>")
 			return 2
 		}
@@ -2616,7 +2616,7 @@ func (cli *CLI) runOwnerProjectState(
 		}
 		admission, err := store.Admit(
 			ctx, arguments[1], arguments[2], domain.ProjectMode(arguments[3]),
-			arguments[4], arguments[5] == "1",
+			arguments[4], arguments[5] == "1", arguments[6:]...,
 		)
 		if err != nil {
 			cli.errorf("reserve owner project identity: %v", err)

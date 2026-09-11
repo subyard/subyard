@@ -4431,89 +4431,13 @@ func TestAssessStructuredActionUsesTypedCoreAssessment(t *testing.T) {
 	}
 }
 
-func TestObserveProjectActionDetectsSyncAndEnvironmentNoOps(t *testing.T) {
+func TestObserveProjectActionDetectsExportAndEnvironmentNoOps(t *testing.T) {
 	record := domain.ProjectRecord{
 		Schema: 1, IdentityVersion: 2, ProjectID: "Demo", Name: "Demo",
 		HostPath: "/host/Demo", SourceKey: state.SourceKey("/host/Demo"),
 		YardPath: state.YardPath("Demo"), Mode: domain.ProjectSync,
 		SSHHost: "yard", Target: "yard",
 	}
-	t.Run("new sync", func(t *testing.T) {
-		execution := &projectExecution{Record: record}
-		program := &CLI{}
-		if err := program.observeProjectAction(context.Background(), "sync", execution); err != nil {
-			t.Fatal(err)
-		}
-		if !execution.ActionChanged {
-			t.Fatal("new sync was assessed as a no-op")
-		}
-	})
-	t.Run("converged sync", func(t *testing.T) {
-		root, environment, _ := nativeFixture(t)
-		incus := lifecycleIncus()
-		probe := projectActionObservationProbe{
-			execute: func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
-				if slices.Contains(request.Command, filepath.Join(filepath.Dir(record.YardPath), ".subyard-meta.json")) {
-					return ports.InstanceExecResult{Stdout: []byte("match"), ExitCode: 0}, nil
-				}
-				return ports.InstanceExecResult{Stdout: []byte("present"), ExitCode: 0}, nil
-			},
-			stream: func(request ports.InstanceExecRequest, _ io.Reader) (ports.InstanceExecResult, error) {
-				if len(request.Command) == 0 || request.Command[0] != "tar" {
-					t.Fatalf("sync comparison=%#v", request.Command)
-				}
-				return ports.InstanceExecResult{ExitCode: 0}, nil
-			},
-		}
-		program, err := New(Options{
-			RepositoryRoot: root, Program: "yard", Environment: environment,
-			WorkingDir: root, Incus: incus, ProjectData: probe, ProjectArchive: projectActionArchive("archive"),
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		existing := record
-		execution := &projectExecution{Loaded: config.Loaded{Context: domain.Context{AccessKind: domain.AccessLocal}}, Record: record, PreviewExisting: &existing}
-		if err := program.observeProjectAction(context.Background(), "sync", execution); err != nil {
-			t.Fatal(err)
-		}
-		if execution.ActionChanged {
-			t.Fatal("converged sync was assessed as changed")
-		}
-	})
-	t.Run("sync metadata drift", func(t *testing.T) {
-		root, environment, _ := nativeFixture(t)
-		probe := projectActionObservationProbe{
-			execute: func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
-				if slices.Contains(request.Command, record.YardPath) {
-					return ports.InstanceExecResult{Stdout: []byte("present"), ExitCode: 0}, nil
-				}
-				return ports.InstanceExecResult{Stdout: []byte("different"), ExitCode: 0}, nil
-			},
-			stream: func(ports.InstanceExecRequest, io.Reader) (ports.InstanceExecResult, error) {
-				return ports.InstanceExecResult{ExitCode: 0}, nil
-			},
-		}
-		program, err := New(Options{
-			RepositoryRoot: root, Program: "yard", Environment: environment,
-			WorkingDir: root, Incus: lifecycleIncus(), ProjectData: probe,
-			ProjectArchive: projectActionArchive("archive"),
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		existing := record
-		execution := &projectExecution{
-			Loaded: config.Loaded{Context: domain.Context{AccessKind: domain.AccessLocal, YardName: "default"}},
-			Record: record, PreviewExisting: &existing,
-		}
-		if err := program.observeProjectAction(context.Background(), "sync", execution); err != nil {
-			t.Fatal(err)
-		}
-		if !execution.ActionChanged {
-			t.Fatal("metadata drift was assessed as a no-op")
-		}
-	})
 	for _, test := range []struct {
 		name     string
 		exitCode int
@@ -4673,7 +4597,7 @@ func TestProjectReservationRejectsIdentityDriftAfterConsent(t *testing.T) {
 		t.Fatal(err)
 	}
 	execution, err := program.prepareProjectImport(
-		context.Background(), loaded, "sync", []string{projectPath},
+		context.Background(), loaded, "bind", []string{projectPath},
 	)
 	if err != nil || execution.Record.ProjectID != "Demo" {
 		t.Fatalf("preview=%#v err=%v", execution, err)
@@ -4771,7 +4695,7 @@ printf '%s\n' '{"projectId":"Demo-2","name":"Demo-2","reserved":true,"existing":
 		Loaded: config.Loaded{Context: domain.Context{
 			AccessKind: domain.AccessRemote, OwnerEndpoint: "dev@owner.example", SSHHost: "yard",
 		}},
-		Commit: projectCommitPut, OperationID: "reserve-operation", RequestedName: "Demo",
+		ExplicitName: true, Commit: projectCommitPut, OperationID: "reserve-operation", RequestedName: "Demo",
 		Record: domain.ProjectRecord{
 			Schema: 1, IdentityVersion: 2, ProjectID: "Demo", Name: "Demo",
 			HostPath: "/host/Demo", SourceKey: state.SourceKey("/host/Demo"),

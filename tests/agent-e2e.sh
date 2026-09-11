@@ -2411,9 +2411,9 @@ owner_incus_line="$(grep -n 'OWNER_BASELINE_IMAGES=.*incus image list' "$ROOT/de
   || fail "P0 owner lane uses Incus before its disposable-VM bootstrap"
 grep -Fq './bin/yard -Y test-yard start --yes' "$ROOT/dev/e2e/p0-guest.sh" \
   || fail "P0 owner lane does not make start automation explicit"
-grep -Fq 'shell "$source" --yes --' "$ROOT/dev/e2e/p0-guest.sh" \
+grep -Fq 'shell P0Project-3 --yes --' "$ROOT/dev/e2e/p0-guest.sh" \
   || fail "P0 owner lane does not confirm shell automation"
-grep -Fq 'export "$source" --yes' "$ROOT/dev/e2e/p0-guest.sh" \
+grep -Fq 'export P0Project-3 --yes' "$ROOT/dev/e2e/p0-guest.sh" \
   || fail "P0 owner lane does not confirm export automation"
 grep -Fq 'exec %q/yard "$@"' "$ROOT/dev/e2e/p0-guest.sh" \
   && grep -Fq '"$release/subyard-install.sh" --yes' "$ROOT/dev/e2e/p0-guest.sh" \

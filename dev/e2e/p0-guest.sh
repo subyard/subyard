@@ -109,7 +109,7 @@ owner_project_contract() {
   local bound="$root/two/P0Project"
   local rejected="$root/three/P0Project"
   local git_url='file:///tmp/P0Project.git'
-  local completions patch projects reservation replay retried
+  local completions patch projects reservation replay retried sync_pid_one sync_pid_two
   clean_tree "$root" "$MARKER"
   install -d -m 0700 "$source" "$bound" "$rejected"
   printf '%s\n' "$MARKER" > "$root/.subyard-p0-marker"
@@ -126,44 +126,63 @@ owner_project_contract() {
   ./bin/yard -Y test-yard bind "$bound" --yes >/dev/null
   ./bin/yard -Y test-yard clone "$git_url" --yes >/dev/null
   ./bin/yard -Y test-yard sync "$source" --target openclaw --yes >/dev/null
+  printf '%s\nsecond\n' "$MARKER" > "$source/result.txt"
+  ./bin/yard -Y test-yard sync "$source" --target openclaw --yes >/dev/null
+  printf '%s\nthird\n' "$MARKER" > "$source/result.txt"
+  ./bin/yard -Y test-yard sync "$source" --target openclaw --yes >/dev/null
   projects="$(./bin/yard -Y test-yard list)"
   [ "$(awk '$1 == "P0Project" { count++ } END { print count+0 }' <<<"$projects")" = 1 ] \
     && [ "$(awk '$1 == "P0Project-2" { count++ } END { print count+0 }' <<<"$projects")" = 1 ] \
     && [ "$(awk '$1 == "P0Project-3" { count++ } END { print count+0 }' <<<"$projects")" = 1 ] \
-    || die 'same-basename bind, clone and sync did not receive three canonical names'
+    && [ "$(awk '$1 == "P0Project-4" { count++ } END { print count+0 }' <<<"$projects")" = 1 ] \
+    && [ "$(awk '$1 == "P0Project-5" { count++ } END { print count+0 }' <<<"$projects")" = 1 ] \
+    || die 'same-source syncs did not receive independent canonical names'
   completions="$(./bin/yard -Y test-yard list --complete-projects)"
-  for project in P0Project P0Project-2 P0Project-3; do
+  for project in P0Project P0Project-2 P0Project-3 P0Project-4 P0Project-5; do
     grep -Fxq "$project" <<<"$completions" \
       || die "project completion omitted $project"
   done
   incus exec yard-test-yard --project subyard-test-yard -- \
     jq -e '
-      .identityVersion == 2 and .projectId == "P0Project-3" and
-      .name == "P0Project-3" and .yard == "test-yard"
-    ' /srv/workspaces/P0Project-3/.subyard-meta.json >/dev/null \
+      .identityVersion == 2 and .projectId == "P0Project-5" and
+      .name == "P0Project-5" and .yard == "test-yard"
+    ' /srv/workspaces/P0Project-5/.subyard-meta.json >/dev/null \
     || die 'canonical project metadata was not published'
+  ./bin/yard -Y test-yard shell P0Project-3 --yes -- grep -Fxq base result.txt
+  ./bin/yard -Y test-yard shell P0Project-4 --yes -- grep -Fxq second result.txt
+  ./bin/yard -Y test-yard shell P0Project-5 --yes -- grep -Fxq third result.txt
   if ./bin/yard -Y test-yard sync "$rejected" --name P0Project --yes \
     >/dev/null 2>&1; then
     die 'explicit colliding project name reached physical mutation'
   fi
   [ "$(./bin/yard -Y test-yard list | awk '
-    $1 == "P0Project" || $1 == "P0Project-2" || $1 == "P0Project-3" { count++ }
+    $1 ~ /^P0Project(-[2-5])?$/ { count++ }
     END { print count+0 }
-  ')" = 3 ] \
+  ')" = 5 ] \
     || die 'explicit collision changed the project inventory'
   ./bin/yard -Y test-yard bind "$bound" --yes >/dev/null
-  ./bin/yard -Y test-yard sync "$source" --target openclaw --yes >/dev/null
   if ./bin/yard -Y test-yard clone "$git_url" --yes >/dev/null 2>&1; then
     die 'repeat clone of the same source created another identity'
   fi
   if ./bin/yard -Y test-yard sync "$bound" --yes >/dev/null 2>&1; then
     die 'same source changed mode from bind to sync'
   fi
-  [ "$(./bin/yard -Y test-yard list | awk '
-    $1 == "P0Project" || $1 == "P0Project-2" || $1 == "P0Project-3" { count++ }
-    END { print count+0 }
-  ')" = 3 ] \
-    || die 'same-source retries changed the project inventory'
+  printf '%s\nconcurrent\n' "$MARKER" > "$source/result.txt"
+  ./bin/yard -Y test-yard sync "$source" --target openclaw --yes >/dev/null &
+  sync_pid_one=$!
+  ./bin/yard -Y test-yard sync "$source" --target openclaw --yes >/dev/null &
+  sync_pid_two=$!
+  wait "$sync_pid_one"
+  wait "$sync_pid_two"
+  projects="$(./bin/yard -Y test-yard list)"
+  [ "$(awk '$1 == "P0Project-6" || $1 == "P0Project-7" { count++ } END { print count+0 }' <<<"$projects")" = 2 ] \
+    || die 'concurrent same-source syncs did not receive distinct canonical names'
+  ./bin/yard -Y test-yard remove P0Project-5 --soft --yes >/dev/null
+  ./bin/yard -Y test-yard sync "$source" --target openclaw --yes >/dev/null
+  ./bin/yard -Y test-yard shell P0Project-8 --yes -- grep -Fxq concurrent result.txt
+  incus exec yard-test-yard --project subyard-test-yard -- \
+    test -d /srv/workspaces/P0Project-5/src \
+    || die 'soft-removed workspace was not retained'
   reservation="$(./bin/yard -Y test-yard _project-state reserve \
     "p0-interrupted-$TOKEN" "/tmp/p0-interrupted-$TOKEN" sync P0Interrupted 0)"
   replay="$(./bin/yard -Y test-yard _project-state reserve \
@@ -183,17 +202,17 @@ owner_project_contract() {
   ./bin/yard -Y test-yard shell P0Project-2 --yes -- \
     test -d .git
   ./bin/yard -Y test-yard remove P0Project-2 --yes >/dev/null
-  ./bin/yard -Y test-yard shell P0Project-3 --yes -- \
-    grep -Fxq base result.txt
-  ./bin/yard -Y test-yard up "$source" --yes >/dev/null
-  ./bin/yard -Y test-yard info "$source" | grep -Fq '"profile": "openclaw"'
-  ./bin/yard -Y test-yard down "$source" --yes >/dev/null
-  env PATH=/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin ./bin/yard -Y test-yard code "$source" --yes >/dev/null
-  ./bin/yard -Y test-yard shell "$source" --yes -- sh -c 'printf "mutated\n" >> result.txt'
-  ./bin/yard -Y test-yard export "$source" --yes >/dev/null
+  ./bin/yard -Y test-yard up P0Project-3 --yes >/dev/null
+  ./bin/yard -Y test-yard info P0Project-3 | grep -Fq '"profile": "openclaw"'
+  ./bin/yard -Y test-yard down P0Project-3 --yes >/dev/null
+  env PATH=/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin ./bin/yard -Y test-yard code P0Project-3 --yes >/dev/null
+  ./bin/yard -Y test-yard shell P0Project-3 --yes -- sh -c 'printf "mutated\n" >> result.txt'
+  ./bin/yard -Y test-yard shell P0Project-4 --yes -- grep -Fxq second result.txt
+  ./bin/yard -Y test-yard export P0Project-3 --yes >/dev/null
   patch="$(grep -RIl -- 'mutated' "${SUBYARD_HOME:-$HOME/.subyard}/exports" | head -n1)"
   [ -n "$patch" ] || die 'project export did not contain the guest change'
-  ./bin/yard -Y test-yard remove "$source" --yes >/dev/null
+  ./bin/yard -Y test-yard remove P0Project-3 --yes >/dev/null
+  ./bin/yard -Y test-yard shell P0Project-4 --yes -- grep -Fxq second result.txt
   find "$patch" -delete
   clean_tree "$root" "$MARKER"
 }
@@ -1452,6 +1471,7 @@ peer_projects() {
   local source="$PEER_ROOT/project" remote_pwd inventory owner_selector="e2e-vm-2/default"
   local ssh_config="$HOME/.ssh/config"
   local include="Include $PEER_ROOT/home/.ssh/subyard-peer.config"
+  local sync_pid_one sync_pid_two
   [ "$SUBYARD_E2E_VM" = 1 ] || die 'remote project controller requires VM1'
   valid_ip "$PEER_IP" || die 'peer IP is invalid'
   install -d -m 0700 "$source"
@@ -1473,9 +1493,22 @@ peer_projects() {
   "$PEER_YARD_ENTRY" remote add peer "dev@$PEER_IP" --yes >/dev/null
   "$PEER_YARD_ENTRY" -Y peer _project-state upsert project project sync yard >/dev/null
   "$PEER_YARD_ENTRY" -Y peer sync "$source" --yes >/dev/null
+  printf '%s\nsecond\n' "$MARKER" > "$source/result.txt"
+  "$PEER_YARD_ENTRY" -Y peer sync "$source" --yes >/dev/null
+  "$PEER_YARD_ENTRY" -Y "$owner_selector" shell project-2 --yes -- grep -Fxq base result.txt
+  "$PEER_YARD_ENTRY" -Y "$owner_selector" shell project-3 --yes -- grep -Fxq second result.txt
+  printf '%s\nconcurrent\n' "$MARKER" > "$source/result.txt"
+  "$PEER_YARD_ENTRY" -Y peer sync "$source" --yes >/dev/null &
+  sync_pid_one=$!
+  "$PEER_YARD_ENTRY" -Y peer sync "$source" --yes >/dev/null &
+  sync_pid_two=$!
+  wait "$sync_pid_one"
+  wait "$sync_pid_two"
   inventory="$("$PEER_YARD_ENTRY" list)"
-  grep -Eq '(^|[[:space:]])project-2([[:space:]]|$)' <<<"$inventory" \
-    || die 'owner allocation did not override the stale controller inventory'
+  for project in project-2 project-3 project-4 project-5; do
+    grep -Eq "(^|[[:space:]])$project([[:space:]]|$)" <<<"$inventory" \
+      || die "remote same-source sync omitted $project"
+  done
   remote_pwd="$("$PEER_YARD_ENTRY" -Y "$owner_selector" shell project-2 --yes -- pwd)"
   case "$remote_pwd" in /srv/workspaces/*/src) ;; *) die 'remote shell did not enter the synced project' ;; esac
   [ "$remote_pwd" = /srv/workspaces/project-2/src ] \
@@ -1484,7 +1517,9 @@ peer_projects() {
     sh -c 'printf "remote-mutated\n" >> result.txt'
   "$PEER_YARD_ENTRY" -Y "$owner_selector" shell project-2 --yes -- \
     grep -Fqx remote-mutated result.txt
-  printf 'ok: owner allocation overrode stale controller inventory\n'
+  "$PEER_YARD_ENTRY" -Y "$owner_selector" shell project-3 --yes -- \
+    grep -Fxq second result.txt
+  printf 'ok: remote owner allocated independent same-source sync copies\n'
 }
 
 peer_projects_offline() {
@@ -1510,7 +1545,7 @@ peer_projects_offline() {
   fi
   grep -Fqi stale <<<"$inventory" \
     || die "offline owner did not expose its last snapshot as stale: $inventory"
-  grep -Eq '(^|[[:space:]])project-2([[:space:]]|$)' <<<"$inventory" \
+  grep -Eq '(^|[[:space:]])project-5([[:space:]]|$)' <<<"$inventory" \
     || die 'offline owner lost its explicit stale project snapshot'
   printf 'ok: offline owner returned zero with an explicit stale snapshot\n'
 }
@@ -1519,12 +1554,16 @@ peer_projects_finish() {
   local inventory owner_selector="e2e-vm-2/default"
   [ "$SUBYARD_E2E_VM" = 1 ] || die 'remote project controller requires VM1'
   inventory="$("$PEER_YARD_ENTRY" list --live)"
-  grep -Eq '(^|[[:space:]])project-2([[:space:]]|$)' <<<"$inventory" \
+  grep -Eq '(^|[[:space:]])project-5([[:space:]]|$)' <<<"$inventory" \
     || die 'force refresh did not recover the remote owner inventory'
   "$PEER_YARD_ENTRY" -Y "$owner_selector" remove project-2 --yes >/dev/null
+  "$PEER_YARD_ENTRY" -Y "$owner_selector" shell project-3 --yes -- grep -Fxq second result.txt
+  for project in project-3 project-4 project-5; do
+    "$PEER_YARD_ENTRY" -Y "$owner_selector" remove "$project" --yes >/dev/null
+  done
   "$PEER_YARD_ENTRY" -Y peer _project-state unregister project
   inventory="$("$PEER_YARD_ENTRY" list --live)"
-  ! grep -Eq '(^|[[:space:]])project(-2)?([[:space:]]|$)' <<<"$inventory" \
+  ! grep -Eq '(^|[[:space:]])project(-[2-5])?([[:space:]]|$)' <<<"$inventory" \
     || die 'authoritative replacement retained a removed ghost project'
   printf 'ok: force refresh recovered and authoritative deletion left no ghost project\n'
   printf 'ok: release-installed remote add, sync and two project shells\n'

@@ -46,6 +46,7 @@ func (store *FileStore) PreviewAdmission(
 	mode domain.ProjectMode,
 	requestedName string,
 	explicit bool,
+	workspaceNames ...string,
 ) (Admission, error) {
 	if source == "" {
 		return Admission{}, errors.New("project source is required")
@@ -75,6 +76,9 @@ func (store *FileStore) PreviewAdmission(
 				record.Name, record.Mode, mode,
 			)
 		}
+		if mode == domain.ProjectSync {
+			continue
+		}
 		if explicit && record.Name != requestedName {
 			return Admission{}, fmt.Errorf(
 				"source is already registered as %q; implicit rename to %q is not allowed",
@@ -84,10 +88,20 @@ func (store *FileStore) PreviewAdmission(
 		current := record
 		return Admission{ProjectID: record.ProjectID, Name: record.Name, Existing: &current}, nil
 	}
+	reservations, err := store.readReservations(time.Now().UTC(), false)
+	if err != nil {
+		return Admission{}, err
+	}
 	occupied := make(map[string]string, len(records))
 	for _, record := range records {
 		occupied[domain.ProjectNameKey(record.ProjectID)] = record.ProjectID
 		occupied[domain.ProjectNameKey(record.Name)] = record.ProjectID
+	}
+	for _, reservation := range reservations {
+		occupied[domain.ProjectNameKey(reservation.ProjectID)] = reservation.ProjectID
+	}
+	for _, workspaceName := range workspaceNames {
+		occupied[domain.ProjectNameKey(workspaceName)] = workspaceName
 	}
 	name := requestedName
 	if owner, found := occupied[domain.ProjectNameKey(name)]; found {
@@ -108,6 +122,7 @@ func (store *FileStore) Admit(
 	mode domain.ProjectMode,
 	requestedName string,
 	explicit bool,
+	workspaceNames ...string,
 ) (Admission, error) {
 	if operationID == "" || !domain.SafeID(operationID) {
 		return Admission{}, errors.New("project admission requires a safe operation ID")
@@ -146,6 +161,9 @@ func (store *FileStore) Admit(
 				record.Name, record.Mode, mode,
 			)
 		}
+		if mode == domain.ProjectSync {
+			continue
+		}
 		if explicit && record.Name != requestedName {
 			return Admission{}, fmt.Errorf(
 				"source is already registered as %q; implicit rename to %q is not allowed",
@@ -175,7 +193,9 @@ func (store *FileStore) Admit(
 					Reservation: &current,
 				}, nil
 			}
-			return Admission{}, fmt.Errorf("%w for this source; retry shortly", ErrAdmissionPending)
+			if mode != domain.ProjectSync || reservation.Mode != domain.ProjectSync {
+				return Admission{}, fmt.Errorf("%w for this source; retry shortly", ErrAdmissionPending)
+			}
 		}
 	}
 
@@ -186,6 +206,9 @@ func (store *FileStore) Admit(
 	}
 	for _, reservation := range reservations {
 		occupied[domain.ProjectNameKey(reservation.ProjectID)] = reservation.ProjectID
+	}
+	for _, workspaceName := range workspaceNames {
+		occupied[domain.ProjectNameKey(workspaceName)] = workspaceName
 	}
 	name := requestedName
 	if owner, found := occupied[domain.ProjectNameKey(name)]; found {
@@ -226,7 +249,8 @@ func (store *FileStore) FinalizeOperation(
 		return err
 	}
 	if record.ProjectID != reservation.ProjectID || record.Name != reservation.Name ||
-		record.HostPath != reservation.Source || record.Mode != reservation.Mode {
+		record.HostPath != reservation.Source || record.Mode != reservation.Mode ||
+		record.SourceKey != SourceKey(reservation.Source) {
 		return errors.New("project admission result does not match its reservation")
 	}
 	if err := store.validateProjectNameUnlocked(record, reservation.OperationID); err != nil {
@@ -250,7 +274,7 @@ func (store *FileStore) AbortAdmission(ctx context.Context, operationID string) 
 	return store.removeReservation(operationID)
 }
 
-func (store *FileStore) readReservations(now time.Time) ([]ProjectReservation, error) {
+func (store *FileStore) readReservations(now time.Time, prune ...bool) ([]ProjectReservation, error) {
 	directory := store.reservationDirectory()
 	entries, err := os.ReadDir(directory)
 	if errors.Is(err, os.ErrNotExist) {
@@ -266,12 +290,18 @@ func (store *FileStore) readReservations(now time.Time) ([]ProjectReservation, e
 		}
 		operationID := strings.TrimSuffix(entry.Name(), ".json")
 		reservation, err := store.readReservation(operationID)
+		// A concurrent finalize or abort may remove an entry after a read-only listing.
+		if len(prune) != 0 && !prune[0] && errors.Is(err, os.ErrNotExist) {
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}
 		if now.Sub(reservation.CreatedAt) >= reservationTTL {
-			if err := store.removeReservation(operationID); err != nil {
-				return nil, err
+			if len(prune) == 0 || prune[0] {
+				if err := store.removeReservation(operationID); err != nil {
+					return nil, err
+				}
 			}
 			continue
 		}

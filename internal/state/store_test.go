@@ -263,7 +263,7 @@ func TestFileStoreDeleteIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestProjectAdmissionUsesCanonicalNamesAndSerializesSources(t *testing.T) {
+func TestProjectAdmissionUsesCanonicalNamesAndIndependentSyncCopies(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 	first, err := store.Admit(ctx, "op-one", "/work/Subyard", domain.ProjectSync, "Subyard", false)
@@ -273,9 +273,9 @@ func TestProjectAdmissionUsesCanonicalNamesAndSerializesSources(t *testing.T) {
 	if first.ProjectID != "Subyard" || first.Name != "Subyard" || first.Reservation == nil {
 		t.Fatalf("first admission = %#v", first)
 	}
-	if _, err := store.Admit(
+	if concurrent, err := store.Admit(
 		ctx, "op-two", "/work/Subyard", domain.ProjectSync, "Subyard", false,
-	); !errors.Is(err, ErrAdmissionPending) {
+	); err != nil || concurrent.ProjectID != "Subyard-2" {
 		t.Fatalf("concurrent same-source admission = %v", err)
 	}
 	if _, err := store.Admit(
@@ -303,7 +303,7 @@ func TestProjectAdmissionUsesCanonicalNamesAndSerializesSources(t *testing.T) {
 	repeat, err := store.Admit(
 		ctx, "op-three", "/work/Subyard", domain.ProjectSync, "Subyard", false,
 	)
-	if err != nil || repeat.Existing == nil || repeat.ProjectID != "Subyard" {
+	if err != nil || repeat.Existing != nil || repeat.ProjectID != "Subyard-3" {
 		t.Fatalf("repeat admission = %#v, %v", repeat, err)
 	}
 	conflicting := fixtureRecord("legacy-other")
@@ -314,7 +314,7 @@ func TestProjectAdmissionUsesCanonicalNamesAndSerializesSources(t *testing.T) {
 	second, err := store.Admit(
 		ctx, "op-four", "/other/Subyard", domain.ProjectSync, "Subyard", false,
 	)
-	if err != nil || second.ProjectID != "Subyard-2" {
+	if err != nil || second.ProjectID != "Subyard-4" {
 		t.Fatalf("colliding admission = %#v, %v", second, err)
 	}
 	if _, err := store.Admit(
@@ -328,7 +328,7 @@ func TestProjectAdmissionUsesCanonicalNamesAndSerializesSources(t *testing.T) {
 	retried, err := store.Admit(
 		ctx, "op-six", "/other/Subyard", domain.ProjectSync, "Subyard", false,
 	)
-	if err != nil || retried.ProjectID != "Subyard-2" {
+	if err != nil || retried.ProjectID != "Subyard-4" {
 		t.Fatalf("admission after abort = %#v, %v", retried, err)
 	}
 }
@@ -386,7 +386,7 @@ func TestProjectAdmissionIgnoresInterruptedReservationCandidate(t *testing.T) {
 	}
 }
 
-func TestConcurrentDifferentSourcesReceiveDistinctCanonicalNames(t *testing.T) {
+func TestConcurrentSameSourceReceivesDistinctCanonicalNames(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 	type result struct {
@@ -395,7 +395,7 @@ func TestConcurrentDifferentSourcesReceiveDistinctCanonicalNames(t *testing.T) {
 	}
 	start := make(chan struct{})
 	results := make(chan result, 2)
-	for index, source := range []string{"/one/Demo", "/two/Demo"} {
+	for index, source := range []string{"/one/Demo", "/one/Demo"} {
 		go func(index int, source string) {
 			<-start
 			admission, err := store.Admit(

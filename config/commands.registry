@@ -19,7 +19,7 @@ provision||@provision||forward|mutate|dynamic|public|lifecycle|profiles|provisio
 test-vms||@test-vms||forward|mutate|dynamic|public|lifecycle|simple|test-vms <command>|manage leased nested VM slots and read the owner-wide broker log|--slot -n -f --yes --help|logs status revoke recover
 stop||@lifecycle||forward|mutate|dynamic|public|lifecycle|stop|stop [--force]|stop the yard and protect active Remote-SSH sessions|--force --yes --help|
 teardown|uninstall|@teardown||forward|mutate|dynamic|public|lifecycle|teardown|teardown|delete the yard; optionally keep persistent data|--keep-data --yes --help|
-sync||@project||local|mutate|dynamic|public|projects|project-target|sync [path]|copy or refresh a project in the yard|--name --target --yes --help|
+sync||@project||local|mutate|dynamic|public|projects|project-target|sync [path]|create a new independent snapshot copy in the yard|--name --target --yes --help|
 bind||@project||deny|mutate|dynamic|public|projects|project-target|bind [path]|explicitly mount a host project path into the yard|--name --target --yes --help|
 clone||@project||local|mutate|dynamic|public|projects|clone|clone <url> [name]|clone a repository directly into the yard|--name --target --yes --help|
 list||@list||local|read|never|public|projects|simple|list|list projects currently registered in yards|--live --help|

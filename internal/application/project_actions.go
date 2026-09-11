@@ -355,22 +355,27 @@ func (runner ProjectActionRunner) sync(ctx context.Context) error {
 		return errors.New("project archive adapter is required")
 	}
 	directory := filepath.Dir(runner.Project.YardPath)
+	dev := uint32(runner.Yard.DevUID)
+	reserve := ports.InstanceExecRequest{Command: []string{"mkdir", "--", directory}}
 	create := ports.InstanceExecRequest{
-		Command: []string{"install", "-d", "--", directory, runner.Project.YardPath},
+		Command: []string{"install", "-d", "--", runner.Project.YardPath}, User: dev, Group: dev,
 	}
 	if runner.Yard.AccessKind != domain.AccessRemote {
 		uid := fmt.Sprint(runner.Yard.DevUID)
-		create.Command = []string{"install", "-d", "-o", uid, "-g", uid, "--",
-			directory, runner.Project.YardPath}
+		create = ports.InstanceExecRequest{Command: []string{
+			"install", "-d", "-o", uid, "-g", uid, "--", directory, runner.Project.YardPath,
+		}}
 	}
-	if err := runner.execute(ctx, "create sync workspace", create); err != nil {
+	if err := runner.execute(ctx, "reserve sync workspace", reserve); err != nil {
+		return err
+	}
+	if err := runner.execute(ctx, "create sync source directory", create); err != nil {
 		return err
 	}
 	archive, err := runner.Archive.Open(ctx, runner.Project.HostPath)
 	if err != nil {
 		return err
 	}
-	dev := uint32(runner.Yard.DevUID)
 	result, streamErr := runner.Data.Stream(ctx, runner.Yard, ports.InstanceExecRequest{
 		Command: []string{"tar", "-C", runner.Project.YardPath, "-xf", "-"}, User: dev, Group: dev,
 	}, archive)
