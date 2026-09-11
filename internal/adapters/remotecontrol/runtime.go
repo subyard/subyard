@@ -337,6 +337,9 @@ func (runtime Runtime) ownerCall(ctx context.Context, spec domain.RemoteSpec, st
 }
 
 func (runtime Runtime) hostCall(ctx context.Context, destination string, stdin []byte, arguments ...string) ([]byte, error) {
+	if !domain.SafeSSHTarget(destination) {
+		return nil, fmt.Errorf("invalid SSH target %q", destination)
+	}
 	command := []string{"-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=" + strconv.Itoa(runtime.timeoutSeconds()), destination, "--"}
 	return runtime.call(ctx, append(command, arguments...), stdin)
 }

@@ -121,6 +121,53 @@ func TestContextRejectsUnsafeBoundaries(t *testing.T) {
 	}
 }
 
+func TestRemoteContextRequiresSafeOwnerEndpoint(t *testing.T) {
+	valid := Context{
+		YardName: "default", AccessKind: AccessRemote, YardKind: YardContainer,
+		YardInstanceName: "yard", IncusProject: "subyard", SSHHost: "yard", DevUser: "dev",
+		ShiftMode: "shift", DevUID: 1000, OwnerYardName: "default",
+		Paths: RuntimePaths{
+			RepositoryRoot: "/repo", ConfigDir: "/repo/config", OperatorHome: "/home/dev",
+			ConfigHome: "/home/dev/.config/subyard", DataHome: "/home/dev/.subyard",
+			StoragePath: "/home/dev/.subyard/incus", HostBase: "/srv/subyard", StateDir: "/state",
+		},
+	}
+	for _, test := range []struct {
+		name     string
+		endpoint string
+		want     bool
+	}{
+		{name: "alias", endpoint: "owner", want: true},
+		{name: "FQDN", endpoint: "owner.example", want: true},
+		{name: "user at FQDN", endpoint: "dev@owner.example", want: true},
+		{name: "IPv4", endpoint: "127.0.0.1", want: true},
+		{name: "user at IPv4", endpoint: "dev@127.0.0.1", want: true},
+		{name: "bracketed IPv6", endpoint: "[2001:db8::1]", want: true},
+		{name: "user at bracketed IPv6", endpoint: "dev@[2001:db8::1]", want: true},
+		{name: "empty", endpoint: ""},
+		{name: "leading dash", endpoint: "-owner"},
+		{name: "space", endpoint: "owner example"},
+		{name: "tab", endpoint: "owner\texample"},
+		{name: "newline", endpoint: "owner\nexample"},
+		{name: "control", endpoint: "owner\x00example"},
+		{name: "slash", endpoint: "owner/example"},
+		{name: "quote", endpoint: "owner'example"},
+		{name: "comma", endpoint: "owner,example"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			context := valid
+			context.OwnerEndpoint = test.endpoint
+			_, err := NormalizeContext(context)
+			if got := err == nil; got != test.want {
+				t.Errorf("NormalizeContext owner endpoint %q accepted = %v, want %v", test.endpoint, got, test.want)
+			}
+			if got := SafeSSHTarget(test.endpoint); got != test.want {
+				t.Errorf("SafeSSHTarget(%q) = %v, want %v", test.endpoint, got, test.want)
+			}
+		})
+	}
+}
+
 func TestContextValidateRejectsUnnormalizedDataHome(t *testing.T) {
 	context := Context{
 		YardName: "default", AccessKind: AccessLocal, YardKind: YardContainer,

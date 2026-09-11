@@ -67,6 +67,25 @@ func TestLookupFallsBackFromSymlinkedHigherPrecedenceEntry(t *testing.T) {
 	}
 }
 
+func TestScanYardKeysRejectsUnsafeOwnerEndpointBeforeProcessCall(t *testing.T) {
+	runtime := remoteFixture(t)
+	called := false
+	runtime.processCall = func(context.Context, string, []string, []byte) ([]byte, error) {
+		called = true
+		return nil, nil
+	}
+
+	_, err := runtime.ScanYardKeys(context.Background(), domain.RemoteSpec{
+		OwnerEndpoint: "-oProxyCommand=unsafe",
+	}, 2222)
+	if err == nil {
+		t.Fatal("unsafe owner endpoint was accepted")
+	}
+	if called {
+		t.Fatal("unsafe owner endpoint reached the SSH process call")
+	}
+}
+
 func TestApplyAddWritesIsolatedContextAndVerifiesPinnedKey(t *testing.T) {
 	runtime := remoteFixture(t)
 	writeRemoteFile(t, runtime.sshConfigPath(), "Host local\n", 0o600)

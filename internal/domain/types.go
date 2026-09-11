@@ -199,7 +199,7 @@ func (ctx Context) Validate() error {
 	if ctx.AccessKind == AccessLocal && (ctx.SSHPort < 1 || ctx.SSHPort > 65535) {
 		return errors.New("SSH port must be an integer from 1 to 65535")
 	}
-	if ctx.AccessKind == AccessRemote && ctx.OwnerEndpoint == "" {
+	if ctx.AccessKind == AccessRemote && !SafeSSHTarget(ctx.OwnerEndpoint) {
 		return errors.New("remote yard context requires an owner endpoint")
 	}
 	if ctx.AccessKind == AccessRemote && !SafeName(ctx.OwnerYardName) {
