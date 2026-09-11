@@ -14,7 +14,7 @@ info() { printf '  [ .. ] %s\n' "$*"; }
 ok() { printf '  [ ok ] %s\n' "$*"; }
 
 [ "${SUBYARD_E2E_VM:-}" = 1 ] || die 'run on VM1 through dev/agent-e2e.sh'
-for command in curl go incus jq ss sudo; do
+for command in curl go incus jq python3 ss sudo; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
 sudo -n true || die 'passwordless sudo is required on the disposable VM'
@@ -120,6 +120,33 @@ printf '%s\n' \
 printf '%s\n' \
   "{\"timestamp\":\"$now\",\"type\":\"session_meta\",\"payload\":{\"id\":\"codex-$token\",\"timestamp\":\"$now\",\"cwd\":\"/synthetic/aiobserver-e2e\",\"originator\":\"aiobserver-e2e\",\"cli_version\":\"0.0.0-test\",\"model_provider\":\"openai\",\"model\":\"gpt-5\"}}" \
   > "$codex_file"
+
+# Optional large synthetic history exercises synchronous backfill before HTTP starts.
+backfill_records="${SUBYARD_E2E_OBSERVER_BACKFILL_RECORDS:-0}"
+[[ "$backfill_records" =~ ^(0|[1-9][0-9]*)$ ]] || die 'invalid synthetic backfill record count'
+if [ "$backfill_records" -gt 0 ]; then
+  info "seeding $backfill_records synthetic history records"
+  python3 - "$(dirname "$claude_file")" "$backfill_records" "$now" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+root, count, timestamp = Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+for batch in range((count + 999) // 1000):
+    with (root / f"backlog-{batch}.jsonl").open("w") as output:
+        for index in range(batch * 1000, min(count, (batch + 1) * 1000)):
+            record = {
+                "type": "user", "timestamp": timestamp,
+                "sessionId": f"backlog-{batch}", "uuid": f"backlog-{index}",
+                "cwd": "/synthetic/aiobserver-e2e",
+                "message": {
+                    "id": f"backlog-{index}", "role": "user", "type": "message",
+                    "content": [{"type": "text", "text": "Synthetic startup backlog"}],
+                },
+            }
+            output.write(json.dumps(record) + "\n")
+PY
+fi
 
 info 'building the current candidate and initializing a container yard'
 YARD_BUILD_VERSION=0.11.3 "$ROOT/dev/build-engine.sh" --force

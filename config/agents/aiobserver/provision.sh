@@ -24,6 +24,12 @@ else
   [ "$(id -u)" -eq 0 ] || die 'must run as root'
 fi
 
+startup_timeout=600
+if [ -n "$TEST_ROOT" ]; then
+  startup_timeout="${AI_OBSERVER_STARTUP_TIMEOUT_SECONDS:-600}"
+fi
+[[ "$startup_timeout" =~ ^[1-9][0-9]*$ ]] || die 'invalid startup timeout'
+
 case "$DEV_USER" in ''|*[!A-Za-z0-9._-]*|-*|.|..) die 'invalid developer user' ;; esac
 if [ -n "$CONTEXT" ] && [[ ! "$CONTEXT" =~ ^[0-9a-f]{64}$ ]]; then
   die 'AI_OBSERVER_CONTEXT must be a lowercase SHA-256 when set'
@@ -290,7 +296,15 @@ check_timeout=20
 if [ "\$test_mode" = 1 ]; then check_timeout="\${AI_OBSERVER_CHECK_TIMEOUT_SECONDS:-20}"; fi
 case "\$check_timeout" in ''|*[!0-9]*|0) die 'invalid readiness timeout' ;; esac
 if [ "\${AI_OBSERVER_CHECK_INNER:-0}" != 1 ]; then
-  exec timeout --foreground "\$check_timeout" env AI_OBSERVER_CHECK_INNER=1 "\$0"
+  if timeout --foreground "\$check_timeout" env AI_OBSERVER_CHECK_INNER=1 "\$0"; then
+    exit 0
+  else
+    status=\$?
+    if [ "\$status" = 124 ]; then
+      printf 'ai-observer-check: readiness check timed out\\n' >&2
+    fi
+    exit "\$status"
+  fi
 fi
 container_value() { timeout 10 docker inspect -f "\$1" "\$container" 2>/dev/null; }
 timeout 10 systemctl is-enabled --quiet "\$unit" || die 'unit is not enabled'
@@ -490,14 +504,39 @@ else
 fi
 
 ready=0
-for _ in $(seq 1 30); do
-  if "$CHECK_PATH" >/dev/null 2>"$temporary/readiness-error"; then ready=1; break; fi
+# Upstream watch --backfill imports history synchronously before starting HTTP.
+# Keep ordinary status checks short, but give initial import its own bounded wait.
+startup_started=$SECONDS
+startup_deadline=$((startup_started + startup_timeout))
+next_progress=$((startup_started + 15))
+: >"$temporary/readiness-error"
+printf 'AI Observer: waiting for initial history import and HTTP readiness (up to %s seconds)\n' \
+  "$startup_timeout"
+while [ "$SECONDS" -lt "$startup_deadline" ]; do
+  remaining=$((startup_deadline - SECONDS))
+  [ "$remaining" -gt 0 ] || break
+  if timeout --foreground "$remaining" "$CHECK_PATH" >/dev/null 2>"$temporary/readiness-attempt-error"; then
+    ready=1
+    break
+  fi
+  diagnostic="$(sed -n '/^ai-observer-check: /{p;q;}' "$temporary/readiness-attempt-error")"
+  if [ -n "$diagnostic" ]; then
+    printf '%s\n' "$diagnostic" >"$temporary/readiness-error"
+  fi
+  if [ "$SECONDS" -ge "$next_progress" ]; then
+    printf 'AI Observer: waiting for HTTP readiness (%s seconds elapsed)\n' \
+      "$((SECONDS - startup_started))"
+    next_progress=$((SECONDS + 15))
+  fi
+  [ "$SECONDS" -lt "$startup_deadline" ] || break
   sleep 1
 done
 if [ "$ready" != 1 ]; then
   # Keep the generated check's fixed diagnostic before rollback removes the candidate.
   # Raw subprocess stderr can contain private paths or settings and stays in the temp file.
   sed -n '/^ai-observer-check: /{p;q;}' "$temporary/readiness-error" >&2
+  printf 'AI Observer provision: startup readiness timed out after %s seconds; initial history import may still be running\n' \
+    "$startup_timeout" >&2
   rollback
   die 'readiness failed; previous runtime restored'
 fi

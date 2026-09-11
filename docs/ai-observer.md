@@ -50,6 +50,11 @@ integration resumes collection from the saved positions.
 
 Inside the yard, `ai-observer status` and `ai-observer logs` inspect the service.
 `ai-observer-check` is the bounded readiness check used during reconciliation.
+The pinned watcher imports existing history before starting its HTTP server.
+During installation, Subyard waits up to ten minutes for readiness and reports
+progress while waiting. If that deadline expires, it restores the previous
+runtime and retains the database. Ordinary readiness checks remain bounded to
+20 seconds.
 
 Upstream: [AI Observer](https://github.com/tobilg/ai-observer),
 [watch mode](https://github.com/tobilg/ai-observer/blob/v0.5.0/README.md#watch-command).

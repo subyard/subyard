@@ -182,6 +182,13 @@ if [ "${AI_OBSERVER_FAKE_HTTP_FAIL:-0}" = 1 ]; then
   printf 'probe-output-should-stay-private\n' >&2
   exit 22
 fi
+if [ -f "${AI_OBSERVER_FAKE_ROOT:?}/http-failures-left" ]; then
+  failures=$(cat "$AI_OBSERVER_FAKE_ROOT/http-failures-left")
+  if [ "$failures" -gt 0 ]; then
+    printf '%s\n' "$((failures - 1))" >"$AI_OBSERVER_FAKE_ROOT/http-failures-left"
+    exit 52
+  fi
+fi
 [ "$(cat "${AI_OBSERVER_FAKE_ROOT:?}/containers/subyard-ai-observer/running" 2>/dev/null)" = true ]
 [ "${*: -1}" = http://127.0.0.1:8080/health ]
 printf '{"status":"ok"}\n'
@@ -192,6 +199,7 @@ export PATH="$TMP/bin:$PATH"
 run_hook() {
   local test_root="$1" dev_home="$2" integrations="$3" context="${4:-}"
   AI_OBSERVER_TEST_ROOT="$test_root" \
+    AI_OBSERVER_STARTUP_TIMEOUT_SECONDS="${AI_OBSERVER_STARTUP_TIMEOUT_SECONDS:-3}" \
     AI_OBSERVER_TEST_ALLOW_NON_ROOT=1 \
     AI_OBSERVER_TEST_DEV_HOME="$dev_home" \
     AI_OBSERVER_CONTEXT="$context" \
@@ -249,10 +257,12 @@ grep -Eq 'curl .*--connect-timeout 2 .*--max-time 5 .*http://127[.]0[.]0[.]1:808
 
 SECONDS=0
 if AI_OBSERVER_CHECK_TIMEOUT_SECONDS=1 AI_OBSERVER_FAKE_DOCKER_DELAY=0.3 \
-  "$check" >/dev/null 2>&1; then
+  "$check" >"$TMP/check-timeout.log" 2>&1; then
   fail 'delayed readiness check unexpectedly succeeded'
 fi
 [ "$SECONDS" -le 2 ] || fail 'readiness check exceeded its total bounded invocation'
+grep -Fxq 'ai-observer-check: readiness check timed out' "$TMP/check-timeout.log" \
+  || fail 'readiness timeout omitted its diagnostic'
 
 : >"$FAKE_LOG"
 run_hook "$test_root" "$dev_home" 'claude codex aiobserver'
@@ -330,10 +340,14 @@ cat >"$TMP/bin/sleep" <<'SH'
 exit 0
 SH
 chmod +x "$TMP/bin/sleep"
+SECONDS=0
 if AI_OBSERVER_FAKE_HTTP_FAIL=1 run_hook "$test_root" "$dev_home" \
   'claude codex aiobserver' >"$TMP/readiness-failure.log" 2>&1; then
   fail 'unhealthy replacement unexpectedly passed readiness'
 fi
+[ "$SECONDS" -le 5 ] || fail 'unhealthy startup exceeded its total wait budget'
+grep -Fq 'startup readiness timed out after 3 seconds' "$TMP/readiness-failure.log" \
+  || fail 'failed startup omitted its deadline diagnostic'
 grep -Fxq 'ai-observer-check: HTTP readiness failed' "$TMP/readiness-failure.log" \
   || fail 'failed provision omitted the final readiness predicate before rollback'
 ! grep -Fq 'probe-output-should-stay-private' "$TMP/readiness-failure.log" \
@@ -342,6 +356,16 @@ grep -Fxq 'ai-observer-check: HTTP readiness failed' "$TMP/readiness-failure.log
   || fail 'readiness failure did not restore the previous container'
 [ "$(cat "$state/data/sentinel")" = 'persistent data' ] \
   || fail 'readiness failure damaged persistent data'
+
+# A healthy first backfill can outlast the old thirty-probe startup window.
+printf '35\n' >"$AI_OBSERVER_FAKE_ROOT/http-failures-left"
+if ! AI_OBSERVER_STARTUP_TIMEOUT_SECONDS=15 run_hook "$test_root" "$dev_home" \
+  'claude codex aiobserver' >"$TMP/slow-startup.log" 2>&1; then
+  fail 'slow initial backfill was rolled back before HTTP became ready'
+fi
+"$check" >/dev/null || fail 'slow initial backfill did not become ready'
+[ "$(cat "$state/data/sentinel")" = 'persistent data' ] \
+  || fail 'slow initial backfill damaged persistent data'
 
 printf 'foreign\n' >"$container/owner"
 : >"$FAKE_LOG"
