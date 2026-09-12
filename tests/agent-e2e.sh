@@ -2314,6 +2314,13 @@ if sed '/^[[:space:]]*#/d' "$ROOT/dev/e2e/p0-acceptance.sh" \
 fi
 
 # Public operational examples and direct script calls must keep the exact-slot boundary visible.
+# Read the files themselves so a source archive cannot silently skip this check.
+(
+  cd "$ROOT"
+  find AGENTS.md docs dev -type f \( -name '*.md' -o -name '*.sh' \) -print0 \
+    | xargs -0 grep -nHE 'dev/agent-e2e\.sh|dev/e2e/p0-acceptance\.sh|\$RUNNER'
+) > "$TMP/public-callers"
+[ -s "$TMP/public-callers" ] || fail 'public caller inventory is empty'
 slotless_public_callers=''
 while IFS=: read -r caller_path caller_line caller_source; do
   trimmed_source="${caller_source#"${caller_source%%[![:space:]]*}"}"
@@ -2347,9 +2354,7 @@ while IFS=: read -r caller_path caller_line caller_source; do
       esac
       ;;
   esac
-done < <(git -C "$ROOT" grep -n -E \
-  'dev/agent-e2e\.sh|dev/e2e/p0-acceptance\.sh|\$RUNNER' -- \
-  AGENTS.md 'docs/*.md' 'dev/*.sh' 'dev/e2e/*.sh')
+done < "$TMP/public-callers"
 [ -z "$slotless_public_callers" ] \
   || fail "public lease-taking caller lacks exact --slot:\n$slotless_public_callers"
 

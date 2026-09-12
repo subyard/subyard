@@ -5,6 +5,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
+
+# Packaging intentionally uses a Git index as its production allowlist. Give it a
+# disposable index of today's public files, even when the source has no .git.
+bash "$ROOT/tests/helpers/source-files.sh" > "$TMP/source-files"
+mkdir "$TMP/source"
+tar -C "$ROOT" --null -T "$TMP/source-files" -cf - | tar -C "$TMP/source" -xf -
+ROOT="$TMP/source"
+git -C "$ROOT" init --quiet
+git -C "$ROOT" add --all
+cd "$ROOT"
+
 release="$TMP/release"
 export SUBYARD_INCUS_SOCKET="$TMP/missing-incus.socket"
 export SUBYARD_OPERATOR_HOME="$TMP/home"

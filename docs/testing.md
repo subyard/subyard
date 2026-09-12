@@ -1,5 +1,21 @@
 # Testing changes
 
+## Run the core checks
+
+Run `./tests/run.sh` against the current source files, including uncommitted edits. No Git history,
+clean checkout, base commit or `.git` directory is required. Install the tools listed in
+[the test guide](test-vms.md), including Git and ripgrep: tests of Git behavior create their own
+temporary repositories. The release packaging test also creates its own index of the current public
+files; it does not change the source checkout's index.
+
+GitHub CI runs the full core gate, warning-level ShellCheck and
+`bash tests/real-host/adapter-contracts.sh` in one `verify` job on every push and pull request.
+The separate nightly/manual Deep CI runs repeated Go race tests and one minute of parser fuzzing.
+Both workflows use standard Ubuntu runners, read-only repository permissions and no artifact uploads.
+Veranda, native Paseo and the full P0 release gate remain separate checks.
+
+## Select additional checks
+
 Subyard's change-impact selector recommends a conservative set of checks for a repository diff. It
 is advisory: it prints recommendations and never executes a check. A caller may add checks, but a
 selector result does not waive required host-free, release, operator-requested, or runtime-derived

@@ -6,6 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUNNER='tests/real-host/adapter-contracts.sh'
 CI_WORKFLOW="$ROOT/.github/workflows/ci.yml"
 RELEASE_WORKFLOW="$ROOT/.github/workflows/release.yml"
+DEEP_WORKFLOW="$ROOT/.github/workflows/deep-ci.yml"
 
 fail() {
   printf 'workflow real-adapter gate: %s\n' "$*" >&2
@@ -13,6 +14,42 @@ fail() {
 }
 
 [ -x "$ROOT/$RUNNER" ] || fail "shared runner is missing or not executable: $RUNNER"
+
+# Guard the two small host-free workflows, not the publishing workflow.
+for workflow in "$CI_WORKFLOW" "$DEEP_WORKFLOW"; do
+  [ -f "$workflow" ] || fail "missing host-free workflow: $(basename "$workflow")"
+  [ "$(grep -Fc 'runs-on: ubuntu-24.04' "$workflow")" -eq 1 ] \
+    || fail 'host-free workflow must have one standard Ubuntu 24.04 job'
+  grep -Fxq 'permissions:' "$workflow" \
+    && grep -Fxq '  contents: read' "$workflow" \
+    || fail 'host-free workflow must declare read-only contents permission'
+  grep -Fxq '          persist-credentials: false' "$workflow" \
+    || fail 'host-free checkout must not persist credentials'
+  if grep -Eq 'self-hosted|pull_request_target|secrets[.[]|:[[:space:]]*write|upload-artifact|/dev/kvm|dev/agent-e2e|dev/e2e/|^[[:space:]]*(services|container|matrix|paths|paths-ignore|concurrency):' "$workflow"; then
+    fail 'host-free workflow contains a privileged, filtered or unnecessary CI mechanism'
+  fi
+  mapfile -t actions < <(sed -nE 's/^[[:space:]]*(- )?uses: //p' "$workflow")
+  [ "${#actions[@]}" -eq 2 ] || fail 'host-free job must use only checkout and setup-go'
+  [[ "${actions[0]}" == actions/checkout@* && "${actions[1]}" == actions/setup-go@* ]] \
+    || fail 'host-free job must check out sources and set up Go'
+  for action in "${actions[@]}"; do
+    [[ "$action" =~ ^actions/(checkout|setup-go)@[0-9a-f]{40}\ \#\ v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+      || fail 'host-free Actions must use full commit SHAs with version comments'
+  done
+done
+grep -Fxq '  verify:' "$CI_WORKFLOW" && grep -Fxq '  deep-go:' "$DEEP_WORKFLOW" \
+  || fail 'core and deep CI must use distinct stable job names'
+grep -Fxq '    timeout-minutes: 15' "$CI_WORKFLOW" \
+  && grep -Fxq '    timeout-minutes: 20' "$DEEP_WORKFLOW" \
+  || fail 'host-free jobs must have bounded timeouts'
+grep -Fxq '  push:' "$CI_WORKFLOW" && grep -Fxq '  pull_request:' "$CI_WORKFLOW" \
+  || fail 'core CI must run on pushes and pull requests'
+grep -Fxq '  workflow_dispatch:' "$DEEP_WORKFLOW" \
+  && grep -Fxq "    - cron: '17 3 * * *'" "$DEEP_WORKFLOW" \
+  || fail 'deep CI must support manual and nightly runs'
+grep -Fq 'run: go test -race -shuffle=on -count=3 ./...' "$DEEP_WORKFLOW" \
+  && grep -Fq "run: go test ./internal/command -run '^\$' -fuzz '^FuzzParseDoesNotPanic\$' -fuzztime=60s" "$DEEP_WORKFLOW" \
+  || fail 'deep CI must run repeated race tests and bounded parser fuzzing'
 
 for workflow in "$CI_WORKFLOW" "$RELEASE_WORKFLOW"; do
   [ "$(grep -Fc "bash $RUNNER" "$workflow")" -eq 1 ] \

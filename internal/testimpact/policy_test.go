@@ -683,23 +683,19 @@ func TestPathCoverageClassifiesEveryPublicRepositoryPath(t *testing.T) {
 		t.Fatalf("LoadPolicy(impact-map.json) error = %v", err)
 	}
 
-	command := exec.Command("git", "-c", "safe.directory="+repo, "-C", repo,
-		"ls-files", "--cached", "--others", "--exclude-standard", "-z")
+	command := exec.Command("bash", filepath.Join(repo, "tests/helpers/source-files.sh"))
 	command.Env = []string{
 		"PATH=" + os.Getenv("PATH"),
 		"LC_ALL=C",
-		"GIT_CONFIG_NOSYSTEM=1",
-		"GIT_CONFIG_GLOBAL=/dev/null",
-		"GIT_OPTIONAL_LOCKS=0",
 	}
 	output, err := command.Output()
 	if err != nil {
-		t.Fatalf("git ls-files error = %v", err)
+		t.Fatalf("list current public source files: %v", err)
+	}
+	if len(output) == 0 {
+		t.Fatal("source inventory returned no public paths")
 	}
 	paths := bytes.Split(bytes.TrimSuffix(output, []byte{0}), []byte{0})
-	if len(paths) == 0 {
-		t.Fatal("git ls-files returned no public paths")
-	}
 	for _, rawPath := range paths {
 		path := string(rawPath)
 		classification, err := policy.ClassifyPath(path)

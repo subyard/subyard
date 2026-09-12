@@ -10,7 +10,6 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -348,28 +347,23 @@ esac
 	}})
 }
 
-func TestReadCommitChangesTrustsCurrentMixedOwnershipCheckoutWithoutGlobalConfig(t *testing.T) {
+func TestReadCommitChangesTrustsOnlyExactRepositoryWithoutGlobalConfig(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("mixed checkout ownership fixture is Unix-specific")
 	}
-	repo, err := filepath.Abs(filepath.Join("..", ".."))
+	repo := newGitRepository(t)
+	gitRun(t, repo, "commit", "--allow-empty", "-m", "fixture")
+	realGit, err := exec.LookPath("git")
 	if err != nil {
-		t.Fatalf("absolute repository path: %v", err)
+		t.Fatal(err)
 	}
-	gitDirInfo, err := os.Stat(filepath.Join(repo, ".git"))
-	if err != nil {
-		t.Fatalf("stat .git: %v", err)
-	}
-	repoInfo, err := os.Stat(repo)
-	if err != nil {
-		t.Fatalf("stat repository: %v", err)
-	}
-	gitDirStat, gitDirOK := gitDirInfo.Sys().(*syscall.Stat_t)
-	repoStat, repoOK := repoInfo.Sys().(*syscall.Stat_t)
-	if !gitDirOK || !repoOK || gitDirStat.Uid == repoStat.Uid {
-		t.Skip("checkout does not expose the expected mixed-ownership fixture")
-	}
-	t.Setenv("PATH", "/usr/bin:/bin")
+	// Git's own ownership-test switch exercises the real safe.directory check
+	// without chown, root privileges, or assumptions about the source checkout.
+	bin := t.TempDir()
+	writeExecutable(t, filepath.Join(bin, "git"), fmt.Sprintf(
+		"#!/bin/sh\nGIT_TEST_ASSUME_DIFFERENT_OWNER=1 exec %s \"$@\"\n",
+		"'"+strings.ReplaceAll(realGit, "'", "'\\''")+"'"))
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	withoutTrust, err := runRealGitWithBoundaryTimeout(t,
 		"-C", repo, "rev-parse", "--verify", "HEAD",
