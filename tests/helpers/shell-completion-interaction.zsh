@@ -92,6 +92,8 @@ run_line() {
   actual=$(<"$TEST_COMPLETION_RESULT")
   [[ $actual == "$expected" ]] || {
     print -u2 -r -- "$shell_name/$editing_mode $label: expected [$expected], got [$actual]"
+    print -u2 -r -- "Shell startup: ${(qqq)startup_transcript}"
+    print -u2 -r -- "Completion interaction: ${(qqq)completion_transcript}"
     return 1
   }
   if [[ -n ${4:-} && $completion_transcript != *$4* ]]; then
@@ -118,6 +120,7 @@ for editing_mode in emacs vi; do
   fi
   zpty -w completion 'source "$TEST_COMPLETION_STUB"; PS1="test> "; printf "\nBOOT%s\n" READY'
   wait_for_marker BOOTREADY
+  startup_transcript=$completion_transcript
   # Assert that startup has not silently changed the user's chosen editing mode.
   if [[ $shell_name == bash ]]; then
     zpty -w completion "[[ -o $editing_mode ]] && printf '\\nMODE%s\\n' OK"
