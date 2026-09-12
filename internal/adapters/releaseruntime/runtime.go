@@ -327,6 +327,26 @@ func (runtime *Runtime) inspectProtectedTransition(
 			errors.New("candidate returned a resume plan for a complete release transition"),
 		)
 	}
+	if journal.Checkpoint == releasetransition.JournalComplete &&
+		inspection.Outcome.Status == releasetransition.StatusRecovering &&
+		inspection.Outcome.Code == releasetransition.CodeRecoveryPending {
+		// Older protected callers need the historical transaction on the V1
+		// wire. Restore the canonical fresh-plan status only after validating
+		// that history, the absent Resume, and the actual completed links.
+		observed, err := runtime.inspectRuntimeLinks(root)
+		actual := releaseLinksFromRuntimeSnapshot(observed)
+		outcome := *inspection.Outcome
+		if err != nil || actual.Active != journal.Goal.Target || outcome.Active != actual.Active ||
+			(outcome.Previous == nil) != (actual.Previous == nil) ||
+			(outcome.Previous != nil && *outcome.Previous != *actual.Previous) {
+			return nil, publicCandidateFailure(errors.New("activation repair inspection does not report the actual completed links"))
+		}
+		outcome.Status = releasetransition.StatusMigrationRequired
+		outcome.Code = releasetransition.CodeTransitionRequired
+		outcome.Transaction = nil
+		outcome.Message = "the inspected release transition has not started"
+		inspection.Outcome = &outcome
+	}
 	return &protectedTransitionInspection{
 		journal: journal, journalSnapshot: snapshot,
 		owner: candidateVerification{

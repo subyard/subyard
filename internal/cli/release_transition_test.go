@@ -990,15 +990,29 @@ func TestCandidateProcessRepairsCompletedJournalActivationDrift(t *testing.T) {
 	if err != nil || repeat.Inspection == nil || repeat.Inspection.Resume != nil ||
 		!strings.HasPrefix(string(repeat.Inspection.Plan), "plan-v1-") ||
 		repeat.Inspection.Outcome == nil ||
-		repeat.Inspection.Outcome.Status != releasetransition.StatusMigrationRequired ||
-		repeat.Inspection.Outcome.Transaction != nil ||
+		repeat.Inspection.Outcome.Status != releasetransition.StatusRecovering ||
+		repeat.Inspection.Outcome.Code != releasetransition.CodeRecoveryPending ||
+		repeat.Inspection.Outcome.Transaction == nil ||
+		*repeat.Inspection.Outcome.Transaction != *completed.Outcome.Transaction ||
 		!repeat.Inspection.Assessment.Changed || reconciler.observes <= observesBefore {
 		t.Fatalf("completed migration inspection=%#v err=%v", repeat, err)
 	}
+	// The frozen v0.11.2 protected caller requires the historical transaction,
+	// while Resume must remain absent so this new plan receives a fresh grant.
 	if err := repeat.Inspection.ValidateOutcome(goal); err != nil {
 		t.Fatalf("completed migration process inspection is invalid: %v", err)
 	}
 	request.Mode = releasetransition.ProcessConverge
+	request.Execution = &releasetransition.Execution{Plan: repeat.Inspection.Plan}
+	unconfirmed, err := executeReleaseTransitionRequest(
+		context.Background(), repositoryRoot, request, verify, reconcilers,
+		releaseTransitionOwnerFixture{}, nil,
+	)
+	if err != nil || unconfirmed.Outcome == nil ||
+		unconfirmed.Outcome.Code != releasetransition.CodeConfirmationRequired ||
+		authorizations != 1 || reconciler.reconciles != reconcilesBefore {
+		t.Fatalf("historical transaction authorized a new repair: %#v err=%v", unconfirmed, err)
+	}
 	request.Execution = &releasetransition.Execution{
 		Plan: repeat.Inspection.Plan, Authorization: grant,
 	}

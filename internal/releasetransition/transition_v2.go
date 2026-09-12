@@ -260,6 +260,10 @@ func NewV2Transition(options V2Options) (*V2Transition, error) {
 }
 
 func (transition *V2Transition) Inspect(ctx context.Context, goal Goal) (Inspection, error) {
+	return transition.inspect(ctx, goal, false)
+}
+
+func (transition *V2Transition) inspect(ctx context.Context, goal Goal, processV1 bool) (Inspection, error) {
 	if transition == nil {
 		return Inspection{}, errors.New("v2 transition is required")
 	}
@@ -271,6 +275,15 @@ func (transition *V2Transition) Inspect(ctx context.Context, goal Goal) (Inspect
 		return Inspection{}, err
 	}
 	outcome := transition.inspectionOutcome(observation)
+	if processV1 && outcome.Status == StatusMigrationRequired && transition.completedJournalMatches(observation) {
+		// Frozen V1 callers require the completed journal's transaction, but
+		// reject it on migration-required. This is a wire presentation only:
+		// Resume stays absent and the fresh plan still needs a fresh grant.
+		outcome.Status = StatusRecovering
+		outcome.Code = CodeRecoveryPending
+		outcome.Transaction = transactionIDPointer(observation.journal.Transaction)
+		outcome.Message = "activation repair requires a new plan and authorization; the completed transaction is history"
+	}
 	if observation.journal != nil && observation.journal.Checkpoint != JournalComplete {
 		transaction := observation.journal.Transaction
 		return Inspection{

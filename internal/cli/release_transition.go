@@ -990,7 +990,7 @@ func executeReleaseTransitionRequest(
 		if request.Execution != nil {
 			return releasetransition.ProcessResponse{}, errors.New("inspect request contains an execution")
 		}
-		inspection, inspectErr := transition.Inspect(ctx, goal)
+		inspection, inspectErr := transition.InspectProcessV1(ctx, goal)
 		if inspectErr != nil {
 			return releasetransition.ProcessResponse{}, inspectErr
 		}

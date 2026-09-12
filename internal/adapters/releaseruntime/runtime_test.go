@@ -861,8 +861,8 @@ func TestPrepareTransitionRepairsCompletedActivationDriftWithOneGrant(t *testing
 	repairPlan := "plan-v1-" + strings.Repeat("f", 64)
 	resumePlan := "resume-v1-" + strings.Repeat("9", 64)
 	driftInspection := fmt.Sprintf(
-		`{"schemaVersion":1,"activationReconciliationOwned":true,"inspection":{"plan":%q,"assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the exact typed migration and release activation plan"]},"outcome":{"status":"migration-required","reachedGoal":false,"active":%q,"previous":"release-a","target":%q,"code":"transition-required","message":"the inspected release transition has not started","retry":"run yard update"}}}`,
-		repairPlan, fixture.target, fixture.target,
+		`{"schemaVersion":1,"activationReconciliationOwned":true,"inspection":{"plan":%q,"assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the exact typed migration and release activation plan"]},"outcome":{"status":"recovering","reachedGoal":false,"active":%q,"previous":"release-a","target":%q,"code":"recovery-pending","message":"the inspected release transition has not started","retry":"run yard update","transaction":%q}}}`,
+		repairPlan, fixture.target, fixture.target, fixture.transaction,
 	)
 	recoveringInspection := fmt.Sprintf(
 		`{"schemaVersion":1,"activationReconciliationOwned":true,"inspection":{"plan":%q,"assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the exact typed migration and release activation plan"]},"resume":%q,"outcome":{"status":"recovering","reachedGoal":false,"active":%q,"previous":"release-a","target":%q,"code":"recovery-pending","message":"the authorized release transition can resume from observed facts","retry":"run yard update","transaction":%q}}}`,
@@ -910,6 +910,19 @@ esac
 		Environment: fixture.environment(), Installer: fixture.installer,
 		Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
 	})
+
+	inspection, err := runtime.inspectProtectedTransition(
+		context.Background(), fixture.runtimeRoot, fixture.configHome, "default", nil,
+	)
+	if err != nil || inspection == nil || inspection.inspection.Outcome == nil {
+		t.Fatalf("inspect completed repair: inspection=%#v err=%v", inspection, err)
+	}
+	if inspection.inspection.Outcome.Status != releasetransition.StatusMigrationRequired ||
+		inspection.inspection.Outcome.Transaction != nil || inspection.inspection.Resume != nil ||
+		inspection.inspection.Plan != releasetransition.PlanToken(repairPlan) ||
+		!inspection.inspection.Assessment.Changed {
+		t.Fatalf("modern caller did not restore new-plan semantics: %#v", inspection.inspection)
+	}
 
 	prepared, err := runtime.PrepareTransition(
 		context.Background(), []string{"--runtime-root", fixture.runtimeRoot},
@@ -1049,6 +1062,51 @@ esac
 				context.Background(), fixture.runtimeRoot, fixture.configHome, "default", nil,
 			); err == nil || inspection != nil {
 				t.Fatalf("unsafe protected inspection accepted: inspection=%#v err=%v", inspection, err)
+			}
+		})
+	}
+}
+
+func TestProtectedCompletedRepairRejectsMismatchedHistory(t *testing.T) {
+	for _, mismatch := range []string{"transaction", "resume", "previous"} {
+		t.Run(mismatch, func(t *testing.T) {
+			fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalComplete)
+			var response releasetransition.ProcessResponse
+			if err := json.Unmarshal([]byte(fixture.recoveringResponse()), &response); err != nil {
+				t.Fatal(err)
+			}
+			inspection := response.Inspection
+			inspection.Plan = releasetransition.PlanToken("plan-v1-" + strings.Repeat("f", 64))
+			inspection.Resume = nil
+			inspection.Outcome.Active = releasetransition.ReleaseID(fixture.target)
+			previous := releasetransition.ReleaseID("release-a")
+			inspection.Outcome.Previous = &previous
+			switch mismatch {
+			case "transaction":
+				foreign := releasetransition.TransactionID("tx-foreign-repair-01")
+				inspection.Outcome.Transaction = &foreign
+			case "resume":
+				inspection.Plan = releasetransition.PlanToken(fixture.resumePlan)
+				inspection.Resume = inspection.Outcome.Transaction
+			case "previous":
+				previous = "release-foreign"
+			}
+			payload, err := json.Marshal(response)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeProtectedRuntimeFixtureEngine(t, fixture, fmt.Sprintf(`#!/bin/sh
+case "${1:-}" in
+  --version) printf 'yard-engine 1.2.3\n' ;;
+  _release-transition) cat >/dev/null; printf '%%s\n' %q ;;
+  *) exit 64 ;;
+esac
+`, string(payload)))
+			runtime := New(Config{Environment: fixture.environment(), Stderr: &bytes.Buffer{}})
+			if protected, err := runtime.inspectProtectedTransition(
+				context.Background(), fixture.runtimeRoot, fixture.configHome, "default", nil,
+			); err == nil || protected != nil {
+				t.Fatalf("mismatched repair accepted: inspection=%#v err=%v", protected, err)
 			}
 		})
 	}

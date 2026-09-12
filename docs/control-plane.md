@@ -239,6 +239,15 @@ a V1 response; adding internal fields or outcomes must not silently extend the V
 Unknown protocol versions are rejected before authorization-channel access or transition work.
 Strict decoding remains part of the contract.
 
+A completed journal followed by activation drift needs a fresh plan and authorization. The
+released V1 protected caller requires the historical transaction ID, but rejects that ID on
+`migration-required`. Its compatibility inspection therefore uses `recovering/recovery-pending`
+with the historical ID, a fresh `plan-v1` token, a changed assessment, and **no `resume`**. This
+presentation does not resume or authorize completed history: apply creates a new transaction,
+and only an unfinished transaction can reuse its grant. The current caller validates the historical
+identity and actual links, then restores the canonical `migration-required` presentation. The
+Module's ordinary `Inspect`, journal bytes, ledger, and convergence responses retain their semantics.
+
 The frozen [`journal/v2`](../internal/releasetransition/journal/v2) module similarly owns the existing
 durable journal representation, including nested evidence and archived predecessor journals.
 Canonical field order, omitted fields and the trailing newline are preserved because fingerprints
@@ -256,7 +265,7 @@ response: the compatibility adapter must preserve its meaning.
 
 Before publication, `dev/verify-release-upgrades.py` runs the unmodified, checksum-pinned v0.11.2
 updater against the built candidate on the runner's architecture. It verifies inspection, activation,
-the completed fixed point, rollback and forward retry. It also kills a real update after journaled
+the completed fixed point, completed activation drift inspection, rollback and forward retry. It also kills a real update after journaled
 activation and uses the old updater to resume the same authorized candidate transaction. This
 released-binary check complements tests of the frozen codecs; rebuilding both ends from current
 source does not establish cross-release compatibility.

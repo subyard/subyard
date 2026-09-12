@@ -203,12 +203,49 @@ def verify_legacy(release, version, baseline, arch, root):
           flush=True)
 
 
+def verify_completed_activation_drift(fixture):
+    transaction = json.loads(fixture.journal.read_text())["transaction"]
+    power = Path(fixture.env["SUBYARD_POWER_RECONCILER_PATH"])
+    require(not power.exists(), "power drift fixture already exists")
+    # An installed non-executable helper requires activation repair. Inspection
+    # does not invoke systemd or privilege authorization; never apply this fixture.
+    power.write_text("")
+    try:
+        retained = fixture.check()
+        current = fixture.check(old=False)
+        require(retained["outcome"]["status"] == "recovering"
+                and retained["outcome"]["code"] == "recovery-pending"
+                and retained["outcome"].get("transaction") == transaction,
+                "released updater rejected completed activation drift")
+        require(current["outcome"]["status"] == "migration-required"
+                and current["outcome"].get("transaction") is None,
+                "current updater did not preserve fresh activation-plan semantics")
+        require(retained["plan"] == current["plan"]
+                and retained["assessment"]["changed"] and current["assessment"]["changed"]
+                and retained.get("resume") is None and current.get("resume") is None,
+                "activation repair changed the plan or reused historical authorization")
+        before = snapshot(fixture.config)
+        declined = run_process([str(fixture.old_launcher), "update", "--offline", "--version", fixture.version],
+                               fixture.env, timeout=180)
+        require(declined.returncode != 0
+                and "confirmation" in (declined.stdout + declined.stderr).lower(),
+                "released updater reused historical consent for an activation repair")
+        require(snapshot(fixture.config) == before and power.read_bytes() == b"",
+                "unconfirmed activation repair changed protected state")
+    finally:
+        power.unlink()
+    fixture.complete()
+    print(f"PASS: released {BASELINE} updater inspects completed activation drift with a fresh plan",
+          flush=True)
+
+
 def verify(release, version, baseline, arch, root):
     normal = Fixture(root / "normal", release, version, baseline, arch)
     require(normal.check()["outcome"]["status"] == "migration-required",
             "old updater could not inspect candidate activation")
     normal.update("--version", version, "--yes")
     normal.complete()
+    verify_completed_activation_drift(normal)
     normal.update("--rollback", "--yes", old=False)
     require(os.readlink(normal.runtime / "current") == normal.initial, "rollback lost the old runtime")
     normal.update("--offline", "--version", version, "--yes")
