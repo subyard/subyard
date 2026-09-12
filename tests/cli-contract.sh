@@ -126,6 +126,23 @@ FPATH="$CLI_TMP/insecure-completions:$(zsh -fc 'print -r -- "$FPATH"')" \
     "$ROOT/completions/yard.zsh" "$ROOT" \
   || fail 'Zsh completion interaction inherited unsafe caller FPATH'
 
+# Model a runner with an insecure directory in Zsh's default search path.
+mkdir -p "$CLI_TMP/zsh-bin"
+cat > "$CLI_TMP/zsh-bin/zsh" <<'ZSH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ -z "${FPATH+x}" ]; then
+  FPATH="$TEST_DEFAULT_COMPLETIONS:$("$TEST_REAL_ZSH" -fc 'print -r -- "$FPATH"')"
+  export FPATH
+fi
+exec "$TEST_REAL_ZSH" "$@"
+ZSH
+chmod +x "$CLI_TMP/zsh-bin/zsh"
+TEST_REAL_ZSH="$(command -v zsh)" TEST_DEFAULT_COMPLETIONS="$CLI_TMP/insecure-completions" \
+  PATH="$CLI_TMP/zsh-bin:$PATH" zsh -f "$ROOT/tests/helpers/shell-completion-interaction.zsh" zsh \
+    "$ROOT/completions/yard.zsh" "$ROOT" \
+  || fail 'Zsh completion interaction used unsafe default FPATH'
+
 zsh -f "$ROOT/tests/helpers/zsh-completion-buffers.zsh" "$ROOT/completions/yard.zsh" "$ROOT" \
   || fail 'Zsh native multi-record completion corrupted the command buffer'
 zsh_profiles="$(TEST_ROOT="$ROOT" zsh -fc '
