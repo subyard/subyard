@@ -52,7 +52,7 @@ jobs:
           mapfile -t shell_files < <(find scripts dev config/profiles config/agents tests -type f -name '*.sh' -print | sort)
           shellcheck -x -S warning bin/yard completions/yard.bash "${shell_files[@]}"
           ./tests/run.sh
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: paseo-headless-*
           path: .build/release
