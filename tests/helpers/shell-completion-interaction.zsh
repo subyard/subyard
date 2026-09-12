@@ -113,7 +113,8 @@ for editing_mode in emacs vi; do
   if [[ $shell_name == bash ]]; then
     zpty -b completion exec env HOME="$shell_home" INPUTRC="$INPUTRC" bash --noprofile -o "$editing_mode" -i
   else
-    zpty -b completion exec env HOME="$shell_home" ZDOTDIR="$shell_home" EDITOR="$editing_mode" VISUAL="$editing_mode" zsh -i
+    # Keep caller completion directories out of this isolated startup fixture.
+    zpty -b completion exec env -u FPATH HOME="$shell_home" ZDOTDIR="$shell_home" EDITOR="$editing_mode" VISUAL="$editing_mode" zsh -i
   fi
   zpty -w completion 'source "$TEST_COMPLETION_STUB"; PS1="test> "; printf "\nBOOT%s\n" READY'
   wait_for_marker BOOTREADY

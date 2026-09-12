@@ -117,6 +117,15 @@ for shell in bash zsh; do
     "$ROOT/completions/yard.$shell" "$ROOT" || fail "$shell default completion interaction failed"
 done
 
+# Caller-installed completion directories must not prompt inside the PTY fixture.
+mkdir -p "$CLI_TMP/insecure-completions"
+printf '#compdef fixture\n' > "$CLI_TMP/insecure-completions/_fixture"
+chmod 0777 "$CLI_TMP/insecure-completions"
+FPATH="$CLI_TMP/insecure-completions:$(zsh -fc 'print -r -- "$FPATH"')" \
+  zsh -f "$ROOT/tests/helpers/shell-completion-interaction.zsh" zsh \
+    "$ROOT/completions/yard.zsh" "$ROOT" \
+  || fail 'Zsh completion interaction inherited unsafe caller FPATH'
+
 zsh -f "$ROOT/tests/helpers/zsh-completion-buffers.zsh" "$ROOT/completions/yard.zsh" "$ROOT" \
   || fail 'Zsh native multi-record completion corrupted the command buffer'
 zsh_profiles="$(TEST_ROOT="$ROOT" zsh -fc '
