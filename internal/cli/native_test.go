@@ -5068,23 +5068,40 @@ func TestUsageAndShellExecArgumentsPreserveTypedBoundaries(t *testing.T) {
 		t.Fatalf("usage exec boundary drifted: %#v", usage)
 	}
 
-	devShell := shellExecArguments(yard, false, "/srv/workspaces/demo/src", []string{"sh", "-lc", "pwd"})
+	devCommand := []string{"sh", "-lc", "printf '%s'", "space arg", "", "$(touch should-not-run)"}
+	devShell := shellExecArguments(yard, false, "/srv/workspaces/demo/src", devCommand)
 	for _, expected := range [][]string{
-		{"--user", "1000"}, {"--group", "1000"}, {"--env", "HOME=/home/dev"},
-		{"--cwd", "/srv/workspaces/demo/src"}, {"--", "sh", "-lc", "pwd"},
+		{"--user", "0"}, {"--group", "0"}, {"--env", "HOME=/home/dev"},
+		{"--cwd", "/srv/workspaces/demo/src"},
+		{"--", "/usr/sbin/runuser", "-u", "dev", "--"},
 	} {
 		if !containsSequence(devShell, expected) {
 			t.Fatalf("dev shell omitted %#v: %#v", expected, devShell)
 		}
 	}
-	rootShell := shellExecArguments(yard, true, "/home/dev", nil)
+	devSuffix := devShell[len(devShell)-len(devCommand):]
+	if !slices.Equal(devSuffix, devCommand) {
+		t.Fatalf("dev shell changed command boundaries: got=%#v want=%#v", devSuffix, devCommand)
+	}
+	devInteractiveShell := shellExecArguments(yard, false, "/home/dev", nil)
+	if !containsSequence(devInteractiveShell, []string{
+		"-t", "--", "/usr/sbin/runuser", "-u", "dev", "--", "bash", "-l",
+	}) {
+		t.Fatalf("dev interactive shell omitted runuser: %#v", devInteractiveShell)
+	}
+	rootCommand := []string{"sh", "-lc", "printf '%s'", "space arg", "", "$(touch should-not-run)"}
+	rootShell := shellExecArguments(yard, true, "/home/dev", rootCommand)
 	for _, expected := range [][]string{
 		{"--user", "0"}, {"--group", "0"}, {"--env", "HOME=/root"},
-		{"--cwd", "/home/dev"}, {"-t", "--", "bash", "-l"},
+		{"--cwd", "/home/dev"}, {"--", "sh", "-lc"},
 	} {
 		if !containsSequence(rootShell, expected) {
 			t.Fatalf("root shell omitted %#v: %#v", expected, rootShell)
 		}
+	}
+	rootSuffix := rootShell[len(rootShell)-len(rootCommand):]
+	if !slices.Equal(rootSuffix, rootCommand) {
+		t.Fatalf("root shell changed command boundaries: got=%#v want=%#v", rootSuffix, rootCommand)
 	}
 }
 

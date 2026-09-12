@@ -5,9 +5,37 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 QA="$ROOT/config/profiles/openclaw/resources/qa-bot-broker/handler.sh"
 STAGING="$ROOT/config/profiles/openclaw/resources/staging-gateway/handler.sh"
+SY_STAGE="$ROOT/config/profiles/openclaw/resources/staging-gateway/sy-stage.sh"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+
+# Execute the actual shell payload sent to docker exec, mapping only its mounted config path.
+# The fixture credentials are synthetic and must not appear in output.
+awk '/^RUN$/ { payload=0 } payload { print } /<<'"'"'RUN'"'"'$/ { payload=1 }' "$SY_STAGE" \
+  | sed "s|^ef=/run/subyard/staging.env$|ef=$TMP/staging.env|" > "$TMP/model-run.sh"
+[ -s "$TMP/model-run.sh" ] || fail 'missing staging model subprocess payload'
+env SUBYARD_LIVE_MODEL=1 ANTHROPIC_API_KEY=ambient-fixture STAGING_MODEL_KEY=ambient-fixture \
+  sh "$TMP/model-run.sh" sh -c \
+  '[ -z "${SUBYARD_LIVE_MODEL:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${STAGING_MODEL_KEY:-}" ]' \
+  > "$TMP/no-key.out" 2>&1 || fail 'no-key subprocess inherited a model credential or live signal'
+printf 'STAGING_MODEL_KEY=staged-fixture\n' > "$TMP/staging.env"
+sh "$TMP/model-run.sh" sh -c \
+  '[ "$SUBYARD_LIVE_MODEL" = 1 ] && [ "$ANTHROPIC_API_KEY" = staged-fixture ] && [ "$STAGING_MODEL_KEY" = staged-fixture ]' \
+  > "$TMP/key.out" 2>&1 || fail 'staged model credential did not reach the command'
+set +e
+sh "$TMP/model-run.sh" sh -c 'exit 23' > "$TMP/failed-command.out" 2>&1
+model_status=$?
+set -e
+[ "$model_status" -eq 23 ] || fail 'staging model subprocess masked the command failure'
+printf 'ANTHROPIC_API_KEY=fallback-fixture\n' > "$TMP/staging.env"
+sh "$TMP/model-run.sh" sh -c \
+  '[ "$SUBYARD_LIVE_MODEL" = 1 ] && [ "$ANTHROPIC_API_KEY" = fallback-fixture ] && [ "$STAGING_MODEL_KEY" = fallback-fixture ]' \
+  > "$TMP/fallback-key.out" 2>&1 || fail 'mounted Anthropic fallback credential was lost'
+if grep -Eq 'ambient-fixture|staged-fixture|fallback-fixture' \
+  "$TMP/no-key.out" "$TMP/key.out" "$TMP/failed-command.out" "$TMP/fallback-key.out"; then
+  fail 'staging model subprocess printed a credential'
+fi
 
 # shellcheck source=tests/helpers/test-context.sh
 . "$ROOT/tests/helpers/test-context.sh"
@@ -82,11 +110,18 @@ case "${command[0]:-}" in
       -c)
         mapped=("${command[@]}")
         if [ "${mapped[4]:-}" = /srv/staging/_lease ]; then mapped[4]="$state_root/lease"; fi
+        case "${mapped[4]:-}" in
+          /srv/staging/canonical/*)
+            mapped[4]="$state_root/staging/${mapped[4]##*/}"
+            mkdir -p "$state_root/staging"
+            ;;
+        esac
         bash -c "${mapped[2]}" "${mapped[@]:3}"
         ;;
     esac
     ;;
   install) touch "$state_root/secret-staged" ;;
+  id) [ "${command[1]:-}" = -g ] && printf '1001\n' ;;
   test)
     case "${command[1]:-} ${command[2]:-}" in
       '-r /srv/source/convex.json') exit 0 ;;
@@ -220,5 +255,15 @@ jq -e '.holder == "canonical" and .kind == "canonical"' "$lease" >/dev/null \
 [ -e "$lock" ] || fail 'staging apply did not create the lease lock'
 [ -d "$lease_dir" ] || fail 'staging apply did not create the lease directory'
 [ -e "$TMP/gateway-running" ] || fail 'staging apply did not launch the gateway'
+
+# A fresh staging runner must use the account's actual primary group for shared caches.
+# It can differ from DEV_UID; resetting it makes the OpenClaw provision check drift.
+rm -f "$TMP/box-exists"
+SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION=up SUBYARD_OPERATION_ID=op-up-cache \
+  "$STAGING" up >"$TMP/up-cache.out"
+for cache in pnpm pip npm; do
+  grep -Fq -- "-- install -d -o 1000 -g 1001 /srv/cache/$cache" "$TMP/incus.log" \
+    || fail "staging did not preserve the primary group of the $cache cache"
+done
 
 printf 'ok: QA stale apply and staging lease prepare/apply boundaries are exact\n'

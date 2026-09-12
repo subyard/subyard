@@ -1597,9 +1597,8 @@ func (cli *CLI) runShell(
 }
 
 func shellExecArguments(yard domain.Context, root bool, cwd string, guestCommand []string) []string {
-	uid := yard.DevUID
 	userArguments := []string{
-		"--user", strconv.Itoa(uid), "--group", strconv.Itoa(uid),
+		"--user", "0", "--group", "0",
 		"--env", "HOME=/home/" + yard.DevUser,
 	}
 	if root {
@@ -1609,9 +1608,15 @@ func shellExecArguments(yard domain.Context, root bool, cwd string, guestCommand
 	result = append(result, userArguments...)
 	result = append(result, "--cwd", cwd)
 	if len(guestCommand) == 0 {
-		return append(result, "-t", "--", "bash", "-l")
+		if root {
+			return append(result, "-t", "--", "bash", "-l")
+		}
+		return append(result, "-t", "--", "/usr/sbin/runuser", "-u", yard.DevUser, "--", "bash", "-l")
 	}
 	result = append(result, "--")
+	if !root {
+		result = append(result, "/usr/sbin/runuser", "-u", yard.DevUser, "--")
+	}
 	return append(result, guestCommand...)
 }
 

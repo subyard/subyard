@@ -492,7 +492,15 @@ case "$sub" in
          -e "VASILY_HOME=$vasilyHome"
          -e "SUBYARD_STAGING_ZONE=$zone"
          -e "SUBYARD_STAGING_DATA_ROOT=$dataRoot")
-    for c in ${CACHES:-}; do yexec install -d -o "$DEV_UID" -g "$DEV_UID" "$c"; mid+=(-v "$c:$c"); done
+    if [ -n "${CACHES:-}" ]; then
+      # Match profile provisioning even when the account's primary GID differs from its UID.
+      cache_gid="$(yexec id -g "$DEV_UID")"
+      case "$cache_gid" in ''|*[!0-9]*) die "could not resolve the development account's cache group" ;; esac
+      for c in $CACHES; do
+        yexec install -d -o "$DEV_UID" -g "$cache_gid" "$c"
+        mid+=(-v "$c:$c")
+      done
+    fi
     [ "$have_secrets" = 1 ] && mid+=(-v "$ysecret:$BOX_SECRET:ro")
     # persistent creds store (a one-time manual provider login survives box recreate); backed by $dataRoot/creds
     [ -n "$CREDS_DEST" ] && mid+=(-v "$dataRoot/creds:$CREDS_DEST")

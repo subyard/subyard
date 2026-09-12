@@ -17,12 +17,19 @@ printf 'v24.15.0\n'
 NODE
 cat > "$test_root/usr/local/bin/corepack" <<'COREPACK'
 #!/usr/bin/env bash
-printf '0.31.0\n'
+case "${1:-}" in
+  --version) printf '0.31.0\n' ;;
+  pnpm@11.2.2) printf '11.2.2\n' ;;
+  *) printf 'FAIL: unpinned or unexpected package manager\n' >&2; exit 1 ;;
+esac
 COREPACK
-cat > "$test_root/usr/local/bin/pnpm" <<'PNPM'
-#!/usr/bin/env bash
-printf '11.2.2\n'
-PNPM
+# Use the actual renderer without running the root-only provision entry point.
+awk '/^render_pnpm_wrapper\(\) \{/ { render=1 } render { print } render && /^\}$/ { exit }' \
+  "$HOOK" > "$tmp/render.sh"
+# shellcheck disable=SC1091
+. "$tmp/render.sh"
+CACHE_PNPM_STORE=/srv/cache/pnpm PNPM_VERSION=11.2.2 \
+  render_pnpm_wrapper > "$test_root/usr/local/bin/pnpm"
 cat > "$test_root/usr/local/bin/sy-cache" <<'CACHE'
 #!/usr/bin/env bash
 exit 0
@@ -54,10 +61,10 @@ cat > "$test_root/etc/environment" <<'ENVIRONMENT'
 SUBYARD_OPENCLAW_DOCS=/etc/subyard/openclaw-l1.md
 # <<< subyard-openclaw <<<
 ENVIRONMENT
-printf '# OpenClaw in this yard — L1 build / test / live (self-serve)\n' \
-  > "$test_root/etc/subyard/openclaw-l1.md"
+cp "$ROOT/config/profiles/openclaw/openclaw-l1.md" "$test_root/etc/subyard/openclaw-l1.md"
 
 common_env=(
+  PATH="$test_root/usr/local/bin:$PATH"
   OPENCLAW_TEST_ROOT="$test_root"
   OPENCLAW_DEV_HOME="$dev_home"
   OPENCLAW_TEST_ALLOW_NON_ROOT=1
@@ -71,6 +78,23 @@ before="$(find "$tmp" -type f -exec sha256sum {} + | sort | sha256sum)"
 env "${common_env[@]}" bash "$HOOK" --check >/dev/null
 after="$(find "$tmp" -type f -exec sha256sum {} + | sort | sha256sum)"
 [ "$before" = "$after" ] || { printf 'FAIL: OpenClaw check mutated state\n' >&2; exit 1; }
+
+printf '\nStale onboarding instructions.\n' >> "$test_root/etc/subyard/openclaw-l1.md"
+set +e
+env "${common_env[@]}" bash "$HOOK" --check >/dev/null
+status=$?
+set -e
+[ "$status" -eq 10 ] || { printf 'FAIL: stale OpenClaw docs status=%s, want 10\n' "$status" >&2; exit 1; }
+cp "$ROOT/config/profiles/openclaw/openclaw-l1.md" "$test_root/etc/subyard/openclaw-l1.md"
+
+cp "$test_root/usr/local/bin/pnpm" "$tmp/current-pnpm"
+sed -i 's/corepack "pnpm@$pnpm_version"/corepack pnpm/' "$test_root/usr/local/bin/pnpm"
+set +e
+env "${common_env[@]}" bash "$HOOK" --check >/dev/null
+status=$?
+set -e
+[ "$status" -eq 10 ] || { printf 'FAIL: unpinned pnpm status=%s, want 10\n' "$status" >&2; exit 1; }
+cp "$tmp/current-pnpm" "$test_root/usr/local/bin/pnpm"
 
 sed -i 's/v24\.15\.0/v0.0.0/' "$test_root/usr/local/bin/node"
 set +e
