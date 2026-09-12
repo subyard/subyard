@@ -277,18 +277,19 @@ func (cli *CLI) initPlatformWithDispatcher(
 	incusPort, executor := cli.statusPorts()
 	configWriter, _ := incusPort.(ports.InstanceConfigWriter)
 	return reconcileruntime.Runtime{
-		RepositoryRoot: cli.options.RepositoryRoot,
-		Environment:    environmentList(cli.env, environment),
-		Stdin:          cli.options.Stdin,
-		Stdout:         cli.options.Stderr,
-		Stderr:         cli.options.Stderr,
-		Incus:          incusPort,
-		ConfigWriter:   configWriter,
-		Executor:       executor,
-		Yard:           loaded.Context,
-		PowerYards:     powerYards,
-		SRVPool:        loaded.Environment["SRV_POOL"],
-		SRVVolume:      loaded.Environment["SRV_VOLUME"],
+		RepositoryRoot:    cli.options.RepositoryRoot,
+		Environment:       environmentList(cli.env, environment),
+		LaunchEnvironment: environmentList(cli.baseEnv, nil),
+		Stdin:             cli.options.Stdin,
+		Stdout:            cli.options.Stderr,
+		Stderr:            cli.options.Stderr,
+		Incus:             incusPort,
+		ConfigWriter:      configWriter,
+		Executor:          executor,
+		Yard:              loaded.Context,
+		PowerYards:        powerYards,
+		SRVPool:           loaded.Environment["SRV_POOL"],
+		SRVVolume:         loaded.Environment["SRV_VOLUME"],
 	}
 }
 

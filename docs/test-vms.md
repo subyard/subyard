@@ -172,6 +172,25 @@ Use the advisory [change-impact testing workflow](testing.md) to select affected
 and targeted lanes for a diff. The selector only recommends checks; targeted evidence does not
 replace this section's continuous full P0 release gate.
 
+The focused AppArmor regression creates a temporary container yard on VM1, exercises failed
+capability probes and both real Incus AppArmor transitions, and verifies Docker and runtime
+preservation. It restores its marked systemd override and tears down its yard. Run it on a free
+slot whose inner Incus starts with AppArmor enabled; it is targeted evidence, not a full P0:
+
+```sh
+dev/agent-e2e.sh --slot "$slot" --purpose apparmor-probe --vm 1 -- \
+  bash dev/e2e/incus-apparmor-probe.sh
+```
+
+The Incus group regression uses a temporary operator to exercise the first named `init` before
+`incus-admin` membership is active. It verifies the real `sg` restart, explicit command overrides,
+independent yard SSH ports and an idempotent retry, then removes its marked operator and yard:
+
+```sh
+dev/agent-e2e.sh --slot "$slot" --purpose incus-group-reexec --vm 1 -- \
+  bash dev/e2e/incus-group-reexec.sh
+```
+
 | Lane | Prerequisites and timeout | Mutable scope | Classification |
 | --- | --- | --- | --- |
 | `./tests/run.sh` | Go toolchain; bounded by CI | temporary host-free roots and `.build/yard` | required host-free gate |

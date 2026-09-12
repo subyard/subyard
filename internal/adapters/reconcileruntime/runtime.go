@@ -31,17 +31,20 @@ import (
 type Runtime struct {
 	RepositoryRoot string
 	Environment    []string
-	Stdin          io.Reader
-	Stdout         io.Writer
-	Stderr         io.Writer
-	Incus          ports.Incus
-	ConfigWriter   ports.InstanceConfigWriter
-	Executor       ports.InstanceExecutor
-	Yard           domain.Context
-	PowerYards     []domain.Context
-	SRVPool        string
-	SRVVolume      string
-	HostDeviceRoot string
+	// LaunchEnvironment is the unresolved CLI input, used only when restarting
+	// the dispatcher. Resolved yard settings must not become command overrides.
+	LaunchEnvironment []string
+	Stdin             io.Reader
+	Stdout            io.Writer
+	Stderr            io.Writer
+	Incus             ports.Incus
+	ConfigWriter      ports.InstanceConfigWriter
+	Executor          ports.InstanceExecutor
+	Yard              domain.Context
+	PowerYards        []domain.Context
+	SRVPool           string
+	SRVVolume         string
+	HostDeviceRoot    string
 }
 
 func (runtime Runtime) CheckStage(ctx context.Context, stage ports.ReconcileStageID) (bool, error) {
@@ -233,6 +236,13 @@ func (runtime Runtime) instanceConverged(ctx context.Context) (bool, error) {
 	if err != nil || !ready {
 		return false, err
 	}
+	appArmorDisabled := false
+	if runtime.Yard.YardKind == domain.YardContainer {
+		appArmorDisabled, err = runtime.incusAppArmorDisabled(ctx)
+		if err != nil {
+			return false, err
+		}
+	}
 	state, err := runtime.reconcileState(ctx)
 	if err != nil || !state.InstanceFound || !state.VolumeFound {
 		return false, err
@@ -271,7 +281,7 @@ func (runtime Runtime) instanceConverged(ctx context.Context) (bool, error) {
 	if config["security.nesting"] != "true" {
 		return false, nil
 	}
-	if runtime.incusAppArmorDisabled(ctx) {
+	if appArmorDisabled {
 		if !dockerAppArmorPresent ||
 			dockerAppArmor["type"] != "disk" ||
 			dockerAppArmor["source"] != "/dev/null" ||
@@ -311,27 +321,6 @@ func (runtime Runtime) instanceConverged(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	return true, nil
-}
-
-func (runtime Runtime) incusAppArmorDisabled(ctx context.Context) bool {
-	systemctl, err := runtime.executableFromPath("systemctl")
-	if err != nil {
-		return false
-	}
-	command := exec.CommandContext(
-		ctx, systemctl, "show", "incus.service", "-p", "Environment", "--value",
-	)
-	command.Env = runtime.Environment
-	output, err := command.Output()
-	if err != nil {
-		return false
-	}
-	for _, field := range strings.Fields(string(output)) {
-		if strings.Trim(field, `"'`) == "INCUS_SECURITY_APPARMOR=false" {
-			return true
-		}
-	}
-	return false
 }
 
 func (runtime Runtime) reconcileState(ctx context.Context) (ports.ReconcileState, error) {
@@ -492,7 +481,7 @@ func (runtime Runtime) installIncus(ctx context.Context) error {
 		return nil
 	}
 	dispatcher := runtime.environmentValue("SUBYARD_DISPATCHER_PATH")
-	if dispatcher == "" || runtime.environmentValue("SUBYARD_SG_REEXEC") == "1" {
+	if dispatcher == "" || runtime.LaunchEnvironment == nil || runtime.environmentValue("SUBYARD_SG_REEXEC") == "1" {
 		return errors.New("open a fresh incus-admin session, then rerun yard init")
 	}
 	sg, err := runtime.executableFromPath("sg")
@@ -509,7 +498,7 @@ func (runtime Runtime) installIncus(ctx context.Context) error {
 		words = append(words, shellquote.Word(argument))
 	}
 	command := strings.Join(words, " ")
-	environment := append([]string(nil), runtime.Environment...)
+	environment := append([]string(nil), runtime.LaunchEnvironment...)
 	environment = append(environment, "SUBYARD_SG_REEXEC=1", "ASSUME_YES=1")
 	return syscall.Exec(sg, []string{"sg", "incus-admin", "-c", command}, environment)
 }
@@ -602,6 +591,18 @@ func (runtime Runtime) powerService() application.PowerService {
 }
 
 func (runtime Runtime) applyInstanceStage(ctx context.Context) error {
+	// Assess once at the mutation boundary, before even power metadata changes.
+	// The shell consumes this observation instead of probing again after Set.
+	appArmor := "restored"
+	if runtime.Yard.YardKind == domain.YardContainer {
+		disabled, err := runtime.incusAppArmorDisabled(ctx)
+		if err != nil {
+			return err
+		}
+		if disabled {
+			appArmor = "disabled"
+		}
+	}
 	desired := application.InitialPower(runtime.Yard)
 	_, err := runtime.Incus.Instance(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName)
 	if err == nil {
@@ -617,7 +618,8 @@ func (runtime Runtime) applyInstanceStage(ctx context.Context) error {
 		return err
 	}
 	if err := runtime.runScriptEnvironment(ctx, runtime.Stderr, map[string]string{
-		"SUBYARD_POWER_DESIRED": desired,
+		"SUBYARD_POWER_DESIRED":           desired,
+		"SUBYARD_PREPARED_INCUS_APPARMOR": appArmor,
 	}, "03-create-subyard.sh", "--yes"); err != nil {
 		return err
 	}
