@@ -35,7 +35,7 @@ ingress="$state_root/ingress"
 cleanup_failed="$state_root/cleanup-failed"
 printf '%s\n' "$*" >> "$log"
 case "${1:-}" in
-  info) exit 0 ;;
+  info) [ ! -e "$state_root/missing-yard" ] ;;
   list) printf 'RUNNING\n' ;;
   file)
     if [ "${2:-}" = push ]; then
@@ -204,8 +204,22 @@ MOCK
 chmod 0755 "$TMP/bin/"*
 
 run_orca() {
+  # Exercise the physical adapter contract in isolation. Native CLI bootstrap,
+  # confirmation and init composition have separate CLI and real-host coverage.
+  local verb="$1" assessment action argument
+  shift
+  local -a arguments=()
+  for argument in "$@"; do
+    [ "$argument" = --yes ] || arguments+=("$argument")
+  done
+  assessment="$(ORCA_ADVERTISE_HOST="${ORCA_TEST_ADVERTISE:-owner.example-tailnet.ts.net}" \
+    ORCA_HOST_PORT=17678 SUBYARD_RESOURCE_MODE=prepare \
+    "$ROOT/config/profiles/orca/resources/orca/handler.sh" "$verb" "${arguments[@]}")" || return
+  action="$(jq -er '.action' <<<"$assessment")" || return
   ORCA_ADVERTISE_HOST="${ORCA_TEST_ADVERTISE:-owner.example-tailnet.ts.net}" \
-    ORCA_HOST_PORT=17678 "$ROOT/bin/yard" orca "$@"
+    ORCA_HOST_PORT=17678 SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION="$action" \
+    SUBYARD_OPERATION_ID=orca-handler-test \
+    "$ROOT/config/profiles/orca/resources/orca/handler.sh" "$verb" "${arguments[@]}"
 }
 
 assert_down() {
@@ -227,6 +241,14 @@ count_log() {
   grep -Fc -- "$1" "$ORCA_TEST_LOG" || true
 }
 
+touch "$TMP/missing-yard"
+ORCA_ADVERTISE_HOST=127.0.0.1 ORCA_HOST_PORT=17678 SUBYARD_RESOURCE_MODE=prepare \
+  "$ROOT/config/profiles/orca/resources/orca/handler.sh" up >"$TMP/bootstrap-plan.json" \
+  || fail 'first bring-up cannot be assessed before the yard exists'
+jq -e '.action == "up" and .changed == true' "$TMP/bootstrap-plan.json" >/dev/null \
+  || fail 'absent yard did not produce an up assessment'
+[ ! -e "$ORCA_TEST_SERVICE" ] || fail 'bootstrap assessment started the service'
+rm -f "$TMP/missing-yard"
 run_orca up --yes >"$TMP/up.out"
 grep -Fxq 'tcp:100.64.1.20:17678' "$ORCA_TEST_ROUTE" \
   || fail 'Tailscale mode did not bind the exact owner address'
@@ -400,8 +422,8 @@ rm -f "$TMP/fail-service-ready"
 assert_down 'readiness failure rollback'
 assert_guest_staging_clean 'readiness failure rollback'
 
-if ORCA_ADVERTISE_HOST='https://bad/path' ORCA_HOST_PORT=17678 \
-  "$ROOT/bin/yard" orca up --yes >"$TMP/invalid.out" 2>&1; then
+if ORCA_ADVERTISE_HOST='https://bad/path' ORCA_HOST_PORT=17678 SUBYARD_RESOURCE_MODE=prepare \
+  "$ROOT/config/profiles/orca/resources/orca/handler.sh" up >"$TMP/invalid.out" 2>&1; then
   fail 'unsafe advertised hostname was accepted'
 fi
 grep -Fq 'without scheme, path or port' "$TMP/invalid.out" \

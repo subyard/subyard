@@ -47,7 +47,7 @@ func BuiltInRegistry() (Registry, error) {
 
 	goPackages := []string{
 		"application", "audit", "cli", "command", "config", "configsync", "credential",
-		"domain", "migration", "ownerinventory", "ports", "releasetransition", "resource", "rpc", "shellquote",
+		"domain", "migration", "ownerinventory", "ports", "releasetransition", "resource", "resourceendpoint", "rpc", "shellquote",
 		"sshidentity", "sshrelay", "state", "systemdunit", "testyardmigration",
 		"adapters/credentialmeta", "adapters/credentialruntime", "adapters/hostruntime",
 		"adapters/incusclient", "adapters/projectruntime", "adapters/reconcileruntime",
@@ -160,6 +160,16 @@ func BuiltInRegistry() (Registry, error) {
 			},
 			BudgetSeconds: 1800,
 			Rationale:     "documented two-VM Hermes substrate and persistence acceptance",
+		},
+		Check{
+			ID:   "e2e:orca-bootstrap",
+			Tier: "T3",
+			Argv: []string{
+				"dev/agent-e2e.sh", "--purpose", "orca-bootstrap", "--vm", "1", "--",
+				"env", "SUBYARD_E2E_ORCA_BOOTSTRAP=1", "./tests/real-host/orca-bootstrap.sh",
+			},
+			BudgetSeconds: 3600,
+			Rationale:     "fresh one-command Orca profile, yard and durable endpoint bootstrap on a disposable leased VM",
 		},
 		Check{
 			ID:   "e2e:orca-resource",

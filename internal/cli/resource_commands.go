@@ -43,6 +43,17 @@ func (cli *CLI) runResourceCommand(
 		))
 		return 2
 	}
+	bootstrap, err := cli.prepareResourceBootstrap(ctx, loaded, definition, invocation.verb)
+	if err != nil {
+		cli.errorf("%s: prepare bootstrap: %v", definition.Command, err)
+		return 1
+	}
+	if bootstrap != nil {
+		loaded = bootstrap.loaded
+	}
+	if definition.Endpoint != nil && invocation.verb == "status" {
+		cli.printResourceEndpoint(loaded, definition)
+	}
 
 	output, err := cli.prepareResource(ctx, loaded, definition, invocation.arguments)
 	if err != nil {
@@ -56,6 +67,8 @@ func (cli *CLI) runResourceCommand(
 		cli.errorf("%s: %v", definition.Command, err)
 		return 1
 	}
+	resourceConsequences := slices.Clone(assessment.Consequences)
+	assessment = bootstrap.augment(assessment)
 	localAction, ok := localResourceAction(definition, assessment.Action)
 	if !ok {
 		cli.errorf("%s: %v", definition.Command, fmt.Errorf(
@@ -92,6 +105,10 @@ func (cli *CLI) runResourceCommand(
 	}
 	if assessment.Changed &&
 		(assessment.Effect == domain.ActionMutation || assessment.Effect == domain.ActionDestruction) {
+		if err := bootstrap.refresh(ctx, cli); err != nil {
+			cli.errorf("%s: refresh bootstrap: %v", definition.Command, err)
+			return 1
+		}
 		refreshedOutput, refreshErr := cli.prepareResource(ctx, loaded, definition, invocation.arguments)
 		if refreshErr != nil {
 			cli.errorf("%s: refresh assessment: %v", definition.Command, refreshErr)
@@ -104,6 +121,7 @@ func (cli *CLI) runResourceCommand(
 			cli.errorf("%s: refresh assessment: %v", definition.Command, refreshErr)
 			return 1
 		}
+		refreshed = bootstrap.augment(refreshed)
 		if refreshed.Action != assessment.Action {
 			cli.errorf("%s: %v: resource action changed after confirmation",
 				definition.Command, domain.ErrPlanStale)
@@ -122,6 +140,7 @@ func (cli *CLI) runResourceCommand(
 	runner := &resourceApplyRunner{
 		cli: cli, loaded: loaded, definition: definition, verb: invocation.verb,
 		localAction: localAction, effect: assessment.Effect, arguments: slices.Clone(invocation.arguments),
+		bootstrap: bootstrap, consequences: resourceConsequences,
 	}
 	orchestrator.Runner = runner
 	_, diagnostics, err := orchestrator.RunAdapter(ctx, plan, domain.AdapterRequest{
@@ -309,13 +328,15 @@ func localResourceAction(definition resource.Definition, action domain.ActionID)
 }
 
 type resourceApplyRunner struct {
-	cli         *CLI
-	loaded      config.Loaded
-	definition  resource.Definition
-	verb        string
-	localAction string
-	effect      domain.ActionEffect
-	arguments   []string
+	cli          *CLI
+	loaded       config.Loaded
+	definition   resource.Definition
+	verb         string
+	localAction  string
+	effect       domain.ActionEffect
+	arguments    []string
+	bootstrap    *resourceBootstrap
+	consequences []string
 }
 
 func (runner *resourceApplyRunner) Run(
@@ -333,6 +354,28 @@ func (runner *resourceApplyRunner) Run(
 	}
 	if err := validateResourceHandler(runner.definition.HandlerPath()); err != nil {
 		return result, "", err
+	}
+	if runner.bootstrap != nil {
+		if err := runner.bootstrap.apply(ctx, runner.cli); err != nil {
+			return result, "", err
+		}
+		output, err := runner.cli.prepareResource(ctx, runner.loaded, runner.definition, runner.arguments)
+		if err != nil {
+			return result, "", err
+		}
+		assessment, err := runner.cli.resources.AssessPrepareResult(runner.cli.coreActions, runner.definition.Command, runner.verb, output)
+		if err != nil {
+			return result, "", err
+		}
+		local, ok := localResourceAction(runner.definition, assessment.Action)
+		if !ok || local != runner.localAction {
+			return result, "", fmt.Errorf("%w: bootstrap changed resource action", domain.ErrPlanStale)
+		}
+		for _, consequence := range assessment.Consequences {
+			if !slices.Contains(runner.consequences, consequence) {
+				return result, "", fmt.Errorf("%w: bootstrap changed resource consequences", domain.ErrPlanStale)
+			}
+		}
 	}
 	command := exec.CommandContext(ctx, runner.definition.HandlerPath(), runner.arguments...)
 	configureResourceProcess(command)

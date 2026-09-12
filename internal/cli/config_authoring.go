@@ -238,14 +238,13 @@ func configScalarAuthoringPath(
 	case config.ScopeHost:
 		return filepath.Join(loaded.Context.Paths.ConfigHome, "config.env"), nil
 	case config.ScopeYard:
-		if loaded.Context.YardName == "" || loaded.Context.YardName == "default" {
-			return "", errors.New(
-				"yard scope requires selecting a non-default yard with -Y",
-			)
+		name := loaded.Context.YardName
+		if name == "" {
+			name = "default"
 		}
 		return filepath.Join(
 			loaded.Context.Paths.ConfigHome, "yards",
-			loaded.Context.YardName, "config.env",
+			name, "config.env",
 		), nil
 	default:
 		return "", errors.New("unsupported persistent scope")

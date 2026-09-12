@@ -268,7 +268,7 @@ mkdir -p "$root/plain/deep/directory"
 printf 'root-dirty\n' > "$root/fixture.txt"
 YARD
 # A real project event for another project performs the global registration pass.
-yard sync "$folder_source" --name folder-project --yes >/dev/null
+yard sync "$folder_source" --name folder-discovery-event --yes >/dev/null
 
 expected_paths=(
   "$clone_root"
@@ -328,7 +328,7 @@ guest_dev git init -q "$clone_root/partial-good"
 guest_root install -d -m 0444 "$clone_root/partial-aaa-unsearchable"
 guest_root install -d -m 000 "$clone_root/partial-unreadable"
 assert_absent_repo "$clone_root/partial-good"
-if ! yard sync "$folder_source" --name folder-project --yes \
+if ! yard sync "$folder_source" --name folder-partial-event --yes \
   >"$STATE/partial-project.out" 2>"$STATE/partial-project.err"; then
   die 'partial Orca discovery undid a successful project sync'
 fi

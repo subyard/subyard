@@ -141,9 +141,13 @@ def valid_yard_action(command, yard_name):
         return True
     if not command or command[0] != "_project-state" or len(command) < 2:
         return False
-    expected_lengths = {
+    minimum_lengths = {
         "preview": 6,
         "reserve": 7,
+    }
+    if command[1] in minimum_lengths:
+        return len(command) >= minimum_lengths[command[1]]
+    expected_lengths = {
         "finalize": 10,
         "abort": 3,
         "upsert": (6, 9),

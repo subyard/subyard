@@ -1,73 +1,99 @@
 # Orca remote server
 
-Subyard can run a pinned stock Orca server inside a selected yard. Orca is an opt-in
-profile resource, not a `CODING_TOOL_INTEGRATIONS` entry. Tailscale and SSH remain on the physical
-owner host; Subyard does not install either inside the yard.
+Subyard runs a pinned stock Orca server inside a selected yard. The public resource
+profile at `config/profiles/orca/resources/orca.res` declares its endpoint defaults
+and first-run bootstrap. Tailscale and SSH stay on the physical owner host.
 
-## Tailscale on the owner host
+## Connect over Tailscale
 
-`ENVIRONMENT_PROFILES` is a complete whitespace-separated list. The minimal example
-below uses only Orca. If the yard already uses other profiles, keep them in the value,
-for example `"android orca"`. Choose a host port unique to the yard and use the owner's
-existing MagicDNS name:
+Install Subyard on the server and Orca Desktop on the laptop. Connect both machines
+to Tailscale and allow the laptop to reach the server's selected TCP port under your
+tailnet access policy. On the server, run:
 
 ```sh
-yard -Y demo config set ENVIRONMENT_PROFILES orca --scope yard
-yard -Y demo config set ORCA_ADVERTISE_HOST owner.example-tailnet.ts.net --scope yard
-yard -Y demo config set ORCA_HOST_PORT 17678 --scope yard
-yard -Y demo init
-yard -Y demo orca up
-yard -Y demo orca status
-yard -Y demo orca pair
+yard orca up
+yard orca pair
 ```
 
-Rerun `yard init` after changing the profile list so the Orca profile is selected in
-the yard.
+These commands use the default yard. Add `-Y <yard>` for another registered yard.
+`up` adds Orca to that yard's profiles without replacing existing selections, runs
+the required yard initialization, installs Orca and registers existing projects.
+It shows one combined plan before applying changes. Repeating it converges the same
+configuration and preserves server state.
 
-`up` verifies that the name resolves to exactly one active owner-host Tailscale IPv4
-address. The Incus proxy listens only on that address and forwards to Orca inside the
-yard. `status` confirms profile selection, automatic project-hook readiness, and
-registered/total checkout counts, including repository kinds and project-group membership,
-without printing a pairing capability. Incomplete scans and registration failures are listed.
+Paste the final `orca://pair?...` line into **Settings → Remote Orca Servers → Add
+Server** on the laptop. This is a private single-client capability: do not put it in
+config, shell history, tickets or logs. Generate a separate link for each laptop.
+`pair` briefly restarts the service; existing grants and server state survive.
+
+Orca connects directly over Tailscale. SSH over Tailscale is sufficient for running
+these server commands; an SSH port-forward is only needed for the alternative
+loopback setup below.
+
+## Endpoint defaults and overrides
+
+On first bring-up, the profile discovers the owner's Tailscale MagicDNS name,
+falling back to its Tailscale IPv4 address when no name is available or the owner
+cannot resolve the name to its Tailscale address. It verifies
+that the endpoint belongs to the active owner-host Tailscale interface. If Tailscale
+is unavailable, bring-up reports how to configure the host or choose SSH forwarding.
+
+The preferred owner port is **6768**, matching Orca's internal service port. If that
+port is occupied or reserved for another yard, initial setup selects a subsequent
+available port. Owner-wide allocation is serialized; if another operation changes
+the proposed allocation while confirmation is pending, rerun `orca up` to obtain
+a fresh plan.
+
+The selected address and port are saved under the owner's
+`$SUBYARD_HOME/resource-endpoints/`. They survive restart, `down`/`up`, and runtime
+updates. They are local runtime state and are not transferred by configuration sync.
+An occupied saved port produces an error instead of silently changing the endpoint.
+
+Inspect the effective values and their provenance:
+
+```sh
+yard config show ORCA_ADVERTISE_HOST
+yard config show ORCA_HOST_PORT
+yard orca status
+```
+
+Explicit address and port settings take precedence independently. For example,
+to select a different owner port:
+
+```sh
+yard config set ORCA_HOST_PORT 17678 --scope yard
+yard orca up
+```
+
+`17678` here is only an override example. Per-yard overrides, including the default
+yard's overrides, live in `yards/<yard>/config.env`; host-wide settings remain in
+`config.env`. Changing an endpoint requires clients to connect to the new address;
+`pair` refuses to issue a link until `up` has applied the endpoint settings.
+
+`up` publishes only on the selected Tailscale IPv4 address or explicit loopback.
+`status` reports profile selection, project-hook readiness, registered checkouts
+and the owner route without returning a pairing capability.
 
 ## SSH forwarding
 
-When the laptop reaches the owner host through ordinary SSH, keep the owner endpoint on
-loopback:
+For ordinary SSH forwarding, explicitly select loopback before bring-up:
 
 ```sh
-yard -Y demo config set ENVIRONMENT_PROFILES orca --scope yard
-yard -Y demo config set ORCA_ADVERTISE_HOST 127.0.0.1 --scope yard
-yard -Y demo config set ORCA_HOST_PORT 17678 --scope yard
-yard -Y demo init
-yard -Y demo orca up
+yard config set ORCA_ADVERTISE_HOST 127.0.0.1 --scope yard
+yard orca up
+yard config show ORCA_HOST_PORT
 ```
 
-On each laptop, keep this tunnel running:
+On the laptop, replace `PORT` with the effective port shown above and keep this
+terminal running:
 
 ```sh
-ssh -N -L 17678:127.0.0.1:17678 operator@owner-host
+ssh -N -o ExitOnForwardFailure=yes -L PORT:127.0.0.1:PORT operator@owner-host
 ```
 
-The local and owner ports are intentionally the same because the Orca pairing link
-advertises `127.0.0.1:17678`.
-
-## Pair laptops
-
-Create one link per laptop:
-
-```sh
-yard -Y demo orca pair
-```
-
-Paste the final `orca://pair?...` line into **Settings → Remote Orca Servers → Add
-Server** on that laptop. `pair` briefly restarts the headless service because stock
-`orca serve` creates its access link at startup. Existing grants and server state
-survive the restart. Before returning the link, `pair` also runs the idempotent
-project-group and checkout reconciliation.
-
-The link is a single-client capability. Keep it private and do not put it in config,
-shell history, tickets, or logs.
+The laptop and owner ports must match because the pairing link advertises that
+loopback endpoint. Then run `yard orca pair` on the server and import its link in
+Desktop as described above.
 
 ## Projects and lifecycle
 
@@ -93,7 +119,7 @@ There is no background discovery. An ordinary nested `git clone` becomes visible
 the next Subyard project action or explicit sync:
 
 ```sh
-yard -Y demo orca sync
+yard orca sync
 ```
 
 Repeated sync preserves group IDs, manual names, colors and display order. Subyard owns
@@ -124,11 +150,11 @@ group catalog. The reopened client should show the project root and every nested
 Inspect or stop the service:
 
 ```sh
-yard -Y demo orca status
-yard -Y demo orca restart
-yard -Y demo orca logs
-yard -Y demo orca logs --follow
-yard -Y demo orca down
+yard orca status
+yard orca restart
+yard orca logs
+yard orca logs --follow
+yard orca down
 ```
 
 `restart` recovers the existing service without returning a pairing link. `logs`

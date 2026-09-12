@@ -88,6 +88,7 @@
     "go-ownerinventory": ["go:ownerinventory"],
     "go-ports": ["go:ports"],
     "go-resource": ["go:resource"],
+    "go-resourceendpoint": ["go:resourceendpoint"],
     "go-releasetransition": ["go:releasetransition"],
     "go-shellquote": ["go:shellquote"],
     "go-state": ["go:state"],
@@ -128,6 +129,7 @@
     ],
     "orca-profile": [
       "shell:orca-profile-resource",
+      "e2e:orca-bootstrap",
       "e2e:orca-resource",
       "e2e:orca-projects",
       "p0:profile-resource"
@@ -155,6 +157,7 @@
     "real-adapter-contract": ["e2e:adapter-contracts"],
     "real-credential-contract": ["e2e:credential-tools"],
     "real-orca-contract": ["e2e:orca-resource"],
+    "real-orca-bootstrap": ["e2e:orca-bootstrap"],
     "real-orca-projects": ["e2e:orca-projects"],
     "orca-registration-tests": ["shell:orca-profile-resource"],
     "real-ssh-credential-contract": ["e2e:ssh-credential-peer"],
@@ -295,6 +298,13 @@
       "priority": 981,
       "pattern": "^tests/real-host/orca-resource\\.sh$",
       "check_sets": ["real-orca-contract"],
+      "risk_domains": []
+    },
+    {
+      "id": "real-orca-bootstrap-test",
+      "priority": 981,
+      "pattern": "^tests/real-host/orca-bootstrap\\.sh$",
+      "check_sets": ["real-orca-bootstrap"],
       "risk_domains": []
     },
     {
@@ -653,6 +663,13 @@
       "pattern": "^internal/resource/.*$",
       "check_sets": ["go-resource", "profile-generic"],
       "risk_domains": ["profile-resource"]
+    },
+    {
+      "id": "internal-resourceendpoint",
+      "priority": 559,
+      "pattern": "^internal/resourceendpoint/.*$",
+      "check_sets": ["go-resourceendpoint", "go-resource", "orca-profile", "profile-generic"],
+      "risk_domains": ["orca-gpu-profile", "profile-resource"]
     },
     {
       "id": "internal-configsync",

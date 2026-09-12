@@ -497,7 +497,11 @@ func TestRepositoryResourceActionMatrix(t *testing.T) {
 		{resource: "staging-gateway", localID: "destroy-purge", verb: "destroy", effect: domain.ActionDestruction, impacts: []domain.ActionImpact{domain.ImpactPersistentData}, recovery: domain.RecoveryIrreversible},
 		{resource: "staging-gateway", localID: "list", verb: "list", effect: domain.ActionRead, recovery: domain.RecoveryNotNeeded},
 
-		{resource: "orca", localID: "up", verb: "up", effect: domain.ActionMutation, impacts: []domain.ActionImpact{domain.ImpactHostOS}, recovery: domain.RecoveryRecreatable},
+		{resource: "orca", localID: "up", verb: "up", effect: domain.ActionMutation, impacts: []domain.ActionImpact{
+			domain.ImpactAccess, domain.ImpactHostIncus, domain.ImpactHostNetwork, domain.ImpactHostOS,
+			domain.ImpactLocalMetadata, domain.ImpactPersistentData, domain.ImpactSecurity,
+			domain.ImpactTrust, domain.ImpactYardRuntime,
+		}, recovery: domain.RecoveryRecreatable},
 		{resource: "orca", localID: "is-up", verb: "is-up", effect: domain.ActionRead, recovery: domain.RecoveryNotNeeded},
 		{resource: "orca", localID: "status", verb: "status", effect: domain.ActionRead, recovery: domain.RecoveryNotNeeded},
 		{resource: "orca", localID: "pair", verb: "pair", effect: domain.ActionMutation, impacts: []domain.ActionImpact{domain.ImpactExternalSystem}, recovery: domain.RecoveryReversible},
@@ -709,6 +713,85 @@ func TestLoadRejectsInvalidFinalHandler(t *testing.T) {
 				t.Fatal("invalid final handler was accepted")
 			}
 		})
+	}
+}
+
+func TestEndpointDefaultsAndProfileBootstrap(t *testing.T) {
+	root := t.TempDir()
+	writeTestResource(t, root, "sample", "service", `
+COMMAND=svc
+HANDLER=resources/service/handler.sh
+TITLE="Sample service"
+PROXY="sample-proxy SAMPLE_HOST SAMPLE_PORT tcp:127.0.0.1:9119 tailscale-only"
+ENDPOINT_DEFAULTS="tailscale-self 6768"
+BOOTSTRAP=profile
+ACTION="up up bootstrap-change recreatable"
+ACTION="down down host-change reversible"
+`)
+	registry, err := Load(root)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	definition, ok := registry.Lookup("svc")
+	if !ok || definition.Endpoint == nil || definition.Endpoint.HostMode != "tailscale-self" ||
+		definition.Endpoint.PreferredPort != 6768 || !definition.Bootstrap {
+		t.Fatalf("definition = %#v, found=%v", definition, ok)
+	}
+}
+
+func TestEndpointMetadataValidation(t *testing.T) {
+	for _, metadata := range []string{
+		`ENDPOINT_DEFAULTS="unknown 6768"`,
+		`ENDPOINT_DEFAULTS="tailscale-self 0"`,
+		`ENDPOINT_DEFAULTS="tailscale-self 65536"`,
+		`BOOTSTRAP=yard`,
+	} {
+		t.Run(metadata, func(t *testing.T) {
+			root := t.TempDir()
+			writeTestResource(t, root, "sample", "service", `
+COMMAND=svc
+HANDLER=resources/service/handler.sh
+TITLE="Sample service"
+PROXY="sample-proxy SAMPLE_HOST SAMPLE_PORT tcp:127.0.0.1:9119 tailscale-only"
+`+metadata+`
+ACTION="up up host-change recreatable"
+ACTION="down down host-change reversible"
+`)
+			if _, err := Load(root); err == nil {
+				t.Fatalf("invalid endpoint metadata was accepted: %s", metadata)
+			}
+		})
+	}
+}
+
+func TestEndpointMetadataRequiresProxy(t *testing.T) {
+	root := t.TempDir()
+	writeTestResource(t, root, "sample", "service", `
+COMMAND=svc
+HANDLER=resources/service/handler.sh
+TITLE="Sample service"
+ENDPOINT_DEFAULTS="tailscale-self 6768"
+ACTION="up up host-change recreatable"
+ACTION="down down host-change reversible"
+`)
+	if _, err := Load(root); err == nil {
+		t.Fatal("endpoint defaults without proxy were accepted")
+	}
+}
+
+func TestProfileBootstrapRequiresConservativeBringUpAssessment(t *testing.T) {
+	root := t.TempDir()
+	writeTestResource(t, root, "sample", "service", `
+COMMAND=svc
+HANDLER=resources/service/handler.sh
+TITLE="Sample service"
+PROXY="sample-proxy SAMPLE_HOST SAMPLE_PORT tcp:127.0.0.1:9119 tailscale-only"
+BOOTSTRAP=profile
+ACTION="up up host-change recreatable"
+ACTION="down down host-change reversible"
+`)
+	if _, err := Load(root); err == nil {
+		t.Fatal("profile bootstrap with narrow bring-up assessment was accepted")
 	}
 }
 

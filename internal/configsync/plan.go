@@ -252,7 +252,7 @@ func validateCandidate(options Options, source sourceSnapshot, previous Manifest
 			}
 			continue
 		}
-		if !domain.SafeName(name) || name == "default" {
+		if !domain.SafeName(name) {
 			return fmt.Errorf("invalid live yard directory %q", name)
 		}
 		target := filepath.ToSlash(filepath.Join("yards", name, "config.env"))
@@ -265,8 +265,17 @@ func validateCandidate(options Options, source sourceSnapshot, previous Manifest
 		if _, exists, err := inspectLiveFile(options.ConfigHome, path); err != nil {
 			return err
 		} else if exists {
-			yardNames[name] = struct{}{}
+			if name != "default" {
+				yardNames[name] = struct{}{}
+			}
 		}
+	}
+	defaultSettings, err := selectScalar("yards/default/config.env")
+	if err != nil {
+		return err
+	}
+	if defaultSettings != "" {
+		yardSettings["default"] = defaultSettings
 	}
 	for name := range yardNames {
 		target := filepath.ToSlash(filepath.Join("yards", name, "config.env"))
@@ -518,7 +527,7 @@ func validHexDigest(value string, length int) bool {
 func deletedYardDefinition(path string) (string, bool) {
 	parts := strings.Split(filepath.ToSlash(path), "/")
 	if len(parts) == 3 && parts[0] == "yards" && parts[2] == "config.env" &&
-		domain.SafeName(parts[1]) {
+		domain.SafeName(parts[1]) && parts[1] != "default" {
 		return parts[1], true
 	}
 	return "", false

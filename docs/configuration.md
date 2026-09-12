@@ -76,7 +76,10 @@ shipped defaults
   -> current command environment
 ```
 
-The default yard omits the named-yard layers. A command environment value is temporary and has the
+The default yard also accepts scalar overrides in `yards/default/config.env`, after host-wide
+settings. Its optional override file does not register another yard or apply to named yards.
+`yard config set NAME VALUE --scope yard` selects this layer when `-Y` is omitted.
+A command environment value is temporary and has the
 highest precedence. It is never persisted by config sync. `yard [-Y <yard>] config show <SETTING>`
 is the authoritative explanation of the actual chain, including derived values. Start from
 [`config/settings.env.example`](../config/settings.env.example).

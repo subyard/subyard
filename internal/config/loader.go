@@ -238,6 +238,34 @@ func load(
 	}
 	if yardName == "" || yardName == "default" {
 		yardName = "default"
+		defaultYardFile := filepath.Join(configHome, "yards", "default", "config.env")
+		if options.LayerPaths != nil {
+			defaultYardFile = options.LayerPaths.YardSettings["default"]
+		}
+		if defaultYardFile != "" {
+			info, statErr := os.Lstat(defaultYardFile)
+			switch {
+			case errors.Is(statErr, os.ErrNotExist):
+			case statErr != nil:
+				return domain.Context{}, nil, statErr
+			case !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0:
+				return domain.Context{}, nil, fmt.Errorf(
+					"default yard settings must be a regular non-symlink file: %s", defaultYardFile,
+				)
+			default:
+				defaultYardLayer := tracker.addLayer(
+					"yard", "scalar settings", defaultYardFile, true, settingScalar,
+				)
+				if err := applyEnvFileTrackedValidated(
+					defaultYardFile, values, tracker, defaultYardLayer, ScopeYard, options.SyncSource,
+				); err != nil {
+					return domain.Context{}, nil, err
+				}
+				if err := validateBootstrapConfigHome(values, configHome, defaultYardFile); err != nil {
+					return domain.Context{}, nil, err
+				}
+			}
+		}
 	} else {
 		if !domain.SafeName(yardName) {
 			return domain.Context{}, nil, fmt.Errorf("invalid yard name %q", yardName)
@@ -316,6 +344,9 @@ func load(
 	tracker.normalize("CODING_TOOL_INTEGRATIONS", values["CODING_TOOL_INTEGRATIONS"], "resolved agent dependencies")
 	normalizeAgentPersistLinks(values, tracker, defaultLayer)
 	ctx, err := contextFrom(root, yardName, values, tracker, defaultLayer, normalizationLayer)
+	if err == nil {
+		err = applySavedResourceEndpoints(root, options, ctx, values, tracker)
+	}
 	if err == nil {
 		err = normalizeAIObserverPort(values, tracker, ctx.SSHPort)
 	}

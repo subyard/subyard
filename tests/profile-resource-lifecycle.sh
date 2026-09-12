@@ -26,7 +26,20 @@ case "${1:-}" in
   list) [ -e "$state_root/up" ] && printf 'RUNNING\n' ;;
   config)
     case "${2:-} ${3:-}" in
-      'device list') [ -e "$state_root/up" ] && printf 'adb-emu\n' ;;
+      'device list')
+        if [ -e "$state_root/up" ]; then
+          printf 'adb-emu\n'
+          [ -e "$state_root/missing-orca-route" ] || printf 'orca-server\n'
+        fi
+        ;;
+      'device get')
+        [ "${5:-}" = orca-server ] || exit 1
+        case "${6:-}" in
+          listen) printf 'tcp:127.0.0.1:17678\n' ;;
+          connect) printf 'tcp:127.0.0.1:6768\n' ;;
+          *) exit 1 ;;
+        esac
+        ;;
     esac ;;
   exec)
     [ -e "$state_root/up" ] || exit 1
@@ -135,6 +148,14 @@ grep -Fq '"action":"list","changed":false' "$TMP/staging-list-plan.json" || fail
 
 ORCA_ADVERTISE_HOST=127.0.0.1 ORCA_HOST_PORT=17678 SUBYARD_RESOURCE_MODE=prepare \
   "$orca_handler" up >"$TMP/orca-up-plan.json" </dev/null
+touch "$TMP/missing-orca-route"
+if ORCA_ADVERTISE_HOST=127.0.0.1 ORCA_HOST_PORT=17678 SUBYARD_RESOURCE_MODE=prepare \
+  "$orca_handler" pair >"$TMP/orca-pair-missing-route.out" 2>&1 </dev/null; then
+  fail 'Orca pair prepare accepted a missing owner route'
+fi
+grep -Fq 'endpoint settings are not applied' "$TMP/orca-pair-missing-route.out" \
+  || fail 'Orca pair missing-route rejection was not actionable'
+rm -f "$TMP/missing-orca-route"
 ORCA_ADVERTISE_HOST=127.0.0.1 ORCA_HOST_PORT=17678 SUBYARD_RESOURCE_MODE=prepare \
   "$orca_handler" pair >"$TMP/orca-pair-plan.json" </dev/null
 SUBYARD_RESOURCE_MODE=prepare \

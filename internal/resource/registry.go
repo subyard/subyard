@@ -25,8 +25,15 @@ type Definition struct {
 	Title     string
 	Proxy     *ProxyContract
 	Dashboard *DashboardContract
+	Endpoint  *EndpointDefaults
+	Bootstrap bool
 	path      string
 	actions   []actionDeclaration
+}
+
+type EndpointDefaults struct {
+	HostMode      string
+	PreferredPort int
 }
 
 // DashboardContract describes an HTTP endpoint that is useful to a person.
@@ -211,6 +218,10 @@ func cloneDefinition(definition Definition) Definition {
 		dashboard := *definition.Dashboard
 		definition.Dashboard = &dashboard
 	}
+	if definition.Endpoint != nil {
+		endpoint := *definition.Endpoint
+		definition.Endpoint = &endpoint
+	}
 	return definition
 }
 
@@ -236,6 +247,17 @@ func loadDefinition(root, path string) (Definition, []domain.ActionDefinition, e
 	dashboard, err := parseDashboardContract(values.singletons["DASHBOARD"], path)
 	if err != nil {
 		return Definition{}, nil, err
+	}
+	endpoint, err := parseEndpointDefaults(values.singletons["ENDPOINT_DEFAULTS"], path)
+	if err != nil {
+		return Definition{}, nil, err
+	}
+	bootstrap, err := parseBootstrap(values.singletons["BOOTSTRAP"], path)
+	if err != nil {
+		return Definition{}, nil, err
+	}
+	if (endpoint != nil || bootstrap) && proxy == nil {
+		return Definition{}, nil, fmt.Errorf("endpoint defaults and profile bootstrap require PROXY in %s", path)
 	}
 	if !domain.SafeName(command) || !domain.SafeName(bringUp) || !domain.SafeName(shutdown) ||
 		handler == "" || title == "" || len(values.actions) == 0 {
@@ -283,6 +305,9 @@ func loadDefinition(root, path string) (Definition, []domain.ActionDefinition, e
 	if !slices.Contains(verbs, bringUp) || !slices.Contains(verbs, shutdown) {
 		return Definition{}, nil, fmt.Errorf("resource lifecycle verbs are missing in %s", path)
 	}
+	if bootstrap && !bootstrapAction(actionDefinitions, declarations, bringUp) {
+		return Definition{}, nil, fmt.Errorf("profile bootstrap bring-up must use bootstrap-change with recoverable mutation in %s", path)
+	}
 	profileRoot := filepath.Join(root, "config", "profiles", profile)
 	handlerPath := filepath.Clean(filepath.Join(profileRoot, handler))
 	relative, err := filepath.Rel(profileRoot, handlerPath)
@@ -311,8 +336,69 @@ func loadDefinition(root, path string) (Definition, []domain.ActionDefinition, e
 	return Definition{
 		Profile: profile, Name: name, Command: command, Handler: handler,
 		BringUp: bringUp, Shutdown: shutdown, Verbs: verbs, Title: title, path: resolvedHandlerPath,
-		Proxy: proxy, Dashboard: dashboard, actions: declarations,
+		Proxy: proxy, Dashboard: dashboard, Endpoint: endpoint, Bootstrap: bootstrap, actions: declarations,
 	}, actionDefinitions, nil
+}
+
+func parseEndpointDefaults(record, path string) (*EndpointDefaults, error) {
+	if record == "" {
+		return nil, nil
+	}
+	fields := strings.Fields(record)
+	if len(fields) != 2 || fields[0] != "tailscale-self" {
+		return nil, fmt.Errorf("invalid ENDPOINT_DEFAULTS record %q in %s", record, path)
+	}
+	port, err := strconv.Atoi(fields[1])
+	if err != nil || port < 1 || port > 65535 || strconv.Itoa(port) != fields[1] {
+		return nil, fmt.Errorf("invalid ENDPOINT_DEFAULTS record %q in %s", record, path)
+	}
+	return &EndpointDefaults{HostMode: fields[0], PreferredPort: port}, nil
+}
+
+func parseBootstrap(record, path string) (bool, error) {
+	switch record {
+	case "":
+		return false, nil
+	case "profile":
+		return true, nil
+	default:
+		return false, fmt.Errorf("invalid BOOTSTRAP record %q in %s", record, path)
+	}
+}
+
+func bootstrapAction(
+	definitions []domain.ActionDefinition,
+	declarations []actionDeclaration,
+	bringUp string,
+) bool {
+	required := []domain.ActionImpact{
+		domain.ImpactAccess, domain.ImpactHostIncus, domain.ImpactHostNetwork, domain.ImpactHostOS,
+		domain.ImpactLocalMetadata, domain.ImpactPersistentData, domain.ImpactSecurity,
+		domain.ImpactTrust, domain.ImpactYardRuntime,
+	}
+	var action domain.ActionID
+	for _, declaration := range declarations {
+		if declaration.verb == bringUp {
+			action = declaration.action
+			break
+		}
+	}
+	for _, definition := range definitions {
+		if definition.Action != action {
+			continue
+		}
+		if definition.Effect != domain.ActionMutation || definition.Recovery == domain.RecoveryNotNeeded ||
+			definition.Recovery == domain.RecoveryIrreversible {
+			return false
+		}
+		for _, impact := range required {
+			if !slices.Contains(definition.Impacts, impact) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 func parseDashboardContract(record, path string) (*DashboardContract, error) {
@@ -410,6 +496,12 @@ func assessmentClass(value string) (domain.ActionEffect, []domain.ActionImpact, 
 		return domain.ActionMutation, []domain.ActionImpact{domain.ImpactAccess, domain.ImpactSecurity, domain.ImpactTrust}, true
 	case "shared-workload-change":
 		return domain.ActionMutation, []domain.ActionImpact{domain.ImpactSharedWorkload}, true
+	case "bootstrap-change":
+		return domain.ActionMutation, []domain.ActionImpact{
+			domain.ImpactAccess, domain.ImpactHostIncus, domain.ImpactHostNetwork, domain.ImpactHostOS,
+			domain.ImpactLocalMetadata, domain.ImpactPersistentData, domain.ImpactSecurity,
+			domain.ImpactTrust, domain.ImpactYardRuntime,
+		}, true
 	case "runtime-destruction":
 		return domain.ActionDestruction, []domain.ActionImpact{domain.ImpactYardRuntime}, true
 	case "persistent-data-destruction":
@@ -436,7 +528,7 @@ func readDescriptor(path string) (descriptorValues, error) {
 	defer file.Close()
 	allowed := map[string]struct{}{
 		"COMMAND": {}, "HANDLER": {}, "TITLE": {}, "ACTION": {}, "BRINGUP": {}, "SHUTDOWN": {},
-		"PROXY": {}, "DASHBOARD": {},
+		"PROXY": {}, "DASHBOARD": {}, "ENDPOINT_DEFAULTS": {}, "BOOTSTRAP": {},
 	}
 	values := descriptorValues{singletons: make(map[string]string)}
 	scanner := bufio.NewScanner(file)

@@ -192,6 +192,83 @@ func TestVersionedConfigSyncAllowsOptionalSharedAndSelectedHostScopes(t *testing
 	})
 }
 
+func TestVersionedConfigSyncPreservesUnmanagedDefaultYardSettings(t *testing.T) {
+	fixture := newSyncFixture(t, "owner-a")
+	fixture.writeSource("hosts/owner-a/config.env", "SSH_PORT=2233\n")
+	fixture.commit("host setting")
+	defaultSettings := filepath.Join(fixture.configHome, "yards", "default", "config.env")
+	writeSyncTestFile(t, defaultSettings, "ENVIRONMENT_PROFILES=orca\n", 0o600)
+
+	plan, err := BuildPlan(fixture.options(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, change := range plan.Changes {
+		if change.Path == "yards/default/config.env" {
+			t.Fatalf("unmanaged default-yard settings entered the sync plan: %#v", change)
+		}
+	}
+	if err := Apply(plan); err != nil {
+		t.Fatal(err)
+	}
+	assertSyncTestFile(t, defaultSettings, "ENVIRONMENT_PROFILES=orca\n", 0o600)
+}
+
+func TestVersionedConfigSyncManagesOptionalDefaultYardSettings(t *testing.T) {
+	fixture := newSyncFixture(t, "owner-a")
+	fixture.writeSource(
+		"hosts/owner-a/yards/default/config.env", "ENVIRONMENT_PROFILES=orca\n",
+	)
+	fixture.commit("default yard setting")
+
+	plan, err := BuildPlan(fixture.options(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(plan); err != nil {
+		t.Fatal(err)
+	}
+	defaultSettings := filepath.Join(fixture.configHome, "yards", "default", "config.env")
+	assertSyncTestFile(t, defaultSettings, "ENVIRONMENT_PROFILES=orca\n", 0o600)
+
+	if err := os.Remove(filepath.Join(fixture.source, "hosts", "owner-a", "yards", "default", "config.env")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(fixture.source, "hosts", "owner-a", "yards", "default")); err != nil {
+		t.Fatal(err)
+	}
+	fixture.commit("remove default yard setting")
+	options := fixture.options(false)
+	options.YardInUse = func(yard string) (string, bool, error) {
+		t.Fatalf("default scalar removal checked runtime yard use for %q", yard)
+		return "", false, nil
+	}
+	removal, err := BuildPlan(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(removal); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(defaultSettings); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("managed default-yard settings were not deleted: %v", err)
+	}
+}
+
+func TestVersionedConfigSyncRejectsInvalidLiveDefaultYardSettings(t *testing.T) {
+	fixture := newSyncFixture(t, "owner-a")
+	fixture.commit("manifest only")
+	writeSyncTestFile(
+		t, filepath.Join(fixture.configHome, "yards", "default", "config.env"),
+		"NOT_A_SUBYARD_SETTING=value\n", 0o600,
+	)
+
+	_, err := BuildPlan(fixture.options(false))
+	if err == nil || !strings.Contains(err.Error(), "NOT_A_SUBYARD_SETTING") {
+		t.Fatalf("invalid default-yard candidate setting was accepted: %v", err)
+	}
+}
+
 func TestVersionedConfigSyncKeepsOptionalScopeValidationFailClosed(t *testing.T) {
 	for _, test := range []struct {
 		name  string
@@ -221,6 +298,17 @@ func TestVersionedConfigSyncKeepsOptionalScopeValidationFailClosed(t *testing.T)
 				)
 			},
 			want: "yard demo has no config.env definition",
+		},
+		{
+			name: "default yard assets are unsupported",
+			write: func(fixture *syncFixture) {
+				fixture.writeSource("hosts/owner-a/yards/default/config.env", "SSH_PORT=2233\n")
+				fixture.writeSource(
+					"hosts/owner-a/yards/default/overrides/agents/codex/rules/repo.rules",
+					"allow\n",
+				)
+			},
+			want: "default yard supports only scalar config.env settings",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {

@@ -150,11 +150,24 @@ func readSource(options Options, hostID string) (sourceSnapshot, error) {
 	}
 	for _, entry := range entries {
 		name := entry.Name()
-		if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !domain.SafeName(name) ||
-			name == "default" {
+		if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !domain.SafeName(name) {
 			return sourceSnapshot{}, fmt.Errorf("invalid versioned yard entry %q for host %s", name, hostID)
 		}
 		yardRoot := filepath.Join(yardsRoot, name)
+		if name == "default" {
+			if err := validateChildren(yardRoot, map[string]bool{"config.env": false}); err != nil {
+				return sourceSnapshot{}, fmt.Errorf(
+					"default yard supports only scalar config.env settings: %w", err,
+				)
+			}
+			if err := snapshot.readConfig(
+				filepath.Join(yardRoot, "config.env"), "yards/default/config.env",
+				config.ScopeYard, true,
+			); err != nil {
+				return sourceSnapshot{}, fmt.Errorf("default yard: %w", err)
+			}
+			continue
+		}
 		if err := validateChildren(yardRoot, map[string]bool{
 			"config.env": false, "overrides": true,
 		}); err != nil {

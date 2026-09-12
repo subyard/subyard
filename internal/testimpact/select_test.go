@@ -70,7 +70,7 @@ func TestSelectClassifiesDocumentationTestsLeafPackagesAndSpecialProfiles(t *tes
 				modifiedChange("config/profiles/orca/provision.sh"),
 			},
 			checkSets: []string{
-				"e2e:orca-projects", "e2e:orca-resource", "go:resource", "p0:profile-resource",
+				"e2e:orca-bootstrap", "e2e:orca-projects", "e2e:orca-resource", "go:resource", "p0:profile-resource",
 				"shell:orca-profile-resource", "shell:profile-resource-lifecycle",
 				"shell:provision-profile-check",
 			},
@@ -79,7 +79,7 @@ func TestSelectClassifiesDocumentationTestsLeafPackagesAndSpecialProfiles(t *tes
 				"go:resource", "shell:orca-profile-resource",
 				"shell:profile-resource-lifecycle", "shell:provision-profile-check",
 			},
-			e2eIDs:       []string{"e2e:orca-projects", "e2e:orca-resource", "p0:profile-resource"},
+			e2eIDs:       []string{"e2e:orca-bootstrap", "e2e:orca-projects", "e2e:orca-resource", "p0:profile-resource"},
 			fullRequired: false,
 		},
 	}

@@ -554,9 +554,13 @@ cmd_up() {
 
 cmd_pair() {
   require_runtime_settings
+  resolve_owner_address
+  runtime_contract_ready && route_matches && owner_endpoint_ready \
+    || die "Orca endpoint settings are not applied; run '$(yard_cmd_hint) orca up' first"
   service_ready || die "Orca is not ready; run '$(yard_cmd_hint) orca up' first"
   yexec systemctl restart "$ORCA_UNIT"
   wait_service_ready || die "Orca did not become ready after restart"
+  wait_owner_endpoint || die "Orca owner endpoint is not reachable after restart"
   run_project_sync
   projects_synced || die "Orca project registrations did not converge"
   yexec jq -er '
@@ -700,21 +704,27 @@ prepare_resource() { # <public-verb>
   validate_resource_arguments "$verb" "$@"
   case "$verb" in
     up)
-      svc_require_yard_running
       require_runtime_settings
       resolve_owner_address
-      select_release
       refuse_port_collision
-      release_ready || changed=true
-      dependencies_ready || changed=true
-      runtime_contract_ready || changed=true
-      service_enabled || changed=true
-      service_ready || changed=true
-      ingress_active || changed=true
-      route_matches || changed=true
-      owner_endpoint_ready || changed=true
-      automatic_project_hook_ready || changed=true
-      projects_synced || changed=true
+      # The engine composes init with this resource action. A first-run plan
+      # must be inspectable before Incus or the selected yard is installed.
+      if incus info "$YARD_INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1 &&
+        [ "$(incus list "$YARD_INSTANCE_NAME" "${PROJ[@]}" -f csv -c s 2>/dev/null)" = RUNNING ]; then
+        select_release
+        release_ready || changed=true
+        dependencies_ready || changed=true
+        runtime_contract_ready || changed=true
+        service_enabled || changed=true
+        service_ready || changed=true
+        ingress_active || changed=true
+        route_matches || changed=true
+        owner_endpoint_ready || changed=true
+        automatic_project_hook_ready || changed=true
+        projects_synced || changed=true
+      else
+        changed=true
+      fi
       if [ "$changed" = true ]; then
         emit_resource_assessment up true \
           "converge the pinned Orca package, dependencies and service contract" \
@@ -727,6 +737,9 @@ prepare_resource() { # <public-verb>
     pair)
       svc_require_yard_running
       require_runtime_settings
+      resolve_owner_address
+      runtime_contract_ready && route_matches && owner_endpoint_ready \
+        || die "Orca endpoint settings are not applied; run '$(yard_cmd_hint) orca up' first"
       service_ready || die "Orca is not ready; run '$(yard_cmd_hint) orca up' first"
       emit_resource_assessment pair true \
         "restart the Orca service, reconcile project groups and checkouts and issue one fresh single-client pairing link"
