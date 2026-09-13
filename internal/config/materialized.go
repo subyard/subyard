@@ -19,7 +19,7 @@ type MaterializedAsset struct {
 	Setting        string
 	Source         string
 	Destination    string
-	OwnedJSON      bool
+	OwnedFormat    string
 	FollowSymlinks bool
 }
 
@@ -44,10 +44,19 @@ func MaterializedAssets(values map[string]string, developer string) ([]Materiali
 			if filepath.IsAbs(destination) || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
 				return nil, fmt.Errorf("agent %s %s destination leaves the developer home", agent, strings.ToLower(kind))
 			}
+			ownedFormat := ""
+			if kind == "CONFIG" {
+				switch filepath.Ext(clean) {
+				case ".json":
+					ownedFormat = "json"
+				case ".toml":
+					ownedFormat = "toml"
+				}
+			}
 			assets = append(assets, MaterializedAsset{
 				Name: agent + "." + strings.ToLower(kind), Setting: setting, Source: source,
 				Destination: filepath.Join("/home", developer, clean),
-				OwnedJSON:   kind == "CONFIG" && filepath.Ext(clean) == ".json",
+				OwnedFormat: ownedFormat,
 			})
 		}
 	}

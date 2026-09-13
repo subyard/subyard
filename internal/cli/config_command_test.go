@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/domain"
@@ -1190,19 +1191,21 @@ func TestConfigApplyRejectsDesiredChangeThatConvergedAfterConfirmation(t *testin
 	for _, asset := range assets {
 		var hash string
 		if asset.Source == source {
-			digest := sha256.Sum256([]byte(after))
-			hash = fmt.Sprintf("%x", digest)
+			hash, err = configmaterial.DesiredDigestFor(asset.OwnedFormat, []byte(after))
+			if err != nil {
+				t.Fatal(err)
+			}
 		} else {
 			hash, err = hashRegularFile(asset.Source)
 			if err != nil {
 				t.Fatal(err)
 			}
 		}
-		fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{
-			Result: ports.InstanceExecResult{
-				Stdout: []byte(fmt.Sprintf("%s  %s\n", hash, asset.Destination)), ExitCode: 0,
-			},
-		})
+		output := []byte(fmt.Sprintf("%s  %s\n", hash, asset.Destination))
+		if asset.OwnedFormat != "" {
+			output = []byte(fmt.Sprintf(`{"converged":true,"fingerprint":%q}`, hash))
+		}
+		fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{Result: ports.InstanceExecResult{Stdout: output}})
 	}
 	prompt := &callbackPrompt{callback: func() {
 		writeConfigCommandFile(t, source, after)
@@ -1305,7 +1308,7 @@ func TestConfigApplyExecErrorFailsPreflightWithAssumeYes(t *testing.T) {
 
 func TestConfigApplyCompletedNonzeroProbeRemainsDrift(t *testing.T) {
 	root, _, _, environment := configCommandFixture(t)
-	environment = append(environment, "CODING_TOOL_INTEGRATIONS=codex")
+	environment = append(environment, "CODING_TOOL_INTEGRATIONS=codex", "AGENT_codex_CONFIG_DEST=.codex/config.txt")
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	fake := &testkit.Incus{
 		Instances: map[string]ports.InstanceInfo{
@@ -3431,7 +3434,7 @@ func appendHashSteps(t *testing.T, fake *testkit.Incus, loaded config.Loaded) {
 			t.Fatal(err)
 		}
 		output := []byte(fmt.Sprintf("%s  %s\n", hash, asset.Destination))
-		if asset.OwnedJSON {
+		if asset.OwnedFormat != "" {
 			output = []byte(fmt.Sprintf(`{"converged":true,"fingerprint":%q}`, hash))
 		}
 		fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{
@@ -3455,7 +3458,7 @@ func appendMismatchedHashSteps(
 	}
 	for _, asset := range assets {
 		output := []byte(strings.Repeat(digit, 64) + "  " + asset.Destination + "\n")
-		if asset.OwnedJSON {
+		if asset.OwnedFormat != "" {
 			output = []byte(fmt.Sprintf(`{"converged":false,"fingerprint":%q}`, strings.Repeat(digit, 64)))
 		}
 		fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{
@@ -3713,49 +3716,61 @@ func seedConfigSyncRecoveryJournal(t *testing.T, configHome string) (string, str
 	return target, transaction
 }
 
-func TestConfigAssessmentUsesOwnedJSONForImportedSources(t *testing.T) {
-	root, _, _, environment := configCommandFixture(t)
-	loaded := loadConfigCommandContext(t, root, environment, "default")
-	source := filepath.Join(t.TempDir(), "imported-without-extension")
-	writeConfigCommandFile(t, source, `{"permissions":{"allow":["Read"]}}`)
-	loaded.Environment["CODING_TOOL_INTEGRATIONS"] = "claude"
-	loaded.Environment["AGENT_claude_CONFIG"] = source
-	loaded.Environment["AGENT_claude_CONFIG_DEST"] = ".claude/settings.json"
-	loaded.Environment["AGENT_claude_RULES"] = ""
-	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
-		loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {Status: "Running"},
-	}}
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: fake, Executor: fake})
-	if err != nil {
-		t.Fatal(err)
-	}
-	assess := func(converged bool, fingerprint string) configTargetAssessment {
-		t.Helper()
-		fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{Result: ports.InstanceExecResult{
-			Stdout: []byte(fmt.Sprintf(`{"converged":%t,"fingerprint":%q}`, converged, strings.Repeat(fingerprint, 64))),
-		}})
-		result, err := program.assessConfigTarget(context.Background(), configTarget{Name: "default", Loaded: loaded}, true)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return result
-	}
-	first := assess(true, "a")
-	if first.Changed || first.State != "converged" {
-		t.Fatalf("owned JSON reported drift: %#v", first)
-	}
-	request := fake.ExecCalls[0].Request
-	if request.Command[0] != "python3" || request.User != 0 || len(request.Stdin) == 0 {
-		t.Fatal("JSON observer must read root-owned baseline using typed stdin payload")
-	}
-	// Source formatting is not semantic drift or a stale-confirmation event.
-	writeConfigCommandFile(t, source, "{\n  \"permissions\": {\"allow\": [\"Read\"]}\n}\n")
-	formatted := assess(true, "a")
-	if first.DesiredFingerprint != formatted.DesiredFingerprint || first.MaterializedFingerprint != formatted.MaterializedFingerprint {
-		t.Fatal("formatting changed JSON fingerprints")
-	}
-	drift := assess(false, "b")
-	if !drift.Changed || drift.State != "drift" || first.MaterializedFingerprint == drift.MaterializedFingerprint {
-		t.Fatal("managed projection or baseline drift was ignored")
+func TestConfigAssessmentUsesOwnedFormatForImportedSources(t *testing.T) {
+	for _, test := range []struct {
+		name, agent, destination, payload, formatted string
+	}{
+		{name: "JSON", agent: "claude", destination: ".claude/settings.json", payload: `{"permissions":{"allow":["Read"]}}`, formatted: "{\n  \"permissions\": {\"allow\": [\"Read\"]}\n}\n"},
+		{name: "TOML", agent: "codex", destination: ".codex/config.toml", payload: "model = \"gpt-5\"\n", formatted: "model=\"gpt-5\"\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, _, _, environment := configCommandFixture(t)
+			loaded := loadConfigCommandContext(t, root, environment, "default")
+			source := filepath.Join(t.TempDir(), "imported-without-extension")
+			writeConfigCommandFile(t, source, test.payload)
+			loaded.Environment["CODING_TOOL_INTEGRATIONS"] = test.agent
+			loaded.Environment["AGENT_"+test.agent+"_CONFIG"] = source
+			loaded.Environment["AGENT_"+test.agent+"_CONFIG_DEST"] = test.destination
+			loaded.Environment["AGENT_"+test.agent+"_RULES"] = ""
+			fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+				loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {Status: "Running"},
+			}}
+			program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: fake, Executor: fake})
+			if err != nil {
+				t.Fatal(err)
+			}
+			assess := func(converged bool, fingerprint string) configTargetAssessment {
+				t.Helper()
+				fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{Result: ports.InstanceExecResult{
+					Stdout: []byte(fmt.Sprintf(`{"converged":%t,"fingerprint":%q}`, converged, strings.Repeat(fingerprint, 64))),
+				}})
+				result, err := program.assessConfigTarget(context.Background(), configTarget{Name: "default", Loaded: loaded}, true)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return result
+			}
+			first := assess(true, "a")
+			if first.Changed || first.State != "converged" {
+				t.Fatalf("owned %s reported drift: %#v", test.name, first)
+			}
+			request := fake.ExecCalls[0].Request
+			if request.Command[0] != "python3" || request.User != 0 || len(request.Stdin) == 0 {
+				t.Fatal("structured observer must read root-owned baseline using typed stdin payload")
+			}
+			// Source formatting is not semantic drift or a stale-confirmation event.
+			writeConfigCommandFile(t, source, test.formatted)
+			formatted := assess(true, "a")
+			if test.name == "JSON" && (first.DesiredFingerprint != formatted.DesiredFingerprint || first.MaterializedFingerprint != formatted.MaterializedFingerprint) {
+				t.Fatal("formatting changed JSON fingerprints")
+			}
+			if test.name == "TOML" && first.DesiredFingerprint == formatted.DesiredFingerprint {
+				t.Fatal("TOML template byte change did not update desired fingerprint")
+			}
+			drift := assess(false, "b")
+			if !drift.Changed || drift.State != "drift" || first.MaterializedFingerprint == drift.MaterializedFingerprint {
+				t.Fatal("managed projection or baseline drift was ignored")
+			}
+		})
 	}
 }

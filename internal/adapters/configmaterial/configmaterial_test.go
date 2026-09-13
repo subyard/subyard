@@ -8,7 +8,110 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Subyard/Subyard/internal/ports"
 )
+
+func TestTOMLMaterializationPreservesRuntimeFields(t *testing.T) {
+	h := newGuestHarness(t)
+	h.format = "toml"
+	desired := []byte("approval_policy = 'on-request'\nsandbox_mode = 'danger-full-access'\n")
+	original := string(desired) + "# Runtime-owned additions\n[hooks]\nenabled = true\n[projects.sample]\ntrust_level = 'trusted'\n[tui]\nnotifications = true\n"
+	h.writeDestination(t, original)
+	h.apply(t, desired)
+	first := h.observe(t, desired)
+	if !first.Converged {
+		t.Fatal("runtime-added hooks/projects/tui caused materialized drift")
+	}
+	payload, err := os.ReadFile(h.destination)
+	if err != nil || string(payload) != original {
+		t.Fatalf("adoption changed otherwise converged TOML: err=%v", err)
+	}
+	info, err := os.Stat(h.destination)
+	if err != nil || info.Mode().Perm() != 0o644 {
+		t.Fatalf("TOML adoption did not enforce materialized file mode: err=%v", err)
+	}
+	h.writeDestination(t, strings.Replace(original, "notifications = true", "notifications = false", 1))
+	second := h.observe(t, desired)
+	if !second.Converged || first.Fingerprint != second.Fingerprint {
+		t.Fatal("unmanaged TOML change invalidated readiness")
+	}
+	h.writeDestination(t, strings.Replace(original, "'on-request'", "'never'", 1))
+	if h.observe(t, desired).Converged {
+		t.Fatal("managed approval policy drift was ignored")
+	}
+	h.apply(t, desired)
+	if !h.observe(t, desired).Converged {
+		t.Fatal("managed TOML repair did not converge")
+	}
+	payload, _ = os.ReadFile(h.destination)
+	for _, runtimeKey := range []string{"[hooks]", "[projects.sample]", "[tui]"} {
+		if !bytes.Contains(payload, []byte(runtimeKey)) {
+			t.Fatalf("repair lost runtime table %s", runtimeKey)
+		}
+	}
+	baseline, _ := os.ReadFile(h.baselinePath(t))
+	if bytes.Contains(baseline, []byte("on-request")) || bytes.Contains(baseline, []byte("projects")) {
+		t.Fatal("baseline captured runtime fields or configuration values")
+	}
+}
+
+func TestTOMLMaterializationRetiresOwnedFieldsAndPreservesScalarTypes(t *testing.T) {
+	h := newGuestHarness(t)
+	h.format = "toml"
+	h.writeDestination(t, "[managed]\nold = true\nruntime = 'kept'\n[runtime]\ndate = 2026-09-13\ntime = 12:34:56\nstamp = 2026-09-13T12:34:56Z\nfloat = 1.5\ninteger = 1\nnan = nan\ninf = inf\n[[hooks.Stop]]\ncommand = 'synthetic-hook'\n")
+	h.apply(t, []byte("[managed]\nold = true\n"))
+	desired := []byte("[managed]\nfresh = 2\n")
+	h.apply(t, desired)
+	if !h.observe(t, desired).Converged {
+		t.Fatal("TOML retirement did not converge")
+	}
+	// Observe the preserved runtime data as a new desired template to verify a
+	// real TOML round trip, including hooks represented as arrays of tables.
+	preserved := []byte("[managed]\nfresh = 2\nruntime = 'kept'\n[runtime]\ndate = 2026-09-13\ntime = 12:34:56\nstamp = 2026-09-13T12:34:56Z\nfloat = 1.5\ninteger = 1\nnan = nan\ninf = inf\n[[hooks.Stop]]\ncommand = 'synthetic-hook'\n")
+	before, _ := os.ReadFile(h.destination)
+	if bytes.Contains(before, []byte("old =")) {
+		t.Fatal("retired owned field remained")
+	}
+	h.apply(t, preserved)
+	after, _ := os.ReadFile(h.destination)
+	if !bytes.Equal(before, after) || !h.observe(t, preserved).Converged {
+		t.Fatal("TOML values changed type or value during serialization")
+	}
+	// TOML integers and floats have different types even when numerically equal.
+	h.writeDestination(t, strings.Replace(string(after), "integer = 1", "integer = 1.0", 1))
+	if h.observe(t, preserved).Converged {
+		t.Fatal("TOML numeric type drift was ignored")
+	}
+}
+
+func TestTOMLMaterializationRejectsInvalidInputsWithoutOverwrite(t *testing.T) {
+	for _, malformed := range []string{"policy = 'secret'\npolicy = 'duplicate'", "[broken\nsecret"} {
+		t.Run(malformed[:6], func(t *testing.T) {
+			h := newGuestHarness(t)
+			h.format = "toml"
+			original := "policy = 'preserve'\n"
+			h.writeDestination(t, original)
+			stderr, err := h.run([]byte(malformed), ModeApply)
+			if err == nil || strings.Contains(stderr, "secret") {
+				t.Fatalf("unsafe desired TOML handling: error=%v stderr=%q", err, stderr)
+			}
+			got, _ := os.ReadFile(h.destination)
+			if string(got) != original {
+				t.Fatal("invalid desired TOML changed the destination")
+			}
+			h.writeDestination(t, malformed)
+			stderr, err = h.run([]byte(original), ModeApply)
+			if err == nil || strings.Contains(stderr, "secret") {
+				t.Fatalf("unsafe current TOML handling: error=%v stderr=%q", err, stderr)
+			}
+			got, _ = os.ReadFile(h.destination)
+			if string(got) != malformed {
+				t.Fatal("invalid current TOML was overwritten")
+			}
+		})
+	}
+}
 
 func TestDesiredDigestIsSemanticAndRequiresObject(t *testing.T) {
 	first, err := DesiredDigest([]byte("{\n  \"enabled\": true, \"nested\": {\"count\": 2}\n}\n"))
@@ -288,6 +391,7 @@ type guestHarness struct {
 	root        string
 	state       string
 	destination string
+	format      string
 }
 
 func newGuestHarness(t *testing.T) guestHarness {
@@ -318,8 +422,7 @@ func (h guestHarness) apply(t *testing.T, payload []byte) {
 
 func (h guestHarness) observe(t *testing.T, payload []byte) JSONObservation {
 	t.Helper()
-	request, err := jsonRequest(ModeObserve, "dev", h.destination, os.Getuid(), payload,
-		h.state, os.Getuid(), filepath.Join(h.root, "home", "dev"))
+	request, err := h.request(payload, ModeObserve)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -337,10 +440,18 @@ func (h guestHarness) observe(t *testing.T, payload []byte) JSONObservation {
 	return observation
 }
 
+func (h guestHarness) request(payload []byte, mode string) (ports.InstanceExecRequest, error) {
+	format := h.format
+	if format == "" {
+		format = "json"
+	}
+	return materializationRequest(format, mode, "dev", h.destination, os.Getuid(), payload,
+		h.state, os.Getuid(), filepath.Join(h.root, "home", "dev"))
+}
+
 func (h guestHarness) run(payload []byte, mode string) (string, error) {
 	h.t.Helper()
-	request, err := jsonRequest(mode, "dev", h.destination, os.Getuid(), payload,
-		h.state, os.Getuid(), filepath.Join(h.root, "home", "dev"))
+	request, err := h.request(payload, mode)
 	if err != nil {
 		return "", err
 	}

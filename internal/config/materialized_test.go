@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestMaterializedAssetsSelectJSONByDestinationAndKind(t *testing.T) {
+func TestMaterializedAssetsSelectOwnedFormatByDestinationAndKind(t *testing.T) {
 	assets, err := MaterializedAssets(map[string]string{
 		"CODING_TOOL_INTEGRATIONS":   "claude opencode codex",
 		"AGENT_claude_CONFIG":        "/imported/renamed",
@@ -24,9 +24,13 @@ func TestMaterializedAssetsSelectJSONByDestinationAndKind(t *testing.T) {
 	if len(assets) != 4 {
 		t.Fatalf("assets=%d", len(assets))
 	}
+	want := map[string]string{
+		"AGENT_claude_CONFIG": "json",
+		"AGENT_codex_CONFIG":  "toml",
+	}
 	for _, asset := range assets {
-		if asset.OwnedJSON != (asset.Setting == "AGENT_claude_CONFIG") {
-			t.Fatalf("wrong policy for %s", asset.Setting)
+		if asset.OwnedFormat != want[asset.Setting] {
+			t.Fatalf("policy for %s = %q, want %q", asset.Setting, asset.OwnedFormat, want[asset.Setting])
 		}
 	}
 }

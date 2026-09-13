@@ -22,7 +22,7 @@ type guestConfigFile struct {
 	source         string
 	destination    string
 	followSymlinks bool
-	ownedJSON      bool
+	ownedFormat    string
 }
 
 func (runtime Runtime) RefreshConfigs(ctx context.Context) error {
@@ -105,8 +105,8 @@ func (runtime Runtime) guestConfigsConverged(ctx context.Context, files []guestC
 			return false, err
 		}
 		request := ports.InstanceExecRequest{Command: []string{"sha256sum", "--", file.destination}}
-		if file.ownedJSON {
-			request, err = configmaterial.JSONRequest(configmaterial.ModeObserve, runtime.devUser(), file.destination, runtime.Yard.DevUID, payload)
+		if file.ownedFormat != "" {
+			request, err = configmaterial.Request(file.ownedFormat, configmaterial.ModeObserve, runtime.devUser(), file.destination, runtime.Yard.DevUID, payload)
 			if err != nil {
 				return false, err
 			}
@@ -115,11 +115,11 @@ func (runtime Runtime) guestConfigsConverged(ctx context.Context, files []guestC
 		if execErr != nil && result.ExitCode == 0 {
 			return false, execErr
 		}
-		if file.ownedJSON {
+		if file.ownedFormat != "" {
 			if execErr != nil || result.ExitCode != 0 {
-				return false, fmt.Errorf("observe %s: JSON configuration unavailable", file.label)
+				return false, fmt.Errorf("observe %s: structured configuration unavailable", file.label)
 			}
-			observed, err := configmaterial.ParseJSONObservation(result.Stdout)
+			observed, err := configmaterial.ParseObservation(result.Stdout)
 			if err != nil {
 				return false, err
 			}
@@ -230,7 +230,7 @@ func (runtime Runtime) guestConfigFiles() ([]guestConfigFile, error) {
 			if !strings.HasPrefix(asset.Name, agent+".") {
 				continue
 			}
-			files = append(files, guestConfigFile{label: strings.Replace(asset.Name, ".", " ", 1), source: asset.Source, destination: asset.Destination, ownedJSON: asset.OwnedJSON})
+			files = append(files, guestConfigFile{label: strings.Replace(asset.Name, ".", " ", 1), source: asset.Source, destination: asset.Destination, ownedFormat: asset.OwnedFormat})
 		}
 	}
 
@@ -250,16 +250,16 @@ func (file guestConfigFile) sourceHash() (string, error) {
 }
 
 func (runtime Runtime) applyGuestConfig(ctx context.Context, file guestConfigFile, payload []byte) error {
-	if !file.ownedJSON {
+	if file.ownedFormat == "" {
 		return runtime.writeGuestFile(ctx, file.destination, payload)
 	}
-	request, err := configmaterial.JSONRequest(configmaterial.ModeApply, runtime.devUser(), file.destination, runtime.Yard.DevUID, payload)
+	request, err := configmaterial.Request(file.ownedFormat, configmaterial.ModeApply, runtime.devUser(), file.destination, runtime.Yard.DevUID, payload)
 	if err != nil {
 		return err
 	}
 	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, request)
 	if err != nil || result.ExitCode != 0 {
-		return errors.New("JSON configuration apply failed")
+		return errors.New("structured configuration apply failed")
 	}
 	return nil
 }

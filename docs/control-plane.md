@@ -40,11 +40,11 @@ Go owns release selection, download and CLI/RPC planning. The installer only ver
 a prepared bundle. A separate first-install bootstrap is excluded from release runtimes.
 
 Materialized coding-agent assets share resolution and safe source reads in
-`internal/config/materialized.go`. `internal/adapters/configmaterial` implements the guest JSON
-apply/observe boundary with a fixed embedded Python stdlib program, using the base guest Python
-installation. The Go callers send desired content through typed stdin and consume only convergence
+`internal/config/materialized.go`. `internal/adapters/configmaterial` implements the guest JSON/TOML
+apply/observe boundary with an embedded Python program, using the base guest Python installation
+and an embedded TOML writer. The Go callers send desired content through typed stdin and consume only convergence
 and fingerprints. Runtime provisioning, config refresh/status and release activation use the same
-JSON ownership baseline; non-JSON consumers retain byte-exact behavior. See
+field ownership baseline; other consumers retain byte-exact behavior. See
 [File settings](configuration.md#file-settings) for the ownership and interrupted-write contract.
 
 ## Stable interfaces

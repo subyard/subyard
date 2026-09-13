@@ -14,6 +14,7 @@ KEEP_FAILED_UPGRADE=0
 ORIGINAL_HOME="$HOME"
 YARD_BIN="$ROOT/.build/yard"
 EXISTING_YARD="${SUBYARD_E2E_ORCA_EXISTING_YARD:-0}"
+CODEX_CONFIG="${SUBYARD_E2E_ORCA_CODEX_CONFIG:-0}"
 INSTALLED_RELEASE=''
 UPGRADE_FROM="${SUBYARD_E2E_ORCA_UPGRADE_FROM:-}"
 UPGRADE_INSTALLER_SHA256="${SUBYARD_E2E_ORCA_UPGRADE_INSTALLER_SHA256:-}"
@@ -28,7 +29,13 @@ case "$EXISTING_YARD" in
   0|1) ;;
   *) die 'SUBYARD_E2E_ORCA_EXISTING_YARD must be 0 or 1' ;;
 esac
+case "$CODEX_CONFIG" in
+  0) ;;
+  1) EXISTING_YARD=1 ;;
+  *) die 'SUBYARD_E2E_ORCA_CODEX_CONFIG must be 0 or 1' ;;
+esac
 if [ -n "$UPGRADE_FROM" ]; then
+  [ "$CODEX_CONFIG" = 0 ] || die 'Codex config and predecessor upgrade modes are separate checks'
   [[ "$UPGRADE_FROM" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 'upgrade source must be an exact published version'
   [[ "$UPGRADE_INSTALLER_SHA256" =~ ^[0-9a-f]{64}$ ]] || die 'the published installer SHA-256 is required'
   EXISTING_YARD=1
@@ -431,6 +438,7 @@ coding_integrations=''
 yard_profiles=subyard-dev
 if [ "$EXISTING_YARD" = 1 ]; then
   coding_integrations='claude pi'
+  if [ "$CODEX_CONFIG" = 1 ]; then coding_integrations+=' codex'; fi
   yard_profiles='subyard-dev orca'
 fi
 cat > "$SUBYARD_CONFIG_HOME/config.env" <<EOF
@@ -669,6 +677,53 @@ guest_root test -x /usr/local/libexec/subyard/projects-changed \
 [ "$(incus --project "$PROJECT" config device get "$INSTANCE" orca-server listen)" = \
   "tcp:127.0.0.1:$ORCA_PORT" ] || die 'Orca bootstrap published the wrong owner endpoint'
 assert_orca_readiness
+if [ "$CODEX_CONFIG" = 1 ]; then
+  stage 'checking Codex TOML runtime additions through public apply and Orca restart'
+  install_stock_orca_client
+  pairing="$(yard orca pair --yes | tail -n1)"
+  case "$pairing" in orca://pair\?code=*) ;; *) die 'Orca pair returned no private link' ;; esac
+  client_status "$pairing" paired-client
+  # Seed representative runtime additions explicitly: plain serve readiness does
+  # not exercise every desktop integration that can add hooks/projects/tui.
+  guest_root python3 -c '
+import pathlib, sys, tomllib
+writer = {}
+exec(sys.stdin.read(), writer)
+path = pathlib.Path("/home/dev/.codex/config.toml")
+value = tomllib.loads(path.read_text())
+for table in ("hooks", "projects", "tui"):
+    value.setdefault(table, {})["subyard_e2e"] = {"preserved": True}
+path.write_text(writer["dumps"](value))
+' < "$ROOT/internal/adapters/configmaterial/tomli_w.py"
+  yard config status >/dev/null || die 'runtime-only Codex fields caused config drift'
+  release_ready codex-runtime-additions || die 'runtime-only Codex fields blocked release readiness'
+  guest_root python3 -c '
+import pathlib, sys, tomllib
+writer = {}
+exec(sys.stdin.read(), writer)
+path = pathlib.Path("/home/dev/.codex/config.toml")
+value = tomllib.loads(path.read_text())
+value["approval_policy"] = "never"
+path.write_text(writer["dumps"](value))
+' < "$ROOT/internal/adapters/configmaterial/tomli_w.py"
+  assert_config_drift codex-managed-policy
+  yard config apply --yes >"$STATE/codex-apply.out" 2>"$STATE/codex-apply.err" \
+    || die 'public config apply could not repair managed Codex drift'
+  yard orca restart --yes >/dev/null || die 'Codex config blocked Orca restart'
+  assert_orca_readiness
+  client_status "$pairing" paired-client
+  yard migrate --check --json >"$STATE/codex-migrate.json"
+  jq -e '.outcome.status == "ready" and .outcome.reachedGoal == true' \
+    "$STATE/codex-migrate.json" >/dev/null || die 'release drift returned after restart/reconnect'
+  guest_root python3 -c '
+import pathlib, tomllib
+value = tomllib.loads(pathlib.Path("/home/dev/.codex/config.toml").read_text())
+assert value["approval_policy"] == "on-request"
+assert all(value[table]["subyard_e2e"] == {"preserved": True} for table in ("hooks", "projects", "tui"))
+' || die 'Codex runtime fields or managed policy were not preserved'
+  printf 'ok: Codex runtime fields preserved; managed drift repaired; Orca restart and saved-client readiness passed\n'
+  exit 0
+fi
 if [ "$EXISTING_YARD" = 1 ]; then
   stage 'preserving runtime JSON additions through public config import and apply'
   capture_orca_runtime_json

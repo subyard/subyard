@@ -70,7 +70,7 @@ type configMaterializedAssetSnapshot struct {
 type configTargetSelector func() ([]configTarget, error)
 
 type configAsset struct {
-	OwnedJSON   bool
+	OwnedFormat string
 	Name        string
 	Source      string
 	Destination string
@@ -1350,8 +1350,8 @@ func (cli *CLI) assessConfigTarget(
 				return configTargetAssessment{}, fmt.Errorf("%s: %w", asset.Name, err)
 			}
 			hostHash := fmt.Sprintf("%x", sha256.Sum256(payload))
-			if asset.OwnedJSON {
-				hostHash, err = configmaterial.DesiredDigest(payload)
+			if asset.OwnedFormat != "" {
+				hostHash, err = configmaterial.DesiredDigestFor(asset.OwnedFormat, payload)
 			}
 			if err != nil {
 				return configTargetAssessment{}, fmt.Errorf("%s: %w", asset.Name, err)
@@ -1389,8 +1389,8 @@ func (cli *CLI) assessConfigTarget(
 			Command: []string{"sha256sum", "--", asset.Destination},
 			User:    uint32(target.Loaded.Context.DevUID), Group: uint32(target.Loaded.Context.DevUID),
 		}
-		if asset.OwnedJSON {
-			request, err = configmaterial.JSONRequest(configmaterial.ModeObserve, target.Loaded.Context.DevUser, asset.Destination, target.Loaded.Context.DevUID, desiredPayloads[index])
+		if asset.OwnedFormat != "" {
+			request, err = configmaterial.Request(asset.OwnedFormat, configmaterial.ModeObserve, target.Loaded.Context.DevUser, asset.Destination, target.Loaded.Context.DevUID, desiredPayloads[index])
 			if err != nil {
 				return configTargetAssessment{}, err
 			}
@@ -1399,16 +1399,16 @@ func (cli *CLI) assessConfigTarget(
 		if err != nil && result.ExitCode == 0 {
 			return configTargetAssessment{}, err
 		}
-		if asset.OwnedJSON {
+		if asset.OwnedFormat != "" {
 			if err != nil || result.ExitCode != 0 {
-				return configTargetAssessment{}, fmt.Errorf("%s: JSON configuration observation failed", asset.Name)
+				return configTargetAssessment{}, fmt.Errorf("%s: structured configuration observation failed", asset.Name)
 			}
-			observation, err := configmaterial.ParseJSONObservation(result.Stdout)
+			observation, err := configmaterial.ParseObservation(result.Stdout)
 			if err != nil {
 				return configTargetAssessment{}, fmt.Errorf("%s: %w", asset.Name, err)
 			}
 			materialized.Assets = append(materialized.Assets, configMaterializedAssetSnapshot{
-				Name: asset.Name, GuestOutput: "owned-json", GuestHash: observation.Fingerprint,
+				Name: asset.Name, GuestOutput: "owned-" + asset.OwnedFormat, GuestHash: observation.Fingerprint,
 			})
 			changed = changed || !observation.Converged
 			continue
@@ -1472,7 +1472,7 @@ func effectiveConfigAssets(loaded config.Loaded) ([]configAsset, error) {
 	}
 	var result []configAsset
 	for _, materialized := range assets {
-		asset := configAsset{Name: materialized.Name, Source: materialized.Source, Destination: materialized.Destination, OwnedJSON: materialized.OwnedJSON}
+		asset := configAsset{Name: materialized.Name, Source: materialized.Source, Destination: materialized.Destination, OwnedFormat: materialized.OwnedFormat}
 		if trace, ok := loaded.Settings[materialized.Setting]; ok {
 			if resolution, found := effectiveSettingResolution(trace); found {
 				asset.Scope, asset.Role = resolution.Scope, resolution.Role

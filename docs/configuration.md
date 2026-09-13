@@ -93,11 +93,12 @@ be replaced by the matching file under `overrides/shared`, `overrides/host`, or 
 These directories currently override known file settings only. They are not generic scalar
 configuration directories.
 
-For a coding-agent `CONFIG` whose destination ends in `.json`, Subyard owns the fields in the
+For a coding-agent `CONFIG` whose destination ends in `.json` or `.toml`, Subyard owns the fields in the
 selected template and preserves fields added by the running tool. This includes Orca's Claude
-`hooks` and `statusLine` when the template does not define them. The destination selects this policy;
+`hooks` and `statusLine`, and Codex's `hooks`, `projects` and `tui`, when the template does not define
+them. The destination selects this policy;
 importing a template from a renamed source does not change it. `RULES`, instruction files, JSONC
-and TOML keep exact byte replacement and comparison.
+and other formats keep exact byte replacement and comparison.
 
 JSON objects merge recursively. Arrays, scalars and `null` replace the whole value at their path;
 an empty object requires an object but preserves added children. A later template removes fields
@@ -106,8 +107,15 @@ array replaces that entire field. Removing a template's field before its first r
 cannot remove an older default automatically: first adoption preserves fields absent from the
 current template.
 
+TOML tables follow the same field ownership rules, including nested tables; arrays are owned as
+whole values. Runtime additions and formatting changes do not cause drift, but changes to managed
+values or TOML scalar types do. Applying an already matching TOML document preserves its text;
+when managed values need changing, serialization normalizes formatting and removes comments while
+preserving unmanaged values. TOML parsing uses Python 3.11 or newer in the yard, and the writer is
+embedded in the release, so existing yards need no extra Python package for observation or repair.
+
 `yard init --configs`, `yard config apply`, provisioning checks and release activation share this
-ownership contract. Read-only checks compare managed JSON fields and their ownership baseline,
+ownership contract. Read-only checks compare managed fields and their ownership baseline,
 so runtime additions do not trigger a release migration. The first application records a root-owned
 baseline under `/var/lib/subyard/config-materialization` inside the yard. It contains only asset
 identity, schema version, template digest and owned paths, never configuration values. A missing or
@@ -117,7 +125,8 @@ Subyard serializes its own writes per asset and atomically replaces the destinat
 the baseline. Retrying an interrupted application converges. Invalid JSON or an invalid baseline
 fails without overwriting it; diagnostics omit configuration contents. Running tools do not share
 Subyard's lock: application reads the current file and verifies its result, but cannot serialize
-arbitrary concurrent third-party writes.
+arbitrary concurrent third-party writes. Invalid TOML, like invalid JSON, fails without overwriting
+the current document or printing its contents.
 
 ## Coding-agent compatibility
 

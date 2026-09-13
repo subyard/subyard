@@ -229,6 +229,20 @@ dev/agent-e2e.sh --slot "$slot" --purpose orca-projects --vm 1 -- \
 ```
 
 Bootstrap installs a packaged candidate and exercises public commands through a real terminal.
+For the narrow Codex configuration regression, run:
+
+```sh
+dev/agent-e2e.sh --slot "$slot" --purpose orca-codex-config --vm 1 -- \
+  env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_CODEX_CONFIG=1 \
+  bash tests/real-host/orca-bootstrap.sh
+```
+
+This mode seeds representative TOML runtime additions, verifies that they do not block readiness,
+repairs a deliberately changed managed policy through `config apply`, then verifies Orca restart,
+saved-client connectivity and `migrate --check`. It skips the broader JSON import/sync and down/up
+scenarios. The seeded additions model the observed drift; they do not prove which desktop action
+writes each runtime field.
+
 For a narrow predecessor upgrade check, set `SUBYARD_E2E_ORCA_UPGRADE_FROM` to an exact published
 version and `SUBYARD_E2E_ORCA_UPGRADE_INSTALLER_SHA256` to that release's installer asset digest.
 This mode starts Orca on a converged published release with two local yards, changes the candidate's

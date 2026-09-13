@@ -7,9 +7,14 @@ import secrets
 import stat
 import sys
 from decimal import Decimal
+from datetime import date, datetime, time
 
 STATE_ROOT = "@STATE_ROOT@"
 STATE_UID = @STATE_UID@
+FORMAT = "@FORMAT@"
+
+if FORMAT == "toml":
+    import tomllib
 
 
 class MaterializationError(Exception):
@@ -82,6 +87,14 @@ def parse_json(payload):
                       parse_constant=reject_constant)
 
 
+def parse_document(payload):
+    if FORMAT == "json":
+        return parse_json(payload)
+    if isinstance(payload, bytes):
+        payload = payload.decode("utf-8")
+    return tomllib.loads(payload, parse_float=Decimal)
+
+
 def lookup(root, parts):
     value = root
     for part in parts:
@@ -93,6 +106,9 @@ def lookup(root, parts):
 
 def json_equal(left, right):
     if isinstance(left, Decimal) or isinstance(right, Decimal):
+        if (FORMAT == "toml" and isinstance(left, Decimal) and
+                isinstance(right, Decimal) and left.is_nan() and right.is_nan()):
+            return True
         return isinstance(left, Decimal) and isinstance(right, Decimal) and left == right
     if isinstance(left, bool) or isinstance(right, bool):
         return isinstance(left, bool) and isinstance(right, bool) and left == right
@@ -108,6 +124,8 @@ def json_equal(left, right):
         return (isinstance(left, dict) and isinstance(right, dict) and
                 set(left) == set(right) and
                 all(json_equal(left[key], right[key]) for key in left))
+    if FORMAT == "toml" and type(left) is type(right) and isinstance(left, (int, date, time)):
+        return left == right
     return False
 
 
@@ -210,14 +228,14 @@ def read_current(destination):
             raise MaterializationError("invalid destination path")
         with open(destination, "rb") as source:
             raw = source.read()
-        value = parse_json(raw)
+        value = parse_document(raw)
         if not isinstance(value, dict):
             raise ValueError()
         return value, raw
     except MaterializationError:
         raise
     except Exception:
-        raise MaterializationError("invalid current JSON")
+        raise MaterializationError("invalid current " + FORMAT.upper())
 
 
 def validate_destination_parent(destination, allowed_home, uid, create):
@@ -284,7 +302,33 @@ def fingerprint(current, desired, baseline_digest, state, tracked):
                            "found": found, "value": value if found else None})
     materialized = {"schema": 1, "state": state, "desired_digest": baseline_digest,
                     "projection": projection}
-    return hashlib.sha256(semantic_payload(materialized)).hexdigest()
+    payload = (toml_fingerprint_payload(materialized) if FORMAT == "toml"
+               else semantic_payload(materialized))
+    return hashlib.sha256(payload).hexdigest()
+
+
+def toml_fingerprint_payload(value):
+    # Preserve TOML scalar types (including dates and non-finite floats) without
+    # persisting values in the ownership baseline or exposing them in diagnostics.
+    def typed(current):
+        if isinstance(current, dict):
+            return ["table", [[key, typed(current[key])] for key in sorted(current)]]
+        if isinstance(current, list):
+            return ["array", [typed(item) for item in current]]
+        if isinstance(current, Decimal):
+            if current.is_nan():
+                encoded = "nan"
+            elif current == 0:
+                encoded = "0"
+            else:
+                encoded = format(current, "f")
+                if "." in encoded:
+                    encoded = encoded.rstrip("0").rstrip(".")
+            return ["float", encoded]
+        if isinstance(current, (datetime, date, time)):
+            return [type(current).__name__, current.isoformat()]
+        return [type(current).__name__, current]
+    return json.dumps(typed(value), ensure_ascii=False, separators=(",", ":")).encode()
 
 
 def atomic_write(path, payload, uid, mode):
@@ -327,11 +371,11 @@ def main():
     except ValueError:
         fail("invalid request")
     try:
-        desired = parse_json(sys.stdin.read())
+        desired = parse_document(sys.stdin.read())
     except Exception:
-        fail("invalid desired JSON")
+        fail("invalid desired " + FORMAT.upper())
     if not isinstance(desired, dict):
-        fail("desired JSON root must be an object")
+        fail("desired configuration root must be an object")
     wanted_owned = sorted(ownership(desired), key=lambda item: (item["path"], item["kind"]))
     identity = hashlib.sha256((developer + "\0" + destination).encode()).hexdigest()
     baseline_path = os.path.join(STATE_ROOT, identity + ".json")
@@ -407,7 +451,12 @@ def main():
             for entry in sorted(retired, key=lambda item: item["path"].count("/"), reverse=True):
                 remove_owned(current, entry)
         overlay(current, desired)
-        destination_payload = semantic_payload(current) + b"\n"
+        if FORMAT == "toml":
+            destination_payload = (original if original is not None and
+                                   json_equal(current, parse_document(original))
+                                   else _toml_writer["dumps"](current).encode())
+        else:
+            destination_payload = semantic_payload(current) + b"\n"
 
         if original is not None:
             with open(destination, "rb") as source:

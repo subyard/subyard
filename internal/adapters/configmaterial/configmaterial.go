@@ -29,9 +29,45 @@ const (
 //go:embed guest_json.py
 var guestJSONProgram string
 
+// Tomli-W 1.2.0, unmodified upstream writer; see TOMLI_W_LICENSE.
+//
+//go:embed tomli_w.py
+var guestTOMLWriter string
+
+//go:embed TOMLI_W_LICENSE
+var guestTOMLWriterLicense string
+
 type JSONObservation struct {
 	Converged   bool   `json:"converged"`
 	Fingerprint string `json:"fingerprint"`
+}
+
+type Observation = JSONObservation
+
+func ParseObservation(payload []byte) (Observation, error) {
+	return ParseJSONObservation(payload)
+}
+
+// TOML syntax is validated by the guest's standard-library parser before any
+// mutation. Bind the exact template bytes without requiring a host Python runtime.
+func DesiredDigestFor(format string, payload []byte) (string, error) {
+	switch format {
+	case "json":
+		return DesiredDigest(payload)
+	case "toml":
+		digest := sha256.Sum256(payload)
+		return hex.EncodeToString(digest[:]), nil
+	default:
+		return "", errors.New("unsupported materialization format")
+	}
+}
+
+func Request(format, mode, developer, destination string, uid int, payload []byte) (ports.InstanceExecRequest, error) {
+	if uid <= 0 {
+		uid = 1000
+	}
+	return materializationRequest(format, mode, developer, destination, uid, payload,
+		guestStateRoot, 0, "/home/"+developer)
 }
 
 func DesiredDigest(payload []byte) (string, error) {
@@ -241,6 +277,10 @@ func jsonRequest(
 	stateUID int,
 	allowedHome string,
 ) (ports.InstanceExecRequest, error) {
+	return materializationRequest("json", mode, developer, destination, uid, payload, stateRoot, stateUID, allowedHome)
+}
+
+func materializationRequest(format, mode, developer, destination string, uid int, payload []byte, stateRoot string, stateUID int, allowedHome string) (ports.InstanceExecRequest, error) {
 	if mode != ModeObserve && mode != ModeApply {
 		return ports.InstanceExecRequest{}, errors.New("invalid JSON materialization mode")
 	}
@@ -255,12 +295,20 @@ func jsonRequest(
 		cleanDestination != destination {
 		return ports.InstanceExecRequest{}, errors.New("invalid JSON materialization destination")
 	}
-	digest, err := DesiredDigest(payload)
+	digest, err := DesiredDigestFor(format, payload)
 	if err != nil {
 		return ports.InstanceExecRequest{}, err
 	}
 	program := strings.ReplaceAll(guestJSONProgram, "@STATE_ROOT@", stateRoot)
 	program = strings.ReplaceAll(program, "@STATE_UID@", fmt.Sprint(stateUID))
+	program = strings.ReplaceAll(program, "@FORMAT@", format)
+	if format == "toml" {
+		// Execute the embedded, self-contained writer in its own namespace so its
+		// helpers cannot collide with ownership or validation functions.
+		licensedWriter := "# " + strings.ReplaceAll(guestTOMLWriterLicense, "\n", "\n# ") + "\n" + guestTOMLWriter
+		writer, _ := json.Marshal(licensedWriter)
+		program = "_toml_writer = {}\nexec(" + string(writer) + ", _toml_writer)\n" + program
+	}
 	return ports.InstanceExecRequest{
 		Command: []string{
 			"python3", "-B", "-c", program,
