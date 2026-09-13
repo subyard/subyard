@@ -21,6 +21,8 @@ make build
 `make build` compiles the development binary at `.build/yard`; `go.mod` selects the Go toolchain.
 Run `./tests/run.sh` before finishing shell or CLI changes. CI additionally runs
 `shellcheck -x -S warning` over the CLI, scripts, provision hooks, tests and Bash completion.
+Linux CLI tests also require util-linux `script` to exercise resource commands with a real
+controlling terminal, including terminal-input isolation and cancellation.
 
 If there is any doubt that behavior is covered or a problem is reproduced, use an allocated
 `test-vms` slot to reproduce and verify it on real GNU/Linux hosts. A green host-free test is not a
@@ -211,6 +213,30 @@ dev/agent-e2e.sh --slot "$slot" --purpose incus-group-reexec --vm 1 -- \
 
 Android/GPU, real credentials and external-service profiles use separate explicitly prerequisite-
 gated lanes. A generic dependency-free resource pass does not report those handlers green.
+
+Orca has three real-host fixtures. Run each on VM1 of an explicitly selected available slot:
+
+```sh
+dev/agent-e2e.sh --slot "$slot" --purpose orca-bootstrap --vm 1 -- \
+  env SUBYARD_E2E_ORCA_BOOTSTRAP=1 bash tests/real-host/orca-bootstrap.sh
+dev/agent-e2e.sh --slot "$slot" --purpose orca-existing-yard --vm 1 -- \
+  env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_EXISTING_YARD=1 \
+  bash tests/real-host/orca-bootstrap.sh
+dev/agent-e2e.sh --slot "$slot" --purpose orca-resource --vm 1 -- \
+  env SUBYARD_E2E_ORCA_RESOURCE=1 bash tests/real-host/orca-resource.sh
+dev/agent-e2e.sh --slot "$slot" --purpose orca-projects --vm 1 -- \
+  env SUBYARD_E2E_ORCA_PROJECTS=1 bash tests/real-host/orca-projects.sh
+```
+
+Bootstrap installs a packaged candidate and exercises public commands through a real terminal.
+The existing-yard variant completes release activation with Claude and Pi selected before starting
+Orca, then checks release convergence and materialized settings. The resource fixture verifies
+paired stock clients, terminal input/output, service lifecycle, exact owner/loopback routes and a
+paired desktop under Xvfb. A bounded loopback DevTools driver uses the installed client's preload
+API, reloads the renderer, verifies the remote project in its sidebar and requests normal closure.
+Pairing capabilities stay in protected temporary files. Owner-address discovery is synthetic;
+the fixture does not verify a real Tailscale account. Projects covers production local and SSH-remote
+project actions, checkout discovery and preservation of identities and terminal tabs.
 
 Standalone `reboot-verify` prepares its own power reconciler through the same marked
 published-release upgrade fixture used by `power-systemd`. It works after the last test yard

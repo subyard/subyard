@@ -362,8 +362,15 @@ func (cli *CLI) Run(ctx context.Context) int {
 	if core && definition.Handler == "@config" {
 		configSync, configSyncCheck, configSyncStatus = configSyncInvocation(commandArguments)
 	}
-	readOnlyInvocation := commandHelpRequested(commandArguments) ||
+	resourceReadOnly := false
+	if profileResource {
+		invocation, parseErr := parseResourceInvocation(commandArguments)
+		resourceReadOnly = parseErr == nil && (invocation.help ||
+			cli.resources.VerbReadOnly(resourceDefinition.Command, invocation.verb))
+	}
+	readOnlyInvocation := (core && commandHelpRequested(commandArguments)) ||
 		(core && definition.Effect == command.EffectRead) ||
+		resourceReadOnly ||
 		(core && definition.Handler == "@config" && (configSyncCheck || configSyncStatus)) ||
 		(core && definition.Handler == "@test-vms" && testVMStatusInvocation(commandArguments)) ||
 		(core && definition.Handler == "@update" && slices.Contains(commandArguments, "--check"))

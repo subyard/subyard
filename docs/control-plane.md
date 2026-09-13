@@ -412,8 +412,15 @@ BOOTSTRAP=profile                 # optional profile selection and init on bring
 ```
 
 `ACTION` is repeatable and is the source of the public verb list. Its assessment and recovery classes
-bind each operation to the shared typed confirmation policy. At least one action is required, and the
-`BRINGUP` and `SHUTDOWN` verbs must be declared by actions. `HANDLER` is relative to the owning profile.
+bind each operation to the shared typed confirmation policy. The engine owns confirmation input.
+Non-session handlers run with standard input connected to the null device. Session actions
+inherit operator input; terminal sessions take foreground control and return it on exit or
+cancellation. When a terminal session ends, the engine also terminates remaining members of its
+process group. Handlers can still supply their own pipes or here-documents to child processes.
+Each resource process group remains cancellable as a unit. Declared read-only verbs remain
+available during an unfinished release transition; verbs with any non-read action remain gated.
+At least one action is required, and the `BRINGUP` and `SHUTDOWN` verbs must be declared by actions.
+`HANDLER` is relative to the owning profile.
 Registry validation rejects unknown descriptor fields, path traversal, duplicate names/commands or
 local action IDs, collisions with core commands, invalid actions, and missing executables. The handler
 owns every lifecycle verb including the silent `is-up` probe. Core code discovers, dispatches,

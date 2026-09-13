@@ -58,6 +58,40 @@ func TestAssessPrepareResultCombinesTrustedMetadataWithValidatedDelta(t *testing
 	}
 }
 
+func TestVerbReadOnlyRequiresEveryDeclaredActionToBeReadOnly(t *testing.T) {
+	root := t.TempDir()
+	writeTestResource(t, root, "sample", "service", `
+COMMAND=svc
+HANDLER=resources/service/handler.sh
+TITLE="Sample service"
+ACTION="status status read-only not-needed"
+ACTION="read mixed read-only not-needed"
+ACTION="write mixed bounded-write not-needed"
+ACTION="terminal terminal session not-needed"
+ACTION="inspect inspect bounded-write not-needed"
+ACTION="up up yard-change reversible"
+ACTION="destroy destroy runtime-destruction recreatable"
+BRINGUP=up
+SHUTDOWN=destroy
+`)
+	registry, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !registry.VerbReadOnly("svc", "status") {
+		t.Fatal("status verb was not recognized as read-only")
+	}
+	for _, verb := range []string{"up", "destroy", "mixed", "inspect", "terminal", "unknown"} {
+		if registry.VerbReadOnly("svc", verb) {
+			t.Errorf("verb %q was incorrectly recognized as read-only", verb)
+		}
+	}
+	if registry.VerbReadOnly("unknown", "status") {
+		t.Fatal("unknown resource was recognized as read-only")
+	}
+}
+
 func TestAssessPrepareResultRejectsMalformedOrSensitiveOutput(t *testing.T) {
 	registry, actions := testActionRegistry(t)
 	validPrefix := `{"schema":"yard.resource-action-assessment.v1","action":"destroy","changed":true,"consequences":`

@@ -56,7 +56,7 @@ MANAGED_MARKER="$(root_path /etc/subyard/ai-observer/managed)"
 EXPECTED_FILE_OWNER="$DEV_UID:$DEV_GID"
 [ -z "$TEST_ROOT" ] && EXPECTED_FILE_OWNER=0:0
 
-for command in cmp curl docker grep readlink sha256sum stat systemctl timeout; do
+for command in cmp curl docker grep jq readlink sha256sum stat systemctl timeout; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
 timeout 10 docker info >/dev/null 2>&1 || die 'Docker is unavailable'
@@ -111,7 +111,8 @@ CODEX_SOURCE="$(prepare_session_source codex "$DEV_HOME/.codex/sessions" "$EMPTY
 BIND_DATA="$DATA_DIR:/app/data:rw"
 BIND_CLAUDE="$CLAUDE_SOURCE:/sessions/claude:ro"
 BIND_CODEX="$CODEX_SOURCE:/sessions/codex:ro"
-EXPECTED_BINDS="[\"$BIND_DATA\",\"$BIND_CLAUDE\",\"$BIND_CODEX\"]"
+# Docker builds this list from a map. Compare the exact multiset, not its order.
+EXPECTED_BINDS="$(jq -cn --args '$ARGS.positional | sort' "$BIND_DATA" "$BIND_CLAUDE" "$BIND_CODEX")"
 EXPECTED_PORTS='{"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"8080"}]}'
 SPEC="$(printf '%s\n' \
   "$IMAGE" "$CONTEXT" "$DEV_UID:$DEV_GID" "$BIND_DATA" "$BIND_CLAUDE" "$BIND_CODEX" \
@@ -136,7 +137,7 @@ container_matches() {
   [ "$(container_value '{{.Config.Image}}')" = "$IMAGE" ] || return 1
   [ "$(container_value '{{.Config.User}}')" = "$DEV_UID:$DEV_GID" ] || return 1
   [ "$(container_value '{{json .Config.Cmd}}')" = '["watch","all","--backfill"]' ] || return 1
-  [ "$(container_value '{{json .HostConfig.Binds}}')" = "$EXPECTED_BINDS" ] || return 1
+  [ "$(container_value '{{json .HostConfig.Binds}}' | jq -ce 'arrays | sort')" = "$EXPECTED_BINDS" ] || return 1
   [ "$(container_value '{{json .HostConfig.PortBindings}}')" = "$EXPECTED_PORTS" ] || return 1
   [ "$(container_value '{{.HostConfig.RestartPolicy.Name}}')" = no ] || return 1
   env="$(container_value '{{range .Config.Env}}{{println .}}{{end}}')" || return 1
@@ -292,6 +293,8 @@ expected_binds=$q_binds
 expected_ports=$q_ports
 test_mode=$q_test_mode
 die() { printf 'ai-observer-check: %s\\n' "\$*" >&2; exit 1; }
+# Static specification drift cannot recover while waiting for HTTP startup.
+drift() { printf 'ai-observer-check: %s\\n' "\$*" >&2; exit 2; }
 check_timeout=20
 if [ "\$test_mode" = 1 ]; then check_timeout="\${AI_OBSERVER_CHECK_TIMEOUT_SECONDS:-20}"; fi
 case "\$check_timeout" in ''|*[!0-9]*|0) die 'invalid readiness timeout' ;; esac
@@ -307,29 +310,35 @@ if [ "\${AI_OBSERVER_CHECK_INNER:-0}" != 1 ]; then
   fi
 fi
 container_value() { timeout 10 docker inspect -f "\$1" "\$container" 2>/dev/null; }
+expect_container_value() {
+  local actual
+  actual="\$(container_value "\$1")" || die 'container specification unavailable'
+  [ "\$actual" = "\$2" ] || drift "\$3"
+}
 timeout 10 systemctl is-enabled --quiet "\$unit" || die 'unit is not enabled'
 timeout 10 systemctl is-active --quiet "\$unit" || die 'unit is not active'
 timeout 10 docker container inspect "\$container" >/dev/null 2>&1 || die 'managed container is missing'
-[ "\$(container_value '{{ index .Config.Labels "org.subyard.managed" }}')" = "\$owner_label" ] \
-  || die 'container ownership marker drifted'
-[ "\$(container_value '{{ index .Config.Labels "org.subyard.ai-observer.spec" }}')" = "\$spec" ] \
-  || die 'container specification drifted'
-[ "\$(container_value '{{.Config.Image}}')" = "\$image" ] || die 'container image drifted'
-[ "\$(container_value '{{.Config.User}}')" = "\$expected_user" ] || die 'container user drifted'
-[ "\$(container_value '{{json .Config.Cmd}}')" = '["watch","all","--backfill"]' ] \
-  || die 'container command drifted'
-[ "\$(container_value '{{json .HostConfig.Binds}}')" = "\$expected_binds" ] \
-  || die 'container mounts drifted'
-[ "\$(container_value '{{json .HostConfig.PortBindings}}')" = "\$expected_ports" ] \
-  || die 'container port binding drifted'
-[ "\$(container_value '{{.HostConfig.RestartPolicy.Name}}')" = no ] \
-  || die 'container restart ownership drifted'
+expect_container_value '{{ index .Config.Labels "org.subyard.managed" }}' "\$owner_label" \
+  'container ownership marker drifted'
+expect_container_value '{{ index .Config.Labels "org.subyard.ai-observer.spec" }}' "\$spec" \
+  'container specification drifted'
+expect_container_value '{{.Config.Image}}' "\$image" 'container image drifted'
+expect_container_value '{{.Config.User}}' "\$expected_user" 'container user drifted'
+expect_container_value '{{json .Config.Cmd}}' '["watch","all","--backfill"]' \
+  'container command drifted'
+actual_binds="\$(container_value '{{json .HostConfig.Binds}}' | jq -ce 'arrays | sort')" \
+  || die 'container mounts unavailable'
+[ "\$actual_binds" = "\$expected_binds" ] || drift 'container mounts drifted'
+expect_container_value '{{json .HostConfig.PortBindings}}' "\$expected_ports" \
+  'container port binding drifted'
+expect_container_value '{{.HostConfig.RestartPolicy.Name}}' no \
+  'container restart ownership drifted'
 env="\$(container_value '{{range .Config.Env}}{{println .}}{{end}}')" || die 'container environment unavailable'
-grep -Fxq 'AI_OBSERVER_CLAUDE_PATH=/sessions/claude' <<<"\$env" || die 'Claude session path drifted'
-grep -Fxq 'AI_OBSERVER_CODEX_PATH=/sessions/codex' <<<"\$env" || die 'Codex session path drifted'
+grep -Fxq 'AI_OBSERVER_CLAUDE_PATH=/sessions/claude' <<<"\$env" || drift 'Claude session path drifted'
+grep -Fxq 'AI_OBSERVER_CODEX_PATH=/sessions/codex' <<<"\$env" || drift 'Codex session path drifted'
 grep -Fxq 'AI_OBSERVER_DATABASE_PATH=/app/data/ai-observer.duckdb' <<<"\$env" \
-  || die 'database path drifted'
-grep -Fxq 'AI_OBSERVER_API_PORT=8080' <<<"\$env" || die 'API port drifted'
+  || drift 'database path drifted'
+grep -Fxq 'AI_OBSERVER_API_PORT=8080' <<<"\$env" || drift 'API port drifted'
 [ "\$(container_value '{{.State.Running}}')" = true ] || die 'container is not running'
 curl --fail --silent --show-error --connect-timeout 2 --max-time 5 \
   http://127.0.0.1:8080/health >/dev/null || die 'HTTP readiness failed'
@@ -504,6 +513,7 @@ else
 fi
 
 ready=0
+check_status=0
 # Upstream watch --backfill imports history synchronously before starting HTTP.
 # Keep ordinary status checks short, but give initial import its own bounded wait.
 startup_started=$SECONDS
@@ -518,11 +528,14 @@ while [ "$SECONDS" -lt "$startup_deadline" ]; do
   if timeout --foreground "$remaining" "$CHECK_PATH" >/dev/null 2>"$temporary/readiness-attempt-error"; then
     ready=1
     break
+  else
+    check_status=$?
   fi
   diagnostic="$(sed -n '/^ai-observer-check: /{p;q;}' "$temporary/readiness-attempt-error")"
   if [ -n "$diagnostic" ]; then
     printf '%s\n' "$diagnostic" >"$temporary/readiness-error"
   fi
+  [ "$check_status" != 2 ] || break
   if [ "$SECONDS" -ge "$next_progress" ]; then
     printf 'AI Observer: waiting for HTTP readiness (%s seconds elapsed)\n' \
       "$((SECONDS - startup_started))"
@@ -535,6 +548,10 @@ if [ "$ready" != 1 ]; then
   # Keep the generated check's fixed diagnostic before rollback removes the candidate.
   # Raw subprocess stderr can contain private paths or settings and stays in the temp file.
   sed -n '/^ai-observer-check: /{p;q;}' "$temporary/readiness-error" >&2
+  if [ "$check_status" = 2 ]; then
+    rollback
+    die 'container specification verification failed; previous runtime restored'
+  fi
   printf 'AI Observer provision: startup readiness timed out after %s seconds; initial history import may still be running\n' \
     "$startup_timeout" >&2
   rollback

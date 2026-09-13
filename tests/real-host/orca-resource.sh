@@ -57,7 +57,7 @@ fi
 stage 'preparing an independent stock Orca CLI client'
 sudo apt-get update -qq
 sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-  "$artifact" file jq nftables zlib1g-dev \
+  "$artifact" file jq nftables python3-websocket xauth zlib1g-dev \
   libasound2t64 libgbm1 libgtk-3-0t64 libnss3 >/dev/null
 client=/usr/bin/orca-ide
 test -x "$client"
@@ -183,14 +183,7 @@ client_status() {
   local pairing="$1" profile="$2"
   local output="$work/$profile-status.json"
   local error="$work/$profile-status.err"
-  mkdir -p "$work/$profile/home" "$work/$profile/config" "$work/$profile/data" "$work/$profile/state"
-  if ! HOME="$work/$profile/home" \
-    XDG_CONFIG_HOME="$work/$profile/config" \
-    XDG_DATA_HOME="$work/$profile/data" \
-    XDG_STATE_HOME="$work/$profile/state" \
-    LIBGL_ALWAYS_SOFTWARE=1 \
-    timeout 30 "$client" \
-    --pairing-code "$pairing" status --json >"$output" 2>"$error"; then
+  if ! client_cli "$pairing" "$profile" status --json >"$output" 2>"$error"; then
     sed -n '1,80p' "$error" >&2
     die "$profile stock client command failed"
   fi
@@ -199,6 +192,230 @@ client_status() {
       "$output" >&2 || true
     die "$profile did not reach the paired runtime"
   fi
+}
+
+client_cli() {
+  local pairing="$1" profile="$2"
+  shift 2
+  mkdir -p "$work/$profile/home" "$work/$profile/config" "$work/$profile/data" "$work/$profile/state"
+  HOME="$work/$profile/home" \
+    XDG_CONFIG_HOME="$work/$profile/config" \
+    XDG_DATA_HOME="$work/$profile/data" \
+    XDG_STATE_HOME="$work/$profile/state" \
+    LIBGL_ALWAYS_SOFTWARE=1 \
+    ORCA_PAIRING_CODE="$pairing" \
+    timeout 30 "$client" "$@"
+}
+
+assert_paired_terminal_io() {
+  local pairing="$1" profile="$2" repos create handle='' ready=0 send read_result close
+  local error rc deadline echoed=0
+  repos="$work/$profile-terminal-repos.json"
+  create="$work/$profile-terminal-create.json"
+  send="$work/$profile-terminal-send.json"
+  read_result="$work/$profile-terminal-read.json"
+  close="$work/$profile-terminal-close.json"
+
+  terminal_diagnostic() {
+    local stage="$1" exit_status="$2" output="$3" summary
+    summary="$(jq -r '
+      "ok=\(.ok == true)" +
+      " terminal_running=\(.result.terminal.status? == "running")" +
+      " terminal_exited=\(.result.terminal.status? == "exited")" +
+      " send_accepted=\(.result.send.accepted? == true)" +
+      " close_tab=\(.result.close.closeMode? == "tab")" +
+      " pty_killed=\(.result.close.ptyKilled? == true)"
+    ' "$output" 2>/dev/null)" || summary='structured_status=unavailable'
+    printf 'orca-resource: paired terminal %s failed (exit=%s %s)\n' \
+      "$stage" "$exit_status" "$summary" >&2
+  }
+
+  terminal_fail() {
+    local stage="$1" exit_status="$2" output="$3"
+    terminal_diagnostic "$stage" "$exit_status" "$output"
+    if [ -n "$handle" ]; then
+      client_cli "$pairing" "$profile" terminal close --terminal "$handle" --tab --json \
+        >"$close" 2>"$work/$profile-terminal-cleanup.err" || true
+    fi
+    die "paired terminal $stage failed"
+  }
+
+  error="$work/$profile-terminal-repos.err"
+  if client_cli "$pairing" "$profile" repo list --json >"$repos" 2>"$error"; then
+    :
+  else
+    rc=$?
+    terminal_fail 'repository selection' "$rc" "$repos"
+  fi
+  local repo_id repo_path selector
+  repo_path=/srv/workspaces/alpha-12345678/src
+  repo_id="$(jq -er --arg path "$repo_path" \
+    '.result.repos | map(select(.path == $path)) | select(length == 1) | .[0].id' "$repos")" \
+    || terminal_fail 'repository selection' 0 "$repos"
+  selector="id:$repo_id::$repo_path"
+
+  error="$work/$profile-terminal-create.err"
+  if client_cli "$pairing" "$profile" terminal create --worktree "$selector" \
+    --title subyard-terminal-e2e \
+    --command "printf '%s%s\\n' 'subyard-terminal-' 'ready'; IFS= read -r value; printf '%s%s%s\\n' 'subyard-terminal-' 'echo:' \"\$value\"" \
+    --json >"$create" 2>"$error"; then
+    :
+  else
+    rc=$?
+    terminal_fail 'create' "$rc" "$create"
+  fi
+  handle="$(jq -er 'select(.ok == true) | .result.terminal.handle |
+    select(type == "string" and length > 0)' "$create")" \
+    || terminal_fail 'create result' 0 "$create"
+
+  deadline=$((SECONDS + 15))
+  while ((SECONDS < deadline)); do
+    error="$work/$profile-terminal-read-ready.err"
+    if client_cli "$pairing" "$profile" terminal read --terminal "$handle" --json \
+      >"$read_result" 2>"$error" \
+      && jq -e '.ok == true and
+        (.result.terminal.tail | any(contains("subyard-terminal-ready")))' \
+        "$read_result" >/dev/null; then
+      ready=1
+      break
+    fi
+    sleep 0.1
+  done
+  [ "$ready" -eq 1 ] || terminal_fail 'readiness poll' 0 "$read_result"
+
+  error="$work/$profile-terminal-send.err"
+  if client_cli "$pairing" "$profile" terminal send --terminal "$handle" \
+    --text subyard-terminal-input --enter --json >"$send" 2>"$error"; then
+    :
+  else
+    rc=$?
+    terminal_fail 'send' "$rc" "$send"
+  fi
+  jq -e '.ok == true and .result.send.accepted == true and .result.send.bytesWritten > 0' \
+    "$send" >/dev/null || terminal_fail 'send result' 0 "$send"
+
+  deadline=$((SECONDS + 15))
+  while ((SECONDS < deadline)); do
+    error="$work/$profile-terminal-read-echo.err"
+    if client_cli "$pairing" "$profile" terminal read --terminal "$handle" --json \
+      >"$read_result" 2>"$error" \
+      && jq -e '.ok == true and
+        (.result.terminal.tail | any(contains("subyard-terminal-echo:subyard-terminal-input")))' \
+        "$read_result" >/dev/null; then
+      echoed=1
+      break
+    fi
+    sleep 0.1
+  done
+  [ "$echoed" -eq 1 ] || terminal_fail 'output poll' 0 "$read_result"
+
+  error="$work/$profile-terminal-close.err"
+  if client_cli "$pairing" "$profile" terminal close --terminal "$handle" --tab --json \
+    >"$close" 2>"$error"; then
+    :
+  else
+    rc=$?
+    terminal_fail 'close' "$rc" "$close"
+  fi
+  jq -e '.ok == true and .result.close.closeMode == "tab"' "$close" >/dev/null \
+    || terminal_fail 'close result' 0 "$close"
+}
+
+assert_paired_desktop_smoke() {
+  local pairing="$1" desktop_file desktop_exec gui_root probe pairing_file log
+  local -a desktop_files=()
+  mapfile -t desktop_files < <(dpkg-query -L orca-ide | \
+    awk '/^\/usr\/share\/applications\/[^/]+\.desktop$/ {print}')
+  [ "${#desktop_files[@]}" -eq 1 ] || die 'pinned Orca package did not install one desktop entry'
+  desktop_file="${desktop_files[0]}"
+  desktop_exec="$(python3 -B - "$desktop_file" <<'PY'
+import shlex
+import sys
+
+values = []
+in_desktop_entry = False
+with open(sys.argv[1], encoding="utf-8") as source:
+    for raw in source:
+        if raw.startswith("["):
+            in_desktop_entry = raw.strip() == "[Desktop Entry]"
+        elif in_desktop_entry and raw.startswith("Exec="):
+            values.append(shlex.split(raw.removeprefix("Exec=").strip()))
+if len(values) != 1 or not values[0] or not values[0][0].startswith("/"):
+    raise SystemExit(1)
+print(values[0][0])
+PY
+)" || die 'pinned Orca desktop entry has no exact absolute executable'
+  [ -x "$desktop_exec" ] || die 'pinned Orca desktop executable is unavailable'
+  command -v Xvfb >/dev/null 2>&1 || die 'pinned Orca package did not install Xvfb'
+  command -v xdotool >/dev/null 2>&1 || die 'pinned Orca package did not install xdotool'
+
+  gui_root="$work/desktop-smoke"
+  install -d -m 0700 "$gui_root/home" "$gui_root/config" "$gui_root/data" "$gui_root/state"
+  pairing_file="$gui_root/pairing"
+  log="$gui_root/desktop.log"
+  install -m 0600 /dev/null "$pairing_file"
+  install -m 0600 /dev/null "$log"
+  printf '%s\n' "$pairing" >"$pairing_file"
+  probe="$gui_root/probe.sh"
+  cat >"$probe" <<'PROBE'
+#!/usr/bin/env bash
+set -euo pipefail
+desktop_exec=$1
+log=$2
+pairing_file=$3
+driver=$4
+
+group_live() {
+  ps -eo pgid=,stat= | awk -v group="$app_pid" \
+    '$1 == group && $2 !~ /^Z/ {found=1} END {exit found ? 0 : 1}'
+}
+stop_group() {
+  kill -TERM -- "-$app_pid" 2>/dev/null || true
+  for _ in $(seq 1 30); do
+    group_live || { wait "$app_pid" 2>/dev/null || true; return 0; }
+    sleep 0.1
+  done
+  kill -KILL -- "-$app_pid" 2>/dev/null || true
+  wait "$app_pid" 2>/dev/null || true
+  ! group_live
+}
+
+setsid "$desktop_exec" \
+  --remote-debugging-address=127.0.0.1 --remote-debugging-port=0 >"$log" 2>&1 &
+app_pid=$!
+trap 'stop_group || true' EXIT INT TERM
+visible=0
+window=''
+for _ in $(seq 1 300); do
+  kill -0 "$app_pid" 2>/dev/null || exit 1
+  window="$(xdotool search --onlyvisible --class '^orca$' 2>/dev/null | head -n 1)" || true
+  if [ -n "$window" ]; then
+    visible=1
+    break
+  fi
+  sleep 0.1
+done
+[ "$visible" -eq 1 ] || exit 1
+python3 -B "$driver" --log "$log" --pairing-file "$pairing_file" \
+  --expected-repo-label alpha-12345678 \
+  --expected-repo-path /srv/workspaces/alpha-12345678/src
+for _ in $(seq 1 300); do
+  kill -0 "$app_pid" 2>/dev/null || break
+  sleep 0.1
+done
+! kill -0 "$app_pid" 2>/dev/null || exit 1
+wait "$app_pid"
+! group_live
+trap - EXIT INT TERM
+PROBE
+  chmod 0700 "$probe"
+  HOME="$gui_root/home" XDG_CONFIG_HOME="$gui_root/config" \
+    XDG_DATA_HOME="$gui_root/data" XDG_STATE_HOME="$gui_root/state" \
+    LIBGL_ALWAYS_SOFTWARE=1 NO_AT_BRIDGE=1 \
+    timeout --signal=TERM --kill-after=5s 90 \
+    xvfb-run -a -s '-screen 0 1280x800x24' \
+    "$probe" "$desktop_exec" "$log" "$pairing_file" "$ROOT/tests/helpers/orca-desktop.py" \
+    || die 'pinned Orca desktop did not pair, render the remote project, and close cleanly'
 }
 
 retarget_pairing() {
@@ -264,6 +481,8 @@ stage 'pairing two independent clients and reconnecting the first'
 first_pair="$("${incus[@]}" exec "$instance" -- \
   jq -er '.pairing | select(.available == true) | .url' /srv/agents/orca/ready.json)"
 client_status "$first_pair" client-a
+stage 'exercising terminal input and output through the paired stock client'
+assert_paired_terminal_io "$first_pair" client-a
 "${incus[@]}" exec "$instance" -- bash -se <<'YARD'
 id=gamma-12345678
 root="/srv/workspaces/$id"
@@ -346,8 +565,16 @@ retargeted_first_pair="$(retarget_pairing "$first_pair" "ws://127.0.0.1:$host_po
 client_status "$retargeted_first_pair" client-a
 assert_all_repos
 assert_no_pairing_journal
-run_orca down
 
+stage 'pairing and closing the pinned desktop under Xvfb'
+desktop_pair="$(run_orca pair | tail -n1)"
+case "$desktop_pair" in
+  orca://pair\?code=*) ;;
+  *) die 'Orca pair did not return a private stock pairing link for the desktop' ;;
+esac
+assert_paired_desktop_smoke "$desktop_pair"
+
+run_orca down
 if "${incus[@]}" config device list "$instance" | grep -qx orca-server; then
   die 'owned proxy survived down'
 fi
@@ -356,4 +583,4 @@ if "${incus[@]}" exec "$instance" -- nft list table inet subyard_orca >/dev/null
   die 'owned ingress table survived down'
 fi
 
-printf 'ok: stock Orca reconnected clients, preserved grants/repos, and repeated exact host routes\n'
+printf 'ok: stock Orca preserved grants/repos, exchanged terminal I/O, repeated exact routes, and paired its desktop\n'
