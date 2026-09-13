@@ -1067,30 +1067,17 @@ func (runtime Runtime) provisionConverged(ctx context.Context) (bool, error) {
 	if version == "" || version == "latest" {
 		return false, nil
 	}
-	codexSelected := false
-	for _, agent := range strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")) {
-		if agent == "codex" {
-			codexSelected = true
-			break
-		}
-	}
-	codexVersion := runtime.environmentValue("CODEX_VERSION")
-	if codexSelected && (codexVersion == "" || codexVersion == "latest") {
-		return false, nil
-	}
 	state, err := runtime.reconcileState(ctx)
 	if err != nil || !state.InstanceFound {
 		return false, err
 	}
 	instance := state.Instance
 	marker, _ := instance.EffectiveConfig("user.subyard.ccusage_version")
-	codexMarker, _ := instance.EffectiveConfig("user.subyard.codex_version")
 	if observerReady, err := runtime.aiObserverConverged(instance); err != nil || !observerReady {
 		return false, err
 	}
 	if strings.EqualFold(instance.Status, "stopped") {
-		return instanceIntentionallyStopped(instance) && marker == version &&
-			(!codexSelected || codexMarker == codexVersion), nil
+		return instanceIntentionallyStopped(instance) && marker == version, nil
 	}
 	if !strings.EqualFold(instance.Status, "running") {
 		return false, nil
@@ -1202,7 +1189,7 @@ jq -e '."ip-forward-no-drop" == true' /etc/docker/daemon.json >/dev/null \
 	if ok, err := runtime.projectHooksConverged(ctx); err != nil || !ok {
 		return false, err
 	}
-	return marker == version && (!codexSelected || codexMarker == codexVersion), nil
+	return marker == version, nil
 }
 
 func (runtime Runtime) provisionAgentCommands() ([]string, error) {

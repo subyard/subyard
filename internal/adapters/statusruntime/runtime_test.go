@@ -450,13 +450,15 @@ func TestRuntimeReportsSelectedProfilesAndAgentsWithVerifiedDashboard(t *testing
 		t.Fatalf("profiles = %#v", facts.Profiles)
 	}
 	wantAgents := []domain.AgentStatus{
-		{Name: "codex", State: "enabled"},
+		{Name: "codex", State: "rules-ok", Hint: "home matcher: commit/push prompt; session approvals unverified"},
 		{Name: "aiobserver", State: "up", URL: "http://127.0.0.1:18080/", DashboardPort: 18080},
 	}
 	if !reflect.DeepEqual(facts.Agents, wantAgents) {
 		t.Fatalf("agents = %#v, want %#v", facts.Agents, wantAgents)
 	}
-	if len(executor.calls) != 1 || !slices.Equal(executor.calls[0].Command, []string{"/usr/local/bin/ai-observer-check"}) {
+	if len(executor.calls) != 2 || !slices.ContainsFunc(executor.calls, func(call ports.InstanceExecRequest) bool {
+		return slices.Equal(call.Command, []string{"/usr/local/bin/ai-observer-check"})
+	}) {
 		t.Fatalf("AI Observer probes = %#v", executor.calls)
 	}
 }

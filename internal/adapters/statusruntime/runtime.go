@@ -68,6 +68,12 @@ func (runtime Runtime) agentStatus(
 	result := make([]domain.AgentStatus, 0, len(agents))
 	for _, name := range agents {
 		status := domain.AgentStatus{Name: name, State: "enabled"}
+		switch name {
+		case "codex":
+			status = runtime.codexRulesStatus(ctx, yard, running)
+		case "claude", "opencode", "pi":
+			status.State, status.Hint = "unverified", "runtime approvals have no supported offline check"
+		}
 		if name != "aiobserver" {
 			result = append(result, status)
 			continue

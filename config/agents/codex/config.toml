@@ -1,9 +1,10 @@
 # Codex default config for the yard (config/agents.env → AGENT_codex_CONFIG).
 # The container is the isolation boundary, so Codex runs with full local permissions and
 # unrestricted network for free local work. Publishing git history is gated at the Codex
-# level — every `git commit` and `git push` prompts the operator via
+# level — canonical direct `git commit` and `git push` request operator approval via
 # ~/.codex/rules/repo.rules — instead of a yard-wide git shim. Override with a fuller private
 # config via AGENT_codex_CONFIG.
+# `yard status` probes home rules; active client overrides still need runtime acceptance.
 
 approval_policy = "on-request"   # run local commands freely; prompt on explicit command rules
 approvals_reviewer = "user"      # commit/push prompts are routed to the operator

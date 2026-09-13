@@ -1,5 +1,27 @@
 # Testing changes
 
+## Keep tests proportional
+
+Choose additional tests by concrete failure risk and existing coverage.
+
+- Add a case for a distinct regression or meaningful observable contract that is not
+  adequately covered. Extend an existing test when it fits.
+- Use the narrowest boundary that proves the behavior. Another layer or combination
+  of inputs must catch a different failure. Assert outcomes and stable interfaces;
+  reserve source-text assertions for explicit source-level contracts.
+- For prose, formatting and mechanical edits with unchanged behavior, use existing
+  checks. New tests need a concrete behavior risk, not merely a changed file.
+- Preserve targeted checks for permissions, data loss, migrations, atomic updates
+  and recovery. A small code change can still carry a large risk.
+- If a small feature needs extensive fixtures, a parser or a process harness,
+  reconsider the implementation and scope first. Remove obsolete behavior and its
+  tests together; keep protections for behavior that remains.
+- Mocks prove our adapter's behavior. Claims about an external CLI or protocol need
+  evidence from the real consumer; otherwise state that compatibility is unverified.
+
+These rules govern adding tests. Run the existing required gates below; during
+development use focused checks and repeat broader checks after relevant changes or failures.
+
 ## Run the core checks
 
 Run `./tests/run.sh` against the current source files, including uncommitted edits. No Git history,
@@ -13,6 +35,14 @@ GitHub CI runs the full core gate, warning-level ShellCheck and
 The separate nightly/manual Deep CI runs repeated Go race tests and one minute of parser fuzzing.
 Both workflows use standard Ubuntu runners, read-only repository permissions and no artifact uploads.
 Veranda, native Paseo and the full P0 release gate remain separate checks.
+
+Agent compatibility regressions run locally with
+`go test ./internal/adapters/statusruntime` and `bash tests/codex-agent-provision.sh`.
+They use temporary rules, fake CLI programs and release metadata; they do not start VMs,
+contact model APIs or publish Git history. They cover the matcher invocation and failure
+handling, latest-release installation and preservation of a working binary after a bad download.
+Mocks do not establish compatibility with a real CLI release. Check its native `execpolicy check`
+against the shipped rules for that evidence; real client approve/deny needs separate acceptance.
 
 ## Select additional checks
 

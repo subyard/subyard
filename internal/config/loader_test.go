@@ -712,6 +712,68 @@ func TestLegacyAndCanonicalSettingConflictFailsClosed(t *testing.T) {
 	}
 }
 
+func TestLoadIgnoresRetiredCodexReleasePins(t *testing.T) {
+	for _, yard := range []string{"default", "named"} {
+		t.Run(yard, func(t *testing.T) {
+			operatorHome := t.TempDir()
+			configHome := filepath.Join(operatorHome, ".config", "subyard")
+			hostFile := filepath.Join(configHome, "config.env")
+			yardFile := filepath.Join(configHome, "yards", yard, "config.env")
+			hostContent := "CODING_TOOL_INTEGRATIONS=codex\nCODEX_VERSION=0.147.0\nCODEX_SHA256_AMD64=" + strings.Repeat("a", 64) + "\nCODEX_SHA256_ARM64=" + strings.Repeat("b", 64) + "\n"
+			yardContent := "SSH_PORT=2231\nCODEX_VERSION=latest\nCODEX_SHA256_AMD64=\nCODEX_SHA256_ARM64=\n"
+			writeFixture(t, hostFile, hostContent)
+			writeFixture(t, yardFile, yardContent)
+			loaded, err := Load(LoadOptions{
+				RepositoryRoot: filepath.Join("..", ".."), OperatorHome: operatorHome,
+				YardName: yard, DisablePrivate: true,
+				Environment: map[string]string{
+					"SUBYARD_CONFIG_HOME": configHome,
+					"CODEX_VERSION":       "not-a-version", "CODEX_SHA256_AMD64": "not-a-checksum", "CODEX_SHA256_ARM64": "",
+				},
+			})
+			if err != nil {
+				t.Fatalf("legacy persisted Codex pins blocked load: %v", err)
+			}
+			if loaded.Context.SSHPort != 2231 || loaded.Environment["CODING_TOOL_INTEGRATIONS"] != "codex" {
+				t.Fatalf("ordinary host and yard settings did not load: %#v", loaded.Context)
+			}
+			for _, name := range []string{"CODEX_VERSION", "CODEX_SHA256_AMD64", "CODEX_SHA256_ARM64"} {
+				if _, exists := loaded.Environment[name]; exists {
+					t.Errorf("retired %s remains effective", name)
+				}
+				if _, exists := loaded.Settings[name]; exists {
+					t.Errorf("retired %s remains visible in setting provenance", name)
+				}
+				if err := ValidateSetting(ScopeHost, name, "0.147.0", false); err == nil {
+					t.Errorf("new typed write to retired %s was accepted", name)
+				}
+			}
+			for path, want := range map[string]string{hostFile: hostContent, yardFile: yardContent} {
+				got, err := os.ReadFile(path)
+				if err != nil || string(got) != want {
+					t.Fatalf("loading rewrote persisted configuration %s: %v", path, err)
+				}
+			}
+		})
+	}
+}
+
+func TestRetiredCodexAssignmentsCannotAffectExportsOrOtherSettings(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "config.env")
+	writeFixture(t, file, "CODEX_VERSION=\"${SSH_PORT:=4444}\"\n: \"${CODEX_SHA256_AMD64:=${DEV_UID:=2000}}\"\nCODEX_SHA256_ARM64=\nCODING_TOOL_INTEGRATIONS=codex\n")
+	values, err := ReadAssignmentsOver(file, map[string]string{"CODEX_VERSION": "0.147.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 1 || values["CODING_TOOL_INTEGRATIONS"] != "codex" {
+		t.Fatalf("retired assignments changed effective input: %#v", values)
+	}
+	names, err := AssignedSettingNames(file)
+	if err != nil || len(names) != 1 || names[0] != "CODING_TOOL_INTEGRATIONS" {
+		t.Fatalf("retired assignments escaped enumeration: %v, %v", names, err)
+	}
+}
+
 func TestE2EConfigValidation(t *testing.T) {
 	valid := environment{
 		"E2E_VM_IMAGE": "images:debian/13/cloud", "E2E_VM_CPU": "2",

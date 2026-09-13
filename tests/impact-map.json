@@ -821,7 +821,7 @@
     {
       "id": "documentation-and-metadata",
       "priority": 340,
-      "pattern": "^(docs/.*|README\\.md|AGENTS\\.md|CLAUDE\\.md|LICENSE|\\.gitignore)$",
+      "pattern": "^(docs/.*|\\.agents/skills/[^/]+/(SKILL\\.md|agents/openai\\.yaml)|README\\.md|AGENTS\\.md|CLAUDE\\.md|LICENSE|\\.gitignore)$",
       "check_sets": [],
       "risk_domains": []
     }

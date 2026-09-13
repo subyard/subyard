@@ -49,14 +49,6 @@ incus_wait_instance_agent "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" \
 
 incus config set "$YARD_INSTANCE_NAME" user.subyard.ccusage_version pending "${PROJ[@]}" \
   || die "could not invalidate ccusage convergence"
-_codex_selected=0
-for _agent in ${CODING_TOOL_INTEGRATIONS:-}; do
-  [ "$_agent" != codex ] || _codex_selected=1
-done
-if [ "$_codex_selected" = 1 ]; then
-  incus config set "$YARD_INSTANCE_NAME" user.subyard.codex_version pending "${PROJ[@]}" \
-    || die "could not invalidate Codex convergence"
-fi
 
 # --- 1. provision inside the yard --------------------------------------------
 # Quoted heredoc: nothing expands on the host; vars arrive via --env.
@@ -247,9 +239,6 @@ for _agent in ${CODING_TOOL_INTEGRATIONS:-}; do
     --env CODING_TOOL_INTEGRATIONS="${CODING_TOOL_INTEGRATIONS:-}"
     --env AI_OBSERVER_CONTEXT="${AI_OBSERVER_CONTEXT:-}"
     --env YARD_VERSION="${YARD_VERSION:-}"
-    --env CODEX_VERSION="$CODEX_VERSION"
-    --env CODEX_SHA256_AMD64="$CODEX_SHA256_AMD64"
-    --env CODEX_SHA256_ARM64="$CODEX_SHA256_ARM64"
   )
   incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" "${_agent_env[@]}" \
     -- bash -euo pipefail -s < "$_provision" \
@@ -340,11 +329,6 @@ fi
 # --- summary -----------------------------------------------------------------
 incus config set "$YARD_INSTANCE_NAME" user.subyard.ccusage_version "$CCUSAGE_VERSION" "${PROJ[@]}" \
   || die "could not record ccusage convergence"
-if [ "$_codex_selected" = 1 ]; then
-  incus config set "$YARD_INSTANCE_NAME" user.subyard.codex_version "$CODEX_VERSION" "${PROJ[@]}" \
-    || die "could not record Codex convergence"
-fi
-unset _codex_selected
 echo
 ok "Phase 3 done."
 cat <<MSG

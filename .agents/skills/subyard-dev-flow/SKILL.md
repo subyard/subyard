@@ -31,6 +31,8 @@ requirements when the task depends on them.
    steps current; change the agreed scope only with the user's agreement.
 2. Preserve unrelated edits and follow the affected component's architecture.
    Make host fixes reproducible through product setup, including repeat runs.
+   Choose new tests by [failure risk and existing coverage](../../../docs/testing.md#keep-tests-proportional).
+   Simplify unnecessary implementation scope before expanding its test machinery.
 3. Run the applicable checks against the final changes. The test selector is
    advisory; follow the testing guides for required core and release gates.
    Planned checks on available allocated VMs are agent work: complete them before

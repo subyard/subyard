@@ -609,11 +609,9 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 	}}
 	assertStage(t, runtime, "provision", true, "matching stopped provision marker")
 	runtime.Environment = []string{
-		"CODING_TOOL_INTEGRATIONS=codex", "CCUSAGE_VERSION=1.2.3", "CODEX_VERSION=0.147.0",
+		"CODING_TOOL_INTEGRATIONS=codex", "CCUSAGE_VERSION=1.2.3",
 	}
-	assertStage(t, runtime, "provision", false, "missing stopped Codex version marker")
-	incus.Reconcile.Instance.Config["user.subyard.codex_version"] = "0.147.0"
-	assertStage(t, runtime, "provision", true, "matching stopped Codex version marker")
+	assertStage(t, runtime, "provision", true, "stopped Codex does not need a release pin")
 	runtime.Environment = []string{
 		"CODING_TOOL_INTEGRATIONS=opencode", "CCUSAGE_VERSION=1.2.4",
 		"HOST_OPENCODE_AGENTS_MD=" + instructions,

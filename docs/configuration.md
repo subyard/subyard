@@ -93,6 +93,49 @@ be replaced by the matching file under `overrides/shared`, `overrides/host`, or 
 These directories currently override known file settings only. They are not generic scalar
 configuration directories.
 
+## Coding-agent compatibility
+
+Codex, Claude Code, OpenCode and pi can run directly in the yard. Their versions are not a
+Subyard compatibility allowlist. When the Codex provisioning hook runs, it resolves the current
+stable official release and verifies the downloaded artifact against that release's SHA-256
+metadata before replacing the managed binary. A newer working installation is preserved.
+Legacy `CODEX_VERSION` and `CODEX_SHA256_*` assignments are ignored when loading existing
+settings; new writes to these retired fields are rejected. Already-converged yards do not check for upstream updates
+on every `yard init`, and `yard status` does not install or update agents.
+
+`yard status` runs one offline Codex rule check in a running yard:
+
+| State | Evidence |
+| --- | --- |
+| `rules-ok` | Codex's native matcher returned `prompt` for the checked commit/push forms and left the checked local commands ungated. |
+| `incompatible` | The native command failed, returned an unsupported response, or the home rules did not meet that contract. Review the rules or update Subyard. |
+| `unverified` | Claude, OpenCode and pi have no supported offline approval check in Subyard. |
+| `missing` / `?` | The CLI was not found, or the check was unavailable, timed out, or not run because the yard is stopped. |
+
+The probe runs as the developer user with the default home CLI directories followed by system
+directories on `PATH`. It uses the CLI capability directly, without interpreting its version
+number. Standard guest utilities bound execution time and captured output. Raw CLI output and
+configuration never appear in status; the guest returns only a result code. No model APIs,
+agent sessions or updates are started by the check.
+
+Codex uses its offline [`execpolicy check`](https://learn.chatgpt.com/docs/agent-configuration/rules)
+for `git commit`, `git commit -m msg`, `git commit --amend`, `git push`, `git push origin main`
+and `git push --force-with-lease`. It also checks that `git status` and `sh dev-check.sh` are
+not gated by a rule. These commands are arguments to the matcher; Git and scripts are never
+executed. All default-home `*.rules` files participate.
+
+`rules-ok` proves only the matcher result. Subyard does not reconstruct client configuration or
+inspect active sessions: `approval_policy = "never"`, profiles, custom `CODEX_HOME`, launch flags,
+project overrides and unloaded rules can still change runtime behavior. Other Git spellings such
+as `git -C` and `git -c` are outside this check; matching raw `bash -lc` input also does not model
+Codex's runtime shell decomposition. Single-use approval and denial require client acceptance.
+
+For Claude, OpenCode and pi, status states the missing evidence without parsing their configs
+or launching diagnostics. In particular, Claude's shipped `bypassPermissions` mode skips prompts
+according to its [CLI documentation](https://code.claude.com/docs/en/permissions#permission-modes);
+ask entries alone do not establish enforcement. These diagnostics do not restrict direct use
+of any agent or make its approval settings a security boundary.
+
 ## Applying changes
 
 Settings are resolved on every `yard` command. The `APPLIES` column in `yard config show` identifies

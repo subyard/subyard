@@ -838,9 +838,28 @@ var legacySettingNames = map[string]string{
 	"AGENTS":              "CODING_TOOL_INTEGRATIONS",
 }
 
+// Retired inputs may remain in persisted files from older releases. They are
+// parsed but discarded, never exposed as writable settings or effective values.
+func isRetiredSetting(name string) bool {
+	switch name {
+	case "CODEX_VERSION", "CODEX_SHA256_AMD64", "CODEX_SHA256_ARM64":
+		return true
+	default:
+		return false
+	}
+}
+
+func discardRetiredSettings(values environment) {
+	for name := range values {
+		if isRetiredSetting(name) {
+			delete(values, name)
+		}
+	}
+}
+
 func IsLegacySetting(name string) bool {
 	_, legacy := legacySettingNames[name]
-	return legacy
+	return legacy || isRetiredSetting(name)
 }
 
 func AddLegacySettingAliases(values map[string]string) {
@@ -857,6 +876,7 @@ func canonicalSettingName(name string) string {
 }
 
 func normalizeLegacyEnvironment(values environment) error {
+	discardRetiredSettings(values)
 	for legacy, canonical := range legacySettingNames {
 		legacyValue, hasLegacy := values[legacy]
 		if !hasLegacy {
