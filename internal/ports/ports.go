@@ -175,21 +175,22 @@ type AdapterRunner interface {
 type ReconcileStageID string
 
 const (
-	ReconcileStageIncus       ReconcileStageID = "incus"
-	ReconcileStageProject     ReconcileStageID = "project"
-	ReconcileStageNetwork     ReconcileStageID = "network"
-	ReconcileStagePowerImport ReconcileStageID = "power-import"
-	ReconcileStageInstance    ReconcileStageID = "instance"
-	ReconcileStageMounts      ReconcileStageID = "mounts"
-	ReconcileStageProvision   ReconcileStageID = "provision"
-	ReconcileStageTestVMs     ReconcileStageID = "test-vms"
-	ReconcileStageSSH         ReconcileStageID = "ssh"
-	ReconcileStageGitIdentity ReconcileStageID = "git-identity"
-	ReconcileStageExtras      ReconcileStageID = "extras"
-	ReconcileStagePower       ReconcileStageID = "power"
-	ReconcileStageKeys        ReconcileStageID = "keys"
-	ReconcileStageSecurity    ReconcileStageID = "security"
-	ReconcileStageFinalize    ReconcileStageID = "finalize"
+	ReconcileStageIncus         ReconcileStageID = "incus"
+	ReconcileStageProject       ReconcileStageID = "project"
+	ReconcileStageNetwork       ReconcileStageID = "network"
+	ReconcileStageNetworkPolicy ReconcileStageID = "network-policy"
+	ReconcileStagePowerImport   ReconcileStageID = "power-import"
+	ReconcileStageInstance      ReconcileStageID = "instance"
+	ReconcileStageMounts        ReconcileStageID = "mounts"
+	ReconcileStageProvision     ReconcileStageID = "provision"
+	ReconcileStageTestVMs       ReconcileStageID = "test-vms"
+	ReconcileStageSSH           ReconcileStageID = "ssh"
+	ReconcileStageGitIdentity   ReconcileStageID = "git-identity"
+	ReconcileStageExtras        ReconcileStageID = "extras"
+	ReconcileStagePower         ReconcileStageID = "power"
+	ReconcileStageKeys          ReconcileStageID = "keys"
+	ReconcileStageSecurity      ReconcileStageID = "security"
+	ReconcileStageFinalize      ReconcileStageID = "finalize"
 )
 
 type ReconcileStageRunner interface {

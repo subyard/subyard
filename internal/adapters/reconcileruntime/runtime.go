@@ -26,7 +26,14 @@ import (
 	"github.com/Subyard/Subyard/internal/sshidentity"
 	"github.com/Subyard/Subyard/internal/sshrelay"
 	"github.com/Subyard/Subyard/internal/systemdunit"
+	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
+
+type YardNetworkPolicy interface {
+	Check(context.Context, yardnetwork.Yard) error
+	Ensure(context.Context, yardnetwork.Yard) error
+	WithStart(context.Context, yardnetwork.Yard, func() error) error
+}
 
 type Runtime struct {
 	RepositoryRoot string
@@ -45,6 +52,7 @@ type Runtime struct {
 	SRVPool           string
 	SRVVolume         string
 	HostDeviceRoot    string
+	NetworkPolicy     YardNetworkPolicy
 }
 
 func (runtime Runtime) CheckStage(ctx context.Context, stage ports.ReconcileStageID) (bool, error) {
@@ -62,6 +70,15 @@ func (runtime Runtime) CheckStage(ctx context.Context, stage ports.ReconcileStag
 		return runtime.gitIdentityConverged(ctx)
 	case ports.ReconcileStageNetwork:
 		err = runtime.runObservedPowerScript(ctx, nil, true, "06-network.sh", "--check")
+	case ports.ReconcileStageNetworkPolicy:
+		if runtime.NetworkPolicy == nil {
+			return false, errors.New("yard network policy service is required")
+		}
+		err = runtime.NetworkPolicy.Check(ctx, runtime.networkPolicyYard())
+		if errors.Is(err, yardnetwork.ErrNotConverged) {
+			return false, nil
+		}
+		return err == nil, err
 	case ports.ReconcileStagePower, ports.ReconcileStageFinalize:
 		return runtime.powerConverged(ctx, true)
 	case ports.ReconcileStageTestVMs:
@@ -102,6 +119,11 @@ func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStag
 		return runtime.applyGitIdentity(ctx)
 	case ports.ReconcileStageNetwork:
 		return runtime.runScript(ctx, runtime.Stderr, "06-network.sh", "--yes")
+	case ports.ReconcileStageNetworkPolicy:
+		if runtime.NetworkPolicy == nil {
+			return errors.New("yard network policy service is required")
+		}
+		return runtime.NetworkPolicy.Ensure(ctx, runtime.networkPolicyYard())
 	case ports.ReconcileStagePower:
 		return runtime.runScript(ctx, runtime.Stderr, "install-power-reconciler.sh", "--yes")
 	case ports.ReconcileStageFinalize:
@@ -526,11 +548,13 @@ func (runtime Runtime) Teardown(ctx context.Context) error {
 	if hasOtherRegisteredLocalYard(runtime.Yard.YardName, runtime.powerYards()) {
 		keepShared = "1"
 	}
-	return runtime.runScriptEnvironment(ctx, runtime.Stdout,
-		map[string]string{
-			"SUBYARD_TEARDOWN_KEEP_DATA":   "0",
-			"SUBYARD_TEARDOWN_KEEP_SHARED": keepShared,
-		}, "teardown-physical.sh", "--yes")
+	return runtime.withNetworkStart(ctx, func() error {
+		return runtime.runScriptEnvironment(ctx, runtime.Stdout,
+			map[string]string{
+				"SUBYARD_TEARDOWN_KEEP_DATA":   "0",
+				"SUBYARD_TEARDOWN_KEEP_SHARED": keepShared,
+			}, "teardown-physical.sh", "--yes")
+	})
 }
 
 func hasOtherRegisteredLocalYard(current string, yards []domain.Context) bool {
@@ -591,6 +615,9 @@ func (runtime Runtime) powerService() application.PowerService {
 }
 
 func (runtime Runtime) applyInstanceStage(ctx context.Context) error {
+	if runtime.NetworkPolicy == nil {
+		return errors.New("yard network policy service is required")
+	}
 	// Assess once at the mutation boundary, before even power metadata changes.
 	// The shell consumes this observation instead of probing again after Set.
 	appArmor := "restored"
@@ -617,10 +644,12 @@ func (runtime Runtime) applyInstanceStage(ctx context.Context) error {
 	} else if !errors.Is(err, ports.ErrInstanceNotFound) {
 		return err
 	}
-	if err := runtime.runScriptEnvironment(ctx, runtime.Stderr, map[string]string{
-		"SUBYARD_POWER_DESIRED":           desired,
-		"SUBYARD_PREPARED_INCUS_APPARMOR": appArmor,
-	}, "03-create-subyard.sh", "--yes"); err != nil {
+	if err := runtime.withNetworkStart(ctx, func() error {
+		return runtime.runScriptEnvironment(ctx, runtime.Stderr, map[string]string{
+			"SUBYARD_POWER_DESIRED":           desired,
+			"SUBYARD_PREPARED_INCUS_APPARMOR": appArmor,
+		}, "03-create-subyard.sh", "--yes")
+	}); err != nil {
 		return err
 	}
 	return runtime.powerService().Set(ctx, runtime.Yard, desired, false)
@@ -689,8 +718,10 @@ func (runtime Runtime) testVMBackend(desired string) *testvmsruntime.Backend {
 		Environment:    environment,
 		Output:         runtime.Stderr,
 		Start: func(ctx context.Context) error {
-			return runtime.runScript(ctx, runtime.Stderr,
-				"lifecycle-guard.sh", "start", "--reconcile")
+			return runtime.withNetworkStart(ctx, func() error {
+				return runtime.runScript(ctx, runtime.Stderr,
+					"lifecycle-guard.sh", "start", "--reconcile")
+			})
 		},
 		Stop: func(ctx context.Context) error {
 			return runtime.runScript(ctx, runtime.Stderr,
@@ -823,12 +854,38 @@ func (runtime Runtime) finalizePowerState(ctx context.Context) error {
 	if intent.Desired == application.PowerRunning {
 		action = "start"
 	}
-	if err := runtime.runScript(
-		ctx, runtime.Stderr, "lifecycle-guard.sh", action, "--reconcile",
-	); err != nil {
-		return err
+	run := func() error {
+		return runtime.runScript(
+			ctx, runtime.Stderr, "lifecycle-guard.sh", action, "--reconcile",
+		)
+	}
+	var runErr error
+	if action == "start" {
+		runErr = runtime.withNetworkStart(ctx, run)
+	} else {
+		runErr = run()
+	}
+	if runErr != nil {
+		return runErr
 	}
 	return runtime.powerService().Commit(ctx, runtime.Yard, intent.Desired)
+}
+
+func (runtime Runtime) withNetworkStart(ctx context.Context, start func() error) error {
+	if runtime.NetworkPolicy == nil {
+		return errors.New("yard network policy service is required")
+	}
+	if start == nil {
+		return errors.New("yard start callback is required")
+	}
+	return runtime.NetworkPolicy.WithStart(ctx, runtime.networkPolicyYard(), start)
+}
+
+func (runtime Runtime) networkPolicyYard() yardnetwork.Yard {
+	return yardnetwork.Yard{
+		Name: runtime.Yard.YardName, Project: runtime.Yard.IncusProject,
+		Instance: runtime.Yard.YardInstanceName, Network: runtime.Yard.IncusBridge,
+	}
 }
 
 func (runtime Runtime) powerYards() []domain.Context {

@@ -123,6 +123,9 @@ func TestRegistryNamedE2EChecksUsePreparedRunnableEntrypoints(t *testing.T) {
 		t.Fatalf("BuiltInRegistry() error = %v", err)
 	}
 	want := map[string][]string{
+		"e2e:yard-network-policy": {
+			"dev/e2e/yard-network-policy.sh",
+		},
 		"e2e:adapter-contracts": {
 			"dev/agent-e2e.sh", "--purpose", "adapter-contracts", "--vm", "1", "--",
 			"bash", "tests/real-host/adapter-contracts.sh",

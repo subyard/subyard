@@ -289,6 +289,7 @@ func (cli *CLI) initPlatformWithDispatcher(
 		Stdout:            cli.options.Stderr,
 		Stderr:            cli.options.Stderr,
 		Incus:             incusPort,
+		NetworkPolicy:     cli.networkService(powerYards),
 		ConfigWriter:      configWriter,
 		Executor:          executor,
 		Yard:              loaded.Context,

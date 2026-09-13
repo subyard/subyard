@@ -358,6 +358,7 @@ func TestOldYardTeardownRequiresCanonicalTemplateMigration(t *testing.T) {
 		Stderr:         &stderr,
 		AdapterRunner:  runner,
 		Incus:          &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true}},
+		NetworkPolicy:  allowTestNetworkPolicy(),
 	})
 	if err != nil {
 		t.Fatal(err)

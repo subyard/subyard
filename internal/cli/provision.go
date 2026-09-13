@@ -282,8 +282,14 @@ func (cli *CLI) executeProvision(
 	if err != nil {
 		return domain.AdapterResult{}, err
 	}
+	var guardStart func(context.Context, func() error) error
+	if service := cli.networkService([]domain.Context{loaded.Context}); service != nil {
+		guardStart = func(ctx context.Context, start func() error) error {
+			return service.WithStart(ctx, networkYard(loaded.Context), start)
+		}
+	}
 	orchestrator.Runner = application.ProvisionRunner{
-		Power: power, Physical: orchestrator.Runner,
+		Power: power, Physical: orchestrator.Runner, GuardStart: guardStart,
 		Yard: loaded.Context, Profiles: execution.profiles, Reporter: provisionReporter{output: diagnostics},
 	}
 	request := domain.AdapterRequest{

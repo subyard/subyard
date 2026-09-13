@@ -58,6 +58,15 @@ case "$*" in
   *) exit 90 ;;
 esac
 SH
+cat > "$TMP/bin/yard-engine" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  "_network-lock check") [ "${MOCK_NETWORK_LOCK_CHECK:-ok}" = ok ] ;;
+  "_network-lock ensure") exit 0 ;;
+  *) exit 90 ;;
+esac
+SH
 cat > "$TMP/bin/incus" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -94,8 +103,13 @@ esac
 SH
 chmod +x "$TMP/bin/"*
 export PATH="$TMP/bin:$PATH"
+export SUBYARD_DISPATCHER_PATH="$TMP/bin/yard-engine"
 export MOCK_NM_STATE=inactive MOCK_INSTANCE_EXISTS=1 MOCK_INSTANCE_STATE=STOPPED
 export MOCK_INSTANCE_IP='' MOCK_DEFAULT_ROUTE='default via 192.0.2.1 dev eth0'
+
+if MOCK_NETWORK_LOCK_CHECK=fail bash "$ROOT/scripts/06-network.sh" --verify; then
+  fail "network verification ignored host-lock validation failure"
+fi
 
 # The network stage owns host guards, not desired-power reconciliation. A stopped instance is safe
 # here even when the later init finalizer still needs to restore desired=running.

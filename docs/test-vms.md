@@ -157,6 +157,20 @@ and resource generation throughout the run.
 
 ### Test lanes and gates
 
+The same-host network policy acceptance creates synthetic local yards and verifies explicit
+links, isolation toggles, spoofing protection and managed lifecycle behavior. Choose an available
+slot from fresh status, then run:
+
+```sh
+dev/e2e/yard-network-policy.sh --slot N
+dev/e2e/yard-network-policy.sh --slot N --vm 2  # select the second guest when needed
+```
+
+This controller owns one lease across setup, a selected-guest reboot and resumed validation;
+`--vm` accepts `1` or `2` and defaults to `1`. It changes
+network policy only inside the disposable VM and does not enable isolation on the operator's host.
+A network implementation change still requires a fresh full P0 below.
+
 `dev/e2e/p0-acceptance.sh --slot N` is the continuous P0 release gate. Addressable lanes require the
 same explicit selector and are diagnostics: they shorten a rerun after a late failure but never turn
 a partial pass into a fresh-install release result. `--list-lanes` does not acquire and needs no slot.

@@ -31,11 +31,17 @@ func (cli *CLI) reportPreparationError(definition command.Definition, err error)
 	if errors.Is(err, domain.ErrPlanStale) {
 		code = 1
 	}
+	if errors.Is(err, errNetworkUsage) {
+		code = 2
+	}
 	cli.errorf("%s: %v", prefix, err)
 	return code
 }
 
 func preparationRPCError(definition command.Definition, err error) error {
+	if errors.Is(err, errNetworkUsage) {
+		return operationRPCError("invalid_params", err)
+	}
 	code := "plan_failed"
 	var failure *commandPreparationError
 	if errors.As(err, &failure) {

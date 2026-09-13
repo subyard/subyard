@@ -111,6 +111,7 @@ func newInitPlatformFixture() *initPlatformFixture {
 	converged := make(map[ports.ReconcileStageID]bool)
 	for _, id := range []ports.ReconcileStageID{
 		ports.ReconcileStageIncus, ports.ReconcileStageProject, ports.ReconcileStageNetwork,
+		ports.ReconcileStageNetworkPolicy,
 		ports.ReconcileStagePowerImport, ports.ReconcileStageInstance, ports.ReconcileStageMounts,
 		ports.ReconcileStageProvision, ports.ReconcileStageTestVMs, ports.ReconcileStageSSH,
 		ports.ReconcileStageGitIdentity, ports.ReconcileStageExtras, ports.ReconcileStagePower,

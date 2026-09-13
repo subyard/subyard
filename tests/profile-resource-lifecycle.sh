@@ -309,6 +309,7 @@ fi
 
 # Representative reverse lifecycle paths execute through the generic dispatcher and fake Incus.
 if ! "$ROOT/bin/yard" emu down --yes >"$TMP/emu-down.out" 2>&1; then
+  cat "$TMP/emu-down.out" >&2
   tail -n 20 "$RESOURCE_TEST_LOG" >&2
   fail 'controller-owned emulator down failed'
 fi

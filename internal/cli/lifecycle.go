@@ -148,7 +148,22 @@ func (cli *CLI) executeLifecycle(
 		Schema: shelladapter.ProtocolSchema, OperationID: plan.OperationID,
 		Adapter: "lifecycle", Action: execution.action, Arguments: arguments, Context: contextValues,
 	}
-	result, stderr, err := orchestrator.RunAdapter(ctx, plan, request, nil)
+	var result domain.AdapterResult
+	var stderr string
+	run := func() error {
+		var runErr error
+		result, stderr, runErr = orchestrator.RunAdapter(ctx, plan, request, nil)
+		return runErr
+	}
+	if execution.action == "start" {
+		service := cli.networkService([]domain.Context{yard})
+		if service == nil {
+			return domain.AdapterResult{}, errors.New("Incus network policy adapter is unavailable")
+		}
+		err = service.WithStart(ctx, networkYard(yard), run)
+	} else {
+		err = run()
+	}
 	writeAdapterDiagnostics(diagnostics, stderr)
 	if err == nil && result.Status == "ok" {
 		if execution.action == "start" {

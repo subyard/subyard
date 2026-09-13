@@ -106,7 +106,8 @@ func TestDirectAndRPCPreparationParity(t *testing.T) {
 				Environment: append(environment, "SUBYARD_OPERATION_ID=direct-parity"),
 				WorkingDir:  root, Prompt: prompt, AdapterRunner: runner, Clock: clock,
 				Incus: incus, ProjectData: projectData, InitPlatform: initPlatform,
-				Stdout: io.Discard, Stderr: &directStderr,
+				NetworkPolicy: allowTestNetworkPolicy(),
+				Stdout:        io.Discard, Stderr: &directStderr,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -126,6 +127,7 @@ func TestDirectAndRPCPreparationParity(t *testing.T) {
 				RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 				Clock: clock, Incus: incus, ProjectData: projectData, InitPlatform: initPlatform,
 				AdapterRunner: &testkit.ScriptedAdapter{}, Stdout: io.Discard, Stderr: io.Discard,
+				NetworkPolicy: allowTestNetworkPolicy(),
 			})
 			if err != nil {
 				t.Fatal(err)

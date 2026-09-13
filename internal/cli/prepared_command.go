@@ -82,6 +82,9 @@ func resolveCoreCommand(definition command.Definition) (coreCommandBehavior, err
 		behavior.nonRPCReason = "interactive terminal session"
 	case "@config", "@host":
 		behavior.nonRPCReason = "dedicated configuration and registration workflow"
+	case "@network":
+		behavior.prepare = (*preparedCommand).prepareNetwork
+		behavior.prepareExit, behavior.prepareRPCCode = 1, "plan_failed"
 	case "@resource":
 		behavior.nonRPCReason = "profile resource pipeline"
 	case "@check", "@security", "@status", "@space", "@info", "@yards", "@logs", "@usage", "@list", "@help":
@@ -387,6 +390,7 @@ func (prepared *preparedCommand) prepareTestVMs(ctx context.Context, _ *initBoot
 }
 
 func (prepared *preparedCommand) prepareTeardown(_ context.Context, _ *initBootstrap) error {
+	prepared.executeNoOp = true
 	execution, err := prepareTeardownExecution(prepared.Arguments)
 	if err != nil {
 		return err

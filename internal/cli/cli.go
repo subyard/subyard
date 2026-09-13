@@ -49,6 +49,7 @@ import (
 	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/sshidentity"
 	"github.com/Subyard/Subyard/internal/state"
+	"github.com/Subyard/Subyard/internal/yardnetwork"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
 )
@@ -67,6 +68,7 @@ type Options struct {
 	Stdout          io.Writer
 	Stderr          io.Writer
 	Incus           ports.Incus
+	NetworkPolicy   *yardnetwork.Service
 	Executor        ports.InstanceExecutor
 	ProjectData     ports.YardExecutor
 	ProjectDevices  ports.InstanceDeviceManager
@@ -361,6 +363,10 @@ func (cli *CLI) Run(ctx context.Context) int {
 		cli.errorf("unknown command %q\nTry %q.", name, cli.options.Program+" --help")
 		return 2
 	}
+	if core && definition.Handler == "@network" && commandHelpRequested(commandArguments) {
+		cli.networkUsage()
+		return 0
+	}
 	configSync, configSyncCheck, configSyncStatus := false, false, false
 	registrationRepair := core && definition.Handler == "@config" && configRegistrationRepairInvocation(commandArguments)
 	if core && definition.Handler == "@config" {
@@ -377,6 +383,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		resourceReadOnly ||
 		(core && definition.Handler == "@config" && (configReadOnlyInvocation(commandArguments) || configSyncCheck || configSyncStatus)) ||
 		(core && definition.Handler == "@test-vms" && testVMStatusInvocation(commandArguments)) ||
+		(core && definition.Handler == "@network" && len(commandArguments) > 0 && commandArguments[0] == "status") ||
 		(core && definition.Handler == "@update" && slices.Contains(commandArguments, "--check"))
 	if explicit {
 		cli.env["SUBYARD_YARD_EXPLICIT"] = "1"
@@ -3655,7 +3662,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			}
 		}()
 		if prepared.displayOnly != nil {
-			return nil, operationRPCError("plan_failed", errors.New("provision execution is required"))
+			return nil, operationRPCError("command_not_mutating", errors.New("read-only commands do not require an operation plan"))
 		}
 		plan := prepared.Plan
 		handler.plansMu.Lock()

@@ -11,14 +11,33 @@ import (
 
 	"github.com/Subyard/Subyard/internal/adapters/hostruntime"
 	"github.com/Subyard/Subyard/internal/adapters/incusclient"
+	"github.com/Subyard/Subyard/internal/adapters/networkruntime"
 	"github.com/Subyard/Subyard/internal/adapters/testvmsruntime"
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/cli"
+	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if len(os.Args) > 1 && os.Args[1] == "_network-lock" {
+		if len(os.Args) != 3 || (os.Args[2] != "ensure" && os.Args[2] != "check") {
+			fmt.Fprintln(os.Stderr, "usage: _network-lock <ensure|check>")
+			os.Exit(2)
+		}
+		var err error
+		if os.Args[2] == "ensure" {
+			err = networkruntime.EnsureHostLock()
+		} else {
+			err = networkruntime.CheckHostLock()
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "network policy lock: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "_migrate-test-yard" {
 		// Compatibility shim for the released 0.4.0 installer. The ordered
 		// v1 adapter is the only supported reader of that historical handoff.
@@ -117,7 +136,9 @@ func main() {
 		os.Exit(cli.RunBootPower(ctx, os.Args[2:], os.Stdout, os.Stderr,
 			application.BootPowerReconciler{
 				Inventory: client, Instances: client, Power: client,
-				Network: hostruntime.NetworkGuard{},
+				Network:           hostruntime.NetworkGuard{},
+				NetworkPolicy:     &yardnetwork.Service{Host: client, Lock: networkruntime.HostLock{}},
+				EnsureNetworkLock: networkruntime.EnsureHostLock,
 			}))
 	}
 	root, err := repositoryRoot()

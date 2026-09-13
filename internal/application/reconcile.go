@@ -116,6 +116,8 @@ func InitStages(yard domain.Context) []ReconcileStage {
 		{ID: ports.ReconcileStageIncus, Label: "Install or upgrade Incus and initialize storage"},
 		{ID: ports.ReconcileStageProject, Label: fmt.Sprintf("Create the Incus project %q", yard.IncusProject)},
 		{ID: ports.ReconcileStageNetwork, Label: "Open host DHCP/DNS for the yard bridge"},
+		{ID: ports.ReconcileStageNetworkPolicy,
+			Label: "Reconcile same-host yard network policy (may restart affected running yards when isolation is enabled)"},
 		{ID: ports.ReconcileStagePowerImport, Label: "Import desired-power state for registered local yards"},
 		{ID: ports.ReconcileStageInstance, Label: instance},
 		{ID: ports.ReconcileStageMounts, Label: fmt.Sprintf("Create host dirs under %s and mount them", yard.Paths.HostBase)},

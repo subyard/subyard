@@ -48,9 +48,9 @@ func BuiltInRegistry() (Registry, error) {
 	goPackages := []string{
 		"application", "audit", "cli", "command", "config", "configsync", "credential",
 		"domain", "migration", "ownerinventory", "ports", "releasetransition", "resource", "resourceendpoint", "rpc", "shellquote",
-		"sshidentity", "sshrelay", "state", "systemdunit", "testyardmigration",
+		"sshidentity", "sshrelay", "state", "systemdunit", "testyardmigration", "yardnetwork",
 		"adapters/configmaterial", "adapters/credentialmeta", "adapters/credentialruntime", "adapters/hostruntime",
-		"adapters/incusclient", "adapters/projectruntime", "adapters/reconcileruntime",
+		"adapters/incusclient", "adapters/networkruntime", "adapters/projectruntime", "adapters/reconcileruntime",
 		"adapters/releaseruntime", "adapters/remotecontrol", "adapters/securityruntime",
 		"adapters/shelladapter", "adapters/statusruntime", "adapters/testvmsruntime",
 		"adapters/transport",
@@ -151,6 +151,11 @@ func BuiltInRegistry() (Registry, error) {
 		})
 	}
 	checks = append(checks,
+		Check{
+			ID: "e2e:yard-network-policy", Tier: "T3",
+			Argv:          []string{"dev/e2e/yard-network-policy.sh"},
+			BudgetSeconds: 3600, Rationale: "explicit same-host yard links, isolation and lifecycle recovery on a disposable VM",
+		},
 		Check{
 			ID:   "e2e:hermes-profile",
 			Tier: "T3",

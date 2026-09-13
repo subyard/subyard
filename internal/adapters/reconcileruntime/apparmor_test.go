@@ -54,7 +54,8 @@ exit "${PROBE_EXIT:-0}"
 	}
 	return Runtime{
 		RepositoryRoot: root, Incus: incus, ConfigWriter: incus, HostDeviceRoot: root,
-		Environment: []string{"PATH=" + root, "PROBE_OUTPUT=" + output},
+		NetworkPolicy: &networkPolicyFixture{},
+		Environment:   []string{"PATH=" + root, "PROBE_OUTPUT=" + output},
 		Yard: domain.Context{
 			YardName: "default", IncusProject: "subyard", YardInstanceName: "yard",
 			IncusBridge: "incusbr0", YardKind: domain.YardContainer,
@@ -206,6 +207,10 @@ printf '%s\n' "$SUBYARD_PREPARED_INCUS_APPARMOR" > "$CAPTURE"
 		}
 		if err := runtime.ApplyStage(context.Background(), ports.ReconcileStageInstance); err != nil {
 			t.Fatal(err)
+		}
+		policy := runtime.NetworkPolicy.(*networkPolicyFixture)
+		if len(policy.started) != 1 {
+			t.Fatalf("instance start was not network-gated: %#v", policy.started)
 		}
 		got, err := os.ReadFile(capture)
 		want := "disabled\n"

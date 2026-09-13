@@ -421,7 +421,60 @@ storage, systemd, credential and nested-VM leaves for physical checks or mutatio
 Registered-yard discovery and legacy power-metadata import are native. Shell only applies the
 selected yard's guarded start/stop boundary.
 
+### Yard network policy
+
+`yard network status`, `link A B`, `unlink A B`, `isolation on|off`, and `reconcile`
+manage one physical host. Bare names and selectors qualified with the local HostID are
+accepted; cross-host links require a separate transport and are not supported.
+Isolation is opt-in and is never enabled by installation or upgrade. Links remain saved
+when isolation is disabled. Each pair permits traffic in both directions; the graph
+does not add transitive permissions. While isolation is off, links do not restrict traffic.
+
+```sh
+yard network link alpha beta
+yard network status --json
+yard network isolation on --yes
+yard network unlink alpha beta --yes
+yard network isolation off --yes
+```
+
+`internal/yardnetwork` owns the policy, read-only planning, stale-state rejection and
+recovery. The default Incus project's `user.subyard.network_policy` key stores versioned
+JSON with desired/applied revisions, links, original NIC settings, fixed identities and
+pending restarts/cleanup. `internal/adapters/incusclient/network.go` performs exact,
+ETag-checked Incus operations. It preserves unrelated project and profile fields.
+
+The supported topology is a standalone Incus host using nftables, restricted per-yard
+projects, and one shared managed IPv4 bridge with DHCP in the default project's
+network namespace for all yards. Cross-bridge
+isolation fails preflight because overlapping addresses and NAT make source identity
+ambiguous. Disabling isolation remains available for recovery. Each yard's default profile owns its sole
+primary `eth0`; foreign ACLs, local NIC overrides and additional NICs fail preflight.
+Each profile receives a separate ACL, pinned IPv4/MAC identity and spoofing filters.
+Address allocation includes DHCP and static reservations across every project sharing
+the bridge; a fixed address claimed by another network identity fails preflight.
+Ingress permits only explicit IPv4 peers and the bridge gateway's SSH relay; default
+ingress denies IPv6 as well. Egress, DHCP and DNS remain available. This controls new
+direct network flows, not application-level forwarding deliberately provided by a peer.
+
+On Incus 6.0.6, NIC-filter changes are not atomic and updating an attached ACL can fail
+for restricted-project references. Apply therefore stops affected running yards, detaches
+their ACLs, updates rules, reattaches while stopped, verifies, then restores prior power.
+The typed assessment includes the interruption. Active connections close during this
+restart; removing an ACL allow rule alone would not flush established conntrack entries.
+On failure, desired/applied revisions remain different and pending restarts persist;
+managed starts refuse incomplete policy. Run `yard network reconcile --yes` to retry,
+or explicitly select `isolation off` to restore the recorded original NIC settings.
+
+The fixed root-owned `/run/lock/subyard-network/policy.lock` serializes policy application
+and managed starts. Host network setup, boot-reconciler installation during upgrades,
+and boot reconciliation initialize it without replacing an existing validated lock.
+The `network-policy` init stage runs after host networking and before instance creation;
+ordinary starts, init finalization, the test VM backend, boot restoration and teardown
+use the same policy service. Existing NetworkManager and host-route guards still apply.
+
 ### Credential ledger
+
 
 The host-scoped ledger is physically outside the checkout and every managed yard mount. Its shared
 Git store contains signed SOPS/age ciphertext; local-only records and identity keys never enter that

@@ -156,6 +156,14 @@ func NewCoreActionRegistry() (*domain.ActionRegistry, error) {
 			Recovery: domain.RecoveryRecreatable,
 		},
 		{
+			Action: "yard.network.save", Summary: "Save local yard network links", Effect: domain.ActionBoundedWrite,
+			Recovery: domain.RecoveryNotNeeded,
+		},
+		{
+			Action: "yard.network.apply", Summary: "Apply local yard network isolation", Effect: domain.ActionMutation,
+			Impacts: []domain.ActionImpact{domain.ImpactHostNetwork, domain.ImpactYardRuntime, domain.ImpactAccess}, Recovery: domain.RecoveryReversible,
+		},
+		{
 			Action: "yard.stop", Summary: "Stop yard", Effect: domain.ActionMutation,
 			Impacts:  []domain.ActionImpact{domain.ImpactAccess, domain.ImpactYardRuntime},
 			Recovery: domain.RecoveryReversible,

@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "check_sets": {
+    "yard-network": ["go:yardnetwork", "go:adapters/networkruntime", "go:adapters/incusclient", "go:cli", "go:application", "go:adapters/reconcileruntime", "shell:init-network-convergence", "e2e:yard-network-policy", "p0:real-incus", "p0:power-systemd", "p0:reboot-verify", "p0:peer"],
     "android-profile": [
       "shell:android-provision-check",
       "shell:emulator-process-control",
@@ -224,6 +225,13 @@
     }
   ],
   "rules": [
+    {
+      "id": "yard-network-policy",
+      "priority": 1001,
+      "pattern": "^(internal/yardnetwork/.*|internal/adapters/networkruntime/.*|internal/adapters/incusclient/network.*|internal/cli/network_commands.*|dev/e2e/yard-network-policy\\.sh)$",
+      "check_sets": ["yard-network"],
+      "risk_domains": ["boot-lifecycle", "incus-runtime", "command-control"]
+    },
     {
       "id": "selector-self",
       "priority": 1000,

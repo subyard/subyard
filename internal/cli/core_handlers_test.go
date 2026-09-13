@@ -559,6 +559,7 @@ func TestTeardownRejectsUnknownInputAndPublishesMode(t *testing.T) {
 		Environment: append(environment, "SUBYARD_OPERATION_ID=teardown-test"), WorkingDir: root,
 		AdapterRunner: runner, Prompt: prompt, Clock: testkit.NewManualClock(time.Unix(100, 0)),
 		Stderr: &stderr, Incus: &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true}},
+		NetworkPolicy: allowTestNetworkPolicy(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -595,6 +596,34 @@ func TestLifecycleExecutionBuildsTypedStopDelta(t *testing.T) {
 				t.Fatal("changed lifecycle action has no consequences")
 			}
 		})
+	}
+}
+
+func TestLifecycleStartFailsClosedWithoutNetworkPolicyAdapter(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	incus := lifecycleIncus()
+	runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{
+		Schema: 1, OperationID: "start-without-network-policy", Status: "ok",
+	}}}}
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
+		Incus: incus, AdapterRunner: runner,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := program.executeLifecycle(
+		context.Background(),
+		program.operationOrchestrator("start-without-network-policy", config.Loaded{Context: domain.Context{
+			YardName: "default", IncusProject: "subyard", YardInstanceName: "yard", IncusBridge: "incusbr0",
+		}}, nil, nil),
+		domain.Context{YardName: "default", IncusProject: "subyard", YardInstanceName: "yard", IncusBridge: "incusbr0"},
+		domain.OperationPlan{OperationID: "start-without-network-policy", Confirmed: true},
+		&lifecycleExecution{action: "start"}, io.Discard,
+	)
+	if err == nil || !strings.Contains(err.Error(), "network policy adapter is unavailable") ||
+		result.Status != "" || len(runner.Requests) != 0 {
+		t.Fatalf("start result=%#v requests=%#v err=%v", result, runner.Requests, err)
 	}
 }
 
@@ -673,7 +702,7 @@ func TestObserveTeardownExecutionDetectsOwnedTarget(t *testing.T) {
 			incus.Reconcile = test.reconcile
 			program, err := New(Options{
 				RepositoryRoot: root, Program: "yard", Environment: environment,
-				WorkingDir: root, Incus: incus,
+				WorkingDir: root, Incus: incus, NetworkPolicy: allowTestNetworkPolicy(),
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -708,7 +737,7 @@ func TestTeardownKeepsSharedIncusForAnotherRegisteredLocalYard(t *testing.T) {
 		Environment: append(environment, "SUBYARD_OPERATION_ID=teardown-shared-test"), WorkingDir: root,
 		AdapterRunner: runner, Prompt: &testkit.Prompt{},
 		Incus: &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true}},
-		Clock: testkit.NewManualClock(time.Unix(100, 0)),
+		Clock: testkit.NewManualClock(time.Unix(100, 0)), NetworkPolicy: allowTestNetworkPolicy(),
 	})
 	if err != nil {
 		t.Fatal(err)

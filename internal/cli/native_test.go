@@ -414,7 +414,7 @@ func TestStructuredStartSharesPlanAndAdapterAcrossCLIAndRPC(t *testing.T) {
 		Environment: append(environment, "SUBYARD_OPERATION_ID=operation-cli"),
 		WorkingDir:  root,
 		Stdout:      &stdout, Stderr: &stderr, AdapterRunner: cliRunner, Prompt: prompt, Clock: clock,
-		Incus: lifecycleIncus(),
+		Incus: lifecycleIncus(), NetworkPolicy: allowTestNetworkPolicy(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -436,6 +436,7 @@ func TestStructuredStartSharesPlanAndAdapterAcrossCLIAndRPC(t *testing.T) {
 	program, err = New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 		Stderr: &stderr, AdapterRunner: rpcRunner, Clock: clock, Incus: lifecycleIncus(),
+		NetworkPolicy: allowTestNetworkPolicy(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1618,7 +1619,7 @@ func TestStructuredStartAutomationSkipsOnlyTheLocalPrompt(t *testing.T) {
 				RepositoryRoot: root, Program: "yard", Arguments: test.arguments,
 				Environment: append(environment, "SUBYARD_OPERATION_ID=operation-automation"),
 				WorkingDir:  root, Stderr: &stderr, AdapterRunner: runner, Prompt: prompt,
-				Incus: lifecycleIncus(),
+				Incus: lifecycleIncus(), NetworkPolicy: allowTestNetworkPolicy(),
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -1770,7 +1771,7 @@ func TestStructuredStartRunsOverFramedRPCSession(t *testing.T) {
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"rpc", "--stdio"},
 		Environment: environment, WorkingDir: root, Stdin: server, Stdout: server, Stderr: &stderr,
 		AdapterRunner: runner, Clock: testkit.NewManualClock(time.Unix(100, 0)),
-		Incus: lifecycleIncus(),
+		Incus: lifecycleIncus(), NetworkPolicy: allowTestNetworkPolicy(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -3260,7 +3261,7 @@ func TestTrustedInProcessReleaseTransitionChildBypassesMutationGate(t *testing.T
 	program, err := New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Environment: environment, WorkingDir: root, Stderr: &stderr,
-		AdapterRunner: runner, Incus: lifecycleIncus(),
+		AdapterRunner: runner, Incus: lifecycleIncus(), NetworkPolicy: allowTestNetworkPolicy(),
 	})
 	if err != nil {
 		t.Fatal(err)

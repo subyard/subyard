@@ -73,6 +73,10 @@ fi
   || die "power engine source must be an executable regular file: $ENGINE_SOURCE"
 install -d -o root -g root -m 0755 "$LIBEXEC_DIR" "$(dirname "$UNIT_PATH")"
 install -o root -g root -m 0755 "$ENGINE_SOURCE" "$RECONCILER_PATH"
+# Upgrades can reach this helper without running the new host-network stage.
+# Managed starts and teardown must work before the next host reboot.
+"$RECONCILER_PATH" _network-lock ensure \
+  || die "could not initialize the host network policy lock"
 
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
