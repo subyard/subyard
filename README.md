@@ -43,7 +43,9 @@ synchronized between owner hosts through git. Run `yard config sync help` for
 setup, status, pull and push examples.
 
 Upgrade with `yard update`; use `yard update --rollback` to swap back to the retained previous
-runtime.
+runtime. Run `yard migrate --check` to see unfinished migrations and runtime repairs for the
+installed release, then `yard migrate` to complete them. This uses the installed release without
+downloading an update.
 
 Run `yard --help` or `yard <command> --help` for complete command usage.
 

@@ -1620,7 +1620,7 @@ func TestCompletedMaterializedConfigReadinessDoesNotDependOnSelectedYard(t *test
 	beforeJournal, err := frozen.Observe(
 		context.Background(), activeRelease, releasetransition.ReleaseLinks{},
 	)
-	if err != nil || !beforeJournal.Converged {
+	if err != nil || beforeJournal.Converged || !frozen.allLocal {
 		t.Fatalf("observe before journal: %#v err=%v", beforeJournal, err)
 	}
 	freshStore, err := releasetransition.NewPOSIXV2Store(freshConfigHome)
@@ -1634,6 +1634,10 @@ func TestCompletedMaterializedConfigReadinessDoesNotDependOnSelectedYard(t *test
 	if err := freshStore.CompareAndSwapLedger(missingLedger, completedLedger.Payload); err != nil {
 		t.Fatal(err)
 	}
+	freshFake.ExecSteps = append(freshFake.ExecSteps, testkit.IncusExecStep{Result: ports.InstanceExecResult{
+		Stdout:   []byte(strings.Repeat("0", 64) + "  /home/dev/.codex/rules/repo.rules\n"),
+		ExitCode: 0,
+	}})
 	freshRuntimeRoot := filepath.Join(root, "fresh-runtime")
 	if err := os.MkdirAll(filepath.Join(freshRuntimeRoot, "releases", "release-b"), 0o700); err != nil {
 		t.Fatal(err)
@@ -1680,8 +1684,8 @@ func TestCompletedMaterializedConfigReadinessDoesNotDependOnSelectedYard(t *test
 	afterJournal, err := frozen.Observe(
 		context.Background(), activeRelease, releasetransition.ReleaseLinks{},
 	)
-	if err != nil || afterJournal != beforeJournal || frozen.allLocal {
-		t.Fatalf("absent journal did not freeze selected scope: before=%#v after=%#v allLocal=%t err=%v",
+	if err != nil || afterJournal != beforeJournal || !frozen.allLocal {
+		t.Fatalf("same-release catch-up did not retain all-local scope: before=%#v after=%#v allLocal=%t err=%v",
 			beforeJournal, afterJournal, frozen.allLocal, err)
 	}
 }

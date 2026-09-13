@@ -80,6 +80,19 @@ func NewCoreActionRegistry() (*domain.ActionRegistry, error) {
 			Recovery: domain.RecoveryNotNeeded,
 		},
 		{
+			Action: "migrate.help", Summary: "Show migration help", Effect: domain.ActionRead,
+			Recovery: domain.RecoveryNotNeeded,
+		},
+		{
+			Action: "migrate.check", Summary: "Check installed release readiness", Effect: domain.ActionRead,
+			Recovery: domain.RecoveryNotNeeded,
+		},
+		{
+			Action: "migrate.apply", Summary: "Finish installed release migrations", Effect: domain.ActionMutation,
+			Impacts:  []domain.ActionImpact{domain.ImpactLocalMetadata, domain.ImpactPersistentData, domain.ImpactYardRuntime},
+			Recovery: domain.RecoveryReversible,
+		},
+		{
 			Action: "update.check", Summary: "Check Subyard release", Effect: domain.ActionBoundedWrite,
 			Recovery: domain.RecoveryNotNeeded,
 		},

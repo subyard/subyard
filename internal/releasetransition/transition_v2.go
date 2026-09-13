@@ -2472,6 +2472,12 @@ func (transition *V2Transition) observeActivation(
 		if err := validateActivationObservation(id, actual); err != nil {
 			return err
 		}
+		if !actual.Converged {
+			observation.decisions = append(observation.decisions, RedactedDecision{
+				Resource: "activation." + id, Scope: "activation",
+				Decision: DecisionCanonicalize, Result: "converged",
+			})
+		}
 		payload, err := json.Marshal(struct {
 			ID      string      `json:"id"`
 			Actual  Fingerprint `json:"actual"`

@@ -73,6 +73,9 @@ func resolveCoreCommand(definition command.Definition) (coreCommandBehavior, err
 	case "@update":
 		behavior.prepare = (*preparedCommand).prepareUpdate
 		behavior.prepareExit, behavior.prepareRPCCode = 1, "plan_failed"
+	case "@current-migration":
+		behavior.prepare = (*preparedCommand).prepareCurrentMigration
+		behavior.prepareExit, behavior.prepareRPCCode = 1, "plan_failed"
 	case "@keys":
 		behavior.nonRPCReason = "protected credential transport"
 	case "@shell":

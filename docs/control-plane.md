@@ -226,6 +226,26 @@ Each compiled capability classifies its bounded resources as preserve, transform
 reset or block before confirmation. An authorized reset is a successful, journaled one-time result;
 unknown or ambiguous state produces a structured operator-action outcome without overwriting it.
 
+`yard migrate --check` reports readiness of the exact installed `current` release: per-domain
+recorded and required epochs, applied and pending migration IDs, transaction/step checkpoints,
+runtime reconciliation actions and blockers. Add `--json` for the versioned machine-readable
+report. A successful inspection exits 0 even when work remains; inspect `outcome.status` for
+readiness. Unavailable or unsupported inspection never means ready.
+
+`yard migrate` assesses and confirms the necessary work, then uses the same verified transition
+owner, authorization, lock, journal and convergence engine as `yard update`. It does not download
+or publish a release, choose a version, or rotate runtime links to another release. Completed
+migrations stay completed; runtime drift gets a new repair transaction. A ready installation
+needs no confirmation, and successful apply exits 0 only after verifying readiness.
+
+This is a host-wide command for local yards; run it without a yard selector on the owner host.
+It remains reachable without loading unrelated yard configuration. `--yes` supplies automation
+consent; release-selection and rollback flags are not accepted. If an unfinished update still
+needs to activate another release, the report directs the operator to `yard update`. Once that
+target is current, `yard migrate` can resume the existing transaction. Retained rollback recovery
+continues to use the journal's verified transition owner. Owners that cannot verify runtime
+reconciliation require an update to supported tooling.
+
 The [runtime installer](../scripts/install-runtime-release.sh) verifies, unpacks and publishes an
 immutable candidate. It may create the first `current` link during a clean bootstrap, but it does
 not activate an update, perform rollback, or invoke mutating `_migrate` verbs. Installed update,

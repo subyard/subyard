@@ -162,6 +162,7 @@ type mutationGateOutcome struct {
 	Previous    *releasetransition.ReleaseID     `json:"previous"`
 	Target      releasetransition.ReleaseID      `json:"target"`
 	Transaction *releasetransition.TransactionID `json:"transaction"`
+	Message     string                           `json:"message,omitempty"`
 	Action      string                           `json:"action"`
 }
 
@@ -169,7 +170,8 @@ func publicMutationGateOutcome(outcome releasetransition.Outcome) mutationGateOu
 	return mutationGateOutcome{
 		Status: outcome.Status, Code: outcome.Code,
 		Active: outcome.Active, Previous: outcome.Previous, Target: outcome.Target,
-		Transaction: outcome.Transaction, Action: outcome.Retry,
+		Transaction: outcome.Transaction, Message: outcome.Message,
+		Action: releaseruntime.CurrentReleaseRetry(outcome),
 	}
 }
 
@@ -380,6 +382,9 @@ func (cli *CLI) Run(ctx context.Context) int {
 		cli.env["SUBYARD_YARD_EXPLICIT"] = "1"
 	}
 	cli.env["SUBYARD_YARD"] = yard
+	if core && definition.Handler == "@current-migration" {
+		return cli.runCurrentMigration(ctx, definition, commandArguments, explicit, yes)
+	}
 	if core && definition.Handler == "@help" {
 		if cli.env["SUBYARD_NO_AUDIT"] == "" {
 			cli.audit(name, commandArguments, yard, "")
@@ -3624,7 +3629,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		if behavior.prepare == nil {
 			return nil, &rpc.Error{Code: "interactive_or_payload_command", Message: params.Command}
 		}
-		if definition.Name != "update" {
+		if !releaseRecoveryCommand(definition) {
 			outcome, gateErr := handler.cli.inspectMutationGate(
 				ctx, handler.loaded.Context.YardName,
 			)
@@ -3688,7 +3693,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			return nil, &rpc.Error{Code: "plan_not_found", Message: call.OperationID}
 		}
 		defer planned.Close()
-		if planned.Definition.Name != "update" {
+		if !releaseRecoveryCommand(planned.Definition) {
 			outcome, gateErr := planned.CLI.inspectMutationGate(
 				ctx, handler.loaded.Context.YardName,
 			)

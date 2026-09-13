@@ -408,7 +408,7 @@ esac
 
 	requestCapture := filepath.Join(filepath.Dir(fixture.runtimeRoot), "rollback-inspection.json")
 	readyInspection := fmt.Sprintf(
-		`{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":false,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible"},"outcome":{"status":"ready","reachedGoal":true,"active":%q,"previous":%q,"target":%q,"code":"ready","message":"verified","transaction":%q}}}`,
+		`{"schemaVersion":1,"activationReconciliationOwned":true,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":false,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible"},"outcome":{"status":"ready","reachedGoal":true,"active":%q,"previous":%q,"target":%q,"code":"ready","message":"verified","transaction":%q}}}`,
 		oldRelease, ownerRelease, oldRelease, fixture.transaction,
 	)
 	ownerPayload := fmt.Sprintf(`#!/bin/sh
@@ -425,8 +425,11 @@ esac
 	registryPath := filepath.Join(
 		fixture.runtimeRoot, "releases", ownerRelease, "config", "release-transition.json",
 	)
-	registry, err := os.ReadFile(registryPath)
+	registry, err := os.ReadFile(filepath.Join("..", "..", "..", "config", "release-transition.json"))
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(registryPath, registry, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	registryDigest := sha256.Sum256(registry)
@@ -502,6 +505,77 @@ esac
 		request.ArtifactDigest != journal.ArtifactDigest {
 		t.Fatalf("protected rollback request = %#v", request)
 	}
+	// Current-only reporting must read the retained owner's registry, because
+	// the active pre-v2 artifact deliberately has no transition registry.
+	parsedRegistry, _, err := releasetransition.ParseRegistryV2(registry, releasetransition.BuiltinCapabilityCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger := releasetransition.BaselineLedgerV2(parsedRegistry)
+	for _, migration := range parsedRegistry.Migrations {
+		ledger, err = ledger.Advance(parsedRegistry, migration)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	ledgerPayload, _, err := releasetransition.MarshalLedgerV2(ledger, parsedRegistry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(fixture.journalPath), "ledger.json"), ledgerPayload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var reportOutput bytes.Buffer
+	environment := fixture.environment()
+	environment["YARD_RUNTIME_ROOT"] = fixture.runtimeRoot
+	currentRuntime := New(Config{Environment: environment, Stdout: &reportOutput})
+	defer currentRuntime.Close()
+	check, err := currentRuntime.PrepareCurrentTransition(context.Background(), []string{"--check", "--json"}, fixture.configHome, "default", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := check.Execute(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var report currentReport
+	if err := json.Unmarshal(reportOutput.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Owner != releasetransition.ReleaseID(ownerRelease) || report.Current != oldRelease || report.Outcome.Status != releasetransition.StatusReady || len(report.Domains) == 0 {
+		t.Fatalf("retained owner current report = %s", reportOutput.String())
+	}
+	for _, domain := range report.Domains {
+		if len(domain.Pending) != 0 {
+			t.Fatalf("retained owner has pending migrations: %#v", domain)
+		}
+	}
+	if _, err := os.Stat(oldTransitionCalled); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("current report invoked pre-v2 owner: %v", err)
+	}
+	if err := os.Rename(filepath.Join(fixture.runtimeRoot, "releases", ownerRelease), filepath.Join(fixture.runtimeRoot, "releases", ownerRelease+"-unavailable")); err != nil {
+		t.Fatal(err)
+	}
+	// Remove the now-dangling previous link so the missing verified owner is
+	// diagnosed independently of unsafe link topology.
+	if err := os.Remove(filepath.Join(fixture.runtimeRoot, "previous")); err != nil {
+		t.Fatal(err)
+	}
+	reportOutput.Reset()
+	check, err = currentRuntime.PrepareCurrentTransition(context.Background(), []string{"--check", "--json"}, fixture.configHome, "default", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := check.Execute(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	report = currentReport{}
+	if err := json.Unmarshal(reportOutput.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Outcome.Status != releasetransition.StatusOperatorActionRequired || len(report.Domains) != 0 || len(report.Decisions) != 0 {
+		t.Fatalf("missing owner fabricated readiness: %s", reportOutput.String())
+	}
+
 }
 
 func TestRollbackFactsRequireExactSealedArtifact(t *testing.T) {

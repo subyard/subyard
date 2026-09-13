@@ -1017,11 +1017,7 @@ func (runtime *Runtime) prepareInspectedCandidateTransition(
 		consequences = append([]string{"reactivate the verified retained previous runtime"}, consequences...)
 	}
 	for _, decision := range inspection.Decisions {
-		consequence := fmt.Sprintf("%s %s setting %s", decision.Decision, decision.Scope, decision.Resource)
-		if decision.Result != "" {
-			consequence += " to " + decision.Result
-		}
-		consequences = append(consequences, consequence)
+		consequences = append(consequences, releaseDecisionConsequence(decision))
 	}
 	changed := inspection.Assessment.Changed
 	if inspection.Resume != nil {
@@ -1090,6 +1086,12 @@ func (runtime *Runtime) prepareInspectedCandidateTransition(
 				}
 				if !sameProtectedSnapshot(journal, revalidation.journalSnapshot) {
 					return fmt.Errorf("%w: recovery source journal changed after inspection", domain.ErrPlanStale)
+				}
+			}
+			if parsed.expectedLinks != nil {
+				observed, err := runtime.inspectRuntimeLinks(parsed.root)
+				if err != nil || observed != *parsed.expectedLinks {
+					return fmt.Errorf("%w: runtime links changed after inspection", domain.ErrPlanStale)
 				}
 			}
 			grant := releasetransition.Authorization("")
@@ -1281,6 +1283,7 @@ func transitionOutcomeError(outcome releasetransition.Outcome) error {
 }
 
 type options struct {
+	expectedLinks                                           *runtimeLinkSnapshot
 	channel, version, root, cache, repository, baseURL, tag string
 	offline, check, rollback, force, versionExplicit        bool
 }
@@ -1680,4 +1683,16 @@ func first(value, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func releaseDecisionConsequence(decision releasetransition.RedactedDecision) string {
+	kind := "setting"
+	if decision.Scope == "activation" {
+		kind = "runtime"
+	}
+	consequence := fmt.Sprintf("%s %s %s %s", decision.Decision, decision.Scope, kind, decision.Resource)
+	if decision.Result != "" {
+		consequence += " to " + decision.Result
+	}
+	return consequence
 }

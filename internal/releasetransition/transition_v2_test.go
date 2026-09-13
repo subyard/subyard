@@ -2541,6 +2541,12 @@ func TestV2TransitionRepairsActivationDriftAfterCompletedMigration(t *testing.T)
 		t.Fatalf("drift inspection = %#v, err=%v", repeat, err)
 	}
 	firstDriftPlan := repeat.Plan
+	if !slices.Contains(repeat.Decisions, RedactedDecision{
+		Resource: "activation.test-runtime", Scope: "activation",
+		Decision: DecisionCanonicalize, Result: "converged",
+	}) {
+		t.Fatalf("drift inspection does not identify pending runtime work: %#v", repeat.Decisions)
+	}
 	reconciler.drift = digestC
 	repeat, err = transition.Inspect(context.Background(), goal)
 	if err != nil || repeat.Plan == firstDriftPlan {

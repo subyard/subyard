@@ -922,9 +922,11 @@ resume() {
 }
 
 finish() {
-  local transaction_before target_before previous_before
-  local transition_root="$OPERATOR_HOME/.config/subyard/release-transition/v2"
+  local transaction_before target_before previous_before report releases_before host_hash guest_hash
+	local transition_root="$OPERATOR_HOME/.config/subyard/release-transition/v2"
   local ledger_before="$SHARED_ROOT/post-reboot-ledger.before"
+  local journal_before="$SHARED_ROOT/post-reboot-journal.before"
+  local journal_ready="$SHARED_ROOT/post-reboot-journal.ready"
   load_rebooted_fixture
   [ "$(operator_yard --version)" = "yard $VERSION_B" ] \
     || die 'runtime entrypoint did not survive reboot'
@@ -946,26 +948,67 @@ finish() {
   operator_yard check
   operator_yard -Y "$YARD_NAME" status >/dev/null
   operator_yard -Y "$YARD_NAME" check
-  # Starting a stopped owner exposes live activation drift. Authorize its exact
-  # retained release before init, without replaying the completed migrations.
+  # Seed harmless materialized drift in the fixture yard, then repair the exact
+  # installed release without replaying its completed migrations.
+  incus exec "$INSTANCE" --project "$PROJECT" --user 1001 --group 1001 -- \
+    sh -c 'printf "\n# current-release migration fixture\n" >> /home/dev/.codex/rules/repo.rules'
   verify_v2_release_transition "$VERSION_B"
   operator_env cat "$transition_root/ledger.json" > "$ledger_before"
+  operator_env cat "$transition_root/journal.json" > "$journal_before"
   transaction_before="$(operator_env jq -er '.transaction' "$transition_root/journal.json")"
   target_before="$(operator_env jq -er '.goal.target' "$transition_root/journal.json")"
   previous_before="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/previous")"
-  operator_no_go env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT/b" \
-    "$OPERATOR_HOME/.local/bin/yard" update --version "$VERSION_B" --yes
+  releases_before="$(operator_env ls -1 "$OPERATOR_HOME/.subyard/runtime/releases")"
+  report="$(operator_no_go env YARD_RELEASE_BASE_URL="file://$SHARED_ROOT/forbidden-release" \
+    YARD_RELEASE_CACHE="$SHARED_ROOT/forbidden-cache" YARD_RELEASE_VERSION=invalid/selected/version \
+    "$OPERATOR_HOME/.local/bin/yard" migrate --check --json)"
+  jq -e --arg current "$target_before" '
+    .schemaVersion == 1 and .current == $current and .owner == $current and
+    .outcome.status == "migration-required" and .next == "yard migrate" and
+    all(.domains[]; .pending == []) and
+    any(.decisions[]; .scope == "activation" and .resource == "activation.materialized-config")
+  ' <<<"$report" >/dev/null || die 'current migration check did not identify runtime drift'
+  operator_env cat "$transition_root/journal.json" | cmp "$journal_before" - \
+    || die 'current migration check changed the journal'
+  incus exec "$INSTANCE" --project "$PROJECT" --user 1001 --group 1001 -- \
+    grep -Fq '# current-release migration fixture' /home/dev/.codex/rules/repo.rules \
+    || die 'current migration check repaired materialized configuration'
+  operator_no_go env YARD_RELEASE_BASE_URL="file://$SHARED_ROOT/forbidden-release" \
+    YARD_RELEASE_CACHE="$SHARED_ROOT/forbidden-cache" YARD_RELEASE_VERSION=invalid/selected/version \
+    "$OPERATOR_HOME/.local/bin/yard" migrate --yes
   verify_v2_release_transition "$VERSION_B"
   operator_env cat "$transition_root/ledger.json" | cmp "$ledger_before" - \
     || die 'post-reboot activation repair changed the one-time migration ledger'
   operator_env jq -e --arg transaction "$transaction_before" --arg target "$target_before" '
     .goal == {target:$target,direction:"activate-target"} and .releases.target == $target and
-    (.transaction == $transaction or (.steps == [] and .releases.from == $target))
+    .transaction != $transaction and .steps == [] and .releases.from == $target
   ' "$transition_root/journal.json" >/dev/null \
     || die 'post-reboot repair replayed migrations or changed the release target'
   [ "$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")" = "releases/$target_before" ] \
     && [ "$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/previous")" = "$previous_before" ] \
     || die 'post-reboot activation repair changed the runtime pair'
+  host_hash="$(sudo -n sha256sum \
+    "$OPERATOR_HOME/.config/subyard/overrides/host/agents/codex/repo.rules" | awk '{print $1}')"
+  guest_hash="$(incus exec "$INSTANCE" --project "$PROJECT" --user 1001 --group 1001 -- \
+    sha256sum /home/dev/.codex/rules/repo.rules | awk '{print $1}')"
+  [ "$host_hash" = "$guest_hash" ] || die 'current migration did not repair the materialized rules'
+  report="$(operator_yard migrate --check --json)"
+  jq -e '.outcome.status == "ready" and all(.domains[]; .pending == []) and
+    ((.decisions // []) | length) == 0' <<<"$report" >/dev/null \
+    || die 'current migration did not reach readiness'
+  operator_env cat "$transition_root/journal.json" > "$journal_ready"
+  operator_no_go env -u ASSUME_YES YARD_RELEASE_BASE_URL="file://$SHARED_ROOT/forbidden-release" \
+    YARD_RELEASE_CACHE="$SHARED_ROOT/forbidden-cache" YARD_RELEASE_VERSION=invalid/selected/version \
+    "$OPERATOR_HOME/.local/bin/yard" migrate </dev/null
+  operator_env cat "$transition_root/journal.json" | cmp "$journal_ready" - \
+    || die 'ready migration rewrote its journal'
+  operator_env cat "$transition_root/ledger.json" | cmp "$ledger_before" - \
+    || die 'ready migration rewrote its ledger'
+  [ "$(operator_env ls -1 "$OPERATOR_HOME/.subyard/runtime/releases")" = "$releases_before" ] \
+    && [ "$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")" = "releases/$target_before" ] \
+    && [ "$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/previous")" = "$previous_before" ] \
+    && [ ! -e "$SHARED_ROOT/forbidden-cache" ] \
+    || die 'current migration selected or published a release'
   p0_retry_init_after_plan_stale operator_yard -Y "$YARD_NAME" init --yes
   verify_v2_release_transition "$VERSION_B"
   verify_config_workflow

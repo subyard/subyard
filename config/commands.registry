@@ -33,6 +33,7 @@ yards||@yards||local|read|never|public|lifecycle|simple|yards|list registered lo
 host||@host||local|mutate|dynamic|public|remote|simple|host <command>|manage owner-host identity and controller registration|--yes --help|add list rename remove repair
 remote||@remote||local|mutate|dynamic|hidden|remote|remote|remote <command>|compatibility adapter for legacy remote-yard contexts|--yard --yes --help|add repair-key remove list
 update||@update||local|mutate|dynamic|public|lifecycle|simple|update|check, install or roll back the release runtime|--check --version --offline --rollback --force --yes --help|
+migrate||@current-migration||deny|mutate|dynamic|public|lifecycle|simple|migrate|inspect or finish migrations for the installed release|--check --json --yes --help|
 config||@config||local|mutate|dynamic|public|lifecycle|config|config <command>|inspect, author, sync and reconcile Subyard settings|--all-local --check --adopt --host-id --checkout --offline --apply --init --scope -m --message --yes --help|fields show paths set unset import edit repair-registration status apply sync
 help||@help||local|read|never|hidden|internal|none|help|show top-level help||
 rpc||@rpc||local|mutate|dynamic|hidden|internal|none|rpc --stdio|serve the versioned local RPC protocol|--stdio|

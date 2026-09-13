@@ -794,6 +794,7 @@ func (reconciler *materializedConfigActivationReconciler) resolveScope(
 		return err
 	}
 	if !snapshot.Exists {
+		reconciler.allLocal = true
 		reconciler.scopeResolved = true
 		return nil
 	}
@@ -808,10 +809,10 @@ func (reconciler *materializedConfigActivationReconciler) resolveScope(
 		return nil
 	}
 	// Completed source work makes materialized readiness a release-wide fixed
-	// point. A zero-step same-release journal is its durable activation-only
-	// repair and must retain that scope when resumed by a fresh process.
+	// point. Same-release catch-up also covers every local yard, including when
+	// ledger migrations remain, and retains that scope on resume.
 	reconciler.allLocal = journal.Checkpoint == releasetransition.JournalComplete ||
-		(len(journal.Steps) == 0 && journal.Releases.From == journal.Releases.Target)
+		journal.Releases.From == journal.Releases.Target
 	return nil
 }
 
