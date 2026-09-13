@@ -100,6 +100,7 @@ type CLI struct {
 	effectiveUID                 func() int
 	retainedAdapterCompatibility bool
 	releaseTransitionChild       bool
+	configApplyRepair            *configApplyRepairPermit
 }
 
 func (cli *CLI) rpcOperation(operationID string) *CLI {
@@ -147,6 +148,7 @@ func (cli *CLI) runReleaseTransitionYardCommandIO(
 	operation.options.Stdout = stdout
 	operation.options.Stderr = stderr
 	operation.releaseTransitionChild = true
+	operation.configApplyRepair = nil
 	if code := operation.Run(ctx); code != 0 {
 		return fmt.Errorf("yard command exited with status %d", code)
 	}
@@ -371,7 +373,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 	readOnlyInvocation := (core && commandHelpRequested(commandArguments)) ||
 		(core && definition.Effect == command.EffectRead) ||
 		resourceReadOnly ||
-		(core && definition.Handler == "@config" && (configSyncCheck || configSyncStatus)) ||
+		(core && definition.Handler == "@config" && (configReadOnlyInvocation(commandArguments) || configSyncCheck || configSyncStatus)) ||
 		(core && definition.Handler == "@test-vms" && testVMStatusInvocation(commandArguments)) ||
 		(core && definition.Handler == "@update" && slices.Contains(commandArguments, "--check"))
 	if explicit {
@@ -416,6 +418,19 @@ func (cli *CLI) Run(ctx context.Context) int {
 		if gateErr != nil {
 			cli.errorf("inspect release transition: %v", gateErr)
 			return 1
+		}
+		if outcome != nil && core && definition.Handler == "@config" {
+			if apply, allLocal := configApplyInvocation(commandArguments); apply {
+				permit, err := cli.prepareConfigApplyRepair(ctx, yard, allLocal, *outcome)
+				if err != nil {
+					cli.errorf("config apply: %v", err)
+					return 1
+				}
+				cli.configApplyRepair = permit
+				if permit != nil {
+					outcome = nil
+				}
+			}
 		}
 		if outcome != nil {
 			if encodeErr := json.NewEncoder(cli.options.Stderr).Encode(

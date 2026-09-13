@@ -64,10 +64,8 @@ func (cli *CLI) runReleaseTransition(ctx context.Context, arguments []string) in
 			artifactDigest: request.ArtifactDigest,
 			registryDigest: request.RegistryDigest,
 		},
-		cli.brokerActivationReconciler(request),
-		cli.routeConsumerActivationReconciler(request),
-		cli.powerActivationReconciler(request),
 	}
+	reconcilers = append(reconcilers, cli.nonConfigActivationReconcilers(request)...)
 	ownerRegistration := cli.ownerRegistrationTransition(request)
 	ingressFactory := cli.releaseTransitionIngressFactory(request)
 	response, err := executeReleaseTransitionRequest(
@@ -85,6 +83,16 @@ func (cli *CLI) runReleaseTransition(ctx context.Context, arguments []string) in
 		return 1
 	}
 	return 0
+}
+
+// Keep the complete set of non-config activation owners shared by release
+// transitions and bounded materialized-config repair admission.
+func (cli *CLI) nonConfigActivationReconcilers(request releasetransition.ProcessRequest) []releasetransition.V2ActivationReconciler {
+	return []releasetransition.V2ActivationReconciler{
+		cli.brokerActivationReconciler(request),
+		cli.routeConsumerActivationReconciler(request),
+		cli.powerActivationReconciler(request),
+	}
 }
 
 type ownerRegistrationTransition struct {

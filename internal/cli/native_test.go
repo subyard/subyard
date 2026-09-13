@@ -5187,3 +5187,51 @@ func lifecycleIncus() *testkit.Incus {
 		},
 	}}}
 }
+
+func TestConfigStatusRemainsReadOnlyDuringReleaseRecovery(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	manifestPath := filepath.Join(root, "config", "commands.registry")
+	manifest, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual, err := os.ReadFile(filepath.Join(repositoryRoot(t), "config", "commands.registry"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(actual), "\n") {
+		if strings.HasPrefix(line, "config|") {
+			manifest = append(manifest, []byte("\n"+line+"\n")...)
+		}
+	}
+	writeCLIFile(t, manifestPath, string(manifest), 0600)
+
+	runtimeRoot := filepath.Join(root, "runtime-v2-config-status")
+	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot, "V2_GATE_CAPTURE="+filepath.Join(root, "capture"))
+	journal, _ := installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
+	before, err := os.ReadFile(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{"fields", "show", "paths", "status"} {
+		t.Run(action, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			incus := lifecycleIncus()
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard", Arguments: []string{"config", action},
+				Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Incus: incus, Executor: incus,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code := program.Run(context.Background()); code != 0 {
+				t.Fatalf("read-only config %s blocked: code=%d stderr=%s", action, code, stderr.String())
+			}
+		})
+	}
+
+	after, err := os.ReadFile(journal)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("read-only status changed recovery journal")
+	}
+}

@@ -112,6 +112,7 @@
       "shell:init-project-convergence",
       "p0:source-upgrade"
     ],
+    "materialized-config": ["go:adapters/configmaterial", "go:config", "go:adapters/reconcileruntime", "go:cli", "p0:release", "e2e:orca-bootstrap"],
     "migration-release": [
       "go:migration",
       "go:releasetransition",
@@ -551,6 +552,13 @@
       "pattern": "^internal/adapters/releaseruntime/.*$",
       "check_sets": ["migration-release"],
       "risk_domains": ["release-runner"]
+    },
+    {
+      "id": "internal-configmaterial",
+      "priority": 715,
+      "pattern": "^internal/adapters/configmaterial/.*$",
+      "check_sets": ["materialized-config"],
+      "risk_domains": ["config-state", "durable-layout"]
     },
     {
       "id": "internal-reconcileruntime",

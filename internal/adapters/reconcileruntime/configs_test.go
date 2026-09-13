@@ -356,3 +356,25 @@ func runningIncus(execCount int) *testkit.Incus {
 		ExecSteps: steps,
 	}
 }
+
+func TestConfigsConvergedUsesOwnedJSONObservation(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "imported-settings")
+	if err := os.WriteFile(source, []byte(`{"permissions":{"allow":["Read"]}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	incus := runningIncus(1)
+	incus.ExecSteps[0].Result.Stdout = []byte(`{"converged":true,"fingerprint":"` + strings.Repeat("a", 64) + `"}`)
+	runtime := Runtime{
+		Environment: []string{"CODING_TOOL_INTEGRATIONS=claude", "AGENT_claude_CONFIG=" + source, "AGENT_claude_CONFIG_DEST=.claude/settings.json"},
+		Incus:       incus, Executor: incus,
+		Yard: domain.Context{IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev"},
+	}
+	converged, err := runtime.ConfigsConverged(context.Background())
+	if err != nil || !converged {
+		t.Fatalf("owned JSON observation rejected: converged=%v err=%v", converged, err)
+	}
+	request := incus.ExecCalls[0].Request
+	if len(request.Command) == 0 || request.Command[0] != "python3" || len(request.Stdin) == 0 {
+		t.Fatal("JSON observation did not use the guest ownership adapter")
+	}
+}

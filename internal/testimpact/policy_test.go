@@ -649,6 +649,7 @@ func TestPolicyCoLocatedGoTestsRetainOwningChecksWithoutRiskDomains(t *testing.T
 	}{
 		{path: "internal/cli/cli_test.go", check: "go:cli"},
 		{path: "internal/configsync/configsync_test.go", check: "go:configsync"},
+		{path: "internal/adapters/configmaterial/configmaterial_test.go", check: "go:adapters/configmaterial"},
 		{path: "internal/adapters/transport/process_test.go", check: "go:adapters/transport"},
 		{path: "internal/migration/power_reconciler_test.go", check: "p0:power-systemd"},
 	} {

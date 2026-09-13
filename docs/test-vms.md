@@ -229,6 +229,10 @@ dev/agent-e2e.sh --slot "$slot" --purpose orca-projects --vm 1 -- \
 ```
 
 Bootstrap installs a packaged candidate and exercises public commands through a real terminal.
+For a narrow predecessor upgrade check, set `SUBYARD_E2E_ORCA_UPGRADE_FROM` to an exact published
+version and `SUBYARD_E2E_ORCA_UPGRADE_INSTALLER_SHA256` to that release's installer asset digest.
+This mode starts Orca on the published release, runs the public update command, and checks release
+readiness, the saved client grant, endpoint and runtime JSON before cleanup.
 The existing-yard variant completes release activation with Claude and Pi selected before starting
 Orca, then checks release convergence and materialized settings. The resource fixture verifies
 paired stock clients, terminal input/output, service lifecycle, exact owner/loopback routes and a

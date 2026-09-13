@@ -93,6 +93,32 @@ be replaced by the matching file under `overrides/shared`, `overrides/host`, or 
 These directories currently override known file settings only. They are not generic scalar
 configuration directories.
 
+For a coding-agent `CONFIG` whose destination ends in `.json`, Subyard owns the fields in the
+selected template and preserves fields added by the running tool. This includes Orca's Claude
+`hooks` and `statusLine` when the template does not define them. The destination selects this policy;
+importing a template from a renamed source does not change it. `RULES`, instruction files, JSONC
+and TOML keep exact byte replacement and comparison.
+
+JSON objects merge recursively. Arrays, scalars and `null` replace the whole value at their path;
+an empty object requires an object but preserves added children. A later template removes fields
+owned by the previous template, preserving unrelated siblings. Changing an object to a scalar or
+array replaces that entire field. Removing a template's field before its first recorded application
+cannot remove an older default automatically: first adoption preserves fields absent from the
+current template.
+
+`yard init --configs`, `yard config apply`, provisioning checks and release activation share this
+ownership contract. Read-only checks compare managed JSON fields and their ownership baseline,
+so runtime additions do not trigger a release migration. The first application records a root-owned
+baseline under `/var/lib/subyard/config-materialization` inside the yard. It contains only asset
+identity, schema version, template digest and owned paths, never configuration values. A missing or
+outdated baseline requires application even if the managed values already match.
+
+Subyard serializes its own writes per asset and atomically replaces the destination before updating
+the baseline. Retrying an interrupted application converges. Invalid JSON or an invalid baseline
+fails without overwriting it; diagnostics omit configuration contents. Running tools do not share
+Subyard's lock: application reads the current file and verifies its result, but cannot serialize
+arbitrary concurrent third-party writes.
+
 ## Coding-agent compatibility
 
 Codex, Claude Code, OpenCode and pi can run directly in the yard. Their versions are not a
@@ -148,7 +174,15 @@ the consumer:
 
 `yard config status [--all-local]` checks only materialized file settings in running local yards.
 `yard config apply [--all-local]` refreshes those consumers after confirmation. Neither command is a
-Git transport command. Use the typed persistent writers before publishing a change:
+Git transport command. Configuration readers (`fields`, `show`, `paths`, `status`) remain available
+while a release transition needs attention. If a completed, verified release needs only materialized
+configuration repair, `config apply` can perform that bounded repair after its normal confirmation.
+It rechecks the protected release state before writing and requires release readiness afterward.
+Repair uses persisted configuration; differing command overrides are rejected before confirmation.
+An unfinished or invalid release transition still requires `yard update`; config apply does not
+perform unrelated activation work. When several yards drift, use `--all-local` to cover them all.
+
+Use the typed persistent writers before publishing a change:
 
 ```sh
 yard config set <SETTING> <VALUE> --scope shared|host|yard

@@ -1305,6 +1305,7 @@ func TestConfigApplyExecErrorFailsPreflightWithAssumeYes(t *testing.T) {
 
 func TestConfigApplyCompletedNonzeroProbeRemainsDrift(t *testing.T) {
 	root, _, _, environment := configCommandFixture(t)
+	environment = append(environment, "CODING_TOOL_INTEGRATIONS=codex")
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	fake := &testkit.Incus{
 		Instances: map[string]ports.InstanceInfo{
@@ -3429,9 +3430,13 @@ func appendHashSteps(t *testing.T, fake *testkit.Incus, loaded config.Loaded) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		output := []byte(fmt.Sprintf("%s  %s\n", hash, asset.Destination))
+		if asset.OwnedJSON {
+			output = []byte(fmt.Sprintf(`{"converged":true,"fingerprint":%q}`, hash))
+		}
 		fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{
 			Result: ports.InstanceExecResult{
-				Stdout: []byte(fmt.Sprintf("%s  %s\n", hash, asset.Destination)), ExitCode: 0,
+				Stdout: output, ExitCode: 0,
 			},
 		})
 	}
@@ -3449,9 +3454,13 @@ func appendMismatchedHashSteps(
 		t.Fatal(err)
 	}
 	for _, asset := range assets {
+		output := []byte(strings.Repeat(digit, 64) + "  " + asset.Destination + "\n")
+		if asset.OwnedJSON {
+			output = []byte(fmt.Sprintf(`{"converged":false,"fingerprint":%q}`, strings.Repeat(digit, 64)))
+		}
 		fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{
 			Result: ports.InstanceExecResult{
-				Stdout:   []byte(strings.Repeat(digit, 64) + "  " + asset.Destination + "\n"),
+				Stdout:   output,
 				ExitCode: 0,
 			},
 		})
@@ -3702,4 +3711,51 @@ func seedConfigSyncRecoveryJournal(t *testing.T, configHome string) (string, str
 `, transactionID, strings.Repeat("a", 64), strings.Repeat("b", 64),
 		fmt.Sprintf("%x", sha256.Sum256(before)), fmt.Sprintf("%x", sha256.Sum256(after))))
 	return target, transaction
+}
+
+func TestConfigAssessmentUsesOwnedJSONForImportedSources(t *testing.T) {
+	root, _, _, environment := configCommandFixture(t)
+	loaded := loadConfigCommandContext(t, root, environment, "default")
+	source := filepath.Join(t.TempDir(), "imported-without-extension")
+	writeConfigCommandFile(t, source, `{"permissions":{"allow":["Read"]}}`)
+	loaded.Environment["CODING_TOOL_INTEGRATIONS"] = "claude"
+	loaded.Environment["AGENT_claude_CONFIG"] = source
+	loaded.Environment["AGENT_claude_CONFIG_DEST"] = ".claude/settings.json"
+	loaded.Environment["AGENT_claude_RULES"] = ""
+	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+		loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {Status: "Running"},
+	}}
+	program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: fake, Executor: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assess := func(converged bool, fingerprint string) configTargetAssessment {
+		t.Helper()
+		fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{Result: ports.InstanceExecResult{
+			Stdout: []byte(fmt.Sprintf(`{"converged":%t,"fingerprint":%q}`, converged, strings.Repeat(fingerprint, 64))),
+		}})
+		result, err := program.assessConfigTarget(context.Background(), configTarget{Name: "default", Loaded: loaded}, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	first := assess(true, "a")
+	if first.Changed || first.State != "converged" {
+		t.Fatalf("owned JSON reported drift: %#v", first)
+	}
+	request := fake.ExecCalls[0].Request
+	if request.Command[0] != "python3" || request.User != 0 || len(request.Stdin) == 0 {
+		t.Fatal("JSON observer must read root-owned baseline using typed stdin payload")
+	}
+	// Source formatting is not semantic drift or a stale-confirmation event.
+	writeConfigCommandFile(t, source, "{\n  \"permissions\": {\"allow\": [\"Read\"]}\n}\n")
+	formatted := assess(true, "a")
+	if first.DesiredFingerprint != formatted.DesiredFingerprint || first.MaterializedFingerprint != formatted.MaterializedFingerprint {
+		t.Fatal("formatting changed JSON fingerprints")
+	}
+	drift := assess(false, "b")
+	if !drift.Changed || drift.State != "drift" || first.MaterializedFingerprint == drift.MaterializedFingerprint {
+		t.Fatal("managed projection or baseline drift was ignored")
+	}
 }

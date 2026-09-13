@@ -14,6 +14,8 @@ ORIGINAL_HOME="$HOME"
 YARD_BIN="$ROOT/.build/yard"
 EXISTING_YARD="${SUBYARD_E2E_ORCA_EXISTING_YARD:-0}"
 INSTALLED_RELEASE=''
+UPGRADE_FROM="${SUBYARD_E2E_ORCA_UPGRADE_FROM:-}"
+UPGRADE_INSTALLER_SHA256="${SUBYARD_E2E_ORCA_UPGRADE_INSTALLER_SHA256:-}"
 
 stage() { printf 'orca-bootstrap-e2e: %s\n' "$*" >&2; }
 die() { printf 'orca-bootstrap-e2e: %s\n' "$*" >&2; exit 1; }
@@ -25,6 +27,11 @@ case "$EXISTING_YARD" in
   0|1) ;;
   *) die 'SUBYARD_E2E_ORCA_EXISTING_YARD must be 0 or 1' ;;
 esac
+if [ -n "$UPGRADE_FROM" ]; then
+  [[ "$UPGRADE_FROM" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 'upgrade source must be an exact published version'
+  [[ "$UPGRADE_INSTALLER_SHA256" =~ ^[0-9a-f]{64}$ ]] || die 'the published installer SHA-256 is required'
+  EXISTING_YARD=1
+fi
 for command in git go incus jq python3 rg script sudo timeout; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
@@ -162,15 +169,175 @@ sys.exit(1 if mismatch else 0)
 }
 
 assert_materialized_json() {
-  local asset destination
+  local claude_source="${1:-$ROOT/config/agents/claude/settings.json}"
+  local pi_source="${2:-$ROOT/config/agents/pi/settings.json}"
+  local asset source destination
   for asset in claude/settings.json pi/settings.json; do
     case "$asset" in
-      claude/*) destination=/home/dev/.claude/settings.json ;;
-      pi/*) destination=/home/dev/.pi/agent/settings.json ;;
+      claude/*) source="$claude_source"; destination=/home/dev/.claude/settings.json ;;
+      pi/*) source="$pi_source"; destination=/home/dev/.pi/agent/settings.json ;;
     esac
-    compare_json_managed_projection "$ROOT/config/agents/$asset" "$destination" "$asset" \
+    compare_json_managed_projection "$source" "$destination" "$asset" \
       || return 1
   done
+}
+
+assert_orca_readiness() {
+  guest_root jq -e --arg endpoint "ws://127.0.0.1:$ORCA_PORT" '
+    .type == "orca_server_ready" and
+    .schemaVersion == 1 and
+    .advertisedEndpoint == $endpoint and
+    .pairing.available == true and
+    (.pairing.url | type == "string" and startswith("orca://pair?"))
+  ' /srv/agents/orca/ready.json >/dev/null \
+    || die 'Orca readiness contract was unavailable'
+}
+
+guest_json_projection_hash() {
+  local filter="$1" path="$2"
+  guest_root sh -c '
+    set -eu
+    canonical="$(jq -cS "$1" "$2" 2>/dev/null)"
+    printf "%s" "$canonical" | sha256sum | cut -d " " -f 1
+  ' sh "$filter" "$path"
+}
+
+capture_orca_runtime_json() {
+  guest_root jq -e '
+    (.hooks | type == "object" and length > 0) and
+    (.statusLine != null)
+  ' /home/dev/.claude/settings.json >/dev/null \
+    || die 'Orca did not add Claude hooks and status line'
+  CLAUDE_HOOKS_COUNT="$(guest_root jq -er '.hooks | length | select(. > 0)' \
+    /home/dev/.claude/settings.json 2>/dev/null)" \
+    || die 'Orca did not add Claude hooks'
+  CLAUDE_HOOKS_HASH="$(guest_json_projection_hash '.hooks' \
+    /home/dev/.claude/settings.json)" \
+    || die 'Claude hooks could not be fingerprinted'
+  CLAUDE_STATUS_HASH="$(guest_json_projection_hash '.statusLine | select(. != null)' \
+    /home/dev/.claude/settings.json)" \
+    || die 'Orca did not add a Claude status line'
+
+  guest_root runuser -u dev -- python3 -c '
+import json
+import os
+import tempfile
+
+updates = {
+    "/home/dev/.claude/settings.json": lambda value: value.setdefault("env", {}).update(
+        {"SUBYARD_E2E_RUNTIME_ADDITION": "claude-runtime"}
+    ),
+    "/home/dev/.pi/agent/settings.json": lambda value: value.setdefault(
+        "runtimeAdditions", {}
+    ).update({"subyardE2E": {"enabled": True, "generation": 1}}),
+}
+for path, update in updates.items():
+    with open(path, encoding="utf-8") as source:
+        value = json.load(source)
+    update(value)
+    descriptor, temporary = tempfile.mkstemp(prefix=".subyard-e2e.", dir=os.path.dirname(path))
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            json.dump(value, output, sort_keys=True, separators=(",", ":"))
+            output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            os.unlink(temporary)
+' >/dev/null || die 'synthetic runtime JSON additions could not be prepared'
+
+  CLAUDE_RUNTIME_HASH="$(guest_json_projection_hash \
+    '{env: {SUBYARD_E2E_RUNTIME_ADDITION: .env.SUBYARD_E2E_RUNTIME_ADDITION}}' \
+    /home/dev/.claude/settings.json)" \
+    || die 'Claude runtime addition could not be fingerprinted'
+  PI_RUNTIME_HASH="$(guest_json_projection_hash '.runtimeAdditions.subyardE2E' \
+    /home/dev/.pi/agent/settings.json)" \
+    || die 'Pi runtime addition could not be fingerprinted'
+}
+
+assert_orca_runtime_json_preserved() {
+  guest_root jq -e '
+    .env.SUBYARD_E2E_RUNTIME_ADDITION == "claude-runtime" and
+    (.hooks | length) > 0 and .statusLine != null
+  ' /home/dev/.claude/settings.json >/dev/null \
+    || die 'Claude runtime additions did not survive configuration materialization'
+  guest_root jq -e '
+    .runtimeAdditions.subyardE2E == {"enabled": true, "generation": 1}
+  ' /home/dev/.pi/agent/settings.json >/dev/null \
+    || die 'Pi runtime additions did not survive configuration materialization'
+  [ "$(guest_root jq -er '.hooks | length' /home/dev/.claude/settings.json)" = \
+    "$CLAUDE_HOOKS_COUNT" ] || die 'Claude hook count changed during configuration materialization'
+  [ "$(guest_json_projection_hash '.hooks' /home/dev/.claude/settings.json)" = \
+    "$CLAUDE_HOOKS_HASH" ] || die 'Claude hooks changed during configuration materialization'
+  [ "$(guest_json_projection_hash '.statusLine' /home/dev/.claude/settings.json)" = \
+    "$CLAUDE_STATUS_HASH" ] || die 'Claude status line changed during configuration materialization'
+  [ "$(guest_json_projection_hash \
+    '{env: {SUBYARD_E2E_RUNTIME_ADDITION: .env.SUBYARD_E2E_RUNTIME_ADDITION}}' \
+    /home/dev/.claude/settings.json)" = "$CLAUDE_RUNTIME_HASH" ] \
+    || die 'Claude synthetic runtime field changed during configuration materialization'
+  [ "$(guest_json_projection_hash '.runtimeAdditions.subyardE2E' \
+    /home/dev/.pi/agent/settings.json)" = "$PI_RUNTIME_HASH" ] \
+    || die 'Pi synthetic runtime field changed during configuration materialization'
+}
+
+report_config_failure() {
+  python3 - "$1" <<'PY_REPORT'
+import json
+import pathlib
+import re
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text(errors="replace")[:65536]
+for line in text.splitlines():
+    try:
+        value = json.loads(line)
+    except ValueError:
+        continue
+    if isinstance(value, dict) and "status" in value and "code" in value:
+        safe = lambda field: field if isinstance(field, str) and re.fullmatch(r"[a-z-]{1,64}", field) else "unavailable"
+        print("config-release-gate: status=" + safe(value["status"]) + " code=" + safe(value["code"]), file=sys.stderr)
+        break
+else:
+    categories = {
+        "invalid desired JSON": "invalid-desired-json",
+        "invalid JSON materialization observation": "invalid-json-observation",
+        "JSON configuration observation failed": "json-observation-failed",
+        "JSON configuration apply failed": "json-apply-failed",
+        "yard scope requires selecting a non-default yard": "unsupported-default-file-scope",
+        "stale": "stale-plan",
+    }
+    category = next((category for message, category in categories.items() if message in text), "unclassified")
+    print("config-error: " + category, file=sys.stderr)
+PY_REPORT
+}
+
+assert_config_drift() {
+  local phase="$1"
+  local output="$STATE/config-status-$phase.out" error="$STATE/config-status-$phase.err"
+  if yard config status >"$output" 2>"$error"; then
+    die "config status did not detect $phase drift"
+  fi
+  if ! grep -Fq 'agent config drift' "$error"; then
+    report_config_failure "$error"
+    die "config status did not classify $phase drift"
+  fi
+}
+
+apply_imported_claude_template() {
+  local phase="$1" source="$2"
+  yard config import AGENT_claude_CONFIG "$source" --scope host --yes \
+    >"$STATE/config-import-$phase.out" 2>"$STATE/config-import-$phase.err" \
+    || { report_config_failure "$STATE/config-import-$phase.err"; die "public config import failed for $phase"; }
+  assert_config_drift "$phase"
+  yard config apply --yes >"$STATE/config-apply-$phase.out" 2>"$STATE/config-apply-$phase.err" \
+    || { report_config_failure "$STATE/config-apply-$phase.err"; die "public config apply failed for $phase"; }
+  yard config status >"$STATE/config-converged-$phase.out" \
+    2>"$STATE/config-converged-$phase.err" \
+    || die "config status did not converge after $phase apply"
 }
 
 print_materialized_json_diagnostics() {
@@ -200,6 +367,35 @@ client_status() {
     || die 'stock Orca client could not use the private pairing link'
   jq -e '.ok == true and .result.runtime.reachable == true' "$output" >/dev/null \
     || die 'stock Orca client did not reach the bootstrapped runtime'
+}
+
+install_stock_orca_client() {
+  local url digest artifact cache
+  if [ -x /usr/bin/orca-ide ] && [ "$(dpkg-query -W -f='${Version}' orca-ide 2>/dev/null)" = "$ORCA_VERSION" ]; then
+    return
+  fi
+  stage 'installing a stock Orca client without exposing its pairing capability'
+  case "$(dpkg --print-architecture)" in
+    amd64) url="$ORCA_DEB_AMD64_URL"; digest="$ORCA_DEB_AMD64_SHA256" ;;
+    arm64) url="$ORCA_DEB_ARM64_URL"; digest="$ORCA_DEB_ARM64_SHA256" ;;
+    *) die 'unsupported architecture' ;;
+  esac
+  artifact="$STATE/orca.deb"
+  cache="/var/tmp/subyard-orca-$ORCA_VERSION-$digest.deb"
+  if printf '%s  %s\n' "$digest" "$cache" | sha256sum -c --status 2>/dev/null; then
+    cp "$cache" "$artifact"
+  else
+    curl --proto '=https' --tlsv1.2 -fsSL \
+      --retry 3 --retry-all-errors --connect-timeout 20 --max-time 1200 \
+      "$url" -o "$artifact"
+    printf '%s  %s\n' "$digest" "$artifact" | sha256sum -c - >/dev/null
+    cp "$artifact" "$cache"
+  fi
+  sudo -n apt-get update -qq
+  sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    "$artifact" file jq nftables zlib1g-dev \
+    libasound2t64 libgbm1 libgtk-3-0t64 libnss3 >/dev/null
+  test -x /usr/bin/orca-ide || die 'stock Orca client is unavailable'
 }
 
 STATE="$(mktemp -d /var/tmp/subyard-orca-bootstrap.XXXXXX)"
@@ -255,6 +451,53 @@ git -C "$STATE/source" add --all
 release_version=0.13.3-orca-bootstrap-e2e
 bash "$STATE/source/dev/package-engine.sh" --version "$release_version" \
   --output-dir "$STATE/release" >/dev/null
+if [ -n "$UPGRADE_FROM" ]; then
+  stage "installing published Subyard $UPGRADE_FROM and starting Orca before the upgrade"
+  published_installer="$STATE/published-install.sh"
+  curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --connect-timeout 20 --max-time 120 \
+    "https://github.com/subyard/subyard/releases/download/v$UPGRADE_FROM/subyard-install.sh" \
+    -o "$published_installer"
+  printf '%s  %s\n' "$UPGRADE_INSTALLER_SHA256" "$published_installer" | sha256sum -c - >/dev/null
+  YARD_RELEASE_VERSION="$UPGRADE_FROM" YARD_BIN_DIR="$HOME/.local/bin" SHELL=/bin/bash \
+    bash "$published_installer" --version "$UPGRADE_FROM" --yes >"$STATE/published-install.out" 2>&1 \
+    || die 'published release installation failed'
+  YARD_BIN="$HOME/.local/bin/yard"
+  [ "$(yard --version)" = "yard $UPGRADE_FROM" ] || die 'published release is not active'
+  published_target="$(readlink "$SUBYARD_HOME/runtime/current")"
+  yard init --yes >"$STATE/published-init.out" 2>"$STATE/published-init.err" \
+    || die 'published yard initialization failed'
+  yard orca up --yes >"$STATE/published-orca-up.out" 2>"$STATE/published-orca-up.err" \
+    || die 'published Orca startup failed'
+  ORCA_PORT="$(setting_value ORCA_HOST_PORT)"
+  assert_orca_readiness
+  capture_orca_runtime_json
+  pairing="$(yard orca pair --yes | tail -n1)"
+  case "$pairing" in orca://pair\?code=*) ;; *) die 'published Orca did not return a pairing link' ;; esac
+  install_stock_orca_client
+  client_status "$pairing" upgrade-client
+
+  stage "updating published Subyard $UPGRADE_FROM through the public update command"
+  YARD_RELEASE_BASE_URL="file://$STATE/release" yard update --version "$release_version" --yes \
+    >"$STATE/upgrade.out" 2>"$STATE/upgrade.err" \
+    || { report_config_failure "$STATE/upgrade.err"; die 'published release upgrade failed'; }
+  [ "$(yard --version)" = "yard $release_version" ] || die 'upgrade did not activate the candidate'
+  installed_target="$(readlink "$SUBYARD_HOME/runtime/current")"
+  [ "$installed_target" != "$published_target" ] || die 'upgrade retained the predecessor'
+  INSTALLED_RELEASE="${installed_target#releases/}"
+  [ "$(readlink "$SUBYARD_HOME/runtime/previous")" = "$published_target" ] \
+    || die 'upgrade did not retain the published predecessor'
+  release_ready upgraded || { print_release_state upgraded; die 'upgraded release is not ready'; }
+  yard orca status >"$STATE/upgrade-status.out" 2>"$STATE/upgrade-status.err" \
+    || die 'upgraded Orca status failed'
+  [ "$(setting_value ORCA_HOST_PORT)" = "$ORCA_PORT" ] || die 'upgrade changed the Orca endpoint'
+  assert_materialized_json || die 'upgrade did not converge managed JSON fields'
+  assert_orca_runtime_json_preserved
+  assert_orca_readiness
+  client_status "$pairing" upgrade-client
+  printf 'ok: published %s upgraded to the candidate; Orca remained ready with its saved grant and runtime JSON\n' "$UPGRADE_FROM"
+  exit 0
+fi
+
 YARD_RELEASE_BASE_URL="file://$STATE/release" YARD_RELEASE_VERSION="$release_version" \
   YARD_BIN_DIR="$HOME/.local/bin" SHELL=/bin/bash \
   "$STATE/release/subyard-install.sh" --yes >/dev/null
@@ -354,6 +597,45 @@ guest_root test -x /usr/local/libexec/subyard/projects-changed \
   || die 'Orca bootstrap did not run the existing init reconciler'
 [ "$(incus --project "$PROJECT" config device get "$INSTANCE" orca-server listen)" = \
   "tcp:127.0.0.1:$ORCA_PORT" ] || die 'Orca bootstrap published the wrong owner endpoint'
+assert_orca_readiness
+if [ "$EXISTING_YARD" = 1 ]; then
+  stage 'preserving runtime JSON additions through public config import and apply'
+  capture_orca_runtime_json
+  desired_one="$STATE/claude-desired-one"
+  jq '
+    .autoMemoryDirectory = "~/.claude-memory-e2e" |
+    .permissions.defaultMode = "acceptEdits" |
+    .env = {"SUBYARD_E2E_MANAGED_SETTING": "first"}
+  ' "$ROOT/config/agents/claude/settings.json" >"$desired_one"
+  chmod 0600 "$desired_one"
+  apply_imported_claude_template first "$desired_one"
+  assert_materialized_json "$desired_one" "$ROOT/config/agents/pi/settings.json" \
+    || die 'first imported desired JSON fields were not materialized'
+  guest_root jq -e '
+    .autoMemoryDirectory == "~/.claude-memory-e2e" and
+    .permissions.defaultMode == "acceptEdits" and
+    .env.SUBYARD_E2E_MANAGED_SETTING == "first"
+  ' /home/dev/.claude/settings.json >/dev/null \
+    || die 'first imported managed settings were not honored'
+  assert_orca_runtime_json_preserved
+  assert_orca_readiness
+
+  stage 'retiring one managed JSON field while retaining its runtime sibling'
+  desired_two="$STATE/claude-desired-two"
+  jq 'del(.env.SUBYARD_E2E_MANAGED_SETTING)' "$desired_one" >"$desired_two"
+  chmod 0600 "$desired_two"
+  apply_imported_claude_template retired "$desired_two"
+  assert_materialized_json "$desired_two" "$ROOT/config/agents/pi/settings.json" \
+    || die 'second imported desired JSON fields were not materialized'
+  guest_root jq -e '
+    (.env | type == "object") and
+    (.env | has("SUBYARD_E2E_MANAGED_SETTING") | not) and
+    .env.SUBYARD_E2E_RUNTIME_ADDITION == "claude-runtime"
+  ' /home/dev/.claude/settings.json >/dev/null \
+    || die 'retired managed field or its nested runtime sibling was handled incorrectly'
+  assert_orca_runtime_json_preserved
+  assert_orca_readiness
+fi
 if [ ! -f "$platform_marker" ]; then
   incus info >/dev/null
   incus storage show default --project default >/dev/null
@@ -369,28 +651,7 @@ kill -TERM "$COLLISION_PID"
 wait "$COLLISION_PID" 2>/dev/null || true
 COLLISION_PID=''
 
-stage 'installing a stock Orca client without exposing its pairing capability'
-case "$(dpkg --print-architecture)" in
-  amd64) url="$ORCA_DEB_AMD64_URL"; digest="$ORCA_DEB_AMD64_SHA256" ;;
-  arm64) url="$ORCA_DEB_ARM64_URL"; digest="$ORCA_DEB_ARM64_SHA256" ;;
-  *) die 'unsupported architecture' ;;
-esac
-artifact="$STATE/orca.deb"
-cache="/var/tmp/subyard-orca-$ORCA_VERSION-$digest.deb"
-if printf '%s  %s\n' "$digest" "$cache" | sha256sum -c --status 2>/dev/null; then
-  cp "$cache" "$artifact"
-else
-  curl --proto '=https' --tlsv1.2 -fsSL \
-    --retry 3 --retry-all-errors --connect-timeout 20 --max-time 1200 \
-    "$url" -o "$artifact"
-  printf '%s  %s\n' "$digest" "$artifact" | sha256sum -c - >/dev/null
-  cp "$artifact" "$cache"
-fi
-sudo -n apt-get update -qq
-sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-  "$artifact" file jq nftables zlib1g-dev \
-  libasound2t64 libgbm1 libgtk-3-0t64 libnss3 >/dev/null
-test -x /usr/bin/orca-ide || die 'stock Orca client is unavailable'
+install_stock_orca_client
 
 pairing="$(yard orca pair --yes | tail -n1)"
 case "$pairing" in
@@ -398,9 +659,67 @@ case "$pairing" in
   *) die 'Orca pair did not return a private stock pairing link' ;;
 esac
 client_status "$pairing" paired-client
+if [ "$EXISTING_YARD" = 1 ]; then
+  stage 'syncing and applying a tracked desired config while preserving runtime state and the grant'
+  sync_host_id="$(<"$SUBYARD_CONFIG_HOME/host-id")"
+  case "$sync_host_id" in
+    ''|*[!A-Za-z0-9._-]*) die 'config sync host identity is unavailable' ;;
+  esac
+  sync_source="$STATE/config-sync-source"
+  sync_claude="$sync_source/hosts/$sync_host_id/overrides/agents/claude/settings.json"
+  install -d -m 0700 "${sync_claude%/*}"
+  desired_sync="$STATE/claude-desired-sync"
+  jq '.autoMemoryDirectory = "~/.claude-memory-e2e-sync"' "$desired_two" >"$desired_sync"
+  chmod 0600 "$desired_sync"
+  cp "$desired_sync" "$sync_claude"
+  chmod 0600 "$sync_claude"
+  printf '{"schemaVersion":1}\n' >"$sync_source/subyard-config.json"
+  chmod 0600 "$sync_source/subyard-config.json"
+  git -C "$sync_source" init --quiet
+  git -C "$sync_source" add --all
+  git -C "$sync_source" -c user.name='Subyard Test' -c user.email=test@invalid \
+    commit --quiet -m 'Update managed agent configuration'
+  yard config sync "$sync_source" --adopt --apply --yes \
+    >"$STATE/config-sync-apply.out" 2>"$STATE/config-sync-apply.err" \
+    || { report_config_failure "$STATE/config-sync-apply.err"; die 'public config sync --apply did not complete'; }
+  yard config sync "$sync_source" --check \
+    >"$STATE/config-sync-check.out" 2>"$STATE/config-sync-check.err" \
+    || { report_config_failure "$STATE/config-sync-check.err"; die 'public config sync did not converge'; }
+  yard config status >"$STATE/config-sync-status.out" 2>"$STATE/config-sync-status.err" \
+    || die 'config sync --apply did not converge materialized settings'
+  assert_materialized_json "$desired_sync" "$ROOT/config/agents/pi/settings.json" \
+    || die 'config sync --apply did not materialize its managed JSON fields'
+  guest_root jq -e '
+    .autoMemoryDirectory == "~/.claude-memory-e2e-sync" and
+    (.env | has("SUBYARD_E2E_MANAGED_SETTING") | not)
+  ' /home/dev/.claude/settings.json >/dev/null \
+    || die 'config sync --apply did not honor the tracked managed settings'
+  assert_orca_runtime_json_preserved
+  assert_orca_readiness
+  client_status "$pairing" paired-client
+
+  stage 'updating the installed candidate while preserving JSON additions and the saved grant'
+  yard update --offline --version "$release_version" --yes \
+    >"$STATE/release-after-json.out" 2>"$STATE/release-after-json.err" \
+    || die 'public release update failed after runtime JSON additions'
+  if ! release_ready after-json; then
+    print_release_state after-json
+    die 'release was not ready after the runtime JSON preservation update'
+  fi
+  assert_materialized_json "$desired_sync" "$ROOT/config/agents/pi/settings.json" \
+    || die 'release update changed an imported managed JSON field'
+  assert_orca_runtime_json_preserved
+  assert_orca_readiness
+  client_status "$pairing" paired-client
+fi
 
 stage 'preserving the selected endpoint and grant across restart and down/up'
 yard orca restart --yes >/dev/null
+assert_orca_readiness
+if [ "$EXISTING_YARD" = 1 ] && ! release_ready after-restart; then
+  print_release_state after-restart
+  die 'release was not ready after Orca restart'
+fi
 client_status "$pairing" paired-client
 yard orca down --yes >/dev/null
 yard orca up --yes >/dev/null
@@ -412,6 +731,16 @@ yard orca up --yes >/dev/null
   || die 'down/up lost the selected Orca profile'
 [ "$(incus --project "$PROJECT" config device get "$INSTANCE" orca-server listen)" = \
   "tcp:127.0.0.1:$ORCA_PORT" ] || die 'down/up changed the published owner endpoint'
+assert_orca_readiness
+if [ "$EXISTING_YARD" = 1 ]; then
+  assert_materialized_json "$desired_sync" "$ROOT/config/agents/pi/settings.json" \
+    || die 'restart/down-up changed an imported managed JSON field'
+  assert_orca_runtime_json_preserved
+  if ! release_ready after-down-up; then
+    print_release_state after-down-up
+    die 'release was not ready after Orca down/up'
+  fi
+fi
 client_status "$pairing" paired-client
 
 printf 'ok: fresh Orca bootstrap reconciled the yard and preserved its endpoint and grant\n'

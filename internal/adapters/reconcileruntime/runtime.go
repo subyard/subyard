@@ -1146,22 +1146,10 @@ jq -e '."ip-forward-no-drop" == true' /etc/docker/daemon.json >/dev/null \
 	if err != nil {
 		return false, err
 	}
-	for _, file := range configFiles {
-		hostHash, err := file.sourceHash()
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			return false, err
-		}
-		result, ok, err := runtime.guestObserve(
-			ctx, []string{"sha256sum", "--", file.destination},
-		)
-		fields := strings.Fields(string(result.Stdout))
-		if err != nil || !ok || len(fields) == 0 || fields[0] != hostHash {
-			return false, err
-		}
+	if ok, err := runtime.guestConfigsConverged(ctx, configFiles); err != nil || !ok {
+		return false, err
 	}
+
 	sudoers := "/etc/sudoers.d/90-subyard-" + user
 	sudoTest := "-f"
 	if !runtime.Yard.DevSudo {
