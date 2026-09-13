@@ -40,7 +40,27 @@ type Prepared struct {
 	Consequences   []string
 	RefreshConfigs bool
 	ActiveLauncher string
+	SourceRelease  string
+	SourceVersion  string
+	TargetRelease  string
+	TargetVersion  string
 	run            func(context.Context) error
+}
+
+type verifiedPreparationError struct {
+	cause    error
+	prepared Prepared
+}
+
+func (failure verifiedPreparationError) Error() string { return failure.cause.Error() }
+func (failure verifiedPreparationError) Unwrap() error { return failure.cause }
+
+func VerifiedPreparation(err error) (Prepared, bool) {
+	var failure verifiedPreparationError
+	if !errors.As(err, &failure) {
+		return Prepared{}, false
+	}
+	return failure.prepared, true
 }
 
 func (prepared Prepared) Execute(ctx context.Context) error {
@@ -535,12 +555,20 @@ func (runtime *Runtime) PrepareTransition(
 	if err == nil {
 		return prepared, nil
 	}
+	verifiedPreparation := Prepared{
+		TargetRelease: string(candidate.release), TargetVersion: verified.version,
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return Prepared{}, verifiedPreparationError{cause: err, prepared: verifiedPreparation}
+	}
 	var public publicReleaseInspectionError
 	if errors.As(err, &public) {
 		if parsed.check {
 			return runtime.preparePublicInspectionOutcome(public.outcome), nil
 		}
-		return Prepared{}, transitionOutcomeError(public.outcome)
+		return Prepared{}, verifiedPreparationError{
+			cause: transitionOutcomeError(public.outcome), prepared: verifiedPreparation,
+		}
 	}
 	outcome := observedPublicReleaseOutcome(
 		parsed.root, request.Target, nil,
@@ -551,7 +579,9 @@ func (runtime *Runtime) PrepareTransition(
 	if parsed.check {
 		return runtime.preparePublicInspectionOutcome(outcome), nil
 	}
-	return Prepared{}, transitionOutcomeError(outcome)
+	return Prepared{}, verifiedPreparationError{
+		cause: transitionOutcomeError(outcome), prepared: verifiedPreparation,
+	}
 }
 
 type qualifiedReplacementRecovery struct {
@@ -795,6 +825,11 @@ func (runtime *Runtime) prepareRetainedTransition(
 		))
 	}
 	defer verified.Close()
+	verifiedPreparation := func(cause error) error {
+		return verifiedPreparationError{cause: cause, prepared: Prepared{
+			TargetRelease: string(verified.candidate.release), TargetVersion: verified.version,
+		}}
+	}
 	request := releasetransition.ProcessRequest{
 		SchemaVersion: releasetransition.ProcessProtocolSchemaV1,
 		Mode:          releasetransition.ProcessInspect,
@@ -815,26 +850,32 @@ func (runtime *Runtime) prepareRetainedTransition(
 			root: filepath.Join(parsed.root, links.current.target),
 		}
 		active, err = runtime.verifyPublishedCandidate(ctx, activeCandidate, parsed.root, nil)
+		if err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+			return Prepared{}, verifiedPreparation(err)
+		}
 		if err != nil || active.registryDigest == "" {
 			if active != nil {
 				active.Close()
 			}
-			return Prepared{}, transitionOutcomeError(publicReleaseOutcome(
+			return Prepared{}, verifiedPreparation(transitionOutcomeError(publicReleaseOutcome(
 				observed, release, nil, releasetransition.CodeRollbackIncompatible,
 				"the active release cannot own a transition to the retained release",
 				"restore a compatible retained release, then run yard update --rollback",
-			))
+			)))
 		}
 		defer active.Close()
 		owner = active
 	}
 	prepared, err := runtime.prepareVerifiedTransition(ctx, parsed, owner, verified, request, nil)
 	if err != nil {
-		return Prepared{}, transitionOutcomeError(publicReleaseOutcome(
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return Prepared{}, verifiedPreparation(err)
+		}
+		return Prepared{}, verifiedPreparation(transitionOutcomeError(publicReleaseOutcome(
 			observed, release, nil, releasetransition.CodeRollbackIncompatible,
 			"the retained release cannot provide a safe rollback plan",
 			"restore a compatible retained release, then run yard update --rollback",
-		))
+		)))
 	}
 	return prepared, nil
 }
@@ -993,6 +1034,10 @@ func (runtime *Runtime) prepareInspectedCandidateTransition(
 		Changed: changed, Consequences: consequences,
 		RefreshConfigs: !activationReconciliationOwned,
 		ActiveLauncher: filepath.Join(parsed.root, "current", "bin", "yard"),
+		SourceRelease:  string(inspection.Outcome.Active),
+		SourceVersion:  "",
+		TargetRelease:  string(target.candidate.release),
+		TargetVersion:  target.version,
 		run: func(ctx context.Context) error {
 			if err := requirePreparedReleaseRoots(parsed, false); err != nil {
 				return err

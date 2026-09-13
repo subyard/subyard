@@ -256,6 +256,16 @@ transition owner after interruption or rollback. New migration internals do not 
 shared representation automatically; runtime-specific recovery changes require an explicit,
 compatible storage design.
 
+The release-transition journal is authoritative recovery state, not an operator transcript. A
+separate structured update history under `$SUBYARD_HOME/logs/updates` records each committed
+activation or rollback attempt, direct preparation failure, and declined confirmation with a unique
+attempt ID, operation ID, direction, bounded phase events, verified source/target identity when
+available, and a safe terminal status/code. It retains the newest 30 attempts and never copies hook
+output, error text, environment values, or journal JSON. Local `yard logs --updates [-n N]` reads
+that history and `yard logs --audit [-n N]` reads the current command audit file plus five retained
+1 MiB rotations without loading yard configuration or Incus. Explicit yard selectors continue
+through normal owner routing.
+
 Introduce a new protocol by first shipping support alongside V1 while continuing to send V1.
 Only a subsequent release may start using the new protocol with owners that support it. Retain
 the old reader, writer and semantics throughout the supported upgrade, retained-runtime rollback
@@ -433,6 +443,13 @@ read-only configuration/status calls never allocate a port. See the shipped `.re
 `DASHBOARD` is explicit because a TCP proxy does not imply HTTP. Detailed status publishes its URL
 only while the resource's `is-up` probe succeeds and the referenced host and port settings are
 valid.
+
+Resource handlers reserve prepare exit status 2 for invalid command-line arguments. The shared
+`svc_usage_error` helper exits with status 2; the dispatcher classifies this as
+`resource_usage_invalid` and returns CLI exit status 2; rejected arguments cannot reach apply. Help and an omitted verb return 0,
+while other prepare failures, precondition failures, and invalid plans return 1. The successful plan
+schema is unchanged. Resource preparation currently uses its dedicated non-RPC pipeline, so this
+exit-status contract does not imply an RPC resource-preparation interface.
 
 ## Test topology
 

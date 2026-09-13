@@ -116,6 +116,11 @@ under that yard's `HOST_BASE`, while an explicit `yard bind` grants the selected
 host path to the yard. Host Docker and Incus control sockets are rejected by
 managed configuration. Run `yard security` to audit the effective setup.
 
+Opt-in SSH agent forwarding permits git push and other host access from inside the yard
+using a forwarded, write-enabled credential while the SSH session is active.
+No private key is copied into the yard, but any process that can reach the forwarded agent
+can use that credential; agent ask-rules are a UX safeguard, not a security boundary.
+
 A trusted test yard can opt in to two disposable nested VMs without receiving the
 L0 Incus socket. See [Disposable nested test VMs](docs/test-vms.md) for the widened
 device/syscall boundary, lifecycle and cleanup contract.

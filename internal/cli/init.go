@@ -26,6 +26,11 @@ const (
 	initReset
 )
 
+const forwardedSSHAgentConsequence = "SSH agent forwarding enables git push and other host access from " +
+	"inside the yard with the forwarded, write-enabled credential while the SSH session is active. " +
+	"No private key is copied into the yard, but any process that can reach the forwarded agent can " +
+	"exercise it; agent ask-rules are a UX safeguard, not a security boundary"
+
 type initArguments struct {
 	mode    initMode
 	profile string
@@ -409,18 +414,29 @@ func (execution *initExecution) consequences() []string {
 	case initReset:
 		result := []string{"delete the yard instance and its disk data"}
 		for _, step := range execution.plan.Steps {
-			result = append(result, step.Stage.Label)
+			result = execution.appendStageConsequences(result, step)
 		}
 		return append(hostIDConsequences, result...)
 	default:
 		result := make([]string, 0, execution.plan.Pending())
 		for _, step := range execution.plan.Steps {
 			if !step.Converged {
-				result = append(result, step.Stage.Label)
+				result = execution.appendStageConsequences(result, step)
 			}
 		}
 		return append(hostIDConsequences, result...)
 	}
+}
+
+func (execution *initExecution) appendStageConsequences(
+	result []string,
+	step application.ReconcileStep,
+) []string {
+	result = append(result, step.Stage.Label)
+	if step.Stage.ID == ports.ReconcileStageSSH && execution.loaded.Context.ForwardSSHAgent {
+		result = append(result, forwardedSSHAgentConsequence)
+	}
+	return result
 }
 
 func (execution *initExecution) actionPlan() (domain.ActionID, domain.ActionDelta, error) {

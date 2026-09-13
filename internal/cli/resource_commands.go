@@ -58,6 +58,9 @@ func (cli *CLI) runResourceCommand(
 	output, err := cli.prepareResource(ctx, loaded, definition, invocation.arguments)
 	if err != nil {
 		cli.errorf("%s: %v", definition.Command, err)
+		if errors.Is(err, resource.ErrResourceUsageInvalid) {
+			return 2
+		}
 		return 1
 	}
 	assessment, err := cli.resources.AssessPrepareResult(
@@ -226,12 +229,17 @@ func (cli *CLI) prepareResource(
 			resource.ErrResourcePlanInvalid, resource.MaxPrepareOutputBytes)
 	}
 	if err != nil {
+		failureClass := resource.ErrResourcePlanInvalid
+		var exitError *exec.ExitError
+		if errors.As(err, &exitError) && exitError.ExitCode() == 2 {
+			failureClass = resource.ErrResourceUsageInvalid
+		}
 		detail := strings.TrimSpace(stderr.String())
 		if detail != "" {
 			return nil, fmt.Errorf("%w: prepare failed: %v: %s",
-				resource.ErrResourcePlanInvalid, err, detail)
+				failureClass, err, detail)
 		}
-		return nil, fmt.Errorf("%w: prepare failed: %v", resource.ErrResourcePlanInvalid, err)
+		return nil, fmt.Errorf("%w: prepare failed: %v", failureClass, err)
 	}
 	return slices.Clone(stdout.Bytes()), nil
 }

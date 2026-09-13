@@ -110,7 +110,10 @@ func (runtime Runtime) staticFindings() []finding {
 	}
 	if runtime.Yard.ForwardSSHAgent {
 		result = append(result, finding{"warn",
-			"SSH agent forwarding is enabled; this is operator opt-in, not a credential boundary"})
+			"SSH agent forwarding is enabled: git push and other host access from inside the yard can use " +
+				"the forwarded, write-enabled credential while the SSH session is active. No private key is " +
+				"copied into the yard, but any process that can reach the forwarded agent can exercise it; " +
+				"agent ask-rules are a UX safeguard, not a security boundary"})
 	}
 	return append(result, runtime.keyFindings()...)
 }

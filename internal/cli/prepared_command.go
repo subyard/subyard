@@ -124,6 +124,7 @@ type preparedCommand struct {
 	Loaded          config.Loaded
 	Plan            domain.OperationPlan
 	Project         *projectExecution
+	release         *releaseExecution
 	policy          domain.CommandPolicy
 	assess          commandAssessment
 	refresh         commandAssessment
@@ -427,12 +428,17 @@ func (prepared *preparedCommand) prepareUpdate(ctx context.Context, _ *initBoots
 		return err
 	}
 	prepared.closeResource = execution.Close
+	prepared.release = execution
 	prepared.executeNoOp = true
 	prepared.assess = func(context.Context) (domain.ActionID, domain.ActionDelta, error) {
 		return execution.prepared.Action, domain.ActionDelta{Changed: execution.prepared.Changed, Consequences: execution.prepared.Consequences}, nil
 	}
 	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, _ io.Writer) (domain.AdapterResult, error) {
-		return prepared.CLI.executeRelease(ctx, orchestrator, prepared.Plan, execution)
+		if err := prepared.CLI.beginUpdateHistory(prepared.Plan, execution); err != nil {
+			return domain.AdapterResult{}, fmt.Errorf("create update history: %w", err)
+		}
+		result, runErr := prepared.CLI.executeRelease(ctx, orchestrator, prepared.Plan, execution)
+		return result, prepared.CLI.finishUpdateHistory(ctx, execution, result, runErr)
 	}
 	return nil
 }

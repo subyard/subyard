@@ -2,6 +2,7 @@ package audit
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 )
 
 const defaultMaximum = int64(1024 * 1024)
+const retainedAuditGenerations = 5
 
 var (
 	credentialURL = regexp.MustCompile(
@@ -82,7 +84,7 @@ func WriteInvocation(invocation Invocation) error {
 		maximum = defaultMaximum
 	}
 	if info, err := os.Stat(path); err == nil && info.Size() >= maximum {
-		if err := os.Rename(path, path+".1"); err != nil {
+		if err := rotateAuditFiles(path); err != nil {
 			return err
 		}
 	}
@@ -117,6 +119,61 @@ func WriteInvocation(invocation Invocation) error {
 	_, err = fmt.Fprintf(file, "%s pid=%d cwd=%s where=%s%s -- %s\n",
 		now.UTC().Format(time.RFC3339), pid, cleanField(invocation.WorkingDir), side, fields, message)
 	return err
+}
+
+func rotateAuditFiles(path string) error {
+	for generation := retainedAuditGenerations; generation >= 1; generation-- {
+		source := path
+		if generation > 1 {
+			source = path + "." + strconv.Itoa(generation-1)
+		}
+		destination := path + "." + strconv.Itoa(generation)
+		if err := os.Rename(source, destination); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+func ReadAuditLines(home string, limit int) ([]string, error) {
+	if home == "" {
+		return nil, errors.New("audit home is required")
+	}
+	if limit < 1 {
+		return nil, errors.New("audit line limit must be positive")
+	}
+	directory := filepath.Join(home, "logs")
+	lines := make([]string, 0, limit)
+	for generation := retainedAuditGenerations; generation >= 0; generation-- {
+		name := "yard.log"
+		if generation > 0 {
+			name += "." + strconv.Itoa(generation)
+		}
+		path := filepath.Join(directory, name)
+		info, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			return nil, errors.New("audit log is not a regular file")
+		}
+		payload, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		for _, line := range strings.Split(strings.TrimSuffix(string(payload), "\n"), "\n") {
+			if line != "" {
+				lines = append(lines, line)
+			}
+		}
+	}
+	if len(lines) > limit {
+		lines = lines[len(lines)-limit:]
+	}
+	return lines, nil
 }
 
 func redactArguments(arguments []string) string {

@@ -181,6 +181,71 @@ func TestInitExecutionBuildsTypedActionDelta(t *testing.T) {
 	}
 }
 
+func TestInitExecutionPlansForwardedSSHAgentBoundaryOnlyForPendingSSH(t *testing.T) {
+	sshStep := application.ReconcileStep{
+		Stage: application.ReconcileStage{ID: ports.ReconcileStageSSH, Label: "Set up SSH access"},
+	}
+	for _, test := range []struct {
+		name      string
+		execution initExecution
+		forward   bool
+		want      bool
+	}{
+		{
+			name: "pending SSH",
+			execution: initExecution{mode: initReconcile, plan: application.ReconcilePlan{
+				Steps: []application.ReconcileStep{sshStep},
+			}},
+			forward: true,
+			want:    true,
+		},
+		{
+			name: "reset",
+			execution: initExecution{mode: initReset, plan: application.ReconcilePlan{
+				Steps: []application.ReconcileStep{sshStep},
+			}},
+			forward: true,
+			want:    true,
+		},
+		{
+			name: "pending SSH without forwarding",
+			execution: initExecution{mode: initReconcile, plan: application.ReconcilePlan{
+				Steps: []application.ReconcileStep{sshStep},
+			}},
+		},
+		{
+			name: "converged SSH",
+			execution: initExecution{mode: initReconcile, plan: application.ReconcilePlan{
+				Steps: []application.ReconcileStep{{Stage: sshStep.Stage, Converged: true}},
+			}},
+			forward: true,
+		},
+		{name: "configs only", execution: initExecution{mode: initConfigs, configsChanged: true}, forward: true},
+		{name: "hooks only", execution: initExecution{mode: initReconcile, hooksApplicable: true}, forward: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			test.execution.loaded.Context.ForwardSSHAgent = test.forward
+			_, delta, err := test.execution.actionPlan()
+			if err != nil {
+				t.Fatal(err)
+			}
+			consequences := strings.Join(delta.Consequences, "\n")
+			for _, expected := range []string{
+				"git push",
+				"forwarded, write-enabled credential",
+				"No private key is copied",
+				"any process that can reach the forwarded agent can exercise it",
+				"agent ask-rules are a UX safeguard, not a security boundary",
+			} {
+				if strings.Contains(consequences, expected) != test.want {
+					t.Fatalf("forwarding consequence presence for %q = %v, want %v: %q",
+						expected, strings.Contains(consequences, expected), test.want, consequences)
+				}
+			}
+		})
+	}
+}
+
 func TestPrepareInitConfigsUsesReadOnlyConvergence(t *testing.T) {
 	for _, test := range []struct {
 		name      string

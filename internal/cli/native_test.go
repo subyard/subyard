@@ -21,6 +21,7 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
 	"github.com/Subyard/Subyard/internal/application"
+	"github.com/Subyard/Subyard/internal/audit"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/domain"
@@ -514,6 +515,9 @@ func TestUpdateUsesThePreparedReleaseAcrossRPCPlanAndExecute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if records, readErr := (audit.UpdateHistory{Home: environmentValue(environment, "SUBYARD_HOME")}).Read(10); readErr != nil || len(records) != 0 {
+		t.Fatalf("RPC preparation wrote update history: records=%#v err=%v", records, readErr)
+	}
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -553,6 +557,10 @@ func TestUpdateUsesThePreparedReleaseAcrossRPCPlanAndExecute(t *testing.T) {
 		!slices.Equal(configApplier.yards, []string{"default"}) {
 		t.Fatalf("release RPC bypassed its prepared operation: args=%q events=%q configs=%q err=%v",
 			arguments, events, configApplier.yards, err)
+	}
+	records, readErr := (audit.UpdateHistory{Home: environmentValue(environment, "SUBYARD_HOME")}).Read(10)
+	if readErr != nil || len(records) != 1 || records[0].OperationID != "operation-update" || records[0].Status != "success" {
+		t.Fatalf("RPC execution history=%#v err=%v", records, readErr)
 	}
 }
 
@@ -888,6 +896,7 @@ case "${1:-}" in
 	    runtime_root=$(printf '%s' "$request" | jq -r .runtimeRoot)
 	    target_release=$(printf '%s' "$request" | jq -r .target)
 	    if [ "$mode" = inspect ]; then
+	      if [ "${UPDATE_CANCEL_INSPECTION:-}" = 1 ]; then exec sleep 30; fi
 	      active=$(readlink "$runtime_root/current")
 	      active_release=${active#releases/}
 	      printf '{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["activate retained runtime"]},"outcome":{"status":"migration-required","reachedGoal":false,"active":"%s","target":"%s","code":"transition-required","message":"the retained release transition has not started","retry":"run yard update"}}}\n' "$active_release" "$target_release"
@@ -1180,6 +1189,7 @@ case "${1:-}" in
     runtime_root=$(printf '%s' "$request" | jq -r .runtimeRoot)
     target_release=$(printf '%s' "$request" | jq -r .target)
     if [ "$mode" = inspect ]; then
+      if [ "${UPDATE_CANCEL_INSPECTION:-}" = 1 ]; then exec sleep 30; fi
       if [ "${UPDATE_BLOCK_INSPECTION:-}" = 1 ]; then
         printf '%s\n' '{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["inspect blocked candidate"]},"blockers":[{"code":"migration-stale","resource":"yard.fixture","message":"the candidate resource changed","retry":"run yard update --check"}],"outcome":{"status":"operator-action-required","reachedGoal":false,"active":"release-old","target":"1.2.3-f16d05ec6b29","code":"migration-stale","message":"the candidate resource changed","retry":"run yard update --check","transaction":"tx-0123456789abcdef"}}}'
         exit 0
@@ -5134,7 +5144,7 @@ func nativeFixture(t *testing.T) (string, []string, string) {
 		"teardown||@teardown||forward|mutate|dynamic|public|lifecycle|teardown|teardown|teardown|--keep-data --yes --help|",
 		"status||@status||forward|read|never|public|lifecycle|status|status|status|--all --help|",
 		"space||@space||local|read|never|public|lifecycle|simple|space|space|--refresh --help|",
-		"logs||@logs||forward|read|never|public|lifecycle|simple|logs|logs|-f -n --yes --help|",
+		"logs||@logs||forward|read|never|public|lifecycle|simple|logs|logs|-f -n --updates --audit --yes --help|",
 		"usage||@usage||forward|read|never|public|lifecycle|simple|usage|usage|--help|",
 		"shell||@shell||forward|mutate|never|public|lifecycle|project-shell|shell|shell|--root --yes --help|",
 		"clone||@project||local|mutate|dynamic|public|projects|clone|clone <url>|clone|--target --yes --help|",

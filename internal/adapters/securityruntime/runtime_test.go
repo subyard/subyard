@@ -302,6 +302,42 @@ func TestSecurityRuntimeWarnsForExplicitDiskOutsideHostBase(t *testing.T) {
 	}
 }
 
+func TestSecurityRuntimeReportsForwardedSSHAgentBoundaryOnlyWhenEnabled(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		enabled bool
+		want    bool
+	}{
+		{name: "enabled", enabled: true, want: true},
+		{name: "disabled", enabled: false, want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runtime := testRuntime(t)
+			runtime.Yard.ForwardSSHAgent = test.enabled
+			var diagnostics bytes.Buffer
+			runtime.Stderr = &diagnostics
+			if _, err := runtime.CheckSecurity(context.Background(), false, false); err != nil {
+				t.Fatal(err)
+			}
+			warning := diagnostics.String()
+			for _, expected := range []string{
+				"SSH agent forwarding is enabled",
+				"git push and other host access from inside the yard",
+				"forwarded, write-enabled credential",
+				"while the SSH session is active",
+				"No private key is copied into the yard",
+				"any process that can reach the forwarded agent can exercise it",
+				"agent ask-rules are a UX safeguard, not a security boundary",
+			} {
+				if strings.Contains(warning, expected) != test.want {
+					t.Fatalf("forwarding warning presence for %q = %v, want %v: %q",
+						expected, strings.Contains(warning, expected), test.want, warning)
+				}
+			}
+		})
+	}
+}
+
 func TestSecurityRuntimeRequiresPrivateIdentityMode(t *testing.T) {
 	runtime := testRuntime(t)
 	root := filepath.Join(t.TempDir(), "keys")

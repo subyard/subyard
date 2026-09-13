@@ -7,7 +7,8 @@
 #
 # Provisioning (operator, ONCE, on the HOST): `yard staging up <zone> --source <ws>` builds the
 # runner, stages creds, and writes into the yard: /srv/staging/<zone>/zone.env (this script's
-# spec), /srv/staging/<zone>/run-args (rebind spec) and /srv/staging/<zone>/prod-fingerprints.
+# spec), /srv/staging/<zone>/run-args (rebind spec) and a required, validated
+# /srv/staging/<zone>/prod-fingerprints (one SHA-256 hex fingerprint per line).
 # It also installs this script at /usr/local/bin/sy-stage. After that the agent self-serves:
 #
 #   sy-stage reserve [--zone Z]            acquire the bot lease (ephemeral; preempts canonical)
@@ -102,6 +103,24 @@ box_exists()      { docker inspect "$CNAME" >/dev/null 2>&1; }
 require_box()     { box_exists || die "no runner for zone '$zone' — operator: 'yard staging up $zone --source <ws>'"; }
 gateway_running() { docker exec "$CNAME" sh -c '[ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null' _ "$GW_PID" 2>/dev/null; }
 
+load_prod_fingerprints() { # <file>
+  local file="$1" line="" normalized="" line_number=0
+  if [ ! -f "$file" ] || [ ! -r "$file" ]; then
+    die "production fingerprint file is missing or unreadable: $file"
+  fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    line_number=$((line_number + 1))
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    case "$line" in ''|'#'*) continue ;; esac
+    [[ "$line" =~ ^[0-9a-fA-F]{64}$ ]] \
+      || die "malformed production fingerprint at $file:$line_number (expected exactly 64 hex characters)"
+    normalized="${normalized}${normalized:+$'\n'}$(printf '%s' "$line" | tr '[:upper:]' '[:lower:]')"
+  done < "$file"
+  [ -n "$normalized" ] || die "production fingerprint file has no fingerprints: $file"
+  printf '%s\n' "$normalized"
+}
+
 # --- bot-identity lease (flock+file; FIFO/TTL/epoch; single host) — same primitive as the host CLI
 lease_acquire() {  # kind [mode] -> "OK <epoch>" | "PREEMPT <holder>" | "BUSY <holder> <kind> <secs>"
   local kind="$1" mode="${2:-normal}"
@@ -161,8 +180,8 @@ reserve_lease() {
 # prod-guard (deny-by-default) + lease + (re)launch gateway. Mirrors the host 'staging start'.
 launch_gateway() {
   require_box
-  local prod_fps="" fpf="$STAGING_ROOT/$zone/prod-fingerprints"
-  [ -r "$fpf" ] && prod_fps="$(grep -vE '^\s*(#|$)' "$fpf" 2>/dev/null | tr -s '[:space:]' '\n' || true)"
+  local prod_fps fpf="$STAGING_ROOT/$zone/prod-fingerprints"
+  prod_fps="$(load_prod_fingerprints "$fpf")"
   local guard_out
   guard_out="$(docker exec -i -e "SUBYARD_PROD_FPS=$prod_fps" "$CNAME" sh -s <<'GUARD'
 set -eu
@@ -193,8 +212,6 @@ GUARD
     FAIL\ *) die "prod-guard refused: ${guard_out#FAIL }" ;;
     *)       die "prod-guard produced no verdict — refusing (fail-closed): '${guard_out:-<empty>}'" ;;
   esac
-  [ -n "$prod_fps" ] || info "WARN prod-fingerprints empty — guard passed on the staging marker alone"
-
   reserve_lease
 
   # rebuild from the live-bound tree so 'restart' picks up the agent's current edits (synchronous)

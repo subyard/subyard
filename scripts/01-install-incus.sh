@@ -101,13 +101,14 @@ if [ "$OPERATOR_USER" != root ] && [ -e "$operator_incus_config" ]; then
 fi
 
 # --- 1. ensure incus, recent enough for nested Docker ------------------------
-# Many distros still package an Incus older than MIN_INCUS_VER, so nested Docker (project-env
-# boxes) fails. With --zabbly (set by 'yard init' after a y/N prompt) we add the Zabbly LTS-6.0
-# repo and install/upgrade from there; otherwise we use the distro package and warn about the floor.
+# Many distros package an Incus older than MIN_INCUS_VER, which breaks nested Docker.
+# Auto-selection uses the Zabbly LTS-6.0 repository when the installed version or
+# distro candidate cannot meet the floor; --zabbly forces it. Every path verifies it.
 echo "Dependency: incus"
 _iver()    { incus --version 2>/dev/null || echo '?'; }
 _irecent() { local v; v="$(_iver)"; [ "$v" != '?' ] && command -v dpkg >/dev/null 2>&1 \
                && dpkg --compare-versions "$v" ge "$MIN_INCUS_VER"; }
+incus_ready=
 
 if [ "$USE_ZABBLY" = auto ]; then
   USE_ZABBLY=0
@@ -125,7 +126,7 @@ fi
 
 if command -v incus >/dev/null 2>&1; then
   if _irecent; then
-    ok "incus present ($(_iver)) >= $MIN_INCUS_VER"
+    incus_ready="incus present ($(_iver)) >= $MIN_INCUS_VER"
   elif [ "$USE_ZABBLY" = 1 ]; then
     warn "incus $(_iver) < $MIN_INCUS_VER — upgrading from the Zabbly LTS-6.0 repo"
     add_zabbly_lts_repo || die "could not set up the Zabbly LTS-6.0 repo"
@@ -133,8 +134,7 @@ if command -v incus >/dev/null 2>&1; then
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends incus \
       || die "incus upgrade failed"
     systemctl try-restart incus.service 2>/dev/null || true
-    if _irecent; then ok "incus upgraded ($(_iver))"
-    else warn "incus is still $(_iver) after upgrade — check 'apt-cache policy incus'"; fi
+    incus_ready="incus upgraded ($(_iver))"
   else
     warn "incus $(_iver) < $MIN_INCUS_VER — nested Docker (project-env boxes) will fail (re-run with --zabbly to upgrade)"
   fi
@@ -152,15 +152,12 @@ else
   info "installing incus"
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends incus \
     || die "incus install failed (the distro repos may carry it; Zabbly LTS-6.0 is the >= $MIN_INCUS_VER source)"
-  ok "incus installed ($(_iver))"
-  if ! _irecent; then
-    if [ "$USE_ZABBLY" = 1 ]; then
-      die "installed incus $(_iver) < $MIN_INCUS_VER even after adding the Zabbly repo — check 'apt-cache policy incus'"
-    else
-      warn "installed incus $(_iver) < $MIN_INCUS_VER — nested Docker will fail until you upgrade (re-run with --zabbly)"
-    fi
-  fi
+  incus_ready="incus installed ($(_iver))"
 fi
+
+_irecent \
+  || die "incus $(_iver) < $MIN_INCUS_VER after installation/upgrade — check 'apt-cache policy incus'"
+ok "$incus_ready"
 
 # --upgrade-only: ensuring the version is all this run does — group/storage/init are 'yard init's job.
 if [ "$UPGRADE_ONLY" = 1 ]; then

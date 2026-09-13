@@ -171,10 +171,10 @@ parse_up_arguments() {
         UP_FORWARD_ARGS+=("$@")
         return 0
         ;;
-      -*) die "'yard emu up' accepts one optional AVD name; put emulator options after --" ;;
+      -*) svc_usage_error "'yard emu up' accepts one optional AVD name; put emulator options after --" ;;
       *)
         [ "$avd_seen" -eq 0 ] \
-          || die "'yard emu up' accepts at most one AVD name before --"
+          || svc_usage_error "'yard emu up' accepts at most one AVD name before --"
         UP_FORWARD_ARGS+=("$1")
         avd_seen=1
         shift
@@ -197,7 +197,7 @@ parse_view_arguments() {
         VIEW_EXTRA=("$@")
         return 0
         ;;
-      *) die "'yard emu view' accepts control mode only; put scrcpy options after --" ;;
+      *) svc_usage_error "'yard emu view' accepts control mode only; put scrcpy options after --" ;;
     esac
   done
 }
@@ -399,7 +399,7 @@ emit_resource_assessment() { # <local-action> <true|false> [fixed consequence...
 require_no_resource_arguments() {
   local verb="$1"
   shift
-  [ "$#" -eq 0 ] || die "'$verb' does not accept additional arguments"
+  [ "$#" -eq 0 ] || svc_usage_error "'$verb' does not accept additional arguments"
 }
 
 prepare_resource() { # <public-verb> [validated args...]
@@ -463,7 +463,7 @@ prepare_resource() { # <public-verb> [validated args...]
         emit_resource_assessment view false
       fi
       ;;
-    *) die "unknown 'yard emu' resource verb: '$verb'" ;;
+    *) svc_usage_error "unknown 'yard emu' resource verb: '$verb'" ;;
   esac
 }
 
@@ -478,7 +478,7 @@ require_resource_apply() { # <expected-local-action>
 sub="${1:-}"; [ $# -gt 0 ] && shift
 case "${SUBYARD_RESOURCE_MODE:-}" in
   prepare)
-    [ -n "$sub" ] || die "resource verb is required"
+    [ -n "$sub" ] || svc_usage_error "resource verb is required"
     prepare_resource "$sub" "$@"
     ;;
   apply)

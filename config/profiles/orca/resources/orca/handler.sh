@@ -633,10 +633,10 @@ cmd_logs() {
   case "$#" in
     0) yexec journalctl --no-pager -u "$ORCA_UNIT" -n 18000 ;;
     1)
-      [ "$1" = --follow ] || die "'logs' accepts only '--follow'"
+      [ "$1" = --follow ] || svc_usage_error "'logs' accepts only '--follow'"
       yexec journalctl --no-pager -u "$ORCA_UNIT" -n 18000 --follow
       ;;
-    *) die "'logs' accepts only '--follow'" ;;
+    *) svc_usage_error "'logs' accepts only '--follow'" ;;
   esac
 }
 
@@ -673,7 +673,7 @@ emit_resource_assessment() { # <local-action> <true|false> [fixed consequence...
 require_no_resource_arguments() {
   local verb="$1"
   shift
-  [ "$#" -eq 0 ] || die "'$verb' does not accept additional arguments"
+  [ "$#" -eq 0 ] || svc_usage_error "'$verb' does not accept additional arguments"
 }
 
 validate_resource_arguments() {
@@ -682,8 +682,8 @@ validate_resource_arguments() {
   if [ "$verb" = logs ]; then
     case "$#" in
       0) return 0 ;;
-      1) [ "$1" = --follow ] || die "'logs' accepts only '--follow'" ;;
-      *) die "'logs' accepts only '--follow'" ;;
+      1) [ "$1" = --follow ] || svc_usage_error "'logs' accepts only '--follow'" ;;
+      *) svc_usage_error "'logs' accepts only '--follow'" ;;
     esac
     return 0
   fi
@@ -770,7 +770,7 @@ prepare_resource() { # <public-verb>
     is-up|status|logs)
       emit_resource_assessment "$verb" false
       ;;
-    *) die "unknown Orca resource verb '$verb'" ;;
+    *) svc_usage_error "unknown Orca resource verb '$verb'" ;;
   esac
 }
 
@@ -784,7 +784,7 @@ shift || true
 
 case "${SUBYARD_RESOURCE_MODE:-}" in
   prepare)
-    [ -n "$sub" ] || die "resource verb is required"
+    [ -n "$sub" ] || svc_usage_error "resource verb is required"
     prepare_resource "$sub" "$@"
     ;;
   apply)

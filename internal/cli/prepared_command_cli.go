@@ -62,9 +62,27 @@ func (cli *CLI) runPreparedCommand(ctx context.Context, prepared *preparedComman
 	orchestrator := cli.operationOrchestrator(prepared.Plan.OperationID, prepared.Loaded, nil, &prepared.Definition)
 	plan, err := orchestrator.Confirm(ctx, prepared.Plan, assumeYes)
 	if err != nil {
-		if errors.Is(err, application.ErrDeclined) {
+		switch {
+		case errors.Is(err, application.ErrDeclined):
+			if prepared.Definition.Handler == "@update" {
+				if historyErr := cli.recordUpdateTerminal(
+					prepared.Arguments, prepared.Plan.OperationID,
+					"confirmation", "declined", "operator_declined", prepared.release,
+				); historyErr != nil {
+					cli.errorf("update history: %v", historyErr)
+				}
+			}
 			cli.errorf("operation declined")
-		} else {
+		case prepared.Definition.Handler == "@update" &&
+			(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)):
+			if historyErr := cli.recordUpdateTerminal(
+				prepared.Arguments, prepared.Plan.OperationID,
+				"confirmation", "interrupted", "context_cancelled", prepared.release,
+			); historyErr != nil {
+				cli.errorf("update history: %v", historyErr)
+			}
+			cli.errorf("plan %s: %v", prepared.Definition.Name, err)
+		default:
 			cli.errorf("plan %s: %v", prepared.Definition.Name, err)
 		}
 		return 1

@@ -329,20 +329,29 @@ run_hook "$test_root" "$dev_home" 'claude codex aiobserver' >/dev/null
 
 canonical_binds="$(cat "$container/binds")"
 canonical_spec="$(cat "$container/spec")"
-permuted_binds="[\"$dev_home/.codex/sessions:/sessions/codex:ro\",\"$state/data:/app/data:rw\",\"$TMP/shared/claude:/sessions/claude:ro\"]"
-printf '%s\n' "$permuted_binds" >"$container/binds"
-"$check" >/dev/null \
-  || fail 'readiness check rejected semantically identical permuted mounts'
-: >"$FAKE_LOG"
-run_hook "$test_root" "$dev_home" 'claude codex aiobserver'
-assert_log_absent '^docker (create|rename|rm|stop)'
-assert_log_absent '^systemctl (start|restart|stop|disable)'
+# Docker does not promise to retain the CLI order of bind mounts.
+bind_mounts=("$state/data:/app/data:rw" "$TMP/shared/claude:/sessions/claude:ro" \
+  "$dev_home/.codex/sessions:/sessions/codex:ro")
+for permutation in '0 1 2' '0 2 1' '1 0 2' '1 2 0' '2 0 1' '2 1 0'; do
+  read -r first second third <<<"$permutation"
+  printf '["%s","%s","%s"]\n' \
+    "${bind_mounts[$first]}" "${bind_mounts[$second]}" "${bind_mounts[$third]}" >"$container/binds"
+  "$check" >/dev/null || fail 'readiness rejected an equivalent mount order'
+  : >"$FAKE_LOG"
+  run_hook "$test_root" "$dev_home" 'claude codex aiobserver' >/dev/null
+  assert_log_absent '^docker (create|rename|rm|stop)'
+  assert_log_absent '^systemctl (start|restart|stop|disable)'
+done
+permuted_binds="$(cat "$container/binds")"
+[ "$canonical_binds" != "$permuted_binds" ] \
+  || fail 'mount permutation fixture did not change Docker inspect order'
 
 assert_mount_drift_rejected() {
   local binds="$1" description="$2" output="$TMP/mount-drift.log" status
   printf '%s\n' "$binds" >"$container/binds"
   [ "$(cat "$container/spec")" = "$canonical_spec" ] \
     || fail "$description mount fixture changed the expected-spec marker"
+  : >"$FAKE_LOG"
   SECONDS=0
   set +e
   "$check" >"$output" 2>&1
@@ -356,6 +365,7 @@ assert_mount_drift_rejected() {
   [ "$SECONDS" -le 2 ] || fail "$description mount drift did not fail fast"
   grep -Fxq 'ai-observer-check: container mounts drifted' "$output" \
     || fail "$description mount drift omitted its exact predicate"
+  assert_log_absent '^curl '
 }
 
 assert_mount_drift_rejected \
@@ -364,6 +374,9 @@ assert_mount_drift_rejected \
 assert_mount_drift_rejected \
   "[\"$state/data:/app/data:rw\",\"$TMP/shared/claude:/sessions/claude:ro\",\"$dev_home/.codex/sessions:/sessions/codex:ro\",\"$state/empty:/sessions/extra:ro\"]" \
   extra
+assert_mount_drift_rejected \
+  "[\"$state/data:/app/data:rw\",\"$TMP/shared/claude:/sessions/claude:ro\",\"$dev_home/.codex/sessions:/sessions/codex:ro\",\"/var/run/docker.sock:/var/run/docker.sock:ro\"]" \
+  docker-socket
 assert_mount_drift_rejected \
   "[\"$state/data:/app/data:rw\",\"$TMP/shared/claude:/sessions/claude:rw\",\"$dev_home/.codex/sessions:/sessions/codex:ro\"]" \
   mode
@@ -377,8 +390,6 @@ assert_mount_drift_rejected \
   "[\"$state/data:/app/other-data:rw\",\"$TMP/shared/claude:/sessions/claude:ro\",\"$dev_home/.codex/sessions:/sessions/codex:ro\"]" \
   destination
 printf '%s\n' "$permuted_binds" >"$container/binds"
-[ "$canonical_binds" != "$permuted_binds" ] \
-  || fail 'mount permutation fixture did not change Docker inspect order'
 
 SECONDS=0
 if AI_OBSERVER_CHECK_TIMEOUT_SECONDS=1 AI_OBSERVER_FAKE_DOCKER_DELAY=0.3 \

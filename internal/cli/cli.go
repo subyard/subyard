@@ -404,6 +404,12 @@ func (cli *CLI) Run(ctx context.Context) int {
 		}
 		return cli.runTestVMLogs(ctx, commandArguments)
 	}
+	if core && definition.Handler == "@logs" && !explicit && hostLogInvocation(commandArguments) {
+		if cli.env["SUBYARD_NO_AUDIT"] == "" {
+			cli.audit(name, commandArguments, "", "")
+		}
+		return cli.runHostLogs(commandArguments)
+	}
 	if !readOnlyInvocation && !registrationRepair && !cli.releaseTransitionChild &&
 		(!core || definition.Name != "update") {
 		outcome, gateErr := cli.inspectMutationGate(ctx, yard)
@@ -577,6 +583,24 @@ func (cli *CLI) Run(ctx context.Context) int {
 				},
 			})
 			if prepareErr != nil {
+				if definition.Handler == "@update" &&
+					!slices.Contains(commandArguments, "--check") &&
+					!commandHelpRequested(commandArguments) {
+					operationID := cli.ensureOperationID()
+					status, code := "failure", "preparation_failed"
+					if errors.Is(prepareErr, context.Canceled) || errors.Is(prepareErr, context.DeadlineExceeded) {
+						status, code = "interrupted", "context_cancelled"
+					}
+					var execution *releaseExecution
+					if verified, ok := releaseruntime.VerifiedPreparation(prepareErr); ok {
+						execution = &releaseExecution{prepared: verified}
+					}
+					if historyErr := cli.recordUpdateTerminal(
+						commandArguments, operationID, "prepare", status, code, execution,
+					); historyErr != nil {
+						cli.errorf("update history: %v", historyErr)
+					}
+				}
 				return cli.reportPreparationError(definition, prepareErr)
 			}
 			defer prepared.Close()
@@ -625,6 +649,9 @@ func (cli *CLI) Run(ctx context.Context) int {
 			return cli.runRemoteKeys(ctx, loaded, definition, commandArguments)
 		}
 		return cli.forwardRemote(ctx, loadedContext, name, commandArguments)
+	}
+	if core && definition.Handler == "@logs" && hostLogInvocation(commandArguments) {
+		return cli.runHostLogs(commandArguments)
 	}
 	if configSync {
 		configSyncTarget, configSyncRouteErr := application.Route(

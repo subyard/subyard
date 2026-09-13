@@ -11,7 +11,7 @@ init|setup|@init||forward|mutate|dynamic|public|lifecycle|simple|init|install or
 start||@lifecycle||forward|mutate|never|public|lifecycle|simple|start|start the yard|--yes --help|
 status||@status||local|read|never|public|lifecycle|status|status|summarize all yards or show one selected yard in detail|--all --yes --help|
 space||@space||local|read|never|public|lifecycle|simple|space|show disk usage for local yards|--refresh --help|
-logs||@logs||forward|read|never|public|lifecycle|simple|logs|tail the yard runtime logs|-f -n --yes --help|
+logs||@logs||forward|read|never|public|lifecycle|simple|logs|tail yard runtime logs or show host update/audit history|-f -n --updates --audit --yes --help|
 usage||@usage||forward|read|never|public|lifecycle|simple|usage [args]|show coding-agent token usage|--help|
 keys||@keys||forward|mutate|dynamic|public|lifecycle|keys|keys [command]|manage the host-only encrypted and versioned credential ledger|--kind --zone --consumer --file --local-only --exclusive --dry-run --manual-only --all --now --yes --help|trust untrust add import list status history sync auto-sync materialize rotate rollback revoke delete resolve move
 shell||@shell||forward|mutate|never|public|lifecycle|project-shell|shell [project]|open a dev shell, optionally in a project directory|--root --yes --help|

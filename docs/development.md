@@ -60,6 +60,16 @@ leaf publishes recovery facts before importing config and later switches shell e
 not authorize, activate or roll back a release. An interruption resumes from the protected outer
 journal and observed facts.
 
+Structured update history is durable outside the installed runtime. Each committed activation or rollback,
+plus direct preparation failures and declined confirmations, records a structured attempt under
+`$SUBYARD_HOME/logs/updates`; the newest 30 attempts are retained. `yard logs --updates [-n N]`
+shows their phase progression, verified source and target versions when available, and safe terminal
+status codes. It deliberately excludes installer output, error text, environment values, and recovery
+journal JSON; detailed diagnostics remain on the invoking console. `yard logs --audit [-n N]` reads
+the host command audit log across the current file and five 1 MiB rotations. Both local viewers work
+without a usable yard configuration or Incus, while an explicit `-Y` selector preserves ordinary
+owner routing. `yard logs` without either selector continues to show the selected yard's runtime log.
+
 Verify a built candidate with the unmodified supported updater before release:
 
 ```sh
