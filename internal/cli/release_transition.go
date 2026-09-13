@@ -781,10 +781,6 @@ func (reconciler *materializedConfigActivationReconciler) resolveScope(
 	if reconciler.scopeResolved {
 		return nil
 	}
-	if releases.From != releases.Target {
-		reconciler.scopeResolved = true
-		return nil
-	}
 	store, err := releasetransition.NewPOSIXV2Store(reconciler.configHome)
 	if err != nil {
 		return err
@@ -793,19 +789,33 @@ func (reconciler *materializedConfigActivationReconciler) resolveScope(
 	if err != nil {
 		return err
 	}
-	if !snapshot.Exists {
-		reconciler.allLocal = true
-		reconciler.scopeResolved = true
-		return nil
+	var journal releasetransition.JournalRecord
+	if snapshot.Exists {
+		journal, err = releasetransition.ParseJournal(snapshot.Payload)
+		if err != nil {
+			return err
+		}
 	}
-	journal, err := releasetransition.ParseJournal(snapshot.Payload)
-	if err != nil {
+	matches := snapshot.Exists && journal.Goal == reconciler.goal &&
+		journal.ArtifactDigest == reconciler.artifactDigest &&
+		(reconciler.registryDigest == "" || journal.RegistryDigest == reconciler.registryDigest)
+	if releases.From != releases.Target {
+		// Source migrations can rename registrations. Their authorized scope
+		// must remain stable even after they advance the ledger during recovery.
+		if matches && journal.Checkpoint != releasetransition.JournalComplete && len(journal.Steps) != 0 {
+			reconciler.scopeResolved = true
+			return nil
+		}
+		reconciler.allLocal, err = reconciler.sourceMigrationsComplete(store)
+		reconciler.scopeResolved = err == nil
 		return err
 	}
 	reconciler.scopeResolved = true
-	if journal.Goal != reconciler.goal ||
-		journal.ArtifactDigest != reconciler.artifactDigest ||
-		(reconciler.registryDigest != "" && journal.RegistryDigest != reconciler.registryDigest) {
+	if !snapshot.Exists {
+		reconciler.allLocal = true
+		return nil
+	}
+	if !matches {
 		return nil
 	}
 	// Completed source work makes materialized readiness a release-wide fixed
@@ -814,6 +824,29 @@ func (reconciler *materializedConfigActivationReconciler) resolveScope(
 	reconciler.allLocal = journal.Checkpoint == releasetransition.JournalComplete ||
 		journal.Releases.From == journal.Releases.Target
 	return nil
+}
+
+func (reconciler *materializedConfigActivationReconciler) sourceMigrationsComplete(
+	store *releasetransition.POSIXV2Store,
+) (bool, error) {
+	snapshot, err := store.ReadLedger()
+	if err != nil || !snapshot.Exists {
+		return false, err
+	}
+	payload, err := os.ReadFile(filepath.Join(reconciler.cli.options.RepositoryRoot, "config", "release-transition.json"))
+	if err != nil {
+		return false, err
+	}
+	registry, _, err := releasetransition.ParseRegistryV2(payload, releasetransition.BuiltinCapabilityCatalog())
+	if err != nil {
+		return false, err
+	}
+	ledger, _, err := releasetransition.ParseLedgerV2(snapshot.Payload, registry)
+	if err != nil {
+		return false, err
+	}
+	pending, err := registry.PendingPath(ledger)
+	return len(pending) == 0 && err == nil, err
 }
 
 func (reconciler *materializedConfigActivationReconciler) reconcileCLI() *CLI {

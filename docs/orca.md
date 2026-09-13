@@ -26,9 +26,49 @@ Server** on the laptop. This is a private single-client capability: do not put i
 config, shell history, tickets or logs. Generate a separate link for each laptop.
 `pair` briefly restarts the service; existing grants and server state survive.
 
+For another client computer, run `yard orca pair` again on the server and import the new
+link on that laptop. Existing clients may briefly disconnect during the restart,
+but keep their saved access. Ordinary reconnects do not require another pairing.
+
 Orca connects directly over Tailscale. SSH over Tailscale is sufficient for running
 these server commands; an SSH port-forward is only needed for the alternative
 loopback setup below.
+
+### Allow the owner port in Tailscale
+
+An access policy allowing SSH (`tcp:22`), HTTPS (`tcp:443`) or ICMP does not allow
+Orca's preferred `tcp:6768` port. In Tailscale **Access controls**, allow your client
+group to reach your owner-host tag on the selected TCP port. Using a tag covers
+other owner hosts with that tag and port without a separate rule for each IP.
+
+For example, if your policy already defines `group:developers` and `tag:orca`, add
+this entry to its existing `grants` array:
+
+```json
+{
+  "src": ["group:developers"],
+  "dst": ["tag:orca"],
+  "ip": ["tcp:6768"]
+}
+```
+
+Use your existing group and host tag, and replace `6768` if `yard orca status`
+reports another port. See the [Tailscale policy reference](https://tailscale.com/docs/reference/syntax/policy-file).
+Subyard configures the host-to-yard proxy; the tailnet administrator controls this
+network access policy.
+
+If Desktop reports **Host unavailable**, run this on the laptop, replacing `HOST`
+and `PORT` with the endpoint from `yard orca status`:
+
+```sh
+curl --noproxy '*' --connect-timeout 5 --max-time 10 -sS -o /dev/null \
+  -w 'HTTP %{http_code}\n' http://HOST:PORT/
+```
+
+A response from the owner host itself only verifies its local route into the
+yard. The laptop must also reach the port. A successful `tailscale ping --tsmp`
+does not prove policy access: it stops before the access-policy check, as described
+in [Tailscale's policy diagnostics](https://tailscale.com/kb/1338/acl-edit).
 
 ## Endpoint defaults and overrides
 

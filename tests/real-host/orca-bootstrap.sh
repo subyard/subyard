@@ -10,6 +10,7 @@ STATE=''
 PROJECT=''
 INSTANCE=''
 COLLISION_PID=''
+KEEP_FAILED_UPGRADE=0
 ORIGINAL_HOME="$HOME"
 YARD_BIN="$ROOT/.build/yard"
 EXISTING_YARD="${SUBYARD_E2E_ORCA_EXISTING_YARD:-0}"
@@ -55,6 +56,13 @@ cleanup() {
   if [ -n "$COLLISION_PID" ] && kill -0 "$COLLISION_PID" 2>/dev/null; then
     kill -TERM "$COLLISION_PID" 2>/dev/null || true
     wait "$COLLISION_PID" 2>/dev/null || true
+  fi
+  if [ "$KEEP_FAILED_UPGRADE" = 1 ]; then
+    stage "retained marked failed upgrade fixture: $STATE"
+    exit "$rc"
+  fi
+  if [ -f "${SUBYARD_CONFIG_HOME:-}/yards/secondary/config.env" ]; then
+    yard -Y secondary teardown --yes >/dev/null 2>&1 || { rc=3; cleanup_failed=1; }
   fi
   if [ -f "${SUBYARD_CONFIG_HOME:-}/yards/default/config.env" ]; then
     yard teardown --yes >/dev/null 2>&1 || { rc=3; cleanup_failed=1; }
@@ -448,6 +456,20 @@ mkdir "$STATE/source"
 tar -C "$ROOT" --null -T "$STATE/source-files" -cf - | tar -C "$STATE/source" -xf -
 git -C "$STATE/source" init --quiet
 git -C "$STATE/source" add --all
+if [ -n "$UPGRADE_FROM" ]; then
+  # The predecessor must be converged: its released updater cannot change
+  # targets while an existing activation needs repair. Only the candidate
+  # introduces this new desired value, in both local yards.
+  python3 - "$STATE/source/config/agents/claude/settings.json" <<'PY_UPGRADE_DEFAULT'
+import json
+import pathlib
+import sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["autoMemoryDirectory"] = "~/.claude-memory-upgrade-fixture"
+path.write_text(json.dumps(value) + "\n")
+PY_UPGRADE_DEFAULT
+fi
 release_version=0.13.3-orca-bootstrap-e2e
 bash "$STATE/source/dev/package-engine.sh" --version "$release_version" \
   --output-dir "$STATE/release" >/dev/null
@@ -466,6 +488,9 @@ if [ -n "$UPGRADE_FROM" ]; then
   published_target="$(readlink "$SUBYARD_HOME/runtime/current")"
   yard init --yes >"$STATE/published-init.out" 2>"$STATE/published-init.err" \
     || die 'published yard initialization failed'
+  yard update --offline --version "$UPGRADE_FROM" --yes \
+    >"$STATE/published-transition.out" 2>"$STATE/published-transition.err" \
+    || die 'published release transition did not complete before the upgrade fixture'
   yard orca up --yes >"$STATE/published-orca-up.out" 2>"$STATE/published-orca-up.err" \
     || die 'published Orca startup failed'
   ORCA_PORT="$(setting_value ORCA_HOST_PORT)"
@@ -476,10 +501,49 @@ if [ -n "$UPGRADE_FROM" ]; then
   install_stock_orca_client
   client_status "$pairing" upgrade-client
 
+  stage 'preparing another local yard for changed candidate defaults'
+  install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/secondary"
+  cat > "$SUBYARD_CONFIG_HOME/yards/secondary/config.env" <<EOF
+INCUS_PROJECT=$PROJECT-secondary
+YARD_INSTANCE_NAME=$INSTANCE-secondary
+SSH_PORT=$(free_port)
+ENVIRONMENT_PROFILES=""
+CODING_TOOL_INTEGRATIONS=claude
+EOF
+  chmod 0600 "$SUBYARD_CONFIG_HOME/yards/secondary/config.env"
+  yard -Y secondary init --yes >"$STATE/secondary-init.out" 2>"$STATE/secondary-init.err" \
+    || die 'secondary yard initialization failed'
+  yard -Y secondary start --yes >"$STATE/secondary-start.out" 2>"$STATE/secondary-start.err" \
+    || die 'secondary yard did not start before the upgrade'
+  yard config status --all-local >"$STATE/before-upgrade-config.out" 2>"$STATE/before-upgrade-config.err" \
+    || die 'published release configs are not converged before the upgrade'
+  rg -Fxq 'yard secondary materialized-config: converged' "$STATE/before-upgrade-config.out" \
+    || die 'secondary yard must be running and converged before the upgrade'
+
   stage "updating published Subyard $UPGRADE_FROM through the public update command"
   YARD_RELEASE_BASE_URL="file://$STATE/release" yard update --version "$release_version" --yes \
     >"$STATE/upgrade.out" 2>"$STATE/upgrade.err" \
-    || { report_config_failure "$STATE/upgrade.err"; die 'published release upgrade failed'; }
+    || {
+      KEEP_FAILED_UPGRADE=1
+      report_config_failure "$STATE/upgrade.out"
+      report_config_failure "$STATE/upgrade.err"
+      python3 - "$STATE/upgrade.err" <<'PY_UPGRADE_ERROR'
+import pathlib
+import re
+import sys
+
+# This fixture uses public desired configs and synthetic identities. Bound the
+# diagnostic and remove capabilities before the marked temporary state is cleaned.
+text = pathlib.Path(sys.argv[1]).read_text(errors="replace")[-8192:]
+text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+text = re.sub(r"orca://\S+", "<redacted>", text)
+text = re.sub(r"(?im)^.*(?:authorization|bearer|pairing|token|secret|password).*$", "<redacted>", text)
+text = re.sub(r"[A-Za-z0-9_+/=-]{64,}", "<redacted>", text)
+for line in text.splitlines()[-20:]:
+    print("upgrade-error: " + line, file=sys.stderr)
+PY_UPGRADE_ERROR
+      die 'published release upgrade failed'
+    }
   [ "$(yard --version)" = "yard $release_version" ] || die 'upgrade did not activate the candidate'
   installed_target="$(readlink "$SUBYARD_HOME/runtime/current")"
   [ "$installed_target" != "$published_target" ] || die 'upgrade retained the predecessor'
@@ -487,10 +551,17 @@ if [ -n "$UPGRADE_FROM" ]; then
   [ "$(readlink "$SUBYARD_HOME/runtime/previous")" = "$published_target" ] \
     || die 'upgrade did not retain the published predecessor'
   release_ready upgraded || { print_release_state upgraded; die 'upgraded release is not ready'; }
+  yard config status --all-local >"$STATE/upgrade-config.out" 2>"$STATE/upgrade-config.err" \
+    || die 'upgrade left materialized config drift in a local yard'
+  rg -Fxq 'yard secondary materialized-config: converged' "$STATE/upgrade-config.out" \
+    || die 'secondary yard must remain running and converged after the upgrade'
+  yard orca restart --yes >"$STATE/upgrade-restart.out" 2>"$STATE/upgrade-restart.err" \
+    || die 'Orca restart was blocked after the upgrade'
   yard orca status >"$STATE/upgrade-status.out" 2>"$STATE/upgrade-status.err" \
     || die 'upgraded Orca status failed'
   [ "$(setting_value ORCA_HOST_PORT)" = "$ORCA_PORT" ] || die 'upgrade changed the Orca endpoint'
-  assert_materialized_json || die 'upgrade did not converge managed JSON fields'
+  assert_materialized_json "$STATE/source/config/agents/claude/settings.json" \
+    "$STATE/source/config/agents/pi/settings.json" || die 'upgrade did not converge managed JSON fields'
   assert_orca_runtime_json_preserved
   assert_orca_readiness
   client_status "$pairing" upgrade-client

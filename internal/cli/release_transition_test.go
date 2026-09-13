@@ -817,6 +817,103 @@ esac
 	}
 }
 
+func TestForwardMaterializedConfigResumeKeepsScopeAcrossLegacyRename(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	registry, err := os.ReadFile(filepath.Join("..", "..", "config", "release-transition.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeReleaseTransitionTestFile(t,
+		filepath.Join(root, "config", "release-transition.json"), registry, 0o600)
+	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join([]string{
+		"SHIFT_MODE=shift", "FORWARD_SSH_AGENT=0", "DEV_SUDO=0", "DEV_UID=1000", "DEV_USER=dev",
+		"SSH_PORT=2222", "STORAGE_PATH=" + filepath.Join(root, "data", "storage"),
+		"HOST_BASE=" + filepath.Join(root, "host"), "RESTRICTED_DISK_PATHS=" + filepath.Join(root, "host"),
+	}, "\n")+"\n", 0o600)
+	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+	legacy := filepath.Join(configHome, "yards", testyardmigration.LegacyYard)
+	current := filepath.Join(configHome, "yards", testyardmigration.CurrentYard)
+	writeReleaseTransitionTestFile(t, filepath.Join(legacy, "config.env"),
+		[]byte("YARD_TEMPLATE=test-vms\n"), 0o600)
+	runtimeRoot := filepath.Join(root, "runtime-legacy-config-resume")
+	for _, release := range []string{"release-a", "release-b"} {
+		if err := os.MkdirAll(filepath.Join(runtimeRoot, "releases", release), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("releases/release-a", filepath.Join(runtimeRoot, "current")); err != nil {
+		t.Fatal(err)
+	}
+	fake := &testkit.Incus{Instances: make(map[string]ports.InstanceInfo)}
+	program, err := New(Options{
+		RepositoryRoot: root, Environment: environment, Incus: fake, Executor: fake,
+		Config: &recordingConfigApplier{}, Stdout: io.Discard, Stderr: io.Discard,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := releasetransition.ProcessRequest{
+		SchemaVersion: releasetransition.ProcessProtocolSchemaV1,
+		Mode:          releasetransition.ProcessInspect, RuntimeRoot: runtimeRoot, ConfigHome: configHome,
+		Target: "release-b", Direction: releasetransition.DirectionActivateTarget,
+		ArtifactDigest:      releasetransition.Fingerprint(strings.Repeat("a", 64)),
+		InheritedSettingIDs: program.releaseTransitionInheritedSettingIDs(),
+	}
+	reconciler := func() *materializedConfigActivationReconciler {
+		return &materializedConfigActivationReconciler{
+			cli: program, configHome: configHome,
+			goal:           releasetransition.Goal{Target: request.Target, Direction: request.Direction},
+			artifactDigest: request.ArtifactDigest,
+		}
+	}
+	owner := &interruptedRenameOwner{legacy: legacy, current: current}
+	verify := func(releasetransition.PlanToken, releasetransition.Authorization) bool { return true }
+	first, err := executeReleaseTransitionRequest(context.Background(), root, request, verify,
+		[]releasetransition.V2ActivationReconciler{&observeOnlyMaterialized{
+			materializedConfigActivationReconciler: reconciler(),
+		}}, owner, nil)
+	if err != nil || first.Inspection == nil {
+		t.Fatalf("inspect forward transition = %#v, err=%v", first, err)
+	}
+	request.Mode = releasetransition.ProcessConverge
+	request.Execution = &releasetransition.Execution{Plan: first.Inspection.Plan, Authorization: "confirmed"}
+	interrupting := &observeOnlyMaterialized{materializedConfigActivationReconciler: reconciler(), fail: true}
+	interrupted, err := executeReleaseTransitionRequest(context.Background(), root, request, verify,
+		[]releasetransition.V2ActivationReconciler{interrupting}, owner, nil)
+	if err != nil || interrupted.Outcome == nil ||
+		interrupted.Outcome.Status != releasetransition.StatusRecovering {
+		t.Fatalf("interrupted activation = %#v, outcome=%+v err=%v",
+			interrupted, interrupted.Outcome, err)
+	}
+	store, err := releasetransition.NewPOSIXV2Store(configHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	complete, err := reconciler().sourceMigrationsComplete(store)
+	if err != nil || !complete {
+		t.Fatalf("source migrations complete=%t err=%v", complete, err)
+	}
+	request.Mode, request.Execution = releasetransition.ProcessInspect, nil
+	fresh := reconciler()
+	resume, err := executeReleaseTransitionRequest(context.Background(), root, request, verify,
+		[]releasetransition.V2ActivationReconciler{&observeOnlyMaterialized{
+			materializedConfigActivationReconciler: fresh,
+		}}, owner, nil)
+	if err != nil || resume.Inspection == nil || resume.Inspection.Resume == nil || fresh.allLocal {
+		t.Fatalf("fresh selected-scope resume = %#v, allLocal=%t err=%v", resume, fresh.allLocal, err)
+	}
+	request.Mode = releasetransition.ProcessConverge
+	request.Execution = &releasetransition.Execution{Plan: resume.Inspection.Plan}
+	settled, err := executeReleaseTransitionRequest(context.Background(), root, request, verify,
+		[]releasetransition.V2ActivationReconciler{&observeOnlyMaterialized{
+			materializedConfigActivationReconciler: fresh,
+		}}, owner, nil)
+	if err != nil || settled.Outcome == nil || settled.Outcome.Status != releasetransition.StatusReady {
+		t.Fatalf("resumed forward transition = %#v, outcome=%+v err=%v",
+			settled, settled.Outcome, err)
+	}
+}
+
 func TestCandidateReleaseTransitionProtocolReportsInvalidRegistry(t *testing.T) {
 	repositoryRoot := t.TempDir()
 	runtimeRoot := t.TempDir()
@@ -1307,6 +1404,54 @@ func TestReleaseTransitionRejectsTrailingRequestJSON(t *testing.T) {
 
 type releaseTransitionOwnerFixture struct{}
 
+type interruptedRenameOwner struct {
+	legacy, current string
+}
+
+type observeOnlyMaterialized struct {
+	*materializedConfigActivationReconciler
+	fail bool
+}
+
+func (reconciler *observeOnlyMaterialized) Reconcile(
+	context.Context, releasetransition.ReleaseLinks,
+) error {
+	if reconciler.fail {
+		reconciler.fail = false
+		return errors.New("injected interruption before materialized config reconciliation")
+	}
+	return nil
+}
+
+func (owner *interruptedRenameOwner) Prepare(
+	context.Context, releasetransition.V2SettingsSnapshotView,
+) (releasetransition.OwnerRegistrationObservation, error) {
+	return releasetransition.OwnerRegistrationObservation{
+		State:        releasetransition.OwnerRegistrationLegacyDirectory,
+		Registration: releasetransition.Fingerprint(strings.Repeat("1", 64)),
+		Overrides:    releasetransition.Fingerprint(strings.Repeat("2", 64)),
+		Controller:   releasetransition.Fingerprint(strings.Repeat("3", 64)),
+	}, nil
+}
+
+func (owner *interruptedRenameOwner) Observe(
+	_ context.Context, _ releasetransition.OwnerRegistrationObservation,
+) (releasetransition.OwnerRegistrationProgress, error) {
+	if _, err := os.Stat(owner.current); err == nil {
+		return releasetransition.OwnerRegistrationDesired, nil
+	}
+	return releasetransition.OwnerRegistrationExpected, nil
+}
+
+func (owner *interruptedRenameOwner) Commit(
+	_ context.Context, before releasetransition.OwnerRegistrationObservation,
+) error {
+	if before.TerminalCleanup {
+		return nil
+	}
+	return os.Rename(owner.legacy, owner.current)
+}
+
 type prospectiveOwnerSettingsView struct {
 	snapshots map[string]config.PersistentFileSnapshot
 }
@@ -1546,9 +1691,12 @@ func TestCompletedMaterializedConfigReadinessDoesNotDependOnSelectedYard(t *test
 		return observation
 	}
 	sourceRelease := releasetransition.ReleasePair{From: "release-a", Target: "release-b"}
-	if sourceBootstrap := observe(program, "default", sourceRelease); !sourceBootstrap.Converged {
-		t.Fatalf("source transition did not preserve selected-yard scope: %#v", sourceBootstrap)
+	if sourceBootstrap := observe(program, "default", sourceRelease); sourceBootstrap.Converged {
+		t.Fatalf("source transition ignored drift in another local yard: %#v", sourceBootstrap)
 	}
+	fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{Result: ports.InstanceExecResult{
+		Stdout: []byte(strings.Repeat("0", 64) + "  /home/dev/.codex/rules/repo.rules\n"),
+	}})
 	activeRelease := releasetransition.ReleasePair{From: "release-b", Target: "release-b"}
 	bootstrap := observe(updateProgram, "default", activeRelease)
 	nextCommand := observe(program, testyardmigration.CurrentYard, activeRelease)

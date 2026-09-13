@@ -222,6 +222,11 @@ Release-owned one-time transitions are declared in
 authorization binding, protected evidence, per-domain epoch advancement, stable runtime links,
 forward recovery and post-activation reconciliation. A completed one-time migration is durable
 history and is never reopened to repair later drift.
+When switching releases after source migrations are complete, materialized-config
+activation observes and reconciles all registered local yards, using the same scope
+as the completed release's readiness check. Pending source migrations retain their
+selected-yard scope across recovery because they can rename yard registrations.
+This config reconciliation leaves stopped or absent yards untouched.
 Each compiled capability classifies its bounded resources as preserve, transform, canonicalize,
 reset or block before confirmation. An authorized reset is a successful, journaled one-time result;
 unknown or ambiguous state produces a structured operator-action outcome without overwriting it.
