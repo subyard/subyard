@@ -180,6 +180,14 @@ func (cli *CLI) executeTeardown(
 	if hasOtherRegisteredLocalYard(loaded.Context.YardName, yards) {
 		contextValues["SUBYARD_TEARDOWN_KEEP_SHARED"] = "1"
 	}
+	// Teardown must not leave a credential service reconnecting to a future yard.
+	agentRuntime, agentErr := cli.sshAgentRuntime(loaded)
+	if agentErr != nil {
+		return domain.AdapterResult{}, agentErr
+	}
+	if agentErr = agentRuntime.Revoke(ctx); agentErr != nil {
+		return domain.AdapterResult{}, agentErr
+	}
 	request := domain.AdapterRequest{
 		Schema: shelladapter.ProtocolSchema, OperationID: plan.OperationID,
 		Adapter: "teardown", Action: "apply", Arguments: []string{"--yes"}, Context: contextValues,

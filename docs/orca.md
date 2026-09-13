@@ -137,6 +137,30 @@ Desktop as described above.
 
 ## Projects and lifecycle
 
+Subyard replaces Orca's stock Codex YOLO launch default with an explicit empty
+argument setting. With the default account, Codex then reads the yard's
+`~/.codex/config.toml`, including
+its approval policy and reviewer. The shipped configuration allows local work
+inside the yard while keeping user approval for matching commit/push rules.
+Orca may label this launch mode **Manual**; that label does not mean a read-only
+Codex sandbox.
+
+Paired desktops can also send their own stock YOLO argument. In the yard's
+default Bash shell, an Orca-only login function removes that exact argument
+before executing the native Codex CLI. This keeps remote agent launches on the
+yard configuration too. SSH/VS Code shells and the installed Codex binary are
+unchanged. A desktop may still display its local YOLO preference; it does not
+describe the effective server launch. Custom shells and explicit executable
+paths bypass this Bash integration. Account-specific `CODEX_HOME` is preserved;
+an account configured with a different home reads its own Codex configuration.
+
+`orca up` repairs fresh and existing stock defaults through Orca's settings API.
+The installed project hook also checks them on `orca sync` and subsequent
+`yard init` runs while Orca is active. Other settings and explicitly customized
+Codex arguments are preserved. Put persistent Codex policy in the yard's agent
+configuration; selecting YOLO or another session mode in a client can override
+it. Existing Codex sessions are not reconfigured by this repair.
+
 Each Subyard project has one Orca group containing its canonical
 `/srv/workspaces/<project-id>/src` root and every nested Git checkout. The root is always
 registered: as a Git repository when it is a Git root, or as a folder otherwise. The

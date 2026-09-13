@@ -256,6 +256,14 @@ func NewCoreActionRegistry() (*domain.ActionRegistry, error) {
 		},
 	}
 	definitions = append(definitions, credentialActionDefinitions()...)
+	definitions = append(definitions,
+		domain.ActionDefinition{Action: "ssh-agent.help", Summary: "Show SSH agent help", Effect: domain.ActionRead, Recovery: domain.RecoveryNotNeeded},
+		domain.ActionDefinition{Action: "ssh-agent.status", Summary: "Show SSH agent status", Effect: domain.ActionRead, Recovery: domain.RecoveryNotNeeded},
+		domain.ActionDefinition{Action: "ssh-agent.start", Summary: "Start SSH agent", Effect: domain.ActionMutation,
+			Impacts: []domain.ActionImpact{domain.ImpactAccess, domain.ImpactSecurity}, Recovery: domain.RecoveryReversible},
+		domain.ActionDefinition{Action: "ssh-agent.stop", Summary: "Stop SSH agent", Effect: domain.ActionMutation,
+			Impacts: []domain.ActionImpact{domain.ImpactAccess}, Recovery: domain.RecoveryReversible},
+	)
 	return domain.NewActionRegistry(definitions)
 }
 

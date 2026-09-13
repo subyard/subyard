@@ -63,9 +63,12 @@ yard provision [profile]           Apply a project profile
 yard test-vms <command>            Manage two disposable nested test VMs (opt-in)
 yard up | down | info [project]    Manage an L2 project environment
 yard keys <command>                Manage the host-side encrypted credential ledger
+yard ssh-agent <command>           Grant, inspect or stop temporary SSH key access
 yard host <command>                Register and manage remote owner hosts
 yard config <command>              Inspect or sync settings and refresh file consumers
 ```
+
+See [temporary SSH access](docs/ssh-agent.md) to use a host Git key from every yard session.
 
 ## Documentation
 

@@ -380,6 +380,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 	}
 	readOnlyInvocation := (core && commandHelpRequested(commandArguments)) ||
 		(core && definition.Effect == command.EffectRead) ||
+		(core && definition.Handler == "@ssh-agent" && sshAgentReadOnlyInvocation(commandArguments)) ||
 		resourceReadOnly ||
 		(core && definition.Handler == "@config" && (configReadOnlyInvocation(commandArguments) || configSyncCheck || configSyncStatus)) ||
 		(core && definition.Handler == "@test-vms" && testVMStatusInvocation(commandArguments)) ||
@@ -659,10 +660,21 @@ func (cli *CLI) Run(ctx context.Context) int {
 		remote = loadedContext.OwnerEndpoint
 	}
 	if name != "_info" && cli.env["SUBYARD_NO_AUDIT"] == "" {
-		cli.audit(name, commandArguments, yard, remote)
+		if definition.Handler == "@ssh-agent" {
+			cli.audit(name, sshAgentAuditArguments(commandArguments), yard, remote)
+		} else {
+			cli.audit(name, commandArguments, yard, remote)
+		}
 	}
 
 	target, routeErr := application.Route(loadedContext, domain.RemotePolicy(remotePlane))
+	if core && definition.Handler == "@ssh-agent" {
+		if loadedContext.AccessKind == domain.AccessRemote {
+			cli.errorf("ssh-agent is owner-host only; run it on the owner host")
+			return 1
+		}
+		return cli.runSSHAgent(ctx, loaded, commandArguments)
+	}
 	if routeErr != nil {
 		if remotePlane == command.RemoteDeny {
 			fmt.Fprintf(cli.options.Stderr, "%s is host-local — use sync or clone\n", name)

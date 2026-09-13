@@ -12,6 +12,7 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/hostruntime"
 	"github.com/Subyard/Subyard/internal/adapters/incusclient"
 	"github.com/Subyard/Subyard/internal/adapters/networkruntime"
+	"github.com/Subyard/Subyard/internal/adapters/sshagentruntime"
 	"github.com/Subyard/Subyard/internal/adapters/testvmsruntime"
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/cli"
@@ -34,6 +35,17 @@ func main() {
 		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "network policy lock: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "_ssh-agent-worker" {
+		if len(os.Args) != 3 {
+			fmt.Fprintln(os.Stderr, "invalid SSH-agent worker invocation")
+			os.Exit(2)
+		}
+		if err := sshagentruntime.RunWorker(ctx, os.Args[2]); err != nil {
+			fmt.Fprintln(os.Stderr, "SSH-agent worker stopped:", err)
 			os.Exit(1)
 		}
 		return

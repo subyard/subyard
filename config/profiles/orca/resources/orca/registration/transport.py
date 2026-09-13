@@ -27,7 +27,7 @@ class RuntimeRPC:
         self.runtime_id = None
 
     def call(self, method, params=None, before_send=None):
-        write = method not in ("repo.list", "projectGroup.list")
+        write = method not in ("repo.list", "projectGroup.list", "settings.get")
         sent = False
         try:
             fd = os.open(self.metadata_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)

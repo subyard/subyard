@@ -27,8 +27,9 @@ ORCA_CAPTURE=/usr/local/libexec/subyard/orca-capture-ready
 ORCA_INGRESS=/usr/local/libexec/subyard/orca-ingress
 ORCA_SYNC=/usr/local/libexec/subyard/projects-changed.d/orca
 ORCA_REGISTRATION=/usr/local/libexec/subyard/orca-registration
+ORCA_CODEX_PROFILE=/etc/profile.d/subyard-orca-codex.sh
 ORCA_CONTRACT_DIGEST=/usr/local/libexec/subyard/orca-contract.sha256
-ORCA_CONTRACT_VERSION=2
+ORCA_CONTRACT_VERSION=3
 ORCA_GUEST_PORT=6768
 ORCA_RUNTIME_CHANGED=0
 ORCA_TMP_DIR=
@@ -255,6 +256,7 @@ stage_runtime_contract() {
   local ingress="$ORCA_TMP_DIR/orca-ingress"
   local capture="$ORCA_TMP_DIR/orca-capture-ready"
   local sync="$ORCA_TMP_DIR/orca-sync"
+  local codex_profile="$ORCA_TMP_DIR/orca-codex-profile"
   local unit="$ORCA_TMP_DIR/$ORCA_UNIT"
   local source guest_helper helper contract_version
   local -a helpers=()
@@ -266,6 +268,7 @@ stage_runtime_contract() {
   local guest_ingress="$ORCA_GUEST_TMP_DIR/orca-ingress"
   local guest_capture="$ORCA_GUEST_TMP_DIR/orca-capture-ready"
   local guest_sync="$ORCA_GUEST_TMP_DIR/orca-sync"
+  local guest_codex_profile="$ORCA_GUEST_TMP_DIR/orca-codex-profile"
   local guest_unit="$ORCA_GUEST_TMP_DIR/$ORCA_UNIT"
   cat >"$ingress" <<'INGRESS'
 #!/usr/bin/env bash
@@ -303,10 +306,20 @@ umask 077
 : >"$ready"
 exec "$@" >"$ready"
 CAPTURE
+  # Orca's bash startup sources /etc/profile before injecting its agent command.
+  # Remote clients can send their own stock YOLO argument, bypassing server defaults.
+  # Keep the native CLI and SSH/VS Code shells unchanged; this is a launch default,
+  # not a security boundary against explicit commands or in-session mode changes.
+  cat >"$codex_profile" <<CODEX_PROFILE
+if [ "\${SUBYARD_ORCA_CODEX_CONFIG:-}" = 1 ]; then
+  codex() { /usr/bin/python3 -B $ORCA_REGISTRATION/codex_launch.py "\$@"; }
+fi
+CODEX_PROFILE
   cat >"$sync" <<SYNC_HEAD
 #!/usr/bin/env bash
 set -euo pipefail
 systemctl is-active --quiet $ORCA_UNIT || exit 0
+/usr/bin/python3 -B $ORCA_REGISTRATION/settings.py
 status=0
 report="\$(/usr/bin/python3 -B $ORCA_REGISTRATION/main.py sync)" || status=\$?
 if ! jq -e '(.ready | type == "boolean") and (.errors | type == "array") and (.warnings | type == "array")' <<<"\$report" >/dev/null; then
@@ -333,6 +346,7 @@ Environment=XDG_CONFIG_HOME=$ORCA_STATE/config
 Environment=XDG_DATA_HOME=$ORCA_STATE/data
 Environment=XDG_STATE_HOME=$ORCA_STATE/state
 Environment=LIBGL_ALWAYS_SOFTWARE=1
+Environment=SUBYARD_ORCA_CODEX_CONFIG=1
 WorkingDirectory=/srv/workspaces
 ExecStartPre=+$ORCA_INGRESS up $ORCA_GUEST_PORT
 ExecStart=$ORCA_CAPTURE $ORCA_READY $ORCA_EXEC serve --port $ORCA_GUEST_PORT --pairing-address $ORCA_ADVERTISE_HOST:$ORCA_HOST_PORT --json
@@ -354,6 +368,8 @@ UNIT
     "${PROJ[@]}" --mode 0755 >/dev/null
   incus file push "$sync" "$YARD_INSTANCE_NAME$guest_sync" \
     "${PROJ[@]}" --mode 0755 >/dev/null
+  incus file push "$codex_profile" "$YARD_INSTANCE_NAME$guest_codex_profile" \
+    "${PROJ[@]}" --mode 0644 >/dev/null
   incus file push "$unit" "$YARD_INSTANCE_NAME$guest_unit" \
     "${PROJ[@]}" --mode 0644 >/dev/null
   yexec install -d -m 0755 "$ORCA_REGISTRATION"
@@ -368,6 +384,7 @@ UNIT
   if ! yexec cmp -s "$guest_ingress" "$ORCA_INGRESS" ||
     ! yexec cmp -s "$guest_capture" "$ORCA_CAPTURE" ||
     ! yexec cmp -s "$guest_sync" "$ORCA_SYNC" ||
+    ! yexec cmp -s "$guest_codex_profile" "$ORCA_CODEX_PROFILE" ||
     ! yexec cmp -s "$guest_unit" "/etc/systemd/system/$ORCA_UNIT" ||
     ! ingress_active; then
     ORCA_RUNTIME_CHANGED=1
@@ -376,9 +393,10 @@ UNIT
   yexec install -m 0755 "$guest_ingress" "$ORCA_INGRESS"
   yexec install -m 0755 "$guest_capture" "$ORCA_CAPTURE"
   yexec install -m 0755 "$guest_sync" "$ORCA_SYNC"
+  yexec install -m 0644 "$guest_codex_profile" "$ORCA_CODEX_PROFILE"
   yexec install -m 0644 "$guest_unit" "/etc/systemd/system/$ORCA_UNIT"
   yexec bash -se -- "$ORCA_CONTRACT_DIGEST" "$contract_version" \
-    "$ORCA_INGRESS" "$ORCA_CAPTURE" "$ORCA_SYNC" "/etc/systemd/system/$ORCA_UNIT" "${helpers[@]}" <<'YARD'
+    "$ORCA_INGRESS" "$ORCA_CAPTURE" "$ORCA_SYNC" "$ORCA_CODEX_PROFILE" "/etc/systemd/system/$ORCA_UNIT" "${helpers[@]}" <<'YARD'
 set -euo pipefail
 marker="$1"; version="$2"; shift 2
 digest="$(sha256sum "$@" | sha256sum | awk '{print $1}')"
@@ -422,13 +440,18 @@ run_project_sync() {
   yexec runuser -u "${DEV_USER:-dev}" -- "$ORCA_SYNC"
 }
 
+codex_defaults_ready() {
+  yexec runuser -u "${DEV_USER:-dev}" -- /usr/bin/python3 -B \
+    "$ORCA_REGISTRATION/settings.py" --check >/dev/null 2>&1
+}
+
 runtime_contract_ready() {
   local contract_version
   local -a helpers=()
   mapfile -t helpers < <(registration_files)
   contract_version="$(registration_contract_version)" || return 1
   if ! yexec bash -se -- "$ORCA_CONTRACT_DIGEST" "$contract_version" \
-    "$ORCA_INGRESS" "$ORCA_CAPTURE" "$ORCA_SYNC" "/etc/systemd/system/$ORCA_UNIT" "${helpers[@]}" <<'YARD'
+    "$ORCA_INGRESS" "$ORCA_CAPTURE" "$ORCA_SYNC" "$ORCA_CODEX_PROFILE" "/etc/systemd/system/$ORCA_UNIT" "${helpers[@]}" <<'YARD'
 set -euo pipefail
 marker="$1"; version="$2"; shift 2
 [ -r "$marker" ]
@@ -514,7 +537,7 @@ automatic_project_hook_ready() {
 up_converged() {
   release_ready && dependencies_ready && runtime_contract_ready && service_enabled &&
     service_ready && ingress_active && route_matches && owner_endpoint_ready &&\
-    automatic_project_hook_ready && projects_synced
+    automatic_project_hook_ready && codex_defaults_ready && projects_synced
 }
 
 cmd_up() {
@@ -548,6 +571,7 @@ cmd_up() {
     die "Orca owner endpoint failed readiness; route and service were rolled back"
   fi
   run_project_sync
+  codex_defaults_ready || die "Orca Codex launch defaults did not converge"
   automatic_project_hook_ready && projects_synced || die "Orca project registration did not converge"
   ok "Orca ready through $ORCA_TRANSPORT at $ORCA_ADVERTISE_HOST:$ORCA_HOST_PORT"
 }
@@ -610,6 +634,11 @@ cmd_status() {
     warn "automatic project dispatcher missing or stale; run '$(yard_cmd_hint) init'"
   fi
   if [ "$service_is_ready" -eq 1 ]; then
+    if codex_defaults_ready; then
+      ok "Codex stock YOLO launch override disabled; yard config supplies defaults"
+    else
+      warn "Codex launch defaults need repair; run '$(yard_cmd_hint) orca up'"
+    fi
     if report="$(project_registration_report)"; then
       registered="$(jq -r '.registered' <<<"$report")"
       total="$(jq -r '.total' <<<"$report")"
@@ -721,6 +750,7 @@ prepare_resource() { # <public-verb>
         route_matches || changed=true
         owner_endpoint_ready || changed=true
         automatic_project_hook_ready || changed=true
+        codex_defaults_ready || changed=true
         projects_synced || changed=true
       else
         changed=true
@@ -728,6 +758,7 @@ prepare_resource() { # <public-verb>
       if [ "$changed" = true ]; then
         emit_resource_assessment up true \
           "converge the pinned Orca package, dependencies and service contract" \
+          "use the yard Codex configuration instead of the stock Orca YOLO launch default" \
           "publish the owned guarded endpoint for the selected yard" \
           "register Subyard roots and nested Git checkouts in their project groups"
       else

@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Subyard/Subyard/internal/adapters/sshagentruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -45,6 +46,7 @@ func (runtime Runtime) CheckSecurity(
 	quiet bool,
 ) (string, error) {
 	findings := runtime.staticFindings()
+	findings = append(findings, runtime.sshAgentFindings(ctx)...)
 	state, live, err := runtime.liveState(ctx)
 	if err != nil {
 		return "FAIL", err
@@ -558,4 +560,29 @@ func writer(value io.Writer) io.Writer {
 		return io.Discard
 	}
 	return value
+}
+
+func (runtime Runtime) sshAgentFindings(ctx context.Context) []finding {
+	if runtime.Yard.Paths.DataHome == "" || runtime.Yard.Paths.OperatorHome == "" {
+		return nil
+	}
+	environment := make([]string, 0, len(runtime.Environment))
+	for name, value := range runtime.Environment {
+		environment = append(environment, name+"="+value)
+	}
+	agentRuntime, err := sshagentruntime.New(sshagentruntime.Config{
+		StateRoot: filepath.Join(runtime.Yard.Paths.DataHome, "ssh-agent"),
+		Yard:      runtime.Yard.YardName, OperatorHome: runtime.Yard.Paths.OperatorHome, Environment: environment,
+	})
+	if err != nil {
+		return []finding{{"warn", "Temporary SSH-agent state could not be inspected"}}
+	}
+	status, err := agentRuntime.Inspect(ctx)
+	if err != nil {
+		return []finding{{"warn", "Temporary SSH-agent state could not be inspected"}}
+	}
+	if status.State == "active" || status.State == "connecting" || status.State == "loading" {
+		return []finding{{"warn", "Temporary SSH-agent access is granted to this yard: every dev process can use the selected key's upstream permissions until expiry or owner revocation"}}
+	}
+	return nil
 }

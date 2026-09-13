@@ -667,6 +667,13 @@
       "risk_domains": ["ssh-remote-transport"]
     },
     {
+      "id": "internal-sshagentruntime",
+      "priority": 579,
+      "pattern": "^internal/adapters/sshagentruntime/.*$",
+      "check_sets": ["ssh-transport"],
+      "risk_domains": ["ssh-remote-transport", "boot-lifecycle"]
+    },
+    {
       "id": "internal-credential",
       "priority": 570,
       "pattern": "^internal/credential/.*$",

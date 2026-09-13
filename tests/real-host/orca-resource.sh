@@ -257,7 +257,7 @@ assert_paired_terminal_io() {
   error="$work/$profile-terminal-create.err"
   if client_cli "$pairing" "$profile" terminal create --worktree "$selector" \
     --title subyard-terminal-e2e \
-    --command "printf '%s%s\\n' 'subyard-terminal-' 'ready'; IFS= read -r value; printf '%s%s%s\\n' 'subyard-terminal-' 'echo:' \"\$value\"" \
+    --command "codex --dangerously-bypass-approvals-and-sandbox --model fixture '$profile'; printf '%s%s\\n' 'subyard-terminal-' 'ready'; IFS= read -r value; printf '%s%s%s\\n' 'subyard-terminal-' 'echo:' \"\$value\"" \
     --json >"$create" 2>"$error"; then
     :
   else
@@ -282,6 +282,12 @@ assert_paired_terminal_io() {
     sleep 0.1
   done
   [ "$ready" -eq 1 ] || terminal_fail 'readiness poll' 0 "$read_result"
+  "${incus[@]}" exec "$instance" -- python3 -c '
+import json, sys
+from pathlib import Path
+actual = json.loads(Path("/tmp/subyard-codex-launch.json").read_text())
+assert actual == ["--model", "fixture", sys.argv[1]], "paired Codex launch overrode the yard configuration"
+' "$profile" || terminal_fail 'Codex configuration arguments' 0 "$read_result"
 
   error="$work/$profile-terminal-send.err"
   if client_cli "$pairing" "$profile" terminal send --terminal "$handle" \
@@ -477,6 +483,70 @@ run_orca up
 assert_no_pairing_journal
 assert_repos
 
+stage 'checking fresh Codex defaults and repairing an existing YOLO preference'
+"${incus[@]}" exec "$instance" -- runuser -u dev -- python3 -B - <<'PY'
+import sys
+sys.path.insert(0, "/usr/local/libexec/subyard/orca-registration")
+from transport import RuntimeRPC
+rpc = RuntimeRPC("/srv/agents/orca/config/orca/orca-runtime.json")
+arguments = rpc.call("settings.get")["settings"]["agentDefaultArgs"]
+assert arguments["codex"] == "", "fresh Orca still overrides the yard Codex config"
+rpc.call("settings.update", {"agentDefaultArgs": {
+    **arguments, "codex": "--dangerously-bypass-approvals-and-sandbox", "claude": "--verbose"
+}})
+PY
+run_orca up
+"${incus[@]}" exec "$instance" -- runuser -u dev -- python3 -B - <<'PY'
+import sys
+sys.path.insert(0, "/usr/local/libexec/subyard/orca-registration")
+from transport import RuntimeRPC
+rpc = RuntimeRPC("/srv/agents/orca/config/orca/orca-runtime.json")
+arguments = rpc.call("settings.get")["settings"]["agentDefaultArgs"]
+assert arguments["codex"] == "", "existing Orca YOLO preference was not repaired"
+assert arguments["claude"] == "--verbose", "repair changed another agent's preference"
+# This argv recorder is not Codex's app-server. Isolate the launch contract from
+# Orca's separate status-hook trust handshake, which requires that real server.
+rpc.call("settings.update", {"agentStatusHooksEnabled": False})
+PY
+# Record the actual argv delivered by the stock paired terminal without model credentials.
+"${incus[@]}" exec "$instance" -- bash -se <<'YARD'
+[ ! -e /usr/local/bin/codex ] || { printf 'unexpected Codex fixture collision\n' >&2; exit 1; }
+cat >/usr/local/bin/codex <<'CLI'
+#!/usr/bin/python3
+import json
+import os
+import sys
+from pathlib import Path
+assert os.environ["HOME"] == "/home/dev", "Codex did not inherit the yard home"
+assert os.environ.get("CODEX_HOME", "/home/dev/.codex") == "/home/dev/.codex", "Codex config home was overridden"
+Path("/tmp/subyard-codex-launch.json").write_text(json.dumps(sys.argv[1:]))
+CLI
+chmod 0755 /usr/local/bin/codex
+YARD
+"${incus[@]}" exec "$instance" -- runuser -u dev -- python3 -B - <<'PY'
+import json
+from pathlib import Path
+import secrets
+import sys
+import time
+sys.path.insert(0, "/usr/local/libexec/subyard/orca-registration")
+from transport import RuntimeRPC
+rpc = RuntimeRPC("/srv/agents/orca/config/orca/orca-runtime.json", timeout=30)
+created = rpc.call("terminal.createAgentSession", {
+    "clientOperationId": f"{int(time.time() * 1000):013d}-{secrets.token_hex(16)}",
+    "worktree": "path:/srv/workspaces/alpha-12345678/src",
+    "agent": "codex",
+    "agentArgs": "--dangerously-bypass-approvals-and-sandbox",
+})
+record = Path("/tmp/subyard-codex-launch.json")
+deadline = time.monotonic() + 15
+while not record.exists() and time.monotonic() < deadline:
+    time.sleep(0.1)
+assert record.exists(), "Orca agent launcher did not execute native Codex"
+assert json.loads(record.read_text()) == [], "Orca agent launcher overrode the yard Codex config"
+rpc.call("terminal.close", {"terminal": created["terminal"]["handle"]})
+PY
+
 stage 'pairing two independent clients and reconnecting the first'
 first_pair="$("${incus[@]}" exec "$instance" -- \
   jq -er '.pairing | select(.available == true) | .url' /srv/agents/orca/ready.json)"
@@ -493,6 +563,9 @@ chown dev:dev "$root/.subyard-meta.json"
 runuser -u dev -- git -C "$root/src" init -q
 YARD
 second_pair="$(run_orca pair | tail -n1)"
+"${incus[@]}" exec "$instance" -- runuser -u dev -- \
+  python3 -B /usr/local/libexec/subyard/orca-registration/settings.py --check \
+  || die 'Codex defaults did not survive an Orca restart'
 [ "$first_pair" != "$second_pair" ] || die 'pair restart reused the old offer'
 client_status "$second_pair" client-b
 client_status "$first_pair" client-a

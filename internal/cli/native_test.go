@@ -5147,6 +5147,7 @@ func nativeFixture(t *testing.T) (string, []string, string) {
 		"space||@space||local|read|never|public|lifecycle|simple|space|space|--refresh --help|",
 		"logs||@logs||forward|read|never|public|lifecycle|simple|logs|logs|-f -n --updates --audit --yes --help|",
 		"usage||@usage||forward|read|never|public|lifecycle|simple|usage|usage|--help|",
+		"ssh-agent||@ssh-agent||deny|mutate|dynamic|public|lifecycle|simple|ssh-agent <command>|manage the owner-host SSH agent|--key --ttl --json --yes --help|status start stop",
 		"shell||@shell||forward|mutate|never|public|lifecycle|project-shell|shell|shell|--root --yes --help|",
 		"clone||@project||local|mutate|dynamic|public|projects|clone|clone <url>|clone|--target --yes --help|",
 		"code||@project||local|mutate|never|public|projects|project|code [project]|code|--yes --help|",

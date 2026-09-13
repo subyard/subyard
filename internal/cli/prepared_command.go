@@ -78,6 +78,8 @@ func resolveCoreCommand(definition command.Definition) (coreCommandBehavior, err
 		behavior.prepareExit, behavior.prepareRPCCode = 1, "plan_failed"
 	case "@keys":
 		behavior.nonRPCReason = "protected credential transport"
+	case "@ssh-agent":
+		behavior.nonRPCReason = "protected owner-host credential transport"
 	case "@shell":
 		behavior.nonRPCReason = "interactive terminal session"
 	case "@config", "@host":

@@ -96,7 +96,11 @@ case "${1:-}" in
         [ ! -e "$state_root/missing-dispatcher" ]
         ;;
       *' runuser -u dev -- /usr/local/libexec/subyard/projects-changed.d/orca '*)
-        [ ! -e "$state_root/project-sync-fail" ]
+        [ ! -e "$state_root/project-sync-fail" ] || exit 1
+        rm -f "$state_root/codex-defaults-drift"
+        ;;
+      *' /usr/bin/python3 -B /usr/local/libexec/subyard/orca-registration/settings.py --check '*)
+        [ ! -e "$state_root/codex-defaults-drift" ]
         ;;
       *' mktemp -d /tmp/subyard-orca.XXXXXX '*)
         counter="$(cat "$stage_counter_file" 2>/dev/null || printf 0)"
@@ -285,6 +289,26 @@ run_orca up --yes >/dev/null
 if grep -Fq 'apt-get install -y -qq /tmp/subyard-orca' "$ORCA_TEST_LOG"; then
   fail 'repeated up reinstalled the already verified Orca release'
 fi
+
+grep -Fq '/usr/bin/python3 -B /usr/local/libexec/subyard/orca-registration/settings.py' \
+  "$ORCA_TEST_CAPTURE/orca-sync" || fail 'project/init hook omitted Codex default convergence'
+grep -Fxq 'Environment=SUBYARD_ORCA_CODEX_CONFIG=1' "$ORCA_TEST_CAPTURE/subyard-orca.service" \
+  || fail 'Orca service omitted its scoped Codex launch environment'
+dash -n "$ORCA_TEST_GUEST/etc/profile.d/subyard-orca-codex.sh" \
+  || fail 'Codex shell integration is not valid for ordinary POSIX login shells'
+env -u SUBYARD_ORCA_CODEX_CONFIG bash --noprofile --norc -c \
+  '. "$1"; ! declare -F codex' _ "$ORCA_TEST_GUEST/etc/profile.d/subyard-orca-codex.sh" \
+  || fail 'Codex shell integration changed a non-Orca shell'
+touch "$TMP/codex-defaults-drift"
+ORCA_ADVERTISE_HOST=owner.example-tailnet.ts.net ORCA_HOST_PORT=17678 SUBYARD_RESOURCE_MODE=prepare \
+  "$ROOT/config/profiles/orca/resources/orca/handler.sh" up >"$TMP/codex-plan.json"
+jq -e '.changed == true' "$TMP/codex-plan.json" >/dev/null \
+  || fail 'Codex default drift was not assessed'
+[ -e "$TMP/codex-defaults-drift" ] || fail 'assessment changed Codex settings'
+run_orca up --yes >/dev/null
+[ ! -e "$TMP/codex-defaults-drift" ] || fail 'up did not repair Codex defaults'
+[ "$(count_log 'systemctl restart subyard-orca.service')" -eq "$restart_count" ] \
+  || fail 'Codex settings repair unnecessarily restarted Orca'
 
 touch "$TMP/missing-dispatcher"
 if run_orca up --yes >"$TMP/missing-dispatcher.out" 2>&1; then

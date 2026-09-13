@@ -15,6 +15,7 @@ space||@space||local|read|never|public|lifecycle|simple|space|show disk usage fo
 logs||@logs||forward|read|never|public|lifecycle|simple|logs|tail yard runtime logs or show host update/audit history|-f -n --updates --audit --yes --help|
 usage||@usage||forward|read|never|public|lifecycle|simple|usage [args]|show coding-agent token usage|--help|
 keys||@keys||forward|mutate|dynamic|public|lifecycle|keys|keys [command]|manage the host-only encrypted and versioned credential ledger|--kind --zone --consumer --file --local-only --exclusive --dry-run --manual-only --all --now --yes --help|trust untrust add import list status history sync auto-sync materialize rotate rollback revoke delete resolve move
+ssh-agent||@ssh-agent||deny|mutate|dynamic|public|lifecycle|simple|ssh-agent <command>|manage the owner-host SSH agent|--key --ttl --json --yes --help|status start stop
 shell||@shell||forward|mutate|never|public|lifecycle|project-shell|shell [project]|open a dev shell, optionally in a project directory|--root --yes --help|
 provision||@provision||forward|mutate|dynamic|public|lifecycle|profiles|provision [profile]|install a profile toolchain into the yard|-l --list --yes --help|
 test-vms||@test-vms||forward|mutate|dynamic|public|lifecycle|simple|test-vms <command>|manage leased nested VM slots and read the owner-wide broker log|--slot -n -f --yes --help|logs status revoke recover

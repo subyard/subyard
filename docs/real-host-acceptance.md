@@ -52,6 +52,20 @@ live configuration and SSH process; it never changes the outer yard lifecycle.
 
 ## Platform and release checks
 
+Temporary shared SSH-agent access has a dedicated disposable-host check:
+
+```sh
+dev/agent-e2e.sh --slot "$slot" --purpose ssh-agent-lifecycle --vm 1 -- \
+  sudo -n env SUBYARD_E2E_VM=1 bash tests/real-host/ssh-agent.sh
+```
+
+It uses generated fixture keys and a loopback Git SSH server, exercises existing
+and new yard sessions and `yard clone`, and checks revocation, expiry, reconnect
+without deadline extension, and isolation between two named container yards.
+To exercise a VM as the second yard, also pass `SUBYARD_SSH_AGENT_SECOND_KIND=vm`
+to `env`. This needs a working nested VM boot/Incus-agent baseline. Optional host
+mounts are disabled in this focused SSH fixture.
+
 VM1 installs the candidate runtime, runs `init` twice, repairs a legacy fixture and verifies storage,
 network, systemd, Incus container/VM and rollback behavior. VM2 runs the full suite and transport
 contracts. Only these disposable VMs observe real KVM and kernel behavior.
