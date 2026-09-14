@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -49,9 +50,9 @@ func parseSSHAgentArguments(arguments []string) (sshAgentInvocation, error) {
 				}
 				result.key = value
 			} else {
-				ttl, err := time.ParseDuration(value)
-				if err != nil || ttl < time.Second || ttl%time.Second != 0 || ttl > 24*time.Hour || result.ttl != 0 {
-					return result, errors.New("--ttl requires one whole-second duration between 1s and 24h, for example 30m or 2h")
+				ttl, err := parseSSHAgentTTL(value)
+				if err != nil || ttl < time.Second || ttl%time.Second != 0 || ttl > sshagentruntime.MaxTTL || result.ttl != 0 {
+					return result, errors.New("--ttl requires one whole-second duration between 1s and 2147483647s, for example 2h, 14d or 365d")
 				}
 				result.ttl = ttl
 			}
@@ -81,6 +82,17 @@ func parseSSHAgentArguments(arguments []string) (sshAgentInvocation, error) {
 	return result, nil
 }
 
+func parseSSHAgentTTL(value string) (time.Duration, error) {
+	if days, ok := strings.CutSuffix(value, "d"); ok {
+		count, err := strconv.ParseInt(days, 10, 64)
+		if err != nil || count < 1 || count > int64(sshagentruntime.MaxTTL/(24*time.Hour)) {
+			return 0, errors.New("invalid SSH agent day count")
+		}
+		return time.Duration(count) * 24 * time.Hour, nil
+	}
+	return time.ParseDuration(value)
+}
+
 func (cli *CLI) runSSHAgent(ctx context.Context, loaded config.Loaded, definition command.Definition, arguments []string) int {
 	invocation, err := parseSSHAgentArguments(arguments)
 	if err != nil {
@@ -88,7 +100,7 @@ func (cli *CLI) runSSHAgent(ctx context.Context, loaded config.Loaded, definitio
 		return 2
 	}
 	if invocation.help {
-		fmt.Fprintf(cli.options.Stdout, "Usage: %s ssh-agent unlock --key PATH --ttl DURATION [--yes]\n       %s ssh-agent status [--json]\n       %s ssh-agent lock\n\nRun on the yard owner host. Unlock asks for the key passphrase in the terminal.\nExpiry and lock prevent new authentication; existing SSH connections are not disconnected.\n", cli.options.Program, cli.options.Program, cli.options.Program)
+		fmt.Fprintf(cli.options.Stdout, "Usage: %s ssh-agent unlock --key PATH --ttl DURATION [--yes]\n       %s ssh-agent status [--json]\n       %s ssh-agent lock\n\nTTL examples: 30m, 2h, 14d, 365d (one day is 24 hours).\nRun on the yard owner host. Unlock asks for the key passphrase in the terminal.\nExpiry and lock prevent new authentication; existing SSH connections are not disconnected.\n", cli.options.Program, cli.options.Program, cli.options.Program)
 		return 0
 	}
 	yard := loaded.Context

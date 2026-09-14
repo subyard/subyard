@@ -207,7 +207,11 @@ func TestDetachedGrantSignsExpiresAndCutsExistingGuestConnection(t *testing.T) {
 func TestExplicitLockCutsExistingConnectionAndOtherYardRemainsUsable(t *testing.T) {
 	first, firstReady := syntheticYard(t)
 	second, secondReady := syntheticYard(t)
-	a, _ := syntheticUnlock(t, first, time.Minute)
+	ttl := 365 * 24 * time.Hour
+	a, status := syntheticUnlock(t, first, ttl)
+	if status.State != "unlocked" || status.RemainingSeconds < int64(ttl/time.Second)-5 || status.RemainingSeconds > int64(ttl/time.Second) {
+		t.Fatalf("year-long grant: %+v", status)
+	}
 	_, _ = syntheticUnlock(t, second, time.Minute)
 	clientA := guestAgent(t, <-firstReady)
 	clientB := guestAgent(t, <-secondReady)

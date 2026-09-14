@@ -27,6 +27,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// MaxTTL is the largest lifetime accepted by OpenSSH ssh-add's signed-second parser.
+const MaxTTL = time.Duration(math.MaxInt32) * time.Second
+
 type Config struct {
 	Directory      string
 	Executable     string
@@ -248,8 +251,8 @@ func readEncryptedPrivateKey(path string) ([]byte, error) {
 }
 
 func (m Manager) Unlock(ctx context.Context, key string, ttl time.Duration) (Status, error) {
-	if ttl < time.Second || ttl%time.Second != 0 || ttl > 24*time.Hour {
-		return Status{}, errors.New("SSH agent TTL must be a whole number of seconds between 1s and 24h")
+	if ttl < time.Second || ttl%time.Second != 0 || ttl > MaxTTL {
+		return Status{}, errors.New("SSH agent TTL must be a whole number of seconds between 1s and 2147483647s")
 	}
 	if !regexp.MustCompile(`^[a-z_][a-z0-9_-]*[$]?$`).MatchString(m.Config.Developer) || m.Config.SSHPort < 1 || m.Config.SSHPort > 65535 {
 		return Status{}, errors.New("invalid SSH agent yard transport")
@@ -428,7 +431,7 @@ func RunDaemon(ctx context.Context, directory string) error {
 	var cfg daemonConfig
 	err = json.NewDecoder(io.LimitReader(file, 16<<10)).Decode(&cfg)
 	file.Close()
-	if err != nil || cfg.Config.Directory != directory || cfg.TTL < time.Second || cfg.TTL > 24*time.Hour {
+	if err != nil || cfg.Config.Directory != directory || cfg.TTL < time.Second || cfg.TTL%time.Second != 0 || cfg.TTL > MaxTTL {
 		return errors.New("invalid SSH agent worker configuration")
 	}
 	if err := os.Remove(filepath.Join(directory, "worker.json")); err != nil {

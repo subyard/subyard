@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -34,8 +35,10 @@ func TestManagerRejectsUnsafeDirectoryAndInvalidTTL(t *testing.T) {
 	if err != nil || status.State != "locked" {
 		t.Fatalf("status: %+v %v", status, err)
 	}
-	if _, err := m.Unlock(context.Background(), "unused", 0); err == nil {
-		t.Fatal("accepted zero TTL")
+	for _, ttl := range []time.Duration{0, -time.Second, 1500 * time.Millisecond, MaxTTL + time.Second} {
+		if _, err := m.Unlock(context.Background(), "unused", ttl); err == nil || !strings.Contains(err.Error(), "TTL") {
+			t.Fatalf("invalid TTL %s: %v", ttl, err)
+		}
 	}
 	link := filepath.Join(root, "link")
 	if err := os.Symlink(dir, link); err != nil {

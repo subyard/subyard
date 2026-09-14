@@ -34,7 +34,13 @@ func TestSSHAgentArgumentBoundaries(t *testing.T) {
 		{"unlock", "--key", "key", "--ttl", "0"},
 		{"unlock", "--key", "key", "--ttl", "-1s"},
 		{"unlock", "--key", "key", "--ttl", "1.5s"},
-		{"unlock", "--key", "key", "--ttl", "25h"},
+		{"unlock", "--key", "key", "--ttl", "0d"},
+		{"unlock", "--key", "key", "--ttl", "-1d"},
+		{"unlock", "--key", "key", "--ttl", "1.5d"},
+		{"unlock", "--key", "key", "--ttl", "999999999999999999999d"},
+		{"unlock", "--key", "key", "--ttl", "24856d"},
+		{"unlock", "--key", "key", "--ttl", "1d2h"},
+		{"unlock", "--key", "key", "--ttl", "2147483648s"},
 		{"unlock", "--key", "key", "--ttl", "2h", "--ttl", "3h"},
 		{"status", "unlock"}, {"status", "--key", "key"}, {"lock", "--ttl", "1h"},
 		{"lock", "--json"}, {"unlock", "--key", "--ttl", "2h"},
@@ -46,6 +52,17 @@ func TestSSHAgentArgumentBoundaries(t *testing.T) {
 	got, err := parseSSHAgentArguments([]string{"--yes", "unlock", "--key", "key with spaces", "--ttl", "2h"})
 	if err != nil || got.key != "key with spaces" || got.ttl != 2*time.Hour || !got.yes {
 		t.Fatalf("got=%+v err=%v", got, err)
+	}
+	for value, want := range map[string]time.Duration{
+		"25h": 25 * time.Hour, "336h": 14 * 24 * time.Hour,
+		"14d": 14 * 24 * time.Hour, "365d": 365 * 24 * time.Hour,
+		"8760h": 365 * 24 * time.Hour, "2147483647s": 2147483647 * time.Second,
+		"24855d": 24855 * 24 * time.Hour,
+	} {
+		got, err := parseSSHAgentArguments([]string{"unlock", "--key", "key", "--ttl", value})
+		if err != nil || got.ttl != want {
+			t.Errorf("TTL %q: got=%s want=%s err=%v", value, got.ttl, want, err)
+		}
 	}
 }
 
