@@ -2,134 +2,72 @@
 
 > Give agents a yard, not the house keys.
 
-Subyard gives AI coding agents a persistent Linux workspace isolated from the
-host by default. It runs an unprivileged Incus instance (the **yard**) and
-exposes the workflow through one `yard` CLI.
+Give AI coding agents isolated **yards** across your laptop, servers, and VPSs.
+Each yard keeps projects and sessions, and can host shared service environments
+where agents run your product, reproduce bugs, and verify changes.
 
-## Model
+[Get started](#getting-started) · [Documentation](docs/README.md) · [Security](docs/security.md)
 
-- **L1 — Yard:** the persistent Incus container where agents and projects live.
-- **L2 — Project environment:** an optional Docker Compose stack selected by a
-  project profile.
-- **Profiles:** reusable project and agent configuration under `config/`.
+![A laptop and server each run multiple yards. Within a yard, agents work on projects and share service environments for staging and tests. A dedicated test yard provides broker-leased resources. Hosts connect over SSH and synchronize shared settings and encrypted staging credentials.](docs/assets/agent-workspace.svg)
 
-`yard sync` copies a project into yard-owned storage. `yard bind` may instead
-mount any host directory explicitly; the CLI warns because this weakens the
-yard's encapsulation. A new project's safe name is also its ID and workspace
-directory; basename collisions become `Name-2`, `Name-3`, and so on. Use
-`--name NAME` with `sync`, `bind`, or `clone` to choose an explicit name.
-Repeated `sync` or `clone` commands create independent copies, even from the same source.
+## What you get
 
-## Quick start
+- **Your agents and editors.** Claude Code, Codex, OpenCode, pi; VS Code,
+  [Orca](docs/orca.md), shell, and optional desktop ADE. Orca includes a ready-made
+  profile and background service; enable it on demand with `yard orca up`.
+- **Multiple yards per machine.** Container or VM isolation, Debian/Ubuntu system
+  images, and per-yard CPU/RAM limits.
+- **Profiles for your product.** Reusable toolchains, dependencies, caches, and
+  service environments for each task.
+- **Shared staging inside a yard.** Agents can run services, reproduce issues,
+  inspect behavior, and test changes end to end on your own compute.
+- **Resources on demand.** Use shared environments or
+  [broker-leased test VMs](docs/test-vms.md) for checks that need their own machines,
+  root access, or reboots. Reuse in local compute.
+- **Connected machines.** Manage yards locally or on remote hosts over SSH; sync shared
+  settings through Git. [Multi-host setup →](docs/workflows.md#select-local-and-remote-yards)
+- **Encrypted staging credentials.** Sync selected staging/QA records between
+  trusted hosts; deliver only authorized files to yards. [Credential sync →](docs/keys.md)
+- **Persistent history and statistics.** Keep agent sessions, projects, and caches.
+  [AI Observer](docs/ai-observer.md) tracks Claude Code and Codex session usage.
 
-Subyard targets a Linux amd64 or arm64 host with Incus. The installer downloads a verified,
-self-contained release runtime, so the operator CLI does not require Go or compile source at runtime.
-The host needs `curl`, `jq`, `sha256sum`, `tar`, and `gzip`. The installer shows every local change
-and asks once before it links `yard` and `sy` into `~/.local/bin`, configures new-shell PATH, and
-enables shell completion.
+## Getting started
+
+You need a **GNU/Linux host** — laptop, workstation, or server; `yard init` installs
+Incus for you. Native Windows/macOS support isn't planned — run Subyard inside a
+Linux VM and follow the steps below.
+
+[Host requirements and installation details →](docs/getting-started.md)
 
 ```bash
 curl -fsSL --proto '=https' --tlsv1.2 \
   https://github.com/Subyard/Subyard/releases/latest/download/subyard-install.sh | bash
 exec "$SHELL" -l
-yard check
-yard init
-
 ```
 
-The runtime contains the engine, public profiles/config, completions and host adapters, but no
-source checkout, toolchain or private data.
-Subyard has persistent [shared, host and yard configuration](docs/configuration.md). It can be
-synchronized between owner hosts through git. Run `yard config sync help` for
-setup, status, pull and push examples.
-
-Upgrade with `yard update`; use `yard update --rollback` to swap back to the retained previous
-runtime. Run `yard migrate --check` to see unfinished migrations and runtime repairs for the
-installed release, then `yard migrate` to complete them. This uses the installed release without
-downloading an update.
-
-Run `yard --help` or `yard <command> --help` for complete command usage.
-
-## Everyday commands
-
-```text
-yard start | stop                  Manage the yard instance
-yard security                      Audit the host boundary
-yard sync | bind | clone           Add a project
-yard list                          List projects
-yard space [--refresh]             Show disk usage for every local yard
-yard shell | code [project]        Open a project session
-yard export | remove [project]     Copy out or remove a project
-yard provision [profile]           Apply a project profile
-yard test-vms <command>            Manage two disposable nested test VMs (opt-in)
-yard up | down | info [project]    Manage an L2 project environment
-yard keys <command>                Manage the host-side encrypted credential ledger
-yard ssh-agent <command>           Grant, inspect or stop temporary SSH key access
-yard host <command>                Register and manage remote owner hosts
-yard config <command>              Inspect or sync settings and refresh file consumers
-```
-
-See [temporary SSH access](docs/ssh-agent.md) to use a host Git key from every yard session.
-
-## Documentation
-
-- Operators: [configuration](docs/configuration.md), [named yards](config/yards/README.md), the
-  [credential ledger](docs/keys.md), and [per-yard SSH agents](docs/ssh-agent.md).
-- Agent usage dashboard: [AI Observer](docs/ai-observer.md), enabled by default for Claude and Codex session files.
-- Optional integrations: [Paseo Desktop](docs/paseo.md), [Orca remote server](docs/orca.md), and a
-  dedicated [Hermes yard](docs/hermes.md).
-- Desktop client: the current [Veranda implementation](veranda/README.md) and its
-  [UX contract](docs/veranda/README.md).
-- Contributors: [development](docs/development.md), [test selection](docs/testing.md), the
-  [E2E VM pool](docs/test-vms.md), [live acceptance](docs/real-host-acceptance.md), and the
-  [control-plane architecture](docs/control-plane.md).
-
-## Multiple and remote yards
-
-Use `-Y` or `@name` to select a named local yard. A registered owner host is reached over SSH;
-inventory selectors use the stable `<HostID>/<yard>` identity:
+Create a yard and open a project:
 
 ```bash
-yard -Y openclaw init
-yard @openclaw status
-yard status
-yard @default status
-yard space
-yard @openclaw space --refresh
-
-yard host add me@srv1
-yard host list
-yard list
-yard -Y owner-host/default list
+yard init
+yard sync --name demo ./my-project
+yard code demo
 ```
 
-Replace `owner-host` with the authoritative HostID reported by `yard host add`.
+This copies the project into the yard and opens VS Code. Use `yard shell demo`
+for a terminal. Connect another prepared host with:
 
-`yard space` reads the latest cached measurement for every local yard. Use
-`yard space --refresh` to synchronously recalculate all running local yards, or
-combine `space` with `-Y`/`@name` to inspect or refresh only one yard.
+```bash
+yard host add me@my-server
+yard yards
+```
 
-Use a full selector
-when a short name is ambiguous. Remote yards support `sync` and `clone`;
-`bind` is local-only. See
-[Subyard configuration](docs/configuration.md), [named yards](config/yards/README.md), and the
-[credential ledger](docs/keys.md).
+[Profiles, remote projects, and dashboards →](docs/workflows.md)
 
-## Security boundary
+## The host stays yours
 
-The yard is an unprivileged container by default. Managed host mounts must stay
-under that yard's `HOST_BASE`, while an explicit `yard bind` grants the selected
-host path to the yard. Host Docker and Incus control sockets are rejected by
-managed configuration. Run `yard security` to audit the effective setup.
+Unprivileged Incus containers are the default; managed configuration rejects host
+Docker/Incus control sockets. `yard bind` and SSH grants explicitly widen access. Containers
+share the host kernel; agents in one yard share its trust and granted credentials.
+Run `yard security` to [audit the boundary](docs/security.md).
 
-Opt-in SSH agent forwarding permits git push and other host access from inside the yard
-using a forwarded, write-enabled credential while the SSH session is active.
-No private key is copied into the yard, but any process that can reach the forwarded agent
-can use that credential; agent ask-rules are a UX safeguard, not a security boundary.
-
-A trusted test yard can opt in to two disposable nested VMs without receiving the
-L0 Incus socket. See [Disposable nested test VMs](docs/test-vms.md) for the widened
-device/syscall boundary, lifecycle and cleanup contract.
-
-Subyard protects the host boundary. It does not isolate credentials between
-agents operating inside the same yard.
+[Contribute](docs/development.md) · [MIT license](LICENSE)
