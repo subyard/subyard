@@ -325,7 +325,12 @@ func (m Manager) Unlock(ctx context.Context, key string, ttl time.Duration) (Sta
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
-	add := exec.CommandContext(ctx, "ssh-add", "-k", "-t", strconv.FormatInt(int64(ttl/time.Second), 10), "-")
+	// ssh-add closes its key descriptor before prompting. With "-", /dev/tty
+	// can reopen as fd 0, which readpassphrase treats as stdin and leaves echo on.
+	// Opening /dev/stdin separately preserves fd 0 and native hidden TTY input.
+	add := exec.CommandContext(ctx, "ssh-add", "-k", "-t", strconv.FormatInt(int64(ttl/time.Second), 10), "/dev/stdin")
+	// Let OpenSSH restore terminal echo on cancellation before WaitDelay's kill fallback.
+	add.Cancel = func() error { return add.Process.Signal(syscall.SIGTERM) }
 	env := m.Environment
 	if env == nil {
 		env = os.Environ()
