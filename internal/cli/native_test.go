@@ -672,21 +672,25 @@ func TestUpdateTypedConfirmationSeparatesCheckActivationAndRollbackPreflight(t *
 
 	t.Run("declined activation leaves published candidate inactive", func(t *testing.T) {
 		root, environment, runtimeRoot := updateReleaseFixture(t)
-		prompt := &testkit.Prompt{Answers: []bool{false}}
 		configs := &recordingConfigApplier{}
-		var stderr bytes.Buffer
+		var stdout, stderr bytes.Buffer
 		program, err := New(Options{
 			RepositoryRoot: root, Program: "yard",
 			Arguments:   []string{"update", "--version", "1.2.3", "--runtime-root", runtimeRoot},
-			Environment: environment, WorkingDir: root, Prompt: prompt, Config: configs,
-			Stdout: &bytes.Buffer{}, Stderr: &stderr,
+			Environment: environment, WorkingDir: root, Config: configs,
+			Stdin: strings.NewReader("n\n"), Stdout: &stdout, Stderr: &stderr,
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if code := program.Run(context.Background()); code != 1 || len(prompt.Requests) != 1 ||
-			prompt.Requests[0].Default != domain.ConfirmationDefaultYes {
-			t.Fatalf("code=%d prompt=%#v stderr=%q", code, prompt.Requests, stderr.String())
+		program.promptInputTerminal = func() bool { return true }
+		if code := program.Run(context.Background()); code != 1 {
+			t.Fatalf("code=%d stderr=%q", code, stderr.String())
+		}
+		preview := strings.Index(stdout.String(), "Update: release-old -> 1.2.3\n")
+		confirmation := strings.Index(stdout.String(), "Proceed? [Y/n]")
+		if preview < 0 || confirmation <= preview || strings.Count(stdout.String(), "Proceed?") != 1 {
+			t.Fatalf("expected release versions before a single confirmation: %q", stdout.String())
 		}
 		if target, err := os.Readlink(filepath.Join(runtimeRoot, "current")); err != nil ||
 			target != "releases/release-old" {
