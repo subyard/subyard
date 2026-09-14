@@ -22,9 +22,11 @@ fi
 EOF
 )
 dropin_body=$(printf '[Service]\nEnvironment=SSH_AUTH_SOCK=/home/%s/.ssh/subyard-agent.sock' "$dev_user")
+# OpenSSH 9.6 Match parsing rejects nested escaped quotes. Expand only a constant
+# presence marker so socket contents never undergo shell splitting or globbing.
 client_body=$(cat <<'EOF'
 # Managed by Subyard. User SSH configuration and session-forwarded agents take precedence.
-Match exec "test -z \"$SSH_AUTH_SOCK\" && test -S ~/.ssh/subyard-agent.sock"
+Match exec "test x${SSH_AUTH_SOCK:+set} = x && test -S ~/.ssh/subyard-agent.sock"
     IdentityAgent ~/.ssh/subyard-agent.sock
 Match all
 EOF

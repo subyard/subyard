@@ -41,12 +41,15 @@ Host explicit-user
 Host *
     Include "$client_config"
 EOF
-ssh_agent_setting() {
-  HOME="$TMP/home" ssh -G -F "$TMP/ssh_config" "$1" 2>/dev/null \
-    | awk '$1 == "identityagent" {print $2}'
+expect_agent_setting() {
+  local expected="$1" host="$2" message="$3" settings actual
+  settings="$(HOME="$TMP/home" ssh -G -T -F "$TMP/ssh_config" "$host")" \
+    || fail 'OpenSSH rejected the managed client configuration'
+  actual="$(awk '$1 == "identityagent" {print $2}' <<< "$settings")"
+  [ "$actual" = "$expected" ] || fail "$message"
 }
 unset SSH_AUTH_SOCK
-[ -z "$(ssh_agent_setting ordinary-session)" ] || fail 'absent yard socket changed OpenSSH defaults'
+expect_agent_setting "" ordinary-session 'absent yard socket changed OpenSSH defaults'
 python3 - "$TMP/home/.ssh/subyard-agent.sock" <<'PY'
 import socket
 import sys
@@ -54,12 +57,12 @@ with socket.socket(socket.AF_UNIX) as agent:
     agent.bind(sys.argv[1])
 PY
 login_home="$(getent passwd "$(id -u)" | cut -d: -f6)"
-[ "$(ssh_agent_setting ordinary-session)" = "$login_home/.ssh/subyard-agent.sock" ] \
-  || fail 'existing session without SSH_AUTH_SOCK lacks the OpenSSH fallback'
-[ "$(ssh_agent_setting explicit-user)" = /tmp/subyard-fixture-user-agent.sock ] \
-  || fail 'system fallback replaced explicit user IdentityAgent'
-[ -z "$(SSH_AUTH_SOCK=/tmp/session-agent ssh_agent_setting ordinary-session)" ] \
-  || fail 'system fallback replaced a session-forwarded SSH_AUTH_SOCK'
+expect_agent_setting "$login_home/.ssh/subyard-agent.sock" ordinary-session \
+  'existing session without SSH_AUTH_SOCK lacks the OpenSSH fallback'
+expect_agent_setting /tmp/subyard-fixture-user-agent.sock explicit-user \
+  'system fallback replaced explicit user IdentityAgent'
+SSH_AUTH_SOCK="/tmp/session agent" expect_agent_setting "" ordinary-session \
+  'system fallback replaced a session-forwarded SSH_AUTH_SOCK'
 cat > "$client_config" <<'EOF'
 # Legacy managed default from the original provisioning stage.
 Match exec "test -S ~/.subyard/run/ssh-agent.sock"
@@ -69,8 +72,8 @@ EOF
 run check && fail 'legacy OpenSSH fallback considered converged'
 run ensure
 run check || fail 'OpenSSH fallback did not recover from drift'
-[ "$(ssh_agent_setting ordinary-session)" = "$login_home/.ssh/subyard-agent.sock" ] \
-  || fail 'OpenSSH fallback drift was not repaired'
+expect_agent_setting "$login_home/.ssh/subyard-agent.sock" ordinary-session \
+  'OpenSSH fallback drift was not repaired'
 chmod 666 "$client_config"
 run check && fail 'unsafe OpenSSH fallback permissions considered converged'
 run ensure
