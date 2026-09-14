@@ -577,12 +577,18 @@ cmd_up() {
   ok "Orca ready through $ORCA_TRANSPORT at $ORCA_ADVERTISE_HOST:$ORCA_HOST_PORT"
 }
 
-cmd_pair() {
+require_pair_ready() {
+  yexec systemctl is-active --quiet "$ORCA_UNIT" \
+    || die "Orca is not running; run '$(yard_cmd_hint) orca up' first"
   require_runtime_settings
   resolve_owner_address
   runtime_contract_ready && route_matches && owner_endpoint_ready \
     || die "Orca endpoint settings are not applied; run '$(yard_cmd_hint) orca up' first"
   service_ready || die "Orca is not ready; run '$(yard_cmd_hint) orca up' first"
+}
+
+cmd_pair() {
+  require_pair_ready
   yexec systemctl restart "$ORCA_UNIT"
   wait_service_ready || die "Orca did not become ready after restart"
   wait_owner_endpoint || die "Orca owner endpoint is not reachable after restart"
@@ -768,11 +774,7 @@ prepare_resource() { # <public-verb>
       ;;
     pair)
       svc_require_yard_running
-      require_runtime_settings
-      resolve_owner_address
-      runtime_contract_ready && route_matches && owner_endpoint_ready \
-        || die "Orca endpoint settings are not applied; run '$(yard_cmd_hint) orca up' first"
-      service_ready || die "Orca is not ready; run '$(yard_cmd_hint) orca up' first"
+      require_pair_ready
       emit_resource_assessment pair true \
         "restart the Orca service, reconcile project groups and checkouts and issue one fresh single-client pairing link"
       ;;

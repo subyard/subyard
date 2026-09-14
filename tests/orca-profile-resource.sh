@@ -253,6 +253,23 @@ jq -e '.action == "up" and .changed == true' "$TMP/bootstrap-plan.json" >/dev/nu
   || fail 'absent yard did not produce an up assessment'
 [ ! -e "$ORCA_TEST_SERVICE" ] || fail 'bootstrap assessment started the service'
 rm -f "$TMP/missing-yard"
+for mode in prepare apply; do
+  for port in '' 17678; do
+    if ORCA_ADVERTISE_HOST=127.0.0.1 ORCA_HOST_PORT="$port" \
+      SUBYARD_RESOURCE_MODE="$mode" SUBYARD_RESOURCE_ACTION=pair \
+      SUBYARD_OPERATION_ID=orca-handler-test \
+      "$ROOT/config/profiles/orca/resources/orca/handler.sh" pair >"$TMP/pair-stopped.out" 2>&1; then
+      fail "pair $mode accepted a stopped Orca service"
+    fi
+    grep -Fq "Orca is not running; run 'yard orca up' first" "$TMP/pair-stopped.out" \
+      || fail "pair $mode did not explain that Orca must be started first (port='$port')"
+    assert_down "pair $mode while stopped"
+  done
+done
+[ "$(count_log 'systemctl restart subyard-orca.service')" -eq 0 ] \
+  || fail 'pair restarted a stopped Orca service'
+[ "$(count_log '.pairing.url')" -eq 0 ] \
+  || fail 'pair read a pairing capability while Orca was stopped'
 run_orca up --yes >"$TMP/up.out"
 grep -Fxq 'Environment=SSH_AUTH_SOCK=/home/dev/.ssh/subyard-agent.sock' \
   "$ORCA_TEST_CAPTURE/subyard-orca.service" \
