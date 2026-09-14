@@ -671,16 +671,23 @@ func TestSSHProbeOwnsProxyAndClientConfig(t *testing.T) {
 	incus.Reconcile.Instance.Status = "Running"
 	incus.ExecSteps = []testkit.IncusExecStep{{Result: ports.InstanceExecResult{ExitCode: 1}}}
 	assertStage(t, runtime, "ssh", false, "guest missing canonical public key")
-	incus.ExecSteps = []testkit.IncusExecStep{{}}
+	runtime.RepositoryRoot = filepath.Join("..", "..", "..")
+	incus.ExecSteps = []testkit.IncusExecStep{{}, {Result: ports.InstanceExecResult{ExitCode: 1}}}
+	assertStage(t, runtime, "ssh", false, "guest missing SSH agent environment")
+	incus.ExecSteps = []testkit.IncusExecStep{{}, {}}
 	assertStage(t, runtime, "ssh", true, "guest authorizes canonical public key")
-	last := incus.ExecCalls[len(incus.ExecCalls)-1].Request.Command
+	environmentProbe := incus.ExecCalls[len(incus.ExecCalls)-1].Request
+	if strings.Join(environmentProbe.Command, " ") != "sh -eu -s -- check dev" || len(environmentProbe.Stdin) == 0 {
+		t.Fatal("guest environment was not checked using the shared helper")
+	}
+	last := incus.ExecCalls[len(incus.ExecCalls)-2].Request.Command
 	if len(last) < 4 || last[0] != "grep" || last[1] != "-qxF" {
 		t.Fatalf("guest authorization probe does not match the canonical public key: %q", last)
 	}
 	runtime.Yard.NestedE2EVMs = true
-	incus.ExecSteps = []testkit.IncusExecStep{{}}
+	incus.ExecSteps = []testkit.IncusExecStep{{}, {}}
 	assertStage(t, runtime, "ssh", true, "nested guest authorizes restricted canonical key")
-	last = incus.ExecCalls[len(incus.ExecCalls)-1].Request.Command
+	last = incus.ExecCalls[len(incus.ExecCalls)-2].Request.Command
 	if len(last) < 4 || !strings.HasPrefix(last[3], `from="127.0.0.1,::1" ssh-ed25519 `) {
 		t.Fatalf("nested authorization probe is not exact and restricted: %q", last)
 	}

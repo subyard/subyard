@@ -1,256 +1,324 @@
 #!/usr/bin/env bash
-# Production owner-host agent, standard SSH transport and cross-session Git acceptance.
-# Run only on a disposable VM through dev/agent-e2e.sh.
+# Sourced by the focused Orca bootstrap mode on a disposable lease VM.
+# Run: SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_SSH_AGENT=1 \
+#   bash tests/real-host/orca-bootstrap.sh
+# Variables token and pairing belong to the sourcing bootstrap fixture.
+# shellcheck disable=SC2154
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-ENGINE="$ROOT/.build/yard"
-OWNER_HOME="$HOME"
-PLATFORM="$OWNER_HOME/.cache/subyard-e2e-platform"
-SECOND_KIND="${SUBYARD_SSH_AGENT_SECOND_KIND:-container}"
-case "$SECOND_KIND" in container|vm) ;; *) printf 'invalid second yard kind\n' >&2; exit 2;; esac
-STATE=''; SHELL_PID=''; YARD_A=''; YARD_B=''
-die() { printf 'ssh-agent-e2e: %s\n' "$*" >&2; exit 1; }
-stage() { printf 'ssh-agent-e2e: %s\n' "$*" >&2; }
-[ "${SUBYARD_E2E_VM:-}" = 1 ] && [ "$(id -u)" = 0 ] || die 'requires allocated VM1 root'
-free_port() { python3 -c 'import socket; s=socket.socket(); s.bind(("0.0.0.0",0)); print(s.getsockname()[1]); s.close()'; }
-run_yard() {
-  env HOME="$STATE/home" SUBYARD_OPERATOR_HOME="$STATE/home" \
-    SUBYARD_CONFIG_HOME="$STATE/config" SUBYARD_HOME="$STATE/data" \
-    STORAGE_PATH="$PLATFORM/incus/incus/storage" HOST_BASE="$STATE/host" \
-    RESTRICTED_DISK_PATHS="$STATE/host" SUBYARD_NO_AUDIT=1 \
-    SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 MIN_DISK_GIB=1 \
-    "$ENGINE" -Y "$1" "${@:2}"
+[ "${SUBYARD_E2E_VM:-}" = 1 ] && [ "${SSH_AGENT:-}" = 1 ] \
+  && [ -f "${STATE:-}/.marker" ] \
+  && [ "$(<"$STATE/.marker")" = subyard-orca-bootstrap-e2e-v1 ] \
+  || { printf 'ssh-agent-e2e: use the marked Orca bootstrap fixture\n' >&2; exit 2; }
+
+agent_terminal=''
+agent_project=$PROJECT
+agent_instance=$INSTANCE
+agent_seed=/tmp/subyard-ssh-agent-$token
+agent_key=$STATE/ssh-agent-key
+agent_passphrase=subyard-ssh-agent-public-test-fixture-only
+
+agent_root() { incus --project "$agent_project" exec "$agent_instance" -- "$@"; }
+agent_dev() { agent_root runuser -l dev -c "$1"; }
+agent_client() {
+  HOME="$STATE/ssh-agent-client/home" \
+    XDG_CONFIG_HOME="$STATE/ssh-agent-client/config" \
+    XDG_DATA_HOME="$STATE/ssh-agent-client/data" \
+    XDG_STATE_HOME="$STATE/ssh-agent-client/state" \
+    LIBGL_ALWAYS_SOFTWARE=1 ORCA_PAIRING_CODE="$pairing" \
+    timeout 30 /usr/bin/orca-ide "$@"
 }
-guest_dev() {
-  local name="$1"; shift
-  incus --project "subyard-$name" exec "yard-$name" --user 1000 --group 1000 \
-    --env HOME=/home/dev -- "$@"
-}
-cleanup() {
-  local rc=$?
-  trap - EXIT INT TERM
-  set +e
-  [ -z "$SHELL_PID" ] || kill "$SHELL_PID" 2>/dev/null
-  for name in "$YARD_A" "$YARD_B"; do
-    [ -n "$name" ] || continue
-    run_yard "$name" ssh-agent stop --yes >/dev/null 2>&1
-    run_yard "$name" teardown --yes >/dev/null 2>&1
-  done
-  if [[ "$STATE" = /var/tmp/subyard-ssh-agent.* ]] &&
-    [ "$(cat "$STATE/.marker" 2>/dev/null)" = subyard-ssh-agent-e2e-v1 ]; then
-    find "$STATE" -depth -delete
+ssh_agent_cleanup() {
+  local failed=0
+  if [ -n "$agent_terminal" ]; then
+    agent_client terminal close --terminal "$agent_terminal" --tab --json >/dev/null 2>&1 || true
   fi
-  exit "$rc"
+  yard ssh-agent lock >/dev/null 2>&1 || failed=1
+  if [ -f "$SUBYARD_CONFIG_HOME/yards/secondary/config.env" ]; then
+    yard -Y secondary ssh-agent lock >/dev/null 2>&1 || failed=1
+  fi
+  return "$failed"
 }
-STATE="$(mktemp -d /var/tmp/subyard-ssh-agent.XXXXXX)"
-printf '%s\n' subyard-ssh-agent-e2e-v1 > "$STATE/.marker"
-trap cleanup EXIT INT TERM
-stage 'reconciling disposable host baseline with product installer'
-install -d -m 0700 "$PLATFORM"
-if ! command -v incus >/dev/null || ! incus info >/dev/null 2>&1 ||
-  ! incus storage show default --project default >/dev/null 2>&1 ||
-  [ ! -d "$PLATFORM/incus" ]; then
-  (
-    # shellcheck source=tests/helpers/test-context.sh
-    . "$ROOT/tests/helpers/test-context.sh"
-    setup_test_context "$STATE/bootstrap"
-    export SUBYARD_USER=root SUBYARD_OPERATOR_HOME="$OWNER_HOME"
-    export SUBYARD_CONFIG_DIR="$ROOT/config" SUBYARD_HOME="$PLATFORM"
-    export STORAGE_PATH="$PLATFORM/incus/incus/storage"
-    set -a
-    # shellcheck source=config/host.env
-    . "$ROOT/config/host.env"
-    set +a
-    bash "$ROOT/scripts/01-install-incus.sh" --yes --zabbly
-  )
+agent_status() {
+  yard "$@" ssh-agent status --json | jq -er '.state'
+}
+agent_unlock() {
+  local ttl=$1 passphrase=${2:-$agent_passphrase}
+  # pty.fork gives the public command and ssh-add their real controlling terminal.
+  # Only this synthetic fixture passphrase is sent; captured terminal bytes are never printed.
+  timeout --signal=TERM --kill-after=3s 45 python3 - "$YARD_BIN" "$agent_key" "$ttl" "$passphrase" <<'PY'
+import errno
+import os
+import pty
+import re
+import select
+import signal
+import sys
+import time
+
+pid, terminal = pty.fork()
+if pid == 0:
+    os.environ["LC_ALL"] = "C"
+    os.execv(sys.argv[1], [sys.argv[1], "ssh-agent", "unlock", "--key", sys.argv[2],
+                         "--ttl", sys.argv[3], "--yes"])
+deadline = time.monotonic() + 35
+buffer = b""
+attempts = 0
+try:
+    while time.monotonic() < deadline:
+        done, status = os.waitpid(pid, os.WNOHANG)
+        if done:
+            if os.waitstatus_to_exitcode(status) != 0 or not attempts:
+                raise RuntimeError("public terminal unlock failed")
+            break
+        readable, _, _ = select.select([terminal], [], [], 0.1)
+        if not readable:
+            continue
+        try:
+            chunk = os.read(terminal, 4096)
+        except OSError as error:
+            if error.errno == errno.EIO:
+                continue
+            raise
+        buffer = (buffer + chunk)[-8192:]
+        if b"bad passphrase" in buffer.lower():
+            # Exercise ordinary operator cancellation after a rejected password.
+            # SIGKILL would bypass CLI cleanup and only test the pending watchdog.
+            os.write(terminal, b"\x03")
+            buffer = b""
+            continue
+        if b"enter passphrase for" in buffer.lower():
+            if attempts >= 3:
+                raise RuntimeError("too many passphrase prompts")
+            os.write(terminal, sys.argv[4].encode() + b"\n")
+            attempts += 1
+            buffer = b""
+    else:
+        raise RuntimeError("public terminal unlock timed out")
+except (OSError, RuntimeError) as failure:
+    try:
+        os.killpg(pid, signal.SIGTERM)
+        cleanup_deadline = time.monotonic() + 3
+        while time.monotonic() < cleanup_deadline:
+            if os.waitpid(pid, os.WNOHANG)[0]:
+                break
+            time.sleep(0.05)
+        else:
+            os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except ChildProcessError:
+        pass
+    # Drain only this fixture's PTY and report bounded CLI diagnostics. Never
+    # publish the raw terminal transcript or either synthetic credential value.
+    while select.select([terminal], [], [], 0)[0]:
+        try:
+            chunk = os.read(terminal, 4096)
+        except OSError:
+            break
+        if not chunk:
+            break
+        buffer = (buffer + chunk)[-8192:]
+    diagnostic = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", buffer.decode(errors="replace"))
+    for value in (sys.argv[2], sys.argv[4]):
+        diagnostic = diagnostic.replace(value, "<fixture credential>")
+    print(f"ssh-agent-e2e: {failure}; passphrase prompts={attempts}", file=sys.stderr)
+    for line in diagnostic.splitlines():
+        if line.startswith(("yard:", "SSH key access:")):
+            print(line[:1000], file=sys.stderr)
+    sys.exit(1)
+finally:
+    os.close(terminal)
+PY
+}
+
+agent_prepare_guest() {
+  # The only key uploaded is public. Both yards authorize it so socket isolation,
+  # rather than a different authorized_keys entry, determines the negative case.
+  agent_root sh -eu -c '
+    IFS= read -r public_key
+    grep -Fxq "$public_key" /home/dev/.ssh/authorized_keys ||
+      printf "%s\n" "$public_key" >> /home/dev/.ssh/authorized_keys
+  ' < "$agent_key.pub"
+  agent_root sh -eu -c '
+    directory=$1
+    install -d -m 0755 -o dev -g dev "$directory"
+    awk '\''$1 == "ssh-ed25519" { print "127.0.0.1 " $1 " " $2 }'\'' \
+      /etc/ssh/ssh_host_ed25519_key.pub > "$directory/known_hosts"
+    chmod 0644 "$directory/known_hosts"
+  ' sh "$agent_seed"
+  if ! agent_root test -d "$agent_seed/source.git"; then
+    agent_dev "git init -q '$agent_seed/source' &&
+      git -C '$agent_seed/source' -c user.name=Fixture -c user.email=fixture@example.invalid \
+        commit --allow-empty -qm initial &&
+      git clone -q --bare '$agent_seed/source' '$agent_seed/source.git'"
+  fi
+  for branch in ordinary unlocked reunlocked; do
+    agent_dev "git --git-dir='$agent_seed/source.git' update-ref -d refs/heads/$branch"
+  done
+}
+agent_poll_terminal() {
+  local expected=$1 deadline=$((SECONDS + 20))
+  while ((SECONDS < deadline)); do
+    if agent_client terminal read --terminal "$agent_terminal" --json \
+      > "$STATE/agent-terminal-read.json" 2> "$STATE/agent-terminal-read.err" &&
+      jq -e --arg expected "$expected" '.ok == true and
+        (.result.terminal.tail | any(contains($expected)))' \
+        "$STATE/agent-terminal-read.json" >/dev/null; then
+      return
+    fi
+    sleep 0.2
+  done
+  die "Orca terminal did not report $expected"
+}
+agent_terminal_check() {
+  local phase=$1 result=$2
+  agent_client terminal send --terminal "$agent_terminal" --text "$phase" --enter --json \
+    > "$STATE/agent-terminal-send.json" 2> "$STATE/agent-terminal-send.err" \
+    || die 'Orca terminal input failed'
+  jq -e '.ok == true and .result.send.accepted == true' "$STATE/agent-terminal-send.json" >/dev/null \
+    || die 'Orca terminal rejected input'
+  agent_poll_terminal "subyard-agent-$phase:$result"
+}
+
+stage 'preparing synthetic encrypted SSH identity and independent second yard'
+yard ssh-agent lock >/dev/null
+[ -f "$agent_key" ] || ssh-keygen -q -t ed25519 -N "$agent_passphrase" -C subyard-public-e2e -f "$agent_key"
+install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/secondary"
+if [ ! -f "$SUBYARD_CONFIG_HOME/yards/secondary/config.env" ]; then
+cat > "$SUBYARD_CONFIG_HOME/yards/secondary/config.env" <<EOF
+INCUS_PROJECT=$PROJECT-secondary
+YARD_INSTANCE_NAME=$INSTANCE-secondary
+SSH_PORT=$(free_port)
+ENVIRONMENT_PROFILES=""
+CODING_TOOL_INTEGRATIONS=""
+EOF
+chmod 0600 "$SUBYARD_CONFIG_HOME/yards/secondary/config.env"
 fi
-incus info >/dev/null
-incus storage show default --project default >/dev/null
-[ -d "$PLATFORM/incus" ] || die 'product platform storage is not present'
-if [ -e "$PLATFORM/.subyard-e2e-platform-marker" ]; then
-  [ "$(cat "$PLATFORM/.subyard-e2e-platform-marker")" = subyard-e2e-platform-v1 ] || die 'unexpected platform marker'
-else
-  printf '%s\n' subyard-e2e-platform-v1 > "$PLATFORM/.subyard-e2e-platform-marker"
+yard -Y secondary init --yes > "$STATE/agent-secondary-init.out" 2>&1 \
+  || die 'second yard initialization failed'
+# Named yards deliberately finish their first init with desired power stopped.
+yard -Y secondary start --yes > "$STATE/agent-secondary-start.out" 2>&1 \
+  || die 'second yard did not start for the isolation check'
+agent_prepare_guest
+agent_project=$PROJECT-secondary agent_instance=$INSTANCE-secondary agent_prepare_guest
+
+agent_client repo list --json > "$STATE/agent-repos.json" 2> "$STATE/agent-repos.err"
+if ! jq -e '.result.repos | any(.displayName == "ssh-agent-e2e")' "$STATE/agent-repos.json" >/dev/null; then
+  yard clone "file://$agent_seed/source.git" --name ssh-agent-e2e --yes \
+    > "$STATE/agent-clone.out" 2>&1 || die 'fixture worktree registration failed'
+  agent_client repo list --json > "$STATE/agent-repos.json" 2> "$STATE/agent-repos.err"
 fi
-# The fixture isolates timer files from the normal root profile. Supply the actual
-# user manager/linger prerequisites without enabling a second keys-sync timer.
-loginctl enable-linger root
-systemctl start user@0.service
-# VM-yard mode has an explicit QEMU prerequisite; install it only in this
-# allocated disposable host, as directed by the product's VM preflight.
-if [ "$SECOND_KIND" = vm ] && ! command -v qemu-system-x86_64 >/dev/null; then
-  apt-get install -y qemu-system-x86 qemu-utils ovmf
+agent_repo_id="$(jq -er '.result.repos | map(select(.kind == "git" and
+  .displayName == "ssh-agent-e2e")) | select(length == 1) | .[0].id' \
+  "$STATE/agent-repos.json")" || die 'Orca did not register the fixture worktree'
+agent_worktree="$(jq -er --arg id "$agent_repo_id" \
+  '.result.repos[] | select(.id == $id) | .path' "$STATE/agent-repos.json")"
+[[ "$agent_worktree" =~ ^/srv/workspaces/[A-Za-z0-9._-]+/src$ ]] \
+  || die 'registered fixture worktree has an unsafe path'
+agent_remote=ssh://dev@127.0.0.1$agent_seed/source.git
+agent_ssh="ssh -F /dev/null -o BatchMode=yes -o PreferredAuthentications=publickey -o IdentityFile=none -o ControlMaster=no -o ControlPath=none -o ControlPersist=no -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$agent_seed/known_hosts -o GlobalKnownHostsFile=/dev/null -o ConnectTimeout=5"
+agent_dev "git -C '$agent_worktree' config core.sshCommand '$agent_ssh' &&
+  git -C '$agent_worktree' remote set-url origin '$agent_remote'"
+agent_fetch="git -C '$agent_worktree' ls-remote origin"
+[ "$(agent_status)" = locked ] || die 'new fixture unexpectedly has an active grant'
+if agent_dev "$agent_fetch" > "$STATE/agent-before.out" 2>&1; then
+  die 'Git authenticated before unlock'
 fi
-stage 'building candidate and preparing two named yards'
-bash "$ROOT/dev/build-engine.sh"
-token="$(printf '%s' "${STATE##*.}" | tr '[:upper:]' '[:lower:]')"
-YARD_A="ssh-agent-a-$token"; YARD_B="ssh-agent-b-$token"
-SSH_PORT_A="$(free_port)"; SSH_PORT_B="$(free_port)"
-[ "$SSH_PORT_A" != "$SSH_PORT_B" ] || die 'ports collided; retry fixture'
-install -d -m 0700 "$STATE/home" "$STATE/data" "$STATE/config" "$STATE/host" \
-  "$STATE/config/yards/$YARD_A" "$STATE/config/yards/$YARD_B" "$STATE/git/seed"
-for name in "$YARD_A" "$YARD_B"; do
-  port="$SSH_PORT_A"; [ "$name" != "$YARD_B" ] || port="$SSH_PORT_B"
-  kind=container; [ "$name" != "$YARD_B" ] || kind="$SECOND_KIND"
-  memory=512MiB; [ "$kind" != vm ] || memory=2GiB
-  cat > "$STATE/config/yards/$name/config.env" <<CFG
-SSH_PORT=$port
-YARD_KIND=$kind
-LIMITS_CPU=1
-LIMITS_MEMORY=$memory
-CODING_TOOL_INTEGRATIONS=
-ENVIRONMENT_PROFILES=
-HOST_MOUNTS=
-HOST_LINKS=
-FORWARD_SSH_AGENT=0
-CFG
-  chmod 0600 "$STATE/config/yards/$name/config.env"
-  stage "initializing $kind yard"
-  run_yard "$name" init --yes > "$STATE/init-$name.log" 2>&1 || {
-    tail -60 "$STATE/init-$name.log" >&2
-    incus --project "subyard-$name" info "yard-$name" --show-log >&2 || true
-    if [ "$kind" = vm ]; then incus --project "subyard-$name" console "yard-$name" --show-log >&2 || true; fi
-    die 'yard init failed'
-  }
-  run_yard "$name" start --yes
+
+stage 'opening an actual paired Orca terminal before unlock'
+agent_root sh -eu -c 'cat > "$1/terminal-check.sh"; chmod 0644 "$1/terminal-check.sh"' sh "$agent_seed" <<'GUEST'
+#!/bin/bash
+set -eu
+[ "${SSH_AUTH_SOCK:-}" = /home/dev/.ssh/subyard-agent.sock ] || exit 1
+printf '%s%s\n' 'subyard-agent-' ready
+while IFS= read -r phase; do
+  case "$phase" in
+    unlocked|reunlocked)
+      if git push origin "HEAD:refs/heads/$phase" >/dev/null 2>&1; then result=ok; else result=failed; fi ;;
+    locked|expired)
+      if git ls-remote origin >/dev/null 2>&1; then result=unexpected; else result=denied; fi ;;
+    *) exit 2 ;;
+  esac
+  printf 'subyard-agent-%s:%s\n' "$phase" "$result"
 done
-stage 'serving disposable Git over loopback SSH inside each yard'
-for name in git-client-key other-client-key; do ssh-keygen -q -t ed25519 -N '' -f "$STATE/$name"; done
-public_key="$(cat "$STATE/git-client-key.pub")"
-for name in "$YARD_A" "$YARD_B"; do
-  incus --project "subyard-$name" exec "yard-$name" -- bash -se -- "$public_key" <<'GUEST'
-set -euo pipefail
-fixture=/var/tmp/subyard-agent-git
-install -d -m 0755 "$fixture"
-printf '%s\n' "$1" > "$fixture/authorized_keys"
-chmod 0644 "$fixture/authorized_keys"
-ssh-keygen -q -t ed25519 -N '' -f "$fixture/host-key"
-install -d -m 0755 -o dev -g dev "$fixture/seed"
-runuser -u dev -- bash -se -- "$fixture" <<'SEED'
-fixture=$1
-git -C "$fixture/seed" init -q -b main
-printf 'ssh-agent fixture\n' > "$fixture/seed/fixture.txt"
-git -C "$fixture/seed" add fixture.txt
-git -C "$fixture/seed" -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm initial
-SEED
-install -d -m 0755 -o dev -g dev "$fixture/repo.git"
-runuser -u dev -- git clone -q --bare "$fixture/seed" "$fixture/repo.git"
-cat > "$fixture/sshd_config" <<CFG
-Port 22222
-ListenAddress 127.0.0.1
-HostKey $fixture/host-key
-AuthorizedKeysFile $fixture/authorized_keys
-StrictModes no
-PubkeyAuthentication yes
-PasswordAuthentication no
-KbdInteractiveAuthentication no
-PermitRootLogin no
-AllowUsers dev
-AllowTcpForwarding no
-X11Forwarding no
-PermitTTY no
-UsePAM yes
-UseDNS no
-LogLevel ERROR
-CFG
-cat > /etc/systemd/system/subyard-agent-git.service <<CFG
-[Unit]
-Description=Disposable SSH-agent Git test
-After=network.target
-[Service]
-ExecStart=/usr/sbin/sshd -D -e -f $fixture/sshd_config
-[Install]
-WantedBy=multi-user.target
-CFG
-systemctl daemon-reload
-systemctl enable --now subyard-agent-git.service
-runuser -u dev -- bash -se <<'CLIENT'
-install -d -m 0700 "$HOME/.ssh"
-for _ in $(seq 1 50); do
-  ssh-keyscan -T 1 -p 22222 127.0.0.1 > "$HOME/.ssh/agent-test-known_hosts" 2>/dev/null && break
-  sleep 0.1
-done
-test -s "$HOME/.ssh/agent-test-known_hosts"
-cat > "$HOME/.ssh/config" <<CFG
-Host agent-test-git
-    HostName 127.0.0.1
-    Port 22222
-    User dev
-    BatchMode yes
-    StrictHostKeyChecking yes
-    UserKnownHostsFile ~/.ssh/agent-test-known_hosts
-CFG
-chmod 0600 "$HOME/.ssh/config" "$HOME/.ssh/agent-test-known_hosts"
-CLIENT
 GUEST
-done
-repo="ssh://agent-test-git/var/tmp/subyard-agent-git/repo.git"
-can_read() { guest_dev "$1" git ls-remote "$repo" HEAD >/dev/null 2>&1; }
-! can_read "$YARD_A" || die 'Git unexpectedly worked without a grant'
-# Keep a real guest shell open across start, with no SSH_AUTH_SOCK in its environment.
-mkfifo "$STATE/existing-shell.in"
-exec 9<> "$STATE/existing-shell.in"
-run_yard "$YARD_A" shell -- bash -s < "$STATE/existing-shell.in" > "$STATE/existing-shell.out" 2>&1 &
-SHELL_PID=$!
-printf 'printf "shell-ready\\n"\n' >&9
-for _ in $(seq 1 50); do grep -q shell-ready "$STATE/existing-shell.out" && break; sleep 0.1; done
-grep -q shell-ready "$STATE/existing-shell.out" || die 'existing shell did not start'
-stage 'granting access without any existing host agent'
-if ! run_yard "$YARD_A" ssh-agent start --key "$STATE/git-client-key" --ttl 3m --yes; then
-  stage 'checking dedicated login and shared guest prerequisites'
-  ssh -T -S none -F /dev/null -o BatchMode=yes -o IdentityAgent=none -o IdentitiesOnly=yes \
-    -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$STATE/data/ssh/known_hosts" \
-    -i "$STATE/data/ssh/id_ed25519" -p "$SSH_PORT_A" dev@127.0.0.1 true || true
-  guest_dev "$YARD_A" sh -c '
-    test ! -f /etc/ssh/ssh_config.d/50-subyard-agent.conf || echo shared-config-present
-    for directory in "$HOME/.subyard" "$HOME/.subyard/run"; do
-      if test -e "$directory"; then stat -c "guest-directory mode=%a uid=%u" "$directory"; fi
-    done
-  ' || true
-  die 'SSH-agent grant failed'
+agent_client terminal create --worktree "id:$agent_repo_id::$agent_worktree" \
+  --title subyard-ssh-agent-e2e --command "exec bash $agent_seed/terminal-check.sh" --json \
+  > "$STATE/agent-terminal-create.json" 2> "$STATE/agent-terminal-create.err" \
+  || die 'stock Orca could not create the fixture terminal'
+agent_terminal="$(jq -er 'select(.ok == true) | .result.terminal.handle |
+  select(type == "string" and length > 0)' "$STATE/agent-terminal-create.json")"
+agent_poll_terminal subyard-agent-ready
+agent_orca_pid="$(guest_root systemctl show -p MainPID --value subyard-orca.service)"
+
+stage 'unlocking in a real PTY and proving detached Git and Orca signing'
+if agent_unlock 2m wrong-public-fixture-passphrase > "$STATE/agent-wrong-passphrase.out" 2>&1; then
+  die 'wrong passphrase unexpectedly unlocked the key'
 fi
-run_yard "$YARD_A" ssh-agent status --json | jq -e '.state == "active"' >/dev/null
-printf 'set -e\nunset SSH_AUTH_SOCK\ngit ls-remote %q HEAD\nprintf "git-ready\\n"\nexit\n' "$repo" >&9
-exec 9>&-
-wait "$SHELL_PID" || { cat "$STATE/existing-shell.out" >&2; die 'existing shell lost agent access'; }
-SHELL_PID=''
-grep -q git-ready "$STATE/existing-shell.out" || die 'existing shell did not finish Git'
-can_read "$YARD_A" || die 'new dev session could not read Git'
-run_yard "$YARD_A" clone "$repo" --name agent-clone --yes
-run_yard "$YARD_A" shell agent-clone -- test -s fixture.txt
-stage 'checking duplicate grant refusal and independent second-yard access'
-if run_yard "$YARD_A" ssh-agent start --key "$STATE/other-client-key" --ttl 1m --yes >/dev/null 2>&1; then die 'active grant was silently replaced'; fi
-! can_read "$YARD_B" || die 'ungranted second yard borrowed access'
-run_yard "$YARD_B" ssh-agent start --key "$STATE/other-client-key" --ttl 3m --yes
-! can_read "$YARD_B" || die 'second yard borrowed the first key'
-can_read "$YARD_A" || die 'second grant disrupted first yard'
-run_yard "$YARD_B" ssh-agent stop --yes
-run_yard "$YARD_B" ssh-agent start --key "$STATE/git-client-key" --ttl 3m --yes
-can_read "$YARD_B" || die 'second yard could not use its own grant'
-run_yard "$YARD_A" security > "$STATE/security.out" 2>&1 || true
-grep -q 'Temporary SSH-agent access is granted' "$STATE/security.out" || die 'security omitted granted access'
-stage 'checking reconnect after yard stop/start preserves the absolute deadline'
-before="$(run_yard "$YARD_A" ssh-agent status --json | jq -er '.expires_at')"
-run_yard "$YARD_A" stop --force --yes
-run_yard "$YARD_A" start --yes
-for _ in $(seq 1 30); do can_read "$YARD_A" && break; sleep 1; done
-can_read "$YARD_A" || die 'agent did not reconnect'
-after="$(run_yard "$YARD_A" ssh-agent status --json | jq -er '.expires_at')"
-[ "$before" = "$after" ] || die 'reconnect extended the deadline'
-stage 'checking immediate stop and short TTL with real Git authentications'
-run_yard "$YARD_A" ssh-agent stop --yes
-run_yard "$YARD_A" ssh-agent stop --yes
-! can_read "$YARD_A" || die 'stop left authentication available'
-run_yard "$YARD_A" ssh-agent start --key "$STATE/git-client-key" --ttl 5s --yes
-can_read "$YARD_A" || die 'short grant never worked'
-sleep 6
-! can_read "$YARD_A" || die 'expired key still authenticated'
-run_yard "$YARD_A" ssh-agent status --json | jq -e '.state == "expired"' >/dev/null
-stage 'checking teardown revokes a live grant'
-agent_runtime="$(jq -er '.runtime_dir' "$STATE/data/ssh-agent/$YARD_B/session.json")"
-agent_unit="${agent_runtime##*/}.service"
-run_yard "$YARD_B" teardown --yes
-unit_state="$(env XDG_RUNTIME_DIR=/run/user/0 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus \
-  systemctl --user show "$agent_unit" --property=ActiveState --value)"
-case "$unit_state" in inactive|failed) ;; *) die 'teardown left the agent service running';; esac
-printf 'ok: owner SSH-agent, existing/new sessions, clone, stop, TTL, reconnect, container/%s isolation and teardown\n' "$SECOND_KIND"
+[ "$(agent_status)" = locked ] || die 'failed passphrase left an active grant'
+if agent_dev "$agent_fetch" > "$STATE/agent-wrong-passphrase-fetch.out" 2>&1; then
+  die 'Git authenticated after a failed passphrase'
+fi
+agent_unlock 2m
+[ "$(agent_status)" = unlocked ] || die 'grant did not outlive the unlock terminal'
+agent_dev "$agent_fetch" > "$STATE/agent-fetch.out" 2>&1 || die 'ordinary guest shell could not authenticate'
+yard shell -- git -C "$agent_worktree" ls-remote origin > "$STATE/agent-shell-fetch.out" 2>&1 \
+  || die 'yard shell command did not inherit the agent socket'
+agent_dev "git -C '$agent_worktree' push origin HEAD:refs/heads/ordinary" \
+  > "$STATE/agent-push.out" 2>&1 || die 'ordinary guest shell could not push'
+agent_terminal_check unlocked ok
+agent_root git --git-dir="$agent_seed/source.git" rev-parse --verify refs/heads/unlocked >/dev/null \
+  || die 'Orca terminal push did not create the remote ref'
+if agent_dev 'ssh-add -D' > "$STATE/agent-admin.out" 2>&1; then
+  die 'guest could modify the host agent'
+fi
+agent_dev "$agent_fetch" > "$STATE/agent-after-admin.out" 2>&1 \
+  || die 'rejected guest mutation removed the signing identity'
+[ "$(agent_status -Y secondary)" = locked ] || die 'grant leaked to another yard status'
+if agent_project=$PROJECT-secondary agent_instance=$INSTANCE-secondary \
+  agent_dev "git -c core.sshCommand='$agent_ssh' ls-remote '$agent_remote'" \
+  > "$STATE/agent-secondary-fetch.out" 2>&1; then
+  die 'independent second yard authenticated using the first yard grant'
+fi
+grep -Fq 'Permission denied' "$STATE/agent-secondary-fetch.out" \
+  || die 'second yard negative case did not reach SSH authentication'
+# The selected private file is outside HOST_BASE, and no guest-visible mount may
+# cover it. The new guest also must not gain an ordinary private identity file.
+incus --project "$PROJECT" list "$INSTANCE" --format json \
+  | jq -e --arg key "$agent_key" --arg instance "$INSTANCE" \
+    '[.[] | select(.name == $instance)] | select(length == 1) | .[0] |
+    [.expanded_devices[] | select(.type == "disk") | .source // "" |
+      select(startswith("/")) | select(. as $source |
+        $key == $source or ($key | startswith($source + "/")))] | length == 0' >/dev/null \
+  || die 'selected private key lies inside a guest-visible host mount'
+agent_root sh -eu -c 'test ! -e /home/dev/.ssh/id_ed25519 && test ! -e /home/dev/.ssh/id_rsa' \
+  || die 'guest unexpectedly contains a private SSH identity'
+agent_private_scan=0
+agent_root grep -rIlE --devices=skip '^-----BEGIN (OPENSSH|RSA|EC|DSA|ENCRYPTED) PRIVATE KEY-----$' \
+  /home/dev/.ssh "$agent_seed" "$agent_worktree" > "$STATE/agent-private-key-paths.out" \
+  || agent_private_scan=$?
+[ "$agent_private_scan" = 1 ] || die 'private-key absence check failed in the guest fixture paths'
+
+stage 'locking the grant and testing fresh authentication in the existing terminal'
+yard ssh-agent lock > "$STATE/agent-lock.out" 2>&1
+[ "$(agent_status)" = locked ] || die 'lock did not revoke the grant'
+if agent_dev "$agent_fetch" > "$STATE/agent-locked-fetch.out" 2>&1; then
+  die 'Git authenticated after lock'
+fi
+agent_terminal_check locked denied
+
+stage 're-unlocking briefly and verifying expiry without restarting Orca'
+agent_unlock 10s
+agent_dev "$agent_fetch" > "$STATE/agent-reunlocked-fetch.out" 2>&1 \
+  || die 'fresh short grant could not authenticate'
+agent_terminal_check reunlocked ok
+agent_expiry_deadline=$((SECONDS + 20))
+while [ "$(agent_status)" != locked ] && ((SECONDS < agent_expiry_deadline)); do sleep 0.5; done
+[ "$(agent_status)" = locked ] || die 'grant did not expire within its bound'
+if agent_dev "$agent_fetch" > "$STATE/agent-expired-fetch.out" 2>&1; then
+  die 'Git authenticated after expiry'
+fi
+agent_terminal_check expired denied
+[ "$(guest_root systemctl show -p MainPID --value subyard-orca.service)" = "$agent_orca_pid" ] \
+  || die 'grant lifecycle restarted Orca'
+printf 'ok: encrypted owner key unlocked via PTY; ordinary and Orca Git pushes passed; mutation, cross-yard, lock and expiry checks passed\n'

@@ -1,231 +1,264 @@
 package sshagentruntime
 
 import (
-	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
+	"encoding/pem"
+	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
+	"golang.org/x/sys/unix"
+	"net"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
 
-func fixture(t *testing.T) (*Runtime, string) {
-	t.Helper()
-	root, err := os.MkdirTemp("", "sy-agent-")
-	if err != nil {
+func TestManagerRejectsUnsafeDirectoryAndInvalidTTL(t *testing.T) {
+	root := t.TempDir()
+	os.Chmod(root, 0700)
+	dir := filepath.Join(root, "grant")
+	if err := os.Mkdir(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	for _, dir := range []string{"data", "data/ssh", "runtime", "bin"} {
-		if err = os.MkdirAll(filepath.Join(root, dir), 0700); err != nil {
-			t.Fatal(err)
-		}
+	m := Manager{Config: Config{Directory: dir}}
+	if _, err := m.Status(context.Background()); err == nil {
+		t.Fatal("accepted public runtime directory")
 	}
-	for _, name := range []string{"id_ed25519", "known_hosts"} {
-		if err = os.WriteFile(filepath.Join(root, "data", "ssh", name), []byte("synthetic fixture"), 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, name := range []string{"ssh", "ssh-agent", "ssh-add", "systemd-run", "systemctl", "loginctl"} {
-		text := "#!/bin/sh\nexit 0\n"
-		if name == "systemctl" {
-			text = "#!/bin/sh\ncase \"$*\" in *LoadState*) printf 'LoadState=not-found\\nActiveState=inactive\\n';; *) echo 255;; esac\n"
-		}
-		if name == "loginctl" {
-			text = "#!/bin/sh\necho yes\n"
-		}
-		if err = os.WriteFile(filepath.Join(root, "bin", name), []byte(text), 0700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	runtime, err := New(Config{StateRoot: filepath.Join(root, "data", "ssh-agent"), Yard: "test", DataHome: filepath.Join(root, "data"), OperatorHome: root, Dispatcher: "/fixture/yard", DevUser: "dev", SSHPort: 2222,
-		Environment: []string{"PATH=" + filepath.Join(root, "bin"), "XDG_RUNTIME_DIR=" + filepath.Join(root, "runtime")}, Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
-	if err != nil {
+	if err := os.Chmod(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	key := filepath.Join(root, "selected-key")
-	if err = os.WriteFile(key, []byte("synthetic selected key"), 0600); err != nil {
+	status, err := m.Status(context.Background())
+	if err != nil || status.State != "locked" {
+		t.Fatalf("status: %+v %v", status, err)
+	}
+	if _, err := m.Unlock(context.Background(), "unused", 0); err == nil {
+		t.Fatal("accepted zero TTL")
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(dir, link); err != nil {
 		t.Fatal(err)
 	}
-	return runtime, key
-}
-
-func TestPrepareValidatesWithoutReadingKeyOrCreatingState(t *testing.T) {
-	r, key := fixture(t)
-	prepared, err := r.Prepare(context.Background(), []string{"start", "--key", key, "--ttl", "14d"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if prepared.Action != "ssh-agent.start" || !prepared.Changed || prepared.request.ttl != 14*24*time.Hour {
-		t.Fatalf("bad assessment: %#v", prepared)
-	}
-	if _, err = os.Lstat(r.cfg.StateRoot); !os.IsNotExist(err) {
-		t.Fatalf("prepare created state: %v", err)
-	}
-	// Invalid key contents above are deliberately accepted by metadata-only prepare.
-	for _, mode := range []os.FileMode{0644, 0660} {
-		if err = os.Chmod(key, mode); err != nil {
-			t.Fatal(err)
-		}
-		if _, err = r.Prepare(context.Background(), []string{"start", "--key", key, "--ttl", "14d"}); err == nil {
-			t.Fatal("accepted exposed key")
-		}
-	}
-	if err = os.Chmod(key, 0600); err != nil {
-		t.Fatal(err)
-	}
-	link := key + "-link"
-	if err = os.Symlink(key, link); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = r.Prepare(context.Background(), []string{"start", "--key", link, "--ttl", "14d"}); err == nil {
-		t.Fatal("accepted symlink key")
+	m.Config.Directory = link
+	if _, err := m.Status(context.Background()); err == nil {
+		t.Fatal("accepted symlink runtime directory")
 	}
 }
 
-func TestKeyReplacementAfterConsentIsRejected(t *testing.T) {
-	r, key := fixture(t)
-	p, err := r.Prepare(context.Background(), []string{"start", "--key", key, "--ttl", "10m"})
-	if err != nil {
+func TestDaemonPendingGrantCanBeLockedAndCannotRestartGrant(t *testing.T) {
+	root := t.TempDir()
+	os.Chmod(root, 0700)
+	dir := filepath.Join(root, "run")
+	os.Mkdir(dir, 0700)
+	cfg := daemonConfig{Config: Config{Directory: dir, SSHPort: 1, Developer: "dev", IdentityFile: "unused", KnownHostsFile: "unused"}, TTL: time.Minute}
+	data, _ := json.Marshal(cfg)
+	if err := os.WriteFile(filepath.Join(dir, "worker.json"), data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	// Keep the original inode alive, so this test cannot accidentally reuse it.
-	if err = os.Rename(key, key+".old"); err != nil {
+	done := make(chan error, 1)
+	go func() { done <- RunDaemon(context.Background(), dir) }()
+	m := Manager{Config: cfg.Config}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		status, err := m.Status(context.Background())
+		if err == nil && status.State == "pending" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("worker not ready: %+v %v", status, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := m.Lock(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err = os.WriteFile(key, []byte("replacement"), 0600); err != nil {
-		t.Fatal(err)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("worker survived lock")
 	}
-	if err = p.Execute(context.Background()); err == nil || !strings.Contains(err.Error(), "changed after assessment") {
-		t.Fatalf("replacement: %v", err)
+	if _, err := os.Stat(filepath.Join(dir, "private.sock")); !os.IsNotExist(err) {
+		t.Fatal("private socket survived lock")
 	}
-	if _, err = os.Stat(filepath.Join(r.directory, "session.json")); !os.IsNotExist(err) {
-		t.Fatal("replacement launched a session")
+	if err := RunDaemon(context.Background(), dir); err == nil {
+		t.Fatal("worker restarted without fresh unlock")
 	}
 }
 
-func TestTTLAndVerbValidation(t *testing.T) {
-	for _, args := range [][]string{
-		{"start", "--key", "key"}, {"start", "--key", "key", "--ttl", "0s"},
-		{"start", "--key", "key", "--ttl", "-1h"}, {"start", "--key", "key", "--ttl", "31d"},
-		{"start", "--key", "key", "--ttl", "999999999999999999d"},
-		{"start", "--key", "key", "--ttl", "1h", "--ttl", "2h"},
-		{"status", "--ttl", "0s"}, {"stop", "--json"}, {"unexpected"},
+func TestUnsafePathsDoNotCreateOrTruncateFiles(t *testing.T) {
+	root := t.TempDir()
+	os.Chmod(root, 0700)
+	public := filepath.Join(root, "public")
+	os.Mkdir(public, 0755)
+	child := filepath.Join(public, "grant")
+	if err := validateDirectory(child, true); err == nil {
+		t.Fatal("accepted public parent")
+	}
+	if _, err := os.Lstat(child); !os.IsNotExist(err) {
+		t.Fatal("created directory before rejecting parent")
+	}
+	victim := filepath.Join(root, "victim")
+	os.WriteFile(victim, []byte("preserve"), 0600)
+	link := filepath.Join(root, "linked")
+	os.Link(victim, link)
+	if f, err := protectedFile(link, os.O_WRONLY|os.O_TRUNC); err == nil {
+		f.Close()
+		t.Fatal("accepted hardlinked state")
+	}
+	content, _ := os.ReadFile(victim)
+	if string(content) != "preserve" {
+		t.Fatal("truncated unsafe file before validation")
+	}
+}
+
+func TestEmptyAgentCannotActivateGrant(t *testing.T) {
+	cfg, _ := syntheticYard(t)
+	if err := validateDirectory(cfg.Directory, true); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(daemonConfig{Config: cfg, TTL: time.Minute})
+	os.WriteFile(filepath.Join(cfg.Directory, "worker.json"), raw, 0600)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- RunDaemon(ctx, cfg.Directory) }()
+	m := Manager{Config: cfg}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		status, _ := m.Status(ctx)
+		if status.State == "pending" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("worker not ready")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	response, err := control(ctx, cfg.Directory, "activate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Error == "" {
+		t.Fatal("empty agent reported active grant")
+	}
+	m.Lock(context.Background())
+	<-done
+}
+
+func TestActiveWorkerStopsAfterLock(t *testing.T) {
+	cfg, _ := syntheticYard(t)
+	validateDirectory(cfg.Directory, true)
+	raw, _ := json.Marshal(daemonConfig{Config: cfg, TTL: time.Minute})
+	os.WriteFile(filepath.Join(cfg.Directory, "worker.json"), raw, 0600)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- RunDaemon(ctx, cfg.Directory) }()
+	m := Manager{Config: cfg}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		status, _ := m.Status(ctx)
+		if status.State == "pending" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("worker not ready")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	_, key, _ := ed25519.GenerateKey(rand.Reader)
+	conn, err := net.Dial("unix", filepath.Join(cfg.Directory, "private.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = agent.NewClient(conn).Add(agent.AddedKey{PrivateKey: key})
+	conn.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := control(ctx, cfg.Directory, "activate")
+	if err != nil || response.Error != "" {
+		t.Fatalf("activation: %v %s", err, response.Error)
+	}
+	if err := m.Lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	<-done
+}
+
+func TestPrivateFilesRejectFIFOWithoutBlocking(t *testing.T) {
+	root := t.TempDir()
+	fifo := filepath.Join(root, "fifo")
+	if err := unix.Mkfifo(fifo, 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, read := range []func() error{
+		func() error {
+			f, err := protectedFile(fifo, unix.O_RDONLY)
+			if f != nil {
+				f.Close()
+			}
+			return err
+		},
+		func() error { _, err := readPrivateKey(fifo); return err },
 	} {
-		if _, err := parse(args); err == nil {
-			t.Fatalf("accepted %q", args)
-		}
-	}
-	if req, err := parse([]string{"start", "--key", "key", "--ttl", "30d"}); err != nil || req.ttl != maxTTL {
-		t.Fatalf("30d: %#v %v", req, err)
-	}
-}
-
-func TestStatusDoesNotCreateOrExposePrivateState(t *testing.T) {
-	r, _ := fixture(t)
-	p, err := r.Prepare(context.Background(), []string{"status", "--json"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = p.Execute(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = os.Stat(r.cfg.StateRoot); !os.IsNotExist(err) {
-		t.Fatal("read-only status created state")
-	}
-	output := r.cfg.Stdout.(*bytes.Buffer)
-	if strings.Contains(output.String(), r.cfg.StateRoot) {
-		t.Fatal("status exposed private paths")
-	}
-	lock, err := r.lock()
-	if err != nil {
-		t.Fatal(err)
-	}
-	lock.Close()
-	deadline := time.Now().Add(-time.Second)
-	if err = writeJSON(filepath.Join(r.directory, "session.json"), session{Yard: r.cfg.Yard, RuntimeDir: r.runtimeDir, ExpiresAt: deadline, Token: strings.Repeat("a", 32)}); err != nil {
-		t.Fatal(err)
-	}
-	output.Reset()
-	if err = p.Execute(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	var status Status
-	if err = json.Unmarshal(output.Bytes(), &status); err != nil || status.State != "expired" {
-		t.Fatalf("status %s: %v", output, err)
-	}
-	if strings.Contains(output.String(), "token") || strings.Contains(output.String(), "runtime_dir") {
-		t.Fatal("status exposed internal state")
-	}
-}
-
-func TestPrivateStateRejectsSymlinksAndConcurrentOperations(t *testing.T) {
-	r, _ := fixture(t)
-	if err := os.Symlink(r.cfg.OperatorHome, r.cfg.StateRoot); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := r.Prepare(context.Background(), []string{"status"}); err == nil {
-		t.Fatal("accepted symlink state root")
-	}
-	if err := os.Remove(r.cfg.StateRoot); err != nil {
-		t.Fatal(err)
-	}
-	lock, err := r.lock()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer lock.Close()
-	if other, err := r.lock(); err == nil {
-		other.Close()
-		t.Fatal("allowed concurrent state operation")
-	}
-}
-
-func TestSSHUsesDedicatedLoginAndForwardedAgentSeparately(t *testing.T) {
-	s := session{RuntimeDir: "/run/user/1000/fixture", DataHome: "/fixture/data with space", DevUser: "dev", SSHPort: 2222, Token: strings.Repeat("a", 32)}
-	args := sshArguments(s)
-	joined := strings.Join(args, "\n")
-	for _, want := range []string{"IdentitiesOnly=yes", `ForwardAgent="/run/user/1000/fixture/agent.sock"`, "StrictHostKeyChecking=yes", "/fixture/data with space/ssh/id_ed25519", "subyard-ssh-agent-ready"} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("missing %q", want)
-		}
-	}
-	for _, arg := range args {
-		if arg == "-N" || arg == "-R" || arg == "IdentityAgent=none" {
-			t.Fatalf("forwarding lost SSH agent session semantics: %s", arg)
+		done := make(chan error, 1)
+		go func() { done <- read() }()
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Fatal("accepted FIFO")
+			}
+		case <-time.After(100 * time.Millisecond):
+			t.Fatal("blocked opening FIFO")
 		}
 	}
 }
 
-func TestStopCannotClaimRevocationWhenManagerIsUnavailable(t *testing.T) {
-	r, _ := fixture(t)
-	lock, err := r.lock()
+func TestValidateKeyRejectsUnencryptedOrPublicFiles(t *testing.T) {
+	_, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	lock.Close()
-	path := filepath.Join(r.directory, "session.json")
-	s := session{Yard: r.cfg.Yard, RuntimeDir: r.runtimeDir, ExpiresAt: time.Now().Add(time.Hour)}
-	if err = writeJSON(path, s); err != nil {
-		t.Fatal(err)
-	}
-	program, err := r.program("systemctl")
+	path := filepath.Join(t.TempDir(), "key")
+	block, err := ssh.MarshalPrivateKeyWithPassphrase(key, "synthetic", []byte("synthetic-passphrase"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = os.WriteFile(program, []byte("#!/bin/sh\nexit 1\n"), 0700); err != nil {
+	if err := os.WriteFile(path, pem.EncodeToMemory(block), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err = r.Revoke(context.Background()); err == nil {
-		t.Fatal("claimed revoke without user manager")
+	if err := ValidateKey(path); err != nil {
+		t.Fatalf("encrypted key rejected: %v", err)
 	}
-	var after session
-	if err = readJSON(path, &after); err != nil {
+	if err := os.Chmod(path, 0644); err != nil {
 		t.Fatal(err)
 	}
-	if after.Stopped {
-		t.Fatal("persisted a false stopped state")
+	if err := ValidateKey(path); err == nil {
+		t.Fatal("publicly readable key accepted")
+	}
+	if err := os.Chmod(path, 0600); err != nil {
+		t.Fatal(err)
+	}
+	block, err = ssh.MarshalPrivateKey(key, "synthetic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, pem.EncodeToMemory(block), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateKey(path); err == nil {
+		t.Fatal("unencrypted key accepted")
+	}
+	if err := os.WriteFile(path, []byte("invalid private key"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateKey(path); err == nil {
+		t.Fatal("malformed key accepted")
 	}
 }

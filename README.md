@@ -72,8 +72,8 @@ See [temporary SSH access](docs/ssh-agent.md) to use a host Git key from every y
 
 ## Documentation
 
-- Operators: [configuration](docs/configuration.md), [named yards](config/yards/README.md), and the
-  [credential ledger](docs/keys.md).
+- Operators: [configuration](docs/configuration.md), [named yards](config/yards/README.md), the
+  [credential ledger](docs/keys.md), and [per-yard SSH agents](docs/ssh-agent.md).
 - Agent usage dashboard: [AI Observer](docs/ai-observer.md), enabled by default for Claude and Codex session files.
 - Optional integrations: [Paseo Desktop](docs/paseo.md), [Orca remote server](docs/orca.md), and a
   dedicated [Hermes yard](docs/hermes.md).

@@ -178,7 +178,20 @@ func ReadAuditLines(home string, limit int) ([]string, error) {
 
 func redactArguments(arguments []string) string {
 	redacted := make([]string, 0, len(arguments))
+	sshAgent := len(arguments) > 0 && arguments[0] == "ssh-agent"
+	keyValue := false
 	for _, argument := range arguments {
+		if sshAgent && keyValue {
+			redacted = append(redacted, "***")
+			keyValue = false
+			continue
+		}
+		if sshAgent && argument == "--key" {
+			keyValue = true
+		}
+		if sshAgent && strings.HasPrefix(argument, "--key=") {
+			argument = "--key=***"
+		}
 		if argument == "--" {
 			redacted = append(redacted, "--", "***")
 			break

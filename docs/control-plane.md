@@ -109,6 +109,25 @@ share assessment, execution and successful project-state commit; CLI owns human 
 prompts, while RPC owns bounded session storage, events and protocol errors. Dedicated query,
 terminal, configuration and credential workflows retain explicit resolver classifications.
 
+### Temporary SSH-key access
+
+`ssh-agent` is a dedicated owner-local credential workflow. The CLI validates the explicit key
+and TTL, assesses access changes before mutation, and keeps passphrase input on the operator TTY.
+`internal/adapters/sshagentruntime` owns an isolated OpenSSH agent and a detached, expiring worker
+per owner data home and yard. Its private control endpoint is never exposed to the guest. A pinned
+SSH connection opens a reverse Unix listener in the guest; only SSH2 identity-list and sign
+requests reach the isolated agent. Native key lifetime and worker cancellation enforce expiry,
+including closing existing agent channels. The worker consumes its launch record and cannot
+restore an unlocked key after restart. Status and revocation remain available during release
+recovery, while unlock uses the normal mutation gate. This workflow does not use RPC credential
+payloads or the persistent `yard keys` ledger.
+
+The shared `scripts/ssh-agent-environment.sh` physical leaf installs and checks the guest shell
+fallback, OpenSSH client default and Orca systemd environment. Both SSH initialization and
+explicit unlock use it; repeated
+grants do not restart Orca. See [temporary SSH access](ssh-agent.md) for the public command contract
+and the distinction between expiring signatures and already authenticated SSH sessions.
+
 ### RPC
 
 `yard rpc --stdio` is the only machine protocol. Each frame is a four-byte big-endian length

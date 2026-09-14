@@ -3,112 +3,124 @@ package cli
 import (
 	"bytes"
 	"context"
-	"encoding/json"
-	"io"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/domain"
 )
 
-func TestSSHAgentCLIHelpPrintsWithoutRuntimeEffects(t *testing.T) {
+func TestSSHAgentStatusDoesNotCreateState(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
-	var stdout, stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard",
-		Arguments: []string{"ssh-agent", "--help"}, Environment: environment,
-		WorkingDir: root, Stdout: &stdout, Stderr: &stderr})
+	var out, stderr bytes.Buffer
+	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"ssh-agent", "status", "--json"}, Environment: environment, WorkingDir: root, Stdout: &out, Stderr: &stderr})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code := program.Run(context.Background()); code != 0 || !strings.Contains(stdout.String(), "Usage: yard [-Y NAME] ssh-agent") {
-		t.Fatalf("help code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	if code := program.Run(context.Background()); code != 0 || !strings.Contains(out.String(), `"state":"locked"`) {
+		t.Fatalf("code=%d output=%s stderr=%s", code, &out, &stderr)
 	}
-	if _, err := os.Stat(filepath.Join(root, "data", "ssh-agent")); !os.IsNotExist(err) {
-		t.Fatalf("help created runtime state: err=%v", err)
+	if _, err := os.Stat(filepath.Join(root, "data")); !os.IsNotExist(err) {
+		t.Fatalf("status created data: %v", err)
 	}
 }
 
-func TestSSHAgentCLIStatusJSONIsReadOnly(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
-	dataHome := filepath.Join(root, "data")
-	if err := os.MkdirAll(dataHome, 0o700); err != nil {
-		t.Fatal(err)
+func TestSSHAgentArgumentBoundaries(t *testing.T) {
+	for _, args := range [][]string{
+		{"unlock"}, {"unlock", "--key", "key"}, {"unlock", "--ttl", "2h"},
+		{"unlock", "--key", "key", "--ttl", "0"},
+		{"unlock", "--key", "key", "--ttl", "-1s"},
+		{"unlock", "--key", "key", "--ttl", "1.5s"},
+		{"unlock", "--key", "key", "--ttl", "25h"},
+		{"unlock", "--key", "key", "--ttl", "2h", "--ttl", "3h"},
+		{"status", "unlock"}, {"status", "--key", "key"}, {"lock", "--ttl", "1h"},
+		{"lock", "--json"}, {"unlock", "--key", "--ttl", "2h"},
+	} {
+		if _, err := parseSSHAgentArguments(args); err == nil {
+			t.Fatalf("accepted invalid arguments %q", args)
+		}
 	}
-	var stdout, stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard",
-		Arguments: []string{"ssh-agent", "status", "--json"}, Environment: environment,
-		WorkingDir: root, Stdout: &stdout, Stderr: &stderr})
+	got, err := parseSSHAgentArguments([]string{"--yes", "unlock", "--key", "key with spaces", "--ttl", "2h"})
+	if err != nil || got.key != "key with spaces" || got.ttl != 2*time.Hour || !got.yes {
+		t.Fatalf("got=%+v err=%v", got, err)
+	}
+}
+
+func TestSSHAgentUnlockNeedsTerminalEvenWithConsent(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	var out bytes.Buffer
+	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"ssh-agent", "unlock", "--key", "absent", "--ttl", "2h", "--yes"}, Environment: environment, WorkingDir: root, Stderr: &out})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code := program.Run(context.Background()); code != 0 {
-		t.Fatalf("status code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
-	}
-	var status struct {
-		Yard, State string
-	}
-	if err := json.Unmarshal(stdout.Bytes(), &status); err != nil || status.Yard != "default" || status.State != "stopped" {
-		t.Fatalf("status=%#v err=%v stdout=%q", status, err, stdout.String())
-	}
-	if _, err := os.Stat(filepath.Join(dataHome, "ssh-agent")); !os.IsNotExist(err) {
-		t.Fatalf("status created runtime state: err=%v", err)
+	program.operatorTerminal = func() bool { return false }
+	if code := program.Run(context.Background()); code != 1 || !strings.Contains(out.String(), "requires a terminal") {
+		t.Fatalf("code=%d err=%s", code, &out)
 	}
 }
 
-func TestSSHAgentCLIRemoteSelectionIsRejected(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
-	environment = append(environment, "ACCESS_KIND=remote", "OWNER_ENDPOINT=owner.example", "OWNER_YARD_NAME=default")
-	var stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard",
-		Arguments: []string{"ssh-agent", "status"}, Environment: environment,
-		WorkingDir: root, Stdout: io.Discard, Stderr: &stderr})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if code := program.Run(context.Background()); code != 1 || !strings.Contains(stderr.String(), "owner-host only") {
-		t.Fatalf("remote code=%d stderr=%q", code, stderr.String())
-	}
-}
-
-func TestSSHAgentAuditArgumentsRedactKey(t *testing.T) {
-	got := sshAgentAuditArguments([]string{"start", "--key", "/secret/id_ed25519", "--ttl", "14d"})
-	if want := []string{"start", "--key", "<redacted>", "--ttl", "14d"}; !slices.Equal(got, want) {
-		t.Fatalf("redacted arguments = %#v, want %#v", got, want)
-	}
-	got = sshAgentAuditArguments([]string{"start", "--key=/secret/id_ed25519"})
-	if want := []string{"start", "--key=<redacted>"}; !slices.Equal(got, want) {
-		t.Fatalf("equals redacted arguments = %#v, want %#v", got, want)
-	}
-}
-
-func TestSSHAgentActionsRegistered(t *testing.T) {
+func TestSSHAgentLockIsPromptFreeAndUnlockAssessesAccess(t *testing.T) {
 	registry, err := application.NewCoreActionRegistry()
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, action := range []domain.ActionID{"ssh-agent.help", "ssh-agent.status"} {
-		assessment, err := registry.Assess(action, domain.ActionDelta{})
-		if err != nil || assessment.Effect != domain.ActionRead {
-			t.Fatalf("read action %q = %#v, err=%v", action, assessment, err)
+	for _, item := range []struct {
+		action domain.ActionID
+		policy domain.ActionConfirmationPolicy
+	}{
+		{"ssh-agent.lock", domain.ActionConfirmationNever},
+		{"ssh-agent.unlock", domain.ActionConfirmationPromptDefaultYes},
+	} {
+		assessment, err := registry.Assess(item.action, domain.ActionDelta{Changed: true, Consequences: []string{"change temporary key access"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		policy, _, err := registry.Resolve(assessment)
+		if err != nil || policy != item.policy {
+			t.Fatalf("%s: %s %v", item.action, policy, err)
 		}
 	}
-	for _, action := range []domain.ActionID{"ssh-agent.start", "ssh-agent.stop"} {
-		assessment, err := registry.Assess(action, domain.ActionDelta{Changed: true, Consequences: []string{"change SSH-agent access"}})
-		if err != nil || assessment.Effect != domain.ActionMutation {
-			t.Fatalf("mutation action %q = %#v, err=%v", action, assessment, err)
+}
+
+func TestSSHAgentRejectsInvalidKeyBeforeGuestPreparation(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	key := filepath.Join(root, "invalid-key")
+	writeCLIFile(t, key, "invalid private key", 0600)
+	var out bytes.Buffer
+	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"ssh-agent", "unlock", "--key", key, "--ttl", "2h", "--yes"}, Environment: environment, WorkingDir: root, Stderr: &out})
+	if err != nil {
+		t.Fatal(err)
+	}
+	program.operatorTerminal = func() bool { return true }
+	if code := program.Run(context.Background()); code != 1 || !strings.Contains(out.String(), "encrypted private key") {
+		t.Fatalf("invalid key reached transport preparation: code=%d err=%s", code, &out)
+	}
+}
+
+func TestSSHAgentRevocationRemainsAvailableDuringReleaseRecovery(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	runtimeRoot := filepath.Join(root, "runtime-agent-recovery")
+	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot, "V2_GATE_CAPTURE="+filepath.Join(root, "capture"))
+	journal, _ := installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
+	before, err := os.ReadFile(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, verb := range []string{"status", "lock"} {
+		var stderr bytes.Buffer
+		program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"ssh-agent", verb}, Environment: environment, WorkingDir: root, Stderr: &stderr})
+		if err != nil {
+			t.Fatal(err)
 		}
-		policy, request, err := registry.Resolve(assessment)
-		if err != nil || policy != domain.ActionConfirmationPromptDefaultYes || request == nil {
-			t.Fatalf("mutation policy %q = %q, %#v, err=%v", action, policy, request, err)
+		if code := program.Run(context.Background()); code != 0 {
+			t.Fatalf("%s: code=%d %s", verb, code, &stderr)
 		}
 	}
-	assessment, _ := registry.Assess("ssh-agent.stop", domain.ActionDelta{})
-	policy, request, err := registry.Resolve(assessment)
-	if err != nil || policy != domain.ActionConfirmationNever || request != nil {
-		t.Fatalf("unchanged stop policy = %q, %#v, err=%v", policy, request, err)
+	after, err := os.ReadFile(journal)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("SSH agent inspection/revocation changed release journal")
 	}
 }

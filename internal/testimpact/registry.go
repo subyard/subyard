@@ -53,7 +53,7 @@ func BuiltInRegistry() (Registry, error) {
 		"adapters/incusclient", "adapters/networkruntime", "adapters/projectruntime", "adapters/reconcileruntime",
 		"adapters/releaseruntime", "adapters/remotecontrol", "adapters/securityruntime",
 		"adapters/shelladapter", "adapters/statusruntime", "adapters/testvmsruntime",
-		"adapters/transport",
+		"adapters/transport", "adapters/sshagentruntime",
 		"architecture", "contracttest", "testkit",
 	}
 	for _, packageName := range goPackages {
@@ -85,7 +85,7 @@ func BuiltInRegistry() (Registry, error) {
 		"power-reconciler-systemd-255-launch", "power-reconciler-systemd",
 		"profile-resource-lifecycle", "project-registry-convergence",
 		"prompt-contract", "provision-profile-check", "remote-projects",
-		"runtime-privilege-reexec", "ssh-config", "ssh-transport-identity",
+		"runtime-privilege-reexec", "ssh-config", "ssh-transport-identity", "ssh-agent-environment",
 		"subyard-dev-provision", "teardown-runtime-preservation", "test-vms",
 		"vscode-remote-maintenance", "workflow-real-adapter-gate", "yard-extras-convergence",
 		"yard-keys", "yard-remote", "yard-shell", "yard-usage", "zabbly-download",
@@ -175,6 +175,13 @@ func BuiltInRegistry() (Registry, error) {
 			},
 			BudgetSeconds: 3600,
 			Rationale:     "fresh one-command Orca profile, yard and durable endpoint bootstrap on a disposable leased VM",
+		},
+		Check{
+			ID: "e2e:orca-ssh-agent", Tier: "T3",
+			Argv: []string{"dev/agent-e2e.sh", "--purpose", "orca-ssh-agent", "--vm", "1", "--",
+				"env", "SUBYARD_E2E_ORCA_BOOTSTRAP=1", "SUBYARD_E2E_ORCA_SSH_AGENT=1", "bash", "tests/real-host/orca-bootstrap.sh"},
+			BudgetSeconds: 1800,
+			Rationale:     "encrypted SSH key grants, Git and Orca signing, isolation and expiry on a disposable leased VM",
 		},
 		Check{
 			ID:   "e2e:orca-resource",

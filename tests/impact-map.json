@@ -169,6 +169,7 @@
       "go:testimpact",
       "shell:test-impact"
     ],
+    "ssh-agent": ["go:adapters/sshagentruntime", "shell:ssh-agent-environment", "e2e:orca-ssh-agent"],
     "ssh-transport": [
       "go:adapters/remotecontrol",
       "go:adapters/transport",
@@ -650,6 +651,13 @@
       "priority": 600,
       "pattern": "^internal/rpc/.*$",
       "check_sets": ["cli-control", "ssh-transport"],
+      "risk_domains": ["ssh-remote-transport"]
+    },
+    {
+      "id": "ssh-agent-runtime",
+      "priority": 620,
+      "pattern": "^(internal/adapters/sshagentruntime/.*|internal/cli/ssh_agent(_test)?\\.go|scripts/ssh-agent-environment\\.sh|tests/(real-host/)?ssh-agent(-environment)?\\.sh)$",
+      "check_sets": ["ssh-agent", "ssh-transport", "cli-control"],
       "risk_domains": ["ssh-remote-transport"]
     },
     {

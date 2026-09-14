@@ -1088,13 +1088,22 @@ func (runtime Runtime) sshConverged(ctx context.Context) (bool, error) {
 		"grep", "-qxF", "--", authorizedLine, "/home/" + user + "/.ssh/authorized_keys",
 	}}
 	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, request)
-	if err == nil {
-		return result.ExitCode == 0, nil
-	}
 	if result.ExitCode != 0 {
 		return false, nil
 	}
-	return false, err
+	if err != nil {
+		return false, err
+	}
+	script, err := os.ReadFile(filepath.Join(runtime.RepositoryRoot, "scripts", "ssh-agent-environment.sh"))
+	if err != nil {
+		return false, err
+	}
+	result, err = runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName,
+		ports.InstanceExecRequest{Command: []string{"sh", "-eu", "-s", "--", "check", user}, Stdin: script})
+	if result.ExitCode != 0 {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 func (runtime Runtime) vmSSHRelayConverged(ctx context.Context, address, port string) bool {

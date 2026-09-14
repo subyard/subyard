@@ -52,19 +52,20 @@ live configuration and SSH process; it never changes the outer yard lifecycle.
 
 ## Platform and release checks
 
-Temporary shared SSH-agent access has a dedicated disposable-host check:
+Temporary shared SSH-agent access has a focused disposable-host check:
 
 ```sh
-dev/agent-e2e.sh --slot "$slot" --purpose ssh-agent-lifecycle --vm 1 -- \
-  sudo -n env SUBYARD_E2E_VM=1 bash tests/real-host/ssh-agent.sh
+dev/agent-e2e.sh --slot "$slot" --purpose orca-ssh-agent --vm 1 -- \
+  env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_SSH_AGENT=1 \
+  bash tests/real-host/orca-bootstrap.sh
 ```
 
-It uses generated fixture keys and a loopback Git SSH server, exercises existing
-and new yard sessions and `yard clone`, and checks revocation, expiry, reconnect
-without deadline extension, and isolation between two named container yards.
-To exercise a VM as the second yard, also pass `SUBYARD_SSH_AGENT_SECOND_KIND=vm`
-to `env`. This needs a working nested VM boot/Incus-agent baseline. Optional host
-mounts are disabled in this focused SSH fixture.
+It unlocks a generated encrypted key through a real terminal and checks Git pushes
+from a yard and an already-open paired Orca terminal, cross-yard isolation,
+rejected agent mutations, wrong passphrases, cancellation, explicit revocation and
+expiry. Grants do not restart Orca. See [test VMs](test-vms.md) for fixture scope
+and bounded debugging options. Reconnect deadline and worker failure behavior
+also have focused runtime tests with real OpenSSH agents.
 
 VM1 installs the candidate runtime, runs `init` twice, repairs a legacy fixture and verifies storage,
 network, systemd, Incus container/VM and rollback behavior. VM2 runs the full suite and transport

@@ -1,76 +1,62 @@
-# Temporary SSH access for a yard
+# Per-yard SSH agent
 
-Run on the yard's **owner host**, where the private Git key is stored:
+Subyard can unlock one SSH private key into a separate, owner-host agent for each yard. The agent
+continues running after the command and terminal exit, and its key expires after the required
+time-to-live. This leaves the user's normal SSH agent unchanged.
 
-```sh
-yard ssh-agent start --key ~/.ssh/id_ed25519 --ttl 14d
+Run these commands on the yard's owner host. The first release does not route them from a remote
+controller because the key path and passphrase prompt belong to the owner host.
+
+```bash
+yard ssh-agent unlock --key ~/.ssh/id_ed25519 --ttl 2h
 yard ssh-agent status
-yard ssh-agent stop
-```
-
-Use `-Y NAME` to select another local yard. A duration is required: seconds, minutes,
-hours, or whole days, from `1s` through `30d`. `start` confirms the selected yard and
-access before reading the key. OpenSSH asks for an encrypted key's passphrase in the
-owner terminal. No existing SSH agent is required. For unattended tests, an
-unencrypted disposable key and explicit `--yes` can be used.
-
-After `start` succeeds, ordinary Git-over-SSH commands use the shared agent from
-existing and new `dev` terminals, `yard shell`, and `yard clone`. No `export
-SSH_AUTH_SOCK` is needed. HTTPS Git authentication is unchanged.
-
-## Prerequisites
-
-Run current `yard init` on the owner first. It provisions the dedicated SSH login,
-pins the guest host key, installs the guest SSH client default, and enables the
-owner's systemd user manager with lingering. The yard must be running when granting
-access. No host network, firewall, Incus mount, or SSH server policy is changed by
-`ssh-agent start`.
-
-The command is owner-local. For a yard on another server, connect to that owner and
-run the command there. The command does not transfer private key input through
-Subyard RPC. Ordinary per-session `FORWARD_SSH_AGENT` remains a separate opt-in.
-
-## Scope and lifetime
-
-Each selected yard gets a dedicated host SSH agent containing the selected key.
-**Every process running as `dev` in that yard can use the key's existing upstream
-permissions**, including push if allowed. The feature does not enforce read-only
-Git, repository restrictions, or approval for individual Git operations.
-
-The private key is read by `ssh-add` on the owner and is never copied into the yard.
-The background connection uses ordinary OpenSSH agent forwarding. A private guest
-runtime link at `~/.subyard/run/ssh-agent.sock` points to the current session socket.
-The managed `/etc/ssh/ssh_config.d/50-subyard-agent.conf` chooses it only while a
-shared socket exists; otherwise ordinary `SSH_AUTH_SOCK` handling remains available.
-Explicit user SSH configuration takes precedence. In particular, a custom
-`IdentityAgent`, `IdentitiesOnly`, or Git `core.sshCommand` may override this default.
-
-The maximum lifetime starts when `start` creates the background service, including
-time spent entering a passphrase. Both the loaded key and the service are bounded.
-Closing the owner terminal does not stop access. A broken connection or yard restart
-can reconnect using the original, still-loaded agent, without extending the deadline.
-The worker never rereads or automatically reloads the private key. An owner reboot
-or dead agent requires a new explicit `start`.
-
-`stop` and `yard teardown` terminate this yard's service and agent.
-`yard security` reports a warning while temporary access is granted. Expiry and stop prevent **new SSH
-authentications using this agent**; they do not terminate sessions already
-authenticated, revoke other copies of the key, or disable another available identity.
-A repeated `start` while access is active is rejected; inspect `status` or explicitly
-`stop` before replacing it. A repeated `stop` is safe.
-
-## Diagnostics
-
-```sh
 yard ssh-agent status --json
+yard ssh-agent lock
 ```
 
-Status reports `yard`, `state` and, when known, `expires_at`. States are `loading`,
-`connecting`, `active`, `expired`, and `stopped`. `active` means the managed forwarding
-session is connected, not that a particular Git provider has accepted the key.
-Status does not list identities, source key paths, or internal runtime paths.
+`--key` must name an encrypted, owner-only private-key file. `--ttl` is required, must resolve to
+a whole number of seconds from 1 second to 24 hours, and accepts duration units `s`, `m`, and `h`,
+such as `900s`, `30m`, `1h30m`, or `2h`. There is no unlimited lifetime.
+Unlock asks for confirmation before granting access. `--yes`
+answers that confirmation only; it never supplies or bypasses the private-key passphrase. The
+key passphrase is read from the operator terminal. The yard must be running with its managed SSH
+transport configured; run `yard init` if the command reports that transport needs reconciliation.
 
-If startup fails, its dedicated service is stopped. Check the owner's dedicated yard
-SSH access and reconcile with `yard init`. A stopped owner user manager or disabled
-lingering also requires owner-side initialization. Git provider authorization and
-host-key verification must still be configured normally inside the yard.
+Status reports `locked`, `pending` (waiting for key loading), `unlocked`, or `reconnecting`, with
+the remaining lifetime after activation. Reconnecting does not extend the lifetime. A host reboot
+or agent worker restart requires a new explicit unlock.
+
+Unlock replaces the key available to the selected yard. Replacement revokes the old access before
+the new key becomes available. A wrong passphrase or cancelled prompt does not grant new access.
+`lock` needs no confirmation and prevents new authentication with the per-yard agent. It does not
+terminate SSH connections, multiplexed OpenSSH ControlMaster sessions, or transfers that were
+already established. Expiry has the same limitation.
+
+Subyard exposes a stable agent socket at `/home/dev/.ssh/subyard-agent.sock` inside the selected
+yard through a reverse Unix-socket SSH tunnel. The tunnel filters the agent protocol to identity
+listing and signing operations. It does not copy the private key, passphrase, or agent state into
+the yard, and `status` does not enumerate loaded identities.
+
+When `SSH_AUTH_SOCK` is unset, the managed SSH client default selects this socket while it
+exists, so Git also works in
+existing guest sessions and through `yard clone`. Explicit user `IdentityAgent` settings take
+precedence; custom `IdentitiesOnly` or Git `core.sshCommand` settings may override this default.
+When the shared socket is absent, ordinary session agent handling remains available.
+
+New guest shells use that socket as `SSH_AUTH_SOCK` when no other socket was supplied. Orca receives
+the same setting through its managed environment. The first unlock may install that environment
+and restart Orca once; later unlock and lock operations do not restart it. Open a new yard login
+after the initial setup if an existing terminal does not see the socket.
+
+## Git access
+
+Use an SSH Git remote, for example `git@github.com:owner/repository.git`, to use the per-yard agent.
+The Git host still needs a normal, verified `known_hosts` entry in the yard. Unlocking a key does not
+trust a Git host automatically.
+
+`yard teardown` revokes the selected yard's grant before removing the yard. `yard security`
+reports a warning while temporary access is granted.
+
+The socket is a delegated signing capability. A process in the yard that can reach it can request
+signatures until the key expires or the agent is locked. Processes running as the yard developer
+share this access.

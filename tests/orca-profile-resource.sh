@@ -254,6 +254,9 @@ jq -e '.action == "up" and .changed == true' "$TMP/bootstrap-plan.json" >/dev/nu
 [ ! -e "$ORCA_TEST_SERVICE" ] || fail 'bootstrap assessment started the service'
 rm -f "$TMP/missing-yard"
 run_orca up --yes >"$TMP/up.out"
+grep -Fxq 'Environment=SSH_AUTH_SOCK=/home/dev/.ssh/subyard-agent.sock' \
+  "$ORCA_TEST_CAPTURE/subyard-orca.service" \
+  || fail 'service lacks the fixed yard SSH agent environment'
 grep -Fxq 'tcp:100.64.1.20:17678' "$ORCA_TEST_ROUTE" \
   || fail 'Tailscale mode did not bind the exact owner address'
 grep -Fxq 'tcp:127.0.0.1:6768' "$ORCA_TEST_ROUTE" \

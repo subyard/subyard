@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
+	"github.com/Subyard/Subyard/internal/adapters/sshagentruntime"
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
@@ -181,11 +182,10 @@ func (cli *CLI) executeTeardown(
 		contextValues["SUBYARD_TEARDOWN_KEEP_SHARED"] = "1"
 	}
 	// Teardown must not leave a credential service reconnecting to a future yard.
-	agentRuntime, agentErr := cli.sshAgentRuntime(loaded)
-	if agentErr != nil {
-		return domain.AdapterResult{}, agentErr
-	}
-	if agentErr = agentRuntime.Revoke(ctx); agentErr != nil {
+	agentManager := sshagentruntime.Manager{Config: sshagentruntime.Config{
+		Directory: sshagentruntime.Directory(loaded.Context.Paths.DataHome, loaded.Context.YardName),
+	}}
+	if agentErr := agentManager.Lock(ctx); agentErr != nil {
 		return domain.AdapterResult{}, agentErr
 	}
 	request := domain.AdapterRequest{

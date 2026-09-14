@@ -199,25 +199,6 @@ mkdir -p "${srv_skel[@]}"
 chown root:yard "${srv_skel[@]}"
 chmod g+rwXs "${srv_skel[@]}"   # g+rwX + setgid (dirs) so new subdirs inherit the yard group
 
-# A host-granted agent is available to every dev session, including Incus exec.
-# When no shared socket exists, ordinary SSH_AUTH_SOCK forwarding still works.
-# The per-user SSH config is read first and keeps precedence over this default.
-install -d -m 0755 /etc/ssh/ssh_config.d
-shared_agent_config=/etc/ssh/ssh_config.d/50-subyard-agent.conf
-if [ -L "$shared_agent_config" ] || { [ -e "$shared_agent_config" ] && [ ! -f "$shared_agent_config" ]; }; then
-  echo "unsafe shared SSH-agent client configuration" >&2
-  exit 1
-fi
-shared_agent_temporary="$(mktemp /etc/ssh/ssh_config.d/.subyard-agent.XXXXXX)"
-cat > "$shared_agent_temporary" <<'SSH_AGENT_CONFIG'
-# Managed by Subyard. Key access is granted explicitly with yard ssh-agent start.
-Match exec "test -S ~/.subyard/run/ssh-agent.sock"
-    IdentityAgent ~/.subyard/run/ssh-agent.sock
-Match all
-SSH_AGENT_CONFIG
-chmod 0644 "$shared_agent_temporary"
-mv -f -- "$shared_agent_temporary" "$shared_agent_config"
-
 # Services live in the container's own systemd (does not touch host systemd).
 systemctl enable --now ssh docker
 EOS

@@ -5082,6 +5082,7 @@ func TestUsageAndShellExecArgumentsPreserveTypedBoundaries(t *testing.T) {
 	devCommand := []string{"sh", "-lc", "printf '%s'", "space arg", "", "$(touch should-not-run)"}
 	devShell := shellExecArguments(yard, false, "/srv/workspaces/demo/src", devCommand)
 	for _, expected := range [][]string{
+		{"--env", "SSH_AUTH_SOCK=/home/dev/.ssh/subyard-agent.sock"},
 		{"--user", "0"}, {"--group", "0"}, {"--env", "HOME=/home/dev"},
 		{"--cwd", "/srv/workspaces/demo/src"},
 		{"--", "/usr/sbin/runuser", "-u", "dev", "--"},
@@ -5147,7 +5148,7 @@ func nativeFixture(t *testing.T) (string, []string, string) {
 		"space||@space||local|read|never|public|lifecycle|simple|space|space|--refresh --help|",
 		"logs||@logs||forward|read|never|public|lifecycle|simple|logs|logs|-f -n --updates --audit --yes --help|",
 		"usage||@usage||forward|read|never|public|lifecycle|simple|usage|usage|--help|",
-		"ssh-agent||@ssh-agent||deny|mutate|dynamic|public|lifecycle|simple|ssh-agent <command>|manage the owner-host SSH agent|--key --ttl --json --yes --help|status start stop",
+		"ssh-agent||@ssh-agent||deny|mutate|dynamic|public|lifecycle|ssh-agent|ssh-agent <command>|manage temporary SSH access|--key --ttl --json --yes --help|unlock status lock",
 		"shell||@shell||forward|mutate|never|public|lifecycle|project-shell|shell|shell|--root --yes --help|",
 		"clone||@project||local|mutate|dynamic|public|projects|clone|clone <url>|clone|--target --yes --help|",
 		"code||@project||local|mutate|never|public|projects|project|code [project]|code|--yes --help|",

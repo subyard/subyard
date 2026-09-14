@@ -155,6 +155,12 @@ incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" --env PUBKEY="$PUBKEY" --env DEV_U
 ' || die "could not authorize the key in the yard"
 ok "$DEV_USER@$SSH_HOST authorized for your key"
 
+# Install the fixed yard agent fallback for new shells and the Orca service. The
+# same helper is used by first unlock to upgrade yards initialized by older releases.
+incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- sh -eu -s -- ensure "$DEV_USER" \
+  < "$SCRIPT_DIR/ssh-agent-environment.sh" \
+  || die "could not configure the yard SSH agent environment"
+
 # --- 4. ~/.ssh Host entry via an Include (does not rewrite your config) -------
 echo "SSH client config:"
 sshdir="$HOME/.ssh"; install -d -m 700 "$sshdir"

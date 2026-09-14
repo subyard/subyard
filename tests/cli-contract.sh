@@ -47,6 +47,27 @@ grep -qx -- 'sync' <<<"$completion_words" || fail 'Bash completion omitted confi
 grep -qx -- 'pull' <<<"$completion_words" || fail 'Bash completion omitted config sync pull'
 grep -qx -- '--apply' <<<"$completion_words" || fail 'Bash completion omitted config sync push --apply'
 
+# The ssh-agent provider completes its verbs and the unlock key path without
+# depending on a built engine that already contains the new registry row.
+ssh_agent_completion="$({
+  printf 'fixture\n' >"$CLI_TMP/id_fixture"
+  yard() {
+    case "$1" in
+      --command-completion) printf '%s\n' ssh-agent ;;
+      --command-options) printf '%s\n' '--key --ttl --json --yes --help' ;;
+      --command-verbs) printf '%s\n' 'unlock status lock' ;;
+    esac
+  }
+  # shellcheck source=completions/yard.bash
+  . "$ROOT/completions/yard.bash"
+  COMP_WORDS=(yard ssh-agent unl); COMP_CWORD=2; _yard
+  printf 'verb:%s\n' "${COMPREPLY[@]}"
+  COMP_WORDS=(yard ssh-agent unlock --key "$CLI_TMP/"); COMP_CWORD=4; _yard
+  printf 'key:%s\n' "${COMPREPLY[@]}"
+} | sort)"
+grep -qx 'verb:unlock' <<<"$ssh_agent_completion" || fail 'Bash completion omitted ssh-agent unlock'
+grep -Fqx "key:$CLI_TMP/id_fixture" <<<"$ssh_agent_completion" || fail 'Bash completion did not complete ssh-agent --key as a path'
+
 # Ambiguous project names complete to canonical project-first selectors. Host-first selectors do
 # not match an already typed project-name prefix and made `yard code Subyard<Tab>` return nothing.
 project_selectors="$({

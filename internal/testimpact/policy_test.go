@@ -146,6 +146,10 @@ func TestRegistryNamedE2EChecksUsePreparedRunnableEntrypoints(t *testing.T) {
 			"dev/agent-e2e.sh", "--purpose", "orca-bootstrap", "--vm", "1", "--",
 			"env", "SUBYARD_E2E_ORCA_BOOTSTRAP=1", "./tests/real-host/orca-bootstrap.sh",
 		},
+		"e2e:orca-ssh-agent": {
+			"dev/agent-e2e.sh", "--purpose", "orca-ssh-agent", "--vm", "1", "--",
+			"env", "SUBYARD_E2E_ORCA_BOOTSTRAP=1", "SUBYARD_E2E_ORCA_SSH_AGENT=1", "bash", "tests/real-host/orca-bootstrap.sh",
+		},
 		"e2e:orca-projects": {
 			"dev/agent-e2e.sh", "--purpose", "orca-projects", "--vm", "1", "--",
 			"env", "SUBYARD_E2E_ORCA_PROJECTS=1", "./tests/real-host/orca-projects.sh",

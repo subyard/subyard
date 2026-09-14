@@ -5,6 +5,19 @@ import "github.com/Subyard/Subyard/internal/domain"
 func NewCoreActionRegistry() (*domain.ActionRegistry, error) {
 	definitions := []domain.ActionDefinition{
 		{
+			Action: "ssh-agent.status", Summary: "Inspect temporary SSH-key access", Effect: domain.ActionRead,
+			Recovery: domain.RecoveryNotNeeded,
+		},
+		{
+			Action: "ssh-agent.unlock", Summary: "Grant temporary SSH-key access to the yard", Effect: domain.ActionMutation,
+			Impacts:  []domain.ActionImpact{domain.ImpactAccess, domain.ImpactYardRuntime},
+			Recovery: domain.RecoveryReversible,
+		},
+		{
+			Action: "ssh-agent.lock", Summary: "Revoke temporary SSH-key access", Effect: domain.ActionBoundedWrite,
+			Recovery: domain.RecoveryNotNeeded,
+		},
+		{
 			Action: "remote.list", Summary: "List remote yards", Effect: domain.ActionRead,
 			Recovery: domain.RecoveryNotNeeded,
 		},
@@ -256,14 +269,6 @@ func NewCoreActionRegistry() (*domain.ActionRegistry, error) {
 		},
 	}
 	definitions = append(definitions, credentialActionDefinitions()...)
-	definitions = append(definitions,
-		domain.ActionDefinition{Action: "ssh-agent.help", Summary: "Show SSH agent help", Effect: domain.ActionRead, Recovery: domain.RecoveryNotNeeded},
-		domain.ActionDefinition{Action: "ssh-agent.status", Summary: "Show SSH agent status", Effect: domain.ActionRead, Recovery: domain.RecoveryNotNeeded},
-		domain.ActionDefinition{Action: "ssh-agent.start", Summary: "Start SSH agent", Effect: domain.ActionMutation,
-			Impacts: []domain.ActionImpact{domain.ImpactAccess, domain.ImpactSecurity}, Recovery: domain.RecoveryReversible},
-		domain.ActionDefinition{Action: "ssh-agent.stop", Summary: "Stop SSH agent", Effect: domain.ActionMutation,
-			Impacts: []domain.ActionImpact{domain.ImpactAccess}, Recovery: domain.RecoveryReversible},
-	)
 	return domain.NewActionRegistry(definitions)
 }
 

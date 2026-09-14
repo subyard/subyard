@@ -137,6 +137,22 @@ _yard() {
             _arguments ${registry_options[@]}
           fi
           ;;
+        ssh-agent)
+          if (( CURRENT == 2 )); then
+            local -a sub; sub=( ${=command_verbs} )
+            _describe -t subcommands 'ssh-agent subcommand' sub
+          elif [[ ${words[2]} == unlock ]]; then
+            _arguments '--key[private key path]:private key:_files' \
+              '--ttl[key lifetime (for example 2h)]:duration:' \
+              '--yes[skip confirmation]' '--help[show help]'
+          elif [[ ${words[2]} == status ]]; then
+            _arguments '--json[print machine-readable status]' '--help[show help]'
+          elif [[ ${words[2]} == lock ]]; then
+            _arguments '--help[show help]'
+          else
+            _arguments ${registry_options[@]}
+          fi
+          ;;
         config)
           if (( CURRENT == 2 )); then
             local -a sub; sub=( ${=command_verbs} )

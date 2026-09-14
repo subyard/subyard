@@ -380,12 +380,18 @@ func (cli *CLI) Run(ctx context.Context) int {
 	}
 	readOnlyInvocation := (core && commandHelpRequested(commandArguments)) ||
 		(core && definition.Effect == command.EffectRead) ||
-		(core && definition.Handler == "@ssh-agent" && sshAgentReadOnlyInvocation(commandArguments)) ||
 		resourceReadOnly ||
 		(core && definition.Handler == "@config" && (configReadOnlyInvocation(commandArguments) || configSyncCheck || configSyncStatus)) ||
 		(core && definition.Handler == "@test-vms" && testVMStatusInvocation(commandArguments)) ||
 		(core && definition.Handler == "@network" && len(commandArguments) > 0 && commandArguments[0] == "status") ||
 		(core && definition.Handler == "@update" && slices.Contains(commandArguments, "--check"))
+	if core && definition.Handler == "@ssh-agent" {
+		invocation, parseErr := parseSSHAgentArguments(commandArguments)
+		// Revocation must remain available during release recovery. Treat it
+		// like a reader only for preflight; its own typed action still audits
+		// the bounded mutation and never grants access.
+		readOnlyInvocation = parseErr != nil || invocation.verb != "unlock" || invocation.help
+	}
 	if explicit {
 		cli.env["SUBYARD_YARD_EXPLICIT"] = "1"
 	}
@@ -660,24 +666,17 @@ func (cli *CLI) Run(ctx context.Context) int {
 		remote = loadedContext.OwnerEndpoint
 	}
 	if name != "_info" && cli.env["SUBYARD_NO_AUDIT"] == "" {
-		if definition.Handler == "@ssh-agent" {
-			cli.audit(name, sshAgentAuditArguments(commandArguments), yard, remote)
-		} else {
-			cli.audit(name, commandArguments, yard, remote)
-		}
+		cli.audit(name, commandArguments, yard, remote)
 	}
 
 	target, routeErr := application.Route(loadedContext, domain.RemotePolicy(remotePlane))
-	if core && definition.Handler == "@ssh-agent" {
-		if loadedContext.AccessKind == domain.AccessRemote {
-			cli.errorf("ssh-agent is owner-host only; run it on the owner host")
-			return 1
-		}
-		return cli.runSSHAgent(ctx, loaded, commandArguments)
-	}
 	if routeErr != nil {
 		if remotePlane == command.RemoteDeny {
-			fmt.Fprintf(cli.options.Stderr, "%s is host-local — use sync or clone\n", name)
+			if name == "ssh-agent" {
+				cli.errorf("ssh-agent must run on the yard's owner host, where the key and terminal are available")
+			} else {
+				fmt.Fprintf(cli.options.Stderr, "%s is host-local — use sync or clone\n", name)
+			}
 		} else {
 			cli.errorf("route %s: %v", name, routeErr)
 		}
@@ -735,6 +734,8 @@ func (cli *CLI) Run(ctx context.Context) int {
 		return cli.runSecurity(ctx, loaded, commandArguments)
 	case "@keys":
 		return cli.runKeys(ctx, loaded, definition, commandArguments)
+	case "@ssh-agent":
+		return cli.runSSHAgent(ctx, loaded, definition, commandArguments)
 	case "@update":
 		return cli.runUpdate(ctx, loaded, definition, commandArguments)
 	case "@config":
@@ -1673,6 +1674,7 @@ func shellExecArguments(yard domain.Context, root bool, cwd string, guestCommand
 	userArguments := []string{
 		"--user", "0", "--group", "0",
 		"--env", "HOME=/home/" + yard.DevUser,
+		"--env", "SSH_AUTH_SOCK=/home/" + yard.DevUser + "/.ssh/subyard-agent.sock",
 	}
 	if root {
 		userArguments = []string{"--user", "0", "--group", "0", "--env", "HOME=/root"}

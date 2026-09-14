@@ -257,6 +257,27 @@ saved-client connectivity and `migrate --check`. It skips the broader JSON impor
 scenarios. The seeded additions model the observed drift; they do not prove which desktop action
 writes each runtime field.
 
+For temporary SSH-key access, run the focused current-candidate fixture:
+
+```sh
+dev/agent-e2e.sh --slot "$slot" --purpose orca-ssh-agent --vm 1 -- \
+  env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_SSH_AGENT=1 \
+  bash tests/real-host/orca-bootstrap.sh
+```
+
+It initializes two isolated yards, starts stock Orca and uses a synthetic encrypted key with a
+real passphrase terminal. It checks Git pushes from a guest shell and an existing paired Orca
+terminal, wrong-passphrase rejection, guest agent-mutation denial, cross-yard isolation and
+new-authentication failure after revocation and expiry. This mode skips the packaging, upgrade,
+configuration and port-collision scenarios; it does not install coding-agent CLIs or call model APIs.
+The focused SSH and Codex configuration modes reuse the pinned Orca package cache after SHA-256
+verification when available. They verify runtime integration, not a fresh Orca package download.
+
+For SSH fixture debugging, opt in to `SUBYARD_E2E_ORCA_KEEP_FAILED=1` to retain a failed marked
+fixture after revoking its key grants. The runner still releases the VM lease. On that same slot,
+rerun with `SUBYARD_E2E_ORCA_RESUME` set to the reported fixture directory; the current candidate
+reconciles the existing yards and repeats the assertions. Successful runs remove the fixture.
+
 For a narrow predecessor upgrade check, set `SUBYARD_E2E_ORCA_UPGRADE_FROM` to an exact published
 version and `SUBYARD_E2E_ORCA_UPGRADE_INSTALLER_SHA256` to that release's installer asset digest.
 This mode starts Orca on a converged published release with two local yards, changes the candidate's

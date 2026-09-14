@@ -342,6 +342,7 @@ Type=simple
 User=${DEV_USER:-dev}
 Group=${DEV_USER:-dev}
 Environment=HOME=/home/${DEV_USER:-dev}
+Environment=SSH_AUTH_SOCK=/home/${DEV_USER:-dev}/.ssh/subyard-agent.sock
 Environment=XDG_CONFIG_HOME=$ORCA_STATE/config
 Environment=XDG_DATA_HOME=$ORCA_STATE/data
 Environment=XDG_STATE_HOME=$ORCA_STATE/state

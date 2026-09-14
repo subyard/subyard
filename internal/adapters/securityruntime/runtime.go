@@ -563,25 +563,17 @@ func writer(value io.Writer) io.Writer {
 }
 
 func (runtime Runtime) sshAgentFindings(ctx context.Context) []finding {
-	if runtime.Yard.Paths.DataHome == "" || runtime.Yard.Paths.OperatorHome == "" {
+	if runtime.Yard.Paths.DataHome == "" {
 		return nil
 	}
-	environment := make([]string, 0, len(runtime.Environment))
-	for name, value := range runtime.Environment {
-		environment = append(environment, name+"="+value)
-	}
-	agentRuntime, err := sshagentruntime.New(sshagentruntime.Config{
-		StateRoot: filepath.Join(runtime.Yard.Paths.DataHome, "ssh-agent"),
-		Yard:      runtime.Yard.YardName, OperatorHome: runtime.Yard.Paths.OperatorHome, Environment: environment,
-	})
+	manager := sshagentruntime.Manager{Config: sshagentruntime.Config{
+		Directory: sshagentruntime.Directory(runtime.Yard.Paths.DataHome, runtime.Yard.YardName),
+	}}
+	status, err := manager.Status(ctx)
 	if err != nil {
 		return []finding{{"warn", "Temporary SSH-agent state could not be inspected"}}
 	}
-	status, err := agentRuntime.Inspect(ctx)
-	if err != nil {
-		return []finding{{"warn", "Temporary SSH-agent state could not be inspected"}}
-	}
-	if status.State == "active" || status.State == "connecting" || status.State == "loading" {
+	if status.State == "pending" || status.State == "unlocked" || status.State == "reconnecting" {
 		return []finding{{"warn", "Temporary SSH-agent access is granted to this yard: every dev process can use the selected key's upstream permissions until expiry or owner revocation"}}
 	}
 	return nil

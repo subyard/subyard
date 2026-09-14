@@ -3,16 +3,16 @@ package securityruntime
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/adapters/sshagentruntime"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/resource"
@@ -374,34 +374,35 @@ func TestSecurityRuntimeSSHAgentStateIsOptionalAndReadOnly(t *testing.T) {
 		strings.Contains(diagnostics.String(), "SSH-agent access is granted") {
 		t.Fatalf("missing state produced SSH-agent finding: %q", diagnostics.String())
 	}
-	if _, err := os.Stat(filepath.Join(runtime.Yard.Paths.DataHome, "ssh-agent")); !os.IsNotExist(err) {
+	if _, err := os.Stat(sshagentruntime.Directory(runtime.Yard.Paths.DataHome, runtime.Yard.YardName)); !os.IsNotExist(err) {
 		t.Fatalf("security check created SSH-agent state: %v", err)
 	}
 }
 
 func TestSecurityRuntimeReportsActiveSSHAgentAccess(t *testing.T) {
-	runtime, stateRoot, runtimeDir, token := securitySSHAgentFixture(t, true)
+	runtime := securitySSHAgentFixture(t, "unlocked")
 	var diagnostics bytes.Buffer
 	runtime.Stderr = &diagnostics
 	if _, err := runtime.CheckSecurity(context.Background(), false, false); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(diagnostics.String(), "Temporary SSH-agent access is granted to this yard") {
-		t.Fatalf("active agent warning missing: %q stateRoot=%s runtime=%s", diagnostics.String(), stateRoot, runtimeDir)
-	}
-	if _, err := os.Stat(filepath.Join(stateRoot, "test", "session.json")); err != nil {
-		t.Fatalf("session disappeared: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(runtimeDir, "ready")); err != nil || token == "" {
-		t.Fatalf("active runtime fixture invalid: err=%v", err)
+		t.Fatalf("active agent warning missing: %q", diagnostics.String())
 	}
 }
 
 func TestSecurityRuntimeWarnsWhenSSHAgentStateCannotBeInspected(t *testing.T) {
-	runtime, _, _, _ := securitySSHAgentFixture(t, true)
-	if err := os.WriteFile(filepath.Join(runtime.Environment["PATH"], "systemctl"), []byte("#!/bin/sh\nexit 1\n"), 0700); err != nil {
+	runtime := testRuntime(t)
+	runtime.Yard.YardName = "test"
+	runtime.Yard.Paths.DataHome = t.TempDir()
+	directory := sshagentruntime.Directory(runtime.Yard.Paths.DataHome, runtime.Yard.YardName)
+	if err := os.MkdirAll(filepath.Dir(directory), 0700); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Mkdir(directory, 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
 	var diagnostics bytes.Buffer
 	runtime.Stderr = &diagnostics
 	if _, err := runtime.CheckSecurity(context.Background(), false, false); err != nil {
@@ -413,56 +414,34 @@ func TestSecurityRuntimeWarnsWhenSSHAgentStateCannotBeInspected(t *testing.T) {
 	}
 }
 
-func securitySSHAgentFixture(t *testing.T, active bool) (Runtime, string, string, string) {
+func securitySSHAgentFixture(t *testing.T, state string) Runtime {
 	t.Helper()
-	root, err := os.MkdirTemp("/tmp", "sa")
+	runtime := testRuntime(t)
+	runtime.Yard.YardName = "test"
+	runtime.Yard.Paths.DataHome = t.TempDir()
+	directory := sshagentruntime.Directory(runtime.Yard.Paths.DataHome, runtime.Yard.YardName)
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	listener, err := net.Listen("unix", filepath.Join(directory, "control.sock"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	dataHome, runtimeHome, bin := filepath.Join(root, "data"), filepath.Join(root, "runtime"), filepath.Join(root, "bin")
-	for _, path := range []string{dataHome, runtimeHome, bin, filepath.Join(dataHome, "ssh-agent", "test")} {
-		if err := os.MkdirAll(path, 0700); err != nil {
-			t.Fatal(err)
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
 		}
-	}
-	systemctl := "#!/bin/sh\nexit 1\n"
-	if active {
-		systemctl = "#!/bin/sh\nprintf 'LoadState=loaded\\nActiveState=active\\n'\n"
-	}
-	if err := os.WriteFile(filepath.Join(bin, "systemctl"), []byte(systemctl), 0700); err != nil {
-		t.Fatal(err)
-	}
-	yardDir := filepath.Join(dataHome, "ssh-agent", "test")
-	directoryHash := sha256.Sum256([]byte(yardDir))
-	runtimeDir := filepath.Join(runtimeHome, "subyard-ssh-agent-"+hex.EncodeToString(directoryHash[:12]))
-	token := "synthetic-token"
-	if active {
-		expires := time.Now().Add(time.Hour).UTC()
-		session := map[string]any{"yard": "test", "expires_at": expires, "token": token, "runtime_dir": runtimeDir}
-		payload, err := json.Marshal(session)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(yardDir, "session.json"), payload, 0600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.MkdirAll(runtimeDir, 0700); err != nil {
-			t.Fatal(err)
-		}
-		for _, name := range []string{"ready", "connection"} {
-			if err := os.WriteFile(filepath.Join(runtimeDir, name), []byte(token), 0600); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	runtime := testRuntime(t)
-	runtime.Yard.YardName = "test"
-	runtime.Yard.Paths.DataHome = dataHome
-	runtime.Yard.Paths.OperatorHome = t.TempDir()
-	runtime.Environment["PATH"] = bin
-	runtime.Environment["XDG_RUNTIME_DIR"] = runtimeHome
-	return runtime, filepath.Join(dataHome, "ssh-agent"), runtimeDir, token
+		defer connection.Close()
+		var request map[string]string
+		_ = json.NewDecoder(connection).Decode(&request)
+		_ = json.NewEncoder(connection).Encode(map[string]any{"status": map[string]any{
+			"state": state, "expiresAt": time.Now().Add(time.Hour).UTC(), "remainingSeconds": 3600,
+		}})
+	}()
+	return runtime
 }
 
 func TestSecurityRuntimeRejectsLedgerUnderHostBase(t *testing.T) {

@@ -44,8 +44,8 @@ func main() {
 			fmt.Fprintln(os.Stderr, "invalid SSH-agent worker invocation")
 			os.Exit(2)
 		}
-		if err := sshagentruntime.RunWorker(ctx, os.Args[2]); err != nil {
-			fmt.Fprintln(os.Stderr, "SSH-agent worker stopped:", err)
+		if err := sshagentruntime.RunDaemon(ctx, os.Args[2]); err != nil {
+			fmt.Fprintln(os.Stderr, "SSH-agent worker stopped")
 			os.Exit(1)
 		}
 		return

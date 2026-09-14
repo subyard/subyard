@@ -15,6 +15,10 @@ ORIGINAL_HOME="$HOME"
 YARD_BIN="$ROOT/.build/yard"
 EXISTING_YARD="${SUBYARD_E2E_ORCA_EXISTING_YARD:-0}"
 CODEX_CONFIG="${SUBYARD_E2E_ORCA_CODEX_CONFIG:-0}"
+SSH_AGENT="${SUBYARD_E2E_ORCA_SSH_AGENT:-0}"
+KEEP_FAILED="${SUBYARD_E2E_ORCA_KEEP_FAILED:-0}"
+RESUME_STATE="${SUBYARD_E2E_ORCA_RESUME:-}"
+FIXTURE_READY=0
 INSTALLED_RELEASE=''
 UPGRADE_FROM="${SUBYARD_E2E_ORCA_UPGRADE_FROM:-}"
 UPGRADE_INSTALLER_SHA256="${SUBYARD_E2E_ORCA_UPGRADE_INSTALLER_SHA256:-}"
@@ -34,6 +38,18 @@ case "$CODEX_CONFIG" in
   1) EXISTING_YARD=1 ;;
   *) die 'SUBYARD_E2E_ORCA_CODEX_CONFIG must be 0 or 1' ;;
 esac
+case "$SSH_AGENT" in
+  0) ;;
+  1)
+    [ "$EXISTING_YARD" = 0 ] && [ -z "$UPGRADE_FROM" ] \
+      || die 'SSH agent acceptance is separate from config and upgrade modes'
+    ;;
+  *) die 'SUBYARD_E2E_ORCA_SSH_AGENT must be 0 or 1' ;;
+esac
+case "$KEEP_FAILED" in 0|1) ;; *) die 'SUBYARD_E2E_ORCA_KEEP_FAILED must be 0 or 1' ;; esac
+if [ "$KEEP_FAILED" = 1 ] || [ -n "$RESUME_STATE" ]; then
+  [ "$SSH_AGENT" = 1 ] || die 'retaining or resuming a fixture is supported only in SSH agent mode'
+fi
 if [ -n "$UPGRADE_FROM" ]; then
   [ "$CODEX_CONFIG" = 0 ] || die 'Codex config and predecessor upgrade modes are separate checks'
   [[ "$UPGRADE_FROM" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 'upgrade source must be an exact published version'
@@ -60,12 +76,28 @@ cleanup() {
   local rc=$? cleanup_failed=0
   trap - EXIT INT TERM
   set +e
+  [ "$FIXTURE_READY" = 1 ] || exit "$rc"
+  if [ "$SSH_AGENT" = 1 ]; then
+    if declare -F ssh_agent_cleanup >/dev/null; then
+      ssh_agent_cleanup || { rc=3; cleanup_failed=1; }
+    else
+      yard ssh-agent lock >/dev/null 2>&1 || { rc=3; cleanup_failed=1; }
+      if [ -f "$SUBYARD_CONFIG_HOME/yards/secondary/config.env" ]; then
+        yard -Y secondary ssh-agent lock >/dev/null 2>&1 || { rc=3; cleanup_failed=1; }
+      fi
+    fi
+  fi
   if [ -n "$COLLISION_PID" ] && kill -0 "$COLLISION_PID" 2>/dev/null; then
     kill -TERM "$COLLISION_PID" 2>/dev/null || true
     wait "$COLLISION_PID" 2>/dev/null || true
   fi
   if [ "$KEEP_FAILED_UPGRADE" = 1 ]; then
     stage "retained marked failed upgrade fixture: $STATE"
+    exit "$rc"
+  fi
+  if [ "$rc" -ne 0 ] && [ "$KEEP_FAILED" = 1 ] && [ "$cleanup_failed" = 0 ]; then
+    stage "retained marked SSH fixture after revoking grants: $STATE"
+    stage 'resume with SUBYARD_E2E_ORCA_RESUME set to that exact path; successful runs clean up normally'
     exit "$rc"
   fi
   if [ -f "${SUBYARD_CONFIG_HOME:-}/yards/secondary/config.env" ]; then
@@ -413,19 +445,86 @@ install_stock_orca_client() {
   test -x /usr/bin/orca-ide || die 'stock Orca client is unavailable'
 }
 
-STATE="$(mktemp -d /var/tmp/subyard-orca-bootstrap.XXXXXX)"
-printf '%s\n' subyard-orca-bootstrap-e2e-v1 > "$STATE/.marker"
+prepare_cached_orca_guest() {
+  # Focused config/SSH acceptance exercises the real installed runtime and public
+  # service reconciliation. Reusing a verified package is not fresh-download evidence.
+  local digest cache guest_artifact
+  [ "$SSH_AGENT" = 1 ] || [ "$CODEX_CONFIG" = 1 ] || return 0
+  install_stock_orca_client
+  case "$(guest_root dpkg --print-architecture)" in
+    amd64) digest="$ORCA_DEB_AMD64_SHA256" ;;
+    arm64) digest="$ORCA_DEB_ARM64_SHA256" ;;
+    *) die 'unsupported guest architecture' ;;
+  esac
+  cache="/var/tmp/subyard-orca-$ORCA_VERSION-$digest.deb"
+  if ! printf '%s  %s\n' "$digest" "$cache" | sha256sum -c --status 2>/dev/null; then
+    stage 'no verified Orca package cache; public Orca up will download its pinned release'
+    return 0
+  fi
+  stage 'reusing the checksum-verified stock Orca package for focused runtime acceptance'
+  [ -f "$STATE/.marker" ] && [ "$(<"$STATE/.marker")" = subyard-orca-bootstrap-e2e-v1 ] \
+    && [[ "$INSTANCE" = yard-orca-bootstrap-* ]] || die 'guest package target is not fixture-owned'
+  guest_artifact="/tmp/subyard-orca-bootstrap-$token.deb"
+  incus --project "$PROJECT" file push "$cache" "$INSTANCE$guest_artifact" --mode 0644
+  printf '%s  %s\n' "$digest" "$guest_artifact" | guest_root sha256sum -c --status \
+    || die 'copied Orca package failed guest checksum verification'
+  guest_root timeout 900 env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    "$guest_artifact" >/dev/null || die 'cached Orca package could not be installed in the fixture'
+  guest_root rm -f -- "$guest_artifact"
+  [ "$(guest_root dpkg-query -W -f='${Version}' orca-ide)" = "$ORCA_VERSION" ] \
+    || die 'cached Orca package installed an unexpected version'
+}
+
+if [ -n "$RESUME_STATE" ]; then
+  # Validate before claiming cleanup ownership: a rejected path must never become
+  # a teardown target. Do not source configuration from the retained directory.
+  [[ "$RESUME_STATE" =~ ^/var/tmp/subyard-orca-bootstrap\.[A-Za-z0-9]{6,}$ ]] \
+    || die 'resume path is not a canonical fixture directory'
+  [ "$(readlink -f -- "$RESUME_STATE")" = "$RESUME_STATE" ] \
+    || die 'resume path contains a symlink'
+  for relative in '' /home /config /config/yards /config/yards/default /data /host; do
+    directory="$RESUME_STATE$relative"
+    [ -d "$directory" ] && [ ! -L "$directory" ] \
+      && [ "$(stat -c %u "$directory")" = "$EUID" ] \
+      && [ "$((0$(stat -c %a "$directory") & 022))" -eq 0 ] \
+      || die 'resume directory ownership or permissions are unsafe'
+  done
+  for relative in .marker config/config.env config/yards/default/config.env; do
+    file="$RESUME_STATE/$relative"
+    [ -f "$file" ] && [ ! -L "$file" ] \
+      && [ "$(stat -c %u "$file")" = "$EUID" ] \
+      && [ "$((0$(stat -c %a "$file") & 022))" -eq 0 ] \
+      || die 'resume marker or configuration is unsafe'
+  done
+  [ "$(<"$RESUME_STATE/.marker")" = subyard-orca-bootstrap-e2e-v1 ] \
+    || die 'resume marker does not match this fixture'
+  if [ -e "$RESUME_STATE/config/yards/secondary" ] || [ -L "$RESUME_STATE/config/yards/secondary" ]; then
+    directory="$RESUME_STATE/config/yards/secondary"
+    file="$directory/config.env"
+    [ -d "$directory" ] && [ ! -L "$directory" ] && [ -f "$file" ] && [ ! -L "$file" ] \
+      && [ "$(stat -c %u "$directory")" = "$EUID" ] && [ "$(stat -c %u "$file")" = "$EUID" ] \
+      && [ "$((0$(stat -c %a "$directory") & 022))" -eq 0 ] \
+      && [ "$((0$(stat -c %a "$file") & 022))" -eq 0 ] \
+      || die 'resume secondary-yard configuration is unsafe'
+  fi
+  STATE="$RESUME_STATE"
+else
+  STATE="$(mktemp -d /var/tmp/subyard-orca-bootstrap.XXXXXX)"
+  printf '%s\n' subyard-orca-bootstrap-e2e-v1 > "$STATE/.marker"
+  chmod 0600 "$STATE/.marker"
+fi
 token="$(printf '%s' "${STATE##*.}" | tr '[:upper:]' '[:lower:]')"
 PROJECT="subyard-orca-bootstrap-$token"
 INSTANCE="yard-orca-bootstrap-$token"
-SSH_PORT="$(free_port)"
 
 bash "$ROOT/dev/build-engine.sh" >/dev/null
 # Keep the disposable VM's prepared toolchain caches when isolating the operator home.
 GOMODCACHE="$(go env GOMODCACHE)"
 GOCACHE="$(go env GOCACHE)"
 export GOMODCACHE GOCACHE
-install -d -m 0700 "$STATE/home" "$STATE/config/yards/default" "$STATE/data" "$STATE/host"
+if [ -z "$RESUME_STATE" ]; then
+  install -d -m 0700 "$STATE/home" "$STATE/config/yards/default" "$STATE/data" "$STATE/host"
+fi
 export HOME="$STATE/home"
 export SUBYARD_OPERATOR_HOME="$HOME"
 export SUBYARD_CONFIG_HOME="$STATE/config"
@@ -436,12 +535,15 @@ export SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1
 export MIN_DISK_GIB=1
 coding_integrations=''
 yard_profiles=subyard-dev
+[ "$SSH_AGENT" = 0 ] || yard_profiles=orca
 if [ "$EXISTING_YARD" = 1 ]; then
   coding_integrations='claude pi'
   if [ "$CODEX_CONFIG" = 1 ]; then coding_integrations+=' codex'; fi
   yard_profiles='subyard-dev orca'
 fi
-cat > "$SUBYARD_CONFIG_HOME/config.env" <<EOF
+if [ -z "$RESUME_STATE" ]; then
+  SSH_PORT="$(free_port)"
+  cat > "$SUBYARD_CONFIG_HOME/config.env" <<EOF
 SSH_PORT=$SSH_PORT
 INCUS_PROJECT=$PROJECT
 YARD_INSTANCE_NAME=$INSTANCE
@@ -451,10 +553,55 @@ HOST_BASE=$STATE/host
 RESTRICTED_DISK_PATHS=$STATE/host
 FORWARD_SSH_AGENT=0
 EOF
-printf 'ENVIRONMENT_PROFILES=%q\n' "$yard_profiles" \
-  > "$SUBYARD_CONFIG_HOME/yards/default/config.env"
-chmod 0600 "$SUBYARD_CONFIG_HOME/config.env" \
-  "$SUBYARD_CONFIG_HOME/yards/default/config.env"
+  printf 'ENVIRONMENT_PROFILES=%q\n' "$yard_profiles" \
+    > "$SUBYARD_CONFIG_HOME/yards/default/config.env"
+  chmod 0600 "$SUBYARD_CONFIG_HOME/config.env" \
+    "$SUBYARD_CONFIG_HOME/yards/default/config.env"
+else
+  [ "$(setting_value INCUS_PROJECT)" = "$PROJECT" ] \
+    && [ "$(setting_value YARD_INSTANCE_NAME)" = "$INSTANCE" ] \
+    && [ "$(setting_value HOST_BASE)" = "$STATE/host" ] \
+    && [ "$(setting_value CODING_TOOL_INTEGRATIONS)" = '<unset>' ] \
+    && [ "$(setting_value ENVIRONMENT_PROFILES)" = orca ] \
+    || die 'resume configuration does not describe this SSH fixture'
+  SSH_PORT="$(setting_value SSH_PORT)"
+  [[ "$SSH_PORT" =~ ^[0-9]+$ ]] || die 'resume SSH port is invalid'
+  if [ -f "$SUBYARD_CONFIG_HOME/yards/secondary/config.env" ]; then
+    [ "$(yard -Y secondary config show INCUS_PROJECT | awk -F': ' '$1 == "effective" {print $2}')" = "$PROJECT-secondary" ] \
+      && [ "$(yard -Y secondary config show YARD_INSTANCE_NAME | awk -F': ' '$1 == "effective" {print $2}')" = "$INSTANCE-secondary" ] \
+      || die 'resume secondary configuration targets another fixture'
+  fi
+  stage "resuming marked SSH fixture: $STATE"
+fi
+FIXTURE_READY=1
+
+if [ "$CODEX_CONFIG" = 1 ]; then
+  # This acceptance owns CONFIG/RULES semantics, not Codex installation or execution.
+  # Use an ordinary fixture hook so a CLI download cannot hide that regression.
+  printf '#!/bin/sh\nexit 0\n' > "$STATE/codex-config-provision.sh"
+  chmod 0600 "$STATE/codex-config-provision.sh"
+  {
+    printf 'AGENT_codex_PROVISION=%q\n' "$STATE/codex-config-provision.sh"
+    printf 'AGENT_codex_COMMAND=true\nAGENT_codex_CHECK=true\n'
+  } >> "$SUBYARD_CONFIG_HOME/config.env"
+fi
+
+if [ "$SSH_AGENT" = 1 ]; then
+  install_stock_orca_client
+  stage 'initializing the candidate and stock Orca for focused SSH agent acceptance'
+  yard init --yes
+  prepare_cached_orca_guest
+  yard orca up --yes
+  ORCA_PORT="$(setting_value ORCA_HOST_PORT)"
+  assert_orca_readiness
+  install_stock_orca_client
+  pairing="$(yard orca pair --yes | tail -n1)"
+  case "$pairing" in orca://pair\?code=*) ;; *) die 'Orca did not return a private pairing link' ;; esac
+  client_status "$pairing" ssh-agent-client
+  # shellcheck source=tests/real-host/ssh-agent.sh
+  . "$ROOT/tests/real-host/ssh-agent.sh"
+  exit 0
+fi
 
 stage 'installing a packaged candidate through the public release installer'
 # The VM receives public source without Git metadata. Give packaging its normal
@@ -629,6 +776,7 @@ if [ "$EXISTING_YARD" = 1 ]; then
 else
   stage 'bootstrapping an uninitialized yard interactively with one confirmation'
 fi
+[ "$CODEX_CONFIG" = 0 ] || prepare_cached_orca_guest
 export SUBYARD_TTY_TEST_ENGINE="$YARD_BIN"
 # A real controlling terminal catches background-handler stops that --yes and
 # redirected stdin hide. Enter accepts the normal top-level default-yes prompt.

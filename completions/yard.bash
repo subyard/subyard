@@ -139,6 +139,24 @@ _yard() {
         COMPREPLY=( $(compgen -W "$command_options" -- "$cur") )
       fi
       ;;
+    ssh-agent)
+      local ssh_agent_action="${COMP_WORDS[cmdidx+1]:-}"
+      if [ "$cword" -eq "$((cmdidx + 1))" ]; then
+        COMPREPLY=( $(compgen -W "$command_verbs" -- "$cur") )
+      elif [ "$ssh_agent_action" = unlock ] && [ "$prev" = --key ]; then
+        filenames=true; local IFS=$'\n'
+        COMPREPLY=( $(compgen -f -- "$cur") )
+      elif [ "$ssh_agent_action" = unlock ] && [ "$prev" = --ttl ]; then
+        COMPREPLY=()
+      else
+        case "$ssh_agent_action" in
+          unlock) COMPREPLY=( $(compgen -W '--key --ttl --yes --help' -- "$cur") ) ;;
+          status) COMPREPLY=( $(compgen -W '--json --help' -- "$cur") ) ;;
+          lock) COMPREPLY=( $(compgen -W '--help' -- "$cur") ) ;;
+          *) COMPREPLY=( $(compgen -W "$command_options" -- "$cur") ) ;;
+        esac
+      fi
+      ;;
     config)
       local config_action="${COMP_WORDS[cmdidx+1]:-}"
       if [ "$cword" -eq "$((cmdidx + 1))" ]; then
