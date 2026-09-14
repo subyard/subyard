@@ -18,6 +18,7 @@ mount any host directory explicitly; the CLI warns because this weakens the
 yard's encapsulation. A new project's safe name is also its ID and workspace
 directory; basename collisions become `Name-2`, `Name-3`, and so on. Use
 `--name NAME` with `sync`, `bind`, or `clone` to choose an explicit name.
+Repeated `sync` or `clone` commands create independent copies, even from the same source.
 
 ## Quick start
 

@@ -50,7 +50,7 @@ type projectExecution struct {
 	PreviewExisting *domain.ProjectRecord
 	ActionChanged   bool
 	WorkspaceNames  []string
-	SyncObserved    bool
+	CopyObserved    bool
 	Removal         projectRemovalObservation
 }
 
@@ -122,10 +122,10 @@ func (execution *projectExecution) actionPlan(commandName string) (
 		return action, delta, nil
 	}
 	delta.Consequences = application.ProjectConsequences(commandName, execution.Record, false)
-	if commandName == "sync" && !execution.ExplicitName {
+	if execution.automaticCopy() && (commandName == "sync" || commandName == "clone") {
 		delta.Consequences = []string{fmt.Sprintf(
-			"copy %s to a new yard-owned snapshot with an available name based on %s",
-			execution.Record.HostPath, execution.RequestedName,
+			"%s %s to a new yard-owned copy with an available name based on %s",
+			commandName, execution.Record.HostPath, execution.RequestedName,
 		)}
 	}
 	if commandName == "down" {
@@ -149,8 +149,8 @@ func (cli *CLI) observeProjectAction(
 		return errors.New("project execution is required")
 	}
 	switch commandName {
-	case "sync":
-		return cli.observeSyncCopy(ctx, execution)
+	case "sync", "clone":
+		return cli.observeProjectCopy(ctx, execution)
 	case "bind":
 		if execution.Loaded.Context.AccessKind == domain.AccessRemote {
 			return errors.New("bind is host-local; use sync or clone")
@@ -180,22 +180,6 @@ func (cli *CLI) observeProjectAction(
 			return err
 		}
 		execution.ActionChanged = !converged
-		return nil
-	case "clone":
-		data := cli.projectDataPlane()
-		result, err := data.Execute(ctx, execution.Loaded.Context, ports.InstanceExecRequest{
-			Command: []string{
-				"sh", "-c", `[ ! -e "$1" ] && [ ! -L "$1" ]`,
-				"subyard", filepath.Dir(execution.Record.YardPath),
-			},
-		})
-		if err != nil {
-			if result.ExitCode == 1 {
-				return fmt.Errorf("clone workspace already exists: %s", filepath.Dir(execution.Record.YardPath))
-			}
-			return fmt.Errorf("inspect clone workspace: %w", err)
-		}
-		execution.ActionChanged = true
 		return nil
 	case "export":
 		if execution.Record.Mode != domain.ProjectSync {
@@ -623,12 +607,6 @@ func (cli *CLI) prepareProjectClone(
 	if err != nil {
 		return nil, err
 	}
-	if admission.Existing != nil {
-		return nil, fmt.Errorf(
-			"%q is already in the yard (id %s); remove it first",
-			admission.Existing.Name, admission.Existing.ProjectID,
-		)
-	}
 	record := domain.ProjectRecord{
 		Schema: 1, IdentityVersion: 2, ProjectID: admission.ProjectID, Name: admission.Name,
 		HostPath: url, SourceKey: state.SourceKey(url),
@@ -689,8 +667,8 @@ func (cli *CLI) previewProjectAdmission(
 	if !domain.SafeProjectName(response.ProjectID) || response.Name != response.ProjectID {
 		return state.Admission{}, errors.New("owner returned an invalid canonical project preview")
 	}
-	if response.Existing != nil && mode == domain.ProjectSync {
-		return state.Admission{}, errors.New("owner does not support independent sync copies; update the owner runtime")
+	if response.Existing != nil && (mode == domain.ProjectSync || mode == domain.ProjectGit) {
+		return state.Admission{}, errors.New("owner does not support independent project copies; update the owner runtime")
 	}
 	if response.Existing != nil {
 		if err := response.Existing.Validate(response.ProjectID); err != nil {
@@ -1056,8 +1034,8 @@ func (cli *CLI) reserveRemoteProject(
 	if response.Existing == nil && !response.Reserved {
 		return errors.New("owner returned neither an existing project nor a reservation")
 	}
-	if response.Existing != nil && execution.Record.Mode == domain.ProjectSync {
-		return errors.New("owner does not support independent sync copies; update the owner runtime")
+	if response.Existing != nil && (execution.Record.Mode == domain.ProjectSync || execution.Record.Mode == domain.ProjectGit) {
+		return errors.New("owner does not support independent project copies; update the owner runtime")
 	}
 	if response.Existing != nil {
 		if err := response.Existing.Validate(response.ProjectID); err != nil ||
@@ -1086,7 +1064,7 @@ func (cli *CLI) reserveRemoteProject(
 	if !stale && response.Existing != nil {
 		stale = *response.Existing != *execution.PreviewExisting
 	}
-	if stale && execution.automaticSyncCopy() && response.Reserved && response.Existing == nil {
+	if stale && execution.automaticCopy() && response.Reserved && response.Existing == nil {
 		execution.setCopyIdentity(response.ProjectID, response.Name)
 		stale = false
 	}
@@ -1138,7 +1116,7 @@ func (cli *CLI) reserveProjectExecution(
 	if !stale && admission.Existing != nil {
 		stale = *admission.Existing != *execution.PreviewExisting
 	}
-	if stale && execution.automaticSyncCopy() && admission.Reservation != nil && admission.Existing == nil {
+	if stale && execution.automaticCopy() && admission.Reservation != nil && admission.Existing == nil {
 		execution.setCopyIdentity(admission.ProjectID, admission.Name)
 		stale = false
 	}

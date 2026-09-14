@@ -11,45 +11,50 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 )
 
-func TestSyncAdmissionFinalizesIndependentCopiesWithSharedProvenance(t *testing.T) {
-	store := newTestStore(t)
-	ctx := context.Background()
-	source := "/work/exact/Demo"
-	legacy := fixtureRecord("legacy-demo-12345678")
-	legacy.Name, legacy.HostPath, legacy.SourceKey = "LegacyDemo", source, ""
-	putLegacyRecord(t, store, legacy)
+func TestCopyAdmissionFinalizesIndependentCopiesWithSharedProvenance(t *testing.T) {
+	for _, mode := range []domain.ProjectMode{domain.ProjectSync, domain.ProjectGit} {
+		t.Run(string(mode), func(t *testing.T) {
+			store := newTestStore(t)
+			ctx := context.Background()
+			source := "/work/exact/Demo"
+			legacy := fixtureRecord("legacy-demo-12345678")
+			legacy.Name, legacy.HostPath, legacy.SourceKey = "LegacyDemo", source, ""
+			legacy.Mode = mode
+			putLegacyRecord(t, store, legacy)
 
-	wantNames := []string{"Demo", "Demo-2", "Demo-3"}
-	for index, want := range wantNames {
-		admission, err := store.Admit(
-			ctx, "sync-copy-op-"+string(rune('1'+index)), source,
-			domain.ProjectSync, "Demo", false,
-		)
-		if err != nil {
-			t.Fatalf("admit copy %d: %v", index+1, err)
-		}
-		if admission.ProjectID != want || admission.Name != want || admission.Existing != nil {
-			t.Fatalf("copy %d admission = %#v, want name %q", index+1, admission, want)
-		}
-		record := admittedRecord(admission, source, domain.ProjectSync)
-		if err := store.FinalizeOperation(ctx, admission.Reservation.OperationID, record); err != nil {
-			t.Fatalf("finalize copy %d: %v", index+1, err)
-		}
-	}
+			wantNames := []string{"Demo", "Demo-2", "Demo-3"}
+			for index, want := range wantNames {
+				admission, err := store.Admit(
+					ctx, "sync-copy-op-"+string(rune('1'+index)), source,
+					mode, "Demo", false,
+				)
+				if err != nil {
+					t.Fatalf("admit copy %d: %v", index+1, err)
+				}
+				if admission.ProjectID != want || admission.Name != want || admission.Existing != nil {
+					t.Fatalf("copy %d admission = %#v, want name %q", index+1, admission, want)
+				}
+				record := admittedRecord(admission, source, mode)
+				if err := store.FinalizeOperation(ctx, admission.Reservation.OperationID, record); err != nil {
+					t.Fatalf("finalize copy %d: %v", index+1, err)
+				}
+			}
 
-	for _, name := range wantNames {
-		record, err := store.Get(ctx, name)
-		if err != nil {
-			t.Fatalf("get %q: %v", name, err)
-		}
-		if record.ProjectID != name || record.Name != name || record.HostPath != source ||
-			record.SourceKey != SourceKey(source) {
-			t.Fatalf("copy %q lost identity or provenance: %#v", name, record)
-		}
-	}
-	gotLegacy, err := store.Get(ctx, legacy.ProjectID)
-	if err != nil || gotLegacy != legacy {
-		t.Fatalf("legacy same-source record changed: got=%#v err=%v", gotLegacy, err)
+			for _, name := range wantNames {
+				record, err := store.Get(ctx, name)
+				if err != nil {
+					t.Fatalf("get %q: %v", name, err)
+				}
+				if record.ProjectID != name || record.Name != name || record.HostPath != source ||
+					record.SourceKey != SourceKey(source) {
+					t.Fatalf("copy %q lost identity or provenance: %#v", name, record)
+				}
+			}
+			gotLegacy, err := store.Get(ctx, legacy.ProjectID)
+			if err != nil || gotLegacy != legacy {
+				t.Fatalf("legacy same-source record changed: got=%#v err=%v", gotLegacy, err)
+			}
+		})
 	}
 }
 
@@ -146,14 +151,13 @@ func TestAdmissionPrunesExpiredReservationBeforePendingModeCheck(t *testing.T) {
 	}
 }
 
-func TestRepeatedBindAndGitAdmissionKeepsExistingSemantics(t *testing.T) {
+func TestRepeatedBindAdmissionKeepsExistingSemantics(t *testing.T) {
 	for _, test := range []struct {
 		name   string
 		mode   domain.ProjectMode
 		source string
 	}{
 		{name: "bind", mode: domain.ProjectBind, source: "/work/bound"},
-		{name: "git", mode: domain.ProjectGit, source: "https://example.invalid/repository.git"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			store := newTestStore(t)

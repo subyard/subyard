@@ -4807,11 +4807,12 @@ func TestProjectImportAndCloneAllocateSameBasenameInEitherOrder(t *testing.T) {
 			program.abortProjectExecution(context.Background(), thirdRun)
 
 			program.env["SUBYARD_OPERATION_ID"] = "op-repeat"
-			if _, err := program.prepareProjectClone(
+			repeated, err := program.prepareProjectClone(
 				context.Background(), loaded,
 				[]string{"https://example.invalid/Demo.git"},
-			); err == nil || !strings.Contains(err.Error(), "already in the yard") {
-				t.Fatalf("repeat clone = %v", err)
+			)
+			if err != nil || repeated.Record.ProjectID != "Demo-3" {
+				t.Fatalf("repeat clone = %#v, %v", repeated, err)
 			}
 		})
 	}

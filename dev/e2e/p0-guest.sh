@@ -161,9 +161,6 @@ owner_project_contract() {
   ')" = 5 ] \
     || die 'explicit collision changed the project inventory'
   ./bin/yard -Y test-yard bind "$bound" --yes >/dev/null
-  if ./bin/yard -Y test-yard clone "$git_url" --yes >/dev/null 2>&1; then
-    die 'repeat clone of the same source created another identity'
-  fi
   if ./bin/yard -Y test-yard sync "$bound" --yes >/dev/null 2>&1; then
     die 'same source changed mode from bind to sync'
   fi
@@ -183,6 +180,21 @@ owner_project_contract() {
   incus exec yard-test-yard --project subyard-test-yard -- \
     test -d /srv/workspaces/P0Project-5/src \
     || die 'soft-removed workspace was not retained'
+  for project in P0Project-9 P0Project-10; do
+    ./bin/yard -Y test-yard clone "$git_url" --yes >/dev/null
+    ./bin/yard -Y test-yard shell "$project" --yes -- test -d .git
+  done
+  ./bin/yard -Y test-yard shell P0Project-9 --yes -- touch independent-copy
+  ./bin/yard -Y test-yard shell P0Project-2 --yes -- test ! -e independent-copy
+  ./bin/yard -Y test-yard shell P0Project-10 --yes -- test ! -e independent-copy
+  ./bin/yard -Y test-yard clone "$git_url" --name P0CloneNamed --yes >/dev/null
+  ./bin/yard -Y test-yard shell P0CloneNamed --yes -- test -d .git
+  if ./bin/yard -Y test-yard clone "$git_url" --name P0CloneNamed --yes >/dev/null 2>&1; then
+    die 'explicit clone collision was accepted'
+  fi
+  ./bin/yard -Y test-yard remove P0Project-9 --yes >/dev/null
+  ./bin/yard -Y test-yard shell P0Project-10 --yes -- test -d .git
+  ./bin/yard -Y test-yard shell P0CloneNamed --yes -- test -d .git
   reservation="$(./bin/yard -Y test-yard _project-state reserve \
     "p0-interrupted-$TOKEN" "/tmp/p0-interrupted-$TOKEN" sync P0Interrupted 0)"
   replay="$(./bin/yard -Y test-yard _project-state reserve \
