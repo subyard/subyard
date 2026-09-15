@@ -36,10 +36,10 @@ can bypass the policy that `yard security` is designed to verify.
 
 ## SSH credentials
 
-Opt-in SSH agent forwarding lets processes inside a yard request signatures from a host credential
-while the forwarding session is active. The private key is not copied into the yard, but any process
-that can reach the forwarded socket can exercise the credential. Agent confirmation rules improve
-the interaction; they are not a security boundary.
+Opt-in SSH agent forwarding permits git push and other host access from inside the yard
+using a forwarded, write-enabled credential while the SSH session is active.
+No private key is copied into the yard, but any process that can reach the forwarded agent
+can use that credential; agent ask-rules are a UX safeguard, not a security boundary.
 
 The managed [per-yard SSH agent](ssh-agent.md) narrows this grant to one selected yard and one
 encrypted key with a required lifetime of at most 24 hours. It still delegates signing capability to

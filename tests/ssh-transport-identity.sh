@@ -188,6 +188,8 @@ grep -Fq "$positional_helper_arguments" \
   || fail 'teardown does not pass both operator SSH paths positionally'
 grep -Fq ': "${FORWARD_SSH_AGENT:=0}"' "$ROOT/config/subyard.env" \
   || fail 'ssh-agent forwarding is not opt-in by default'
+grep -Fq '(docs/security.md)' "$ROOT/README.md" \
+  || fail 'README omits the security documentation link'
 for forwarding_warning in \
   'git push and other host access from inside the yard' \
   'forwarded, write-enabled credential while the SSH session is active' \
@@ -197,8 +199,8 @@ for forwarding_warning in \
 do
   grep -Fq "$forwarding_warning" "$access_script" \
     || fail "SSH access plan omits forwarding boundary: $forwarding_warning"
-  grep -Fq "$forwarding_warning" "$ROOT/README.md" \
-    || fail "README omits forwarding boundary: $forwarding_warning"
+  grep -Fq "$forwarding_warning" "$ROOT/docs/security.md" \
+    || fail "security documentation omits forwarding boundary: $forwarding_warning"
 done
 
 printf 'ok: host-scoped SSH transport identity lifecycle is fail-closed\n'
