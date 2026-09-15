@@ -213,10 +213,12 @@ dev_gid="$(incus exec "$instance" --project "$project" -- id -g dev)" \
 
 incus exec "$instance" --project "$project" -- sh -euc '
 fail() { printf "Hermes substrate assertion failed: %s\n" "$*" >&2; exit 1; }
-for package in build-essential ca-certificates curl git libffi-dev python3-dev xz-utils; do
+for package in age build-essential ca-certificates curl git libffi-dev python3-dev xz-utils; do
   test "$(dpkg-query -W -f="\${Status}" "$package")" = "install ok installed" \
     || fail "generic prerequisite $package"
 done
+test "$(loginctl show-user dev --property=Linger --value)" = yes \
+  || fail "lingering is disabled for dev"
 '
 incus exec "$instance" --project "$project" --user "$dev_uid" --group "$dev_gid" \
   --env HOME=/home/dev -- sh -euc '

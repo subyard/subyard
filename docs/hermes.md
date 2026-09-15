@@ -31,8 +31,11 @@ yard -Y hermes security --require-live
 Provisioning installs only these generic OS prerequisites:
 
 ```text
-build-essential ca-certificates curl git libffi-dev python3-dev xz-utils
+age build-essential ca-certificates curl git libffi-dev python3-dev xz-utils
 ```
+
+Provisioning also enables systemd user lingering for the configured `DEV_USER`, so user services
+can start at boot and continue running without an interactive login.
 
 Subyard does not install, locate, validate or update Hermes software. It does not select a Hermes
 release or component, run an upstream installer, assume an installation layout, or create a

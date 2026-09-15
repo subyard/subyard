@@ -33,7 +33,8 @@ for required in \
   'dev_uid="$(incus exec' \
   '--user "$dev_uid" --group "$dev_gid"' \
   'dpkg-query -W' \
-  'build-essential ca-certificates curl git libffi-dev python3-dev xz-utils' \
+  'age build-essential ca-certificates curl git libffi-dev python3-dev xz-utils' \
+  'loginctl show-user dev --property=Linger --value' \
   'test ! -e "$HOME/.hermes" && test ! -L "$HOME/.hermes"' \
   'test ! -e "$HOME/.local/bin/hermes" && test ! -L "$HOME/.local/bin/hermes"' \
   '$HOME/.hermes' \
