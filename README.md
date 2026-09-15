@@ -8,7 +8,7 @@ where agents run your product, reproduce bugs, and verify changes.
 
 [Get started](#getting-started) · [Documentation](docs/README.md) · [Security](docs/security.md)
 
-![A laptop and server each run multiple yards. Within a yard, agents work on projects and share service environments for staging and tests. A dedicated test yard provides broker-leased resources. Hosts connect over SSH and synchronize shared settings and encrypted staging credentials.](docs/assets/agent-workspace.svg)
+![A laptop and remote server run isolated yards with agents and shared staging environments. Trusted hosts connect over SSH, sync settings through Git, and exchange encrypted staging credentials. Projects and history remain local to each host.](docs/assets/agent-workspace.webp)
 
 ## What you get
 
