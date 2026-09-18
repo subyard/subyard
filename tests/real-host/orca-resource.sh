@@ -466,7 +466,9 @@ assert_no_pairing_journal() {
   logs="$("${incus[@]}" exec "$instance" -- \
     journalctl -u subyard-orca.service --no-pager)"
   case "$logs" in
-    *orca://*|*'"url":"orca:'*) die 'service journal leaked a pairing capability' ;;
+    *orca://*|*'"url":"orca:'*|*deviceToken*|*publicKeyB64*)
+      die 'service journal leaked a pairing capability'
+      ;;
   esac
 }
 
@@ -480,6 +482,10 @@ run_orca up
   grep -Fq 'comment "subyard-orca-managed"'
 [ "$("${incus[@]}" exec "$instance" -- stat -c %a /srv/agents/orca/ready.json)" = 600 ] \
   || die 'pairing readiness file is not mode 0600'
+"${incus[@]}" exec "$instance" -- jq -e '
+  .pairing.available == true and .pairing.scope == "runtime"
+' /srv/agents/orca/ready.json >/dev/null \
+  || die 'ordinary startup did not publish a Desktop pairing scope'
 assert_no_pairing_journal
 assert_repos
 
@@ -567,6 +573,10 @@ second_pair="$(run_orca pair | tail -n1)"
   python3 -B /usr/local/libexec/subyard/orca-registration/settings.py --check \
   || die 'Codex defaults did not survive an Orca restart'
 [ "$first_pair" != "$second_pair" ] || die 'pair restart reused the old offer'
+"${incus[@]}" exec "$instance" -- jq -e '
+  .pairing.available == true and .pairing.scope == "runtime"
+' /srv/agents/orca/ready.json >/dev/null \
+  || die 'ordinary pair did not preserve the Desktop pairing scope'
 client_status "$second_pair" client-b
 client_status "$first_pair" client-a
 assert_all_repos
@@ -590,7 +600,7 @@ run_orca logs >"$work/logs.out"
 [ "$(wc -l <"$work/logs.out")" -le 18000 ] \
   || die 'bounded logs returned more than 18000 lines'
 case "$(cat "$work/logs.out")" in
-  *orca://*) die 'bounded logs returned a pairing capability' ;;
+  *orca://*|*deviceToken*|*publicKeyB64*) die 'bounded logs returned a pairing capability' ;;
 esac
 set +e
 timeout --signal=TERM --kill-after=2s 3s \
@@ -601,7 +611,7 @@ follow_status=$?
 set -e
 [ "$follow_status" -eq 124 ] || die "logs --follow exited with status $follow_status before timeout"
 case "$(cat "$work/logs-follow.out")" in
-  *orca://*) die 'followed logs returned a pairing capability' ;;
+  *orca://*|*deviceToken*|*publicKeyB64*) die 'followed logs returned a pairing capability' ;;
 esac
 
 stage 'adding a project through stock repo sync'

@@ -23,13 +23,15 @@ ORCA_DEVICE=orca-server
 ORCA_EXEC=/usr/bin/orca-ide
 ORCA_STATE=/srv/agents/orca
 ORCA_READY="$ORCA_STATE/ready.json"
+ORCA_MOBILE_REQUEST="$ORCA_READY.mobile-request"
+ORCA_PAIR_PENDING=0
 ORCA_CAPTURE=/usr/local/libexec/subyard/orca-capture-ready
 ORCA_INGRESS=/usr/local/libexec/subyard/orca-ingress
 ORCA_SYNC=/usr/local/libexec/subyard/projects-changed.d/orca
 ORCA_REGISTRATION=/usr/local/libexec/subyard/orca-registration
 ORCA_CODEX_PROFILE=/etc/profile.d/subyard-orca-codex.sh
 ORCA_CONTRACT_DIGEST=/usr/local/libexec/subyard/orca-contract.sha256
-ORCA_CONTRACT_VERSION=3
+ORCA_CONTRACT_VERSION=4
 ORCA_GUEST_PORT=6768
 ORCA_RUNTIME_CHANGED=0
 ORCA_TMP_DIR=
@@ -48,6 +50,9 @@ cleanup_guest() {
 
 cleanup() {
   local status=$? cleanup_failed=0
+  if [ "$ORCA_PAIR_PENDING" -eq 1 ]; then
+    clear_mobile_request >/dev/null 2>&1 || cleanup_failed=1
+  fi
   cleanup_guest >/dev/null 2>&1 || cleanup_failed=1
   if [ -n "$ORCA_TMP_DIR" ]; then
     rm -rf -- "$ORCA_TMP_DIR" || cleanup_failed=1
@@ -56,6 +61,17 @@ cleanup() {
   return "$status"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+clear_mobile_request() {
+  yexec runuser -u "${DEV_USER:-dev}" -- bash -c '
+    if [ -f "$1" ] && IFS= read -r owner < "$1" && [ "$owner" = "$2" ]; then
+      rm -f -- "$1"
+    fi
+  ' _ "$ORCA_MOBILE_REQUEST" "$SUBYARD_OPERATION_ID" || return 1
+  ORCA_PAIR_PENDING=0
+}
 
 device_exists() {
   incus config device list "$YARD_INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null |
@@ -303,7 +319,12 @@ set -euo pipefail
 ready="${1:?ready file is required}"
 shift
 umask 077
-: >"$ready"
+# Consume the request before starting Orca, including a failed startup. A later
+# systemd retry or ordinary restart must use the normal Desktop pairing scope.
+if [ -f "$ready.mobile-request" ]; then
+  rm -- "$ready.mobile-request"
+  set -- "$@" --mobile-pairing
+fi
 exec "$@" >"$ready"
 CAPTURE
   # Orca's bash startup sources /etc/profile before injecting its agent command.
@@ -588,16 +609,39 @@ require_pair_ready() {
 }
 
 cmd_pair() {
+  local scope=runtime
   require_pair_ready
+  if [ "${1:-}" = --mobile ]; then
+    scope=mobile
+    # Record cleanup before the guest call: it may publish the request even if
+    # transport fails. Atomic publication tags ownership without clobbering an
+    # existing request, so cancellation only removes this operation's request.
+    ORCA_PAIR_PENDING=1
+    yexec runuser -u "${DEV_USER:-dev}" -- bash -c '
+      set -euo pipefail
+      umask 077
+      temporary="$(mktemp "$1.XXXXXX")"
+      trap '\''rm -f -- "$temporary"'\'' EXIT
+      trap '\''exit 130'\'' INT
+      trap '\''exit 143'\'' TERM
+      printf "%s\n" "$2" > "$temporary"
+      ln -T -- "$temporary" "$1"
+    ' _ "$ORCA_MOBILE_REQUEST" "$SUBYARD_OPERATION_ID" \
+      || die "Orca mobile pairing request could not be installed"
+  fi
   yexec systemctl restart "$ORCA_UNIT"
   wait_service_ready || die "Orca did not become ready after restart"
+  if [ "$ORCA_PAIR_PENDING" -eq 1 ]; then
+    clear_mobile_request || die "Orca mobile pairing request could not be cleared"
+  fi
   wait_owner_endpoint || die "Orca owner endpoint is not reachable after restart"
   run_project_sync
   projects_synced || die "Orca project registrations did not converge"
-  yexec jq -er '
+  yexec jq -er --arg scope "$scope" '
     select(.type == "orca_server_ready" and .schemaVersion == 1) |
-    .pairing | select(.available == true) | .url
-  ' "$ORCA_READY" || die "Orca did not publish a pairing link"
+    .pairing | select(.available == true and .scope == $scope) |
+    .url | select(type == "string" and startswith("orca://pair?code="))
+  ' "$ORCA_READY" || die "Orca did not publish a $scope pairing link"
 }
 
 cmd_sync() {
@@ -715,6 +759,14 @@ require_no_resource_arguments() {
 validate_resource_arguments() {
   local verb="$1"
   shift
+  if [ "$verb" = pair ]; then
+    case "$#" in
+      0) return 0 ;;
+      1) [ "$1" = --mobile ] || svc_usage_error "'pair' accepts only '--mobile'" ;;
+      *) svc_usage_error "'pair' accepts only one optional '--mobile'" ;;
+    esac
+    return 0
+  fi
   if [ "$verb" = logs ]; then
     case "$#" in
       0) return 0 ;;
@@ -776,7 +828,8 @@ prepare_resource() { # <public-verb>
       svc_require_yard_running
       require_pair_ready
       emit_resource_assessment pair true \
-        "restart the Orca service, reconcile project groups and checkouts and issue one fresh single-client pairing link"
+        "briefly restart the Orca service, preserving existing client grants and server state" \
+        "reconcile project groups and checkouts and issue one ${1:+mobile }single-client pairing link"
       ;;
     restart)
       svc_require_yard_running
@@ -833,7 +886,7 @@ case "${SUBYARD_RESOURCE_MODE:-}" in
     case "$sub" in
       up) cmd_up ;;
       status) cmd_status ;;
-      pair) cmd_pair ;;
+      pair) cmd_pair "$@" ;;
       restart) cmd_restart ;;
       sync) cmd_sync ;;
       logs) cmd_logs "$@" ;;
@@ -845,6 +898,7 @@ case "${SUBYARD_RESOURCE_MODE:-}" in
       is-up) require_no_resource_arguments is-up "$@"; cmd_is_up ;;
       -h|--help|help|"")
         printf 'Usage: %s orca <up|is-up|status|pair|restart|sync|logs|down>\n' "${PROG:-yard}"
+        printf '  pair [--mobile]  Issue a Desktop or mobile link after a brief service restart\n'
         ;;
       *) die "typed resource dispatcher required for 'yard orca $sub'" ;;
     esac

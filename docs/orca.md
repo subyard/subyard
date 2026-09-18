@@ -34,6 +34,37 @@ Orca connects directly over Tailscale. SSH over Tailscale is sufficient for runn
 these server commands; an SSH port-forward is only needed for the alternative
 loopback setup below.
 
+## Connect Orca Mobile
+
+After updating Subyard, run `up` once to install the current pairing wrapper, then
+request a mobile link on the owner host:
+
+```sh
+yard orca up
+yard orca pair --mobile
+# For another registered yard:
+yard -Y <yard> orca pair --mobile
+```
+
+Install [Orca Mobile](https://www.onorca.dev/docs/mobile) on iOS or Android and
+connect the phone to the owner's Tailscale network. In the app, choose **Pair**
+and paste the final `orca://pair?...` line. Connect that phone before requesting
+a link for the next one: Orca reuses a pending invitation until a client connects,
+then issues a new link. Keep these access capabilities out of config, shell
+history and logs.
+
+Mobile pairing briefly restarts the existing server and synchronizes project
+groups and checkouts. Connected clients may disconnect temporarily; their saved
+grants, projects and server state survive. The mobile request applies to that
+startup only. Ordinary `yard orca pair` continues to issue Desktop links.
+
+The phone must keep network access to the advertised owner address and selected
+TCP port, including any automatically allocated nondefault port. For a Tailscale
+endpoint, keep Tailscale connected on both phone and owner. An explicitly selected
+loopback endpoint requires an SSH tunnel on the phone. A pairing link does not
+create a tunnel. The pinned headless Orca server does not initialize Orca Relay;
+this profile does not provide an automatic relay through Orca's Internet servers.
+
 ### Allow the owner port in Tailscale
 
 An access policy allowing SSH (`tcp:22`), HTTPS (`tcp:443`) or ICMP does not allow

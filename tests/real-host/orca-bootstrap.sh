@@ -230,14 +230,76 @@ assert_materialized_json() {
 }
 
 assert_orca_readiness() {
-  guest_root jq -e --arg endpoint "ws://127.0.0.1:$ORCA_PORT" '
+  local scope="${1:-}"
+  [ "$(guest_root stat -c %a /srv/agents/orca/ready.json)" = 600 ] \
+    || die 'Orca readiness file is not mode 0600'
+  guest_root jq -e --arg endpoint "ws://127.0.0.1:$ORCA_PORT" --arg scope "$scope" '
     .type == "orca_server_ready" and
     .schemaVersion == 1 and
     .advertisedEndpoint == $endpoint and
     .pairing.available == true and
+    ($scope == "" or .pairing.scope == $scope) and
     (.pairing.url | type == "string" and startswith("orca://pair?"))
   ' /srv/agents/orca/ready.json >/dev/null \
     || die 'Orca readiness contract was unavailable'
+}
+
+assert_pairing_file() {
+  local path="$1" scope="$2"
+  [ "$(stat -c %a "$path")" = 600 ] || die 'pairing output file is not mode 0600'
+  python3 - "$path" "$scope" "ws://127.0.0.1:$ORCA_PORT" <<'PY' \
+    || die 'pairing link did not contain the expected private contract'
+import base64
+import json
+import sys
+from pathlib import Path
+
+try:
+    raw = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+    if not raw or not raw[-1].startswith("orca://pair?code="):
+        raise ValueError
+    code = raw[-1].removeprefix("orca://pair?code=")
+    if not code or len(code) % 4 == 1:
+        raise ValueError
+    payload = json.loads(base64.urlsafe_b64decode(code + "=" * (-len(code) % 4)))
+    valid = (
+        payload.get("v") == 2
+        and payload.get("endpoint") == sys.argv[3]
+        and isinstance(payload.get("deviceToken"), str) and payload["deviceToken"]
+        and isinstance(payload.get("publicKeyB64"), str) and payload["publicKeyB64"]
+        and payload.get("scope") == sys.argv[2]
+    )
+except Exception:
+    valid = False
+raise SystemExit(0 if valid else 1)
+PY
+}
+
+assert_fresh_pairing_files() {
+  python3 - "$1" "$2" <<'PY' || die 'mobile pairing reused the old offer'
+import sys
+from pathlib import Path
+
+try:
+    first = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()[-1]
+    second = Path(sys.argv[2]).read_text(encoding="utf-8").splitlines()[-1]
+except (OSError, UnicodeError, IndexError):
+    raise SystemExit(1)
+raise SystemExit(0 if first != second else 1)
+PY
+}
+
+assert_no_pairing_capability_logs() {
+  local status="$STATE/orca-status.out" journal="$STATE/orca-journal.out"
+  yard orca status >"$status" 2>"$STATE/orca-status.err"
+  if rg -q 'orca://|deviceToken|publicKeyB64' "$status" "$STATE/orca-status.err"; then
+    die 'Orca status leaked a pairing capability'
+  fi
+  install -m 0600 /dev/null "$journal"
+  guest_root journalctl -u subyard-orca.service --no-pager >"$journal"
+  if rg -q 'orca://|deviceToken|publicKeyB64' "$journal"; then
+    die 'Orca service journal leaked a pairing capability'
+  fi
 }
 
 guest_json_projection_hash() {
@@ -933,6 +995,41 @@ case "$pairing" in
   *) die 'Orca pair did not return a private stock pairing link' ;;
 esac
 client_status "$pairing" paired-client
+
+stage 'connecting mobile-scoped clients through stock CLI and restoring Desktop pairing'
+mobile_pair_one="$STATE/mobile-pair-one.out"
+mobile_pair_two="$STATE/mobile-pair-two.out"
+desktop_pair_after_mobile="$STATE/desktop-pair-after-mobile.out"
+for pairing_output in "$mobile_pair_one" "$mobile_pair_two" "$desktop_pair_after_mobile" \
+  "$STATE/mobile-pair-one.err" "$STATE/mobile-pair-two.err" "$STATE/desktop-pair-after-mobile.err"; do
+  install -m 0600 /dev/null "$pairing_output"
+done
+yard orca pair --mobile --yes >"$mobile_pair_one" 2>"$STATE/mobile-pair-one.err"
+assert_orca_readiness mobile
+assert_pairing_file "$mobile_pair_one" mobile
+guest_root test ! -e /srv/agents/orca/ready.json.mobile-request \
+  || die 'Orca consumed mobile pairing request was not cleared'
+client_status "$pairing" paired-client
+# Authenticate the first mobile grant: stock Orca reuses an unconsumed offer.
+client_status "$(tail -n1 "$mobile_pair_one")" mobile-client-one
+yard orca pair --mobile --yes >"$mobile_pair_two" 2>"$STATE/mobile-pair-two.err"
+assert_orca_readiness mobile
+assert_pairing_file "$mobile_pair_two" mobile
+assert_fresh_pairing_files "$mobile_pair_one" "$mobile_pair_two"
+client_status "$(tail -n1 "$mobile_pair_two")" mobile-client-two
+client_status "$(tail -n1 "$mobile_pair_one")" mobile-client-one
+yard orca restart --yes >/dev/null
+assert_orca_readiness runtime
+guest_root test ! -e /srv/agents/orca/ready.json.mobile-request \
+  || die 'ordinary restart retained a mobile pairing request'
+client_status "$pairing" paired-client
+yard orca pair --yes >"$desktop_pair_after_mobile" 2>"$STATE/desktop-pair-after-mobile.err"
+assert_orca_readiness runtime
+assert_pairing_file "$desktop_pair_after_mobile" runtime
+desktop_pair_after_mobile="$(tail -n1 "$desktop_pair_after_mobile")"
+client_status "$desktop_pair_after_mobile" desktop-after-mobile-client
+client_status "$(tail -n1 "$mobile_pair_one")" mobile-client-one
+assert_no_pairing_capability_logs
 if [ "$EXISTING_YARD" = 1 ]; then
   stage 'syncing and applying a tracked desired config while preserving runtime state and the grant'
   sync_host_id="$(<"$SUBYARD_CONFIG_HOME/host-id")"
