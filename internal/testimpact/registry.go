@@ -177,6 +177,13 @@ func BuiltInRegistry() (Registry, error) {
 			Rationale:     "fresh one-command Orca profile, yard and durable endpoint bootstrap on a disposable leased VM",
 		},
 		Check{
+			ID: "e2e:codex-permissions", Tier: "T3",
+			Argv: []string{"dev/agent-e2e.sh", "--purpose", "codex-permissions", "--vm", "1", "--",
+				"env", "SUBYARD_E2E_ORCA_BOOTSTRAP=1", "SUBYARD_E2E_ORCA_CODEX_PERMISSIONS=1", "bash", "tests/real-host/orca-bootstrap.sh"},
+			BudgetSeconds: 1800,
+			Rationale:     "native Codex managed policy, terminal and paired Orca approval/deny in two yard projects",
+		},
+		Check{
 			ID: "e2e:orca-ssh-agent", Tier: "T3",
 			Argv: []string{"dev/agent-e2e.sh", "--purpose", "orca-ssh-agent", "--vm", "1", "--",
 				"env", "SUBYARD_E2E_ORCA_BOOTSTRAP=1", "SUBYARD_E2E_ORCA_SSH_AGENT=1", "bash", "tests/real-host/orca-bootstrap.sh"},

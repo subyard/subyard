@@ -2,8 +2,8 @@
 # The container is the isolation boundary, so Codex runs with full local permissions and
 # unrestricted network for free local work. Publishing git history is gated at the Codex
 # level — canonical direct `git commit` and `git push` request operator approval via
-# ~/.codex/rules/repo.rules — instead of a yard-wide git shim. Override with a fuller private
-# config via AGENT_codex_CONFIG.
+# ~/.codex/rules/repo.rules and managed /etc/codex/requirements.toml. Customize defaults
+# via AGENT_codex_CONFIG; native requirements retain user approval across projects/clients.
 # `yard status` probes home rules; active client overrides still need runtime acceptance.
 
 approval_policy = "on-request"   # run local commands freely; prompt on explicit command rules

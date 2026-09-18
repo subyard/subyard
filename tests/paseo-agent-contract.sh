@@ -70,11 +70,11 @@ rg -q 'PASEO_UNIT_WAIT_SECONDS' "$ROOT/config/agents/paseo/bin/paseo-check" \
   || fail "readiness has no bounded systemd activation wait"
 rg -q 'until systemctl is-active --quiet' "$ROOT/config/agents/paseo/bin/paseo-check" \
   || fail "readiness rejects the normal systemd activating state"
-rg -q 'as_dev /usr/local/bin/codex-check' "$ROOT/config/agents/paseo/bin/paseo-check" \
+rg -q 'as_dev /usr/local/bin/codex-policy-check' "$ROOT/config/agents/paseo/bin/paseo-check" \
   || fail "readiness does not verify the canonical Codex package"
 rg -q 'CODEX_HOME=' "$ROOT/config/agents/paseo/bin/paseo-check" \
   || fail "readiness does not give Codex its exact user state directory"
-codex_check_line="$(rg -n 'as_dev /usr/local/bin/codex-check' \
+codex_check_line="$(rg -n 'as_dev /usr/local/bin/codex-policy-check' \
   "$ROOT/config/agents/paseo/bin/paseo-check" | cut -d: -f1)"
 pair_check_line="$(rg -n 'daemon pair .*--json' \
   "$ROOT/config/agents/paseo/bin/paseo-check" | cut -d: -f1)"

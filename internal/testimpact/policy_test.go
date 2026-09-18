@@ -150,6 +150,10 @@ func TestRegistryNamedE2EChecksUsePreparedRunnableEntrypoints(t *testing.T) {
 			"dev/agent-e2e.sh", "--purpose", "orca-ssh-agent", "--vm", "1", "--",
 			"env", "SUBYARD_E2E_ORCA_BOOTSTRAP=1", "SUBYARD_E2E_ORCA_SSH_AGENT=1", "bash", "tests/real-host/orca-bootstrap.sh",
 		},
+		"e2e:codex-permissions": {
+			"dev/agent-e2e.sh", "--purpose", "codex-permissions", "--vm", "1", "--",
+			"env", "SUBYARD_E2E_ORCA_BOOTSTRAP=1", "SUBYARD_E2E_ORCA_CODEX_PERMISSIONS=1", "bash", "tests/real-host/orca-bootstrap.sh",
+		},
 		"e2e:orca-projects": {
 			"dev/agent-e2e.sh", "--purpose", "orca-projects", "--vm", "1", "--",
 			"env", "SUBYARD_E2E_ORCA_PROJECTS=1", "./tests/real-host/orca-projects.sh",
@@ -603,6 +607,8 @@ func TestPolicyRealHostTestPathsSelectOwningChecksWithoutRiskDomains(t *testing.
 		{"tests/real-host/credential-tools.sh", "e2e:credential-tools"},
 		{"tests/real-host/incus-contract.sh", "p0:real-incus"},
 		{"tests/real-host/orca-bootstrap.sh", "e2e:orca-bootstrap"},
+		{"tests/real-host/codex-yard.sh", "e2e:codex-permissions"},
+		{"tests/real-host/codex-permissions.py", "e2e:codex-permissions"},
 		{"tests/real-host/orca-resource.sh", "e2e:orca-resource"},
 		{"tests/real-host/orca-projects.sh", "e2e:orca-projects"},
 		{"tests/real-host/orca-projects-helper.py", "e2e:orca-projects"},

@@ -114,14 +114,16 @@ run_hook() { # <arch> <root> [environment assignments...]
     CODEX_ARCH="$arch" \
     CODEX_INSTALL_ROOT="$install_root/opt/subyard/codex" \
     CODEX_BIN_LINK="$install_root/usr/local/bin/codex" \
-    CODEX_CHECK_PATH="$install_root/usr/local/bin/codex-check" \
+    CODEX_CHECK_PATH="$install_root/usr/local/bin/codex-policy-check" \
+    CODEX_REQUIREMENTS_PATH="$install_root/etc/codex/requirements.toml" \
     "$@" bash "$HOOK"
 }
 
 root="$tmp/install"
 runtime="$root/opt/subyard/codex/codex"
 link="$root/usr/local/bin/codex"
-check="$root/usr/local/bin/codex-check"
+check="$root/usr/local/bin/codex-policy-check"
+requirements="$root/etc/codex/requirements.toml"
 set_latest 0.147.0 "$sha_147_amd64" "$sha_147_arm64"
 run_hook amd64 "$root" >/dev/null
 [ "$(fetch_count)" -eq 2 ] || fail "fresh install did not fetch release metadata and artifact"
@@ -134,6 +136,15 @@ run_hook amd64 "$root" >/dev/null
 [ "$("$link" --version)" = 'codex-cli 0.147.0' ] || fail "fresh install reports the wrong version"
 "$link" app-server --help >/dev/null || fail "fresh install has no app-server command"
 CODEX_CHECK_DEV_USER="$(id -un)" "$check" >/dev/null || fail "package check rejected a valid install"
+python3 - "$requirements" <<'PY'
+import pathlib, sys, tomllib
+policy = tomllib.loads(pathlib.Path(sys.argv[1]).read_text())
+assert policy['allowed_approval_policies'] == ['on-request']
+assert policy['allowed_approvals_reviewers'] == ['user']
+rule, = policy['rules']['prefix_rules']
+assert rule['pattern'] == [{'token': 'git'}, {'any_of': ['commit', 'push']}]
+assert rule['decision'] == 'prompt'
+PY
 case "$(tail -n 1 "$curl_log")" in
   */rust-v0.147.0/codex-x86_64-unknown-linux-musl.tar.gz) ;;
   *) fail "amd64 did not map to the x86_64 musl artifact" ;;
@@ -233,6 +244,18 @@ fi
 [ "$(fetch_count)" -eq "$count" ] || fail "command conflict fetched before failing"
 [ ! -e "$conflict/opt/subyard/codex/codex" ] || fail "command conflict mutated the managed runtime"
 
+# Existing operator-managed requirements must never be overwritten.
+policy_conflict="$tmp/policy-conflict"
+mkdir -p "$policy_conflict/etc/codex"
+printf 'allowed_approval_policies = ["never"]\n' > "$policy_conflict/etc/codex/requirements.toml"
+cp "$policy_conflict/etc/codex/requirements.toml" "$tmp/operator-policy"
+if run_hook amd64 "$policy_conflict" >/dev/null 2>&1; then
+  fail "unmanaged requirements were overwritten"
+fi
+cmp "$policy_conflict/etc/codex/requirements.toml" "$tmp/operator-policy" \
+  || fail "operator policy changed on refusal"
+[ "$(fetch_count)" -eq "$count" ] || fail "policy conflict fetched before failing"
+
 # Verify arm64 mapping and fail-fast architecture validation.
 arm_root="$tmp/arm-install"
 set_latest 0.147.0 "$sha_147_amd64" "$sha_147_arm64"
@@ -253,6 +276,22 @@ for stale_version in 0.147.0 latest; do
     CODEX_SHA256_AMD64=not-a-checksum CODEX_SHA256_ARM64= >/dev/null
   [ "$("$legacy_root/usr/local/bin/codex" --version)" = 'codex-cli 0.148.0' ] \
     || fail "obsolete environment pins overrode the current release"
+done
+
+# Missing, modified and writable requirements fail readiness and reconcile on rerun.
+cp "$requirements" "$tmp/expected-requirements"
+for drift in missing policy permissions directory; do
+  case "$drift" in
+    missing) rm "$requirements" ;;
+    policy) printf '\nallowed_extra = true\n' >> "$requirements" ;;
+    permissions) chmod 0666 "$requirements" ;;
+    directory) chmod 0777 "$(dirname "$requirements")" ;;
+  esac
+  if CODEX_CHECK_DEV_USER="$(id -un)" "$check" >/dev/null 2>&1; then
+    fail "$drift requirements drift passed readiness"
+  fi
+  run_hook amd64 "$root" >/dev/null
+  cmp "$requirements" "$tmp/expected-requirements" || fail "requirements were not repaired"
 done
 
 # Production invocation is root-only.

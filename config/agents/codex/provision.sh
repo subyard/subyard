@@ -5,12 +5,28 @@ set -euo pipefail
 INSTALL_ROOT="${CODEX_INSTALL_ROOT:-/opt/subyard/codex}"
 RUNTIME_PATH="$INSTALL_ROOT/codex"
 BIN_LINK="${CODEX_BIN_LINK:-/usr/local/bin/codex}"
-CHECK_PATH="${CODEX_CHECK_PATH:-/usr/local/bin/codex-check}"
+CHECK_PATH="${CODEX_CHECK_PATH:-/usr/local/bin/codex-policy-check}"
+REQUIREMENTS_PATH="${CODEX_REQUIREMENTS_PATH:-/etc/codex/requirements.toml}"
 RELEASE_API_URL=https://api.github.com/repos/openai/codex/releases/latest
 RELEASE_BASE_URL=https://github.com/openai/codex/releases/download
 ARCH="${CODEX_ARCH:-}"
 DEV_USER="${DEV_USER:-dev}"
 MANAGED_CHECK_MARKER='# Managed by Subyard Codex provision.'
+
+# Native requirements apply across projects, CODEX_HOME and client launch modes.
+# Keep this in the self-contained provision hook copied into the yard.
+requirements() {
+  cat <<'REQUIREMENTS'
+# Managed by Subyard Codex provision.
+allowed_approval_policies = ["on-request"]
+allowed_approvals_reviewers = ["user"]
+
+[rules]
+prefix_rules = [
+  { pattern = [{ token = "git" }, { any_of = ["commit", "push"] }], decision = "prompt", justification = "Creating or amending commits and pushing require explicit operator approval." },
+]
+REQUIREMENTS
+}
 
 die() { printf 'Codex provision: %s\n' "$*" >&2; exit 1; }
 
@@ -18,7 +34,7 @@ if [ "$(id -u)" -ne 0 ] && [ "${CODEX_TEST_ALLOW_NON_ROOT:-0}" != 1 ]; then
   die "must run as root"
 fi
 
-for path in "$INSTALL_ROOT" "$BIN_LINK" "$CHECK_PATH"; do
+for path in "$INSTALL_ROOT" "$BIN_LINK" "$CHECK_PATH" "$REQUIREMENTS_PATH"; do
   case "$path" in /*) ;; *) die "install paths must be absolute" ;; esac
 done
 case "$DEV_USER" in ''|*[!A-Za-z0-9._-]*) die "DEV_USER is invalid" ;; esac
@@ -81,16 +97,39 @@ fi
 if [ -L "$INSTALL_ROOT" ] || { [ -e "$INSTALL_ROOT" ] && [ ! -d "$INSTALL_ROOT" ]; }; then
   die "$INSTALL_ROOT is not a managed directory — leaving it unchanged"
 fi
+requirements_dir="$(dirname "$REQUIREMENTS_PATH")"
+if [ -L "$requirements_dir" ] || { [ -e "$requirements_dir" ] && [ ! -d "$requirements_dir" ]; }; then
+  die "$requirements_dir is not a regular directory — leaving it unchanged"
+fi
+if [ -L "$REQUIREMENTS_PATH" ] || { [ -e "$REQUIREMENTS_PATH" ] && [ ! -f "$REQUIREMENTS_PATH" ]; }; then
+  die "$REQUIREMENTS_PATH is not a managed regular file — leaving it unchanged"
+elif [ -f "$REQUIREMENTS_PATH" ] && ! grep -Fxq "$MANAGED_CHECK_MARKER" "$REQUIREMENTS_PATH"; then
+  die "$REQUIREMENTS_PATH is managed by another policy — leaving it unchanged"
+fi
+
+install_requirements() {
+  local requirements_stage
+  install -d -m 0755 "$requirements_dir"
+  requirements_stage="$(mktemp "$requirements_dir/.requirements.XXXXXX")"
+  requirements > "$requirements_stage"
+  chmod 0644 "$requirements_stage"
+  if [ "$(id -u)" -eq 0 ]; then
+    chown 0:0 "$requirements_dir" "$requirements_stage"
+  fi
+  mv -fT -- "$requirements_stage" "$REQUIREMENTS_PATH"
+}
 
 install_check() {
-  local check_dir check_stage q_runtime q_link q_user q_owner
+  local check_dir check_stage q_runtime q_link q_user q_owner q_requirements requirements_sha
   check_dir="$(dirname "$CHECK_PATH")"
   mkdir -p "$check_dir"
-  check_stage="$(mktemp "$check_dir/.codex-check.XXXXXX")"
+  check_stage="$(mktemp "$check_dir/.codex-policy-check.XXXXXX")"
   printf -v q_runtime '%q' "$RUNTIME_PATH"
   printf -v q_link '%q' "$BIN_LINK"
   printf -v q_user '%q' "$DEV_USER"
   printf -v q_owner '%q' "$expected_owner"
+  printf -v q_requirements '%q' "$REQUIREMENTS_PATH"
+  requirements_sha="$(requirements | sha256sum | cut -d' ' -f1)"
   cat > "$check_stage" <<EOF
 #!/usr/bin/env bash
 $MANAGED_CHECK_MARKER
@@ -99,7 +138,17 @@ runtime=$q_runtime
 link=$q_link
 dev_user="\${CODEX_CHECK_DEV_USER:-$q_user}"
 expected_owner=$q_owner
-die() { printf 'codex-check: %s\\n' "\$*" >&2; exit 1; }
+requirements=$q_requirements
+die() { printf 'codex-policy-check: %s\\n' "\$*" >&2; exit 1; }
+[ -f "\$requirements" ] && [ ! -L "\$requirements" ] \
+  || die "managed approval requirements are missing"
+[ ! -L "\$(dirname "\$requirements")" ] \
+  && [ "\$(stat -c '%a:%u:%g' "\$(dirname "\$requirements")")" = "755:\$expected_owner" ] \
+  || die "managed approval requirements directory drifted"
+[ "\$(stat -c '%a:%u:%g' "\$requirements")" = "644:\$expected_owner" ] \
+  || die "managed approval requirements permissions drifted"
+[ "\$(sha256sum "\$requirements" | cut -d' ' -f1)" = '$requirements_sha' ] \
+  || die "managed approval requirements drifted; run yard init"
 [ -f "\$runtime" ] && [ ! -L "\$runtime" ] && [ -x "\$runtime" ] \
   || die "managed runtime is missing"
 [ "\$(stat -c '%a' "\$runtime" 2>/dev/null)" = 755 ] || die "managed runtime mode is not 0755"
@@ -179,6 +228,7 @@ if is_working_binary "$RUNTIME_PATH"; then
     { [ "$current_base" != "$VERSION" ] && [ "$newest_base" = "$current_base" ]; } || \
     { [ "$current_base" = "$VERSION" ] && [[ "$BINARY_VERSION" = "$VERSION"+* ]]; }; then
     publish_command
+    install_requirements
     install_check
     "$CHECK_PATH" >/dev/null
     printf 'Codex %s is already current at %s\n' "$BINARY_VERSION" "$BIN_LINK"
@@ -216,6 +266,7 @@ mv -fT -- "$stage" "$RUNTIME_PATH"
 stage=""
 
 publish_command
+install_requirements
 install_check
 is_working_binary "$RUNTIME_PATH" && [ "$BINARY_VERSION" = "$VERSION" ] \
   || die "installed runtime verification failed"

@@ -182,15 +182,18 @@ before executing the native Codex CLI. This keeps remote agent launches on the
 yard configuration too. SSH/VS Code shells and the installed Codex binary are
 unchanged. A desktop may still display its local YOLO preference; it does not
 describe the effective server launch. Custom shells and explicit executable
-paths bypass this Bash integration. Account-specific `CODEX_HOME` is preserved;
-an account configured with a different home reads its own Codex configuration.
+paths bypass this Bash integration, but the native Codex CLI still loads the yard's
+`/etc/codex/requirements.toml`. These managed requirements preserve user approval and
+commit/push rules across projects, profiles and account-specific `CODEX_HOME` values.
+See [Codex permissions across projects](configuration.md#codex-permissions-across-projects).
 
 `orca up` repairs fresh and existing stock defaults through Orca's settings API.
 The installed project hook also checks them on `orca sync` and subsequent
 `yard init` runs while Orca is active. Other settings and explicitly customized
-Codex arguments are preserved. Put persistent Codex policy in the yard's agent
-configuration; selecting YOLO or another session mode in a client can override
-it. Existing Codex sessions are not reconfigured by this repair.
+Codex arguments are preserved; incompatible permission overrides cannot weaken native
+Codex requirements. Use **Manual** with empty Codex arguments to follow the yard defaults.
+Run `yard init` after updating Subyard and start new Codex sessions; existing sessions
+are not reconfigured by this repair.
 
 Each Subyard project has one Orca group containing its canonical
 `/srv/workspaces/<project-id>/src` root and every nested Git checkout. The root is always

@@ -15,6 +15,7 @@ ORIGINAL_HOME="$HOME"
 YARD_BIN="$ROOT/.build/yard"
 EXISTING_YARD="${SUBYARD_E2E_ORCA_EXISTING_YARD:-0}"
 CODEX_CONFIG="${SUBYARD_E2E_ORCA_CODEX_CONFIG:-0}"
+CODEX_PERMISSIONS="${SUBYARD_E2E_ORCA_CODEX_PERMISSIONS:-0}"
 SSH_AGENT="${SUBYARD_E2E_ORCA_SSH_AGENT:-0}"
 KEEP_FAILED="${SUBYARD_E2E_ORCA_KEEP_FAILED:-0}"
 RESUME_STATE="${SUBYARD_E2E_ORCA_RESUME:-}"
@@ -38,10 +39,18 @@ case "$CODEX_CONFIG" in
   1) EXISTING_YARD=1 ;;
   *) die 'SUBYARD_E2E_ORCA_CODEX_CONFIG must be 0 or 1' ;;
 esac
+case "$CODEX_PERMISSIONS" in
+  0) ;;
+  1)
+    [ "$EXISTING_YARD" = 0 ] && [ "$CODEX_CONFIG" = 0 ] && [ -z "$UPGRADE_FROM" ] \
+      || die 'Codex permissions acceptance is separate from config and upgrade modes'
+    ;;
+  *) die 'SUBYARD_E2E_ORCA_CODEX_PERMISSIONS must be 0 or 1' ;;
+esac
 case "$SSH_AGENT" in
   0) ;;
   1)
-    [ "$EXISTING_YARD" = 0 ] && [ -z "$UPGRADE_FROM" ] \
+    [ "$EXISTING_YARD" = 0 ] && [ "$CODEX_PERMISSIONS" = 0 ] && [ -z "$UPGRADE_FROM" ] \
       || die 'SSH agent acceptance is separate from config and upgrade modes'
     ;;
   *) die 'SUBYARD_E2E_ORCA_SSH_AGENT must be 0 or 1' ;;
@@ -511,7 +520,7 @@ prepare_cached_orca_guest() {
   # Focused config/SSH acceptance exercises the real installed runtime and public
   # service reconciliation. Reusing a verified package is not fresh-download evidence.
   local digest cache guest_artifact
-  [ "$SSH_AGENT" = 1 ] || [ "$CODEX_CONFIG" = 1 ] || return 0
+  [ "$SSH_AGENT" = 1 ] || [ "$CODEX_CONFIG" = 1 ] || [ "$CODEX_PERMISSIONS" = 1 ] || return 0
   install_stock_orca_client
   case "$(guest_root dpkg --print-architecture)" in
     amd64) digest="$ORCA_DEB_AMD64_SHA256" ;;
@@ -598,6 +607,10 @@ export MIN_DISK_GIB=1
 coding_integrations=''
 yard_profiles=subyard-dev
 [ "$SSH_AGENT" = 0 ] || yard_profiles=orca
+if [ "$CODEX_PERMISSIONS" = 1 ]; then
+  coding_integrations=codex
+  yard_profiles=orca
+fi
 if [ "$EXISTING_YARD" = 1 ]; then
   coding_integrations='claude pi'
   if [ "$CODEX_CONFIG" = 1 ]; then coding_integrations+=' codex'; fi
@@ -662,6 +675,22 @@ if [ "$SSH_AGENT" = 1 ]; then
   client_status "$pairing" ssh-agent-client
   # shellcheck source=tests/real-host/ssh-agent.sh
   . "$ROOT/tests/real-host/ssh-agent.sh"
+  exit 0
+fi
+
+if [ "$CODEX_PERMISSIONS" = 1 ]; then
+  install_stock_orca_client
+  stage 'initializing the candidate and stock Orca for focused Codex permissions acceptance'
+  yard init --yes
+  prepare_cached_orca_guest
+  yard orca up --yes
+  ORCA_PORT="$(setting_value ORCA_HOST_PORT)"
+  assert_orca_readiness
+  pairing="$(yard orca pair --yes | tail -n1)"
+  case "$pairing" in orca://pair\?code=*) ;; *) die 'Orca did not return a private pairing link' ;; esac
+  client_status "$pairing" codex-permissions-client
+  # shellcheck source=tests/real-host/codex-yard.sh
+  . "$ROOT/tests/real-host/codex-yard.sh"
   exit 0
 fi
 

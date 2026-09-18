@@ -257,6 +257,20 @@ saved-client connectivity and `migrate --check`. It skips the broader JSON impor
 scenarios. The seeded additions model the observed drift; they do not prove which desktop action
 writes each runtime field.
 
+For Codex permissions across terminal and Orca launches:
+
+```sh
+dev/agent-e2e.sh --slot "$slot" --purpose codex-permissions --vm 1 -- \
+  env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_CODEX_PERMISSIONS=1 \
+  bash tests/real-host/orca-bootstrap.sh
+```
+
+This focused mode installs the native Codex CLI and stock Orca in a disposable yard.
+It verifies managed policy reconciliation through `yard init` and exercises runtime approval
+with synthetic model responses and disposable Git repositories. It uses no real agent credentials
+or external model APIs. These checks do not replace interactive VS Code/Desktop acceptance or
+establish a security boundary against alternative Git commands.
+
 For temporary SSH-key access, run the focused current-candidate fixture:
 
 ```sh

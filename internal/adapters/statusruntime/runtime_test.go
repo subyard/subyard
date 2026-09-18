@@ -450,7 +450,7 @@ func TestRuntimeReportsSelectedProfilesAndAgentsWithVerifiedDashboard(t *testing
 		t.Fatalf("profiles = %#v", facts.Profiles)
 	}
 	wantAgents := []domain.AgentStatus{
-		{Name: "codex", State: "rules-ok", Hint: "home matcher: commit/push prompt; session approvals unverified"},
+		{Name: "codex", State: "rules-ok", Hint: "installed policy + home matcher: commit/push prompt; session approvals unverified"},
 		{Name: "aiobserver", State: "up", URL: "http://127.0.0.1:18080/", DashboardPort: 18080},
 	}
 	if !reflect.DeepEqual(facts.Agents, wantAgents) {

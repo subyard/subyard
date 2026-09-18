@@ -138,12 +138,46 @@ Legacy `CODEX_VERSION` and `CODEX_SHA256_*` assignments are ignored when loading
 settings; new writes to these retired fields are rejected. Already-converged yards do not check for upstream updates
 on every `yard init`, and `yard status` does not install or update agents.
 
-`yard status` runs one offline Codex rule check in a running yard:
+### Codex permissions across projects
+
+The default yard configuration permits local edits, builds, tests and network access without
+approval. Canonical direct `git commit` (including `--amend`) and `git push` require user approval.
+The same policy applies to every project in the yard:
+
+| Client | Yard mode |
+| --- | --- |
+| Terminal | Run `codex` without permission overrides. |
+| VS Code Codex extension | Select **Custom (config.toml)**. |
+| Orca | Use **Manual** with empty Codex arguments; Subyard also removes the stock YOLO argument. |
+
+Codex provisioning installs root-owned `/etc/codex/requirements.toml` using Codex's native
+[managed requirements](https://learn.chatgpt.com/docs/enterprise/managed-configuration).
+It requires `on-request`, the `user` reviewer and commit/push prompt rules independently of the
+home rules. Project settings, profiles, alternate `CODEX_HOME` and client flags cannot remove
+these requirements. Incompatible overrides such as `never` or automatic review cannot take effect.
+The home config supplies the existing `danger-full-access` yard sandbox default; stricter sandbox
+choices remain available. Use **Custom** in clients that offer permission presets: unrestricted
+filesystem access and mandatory command approval are separate settings.
+
+After updating Subyard, run `yard init` to reconcile existing yards, then start new Codex sessions.
+Existing sessions must be restarted to load the policy. `codex-policy-check` checks the installed policy's
+contents, ownership and permissions; `yard init` repairs managed drift. Provisioning refuses to
+overwrite an existing requirements file owned by another policy.
+
+This is a Codex command policy, not an OS boundary against another executable, alternative Git
+spellings or direct writes to Git metadata. Yard root can change the requirements. Enterprise-managed
+requirements can also have higher precedence; their effective policy needs separate acceptance.
+The native terminal UI offers single-use approval for these managed rules. A separate app-server
+client can still submit a session-wide approval response; managed requirements do not disable that
+protocol response. Single-use behavior in VS Code or other app-server clients needs its own
+interactive acceptance.
+
+`yard status` runs the installed policy check and one offline Codex rule check in a running yard:
 
 | State | Evidence |
 | --- | --- |
-| `rules-ok` | Codex's native matcher returned `prompt` for the checked commit/push forms and left the checked local commands ungated. |
-| `incompatible` | The native command failed, returned an unsupported response, or the home rules did not meet that contract. Review the rules or update Subyard. |
+| `rules-ok` | The installed policy passed readiness; Codex's native home-rules matcher returned `prompt` for the checked commit/push forms and left the checked local commands ungated. |
+| `incompatible` | Installed policy drifted, the native command failed, or the home rules did not meet the contract. Run `yard init` or review the rules. |
 | `unverified` | Claude, OpenCode and pi have no supported offline approval check in Subyard. |
 | `missing` / `?` | The CLI was not found, or the check was unavailable, timed out, or not run because the yard is stopped. |
 
@@ -159,11 +193,10 @@ and `git push --force-with-lease`. It also checks that `git status` and `sh dev-
 not gated by a rule. These commands are arguments to the matcher; Git and scripts are never
 executed. All default-home `*.rules` files participate.
 
-`rules-ok` proves only the matcher result. Subyard does not reconstruct client configuration or
-inspect active sessions: `approval_policy = "never"`, profiles, custom `CODEX_HOME`, launch flags,
-project overrides and unloaded rules can still change runtime behavior. Other Git spellings such
-as `git -C` and `git -c` are outside this check; matching raw `bash -lc` input also does not model
-Codex's runtime shell decomposition. Single-use approval and denial require client acceptance.
+`rules-ok` proves installed policy readiness and the home matcher result. Subyard does not inspect
+active sessions or prove that a client displays approval requests. Other Git spellings such as
+`git -C` and `git -c` are outside this check; matching raw `bash -lc` input also does not model
+Codex's runtime shell decomposition. Single-use approval and denial require runtime acceptance.
 
 For Claude, OpenCode and pi, status states the missing evidence without parsing their configs
 or launching diagnostics. In particular, Claude's shipped `bypassPermissions` mode skips prompts

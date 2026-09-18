@@ -49,6 +49,10 @@ func (runtime Runtime) codexRulesStatus(ctx context.Context, yard domain.Context
 	switch {
 	case probeCtx.Err() != nil || result.ExitCode == 124 || result.ExitCode == 137:
 		status.Hint = "home rule check timed out; retry status"
+	case result.ExitCode == 126:
+		status.State, status.Hint = "missing", "Codex managed policy check not installed; run yard init"
+	case result.ExitCode == 125:
+		status.State, status.Hint = "incompatible", "installed Codex policy check failed; repair the Codex installation"
 	case result.ExitCode == 127:
 		status.State, status.Hint = "missing", "Codex CLI not found on the default developer PATH"
 	case result.ExitCode != 0:
@@ -56,7 +60,7 @@ func (runtime Runtime) codexRulesStatus(ctx context.Context, yard domain.Context
 	case err != nil:
 		status.Hint = "home rule check unavailable; check installation or update Subyard"
 	default:
-		status.State, status.Hint = "rules-ok", "home matcher: commit/push prompt; session approvals unverified"
+		status.State, status.Hint = "rules-ok", "installed policy + home matcher: commit/push prompt; session approvals unverified"
 	}
 	return status
 }
@@ -67,6 +71,8 @@ const codexRulesCommand = `
 set -euo pipefail
 exec >/dev/null 2>&1
 cd "$HOME"
+[ -x /usr/local/bin/codex-policy-check ] || exit 126
+/usr/local/bin/codex-policy-check || exit 125
 command -v codex >/dev/null || exit 127
 shopt -s nullglob
 files=("$CODEX_HOME"/rules/*.rules)

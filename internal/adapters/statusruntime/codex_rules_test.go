@@ -18,6 +18,7 @@ func TestCodexRulesProbe(t *testing.T) {
 	for _, tc := range []struct {
 		name, protected, local, state string
 		cliFailure, missingRules      bool
+		policyFailure, missingPolicy  bool
 	}{
 		{name: "prompt", protected: `{"decision":"prompt"}`, local: `{}`, state: "rules-ok"},
 		{name: "allow override", protected: `{"decision":"allow"}`, local: `{}`, state: "incompatible"},
@@ -27,6 +28,8 @@ func TestCodexRulesProbe(t *testing.T) {
 		{name: "oversized response", protected: `{"decision":"prompt","extra":"` + strings.Repeat("x", 32768) + `"}`, state: "incompatible"},
 		{name: "CLI failure", state: "incompatible", cliFailure: true},
 		{name: "missing rules", state: "incompatible", missingRules: true},
+		{name: "managed policy check failure", state: "incompatible", policyFailure: true},
+		{name: "missing managed policy check", state: "missing", missingPolicy: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -44,8 +47,17 @@ func TestCodexRulesProbe(t *testing.T) {
 				write(".codex/rules/a.rules", "", 0o600)
 				write(".codex/rules/b.rules", "", 0o600)
 			}
+			// A user PATH shadow must not satisfy the managed check.
+			write("bin/codex-policy-check", "#!/bin/sh\nexit 0\n", 0o700)
 			write("protected", tc.protected, 0o600)
 			write("local", tc.local, 0o600)
+			if !tc.missingPolicy {
+				policyCheck := "#!/bin/sh\nexit 0\n"
+				if tc.policyFailure {
+					policyCheck = "#!/bin/sh\nprintf 'private policy diagnostic' >&2\nexit 2\n"
+				}
+				write("managed-check", policyCheck, 0o700)
+			}
 			script := `#!/bin/bash
 set -eu
 [[ "$PWD" = "$HOME" && "$1 $2" = 'execpolicy check' ]] || exit 1
@@ -64,7 +76,9 @@ esac
 			}
 			write("bin/codex", script, 0o700)
 			runtime := Runtime{Executor: statusExecutorFunc(func(ctx context.Context, _, _ string, req ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
-				command := exec.CommandContext(ctx, req.Command[0], req.Command[1:]...)
+				args := append([]string(nil), req.Command[1:]...)
+				args[len(args)-1] = strings.ReplaceAll(args[len(args)-1], "/usr/local/bin/codex-policy-check", filepath.Join(home, "managed-check"))
+				command := exec.CommandContext(ctx, req.Command[0], args...)
 				command.Env = []string{"HOME=" + home, "CODEX_HOME=" + home + "/.codex", "PATH=" + home + "/bin:/usr/bin:/bin"}
 				output, err := command.CombinedOutput()
 				if len(output) != 0 {

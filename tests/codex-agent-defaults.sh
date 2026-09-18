@@ -14,7 +14,7 @@ set +a
 [ "$AGENT_codex_PROVISION" = "$ROOT/config/agents/codex/provision.sh" ] \
   || fail "Codex provision hook is not wired"
 [ "$AGENT_codex_COMMAND" = codex ] || fail "Codex convergence command drifted"
-[ "$AGENT_codex_CHECK" = codex-check ] || fail "Codex package check drifted"
+[ "$AGENT_codex_CHECK" = codex-policy-check ] || fail "Codex package check drifted"
 [ -x "$AGENT_codex_PROVISION" ] || fail "Codex provision hook is not executable"
 
 case "$AGENT_codex_PERSIST" in
