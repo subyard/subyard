@@ -329,6 +329,8 @@ func newConfigApplyRepairFixture(t *testing.T, named bool) configApplyRepairFixt
 	environment = append(environment,
 		"YARD_RUNTIME_ROOT="+runtimeRoot,
 		"V2_GATE_CAPTURE="+filepath.Join(root, "capture"),
+		"SUBYARD_POWER_RECONCILER_PATH="+filepath.Join(root, "absent-power-reconciler"),
+		"SUBYARD_POWER_UNIT_PATH="+filepath.Join(root, "absent-power-unit"),
 	)
 	journalPath, _ := installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
 	registryPayload, err := os.ReadFile(filepath.Join(repositoryRoot(t), "config", "release-transition.json"))

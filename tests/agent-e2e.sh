@@ -2454,6 +2454,36 @@ grep -Fq 'wait_ready p0-container container' "$ROOT/dev/e2e/p0-real-incus.sh" \
   && grep -Fq 'stopped during first boot; replacing it once' "$ROOT/dev/e2e/p0-real-incus.sh" \
   && grep -Fq 'relaunching real Incus VM after first-boot stop' "$ROOT/dev/e2e/p0-real-incus.sh" \
   || fail "P0 real-Incus lane does not bound first-boot VM recovery with deterministic boot policy"
+P0_REAL_INCUS_WAIT_FUNCTION="$(sed -n '/^wait_ready() {/,/^}/p' "$ROOT/dev/e2e/p0-real-incus.sh")" \
+  bash -c '
+    set -euo pipefail
+    eval "$P0_REAL_INCUS_WAIT_FUNCTION"
+    PROJECT=test-project
+    die() { return 2; }
+    sleep() { SECONDS=$((SECONDS + 180)); }
+    real_incus_observe() {
+      case "$1" in
+        exec) [ "$case_name" != stuck-vm ] && [ "$((SECONDS - started))" -ge 300 ] ;;
+        list) printf "RUNNING\n" ;;
+        info|console) diagnostics="$diagnostics $1" ;;
+        *) return 3 ;;
+      esac
+    }
+    for case_name in slow-vm slow-container stuck-vm; do
+      started=$SECONDS
+      diagnostics=""
+      kind=virtual-machine
+      [ "$case_name" != slow-container ] || kind=container
+      if wait_ready test-instance "$kind"; then
+        [ "$case_name" = slow-vm ]
+        [ -z "$diagnostics" ]
+      else
+        [ "$case_name" != slow-vm ]
+        [ "$diagnostics" = " info console" ]
+        [ "$((SECONDS - started))" -le 720 ]
+      fi
+    done
+  ' || fail "P0 readiness does not allow slow VM boot or diagnose bounded failures"
 grep -Fq 'cleanup delete of %s failed; retrying (%s/3)' "$ROOT/dev/e2e/p0-real-incus.sh" \
   && grep -Fq 'refusing to delete unmarked instance' "$ROOT/dev/e2e/p0-real-incus.sh" \
   && grep -Fq 'could not delete marked instance $name after 3 attempts' "$ROOT/dev/e2e/p0-real-incus.sh" \
@@ -3667,7 +3697,7 @@ done
 grep -Fq 's/^YARD_TEMPLATE=e2e-vms$/YARD_TEMPLATE=test-vms/' \
   "$ROOT/dev/e2e/p0-source-upgrade.sh" \
   || fail "P0 source-upgrade lane does not verify the retired template migration"
-grep -Fq 'chmod 0755 "$CANDIDATE_A_REPOSITORY"' \
+grep -Fq 'chmod -R a+rX "$CANDIDATE_A_REPOSITORY"' \
     "$ROOT/dev/e2e/p0-source-upgrade.sh" \
   && grep -Fq 'operator_env test -x "$CANDIDATE_A_ENGINE"' \
     "$ROOT/dev/e2e/p0-source-upgrade.sh" \

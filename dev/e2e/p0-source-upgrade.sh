@@ -403,7 +403,8 @@ package_candidates() {
     || die 'candidate A runtime bundle is not a regular file'
   install -d -m 0755 "$CANDIDATE_A_REPOSITORY"
   tar -xzf "$candidate_a_bundle" -C "$CANDIDATE_A_REPOSITORY"
-  chmod 0755 "$CANDIDATE_A_REPOSITORY"
+  # Public runtime files may retain owner-only modes from the source checkout.
+  chmod -R a+rX "$CANDIDATE_A_REPOSITORY"
   [ -f "$CANDIDATE_A_ENGINE" ] && [ ! -L "$CANDIDATE_A_ENGINE" ] \
     && [ -x "$CANDIDATE_A_ENGINE" ] \
     && [ -f "$CANDIDATE_A_REPOSITORY/config/commands.registry" ] \

@@ -242,23 +242,29 @@ launch_with_retry p0-vm "launching real Incus VM (a clean allocation may downloa
 
 wait_ready() {
   local name="$1" kind="$2" state='' replaced=0
+  local wait_timeout=240 deadline
   local restart_grace="${P0_REAL_INCUS_RESTART_GRACE_ATTEMPTS:-30}"
+  # A cloud VM's first boot may reboot before its agent starts, including under nested KVM.
+  [ "$kind" != virtual-machine ] || wait_timeout=600
+  deadline=$((SECONDS + wait_timeout))
   printf '  [ .. ] waiting for %s\n' "$name"
-  for _ in $(seq 1 120); do
-    if real_incus exec "$name" --project "$PROJECT" -- true >/dev/null 2>&1; then
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if real_incus_observe exec "$name" --project "$PROJECT" -- true >/dev/null 2>&1; then
       return 0
     fi
-    state="$(real_incus list "$name" --project "$PROJECT" --format csv -c s)"
+    state="$(real_incus_observe list "$name" --project "$PROJECT" --format csv -c s)"
     if [ "$state" = STOPPED ]; then
       printf '  [ .. ] %s is stopped; waiting for a bounded first-boot restart\n' "$name"
       for _ in $(seq 1 "$restart_grace"); do
+        [ "$SECONDS" -lt "$deadline" ] || break
         sleep 1
-        if real_incus exec "$name" --project "$PROJECT" -- true >/dev/null 2>&1; then
+        if real_incus_observe exec "$name" --project "$PROJECT" -- true >/dev/null 2>&1; then
           return 0
         fi
-        state="$(real_incus list "$name" --project "$PROJECT" --format csv -c s)"
+        state="$(real_incus_observe list "$name" --project "$PROJECT" --format csv -c s)"
         [ "$state" = STOPPED ] || break
       done
+      [ "$SECONDS" -lt "$deadline" ] || break
       [ "$state" = STOPPED ] || continue
       if [ "$kind" = virtual-machine ] && [ "$replaced" = 0 ]; then
         printf '  [warn] %s stopped during first boot; replacing it once\n' "$name"
@@ -271,6 +277,8 @@ wait_ready() {
     fi
     sleep 2
   done
+  real_incus_observe info "$name" --project "$PROJECT" --show-log >&2 || true
+  real_incus_observe console "$name" --project "$PROJECT" --show-log >&2 || true
   die "$name did not become ready (last state: ${state:-unknown})"
 }
 wait_ready p0-container container
