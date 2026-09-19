@@ -186,6 +186,7 @@ const (
 	ReconcileStageTestVMs       ReconcileStageID = "test-vms"
 	ReconcileStageSSH           ReconcileStageID = "ssh"
 	ReconcileStageGitIdentity   ReconcileStageID = "git-identity"
+	ReconcileStageGitHub        ReconcileStageID = "github"
 	ReconcileStageExtras        ReconcileStageID = "extras"
 	ReconcileStagePower         ReconcileStageID = "power"
 	ReconcileStageKeys          ReconcileStageID = "keys"

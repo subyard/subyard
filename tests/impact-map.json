@@ -676,6 +676,13 @@
       "risk_domains": ["ssh-remote-transport"]
     },
     {
+      "id": "github-broker",
+      "priority": 625,
+      "pattern": "^(internal/githubbroker/.*|scripts/github-broker\\.sh|config/profiles/github/.*|dev/e2e/github-broker\\.sh)$",
+      "check_sets": ["host-free-core", "ssh-transport"],
+      "risk_domains": ["credential-profile", "ssh-remote-transport", "boot-lifecycle"]
+    },
+    {
       "id": "internal-sshidentity",
       "priority": 590,
       "pattern": "^internal/sshidentity/.*$",

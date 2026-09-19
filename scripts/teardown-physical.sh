@@ -47,6 +47,8 @@ PROJ=(--project "$INCUS_PROJECT")
 bridge_gone=0; pool_gone=0
 [ "$have_incus" = 1 ] || { bridge_gone=1; pool_gone=1; }
 
+bash "$SCRIPT_DIR/github-broker.sh" --remove
+
 echo "Instance:"
 if [ "$have_incus" = 1 ] && incus project show "$INCUS_PROJECT" >/dev/null 2>&1; then
   while IFS= read -r inst; do

@@ -53,6 +53,7 @@ vscode_remote_state() {
 SSH_SERVICE_WAS_ACTIVE=0
 SSH_SOCKET_WAS_ACTIVE=0
 SSH_RESTORE_NEEDED=0
+GITHUB_RESTORE_NEEDED=0
 
 # Stop only the SSH listener, never established sessions. With Debian's KillMode=process the
 # per-session sshd children survive, so the activity probe can see them while no new Remote-SSH
@@ -114,6 +115,9 @@ ssh_listener_restore() {
 
 restore_ssh_listener_on_exit() {
   [ "$SSH_RESTORE_NEEDED" = 0 ] || ssh_listener_restore
+  if [ "$GITHUB_RESTORE_NEEDED" = 1 ]; then
+    "$SCRIPT_DIR/github-broker.sh" --resume || warn 'could not resume the GitHub broker service'
+  fi
 }
 trap restore_ssh_listener_on_exit EXIT
 
@@ -137,7 +141,18 @@ case "$action" in
           2) die "cannot safely pause new SSH connections: ssh.service KillMode is not 'process'; use '$(yard_cmd_hint) stop --force' only for emergency shutdown" ;;
           *) die "could not pause new SSH connections before checking VS Code; retry, or use '$(yard_cmd_hint) stop --force' for emergency shutdown" ;;
         esac
+        broker_state="$("$SCRIPT_DIR/github-broker.sh" --pause)" \
+          || die 'could not pause the GitHub broker before checking SSH sessions'
+        [ "$broker_state" != paused ] || GITHUB_RESTORE_NEEDED=1
         vcstate="$(vscode_remote_state)"
+        # Remote sshd children can briefly outlive the closed transport.
+        if [ "$GITHUB_RESTORE_NEEDED" = 1 ]; then
+          for _ in {1..10}; do
+            [ "$vcstate" = active ] || break
+            sleep 0.2
+            vcstate="$(vscode_remote_state)"
+          done
+        fi
         case "$vcstate" in
           active)
             ssh_listener_restore

@@ -83,6 +83,11 @@ install -m 0755 "$artifact" "$bundle_stage/bin/yard-engine"
 install -m 0755 "$REPO/bin/yard" "$bundle_stage/bin/yard"
 runtime_list="$bundle_stage/.runtime-inputs"
 runtime_extras=(
+  scripts/github-broker.sh
+  config/profiles/github/profile.conf
+  config/profiles/github/provision.sh
+  config/profiles/github/bin/subyard-github
+  config/profiles/github/SKILL.md
   scripts/lib/ai-observer-proxy.sh
   scripts/lib/engine-context.sh
   scripts/install-ssh-relay.sh

@@ -15,6 +15,7 @@ import (
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/githubbroker"
 )
 
 type provisionExecution struct {
@@ -95,6 +96,9 @@ func (cli *CLI) prepareProvisionExecution(
 	seen := make(map[string]bool, len(selected))
 	profiles := make([]string, 0, len(selected))
 	for _, name := range selected {
+		if name == "github" && want == "" && !githubbroker.ProfileEnabled(loaded.Context.YardName, loaded.Environment) {
+			continue
+		}
 		if seen[name] {
 			continue
 		}

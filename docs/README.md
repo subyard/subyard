@@ -24,6 +24,7 @@ choices that widen it.
   SSH forwarding.
 - [Hermes yard](hermes.md) — prepare a dedicated yard while leaving Hermes installation and
   authentication to its upstream workflow.
+- [GitHub App access](github.md) — provide short-lived GitHub authentication to selected yards.
 - [Veranda desktop client](../veranda/README.md) — build and run the current read-only desktop
   implementation.
 - [Veranda UX contract](veranda/README.md) — review the product model, interaction contract and

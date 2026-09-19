@@ -16,12 +16,27 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/testvmsruntime"
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/cli"
+	"github.com/Subyard/Subyard/internal/githubbroker"
 	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if len(os.Args) > 1 && os.Args[1] == "_github-client" {
+		os.Exit(githubbroker.RunClient(ctx, os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "_github-broker" {
+		if len(os.Args) != 3 {
+			fmt.Fprintln(os.Stderr, "usage: _github-broker CONFIG")
+			os.Exit(2)
+		}
+		if err := githubbroker.RunServer(ctx, os.Args[2]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "_network-lock" {
 		if len(os.Args) != 3 || (os.Args[2] != "ensure" && os.Args[2] != "check") {
 			fmt.Fprintln(os.Stderr, "usage: _network-lock <ensure|check>")

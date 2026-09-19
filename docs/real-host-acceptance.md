@@ -128,3 +128,19 @@ age/SOPS binaries.
 It verifies reciprocal trust roles, the retained SSH route, signed encrypted sync, remote decrypt,
 plaintext isolation and revoke. The two-E2E-VM lane still verifies host identity separation,
 failure/reconnect and an exclusive handoff with real consumers.
+
+## GitHub broker
+
+The focused fixture uses a synthetic App key and never mints a real GitHub token. The controller
+keeps one exact slot lease while it prepares, reboots, verifies recovery, and cleans up the VM.
+
+```sh
+dev/e2e/github-broker.sh --slot "$slot"
+```
+
+Add `--hermes` to run the broader Hermes profile fixture under the same lease; `--wait 60m`
+extends lease acquisition when the pool is busy.
+
+This checks profile defaults, persistent owner service, SSH reconnect, crash recovery, reboot,
+explicit disable and preservation of Hermes state. Real GitHub App permissions and token use
+still require an operator-configured installation and an authorized sandbox repository.

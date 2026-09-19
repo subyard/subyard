@@ -15,9 +15,10 @@ yard -Y hermes provision
 definition from the shipped preset. Later reconciliation uses plain `yard -Y hermes init`; it does
 not depend on repeating `--profile`.
 
-The shipped preset deliberately selects no coding-tool integration, host mount, host link,
-capability, device or forwarded SSH agent. The `dev` user has no passwordless sudo and Tailscale is
-not installed inside the yard. Inspect the effective boundary with:
+The shipped preset selects the GitHub broker profile alongside Hermes, but no coding-tool
+integration, host mount, host link, capability, device or forwarded SSH agent. The `dev` user has
+no passwordless sudo and Tailscale is not installed inside the yard. Inspect the effective boundary
+with:
 
 ```sh
 yard -Y hermes config show ENVIRONMENT_PROFILES
@@ -27,6 +28,9 @@ yard -Y hermes config show HOST_LINKS
 yard -Y hermes config show FORWARD_SSH_AGENT
 yard -Y hermes security --require-live
 ```
+
+See [GitHub App access](github.md) for owner-side setup and the short-lived `gh` workflow. Hermes
+receives the same client without receiving the App key or a persistent GitHub credential.
 
 Provisioning installs only these generic OS prerequisites:
 

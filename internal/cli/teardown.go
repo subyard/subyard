@@ -115,6 +115,9 @@ func (cli *CLI) observeTeardownExecution(
 		suffix = "-" + loaded.Context.YardName
 	}
 	paths := []string{
+		filepath.Join(loaded.Context.Paths.DataHome, "github-broker", loaded.Context.YardName+"-engine"),
+		filepath.Join(loaded.Context.Paths.OperatorHome, ".config", "systemd", "user", "subyard-github-"+loaded.Context.YardName+".service"),
+		filepath.Join(loaded.Context.Paths.DataHome, "github-broker", loaded.Context.YardName+".json"),
 		loaded.Context.Paths.StateDir,
 		filepath.Join(loaded.Context.Paths.OperatorHome, ".ssh", "subyard"+suffix+".config"),
 		filepath.Join(loaded.Context.Paths.DataHome, "space"+suffix+".cache"),

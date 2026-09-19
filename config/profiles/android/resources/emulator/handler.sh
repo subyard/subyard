@@ -54,6 +54,7 @@ EMU_LOG=/tmp/subyard-android-emu.log
 PROFILE_SRC="$SCRIPT_DIR/../config/profiles/android"
 EMU_CONTROL="$EMU_DIR/emulator-control.sh"
 
+# Consume the full list: early grep exit can SIGPIPE Incus under pipefail.
 device_exists() { incus config device list "$YARD_INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null | grep -Fx -- "$1" >/dev/null; }
 
 proxy_exact() { # <device> <host-port> <yard-port>

@@ -190,10 +190,17 @@ replacement_dashboard_port="$(next_port "$((dashboard_port + 1))")"
   || die "dashboard replacement port allocation collided"
 
 printf '  [ .. ] creating a fresh isolated yard from the Hermes preset\n'
-yard "$YARD" init --profile hermes --yes
 definition="$SUBYARD_CONFIG_HOME/yards/$YARD/config.env"
-cmp "$ROOT/config/profiles/hermes/yard.env" "$definition" \
-  || die "profile bootstrap did not persist the shipped preset"
+if ss -Hln 'sport = :2224' 2>/dev/null | grep -q .; then
+  install -d -m 0700 "$(dirname "$definition")"
+  install -m 0600 "$ROOT/config/profiles/hermes/yard.env" "$definition"
+  yard "$YARD" config set SSH_PORT "$ssh_port" --scope yard --yes
+  yard "$YARD" init --yes
+else
+  yard "$YARD" init --profile hermes --yes
+  cmp "$ROOT/config/profiles/hermes/yard.env" "$definition" \
+    || die "profile bootstrap did not persist the shipped preset"
+fi
 [ "$(stat -c %a "$definition")" = 600 ] || die "yard definition is not mode 0600"
 yard "$YARD" config set SSH_PORT "$ssh_port" --scope yard --yes
 yard "$YARD" start --yes
@@ -223,7 +230,7 @@ test "$(loginctl show-user dev --property=Linger --value)" = yes \
 incus exec "$instance" --project "$project" --user "$dev_uid" --group "$dev_gid" \
   --env HOME=/home/dev -- sh -euc '
 fail() { printf "Hermes substrate assertion failed: %s\n" "$*" >&2; exit 1; }
-test ! -e "$HOME/.hermes" && test ! -L "$HOME/.hermes" || fail "Subyard created Hermes state"
+test -L "$HOME/.hermes/skills/subyard-github" || fail "GitHub skill is missing"
 test ! -e "$HOME/.local/bin/hermes" && test ! -L "$HOME/.local/bin/hermes" \
   || fail "Subyard installed a Hermes launcher"
 ! command -v tailscale >/dev/null 2>&1 || fail "Tailscale leaked into the guest"

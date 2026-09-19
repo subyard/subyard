@@ -61,7 +61,7 @@ yard host add me@my-server
 yard yards
 ```
 
-[Profiles, remote projects, and dashboards →](docs/workflows.md)
+[Profiles, remote projects, and dashboards →](docs/workflows.md) · [GitHub App access →](docs/github.md)
 
 ## The host stays yours
 
