@@ -194,9 +194,12 @@ func (m Manager) Lock(ctx context.Context) error {
 
 func (m Manager) stop(ctx context.Context) error {
 	_, err := control(ctx, m.Config.Directory, "lock")
-	if err != nil && !errors.Is(err, syscall.ENOENT) && !errors.Is(err, syscall.ECONNREFUSED) {
+	if err != nil && !errors.Is(err, syscall.ENOENT) && !errors.Is(err, syscall.ECONNREFUSED) &&
+		!errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) &&
+		!errors.Is(err, syscall.ECONNRESET) && !errors.Is(err, syscall.EPIPE) {
 		return errors.New("cannot revoke SSH agent worker")
 	}
+	// A worker may close control before replying. Its lock is released only after cleanup.
 	waitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	lock, err := acquireLock(waitCtx, filepath.Join(m.Config.Directory, "worker.lock"))
@@ -302,7 +305,8 @@ func (m Manager) Unlock(ctx context.Context, key string, ttl time.Duration) (Sta
 	if err := worker.Start(); err != nil {
 		return Status{}, errors.New("cannot start SSH agent worker")
 	}
-	go worker.Wait()
+	workerDone := make(chan struct{})
+	go func() { _ = worker.Wait(); close(workerDone) }()
 	success := false
 	defer func() {
 		if !success {
@@ -310,6 +314,11 @@ func (m Manager) Unlock(ctx context.Context, key string, ttl time.Duration) (Sta
 			defer cancel()
 			_ = m.stop(cleanup)
 			_ = worker.Process.Kill()
+			<-workerDone
+			// A forced exit skips daemon defers; clean up only after the worker has exited.
+			for _, name := range []string{"private.sock", "control.sock"} {
+				_ = removeSocket(filepath.Join(m.Config.Directory, name))
+			}
 		}
 	}()
 	readyCtx, cancel := context.WithTimeout(ctx, 5*time.Second)

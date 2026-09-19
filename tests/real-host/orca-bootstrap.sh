@@ -115,6 +115,11 @@ cleanup() {
   if [ -f "${SUBYARD_CONFIG_HOME:-}/yards/default/config.env" ]; then
     yard teardown --yes >/dev/null 2>&1 || { rc=3; cleanup_failed=1; }
   fi
+  if ! incus list --all-projects --format=json | jq -e --arg project "$PROJECT" \
+    'all(.[]; .project != $project and .project != ($project + "-secondary"))' >/dev/null; then
+    stage 'fixture instances remain or their removal could not be verified'
+    rc=3; cleanup_failed=1
+  fi
   if [ "$cleanup_failed" = 0 ] && [ -n "$STATE" ] && [[ "$STATE" = /var/tmp/subyard-orca-bootstrap.* ]] \
     && [ -f "$STATE/.marker" ] \
     && [ "$(<"$STATE/.marker")" = subyard-orca-bootstrap-e2e-v1 ]; then

@@ -54,7 +54,7 @@ EMU_LOG=/tmp/subyard-android-emu.log
 PROFILE_SRC="$SCRIPT_DIR/../config/profiles/android"
 EMU_CONTROL="$EMU_DIR/emulator-control.sh"
 
-device_exists() { incus config device list "$YARD_INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null | grep -qx "$1"; }
+device_exists() { incus config device list "$YARD_INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null | grep -Fx -- "$1" >/dev/null; }
 
 proxy_exact() { # <device> <host-port> <yard-port>
   local dev="$1" host_port="$2" yard_port="$3"

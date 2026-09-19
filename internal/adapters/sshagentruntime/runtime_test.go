@@ -50,6 +50,47 @@ func TestManagerRejectsUnsafeDirectoryAndInvalidTTL(t *testing.T) {
 	}
 }
 
+func TestStopAcceptsControlDisconnect(t *testing.T) {
+	for name, response := range map[string]string{"empty": "", "partial": "{"} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			lock, err := acquireLock(context.Background(), filepath.Join(dir, "worker.lock"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer lock.Close()
+			listener, err := net.Listen("unix", filepath.Join(dir, "control.sock"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			disconnected := make(chan struct{})
+			go func() {
+				defer close(disconnected)
+				conn, err := listener.Accept()
+				if err != nil {
+					return
+				}
+				var request controlRequest
+				_ = json.NewDecoder(conn).Decode(&request)
+				_, _ = conn.Write([]byte(response))
+				_ = conn.Close() // The worker can exit before completing a lock response.
+			}()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- (Manager{Config: Config{Directory: dir}}).stop(ctx) }()
+			<-disconnected
+			if err := lock.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := <-done; err != nil {
+				t.Fatalf("worker shutdown rejected after control disconnect: %v", err)
+			}
+		})
+	}
+}
+
 func TestDaemonPendingGrantCanBeLockedAndCannotRestartGrant(t *testing.T) {
 	root := t.TempDir()
 	os.Chmod(root, 0700)

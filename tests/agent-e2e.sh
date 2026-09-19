@@ -565,6 +565,108 @@ host_network_assert_line="$(grep -nF \
   && [ -n "$host_network_assert_line" ] \
   && [ "$owned_backend_cleanup_line" -lt "$host_network_assert_line" ] \
   || fail "nested teardown checks host networking before removing its marker-owned backend"
+remove_owned_outer_backend_source="$(awk '
+  /^remove_owned_outer_backend\(\)/ { copying=1 }
+  copying { print }
+  copying && /^}$/ { exit }
+' "$nested_teardown_script")"
+network_cleanup_function="$TMP/remove-owned-outer-backend.sh"
+printf '%s\n' "$remove_owned_outer_backend_source" > "$network_cleanup_function"
+network_cleanup_bin="$TMP/nested-network-cleanup-bin"
+mkdir -p "$network_cleanup_bin"
+cat > "$network_cleanup_bin/incus" <<'EOF_NESTED_NETWORK_INCUS'
+#!/usr/bin/env bash
+set -eu
+printf '%s\n' "$*" >> "$NETWORK_CLEANUP_LOG"
+case "$1 $2" in
+  'network show') exit 0 ;;
+  'network get')
+    if [ "$NETWORK_CLEANUP_CASE" = foreign-owner ]; then
+      printf 'foreign-owner\n'
+    else
+      printf 'nested-teardown-e2e-v1\n'
+    fi
+    ;;
+  query\ *)
+    case "$NETWORK_CLEANUP_CASE" in
+      empty|foreign-owner) printf '{"used_by":[]}\n' ;;
+      used) printf '{"used_by":["/1.0/instances/consumer"]}\n' ;;
+      query-failure) exit 17 ;;
+      malformed) printf '{"used_by":{}}\n' ;;
+      *) exit 91 ;;
+    esac
+    ;;
+  'network delete') exit 0 ;;
+  *) exit 91 ;;
+esac
+EOF_NESTED_NETWORK_INCUS
+chmod 0700 "$network_cleanup_bin/incus"
+for network_cleanup_case in empty used foreign-owner query-failure malformed; do
+  network_cleanup_log="$TMP/nested-network-cleanup-$network_cleanup_case.log"
+  : > "$network_cleanup_log"
+  set +e
+  network_cleanup_output="$(
+    PATH="$network_cleanup_bin:$PATH" \
+      NETWORK_CLEANUP_CASE="$network_cleanup_case" \
+      NETWORK_CLEANUP_LOG="$network_cleanup_log" \
+      NETWORK_CLEANUP_FUNCTION="$network_cleanup_function" bash -c '
+        set -eu
+        . "$NETWORK_CLEANUP_FUNCTION"
+        OUTER_POOL=""
+        OUTER_BRIDGE="owned-bridge"
+        if remove_owned_outer_backend; then exit 0; else exit $?; fi
+      ' 2>&1
+  )"
+  network_cleanup_rc=$?
+  set -e
+  grep -Fqx 'query /1.0/networks/owned-bridge?project=default' "$network_cleanup_log" \
+    || fail "nested teardown did not query the bridge API for $network_cleanup_case"
+  case "$network_cleanup_case" in
+    empty)
+      [ "$network_cleanup_rc" = 0 ] \
+        && grep -Fqx 'network delete owned-bridge --project default' "$network_cleanup_log" \
+        || fail "nested teardown did not delete an empty owned network: rc=$network_cleanup_rc output=$network_cleanup_output"
+      ;;
+    *)
+      [ "$network_cleanup_rc" != 0 ] \
+        && ! grep -Fq 'network delete owned-bridge --project default' "$network_cleanup_log" \
+        || fail "nested teardown deleted an unsafe $network_cleanup_case network: rc=$network_cleanup_rc output=$network_cleanup_output"
+      ;;
+  esac
+done
+nested_cleanup_function="$TMP/nested-teardown-cleanup.sh"
+sed -n '/^cleanup()/,/^}$/p' "$nested_teardown_script" > "$nested_cleanup_function"
+for nested_cleanup_case in success teardown-failure backend-failure; do
+  nested_cleanup_state="$(mktemp -d /var/tmp/subyard-nested-teardown.cleanup.XXXXXX)"
+  printf '%s\n' nested-teardown-e2e-v1 > "$nested_cleanup_state/.marker"
+  set +e
+  NESTED_CLEANUP_CASE="$nested_cleanup_case" \
+    NESTED_CLEANUP_FUNCTION="$nested_cleanup_function" \
+    NESTED_CLEANUP_STATE="$nested_cleanup_state" bash -c '
+      set -eu
+      . "$NESTED_CLEANUP_FUNCTION"
+      yard() { [ "$NESTED_CLEANUP_CASE" != teardown-failure ]; }
+      incus() { [ "$1 $2" = "project show" ]; }
+      remove_owned_outer_backend() { [ "$NESTED_CLEANUP_CASE" != backend-failure ]; }
+      sudo() { shift; "$@"; }
+      STATE="$NESTED_CLEANUP_STATE"
+      OUTER_PROJECT=owned-project
+      cleanup
+    ' >/dev/null 2>&1
+  nested_cleanup_rc=$?
+  set -e
+  case "$nested_cleanup_case" in
+    success)
+      [ "$nested_cleanup_rc" = 0 ] && [ ! -e "$nested_cleanup_state" ] \
+        || fail "nested teardown cleanup did not remove successful fixture state: rc=$nested_cleanup_rc"
+      ;;
+    *)
+      [ "$nested_cleanup_rc" = 3 ] && [ -f "$nested_cleanup_state/.marker" ] \
+        || fail "nested teardown cleanup did not retain failed $nested_cleanup_case state: rc=$nested_cleanup_rc"
+      find "$nested_cleanup_state" -depth -delete
+      ;;
+  esac
+done
 memory_reserve_source="$(awk '
   /^(nested_decimal_at_most|nested_monotonic_seconds|nested_memory_available_bytes|require_nested_memory_reserve)\(\)/ {
     copying=1

@@ -242,8 +242,8 @@ remove_owned_outer_backend() {
     && incus network show "$OUTER_BRIDGE" --project default >/dev/null 2>&1; then
     owner="$(incus network get "$OUTER_BRIDGE" user.subyard.owner \
       --project default 2>/dev/null)"
-    used_by="$(incus network show "$OUTER_BRIDGE" --project default \
-      --format json | jq -r '.used_by | length')"
+    used_by="$(incus query "/1.0/networks/$OUTER_BRIDGE?project=default" \
+      | jq -er '.used_by | arrays | length')"
     if [ "$owner" != nested-teardown-e2e-v1 ]; then
       printf 'nested-teardown-boundary: refusing non-owned network %s\n' \
         "$OUTER_BRIDGE" >&2
@@ -260,14 +260,14 @@ remove_owned_outer_backend() {
 }
 
 cleanup() {
-  local rc=$?
+  local rc=$? cleanup_failed=0
   trap - EXIT INT TERM
   set +e
   if [ -n "$OUTER_PROJECT" ] && incus project show "$OUTER_PROJECT" >/dev/null 2>&1; then
-    yard teardown --yes >/dev/null 2>&1 || rc=3
+    yard teardown --yes >/dev/null 2>&1 || { rc=3; cleanup_failed=1; }
   fi
-  remove_owned_outer_backend || rc=3
-  if [ -n "$STATE" ] && [[ "$STATE" = /var/tmp/subyard-nested-teardown.* ]] \
+  remove_owned_outer_backend || { rc=3; cleanup_failed=1; }
+  if [ "$cleanup_failed" = 0 ] && [ -n "$STATE" ] && [[ "$STATE" = /var/tmp/subyard-nested-teardown.* ]] \
     && [ -f "$STATE/.marker" ] && [ "$(<"$STATE/.marker")" = nested-teardown-e2e-v1 ]; then
     sudo -n find "$STATE" -depth -delete || rc=3
   fi

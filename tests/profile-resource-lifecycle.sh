@@ -31,6 +31,8 @@ case "${1:-}" in
       'device list')
         if [ -e "$state_root/up" ]; then
           printf 'adb-emu\n'
+          # Device lists can arrive in chunks; consumers must not close the pipe early.
+          sleep 0.02
           [ -e "$state_root/missing-orca-route" ] || printf 'orca-server\n'
         fi
         ;;
@@ -308,6 +310,10 @@ if grep -Fq 'pgrep -u dev -f --' "$RESOURCE_TEST_LOG"; then
 fi
 
 # Representative reverse lifecycle paths execute through the generic dispatcher and fake Incus.
+SUBYARD_RESOURCE_MODE=prepare "$ROOT/config/profiles/android/resources/emulator/handler.sh" \
+  down >"$TMP/emu-down-plan.json"
+grep -Fq 'remove the host-loopback emulator proxy devices' "$TMP/emu-down-plan.json" \
+  || fail 'emulator prepare lost a device from the streamed device list'
 if ! "$ROOT/bin/yard" emu down --yes >"$TMP/emu-down.out" 2>&1; then
   cat "$TMP/emu-down.out" >&2
   tail -n 20 "$RESOURCE_TEST_LOG" >&2

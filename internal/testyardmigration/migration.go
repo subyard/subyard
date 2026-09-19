@@ -1414,6 +1414,13 @@ func preflightLegacyLease(
 			result = ensureNoActiveLease(status)
 		}
 	}
+	// A running legacy owner also needs the host lock for the subsequent teardown.
+	// Prepare it only during commit, after proving that no active lease remains.
+	if startStopped && restoreStopped == nil && result == nil {
+		if err := run(ctx, options, LegacyYard, nil, "_migrate", "reconcile-power-reconciler"); err != nil {
+			result = fmt.Errorf("prepare host power before legacy teardown: %w", err)
+		}
+	}
 	if restoreStopped != nil {
 		if err := restoreStopped(); err != nil {
 			result = errors.Join(
@@ -1467,6 +1474,11 @@ func temporarilyStartStoppedLegacyYard(
 	}
 	if !startStopped {
 		return nil, false, nil
+	}
+	// Historical installs may not have the host lock required by guarded starts.
+	// Install the root-owned power helper before starting the legacy lease owner.
+	if err := run(ctx, options, LegacyYard, nil, "_migrate", "reconcile-power-reconciler"); err != nil {
+		return nil, false, fmt.Errorf("prepare host power before temporary legacy start: %w", err)
 	}
 	if err := run(ctx, options, LegacyYard, nil, "start", "--yes"); err != nil {
 		return nil, false, fmt.Errorf("temporarily start legacy test yard: %w", err)

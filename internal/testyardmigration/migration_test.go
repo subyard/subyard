@@ -436,6 +436,21 @@ func TestPrepareLeavesDesiredRunningLegacyYardStoppedUntilCommitPreflight(t *tes
 			t.Fatalf("read-only preparation invoked %q:\n%s", unexpected, log)
 		}
 	}
+	if _, err := os.Stat(filepath.Join(root, "calls")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read-only preparation invoked a yard command: %v", err)
+	}
+	failing := options
+	failing.Environment = append(append([]string(nil), options.Environment...), "MIGRATION_FAIL=e2e-yard:_migrate")
+	if err := preflightLegacyLease(context.Background(), failing, true); err == nil ||
+		!strings.Contains(err.Error(), "prepare host power") {
+		t.Fatalf("host power preparation failure = %v", err)
+	}
+	if calls := read(t, filepath.Join(root, "calls")); strings.Contains(calls, " start --yes\n") {
+		t.Fatalf("failed host power preparation started the legacy yard:\n%s", calls)
+	}
+	if got := strings.TrimSpace(read(t, os.Getenv("MIGRATION_INSTANCE_STATE"))); got != "STOPPED" {
+		t.Fatalf("failed host power preparation changed stopped state: %q", got)
+	}
 	if err := preflightLegacyLease(context.Background(), options, true); err != nil {
 		t.Fatalf("commit lease preflight: %v", err)
 	}
@@ -444,9 +459,9 @@ func TestPrepareLeavesDesiredRunningLegacyYardStoppedUntilCommitPreflight(t *tes
 	}
 	if calls := read(t, filepath.Join(root, "calls")); !strings.Contains(
 		calls,
-		"-Y e2e-yard start --yes\n",
+		"-Y e2e-yard _migrate reconcile-power-reconciler\n-Y e2e-yard start --yes\n",
 	) {
-		t.Fatalf("commit lease preflight bypassed guarded yard start:\n%s", calls)
+		t.Fatalf("commit lease preflight did not prepare host power before guarded start:\n%s", calls)
 	}
 	log = read(t, filepath.Join(root, "incus-calls"))
 	if !strings.Contains(log, "stop yard-e2e-yard --project subyard-e2e-yard\n") {
@@ -454,6 +469,48 @@ func TestPrepareLeavesDesiredRunningLegacyYardStoppedUntilCommitPreflight(t *tes
 	}
 	if strings.Contains(log, "start yard-e2e-yard --project subyard-e2e-yard\n") {
 		t.Fatalf("commit lease preflight bypassed guarded yard start:\n%s", log)
+	}
+}
+
+func TestRunningLegacyPreflightPreparesPowerOnlyAfterAuthorizedIdleCheck(t *testing.T) {
+	for _, test := range []struct {
+		name, failure         string
+		commit, active, power bool
+	}{
+		{name: "read only"},
+		{name: "active lease", commit: true, active: true, failure: "active lease"},
+		{name: "power failure", commit: true, power: true, failure: "prepare host power"},
+		{name: "idle commit", commit: true, power: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			options := ownerOptions(t, root, filepath.Join(root, "config"))
+			if test.active {
+				options.Environment = append(options.Environment, "MIGRATION_TTL=60")
+			}
+			if test.failure == "prepare host power" {
+				options.Environment = append(options.Environment, "MIGRATION_FAIL=e2e-yard:_migrate")
+			}
+			err := preflightLegacyLease(context.Background(), options, test.commit)
+			if (err != nil) != (test.failure != "") ||
+				(err != nil && !strings.Contains(err.Error(), test.failure)) {
+				t.Fatalf("preflight error = %v, want %q", err, test.failure)
+			}
+			want := "-Y e2e-yard check\n-Y e2e-yard test-vms status\n"
+			if test.power {
+				want += "-Y e2e-yard _migrate reconcile-power-reconciler\n"
+			}
+			if calls := read(t, filepath.Join(root, "calls")); calls != want {
+				t.Fatalf("yard calls = %q, want %q", calls, want)
+			}
+			if got := strings.TrimSpace(read(t, os.Getenv("MIGRATION_INSTANCE_STATE"))); got != "RUNNING" {
+				t.Fatalf("preflight changed running state: %q", got)
+			}
+			calls := read(t, filepath.Join(root, "incus-calls"))
+			if strings.Contains(calls, "start yard-") || strings.Contains(calls, "stop yard-") {
+				t.Fatalf("running preflight changed lifecycle:\n%s", calls)
+			}
+		})
 	}
 }
 
