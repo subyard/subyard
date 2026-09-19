@@ -18,6 +18,7 @@ import (
 // RuntimeConfig contains transport configuration only. The App key stays on the owner host.
 type RuntimeConfig struct {
 	AppConfig      string `json:"app_config"`
+	KeyFile        string `json:"key_file"`
 	SSHPort        int    `json:"ssh_port"`
 	Developer      string `json:"developer"`
 	IdentityFile   string `json:"identity_file"`
@@ -152,7 +153,11 @@ func serveSSH(ctx context.Context, cfg RuntimeConfig) error {
 		}
 	}()
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cfg, err := LoadConfig(cfg.AppConfig)
+		cfg, err := LoadConfig(cfg.AppConfig, cfg.KeyFile)
+		var issuer *Issuer
+		if err == nil {
+			issuer, err = NewIssuer(cfg)
+		}
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("Cache-Control", "no-store")
@@ -161,11 +166,6 @@ func serveSSH(ctx context.Context, cfg RuntimeConfig) error {
 				return
 			}
 			http.Error(w, "GitHub App is not configured on the owner host", http.StatusServiceUnavailable)
-			return
-		}
-		issuer, err := NewIssuer(cfg)
-		if err != nil {
-			http.Error(w, "GitHub App configuration is unavailable", http.StatusServiceUnavailable)
 			return
 		}
 		NewHandler(issuer).ServeHTTP(w, r)

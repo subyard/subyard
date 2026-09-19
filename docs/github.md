@@ -28,16 +28,43 @@ schema is:
 ```json
 {
   "app_id": "123456",
-  "installation_id": 12345678,
-  "private_key_file": "/secure/path/github-app.pem"
+  "installation_id": 12345678
 }
 ```
 
-`app_id` contains digits, `installation_id` is a positive integer, and `private_key_file` is an
-absolute path. The JSON and private key must be regular, non-symlink files owned by the operator
-with mode `0600` or `0400`. Keep both outside synced configuration, host mounts, yard filesystems,
-and backups that enter a yard. The App key never enters L1, and commands, status, service logs,
-and diagnostics do not print credentials. A wrapped command still controls its own output; do not use it to print or persist its environment.
+`app_id` contains digits and `installation_id` is a positive integer. Keep the JSON as an
+operator-owned, non-symlink mode-`0600`/`0400` file. Import the downloaded PEM on the owner host
+through [yard keys](keys.md):
+
+```sh
+chmod 0600 /secure/path/github-app.pem
+yard keys import /secure/path/github-app.pem --label github-app --consumer github-app-key
+yard keys materialize global
+```
+
+`yard init` initializes the encrypted ledger. The `github-app-key` consumer uses the `global` zone
+and writes `$SUBYARD_KEYS_CONSUMER_ROOT/github/github-app.pem` (normally
+`~/.config/subyard/generated/github/github-app.pem`) with mode `0600`. The broker reads this path
+automatically, including a custom consumer root. An explicit absolute `private_key_file` in the
+App JSON remains supported as an override. Import keeps the original download; remove that duplicate
+separately after verifying the consumer.
+
+The key uses the existing encrypted ledger synchronization: enroll an owner peer with
+`yard keys trust @peer`, then run `yard keys sync @peer --now`. The peer materializes the key through
+the same consumer; configure its App ID and installation ID locally. Default and Hermes yards on
+one owner share the materialized key. Use `--local-only` on import to keep a key out of peer sync.
+Plaintext keys, the App JSON and the ledger identity stay outside guest delivery, config sync,
+host mounts and backups that enter a yard. The App key never enters L1; broker commands, status,
+service logs and diagnostics do not print it. A wrapped command still controls its own output.
+
+Use `yard keys list` to find the credential ID. After `yard keys rotate <id> --file <new.pem>`, run
+`yard keys materialize global` locally and `yard keys sync @peer --now` for peers. The broker reloads
+the key on each request. `yard keys revoke <id>` removes the local consumer; synchronize to propagate
+revocation. Missing or invalid key material makes status unconfigured and rejects new token requests.
+Revoking a ledger entry does not revoke the key in GitHub or tokens already issued; remove the old
+App key in GitHub when retiring it. Removing peer trust cannot erase copies already received.
+Concurrent ledger conflicts retain the last verified consumer until resolved, as described in
+[merge and recovery rules](keys.md#merge-and-recovery-rules).
 
 `yard init` reconciles the selected profile. It installs the client and ordinary `gh`, provides an ephemeral Git HTTPS helper, and enables the owner-side
 `subyard-github-<YARD>.service`. The service uses a pinned yard identity over its protected reverse

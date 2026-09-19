@@ -89,8 +89,8 @@ func TestLoadConfigAndKeyRejectUnsafeFiles(t *testing.T) {
 	if err := os.WriteFile(configPath, configData, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := LoadConfig(configPath)
-	if err != nil || cfg.AppID != "42" || cfg.InstallationID != 987 {
+	cfg, err := LoadConfig(configPath, "/unused/default.pem")
+	if err != nil || cfg.PrivateKeyFile != keyPath || cfg.AppID != "42" || cfg.InstallationID != 987 {
 		t.Fatalf("config = %#v err=%v", cfg, err)
 	}
 	if _, err := NewIssuer(cfg); err != nil {
@@ -101,6 +101,26 @@ func TestLoadConfigAndKeyRejectUnsafeFiles(t *testing.T) {
 	}
 	if _, err := NewIssuer(cfg); err == nil {
 		t.Fatal("world-readable key was accepted")
+	}
+}
+
+func TestLoadConfigDefaultsToYardKeysConsumer(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "github-app.json")
+	if err := os.WriteFile(configPath, []byte(`{"app_id":"42","installation_id":987}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(configPath, "")
+	if err != nil || cfg.PrivateKeyFile != filepath.Join(root, "generated", "github", "github-app.pem") {
+		t.Fatalf("unexpected ledger consumer path: %q, %v", cfg.PrivateKeyFile, err)
+	}
+	if _, err := NewIssuer(cfg); err == nil {
+		t.Fatal("missing materialized key was accepted")
+	}
+	custom := filepath.Join(root, "custom-consumers", "github", "github-app.pem")
+	cfg, err = LoadConfig(configPath, custom)
+	if err != nil || cfg.PrivateKeyFile != custom {
+		t.Fatalf("custom ledger consumer root ignored: %q, %v", cfg.PrivateKeyFile, err)
 	}
 }
 

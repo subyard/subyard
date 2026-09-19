@@ -480,6 +480,7 @@ fi
 export SUBYARD_OPERATOR_HOME="$HOME"
 export SUBYARD_CONFIG_HOME="$STATE/config"
 export SUBYARD_HOME="$STATE/data"
+export SUBYARD_KEYS_CONSUMER_ROOT="$STATE/key-consumers"
 export STORAGE_PATH
 STORAGE_PATH="$(incus storage get default source 2>/dev/null || true)"
 [ -n "$STORAGE_PATH" ] || STORAGE_PATH="$HOME/.cache/subyard-github-e2e-platform/storage"
@@ -571,15 +572,28 @@ else
   wait_status '{"configured":false}'
   ok 'yard stop/start reconnected owner broker'
 
-  info 'checking configured status with a synthetic protected App key'
+  info 'checking broker with a synthetic App key imported through yard keys'
   APP_KEY="$STATE/synthetic-app-key.pem"
   APP_CONFIG="$SUBYARD_CONFIG_HOME/github-app.json"
   openssl genrsa -out "$APP_KEY" 2048 >/dev/null 2>&1
   chmod 0600 "$APP_KEY"
-  printf '{"app_id":"123456","installation_id":42,"private_key_file":"%s"}\n' "$APP_KEY" > "$APP_CONFIG"
+  printf '{"app_id":"123456","installation_id":42}\n' > "$APP_CONFIG"
+  yard keys import "$APP_KEY" --label github-broker-e2e --consumer github-app-key --yes
+  yard keys materialize global --yes
+  MATERIALIZED_KEY="$SUBYARD_KEYS_CONSUMER_ROOT/github/github-app.pem"
+  cmp -s "$APP_KEY" "$MATERIALIZED_KEY" || die 'ledger did not materialize the App key'
+  [ "$(stat -c %a "$MATERIALIZED_KEY")" = 600 ] || die 'materialized App key is not protected'
   chmod 0600 "$APP_CONFIG"
   wait_status '{"configured":true}'
-  ok 'configured status loaded protected owner settings without a GitHub request'
+  credential="$(yard keys list | awk -F '\t' '$8=="github-broker-e2e" {print $1}')"
+  [ -n "$credential" ] || die 'GitHub key record is missing'
+  openssl genrsa -out "$APP_KEY" 2048 >/dev/null 2>&1
+  yard keys rotate "$credential" --file "$APP_KEY" --yes
+  yard keys materialize global --yes
+  cmp -s "$APP_KEY" "$MATERIALIZED_KEY" || die 'App key rotation did not materialize'
+  wait_status '{"configured":true}'
+  guest test ! -e "$MATERIALIZED_KEY" || die 'owner App key entered the yard'
+  ok 'broker loaded and rotated the yard keys consumer without a GitHub request'
   if [ "$MODE" = --prepare-reboot ]; then
     save_checkpoint
     trap - EXIT INT TERM
@@ -670,4 +684,13 @@ hermes_yard init --yes
 [ "$(hermes_dev sha256sum "$opaque" | awk '{print $1}')" = "$opaque_before" ] \
   || die 'Hermes init changed operator-managed opaque state'
 ok 'named Hermes init/provision selects GitHub, preserves opaque state and keeps DEV_SUDO=0'
+credential="$(yard keys list | awk -F '\t' '$8=="github-broker-e2e" {print $1}')"
+[ -n "$credential" ] || die 'GitHub key record is missing after reboot'
+yard keys revoke "$credential" --yes
+[ ! -e "$SUBYARD_KEYS_CONSUMER_ROOT/github/github-app.pem" ] || die 'revoked App key remained materialized'
+[ "$(hermes_status || true)" = '{"configured":false}' ] || die 'Hermes broker kept using a revoked App key'
+if hermes_dev /usr/local/bin/subyard-github run -- true >/dev/null 2>&1; then
+  die 'broker authorized a command after key revocation'
+fi
+ok 'key revocation stopped new broker authorization without restarting its service'
 printf 'ok: GitHub broker lifecycle and profile cleanup passed\n'

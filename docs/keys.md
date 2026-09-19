@@ -50,8 +50,10 @@ there is no separate credential-ledger initialization step.
 Import accepts only a regular, non-symlink mode-`0600`/`0400` file. Preview reads metadata only. A real
 import keeps the legacy source; verify the materialized consumer and its service before separately
 removing that duplicate. Secret input otherwise comes from a silent TTY, stdin, or `--file`, never an
-argument or environment variable. Supported static consumers are `staging-env`, `qa-secrets`, and
-`qa-pool`. Broad `.codex`, `.claude`, OAuth, and mutable staging-runner credential paths are rejected.
+argument or environment variable. Supported static consumers are `staging-env`, `qa-secrets`, `qa-pool`, and
+`github-app-key`. The latter requires zone `global` and materializes the PEM at
+`$SUBYARD_KEYS_CONSUMER_ROOT/github/github-app.pem` for the owner-side
+[GitHub broker](github.md); it never delivers the key into a yard. Broad `.codex`, `.claude`, OAuth, and mutable staging-runner credential paths are rejected.
 
 ## Merge and recovery rules
 

@@ -55,7 +55,7 @@ type Issuer struct {
 	now    func() time.Time
 }
 
-func LoadConfig(path string) (Config, error) {
+func LoadConfig(path, defaultKeyFile string) (Config, error) {
 	if !filepath.IsAbs(path) || strings.ContainsAny(path, "\r\n") {
 		return Config{}, errors.New("github broker config path must be absolute")
 	}
@@ -72,6 +72,12 @@ func LoadConfig(path string) (Config, error) {
 	var extra any
 	if decoder.Decode(&extra) != io.EOF {
 		return Config{}, errors.New("invalid github broker config")
+	}
+	if cfg.PrivateKeyFile == "" {
+		cfg.PrivateKeyFile = defaultKeyFile
+		if cfg.PrivateKeyFile == "" {
+			cfg.PrivateKeyFile = filepath.Join(filepath.Dir(path), "generated", "github", "github-app.pem")
+		}
 	}
 	return cfg, validateConfig(cfg)
 }
