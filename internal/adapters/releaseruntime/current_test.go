@@ -115,6 +115,68 @@ func TestCurrentTransitionCatchesUpInstalledReleaseWithoutSelection(t *testing.T
 	}
 }
 
+func TestStaleCompletedRepairKeepsPlanStaleCurrentRetry(t *testing.T) {
+	fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalComplete)
+	marker := filepath.Join(filepath.Dir(fixture.runtimeRoot), "plan-stale")
+	initialPlan := "plan-v1-" + strings.Repeat("1", 64)
+	recheckedPlan := "plan-v1-" + strings.Repeat("2", 64)
+	driftInspection := func(plan string) string {
+		return fmt.Sprintf(
+			`{"schemaVersion":1,"activationReconciliationOwned":true,"inspection":{"plan":%q,"assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the exact typed migration and release activation plan"]},"outcome":{"status":"recovering","reachedGoal":false,"active":%q,"previous":"release-a","target":%q,"code":"recovery-pending","message":"the inspected release transition has not started","retry":"run yard update","transaction":%q}}}`,
+			plan, fixture.target, fixture.target, fixture.transaction,
+		)
+	}
+	stale := fmt.Sprintf(
+		`{"schemaVersion":1,"activationReconciliationOwned":true,"outcome":{"status":"operator-action-required","reachedGoal":false,"active":%q,"previous":"release-a","target":%q,"code":"plan-stale","message":"the inspected release transition changed before convergence","retry":"run yard update --check"}}`,
+		fixture.target, fixture.target,
+	)
+	engine := fmt.Sprintf(`#!/bin/sh
+case "${1:-}" in
+  --version) printf 'yard-engine 1.2.3\n' ;;
+  _release-transition)
+    request=$(cat)
+    case "$request" in
+      *'"mode":"inspect"'*)
+        if [ -e %q ]; then printf '%%s\n' %q; else printf '%%s\n' %q; fi
+        ;;
+      *'"mode":"converge"'*)
+        : > %q
+        printf '%%s\n' %q
+        ;;
+      *) exit 64 ;;
+    esac
+    ;;
+  *) exit 64 ;;
+esac
+`, marker, driftInspection(recheckedPlan), driftInspection(initialPlan), marker, stale)
+	writeProtectedRuntimeFixtureEngine(t, fixture, engine)
+	environment := fixture.environment()
+	environment["YARD_RUNTIME_ROOT"] = fixture.runtimeRoot
+	runtime := New(Config{
+		Environment: environment, Installer: fixture.installer,
+		Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
+	})
+	defer runtime.Close()
+
+	prepared, err := runtime.PrepareTransition(
+		context.Background(), []string{"--runtime-root", fixture.runtimeRoot},
+		fixture.configHome, "default", nil,
+	)
+	if err != nil {
+		cause := err
+		for errors.Unwrap(cause) != nil {
+			cause = errors.Unwrap(cause)
+		}
+		t.Fatalf("prepare completed activation repair: %v (cause: %v)", err, cause)
+	}
+	err = prepared.Execute(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "code=plan-stale") ||
+		!strings.Contains(err.Error(), "next: run yard migrate --check") ||
+		strings.Contains(err.Error(), "code=recovery-pending") {
+		t.Fatalf("stale completed activation repair error = %v", err)
+	}
+}
+
 func TestCurrentTransitionRejectsVersionSelectionAndCurrentDrift(t *testing.T) {
 	for _, arguments := range [][]string{{"--json"}, {"--version", "0.11.2"}, {"--offline"}, {"--rollback"}, {"--force"}, {"--runtime-root", "/tmp/runtime"}} {
 		runtime := New(Config{})

@@ -2189,7 +2189,7 @@ func TestCandidateTransitionReinspectsPlanStaleOutcomeBeforeReturning(t *testing
 		wantError    string
 	}{
 		{name: "externally reached fixed point", reinspection: ready},
-		{name: "state is still pending", reinspection: pending, wantError: "code=transition-required"},
+		{name: "state is still pending", reinspection: pending, wantError: "code=plan-stale"},
 		{name: "false ready active release", reinspection: wrongReady, wantError: "inconsistent release reinspection"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

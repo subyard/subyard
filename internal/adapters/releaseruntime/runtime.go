@@ -1140,7 +1140,9 @@ func (runtime *Runtime) prepareInspectedCandidateTransition(
 					if rechecked.Inspection.Outcome.Status == releasetransition.StatusReady {
 						return nil
 					}
-					return transitionOutcomeError(*rechecked.Inspection.Outcome)
+					outcome := *converged.Outcome
+					outcome.Retry = CurrentReleaseRetry(outcome)
+					return transitionOutcomeError(outcome)
 				}
 				return transitionOutcomeError(*converged.Outcome)
 			}

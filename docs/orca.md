@@ -226,8 +226,19 @@ first registration, existing project checkouts in a mixed user group move into a
 project group; unrelated entries and the user group's properties are preserved. Group
 names may coincide or be renamed without merging project identities.
 
-If a directory disappears, or a nested checkout loses its Git metadata, old Orca records
-and sessions remain with a diagnostic warning. Sync does not restore files or Git history.
+After a complete successful scan, sync removes missing checkouts from their Subyard-managed
+Orca groups. This includes existing registrations from earlier Subyard versions. Ownership
+requires both membership in the recorded project group and a path inside that project;
+unrelated groups, remote records and manually added nested folders are left alone.
+Records with open or saved session tabs are retained with a warning. Orca's removal API
+discards the removed record's worktree metadata; it does not delete files on disk.
+Empty groups of removed Subyard projects are also removed, unless they contain child groups
+or native Orca folder workspaces. These rules apply to project hooks as well as explicit sync.
+
+Cleanup is skipped on scan or registration errors, including unavailable workspaces and
+scan limits. A registered project whose root is missing also inhibits cleanup: its mount may
+be temporarily unavailable. Missing paths are checked again before removal. Existing directories
+that lose Git metadata retain their old records with a warning. Sync does not restore files or Git history.
 Manually deleted Orca entries and groups for existing directories are registered again.
 If the root gains or loses Git, its kind changes on the existing entry, preserving its ID
 and session data.

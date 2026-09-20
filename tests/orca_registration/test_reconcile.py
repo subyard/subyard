@@ -6,6 +6,7 @@ import shutil
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 from support import Catalog, init_git, project
 
@@ -110,6 +111,118 @@ class ReconcileTests(unittest.TestCase):
         self.assertTrue(report["warnings"])
         self.assertEqual(before, self.rpc.repos)
         self.assertFalse(self.root.exists())
+
+    def test_missing_nested_checkout_pruned_but_existing_former_git_retained(self):
+        init_git(self.root / "gone")
+        init_git(self.root / "former")
+        self.assertTrue(self.run_sync()["ready"])
+        shutil.rmtree(self.root / "gone")
+        shutil.rmtree(self.root / "former/.git")
+        before = copy.deepcopy(self.rpc.repos)
+        self.assertTrue(self.run_sync(apply=False)["ready"])
+        self.assertEqual(before, self.rpc.repos)
+        report = self.run_sync()
+        self.assertTrue(report["ready"], report)
+        self.assertEqual([str(self.root), str(self.root / "former")], [r["path"] for r in self.rpc.repos])
+        self.assertTrue((self.root / "former").is_dir())
+        self.assertTrue(self.run_sync()["ready"])
+
+    def test_removed_project_prunes_owned_records_and_empty_group(self):
+        init_git(self.root / "nested")
+        self.assertTrue(self.run_sync()["ready"])
+        shutil.rmtree(self.root.parent)
+        report = self.run_sync()
+        self.assertTrue(report["ready"], report)
+        self.assertEqual([], self.rpc.repos)
+        self.assertEqual([], self.rpc.groups)
+        self.assertEqual({}, self.sidecar()["projects"])
+
+    def test_cleanup_preserves_session_tabs_manual_and_remote_records(self):
+        init_git(self.root / "gone")
+        self.assertTrue(self.run_sync()["ready"])
+        repo = self.rpc.repos[1]
+        # A disconnected tab on another worktree still belongs to this repo.
+        self.rpc.snapshots = [{"worktree": repo["id"] + "::/old/worktree", "tabs": [{"id": "saved"}]}]
+        for changes in ({"id": "manual", "projectGroupId": "manual", "path": str(self.root / "manual")},
+                        {"id": "outside", "path": str(self.root) + "-outside"},
+                        {"id": "remote", "executionHostId": "remote"},
+                        {"id": "manual-folder", "path": str(self.root / "manual-folder"), "kind": "folder"}):
+            self.rpc.repos.append(dict(repo, **changes))
+        shutil.rmtree(self.root / "gone")
+        before = copy.deepcopy(self.rpc.repos)
+        report = self.run_sync()
+        self.assertTrue(report["ready"], report)
+        self.assertEqual(before, self.rpc.repos)
+        self.assertTrue(any("session tabs" in warning for warning in report["warnings"]))
+        self.rpc.snapshots.clear()
+        self.assertTrue(self.run_sync()["ready"])
+        self.assertEqual(before[:1] + before[2:], self.rpc.repos)
+
+    def test_cleanup_skips_incomplete_scan_and_unavailable_or_changed_workspace(self):
+        init_git(self.root / "gone")
+        self.assertTrue(self.run_sync()["ready"])
+        shutil.rmtree(self.root / "gone")
+        before = copy.deepcopy(self.rpc.repos)
+        scan = self.discover(self.workspaces)
+        scan.errors.append("scan incomplete")
+        self.assertFalse(self.reconcile(scan, self.rpc, self.state)["ready"])
+        self.assertEqual(before, self.rpc.repos)
+        scan = self.discover(self.workspaces)
+        self.workspaces.rename(Path(self.tmp.name) / "old")
+        self.assertFalse(self.run_sync()["ready"])
+        self.assertEqual(before, self.rpc.repos)
+        self.workspaces.mkdir()
+        self.reconcile(scan, self.rpc, self.state)
+        self.assertEqual(before, self.rpc.repos)
+
+    def test_cleanup_rechecks_reappearing_directory_and_rejects_invalid_session_catalog(self):
+        init_git(self.root / "gone")
+        self.assertTrue(self.run_sync()["ready"])
+        shutil.rmtree(self.root / "gone")
+        self.rpc.snapshots = [{"worktree": "invalid"}]
+        self.assertFalse(self.run_sync()["ready"])
+        self.assertEqual(2, len(self.rpc.repos))
+        self.rpc.snapshots = []
+        def reappear(method, params):
+            if method == "session.tabs.listAll":
+                (self.root / "gone").mkdir()
+        self.rpc.after = reappear
+        self.assertFalse(self.run_sync()["ready"])
+        self.assertEqual(2, len(self.rpc.repos))
+
+    def test_cleanup_unknown_remove_reply_is_verified_and_failed_removal_retried(self):
+        init_git(self.root / "gone")
+        self.assertTrue(self.run_sync()["ready"])
+        shutil.rmtree(self.root / "gone")
+        original = self.rpc.call
+        def rejected(method, params=None, **kwargs):
+            if method == "repo.rm":
+                raise self.error("rejected")
+            return original(method, params, **kwargs)
+        with mock.patch.object(self.rpc, "call", side_effect=rejected):
+            self.assertFalse(self.run_sync()["ready"])
+        self.assertEqual(2, len(self.rpc.repos))
+        def lost(method, params):
+            if method == "repo.rm":
+                raise self.error("lost reply", unknown=True)
+        self.rpc.after = lost
+        self.assertTrue(self.run_sync()["ready"])
+        self.assertEqual(1, len(self.rpc.repos))
+
+    def test_removed_project_group_preserves_manual_children_and_native_folders(self):
+        self.assertTrue(self.run_sync()["ready"])
+        group_id = self.rpc.groups[0]["id"]
+        shutil.rmtree(self.root.parent)
+        self.rpc.groups.append({"id": "child", "parentGroupId": group_id})
+        self.assertTrue(self.run_sync()["ready"])
+        self.assertEqual(2, len(self.rpc.groups))
+        self.rpc.groups.pop()
+        self.rpc.folders.append({"id": "folder", "projectGroupId": group_id})
+        self.assertTrue(self.run_sync()["ready"])
+        self.assertEqual(1, len(self.rpc.groups))
+        self.rpc.folders.clear()
+        self.assertTrue(self.run_sync()["ready"])
+        self.assertEqual([], self.rpc.groups)
 
     def test_one_rejected_repo_does_not_skip_other_repos_or_projects(self):
         init_git(self.root / "broken")

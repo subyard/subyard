@@ -924,6 +924,7 @@ resume() {
 
 finish() {
   local transaction_before target_before previous_before report releases_before host_hash guest_hash
+  local ready=0 attempt
 	local transition_root="$OPERATOR_HOME/.config/subyard/release-transition/v2"
   local ledger_before="$SHARED_ROOT/post-reboot-ledger.before"
   local journal_before="$SHARED_ROOT/post-reboot-journal.before"
@@ -949,6 +950,28 @@ finish() {
   operator_yard check
   operator_yard -Y "$YARD_NAME" status >/dev/null
   operator_yard -Y "$YARD_NAME" check
+  # Starting the yard does not wait for every broker service. Establish the
+  # release fixed point before injecting drift into its materialized config.
+  for attempt in $(seq 1 60); do
+    report="$(operator_yard migrate --check --json)"
+    if jq -e '.schemaVersion == 1 and .current == .outcome.target and
+        .outcome.status == "ready" and .outcome.reachedGoal == true' \
+        <<<"$report" >/dev/null; then
+      ready=1
+      break
+    fi
+    if ! jq -e '.schemaVersion == 1 and .current == .outcome.target and
+        .outcome.status == "migration-required" and .outcome.code == "transition-required"' \
+        <<<"$report" >/dev/null; then
+      printf '%s\n' "$report" >&2
+      die 'unexpected current-release readiness failure after yard start'
+    fi
+    sleep 1
+  done
+  if [ "$ready" != 1 ]; then
+    printf '%s\n' "$report" >&2
+    die 'current release did not reach readiness after yard start'
+  fi
   # Seed harmless materialized drift in the fixture yard, then repair the exact
   # installed release without replaying its completed migrations.
   incus exec "$INSTANCE" --project "$PROJECT" --user 1001 --group 1001 -- \
