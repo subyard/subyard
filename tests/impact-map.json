@@ -832,7 +832,7 @@
     {
       "id": "development-tools",
       "priority": 400,
-      "pattern": "^dev/.*$",
+      "pattern": "^(dev/.*|sync-repos\\.sh)$",
       "check_sets": ["host-free-core"],
       "risk_domains": []
     },
