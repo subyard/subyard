@@ -420,6 +420,10 @@ func (transition *V2Transition) preflightConverge(
 		)
 		return "", &outcome, nil
 	}
+	if outcome := transition.completedResumeOutcome(observation, execution.Plan); outcome != nil &&
+		outcome.Status != StatusReady {
+		return "", outcome, nil
+	}
 	if observation.journal != nil && observation.journal.Checkpoint == JournalComplete &&
 		observation.journal.Goal == observation.goal &&
 		(!transition.completedJournalMatches(observation) || transition.fixedPoint(observation)) {
@@ -440,7 +444,11 @@ func (transition *V2Transition) preflightConverge(
 		return "", nil, err
 	}
 	if plan != execution.Plan {
-		outcome := v2OperatorOutcome(observation.links, goal.Target, nil,
+		var transaction *TransactionID
+		if current != nil && execution.Plan == current.ResumePlan {
+			transaction = transactionIDPointer(current.Transaction)
+		}
+		outcome := v2OperatorOutcome(observation.links, goal.Target, transaction,
 			CodePlanStale, "the inspected release transition changed before convergence",
 			"run yard update --check")
 		return "", &outcome, nil
@@ -467,8 +475,9 @@ func (transition *V2Transition) resolveConvergeGoal(
 	current *JournalRecord,
 ) (Goal, bool) {
 	goal, found := transition.cachedGoal(execution.Plan)
-	if current != nil && current.Checkpoint != JournalComplete &&
-		execution.Plan == current.ResumePlan {
+	if current != nil && execution.Plan == current.ResumePlan &&
+		current.Goal.Target == transition.options.Releases.Target &&
+		current.Goal.Direction == transition.options.Direction {
 		return current.Goal, true
 	}
 	if found || (current != nil && current.Checkpoint != JournalComplete &&
@@ -488,6 +497,24 @@ func (transition *V2Transition) resolveConvergeGoal(
 		return Goal{}, false
 	}
 	return candidate, true
+}
+
+// A caller may have inspected recovery just before another caller completed it.
+// Its resume token can verify that transaction, but cannot authorize fresh repair.
+func (transition *V2Transition) completedResumeOutcome(observation v2Observation, plan PlanToken) *Outcome {
+	journal := observation.journal
+	if journal == nil || journal.Checkpoint != JournalComplete || plan != journal.ResumePlan {
+		return nil
+	}
+	if transition.completedJournalMatches(observation) && transition.fixedPoint(observation) {
+		outcome := transition.inspectionOutcome(observation)
+		return &outcome
+	}
+	outcome := v2OperatorOutcome(observation.links, observation.goal.Target,
+		transactionIDPointer(journal.Transaction), CodePlanStale,
+		"the completed release transition requires a new inspection and authorization",
+		"run yard update --check")
+	return &outcome
 }
 
 func (transition *V2Transition) Converge(
@@ -572,6 +599,12 @@ func (transition *V2Transition) Converge(
 		), nil
 	}
 
+	if outcome := transition.completedResumeOutcome(observation, execution.Plan); outcome != nil {
+		if outcome.Status == StatusReady {
+			return transition.cleanupReady(ctx, observation.journal.Transaction, *outcome), nil
+		}
+		return *outcome, nil
+	}
 	completedHistory := transition.completedJournalMatches(observation)
 	if observation.journal != nil && observation.journal.Checkpoint == JournalComplete &&
 		observation.journal.Goal == observation.goal && !completedHistory {
@@ -590,7 +623,11 @@ func (transition *V2Transition) Converge(
 			return Outcome{}, bindErr
 		}
 		if plan != execution.Plan {
-			return v2OperatorOutcome(observation.links, goal.Target, nil,
+			var transaction *TransactionID
+			if current != nil && execution.Plan == current.ResumePlan {
+				transaction = transactionIDPointer(current.Transaction)
+			}
+			return v2OperatorOutcome(observation.links, goal.Target, transaction,
 				CodePlanStale, "the inspected release transition changed before convergence",
 				"run yard update --check"), nil
 		}

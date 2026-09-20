@@ -753,7 +753,18 @@ func TestV2NewOwnerImpactReplacesUnmutatedPreActivationJournal(t *testing.T) {
 	}
 
 	activeFault = false
+	resume, err := transition.InspectProcessV1(context.Background(), goal)
+	if err != nil || resume.Resume == nil {
+		t.Fatalf("owner resume inspection = %#v, err=%v", resume, err)
+	}
 	owner.state = OwnerRegistrationLegacyDirectory
+	stale, err := transition.Converge(context.Background(), Execution{Plan: resume.Plan})
+	if err != nil || stale.Code != CodePlanStale || owner.commits != 0 {
+		t.Fatalf("stale owner resume = %#v, commits=%d, err=%v", stale, owner.commits, err)
+	}
+	if err := ValidateProcessConvergence(goal, resume, stale); err != nil {
+		t.Fatalf("invalid stale owner resume: %v", err)
+	}
 	replacement, err := transition.Inspect(context.Background(), goal)
 	if err != nil || replacement.Resume != nil || replacement.Outcome == nil ||
 		replacement.Outcome.Status != StatusMigrationRequired ||
@@ -2007,6 +2018,75 @@ func TestV2TransitionResumesEveryDurableCheckpointWithoutNewAuthorization(t *tes
 			outcome, err := transition.Converge(context.Background(), Execution{Plan: resume.Plan})
 			if err != nil || outcome.Status != StatusReady || !outcome.ReachedGoal {
 				t.Fatalf("resumed outcome = %#v, err=%v", outcome, err)
+			}
+		})
+	}
+}
+
+func TestV2TransitionResumeAfterAnotherCallerCompletes(t *testing.T) {
+	for _, drift := range []bool{false, true} {
+		t.Run(fmt.Sprintf("drift=%t", drift), func(t *testing.T) {
+			ctx := context.Background()
+			links := ReleaseLinks{Active: "release-a"}
+			transition, _, _ := v2TransitionFixtureWithReleases(t, func(point string) error {
+				if point == "after-target-active" {
+					return errors.New("interrupted before activation reconciliation")
+				}
+				return nil
+			}, ReleasePair{From: "release-a", Target: "release-b"}, links)
+			transition.options.ObserveLinks = func(context.Context) (ReleaseLinks, error) { return links, nil }
+			transition.options.ActivateLinks = func(_ context.Context, pair ReleasePair) (ReleaseLinks, error) {
+				links = ReleaseLinks{Active: pair.Target, Previous: releaseIDPointer(pair.From)}
+				return links, nil
+			}
+			reconciler := &v2TestReconciler{}
+			transition.options.Reconcilers = []V2ActivationReconciler{reconciler}
+			goal := Goal{Target: "release-b", Direction: DirectionActivateTarget}
+			initial, err := transition.Inspect(ctx, goal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			interrupted, err := transition.Converge(ctx, Execution{
+				Plan: initial.Plan, Authorization: v2TestAuthorization(initial.Plan),
+			})
+			if err != nil || interrupted.Status != StatusRecovering {
+				t.Fatalf("interrupted outcome = %#v, err=%v", interrupted, err)
+			}
+			resume, err := transition.InspectProcessV1(ctx, goal)
+			if err != nil || resume.Resume == nil {
+				t.Fatalf("resume inspection = %#v, err=%v", resume, err)
+			}
+			transition.options.fault = nil
+			completed, err := transition.Converge(ctx, Execution{Plan: resume.Plan})
+			if err != nil || completed.Status != StatusReady {
+				t.Fatalf("other caller outcome = %#v, err=%v", completed, err)
+			}
+			before, err := transition.store.ReadCurrentJournal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			reconciler.converged = !drift
+			fresh, err := NewV2Transition(transition.options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			outcome, err := fresh.Converge(ctx, Execution{Plan: resume.Plan})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := ValidateProcessConvergence(goal, resume, outcome); err != nil {
+				t.Fatalf("invalid resumed outcome = %#v: %v", outcome, err)
+			}
+			want := CodeReady
+			if drift {
+				want = CodePlanStale
+			}
+			if outcome.Code != want || reconciler.reconciles != 1 {
+				t.Fatalf("outcome = %#v, reconciles=%d", outcome, reconciler.reconciles)
+			}
+			after, err := fresh.store.ReadCurrentJournal()
+			if err != nil || !sameProtectedSnapshot(before, after) {
+				t.Fatalf("completed journal changed: %v", err)
 			}
 		})
 	}
