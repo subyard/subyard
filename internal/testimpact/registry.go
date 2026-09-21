@@ -115,7 +115,7 @@ func BuiltInRegistry() (Registry, error) {
 	)
 
 	p0Lanes := []string{
-		"boundary", "nested-teardown", "transport", "dependencies", "real-incus",
+		"smoke", "boundary", "nested-teardown", "transport", "dependencies", "real-incus",
 		"profile-resource", "release", "source-upgrade", "power-systemd", "reboot-verify",
 		"peer", "peer-cleanup", "cleanup",
 	}

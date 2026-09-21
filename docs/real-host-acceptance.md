@@ -3,13 +3,17 @@
 The default `./tests/run.sh` is host-free. Live acceptance uses the disposable pool documented in
 [Agent E2E VM pool](test-vms.md#agent-workflow); that guide is the source of truth for setup,
 exact-slot selection, leases, recovery, and the outer-yard boundary. After choosing an available
-slot from redacted status, pass it explicitly to the continuous P0 gate:
+slot from redacted status, pass it explicitly to the required external release smoke:
 
 ```sh
 dev/agent-e2e.sh --status
 slot=1
 dev/e2e/p0-acceptance.sh --slot "$slot"
 ```
+
+This fresh smoke is a manual pre-publication gate; GitHub workflows do not access the VM pool.
+Run `dev/e2e/p0-acceptance.sh --slot "$slot" --lane full` periodically and whenever the change-impact
+selector requires full P0 evidence.
 
 Never run these checks on the operator host, in the privileged outer yard, or in a working yard.
 
@@ -67,9 +71,19 @@ expiry. Grants do not restart Orca. See [test VMs](test-vms.md) for fixture scop
 and bounded debugging options. Reconnect deadline and worker failure behavior
 also have focused runtime tests with real OpenSSH agents.
 
-VM1 installs the candidate runtime, runs `init` twice, repairs a legacy fixture and verifies storage,
-network, systemd, Incus container/VM and rollback behavior. VM2 runs the full suite and transport
-contracts. Only these disposable VMs observe real KVM and kernel behavior.
+The default release smoke checks the pool boundary and disconnect handling, exercises real Incus on
+VM1, then upgrades a checksum-pinned published v0.14.0 runtime to the candidate. It runs candidate
+`init` twice, preserves operator and guest data across one reboot, exports the changed project,
+rolls back and forward, and tears the yard down without removing the installed runtime. Its scoped
+two-owner peer phase starts a fresh candidate yard twice and exercises real remote projects and RPC;
+offline recovery and credential exchange remain in the full peer phase. Cleanup and a final boundary
+check close the run.
+
+The explicit `--lane full` matrix remains the exhaustive compatibility and recovery run. It retains
+historical migration, broker, nested teardown, source upgrade, power/systemd and full peer scenarios,
+and includes the same release-smoke phase before peer acceptance. It assumes the host-free core,
+loopback SSH/crypto and engine-release contracts have already passed, so it does not repeat them on
+the VMs. Only these disposable VMs observe real KVM and kernel behavior.
 
 Exercise a synthetic project through `sync`, ordinary TTL-refreshed `list`, forced `list --live`,
 `shell`, `export`, and `remove`; test an
@@ -102,8 +116,8 @@ CLI startup, idle RPC RSS/CPU, snapshot latency and package-size measurements; c
 host-free baseline in `docs/development.md`. Record results outside the public repository without
 host names, credentials or payloads.
 
-CI and tagged releases use one prepared-context entrypoint for the exact pinned binaries, real
-crypto and loopback OpenSSH contracts:
+Branch CI and tagged Release workflows use one prepared-context entrypoint for the exact pinned
+binaries, real crypto and loopback OpenSSH contracts:
 
 ```sh
 bash tests/real-host/adapter-contracts.sh

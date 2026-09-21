@@ -804,9 +804,10 @@ owner() (
   prepare_owner_go_cache
 	YARD_BUILD_VERSION="$P0_OWNER_VERSION" dev/build-engine.sh --force >/dev/null
 	ensure_owner_incus
+	bash dev/e2e/p0-real-incus.sh
+	# Retain the shared base-image cache for later release smoke and peer fixtures.
 	OWNER_BASELINE_IMAGES="$(incus image list --project default --format csv -c f)"
   OWNER_BASELINE_CAPTURED=1
-	bash dev/e2e/p0-real-incus.sh
 	P0_V0111_BASE_IMAGE="$OWNER_BASE_IMAGE" \
 	  bash dev/e2e/release-transition-v0111-recovery.sh "$TOKEN"
 	profile_resource
@@ -827,7 +828,6 @@ owner() (
     || die 'nested state permissions did not converge'
   ! incus exec yard-test-yard --project subyard-test-yard -- id -nG dev | tr ' ' '\n' \
     | grep -Eq '^(incus-admin|yard)$' || die 'dev retained a privileged L1 group'
-  bash tests/engine-release.sh
   # All migration and recovery fixtures have finished compiling. Drop only
   # this run's disposable Go cache before retaining both nested VM pairs;
   # production broker memory and capacity defaults remain unchanged.
@@ -892,42 +892,6 @@ broker_recovery_owner() (
   run_nested_broker_acceptance dev/e2e/p0-broker-recovery.sh
   ./bin/yard -Y test-yard teardown --yes
   printf 'ok: VM1 broker logging and quarantine rebuild acceptance\n'
-)
-
-controller() (
-  local temp='' rc
-  [ "$SUBYARD_E2E_VM" = 2 ] || die 'controller lane requires VM2'
-  p0_capacity_reset_build_cache
-  p0_capacity_prepare_subtree "$P0_CAPACITY_STATE_ROOT/controller"
-  trap 'rc=$?; set +e; [ -z "$temp" ] || find "$temp" -depth -delete; p0_capacity_remove_subtree "$P0_CAPACITY_STATE_ROOT/controller"; p0_capacity_remove_build_cache; p0_capacity_remove_root_if_empty; exit "$rc"' EXIT
-  shellcheck -x -S warning dev/e2e/p0-acceptance.sh dev/e2e/p0-guest.sh \
-    dev/e2e/lib-p0-capacity.sh dev/e2e/p1-lease-acceptance.sh \
-    dev/e2e/p0-broker-recovery.sh \
-    dev/e2e/p0-real-incus.sh dev/e2e/p0-source-upgrade.sh \
-    dev/e2e/release-transition-v0111-recovery.sh \
-    dev/e2e/power-reconciler-systemd-255.sh \
-    dev/e2e/power-reconciler-systemd.sh dev/e2e/power-reconciler-upgrade.sh \
-    dev/build-engine.sh tests/build-engine.sh \
-    tests/agent-e2e.sh tests/real-host/incus-contract.sh
-  ./tests/run.sh
-  bash tests/real-host/ssh-rpc.sh
-  temp="$(mktemp -d "$P0_CAPACITY_STATE_ROOT/controller/tools.XXXXXX")"
-  (
-    # shellcheck source=tests/helpers/test-context.sh
-    . tests/helpers/test-context.sh
-    setup_test_context "$temp/context"
-    set -a
-    # shellcheck source=config/host.env
-    . config/host.env
-    set +a
-    SUBYARD_HOME="$temp/state" SUBYARD_KEYS_TOOLS_DIR="$temp/tools" \
-      bash scripts/install-key-tools.sh -y >/dev/null
-  )
-  SUBYARD_REAL_KEYS_TOOLS_DIR="$temp/tools" bash tests/real-host/credential-tools.sh
-  SUBYARD_REAL_KEYS_TOOLS_DIR="$temp/tools" bash tests/real-host/ssh-credential-peer.sh
-  find "$temp" -depth -delete
-  temp=''
-  printf 'ok: VM2 suite, SSH RPC and real credential adapters\n'
 )
 
 install_peer_wrapper() {
@@ -1286,9 +1250,11 @@ peer_yard_start() {
     base_image="$OWNER_BASE_IMAGE"
   fi
   install -d -m 0700 "$PEER_ROOT/config"
-  printf 'SSH_PORT=3222\nDEV_UID=1001\nBASE_IMAGE=%s\nBASE_IMAGE_FALLBACK=%s\n' \
+  printf 'AGENTS=none\nSSH_PORT=3222\nDEV_UID=1001\nBASE_IMAGE=%s\nBASE_IMAGE_FALLBACK=%s\n' \
     "$base_image" "$base_image" > "$PEER_ROOT/config/config.env"
   timeout --foreground "${P0_PEER_YARD_TIMEOUT:-1800}" "$PEER_YARD_ENTRY" init --yes
+  timeout --foreground "${P0_PEER_YARD_TIMEOUT:-1800}" "$PEER_YARD_ENTRY" init --yes
+  "$PEER_YARD_ENTRY" check
   "$PEER_YARD_ENTRY" start --yes
   printf 'ok: VM2 release-installed remote yard is running\n'
 }
@@ -2220,7 +2186,6 @@ capacity_verify_cleanup() {
   owner) owner ;;
   owner-migration) owner_migration ;;
   broker-recovery-owner) broker_recovery_owner ;;
-  controller) controller ;;
   peer-prepare) peer_prepare ;;
   peer-prepare-resume) peer_prepare_finish ;;
   peer-info) peer_info ;;

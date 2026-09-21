@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "check_sets": {
+    "release-smoke": ["shell:agent-e2e", "p0:smoke"],
     "yard-network": ["go:yardnetwork", "go:adapters/networkruntime", "go:adapters/incusclient", "go:cli", "go:application", "go:adapters/reconcileruntime", "shell:init-network-convergence", "e2e:yard-network-policy", "p0:real-incus", "p0:power-systemd", "p0:reboot-verify", "p0:peer"],
     "android-profile": [
       "shell:android-provision-check",
@@ -254,6 +255,13 @@
       "pattern": "^dev/e2e/p0-guest\\.sh$",
       "check_sets": ["e2e-infrastructure"],
       "risk_domains": ["full-matrix-composition"]
+    },
+    {
+      "id": "release-smoke-fixture",
+      "priority": 988,
+      "pattern": "^dev/e2e/p0-release-smoke\\.sh$",
+      "check_sets": ["release-smoke"],
+      "risk_domains": []
     },
     {
       "id": "p0-real-incus-lane",

@@ -246,12 +246,13 @@ func TestRegistryP0InventoryMatchesAcceptanceLanesInCleanEnvironment(t *testing.
 		t.Fatalf("p0-acceptance.sh --list-lanes error = %v", err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	if len(lines) != 14 {
-		t.Fatalf("--list-lanes returned %d rows, want 14: %q", len(lines), output)
+	if len(lines) < 2 {
+		t.Fatalf("--list-lanes returned no targeted lanes and full inventory: %q", output)
 	}
 
-	wantP0 := make([]string, 0, 13)
-	for _, lane := range lines[:13] {
+	targeted := lines[:len(lines)-1]
+	wantP0 := make([]string, 0, len(targeted))
+	for _, lane := range targeted {
 		if lane == "" || strings.ContainsAny(lane, "\t ") {
 			t.Fatalf("invalid targeted lane row %q", lane)
 		}
@@ -270,10 +271,13 @@ func TestRegistryP0InventoryMatchesAcceptanceLanesInCleanEnvironment(t *testing.
 	if _, exists := registry.Check("p0:full"); exists {
 		t.Fatal("special full inventory row must not be a p0:full T3 check")
 	}
+	if _, exists := registry.Check("p0:release-smoke"); exists {
+		t.Fatal("release-smoke is a full-matrix phase, not an addressable T3 lane")
+	}
 
-	wantFull := "full\tboundary transport nested-teardown release source-upgrade power-systemd peer cleanup"
-	if lines[13] != wantFull {
-		t.Fatalf("full T4 inventory row = %q, want %q", lines[13], wantFull)
+	wantFull := "full\tboundary transport nested-teardown release source-upgrade power-systemd release-smoke peer cleanup"
+	if lines[len(lines)-1] != wantFull {
+		t.Fatalf("full T4 inventory row = %q, want %q", lines[len(lines)-1], wantFull)
 	}
 	for _, id := range gotP0 {
 		check, _ := registry.Check(id)
@@ -537,6 +541,11 @@ func TestPolicyRepresentativePathsSelectOwningEvidence(t *testing.T) {
 			name: "P0 matrix runner", path: "dev/e2e/p0-acceptance.sh",
 			checks:  []string{"host-free:core", "p0:boundary"},
 			domains: []string{"checkpoint-resume", "full-matrix-composition"}, standaloneDomain: "full-matrix-composition",
+		},
+		{
+			name: "release smoke fixture", path: "dev/e2e/p0-release-smoke.sh",
+			checks:  []string{"shell:agent-e2e", "p0:smoke"},
+			domains: []string{},
 		},
 		{
 			name: "real Incus lane", path: "dev/e2e/p0-real-incus.sh",

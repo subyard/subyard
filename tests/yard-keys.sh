@@ -50,6 +50,7 @@ case "$*" in
 esac
 SH
 chmod +x "$TMP/timer-bin/systemctl" "$TMP/timer-bin/loginctl"
+unset XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS
 SYSTEMCTL_CALLS="$TMP/systemctl-calls" \
 SUBYARD_KEYS_SYSTEMD_DIR="$TMP/live-systemd" \
 SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=0 \

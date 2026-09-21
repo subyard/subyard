@@ -169,13 +169,16 @@ dev/e2e/yard-network-policy.sh --slot N --vm 2  # select the second guest when n
 This controller owns one lease across setup, a selected-guest reboot and resumed validation;
 `--vm` accepts `1` or `2` and defaults to `1`. It changes
 network policy only inside the disposable VM and does not enable isolation on the operator's host.
-A network implementation change still requires a fresh full P0 below.
+A network implementation change still requires a fresh `--lane full` P0 below.
 
-`dev/e2e/p0-acceptance.sh --slot N` is the continuous P0 release gate. Addressable lanes require the
-same explicit selector and are diagnostics: they shorten a rerun after a late failure but never turn
-a partial pass into a fresh-install release result. `--list-lanes` does not acquire and needs no slot.
+`dev/e2e/p0-acceptance.sh --slot N` is the fresh release smoke required before publication. It is an
+external manual gate; GitHub workflows do not receive pool access or enforce it automatically.
+`--lane full` runs the exhaustive compatibility and recovery matrix periodically and when selected
+for a high-risk change. Addressable targeted lanes shorten diagnosis, but do not replace a fresh
+release smoke. `--list-lanes` does not acquire and needs no slot.
 
-Before current `yard init`, VM1 seeds the legacy convergence fixture with:
+During the full owner compatibility chain, before current `yard init`, VM1 seeds the legacy
+convergence fixture with:
 
 ```sh
 SUBYARD_E2E_LEGACY_FIXTURE=1 \
@@ -186,7 +189,8 @@ This fixture is restricted to disposable VM1 candidate yards.
 
 Use the advisory [change-impact testing workflow](testing.md) to select affected host-free checks
 and targeted lanes for a diff. The selector only recommends checks; targeted evidence does not
-replace this section's continuous full P0 release gate.
+replace this section's fresh release-smoke gate. A `full_p0.required` result requires the explicit
+`--lane full` matrix, which includes the release smoke.
 
 The focused AppArmor regression creates a temporary container yard on VM1, exercises failed
 capability probes and both real Incus AppArmor transitions, and verifies Docker and runtime
@@ -211,19 +215,21 @@ dev/agent-e2e.sh --slot "$slot" --purpose incus-group-reexec --vm 1 -- \
 | --- | --- | --- | --- |
 | `./tests/run.sh` | Go toolchain; bounded by CI | temporary host-free roots and `.build/yard` | required host-free gate |
 | `dev/process-coverage.sh` | Go toolchain; selected host-free process contracts | `.build/coverage` and test-owned temporary roots | diagnostic coverage gate |
-| `boundary` | one broker lease; SSH connect deadlines | read-only facade, routes and negative probes | required inside continuous P0 |
-| `transport` | both allocated VMs; bounded SSH disconnect probe | one marker-owned remote sleep and temporary controller log | required inside continuous P0 |
-| `nested-teardown` | VM2, KVM and nested Incus; bounded install, boot and cleanup waits | marker-owned outer VM, nested yard and data-boundary fixtures | required inside continuous P0 |
+| `smoke` (default) | both allocated VMs; capacity/dependency preflight and one reboot | marked Incus, release and peer fixtures described below | required external/manual publication gate |
+| `boundary` | one broker lease; SSH connect deadlines | read-only facade, routes and negative probes | required in smoke and full |
+| `transport` | both allocated VMs; bounded SSH disconnect probe | one marker-owned remote sleep and temporary controller log | required in smoke and full |
+| `nested-teardown` | VM2, KVM and nested Incus; bounded install, boot and cleanup waits | marker-owned outer VM, nested yard and data-boundary fixtures | targeted diagnostic; required in full |
 | `dependencies` | retained guest baseline; 20-minute cold Go download deadline | marker-owned cold caches only | periodic targeted bootstrap diagnostic |
-| `real-incus` | VM1, KVM, persistent Incus pool; 15-minute mutation deadlines | marked project, container, VM and image aliases | required through `release` in continuous P0 |
-| `profile-resource` | VM1 and current candidate | temporary dependency-free resource/state | required through `release` in continuous P0 |
-| `release` | both VMs, capacity preflight; bounded nested install/boot deadlines | fresh candidate yards, current and legacy convergence | targeted diagnostic; required inside continuous P0 |
-| `source-upgrade` | VM1 when targeted; VM2 worker in full; two bounded reboots | marked source-install/migration fixture | targeted diagnostic; required inside continuous P0 |
-| `power-systemd` | VM1 when targeted; VM2 worker in full; real Incus, Ubuntu 24.04/systemd 255; 900-second image-cache fill, 600-second local launch, 300-second restart and bounded TERM-to-KILL Incus commands | test-owned image alias, marker-owned parser project plus snapshotted/restored host power runtime | targeted diagnostic; required inside continuous P0 |
+| `real-incus` | VM1 when targeted/smoke and in the full owner chain; VM2 also runs it as a full-matrix prerequisite; KVM, persistent Incus pool and 15-minute mutation deadlines | marked project, container, VM and image aliases | required in smoke and full |
+| `profile-resource` | VM1 and current candidate | temporary dependency-free resource/state and bound-resource profile | targeted diagnostic; full covers only the dependency-free resource portion |
+| `release` | VM1 fixture with two-VM allocation/preflight; bounded nested install/boot deadlines | fresh candidate yards, current and legacy convergence | targeted diagnostic; covered by the full owner chain |
+| `source-upgrade` | VM1 when targeted; VM2 worker in full; two bounded reboots | marked source-install/migration fixture | targeted diagnostic; required in full |
+| `power-systemd` | VM1 when targeted; VM2 worker in full; real Incus, Ubuntu 24.04/systemd 255; 900-second image-cache fill, 600-second local launch, 300-second restart and bounded TERM-to-KILL Incus commands | test-owned image alias, marker-owned parser project plus snapshotted/restored host power runtime | targeted diagnostic; required in full |
 | `reboot-verify` | VM1, real Incus and cached image preparation; published v0.8.0/candidate fixture; two boot checks with bounded power reconciliation | marked upgrade fixture, two guest reboots, snapshotted/restored host power runtime | targeted transport/recovery diagnostic |
-| `peer` | both VMs and synthetic keys | marked cross-owner RPC, project and credential fixtures | targeted diagnostic; required inside continuous P0 |
+| `release-smoke` (internal phase) | VM1, pinned v0.14.0 installer, candidate package and one reboot | marked yard/project plus retained operator and guest data | required in smoke and full; not a standalone lane |
+| `peer` | both VMs and synthetic keys | marked cross-owner RPC, project and credential fixtures | smoke covers fresh init/projects/RPC; full adds offline and credential scenarios |
 | `peer-cleanup`, `cleanup` | same retained allocation | exact marked fixtures and run worktrees | standalone idempotent cleanup/verifier |
-| `--slot N` (`full`) | all prerequisites above | union of the marked scopes | mandatory continuous release gate |
+| `--lane full` | all prerequisites above | union of the marked scopes | periodic manual and risk-selected exhaustive matrix; includes release smoke |
 
 Android/GPU, real credentials and external-service profiles use separate explicitly prerequisite-
 gated lanes. A generic dependency-free resource pass does not report those handlers green.
@@ -319,6 +325,8 @@ List or run one lane:
 
 ```sh
 dev/e2e/p0-acceptance.sh --list-lanes
+dev/e2e/p0-acceptance.sh --slot "$slot"
+dev/e2e/p0-acceptance.sh --slot "$slot" --lane full
 dev/e2e/p0-acceptance.sh --slot "$slot" --lane peer
 dev/e2e/p0-acceptance.sh --slot "$slot" --lane source-upgrade --resume
 SUBYARD_P0_WAIT_SECONDS=1200 \
@@ -339,10 +347,12 @@ The cache fill and local launch both emit progress. Their independent positive-i
 `SUBYARD_SYSTEMD255_RESTART_TIMEOUT_SECONDS`. A timed-out cache fill or launch fails once with its
 operation and limit. The fixture never starts a second remote pull or launch after a timeout.
 
-The continuous gate keeps the long owner/release chain on VM1. VM2 independently runs nested
-teardown, the controller suite, a real-Incus platform check, source upgrade and power-systemd in
-that order. The two chains are joined before peer checks and cleanup. Their four logical phase
-checkpoints are committed atomically only after both chains pass. The parallel matrix has a
+The full matrix keeps the long historical owner, release and broker chain on VM1. VM2 independently
+runs nested teardown, a real-Incus platform check, source upgrade and power-systemd in that order.
+The two chains join before the shared release-smoke phase and full peer checks, followed by cleanup
+and final boundary verification. Host-free `./tests/run.sh`, prepared loopback SSH/crypto contracts
+and the owner engine-release contract run in their own required gates and are not repeated here.
+The parallel matrix checkpoints are committed atomically only after both chains pass. It has a
 210-minute kernel-monotonic work deadline by default (`SUBYARD_P0_FULL_MATRIX_TIMEOUT_SECONDS`).
 The controller reads `/proc/uptime`, so host wall-clock corrections cannot expire the matrix or its
 shutdown grace periods early. On expiry, runner children get a bounded 30-second TERM grace and

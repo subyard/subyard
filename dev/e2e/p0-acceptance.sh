@@ -39,7 +39,7 @@ declare -A CAPACITY_FLAG=()
 declare -A DEFAULT_BUILD_CACHE_BEFORE=()
 declare -A MODULE_CACHE_BEFORE=()
 declare -A HOME_STATE_BEFORE=()
-P0_LANE=full
+P0_LANE=smoke
 P0_RESUME=0
 P0_CHECKPOINT=''
 P0_EVIDENCE=''
@@ -48,7 +48,7 @@ P0_CURRENT_PHASE='startup'
 P0_PHASE_STARTED=0
 P0_CHILD_PIDS=()
 P0_STARTED_PID=''
-FULL_P0_LANES=(boundary transport nested-teardown release source-upgrade power-systemd peer cleanup)
+FULL_P0_LANES=(boundary transport nested-teardown release source-upgrade power-systemd release-smoke peer cleanup)
 
 # Reuse one ordinary broker lease for the full matrix. This avoids the retired raw SSH-config
 # export and ensures every direct and bundled command addresses the same retained pair.
@@ -87,14 +87,15 @@ Usage:
   dev/e2e/p0-acceptance.sh --slot N --lane NAME [--resume]
   dev/e2e/p0-acceptance.sh --list-lanes
 
-The --slot N form is the continuous release gate. Targeted lanes are diagnostics and do not
-replace it. --resume reuses passed checkpoints only for the same slot resource generation and exact
+The --slot N form runs the release smoke. Use --lane full for the complete compatibility and
+recovery matrix. Targeted lanes are diagnostics; they do not replace the release smoke.
+--resume reuses passed checkpoints only for the same slot resource generation and exact
 worktree bundle hash; pass the same --slot N to request that retained allocation again.
 EOF
 }
 list_lanes() {
   printf '%s\n' \
-    boundary nested-teardown transport dependencies real-incus profile-resource release source-upgrade \
+    smoke boundary nested-teardown transport dependencies real-incus profile-resource release source-upgrade \
     power-systemd \
     reboot-verify peer peer-cleanup cleanup
   printf 'full\t%s\n' "${FULL_P0_LANES[*]}"
@@ -124,10 +125,10 @@ parse_arguments() {
     esac
   done
   case "$P0_LANE" in
-    boundary|nested-teardown|transport|dependencies|real-incus|profile-resource|release|source-upgrade|power-systemd|reboot-verify|peer|peer-cleanup|cleanup|full) ;;
+    smoke|boundary|nested-teardown|transport|dependencies|real-incus|profile-resource|release|source-upgrade|power-systemd|reboot-verify|peer|peer-cleanup|cleanup|full) ;;
     *) die "unknown lane '$P0_LANE'" ;;
   esac
-  [ "$P0_LANE" = full ] || [ "$BROKER_RECOVERY_ONLY" = 0 ] \
+  [ "$lane_seen" = 0 ] || [ "$BROKER_RECOVERY_ONLY" = 0 ] \
     || die 'broker-recovery-only cannot be combined with --lane'
   [ "$P0_RESUME" = 0 ] || [ "$P0_LANE" != cleanup ] \
     || die '--resume is not meaningful for cleanup'
@@ -981,23 +982,6 @@ transport_probes() {
   assert_no_worktrees
 }
 
-run_lanes() {
-  local owner_pid controller_pid owner_rc controller_rc
-  P0_CHILD_PIDS=()
-  start_runner_child run_vm 1 owner
-  owner_pid="$P0_STARTED_PID"
-  start_runner_child run_vm 2 controller
-  controller_pid="$P0_STARTED_PID"
-  set +e
-  wait "$owner_pid"; owner_rc=$?
-  wait "$controller_pid"; controller_rc=$?
-  set -e
-  P0_CHILD_PIDS=()
-  [ "$owner_rc" != 3 ] && [ "$controller_rc" != 3 ] || return 3
-  [ "$owner_rc" != 2 ] && [ "$controller_rc" != 2 ] || return 2
-  [ "$owner_rc" = 0 ] && [ "$controller_rc" = 0 ] || return 1
-}
-
 run_full_aux_stage() {
   local stage="$1" started now; shift
   started="$(p0_monotonic_seconds)"
@@ -1034,7 +1018,6 @@ full_aux_lane() (
   trap 'full_aux_exit "$?"' EXIT
   trap 'exit 143' TERM
   run_full_aux_stage nested-teardown run_vm 2 nested-teardown
-  run_full_aux_stage controller run_vm 2 controller
   run_full_aux_stage fixture-platform run_vm 2 real-incus
   run_full_aux_stage source-upgrade source_upgrade_lane 2 prepared
   find "$FULL_SOURCE_ARM_FILE" -delete
@@ -1205,8 +1188,19 @@ reboot_verify_lane() {
   POWER_SYSTEMD_STARTED=0
 }
 
+release_smoke_lane() {
+  POWER_SYSTEMD_LANE_VM=1
+  POWER_SYSTEMD_STARTED=1
+  run_power_systemd_vm 1 dev/e2e/p0-release-smoke.sh prepare "$TOKEN"
+  reboot_vm 1
+  run_power_systemd_vm 1 dev/e2e/p0-release-smoke.sh finish "$TOKEN"
+  POWER_SYSTEMD_STARTED=0
+}
+
 peer_lane() {
+  local scope="${1:-full}"
   local peer1_info peer2_info peer1_key peer2_key vm1_host_key vm2_host_key vm
+  case "$scope" in smoke|full) ;; *) die "unknown peer scope '$scope'" ;; esac
   VM1_YARD_ENTRY="$(yard_entry_state 1)"
   VM2_YARD_ENTRY="$(yard_entry_state 2)"
   VM1_SSH_STATE="$(ssh_state 1)"
@@ -1230,13 +1224,17 @@ peer_lane() {
   direct_vm 2 peer-probe "$vm1_ip"
   direct_vm 2 peer-yard-start
   direct_vm 1 peer-projects "$vm2_ip"
-  direct_vm 2 peer-deny
-  direct_vm 1 peer-projects-offline "$vm2_ip"
-  direct_vm 2 peer-allow
+  if [ "$scope" = full ]; then
+    direct_vm 2 peer-deny
+    direct_vm 1 peer-projects-offline "$vm2_ip"
+    direct_vm 2 peer-allow
+  fi
   direct_vm 1 peer-projects-finish "$vm2_ip"
   direct_vm 1 peer-rpc "$vm2_ip"
   direct_vm 2 peer-rpc "$vm1_ip"
-  direct_vm 1 peer-credentials "$vm2_ip"
+  if [ "$scope" = full ]; then
+    direct_vm 1 peer-credentials "$vm2_ip"
+  fi
   clean_peers
   PEERS_READY=0
 
@@ -1331,7 +1329,7 @@ case "$P0_LANE" in
   release)
     run_phase capacity-preflight preflight_lane
     start_capacity_monitors
-    run_phase release run_lanes
+    run_phase release run_vm 1 owner
     run_phase cleanup cleanup_lane
     run_phase capacity-report targeted_capacity_report
     find "$CAPACITY_LOG_DIR" -depth -delete
@@ -1362,7 +1360,7 @@ case "$P0_LANE" in
     ;;
   peer-cleanup) run_phase peer-cleanup cleanup_lane ;;
   cleanup) run_phase cleanup cleanup_lane ;;
-  full)
+  smoke|full)
     for vm in 1 2; do
       snapshot="$(capacity_cache_snapshot "$vm")"
       IFS=$'\t' read -r DEFAULT_BUILD_CACHE_BEFORE[$vm] MODULE_CACHE_BEFORE[$vm] <<<"$snapshot"
@@ -1372,8 +1370,15 @@ case "$P0_LANE" in
     start_capacity_monitors
     run_phase boundary verify_boundary
     run_phase transport transport_probes
-    run_full_matrix_phase
-    run_phase peer peer_lane
+    if [ "$P0_LANE" = full ]; then
+      run_full_matrix_phase
+      run_phase release-smoke release_smoke_lane
+      run_phase peer peer_lane
+    else
+      run_phase real-incus run_vm 1 real-incus
+      run_phase release-smoke release_smoke_lane
+      run_phase peer-smoke peer_lane smoke
+    fi
     run_phase cleanup cleanup_lane
     P0_CURRENT_PHASE=final-verify
     P0_PHASE_STARTED="$(p0_monotonic_seconds)"
@@ -1390,7 +1395,9 @@ case "$P0_LANE" in
 esac
 
 if [ "$P0_LANE" = full ] && [ "$P0_RESUME" = 0 ]; then
-  printf 'ok: continuous P0 two-VM release gate passed within one broker lease\n'
+  printf 'ok: full P0 compatibility and recovery matrix passed within one broker lease\n'
+elif [ "$P0_LANE" = smoke ] && [ "$P0_RESUME" = 0 ]; then
+  printf 'ok: P0 release smoke passed within one broker lease\n'
 else
-  printf 'ok: targeted P0 lane %s passed; continuous fresh-install P0 is still required\n' "$P0_LANE"
+  printf 'ok: targeted or resumed P0 lane %s passed; fresh release smoke is still required\n' "$P0_LANE"
 fi

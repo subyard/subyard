@@ -48,9 +48,13 @@ links `~/.local/bin/{yard,sy}` to the verified runtime, and configures login PAT
 
 `make package VERSION=<version>` writes amd64 or arm64 Linux engine artifacts and a complete
 `subyard-<version>-linux-<arch>.tar.gz` runtime under `.build/release/`, each with a detached SHA-256,
-compatibility manifest and provenance. A `vMAJOR.MINOR.PATCH` tag runs the full gate and publishes
-both architectures to a tag-backed GitHub Release. `yard update` verifies all release inputs, applies
-the candidate's migration registry, publishes an immutable release directory and atomically rotates
+compatibility manifest and provenance. Run the required live release smoke manually on
+operator-allocated E2E VMs before pushing a `vMAJOR.MINOR.PATCH` tag; GitHub workflows do not have
+access to that pool. The tag starts the independent Release workflow checks: host-free,
+native Paseo, adapter and upgrade compatibility. The workflow publishes both architectures to a
+tag-backed GitHub Release after they pass. Branch CI does not run for tag pushes. `yard update`
+verifies all release inputs, applies the candidate's migration registry, publishes an immutable
+release directory and atomically rotates
 `current`/`previous`. See [release migrations](control-plane.md#release-migrations) for the runtime
 contract and [real-host acceptance](real-host-acceptance.md) for its test lane. First install and
 runtime execution require no Go or source checkout; interrupted or incompatible releases cannot
@@ -92,7 +96,9 @@ services.
 CI additionally installs `openssh-server`, downloads the pinned age/SOPS artifacts through the
 checksum-verifying project installer, and runs the temporary loopback contracts under
 `tests/real-host/`. Those tests use synthetic payloads and an ephemeral non-system sshd; dedicated
-container/VM and two-owner-host acceptance remains an explicit release gate.
+container/VM and two-owner-host acceptance remains an explicit external release gate. Run the fresh
+release smoke with `dev/e2e/p0-acceptance.sh --slot N`; use `--lane full` for periodic manual evidence
+and changes selected as full P0 risk.
 
 Live platform and release acceptance runs only on operator-allocated E2E VMs; see
 [`real-host-acceptance.md`](real-host-acceptance.md).

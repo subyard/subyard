@@ -575,9 +575,12 @@ contain no real secret. The opt-in E2E VM subset is documented in
 
 Host-free fakes cannot prove Incus, kernel, network, mount, systemd, or real SSH behavior. The
 operator maintains a configurable pool of disposable two-VM pairs. The canonical pool, exact-slot,
-lease, nested-slot, and cleanup contract lives in [Agent E2E VM pool](test-vms.md). The continuous
-gate is `dev/e2e/p0-acceptance.sh --slot N`; do not run it on the operator host or in the privileged
-outer yard.
+lease, nested-slot, and cleanup contract lives in [Agent E2E VM pool](test-vms.md). The required
+external release smoke is `dev/e2e/p0-acceptance.sh --slot N`; the periodic and risk-selected
+compatibility matrix is `dev/e2e/p0-acceptance.sh --slot N --lane full`. GitHub workflows do not run
+either VM gate. Do not run them on the operator host or in the privileged outer yard.
+
+The full matrix covers the following physical boundaries:
 
 1. For both a container and VM context: `yard -Y <context> init`, rerun it as a no-op, introduce one
    safe managed drift (for example the ccusage convergence marker), rerun to repair it, then reboot
