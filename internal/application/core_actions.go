@@ -4,6 +4,24 @@ import "github.com/Subyard/Subyard/internal/domain"
 
 func NewCoreActionRegistry() (*domain.ActionRegistry, error) {
 	definitions := []domain.ActionDefinition{
+		{Action: "integration.reconcile", Summary: "Reconcile yard coding tool integrations", Effect: domain.ActionMutation, Impacts: []domain.ActionImpact{domain.ImpactLocalMetadata, domain.ImpactYardRuntime}, Recovery: domain.RecoveryReversible},
+		{
+			Action: "ssh.trust", Summary: "Trust an unknown SSH server key", Effect: domain.ActionMutation,
+			Impacts: []domain.ActionImpact{domain.ImpactTrust}, Recovery: domain.RecoveryReversible,
+		},
+		{
+			Action: "ssh-agent.status", Summary: "Inspect temporary SSH-key access", Effect: domain.ActionRead,
+			Recovery: domain.RecoveryNotNeeded,
+		},
+		{
+			Action: "ssh-agent.unlock", Summary: "Grant temporary SSH-key access to the yard", Effect: domain.ActionMutation,
+			Impacts:  []domain.ActionImpact{domain.ImpactAccess, domain.ImpactYardRuntime},
+			Recovery: domain.RecoveryReversible,
+		},
+		{
+			Action: "ssh-agent.lock", Summary: "Revoke temporary SSH-key access", Effect: domain.ActionBoundedWrite,
+			Recovery: domain.RecoveryNotNeeded,
+		},
 		{
 			Action: "remote.list", Summary: "List remote yards", Effect: domain.ActionRead,
 			Recovery: domain.RecoveryNotNeeded,
@@ -80,6 +98,19 @@ func NewCoreActionRegistry() (*domain.ActionRegistry, error) {
 			Recovery: domain.RecoveryNotNeeded,
 		},
 		{
+			Action: "migrate.help", Summary: "Show migration help", Effect: domain.ActionRead,
+			Recovery: domain.RecoveryNotNeeded,
+		},
+		{
+			Action: "migrate.check", Summary: "Check installed release readiness", Effect: domain.ActionRead,
+			Recovery: domain.RecoveryNotNeeded,
+		},
+		{
+			Action: "migrate.apply", Summary: "Finish installed release migrations", Effect: domain.ActionMutation,
+			Impacts:  []domain.ActionImpact{domain.ImpactLocalMetadata, domain.ImpactPersistentData, domain.ImpactYardRuntime},
+			Recovery: domain.RecoveryReversible,
+		},
+		{
 			Action: "update.check", Summary: "Check Subyard release", Effect: domain.ActionBoundedWrite,
 			Recovery: domain.RecoveryNotNeeded,
 		},
@@ -141,6 +172,14 @@ func NewCoreActionRegistry() (*domain.ActionRegistry, error) {
 			Action: "yard.provision", Summary: "Provision yard profiles", Effect: domain.ActionMutation,
 			Impacts:  []domain.ActionImpact{domain.ImpactYardRuntime},
 			Recovery: domain.RecoveryRecreatable,
+		},
+		{
+			Action: "yard.network.save", Summary: "Save local yard network links", Effect: domain.ActionBoundedWrite,
+			Recovery: domain.RecoveryNotNeeded,
+		},
+		{
+			Action: "yard.network.apply", Summary: "Apply local yard network isolation", Effect: domain.ActionMutation,
+			Impacts: []domain.ActionImpact{domain.ImpactHostNetwork, domain.ImpactYardRuntime, domain.ImpactAccess}, Recovery: domain.RecoveryReversible,
 		},
 		{
 			Action: "yard.stop", Summary: "Stop yard", Effect: domain.ActionMutation,

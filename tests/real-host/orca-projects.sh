@@ -476,22 +476,33 @@ tabs="$(orca_rpc session.tabs.list "$(rpc_params --arg selector "id:$folder_id::
 jq -e --arg id "$session_id" '.tabs | any(.id == $id)' <<<"$tabs" >/dev/null \
   || die 'git-to-folder lost the root terminal tab'
 
-stage 'retaining gone and former-Git records with diagnostics and no filesystem repair'
+stage 'pruning gone records while preserving existing directories and saved session tabs'
 stale_folder="$clone_root/stale-folder"
 stale_gone="$clone_root/stale-gone"
 stale_folder_id="$(repo_id "$stale_folder")"
-stale_gone_id="$(repo_id "$stale_gone")"
+saved_gone="$clone_root/saved-gone"
+guest_dev git init -q "$saved_gone"
+yard orca sync --yes >/dev/null
+saved_gone_id="$(repo_id "$saved_gone")"
+saved_session="$(orca_rpc session.tabs.createTerminal \
+  "$(rpc_params --arg selector "id:$saved_gone_id::$saved_gone" \
+    '{worktree:$selector,activate:false,clientMutationId:"orca-projects-saved-gone"}')")"
+saved_session_id="$(jq -er '.tab.id' <<<"$saved_session")"
 guest_dev rm -rf -- "$stale_folder/.git" "$stale_gone"
+guest_dev rm -rf -- "$saved_gone"
 if ! yard orca sync --yes >"$STATE/stale.out" 2>"$STATE/stale.err"; then
-  die 'explicit sync failed for additive stale-record diagnostics'
+  die 'explicit sync failed for missing checkout cleanup'
 fi
 grep -Fq "$stale_folder" "$STATE/stale.out" "$STATE/stale.err" \
   || die 'former-Git record warning was not reported'
-grep -Fq "$stale_gone" "$STATE/stale.out" "$STATE/stale.err" \
-  || die 'gone-directory record warning was not reported'
 [ "$(repo_id "$stale_folder")" = "$stale_folder_id" ] \
-  && [ "$(repo_id "$stale_gone")" = "$stale_gone_id" ] \
-  || die 'stale Orca records were removed or replaced'
+  || die 'existing former-Git directory lost its record'
+assert_absent_repo "$stale_gone"
+[ "$(repo_id "$saved_gone")" = "$saved_gone_id" ] \
+  || die 'missing checkout with session tabs was removed'
+orca_rpc session.tabs.listAll | jq -e --arg id "$saved_session_id" \
+  '.snapshots | any(.tabs | any(.id == $id))' >/dev/null \
+  || die 'cleanup lost a missing checkout session tab'
 guest_dev test ! -e "$stale_folder/.git" \
   && guest_dev test ! -e "$stale_gone" \
   || die 'registration repaired project filesystem content'
@@ -538,13 +549,14 @@ yard orca up --yes >/dev/null
 stopped_group="$(group_id /srv/workspaces/stopped-project/src)"
 assert_repo /srv/workspaces/stopped-project/src folder "$stopped_group" stopped-project
 
-stage 'running the project removal hook while retaining Orca records and bind source data'
-bind_id="$(repo_id "$bind_root")"
+stage 'running the project removal hook to prune Orca records while retaining bind source data'
 guest_dev git init -q "$clone_root/remove-event-child"
 assert_absent_repo "$clone_root/remove-event-child"
 yard remove bind-project --yes >/dev/null
 [ -f "$bind_source/content.txt" ] || die 'bind removal deleted the owner source data'
-[ "$(repo_id "$bind_root")" = "$bind_id" ] || die 'project removal deleted the additive Orca record'
+assert_absent_repo "$bind_root"
+groups | jq -e --arg id "$bind_group" '.groups | all(.id != $id)' >/dev/null \
+  || die 'project removal retained its empty Orca group'
 assert_repo "$clone_root/remove-event-child" git "$clone_group" remove-event-child
 guest_dev test ! -e "$bind_root" || die 'project removal left the bound workspace mounted'
 

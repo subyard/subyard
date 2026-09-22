@@ -21,14 +21,100 @@ the required yard initialization, installs Orca and registers existing projects.
 It shows one combined plan before applying changes. Repeating it converges the same
 configuration and preserves server state.
 
+`yard update` also refreshes the project-registration files of existing Orca
+installations in all running local yards, including named yards. This does not
+install Orca in other yards, change endpoints or start a stopped Orca service.
+Registration-only changes do not restart the service. Stopped yards are left
+stopped; after starting one, run `yard init` to repair its installed handler before
+project hooks execute. This repair also runs when provisioning is already current.
+`orca sync` refuses a stale registration contract and points to `yard init`.
+
+When rolling back to Subyard 0.14.0 or 0.13.13, the older updater leaves the newer,
+backward-compatible registration handler installed. This legacy rollback does not
+undo a defect in that handler. An explicit `orca up` on the older release reinstalls
+that release's handler. A subsequent update to a release with handler refresh
+converges either state to its own registration files. Server data and client grants
+are preserved; rollback does not restore previously pruned catalog entries.
+
 Paste the final `orca://pair?...` line into **Settings → Remote Orca Servers → Add
 Server** on the laptop. This is a private single-client capability: do not put it in
 config, shell history, tickets or logs. Generate a separate link for each laptop.
 `pair` briefly restarts the service; existing grants and server state survive.
 
+For another client computer, run `yard orca pair` again on the server and import the new
+link on that laptop. Existing clients may briefly disconnect during the restart,
+but keep their saved access. Ordinary reconnects do not require another pairing.
+
 Orca connects directly over Tailscale. SSH over Tailscale is sufficient for running
 these server commands; an SSH port-forward is only needed for the alternative
 loopback setup below.
+
+## Connect Orca Mobile
+
+After updating Subyard, run `up` once to install the current pairing wrapper, then
+request a mobile link on the owner host:
+
+```sh
+yard orca up
+yard orca pair --mobile
+# For another registered yard:
+yard -Y <yard> orca pair --mobile
+```
+
+Install [Orca Mobile](https://www.onorca.dev/docs/mobile) on iOS or Android and
+connect the phone to the owner's Tailscale network. In the app, choose **Pair**
+and paste the final `orca://pair?...` line. Connect that phone before requesting
+a link for the next one: Orca reuses a pending invitation until a client connects,
+then issues a new link. Keep these access capabilities out of config, shell
+history and logs.
+
+Mobile pairing briefly restarts the existing server and synchronizes project
+groups and checkouts. Connected clients may disconnect temporarily; their saved
+grants, projects and server state survive. The mobile request applies to that
+startup only. Ordinary `yard orca pair` continues to issue Desktop links.
+
+The phone must keep network access to the advertised owner address and selected
+TCP port, including any automatically allocated nondefault port. For a Tailscale
+endpoint, keep Tailscale connected on both phone and owner. An explicitly selected
+loopback endpoint requires an SSH tunnel on the phone. A pairing link does not
+create a tunnel. The pinned headless Orca server does not initialize Orca Relay;
+this profile does not provide an automatic relay through Orca's Internet servers.
+
+### Allow the owner port in Tailscale
+
+An access policy allowing SSH (`tcp:22`), HTTPS (`tcp:443`) or ICMP does not allow
+Orca's preferred `tcp:6768` port. In Tailscale **Access controls**, allow your client
+group to reach your owner-host tag on the selected TCP port. Using a tag covers
+other owner hosts with that tag and port without a separate rule for each IP.
+
+For example, if your policy already defines `group:developers` and `tag:orca`, add
+this entry to its existing `grants` array:
+
+```json
+{
+  "src": ["group:developers"],
+  "dst": ["tag:orca"],
+  "ip": ["tcp:6768"]
+}
+```
+
+Use your existing group and host tag, and replace `6768` if `yard orca status`
+reports another port. See the [Tailscale policy reference](https://tailscale.com/docs/reference/syntax/policy-file).
+Subyard configures the host-to-yard proxy; the tailnet administrator controls this
+network access policy.
+
+If Desktop reports **Host unavailable**, run this on the laptop, replacing `HOST`
+and `PORT` with the endpoint from `yard orca status`:
+
+```sh
+curl --noproxy '*' --connect-timeout 5 --max-time 10 -sS -o /dev/null \
+  -w 'HTTP %{http_code}\n' http://HOST:PORT/
+```
+
+A response from the owner host itself only verifies its local route into the
+yard. The laptop must also reach the port. A successful `tailscale ping --tsmp`
+does not prove policy access: it stops before the access-policy check, as described
+in [Tailscale's policy diagnostics](https://tailscale.com/kb/1338/acl-edit).
 
 ## Endpoint defaults and overrides
 
@@ -97,6 +183,33 @@ Desktop as described above.
 
 ## Projects and lifecycle
 
+Subyard replaces Orca's stock Codex YOLO launch default with an explicit empty
+argument setting. With the default account, Codex then reads the yard's
+`~/.codex/config.toml`, including
+its approval policy and reviewer. The shipped configuration allows local work
+inside the yard while keeping user approval for matching commit/push rules.
+Orca may label this launch mode **Manual**; that label does not mean a read-only
+Codex sandbox.
+
+Paired desktops can also send their own stock YOLO argument. In the yard's
+default Bash shell, an Orca-only login function removes that exact argument
+before executing the native Codex CLI. This keeps remote agent launches on the
+yard configuration too. SSH/VS Code shells and the installed Codex binary are
+unchanged. A desktop may still display its local YOLO preference; it does not
+describe the effective server launch. Custom shells and explicit executable
+paths bypass this Bash integration, but the native Codex CLI still loads the yard's
+`/etc/codex/requirements.toml`. These managed requirements preserve user approval and
+commit/push rules across projects, profiles and account-specific `CODEX_HOME` values.
+See [Codex permissions across projects](configuration.md#codex-permissions-across-projects).
+
+`orca up` repairs fresh and existing stock defaults through Orca's settings API.
+The installed project hook also checks them on `orca sync` and subsequent
+`yard init` runs while Orca is active. Other settings and explicitly customized
+Codex arguments are preserved; incompatible permission overrides cannot weaken native
+Codex requirements. Use **Manual** with empty Codex arguments to follow the yard defaults.
+Run `yard init` after updating Subyard and start new Codex sessions; existing sessions
+are not reconfigured by this repair.
+
 Each Subyard project has one Orca group containing its canonical
 `/srv/workspaces/<project-id>/src` root and every nested Git checkout. The root is always
 registered: as a Git repository when it is a Git root, or as a folder otherwise. The
@@ -128,8 +241,19 @@ first registration, existing project checkouts in a mixed user group move into a
 project group; unrelated entries and the user group's properties are preserved. Group
 names may coincide or be renamed without merging project identities.
 
-If a directory disappears, or a nested checkout loses its Git metadata, old Orca records
-and sessions remain with a diagnostic warning. Sync does not restore files or Git history.
+After a complete successful scan, sync removes missing checkouts from their Subyard-managed
+Orca groups. This includes existing registrations from earlier Subyard versions. Ownership
+requires both membership in the recorded project group and a path inside that project;
+unrelated groups, remote records and manually added nested folders are left alone.
+Records with open or saved session tabs are retained with a warning. Orca's removal API
+discards the removed record's worktree metadata; it does not delete files on disk.
+Empty groups of removed Subyard projects are also removed, unless they contain child groups
+or native Orca folder workspaces. These rules apply to project hooks as well as explicit sync.
+
+Cleanup is skipped on scan or registration errors, including unavailable workspaces and
+scan limits. A registered project whose root is missing also inhibits cleanup: its mount may
+be temporarily unavailable. Missing paths are checked again before removal. Existing directories
+that lose Git metadata retain their old records with a warning. Sync does not restore files or Git history.
 Manually deleted Orca entries and groups for existing directories are registered again.
 If the root gains or loses Git, its kind changes on the existing entry, preserving its ID
 and session data.

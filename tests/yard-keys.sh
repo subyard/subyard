@@ -50,11 +50,13 @@ case "$*" in
 esac
 SH
 chmod +x "$TMP/timer-bin/systemctl" "$TMP/timer-bin/loginctl"
+unset XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS
 SYSTEMCTL_CALLS="$TMP/systemctl-calls" \
 SUBYARD_KEYS_SYSTEMD_DIR="$TMP/live-systemd" \
 SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=0 \
 PATH="$TMP/timer-bin:$PATH" \
 ASSUME_YES=1 \
+  env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS \
   "$ROOT/scripts/install-keys-auto-sync.sh" >/dev/null
 expected_runtime="/run/user/$(id -u)"
 grep -Fxq "$expected_runtime|unix:path=$expected_runtime/bus|--user show-environment" "$TMP/systemctl-calls" \
@@ -466,9 +468,16 @@ EOF
 cat > "$HOME/.bash_profile" <<EOF
 export PATH="$ROOT/bin:\$PATH"
 EOF
+export SUBYARD_TEST_KNOWN_HOSTS="$TMP/ssh-known-hosts"
+printf '%s\n' 'fake-owner ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA fixture' \
+  > "$SUBYARD_TEST_KNOWN_HOSTS"
 cat > "$TMP/fake-bin/ssh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+if [ "${1:-}" = -G ]; then
+  printf 'hostname fake-owner\nport 22\nuserknownhostsfile %s\n' "$SUBYARD_TEST_KNOWN_HOSTS"
+  exit 0
+fi
 printf '%q ' "$@" >> "${SUBYARD_TEST_SSH_LOG:?}"
 printf '\n' >> "$SUBYARD_TEST_SSH_LOG"
 args=("$@")
@@ -476,7 +485,6 @@ i=0
 while [ "$i" -lt "${#args[@]}" ]; do
   case "${args[$i]}" in
     -o|-p|-i|-F|-J) i=$((i + 2)) ;;
-    -G) exit 1 ;;
     -*) i=$((i + 1)) ;;
     *) break ;;
   esac

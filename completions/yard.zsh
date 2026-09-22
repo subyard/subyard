@@ -112,6 +112,14 @@ _yard() {
             '--yes[accept the compatible global option]' '--help[show help]'
           ;;
         stop|simple|teardown) _arguments ${registry_options[@]} ;;
+        integration)
+          if (( CURRENT == 2 )); then
+            local -a sub; sub=( ${=command_verbs} )
+            _describe -t subcommands "integration subcommand" sub
+          else
+            _arguments ${registry_options[@]}
+          fi
+          ;;
         remote)
           if (( CURRENT == 2 )); then
             local -a sub; sub=( ${=command_verbs} )
@@ -133,6 +141,22 @@ _yard() {
             local -a kn; kn=( ${${(f)"$(_yard_yards)"}/#/@} ); _describe -t yards 'key peer' kn
           elif [[ ${words[2]} == import || ${words[CURRENT-1]} == --file ]]; then
             _files
+          else
+            _arguments ${registry_options[@]}
+          fi
+          ;;
+        ssh-agent)
+          if (( CURRENT == 2 )); then
+            local -a sub; sub=( ${=command_verbs} )
+            _describe -t subcommands 'ssh-agent subcommand' sub
+          elif [[ ${words[2]} == unlock ]]; then
+            _arguments '--key[private key path]:private key:_files' \
+              '--ttl[key lifetime (for example 2h)]:duration:' \
+              '--yes[skip confirmation]' '--help[show help]'
+          elif [[ ${words[2]} == status ]]; then
+            _arguments '--json[print machine-readable status]' '--help[show help]'
+          elif [[ ${words[2]} == lock ]]; then
+            _arguments '--help[show help]'
           else
             _arguments ${registry_options[@]}
           fi

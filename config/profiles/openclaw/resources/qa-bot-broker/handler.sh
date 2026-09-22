@@ -467,7 +467,7 @@ emit_resource_assessment() { # <local-action> <true|false> [fixed consequence...
 require_no_resource_arguments() {
   local verb="$1"
   shift
-  [ "$#" -eq 0 ] || die "'$verb' does not accept additional arguments"
+  [ "$#" -eq 0 ] || svc_usage_error "'$verb' does not accept additional arguments"
 }
 
 validate_up_arguments() {
@@ -476,12 +476,12 @@ validate_up_arguments() {
     case "$1" in
       --source)
         src_override="${2:-}"
-        [ -n "$src_override" ] || die "--source needs a yard path"
+        [ -n "$src_override" ] || svc_usage_error "--source needs a yard path"
         shift
         ;;
       --redeploy) ;;
-      -*) die "unknown option '$1'" ;;
-      *) die "unexpected argument '$1'" ;;
+      -*) svc_usage_error "unknown option '$1'" ;;
+      *) svc_usage_error "unexpected argument '$1'" ;;
     esac
     shift
   done
@@ -493,7 +493,7 @@ validate_logs_arguments() {
   for argument in "$@"; do
     case "$argument" in
       -f|--follow) ;;
-      *) die "logs does not accept argument '$argument'" ;;
+      *) svc_usage_error "logs does not accept argument '$argument'" ;;
     esac
   done
 }
@@ -503,7 +503,7 @@ destroy_action_for_arguments() {
   for argument in "$@"; do
     case "$argument" in
       --purge) purge_requested=1 ;;
-      *) die "destroy does not accept argument '$argument'" ;;
+      *) svc_usage_error "destroy does not accept argument '$argument'" ;;
     esac
   done
   if [ "$purge_requested" -eq 1 ]; then printf 'destroy-purge\n'; else printf 'destroy\n'; fi
@@ -591,7 +591,7 @@ prepare_resource() { # <public-verb> [validated args...]
       validate_logs_arguments "$@"
       emit_resource_assessment logs false
       ;;
-    *) die "unknown 'yard qa-pool' resource verb: '$verb'" ;;
+    *) svc_usage_error "unknown 'yard qa-pool' resource verb: '$verb'" ;;
   esac
 }
 
@@ -606,7 +606,7 @@ require_resource_apply() { # <expected-local-action>
 sub="${1:-}"; [ $# -gt 0 ] && shift
 case "${SUBYARD_RESOURCE_MODE:-}" in
   prepare)
-    [ -n "$sub" ] || die "resource verb is required"
+    [ -n "$sub" ] || svc_usage_error "resource verb is required"
     prepare_resource "$sub" "$@"
     ;;
   apply)

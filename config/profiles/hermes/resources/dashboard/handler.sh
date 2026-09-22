@@ -339,7 +339,7 @@ emit_resource_assessment() {
 require_no_resource_arguments() {
   local verb="$1"
   shift
-  [ "$#" -eq 0 ] || die "'$verb' does not accept additional arguments"
+  [ "$#" -eq 0 ] || svc_usage_error "'$verb' does not accept additional arguments"
 }
 
 require_resource_apply() {
@@ -388,7 +388,7 @@ prepare_resource() {
       fi
       ;;
     is-up|status) emit_resource_assessment "$verb" false ;;
-    *) die "unknown Hermes dashboard resource verb '$verb'" ;;
+    *) svc_usage_error "unknown Hermes dashboard resource verb '$verb'" ;;
   esac
 }
 
@@ -403,7 +403,7 @@ sub="${1:-}"
 shift || true
 case "${SUBYARD_RESOURCE_MODE:-}" in
   prepare)
-    [ -n "$sub" ] || die "resource verb is required"
+    [ -n "$sub" ] || svc_usage_error "resource verb is required"
     prepare_resource "$sub" "$@"
     ;;
   apply)

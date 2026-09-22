@@ -33,8 +33,8 @@ set +a
   || fail "OpenCode provision hook is not wired"
 [ "$AGENT_opencode_COMMAND" = opencode ] || fail "OpenCode convergence command drifted"
 [ -x "$AGENT_opencode_PROVISION" ] || fail "OpenCode provision hook is not executable"
-grep -Fq '_provision_var="AGENT_' "$ROOT/scripts/04-provision-subyard.sh" \
-  || fail "Phase 3 does not discover agent provision hooks"
+grep -Fq '_provision_var="AGENT_' "$ROOT/scripts/reconcile-integrations.sh" \
+  || fail "Bounded integration adapter does not discover agent provision hooks"
 case "$AGENT_opencode_PERSIST" in
   *auth.json* | *'/log'* | *'/storage'*) fail "OpenCode secrets/logs/legacy storage are persisted" ;;
 esac

@@ -233,6 +233,27 @@ MOCK_INCUS_EXEC_READY_AFTER=2
 incus_wait_instance_agent test-project test-yard || fail "instance agent did not become ready"
 [ "$(cat "$MOCK_INCUS_EXEC_COUNT")" = 2 ] || fail "instance agent wait did not retry"
 
+# Simulate a healthy agent arriving after the container deadline, without waiting minutes.
+(
+  sleep() { SECONDS=$((SECONDS + 130)); }
+  unset SUBYARD_INCUS_AGENT_WAIT_TIMEOUT
+  for kind in vm container; do
+    reset_case
+    MOCK_INCUS_EXEC_READY_AFTER=2
+    if YARD_KIND="$kind" incus_wait_instance_agent test-project test-yard; then
+      [ "$kind" = vm ] || fail "container exceeded its agent deadline"
+    else
+      [ "$kind" = container ] || fail "slow VM agent was rejected"
+    fi
+  done
+  reset_case
+  MOCK_INCUS_EXEC_READY_AFTER=2
+  if YARD_KIND=vm SUBYARD_INCUS_AGENT_WAIT_TIMEOUT=120 \
+    incus_wait_instance_agent test-project test-yard; then
+    fail "VM agent wait ignored the explicit deadline"
+  fi
+)
+
 reset_case
 started=$SECONDS
 if MOCK_INCUS_EXEC_HANG=1 SUBYARD_INCUS_AGENT_WAIT_TIMEOUT=1 \

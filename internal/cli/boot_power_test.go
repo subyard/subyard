@@ -11,6 +11,7 @@ import (
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
+	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
 
 type bootNetworkGuard struct{}
@@ -18,6 +19,18 @@ type bootNetworkGuard struct{}
 func (bootNetworkGuard) Check(context.Context, []string) error { return nil }
 
 type bootPowerManagerFunc func(context.Context, string, string, string, bool) error
+
+type bootNetworkPolicyStub struct{}
+
+func (bootNetworkPolicyStub) WithStart(
+	_ context.Context,
+	_ yardnetwork.Yard,
+	start func() error,
+) error {
+	return start()
+}
+
+func bootLockStub() error { return nil }
 
 func (function bootPowerManagerFunc) SetInstancePower(
 	ctx context.Context,
@@ -45,7 +58,8 @@ func bootPowerFailureReconciler(powerError error) application.BootPowerReconcile
 		Power: bootPowerManagerFunc(func(context.Context, string, string, string, bool) error {
 			return powerError
 		}),
-		Network: bootNetworkGuard{},
+		Network: bootNetworkGuard{}, NetworkPolicy: bootNetworkPolicyStub{},
+		EnsureNetworkLock: bootLockStub,
 	}
 }
 
@@ -81,6 +95,7 @@ func TestRunBootPowerAndHasManaged(t *testing.T) {
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"p/yard": instance}}
 	reconciler := application.BootPowerReconciler{
 		Inventory: fake, Instances: fake, Power: fake, Network: bootNetworkGuard{},
+		NetworkPolicy: bootNetworkPolicyStub{}, EnsureNetworkLock: bootLockStub,
 	}
 	var stdout, stderr bytes.Buffer
 	if code := RunBootPower(context.Background(), []string{"has-managed"}, &stdout, &stderr, reconciler); code != 0 {

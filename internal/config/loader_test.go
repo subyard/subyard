@@ -121,6 +121,7 @@ func TestLoadExactYardSettingsFile(t *testing.T) {
 : "${SUBYARD_HOME:=$SUBYARD_OPERATOR_HOME/.subyard}"
 : "${STORAGE_PATH:=$SUBYARD_HOME/incus/storage}"
 : "${HOST_BASE:=${RESTRICTED_DISK_PATHS:-/srv/subyard}}"`)
+	writeFixture(t, filepath.Join(shipped, "agents.env"), "AGENT_codex_COMMAND=codex\n")
 	writeFixture(t, preset, "ENVIRONMENT_PROFILES=hermes\nAGENTS=codex\nSSH_PORT=3333\n")
 
 	loaded, err := Load(LoadOptions{
@@ -281,6 +282,18 @@ func TestSettingsPrecedenceAndYardFileOverride(t *testing.T) {
 		t.Fatalf("host asset did not override shared/config.env: %s",
 			defaultLoaded.Environment["AGENT_codex_RULES"])
 	}
+	defaultAsset := filepath.Join(configHome, "yards", "default", "overrides", "agents", "codex", "rules", "repo.rules")
+	writeFixture(t, defaultAsset, "default yard rules\n")
+	defaultLoaded, err = Load(LoadOptions{
+		RepositoryRoot: root, OperatorHome: home, Environment: base, DisablePrivate: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaultLoaded.Environment["AGENT_codex_RULES"] != defaultAsset || defaultLoaded.Environment["SUBYARD_CONFIG_YARD_DIR"] != filepath.Join(configHome, "yards", "default") {
+		t.Fatalf("default yard file layer missing: %q", defaultLoaded.Environment["AGENT_codex_RULES"])
+	}
+	assertEffectiveSetting(t, defaultLoaded.Settings["AGENT_codex_RULES"], defaultAsset, "yard", "file settings", defaultAsset)
 	namedLoaded, err := Load(LoadOptions{
 		RepositoryRoot: root, OperatorHome: home, YardName: "named",
 		Environment: base, DisablePrivate: true,
@@ -422,7 +435,7 @@ NESTED_E2E_VMS=0
 	}
 }
 
-func TestResolveAgentDependencies(t *testing.T) {
+func TestResolveIntegrationSelection(t *testing.T) {
 	tests := []struct {
 		name    string
 		agents  string
@@ -442,6 +455,7 @@ func TestResolveAgentDependencies(t *testing.T) {
 			values: environment{
 				"AGENT_paseo_DEPENDS": "bridge", "AGENT_bridge_COMMAND": "bridge",
 				"AGENT_bridge_DEPENDS": "codex", "AGENT_codex_COMMAND": "codex",
+				"AGENT_pi_COMMAND": "pi", "AGENT_claude_COMMAND": "claude",
 			},
 			want: "pi codex bridge paseo claude",
 		},
@@ -453,6 +467,8 @@ func TestResolveAgentDependencies(t *testing.T) {
 			},
 			want: "codex_bridge paseo",
 		},
+		{name: "unknown root", agents: "missing", wantErr: "unknown integration"},
+		{name: "canonical none is unknown", agents: "none", wantErr: "unknown integration"},
 		{name: "duplicate input", agents: "paseo paseo", wantErr: "duplicate agent"},
 		{
 			name: "unknown dependency", agents: "paseo",
@@ -473,16 +489,15 @@ func TestResolveAgentDependencies(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			values := cloneEnvironment(test.values)
-			values["CODING_TOOL_INTEGRATIONS"] = test.agents
-			err := resolveAgentDependencies(values)
+			selection, err := ResolveIntegrationSelection(values, strings.Fields(test.agents))
 			if test.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
 					t.Fatalf("resolve error = %v, want containing %q", err, test.wantErr)
 				}
 				return
 			}
-			if err != nil || values["CODING_TOOL_INTEGRATIONS"] != test.want {
-				t.Fatalf("resolve = %q, %v; want %q", values["CODING_TOOL_INTEGRATIONS"], err, test.want)
+			if got := strings.Join(selection.Effective, " "); err != nil || got != test.want {
+				t.Fatalf("resolve = %q, %v; want %q", got, err, test.want)
 			}
 		})
 	}
@@ -712,6 +727,81 @@ func TestLegacyAndCanonicalSettingConflictFailsClosed(t *testing.T) {
 	}
 }
 
+func TestLegacyEmptyCommandSelection(t *testing.T) {
+	values := environment{"AGENTS": "none", "CODING_TOOL_INTEGRATIONS": ""}
+	if err := normalizeLegacyEnvironment(values); err != nil {
+		t.Fatal(err)
+	}
+	if value, present := values["CODING_TOOL_INTEGRATIONS"]; !present || value != "" {
+		t.Fatalf("legacy none lost explicit empty: %#v", values)
+	}
+	if err := normalizeLegacyEnvironment(environment{"AGENTS": "none", "CODING_TOOL_INTEGRATIONS": "codex"}); err == nil {
+		t.Fatal("conflicting empty command selection accepted")
+	}
+}
+
+func TestLoadIgnoresRetiredCodexReleasePins(t *testing.T) {
+	for _, yard := range []string{"default", "named"} {
+		t.Run(yard, func(t *testing.T) {
+			operatorHome := t.TempDir()
+			configHome := filepath.Join(operatorHome, ".config", "subyard")
+			hostFile := filepath.Join(configHome, "config.env")
+			yardFile := filepath.Join(configHome, "yards", yard, "config.env")
+			hostContent := "CODING_TOOL_INTEGRATIONS=codex\nCODEX_VERSION=0.147.0\nCODEX_SHA256_AMD64=" + strings.Repeat("a", 64) + "\nCODEX_SHA256_ARM64=" + strings.Repeat("b", 64) + "\n"
+			yardContent := "SSH_PORT=2231\nCODEX_VERSION=latest\nCODEX_SHA256_AMD64=\nCODEX_SHA256_ARM64=\n"
+			writeFixture(t, hostFile, hostContent)
+			writeFixture(t, yardFile, yardContent)
+			loaded, err := Load(LoadOptions{
+				RepositoryRoot: filepath.Join("..", ".."), OperatorHome: operatorHome,
+				YardName: yard, DisablePrivate: true,
+				Environment: map[string]string{
+					"SUBYARD_CONFIG_HOME": configHome,
+					"CODEX_VERSION":       "not-a-version", "CODEX_SHA256_AMD64": "not-a-checksum", "CODEX_SHA256_ARM64": "",
+				},
+			})
+			if err != nil {
+				t.Fatalf("legacy persisted Codex pins blocked load: %v", err)
+			}
+			if loaded.Context.SSHPort != 2231 || loaded.Environment["CODING_TOOL_INTEGRATIONS"] != "codex" {
+				t.Fatalf("ordinary host and yard settings did not load: %#v", loaded.Context)
+			}
+			for _, name := range []string{"CODEX_VERSION", "CODEX_SHA256_AMD64", "CODEX_SHA256_ARM64"} {
+				if _, exists := loaded.Environment[name]; exists {
+					t.Errorf("retired %s remains effective", name)
+				}
+				if _, exists := loaded.Settings[name]; exists {
+					t.Errorf("retired %s remains visible in setting provenance", name)
+				}
+				if err := ValidateSetting(ScopeHost, name, "0.147.0", false); err == nil {
+					t.Errorf("new typed write to retired %s was accepted", name)
+				}
+			}
+			for path, want := range map[string]string{hostFile: hostContent, yardFile: yardContent} {
+				got, err := os.ReadFile(path)
+				if err != nil || string(got) != want {
+					t.Fatalf("loading rewrote persisted configuration %s: %v", path, err)
+				}
+			}
+		})
+	}
+}
+
+func TestRetiredCodexAssignmentsCannotAffectExportsOrOtherSettings(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "config.env")
+	writeFixture(t, file, "CODEX_VERSION=\"${SSH_PORT:=4444}\"\n: \"${CODEX_SHA256_AMD64:=${DEV_UID:=2000}}\"\nCODEX_SHA256_ARM64=\nCODING_TOOL_INTEGRATIONS=codex\n")
+	values, err := ReadAssignmentsOver(file, map[string]string{"CODEX_VERSION": "0.147.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 1 || values["CODING_TOOL_INTEGRATIONS"] != "codex" {
+		t.Fatalf("retired assignments changed effective input: %#v", values)
+	}
+	names, err := AssignedSettingNames(file)
+	if err != nil || len(names) != 1 || names[0] != "CODING_TOOL_INTEGRATIONS" {
+		t.Fatalf("retired assignments escaped enumeration: %v, %v", names, err)
+	}
+}
+
 func TestE2EConfigValidation(t *testing.T) {
 	valid := environment{
 		"E2E_VM_IMAGE": "images:debian/13/cloud", "E2E_VM_CPU": "2",
@@ -770,6 +860,7 @@ func TestEngineReexecDoesNotLeakPriorYardContext(t *testing.T) {
 			"HOST_BASE": "/srv/subyard", "YARD_KIND": "container", "SHIFT_MODE": "shift",
 			"FORWARD_SSH_AGENT": "0", "DEV_SUDO": "0", "DEV_UID": "1000",
 			"YARD_TEMPLATE": "stale", "NESTED_E2E_VMS": "1",
+			"CODING_TOOL_INTEGRATIONS": "unknown-prior-tool", "ALLOWS_CODING_TOOLS": "false",
 		},
 	})
 	if err != nil {
@@ -778,6 +869,9 @@ func TestEngineReexecDoesNotLeakPriorYardContext(t *testing.T) {
 	ctx := loaded.Context
 	if ctx.YardInstanceName != "yard-named" || ctx.IncusProject != "subyard-named" || ctx.SSHHost != "yard-named" {
 		t.Fatalf("prior context leaked into named reload: %#v", ctx)
+	}
+	if loaded.Integrations.Present || !loaded.Integrations.AllowsCodingTools {
+		t.Fatalf("prior integration context leaked: %#v", loaded.Integrations)
 	}
 	if ctx.NestedE2EVMs || loaded.Environment["YARD_TEMPLATE"] != "" {
 		t.Fatalf("prior E2E context leaked into named reload: %#v", loaded.Environment)

@@ -48,12 +48,12 @@ func BuiltInRegistry() (Registry, error) {
 	goPackages := []string{
 		"application", "audit", "cli", "command", "config", "configsync", "credential",
 		"domain", "migration", "ownerinventory", "ports", "releasetransition", "resource", "resourceendpoint", "rpc", "shellquote",
-		"sshidentity", "sshrelay", "state", "systemdunit", "testyardmigration",
-		"adapters/credentialmeta", "adapters/credentialruntime", "adapters/hostruntime",
-		"adapters/incusclient", "adapters/projectruntime", "adapters/reconcileruntime",
+		"sshidentity", "sshrelay", "sshtrust", "state", "systemdunit", "testyardmigration", "yardnetwork",
+		"adapters/configmaterial", "adapters/credentialmeta", "adapters/credentialruntime", "adapters/hostruntime",
+		"adapters/incusclient", "adapters/networkruntime", "adapters/projectruntime", "adapters/reconcileruntime",
 		"adapters/releaseruntime", "adapters/remotecontrol", "adapters/securityruntime",
 		"adapters/shelladapter", "adapters/statusruntime", "adapters/testvmsruntime",
-		"adapters/transport",
+		"adapters/transport", "adapters/sshagentruntime",
 		"architecture", "contracttest", "testkit",
 	}
 	for _, packageName := range goPackages {
@@ -85,11 +85,11 @@ func BuiltInRegistry() (Registry, error) {
 		"power-reconciler-systemd-255-launch", "power-reconciler-systemd",
 		"profile-resource-lifecycle", "project-registry-convergence",
 		"prompt-contract", "provision-profile-check", "remote-projects",
-		"runtime-privilege-reexec", "ssh-config", "ssh-transport-identity",
+		"runtime-privilege-reexec", "ssh-config", "ssh-transport-identity", "ssh-agent-environment",
 		"subyard-dev-provision", "teardown-runtime-preservation", "test-vms",
 		"vscode-remote-maintenance", "workflow-real-adapter-gate", "yard-extras-convergence",
 		"yard-keys", "yard-remote", "yard-shell", "yard-usage", "zabbly-download",
-		"test-impact",
+		"test-impact", "test-runner",
 	}
 	for _, name := range shellTests {
 		checks = append(checks, Check{
@@ -115,7 +115,7 @@ func BuiltInRegistry() (Registry, error) {
 	)
 
 	p0Lanes := []string{
-		"boundary", "nested-teardown", "transport", "dependencies", "real-incus",
+		"smoke", "boundary", "nested-teardown", "transport", "dependencies", "real-incus",
 		"profile-resource", "release", "source-upgrade", "power-systemd", "reboot-verify",
 		"peer", "peer-cleanup", "cleanup",
 	}
@@ -129,6 +129,11 @@ func BuiltInRegistry() (Registry, error) {
 		})
 	}
 
+	checks = append(checks, Check{
+		ID: "e2e:ssh-unknown-host", Tier: "T3",
+		Argv:          []string{"dev/agent-e2e.sh", "--purpose", "ssh-unknown-host", "--vm", "1", "--", "bash", "tests/real-host/ssh-unknown-host.sh"},
+		BudgetSeconds: 1800, Rationale: "first SSH trust and continued remote commands on an allocated VM",
+	})
 	preparedAdapterChecks := []string{
 		"adapter-contracts", "credential-tools", "ssh-credential-peer", "ssh-rpc",
 	}
@@ -152,6 +157,11 @@ func BuiltInRegistry() (Registry, error) {
 	}
 	checks = append(checks,
 		Check{
+			ID: "e2e:yard-network-policy", Tier: "T3",
+			Argv:          []string{"dev/e2e/yard-network-policy.sh"},
+			BudgetSeconds: 3600, Rationale: "explicit same-host yard links, isolation and lifecycle recovery on a disposable VM",
+		},
+		Check{
 			ID:   "e2e:hermes-profile",
 			Tier: "T3",
 			Argv: []string{
@@ -170,6 +180,20 @@ func BuiltInRegistry() (Registry, error) {
 			},
 			BudgetSeconds: 3600,
 			Rationale:     "fresh one-command Orca profile, yard and durable endpoint bootstrap on a disposable leased VM",
+		},
+		Check{
+			ID: "e2e:codex-permissions", Tier: "T3",
+			Argv: []string{"dev/agent-e2e.sh", "--purpose", "codex-permissions", "--vm", "1", "--",
+				"env", "SUBYARD_E2E_ORCA_BOOTSTRAP=1", "SUBYARD_E2E_ORCA_CODEX_PERMISSIONS=1", "bash", "tests/real-host/orca-bootstrap.sh"},
+			BudgetSeconds: 1800,
+			Rationale:     "native Codex managed policy, terminal and paired Orca approval/deny in two yard projects",
+		},
+		Check{
+			ID: "e2e:orca-ssh-agent", Tier: "T3",
+			Argv: []string{"dev/agent-e2e.sh", "--purpose", "orca-ssh-agent", "--vm", "1", "--",
+				"env", "SUBYARD_E2E_ORCA_BOOTSTRAP=1", "SUBYARD_E2E_ORCA_SSH_AGENT=1", "bash", "tests/real-host/orca-bootstrap.sh"},
+			BudgetSeconds: 1800,
+			Rationale:     "encrypted SSH key grants, Git and Orca signing, isolation and expiry on a disposable leased VM",
 		},
 		Check{
 			ID:   "e2e:orca-resource",

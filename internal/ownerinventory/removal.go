@@ -2,6 +2,7 @@ package ownerinventory
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -99,31 +100,107 @@ func (store Connections) prepareRemovalLocked(connection Connection, snapshot Sn
 		digest: hex.EncodeToString(digest[:])}, nil
 }
 
-func (store Connections) ApplyRemoval(plan RemovalPlan) (Connection, error) {
+func (store Connections) ApplyRemoval(
+	ctx context.Context, plan RemovalPlan,
+	refresh func(context.Context, Connection) (Snapshot, error),
+) (Connection, error) {
+	if err := store.validateRemovalPlan(plan); err != nil {
+		return Connection{}, err
+	}
+	if refresh == nil {
+		return Connection{}, errors.New("owner removal requires a fresh authoritative inventory refresh")
+	}
+	releaseMutation, err := store.acquireHostMutation(ctx, plan.HostID, true, false)
+	if err != nil {
+		return Connection{}, err
+	}
+	defer releaseMutation()
+	if err := store.validateRemovalPlan(plan); err != nil {
+		return Connection{}, err
+	}
+
 	connectionsMu.Lock()
-	defer connectionsMu.Unlock()
 	release, err := store.lock()
 	if err != nil {
+		connectionsMu.Unlock()
 		return Connection{}, err
 	}
-	defer release()
-	if err := store.recoverPendingLocked(); err != nil {
-		return Connection{}, err
+	err = store.recoverPendingLocked(plan.HostID)
+	if err == nil {
+		err = store.validateConnectionLocked(plan.connection)
 	}
-	current, err := store.prepareRemovalLocked(plan.connection, plan.snapshot)
+	release()
+	connectionsMu.Unlock()
 	if err != nil {
 		return Connection{}, err
 	}
-	if current.digest != plan.digest || current.HostID != plan.HostID {
-		return Connection{}, errors.New("owner removal plan is stale")
-	}
-	if err := store.writeRemovalJournal(plan.HostID); err != nil {
+
+	snapshot, err := refresh(ctx, plan.connection)
+	if err != nil {
 		return Connection{}, err
 	}
-	if err := store.applyRemovalLocked(plan.HostID); err != nil {
+
+	connectionsMu.Lock()
+	release, err = store.lock()
+	if err != nil {
+		connectionsMu.Unlock()
+		return Connection{}, err
+	}
+	err = store.recoverPendingLocked(plan.HostID)
+	if err == nil {
+		err = store.validateConnectionLocked(plan.connection)
+	}
+	if err == nil {
+		_, err = store.prepareRemovalLocked(plan.connection, snapshot)
+	}
+	if err == nil {
+		err = store.writeRemovalJournal(plan.HostID)
+	}
+	if err == nil {
+		err = store.applyRemovalLocked(plan.HostID)
+	}
+	release()
+	connectionsMu.Unlock()
+	if err != nil {
 		return Connection{}, err
 	}
 	return plan.connection, nil
+}
+
+func (store Connections) validateRemovalPlan(plan RemovalPlan) error {
+	if plan.HostID == "" || plan.HostID != plan.connection.HostID {
+		return errors.New("owner removal plan is invalid")
+	}
+	current, err := store.removalPlanFor(plan.connection, plan.snapshot)
+	if err != nil {
+		return err
+	}
+	if current.digest != plan.digest {
+		return errors.New("owner removal plan is stale")
+	}
+	return nil
+}
+
+func (store Connections) removalPlanFor(connection Connection, snapshot Snapshot) (RemovalPlan, error) {
+	if snapshot.FetchedAt.IsZero() || snapshot.Inventory.HostID != connection.HostID {
+		return RemovalPlan{}, errors.New("removal requires a fresh authoritative snapshot for the registered HostID")
+	}
+	if age := store.currentTime().Sub(snapshot.FetchedAt); age > Freshness || age < -Freshness {
+		return RemovalPlan{}, errors.New("removal snapshot is stale; refresh it before removal")
+	}
+	if err := snapshot.Inventory.Validate(); err != nil {
+		return RemovalPlan{}, err
+	}
+	payload, err := json.Marshal(struct {
+		Connection Connection
+		Snapshot   Snapshot
+	}{connection, snapshot})
+	if err != nil {
+		return RemovalPlan{}, err
+	}
+	digest := sha256.Sum256(payload)
+	return RemovalPlan{HostID: connection.HostID, connection: connection, snapshot: snapshot,
+		digest: hex.EncodeToString(digest[:])}, nil
 }
 
 func (store Connections) removalPath() string {
@@ -139,7 +216,7 @@ func (store Connections) writeRemovalJournal(hostID string) error {
 	return store.writeJournal(store.removalPath(), append(payload, '\n'))
 }
 
-func (store Connections) recoverRemovalLocked() error {
+func (store Connections) recoverRemovalLocked(heldHostIDs ...string) error {
 	payload, err := os.ReadFile(store.removalPath())
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -163,6 +240,15 @@ func (store Connections) recoverRemovalLocked() error {
 	if journal.SchemaVersion != removalSchema || validateHostID(journal.HostID) != nil {
 		return errors.New("owner removal journal is invalid")
 	}
+	release := func() {}
+	if !containsHostID(heldHostIDs, journal.HostID) {
+		var lockErr error
+		release, lockErr = store.acquireHostMutation(context.Background(), journal.HostID, true, true)
+		if lockErr != nil {
+			return lockErr
+		}
+	}
+	defer release()
 	return store.applyRemovalLocked(journal.HostID)
 }
 

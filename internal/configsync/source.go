@@ -154,34 +154,20 @@ func readSource(options Options, hostID string) (sourceSnapshot, error) {
 			return sourceSnapshot{}, fmt.Errorf("invalid versioned yard entry %q for host %s", name, hostID)
 		}
 		yardRoot := filepath.Join(yardsRoot, name)
-		if name == "default" {
-			if err := validateChildren(yardRoot, map[string]bool{"config.env": false}); err != nil {
-				return sourceSnapshot{}, fmt.Errorf(
-					"default yard supports only scalar config.env settings: %w", err,
-				)
-			}
-			if err := snapshot.readConfig(
-				filepath.Join(yardRoot, "config.env"), "yards/default/config.env",
-				config.ScopeYard, true,
-			); err != nil {
-				return sourceSnapshot{}, fmt.Errorf("default yard: %w", err)
-			}
-			continue
-		}
 		if err := validateChildren(yardRoot, map[string]bool{
 			"config.env": false, "overrides": true,
 		}); err != nil {
 			return sourceSnapshot{}, fmt.Errorf("yard %s: %w", name, err)
 		}
 		sourceConfig := filepath.Join(yardRoot, "config.env")
-		if _, err := os.Lstat(sourceConfig); err != nil {
+		if _, err := os.Lstat(sourceConfig); err != nil && name != "default" {
 			if errors.Is(err, os.ErrNotExist) {
 				return sourceSnapshot{}, fmt.Errorf("yard %s has no config.env definition", name)
 			}
 			return sourceSnapshot{}, err
 		}
 		targetConfig := filepath.ToSlash(filepath.Join("yards", name, "config.env"))
-		if err := snapshot.readConfig(sourceConfig, targetConfig, config.ScopeYard, true); err != nil {
+		if err := snapshot.readConfig(sourceConfig, targetConfig, config.ScopeYard, name != "default"); err != nil {
 			return sourceSnapshot{}, fmt.Errorf("yard %s: %w", name, err)
 		}
 		targetAssets := filepath.ToSlash(filepath.Join("yards", name, "overrides", "agents"))
@@ -190,7 +176,9 @@ func readSource(options Options, hostID string) (sourceSnapshot, error) {
 		); err != nil {
 			return sourceSnapshot{}, fmt.Errorf("yard %s overrides: %w", name, err)
 		}
-		snapshot.yardNames = append(snapshot.yardNames, name)
+		if name != "default" {
+			snapshot.yardNames = append(snapshot.yardNames, name)
+		}
 	}
 	sort.Strings(snapshot.yardNames)
 	if err := snapshot.ensureTracked(); err != nil {

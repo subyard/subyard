@@ -21,6 +21,8 @@ make build
 `make build` compiles the development binary at `.build/yard`; `go.mod` selects the Go toolchain.
 Run `./tests/run.sh` before finishing shell or CLI changes. CI additionally runs
 `shellcheck -x -S warning` over the CLI, scripts, provision hooks, tests and Bash completion.
+Linux CLI tests also require util-linux `script` to exercise resource commands with a real
+controlling terminal, including terminal-input isolation and cancellation.
 
 If there is any doubt that behavior is covered or a problem is reproduced, use an allocated
 `test-vms` slot to reproduce and verify it on real GNU/Linux hosts. A green host-free test is not a
@@ -148,6 +150,18 @@ dev/agent-e2e.sh --slot "$slot" --purpose real-host-check --vm 1 -- \
 The runner filters private and ignored files, verifies the worktree bundle and removes its guest
 worktree. Every lease-taking invocation prints `yard + project + run + purpose` for attribution.
 
+For first SSH trust and continuation of ordinary remote commands, run the focused fixture on a
+free slot:
+
+```sh
+dev/agent-e2e.sh --slot "$slot" --purpose ssh-unknown-host --vm 1 -- \
+  bash tests/real-host/ssh-unknown-host.sh
+```
+
+It initializes a disposable yard, uses an isolated owner SSH server and controller trust store,
+removes only its test yard's key, and checks confirmation and continuation of `sync`. It never
+edits the operator's SSH trust. This focused check does not replace the full P0 gate.
+
 The default pool has slots 1 and 2, but callers must use the configured capacity reported by status.
 The live lease acceptance always exercises one exact slot and, when a second exists, adds concurrent
 cross-slot isolation. Additional slots remain unselected and must retain the same state, lease epoch
@@ -155,11 +169,28 @@ and resource generation throughout the run.
 
 ### Test lanes and gates
 
-`dev/e2e/p0-acceptance.sh --slot N` is the continuous P0 release gate. Addressable lanes require the
-same explicit selector and are diagnostics: they shorten a rerun after a late failure but never turn
-a partial pass into a fresh-install release result. `--list-lanes` does not acquire and needs no slot.
+The same-host network policy acceptance creates synthetic local yards and verifies explicit
+links, isolation toggles, spoofing protection and managed lifecycle behavior. Choose an available
+slot from fresh status, then run:
 
-Before current `yard init`, VM1 seeds the legacy convergence fixture with:
+```sh
+dev/e2e/yard-network-policy.sh --slot N
+dev/e2e/yard-network-policy.sh --slot N --vm 2  # select the second guest when needed
+```
+
+This controller owns one lease across setup, a selected-guest reboot and resumed validation;
+`--vm` accepts `1` or `2` and defaults to `1`. It changes
+network policy only inside the disposable VM and does not enable isolation on the operator's host.
+A network implementation change still requires a fresh `--lane full` P0 below.
+
+`dev/e2e/p0-acceptance.sh --slot N` is the fresh release smoke required before publication. It is an
+external manual gate; GitHub workflows do not receive pool access or enforce it automatically.
+`--lane full` runs the exhaustive compatibility and recovery matrix periodically and when selected
+for a high-risk change. Addressable targeted lanes shorten diagnosis, but do not replace a fresh
+release smoke. `--list-lanes` does not acquire and needs no slot.
+
+During the full owner compatibility chain, before current `yard init`, VM1 seeds the legacy
+convergence fixture with:
 
 ```sh
 SUBYARD_E2E_LEGACY_FIXTURE=1 \
@@ -170,28 +201,166 @@ This fixture is restricted to disposable VM1 candidate yards.
 
 Use the advisory [change-impact testing workflow](testing.md) to select affected host-free checks
 and targeted lanes for a diff. The selector only recommends checks; targeted evidence does not
-replace this section's continuous full P0 release gate.
+replace this section's fresh release-smoke gate. A `full_p0.required` result requires the explicit
+`--lane full` matrix, which includes the release smoke.
+
+The focused AppArmor regression creates a temporary container yard on VM1, exercises failed
+capability probes and both real Incus AppArmor transitions, and verifies Docker and runtime
+preservation. It restores its marked systemd override and tears down its yard. Run it on a free
+slot whose inner Incus starts with AppArmor enabled; it is targeted evidence, not a full P0:
+
+```sh
+dev/agent-e2e.sh --slot "$slot" --purpose apparmor-probe --vm 1 -- \
+  bash dev/e2e/incus-apparmor-probe.sh
+```
+
+The Incus group regression uses a temporary operator to exercise the first named `init` before
+`incus-admin` membership is active. It verifies the real `sg` restart, explicit command overrides,
+independent yard SSH ports and an idempotent retry, then removes its marked operator and yard:
+
+```sh
+dev/agent-e2e.sh --slot "$slot" --purpose incus-group-reexec --vm 1 -- \
+  bash dev/e2e/incus-group-reexec.sh
+```
 
 | Lane | Prerequisites and timeout | Mutable scope | Classification |
 | --- | --- | --- | --- |
 | `./tests/run.sh` | Go toolchain; bounded by CI | temporary host-free roots and `.build/yard` | required host-free gate |
 | `dev/process-coverage.sh` | Go toolchain; selected host-free process contracts | `.build/coverage` and test-owned temporary roots | diagnostic coverage gate |
-| `boundary` | one broker lease; SSH connect deadlines | read-only facade, routes and negative probes | required inside continuous P0 |
-| `transport` | both allocated VMs; bounded SSH disconnect probe | one marker-owned remote sleep and temporary controller log | required inside continuous P0 |
-| `nested-teardown` | VM2, KVM and nested Incus; bounded install, boot and cleanup waits | marker-owned outer VM, nested yard and data-boundary fixtures | required inside continuous P0 |
+| `smoke` (default) | both allocated VMs; capacity/dependency preflight and one reboot | marked Incus, release and peer fixtures described below | required external/manual publication gate |
+| `boundary` | one broker lease; SSH connect deadlines | read-only facade, routes and negative probes | required in smoke and full |
+| `transport` | both allocated VMs; bounded SSH disconnect probe | one marker-owned remote sleep and temporary controller log | required in smoke and full |
+| `nested-teardown` | VM2, KVM and nested Incus; bounded install, boot and cleanup waits | marker-owned outer VM, nested yard and data-boundary fixtures | targeted diagnostic; required in full |
 | `dependencies` | retained guest baseline; 20-minute cold Go download deadline | marker-owned cold caches only | periodic targeted bootstrap diagnostic |
-| `real-incus` | VM1, KVM, persistent Incus pool; 15-minute mutation deadlines | marked project, container, VM and image aliases | required through `release` in continuous P0 |
-| `profile-resource` | VM1 and current candidate | temporary dependency-free resource/state | required through `release` in continuous P0 |
-| `release` | both VMs, capacity preflight; bounded nested install/boot deadlines | fresh candidate yards, current and legacy convergence | targeted diagnostic; required inside continuous P0 |
-| `source-upgrade` | VM1 when targeted; VM2 worker in full; two bounded reboots | marked source-install/migration fixture | targeted diagnostic; required inside continuous P0 |
-| `power-systemd` | VM1 when targeted; VM2 worker in full; real Incus, Ubuntu 24.04/systemd 255; 900-second image-cache fill, 600-second local launch, 300-second restart and bounded TERM-to-KILL Incus commands | test-owned image alias, marker-owned parser project plus snapshotted/restored host power runtime | targeted diagnostic; required inside continuous P0 |
+| `real-incus` | VM1 when targeted/smoke and in the full owner chain; VM2 also runs it as a full-matrix prerequisite; KVM, persistent Incus pool and 15-minute mutation deadlines | marked project, container, VM and image aliases | required in smoke and full |
+| `profile-resource` | VM1 and current candidate | temporary dependency-free resource/state and bound-resource profile | targeted diagnostic; full covers only the dependency-free resource portion |
+| `release` | VM1 fixture with two-VM allocation/preflight; bounded nested install/boot deadlines | fresh candidate yards, current and legacy convergence | targeted diagnostic; covered by the full owner chain |
+| `source-upgrade` | VM1 when targeted; VM2 worker in full; two bounded reboots | marked source-install/migration fixture | targeted diagnostic; required in full |
+| `power-systemd` | VM1 when targeted; VM2 worker in full; real Incus, Ubuntu 24.04/systemd 255; 900-second image-cache fill, 600-second local launch, 300-second restart and bounded TERM-to-KILL Incus commands | test-owned image alias, marker-owned parser project plus snapshotted/restored host power runtime | targeted diagnostic; required in full |
 | `reboot-verify` | VM1, real Incus and cached image preparation; published v0.8.0/candidate fixture; two boot checks with bounded power reconciliation | marked upgrade fixture, two guest reboots, snapshotted/restored host power runtime | targeted transport/recovery diagnostic |
-| `peer` | both VMs and synthetic keys | marked cross-owner RPC, project and credential fixtures | targeted diagnostic; required inside continuous P0 |
+| `release-smoke` (internal phase) | VM1, pinned v0.14.0 installer, candidate package and one reboot | marked yard/project plus retained operator and guest data | required in smoke and full; not a standalone lane |
+| `peer` | both VMs and synthetic keys | marked cross-owner RPC, project and credential fixtures | smoke covers fresh init/projects/RPC; full adds offline and credential scenarios |
 | `peer-cleanup`, `cleanup` | same retained allocation | exact marked fixtures and run worktrees | standalone idempotent cleanup/verifier |
-| `--slot N` (`full`) | all prerequisites above | union of the marked scopes | mandatory continuous release gate |
+| `--lane full` | all prerequisites above | union of the marked scopes | periodic manual and risk-selected exhaustive matrix; includes release smoke |
+
+The integration selection fixtures use only marker-owned yards on allocated VM1. They exercise
+fresh/default selection, legacy selection adoption with established inventory, evidence-backed
+retirement, desired-retained failure and retry, and stopped-yard rejection without model API calls:
+
+```sh
+dev/agent-e2e.sh --slot "$slot" --purpose integration-selection --vm 1 -- \
+  bash dev/e2e/integration-selection.sh container
+```
+
+Other modes are `vm`, `default`, `special` (fresh test-vms role), and `upgrade` (owned
+ordinary-yard artifacts retired when adopting the test-vms role). The `default` mode installs
+all five fresh-default integrations and needs their normal package download access. Test config,
+physical project and instance names, and teardown are isolated from the retained host baseline.
+
+The pinned legacy-upgrade fixture installs the published v0.14.0 ordinary default, then exercises
+candidate-owned planning, exact ownership adoption, disable/re-enable preservation,
+rollback with the retained config writer, and a forward retry:
+
+```sh
+dev/agent-e2e.sh --slot "$slot" --purpose integration-legacy-upgrade --vm 1 -- \
+  bash dev/e2e/integration-legacy-upgrade.sh
+```
+
+The remote fixture runs a temporary loopback OpenSSH server with a synthetic key forced to the
+selected owner's RPC endpoint. It uses independent controller settings and exercises real framed
+plan/execute, digest tampering, replay, public remote status/enable/disable and stopped refusal:
+
+```sh
+dev/agent-e2e.sh --slot "$slot" --purpose integration-remote --vm 1 -- \
+  bash dev/e2e/integration-remote.sh
+```
+
+These are targeted lifecycle checks; publication still requires the fresh release smoke.
+Run `--lane full` when selected by change impact or required by broader runtime coupling.
 
 Android/GPU, real credentials and external-service profiles use separate explicitly prerequisite-
 gated lanes. A generic dependency-free resource pass does not report those handlers green.
+
+Orca has three real-host fixtures. Run each on VM1 of an explicitly selected available slot:
+
+```sh
+dev/agent-e2e.sh --slot "$slot" --purpose orca-bootstrap --vm 1 -- \
+  env SUBYARD_E2E_ORCA_BOOTSTRAP=1 bash tests/real-host/orca-bootstrap.sh
+dev/agent-e2e.sh --slot "$slot" --purpose orca-existing-yard --vm 1 -- \
+  env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_EXISTING_YARD=1 \
+  bash tests/real-host/orca-bootstrap.sh
+dev/agent-e2e.sh --slot "$slot" --purpose orca-resource --vm 1 -- \
+  env SUBYARD_E2E_ORCA_RESOURCE=1 bash tests/real-host/orca-resource.sh
+dev/agent-e2e.sh --slot "$slot" --purpose orca-projects --vm 1 -- \
+  env SUBYARD_E2E_ORCA_PROJECTS=1 bash tests/real-host/orca-projects.sh
+```
+
+Bootstrap installs a packaged candidate and exercises public commands through a real terminal.
+For the narrow Codex configuration regression, run:
+
+```sh
+dev/agent-e2e.sh --slot "$slot" --purpose orca-codex-config --vm 1 -- \
+  env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_CODEX_CONFIG=1 \
+  bash tests/real-host/orca-bootstrap.sh
+```
+
+This mode seeds representative TOML runtime additions, verifies that they do not block readiness,
+repairs a deliberately changed managed policy through `config apply`, then verifies Orca restart,
+saved-client connectivity and `migrate --check`. It skips the broader JSON import/sync and down/up
+scenarios. The seeded additions model the observed drift; they do not prove which desktop action
+writes each runtime field.
+
+For Codex permissions across terminal and Orca launches:
+
+```sh
+dev/agent-e2e.sh --slot "$slot" --purpose codex-permissions --vm 1 -- \
+  env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_CODEX_PERMISSIONS=1 \
+  bash tests/real-host/orca-bootstrap.sh
+```
+
+This focused mode installs the native Codex CLI and stock Orca in a disposable yard.
+It verifies managed policy reconciliation through `yard init` and exercises runtime approval
+with synthetic model responses and disposable Git repositories. It uses no real agent credentials
+or external model APIs. These checks do not replace interactive VS Code/Desktop acceptance or
+establish a security boundary against alternative Git commands.
+
+For temporary SSH-key access, run the focused current-candidate fixture:
+
+```sh
+dev/agent-e2e.sh --slot "$slot" --purpose orca-ssh-agent --vm 1 -- \
+  env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_SSH_AGENT=1 \
+  bash tests/real-host/orca-bootstrap.sh
+```
+
+It initializes two isolated yards, starts stock Orca and uses a synthetic encrypted key with a
+real passphrase terminal. It checks Git pushes from a guest shell and an existing paired Orca
+terminal, wrong-passphrase rejection, guest agent-mutation denial, cross-yard isolation and
+new-authentication failure after revocation and expiry. This mode skips the packaging, upgrade,
+configuration and port-collision scenarios; it does not install coding-agent CLIs or call model APIs.
+The focused SSH and Codex configuration modes reuse the pinned Orca package cache after SHA-256
+verification when available. They verify runtime integration, not a fresh Orca package download.
+
+For SSH fixture debugging, opt in to `SUBYARD_E2E_ORCA_KEEP_FAILED=1` to retain a failed marked
+fixture after revoking its key grants. The runner still releases the VM lease. On that same slot,
+rerun with `SUBYARD_E2E_ORCA_RESUME` set to the reported fixture directory; the current candidate
+reconciles the existing yards and repeats the assertions. Successful runs remove the fixture.
+
+For a narrow predecessor upgrade check, set `SUBYARD_E2E_ORCA_UPGRADE_FROM` to an exact published
+version and `SUBYARD_E2E_ORCA_UPGRADE_INSTALLER_SHA256` to that release's installer asset digest.
+This mode starts Orca on a converged published release with two local yards, changes the candidate's
+managed Claude defaults, then runs the public update command. It checks all-local config convergence, release
+readiness, Orca restart, the saved client grant, endpoint and runtime JSON before cleanup.
+If the update command fails, the fixture reports its marked temporary state path and retains the
+test yards for diagnosis on the disposable VM. Clean up those exact yards and marked state after
+the investigation.
+The existing-yard variant completes release activation with Claude and Pi selected before starting
+Orca, then checks release convergence and materialized settings. The resource fixture verifies
+paired stock clients, terminal input/output, service lifecycle, exact owner/loopback routes and a
+paired desktop under Xvfb. A bounded loopback DevTools driver uses the installed client's preload
+API, reloads the renderer, verifies the remote project in its sidebar and requests normal closure.
+Pairing capabilities stay in protected temporary files. Owner-address discovery is synthetic;
+the fixture does not verify a real Tailscale account. Projects covers production local and SSH-remote
+project actions, checkout discovery and preservation of identities and terminal tabs.
 
 Standalone `reboot-verify` prepares its own power reconciler through the same marked
 published-release upgrade fixture used by `power-systemd`. It works after the last test yard
@@ -203,6 +372,8 @@ List or run one lane:
 
 ```sh
 dev/e2e/p0-acceptance.sh --list-lanes
+dev/e2e/p0-acceptance.sh --slot "$slot"
+dev/e2e/p0-acceptance.sh --slot "$slot" --lane full
 dev/e2e/p0-acceptance.sh --slot "$slot" --lane peer
 dev/e2e/p0-acceptance.sh --slot "$slot" --lane source-upgrade --resume
 SUBYARD_P0_WAIT_SECONDS=1200 \
@@ -223,10 +394,12 @@ The cache fill and local launch both emit progress. Their independent positive-i
 `SUBYARD_SYSTEMD255_RESTART_TIMEOUT_SECONDS`. A timed-out cache fill or launch fails once with its
 operation and limit. The fixture never starts a second remote pull or launch after a timeout.
 
-The continuous gate keeps the long owner/release chain on VM1. VM2 independently runs nested
-teardown, the controller suite, a real-Incus platform check, source upgrade and power-systemd in
-that order. The two chains are joined before peer checks and cleanup. Their four logical phase
-checkpoints are committed atomically only after both chains pass. The parallel matrix has a
+The full matrix keeps the long historical owner, release and broker chain on VM1. VM2 independently
+runs nested teardown, a real-Incus platform check, source upgrade and power-systemd in that order.
+The two chains join before the shared release-smoke phase and full peer checks, followed by cleanup
+and final boundary verification. Host-free `./tests/run.sh`, prepared loopback SSH/crypto contracts
+and the owner engine-release contract run in their own required gates and are not repeated here.
+The parallel matrix checkpoints are committed atomically only after both chains pass. It has a
 210-minute kernel-monotonic work deadline by default (`SUBYARD_P0_FULL_MATRIX_TIMEOUT_SECONDS`).
 The controller reads `/proc/uptime`, so host wall-clock corrections cannot expire the matrix or its
 shutdown grace periods early. On expiry, runner children get a bounded 30-second TERM grace and

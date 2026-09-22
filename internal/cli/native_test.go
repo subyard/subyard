@@ -21,6 +21,7 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
 	"github.com/Subyard/Subyard/internal/application"
+	"github.com/Subyard/Subyard/internal/audit"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/domain"
@@ -413,7 +414,7 @@ func TestStructuredStartSharesPlanAndAdapterAcrossCLIAndRPC(t *testing.T) {
 		Environment: append(environment, "SUBYARD_OPERATION_ID=operation-cli"),
 		WorkingDir:  root,
 		Stdout:      &stdout, Stderr: &stderr, AdapterRunner: cliRunner, Prompt: prompt, Clock: clock,
-		Incus: lifecycleIncus(),
+		Incus: lifecycleIncus(), NetworkPolicy: allowTestNetworkPolicy(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -435,6 +436,7 @@ func TestStructuredStartSharesPlanAndAdapterAcrossCLIAndRPC(t *testing.T) {
 	program, err = New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 		Stderr: &stderr, AdapterRunner: rpcRunner, Clock: clock, Incus: lifecycleIncus(),
+		NetworkPolicy: allowTestNetworkPolicy(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -514,6 +516,9 @@ func TestUpdateUsesThePreparedReleaseAcrossRPCPlanAndExecute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if records, readErr := (audit.UpdateHistory{Home: environmentValue(environment, "SUBYARD_HOME")}).Read(10); readErr != nil || len(records) != 0 {
+		t.Fatalf("RPC preparation wrote update history: records=%#v err=%v", records, readErr)
+	}
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -553,6 +558,10 @@ func TestUpdateUsesThePreparedReleaseAcrossRPCPlanAndExecute(t *testing.T) {
 		!slices.Equal(configApplier.yards, []string{"default"}) {
 		t.Fatalf("release RPC bypassed its prepared operation: args=%q events=%q configs=%q err=%v",
 			arguments, events, configApplier.yards, err)
+	}
+	records, readErr := (audit.UpdateHistory{Home: environmentValue(environment, "SUBYARD_HOME")}).Read(10)
+	if readErr != nil || len(records) != 1 || records[0].OperationID != "operation-update" || records[0].Status != "success" {
+		t.Fatalf("RPC execution history=%#v err=%v", records, readErr)
 	}
 }
 
@@ -663,21 +672,25 @@ func TestUpdateTypedConfirmationSeparatesCheckActivationAndRollbackPreflight(t *
 
 	t.Run("declined activation leaves published candidate inactive", func(t *testing.T) {
 		root, environment, runtimeRoot := updateReleaseFixture(t)
-		prompt := &testkit.Prompt{Answers: []bool{false}}
 		configs := &recordingConfigApplier{}
-		var stderr bytes.Buffer
+		var stdout, stderr bytes.Buffer
 		program, err := New(Options{
 			RepositoryRoot: root, Program: "yard",
 			Arguments:   []string{"update", "--version", "1.2.3", "--runtime-root", runtimeRoot},
-			Environment: environment, WorkingDir: root, Prompt: prompt, Config: configs,
-			Stdout: &bytes.Buffer{}, Stderr: &stderr,
+			Environment: environment, WorkingDir: root, Config: configs,
+			Stdin: strings.NewReader("n\n"), Stdout: &stdout, Stderr: &stderr,
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if code := program.Run(context.Background()); code != 1 || len(prompt.Requests) != 1 ||
-			prompt.Requests[0].Default != domain.ConfirmationDefaultYes {
-			t.Fatalf("code=%d prompt=%#v stderr=%q", code, prompt.Requests, stderr.String())
+		program.promptInputTerminal = func() bool { return true }
+		if code := program.Run(context.Background()); code != 1 {
+			t.Fatalf("code=%d stderr=%q", code, stderr.String())
+		}
+		preview := strings.Index(stdout.String(), "Update: release-old -> 1.2.3\n")
+		confirmation := strings.Index(stdout.String(), "Proceed? [Y/n]")
+		if preview < 0 || confirmation <= preview || strings.Count(stdout.String(), "Proceed?") != 1 {
+			t.Fatalf("expected release versions before a single confirmation: %q", stdout.String())
 		}
 		if target, err := os.Readlink(filepath.Join(runtimeRoot, "current")); err != nil ||
 			target != "releases/release-old" {
@@ -888,6 +901,7 @@ case "${1:-}" in
 	    runtime_root=$(printf '%s' "$request" | jq -r .runtimeRoot)
 	    target_release=$(printf '%s' "$request" | jq -r .target)
 	    if [ "$mode" = inspect ]; then
+	      if [ "${UPDATE_CANCEL_INSPECTION:-}" = 1 ]; then exec sleep 30; fi
 	      active=$(readlink "$runtime_root/current")
 	      active_release=${active#releases/}
 	      printf '{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["activate retained runtime"]},"outcome":{"status":"migration-required","reachedGoal":false,"active":"%s","target":"%s","code":"transition-required","message":"the retained release transition has not started","retry":"run yard update"}}}\n' "$active_release" "$target_release"
@@ -1180,6 +1194,7 @@ case "${1:-}" in
     runtime_root=$(printf '%s' "$request" | jq -r .runtimeRoot)
     target_release=$(printf '%s' "$request" | jq -r .target)
     if [ "$mode" = inspect ]; then
+      if [ "${UPDATE_CANCEL_INSPECTION:-}" = 1 ]; then exec sleep 30; fi
       if [ "${UPDATE_BLOCK_INSPECTION:-}" = 1 ]; then
         printf '%s\n' '{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["inspect blocked candidate"]},"blockers":[{"code":"migration-stale","resource":"yard.fixture","message":"the candidate resource changed","retry":"run yard update --check"}],"outcome":{"status":"operator-action-required","reachedGoal":false,"active":"release-old","target":"1.2.3-f16d05ec6b29","code":"migration-stale","message":"the candidate resource changed","retry":"run yard update --check","transaction":"tx-0123456789abcdef"}}}'
         exit 0
@@ -1608,7 +1623,7 @@ func TestStructuredStartAutomationSkipsOnlyTheLocalPrompt(t *testing.T) {
 				RepositoryRoot: root, Program: "yard", Arguments: test.arguments,
 				Environment: append(environment, "SUBYARD_OPERATION_ID=operation-automation"),
 				WorkingDir:  root, Stderr: &stderr, AdapterRunner: runner, Prompt: prompt,
-				Incus: lifecycleIncus(),
+				Incus: lifecycleIncus(), NetworkPolicy: allowTestNetworkPolicy(),
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -1760,7 +1775,7 @@ func TestStructuredStartRunsOverFramedRPCSession(t *testing.T) {
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"rpc", "--stdio"},
 		Environment: environment, WorkingDir: root, Stdin: server, Stdout: server, Stderr: &stderr,
 		AdapterRunner: runner, Clock: testkit.NewManualClock(time.Unix(100, 0)),
-		Incus: lifecycleIncus(),
+		Incus: lifecycleIncus(), NetworkPolicy: allowTestNetworkPolicy(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -3250,7 +3265,7 @@ func TestTrustedInProcessReleaseTransitionChildBypassesMutationGate(t *testing.T
 	program, err := New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Environment: environment, WorkingDir: root, Stderr: &stderr,
-		AdapterRunner: runner, Incus: lifecycleIncus(),
+		AdapterRunner: runner, Incus: lifecycleIncus(), NetworkPolicy: allowTestNetworkPolicy(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -4792,11 +4807,12 @@ func TestProjectImportAndCloneAllocateSameBasenameInEitherOrder(t *testing.T) {
 			program.abortProjectExecution(context.Background(), thirdRun)
 
 			program.env["SUBYARD_OPERATION_ID"] = "op-repeat"
-			if _, err := program.prepareProjectClone(
+			repeated, err := program.prepareProjectClone(
 				context.Background(), loaded,
 				[]string{"https://example.invalid/Demo.git"},
-			); err == nil || !strings.Contains(err.Error(), "already in the yard") {
-				t.Fatalf("repeat clone = %v", err)
+			)
+			if err != nil || repeated.Record.ProjectID != "Demo-3" {
+				t.Fatalf("repeat clone = %#v, %v", repeated, err)
 			}
 		})
 	}
@@ -5068,23 +5084,41 @@ func TestUsageAndShellExecArgumentsPreserveTypedBoundaries(t *testing.T) {
 		t.Fatalf("usage exec boundary drifted: %#v", usage)
 	}
 
-	devShell := shellExecArguments(yard, false, "/srv/workspaces/demo/src", []string{"sh", "-lc", "pwd"})
+	devCommand := []string{"sh", "-lc", "printf '%s'", "space arg", "", "$(touch should-not-run)"}
+	devShell := shellExecArguments(yard, false, "/srv/workspaces/demo/src", devCommand)
 	for _, expected := range [][]string{
-		{"--user", "1000"}, {"--group", "1000"}, {"--env", "HOME=/home/dev"},
-		{"--cwd", "/srv/workspaces/demo/src"}, {"--", "sh", "-lc", "pwd"},
+		{"--env", "SSH_AUTH_SOCK=/home/dev/.ssh/subyard-agent.sock"},
+		{"--user", "0"}, {"--group", "0"}, {"--env", "HOME=/home/dev"},
+		{"--cwd", "/srv/workspaces/demo/src"},
+		{"--", "/usr/sbin/runuser", "-u", "dev", "--"},
 	} {
 		if !containsSequence(devShell, expected) {
 			t.Fatalf("dev shell omitted %#v: %#v", expected, devShell)
 		}
 	}
-	rootShell := shellExecArguments(yard, true, "/home/dev", nil)
+	devSuffix := devShell[len(devShell)-len(devCommand):]
+	if !slices.Equal(devSuffix, devCommand) {
+		t.Fatalf("dev shell changed command boundaries: got=%#v want=%#v", devSuffix, devCommand)
+	}
+	devInteractiveShell := shellExecArguments(yard, false, "/home/dev", nil)
+	if !containsSequence(devInteractiveShell, []string{
+		"-t", "--", "/usr/sbin/runuser", "-u", "dev", "--", "bash", "-l",
+	}) {
+		t.Fatalf("dev interactive shell omitted runuser: %#v", devInteractiveShell)
+	}
+	rootCommand := []string{"sh", "-lc", "printf '%s'", "space arg", "", "$(touch should-not-run)"}
+	rootShell := shellExecArguments(yard, true, "/home/dev", rootCommand)
 	for _, expected := range [][]string{
 		{"--user", "0"}, {"--group", "0"}, {"--env", "HOME=/root"},
-		{"--cwd", "/home/dev"}, {"-t", "--", "bash", "-l"},
+		{"--cwd", "/home/dev"}, {"--", "sh", "-lc"},
 	} {
 		if !containsSequence(rootShell, expected) {
 			t.Fatalf("root shell omitted %#v: %#v", expected, rootShell)
 		}
+	}
+	rootSuffix := rootShell[len(rootShell)-len(rootCommand):]
+	if !slices.Equal(rootSuffix, rootCommand) {
+		t.Fatalf("root shell changed command boundaries: got=%#v want=%#v", rootSuffix, rootCommand)
 	}
 }
 
@@ -5117,8 +5151,9 @@ func nativeFixture(t *testing.T) (string, []string, string) {
 		"teardown||@teardown||forward|mutate|dynamic|public|lifecycle|teardown|teardown|teardown|--keep-data --yes --help|",
 		"status||@status||forward|read|never|public|lifecycle|status|status|status|--all --help|",
 		"space||@space||local|read|never|public|lifecycle|simple|space|space|--refresh --help|",
-		"logs||@logs||forward|read|never|public|lifecycle|simple|logs|logs|-f -n --yes --help|",
+		"logs||@logs||forward|read|never|public|lifecycle|simple|logs|logs|-f -n --updates --audit --yes --help|",
 		"usage||@usage||forward|read|never|public|lifecycle|simple|usage|usage|--help|",
+		"ssh-agent||@ssh-agent||deny|mutate|dynamic|public|lifecycle|ssh-agent|ssh-agent <command>|manage temporary SSH access|--key --ttl --json --yes --help|unlock status lock",
 		"shell||@shell||forward|mutate|never|public|lifecycle|project-shell|shell|shell|--root --yes --help|",
 		"clone||@project||local|mutate|dynamic|public|projects|clone|clone <url>|clone|--target --yes --help|",
 		"code||@project||local|mutate|never|public|projects|project|code [project]|code|--yes --help|",
@@ -5134,7 +5169,11 @@ func nativeFixture(t *testing.T) (string, []string, string) {
 	}, "\n") + "\n"
 	writeCLIFile(t, filepath.Join(root, "config", "commands.registry"), manifest, 0o600)
 	for _, name := range []string{"incus.project.env", "subyard.env", "host.env", "agents.env", "ports.env"} {
-		writeCLIFile(t, filepath.Join(root, "config", name), "", 0o600)
+		content := ""
+		if name == "agents.env" {
+			content = "CODING_TOOL_INTEGRATIONS=\nAGENT_codex_COMMAND=codex\nAGENT_claude_COMMAND=claude\n"
+		}
+		writeCLIFile(t, filepath.Join(root, "config", name), content, 0o600)
 	}
 	home := filepath.Join(root, "home")
 	configHome := filepath.Join(root, "state")
@@ -5159,4 +5198,52 @@ func lifecycleIncus() *testkit.Incus {
 			"user.subyard.bridge": "incusbr0", "boot.autostart": "false",
 		},
 	}}}
+}
+
+func TestConfigStatusRemainsReadOnlyDuringReleaseRecovery(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	manifestPath := filepath.Join(root, "config", "commands.registry")
+	manifest, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual, err := os.ReadFile(filepath.Join(repositoryRoot(t), "config", "commands.registry"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(actual), "\n") {
+		if strings.HasPrefix(line, "config|") {
+			manifest = append(manifest, []byte("\n"+line+"\n")...)
+		}
+	}
+	writeCLIFile(t, manifestPath, string(manifest), 0600)
+
+	runtimeRoot := filepath.Join(root, "runtime-v2-config-status")
+	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot, "V2_GATE_CAPTURE="+filepath.Join(root, "capture"))
+	journal, _ := installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
+	before, err := os.ReadFile(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{"fields", "show", "paths", "status"} {
+		t.Run(action, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			incus := lifecycleIncus()
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard", Arguments: []string{"config", action},
+				Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Incus: incus, Executor: incus,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code := program.Run(context.Background()); code != 0 {
+				t.Fatalf("read-only config %s blocked: code=%d stderr=%s", action, code, stderr.String())
+			}
+		})
+	}
+
+	after, err := os.ReadFile(journal)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("read-only status changed recovery journal")
+	}
 }

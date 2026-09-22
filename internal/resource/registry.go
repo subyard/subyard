@@ -197,6 +197,33 @@ func (registry Registry) LookupAction(resource, verb, localID string) (domain.Ac
 	return "", false
 }
 
+// VerbReadOnly reports whether a known resource verb can produce only read
+// actions. Unknown verbs and incomplete action metadata fail closed.
+func (registry Registry) VerbReadOnly(resource, verb string) bool {
+	definition, ok := registry.definition(resource)
+	if !ok {
+		return false
+	}
+	found := false
+	for _, declaration := range definition.actions {
+		if declaration.verb != verb {
+			continue
+		}
+		found = true
+		readOnly := false
+		for _, action := range registry.actionDefinitions {
+			if action.Action == declaration.action {
+				readOnly = action.Effect == domain.ActionRead
+				break
+			}
+		}
+		if !readOnly {
+			return false
+		}
+	}
+	return found
+}
+
 func (registry Registry) definition(value string) (Definition, bool) {
 	if index, ok := registry.byCommand[value]; ok {
 		return registry.definitions[index], true

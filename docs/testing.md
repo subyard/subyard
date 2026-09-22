@@ -1,5 +1,27 @@
 # Testing changes
 
+## Keep tests proportional
+
+Choose additional tests by concrete failure risk and existing coverage.
+
+- Add a case for a distinct regression or meaningful observable contract that is not
+  adequately covered. Extend an existing test when it fits.
+- Use the narrowest boundary that proves the behavior. Another layer or combination
+  of inputs must catch a different failure. Assert outcomes and stable interfaces;
+  reserve source-text assertions for explicit source-level contracts.
+- For prose, formatting and mechanical edits with unchanged behavior, use existing
+  checks. New tests need a concrete behavior risk, not merely a changed file.
+- Preserve targeted checks for permissions, data loss, migrations, atomic updates
+  and recovery. A small code change can still carry a large risk.
+- If a small feature needs extensive fixtures, a parser or a process harness,
+  reconsider the implementation and scope first. Remove obsolete behavior and its
+  tests together; keep protections for behavior that remains.
+- Mocks prove our adapter's behavior. Claims about an external CLI or protocol need
+  evidence from the real consumer; otherwise state that compatibility is unverified.
+
+These rules govern adding tests. Run the existing required gates below; during
+development use focused checks and repeat broader checks after relevant changes or failures.
+
 ## Run the core checks
 
 Run `./tests/run.sh` against the current source files, including uncommitted edits. No Git history,
@@ -8,11 +30,35 @@ clean checkout, base commit or `.git` directory is required. Install the tools l
 temporary repositories. The release packaging test also creates its own index of the current public
 files; it does not change the source checkout's index.
 
+The runner prints one start/result line per check and a final `SUMMARY` with its
+status, check count, elapsed seconds and original exit code. Successful check output
+stays in separate logs under a unique `.build/test-runs/run.*/` directory. On the
+first failure it stops, prints the last 40 log lines and points to the complete log.
+`RESULTS` and `SUMMARY` identify the run's `summary.tsv`, which has these columns:
+`kind`, `suite`, `check`, `status`, `exit_code`, `duration_seconds`, `log`.
+Log names are relative to that summary's directory. Each completed check has a
+`check` row; the final `run` row reports the whole invocation. A missing final row
+means the run did not finish reporting; absent checks have not passed. Durations
+use Bash's elapsed seconds and may be zero for short checks. Separate invocations
+never overwrite each other's results. Logs stay local until explicitly removed;
+they are not uploaded by CI. Agents should read the summary first and open only
+the relevant log when a check fails.
+
 GitHub CI runs the full core gate, warning-level ShellCheck and
-`bash tests/real-host/adapter-contracts.sh` in one `verify` job on every push and pull request.
+`bash tests/real-host/adapter-contracts.sh` in one `verify` job on every branch push and pull request;
+tag pushes are reserved for the independent Release workflow. Native Paseo uses the same branch/PR
+trigger boundary, while Release builds its native artifacts independently.
 The separate nightly/manual Deep CI runs repeated Go race tests and one minute of parser fuzzing.
 Both workflows use standard Ubuntu runners, read-only repository permissions and no artifact uploads.
-Veranda, native Paseo and the full P0 release gate remain separate checks.
+Veranda, native Paseo and live P0 acceptance remain separate checks.
+
+Agent compatibility regressions run locally with
+`go test ./internal/adapters/statusruntime` and `bash tests/codex-agent-provision.sh`.
+They use temporary rules, fake CLI programs and release metadata; they do not start VMs,
+contact model APIs or publish Git history. They cover the matcher invocation and failure
+handling, latest-release installation and preservation of a working binary after a bad download.
+Mocks do not establish compatibility with a real CLI release. Check its native `execpolicy check`
+against the shipped rules for that evidence; real client approve/deny needs separate acceptance.
 
 ## Select additional checks
 
@@ -71,7 +117,7 @@ Treat the result as fail-closed:
 | Status | Exit | Meaning and required response |
 | --- | ---: | --- |
 | `selected` | 0 | Normal analysis. Run the recommended checks and apply the external gates below. An empty diff can produce an empty recommendation. |
-| `fallback` | 0 | Analysis or bootstrap was unsafe or unavailable. Run the expanded `host-free:all` recommendation and a fresh full P0. Inspect `errors` for the sanitized cause. |
+| `fallback` | 0 | Analysis or bootstrap was unsafe or unavailable. Run the expanded `host-free:all` recommendation and a fresh `dev/e2e/p0-acceptance.sh --slot N --lane full`. Inspect `errors` for the sanitized cause. |
 | `error` | 2 | Command-line misuse. No recommendations are available; correct the invocation and rerun it. |
 
 Automation must inspect `status` and `full_p0.required`; exit 0 alone does not mean targeted testing
@@ -87,14 +133,19 @@ not contain executable command lines and do not run them.
 | T1 | Affected host-free package, race, shell, CLI, frontend, or Rust checks. Typical target: at most 3 minutes; registry metadata identifies larger explicit budgets. |
 | T2 | The core host-free gate, `./tests/run.sh`. It remains required by the merge workflow and is not narrowed by the selector. The `host-free:all` fallback composite also includes Veranda checks. |
 | T3 | Existing targeted E2E lanes or real-host checks for affected physical boundaries. |
-| T4 | A fresh full P0: `dev/e2e/p0-acceptance.sh --slot N` with no lane and without `--resume`. |
+| T4 | A fresh full P0: `dev/e2e/p0-acceptance.sh --slot N --lane full` without `--resume`. |
 
 Run the applicable T0 check while developing, then use the selector to identify the T1 and T3
-lower bound. Run T2 when the merge workflow requires it. If `full_p0.required` is true, run T4 in
-addition to every selected check.
+lower bound. Run T2 when the merge workflow requires it. If `full_p0.required` is true, run T4.
+A fresh full pass also satisfies its contained T3 lanes: smoke, boundary, transport, nested teardown,
+real Incus, release, source upgrade, power/systemd (including reboot verification), peer and cleanup.
+Do not rerun those same lanes solely because the selector also lists them. Other selected checks
+remain required; for example, cold dependencies, profile-resource's bind fixture and Orca acceptance
+are not covered by the full matrix.
 
 Targeted evidence shows that the selected contracts and physical boundaries passed for the analyzed
-change. It is not full release evidence. The continuous full P0 run remains the external
-release gate, even when every targeted recommendation passes. A release candidate or tag, an
-operator request or override, or runtime coupling discovered by a targeted E2E check can require a
-fresh full P0 independently of the selector's static result.
+change. It does not replace the fresh release smoke required before publication:
+`dev/e2e/p0-acceptance.sh --slot N` without `--resume`. This VM gate is run externally and manually;
+GitHub workflows do not receive VM access or enforce it automatically. The exhaustive `--lane full`
+matrix is periodic manual evidence and is also required when `full_p0.required` is true, an operator
+requests it, or targeted runtime evidence exposes broader coupling.

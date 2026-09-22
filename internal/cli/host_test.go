@@ -52,7 +52,11 @@ func hostAddSSHFixture(t *testing.T, inventory any) (string, ownerinventory.SSHH
 		t.Fatal(err)
 	}
 	program := filepath.Join(bin, "ssh")
-	script := `#!/bin/sh
+	script := strings.ReplaceAll(`#!/bin/sh
+if [ "${1-}" = -G ]; then
+  printf 'hostname owner-alias\nport 22\nuserknownhostsfile %s\n' '__KNOWN_HOSTS__'
+  exit 0
+fi
 assessment=0
 known_hosts=
 previous=
@@ -71,7 +75,7 @@ if [ "$assessment" = 1 ]; then
   exit 255
 fi
 cat "$SSH_RPC_RESPONSE"
-`
+`, "__KNOWN_HOSTS__", filepath.Join(bin, "known_hosts"))
 	if err := os.WriteFile(program, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}

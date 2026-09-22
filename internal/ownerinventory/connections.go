@@ -264,6 +264,33 @@ func (store Connections) Write(connection Connection) error {
 	if err := store.recoverPendingLocked(); err != nil {
 		return err
 	}
+	return store.writeLocked(connection)
+}
+
+// Update publishes a connection change only when expected remains the exact
+// registered value, so an inventory refresh cannot recreate a removed owner
+// with a stale route-cache write.
+func (store Connections) Update(expected, connection Connection) error {
+	if expected.HostID != connection.HostID {
+		return errors.New("owner connection update cannot change HostID")
+	}
+	connectionsMu.Lock()
+	defer connectionsMu.Unlock()
+	release, err := store.lock()
+	if err != nil {
+		return err
+	}
+	defer release()
+	if err := store.recoverPendingLocked(); err != nil {
+		return err
+	}
+	if err := store.validateConnectionLocked(expected); err != nil {
+		return err
+	}
+	return store.writeLocked(connection)
+}
+
+func (store Connections) writeLocked(connection Connection) error {
 	if err := connection.Validate(); err != nil {
 		return err
 	}
@@ -302,89 +329,6 @@ func (store Connections) Write(connection Connection) error {
 	return store.writeConnectionFile(connection)
 }
 
-// Remove deletes controller-owned registration and inventory cache only. It
-// refuses while the last authoritative snapshot still contains projects.
-func (store Connections) Remove(hostID string) (Connection, error) {
-	connectionsMu.Lock()
-	defer connectionsMu.Unlock()
-	release, err := store.lock()
-	if err != nil {
-		return Connection{}, err
-	}
-	defer release()
-	if err := store.recoverPendingLocked(); err != nil {
-		return Connection{}, err
-	}
-	connections, err := store.list()
-	if err != nil {
-		return Connection{}, err
-	}
-	var selected Connection
-	found := false
-	for _, connection := range connections {
-		if connection.HostID == hostID {
-			selected, found = connection, true
-			break
-		}
-	}
-	if !found {
-		return Connection{}, fmt.Errorf("OwnerHost %q is not registered", hostID)
-	}
-	cache := Cache{Root: store.Root}
-	if err := ensureNoOwnerProjects(cache, hostID); err != nil {
-		return Connection{}, err
-	}
-	if err := store.writeRemovalJournal(hostID); err != nil {
-		return Connection{}, err
-	}
-	if err := store.applyRemovalLocked(hostID); err != nil {
-		return Connection{}, err
-	}
-	return selected, nil
-}
-
-func (store Connections) CanRemove(hostID string) error {
-	connectionsMu.Lock()
-	defer connectionsMu.Unlock()
-	release, err := store.lock()
-	if err != nil {
-		return err
-	}
-	defer release()
-	if err := store.recoverPendingLocked(); err != nil {
-		return err
-	}
-	found := false
-	connections, err := store.list()
-	if err != nil {
-		return err
-	}
-	for _, connection := range connections {
-		found = found || connection.HostID == hostID
-	}
-	if !found {
-		return fmt.Errorf("OwnerHost %q is not registered", hostID)
-	}
-	return ensureNoOwnerProjects(Cache{Root: store.Root}, hostID)
-}
-
-func ensureNoOwnerProjects(cache Cache, hostID string) error {
-	snapshot, err := cache.Read(hostID)
-	if errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("OwnerHost %q has no authoritative inventory snapshot; refresh it before removal", hostID)
-	}
-	if err != nil {
-		return err
-	}
-	if age := time.Since(snapshot.FetchedAt); age > Freshness || age < -Freshness {
-		return fmt.Errorf("OwnerHost %q inventory snapshot is stale; refresh it before removal", hostID)
-	}
-	if err := ensureInventoryHasNoProjects(snapshot.Inventory); err != nil {
-		return err
-	}
-	return ensureNoRoutingProjects(cache.Root, hostID)
-}
-
 func ensureInventoryHasNoProjects(inventory domain.OwnerInventory) error {
 	for _, yard := range inventory.Yards {
 		if len(yard.Projects) != 0 {
@@ -403,15 +347,30 @@ func ensureNoRoutingProjects(root, hostID string) error {
 		if walkErr != nil {
 			return walkErr
 		}
-		if entry.IsDir() {
-			return nil
-		}
 		relative, relErr := filepath.Rel(routingRoot, path)
 		if relErr != nil {
 			return relErr
 		}
-		for _, component := range strings.Split(relative, string(filepath.Separator)) {
+		components := strings.Split(relative, string(filepath.Separator))
+		if entry.IsDir() {
+			for index, component := range components {
+				if component == "projects" && index+1 < len(components) {
+					return fmt.Errorf("OwnerHost %q still has controller project routing state", hostID)
+				}
+			}
+			return nil
+		}
+		for index, component := range components {
 			if component == "projects" {
+				if len(components) == 3 && index == 1 && components[2] == ".lock" && entry.Type()&os.ModeSymlink == 0 && entry.Type().IsRegular() {
+					info, infoErr := entry.Info()
+					if infoErr != nil {
+						return infoErr
+					}
+					if info.Size() == 0 {
+						return nil
+					}
+				}
 				return fmt.Errorf("OwnerHost %q still has controller project routing state", hostID)
 			}
 		}

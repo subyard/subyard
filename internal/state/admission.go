@@ -76,7 +76,7 @@ func (store *FileStore) PreviewAdmission(
 				record.Name, record.Mode, mode,
 			)
 		}
-		if mode == domain.ProjectSync {
+		if mode == domain.ProjectSync || mode == domain.ProjectGit {
 			continue
 		}
 		if explicit && record.Name != requestedName {
@@ -161,7 +161,7 @@ func (store *FileStore) Admit(
 				record.Name, record.Mode, mode,
 			)
 		}
-		if mode == domain.ProjectSync {
+		if mode == domain.ProjectSync || mode == domain.ProjectGit {
 			continue
 		}
 		if explicit && record.Name != requestedName {
@@ -193,7 +193,7 @@ func (store *FileStore) Admit(
 					Reservation: &current,
 				}, nil
 			}
-			if mode != domain.ProjectSync || reservation.Mode != domain.ProjectSync {
+			if mode == domain.ProjectBind || reservation.Mode != mode {
 				return Admission{}, fmt.Errorf("%w for this source; retry shortly", ErrAdmissionPending)
 			}
 		}

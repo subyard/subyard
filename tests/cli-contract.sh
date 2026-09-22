@@ -36,6 +36,8 @@ completion_words="$({
   COMP_WORDS=("$ROOT/bin/yard" init --r); COMP_CWORD=2; _yard; printf '%s\n' "${COMPREPLY[@]}"
   COMP_WORDS=("$ROOT/bin/yard" provision ope); COMP_CWORD=2; _yard; printf '%s\n' "${COMPREPLY[@]}"
   COMP_WORDS=("$ROOT/bin/yard" --res); COMP_CWORD=1; _yard; printf '%s\n' "${COMPREPLY[@]}"
+  COMP_WORDS=("$ROOT/bin/yard" integration en); COMP_CWORD=2; _yard; printf '%s\n' "${COMPREPLY[@]}"
+  COMP_WORDS=("$ROOT/bin/yard" -Y demo integration dis); COMP_CWORD=4; _yard; printf '%s\n' "${COMPREPLY[@]}"
   COMP_WORDS=("$ROOT/bin/yard" config sy); COMP_CWORD=2; _yard; printf '%s\n' "${COMPREPLY[@]}"
   COMP_WORDS=("$ROOT/bin/yard" config sync pu); COMP_CWORD=3; _yard; printf '%s\n' "${COMPREPLY[@]}"
   COMP_WORDS=("$ROOT/bin/yard" config sync push --a); COMP_CWORD=4; _yard; printf '%s\n' "${COMPREPLY[@]}"
@@ -43,9 +45,32 @@ completion_words="$({
 grep -qx -- '--reset' <<<"$completion_words" || fail 'Bash completion omitted manifest init options'
 grep -qx -- 'openclaw' <<<"$completion_words" || fail 'Bash completion omitted profile values'
 grep -qx -- '--resources' <<<"$completion_words" || fail 'Bash completion omitted global resources option'
+grep -qx -- 'enable' <<<"$completion_words" || fail 'Bash completion omitted integration enable'
+grep -qx -- 'disable' <<<"$completion_words" || fail 'Bash completion omitted selected-yard integration disable'
 grep -qx -- 'sync' <<<"$completion_words" || fail 'Bash completion omitted config sync'
 grep -qx -- 'pull' <<<"$completion_words" || fail 'Bash completion omitted config sync pull'
 grep -qx -- '--apply' <<<"$completion_words" || fail 'Bash completion omitted config sync push --apply'
+
+# The ssh-agent provider completes its verbs and the unlock key path without
+# depending on a built engine that already contains the new registry row.
+ssh_agent_completion="$({
+  printf 'fixture\n' >"$CLI_TMP/id_fixture"
+  yard() {
+    case "$1" in
+      --command-completion) printf '%s\n' ssh-agent ;;
+      --command-options) printf '%s\n' '--key --ttl --json --yes --help' ;;
+      --command-verbs) printf '%s\n' 'unlock status lock' ;;
+    esac
+  }
+  # shellcheck source=completions/yard.bash
+  . "$ROOT/completions/yard.bash"
+  COMP_WORDS=(yard ssh-agent unl); COMP_CWORD=2; _yard
+  printf 'verb:%s\n' "${COMPREPLY[@]}"
+  COMP_WORDS=(yard ssh-agent unlock --key "$CLI_TMP/"); COMP_CWORD=4; _yard
+  printf 'key:%s\n' "${COMPREPLY[@]}"
+} | sort)"
+grep -qx 'verb:unlock' <<<"$ssh_agent_completion" || fail 'Bash completion omitted ssh-agent unlock'
+grep -Fqx "key:$CLI_TMP/id_fixture" <<<"$ssh_agent_completion" || fail 'Bash completion did not complete ssh-agent --key as a path'
 
 # Ambiguous project names complete to canonical project-first selectors. Host-first selectors do
 # not match an already typed project-name prefix and made `yard code Subyard<Tab>` return nothing.
@@ -116,6 +141,32 @@ for shell in bash zsh; do
   zsh -f "$ROOT/tests/helpers/shell-completion-interaction.zsh" "$shell" \
     "$ROOT/completions/yard.$shell" "$ROOT" || fail "$shell default completion interaction failed"
 done
+
+# Caller-installed completion directories must not prompt inside the PTY fixture.
+mkdir -p "$CLI_TMP/insecure-completions"
+printf '#compdef fixture\n' > "$CLI_TMP/insecure-completions/_fixture"
+chmod 0777 "$CLI_TMP/insecure-completions"
+FPATH="$CLI_TMP/insecure-completions:$(zsh -fc 'print -r -- "$FPATH"')" \
+  zsh -f "$ROOT/tests/helpers/shell-completion-interaction.zsh" zsh \
+    "$ROOT/completions/yard.zsh" "$ROOT" \
+  || fail 'Zsh completion interaction inherited unsafe caller FPATH'
+
+# Model a runner with an insecure directory in Zsh's default search path.
+mkdir -p "$CLI_TMP/zsh-bin"
+cat > "$CLI_TMP/zsh-bin/zsh" <<'ZSH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ -z "${FPATH+x}" ]; then
+  FPATH="$TEST_DEFAULT_COMPLETIONS:$("$TEST_REAL_ZSH" -fc 'print -r -- "$FPATH"')"
+  export FPATH
+fi
+exec "$TEST_REAL_ZSH" "$@"
+ZSH
+chmod +x "$CLI_TMP/zsh-bin/zsh"
+TEST_REAL_ZSH="$(command -v zsh)" TEST_DEFAULT_COMPLETIONS="$CLI_TMP/insecure-completions" \
+  PATH="$CLI_TMP/zsh-bin:$PATH" zsh -f "$ROOT/tests/helpers/shell-completion-interaction.zsh" zsh \
+    "$ROOT/completions/yard.zsh" "$ROOT" \
+  || fail 'Zsh completion interaction used unsafe default FPATH'
 
 zsh -f "$ROOT/tests/helpers/zsh-completion-buffers.zsh" "$ROOT/completions/yard.zsh" "$ROOT" \
   || fail 'Zsh native multi-record completion corrupted the command buffer'

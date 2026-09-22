@@ -33,6 +33,8 @@ class Scan:
     projects: list = field(default_factory=list)
     errors: list = field(default_factory=list)
     warnings: list = field(default_factory=list)
+    workspaces: str = ""
+    identity: tuple = ()
 
 
 class ScanLimit(Exception):
@@ -96,9 +98,37 @@ def verify_root(root, deadline):
         return False
 
 
+def verify_missing(scan, path):
+    """Require ENOENT below the same workspace boundary; never follow symlinks."""
+    if not path.startswith(scan.workspaces + "/") or os.path.normpath(path) != path:
+        return False
+    fd = None
+    try:
+        fd = _open_dir(scan.workspaces)
+        current = os.fstat(fd)
+        if ((current.st_dev, current.st_ino) != scan.identity
+                or not _same_directory(scan.workspaces, fd)):
+            return False
+        ancestor = scan.workspaces
+        for name in os.path.relpath(path, scan.workspaces).split("/"):
+            try:
+                child = _open_dir(name, fd)
+            except FileNotFoundError:
+                return _same_directory(ancestor, fd)
+            os.close(fd)
+            fd = child
+            ancestor = os.path.join(ancestor, name)
+    except OSError:
+        pass
+    finally:
+        if fd is not None:
+            os.close(fd)
+    return False
+
+
 def discover(workspaces, deadline=None, max_entries=100000):
-    scan = Scan()
     workspaces = os.path.abspath(workspaces)
+    scan = Scan(workspaces=workspaces)
     deadline = deadline if deadline is not None else time.monotonic() + 20.0
     entries_left = max_entries
 
@@ -175,6 +205,8 @@ def discover(workspaces, deadline=None, max_entries=100000):
         if os.path.realpath(workspaces) != workspaces:
             raise OSError("workspace boundary is a symlink")
         base_fd = _open_dir(workspaces)
+        identity = os.fstat(base_fd)
+        scan.identity = (identity.st_dev, identity.st_ino)
         try:
             for project_id, is_directory in entries(base_fd):
                 if not is_directory:

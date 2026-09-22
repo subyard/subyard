@@ -48,6 +48,43 @@ func TestProvisionSelectionUsesYardThenProjectProfiles(t *testing.T) {
 	}
 }
 
+func TestGitHubProvisionDefaultDoesNotChangeOtherProfileSelection(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	writeProvisionProfile(t, root, "github")
+	writeProvisionProfile(t, root, "android")
+	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := program.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	empty, selected := "", "github android"
+	for _, scenario := range []struct {
+		yard      string
+		selection *string
+		github    bool
+	}{
+		{yard: "default", github: true}, {yard: "other", github: false},
+		{yard: "default", selection: &empty, github: false},
+		{yard: "other", selection: &selected, github: true},
+	} {
+		loaded.Context.YardName = scenario.yard
+		delete(loaded.Environment, "ENVIRONMENT_PROFILES")
+		if scenario.selection != nil {
+			loaded.Environment["ENVIRONMENT_PROFILES"] = *scenario.selection
+		}
+		execution, err := program.prepareProvisionExecution(loaded, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if slices.Contains(execution.profiles, "github") != scenario.github || !slices.Contains(execution.profiles, "android") {
+			t.Fatalf("unexpected profile selection for %s: %v", scenario.yard, execution.profiles)
+		}
+	}
+}
+
 func TestProvisionRejectsHookWithoutCheckProtocol(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	directory := filepath.Join(root, "config", "profiles", "legacy")

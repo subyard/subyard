@@ -406,7 +406,11 @@ func (runtime *Runtime) runVerifiedCandidate(
 		command.Env = append(command.Env, "SUBYARD_RELEASE_TRANSITION_GRANT_FD=3")
 	}
 	command.Stdin, command.Stdout, command.Stderr = stdin, stdout, runtime.config.Stderr
-	return command.Run()
+	err := command.Run()
+	if err != nil && ctx.Err() != nil {
+		return errors.Join(err, ctx.Err())
+	}
+	return err
 }
 
 func (runtime *Runtime) invokeVerifiedCandidateTransition(

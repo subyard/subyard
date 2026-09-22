@@ -14,15 +14,22 @@ ENGINE="$ROOT/.build/yard"
 
 TMP="$(mktemp -d)"
 sshd_pid=''
+occupied_sshd_pid=''
 cleanup() {
   if [ -n "$sshd_pid" ] && kill -0 "$sshd_pid" 2>/dev/null; then
     kill -TERM "$sshd_pid" 2>/dev/null || true
     wait "$sshd_pid" 2>/dev/null || true
   fi
+  if [ -n "$occupied_sshd_pid" ] && kill -0 "$occupied_sshd_pid" 2>/dev/null; then
+    kill -TERM "$occupied_sshd_pid" 2>/dev/null || true
+    wait "$occupied_sshd_pid" 2>/dev/null || true
+  fi
   rm -rf "$TMP"
 }
 trap cleanup EXIT
 fail() { printf 'ssh-rpc: %s\n' "$*" >&2; exit 1; }
+# shellcheck source=tests/helpers/loopback-sshd.sh
+. "$ROOT/tests/helpers/loopback-sshd.sh"
 
 ssh-keygen -q -t ed25519 -N '' -f "$TMP/host-key"
 ssh-keygen -q -t ed25519 -N '' -f "$TMP/client-key"
@@ -53,16 +60,29 @@ LogLevel VERBOSE
 EOF
 
 "$SSHD" -t -f "$TMP/sshd_config"
-"$SSHD" -D -e -f "$TMP/sshd_config" > "$TMP/sshd.log" 2>&1 &
-sshd_pid=$!
-for _ in $(seq 1 50); do
-  kill -0 "$sshd_pid" 2>/dev/null || { sed -n '1,80p' "$TMP/sshd.log" >&2; fail 'ephemeral sshd exited'; }
-  if ssh-keyscan -T 1 -p "$port" 127.0.0.1 > "$TMP/known_hosts" 2>/dev/null; then
-    break
-  fi
-  sleep 0.1
-done
-[ -s "$TMP/known_hosts" ] || fail 'ephemeral sshd did not become ready'
+occupied="$TMP/occupied"
+mkdir -p "$occupied"
+ssh-keygen -q -t ed25519 -N '' -f "$occupied/host-key"
+cat > "$occupied/sshd_config" <<EOF
+ListenAddress 127.0.0.1
+HostKey $occupied/host-key
+PidFile $occupied/sshd.pid
+AuthorizedKeysFile none
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+UsePAM no
+AllowUsers $user
+EOF
+start_loopback_sshd "$occupied" "$SSHD" "$port" \
+  || fail 'collision fixture sshd did not become ready'
+occupied_port="$port"
+occupied_sshd_pid="$sshd_pid"
+sshd_pid=''
+start_loopback_sshd "$TMP" "$SSHD" "$occupied_port" \
+  || fail 'ephemeral sshd did not become ready'
+if [ "$port" = "$occupied_port" ] || ! kill -0 "$occupied_sshd_pid" 2>/dev/null; then
+  fail 'ephemeral sshd did not preserve a foreign listener while retrying'
+fi
 
 append_frame() { # json output
   local payload="$1" output="$2" hex

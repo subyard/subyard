@@ -14,6 +14,8 @@ export HOME="$TMP/home" SUBYARD_NO_AUDIT=1 PATH="$TMP/bin:$PATH"
 export SUBYARD_CONFIG_HOST_DIR="$SUBYARD_CONFIG_HOME/overrides/host"
 export SUBYARD_CONFIG_GENERATED_DIR="$SUBYARD_CONFIG_HOME/generated"
 mkdir -p "$HOME" "$TMP/bin" "$SUBYARD_CONFIG_HOST_DIR" "$SUBYARD_CONFIG_GENERATED_DIR"
+printf '%s' 'synthetic-production-token' | sha256sum | cut -d ' ' -f 1 \
+  > "$SUBYARD_CONFIG_HOST_DIR/prod-fingerprints"
 
 cat > "$TMP/bin/incus" <<'MOCK'
 #!/usr/bin/env bash
@@ -29,6 +31,8 @@ case "${1:-}" in
       'device list')
         if [ -e "$state_root/up" ]; then
           printf 'adb-emu\n'
+          # Device lists can arrive in chunks; consumers must not close the pipe early.
+          sleep 0.02
           [ -e "$state_root/missing-orca-route" ] || printf 'orca-server\n'
         fi
         ;;
@@ -61,6 +65,9 @@ case "${1:-}" in
       *' dpkg --print-architecture '*) printf 'amd64\n' ;;
       *' dpkg-query -W '*orca-ide*) printf '1.4.159\n' ;;
       *' bash -se -- dev /usr/bin/orca-ide /srv/agents/orca ') printf '0 0\n' ;;
+      *' bash -se -- '*'orca-registration.sha256'*)
+        cat >/dev/null
+        printf '{"state":"current","actual":"%064d","desired":"%064d"}\n' 0 0 ;;
       *' docker inspect -f '*) printf 'true\n' ;;
     esac ;;
   file) : ;;
@@ -81,6 +88,50 @@ touch "$TMP/up" "$TMP/listening" "$TMP/emulator-proc" "$TMP/control-available"
 qa_handler="$ROOT/config/profiles/openclaw/resources/qa-bot-broker/handler.sh"
 staging_handler="$ROOT/config/profiles/openclaw/resources/staging-gateway/handler.sh"
 orca_handler="$ROOT/config/profiles/orca/resources/orca/handler.sh"
+
+# Public help succeeds; argument errors use 2 before any physical probe or apply.
+for handler in "$qa_handler" "$staging_handler" "$orca_handler" \
+  "$ROOT/config/profiles/android/resources/emulator/handler.sh" \
+  "$ROOT/config/profiles/hermes/resources/dashboard/handler.sh"; do
+  : > "$RESOURCE_TEST_LOG"
+  "$handler" --help >"$TMP/resource-help.out" 2>&1 || fail "$handler help failed"
+  verb=status
+  [ "$handler" != "$staging_handler" ] || verb=list
+  resource_rc=0
+  SUBYARD_RESOURCE_MODE=prepare "$handler" "$verb" unexpected \
+    >"$TMP/resource-usage.out" 2>&1 || resource_rc=$?
+  [ "$resource_rc" -eq 2 ] || fail "$handler usage returned $resource_rc instead of 2"
+  [ ! -s "$RESOURCE_TEST_LOG" ] || fail "$handler invalid arguments reached a physical probe"
+done
+
+check_resource_usage() {
+  local handler="$1" resource_rc=0
+  shift
+  : > "$RESOURCE_TEST_LOG"
+  SUBYARD_RESOURCE_MODE=prepare "$handler" "$@" >"$TMP/resource-usage.out" 2>&1 || resource_rc=$?
+  [ "$resource_rc" -eq 2 ] || fail "$handler $* returned $resource_rc instead of usage code 2"
+  [ ! -s "$RESOURCE_TEST_LOG" ] || fail "$handler invalid arguments reached a physical probe"
+}
+check_resource_usage "$qa_handler" up --source
+check_resource_usage "$qa_handler" logs unexpected
+check_resource_usage "$qa_handler" destroy --unknown
+check_resource_usage "$staging_handler" start invalid/zone
+check_resource_usage "$staging_handler" up --source
+check_resource_usage "$staging_handler" logs --purge
+check_resource_usage "$orca_handler" logs --unknown
+check_resource_usage "$ROOT/config/profiles/android/resources/emulator/handler.sh" up --unknown
+check_resource_usage "$ROOT/config/profiles/android/resources/emulator/handler.sh" view --unknown
+
+# A valid mutation against a stopped yard is a runtime/precondition failure, not usage.
+mv "$TMP/up" "$TMP/stopped"
+for handler in "$qa_handler" "$staging_handler" "$orca_handler" \
+  "$ROOT/config/profiles/android/resources/emulator/handler.sh" \
+  "$ROOT/config/profiles/hermes/resources/dashboard/handler.sh"; do
+  resource_rc=0
+  SUBYARD_RESOURCE_MODE=prepare "$handler" down >"$TMP/resource-stopped.out" 2>&1 || resource_rc=$?
+  [ "$resource_rc" -eq 1 ] || fail "$handler precondition returned $resource_rc instead of 1"
+done
+mv "$TMP/stopped" "$TMP/up"
 
 # Host-side generated credential fixtures fail visibly if a prepare path sources them.
 mkdir -p "$SUBYARD_CONFIG_GENERATED_DIR/qa-pool" "$SUBYARD_CONFIG_GENERATED_DIR/staging"
@@ -262,7 +313,12 @@ if grep -Fq 'pgrep -u dev -f --' "$RESOURCE_TEST_LOG"; then
 fi
 
 # Representative reverse lifecycle paths execute through the generic dispatcher and fake Incus.
+SUBYARD_RESOURCE_MODE=prepare "$ROOT/config/profiles/android/resources/emulator/handler.sh" \
+  down >"$TMP/emu-down-plan.json"
+grep -Fq 'remove the host-loopback emulator proxy devices' "$TMP/emu-down-plan.json" \
+  || fail 'emulator prepare lost a device from the streamed device list'
 if ! "$ROOT/bin/yard" emu down --yes >"$TMP/emu-down.out" 2>&1; then
+  cat "$TMP/emu-down.out" >&2
   tail -n 20 "$RESOURCE_TEST_LOG" >&2
   fail 'controller-owned emulator down failed'
 fi

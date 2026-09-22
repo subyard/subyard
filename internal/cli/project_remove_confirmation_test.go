@@ -441,6 +441,14 @@ func TestProjectRemovalRejectsUnsafeStateDirectoryBeforePrompt(t *testing.T) {
 
 func TestCanonicalOwnerProjectRemovalDeclinePreservesRoutingMetadata(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
+	fakeBin := filepath.Join(root, "fake-bin")
+	if err := os.MkdirAll(fakeBin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(fakeBin, "ssh"), "#!/bin/sh\n"+trustedSSHMock(t)+"exit 1\n", 0o700)
+	path := fakeBin + string(os.PathListSeparator) + os.Getenv("PATH")
+	t.Setenv("PATH", path)
+	environment = append(environment, "PATH="+path)
 	dataHome := environmentValue(environment, "SUBYARD_HOME")
 	ownerRoot := filepath.Join(dataHome, "owner-inventory")
 	connection := ownerinventory.Connection{

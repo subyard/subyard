@@ -49,7 +49,8 @@ set -euo pipefail
 if [ "${1:-}" = -G ]; then
   target="${2:-}"
   snip="$HOME/.ssh/subyard-${target#yard-}.config"
-  printf 'hostname %s\nport 22\n' "$target"
+  printf 'hostname %s\nport 22\nuserknownhostsfile %s\n' \
+    "$target" "$SUBYARD_HOME/ssh/known_hosts"
   [ -f "$snip" ] && awk 'tolower($1)=="hostkeyalias" { print "hostkeyalias " $2; exit }' "$snip"
   exit 0
 fi
@@ -152,6 +153,12 @@ export SUBYARD_NO_AUDIT=1
 export YARD_VERSION=test
 export REMOTE_TEST_ROOT="$TMP/state"
 
+mkdir -p "$SUBYARD_HOME/ssh"
+for owner in one two three four stopped; do
+  printf 'owner-%s %s\n' "$owner" "$(cut -d' ' -f1,2 "$TMP/state/$owner.pub")" \
+    >> "$SUBYARD_HOME/ssh/known_hosts"
+done
+
 run_add() { "$ROOT/bin/yard" remote add "$@" --yes; }
 
 # Prepare is read-only and shows the scanned yard key before confirmation.
@@ -167,9 +174,8 @@ assert_contains "$output" 'yard ssh key: SHA256:'
 
 # A local port pin and two remote yards all use 2222. Only the per-context aliases distinguish
 # the remote keys; unique control paths also prevent one ProxyJump connection being reused by another.
-mkdir -p "$SUBYARD_HOME/ssh"
 printf '[127.0.0.1]:2222 %s\n' "$(cut -d' ' -f1,2 "$TMP/state/local.pub")" \
-  > "$SUBYARD_HOME/ssh/known_hosts"
+  >> "$SUBYARD_HOME/ssh/known_hosts"
 output="$(run_add one owner-one)"
 assert_contains "$output" 'sync <project-dir>'
 assert_contains "$output" 'remote host can read everything explicitly synced'

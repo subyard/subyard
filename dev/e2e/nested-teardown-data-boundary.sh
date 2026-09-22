@@ -242,8 +242,8 @@ remove_owned_outer_backend() {
     && incus network show "$OUTER_BRIDGE" --project default >/dev/null 2>&1; then
     owner="$(incus network get "$OUTER_BRIDGE" user.subyard.owner \
       --project default 2>/dev/null)"
-    used_by="$(incus network show "$OUTER_BRIDGE" --project default \
-      --format json | jq -r '.used_by | length')"
+    used_by="$(incus query "/1.0/networks/$OUTER_BRIDGE?project=default" \
+      | jq -er '.used_by | arrays | length')"
     if [ "$owner" != nested-teardown-e2e-v1 ]; then
       printf 'nested-teardown-boundary: refusing non-owned network %s\n' \
         "$OUTER_BRIDGE" >&2
@@ -260,14 +260,22 @@ remove_owned_outer_backend() {
 }
 
 cleanup() {
-  local rc=$?
+  local rc=$? cleanup_failed=0
   trap - EXIT INT TERM
   set +e
-  if [ -n "$OUTER_PROJECT" ] && incus project show "$OUTER_PROJECT" >/dev/null 2>&1; then
-    yard teardown --yes >/dev/null 2>&1 || rc=3
+  if [ "$rc" != 0 ] && [ -n "$OUTER_INSTANCE" ] \
+    && [ "$(incus config get "$OUTER_INSTANCE" user.subyard.managed \
+      --project "$OUTER_PROJECT" 2>/dev/null)" = true ]; then
+    printf '\n== failed nested yard: instance and console ==\n' >&2
+    timeout 10 incus info "$OUTER_INSTANCE" --project "$OUTER_PROJECT" --show-log >&2
+    timeout 10 incus console "$OUTER_INSTANCE" --project "$OUTER_PROJECT" --show-log \
+      | tail -n 100 >&2
   fi
-  remove_owned_outer_backend || rc=3
-  if [ -n "$STATE" ] && [[ "$STATE" = /var/tmp/subyard-nested-teardown.* ]] \
+  if [ -n "$OUTER_PROJECT" ] && incus project show "$OUTER_PROJECT" >/dev/null 2>&1; then
+    yard teardown --yes >/dev/null 2>&1 || { rc=3; cleanup_failed=1; }
+  fi
+  remove_owned_outer_backend || { rc=3; cleanup_failed=1; }
+  if [ "$cleanup_failed" = 0 ] && [ -n "$STATE" ] && [[ "$STATE" = /var/tmp/subyard-nested-teardown.* ]] \
     && [ -f "$STATE/.marker" ] && [ "$(<"$STATE/.marker")" = nested-teardown-e2e-v1 ]; then
     sudo -n find "$STATE" -depth -delete || rc=3
   fi
@@ -295,8 +303,7 @@ incus storage show "$OUTER_POOL" --project default >/dev/null 2>&1 \
   && die "refusing existing pool $OUTER_POOL"
 incus network show "$OUTER_BRIDGE" --project default >/dev/null 2>&1 \
   && die "refusing existing network $OUTER_BRIDGE"
-incus storage create "$OUTER_POOL" dir --project default >/dev/null
-incus storage set "$OUTER_POOL" user.subyard.owner=nested-teardown-e2e-v1 \
+incus storage create "$OUTER_POOL" dir user.subyard.owner=nested-teardown-e2e-v1 \
   --project default >/dev/null
 
 export SUBYARD_OPERATOR_HOME="$STATE/operator"
@@ -333,11 +340,12 @@ NESTED_E2E_VMS=0
 EOF
 
 require_nested_memory_reserve
+# Publish ownership with creation so cleanup also works when yard init fails.
+incus network create "$OUTER_BRIDGE" ipv4.address=auto ipv6.address=none \
+  user.subyard.owner=nested-teardown-e2e-v1 --project default >/dev/null
 printf '  [ .. ] creating the outer yard\n'
 yard init --yes
 OUTER_DATA_HOME_METADATA="$(outer_data_home_metadata)"
-incus network set "$OUTER_BRIDGE" user.subyard.owner=nested-teardown-e2e-v1 \
-  --project default >/dev/null
 yard start --yes
 [ "$(incus config get "$OUTER_INSTANCE" user.subyard.managed --project "$OUTER_PROJECT")" = true ] \
   || die 'outer instance is not marker-owned'
@@ -436,10 +444,12 @@ printf '  [ .. ] creating and tearing down a source inner yard\n'
 outer_dev sh -euc '
   source=$1
   install -d "$HOME/.subyard/workspaces"
+  install -d -m 0700 "$HOME/.config/subyard/yards/default"
+  printf "CODING_TOOL_INTEGRATIONS=\n" > "$HOME/.config/subyard/yards/default/config.env"
   printf "outer sentinel\n" > "$HOME/.subyard/workspaces/active.code-workspace"
   cd "$source"
   env \
-    CODING_TOOL_INTEGRATIONS= HOST_MOUNTS= HOST_LINKS= FORWARD_SSH_AGENT=0 DEV_SUDO=0 \
+    HOST_MOUNTS= HOST_LINKS= FORWARD_SSH_AGENT=0 DEV_SUDO=0 \
     NESTED_E2E_VMS=0 SSH_PORT=23222 MIN_DISK_GIB=1 \
     SUBYARD_NO_AUDIT=1 SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 \
     HOST_CLAUDE_MD= HOST_CODEX_AGENTS_MD= HOST_OPENCODE_AGENTS_MD= \

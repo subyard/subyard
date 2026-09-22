@@ -306,7 +306,11 @@ func validateCandidate(options Options, source sourceSnapshot, previous Manifest
 		),
 		YardSettings: yardSettings, YardAssets: map[string]string{},
 	}
+	assetYards := []string{"default"}
 	for name := range yardNames {
+		assetYards = append(assetYards, name)
+	}
+	for _, name := range assetYards {
 		sourceRoot := filepath.Join(
 			source.root, "hosts", source.hostID, "yards", name, "overrides", "agents",
 		)

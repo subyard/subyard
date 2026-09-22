@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"text/tabwriter"
 
+	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
@@ -69,11 +70,53 @@ type configMaterializedAssetSnapshot struct {
 type configTargetSelector func() ([]configTarget, error)
 
 type configAsset struct {
+	OwnedFormat string
 	Name        string
 	Source      string
 	Destination string
 	Scope       string
 	Role        string
+}
+
+// Classify by the subcommand that owns execution. Invalid arguments to these
+// readers can only produce usage errors; later tokens never select a writer.
+func configReadOnlyInvocation(arguments []string) bool {
+	if len(arguments) > 0 && (arguments[0] == "--yes" || arguments[0] == "-y") {
+		arguments = arguments[1:]
+	}
+	if len(arguments) == 0 {
+		return true
+	}
+	switch arguments[0] {
+	case "fields", "show", "paths", "status":
+		return true
+	case "sync":
+		if len(arguments) > 1 {
+			return arguments[1] == "path" || arguments[1] == "help"
+		}
+	}
+	return false
+}
+
+// Only the exact bounded apply form can request a completed-release repair.
+func configApplyInvocation(arguments []string) (bool, bool) {
+	if len(arguments) > 0 && (arguments[0] == "--yes" || arguments[0] == "-y") {
+		arguments = arguments[1:]
+	}
+	if len(arguments) == 0 || arguments[0] != "apply" {
+		return false, false
+	}
+	allLocal := false
+	for _, argument := range arguments[1:] {
+		switch argument {
+		case "--all-local":
+			allLocal = true
+		case "--yes", "-y":
+		default:
+			return false, false
+		}
+	}
+	return true, allLocal
 }
 
 func (cli *CLI) runConfig(ctx context.Context, loaded config.Loaded, arguments []string) int {
@@ -669,6 +712,28 @@ func (cli *CLI) materializeConfigSyncPlan(
 		}
 		return refreshed, nil
 	}
+	// The confirmed import can create config-only release drift. Admit its exact
+	// affected target set through the same protected repair path as config apply.
+	if len(targets) != 0 && !cli.releaseTransitionChild {
+		outcome, err := cli.inspectMutationGate(ctx, loaded.Context.YardName)
+		if err != nil {
+			return err
+		}
+		if outcome != nil {
+			permit, err := cli.prepareConfigApplyRepairMode(
+				ctx, loaded.Context.YardName, false, *outcome, true, selectedNames,
+			)
+			if err != nil {
+				return err
+			}
+			if permit == nil {
+				return fmt.Errorf("materialized configuration refresh blocked by release transition: %s; %s", outcome.Code, outcome.Retry)
+			}
+			previousPermit := cli.configApplyRepair
+			cli.configApplyRepair = permit
+			defer func() { cli.configApplyRepair = previousPermit }()
+		}
+	}
 	if code := cli.applyConfig(ctx, targets, assumeYes, selector); code != 0 {
 		return errors.New("materialized configuration refresh failed")
 	}
@@ -1067,10 +1132,26 @@ func (cli *CLI) applyConfig(
 				"yard %s materialized-config: %s; skipped\n", target.Name, assessment.State)
 		}
 	}
+	if cli.configApplyRepair != nil && !cli.configApplyRepair.matchesRequestedConfigs(assessments) {
+		cli.errorf("config apply: release repair requires the persisted configuration; remove differing command overrides")
+		return 1
+	}
 	if len(drifted) == 0 {
 		if !cli.planConfigAction(ctx, targets[0].Loaded, "apply", assumeYes, true,
 			"no running local yards have materialized configuration drift") {
 			return 1
+		}
+		if cli.configApplyRepair != nil {
+			unlock, err := cli.lockConfigApplyRepair(ctx, cli.configApplyRepair)
+			if err != nil {
+				cli.errorf("config apply: %v", err)
+				return 1
+			}
+			defer unlock()
+			if err := cli.finishConfigApplyRepair(ctx, cli.configApplyRepair); err != nil {
+				cli.errorf("config apply verification: %v", err)
+				return 1
+			}
 		}
 		fmt.Fprintln(cli.options.Stdout, "config apply: no running local yards to refresh")
 		return 0
@@ -1082,6 +1163,14 @@ func (cli *CLI) applyConfig(
 	if !cli.planConfigAction(ctx, targets[0].Loaded, "apply", assumeYes, false,
 		"refresh materialized agent configs in local running yards: "+strings.Join(names, ", ")) {
 		return 1
+	}
+	if cli.configApplyRepair != nil {
+		unlock, err := cli.lockConfigApplyRepair(ctx, cli.configApplyRepair)
+		if err != nil {
+			cli.errorf("config apply: %v", err)
+			return 1
+		}
+		defer unlock()
 	}
 	if selector == nil {
 		cli.errorf("config apply: target selector is required")
@@ -1136,10 +1225,19 @@ func (cli *CLI) applyConfig(
 		}
 	}
 	if len(driftedTargets) == 0 {
+		if cli.configApplyRepair != nil {
+			if err := cli.finishConfigApplyRepair(ctx, cli.configApplyRepair); err != nil {
+				cli.errorf("config apply verification: %v", err)
+				return 1
+			}
+		}
 		fmt.Fprintln(cli.options.Stdout, "config apply: drift converged after confirmation; nothing to refresh")
 		return 0
 	}
 	applier := cli.options.Config
+	if applier == nil && cli.configApplyRepair != nil {
+		applier = releaseTransitionConfigApplier{cli: cli}
+	}
 	if applier == nil {
 		applier = dispatcherConfigApplier{
 			path: cli.options.DispatcherPath, environment: cli.baseEnv,
@@ -1155,6 +1253,12 @@ func (cli *CLI) applyConfig(
 	if err := cli.configStatus(ctx, driftedTargets, true); err != nil {
 		cli.errorf("config apply verification: %v", err)
 		return 1
+	}
+	if cli.configApplyRepair != nil {
+		if err := cli.finishConfigApplyRepair(ctx, cli.configApplyRepair); err != nil {
+			cli.errorf("config apply verification: %v", err)
+			return 1
+		}
 	}
 	return 0
 }
@@ -1232,6 +1336,7 @@ func (cli *CLI) assessConfigTarget(
 	}
 	var assets []configAsset
 	var desiredHashes []string
+	var desiredPayloads [][]byte
 	if check {
 		var err error
 		assets, err = effectiveConfigAssets(target.Loaded)
@@ -1240,7 +1345,14 @@ func (cli *CLI) assessConfigTarget(
 		}
 		desiredHashes = make([]string, 0, len(assets))
 		for _, asset := range assets {
-			hostHash, err := hashRegularFile(asset.Source)
+			payload, err := (config.MaterializedAsset{Source: asset.Source}).ReadSource()
+			if err != nil {
+				return configTargetAssessment{}, fmt.Errorf("%s: %w", asset.Name, err)
+			}
+			hostHash := fmt.Sprintf("%x", sha256.Sum256(payload))
+			if asset.OwnedFormat != "" {
+				hostHash, err = configmaterial.DesiredDigestFor(asset.OwnedFormat, payload)
+			}
 			if err != nil {
 				return configTargetAssessment{}, fmt.Errorf("%s: %w", asset.Name, err)
 			}
@@ -1249,6 +1361,7 @@ func (cli *CLI) assessConfigTarget(
 				Scope: asset.Scope, Role: asset.Role, DesiredHash: hostHash,
 			})
 			desiredHashes = append(desiredHashes, hostHash)
+			desiredPayloads = append(desiredPayloads, payload)
 		}
 	}
 	incus, executor := cli.statusPorts()
@@ -1272,15 +1385,35 @@ func (cli *CLI) assessConfigTarget(
 	changed := false
 	for index, asset := range assets {
 		hostHash := desiredHashes[index]
-		result, err := executor.Exec(ctx, target.Loaded.Context.IncusProject,
-			target.Loaded.Context.YardInstanceName, ports.InstanceExecRequest{
-				Command: []string{"sha256sum", "--", asset.Destination},
-				User:    uint32(target.Loaded.Context.DevUID),
-				Group:   uint32(target.Loaded.Context.DevUID),
-			})
+		request := ports.InstanceExecRequest{
+			Command: []string{"sha256sum", "--", asset.Destination},
+			User:    uint32(target.Loaded.Context.DevUID), Group: uint32(target.Loaded.Context.DevUID),
+		}
+		if asset.OwnedFormat != "" {
+			request, err = configmaterial.Request(asset.OwnedFormat, configmaterial.ModeObserve, target.Loaded.Context.DevUser, asset.Destination, target.Loaded.Context.DevUID, desiredPayloads[index])
+			if err != nil {
+				return configTargetAssessment{}, err
+			}
+		}
+		result, err := executor.Exec(ctx, target.Loaded.Context.IncusProject, target.Loaded.Context.YardInstanceName, request)
 		if err != nil && result.ExitCode == 0 {
 			return configTargetAssessment{}, err
 		}
+		if asset.OwnedFormat != "" {
+			if err != nil || result.ExitCode != 0 {
+				return configTargetAssessment{}, fmt.Errorf("%s: structured configuration observation failed", asset.Name)
+			}
+			observation, err := configmaterial.ParseObservation(result.Stdout)
+			if err != nil {
+				return configTargetAssessment{}, fmt.Errorf("%s: %w", asset.Name, err)
+			}
+			materialized.Assets = append(materialized.Assets, configMaterializedAssetSnapshot{
+				Name: asset.Name, GuestOutput: "owned-" + asset.OwnedFormat, GuestHash: observation.Fingerprint,
+			})
+			changed = changed || !observation.Converged
+			continue
+		}
+
 		materializedAsset := configMaterializedAssetSnapshot{
 			Name: asset.Name, GuestExit: result.ExitCode,
 		}
@@ -1333,35 +1466,21 @@ func sameConfigTargetSet(
 }
 
 func effectiveConfigAssets(loaded config.Loaded) ([]configAsset, error) {
-	values := loaded.Environment
-	var result []configAsset
-	for _, agent := range strings.Fields(values["CODING_TOOL_INTEGRATIONS"]) {
-		if !domain.SafeName(agent) {
-			return nil, fmt.Errorf("invalid agent name %q", agent)
-		}
-		for _, kind := range []string{"CONFIG", "RULES"} {
-			settingName := "AGENT_" + agent + "_" + kind
-			source := values[settingName]
-			destination := values["AGENT_"+agent+"_"+kind+"_DEST"]
-			if source == "" || destination == "" {
-				continue
-			}
-			if filepath.IsAbs(destination) || destination == ".." ||
-				strings.HasPrefix(filepath.Clean(destination), ".."+string(filepath.Separator)) {
-				return nil, fmt.Errorf("invalid %s %s destination", agent, kind)
-			}
-			asset := configAsset{
-				Name: agent + "." + strings.ToLower(kind), Source: source,
-				Destination: filepath.Join("/home", loaded.Context.DevUser, destination),
-			}
-			if trace, ok := loaded.Settings[settingName]; ok {
-				if resolution, found := effectiveSettingResolution(trace); found {
-					asset.Scope, asset.Role = resolution.Scope, resolution.Role
-				}
-			}
-			result = append(result, asset)
-		}
+	assets, err := config.MaterializedAssets(loaded.Environment, loaded.Context.DevUser)
+	if err != nil {
+		return nil, err
 	}
+	var result []configAsset
+	for _, materialized := range assets {
+		asset := configAsset{Name: materialized.Name, Source: materialized.Source, Destination: materialized.Destination, OwnedFormat: materialized.OwnedFormat}
+		if trace, ok := loaded.Settings[materialized.Setting]; ok {
+			if resolution, found := effectiveSettingResolution(trace); found {
+				asset.Scope, asset.Role = resolution.Scope, resolution.Role
+			}
+		}
+		result = append(result, asset)
+	}
+
 	sort.Slice(result, func(left, right int) bool { return result[left].Name < result[right].Name })
 	return result, nil
 }

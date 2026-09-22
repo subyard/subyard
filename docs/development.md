@@ -48,9 +48,13 @@ links `~/.local/bin/{yard,sy}` to the verified runtime, and configures login PAT
 
 `make package VERSION=<version>` writes amd64 or arm64 Linux engine artifacts and a complete
 `subyard-<version>-linux-<arch>.tar.gz` runtime under `.build/release/`, each with a detached SHA-256,
-compatibility manifest and provenance. A `vMAJOR.MINOR.PATCH` tag runs the full gate and publishes
-both architectures to a tag-backed GitHub Release. `yard update` verifies all release inputs, applies
-the candidate's migration registry, publishes an immutable release directory and atomically rotates
+compatibility manifest and provenance. Run the required live release smoke manually on
+operator-allocated E2E VMs before pushing a `vMAJOR.MINOR.PATCH` tag; GitHub workflows do not have
+access to that pool. The tag starts the independent Release workflow checks: host-free,
+native Paseo, adapter and upgrade compatibility. The workflow publishes both architectures to a
+tag-backed GitHub Release after they pass. Branch CI does not run for tag pushes. `yard update`
+verifies all release inputs, applies the candidate's migration registry, publishes an immutable
+release directory and atomically rotates
 `current`/`previous`. See [release migrations](control-plane.md#release-migrations) for the runtime
 contract and [real-host acceptance](real-host-acceptance.md) for its test lane. First install and
 runtime execution require no Go or source checkout; interrupted or incompatible releases cannot
@@ -59,6 +63,16 @@ transition. Its bounded [`scripts/migrate-source-install.sh`](../scripts/migrate
 leaf publishes recovery facts before importing config and later switches shell entrypoints; it does
 not authorize, activate or roll back a release. An interruption resumes from the protected outer
 journal and observed facts.
+
+Structured update history is durable outside the installed runtime. Each committed activation or rollback,
+plus direct preparation failures and declined confirmations, records a structured attempt under
+`$SUBYARD_HOME/logs/updates`; the newest 30 attempts are retained. `yard logs --updates [-n N]`
+shows their phase progression, verified source and target versions when available, and safe terminal
+status codes. It deliberately excludes installer output, error text, environment values, and recovery
+journal JSON; detailed diagnostics remain on the invoking console. `yard logs --audit [-n N]` reads
+the host command audit log across the current file and five 1 MiB rotations. Both local viewers work
+without a usable yard configuration or Incus, while an explicit `-Y` selector preserves ordinary
+owner routing. `yard logs` without either selector continues to show the selected yard's runtime log.
 
 Verify a built candidate with the unmodified supported updater before release:
 
@@ -82,7 +96,9 @@ services.
 CI additionally installs `openssh-server`, downloads the pinned age/SOPS artifacts through the
 checksum-verifying project installer, and runs the temporary loopback contracts under
 `tests/real-host/`. Those tests use synthetic payloads and an ephemeral non-system sshd; dedicated
-container/VM and two-owner-host acceptance remains an explicit release gate.
+container/VM and two-owner-host acceptance remains an explicit external release gate. Run the fresh
+release smoke with `dev/e2e/p0-acceptance.sh --slot N`; use `--lane full` for periodic manual evidence
+and changes selected as full P0 risk.
 
 Live platform and release acceptance runs only on operator-allocated E2E VMs; see
 [`real-host-acceptance.md`](real-host-acceptance.md).

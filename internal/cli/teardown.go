@@ -9,15 +9,19 @@ import (
 	"path/filepath"
 
 	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
+	"github.com/Subyard/Subyard/internal/adapters/sshagentruntime"
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
 
 type teardownExecution struct {
-	keepData bool
-	changed  bool
+	keepData        bool
+	changed         bool
+	physicalChanged bool
+	networkRemoval  *yardnetwork.RemovalPlan
 }
 
 func prepareTeardownExecution(arguments []string) (*teardownExecution, error) {
@@ -50,6 +54,9 @@ func (execution *teardownExecution) policy(definition command.Definition, yard d
 			"remove the NetworkManager guard only after the bridge disappears",
 		)
 	}
+	if execution.networkRemoval != nil {
+		consequences = append(consequences, execution.networkRemoval.Consequences...)
+	}
 	return domain.CommandPolicy{
 		Name: definition.Name, Effect: domain.CommandEffect(definition.Effect),
 		RemotePolicy: domain.RemotePolicy(definition.Remote), Consequences: consequences,
@@ -66,6 +73,13 @@ func (execution *teardownExecution) actionPlan(
 	action := domain.ActionID("yard.teardown.purge")
 	if execution.keepData {
 		action = "yard.teardown.keep-data"
+	}
+	if !execution.physicalChanged && execution.networkRemoval != nil && execution.networkRemoval.Cleanup {
+		action = "yard.network.save"
+		if execution.networkRemoval.Stored.Policy.Isolation {
+			action = "yard.network.apply"
+		}
+		return action, domain.ActionDelta{Changed: true, Consequences: execution.networkRemoval.Consequences}, nil
 	}
 	delta := domain.ActionDelta{Changed: execution.changed}
 	if delta.Changed {
@@ -101,6 +115,9 @@ func (cli *CLI) observeTeardownExecution(
 		suffix = "-" + loaded.Context.YardName
 	}
 	paths := []string{
+		filepath.Join(loaded.Context.Paths.DataHome, "github-broker", loaded.Context.YardName+"-engine"),
+		filepath.Join(loaded.Context.Paths.OperatorHome, ".config", "systemd", "user", "subyard-github-"+loaded.Context.YardName+".service"),
+		filepath.Join(loaded.Context.Paths.DataHome, "github-broker", loaded.Context.YardName+".json"),
 		loaded.Context.Paths.StateDir,
 		filepath.Join(loaded.Context.Paths.OperatorHome, ".ssh", "subyard"+suffix+".config"),
 		filepath.Join(loaded.Context.Paths.DataHome, "space"+suffix+".cache"),
@@ -115,6 +132,20 @@ func (cli *CLI) observeTeardownExecution(
 			return fmt.Errorf("inspect teardown artifact %s: %w", path, statErr)
 		}
 	}
+	execution.physicalChanged = execution.changed
+	service := cli.networkService([]domain.Context{loaded.Context})
+	if service == nil {
+		return errors.New("Incus network policy adapter is required for teardown")
+	}
+	removal, err := service.PrepareRemoval(ctx, networkYard(loaded.Context))
+	if err != nil {
+		return err
+	}
+	if execution.networkRemoval != nil && (execution.networkRemoval.Stored.Content != removal.Stored.Content || execution.networkRemoval.Stored.ETag != removal.Stored.ETag) {
+		return domain.ErrPlanStale
+	}
+	execution.networkRemoval = &removal
+	execution.changed = execution.changed || removal.Cleanup
 	return nil
 }
 
@@ -130,14 +161,14 @@ func (cli *CLI) executeTeardown(
 		return domain.AdapterResult{}, errors.New("teardown execution is required")
 	}
 	contextValues := structuredCommandContext(loaded)
-	if cli.options.AdapterRunner == nil {
+	if execution.physicalChanged && cli.options.AdapterRunner == nil {
 		if err := cli.prepareSudoPrivileges(
 			ctx, diagnostics, cli.effectiveUID(), "teardown",
 		); err != nil {
 			return domain.AdapterResult{}, err
 		}
 	}
-	if cli.env["SUBYARD_SUDO_PREAUTHORIZED"] == "1" {
+	if execution.physicalChanged && cli.env["SUBYARD_SUDO_PREAUTHORIZED"] == "1" {
 		contextValues["SUBYARD_SUDO_PREAUTHORIZED"] = "1"
 	}
 	if execution.keepData {
@@ -153,11 +184,35 @@ func (cli *CLI) executeTeardown(
 	if hasOtherRegisteredLocalYard(loaded.Context.YardName, yards) {
 		contextValues["SUBYARD_TEARDOWN_KEEP_SHARED"] = "1"
 	}
+	// Teardown must not leave a credential service reconnecting to a future yard.
+	agentManager := sshagentruntime.Manager{Config: sshagentruntime.Config{
+		Directory: sshagentruntime.Directory(loaded.Context.Paths.DataHome, loaded.Context.YardName),
+	}}
+	if agentErr := agentManager.Lock(ctx); agentErr != nil {
+		return domain.AdapterResult{}, agentErr
+	}
 	request := domain.AdapterRequest{
 		Schema: shelladapter.ProtocolSchema, OperationID: plan.OperationID,
 		Adapter: "teardown", Action: "apply", Arguments: []string{"--yes"}, Context: contextValues,
 	}
-	result, stderr, err := orchestrator.RunAdapter(ctx, plan, request, nil)
+	service := cli.networkService(yards)
+	if service == nil || execution.networkRemoval == nil {
+		return domain.AdapterResult{}, errors.New("prepared network cleanup is required for teardown")
+	}
+	var result domain.AdapterResult
+	var stderr string
+	err = service.WithRemoval(ctx, *execution.networkRemoval, func() error {
+		if !execution.physicalChanged {
+			result = domain.AdapterResult{Schema: shelladapter.ProtocolSchema, OperationID: plan.OperationID, Status: "ok"}
+			return nil
+		}
+		var runErr error
+		result, stderr, runErr = orchestrator.RunAdapter(ctx, plan, request, nil)
+		if runErr == nil && result.Status != "ok" {
+			return errors.New("physical teardown did not succeed")
+		}
+		return runErr
+	})
 	writeAdapterDiagnostics(diagnostics, stderr)
 	return result, err
 }

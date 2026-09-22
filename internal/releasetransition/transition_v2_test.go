@@ -753,7 +753,18 @@ func TestV2NewOwnerImpactReplacesUnmutatedPreActivationJournal(t *testing.T) {
 	}
 
 	activeFault = false
+	resume, err := transition.InspectProcessV1(context.Background(), goal)
+	if err != nil || resume.Resume == nil {
+		t.Fatalf("owner resume inspection = %#v, err=%v", resume, err)
+	}
 	owner.state = OwnerRegistrationLegacyDirectory
+	stale, err := transition.Converge(context.Background(), Execution{Plan: resume.Plan})
+	if err != nil || stale.Code != CodePlanStale || owner.commits != 0 {
+		t.Fatalf("stale owner resume = %#v, commits=%d, err=%v", stale, owner.commits, err)
+	}
+	if err := ValidateProcessConvergence(goal, resume, stale); err != nil {
+		t.Fatalf("invalid stale owner resume: %v", err)
+	}
 	replacement, err := transition.Inspect(context.Background(), goal)
 	if err != nil || replacement.Resume != nil || replacement.Outcome == nil ||
 		replacement.Outcome.Status != StatusMigrationRequired ||
@@ -2012,6 +2023,75 @@ func TestV2TransitionResumesEveryDurableCheckpointWithoutNewAuthorization(t *tes
 	}
 }
 
+func TestV2TransitionResumeAfterAnotherCallerCompletes(t *testing.T) {
+	for _, drift := range []bool{false, true} {
+		t.Run(fmt.Sprintf("drift=%t", drift), func(t *testing.T) {
+			ctx := context.Background()
+			links := ReleaseLinks{Active: "release-a"}
+			transition, _, _ := v2TransitionFixtureWithReleases(t, func(point string) error {
+				if point == "after-target-active" {
+					return errors.New("interrupted before activation reconciliation")
+				}
+				return nil
+			}, ReleasePair{From: "release-a", Target: "release-b"}, links)
+			transition.options.ObserveLinks = func(context.Context) (ReleaseLinks, error) { return links, nil }
+			transition.options.ActivateLinks = func(_ context.Context, pair ReleasePair) (ReleaseLinks, error) {
+				links = ReleaseLinks{Active: pair.Target, Previous: releaseIDPointer(pair.From)}
+				return links, nil
+			}
+			reconciler := &v2TestReconciler{}
+			transition.options.Reconcilers = []V2ActivationReconciler{reconciler}
+			goal := Goal{Target: "release-b", Direction: DirectionActivateTarget}
+			initial, err := transition.Inspect(ctx, goal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			interrupted, err := transition.Converge(ctx, Execution{
+				Plan: initial.Plan, Authorization: v2TestAuthorization(initial.Plan),
+			})
+			if err != nil || interrupted.Status != StatusRecovering {
+				t.Fatalf("interrupted outcome = %#v, err=%v", interrupted, err)
+			}
+			resume, err := transition.InspectProcessV1(ctx, goal)
+			if err != nil || resume.Resume == nil {
+				t.Fatalf("resume inspection = %#v, err=%v", resume, err)
+			}
+			transition.options.fault = nil
+			completed, err := transition.Converge(ctx, Execution{Plan: resume.Plan})
+			if err != nil || completed.Status != StatusReady {
+				t.Fatalf("other caller outcome = %#v, err=%v", completed, err)
+			}
+			before, err := transition.store.ReadCurrentJournal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			reconciler.converged = !drift
+			fresh, err := NewV2Transition(transition.options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			outcome, err := fresh.Converge(ctx, Execution{Plan: resume.Plan})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := ValidateProcessConvergence(goal, resume, outcome); err != nil {
+				t.Fatalf("invalid resumed outcome = %#v: %v", outcome, err)
+			}
+			want := CodeReady
+			if drift {
+				want = CodePlanStale
+			}
+			if outcome.Code != want || reconciler.reconciles != 1 {
+				t.Fatalf("outcome = %#v, reconciles=%d", outcome, reconciler.reconciles)
+			}
+			after, err := fresh.store.ReadCurrentJournal()
+			if err != nil || !sameProtectedSnapshot(before, after) {
+				t.Fatalf("completed journal changed: %v", err)
+			}
+		})
+	}
+}
+
 func TestV2TransitionBlocksThirdResourceStateWithoutOverwrite(t *testing.T) {
 	injected := errors.New("stop before settings CAS")
 	active := true
@@ -2541,6 +2621,12 @@ func TestV2TransitionRepairsActivationDriftAfterCompletedMigration(t *testing.T)
 		t.Fatalf("drift inspection = %#v, err=%v", repeat, err)
 	}
 	firstDriftPlan := repeat.Plan
+	if !slices.Contains(repeat.Decisions, RedactedDecision{
+		Resource: "activation.test-runtime", Scope: "activation",
+		Decision: DecisionCanonicalize, Result: "converged",
+	}) {
+		t.Fatalf("drift inspection does not identify pending runtime work: %#v", repeat.Decisions)
+	}
 	reconciler.drift = digestC
 	repeat, err = transition.Inspect(context.Background(), goal)
 	if err != nil || repeat.Plan == firstDriftPlan {
@@ -2903,6 +2989,69 @@ func TestV2TransitionCannotReplaceUnsafeCompletedJournalForSameGoal(t *testing.T
 	after, err := transition.store.ReadCurrentJournal()
 	if err != nil || before.Fingerprint != after.Fingerprint {
 		t.Fatalf("unsafe completed journal changed: before=%#v after=%#v err=%v", before, after, err)
+	}
+}
+
+func TestV2ActivationConsequencesReachProcessInspectionAndBindConsent(t *testing.T) {
+	for _, change := range []string{"none", "consequence", "snapshot"} {
+		t.Run(change, func(t *testing.T) {
+			transition, _, configPath := v2TransitionFixture(t, nil)
+			reconciler := &v2TestReconciler{consequences: []string{
+				"Adopt existing Codex rules under integration management: /home/dev/.codex/rules/repo.rules",
+			}}
+			transition.options.Reconcilers = []V2ActivationReconciler{reconciler}
+			goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
+			inspection, err := transition.InspectProcessV1(context.Background(), goal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := append([]string{v2ChangedConsequence}, reconciler.consequences...)
+			if !slices.Equal(inspection.Assessment.Consequences, want) {
+				t.Fatalf("missing activation consequences: %#v", inspection.Assessment.Consequences)
+			}
+			encoded, err := json.Marshal(ProcessResponse{SchemaVersion: 1, ActivationReconciliationOwned: true, Inspection: &inspection})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var decoded ProcessResponse
+			if err := json.Unmarshal(encoded, &decoded); err != nil || decoded.Inspection == nil || !slices.Equal(decoded.Inspection.Assessment.Consequences, want) {
+				t.Fatalf("existing process protocol lost consequences: %v", err)
+			}
+			before, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch change {
+			case "consequence":
+				reconciler.consequences[0] = "Adopt a different existing artifact"
+			case "snapshot":
+				reconciler.drift = digestC
+			}
+			outcome, err := transition.Converge(context.Background(), Execution{
+				Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
+			})
+			if change == "none" {
+				if err != nil || outcome.Status != StatusReady || reconciler.reconciles != 1 {
+					t.Fatalf("confirmed adoption failed: %#v err=%v", outcome, err)
+				}
+				repeated, err := transition.InspectProcessV1(context.Background(), goal)
+				if err != nil || repeated.Assessment.Changed || len(repeated.Assessment.Consequences) != 0 {
+					t.Fatalf("completed activation retained adoption consequences: %#v err=%v", repeated, err)
+				}
+				return
+			}
+			if err != nil || outcome.Code != CodePlanStale || reconciler.reconciles != 0 {
+				t.Fatalf("changed adoption plan executed: %#v err=%v", outcome, err)
+			}
+			after, err := os.ReadFile(configPath)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatal("stale adoption plan changed configuration")
+			}
+			journal, err := transition.store.ReadCurrentJournal()
+			if err != nil || journal.Exists {
+				t.Fatalf("stale adoption plan published a journal: %v", err)
+			}
+		})
 	}
 }
 
@@ -3370,11 +3519,12 @@ func TestV2TransitionDoesNotFabricateLinksWhenPostMutationObservationFails(t *te
 }
 
 type v2TestReconciler struct {
-	id         string
-	converged  bool
-	drift      Fingerprint
-	observes   int
-	reconciles int
+	id           string
+	converged    bool
+	drift        Fingerprint
+	observes     int
+	reconciles   int
+	consequences []string
 }
 
 type v2PostErrorReconciler struct {
@@ -3617,7 +3767,7 @@ func (reconciler *v2TestReconciler) Observe(context.Context, ReleasePair, Releas
 	if drift == "" {
 		drift = digestB
 	}
-	return V2ActivationObservation{Actual: map[bool]Fingerprint{true: digestA, false: drift}[reconciler.converged], Desired: digestA, Converged: reconciler.converged}, nil
+	return V2ActivationObservation{Actual: map[bool]Fingerprint{true: digestA, false: drift}[reconciler.converged], Desired: digestA, Converged: reconciler.converged, Consequences: slices.Clone(reconciler.consequences)}, nil
 }
 
 func (reconciler *v2TestReconciler) Reconcile(context.Context, ReleaseLinks) error {

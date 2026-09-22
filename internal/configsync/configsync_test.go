@@ -299,17 +299,6 @@ func TestVersionedConfigSyncKeepsOptionalScopeValidationFailClosed(t *testing.T)
 			},
 			want: "yard demo has no config.env definition",
 		},
-		{
-			name: "default yard assets are unsupported",
-			write: func(fixture *syncFixture) {
-				fixture.writeSource("hosts/owner-a/yards/default/config.env", "SSH_PORT=2233\n")
-				fixture.writeSource(
-					"hosts/owner-a/yards/default/overrides/agents/codex/rules/repo.rules",
-					"allow\n",
-				)
-			},
-			want: "default yard supports only scalar config.env settings",
-		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newSyncFixture(t, "owner-a")
@@ -1110,5 +1099,23 @@ func assertSyncTestFile(t *testing.T, path, expected string, mode os.FileMode) {
 	}
 	if info.Mode().Perm() != mode {
 		t.Fatalf("%s mode=%04o want=%04o", path, info.Mode().Perm(), mode)
+	}
+}
+
+func TestVersionedConfigSyncDefaultYardAssets(t *testing.T) {
+	fixture := newSyncFixture(t, "owner-a")
+	relative := "yards/default/overrides/agents/codex/rules/repo.rules"
+	fixture.writeSource("hosts/owner-a/"+relative, "default rules\n")
+	fixture.commit("default yard file override")
+	plan, err := BuildPlan(fixture.options(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(plan); err != nil {
+		t.Fatal(err)
+	}
+	assertSyncTestFile(t, filepath.Join(fixture.configHome, relative), "default rules\n", 0o644)
+	if _, err := os.Stat(filepath.Join(fixture.configHome, "yards/default/config.env")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("asset-only default created scalar settings: %v", err)
 	}
 }

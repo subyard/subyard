@@ -40,7 +40,9 @@ incus info "$YARD_INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1 \
   || die "yard is not running — start it: $(yard_cmd_hint) start"
 
 fwd_note=()
-[ "$FORWARD_SSH_AGENT" = 1 ] && fwd_note=("Enable ssh-agent forwarding for '$SSH_HOST' (no private key enters the yard).")
+[ "$FORWARD_SSH_AGENT" = 1 ] && fwd_note=(
+  "SSH agent forwarding enables git push and other host access from inside the yard with the forwarded, write-enabled credential while the SSH session is active. No private key is copied into the yard, but any process that can reach the forwarded agent can exercise it; agent ask-rules are a UX safeguard, not a security boundary."
+)
 boundary_note=()
 [ "${NESTED_E2E_VMS:-0}" != 1 ] || boundary_note=(
   "Replace '$DEV_USER' authorized_keys with this operator key restricted to the L0 loopback proxy."
@@ -152,6 +154,12 @@ incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" --env PUBKEY="$PUBKEY" --env DEV_U
   chmod 600 "$ak"; chown "$DEV_USER":"$DEV_USER" "$ak"
 ' || die "could not authorize the key in the yard"
 ok "$DEV_USER@$SSH_HOST authorized for your key"
+
+# Install the fixed yard agent fallback for new shells and the Orca service. The
+# same helper is used by first unlock to upgrade yards initialized by older releases.
+incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- sh -eu -s -- ensure "$DEV_USER" \
+  < "$SCRIPT_DIR/ssh-agent-environment.sh" \
+  || die "could not configure the yard SSH agent environment"
 
 # --- 4. ~/.ssh Host entry via an Include (does not rewrite your config) -------
 echo "SSH client config:"

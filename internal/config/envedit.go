@@ -435,6 +435,15 @@ func editAssignmentContent(
 	if err != nil {
 		return nil, err
 	}
+	// Selection authoring upgrades the compatibility ingress in place. Leaving
+	// AGENTS behind would make the next canonical edit conflict on reload.
+	if name == "CODING_TOOL_INTEGRATIONS" {
+		for index := range records {
+			if records[index].name == "AGENTS" {
+				records[index].name = name
+			}
+		}
+	}
 	replacement := []byte(name + "=" + quotePersistentValue(dereference(value)) + "\n")
 	last := -1
 	for index := range records {

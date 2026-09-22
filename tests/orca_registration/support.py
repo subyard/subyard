@@ -37,6 +37,8 @@ class Catalog:
     def __init__(self):
         self.groups = []
         self.repos = []
+        self.snapshots = []
+        self.folders = []
         self.runtime_id = "runtime-1"
         self.calls = []
         self.after = None
@@ -47,8 +49,18 @@ class Catalog:
         self.calls.append((method, params))
         if method == "repo.list":
             result = {"repos": self.repos}
+        elif method == "session.tabs.listAll":
+            result = {"snapshots": self.snapshots}
+        elif method == "folderWorkspace.list":
+            result = {"folderWorkspaces": self.folders}
+        elif method == "repo.rm":
+            self.repos = [r for r in self.repos if "id:" + r["id"] != params["repo"]]
+            result = {}
         elif method == "projectGroup.list":
             result = {"groups": self.groups}
+        elif method == "projectGroup.delete":
+            self.groups = [g for g in self.groups if g["id"] != params["groupId"]]
+            result = {}
         elif method == "projectGroup.create":
             group = {"id": "group-" + str(len(self.groups) + 1), "name": params["name"],
                      "parentPath": params.get("parentPath"), "createdFrom": params["createdFrom"],

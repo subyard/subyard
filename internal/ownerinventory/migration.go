@@ -2,6 +2,7 @@ package ownerinventory
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,6 +31,13 @@ type hostIDAdoptionJournal struct {
 }
 
 func (store Connections) AdoptHostID(proof IdentityProof, snapshot Snapshot) error {
+	releaseMutation, err := store.acquireHostMutations(
+		context.Background(), []string{proof.ExpectedHostID, proof.ObservedHostID}, true, false,
+	)
+	if err != nil {
+		return err
+	}
+	defer releaseMutation()
 	connectionsMu.Lock()
 	defer connectionsMu.Unlock()
 	release, err := store.lock()
@@ -37,7 +45,7 @@ func (store Connections) AdoptHostID(proof IdentityProof, snapshot Snapshot) err
 		return err
 	}
 	defer release()
-	if err := store.recoverPendingLocked(); err != nil {
+	if err := store.recoverPendingLocked(proof.ExpectedHostID, proof.ObservedHostID); err != nil {
 		return err
 	}
 	inventory := snapshot.Inventory
@@ -110,11 +118,18 @@ func (store Connections) AdoptHostID(proof IdentityProof, snapshot Snapshot) err
 	return store.applyHostIDAdoptionLocked(journal)
 }
 
-func (store Connections) recoverHostIDAdoptionLocked() error {
+func (store Connections) recoverHostIDAdoptionLocked(heldHostIDs ...string) error {
 	journal, exists, err := store.readHostIDAdoptionJournal()
 	if err != nil || !exists {
 		return err
 	}
+	release, err := store.acquireRecoveryMutation(heldHostIDs, []string{
+		journal.OldConnection.HostID, journal.NewConnection.HostID,
+	})
+	if err != nil {
+		return err
+	}
+	defer release()
 	return store.applyHostIDAdoptionLocked(journal)
 }
 

@@ -76,6 +76,16 @@ yard start --yes
 project="subyard-$YARD_NAME"
 instance="yard-$YARD_NAME"
 
+# Incus numeric UID/GID exec does not initialize the account's supplementary groups.
+# Shell sessions must retain the same identity and Docker access as a login session.
+yard shell -- sh -c '
+  set -eu
+  test "$(id -un)" = dev
+  test "$(id -g)" = "$(id -g dev)"
+  test "$(id -G | tr " " "\n" | sort -n)" = "$(id -G dev | tr " " "\n" | sort -n)"
+  docker info --format "{{.ServerVersion}}" >/dev/null
+'
+
 yard bind "$source" --name live-bind --target yard --yes
 yard remove live-bind --yes
 [ "$(<"$source/marker")" = 'host source must survive' ] \

@@ -28,8 +28,51 @@ CACHE_PNPM_STORE="${npm_config_store_dir:-}"
 CACHE_PLAYWRIGHT="${PLAYWRIGHT_BROWSERS_PATH:-}"
 unset PIP_CACHE_DIR npm_config_cache npm_config_store_dir PLAYWRIGHT_BROWSERS_PATH
 
+PROFILE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 DEV_HOME="${OPENCLAW_DEV_HOME:-$(getent passwd "$DEV_USER" | cut -d: -f6)}"
 : "${DEV_HOME:=/home/$DEV_USER}"
+
+render_pnpm_wrapper() {
+  cat <<'SH'
+#!/usr/bin/env bash
+# arch-scoped so ad-hoc installs don't pull win/mac/musl native variants. pnpm honors fetch-timeout
+# only as a CLI flag (not .npmrc / npm_config_* env), and the yard's egress is slow on OpenClaw's huge
+# native/ML tarballs → inject a generous one for install-type commands. store-dir (baked below) points
+# pnpm at the shared store; it is a pnpm-only flag, so npm/npx never see it (no "Unknown config" warn).
+# confirmModulesPurge: pointing pnpm at the shared store invalidates a node_modules built against any
+# other one, and pnpm's purge prompt ABORTS with no TTY — which is every agent shell.
+ft=; case "${1:-}" in install|add|update|up|i|fetch) ft="--fetch-timeout=1800000 --config.confirmModulesPurge=false" ;; esac
+SH
+  printf 'sd=%q\n' "$CACHE_PNPM_STORE"
+  printf 'pnpm_version=%q\n' "$PNPM_VERSION"
+  cat <<'SH'
+LOCK=/srv/cache/.sy-cache.lock
+runpnpm() { exec corepack "pnpm@$pnpm_version" \
+  --config.supportedArchitectures.os=linux \
+  --config.supportedArchitectures.cpu=current \
+  --config.supportedArchitectures.libc=glibc \
+  ${sd:+--config.store-dir="$sd"} "$@"; }
+# Cache locking, DECOUPLED from the fetch-timeout above:
+#   `store prune|clean` MUTATE the store -> EXCLUSIVE lock; re-exec ourself marked so a raw
+#   `pnpm store prune` self-serializes (no reliance on sy-cache) without duplicating flags.
+#   Store-WRITING verbs -> SHARED lock, BEST-EFFORT (a lock hiccup must NEVER block a build), held on
+#   fd 8 across the exec so it spans the install. `flock -o` (exclusive) keeps the lock fd out of the
+#   child tree; the SY_CACHE_* markers stop nested pnpm/sy-cache from re-locking or self-deadlocking.
+if [ -z "${SY_CACHE_LOCKED:-}" ] && [ -e "$LOCK" ]; then
+  if [ "${1:-}" = store ] && { [ "${2:-}" = prune ] || [ "${2:-}" = clean ]; }; then
+    exec flock -o -w 3600 -x "$LOCK" env SY_CACHE_LOCKED=1 "$0" "$@"
+  fi
+  case "${1:-}" in
+    install|add|update|up|i|fetch|dlx|exec|patch|patch-commit|rebuild|import|deploy)
+      if [ -r "$LOCK" ]; then
+        exec 8<"$LOCK" && flock -s -w 600 8 2>/dev/null && export SY_CACHE_SHARED_HELD=1 || true
+      fi ;;
+  esac
+fi
+runpnpm "$@" $ft
+SH
+}
 
 if [ "$check_only" -eq 1 ]; then
   root_prefix="${OPENCLAW_TEST_ROOT:-}"
@@ -43,7 +86,9 @@ if [ "$check_only" -eq 1 ]; then
   pip="$(rooted /opt/venv/bin/pip)"
   [ -x "$node" ] && [ "$($node --version 2>/dev/null)" = "v${NODE_VERSION}" ] || changed=1
   [ -x "$corepack" ] && [ "$($corepack --version 2>/dev/null)" = "$COREPACK_VERSION" ] || changed=1
-  [ -x "$pnpm" ] && [ "$($pnpm --version 2>/dev/null)" = "$PNPM_VERSION" ] || changed=1
+  [ -x "$pnpm" ] && [ ! -L "$pnpm" ] \
+    && cmp -s <(render_pnpm_wrapper) "$pnpm" \
+    && [ "$($pnpm --version 2>/dev/null)" = "$PNPM_VERSION" ] || changed=1
   [ -x "$sy_cache" ] && [ -x "$python" ] && [ -x "$pip" ] || changed=1
   expected_owner="$(id -u "$DEV_USER"):$(id -g "$DEV_USER")"
   for cache in /srv/cache/pnpm /srv/cache/pip /srv/cache/npm; do
@@ -74,7 +119,7 @@ if [ "$check_only" -eq 1 ]; then
     && grep -Fxq 'SUBYARD_OPENCLAW_DOCS=/etc/subyard/openclaw-l1.md' "$environment_file" \
     || changed=1
   [ -f "$docs" ] && [ ! -L "$docs" ] \
-    && grep -Fq '# OpenClaw in this yard' "$docs" || changed=1
+    && cmp -s "$PROFILE_DIR/openclaw-l1.md" "$docs" || changed=1
   case " ${OPTIONAL_FEATURES:-} " in
     *" browser_tests "*)
       command -v chromium >/dev/null 2>&1 || changed=1
@@ -114,48 +159,15 @@ fi
 #    pnpm-only CLI flag (baked from profile.conf), so `npm`/`npx` never see the (to them invalid)
 #    store-dir key and never warn — and nothing is forced via global env onto unrelated yard tools.
 /usr/local/bin/npm install -g "corepack@${COREPACK_VERSION}" >/dev/null
-/usr/local/bin/corepack enable >/dev/null
+# The profile supplies its own pnpm entry point. `corepack enable` rejects that regular file
+# on a later apply; dispatching through `corepack pnpm@VERSION` needs no Corepack shim.
 /usr/local/bin/corepack prepare "pnpm@${PNPM_VERSION}" --activate >/dev/null
-{
-  cat <<'SH'
-#!/usr/bin/env bash
-# arch-scoped so ad-hoc installs don't pull win/mac/musl native variants. pnpm honors fetch-timeout
-# only as a CLI flag (not .npmrc / npm_config_* env), and the yard's egress is slow on OpenClaw's huge
-# native/ML tarballs → inject a generous one for install-type commands. store-dir (baked below) points
-# pnpm at the shared store; it is a pnpm-only flag, so npm/npx never see it (no "Unknown config" warn).
-# confirmModulesPurge: pointing pnpm at the shared store invalidates a node_modules built against any
-# other one, and pnpm's purge prompt ABORTS with no TTY — which is every agent shell.
-ft=; case "${1:-}" in install|add|update|up|i|fetch) ft="--fetch-timeout=1800000 --config.confirmModulesPurge=false" ;; esac
-SH
-  printf 'sd=%q\n' "$CACHE_PNPM_STORE"
-  cat <<'SH'
-LOCK=/srv/cache/.sy-cache.lock
-runpnpm() { exec corepack pnpm \
-  --config.supportedArchitectures.os=linux \
-  --config.supportedArchitectures.cpu=current \
-  --config.supportedArchitectures.libc=glibc \
-  ${sd:+--config.store-dir="$sd"} "$@"; }
-# Cache locking, DECOUPLED from the fetch-timeout above:
-#   `store prune|clean` MUTATE the store -> EXCLUSIVE lock; re-exec ourself marked so a raw
-#   `pnpm store prune` self-serializes (no reliance on sy-cache) without duplicating flags.
-#   Store-WRITING verbs -> SHARED lock, BEST-EFFORT (a lock hiccup must NEVER block a build), held on
-#   fd 8 across the exec so it spans the install. `flock -o` (exclusive) keeps the lock fd out of the
-#   child tree; the SY_CACHE_* markers stop nested pnpm/sy-cache from re-locking or self-deadlocking.
-if [ -z "${SY_CACHE_LOCKED:-}" ] && [ -e "$LOCK" ]; then
-  if [ "${1:-}" = store ] && { [ "${2:-}" = prune ] || [ "${2:-}" = clean ]; }; then
-    exec flock -o -w 3600 -x "$LOCK" env SY_CACHE_LOCKED=1 "$0" "$@"
-  fi
-  case "${1:-}" in
-    install|add|update|up|i|fetch|dlx|exec|patch|patch-commit|rebuild|import|deploy)
-      if [ -r "$LOCK" ]; then
-        exec 8<"$LOCK" && flock -s -w 600 8 2>/dev/null && export SY_CACHE_SHARED_HELD=1 || true
-      fi ;;
-  esac
-fi
-runpnpm "$@" $ft
-SH
-} > /usr/local/bin/pnpm
-chmod +x /usr/local/bin/pnpm
+# Replace the entry atomically: older provision runs left a symlink into Corepack's package.
+# Writing through that link would overwrite Corepack's pnpm entry point.
+pnpm_wrapper="$(mktemp /usr/local/bin/.subyard-pnpm.XXXXXX)"
+render_pnpm_wrapper > "$pnpm_wrapper"
+chmod 0755 "$pnpm_wrapper"
+mv -Tf "$pnpm_wrapper" /usr/local/bin/pnpm
 
 # 3. Python dev venv.
 [ -x /opt/venv/bin/python ] || python3 -m venv /opt/venv
@@ -303,71 +315,7 @@ done
 #    repo's AGENTS.md/CLAUDE.md should also point here (operator recommendation, we don't edit it).
 #    Persistent /etc (NOT tmpfs /run/subyard): provision is operator-run once, not re-run on reboot.
 install -d -m 0755 /etc/subyard
-cat > /etc/subyard/openclaw-l1.md <<'DOC'
-# OpenClaw in this yard — L1 build / test / live (self-serve)
-
-You are in an **L1 yard**: several non-isolated agents share ONE machine and ONE set of caches.
-BUILD and the unit suite run from your own checkout with no extra setup. The LIVE lane (a real model
-move) is operator-gated — see below. There is no gateway and no Telegram in this lane.
-
-Exact script names below follow the project's own `package.json`; confirm them with `pnpm run` if a
-command is reported missing (the vendored project moves).
-
-## Build
-Run from your project workspace (the checkout you were given):
-
-    pnpm install --frozen-lockfile      # uses the shared store; first run is slow on a cold cache
-    pnpm build
-
-## Test suite
-
-    pnpm test:unit:fast                 # fast unit suite
-
-The fuller matrices (e2e / docker-in-docker / browser / sandbox) need optional features and a
-loopback gateway or docker socket that this plain L1 lane does not start. Run them only where the
-operator enabled OPTIONAL_FEATURES (browser_tests / sandbox_tests) for this yard.
-
-## Live model move, no gateway (operator-gated)
-
-`sy-stage` appears on PATH ONLY after the operator runs `yard staging up <zone>` for a staging zone.
-If it is absent, the live lane is not provisioned here yet — build and the unit suite still work.
-When present:
-
-    sy-stage test -- <your live-test command>          # e.g. OPENCLAW_LIVE_TEST=1 pnpm test:live
-
-It runs your command in the staging runner (cwd /workspace) and injects the host-config STAGING
-provider key as `ANTHROPIC_API_KEY` for THAT ONE subprocess only — never your shell env, never a log.
-That injected key is what un-skips the project's key-gated live tests; with no key they skip cleanly.
-
-- The project's own live suites gate on the provider key and on the project's own switch (e.g.
-  `OPENCLAW_LIVE_TEST=1`, plus per-suite `OPENCLAW_LIVE_*` knobs) — pass those in your command. They
-  do NOT read `SUBYARD_LIVE_MODEL`; that flag is only a Subyard convenience signal (set to 1 when a
-  key is present) for your own wrappers to branch on, not a project contract.
-- The key is host-config only; it is never in commits, logs, or your shell.
-
-## Shared caches (you must understand this)
-
-All agents in this yard share `/srv/cache` (pnpm store, npm, pip[, playwright]). The cache locations
-are preconfigured for you — pnpm's store via the `pnpm` wrapper, npm + pip via your `~/.npmrc` and
-`~/.config/pip/pip.conf` — so they apply in every shell (login or `yard shell -- <cmd>`). Do NOT
-override the store/cache dirs per checkout, or you fork the cache and re-download everything.
-
-- Cache mutations self-serialize: run `sy-cache prune|clean|purge|all` (or even a raw `pnpm store
-  prune` — the pnpm wrapper locks it for you). The pnpm STORE is guarded by an exclusive lock that
-  waits for in-flight `pnpm install`/fetch (which hold a shared lock) and blocks new ones, so a prune
-  never corrupts the store mid-fetch. The npm/pip caches are NOT shared-locked — don't run `sy-cache
-  clean`/`purge` while an `npm install` / `pip install` is in flight.
-- DO NOT prune the pnpm store. Your workspace is a bind-mounted host dir — a different MOUNT than the
-  store — so pnpm cannot hardlink into `node_modules` (EXDEV) and copies instead. Nothing references
-  the store, so a prune deletes ALL of it and every agent re-downloads. (`sy-cache prune` now refuses;
-  a raw `pnpm store prune` does not.) Hence the store dedupes DOWNLOADS, not disk: each checkout
-  carries its own full `node_modules` (OpenClaw: ~3.3 GB). See profile.conf for the sharing rules.
-
-## This lane does NOT
-- start a gateway or connect Telegram (that is the staging/qa lane, operator-provisioned);
-- give you any master credential — a live key, if present, is injected per-run and you never see it.
-DOC
-chmod 0644 /etc/subyard/openclaw-l1.md
+install -m 0644 "$PROFILE_DIR/openclaw-l1.md" /etc/subyard/openclaw-l1.md
 
 echo "openclaw provision OK: node=$(/usr/local/bin/node --version) pnpm=$(/usr/local/bin/pnpm --version 2>/dev/null) venv=$([ -x /opt/venv/bin/python ] && echo yes)"
 # Operator recommendation (Slice 3.2): the self-serve how-to is at /etc/subyard/openclaw-l1.md and is

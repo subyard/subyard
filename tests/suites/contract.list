@@ -12,7 +12,9 @@ power-reconciler-systemd-255-launch.sh
 power-reconciler-systemd.sh
 prompt-contract.sh
 provision-profile-check.sh
+ssh-agent-environment.sh
 test-impact.sh
+test-runner.sh
 test-vms.sh
 workflow-real-adapter-gate.sh
 yard-extras-convergence.sh

@@ -9,7 +9,7 @@ PRESET="$PROFILE/yard.env"
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
 for setting in \
-  'ENVIRONMENT_PROFILES=hermes' \
+  'ENVIRONMENT_PROFILES="hermes github"' \
   'CODING_TOOL_INTEGRATIONS=' \
   'HOST_CLAUDE_MD=' \
   'HOST_CODEX_AGENTS_MD=' \
@@ -33,8 +33,9 @@ for required in \
   'dev_uid="$(incus exec' \
   '--user "$dev_uid" --group "$dev_gid"' \
   'dpkg-query -W' \
-  'build-essential ca-certificates curl git libffi-dev python3-dev xz-utils' \
-  'test ! -e "$HOME/.hermes" && test ! -L "$HOME/.hermes"' \
+  'age build-essential ca-certificates curl git libffi-dev python3-dev xz-utils' \
+  'loginctl show-user dev --property=Linger --value' \
+  'test -L "$HOME/.hermes/skills/subyard-github"' \
   'test ! -e "$HOME/.local/bin/hermes" && test ! -L "$HOME/.local/bin/hermes"' \
   '$HOME/.hermes' \
   '$HOME/.local/bin/hermes' \

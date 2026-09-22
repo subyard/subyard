@@ -59,6 +59,7 @@ func applyEnvFileObserved(path string, values environment, observer assignmentOb
 		return err
 	}
 	defer file.Close()
+	discardRetiredSettings(values)
 
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 4096), 1024*1024)
@@ -146,6 +147,12 @@ func applyRecord(record string, values environment, observer func(name, value st
 	name := strings.TrimSpace(record[:separator])
 	if !ValidVariable(name) {
 		return fmt.Errorf("invalid variable name %q", name)
+	}
+	if isRetiredSetting(name) {
+		// Validate the old expression without allowing its assignments or nested
+		// defaults to affect current settings, provenance, or sync exports.
+		values = cloneEnvironment(values)
+		observer = nil
 	}
 	raw := strings.TrimSpace(record[separator+1:])
 	value, expand := decodeValue(raw)
@@ -259,6 +266,10 @@ func expandParameter(
 	name, operator, fallback := splitParameter(expression)
 	if !ValidVariable(name) {
 		return "", fmt.Errorf("invalid parameter name %q", name)
+	}
+	if isRetiredSetting(name) {
+		values = cloneEnvironment(values)
+		observer = nil
 	}
 	current := values[name]
 	switch operator {

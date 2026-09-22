@@ -21,7 +21,9 @@ import (
 const defaultLimit = 4 * 1024 * 1024
 
 type Process struct {
-	Program   string
+	Program string
+	// SSHTarget enables the caller's trust gate before sending any command or stdin.
+	SSHTarget string
 	Arguments []string
 	Directory string
 	Env       []string
@@ -56,6 +58,7 @@ func SSHPinned(program, target, knownHostsPath string, connectTimeout time.Durat
 		"UserKnownHostsFile=" + knownHostsPath,
 		"GlobalKnownHostsFile=/dev/null",
 		"UpdateHostKeys=no",
+		"ControlMaster=no", "ControlPath=none",
 	})
 }
 
@@ -126,7 +129,11 @@ func sshProcess(
 		arguments = append(arguments, "-o", option)
 	}
 	arguments = append(arguments, target, "--", "bash", "-lc", shellquote.Word(command))
-	return Process{Program: program, Arguments: arguments}, nil
+	process := Process{Program: program, Arguments: arguments}
+	if len(options) == 0 {
+		process.SSHTarget = target
+	}
+	return process, nil
 }
 
 func (transport Process) Call(ctx context.Context, _ string, request []byte) ([]byte, error) {
@@ -141,6 +148,13 @@ func (transport Process) Run(ctx context.Context, arguments ...string) ([]byte, 
 func (transport Process) CallReader(ctx context.Context, request io.Reader) ([]byte, error) {
 	if transport.Program == "" {
 		return nil, errors.New("transport program is required")
+	}
+	if transport.SSHTarget != "" {
+		options, err := SSHOptions(ctx, transport.Program, transport.SSHTarget)
+		if err != nil {
+			return nil, err
+		}
+		transport.Arguments = append(options, transport.Arguments...)
 	}
 	callContext := ctx
 	cancel := func() {}

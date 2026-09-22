@@ -7,7 +7,8 @@
 #
 # Provisioning (operator, ONCE, on the HOST): `yard staging up <zone> --source <ws>` builds the
 # runner, stages creds, and writes into the yard: /srv/staging/<zone>/zone.env (this script's
-# spec), /srv/staging/<zone>/run-args (rebind spec) and /srv/staging/<zone>/prod-fingerprints.
+# spec), /srv/staging/<zone>/run-args (rebind spec) and a required, validated
+# /srv/staging/<zone>/prod-fingerprints (one SHA-256 hex fingerprint per line).
 # It also installs this script at /usr/local/bin/sy-stage. After that the agent self-serves:
 #
 #   sy-stage reserve [--zone Z]            acquire the bot lease (ephemeral; preempts canonical)
@@ -20,7 +21,7 @@
 #   sy-stage test    [--zone Z] -- CMD...  run CMD in the runner (cwd /workspace) with the host-config
 #                                          staging MODEL key injected for THIS subprocess only — the
 #                                          simple "no broker" live model-move path. SUBYARD_LIVE_MODEL=1
-#                                          when a key is present; unset (so live tests skip) when absent.
+#                                          when a key is present; unset when absent. CMD decides whether to skip.
 #
 # The bot identity is the scarce resource: one poller at a time via a flock+file lease. An agent
 # run is `ephemeral` and PREEMPTS a `canonical` holder (fence-by-lifecycle: stop it first).
@@ -51,12 +52,12 @@ Commands:
   logs [-f]          tail the gateway log (-f to follow)
   test -- CMD...     run CMD in the runner (cwd /workspace); injects the host-config staging provider
                      key as ANTHROPIC_API_KEY for THAT subprocess only (also SUBYARD_LIVE_MODEL=1, a
-                     Subyard convenience flag the project does not read). With no key, key-gated live
-                     tests skip cleanly. The "no gateway / no broker" live path.
+                     Subyard convenience flag the project does not read). CMD runs even with no key;
+                     use that flag to report a missing prerequisite before running live tests.
   help               this text
 
 Typical flows:
-  live model, no gateway:   sy-stage test -- <your live-test command>   # e.g. OPENCLAW_LIVE_TEST=1 pnpm test:live
+  live model, no gateway:   see the model-only wrapper in /etc/subyard/openclaw-l1.md
   full gateway e2e:         sy-stage reserve -> sy-stage restart -> sy-stage logs -f -> sy-stage stop
 
 Constraints you must understand:
@@ -65,8 +66,8 @@ Constraints you must understand:
   - The tree is LIVE-BOUND: restart/rebuild runs your CURRENT edits and writes into your workspace
     (NOT a snapshot).
   - The real test-bot has REAL side effects in the test chat; prod is refused by the prod-guard.
-  - The injected ANTHROPIC_API_KEY un-skips the project's key-gated live tests; its own live suites
-    also need their switch (e.g. OPENCLAW_LIVE_TEST=1). No key => those tests skip cleanly.
+  - Test commands need their own live switches and model/provider selection. The full test:live
+    matrix includes gateway suites and may fail without credentials. Command failures are preserved.
   - Caches are shared (/srv/cache); don't fork them per checkout. See /etc/subyard/openclaw-l1.md.
 
 A zone must be provisioned by the operator first: yard staging up <zone> --source <ws>
@@ -101,6 +102,24 @@ zenv="$STAGING_ROOT/$zone/zone.env"
 box_exists()      { docker inspect "$CNAME" >/dev/null 2>&1; }
 require_box()     { box_exists || die "no runner for zone '$zone' — operator: 'yard staging up $zone --source <ws>'"; }
 gateway_running() { docker exec "$CNAME" sh -c '[ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null' _ "$GW_PID" 2>/dev/null; }
+
+load_prod_fingerprints() { # <file>
+  local file="$1" line="" normalized="" line_number=0
+  if [ ! -f "$file" ] || [ ! -r "$file" ]; then
+    die "production fingerprint file is missing or unreadable: $file"
+  fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    line_number=$((line_number + 1))
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    case "$line" in ''|'#'*) continue ;; esac
+    [[ "$line" =~ ^[0-9a-fA-F]{64}$ ]] \
+      || die "malformed production fingerprint at $file:$line_number (expected exactly 64 hex characters)"
+    normalized="${normalized}${normalized:+$'\n'}$(printf '%s' "$line" | tr '[:upper:]' '[:lower:]')"
+  done < "$file"
+  [ -n "$normalized" ] || die "production fingerprint file has no fingerprints: $file"
+  printf '%s\n' "$normalized"
+}
 
 # --- bot-identity lease (flock+file; FIFO/TTL/epoch; single host) — same primitive as the host CLI
 lease_acquire() {  # kind [mode] -> "OK <epoch>" | "PREEMPT <holder>" | "BUSY <holder> <kind> <secs>"
@@ -161,8 +180,8 @@ reserve_lease() {
 # prod-guard (deny-by-default) + lease + (re)launch gateway. Mirrors the host 'staging start'.
 launch_gateway() {
   require_box
-  local prod_fps="" fpf="$STAGING_ROOT/$zone/prod-fingerprints"
-  [ -r "$fpf" ] && prod_fps="$(grep -vE '^\s*(#|$)' "$fpf" 2>/dev/null | tr -s '[:space:]' '\n' || true)"
+  local prod_fps fpf="$STAGING_ROOT/$zone/prod-fingerprints"
+  prod_fps="$(load_prod_fingerprints "$fpf")"
   local guard_out
   guard_out="$(docker exec -i -e "SUBYARD_PROD_FPS=$prod_fps" "$CNAME" sh -s <<'GUARD'
 set -eu
@@ -193,8 +212,6 @@ GUARD
     FAIL\ *) die "prod-guard refused: ${guard_out#FAIL }" ;;
     *)       die "prod-guard produced no verdict — refusing (fail-closed): '${guard_out:-<empty>}'" ;;
   esac
-  [ -n "$prod_fps" ] || info "WARN prod-fingerprints empty — guard passed on the staging marker alone"
-
   reserve_lease
 
   # rebuild from the live-bound tree so 'restart' picks up the agent's current edits (synchronous)
@@ -255,7 +272,7 @@ stop_gateway() {
 # THIS subprocess only — never the runner's persistent env, never echoed. The key is resolved
 # INSIDE the runner from the ro-mounted host-config (/run/subyard/staging.env: STAGING_MODEL_KEY,
 # or ANTHROPIC_API_KEY), so it never crosses this CLI's process. Exports SUBYARD_LIVE_MODEL=1 when
-# a key is present (live model moves run) and leaves it unset when absent (live tests skip cleanly).
+# a key is present and clears it when absent. The command owns prerequisite skips and exit status.
 # This is the "simple path, no broker" of the live-test lane: a live model turn from host-config.
 run_test() {
   require_box
@@ -265,11 +282,13 @@ run_test() {
   elif [ -n "${TEST_LIVE_CMD:-}" ]; then
     cmd=(sh -c "$TEST_LIVE_CMD")
   else
-    die "usage: sy-stage test [--zone Z] -- <cmd...>  — runs <cmd> in the runner (cwd /workspace) with the host-config staging provider key injected as ANTHROPIC_API_KEY for THIS run only (also SUBYARD_LIVE_MODEL=1, a Subyard convenience flag the project does not read). With no key, key-gated live tests skip cleanly; the project's own live suites also need their switch, e.g. OPENCLAW_LIVE_TEST=1. Set STAGING_MODEL_KEY in the zone's host-config staging.env."
+    die "usage: sy-stage test [--zone Z] -- <cmd...>  — runs <cmd> in the runner (cwd /workspace) with the host-config staging provider key injected as ANTHROPIC_API_KEY for THIS run only (also SUBYARD_LIVE_MODEL=1, a Subyard convenience flag the project does not read). CMD runs even without a key; check SUBYARD_LIVE_MODEL for a prerequisite skip. See /etc/subyard/openclaw-l1.md for the model-only command. Set STAGING_MODEL_KEY in the zone's host-config staging.env."
   fi
-  info "live-model test in zone '$zone' (provider key injected for this subprocess only; cwd /workspace)"
+  info "test command in zone '$zone' (staging provider key used when configured; cwd /workspace)"
   docker exec -i -w /workspace "$CNAME" sh -s -- "${cmd[@]}" <<'RUN'
 set -eu
+# Credentials for this invocation come only from the mounted staging config.
+unset SUBYARD_LIVE_MODEL ANTHROPIC_API_KEY STAGING_MODEL_KEY
 ef=/run/subyard/staging.env
 key=""
 [ -r "$ef" ] && key="$( . "$ef" 2>/dev/null; printf '%s' "${STAGING_MODEL_KEY:-${ANTHROPIC_API_KEY:-}}" )"
@@ -279,7 +298,7 @@ if [ -n "$key" ]; then
   export SUBYARD_LIVE_MODEL=1 ANTHROPIC_API_KEY="$key" STAGING_MODEL_KEY="$key"
   echo "sy-stage: staging provider key injected as ANTHROPIC_API_KEY (this run only); SUBYARD_LIVE_MODEL=1" >&2
 else
-  echo "sy-stage: no staging provider key in host-config -> key-gated live tests skip cleanly" >&2
+  echo "sy-stage: no staging provider key in host-config; running command without model credentials" >&2
 fi
 exec "$@"
 RUN

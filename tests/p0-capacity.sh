@@ -243,6 +243,9 @@ printf '%s\n' \
   '    printf "%s\\n" "$*" >> "$P0_FAKE_INCUS_LOG"' \
   '    find "$P0_FAKE_INCUS_STATE" -delete' \
   '    ;;' \
+  '  "project list --format csv -c n")' \
+  '    [ ! -e "$P0_FAKE_INCUS_PROJECT" ] || printf "%s\\n" "$P0_FAKE_INCUS_PROJECT_NAME"' \
+  '    ;;' \
   '  "project show subyard-e2e-yard")' \
   '    [ "$P0_FAKE_INCUS_PROJECT_NAME" = subyard-e2e-yard ] && [ -e "$P0_FAKE_INCUS_PROJECT" ]' \
   '    ;;' \
@@ -251,6 +254,9 @@ printf '%s\n' \
   '    ;;' \
   '  "project get subyard-e2e-yard user.subyard.p0-image-cache"|"project get subyard-test-yard user.subyard.p0-image-cache")' \
   '    printf "%s\\n" "$P0_FAKE_INCUS_MARKER"' \
+  '    ;;' \
+  '  "project get subyard-e2e-yard user.subyard.p0-source"|"project get subyard-test-yard user.subyard.p0-source"|"project get subyard user.subyard.p0-source")' \
+  '    printf "\\n"' \
   '    ;;' \
   '  "project get subyard-e2e-yard restricted"|"project get subyard-test-yard restricted") printf "true\\n" ;;' \
   '  "list --project subyard-e2e-yard --format csv -c n"|"list --project subyard-test-yard --format csv -c n")' \

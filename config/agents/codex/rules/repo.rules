@@ -1,6 +1,8 @@
 # Codex command rules for the yard (laid down at ~/.codex/rules/repo.rules).
-# Gate creating and publishing git history at the Codex level — every commit and push prompts
-# the operator — rather than a yard-wide git shim. Routine local work (edits, builds, tests,
+# Request approval for canonical direct git commit/push commands at the Codex level.
+# Provisioning also installs mandatory native requirements independent of these home rules.
+# These argv-prefix rules are not a boundary for other Git spellings or direct Git metadata writes.
+# Routine local work (edits, builds, tests,
 # git reset) stays free.
 
 prefix_rule(

@@ -49,6 +49,7 @@ import (
 	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/sshidentity"
 	"github.com/Subyard/Subyard/internal/state"
+	"github.com/Subyard/Subyard/internal/yardnetwork"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
 )
@@ -57,32 +58,34 @@ var Version = "0.1.0-dev"
 var operationCounter atomic.Uint64
 
 type Options struct {
-	RepositoryRoot  string
-	DispatcherPath  string
-	Program         string
-	Arguments       []string
-	Environment     []string
-	WorkingDir      string
-	Stdin           io.Reader
-	Stdout          io.Writer
-	Stderr          io.Writer
-	Incus           ports.Incus
-	Executor        ports.InstanceExecutor
-	ProjectData     ports.YardExecutor
-	ProjectDevices  ports.InstanceDeviceManager
-	ProjectArchive  ports.DirectoryArchiver
-	ProjectExports  ports.ProjectExportStore
-	ProjectVSCode   ports.VSCode
-	ProjectObserver ports.ProjectObserver
-	StatusFacts     ports.StatusFactsReader
-	Credentials     ports.CredentialMetadataReader
-	AdapterRunner   ports.AdapterRunner
-	InitPlatform    ports.InitPlatform
-	RemoteControl   ports.RemoteControl
-	Prompt          ports.Prompter
-	Config          ports.ConfigApplier
-	Clock           ports.Clock
-	Audit           ports.AuditSink
+	RepositoryRoot     string
+	DispatcherPath     string
+	Program            string
+	Arguments          []string
+	Environment        []string
+	WorkingDir         string
+	Stdin              io.Reader
+	Stdout             io.Writer
+	Stderr             io.Writer
+	Incus              ports.Incus
+	NetworkPolicy      *yardnetwork.Service
+	Executor           ports.InstanceExecutor
+	ProjectData        ports.YardExecutor
+	ProjectDevices     ports.InstanceDeviceManager
+	ProjectArchive     ports.DirectoryArchiver
+	ProjectExports     ports.ProjectExportStore
+	ProjectVSCode      ports.VSCode
+	ProjectObserver    ports.ProjectObserver
+	StatusFacts        ports.StatusFactsReader
+	Credentials        ports.CredentialMetadataReader
+	AdapterRunner      ports.AdapterRunner
+	InitPlatform       ports.InitPlatform
+	IntegrationRuntime func(config.Loaded) IntegrationRuntime
+	RemoteControl      ports.RemoteControl
+	Prompt             ports.Prompter
+	Config             ports.ConfigApplier
+	Clock              ports.Clock
+	Audit              ports.AuditSink
 }
 
 type CLI struct {
@@ -100,6 +103,8 @@ type CLI struct {
 	effectiveUID                 func() int
 	retainedAdapterCompatibility bool
 	releaseTransitionChild       bool
+	configApplyRepair            *configApplyRepairPermit
+	orcaInitRepair               *configApplyRepairPermit
 }
 
 func (cli *CLI) rpcOperation(operationID string) *CLI {
@@ -147,6 +152,8 @@ func (cli *CLI) runReleaseTransitionYardCommandIO(
 	operation.options.Stdout = stdout
 	operation.options.Stderr = stderr
 	operation.releaseTransitionChild = true
+	operation.configApplyRepair = nil
+	operation.orcaInitRepair = nil
 	if code := operation.Run(ctx); code != 0 {
 		return fmt.Errorf("yard command exited with status %d", code)
 	}
@@ -160,6 +167,7 @@ type mutationGateOutcome struct {
 	Previous    *releasetransition.ReleaseID     `json:"previous"`
 	Target      releasetransition.ReleaseID      `json:"target"`
 	Transaction *releasetransition.TransactionID `json:"transaction"`
+	Message     string                           `json:"message,omitempty"`
 	Action      string                           `json:"action"`
 }
 
@@ -167,7 +175,8 @@ func publicMutationGateOutcome(outcome releasetransition.Outcome) mutationGateOu
 	return mutationGateOutcome{
 		Status: outcome.Status, Code: outcome.Code,
 		Active: outcome.Active, Previous: outcome.Previous, Target: outcome.Target,
-		Transaction: outcome.Transaction, Action: outcome.Retry,
+		Transaction: outcome.Transaction, Message: outcome.Message,
+		Action: releaseruntime.CurrentReleaseRetry(outcome),
 	}
 }
 
@@ -357,20 +366,43 @@ func (cli *CLI) Run(ctx context.Context) int {
 		cli.errorf("unknown command %q\nTry %q.", name, cli.options.Program+" --help")
 		return 2
 	}
+	if core && definition.Handler == "@network" && commandHelpRequested(commandArguments) {
+		cli.networkUsage()
+		return 0
+	}
 	configSync, configSyncCheck, configSyncStatus := false, false, false
 	registrationRepair := core && definition.Handler == "@config" && configRegistrationRepairInvocation(commandArguments)
 	if core && definition.Handler == "@config" {
 		configSync, configSyncCheck, configSyncStatus = configSyncInvocation(commandArguments)
 	}
-	readOnlyInvocation := commandHelpRequested(commandArguments) ||
+	resourceReadOnly := false
+	if profileResource {
+		invocation, parseErr := parseResourceInvocation(commandArguments)
+		resourceReadOnly = parseErr == nil && (invocation.help ||
+			cli.resources.VerbReadOnly(resourceDefinition.Command, invocation.verb))
+	}
+	readOnlyInvocation := (core && commandHelpRequested(commandArguments)) ||
 		(core && definition.Effect == command.EffectRead) ||
-		(core && definition.Handler == "@config" && (configSyncCheck || configSyncStatus)) ||
+		resourceReadOnly ||
+		(core && definition.Handler == "@config" && (configReadOnlyInvocation(commandArguments) || configSyncCheck || configSyncStatus)) ||
 		(core && definition.Handler == "@test-vms" && testVMStatusInvocation(commandArguments)) ||
+		(core && definition.Handler == "@integration" && slices.Contains(commandArguments, "status")) ||
+		(core && definition.Handler == "@network" && len(commandArguments) > 0 && commandArguments[0] == "status") ||
 		(core && definition.Handler == "@update" && slices.Contains(commandArguments, "--check"))
+	if core && definition.Handler == "@ssh-agent" {
+		invocation, parseErr := parseSSHAgentArguments(commandArguments)
+		// Revocation must remain available during release recovery. Treat it
+		// like a reader only for preflight; its own typed action still audits
+		// the bounded mutation and never grants access.
+		readOnlyInvocation = parseErr != nil || invocation.verb != "unlock" || invocation.help
+	}
 	if explicit {
 		cli.env["SUBYARD_YARD_EXPLICIT"] = "1"
 	}
 	cli.env["SUBYARD_YARD"] = yard
+	if core && definition.Handler == "@current-migration" {
+		return cli.runCurrentMigration(ctx, definition, commandArguments, explicit, yes)
+	}
 	if core && definition.Handler == "@help" {
 		if cli.env["SUBYARD_NO_AUDIT"] == "" {
 			cli.audit(name, commandArguments, yard, "")
@@ -397,12 +429,42 @@ func (cli *CLI) Run(ctx context.Context) int {
 		}
 		return cli.runTestVMLogs(ctx, commandArguments)
 	}
+	if core && definition.Handler == "@logs" && !explicit && hostLogInvocation(commandArguments) {
+		if cli.env["SUBYARD_NO_AUDIT"] == "" {
+			cli.audit(name, commandArguments, "", "")
+		}
+		return cli.runHostLogs(commandArguments)
+	}
 	if !readOnlyInvocation && !registrationRepair && !cli.releaseTransitionChild &&
 		(!core || definition.Name != "update") {
 		outcome, gateErr := cli.inspectMutationGate(ctx, yard)
 		if gateErr != nil {
 			cli.errorf("inspect release transition: %v", gateErr)
 			return 1
+		}
+		if outcome != nil && core && definition.Handler == "@config" {
+			if apply, allLocal := configApplyInvocation(commandArguments); apply {
+				permit, err := cli.prepareConfigApplyRepair(ctx, yard, allLocal, *outcome)
+				if err != nil {
+					cli.errorf("config apply: %v", err)
+					return 1
+				}
+				cli.configApplyRepair = permit
+				if permit != nil {
+					outcome = nil
+				}
+			}
+		}
+		if outcome != nil && core && definition.Handler == "@init" {
+			permit, err := cli.prepareOrcaInitRepair(ctx, yard, commandArguments, *outcome)
+			if err != nil {
+				cli.errorf("init release repair: %v", err)
+				return 1
+			}
+			cli.orcaInitRepair = permit
+			if permit != nil {
+				outcome = nil
+			}
 		}
 		if outcome != nil {
 			if encodeErr := json.NewEncoder(cli.options.Stderr).Encode(
@@ -423,13 +485,16 @@ func (cli *CLI) Run(ctx context.Context) int {
 			ownerDataHome = filepath.Join(operatorHome, ".subyard")
 		}
 	}
-	if ownerDataHome != "" && !readOnlyInvocation && !registrationRepair {
+	if ownerDataHome != "" && !readOnlyInvocation && !registrationRepair && !(core && definition.Handler == "@integration") {
 		if err := (ownerinventory.Connections{Root: filepath.Join(ownerDataHome, "owner-inventory")}).Recover(); err != nil {
 			cli.errorf("recover owner inventory transaction: %v", err)
 			return 1
 		}
 	}
 	configSyncHome := ""
+	trust := cli.sshTrust(ownerDataHome, yes || cli.env["ASSUME_YES"] == "1" || sshTrustConsent(commandArguments))
+	defer trust.Close()
+	ctx = transport.WithSSHTrust(ctx, trust.Options)
 	configSyncPending := false
 	if core && definition.Handler == "@config" {
 		if configSync {
@@ -476,7 +541,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		if baseErr != nil {
 			err = baseErr
 		} else {
-			readOnlyRoute := readOnlyInvocation || registrationRepair || (core && definition.Name == "remove")
+			readOnlyRoute := readOnlyInvocation || registrationRepair || (core && (definition.Name == "remove" || definition.Handler == "@integration"))
 			var results []ownerInventoryResult
 			if readOnlyRoute {
 				results = cli.allOwnerInventoriesReadOnly(ctx, base, false)
@@ -517,7 +582,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		cli.errorf("%v", err)
 		return 2
 	}
-	if !readOnlyInvocation && !registrationRepair {
+	if !readOnlyInvocation && !registrationRepair && !(core && definition.Handler == "@integration") {
 		if err := configsync.RecoverHostIDRename(loaded.Context.Paths.ConfigHome); err != nil {
 			cli.errorf("recover owner HostID rename: %v", err)
 			return 1
@@ -570,6 +635,24 @@ func (cli *CLI) Run(ctx context.Context) int {
 				},
 			})
 			if prepareErr != nil {
+				if definition.Handler == "@update" &&
+					!slices.Contains(commandArguments, "--check") &&
+					!commandHelpRequested(commandArguments) {
+					operationID := cli.ensureOperationID()
+					status, code := "failure", "preparation_failed"
+					if errors.Is(prepareErr, context.Canceled) || errors.Is(prepareErr, context.DeadlineExceeded) {
+						status, code = "interrupted", "context_cancelled"
+					}
+					var execution *releaseExecution
+					if verified, ok := releaseruntime.VerifiedPreparation(prepareErr); ok {
+						execution = &releaseExecution{prepared: verified}
+					}
+					if historyErr := cli.recordUpdateTerminal(
+						commandArguments, operationID, "prepare", status, code, execution,
+					); historyErr != nil {
+						cli.errorf("update history: %v", historyErr)
+					}
+				}
 				return cli.reportPreparationError(definition, prepareErr)
 			}
 			defer prepared.Close()
@@ -607,17 +690,33 @@ func (cli *CLI) Run(ctx context.Context) int {
 	target, routeErr := application.Route(loadedContext, domain.RemotePolicy(remotePlane))
 	if routeErr != nil {
 		if remotePlane == command.RemoteDeny {
-			fmt.Fprintf(cli.options.Stderr, "%s is host-local — use sync or clone\n", name)
+			if name == "ssh-agent" {
+				cli.errorf("ssh-agent must run on the yard's owner host, where the key and terminal are available")
+			} else {
+				fmt.Fprintf(cli.options.Stderr, "%s is host-local — use sync or clone\n", name)
+			}
 		} else {
 			cli.errorf("route %s: %v", name, routeErr)
 		}
 		return 1
 	}
+	releaseProject, projectErr := cli.beginProjectMutation(ctx, projectRun)
+	if projectErr != nil {
+		cli.errorf("prepare %s: %v", name, projectErr)
+		return 1
+	}
+	defer func() {
+		cli.abortProjectExecution(context.Background(), projectRun)
+		releaseProject()
+	}()
 	if target == domain.TargetRemoteOwner {
 		if core && definition.Name == "keys" {
 			return cli.runRemoteKeys(ctx, loaded, definition, commandArguments)
 		}
 		return cli.forwardRemote(ctx, loadedContext, name, commandArguments)
+	}
+	if core && definition.Handler == "@logs" && hostLogInvocation(commandArguments) {
+		return cli.runHostLogs(commandArguments)
 	}
 	if configSync {
 		configSyncTarget, configSyncRouteErr := application.Route(
@@ -662,8 +761,13 @@ func (cli *CLI) Run(ctx context.Context) int {
 		return cli.runSecurity(ctx, loaded, commandArguments)
 	case "@keys":
 		return cli.runKeys(ctx, loaded, definition, commandArguments)
+	case "@ssh-agent":
+		return cli.runSSHAgent(ctx, loaded, definition, commandArguments)
 	case "@update":
 		return cli.runUpdate(ctx, loaded, definition, commandArguments)
+	case "@integration":
+		fmt.Fprintf(cli.options.Stdout, "Usage: %s integration enable|disable <id> | status [id] [--json]\n", cli.options.Program)
+		return 0
 	case "@config":
 		return cli.runConfig(ctx, loaded, commandArguments)
 	case "@status":
@@ -1597,10 +1701,10 @@ func (cli *CLI) runShell(
 }
 
 func shellExecArguments(yard domain.Context, root bool, cwd string, guestCommand []string) []string {
-	uid := yard.DevUID
 	userArguments := []string{
-		"--user", strconv.Itoa(uid), "--group", strconv.Itoa(uid),
+		"--user", "0", "--group", "0",
 		"--env", "HOME=/home/" + yard.DevUser,
+		"--env", "SSH_AUTH_SOCK=/home/" + yard.DevUser + "/.ssh/subyard-agent.sock",
 	}
 	if root {
 		userArguments = []string{"--user", "0", "--group", "0", "--env", "HOME=/root"}
@@ -1609,9 +1713,15 @@ func shellExecArguments(yard domain.Context, root bool, cwd string, guestCommand
 	result = append(result, userArguments...)
 	result = append(result, "--cwd", cwd)
 	if len(guestCommand) == 0 {
-		return append(result, "-t", "--", "bash", "-l")
+		if root {
+			return append(result, "-t", "--", "bash", "-l")
+		}
+		return append(result, "-t", "--", "/usr/sbin/runuser", "-u", yard.DevUser, "--", "bash", "-l")
 	}
 	result = append(result, "--")
+	if !root {
+		result = append(result, "/usr/sbin/runuser", "-u", yard.DevUser, "--")
+	}
 	return append(result, guestCommand...)
 }
 
@@ -2374,7 +2484,12 @@ func (cli *CLI) projectStores(ctx context.Context, yard domain.Context) (map[str
 		if err != nil {
 			return nil, err
 		}
-		store, err := openProjectStore(ctx, contextForYard.Paths.StateDir)
+		var store ports.ProjectStore
+		if contextForYard.AccessKind == domain.AccessRemote {
+			store, err = openProjectStoreReadOnly(contextForYard.Paths.StateDir)
+		} else {
+			store, err = openProjectStore(ctx, contextForYard.Paths.StateDir)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -2918,6 +3033,7 @@ func structuredAdapterContext(yard domain.Context) map[string]string {
 }
 
 var structuredRuntimeRoleKeys = map[string]struct{}{
+	"INTEGRATION_HOST_LINKS":           {},
 	"SUBYARD_KEYS_CONSUMER_ROOT":       {},
 	"SUBYARD_KEYS_PROD_FINGERPRINTS":   {},
 	"SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE": {},
@@ -3199,6 +3315,8 @@ Remote yards:
   (code/sync/export/clone/remove) go straight into the yard. 'bind' is host-local and
   disabled for remote yards. 'remote add' never copies secrets; only a separate confirmed
   'keys trust' permits authorized encrypted ledger records to sync between owner hosts.
+  If an SSH server key is unknown, review its target and fingerprint to trust it and continue
+  the command. Non-terminal input requires --yes or ASSUME_YES=1; key verification still applies.
   A real in-yard host-key change stays blocked. Verify its fingerprint on the trusted owner
   host, then use 'remote repair-key <name>' for an explicit, context-scoped rotation.
   Subcommands:  remote add <name> <user@host> [--yard <remote-yard>] | remote repair-key <name> | remote remove <name> | remote list
@@ -3316,7 +3434,12 @@ func (cli *CLI) forwardRemote(ctx context.Context, yardContext domain.Context, n
 		hint := "yard -Y " + cli.env["SUBYARD_YARD"] + " init"
 		remoteLine = "SUBYARD_USAGE_REPAIR_HINT=" + shellquote.Word(hint) + " " + remoteLine
 	}
-	return cli.runExternal(ctx, "ssh", []string{"-t", yardContext.OwnerEndpoint, "--", "bash", "-lc", shellquote.Word(remoteLine)})
+	sshArguments, err := cli.sshArguments(ctx, yardContext.OwnerEndpoint, []string{"-t", yardContext.OwnerEndpoint, "--", "bash", "-lc", shellquote.Word(remoteLine)})
+	if err != nil {
+		cli.errorf("SSH trust: %v", err)
+		return 1
+	}
+	return cli.runExternal(ctx, "ssh", sshArguments)
 }
 
 func (cli *CLI) runExternal(ctx context.Context, program string, arguments []string) int {
@@ -3454,7 +3577,7 @@ func (cli *CLI) serveRPC(ctx context.Context, yard string, arguments []string) i
 		"snapshot", "ordered-events", "cancellation", "deadlines", "commands", "context",
 		"projects", "yard-status", "credential-metadata", "credential-status",
 		"operation-plan", "operation-execute", "resync", "owner-inventory-v1",
-		credentialPrepareCapability,
+		credentialPrepareCapability, exactPlanCapability,
 	}, DrainOnEOF: true}
 	if err := session.Serve(ctx, cli.options.Stdin, cli.options.Stdout); err != nil {
 		if !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) {
@@ -3466,16 +3589,18 @@ func (cli *CLI) serveRPC(ctx context.Context, yard string, arguments []string) i
 }
 
 type rpcHandler struct {
-	cli     *CLI
-	loaded  config.Loaded
-	plansMu sync.Mutex
-	plans   map[string]*preparedCommand
+	cli        *CLI
+	loaded     config.Loaded
+	plansMu    sync.Mutex
+	plans      map[string]*preparedCommand
+	exactPlans map[string]exactOperationPlan
 }
 
 func (handler *rpcHandler) closePlans() {
 	handler.plansMu.Lock()
 	plans := handler.plans
 	handler.plans = nil
+	handler.exactPlans = nil
 	handler.plansMu.Unlock()
 	for _, prepared := range plans {
 		_ = prepared.Close()
@@ -3510,6 +3635,18 @@ func operationRPCError(fallback string, err error) *rpc.Error {
 
 func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.Emit) (any, error) {
 	switch call.Method {
+	case "integration.status":
+		var params struct {
+			ID        string `json:"id"`
+			OwnerOnly bool   `json:"ownerOnly,omitempty"`
+		}
+		if err := decodeRPCParams(call.Params, &params); err != nil {
+			return nil, err
+		}
+		if params.OwnerOnly && handler.loaded.Context.AccessKind == domain.AccessRemote {
+			return nil, &rpc.Error{Code: "remote_owner_required", Message: "integration status must resolve to the owner host"}
+		}
+		return handler.cli.rpcOperation(call.OperationID).queryIntegrationStatus(ctx, handler.loaded, params.ID)
 	case "command.list":
 		return handler.commands(), nil
 	case "context.get":
@@ -3552,6 +3689,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		var params struct {
 			Command   string   `json:"command"`
 			Arguments []string `json:"arguments"`
+			Exact     bool     `json:"exact,omitempty"`
 		}
 		if err := decodeRPCParams(call.Params, &params); err != nil {
 			return nil, err
@@ -3563,6 +3701,12 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		if definition.Effect != command.EffectMutate {
 			return nil, &rpc.Error{Code: "command_not_mutating", Message: params.Command}
 		}
+		if definition.Handler == "@integration" && !params.Exact {
+			return nil, &rpc.Error{Code: "exact_plan_required", Message: "integration requires operation-exact-plan-v1"}
+		}
+		if params.Exact && handler.loaded.Context.AccessKind == domain.AccessRemote {
+			return nil, &rpc.Error{Code: "remote_owner_required", Message: "request the exact plan on the owner host"}
+		}
 		behavior, err := resolveCoreCommand(definition)
 		if err != nil {
 			return nil, operationRPCError("invalid_params", err)
@@ -3570,7 +3714,8 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		if behavior.prepare == nil {
 			return nil, &rpc.Error{Code: "interactive_or_payload_command", Message: params.Command}
 		}
-		if definition.Name != "update" {
+		operationCLI := handler.cli.rpcOperation(call.OperationID)
+		if !releaseRecoveryCommand(definition) {
 			outcome, gateErr := handler.cli.inspectMutationGate(
 				ctx, handler.loaded.Context.YardName,
 			)
@@ -3578,13 +3723,21 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 				return nil, operationRPCError("mutation_gate_failed", gateErr)
 			}
 			if outcome != nil {
-				return nil, mutationGateRPCError(*outcome)
+				if definition.Handler == "@init" {
+					operationCLI.orcaInitRepair, gateErr = operationCLI.prepareOrcaInitRepair(
+						ctx, handler.loaded.Context.YardName, params.Arguments, *outcome)
+					if gateErr != nil {
+						return nil, operationRPCError("mutation_gate_failed", gateErr)
+					}
+				}
+				if operationCLI.orcaInitRepair == nil {
+					return nil, mutationGateRPCError(*outcome)
+				}
 			}
 		}
-		operationCLI := handler.cli.rpcOperation(call.OperationID)
 		prepared, err := operationCLI.prepareCommand(ctx, prepareCommandRequest{
 			Loaded: handler.loaded, Definition: definition, Arguments: params.Arguments,
-			ExplicitYard: true,
+			ExplicitYard: true, ReadOnly: params.Exact,
 		})
 		if err != nil {
 			return nil, preparationRPCError(definition, err)
@@ -3596,7 +3749,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			}
 		}()
 		if prepared.displayOnly != nil {
-			return nil, operationRPCError("plan_failed", errors.New("provision execution is required"))
+			return nil, operationRPCError("command_not_mutating", errors.New("read-only commands do not require an operation plan"))
 		}
 		plan := prepared.Plan
 		handler.plansMu.Lock()
@@ -3612,11 +3765,20 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		}
 		handler.plans[plan.OperationID] = prepared
 		keep = true
+		if params.Exact {
+			if handler.exactPlans == nil {
+				handler.exactPlans = make(map[string]exactOperationPlan)
+			}
+			exact := bindExactOperationPlan(prepared, time.Now())
+			handler.exactPlans[plan.OperationID] = exact
+			return exact, nil
+		}
 		return plan, nil
 
 	case "operation.execute":
 		var params struct {
-			Confirmed bool `json:"confirmed"`
+			Confirmed bool   `json:"confirmed"`
+			Digest    string `json:"digest,omitempty"`
 		}
 		if err := decodeRPCParams(call.Params, &params); err != nil {
 			return nil, err
@@ -3626,15 +3788,24 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		}
 		handler.plansMu.Lock()
 		planned, ok := handler.plans[call.OperationID]
+		exact, bound := handler.exactPlans[call.OperationID]
 		if ok {
 			delete(handler.plans, call.OperationID)
+			delete(handler.exactPlans, call.OperationID)
 		}
 		handler.plansMu.Unlock()
 		if !ok {
 			return nil, &rpc.Error{Code: "plan_not_found", Message: call.OperationID}
 		}
 		defer planned.Close()
-		if planned.Definition.Name != "update" {
+		if bound {
+			if err := validateExactOperationPlan(exact, planned, params.Digest, time.Now()); err != nil {
+				return nil, operationRPCError("plan_binding_invalid", err)
+			}
+		} else if params.Digest != "" || planned.Definition.Handler == "@integration" {
+			return nil, &rpc.Error{Code: "exact_plan_required", Message: "no exact plan is bound to this operation"}
+		}
+		if !releaseRecoveryCommand(planned.Definition) {
 			outcome, gateErr := planned.CLI.inspectMutationGate(
 				ctx, handler.loaded.Context.YardName,
 			)
@@ -3642,7 +3813,10 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 				return nil, operationRPCError("mutation_gate_failed", gateErr)
 			}
 			if outcome != nil {
-				return nil, mutationGateRPCError(*outcome)
+				if planned.Definition.Handler != "@init" || planned.CLI.orcaInitRepair == nil ||
+					!sameConfigApplyGate(planned.CLI.orcaInitRepair.gate, *outcome) {
+					return nil, mutationGateRPCError(*outcome)
+				}
 			}
 		}
 		if planned.Plan.Target == domain.TargetRemoteOwner {

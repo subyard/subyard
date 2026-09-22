@@ -22,7 +22,7 @@ type SourceRecord struct {
 }
 
 func SourceRecordPath(configHome string) string {
-	return filepath.Join(configHome, ".sync", "source.json")
+	return filepath.Join(configHome, filepath.FromSlash(config.SourceRecordRelativePath))
 }
 
 func ReadSourceRecord(configHome string) (SourceRecord, bool, error) {

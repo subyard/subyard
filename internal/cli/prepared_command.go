@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/command"
@@ -32,6 +33,9 @@ type coreCommandBehavior struct {
 func resolveCoreCommand(definition command.Definition) (coreCommandBehavior, error) {
 	behavior := coreCommandBehavior{prepareExit: 2, prepareRPCCode: "invalid_params"}
 	switch definition.Handler {
+	case "@integration":
+		behavior.prepare = (*preparedCommand).prepareIntegration
+		behavior.prepareExit, behavior.prepareRPCCode = 1, "plan_failed"
 	case "@init":
 		behavior.prepare = (*preparedCommand).prepareInit
 		behavior.prepareExit, behavior.prepareRPCCode = 1, "plan_failed"
@@ -73,12 +77,20 @@ func resolveCoreCommand(definition command.Definition) (coreCommandBehavior, err
 	case "@update":
 		behavior.prepare = (*preparedCommand).prepareUpdate
 		behavior.prepareExit, behavior.prepareRPCCode = 1, "plan_failed"
+	case "@current-migration":
+		behavior.prepare = (*preparedCommand).prepareCurrentMigration
+		behavior.prepareExit, behavior.prepareRPCCode = 1, "plan_failed"
 	case "@keys":
 		behavior.nonRPCReason = "protected credential transport"
+	case "@ssh-agent":
+		behavior.nonRPCReason = "protected owner-host credential transport"
 	case "@shell":
 		behavior.nonRPCReason = "interactive terminal session"
 	case "@config", "@host":
 		behavior.nonRPCReason = "dedicated configuration and registration workflow"
+	case "@network":
+		behavior.prepare = (*preparedCommand).prepareNetwork
+		behavior.prepareExit, behavior.prepareRPCCode = 1, "plan_failed"
 	case "@resource":
 		behavior.nonRPCReason = "profile resource pipeline"
 	case "@check", "@security", "@status", "@space", "@info", "@yards", "@logs", "@usage", "@list", "@help":
@@ -123,7 +135,10 @@ type preparedCommand struct {
 	Arguments       []string
 	Loaded          config.Loaded
 	Plan            domain.OperationPlan
+	exactState      string
+	ownerPlan       bool
 	Project         *projectExecution
+	release         *releaseExecution
 	policy          domain.CommandPolicy
 	assess          commandAssessment
 	refresh         commandAssessment
@@ -185,6 +200,12 @@ func (cli *CLI) prepareCommand(ctx context.Context, request prepareCommandReques
 		request.OnResolved(prepared.Loaded, slices.Clone(prepared.Arguments))
 	}
 	prepared.policy = commandPolicy(prepared.Definition, prepared.Loaded.Context, prepared.Arguments, prepared.Project)
+	if prepared.Definition.Handler == "@integration" && prepared.Loaded.Context.AccessKind == domain.AccessRemote {
+		if err = prepared.prepareRemoteOperation(ctx); err != nil {
+			return nil, &commandPreparationError{phase: "prepare", err: err}
+		}
+		return prepared, nil
+	}
 	if err = behavior.prepare(prepared, ctx, request.Bootstrap); err != nil {
 		return nil, &commandPreparationError{phase: "prepare", err: err}
 	}
@@ -242,6 +263,13 @@ func (prepared *preparedCommand) Execute(ctx context.Context, orchestrator *appl
 	if !prepared.executeNoOp && operationPlanNoOp(prepared.Plan) {
 		return noOp()
 	}
+	release, err := prepared.CLI.beginProjectMutation(ctx, prepared.Project)
+	if err != nil {
+		return domain.AdapterResult{}, err
+	}
+	defer release()
+	// Abort before releasing the host barrier, including failures after reservation.
+	defer prepared.CLI.abortProjectExecution(context.Background(), prepared.Project)
 	if prepared.Plan.Assessment != nil && prepared.refresh != nil {
 		action, delta, err := prepared.refresh(ctx)
 		if err != nil {
@@ -285,9 +313,22 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 	if err != nil {
 		return err
 	}
+	if err := execution.validateOrcaRepair(ctx, cli); err != nil {
+		return err
+	}
+	prepared.exactState = operationStateDigest(struct {
+		Baseline *initIntegrationBaseline
+		Adoption reconcileruntime.IntegrationPlan
+	}{execution.integrationBaseline, execution.integrationAdoption})
 	prepared.policy.Consequences = execution.consequences()
 	prepared.assess = func(context.Context) (domain.ActionID, domain.ActionDelta, error) { return execution.actionPlan() }
 	prepared.refresh = func(ctx context.Context) (domain.ActionID, domain.ActionDelta, error) {
+		if err := execution.checkIntegrationBaseline(cli); err != nil {
+			return "", domain.ActionDelta{}, err
+		}
+		if err := execution.integrationSelection.check(ctx, cli, execution); err != nil {
+			return "", domain.ActionDelta{}, err
+		}
 		if err := execution.refreshAssessment(ctx); err != nil {
 			return "", domain.ActionDelta{}, err
 		}
@@ -310,16 +351,29 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 		}
 	}
 	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (domain.AdapterResult, error) {
+		if cli.orcaInitRepair != nil {
+			if err := execution.validateOrcaRepair(ctx, cli); err != nil {
+				return domain.AdapterResult{}, err
+			}
+			unlock, err := cli.lockConfigApplyRepair(ctx, cli.orcaInitRepair)
+			if err != nil {
+				return domain.AdapterResult{}, err
+			}
+			defer unlock()
+		}
 		if cli.options.InitPlatform == nil && execution.mode != initConfigs && !execution.hooksOnly() {
 			if err := cli.prepareSudoPrivileges(ctx, diagnostics, cli.effectiveUID(), prepared.Definition.Name); err != nil {
 				return domain.AdapterResult{}, err
 			}
-			execution.platform = cli.initPlatform(execution.loaded, execution.powerYards)
+			execution.rebuildPlatform(cli)
 		}
 		orchestrator.Runner = initAdapter{execution: execution, cli: cli, output: diagnostics}
 		result, _, err := orchestrator.RunAdapter(ctx, prepared.Plan, domain.AdapterRequest{
 			Schema: shelladapter.ProtocolSchema, OperationID: prepared.Plan.OperationID, Adapter: "init", Action: "reconcile",
 		}, nil)
+		if err == nil && cli.orcaInitRepair != nil {
+			err = cli.finishConfigApplyRepair(ctx, cli.orcaInitRepair)
+		}
 		return result, err
 	}
 	return nil
@@ -383,6 +437,7 @@ func (prepared *preparedCommand) prepareTestVMs(ctx context.Context, _ *initBoot
 }
 
 func (prepared *preparedCommand) prepareTeardown(_ context.Context, _ *initBootstrap) error {
+	prepared.executeNoOp = true
 	execution, err := prepareTeardownExecution(prepared.Arguments)
 	if err != nil {
 		return err
@@ -427,12 +482,25 @@ func (prepared *preparedCommand) prepareUpdate(ctx context.Context, _ *initBoots
 		return err
 	}
 	prepared.closeResource = execution.Close
+	prepared.release = execution
 	prepared.executeNoOp = true
+	prepared.preview = func() {
+		if _, ok := updateDirection(execution.prepared.Action); ok {
+			fmt.Fprintf(prepared.CLI.options.Stdout, "Update: %s -> %s\n",
+				firstNonempty(execution.prepared.SourceVersion, execution.prepared.SourceRelease, "unknown"),
+				firstNonempty(execution.prepared.TargetVersion, execution.prepared.TargetRelease, "unknown"),
+			)
+		}
+	}
 	prepared.assess = func(context.Context) (domain.ActionID, domain.ActionDelta, error) {
 		return execution.prepared.Action, domain.ActionDelta{Changed: execution.prepared.Changed, Consequences: execution.prepared.Consequences}, nil
 	}
 	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, _ io.Writer) (domain.AdapterResult, error) {
-		return prepared.CLI.executeRelease(ctx, orchestrator, prepared.Plan, execution)
+		if err := prepared.CLI.beginUpdateHistory(prepared.Plan, execution); err != nil {
+			return domain.AdapterResult{}, fmt.Errorf("create update history: %w", err)
+		}
+		result, runErr := prepared.CLI.executeRelease(ctx, orchestrator, prepared.Plan, execution)
+		return result, prepared.CLI.finishUpdateHistory(ctx, execution, result, runErr)
 	}
 	return nil
 }

@@ -1,6 +1,7 @@
 package releasetransition
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -11,6 +12,13 @@ import (
 )
 
 const ProcessProtocolSchemaV1 = 1
+
+// InspectProcessV1 presents a new activation repair in the frozen caller's
+// vocabulary. Inspect remains the canonical Module interface; both bind the
+// same fresh plan to the same observation and never resume completed history.
+func (transition *V2Transition) InspectProcessV1(ctx context.Context, goal Goal) (Inspection, error) {
+	return transition.inspect(ctx, goal, true)
+}
 
 const SourceIngressRequestSchemaV1 = 1
 

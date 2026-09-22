@@ -95,7 +95,7 @@ assert_guest_ready() {
     --env HOME=/home/dev --env CODEX_HOME=/home/dev/.codex -- sh -euc '
       [ "$(codex --version)" = "codex-cli 0.147.0" ]
       [ "$(paseo --version)" = "0.2.1" ]
-      codex-check >/dev/null
+      codex-policy-check >/dev/null
       [ ! -e /home/dev/.codex/auth.json ]
     '
   if ! incus exec "$instance" --project "$project" --user 1000 --group 1000 \

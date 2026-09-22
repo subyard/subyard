@@ -322,7 +322,7 @@ func productionShellContracts() map[string]shellContract {
 	goReconcile := "internal/adapters/reconcileruntime/runtime.go"
 	goPrepared := "internal/cli/prepared_command.go"
 	return map[string]shellContract{
-		"scripts/lib/ai-observer-proxy.sh":      {"library", "scripts/04-provision-subyard.sh", `lib/ai-observer-proxy.sh`},
+		"scripts/lib/ai-observer-proxy.sh":      {"library", "scripts/reconcile-integrations.sh", `lib/ai-observer-proxy.sh`},
 		"config/agents/aiobserver/provision.sh": {"profile", "config/agents.env", `agents/aiobserver/provision.sh`},
 		"config/agents/ccusage/provision.sh":    {"profile", "config/agents.env", `agents/ccusage/provision.sh`},
 		"config/agents/codex/provision.sh":      {"profile", "config/agents.env", `agents/codex/provision.sh`},
@@ -332,6 +332,7 @@ func productionShellContracts() map[string]shellContract {
 		"scripts/02-create-project.sh":          {"leaf", goReconcile, `"02-create-project.sh"`},
 		"scripts/03-create-subyard.sh":          {"leaf", goReconcile, `"03-create-subyard.sh"`},
 		"scripts/04-provision-subyard.sh":       {"leaf", goReconcile, `"04-provision-subyard.sh"`},
+		"scripts/reconcile-integrations.sh":     {"leaf", "internal/adapters/reconcileruntime/integrations.go", `"reconcile-integrations.sh"`},
 		"scripts/05-mount-host-paths.sh":        {"leaf", goReconcile, `"05-mount-host-paths.sh"`},
 		"scripts/06-network.sh":                 {"leaf", goReconcile, `"06-network.sh"`},
 		"scripts/07-ssh-access.sh":              {"leaf", goReconcile, `"07-ssh-access.sh"`},
@@ -340,8 +341,11 @@ func productionShellContracts() map[string]shellContract {
 		"scripts/e2e-lab/provision.sh":          {"embedded", "internal/adapters/testvmsruntime/backend.go", `"provision.sh"`},
 		"scripts/install-key-tools.sh":          {"leaf", goReconcile, `"install-key-tools.sh"`},
 		"scripts/install-keys-auto-sync.sh":     {"leaf", goReconcile, `"install-keys-auto-sync.sh"`},
+		"scripts/github-broker.sh":              {"leaf", goReconcile, `"github-broker.sh"`},
+		"config/profiles/github/provision.sh":   {"profile", "scripts/github-broker.sh", `provision.sh`},
 		"scripts/install-power-reconciler.sh":   {"leaf", goReconcile, `"install-power-reconciler.sh"`},
 		"scripts/install-ssh-relay.sh":          {"embedded", "scripts/07-ssh-access.sh", `install-ssh-relay.sh`},
+		"scripts/ssh-agent-environment.sh":      {"embedded", "internal/cli/ssh_agent.go", `"ssh-agent-environment.sh"`},
 		"scripts/install-test-vms-host-sink.sh": {
 			"leaf", goReconcile, `"install-test-vms-host-sink.sh"`,
 		},
@@ -394,13 +398,15 @@ func productionLeafContracts() map[string]leafContract {
 		"scripts/09-yard-extras.sh":           {"reconcile", "ports.ReconcileStageExtras"},
 		"scripts/install-key-tools.sh":        {"reconcile", "ports.ReconcileStageKeys"},
 		"scripts/install-keys-auto-sync.sh":   {"reconcile", "ports.ReconcileStageKeys"},
+		"scripts/github-broker.sh":            {"reconcile", "ports.ReconcileStageGitHub"},
 		"scripts/install-power-reconciler.sh": {"reconcile", "ports.ReconcileStagePower"},
 		"scripts/install-test-vms-host-sink.sh": {
 			"reconcile", "ports.ReconcileStageTestVMs",
 		},
-		"scripts/e2e-lab/invoke.sh":    {"command", "test-vms"},
-		"scripts/lifecycle-guard.sh":   {"command", "lifecycle"},
-		"scripts/teardown-physical.sh": {"command", "teardown"},
+		"scripts/e2e-lab/invoke.sh":         {"command", "test-vms"},
+		"scripts/reconcile-integrations.sh": {"command", "integration"},
+		"scripts/lifecycle-guard.sh":        {"command", "lifecycle"},
+		"scripts/teardown-physical.sh":      {"command", "teardown"},
 	}
 }
 

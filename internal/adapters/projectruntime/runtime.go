@@ -101,7 +101,7 @@ func (runtime Runtime) executeSSHReader(
 		binary = "ssh"
 	}
 	process := transport.Process{
-		Program: binary, Env: runtime.Environment, Timeout: runtime.Timeout, MaxBytes: runtime.MaxBytes,
+		Program: binary, SSHTarget: host, Env: runtime.Environment, Timeout: runtime.Timeout, MaxBytes: runtime.MaxBytes,
 		Arguments: []string{
 			"-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=yes",
 			host, "--", shellquote.Command(command),

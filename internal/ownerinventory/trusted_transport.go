@@ -51,12 +51,13 @@ func AssessSSHHostKey(
 }
 
 type managedTrustTransport struct {
-	root           string
-	program        string
-	target         string
-	knownHostsLine string
-	timeout        time.Duration
-	environment    []string
+	root            string
+	program         string
+	target          string
+	knownHostsLine  string
+	timeout         time.Duration
+	environment     []string
+	checkProxyTrust bool
 }
 
 func (transport *managedTrustTransport) Call(
@@ -84,6 +85,18 @@ func (transport *managedTrustTransport) Call(
 		return nil, err
 	}
 	process.Env = transport.environment
+	if transport.checkProxyTrust {
+		options, err := transportadapter.SSHOptions(ctx, transport.program, transport.target)
+		if err != nil {
+			return nil, err
+		}
+		// Preserve this client's exact identity proof even if a concurrent host
+		// repair replaces the connection while proxy trust is being confirmed.
+		prefix := []string{"-o", "UserKnownHostsFile=" + knownHostsPath, "-o", "GlobalKnownHostsFile=/dev/null"}
+		process.Arguments = append(prefix, append(options, process.Arguments...)...)
+		// Bound the RPC after any interactive proxy-key confirmation.
+		process.Timeout = 8 * time.Second
+	}
 	response, err := process.Call(ctx, "", request)
 	if err != nil && sshHostKeyChanged(err.Error()) {
 		return response, fmt.Errorf(
@@ -141,7 +154,7 @@ func (store Connections) TrustedSSHClient(
 		Transport: &managedTrustTransport{
 			root: filepath.Join(store.Root, "tmp"), program: program,
 			target: connection.Destination, knownHostsLine: trust.KnownHostsLine,
-			timeout: timeout,
+			timeout: timeout, checkProxyTrust: true,
 		},
 		verifiedFingerprint: trust.Fingerprint,
 	}, nil

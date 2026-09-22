@@ -15,6 +15,7 @@ import (
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/githubbroker"
 )
 
 type provisionExecution struct {
@@ -95,6 +96,9 @@ func (cli *CLI) prepareProvisionExecution(
 	seen := make(map[string]bool, len(selected))
 	profiles := make([]string, 0, len(selected))
 	for _, name := range selected {
+		if name == "github" && want == "" && !githubbroker.ProfileEnabled(loaded.Context.YardName, loaded.Environment) {
+			continue
+		}
 		if seen[name] {
 			continue
 		}
@@ -282,8 +286,14 @@ func (cli *CLI) executeProvision(
 	if err != nil {
 		return domain.AdapterResult{}, err
 	}
+	var guardStart func(context.Context, func() error) error
+	if service := cli.networkService([]domain.Context{loaded.Context}); service != nil {
+		guardStart = func(ctx context.Context, start func() error) error {
+			return service.WithStart(ctx, networkYard(loaded.Context), start)
+		}
+	}
 	orchestrator.Runner = application.ProvisionRunner{
-		Power: power, Physical: orchestrator.Runner,
+		Power: power, Physical: orchestrator.Runner, GuardStart: guardStart,
 		Yard: loaded.Context, Profiles: execution.profiles, Reporter: provisionReporter{output: diagnostics},
 	}
 	request := domain.AdapterRequest{

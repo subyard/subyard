@@ -129,7 +129,7 @@ func TestSelectClassifiesRenameCopyDeleteAndModeSides(t *testing.T) {
 				},
 				{
 					Path: "internal/rpc/new.go", Side: "new", RuleID: "internal-rpc",
-					CheckSets:   []string{"e2e:ssh-rpc", "go:adapters/remotecontrol", "go:adapters/transport", "go:application", "go:audit", "go:cli", "go:command", "go:domain", "go:rpc", "go:sshidentity", "go:sshrelay", "p0:peer", "p0:transport", "shell:cli-contract", "shell:command-registry", "shell:prompt-contract", "shell:remote-projects", "shell:ssh-config", "shell:ssh-transport-identity", "shell:yard-remote", "shell:yard-usage"},
+					CheckSets:   []string{"e2e:ssh-rpc", "e2e:ssh-unknown-host", "go:adapters/remotecontrol", "go:adapters/transport", "go:application", "go:audit", "go:cli", "go:command", "go:domain", "go:rpc", "go:sshidentity", "go:sshrelay", "go:sshtrust", "p0:peer", "p0:transport", "shell:cli-contract", "shell:command-registry", "shell:prompt-contract", "shell:remote-projects", "shell:ssh-config", "shell:ssh-transport-identity", "shell:yard-remote", "shell:yard-usage"},
 					RiskDomains: []string{"ssh-remote-transport"},
 				},
 			},

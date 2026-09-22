@@ -42,6 +42,10 @@ case "${1:-}" in
     for path in "$state_root"/proxy-*; do
       [ ! -e "$path" ] || printf '%s\n' "${path##*/proxy-}"
     done
+    if [ "${RESOURCE_TEST_DELAYED_DEVICES:-0}" = 1 ]; then
+      sleep 0.05
+      printf 'unrelated-device\n'
+    fi
     ;;
   'device get')
     dev="${5:-}" key="${6:-}"
@@ -143,6 +147,12 @@ grep -Fq '"action":"down","changed":true' "$TMP/down-plan.json" \
 [ "$after" -ge "$before" ] || fail 'invalid probe log accounting'
 [ -e "$TMP/emulator.running" ] && [ -e "$TMP/proxy-adb-emu" ] \
   || fail 'down prepare changed state'
+
+# A match followed by a later write must not turn SIGPIPE into a missing bridge.
+RESOURCE_TEST_DELAYED_DEVICES=1 SUBYARD_RESOURCE_MODE=prepare "$HANDLER" down \
+  >"$TMP/down-delayed-plan.json" </dev/null
+cmp -s "$TMP/down-plan.json" "$TMP/down-delayed-plan.json" \
+  || fail 'device-list write timing changed the prepared down consequences'
 
 if grep -Eq 'proceed_or_die|announce_confirm' "$HANDLER"; then
   fail 'emulator handler retains action-local confirmation'

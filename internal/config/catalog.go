@@ -71,6 +71,8 @@ type SettingDefinition struct {
 }
 
 var catalog = map[string]SettingDefinition{
+	"ALLOWS_CODING_TOOLS": scalar("yard-security", SettingBoolean, SettingYardInit, false,
+		scopes(ScopeShipped), enum("true", "false")),
 	"ACCESS_KIND": scalar("remote-connection", SettingString, SettingNextCommand, false,
 		scopes(ScopeHost, ScopeYard, ScopeCommand), enum("local", "remote")),
 	"ADB_CONSOLE_EMULATOR_PORT": scalar("port", SettingPort, SettingNextCommand, true,
@@ -96,12 +98,6 @@ var catalog = map[string]SettingDefinition{
 	"CCUSAGE_SHA256_ARM64": scalar("agent-integration", SettingSHA256, SettingYardInit, true,
 		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand)),
 	"CCUSAGE_VERSION": scalar("agent-integration", SettingVersion, SettingYardInit, true,
-		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand)),
-	"CODEX_SHA256_AMD64": scalar("agent-integration", SettingSHA256, SettingYardInit, true,
-		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand)),
-	"CODEX_SHA256_ARM64": scalar("agent-integration", SettingSHA256, SettingYardInit, true,
-		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand)),
-	"CODEX_VERSION": scalar("agent-integration", SettingVersion, SettingYardInit, true,
 		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand)),
 	"DEV_SUDO": scalar("yard-security", SettingBoolean, SettingYardInit, true,
 		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand)),

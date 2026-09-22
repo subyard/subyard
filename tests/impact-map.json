@@ -1,6 +1,8 @@
 {
   "schema_version": 1,
   "check_sets": {
+    "release-smoke": ["shell:agent-e2e", "p0:smoke"],
+    "yard-network": ["go:yardnetwork", "go:adapters/networkruntime", "go:adapters/incusclient", "go:cli", "go:application", "go:adapters/reconcileruntime", "shell:init-network-convergence", "e2e:yard-network-policy", "p0:real-incus", "p0:power-systemd", "p0:reboot-verify", "p0:peer"],
     "android-profile": [
       "shell:android-provision-check",
       "shell:emulator-process-control",
@@ -112,6 +114,7 @@
       "shell:init-project-convergence",
       "p0:source-upgrade"
     ],
+    "materialized-config": ["go:adapters/configmaterial", "go:config", "go:adapters/reconcileruntime", "go:cli", "p0:release", "e2e:orca-bootstrap"],
     "migration-release": [
       "go:migration",
       "go:releasetransition",
@@ -158,6 +161,7 @@
     "real-credential-contract": ["e2e:credential-tools"],
     "real-orca-contract": ["e2e:orca-resource"],
     "real-orca-bootstrap": ["e2e:orca-bootstrap"],
+    "codex-permissions": ["e2e:codex-permissions"],
     "real-orca-projects": ["e2e:orca-projects"],
     "orca-registration-tests": ["shell:orca-profile-resource"],
     "real-ssh-credential-contract": ["e2e:ssh-credential-peer"],
@@ -167,17 +171,20 @@
       "go:testimpact",
       "shell:test-impact"
     ],
+    "ssh-agent": ["go:adapters/sshagentruntime", "shell:ssh-agent-environment", "e2e:orca-ssh-agent"],
     "ssh-transport": [
       "go:adapters/remotecontrol",
       "go:adapters/transport",
       "go:rpc",
       "go:sshidentity",
       "go:sshrelay",
+      "go:sshtrust",
       "shell:remote-projects",
       "shell:ssh-config",
       "shell:ssh-transport-identity",
       "shell:yard-remote",
       "e2e:ssh-rpc",
+      "e2e:ssh-unknown-host",
       "p0:peer",
       "p0:transport"
     ],
@@ -224,6 +231,13 @@
   ],
   "rules": [
     {
+      "id": "yard-network-policy",
+      "priority": 1001,
+      "pattern": "^(internal/yardnetwork/.*|internal/adapters/networkruntime/.*|internal/adapters/incusclient/network.*|internal/cli/network_commands.*|dev/e2e/yard-network-policy\\.sh)$",
+      "check_sets": ["yard-network"],
+      "risk_domains": ["boot-lifecycle", "incus-runtime", "command-control"]
+    },
+    {
       "id": "selector-self",
       "priority": 1000,
       "pattern": "^(internal/testimpact/.*|cmd/test-impact/.*|dev/test-impact\\.sh|tests/(impact-map\\.json|test-impact\\.sh))$",
@@ -243,6 +257,13 @@
       "pattern": "^dev/e2e/p0-guest\\.sh$",
       "check_sets": ["e2e-infrastructure"],
       "risk_domains": ["full-matrix-composition"]
+    },
+    {
+      "id": "release-smoke-fixture",
+      "priority": 988,
+      "pattern": "^dev/e2e/p0-release-smoke\\.sh$",
+      "check_sets": ["release-smoke"],
+      "risk_domains": []
     },
     {
       "id": "p0-real-incus-lane",
@@ -301,6 +322,13 @@
       "risk_domains": []
     },
     {
+      "id": "codex-permissions-test",
+      "priority": 982,
+      "pattern": "^tests/real-host/codex-(yard\\.sh|permissions\\.py)$",
+      "check_sets": ["codex-permissions"],
+      "risk_domains": []
+    },
+    {
       "id": "real-orca-bootstrap-test",
       "priority": 981,
       "pattern": "^tests/real-host/orca-bootstrap\\.sh$",
@@ -327,6 +355,13 @@
       "pattern": "^tests/real-host/ssh-credential-peer\\.sh$",
       "check_sets": ["real-ssh-credential-contract"],
       "risk_domains": []
+    },
+    {
+      "id": "real-ssh-unknown-host-test",
+      "priority": 1001,
+      "pattern": "^tests/real-host/ssh-unknown-host\\.sh$",
+      "check_sets": ["ssh-transport"],
+      "risk_domains": ["ssh-remote-transport"]
     },
     {
       "id": "real-ssh-rpc-contract-test",
@@ -462,6 +497,13 @@
       "risk_domains": ["profile-resource"]
     },
     {
+      "id": "codex-agent-permissions",
+      "priority": 835,
+      "pattern": "^config/agents/codex/.*$",
+      "check_sets": ["host-free-core", "codex-permissions"],
+      "risk_domains": ["external-service-profile"]
+    },
+    {
       "id": "agent-profile-configuration",
       "priority": 830,
       "pattern": "^config/agents/.*$",
@@ -506,7 +548,7 @@
     {
       "id": "internal-transport",
       "priority": 770,
-      "pattern": "^internal/adapters/transport/.*$",
+      "pattern": "^(internal/adapters/transport|internal/sshtrust)/.*$",
       "check_sets": ["ssh-transport"],
       "risk_domains": ["ssh-remote-transport"]
     },
@@ -551,6 +593,13 @@
       "pattern": "^internal/adapters/releaseruntime/.*$",
       "check_sets": ["migration-release"],
       "risk_domains": ["release-runner"]
+    },
+    {
+      "id": "internal-configmaterial",
+      "priority": 715,
+      "pattern": "^internal/adapters/configmaterial/.*$",
+      "check_sets": ["materialized-config"],
+      "risk_domains": ["config-state", "durable-layout"]
     },
     {
       "id": "internal-reconcileruntime",
@@ -637,6 +686,20 @@
       "risk_domains": ["ssh-remote-transport"]
     },
     {
+      "id": "ssh-agent-runtime",
+      "priority": 620,
+      "pattern": "^(internal/adapters/sshagentruntime/.*|internal/cli/ssh_agent(_test)?\\.go|scripts/ssh-agent-environment\\.sh|tests/(real-host/)?ssh-agent(-environment)?\\.sh)$",
+      "check_sets": ["ssh-agent", "ssh-transport", "cli-control"],
+      "risk_domains": ["ssh-remote-transport"]
+    },
+    {
+      "id": "github-broker",
+      "priority": 625,
+      "pattern": "^(internal/githubbroker/.*|scripts/github-broker\\.sh|config/profiles/github/.*|dev/e2e/github-broker\\.sh)$",
+      "check_sets": ["host-free-core", "ssh-transport"],
+      "risk_domains": ["credential-profile", "ssh-remote-transport", "boot-lifecycle"]
+    },
+    {
       "id": "internal-sshidentity",
       "priority": 590,
       "pattern": "^internal/sshidentity/.*$",
@@ -649,6 +712,13 @@
       "pattern": "^internal/sshrelay/.*$",
       "check_sets": ["ssh-transport"],
       "risk_domains": ["ssh-remote-transport"]
+    },
+    {
+      "id": "internal-sshagentruntime",
+      "priority": 579,
+      "pattern": "^internal/adapters/sshagentruntime/.*$",
+      "check_sets": ["ssh-transport"],
+      "risk_domains": ["ssh-remote-transport", "boot-lifecycle"]
     },
     {
       "id": "internal-credential",
@@ -779,7 +849,7 @@
     {
       "id": "development-tools",
       "priority": 400,
-      "pattern": "^dev/.*$",
+      "pattern": "^(dev/.*|sync-repos\\.sh)$",
       "check_sets": ["host-free-core"],
       "risk_domains": []
     },
@@ -821,7 +891,7 @@
     {
       "id": "documentation-and-metadata",
       "priority": 340,
-      "pattern": "^(docs/.*|README\\.md|AGENTS\\.md|CLAUDE\\.md|LICENSE|\\.gitignore)$",
+      "pattern": "^(docs/.*|\\.agents/skills/[^/]+/(SKILL\\.md|agents/openai\\.yaml)|README\\.md|AGENTS\\.md|CLAUDE\\.md|LICENSE|\\.gitignore)$",
       "check_sets": [],
       "risk_domains": []
     }

@@ -6,6 +6,12 @@ YARD_INSTANCE_NAME="${YARD_INSTANCE_NAME:-yard}"
 PROJ=(--project "$INCUS_PROJECT")
 yexec() { incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- "$@"; }
 
+# Resource prepare reserves status 2 for command-line usage errors.
+svc_usage_error() {
+  printf '  %s[fail]%s %s\n' "$C_BAD" "$C_OFF" "$*" >&2
+  exit 2
+}
+
 svc_require_yard_running() {
   incus_preflight
   incus info "$YARD_INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1 \

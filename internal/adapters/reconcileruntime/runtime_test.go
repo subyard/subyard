@@ -11,10 +11,166 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
+	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
+
+type networkPolicyFixture struct {
+	checkErr  error
+	ensureErr error
+	startErr  error
+	checked   []yardnetwork.Yard
+	ensured   []yardnetwork.Yard
+	started   []yardnetwork.Yard
+}
+
+func (fixture *networkPolicyFixture) Check(_ context.Context, yard yardnetwork.Yard) error {
+	fixture.checked = append(fixture.checked, yard)
+	return fixture.checkErr
+}
+
+func (fixture *networkPolicyFixture) Ensure(_ context.Context, yard yardnetwork.Yard) error {
+	fixture.ensured = append(fixture.ensured, yard)
+	return fixture.ensureErr
+}
+
+func (fixture *networkPolicyFixture) WithStart(
+	_ context.Context,
+	yard yardnetwork.Yard,
+	start func() error,
+) error {
+	fixture.started = append(fixture.started, yard)
+	if fixture.startErr != nil {
+		return fixture.startErr
+	}
+	return start()
+}
+
+func TestNetworkPolicyStageMapsDriftAndUsesResolvedYard(t *testing.T) {
+	yard := domain.Context{
+		YardName: "demo", IncusProject: "subyard-demo",
+		YardInstanceName: "yard-demo", IncusBridge: "incusbr0",
+	}
+	want := yardnetwork.Yard{
+		Name: "demo", Project: "subyard-demo", Instance: "yard-demo", Network: "incusbr0",
+	}
+	policy := &networkPolicyFixture{checkErr: yardnetwork.ErrNotConverged}
+	runtime := Runtime{Yard: yard, NetworkPolicy: policy}
+
+	converged, err := runtime.CheckStage(context.Background(), ports.ReconcileStageNetworkPolicy)
+	if err != nil || converged {
+		t.Fatalf("drift result = converged %v, err %v", converged, err)
+	}
+	if len(policy.checked) != 1 || policy.checked[0] != want {
+		t.Fatalf("checked yards = %#v, want %#v", policy.checked, want)
+	}
+
+	policy.checkErr = nil
+	if err := runtime.ApplyStage(context.Background(), ports.ReconcileStageNetworkPolicy); err != nil {
+		t.Fatal(err)
+	}
+	if len(policy.ensured) != 1 || policy.ensured[0] != want {
+		t.Fatalf("ensured yards = %#v, want %#v", policy.ensured, want)
+	}
+	converged, err = runtime.VerifyStage(context.Background(), ports.ReconcileStageNetworkPolicy)
+	if err != nil || !converged {
+		t.Fatalf("verified result = converged %v, err %v", converged, err)
+	}
+}
+
+func TestNetworkStartWrapperChecksPolicyBeforeCallback(t *testing.T) {
+	policy := &networkPolicyFixture{}
+	runtime := Runtime{
+		NetworkPolicy: policy,
+		Yard: domain.Context{
+			YardName: "default", IncusProject: "subyard",
+			YardInstanceName: "yard", IncusBridge: "incusbr0",
+		},
+	}
+	called := false
+	if err := runtime.withNetworkStart(context.Background(), func() error {
+		called = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !called || len(policy.started) != 1 {
+		t.Fatalf("start callback=%v policy starts=%#v", called, policy.started)
+	}
+
+	policy.startErr = errors.New("unsafe policy")
+	called = false
+	if err := runtime.withNetworkStart(context.Background(), func() error {
+		called = true
+		return nil
+	}); err == nil || called {
+		t.Fatalf("policy failure reached start callback: called=%v err=%v", called, err)
+	}
+}
+
+func TestResetTeardownUsesNetworkPolicyBoundary(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "scripts"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(root, "teardown-called")
+	if err := os.WriteFile(filepath.Join(root, "scripts", "teardown-physical.sh"), []byte(
+		"#!/bin/sh\n: > \"$TEARDOWN_MARKER\"\n",
+	), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	policy := &networkPolicyFixture{startErr: errors.New("policy incomplete")}
+	runtime := Runtime{
+		RepositoryRoot: root, Environment: []string{"TEARDOWN_MARKER=" + marker}, NetworkPolicy: policy,
+		Yard: domain.Context{
+			YardName: "default", IncusProject: "subyard",
+			YardInstanceName: "yard", IncusBridge: "incusbr0",
+		},
+	}
+	if err := runtime.Teardown(context.Background()); err == nil || !strings.Contains(err.Error(), "policy incomplete") {
+		t.Fatalf("reset teardown policy failure = %v", err)
+	}
+	if _, err := os.Lstat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("policy failure reached teardown script: %v", err)
+	}
+
+	policy.startErr = nil
+	if err := runtime.Teardown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); err != nil || len(policy.started) != 2 {
+		t.Fatalf("guarded teardown marker=%v policy calls=%#v", err, policy.started)
+	}
+}
+
+func TestTestVMBackendStartUsesNetworkPolicy(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "scripts"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "scripts", "lifecycle-guard.sh"), []byte(
+		"#!/bin/sh\nexit 0\n",
+	), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	policy := &networkPolicyFixture{}
+	runtime := Runtime{
+		RepositoryRoot: root, NetworkPolicy: policy,
+		Yard: domain.Context{
+			YardName: "default", IncusProject: "subyard",
+			YardInstanceName: "yard", IncusBridge: "incusbr0",
+		},
+	}
+	if err := runtime.testVMBackend(application.PowerRunning).Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(policy.started) != 1 {
+		t.Fatalf("test VM backend start was not network-gated: %#v", policy.started)
+	}
+}
 
 func TestProbeConvergedClassifiesExitStatus(t *testing.T) {
 	exit := func(code string) error {
@@ -372,10 +528,12 @@ func TestFinalizeMapsDesiredPowerToLifecycleAction(t *testing.T) {
 					},
 				},
 			}}
+			policy := &networkPolicyFixture{}
 			runtime := Runtime{
 				RepositoryRoot: root, Environment: append(os.Environ(), "ARGUMENTS="+arguments),
 				Incus: incus, ConfigWriter: incus,
-				Yard: domain.Context{IncusProject: "subyard", YardInstanceName: "yard"},
+				NetworkPolicy: policy,
+				Yard:          domain.Context{IncusProject: "subyard", YardInstanceName: "yard"},
 			}
 			if err := runtime.ApplyStage(context.Background(), "finalize"); err != nil {
 				t.Fatal(err)
@@ -389,6 +547,13 @@ func TestFinalizeMapsDesiredPowerToLifecycleAction(t *testing.T) {
 			}
 			if incus.Instances["subyard/yard"].Config["user.subyard.initialized"] != "true" {
 				t.Fatal("final power state was not committed")
+			}
+			wantStarts := 0
+			if test.desired == "running" {
+				wantStarts = 1
+			}
+			if len(policy.started) != wantStarts {
+				t.Fatalf("network-gated starts = %d, want %d", len(policy.started), wantStarts)
 			}
 		})
 	}
@@ -506,16 +671,23 @@ func TestSSHProbeOwnsProxyAndClientConfig(t *testing.T) {
 	incus.Reconcile.Instance.Status = "Running"
 	incus.ExecSteps = []testkit.IncusExecStep{{Result: ports.InstanceExecResult{ExitCode: 1}}}
 	assertStage(t, runtime, "ssh", false, "guest missing canonical public key")
-	incus.ExecSteps = []testkit.IncusExecStep{{}}
+	runtime.RepositoryRoot = filepath.Join("..", "..", "..")
+	incus.ExecSteps = []testkit.IncusExecStep{{}, {Result: ports.InstanceExecResult{ExitCode: 1}}}
+	assertStage(t, runtime, "ssh", false, "guest missing SSH agent environment")
+	incus.ExecSteps = []testkit.IncusExecStep{{}, {}}
 	assertStage(t, runtime, "ssh", true, "guest authorizes canonical public key")
-	last := incus.ExecCalls[len(incus.ExecCalls)-1].Request.Command
+	environmentProbe := incus.ExecCalls[len(incus.ExecCalls)-1].Request
+	if strings.Join(environmentProbe.Command, " ") != "sh -eu -s -- check dev" || len(environmentProbe.Stdin) == 0 {
+		t.Fatal("guest environment was not checked using the shared helper")
+	}
+	last := incus.ExecCalls[len(incus.ExecCalls)-2].Request.Command
 	if len(last) < 4 || last[0] != "grep" || last[1] != "-qxF" {
 		t.Fatalf("guest authorization probe does not match the canonical public key: %q", last)
 	}
 	runtime.Yard.NestedE2EVMs = true
-	incus.ExecSteps = []testkit.IncusExecStep{{}}
+	incus.ExecSteps = []testkit.IncusExecStep{{}, {}}
 	assertStage(t, runtime, "ssh", true, "nested guest authorizes restricted canonical key")
-	last = incus.ExecCalls[len(incus.ExecCalls)-1].Request.Command
+	last = incus.ExecCalls[len(incus.ExecCalls)-2].Request.Command
 	if len(last) < 4 || !strings.HasPrefix(last[3], `from="127.0.0.1,::1" ssh-ed25519 `) {
 		t.Fatalf("nested authorization probe is not exact and restricted: %q", last)
 	}
@@ -609,11 +781,9 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 	}}
 	assertStage(t, runtime, "provision", true, "matching stopped provision marker")
 	runtime.Environment = []string{
-		"CODING_TOOL_INTEGRATIONS=codex", "CCUSAGE_VERSION=1.2.3", "CODEX_VERSION=0.147.0",
+		"CODING_TOOL_INTEGRATIONS=codex", "CCUSAGE_VERSION=1.2.3",
 	}
-	assertStage(t, runtime, "provision", false, "missing stopped Codex version marker")
-	incus.Reconcile.Instance.Config["user.subyard.codex_version"] = "0.147.0"
-	assertStage(t, runtime, "provision", true, "matching stopped Codex version marker")
+	assertStage(t, runtime, "provision", true, "stopped Codex does not need a release pin")
 	runtime.Environment = []string{
 		"CODING_TOOL_INTEGRATIONS=opencode", "CCUSAGE_VERSION=1.2.4",
 		"HOST_OPENCODE_AGENTS_MD=" + instructions,

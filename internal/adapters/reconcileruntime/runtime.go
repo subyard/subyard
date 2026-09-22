@@ -20,28 +20,46 @@ import (
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/githubbroker"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/sshidentity"
 	"github.com/Subyard/Subyard/internal/sshrelay"
 	"github.com/Subyard/Subyard/internal/systemdunit"
+	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
+
+type YardNetworkPolicy interface {
+	Check(context.Context, yardnetwork.Yard) error
+	Ensure(context.Context, yardnetwork.Yard) error
+	WithStart(context.Context, yardnetwork.Yard, func() error) error
+}
 
 type Runtime struct {
 	RepositoryRoot string
 	Environment    []string
-	Stdin          io.Reader
-	Stdout         io.Writer
-	Stderr         io.Writer
-	Incus          ports.Incus
-	ConfigWriter   ports.InstanceConfigWriter
-	Executor       ports.InstanceExecutor
-	Yard           domain.Context
-	PowerYards     []domain.Context
-	SRVPool        string
-	SRVVolume      string
-	HostDeviceRoot string
+	// AdoptLegacyIntegrations permits one initial, exact ownership adoption during
+	// a reviewed init plan. Ordinary integration commands leave it false.
+	AdoptLegacyIntegrations bool
+	// LegacyIntegrationFingerprint binds the reviewed initial adoption until its
+	// first inventory publication. Retries with established evidence ignore it.
+	LegacyIntegrationFingerprint string
+	// LaunchEnvironment is the unresolved CLI input, used only when restarting
+	// the dispatcher. Resolved yard settings must not become command overrides.
+	LaunchEnvironment []string
+	Stdin             io.Reader
+	Stdout            io.Writer
+	Stderr            io.Writer
+	Incus             ports.Incus
+	ConfigWriter      ports.InstanceConfigWriter
+	Executor          ports.InstanceExecutor
+	Yard              domain.Context
+	PowerYards        []domain.Context
+	SRVPool           string
+	SRVVolume         string
+	HostDeviceRoot    string
+	NetworkPolicy     YardNetworkPolicy
 }
 
 func (runtime Runtime) CheckStage(ctx context.Context, stage ports.ReconcileStageID) (bool, error) {
@@ -59,12 +77,23 @@ func (runtime Runtime) CheckStage(ctx context.Context, stage ports.ReconcileStag
 		return runtime.gitIdentityConverged(ctx)
 	case ports.ReconcileStageNetwork:
 		err = runtime.runObservedPowerScript(ctx, nil, true, "06-network.sh", "--check")
+	case ports.ReconcileStageNetworkPolicy:
+		if runtime.NetworkPolicy == nil {
+			return false, errors.New("yard network policy service is required")
+		}
+		err = runtime.NetworkPolicy.Check(ctx, runtime.networkPolicyYard())
+		if errors.Is(err, yardnetwork.ErrNotConverged) {
+			return false, nil
+		}
+		return err == nil, err
 	case ports.ReconcileStagePower, ports.ReconcileStageFinalize:
 		return runtime.powerConverged(ctx, true)
 	case ports.ReconcileStageTestVMs:
 		return runtime.testVMsConverged(ctx)
 	case ports.ReconcileStageKeys:
 		return runtime.keysConverged(ctx)
+	case ports.ReconcileStageGitHub:
+		return runtime.githubConverged(ctx)
 	case ports.ReconcileStageSSH:
 		return runtime.sshConverged(ctx)
 	case ports.ReconcileStageProvision:
@@ -79,6 +108,15 @@ func (runtime Runtime) CheckStage(ctx context.Context, stage ports.ReconcileStag
 		err = runtime.runScriptEnvironment(ctx, nil, desired, "09-yard-extras.sh", "--check")
 	case ports.ReconcileStageSecurity:
 		return runtime.securityConverged(ctx)
+	case ports.ReconcileStageOrca:
+		observation, err := runtime.ObserveOrcaRuntime(ctx)
+		if err != nil {
+			return false, err
+		}
+		if observation.State == "deferred" {
+			runtime.reportOrcaDeferred()
+		}
+		return observation.State != "stale", nil
 	default:
 		return false, fmt.Errorf("unknown reconcile stage %q", stage)
 	}
@@ -99,6 +137,11 @@ func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStag
 		return runtime.applyGitIdentity(ctx)
 	case ports.ReconcileStageNetwork:
 		return runtime.runScript(ctx, runtime.Stderr, "06-network.sh", "--yes")
+	case ports.ReconcileStageNetworkPolicy:
+		if runtime.NetworkPolicy == nil {
+			return errors.New("yard network policy service is required")
+		}
+		return runtime.NetworkPolicy.Ensure(ctx, runtime.networkPolicyYard())
 	case ports.ReconcileStagePower:
 		return runtime.runScript(ctx, runtime.Stderr, "install-power-reconciler.sh", "--yes")
 	case ports.ReconcileStageFinalize:
@@ -130,18 +173,23 @@ func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStag
 			return err
 		}
 		return runtime.runScript(ctx, runtime.Stderr, "install-keys-auto-sync.sh", "--yes")
+	case ports.ReconcileStageGitHub:
+		return runtime.runScriptEnvironment(ctx, runtime.Stderr, runtime.githubEnvironment(), "github-broker.sh", "--yes")
 	case ports.ReconcileStageSSH:
 		return runtime.runScript(ctx, runtime.Stderr, "07-ssh-access.sh", "--yes")
 	case ports.ReconcileStageProvision:
-		observerIdentity, err := runtime.aiObserverProvisionIdentity()
+		if err := runtime.runScript(ctx, runtime.Stderr, "04-provision-subyard.sh", "--yes"); err != nil {
+			return err
+		}
+		// Base provisioning makes a fresh guest reachable before repairing installed hooks.
+		if err := runtime.applyOrcaRuntime(ctx); err != nil {
+			return err
+		}
+		plan, err := runtime.IntegrationPlan(ctx)
 		if err != nil {
 			return err
 		}
-		if err := runtime.runScriptEnvironment(ctx, runtime.Stderr,
-			map[string]string{"AI_OBSERVER_CONTEXT": observerIdentity}, "04-provision-subyard.sh", "--yes"); err != nil {
-			return err
-		}
-		return runtime.RefreshConfigs(ctx)
+		return runtime.ApplyIntegrations(ctx, plan)
 	case ports.ReconcileStageIncus:
 		return runtime.installIncus(ctx)
 	case ports.ReconcileStageExtras:
@@ -154,6 +202,8 @@ func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStag
 	case ports.ReconcileStageSecurity:
 		_, err := runtime.securityRuntime().CheckSecurity(ctx, true, false)
 		return err
+	case ports.ReconcileStageOrca:
+		return runtime.applyOrcaRuntime(ctx)
 	default:
 		return fmt.Errorf("unknown reconcile stage %q", stage)
 	}
@@ -233,6 +283,13 @@ func (runtime Runtime) instanceConverged(ctx context.Context) (bool, error) {
 	if err != nil || !ready {
 		return false, err
 	}
+	appArmorDisabled := false
+	if runtime.Yard.YardKind == domain.YardContainer {
+		appArmorDisabled, err = runtime.incusAppArmorDisabled(ctx)
+		if err != nil {
+			return false, err
+		}
+	}
 	state, err := runtime.reconcileState(ctx)
 	if err != nil || !state.InstanceFound || !state.VolumeFound {
 		return false, err
@@ -271,7 +328,7 @@ func (runtime Runtime) instanceConverged(ctx context.Context) (bool, error) {
 	if config["security.nesting"] != "true" {
 		return false, nil
 	}
-	if runtime.incusAppArmorDisabled(ctx) {
+	if appArmorDisabled {
 		if !dockerAppArmorPresent ||
 			dockerAppArmor["type"] != "disk" ||
 			dockerAppArmor["source"] != "/dev/null" ||
@@ -311,27 +368,6 @@ func (runtime Runtime) instanceConverged(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	return true, nil
-}
-
-func (runtime Runtime) incusAppArmorDisabled(ctx context.Context) bool {
-	systemctl, err := runtime.executableFromPath("systemctl")
-	if err != nil {
-		return false
-	}
-	command := exec.CommandContext(
-		ctx, systemctl, "show", "incus.service", "-p", "Environment", "--value",
-	)
-	command.Env = runtime.Environment
-	output, err := command.Output()
-	if err != nil {
-		return false
-	}
-	for _, field := range strings.Fields(string(output)) {
-		if strings.Trim(field, `"'`) == "INCUS_SECURITY_APPARMOR=false" {
-			return true
-		}
-	}
-	return false
 }
 
 func (runtime Runtime) reconcileState(ctx context.Context) (ports.ReconcileState, error) {
@@ -492,7 +528,7 @@ func (runtime Runtime) installIncus(ctx context.Context) error {
 		return nil
 	}
 	dispatcher := runtime.environmentValue("SUBYARD_DISPATCHER_PATH")
-	if dispatcher == "" || runtime.environmentValue("SUBYARD_SG_REEXEC") == "1" {
+	if dispatcher == "" || runtime.LaunchEnvironment == nil || runtime.environmentValue("SUBYARD_SG_REEXEC") == "1" {
 		return errors.New("open a fresh incus-admin session, then rerun yard init")
 	}
 	sg, err := runtime.executableFromPath("sg")
@@ -509,7 +545,7 @@ func (runtime Runtime) installIncus(ctx context.Context) error {
 		words = append(words, shellquote.Word(argument))
 	}
 	command := strings.Join(words, " ")
-	environment := append([]string(nil), runtime.Environment...)
+	environment := append([]string(nil), runtime.LaunchEnvironment...)
 	environment = append(environment, "SUBYARD_SG_REEXEC=1", "ASSUME_YES=1")
 	return syscall.Exec(sg, []string{"sg", "incus-admin", "-c", command}, environment)
 }
@@ -537,11 +573,13 @@ func (runtime Runtime) Teardown(ctx context.Context) error {
 	if hasOtherRegisteredLocalYard(runtime.Yard.YardName, runtime.powerYards()) {
 		keepShared = "1"
 	}
-	return runtime.runScriptEnvironment(ctx, runtime.Stdout,
-		map[string]string{
-			"SUBYARD_TEARDOWN_KEEP_DATA":   "0",
-			"SUBYARD_TEARDOWN_KEEP_SHARED": keepShared,
-		}, "teardown-physical.sh", "--yes")
+	return runtime.withNetworkStart(ctx, func() error {
+		return runtime.runScriptEnvironment(ctx, runtime.Stdout,
+			map[string]string{
+				"SUBYARD_TEARDOWN_KEEP_DATA":   "0",
+				"SUBYARD_TEARDOWN_KEEP_SHARED": keepShared,
+			}, "teardown-physical.sh", "--yes")
+	})
 }
 
 func hasOtherRegisteredLocalYard(current string, yards []domain.Context) bool {
@@ -602,6 +640,21 @@ func (runtime Runtime) powerService() application.PowerService {
 }
 
 func (runtime Runtime) applyInstanceStage(ctx context.Context) error {
+	if runtime.NetworkPolicy == nil {
+		return errors.New("yard network policy service is required")
+	}
+	// Assess once at the mutation boundary, before even power metadata changes.
+	// The shell consumes this observation instead of probing again after Set.
+	appArmor := "restored"
+	if runtime.Yard.YardKind == domain.YardContainer {
+		disabled, err := runtime.incusAppArmorDisabled(ctx)
+		if err != nil {
+			return err
+		}
+		if disabled {
+			appArmor = "disabled"
+		}
+	}
 	desired := application.InitialPower(runtime.Yard)
 	_, err := runtime.Incus.Instance(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName)
 	if err == nil {
@@ -616,9 +669,12 @@ func (runtime Runtime) applyInstanceStage(ctx context.Context) error {
 	} else if !errors.Is(err, ports.ErrInstanceNotFound) {
 		return err
 	}
-	if err := runtime.runScriptEnvironment(ctx, runtime.Stderr, map[string]string{
-		"SUBYARD_POWER_DESIRED": desired,
-	}, "03-create-subyard.sh", "--yes"); err != nil {
+	if err := runtime.withNetworkStart(ctx, func() error {
+		return runtime.runScriptEnvironment(ctx, runtime.Stderr, map[string]string{
+			"SUBYARD_POWER_DESIRED":           desired,
+			"SUBYARD_PREPARED_INCUS_APPARMOR": appArmor,
+		}, "03-create-subyard.sh", "--yes")
+	}); err != nil {
 		return err
 	}
 	return runtime.powerService().Set(ctx, runtime.Yard, desired, false)
@@ -687,8 +743,10 @@ func (runtime Runtime) testVMBackend(desired string) *testvmsruntime.Backend {
 		Environment:    environment,
 		Output:         runtime.Stderr,
 		Start: func(ctx context.Context) error {
-			return runtime.runScript(ctx, runtime.Stderr,
-				"lifecycle-guard.sh", "start", "--reconcile")
+			return runtime.withNetworkStart(ctx, func() error {
+				return runtime.runScript(ctx, runtime.Stderr,
+					"lifecycle-guard.sh", "start", "--reconcile")
+			})
 		},
 		Stop: func(ctx context.Context) error {
 			return runtime.runScript(ctx, runtime.Stderr,
@@ -821,12 +879,38 @@ func (runtime Runtime) finalizePowerState(ctx context.Context) error {
 	if intent.Desired == application.PowerRunning {
 		action = "start"
 	}
-	if err := runtime.runScript(
-		ctx, runtime.Stderr, "lifecycle-guard.sh", action, "--reconcile",
-	); err != nil {
-		return err
+	run := func() error {
+		return runtime.runScript(
+			ctx, runtime.Stderr, "lifecycle-guard.sh", action, "--reconcile",
+		)
+	}
+	var runErr error
+	if action == "start" {
+		runErr = runtime.withNetworkStart(ctx, run)
+	} else {
+		runErr = run()
+	}
+	if runErr != nil {
+		return runErr
 	}
 	return runtime.powerService().Commit(ctx, runtime.Yard, intent.Desired)
+}
+
+func (runtime Runtime) withNetworkStart(ctx context.Context, start func() error) error {
+	if runtime.NetworkPolicy == nil {
+		return errors.New("yard network policy service is required")
+	}
+	if start == nil {
+		return errors.New("yard start callback is required")
+	}
+	return runtime.NetworkPolicy.WithStart(ctx, runtime.networkPolicyYard(), start)
+}
+
+func (runtime Runtime) networkPolicyYard() yardnetwork.Yard {
+	return yardnetwork.Yard{
+		Name: runtime.Yard.YardName, Project: runtime.Yard.IncusProject,
+		Instance: runtime.Yard.YardInstanceName, Network: runtime.Yard.IncusBridge,
+	}
 }
 
 func (runtime Runtime) powerYards() []domain.Context {
@@ -1029,13 +1113,22 @@ func (runtime Runtime) sshConverged(ctx context.Context) (bool, error) {
 		"grep", "-qxF", "--", authorizedLine, "/home/" + user + "/.ssh/authorized_keys",
 	}}
 	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, request)
-	if err == nil {
-		return result.ExitCode == 0, nil
-	}
 	if result.ExitCode != 0 {
 		return false, nil
 	}
-	return false, err
+	if err != nil {
+		return false, err
+	}
+	script, err := os.ReadFile(filepath.Join(runtime.RepositoryRoot, "scripts", "ssh-agent-environment.sh"))
+	if err != nil {
+		return false, err
+	}
+	result, err = runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName,
+		ports.InstanceExecRequest{Command: []string{"sh", "-eu", "-s", "--", "check", user}, Stdin: script})
+	if result.ExitCode != 0 {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 func (runtime Runtime) vmSSHRelayConverged(ctx context.Context, address, port string) bool {
@@ -1062,18 +1155,7 @@ func (runtime Runtime) provisionConverged(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	version := runtime.environmentValue("CCUSAGE_VERSION")
-	if version == "" || version == "latest" {
-		return false, nil
-	}
-	codexSelected := false
-	for _, agent := range strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")) {
-		if agent == "codex" {
-			codexSelected = true
-			break
-		}
-	}
-	codexVersion := runtime.environmentValue("CODEX_VERSION")
-	if codexSelected && (codexVersion == "" || codexVersion == "latest") {
+	if runtime.environmentValue("ALLOWS_CODING_TOOLS") != "false" && (version == "" || version == "latest") {
 		return false, nil
 	}
 	state, err := runtime.reconcileState(ctx)
@@ -1082,13 +1164,14 @@ func (runtime Runtime) provisionConverged(ctx context.Context) (bool, error) {
 	}
 	instance := state.Instance
 	marker, _ := instance.EffectiveConfig("user.subyard.ccusage_version")
-	codexMarker, _ := instance.EffectiveConfig("user.subyard.codex_version")
 	if observerReady, err := runtime.aiObserverConverged(instance); err != nil || !observerReady {
 		return false, err
 	}
 	if strings.EqualFold(instance.Status, "stopped") {
-		return instanceIntentionallyStopped(instance) && marker == version &&
-			(!codexSelected || codexMarker == codexVersion), nil
+		if runtime.environmentValue("ALLOWS_CODING_TOOLS") == "false" {
+			return instanceIntentionallyStopped(instance) && marker == "", nil
+		}
+		return instanceIntentionallyStopped(instance) && marker == version, nil
 	}
 	if !strings.EqualFold(instance.Status, "running") {
 		return false, nil
@@ -1138,41 +1221,31 @@ jq -e '."ip-forward-no-drop" == true' /etc/docker/daemon.json >/dev/null \
 		return false, nil
 	}
 	home := fields[5]
-	ccusagePath := runtime.environmentDefault("CCUSAGE_INSTALL_PATH", "/usr/local/bin/ccusage")
-	status, ok, err := runtime.guestObserve(ctx,
-		[]string{"stat", "-c", "%F|%a|%u:%g", ccusagePath})
-	if err != nil || !ok || strings.TrimSpace(string(status.Stdout)) !=
-		"regular file|755|"+runtime.environmentDefault("CCUSAGE_EXPECTED_OWNER", "0:0") {
-		return false, err
-	}
-	magic, ok, err := runtime.guestObserve(ctx, []string{"od", "-An", "-tx1", "-N4", ccusagePath})
-	if err != nil || !ok || strings.Join(strings.Fields(string(magic.Stdout)), "") != "7f454c46" {
-		return false, err
-	}
-	reported, ok, err := runtime.guestObserve(ctx, []string{ccusagePath, "--version"})
-	if err != nil || !ok || strings.TrimSpace(string(reported.Stdout)) != "ccusage "+version {
-		return false, err
+	if runtime.environmentValue("ALLOWS_CODING_TOOLS") != "false" {
+		ccusagePath := runtime.environmentDefault("CCUSAGE_INSTALL_PATH", "/usr/local/bin/ccusage")
+		status, ok, err := runtime.guestObserve(ctx,
+			[]string{"stat", "-c", "%F|%a|%u:%g", ccusagePath})
+		if err != nil || !ok || strings.TrimSpace(string(status.Stdout)) !=
+			"regular file|755|"+runtime.environmentDefault("CCUSAGE_EXPECTED_OWNER", "0:0") {
+			return false, err
+		}
+		magic, ok, err := runtime.guestObserve(ctx, []string{"od", "-An", "-tx1", "-N4", ccusagePath})
+		if err != nil || !ok || strings.Join(strings.Fields(string(magic.Stdout)), "") != "7f454c46" {
+			return false, err
+		}
+		reported, ok, err := runtime.guestObserve(ctx, []string{ccusagePath, "--version"})
+		if err != nil || !ok || strings.TrimSpace(string(reported.Stdout)) != "ccusage "+version {
+			return false, err
+		}
 	}
 	configFiles, err := runtime.guestConfigFiles()
 	if err != nil {
 		return false, err
 	}
-	for _, file := range configFiles {
-		hostHash, err := file.sourceHash()
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			return false, err
-		}
-		result, ok, err := runtime.guestObserve(
-			ctx, []string{"sha256sum", "--", file.destination},
-		)
-		fields := strings.Fields(string(result.Stdout))
-		if err != nil || !ok || len(fields) == 0 || fields[0] != hostHash {
-			return false, err
-		}
+	if ok, err := runtime.guestConfigsConverged(ctx, configFiles); err != nil || !ok {
+		return false, err
 	}
+
 	sudoers := "/etc/sudoers.d/90-subyard-" + user
 	sudoTest := "-f"
 	if !runtime.Yard.DevSudo {
@@ -1200,7 +1273,18 @@ jq -e '."ip-forward-no-drop" == true' /etc/docker/daemon.json >/dev/null \
 	if ok, err := runtime.projectHooksConverged(ctx); err != nil || !ok {
 		return false, err
 	}
-	return marker == version && (!codexSelected || codexMarker == codexVersion), nil
+	if runtime.environmentValue("ALLOWS_CODING_TOOLS") == "false" {
+		plan, err := runtime.IntegrationPlan(ctx)
+		return !plan.Changed, err
+	}
+	// Resolved contexts opt into the shared integration ownership contract.
+	for _, entry := range runtime.Environment {
+		if strings.HasPrefix(entry, "INTEGRATION_HOST_LINKS=") {
+			plan, err := runtime.IntegrationPlan(ctx)
+			return marker == version && !plan.Changed, err
+		}
+	}
+	return marker == version, nil
 }
 
 func (runtime Runtime) provisionAgentCommands() ([]string, error) {
@@ -1481,4 +1565,23 @@ func (runtime Runtime) runPathEnvironment(
 		return fmt.Errorf("reconcile adapter %s: %w", strings.Join(arguments, " "), err)
 	}
 	return nil
+}
+
+func (runtime Runtime) githubEnvironment() map[string]string {
+	enabled := "0"
+	if githubbroker.ProfileEnabled(runtime.Yard.YardName, runtimeEnvironment(runtime.Environment)) {
+		enabled = "1"
+	}
+	return map[string]string{"SUBYARD_GITHUB_ENABLED": enabled}
+}
+func (runtime Runtime) githubConverged(ctx context.Context) (bool, error) {
+	environment := runtime.githubEnvironment()
+	state, err := runtime.reconcileState(ctx)
+	if err != nil {
+		return false, err
+	}
+	if state.InstanceFound && strings.EqualFold(state.Instance.Status, "stopped") && instanceIntentionallyStopped(state.Instance) {
+		environment["SUBYARD_GITHUB_STOPPED"] = "1"
+	}
+	return probeConverged(runtime.runScriptEnvironment(ctx, nil, environment, "github-broker.sh", "--check"))
 }

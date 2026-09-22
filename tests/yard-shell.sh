@@ -36,13 +36,13 @@ JSON
 chmod 0600 "$SUBYARD_STATE_DIR/subyard-id.json"
 
 "$ROOT/bin/yard" shell -- true
-grep -Fq -- '--user 1000 --group 1000 --env HOME=/home/dev --cwd /home/dev -- true' "$INCUS_LOG"
+grep -Fq -- '--user 0 --group 0 --env HOME=/home/dev --env SSH_AUTH_SOCK=/home/dev/.ssh/subyard-agent.sock --cwd /home/dev -- /usr/sbin/runuser -u dev -- true' "$INCUS_LOG"
 
 "$ROOT/bin/yard" shell --root -- id -u
 grep -Fq -- '--user 0 --group 0 --env HOME=/root --cwd /home/dev -- id -u' "$INCUS_LOG"
 
 "$ROOT/bin/yard" shell Subyard -- pwd
-grep -Fq -- '--user 1000 --group 1000 --env HOME=/home/dev --cwd /srv/workspaces/subyard-id/src -- pwd' "$INCUS_LOG"
+grep -Fq -- '--user 0 --group 0 --env HOME=/home/dev --env SSH_AUTH_SOCK=/home/dev/.ssh/subyard-agent.sock --cwd /srv/workspaces/subyard-id/src -- /usr/sbin/runuser -u dev -- pwd' "$INCUS_LOG"
 
 if "$ROOT/bin/yard" ssh >/dev/null 2>&1; then
   printf 'yard ssh unexpectedly remains available\n' >&2

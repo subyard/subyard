@@ -2,6 +2,7 @@ package ownerinventory
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
@@ -157,28 +158,21 @@ func TestConnectionsWriteRejectsManagedTrustDowngradeOrReplacement(t *testing.T)
 	}
 }
 
-func TestConnectionsRemoveRejectsProjectReferencesAndDeletesControllerState(t *testing.T) {
+func TestRemovalRejectsProjectReferencesAndDeletesControllerState(t *testing.T) {
 	root := t.TempDir()
 	store := Connections{Root: root}
 	connection := Connection{HostID: "owner-a", Destination: "dev@owner.example"}
 	if err := store.Write(connection); err != nil {
 		t.Fatal(err)
 	}
-	cache := Cache{Root: root}
 	withProject := fixtureInventory("owner-a", time.Now(), "project-one")
-	if err := cache.Write(Snapshot{FetchedAt: time.Now(), Inventory: withProject}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Remove("owner-a"); err == nil || !strings.Contains(err.Error(), "project reference") {
+	if _, err := store.PrepareRemoval(connection, Snapshot{FetchedAt: time.Now(), Inventory: withProject}); err == nil || !strings.Contains(err.Error(), "project reference") {
 		t.Fatalf("remove accepted a referenced owner: %v", err)
 	}
 	if records, err := store.List(); err != nil || len(records) != 1 {
 		t.Fatalf("failed removal mutated registration: records=%#v err=%v", records, err)
 	}
 	empty := fixtureInventory("owner-a", time.Now())
-	if err := cache.Write(Snapshot{FetchedAt: time.Now(), Inventory: empty}); err != nil {
-		t.Fatal(err)
-	}
 	routing := filepath.Join(root, "routing", "owner-a", "default", "projects")
 	if err := os.MkdirAll(routing, 0o700); err != nil {
 		t.Fatal(err)
@@ -186,20 +180,29 @@ func TestConnectionsRemoveRejectsProjectReferencesAndDeletesControllerState(t *t
 	if err := os.WriteFile(filepath.Join(routing, "stale.json"), []byte("stale\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Remove("owner-a"); err == nil || !strings.Contains(err.Error(), "routing state") {
+	if _, err := store.PrepareRemoval(connection, Snapshot{FetchedAt: time.Now(), Inventory: empty}); err == nil || !strings.Contains(err.Error(), "routing state") {
 		t.Fatalf("remove accepted project routing state: %v", err)
 	}
 	if err := os.Remove(filepath.Join(routing, "stale.json")); err != nil {
 		t.Fatal(err)
 	}
-	removed, err := store.Remove("owner-a")
+	if err := os.WriteFile(filepath.Join(routing, ".lock"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := store.PrepareRemoval(connection, Snapshot{FetchedAt: time.Now(), Inventory: empty})
+	if err != nil {
+		t.Fatal(err)
+	}
+	removed, err := store.ApplyRemoval(context.Background(), plan, func(context.Context, Connection) (Snapshot, error) {
+		return Snapshot{FetchedAt: time.Now(), Inventory: empty}, nil
+	})
 	if err != nil || removed.HostID != "owner-a" {
 		t.Fatalf("remove = %#v, %v", removed, err)
 	}
 	if records, err := store.List(); err != nil || len(records) != 0 {
 		t.Fatalf("registration remains: records=%#v err=%v", records, err)
 	}
-	if _, err := cache.Read("owner-a"); !errors.Is(err, os.ErrNotExist) {
+	if _, err := (Cache{Root: root}).Read("owner-a"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("cache remains after removal: %v", err)
 	}
 	if _, err := os.Lstat(filepath.Join(root, "routing", "owner-a")); !errors.Is(err, os.ErrNotExist) {
@@ -207,23 +210,20 @@ func TestConnectionsRemoveRejectsProjectReferencesAndDeletesControllerState(t *t
 	}
 }
 
-func TestConnectionsRemoveFailsClosedWithoutFreshAuthoritativeSnapshot(t *testing.T) {
+func TestRemovalRequiresFreshAuthoritativeSnapshot(t *testing.T) {
 	root := t.TempDir()
 	store := Connections{Root: root}
 	connection := Connection{HostID: "owner-a", Destination: "dev@owner.example"}
 	if err := store.Write(connection); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Remove("owner-a"); err == nil || !strings.Contains(err.Error(), "no authoritative") {
+	if _, err := store.PrepareRemoval(connection, Snapshot{}); err == nil || !strings.Contains(err.Error(), "fresh authoritative") {
 		t.Fatalf("remove without snapshot did not fail closed: %v", err)
 	}
-	if err := (Cache{Root: root}).Write(Snapshot{
+	if _, err := store.PrepareRemoval(connection, Snapshot{
 		FetchedAt: time.Now().Add(-Freshness - time.Second),
 		Inventory: fixtureInventory("owner-a", time.Now()),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Remove("owner-a"); err == nil || !strings.Contains(err.Error(), "stale") {
+	}); err == nil || !strings.Contains(err.Error(), "stale") {
 		t.Fatalf("remove with stale snapshot did not fail closed: %v", err)
 	}
 }
@@ -245,7 +245,9 @@ func TestRemovalPlanRejectsConnectionChangedAfterConfirmation(t *testing.T) {
 	if err := store.Write(changed); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.ApplyRemoval(plan); err == nil || !strings.Contains(err.Error(), "changed") {
+	if _, err := store.ApplyRemoval(context.Background(), plan, func(context.Context, Connection) (Snapshot, error) {
+		return snapshot, nil
+	}); err == nil || !strings.Contains(err.Error(), "changed") {
 		t.Fatalf("stale removal plan deleted a changed connection: %v", err)
 	}
 	if records, err := store.List(); err != nil || len(records) != 1 || len(records[0].Yards) != 1 {
@@ -298,11 +300,222 @@ func TestRemovalPlanExpiresBeforeApply(t *testing.T) {
 		t.Fatal(err)
 	}
 	now = now.Add(Freshness + time.Second)
-	if _, err := store.ApplyRemoval(plan); err == nil || !strings.Contains(err.Error(), "stale") {
+	if _, err := store.ApplyRemoval(context.Background(), plan, func(context.Context, Connection) (Snapshot, error) {
+		return snapshot, nil
+	}); err == nil || !strings.Contains(err.Error(), "stale") {
 		t.Fatalf("ApplyRemoval accepted expired snapshot: %v", err)
 	}
 	if records, err := store.List(); err != nil || len(records) != 1 {
 		t.Fatalf("expired removal mutated registration: %#v, %v", records, err)
+	}
+}
+
+func TestRemovalWaitsForProjectMutationLease(t *testing.T) {
+	root := t.TempDir()
+	store := Connections{Root: root}
+	connection := Connection{HostID: "owner-a", Destination: "owner.example"}
+	if err := store.Write(connection); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := Snapshot{FetchedAt: time.Now(), Inventory: fixtureInventory("owner-a", time.Now())}
+	plan, err := store.PrepareRemoval(connection, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, err := store.BeginHostMutation(context.Background(), connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaseSecond, err := store.BeginHostMutation(context.Background(), connection)
+	if err != nil {
+		t.Fatalf("second project mutation lease = %v", err)
+	}
+	releaseSecond()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	called := false
+	_, err = store.ApplyRemoval(ctx, plan, func(context.Context, Connection) (Snapshot, error) {
+		called = true
+		return snapshot, nil
+	})
+	if err == nil || called {
+		t.Fatalf("removal proceeded while project lease was held: err=%v called=%v", err, called)
+	}
+	release()
+	if _, err := store.ApplyRemoval(context.Background(), plan, func(context.Context, Connection) (Snapshot, error) {
+		return Snapshot{FetchedAt: time.Now(), Inventory: fixtureInventory("owner-a", time.Now(), "project-one")}, nil
+	}); err == nil || !strings.Contains(err.Error(), "project reference") {
+		t.Fatalf("removal accepted project created after the original empty plan: %v", err)
+	}
+	if records, err := store.List(); err != nil || len(records) != 1 {
+		t.Fatalf("project refresh removal mutated registration: %#v, %v", records, err)
+	}
+}
+
+func TestProjectLeaseWaitsForRemovalThenRejectsDeletedOwner(t *testing.T) {
+	root := t.TempDir()
+	store := Connections{Root: root}
+	connection := Connection{HostID: "owner-a", Destination: "owner.example"}
+	if err := store.Write(connection); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := Snapshot{FetchedAt: time.Now(), Inventory: fixtureInventory("owner-a", time.Now())}
+	plan, err := store.PrepareRemoval(connection, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refreshStarted := make(chan struct{})
+	allowRefresh := make(chan struct{})
+	removed := make(chan error, 1)
+	go func() {
+		_, removeErr := store.ApplyRemoval(context.Background(), plan, func(context.Context, Connection) (Snapshot, error) {
+			close(refreshStarted)
+			<-allowRefresh
+			return snapshot, nil
+		})
+		removed <- removeErr
+	}()
+	<-refreshStarted
+	started := make(chan error, 1)
+	go func() {
+		_, beginErr := store.BeginHostMutation(context.Background(), connection)
+		started <- beginErr
+	}()
+	select {
+	case err := <-started:
+		t.Fatalf("project lease acquired while removal held exclusive mutation: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(allowRefresh)
+	if err := <-removed; err != nil {
+		t.Fatalf("remove owner = %v", err)
+	}
+	if err := <-started; !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatalf("project lease after removal = %v, want stale owner", err)
+	}
+}
+
+func TestApplyRegistrationRecoversPendingJournalUnderOwnLease(t *testing.T) {
+	root := t.TempDir()
+	store := Connections{Root: root}
+	trust := testSSHHostTrust(t, "owner.example")
+	connection := Connection{HostID: "owner-a", Destination: "owner.example", Trust: &trust}
+	snapshot := Snapshot{FetchedAt: time.Now(), Inventory: fixtureInventory("owner-a", time.Now())}
+	plan, err := store.PrepareRegistration(connection, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeJournalFixture(t, store.registrationPath(), registrationJournal{
+		SchemaVersion: registrationSchema, Connection: connection, Snapshot: snapshot,
+	})
+	err = store.ApplyRegistration(plan)
+	var busy *HostMutationBusyError
+	if errors.As(err, &busy) {
+		t.Fatalf("repeated registration self-conflicted with its recovery lock: %v", err)
+	}
+	if records, listErr := store.List(); listErr != nil || len(records) != 1 {
+		t.Fatalf("pending registration recovery = %#v, %v", records, listErr)
+	}
+}
+
+func TestRecoveryDefersRemovalWhileProjectMutationLeaseIsHeld(t *testing.T) {
+	root := t.TempDir()
+	store := Connections{Root: root}
+	connection := Connection{HostID: "owner-a", Destination: "owner.example"}
+	if err := store.Write(connection); err != nil {
+		t.Fatal(err)
+	}
+	release, err := store.BeginHostMutation(context.Background(), connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeJournalFixture(t, store.removalPath(), removalJournal{SchemaVersion: removalSchema, HostID: connection.HostID})
+	if err := store.Recover(); err == nil {
+		t.Fatal("recovery deleted routing while a project mutation lease was held")
+	} else {
+		var busy *HostMutationBusyError
+		if !errors.As(err, &busy) {
+			t.Fatalf("recovery error = %v, want host mutation busy", err)
+		}
+	}
+	release()
+	if err := store.Recover(); err != nil {
+		t.Fatalf("recovery after project lease = %v", err)
+	}
+}
+
+func TestConnectionUpdateCannotResurrectRemovedOwner(t *testing.T) {
+	root := t.TempDir()
+	store := Connections{Root: root}
+	connection := Connection{HostID: "owner-a", Destination: "owner.example"}
+	if err := store.Write(connection); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := Snapshot{FetchedAt: time.Now(), Inventory: fixtureInventory("owner-a", time.Now())}
+	plan, err := store.PrepareRemoval(connection, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ApplyRemoval(context.Background(), plan, func(context.Context, Connection) (Snapshot, error) {
+		return snapshot, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	updated := connection
+	updated.Yards = map[string]YardRoute{"default": {SSHHost: "yard-owner"}}
+	if err := store.Update(connection, updated); err == nil || !strings.Contains(err.Error(), "not registered") {
+		t.Fatalf("stale connection update recreated removed owner: %v", err)
+	}
+}
+
+func TestEnsureNoRoutingProjectsAllowsOnlyRegularProjectLock(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		setup func(t *testing.T, projects string)
+		want  bool
+	}{
+		{name: "regular lock", want: true, setup: func(t *testing.T, projects string) {
+			if err := os.WriteFile(filepath.Join(projects, ".lock"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "lock symlink", setup: func(t *testing.T, projects string) {
+			target := filepath.Join(filepath.Dir(projects), "target")
+			if err := os.WriteFile(target, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, filepath.Join(projects, ".lock")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "lock directory", setup: func(t *testing.T, projects string) {
+			if err := os.Mkdir(filepath.Join(projects, ".lock"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "nonempty lock", setup: func(t *testing.T, projects string) {
+			if err := os.WriteFile(filepath.Join(projects, ".lock"), []byte("unexpected\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "state record", setup: func(t *testing.T, projects string) {
+			if err := os.WriteFile(filepath.Join(projects, "project.json"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			projects := filepath.Join(root, "routing", "owner-a", "default", "projects")
+			if err := os.MkdirAll(projects, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			test.setup(t, projects)
+			err := ensureNoRoutingProjects(root, "owner-a")
+			if (err == nil) != test.want {
+				t.Fatalf("ensureNoRoutingProjects error = %v, want success=%v", err, test.want)
+			}
+		})
 	}
 }
 

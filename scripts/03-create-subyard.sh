@@ -33,15 +33,48 @@ PROJ=(--project "$INCUS_PROJECT")
 device_exists() { incus config device list "$YARD_INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null | grep -qx "$1"; }
 device_get() { incus config device get "$YARD_INSTANCE_NAME" "$1" "$2" "${PROJ[@]}" 2>/dev/null || true; }
 instance_get() { incus config get "$YARD_INSTANCE_NAME" "$1" "${PROJ[@]}" 2>/dev/null || true; }
-incus_apparmor_disabled() {
-  local service_environment
+incus_apparmor_state() {
+  local service_environment token quote c name value seen=0 state=restored i
   command -v systemctl >/dev/null 2>&1 || return 1
-  service_environment="$(systemctl show incus.service -p Environment --value 2>/dev/null)" \
+  # Replace NUL before command substitution (which would silently discard it).
+  service_environment="$(systemctl show incus.service -p Environment --value 2>/dev/null | tr '\000' '\001')" \
     || return 1
-  case " $service_environment " in
-    *' INCUS_SECURITY_APPARMOR=false '*) return 0 ;;
-  esac
-  return 1
+  case "$service_environment" in *$'\001'* | *$'\r'* | *$'\n'*) return 1 ;; esac
+  # Decode complete shell-quoted assignments without eval. Keep the contract in
+  # sync with parseIncusAppArmor in internal/adapters/reconcileruntime/apparmor.go.
+  for ((i=0; i<${#service_environment}; )); do
+    c="${service_environment:i:1}"
+    if [[ "$c" = ' ' || "$c" = $'\t' ]]; then i=$((i+1)); continue; fi
+    token='' quote=''
+    for ((; i<${#service_environment}; i++)); do
+      c="${service_environment:i:1}"
+      if [[ -z "$quote" && ( "$c" = ' ' || "$c" = $'\t' ) ]]; then break; fi
+      if [[ "$c" = '\' && "$quote" != "'" ]]; then
+        i=$((i+1))
+        [ "$i" -lt "${#service_environment}" ] || return 1
+        c="${service_environment:i:1}"
+        if [ "$quote" = '"' ]; then
+          case "$c" in '\' | '"' | '$' | '`') ;; *) return 1 ;; esac
+        fi
+        token+="$c"
+      elif [[ -n "$quote" && "$c" = "$quote" ]]; then
+        quote=
+      elif [[ -z "$quote" && ( "$c" = "'" || "$c" = '"' ) ]]; then
+        quote="$c"
+      else
+        token+="$c"
+      fi
+    done
+    [[ -z "$quote" && "$token" = *=* ]] || return 1
+    name="${token%%=*}"; value="${token#*=}"
+    [[ "$name" =~ ^[a-zA-Z_][a-zA-Z_0-9]*$ ]] || return 1
+    if [ "$name" = INCUS_SECURITY_APPARMOR ]; then
+      [ "$seen" = 0 ] || return 1
+      seen=1
+      case "$value" in false) state=disabled ;; true) state=restored ;; *) return 1 ;; esac
+    fi
+  done
+  printf '%s\n' "$state"
 }
 
 reconcile_e2e_route_mount() {
@@ -68,6 +101,24 @@ reconcile_e2e_route_mount() {
 incus_preflight
 incus project show "$INCUS_PROJECT" >/dev/null 2>&1 \
   || die "project '$INCUS_PROJECT' missing — run scripts/02-create-project.sh first"
+
+# The Go Apply path supplies its fresh observation before writing power metadata.
+# Standalone adapter calls observe here, before instance, route or power mutation.
+# Environment= describes the loaded unit; provisioning owns daemon reload/restart.
+docker_apparmor_required=0
+if [ "$YARD_KIND" = container ]; then
+  if [ "${SUBYARD_PREPARED_INCUS_APPARMOR+x}" = x ]; then
+    apparmor_state="$SUBYARD_PREPARED_INCUS_APPARMOR"
+  else
+    apparmor_state="$(incus_apparmor_state)" \
+      || die "Incus AppArmor capability unknown: systemctl Environment probe failed or was invalid; check incus.service and retry init"
+  fi
+  case "$apparmor_state" in
+    disabled) docker_apparmor_required=1 ;;
+    restored) ;;
+    *) die "Incus AppArmor capability unknown: invalid prepared state; retry init" ;;
+  esac
+fi
 
 announce_confirm "Subyard Phase 2 — create yard instance" \
   "Create Incus instance '$YARD_INSTANCE_NAME' ($YARD_KIND) from $YARD_IMAGE (fallback $YARD_IMAGE_FALLBACK)." \
@@ -141,10 +192,6 @@ reconcile_e2e_route_mount
 # only the indicator in that compatibility mode; on ordinary AppArmor-enabled hosts Docker keeps
 # its normal docker-default confinement.
 docker_apparmor_device=subyard-docker-apparmor
-docker_apparmor_required=0
-if [ "$YARD_KIND" = container ] && incus_apparmor_disabled; then
-  docker_apparmor_required=1
-fi
 docker_apparmor_drift=0
 if [ "$docker_apparmor_required" = 1 ]; then
   device_exists "$docker_apparmor_device" \

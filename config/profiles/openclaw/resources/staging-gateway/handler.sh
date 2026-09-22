@@ -15,7 +15,9 @@
 #     never via -e, never under /srv/cache;
 #   * a startup prod-fingerprint GUARD (ours; the project has no such check) that refuses to
 #     start unless the config is marked staging AND the bot token's fingerprint is not on the
-#     operator's host override prod denylist, plus state-root markers.
+#     operator's host override prod denylist, plus state-root markers. The denylist is required
+#     before up/start: one 64-character SHA-256 hex fingerprint per line; blank lines and comments
+#     are accepted. Re-run up after changing it to refresh the in-yard self-service copy.
 #   * the bot identity is the scarce resource: a flock+file LEASE (FIFO/TTL/epoch) admits one
 #     poller at a time; handover is fence-by-lifecycle (stop the prior holder's gateway).
 #
@@ -59,6 +61,39 @@ LEASE_DIR="/srv/staging/_lease"                          # in the yard; one leas
 ydocker() { yexec docker "$@"; }
 cname_for() { printf 'subyard-staging-%s' "$1"; }
 
+load_prod_fingerprints() { # <file>
+  local file="$1" line="" normalized="" line_number=0
+  if [ ! -f "$file" ] || [ ! -r "$file" ]; then
+    die "production fingerprint file is missing or unreadable: $file"
+  fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    line_number=$((line_number + 1))
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    case "$line" in ''|'#'*) continue ;; esac
+    [[ "$line" =~ ^[0-9a-fA-F]{64}$ ]] \
+      || die "malformed production fingerprint at $file:$line_number (expected exactly 64 hex characters)"
+    normalized="${normalized}${normalized:+$'\n'}$(printf '%s' "$line" | tr '[:upper:]' '[:lower:]')"
+  done < "$file"
+  [ -n "$normalized" ] || die "production fingerprint file has no fingerprints: $file"
+  printf '%s\n' "$normalized"
+}
+
+stage_prod_fingerprints() { # <validated normalized fingerprints>
+  local fingerprints="$1" snapshot
+  [ -n "$fingerprints" ] || die "production fingerprint validation produced no entries"
+  snapshot="$(umask 077; mktemp "${TMPDIR:-/tmp}/subyard-prod-fingerprints.XXXXXX")" \
+    || die "could not create a production fingerprint snapshot"
+  printf '%s\n' "$fingerprints" > "$snapshot"
+  if ! incus file push "$snapshot" "$YARD_INSTANCE_NAME$dataRoot/prod-fingerprints" "${PROJ[@]}" \
+    --mode 0644 >/dev/null
+  then
+    rm -f -- "$snapshot"
+    die "could not stage the validated production fingerprint file into the yard"
+  fi
+  rm -f -- "$snapshot"
+}
+
 emit_resource_assessment() { # <local-action> <true|false> [fixed consequence...]
   local action="$1" changed="$2" separator=""
   shift 2
@@ -82,7 +117,7 @@ require_resource_apply() { # <expected-local-action>
 
 sub="${1:-}"; shift || true
 if [ -z "$sub" ]; then
-  [ -z "${SUBYARD_RESOURCE_MODE:-}" ] || die "resource verb is required"
+  [ -z "${SUBYARD_RESOURCE_MODE:-}" ] || svc_usage_error "resource verb is required"
   _yard_help_and_exit
 fi
 
@@ -106,12 +141,12 @@ fi
 if [ -z "${SUBYARD_RESOURCE_MODE:-}" ]; then
   case "$sub" in
     -h|--help|help) _yard_help_and_exit ;;
-    *) die "typed resource dispatcher required for 'yard staging $sub'" ;;
+    *) svc_usage_error "typed resource dispatcher required for 'yard staging $sub'" ;;
   esac
 fi
 
 if [ "$sub" = list ]; then
-  [ "$#" -eq 0 ] || die "'list' does not accept additional arguments"
+  [ "$#" -eq 0 ] || svc_usage_error "'list' does not accept additional arguments"
   case "${SUBYARD_RESOURCE_MODE:-}" in
     prepare) emit_resource_assessment list false ;;
     apply)
@@ -131,32 +166,32 @@ zone="canonical"; rebuild=0; purge=0; follow=0; zone_set=0; src_override=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --rebuild) rebuild=1 ;;
-    --source)  src_override="${2:-}"; [ -n "$src_override" ] || die "--source needs a yard path"; shift ;;
+    --source)  src_override="${2:-}"; [ -n "$src_override" ] || svc_usage_error "--source needs a yard path"; shift ;;
     --purge)   purge=1 ;;
     -f|--follow) follow=1 ;;
-    -*)        die "unknown option '$1'" ;;
-    *)         [ "$zone_set" = 1 ] && die "unexpected extra argument '$1'"; zone="$1"; zone_set=1 ;;
+    -*)        svc_usage_error "unknown option '$1'" ;;
+    *)         [ "$zone_set" = 1 ] && svc_usage_error "unexpected extra argument '$1'"; zone="$1"; zone_set=1 ;;
   esac
   shift
 done
-case "$zone" in *[!a-zA-Z0-9_-]*) die "zone name '$zone' must be [a-zA-Z0-9_-]" ;; esac
+case "$zone" in *[!a-zA-Z0-9_-]*) svc_usage_error "zone name '$zone' must be [a-zA-Z0-9_-]" ;; esac
 case "$sub" in
   up)
-    [ "$purge" -eq 0 ] && [ "$follow" -eq 0 ] || die "'up' accepts only --rebuild and --source"
+    [ "$purge" -eq 0 ] && [ "$follow" -eq 0 ] || svc_usage_error "'up' accepts only --rebuild and --source"
     ;;
   logs)
     [ "$rebuild" -eq 0 ] && [ "$purge" -eq 0 ] && [ -z "$src_override" ] \
-      || die "'logs' accepts only -f or --follow"
+      || svc_usage_error "'logs' accepts only -f or --follow"
     ;;
   destroy)
     [ "$rebuild" -eq 0 ] && [ "$follow" -eq 0 ] && [ -z "$src_override" ] \
-      || die "'destroy' accepts only --purge"
+      || svc_usage_error "'destroy' accepts only --purge"
     ;;
   start|stop|status|shell|down)
     [ "$rebuild" -eq 0 ] && [ "$purge" -eq 0 ] && [ "$follow" -eq 0 ] && [ -z "$src_override" ] \
-      || die "'$sub' does not accept options"
+      || svc_usage_error "'$sub' does not accept options"
     ;;
-  *) die "unknown staging resource verb '$sub'" ;;
+  *) svc_usage_error "unknown staging resource verb '$sub'" ;;
 esac
 
 svc_require_yard_running
@@ -298,7 +333,7 @@ validate_running_gateway_lease() {
 }
 
 validate_start_guard() {
-  local prod_fps="" guard_out=""
+  local prod_fps guard_out=""
   require_box
   box_running \
     || die "staging-runner zone '$zone' is stopped — run: ${PROG:-yard} staging up $zone"
@@ -307,8 +342,7 @@ validate_start_guard() {
 
   # The authority check is read-only and must happen before central consent or lease acquisition.
   "$SUBYARD_ROOT/bin/yard" keys check-exclusive "$zone" >/dev/null
-  [ -r "$PROD_FP_FILE" ] \
-    && prod_fps="$(grep -vE '^\s*(#|$)' "$PROD_FP_FILE" 2>/dev/null | tr -s '[:space:]' '\n' || true)"
+  prod_fps="$(load_prod_fingerprints "$PROD_FP_FILE")"
   guard_out="$(ydocker exec -i -e "SUBYARD_PROD_FPS=$prod_fps" "$cname" sh -s <<'GUARD'
 set -eu
 cfg="${OPENCLAW_CONFIG_PATH:-$VASILY_HOME/openclaw/openclaw.json}"
@@ -359,6 +393,7 @@ prepare_resource() {
       # shellcheck disable=SC1090
       . "$pf"
       : "${PROJECT_ENV_BASE_IMAGE:?profile $profile has no PROJECT_ENV_BASE_IMAGE}"
+      load_prod_fingerprints "$PROD_FP_FILE" >/dev/null
       [ -z "$SOURCE_BIND" ] || yexec test -d "$SOURCE_BIND" \
         || die "SOURCE_BIND is not a directory in the yard"
       emit_resource_assessment up true \
@@ -437,6 +472,7 @@ case "$sub" in
     # shellcheck disable=SC1090
     . "$pf"
     : "${PROJECT_ENV_BASE_IMAGE:?profile $profile has no PROJECT_ENV_BASE_IMAGE}"
+    prod_fps="$(load_prod_fingerprints "$PROD_FP_FILE")"
     df="${IMAGE_DOCKERFILE:-}"; run_image="$PROJECT_ENV_BASE_IMAGE"; ctx=""
     if [ -n "$df" ]; then ctx="${IMAGE_CONTEXT:-$(dirname "$df")}"; run_image="${IMAGE_TAG:-subyard-staging-$zone}"; fi
 
@@ -448,6 +484,7 @@ case "$sub" in
       || die "SOURCE_BIND '$SOURCE_BIND' is not a directory in the yard — point it at an agent's workspace (e.g. /srv/workspaces/<id>)"
 
     if box_exists; then
+      stage_prod_fingerprints "$prod_fps"
       ydocker start "$cname" >/dev/null
       # keep the in-yard CLI fresh (zone.env/run-args were written on first up)
       incus file push "$RESOURCE_DIR/sy-stage.sh" "$YARD_INSTANCE_NAME/usr/local/bin/sy-stage" "${PROJ[@]}" --mode 0755 --uid 0 --gid 0 >/dev/null 2>&1 || true
@@ -462,6 +499,7 @@ case "$sub" in
     for d in "$dataRoot" "$dataRoot/logs" "$dataRoot/run" "$dataRoot/creds" "$vasilyHome" "$srcDir" "$LEASE_DIR"; do
       yexec install -d -o "$DEV_UID" -g "$DEV_UID" "$d"
     done
+    stage_prod_fingerprints "$prod_fps"
 
     if [ -n "$df" ]; then
       src_for_build="${SOURCE_BIND:-$srcDir}"
@@ -492,7 +530,15 @@ case "$sub" in
          -e "VASILY_HOME=$vasilyHome"
          -e "SUBYARD_STAGING_ZONE=$zone"
          -e "SUBYARD_STAGING_DATA_ROOT=$dataRoot")
-    for c in ${CACHES:-}; do yexec install -d -o "$DEV_UID" -g "$DEV_UID" "$c"; mid+=(-v "$c:$c"); done
+    if [ -n "${CACHES:-}" ]; then
+      # Match profile provisioning even when the account's primary GID differs from its UID.
+      cache_gid="$(yexec id -g "$DEV_UID")"
+      case "$cache_gid" in ''|*[!0-9]*) die "could not resolve the development account's cache group" ;; esac
+      for c in $CACHES; do
+        yexec install -d -o "$DEV_UID" -g "$cache_gid" "$c"
+        mid+=(-v "$c:$c")
+      done
+    fi
     [ "$have_secrets" = 1 ] && mid+=(-v "$ysecret:$BOX_SECRET:ro")
     # persistent creds store (a one-time manual provider login survives box recreate); backed by $dataRoot/creds
     [ -n "$CREDS_DEST" ] && mid+=(-v "$dataRoot/creds:$CREDS_DEST")
@@ -529,8 +575,6 @@ YLOG='$ylog'
 ZENV
     # run-args — the reusable mid spec for 'sy-stage rebind' (one arg per line, preserves spaces).
     printf '%s\n' "${mid[@]}" | yexec sh -c 'cat > "$1"' _ "$dataRoot/run-args"
-    # prod-fingerprints — the in-yard prod-guard reads this (deny-by-default stays effective).
-    [ -r "$PROD_FP_FILE" ] && incus file push "$PROD_FP_FILE" "$YARD_INSTANCE_NAME$dataRoot/prod-fingerprints" "${PROJ[@]}" --mode 0644 >/dev/null 2>&1 || true
     # install the in-yard CLI on the agent's PATH.
     if incus file push "$RESOURCE_DIR/sy-stage.sh" "$YARD_INSTANCE_NAME/usr/local/bin/sy-stage" "${PROJ[@]}" --mode 0755 --uid 0 --gid 0 >/dev/null 2>&1; then
       ok "in-yard self-serve ready: in the yard the agent runs 'sy-stage restart --zone $zone' (reserve/restart/rebind/stop/status/logs)"
@@ -549,9 +593,11 @@ Next:
        # mark it staging ("_subyardStaging": true), log in the staging model provider (Codex) once.
        # To survive box recreate, set CREDS_DEST in $zone.conf to the runner's creds dir
        # (persisted at $dataRoot/creds); else the login lives in the box until 'destroy'.
-  3. Record PROD bot fingerprint(s) so the guard refuses them:
+  3. Maintain the required PROD bot fingerprint denylist (64 hex characters per line;
+     blank lines and comments are accepted):
        printf '%s' "<PROD_BOT_TOKEN>" | sha256sum   # hash only
        echo "<that-hash>" >> "$SUBYARD_CONFIG_HOST_DIR/prod-fingerprints"
+     Re-run '${PROG:-yard} staging up $zone' after editing it to refresh the in-yard copy.
   4. ${PROG:-yard} staging start $zone
 MSG
     ;;
