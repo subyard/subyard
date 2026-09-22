@@ -89,7 +89,7 @@ func BuiltInRegistry() (Registry, error) {
 		"subyard-dev-provision", "teardown-runtime-preservation", "test-vms",
 		"vscode-remote-maintenance", "workflow-real-adapter-gate", "yard-extras-convergence",
 		"yard-keys", "yard-remote", "yard-shell", "yard-usage", "zabbly-download",
-		"test-impact",
+		"test-impact", "test-runner",
 	}
 	for _, name := range shellTests {
 		checks = append(checks, Check{

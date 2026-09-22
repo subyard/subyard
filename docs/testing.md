@@ -30,6 +30,20 @@ clean checkout, base commit or `.git` directory is required. Install the tools l
 temporary repositories. The release packaging test also creates its own index of the current public
 files; it does not change the source checkout's index.
 
+The runner prints one start/result line per check and a final `SUMMARY` with its
+status, check count, elapsed seconds and original exit code. Successful check output
+stays in separate logs under a unique `.build/test-runs/run.*/` directory. On the
+first failure it stops, prints the last 40 log lines and points to the complete log.
+`RESULTS` and `SUMMARY` identify the run's `summary.tsv`, which has these columns:
+`kind`, `suite`, `check`, `status`, `exit_code`, `duration_seconds`, `log`.
+Log names are relative to that summary's directory. Each completed check has a
+`check` row; the final `run` row reports the whole invocation. A missing final row
+means the run did not finish reporting; absent checks have not passed. Durations
+use Bash's elapsed seconds and may be zero for short checks. Separate invocations
+never overwrite each other's results. Logs stay local until explicitly removed;
+they are not uploaded by CI. Agents should read the summary first and open only
+the relevant log when a check fails.
+
 GitHub CI runs the full core gate, warning-level ShellCheck and
 `bash tests/real-host/adapter-contracts.sh` in one `verify` job on every branch push and pull request;
 tag pushes are reserved for the independent Release workflow. Native Paseo uses the same branch/PR
