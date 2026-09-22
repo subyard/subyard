@@ -38,6 +38,21 @@ requirements when the task depends on them.
    Planned checks on available allocated VMs are agent work: complete them before
    reporting readiness.
 
+## Test execution and delegation
+
+- Run short checks directly. For long runs, use one worker with
+  `model="gpt-5.6-terra"`, `reasoning_effort="medium"`, `fork_turns="none"`;
+  run locally if unavailable.
+- Pass the working directory, exact commands, source state, known facts, relevant
+  file/section references and result paths. Do not copy chat history or whole
+  documents, or ask the worker to repeat project discovery.
+- Only the worker monitors the run; the parent does not duplicate polls or log
+  reads. Prefer completion events; otherwise poll about every 60 seconds within
+  client limits. Leave lease heartbeats and cleanup to the runner.
+- Return the exit code, duration, summary/log paths and a short failure excerpt.
+  Read `summary.tsv` first. Do not edit source or rerun the full suite without
+  the parent's instruction.
+
 ## Boundaries
 
 - Keep public files generic and in English. Keep private material in the overlay;
