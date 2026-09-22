@@ -20,6 +20,8 @@ mkdir -p "$TMP/bin" "$TMP/config/yards" "$TMP/config/yards/remote/projects" \
 for f in agents.env host.env ports.env; do : > "$TMP/shipped/$f"; done
 printf ': "${YARD_INSTANCE_NAME:=yard}"\n: "${INCUS_PROJECT:=subyard}"\n' > "$TMP/shipped/incus.project.env"
 printf ': "${SSH_PORT:=2222}"\n' > "$TMP/shipped/subyard.env"
+printf '%s\n' 'subyard-remote-remote ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA fixture' \
+  > "$TMP/state/known_hosts"
 
 cat > "$TMP/bin/incus" <<'MOCK'
 #!/usr/bin/env bash
@@ -48,7 +50,8 @@ cat > "$TMP/bin/ssh" <<'MOCK'
 set -euo pipefail
 joined="$*"
 if [ "${1:-}" = -G ]; then
-  printf 'hostname 127.0.0.1\nhostkeyalias subyard-remote-remote\n'
+  printf 'hostname 127.0.0.1\nport 22\nhostkeyalias subyard-remote-remote\nuserknownhostsfile %s\n' \
+    "$REMOTE_TEST_STATE/known_hosts"
   exit 0
 fi
 if [[ "$joined" == *yard* && "$joined" == *rpc* && "$joined" == *--stdio* ]]; then

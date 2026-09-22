@@ -431,6 +431,7 @@ func TestExplicitRemoteUpdateLogViewerUsesForwardRoute(t *testing.T) {
 	}
 	sshLog := filepath.Join(root, "remote-logs-ssh.log")
 	writeCLIFile(t, filepath.Join(fakeBin, "ssh"), `#!/bin/sh
+`+trustedSSHMock(t)+`
 printf '%s\n' "$@" >"$SUBYARD_TEST_SSH_LOG"
 `, 0o700)
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))

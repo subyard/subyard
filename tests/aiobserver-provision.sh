@@ -494,11 +494,31 @@ grep -Fxq 'ai-observer-check: HTTP readiness failed' "$TMP/readiness-failure.log
   || fail 'readiness failure damaged persistent data'
 
 # A healthy first backfill can outlast the old thirty-probe startup window.
+# This case counts retries; the real startup deadline is checked above. Freeze
+# only the provision shell's clock so slow mock processes cannot spend its budget.
+cat >"$TMP/startup-clock.sh" <<'SH'
+if [ "$0" = "${AI_OBSERVER_FAKE_CLOCK_HOOK:-}" ]; then
+  unset SECONDS
+  SECONDS=0
+  startup_clock_sleeps=0
+  sleep() {
+    startup_clock_sleeps=$((startup_clock_sleeps + 1))
+    # Bound the virtual clock too: a thirty-sixth failure must time out.
+    if [ "$startup_clock_sleeps" -ge 36 ]; then
+      SECONDS="$AI_OBSERVER_STARTUP_TIMEOUT_SECONDS"
+    fi
+  }
+fi
+SH
 printf '35\n' >"$AI_OBSERVER_FAKE_ROOT/http-failures-left"
-if ! AI_OBSERVER_STARTUP_TIMEOUT_SECONDS=15 run_hook "$test_root" "$dev_home" \
+: >"$FAKE_LOG"
+if ! BASH_ENV="$TMP/startup-clock.sh" AI_OBSERVER_FAKE_CLOCK_HOOK="$HOOK" \
+  AI_OBSERVER_STARTUP_TIMEOUT_SECONDS=15 run_hook "$test_root" "$dev_home" \
   'claude codex aiobserver' >"$TMP/slow-startup.log" 2>&1; then
   fail 'slow initial backfill was rolled back before HTTP became ready'
 fi
+[ "$(grep -c '^curl ' "$FAKE_LOG")" = 36 ] \
+  || fail 'slow initial backfill did not survive all thirty-five failed probes'
 "$check" >/dev/null || fail 'slow initial backfill did not become ready'
 [ "$(cat "$state/data/sentinel")" = 'persistent data' ] \
   || fail 'slow initial backfill damaged persistent data'

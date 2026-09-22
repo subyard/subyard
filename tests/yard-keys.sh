@@ -467,9 +467,16 @@ EOF
 cat > "$HOME/.bash_profile" <<EOF
 export PATH="$ROOT/bin:\$PATH"
 EOF
+export SUBYARD_TEST_KNOWN_HOSTS="$TMP/ssh-known-hosts"
+printf '%s\n' 'fake-owner ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA fixture' \
+  > "$SUBYARD_TEST_KNOWN_HOSTS"
 cat > "$TMP/fake-bin/ssh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+if [ "${1:-}" = -G ]; then
+  printf 'hostname fake-owner\nport 22\nuserknownhostsfile %s\n' "$SUBYARD_TEST_KNOWN_HOSTS"
+  exit 0
+fi
 printf '%q ' "$@" >> "${SUBYARD_TEST_SSH_LOG:?}"
 printf '\n' >> "$SUBYARD_TEST_SSH_LOG"
 args=("$@")
@@ -477,7 +484,6 @@ i=0
 while [ "$i" -lt "${#args[@]}" ]; do
   case "${args[$i]}" in
     -o|-p|-i|-F|-J) i=$((i + 2)) ;;
-    -G) exit 1 ;;
     -*) i=$((i + 1)) ;;
     *) break ;;
   esac

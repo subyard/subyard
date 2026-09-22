@@ -994,7 +994,7 @@ reexec_with_incus_group() {
 }
 
 run_incus_installer() {
-  local state_root="$1"; shift
+  local state_root="$1" storage_path="$2"; shift 2
   (
     # shellcheck source=tests/helpers/test-context.sh
     . "$ROOT/tests/helpers/test-context.sh"
@@ -1005,7 +1005,7 @@ run_incus_installer() {
     export SUBYARD_CONFIG_DIR="$ROOT/config"
     export SUBYARD_CONFIG_HOME="$state_root/e2e-bootstrap-config"
     export SUBYARD_HOME="$state_root"
-    export STORAGE_PATH="$state_root/incus/storage"
+    export STORAGE_PATH="$storage_path"
     export HOST_BASE="$state_root/host-data"
     export RESTRICTED_DISK_PATHS="$HOST_BASE"
     set -a
@@ -1063,6 +1063,7 @@ restore_p0_incus_apparmor_default() {
 
 ensure_incus() {
 	local state_root="$1" install_marker="${2:-}" resume_mode="$3"
+	local storage_path="${4:-$state_root/incus/storage}"
 	if command -v incus >/dev/null 2>&1 \
 		&& ! id -nG | tr ' ' '\n' | grep -qx incus-admin \
 		&& id -nG "$(id -un)" | tr ' ' '\n' | grep -qx incus-admin; then
@@ -1071,7 +1072,7 @@ ensure_incus() {
 	if incus info >/dev/null 2>&1; then
     if ! dpkg --compare-versions "$(incus --version)" ge 6.0.6; then
       printf '  [ .. ] VM%s: upgrading Incus to the supported LTS\n' "$SUBYARD_E2E_VM"
-      run_incus_installer "$state_root" --yes --zabbly --upgrade-only
+      run_incus_installer "$state_root" "$storage_path" --yes --zabbly --upgrade-only
       dpkg --compare-versions "$(incus --version)" ge 6.0.6 \
         || die 'Incus upgrade did not reach 6.0.6'
     fi
@@ -1081,26 +1082,28 @@ ensure_incus() {
     fi
 		[ -z "$install_marker" ] || printf '%s\n' "$MARKER" > "$install_marker"
     printf '  [ .. ] VM%s: restoring the Incus owner API\n' "$SUBYARD_E2E_VM"
-    run_incus_installer "$state_root" --yes --zabbly
+    run_incus_installer "$state_root" "$storage_path" --yes --zabbly
     return
   fi
   if command -v incus >/dev/null 2>&1 || [ -S /var/lib/incus/unix.socket ]; then
     [ -z "$install_marker" ] || printf '%s\n' "$MARKER" > "$install_marker"
     printf '  [ .. ] VM%s: reconciling a partial Incus installation\n' "$SUBYARD_E2E_VM"
-    run_incus_installer "$state_root" --yes --zabbly
+    run_incus_installer "$state_root" "$storage_path" --yes --zabbly
     id -nG | tr ' ' '\n' | grep -qx incus-admin || reexec_with_incus_group "$resume_mode"
     return
   fi
 	[ -z "$install_marker" ] || printf '%s\n' "$MARKER" > "$install_marker"
 	printf '  [ .. ] VM%s: initializing the Incus owner API\n' "$SUBYARD_E2E_VM"
-	run_incus_installer "$state_root" --yes --zabbly
+	run_incus_installer "$state_root" "$storage_path" --yes --zabbly
 	id -nG | tr ' ' '\n' | grep -qx incus-admin || reexec_with_incus_group "$resume_mode"
 }
 
 ensure_owner_incus() {
   local resume_mode="${1:-owner}"
   p0_capacity_prepare_platform_root
-  ensure_incus "$P0_CAPACITY_PLATFORM_ROOT/incus" '' "$resume_mode"
+  # Storage ancestors may belong to root; bootstrap state belongs to the operator.
+  ensure_incus "$P0_CAPACITY_PLATFORM_ROOT" '' "$resume_mode" \
+    "$P0_CAPACITY_PLATFORM_ROOT/incus/incus/storage"
   reconcile_p0_incus_apparmor_compat
 }
 ensure_peer_incus() {

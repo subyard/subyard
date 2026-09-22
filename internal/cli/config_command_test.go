@@ -1753,6 +1753,7 @@ func TestConfigSyncRemoteRoutingIgnoresLocalRecoveryJournal(t *testing.T) {
 			fakeBin := filepath.Join(home, "fake-bin")
 			logPath := filepath.Join(home, "ssh-arguments")
 			writeConfigCommandFile(t, filepath.Join(fakeBin, "ssh"), `#!/bin/sh
+`+trustedSSHMock(t)+`
 printf '%s\n' "$@" >"$SUBYARD_TEST_SSH_LOG"
 `, 0o700)
 			t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
@@ -2222,6 +2223,7 @@ func TestConfigSourceConnectRejectsEmbeddedCredentialsAndRemoteForwards(t *testi
 	fakeBin := filepath.Join(home, "fake-bin")
 	logPath := filepath.Join(home, "ssh-arguments")
 	writeConfigCommandFile(t, filepath.Join(fakeBin, "ssh"), `#!/bin/sh
+`+trustedSSHMock(t)+`
 printf '%s\n' "$@" >"$SUBYARD_TEST_SSH_LOG"
 `, 0o700)
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))

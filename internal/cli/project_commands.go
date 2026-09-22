@@ -1147,9 +1147,12 @@ func (cli *CLI) remoteProjectStateCall(
 	}
 	line := "SUBYARD_OPERATION_ID=" + shellquote.Word(cli.env["SUBYARD_OPERATION_ID"]) +
 		" " + strings.Join(parts, " ")
-	command := exec.CommandContext(
-		ctx, "ssh", "-T", yard.OwnerEndpoint, "--", "bash", "-lc", shellquote.Word(line),
-	)
+	sshArguments, err := cli.sshArguments(ctx, yard.OwnerEndpoint,
+		[]string{"-T", yard.OwnerEndpoint, "--", "bash", "-lc", shellquote.Word(line)})
+	if err != nil {
+		return nil, err
+	}
+	command := exec.CommandContext(ctx, "ssh", sshArguments...)
 	command.Dir = cli.options.WorkingDir
 	command.Env = environmentList(cli.env, nil)
 	command.Stderr = cli.options.Stderr

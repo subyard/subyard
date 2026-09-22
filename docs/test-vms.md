@@ -150,6 +150,18 @@ dev/agent-e2e.sh --slot "$slot" --purpose real-host-check --vm 1 -- \
 The runner filters private and ignored files, verifies the worktree bundle and removes its guest
 worktree. Every lease-taking invocation prints `yard + project + run + purpose` for attribution.
 
+For first SSH trust and continuation of ordinary remote commands, run the focused fixture on a
+free slot:
+
+```sh
+dev/agent-e2e.sh --slot "$slot" --purpose ssh-unknown-host --vm 1 -- \
+  bash tests/real-host/ssh-unknown-host.sh
+```
+
+It initializes a disposable yard, uses an isolated owner SSH server and controller trust store,
+removes only its test yard's key, and checks confirmation and continuation of `sync`. It never
+edits the operator's SSH trust. This focused check does not replace the full P0 gate.
+
 The default pool has slots 1 and 2, but callers must use the configured capacity reported by status.
 The live lease acceptance always exercises one exact slot and, when a second exists, adds concurrent
 cross-slot isolation. Additional slots remain unselected and must retain the same state, lease epoch

@@ -27,6 +27,8 @@ cleanup() {
 }
 trap cleanup EXIT
 fail() { printf 'ssh-credential-peer: %s\n' "$*" >&2; exit 1; }
+# shellcheck source=tests/helpers/loopback-sshd.sh
+. "$ROOT/tests/helpers/loopback-sshd.sh"
 
 local_root="$TMP/local"
 remote_root="$TMP/remote"
@@ -94,14 +96,8 @@ AllowUsers $user
 LogLevel VERBOSE
 EOF
 "$SSHD" -t -f "$TMP/sshd_config"
-"$SSHD" -D -e -f "$TMP/sshd_config" > "$TMP/sshd.log" 2>&1 &
-sshd_pid=$!
-for _ in $(seq 1 50); do
-  kill -0 "$sshd_pid" 2>/dev/null || { sed -n '1,80p' "$TMP/sshd.log" >&2; fail 'ephemeral sshd exited'; }
-  if ssh-keyscan -T 1 -p "$port" 127.0.0.1 > "$TMP/known_hosts" 2>/dev/null; then break; fi
-  sleep 0.1
-done
-[ -s "$TMP/known_hosts" ] || fail 'ephemeral sshd did not become ready'
+start_loopback_sshd "$TMP" "$SSHD" "$port" \
+  || fail 'ephemeral sshd did not become ready'
 
 cat > "$TMP/ssh_config" <<EOF
 Host peer-two

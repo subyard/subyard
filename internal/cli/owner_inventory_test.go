@@ -255,7 +255,7 @@ func TestReadOnlyProjectListHonorsFreshCacheAndLiveForce(t *testing.T) {
 			}
 			encodedResponse := base64.StdEncoding.EncodeToString(response.Bytes())
 			writeCLIFile(t, filepath.Join(bin, "ssh"),
-				"#!/bin/sh\nprintf x >> \"$SUBYARD_TEST_SSH_LOG\"\nprintf '%s' '"+encodedResponse+"' | /usr/bin/base64 -d\n",
+				"#!/bin/sh\n"+trustedSSHMock(t)+"printf x >> \"$SUBYARD_TEST_SSH_LOG\"\nprintf '%s' '"+encodedResponse+"' | /usr/bin/base64 -d\n",
 				0o700,
 			)
 			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))

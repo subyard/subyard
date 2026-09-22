@@ -205,6 +205,15 @@ One-minor legacy discovery may retain an explicitly stale, untrusted inventory s
 listing. A later confirmed `yard host add` of the same endpoint and authoritative HostID upgrades that
 snapshot atomically to managed SSH trust; it does not require deletion or manual state repair.
 
+Ordinary CLI SSH calls share an invocation-scoped gate in `internal/sshtrust`. Transports identify
+their SSH target before handing off command arguments or stdin. The gate resolves OpenSSH config,
+preserves each host-key namespace, and reuses registered owner pins. Missing keys are negotiated in
+a private temporary file with authentication disabled, then verified through a trusted owner for
+registered yard routes. The typed `ssh.trust` action requires consent before persistent trust is
+added; login and exact-key verification must pass again afterward. Existing keys use strict checking
+and cannot enter first trust or bypass explicit repair. Network deadlines start after this prerequisite,
+so reviewing a fingerprint does not exhaust a status or inventory request's network timeout.
+
 Structured system adapters are selected from the validated command manifest and receive only declared
 non-secret context keys. Metadata uses a dedicated file descriptor and protected input uses stdin.
 Leaf commands report diagnostics normally; the runner converts their exit status into a typed result.

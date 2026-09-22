@@ -20,6 +20,7 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ownerinventory"
 	"github.com/Subyard/Subyard/internal/shellquote"
+	"github.com/Subyard/Subyard/internal/sshtrust"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -204,6 +205,11 @@ func (runtime Runtime) applyAdd(ctx context.Context, prepared domain.RemotePrepa
 	if _, err := runtime.ownerCall(ctx, prepared.Spec, publicKey, "_authorize"); err != nil {
 		return domain.RemoteResult{}, fmt.Errorf("authorize controller key: %w", err)
 	}
+	unlock, err := sshtrust.LockKnownHosts(ctx, runtime.knownHostsPath())
+	if err != nil {
+		return domain.RemoteResult{}, err
+	}
+	defer unlock()
 	envPath := filepath.Join(runtime.ConfigHome, "yards", prepared.Spec.LegacyAlias, "config.env")
 	if prepared.Existing != nil {
 		envPath = prepared.Existing.Path
@@ -247,7 +253,12 @@ func (runtime Runtime) applyRepair(ctx context.Context, prepared domain.RemotePr
 		return domain.RemoteResult{}, err
 	}
 	known := runtime.knownHostsPath()
-	err := transactional([]string{known}, func() error {
+	unlock, err := sshtrust.LockKnownHosts(ctx, known)
+	if err != nil {
+		return domain.RemoteResult{}, err
+	}
+	defer unlock()
+	err = transactional([]string{known}, func() error {
 		payload, err := readOptional(known)
 		if err != nil {
 			return err
@@ -268,7 +279,12 @@ func (runtime Runtime) applyRemove(ctx context.Context, prepared domain.RemotePr
 		return domain.RemoteResult{}, err
 	}
 	envPath, snippet, sshConfig, known, cache := prepared.Existing.Path, runtime.snippetPath(prepared.Spec.LegacyAlias), runtime.sshConfigPath(), runtime.knownHostsPath(), runtime.cachePath(prepared.Spec.LegacyAlias)
-	err := transactional([]string{envPath, snippet, sshConfig, known, cache}, func() error {
+	unlock, err := sshtrust.LockKnownHosts(ctx, known)
+	if err != nil {
+		return domain.RemoteResult{}, err
+	}
+	defer unlock()
+	err = transactional([]string{envPath, snippet, sshConfig, known, cache}, func() error {
 		configData, err := readOptional(sshConfig)
 		if err != nil {
 			return err
@@ -341,6 +357,11 @@ func (runtime Runtime) hostCall(ctx context.Context, destination string, stdin [
 		return nil, fmt.Errorf("invalid SSH target %q", destination)
 	}
 	command := []string{"-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=" + strconv.Itoa(runtime.timeoutSeconds()), destination, "--"}
+	options, err := transport.SSHOptions(ctx, runtime.SSH, destination)
+	if err != nil {
+		return nil, err
+	}
+	command = append(options, command...)
 	return runtime.call(ctx, append(command, arguments...), stdin)
 }
 

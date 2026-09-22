@@ -98,8 +98,15 @@ OWNER_ENDPOINT=owner.test
 OWNER_YARD_NAME=inner
 ENV
 export SSH_LOG="$tmp/ssh.log"
+export SSH_KNOWN_HOSTS="$tmp/known_hosts"
+printf '%s\n' 'owner.test ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA fixture' \
+  > "$SSH_KNOWN_HOSTS"
 cat > "$tmp/bin/ssh" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = -G ]; then
+  printf 'hostname owner.test\nport 22\nuserknownhostsfile %s\n' "$SSH_KNOWN_HOSTS"
+  exit 0
+fi
 printf '%s\0' "$@" > "$SSH_LOG"
 SH
 chmod +x "$tmp/bin/ssh"

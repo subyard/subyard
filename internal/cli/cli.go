@@ -490,6 +490,9 @@ func (cli *CLI) Run(ctx context.Context) int {
 		}
 	}
 	configSyncHome := ""
+	trust := cli.sshTrust(ownerDataHome, yes || cli.env["ASSUME_YES"] == "1" || sshTrustConsent(commandArguments))
+	defer trust.Close()
+	ctx = transport.WithSSHTrust(ctx, trust.Options)
 	configSyncPending := false
 	if core && definition.Handler == "@config" {
 		if configSync {
@@ -3292,6 +3295,8 @@ Remote yards:
   (code/sync/export/clone/remove) go straight into the yard. 'bind' is host-local and
   disabled for remote yards. 'remote add' never copies secrets; only a separate confirmed
   'keys trust' permits authorized encrypted ledger records to sync between owner hosts.
+  If an SSH server key is unknown, review its target and fingerprint to trust it and continue
+  the command. Non-terminal input requires --yes or ASSUME_YES=1; key verification still applies.
   A real in-yard host-key change stays blocked. Verify its fingerprint on the trusted owner
   host, then use 'remote repair-key <name>' for an explicit, context-scoped rotation.
   Subcommands:  remote add <name> <user@host> [--yard <remote-yard>] | remote repair-key <name> | remote remove <name> | remote list
@@ -3409,7 +3414,12 @@ func (cli *CLI) forwardRemote(ctx context.Context, yardContext domain.Context, n
 		hint := "yard -Y " + cli.env["SUBYARD_YARD"] + " init"
 		remoteLine = "SUBYARD_USAGE_REPAIR_HINT=" + shellquote.Word(hint) + " " + remoteLine
 	}
-	return cli.runExternal(ctx, "ssh", []string{"-t", yardContext.OwnerEndpoint, "--", "bash", "-lc", shellquote.Word(remoteLine)})
+	sshArguments, err := cli.sshArguments(ctx, yardContext.OwnerEndpoint, []string{"-t", yardContext.OwnerEndpoint, "--", "bash", "-lc", shellquote.Word(remoteLine)})
+	if err != nil {
+		cli.errorf("SSH trust: %v", err)
+		return 1
+	}
+	return cli.runExternal(ctx, "ssh", sshArguments)
 }
 
 func (cli *CLI) runExternal(ctx context.Context, program string, arguments []string) int {

@@ -178,11 +178,13 @@
       "go:rpc",
       "go:sshidentity",
       "go:sshrelay",
+      "go:sshtrust",
       "shell:remote-projects",
       "shell:ssh-config",
       "shell:ssh-transport-identity",
       "shell:yard-remote",
       "e2e:ssh-rpc",
+      "e2e:ssh-unknown-host",
       "p0:peer",
       "p0:transport"
     ],
@@ -353,6 +355,13 @@
       "pattern": "^tests/real-host/ssh-credential-peer\\.sh$",
       "check_sets": ["real-ssh-credential-contract"],
       "risk_domains": []
+    },
+    {
+      "id": "real-ssh-unknown-host-test",
+      "priority": 1001,
+      "pattern": "^tests/real-host/ssh-unknown-host\\.sh$",
+      "check_sets": ["ssh-transport"],
+      "risk_domains": ["ssh-remote-transport"]
     },
     {
       "id": "real-ssh-rpc-contract-test",
@@ -539,7 +548,7 @@
     {
       "id": "internal-transport",
       "priority": 770,
-      "pattern": "^internal/adapters/transport/.*$",
+      "pattern": "^(internal/adapters/transport|internal/sshtrust)/.*$",
       "check_sets": ["ssh-transport"],
       "risk_domains": ["ssh-remote-transport"]
     },

@@ -149,9 +149,8 @@ func (cli *CLI) remoteYardStatus(ctx context.Context, yard domain.Context) (doma
 	if err != nil {
 		return domain.YardStatus{}, err
 	}
-	callContext, cancel := context.WithTimeout(ctx, 8*time.Second)
-	defer cancel()
-	return (ownerinventory.Client{Transport: process}).YardStatus(callContext)
+	process.Timeout = 8 * time.Second
+	return (ownerinventory.Client{Transport: process}).YardStatus(ctx)
 }
 
 func (cli *CLI) remoteOwnerYardStatus(
@@ -177,9 +176,8 @@ func (cli *CLI) remoteOwnerYardStatus(
 	if err != nil {
 		return domain.YardStatus{}, "", err
 	}
-	callContext, cancel := context.WithTimeout(ctx, 8*time.Second)
-	defer cancel()
-	status, err := (ownerinventory.Client{Transport: process}).YardStatus(callContext)
+	process.Timeout = 8 * time.Second
+	status, err := (ownerinventory.Client{Transport: process}).YardStatus(ctx)
 	return status, destination, err
 }
 
@@ -324,8 +322,9 @@ func (cli *CLI) allOwnerInventories(
 	})
 	remoteResults := make([]ownerInventoryResult, len(requests))
 	var wait sync.WaitGroup
-	common, cancel := context.WithTimeout(ctx, 8*time.Second)
-	defer cancel()
+	// Each network call is bounded after its SSH trust gate. Human fingerprint
+	// review must not consume the inventory transport's deadline.
+	common := ctx
 	for index, request := range requests {
 		wait.Add(1)
 		go func(index int, request remoteRequest) {
@@ -342,6 +341,7 @@ func (cli *CLI) allOwnerInventories(
 					remoteResults[index].err = clientErr
 					return
 				}
+				process.Timeout = 8 * time.Second
 				client := ownerinventory.Client{Transport: process}
 				read := (ownerinventory.LegacyService{
 					Store: connectionStore, Clock: cli.options.Clock,
@@ -441,8 +441,7 @@ func (cli *CLI) allOwnerInventoriesReadOnly(
 	})
 	cache := ownerinventory.Cache{Root: root}
 	remote := make([]ownerInventoryResult, len(connections))
-	common, cancel := context.WithTimeout(ctx, 8*time.Second)
-	defer cancel()
+	common := ctx
 	var wait sync.WaitGroup
 	for index, connection := range connections {
 		wait.Add(1)
@@ -456,6 +455,7 @@ func (cli *CLI) allOwnerInventoriesReadOnly(
 					remote[index].err = transportErr
 					return
 				}
+				process.Timeout = 8 * time.Second
 				inventory, fetchErr := (ownerinventory.Client{Transport: process}).Fetch(common, "")
 				if fetchErr != nil {
 					remote[index].err = fetchErr
@@ -474,6 +474,7 @@ func (cli *CLI) allOwnerInventoriesReadOnly(
 			}
 			process, transportErr := transport.SSH("ssh", connection.Destination, 3*time.Second)
 			if transportErr == nil {
+				process.Timeout = 8 * time.Second
 				inventory, fetchErr := (ownerinventory.Client{Transport: process}).Fetch(common, connection.HostID)
 				if fetchErr == nil {
 					remote[index] = ownerInventoryResult{inventory: inventory, fetchedAt: now}

@@ -65,17 +65,19 @@ sha_bad_archive="$(sha256sum "$releases/rust-v8.8.8/codex-x86_64-unknown-linux-m
 cat > "$fake_bin/curl" <<'CURL'
 #!/usr/bin/env bash
 set -euo pipefail
-out='' url=''
+out='' url='' retries=''
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --output|-o) out="$2"; shift 2 ;;
     --output=*) out="${1#*=}"; shift ;;
-    --header|-H|--proto|--proto-redir|--connect-timeout|--max-time|--retry) shift 2 ;;
+    --retry) retries="$2"; shift 2 ;;
+    --header|-H|--proto|--proto-redir|--connect-timeout|--max-time) shift 2 ;;
     --*) shift ;;
     *) url="$1"; shift ;;
   esac
 done
 [ -n "$out" ] && [ -n "$url" ]
+[ "$retries" = 3 ]
 printf '%s\n' "$url" >> "$CODEX_TEST_CURL_LOG"
 case "$url" in
   https://api.github.com/repos/openai/codex/releases/latest)

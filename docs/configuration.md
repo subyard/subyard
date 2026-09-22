@@ -248,6 +248,20 @@ adapter for installations that still have per-yard contexts.
 Legacy discovery snapshots remain untrusted. Confirmed `yard host add` upgrades an exact
 same-endpoint, same-HostID snapshot atomically to managed SSH trust.
 
+Ordinary remote commands also handle a missing SSH server key. Before sending the command,
+Subyard shows the SSH target, key algorithm, SHA256 fingerprint and exact `known_hosts` namespace
+and file. Missing keys along a ProxyJump route are reviewed together in one confirmation. For a
+registered remote yard it checks the key against a scan through the owner using its existing or
+proposed pin. Confirming first trust verifies the connection, saves only the reviewed keys and
+continues the same invocation. Existing entries are preserved. Trust confirmation is a connection prerequisite;
+it does not authorize a subsequent destructive command.
+
+Declining, EOF or non-terminal input without `--yes`/`ASSUME_YES=1` leaves trust unchanged.
+Automation consent still requires key verification and a successful login. Known keys need no
+additional prompt. Changed keys remain blocked: use `yard host repair <HostID>` for a registered
+owner or `yard remote repair-key <name>` for a compatibility yard route after verifying the change.
+An authentication failure or an unreachable server does not trigger first trust.
+
 ## Entity and migration vocabulary
 
 Subyard uses `OwnerHost → Yard → Project → optional ProjectEnv`. A yard is identified as

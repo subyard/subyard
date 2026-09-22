@@ -5,6 +5,10 @@ import "github.com/Subyard/Subyard/internal/domain"
 func NewCoreActionRegistry() (*domain.ActionRegistry, error) {
 	definitions := []domain.ActionDefinition{
 		{
+			Action: "ssh.trust", Summary: "Trust an unknown SSH server key", Effect: domain.ActionMutation,
+			Impacts: []domain.ActionImpact{domain.ImpactTrust}, Recovery: domain.RecoveryReversible,
+		},
+		{
 			Action: "ssh-agent.status", Summary: "Inspect temporary SSH-key access", Effect: domain.ActionRead,
 			Recovery: domain.RecoveryNotNeeded,
 		},

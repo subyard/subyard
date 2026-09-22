@@ -911,6 +911,65 @@ owner_capacity_reclaim_source="$(awk '
 ' "$ROOT/dev/e2e/p0-guest.sh")"
 ! grep -Fq '"$ROOT/.build/p0-owner-release"' <<<"$owner_capacity_reclaim_source" \
   || fail 'P0 owner capacity reclaim deletes a release artifact used by later updates'
+p0_incus_fixture="$TMP/p0-incus-bootstrap"
+p0_incus_root="$p0_incus_fixture/platform"
+p0_incus_backend="$p0_incus_root/incus"
+p0_incus_storage="$p0_incus_backend/incus/storage"
+p0_incus_log="$p0_incus_fixture/installer.log"
+p0_incus_source_root="$ROOT"
+mkdir -p "$p0_incus_fixture/root/tests/helpers" "$p0_incus_fixture/root/scripts" \
+  "$p0_incus_fixture/root/config" "$p0_incus_storage"
+cp "$ROOT/tests/helpers/test-context.sh" "$p0_incus_fixture/root/tests/helpers/"
+: > "$p0_incus_fixture/root/config/host.env"
+cat > "$p0_incus_fixture/root/scripts/01-install-incus.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$SUBYARD_HOME" = "$EXPECTED_SUBYARD_HOME" ]
+[ "$STORAGE_PATH" = "$EXPECTED_STORAGE_PATH" ]
+printf '%s\t%s\t%s\t%s\n' \
+  "$SUBYARD_HOME" "$STORAGE_PATH" "$HOST_BASE" "$*" >> "$P0_INCUS_FIXTURE_LOG"
+EOF
+chmod 0755 "$p0_incus_fixture/root/scripts/01-install-incus.sh"
+chmod 0500 "$p0_incus_backend"
+(
+  ROOT="$p0_incus_fixture/root"
+  export ROOT P0_INCUS_FIXTURE_LOG="$p0_incus_log"
+  export EXPECTED_SUBYARD_HOME="$p0_incus_root"
+  export EXPECTED_STORAGE_PATH="$p0_incus_storage"
+  eval "$(sed -n '/^run_incus_installer() {/,/^}/p' \
+    "$p0_incus_source_root/dev/e2e/p0-guest.sh")"
+  run_incus_installer "$p0_incus_root" "$p0_incus_storage" --yes --zabbly
+) || fail 'P0 owner Incus bootstrap still writes below its storage backend'
+(
+  ROOT="$p0_incus_fixture/root"
+  P0_CAPACITY_PLATFORM_ROOT="$p0_incus_root"
+  TOKEN=441
+  export ROOT P0_CAPACITY_PLATFORM_ROOT TOKEN P0_INCUS_FIXTURE_LOG="$p0_incus_log"
+  export EXPECTED_SUBYARD_HOME="$p0_incus_root"
+  export EXPECTED_STORAGE_PATH="$p0_incus_storage"
+  p0_capacity_prepare_platform_root() { :; }
+  eval "$(sed -n '/^run_incus_installer() {/,/^}/p' \
+    "$p0_incus_source_root/dev/e2e/p0-source-upgrade.sh")"
+  run_incus_installer --yes --zabbly
+) || fail 'P0 source-upgrade Incus bootstrap still writes below its storage backend'
+owner_incus_call="$TMP/p0-owner-incus-call"
+(
+  P0_CAPACITY_PLATFORM_ROOT="$p0_incus_root"
+  p0_capacity_prepare_platform_root() { :; }
+  ensure_incus() { printf '%s\n' "$*" > "$owner_incus_call"; }
+  reconcile_p0_incus_apparmor_compat() { :; }
+  eval "$(sed -n '/^ensure_owner_incus() {/,/^}/p' "$ROOT/dev/e2e/p0-guest.sh")"
+  ensure_owner_incus owner
+) || fail 'P0 owner Incus bootstrap path selection failed'
+[ "$(stat -c %a "$p0_incus_backend")" = 500 ] \
+  && [ "$(cat "$owner_incus_call")" = \
+    "$p0_incus_root  owner $p0_incus_storage" ] \
+  && [ "$(cat "$p0_incus_log")" = "$(printf '%s\t%s\t%s\t%s\n' \
+    "$p0_incus_root" "$p0_incus_storage" "$p0_incus_root/host-data" '--yes --zabbly' \
+    "$p0_incus_root" "$p0_incus_storage" \
+    "$p0_incus_root/p0-source-host-data-441" '--yes --zabbly')" ] \
+  || fail 'P0 Incus bootstrap changed backend ownership/mode or lost storage separation'
+chmod 0700 "$p0_incus_backend"
 grep -Fq 'WAIT_SECONDS="${SUBYARD_P0_WAIT_SECONDS:-0}"' \
   "$ROOT/dev/e2e/p0-acceptance.sh" \
   || fail 'P0 acceptance cannot wait atomically for shared broker capacity'
@@ -3431,6 +3490,44 @@ for invalid_deadline_count in missing duplicate mixed; do
       <<<"$source_deadline_failure" \
     || fail "P0 source-upgrade accepted a $invalid_deadline_count deadline fixture"
 done
+source_broker_wait="$(sed -n '/^wait_for_test_vm_broker() {/,/^}/p' \
+  "$ROOT/dev/e2e/p0-source-upgrade.sh")"
+(
+  eval "$source_broker_wait"
+  OPERATOR_HOME=/fixture/operator
+  INSTANCE=yard-test-yard PROJECT=subyard-test-yard
+  broker_hash="$(printf '%064d' 1)"
+  broker_polls="$TMP/source-broker-polls"
+  broker_ready_after=3
+  operator_env() {
+    [ "$*" = "sha256sum $OPERATOR_HOME/.subyard/runtime/current/bin/yard-engine" ] || return 2
+    printf '%s  yard-engine\n' "$broker_hash"
+  }
+  incus() {
+    [ "$*" = "exec $INSTANCE --project $PROJECT -- env WANT_ENABLED=1 WANT_ENGINE_HASH=$broker_hash /usr/local/libexec/subyard/test-vms-inner _test-vms-worker doctor" ] || return 2
+    local poll
+    poll=$(( $(cat "$broker_polls") + 1 ))
+    printf '%s\n' "$poll" > "$broker_polls"
+    [ "$poll" -lt "$broker_ready_after" ] || return 0
+    printf 'inner Incus is inactive\n' >&2
+    return 1
+  }
+  sleep() { [ "$1" = 1 ]; }
+  printf '0\n' > "$broker_polls"
+  wait_for_test_vm_broker || fail 'source fixture did not wait for broker readiness'
+  [ "$(cat "$broker_polls")" = 3 ] || fail 'source fixture kept polling a ready broker'
+  broker_ready_after=100
+  printf '0\n' > "$broker_polls"
+  if wait_for_test_vm_broker > "$TMP/source-broker-failure" 2>&1; then
+    fail 'source fixture accepted a broker that never became ready'
+  fi
+  [ "$(cat "$broker_polls")" = 60 ] \
+    && grep -Fxq 'inner Incus is inactive' "$TMP/source-broker-failure" \
+    || fail 'source fixture lost its readiness bound or doctor diagnostic'
+) || fail 'source fixture broker readiness regression'
+source_finish="$(sed -n '/^finish() {/,/^}/p' "$ROOT/dev/e2e/p0-source-upgrade.sh")"
+[[ "$source_finish" == *'operator_yard -Y "$YARD_NAME" start --yes'*'wait_for_test_vm_broker'*'# current-release migration fixture'* ]] \
+  || fail 'source fixture must establish broker readiness before seeding config drift'
 source_normalizer_function="$(sed -n '/^assert_direct_normalizer_is_pure() {/,/^}/p' \
   "$ROOT/dev/e2e/p0-source-upgrade.sh")"
 run_source_normalizer_contract() (

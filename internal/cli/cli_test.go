@@ -482,3 +482,17 @@ func writeCLIFile(t *testing.T, path, contents string, mode os.FileMode) {
 		t.Fatal(err)
 	}
 }
+
+func trustedSSHMock(t *testing.T) string {
+	t.Helper()
+	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
+	writeCLIFile(t, knownHosts,
+		"owner.example,remote.example,127.0.0.1,yard-legacy-route ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA fixture\n",
+		0o600)
+	return strings.ReplaceAll(`if [ "${1-}" = "-G" ]; then
+  target=${2##*@}
+  printf 'hostname %s\nport 22\nuserknownhostsfile %s\n' "$target" '__KNOWN_HOSTS__'
+  exit 0
+fi
+`, "__KNOWN_HOSTS__", knownHosts)
+}

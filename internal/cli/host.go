@@ -279,10 +279,8 @@ func (cli *CLI) runRegisteredHost(
 	if cli.options.Clock != nil {
 		fetchedAt = cli.options.Clock.Now().UTC()
 	}
-	callContext, cancel := context.WithTimeout(ctx, 8*time.Second)
-	defer cancel()
 	fresh, refreshErr := ownerinventory.RefreshConnection(
-		callContext, trustedClient, store, connection, fetchedAt,
+		ctx, trustedClient, store, connection, fetchedAt,
 	)
 	if refreshErr != nil {
 		cli.errorf("refresh OwnerHost %q before removal: %v", hostID, refreshErr)

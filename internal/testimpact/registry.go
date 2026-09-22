@@ -48,7 +48,7 @@ func BuiltInRegistry() (Registry, error) {
 	goPackages := []string{
 		"application", "audit", "cli", "command", "config", "configsync", "credential",
 		"domain", "migration", "ownerinventory", "ports", "releasetransition", "resource", "resourceendpoint", "rpc", "shellquote",
-		"sshidentity", "sshrelay", "state", "systemdunit", "testyardmigration", "yardnetwork",
+		"sshidentity", "sshrelay", "sshtrust", "state", "systemdunit", "testyardmigration", "yardnetwork",
 		"adapters/configmaterial", "adapters/credentialmeta", "adapters/credentialruntime", "adapters/hostruntime",
 		"adapters/incusclient", "adapters/networkruntime", "adapters/projectruntime", "adapters/reconcileruntime",
 		"adapters/releaseruntime", "adapters/remotecontrol", "adapters/securityruntime",
@@ -129,6 +129,11 @@ func BuiltInRegistry() (Registry, error) {
 		})
 	}
 
+	checks = append(checks, Check{
+		ID: "e2e:ssh-unknown-host", Tier: "T3",
+		Argv:          []string{"dev/agent-e2e.sh", "--purpose", "ssh-unknown-host", "--vm", "1", "--", "bash", "tests/real-host/ssh-unknown-host.sh"},
+		BudgetSeconds: 1800, Rationale: "first SSH trust and continued remote commands on an allocated VM",
+	})
 	preparedAdapterChecks := []string{
 		"adapter-contracts", "credential-tools", "ssh-credential-peer", "ssh-rpc",
 	}

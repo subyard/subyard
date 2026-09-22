@@ -707,6 +707,22 @@ wait_for_desired_yards() {
   return 1
 }
 
+wait_for_test_vm_broker() {
+  local engine_hash diagnostic='' _
+  engine_hash="$(operator_env sha256sum \
+    "$OPERATOR_HOME/.subyard/runtime/current/bin/yard-engine" | awk '{print $1}')" || return
+  for _ in $(seq 1 60); do
+    if diagnostic="$(incus exec "$INSTANCE" --project "$PROJECT" -- \
+      env WANT_ENABLED=1 WANT_ENGINE_HASH="$engine_hash" \
+      /usr/local/libexec/subyard/test-vms-inner _test-vms-worker doctor 2>&1)"; then
+      return 0
+    fi
+    sleep 1
+  done
+  printf '%s\n' "$diagnostic" >&2
+  return 1
+}
+
 install_power_retry_probe() {
   local dropin wrapper
   dropin="$(mktemp)"
@@ -777,14 +793,14 @@ run_incus_installer() {
   (
     # shellcheck source=tests/helpers/test-context.sh
     . "$ROOT/tests/helpers/test-context.sh"
-    setup_test_context "$P0_CAPACITY_PLATFORM_ROOT/incus/p0-source-bootstrap-$TOKEN"
+    setup_test_context "$P0_CAPACITY_PLATFORM_ROOT/p0-source-bootstrap-$TOKEN"
     export SUBYARD_USER
     SUBYARD_USER="$(id -un)"
     export SUBYARD_OPERATOR_HOME="$HOME"
     export SUBYARD_CONFIG_DIR="$ROOT/config"
     export SUBYARD_CONFIG_HOME="$HOME/.config/subyard"
-    export SUBYARD_HOME="$P0_CAPACITY_PLATFORM_ROOT/incus"
-    export STORAGE_PATH="$SUBYARD_HOME/incus/storage"
+    export SUBYARD_HOME="$P0_CAPACITY_PLATFORM_ROOT"
+    export STORAGE_PATH="$SUBYARD_HOME/incus/incus/storage"
     export HOST_BASE="$SUBYARD_HOME/p0-source-host-data-$TOKEN"
     export RESTRICTED_DISK_PATHS="$HOST_BASE"
     set -a
@@ -950,6 +966,9 @@ finish() {
   operator_yard check
   operator_yard -Y "$YARD_NAME" status >/dev/null
   operator_yard -Y "$YARD_NAME" check
+  # Yard start waits for its agent; inner Incus may still be starting. Establish
+  # broker readiness before binding a plan to the intentional config drift.
+  wait_for_test_vm_broker || die 'test VM broker did not become ready after yard start'
   # Starting the yard does not wait for every broker service. Establish the
   # release fixed point before injecting drift into its materialized config.
   for attempt in $(seq 1 60); do

@@ -428,6 +428,7 @@ func TestRemoteResourceCommandIsPreparedOnlyByOwner(t *testing.T) {
 	}
 	writeCLIFile(t, filepath.Join(fakeBin, "ssh"), `#!/bin/sh
 set -eu
+`+trustedSSHMock(t)+`
 root="$(cd "$(dirname "$0")/.." && pwd)"
 printf '%s\n' "$@" >"$root/remote-ssh.log"
 `, 0o700)

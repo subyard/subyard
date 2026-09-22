@@ -214,11 +214,14 @@ func TestRemoteKeysTransfersProtectedStdinOnlyAfterOwnerPlanConsent(t *testing.T
 			fakeBin := filepath.Join(home, "fake-bin")
 			writeConfigCommandFile(t, filepath.Join(fakeBin, "ssh"), `#!/bin/sh
 set -eu
-if [ "${1-}" = "-T" ]; then
+`+trustedSSHMock(t)+`
+for argument do
+  if [ "$argument" = "-T" ]; then
   cp /dev/stdin "$SUBYARD_TEST_RPC_REQUEST"
   cat "$SUBYARD_TEST_RPC_RESPONSE"
   exit 0
-fi
+  fi
+done
 printf '%s\n' "$*" >"$SUBYARD_TEST_EXECUTE_ARGS"
 cp /dev/stdin "$SUBYARD_TEST_PAYLOAD"
 `, 0o700)
