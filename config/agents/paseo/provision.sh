@@ -13,6 +13,15 @@ DEV_HOME="$(getent passwd "$DEV_USER" | cut -d: -f6)"
 
 die() { printf 'Paseo provision: %s\n' "$*" >&2; exit 1; }
 case "$DEV_USER" in ''|*[!A-Za-z0-9._-]*|-*|.|..) die "invalid developer user" ;; esac
+# A foreign or changed service must never be adopted by provisioning.
+ownership=/var/lib/subyard/paseo-ownership
+if [ -e /etc/systemd/system/paseo.service ] || [ -L /etc/systemd/system/paseo.service ]; then
+  [ -f "$ownership" ] && [ ! -L "$ownership" ] \
+    && [ "$(stat -c '%u:%g:%a' "$ownership")" = 0:0:600 ] \
+    && [ "$(head -n 1 "$ownership")" = "# subyard-paseo-ownership-v1" ] \
+    && sha256sum --status -c "$ownership" \
+    || die "Paseo service ownership is unknown or changed"
+fi
 case "$(dpkg --print-architecture)" in
   amd64) artifact_arch=amd64 ;;
   arm64) artifact_arch=arm64 ;;
@@ -222,5 +231,13 @@ if ! PASEO_DEV_USER="$DEV_USER" PASEO_DEV_HOME="$DEV_HOME" /usr/local/bin/paseo-
   die "readiness failed; previous runtime restored"
 fi
 
+# Evidence contains only identities and content digests, never pairing/auth state.
+install -d -m 0755 /var/lib/subyard
+receipt="$(mktemp /var/lib/subyard/.paseo-ownership.XXXXXX)"
+printf '%s\n' '# subyard-paseo-ownership-v1' >"$receipt"
+sha256sum /etc/systemd/system/paseo.service >>"$receipt"
+chmod 0600 "$receipt"
+chown root:root "$receipt"
+mv -f -- "$receipt" "$ownership"
 [ -z "$displaced_release" ] || rm -rf -- "$displaced_release"
 printf 'Paseo %s installed. Retrieve the pairing offer explicitly with paseo-pair.\n' "$PASEO_VERSION"

@@ -58,33 +58,34 @@ var Version = "0.1.0-dev"
 var operationCounter atomic.Uint64
 
 type Options struct {
-	RepositoryRoot  string
-	DispatcherPath  string
-	Program         string
-	Arguments       []string
-	Environment     []string
-	WorkingDir      string
-	Stdin           io.Reader
-	Stdout          io.Writer
-	Stderr          io.Writer
-	Incus           ports.Incus
-	NetworkPolicy   *yardnetwork.Service
-	Executor        ports.InstanceExecutor
-	ProjectData     ports.YardExecutor
-	ProjectDevices  ports.InstanceDeviceManager
-	ProjectArchive  ports.DirectoryArchiver
-	ProjectExports  ports.ProjectExportStore
-	ProjectVSCode   ports.VSCode
-	ProjectObserver ports.ProjectObserver
-	StatusFacts     ports.StatusFactsReader
-	Credentials     ports.CredentialMetadataReader
-	AdapterRunner   ports.AdapterRunner
-	InitPlatform    ports.InitPlatform
-	RemoteControl   ports.RemoteControl
-	Prompt          ports.Prompter
-	Config          ports.ConfigApplier
-	Clock           ports.Clock
-	Audit           ports.AuditSink
+	RepositoryRoot     string
+	DispatcherPath     string
+	Program            string
+	Arguments          []string
+	Environment        []string
+	WorkingDir         string
+	Stdin              io.Reader
+	Stdout             io.Writer
+	Stderr             io.Writer
+	Incus              ports.Incus
+	NetworkPolicy      *yardnetwork.Service
+	Executor           ports.InstanceExecutor
+	ProjectData        ports.YardExecutor
+	ProjectDevices     ports.InstanceDeviceManager
+	ProjectArchive     ports.DirectoryArchiver
+	ProjectExports     ports.ProjectExportStore
+	ProjectVSCode      ports.VSCode
+	ProjectObserver    ports.ProjectObserver
+	StatusFacts        ports.StatusFactsReader
+	Credentials        ports.CredentialMetadataReader
+	AdapterRunner      ports.AdapterRunner
+	InitPlatform       ports.InitPlatform
+	IntegrationRuntime func(config.Loaded) IntegrationRuntime
+	RemoteControl      ports.RemoteControl
+	Prompt             ports.Prompter
+	Config             ports.ConfigApplier
+	Clock              ports.Clock
+	Audit              ports.AuditSink
 }
 
 type CLI struct {
@@ -385,6 +386,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		resourceReadOnly ||
 		(core && definition.Handler == "@config" && (configReadOnlyInvocation(commandArguments) || configSyncCheck || configSyncStatus)) ||
 		(core && definition.Handler == "@test-vms" && testVMStatusInvocation(commandArguments)) ||
+		(core && definition.Handler == "@integration" && slices.Contains(commandArguments, "status")) ||
 		(core && definition.Handler == "@network" && len(commandArguments) > 0 && commandArguments[0] == "status") ||
 		(core && definition.Handler == "@update" && slices.Contains(commandArguments, "--check"))
 	if core && definition.Handler == "@ssh-agent" {
@@ -483,7 +485,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 			ownerDataHome = filepath.Join(operatorHome, ".subyard")
 		}
 	}
-	if ownerDataHome != "" && !readOnlyInvocation && !registrationRepair {
+	if ownerDataHome != "" && !readOnlyInvocation && !registrationRepair && !(core && definition.Handler == "@integration") {
 		if err := (ownerinventory.Connections{Root: filepath.Join(ownerDataHome, "owner-inventory")}).Recover(); err != nil {
 			cli.errorf("recover owner inventory transaction: %v", err)
 			return 1
@@ -539,7 +541,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		if baseErr != nil {
 			err = baseErr
 		} else {
-			readOnlyRoute := readOnlyInvocation || registrationRepair || (core && definition.Name == "remove")
+			readOnlyRoute := readOnlyInvocation || registrationRepair || (core && (definition.Name == "remove" || definition.Handler == "@integration"))
 			var results []ownerInventoryResult
 			if readOnlyRoute {
 				results = cli.allOwnerInventoriesReadOnly(ctx, base, false)
@@ -580,7 +582,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		cli.errorf("%v", err)
 		return 2
 	}
-	if !readOnlyInvocation && !registrationRepair {
+	if !readOnlyInvocation && !registrationRepair && !(core && definition.Handler == "@integration") {
 		if err := configsync.RecoverHostIDRename(loaded.Context.Paths.ConfigHome); err != nil {
 			cli.errorf("recover owner HostID rename: %v", err)
 			return 1
@@ -754,6 +756,9 @@ func (cli *CLI) Run(ctx context.Context) int {
 		return cli.runSSHAgent(ctx, loaded, definition, commandArguments)
 	case "@update":
 		return cli.runUpdate(ctx, loaded, definition, commandArguments)
+	case "@integration":
+		fmt.Fprintf(cli.options.Stdout, "Usage: %s integration enable|disable <id> | status [id] [--json]\n", cli.options.Program)
+		return 0
 	case "@config":
 		return cli.runConfig(ctx, loaded, commandArguments)
 	case "@status":
@@ -3014,6 +3019,7 @@ func structuredAdapterContext(yard domain.Context) map[string]string {
 }
 
 var structuredRuntimeRoleKeys = map[string]struct{}{
+	"INTEGRATION_HOST_LINKS":           {},
 	"SUBYARD_KEYS_CONSUMER_ROOT":       {},
 	"SUBYARD_KEYS_PROD_FINGERPRINTS":   {},
 	"SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE": {},
@@ -3557,7 +3563,7 @@ func (cli *CLI) serveRPC(ctx context.Context, yard string, arguments []string) i
 		"snapshot", "ordered-events", "cancellation", "deadlines", "commands", "context",
 		"projects", "yard-status", "credential-metadata", "credential-status",
 		"operation-plan", "operation-execute", "resync", "owner-inventory-v1",
-		credentialPrepareCapability,
+		credentialPrepareCapability, exactPlanCapability,
 	}, DrainOnEOF: true}
 	if err := session.Serve(ctx, cli.options.Stdin, cli.options.Stdout); err != nil {
 		if !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) {
@@ -3569,16 +3575,18 @@ func (cli *CLI) serveRPC(ctx context.Context, yard string, arguments []string) i
 }
 
 type rpcHandler struct {
-	cli     *CLI
-	loaded  config.Loaded
-	plansMu sync.Mutex
-	plans   map[string]*preparedCommand
+	cli        *CLI
+	loaded     config.Loaded
+	plansMu    sync.Mutex
+	plans      map[string]*preparedCommand
+	exactPlans map[string]exactOperationPlan
 }
 
 func (handler *rpcHandler) closePlans() {
 	handler.plansMu.Lock()
 	plans := handler.plans
 	handler.plans = nil
+	handler.exactPlans = nil
 	handler.plansMu.Unlock()
 	for _, prepared := range plans {
 		_ = prepared.Close()
@@ -3613,6 +3621,18 @@ func operationRPCError(fallback string, err error) *rpc.Error {
 
 func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.Emit) (any, error) {
 	switch call.Method {
+	case "integration.status":
+		var params struct {
+			ID        string `json:"id"`
+			OwnerOnly bool   `json:"ownerOnly,omitempty"`
+		}
+		if err := decodeRPCParams(call.Params, &params); err != nil {
+			return nil, err
+		}
+		if params.OwnerOnly && handler.loaded.Context.AccessKind == domain.AccessRemote {
+			return nil, &rpc.Error{Code: "remote_owner_required", Message: "integration status must resolve to the owner host"}
+		}
+		return handler.cli.rpcOperation(call.OperationID).queryIntegrationStatus(ctx, handler.loaded, params.ID)
 	case "command.list":
 		return handler.commands(), nil
 	case "context.get":
@@ -3655,6 +3675,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		var params struct {
 			Command   string   `json:"command"`
 			Arguments []string `json:"arguments"`
+			Exact     bool     `json:"exact,omitempty"`
 		}
 		if err := decodeRPCParams(call.Params, &params); err != nil {
 			return nil, err
@@ -3665,6 +3686,12 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		}
 		if definition.Effect != command.EffectMutate {
 			return nil, &rpc.Error{Code: "command_not_mutating", Message: params.Command}
+		}
+		if definition.Handler == "@integration" && !params.Exact {
+			return nil, &rpc.Error{Code: "exact_plan_required", Message: "integration requires operation-exact-plan-v1"}
+		}
+		if params.Exact && handler.loaded.Context.AccessKind == domain.AccessRemote {
+			return nil, &rpc.Error{Code: "remote_owner_required", Message: "request the exact plan on the owner host"}
 		}
 		behavior, err := resolveCoreCommand(definition)
 		if err != nil {
@@ -3696,7 +3723,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		}
 		prepared, err := operationCLI.prepareCommand(ctx, prepareCommandRequest{
 			Loaded: handler.loaded, Definition: definition, Arguments: params.Arguments,
-			ExplicitYard: true,
+			ExplicitYard: true, ReadOnly: params.Exact,
 		})
 		if err != nil {
 			return nil, preparationRPCError(definition, err)
@@ -3724,11 +3751,20 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		}
 		handler.plans[plan.OperationID] = prepared
 		keep = true
+		if params.Exact {
+			if handler.exactPlans == nil {
+				handler.exactPlans = make(map[string]exactOperationPlan)
+			}
+			exact := bindExactOperationPlan(prepared, time.Now())
+			handler.exactPlans[plan.OperationID] = exact
+			return exact, nil
+		}
 		return plan, nil
 
 	case "operation.execute":
 		var params struct {
-			Confirmed bool `json:"confirmed"`
+			Confirmed bool   `json:"confirmed"`
+			Digest    string `json:"digest,omitempty"`
 		}
 		if err := decodeRPCParams(call.Params, &params); err != nil {
 			return nil, err
@@ -3738,14 +3774,23 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		}
 		handler.plansMu.Lock()
 		planned, ok := handler.plans[call.OperationID]
+		exact, bound := handler.exactPlans[call.OperationID]
 		if ok {
 			delete(handler.plans, call.OperationID)
+			delete(handler.exactPlans, call.OperationID)
 		}
 		handler.plansMu.Unlock()
 		if !ok {
 			return nil, &rpc.Error{Code: "plan_not_found", Message: call.OperationID}
 		}
 		defer planned.Close()
+		if bound {
+			if err := validateExactOperationPlan(exact, planned, params.Digest, time.Now()); err != nil {
+				return nil, operationRPCError("plan_binding_invalid", err)
+			}
+		} else if params.Digest != "" || planned.Definition.Handler == "@integration" {
+			return nil, &rpc.Error{Code: "exact_plan_required", Message: "no exact plan is bound to this operation"}
+		}
 		if !releaseRecoveryCommand(planned.Definition) {
 			outcome, gateErr := planned.CLI.inspectMutationGate(
 				ctx, handler.loaded.Context.YardName,

@@ -322,7 +322,7 @@ func productionShellContracts() map[string]shellContract {
 	goReconcile := "internal/adapters/reconcileruntime/runtime.go"
 	goPrepared := "internal/cli/prepared_command.go"
 	return map[string]shellContract{
-		"scripts/lib/ai-observer-proxy.sh":      {"library", "scripts/04-provision-subyard.sh", `lib/ai-observer-proxy.sh`},
+		"scripts/lib/ai-observer-proxy.sh":      {"library", "scripts/reconcile-integrations.sh", `lib/ai-observer-proxy.sh`},
 		"config/agents/aiobserver/provision.sh": {"profile", "config/agents.env", `agents/aiobserver/provision.sh`},
 		"config/agents/ccusage/provision.sh":    {"profile", "config/agents.env", `agents/ccusage/provision.sh`},
 		"config/agents/codex/provision.sh":      {"profile", "config/agents.env", `agents/codex/provision.sh`},
@@ -332,6 +332,7 @@ func productionShellContracts() map[string]shellContract {
 		"scripts/02-create-project.sh":          {"leaf", goReconcile, `"02-create-project.sh"`},
 		"scripts/03-create-subyard.sh":          {"leaf", goReconcile, `"03-create-subyard.sh"`},
 		"scripts/04-provision-subyard.sh":       {"leaf", goReconcile, `"04-provision-subyard.sh"`},
+		"scripts/reconcile-integrations.sh":     {"leaf", "internal/adapters/reconcileruntime/integrations.go", `"reconcile-integrations.sh"`},
 		"scripts/05-mount-host-paths.sh":        {"leaf", goReconcile, `"05-mount-host-paths.sh"`},
 		"scripts/06-network.sh":                 {"leaf", goReconcile, `"06-network.sh"`},
 		"scripts/07-ssh-access.sh":              {"leaf", goReconcile, `"07-ssh-access.sh"`},
@@ -402,9 +403,10 @@ func productionLeafContracts() map[string]leafContract {
 		"scripts/install-test-vms-host-sink.sh": {
 			"reconcile", "ports.ReconcileStageTestVMs",
 		},
-		"scripts/e2e-lab/invoke.sh":    {"command", "test-vms"},
-		"scripts/lifecycle-guard.sh":   {"command", "lifecycle"},
-		"scripts/teardown-physical.sh": {"command", "teardown"},
+		"scripts/e2e-lab/invoke.sh":         {"command", "test-vms"},
+		"scripts/reconcile-integrations.sh": {"command", "integration"},
+		"scripts/lifecycle-guard.sh":        {"command", "lifecycle"},
+		"scripts/teardown-physical.sh":      {"command", "teardown"},
 	}
 }
 

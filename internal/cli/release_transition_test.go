@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -22,17 +23,21 @@ import (
 	"github.com/Subyard/Subyard/internal/testyardmigration"
 )
 
-func TestReleaseActivationIncludesInstalledOrcaRefresh(t *testing.T) {
+func TestReleaseActivationRefreshesOrcaBeforeMaterializedConfig(t *testing.T) {
 	program, err := New(Options{RepositoryRoot: repositoryRoot(t), Environment: []string{"HOME=" + t.TempDir()}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, reconciler := range program.nonConfigActivationReconcilers(releasetransition.ProcessRequest{}) {
-		if reconciler.ID() == "orca-runtime" {
-			return
-		}
+	reconcilers := program.activationReconcilers(releasetransition.ProcessRequest{})
+	orca := slices.IndexFunc(reconcilers, func(reconciler releasetransition.V2ActivationReconciler) bool {
+		return reconciler.ID() == "orca-runtime"
+	})
+	configs := slices.IndexFunc(reconcilers, func(reconciler releasetransition.V2ActivationReconciler) bool {
+		return reconciler.ID() == "materialized-config"
+	})
+	if orca < 0 || configs < 0 || orca >= configs {
+		t.Fatalf("release integration hooks can run before Orca refresh: orca=%d configs=%d", orca, configs)
 	}
-	t.Fatal("release activation does not refresh installed Orca handlers")
 }
 
 func TestOrcaActivationRepairsAllLocalInstalledContracts(t *testing.T) {
@@ -999,6 +1004,7 @@ esac
 
 func TestForwardMaterializedConfigResumeKeepsScopeAcrossLegacyRename(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
+	writeCLIFile(t, filepath.Join(root, "config", "projects-changed.sh"), "#!/bin/sh\nexit 0\n", 0755)
 	registry, err := os.ReadFile(filepath.Join("..", "..", "config", "release-transition.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -1397,6 +1403,61 @@ func TestReleaseTransitionMigrationUsesPinnedCandidateEngine(t *testing.T) {
 	}
 }
 
+func TestPowerActivationReloadsRegisteredYardSelection(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+	writeCLIFile(t, filepath.Join(root, "config/subyard.env"), strings.Join([]string{
+		"SHIFT_MODE=shift", "FORWARD_SSH_AGENT=0", "DEV_SUDO=0", "DEV_UID=1000", "DEV_USER=dev", "SSH_PORT=2222",
+		"STORAGE_PATH=" + filepath.Join(root, "data/storage"),
+		"HOST_BASE=" + filepath.Join(root, "host"),
+		"RESTRICTED_DISK_PATHS=" + filepath.Join(root, "host"),
+	}, "\n")+"\n", 0o600)
+	profile := filepath.Join(root, "config/yards/profiles/test-vms.env")
+	if err := os.MkdirAll(filepath.Dir(profile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, profile, "ALLOWS_CODING_TOOLS=false\nNESTED_E2E_VMS=1\n", 0o600)
+	writeCLIFile(t, filepath.Join(root, "config/agents.env"), "CODING_TOOL_INTEGRATIONS=codex\nAGENT_codex_COMMAND=codex\n", 0o600)
+	registration := filepath.Join(configHome, "yards", "test-yard", "config.env")
+	if err := os.MkdirAll(filepath.Dir(registration), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, registration, "YARD_TEMPLATE=test-vms\nSSH_PORT=2224\nCODING_TOOL_INTEGRATIONS=''\n", 0o600)
+	source, err := New(Options{RepositoryRoot: root, Environment: environment})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := source.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Integrations.Effective) == 0 {
+		t.Fatal("fixture must forward the default yard's non-empty integration selection")
+	}
+	// Release execution forwards the active CLI's resolved environment. Each
+	// registered yard must still use its own persistent settings in the candidate.
+	program, err := New(Options{RepositoryRoot: root, Environment: environmentList(loaded.Environment, nil)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciler := program.powerActivationReconciler(releasetransition.ProcessRequest{ConfigHome: configHome}).(*activationStageReconciler)
+	platform, err := reconciler.platform(context.Background(), activationApplicability{state: "installed", applies: true})
+	if err != nil {
+		t.Fatalf("candidate power observation inherited another yard's selection: %v", err)
+	}
+	runtime := platform.(reconcileruntime.Runtime)
+	if len(runtime.PowerYards) != 2 || runtime.PowerYards[1].YardName != "test-yard" || !runtime.PowerYards[1].NestedE2EVMs {
+		t.Fatalf("candidate did not preserve registered power contexts: %#v", runtime.PowerYards)
+	}
+	if program.baseEnv["CODING_TOOL_INTEGRATIONS"] != "codex" {
+		t.Fatal("candidate power observation mutated the caller's environment")
+	}
+	writeCLIFile(t, registration, "YARD_TEMPLATE=test-vms\nSSH_PORT=2224\nCODING_TOOL_INTEGRATIONS=codex\n", 0o600)
+	if _, err := reconciler.platform(context.Background(), activationApplicability{state: "installed", applies: true}); err == nil || !strings.Contains(err.Error(), "yard role forbids") || !strings.Contains(err.Error(), registration) {
+		t.Fatalf("candidate accepted forbidden persistent selection: %v", err)
+	}
+}
+
 func TestPowerActivationUsesPinnedCandidateEngine(t *testing.T) {
 	root := repositoryRoot(t)
 	home := t.TempDir()
@@ -1464,6 +1525,7 @@ func TestMaterializedConfigReconcileUsesTargetContextForRevalidation(t *testing.
 	var stdout, stderr bytes.Buffer
 	applier := &recordingConfigApplier{}
 	program, err := New(Options{
+		InitPlatform:   newInitPlatformFixture(),
 		RepositoryRoot: root,
 		Environment: []string{
 			"HOME=" + home,
@@ -1728,6 +1790,9 @@ func TestActivationStageReconcilerPreservesInapplicableRuntime(t *testing.T) {
 
 func TestCompletedMaterializedConfigReadinessDoesNotDependOnSelectedYard(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
+	writeCLIFile(t, filepath.Join(root, "config", "projects-changed.sh"), "#!/bin/sh\nexit 0\n", 0755)
+	// This fixture authors its selection in subyard.env below.
+	writeCLIFile(t, filepath.Join(root, "config", "agents.env"), "", 0600)
 	registry, err := os.ReadFile(filepath.Join("..", "..", "config", "release-transition.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -1815,6 +1880,7 @@ func TestCompletedMaterializedConfigReadinessDoesNotDependOnSelectedYard(t *test
 
 	fake := &testkit.Incus{Instances: make(map[string]ports.InstanceInfo)}
 	program, err := New(Options{
+		InitPlatform:   newInitPlatformFixture(),
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 		Incus: fake, Executor: fake, Stdout: io.Discard, Stderr: io.Discard,
 	})
@@ -1833,6 +1899,7 @@ func TestCompletedMaterializedConfigReadinessDoesNotDependOnSelectedYard(t *test
 		t.Fatal(err)
 	}
 	updateProgram, err := New(Options{
+		InitPlatform:   newInitPlatformFixture(),
 		RepositoryRoot: root, Program: "yard",
 		Environment: environmentList(defaultLoaded.Environment, nil), WorkingDir: root,
 		Incus: fake, Executor: fake, Stdout: io.Discard, Stderr: io.Discard,
@@ -1880,7 +1947,7 @@ func TestCompletedMaterializedConfigReadinessDoesNotDependOnSelectedYard(t *test
 	activeRelease := releasetransition.ReleasePair{From: "release-b", Target: "release-b"}
 	bootstrap := observe(updateProgram, "default", activeRelease)
 	nextCommand := observe(program, testyardmigration.CurrentYard, activeRelease)
-	if bootstrap != nextCommand || bootstrap.Converged {
+	if !reflect.DeepEqual(bootstrap, nextCommand) || bootstrap.Converged {
 		t.Fatalf("completed readiness depends on selected yard: bootstrap=%#v next=%#v",
 			bootstrap, nextCommand)
 	}
@@ -1916,6 +1983,7 @@ func TestCompletedMaterializedConfigReadinessDoesNotDependOnSelectedYard(t *test
 		"YARD_TEMPLATE=test-vms\nSSH_PORT=2223\n", 0o600)
 	freshFake := &testkit.Incus{Instances: make(map[string]ports.InstanceInfo)}
 	freshProgram, err := New(Options{
+		InitPlatform:   newInitPlatformFixture(),
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 		Incus: freshFake, Executor: freshFake, Stdout: io.Discard, Stderr: io.Discard,
 	})
@@ -2012,7 +2080,7 @@ func TestCompletedMaterializedConfigReadinessDoesNotDependOnSelectedYard(t *test
 	afterJournal, err := frozen.Observe(
 		context.Background(), activeRelease, releasetransition.ReleaseLinks{},
 	)
-	if err != nil || afterJournal != beforeJournal || !frozen.allLocal {
+	if err != nil || !reflect.DeepEqual(afterJournal, beforeJournal) || !frozen.allLocal {
 		t.Fatalf("same-release catch-up did not retain all-local scope: before=%#v after=%#v allLocal=%t err=%v",
 			beforeJournal, afterJournal, frozen.allLocal, err)
 	}
@@ -2065,6 +2133,8 @@ func TestReleaseTransitionConfigApplierUsesTrustedInProcessChild(t *testing.T) {
 
 func TestMaterializedConfigActivationUsesTrustedProcessChild(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
+	// This fixture authors its selection in subyard.env below.
+	writeCLIFile(t, filepath.Join(root, "config", "agents.env"), "", 0600)
 	source := filepath.Join(root, "repo.rules")
 	writeCLIFile(t, source, "allow_rule()\n", 0o600)
 	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join([]string{

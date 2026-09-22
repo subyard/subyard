@@ -66,7 +66,17 @@ func (cli *CLI) runPreparedCommand(ctx context.Context, prepared *preparedComman
 	}
 	assumeYes = assumeYes || slices.Contains(prepared.Arguments, "--yes") || slices.Contains(prepared.Arguments, "-y")
 	orchestrator := cli.operationOrchestrator(prepared.Plan.OperationID, prepared.Loaded, nil, &prepared.Definition)
-	plan, err := orchestrator.Confirm(ctx, prepared.Plan, assumeYes)
+	confirmationPlan := prepared.Plan
+	if prepared.ownerPlan {
+		// The owner resolved the action policy. Confirm its concrete policy here;
+		// do not resolve the remote assessment again against the controller registry.
+		if request := confirmationPlan.ConfirmationRequest; request != nil && request.Summary != "" {
+			confirmationPlan.Command = request.Summary
+		}
+		confirmationPlan.Assessment = nil
+		confirmationPlan.ConfirmationRequest = nil
+	}
+	plan, err := orchestrator.Confirm(ctx, confirmationPlan, assumeYes)
 	if err != nil {
 		switch {
 		case errors.Is(err, application.ErrDeclined):
@@ -93,7 +103,12 @@ func (cli *CLI) runPreparedCommand(ctx context.Context, prepared *preparedComman
 		}
 		return 1
 	}
-	prepared.Plan = plan
+	if prepared.ownerPlan {
+		prepared.Plan.Confirmed = plan.Confirmed
+		plan = prepared.Plan
+	} else {
+		prepared.Plan = plan
+	}
 	if plan.Target == domain.TargetRemoteOwner {
 		arguments := slices.Clone(prepared.Arguments)
 		if prepared.remoteArguments != nil {

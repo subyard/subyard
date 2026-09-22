@@ -366,3 +366,20 @@ func TestReadPersistentFileSnapshotRejectsForeignOwnershipWhenSupported(t *testi
 		t.Fatal("accepted foreign-owned file")
 	}
 }
+
+func TestSelectionAuthoringReplacesLegacyAlias(t *testing.T) {
+	value := "paseo"
+	for _, initial := range []string{"AGENTS=codex\n", "AGENTS=none\nCODING_TOOL_INTEGRATIONS=\n"} {
+		content, err := EditPersistentAssignmentContent("config.env", []byte("SSH_PORT=2222\n"+initial), "CODING_TOOL_INTEGRATIONS", &value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(content) != "SSH_PORT=2222\nCODING_TOOL_INTEGRATIONS='paseo'\n" {
+			t.Fatalf("canonical content = %s", content)
+		}
+		content, err = EditPersistentAssignmentContent("config.env", []byte(initial), "CODING_TOOL_INTEGRATIONS", nil)
+		if err != nil || len(content) != 0 {
+			t.Fatalf("unset legacy selection = %q, %v", content, err)
+		}
+	}
+}

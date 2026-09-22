@@ -31,7 +31,7 @@ configuration:
 | `config.env` | Host-wide scalar settings |
 | `overrides/shared/` | Explicitly shareable non-secret file settings |
 | `overrides/host/` | File settings specific to this owner host |
-| `yards/<name>/config.env` | Named-yard definition and scalar settings |
+| `yards/<name>/config.env` | Yard definition and scalar settings, including `default` |
 | `yards/<name>/overrides/` | File settings specific to one yard |
 | `secrets/` | Secret inputs, not settings |
 | `generated/` | Materialized consumers, not settings |
@@ -87,8 +87,8 @@ is the authoritative explanation of the actual chain, including derived values. 
 ## File settings
 
 Known file settings, such as coding-agent configuration and rules, start with a shipped file and may
-be replaced by the matching file under `overrides/shared`, `overrides/host`, or a named yard's
-`overrides` directory. Their precedence is shipped, shared, host, yard, then a command override.
+be replaced by the matching file under `overrides/shared`, `overrides/host`, or a yard's
+`overrides` directory (including `yards/default/overrides`). Their precedence is shipped, shared, host, yard, then a command override.
 
 These directories currently override known file settings only. They are not generic scalar
 configuration directories.
@@ -118,7 +118,8 @@ embedded in the release, so existing yards need no extra Python package for obse
 ownership contract. Read-only checks compare managed fields and their ownership baseline,
 so runtime additions do not trigger a release migration. The first application records a root-owned
 baseline under `/var/lib/subyard/config-materialization` inside the yard. It contains only asset
-identity, schema version, template digest and owned paths, never configuration values. A missing or
+identity, schema version, template digest, owned paths and a digest of the owned values, never
+configuration values. A missing or
 outdated baseline requires application even if the managed values already match.
 
 Subyard serializes its own writes per asset and atomically replaces the destination before updating
@@ -127,6 +128,86 @@ fails without overwriting it; diagnostics omit configuration contents. Running t
 Subyard's lock: application reads the current file and verifies its result, but cannot serialize
 arbitrary concurrent third-party writes. Invalid TOML, like invalid JSON, fails without overwriting
 the current document or printing its contents.
+
+## Per-yard coding tool selection
+
+```sh
+yard integration status --json
+yard -Y demo integration enable codex
+yard -Y demo integration disable codex
+yard -Y demo integration status codex
+```
+
+`CODING_TOOL_INTEGRATIONS` stores the complete requested set in the selected yard's
+`yards/<name>/config.env`. An empty assignment explicitly selects no integrations;
+an absent assignment remains distinguishable from empty. The compatibility input
+`AGENTS=none` means empty. Unknown IDs, duplicate IDs and dependency cycles are errors.
+Dependencies are computed separately: enabling Paseo also makes Codex effective;
+disabling Codex while Paseo still requests it is rejected. Status reports the requested
+set, effective set, dependency reasons, configuration source and observed yard readiness.
+An ID filters membership and dependency details; readiness describes the whole yard.
+
+The first owner-side initialization materializes the selection. A fresh default yard
+gets `claude codex opencode pi aiobserver`; a fresh named yard gets an explicit empty
+set. Existing yards retain their trustworthy requested configuration through bounded
+adoption of that selected yard. Subyard does not infer intent from installed binaries
+or change other yards during adoption. If previous intent cannot be established, set
+`CODING_TOOL_INTEGRATIONS` explicitly with `yard config set --scope yard` before init.
+The default yard uses the same scalar and file configuration layout as named yards.
+
+Enable and disable require an existing, running yard with its core substrate ready.
+A stopped or missing yard fails before confirmation or configuration changes. The
+command never starts the yard. A running-state and exact-plan recheck also prevents
+applying a plan after the yard has stopped. Remote changes are planned and executed
+on the authoritative owner over one RPC session; the controller confirms the owner's
+plan once. An older owner without the exact-plan capability must be upgraded first.
+
+A confirmed operation saves desired configuration with a compare-and-swap guard,
+then reconciles only the integration packages, configuration, links, hooks and owned
+services. Full init uses the same integration reconciler. Failed application keeps
+the requested set and returns an error; repeating the command repairs pending state.
+An unchanged selection is a no-op only when the runtime is also converged. A temporary
+selection override that conflicts with persistent configuration is rejected.
+
+Disable stops only proven-owned services and removes only unchanged owned wiring.
+Credentials, session history, session storage targets, explicit operator links,
+unmanaged binaries and user CLI sessions are preserved. JSON/TOML retirement removes
+owned fields while retaining the document and unrelated fields. Materialization baselines
+keep the v0.14.0 format for retained-runtime rollback; extra retirement evidence uses a
+protected companion record under the same lock. The root-owned
+inventory under `/var/lib/subyard/integrations` records artifact identity and digests;
+it is ownership evidence, not another desired-state store. Missing, legacy, corrupt
+or changed ownership evidence can block cleanup with a conflict instead of deleting
+unproven artifacts. After inventory initialization, newly created unrecorded runtime
+files remain unmanaged and are preserved; selecting an integration does not authorize
+replacing an occupied unowned file or link. Fix reported conflicts before retrying.
+The shared project-hook dispatcher and hook list can acquire inventory evidence when
+their bytes exactly match the desired core files, or the dispatcher matches its known
+published predecessor, and their ownership, modes and parent directories are protected.
+Ordinary legacy yards can establish their first inventory through a confirmed
+`init` or release update when the persistent selection is unchanged. The plan
+lists the paths it will manage. Existing plain files and links must match the
+selected templates, targets and metadata exactly; existing JSON/TOML documents
+also need a protected matching materialization baseline. Unrelated fields and
+session targets remain preserved. Unknown or changed state fails before adoption.
+Release activation reconciles running ordinary yards before refreshing their configs,
+including unfinished inventory application. Stopped yards remain unchanged.
+Integration enable/disable does not perform this initial adoption. Interrupted
+release updates resume within the same approved desired artifact scope.
+
+When a configuration source is registered, enable/disable rejects local selection
+writes. Edit the selected yard's full requested set in that source, run `yard config
+sync`, then `yard init` to reconcile. `config sync --apply` refreshes file consumers and
+does not replace the integration lifecycle. The ordinary `config set` followed by
+explicit `config sync push` workflow remains available.
+
+The shipped `test-vms` role has `ALLOWS_CODING_TOOLS=false`. Its inherited tools are
+suppressed, explicit nonempty selections fail, and agent-only utilities such as
+`ccusage` are excluded. Cleanup of an existing running test yard uses the same ownership
+checks and preserves broker keys, inner VMs, profile resources and test data. The role
+does not restrict arbitrary software installed or launched by the operator. GitHub
+remains an optional environment profile; Orca remains a profile resource. `ccusage`
+is a core utility in ordinary yards, not a selectable integration.
 
 ## Coding-agent compatibility
 

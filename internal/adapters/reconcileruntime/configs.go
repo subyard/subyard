@@ -18,6 +18,7 @@ import (
 )
 
 type guestConfigFile struct {
+	integration    string
 	label          string
 	source         string
 	destination    string
@@ -224,13 +225,14 @@ func (runtime Runtime) guestConfigFiles() ([]guestConfigFile, error) {
 	}
 	for _, agent := range strings.Fields(values["CODING_TOOL_INTEGRATIONS"]) {
 		if instruction, ok := instructions[agent]; ok {
+			instruction.integration = agent
 			files = append(files, instruction)
 		}
 		for _, asset := range assets {
 			if !strings.HasPrefix(asset.Name, agent+".") {
 				continue
 			}
-			files = append(files, guestConfigFile{label: strings.Replace(asset.Name, ".", " ", 1), source: asset.Source, destination: asset.Destination, ownedFormat: asset.OwnedFormat})
+			files = append(files, guestConfigFile{integration: agent, label: strings.Replace(asset.Name, ".", " ", 1), source: asset.Source, destination: asset.Destination, ownedFormat: asset.OwnedFormat})
 		}
 	}
 

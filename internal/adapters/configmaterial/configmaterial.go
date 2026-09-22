@@ -22,6 +22,15 @@ import (
 const (
 	ModeObserve = "observe"
 	ModeApply   = "apply"
+	// ModeAssessAdopt permits creation or verifies existing managed fields against
+	// protected ownership evidence, including legacy baselines, without writing.
+	ModeAssessAdopt = "assess-adopt"
+	// ModeAssessRetire reports whether ownership has already been released and
+	// rejects missing, stale, or drifted ownership receipts without changing state.
+	ModeAssessRetire = "assess-retire"
+	// ModeRetire removes only the unchanged, previously applied owned fields.
+	// Both retirement modes ignore payload and preserve the destination document.
+	ModeRetire = "retire"
 
 	guestStateRoot = "/var/lib/subyard/config-materialization"
 )
@@ -39,6 +48,7 @@ var guestTOMLWriterLicense string
 
 type JSONObservation struct {
 	Converged   bool   `json:"converged"`
+	Adoptable   bool   `json:"adoptable,omitempty"`
 	Fingerprint string `json:"fingerprint"`
 }
 
@@ -281,7 +291,7 @@ func jsonRequest(
 }
 
 func materializationRequest(format, mode, developer, destination string, uid int, payload []byte, stateRoot string, stateUID int, allowedHome string) (ports.InstanceExecRequest, error) {
-	if mode != ModeObserve && mode != ModeApply {
+	if mode != ModeObserve && mode != ModeApply && mode != ModeAssessAdopt && mode != ModeAssessRetire && mode != ModeRetire {
 		return ports.InstanceExecRequest{}, errors.New("invalid JSON materialization mode")
 	}
 	if !domain.SafeName(developer) || uid <= 0 {
@@ -294,6 +304,12 @@ func materializationRequest(format, mode, developer, destination string, uid int
 		!strings.HasPrefix(cleanDestination, cleanHome+string(filepath.Separator)) ||
 		cleanDestination != destination {
 		return ports.InstanceExecRequest{}, errors.New("invalid JSON materialization destination")
+	}
+	if mode == ModeAssessRetire || mode == ModeRetire {
+		payload = []byte(`{}`)
+		if format == "toml" {
+			payload = nil
+		}
 	}
 	digest, err := DesiredDigestFor(format, payload)
 	if err != nil {
@@ -321,6 +337,7 @@ func materializationRequest(format, mode, developer, destination string, uid int
 func ParseJSONObservation(payload []byte) (JSONObservation, error) {
 	type encodedObservation struct {
 		Converged   *bool  `json:"converged"`
+		Adoptable   bool   `json:"adoptable,omitempty"`
 		Fingerprint string `json:"fingerprint"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
@@ -337,5 +354,5 @@ func ParseJSONObservation(payload []byte) (JSONObservation, error) {
 	if _, err := hex.DecodeString(encoded.Fingerprint); err != nil {
 		return JSONObservation{}, errors.New("invalid JSON materialization observation")
 	}
-	return JSONObservation{Converged: *encoded.Converged, Fingerprint: encoded.Fingerprint}, nil
+	return JSONObservation{Converged: *encoded.Converged, Adoptable: encoded.Adoptable, Fingerprint: encoded.Fingerprint}, nil
 }

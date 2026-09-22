@@ -39,6 +39,12 @@ type YardNetworkPolicy interface {
 type Runtime struct {
 	RepositoryRoot string
 	Environment    []string
+	// AdoptLegacyIntegrations permits one initial, exact ownership adoption during
+	// a reviewed init plan. Ordinary integration commands leave it false.
+	AdoptLegacyIntegrations bool
+	// LegacyIntegrationFingerprint binds the reviewed initial adoption until its
+	// first inventory publication. Retries with established evidence ignore it.
+	LegacyIntegrationFingerprint string
 	// LaunchEnvironment is the unresolved CLI input, used only when restarting
 	// the dispatcher. Resolved yard settings must not become command overrides.
 	LaunchEnvironment []string
@@ -172,15 +178,18 @@ func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStag
 	case ports.ReconcileStageSSH:
 		return runtime.runScript(ctx, runtime.Stderr, "07-ssh-access.sh", "--yes")
 	case ports.ReconcileStageProvision:
-		observerIdentity, err := runtime.aiObserverProvisionIdentity()
+		if err := runtime.runScript(ctx, runtime.Stderr, "04-provision-subyard.sh", "--yes"); err != nil {
+			return err
+		}
+		// Base provisioning makes a fresh guest reachable before repairing installed hooks.
+		if err := runtime.applyOrcaRuntime(ctx); err != nil {
+			return err
+		}
+		plan, err := runtime.IntegrationPlan(ctx)
 		if err != nil {
 			return err
 		}
-		if err := runtime.runScriptEnvironment(ctx, runtime.Stderr,
-			map[string]string{"AI_OBSERVER_CONTEXT": observerIdentity}, "04-provision-subyard.sh", "--yes"); err != nil {
-			return err
-		}
-		return runtime.RefreshConfigs(ctx)
+		return runtime.ApplyIntegrations(ctx, plan)
 	case ports.ReconcileStageIncus:
 		return runtime.installIncus(ctx)
 	case ports.ReconcileStageExtras:
@@ -1146,7 +1155,7 @@ func (runtime Runtime) provisionConverged(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	version := runtime.environmentValue("CCUSAGE_VERSION")
-	if version == "" || version == "latest" {
+	if runtime.environmentValue("ALLOWS_CODING_TOOLS") != "false" && (version == "" || version == "latest") {
 		return false, nil
 	}
 	state, err := runtime.reconcileState(ctx)
@@ -1159,6 +1168,9 @@ func (runtime Runtime) provisionConverged(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	if strings.EqualFold(instance.Status, "stopped") {
+		if runtime.environmentValue("ALLOWS_CODING_TOOLS") == "false" {
+			return instanceIntentionallyStopped(instance) && marker == "", nil
+		}
 		return instanceIntentionallyStopped(instance) && marker == version, nil
 	}
 	if !strings.EqualFold(instance.Status, "running") {
@@ -1209,20 +1221,22 @@ jq -e '."ip-forward-no-drop" == true' /etc/docker/daemon.json >/dev/null \
 		return false, nil
 	}
 	home := fields[5]
-	ccusagePath := runtime.environmentDefault("CCUSAGE_INSTALL_PATH", "/usr/local/bin/ccusage")
-	status, ok, err := runtime.guestObserve(ctx,
-		[]string{"stat", "-c", "%F|%a|%u:%g", ccusagePath})
-	if err != nil || !ok || strings.TrimSpace(string(status.Stdout)) !=
-		"regular file|755|"+runtime.environmentDefault("CCUSAGE_EXPECTED_OWNER", "0:0") {
-		return false, err
-	}
-	magic, ok, err := runtime.guestObserve(ctx, []string{"od", "-An", "-tx1", "-N4", ccusagePath})
-	if err != nil || !ok || strings.Join(strings.Fields(string(magic.Stdout)), "") != "7f454c46" {
-		return false, err
-	}
-	reported, ok, err := runtime.guestObserve(ctx, []string{ccusagePath, "--version"})
-	if err != nil || !ok || strings.TrimSpace(string(reported.Stdout)) != "ccusage "+version {
-		return false, err
+	if runtime.environmentValue("ALLOWS_CODING_TOOLS") != "false" {
+		ccusagePath := runtime.environmentDefault("CCUSAGE_INSTALL_PATH", "/usr/local/bin/ccusage")
+		status, ok, err := runtime.guestObserve(ctx,
+			[]string{"stat", "-c", "%F|%a|%u:%g", ccusagePath})
+		if err != nil || !ok || strings.TrimSpace(string(status.Stdout)) !=
+			"regular file|755|"+runtime.environmentDefault("CCUSAGE_EXPECTED_OWNER", "0:0") {
+			return false, err
+		}
+		magic, ok, err := runtime.guestObserve(ctx, []string{"od", "-An", "-tx1", "-N4", ccusagePath})
+		if err != nil || !ok || strings.Join(strings.Fields(string(magic.Stdout)), "") != "7f454c46" {
+			return false, err
+		}
+		reported, ok, err := runtime.guestObserve(ctx, []string{ccusagePath, "--version"})
+		if err != nil || !ok || strings.TrimSpace(string(reported.Stdout)) != "ccusage "+version {
+			return false, err
+		}
 	}
 	configFiles, err := runtime.guestConfigFiles()
 	if err != nil {
@@ -1258,6 +1272,17 @@ jq -e '."ip-forward-no-drop" == true' /etc/docker/daemon.json >/dev/null \
 	}
 	if ok, err := runtime.projectHooksConverged(ctx); err != nil || !ok {
 		return false, err
+	}
+	if runtime.environmentValue("ALLOWS_CODING_TOOLS") == "false" {
+		plan, err := runtime.IntegrationPlan(ctx)
+		return !plan.Changed, err
+	}
+	// Resolved contexts opt into the shared integration ownership contract.
+	for _, entry := range runtime.Environment {
+		if strings.HasPrefix(entry, "INTEGRATION_HOST_LINKS=") {
+			plan, err := runtime.IntegrationPlan(ctx)
+			return marker == version && !plan.Changed, err
+		}
 	}
 	return marker == version, nil
 }

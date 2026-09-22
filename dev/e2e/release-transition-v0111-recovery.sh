@@ -356,15 +356,13 @@ write_fixture_config() {
   [ "$FIXTURE" = post-cas ] && ssh_port=2292
   install -d -m 0700 "$CONFIG_HOME/yards/$YARD_NAME" "$BIN_ROOT" "$HOME_ROOT/host"
   printf 'AGENTS=\n' > "$CONFIG_HOME/config.env"
+  # This workspace selects Codex to reproduce materialized-config drift. The
+  # test-vms broker role forbids coding tools and is covered by the owner lane.
   printf '%s\n' \
-    'YARD_TEMPLATE=test-vms' \
+    'YARD_KIND=container' \
     "SSH_PORT=$ssh_port" \
     'AGENTS=' \
     'DEV_UID=1001' \
-    'E2E_VM_CPU=1' \
-    'E2E_VM_MEMORY=700MiB' \
-    'E2E_VM_DISK=10GiB' \
-    'E2E_VM_SLOT_COUNT=1' \
     "BASE_IMAGE=$base_image" \
     "BASE_IMAGE_FALLBACK=$base_image" \
     > "$CONFIG_HOME/yards/$YARD_NAME/config.env"

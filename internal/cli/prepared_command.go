@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/command"
@@ -32,6 +33,9 @@ type coreCommandBehavior struct {
 func resolveCoreCommand(definition command.Definition) (coreCommandBehavior, error) {
 	behavior := coreCommandBehavior{prepareExit: 2, prepareRPCCode: "invalid_params"}
 	switch definition.Handler {
+	case "@integration":
+		behavior.prepare = (*preparedCommand).prepareIntegration
+		behavior.prepareExit, behavior.prepareRPCCode = 1, "plan_failed"
 	case "@init":
 		behavior.prepare = (*preparedCommand).prepareInit
 		behavior.prepareExit, behavior.prepareRPCCode = 1, "plan_failed"
@@ -131,6 +135,8 @@ type preparedCommand struct {
 	Arguments       []string
 	Loaded          config.Loaded
 	Plan            domain.OperationPlan
+	exactState      string
+	ownerPlan       bool
 	Project         *projectExecution
 	release         *releaseExecution
 	policy          domain.CommandPolicy
@@ -194,6 +200,12 @@ func (cli *CLI) prepareCommand(ctx context.Context, request prepareCommandReques
 		request.OnResolved(prepared.Loaded, slices.Clone(prepared.Arguments))
 	}
 	prepared.policy = commandPolicy(prepared.Definition, prepared.Loaded.Context, prepared.Arguments, prepared.Project)
+	if prepared.Definition.Handler == "@integration" && prepared.Loaded.Context.AccessKind == domain.AccessRemote {
+		if err = prepared.prepareRemoteOperation(ctx); err != nil {
+			return nil, &commandPreparationError{phase: "prepare", err: err}
+		}
+		return prepared, nil
+	}
 	if err = behavior.prepare(prepared, ctx, request.Bootstrap); err != nil {
 		return nil, &commandPreparationError{phase: "prepare", err: err}
 	}
@@ -297,9 +309,19 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 	if err := execution.validateOrcaRepair(ctx, cli); err != nil {
 		return err
 	}
+	prepared.exactState = operationStateDigest(struct {
+		Baseline *initIntegrationBaseline
+		Adoption reconcileruntime.IntegrationPlan
+	}{execution.integrationBaseline, execution.integrationAdoption})
 	prepared.policy.Consequences = execution.consequences()
 	prepared.assess = func(context.Context) (domain.ActionID, domain.ActionDelta, error) { return execution.actionPlan() }
 	prepared.refresh = func(ctx context.Context) (domain.ActionID, domain.ActionDelta, error) {
+		if err := execution.checkIntegrationBaseline(cli); err != nil {
+			return "", domain.ActionDelta{}, err
+		}
+		if err := execution.integrationSelection.check(ctx, cli, execution); err != nil {
+			return "", domain.ActionDelta{}, err
+		}
 		if err := execution.refreshAssessment(ctx); err != nil {
 			return "", domain.ActionDelta{}, err
 		}
@@ -336,7 +358,7 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 			if err := cli.prepareSudoPrivileges(ctx, diagnostics, cli.effectiveUID(), prepared.Definition.Name); err != nil {
 				return domain.AdapterResult{}, err
 			}
-			execution.platform = cli.initPlatform(execution.loaded, execution.powerYards)
+			execution.rebuildPlatform(cli)
 		}
 		orchestrator.Runner = initAdapter{execution: execution, cli: cli, output: diagnostics}
 		result, _, err := orchestrator.RunAdapter(ctx, prepared.Plan, domain.AdapterRequest{

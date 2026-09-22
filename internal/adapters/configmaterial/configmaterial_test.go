@@ -3,6 +3,7 @@ package configmaterial
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -358,6 +359,7 @@ func TestJSONRequestAndObservationParserRejectUnsafeInputs(t *testing.T) {
 		[]byte(`{"converged":true,"fingerprint":"short"}`),
 		[]byte(`{"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`),
 		[]byte(`{"converged":true,"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","extra":1}`),
+		[]byte(`{"converged":false,"adoptable":"yes","fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`),
 	} {
 		if _, err := ParseJSONObservation(output); err == nil {
 			t.Fatalf("accepted invalid observation %q", output)
@@ -422,7 +424,12 @@ func (h guestHarness) apply(t *testing.T, payload []byte) {
 
 func (h guestHarness) observe(t *testing.T, payload []byte) JSONObservation {
 	t.Helper()
-	request, err := h.request(payload, ModeObserve)
+	return h.observeMode(t, payload, ModeObserve)
+}
+
+func (h guestHarness) observeMode(t *testing.T, payload []byte, mode string) JSONObservation {
+	t.Helper()
+	request, err := h.request(payload, mode)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -485,6 +492,11 @@ func (h guestHarness) baselinePath(t *testing.T) string {
 	return entries[0]
 }
 
+func (h guestHarness) receiptPath(t *testing.T) string {
+	t.Helper()
+	return strings.TrimSuffix(h.baselinePath(t), ".json") + ".ownership"
+}
+
 func jsonEqual(left, right any) bool {
 	leftPayload, _ := json.Marshal(left)
 	rightPayload, _ := json.Marshal(right)
@@ -509,4 +521,547 @@ func treeNames(t *testing.T, root string) []string {
 		t.Fatal(err)
 	}
 	return names
+}
+
+func TestAdoptionAssessmentPreservesLegacyAndCurrentDocuments(t *testing.T) {
+	for _, format := range []string{"json", "toml"} {
+		for _, schema := range []int{1, 2} {
+			t.Run(fmt.Sprintf("%s/schema-%d", format, schema), func(t *testing.T) {
+				h := newGuestHarness(t)
+				h.format = format
+				desired := `{"managed":{"leaf":"synthetic-secret"},"empty":{}}`
+				current := `{"managed":{"leaf":"synthetic-secret","runtime":true},"empty":{"runtime":true},"history":[1,2]}`
+				if format == "toml" {
+					desired = "[managed]\nleaf = 'synthetic-secret'\n[empty]\n"
+					current = "history = [1,2]\n[managed]\nleaf = 'synthetic-secret'\nruntime = true\n[empty]\nruntime = true\n"
+				}
+				before := snapshotMaterialization(t, h.root)
+				if observed := h.observeMode(t, []byte(desired), ModeAssessAdopt); observed.Converged || observed.Adoptable {
+					t.Fatal("absent destination reported converged or adopted")
+				}
+				if !jsonEqual(before, snapshotMaterialization(t, h.root)) {
+					t.Fatal("creation assessment wrote state")
+				}
+				h.apply(t, []byte(desired))
+				baselinePath := h.baselinePath(t)
+				receiptPath := h.receiptPath(t)
+				if schema == 2 {
+					baseline, err := os.ReadFile(receiptPath)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(baselinePath, baseline, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := os.Remove(receiptPath); err != nil {
+					t.Fatal(err)
+				}
+				h.writeDestination(t, current)
+				before = snapshotMaterialization(t, h.root)
+				if h.observe(t, []byte(desired)).Converged {
+					t.Fatal("legacy state did not request compatible ownership publication")
+				}
+				if observed := h.observeMode(t, []byte(desired), ModeAssessAdopt); !observed.Converged || !observed.Adoptable {
+					t.Fatal("matching protected evidence was not adoptable")
+				}
+				if format == "toml" && schema == 1 {
+					if _, err := h.run([]byte(desired+"# changed template\n"), ModeAssessAdopt); err == nil {
+						t.Fatal("legacy TOML accepted a different raw template digest")
+					}
+				}
+				if !jsonEqual(before, snapshotMaterialization(t, h.root)) {
+					t.Fatal("adoption assessment modified files")
+				}
+				h.apply(t, []byte(desired))
+				baseline, err := os.ReadFile(baselinePath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var value map[string]any
+				if err := json.Unmarshal(baseline, &value); err != nil || value["schema"] != float64(1) || len(value) != 5 {
+					t.Fatalf("normal apply did not preserve the retained-runtime baseline schema: %v", err)
+				}
+				if _, err := os.Stat(receiptPath); err != nil {
+					t.Fatal("normal apply did not establish ownership proof", err)
+				}
+				if !h.observe(t, []byte(desired)).Converged {
+					t.Fatal("compatible ownership publication did not converge")
+				}
+				h.observeMode(t, nil, ModeRetire)
+				payload, err := os.ReadFile(h.destination)
+				if err != nil || bytes.Contains(payload, []byte("synthetic-secret")) || !bytes.Contains(payload, []byte("runtime")) || !bytes.Contains(payload, []byte("history")) {
+					t.Fatalf("retirement after adoption lost runtime data: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestAdoptionAssessmentRejectsUnknownOrChangedEvidence(t *testing.T) {
+	for _, kind := range []string{"missing", "mode", "invalid", "baseline-digest", "owned-paths", "managed", "legacy-managed", "projection", "retiring", "retired"} {
+		t.Run(kind, func(t *testing.T) {
+			h := newGuestHarness(t)
+			desired := []byte(`{"managed":"synthetic-secret"}`)
+			h.apply(t, desired)
+			baselinePath := h.baselinePath(t)
+			if kind == "projection" || kind == "retiring" || kind == "retired" {
+				baselinePath = h.receiptPath(t)
+			}
+			baseline, err := os.ReadFile(baselinePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var value map[string]any
+			if err := json.Unmarshal(baseline, &value); err != nil {
+				t.Fatal(err)
+			}
+			switch kind {
+			case "invalid":
+				value["schema"] = 99
+			case "owned-paths":
+				value["owned"] = []any{}
+			case "baseline-digest":
+				value["desired_digest"] = strings.Repeat("0", 64)
+			case "projection":
+				value["projection_digest"] = strings.Repeat("0", 64)
+			case "retiring", "retired":
+				value["phase"] = kind
+				value["retired_digest"] = strings.Repeat("0", 64)
+				if kind == "retired" {
+					shared, err := os.ReadFile(h.baselinePath(t))
+					if err != nil {
+						t.Fatal(err)
+					}
+					var released map[string]any
+					if err := json.Unmarshal(shared, &released); err != nil {
+						t.Fatal(err)
+					}
+					released["owned"] = []any{}
+					shared, _ = json.Marshal(released)
+					if err := os.WriteFile(h.baselinePath(t), shared, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			case "legacy-managed":
+				if err := os.Remove(h.receiptPath(t)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			baseline, _ = json.Marshal(value)
+			if err := os.WriteFile(baselinePath, baseline, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			switch kind {
+			case "missing":
+				if err := os.Remove(baselinePath); err != nil {
+					t.Fatal(err)
+				}
+			case "mode":
+				if err := os.Chmod(baselinePath, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			case "managed", "legacy-managed":
+				h.writeDestination(t, `{"managed":"changed-secret","history":[1]}`)
+			}
+			before := snapshotMaterialization(t, h.root)
+			stderr, err := h.run(desired, ModeAssessAdopt)
+			if err == nil || strings.Contains(stderr, "secret") {
+				t.Fatalf("unsafe adoption: error=%v stderr=%q", err, stderr)
+			}
+			if !jsonEqual(before, snapshotMaterialization(t, h.root)) {
+				t.Fatal("rejected adoption modified files")
+			}
+		})
+	}
+}
+
+func TestJSONAdoptionAllowsTemplateEvolutionOnlyWithUnchangedHistoricalFields(t *testing.T) {
+	for _, receipt := range []bool{false, true} {
+		t.Run(fmt.Sprintf("receipt=%t", receipt), func(t *testing.T) {
+			h := newGuestHarness(t)
+			previous := []byte(`{"a/b":{"~key":"line\u2028para\u2029雪","number":1e2,"removed":true},"empty":{},"list":[1,true,null]}`)
+			h.apply(t, previous)
+			if !receipt {
+				if err := os.Remove(h.receiptPath(t)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			current := `{"a/b":{"~key":"line\u2028para\u2029雪","number":100.0,"removed":true,"runtime":42},"empty":{"foreign":true},"list":[1,true,null],"history":["kept"]}`
+			h.writeDestination(t, current)
+			desired := []byte(`{"a/b":{"~key":"new","number":200},"fresh":true}`)
+			before := snapshotMaterialization(t, h.root)
+			first := h.observeMode(t, desired, ModeAssessAdopt)
+			if first.Converged || !first.Adoptable {
+				t.Fatalf("unchanged old template was not adoptable for update: %#v", first)
+			}
+			second := h.observeMode(t, bytes.ReplaceAll(desired, []byte("200"), []byte("300")), ModeAssessAdopt)
+			if !second.Adoptable || second.Fingerprint == first.Fingerprint {
+				t.Fatal("assessment did not bind candidate template values")
+			}
+			if !jsonEqual(before, snapshotMaterialization(t, h.root)) {
+				t.Fatal("template evolution assessment wrote state")
+			}
+			for _, changed := range []string{
+				strings.Replace(current, "100.0", "101", 1),
+				strings.Replace(current, `"removed":true,`, "", 1),
+				strings.Replace(current, `"empty":{"foreign":true}`, `"empty":false`, 1),
+			} {
+				h.writeDestination(t, changed)
+				if _, err := h.run(desired, ModeAssessAdopt); err == nil {
+					t.Fatal("candidate template change hid historical managed-field drift")
+				}
+			}
+			h.writeDestination(t, current)
+			h.apply(t, desired)
+			if !h.observe(t, desired).Converged {
+				t.Fatal("adopted template update did not converge")
+			}
+			want := map[string]any{
+				"a/b":   map[string]any{"~key": "new", "number": float64(200), "runtime": float64(42)},
+				"empty": map[string]any{"foreign": true}, "history": []any{"kept"}, "fresh": true,
+			}
+			if got := h.readDestination(t); !jsonEqual(got, want) {
+				t.Fatalf("template update lost foreign fields or retained obsolete managed fields: %#v", got)
+			}
+		})
+	}
+}
+
+func TestRetirementPreservesDocumentAndRuntimeFields(t *testing.T) {
+	for _, format := range []string{"json", "toml"} {
+		t.Run(format, func(t *testing.T) {
+			h := newGuestHarness(t)
+			h.format = format
+			desired, current := `{"managed":{"leaf":"synthetic-secret"},"empty":{}}`, `{"managed":{"leaf":"synthetic-secret","runtime":true},"empty":{"runtime":true},"history":[1,2]}`
+			if format == "toml" {
+				desired = "[managed]\nleaf = 'synthetic-secret'\n[empty]\n"
+				current = "history = [1,2]\n[managed]\nleaf = 'synthetic-secret'\nruntime = true\n[empty]\nruntime = true\n"
+			}
+			h.apply(t, []byte(desired))
+			h.writeDestination(t, current)
+			if err := os.Chmod(h.destination, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			before := snapshotMaterialization(t, h.root)
+			if result := h.observeMode(t, nil, ModeAssessRetire); result.Converged {
+				t.Fatal("active ownership reported retired")
+			}
+			if !jsonEqual(before, snapshotMaterialization(t, h.root)) {
+				t.Fatal("retirement assessment modified files")
+			}
+			if result := h.observeMode(t, nil, ModeRetire); !result.Converged {
+				t.Fatal("retirement did not converge")
+			}
+			payload, err := os.ReadFile(h.destination)
+			if err != nil || bytes.Contains(payload, []byte("synthetic-secret")) || !bytes.Contains(payload, []byte("runtime")) || !bytes.Contains(payload, []byte("history")) {
+				t.Fatalf("retirement lost document/runtime fields or retained owned value: %v", err)
+			}
+			if info, err := os.Stat(h.destination); err != nil || info.Mode().Perm() != 0o600 {
+				t.Fatalf("retirement changed document permissions: %v", err)
+			}
+			baseline, _ := os.ReadFile(h.baselinePath(t))
+			if bytes.Contains(baseline, []byte("synthetic-secret")) || bytes.Contains(baseline, []byte("history")) {
+				t.Fatal("ownership evidence contains values or runtime fields")
+			}
+			before = snapshotMaterialization(t, h.root)
+			if !h.observeMode(t, nil, ModeAssessRetire).Converged || !h.observeMode(t, nil, ModeRetire).Converged {
+				t.Fatal("retirement retry did not converge")
+			}
+			if !jsonEqual(before, snapshotMaterialization(t, h.root)) {
+				t.Fatal("retirement retry changed files")
+			}
+			// Re-enabling establishes fresh ownership after retirement.
+			h.apply(t, []byte(desired))
+			if !h.observe(t, []byte(desired)).Converged {
+				t.Fatal("re-enable did not converge")
+			}
+		})
+	}
+}
+
+func TestRetirementRejectsUnprovenOwnershipWithoutMutation(t *testing.T) {
+	for _, kind := range []string{"missing-baseline", "legacy", "corrupt", "drift", "missing-field", "missing-document", "symlink", "renamed"} {
+		t.Run(kind, func(t *testing.T) {
+			h := newGuestHarness(t)
+			h.apply(t, []byte(`{"managed":["synthetic-secret"]}`))
+			baselinePath := h.baselinePath(t)
+			switch kind {
+			case "missing-baseline":
+				if err := os.Remove(baselinePath); err != nil {
+					t.Fatal(err)
+				}
+			case "legacy":
+				if err := os.Remove(h.receiptPath(t)); err != nil {
+					t.Fatal(err)
+				}
+				if h.observe(t, []byte(`{"managed":["synthetic-secret"]}`)).Converged {
+					t.Fatal("missing ownership receipt did not request repair")
+				}
+			case "corrupt":
+				if err := os.WriteFile(baselinePath, []byte(`{"secret":"invalid"}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "drift":
+				h.writeDestination(t, `{"managed":["changed-secret"]}`)
+			case "missing-field":
+				h.writeDestination(t, `{}`)
+			case "missing-document", "symlink":
+				if err := os.Remove(h.destination); err != nil {
+					t.Fatal(err)
+				}
+				if kind == "symlink" {
+					target := filepath.Join(h.root, "foreign.json")
+					if err := os.WriteFile(target, []byte(`{"managed":["synthetic-secret"]}`), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Symlink(target, h.destination); err != nil {
+						t.Fatal(err)
+					}
+				}
+			case "renamed":
+				h.destination += ".renamed"
+				h.writeDestination(t, `{"managed":["synthetic-secret"]}`)
+			}
+			before := snapshotMaterialization(t, h.root)
+			for _, mode := range []string{ModeAssessRetire, ModeRetire} {
+				stderr, err := h.run(nil, mode)
+				if err == nil || strings.Contains(stderr, "secret") {
+					t.Fatalf("unsafe retirement: mode=%s error=%v stderr=%q", mode, err, stderr)
+				}
+				if !jsonEqual(before, snapshotMaterialization(t, h.root)) {
+					t.Fatal("rejected retirement modified files")
+				}
+			}
+			if kind == "legacy" {
+				h.apply(t, []byte(`{"managed":["synthetic-secret"]}`))
+				if !h.observeMode(t, nil, ModeRetire).Converged {
+					t.Fatal("explicit apply did not upgrade legacy evidence")
+				}
+			}
+		})
+	}
+}
+
+func TestRetirementResumesInterruptedReplacement(t *testing.T) {
+	for _, stage := range []string{"before", "after", "released-baseline", "legacy-schema2"} {
+		t.Run(stage, func(t *testing.T) {
+			h := newGuestHarness(t)
+			h.apply(t, []byte(`{"managed":1}`))
+			h.writeDestination(t, `{"managed":1,"history":["kept"]}`)
+			if stage == "legacy-schema2" {
+				receipt, err := os.ReadFile(h.receiptPath(t))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(h.baselinePath(t), receipt, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(h.receiptPath(t)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			request, err := h.request(nil, ModeRetire)
+			if err != nil {
+				t.Fatal(err)
+			}
+			needle := "    atomic_write(destination, payload, uid, file_mode)"
+			injected := "    raise MaterializationError(\"synthetic interruption\")\n" + needle
+			if stage == "after" {
+				injected = needle + "\n    raise MaterializationError(\"synthetic interruption\")"
+			}
+			if stage == "released-baseline" {
+				needle = "        baseline[\"phase\"] = \"retired\""
+				injected = "        raise MaterializationError(\"synthetic interruption\")\n" + needle
+			}
+			if stage == "legacy-schema2" {
+				needle = "            # Convert an earlier candidate's schema2 before any document edit."
+				injected = "            raise MaterializationError(\"synthetic interruption\")\n" + needle
+			}
+			request.Command[3] = strings.Replace(request.Command[3], needle, injected, 1)
+			command := exec.Command(request.Command[0], request.Command[1:]...)
+			command.Stdin = bytes.NewReader(request.Stdin)
+			if err := command.Run(); err == nil {
+				t.Fatal("interruption did not occur")
+			}
+			if h.observeMode(t, nil, ModeAssessRetire).Converged {
+				t.Fatal("unfinished retirement reported complete")
+			}
+			interrupted, err := os.ReadFile(h.destination)
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.writeDestination(t, `{"managed":"changed-secret","history":["kept"]}`)
+			before := snapshotMaterialization(t, h.root)
+			if stderr, err := h.run(nil, ModeRetire); err == nil || strings.Contains(stderr, "secret") {
+				t.Fatalf("retry accepted drift: %v %q", err, stderr)
+			}
+			if !jsonEqual(before, snapshotMaterialization(t, h.root)) {
+				t.Fatal("retry overwrote drift")
+			}
+			h.writeDestination(t, string(interrupted))
+			if !h.observeMode(t, nil, ModeRetire).Converged {
+				t.Fatal("retirement retry failed")
+			}
+			if got := h.readDestination(t); !jsonEqual(got, map[string]any{"history": []any{"kept"}}) {
+				t.Fatalf("retry changed runtime fields: %#v", got)
+			}
+		})
+	}
+}
+
+func TestMaterializationResumesInterruptedReceiptPublication(t *testing.T) {
+	for _, stage := range []string{"baseline", "receipt"} {
+		t.Run(stage, func(t *testing.T) {
+			h := newGuestHarness(t)
+			h.apply(t, []byte(`{"managed":1}`))
+			h.writeDestination(t, `{"managed":1,"history":["kept"]}`)
+			desired := []byte(`{"managed":2}`)
+			request, err := h.request(desired, ModeApply)
+			if err != nil {
+				t.Fatal(err)
+			}
+			needle := "        atomic_write(baseline_path, semantic_payload(compatible_baseline(evidence))"
+			if stage == "receipt" {
+				needle = "        atomic_write(receipt_path, semantic_payload(evidence)"
+			}
+			request.Command[3] = strings.Replace(request.Command[3], needle, "        raise MaterializationError(\"synthetic interruption\")\n"+needle, 1)
+			command := exec.Command(request.Command[0], request.Command[1:]...)
+			command.Stdin = bytes.NewReader(request.Stdin)
+			if err := command.Run(); err == nil {
+				t.Fatal("interruption did not occur")
+			}
+			if h.observe(t, desired).Converged {
+				t.Fatal("incomplete ownership publication reported ready")
+			}
+			if _, err := h.run(nil, ModeRetire); err == nil {
+				t.Fatal("incomplete ownership publication authorized retirement")
+			}
+			h.apply(t, desired)
+			if !h.observe(t, desired).Converged {
+				t.Fatal("apply did not repair ownership proof")
+			}
+			h.observeMode(t, nil, ModeRetire)
+			if got := h.readDestination(t); !jsonEqual(got, map[string]any{"history": []any{"kept"}}) {
+				t.Fatalf("retry lost unrelated data: %#v", got)
+			}
+		})
+	}
+}
+
+func TestRetainedWriterInvalidatesRetirementReceipt(t *testing.T) {
+	h := newGuestHarness(t)
+	h.apply(t, []byte(`{"managed":1}`))
+	baselinePath := h.baselinePath(t)
+	baseline, err := os.ReadFile(baselinePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var value map[string]any
+	if err := json.Unmarshal(baseline, &value); err != nil {
+		t.Fatal(err)
+	}
+	// v0.14 accepts exactly these five fields, and writes the same schema when
+	// it changes desired values. It neither reads nor updates the companion.
+	if len(value) != 5 || value["schema"] != float64(1) {
+		t.Fatal("shared baseline is incompatible with the retained reader")
+	}
+	for _, key := range []string{"schema", "developer", "destination", "desired_digest", "owned"} {
+		if _, exists := value[key]; !exists {
+			t.Fatalf("missing retained baseline field %s", key)
+		}
+	}
+	desired := []byte(`{"managed":2}`)
+	value["desired_digest"], err = DesiredDigest(desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline, _ = json.Marshal(value)
+	if err := os.WriteFile(baselinePath, baseline, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.writeDestination(t, `{"managed":2,"history":["kept"]}`)
+	before := snapshotMaterialization(t, h.root)
+	for _, mode := range []string{ModeAssessRetire, ModeRetire} {
+		if stderr, err := h.run(nil, mode); err == nil {
+			t.Fatalf("stale receipt authorized %s: %s", mode, stderr)
+		}
+	}
+	if h.observe(t, desired).Converged || !h.observeMode(t, desired, ModeAssessAdopt).Converged {
+		t.Fatal("stale proof must request repair while preserving exact legacy adoption")
+	}
+	if !jsonEqual(before, snapshotMaterialization(t, h.root)) {
+		t.Fatal("read-only stale evidence handling changed state")
+	}
+	h.apply(t, desired)
+	h.observeMode(t, nil, ModeRetire)
+	if got := h.readDestination(t); !jsonEqual(got, map[string]any{"history": []any{"kept"}}) {
+		t.Fatalf("proof repair/retirement lost runtime additions: %#v", got)
+	}
+	baseline, _ = os.ReadFile(baselinePath)
+	if err := json.Unmarshal(baseline, &value); err != nil || len(value["owned"].([]any)) != 0 {
+		t.Fatal("retirement did not release ownership for retained writers")
+	}
+}
+
+func TestOwnershipReceiptRejectsUnprotectedOrInvalidState(t *testing.T) {
+	for _, kind := range []string{"mode", "symlink", "hardlink", "corrupt"} {
+		t.Run(kind, func(t *testing.T) {
+			h := newGuestHarness(t)
+			h.apply(t, []byte(`{"managed":1}`))
+			path := h.receiptPath(t)
+			switch kind {
+			case "mode":
+				if err := os.Chmod(path, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			case "symlink":
+				if err := os.Rename(path, path+".foreign"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(path+".foreign", path); err != nil {
+					t.Fatal(err)
+				}
+			case "hardlink":
+				if err := os.Link(path, path+".foreign"); err != nil {
+					t.Fatal(err)
+				}
+			case "corrupt":
+				if err := os.WriteFile(path, []byte(`{"schema":1}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := snapshotMaterialization(t, h.root)
+			for _, mode := range []string{ModeAssessRetire, ModeRetire, ModeApply} {
+				if _, err := h.run([]byte(`{"managed":1}`), mode); err == nil {
+					t.Fatalf("untrusted receipt accepted by %s", mode)
+				}
+				if !jsonEqual(before, snapshotMaterialization(t, h.root)) {
+					t.Fatal("untrusted receipt handling changed state")
+				}
+			}
+		})
+	}
+}
+
+func snapshotMaterialization(t *testing.T, root string) map[string]string {
+	t.Helper()
+	result := map[string]string{}
+	for _, relative := range treeNames(t, root) {
+		path := filepath.Join(root, relative)
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().IsRegular() {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result[relative] = string(data)
+		} else {
+			result[relative] = info.Mode().String()
+		}
+	}
+	return result
 }

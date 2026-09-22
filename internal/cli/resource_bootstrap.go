@@ -77,6 +77,16 @@ func (cli *CLI) prepareResourceBootstrap(ctx context.Context, loaded config.Load
 	if err != nil {
 		return nil, err
 	}
+	if bootstrap.selectionPath != "" && execution.integrationSelection != nil {
+		write := execution.integrationSelection.write
+		if write == nil {
+			return nil, fmt.Errorf("resource bootstrap requires a prepared integration settings write")
+		}
+		write.Content, err = config.EditPersistentAssignmentContent(write.Path, write.Content, "ENVIRONMENT_PROFILES", &bootstrap.profiles)
+		if err != nil {
+			return nil, err
+		}
+	}
 	// An already initialized yard does not need the unconditional init hook retry:
 	// the resource performs its own project reconciliation during bring-up.
 	if !execution.hooksOnly() {
@@ -208,6 +218,12 @@ func (bootstrap *resourceBootstrap) refresh(ctx context.Context, cli *CLI) error
 		}
 	}
 	if bootstrap.init != nil {
+		if err := bootstrap.init.checkIntegrationBaseline(cli); err != nil {
+			return err
+		}
+		if err := bootstrap.init.integrationSelection.check(ctx, cli, bootstrap.init); err != nil {
+			return err
+		}
 		before := bootstrap.init.consequences()
 		if err := bootstrap.init.refreshAssessment(ctx); err != nil {
 			return err
@@ -229,11 +245,22 @@ func (bootstrap *resourceBootstrap) apply(ctx context.Context, cli *CLI) error {
 		return err
 	}
 	writeSelection := func() error {
-		if bootstrap.selectionPath == "" {
+		if bootstrap.selectionPath == "" || (bootstrap.init != nil && bootstrap.init.integrationSelection != nil) {
+			// Full init publishes both requested selections in one protected write.
 			return nil
 		}
-		return config.WritePersistentAssignmentIfUnchanged(bootstrap.loaded.Context.Paths.ConfigHome,
-			bootstrap.selectionPath, "ENVIRONMENT_PROFILES", &bootstrap.profiles, bootstrap.selection)
+		content, err := config.EditPersistentAssignmentContent(bootstrap.selectionPath, bootstrap.selection.Content, "ENVIRONMENT_PROFILES", &bootstrap.profiles)
+		if err != nil {
+			return err
+		}
+		if err := config.WritePersistentAssignmentIfUnchanged(bootstrap.loaded.Context.Paths.ConfigHome,
+			bootstrap.selectionPath, "ENVIRONMENT_PROFILES", &bootstrap.profiles, bootstrap.selection); err != nil {
+			return err
+		}
+		if bootstrap.init != nil {
+			return bootstrap.init.integrationBaseline.acceptPublishedSource(bootstrap.selectionPath, content)
+		}
+		return nil
 	}
 	if bootstrap.endpoint != nil {
 		bounded, cancel := context.WithTimeout(ctx, resourcePrepareTimeout)
@@ -250,7 +277,7 @@ func (bootstrap *resourceBootstrap) apply(ctx context.Context, cli *CLI) error {
 			if err := cli.prepareSudoPrivileges(ctx, cli.options.Stderr, cli.effectiveUID(), bootstrap.definition.Command); err != nil {
 				return err
 			}
-			bootstrap.init.platform = cli.initPlatform(bootstrap.loaded, bootstrap.init.powerYards)
+			bootstrap.init.rebuildPlatform(cli)
 		}
 		cli.printInitPlan(bootstrap.init)
 		if err := bootstrap.init.run(ctx, cli, cli.options.Stdout); err != nil {

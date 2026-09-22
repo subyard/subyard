@@ -82,9 +82,10 @@ type settingAssignment struct {
 }
 
 type settingTracker struct {
-	layers      []settingLayer
-	assignments map[string][]settingAssignment
-	order       int
+	integrations IntegrationSelection
+	layers       []settingLayer
+	assignments  map[string][]settingAssignment
+	order        int
 }
 
 func newSettingTracker() *settingTracker {

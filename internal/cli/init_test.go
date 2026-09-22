@@ -95,6 +95,10 @@ type initPlatformFixture struct {
 	readyOnOrca      string
 }
 
+func (fixture *initPlatformFixture) InstanceExists(context.Context) (bool, error) {
+	return fixture.converged[ports.ReconcileStageInstance], nil
+}
+
 func (fixture *initPlatformFixture) ProjectHooksApplicable(context.Context) (bool, error) {
 	return fixture.hooksApplicable, nil
 }
@@ -573,6 +577,10 @@ func TestInitProfileReusesPrivateDefinitionFromEffectiveConfigDir(t *testing.T) 
 	content := "ENVIRONMENT_PROFILES=hermes\nAGENTS=codex\nSSH_PORT=2234\n"
 	writeCLIFile(t, preset, content, 0o600)
 	alternateConfig := filepath.Join(root, "installed", "config")
+	if err := os.MkdirAll(alternateConfig, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(alternateConfig, "agents.env"), "AGENT_codex_COMMAND=codex\n", 0o600)
 	environment = append(environment, "SUBYARD_CONFIG_DIR="+alternateConfig)
 	legacy := filepath.Join(root, "installed", "private", "yards", "custom-name.env")
 	if err := os.MkdirAll(filepath.Dir(legacy), 0o700); err != nil {
@@ -1272,7 +1280,8 @@ func TestInitProfileCreatesDefinitionOnlyAfterConfirmationAndPreflight(t *testin
 				}
 				return
 			}
-			if err != nil || string(stored) != content {
+			want := strings.Replace(content, "AGENTS=codex", "CODING_TOOL_INTEGRATIONS='codex'", 1)
+			if err != nil || string(stored) != want {
 				t.Fatalf("definition content=%q err=%v", stored, err)
 			}
 			info, err := os.Lstat(target)

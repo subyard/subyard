@@ -119,6 +119,11 @@ _yard() {
       else COMPREPLY=( $(compgen -W "$(_yard_profiles "${COMP_WORDS[0]}")" -- "$cur") ); fi
       ;;
     teardown|stop|simple|status) COMPREPLY=( $(compgen -W "$command_options" -- "$cur") ) ;;
+    integration)
+      if [ "$cword" -eq "$((cmdidx + 1))" ] && [[ "$cur" != -* ]]; then
+        COMPREPLY=( $(compgen -W "$command_verbs" -- "$cur") )
+      else COMPREPLY=( $(compgen -W "$command_options" -- "$cur") ); fi
+      ;;
     remote)
       # remote <add|repair-key|remove|list>; repair/remove take a registered yard name.
       if [ "$cword" -eq "$((cmdidx + 1))" ]; then COMPREPLY=( $(compgen -W "$command_verbs" -- "$cur") )

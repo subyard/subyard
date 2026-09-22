@@ -82,7 +82,8 @@ pair_check_line="$(rg -n 'daemon pair .*--json' \
   || fail "Paseo generates a pairing offer before Codex capability readiness"
 rg -q 'ubuntu-24[.]04-arm' "$ROOT/.github/workflows/release.yml" \
   || fail "release has no native arm64 Paseo lane"
-! rg -qi 'paseo' "$ROOT/config/commands.registry" "$ROOT/internal/cli" \
+# Generic resolver tests may exercise the shipped Paseo -> Codex dependency.
+! rg -qi --glob '!**/*_test.go' 'paseo' "$ROOT/config/commands.registry" "$ROOT/internal/cli" \
   "$ROOT/internal/domain" "$ROOT/internal/rpc" "$ROOT/scripts/04-provision-subyard.sh" \
   || fail "Paseo-specific core CLI/domain/RPC plumbing appeared"
 

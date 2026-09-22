@@ -47,6 +47,14 @@ and fingerprints. Runtime provisioning, config refresh/status and release activa
 field ownership baseline; other consumers retain byte-exact behavior. See
 [File settings](configuration.md#file-settings) for the ownership and interrupted-write contract.
 
+Integration selection uses the shared prepared-command boundary, the protected per-yard config
+writer and `reconcileruntime.IntegrationPlan` / `ApplyIntegrations`. The same runtime path is used
+by full initialization after core substrate provisioning. `scripts/reconcile-integrations.sh` is a
+bounded package/proxy/project-hook leaf. A per-yard lock serializes confirmed desired publication
+and reconciliation. Guest ownership evidence covers structured fields, plain files, instruction
+files, derived session links and known service receipts; evidence conflicts preserve artifacts.
+See [per-yard selection](configuration.md#per-yard-coding-tool-selection) for user-visible semantics.
+
 ## Stable interfaces
 
 ### Commands
@@ -141,17 +149,24 @@ The outer event `sequence` and `revision` are one monotonic per-session stream; 
 revisions remain typed event data and cannot make the RPC revision move backwards after a snapshot.
 
 The switched surface exposes `command.list`, `context.get`, `operation.route`, `operation.plan`,
-`operation.execute`, `project.list`, `owner.inventory`, `yard.status`, `credential.list`, `credential.status`,
+`operation.execute`, `integration.status`, `project.list`, `owner.inventory`, `yard.status`, `credential.list`, `credential.status`,
 `incus.events`, `system.snapshot`, `system.resync` and `system.ping`. `operation.plan` accepts every
 public mutating core command whose handler family supports preparation. Interactive terminal and
 protected credential-payload commands keep their dedicated transport rather than treating human
 stdin/stdout as a typed result. Its server-side plan is bounded and single-use; execution requires an
-explicit `confirmed=true` and emits correlated start/final events. The operation protocol does not
-yet expose a general plan digest or plan expiry; request deadlines are separate. Execute currently
-refuses a stored plan routed to a remote owner with `remote_owner_required`. The client must plan
-again in the owner's SSH stdio session and execute there; controller-side plans are not transferable.
-Command-specific stale checks and the release-transition authorization contract remain distinct
-from this session-level plan storage.
+explicit `confirmed=true`. The `operation-exact-plan-v1` capability adds `exact:true` to
+`operation.plan`. Its response contains `schema`, the owner `plan`, its `digest` and `expiresAt`.
+Exact execution requires that digest in the same RPC session, consumes the plan once and rejects
+expiry, mismatched bindings and replay. The binding covers the owner context, arguments, public
+plan and captured private assessment fingerprint. Request deadlines remain separate from the
+five-minute plan lifetime. Integration mutations require this contract. Their controller keeps
+one SSH stdio session from owner assessment through central confirmation and owner execution;
+a disconnect discards the plan. `integration.status` uses the same read-only owner query.
+
+Other command families retain their existing routing until explicitly migrated. Legacy execution
+still refuses a controller-side plan routed to a remote owner with `remote_owner_required`;
+controller plans cannot be transferred to another session. Command-specific stale checks and the
+release-transition authorization contract remain distinct from session-level plan storage.
 
 The full snapshot contains one revision over context, public commands, project inventory, yard status and
 redacted credential metadata; `snapshot.ready` and Incus events use the same ordered event channel.

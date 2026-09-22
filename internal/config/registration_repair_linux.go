@@ -75,6 +75,10 @@ func (repair *YardRegistrationRepair) Apply() error {
 }
 
 func (repair *YardRegistrationRepair) apply(fault func() error) error {
+	return repair.applyGuarded(nil, fault)
+}
+
+func (repair *YardRegistrationRepair) applyGuarded(guard, fault func() error) error {
 	if repair == nil || repair.name == "default" || !domain.SafeName(repair.name) ||
 		!filepath.IsAbs(repair.root) {
 		return errors.New("yard registration repair plan is invalid")
@@ -95,6 +99,11 @@ func (repair *YardRegistrationRepair) apply(fault func() error) error {
 		return err
 	}
 	defer unix.Flock(root, unix.LOCK_UN)
+	if guard != nil {
+		if err := guard(); err != nil {
+			return err
+		}
+	}
 
 	yards, err := openRegistrationRepairDirectoryAt(root, "yards")
 	if err != nil {

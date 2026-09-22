@@ -243,6 +243,41 @@ dev/agent-e2e.sh --slot "$slot" --purpose incus-group-reexec --vm 1 -- \
 | `peer-cleanup`, `cleanup` | same retained allocation | exact marked fixtures and run worktrees | standalone idempotent cleanup/verifier |
 | `--lane full` | all prerequisites above | union of the marked scopes | periodic manual and risk-selected exhaustive matrix; includes release smoke |
 
+The integration selection fixtures use only marker-owned yards on allocated VM1. They exercise
+fresh/default selection, legacy selection adoption with established inventory, evidence-backed
+retirement, desired-retained failure and retry, and stopped-yard rejection without model API calls:
+
+```sh
+dev/agent-e2e.sh --slot "$slot" --purpose integration-selection --vm 1 -- \
+  bash dev/e2e/integration-selection.sh container
+```
+
+Other modes are `vm`, `default`, `special` (fresh test-vms role), and `upgrade` (owned
+ordinary-yard artifacts retired when adopting the test-vms role). The `default` mode installs
+all five fresh-default integrations and needs their normal package download access. Test config,
+physical project and instance names, and teardown are isolated from the retained host baseline.
+
+The pinned legacy-upgrade fixture installs the published v0.14.0 ordinary default, then exercises
+candidate-owned planning, exact ownership adoption, disable/re-enable preservation,
+rollback with the retained config writer, and a forward retry:
+
+```sh
+dev/agent-e2e.sh --slot "$slot" --purpose integration-legacy-upgrade --vm 1 -- \
+  bash dev/e2e/integration-legacy-upgrade.sh
+```
+
+The remote fixture runs a temporary loopback OpenSSH server with a synthetic key forced to the
+selected owner's RPC endpoint. It uses independent controller settings and exercises real framed
+plan/execute, digest tampering, replay, public remote status/enable/disable and stopped refusal:
+
+```sh
+dev/agent-e2e.sh --slot "$slot" --purpose integration-remote --vm 1 -- \
+  bash dev/e2e/integration-remote.sh
+```
+
+These are targeted lifecycle checks; publication still requires the fresh release smoke.
+Run `--lane full` when selected by change impact or required by broader runtime coupling.
+
 Android/GPU, real credentials and external-service profiles use separate explicitly prerequisite-
 gated lanes. A generic dependency-free resource pass does not report those handlers green.
 

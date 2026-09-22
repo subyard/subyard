@@ -230,7 +230,7 @@ owner_project_contract() {
 }
 
 owner_cleanup() {
-  local rc=$? source="/tmp/subyard-p0-project-$TOKEN" patch fingerprint yard registration
+  local rc=$? source="/tmp/subyard-p0-project-$TOKEN" patch fingerprint yard registration vm
   local cleanup_failed=0
   trap - EXIT
   set +e
@@ -241,13 +241,24 @@ owner_cleanup() {
   fi
   for yard in e2e-yard test-yard; do
     registration="$OWNER_YARD_DIR/$yard.env"
+    if [ -e "$OWNER_YARD_DIR/$yard/config.env" ] || [ -L "$OWNER_YARD_DIR/$yard/config.env" ]; then
+      registration="$OWNER_YARD_DIR/$yard/config.env"
+    fi
     [ -f "$registration" ] || continue
-    grep -Fqx "# $MARKER" "$registration" || { cleanup_failed=1; continue; }
+    [ ! -L "$registration" ] && [ -O "$registration" ] \
+      && grep -Fqx "# $MARKER" "$registration" || { cleanup_failed=1; continue; }
     if grep -Fqx 'YARD_TEMPLATE=e2e-vms' "$registration"; then
       sed -i 's/^YARD_TEMPLATE=e2e-vms$/YARD_TEMPLATE=test-vms/' "$registration" \
         || cleanup_failed=1
     fi
     if incus project show "subyard-$yard" >/dev/null 2>&1; then
+      if [ "$rc" -ne 0 ] && [ "$yard" = test-yard ]; then
+        for vm in e2e-vm-1 e2e-vm-2; do
+          timeout 15 incus exec "yard-$yard" --project "subyard-$yard" -- \
+            incus --project subyard-e2e-vms-slot-1 console "$vm" --show-log 2>&1 \
+            | tail -n 60 >&2
+        done
+      fi
       if ! ./bin/yard -Y "$yard" teardown --yes >/dev/null 2>&1; then
         cleanup_failed=1
         continue
@@ -282,6 +293,7 @@ owner_cleanup() {
 
 cleanup_owner_test_vms_sink() {
   local path present=0 touched=0 unsafe=0
+  local -a sink_homes=()
   for path in "$OWNER_TEST_VMS_SINK" "$OWNER_TEST_VMS_SINK_SERVICE" \
     "$OWNER_TEST_VMS_SINK_TIMER"; do
     if [ -e "$path" ] || [ -L "$path" ]; then
@@ -300,14 +312,20 @@ cleanup_owner_test_vms_sink() {
       || unsafe=1
   fi
   if [ -e "$OWNER_TEST_VMS_SINK_SERVICE" ] && [ "$unsafe" = 0 ]; then
-    grep -Fqx "Environment=\"SUBYARD_HOME=$OWNER_DATA_ROOT\"" \
-      "$OWNER_TEST_VMS_SINK_SERVICE" \
+    mapfile -t sink_homes < <(sed -n 's/^Environment="SUBYARD_HOME=\([^"[:space:]]*\)"$/\1/p' \
+      "$OWNER_TEST_VMS_SINK_SERVICE")
+    [ "${#sink_homes[@]}" = 1 ] && [[ "${sink_homes[0]}" =~ ^/[A-Za-z0-9_./-]+$ ]] \
       && grep -Fqx "ExecStart=$OWNER_TEST_VMS_SINK _test-vms-host-sink sync" \
         "$OWNER_TEST_VMS_SINK_SERVICE" \
       || unsafe=1
   fi
   [ "$unsafe" = 0 ] \
     || { printf 'p0-guest: refusing unsafe owner test-vms sink artifacts\n' >&2; return 1; }
+  # A retained platform sink can belong to another fixture. Its valid artifacts
+  # are outside this owner's cleanup scope, just as in retire_fixture_sink.
+  if [ "$present" = 1 ] && [ "${sink_homes[0]}" != "$OWNER_DATA_ROOT" ]; then
+    return 0
+  fi
   if [ -e "$OWNER_TEST_VMS_SINK_TIMER" ]; then
     sudo -n systemctl disable --now "$OWNER_TEST_VMS_SINK_TIMER_NAME" >/dev/null 2>&1 \
       || return 1
@@ -344,16 +362,23 @@ prepare_owner_go_cache() {
 
 write_owner_registration() { # <yard> <template> <ssh-port> [slot-count]
   local yard="$1" template="$2" port="$3" slots="${4:-2}" registration
+  local selection='AGENTS=none'
   [[ "$slots" =~ ^[1-9][0-9]{0,2}$ ]] \
     || die "invalid diagnostic slot count $slots"
   registration="$OWNER_YARD_DIR/$yard.env"
+  # Retain predecessor fixtures until candidate init adopts their registration.
+  if [ -e "$OWNER_YARD_DIR/$yard/config.env" ] || [ -L "$OWNER_YARD_DIR/$yard/config.env" ]; then
+    registration="$OWNER_YARD_DIR/$yard/config.env"
+    selection="CODING_TOOL_INTEGRATIONS=''"
+  fi
   install -d -m 0700 "$OWNER_YARD_DIR"
-  if [ -e "$registration" ]; then
-    grep -Fqx "# $MARKER" "$registration" \
+  if [ -e "$registration" ] || [ -L "$registration" ]; then
+    [ -f "$registration" ] && [ ! -L "$registration" ] && [ -O "$registration" ] \
+      && grep -Fqx "# $MARKER" "$registration" \
       || die "refusing to replace unrelated registration $registration"
   fi
-  printf '# %s\nYARD_TEMPLATE=%s\nSSH_PORT=%s\nAGENTS=none\nDEV_UID=%s\nE2E_VM_CPU=1\nE2E_VM_MEMORY=%s\nE2E_VM_DISK=10GiB\nE2E_VM_SLOT_COUNT=%s\nE2E_VM_BOOT_TIMEOUT=%s\nBASE_IMAGE=%s\nBASE_IMAGE_FALLBACK=%s\n' \
-    "$MARKER" "$template" "$port" "$OWNER_DIAGNOSTIC_DEV_UID" "$OWNER_DIAGNOSTIC_VM_MEMORY" \
+  printf '# %s\nYARD_TEMPLATE=%s\nSSH_PORT=%s\n%s\nDEV_UID=%s\nE2E_VM_CPU=1\nE2E_VM_MEMORY=%s\nE2E_VM_DISK=10GiB\nE2E_VM_SLOT_COUNT=%s\nE2E_VM_BOOT_TIMEOUT=%s\nBASE_IMAGE=%s\nBASE_IMAGE_FALLBACK=%s\n' \
+    "$MARKER" "$template" "$port" "$selection" "$OWNER_DIAGNOSTIC_DEV_UID" "$OWNER_DIAGNOSTIC_VM_MEMORY" \
     "$slots" "$OWNER_DIAGNOSTIC_VM_BOOT_TIMEOUT" \
     "$OWNER_BASE_IMAGE" "$OWNER_BASE_IMAGE" \
     > "$registration"
@@ -474,7 +499,7 @@ canonical_broker_release_migration_contract() {
   local runtime_root="${SUBYARD_HOME:-$HOME/.subyard}/runtime"
   local active_old_hash active_new_hash expected_hash inactive_marker
   local rolled_back_hash
-  local current_registration old_yard state
+  local current_registration registration_archive old_yard state
 
   [ "$("$runtime_root/current/bin/yard" --version)" = "yard $P0_CURRENT_BASE_VERSION" ] \
     || die 'broker migration fixture requires the canonical layout-2 runtime'
@@ -538,9 +563,21 @@ canonical_broker_release_migration_contract() {
   old_yard="$runtime_root/current/bin/yard"
   "$old_yard" -Y test-yard teardown --yes
   current_registration="$OWNER_YARD_DIR/test-yard.env"
-  grep -Fqx "# $MARKER" "$current_registration" \
+  if [ -e "$OWNER_YARD_DIR/test-yard/config.env" ] || [ -L "$OWNER_YARD_DIR/test-yard/config.env" ]; then
+    current_registration="$OWNER_YARD_DIR/test-yard/config.env"
+  fi
+  [ -f "$current_registration" ] && [ ! -L "$current_registration" ] && [ -O "$current_registration" ] \
+    && grep -Fqx "# $MARKER" "$current_registration" \
     || die 'broker migration fixture lost its owned canonical registration'
   find "$current_registration" -delete
+  # The next fixture starts an independent predecessor history for this yard.
+  registration_archive="$OWNER_CONFIG_HOME/recovery/yard-registrations/test-yard.env"
+  if [ -e "$registration_archive" ] || [ -L "$registration_archive" ]; then
+    [ -f "$registration_archive" ] && [ ! -L "$registration_archive" ] && [ -O "$registration_archive" ] \
+      && grep -Fqx "# $MARKER" "$registration_archive" \
+      || die 'broker migration fixture has an unrelated registration archive'
+    find "$registration_archive" -delete
+  fi
   printf 'ok: active broker auto-upgraded and inactive broker stayed inactive\n'
 }
 
@@ -996,18 +1033,18 @@ reexec_with_incus_group() {
 run_incus_installer() {
   local state_root="$1" storage_path="$2"; shift 2
   (
+    local bootstrap_root="$P0_CAPACITY_STATE_ROOT/incus-bootstrap" bootstrap_rc=0
+    p0_capacity_prepare_subtree "$bootstrap_root"
+    trap 'bootstrap_rc=$?; p0_capacity_remove_subtree "$bootstrap_root" || bootstrap_rc=3; exit "$bootstrap_rc"' EXIT
     # shellcheck source=tests/helpers/test-context.sh
     . "$ROOT/tests/helpers/test-context.sh"
-    setup_test_context "$state_root/e2e-bootstrap"
+    setup_test_context "$bootstrap_root"
     export SUBYARD_USER
     SUBYARD_USER="$(id -un)"
     export SUBYARD_OPERATOR_HOME="$HOME"
     export SUBYARD_CONFIG_DIR="$ROOT/config"
-    export SUBYARD_CONFIG_HOME="$state_root/e2e-bootstrap-config"
-    export SUBYARD_HOME="$state_root"
+    # Bootstrap config/data stay operator-owned; persistent Incus parents may be root-owned.
     export STORAGE_PATH="$storage_path"
-    export HOST_BASE="$state_root/host-data"
-    export RESTRICTED_DISK_PATHS="$HOST_BASE"
     set -a
     # shellcheck source=config/host.env
     . "$ROOT/config/host.env"

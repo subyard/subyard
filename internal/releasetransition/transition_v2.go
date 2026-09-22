@@ -46,6 +46,7 @@ func assessV2Action(
 	policy *domain.ActionRegistry,
 	changed bool,
 	legacyRollbackCompatible bool,
+	activationConsequences []string,
 ) (domain.ActionAssessment, error) {
 	consequences := []string(nil)
 	if changed {
@@ -53,6 +54,7 @@ func assessV2Action(
 		if legacyRollbackCompatible {
 			consequences = append(consequences, v2RollbackNoOpConsequence)
 		}
+		consequences = append(consequences, activationConsequences...)
 	}
 	return policy.Assess(v2ActionID, domain.ActionDelta{
 		Changed: changed, Consequences: consequences,
@@ -92,9 +94,10 @@ type V2ActivationReconciler interface {
 }
 
 type V2ActivationObservation struct {
-	Actual    Fingerprint `json:"actual"`
-	Desired   Fingerprint `json:"desired"`
-	Converged bool        `json:"converged"`
+	Actual       Fingerprint `json:"actual"`
+	Desired      Fingerprint `json:"desired"`
+	Converged    bool        `json:"converged"`
+	Consequences []string    `json:"consequences,omitempty"`
 }
 
 type V2Transition struct {
@@ -131,23 +134,24 @@ type v2Work struct {
 }
 
 type v2Observation struct {
-	goal              Goal
-	links             ReleaseLinks
-	ledger            LedgerV2
-	ledgerSnapshot    ProtectedSnapshot
-	journal           *JournalRecord
-	journalSnapshot   ProtectedSnapshot
-	assessment        domain.ActionAssessment
-	decisions         []RedactedDecision
-	blockers          []Blocker
-	observations      []ResourceObservation
-	intents           []PlannerStepIntent
-	work              []v2Work
-	activationScope   []v2ActivationScope
-	observationScope  Fingerprint
-	activationFixed   bool
-	replacement       *JournalReplacement
-	supersededJournal *JournalRecord
+	goal                   Goal
+	links                  ReleaseLinks
+	ledger                 LedgerV2
+	ledgerSnapshot         ProtectedSnapshot
+	journal                *JournalRecord
+	journalSnapshot        ProtectedSnapshot
+	assessment             domain.ActionAssessment
+	decisions              []RedactedDecision
+	blockers               []Blocker
+	observations           []ResourceObservation
+	intents                []PlannerStepIntent
+	work                   []v2Work
+	activationScope        []v2ActivationScope
+	activationConsequences []string
+	observationScope       Fingerprint
+	activationFixed        bool
+	replacement            *JournalReplacement
+	supersededJournal      *JournalRecord
 }
 
 type v2ActivationScope struct {
@@ -1147,7 +1151,7 @@ func (transition *V2Transition) observe(ctx context.Context, goal Goal) (v2Obser
 	legacyRollbackCompatible := transition.options.Direction == DirectionActivatePrevious &&
 		transition.options.RollbackTarget != nil &&
 		transition.options.RollbackTarget.RegistryDigest == ""
-	assessment, err := assessV2Action(transition.policy, changed, legacyRollbackCompatible)
+	assessment, err := assessV2Action(transition.policy, changed, legacyRollbackCompatible, observation.activationConsequences)
 	if err != nil {
 		return v2Observation{}, err
 	}
@@ -2510,6 +2514,7 @@ func (transition *V2Transition) observeActivation(
 			return err
 		}
 		if !actual.Converged {
+			observation.activationConsequences = append(observation.activationConsequences, actual.Consequences...)
 			observation.decisions = append(observation.decisions, RedactedDecision{
 				Resource: "activation." + id, Scope: "activation",
 				Decision: DecisionCanonicalize, Result: "converged",

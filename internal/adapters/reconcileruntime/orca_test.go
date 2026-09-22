@@ -143,6 +143,66 @@ esac
 	}
 }
 
+func TestProvisionRefreshesOrcaAfterBaseBeforeIntegrationHooks(t *testing.T) {
+	for _, failure := range []string{"", "base", "orca"} {
+		t.Run("failure="+failure, func(t *testing.T) {
+			root := t.TempDir()
+			handler := `#!/bin/sh
+set -eu
+[ -e "$BASE_READY" ]
+case "$2" in
+  observe)
+    if [ -e "$ORCA_READY" ]; then
+      printf '{"state":"current","actual":"%s","desired":"%s"}\n' "$NEW" "$NEW"
+    else
+      printf '{"state":"stale","actual":"%s","desired":"%s"}\n' "$OLD" "$NEW"
+    fi
+    ;;
+  apply)
+    [ "$FAIL_STAGE" != orca ]
+    : > "$ORCA_READY"
+    printf '{"state":"current","actual":"%s","desired":"%s"}\n' "$NEW" "$NEW"
+    ;;
+esac
+`
+			runtime := orcaRuntimeFixtureWithHandler(t, root, handler)
+			for path, content := range map[string]string{
+				"config/projects-changed.sh":        "#!/bin/sh\nexit 0\n",
+				"scripts/04-provision-subyard.sh":   "#!/bin/sh\nset -eu\n[ \"$FAIL_STAGE\" != base ]\n: > \"$BASE_READY\"\n",
+				"scripts/reconcile-integrations.sh": "#!/bin/sh\nexit 0\n",
+			} {
+				full := filepath.Join(root, path)
+				if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(full, []byte(content), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ready := filepath.Join(root, "orca-ready")
+			executor := &retryableIntegrationExecutor{pending: true, hookReady: ready}
+			runtime.Executor = executor
+			incus := runtime.Incus.(*testkit.Incus)
+			incus.Reconcile = ports.ReconcileState{InstanceFound: true, Instance: incus.Instances["subyard/yard"]}
+			runtime.Environment = []string{
+				"BASE_READY=" + filepath.Join(root, "base-ready"), "ORCA_READY=" + ready,
+				"FAIL_STAGE=" + failure, "OLD=" + orcaOldDigest, "NEW=" + orcaNewDigest,
+				"SUBYARD_OPERATION_ID=op-12345678",
+			}
+			err := runtime.ApplyStage(context.Background(), ports.ReconcileStageProvision)
+			if failure != "" {
+				if err == nil || executor.hookAttempts != 0 || executor.commits != 0 {
+					t.Fatalf("failed %s reached hooks/commit: err=%v hooks=%d commits=%d", failure, err, executor.hookAttempts, executor.commits)
+				}
+				return
+			}
+			if err != nil || executor.hookAttempts != 1 || executor.commits != 1 || executor.pending {
+				t.Fatalf("provision order failed: err=%v hooks=%d commits=%d pending=%v", err, executor.hookAttempts, executor.commits, executor.pending)
+			}
+		})
+	}
+}
+
 func orcaRuntimeFixture(t *testing.T, output string) Runtime {
 	t.Helper()
 	root := t.TempDir()

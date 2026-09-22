@@ -525,7 +525,18 @@ assert_direct_normalizer_is_pure() {
     || die 'direct normalization changed the scoped operator tree'
 }
 
-verify_migration() {
+verify_migrated_yard_registration() { # [adopted]
+  operator_env bash -c '
+    set -euo pipefail
+    { sed "s/^YARD_TEMPLATE=e2e-vms$/YARD_TEMPLATE=test-vms/" "$1"
+      if [ "$3" = adopted ]; then printf "%s\n" "$4"; fi
+    } | cmp - "$2"
+  ' _ "$SOURCE_ROOT/private/yards/e2e-yard.env" \
+    "$OPERATOR_HOME/.config/subyard/yards/test-yard/config.env" \
+    "${1:-}" "CODING_TOOL_INTEGRATIONS=''"
+}
+
+verify_migration() { # [adopted]
   local runtime="$OPERATOR_HOME/.subyard/runtime/current/bin/yard"
   [ "$(operator_env readlink "$OPERATOR_HOME/.local/bin/yard")" = "$runtime" ] \
     && [ "$(operator_env readlink "$OPERATOR_HOME/.local/bin/sy")" = "$runtime" ] \
@@ -534,11 +545,8 @@ verify_migration() {
     || die 'source checkout was changed or removed'
   operator_env cmp "$SOURCE_ROOT/private/config.env" "$OPERATOR_HOME/.config/subyard/config.env" \
     || die 'host settings were not migrated'
-  operator_env bash -c \
-    'sed "s/^YARD_TEMPLATE=e2e-vms$/YARD_TEMPLATE=test-vms/" "$1" | cmp - "$2"' _ \
-    "$SOURCE_ROOT/private/yards/e2e-yard.env" \
-    "$OPERATOR_HOME/.config/subyard/yards/test-yard/config.env" \
-    || die 'named test yard was normalized and renamed'
+  verify_migrated_yard_registration "${1:-}" \
+    || die 'named test yard registration differs from its authorized migration and adoption'
   operator_env cmp "$SOURCE_ROOT/private/agents/codex/repo.rules" \
     "$OPERATOR_HOME/.config/subyard/overrides/host/agents/codex/repo.rules" \
     || die 'private agent asset was not migrated'
@@ -631,11 +639,14 @@ verify_authorized_source_ingress() {
 
 verify_config_workflow() {
   local default_show paths show_output host_hash guest_hash status_output status_rc
+  [ "$(operator_yard -Y "$YARD_NAME" config show CODING_TOOL_INTEGRATIONS | sed -n 's/^effective: //p')" = '<unset>' ] \
+    && [ "$(operator_yard config show CODING_TOOL_INTEGRATIONS | sed -n 's/^effective: //p')" = codex ] \
+    || die 'migrated integration selection did not preserve the broker/workspace roles'
   default_show="$(operator_yard config show DEV_SUDO)"
   grep -Fq 'effective: 1' <<<"$default_show" \
     && grep -Fq "$OPERATOR_HOME/.config/subyard/config.env" <<<"$default_show" \
     || die 'default-yard config did not consume migrated host settings'
-  paths="$(operator_yard -Y "$YARD_NAME" config paths)"
+  paths="$(operator_yard config paths)"
   grep -Fq "configuration-root: $OPERATOR_HOME/.config/subyard" <<<"$paths" \
     || die 'config paths did not report the persistent configuration root'
   grep -Fq \
@@ -651,24 +662,24 @@ verify_config_workflow() {
   ! grep -Eq 'source-(staging|qa|profile)-fixture' <<<"$show_output" \
     || die 'config show printed a secret value'
   set +e
-  status_output="$(operator_yard -Y "$YARD_NAME" config status --all-local 2>&1)"
+  status_output="$(operator_yard config status --all-local 2>&1)"
   status_rc=$?
   set -e
   printf '%s\n' "$status_output"
   if [ "$status_rc" -ne 0 ]; then
     [ "$status_rc" -eq 1 ] \
-      && grep -Fq 'yard test-yard materialized-config: drift' <<<"$status_output" \
-      && grep -Fq 'config status: materialized agent config drift in yards: test-yard' \
+      && grep -Fq 'yard default materialized-config: drift' <<<"$status_output" \
+      && grep -Fq 'config status: materialized agent config drift in yards: default' \
         <<<"$status_output" \
       || die 'config status failed for a reason other than expected agent drift'
   fi
   ! grep -Eq 'source-(staging|qa|profile)-fixture' <<<"$status_output" \
     || die 'config status printed a secret value'
-  operator_yard -Y "$YARD_NAME" config apply --all-local --yes
-  operator_yard -Y "$YARD_NAME" config status --all-local
+  operator_yard config apply --all-local --yes
+  operator_yard config status --all-local
   host_hash="$(sudo -n sha256sum \
     "$OPERATOR_HOME/.config/subyard/overrides/host/agents/codex/repo.rules" | awk '{print $1}')"
-  guest_hash="$(incus exec "$INSTANCE" --project "$PROJECT" --user 1001 --group 1001 -- \
+  guest_hash="$(incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" --user 1000 --group 1000 -- \
     sha256sum /home/dev/.codex/rules/repo.rules | awk '{print $1}')"
   [ "$host_hash" = "$guest_hash" ] || die 'migrated Codex rules were not applied to the yard'
 }
@@ -676,8 +687,9 @@ verify_config_workflow() {
 verify_without_source_checkout() {
   local unavailable="$OPERATOR_HOME/src.unavailable"
   operator_env mv "$SOURCE_ROOT" "$unavailable"
-  if ! operator_yard -Y "$YARD_NAME" config paths >/dev/null \
-    || ! operator_yard -Y "$YARD_NAME" config status --all-local \
+  if ! operator_yard config paths >/dev/null \
+    || ! operator_yard config status --all-local \
+    || ! operator_yard check \
     || ! operator_yard -Y "$YARD_NAME" check; then
     operator_env mv "$unavailable" "$SOURCE_ROOT"
     die 'installed runtime still depends on the source checkout'
@@ -791,18 +803,18 @@ prepare_default_yard() {
 run_incus_installer() {
   p0_capacity_prepare_platform_root
   (
+    local bootstrap_root="$P0_CAPACITY_STATE_ROOT/incus-bootstrap" bootstrap_rc=0
+    p0_capacity_prepare_subtree "$bootstrap_root"
+    trap 'bootstrap_rc=$?; p0_capacity_remove_subtree "$bootstrap_root" || bootstrap_rc=3; exit "$bootstrap_rc"' EXIT
     # shellcheck source=tests/helpers/test-context.sh
     . "$ROOT/tests/helpers/test-context.sh"
-    setup_test_context "$P0_CAPACITY_PLATFORM_ROOT/p0-source-bootstrap-$TOKEN"
+    setup_test_context "$bootstrap_root"
     export SUBYARD_USER
     SUBYARD_USER="$(id -un)"
     export SUBYARD_OPERATOR_HOME="$HOME"
     export SUBYARD_CONFIG_DIR="$ROOT/config"
-    export SUBYARD_CONFIG_HOME="$HOME/.config/subyard"
-    export SUBYARD_HOME="$P0_CAPACITY_PLATFORM_ROOT"
-    export STORAGE_PATH="$SUBYARD_HOME/incus/incus/storage"
-    export HOST_BASE="$SUBYARD_HOME/p0-source-host-data-$TOKEN"
-    export RESTRICTED_DISK_PATHS="$HOST_BASE"
+    # Preserve the retained pool path without writing config/data into its root-owned parents.
+    export STORAGE_PATH="$P0_CAPACITY_PLATFORM_ROOT/incus/incus/storage"
     set -a
     # shellcheck source=config/host.env
     . "$ROOT/config/host.env"
@@ -869,9 +881,9 @@ prepare() {
     || die 'test-yard migration did not establish desired=running'
   operator_yard -Y "$YARD_NAME" check
   p0_retry_init_after_plan_stale operator_yard -Y "$YARD_NAME" init --yes
+  prepare_default_yard
   verify_config_workflow
   verify_without_source_checkout
-  prepare_default_yard
   operator_yard stop --yes
 
   verify_v2_release_transition "$VERSION_A"
@@ -919,11 +931,11 @@ resume() {
   operator_no_go env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT/b" \
     "$OPERATOR_HOME/.local/bin/yard" update --version "$VERSION_B" --yes
   verify_v2_release_transition "$VERSION_B"
+  operator_yard -Y "$YARD_NAME" stop --yes
+  operator_yard start --yes
   verify_config_workflow
   operator_env chmod 0600 \
     "$OPERATOR_HOME/.config/subyard/yards/test-yard/config.env"
-  operator_yard -Y "$YARD_NAME" stop --yes
-  operator_yard start --yes
   [ "$(incus config get "$INSTANCE" user.subyard.desired_power --project "$PROJECT")" = stopped ] \
     && [ "$(incus config get "$DEFAULT_INSTANCE" user.subyard.desired_power \
       --project "$DEFAULT_PROJECT")" = running ] \
@@ -970,7 +982,7 @@ finish() {
   # broker readiness before binding a plan to the intentional config drift.
   wait_for_test_vm_broker || die 'test VM broker did not become ready after yard start'
   # Starting the yard does not wait for every broker service. Establish the
-  # release fixed point before injecting drift into its materialized config.
+  # release fixed point before injecting drift into the default workspace.
   for attempt in $(seq 1 60); do
     report="$(operator_yard migrate --check --json)"
     if jq -e '.schemaVersion == 1 and .current == .outcome.target and
@@ -991,10 +1003,10 @@ finish() {
     printf '%s\n' "$report" >&2
     die 'current release did not reach readiness after yard start'
   fi
-  # Seed harmless materialized drift in the fixture yard, then repair the exact
-  # installed release without replaying its completed migrations.
-  incus exec "$INSTANCE" --project "$PROJECT" --user 1001 --group 1001 -- \
-    sh -c 'printf "\n# current-release migration fixture\n" >> /home/dev/.codex/rules/repo.rules'
+  # Remove an owned artifact to exercise repair without replaying completed migrations.
+  # Edited artifacts must instead fail closed to preserve user changes.
+  incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" --user 1000 --group 1000 -- \
+    rm /home/dev/.codex/rules/repo.rules
   verify_v2_release_transition "$VERSION_B"
   operator_env cat "$transition_root/ledger.json" > "$ledger_before"
   operator_env cat "$transition_root/journal.json" > "$journal_before"
@@ -1010,11 +1022,14 @@ finish() {
     .outcome.status == "migration-required" and .next == "yard migrate" and
     all(.domains[]; .pending == []) and
     any(.decisions[]; .scope == "activation" and .resource == "activation.materialized-config")
-  ' <<<"$report" >/dev/null || die 'current migration check did not identify runtime drift'
+  ' <<<"$report" >/dev/null || {
+    printf '%s\n' "$report" >&2
+    die 'current migration check did not identify runtime drift'
+  }
   operator_env cat "$transition_root/journal.json" | cmp "$journal_before" - \
     || die 'current migration check changed the journal'
-  incus exec "$INSTANCE" --project "$PROJECT" --user 1001 --group 1001 -- \
-    grep -Fq '# current-release migration fixture' /home/dev/.codex/rules/repo.rules \
+  incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" --user 1000 --group 1000 -- \
+    test ! -e /home/dev/.codex/rules/repo.rules \
     || die 'current migration check repaired materialized configuration'
   operator_no_go env YARD_RELEASE_BASE_URL="file://$SHARED_ROOT/forbidden-release" \
     YARD_RELEASE_CACHE="$SHARED_ROOT/forbidden-cache" YARD_RELEASE_VERSION=invalid/selected/version \
@@ -1032,7 +1047,7 @@ finish() {
     || die 'post-reboot activation repair changed the runtime pair'
   host_hash="$(sudo -n sha256sum \
     "$OPERATOR_HOME/.config/subyard/overrides/host/agents/codex/repo.rules" | awk '{print $1}')"
-  guest_hash="$(incus exec "$INSTANCE" --project "$PROJECT" --user 1001 --group 1001 -- \
+  guest_hash="$(incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" --user 1000 --group 1000 -- \
     sha256sum /home/dev/.codex/rules/repo.rules | awk '{print $1}')"
   [ "$host_hash" = "$guest_hash" ] || die 'current migration did not repair the materialized rules'
   report="$(operator_yard migrate --check --json)"
@@ -1070,7 +1085,7 @@ finish() {
   fi
   [ "$(operator_yard --version)" = "yard $VERSION_B" ] \
     || die 'rejected source restore changed the active runtime'
-  verify_migration
+  verify_migration adopted
   p0_retry_init_after_plan_stale operator_yard -Y "$YARD_NAME" init --yes
   operator_yard -Y "$YARD_NAME" check
   verify_config_workflow

@@ -11,8 +11,10 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 
+	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
@@ -55,17 +57,7 @@ func (cli *CLI) runReleaseTransition(ctx context.Context, arguments []string) in
 		cli.errorf("release transition operation context is invalid")
 		return 2
 	}
-	reconcilers := []releasetransition.V2ActivationReconciler{
-		&materializedConfigActivationReconciler{
-			cli: cli, yard: request.Yard, configHome: request.ConfigHome,
-			goal: releasetransition.Goal{
-				Target: request.Target, Direction: request.Direction,
-			},
-			artifactDigest: request.ArtifactDigest,
-			registryDigest: request.RegistryDigest,
-		},
-	}
-	reconcilers = append(reconcilers, cli.nonConfigActivationReconcilers(request)...)
+	reconcilers := cli.activationReconcilers(request)
 	ownerRegistration := cli.ownerRegistrationTransition(request)
 	ingressFactory := cli.releaseTransitionIngressFactory(request)
 	response, err := executeReleaseTransitionRequest(
@@ -85,14 +77,28 @@ func (cli *CLI) runReleaseTransition(ctx context.Context, arguments []string) in
 	return 0
 }
 
+func (cli *CLI) activationReconcilers(request releasetransition.ProcessRequest) []releasetransition.V2ActivationReconciler {
+	reconcilers := cli.nonConfigActivationReconcilers(request)
+	// Integration reconciliation runs project hooks, so repair installed Orca first.
+	materialized := &materializedConfigActivationReconciler{
+		cli: cli, yard: request.Yard, configHome: request.ConfigHome,
+		goal: releasetransition.Goal{
+			Target: request.Target, Direction: request.Direction,
+		},
+		artifactDigest: request.ArtifactDigest,
+		registryDigest: request.RegistryDigest,
+	}
+	return slices.Insert(reconcilers, 1, releasetransition.V2ActivationReconciler(materialized))
+}
+
 // Keep the complete set of non-config activation owners shared by release
 // transitions and bounded materialized-config repair admission.
 func (cli *CLI) nonConfigActivationReconcilers(request releasetransition.ProcessRequest) []releasetransition.V2ActivationReconciler {
 	return []releasetransition.V2ActivationReconciler{
+		cli.orcaActivationReconciler(request),
 		cli.brokerActivationReconciler(request),
 		cli.routeConsumerActivationReconciler(request),
 		cli.powerActivationReconciler(request),
-		cli.orcaActivationReconciler(request),
 	}
 }
 
@@ -595,19 +601,24 @@ func (cli *CLI) powerActivationReconciler(
 			return inspectPowerActivationApplicability(cli.env)
 		},
 		platform: func(context.Context, activationApplicability) (ports.ReconcileStageRunner, error) {
+			// All registered yards must be loaded from candidate configuration,
+			// without treating the active CLI's resolved settings as overrides.
+			operation := *cli
+			operation.baseEnv = freshMigrationEnvironment(cli.baseEnv, cli.options.RepositoryRoot)
+			operation.env = maps.Clone(operation.baseEnv)
 			yard := request.Yard
 			if yard == "" {
 				yard = "default"
 			}
-			loaded, err := cli.resolveReleaseTransitionContext(yard, request.ConfigHome)
+			loaded, err := operation.resolveReleaseTransitionContext(yard, request.ConfigHome)
 			if err != nil {
 				return nil, err
 			}
-			powerYards, err := cli.powerYardContexts(loaded)
+			powerYards, err := operation.powerYardContexts(loaded)
 			if err != nil {
 				return nil, err
 			}
-			return cli.initPlatformWithDispatcher(
+			return operation.initPlatformWithDispatcher(
 				loaded,
 				powerYards,
 				filepath.Join(cli.options.RepositoryRoot, "bin", "yard-engine"),
@@ -659,14 +670,15 @@ func inspectPowerActivationApplicability(
 }
 
 type materializedConfigActivationReconciler struct {
-	cli            *CLI
-	yard           string
-	configHome     string
-	goal           releasetransition.Goal
-	artifactDigest releasetransition.Fingerprint
-	registryDigest releasetransition.Fingerprint
-	allLocal       bool
-	scopeResolved  bool
+	cli              *CLI
+	yard             string
+	configHome       string
+	goal             releasetransition.Goal
+	artifactDigest   releasetransition.Fingerprint
+	registryDigest   releasetransition.Fingerprint
+	allLocal         bool
+	scopeResolved    bool
+	integrationPlans map[string]reconcileruntime.IntegrationPlan
 }
 
 type releaseTransitionConfigApplier struct{ cli *CLI }
@@ -733,23 +745,65 @@ func (reconciler *materializedConfigActivationReconciler) Observe(
 		return releasetransition.V2ActivationObservation{}, err
 	}
 	type targetFingerprint struct {
-		Name        string `json:"name"`
-		Fingerprint string `json:"fingerprint"`
-		State       string `json:"state,omitempty"`
+		Name         string `json:"name"`
+		Fingerprint  string `json:"fingerprint"`
+		State        string `json:"state,omitempty"`
+		Integrations string `json:"integrations,omitempty"`
 	}
 	desired := make([]targetFingerprint, 0, len(targets))
 	actual := make([]targetFingerprint, 0, len(targets))
 	converged := true
+	consequences := []string{}
+	captureIntegrationPlans := reconciler.integrationPlans == nil
+	if captureIntegrationPlans {
+		reconciler.integrationPlans = map[string]reconcileruntime.IntegrationPlan{}
+	}
 	for _, target := range targets {
 		assessment, assessErr := operation.assessConfigTarget(ctx, target, true)
 		if assessErr != nil {
 			return releasetransition.V2ActivationObservation{}, assessErr
 		}
+		integrationScope := ""
+		var managedPaths []string
+		platform := operation.initPlatform(target.Loaded, nil)
+		integration := reconcileruntime.IntegrationPlan{}
+		if runtime, ok := platform.(reconcileruntime.Runtime); ok && target.Loaded.Integrations.AllowsCodingTools {
+			integrationScope, managedPaths, err = runtime.IntegrationScope()
+			if err != nil {
+				return releasetransition.V2ActivationObservation{}, err
+			}
+			if assessment.State == "drift" || assessment.State == "converged" {
+				platform, _, err = prepareLegacyIntegrationAdoption(ctx, target.Loaded.Integrations, platform)
+				if err != nil {
+					return releasetransition.V2ActivationObservation{}, fmt.Errorf("yard %s legacy integrations: %w", target.Name, err)
+				}
+				integration, err = platform.(reconcileruntime.Runtime).IntegrationPlan(ctx)
+				if err != nil {
+					return releasetransition.V2ActivationObservation{}, err
+				}
+				if captureIntegrationPlans {
+					reconciler.integrationPlans[target.Name] = integration
+				}
+			}
+		}
+		if integration.Changed {
+			if integration.AdoptionFingerprint != "" {
+				for _, path := range managedPaths {
+					consequences = append(consequences, fmt.Sprintf("yard %s: manage integration path (create if absent, adopt only exact matching legacy state): %s", target.Name, path))
+				}
+			} else {
+				for _, step := range integration.Steps {
+					consequences = append(consequences, "yard "+target.Name+": "+step)
+				}
+			}
+			consequences = append(consequences, "yard "+target.Name+": reconcile selected integration packages, configs, links, hooks and services")
+			converged = false
+		}
 		desired = append(desired, targetFingerprint{
-			Name: target.Name, Fingerprint: assessment.DesiredFingerprint,
+			Name: target.Name, Fingerprint: assessment.DesiredFingerprint, Integrations: integrationScope,
 		})
 		actual = append(actual, targetFingerprint{
-			Name: target.Name, Fingerprint: assessment.MaterializedFingerprint,
+			Name: target.Name, Fingerprint: operationStateDigest([]string{assessment.MaterializedFingerprint, integration.Fingerprint}),
 			State: assessment.State,
 		})
 		converged = converged && !assessment.Changed
@@ -770,9 +824,10 @@ func (reconciler *materializedConfigActivationReconciler) Observe(
 	desiredDigest := sha256.Sum256(desiredPayload)
 	actualDigest := sha256.Sum256(actualPayload)
 	return releasetransition.V2ActivationObservation{
-		Actual:    releasetransition.Fingerprint(fmt.Sprintf("%x", actualDigest[:])),
-		Desired:   releasetransition.Fingerprint(fmt.Sprintf("%x", desiredDigest[:])),
-		Converged: converged,
+		Actual:       releasetransition.Fingerprint(fmt.Sprintf("%x", actualDigest[:])),
+		Desired:      releasetransition.Fingerprint(fmt.Sprintf("%x", desiredDigest[:])),
+		Converged:    converged,
+		Consequences: consequences,
 	}, nil
 }
 
@@ -887,6 +942,13 @@ func (reconciler *materializedConfigActivationReconciler) Reconcile(
 	targets, err := operation.localConfigTargets(loaded, reconciler.allLocal)
 	if err != nil {
 		return err
+	}
+	// Enroll only the exact legacy state shown in the top-level release plan,
+	// before the ordinary config refresh can replace any unowned bytes.
+	for _, target := range targets {
+		if err := reconciler.reconcileIntegrationTarget(ctx, operation, target); err != nil {
+			return err
+		}
 	}
 	selector := func() ([]configTarget, error) {
 		return operation.refreshLocalConfigTargets(loaded, reconciler.allLocal)
@@ -1102,4 +1164,29 @@ func readReleaseTransitionGrant() (releasetransition.Authorization, error) {
 		}
 	}
 	return releasetransition.Authorization(payload), nil
+}
+
+func (reconciler *materializedConfigActivationReconciler) reconcileIntegrationTarget(ctx context.Context, operation *CLI, target configTarget) error {
+	approved, selected := reconciler.integrationPlans[target.Name]
+	if !selected {
+		return nil
+	}
+	unlock, err := lockIntegrationYard(ctx, target.Loaded)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	platform, _, err := prepareLegacyIntegrationAdoption(ctx, target.Loaded.Integrations, operation.initPlatform(target.Loaded, nil))
+	if err != nil {
+		return err
+	}
+	runtime := platform.(reconcileruntime.Runtime)
+	plan, err := runtime.IntegrationPlan(ctx)
+	if err != nil {
+		return err
+	}
+	if plan.Fingerprint != approved.Fingerprint {
+		return fmt.Errorf("%w: yard %s integrations changed", domain.ErrPlanStale, target.Name)
+	}
+	return runtime.ApplyIntegrations(ctx, plan)
 }

@@ -2992,6 +2992,69 @@ func TestV2TransitionCannotReplaceUnsafeCompletedJournalForSameGoal(t *testing.T
 	}
 }
 
+func TestV2ActivationConsequencesReachProcessInspectionAndBindConsent(t *testing.T) {
+	for _, change := range []string{"none", "consequence", "snapshot"} {
+		t.Run(change, func(t *testing.T) {
+			transition, _, configPath := v2TransitionFixture(t, nil)
+			reconciler := &v2TestReconciler{consequences: []string{
+				"Adopt existing Codex rules under integration management: /home/dev/.codex/rules/repo.rules",
+			}}
+			transition.options.Reconcilers = []V2ActivationReconciler{reconciler}
+			goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
+			inspection, err := transition.InspectProcessV1(context.Background(), goal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := append([]string{v2ChangedConsequence}, reconciler.consequences...)
+			if !slices.Equal(inspection.Assessment.Consequences, want) {
+				t.Fatalf("missing activation consequences: %#v", inspection.Assessment.Consequences)
+			}
+			encoded, err := json.Marshal(ProcessResponse{SchemaVersion: 1, ActivationReconciliationOwned: true, Inspection: &inspection})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var decoded ProcessResponse
+			if err := json.Unmarshal(encoded, &decoded); err != nil || decoded.Inspection == nil || !slices.Equal(decoded.Inspection.Assessment.Consequences, want) {
+				t.Fatalf("existing process protocol lost consequences: %v", err)
+			}
+			before, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch change {
+			case "consequence":
+				reconciler.consequences[0] = "Adopt a different existing artifact"
+			case "snapshot":
+				reconciler.drift = digestC
+			}
+			outcome, err := transition.Converge(context.Background(), Execution{
+				Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
+			})
+			if change == "none" {
+				if err != nil || outcome.Status != StatusReady || reconciler.reconciles != 1 {
+					t.Fatalf("confirmed adoption failed: %#v err=%v", outcome, err)
+				}
+				repeated, err := transition.InspectProcessV1(context.Background(), goal)
+				if err != nil || repeated.Assessment.Changed || len(repeated.Assessment.Consequences) != 0 {
+					t.Fatalf("completed activation retained adoption consequences: %#v err=%v", repeated, err)
+				}
+				return
+			}
+			if err != nil || outcome.Code != CodePlanStale || reconciler.reconciles != 0 {
+				t.Fatalf("changed adoption plan executed: %#v err=%v", outcome, err)
+			}
+			after, err := os.ReadFile(configPath)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatal("stale adoption plan changed configuration")
+			}
+			journal, err := transition.store.ReadCurrentJournal()
+			if err != nil || journal.Exists {
+				t.Fatalf("stale adoption plan published a journal: %v", err)
+			}
+		})
+	}
+}
+
 func TestV2TransitionNamesFailedActivationReconcilerAndPhase(t *testing.T) {
 	transition, _, _ := v2TransitionFixture(t, nil)
 	transition.options.Reconcilers = []V2ActivationReconciler{
@@ -3456,11 +3519,12 @@ func TestV2TransitionDoesNotFabricateLinksWhenPostMutationObservationFails(t *te
 }
 
 type v2TestReconciler struct {
-	id         string
-	converged  bool
-	drift      Fingerprint
-	observes   int
-	reconciles int
+	id           string
+	converged    bool
+	drift        Fingerprint
+	observes     int
+	reconciles   int
+	consequences []string
 }
 
 type v2PostErrorReconciler struct {
@@ -3703,7 +3767,7 @@ func (reconciler *v2TestReconciler) Observe(context.Context, ReleasePair, Releas
 	if drift == "" {
 		drift = digestB
 	}
-	return V2ActivationObservation{Actual: map[bool]Fingerprint{true: digestA, false: drift}[reconciler.converged], Desired: digestA, Converged: reconciler.converged}, nil
+	return V2ActivationObservation{Actual: map[bool]Fingerprint{true: digestA, false: drift}[reconciler.converged], Desired: digestA, Converged: reconciler.converged, Consequences: slices.Clone(reconciler.consequences)}, nil
 }
 
 func (reconciler *v2TestReconciler) Reconcile(context.Context, ReleaseLinks) error {

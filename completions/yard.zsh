@@ -112,6 +112,14 @@ _yard() {
             '--yes[accept the compatible global option]' '--help[show help]'
           ;;
         stop|simple|teardown) _arguments ${registry_options[@]} ;;
+        integration)
+          if (( CURRENT == 2 )); then
+            local -a sub; sub=( ${=command_verbs} )
+            _describe -t subcommands "integration subcommand" sub
+          else
+            _arguments ${registry_options[@]}
+          fi
+          ;;
         remote)
           if (( CURRENT == 2 )); then
             local -a sub; sub=( ${=command_verbs} )

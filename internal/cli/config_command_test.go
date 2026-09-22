@@ -3776,3 +3776,127 @@ func TestConfigAssessmentUsesOwnedFormatForImportedSources(t *testing.T) {
 		})
 	}
 }
+
+func TestConfigSelectionRejectsInvalidAndForbiddenRequestsBeforeConsent(t *testing.T) {
+	for _, test := range []struct {
+		name, value, scope string
+		allowed            bool
+	}{
+		{"unknown root", "missing-integration", "yard", false},
+		{"duplicate root", "codex codex", "yard", false},
+		{"forbidden yard request", "codex", "yard", false},
+		{"inherited host request", "codex", "host", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, _, configHome, environment := configCommandFixture(t)
+			yard := filepath.Join(configHome, "yards/lab/config.env")
+			original := "YARD_TEMPLATE=test-vms\nCODING_TOOL_INTEGRATIONS=''\n"
+			writeConfigCommandFile(t, yard, original)
+			prompt := &testkit.Prompt{Answers: []bool{true}}
+			var stderr bytes.Buffer
+			program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, Arguments: []string{"-Y", "lab", "config", "set", "CODING_TOOL_INTEGRATIONS", test.value, "--scope", test.scope}, Prompt: prompt, Stderr: &stderr})
+			if err != nil {
+				t.Fatal(err)
+			}
+			code := program.Run(context.Background())
+			if test.allowed {
+				if code != 0 || len(prompt.Requests) != 1 {
+					t.Fatalf("inherited request rejected: code=%d %s", code, stderr.String())
+				}
+			} else if code == 0 || len(prompt.Requests) != 0 {
+				t.Fatalf("forbidden request reached consent/write: code=%d prompts=%v %s", code, prompt.Requests, stderr.String())
+			}
+			content, err := os.ReadFile(yard)
+			if err != nil || string(content) != original {
+				t.Fatalf("yard request changed: %q %v", content, err)
+			}
+		})
+	}
+}
+
+func TestConfigYardAuthoringWaitsForIntegrationLock(t *testing.T) {
+	for _, fileSetting := range []bool{false, true} {
+		t.Run(fmt.Sprint(fileSetting), func(t *testing.T) {
+			root, _, configHome, environment := configCommandFixture(t)
+			target := filepath.Join(configHome, "yards/default/config.env")
+			writeConfigCommandFile(t, target, "CODING_TOOL_INTEGRATIONS=''\n")
+			arguments := []string{"config", "set", "SSH_PORT", "2237", "--scope", "yard", "--yes"}
+			if fileSetting {
+				source := filepath.Join(t.TempDir(), "rules")
+				writeConfigCommandFile(t, source, "new rules\n")
+				target = filepath.Join(configHome, "yards/default/overrides/agents/codex/rules/repo.rules")
+				arguments = []string{"config", "import", "AGENT_codex_RULES", source, "--scope", "yard", "--yes"}
+			}
+			program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, Arguments: arguments})
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded := loadConfigCommandContext(t, root, environment, "default")
+			unlock, err := lockIntegrationYard(context.Background(), loaded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer unlock()
+			before, err := readConfigAuthoringTarget(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			if code := program.Run(ctx); code == 0 {
+				t.Fatal("config write bypassed integration lock")
+			}
+			after, err := readConfigAuthoringTarget(target)
+			if err != nil || !sameConfigAuthoringSnapshot(before, after) {
+				t.Fatalf("locked target changed: %v", err)
+			}
+		})
+	}
+}
+
+func TestConfigTemplateTransitionChecksDestinationRoleBeforeConsent(t *testing.T) {
+	for _, test := range []struct {
+		name, initial, action, template string
+		allowed                         bool
+	}{
+		{"explicit tools forbidden", "CODING_TOOL_INTEGRATIONS=codex\n", "set", "test-vms", false},
+		{"empty allowed", "CODING_TOOL_INTEGRATIONS=''\n", "set", "test-vms", true},
+		{"inherited suppressed", "SSH_PORT=2236\n", "set", "test-vms", true},
+		{"unset releases policy", "YARD_TEMPLATE=test-vms\nCODING_TOOL_INTEGRATIONS=''\n", "unset", "", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, _, configHome, environment := configCommandFixture(t)
+			target := filepath.Join(configHome, "yards/ordinary/config.env")
+			writeConfigCommandFile(t, target, test.initial)
+			args := []string{"-Y", "ordinary", "config", test.action, "YARD_TEMPLATE"}
+			if test.action == "set" {
+				args = append(args, test.template)
+			}
+			args = append(args, "--scope", "yard")
+			prompt := &testkit.Prompt{Answers: []bool{true}}
+			var stderr bytes.Buffer
+			program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, Arguments: args, Prompt: prompt, Stderr: &stderr})
+			if err != nil {
+				t.Fatal(err)
+			}
+			code := program.Run(context.Background())
+			if test.allowed {
+				if code != 0 || len(prompt.Requests) != 1 {
+					t.Fatalf("valid transition rejected: code=%d %s", code, stderr.String())
+				}
+				reloaded := loadConfigCommandContext(t, root, environment, "ordinary")
+				if reloaded.Integrations.AllowsCodingTools != (test.action == "unset") {
+					t.Fatalf("wrong destination role: %#v", reloaded.Integrations)
+				}
+			} else {
+				if code == 0 || len(prompt.Requests) != 0 || !strings.Contains(stderr.String(), "clear the yard's CODING_TOOL_INTEGRATIONS") {
+					t.Fatalf("forbidden transition reached consent: code=%d prompts=%v %s", code, prompt.Requests, stderr.String())
+				}
+				content, err := os.ReadFile(target)
+				if err != nil || string(content) != test.initial {
+					t.Fatalf("forbidden transition wrote settings: %q %v", content, err)
+				}
+			}
+		})
+	}
+}

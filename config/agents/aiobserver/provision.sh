@@ -246,6 +246,10 @@ case "\${1:-}" in
     [ "\$(container_value '{{.State.Running}}')" != true ] \
       || timeout 20 docker stop --time 10 "\$container" >/dev/null
     ;;
+  assess-disable)
+    verify_control_files
+    if container_exists; then container_owned || die 'refusing to disable a foreign same-name container'; fi
+    ;;
   disable)
     [ "\$(id -u)" -eq 0 ] || [ "\$test_mode" = 1 ] || die 'disable must run as root'
     verify_control_files

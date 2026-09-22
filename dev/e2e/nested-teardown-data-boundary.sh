@@ -263,6 +263,14 @@ cleanup() {
   local rc=$? cleanup_failed=0
   trap - EXIT INT TERM
   set +e
+  if [ "$rc" != 0 ] && [ -n "$OUTER_INSTANCE" ] \
+    && [ "$(incus config get "$OUTER_INSTANCE" user.subyard.managed \
+      --project "$OUTER_PROJECT" 2>/dev/null)" = true ]; then
+    printf '\n== failed nested yard: instance and console ==\n' >&2
+    timeout 10 incus info "$OUTER_INSTANCE" --project "$OUTER_PROJECT" --show-log >&2
+    timeout 10 incus console "$OUTER_INSTANCE" --project "$OUTER_PROJECT" --show-log \
+      | tail -n 100 >&2
+  fi
   if [ -n "$OUTER_PROJECT" ] && incus project show "$OUTER_PROJECT" >/dev/null 2>&1; then
     yard teardown --yes >/dev/null 2>&1 || { rc=3; cleanup_failed=1; }
   fi
@@ -436,10 +444,12 @@ printf '  [ .. ] creating and tearing down a source inner yard\n'
 outer_dev sh -euc '
   source=$1
   install -d "$HOME/.subyard/workspaces"
+  install -d -m 0700 "$HOME/.config/subyard/yards/default"
+  printf "CODING_TOOL_INTEGRATIONS=\n" > "$HOME/.config/subyard/yards/default/config.env"
   printf "outer sentinel\n" > "$HOME/.subyard/workspaces/active.code-workspace"
   cd "$source"
   env \
-    CODING_TOOL_INTEGRATIONS= HOST_MOUNTS= HOST_LINKS= FORWARD_SSH_AGENT=0 DEV_SUDO=0 \
+    HOST_MOUNTS= HOST_LINKS= FORWARD_SSH_AGENT=0 DEV_SUDO=0 \
     NESTED_E2E_VMS=0 SSH_PORT=23222 MIN_DISK_GIB=1 \
     SUBYARD_NO_AUDIT=1 SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 \
     HOST_CLAUDE_MD= HOST_CODEX_AGENTS_MD= HOST_OPENCODE_AGENTS_MD= \

@@ -92,6 +92,7 @@ runtime_extras=(
   scripts/lib/engine-context.sh
   scripts/install-ssh-relay.sh
   scripts/install-test-vms-host-sink.sh
+  scripts/reconcile-integrations.sh
   config/agents/codex/provision.sh
   config/agents/aiobserver/provision.sh
   config/profiles/hermes/resources/dashboard.res
@@ -126,6 +127,7 @@ for required in \
   scripts/install-runtime-release.sh \
   scripts/install-ssh-relay.sh \
   scripts/install-test-vms-host-sink.sh \
+  scripts/reconcile-integrations.sh \
   config/systemd/subyard-test-vms-host-sink.service.in \
   config/systemd/subyard-test-vms-host-sink.timer.in \
   config/commands.registry \

@@ -56,6 +56,7 @@ SUBYARD_KEYS_SYSTEMD_DIR="$TMP/live-systemd" \
 SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=0 \
 PATH="$TMP/timer-bin:$PATH" \
 ASSUME_YES=1 \
+  env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS \
   "$ROOT/scripts/install-keys-auto-sync.sh" >/dev/null
 expected_runtime="/run/user/$(id -u)"
 grep -Fxq "$expected_runtime|unix:path=$expected_runtime/bus|--user show-environment" "$TMP/systemctl-calls" \

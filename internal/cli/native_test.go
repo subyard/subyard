@@ -5169,7 +5169,11 @@ func nativeFixture(t *testing.T) (string, []string, string) {
 	}, "\n") + "\n"
 	writeCLIFile(t, filepath.Join(root, "config", "commands.registry"), manifest, 0o600)
 	for _, name := range []string{"incus.project.env", "subyard.env", "host.env", "agents.env", "ports.env"} {
-		writeCLIFile(t, filepath.Join(root, "config", name), "", 0o600)
+		content := ""
+		if name == "agents.env" {
+			content = "CODING_TOOL_INTEGRATIONS=\nAGENT_codex_COMMAND=codex\nAGENT_claude_COMMAND=claude\n"
+		}
+		writeCLIFile(t, filepath.Join(root, "config", name), content, 0o600)
 	}
 	home := filepath.Join(root, "home")
 	configHome := filepath.Join(root, "state")

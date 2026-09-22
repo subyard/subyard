@@ -14,8 +14,6 @@ subyard_require_engine_context
 . "$SCRIPT_DIR/lib/ui.sh"
 # shellcheck source=scripts/lib/host.sh
 . "$SCRIPT_DIR/lib/host.sh"
-# shellcheck source=scripts/lib/ai-observer-proxy.sh
-. "$SCRIPT_DIR/lib/ai-observer-proxy.sh"
 
 INCUS_PROJECT="${INCUS_PROJECT:-subyard}"
 YARD_INSTANCE_NAME="${YARD_INSTANCE_NAME:-yard}"
@@ -47,8 +45,10 @@ info "waiting for $YARD_INSTANCE_NAME agent"
 incus_wait_instance_agent "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" \
   || die "instance '$YARD_INSTANCE_NAME' agent did not become ready"
 
+if [ "${ALLOWS_CODING_TOOLS:-true}" != false ]; then
 incus config set "$YARD_INSTANCE_NAME" user.subyard.ccusage_version pending "${PROJ[@]}" \
   || die "could not invalidate ccusage convergence"
+fi
 
 # --- 1. provision inside the yard --------------------------------------------
 # Quoted heredoc: nothing expands on the host; vars arrive via --env.
@@ -139,54 +139,6 @@ else
   rm -f "$sudoers"
 fi
 
-# Agent credentials stay in the yard rootfs; only declared session/state paths use HOST_LINKS.
-# CLAUDE.md is copied in host-side (section 3), not symlinked.
-dev_home="$(getent passwd "$DEV_USER" | cut -d: -f6)"
-
-# Selected credential homes are real rootfs dirs. Drop only their stale legacy symlinks;
-# reconciliation never creates or deletes homes for unselected agents.
-for agent in ${CODING_TOOL_INTEGRATIONS:-}; do
-  case "$agent" in
-    claude) d=.claude ;;
-    codex) d=.codex ;;
-    *) continue ;;
-  esac
-  p="$dev_home/$d"
-  [ -L "$p" ] && rm -f "$p"
-  runuser -u "$DEV_USER" -- mkdir -p "$p"
-done
-unset agent d p
-
-# Symlink dev's session paths to the host-agent-sessions mount (HOST_LINKS, config/host.env).
-# Entry "<name>:<target>[:file]"; ":file" makes the target's parent, not the path. Idempotent;
-# skips an unattached mount; never clobbers a real directory that already holds data.
-if [ -n "${HOST_LINKS:-}" ]; then
-  printf '%s\n' "$HOST_LINKS" | sed 's/[[:space:]]//g' | while IFS=: read -r name target kind; do
-    [ -n "$name" ] && [ -n "$target" ] || continue
-    mroot="/$(printf '%s' "$target" | cut -d/ -f2-4)"
-    [ -d "$mroot" ] || { echo "skip $name -> $target (host mount $mroot not attached)" >&2; continue; }
-    if [ "$kind" = file ]; then
-      runuser -u "$DEV_USER" -- mkdir -p "$(dirname "$target")" 2>/dev/null || true
-    else
-      runuser -u "$DEV_USER" -- mkdir -p "$target" 2>/dev/null || true
-    fi
-    link="$dev_home/$name"
-    runuser -u "$DEV_USER" -- mkdir -p "$(dirname "$link")" 2>/dev/null || true
-    if [ -L "$link" ] || [ ! -e "$link" ]; then
-      ln -sfn "$target" "$link"; chown -h "$DEV_USER:$DEV_USER" "$link"
-    else
-      echo "WARNING: $link exists and is not a symlink — leaving it (move it aside to share)" >&2
-    fi
-  done
-fi
-
-# Detach the exact legacy OpenCode storage symlink; leave real directories untouched.
-legacy_opencode_storage="$dev_home/.local/share/opencode/storage"
-if [ -L "$legacy_opencode_storage" ] \
-  && [ "$(readlink "$legacy_opencode_storage")" = /mnt/host/agent-sessions/opencode/storage ]; then
-  rm -f "$legacy_opencode_storage"
-fi
-
 # /srv skeleton (generic core; profile caches like android-sdk come in Phase 4).
 # Own + group-share ONLY the skeleton dirs this script creates, NON-recursively. A recursive
 # chown/chmod over /srv is destructive here: /srv/workspaces/<id>/src holds shift-mapped bind
@@ -204,6 +156,7 @@ systemctl enable --now ssh docker
 EOS
 ok "in-yard provisioning complete"
 
+if [ "${ALLOWS_CODING_TOOLS:-true}" != false ]; then
 # --- 2. provision the core usage reporter -----------------------------------
 # Unconditional because usage is a core command rather than an CODING_TOOL_INTEGRATIONS entry.
 [ -n "${CCUSAGE_PROVISION:-}" ] || die "ccusage provision hook is not configured"
@@ -216,93 +169,17 @@ incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" \
   -- bash -euo pipefail -s < "$CCUSAGE_PROVISION" \
   || die "ccusage provisioning failed"
 ok "ccusage $CCUSAGE_VERSION ready"
+incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- sh -eu -c '
+  install -d -m 0755 /var/lib/subyard
+  receipt=$(mktemp /var/lib/subyard/.ccusage-ownership.XXXXXX)
+  printf "%s\n" "# subyard-ccusage-ownership-v1" >"$receipt"
+  sha256sum /usr/local/bin/ccusage >>"$receipt"
+  chmod 0600 "$receipt"
+  chown root:root "$receipt"
+  mv -f -- "$receipt" /var/lib/subyard/ccusage-ownership
+' || die "could not record ccusage ownership"
 
-# --- 3. provision enabled agent CLIs ----------------------------------------
-# Hooks live under config/agents/<name> and run as root in the yard.
-echo "Agent CLIs:"
-_aiobserver_selected=0
-for _agent in ${CODING_TOOL_INTEGRATIONS:-}; do
-  [ "$_agent" != aiobserver ] || _aiobserver_selected=1
-  _provision_var="AGENT_${_agent}_PROVISION"
-  _provision="${!_provision_var:-}"
-  [ -n "$_provision" ] || continue
-  [ -r "$_provision" ] || die "$_agent provision hook missing: $_provision"
-  if [ "$_agent" = aiobserver ]; then
-    [[ "${AI_OBSERVER_CONTEXT:-}" =~ ^[0-9a-f]{64}$ ]] \
-      || die "prepared AI Observer context is required"
-    incus config set "$YARD_INSTANCE_NAME" user.subyard.ai_observer_provision pending "${PROJ[@]}" \
-      || die "could not invalidate AI Observer convergence"
-  fi
-  info "provisioning $_agent CLI in $YARD_INSTANCE_NAME"
-  _agent_env=(
-    --env DEV_USER="$DEV_USER"
-    --env CODING_TOOL_INTEGRATIONS="${CODING_TOOL_INTEGRATIONS:-}"
-    --env AI_OBSERVER_CONTEXT="${AI_OBSERVER_CONTEXT:-}"
-    --env YARD_VERSION="${YARD_VERSION:-}"
-  )
-  incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" "${_agent_env[@]}" \
-    -- bash -euo pipefail -s < "$_provision" \
-    || die "$_agent CLI provisioning failed"
-  _check_var="AGENT_${_agent}_CHECK"
-  _check="${!_check_var:-}"
-  if [ -n "$_check" ]; then
-    case "$_check" in *[!A-Za-z0-9._/-]*|'') die "$_agent check command is invalid" ;; esac
-    incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- timeout 90 "$_check" \
-      || die "$_agent package check failed"
-  fi
-  ok "$_agent CLI ready"
-done
-unset _agent _agent_env _check_var _check _provision_var _provision
-
-# Stop a previously managed observer when it is removed from the exact agent list.
-if [ "$_aiobserver_selected" = 0 ]; then
-  incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- sh -eu -c '
-    if [ -f /etc/subyard/ai-observer/managed ]; then
-      /usr/local/bin/ai-observer disable
-    fi
-  ' || die "could not disable the deselected AI Observer"
 fi
-subyard_ai_observer_proxy "$_aiobserver_selected" || die "AI Observer dashboard route did not converge"
-subyard_ai_observer_provision_marker \
-  "$_aiobserver_selected" "${AI_OBSERVER_CONTEXT:-}" \
-  || die "could not update AI Observer convergence marker"
-unset _aiobserver_selected
-
-# Install one generic guest-side project lifecycle dispatcher. Enabled agents stay in the
-# generated list; opt-in shared resources own executable hooks in projects-changed.d.
-_project_hooks=()
-for _agent in ${CODING_TOOL_INTEGRATIONS:-}; do
-  _hook_var="AGENT_${_agent}_PROJECTS_CHANGED"
-  _hook="${!_hook_var:-}"
-  [ -n "$_hook" ] || continue
-  case "$_hook" in *[!A-Za-z0-9._/-]*|'') die "$_agent project hook command is invalid" ;; esac
-  _project_hooks+=("$_hook")
-done
-incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- sh -euc '
-  install -d -m 0755 /etc/subyard /usr/local/libexec/subyard/projects-changed.d
-  temporary=$(mktemp /usr/local/libexec/subyard/.projects-changed.XXXXXX)
-  cleanup_dispatcher() { rm -f -- "$temporary"; }
-  trap cleanup_dispatcher EXIT HUP INT TERM
-  cat >"$temporary"
-  chmod 0755 "$temporary"
-  chown root:root "$temporary"
-  mv -f -- "$temporary" /usr/local/libexec/subyard/projects-changed
-  trap - EXIT HUP INT TERM
-' < "$SCRIPT_DIR/../config/projects-changed.sh" || die "could not install project lifecycle dispatcher"
-printf '%s\n' "${_project_hooks[@]}" \
-  | incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- sh -euc '
-      temporary=$(mktemp /etc/subyard/.agent-project-hooks.XXXXXX)
-      cleanup_project_hooks() {
-        rm -f -- "$temporary"
-      }
-      trap cleanup_project_hooks EXIT HUP INT TERM
-      cat >"$temporary"
-      chmod 0644 "$temporary"
-      chown root:root "$temporary"
-      mv -f -- "$temporary" /etc/subyard/agent-project-hooks
-      trap - EXIT HUP INT TERM
-    ' || die "could not install agent project lifecycle hooks"
-unset _agent _hook_var _hook _project_hooks
 
 # --- 4. fix /dev/kvm device GID to the in-yard 'kvm' group --------------------
 echo "KVM gid:"
@@ -327,8 +204,10 @@ else
 fi
 
 # --- summary -----------------------------------------------------------------
+if [ "${ALLOWS_CODING_TOOLS:-true}" != false ]; then
 incus config set "$YARD_INSTANCE_NAME" user.subyard.ccusage_version "$CCUSAGE_VERSION" "${PROJ[@]}" \
   || die "could not record ccusage convergence"
+fi
 echo
 ok "Phase 3 done."
 cat <<MSG

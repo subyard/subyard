@@ -187,7 +187,7 @@ YARD_INSTANCE_NAME=$INSTANCE-secondary
 SSH_PORT=$secondary_ssh_port
 ORCA_HOST_PORT=$secondary_orca_port
 ENVIRONMENT_PROFILES=orca
-CODING_TOOL_INTEGRATIONS=
+CODING_TOOL_INTEGRATIONS=claude
 ORCA_ADVERTISE_HOST=127.0.0.1
 EOF_SECONDARY_HANDLER
   chmod 0600 "$SUBYARD_CONFIG_HOME/yards/secondary/config.env"
@@ -219,7 +219,11 @@ EOF_SECONDARY_HANDLER
   stage "updating the $mode predecessor to candidate $target_version"
   YARD_RELEASE_BASE_URL="file://$STATE/release" \
     yard update --version "$target_version" --yes >"$STATE/handler-candidate-update.out" \
-      2>"$STATE/handler-candidate-update.err" || die 'candidate handler update failed'
+      2>"$STATE/handler-candidate-update.err" || {
+        KEEP_FAILED_UPGRADE=1
+        report_config_failure "$STATE/handler-candidate-update.err"
+        die 'candidate handler update failed'
+      }
   [ "$(yard --version)" = "yard $target_version" ] || die 'candidate release is not active'
   target_root="$SUBYARD_HOME/runtime/$(readlink "$SUBYARD_HOME/runtime/current")"
   target_helper="$(release_orca_helper_hash "$target_root")"

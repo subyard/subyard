@@ -911,47 +911,8 @@ owner_capacity_reclaim_source="$(awk '
 ' "$ROOT/dev/e2e/p0-guest.sh")"
 ! grep -Fq '"$ROOT/.build/p0-owner-release"' <<<"$owner_capacity_reclaim_source" \
   || fail 'P0 owner capacity reclaim deletes a release artifact used by later updates'
-p0_incus_fixture="$TMP/p0-incus-bootstrap"
-p0_incus_root="$p0_incus_fixture/platform"
-p0_incus_backend="$p0_incus_root/incus"
-p0_incus_storage="$p0_incus_backend/incus/storage"
-p0_incus_log="$p0_incus_fixture/installer.log"
-p0_incus_source_root="$ROOT"
-mkdir -p "$p0_incus_fixture/root/tests/helpers" "$p0_incus_fixture/root/scripts" \
-  "$p0_incus_fixture/root/config" "$p0_incus_storage"
-cp "$ROOT/tests/helpers/test-context.sh" "$p0_incus_fixture/root/tests/helpers/"
-: > "$p0_incus_fixture/root/config/host.env"
-cat > "$p0_incus_fixture/root/scripts/01-install-incus.sh" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-[ "$SUBYARD_HOME" = "$EXPECTED_SUBYARD_HOME" ]
-[ "$STORAGE_PATH" = "$EXPECTED_STORAGE_PATH" ]
-printf '%s\t%s\t%s\t%s\n' \
-  "$SUBYARD_HOME" "$STORAGE_PATH" "$HOST_BASE" "$*" >> "$P0_INCUS_FIXTURE_LOG"
-EOF
-chmod 0755 "$p0_incus_fixture/root/scripts/01-install-incus.sh"
-chmod 0500 "$p0_incus_backend"
-(
-  ROOT="$p0_incus_fixture/root"
-  export ROOT P0_INCUS_FIXTURE_LOG="$p0_incus_log"
-  export EXPECTED_SUBYARD_HOME="$p0_incus_root"
-  export EXPECTED_STORAGE_PATH="$p0_incus_storage"
-  eval "$(sed -n '/^run_incus_installer() {/,/^}/p' \
-    "$p0_incus_source_root/dev/e2e/p0-guest.sh")"
-  run_incus_installer "$p0_incus_root" "$p0_incus_storage" --yes --zabbly
-) || fail 'P0 owner Incus bootstrap still writes below its storage backend'
-(
-  ROOT="$p0_incus_fixture/root"
-  P0_CAPACITY_PLATFORM_ROOT="$p0_incus_root"
-  TOKEN=441
-  export ROOT P0_CAPACITY_PLATFORM_ROOT TOKEN P0_INCUS_FIXTURE_LOG="$p0_incus_log"
-  export EXPECTED_SUBYARD_HOME="$p0_incus_root"
-  export EXPECTED_STORAGE_PATH="$p0_incus_storage"
-  p0_capacity_prepare_platform_root() { :; }
-  eval "$(sed -n '/^run_incus_installer() {/,/^}/p' \
-    "$p0_incus_source_root/dev/e2e/p0-source-upgrade.sh")"
-  run_incus_installer --yes --zabbly
-) || fail 'P0 source-upgrade Incus bootstrap still writes below its storage backend'
+p0_incus_root="$TMP/p0-incus-bootstrap/platform"
+p0_incus_storage="$p0_incus_root/incus/incus/storage"
 owner_incus_call="$TMP/p0-owner-incus-call"
 (
   P0_CAPACITY_PLATFORM_ROOT="$p0_incus_root"
@@ -961,15 +922,8 @@ owner_incus_call="$TMP/p0-owner-incus-call"
   eval "$(sed -n '/^ensure_owner_incus() {/,/^}/p' "$ROOT/dev/e2e/p0-guest.sh")"
   ensure_owner_incus owner
 ) || fail 'P0 owner Incus bootstrap path selection failed'
-[ "$(stat -c %a "$p0_incus_backend")" = 500 ] \
-  && [ "$(cat "$owner_incus_call")" = \
-    "$p0_incus_root  owner $p0_incus_storage" ] \
-  && [ "$(cat "$p0_incus_log")" = "$(printf '%s\t%s\t%s\t%s\n' \
-    "$p0_incus_root" "$p0_incus_storage" "$p0_incus_root/host-data" '--yes --zabbly' \
-    "$p0_incus_root" "$p0_incus_storage" \
-    "$p0_incus_root/p0-source-host-data-441" '--yes --zabbly')" ] \
-  || fail 'P0 Incus bootstrap changed backend ownership/mode or lost storage separation'
-chmod 0700 "$p0_incus_backend"
+[ "$(cat "$owner_incus_call")" = "$p0_incus_root  owner $p0_incus_storage" ] \
+  || fail 'P0 owner Incus bootstrap lost storage separation'
 grep -Fq 'WAIT_SECONDS="${SUBYARD_P0_WAIT_SECONDS:-0}"' \
   "$ROOT/dev/e2e/p0-acceptance.sh" \
   || fail 'P0 acceptance cannot wait atomically for shared broker capacity'
@@ -1006,13 +960,25 @@ grep -Fq 'mapfile -t SLOT_IDS' "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
   export OWNER_DIAGNOSTIC_VM_MEMORY=700MiB
   export OWNER_DIAGNOSTIC_VM_BOOT_TIMEOUT=600
   export OWNER_BASE_IMAGE=subyard-e2e-test-image
-  die() { return 2; }
+  die() { exit 2; }
   eval "$(sed -n '/^write_owner_registration() {/,/^}/p' \
     "$ROOT/dev/e2e/p0-guest.sh")"
   umask 022
   write_owner_registration test-yard test-vms 2224
-  [ "$(stat -c %a "$OWNER_YARD_DIR/test-yard.env")" = 600 ]
-) || fail 'P0 owner registration fixture is not private mode 0600'
+  [ "$(stat -c %a "$OWNER_YARD_DIR/test-yard.env")" = 600 ] || exit 1
+  grep -Fxq AGENTS=none "$OWNER_YARD_DIR/test-yard.env" || exit 1
+  mkdir "$OWNER_YARD_DIR/test-yard"
+  mv "$OWNER_YARD_DIR/test-yard.env" "$OWNER_YARD_DIR/test-yard/config.env"
+  write_owner_registration test-yard test-vms 2224 3
+  [ ! -e "$OWNER_YARD_DIR/test-yard.env" ] || exit 1
+  [ "$(stat -c %a "$OWNER_YARD_DIR/test-yard/config.env")" = 600 ] || exit 1
+  grep -Fxq E2E_VM_SLOT_COUNT=3 "$OWNER_YARD_DIR/test-yard/config.env" || exit 1
+  grep -Fxq "CODING_TOOL_INTEGRATIONS=''" "$OWNER_YARD_DIR/test-yard/config.env" || exit 1
+  ! grep -q '^AGENTS=' "$OWNER_YARD_DIR/test-yard/config.env" || exit 1
+  printf '# unrelated\n' > "$OWNER_YARD_DIR/test-yard/config.env"
+  ! (write_owner_registration test-yard test-vms 2224 2) || exit 1
+  [ "$(cat "$OWNER_YARD_DIR/test-yard/config.env")" = '# unrelated' ]
+) || fail 'P0 owner registration did not preserve private, owned legacy/canonical fixtures'
 grep -Fq 'systemctl is-enabled --quiet subyard-e2e-lease-context.service' \
   "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
   && grep -Fq '/proc/sys/kernel/random/boot_id' "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
@@ -1324,7 +1290,7 @@ owner_sink_cleanup_function="$(sed -n '/^cleanup_owner_test_vms_sink() {/,/^}/p'
   "$ROOT/dev/e2e/p0-guest.sh")"
 owner_capacity_cleanup_function="$(sed -n '/^cleanup_owner_capacity_state() {/,/^}/p' \
   "$ROOT/dev/e2e/p0-guest.sh")"
-for owner_sink_scenario in success absent timer-failure service-failure foreign-service foreign-timer missing-service; do
+for owner_sink_scenario in success absent timer-failure service-failure foreign-service foreign-timer missing-service malformed-command missing-home duplicate-home wrong-owner symlink; do
   owner_sink_fixture="$TMP/owner-sink-$owner_sink_scenario"
   install -d -m 0700 "$owner_sink_fixture"
   OWNER_SINK_SCENARIO="$owner_sink_scenario" OWNER_SINK_FIXTURE="$owner_sink_fixture" \
@@ -1361,7 +1327,15 @@ for owner_sink_scenario in success absent timer-failure service-failure foreign-
       if [ "$OWNER_SINK_SCENARIO" = foreign-timer ]; then
         printf "\n[Timer]\nUnit=unrelated.service\n" >> "$OWNER_TEST_VMS_SINK_TIMER"
       fi
-      stat() { printf "0:0\n"; }
+      case "$OWNER_SINK_SCENARIO" in
+        malformed-command) sed -i "s/ sync$/ foreign/" "$OWNER_TEST_VMS_SINK_SERVICE" ;;
+        missing-home) sed -i "/^Environment=/d" "$OWNER_TEST_VMS_SINK_SERVICE" ;;
+        duplicate-home) printf "Environment=\"SUBYARD_HOME=/foreign\"\n" >> "$OWNER_TEST_VMS_SINK_SERVICE" ;;
+        symlink) mv "$OWNER_TEST_VMS_SINK" "$OWNER_SINK_FIXTURE/real-sink"; ln -s real-sink "$OWNER_TEST_VMS_SINK" ;;
+      esac
+      stat() {
+        if [ "$OWNER_SINK_SCENARIO" = wrong-owner ]; then printf "1000:1000\n"; else printf "0:0\n"; fi
+      }
       sudo() {
         printf "%s\n" "$*" >> "$OWNER_SINK_LOG"
         case "$*" in
@@ -1397,10 +1371,22 @@ for owner_sink_scenario in success absent timer-failure service-failure foreign-
           [ "$cleanup_rc" = 0 ]
           [ "$(grep -c "^remove-" "$OWNER_SINK_LOG")" = 3 ]
           ;;
+        foreign-service)
+          [ "$cleanup_rc" = 0 ]
+          [ -f "$OWNER_TEST_VMS_SINK" ] \
+            && [ -f "$OWNER_TEST_VMS_SINK_SERVICE" ] \
+            && [ -f "$OWNER_TEST_VMS_SINK_TIMER" ]
+          ! grep -q "^-n " "$OWNER_SINK_LOG"
+          [ "$(grep -c "^remove-" "$OWNER_SINK_LOG")" = 3 ]
+          ;;
         *)
           [ "$cleanup_rc" -ne 0 ]
           ! grep -q "^remove-" "$OWNER_SINK_LOG" 2>/dev/null
           [ -d "$OWNER_ROOT" ]
+          case "$OWNER_SINK_SCENARIO" in
+            foreign-timer|missing-service|malformed-command|missing-home|duplicate-home|wrong-owner|symlink)
+              ! grep -q "^-n " "$OWNER_SINK_LOG" 2>/dev/null ;;
+          esac
           ;;
       esac
     ' || fail "P0 owner sink cleanup violated $owner_sink_scenario isolation"
@@ -1613,6 +1599,21 @@ v0111_fixture_env="$(bash -c '
 [ "$v0111_fixture_env" = \
   '1|/usr/local/libexec/subyard/subyard-p0-v0111-success-123-test-vms-sink|/etc/systemd/system/subyard-p0-v0111-success-123-test-vms-host-sink.service|/etc/systemd/system/subyard-p0-v0111-success-123-test-vms-host-sink.timer' ] \
   || fail 'v0.11.1 fixture does not isolate optional user timers and the root host sink'
+bash -c '
+  set -euo pipefail
+  source "$1"
+  TOKEN=123
+  STATE_ROOT="$2"
+  SUCCESS_ROOT="$STATE_ROOT/success"
+  SUCCESS_YARD=v0111-success-123
+  select_fixture success
+  write_fixture_config
+  registration="$CONFIG_HOME/yards/$YARD_NAME/config.env"
+  grep -Fxq YARD_KIND=container "$registration"
+  grep -Fxq AGENTS= "$registration"
+  ! grep -Eq "^(YARD_TEMPLATE|NESTED_E2E_VMS|E2E_VM_)" "$registration"
+' _ "$v0111_recovery" "$TMP/v0111-config" \
+  || fail 'v0.11.1 config-drift fixture must allow the selected Codex integration'
 grep -Fq 'sed -i '\''s/^AGENTS=$/AGENTS=codex/'\'' "$CONFIG_HOME/yards/$YARD_NAME/config.env"' \
     "$v0111_recovery" \
   && grep -Fq 'assert_source_dead_end' "$v0111_recovery" \
@@ -2626,6 +2627,56 @@ real_incus_race_rc=$?
 set -e
 [ "$real_incus_race_rc" = 0 ] \
   || fail 'P0 real-Incus launch retry raced a still-active exact-name create operation'
+(
+  source_root="$ROOT"
+  bootstrap_fixture="$TMP/incus-bootstrap-isolation"
+  mkdir -p "$bootstrap_fixture/repo/tests/helpers" "$bootstrap_fixture/repo/config" \
+    "$bootstrap_fixture/repo/scripts" "$bootstrap_fixture/state" "$bootstrap_fixture/platform/incus"
+  cp "$ROOT/tests/helpers/test-context.sh" "$bootstrap_fixture/repo/tests/helpers/"
+  cp "$ROOT/config/host.env" "$bootstrap_fixture/repo/config/"
+  # shellcheck source=dev/e2e/lib-p0-capacity.sh
+  . "$ROOT/dev/e2e/lib-p0-capacity.sh"
+  P0_CAPACITY_STATE_ROOT="$bootstrap_fixture/state"
+  P0_CAPACITY_PLATFORM_ROOT="$bootstrap_fixture/platform"
+  P0_CAPACITY_MARKER='bootstrap-fixture'
+  printf '%s\n' "$P0_CAPACITY_MARKER" > "$P0_CAPACITY_STATE_ROOT/.subyard-p0-marker"
+  printf 'retained\n' > "$P0_CAPACITY_PLATFORM_ROOT/incus/sentinel"
+  chmod 0555 "$P0_CAPACITY_PLATFORM_ROOT/incus"
+  p0_capacity_prepare_platform_root() { :; }
+  export EXPECTED_BOOTSTRAP="$P0_CAPACITY_STATE_ROOT/incus-bootstrap"
+  export EXPECTED_STORAGE="$P0_CAPACITY_PLATFORM_ROOT/incus/incus/storage"
+  export BOOTSTRAP_CALL_LOG="$bootstrap_fixture/calls" BOOTSTRAP_EXIT
+  cat > "$bootstrap_fixture/repo/scripts/01-install-incus.sh" <<'BOOTSTRAP_INSTALLER'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$SUBYARD_CONFIG_HOME" = "$EXPECTED_BOOTSTRAP/config" ]
+[ "$SUBYARD_HOME" = "$EXPECTED_BOOTSTRAP/subyard" ]
+[ -d "$SUBYARD_HOME" ] && [ -O "$SUBYARD_HOME" ]
+[ "$STORAGE_PATH" = "$EXPECTED_STORAGE" ]
+[ "$HOST_BASE" = "$EXPECTED_BOOTSTRAP/host-data" ]
+printf 'called\n' >> "$BOOTSTRAP_CALL_LOG"
+exit "$BOOTSTRAP_EXIT"
+BOOTSTRAP_INSTALLER
+  ROOT="$bootstrap_fixture/repo"
+  for bootstrap_caller in p0-guest.sh p0-source-upgrade.sh; do
+    eval "$(sed -n '/^run_incus_installer() {/,/^}/p' "$source_root/dev/e2e/$bootstrap_caller")"
+    for BOOTSTRAP_EXIT in 0 27; do
+      bootstrap_rc=0
+      if [ "$bootstrap_caller" = p0-guest.sh ]; then
+        run_incus_installer "$P0_CAPACITY_PLATFORM_ROOT" "$EXPECTED_STORAGE" --yes || bootstrap_rc=$?
+      else
+        run_incus_installer --yes || bootstrap_rc=$?
+      fi
+      [ "$bootstrap_rc" = "$BOOTSTRAP_EXIT" ] || fail 'Incus bootstrap lost installer exit status'
+      [ ! -e "$EXPECTED_BOOTSTRAP" ] || fail 'Incus bootstrap left ephemeral operator state'
+      [ "$(cat "$P0_CAPACITY_PLATFORM_ROOT/incus/sentinel")" = retained ] \
+        && [ "$(stat -c '%a' "$P0_CAPACITY_PLATFORM_ROOT/incus")" = 555 ] \
+        || fail 'Incus bootstrap changed persistent parent contents or permissions'
+    done
+  done
+  [ "$(wc -l < "$BOOTSTRAP_CALL_LOG")" = 4 ] || fail 'Incus bootstrap skipped the installer'
+  chmod 0755 "$P0_CAPACITY_PLATFORM_ROOT/incus"
+)
 # Exercise the actual standalone dispatch with VM boundaries replaced by a strict
 # fixture state machine. An unprepared reboot must fail, even on an empty host.
 reboot_lane_dispatch="$(awk '
@@ -3526,8 +3577,32 @@ source_broker_wait="$(sed -n '/^wait_for_test_vm_broker() {/,/^}/p' \
     || fail 'source fixture lost its readiness bound or doctor diagnostic'
 ) || fail 'source fixture broker readiness regression'
 source_finish="$(sed -n '/^finish() {/,/^}/p' "$ROOT/dev/e2e/p0-source-upgrade.sh")"
-[[ "$source_finish" == *'operator_yard -Y "$YARD_NAME" start --yes'*'wait_for_test_vm_broker'*'# current-release migration fixture'* ]] \
+[[ "$source_finish" == *'operator_yard -Y "$YARD_NAME" start --yes'*'wait_for_test_vm_broker'*'rm /home/dev/.codex/rules/repo.rules'* ]] \
   || fail 'source fixture must establish broker readiness before seeding config drift'
+(
+  SOURCE_ROOT="$TMP/source-registration/src"
+  OPERATOR_HOME="$TMP/source-registration/operator"
+  mkdir -p "$SOURCE_ROOT/private/yards" "$OPERATOR_HOME/.config/subyard/yards/test-yard"
+  original="$SOURCE_ROOT/private/yards/e2e-yard.env"
+  migrated="$OPERATOR_HOME/.config/subyard/yards/test-yard/config.env"
+  printf '# retained comment\nYARD_TEMPLATE=e2e-vms\nSSH_PORT=2223\n' > "$original"
+  sed 's/^YARD_TEMPLATE=e2e-vms$/YARD_TEMPLATE=test-vms/' "$original" > "$migrated"
+  operator_env() { "$@"; }
+  eval "$(sed -n '/^verify_migrated_yard_registration() {/,/^}/p' "$ROOT/dev/e2e/p0-source-upgrade.sh")"
+  verify_migrated_yard_registration || fail 'initial source registration comparison failed'
+  if verify_migrated_yard_registration adopted >/dev/null 2>&1; then
+    fail 'adopted registration comparison accepted a missing selection'
+  fi
+  printf "CODING_TOOL_INTEGRATIONS=''\n" >> "$migrated"
+  verify_migrated_yard_registration adopted || fail 'authorized empty adoption was rejected'
+  if verify_migrated_yard_registration >/dev/null 2>&1; then
+    fail 'pre-adoption comparison accepted a premature selection write'
+  fi
+  sed -i 's/^SSH_PORT=2223$/SSH_PORT=2224/' "$migrated"
+  if verify_migrated_yard_registration adopted >/dev/null 2>&1; then
+    fail 'adoption comparison accepted unrelated setting drift'
+  fi
+) || fail 'source-upgrade registration comparison did not retain exact migration evidence'
 source_normalizer_function="$(sed -n '/^assert_direct_normalizer_is_pure() {/,/^}/p' \
   "$ROOT/dev/e2e/p0-source-upgrade.sh")"
 run_source_normalizer_contract() (
@@ -3794,5 +3869,6 @@ grep -Fq 'select(.slot_id == $slot)' "$ROOT/dev/agent-e2e.sh" \
   || fail "agent E2E boundary verification is coupled to unrelated concurrent slots"
 ! grep -Fq 'test-vms-inner' "$ROOT/dev/agent-e2e.sh" \
   || fail "agent E2E transport still invokes the privileged lifecycle worker"
+
 
 printf 'ok: agent E2E lease transport is pinned, fenced and cleanup-owned\n'

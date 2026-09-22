@@ -30,6 +30,16 @@ func compareAndSwapPersistentFile(
 	desired []byte,
 	fault func(string) error,
 ) error {
+	return compareAndSwapPersistentFileGuarded(configHome, path, expected, desired, nil, fault)
+}
+
+func compareAndSwapPersistentFileGuarded(
+	configHome, path string,
+	expected PersistentFileSnapshot,
+	desired []byte,
+	guard func() error,
+	fault func(string) error,
+) error {
 	if !expected.Exists || expected.Identity == (PersistentFileIdentity{}) {
 		return errors.New("protected persistent CAS requires an exact existing snapshot")
 	}
@@ -57,6 +67,11 @@ func compareAndSwapPersistentFile(
 		return err
 	}
 	defer unix.Flock(root, unix.LOCK_UN)
+	if guard != nil {
+		if err := guard(); err != nil {
+			return err
+		}
+	}
 	for _, part := range parts[:len(parts)-1] {
 		next, openErr := unix.Openat(
 			current, part,

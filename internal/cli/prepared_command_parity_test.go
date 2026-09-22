@@ -282,6 +282,11 @@ func preparationConvergedInit(
 		t.Fatal(err)
 	}
 	writeCLIFile(t, filepath.Join(filepath.Dir(stateDirectory), "host-id"), "yard\n", 0o600)
+	selection := filepath.Join(filepath.Dir(stateDirectory), "yards/default/config.env")
+	if err := os.MkdirAll(filepath.Dir(selection), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, selection, "CODING_TOOL_INTEGRATIONS=\n", 0o600)
 	platform := newInitPlatformFixture()
 	for stage := range platform.converged {
 		platform.converged[stage] = true

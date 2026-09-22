@@ -4,6 +4,7 @@ import "github.com/Subyard/Subyard/internal/domain"
 
 func NewCoreActionRegistry() (*domain.ActionRegistry, error) {
 	definitions := []domain.ActionDefinition{
+		{Action: "integration.reconcile", Summary: "Reconcile yard coding tool integrations", Effect: domain.ActionMutation, Impacts: []domain.ActionImpact{domain.ImpactLocalMetadata, domain.ImpactYardRuntime}, Recovery: domain.RecoveryReversible},
 		{
 			Action: "ssh.trust", Summary: "Trust an unknown SSH server key", Effect: domain.ActionMutation,
 			Impacts: []domain.ActionImpact{domain.ImpactTrust}, Recovery: domain.RecoveryReversible,

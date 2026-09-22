@@ -71,6 +71,8 @@ type SettingDefinition struct {
 }
 
 var catalog = map[string]SettingDefinition{
+	"ALLOWS_CODING_TOOLS": scalar("yard-security", SettingBoolean, SettingYardInit, false,
+		scopes(ScopeShipped), enum("true", "false")),
 	"ACCESS_KIND": scalar("remote-connection", SettingString, SettingNextCommand, false,
 		scopes(ScopeHost, ScopeYard, ScopeCommand), enum("local", "remote")),
 	"ADB_CONSOLE_EMULATOR_PORT": scalar("port", SettingPort, SettingNextCommand, true,
