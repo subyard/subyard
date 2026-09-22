@@ -472,6 +472,24 @@ func (execution *initExecution) hooksOnly() bool {
 		execution.bootstrap == nil && !execution.hostIDPending
 }
 
+func (execution *initExecution) validateOrcaRepair(ctx context.Context, cli *CLI) error {
+	if cli.orcaInitRepair == nil {
+		return nil
+	}
+	if execution.mode != initReconcile || execution.bootstrap != nil || execution.hostIDPending {
+		return errors.New("release repair requires ordinary init of an existing yard; run yard update first")
+	}
+	assessment, err := cli.assessConfigTarget(ctx,
+		configTarget{Name: execution.loaded.Context.YardName, Loaded: execution.loaded}, true)
+	if err != nil {
+		return err
+	}
+	if !cli.orcaInitRepair.matchesRequestedConfigs([]configTargetAssessment{assessment}) {
+		return errors.New("init release repair requires the persisted yard configuration without overrides")
+	}
+	return nil
+}
+
 func (execution *initExecution) refreshAssessment(ctx context.Context) error {
 	if execution == nil {
 		return errors.New("init execution is required")

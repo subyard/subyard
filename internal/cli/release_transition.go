@@ -92,6 +92,7 @@ func (cli *CLI) nonConfigActivationReconcilers(request releasetransition.Process
 		cli.brokerActivationReconciler(request),
 		cli.routeConsumerActivationReconciler(request),
 		cli.powerActivationReconciler(request),
+		cli.orcaActivationReconciler(request),
 	}
 }
 
@@ -829,11 +830,18 @@ func (reconciler *materializedConfigActivationReconciler) resolveScope(
 func (reconciler *materializedConfigActivationReconciler) sourceMigrationsComplete(
 	store *releasetransition.POSIXV2Store,
 ) (bool, error) {
+	return releaseSourceMigrationsComplete(reconciler.cli.options.RepositoryRoot, store)
+}
+
+func releaseSourceMigrationsComplete(
+	repositoryRoot string,
+	store *releasetransition.POSIXV2Store,
+) (bool, error) {
 	snapshot, err := store.ReadLedger()
 	if err != nil || !snapshot.Exists {
 		return false, err
 	}
-	payload, err := os.ReadFile(filepath.Join(reconciler.cli.options.RepositoryRoot, "config", "release-transition.json"))
+	payload, err := os.ReadFile(filepath.Join(repositoryRoot, "config", "release-transition.json"))
 	if err != nil {
 		return false, err
 	}

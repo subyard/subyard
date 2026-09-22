@@ -130,6 +130,7 @@ func InitStages(yard domain.Context) []ReconcileStage {
 		{ID: ports.ReconcileStagePower, Label: "Persist desired yard power and install host boot reconciliation"},
 		{ID: ports.ReconcileStageKeys, Label: "Initialize the encrypted credential ledger and sync timer"},
 		{ID: ports.ReconcileStageSecurity, Label: "Validate host-boundary security invariants"},
+		{ID: ports.ReconcileStageOrca, Label: "Refresh installed Orca project handlers before running project hooks"},
 	}
 }
 

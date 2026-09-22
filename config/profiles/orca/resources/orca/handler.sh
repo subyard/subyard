@@ -31,6 +31,8 @@ ORCA_SYNC=/usr/local/libexec/subyard/projects-changed.d/orca
 ORCA_REGISTRATION=/usr/local/libexec/subyard/orca-registration
 ORCA_CODEX_PROFILE=/etc/profile.d/subyard-orca-codex.sh
 ORCA_CONTRACT_DIGEST=/usr/local/libexec/subyard/orca-contract.sha256
+ORCA_REGISTRATION_DIGEST=/usr/local/libexec/subyard/orca-registration.sha256
+ORCA_REGISTRATION_LOCK=/usr/local/libexec/subyard/orca-registration.lock
 ORCA_CONTRACT_VERSION=4
 ORCA_GUEST_PORT=6768
 ORCA_RUNTIME_CHANGED=0
@@ -267,6 +269,153 @@ install_release() {
   ok "installed verified Orca $ORCA_VERSION release"
 }
 
+render_registration_hook() {
+  local version
+  version="$(registration_contract_version)" || return 1
+  cat <<SYNC_HEAD
+#!/usr/bin/env bash
+set -euo pipefail
+exec 9<$ORCA_REGISTRATION_LOCK
+flock -s 9
+[ "\$(cat $ORCA_REGISTRATION_DIGEST 2>/dev/null)" = "$version" ] || {
+  printf "Orca project helper is stale or incomplete; run 'yard init' first\n" >&2
+  exit 1
+}
+systemctl is-active --quiet $ORCA_UNIT || exit 0
+/usr/bin/python3 -B $ORCA_REGISTRATION/settings.py
+status=0
+report="\$(/usr/bin/python3 -B $ORCA_REGISTRATION/main.py sync)" || status=\$?
+if ! jq -e '(.ready | type == "boolean") and (.errors | type == "array") and (.warnings | type == "array")' <<<"\$report" >/dev/null; then
+  printf 'Orca project registration failed; run yard orca status\n' >&2
+  exit 1
+fi
+jq -r '(.errors[] | "Orca registration error: " + .), (.warnings[] | "Orca registration warning: " + .)' <<<"\$report" >&2
+jq -r '"Orca checkouts registered: \(.registered)/\(.total)"' <<<"\$report"
+jq -e '.ready' <<<"\$report" >/dev/null || status=1
+exit "\$status"
+SYNC_HEAD
+}
+
+registration_desired_digest() {
+  local version
+  version="$(registration_contract_version)" || return 1
+  {
+    printf '755 0:0 '
+    render_registration_hook | sha256sum | awk '{print $1}'
+    local source
+    for source in "$RESOURCE_DIR"/registration/*.py; do
+      [ -f "$source" ] || return 1
+      printf '644 0:0 %s ' "${source##*/}"
+      sha256sum "$source" | awk '{print $1}'
+    done
+    printf '644 0:0 lock\n'
+    printf '644 0:0 marker %s\n' "$version"
+  } | sha256sum | awk '{print $1}'
+}
+
+observe_registration_contract() {
+  local desired
+  local -a names=()
+  desired="$(registration_desired_digest)" || die "Orca registration helper contract unavailable"
+  mapfile -t names < <(cd "$RESOURCE_DIR/registration" && printf '%s\n' ./*.py | sed 's#^./##')
+  yexec bash -se -- "$desired" "$ORCA_SYNC" "$ORCA_REGISTRATION" \
+    "$ORCA_REGISTRATION_DIGEST" "$ORCA_REGISTRATION_LOCK" "$ORCA_EXEC" \
+    "/etc/systemd/system/$ORCA_UNIT" "${names[@]}" <<'YARD'
+set -euo pipefail
+desired="$1"; hook="$2"; directory="$3"; marker="$4"; lock="$5"; executable="$6"; unit="$7"; shift 7
+if [ ! -e "$executable" ] && [ ! -e "$unit" ] && [ ! -e "$hook" ] &&
+  [ ! -e "$directory" ] && [ ! -e "$marker" ] && [ ! -e "$lock" ]; then
+  printf '{"state":"absent","actual":"","desired":""}\n'
+  exit 0
+fi
+actual="$({
+  if [ -f "$hook" ]; then
+    printf '%s %s:%s ' "$(stat -c %a "$hook")" "$(stat -c %u "$hook")" "$(stat -c %g "$hook")"
+    sha256sum "$hook" | awk '{print $1}'
+  else printf 'missing\n'; fi
+  for name in "$@"; do
+    if [ -f "$directory/$name" ]; then
+      printf '%s %s:%s %s ' "$(stat -c %a "$directory/$name")" \
+        "$(stat -c %u "$directory/$name")" "$(stat -c %g "$directory/$name")" "$name"
+    else
+      printf '%s ' "$name"
+    fi
+    if [ -f "$directory/$name" ]; then
+      sha256sum "$directory/$name" | awk '{print $1}'
+    else
+      printf 'missing\n'
+    fi
+  done
+  for installed in "$directory"/*.py; do
+    [ -e "$installed" ] || continue
+    case " $* " in
+      *" ${installed##*/} "*) ;;
+      *) printf 'unexpected %s\n' "${installed##*/}" ;;
+    esac
+  done
+  if [ -f "$lock" ]; then
+    printf '%s %s:%s lock\n' "$(stat -c %a "$lock")" "$(stat -c %u "$lock")" "$(stat -c %g "$lock")"
+  else
+    printf 'missing lock\n'
+  fi
+  if [ -f "$marker" ]; then
+    printf '%s %s:%s marker ' "$(stat -c %a "$marker")" \
+      "$(stat -c %u "$marker")" "$(stat -c %g "$marker")"
+    cat "$marker"
+  else
+    printf 'missing marker\n'
+  fi
+} | sha256sum | awk '{print $1}')"
+state=stale
+if [ "$actual" = "$desired" ]; then
+  state=current
+fi
+printf '{"state":"%s","actual":"%s","desired":"%s"}\n' "$state" "$actual" "$desired"
+YARD
+}
+
+stage_registration_contract() {
+  ORCA_TMP_DIR="${ORCA_TMP_DIR:-$(mktemp -d)}"
+  local sync="$ORCA_TMP_DIR/orca-sync"
+  local source desired version
+  render_registration_hook >"$sync"
+  chmod 0755 "$sync"
+  desired="$(registration_desired_digest)" || die "Orca registration helper contract unavailable"
+  version="$(registration_contract_version)" || die "Orca registration helper contract unavailable"
+  [ -n "$ORCA_GUEST_TMP_DIR" ] || ORCA_GUEST_TMP_DIR="$(yexec mktemp -d /tmp/subyard-orca.XXXXXX)"
+  valid_guest_tmp_dir "$ORCA_GUEST_TMP_DIR" \
+    || die "Orca guest staging returned an unsafe temporary path"
+  incus file push "$sync" "$YARD_INSTANCE_NAME$ORCA_GUEST_TMP_DIR/orca-sync" \
+    "${PROJ[@]}" --mode 0755 >/dev/null
+  for source in "$RESOURCE_DIR"/registration/*.py; do
+    incus file push "$source" "$YARD_INSTANCE_NAME$ORCA_GUEST_TMP_DIR/${source##*/}" \
+      "${PROJ[@]}" --mode 0644 >/dev/null
+  done
+  yexec bash -se -- "$ORCA_GUEST_TMP_DIR" "$ORCA_SYNC" "$ORCA_REGISTRATION" \
+    "$ORCA_REGISTRATION_DIGEST" "$ORCA_REGISTRATION_LOCK" "$version" <<'YARD'
+set -euo pipefail
+stage="$1"; hook="$2"; directory="$3"; marker="$4"; lock="$5"; version="$6"
+install -d -m 0755 "$(dirname "$lock")"
+touch "$lock"
+chmod 0644 "$lock"
+chown 0:0 "$lock"
+exec 9>"$lock"
+flock -x 9
+install -d -m 0755 "$directory" "$(dirname "$hook")"
+rm -f -- "$marker"
+for installed in "$directory"/*.py; do
+  [ -e "$installed" ] || continue
+  [ -f "$stage/${installed##*/}" ] || rm -f -- "$installed"
+done
+for source in "$stage"/*.py; do install -m 0644 "$source" "$directory/${source##*/}"; done
+install -m 0755 "$stage/orca-sync" "$hook"
+temporary="$marker.$$"
+printf '%s\n' "$version" >"$temporary"
+chmod 0644 "$temporary"
+mv "$temporary" "$marker"
+YARD
+}
+
 stage_runtime_contract() {
   ORCA_TMP_DIR="${ORCA_TMP_DIR:-$(mktemp -d)}"
   local ingress="$ORCA_TMP_DIR/orca-ingress"
@@ -274,7 +423,7 @@ stage_runtime_contract() {
   local sync="$ORCA_TMP_DIR/orca-sync"
   local codex_profile="$ORCA_TMP_DIR/orca-codex-profile"
   local unit="$ORCA_TMP_DIR/$ORCA_UNIT"
-  local source guest_helper helper contract_version
+  local source contract_version
   local -a helpers=()
   mapfile -t helpers < <(registration_files)
   contract_version="$(registration_contract_version)" || die "Orca registration helper contract unavailable"
@@ -283,7 +432,6 @@ stage_runtime_contract() {
     || die "Orca guest staging returned an unsafe temporary path"
   local guest_ingress="$ORCA_GUEST_TMP_DIR/orca-ingress"
   local guest_capture="$ORCA_GUEST_TMP_DIR/orca-capture-ready"
-  local guest_sync="$ORCA_GUEST_TMP_DIR/orca-sync"
   local guest_codex_profile="$ORCA_GUEST_TMP_DIR/orca-codex-profile"
   local guest_unit="$ORCA_GUEST_TMP_DIR/$ORCA_UNIT"
   cat >"$ingress" <<'INGRESS'
@@ -336,22 +484,7 @@ if [ "\${SUBYARD_ORCA_CODEX_CONFIG:-}" = 1 ]; then
   codex() { /usr/bin/python3 -B $ORCA_REGISTRATION/codex_launch.py "\$@"; }
 fi
 CODEX_PROFILE
-  cat >"$sync" <<SYNC_HEAD
-#!/usr/bin/env bash
-set -euo pipefail
-systemctl is-active --quiet $ORCA_UNIT || exit 0
-/usr/bin/python3 -B $ORCA_REGISTRATION/settings.py
-status=0
-report="\$(/usr/bin/python3 -B $ORCA_REGISTRATION/main.py sync)" || status=\$?
-if ! jq -e '(.ready | type == "boolean") and (.errors | type == "array") and (.warnings | type == "array")' <<<"\$report" >/dev/null; then
-  printf 'Orca project registration failed; run yard orca status\n' >&2
-  exit 1
-fi
-jq -r '(.errors[] | "Orca registration error: " + .), (.warnings[] | "Orca registration warning: " + .)' <<<"\$report" >&2
-jq -r '"Orca checkouts registered: \(.registered)/\(.total)"' <<<"\$report"
-jq -e '.ready' <<<"\$report" >/dev/null || status=1
-exit "\$status"
-SYNC_HEAD
+  render_registration_hook >"$sync"
   cat >"$unit" <<UNIT
 [Unit]
 Description=Subyard Orca remote server
@@ -388,24 +521,13 @@ UNIT
     "${PROJ[@]}" --mode 0755 >/dev/null
   incus file push "$capture" "$YARD_INSTANCE_NAME$guest_capture" \
     "${PROJ[@]}" --mode 0755 >/dev/null
-  incus file push "$sync" "$YARD_INSTANCE_NAME$guest_sync" \
-    "${PROJ[@]}" --mode 0755 >/dev/null
   incus file push "$codex_profile" "$YARD_INSTANCE_NAME$guest_codex_profile" \
     "${PROJ[@]}" --mode 0644 >/dev/null
   incus file push "$unit" "$YARD_INSTANCE_NAME$guest_unit" \
     "${PROJ[@]}" --mode 0644 >/dev/null
-  yexec install -d -m 0755 "$ORCA_REGISTRATION"
-  for source in "$RESOURCE_DIR"/registration/*.py; do
-    guest_helper="$ORCA_GUEST_TMP_DIR/${source##*/}"
-    helper="$ORCA_REGISTRATION/${source##*/}"
-    incus file push "$source" "$YARD_INSTANCE_NAME$guest_helper" \
-      "${PROJ[@]}" --mode 0644 >/dev/null
-    yexec cmp -s "$guest_helper" "$helper" || ORCA_RUNTIME_CHANGED=1
-    yexec install -m 0644 "$guest_helper" "$helper"
-  done
+  stage_registration_contract
   if ! yexec cmp -s "$guest_ingress" "$ORCA_INGRESS" ||
     ! yexec cmp -s "$guest_capture" "$ORCA_CAPTURE" ||
-    ! yexec cmp -s "$guest_sync" "$ORCA_SYNC" ||
     ! yexec cmp -s "$guest_codex_profile" "$ORCA_CODEX_PROFILE" ||
     ! yexec cmp -s "$guest_unit" "/etc/systemd/system/$ORCA_UNIT" ||
     ! ingress_active; then
@@ -414,7 +536,6 @@ UNIT
   yexec install -d -m 0755 "$(dirname "$ORCA_CAPTURE")" "$(dirname "$ORCA_SYNC")"
   yexec install -m 0755 "$guest_ingress" "$ORCA_INGRESS"
   yexec install -m 0755 "$guest_capture" "$ORCA_CAPTURE"
-  yexec install -m 0755 "$guest_sync" "$ORCA_SYNC"
   yexec install -m 0644 "$guest_codex_profile" "$ORCA_CODEX_PROFILE"
   yexec install -m 0644 "$guest_unit" "/etc/systemd/system/$ORCA_UNIT"
   yexec bash -se -- "$ORCA_CONTRACT_DIGEST" "$contract_version" \
@@ -553,7 +674,17 @@ YARD
 
 automatic_project_hook_ready() {
   project_dispatcher_ready &&
-    yexec test -x "$ORCA_SYNC" >/dev/null 2>&1 && runtime_contract_ready
+    yexec test -x "$ORCA_SYNC" >/dev/null 2>&1 && registration_contract_ready
+}
+
+registration_contract_ready() {
+  [ "$(observe_registration_contract | jq -r .state)" = current ]
+}
+
+service_contract_endpoint_ready() {
+  yexec grep -Fqx \
+    "ExecStart=$ORCA_CAPTURE $ORCA_READY $ORCA_EXEC serve --port $ORCA_GUEST_PORT --pairing-address $ORCA_ADVERTISE_HOST:$ORCA_HOST_PORT --json" \
+    "/etc/systemd/system/$ORCA_UNIT" >/dev/null 2>&1
 }
 
 up_converged() {
@@ -603,7 +734,7 @@ require_pair_ready() {
     || die "Orca is not running; run '$(yard_cmd_hint) orca up' first"
   require_runtime_settings
   resolve_owner_address
-  runtime_contract_ready && route_matches && owner_endpoint_ready \
+  registration_contract_ready && service_contract_endpoint_ready && route_matches && owner_endpoint_ready \
     || die "Orca endpoint settings are not applied; run '$(yard_cmd_hint) orca up' first"
   service_ready || die "Orca is not ready; run '$(yard_cmd_hint) orca up' first"
 }
@@ -647,6 +778,8 @@ cmd_pair() {
 cmd_sync() {
   yexec systemctl is-active --quiet "$ORCA_UNIT" \
     || die "Orca is not running; run '$(yard_cmd_hint) orca up' first"
+  registration_contract_ready \
+    || die "Orca project helper is stale or incomplete; run '$(yard_cmd_hint) init' first"
   run_project_sync
   projects_synced || die "Orca project registration did not converge"
   ok "Subyard roots and nested Git checkouts are registered in their Orca project groups"
@@ -842,6 +975,8 @@ prepare_resource() { # <public-verb>
       svc_require_yard_running
       yexec systemctl is-active --quiet "$ORCA_UNIT" \
         || die "Orca is not running; run '$(yard_cmd_hint) orca up' first"
+      registration_contract_ready \
+        || die "Orca project helper is stale or incomplete; run '$(yard_cmd_hint) init' first"
       # Always run an explicit scan, including diagnostics for stale paths on an otherwise ready catalog.
       emit_resource_assessment sync true "reconcile Subyard project groups, roots and nested Git checkouts"
       ;;
@@ -868,6 +1003,37 @@ cmd_is_up() {
 
 sub="${1:-}"
 shift || true
+
+if [ "$sub" = _runtime-contract ]; then
+  case "${1:-}" in
+    observe)
+      [ "$#" -eq 1 ] || die "usage: _runtime-contract observe"
+      observe_registration_contract
+      ;;
+    apply)
+      [ "$#" -eq 4 ] \
+        || die "usage: _runtime-contract apply <operation-id> <expected-actual> <expected-desired>"
+      [ -n "${2:-}" ] || die "runtime contract apply requires an operation ID"
+      SUBYARD_OPERATION_ID="$2"
+      observation="$(observe_registration_contract)"
+      [ "$(jq -r .actual <<<"$observation")" = "$3" ] &&
+        [ "$(jq -r .desired <<<"$observation")" = "$4" ] \
+        || die "Orca runtime contract changed since assessment; retry yard init"
+      case "$(jq -r .state <<<"$observation")" in
+        absent) printf '%s\n' "$observation" ;;
+        current) printf '%s\n' "$observation" ;;
+        stale)
+          stage_registration_contract
+          cleanup_guest || die "Orca guest staging directory could not be removed"
+          observe_registration_contract | jq -e 'select(.state == "current")'
+          ;;
+        *) die "invalid Orca runtime contract observation" ;;
+      esac
+      ;;
+    *) die "usage: _runtime-contract observe | apply <operation-id> <expected-actual> <expected-desired>" ;;
+  esac
+  exit
+fi
 
 case "${SUBYARD_RESOURCE_MODE:-}" in
   prepare)

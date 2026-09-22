@@ -16,6 +16,130 @@ import (
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
+type orcaRepairPlatformFixture struct {
+	*initPlatformFixture
+	observation *ports.OrcaRuntimeObservation
+}
+
+func (fixture *orcaRepairPlatformFixture) ObserveOrcaRuntime(context.Context) (ports.OrcaRuntimeObservation, error) {
+	if fixture.observation != nil {
+		return *fixture.observation, nil
+	}
+	observation := ports.OrcaRuntimeObservation{State: "current", Actual: strings.Repeat("b", 64), Desired: strings.Repeat("b", 64)}
+	if !fixture.converged[ports.ReconcileStageOrca] {
+		observation.State, observation.Actual = "stale", strings.Repeat("a", 64)
+	}
+	return observation, nil
+}
+
+func TestOrcaInitRepairUsesCompletedGateWithoutAdmittingOtherDrift(t *testing.T) {
+	for _, scenario := range []string{"repair", "config drift", "unselected Orca", "unfinished", "rollback", "unfinished rollback", "journal changed", "current convergence", "absent race", "replacement stale"} {
+		t.Run(scenario, func(t *testing.T) {
+			fixture := newConfigApplyRepairFixture(t, scenario == "unselected Orca")
+			platform := &orcaRepairPlatformFixture{initPlatformFixture: newInitPlatformFixture()}
+			for stage := range platform.converged {
+				platform.converged[stage] = true
+			}
+			platform.converged[ports.ReconcileStageOrca] = false
+			fixture.cli.options.InitPlatform = platform
+			fake := fixture.cli.options.Executor.(*testkit.Incus)
+			fake.ExecSteps = nil
+			loaded, err := fixture.cli.resolveReleaseTransitionContext("default", fixture.cli.env["SUBYARD_CONFIG_HOME"])
+			if err != nil {
+				t.Fatal(err)
+			}
+			targets, err := fixture.cli.localConfigTargets(loaded, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for range 4 {
+				for _, target := range targets {
+					if scenario == "config drift" {
+						appendMismatchedHashSteps(t, fake, target.Loaded, "0")
+					} else {
+						appendHashSteps(t, fake, target.Loaded)
+					}
+				}
+			}
+			if scenario == "unfinished" || scenario == "rollback" || scenario == "unfinished rollback" {
+				payload, err := os.ReadFile(fixture.journalPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				journal, err := releasetransition.ParseJournal(payload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if scenario == "rollback" || scenario == "unfinished rollback" {
+					journal.Goal.Direction = releasetransition.DirectionActivatePrevious
+				}
+				if scenario == "unfinished" || scenario == "unfinished rollback" {
+					journal.Checkpoint = releasetransition.JournalReconciling
+				}
+				payload, err = releasetransition.MarshalJournal(journal)
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeCLIFile(t, fixture.journalPath, string(payload), 0o600)
+			}
+			permit, err := fixture.cli.prepareOrcaInitRepair(context.Background(), "default", nil, fixture.outcome)
+			admitted := scenario != "unselected Orca" && scenario != "unfinished" && scenario != "unfinished rollback"
+			if err != nil || (permit != nil) != admitted {
+				t.Fatalf("repair admission: permit=%#v err=%v", permit, err)
+			}
+			if !admitted {
+				return
+			}
+			if len(platform.applied) != 0 || platform.projectHooks != 0 {
+				t.Fatal("assessment applied the repair")
+			}
+			if scenario == "journal changed" {
+				payload, err := os.ReadFile(fixture.journalPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeCLIFile(t, fixture.journalPath, string(payload)+"\n", 0o600)
+			}
+			switch scenario {
+			case "current convergence":
+				platform.observation = &ports.OrcaRuntimeObservation{
+					State: "current", Actual: strings.Repeat("b", 64), Desired: strings.Repeat("b", 64),
+				}
+			case "absent race":
+				platform.observation = &ports.OrcaRuntimeObservation{State: "absent"}
+			case "replacement stale":
+				platform.observation = &ports.OrcaRuntimeObservation{
+					State: "stale", Actual: strings.Repeat("c", 64), Desired: strings.Repeat("b", 64),
+				}
+			}
+			unlock, err := fixture.cli.lockConfigApplyRepair(context.Background(), permit)
+			if scenario == "journal changed" {
+				if err == nil {
+					unlock()
+					t.Fatal("changed recovery journal admitted repair")
+				}
+				return
+			}
+			if scenario == "absent race" || scenario == "replacement stale" {
+				if err == nil {
+					unlock()
+					t.Fatal("changed Orca contract admitted after confirmation")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer unlock()
+			platform.converged[ports.ReconcileStageOrca] = true
+			writeCLIFile(t, fixture.readyMarker, "ready\n", 0o600)
+			if err := fixture.cli.finishConfigApplyRepair(context.Background(), permit); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestConfigApplyRepairUsesCompletedProtectedGateAndStableLock(t *testing.T) {
 	fixture := newConfigApplyRepairFixture(t, false)
 	observed, err := fixture.cli.inspectMutationGate(context.Background(), "default")
@@ -294,6 +418,11 @@ type configApplyRepairFixture struct {
 
 func newConfigApplyRepairFixture(t *testing.T, named bool) configApplyRepairFixture {
 	root, environment, _ := nativeFixture(t)
+	orcaHandler := filepath.Join(root, "config", "profiles", "orca", "resources", "orca", "handler.sh")
+	if err := os.MkdirAll(filepath.Dir(orcaHandler), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, orcaHandler, "#!/bin/sh\nprintf '%s\\n' '{\"state\":\"absent\",\"actual\":\"\",\"desired\":\"\"}'\n", 0o700)
 	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join([]string{
 		"SHIFT_MODE=shift", "FORWARD_SSH_AGENT=0", "DEV_SUDO=0", "DEV_UID=1000",
 		"DEV_USER=dev", "SSH_PORT=2222",

@@ -102,6 +102,15 @@ func (runtime Runtime) CheckStage(ctx context.Context, stage ports.ReconcileStag
 		err = runtime.runScriptEnvironment(ctx, nil, desired, "09-yard-extras.sh", "--check")
 	case ports.ReconcileStageSecurity:
 		return runtime.securityConverged(ctx)
+	case ports.ReconcileStageOrca:
+		observation, err := runtime.ObserveOrcaRuntime(ctx)
+		if err != nil {
+			return false, err
+		}
+		if observation.State == "deferred" {
+			runtime.reportOrcaDeferred()
+		}
+		return observation.State != "stale", nil
 	default:
 		return false, fmt.Errorf("unknown reconcile stage %q", stage)
 	}
@@ -184,6 +193,8 @@ func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStag
 	case ports.ReconcileStageSecurity:
 		_, err := runtime.securityRuntime().CheckSecurity(ctx, true, false)
 		return err
+	case ports.ReconcileStageOrca:
+		return runtime.applyOrcaRuntime(ctx)
 	default:
 		return fmt.Errorf("unknown reconcile stage %q", stage)
 	}

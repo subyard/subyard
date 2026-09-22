@@ -294,6 +294,9 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 	if err != nil {
 		return err
 	}
+	if err := execution.validateOrcaRepair(ctx, cli); err != nil {
+		return err
+	}
 	prepared.policy.Consequences = execution.consequences()
 	prepared.assess = func(context.Context) (domain.ActionID, domain.ActionDelta, error) { return execution.actionPlan() }
 	prepared.refresh = func(ctx context.Context) (domain.ActionID, domain.ActionDelta, error) {
@@ -319,6 +322,16 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 		}
 	}
 	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (domain.AdapterResult, error) {
+		if cli.orcaInitRepair != nil {
+			if err := execution.validateOrcaRepair(ctx, cli); err != nil {
+				return domain.AdapterResult{}, err
+			}
+			unlock, err := cli.lockConfigApplyRepair(ctx, cli.orcaInitRepair)
+			if err != nil {
+				return domain.AdapterResult{}, err
+			}
+			defer unlock()
+		}
 		if cli.options.InitPlatform == nil && execution.mode != initConfigs && !execution.hooksOnly() {
 			if err := cli.prepareSudoPrivileges(ctx, diagnostics, cli.effectiveUID(), prepared.Definition.Name); err != nil {
 				return domain.AdapterResult{}, err
@@ -329,6 +342,9 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 		result, _, err := orchestrator.RunAdapter(ctx, prepared.Plan, domain.AdapterRequest{
 			Schema: shelladapter.ProtocolSchema, OperationID: prepared.Plan.OperationID, Adapter: "init", Action: "reconcile",
 		}, nil)
+		if err == nil && cli.orcaInitRepair != nil {
+			err = cli.finishConfigApplyRepair(ctx, cli.orcaInitRepair)
+		}
 		return result, err
 	}
 	return nil

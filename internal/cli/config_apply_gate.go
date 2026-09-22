@@ -17,11 +17,12 @@ import (
 	"syscall"
 
 	"github.com/Subyard/Subyard/internal/migration"
+	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 )
 
-// configApplyRepairPermit admits only the materialized-config repair hidden
-// behind a verified, completed release transition. It is deliberately local
+// configApplyRepairPermit admits config apply or Orca init repair behind
+// a verified, completed release transition. It is deliberately local
 // to the CLI: no environment value or public command can manufacture it.
 type configApplyRepairPermit struct {
 	yard                string
@@ -34,6 +35,8 @@ type configApplyRepairPermit struct {
 	driftedTargetNames  []string
 	requestedTargets    map[string]string
 	selectedTargetNames []string
+	selectedOrca        map[string]ports.OrcaRuntimeObservation
+	orcaInit            bool
 }
 
 type configApplyRepairFacts struct {
@@ -74,6 +77,25 @@ func (cli *CLI) prepareConfigApplyRepairMode(
 	requireDrift bool,
 	selectedNames []string,
 ) (*configApplyRepairPermit, error) {
+	return cli.prepareActivationRepairMode(ctx, yard, allLocal, outcome, requireDrift, selectedNames, false)
+}
+
+// Orca init repair shares the completed-journal, ledger, link and lock guards of
+// config repair. It permits only an ordinarily assessed init for the selected yard.
+func (cli *CLI) prepareOrcaInitRepair(ctx context.Context, yard string, arguments []string,
+	outcome releasetransition.Outcome,
+) (*configApplyRepairPermit, error) {
+	request, err := parseInitArguments(arguments)
+	if err != nil || request.mode != initReconcile || request.profile != "" {
+		return nil, err
+	}
+	return cli.prepareActivationRepairMode(ctx, yard, false, outcome, true, nil, true)
+}
+
+func (cli *CLI) prepareActivationRepairMode(
+	ctx context.Context, yard string, allLocal bool, outcome releasetransition.Outcome,
+	requireDrift bool, selectedNames []string, orcaInit bool,
+) (*configApplyRepairPermit, error) {
 	options, available, err := cli.mutationGateReleaseOptions()
 	if err != nil {
 		return nil, err
@@ -96,7 +118,8 @@ func (cli *CLI) prepareConfigApplyRepairMode(
 		return nil, nil
 	}
 	journal, err := releasetransition.ParseJournal(snapshot.Payload)
-	if err != nil || !configApplyRepairJournalMatches(journal, outcome) {
+	if err != nil || !configApplyRepairJournalMatches(journal, outcome) &&
+		!(orcaInit && orcaInitRepairRollbackJournalMatches(journal, outcome)) {
 		return nil, nil
 	}
 	observedGate, err := cli.inspectMutationGate(ctx, yard)
@@ -163,6 +186,7 @@ func (cli *CLI) prepareConfigApplyRepairMode(
 	}
 	var driftedNames []string
 	requestedDesired := make(map[string]string, len(requested))
+	selectedOrca := make(map[string]ports.OrcaRuntimeObservation, len(requested))
 	for _, target := range allTargets {
 		assessment, assessErr := operation.assessConfigTarget(ctx, target, true)
 		if assessErr != nil {
@@ -174,7 +198,18 @@ func (cli *CLI) prepareConfigApplyRepairMode(
 		if _, selected := requested[target.Name]; selected {
 			requestedDesired[target.Name] = assessment.DesiredFingerprint
 		}
-		if assessment.Changed {
+		changed := assessment.Changed
+		if orcaInit {
+			contract, err := orcaActivationPlatform(&operation, target).ObserveOrcaRuntime(ctx)
+			if err != nil {
+				return nil, nil
+			}
+			if _, selected := requested[target.Name]; selected {
+				selectedOrca[target.Name] = contract
+			}
+			changed = changed || contract.State == "stale"
+		}
+		if changed {
 			if _, selected := requested[target.Name]; !selected {
 				return nil, nil
 			}
@@ -210,8 +245,14 @@ func (cli *CLI) prepareConfigApplyRepairMode(
 	}
 	for _, reconciler := range cli.nonConfigActivationReconcilers(request) {
 		observation, observeErr := reconciler.Observe(ctx, pair, observedLinks)
-		if observeErr != nil || !validConfigApplyActivationObservation(observation) ||
-			!observation.Converged || observation.Actual != observation.Desired {
+		if observeErr != nil || !validConfigApplyActivationObservation(observation) {
+			return nil, nil
+		}
+		if orcaInit && reconciler.ID() == "orca-runtime" {
+			// Bind the target contract, allowing only its observed drift to shrink.
+			observation.Actual, observation.Converged = observation.Desired, true
+		}
+		if !observation.Converged || observation.Actual != observation.Desired {
 			return nil, nil
 		}
 		facts.OtherActivations = append(facts.OtherActivations, configApplyActivationFact{
@@ -236,6 +277,8 @@ func (cli *CLI) prepareConfigApplyRepairMode(
 		driftedTargetNames:  driftedNames,
 		requestedTargets:    requestedDesired,
 		selectedTargetNames: slices.Clone(selectedNames),
+		selectedOrca:        selectedOrca,
+		orcaInit:            orcaInit,
 	}, nil
 }
 
@@ -286,14 +329,15 @@ func (cli *CLI) lockConfigApplyRepair(
 	if err != nil {
 		return nil, err
 	}
-	refreshed, err := cli.prepareConfigApplyRepairMode(
-		ctx, permit.yard, permit.allLocal, permit.gate, false, permit.selectedTargetNames,
+	refreshed, err := cli.prepareActivationRepairMode(
+		ctx, permit.yard, permit.allLocal, permit.gate, false, permit.selectedTargetNames, permit.orcaInit,
 	)
 	if err != nil || refreshed == nil ||
 		refreshed.factsFingerprint != permit.factsFingerprint ||
 		refreshed.journal.Fingerprint != permit.journal.Fingerprint ||
 		!bytes.Equal(refreshed.journal.Payload, permit.journal.Payload) ||
-		!configApplyDriftSubset(refreshed.driftedTargetNames, permit.driftedTargetNames) {
+		!configApplyDriftSubset(refreshed.driftedTargetNames, permit.driftedTargetNames) ||
+		!validOrcaRepairTransition(permit.selectedOrca, refreshed.selectedOrca) {
 		unlock()
 		if err != nil {
 			return nil, err
@@ -301,6 +345,28 @@ func (cli *CLI) lockConfigApplyRepair(
 		return nil, errors.New("config apply release repair changed after confirmation")
 	}
 	return unlock, nil
+}
+
+func validOrcaRepairTransition(
+	confirmed, current map[string]ports.OrcaRuntimeObservation,
+) bool {
+	if len(confirmed) != len(current) {
+		return false
+	}
+	for name, before := range confirmed {
+		after, exists := current[name]
+		if !exists {
+			return false
+		}
+		if before == after {
+			continue
+		}
+		if before.State != "stale" || after.State != "current" ||
+			before.Desired != after.Desired || after.Actual != after.Desired {
+			return false
+		}
+	}
+	return true
 }
 
 func configApplyDriftSubset(current, admitted []string) bool {
@@ -366,6 +432,15 @@ func configApplyRepairJournalMatches(
 ) bool {
 	return journal.Checkpoint == releasetransition.JournalComplete &&
 		journal.Goal.Direction == releasetransition.DirectionActivateTarget &&
+		journal.Goal.Target == outcome.Target && journal.Goal.Target == outcome.Active
+}
+
+func orcaInitRepairRollbackJournalMatches(
+	journal releasetransition.JournalRecord,
+	outcome releasetransition.Outcome,
+) bool {
+	return journal.Checkpoint == releasetransition.JournalComplete &&
+		journal.Goal.Direction == releasetransition.DirectionActivatePrevious &&
 		journal.Goal.Target == outcome.Target && journal.Goal.Target == outcome.Active
 }
 

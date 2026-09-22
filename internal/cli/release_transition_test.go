@@ -22,6 +22,186 @@ import (
 	"github.com/Subyard/Subyard/internal/testyardmigration"
 )
 
+func TestReleaseActivationIncludesInstalledOrcaRefresh(t *testing.T) {
+	program, err := New(Options{RepositoryRoot: repositoryRoot(t), Environment: []string{"HOME=" + t.TempDir()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, reconciler := range program.nonConfigActivationReconcilers(releasetransition.ProcessRequest{}) {
+		if reconciler.ID() == "orca-runtime" {
+			return
+		}
+	}
+	t.Fatal("release activation does not refresh installed Orca handlers")
+}
+
+func TestOrcaActivationRepairsAllLocalInstalledContracts(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join(environment, "\n")+"\n", 0o600)
+	home := filepath.Join(root, "state")
+	seedCurrentReleaseLedger(t, root, home)
+	for name, content := range map[string]string{
+		"named":   "INCUS_PROJECT=named-project\nYARD_INSTANCE_NAME=named-yard\nSSH_PORT=2234\n",
+		"stopped": "INCUS_PROJECT=stopped-project\nYARD_INSTANCE_NAME=stopped-yard\nSSH_PORT=2235\n",
+		"absent":  "INCUS_PROJECT=absent-project\nYARD_INSTANCE_NAME=absent-yard\nSSH_PORT=2236\n",
+		"remote":  "ACCESS_KIND=remote\nREMOTE_DEST=owner.example\nREMOTE_YARD=default\n",
+	} {
+		path := filepath.Join(home, "yards", name, "config.env")
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeCLIFile(t, path, content, 0o600)
+	}
+	handler := filepath.Join(root, "config", "profiles", "orca", "resources", "orca", "handler.sh")
+	if err := os.MkdirAll(filepath.Dir(handler), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldDigest, newDigest := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	stale := fmt.Sprintf(`{"state":"stale","actual":%q,"desired":%q}`, oldDigest, newDigest)
+	current := fmt.Sprintf(`{"state":"current","actual":%q,"desired":%q}`, newDigest, newDigest)
+	writeCLIFile(t, handler, `#!/bin/sh
+set -eu
+[ "$1" = _runtime-contract ]
+[ "$SUBYARD_ENGINE_CONTEXT" = 1 ]
+yard_name="${YARD_NAME:-default}"
+state="$SUBYARD_CONFIG_HOME/orca-$yard_name"
+case "$2" in
+  observe) cat "$state" ;;
+  apply)
+    [ "$3" = orca-activation-test ]
+    [ ! -e "$SUBYARD_CONFIG_HOME/fail-orca" ] || exit 9
+    printf '%s\n' '`+current+`' > "$state"
+    printf '%s\n' "$yard_name" >> "$SUBYARD_CONFIG_HOME/orca-applied"
+    cat "$state"
+    ;;
+  *) exit 90 ;;
+esac
+`, 0o700)
+	for _, name := range []string{"default", "named"} {
+		writeCLIFile(t, filepath.Join(home, "orca-"+name), stale, 0o600)
+	}
+	incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+		"subyard/yard": {Status: "running"}, "named-project/named-yard": {Status: "running"},
+		"stopped-project/stopped-yard": {Status: "stopped"},
+	}}
+	var diagnostics bytes.Buffer
+	program, err := New(Options{RepositoryRoot: root, Environment: append(environment,
+		"SUBYARD_OPERATION_ID=orca-activation-test", "PATH="+os.Getenv("PATH")),
+		Incus: incus, Executor: incus, Stderr: &diagnostics})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciler := program.orcaActivationReconciler(releasetransition.ProcessRequest{ConfigHome: home})
+	ctx := context.Background()
+	before, err := reconciler.Observe(ctx, releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+	if err != nil || before.Converged || before.Actual == before.Desired {
+		t.Fatalf("initial observation: %#v, %v", before, err)
+	}
+	if _, err := os.Stat(filepath.Join(home, "orca-applied")); !os.IsNotExist(err) {
+		t.Fatal("assessment changed guest files")
+	}
+	if !strings.Contains(diagnostics.String(), "stopped") || !strings.Contains(diagnostics.String(), "deferred") {
+		t.Fatalf("stopped yard deferral was hidden: %s", diagnostics.String())
+	}
+	writeCLIFile(t, filepath.Join(home, "fail-orca"), "", 0o600)
+	if err := reconciler.Reconcile(ctx, releasetransition.ReleaseLinks{}); err == nil {
+		t.Fatal("failed helper installation was accepted")
+	}
+	if err := os.Remove(filepath.Join(home, "fail-orca")); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.Reconcile(ctx, releasetransition.ReleaseLinks{}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := reconciler.Observe(ctx, releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+	if err != nil || !after.Converged || after.Actual != after.Desired || after.Desired != before.Desired {
+		t.Fatalf("final observation: %#v, %v", after, err)
+	}
+	if err := reconciler.Reconcile(ctx, releasetransition.ReleaseLinks{}); err != nil {
+		t.Fatal(err)
+	}
+	applied, err := os.ReadFile(filepath.Join(home, "orca-applied"))
+	if err != nil || string(applied) != "default\nnamed\n" {
+		t.Fatalf("scope/retry/no-op: %q, %v", applied, err)
+	}
+}
+
+func TestOrcaActivationDefersLegacyYardLoadingUntilSourceMigrationsComplete(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join(environment, "\n")+"\n", 0o600)
+	home := filepath.Join(root, "state")
+	legacy := filepath.Join(home, "yards", "hermes", "config.env")
+	if err := os.MkdirAll(filepath.Dir(legacy), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, legacy, "YARD_TEMPLATE=e2e-vms\nSSH_PORT=2234\n", 0o600)
+	program, err := New(Options{
+		RepositoryRoot: root,
+		Environment:    append(environment, "PATH="+os.Getenv("PATH")),
+		Incus:          &testkit.Incus{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := releasetransition.ProcessRequest{
+		ConfigHome: home, ArtifactDigest: releasetransition.Fingerprint(strings.Repeat("c", 64)),
+	}
+	reconciler := program.orcaActivationReconciler(request)
+	releases := releasetransition.ReleasePair{Target: "1.1.0-test-aaaaaaaaaaaa"}
+	pending, err := reconciler.Observe(context.Background(), releases, releasetransition.ReleaseLinks{})
+	if err != nil || pending.Converged || pending.Actual == pending.Desired {
+		t.Fatalf("pending source observation = %#v, %v", pending, err)
+	}
+
+	seedCurrentReleaseLedger(t, root, home)
+	writeCLIFile(t, legacy, "SSH_PORT=2234\n", 0o600)
+	complete, err := reconciler.Observe(context.Background(), releases, releasetransition.ReleaseLinks{})
+	if err != nil || !complete.Converged || complete.Actual != complete.Desired ||
+		complete.Desired != pending.Desired {
+		t.Fatalf("completed source observation = %#v, %v; pending=%#v", complete, err, pending)
+	}
+}
+
+func seedCurrentReleaseLedger(t *testing.T, root, configHome string) {
+	t.Helper()
+	if err := os.MkdirAll(configHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := os.ReadFile(filepath.Join(repositoryRoot(t), "config", "release-transition.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(root, "config", "release-transition.json"), string(payload), 0o600)
+	registry, _, err := releasetransition.ParseRegistryV2(
+		payload, releasetransition.BuiltinCapabilityCatalog(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger := releasetransition.BaselineLedgerV2(registry)
+	for _, migration := range registry.Migrations {
+		ledger, err = ledger.Advance(registry, migration)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	encoded, _, err := releasetransition.MarshalLedgerV2(ledger, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := releasetransition.NewPOSIXV2Store(configHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing, err := store.ReadLedger()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompareAndSwapLedger(missing, encoded); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCandidateProcessRejectsUnsafeSourceIngressDescriptor(t *testing.T) {
 	home := t.TempDir()
 	valid := releasetransition.SourceIngressRequest{

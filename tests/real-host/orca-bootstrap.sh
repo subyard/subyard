@@ -23,6 +23,8 @@ FIXTURE_READY=0
 INSTALLED_RELEASE=''
 UPGRADE_FROM="${SUBYARD_E2E_ORCA_UPGRADE_FROM:-}"
 UPGRADE_INSTALLER_SHA256="${SUBYARD_E2E_ORCA_UPGRADE_INSTALLER_SHA256:-}"
+UPGRADE_TARGET="${SUBYARD_E2E_ORCA_UPGRADE_TARGET:-}"
+HANDLER_ACCEPTANCE="${SUBYARD_E2E_ORCA_HANDLER_ACCEPTANCE:-}"
 
 stage() { printf 'orca-bootstrap-e2e: %s\n' "$*" >&2; }
 die() { printf 'orca-bootstrap-e2e: %s\n' "$*" >&2; exit 1; }
@@ -65,6 +67,17 @@ if [ -n "$UPGRADE_FROM" ]; then
   [[ "$UPGRADE_INSTALLER_SHA256" =~ ^[0-9a-f]{64}$ ]] || die 'the published installer SHA-256 is required'
   EXISTING_YARD=1
 fi
+if [ -n "$UPGRADE_TARGET" ]; then
+  [ -n "$UPGRADE_FROM" ] || die 'an exact upgrade target requires a published predecessor'
+  [[ "$UPGRADE_TARGET" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    || die 'upgrade target must be an exact published version'
+fi
+case "$HANDLER_ACCEPTANCE" in
+  ''|direct|inherited) ;;
+  *) die 'SUBYARD_E2E_ORCA_HANDLER_ACCEPTANCE must be direct or inherited' ;;
+esac
+[ -z "$HANDLER_ACCEPTANCE" ] || [ -n "$UPGRADE_FROM" ] \
+  || die 'Orca handler acceptance requires a published predecessor'
 for command in git go incus jq python3 rg script sudo timeout; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
@@ -80,6 +93,211 @@ incus() {
 }
 yard() { timeout --signal=TERM --kill-after=5s 900 "$YARD_BIN" "$@"; }
 guest_root() { incus --project "$PROJECT" exec "$INSTANCE" -- "$@"; }
+guest_dev() {
+  incus --project "$PROJECT" exec "$INSTANCE" --user 1000 --group 1000 \
+    --env HOME=/home/dev -- "$@"
+}
+
+orca_rpc() {
+  guest_dev /usr/bin/python3 -B /tmp/orca-projects-helper.py rpc "$@"
+}
+
+orca_catalog_has() {
+  local path="$1"
+  orca_rpc repo.list | jq -e --arg path "$path" \
+    '.repos | any(.path == $path and ((.executionHostId // "local") == "local") and (.connectionId // null) == null)' \
+    >/dev/null
+}
+
+orca_repo_id() {
+  local path="$1"
+  orca_rpc repo.list | jq -er --arg path "$path" \
+    '[.repos[] | select(.path == $path and ((.executionHostId // "local") == "local") and (.connectionId // null) == null)] | select(length == 1) | .[0].id'
+}
+
+orca_registration_hash() {
+  guest_root sh -c '
+    set -eu
+    for path in /usr/local/libexec/subyard/orca-registration/*.py; do
+      digest="$(sha256sum "$path" | cut -d " " -f 1)"
+      printf "%s  %s\n" "$digest" "${path##*/}"
+    done | sha256sum | cut -d " " -f 1
+  '
+}
+
+orca_hook_hash() {
+  guest_root sha256sum /usr/local/libexec/subyard/projects-changed.d/orca | cut -d ' ' -f 1
+}
+
+release_orca_helper_hash() {
+  local release_root="$1" path digest
+  {
+    for path in "$release_root"/config/profiles/orca/resources/orca/registration/*.py; do
+      digest="$(sha256sum "$path" | cut -d ' ' -f 1)"
+      printf '%s  %s\n' "$digest" "${path##*/}"
+    done
+  } | sha256sum | cut -d ' ' -f 1
+}
+
+run_candidate_handler_acceptance() {
+  local mode="$1" target_version="$release_version"
+  local upgrade_source gone keep_session keep_id keep_tab keep_tab_id
+  local legacy_helper legacy_hook target_root target_helper target_hook rolled_back_version
+  local rollback_root rollback_helper restored_helper restored_hook
+  local primary_project="$PROJECT" primary_instance="$INSTANCE" primary_pid
+  local secondary_helper secondary_hook secondary_helper_after secondary_hook_after
+  local secondary_active secondary_enabled secondary_ssh_port secondary_orca_port
+
+  stage "seeding missing-checkout records for $mode candidate handler acceptance"
+  incus --project "$PROJECT" file push "$ROOT/tests/real-host/orca-projects-helper.py" \
+    "$INSTANCE/tmp/orca-projects-helper.py" --mode 0755
+  upgrade_source="$STATE/host/handler-upgrade-source"
+  mkdir -p "$upgrade_source"
+  printf 'handler upgrade fixture\n' >"$upgrade_source/README"
+  yard sync "$upgrade_source" --name handler-upgrade --yes >/dev/null
+  gone=/srv/workspaces/handler-upgrade/src/gone
+  keep_session=/srv/workspaces/handler-upgrade/src/keep-session
+  guest_dev git init -q "$gone"
+  guest_dev git init -q "$keep_session"
+  yard orca sync --yes >/dev/null
+  orca_repo_id "$gone" >/dev/null || die 'gone checkout was not registered by the predecessor'
+  keep_id="$(orca_repo_id "$keep_session")" || die 'keep-session checkout was not registered'
+  keep_tab="$(orca_rpc session.tabs.createTerminal \
+    "$(jq -cn --arg selector "id:$keep_id::$keep_session" \
+      '{worktree:$selector,activate:false,clientMutationId:"orca-handler-candidate-keep"}')")"
+  keep_tab_id="$(jq -er '.tab.id' <<<"$keep_tab")" || die 'saved session tab was not created'
+  guest_dev rm -rf -- "$gone" "$keep_session"
+  yard orca sync --yes >/dev/null
+  orca_catalog_has "$gone" || die 'predecessor unexpectedly pruned the gone checkout'
+
+  stage 'installing Orca in a named yard and stopping only its service'
+  secondary_ssh_port="$(free_port)"
+  while [ "$secondary_ssh_port" = "$(setting_value SSH_PORT)" ]; do
+    secondary_ssh_port="$(free_port)"
+  done
+  secondary_orca_port="$(free_port)"
+  while [ "$secondary_orca_port" = "$secondary_ssh_port" ] \
+    || [ "$secondary_orca_port" = "$(setting_value ORCA_HOST_PORT)" ]; do
+    secondary_orca_port="$(free_port)"
+  done
+  install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/secondary"
+  cat >"$SUBYARD_CONFIG_HOME/yards/secondary/config.env" <<EOF_SECONDARY_HANDLER
+INCUS_PROJECT=$PROJECT-secondary
+YARD_INSTANCE_NAME=$INSTANCE-secondary
+SSH_PORT=$secondary_ssh_port
+ORCA_HOST_PORT=$secondary_orca_port
+ENVIRONMENT_PROFILES=orca
+CODING_TOOL_INTEGRATIONS=
+ORCA_ADVERTISE_HOST=127.0.0.1
+EOF_SECONDARY_HANDLER
+  chmod 0600 "$SUBYARD_CONFIG_HOME/yards/secondary/config.env"
+  yard -Y secondary init --yes >/dev/null
+  yard -Y secondary start --yes >/dev/null
+  yard -Y secondary orca up --yes >/dev/null
+  yard -Y secondary orca down --yes >/dev/null
+  PROJECT="$primary_project-secondary"
+  INSTANCE="$primary_instance-secondary"
+  secondary_helper="$(orca_registration_hash)"
+  secondary_hook="$(orca_hook_hash)"
+  secondary_active="$(guest_root systemctl is-active subyard-orca.service 2>/dev/null || true)"
+  PROJECT="$primary_project"
+  INSTANCE="$primary_instance"
+  [ "$secondary_active" = inactive ] || die 'named-yard Orca did not become inactive after down'
+
+  if [ "$mode" = inherited ]; then
+    stage 'creating inherited 0.14.0 release with the 0.13.13 installed helper'
+    YARD_RELEASE_BASE_URL=https://github.com/subyard/subyard/releases/download/v0.14.0 \
+      yard update --version 0.14.0 --yes >/dev/null
+    [ "$(yard --version)" = 'yard 0.14.0' ] || die 'published 0.14.0 is not active'
+    yard orca sync --yes >/dev/null
+    orca_catalog_has "$gone" || die 'inherited stale helper unexpectedly pruned the gone checkout'
+  fi
+  legacy_helper="$(orca_registration_hash)"
+  legacy_hook="$(orca_hook_hash)"
+  primary_pid="$(guest_root systemctl show -p MainPID --value subyard-orca.service)"
+
+  stage "updating the $mode predecessor to candidate $target_version"
+  YARD_RELEASE_BASE_URL="file://$STATE/release" \
+    yard update --version "$target_version" --yes >"$STATE/handler-candidate-update.out" \
+      2>"$STATE/handler-candidate-update.err" || die 'candidate handler update failed'
+  [ "$(yard --version)" = "yard $target_version" ] || die 'candidate release is not active'
+  target_root="$SUBYARD_HOME/runtime/$(readlink "$SUBYARD_HOME/runtime/current")"
+  target_helper="$(release_orca_helper_hash "$target_root")"
+  [ "$(orca_registration_hash)" = "$target_helper" ] \
+    || die 'candidate update did not install the target registration helpers'
+  [ "$(orca_hook_hash)" != "$legacy_hook" ] \
+    || die 'candidate update retained the legacy Orca hook'
+  target_hook="$(orca_hook_hash)"
+  [ "$(guest_root systemctl show -p MainPID --value subyard-orca.service)" = "$primary_pid" ] \
+    || die 'candidate helper refresh restarted active Orca'
+  PROJECT="$primary_project-secondary"
+  INSTANCE="$primary_instance-secondary"
+  secondary_helper_after="$(orca_registration_hash)"
+  secondary_hook_after="$(orca_hook_hash)"
+  secondary_active="$(guest_root systemctl is-active subyard-orca.service 2>/dev/null || true)"
+  secondary_enabled="$(guest_root systemctl is-enabled subyard-orca.service 2>/dev/null || true)"
+  PROJECT="$primary_project"
+  INSTANCE="$primary_instance"
+  [ "$secondary_helper_after" = "$target_helper" ] \
+    && [ "$secondary_hook_after" != "$secondary_hook" ] \
+    || die 'candidate update did not refresh the named-yard helper contract'
+  [ "$secondary_active" = inactive ] || die 'candidate update changed stopped named-yard Orca state'
+  [ "$secondary_enabled" = disabled ] || die 'candidate update changed disabled named-yard Orca state'
+  [ "$secondary_helper" != "$target_helper" ] \
+    || die 'named-yard fixture did not begin with stale registration helpers'
+  yard orca sync --yes >"$STATE/handler-candidate-sync.out" 2>"$STATE/handler-candidate-sync.err"
+  orca_catalog_has "$gone" && die 'candidate helper retained the empty missing checkout'
+  [ "$(orca_repo_id "$keep_session")" = "$keep_id" ] \
+    || die 'candidate helper changed the keep-session repository identity'
+  orca_rpc session.tabs.listAll | jq -e --arg id "$keep_tab_id" \
+    '.snapshots | any(.tabs | any(.id == $id))' >/dev/null \
+    || die 'candidate helper lost the saved session tab'
+  assert_orca_runtime_json_preserved
+  client_status "$pairing" upgrade-client
+
+  stage 'checking legacy rollback retention and explicit old Orca restoration'
+  yard update --rollback --yes >/dev/null || die 'legacy rollback failed'
+  rolled_back_version="$(yard --version)"
+  rollback_root="$SUBYARD_HOME/runtime/$(readlink "$SUBYARD_HOME/runtime/current")"
+  rollback_helper="$(release_orca_helper_hash "$rollback_root")"
+  [ "$(orca_registration_hash)" = "$target_helper" ] \
+    && [ "$(orca_hook_hash)" = "$target_hook" ] \
+    || die 'legacy rollback did not retain the candidate helper contract'
+  yard orca sync --yes >/dev/null
+  [ "$(orca_repo_id "$keep_session")" = "$keep_id" ] \
+    || die 'rollback with the candidate helper lost the saved checkout'
+  assert_orca_runtime_json_preserved
+  client_status "$pairing" upgrade-client
+  yard orca up --yes >/dev/null
+  restored_helper="$(orca_registration_hash)"
+  restored_hook="$(orca_hook_hash)"
+  [ "$restored_helper" = "$rollback_helper" ] \
+    && [ "$restored_hook" != "$target_hook" ] \
+    || die 'old Orca up did not restore its helper contract'
+
+  stage 'checking stopped-yard deferred repair with simultaneous candidate config drift'
+  yard stop --yes >/dev/null
+  YARD_RELEASE_BASE_URL="file://$STATE/release" \
+    yard update --version "$target_version" --yes >/dev/null || die 'stopped-yard forward update failed'
+  [ "$(incus --project "$PROJECT" list "$INSTANCE" --format csv -c s)" = STOPPED ] \
+    || die 'candidate update started the stopped yard'
+  yard start --yes >/dev/null
+  [ "$(orca_registration_hash)" = "$restored_helper" ] \
+    && [ "$(orca_hook_hash)" = "$restored_hook" ] \
+    || die 'stopped-yard update repaired guest helpers before the first init'
+  yard init --yes >/dev/null || die 'first init did not repair the stopped-yard helper'
+  [ "$(orca_registration_hash)" = "$target_helper" ] \
+    && [ "$(orca_hook_hash)" = "$target_hook" ] \
+    || die 'first init after start did not converge the target helper contract'
+  incus --project "$PROJECT" file push "$ROOT/tests/real-host/orca-projects-helper.py" \
+    "$INSTANCE/tmp/orca-projects-helper.py" --mode 0755
+  [ "$(orca_repo_id "$keep_session")" = "$keep_id" ] \
+    || die 'stopped-yard repair changed the keep-session repository identity'
+  assert_orca_runtime_json_preserved
+  client_status "$pairing" upgrade-client
+  printf 'orca-handler-candidate-evidence: mode=%s from=%s rollback=%s target=%s legacy-helper=%s target-helper=%s keep-session=retained gone=pruned stopped-repair=converged\n' \
+    "$mode" "$UPGRADE_FROM" "$rolled_back_version" "$target_version" "$legacy_helper" "$target_helper"
+}
 
 cleanup() {
   local rc=$? cleanup_failed=0
@@ -722,6 +940,7 @@ path.write_text(json.dumps(value) + "\n")
 PY_UPGRADE_DEFAULT
 fi
 release_version=0.13.3-orca-bootstrap-e2e
+[ -z "$HANDLER_ACCEPTANCE" ] || release_version=0.14.1-orca-handler-e2e
 bash "$STATE/source/dev/package-engine.sh" --version "$release_version" \
   --output-dir "$STATE/release" >/dev/null
 if [ -n "$UPGRADE_FROM" ]; then
@@ -751,6 +970,93 @@ if [ -n "$UPGRADE_FROM" ]; then
   case "$pairing" in orca://pair\?code=*) ;; *) die 'published Orca did not return a pairing link' ;; esac
   install_stock_orca_client
   client_status "$pairing" upgrade-client
+
+  if [ -n "$UPGRADE_TARGET" ]; then
+    stage 'seeding missing-checkout records before the exact published upgrade'
+    incus --project "$PROJECT" file push "$ROOT/tests/real-host/orca-projects-helper.py" \
+      "$INSTANCE/tmp/orca-projects-helper.py" --mode 0755
+    upgrade_source="$STATE/host/handler-upgrade-source"
+    mkdir -p "$upgrade_source"
+    printf 'handler upgrade fixture\n' >"$upgrade_source/README"
+    yard sync "$upgrade_source" --name handler-upgrade --yes >/dev/null
+    gone=/srv/workspaces/handler-upgrade/src/gone
+    keep_session=/srv/workspaces/handler-upgrade/src/keep-session
+    guest_dev git init -q "$gone"
+    guest_dev git init -q "$keep_session"
+    yard orca sync --yes >/dev/null
+    orca_repo_id "$gone" >/dev/null || die 'gone checkout was not registered by the predecessor'
+    keep_id="$(orca_repo_id "$keep_session")" || die 'keep-session checkout was not registered by the predecessor'
+    keep_tab="$(orca_rpc session.tabs.createTerminal \
+      "$(jq -cn --arg selector "id:$keep_id::$keep_session" \
+        '{worktree:$selector,activate:false,clientMutationId:"orca-handler-upgrade-keep"}')")"
+    keep_tab_id="$(jq -er '.tab.id' <<<"$keep_tab")" \
+      || die 'saved keep-session tab was not created'
+    helper_before="$(orca_registration_hash)" || die 'predecessor helper could not be fingerprinted'
+    hook_before="$(orca_hook_hash)" || die 'predecessor hook could not be fingerprinted'
+    service_before="$(guest_root systemctl is-active subyard-orca.service)"
+    endpoint_before="$(setting_value ORCA_HOST_PORT)"
+    guest_dev rm -rf -- "$gone" "$keep_session"
+    yard orca sync --yes >/dev/null
+    orca_catalog_has "$gone" || die 'predecessor unexpectedly pruned the missing gone checkout'
+    orca_catalog_has "$keep_session" || die 'predecessor lost the saved-session checkout'
+
+    stage "updating published Subyard $UPGRADE_FROM to published $UPGRADE_TARGET without Orca repair"
+    YARD_RELEASE_BASE_URL="https://github.com/subyard/subyard/releases/download/v$UPGRADE_TARGET" \
+      yard update --version "$UPGRADE_TARGET" --yes >"$STATE/upgrade.out" 2>"$STATE/upgrade.err" \
+      || die 'exact published release upgrade failed'
+    [ "$(yard --version)" = "yard $UPGRADE_TARGET" ] || die 'exact target release is not active'
+    target_root="$SUBYARD_HOME/runtime/$(readlink "$SUBYARD_HOME/runtime/current")"
+    helper_target="$(release_orca_helper_hash "$target_root")" \
+      || die 'target release helper could not be fingerprinted'
+    helper_after_update="$(orca_registration_hash)" || die 'post-update helper could not be fingerprinted'
+    hook_after_update="$(orca_hook_hash)" || die 'post-update hook could not be fingerprinted'
+    [ "$helper_after_update" = "$helper_before" ] \
+      || die 'legacy update unexpectedly changed the installed Orca helper'
+    [ "$hook_after_update" = "$hook_before" ] \
+      || die 'legacy update unexpectedly changed the installed Orca hook'
+    [ "$helper_after_update" != "$helper_target" ] \
+      || die 'legacy update did not reproduce stale installed Orca helpers'
+    yard orca sync --yes >/dev/null
+    orca_catalog_has "$gone" || die 'stale helper unexpectedly pruned the gone checkout'
+    orca_catalog_has "$keep_session" || die 'stale helper lost the saved-session checkout'
+
+    yard init --yes >/dev/null
+    [ "$(orca_registration_hash)" = "$helper_before" ] \
+      || die 'legacy init unexpectedly repaired the installed Orca helper'
+    [ "$(orca_hook_hash)" = "$hook_before" ] \
+      || die 'legacy init unexpectedly repaired the installed Orca hook'
+    yard orca sync --yes >/dev/null
+    orca_catalog_has "$gone" || die 'legacy init changed stale-helper cleanup behavior'
+
+    stage 'repairing through target Orca up and checking RPC cleanup guards'
+    yard orca up --yes >/dev/null
+    [ "$(orca_registration_hash)" = "$helper_target" ] \
+      || die 'target Orca up did not install the target helper contract'
+    [ "$(orca_hook_hash)" = "$hook_before" ] \
+      || die 'published target installed an unexpected generated hook'
+    [ "$(guest_root systemctl is-active subyard-orca.service)" = "$service_before" ] \
+      || die 'upgrade scenario changed the Orca service state'
+    [ "$(setting_value ORCA_HOST_PORT)" = "$endpoint_before" ] \
+      || die 'upgrade scenario changed the Orca endpoint'
+    yard orca sync --yes >"$STATE/repaired-sync.out" 2>"$STATE/repaired-sync.err"
+    orca_catalog_has "$gone" && die 'target helper retained the empty missing checkout'
+    [ "$(orca_repo_id "$keep_session")" = "$keep_id" ] \
+      || die 'target helper changed the keep-session repository identity'
+    orca_rpc session.tabs.listAll | jq -e --arg id "$keep_tab_id" \
+      '.snapshots | any(.tabs | any(.id == $id))' >/dev/null \
+      || die 'target helper lost the saved session tab'
+    printf 'orca-handler-upgrade-evidence: from=%s target=%s helper-before=%s helper-after-update=%s target-helper=%s hook-before=%s hook-after-update=%s gone-before=retained gone-after=pruned keep-session=retained\n' \
+      "$UPGRADE_FROM" "$UPGRADE_TARGET" "$helper_before" "$helper_after_update" "$helper_target" \
+      "$hook_before" "$hook_after_update"
+    printf 'ok: published Orca helper delivery defect reproduced and repair behavior verified\n'
+    exit 0
+  fi
+
+  if [ -n "$HANDLER_ACCEPTANCE" ]; then
+    run_candidate_handler_acceptance "$HANDLER_ACCEPTANCE"
+    printf 'ok: candidate Orca helper upgrade, rollback, and deferred repair acceptance passed\n'
+    exit 0
+  fi
 
   stage 'preparing another local yard for changed candidate defaults'
   install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/secondary"

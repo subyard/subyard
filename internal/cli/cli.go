@@ -103,6 +103,7 @@ type CLI struct {
 	retainedAdapterCompatibility bool
 	releaseTransitionChild       bool
 	configApplyRepair            *configApplyRepairPermit
+	orcaInitRepair               *configApplyRepairPermit
 }
 
 func (cli *CLI) rpcOperation(operationID string) *CLI {
@@ -151,6 +152,7 @@ func (cli *CLI) runReleaseTransitionYardCommandIO(
 	operation.options.Stderr = stderr
 	operation.releaseTransitionChild = true
 	operation.configApplyRepair = nil
+	operation.orcaInitRepair = nil
 	if code := operation.Run(ctx); code != 0 {
 		return fmt.Errorf("yard command exited with status %d", code)
 	}
@@ -449,6 +451,17 @@ func (cli *CLI) Run(ctx context.Context) int {
 				if permit != nil {
 					outcome = nil
 				}
+			}
+		}
+		if outcome != nil && core && definition.Handler == "@init" {
+			permit, err := cli.prepareOrcaInitRepair(ctx, yard, commandArguments, *outcome)
+			if err != nil {
+				cli.errorf("init release repair: %v", err)
+				return 1
+			}
+			cli.orcaInitRepair = permit
+			if permit != nil {
+				outcome = nil
 			}
 		}
 		if outcome != nil {
@@ -3650,6 +3663,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		if behavior.prepare == nil {
 			return nil, &rpc.Error{Code: "interactive_or_payload_command", Message: params.Command}
 		}
+		operationCLI := handler.cli.rpcOperation(call.OperationID)
 		if !releaseRecoveryCommand(definition) {
 			outcome, gateErr := handler.cli.inspectMutationGate(
 				ctx, handler.loaded.Context.YardName,
@@ -3658,10 +3672,18 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 				return nil, operationRPCError("mutation_gate_failed", gateErr)
 			}
 			if outcome != nil {
-				return nil, mutationGateRPCError(*outcome)
+				if definition.Handler == "@init" {
+					operationCLI.orcaInitRepair, gateErr = operationCLI.prepareOrcaInitRepair(
+						ctx, handler.loaded.Context.YardName, params.Arguments, *outcome)
+					if gateErr != nil {
+						return nil, operationRPCError("mutation_gate_failed", gateErr)
+					}
+				}
+				if operationCLI.orcaInitRepair == nil {
+					return nil, mutationGateRPCError(*outcome)
+				}
 			}
 		}
-		operationCLI := handler.cli.rpcOperation(call.OperationID)
 		prepared, err := operationCLI.prepareCommand(ctx, prepareCommandRequest{
 			Loaded: handler.loaded, Definition: definition, Arguments: params.Arguments,
 			ExplicitYard: true,
@@ -3722,7 +3744,10 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 				return nil, operationRPCError("mutation_gate_failed", gateErr)
 			}
 			if outcome != nil {
-				return nil, mutationGateRPCError(*outcome)
+				if planned.Definition.Handler != "@init" || planned.CLI.orcaInitRepair == nil ||
+					!sameConfigApplyGate(planned.CLI.orcaInitRepair.gate, *outcome) {
+					return nil, mutationGateRPCError(*outcome)
+				}
 			}
 		}
 		if planned.Plan.Target == domain.TargetRemoteOwner {

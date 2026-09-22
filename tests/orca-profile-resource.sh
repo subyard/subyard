@@ -92,6 +92,41 @@ case "${1:-}" in
     ;;
   exec)
     case " $* " in
+      *' bash -se -- '*'orca-registration.sha256'*)
+        arguments=("$@")
+        command=()
+        for index in "${!arguments[@]}"; do
+          [ "${arguments[$index]}" = -- ] && command=("${arguments[@]:$((index + 1))}")
+        done
+        mapped=()
+        if [[ "${command[0]}" = /tmp/subyard-orca.* ]]; then
+          for index in 0 1 2 3 4; do mapped+=("$guest${command[$index]}"); done
+          mapped+=("${command[5]}")
+        else
+          mapped+=("${command[0]}")
+          for index in 1 2 3 4 5 6; do mapped+=("$guest${command[$index]}"); done
+          mapped+=("${command[@]:7}")
+        fi
+        export ORCA_TEST_GUEST_ROOT="$guest" ORCA_TEST_STATE_ROOT="$state_root"
+        stat() {
+          if [ "${1:-}" = -c ] && { [ "${2:-}" = %u ] || [ "${2:-}" = %g ]; }; then
+            printf '0\n'
+          else
+            command stat "$@"
+          fi
+        }
+        chown() { :; }
+        mv() {
+          local target="${!#}"
+          if [ -e "$ORCA_TEST_STATE_ROOT/fail-registration-marker" ] &&
+            [[ "$target" = "$ORCA_TEST_GUEST_ROOT/usr/local/libexec/subyard/orca-registration.sha256" ]]; then
+            return 1
+          fi
+          command mv "$@"
+        }
+        export -f stat chown mv
+        /bin/bash -se -- "${mapped[@]}"
+        ;;
       *' test -x /usr/local/libexec/subyard/projects-changed '*)
         [ ! -e "$state_root/missing-dispatcher" ]
         ;;
@@ -342,6 +377,9 @@ done
   || fail 'pair restarted a stopped Orca service'
 [ "$(count_log '.pairing.url')" -eq 0 ] \
   || fail 'pair read a pairing capability while Orca was stopped'
+observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
+jq -e '.state == "absent" and .actual == "" and .desired == ""' <<<"$observation" >/dev/null \
+  || fail 'runtime contract observation did not distinguish an absent Orca installation'
 run_orca up --yes >"$TMP/up.out"
 ready_file="$ORCA_TEST_GUEST/srv/agents/orca/ready.json"
 mobile_request="$ready_file.mobile-request"
@@ -374,6 +412,70 @@ for source in "$ROOT"/config/profiles/orca/resources/orca/registration/*.py; do
   cmp -s "$source" "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration/${source##*/}" \
     || fail 'registration component was not installed intact'
 done
+observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
+jq -e '.state == "current" and (.actual | test("^[0-9a-f]{64}$")) and .actual == .desired' \
+  <<<"$observation" >/dev/null || fail 'installed runtime contract was not observed as current'
+rm -f "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration.sha256"
+observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
+jq -e '.state == "stale" and .actual != .desired' <<<"$observation" >/dev/null \
+  || fail 'runtime contract observation accepted a missing completion marker'
+printf 'legacy-contract\n' >"$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration.sha256"
+observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
+jq -e '.state == "stale" and .actual != .desired' <<<"$observation" >/dev/null \
+  || fail 'runtime contract observation accepted an old completion marker'
+push_count="$(cat "$ORCA_TEST_PUSH_COUNTER")"
+printf '# drift\n' >>"$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration/main.py"
+chmod 0644 "$ORCA_TEST_GUEST/usr/local/libexec/subyard/projects-changed.d/orca"
+rm -f "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration.lock"
+printf 'legacy-contract\n' >"$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration.sha256"
+observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
+jq -e '.state == "stale" and .actual != .desired' <<<"$observation" >/dev/null \
+  || fail 'runtime contract observation missed helper drift'
+[ "$(cat "$ORCA_TEST_PUSH_COUNTER")" -eq "$push_count" ] \
+  || fail 'runtime contract observation wrote guest files'
+if run_orca sync >"$TMP/stale-sync.out" 2>&1; then
+  fail 'sync assessment accepted a stale installed helper'
+fi
+grep -Fq 'yard init' "$TMP/stale-sync.out" \
+  || fail 'stale sync assessment did not provide an init recovery hint'
+if ORCA_ADVERTISE_HOST=owner.example-tailnet.ts.net ORCA_HOST_PORT=17678 \
+  SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION=sync SUBYARD_OPERATION_ID=stale-sync \
+  "$ROOT/config/profiles/orca/resources/orca/handler.sh" sync >"$TMP/stale-sync-apply.out" 2>&1; then
+  fail 'sync apply executed a stale installed helper'
+fi
+grep -Fq 'yard init' "$TMP/stale-sync-apply.out" \
+  || fail 'stale sync apply did not provide an init recovery hint'
+if "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply \
+  orca-refresh wrong "$(jq -r .desired <<<"$observation")" >"$TMP/runtime-stale.out" 2>&1; then
+  fail 'runtime contract apply accepted a stale assessment'
+fi
+restart_count="$(count_log 'systemctl restart subyard-orca.service')"
+unit_hash="$(sha256sum "$ORCA_TEST_GUEST/etc/systemd/system/subyard-orca.service")"
+touch "$TMP/fail-registration-marker"
+if "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
+  "$(jq -r .actual <<<"$observation")" "$(jq -r .desired <<<"$observation")" \
+  >"$TMP/runtime-interrupted.out" 2>&1; then
+  fail 'runtime contract apply concealed an interruption before marker publication'
+fi
+rm -f "$TMP/fail-registration-marker"
+observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
+jq -e '.state == "stale" and .actual != .desired' <<<"$observation" >/dev/null \
+  || fail 'interrupted runtime contract apply appeared current without its marker'
+"$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply orca-refresh \
+  "$(jq -r .actual <<<"$observation")" "$(jq -r .desired <<<"$observation")" \
+  >"$TMP/runtime-applied.json"
+jq -e '.state == "current" and .actual == .desired' "$TMP/runtime-applied.json" >/dev/null \
+  || fail 'runtime contract apply did not verify the repaired helper'
+[ "$(stat -c %a "$ORCA_TEST_GUEST/usr/local/libexec/subyard/projects-changed.d/orca")" = 755 ] \
+  || fail 'runtime contract repair did not restore the hook mode'
+[ "$(stat -c %a "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration.lock")" = 644 ] \
+  || fail 'runtime contract repair did not restore the persistent lock'
+grep -Fq 'orca-registration.sha256' "$ORCA_TEST_GUEST/usr/local/libexec/subyard/projects-changed.d/orca" \
+  || fail 'project hook does not guard against an interrupted helper generation'
+[ "$(count_log 'systemctl restart subyard-orca.service')" -eq "$restart_count" ] \
+  || fail 'registration-only runtime repair restarted Orca'
+[ "$(sha256sum "$ORCA_TEST_GUEST/etc/systemd/system/subyard-orca.service")" = "$unit_hash" ] \
+  || fail 'registration-only runtime repair changed the installed service unit'
 if grep -Eqi 'nodejs|npm|AppImage|squashfs|APPDIR|SHA512' \
   "$ROOT/config/profiles/orca/resources/orca/handler.sh" "$ROOT/config/profiles/orca/release.env"; then
   fail 'removed SSH/AppImage dependencies returned'

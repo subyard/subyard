@@ -65,6 +65,9 @@ case "${1:-}" in
       *' dpkg --print-architecture '*) printf 'amd64\n' ;;
       *' dpkg-query -W '*orca-ide*) printf '1.4.159\n' ;;
       *' bash -se -- dev /usr/bin/orca-ide /srv/agents/orca ') printf '0 0\n' ;;
+      *' bash -se -- '*'orca-registration.sha256'*)
+        cat >/dev/null
+        printf '{"state":"current","actual":"%064d","desired":"%064d"}\n' 0 0 ;;
       *' docker inspect -f '*) printf 'true\n' ;;
     esac ;;
   file) : ;;

@@ -21,6 +21,21 @@ the required yard initialization, installs Orca and registers existing projects.
 It shows one combined plan before applying changes. Repeating it converges the same
 configuration and preserves server state.
 
+`yard update` also refreshes the project-registration files of existing Orca
+installations in all running local yards, including named yards. This does not
+install Orca in other yards, change endpoints or start a stopped Orca service.
+Registration-only changes do not restart the service. Stopped yards are left
+stopped; after starting one, run `yard init` to repair its installed handler before
+project hooks execute. This repair also runs when provisioning is already current.
+`orca sync` refuses a stale registration contract and points to `yard init`.
+
+When rolling back to Subyard 0.14.0 or 0.13.13, the older updater leaves the newer,
+backward-compatible registration handler installed. This legacy rollback does not
+undo a defect in that handler. An explicit `orca up` on the older release reinstalls
+that release's handler. A subsequent update to a release with handler refresh
+converges either state to its own registration files. Server data and client grants
+are preserved; rollback does not restore previously pruned catalog entries.
+
 Paste the final `orca://pair?...` line into **Settings → Remote Orca Servers → Add
 Server** on the laptop. This is a private single-client capability: do not put it in
 config, shell history, tickets or logs. Generate a separate link for each laptop.
