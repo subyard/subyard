@@ -632,6 +632,17 @@ for nested_cleanup_case in success teardown-failure backend-failure; do
       ;;
   esac
 done
+nested_bridge_create_line="$(grep -nF 'incus network create "$OUTER_BRIDGE" ipv4.address=auto ipv6.address=none' \
+  "$nested_teardown_script" | cut -d: -f1)"
+nested_yard_init_line="$(grep -nF 'yard init --yes' "$nested_teardown_script" \
+  | head -n 1 | cut -d: -f1)"
+[ -n "$nested_bridge_create_line" ] && [ -n "$nested_yard_init_line" ] \
+  && [ "$nested_bridge_create_line" -lt "$nested_yard_init_line" ] \
+  && grep -A1 -F 'incus storage create "$OUTER_POOL" dir' "$nested_teardown_script" \
+    | grep -Fq 'user.subyard.owner=nested-teardown-e2e-v1' \
+  && grep -A1 -F 'incus network create "$OUTER_BRIDGE" ipv4.address=auto ipv6.address=none' \
+    "$nested_teardown_script" | grep -Fq 'user.subyard.owner=nested-teardown-e2e-v1' \
+  || fail 'nested teardown does not publish marker-owned pool and bridge before yard init'
 memory_reserve_source="$(awk '
   /^(nested_decimal_at_most|nested_monotonic_seconds|nested_memory_available_bytes|require_nested_memory_reserve)\(\)/ {
     copying=1
@@ -1187,6 +1198,78 @@ set -e
 [ "$source_recovery_rc" = 2 ] \
   && grep -Fq 'conflicting fixture markers' <<<"$source_recovery_failure" \
   || fail 'P0 source fixture recovery combined conflicting project and durable markers'
+real_incus_recovery_function="$(awk '
+  /^recover_stale_real_incus_fixture\(\)/ { copying=1 }
+  copying { print }
+  copying && /^}$/ { exit }
+' "$ROOT/dev/e2e/p0-guest.sh")"
+run_real_incus_recovery_case() {
+  ROOT="$ROOT" REAL_INCUS_RECOVERY_CASE="$1" \
+  REAL_INCUS_RECOVERY_FUNCTION="$real_incus_recovery_function" bash -c '
+    set -euo pipefail
+    SUBYARD_E2E_VM=1
+    project_present=1
+    cleanup_calls=0
+    die() { printf "%s\\n" "$*" >&2; exit 2; }
+    command() {
+      [ "$1 ${2:-}" != "-v incus" ] || return 0
+      builtin command "$@"
+    }
+    incus() {
+      [ "$1 $2" = "project list" ] || exit 93
+      [ "$REAL_INCUS_RECOVERY_CASE" != initial-query-error ] || return 17
+      [ "$project_present" = 0 ] || printf "%s\\n" subyard-p0-real-incus
+    }
+    pgrep() {
+      case "$REAL_INCUS_RECOVERY_CASE" in
+        active) return 0 ;;
+        query-error) return 2 ;;
+        *) return 1 ;;
+      esac
+    }
+    bash() {
+      [ "$1" = "$ROOT/dev/e2e/p0-real-incus.sh" ] && [ "$2" = --cleanup-only ] \
+        || exit 91
+      cleanup_calls=$((cleanup_calls + 1))
+      [ "$REAL_INCUS_RECOVERY_CASE" != remains ] || return 0
+      project_present=0
+    }
+    timeout() {
+      case "$1" in
+        --foreground) shift 2 ;;
+        --signal=TERM) shift 3 ;;
+        *) exit 92 ;;
+      esac
+      "$@"
+    }
+    eval "$REAL_INCUS_RECOVERY_FUNCTION"
+    case "$REAL_INCUS_RECOVERY_CASE" in absent) project_present=0 ;; esac
+    recover_stale_real_incus_fixture
+    printf "%s\\n" "$cleanup_calls"
+  '
+}
+[ "$(run_real_incus_recovery_case absent)" = 0 ] \
+  || fail 'P0 preflight recovered a missing real-Incus project'
+[ "$(run_real_incus_recovery_case stale | tail -n 1)" = 1 ] \
+  || fail 'P0 preflight did not reclaim the exact stale real-Incus project'
+for real_incus_recovery_case in active query-error remains initial-query-error; do
+  set +e
+  real_incus_recovery_output="$(run_real_incus_recovery_case "$real_incus_recovery_case" 2>&1)"
+  real_incus_recovery_rc=$?
+  set -e
+  [ "$real_incus_recovery_rc" = 2 ] \
+    || fail "P0 preflight accepted a $real_incus_recovery_case real-Incus fixture"
+  case "$real_incus_recovery_case" in
+    active) grep -Fq 'active process' <<<"$real_incus_recovery_output" ;;
+    query-error) grep -Fq 'cannot determine whether' <<<"$real_incus_recovery_output" ;;
+    remains) grep -Fq 'remains after recovery' <<<"$real_incus_recovery_output" ;;
+    initial-query-error) grep -Fq 'cannot inspect real-Incus fixture inventory' <<<"$real_incus_recovery_output" ;;
+  esac || fail "P0 preflight did not fail closed for $real_incus_recovery_case"
+done
+sed -n '/^capacity_preflight() {/,/^}/p' "$ROOT/dev/e2e/p0-guest.sh" \
+  | tr '\n' ' ' \
+  | grep -Eq 'recover_stale_source_upgrade_fixture.*recover_stale_real_incus_fixture.*recover_stale_test_default_pool' \
+  || fail 'P0 real-Incus recovery is not ordered before pool and capacity checks'
 grep -Fq 'is_markerless_migrated_fixture_project' \
   "$ROOT/dev/e2e/p0-source-upgrade.sh" \
   && grep -Fq 'user.subyard.test_vms_revision' \
@@ -2467,6 +2550,82 @@ grep -Fq 'cleanup delete of %s failed; retrying (%s/3)' "$ROOT/dev/e2e/p0-real-i
   && grep -Fq 'refusing to delete unmarked instance' "$ROOT/dev/e2e/p0-real-incus.sh" \
   && grep -Fq 'could not delete marked instance $name after 3 attempts' "$ROOT/dev/e2e/p0-real-incus.sh" \
   || fail "P0 real-Incus cleanup retry is not bounded to marked test instances"
+real_incus_project_cleanup_functions="$(
+  for function_name in real_incus_observe p0_monotonic_seconds cleanup_real_incus \
+    cleanup_sleep active_instance_operation_ids delete_marked_instance cleanup; do
+    sed -n "/^${function_name}() {/,/^}/p" "$ROOT/dev/e2e/p0-real-incus.sh"
+  done
+)"
+run_real_incus_project_cleanup_case() {
+  REAL_INCUS_PROJECT_CLEANUP_CASE="$1" \
+  REAL_INCUS_PROJECT_CLEANUP_LOG="$2" \
+  REAL_INCUS_PROJECT_CLEANUP_FUNCTIONS="$real_incus_project_cleanup_functions" bash -c '
+    set -euo pipefail
+    MARKER=agent-e2e-p0
+    PROJECT=subyard-p0-real-incus
+    TMP=""
+    container_present=1
+    vm_present=1
+    project_present=1
+    die() { printf "%s\\n" "$*" >&2; exit 2; }
+    eval "$REAL_INCUS_PROJECT_CLEANUP_FUNCTIONS"
+    real_incus() {
+      printf "%s\\n" "$*" >> "$REAL_INCUS_PROJECT_CLEANUP_LOG"
+      case "$1 $2" in
+        "project list")
+          [ "$REAL_INCUS_PROJECT_CLEANUP_CASE" != inventory-error ] || return 17
+          [ "$project_present" = 0 ] || printf "%s\\n" "$PROJECT"
+          ;;
+        "project get")
+          [ "$REAL_INCUS_PROJECT_CLEANUP_CASE" != foreign-project ] \
+            && printf "%s\\n" "$MARKER" || printf "%s\\n" foreign
+          ;;
+        "list p0-container")
+          if [ "$REAL_INCUS_PROJECT_CLEANUP_CASE" != foreign-instance ] \
+            && [ "$container_present" = 1 ]; then
+            printf "%s\\n" p0-container
+          fi
+          ;;
+        "list p0-vm")
+          [ "$vm_present" != 1 ] || printf "%s\\n" p0-vm
+          ;;
+        "operation list") printf "%s\\n" "[]" ;;
+        "config get")
+          [ "$REAL_INCUS_PROJECT_CLEANUP_CASE" != foreign-instance-marker ] \
+            && printf "%s\\n" "$MARKER" || printf "%s\\n" foreign
+          ;;
+        "delete p0-container") container_present=0 ;;
+        "delete p0-vm") vm_present=0 ;;
+        "list --project")
+          [ "$container_present" = 0 ] && [ "$vm_present" = 0 ] || printf "%s\\n" unexpected
+          ;;
+        "project delete") project_present=0 ;;
+        "image "*) exit 94 ;;
+        *) exit 93 ;;
+      esac
+    }
+    cleanup
+    [ "$project_present" = 0 ]
+  '
+}
+real_incus_project_cleanup_log="$TMP/real-incus-project-cleanup.log"
+: > "$real_incus_project_cleanup_log"
+run_real_incus_project_cleanup_case marked "$real_incus_project_cleanup_log" \
+  || fail 'P0 cleanup did not remove the marked real-Incus fixture'
+grep -Fqx 'project delete subyard-p0-real-incus' "$real_incus_project_cleanup_log" \
+  || fail 'P0 cleanup did not delete its empty marked project'
+for real_incus_project_cleanup_case in foreign-project foreign-instance foreign-instance-marker inventory-error; do
+  : > "$real_incus_project_cleanup_log"
+  set +e
+  run_real_incus_project_cleanup_case "$real_incus_project_cleanup_case" \
+    "$real_incus_project_cleanup_log" >/dev/null 2>&1
+  real_incus_project_cleanup_rc=$?
+  set -e
+  [ "$real_incus_project_cleanup_rc" = 2 ] \
+    && ! grep -Fq 'project delete subyard-p0-real-incus' "$real_incus_project_cleanup_log" \
+    && ! grep -Fq 'image ' "$real_incus_project_cleanup_log" \
+    || fail "P0 cleanup changed an $real_incus_project_cleanup_case fixture or its cache"
+done
 real_incus_cleanup_functions="$(
   for function_name in real_incus_observe p0_monotonic_seconds cleanup_real_incus \
     cleanup_sleep active_instance_operation_ids delete_marked_instance; do

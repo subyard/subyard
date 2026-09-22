@@ -117,6 +117,13 @@ share assessment, execution and successful project-state commit; CLI owns human 
 prompts, while RPC owns bounded session storage, events and protocol errors. Dedicated query,
 terminal, configuration and credential workflows retain explicit resolver classifications.
 
+Remote project execution holds a shared controller lock for its registered owner from
+post-confirmation route validation through physical work and state commit or abort. Host
+removal takes the exclusive lock, refreshes authoritative inventory after waiting, and refuses
+remaining projects or unknown routing state. The empty project store's regular `.lock` file
+does not count as a project. Mutation locks live outside the removable routing tree; a prepared
+command whose registration was removed fails before performing project work.
+
 ### Temporary SSH-key access
 
 `ssh-agent` is a dedicated owner-local credential workflow. The CLI validates the explicit key

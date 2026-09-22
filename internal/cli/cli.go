@@ -700,6 +700,15 @@ func (cli *CLI) Run(ctx context.Context) int {
 		}
 		return 1
 	}
+	releaseProject, projectErr := cli.beginProjectMutation(ctx, projectRun)
+	if projectErr != nil {
+		cli.errorf("prepare %s: %v", name, projectErr)
+		return 1
+	}
+	defer func() {
+		cli.abortProjectExecution(context.Background(), projectRun)
+		releaseProject()
+	}()
 	if target == domain.TargetRemoteOwner {
 		if core && definition.Name == "keys" {
 			return cli.runRemoteKeys(ctx, loaded, definition, commandArguments)
@@ -2475,7 +2484,12 @@ func (cli *CLI) projectStores(ctx context.Context, yard domain.Context) (map[str
 		if err != nil {
 			return nil, err
 		}
-		store, err := openProjectStore(ctx, contextForYard.Paths.StateDir)
+		var store ports.ProjectStore
+		if contextForYard.AccessKind == domain.AccessRemote {
+			store, err = openProjectStoreReadOnly(contextForYard.Paths.StateDir)
+		} else {
+			store, err = openProjectStore(ctx, contextForYard.Paths.StateDir)
+		}
 		if err != nil {
 			return nil, err
 		}

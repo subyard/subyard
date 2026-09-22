@@ -263,6 +263,13 @@ func (prepared *preparedCommand) Execute(ctx context.Context, orchestrator *appl
 	if !prepared.executeNoOp && operationPlanNoOp(prepared.Plan) {
 		return noOp()
 	}
+	release, err := prepared.CLI.beginProjectMutation(ctx, prepared.Project)
+	if err != nil {
+		return domain.AdapterResult{}, err
+	}
+	defer release()
+	// Abort before releasing the host barrier, including failures after reservation.
+	defer prepared.CLI.abortProjectExecution(context.Background(), prepared.Project)
 	if prepared.Plan.Assessment != nil && prepared.refresh != nil {
 		action, delta, err := prepared.refresh(ctx)
 		if err != nil {

@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -273,12 +275,15 @@ func (cli *CLI) allOwnerInventories(
 		return append(results, ownerInventoryResult{err: err})
 	}
 	for index := range connections {
+		original := connections[index]
+		original.Yards = maps.Clone(original.Yards)
+		original.LegacyNames = slices.Clone(original.LegacyNames)
 		changed, mergeErr := mergeLegacyRoutes(&connections[index], legacy)
 		if mergeErr != nil {
 			return append(results, ownerInventoryResult{err: mergeErr})
 		}
 		if changed {
-			if writeErr := connectionStore.Write(connections[index]); writeErr != nil {
+			if writeErr := connectionStore.Update(original, connections[index]); writeErr != nil {
 				return append(results, ownerInventoryResult{err: writeErr})
 			}
 		}
@@ -778,7 +783,7 @@ func (cli *CLI) resolveOwnerProjectFromInventories(
 		return state.Match{}, err
 	}
 	var record domain.ProjectRecord
-	if readOnly {
+	if readOnly || contextValue.AccessKind == domain.AccessRemote {
 		store, storeErr := openProjectStoreReadOnly(contextValue.Paths.StateDir)
 		if storeErr != nil {
 			return state.Match{}, storeErr

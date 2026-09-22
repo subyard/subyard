@@ -110,6 +110,12 @@ func (cli *CLI) runPreparedCommand(ctx context.Context, prepared *preparedComman
 		prepared.Plan = plan
 	}
 	if plan.Target == domain.TargetRemoteOwner {
+		release, err := cli.beginProjectMutation(ctx, prepared.Project)
+		if err != nil {
+			cli.errorf("prepare remote %s: %v", prepared.Definition.Name, err)
+			return 1
+		}
+		defer release()
 		arguments := slices.Clone(prepared.Arguments)
 		if prepared.remoteArguments != nil {
 			arguments, err = prepared.remoteArguments(arguments)

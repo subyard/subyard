@@ -2,6 +2,7 @@ package ownerinventory
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -113,6 +114,13 @@ func (store Connections) prepareRepairLocked(
 }
 
 func (store Connections) ApplyRepair(plan RepairPlan) error {
+	releaseMutation, err := store.acquireHostMutations(
+		context.Background(), []string{plan.OldHostID, plan.NewHostID}, true, false,
+	)
+	if err != nil {
+		return err
+	}
+	defer releaseMutation()
 	connectionsMu.Lock()
 	defer connectionsMu.Unlock()
 	release, err := store.lock()
@@ -120,7 +128,7 @@ func (store Connections) ApplyRepair(plan RepairPlan) error {
 		return err
 	}
 	defer release()
-	if err := store.recoverPendingLocked(); err != nil {
+	if err := store.recoverPendingLocked(plan.OldHostID, plan.NewHostID); err != nil {
 		return err
 	}
 	current, err := store.prepareRepairLocked(plan.OldHostID, *plan.newConnection.Trust, plan.snapshot)
@@ -173,7 +181,7 @@ func (store Connections) connectionRepairPath() string {
 	return filepath.Join(store.Root, "connection-repair.json")
 }
 
-func (store Connections) recoverConnectionRepairLocked() error {
+func (store Connections) recoverConnectionRepairLocked(heldHostIDs ...string) error {
 	payload, err := os.ReadFile(store.connectionRepairPath())
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -202,6 +210,11 @@ func (store Connections) recoverConnectionRepairLocked() error {
 	if err := journal.NewConnection.Validate(); err != nil {
 		return err
 	}
+	release, err := store.acquireRecoveryMutation(heldHostIDs, []string{journal.NewConnection.HostID})
+	if err != nil {
+		return err
+	}
+	defer release()
 	return store.applyConnectionRepairLocked(journal)
 }
 

@@ -314,7 +314,20 @@ func (cli *CLI) runRegisteredHost(
 			return 1
 		}
 	}
-	if _, err := store.ApplyRemoval(removalPlan); err != nil {
+	if _, err := store.ApplyRemoval(ctx, removalPlan, func(ctx context.Context, current ownerinventory.Connection) (ownerinventory.Snapshot, error) {
+		fetched, err := trustedClient.FetchForConnection(ctx, current)
+		if err != nil {
+			return ownerinventory.Snapshot{}, err
+		}
+		if fetched.Rename != nil {
+			return ownerinventory.Snapshot{}, errors.New("owner identity changed after confirmation; refresh and re-run host removal")
+		}
+		fetchedAt := time.Now().UTC()
+		if cli.options.Clock != nil {
+			fetchedAt = cli.options.Clock.Now().UTC()
+		}
+		return ownerinventory.Snapshot{FetchedAt: fetchedAt, Inventory: fetched.Inventory}, nil
+	}); err != nil {
 		cli.errorf("remove OwnerHost %q: %v", hostID, err)
 		return 1
 	}

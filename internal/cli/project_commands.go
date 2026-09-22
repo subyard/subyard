@@ -18,6 +18,7 @@ import (
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ownerinventory"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/state"
@@ -32,6 +33,7 @@ const (
 )
 
 type projectExecution struct {
+	OwnerConnection *ownerinventory.Connection
 	Loaded          config.Loaded
 	YardIdentity    string
 	Arguments       []string
@@ -424,7 +426,12 @@ func (cli *CLI) prepareProjectExecution(
 	arguments []string,
 	explicit bool,
 	readOnly bool,
-) (*projectExecution, error) {
+) (execution *projectExecution, err error) {
+	defer func() {
+		if err == nil && execution != nil {
+			err = cli.captureProjectOwner(execution)
+		}
+	}()
 	switch definition.Name {
 	case "init", "provision":
 		return cli.prepareProjectInventory(ctx, loaded, arguments)
@@ -439,16 +446,73 @@ func (cli *CLI) prepareProjectExecution(
 	}
 }
 
+// Capture the registration during preparation without creating locks or state.
+// Execute checks it again under the host mutation lock after confirmation.
+func (cli *CLI) captureProjectOwner(execution *projectExecution) error {
+	yard := execution.Loaded.Context
+	if yard.AccessKind != domain.AccessRemote {
+		return nil
+	}
+	root := filepath.Join(yard.Paths.DataHome, "owner-inventory")
+	connections, err := (ownerinventory.Connections{Root: root}).ListReadOnly()
+	if err != nil {
+		return err
+	}
+	routingRoot := filepath.Join(root, "routing") + string(filepath.Separator)
+	canonical := strings.HasPrefix(filepath.Clean(yard.Paths.StateDir), routingRoot)
+	for _, connection := range connections {
+		if connection.Destination != yard.OwnerEndpoint {
+			continue
+		}
+		if canonical && (yard.Paths.StateDir != filepath.Join(root, "routing", connection.HostID, yard.OwnerYardName, "projects") ||
+			connection.Yards[yard.OwnerYardName].SSHHost != yard.SSHHost) {
+			return fmt.Errorf("%w: owner project route changed; prepare the command again", domain.ErrPlanStale)
+		}
+		execution.OwnerConnection = &connection
+		return nil
+	}
+	if canonical {
+		return fmt.Errorf("%w: owner project route is no longer registered", domain.ErrPlanStale)
+	}
+	return nil
+}
+
+func (cli *CLI) beginProjectMutation(ctx context.Context, execution *projectExecution) (func(), error) {
+	if execution == nil || execution.OwnerConnection == nil {
+		return func() {}, nil
+	}
+	store := ownerinventory.Connections{Root: filepath.Join(execution.Loaded.Context.Paths.DataHome, "owner-inventory")}
+	release, err := store.BeginHostMutation(ctx, *execution.OwnerConnection)
+	if err != nil {
+		return nil, fmt.Errorf("revalidate project owner: %w", err)
+	}
+	return release, nil
+}
+
+func openProjectPreparationStore(ctx context.Context, yard domain.Context) (*state.FileStore, error) {
+	if yard.AccessKind == domain.AccessRemote {
+		// Canonical routing may be removed concurrently. Preparation must not
+		// recreate it or migrate controller records before taking the host lock.
+		return state.NewFileStore(yard.Paths.StateDir)
+	}
+	return openProjectStore(ctx, yard.Paths.StateDir)
+}
+
 func (cli *CLI) prepareProjectInventory(
 	ctx context.Context,
 	loaded config.Loaded,
 	arguments []string,
 ) (*projectExecution, error) {
-	store, err := openProjectStore(ctx, loaded.Context.Paths.StateDir)
+	store, err := openProjectPreparationStore(ctx, loaded.Context)
 	if err != nil {
 		return nil, err
 	}
-	records, err := store.List(ctx)
+	var records []domain.ProjectRecord
+	if loaded.Context.AccessKind == domain.AccessRemote {
+		records, err = store.ListReadOnly(ctx)
+	} else {
+		records, err = store.List(ctx)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -520,7 +584,7 @@ func (cli *CLI) prepareProjectImport(
 	if name == "bind" && selectedLoaded.Context.AccessKind == domain.AccessRemote {
 		return nil, errors.New("bind is host-local - use sync or clone")
 	}
-	store, err := openProjectStore(ctx, selectedLoaded.Context.Paths.StateDir)
+	store, err := openProjectPreparationStore(ctx, selectedLoaded.Context)
 	if err != nil {
 		return nil, err
 	}
@@ -593,7 +657,7 @@ func (cli *CLI) prepareProjectClone(
 	if err != nil {
 		return nil, err
 	}
-	store, err := openProjectStore(ctx, selectedLoaded.Context.Paths.StateDir)
+	store, err := openProjectPreparationStore(ctx, selectedLoaded.Context)
 	if err != nil {
 		return nil, err
 	}
@@ -718,7 +782,7 @@ func (cli *CLI) prepareExistingProject(
 		}
 	}
 	var store *state.FileStore
-	if readOnlyProject {
+	if readOnlyProject || selectedLoaded.Context.AccessKind == domain.AccessRemote {
 		readOnlyStore, storeErr := openProjectStoreReadOnly(selectedLoaded.Context.Paths.StateDir)
 		if storeErr != nil {
 			return nil, storeErr
@@ -842,7 +906,7 @@ func (cli *CLI) resolveProjectForCommand(
 		selector = stripCurrentYardQualifier(selector, loaded.Context.YardName)
 		var store ports.ProjectStore
 		var err error
-		if readOnly {
+		if readOnly || loaded.Context.AccessKind == domain.AccessRemote {
 			store, err = openProjectStoreReadOnly(loaded.Context.Paths.StateDir)
 		} else {
 			store, err = openProjectStore(ctx, loaded.Context.Paths.StateDir)

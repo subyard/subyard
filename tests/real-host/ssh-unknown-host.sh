@@ -293,4 +293,15 @@ grep -Fq "$namespace " "$known" || fail 'canonical route did not restore the exa
   grep -Fxq 'first trust regression' proof.txt
 "$ROOT/.build/yard" -Y "$HOST_ID/$YARD_NAME" remove CanonicalSSHTrust --yes >/dev/null
 
-printf 'ok: unknown SSH keys covered legacy and canonical routes, owner ProxyJump, refusal, automation, and interactive continuation\n'
+# The canonical project store retains its ordinary lock after the last removal.
+# That housekeeping file must not prevent removal of an empty owner registration.
+routing="$CONTROLLER_DATA_HOME/owner-inventory/routing/$HOST_ID"
+[ -f "$routing/$YARD_NAME/projects/.lock" ] || fail 'canonical cleanup did not exercise the retained project lock'
+"$ROOT/.build/yard" remote remove "$REMOTE_NAME" --yes >/dev/null
+REMOTE_ADDED=0
+"$ROOT/.build/yard" host remove "$HOST_ID" --yes >/dev/null
+[ ! -e "$routing" ] || fail 'host removal retained canonical routing'
+[ ! -e "$CONTROLLER_DATA_HOME/owner-inventory/connections/$HOST_ID.json" ] \
+  || fail 'host removal retained the controller registration'
+
+printf 'ok: unknown SSH keys covered legacy and canonical routes, owner ProxyJump, refusal, automation, interactive continuation, and empty host removal\n'

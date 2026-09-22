@@ -303,8 +303,7 @@ incus storage show "$OUTER_POOL" --project default >/dev/null 2>&1 \
   && die "refusing existing pool $OUTER_POOL"
 incus network show "$OUTER_BRIDGE" --project default >/dev/null 2>&1 \
   && die "refusing existing network $OUTER_BRIDGE"
-incus storage create "$OUTER_POOL" dir --project default >/dev/null
-incus storage set "$OUTER_POOL" user.subyard.owner=nested-teardown-e2e-v1 \
+incus storage create "$OUTER_POOL" dir user.subyard.owner=nested-teardown-e2e-v1 \
   --project default >/dev/null
 
 export SUBYARD_OPERATOR_HOME="$STATE/operator"
@@ -341,11 +340,12 @@ NESTED_E2E_VMS=0
 EOF
 
 require_nested_memory_reserve
+# Publish ownership with creation so cleanup also works when yard init fails.
+incus network create "$OUTER_BRIDGE" ipv4.address=auto ipv6.address=none \
+  user.subyard.owner=nested-teardown-e2e-v1 --project default >/dev/null
 printf '  [ .. ] creating the outer yard\n'
 yard init --yes
 OUTER_DATA_HOME_METADATA="$(outer_data_home_metadata)"
-incus network set "$OUTER_BRIDGE" user.subyard.owner=nested-teardown-e2e-v1 \
-  --project default >/dev/null
 yard start --yes
 [ "$(incus config get "$OUTER_INSTANCE" user.subyard.managed --project "$OUTER_PROJECT")" = true ] \
   || die 'outer instance is not marker-owned'

@@ -1,6 +1,7 @@
 package ownerinventory
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -256,7 +257,9 @@ func TestRemovalRecoversFromEveryDurableIOBoundary(t *testing.T) {
 				t.Fatal(err)
 			}
 			store.failIO = failOwnerBoundaryOnce(boundary)
-			_, err = store.ApplyRemoval(plan)
+			_, err = store.ApplyRemoval(context.Background(), plan, func(context.Context, Connection) (Snapshot, error) {
+				return snapshot, nil
+			})
 			if !errors.Is(err, errInjectedOwnerIO) {
 				t.Fatalf("ApplyRemoval error = %v, want injected failure at %s", err, boundary)
 			}

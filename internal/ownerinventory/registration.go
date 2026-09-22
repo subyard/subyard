@@ -2,6 +2,7 @@ package ownerinventory
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -113,6 +114,11 @@ func (store Connections) prepareRegistrationLocked(
 }
 
 func (store Connections) ApplyRegistration(plan RegistrationPlan) error {
+	releaseMutation, err := store.acquireHostMutation(context.Background(), plan.HostID, true, false)
+	if err != nil {
+		return err
+	}
+	defer releaseMutation()
 	connectionsMu.Lock()
 	defer connectionsMu.Unlock()
 	release, err := store.lock()
@@ -120,7 +126,7 @@ func (store Connections) ApplyRegistration(plan RegistrationPlan) error {
 		return err
 	}
 	defer release()
-	if err := store.recoverPendingLocked(); err != nil {
+	if err := store.recoverPendingLocked(plan.HostID); err != nil {
 		return err
 	}
 	current, err := store.prepareRegistrationLocked(plan.connection, plan.snapshot)
@@ -134,6 +140,11 @@ func (store Connections) ApplyRegistration(plan RegistrationPlan) error {
 }
 
 func (store Connections) Register(connection Connection, snapshot Snapshot) error {
+	releaseMutation, err := store.acquireHostMutation(context.Background(), connection.HostID, true, false)
+	if err != nil {
+		return err
+	}
+	defer releaseMutation()
 	connectionsMu.Lock()
 	defer connectionsMu.Unlock()
 	release, err := store.lock()
@@ -141,7 +152,7 @@ func (store Connections) Register(connection Connection, snapshot Snapshot) erro
 		return err
 	}
 	defer release()
-	if err := store.recoverPendingLocked(); err != nil {
+	if err := store.recoverPendingLocked(connection.HostID); err != nil {
 		return err
 	}
 	if _, err := store.prepareRegistrationLocked(connection, snapshot); err != nil {
@@ -155,6 +166,11 @@ func (store Connections) Register(connection Connection, snapshot Snapshot) erro
 // to managed trust by a confirmed canonical registration of the same endpoint
 // and authoritative HostID.
 func (store Connections) RegisterLegacy(connection Connection, snapshot Snapshot) error {
+	releaseMutation, err := store.acquireHostMutation(context.Background(), connection.HostID, true, false)
+	if err != nil {
+		return err
+	}
+	defer releaseMutation()
 	connectionsMu.Lock()
 	defer connectionsMu.Unlock()
 	release, err := store.lock()
@@ -162,7 +178,7 @@ func (store Connections) RegisterLegacy(connection Connection, snapshot Snapshot
 		return err
 	}
 	defer release()
-	if err := store.recoverPendingLocked(); err != nil {
+	if err := store.recoverPendingLocked(connection.HostID); err != nil {
 		return err
 	}
 	if err := validateRegistrationState(connection, snapshot, false); err != nil {
@@ -232,7 +248,7 @@ func (store Connections) registrationPath() string {
 	return filepath.Join(store.Root, "registration.json")
 }
 
-func (store Connections) recoverRegistrationLocked() error {
+func (store Connections) recoverRegistrationLocked(heldHostIDs ...string) error {
 	payload, err := os.ReadFile(store.registrationPath())
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -259,6 +275,11 @@ func (store Connections) recoverRegistrationLocked() error {
 	if err := validateRegistrationState(journal.Connection, journal.Snapshot, journal.Connection.Trust != nil); err != nil {
 		return fmt.Errorf("invalid owner registration journal: %w", err)
 	}
+	release, err := store.acquireRecoveryMutation(heldHostIDs, []string{journal.Connection.HostID})
+	if err != nil {
+		return err
+	}
+	defer release()
 	return store.applyRegistrationLocked(journal)
 }
 
@@ -278,17 +299,17 @@ func (store Connections) applyRegistrationLocked(journal registrationJournal) er
 	return store.syncDirectory(filepath.Dir(store.registrationPath()))
 }
 
-func (store Connections) recoverPendingLocked() error {
-	if err := store.recoverRegistrationLocked(); err != nil {
+func (store Connections) recoverPendingLocked(heldHostIDs ...string) error {
+	if err := store.recoverRegistrationLocked(heldHostIDs...); err != nil {
 		return err
 	}
-	if err := store.recoverConnectionRepairLocked(); err != nil {
+	if err := store.recoverConnectionRepairLocked(heldHostIDs...); err != nil {
 		return err
 	}
-	if err := store.recoverHostIDAdoptionLocked(); err != nil {
+	if err := store.recoverHostIDAdoptionLocked(heldHostIDs...); err != nil {
 		return err
 	}
-	return store.recoverRemovalLocked()
+	return store.recoverRemovalLocked(heldHostIDs...)
 }
 
 // Recover completes any durable owner-inventory transaction left by an

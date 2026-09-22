@@ -1913,8 +1913,31 @@ recover_stale_test_default_pool() {
   timeout --foreground 120 incus storage delete default --project default >/dev/null
 }
 
+recover_stale_real_incus_fixture() {
+  local inventory active_rc
+  command -v incus >/dev/null 2>&1 || return 0
+  inventory="$(timeout --foreground 30 incus project list --format csv -c n)" \
+    || die 'cannot inspect real-Incus fixture inventory'
+  grep -Fxq subyard-p0-real-incus <<<"$inventory" || return 0
+  if timeout --foreground 10 pgrep -f -- '(^|/)p0-real-incus[.]sh([[:space:]]|$)' \
+    >/dev/null 2>&1; then
+    die 'real-Incus fixture still has an active process'
+  else
+    active_rc=$?
+  fi
+  [ "$active_rc" = 1 ] || die 'cannot determine whether real-Incus fixture is active'
+  printf '  [ .. ] VM%s: recovering marker-owned real-Incus fixture\n' "$SUBYARD_E2E_VM"
+  timeout --signal=TERM --kill-after=10 900 \
+    bash "$ROOT/dev/e2e/p0-real-incus.sh" --cleanup-only
+  inventory="$(timeout --foreground 30 incus project list --format csv -c n)" \
+    || die 'cannot verify real-Incus fixture recovery'
+  ! grep -Fxq subyard-p0-real-incus <<<"$inventory" \
+    || die 'real-Incus fixture remains after recovery'
+}
+
 capacity_preflight() {
   recover_stale_source_upgrade_fixture
+  recover_stale_real_incus_fixture
   recover_stale_test_default_pool
   p0_capacity_preflight
 }

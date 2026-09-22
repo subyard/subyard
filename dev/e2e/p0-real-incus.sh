@@ -11,6 +11,12 @@ VM_CACHE_ALIAS="${P0_REAL_INCUS_VM_CACHE_ALIAS:-subyard-e2e-debian-13-cloud-vm}"
 TMP=''
 
 die() { printf 'p0-real-incus: %s\n' "$*" >&2; exit 2; }
+CLEANUP_ONLY=0
+case "$#:${1:-}" in
+  0:) ;;
+  1:--cleanup-only) CLEANUP_ONLY=1 ;;
+  *) die 'usage: p0-real-incus.sh [--cleanup-only]' ;;
+esac
 # Incus create/init/launch may consume YAML from stdin. The P0 lane is reached through SSH, so an
 # inherited non-TTY stream can stay open forever after the operation itself succeeds.
 real_incus() { timeout --foreground "${P0_REAL_INCUS_COMMAND_TIMEOUT:-900}" incus "$@" </dev/null; }
@@ -181,8 +187,10 @@ launch_with_retry() {
 }
 
 cleanup() {
-  local name
-  if project_exists; then
+  local name inventory
+  inventory="$(real_incus_observe project list --format csv -c n)" \
+    || die 'cannot inspect real-Incus cleanup inventory'
+  if grep -Fxq "$PROJECT" <<<"$inventory"; then
     [ "$(real_incus project get "$PROJECT" user.subyard.p0 2>/dev/null)" = "$MARKER" ] \
       || die "refusing to clean unmarked project $PROJECT"
     for name in p0-container p0-vm; do delete_marked_instance "$name"; done
@@ -194,12 +202,18 @@ cleanup() {
     find "$TMP" -depth -delete
   fi
 }
-trap cleanup EXIT
-
 [ -n "${SUBYARD_E2E_VM:-}" ] || die 'run through dev/agent-e2e.sh'
 for command in go incus jq sudo; do command -v "$command" >/dev/null || die "$command is required"; done
 sudo -n true || die 'passwordless sudo is required in a disposable test VM'
 [ -S /var/lib/incus/unix.socket ] || die 'Incus socket is unavailable'
+if [ "$CLEANUP_ONLY" = 1 ]; then
+  cleanup
+  exit 0
+fi
+trap 'trap - EXIT; trap "" INT TERM HUP; cleanup' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 project_exists && cleanup
 if cache_info="$(real_incus image info "$CONTAINER_CACHE_ALIAS" --project default 2>/dev/null)"; then
   printf '%s\n' "$cache_info" | grep -Fqx 'Type: container' \
@@ -215,8 +229,8 @@ if cache_info="$(real_incus image info "$VM_CACHE_ALIAS" --project default 2>/de
 fi
 
 real_incus project create "$PROJECT" \
-  -c features.images=false -c features.profiles=false -c features.storage.volumes=false >/dev/null
-real_incus project set "$PROJECT" user.subyard.p0="$MARKER"
+  -c features.images=false -c features.profiles=false -c features.storage.volumes=false \
+  -c user.subyard.p0="$MARKER" >/dev/null
 launch_real_container() {
   real_incus_quiet launch "$CONTAINER_IMAGE" p0-container --project "$PROJECT" --storage default \
     -c user.subyard.p0="$MARKER"
