@@ -33,7 +33,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 35
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install native bundle tools
         run: sudo apt-get update -qq && sudo apt-get install -y binutils build-essential jq xz-utils
       - name: Build and smoke-test deploy closure
