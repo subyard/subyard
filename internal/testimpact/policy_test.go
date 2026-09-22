@@ -123,6 +123,13 @@ func TestRegistryNamedE2EChecksUsePreparedRunnableEntrypoints(t *testing.T) {
 		t.Fatalf("BuiltInRegistry() error = %v", err)
 	}
 	want := map[string][]string{
+		"e2e:ssh-unknown-host": {
+			"dev/agent-e2e.sh", "--purpose", "ssh-unknown-host", "--vm", "1", "--",
+			"bash", "tests/real-host/ssh-unknown-host.sh",
+		},
+		"e2e:yard-network-policy": {
+			"dev/e2e/yard-network-policy.sh",
+		},
 		"e2e:adapter-contracts": {
 			"dev/agent-e2e.sh", "--purpose", "adapter-contracts", "--vm", "1", "--",
 			"bash", "tests/real-host/adapter-contracts.sh",
@@ -142,6 +149,14 @@ func TestRegistryNamedE2EChecksUsePreparedRunnableEntrypoints(t *testing.T) {
 		"e2e:orca-bootstrap": {
 			"dev/agent-e2e.sh", "--purpose", "orca-bootstrap", "--vm", "1", "--",
 			"env", "SUBYARD_E2E_ORCA_BOOTSTRAP=1", "./tests/real-host/orca-bootstrap.sh",
+		},
+		"e2e:orca-ssh-agent": {
+			"dev/agent-e2e.sh", "--purpose", "orca-ssh-agent", "--vm", "1", "--",
+			"env", "SUBYARD_E2E_ORCA_BOOTSTRAP=1", "SUBYARD_E2E_ORCA_SSH_AGENT=1", "bash", "tests/real-host/orca-bootstrap.sh",
+		},
+		"e2e:codex-permissions": {
+			"dev/agent-e2e.sh", "--purpose", "codex-permissions", "--vm", "1", "--",
+			"env", "SUBYARD_E2E_ORCA_BOOTSTRAP=1", "SUBYARD_E2E_ORCA_CODEX_PERMISSIONS=1", "bash", "tests/real-host/orca-bootstrap.sh",
 		},
 		"e2e:orca-projects": {
 			"dev/agent-e2e.sh", "--purpose", "orca-projects", "--vm", "1", "--",
@@ -235,12 +250,13 @@ func TestRegistryP0InventoryMatchesAcceptanceLanesInCleanEnvironment(t *testing.
 		t.Fatalf("p0-acceptance.sh --list-lanes error = %v", err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	if len(lines) != 14 {
-		t.Fatalf("--list-lanes returned %d rows, want 14: %q", len(lines), output)
+	if len(lines) < 2 {
+		t.Fatalf("--list-lanes returned no targeted lanes and full inventory: %q", output)
 	}
 
-	wantP0 := make([]string, 0, 13)
-	for _, lane := range lines[:13] {
+	targeted := lines[:len(lines)-1]
+	wantP0 := make([]string, 0, len(targeted))
+	for _, lane := range targeted {
 		if lane == "" || strings.ContainsAny(lane, "\t ") {
 			t.Fatalf("invalid targeted lane row %q", lane)
 		}
@@ -259,10 +275,13 @@ func TestRegistryP0InventoryMatchesAcceptanceLanesInCleanEnvironment(t *testing.
 	if _, exists := registry.Check("p0:full"); exists {
 		t.Fatal("special full inventory row must not be a p0:full T3 check")
 	}
+	if _, exists := registry.Check("p0:release-smoke"); exists {
+		t.Fatal("release-smoke is a full-matrix phase, not an addressable T3 lane")
+	}
 
-	wantFull := "full\tboundary transport nested-teardown release source-upgrade power-systemd peer cleanup"
-	if lines[13] != wantFull {
-		t.Fatalf("full T4 inventory row = %q, want %q", lines[13], wantFull)
+	wantFull := "full\tboundary transport nested-teardown release source-upgrade power-systemd release-smoke peer cleanup"
+	if lines[len(lines)-1] != wantFull {
+		t.Fatalf("full T4 inventory row = %q, want %q", lines[len(lines)-1], wantFull)
 	}
 	for _, id := range gotP0 {
 		check, _ := registry.Check(id)
@@ -528,6 +547,11 @@ func TestPolicyRepresentativePathsSelectOwningEvidence(t *testing.T) {
 			domains: []string{"checkpoint-resume", "full-matrix-composition"}, standaloneDomain: "full-matrix-composition",
 		},
 		{
+			name: "release smoke fixture", path: "dev/e2e/p0-release-smoke.sh",
+			checks:  []string{"shell:agent-e2e", "p0:smoke"},
+			domains: []string{},
+		},
+		{
 			name: "real Incus lane", path: "dev/e2e/p0-real-incus.sh",
 			checks:  []string{"go:adapters/incusclient", "p0:real-incus"},
 			domains: []string{"incus-runtime"},
@@ -596,6 +620,8 @@ func TestPolicyRealHostTestPathsSelectOwningChecksWithoutRiskDomains(t *testing.
 		{"tests/real-host/credential-tools.sh", "e2e:credential-tools"},
 		{"tests/real-host/incus-contract.sh", "p0:real-incus"},
 		{"tests/real-host/orca-bootstrap.sh", "e2e:orca-bootstrap"},
+		{"tests/real-host/codex-yard.sh", "e2e:codex-permissions"},
+		{"tests/real-host/codex-permissions.py", "e2e:codex-permissions"},
 		{"tests/real-host/orca-resource.sh", "e2e:orca-resource"},
 		{"tests/real-host/orca-projects.sh", "e2e:orca-projects"},
 		{"tests/real-host/orca-projects-helper.py", "e2e:orca-projects"},
@@ -649,6 +675,7 @@ func TestPolicyCoLocatedGoTestsRetainOwningChecksWithoutRiskDomains(t *testing.T
 	}{
 		{path: "internal/cli/cli_test.go", check: "go:cli"},
 		{path: "internal/configsync/configsync_test.go", check: "go:configsync"},
+		{path: "internal/adapters/configmaterial/configmaterial_test.go", check: "go:adapters/configmaterial"},
 		{path: "internal/adapters/transport/process_test.go", check: "go:adapters/transport"},
 		{path: "internal/migration/power_reconciler_test.go", check: "p0:power-systemd"},
 	} {

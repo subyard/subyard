@@ -122,4 +122,33 @@ if grep -RE 'rm -rf.*SUBYARD_HOME|subyard_home_remove_preserving_runtime' \
   fail 'production teardown still contains broad Subyard-home cleanup'
 fi
 
+# Interrupted init may leave a running instance before the developer account exists.
+# Broker cleanup must not prevent teardown of that instance.
+(
+  # shellcheck source=tests/helpers/test-context.sh
+  . "$ROOT/tests/helpers/test-context.sh"
+  setup_test_context "$TMP/partial-init"
+  export SUBYARD_GITHUB_ENABLED=0 SUBYARD_YARD=default
+  export INCUS_LOG="$TMP/partial-init/incus.log"
+  mkdir -p "$TMP/bin"
+  cat > "$TMP/bin/incus" <<'INCUS'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$INCUS_LOG"
+case "$*" in
+  'exec yard --project subyard -- true') exit 0 ;;
+  'exec yard --project subyard -- getent passwd dev') exit 2 ;;
+  'exec yard --project subyard -- rm -f -- /usr/local/libexec/subyard/github-client') exit 0 ;;
+  *) exit 99 ;;
+esac
+INCUS
+  chmod +x "$TMP/bin/incus"
+  export PATH="$TMP/bin:$PATH"
+  bash "$ROOT/scripts/github-broker.sh" --check
+  bash "$ROOT/scripts/github-broker.sh" --remove
+  ! grep -Fq 'bash -euo pipefail' "$INCUS_LOG" \
+    || fail 'broker cleanup invoked the profile hook without a developer account'
+  grep -Fq 'rm -f -- /usr/local/libexec/subyard/github-client' "$INCUS_LOG" \
+    || fail 'broker cleanup skipped the guest engine in a partial init'
+)
+
 printf 'ok: last-yard teardown preserves every non-empty shared data root\n'

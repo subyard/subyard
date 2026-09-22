@@ -299,11 +299,16 @@ reconcile_test_vm_state_directory() {
   fi
   # Five digits clear legacy setgid on the existing 2770 directory.
   chmod 00700 "$E2E_VM_STATE_DIR"
+  # writeJSONAtomic creates root-owned 0600 .lease-state.* files and renames them concurrently.
+  # Leave only those transient files out of the legacy permission repair.
   if [ "$(id -u)" = 0 ]; then
-    find "$E2E_VM_STATE_DIR" -mindepth 1 -maxdepth 1 -type f \
+    find "$E2E_VM_STATE_DIR" -ignore_readdir_race -mindepth 1 -maxdepth 1 \
+      ! -name '.lease-state.*' -type f \
       -exec chown root:root -- {} + -exec chmod 0600 -- {} +
   else
-    find "$E2E_VM_STATE_DIR" -mindepth 1 -maxdepth 1 -type f -exec chmod 0600 -- {} +
+    find "$E2E_VM_STATE_DIR" -ignore_readdir_race -mindepth 1 -maxdepth 1 \
+      ! -name '.lease-state.*' -type f \
+      -exec chmod 0600 -- {} +
   fi
 }
 

@@ -17,11 +17,12 @@ type ProvisionReporter interface {
 }
 
 type ProvisionRunner struct {
-	Power    PowerService
-	Physical ports.AdapterRunner
-	Yard     domain.Context
-	Profiles []string
-	Reporter ProvisionReporter
+	Power      PowerService
+	Physical   ports.AdapterRunner
+	GuardStart func(context.Context, func() error) error
+	Yard       domain.Context
+	Profiles   []string
+	Reporter   ProvisionReporter
 }
 
 func (runner ProvisionRunner) Run(
@@ -46,12 +47,24 @@ func (runner ProvisionRunner) Run(
 	started := false
 	var output strings.Builder
 	if strings.EqualFold(instance.Status, "stopped") {
+		if runner.GuardStart == nil {
+			return domain.AdapterResult{}, output.String(), errors.New("yard network policy start guard is required")
+		}
 		physical := request
 		physical.Adapter = "lifecycle"
 		physical.Action = "start"
 		physical.Arguments = []string{"start", "--reconcile"}
-		physicalResult, text, physicalErr := runner.Physical.Run(ctx, physical, nil)
-		output.WriteString(text)
+		var physicalResult domain.AdapterResult
+		var physicalErr error
+		guardErr := runner.GuardStart(ctx, func() error {
+			var text string
+			physicalResult, text, physicalErr = runner.Physical.Run(ctx, physical, nil)
+			output.WriteString(text)
+			return physicalErr
+		})
+		if guardErr != nil {
+			return physicalResult, output.String(), guardErr
+		}
 		if physicalErr != nil || physicalResult.Status != "ok" {
 			return physicalResult, output.String(), physicalErr
 		}

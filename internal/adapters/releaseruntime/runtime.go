@@ -40,7 +40,27 @@ type Prepared struct {
 	Consequences   []string
 	RefreshConfigs bool
 	ActiveLauncher string
+	SourceRelease  string
+	SourceVersion  string
+	TargetRelease  string
+	TargetVersion  string
 	run            func(context.Context) error
+}
+
+type verifiedPreparationError struct {
+	cause    error
+	prepared Prepared
+}
+
+func (failure verifiedPreparationError) Error() string { return failure.cause.Error() }
+func (failure verifiedPreparationError) Unwrap() error { return failure.cause }
+
+func VerifiedPreparation(err error) (Prepared, bool) {
+	var failure verifiedPreparationError
+	if !errors.As(err, &failure) {
+		return Prepared{}, false
+	}
+	return failure.prepared, true
 }
 
 func (prepared Prepared) Execute(ctx context.Context) error {
@@ -327,6 +347,26 @@ func (runtime *Runtime) inspectProtectedTransition(
 			errors.New("candidate returned a resume plan for a complete release transition"),
 		)
 	}
+	if journal.Checkpoint == releasetransition.JournalComplete &&
+		inspection.Outcome.Status == releasetransition.StatusRecovering &&
+		inspection.Outcome.Code == releasetransition.CodeRecoveryPending {
+		// Older protected callers need the historical transaction on the V1
+		// wire. Restore the canonical fresh-plan status only after validating
+		// that history, the absent Resume, and the actual completed links.
+		observed, err := runtime.inspectRuntimeLinks(root)
+		actual := releaseLinksFromRuntimeSnapshot(observed)
+		outcome := *inspection.Outcome
+		if err != nil || actual.Active != journal.Goal.Target || outcome.Active != actual.Active ||
+			(outcome.Previous == nil) != (actual.Previous == nil) ||
+			(outcome.Previous != nil && *outcome.Previous != *actual.Previous) {
+			return nil, publicCandidateFailure(errors.New("activation repair inspection does not report the actual completed links"))
+		}
+		outcome.Status = releasetransition.StatusMigrationRequired
+		outcome.Code = releasetransition.CodeTransitionRequired
+		outcome.Transaction = nil
+		outcome.Message = "the inspected release transition has not started"
+		inspection.Outcome = &outcome
+	}
 	return &protectedTransitionInspection{
 		journal: journal, journalSnapshot: snapshot,
 		owner: candidateVerification{
@@ -515,12 +555,20 @@ func (runtime *Runtime) PrepareTransition(
 	if err == nil {
 		return prepared, nil
 	}
+	verifiedPreparation := Prepared{
+		TargetRelease: string(candidate.release), TargetVersion: verified.version,
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return Prepared{}, verifiedPreparationError{cause: err, prepared: verifiedPreparation}
+	}
 	var public publicReleaseInspectionError
 	if errors.As(err, &public) {
 		if parsed.check {
 			return runtime.preparePublicInspectionOutcome(public.outcome), nil
 		}
-		return Prepared{}, transitionOutcomeError(public.outcome)
+		return Prepared{}, verifiedPreparationError{
+			cause: transitionOutcomeError(public.outcome), prepared: verifiedPreparation,
+		}
 	}
 	outcome := observedPublicReleaseOutcome(
 		parsed.root, request.Target, nil,
@@ -531,7 +579,9 @@ func (runtime *Runtime) PrepareTransition(
 	if parsed.check {
 		return runtime.preparePublicInspectionOutcome(outcome), nil
 	}
-	return Prepared{}, transitionOutcomeError(outcome)
+	return Prepared{}, verifiedPreparationError{
+		cause: transitionOutcomeError(outcome), prepared: verifiedPreparation,
+	}
 }
 
 type qualifiedReplacementRecovery struct {
@@ -775,6 +825,11 @@ func (runtime *Runtime) prepareRetainedTransition(
 		))
 	}
 	defer verified.Close()
+	verifiedPreparation := func(cause error) error {
+		return verifiedPreparationError{cause: cause, prepared: Prepared{
+			TargetRelease: string(verified.candidate.release), TargetVersion: verified.version,
+		}}
+	}
 	request := releasetransition.ProcessRequest{
 		SchemaVersion: releasetransition.ProcessProtocolSchemaV1,
 		Mode:          releasetransition.ProcessInspect,
@@ -795,26 +850,32 @@ func (runtime *Runtime) prepareRetainedTransition(
 			root: filepath.Join(parsed.root, links.current.target),
 		}
 		active, err = runtime.verifyPublishedCandidate(ctx, activeCandidate, parsed.root, nil)
+		if err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+			return Prepared{}, verifiedPreparation(err)
+		}
 		if err != nil || active.registryDigest == "" {
 			if active != nil {
 				active.Close()
 			}
-			return Prepared{}, transitionOutcomeError(publicReleaseOutcome(
+			return Prepared{}, verifiedPreparation(transitionOutcomeError(publicReleaseOutcome(
 				observed, release, nil, releasetransition.CodeRollbackIncompatible,
 				"the active release cannot own a transition to the retained release",
 				"restore a compatible retained release, then run yard update --rollback",
-			))
+			)))
 		}
 		defer active.Close()
 		owner = active
 	}
 	prepared, err := runtime.prepareVerifiedTransition(ctx, parsed, owner, verified, request, nil)
 	if err != nil {
-		return Prepared{}, transitionOutcomeError(publicReleaseOutcome(
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return Prepared{}, verifiedPreparation(err)
+		}
+		return Prepared{}, verifiedPreparation(transitionOutcomeError(publicReleaseOutcome(
 			observed, release, nil, releasetransition.CodeRollbackIncompatible,
 			"the retained release cannot provide a safe rollback plan",
 			"restore a compatible retained release, then run yard update --rollback",
-		))
+		)))
 	}
 	return prepared, nil
 }
@@ -956,11 +1017,7 @@ func (runtime *Runtime) prepareInspectedCandidateTransition(
 		consequences = append([]string{"reactivate the verified retained previous runtime"}, consequences...)
 	}
 	for _, decision := range inspection.Decisions {
-		consequence := fmt.Sprintf("%s %s setting %s", decision.Decision, decision.Scope, decision.Resource)
-		if decision.Result != "" {
-			consequence += " to " + decision.Result
-		}
-		consequences = append(consequences, consequence)
+		consequences = append(consequences, releaseDecisionConsequence(decision))
 	}
 	changed := inspection.Assessment.Changed
 	if inspection.Resume != nil {
@@ -973,6 +1030,10 @@ func (runtime *Runtime) prepareInspectedCandidateTransition(
 		Changed: changed, Consequences: consequences,
 		RefreshConfigs: !activationReconciliationOwned,
 		ActiveLauncher: filepath.Join(parsed.root, "current", "bin", "yard"),
+		SourceRelease:  string(inspection.Outcome.Active),
+		SourceVersion:  "",
+		TargetRelease:  string(target.candidate.release),
+		TargetVersion:  target.version,
 		run: func(ctx context.Context) error {
 			if err := requirePreparedReleaseRoots(parsed, false); err != nil {
 				return err
@@ -1027,6 +1088,12 @@ func (runtime *Runtime) prepareInspectedCandidateTransition(
 					return fmt.Errorf("%w: recovery source journal changed after inspection", domain.ErrPlanStale)
 				}
 			}
+			if parsed.expectedLinks != nil {
+				observed, err := runtime.inspectRuntimeLinks(parsed.root)
+				if err != nil || observed != *parsed.expectedLinks {
+					return fmt.Errorf("%w: runtime links changed after inspection", domain.ErrPlanStale)
+				}
+			}
 			grant := releasetransition.Authorization("")
 			if inspection.Resume == nil && inspection.Assessment.Changed {
 				var grantErr error
@@ -1073,7 +1140,9 @@ func (runtime *Runtime) prepareInspectedCandidateTransition(
 					if rechecked.Inspection.Outcome.Status == releasetransition.StatusReady {
 						return nil
 					}
-					return transitionOutcomeError(*rechecked.Inspection.Outcome)
+					outcome := *converged.Outcome
+					outcome.Retry = CurrentReleaseRetry(outcome)
+					return transitionOutcomeError(outcome)
 				}
 				return transitionOutcomeError(*converged.Outcome)
 			}
@@ -1216,6 +1285,7 @@ func transitionOutcomeError(outcome releasetransition.Outcome) error {
 }
 
 type options struct {
+	expectedLinks                                           *runtimeLinkSnapshot
 	channel, version, root, cache, repository, baseURL, tag string
 	offline, check, rollback, force, versionExplicit        bool
 }
@@ -1615,4 +1685,16 @@ func first(value, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func releaseDecisionConsequence(decision releasetransition.RedactedDecision) string {
+	kind := "setting"
+	if decision.Scope == "activation" {
+		kind = "runtime"
+	}
+	consequence := fmt.Sprintf("%s %s %s %s", decision.Decision, decision.Scope, kind, decision.Resource)
+	if decision.Result != "" {
+		consequence += " to " + decision.Result
+	}
+	return consequence
 }

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -26,6 +27,11 @@ const (
 	initReset
 )
 
+const forwardedSSHAgentConsequence = "SSH agent forwarding enables git push and other host access from " +
+	"inside the yard with the forwarded, write-enabled credential while the SSH session is active. " +
+	"No private key is copied into the yard, but any process that can reach the forwarded agent can " +
+	"exercise it; agent ask-rules are a UX safeguard, not a security boundary"
+
 type initArguments struct {
 	mode    initMode
 	profile string
@@ -39,16 +45,19 @@ type initBootstrap struct {
 }
 
 type initExecution struct {
-	loaded          config.Loaded
-	mode            initMode
-	bootstrap       *initBootstrap
-	plan            application.ReconcilePlan
-	platform        ports.InitPlatform
-	powerYards      []domain.Context
-	hostID          string
-	hostIDPending   bool
-	configsChanged  bool
-	hooksApplicable bool
+	integrationSelection *initIntegrationSelection
+	integrationBaseline  *initIntegrationBaseline
+	integrationAdoption  reconcileruntime.IntegrationPlan
+	loaded               config.Loaded
+	mode                 initMode
+	bootstrap            *initBootstrap
+	plan                 application.ReconcilePlan
+	platform             ports.InitPlatform
+	powerYards           []domain.Context
+	hostID               string
+	hostIDPending        bool
+	configsChanged       bool
+	hooksApplicable      bool
 }
 
 type initReporter struct{ output io.Writer }
@@ -277,18 +286,20 @@ func (cli *CLI) initPlatformWithDispatcher(
 	incusPort, executor := cli.statusPorts()
 	configWriter, _ := incusPort.(ports.InstanceConfigWriter)
 	return reconcileruntime.Runtime{
-		RepositoryRoot: cli.options.RepositoryRoot,
-		Environment:    environmentList(cli.env, environment),
-		Stdin:          cli.options.Stdin,
-		Stdout:         cli.options.Stderr,
-		Stderr:         cli.options.Stderr,
-		Incus:          incusPort,
-		ConfigWriter:   configWriter,
-		Executor:       executor,
-		Yard:           loaded.Context,
-		PowerYards:     powerYards,
-		SRVPool:        loaded.Environment["SRV_POOL"],
-		SRVVolume:      loaded.Environment["SRV_VOLUME"],
+		RepositoryRoot:    cli.options.RepositoryRoot,
+		Environment:       environmentList(cli.env, environment),
+		LaunchEnvironment: environmentList(cli.baseEnv, nil),
+		Stdin:             cli.options.Stdin,
+		Stdout:            cli.options.Stderr,
+		Stderr:            cli.options.Stderr,
+		Incus:             incusPort,
+		NetworkPolicy:     cli.networkService(powerYards),
+		ConfigWriter:      configWriter,
+		Executor:          executor,
+		Yard:              loaded.Context,
+		PowerYards:        powerYards,
+		SRVPool:           loaded.Environment["SRV_POOL"],
+		SRVVolume:         loaded.Environment["SRV_VOLUME"],
 	}
 }
 
@@ -336,6 +347,20 @@ func (cli *CLI) prepareInitExecution(
 		return nil, err
 	}
 	mode := request.mode
+	baseline, err := captureInitIntegrationBaseline(loaded)
+	if err != nil {
+		return nil, err
+	}
+	var selection *initIntegrationSelection
+	// The durable release transition owns restricted-role registration bytes and
+	// paths until verification. Public init can adopt them after it completes.
+	transitionOwnsRegistration := cli.releaseTransitionChild && !loaded.Integrations.AllowsCodingTools
+	if mode != initConfigs && !transitionOwnsRegistration {
+		loaded, selection, err = cli.prepareInitIntegrationSelection(ctx, loaded, bootstrap)
+		if err != nil {
+			return nil, err
+		}
+	}
 	var platform ports.InitPlatform
 	var powerYards []domain.Context
 	if cli.options.InitPlatform != nil {
@@ -349,6 +374,13 @@ func (cli *CLI) prepareInitExecution(
 	}
 	execution := &initExecution{
 		loaded: loaded, mode: mode, bootstrap: bootstrap, platform: platform, powerYards: powerYards,
+		integrationSelection: selection, integrationBaseline: baseline,
+	}
+	if bootstrap == nil && mode == initReconcile && slices.Equal(baseline.Selection.Requested, loaded.Integrations.Requested) {
+		execution.platform, execution.integrationAdoption, err = prepareLegacyIntegrationAdoption(ctx, baseline.Selection, execution.platform)
+		if err != nil {
+			return nil, err
+		}
 	}
 	execution.hostID, execution.hostIDPending, err = configsync.ResolveHostID(
 		loaded.Context.Paths.ConfigHome, loaded.Environment,
@@ -357,6 +389,9 @@ func (cli *CLI) prepareInitExecution(
 		return nil, err
 	}
 	if mode == initConfigs {
+		if err := execution.checkReleaseConfigOwnership(ctx, cli); err != nil {
+			return nil, err
+		}
 		converged, err := execution.platform.ConfigsConverged(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("inspect agent configuration: %w", err)
@@ -394,7 +429,10 @@ func (execution *initExecution) consequences() []string {
 	if execution.hooksOnly() {
 		return []string{"retry installed project hooks once for active resources"}
 	}
-	hostIDConsequences := []string{}
+	hostIDConsequences := integrationAdoptionConsequences(execution.loaded.Context.YardName, execution.integrationAdoption)
+	if execution.integrationSelection != nil {
+		hostIDConsequences = append(hostIDConsequences, "record the selected yard's requested integration set")
+	}
 	if execution.bootstrap != nil {
 		hostIDConsequences = append(hostIDConsequences,
 			"create named yard definition from profile "+execution.bootstrap.profile)
@@ -408,18 +446,29 @@ func (execution *initExecution) consequences() []string {
 	case initReset:
 		result := []string{"delete the yard instance and its disk data"}
 		for _, step := range execution.plan.Steps {
-			result = append(result, step.Stage.Label)
+			result = execution.appendStageConsequences(result, step)
 		}
 		return append(hostIDConsequences, result...)
 	default:
 		result := make([]string, 0, execution.plan.Pending())
 		for _, step := range execution.plan.Steps {
 			if !step.Converged {
-				result = append(result, step.Stage.Label)
+				result = execution.appendStageConsequences(result, step)
 			}
 		}
 		return append(hostIDConsequences, result...)
 	}
+}
+
+func (execution *initExecution) appendStageConsequences(
+	result []string,
+	step application.ReconcileStep,
+) []string {
+	result = append(result, step.Stage.Label)
+	if step.Stage.ID == ports.ReconcileStageSSH && execution.loaded.Context.ForwardSSHAgent {
+		result = append(result, forwardedSSHAgentConsequence)
+	}
+	return result
 }
 
 func (execution *initExecution) actionPlan() (domain.ActionID, domain.ActionDelta, error) {
@@ -427,7 +476,7 @@ func (execution *initExecution) actionPlan() (domain.ActionID, domain.ActionDelt
 		return "", domain.ActionDelta{}, errors.New("init execution is required")
 	}
 	action := domain.ActionID("yard.init.reconcile")
-	changed := execution.plan.Pending() != 0 || execution.bootstrap != nil || execution.hostIDPending
+	changed := execution.plan.Pending() != 0 || execution.bootstrap != nil || execution.hostIDPending || execution.integrationSelection != nil
 	switch execution.mode {
 	case initReconcile:
 		if execution.hooksOnly() {
@@ -451,12 +500,33 @@ func (execution *initExecution) actionPlan() (domain.ActionID, domain.ActionDelt
 
 func (execution *initExecution) hooksOnly() bool {
 	return execution.mode == initReconcile && execution.plan.Pending() == 0 &&
-		execution.bootstrap == nil && !execution.hostIDPending
+		execution.bootstrap == nil && !execution.hostIDPending && execution.integrationSelection == nil
+}
+
+func (execution *initExecution) validateOrcaRepair(ctx context.Context, cli *CLI) error {
+	if cli.orcaInitRepair == nil {
+		return nil
+	}
+	if execution.mode != initReconcile || execution.bootstrap != nil || execution.hostIDPending {
+		return errors.New("release repair requires ordinary init of an existing yard; run yard update first")
+	}
+	assessment, err := cli.assessConfigTarget(ctx,
+		configTarget{Name: execution.loaded.Context.YardName, Loaded: execution.loaded}, true)
+	if err != nil {
+		return err
+	}
+	if !cli.orcaInitRepair.matchesRequestedConfigs([]configTargetAssessment{assessment}) {
+		return errors.New("init release repair requires the persisted yard configuration without overrides")
+	}
+	return nil
 }
 
 func (execution *initExecution) refreshAssessment(ctx context.Context) error {
 	if execution == nil {
 		return errors.New("init execution is required")
+	}
+	if err := execution.checkIntegrationAdoption(ctx); err != nil {
+		return err
 	}
 	hostID, pending, err := configsync.ResolveHostID(
 		execution.loaded.Context.Paths.ConfigHome, execution.loaded.Environment,
@@ -500,6 +570,9 @@ func (cli *CLI) printInitPlan(execution *initExecution) {
 		return
 	}
 	fmt.Fprintln(cli.options.Stdout, "\nSubyard init")
+	for _, consequence := range integrationAdoptionConsequences(execution.loaded.Context.YardName, execution.integrationAdoption) {
+		fmt.Fprintf(cli.options.Stdout, "  [do  ] %s\n", consequence)
+	}
 	for _, step := range execution.plan.Steps {
 		state := "do"
 		if step.Converged {
@@ -510,9 +583,26 @@ func (cli *CLI) printInitPlan(execution *initExecution) {
 }
 
 func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Writer) error {
+	unlock, err := lockIntegrationYard(ctx, execution.loaded)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := execution.checkIntegrationBaseline(cli); err != nil {
+		return err
+	}
+	if err := execution.checkIntegrationAdoption(ctx); err != nil {
+		return err
+	}
 	if execution.hooksOnly() {
 		execution.retryProjectHooks(ctx, output)
 		return nil
+	}
+	if err := execution.integrationSelection.check(ctx, cli, execution); err != nil {
+		return err
+	}
+	if err := execution.integrationSelection.apply(execution); err != nil {
+		return err
 	}
 	if execution.bootstrap != nil {
 		if err := config.CreatePersistentFile(
@@ -531,6 +621,9 @@ func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Wri
 	}
 	fmt.Fprintf(output, "  [ ok ] owner HostID: %s\n", hostID)
 	if execution.mode == initConfigs {
+		if err := execution.checkReleaseConfigOwnership(ctx, cli); err != nil {
+			return err
+		}
 		return execution.platform.RefreshConfigs(ctx)
 	}
 	if execution.mode == initReset {
@@ -630,4 +723,62 @@ func (adapter initAdapter) Run(
 		Schema: 1, OperationID: request.OperationID, Status: "ok",
 		Output: map[string]any{"pending": adapter.execution.plan.Pending()},
 	}, "", nil
+}
+
+// Only a persistent, ordinary yard selection can authorize first-inventory adoption.
+func prepareLegacyIntegrationAdoption(ctx context.Context, selection config.IntegrationSelection, platform ports.InitPlatform) (ports.InitPlatform, reconcileruntime.IntegrationPlan, error) {
+	runtime, ok := platform.(reconcileruntime.Runtime)
+	if !ok || !selection.Present || !selection.AllowsCodingTools || selection.Provenance.Scope == "command" {
+		return platform, reconcileruntime.IntegrationPlan{}, nil
+	}
+	return runtime.PrepareLegacyIntegrationAdoption(ctx)
+}
+
+func integrationAdoptionConsequences(yard string, plan reconcileruntime.IntegrationPlan) []string {
+	result := make([]string, 0, len(plan.Adoption))
+	for _, path := range plan.Adoption {
+		result = append(result, fmt.Sprintf("yard %s: take matching legacy path under integration management: %s", yard, path))
+	}
+	return result
+}
+
+func (execution *initExecution) checkIntegrationAdoption(ctx context.Context) error {
+	if execution.integrationAdoption.AdoptionFingerprint == "" {
+		return nil
+	}
+	runtime, ok := execution.platform.(reconcileruntime.Runtime)
+	if !ok {
+		return errors.New("legacy integration adoption runtime is unavailable")
+	}
+	plan, err := runtime.IntegrationPlan(ctx)
+	if err != nil {
+		return fmt.Errorf("%w: %v", domain.ErrPlanStale, err)
+	}
+	if plan.AdoptionFingerprint != execution.integrationAdoption.AdoptionFingerprint {
+		return fmt.Errorf("%w: legacy integration adoption changed after planning", domain.ErrPlanStale)
+	}
+	return nil
+}
+
+// Release activation must enroll legacy wiring before its config-only child can
+// replace files. Ordinary explicit config refresh keeps its existing contract.
+func (execution *initExecution) checkReleaseConfigOwnership(ctx context.Context, cli *CLI) error {
+	if !cli.releaseTransitionChild {
+		return nil
+	}
+	if runtime, ok := execution.platform.(reconcileruntime.Runtime); ok {
+		if _, err := runtime.IntegrationPlan(ctx); err != nil {
+			return fmt.Errorf("cannot refresh release configs before integration ownership is established: %w", err)
+		}
+	}
+	return nil
+}
+
+func (execution *initExecution) rebuildPlatform(cli *CLI) {
+	execution.platform = cli.initPlatform(execution.loaded, execution.powerYards)
+	if runtime, ok := execution.platform.(reconcileruntime.Runtime); ok && execution.integrationAdoption.AdoptionFingerprint != "" {
+		runtime.AdoptLegacyIntegrations = true
+		runtime.LegacyIntegrationFingerprint = execution.integrationAdoption.AdoptionFingerprint
+		execution.platform = runtime
+	}
 }

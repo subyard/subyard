@@ -1,4 +1,4 @@
-"""Additive reconciliation against stock Orca RPC; never edit its database.
+"""Reconciliation against stock Orca RPC; never edit its database.
 
 Catalog readback proves current runtime state only. Orca owns its debounced disk
 persistence, which is verified separately by service restart acceptance tests.
@@ -8,7 +8,7 @@ import math
 import os
 import time
 
-from discovery import verify_root
+from discovery import verify_missing, verify_root
 from state import State, StateError
 from transport import RpcError
 
@@ -242,6 +242,70 @@ def _report_catalog(report, scan, state, rpc):
                 report["errors"].append(root.path + ": " + "; ".join(reasons))
 
 
+def _prune_missing(report, scan, state, rpc):
+    # An incomplete pass is never evidence for deletion. Missing project roots
+    # may be temporarily unmounted, so warnings also inhibit automatic cleanup.
+    if report["errors"] or scan.warnings:
+        return
+    groups = {group["id"] for group in _records(rpc, "projectGroup.list", "groups") if _local(group)}
+    owners = {entry["group_id"]: entry["root"] for entry in state.data["projects"].values()
+              if entry.get("group_id") in groups}
+    desired = {root.path for project in scan.projects for root in project.roots}
+    candidates = []
+    for repo in _records(rpc, "repo.list", "repos"):
+        root = owners.get(repo.get("projectGroupId"))
+        if (root and _local(repo) and repo["path"] not in desired
+                and (repo["path"] == root or repo["path"].startswith(root + "/"))
+                and (repo["path"] == root or repo.get("kind", "git") == "git")
+                and verify_missing(scan, repo["path"])):
+            candidates.append(repo)
+    for repo in candidates:
+        if time.monotonic() >= state.deadline:
+            raise RpcError("Orca registration time budget exhausted")
+        # This API also covers saved tabs of now-missing linked worktrees.
+        snapshots = rpc.call("session.tabs.listAll").get("snapshots")
+        if (not isinstance(snapshots, list) or any(
+                not isinstance(item, dict) or not isinstance(item.get("worktree"), str)
+                or not isinstance(item.get("tabs"), list) for item in snapshots)):
+            raise RpcError("Orca returned an invalid session tab catalog; cleanup skipped")
+        if any(item["worktree"].startswith(repo["id"] + "::") and item["tabs"] for item in snapshots):
+            report["warnings"].append("Missing Orca checkout has session tabs and is retained: " + repo["path"])
+            continue
+        current = _repo_at(_records(rpc, "repo.list", "repos"), repo["path"])
+        if current != repo or not verify_missing(scan, repo["path"]):
+            raise RpcError("Orca cleanup candidate changed; retry sync: " + repo["path"])
+        try:
+            rpc.call("repo.rm", {"repo": "id:" + repo["id"]})
+        except RpcError as error:
+            if not error.unknown:
+                raise
+        if any(item["id"] == repo["id"] for item in _records(rpc, "repo.list", "repos")):
+            raise RpcError("Orca repository removal is unconfirmed: " + repo["path"])
+    active = {project.project_id for project in scan.projects}
+    for project_id, entry in list(state.data["projects"].items()):
+        group_id = entry.get("group_id")
+        if project_id in active or group_id not in owners or not verify_missing(scan, entry["root"]):
+            continue
+        groups = _records(rpc, "projectGroup.list", "groups")
+        repos = _records(rpc, "repo.list", "repos")
+        folders = _records(rpc, "folderWorkspace.list", "folderWorkspaces")
+        if (any(repo.get("projectGroupId") == group_id for repo in repos + folders)
+                or any(group.get("parentGroupId") == group_id for group in groups)):
+            continue
+        group = next((item for item in groups if item["id"] == group_id), None)
+        if group is None or not _local(group) or not verify_missing(scan, entry["root"]):
+            continue
+        try:
+            rpc.call("projectGroup.delete", {"groupId": group_id})
+        except RpcError as error:
+            if not error.unknown:
+                raise
+        if any(group["id"] == group_id for group in _records(rpc, "projectGroup.list", "groups")):
+            raise RpcError("Orca project group removal is unconfirmed")
+        del state.data["projects"][project_id]
+        state.save()
+
+
 def reconcile(scan, rpc, state_dir, apply=True, deadline=None):
     deadline = deadline if deadline is not None else time.monotonic() + 65
     report = {"ready": False, "registered": 0,
@@ -274,6 +338,7 @@ def reconcile(scan, rpc, state_dir, apply=True, deadline=None):
                             _apply_repo(state, entry, root, group_id, rpc)
                         except RpcError as error:
                             report["errors"].append(root.path + ": " + str(error))
+                _prune_missing(report, scan, state, rpc)
             _report_catalog(report, scan, state, rpc)
     except (RpcError, StateError) as error:
         report["errors"].append(str(error))

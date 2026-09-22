@@ -91,6 +91,12 @@ type initPlatformFixture struct {
 	projectHooks     int
 	projectHooksErr  error
 	hooksApplicable  bool
+	hooksBeforeOrca  bool
+	readyOnOrca      string
+}
+
+func (fixture *initPlatformFixture) InstanceExists(context.Context) (bool, error) {
+	return fixture.converged[ports.ReconcileStageInstance], nil
 }
 
 func (fixture *initPlatformFixture) ProjectHooksApplicable(context.Context) (bool, error) {
@@ -98,8 +104,13 @@ func (fixture *initPlatformFixture) ProjectHooksApplicable(context.Context) (boo
 }
 
 func (fixture *initPlatformFixture) RunProjectHooks(context.Context) error {
+	fixture.hooksBeforeOrca = !fixture.converged[ports.ReconcileStageOrca]
 	fixture.projectHooks++
 	return fixture.projectHooksErr
+}
+
+func (fixture *initPlatformFixture) ObserveOrcaRuntime(context.Context) (ports.OrcaRuntimeObservation, error) {
+	return ports.OrcaRuntimeObservation{State: "absent"}, nil
 }
 
 func (fixture *initPlatformFixture) ConfigsConverged(context.Context) (bool, error) {
@@ -111,10 +122,11 @@ func newInitPlatformFixture() *initPlatformFixture {
 	converged := make(map[ports.ReconcileStageID]bool)
 	for _, id := range []ports.ReconcileStageID{
 		ports.ReconcileStageIncus, ports.ReconcileStageProject, ports.ReconcileStageNetwork,
+		ports.ReconcileStageNetworkPolicy,
 		ports.ReconcileStagePowerImport, ports.ReconcileStageInstance, ports.ReconcileStageMounts,
 		ports.ReconcileStageProvision, ports.ReconcileStageTestVMs, ports.ReconcileStageSSH,
-		ports.ReconcileStageGitIdentity, ports.ReconcileStageExtras, ports.ReconcileStagePower,
-		ports.ReconcileStageKeys, ports.ReconcileStageSecurity,
+		ports.ReconcileStageGitHub, ports.ReconcileStageGitIdentity, ports.ReconcileStageExtras, ports.ReconcileStagePower,
+		ports.ReconcileStageKeys, ports.ReconcileStageSecurity, ports.ReconcileStageOrca,
 	} {
 		converged[id] = true
 	}
@@ -176,6 +188,71 @@ func TestInitExecutionBuildsTypedActionDelta(t *testing.T) {
 			}
 			if test.changed && len(delta.Consequences) == 0 {
 				t.Fatal("changed init action has no consequences")
+			}
+		})
+	}
+}
+
+func TestInitExecutionPlansForwardedSSHAgentBoundaryOnlyForPendingSSH(t *testing.T) {
+	sshStep := application.ReconcileStep{
+		Stage: application.ReconcileStage{ID: ports.ReconcileStageSSH, Label: "Set up SSH access"},
+	}
+	for _, test := range []struct {
+		name      string
+		execution initExecution
+		forward   bool
+		want      bool
+	}{
+		{
+			name: "pending SSH",
+			execution: initExecution{mode: initReconcile, plan: application.ReconcilePlan{
+				Steps: []application.ReconcileStep{sshStep},
+			}},
+			forward: true,
+			want:    true,
+		},
+		{
+			name: "reset",
+			execution: initExecution{mode: initReset, plan: application.ReconcilePlan{
+				Steps: []application.ReconcileStep{sshStep},
+			}},
+			forward: true,
+			want:    true,
+		},
+		{
+			name: "pending SSH without forwarding",
+			execution: initExecution{mode: initReconcile, plan: application.ReconcilePlan{
+				Steps: []application.ReconcileStep{sshStep},
+			}},
+		},
+		{
+			name: "converged SSH",
+			execution: initExecution{mode: initReconcile, plan: application.ReconcilePlan{
+				Steps: []application.ReconcileStep{{Stage: sshStep.Stage, Converged: true}},
+			}},
+			forward: true,
+		},
+		{name: "configs only", execution: initExecution{mode: initConfigs, configsChanged: true}, forward: true},
+		{name: "hooks only", execution: initExecution{mode: initReconcile, hooksApplicable: true}, forward: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			test.execution.loaded.Context.ForwardSSHAgent = test.forward
+			_, delta, err := test.execution.actionPlan()
+			if err != nil {
+				t.Fatal(err)
+			}
+			consequences := strings.Join(delta.Consequences, "\n")
+			for _, expected := range []string{
+				"git push",
+				"forwarded, write-enabled credential",
+				"No private key is copied",
+				"any process that can reach the forwarded agent can exercise it",
+				"agent ask-rules are a UX safeguard, not a security boundary",
+			} {
+				if strings.Contains(consequences, expected) != test.want {
+					t.Fatalf("forwarding consequence presence for %q = %v, want %v: %q",
+						expected, strings.Contains(consequences, expected), test.want, consequences)
+				}
 			}
 		})
 	}
@@ -500,6 +577,10 @@ func TestInitProfileReusesPrivateDefinitionFromEffectiveConfigDir(t *testing.T) 
 	content := "ENVIRONMENT_PROFILES=hermes\nAGENTS=codex\nSSH_PORT=2234\n"
 	writeCLIFile(t, preset, content, 0o600)
 	alternateConfig := filepath.Join(root, "installed", "config")
+	if err := os.MkdirAll(alternateConfig, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(alternateConfig, "agents.env"), "AGENT_codex_COMMAND=codex\n", 0o600)
 	environment = append(environment, "SUBYARD_CONFIG_DIR="+alternateConfig)
 	legacy := filepath.Join(root, "installed", "private", "yards", "custom-name.env")
 	if err := os.MkdirAll(filepath.Dir(legacy), 0o700); err != nil {
@@ -560,6 +641,11 @@ func (fixture *initPlatformFixture) ApplyStage(_ context.Context, stage ports.Re
 	}
 	fixture.applied = append(fixture.applied, stage)
 	fixture.converged[stage] = true
+	if stage == ports.ReconcileStageOrca && fixture.readyOnOrca != "" {
+		if err := os.WriteFile(fixture.readyOnOrca, []byte("ready\n"), 0o600); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -996,6 +1082,144 @@ func TestNativeInitOwnsPlanResumeAndFinalization(t *testing.T) {
 	}
 }
 
+func TestInitRepairsOrcaBeforeHooksInProvisionedYard(t *testing.T) {
+	for _, scenario := range []string{"repair", "failure", "declined"} {
+		t.Run(scenario, func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			platform := newInitPlatformFixture()
+			for stage := range platform.converged {
+				platform.converged[stage] = true
+			}
+			platform.converged[ports.ReconcileStageFinalize] = true
+			platform.converged[ports.ReconcileStageOrca] = false
+			if scenario == "failure" {
+				platform.applyErr = errors.New("injected Orca installation failure")
+			}
+			arguments := []string{"init"}
+			if scenario != "declined" {
+				arguments = append(arguments, "--yes")
+			}
+			var output bytes.Buffer
+			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments,
+				Environment: environment, WorkingDir: root, Stdout: &output, Stderr: &output,
+				InitPlatform: platform, Stdin: strings.NewReader("")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			code := program.Run(context.Background())
+			if scenario != "repair" {
+				if code == 0 || platform.projectHooks != 0 || len(platform.applied) != 0 || strings.Contains(output.String(), "Subyard initialized") {
+					t.Fatalf("failed/declined repair ran hooks or reported success: code=%d hooks=%d applied=%v output=%s", code, platform.projectHooks, platform.applied, output.String())
+				}
+				return
+			}
+			if code != 0 || platform.hooksBeforeOrca || platform.projectHooks != 1 ||
+				!slices.Equal(platform.applied, []ports.ReconcileStageID{ports.ReconcileStageOrca}) {
+				t.Fatalf("repair order: code=%d hooks=%d before=%v applied=%v output=%s", code, platform.projectHooks, platform.hooksBeforeOrca, platform.applied, output.String())
+			}
+		})
+	}
+}
+
+func TestCompletedReleaseRepairRunsOrdinaryInitBeforeProjectHooks(t *testing.T) {
+	fixture := newConfigApplyRepairFixture(t, false)
+	writeCLIFile(t, filepath.Join(fixture.cli.env["SUBYARD_CONFIG_HOME"], "host-id"),
+		"owner-a\n", 0o600)
+	platform := &orcaRepairPlatformFixture{initPlatformFixture: newInitPlatformFixture()}
+	for stage := range platform.converged {
+		platform.converged[stage] = true
+	}
+	platform.converged[ports.ReconcileStageProvision] = false
+	platform.converged[ports.ReconcileStageOrca] = false
+	platform.converged[ports.ReconcileStageFinalize] = true
+	platform.readyOnOrca = fixture.readyMarker
+	fixture.cli.options.InitPlatform = platform
+	fixture.cli.options.Arguments = []string{"init", "--yes"}
+	var output bytes.Buffer
+	fixture.cli.options.Stdout, fixture.cli.options.Stderr = &output, &output
+	fake := fixture.cli.options.Executor.(*testkit.Incus)
+	fake.ExecSteps = nil
+	loaded, err := fixture.cli.resolveReleaseTransitionContext("default", fixture.cli.env["SUBYARD_CONFIG_HOME"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets, err := fixture.cli.localConfigTargets(loaded, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 12 {
+		for _, target := range targets {
+			appendMismatchedHashSteps(t, fake, target.Loaded, "0")
+		}
+	}
+	if code := fixture.cli.Run(context.Background()); code != 0 {
+		t.Fatalf("completed release init repair failed with code %d: %s", code, output.String())
+	}
+	if !slices.Equal(platform.applied, []ports.ReconcileStageID{
+		ports.ReconcileStageProvision, ports.ReconcileStageOrca,
+	}) {
+		t.Fatalf("release repair bypassed ordinary init order: %v", platform.applied)
+	}
+	if platform.hooksBeforeOrca || platform.projectHooks != 1 {
+		t.Fatalf("project hooks ran before Orca repair: before=%v attempts=%d",
+			platform.hooksBeforeOrca, platform.projectHooks)
+	}
+}
+
+func TestOrcaRepairValidationRejectsUnsafeInitShapes(t *testing.T) {
+	permit := &configApplyRepairPermit{requestedTargets: map[string]string{"default": "desired"}}
+	for _, test := range []struct {
+		name      string
+		execution initExecution
+	}{
+		{name: "reset", execution: initExecution{mode: initReset}},
+		{name: "bootstrap", execution: initExecution{mode: initReconcile, bootstrap: &initBootstrap{}}},
+		{name: "new host identity", execution: initExecution{mode: initReconcile, hostIDPending: true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cli := &CLI{orcaInitRepair: permit}
+			if err := test.execution.validateOrcaRepair(context.Background(), cli); err == nil {
+				t.Fatal("unsafe init shape was admitted by completed release repair")
+			}
+		})
+	}
+}
+
+func TestOrcaRepairValidationRejectsChangedEffectiveConfiguration(t *testing.T) {
+	fixture := newConfigApplyRepairFixture(t, false)
+	platform := &orcaRepairPlatformFixture{initPlatformFixture: newInitPlatformFixture()}
+	platform.converged[ports.ReconcileStageOrca] = false
+	fixture.cli.options.InitPlatform = platform
+	fake := fixture.cli.options.Executor.(*testkit.Incus)
+	fake.ExecSteps = nil
+	loaded, err := fixture.cli.resolveReleaseTransitionContext(
+		"default", fixture.cli.env["SUBYARD_CONFIG_HOME"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets, err := fixture.cli.localConfigTargets(loaded, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		for _, target := range targets {
+			appendHashSteps(t, fake, target.Loaded)
+		}
+	}
+	permit, err := fixture.cli.prepareOrcaInitRepair(
+		context.Background(), "default", nil, fixture.outcome)
+	if err != nil || permit == nil {
+		t.Fatalf("prepare Orca repair permit: permit=%#v err=%v", permit, err)
+	}
+	fixture.cli.orcaInitRepair = permit
+	loaded.Context.DevUID++
+	execution := initExecution{loaded: loaded, mode: initReconcile}
+	if err := execution.validateOrcaRepair(context.Background(), fixture.cli); err == nil ||
+		!strings.Contains(err.Error(), "without overrides") {
+		t.Fatalf("changed effective configuration was admitted: %v", err)
+	}
+}
+
 func TestInitProfileCreatesDefinitionOnlyAfterConfirmationAndPreflight(t *testing.T) {
 	for _, test := range []struct {
 		name          string
@@ -1056,7 +1280,8 @@ func TestInitProfileCreatesDefinitionOnlyAfterConfirmationAndPreflight(t *testin
 				}
 				return
 			}
-			if err != nil || string(stored) != content {
+			want := strings.Replace(content, "AGENTS=codex", "CODING_TOOL_INTEGRATIONS='codex'", 1)
+			if err != nil || string(stored) != want {
 				t.Fatalf("definition content=%q err=%v", stored, err)
 			}
 			info, err := os.Lstat(target)

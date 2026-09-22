@@ -116,17 +116,21 @@ func InitStages(yard domain.Context) []ReconcileStage {
 		{ID: ports.ReconcileStageIncus, Label: "Install or upgrade Incus and initialize storage"},
 		{ID: ports.ReconcileStageProject, Label: fmt.Sprintf("Create the Incus project %q", yard.IncusProject)},
 		{ID: ports.ReconcileStageNetwork, Label: "Open host DHCP/DNS for the yard bridge"},
+		{ID: ports.ReconcileStageNetworkPolicy,
+			Label: "Reconcile same-host yard network policy (may restart affected running yards when isolation is enabled)"},
 		{ID: ports.ReconcileStagePowerImport, Label: "Import desired-power state for registered local yards"},
 		{ID: ports.ReconcileStageInstance, Label: instance},
 		{ID: ports.ReconcileStageMounts, Label: fmt.Sprintf("Create host dirs under %s and mount them", yard.Paths.HostBase)},
 		{ID: ports.ReconcileStageProvision, Label: "Provision the yard"},
 		{ID: ports.ReconcileStageTestVMs, Label: testVMs},
 		{ID: ports.ReconcileStageSSH, Label: "Set up SSH access into the yard"},
+		{ID: ports.ReconcileStageGitHub, Label: "Reconcile the GitHub broker profile"},
 		{ID: ports.ReconcileStageGitIdentity, Label: "Reconcile in-yard git config and bind-worktree trust"},
 		{ID: ports.ReconcileStageExtras, Label: "Apply yard extras requested by projects"},
 		{ID: ports.ReconcileStagePower, Label: "Persist desired yard power and install host boot reconciliation"},
 		{ID: ports.ReconcileStageKeys, Label: "Initialize the encrypted credential ledger and sync timer"},
 		{ID: ports.ReconcileStageSecurity, Label: "Validate host-boundary security invariants"},
+		{ID: ports.ReconcileStageOrca, Label: "Refresh installed Orca project handlers before running project hooks"},
 	}
 }
 

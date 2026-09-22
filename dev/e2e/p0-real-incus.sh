@@ -11,6 +11,12 @@ VM_CACHE_ALIAS="${P0_REAL_INCUS_VM_CACHE_ALIAS:-subyard-e2e-debian-13-cloud-vm}"
 TMP=''
 
 die() { printf 'p0-real-incus: %s\n' "$*" >&2; exit 2; }
+CLEANUP_ONLY=0
+case "$#:${1:-}" in
+  0:) ;;
+  1:--cleanup-only) CLEANUP_ONLY=1 ;;
+  *) die 'usage: p0-real-incus.sh [--cleanup-only]' ;;
+esac
 # Incus create/init/launch may consume YAML from stdin. The P0 lane is reached through SSH, so an
 # inherited non-TTY stream can stay open forever after the operation itself succeeds.
 real_incus() { timeout --foreground "${P0_REAL_INCUS_COMMAND_TIMEOUT:-900}" incus "$@" </dev/null; }
@@ -181,8 +187,10 @@ launch_with_retry() {
 }
 
 cleanup() {
-  local name
-  if project_exists; then
+  local name inventory
+  inventory="$(real_incus_observe project list --format csv -c n)" \
+    || die 'cannot inspect real-Incus cleanup inventory'
+  if grep -Fxq "$PROJECT" <<<"$inventory"; then
     [ "$(real_incus project get "$PROJECT" user.subyard.p0 2>/dev/null)" = "$MARKER" ] \
       || die "refusing to clean unmarked project $PROJECT"
     for name in p0-container p0-vm; do delete_marked_instance "$name"; done
@@ -194,12 +202,18 @@ cleanup() {
     find "$TMP" -depth -delete
   fi
 }
-trap cleanup EXIT
-
 [ -n "${SUBYARD_E2E_VM:-}" ] || die 'run through dev/agent-e2e.sh'
 for command in go incus jq sudo; do command -v "$command" >/dev/null || die "$command is required"; done
 sudo -n true || die 'passwordless sudo is required in a disposable test VM'
 [ -S /var/lib/incus/unix.socket ] || die 'Incus socket is unavailable'
+if [ "$CLEANUP_ONLY" = 1 ]; then
+  cleanup
+  exit 0
+fi
+trap 'trap - EXIT; trap "" INT TERM HUP; cleanup' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 project_exists && cleanup
 if cache_info="$(real_incus image info "$CONTAINER_CACHE_ALIAS" --project default 2>/dev/null)"; then
   printf '%s\n' "$cache_info" | grep -Fqx 'Type: container' \
@@ -215,8 +229,8 @@ if cache_info="$(real_incus image info "$VM_CACHE_ALIAS" --project default 2>/de
 fi
 
 real_incus project create "$PROJECT" \
-  -c features.images=false -c features.profiles=false -c features.storage.volumes=false >/dev/null
-real_incus project set "$PROJECT" user.subyard.p0="$MARKER"
+  -c features.images=false -c features.profiles=false -c features.storage.volumes=false \
+  -c user.subyard.p0="$MARKER" >/dev/null
 launch_real_container() {
   real_incus_quiet launch "$CONTAINER_IMAGE" p0-container --project "$PROJECT" --storage default \
     -c user.subyard.p0="$MARKER"
@@ -242,23 +256,29 @@ launch_with_retry p0-vm "launching real Incus VM (a clean allocation may downloa
 
 wait_ready() {
   local name="$1" kind="$2" state='' replaced=0
+  local wait_timeout=240 deadline
   local restart_grace="${P0_REAL_INCUS_RESTART_GRACE_ATTEMPTS:-30}"
+  # A cloud VM's first boot may reboot before its agent starts, including under nested KVM.
+  [ "$kind" != virtual-machine ] || wait_timeout=600
+  deadline=$((SECONDS + wait_timeout))
   printf '  [ .. ] waiting for %s\n' "$name"
-  for _ in $(seq 1 120); do
-    if real_incus exec "$name" --project "$PROJECT" -- true >/dev/null 2>&1; then
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if real_incus_observe exec "$name" --project "$PROJECT" -- true >/dev/null 2>&1; then
       return 0
     fi
-    state="$(real_incus list "$name" --project "$PROJECT" --format csv -c s)"
+    state="$(real_incus_observe list "$name" --project "$PROJECT" --format csv -c s)"
     if [ "$state" = STOPPED ]; then
       printf '  [ .. ] %s is stopped; waiting for a bounded first-boot restart\n' "$name"
       for _ in $(seq 1 "$restart_grace"); do
+        [ "$SECONDS" -lt "$deadline" ] || break
         sleep 1
-        if real_incus exec "$name" --project "$PROJECT" -- true >/dev/null 2>&1; then
+        if real_incus_observe exec "$name" --project "$PROJECT" -- true >/dev/null 2>&1; then
           return 0
         fi
-        state="$(real_incus list "$name" --project "$PROJECT" --format csv -c s)"
+        state="$(real_incus_observe list "$name" --project "$PROJECT" --format csv -c s)"
         [ "$state" = STOPPED ] || break
       done
+      [ "$SECONDS" -lt "$deadline" ] || break
       [ "$state" = STOPPED ] || continue
       if [ "$kind" = virtual-machine ] && [ "$replaced" = 0 ]; then
         printf '  [warn] %s stopped during first boot; replacing it once\n' "$name"
@@ -271,6 +291,8 @@ wait_ready() {
     fi
     sleep 2
   done
+  real_incus_observe info "$name" --project "$PROJECT" --show-log >&2 || true
+  real_incus_observe console "$name" --project "$PROJECT" --show-log >&2 || true
   die "$name did not become ready (last state: ${state:-unknown})"
 }
 wait_ready p0-container container

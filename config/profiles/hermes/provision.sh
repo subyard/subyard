@@ -17,6 +17,7 @@ if [ "$(id -u)" -ne 0 ] && [ "${HERMES_TEST_ALLOW_NON_ROOT:-0}" != 1 ]; then
 fi
 
 packages=(
+  age
   build-essential
   ca-certificates
   curl
@@ -34,19 +35,25 @@ packages_ready() {
   done
 }
 
+linger_ready() {
+  [ "$(loginctl show-user "$DEV_USER" --property=Linger --value 2>/dev/null)" = yes ]
+}
+
 if [ "$check_only" -eq 1 ]; then
-  packages_ready && exit 0
+  packages_ready && linger_ready && exit 0
   exit 10
 fi
 
-if packages_ready; then
-  printf 'hermes provision OK: generic OS prerequisites are already installed\n'
-  exit 0
+if ! packages_ready; then
+  export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
+  apt-get update -qq
+  apt-get install -y -qq "${packages[@]}"
 fi
 
-export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
-apt-get update -qq
-apt-get install -y -qq "${packages[@]}"
-
 packages_ready || die 'generic OS prerequisites are incomplete after package installation'
-printf 'hermes provision OK: generic OS prerequisites are installed\n'
+if ! linger_ready; then
+  loginctl enable-linger "$DEV_USER"
+fi
+linger_ready || die "lingering is disabled for $DEV_USER after reconciliation"
+
+printf 'hermes provision OK: generic OS prerequisites and user lingering are configured\n'

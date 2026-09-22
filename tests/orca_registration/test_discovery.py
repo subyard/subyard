@@ -83,6 +83,33 @@ class DiscoveryTests(unittest.TestCase):
         self.assertTrue(scan.warnings)
         self.assertEqual([], scan.projects[0].roots)
 
+    def test_missing_path_requires_same_available_workspace_and_no_symlinks(self):
+        from discovery import verify_missing
+        scan = self.discover(self.workspaces)
+        missing = str(self.root / "removed/nested")
+        self.assertTrue(verify_missing(scan, missing))
+        self.assertFalse(verify_missing(scan, str(self.root)))
+        self.assertFalse(verify_missing(scan, str(self.root / "../outside")))
+        self.assertFalse(verify_missing(scan, str(Path(self.tmp.name) / "outside")))
+        (self.root / "removed").symlink_to(self.root / "absent")
+        self.assertFalse(verify_missing(scan, missing))
+        self.workspaces.rename(Path(self.tmp.name) / "old")
+        self.assertFalse(verify_missing(scan, missing))
+        self.workspaces.mkdir()
+        self.assertFalse(verify_missing(scan, missing))
+
+    def test_missing_path_rejects_ancestor_replaced_during_recheck(self):
+        import discovery
+        scan = self.discover(self.workspaces)
+        original = discovery._open_dir
+        def replace(path, parent=None):
+            if path == "gone":
+                self.root.rename(self.root.parent / "old-src")
+                (self.root / "gone").mkdir(parents=True)
+            return original(path, parent)
+        with mock.patch.object(discovery, "_open_dir", side_effect=replace):
+            self.assertFalse(discovery.verify_missing(scan, str(self.root / "gone")))
+
     def test_scan_error_and_budget_exhaustion_keep_known_root_but_fail_closed(self):
         (self.root / "blocked").mkdir()
         import discovery

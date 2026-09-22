@@ -46,6 +46,7 @@ func assessV2Action(
 	policy *domain.ActionRegistry,
 	changed bool,
 	legacyRollbackCompatible bool,
+	activationConsequences []string,
 ) (domain.ActionAssessment, error) {
 	consequences := []string(nil)
 	if changed {
@@ -53,6 +54,7 @@ func assessV2Action(
 		if legacyRollbackCompatible {
 			consequences = append(consequences, v2RollbackNoOpConsequence)
 		}
+		consequences = append(consequences, activationConsequences...)
 	}
 	return policy.Assess(v2ActionID, domain.ActionDelta{
 		Changed: changed, Consequences: consequences,
@@ -92,9 +94,10 @@ type V2ActivationReconciler interface {
 }
 
 type V2ActivationObservation struct {
-	Actual    Fingerprint `json:"actual"`
-	Desired   Fingerprint `json:"desired"`
-	Converged bool        `json:"converged"`
+	Actual       Fingerprint `json:"actual"`
+	Desired      Fingerprint `json:"desired"`
+	Converged    bool        `json:"converged"`
+	Consequences []string    `json:"consequences,omitempty"`
 }
 
 type V2Transition struct {
@@ -131,23 +134,24 @@ type v2Work struct {
 }
 
 type v2Observation struct {
-	goal              Goal
-	links             ReleaseLinks
-	ledger            LedgerV2
-	ledgerSnapshot    ProtectedSnapshot
-	journal           *JournalRecord
-	journalSnapshot   ProtectedSnapshot
-	assessment        domain.ActionAssessment
-	decisions         []RedactedDecision
-	blockers          []Blocker
-	observations      []ResourceObservation
-	intents           []PlannerStepIntent
-	work              []v2Work
-	activationScope   []v2ActivationScope
-	observationScope  Fingerprint
-	activationFixed   bool
-	replacement       *JournalReplacement
-	supersededJournal *JournalRecord
+	goal                   Goal
+	links                  ReleaseLinks
+	ledger                 LedgerV2
+	ledgerSnapshot         ProtectedSnapshot
+	journal                *JournalRecord
+	journalSnapshot        ProtectedSnapshot
+	assessment             domain.ActionAssessment
+	decisions              []RedactedDecision
+	blockers               []Blocker
+	observations           []ResourceObservation
+	intents                []PlannerStepIntent
+	work                   []v2Work
+	activationScope        []v2ActivationScope
+	activationConsequences []string
+	observationScope       Fingerprint
+	activationFixed        bool
+	replacement            *JournalReplacement
+	supersededJournal      *JournalRecord
 }
 
 type v2ActivationScope struct {
@@ -260,6 +264,10 @@ func NewV2Transition(options V2Options) (*V2Transition, error) {
 }
 
 func (transition *V2Transition) Inspect(ctx context.Context, goal Goal) (Inspection, error) {
+	return transition.inspect(ctx, goal, false)
+}
+
+func (transition *V2Transition) inspect(ctx context.Context, goal Goal, processV1 bool) (Inspection, error) {
 	if transition == nil {
 		return Inspection{}, errors.New("v2 transition is required")
 	}
@@ -271,6 +279,15 @@ func (transition *V2Transition) Inspect(ctx context.Context, goal Goal) (Inspect
 		return Inspection{}, err
 	}
 	outcome := transition.inspectionOutcome(observation)
+	if processV1 && outcome.Status == StatusMigrationRequired && transition.completedJournalMatches(observation) {
+		// Frozen V1 callers require the completed journal's transaction, but
+		// reject it on migration-required. This is a wire presentation only:
+		// Resume stays absent and the fresh plan still needs a fresh grant.
+		outcome.Status = StatusRecovering
+		outcome.Code = CodeRecoveryPending
+		outcome.Transaction = transactionIDPointer(observation.journal.Transaction)
+		outcome.Message = "activation repair requires a new plan and authorization; the completed transaction is history"
+	}
 	if observation.journal != nil && observation.journal.Checkpoint != JournalComplete {
 		transaction := observation.journal.Transaction
 		return Inspection{
@@ -407,6 +424,10 @@ func (transition *V2Transition) preflightConverge(
 		)
 		return "", &outcome, nil
 	}
+	if outcome := transition.completedResumeOutcome(observation, execution.Plan); outcome != nil &&
+		outcome.Status != StatusReady {
+		return "", outcome, nil
+	}
 	if observation.journal != nil && observation.journal.Checkpoint == JournalComplete &&
 		observation.journal.Goal == observation.goal &&
 		(!transition.completedJournalMatches(observation) || transition.fixedPoint(observation)) {
@@ -427,7 +448,11 @@ func (transition *V2Transition) preflightConverge(
 		return "", nil, err
 	}
 	if plan != execution.Plan {
-		outcome := v2OperatorOutcome(observation.links, goal.Target, nil,
+		var transaction *TransactionID
+		if current != nil && execution.Plan == current.ResumePlan {
+			transaction = transactionIDPointer(current.Transaction)
+		}
+		outcome := v2OperatorOutcome(observation.links, goal.Target, transaction,
 			CodePlanStale, "the inspected release transition changed before convergence",
 			"run yard update --check")
 		return "", &outcome, nil
@@ -454,8 +479,9 @@ func (transition *V2Transition) resolveConvergeGoal(
 	current *JournalRecord,
 ) (Goal, bool) {
 	goal, found := transition.cachedGoal(execution.Plan)
-	if current != nil && current.Checkpoint != JournalComplete &&
-		execution.Plan == current.ResumePlan {
+	if current != nil && execution.Plan == current.ResumePlan &&
+		current.Goal.Target == transition.options.Releases.Target &&
+		current.Goal.Direction == transition.options.Direction {
 		return current.Goal, true
 	}
 	if found || (current != nil && current.Checkpoint != JournalComplete &&
@@ -475,6 +501,24 @@ func (transition *V2Transition) resolveConvergeGoal(
 		return Goal{}, false
 	}
 	return candidate, true
+}
+
+// A caller may have inspected recovery just before another caller completed it.
+// Its resume token can verify that transaction, but cannot authorize fresh repair.
+func (transition *V2Transition) completedResumeOutcome(observation v2Observation, plan PlanToken) *Outcome {
+	journal := observation.journal
+	if journal == nil || journal.Checkpoint != JournalComplete || plan != journal.ResumePlan {
+		return nil
+	}
+	if transition.completedJournalMatches(observation) && transition.fixedPoint(observation) {
+		outcome := transition.inspectionOutcome(observation)
+		return &outcome
+	}
+	outcome := v2OperatorOutcome(observation.links, observation.goal.Target,
+		transactionIDPointer(journal.Transaction), CodePlanStale,
+		"the completed release transition requires a new inspection and authorization",
+		"run yard update --check")
+	return &outcome
 }
 
 func (transition *V2Transition) Converge(
@@ -559,6 +603,12 @@ func (transition *V2Transition) Converge(
 		), nil
 	}
 
+	if outcome := transition.completedResumeOutcome(observation, execution.Plan); outcome != nil {
+		if outcome.Status == StatusReady {
+			return transition.cleanupReady(ctx, observation.journal.Transaction, *outcome), nil
+		}
+		return *outcome, nil
+	}
 	completedHistory := transition.completedJournalMatches(observation)
 	if observation.journal != nil && observation.journal.Checkpoint == JournalComplete &&
 		observation.journal.Goal == observation.goal && !completedHistory {
@@ -577,7 +627,11 @@ func (transition *V2Transition) Converge(
 			return Outcome{}, bindErr
 		}
 		if plan != execution.Plan {
-			return v2OperatorOutcome(observation.links, goal.Target, nil,
+			var transaction *TransactionID
+			if current != nil && execution.Plan == current.ResumePlan {
+				transaction = transactionIDPointer(current.Transaction)
+			}
+			return v2OperatorOutcome(observation.links, goal.Target, transaction,
 				CodePlanStale, "the inspected release transition changed before convergence",
 				"run yard update --check"), nil
 		}
@@ -1097,7 +1151,7 @@ func (transition *V2Transition) observe(ctx context.Context, goal Goal) (v2Obser
 	legacyRollbackCompatible := transition.options.Direction == DirectionActivatePrevious &&
 		transition.options.RollbackTarget != nil &&
 		transition.options.RollbackTarget.RegistryDigest == ""
-	assessment, err := assessV2Action(transition.policy, changed, legacyRollbackCompatible)
+	assessment, err := assessV2Action(transition.policy, changed, legacyRollbackCompatible, observation.activationConsequences)
 	if err != nil {
 		return v2Observation{}, err
 	}
@@ -2458,6 +2512,13 @@ func (transition *V2Transition) observeActivation(
 		}
 		if err := validateActivationObservation(id, actual); err != nil {
 			return err
+		}
+		if !actual.Converged {
+			observation.activationConsequences = append(observation.activationConsequences, actual.Consequences...)
+			observation.decisions = append(observation.decisions, RedactedDecision{
+				Resource: "activation." + id, Scope: "activation",
+				Decision: DecisionCanonicalize, Result: "converged",
+			})
 		}
 		payload, err := json.Marshal(struct {
 			ID      string      `json:"id"`

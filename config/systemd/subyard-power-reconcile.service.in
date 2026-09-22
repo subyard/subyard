@@ -17,6 +17,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=read-only
 ProtectSystem=strict
+ReadWritePaths=/run/lock
 
 [Install]
 WantedBy=multi-user.target

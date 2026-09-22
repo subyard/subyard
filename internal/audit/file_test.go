@@ -11,6 +11,18 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 )
 
+func TestSSHAgentKeyPathIsRedacted(t *testing.T) {
+	for _, args := range [][]string{
+		{"ssh-agent", "unlock", "--key", "/private/key", "--ttl", "2h"},
+		{"ssh-agent", "unlock", "--key=/private/key", "--ttl", "2h"},
+	} {
+		got := redactArguments(args)
+		if strings.Contains(got, "/private/key") || !strings.Contains(got, "2h") {
+			t.Fatalf("unredacted key path: %s", got)
+		}
+	}
+}
+
 func TestWriteInvocationRedactsAndRotates(t *testing.T) {
 	home := t.TempDir()
 	invocation := Invocation{

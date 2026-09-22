@@ -9,7 +9,12 @@ import (
 	"time"
 
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
+
+type BootNetworkPolicy interface {
+	WithStart(context.Context, yardnetwork.Yard, func() error) error
+}
 
 type BootPowerResult struct {
 	Started        []string
@@ -18,12 +23,14 @@ type BootPowerResult struct {
 }
 
 type BootPowerReconciler struct {
-	Inventory ports.InstanceInventory
-	Instances ports.Incus
-	Power     ports.InstancePowerManager
-	Network   ports.HostNetworkGuard
-	Clock     ports.Clock
-	IncusWait time.Duration
+	Inventory         ports.InstanceInventory
+	Instances         ports.Incus
+	Power             ports.InstancePowerManager
+	Network           ports.HostNetworkGuard
+	NetworkPolicy     BootNetworkPolicy
+	EnsureNetworkLock func() error
+	Clock             ports.Clock
+	IncusWait         time.Duration
 }
 
 func (reconciler BootPowerReconciler) HasManaged(ctx context.Context) (bool, error) {
@@ -33,8 +40,12 @@ func (reconciler BootPowerReconciler) HasManaged(ctx context.Context) (bool, err
 
 func (reconciler BootPowerReconciler) Run(ctx context.Context) (BootPowerResult, error) {
 	result := BootPowerResult{}
-	if reconciler.Instances == nil || reconciler.Power == nil || reconciler.Network == nil {
-		return result, errors.New("instance reader, power manager and host network guard are required")
+	if reconciler.Inventory == nil || reconciler.Instances == nil || reconciler.Power == nil || reconciler.Network == nil ||
+		reconciler.NetworkPolicy == nil || reconciler.EnsureNetworkLock == nil {
+		return result, errors.New("instance inventory, reader, power manager and host network guards are required")
+	}
+	if err := reconciler.EnsureNetworkLock(); err != nil {
+		return result, fmt.Errorf("initialize host network policy lock: %w", err)
 	}
 	instances, err := reconciler.waitForManaged(ctx, true)
 	if err != nil || len(instances) == 0 {
@@ -76,10 +87,26 @@ func (reconciler BootPowerReconciler) Run(ctx context.Context) (BootPowerResult,
 		reference := instanceReference(instance)
 		switch strings.ToLower(instance.Status) {
 		case "running":
+			if err := reconciler.NetworkPolicy.WithStart(
+				ctx, bootNetworkYard(instance), func() error { return nil },
+			); err != nil {
+				return result, reconciler.stopRunningFailClosed(
+					ctx, fmt.Errorf("validate network policy for %s: %w", reference, err),
+				)
+			}
 			result.AlreadyRunning = append(result.AlreadyRunning, reference)
 		case "stopped":
-			if err := reconciler.Power.SetInstancePower(ctx, instance.Project, instance.Name, "start", false); err != nil {
-				return result, fmt.Errorf("start %s: %w", reference, err)
+			var startErr error
+			if err := reconciler.NetworkPolicy.WithStart(ctx, bootNetworkYard(instance), func() error {
+				startErr = reconciler.Power.SetInstancePower(ctx, instance.Project, instance.Name, "start", false)
+				return startErr
+			}); err != nil {
+				if startErr != nil {
+					return result, fmt.Errorf("start %s: %w", reference, err)
+				}
+				return result, reconciler.stopRunningFailClosed(
+					ctx, fmt.Errorf("validate network policy for %s: %w", reference, err),
+				)
 			}
 			result.Started = append(result.Started, reference)
 		default:
@@ -90,6 +117,14 @@ func (reconciler BootPowerReconciler) Run(ctx context.Context) (BootPowerResult,
 		}
 	}
 	return result, nil
+}
+
+func bootNetworkYard(instance ports.InstanceInfo) yardnetwork.Yard {
+	name, _ := instance.EffectiveConfig("user.subyard.name")
+	network, _ := instance.EffectiveConfig("user.subyard.bridge")
+	return yardnetwork.Yard{
+		Name: name, Project: instance.Project, Instance: instance.Name, Network: network,
+	}
 }
 
 func (reconciler BootPowerReconciler) listManaged(

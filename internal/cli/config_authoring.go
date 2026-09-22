@@ -66,6 +66,23 @@ func (cli *CLI) runConfigAuthoring(
 				return 2
 			}
 		}
+		if action == "set" && request.name == "CODING_TOOL_INTEGRATIONS" {
+			requested := strings.Fields(request.value)
+			if _, err := config.ResolveIntegrationSelection(loaded.Environment, requested); err != nil {
+				cli.errorf("config set: %v", err)
+				return 2
+			}
+			if request.scope == config.ScopeYard && !loaded.Integrations.AllowsCodingTools && len(requested) != 0 {
+				cli.errorf("config set: yard role forbids non-empty CODING_TOOL_INTEGRATIONS")
+				return 2
+			}
+		}
+		if request.scope == config.ScopeYard && request.name == "YARD_TEMPLATE" {
+			if err := config.ValidateYardTemplateIntegrations(loaded, request.value); err != nil {
+				cli.errorf("config %s: %v", action, err)
+				return 2
+			}
+		}
 		path, err := configScalarAuthoringPath(loaded, request.scope)
 		if err != nil {
 			cli.errorf("config %s: %v", action, err)
@@ -100,6 +117,20 @@ func (cli *CLI) runConfigAuthoring(
 		if unchanged {
 			fmt.Fprintf(cli.options.Stdout, "config %s: already current\n", action)
 			return 0
+		}
+		if request.scope == config.ScopeYard {
+			unlock, err := lockIntegrationYard(ctx, loaded)
+			if err != nil {
+				cli.errorf("config %s: %v", action, err)
+				return 1
+			}
+			defer unlock()
+			if request.name == "YARD_TEMPLATE" {
+				if err := config.ValidateYardTemplateIntegrations(loaded, request.value); err != nil {
+					cli.errorf("config %s: %v", action, err)
+					return 1
+				}
+			}
 		}
 		if err := config.WritePersistentAssignmentIfUnchanged(
 			loaded.Context.Paths.ConfigHome, path, request.name, value, snapshot,
@@ -158,6 +189,14 @@ func (cli *CLI) runConfigAuthoring(
 	if unchanged {
 		fmt.Fprintf(cli.options.Stdout, "config %s: already current\n", action)
 		return 0
+	}
+	if request.scope == config.ScopeYard {
+		unlock, err := lockIntegrationYard(ctx, loaded)
+		if err != nil {
+			cli.errorf("config %s: %v", action, err)
+			return 1
+		}
+		defer unlock()
 	}
 	if err := config.WritePersistentFileIfUnchanged(
 		loaded.Context.Paths.ConfigHome, target, snapshot, content,
@@ -274,12 +313,11 @@ func (cli *CLI) configFileAuthoringPath(
 	case config.ScopeHost:
 		root = filepath.Join(root, "overrides", "host")
 	case config.ScopeYard:
-		if loaded.Context.YardName == "" || loaded.Context.YardName == "default" {
-			return "", errors.New(
-				"yard scope requires selecting a non-default yard with -Y",
-			)
+		name := loaded.Context.YardName
+		if name == "" {
+			name = "default"
 		}
-		root = filepath.Join(root, "yards", loaded.Context.YardName, "overrides")
+		root = filepath.Join(root, "yards", name, "overrides")
 	}
 	return filepath.Join(root, "agents", relative), nil
 }

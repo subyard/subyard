@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Subyard/Subyard/internal/adapters/sshagentruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -45,6 +46,7 @@ func (runtime Runtime) CheckSecurity(
 	quiet bool,
 ) (string, error) {
 	findings := runtime.staticFindings()
+	findings = append(findings, runtime.sshAgentFindings(ctx)...)
 	state, live, err := runtime.liveState(ctx)
 	if err != nil {
 		return "FAIL", err
@@ -110,7 +112,10 @@ func (runtime Runtime) staticFindings() []finding {
 	}
 	if runtime.Yard.ForwardSSHAgent {
 		result = append(result, finding{"warn",
-			"SSH agent forwarding is enabled; this is operator opt-in, not a credential boundary"})
+			"SSH agent forwarding is enabled: git push and other host access from inside the yard can use " +
+				"the forwarded, write-enabled credential while the SSH session is active. No private key is " +
+				"copied into the yard, but any process that can reach the forwarded agent can exercise it; " +
+				"agent ask-rules are a UX safeguard, not a security boundary"})
 	}
 	return append(result, runtime.keyFindings()...)
 }
@@ -555,4 +560,21 @@ func writer(value io.Writer) io.Writer {
 		return io.Discard
 	}
 	return value
+}
+
+func (runtime Runtime) sshAgentFindings(ctx context.Context) []finding {
+	if runtime.Yard.Paths.DataHome == "" {
+		return nil
+	}
+	manager := sshagentruntime.Manager{Config: sshagentruntime.Config{
+		Directory: sshagentruntime.Directory(runtime.Yard.Paths.DataHome, runtime.Yard.YardName),
+	}}
+	status, err := manager.Status(ctx)
+	if err != nil {
+		return []finding{{"warn", "Temporary SSH-agent state could not be inspected"}}
+	}
+	if status.State == "pending" || status.State == "unlocked" || status.State == "reconnecting" {
+		return []finding{{"warn", "Temporary SSH-agent access is granted to this yard: every dev process can use the selected key's upstream permissions until expiry or owner revocation"}}
+	}
+	return nil
 }

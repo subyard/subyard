@@ -301,6 +301,43 @@ func TestResourceCommandPrepareHonorsParentDeadline(t *testing.T) {
 	}
 }
 
+func TestResourceCommandExitCodesDistinguishUsageFromRuntime(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		arguments []string
+		code      int
+	}{
+		{"no verb", []string{"demo"}, 0},
+		{"help", []string{"demo", "--help"}, 0},
+		{"unknown verb", []string{"demo", "unknown"}, 2},
+		{"usage", []string{"demo", "status", "--usage-error"}, 2},
+		{"hidden dispatch usage", []string{"svc", "demo", "status", "--usage-error"}, 2},
+		{"runtime", []string{"demo", "status", "--runtime-error"}, 1},
+		{"malformed plan", []string{"demo", "status", "--malformed"}, 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, environment, applyLog := resourceCommandFixture(t)
+			prompt := &testkit.Prompt{}
+			var stderr bytes.Buffer
+			program, err := New(Options{RepositoryRoot: root, Program: "yard",
+				Arguments: test.arguments, Environment: environment, WorkingDir: root,
+				Stderr: &stderr, Prompt: prompt})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code := program.Run(context.Background()); code != test.code {
+				t.Fatalf("exit=%d want=%d stderr=%q", code, test.code, stderr.String())
+			}
+			if _, err := os.Stat(applyLog); !os.IsNotExist(err) {
+				t.Fatalf("rejected invocation or help reached apply: %v", err)
+			}
+			if len(prompt.Requests) != 0 {
+				t.Fatal("rejected invocation or help prompted")
+			}
+		})
+	}
+}
+
 func TestResourceHelpAndHiddenSvcUseSafeSharedDispatch(t *testing.T) {
 	t.Run("help", func(t *testing.T) {
 		root, environment, applyLog := resourceCommandFixture(t)
@@ -391,6 +428,7 @@ func TestRemoteResourceCommandIsPreparedOnlyByOwner(t *testing.T) {
 	}
 	writeCLIFile(t, filepath.Join(fakeBin, "ssh"), `#!/bin/sh
 set -eu
+`+trustedSSHMock(t)+`
 root="$(cd "$(dirname "$0")/.." && pwd)"
 printf '%s\n' "$@" >"$root/remote-ssh.log"
 `, 0o700)
@@ -491,7 +529,10 @@ case "${SUBYARD_RESOURCE_MODE:-}" in
 		;;
       run:*) action=run; changed=true; consequence='start fixture runtime' ;;
       purge:*) action=purge; changed=true; consequence='permanently erase fixture data' ;;
+	  status:*--escalate*) action=run; changed=true; consequence='unexpected mutation' ;;
 	  status:*--malformed*) printf 'not-json\n'; exit 0 ;;
+	  status:*--usage-error*) printf 'fixture rejected arguments\n' >&2; exit 2 ;;
+	  status:*--runtime-error*) printf 'unknown option in service configuration\n' >&2; exit 1 ;;
 	  status:*--oversize*) head -c 70000 /dev/zero | tr '\000' x; exit 0 ;;
 	  status:*--timeout*) sleep 1 ;;
       status:*) action=status; changed=false; consequence='' ;;
@@ -528,6 +569,153 @@ esac
 `
 	writeCLIFile(t, filepath.Join(resourceRoot, "demo", "handler.sh"), handler, 0o700)
 	return root, environment, applyLog
+}
+
+func TestResourceReadOnlyVerbBypassesV2MutationGate(t *testing.T) {
+	root, environment, applyLog := resourceCommandFixture(t)
+	runtimeRoot := filepath.Join(root, "runtime-v2-resource-gate")
+	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot)
+	journalPath, _ := installUnfinishedV2MutationGateFixture(
+		t, root, environment, runtimeRoot,
+	)
+	before, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeInfo, err := os.Lstat(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var statusStderr bytes.Buffer
+	status, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "status"},
+		Environment: environment, WorkingDir: root,
+		Stdout: &bytes.Buffer{}, Stderr: &statusStderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := status.Run(context.Background()); code != 0 {
+		t.Fatalf("read-only resource status: code=%d stderr=%q", code, statusStderr.String())
+	}
+	prepared, err := os.ReadFile(filepath.Join(root, "resource-prepare.log"))
+	if err != nil || string(prepared) != "prepare\n" {
+		t.Fatalf("read-only resource prepare log=%q err=%v", prepared, err)
+	}
+	readApply, err := os.ReadFile(applyLog)
+	if err != nil || string(readApply) != "status\n" {
+		t.Fatalf("read-only resource apply log=%q err=%v", readApply, err)
+	}
+
+	var escalationStderr bytes.Buffer
+	escalation, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "status", "--escalate"},
+		Environment: environment, WorkingDir: root,
+		Stdout: &bytes.Buffer{}, Stderr: &escalationStderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := escalation.Run(context.Background()); code != 1 ||
+		!strings.Contains(escalationStderr.String(), "does not declare") {
+		t.Fatalf("read verb escalation: code=%d stderr=%q", code, escalationStderr.String())
+	}
+	afterEscalation, err := os.ReadFile(applyLog)
+	if err != nil || string(afterEscalation) != string(readApply) {
+		t.Fatalf("escalated read reached apply: log=%q err=%v", afterEscalation, err)
+	}
+
+	var mutationStderr bytes.Buffer
+	mutation, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "run", "--yes"},
+		Environment: environment, WorkingDir: root,
+		Stdout: &bytes.Buffer{}, Stderr: &mutationStderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := mutation.Run(context.Background()); code != 1 {
+		t.Fatalf("mutating resource gate: code=%d stderr=%q", code, mutationStderr.String())
+	}
+	prepared, err = os.ReadFile(filepath.Join(root, "resource-prepare.log"))
+	if err != nil || string(prepared) != "prepare\nprepare\n" {
+		t.Fatalf("mutating resource reached handler: log=%q err=%v", prepared, err)
+	}
+	afterApply, err := os.ReadFile(applyLog)
+	if err != nil || string(afterApply) != string(readApply) {
+		t.Fatalf("mutating resource ran through gate: log=%q err=%v", afterApply, err)
+	}
+	after, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterInfo, err := os.Lstat(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) || !os.SameFile(beforeInfo, afterInfo) ||
+		afterInfo.Mode() != beforeInfo.Mode() {
+		t.Fatal("resource gate changed the protected v2 journal")
+	}
+}
+
+func TestResourceHandlerHelpArgumentDoesNotBypassV2MutationGate(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		arguments []string
+		wantCode  int
+		wantApply string
+	}{
+		{"global consent with handler help", []string{"--yes", "demo", "run", "--", "--help"}, 1, ""},
+		{"local consent with handler help", []string{"demo", "run", "--yes", "--", "--help"}, 1, ""},
+		{"trailing help", []string{"demo", "run", "--help", "--yes"}, 1, ""},
+		{"short trailing help", []string{"demo", "run", "-h", "--yes"}, 1, ""},
+		{"resource help", []string{"demo", "--help"}, 0, ""},
+		{"read handler help", []string{"demo", "status", "--", "--help"}, 0, "status -- --help\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, environment, applyLog := resourceCommandFixture(t)
+			runtimeRoot := filepath.Join(root, "runtime-v2-resource-gate")
+			environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot)
+			journalPath, _ := installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
+			before, err := os.ReadFile(journalPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var stderr bytes.Buffer
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard", Arguments: test.arguments,
+				Environment: environment, WorkingDir: root,
+				Stdout: &bytes.Buffer{}, Stderr: &stderr,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code := program.Run(context.Background()); code != test.wantCode {
+				t.Errorf("code=%d want=%d stderr=%q", code, test.wantCode, stderr.String())
+			}
+			applied, err := os.ReadFile(applyLog)
+			if err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			if string(applied) != test.wantApply {
+				t.Errorf("applied=%q want=%q", applied, test.wantApply)
+			}
+			if test.wantApply == "" {
+				if _, err := os.Stat(filepath.Join(root, "resource-prepare.log")); !os.IsNotExist(err) {
+					t.Errorf("unexpected prepare invocation: %v", err)
+				}
+			}
+			after, err := os.ReadFile(journalPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Error("protected v2 journal changed")
+			}
+		})
+	}
 }
 
 func readResourceApplyLog(t *testing.T, path string) string {

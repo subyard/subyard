@@ -46,6 +46,11 @@ case "${1:-}" in
     [ "${2:-}" = -f ] || exit 94
     format="${3:?}" dir="$(container_dir "${4:?}")"
     [ -d "$dir" ] || exit 1
+    if [ -f "$root/inspect-fail-once" ] &&
+      [ "$(cat "$root/inspect-fail-once")" = "$format" ]; then
+      rm -f "$root/inspect-fail-once"
+      exit 86
+    fi
     case "$format" in
       '{{ index .Config.Labels "org.subyard.managed" }}') cat "$dir/owner" ;;
       '{{ index .Config.Labels "org.subyard.ai-observer.spec" }}') cat "$dir/spec" ;;
@@ -91,7 +96,13 @@ case "${1:-}" in
     printf '%s\n' "$image" >"$dir/image"
     printf '%s\n' "$user" >"$dir/user"
     printf '%s\n' '["watch","all","--backfill"]' >"$dir/cmd"
+    if [ "${AI_OBSERVER_FAKE_CREATE_BIND_MODE_DRIFT:-0}" = 1 ]; then
+      volumes[1]="${volumes[1]%:ro}:rw"
+    fi
     printf '["%s","%s","%s"]\n' "${volumes[0]}" "${volumes[1]}" "${volumes[2]}" >"$dir/binds"
+    if [ -n "${AI_OBSERVER_FAKE_CREATE_INSPECT_FAIL_FORMAT:-}" ]; then
+      printf '%s\n' "$AI_OBSERVER_FAKE_CREATE_INSPECT_FAIL_FORMAT" >"$root/inspect-fail-once"
+    fi
     [ "$publish" = 127.0.0.1:8080:8080 ] || exit 99
     printf '%s\n' '{"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"8080"}]}' >"$dir/ports"
     printf '%s\n' "$restart" >"$dir/restart"
@@ -255,6 +266,131 @@ status_output="$("$wrapper" status)" || fail 'wrapper status command failed'
 grep -Eq 'curl .*--connect-timeout 2 .*--max-time 5 .*http://127[.]0[.]0[.]1:8080/health' "$FAKE_LOG" \
   || fail 'HTTP readiness request is not bounded'
 
+spec_inspect_format='{{ index .Config.Labels "org.subyard.ai-observer.spec" }}'
+printf '%s\n' "$spec_inspect_format" >"$AI_OBSERVER_FAKE_ROOT/inspect-fail-once"
+set +e
+"$check" >"$TMP/transient-inspect-check.log" 2>&1
+transient_check_status=$?
+set -e
+[ "$transient_check_status" = 1 ] \
+  || fail "transient specification inspect returned $transient_check_status instead of retryable status 1"
+grep -Fxq 'ai-observer-check: container specification unavailable' \
+  "$TMP/transient-inspect-check.log" \
+  || fail 'transient specification inspect was misreported as static drift'
+
+transient_expected_spec="$(cat "$container/spec")"
+printf 'transient-inspect-old-spec\n' >"$container/spec"
+printf 'persistent transient inspect data\n' >"$state/data/transient-inspect-sentinel"
+: >"$FAKE_LOG"
+AI_OBSERVER_FAKE_CREATE_INSPECT_FAIL_FORMAT="$spec_inspect_format" \
+  run_hook "$test_root" "$dev_home" 'claude codex aiobserver' \
+  >"$TMP/transient-inspect-provision.log" 2>&1 \
+  || fail 'outer provision did not retry a transient specification inspect failure'
+[ "$(cat "$container/spec")" = "$transient_expected_spec" ] \
+  || fail 'transient specification inspect rolled back the replacement container'
+[ "$(cat "$container/running")" = true ] \
+  || fail 'transient specification inspect left the replacement service stopped'
+[ "$(cat "$state/data/transient-inspect-sentinel")" = 'persistent transient inspect data' ] \
+  || fail 'transient specification inspect damaged persistent data'
+! grep -Fq 'previous runtime restored' "$TMP/transient-inspect-provision.log" \
+  || fail 'transient specification inspect triggered rollback'
+[ -z "$(find "$AI_OBSERVER_FAKE_ROOT/containers" -mindepth 1 -maxdepth 1 \
+  ! -name subyard-ai-observer -print -quit)" ] \
+  || fail 'transient specification inspect stranded a rollback container'
+
+printf 'persistent outer drift data\n' >"$state/data/outer-drift-sentinel"
+printf 'outer-static-old-spec\n' >"$container/spec"
+: >"$FAKE_LOG"
+SECONDS=0
+set +e
+AI_OBSERVER_STARTUP_TIMEOUT_SECONDS=10 AI_OBSERVER_FAKE_CREATE_BIND_MODE_DRIFT=1 \
+  run_hook "$test_root" "$dev_home" 'claude codex aiobserver' \
+  >"$TMP/outer-static-drift.log" 2>&1
+outer_static_status=$?
+set -e
+[ "$outer_static_status" -ne 0 ] \
+  || fail 'outer provision accepted create-time mount drift'
+[ "$SECONDS" -lt 5 ] \
+  || fail 'outer provision waited for startup timeout on static mount drift'
+grep -Fxq 'ai-observer-check: container mounts drifted' "$TMP/outer-static-drift.log" \
+  || fail 'outer provision omitted the static mount predicate'
+! grep -Fq 'startup readiness timed out' "$TMP/outer-static-drift.log" \
+  || fail 'outer provision misreported static mount drift as startup timeout'
+[ "$(cat "$container/spec")" = outer-static-old-spec ] \
+  || fail 'static mount drift did not restore the previous container'
+[ "$(cat "$container/running")" = true ] \
+  || fail 'static mount drift did not restore the previous running service'
+[ "$(cat "$state/data/outer-drift-sentinel")" = 'persistent outer drift data' ] \
+  || fail 'static mount drift damaged persistent data'
+[ -z "$(find "$AI_OBSERVER_FAKE_ROOT/containers" -mindepth 1 -maxdepth 1 \
+  ! -name subyard-ai-observer -print -quit)" ] \
+  || fail 'static mount drift stranded a rollback container'
+run_hook "$test_root" "$dev_home" 'claude codex aiobserver' >/dev/null
+
+canonical_binds="$(cat "$container/binds")"
+canonical_spec="$(cat "$container/spec")"
+# Docker does not promise to retain the CLI order of bind mounts.
+bind_mounts=("$state/data:/app/data:rw" "$TMP/shared/claude:/sessions/claude:ro" \
+  "$dev_home/.codex/sessions:/sessions/codex:ro")
+for permutation in '0 1 2' '0 2 1' '1 0 2' '1 2 0' '2 0 1' '2 1 0'; do
+  read -r first second third <<<"$permutation"
+  printf '["%s","%s","%s"]\n' \
+    "${bind_mounts[$first]}" "${bind_mounts[$second]}" "${bind_mounts[$third]}" >"$container/binds"
+  "$check" >/dev/null || fail 'readiness rejected an equivalent mount order'
+  : >"$FAKE_LOG"
+  run_hook "$test_root" "$dev_home" 'claude codex aiobserver' >/dev/null
+  assert_log_absent '^docker (create|rename|rm|stop)'
+  assert_log_absent '^systemctl (start|restart|stop|disable)'
+done
+permuted_binds="$(cat "$container/binds")"
+[ "$canonical_binds" != "$permuted_binds" ] \
+  || fail 'mount permutation fixture did not change Docker inspect order'
+
+assert_mount_drift_rejected() {
+  local binds="$1" description="$2" output="$TMP/mount-drift.log" status
+  printf '%s\n' "$binds" >"$container/binds"
+  [ "$(cat "$container/spec")" = "$canonical_spec" ] \
+    || fail "$description mount fixture changed the expected-spec marker"
+  : >"$FAKE_LOG"
+  SECONDS=0
+  set +e
+  "$check" >"$output" 2>&1
+  status=$?
+  set -e
+  if [ "$status" = 0 ]; then
+    fail "readiness check accepted $description mount drift"
+  fi
+  [ "$status" = 2 ] \
+    || fail "$description mount drift returned $status instead of static-drift status 2"
+  [ "$SECONDS" -le 2 ] || fail "$description mount drift did not fail fast"
+  grep -Fxq 'ai-observer-check: container mounts drifted' "$output" \
+    || fail "$description mount drift omitted its exact predicate"
+  assert_log_absent '^curl '
+}
+
+assert_mount_drift_rejected \
+  "[\"$state/data:/app/data:rw\",\"$TMP/shared/claude:/sessions/claude:ro\"]" \
+  missing
+assert_mount_drift_rejected \
+  "[\"$state/data:/app/data:rw\",\"$TMP/shared/claude:/sessions/claude:ro\",\"$dev_home/.codex/sessions:/sessions/codex:ro\",\"$state/empty:/sessions/extra:ro\"]" \
+  extra
+assert_mount_drift_rejected \
+  "[\"$state/data:/app/data:rw\",\"$TMP/shared/claude:/sessions/claude:ro\",\"$dev_home/.codex/sessions:/sessions/codex:ro\",\"/var/run/docker.sock:/var/run/docker.sock:ro\"]" \
+  docker-socket
+assert_mount_drift_rejected \
+  "[\"$state/data:/app/data:rw\",\"$TMP/shared/claude:/sessions/claude:rw\",\"$dev_home/.codex/sessions:/sessions/codex:ro\"]" \
+  mode
+assert_mount_drift_rejected \
+  "[\"$state/data:/app/data:rw\",\"$TMP/shared/claude:/sessions/claude:ro\",\"$dev_home/.codex/sessions:/sessions/codex:ro\",\"$dev_home/.codex/sessions:/sessions/codex:ro\"]" \
+  duplicate
+assert_mount_drift_rejected \
+  "[\"$state/other-data:/app/data:rw\",\"$TMP/shared/claude:/sessions/claude:ro\",\"$dev_home/.codex/sessions:/sessions/codex:ro\"]" \
+  source
+assert_mount_drift_rejected \
+  "[\"$state/data:/app/other-data:rw\",\"$TMP/shared/claude:/sessions/claude:ro\",\"$dev_home/.codex/sessions:/sessions/codex:ro\"]" \
+  destination
+printf '%s\n' "$permuted_binds" >"$container/binds"
+
 SECONDS=0
 if AI_OBSERVER_CHECK_TIMEOUT_SECONDS=1 AI_OBSERVER_FAKE_DOCKER_DELAY=0.3 \
   "$check" >"$TMP/check-timeout.log" 2>&1; then
@@ -358,11 +494,31 @@ grep -Fxq 'ai-observer-check: HTTP readiness failed' "$TMP/readiness-failure.log
   || fail 'readiness failure damaged persistent data'
 
 # A healthy first backfill can outlast the old thirty-probe startup window.
+# This case counts retries; the real startup deadline is checked above. Freeze
+# only the provision shell's clock so slow mock processes cannot spend its budget.
+cat >"$TMP/startup-clock.sh" <<'SH'
+if [ "$0" = "${AI_OBSERVER_FAKE_CLOCK_HOOK:-}" ]; then
+  unset SECONDS
+  SECONDS=0
+  startup_clock_sleeps=0
+  sleep() {
+    startup_clock_sleeps=$((startup_clock_sleeps + 1))
+    # Bound the virtual clock too: a thirty-sixth failure must time out.
+    if [ "$startup_clock_sleeps" -ge 36 ]; then
+      SECONDS="$AI_OBSERVER_STARTUP_TIMEOUT_SECONDS"
+    fi
+  }
+fi
+SH
 printf '35\n' >"$AI_OBSERVER_FAKE_ROOT/http-failures-left"
-if ! AI_OBSERVER_STARTUP_TIMEOUT_SECONDS=15 run_hook "$test_root" "$dev_home" \
+: >"$FAKE_LOG"
+if ! BASH_ENV="$TMP/startup-clock.sh" AI_OBSERVER_FAKE_CLOCK_HOOK="$HOOK" \
+  AI_OBSERVER_STARTUP_TIMEOUT_SECONDS=15 run_hook "$test_root" "$dev_home" \
   'claude codex aiobserver' >"$TMP/slow-startup.log" 2>&1; then
   fail 'slow initial backfill was rolled back before HTTP became ready'
 fi
+[ "$(grep -c '^curl ' "$FAKE_LOG")" = 36 ] \
+  || fail 'slow initial backfill did not survive all thirty-five failed probes'
 "$check" >/dev/null || fail 'slow initial backfill did not become ready'
 [ "$(cat "$state/data/sentinel")" = 'persistent data' ] \
   || fail 'slow initial backfill damaged persistent data'

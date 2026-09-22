@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/domain"
@@ -1190,19 +1191,21 @@ func TestConfigApplyRejectsDesiredChangeThatConvergedAfterConfirmation(t *testin
 	for _, asset := range assets {
 		var hash string
 		if asset.Source == source {
-			digest := sha256.Sum256([]byte(after))
-			hash = fmt.Sprintf("%x", digest)
+			hash, err = configmaterial.DesiredDigestFor(asset.OwnedFormat, []byte(after))
+			if err != nil {
+				t.Fatal(err)
+			}
 		} else {
 			hash, err = hashRegularFile(asset.Source)
 			if err != nil {
 				t.Fatal(err)
 			}
 		}
-		fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{
-			Result: ports.InstanceExecResult{
-				Stdout: []byte(fmt.Sprintf("%s  %s\n", hash, asset.Destination)), ExitCode: 0,
-			},
-		})
+		output := []byte(fmt.Sprintf("%s  %s\n", hash, asset.Destination))
+		if asset.OwnedFormat != "" {
+			output = []byte(fmt.Sprintf(`{"converged":true,"fingerprint":%q}`, hash))
+		}
+		fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{Result: ports.InstanceExecResult{Stdout: output}})
 	}
 	prompt := &callbackPrompt{callback: func() {
 		writeConfigCommandFile(t, source, after)
@@ -1305,6 +1308,7 @@ func TestConfigApplyExecErrorFailsPreflightWithAssumeYes(t *testing.T) {
 
 func TestConfigApplyCompletedNonzeroProbeRemainsDrift(t *testing.T) {
 	root, _, _, environment := configCommandFixture(t)
+	environment = append(environment, "CODING_TOOL_INTEGRATIONS=codex", "AGENT_codex_CONFIG_DEST=.codex/config.txt")
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	fake := &testkit.Incus{
 		Instances: map[string]ports.InstanceInfo{
@@ -1749,6 +1753,7 @@ func TestConfigSyncRemoteRoutingIgnoresLocalRecoveryJournal(t *testing.T) {
 			fakeBin := filepath.Join(home, "fake-bin")
 			logPath := filepath.Join(home, "ssh-arguments")
 			writeConfigCommandFile(t, filepath.Join(fakeBin, "ssh"), `#!/bin/sh
+`+trustedSSHMock(t)+`
 printf '%s\n' "$@" >"$SUBYARD_TEST_SSH_LOG"
 `, 0o700)
 			t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
@@ -2218,6 +2223,7 @@ func TestConfigSourceConnectRejectsEmbeddedCredentialsAndRemoteForwards(t *testi
 	fakeBin := filepath.Join(home, "fake-bin")
 	logPath := filepath.Join(home, "ssh-arguments")
 	writeConfigCommandFile(t, filepath.Join(fakeBin, "ssh"), `#!/bin/sh
+`+trustedSSHMock(t)+`
 printf '%s\n' "$@" >"$SUBYARD_TEST_SSH_LOG"
 `, 0o700)
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
@@ -3429,9 +3435,13 @@ func appendHashSteps(t *testing.T, fake *testkit.Incus, loaded config.Loaded) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		output := []byte(fmt.Sprintf("%s  %s\n", hash, asset.Destination))
+		if asset.OwnedFormat != "" {
+			output = []byte(fmt.Sprintf(`{"converged":true,"fingerprint":%q}`, hash))
+		}
 		fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{
 			Result: ports.InstanceExecResult{
-				Stdout: []byte(fmt.Sprintf("%s  %s\n", hash, asset.Destination)), ExitCode: 0,
+				Stdout: output, ExitCode: 0,
 			},
 		})
 	}
@@ -3449,9 +3459,13 @@ func appendMismatchedHashSteps(
 		t.Fatal(err)
 	}
 	for _, asset := range assets {
+		output := []byte(strings.Repeat(digit, 64) + "  " + asset.Destination + "\n")
+		if asset.OwnedFormat != "" {
+			output = []byte(fmt.Sprintf(`{"converged":false,"fingerprint":%q}`, strings.Repeat(digit, 64)))
+		}
 		fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{
 			Result: ports.InstanceExecResult{
-				Stdout:   []byte(strings.Repeat(digit, 64) + "  " + asset.Destination + "\n"),
+				Stdout:   output,
 				ExitCode: 0,
 			},
 		})
@@ -3702,4 +3716,187 @@ func seedConfigSyncRecoveryJournal(t *testing.T, configHome string) (string, str
 `, transactionID, strings.Repeat("a", 64), strings.Repeat("b", 64),
 		fmt.Sprintf("%x", sha256.Sum256(before)), fmt.Sprintf("%x", sha256.Sum256(after))))
 	return target, transaction
+}
+
+func TestConfigAssessmentUsesOwnedFormatForImportedSources(t *testing.T) {
+	for _, test := range []struct {
+		name, agent, destination, payload, formatted string
+	}{
+		{name: "JSON", agent: "claude", destination: ".claude/settings.json", payload: `{"permissions":{"allow":["Read"]}}`, formatted: "{\n  \"permissions\": {\"allow\": [\"Read\"]}\n}\n"},
+		{name: "TOML", agent: "codex", destination: ".codex/config.toml", payload: "model = \"gpt-5\"\n", formatted: "model=\"gpt-5\"\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, _, _, environment := configCommandFixture(t)
+			loaded := loadConfigCommandContext(t, root, environment, "default")
+			source := filepath.Join(t.TempDir(), "imported-without-extension")
+			writeConfigCommandFile(t, source, test.payload)
+			loaded.Environment["CODING_TOOL_INTEGRATIONS"] = test.agent
+			loaded.Environment["AGENT_"+test.agent+"_CONFIG"] = source
+			loaded.Environment["AGENT_"+test.agent+"_CONFIG_DEST"] = test.destination
+			loaded.Environment["AGENT_"+test.agent+"_RULES"] = ""
+			fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+				loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {Status: "Running"},
+			}}
+			program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: fake, Executor: fake})
+			if err != nil {
+				t.Fatal(err)
+			}
+			assess := func(converged bool, fingerprint string) configTargetAssessment {
+				t.Helper()
+				fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{Result: ports.InstanceExecResult{
+					Stdout: []byte(fmt.Sprintf(`{"converged":%t,"fingerprint":%q}`, converged, strings.Repeat(fingerprint, 64))),
+				}})
+				result, err := program.assessConfigTarget(context.Background(), configTarget{Name: "default", Loaded: loaded}, true)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return result
+			}
+			first := assess(true, "a")
+			if first.Changed || first.State != "converged" {
+				t.Fatalf("owned %s reported drift: %#v", test.name, first)
+			}
+			request := fake.ExecCalls[0].Request
+			if request.Command[0] != "python3" || request.User != 0 || len(request.Stdin) == 0 {
+				t.Fatal("structured observer must read root-owned baseline using typed stdin payload")
+			}
+			// Source formatting is not semantic drift or a stale-confirmation event.
+			writeConfigCommandFile(t, source, test.formatted)
+			formatted := assess(true, "a")
+			if test.name == "JSON" && (first.DesiredFingerprint != formatted.DesiredFingerprint || first.MaterializedFingerprint != formatted.MaterializedFingerprint) {
+				t.Fatal("formatting changed JSON fingerprints")
+			}
+			if test.name == "TOML" && first.DesiredFingerprint == formatted.DesiredFingerprint {
+				t.Fatal("TOML template byte change did not update desired fingerprint")
+			}
+			drift := assess(false, "b")
+			if !drift.Changed || drift.State != "drift" || first.MaterializedFingerprint == drift.MaterializedFingerprint {
+				t.Fatal("managed projection or baseline drift was ignored")
+			}
+		})
+	}
+}
+
+func TestConfigSelectionRejectsInvalidAndForbiddenRequestsBeforeConsent(t *testing.T) {
+	for _, test := range []struct {
+		name, value, scope string
+		allowed            bool
+	}{
+		{"unknown root", "missing-integration", "yard", false},
+		{"duplicate root", "codex codex", "yard", false},
+		{"forbidden yard request", "codex", "yard", false},
+		{"inherited host request", "codex", "host", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, _, configHome, environment := configCommandFixture(t)
+			yard := filepath.Join(configHome, "yards/lab/config.env")
+			original := "YARD_TEMPLATE=test-vms\nCODING_TOOL_INTEGRATIONS=''\n"
+			writeConfigCommandFile(t, yard, original)
+			prompt := &testkit.Prompt{Answers: []bool{true}}
+			var stderr bytes.Buffer
+			program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, Arguments: []string{"-Y", "lab", "config", "set", "CODING_TOOL_INTEGRATIONS", test.value, "--scope", test.scope}, Prompt: prompt, Stderr: &stderr})
+			if err != nil {
+				t.Fatal(err)
+			}
+			code := program.Run(context.Background())
+			if test.allowed {
+				if code != 0 || len(prompt.Requests) != 1 {
+					t.Fatalf("inherited request rejected: code=%d %s", code, stderr.String())
+				}
+			} else if code == 0 || len(prompt.Requests) != 0 {
+				t.Fatalf("forbidden request reached consent/write: code=%d prompts=%v %s", code, prompt.Requests, stderr.String())
+			}
+			content, err := os.ReadFile(yard)
+			if err != nil || string(content) != original {
+				t.Fatalf("yard request changed: %q %v", content, err)
+			}
+		})
+	}
+}
+
+func TestConfigYardAuthoringWaitsForIntegrationLock(t *testing.T) {
+	for _, fileSetting := range []bool{false, true} {
+		t.Run(fmt.Sprint(fileSetting), func(t *testing.T) {
+			root, _, configHome, environment := configCommandFixture(t)
+			target := filepath.Join(configHome, "yards/default/config.env")
+			writeConfigCommandFile(t, target, "CODING_TOOL_INTEGRATIONS=''\n")
+			arguments := []string{"config", "set", "SSH_PORT", "2237", "--scope", "yard", "--yes"}
+			if fileSetting {
+				source := filepath.Join(t.TempDir(), "rules")
+				writeConfigCommandFile(t, source, "new rules\n")
+				target = filepath.Join(configHome, "yards/default/overrides/agents/codex/rules/repo.rules")
+				arguments = []string{"config", "import", "AGENT_codex_RULES", source, "--scope", "yard", "--yes"}
+			}
+			program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, Arguments: arguments})
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded := loadConfigCommandContext(t, root, environment, "default")
+			unlock, err := lockIntegrationYard(context.Background(), loaded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer unlock()
+			before, err := readConfigAuthoringTarget(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			if code := program.Run(ctx); code == 0 {
+				t.Fatal("config write bypassed integration lock")
+			}
+			after, err := readConfigAuthoringTarget(target)
+			if err != nil || !sameConfigAuthoringSnapshot(before, after) {
+				t.Fatalf("locked target changed: %v", err)
+			}
+		})
+	}
+}
+
+func TestConfigTemplateTransitionChecksDestinationRoleBeforeConsent(t *testing.T) {
+	for _, test := range []struct {
+		name, initial, action, template string
+		allowed                         bool
+	}{
+		{"explicit tools forbidden", "CODING_TOOL_INTEGRATIONS=codex\n", "set", "test-vms", false},
+		{"empty allowed", "CODING_TOOL_INTEGRATIONS=''\n", "set", "test-vms", true},
+		{"inherited suppressed", "SSH_PORT=2236\n", "set", "test-vms", true},
+		{"unset releases policy", "YARD_TEMPLATE=test-vms\nCODING_TOOL_INTEGRATIONS=''\n", "unset", "", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, _, configHome, environment := configCommandFixture(t)
+			target := filepath.Join(configHome, "yards/ordinary/config.env")
+			writeConfigCommandFile(t, target, test.initial)
+			args := []string{"-Y", "ordinary", "config", test.action, "YARD_TEMPLATE"}
+			if test.action == "set" {
+				args = append(args, test.template)
+			}
+			args = append(args, "--scope", "yard")
+			prompt := &testkit.Prompt{Answers: []bool{true}}
+			var stderr bytes.Buffer
+			program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, Arguments: args, Prompt: prompt, Stderr: &stderr})
+			if err != nil {
+				t.Fatal(err)
+			}
+			code := program.Run(context.Background())
+			if test.allowed {
+				if code != 0 || len(prompt.Requests) != 1 {
+					t.Fatalf("valid transition rejected: code=%d %s", code, stderr.String())
+				}
+				reloaded := loadConfigCommandContext(t, root, environment, "ordinary")
+				if reloaded.Integrations.AllowsCodingTools != (test.action == "unset") {
+					t.Fatalf("wrong destination role: %#v", reloaded.Integrations)
+				}
+			} else {
+				if code == 0 || len(prompt.Requests) != 0 || !strings.Contains(stderr.String(), "clear the yard's CODING_TOOL_INTEGRATIONS") {
+					t.Fatalf("forbidden transition reached consent: code=%d prompts=%v %s", code, prompt.Requests, stderr.String())
+				}
+				content, err := os.ReadFile(target)
+				if err != nil || string(content) != test.initial {
+					t.Fatalf("forbidden transition wrote settings: %q %v", content, err)
+				}
+			}
+		})
+	}
 }

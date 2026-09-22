@@ -17,6 +17,7 @@ import (
 const (
 	ResourcePlanInvalid   = "resource_plan_invalid"
 	ResourceActionUnknown = "resource_action_unknown"
+	ResourceUsageInvalid  = "resource_usage_invalid"
 
 	PrepareAssessmentSchema = "yard.resource-action-assessment.v1"
 	MaxPrepareOutputBytes   = 64 << 10
@@ -27,6 +28,7 @@ const (
 var (
 	ErrResourcePlanInvalid   = errors.New(ResourcePlanInvalid)
 	ErrResourceActionUnknown = errors.New(ResourceActionUnknown)
+	ErrResourceUsageInvalid  = errors.New(ResourceUsageInvalid)
 
 	credentialAssignment = regexp.MustCompile(`(?i)(?:^|[^a-z0-9_-])(?:password|passphrase|secret|token|api[_-]?key|access[_-]?token|private[_-]?key)\s*[:=]\s*[^[:space:]]+`)
 	jsonWebToken         = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}\b`)
@@ -45,6 +47,8 @@ func ResourceErrorClass(err error) string {
 		return ResourcePlanInvalid
 	case errors.Is(err, ErrResourceActionUnknown):
 		return ResourceActionUnknown
+	case errors.Is(err, ErrResourceUsageInvalid):
+		return ResourceUsageInvalid
 	default:
 		return ""
 	}

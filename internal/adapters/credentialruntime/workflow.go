@@ -155,6 +155,7 @@ Host-side encrypted credential ledger:
   resolve <credential-id> --choose <revision>|--rotate [--file PATH]
   move <credential-id> @peer
 
+Static consumers: staging-env, qa-secrets, qa-pool, github-app-key (global zone).
 Secret values are read only after confirmation from a protected file, stdin or a silent TTY.
 `)
 	return nil
@@ -1812,6 +1813,11 @@ func (runtime *Runtime) consumerPath(consumerName, zone string) (string, bool, e
 		destination = filepath.Join(runtime.config.ConsumerRoot, "qa-pool", "secrets.env")
 	case "qa-pool":
 		destination = filepath.Join(runtime.config.ConsumerRoot, "qa-pool", "pool.jsonl")
+	case "github-app-key":
+		if zone != "global" {
+			return "", false, errors.New("github-app-key requires the global zone")
+		}
+		destination = filepath.Join(runtime.config.ConsumerRoot, "github", "github-app.pem")
 	default:
 		return "", false, errors.New("invalid credential consumer")
 	}
@@ -1831,6 +1837,8 @@ func (runtime *Runtime) detectConsumer(path string) string {
 		return "qa-secrets"
 	case clean == filepath.Join(runtime.config.ConsumerRoot, "qa-pool", "pool.jsonl"):
 		return "qa-pool"
+	case clean == filepath.Join(runtime.config.ConsumerRoot, "github", "github-app.pem"):
+		return "github-app-key"
 	default:
 		return "none"
 	}
@@ -1975,8 +1983,11 @@ func validateClassification(label, kind, zone, consumerName string) error {
 	if zone == "prod" || zone == "production" {
 		return errors.New("production credentials are outside the Subyard credential ledger scope")
 	}
-	if !contains([]string{"none", "staging-env", "qa-secrets", "qa-pool"}, consumerName) {
+	if !contains([]string{"none", "staging-env", "qa-secrets", "qa-pool", "github-app-key"}, consumerName) {
 		return fmt.Errorf("invalid consumer %q", consumerName)
+	}
+	if consumerName == "github-app-key" && zone != "global" {
+		return errors.New("github-app-key requires the global zone")
 	}
 	return nil
 }

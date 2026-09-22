@@ -86,12 +86,13 @@ operator_env() {
   local uid
   uid="$(operator_uid)"
   sudo -n /usr/sbin/runuser -u "$OPERATOR" -- env \
+    -u SUDO_USER -u SUDO_UID -u SUDO_GID -u SUDO_COMMAND \
     HOME="$OPERATOR_HOME" USER="$OPERATOR" LOGNAME="$OPERATOR" SHELL=/bin/bash \
     PATH="$OPERATOR_HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
     GOCACHE="$OPERATOR_HOME/.cache/go-build" GOMODCACHE="$OPERATOR_HOME/go/pkg/mod" \
     XDG_RUNTIME_DIR="/run/user/$uid" \
     DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
-    "$@"
+    bash -c 'cd "$HOME" && exec "$@"' _ "$@"
 }
 operator_yard() { operator_env "$OPERATOR_HOME/.local/bin/yard" "$@"; }
 
@@ -753,8 +754,7 @@ assert_post_reboot_candidate() {
     || die "desired-running yard is $instance_state after reboot"
 }
 
-prepare_candidate() {
-  local systemd_version old_load
+prepare_fixture() {
   [ ! -e "$STATE_ROOT" ] && [ ! -L "$STATE_ROOT" ] \
     || die "fixture state already exists: $STATE_ROOT"
   ! id "$OPERATOR" >/dev/null 2>&1 || die "fixture operator already exists: $OPERATOR"
@@ -770,6 +770,11 @@ prepare_candidate() {
   snapshot_host_runtime
   CLEANUP_ARMED=1
   prepare_operator
+}
+
+prepare_candidate() {
+  local systemd_version old_load
+  prepare_fixture
 
   p0_capacity_reset_build_cache
   info "packaging local layout-5 candidate $CANDIDATE_VERSION"
@@ -838,6 +843,10 @@ finish_candidate_flow() {
   assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
   ok 'roll-forward restored the compatible candidate runtime and unit'
 }
+
+# The release smoke reuses the same disposable operator, durable reboot state and
+# marker-guarded host-runtime restoration without the historical migration matrix.
+if [ "${BASH_SOURCE[0]}" != "$0" ]; then return 0; fi
 
 for command in sudo systemctl timeout; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"

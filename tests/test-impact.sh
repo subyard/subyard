@@ -484,9 +484,6 @@ cmp -s "$current_json" "$hostile_json" || fail 'hostile caller environment chang
 test_wrapper_bootstrap_isolation
 test_targeted_adapter_runner
 
-(cd "$ROOT" && go test ./internal/testimpact -run '^TestHistoricalCorpus' >/dev/null) \
-  || fail 'strict historical corpus decoder failed'
-
 corpus_conforms() {
   jq -e '
     def unique_strings:

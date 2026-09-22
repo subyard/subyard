@@ -520,8 +520,11 @@ func validateMetadata(metadata domain.CredentialMetadata) error {
 		metadata.Zone == ".." || metadata.Scope != "staging" {
 		return errors.New("invalid credential classification")
 	}
-	if !slices.Contains([]string{"none", "staging-env", "qa-secrets", "qa-pool"}, metadata.Consumer) {
+	if !slices.Contains([]string{"none", "staging-env", "qa-secrets", "qa-pool", "github-app-key"}, metadata.Consumer) {
 		return errors.New("invalid credential consumer")
+	}
+	if metadata.Consumer == "github-app-key" && metadata.Zone != "global" {
+		return errors.New("github-app-key requires the global zone")
 	}
 	if !slices.Contains([]string{"active", "revoked", "tombstone"}, metadata.State) {
 		return errors.New("invalid credential state")

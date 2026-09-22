@@ -175,21 +175,24 @@ type AdapterRunner interface {
 type ReconcileStageID string
 
 const (
-	ReconcileStageIncus       ReconcileStageID = "incus"
-	ReconcileStageProject     ReconcileStageID = "project"
-	ReconcileStageNetwork     ReconcileStageID = "network"
-	ReconcileStagePowerImport ReconcileStageID = "power-import"
-	ReconcileStageInstance    ReconcileStageID = "instance"
-	ReconcileStageMounts      ReconcileStageID = "mounts"
-	ReconcileStageProvision   ReconcileStageID = "provision"
-	ReconcileStageTestVMs     ReconcileStageID = "test-vms"
-	ReconcileStageSSH         ReconcileStageID = "ssh"
-	ReconcileStageGitIdentity ReconcileStageID = "git-identity"
-	ReconcileStageExtras      ReconcileStageID = "extras"
-	ReconcileStagePower       ReconcileStageID = "power"
-	ReconcileStageKeys        ReconcileStageID = "keys"
-	ReconcileStageSecurity    ReconcileStageID = "security"
-	ReconcileStageFinalize    ReconcileStageID = "finalize"
+	ReconcileStageIncus         ReconcileStageID = "incus"
+	ReconcileStageProject       ReconcileStageID = "project"
+	ReconcileStageNetwork       ReconcileStageID = "network"
+	ReconcileStageNetworkPolicy ReconcileStageID = "network-policy"
+	ReconcileStagePowerImport   ReconcileStageID = "power-import"
+	ReconcileStageInstance      ReconcileStageID = "instance"
+	ReconcileStageMounts        ReconcileStageID = "mounts"
+	ReconcileStageProvision     ReconcileStageID = "provision"
+	ReconcileStageTestVMs       ReconcileStageID = "test-vms"
+	ReconcileStageSSH           ReconcileStageID = "ssh"
+	ReconcileStageGitIdentity   ReconcileStageID = "git-identity"
+	ReconcileStageGitHub        ReconcileStageID = "github"
+	ReconcileStageExtras        ReconcileStageID = "extras"
+	ReconcileStagePower         ReconcileStageID = "power"
+	ReconcileStageKeys          ReconcileStageID = "keys"
+	ReconcileStageSecurity      ReconcileStageID = "security"
+	ReconcileStageOrca          ReconcileStageID = "orca-runtime"
+	ReconcileStageFinalize      ReconcileStageID = "finalize"
 )
 
 type ReconcileStageRunner interface {
@@ -203,9 +206,18 @@ type InitPlatform interface {
 	Preflight(context.Context, bool) error
 	ConfigsConverged(context.Context) (bool, error)
 	RefreshConfigs(context.Context) error
+	ObserveOrcaRuntime(context.Context) (OrcaRuntimeObservation, error)
 	ProjectHooksApplicable(context.Context) (bool, error)
 	RunProjectHooks(context.Context) error
 	Teardown(context.Context) error
+}
+
+// OrcaRuntimeObservation describes the installed, profile-owned registration
+// contract. A stopped yard defers observation without starting the instance.
+type OrcaRuntimeObservation struct {
+	State   string `json:"state"`
+	Actual  string `json:"actual"`
+	Desired string `json:"desired"`
 }
 
 type RemoteTransport interface {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/domain"
@@ -20,6 +21,7 @@ type provisionFixture struct {
 	checks    []string
 	checkRuns map[string][]string
 	fail      string
+	guarded   int
 }
 
 func (fixture *provisionFixture) Instance(context.Context, string, string) (ports.InstanceInfo, error) {
@@ -105,8 +107,8 @@ func TestProvisionRestoresTemporarilyStartedYard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "ok" || !slices.Equal(fixture.actions, []string{"start", "stop"}) {
-		t.Fatalf("result=%+v actions=%v", result, fixture.actions)
+	if result.Status != "ok" || fixture.guarded != 1 || !slices.Equal(fixture.actions, []string{"start", "stop"}) {
+		t.Fatalf("result=%+v guarded=%d actions=%v", result, fixture.guarded, fixture.actions)
 	}
 	if !slices.Equal(fixture.arguments[0], []string{"start", "--reconcile"}) ||
 		!slices.Equal(fixture.arguments[1], []string{"stop", "--reconcile"}) {
@@ -114,6 +116,32 @@ func TestProvisionRestoresTemporarilyStartedYard(t *testing.T) {
 	}
 	if !slices.Equal(fixture.profiles, []string{"android", "openclaw"}) {
 		t.Fatalf("profiles=%v", fixture.profiles)
+	}
+}
+
+func TestProvisionFailsClosedBeforeTemporaryStartWithoutGuard(t *testing.T) {
+	fixture := &provisionFixture{instance: managedProvisionInstance("Stopped", PowerRunning)}
+	runner := provisionRunnerFixture(fixture, "subyard-dev")
+	runner.GuardStart = nil
+	if _, _, err := runner.Run(context.Background(), provisionRequest(), nil); err == nil ||
+		!strings.Contains(err.Error(), "network policy start guard is required") {
+		t.Fatalf("missing start guard error = %v", err)
+	}
+	if len(fixture.actions) != 0 {
+		t.Fatalf("missing guard reached physical lifecycle: %v", fixture.actions)
+	}
+}
+
+func TestProvisionPolicyFailurePreventsTemporaryStart(t *testing.T) {
+	fixture := &provisionFixture{instance: managedProvisionInstance("Stopped", PowerRunning)}
+	runner := provisionRunnerFixture(fixture, "subyard-dev")
+	runner.GuardStart = func(context.Context, func() error) error { return errors.New("policy incomplete") }
+	if _, _, err := runner.Run(context.Background(), provisionRequest(), nil); err == nil ||
+		!strings.Contains(err.Error(), "policy incomplete") {
+		t.Fatalf("policy failure = %v", err)
+	}
+	if len(fixture.actions) != 0 {
+		t.Fatalf("policy failure reached physical lifecycle: %v", fixture.actions)
 	}
 }
 
@@ -143,6 +171,10 @@ func provisionRunnerFixture(fixture *provisionFixture, names ...string) Provisio
 	yard := domain.Context{YardName: "test", IncusProject: "subyard-test", YardInstanceName: "yard-test"}
 	return ProvisionRunner{
 		Power: PowerService{Instances: fixture, Config: fixture}, Physical: fixture,
+		GuardStart: func(_ context.Context, start func() error) error {
+			fixture.guarded++
+			return start()
+		},
 		Yard: yard, Profiles: names,
 	}
 }

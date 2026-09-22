@@ -408,7 +408,7 @@ esac
 
 	requestCapture := filepath.Join(filepath.Dir(fixture.runtimeRoot), "rollback-inspection.json")
 	readyInspection := fmt.Sprintf(
-		`{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":false,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible"},"outcome":{"status":"ready","reachedGoal":true,"active":%q,"previous":%q,"target":%q,"code":"ready","message":"verified","transaction":%q}}}`,
+		`{"schemaVersion":1,"activationReconciliationOwned":true,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":false,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible"},"outcome":{"status":"ready","reachedGoal":true,"active":%q,"previous":%q,"target":%q,"code":"ready","message":"verified","transaction":%q}}}`,
 		oldRelease, ownerRelease, oldRelease, fixture.transaction,
 	)
 	ownerPayload := fmt.Sprintf(`#!/bin/sh
@@ -425,8 +425,11 @@ esac
 	registryPath := filepath.Join(
 		fixture.runtimeRoot, "releases", ownerRelease, "config", "release-transition.json",
 	)
-	registry, err := os.ReadFile(registryPath)
+	registry, err := os.ReadFile(filepath.Join("..", "..", "..", "config", "release-transition.json"))
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(registryPath, registry, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	registryDigest := sha256.Sum256(registry)
@@ -502,6 +505,77 @@ esac
 		request.ArtifactDigest != journal.ArtifactDigest {
 		t.Fatalf("protected rollback request = %#v", request)
 	}
+	// Current-only reporting must read the retained owner's registry, because
+	// the active pre-v2 artifact deliberately has no transition registry.
+	parsedRegistry, _, err := releasetransition.ParseRegistryV2(registry, releasetransition.BuiltinCapabilityCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger := releasetransition.BaselineLedgerV2(parsedRegistry)
+	for _, migration := range parsedRegistry.Migrations {
+		ledger, err = ledger.Advance(parsedRegistry, migration)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	ledgerPayload, _, err := releasetransition.MarshalLedgerV2(ledger, parsedRegistry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(fixture.journalPath), "ledger.json"), ledgerPayload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var reportOutput bytes.Buffer
+	environment := fixture.environment()
+	environment["YARD_RUNTIME_ROOT"] = fixture.runtimeRoot
+	currentRuntime := New(Config{Environment: environment, Stdout: &reportOutput})
+	defer currentRuntime.Close()
+	check, err := currentRuntime.PrepareCurrentTransition(context.Background(), []string{"--check", "--json"}, fixture.configHome, "default", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := check.Execute(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var report currentReport
+	if err := json.Unmarshal(reportOutput.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Owner != releasetransition.ReleaseID(ownerRelease) || report.Current != oldRelease || report.Outcome.Status != releasetransition.StatusReady || len(report.Domains) == 0 {
+		t.Fatalf("retained owner current report = %s", reportOutput.String())
+	}
+	for _, domain := range report.Domains {
+		if len(domain.Pending) != 0 {
+			t.Fatalf("retained owner has pending migrations: %#v", domain)
+		}
+	}
+	if _, err := os.Stat(oldTransitionCalled); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("current report invoked pre-v2 owner: %v", err)
+	}
+	if err := os.Rename(filepath.Join(fixture.runtimeRoot, "releases", ownerRelease), filepath.Join(fixture.runtimeRoot, "releases", ownerRelease+"-unavailable")); err != nil {
+		t.Fatal(err)
+	}
+	// Remove the now-dangling previous link so the missing verified owner is
+	// diagnosed independently of unsafe link topology.
+	if err := os.Remove(filepath.Join(fixture.runtimeRoot, "previous")); err != nil {
+		t.Fatal(err)
+	}
+	reportOutput.Reset()
+	check, err = currentRuntime.PrepareCurrentTransition(context.Background(), []string{"--check", "--json"}, fixture.configHome, "default", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := check.Execute(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	report = currentReport{}
+	if err := json.Unmarshal(reportOutput.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Outcome.Status != releasetransition.StatusOperatorActionRequired || len(report.Domains) != 0 || len(report.Decisions) != 0 {
+		t.Fatalf("missing owner fabricated readiness: %s", reportOutput.String())
+	}
+
 }
 
 func TestRollbackFactsRequireExactSealedArtifact(t *testing.T) {
@@ -861,8 +935,8 @@ func TestPrepareTransitionRepairsCompletedActivationDriftWithOneGrant(t *testing
 	repairPlan := "plan-v1-" + strings.Repeat("f", 64)
 	resumePlan := "resume-v1-" + strings.Repeat("9", 64)
 	driftInspection := fmt.Sprintf(
-		`{"schemaVersion":1,"activationReconciliationOwned":true,"inspection":{"plan":%q,"assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the exact typed migration and release activation plan"]},"outcome":{"status":"migration-required","reachedGoal":false,"active":%q,"previous":"release-a","target":%q,"code":"transition-required","message":"the inspected release transition has not started","retry":"run yard update"}}}`,
-		repairPlan, fixture.target, fixture.target,
+		`{"schemaVersion":1,"activationReconciliationOwned":true,"inspection":{"plan":%q,"assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the exact typed migration and release activation plan"]},"outcome":{"status":"recovering","reachedGoal":false,"active":%q,"previous":"release-a","target":%q,"code":"recovery-pending","message":"the inspected release transition has not started","retry":"run yard update","transaction":%q}}}`,
+		repairPlan, fixture.target, fixture.target, fixture.transaction,
 	)
 	recoveringInspection := fmt.Sprintf(
 		`{"schemaVersion":1,"activationReconciliationOwned":true,"inspection":{"plan":%q,"assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the exact typed migration and release activation plan"]},"resume":%q,"outcome":{"status":"recovering","reachedGoal":false,"active":%q,"previous":"release-a","target":%q,"code":"recovery-pending","message":"the authorized release transition can resume from observed facts","retry":"run yard update","transaction":%q}}}`,
@@ -910,6 +984,19 @@ esac
 		Environment: fixture.environment(), Installer: fixture.installer,
 		Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
 	})
+
+	inspection, err := runtime.inspectProtectedTransition(
+		context.Background(), fixture.runtimeRoot, fixture.configHome, "default", nil,
+	)
+	if err != nil || inspection == nil || inspection.inspection.Outcome == nil {
+		t.Fatalf("inspect completed repair: inspection=%#v err=%v", inspection, err)
+	}
+	if inspection.inspection.Outcome.Status != releasetransition.StatusMigrationRequired ||
+		inspection.inspection.Outcome.Transaction != nil || inspection.inspection.Resume != nil ||
+		inspection.inspection.Plan != releasetransition.PlanToken(repairPlan) ||
+		!inspection.inspection.Assessment.Changed {
+		t.Fatalf("modern caller did not restore new-plan semantics: %#v", inspection.inspection)
+	}
 
 	prepared, err := runtime.PrepareTransition(
 		context.Background(), []string{"--runtime-root", fixture.runtimeRoot},
@@ -1049,6 +1136,51 @@ esac
 				context.Background(), fixture.runtimeRoot, fixture.configHome, "default", nil,
 			); err == nil || inspection != nil {
 				t.Fatalf("unsafe protected inspection accepted: inspection=%#v err=%v", inspection, err)
+			}
+		})
+	}
+}
+
+func TestProtectedCompletedRepairRejectsMismatchedHistory(t *testing.T) {
+	for _, mismatch := range []string{"transaction", "resume", "previous"} {
+		t.Run(mismatch, func(t *testing.T) {
+			fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalComplete)
+			var response releasetransition.ProcessResponse
+			if err := json.Unmarshal([]byte(fixture.recoveringResponse()), &response); err != nil {
+				t.Fatal(err)
+			}
+			inspection := response.Inspection
+			inspection.Plan = releasetransition.PlanToken("plan-v1-" + strings.Repeat("f", 64))
+			inspection.Resume = nil
+			inspection.Outcome.Active = releasetransition.ReleaseID(fixture.target)
+			previous := releasetransition.ReleaseID("release-a")
+			inspection.Outcome.Previous = &previous
+			switch mismatch {
+			case "transaction":
+				foreign := releasetransition.TransactionID("tx-foreign-repair-01")
+				inspection.Outcome.Transaction = &foreign
+			case "resume":
+				inspection.Plan = releasetransition.PlanToken(fixture.resumePlan)
+				inspection.Resume = inspection.Outcome.Transaction
+			case "previous":
+				previous = "release-foreign"
+			}
+			payload, err := json.Marshal(response)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeProtectedRuntimeFixtureEngine(t, fixture, fmt.Sprintf(`#!/bin/sh
+case "${1:-}" in
+  --version) printf 'yard-engine 1.2.3\n' ;;
+  _release-transition) cat >/dev/null; printf '%%s\n' %q ;;
+  *) exit 64 ;;
+esac
+`, string(payload)))
+			runtime := New(Config{Environment: fixture.environment(), Stderr: &bytes.Buffer{}})
+			if protected, err := runtime.inspectProtectedTransition(
+				context.Background(), fixture.runtimeRoot, fixture.configHome, "default", nil,
+			); err == nil || protected != nil {
+				t.Fatalf("mismatched repair accepted: inspection=%#v err=%v", protected, err)
 			}
 		})
 	}
@@ -2057,7 +2189,7 @@ func TestCandidateTransitionReinspectsPlanStaleOutcomeBeforeReturning(t *testing
 		wantError    string
 	}{
 		{name: "externally reached fixed point", reinspection: ready},
-		{name: "state is still pending", reinspection: pending, wantError: "code=transition-required"},
+		{name: "state is still pending", reinspection: pending, wantError: "code=plan-stale"},
 		{name: "false ready active release", reinspection: wrongReady, wantError: "inconsistent release reinspection"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

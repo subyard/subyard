@@ -12,8 +12,10 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 mkdir -p "$TMP/bin" "$TMP/home"
 LOG="$TMP/commands.log"
 PACKAGE_DB="$TMP/packages"
+LINGER_STATE="$TMP/linger"
 : >"$LOG"
 : >"$PACKAGE_DB"
+printf 'no\n' >"$LINGER_STATE"
 
 cat >"$TMP/bin/dpkg-query" <<'DPKG_QUERY'
 #!/usr/bin/env bash
@@ -38,6 +40,27 @@ if [ "${1:-}" = install ]; then
 fi
 APT_GET
 
+cat >"$TMP/bin/loginctl" <<'LOGINCTL'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  show-user)
+    [ "$#" -eq 4 ] \
+      && [ "$2" = "$DEV_USER" ] \
+      && [ "$3" = --property=Linger ] \
+      && [ "$4" = --value ] \
+      || exit 2
+    cat "$HERMES_TEST_LINGER_STATE"
+    ;;
+  enable-linger)
+    [ "$#" -eq 2 ] && [ "$2" = "$DEV_USER" ] || exit 2
+    printf 'loginctl <enable-linger> <%s>\n' "$2" >>"$HERMES_TEST_LOG"
+    printf 'yes\n' >"$HERMES_TEST_LINGER_STATE"
+    ;;
+  *) exit 2 ;;
+esac
+LOGINCTL
+
 for command in curl git python3 runuser; do
   cat >"$TMP/bin/$command" <<'FORBIDDEN'
 #!/usr/bin/env bash
@@ -57,6 +80,8 @@ common_env=(
   HERMES_TEST_ALLOW_NON_ROOT=1
   HERMES_TEST_LOG="$LOG"
   HERMES_TEST_PACKAGE_DB="$PACKAGE_DB"
+  HERMES_TEST_LINGER_STATE="$LINGER_STATE"
+  DEV_USER=dev
 )
 
 state_signature() {
@@ -83,10 +108,13 @@ env "${common_env[@]}" bash "$HOOK" >/dev/null \
   || fail 'fresh substrate provision installed a Hermes launcher'
 grep -Fxq 'apt-get <update> <-qq>' "$LOG" \
   || fail 'profile did not refresh the package index'
-grep -Fxq 'apt-get <install> <-y> <-qq> <build-essential> <ca-certificates> <curl> <git> <libffi-dev> <python3-dev> <xz-utils>' \
+grep -Fxq 'apt-get <install> <-y> <-qq> <age> <build-essential> <ca-certificates> <curl> <git> <libffi-dev> <python3-dev> <xz-utils>' \
   "$LOG" || fail 'profile package set escaped the generic substrate allowlist'
-[ "$(wc -l <"$LOG")" -eq 2 ] \
-  || fail 'profile performed an action beyond the two expected package-manager commands'
+grep -Fxq 'loginctl <enable-linger> <dev>' "$LOG" \
+  || fail 'profile did not enable lingering for DEV_USER'
+[ "$(wc -l <"$LOG")" -eq 3 ] \
+  || fail 'profile performed an action beyond package reconciliation and enabling linger'
+[ "$(cat "$LINGER_STATE")" = yes ] || fail 'profile did not converge linger state'
 
 mkdir -p "$TMP/home/.hermes/operator-owned" "$TMP/home/.local/bin"
 printf 'opaque-state\n' >"$TMP/home/.hermes/operator-owned/state.bin"
@@ -126,8 +154,26 @@ grep -Fxq xz-utils "$PACKAGE_DB" || fail 'drifted prerequisite was not restored'
 [ "$(state_signature)" = "$before" ] \
   || fail 'drifted reconciliation changed operator-owned Hermes state'
 [ "$(grep -Fxc 'apt-get <update> <-qq>' "$LOG")" -eq 2 ] \
-  && [ "$(grep -Fxc 'apt-get <install> <-y> <-qq> <build-essential> <ca-certificates> <curl> <git> <libffi-dev> <python3-dev> <xz-utils>' "$LOG")" -eq 2 ] \
-  && [ "$(wc -l <"$LOG")" -eq 4 ] \
+  && [ "$(grep -Fxc 'apt-get <install> <-y> <-qq> <age> <build-essential> <ca-certificates> <curl> <git> <libffi-dev> <python3-dev> <xz-utils>' "$LOG")" -eq 2 ] \
+  && [ "$(wc -l <"$LOG")" -eq 5 ] \
   || fail 'drifted reconciliation performed an unexpected external action'
+
+printf 'no\n' >"$LINGER_STATE"
+effects_before_check="$(sha256sum "$LOG")"
+set +e
+env "${common_env[@]}" bash "$HOOK" --check >/dev/null
+status=$?
+set -e
+[ "$status" -eq 10 ] || fail "disabled linger check status=$status, want 10"
+[ "$(sha256sum "$LOG")" = "$effects_before_check" ] \
+  || fail 'disabled linger check performed an external action'
+
+env "${common_env[@]}" bash "$HOOK" >/dev/null \
+  || fail 'disabled linger reconciliation failed'
+[ "$(cat "$LINGER_STATE")" = yes ] || fail 'disabled linger was not restored'
+[ "$(grep -Fxc 'apt-get <update> <-qq>' "$LOG")" -eq 2 ] \
+  && [ "$(grep -Fxc 'loginctl <enable-linger> <dev>' "$LOG")" -eq 2 ] \
+  && [ "$(wc -l <"$LOG")" -eq 6 ] \
+  || fail 'linger reconciliation performed an unexpected external action'
 
 printf 'ok: Hermes profile provides generic prerequisites without managing Hermes software\n'

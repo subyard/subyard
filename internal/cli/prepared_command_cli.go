@@ -31,11 +31,17 @@ func (cli *CLI) reportPreparationError(definition command.Definition, err error)
 	if errors.Is(err, domain.ErrPlanStale) {
 		code = 1
 	}
+	if errors.Is(err, errNetworkUsage) {
+		code = 2
+	}
 	cli.errorf("%s: %v", prefix, err)
 	return code
 }
 
 func preparationRPCError(definition command.Definition, err error) error {
+	if errors.Is(err, errNetworkUsage) {
+		return operationRPCError("invalid_params", err)
+	}
 	code := "plan_failed"
 	var failure *commandPreparationError
 	if errors.As(err, &failure) {
@@ -60,17 +66,56 @@ func (cli *CLI) runPreparedCommand(ctx context.Context, prepared *preparedComman
 	}
 	assumeYes = assumeYes || slices.Contains(prepared.Arguments, "--yes") || slices.Contains(prepared.Arguments, "-y")
 	orchestrator := cli.operationOrchestrator(prepared.Plan.OperationID, prepared.Loaded, nil, &prepared.Definition)
-	plan, err := orchestrator.Confirm(ctx, prepared.Plan, assumeYes)
+	confirmationPlan := prepared.Plan
+	if prepared.ownerPlan {
+		// The owner resolved the action policy. Confirm its concrete policy here;
+		// do not resolve the remote assessment again against the controller registry.
+		if request := confirmationPlan.ConfirmationRequest; request != nil && request.Summary != "" {
+			confirmationPlan.Command = request.Summary
+		}
+		confirmationPlan.Assessment = nil
+		confirmationPlan.ConfirmationRequest = nil
+	}
+	plan, err := orchestrator.Confirm(ctx, confirmationPlan, assumeYes)
 	if err != nil {
-		if errors.Is(err, application.ErrDeclined) {
+		switch {
+		case errors.Is(err, application.ErrDeclined):
+			if prepared.Definition.Handler == "@update" {
+				if historyErr := cli.recordUpdateTerminal(
+					prepared.Arguments, prepared.Plan.OperationID,
+					"confirmation", "declined", "operator_declined", prepared.release,
+				); historyErr != nil {
+					cli.errorf("update history: %v", historyErr)
+				}
+			}
 			cli.errorf("operation declined")
-		} else {
+		case prepared.Definition.Handler == "@update" &&
+			(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)):
+			if historyErr := cli.recordUpdateTerminal(
+				prepared.Arguments, prepared.Plan.OperationID,
+				"confirmation", "interrupted", "context_cancelled", prepared.release,
+			); historyErr != nil {
+				cli.errorf("update history: %v", historyErr)
+			}
+			cli.errorf("plan %s: %v", prepared.Definition.Name, err)
+		default:
 			cli.errorf("plan %s: %v", prepared.Definition.Name, err)
 		}
 		return 1
 	}
-	prepared.Plan = plan
+	if prepared.ownerPlan {
+		prepared.Plan.Confirmed = plan.Confirmed
+		plan = prepared.Plan
+	} else {
+		prepared.Plan = plan
+	}
 	if plan.Target == domain.TargetRemoteOwner {
+		release, err := cli.beginProjectMutation(ctx, prepared.Project)
+		if err != nil {
+			cli.errorf("prepare remote %s: %v", prepared.Definition.Name, err)
+			return 1
+		}
+		defer release()
 		arguments := slices.Clone(prepared.Arguments)
 		if prepared.remoteArguments != nil {
 			arguments, err = prepared.remoteArguments(arguments)

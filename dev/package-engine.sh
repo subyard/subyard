@@ -83,10 +83,16 @@ install -m 0755 "$artifact" "$bundle_stage/bin/yard-engine"
 install -m 0755 "$REPO/bin/yard" "$bundle_stage/bin/yard"
 runtime_list="$bundle_stage/.runtime-inputs"
 runtime_extras=(
+  scripts/github-broker.sh
+  config/profiles/github/profile.conf
+  config/profiles/github/provision.sh
+  config/profiles/github/bin/subyard-github
+  config/profiles/github/SKILL.md
   scripts/lib/ai-observer-proxy.sh
   scripts/lib/engine-context.sh
   scripts/install-ssh-relay.sh
   scripts/install-test-vms-host-sink.sh
+  scripts/reconcile-integrations.sh
   config/agents/codex/provision.sh
   config/agents/aiobserver/provision.sh
   config/profiles/hermes/resources/dashboard.res
@@ -121,6 +127,7 @@ for required in \
   scripts/install-runtime-release.sh \
   scripts/install-ssh-relay.sh \
   scripts/install-test-vms-host-sink.sh \
+  scripts/reconcile-integrations.sh \
   config/systemd/subyard-test-vms-host-sink.service.in \
   config/systemd/subyard-test-vms-host-sink.timer.in \
   config/commands.registry \

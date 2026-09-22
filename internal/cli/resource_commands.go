@@ -58,6 +58,9 @@ func (cli *CLI) runResourceCommand(
 	output, err := cli.prepareResource(ctx, loaded, definition, invocation.arguments)
 	if err != nil {
 		cli.errorf("%s: %v", definition.Command, err)
+		if errors.Is(err, resource.ErrResourceUsageInvalid) {
+			return 2
+		}
 		return 1
 	}
 	assessment, err := cli.resources.AssessPrepareResult(
@@ -226,12 +229,17 @@ func (cli *CLI) prepareResource(
 			resource.ErrResourcePlanInvalid, resource.MaxPrepareOutputBytes)
 	}
 	if err != nil {
+		failureClass := resource.ErrResourcePlanInvalid
+		var exitError *exec.ExitError
+		if errors.As(err, &exitError) && exitError.ExitCode() == 2 {
+			failureClass = resource.ErrResourceUsageInvalid
+		}
 		detail := strings.TrimSpace(stderr.String())
 		if detail != "" {
 			return nil, fmt.Errorf("%w: prepare failed: %v: %s",
-				resource.ErrResourcePlanInvalid, err, detail)
+				failureClass, err, detail)
 		}
-		return nil, fmt.Errorf("%w: prepare failed: %v", resource.ErrResourcePlanInvalid, err)
+		return nil, fmt.Errorf("%w: prepare failed: %v", failureClass, err)
 	}
 	return slices.Clone(stdout.Bytes()), nil
 }
@@ -383,15 +391,40 @@ func (runner *resourceApplyRunner) Run(
 	command.Env = runner.cli.resourceApplyEnvironment(
 		runner.loaded, runner.definition, runner.localAction, request.OperationID, runner.effect,
 	)
-	command.Stdin = runner.cli.options.Stdin
+	var restoreForeground func() error
+	// The engine owns confirmation. Non-session handlers must not inherit the
+	// operator terminal: their separate process group can otherwise be stopped
+	// when a child such as incus exec probes or reads it.
+	if runner.effect == domain.ActionSession {
+		command.Stdin = runner.cli.options.Stdin
+		var err error
+		restoreForeground, err = configureResourceSessionForeground(command, command.Stdin)
+		if err != nil {
+			return result, "", err
+		}
+	}
 	command.Stdout = runner.cli.options.Stdout
 	command.Stderr = runner.cli.options.Stderr
-	if err := command.Run(); err != nil {
+	var runErr error
+	if restoreForeground != nil {
+		runErr = runResourceTerminalSession(command)
+	} else {
+		runErr = command.Run()
+	}
+	if restoreForeground != nil {
+		if err := restoreForeground(); err != nil {
+			return result, "", err
+		}
+	}
+	if runErr != nil {
+		if ctx.Err() != nil {
+			return result, "", fmt.Errorf("run resource handler: %w", ctx.Err())
+		}
 		var exitError *exec.ExitError
-		if errors.As(err, &exitError) {
+		if errors.As(runErr, &exitError) {
 			return result, "", fmt.Errorf("resource handler exited with status %d", exitError.ExitCode())
 		}
-		return result, "", fmt.Errorf("run resource handler: %w", err)
+		return result, "", fmt.Errorf("run resource handler: %w", runErr)
 	}
 	result.Status = "ok"
 	return result, "", nil

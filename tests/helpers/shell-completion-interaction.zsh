@@ -92,6 +92,8 @@ run_line() {
   actual=$(<"$TEST_COMPLETION_RESULT")
   [[ $actual == "$expected" ]] || {
     print -u2 -r -- "$shell_name/$editing_mode $label: expected [$expected], got [$actual]"
+    print -u2 -r -- "Shell startup: ${(qqq)startup_transcript}"
+    print -u2 -r -- "Completion interaction: ${(qqq)completion_transcript}"
     return 1
   }
   if [[ -n ${4:-} && $completion_transcript != *$4* ]]; then
@@ -99,6 +101,22 @@ run_line() {
     return 1
   fi
 }
+
+if [[ $shell_name == zsh ]]; then
+  # Isolate caller paths and unsafe system defaults before interactive startup.
+  # Otherwise compinit's security prompt consumes the fixture's queued commands.
+  safe_zsh_fpath=$(env -u FPATH zsh -fc '
+    autoload -Uz compaudit
+    safe_fpath=()
+    for directory in "$fpath[@]"; do
+      if compaudit "$directory" >/dev/null 2>&1; then
+        safe_fpath+=("$directory")
+      fi
+    done
+    (( $#safe_fpath )) || { print -u2 -- "No safe Zsh completion directories"; exit 1; }
+    print -r -- ${(j.:.)safe_fpath}
+  ')
+fi
 
 for editing_mode in emacs vi; do
   if [[ -n $installed_home ]]; then
@@ -113,10 +131,11 @@ for editing_mode in emacs vi; do
   if [[ $shell_name == bash ]]; then
     zpty -b completion exec env HOME="$shell_home" INPUTRC="$INPUTRC" bash --noprofile -o "$editing_mode" -i
   else
-    zpty -b completion exec env HOME="$shell_home" ZDOTDIR="$shell_home" EDITOR="$editing_mode" VISUAL="$editing_mode" zsh -i
+    zpty -b completion exec env FPATH="$safe_zsh_fpath" HOME="$shell_home" ZDOTDIR="$shell_home" EDITOR="$editing_mode" VISUAL="$editing_mode" zsh -i
   fi
   zpty -w completion 'source "$TEST_COMPLETION_STUB"; PS1="test> "; printf "\nBOOT%s\n" READY'
   wait_for_marker BOOTREADY
+  startup_transcript=$completion_transcript
   # Assert that startup has not silently changed the user's chosen editing mode.
   if [[ $shell_name == bash ]]; then
     zpty -w completion "[[ -o $editing_mode ]] && printf '\\nMODE%s\\n' OK"

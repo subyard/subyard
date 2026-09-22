@@ -32,6 +32,8 @@ ufw_active=0
 command -v ufw >/dev/null 2>&1 && systemctl is-active --quiet ufw 2>/dev/null && ufw_active=1
 
 if [ "$mode" != apply ]; then
+  [ -n "${SUBYARD_DISPATCHER_PATH:-}" ] && [ -x "$SUBYARD_DISPATCHER_PATH" ] || exit 1
+  "$SUBYARD_DISPATCHER_PATH" _network-lock check >/dev/null 2>&1 || exit 1
   command -v incus >/dev/null 2>&1 && incus info >/dev/null 2>&1 || exit 1
   power_host_safe "$BRIDGE" || exit 1
   [ "$ufw_active" = 0 ] || ufw_yard_rules_present "$BRIDGE" || exit 1
@@ -81,6 +83,12 @@ fi
 announce "$title" "${ann[@]}"
 proceed_or_die
 require_root "$why"
+[ -n "${SUBYARD_DISPATCHER_PATH:-}" ] && [ -x "$SUBYARD_DISPATCHER_PATH" ] \
+  || die "current yard engine is required to initialize the network policy lock"
+"$SUBYARD_DISPATCHER_PATH" _network-lock ensure \
+  || die "could not initialize the host network policy lock"
+"$SUBYARD_DISPATCHER_PATH" _network-lock check \
+  || die "host network policy lock did not match the required ownership and mode after initialization"
 
 # Always: stop NetworkManager hijacking the host's internet via a yard veth.
 echo "NetworkManager guard:"

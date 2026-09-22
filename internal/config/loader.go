@@ -36,6 +36,7 @@ type LayerPaths struct {
 }
 
 type Loaded struct {
+	Integrations        IntegrationSelection
 	Context             domain.Context
 	Environment         map[string]string
 	Settings            map[string]SettingTrace
@@ -69,7 +70,7 @@ func Load(options LoadOptions) (Loaded, error) {
 	}
 	return Loaded{
 		Context: ctx, Environment: environment, Settings: tracker.traces(values),
-		ConfigurationLayers: tracker.configurationLayers(),
+		ConfigurationLayers: tracker.configurationLayers(), Integrations: tracker.integrations,
 	}, nil
 }
 
@@ -253,11 +254,8 @@ func load(
 					"default yard settings must be a regular non-symlink file: %s", defaultYardFile,
 				)
 			default:
-				defaultYardLayer := tracker.addLayer(
-					"yard", "scalar settings", defaultYardFile, true, settingScalar,
-				)
-				if err := applyEnvFileTrackedValidated(
-					defaultYardFile, values, tracker, defaultYardLayer, ScopeYard, options.SyncSource,
+				if err := applyYardConfigTracked(
+					configDir, yardName, defaultYardFile, values, tracker, options.SyncSource,
 				); err != nil {
 					return domain.Context{}, nil, err
 				}
@@ -298,18 +296,18 @@ func load(
 		if err := validateBootstrapConfigHome(values, configHome, yardFile); err != nil {
 			return domain.Context{}, nil, err
 		}
-		extendAgentAssetMappings(logicalAssets, values)
-		yardAssets := filepath.Join(configHome, "yards", yardName, "overrides", "agents")
-		if options.LayerPaths != nil {
-			yardAssets = options.LayerPaths.YardAssets[yardName]
-		}
-		yardFileLayer := tracker.addLayer(
-			"yard", "file settings", yardAssets, pathPresent(yardAssets), settingFile,
-		)
-		if err := applyAgentAssetLayer(values, logicalAssets,
-			yardAssets, tracker, yardFileLayer); err != nil {
-			return domain.Context{}, nil, err
-		}
+	}
+	extendAgentAssetMappings(logicalAssets, values)
+	yardAssets := filepath.Join(configHome, "yards", yardName, "overrides", "agents")
+	if options.LayerPaths != nil {
+		yardAssets = options.LayerPaths.YardAssets[yardName]
+	}
+	yardFileLayer := tracker.addLayer(
+		"yard", "file settings", yardAssets, pathPresent(yardAssets), settingFile,
+	)
+	if err := applyAgentAssetLayer(values, logicalAssets,
+		yardAssets, tracker, yardFileLayer); err != nil {
+		return domain.Context{}, nil, err
 	}
 
 	// The process environment is the final layer. Engine-forwarded contexts
@@ -338,10 +336,9 @@ func load(
 	if err := normalizeAgentAssetPaths(values, tracker); err != nil {
 		return domain.Context{}, nil, err
 	}
-	if err := resolveAgentDependencies(values); err != nil {
+	if err := resolveLoadedIntegrations(values, tracker); err != nil {
 		return domain.Context{}, nil, err
 	}
-	tracker.normalize("CODING_TOOL_INTEGRATIONS", values["CODING_TOOL_INTEGRATIONS"], "resolved agent dependencies")
 	normalizeAgentPersistLinks(values, tracker, defaultLayer)
 	ctx, err := contextFrom(root, yardName, values, tracker, defaultLayer, normalizationLayer)
 	if err == nil {
@@ -375,72 +372,12 @@ func normalizeAIObserverPort(values environment, tracker *settingTracker, sshPor
 	return nil
 }
 
-func resolveAgentDependencies(values environment) error {
-	requested := strings.Fields(values["CODING_TOOL_INTEGRATIONS"])
-	selected := make(map[string]bool, len(requested))
-	for _, agent := range requested {
-		if selected[agent] {
-			return fmt.Errorf("duplicate agent %q", agent)
-		}
-		selected[agent] = true
-	}
-
-	knownAgent := func(agent string) bool {
-		for _, suffix := range []string{
-			"COMMAND", "CHECK", "CONFIG", "CONFIG_DEST", "DEPENDS", "PERSIST",
-			"PROJECTS_CHANGED", "PROVISION", "RULES", "RULES_DEST",
-		} {
-			if _, found := values["AGENT_"+agent+"_"+suffix]; found {
-				return true
-			}
-		}
-		return false
-	}
-	visiting := make(map[string]bool)
-	visited := make(map[string]bool)
-	resolved := make([]string, 0, len(requested))
-	var visit func(string) error
-	visit = func(agent string) error {
-		if visited[agent] {
-			return nil
-		}
-		if visiting[agent] {
-			return fmt.Errorf("agent dependency cycle at %q", agent)
-		}
-		visiting[agent] = true
-		dependencies := strings.Fields(values["AGENT_"+agent+"_DEPENDS"])
-		seenDependencies := make(map[string]bool, len(dependencies))
-		for _, dependency := range dependencies {
-			if seenDependencies[dependency] {
-				return fmt.Errorf("duplicate dependency %q for agent %q", dependency, agent)
-			}
-			seenDependencies[dependency] = true
-			if !domain.SafeName(dependency) || !knownAgent(dependency) {
-				return fmt.Errorf("unknown dependency %q for agent %q", dependency, agent)
-			}
-			if err := visit(dependency); err != nil {
-				return err
-			}
-		}
-		delete(visiting, agent)
-		visited[agent] = true
-		resolved = append(resolved, agent)
-		return nil
-	}
-	for _, agent := range requested {
-		if err := visit(agent); err != nil {
-			return err
-		}
-	}
-	values["CODING_TOOL_INTEGRATIONS"] = strings.Join(resolved, " ")
-	return nil
-}
-
 func normalizeAgentPersistLinks(
 	values environment,
 	tracker *settingTracker,
 	defaultLayer settingLayerID,
 ) {
+	values["INTEGRATION_HOST_LINKS"] = ""
 	assignments := tracker.assignments["HOST_LINKS"]
 	if len(assignments) == 0 || assignments[len(assignments)-1].Layer != defaultLayer {
 		return
@@ -450,6 +387,7 @@ func normalizeAgentPersistLinks(
 		selected.WriteString(values["AGENT_"+agent+"_PERSIST"])
 	}
 	values["HOST_LINKS"] = selected.String()
+	values["INTEGRATION_HOST_LINKS"] = values["HOST_LINKS"]
 	tracker.normalize("HOST_LINKS", values["HOST_LINKS"], "derived from selected CODING_TOOL_INTEGRATIONS")
 }
 
@@ -512,11 +450,10 @@ func setConfigurationRolePaths(values environment, configHome, yardName string) 
 	values["SUBYARD_CONFIG_HOST_DIR"] = filepath.Join(configHome, "overrides", "host")
 	values["SUBYARD_CONFIG_SECRETS_DIR"] = filepath.Join(configHome, "secrets")
 	values["SUBYARD_CONFIG_GENERATED_DIR"] = filepath.Join(configHome, "generated")
-	if yardName != "" && yardName != "default" {
-		values["SUBYARD_CONFIG_YARD_DIR"] = filepath.Join(configHome, "yards", yardName)
-	} else {
-		values["SUBYARD_CONFIG_YARD_DIR"] = ""
+	if yardName == "" {
+		yardName = "default"
 	}
+	values["SUBYARD_CONFIG_YARD_DIR"] = filepath.Join(configHome, "yards", yardName)
 	if values["SUBYARD_KEYS_CONSUMER_ROOT"] == "" {
 		values["SUBYARD_KEYS_CONSUMER_ROOT"] = values["SUBYARD_CONFIG_GENERATED_DIR"]
 	}
@@ -662,7 +599,8 @@ func resetInheritedContext(values environment) {
 		"FORWARD_SSH_AGENT", "DEV_SUDO", "DEV_UID", "DEV_USER", "YARD_TEMPLATE", "NESTED_E2E_VMS",
 		"E2E_VM_IMAGE", "E2E_VM_CPU", "E2E_VM_MEMORY", "E2E_VM_DISK", "E2E_VM_SLOT_COUNT", "E2E_VM_BOOT_TIMEOUT",
 		"SUBYARD_STATE_DIR", "RESTRICTED_DISK_PATHS",
-		"HOST_BASE", "SRV_VOLUME",
+		"HOST_BASE", "SRV_VOLUME", "ALLOWS_CODING_TOOLS",
+		"CODING_TOOL_INTEGRATIONS", "INTEGRATION_HOST_LINKS",
 	} {
 		delete(values, name)
 	}
@@ -788,6 +726,7 @@ func applyEnvFileValidated(
 	seen := make(map[string]layerValue)
 	for _, assignment := range assignments {
 		canonical := canonicalSettingName(assignment.name)
+		assignment.value = normalizeLegacySelection(assignment.name, assignment.value)
 		if previous, exists := seen[canonical]; exists && previous.input != assignment.name &&
 			previous.value != assignment.value {
 			return fmt.Errorf(
@@ -838,9 +777,28 @@ var legacySettingNames = map[string]string{
 	"AGENTS":              "CODING_TOOL_INTEGRATIONS",
 }
 
+// Retired inputs may remain in persisted files from older releases. They are
+// parsed but discarded, never exposed as writable settings or effective values.
+func isRetiredSetting(name string) bool {
+	switch name {
+	case "CODEX_VERSION", "CODEX_SHA256_AMD64", "CODEX_SHA256_ARM64":
+		return true
+	default:
+		return false
+	}
+}
+
+func discardRetiredSettings(values environment) {
+	for name := range values {
+		if isRetiredSetting(name) {
+			delete(values, name)
+		}
+	}
+}
+
 func IsLegacySetting(name string) bool {
 	_, legacy := legacySettingNames[name]
-	return legacy
+	return legacy || isRetiredSetting(name)
 }
 
 func AddLegacySettingAliases(values map[string]string) {
@@ -857,11 +815,13 @@ func canonicalSettingName(name string) string {
 }
 
 func normalizeLegacyEnvironment(values environment) error {
+	discardRetiredSettings(values)
 	for legacy, canonical := range legacySettingNames {
 		legacyValue, hasLegacy := values[legacy]
 		if !hasLegacy {
 			continue
 		}
+		legacyValue = normalizeLegacySelection(legacy, legacyValue)
 		if canonicalValue, hasCanonical := values[canonical]; hasCanonical && canonicalValue != legacyValue {
 			return fmt.Errorf(
 				"conflicting command environment settings %s=%q and %s=%q",

@@ -387,40 +387,44 @@ func TestProjectAdmissionIgnoresInterruptedReservationCandidate(t *testing.T) {
 }
 
 func TestConcurrentSameSourceReceivesDistinctCanonicalNames(t *testing.T) {
-	store := newTestStore(t)
-	ctx := context.Background()
-	type result struct {
-		admission Admission
-		err       error
-	}
-	start := make(chan struct{})
-	results := make(chan result, 2)
-	for index, source := range []string{"/one/Demo", "/one/Demo"} {
-		go func(index int, source string) {
-			<-start
-			admission, err := store.Admit(
-				ctx, fmt.Sprintf("op-%d", index), source,
-				domain.ProjectSync, "Demo", false,
-			)
-			results <- result{admission: admission, err: err}
-		}(index, source)
-	}
-	close(start)
-	names := make(map[string]bool)
-	for range 2 {
-		result := <-results
-		if result.err != nil {
-			t.Fatal(result.err)
-		}
-		names[result.admission.ProjectID] = true
-	}
-	if !names["Demo"] || !names["Demo-2"] || len(names) != 2 {
-		t.Fatalf("concurrent canonical names = %#v", names)
-	}
-	if _, err := store.Admit(
-		ctx, "op-unicode", "/three/Demo", domain.ProjectSync, "Демо", false,
-	); err == nil {
-		t.Fatal("Unicode automatic project name was accepted")
+	for _, mode := range []domain.ProjectMode{domain.ProjectSync, domain.ProjectGit} {
+		t.Run(string(mode), func(t *testing.T) {
+			store := newTestStore(t)
+			ctx := context.Background()
+			type result struct {
+				admission Admission
+				err       error
+			}
+			start := make(chan struct{})
+			results := make(chan result, 2)
+			for index, source := range []string{"/one/Demo", "/one/Demo"} {
+				go func(index int, source string) {
+					<-start
+					admission, err := store.Admit(
+						ctx, fmt.Sprintf("op-%d", index), source,
+						mode, "Demo", false,
+					)
+					results <- result{admission: admission, err: err}
+				}(index, source)
+			}
+			close(start)
+			names := make(map[string]bool)
+			for range 2 {
+				result := <-results
+				if result.err != nil {
+					t.Fatal(result.err)
+				}
+				names[result.admission.ProjectID] = true
+			}
+			if !names["Demo"] || !names["Demo-2"] || len(names) != 2 {
+				t.Fatalf("concurrent canonical names = %#v", names)
+			}
+			if _, err := store.Admit(
+				ctx, "op-unicode", "/three/Demo", domain.ProjectSync, "Демо", false,
+			); err == nil {
+				t.Fatal("Unicode automatic project name was accepted")
+			}
+		})
 	}
 }
 

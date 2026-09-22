@@ -132,11 +132,28 @@ mkdir -p "$E2E_VM_STATE_DIR"
 chmod 2770 "$E2E_VM_STATE_DIR"
 printf 'legacy\n' > "$E2E_VM_STATE_DIR/worker-key"
 chmod 0660 "$E2E_VM_STATE_DIR/worker-key"
-reconcile_test_vm_state_directory
+printf 'transient\n' > "$E2E_VM_STATE_DIR/.lease-state.123"
+mkdir "$TMP/state-permission-bin"
+cat > "$TMP/state-permission-bin/chmod" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+case " $* " in
+  *'/worker-key '*) rm -f -- "$TRANSIENT_LEASE_STATE" ;;
+esac
+exec "$REAL_CHMOD" "$@"
+SH
+chmod 0700 "$TMP/state-permission-bin/chmod"
+real_chmod="$(command -v chmod)"
+REAL_CHMOD="$real_chmod" \
+TRANSIENT_LEASE_STATE="$E2E_VM_STATE_DIR/.lease-state.123" \
+PATH="$TMP/state-permission-bin:$PATH" \
+  reconcile_test_vm_state_directory
 [ "$(stat -c '%a' "$E2E_VM_STATE_DIR")" = 700 ] \
   || fail "legacy test-vms state directory retained its setgid boundary"
 [ "$(stat -c '%a' "$E2E_VM_STATE_DIR/worker-key")" = 600 ] \
   || fail "legacy test-vms state file retained group access"
+[ ! -e "$E2E_VM_STATE_DIR/.lease-state.123" ] \
+  || fail "test-vms state repair did not tolerate an atomic lease temp disappearing"
 
 export SUBYARD_INNER_INCUS_APPARMOR_DROPIN="$TMP/incus.service.d/subyard-nested-e2e.conf"
 systemctl() {

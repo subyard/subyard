@@ -10,7 +10,7 @@ case "$TOOLS_DIR" in /*) ;; *) printf 'ssh-credential-peer: set SUBYARD_REAL_KEY
 for tool in age age-keygen sops; do
   [ -x "$TOOLS_DIR/bin/$tool" ] || { printf 'ssh-credential-peer: missing %s\n' "$tool" >&2; exit 2; }
 done
-for tool in ssh ssh-keygen ssh-keyscan jq git; do
+for tool in ssh ssh-keygen ssh-keyscan jq git openssl; do
   command -v "$tool" >/dev/null 2>&1 || { printf 'ssh-credential-peer: %s is required\n' "$tool" >&2; exit 2; }
 done
 command -v go >/dev/null 2>&1 || { printf 'ssh-credential-peer: Go is required\n' >&2; exit 2; }
@@ -27,6 +27,8 @@ cleanup() {
 }
 trap cleanup EXIT
 fail() { printf 'ssh-credential-peer: %s\n' "$*" >&2; exit 1; }
+# shellcheck source=tests/helpers/loopback-sshd.sh
+. "$ROOT/tests/helpers/loopback-sshd.sh"
 
 local_root="$TMP/local"
 remote_root="$TMP/remote"
@@ -94,14 +96,8 @@ AllowUsers $user
 LogLevel VERBOSE
 EOF
 "$SSHD" -t -f "$TMP/sshd_config"
-"$SSHD" -D -e -f "$TMP/sshd_config" > "$TMP/sshd.log" 2>&1 &
-sshd_pid=$!
-for _ in $(seq 1 50); do
-  kill -0 "$sshd_pid" 2>/dev/null || { sed -n '1,80p' "$TMP/sshd.log" >&2; fail 'ephemeral sshd exited'; }
-  if ssh-keyscan -T 1 -p "$port" 127.0.0.1 > "$TMP/known_hosts" 2>/dev/null; then break; fi
-  sleep 0.1
-done
-[ -s "$TMP/known_hosts" ] || fail 'ephemeral sshd did not become ready'
+start_loopback_sshd "$TMP" "$SSHD" "$port" \
+  || fail 'ephemeral sshd did not become ready'
 
 cat > "$TMP/ssh_config" <<EOF
 Host peer-two
@@ -144,23 +140,30 @@ jq -e '.transport=="inbound" and .trusted==true' "$remote_keys/peers/default.jso
   || fail 'remote owner did not retain reciprocal inbound trust'
 
 expected="$TMP/expected"
-printf 'subyard-synthetic-real-ssh-fixture\n' > "$expected"
+openssl genrsa -out "$expected" 2048 >/dev/null 2>&1
 chmod 0600 "$expected"
-"$ROOT/.build/yard" keys add real-ssh --kind file --zone real-ssh --consumer staging-env \
-  --file "$expected" --yes >/dev/null
+"$ROOT/.build/yard" keys import "$expected" --label real-ssh --zone global --consumer github-app-key \
+  --yes >/dev/null
 credential="$("$ROOT/.build/yard" keys list | awk -F '\t' '$8=="real-ssh" {print $1}')"
 [ -n "$credential" ] || fail 'synthetic SSH credential was not created'
 "$ROOT/.build/yard" keys sync @remote-two --now --yes >/dev/null
-ssh peer-two -- bash -lc "$(printf '%q' 'yard keys materialize real-ssh --yes')" >/dev/null
-cmp -s "$expected" "$remote_root/consumer/staging/real-ssh.env" \
+ssh peer-two -- bash -lc "$(printf '%q' 'yard keys materialize global --yes')" >/dev/null
+cmp -s "$expected" "$remote_root/consumer/github/github-app.pem" \
   || fail 'real SSH peer did not decrypt the synchronized credential'
-if grep -R -F -q -- 'subyard-synthetic-real-ssh-fixture' "$local_keys" "$remote_keys"; then
+if grep -R -E -q -- 'BEGIN (RSA )?PRIVATE KEY' "$local_keys" "$remote_keys"; then
   fail 'synthetic plaintext reached an SSH-synchronized ledger'
 fi
+[ "$(stat -c %a "$remote_root/consumer/github/github-app.pem")" = 600 ] \
+  || fail 'GitHub key materialization has unsafe permissions'
+openssl genrsa -out "$expected" 2048 >/dev/null 2>&1
+"$ROOT/.build/yard" keys rotate "$credential" --file "$expected" --yes >/dev/null
+"$ROOT/.build/yard" keys sync @remote-two --now --yes >/dev/null
+cmp -s "$expected" "$remote_root/consumer/github/github-app.pem" \
+  || fail 'SSH peer did not automatically materialize the rotated GitHub key'
 "$ROOT/.build/yard" keys revoke "$credential" --yes >/dev/null
 "$ROOT/.build/yard" keys sync @remote-two --now --yes >/dev/null
-ssh peer-two -- bash -lc "$(printf '%q' 'yard keys materialize real-ssh --yes')" >/dev/null
-[ ! -e "$remote_root/consumer/staging/real-ssh.env" ] \
+ssh peer-two -- bash -lc "$(printf '%q' 'yard keys materialize global --yes')" >/dev/null
+[ ! -e "$remote_root/consumer/github/github-app.pem" ] \
   || fail 'revoked SSH credential remained materialized'
 
-printf 'ok: real OpenSSH credential trust, sync, decrypt and revoke contract\n'
+printf 'ok: real OpenSSH GitHub key import, trust, sync, rotation and revoke contract\n'

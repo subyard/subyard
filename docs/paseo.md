@@ -19,7 +19,7 @@ yard -Y demo config set CODING_TOOL_INTEGRATIONS "codex paseo" --scope yard
 ```
 
 Paseo declares Codex as a required provider. Subyard expands the dependency automatically and
-installs its pinned Codex package before Paseo, regardless of the order of entries in `CODING_TOOL_INTEGRATIONS`.
+installs the current stable Codex package before Paseo, regardless of the order of entries in `CODING_TOOL_INTEGRATIONS`.
 Include other agents in the same setting when that yard should expose their command-line tools too.
 
 The quoted lists are examples; preserve the integrations reported by `config show`. Run only the

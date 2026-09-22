@@ -36,7 +36,7 @@ case "${1:-}" in
       rm -rf -- "$TEST_DATA_HOME"
       ln -s -- "$TEST_REPLACEMENT_HOME" "$TEST_DATA_HOME"
     fi
-    printf '6.0.6\n'
+    printf '%s\n' "${TEST_INCUS_VERSION:-6.0.6}"
     ;;
   storage|network) exit 0 ;;
   *) exit 0 ;;
@@ -90,15 +90,20 @@ SH
 chmod 0755 "$TMP/bin"/*
 
 run_installer() {
-  local data_home="$1"
+  local data_home="$1" command_path installer_path
   shift
-  PATH="$TMP/bin:$PATH" \
+  command_path="${TEST_COMMAND_PATH:-$TMP/bin:$PATH}"
+  installer_path="${TEST_INSTALLER_PATH:-$ROOT/scripts/01-install-incus.sh}"
+  PATH="$command_path" \
   TEST_OPERATOR_HOME="$TMP/operator" \
   TEST_OPERATOR_USER="$(id -un)" \
   TEST_DATA_HOME="$data_home" \
   TEST_CHOWN_LOG="$TMP/chown.log" \
   TEST_INSTALL_LOG="$TMP/install.log" \
   TEST_OPERATOR_GROUP="$(id -gn)" \
+  TEST_INCUS_VERSION="${TEST_INCUS_VERSION:-}" \
+  TEST_INCUS_FIXTURE="${TEST_INCUS_FIXTURE:-}" \
+  TEST_FAKE_BIN="${TEST_FAKE_BIN:-}" \
   SUBYARD_ENGINE_CONTEXT=1 \
   SUBYARD_ENGINE_CONTEXT_SCHEMA=1 \
   SUBYARD_USER="$(id -un)" \
@@ -122,7 +127,7 @@ run_installer() {
   FORWARD_SSH_AGENT=0 \
   NESTED_E2E_VMS=0 \
   ASSUME_YES=1 \
-  "$ROOT/scripts/01-install-incus.sh" --yes "$@"
+  "$installer_path" --yes "$@"
 }
 
 # Every shared broad root and the exact operator home must be rejected before host operations.
@@ -215,5 +220,77 @@ else
   fail 'upgrade-only install failed'
 fi
 [ ! -e "$upgrade_home" ] || fail 'upgrade-only install touched the data home'
+
+# A successful package command must not let an Incus version below the required floor continue.
+cp -R "$ROOT/scripts" "$TMP/version-scripts"
+cat > "$TMP/version-scripts/lib/host.sh" <<'SH'
+#!/usr/bin/env bash
+require_root() { [ "$(id -u)" -eq 0 ]; }
+nm_unmanaged_guard() { :; }
+add_zabbly_lts_repo() { :; }
+subyard_home_validate_root() {
+  SUBYARD_VALIDATED_HOME="$1"
+}
+SH
+version_bin="$TMP/version-bin"
+mkdir "$version_bin"
+for command_name in bash dirname cut realpath awk dpkg find stat cp sed sort grep tr install cat; do
+  ln -s "$(command -v "$command_name")" "$version_bin/$command_name"
+done
+for command_name in getent id systemctl; do
+  ln -s "$TMP/bin/$command_name" "$version_bin/$command_name"
+done
+cat > "$version_bin/apt-cache" <<'SH'
+#!/usr/bin/env bash
+printf '  Candidate: 6.0.6\n'
+SH
+cat > "$version_bin/apt-get" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *' install '*) cp "$TEST_INCUS_FIXTURE" "$TEST_FAKE_BIN/incus" ;;
+esac
+SH
+chmod 0755 "$version_bin/apt-cache" "$version_bin/apt-get"
+
+for package_path in upgrade install; do
+  for mode in normal upgrade-only; do
+    for version in 6.0.5 '?' 6.0.6; do
+      rm -f "$version_bin/incus"
+      [ "$package_path" = install ] || cp "$TMP/bin/incus" "$version_bin/incus"
+      fixture_name="$package_path-$mode-${version//[^A-Za-z0-9]/x}"
+      version_home="$TMP/version-$fixture_name/.subyard"
+      mkdir -p "$version_home/incus/storage"
+      version_output="$TMP/version-$fixture_name.out"
+      version_args=(--zabbly)
+      [ "$mode" = normal ] || version_args+=(--upgrade-only)
+      set +e
+      TEST_UID=0 TEST_INCUS_VERSION="$version" TEST_INCUS_FIXTURE="$TMP/bin/incus" \
+        TEST_FAKE_BIN="$version_bin" TEST_COMMAND_PATH="$version_bin" \
+        TEST_INSTALLER_PATH="$TMP/version-scripts/01-install-incus.sh" \
+        run_installer "$version_home" "${version_args[@]}" >"$version_output" 2>&1
+      status=$?
+      set -e
+      case "$version" in
+        6.0.6)
+          [ "$status" -eq 0 ] || fail "$package_path $mode installer rejected the required Incus version"
+          grep -Eq 'incus (installed|present) \(6\.0\.6\)' "$version_output" \
+            || fail "$package_path $mode installer omitted the verified Incus success result"
+          ;;
+        *)
+          [ "$status" -ne 0 ] \
+            || fail "$package_path $mode installer continued after its package command left Incus at $version"
+          grep -Fq "incus $version < 6.0.6" "$version_output" \
+            || fail "$package_path $mode rejection omitted detected version $version or required version 6.0.6"
+          ! grep -Eq 'incus (installed|upgraded)' "$version_output" \
+            || fail "$package_path $mode installer printed a package success result for Incus $version"
+          ! grep -Fq 'Phase 1 done' "$version_output" \
+            || fail "$package_path $mode installer printed the phase success summary for Incus $version"
+          ! grep -Fq 'Incus is' "$version_output" \
+            || fail "$package_path $mode installer printed the upgrade success summary for Incus $version"
+          ;;
+      esac
+    done
+  done
+done
 
 printf 'ok: Incus installer protects the operator data-home boundary\n'

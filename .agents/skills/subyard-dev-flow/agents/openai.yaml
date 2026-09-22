@@ -1,0 +1,3 @@
+interface:
+  display_name: "Subyard dev-flow"
+  short_description: "Subyard development rules and completion checks"

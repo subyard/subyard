@@ -3,12 +3,16 @@ package securityruntime
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/Subyard/Subyard/internal/adapters/sshagentruntime"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/resource"
@@ -302,6 +306,42 @@ func TestSecurityRuntimeWarnsForExplicitDiskOutsideHostBase(t *testing.T) {
 	}
 }
 
+func TestSecurityRuntimeReportsForwardedSSHAgentBoundaryOnlyWhenEnabled(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		enabled bool
+		want    bool
+	}{
+		{name: "enabled", enabled: true, want: true},
+		{name: "disabled", enabled: false, want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runtime := testRuntime(t)
+			runtime.Yard.ForwardSSHAgent = test.enabled
+			var diagnostics bytes.Buffer
+			runtime.Stderr = &diagnostics
+			if _, err := runtime.CheckSecurity(context.Background(), false, false); err != nil {
+				t.Fatal(err)
+			}
+			warning := diagnostics.String()
+			for _, expected := range []string{
+				"SSH agent forwarding is enabled",
+				"git push and other host access from inside the yard",
+				"forwarded, write-enabled credential",
+				"while the SSH session is active",
+				"No private key is copied into the yard",
+				"any process that can reach the forwarded agent can exercise it",
+				"agent ask-rules are a UX safeguard, not a security boundary",
+			} {
+				if strings.Contains(warning, expected) != test.want {
+					t.Fatalf("forwarding warning presence for %q = %v, want %v: %q",
+						expected, strings.Contains(warning, expected), test.want, warning)
+				}
+			}
+		})
+	}
+}
+
 func TestSecurityRuntimeRequiresPrivateIdentityMode(t *testing.T) {
 	runtime := testRuntime(t)
 	root := filepath.Join(t.TempDir(), "keys")
@@ -318,6 +358,90 @@ func TestSecurityRuntimeRequiresPrivateIdentityMode(t *testing.T) {
 	if !errors.Is(err, ErrContract) || !strings.Contains(diagnostics.String(), "mode 0600") {
 		t.Fatalf("expected identity-mode failure, err=%v output=%q", err, diagnostics.String())
 	}
+}
+
+func TestSecurityRuntimeSSHAgentStateIsOptionalAndReadOnly(t *testing.T) {
+	runtime := testRuntime(t)
+	runtime.Yard.YardName = "test"
+	runtime.Yard.Paths.DataHome = t.TempDir()
+	runtime.Yard.Paths.OperatorHome = t.TempDir()
+	var diagnostics bytes.Buffer
+	runtime.Stderr = &diagnostics
+	if _, err := runtime.CheckSecurity(context.Background(), false, false); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(diagnostics.String(), "Temporary SSH-agent") ||
+		strings.Contains(diagnostics.String(), "SSH-agent access is granted") {
+		t.Fatalf("missing state produced SSH-agent finding: %q", diagnostics.String())
+	}
+	if _, err := os.Stat(sshagentruntime.Directory(runtime.Yard.Paths.DataHome, runtime.Yard.YardName)); !os.IsNotExist(err) {
+		t.Fatalf("security check created SSH-agent state: %v", err)
+	}
+}
+
+func TestSecurityRuntimeReportsActiveSSHAgentAccess(t *testing.T) {
+	runtime := securitySSHAgentFixture(t, "unlocked")
+	var diagnostics bytes.Buffer
+	runtime.Stderr = &diagnostics
+	if _, err := runtime.CheckSecurity(context.Background(), false, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(diagnostics.String(), "Temporary SSH-agent access is granted to this yard") {
+		t.Fatalf("active agent warning missing: %q", diagnostics.String())
+	}
+}
+
+func TestSecurityRuntimeWarnsWhenSSHAgentStateCannotBeInspected(t *testing.T) {
+	runtime := testRuntime(t)
+	runtime.Yard.YardName = "test"
+	runtime.Yard.Paths.DataHome = t.TempDir()
+	directory := sshagentruntime.Directory(runtime.Yard.Paths.DataHome, runtime.Yard.YardName)
+	if err := os.MkdirAll(filepath.Dir(directory), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(directory, 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	var diagnostics bytes.Buffer
+	runtime.Stderr = &diagnostics
+	if _, err := runtime.CheckSecurity(context.Background(), false, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(diagnostics.String(), "Temporary SSH-agent state could not be inspected") ||
+		strings.Contains(diagnostics.String(), "access is granted") {
+		t.Fatalf("inspection failure finding = %q", diagnostics.String())
+	}
+}
+
+func securitySSHAgentFixture(t *testing.T, state string) Runtime {
+	t.Helper()
+	runtime := testRuntime(t)
+	runtime.Yard.YardName = "test"
+	runtime.Yard.Paths.DataHome = t.TempDir()
+	directory := sshagentruntime.Directory(runtime.Yard.Paths.DataHome, runtime.Yard.YardName)
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	listener, err := net.Listen("unix", filepath.Join(directory, "control.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer connection.Close()
+		var request map[string]string
+		_ = json.NewDecoder(connection).Decode(&request)
+		_ = json.NewEncoder(connection).Encode(map[string]any{"status": map[string]any{
+			"state": state, "expiresAt": time.Now().Add(time.Hour).UTC(), "remainingSeconds": 3600,
+		}})
+	}()
+	return runtime
 }
 
 func TestSecurityRuntimeRejectsLedgerUnderHostBase(t *testing.T) {

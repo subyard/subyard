@@ -18,6 +18,7 @@ import (
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ownerinventory"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/state"
@@ -32,6 +33,7 @@ const (
 )
 
 type projectExecution struct {
+	OwnerConnection *ownerinventory.Connection
 	Loaded          config.Loaded
 	YardIdentity    string
 	Arguments       []string
@@ -50,7 +52,7 @@ type projectExecution struct {
 	PreviewExisting *domain.ProjectRecord
 	ActionChanged   bool
 	WorkspaceNames  []string
-	SyncObserved    bool
+	CopyObserved    bool
 	Removal         projectRemovalObservation
 }
 
@@ -122,10 +124,10 @@ func (execution *projectExecution) actionPlan(commandName string) (
 		return action, delta, nil
 	}
 	delta.Consequences = application.ProjectConsequences(commandName, execution.Record, false)
-	if commandName == "sync" && !execution.ExplicitName {
+	if execution.automaticCopy() && (commandName == "sync" || commandName == "clone") {
 		delta.Consequences = []string{fmt.Sprintf(
-			"copy %s to a new yard-owned snapshot with an available name based on %s",
-			execution.Record.HostPath, execution.RequestedName,
+			"%s %s to a new yard-owned copy with an available name based on %s",
+			commandName, execution.Record.HostPath, execution.RequestedName,
 		)}
 	}
 	if commandName == "down" {
@@ -149,8 +151,8 @@ func (cli *CLI) observeProjectAction(
 		return errors.New("project execution is required")
 	}
 	switch commandName {
-	case "sync":
-		return cli.observeSyncCopy(ctx, execution)
+	case "sync", "clone":
+		return cli.observeProjectCopy(ctx, execution)
 	case "bind":
 		if execution.Loaded.Context.AccessKind == domain.AccessRemote {
 			return errors.New("bind is host-local; use sync or clone")
@@ -180,22 +182,6 @@ func (cli *CLI) observeProjectAction(
 			return err
 		}
 		execution.ActionChanged = !converged
-		return nil
-	case "clone":
-		data := cli.projectDataPlane()
-		result, err := data.Execute(ctx, execution.Loaded.Context, ports.InstanceExecRequest{
-			Command: []string{
-				"sh", "-c", `[ ! -e "$1" ] && [ ! -L "$1" ]`,
-				"subyard", filepath.Dir(execution.Record.YardPath),
-			},
-		})
-		if err != nil {
-			if result.ExitCode == 1 {
-				return fmt.Errorf("clone workspace already exists: %s", filepath.Dir(execution.Record.YardPath))
-			}
-			return fmt.Errorf("inspect clone workspace: %w", err)
-		}
-		execution.ActionChanged = true
 		return nil
 	case "export":
 		if execution.Record.Mode != domain.ProjectSync {
@@ -440,7 +426,12 @@ func (cli *CLI) prepareProjectExecution(
 	arguments []string,
 	explicit bool,
 	readOnly bool,
-) (*projectExecution, error) {
+) (execution *projectExecution, err error) {
+	defer func() {
+		if err == nil && execution != nil {
+			err = cli.captureProjectOwner(execution)
+		}
+	}()
 	switch definition.Name {
 	case "init", "provision":
 		return cli.prepareProjectInventory(ctx, loaded, arguments)
@@ -455,16 +446,73 @@ func (cli *CLI) prepareProjectExecution(
 	}
 }
 
+// Capture the registration during preparation without creating locks or state.
+// Execute checks it again under the host mutation lock after confirmation.
+func (cli *CLI) captureProjectOwner(execution *projectExecution) error {
+	yard := execution.Loaded.Context
+	if yard.AccessKind != domain.AccessRemote {
+		return nil
+	}
+	root := filepath.Join(yard.Paths.DataHome, "owner-inventory")
+	connections, err := (ownerinventory.Connections{Root: root}).ListReadOnly()
+	if err != nil {
+		return err
+	}
+	routingRoot := filepath.Join(root, "routing") + string(filepath.Separator)
+	canonical := strings.HasPrefix(filepath.Clean(yard.Paths.StateDir), routingRoot)
+	for _, connection := range connections {
+		if connection.Destination != yard.OwnerEndpoint {
+			continue
+		}
+		if canonical && (yard.Paths.StateDir != filepath.Join(root, "routing", connection.HostID, yard.OwnerYardName, "projects") ||
+			connection.Yards[yard.OwnerYardName].SSHHost != yard.SSHHost) {
+			return fmt.Errorf("%w: owner project route changed; prepare the command again", domain.ErrPlanStale)
+		}
+		execution.OwnerConnection = &connection
+		return nil
+	}
+	if canonical {
+		return fmt.Errorf("%w: owner project route is no longer registered", domain.ErrPlanStale)
+	}
+	return nil
+}
+
+func (cli *CLI) beginProjectMutation(ctx context.Context, execution *projectExecution) (func(), error) {
+	if execution == nil || execution.OwnerConnection == nil {
+		return func() {}, nil
+	}
+	store := ownerinventory.Connections{Root: filepath.Join(execution.Loaded.Context.Paths.DataHome, "owner-inventory")}
+	release, err := store.BeginHostMutation(ctx, *execution.OwnerConnection)
+	if err != nil {
+		return nil, fmt.Errorf("revalidate project owner: %w", err)
+	}
+	return release, nil
+}
+
+func openProjectPreparationStore(ctx context.Context, yard domain.Context) (*state.FileStore, error) {
+	if yard.AccessKind == domain.AccessRemote {
+		// Canonical routing may be removed concurrently. Preparation must not
+		// recreate it or migrate controller records before taking the host lock.
+		return state.NewFileStore(yard.Paths.StateDir)
+	}
+	return openProjectStore(ctx, yard.Paths.StateDir)
+}
+
 func (cli *CLI) prepareProjectInventory(
 	ctx context.Context,
 	loaded config.Loaded,
 	arguments []string,
 ) (*projectExecution, error) {
-	store, err := openProjectStore(ctx, loaded.Context.Paths.StateDir)
+	store, err := openProjectPreparationStore(ctx, loaded.Context)
 	if err != nil {
 		return nil, err
 	}
-	records, err := store.List(ctx)
+	var records []domain.ProjectRecord
+	if loaded.Context.AccessKind == domain.AccessRemote {
+		records, err = store.ListReadOnly(ctx)
+	} else {
+		records, err = store.List(ctx)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -536,7 +584,7 @@ func (cli *CLI) prepareProjectImport(
 	if name == "bind" && selectedLoaded.Context.AccessKind == domain.AccessRemote {
 		return nil, errors.New("bind is host-local - use sync or clone")
 	}
-	store, err := openProjectStore(ctx, selectedLoaded.Context.Paths.StateDir)
+	store, err := openProjectPreparationStore(ctx, selectedLoaded.Context)
 	if err != nil {
 		return nil, err
 	}
@@ -609,7 +657,7 @@ func (cli *CLI) prepareProjectClone(
 	if err != nil {
 		return nil, err
 	}
-	store, err := openProjectStore(ctx, selectedLoaded.Context.Paths.StateDir)
+	store, err := openProjectPreparationStore(ctx, selectedLoaded.Context)
 	if err != nil {
 		return nil, err
 	}
@@ -622,12 +670,6 @@ func (cli *CLI) prepareProjectClone(
 	)
 	if err != nil {
 		return nil, err
-	}
-	if admission.Existing != nil {
-		return nil, fmt.Errorf(
-			"%q is already in the yard (id %s); remove it first",
-			admission.Existing.Name, admission.Existing.ProjectID,
-		)
 	}
 	record := domain.ProjectRecord{
 		Schema: 1, IdentityVersion: 2, ProjectID: admission.ProjectID, Name: admission.Name,
@@ -689,8 +731,8 @@ func (cli *CLI) previewProjectAdmission(
 	if !domain.SafeProjectName(response.ProjectID) || response.Name != response.ProjectID {
 		return state.Admission{}, errors.New("owner returned an invalid canonical project preview")
 	}
-	if response.Existing != nil && mode == domain.ProjectSync {
-		return state.Admission{}, errors.New("owner does not support independent sync copies; update the owner runtime")
+	if response.Existing != nil && (mode == domain.ProjectSync || mode == domain.ProjectGit) {
+		return state.Admission{}, errors.New("owner does not support independent project copies; update the owner runtime")
 	}
 	if response.Existing != nil {
 		if err := response.Existing.Validate(response.ProjectID); err != nil {
@@ -740,7 +782,7 @@ func (cli *CLI) prepareExistingProject(
 		}
 	}
 	var store *state.FileStore
-	if readOnlyProject {
+	if readOnlyProject || selectedLoaded.Context.AccessKind == domain.AccessRemote {
 		readOnlyStore, storeErr := openProjectStoreReadOnly(selectedLoaded.Context.Paths.StateDir)
 		if storeErr != nil {
 			return nil, storeErr
@@ -864,7 +906,7 @@ func (cli *CLI) resolveProjectForCommand(
 		selector = stripCurrentYardQualifier(selector, loaded.Context.YardName)
 		var store ports.ProjectStore
 		var err error
-		if readOnly {
+		if readOnly || loaded.Context.AccessKind == domain.AccessRemote {
 			store, err = openProjectStoreReadOnly(loaded.Context.Paths.StateDir)
 		} else {
 			store, err = openProjectStore(ctx, loaded.Context.Paths.StateDir)
@@ -1056,8 +1098,8 @@ func (cli *CLI) reserveRemoteProject(
 	if response.Existing == nil && !response.Reserved {
 		return errors.New("owner returned neither an existing project nor a reservation")
 	}
-	if response.Existing != nil && execution.Record.Mode == domain.ProjectSync {
-		return errors.New("owner does not support independent sync copies; update the owner runtime")
+	if response.Existing != nil && (execution.Record.Mode == domain.ProjectSync || execution.Record.Mode == domain.ProjectGit) {
+		return errors.New("owner does not support independent project copies; update the owner runtime")
 	}
 	if response.Existing != nil {
 		if err := response.Existing.Validate(response.ProjectID); err != nil ||
@@ -1086,7 +1128,7 @@ func (cli *CLI) reserveRemoteProject(
 	if !stale && response.Existing != nil {
 		stale = *response.Existing != *execution.PreviewExisting
 	}
-	if stale && execution.automaticSyncCopy() && response.Reserved && response.Existing == nil {
+	if stale && execution.automaticCopy() && response.Reserved && response.Existing == nil {
 		execution.setCopyIdentity(response.ProjectID, response.Name)
 		stale = false
 	}
@@ -1138,7 +1180,7 @@ func (cli *CLI) reserveProjectExecution(
 	if !stale && admission.Existing != nil {
 		stale = *admission.Existing != *execution.PreviewExisting
 	}
-	if stale && execution.automaticSyncCopy() && admission.Reservation != nil && admission.Existing == nil {
+	if stale && execution.automaticCopy() && admission.Reservation != nil && admission.Existing == nil {
 		execution.setCopyIdentity(admission.ProjectID, admission.Name)
 		stale = false
 	}
@@ -1169,9 +1211,12 @@ func (cli *CLI) remoteProjectStateCall(
 	}
 	line := "SUBYARD_OPERATION_ID=" + shellquote.Word(cli.env["SUBYARD_OPERATION_ID"]) +
 		" " + strings.Join(parts, " ")
-	command := exec.CommandContext(
-		ctx, "ssh", "-T", yard.OwnerEndpoint, "--", "bash", "-lc", shellquote.Word(line),
-	)
+	sshArguments, err := cli.sshArguments(ctx, yard.OwnerEndpoint,
+		[]string{"-T", yard.OwnerEndpoint, "--", "bash", "-lc", shellquote.Word(line)})
+	if err != nil {
+		return nil, err
+	}
+	command := exec.CommandContext(ctx, "ssh", sshArguments...)
 	command.Dir = cli.options.WorkingDir
 	command.Env = environmentList(cli.env, nil)
 	command.Stderr = cli.options.Stderr

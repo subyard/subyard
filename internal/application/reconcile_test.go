@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 )
 
@@ -108,5 +109,22 @@ func TestReconcilerFailsClosedOnRegistryAndVerification(t *testing.T) {
 		if _, err := (Reconciler{Stages: stages, Runner: fixture}).Plan(context.Background()); err == nil {
 			t.Fatalf("invalid registry was accepted: %#v", stages)
 		}
+	}
+}
+
+func TestInitStagesEnrollNetworkPolicyBeforeInstanceCreation(t *testing.T) {
+	stages := InitStages(domain.Context{IncusProject: "subyard"})
+	index := make(map[ports.ReconcileStageID]int, len(stages))
+	for position, stage := range stages {
+		index[stage.ID] = position
+	}
+	hostNetwork, hostFound := index[ports.ReconcileStageNetwork]
+	policy, policyFound := index[ports.ReconcileStageNetworkPolicy]
+	instance, instanceFound := index[ports.ReconcileStageInstance]
+	if !hostFound || !policyFound || !instanceFound || !(hostNetwork < policy && policy < instance) {
+		t.Fatalf("network policy stage order is unsafe: %#v", stages)
+	}
+	if !strings.Contains(stages[policy].Label, "restart affected running yards") {
+		t.Fatalf("network policy consequence omits peer restarts: %q", stages[policy].Label)
 	}
 }

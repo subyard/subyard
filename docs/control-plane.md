@@ -39,6 +39,22 @@ mutate one physical boundary; it does not select stages, route operations or mak
 Go owns release selection, download and CLI/RPC planning. The installer only verifies and activates
 a prepared bundle. A separate first-install bootstrap is excluded from release runtimes.
 
+Materialized coding-agent assets share resolution and safe source reads in
+`internal/config/materialized.go`. `internal/adapters/configmaterial` implements the guest JSON/TOML
+apply/observe boundary with an embedded Python program, using the base guest Python installation
+and an embedded TOML writer. The Go callers send desired content through typed stdin and consume only convergence
+and fingerprints. Runtime provisioning, config refresh/status and release activation use the same
+field ownership baseline; other consumers retain byte-exact behavior. See
+[File settings](configuration.md#file-settings) for the ownership and interrupted-write contract.
+
+Integration selection uses the shared prepared-command boundary, the protected per-yard config
+writer and `reconcileruntime.IntegrationPlan` / `ApplyIntegrations`. The same runtime path is used
+by full initialization after core substrate provisioning. `scripts/reconcile-integrations.sh` is a
+bounded package/proxy/project-hook leaf. A per-yard lock serializes confirmed desired publication
+and reconciliation. Guest ownership evidence covers structured fields, plain files, instruction
+files, derived session links and known service receipts; evidence conflicts preserve artifacts.
+See [per-yard selection](configuration.md#per-yard-coding-tool-selection) for user-visible semantics.
+
 ## Stable interfaces
 
 ### Commands
@@ -101,6 +117,32 @@ share assessment, execution and successful project-state commit; CLI owns human 
 prompts, while RPC owns bounded session storage, events and protocol errors. Dedicated query,
 terminal, configuration and credential workflows retain explicit resolver classifications.
 
+Remote project execution holds a shared controller lock for its registered owner from
+post-confirmation route validation through physical work and state commit or abort. Host
+removal takes the exclusive lock, refreshes authoritative inventory after waiting, and refuses
+remaining projects or unknown routing state. The empty project store's regular `.lock` file
+does not count as a project. Mutation locks live outside the removable routing tree; a prepared
+command whose registration was removed fails before performing project work.
+
+### Temporary SSH-key access
+
+`ssh-agent` is a dedicated owner-local credential workflow. The CLI validates the explicit key
+and TTL, assesses access changes before mutation, and keeps passphrase input on the operator TTY.
+`internal/adapters/sshagentruntime` owns an isolated OpenSSH agent and a detached, expiring worker
+per owner data home and yard. Its private control endpoint is never exposed to the guest. A pinned
+SSH connection opens a reverse Unix listener in the guest; only SSH2 identity-list and sign
+requests reach the isolated agent. Native key lifetime and worker cancellation enforce expiry,
+including closing existing agent channels. The worker consumes its launch record and cannot
+restore an unlocked key after restart. Status and revocation remain available during release
+recovery, while unlock uses the normal mutation gate. This workflow does not use RPC credential
+payloads or the persistent `yard keys` ledger.
+
+The shared `scripts/ssh-agent-environment.sh` physical leaf installs and checks the guest shell
+fallback, OpenSSH client default and Orca systemd environment. Both SSH initialization and
+explicit unlock use it; repeated
+grants do not restart Orca. See [temporary SSH access](ssh-agent.md) for the public command contract
+and the distinction between expiring signatures and already authenticated SSH sessions.
+
 ### RPC
 
 `yard rpc --stdio` is the only machine protocol. Each frame is a four-byte big-endian length
@@ -114,17 +156,24 @@ The outer event `sequence` and `revision` are one monotonic per-session stream; 
 revisions remain typed event data and cannot make the RPC revision move backwards after a snapshot.
 
 The switched surface exposes `command.list`, `context.get`, `operation.route`, `operation.plan`,
-`operation.execute`, `project.list`, `owner.inventory`, `yard.status`, `credential.list`, `credential.status`,
+`operation.execute`, `integration.status`, `project.list`, `owner.inventory`, `yard.status`, `credential.list`, `credential.status`,
 `incus.events`, `system.snapshot`, `system.resync` and `system.ping`. `operation.plan` accepts every
 public mutating core command whose handler family supports preparation. Interactive terminal and
 protected credential-payload commands keep their dedicated transport rather than treating human
 stdin/stdout as a typed result. Its server-side plan is bounded and single-use; execution requires an
-explicit `confirmed=true` and emits correlated start/final events. The operation protocol does not
-yet expose a general plan digest or plan expiry; request deadlines are separate. Execute currently
-refuses a stored plan routed to a remote owner with `remote_owner_required`. The client must plan
-again in the owner's SSH stdio session and execute there; controller-side plans are not transferable.
-Command-specific stale checks and the release-transition authorization contract remain distinct
-from this session-level plan storage.
+explicit `confirmed=true`. The `operation-exact-plan-v1` capability adds `exact:true` to
+`operation.plan`. Its response contains `schema`, the owner `plan`, its `digest` and `expiresAt`.
+Exact execution requires that digest in the same RPC session, consumes the plan once and rejects
+expiry, mismatched bindings and replay. The binding covers the owner context, arguments, public
+plan and captured private assessment fingerprint. Request deadlines remain separate from the
+five-minute plan lifetime. Integration mutations require this contract. Their controller keeps
+one SSH stdio session from owner assessment through central confirmation and owner execution;
+a disconnect discards the plan. `integration.status` uses the same read-only owner query.
+
+Other command families retain their existing routing until explicitly migrated. Legacy execution
+still refuses a controller-side plan routed to a remote owner with `remote_owner_required`;
+controller plans cannot be transferred to another session. Command-specific stale checks and the
+release-transition authorization contract remain distinct from session-level plan storage.
 
 The full snapshot contains one revision over context, public commands, project inventory, yard status and
 redacted credential metadata; `snapshot.ready` and Incus events use the same ordered event channel.
@@ -178,6 +227,15 @@ One-minor legacy discovery may retain an explicitly stale, untrusted inventory s
 listing. A later confirmed `yard host add` of the same endpoint and authoritative HostID upgrades that
 snapshot atomically to managed SSH trust; it does not require deletion or manual state repair.
 
+Ordinary CLI SSH calls share an invocation-scoped gate in `internal/sshtrust`. Transports identify
+their SSH target before handing off command arguments or stdin. The gate resolves OpenSSH config,
+preserves each host-key namespace, and reuses registered owner pins. Missing keys are negotiated in
+a private temporary file with authentication disabled, then verified through a trusted owner for
+registered yard routes. The typed `ssh.trust` action requires consent before persistent trust is
+added; login and exact-key verification must pass again afterward. Existing keys use strict checking
+and cannot enter first trust or bypass explicit repair. Network deadlines start after this prerequisite,
+so reviewing a fingerprint does not exhaust a status or inventory request's network timeout.
+
 Structured system adapters are selected from the validated command manifest and receive only declared
 non-secret context keys. Metadata uses a dedicated file descriptor and protected input uses stdin.
 Leaf commands report diagnostics normally; the runner converts their exit status into a typed result.
@@ -214,9 +272,34 @@ Release-owned one-time transitions are declared in
 authorization binding, protected evidence, per-domain epoch advancement, stable runtime links,
 forward recovery and post-activation reconciliation. A completed one-time migration is durable
 history and is never reopened to repair later drift.
+When switching releases after source migrations are complete, materialized-config
+activation observes and reconciles all registered local yards, using the same scope
+as the completed release's readiness check. Pending source migrations retain their
+selected-yard scope across recovery because they can rename yard registrations.
+This config reconciliation leaves stopped or absent yards untouched.
 Each compiled capability classifies its bounded resources as preserve, transform, canonicalize,
 reset or block before confirmation. An authorized reset is a successful, journaled one-time result;
 unknown or ambiguous state produces a structured operator-action outcome without overwriting it.
+
+`yard migrate --check` reports readiness of the exact installed `current` release: per-domain
+recorded and required epochs, applied and pending migration IDs, transaction/step checkpoints,
+runtime reconciliation actions and blockers. Add `--json` for the versioned machine-readable
+report. A successful inspection exits 0 even when work remains; inspect `outcome.status` for
+readiness. Unavailable or unsupported inspection never means ready.
+
+`yard migrate` assesses and confirms the necessary work, then uses the same verified transition
+owner, authorization, lock, journal and convergence engine as `yard update`. It does not download
+or publish a release, choose a version, or rotate runtime links to another release. Completed
+migrations stay completed; runtime drift gets a new repair transaction. A ready installation
+needs no confirmation, and successful apply exits 0 only after verifying readiness.
+
+This is a host-wide command for local yards; run it without a yard selector on the owner host.
+It remains reachable without loading unrelated yard configuration. `--yes` supplies automation
+consent; release-selection and rollback flags are not accepted. If an unfinished update still
+needs to activate another release, the report directs the operator to `yard update`. Once that
+target is current, `yard migrate` can resume the existing transaction. Retained rollback recovery
+continues to use the journal's verified transition owner. Owners that cannot verify runtime
+reconciliation require an update to supported tooling.
 
 The [runtime installer](../scripts/install-runtime-release.sh) verifies, unpacks and publishes an
 immutable candidate. It may create the first `current` link during a clean bootstrap, but it does
@@ -239,6 +322,15 @@ a V1 response; adding internal fields or outcomes must not silently extend the V
 Unknown protocol versions are rejected before authorization-channel access or transition work.
 Strict decoding remains part of the contract.
 
+A completed journal followed by activation drift needs a fresh plan and authorization. The
+released V1 protected caller requires the historical transaction ID, but rejects that ID on
+`migration-required`. Its compatibility inspection therefore uses `recovering/recovery-pending`
+with the historical ID, a fresh `plan-v1` token, a changed assessment, and **no `resume`**. This
+presentation does not resume or authorize completed history: apply creates a new transaction,
+and only an unfinished transaction can reuse its grant. The current caller validates the historical
+identity and actual links, then restores the canonical `migration-required` presentation. The
+Module's ordinary `Inspect`, journal bytes, ledger, and convergence responses retain their semantics.
+
 The frozen [`journal/v2`](../internal/releasetransition/journal/v2) module similarly owns the existing
 durable journal representation, including nested evidence and archived predecessor journals.
 Canonical field order, omitted fields and the trailing newline are preserved because fingerprints
@@ -246,6 +338,16 @@ bind those bytes. An old updater must still be able to read the journal and sele
 transition owner after interruption or rollback. New migration internals do not add fields to that
 shared representation automatically; runtime-specific recovery changes require an explicit,
 compatible storage design.
+
+The release-transition journal is authoritative recovery state, not an operator transcript. A
+separate structured update history under `$SUBYARD_HOME/logs/updates` records each committed
+activation or rollback attempt, direct preparation failure, and declined confirmation with a unique
+attempt ID, operation ID, direction, bounded phase events, verified source/target identity when
+available, and a safe terminal status/code. It retains the newest 30 attempts and never copies hook
+output, error text, environment values, or journal JSON. Local `yard logs --updates [-n N]` reads
+that history and `yard logs --audit [-n N]` reads the current command audit file plus five retained
+1 MiB rotations without loading yard configuration or Incus. Explicit yard selectors continue
+through normal owner routing.
 
 Introduce a new protocol by first shipping support alongside V1 while continuing to send V1.
 Only a subsequent release may start using the new protocol with owners that support it. Retain
@@ -256,7 +358,7 @@ response: the compatibility adapter must preserve its meaning.
 
 Before publication, `dev/verify-release-upgrades.py` runs the unmodified, checksum-pinned v0.11.2
 updater against the built candidate on the runner's architecture. It verifies inspection, activation,
-the completed fixed point, rollback and forward retry. It also kills a real update after journaled
+the completed fixed point, completed activation drift inspection, rollback and forward retry. It also kills a real update after journaled
 activation and uses the old updater to resume the same authorized candidate transaction. This
 released-binary check complements tests of the frozen codecs; rebuilding both ends from current
 source does not establish cross-release compatibility.
@@ -369,7 +471,60 @@ storage, systemd, credential and nested-VM leaves for physical checks or mutatio
 Registered-yard discovery and legacy power-metadata import are native. Shell only applies the
 selected yard's guarded start/stop boundary.
 
+### Yard network policy
+
+`yard network status`, `link A B`, `unlink A B`, `isolation on|off`, and `reconcile`
+manage one physical host. Bare names and selectors qualified with the local HostID are
+accepted; cross-host links require a separate transport and are not supported.
+Isolation is opt-in and is never enabled by installation or upgrade. Links remain saved
+when isolation is disabled. Each pair permits traffic in both directions; the graph
+does not add transitive permissions. While isolation is off, links do not restrict traffic.
+
+```sh
+yard network link alpha beta
+yard network status --json
+yard network isolation on --yes
+yard network unlink alpha beta --yes
+yard network isolation off --yes
+```
+
+`internal/yardnetwork` owns the policy, read-only planning, stale-state rejection and
+recovery. The default Incus project's `user.subyard.network_policy` key stores versioned
+JSON with desired/applied revisions, links, original NIC settings, fixed identities and
+pending restarts/cleanup. `internal/adapters/incusclient/network.go` performs exact,
+ETag-checked Incus operations. It preserves unrelated project and profile fields.
+
+The supported topology is a standalone Incus host using nftables, restricted per-yard
+projects, and one shared managed IPv4 bridge with DHCP in the default project's
+network namespace for all yards. Cross-bridge
+isolation fails preflight because overlapping addresses and NAT make source identity
+ambiguous. Disabling isolation remains available for recovery. Each yard's default profile owns its sole
+primary `eth0`; foreign ACLs, local NIC overrides and additional NICs fail preflight.
+Each profile receives a separate ACL, pinned IPv4/MAC identity and spoofing filters.
+Address allocation includes DHCP and static reservations across every project sharing
+the bridge; a fixed address claimed by another network identity fails preflight.
+Ingress permits only explicit IPv4 peers and the bridge gateway's SSH relay; default
+ingress denies IPv6 as well. Egress, DHCP and DNS remain available. This controls new
+direct network flows, not application-level forwarding deliberately provided by a peer.
+
+On Incus 6.0.6, NIC-filter changes are not atomic and updating an attached ACL can fail
+for restricted-project references. Apply therefore stops affected running yards, detaches
+their ACLs, updates rules, reattaches while stopped, verifies, then restores prior power.
+The typed assessment includes the interruption. Active connections close during this
+restart; removing an ACL allow rule alone would not flush established conntrack entries.
+On failure, desired/applied revisions remain different and pending restarts persist;
+managed starts refuse incomplete policy. Run `yard network reconcile --yes` to retry,
+or explicitly select `isolation off` to restore the recorded original NIC settings.
+
+The fixed root-owned `/run/lock/subyard-network/policy.lock` serializes policy application
+and managed starts. Host network setup, boot-reconciler installation during upgrades,
+and boot reconciliation initialize it without replacing an existing validated lock.
+The `network-policy` init stage runs after host networking and before instance creation;
+ordinary starts, init finalization, the test VM backend, boot restoration and teardown
+use the same policy service. Existing NetworkManager and host-route guards still apply.
+
 ### Credential ledger
+
 
 The host-scoped ledger is physically outside the checkout and every managed yard mount. Its shared
 Git store contains signed SOPS/age ciphertext; local-only records and identity keys never enter that
@@ -403,8 +558,15 @@ BOOTSTRAP=profile                 # optional profile selection and init on bring
 ```
 
 `ACTION` is repeatable and is the source of the public verb list. Its assessment and recovery classes
-bind each operation to the shared typed confirmation policy. At least one action is required, and the
-`BRINGUP` and `SHUTDOWN` verbs must be declared by actions. `HANDLER` is relative to the owning profile.
+bind each operation to the shared typed confirmation policy. The engine owns confirmation input.
+Non-session handlers run with standard input connected to the null device. Session actions
+inherit operator input; terminal sessions take foreground control and return it on exit or
+cancellation. When a terminal session ends, the engine also terminates remaining members of its
+process group. Handlers can still supply their own pipes or here-documents to child processes.
+Each resource process group remains cancellable as a unit. Declared read-only verbs remain
+available during an unfinished release transition; verbs with any non-read action remain gated.
+At least one action is required, and the `BRINGUP` and `SHUTDOWN` verbs must be declared by actions.
+`HANDLER` is relative to the owning profile.
 Registry validation rejects unknown descriptor fields, path traversal, duplicate names/commands or
 local action IDs, collisions with core commands, invalid actions, and missing executables. The handler
 owns every lifecycle verb including the silent `is-up` probe. Core code discovers, dispatches,
@@ -417,6 +579,13 @@ read-only configuration/status calls never allocate a port. See the shipped `.re
 `DASHBOARD` is explicit because a TCP proxy does not imply HTTP. Detailed status publishes its URL
 only while the resource's `is-up` probe succeeds and the referenced host and port settings are
 valid.
+
+Resource handlers reserve prepare exit status 2 for invalid command-line arguments. The shared
+`svc_usage_error` helper exits with status 2; the dispatcher classifies this as
+`resource_usage_invalid` and returns CLI exit status 2; rejected arguments cannot reach apply. Help and an omitted verb return 0,
+while other prepare failures, precondition failures, and invalid plans return 1. The successful plan
+schema is unchanged. Resource preparation currently uses its dedicated non-RPC pipeline, so this
+exit-status contract does not imply an RPC resource-preparation interface.
 
 ## Test topology
 
@@ -437,9 +606,12 @@ contain no real secret. The opt-in E2E VM subset is documented in
 
 Host-free fakes cannot prove Incus, kernel, network, mount, systemd, or real SSH behavior. The
 operator maintains a configurable pool of disposable two-VM pairs. The canonical pool, exact-slot,
-lease, nested-slot, and cleanup contract lives in [Agent E2E VM pool](test-vms.md). The continuous
-gate is `dev/e2e/p0-acceptance.sh --slot N`; do not run it on the operator host or in the privileged
-outer yard.
+lease, nested-slot, and cleanup contract lives in [Agent E2E VM pool](test-vms.md). The required
+external release smoke is `dev/e2e/p0-acceptance.sh --slot N`; the periodic and risk-selected
+compatibility matrix is `dev/e2e/p0-acceptance.sh --slot N --lane full`. GitHub workflows do not run
+either VM gate. Do not run them on the operator host or in the privileged outer yard.
+
+The full matrix covers the following physical boundaries:
 
 1. For both a container and VM context: `yard -Y <context> init`, rerun it as a no-op, introduce one
    safe managed drift (for example the ccusage convergence marker), rerun to repair it, then reboot

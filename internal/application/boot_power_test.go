@@ -10,11 +10,14 @@ import (
 
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
+	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
 
 type networkGuardFunc func(context.Context, []string) error
 
 type inventoryFunc func(context.Context) ([]ports.InstanceInfo, error)
+
+type bootNetworkPolicyFunc func(context.Context, yardnetwork.Yard, func() error) error
 
 func (function inventoryFunc) ListInstances(ctx context.Context) ([]ports.InstanceInfo, error) {
 	return function(ctx)
@@ -35,13 +38,27 @@ func (function networkGuardFunc) Check(ctx context.Context, bridges []string) er
 	return function(ctx, bridges)
 }
 
+func (function bootNetworkPolicyFunc) WithStart(
+	ctx context.Context,
+	yard yardnetwork.Yard,
+	start func() error,
+) error {
+	return function(ctx, yard, start)
+}
+
+func allowBootNetworkPolicy(_ context.Context, _ yardnetwork.Yard, start func() error) error {
+	return start()
+}
+
+func ensureBootNetworkLock() error { return nil }
+
 func managedPowerInstance(project, name, status, desired string) ports.InstanceInfo {
 	return ports.InstanceInfo{
 		Project: project, Name: name, Status: status,
 		Config: map[string]string{
 			"user.subyard.managed": "true", "user.subyard.initialized": "true",
 			"user.subyard.desired_power": desired, "user.subyard.bridge": "incusbr0",
-			"boot.autostart": "false",
+			"user.subyard.name": name, "boot.autostart": "false",
 		},
 	}
 }
@@ -97,8 +114,19 @@ func TestBootPowerReconcilerRestoresDesiredState(t *testing.T) {
 		"p/stop":    managedPowerInstance("p", "stop", "Running", PowerStopped),
 	}}
 	var checks [][]string
+	policyChecks := 0
 	reconciler := BootPowerReconciler{
 		Inventory: fake, Instances: fake, Power: fake,
+		NetworkPolicy: bootNetworkPolicyFunc(func(
+			_ context.Context, yard yardnetwork.Yard, start func() error,
+		) error {
+			policyChecks++
+			if yard.Project == "" || yard.Instance == "" || yard.Name == "" || yard.Network != "incusbr0" {
+				t.Fatalf("incomplete boot network identity: %#v", yard)
+			}
+			return start()
+		}),
+		EnsureNetworkLock: ensureBootNetworkLock,
 		Network: networkGuardFunc(func(_ context.Context, bridges []string) error {
 			checks = append(checks, append([]string(nil), bridges...))
 			return nil
@@ -123,6 +151,51 @@ func TestBootPowerReconcilerRestoresDesiredState(t *testing.T) {
 	if len(checks) != 3 || !reflect.DeepEqual(checks[0], []string{"incusbr0"}) {
 		t.Fatalf("unexpected network checks: %#v", checks)
 	}
+	if policyChecks != 2 {
+		t.Fatalf("boot policy checks = %d, want both running-intent yards", policyChecks)
+	}
+}
+
+func TestBootPowerReconcilerInitializesLockBeforeInventory(t *testing.T) {
+	inventoryCalled := false
+	failure := errors.New("lock unavailable")
+	reconciler := BootPowerReconciler{
+		Inventory: inventoryFunc(func(context.Context) ([]ports.InstanceInfo, error) {
+			inventoryCalled = true
+			return nil, nil
+		}),
+		Instances: &testkit.Incus{}, Power: &testkit.Incus{},
+		Network:           networkGuardFunc(func(context.Context, []string) error { return nil }),
+		NetworkPolicy:     bootNetworkPolicyFunc(allowBootNetworkPolicy),
+		EnsureNetworkLock: func() error { return failure },
+	}
+	_, err := reconciler.Run(context.Background())
+	if !errors.Is(err, failure) || inventoryCalled {
+		t.Fatalf("lock error=%v inventoryCalled=%v", err, inventoryCalled)
+	}
+}
+
+func TestBootPowerReconcilerPolicyFailurePreventsStart(t *testing.T) {
+	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+		"p/yard": managedPowerInstance("p", "yard", "Stopped", PowerRunning),
+	}}
+	reconciler := BootPowerReconciler{
+		Inventory: fake, Instances: fake, Power: fake,
+		Network: networkGuardFunc(func(context.Context, []string) error { return nil }),
+		NetworkPolicy: bootNetworkPolicyFunc(func(
+			context.Context, yardnetwork.Yard, func() error,
+		) error {
+			return errors.New("policy drift")
+		}),
+		EnsureNetworkLock: ensureBootNetworkLock,
+	}
+	_, err := reconciler.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "policy drift") {
+		t.Fatalf("policy failure = %v", err)
+	}
+	if len(fake.PowerUpdates) != 0 {
+		t.Fatalf("policy failure started a yard: %#v", fake.PowerUpdates)
+	}
 }
 
 func TestBootPowerReconcilerRejectsInvalidMetadataBeforeMutation(t *testing.T) {
@@ -131,7 +204,9 @@ func TestBootPowerReconcilerRejectsInvalidMetadataBeforeMutation(t *testing.T) {
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"p/yard": invalid}}
 	reconciler := BootPowerReconciler{
 		Inventory: fake, Instances: fake, Power: fake,
-		Network: networkGuardFunc(func(context.Context, []string) error { return nil }),
+		NetworkPolicy:     bootNetworkPolicyFunc(allowBootNetworkPolicy),
+		EnsureNetworkLock: ensureBootNetworkLock,
+		Network:           networkGuardFunc(func(context.Context, []string) error { return nil }),
 	}
 	_, err := reconciler.Run(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "boot.autostart=false") {
@@ -150,6 +225,8 @@ func TestBootPowerReconcilerStopsRunningYardsAfterGuardFailure(t *testing.T) {
 	checks := 0
 	reconciler := BootPowerReconciler{
 		Inventory: fake, Instances: fake, Power: fake,
+		NetworkPolicy:     bootNetworkPolicyFunc(allowBootNetworkPolicy),
+		EnsureNetworkLock: ensureBootNetworkLock,
 		Network: networkGuardFunc(func(context.Context, []string) error {
 			checks++
 			if checks == 3 {
@@ -178,6 +255,8 @@ func TestBootPowerReconcilerReReadsIntentBeforeStart(t *testing.T) {
 	}}
 	reconciler := BootPowerReconciler{
 		Inventory: fake, Instances: fake, Power: fake,
+		NetworkPolicy:     bootNetworkPolicyFunc(allowBootNetworkPolicy),
+		EnsureNetworkLock: ensureBootNetworkLock,
 		Network: networkGuardFunc(func(context.Context, []string) error {
 			instance := fake.Instances["p/yard"]
 			instance.Config["user.subyard.desired_power"] = PowerStopped
@@ -224,8 +303,10 @@ func TestBootPowerReconcilerWaitsForIncusInventory(t *testing.T) {
 			return []ports.InstanceInfo{instance}, nil
 		}),
 		Instances: fake, Power: fake,
-		Network: networkGuardFunc(func(context.Context, []string) error { return nil }),
-		Clock:   clock, IncusWait: 5 * time.Second,
+		NetworkPolicy:     bootNetworkPolicyFunc(allowBootNetworkPolicy),
+		EnsureNetworkLock: ensureBootNetworkLock,
+		Network:           networkGuardFunc(func(context.Context, []string) error { return nil }),
+		Clock:             clock, IncusWait: 5 * time.Second,
 	}
 	result, err := reconciler.Run(context.Background())
 	if err != nil {
@@ -243,8 +324,10 @@ func TestBootPowerReconcilerTimesOutWaitingForIncus(t *testing.T) {
 			return nil, errors.New("offline")
 		}),
 		Instances: &testkit.Incus{}, Power: &testkit.Incus{},
-		Network: networkGuardFunc(func(context.Context, []string) error { return nil }),
-		Clock:   clock, IncusWait: 2 * time.Second,
+		NetworkPolicy:     bootNetworkPolicyFunc(allowBootNetworkPolicy),
+		EnsureNetworkLock: ensureBootNetworkLock,
+		Network:           networkGuardFunc(func(context.Context, []string) error { return nil }),
+		Clock:             clock, IncusWait: 2 * time.Second,
 	}
 	_, err := reconciler.Run(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "within 2s") {
@@ -259,8 +342,10 @@ func TestBootPowerReconcilerBoundsBlockedIncusInventory(t *testing.T) {
 			return nil, ctx.Err()
 		}),
 		Instances: &testkit.Incus{}, Power: &testkit.Incus{},
-		Network:   networkGuardFunc(func(context.Context, []string) error { return nil }),
-		IncusWait: 20 * time.Millisecond,
+		NetworkPolicy:     bootNetworkPolicyFunc(allowBootNetworkPolicy),
+		EnsureNetworkLock: ensureBootNetworkLock,
+		Network:           networkGuardFunc(func(context.Context, []string) error { return nil }),
+		IncusWait:         20 * time.Millisecond,
 	}
 	result := make(chan error, 1)
 	go func() {

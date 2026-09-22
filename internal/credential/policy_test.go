@@ -93,6 +93,18 @@ func TestValidateGraphTrustAssignmentAndBackoff(t *testing.T) {
 	}
 }
 
+func TestGitHubConsumerRequiresGlobalZone(t *testing.T) {
+	record := metadata("actor-a-000000000001-aaaaaaaa", "actor-a", 1)
+	record.Consumer, record.Zone = "github-app-key", "global"
+	if err := ValidateRevisions([]domain.CredentialMetadata{record}); err != nil {
+		t.Fatal(err)
+	}
+	record.Zone = "another"
+	if err := ValidateRevisions([]domain.CredentialMetadata{record}); err == nil {
+		t.Fatal("incoming GitHub consumer could overwrite a different zone")
+	}
+}
+
 func TestValidateIncomingRevisionsOwnsAppendOnlyAssignmentPolicy(t *testing.T) {
 	parent := metadata("actor-a-000000000001-aaaaaaaa", "actor-a", 1)
 	parent.Exclusive = true

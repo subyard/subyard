@@ -96,7 +96,7 @@ jq -e --arg version "$PASEO_VERSION" '
   .listen == "127.0.0.1:6767" and
   .relay == "wss://relay.paseo.sh:443"
 ' "$status_file" >/dev/null || die "daemon status or version drift"
-as_dev /usr/local/bin/codex-check \
+as_dev /usr/local/bin/codex-policy-check \
   || die "Codex provider capability is unavailable to $PASEO_DEV_USER"
 
 for identity in server-id daemon-keypair.json; do
