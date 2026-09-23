@@ -319,6 +319,9 @@ dev/agent-e2e.sh --slot "$slot" --purpose integration-selection --vm 1 -- \
   bash dev/e2e/integration-selection.sh container
 ```
 
+The `cold` mode first removes Incus from an empty disposable baseline, then runs the container
+lifecycle through product installation. Container checks also stop the installed daemon and verify
+that init refuses to replace an existing yard's inherited integration intent before restarting it.
 Other modes are `vm`, `default`, `special` (fresh test-vms role), and `upgrade` (owned
 ordinary-yard artifacts retired when adopting the test-vms role). The `default` mode installs
 all five fresh-default integrations and needs their normal package download access. Test config,

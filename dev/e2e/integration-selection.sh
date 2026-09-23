@@ -4,12 +4,33 @@ set -Eeuo pipefail
 umask 022
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 KIND="${1:-container}"
-case "$KIND" in container|vm|special|default|upgrade) ;; *) printf 'usage: %s [container|vm|special|default|upgrade]\n' "$0" >&2; exit 2 ;; esac
+case "$KIND" in container|cold|vm|special|default|upgrade) ;; *) printf 'usage: %s [container|cold|vm|special|default|upgrade]\n' "$0" >&2; exit 2 ;; esac
 die() { printf 'integration-selection: %s\n' "$*" >&2; exit 1; }
 trap 'printf "integration-selection: failure at line %s (exit %s)\n" "$LINENO" "$?" >&2' ERR
 [ "${SUBYARD_E2E_VM:-}" = 1 ] || die 'run through dev/agent-e2e.sh on an allocated VM'
-for command in jq python3 sudo ss; do command -v "$command" >/dev/null || die "$command is required"; done
+for command in jq python3 sudo ss sg; do command -v "$command" >/dev/null || die "$command is required"; done
 sudo -n true || die 'passwordless sudo is required on the disposable VM'
+if [ "$KIND" = cold ]; then
+  # Only a fresh allocated host with no Incus workloads may become a cold fixture.
+  # Keep the baseline state aside; package removal alone can retain the database.
+  [ -x /usr/bin/incus ] || die 'cold fixture requires the prepared baseline client to verify empty state'
+  sudo -n systemctl start incus.socket incus.service
+  sudo -n /usr/bin/incus list --all-projects --format json | jq -e 'length == 0' >/dev/null \
+    || die 'cold fixture requires no existing instances'
+  sudo -n /usr/bin/incus storage list --format json | jq -e 'length == 0' >/dev/null \
+    || die 'cold fixture requires no existing storage pools'
+  sudo -n systemctl stop incus.service incus.socket
+  sudo -n env DEBIAN_FRONTEND=noninteractive apt-get remove -y incus incus-client >/dev/null
+  baseline="$(sudo -n mktemp -d /var/tmp/subyard-cold-incus.XXXXXX)"
+  for directory in /var/lib/incus /run/incus; do
+    if sudo -n test -e "$directory" || sudo -n test -L "$directory"; then
+      sudo -n mv -- "$directory" "$baseline/$(printf '%s' "$directory" | tr / _)"
+    fi
+  done
+  ! command -v incus >/dev/null || die 'cold fixture still has an Incus client'
+  printf '  [ ok ] cold fixture has no Incus client, socket or state\n'
+  KIND=container
+fi
 # VM-mode product creation requires host QEMU. Match the nested-teardown fixture;
 # the ordinary Incus installer deliberately does not install virtualization packages.
 if [ "$KIND" = vm ] && ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
@@ -40,12 +61,24 @@ incus() {
     /usr/bin/incus "$@"
   fi
 }
-yard() { "$ROOT/.build/yard" -Y "$YARD_NAME" "$@"; }
+incus_stopped=0
+yard() {
+  # First init can enroll this user, but cannot update its parent shell's groups.
+  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+    local command
+    printf -v command '%q ' "$ROOT/.build/yard" -Y "$YARD_NAME" "$@"
+    sg incus-admin -c "exec $command"
+  else
+    "$ROOT/.build/yard" -Y "$YARD_NAME" "$@"
+  fi
+}
 guest() { incus exec "$INSTANCE" --project "$PROJECT" -- "$@"; }
 cleanup() {
   local rc=$? managed=''
   trap - EXIT INT TERM ERR
   set +e
+  if [ "$incus_stopped" = 1 ]; then sudo -n systemctl start incus.socket incus.service; fi
   if command -v /usr/bin/incus >/dev/null; then
     managed="$(incus config get "$INSTANCE" user.subyard.managed --project "$PROJECT" 2>/dev/null)"
   fi
@@ -257,6 +290,19 @@ yard integration status --json | jq -e '.observed == "ready" and .selection.requ
 sed -i '/^CODING_TOOL_INTEGRATIONS=/d' "$config"
 printf 'AGENTS=claude\n' > "$SUBYARD_CONFIG_HOME/config.env"
 chmod 0600 "$SUBYARD_CONFIG_HOME/config.env"
+if [ "$KIND" = container ]; then
+  before="$(sha256sum "$config" "$SUBYARD_CONFIG_HOME/config.env")"
+  incus_stopped=1
+  sudo -n systemctl stop incus.service incus.socket
+  if yard init --yes > "$STATE/stopped-incus-init.log" 2>&1; then die 'init accepted an unavailable existing daemon'; fi
+  grep -Fq 'cannot establish existing integration intent' "$STATE/stopped-incus-init.log" \
+    || die 'stopped-daemon init failed outside the integration intent guard'
+  [ "$(sha256sum "$config" "$SUBYARD_CONFIG_HOME/config.env")" = "$before" ] \
+    || die 'stopped-daemon init changed inherited integration intent'
+  sudo -n systemctl start incus.socket incus.service
+  incus_stopped=0
+  printf 'ok: unavailable existing Incus preserves inherited integration intent\n'
+fi
 yard init --yes
 grep -Eq '^CODING_TOOL_INTEGRATIONS=.*claude' "$config" || die 'existing requested selection was not adopted'
 printf '' > "$SUBYARD_CONFIG_HOME/config.env"

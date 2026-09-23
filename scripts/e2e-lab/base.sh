@@ -31,7 +31,7 @@ if [ -d /var/lib/incus ]; then
 fi
 getent group kvm >/dev/null || groupadd --system kvm
 usermod -aG kvm dev
-install -d -o dev -g dev /home/dev/.cache/subyard-e2e-platform
+install -d -o dev -g dev /home/dev/.cache /home/dev/.cache/subyard-e2e-platform
 printf '%s\n' subyard-e2e-platform-v1 > /home/dev/.cache/subyard-e2e-platform/.subyard-e2e-platform-marker
 chown dev:dev /home/dev/.cache/subyard-e2e-platform/.subyard-e2e-platform-marker
 install -d -m 0755 /var/lib/subyard

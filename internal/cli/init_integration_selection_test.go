@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/adapters/incusclient"
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
@@ -19,6 +20,53 @@ import (
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
+
+func TestInitIntegrationSelectionWithAbsentIncusSocket(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	writeCLIFile(t, filepath.Join(root, "config/agents.env"), "CODING_TOOL_INTEGRATIONS=codex\nAGENT_codex_COMMAND=codex\n", 0o600)
+	path := filepath.Join(root, "state/yards/demo/config.env")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, path, "SSH_PORT=2223\n", 0o600)
+	directory := filepath.Join(root, "incus-state")
+	t.Setenv("INCUS_DIR", directory)
+	t.Setenv("INCUS_SOCKET", "")
+	t.Setenv("PATH", t.TempDir())
+	client := incusclient.New("", "projects")
+	program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: client, Executor: client})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := program.loadContext("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	proposed, selection, err := program.prepareInitIntegrationSelection(ctx, loaded, nil)
+	if err != nil || selection == nil || len(proposed.Integrations.Requested) != 0 {
+		t.Fatalf("cold named init did not plan empty selection: selection=%v err=%v", selection, err)
+	}
+	execution := &initExecution{loaded: proposed, integrationSelection: selection}
+	if err := selection.check(ctx, program, execution); err != nil {
+		t.Fatal(err)
+	}
+	// A stopped daemon (including after package removal) keeps its state. A
+	// missing socket must neither clear its inherited intent nor pass a stale plan.
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := selection.check(ctx, program, execution); err == nil {
+		t.Fatal("newly appeared Incus state did not invalidate cold-init plan")
+	}
+	if _, _, err := program.prepareInitIntegrationSelection(ctx, loaded, nil); err == nil {
+		t.Fatal("unavailable existing daemon was treated as a cold installation")
+	}
+	content, err := os.ReadFile(path)
+	if err != nil || string(content) != "SSH_PORT=2223\n" {
+		t.Fatalf("read-only assessment changed integration settings: %v", err)
+	}
+}
 
 type initAdoptionExecutor struct {
 	fingerprint string

@@ -119,6 +119,11 @@ func (cli *CLI) initSelectionInstanceExists(ctx context.Context, yard domain.Con
 	if errors.Is(err, ports.ErrInstanceNotFound) {
 		return false, nil
 	}
+	if errors.Is(err, os.ErrNotExist) {
+		if local, ok := incus.(interface{ LocalInstallationAbsent() bool }); ok && local.LocalInstallationAbsent() {
+			return false, nil
+		}
+	}
 	return err == nil, err
 }
 

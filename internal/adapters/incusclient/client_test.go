@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +16,40 @@ import (
 	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/lxc/incus/v6/shared/api"
 )
+
+func TestLocalInstallationAbsentPreservesUnavailableState(t *testing.T) {
+	for _, scenario := range []string{"cold", "installed", "retained", "symlink", "custom socket", "socket environment", "relative directory"} {
+		t.Run(scenario, func(t *testing.T) {
+			root := t.TempDir()
+			directory := filepath.Join(root, "incus-state")
+			t.Setenv("PATH", root)
+			t.Setenv("INCUS_DIR", directory)
+			t.Setenv("INCUS_SOCKET", "")
+			client := New("")
+			var err error
+			switch scenario {
+			case "installed":
+				err = os.WriteFile(filepath.Join(root, "incus"), []byte("#!/bin/sh\n"), 0o700)
+			case "retained":
+				err = os.Mkdir(directory, 0o700)
+			case "symlink":
+				err = os.Symlink(filepath.Join(root, "missing"), directory)
+			case "custom socket":
+				client = New(filepath.Join(root, "missing.socket"))
+			case "socket environment":
+				t.Setenv("INCUS_SOCKET", filepath.Join(root, "missing.socket"))
+			case "relative directory":
+				t.Setenv("INCUS_DIR", "relative-incus-state")
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := client.LocalInstallationAbsent(); got != (scenario == "cold") {
+				t.Fatalf("LocalInstallationAbsent() = %v", got)
+			}
+		})
+	}
+}
 
 func TestNormalizeErrorClassifiesTemporaryIncusFailure(t *testing.T) {
 	cause := api.StatusErrorf(http.StatusServiceUnavailable, "storage pool unavailable")

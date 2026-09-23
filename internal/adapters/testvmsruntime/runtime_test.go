@@ -267,7 +267,11 @@ func TestCloudConfigLeavesToolchainToExplicitReconciliation(t *testing.T) {
 		!strings.Contains(payload, publicKey) {
 		t.Fatalf("cloud config omitted the dev bootstrap: %s", payload)
 	}
-	for _, duplicate := range []string{"package_update:", "packages:", "runcmd:"} {
+	if !strings.Contains(payload, "    lock_passwd: true\n") ||
+		!strings.Contains(payload, "ssh_pwauth: false\n") {
+		t.Fatalf("cloud config must leave account activation to SSH reconciliation: %s", payload)
+	}
+	for _, duplicate := range []string{"package_update:", "packages:", "runcmd:", "\n    passwd:", "\n    hashed_passwd:", "\n    plain_text_passwd:"} {
 		if strings.Contains(payload, duplicate) {
 			t.Fatalf("cloud config retained duplicate provisioning %q: %s", duplicate, payload)
 		}

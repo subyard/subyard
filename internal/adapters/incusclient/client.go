@@ -8,6 +8,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -25,6 +28,32 @@ type Client struct {
 
 func New(socket string, requiredExtensions ...string) *Client {
 	return &Client{socket: socket, requiredExtensions: slices.Clone(requiredExtensions)}
+}
+
+// LocalInstallationAbsent proves a cold local install, not merely an unavailable
+// daemon. Package removal can leave its database behind. Custom sockets do not
+// establish where the server keeps that database, so they remain inconclusive.
+func (client *Client) LocalInstallationAbsent() bool {
+	if client.socket != "" || os.Getenv("INCUS_SOCKET") != "" {
+		return false
+	}
+	if _, err := exec.LookPath("incus"); !errors.Is(err, exec.ErrNotFound) {
+		return false
+	}
+	paths := []string{"/var/lib/incus", "/run/incus"}
+	// Match the native client's INCUS_DIR override, including during rechecks.
+	if directory := os.Getenv("INCUS_DIR"); directory != "" {
+		if !filepath.IsAbs(directory) {
+			return false
+		}
+		paths = []string{filepath.Clean(directory)}
+	}
+	for _, path := range paths {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			return false
+		}
+	}
+	return true
 }
 
 func (client *Client) Server(ctx context.Context) (ports.ServerInfo, error) {

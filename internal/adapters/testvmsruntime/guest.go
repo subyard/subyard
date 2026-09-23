@@ -32,6 +32,8 @@ func (runtime *Runtime) cloudConfig() string {
 		agentKey, _ := normalizedPublicKey(runtime.Config.AgentPublicKey)
 		agentLine = "      - " + agentKey + " " + agentKeyMarker + "\n"
 	}
+	// The base already has dev. Leave account activation to configureGuestSSH;
+	// cloud-init warns when passwd is supplied for an existing user.
 	return `#cloud-config
 users:
   - default
@@ -39,8 +41,7 @@ users:
     groups: [sudo]
     shell: /bin/bash
     sudo: ALL=(ALL) NOPASSWD:ALL
-    lock_passwd: false
-    passwd: x
+    lock_passwd: true
     ssh_authorized_keys:
       - ` + workerKey + "\n" + agentLine + `ssh_pwauth: false
 `
