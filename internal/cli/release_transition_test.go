@@ -17,6 +17,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
@@ -37,6 +38,58 @@ func TestReleaseActivationRefreshesOrcaBeforeMaterializedConfig(t *testing.T) {
 	})
 	if orca < 0 || configs < 0 || orca >= configs {
 		t.Fatalf("release integration hooks can run before Orca refresh: orca=%d configs=%d", orca, configs)
+	}
+}
+
+func TestMaterializedConfigObservationReportsSourceManagedOwnershipConflict(t *testing.T) {
+	for _, path := range []string{"/etc/subyard/agent-project-hooks", "/untrusted-secret"} {
+		t.Run(path, func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join(environment, "\n")+"\n", 0o600)
+			writeCLIFile(t, filepath.Join(root, "config", "projects-changed.sh"), "#!/bin/sh\n", 0o755)
+			configHome := filepath.Join(root, "state")
+			if err := configsync.RegisterSource(configHome, t.TempDir()); err != nil {
+				t.Fatal(err)
+			}
+			conflict, _ := json.Marshal(map[string]string{"reason": "unowned selected artifact", "path": path})
+			instance := ports.InstanceInfo{Status: "Running"}
+			fake := &testkit.Incus{
+				Instances: map[string]ports.InstanceInfo{"subyard/yard": instance},
+				Reconcile: ports.ReconcileState{InstanceFound: true, Instance: instance},
+				ExecSteps: []testkit.IncusExecStep{
+					{}, // Existing integration substrate.
+					{}, // Legacy inventory is absent.
+					{Result: ports.InstanceExecResult{ExitCode: 1, Stderr: conflict}},
+				},
+			}
+			var stdout, stderr bytes.Buffer
+			program, err := New(Options{RepositoryRoot: root, Environment: environment,
+				Incus: fake, Executor: fake, Stdout: &stdout, Stderr: &stderr})
+			if err != nil {
+				t.Fatal(err)
+			}
+			reconciler := &materializedConfigActivationReconciler{
+				cli: program, yard: "default", configHome: configHome, scopeResolved: true,
+			}
+			observed, err := reconciler.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+			if err == nil || observed.Converged {
+				t.Fatalf("ownership conflict was accepted: %#v, %v", observed, err)
+			}
+			if !strings.Contains(stderr.String(), "yard default legacy integrations:") ||
+				!strings.Contains(stderr.String(), "integration ownership conflict") {
+				t.Fatalf("update hid the ownership diagnostic: %q", stderr.String())
+			}
+			if path == "/etc/subyard/agent-project-hooks" && !strings.Contains(stderr.String(), path) {
+				t.Fatalf("known conflicting path was hidden: %q", stderr.String())
+			}
+			if stdout.Len() != 0 || strings.Contains(stderr.String(), "untrusted-secret") {
+				t.Fatal("diagnostic polluted protocol output or exposed an untrusted path")
+			}
+			if len(fake.ExecCalls) != 3 || slices.Contains(fake.ExecCalls[2].Request.Command, "apply") ||
+				!slices.Contains(fake.ExecCalls[2].Request.Command, "observe") || len(fake.ConfigUpdates) != 0 || len(fake.PowerUpdates) != 0 {
+				t.Fatal("ownership observation attempted a mutation")
+			}
+		})
 	}
 }
 

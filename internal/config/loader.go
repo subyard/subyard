@@ -583,7 +583,7 @@ func sourceValuedAgentSetting(name string) bool {
 	if !strings.HasPrefix(name, "AGENT_") {
 		return false
 	}
-	for _, suffix := range []string{"_CONFIG", "_RULES", "_PROVISION"} {
+	for _, suffix := range []string{"_CONFIG", "_RULES", "_PROVISION", "_CLEANUP"} {
 		agent, found := strings.CutSuffix(strings.TrimPrefix(name, "AGENT_"), suffix)
 		if found && domain.SafeName(agent) {
 			return true

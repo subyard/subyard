@@ -539,6 +539,29 @@ The public revision shape remains `config/keys/revision.schema.json`. Revision D
 intersection, revoke/tombstone behavior, assignment epoch, append-only verification, quarantine,
 local-only isolation, and fail-closed exclusive handoff are conformance contracts.
 
+### Coding-integration cleanup hooks
+
+The shipped coding-integration profile metadata may declare
+`AGENT_<name>_CLEANUP` alongside its provisioning, readiness and persistence fields. The value is
+a trusted regular, non-symbolic-link source file with the same allowed scopes as
+`AGENT_<name>_PROVISION`. Cleanup metadata declares a known integration even when that integration
+is absent from `CODING_TOOL_INTEGRATIONS`; cleanup never implies selection and does not rewrite the
+requested set. This contract is separate from the environment-profile resource registry below.
+
+The generic `yard integration cleanup <name>` workflow requires a running yard and a declared hook.
+The owner sends the hook through protected input and executes it in the yard as
+`sh -eu -s -- observe|apply DEV_USER DEV_UID EXPECTED_FINGERPRINT`. Observe is read-only and returns
+exactly `{fingerprint, changed, steps}` as JSON: the fingerprint is a lowercase SHA-256, `changed`
+is boolean and every step is bounded public-safe text. A nonzero meaningful failure may return
+exactly `{code, message}`, with a safe-name code and bounded public-safe message. Hook diagnostics
+must never contain secrets or raw configuration contents.
+
+Core owns the typed action assessment, confirmation and stale-plan checks. Apply receives the
+approved observation fingerprint and must recheck it before changing state; it may return the same observation shape.
+Core then observes again and accepts success only when the hook reports convergence. This protocol
+lets each integration define its own bounded, reversible cleanup while the command, safety gates and
+operator interaction remain generic.
+
 ### Profile resources
 
 A resource descriptor is `config/profiles/<profile>/resources/<name>.res` with:

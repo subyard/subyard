@@ -168,6 +168,79 @@ if [ "$KIND" = default ]; then
 fi
 jq -e '.selection.present and (.selection.requested | length) == 0 and (.selection.effective | length) == 0 and .observed == "ready"' "$STATE/status.json" >/dev/null \
   || die 'fresh named yard did not converge to explicit empty selection'
+if [ "$KIND" = container ]; then
+  paseo_sentinel="/srv/agents/paseo/data/.cleanup-preservation-$token"
+  guest sh -eu -c '
+    [ ! -e /var/lib/subyard/paseo-ownership ]
+    [ ! -e /etc/systemd/system/paseo.service ]
+    [ ! -e /etc/systemd/system/paseo.service.subyard-retired ]
+    install -d -o root -g root -m 0755 /srv/agents/paseo/data
+    printf "%s\n" "$1" >"$2"
+    chown root:root "$2"
+    chmod 0600 "$2"
+    printf "%s\n" \
+      "[Unit]" \
+      "Description=Synthetic Paseo cleanup fixture" \
+      "[Service]" \
+      "ExecStart=/usr/bin/sleep infinity" \
+      "[Install]" \
+      "WantedBy=multi-user.target" \
+      >/etc/systemd/system/paseo.service
+    chown root:root /etc/systemd/system/paseo.service
+    chmod 0644 /etc/systemd/system/paseo.service
+    systemctl daemon-reload
+    systemctl enable --now paseo.service
+  ' subyard "$MARKER" "$paseo_sentinel"
+  yard integration status --json >"$STATE/paseo-conflict-status.json"
+  jq -e '.selection.requested == [] and .selection.effective == [] and .observed == "conflict" and (.detail | contains("paseo.service"))' \
+    "$STATE/paseo-conflict-status.json" >/dev/null \
+    || die 'unselected unowned Paseo service did not surface an ownership conflict'
+  paseo_before="$(guest sha256sum /etc/systemd/system/paseo.service "$paseo_sentinel")"
+  yard integration cleanup paseo --check >"$STATE/paseo-cleanup-check.log"
+  grep -Fq 'Integration cleanup: paseo' "$STATE/paseo-cleanup-check.log" \
+    && grep -Fq 'Stop and disable paseo.service' "$STATE/paseo-cleanup-check.log" \
+    && grep -Fq 'paseo.service.subyard-retired' "$STATE/paseo-cleanup-check.log" \
+    || die 'Paseo cleanup check omitted its bounded consequences'
+  [ "$(guest sha256sum /etc/systemd/system/paseo.service "$paseo_sentinel")" = "$paseo_before" ] \
+    || die 'Paseo cleanup check changed the unit or preserved data'
+  guest sh -eu -c '
+    systemctl is-active --quiet paseo.service
+    systemctl is-enabled --quiet paseo.service
+    [ ! -e /etc/systemd/system/paseo.service.subyard-retired ]
+    [ ! -e /var/lib/subyard/paseo-ownership ]
+  ' subyard || die 'Paseo cleanup check changed service state or ownership evidence'
+  if yard integration cleanup paseo </dev/null >"$STATE/paseo-cleanup-eof.log" 2>&1; then
+    die 'EOF accepted Paseo cleanup'
+  fi
+  [ "$(guest sha256sum /etc/systemd/system/paseo.service "$paseo_sentinel")" = "$paseo_before" ] \
+    || die 'declined Paseo cleanup changed the unit or preserved data'
+  guest sh -eu -c '
+    systemctl is-active --quiet paseo.service
+    systemctl is-enabled --quiet paseo.service
+    [ ! -e /etc/systemd/system/paseo.service.subyard-retired ]
+    [ ! -e /var/lib/subyard/paseo-ownership ]
+  ' subyard || die 'declined Paseo cleanup changed service state or ownership evidence'
+  yard integration cleanup paseo --yes >"$STATE/paseo-cleanup-apply.log"
+  guest sh -eu -c '
+    [ ! -e /etc/systemd/system/paseo.service ]
+    [ -f /etc/systemd/system/paseo.service.subyard-retired ]
+    [ "$(stat -c "%u:%g:%a:%h" /etc/systemd/system/paseo.service.subyard-retired)" = 0:0:644:1 ]
+    grep -Fqx "ExecStart=/usr/bin/sleep infinity" /etc/systemd/system/paseo.service.subyard-retired
+    [ "$(cat "$1")" = "$2" ]
+    [ ! -e /var/lib/subyard/paseo-ownership ]
+    ! systemctl is-active --quiet paseo.service
+    ! systemctl is-enabled --quiet paseo.service
+  ' subyard "$paseo_sentinel" "$MARKER" \
+    || die 'confirmed Paseo cleanup did not retire only the service unit'
+  paseo_retired_before="$(guest sha256sum /etc/systemd/system/paseo.service.subyard-retired "$paseo_sentinel")"
+  yard integration cleanup paseo --yes >"$STATE/paseo-cleanup-retry.log"
+  [ "$(guest sha256sum /etc/systemd/system/paseo.service.subyard-retired "$paseo_sentinel")" = "$paseo_retired_before" ] \
+    || die 'converged Paseo cleanup retry changed the backup or preserved data'
+  grep -Fq 'No cleanup needed.' "$STATE/paseo-cleanup-retry.log" \
+    || die 'converged Paseo cleanup retry did not report a no-op'
+  yard integration status --json | jq -e '.observed == "ready" and .selection.requested == [] and .selection.effective == []' >/dev/null \
+    || die 'Paseo cleanup did not restore ready unselected integration status'
+fi
 if [ "$KIND" = special ]; then
   jq -e '.selection.allows_coding_tools == false' "$STATE/status.json" >/dev/null
   guest sh -eu -c 'for file in /usr/local/bin/ccusage /usr/local/bin/codex /usr/local/bin/opencode /usr/local/bin/paseo; do [ ! -e "$file" ]; done'

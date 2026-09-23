@@ -26,9 +26,15 @@ type IntegrationRuntime interface {
 	ApplyIntegrations(context.Context, reconcileruntime.IntegrationPlan) error
 }
 
+type IntegrationCleanupRuntime interface {
+	IntegrationCleanupPlan(context.Context, string) (reconcileruntime.IntegrationCleanupPlan, error)
+	ApplyIntegrationCleanup(context.Context, string, reconcileruntime.IntegrationCleanupPlan) error
+}
+
 type integrationRequest struct {
 	verb, id string
 	json     bool
+	check    bool
 }
 
 func parseIntegrationArguments(arguments []string) (integrationRequest, error) {
@@ -39,21 +45,28 @@ func parseIntegrationArguments(arguments []string) (integrationRequest, error) {
 		case "--yes", "-y":
 		case "--json":
 			request.json = true
+		case "--check":
+			request.check = true
 		default:
 			positional = append(positional, argument)
 		}
 	}
 	if len(positional) == 0 {
-		return request, errors.New("usage: integration enable|disable <id> | status [id] [--json]")
+		return request, errors.New("usage: integration enable|disable <id> | cleanup <id> [--check] | status [id] [--json]")
 	}
 	request.verb = positional[0]
 	if len(positional) > 1 {
 		request.id = positional[1]
 	}
-	if len(positional) > 2 || (request.verb != "status" && request.verb != "enable" && request.verb != "disable") || (request.verb != "status" && (request.id == "" || request.json)) || (request.id != "" && !domain.SafeName(request.id)) {
-		return request, errors.New("usage: integration enable|disable <id> | status [id] [--json]")
+	if len(positional) > 2 || (request.verb != "status" && request.verb != "enable" && request.verb != "disable" && request.verb != "cleanup") || (request.verb != "status" && (request.id == "" || request.json)) || (request.id != "" && !domain.SafeName(request.id)) || (request.check && request.verb != "cleanup") {
+		return request, errors.New("usage: integration enable|disable <id> | cleanup <id> [--check] | status [id] [--json]")
 	}
 	return request, nil
+}
+
+func integrationReadOnlyInvocation(arguments []string) bool {
+	request, err := parseIntegrationArguments(arguments)
+	return err == nil && (request.verb == "status" || request.check)
 }
 
 func (cli *CLI) integrationRuntime(loaded config.Loaded) IntegrationRuntime {
@@ -71,7 +84,7 @@ func (cli *CLI) requireRunningIntegrationYard(ctx context.Context, loaded config
 		return fmt.Errorf("integration requires an existing running yard: %w", err)
 	}
 	if !strings.EqualFold(instance.Status, "running") {
-		return fmt.Errorf("yard %q is %s; integration enable/disable requires a running yard (start it explicitly)", loaded.Context.YardName, instance.Status)
+		return fmt.Errorf("yard %q is %s; integration changes require a running yard (start it explicitly)", loaded.Context.YardName, instance.Status)
 	}
 	return nil
 }
@@ -101,7 +114,7 @@ func (cli *CLI) persistentIntegrationContext(loaded config.Loaded) (config.Loade
 		return persistent, err
 	}
 	if !slices.Equal(loaded.Integrations.Requested, persistent.Integrations.Requested) || loaded.Integrations.AllowsCodingTools != persistent.Integrations.AllowsCodingTools {
-		return persistent, errors.New("temporary integration selection differs from persistent settings; remove the command override before enable/disable")
+		return persistent, errors.New("temporary integration selection differs from persistent settings; remove the command override before changing integrations")
 	}
 	return persistent, nil
 }
@@ -141,6 +154,9 @@ func (prepared *preparedCommand) prepareIntegration(ctx context.Context, _ *init
 	loaded, err := cli.persistentIntegrationContext(prepared.Loaded)
 	if err != nil {
 		return err
+	}
+	if request.verb == "cleanup" {
+		return prepared.prepareIntegrationCleanup(ctx, loaded, request)
 	}
 	if err = integrationSourceGuard(loaded); err != nil {
 		return err

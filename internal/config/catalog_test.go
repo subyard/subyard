@@ -103,3 +103,26 @@ func TestAgentDependencySettingAcceptsDeclaredScopes(t *testing.T) {
 		t.Fatalf("unexpected dependency definition: %+v", definition)
 	}
 }
+
+func TestAgentCleanupSettingUsesProvisionHookContract(t *testing.T) {
+	const name = "AGENT_example_CLEANUP"
+	for _, scope := range []SettingScope{ScopeShipped, ScopeHost, ScopeYard, ScopeCommand} {
+		if err := ValidateSetting(scope, name, "/opt/subyard/example-cleanup", false); err != nil {
+			t.Errorf("ValidateSetting(%s, %s) returned %v", scope, name, err)
+		}
+	}
+	if err := ValidateSetting(ScopeShared, name, "/opt/subyard/example-cleanup", false); err == nil {
+		t.Error("shared cleanup hook override was accepted")
+	}
+	definition, err := ValidateSettingName(ScopeHost, name, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if definition.Kind != SettingFile || definition.Type != SettingRegularFilePath ||
+		definition.Application != SettingYardInit || definition.Syncable {
+		t.Fatalf("unexpected cleanup definition: %+v", definition)
+	}
+	if !sourceValuedAgentSetting(name) {
+		t.Fatal("cleanup hook was not classified as a source-valued agent setting")
+	}
+}

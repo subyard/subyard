@@ -761,6 +761,7 @@ func (reconciler *materializedConfigActivationReconciler) Observe(
 	for _, target := range targets {
 		assessment, assessErr := operation.assessConfigTarget(ctx, target, true)
 		if assessErr != nil {
+			operation.errorf("yard %s materialized config: %v", target.Name, assessErr)
 			return releasetransition.V2ActivationObservation{}, assessErr
 		}
 		integrationScope := ""
@@ -770,15 +771,18 @@ func (reconciler *materializedConfigActivationReconciler) Observe(
 		if runtime, ok := platform.(reconcileruntime.Runtime); ok && target.Loaded.Integrations.AllowsCodingTools {
 			integrationScope, managedPaths, err = runtime.IntegrationScope()
 			if err != nil {
+				operation.errorf("yard %s integration scope: %v", target.Name, err)
 				return releasetransition.V2ActivationObservation{}, err
 			}
 			if assessment.State == "drift" || assessment.State == "converged" {
 				platform, _, err = prepareLegacyIntegrationAdoption(ctx, target.Loaded.Integrations, platform)
 				if err != nil {
+					operation.errorf("yard %s legacy integrations: %v", target.Name, err)
 					return releasetransition.V2ActivationObservation{}, fmt.Errorf("yard %s legacy integrations: %w", target.Name, err)
 				}
 				integration, err = platform.(reconcileruntime.Runtime).IntegrationPlan(ctx)
 				if err != nil {
+					operation.errorf("yard %s integration plan: %v", target.Name, err)
 					return releasetransition.V2ActivationObservation{}, err
 				}
 				if captureIntegrationPlans {

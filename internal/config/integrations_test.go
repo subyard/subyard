@@ -6,6 +6,18 @@ import (
 	"testing"
 )
 
+func TestCleanupOnlyMetadataDeclaresKnownIntegration(t *testing.T) {
+	selection, err := ResolveIntegrationSelection(map[string]string{
+		"AGENT_legacy_CLEANUP": "/opt/subyard/legacy-cleanup",
+	}, []string{"legacy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(selection.Effective, " "); got != "legacy" {
+		t.Fatalf("cleanup-only integration closure = %q", got)
+	}
+}
+
 func TestIntegrationSelectionKeepsRequestsAndPresence(t *testing.T) {
 	root := filepath.Clean(filepath.Join("..", ".."))
 	for _, test := range []struct{ name, content, requested, effective string }{

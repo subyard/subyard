@@ -386,7 +386,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		resourceReadOnly ||
 		(core && definition.Handler == "@config" && (configReadOnlyInvocation(commandArguments) || configSyncCheck || configSyncStatus)) ||
 		(core && definition.Handler == "@test-vms" && testVMStatusInvocation(commandArguments)) ||
-		(core && definition.Handler == "@integration" && slices.Contains(commandArguments, "status")) ||
+		(core && definition.Handler == "@integration" && integrationReadOnlyInvocation(commandArguments)) ||
 		(core && definition.Handler == "@network" && len(commandArguments) > 0 && commandArguments[0] == "status") ||
 		(core && definition.Handler == "@update" && slices.Contains(commandArguments, "--check"))
 	if core && definition.Handler == "@ssh-agent" {
@@ -766,7 +766,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 	case "@update":
 		return cli.runUpdate(ctx, loaded, definition, commandArguments)
 	case "@integration":
-		fmt.Fprintf(cli.options.Stdout, "Usage: %s integration enable|disable <id> | status [id] [--json]\n", cli.options.Program)
+		fmt.Fprintf(cli.options.Stdout, "Usage: %s integration enable|disable <id> | cleanup <id> [--check] | status [id] [--json]\n", cli.options.Program)
 		return 0
 	case "@config":
 		return cli.runConfig(ctx, loaded, commandArguments)

@@ -240,6 +240,9 @@ func (prepared *preparedCommand) prepareRemoteOperation(ctx context.Context) err
 		Arguments []string `json:"arguments"`
 		Exact     bool     `json:"exact"`
 	}{prepared.Definition.Name, keysWithoutConsent(prepared.Arguments), true}
+	if request.check {
+		params.Arguments = slices.DeleteFunc(params.Arguments, func(value string) bool { return value == "--check" })
+	}
 	if err = session.call(planContext, "operation.plan", cli.ensureOperationID(), params, &exact); err != nil {
 		return err
 	}
@@ -249,6 +252,17 @@ func (prepared *preparedCommand) prepareRemoteOperation(ctx context.Context) err
 	preconfirmedPrompt := exact.Plan.Confirmed && exact.Plan.Confirmation != domain.ConfirmationNever
 	if exact.Schema != 1 || exact.Plan.OperationID != cli.ensureOperationID() || exact.Plan.Command != prepared.Definition.Name || exact.Plan.Effect != domain.CommandMutate || exact.Plan.Target != domain.TargetLocalOwner || preconfirmedPrompt || decodeErr != nil || len(digest) != sha256.Size || exact.ExpiresAt.IsZero() {
 		return errors.New("owner returned an invalid exact operation plan")
+	}
+	if request.check {
+		prepared.displayOnly = func() {
+			for _, step := range exact.Plan.Consequences {
+				fmt.Fprintln(cli.options.Stdout, "  "+step)
+			}
+			if len(exact.Plan.Consequences) == 0 {
+				fmt.Fprintln(cli.options.Stdout, "  No cleanup needed.")
+			}
+		}
+		return nil
 	}
 	prepared.Plan = exact.Plan
 	prepared.ownerPlan = true

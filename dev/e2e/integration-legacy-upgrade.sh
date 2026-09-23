@@ -255,6 +255,75 @@ guest sh -eu -c '
 [ "$(legacy_fingerprint)" = "$BASELINE_FINGERPRINT" ] \
   || die 'link fixture did not restore the exact legacy state'
 
+info 'recovering an unselected legacy Paseo service through the downloaded candidate hint'
+# Explicit persistent selection authorizes cleanup without adopting integration inventory.
+operator_env bash -c 'printf "AGENTS=claude codex opencode pi aiobserver\n" >> "$1"' _ "$HOST_CONFIG"
+HOST_CONFIG_FINGERPRINT="$(operator_env sha256sum "$HOST_CONFIG" | awk '{print $1}')"
+guest sh -eu -c '
+  [ ! -e /var/lib/subyard/paseo-ownership ]
+  [ ! -e /etc/systemd/system/paseo.service ]
+  [ ! -e /etc/systemd/system/paseo.service.subyard-retired ]
+  install -d /srv/agents/paseo/data
+  printf "%s\n" legacy-paseo-data > /srv/agents/paseo/data/cleanup-sentinel
+  printf "%s\n" "[Service]" "ExecStart=/usr/bin/sleep infinity" \
+    "[Install]" "WantedBy=multi-user.target" > /etc/systemd/system/paseo.service
+  chmod 0644 /etc/systemd/system/paseo.service
+  systemctl daemon-reload
+  systemctl enable --now paseo.service
+'
+paseo_before="$(guest sha256sum /etc/systemd/system/paseo.service /srv/agents/paseo/data/cleanup-sentinel)"
+if operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
+  "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" --yes \
+  >"$STATE_ROOT/paseo-update-blocked.log" 2>&1; then
+  die 'published updater accepted an unowned unselected Paseo service'
+fi
+assert_unadopted "$BASELINE_FINGERPRINT"
+# Parse the printed command as argv and validate the exact candidate and bounded action.
+# Never evaluate diagnostic text as shell code.
+python3 - "$STATE_ROOT/paseo-update-blocked.log" "${CANDIDATE_LAUNCHER%/yard}/yard-engine" \
+  >"$STATE_ROOT/cleanup-command" <<'PYHINT'
+import shlex
+import sys
+lines = open(sys.argv[1]).read().splitlines()
+expected = [sys.argv[2], "-Y", "default", "integration", "cleanup", "paseo"]
+commands = [shlex.split(line) for line in lines if "'integration' 'cleanup' 'paseo'" in line]
+assert expected in commands and expected + ["--check"] in commands, commands
+sys.stdout.buffer.write(b"\0".join(part.encode() for part in expected) + b"\0")
+PYHINT
+mapfile -d '' -t cleanup_command < "$STATE_ROOT/cleanup-command"
+operator_env "${cleanup_command[@]}" --check >"$STATE_ROOT/paseo-cleanup-check.log"
+if operator_env "${cleanup_command[@]}" </dev/null >"$STATE_ROOT/paseo-cleanup-eof.log" 2>&1; then
+  die 'EOF accepted candidate cleanup'
+fi
+[ "$(guest sha256sum /etc/systemd/system/paseo.service /srv/agents/paseo/data/cleanup-sentinel)" = "$paseo_before" ] \
+  || die 'candidate cleanup preview or EOF changed preserved artifacts'
+guest sh -eu -c '
+  systemctl is-active --quiet paseo.service
+  systemctl is-enabled --quiet paseo.service
+  [ ! -e /etc/systemd/system/paseo.service.subyard-retired ]
+  [ ! -e /var/lib/subyard/paseo-ownership ]
+'
+assert_unadopted "$BASELINE_FINGERPRINT"
+operator_env "${cleanup_command[@]}" --yes >"$STATE_ROOT/paseo-cleanup-apply.log"
+guest sh -eu -c '
+  [ ! -e /etc/systemd/system/paseo.service ]
+  [ -f /etc/systemd/system/paseo.service.subyard-retired ]
+  [ ! -e /var/lib/subyard/paseo-ownership ]
+  [ "$(cat /srv/agents/paseo/data/cleanup-sentinel)" = legacy-paseo-data ]
+  ! systemctl is-active --quiet paseo.service
+  ! systemctl is-enabled --quiet paseo.service
+'
+[ "$(guest sha256sum /etc/systemd/system/paseo.service.subyard-retired | awk '{print $1}')" = \
+  "$(printf '%s\n' "$paseo_before" | head -n 1 | awk '{print $1}')" ] \
+  || die 'candidate cleanup changed the saved unit'
+paseo_retired="$(guest sha256sum /etc/systemd/system/paseo.service.subyard-retired /srv/agents/paseo/data/cleanup-sentinel)"
+operator_env "${cleanup_command[@]}" --yes >"$STATE_ROOT/paseo-cleanup-retry.log"
+grep -Fq 'No cleanup needed.' "$STATE_ROOT/paseo-cleanup-retry.log" \
+  || die 'candidate cleanup retry was not a no-op'
+[ "$(guest sha256sum /etc/systemd/system/paseo.service.subyard-retired /srv/agents/paseo/data/cleanup-sentinel)" = "$paseo_retired" ] \
+  || die 'candidate cleanup retry changed preserved artifacts'
+assert_unadopted "$BASELINE_FINGERPRINT"
+
 info 'upgrading through the published updater and adopting the exact legacy state'
 operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
   "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" --yes

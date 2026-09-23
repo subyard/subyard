@@ -77,7 +77,7 @@ func ResolveIntegrationSelection(values map[string]string, requested []string) (
 		selected[agent] = true
 	}
 	knownAgent := func(agent string) bool {
-		for _, suffix := range []string{"COMMAND", "CHECK", "CONFIG", "CONFIG_DEST", "DEPENDS", "PERSIST", "PROJECTS_CHANGED", "PROVISION", "RULES", "RULES_DEST"} {
+		for _, suffix := range []string{"COMMAND", "CHECK", "CLEANUP", "CONFIG", "CONFIG_DEST", "DEPENDS", "PERSIST", "PROJECTS_CHANGED", "PROVISION", "RULES", "RULES_DEST"} {
 			if _, found := values["AGENT_"+agent+"_"+suffix]; found {
 				return true
 			}

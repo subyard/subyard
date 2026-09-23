@@ -195,6 +195,31 @@ including unfinished inventory application. Stopped yards remain unchanged.
 Integration enable/disable does not perform this initial adoption. Interrupted
 release updates resume within the same approved desired artifact scope.
 
+An integration may declare an `AGENT_<name>_CLEANUP` hook for explicit recovery of
+installed state that is outside the normal ownership inventory. The hook is coding-integration
+profile metadata, distinct from environment-profile resources. It remains discoverable when the
+integration is not selected, so `yard integration cleanup <name>` can inspect or clean up a
+disabled integration without changing the requested set. Cleanup sources use the same trusted
+regular, non-symbolic-link file contract and scopes as provisioning hooks.
+
+To inspect recovery, run `yard -Y <yard> integration cleanup <name> --check`. Run the same command
+without `--check` to review and confirm its consequences. Cleanup refuses integrations that are
+still selected, including dependencies of selected integrations. Hooks must keep cleanup bounded
+and reversible, preserve user data, and support safe retries after interruption.
+
+When an update is blocked before activation, its diagnostic names the downloaded candidate's
+`bin/yard-engine` directly. Use that printed command on the owner host: the active older `yard`
+may not support cleanup yet. After cleanup, repeat the update.
+
+Cleanup uses a read-only observation followed by the shared typed confirmation and an exact-plan
+recheck. Subyard sends the hook to the running yard and invokes it as
+`sh -eu -s -- observe|apply DEV_USER DEV_UID EXPECTED_FINGERPRINT`. Observation writes exactly one
+JSON object with a lowercase SHA-256 `fingerprint`, a `changed` boolean and public-safe `steps`.
+A meaningful failure may instead write an object containing a safe-name `code` and bounded,
+public-safe `message`. Apply receives the observed fingerprint, must recheck it before mutation,
+and may return the same observation shape; Subyard observes again afterward to verify convergence. Hooks must not include
+credentials, configuration contents or other secrets in fingerprints, steps, errors or output.
+
 When a configuration source is registered, enable/disable rejects local selection
 writes. Edit the selected yard's full requested set in that source, run `yard config
 sync`, then `yard init` to reconcile. `config sync --apply` refreshes file consumers and
