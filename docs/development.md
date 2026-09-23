@@ -64,6 +64,11 @@ leaf publishes recovery facts before importing config and later switches shell e
 not authorize, activate or roll back a release. An interruption resumes from the protected outer
 journal and observed facts.
 
+After activation or rollback and configuration refresh, `yard update` reinspects the exact selected
+release without fetching another version. Its final human-readable summary reports readiness and
+the active and previous releases, with blockers and next steps when needed. An unsuccessful final
+check exits nonzero and records a failed update; `yard update --check` keeps its JSON output.
+
 Structured update history is durable outside the installed runtime. Each committed activation or rollback,
 plus direct preparation failures and declined confirmations, records a structured attempt under
 `$SUBYARD_HOME/logs/updates`; the newest 30 attempts are retained. `yard logs --updates [-n N]`

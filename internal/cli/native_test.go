@@ -797,6 +797,51 @@ func TestRollbackDoesNotExecuteRetainedEngineBeforeVerification(t *testing.T) {
 	}
 }
 
+func TestUpdatePrintsFinalReadinessAndFailsOnDrift(t *testing.T) {
+	for _, drift := range []bool{false, true} {
+		t.Run(fmt.Sprintf("drift=%v", drift), func(t *testing.T) {
+			root, environment, runtimeRoot := updateReleaseFixture(t)
+			if drift {
+				environment = append(environment, "UPDATE_FINAL_CHECK_FAIL=1")
+			}
+			var stdout, stderr bytes.Buffer
+			configs := &recordingConfigApplier{}
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard", WorkingDir: root, Environment: environment,
+				Arguments: []string{"update", "--yes", "--version", "1.2.3", "--runtime-root", runtimeRoot},
+				Config:    configs, Stdout: &stdout, Stderr: &stderr,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantCode, status, heading := 0, "ready", "[ ok ] Update completed successfully"
+			if drift {
+				wantCode, status, heading = 1, "migration-required", "[FAIL] Update did not complete successfully"
+			}
+			if code := program.Run(context.Background()); code != wantCode {
+				t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			for _, expected := range []string{heading, "Status: " + status, "Active release: 1.2.3-f16d05ec6b29", "Previous release: release-old"} {
+				if !strings.Contains(stdout.String(), expected) {
+					t.Fatalf("missing %q in %q", expected, stdout.String())
+				}
+			}
+			if len(configs.yards) != 1 || strings.Count(stdout.String(), "Downloading subyard-1.2.3-") != 4 {
+				t.Fatalf("final check refreshed or downloaded again: configs=%v stdout=%q", configs.yards, stdout.String())
+			}
+			if drift {
+				if strings.Contains(stdout.String(), "Update completed successfully") || !strings.Contains(stdout.String(), "Next: yard migrate") {
+					t.Fatalf("drift report=%q", stdout.String())
+				}
+				records, err := (audit.UpdateHistory{Home: environmentValue(environment, "SUBYARD_HOME")}).Read(10)
+				if err != nil || len(records) != 1 || records[0].Status != "failure" || records[0].ErrorCode != "final_check_failed" {
+					t.Fatalf("final check history=%#v err=%v", records, err)
+				}
+			}
+		})
+	}
+}
+
 func TestUpdateRefreshesConfigsWithActivatedRuntimeLauncher(t *testing.T) {
 	for _, test := range []struct {
 		name                                                string
@@ -913,6 +958,19 @@ case "${1:-}" in
 	      if [ "${UPDATE_CANCEL_INSPECTION:-}" = 1 ]; then exec sleep 30; fi
 	      active=$(readlink "$runtime_root/current")
 	      active_release=${active#releases/}
+	      if [ "$active_release" = "$target_release" ]; then
+	        previous=$(readlink "$runtime_root/previous" || true)
+	        jq -n --arg active "$active_release" --arg previous "${previous#releases/}" --arg fail "${UPDATE_FINAL_CHECK_FAIL:-}" '{
+	          schemaVersion: 1,
+	          inspection: {
+	            plan: "plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	            assessment: {action: "release.transition.v2", effect: "mutation", changed: ($fail == "1"), impacts: ["local-metadata", "persistent-data", "yard-runtime"], recovery: "reversible"},
+	            outcome: {status: "ready", reachedGoal: true, active: $active, target: $active, code: "ready", message: "verified"}
+	          }
+	        } | if $previous != "" then .inspection.outcome.previous = $previous else . end
+	          | if $fail == "1" then .inspection.assessment.consequences = ["repair configuration drift"] | .inspection.outcome += {status: "migration-required", reachedGoal: false, code: "transition-required", message: "configuration drift remains", retry: "yard migrate"} else . end'
+	        exit 0
+	      fi
 	      printf '{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["activate retained runtime"]},"outcome":{"status":"migration-required","reachedGoal":false,"active":"%s","target":"%s","code":"transition-required","message":"the retained release transition has not started","retry":"run yard update"}}}\n' "$active_release" "$target_release"
 	      exit 0
 	    fi
@@ -1210,6 +1268,19 @@ case "${1:-}" in
       fi
 	      active=$(readlink "$runtime_root/current")
 	      active_release=${active#releases/}
+	      if [ "$active_release" = "$target_release" ]; then
+	        previous=$(readlink "$runtime_root/previous" || true)
+	        jq -n --arg active "$active_release" --arg previous "${previous#releases/}" --arg fail "${UPDATE_FINAL_CHECK_FAIL:-}" '{
+	          schemaVersion: 1,
+	          inspection: {
+	            plan: "plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	            assessment: {action: "release.transition.v2", effect: "mutation", changed: ($fail == "1"), impacts: ["local-metadata", "persistent-data", "yard-runtime"], recovery: "reversible"},
+	            outcome: {status: "ready", reachedGoal: true, active: $active, target: $active, code: "ready", message: "verified"}
+	          }
+	        } | if $previous != "" then .inspection.outcome.previous = $previous else . end
+	          | if $fail == "1" then .inspection.assessment.consequences = ["repair configuration drift"] | .inspection.outcome += {status: "migration-required", reachedGoal: false, code: "transition-required", message: "configuration drift remains", retry: "yard migrate"} else . end'
+	        exit 0
+	      fi
 	      printf '{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["activate verified runtime 1.2.3"]},"outcome":{"status":"migration-required","reachedGoal":false,"active":"%s","target":"%s","code":"transition-required","message":"the inspected release transition has not started","retry":"run yard update"}}}\n' "$active_release" "$target_release"
       exit 0
     fi

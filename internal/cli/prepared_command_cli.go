@@ -130,6 +130,9 @@ func (cli *CLI) runPreparedCommand(ctx context.Context, prepared *preparedComman
 		return cli.forwardRemote(ctx, prepared.Loaded.Context, prepared.Definition.Name, arguments)
 	}
 	result, err := prepared.Execute(ctx, orchestrator, cli.options.Stdout)
+	if prepared.release != nil {
+		cli.printUpdateResult(prepared.release, err == nil && result.Status == "ok")
+	}
 	if err != nil {
 		var commitErr *commandCommitError
 		if errors.As(err, &commitErr) {

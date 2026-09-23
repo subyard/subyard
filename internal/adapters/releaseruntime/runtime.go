@@ -46,6 +46,7 @@ type Prepared struct {
 	TargetRelease  string
 	TargetVersion  string
 	run            func(context.Context) error
+	check          func(context.Context) (releasetransition.Inspection, error)
 }
 
 type verifiedPreparationError struct {
@@ -69,6 +70,16 @@ func (prepared Prepared) Execute(ctx context.Context) error {
 		return errors.New("release operation was not prepared")
 	}
 	return prepared.run(ctx)
+}
+
+// Check reinspects the exact release selected by this operation without fetching
+// another release or authorizing any further changes. Like update --check, it
+// supports retained owners whose configuration refresh is completed by the caller.
+func (prepared Prepared) Check(ctx context.Context) (releasetransition.Inspection, error) {
+	if prepared.check == nil {
+		return releasetransition.Inspection{}, errors.New("release check was not prepared")
+	}
+	return prepared.check(ctx)
 }
 
 type Runtime struct {
@@ -1038,6 +1049,10 @@ func (runtime *Runtime) prepareInspectedCandidateTransition(
 		SourceVersion:  "",
 		TargetRelease:  string(target.candidate.release),
 		TargetVersion:  target.version,
+		check: func(ctx context.Context) (releasetransition.Inspection, error) {
+			checked, _, err := runtime.inspectCompletedTransition(ctx, request.RuntimeRoot, request.ConfigHome, request.Target, owner, request)
+			return checked, err
+		},
 		run: func(ctx context.Context) error {
 			if err := requirePreparedReleaseRoots(parsed, false); err != nil {
 				return err

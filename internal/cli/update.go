@@ -17,6 +17,7 @@ import (
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/releasetransition"
 )
 
 type releaseAdapter struct{ prepared releaseruntime.Prepared }
@@ -29,6 +30,7 @@ type releaseExecution struct {
 	phase        string
 	failurePhase string
 	failureCode  string
+	inspection   *releasetransition.Inspection
 }
 
 func (execution *releaseExecution) Close() error {
@@ -113,7 +115,54 @@ func (cli *CLI) executeRelease(ctx context.Context, orchestrator *application.Or
 	if result.Status == "ok" && execution.prepared.RefreshConfigs {
 		runErr = errors.Join(runErr, cli.refreshReleaseConfig(ctx, execution))
 	}
+	if _, update := updateDirection(execution.prepared.Action); update && runErr == nil && result.Status == "ok" {
+		if cli.updateProgress != nil {
+			fmt.Fprintln(cli.updateProgress, "Checking the updated release...")
+		}
+		inspection, checkErr := execution.prepared.Check(ctx)
+		if checkErr == nil {
+			execution.inspection = &inspection
+			if inspection.Outcome.Status != releasetransition.StatusReady {
+				checkErr = fmt.Errorf("%s; next: %s", inspection.Outcome.Message, inspection.Outcome.Retry)
+			}
+		}
+		if checkErr != nil {
+			execution.failurePhase, execution.failureCode = execution.phase, "final_check_failed"
+			runErr = fmt.Errorf("final update check: %w", checkErr)
+		}
+	}
 	return result, runErr
+}
+
+func (cli *CLI) printUpdateResult(execution *releaseExecution, success bool) {
+	if _, update := updateDirection(execution.prepared.Action); !update {
+		return
+	}
+	output := cli.options.Stdout
+	if success {
+		fmt.Fprintln(output, "\n  [ ok ] Update completed successfully")
+	} else {
+		fmt.Fprintln(output, "\n  [FAIL] Update did not complete successfully")
+	}
+	if execution.inspection == nil {
+		fmt.Fprintln(output, "  Final readiness: not verified")
+		return
+	}
+	outcome := execution.inspection.Outcome
+	fmt.Fprintf(output, "  Status: %s\n  Active release: %s\n", outcome.Status, outcome.Active)
+	if outcome.Previous != nil {
+		fmt.Fprintf(output, "  Previous release: %s\n", *outcome.Previous)
+	}
+	fmt.Fprintf(output, "  %s\n", outcome.Message)
+	for _, blocker := range execution.inspection.Blockers {
+		fmt.Fprintf(output, "  Blocked: %s\n", blocker.Message)
+	}
+	for _, warning := range outcome.Warnings {
+		fmt.Fprintf(output, "  Warning: %s\n", warning)
+	}
+	if outcome.Retry != "" {
+		fmt.Fprintf(output, "  Next: %s\n", outcome.Retry)
+	}
 }
 
 func (cli *CLI) refreshReleaseConfig(ctx context.Context, execution *releaseExecution) error {

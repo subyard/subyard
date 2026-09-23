@@ -542,62 +542,71 @@ func (runtime *Runtime) recoverCurrentScope(ctx context.Context, root, configHom
 // Completing historical activation may reveal a fresh current-release scope.
 // Inspect that state without extending the previous authorization to new work.
 func (runtime *Runtime) verifyCurrentConvergence(ctx context.Context, root, configHome string, current releasetransition.ReleaseID, owner candidateVerification, request releasetransition.ProcessRequest) error {
-	before, err := runtime.readCurrentSnapshot(root, configHome)
+	inspection, activationOwned, err := runtime.inspectCompletedTransition(ctx, root, configHome, current, owner, request)
 	if err != nil {
-		return redactReleaseInspectionError(err)
-	}
-	actual := releaseLinksFromRuntimeSnapshot(before.links)
-	if actual.Active != current {
-		return fmt.Errorf("%w: current release changed during convergence", domain.ErrPlanStale)
-	}
-	protected, err := runtime.inspectProtectedTransition(ctx, root, configHome, request.Yard, request.InheritedSettingIDs)
-	if err != nil {
-		var public publicReleaseInspectionError
-		if errors.As(err, &public) {
-			return transitionOutcomeError(public.outcome)
-		}
-		return redactReleaseInspectionError(err)
-	}
-	var inspection releasetransition.Inspection
-	var activationOwned bool
-	if protected != nil {
-		if protected.journal.Goal.Target != current {
-			return fmt.Errorf("%w: protected target changed during convergence", domain.ErrPlanStale)
-		}
-		inspection, activationOwned = protected.inspection, protected.activationReconciliationOwned
-	} else {
-		verified, err := runtime.verifyPublishedCandidate(ctx, owner.candidate, root, &owner.digest)
-		if err != nil {
-			return redactReleaseInspectionError(err)
-		}
-		defer verified.Close()
-		request.Mode, request.Execution = releasetransition.ProcessInspect, nil
-		response, err := runtime.invokeVerifiedCandidateTransition(ctx, verified, request, "")
-		if err != nil {
-			return redactReleaseInspectionError(err)
-		}
-		if response.Inspection == nil || response.Outcome != nil {
-			return errors.New("current release returned no final readiness inspection")
-		}
-		if err := releasetransition.ValidateProcessInspection(releasetransition.Goal{Target: current, Direction: request.Direction}, *response.Inspection); err != nil {
-			return redactReleaseInspectionError(err)
-		}
-		inspection, activationOwned = *response.Inspection, response.ActivationReconciliationOwned
-	}
-	if err := runtime.revalidateCurrentSnapshot(root, configHome, before); err != nil {
 		return err
 	}
-	outcome := *inspection.Outcome
 	if !activationOwned {
 		return errors.New("the installed transition owner cannot verify final runtime readiness; run yard update")
 	}
-	if outcome.Active != actual.Active || (outcome.Previous == nil) != (actual.Previous == nil) ||
-		(outcome.Previous != nil && *outcome.Previous != *actual.Previous) {
-		return errors.New("final readiness inspection does not match actual runtime links")
-	}
+	outcome := *inspection.Outcome
 	if outcome.Status != releasetransition.StatusReady {
 		outcome.Retry = CurrentReleaseRetry(outcome)
 		return transitionOutcomeError(outcome)
 	}
 	return nil
+}
+
+func (runtime *Runtime) inspectCompletedTransition(ctx context.Context, root, configHome string, current releasetransition.ReleaseID, owner candidateVerification, request releasetransition.ProcessRequest) (releasetransition.Inspection, bool, error) {
+	before, err := runtime.readCurrentSnapshot(root, configHome)
+	if err != nil {
+		return releasetransition.Inspection{}, false, redactReleaseInspectionError(err)
+	}
+	actual := releaseLinksFromRuntimeSnapshot(before.links)
+	if actual.Active != current {
+		return releasetransition.Inspection{}, false, fmt.Errorf("%w: current release changed during convergence", domain.ErrPlanStale)
+	}
+	protected, err := runtime.inspectProtectedTransition(ctx, root, configHome, request.Yard, request.InheritedSettingIDs)
+	if err != nil {
+		var public publicReleaseInspectionError
+		if errors.As(err, &public) {
+			return releasetransition.Inspection{}, false, transitionOutcomeError(public.outcome)
+		}
+		return releasetransition.Inspection{}, false, redactReleaseInspectionError(err)
+	}
+	var inspection releasetransition.Inspection
+	var activationOwned bool
+	if protected != nil {
+		if protected.journal.Goal.Target != current {
+			return releasetransition.Inspection{}, false, fmt.Errorf("%w: protected target changed during convergence", domain.ErrPlanStale)
+		}
+		inspection, activationOwned = protected.inspection, protected.activationReconciliationOwned
+	} else {
+		verified, err := runtime.verifyPublishedCandidate(ctx, owner.candidate, root, &owner.digest)
+		if err != nil {
+			return releasetransition.Inspection{}, false, redactReleaseInspectionError(err)
+		}
+		defer verified.Close()
+		request.Mode, request.Execution = releasetransition.ProcessInspect, nil
+		response, err := runtime.invokeVerifiedCandidateTransition(ctx, verified, request, "")
+		if err != nil {
+			return releasetransition.Inspection{}, false, redactReleaseInspectionError(err)
+		}
+		if response.Inspection == nil || response.Outcome != nil {
+			return releasetransition.Inspection{}, false, errors.New("current release returned no final readiness inspection")
+		}
+		if err := releasetransition.ValidateProcessInspection(releasetransition.Goal{Target: current, Direction: request.Direction}, *response.Inspection); err != nil {
+			return releasetransition.Inspection{}, false, redactReleaseInspectionError(err)
+		}
+		inspection, activationOwned = *response.Inspection, response.ActivationReconciliationOwned
+	}
+	if err := runtime.revalidateCurrentSnapshot(root, configHome, before); err != nil {
+		return releasetransition.Inspection{}, false, err
+	}
+	outcome := *inspection.Outcome
+	if outcome.Active != actual.Active || (outcome.Previous == nil) != (actual.Previous == nil) ||
+		(outcome.Previous != nil && *outcome.Previous != *actual.Previous) {
+		return releasetransition.Inspection{}, false, errors.New("final readiness inspection does not match actual runtime links")
+	}
+	return inspection, activationOwned, nil
 }
