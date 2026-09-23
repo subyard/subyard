@@ -42,8 +42,16 @@ func TestReleaseActivationRefreshesOrcaBeforeMaterializedConfig(t *testing.T) {
 }
 
 func TestMaterializedConfigObservationReportsSourceManagedOwnershipConflict(t *testing.T) {
-	for _, path := range []string{"/etc/subyard/agent-project-hooks", "/untrusted-secret"} {
-		t.Run(path, func(t *testing.T) {
+	for _, test := range []struct{ path, detail, want, command string }{
+		{path: "/etc/subyard/agent-project-hooks"},
+		{path: "/untrusted-secret", detail: "unrecognized core content"},
+		{path: "/usr/local/libexec/subyard/projects-changed", detail: "unrecognized core content", want: "contents do not match", command: "sha256sum"},
+		{path: "/usr/local/libexec/subyard/projects-changed", detail: "unsafe core metadata", want: "owned by root:root", command: "namei"},
+		{path: "/usr/local/libexec/subyard/projects-changed", detail: "unsafe core ancestor", want: "parent directories", command: "namei"},
+		{path: "/usr/local/libexec/subyard/projects-changed", detail: "untrusted-secret"},
+	} {
+		path := test.path
+		t.Run(path+"/"+test.detail, func(t *testing.T) {
 			root, environment, _ := nativeFixture(t)
 			writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join(environment, "\n")+"\n", 0o600)
 			writeCLIFile(t, filepath.Join(root, "config", "projects-changed.sh"), "#!/bin/sh\n", 0o755)
@@ -51,7 +59,7 @@ func TestMaterializedConfigObservationReportsSourceManagedOwnershipConflict(t *t
 			if err := configsync.RegisterSource(configHome, t.TempDir()); err != nil {
 				t.Fatal(err)
 			}
-			conflict, _ := json.Marshal(map[string]string{"reason": "unowned selected artifact", "path": path})
+			conflict, _ := json.Marshal(map[string]string{"reason": "unowned selected artifact", "path": path, "detail": test.detail})
 			instance := ports.InstanceInfo{Status: "Running"}
 			fake := &testkit.Incus{
 				Instances: map[string]ports.InstanceInfo{"subyard/yard": instance},
@@ -84,6 +92,18 @@ func TestMaterializedConfigObservationReportsSourceManagedOwnershipConflict(t *t
 			}
 			if stdout.Len() != 0 || strings.Contains(stderr.String(), "untrusted-secret") {
 				t.Fatal("diagnostic polluted protocol output or exposed an untrusted path")
+			}
+			var diagnostic interface{ ActivationDiagnostic() (string, string) }
+			if errors.As(err, &diagnostic) != (test.want != "") {
+				t.Fatalf("unexpected public diagnostic: %v", err)
+			}
+			if test.want != "" {
+				message, retry := diagnostic.ActivationDiagnostic()
+				if !strings.Contains(message, test.want) || !strings.Contains(message, path) ||
+					!strings.Contains(retry, "'incus' 'exec' 'yard' '--project' 'subyard' '--' '"+test.command+"'") ||
+					!strings.Contains(stderr.String(), retry) {
+					t.Fatalf("incomplete diagnostic: %q / %q", message, retry)
+				}
 			}
 			if len(fake.ExecCalls) != 3 || slices.Contains(fake.ExecCalls[2].Request.Command, "apply") ||
 				!slices.Contains(fake.ExecCalls[2].Request.Command, "observe") || len(fake.ConfigUpdates) != 0 || len(fake.PowerUpdates) != 0 {

@@ -13,9 +13,10 @@ ROOT = '@STATE_ROOT@'
 OWNER = int('@STATE_UID@')
 
 class OwnershipConflict(Exception):
-    def __init__(self, reason, path):
+    def __init__(self, reason, path, detail=''):
         self.reason = reason
         self.path = path
+        self.detail = detail
 
 def digest(value):
     return hashlib.sha256(value).hexdigest()
@@ -70,7 +71,7 @@ def adoptable_selected(entry, current, home, uid):
 def clean(entry):
     return {k: v for k, v in entry.items() if k != 'content'}
 
-def adoptable_core(entry, current):
+def core_adoption_problem(entry, current):
     # These shared core files predate the integration inventory. Recognize only
     # their exact desired bytes and protected system metadata, never agent files.
     modes = {'/usr/local/libexec/subyard/projects-changed': 0o755,
@@ -78,25 +79,36 @@ def adoptable_core(entry, current):
     mode = modes.get(entry.get('path'))
     predecessor_digests = {
         '/usr/local/libexec/subyard/projects-changed': {
+            # Original installer heredoc, before shared resource hooks.
+            'b632dd04a13ba11abff0b7502785ae09d8a6119c0c1261f338861796de82df35',
             'cefded0322e335042ff9a0e74f2cba187fb1a2a6aa8a2ffbcdf249ecc8e12588'
         }
     }
     accepted_digests = {entry['digest']} | predecessor_digests.get(entry.get('path'), set())
     if (entry['id'] != '_projects' or entry['kind'] != 'file' or mode is None
-            or entry.get('mode', 0o644) != mode or current not in accepted_digests):
-        return False
+            or entry.get('mode', 0o644) != mode):
+        return 'not a shared core artifact'
+    if current not in accepted_digests:
+        return 'unrecognized core content'
     st = os.lstat(entry['path'])
     if (not stat.S_ISREG(st.st_mode) or st.st_uid != OWNER or st.st_gid != OWNER
             or stat.S_IMODE(st.st_mode) != mode):
-        return False
+        return 'unsafe core metadata'
     parent = os.path.dirname(entry['path'])
     while parent != '/':
         st = os.lstat(parent)
         if (not stat.S_ISDIR(st.st_mode) or st.st_uid != OWNER or st.st_gid != OWNER
                 or st.st_mode & 0o022):
-            return False
+            return 'unsafe core ancestor'
         parent = os.path.dirname(parent)
-    return True
+    return ''
+
+def adoptable_core(entry, current):
+    return core_adoption_problem(entry, current) == ''
+
+def unowned_selected(entry, current):
+    return OwnershipConflict('unowned selected artifact', entry['path'],
+                             core_adoption_problem(entry, current))
 
 def open_parent(path):
     descriptor = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
@@ -220,7 +232,7 @@ def main():
                 elif adopt and not established and adoptable_selected(entry, current, home, uid):
                     adopted.append(entry)
                 else:
-                    raise OwnershipConflict('unowned selected artifact', entry['path'])
+                    raise unowned_selected(entry, current)
             changed |= current != entry['digest']
             if current is not None:
                 metadata[name] = actual_metadata(entry)
@@ -246,7 +258,7 @@ def main():
         current = actual(entry)
         if not (adoptable_core(entry, current)
                 or adopt and not established and adoptable_selected(entry, current, home, uid)):
-            raise OwnershipConflict('unowned selected artifact', entry['path'])
+            raise unowned_selected(entry, current)
     os.makedirs(ROOT, mode=0o700, exist_ok=True)
     protected(ROOT, True)
     def save(entries):
@@ -330,7 +342,7 @@ try:
     main()
 except OwnershipConflict as error:
     # Only a fixed category and destination are emitted, never document contents.
-    print(json.dumps({'reason': error.reason, 'path': error.path}), file=sys.stderr)
+    print(json.dumps({'reason': error.reason, 'path': error.path, 'detail': error.detail}), file=sys.stderr)
     sys.exit(1)
 except Exception:
     print('integration ownership conflict or unavailable evidence', file=sys.stderr)

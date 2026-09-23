@@ -2605,10 +2605,12 @@ func (transition *V2Transition) reconcileActivation(
 					blocker.Code, blocker.Message, blocker.Retry,
 				), nil
 			}
-			return v2RecoveringOutcome(
+			outcome := v2RecoveringOutcome(
 				links, journal.Goal.Target, transactionIDPointer(journal.Transaction),
 				blocker.Code, blocker.Message,
-			), nil
+			)
+			outcome.Retry = blocker.Retry
+			return outcome, nil
 		}
 		if err := validateActivationObservation(id, before); err != nil {
 			return v2OperatorOutcome(
@@ -2723,14 +2725,25 @@ func (transition *V2Transition) reduceActivationReconcilerFailure(
 func activationObservationBlocker(id string, err error) Blocker {
 	code := CodeDependencyUnavailable
 	message := fmt.Sprintf("activation reconciler %q cannot be observed safely", id)
+	retry := "run yard update --check"
 	var conflict interface{ ActivationConflict() bool }
 	if errors.As(err, &conflict) && conflict.ActivationConflict() {
 		code = CodeActivationAmbiguous
 		message = fmt.Sprintf("activation reconciler %q reports ambiguous activation topology", id)
 	}
+	// Adapters may explicitly provide a public diagnostic; never expose raw
+	// errors from guest commands, configuration parsing or transport failures.
+	var diagnostic interface{ ActivationDiagnostic() (string, string) }
+	if errors.As(err, &diagnostic) {
+		publicMessage, publicRetry := diagnostic.ActivationDiagnostic()
+		if validateText(publicMessage, "activation diagnostic", maxDiagnosticText, true) == nil &&
+			validateSafeAction(publicRetry) == nil {
+			message, retry = publicMessage, publicRetry
+		}
+	}
 	return Blocker{
 		Code: code, Resource: "activation." + id, Message: message,
-		Retry: "run yard update --check",
+		Retry: retry,
 	}
 }
 

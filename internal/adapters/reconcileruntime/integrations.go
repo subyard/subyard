@@ -15,10 +15,26 @@ import (
 
 	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/shellquote"
 )
 
 //go:embed integration_inventory.py
 var integrationInventoryProgram string
+
+// Only validated, source-owned destinations and fixed diagnostic text may cross
+// the release boundary. Guest stderr and file contents remain private.
+type integrationOwnershipError struct {
+	message string
+	retry   string
+}
+
+func (err integrationOwnershipError) Error() string {
+	return err.message + " Next, inspect on the owner host: " + err.retry
+}
+
+func (err integrationOwnershipError) ActivationDiagnostic() (string, string) {
+	return err.message, err.retry
+}
 
 // IntegrationPlan binds the candidate selection and live ownership evidence.
 // It contains no credentials or document contents.
@@ -235,7 +251,7 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 	program = strings.ReplaceAll(program, "@STATE_UID@", "0")
 	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, ports.InstanceExecRequest{Command: []string{"python3", "-B", "-c", program, mode}, Stdin: payload})
 	if err != nil || result.ExitCode != 0 {
-		var conflict struct{ Reason, Path string }
+		var conflict struct{ Reason, Path, Detail string }
 		if json.Unmarshal(result.Stderr, &conflict) == nil {
 			knownPath := slices.Contains(legacy, conflict.Path)
 			for _, entry := range entries {
@@ -244,6 +260,27 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 			switch conflict.Reason {
 			case "owned artifact drift", "unowned selected artifact", "legacy integration artifact has no ownership evidence":
 				if knownPath && conflict.Path != "" {
+					if conflict.Reason == "unowned selected artifact" &&
+						(conflict.Path == "/usr/local/libexec/subyard/projects-changed" || conflict.Path == "/etc/subyard/agent-project-hooks") {
+						detail := ""
+						probe := []string{"namei", "-l", "--", conflict.Path}
+						switch conflict.Detail {
+						case "unrecognized core content":
+							detail = "contents do not match the current or a recognized legacy Subyard file; compare with the shipped file before replacing it"
+							probe = []string{"sha256sum", "--", conflict.Path}
+						case "unsafe core metadata":
+							detail = "file must be regular, owned by root:root, with mode 0755 for projects-changed or 0644 for agent-project-hooks"
+						case "unsafe core ancestor":
+							detail = "parent directories must be owned by root:root and not writable by group or others"
+						}
+						if detail != "" {
+							command := append([]string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--"}, probe...)
+							return integrationObservation{}, integrationOwnershipError{
+								message: fmt.Sprintf("integration ownership conflict in yard %s at %q: %s. File preserved.", runtime.Yard.YardName, conflict.Path, detail),
+								retry:   shellquote.Command(command),
+							}
+						}
+					}
 					return integrationObservation{}, fmt.Errorf("integration ownership conflict: %s at %q; managed artifacts were preserved", conflict.Reason, conflict.Path)
 				}
 			}

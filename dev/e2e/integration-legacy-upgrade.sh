@@ -50,6 +50,7 @@ guest() { incus exec "$INSTANCE" --project "$PROJECT" -- "$@"; }
 legacy_fingerprint() {
   guest sh -eu -c '
     sha256sum \
+      /usr/local/libexec/subyard/projects-changed \
       /home/dev/.claude/settings.json \
       /home/dev/.codex/config.toml \
       /home/dev/.codex/rules/repo.rules \
@@ -202,6 +203,12 @@ value = json.load(open(p))
 value["fixtureUnmanaged"] = {"marker": "legacy-upgrade"}
 open(p, "w").write(json.dumps(value, indent=2) + "\n")'\''
 ' subyard "$HISTORY_PATH"
+# A yard updated to v0.14 may retain the original v0.3-v0.5 dispatcher.
+guest sh -eu -c 'printf "%s\n" "$1" > /usr/local/libexec/subyard/projects-changed' \
+  subyard "$(cat "$ROOT/internal/adapters/reconcileruntime/testdata/projects-changed-v0.3.sh")"
+[ "$(guest sha256sum /usr/local/libexec/subyard/projects-changed | awk '{print $1}')" = \
+  b632dd04a13ba11abff0b7502785ae09d8a6119c0c1261f338861796de82df35 ] \
+  || die 'historical dispatcher fixture changed'
 BASELINE_FINGERPRINT="$(legacy_fingerprint)"
 HOST_CONFIG_FINGERPRINT="$(operator_env sha256sum "$HOST_CONFIG" | awk '{print $1}')"
 
@@ -259,6 +266,25 @@ info 'recovering an unselected legacy Paseo service through the downloaded candi
 # Explicit persistent selection authorizes cleanup without adopting integration inventory.
 operator_env bash -c 'printf "AGENTS=claude codex opencode pi aiobserver\n" >> "$1"' _ "$HOST_CONFIG"
 HOST_CONFIG_FINGERPRINT="$(operator_env sha256sum "$HOST_CONFIG" | awk '{print $1}')"
+info 'reporting unknown dispatcher contents without changing the file or release'
+guest sh -eu -c 'printf "\n# unknown local change\n" >> /usr/local/libexec/subyard/projects-changed'
+DISPATCHER_DRIFT_FINGERPRINT="$(legacy_fingerprint)"
+if ! operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
+  "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" --check \
+  >"$STATE_ROOT/dispatcher-check.json" 2>"$STATE_ROOT/dispatcher-check.log"; then
+  die 'dispatcher check did not produce a readable inspection'
+fi
+jq -e '
+  .outcome.reachedGoal == false and
+  (.outcome.message | contains("contents do not match")) and
+  (.outcome.message | contains("/usr/local/libexec/subyard/projects-changed")) and
+  (.outcome.retry | contains("sha256sum")) and
+  (.blockers[0].message == .outcome.message)
+' "$STATE_ROOT/dispatcher-check.json" >/dev/null || die 'check hid the actionable dispatcher conflict'
+assert_unadopted "$DISPATCHER_DRIFT_FINGERPRINT"
+guest sh -eu -c 'printf "%s\n" "$1" > /usr/local/libexec/subyard/projects-changed' \
+  subyard "$(cat "$ROOT/internal/adapters/reconcileruntime/testdata/projects-changed-v0.3.sh")"
+assert_unadopted "$BASELINE_FINGERPRINT"
 guest sh -eu -c '
   [ ! -e /var/lib/subyard/paseo-ownership ]
   [ ! -e /etc/systemd/system/paseo.service ]
@@ -330,6 +356,9 @@ operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
 [ "$(operator_yard --version)" = "yard $CANDIDATE_VERSION" ] \
   || die 'candidate release was not activated'
 guest test -f "$INVENTORY" || die 'successful upgrade did not publish integration inventory'
+[ "$(guest sha256sum /usr/local/libexec/subyard/projects-changed | awk '{print $1}')" = \
+  "$(sha256sum "$ROOT/config/projects-changed.sh" | awk '{print $1}')" ] \
+  || die 'successful upgrade did not replace the historical dispatcher'
 operator_yard integration status --json > "$STATE_ROOT/adopted-status.json"
 jq -e '
   .observed == "ready" and

@@ -431,6 +431,16 @@ func TestIntegrationInventoryAdoptsOnlyExactProtectedCoreArtifacts(t *testing.T)
 					if (err != nil) != wantError {
 						t.Fatalf("%s: %v %s", mode, err, output)
 					}
+					if wantDetail := map[string]string{
+						"content": "unrecognized core content", "mode": "unsafe core metadata",
+						"owner": "unsafe core metadata", "group": "unsafe core metadata",
+						"ancestor-writable": "unsafe core ancestor",
+					}[mutation]; wantError && wantDetail != "" {
+						var conflict struct{ Detail string }
+						if json.Unmarshal(output, &conflict) != nil || conflict.Detail != wantDetail {
+							t.Fatalf("missing ownership detail: %s", output)
+						}
+					}
 					var result integrationObservation
 					if mode == "observe" && !wantError {
 						if err := json.Unmarshal(output, &result); err != nil {
@@ -517,80 +527,107 @@ func TestIntegrationInventoryAdoptsOnlyExactProtectedCoreArtifacts(t *testing.T)
 }
 
 func TestIntegrationInventoryAdoptsReleasedDispatcherPredecessor(t *testing.T) {
-	root := t.TempDir()
-	home, state := root+"/home", root+"/state"
-	path := root + "/usr/local/libexec/subyard/projects-changed"
-	for _, directory := range []string{home, filepath.Dir(path)} {
-		if err := os.MkdirAll(directory, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := filepath.WalkDir(root, func(path string, _ os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		return os.Chown(path, -1, os.Getuid())
-	}); err != nil {
-		t.Fatal(err)
-	}
-	desired, err := os.ReadFile("../../../config/projects-changed.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	predecessor := []byte(strings.Replace(string(desired),
-		"# Shared resources own hooks in projects-changed.d; selected agent hooks live in the list.\n", "", 1))
-	if got := fmt.Sprintf("%x", sha256.Sum256(predecessor)); got != "cefded0322e335042ff9a0e74f2cba187fb1a2a6aa8a2ffbcdf249ecc8e12588" {
-		t.Fatalf("unexpected predecessor fixture digest %s", got)
-	}
-	if err := os.WriteFile(path, predecessor, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chown(path, -1, os.Getuid()); err != nil {
-		t.Fatal(err)
-	}
-	program := strings.NewReplacer(
-		"@STATE_ROOT@", state, "@STATE_UID@", fmt.Sprint(os.Getuid()),
-		"/usr/local/libexec/subyard/projects-changed", path,
-		"/etc/subyard/agent-project-hooks", root+"/etc/subyard/agent-project-hooks",
-		"while parent != '/':", "while parent != '"+root+"':",
-	).Replace(integrationInventoryProgram)
-	entry := integrationArtifact{ID: "_projects", Kind: "file", Path: path, Mode: 0755,
-		Content: base64.StdEncoding.EncodeToString(desired), Digest: fmt.Sprintf("%x", sha256.Sum256(desired))}
-	run := func(program, mode string, wantError bool) integrationObservation {
-		t.Helper()
-		request, _ := json.Marshal(map[string]any{"home": home, "uid": os.Getuid(), "entries": []integrationArtifact{entry}})
-		command := exec.Command("python3", "-B", "-c", program, mode)
-		command.Stdin = strings.NewReader(string(request))
-		output, err := command.CombinedOutput()
-		if (err != nil) != wantError {
-			t.Fatalf("%s: %v %s", mode, err, output)
-		}
-		var result integrationObservation
-		if mode == "observe" && !wantError {
-			if err := json.Unmarshal(output, &result); err != nil {
+	for _, version := range []string{"v0.3", "shared-hooks"} {
+		t.Run(version, func(t *testing.T) {
+			root := t.TempDir()
+			home, state := root+"/home", root+"/state"
+			path := root + "/usr/local/libexec/subyard/projects-changed"
+			for _, directory := range []string{home, filepath.Dir(path)} {
+				if err := os.MkdirAll(directory, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := filepath.WalkDir(root, func(path string, _ os.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				return os.Chown(path, -1, os.Getuid())
+			}); err != nil {
 				t.Fatal(err)
 			}
-		}
-		return result
-	}
-	if !run(program, "observe", false).Changed {
-		t.Fatal("released predecessor did not require replacement")
-	}
-	interrupted := strings.Replace(program,
-		"atomic(destination, payload, entry.get('mode', 0o644), owner)",
-		"raise ValueError('fixture interruption')", 1)
-	run(interrupted, "apply", true)
-	if !run(program, "observe", false).Changed {
-		t.Fatal("interrupted predecessor replacement lost pending ownership")
-	}
-	run(program, "apply", false)
-	run(program, "commit", false)
-	if run(program, "observe", false).Changed {
-		t.Fatal("released predecessor replacement did not converge")
-	}
-	got, err := os.ReadFile(path)
-	if err != nil || string(got) != string(desired) {
-		t.Fatalf("dispatcher replacement: %v", err)
+			desired, err := os.ReadFile("../../../config/projects-changed.sh")
+			if err != nil {
+				t.Fatal(err)
+			}
+			predecessor := []byte(strings.Replace(string(desired),
+				"# Shared resources own hooks in projects-changed.d; selected agent hooks live in the list.\n", "", 1))
+			wantDigest := "cefded0322e335042ff9a0e74f2cba187fb1a2a6aa8a2ffbcdf249ecc8e12588"
+			if version == "v0.3" {
+				// Exact installer heredoc shipped in v0.3.0 through v0.5.2.
+				predecessor, err = os.ReadFile("testdata/projects-changed-v0.3.sh")
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantDigest = "b632dd04a13ba11abff0b7502785ae09d8a6119c0c1261f338861796de82df35"
+			}
+			if got := fmt.Sprintf("%x", sha256.Sum256(predecessor)); got != wantDigest {
+				t.Fatalf("unexpected predecessor fixture digest %s", got)
+			}
+			if err := os.WriteFile(path, predecessor, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(path, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chown(path, -1, os.Getuid()); err != nil {
+				t.Fatal(err)
+			}
+			program := strings.NewReplacer(
+				"@STATE_ROOT@", state, "@STATE_UID@", fmt.Sprint(os.Getuid()),
+				"/usr/local/libexec/subyard/projects-changed", path,
+				"/etc/subyard/agent-project-hooks", root+"/etc/subyard/agent-project-hooks",
+				"while parent != '/':", "while parent != '"+root+"':",
+			).Replace(integrationInventoryProgram)
+			entry := integrationArtifact{ID: "_projects", Kind: "file", Path: path, Mode: 0755,
+				Content: base64.StdEncoding.EncodeToString(desired), Digest: fmt.Sprintf("%x", sha256.Sum256(desired))}
+			run := func(program, mode string, wantError bool) integrationObservation {
+				t.Helper()
+				request, _ := json.Marshal(map[string]any{"home": home, "uid": os.Getuid(), "entries": []integrationArtifact{entry}})
+				command := exec.Command("python3", "-B", "-c", program, mode)
+				command.Stdin = strings.NewReader(string(request))
+				output, err := command.CombinedOutput()
+				if (err != nil) != wantError {
+					t.Fatalf("%s: %v %s", mode, err, output)
+				}
+				var result integrationObservation
+				if mode == "observe" && !wantError {
+					if err := json.Unmarshal(output, &result); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return result
+			}
+			if !run(program, "observe", false).Changed {
+				t.Fatal("released predecessor did not require replacement")
+			}
+			if err := os.Chmod(path, 0777); err != nil {
+				t.Fatal(err)
+			}
+			run(program, "observe", true)
+			run(program, "apply", true)
+			if _, err := os.Stat(state); !os.IsNotExist(err) {
+				t.Fatal("unsafe predecessor published ownership")
+			}
+			if err := os.Chmod(path, 0755); err != nil {
+				t.Fatal(err)
+			}
+			interrupted := strings.Replace(program,
+				"atomic(destination, payload, entry.get('mode', 0o644), owner)",
+				"raise ValueError('fixture interruption')", 1)
+			run(interrupted, "apply", true)
+			if !run(program, "observe", false).Changed {
+				t.Fatal("interrupted predecessor replacement lost pending ownership")
+			}
+			run(program, "apply", false)
+			run(program, "commit", false)
+			if run(program, "observe", false).Changed {
+				t.Fatal("released predecessor replacement did not converge")
+			}
+			got, err := os.ReadFile(path)
+			if err != nil || string(got) != string(desired) {
+				t.Fatalf("dispatcher replacement: %v", err)
+			}
+		})
 	}
 }
 

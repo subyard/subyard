@@ -3116,6 +3116,44 @@ func TestV2TransitionReportsActivationObservationFailureAsBlocker(t *testing.T) 
 	}
 }
 
+func TestV2TransitionPreservesExplicitPublicActivationDiagnostic(t *testing.T) {
+	for _, test := range []struct {
+		message, retry string
+		valid          bool
+	}{
+		{"Known legacy file has unexpected contents; file preserved.", "incus exec yard --project subyard -- sha256sum /usr/local/libexec/subyard/projects-changed", true},
+		{"unsafe\nmessage", "yard update --check", false},
+		{strings.Repeat("x", maxDiagnosticText+1), "yard update --check", false},
+		{"known message", "inspect; mutate", false},
+		{"", "", false},
+	} {
+		transition, _, _ := v2TransitionFixture(t, nil)
+		transition.options.Reconcilers = []V2ActivationReconciler{
+			v2ObservationErrorReconciler{id: "materialized-config", err: fmt.Errorf("private wrapper: %w", v2PublicActivationError{test.message, test.retry})},
+		}
+		inspection, err := transition.Inspect(context.Background(), Goal{Target: "release-a", Direction: DirectionActivateTarget})
+		if err != nil || inspection.Outcome == nil || len(inspection.Blockers) != 1 {
+			t.Fatalf("inspection: %#v, %v", inspection, err)
+		}
+		outcome := inspection.Outcome
+		if test.valid {
+			if outcome.Message != test.message || outcome.Retry != test.retry ||
+				inspection.Blockers[0].Message != test.message || inspection.Blockers[0].Retry != test.retry {
+				t.Fatalf("public diagnostic lost: %#v", inspection)
+			}
+		} else if outcome.Message != `activation reconciler "materialized-config" cannot be observed safely` || outcome.Retry != "run yard update --check" {
+			t.Fatalf("invalid diagnostic escaped: %#v", outcome)
+		}
+	}
+}
+
+type v2PublicActivationError struct{ message, retry string }
+
+func (err v2PublicActivationError) Error() string { return "private observation detail" }
+func (err v2PublicActivationError) ActivationDiagnostic() (string, string) {
+	return err.message, err.retry
+}
+
 func TestV2TransitionReportsCompletedActivationObservationFailureAsBlocker(t *testing.T) {
 	transition, _, _ := v2TransitionFixture(t, nil)
 	transition.options.Reconcilers = []V2ActivationReconciler{&v2TestReconciler{}}
