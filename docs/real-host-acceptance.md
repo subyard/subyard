@@ -2,8 +2,9 @@
 
 The default `./tests/run.sh` is host-free. Live acceptance uses the disposable pool documented in
 [Agent E2E VM pool](test-vms.md#agent-workflow); that guide is the source of truth for setup,
-exact-slot selection, leases, recovery, and the outer-yard boundary. After choosing an available
-slot from redacted status, pass it explicitly to the required external release smoke:
+exact-slot selection, leases, recovery, and the outer-yard boundary. Choose checks using
+[Subyard dev-flow](../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk).
+To run a release smoke, select an available slot from redacted status and pass it explicitly:
 
 ```sh
 dev/agent-e2e.sh --status
@@ -11,9 +12,8 @@ slot=1
 dev/e2e/p0-acceptance.sh --slot "$slot"
 ```
 
-This fresh smoke is a manual pre-publication gate; GitHub workflows do not access the VM pool.
-Run `dev/e2e/p0-acceptance.sh --slot "$slot" --lane full` periodically and whenever the change-impact
-selector requires full P0 evidence.
+GitHub workflows do not access the VM pool. The full matrix command is
+`dev/e2e/p0-acceptance.sh --slot "$slot" --lane full`; the skill defines when smoke or full coverage applies.
 
 Never run these checks on the operator host, in the privileged outer yard, or in a working yard.
 

@@ -629,9 +629,10 @@ contain no real secret. The opt-in E2E VM subset is documented in
 
 Host-free fakes cannot prove Incus, kernel, network, mount, systemd, or real SSH behavior. The
 operator maintains a configurable pool of disposable two-VM pairs. The canonical pool, exact-slot,
-lease, nested-slot, and cleanup contract lives in [Agent E2E VM pool](test-vms.md). The required
-external release smoke is `dev/e2e/p0-acceptance.sh --slot N`; the periodic and risk-selected
-compatibility matrix is `dev/e2e/p0-acceptance.sh --slot N --lane full`. GitHub workflows do not run
+lease, nested-slot, and cleanup contract lives in [Agent E2E VM pool](test-vms.md). The
+release smoke is `dev/e2e/p0-acceptance.sh --slot N`; the full compatibility matrix is
+`dev/e2e/p0-acceptance.sh --slot N --lane full`. Choose checks using
+[Subyard dev-flow](../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk). GitHub workflows do not run
 either VM gate. Do not run them on the operator host or in the privileged outer yard.
 
 The full matrix covers the following physical boundaries:
@@ -664,5 +665,4 @@ Capture results outside the public repository and never include credentials or p
 - Profile resource: keep mechanics below its profile, add a `.res` descriptor and executable
   handler, implement silent `is-up`, and test at least probe plus reverse lifecycle behavior.
 
-Run `./tests/run.sh`, the recursive ShellCheck command used by CI, and `git diff --check` before
-submitting changes.
+Choose validation for these changes using the skill's risk-based test-selection policy.

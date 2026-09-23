@@ -11,7 +11,9 @@ outer yard, enter its shell, reach its Incus socket or invoke arbitrary lifecycl
 
 ## Running tests
 
-Run the host-free build and test gates from the current public worktree:
+Choose checks using [Subyard dev-flow](../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk).
+This guide describes VM access, prerequisites and execution. When building or running the full
+host-free suite, use the current public worktree:
 
 ```sh
 make build
@@ -19,14 +21,13 @@ make build
 ```
 
 `make build` compiles the development binary at `.build/yard`; `go.mod` selects the Go toolchain.
-Run `./tests/run.sh` before finishing shell or CLI changes. CI additionally runs
+CI additionally runs
 `shellcheck -x -S warning` over the CLI, scripts, provision hooks, tests and Bash completion.
 Linux CLI tests also require util-linux `script` to exercise resource commands with a real
 controlling terminal, including terminal-input isolation and cancellation.
 
-If there is any doubt that behavior is covered or a problem is reproduced, use an allocated
-`test-vms` slot to reproduce and verify it on real GNU/Linux hosts. A green host-free test is not a
-substitute for the available VM check. The operator owns outer-yard start, stop and teardown; the
+When a selected check needs real GNU/Linux hosts, use an allocated `test-vms` slot.
+The operator owns outer-yard start, stop and teardown; the
 root broker owns inner slot create, start and stop; agents acquire leases only.
 
 ## Operator setup
@@ -235,13 +236,11 @@ dev/e2e/yard-network-policy.sh --slot N --vm 2  # select the second guest when n
 This controller owns one lease across setup, a selected-guest reboot and resumed validation;
 `--vm` accepts `1` or `2` and defaults to `1`. It changes
 network policy only inside the disposable VM and does not enable isolation on the operator's host.
-A network implementation change still requires a fresh `--lane full` P0 below.
+The skill's risk criteria determine whether the focused network lane needs broader lifecycle coverage.
 
-`dev/e2e/p0-acceptance.sh --slot N` is the fresh release smoke required before publication. It is an
-external manual gate; GitHub workflows do not receive pool access or enforce it automatically.
-`--lane full` runs the exhaustive compatibility and recovery matrix periodically and when selected
-for a high-risk change. Addressable targeted lanes shorten diagnosis, but do not replace a fresh
-release smoke. `--list-lanes` does not acquire and needs no slot.
+`dev/e2e/p0-acceptance.sh --slot N` runs the release smoke; `--lane full` runs the exhaustive
+compatibility and recovery matrix. The skill defines when each applies. GitHub workflows do not
+receive pool access or run these checks automatically. `--list-lanes` does not acquire and needs no slot.
 
 During the full owner compatibility chain, before current `yard init`, VM1 seeds the legacy
 convergence fixture with:
@@ -253,10 +252,8 @@ SUBYARD_E2E_LEGACY_FIXTURE=1 \
 
 This fixture is restricted to disposable VM1 candidate yards.
 
-Use the advisory [change-impact testing workflow](testing.md) to select affected host-free checks
-and targeted lanes for a diff. The selector only recommends checks; targeted evidence does not
-replace this section's fresh release-smoke gate. A `full_p0.required` result requires the explicit
-`--lane full` matrix, which includes the release smoke.
+The [change-impact reference](testing.md) documents selector invocation and output.
+Test-selection policy, including how to interpret full-P0 recommendations, lives in the skill.
 
 The focused AppArmor regression creates a temporary container yard on VM1, exercises failed
 capability probes and both real Incus AppArmor transitions, and verifies Docker and runtime
@@ -279,9 +276,9 @@ dev/agent-e2e.sh --slot "$slot" --purpose incus-group-reexec --vm 1 -- \
 
 | Lane | Prerequisites and timeout | Mutable scope | Classification |
 | --- | --- | --- | --- |
-| `./tests/run.sh` | Go toolchain; bounded by CI | temporary host-free roots and `.build/yard` | required host-free gate |
+| `./tests/run.sh` | Go toolchain; bounded by CI | temporary host-free roots and `.build/yard` | full host-free suite |
 | `dev/process-coverage.sh` | Go toolchain; selected host-free process contracts | `.build/coverage` and test-owned temporary roots | diagnostic coverage gate |
-| `smoke` (default) | both allocated VMs; capacity/dependency preflight and one reboot | marked Incus, release and peer fixtures described below | required external/manual publication gate |
+| `smoke` (default) | both allocated VMs; capacity/dependency preflight and one reboot | marked Incus, release and peer fixtures described below | publication smoke; see skill policy |
 | `boundary` | one broker lease; SSH connect deadlines | read-only facade, routes and negative probes | required in smoke and full |
 | `transport` | both allocated VMs; bounded SSH disconnect probe | one marker-owned remote sleep and temporary controller log | required in smoke and full |
 | `nested-teardown` | VM2, KVM and nested Incus; bounded install, boot and cleanup waits | marker-owned outer VM, nested yard and data-boundary fixtures | targeted diagnostic; required in full |
@@ -329,8 +326,7 @@ dev/agent-e2e.sh --slot "$slot" --purpose integration-remote --vm 1 -- \
   bash dev/e2e/integration-remote.sh
 ```
 
-These are targeted lifecycle checks; publication still requires the fresh release smoke.
-Run `--lane full` when selected by change impact or required by broader runtime coupling.
+These are targeted lifecycle checks. See the skill for publication and broader coverage criteria.
 
 Android/GPU, real credentials and external-service profiles use separate explicitly prerequisite-
 gated lanes. A generic dependency-free resource pass does not report those handlers green.

@@ -5,7 +5,9 @@ description: Use when developing Subyard in this repository, including features,
 
 # Subyard dev-flow
 
-Follow the linked sources; keep detailed rules in their authoritative files.
+This skill is the authoritative source for development workflow and test-selection policy.
+The linked guides describe commands, evidence, tools and environment constraints; they do not
+add automatic test gates. Explicit user instructions take precedence over this skill.
 
 ## Read the relevant sources
 
@@ -17,7 +19,7 @@ Read by task; links are relative to this skill.
 | Product context or component docs | [README.md](../../../README.md): product overview and documentation index. |
 | Code, build, or packaging work | [Development](../../../docs/development.md): toolchain and build/release workflow; use `go.mod` for versions. |
 | Commands, RPC, reconciliation, or adapters | [Control plane](../../../docs/control-plane.md): implementation map, ownership boundaries, and extension contracts. |
-| Before building, running, or changing tests | [Testing](../../../docs/testing.md) and [Test VMs](../../../docs/test-vms.md): required checks, evidence tiers, and VM access. |
+| Before building, running, or changing tests | [Testing](../../../docs/testing.md) and [Test VMs](../../../docs/test-vms.md): commands, evidence tiers, and VM access. |
 | Live host or release behavior | [Real-host acceptance](../../../docs/real-host-acceptance.md): physical-boundary and release checks. |
 | Configuration or credentials | [Configuration](../../../docs/configuration.md) and [Keys](../../../docs/keys.md), respectively. |
 
@@ -31,12 +33,43 @@ requirements when the task depends on them.
    steps current; change the agreed scope only with the user's agreement.
 2. Preserve unrelated edits and follow the affected component's architecture.
    Make host fixes reproducible through product setup, including repeat runs.
-   Choose new tests by [failure risk and existing coverage](../../../docs/testing.md#keep-tests-proportional).
+   Choose tests by the policy below and existing coverage.
    Simplify unnecessary implementation scope before expanding its test machinery.
-3. Run the applicable checks against the final changes. The test selector is
-   advisory; follow the testing guides for required core and release gates.
+3. Run the applicable checks against the final changes using the policy below.
    Planned checks on available allocated VMs are agent work: complete them before
    reporting readiness.
+
+## Choose checks by risk
+
+- Start with the smallest existing check that proves the changed behavior. Add a regression
+  case only for a distinct failure or observable contract not already covered. Assert outcomes;
+  source-text assertions belong only to explicit source-level contracts. If a small change needs
+  extensive fixtures, reconsider its implementation before adding test machinery.
+- For documentation, formatting and mechanical changes with unchanged behavior, inspect the diff
+  and use relevant syntax, link or format validation. Do not automatically build, run the core
+  suite or acquire VMs. Small behavioral changes normally need focused package or contract tests.
+- Preserve checks for permissions, data loss, migrations, atomic updates and recovery. Choose
+  broader checks when shared behavior or actual coupling makes focused coverage insufficient.
+  Run the full host-free suite (`./tests/run.sh`) for that reason, an explicit user request, or
+  an applicable merge/release gate, not merely because a CLI or shell file changed.
+- Use the change-impact selector when it helps identify affected checks. Its entire output is
+  advisory, including `full_p0.required=true` and `fallback`. Inspect the reasons against the
+  actual diff; neither a flag nor the number of touched files/risk domains is a sufficient reason
+  for a full run. If selection fails, assess impact manually rather than treating it as no risk.
+  Briefly record the chosen checks and the reason for accepting or narrowing broad recommendations.
+- Use targeted VM/real-host checks when correctness depends on physical behavior that local tests
+  cannot establish. Mocks do not prove external CLI/protocol or host compatibility. Run full P0
+  only for an explicit request or concrete cross-domain lifecycle/recovery coupling that targeted
+  lanes cannot adequately cover. Explain that reason before the expensive run; availability of
+  VMs alone does not justify using them.
+- Before publishing a runtime release, run the fresh release smoke
+  (`dev/e2e/p0-acceptance.sh --slot N`) and release compatibility checks documented in
+  [Development](../../../docs/development.md). This publication gate does not apply to every
+  development edit. Existing CI/merge checks remain unchanged; full P0 is a separate risk-based
+  or explicitly requested check, not a synonym for release smoke.
+- Once relevant checks pass, broaden or repeat them only for a new change, failure or unresolved
+  risk. Report the actual evidence and its limits; do not turn a focused pass into a claim that
+  the full lifecycle or release gate passed.
 
 ## Test progress across leases
 

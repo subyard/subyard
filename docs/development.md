@@ -48,8 +48,9 @@ links `~/.local/bin/{yard,sy}` to the verified runtime, and configures login PAT
 
 `make package VERSION=<version>` writes amd64 or arm64 Linux engine artifacts and a complete
 `subyard-<version>-linux-<arch>.tar.gz` runtime under `.build/release/`, each with a detached SHA-256,
-compatibility manifest and provenance. Run the required live release smoke manually on
-operator-allocated E2E VMs before pushing a `vMAJOR.MINOR.PATCH` tag; GitHub workflows do not have
+compatibility manifest and provenance. Follow the
+[dev-flow publication policy](../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk)
+before pushing a `vMAJOR.MINOR.PATCH` tag; GitHub workflows do not have
 access to that pool. The tag starts the independent Release workflow checks: host-free,
 native Paseo, adapter and upgrade compatibility. The workflow publishes both architectures to a
 tag-backed GitHub Release after they pass. Branch CI does not run for tag pushes. `yard update`
@@ -92,7 +93,8 @@ group. Use `--baseline-dir PATH` and `--legacy-baseline-dir PATH` to reuse downl
 assets (including the legacy runtime installer). Publication runs this check after building the
 release assets.
 
-`./tests/run.sh` is the single unprivileged gate. It runs formatting, vet, race-enabled Go tests, a
+Choose local checks with [Subyard dev-flow](../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk).
+`./tests/run.sh` is the full unprivileged suite. It runs formatting, vet, race-enabled Go tests, a
 short parser fuzz smoke, the static binary build, and all Bash unit/contract/integration tests. It
 requires the `systemd-analyze` binary for unprivileged unit parsing, but does not require root, a
 running systemd manager/PID 1, the host Incus socket, real credentials, SSH peers, or external
@@ -101,9 +103,9 @@ services.
 CI additionally installs `openssh-server`, downloads the pinned age/SOPS artifacts through the
 checksum-verifying project installer, and runs the temporary loopback contracts under
 `tests/real-host/`. Those tests use synthetic payloads and an ephemeral non-system sshd; dedicated
-container/VM and two-owner-host acceptance remains an explicit external release gate. Run the fresh
-release smoke with `dev/e2e/p0-acceptance.sh --slot N`; use `--lane full` for periodic manual evidence
-and changes selected as full P0 risk.
+container/VM and two-owner-host acceptance run separately. The commands are
+`dev/e2e/p0-acceptance.sh --slot N` for release smoke and `--lane full` for the full matrix;
+their selection criteria live in the skill.
 
 Live platform and release acceptance runs only on operator-allocated E2E VMs; see
 [`real-host-acceptance.md`](real-host-acceptance.md).

@@ -1,30 +1,16 @@
 # Testing changes
 
+Test-selection policy lives in [Subyard dev-flow](../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk).
+This guide documents how to run checks and interpret their evidence.
+
 ## Keep tests proportional
 
-Choose additional tests by concrete failure risk and existing coverage.
-
-- Add a case for a distinct regression or meaningful observable contract that is not
-  adequately covered. Extend an existing test when it fits.
-- Use the narrowest boundary that proves the behavior. Another layer or combination
-  of inputs must catch a different failure. Assert outcomes and stable interfaces;
-  reserve source-text assertions for explicit source-level contracts.
-- For prose, formatting and mechanical edits with unchanged behavior, use existing
-  checks. New tests need a concrete behavior risk, not merely a changed file.
-- Preserve targeted checks for permissions, data loss, migrations, atomic updates
-  and recovery. A small code change can still carry a large risk.
-- If a small feature needs extensive fixtures, a parser or a process harness,
-  reconsider the implementation and scope first. Remove obsolete behavior and its
-  tests together; keep protections for behavior that remains.
-- Mocks prove our adapter's behavior. Claims about an external CLI or protocol need
-  evidence from the real consumer; otherwise state that compatibility is unverified.
-
-These rules govern adding tests. Run the existing required gates below; during
-development use focused checks and repeat broader checks after relevant changes or failures.
+Use the skill's [risk-based selection policy](../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk)
+for both adding tests and choosing which existing checks to run.
 
 ## Run the core checks
 
-Run `./tests/run.sh` against the current source files, including uncommitted edits. No Git history,
+`./tests/run.sh` checks the current source files, including uncommitted edits. No Git history,
 clean checkout, base commit or `.git` directory is required. Install the tools listed in
 [the test guide](test-vms.md), including Git and ripgrep: tests of Git behavior create their own
 temporary repositories. The release packaging test also creates its own index of the current public
@@ -62,10 +48,8 @@ against the shipped rules for that evidence; real client approve/deny needs sepa
 
 ## Select additional checks
 
-Subyard's change-impact selector recommends a conservative set of checks for a repository diff. It
-is advisory: it prints recommendations and never executes a check. A caller may add checks, but a
-selector result does not waive required host-free, release, operator-requested, or runtime-derived
-testing.
+Subyard's change-impact selector prints a conservative set of recommendations for a repository
+diff and never executes checks. Apply the skill's selection policy to these recommendations.
 
 ## Select checks
 
@@ -112,18 +96,16 @@ Human-readable output is the default. Add `--format json` for one machine-readab
 
 ## Interpret the result
 
-Treat the result as fail-closed:
-
-| Status | Exit | Meaning and required response |
+| Status | Exit | Meaning |
 | --- | ---: | --- |
-| `selected` | 0 | Normal analysis. Run the recommended checks and apply the external gates below. An empty diff can produce an empty recommendation. |
-| `fallback` | 0 | Analysis or bootstrap was unsafe or unavailable. Run the expanded `host-free:all` recommendation and a fresh `dev/e2e/p0-acceptance.sh --slot N --lane full`. Inspect `errors` for the sanitized cause. |
+| `selected` | 0 | Normal analysis. An empty diff can produce an empty recommendation. |
+| `fallback` | 0 | Analysis or bootstrap was unsafe or unavailable. The output contains expanded recommendations; `errors` explains the sanitized cause. |
 | `error` | 2 | Command-line misuse. No recommendations are available; correct the invocation and rerun it. |
 
-Automation must inspect `status` and `full_p0.required`; exit 0 alone does not mean targeted testing
-is sufficient. JSON results separate `host_free_checks` from `e2e_checks` and include stable check
-IDs, tiers, budgets, rationales, selection reasons, and any static requirement for full P0. They do
-not contain executable command lines and do not run them.
+Exit 0 reports selector completion, not a passing test result. JSON results separate
+`host_free_checks` from `e2e_checks` and include check IDs, tiers, budgets, rationales and selection
+reasons. The existing `full_p0.required` field name represents the selector's conservative full-P0
+recommendation; it is not an execution mandate. See the skill for how to assess it.
 
 ## Evidence tiers
 
@@ -131,30 +113,17 @@ not contain executable command lines and do not run them.
 | --- | --- |
 | T0 | An exact regression test for the defect or failure mode. The engineer or agent defines it; the selector cannot derive it from paths. Target: at most 60 seconds. |
 | T1 | Affected host-free package, race, shell, CLI, frontend, or Rust checks. Typical target: at most 3 minutes; registry metadata identifies larger explicit budgets. |
-| T2 | The core host-free gate, `./tests/run.sh`. It remains required by the merge workflow and is not narrowed by the selector. The `host-free:all` fallback composite also includes Veranda checks. |
+| T2 | The full host-free suite, `./tests/run.sh`. The `host-free:all` fallback composite also includes Veranda checks. |
 | T3 | Existing targeted E2E lanes or real-host checks for affected physical boundaries. |
 | T4 | A fresh full P0: `dev/e2e/p0-acceptance.sh --slot N --lane full`. |
 
-Run the applicable T0 check while developing, then use the selector to identify the T1 and T3
-lower bound. Run T2 when the merge workflow requires it. If `full_p0.required` is true, run T4.
 A fresh full pass also satisfies its contained T3 lanes: smoke, boundary, transport, nested teardown,
 real Incus, release, source upgrade, power/systemd (including reboot verification), peer and cleanup.
-Do not rerun those same lanes solely because the selector also lists them. Other selected checks
-remain required; for example, cold dependencies, profile-resource's bind fixture and Orca acceptance
-are not covered by the full matrix.
-
-Targeted evidence shows that the selected contracts and physical boundaries passed for the analyzed
-change. It does not replace the fresh release smoke required before publication:
-`dev/e2e/p0-acceptance.sh --slot N`. This VM gate is run externally and manually;
-GitHub workflows do not receive VM access or enforce it automatically. The exhaustive `--lane full`
-matrix is periodic manual evidence and is also required when `full_p0.required` is true, an operator
-requests it, or targeted runtime evidence exposes broader coupling.
+Cold dependencies, profile-resource's bind fixture and Orca acceptance are not covered by that matrix.
+See the skill for when local, VM and publication checks apply; the tiers describe evidence scope,
+not a ladder that every change must climb.
 
 ## Continue work across leases
 
-Keep passed, failed and pending test segments in the current task plan, with the exact source hash,
-base fingerprint and controller evidence paths. A freed VM belongs to nobody and its disk is deleted;
-never store the task checklist there or depend on a later lease restoring fixtures. Run remaining
-independent P0 segments with `--lane NAME`; every segment sets up its own prerequisites. Source or
-baseline changes require reassessing affected passes. In-lease reboot continuation is supported;
-cross-lease `--resume` is rejected. Required fresh full P0 gates cannot be assembled from separate runs.
+Follow the skill's [lease evidence rules](../.agents/skills/subyard-dev-flow/SKILL.md#test-progress-across-leases)
+and the [VM guide](test-vms.md) for disposable targets and lane commands.
