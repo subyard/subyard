@@ -62,11 +62,14 @@ func (runtime *Runtime) writeAgentAuthorizedKeys(ip1, ip2 string) error {
 	}
 	options := `restrict,command="` + cfg.StatusCommand + `"`
 	if ip1 != "" || ip2 != "" {
-		if !safeIPv4(ip1) || !safeIPv4(ip2) {
+		if !safeIPv4(ip1) || (cfg.guestCount() == 2 && !safeIPv4(ip2)) || (cfg.guestCount() == 1 && ip2 != "") {
 			return errors.New("cannot publish non-IPv4 VM targets")
 		}
-		options = `restrict,port-forwarding,permitopen="` + ip1 +
-			`:22",permitopen="` + ip2 + `:22",command="` + cfg.StatusCommand + `"`
+		options = `restrict,port-forwarding,permitopen="` + ip1 + `:22"`
+		if cfg.guestCount() == 2 {
+			options += `,permitopen="` + ip2 + `:22"`
+		}
+		options += `,command="` + cfg.StatusCommand + `"`
 	}
 	payload := []byte(nil)
 	if key != "" {
@@ -93,9 +96,12 @@ func (runtime *Runtime) enableAgentAccess(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	ip2, err := runtime.vmIP(ctx, cfg.vm(2))
-	if err != nil {
-		return err
+	ip2 := ""
+	if cfg.guestCount() == 2 {
+		ip2, err = runtime.vmIP(ctx, cfg.vm(2))
+		if err != nil {
+			return err
+		}
 	}
 	runtime.killAgentSessions(ctx)
 	return runtime.writeAgentAuthorizedKeys(ip1, ip2)
@@ -114,7 +120,7 @@ func (runtime *Runtime) collectFailureDiagnostics(ctx context.Context, cause err
 		if value, err := runtime.incus(ctx, "project", "show", cfg.Project); err == nil {
 			payload.WriteString(value)
 		}
-		for index := 1; index <= 2; index++ {
+		for index := 1; index <= cfg.guestCount(); index++ {
 			vm := cfg.vm(index)
 			if !runtime.vmExists(ctx, vm) {
 				continue

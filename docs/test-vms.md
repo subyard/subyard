@@ -1,10 +1,10 @@
 # Agent E2E VM pool
 
 The `test-vms` profile runs a root-owned lease broker inside a trusted outer yard. Its configured
-pool contains one or more slots and defaults to two. Each slot owns an isolated inner Incus project,
-network and a retained pair of VMs. The VM disks survive release; the pair is stopped whenever it
-has no lease. Before stopping a running retained guest, release best-effort trims free guest blocks
-back to the storage pool. A trim failure does not weaken fencing or fail release.
+pool contains one or more shared slots and defaults to two. Each lease selects `subyard-pair`
+(two VMs) or `android-test` (one VM). Slots own isolated inner Incus projects and networks;
+each acquire creates fresh VM disks from a versioned immutable base. Release fences access and
+deletes the disposable disks. No guest state survives a lease as a supported continuation mechanism.
 
 The outer yard remains operator-owned. Agents can acquire inner slots, but cannot start a stopped
 outer yard, enter its shell, reach its Incus socket or invoke arbitrary lifecycle commands.
@@ -53,37 +53,80 @@ A fresh yard with the effective `test-vms` capability starts with desired power 
 `yard -Y test-yard stop` and `start` persist the normal managed power intent. Agent acquire never
 changes it. Stopping the outer yard drains all active slots before shutdown.
 
-`E2E_VM_SLOT_COUNT` defaults to `2` and may be overridden through normal yard/operator config
-precedence. Each slot consumes two VMs. Increasing the count adds empty slots; the VMs are created
-only on first acquire. Shrink is fail-closed while a retiring slot is held, provisioning, draining
-or quarantined. Lease release and age-based GC never remove retained resources. They are removed
-only by confirmed operator configuration reconcile, destructive quarantine recovery described
-below or outer-yard teardown.
+`E2E_VM_SLOT_COUNT` defaults to `2`. Slots are shared between environment types, rather than
+partitioned into separate pools. Increasing the count adds empty slots. Shrinking fails closed
+while retiring slots are held, provisioning, draining or quarantined.
 
-Nested VM disks are thin-provisioned. Capacity checks do not reserve the sum of their virtual
-maximum sizes: before creating a missing VM, the broker requires 1 GiB of initial headroom per
-missing VM and keeps a fixed 5 GiB filesystem reserve. CPU, RAM and disk values remain hard per-VM
-limits.
+| Type | Guests | RAM per guest | Virtual disk per guest |
+| --- | ---: | ---: | ---: |
+| `subyard-pair` | 2 | 4 GiB | 20 GiB |
+| `android-test` | 1 | 8 GiB | 40 GiB |
 
-The other physical defaults are:
+These are initial type defaults; the broker reports the actual CPU, RAM and disk contract in the
+grant. Virtual capacity is distinct from physical storage usage and retained image/cache costs.
 
-```env
-E2E_VM_IMAGE=images:debian/13/cloud
-E2E_VM_CPU=auto
-E2E_VM_MEMORY=4GiB
-E2E_VM_DISK=20GiB
-E2E_VM_BOOT_TIMEOUT=300
+The broker reserves the full requested environment's RAM and bounded disk growth atomically,
+including concurrent provisioning, held VMs and the base-image builder. It accounts for current
+outer-yard memory, configured safety reserves, measured image size and filesystem/pool headroom.
+A typed `capacity` refusal identifies `memory` or `disk` and is safe to retry after resources are
+freed. It does not quarantine a healthy slot. Partial provisioning failures are cleaned up and
+recovered automatically after 1, 5 and 15 minutes, then hourly while the slot remains eligible.
+
+Admission settings use ordinary shipped/shared/host/yard/command configuration precedence and are
+installed by `yard init`. These initial defaults still require workload peak measurements:
+
+| Setting | Initial value | Purpose |
+| --- | ---: | --- |
+| `E2E_DISK_BUDGET` | `160GiB` | Total broker disk budget |
+| `E2E_CACHE_BUDGET` | `24GiB` | Base and build cache budget |
+| `E2E_DISK_RESERVE` | `5GiB` | Free physical storage reserve |
+| `E2E_MEMORY_RESERVE` | `2GiB` | Memory headroom outside VM commitments |
+| `E2E_VM_OVERHEAD` | `512MiB` | Additional RAM reserved per VM |
+
+Values must be positive `MiB` or `GiB` sizes. Recipe installation uses a fixed root-owned path;
+there is no public setting that lets an agent substitute executable recipe sources.
+
+Both types use the generic host baseline: Go bootstrap, compiler/build utilities, ShellCheck,
+Git, curl, jq, ripgrep, SSH, archive tools and the product Incus installer. The `android-test`
+name selects the larger VM resource contract only; its image contains no Android SDK, emulator,
+renderer configuration or application setup. Those belong to the separate Android environment
+workflow. Images contain no project data, credentials or project caches. Go's toolchain remains
+selected by `go.mod`. Releasing a lease deletes its working VM disks and preserves the reusable
+base image, subject to the ordinary refresh and cache-retention policy.
+
+Refresh a type explicitly through the normal operator action flow:
+
+```sh
+yard -Y test-yard test-vms refresh subyard-pair
+yard -Y test-yard test-vms refresh android-test
 ```
 
-The retained guest disks are the prepared dependency layer; Subyard does not maintain a second
-custom image that could silently drift from `images:debian/13/cloud`. Before every lease is exposed,
-the broker verifies a versioned baseline and reconciles it with bounded APT retries/timeouts. The
-baseline includes the Go bootstrap, compiler/build utilities, ShellCheck, Git, curl, jq, ripgrep,
-SSH and archive tools. Its revision marker changes with the package contract. Go's exact toolchain
-and modules remain selected by `go.mod`. APT archives and repository metadata survive with the
-retained disk; P0 may separately reclaim its disposable Go build and module caches. Dependency
-reconciliation still runs the normal `apt-get update`; automated provisioning and capacity helpers
-do not purge APT data to reclaim space.
+Refresh reserves private builder resources, asks for confirmation with a default of Yes, and
+publishes a new fingerprint only after validation. It neither acquires a slot nor replaces active
+lease disks. Failed refresh keeps the previous base and reports a bounded failure code. Later acquisition uses the recorded
+retry deadline and normal recovery backoff.
+
+Bases refresh when the recipe changes, on an explicit operator request, or after seven days.
+A candidate becomes usable only after its validation passes; failed builds never replace the
+published fingerprint. A previous base may serve only while compatible, unrevoked and unexpired.
+Used bases remain pinned until their leases end. Disposable disks, builder disks and obsolete bases
+are cleaned separately. Legacy retained slots require explicit safe retirement before reuse;
+normal agent acquisition never deletes an unclassified legacy allocation. An active legacy lease
+can renew and release, but release retains its old disks until explicit operator retirement:
+
+```sh
+yard -Y test-yard test-vms retire-legacy --slot N
+```
+
+This operation asks for destructive confirmation with a default of No. Review and preserve any
+needed legacy data first. An empty, correctly marked legacy project can be adopted automatically.
+
+The nested broker lanes (`release`, `full` and broker recovery) need a larger allocated test host:
+at least 16 GiB RAM and an 80 GiB disk, with 60 GiB free before their setup. Their diagnostic
+broker uses 2 GiB / 10 GiB guests, two concurrent pairs, normal safety reserves and the immutable
+image publication peak. The default 4 GiB / 20 GiB pair guest cannot host that nested matrix.
+Use an operator-configured pool with larger pair limits; the lane checks capacity before setup.
+These diagnostic limits do not validate the production Android type's 8 GiB / 40 GiB contract.
 
 ## Agent workflow
 
@@ -98,7 +141,7 @@ separate ephemeral guest key.
 
 A standard caller reaches the outer yard through the provisioned yard-to-yard route. Any valid
 Ed25519 controller key is admitted only to the versioned forced facade
-(`status/acquire-v2/renew/release`). It never receives an L1 shell, PTY, file transfer, arbitrary
+(`status/acquire-v3/renew/release`). It never receives an L1 shell, PTY, file transfer, arbitrary
 forwarding or Incus access.
 
 Inspect the redacted pool without acquiring:
@@ -114,6 +157,13 @@ dev/agent-e2e.sh --status
 dev/agent-e2e.sh --status --json
 ```
 
+Status also reports visible memory/cgroup evidence, physical Incus pool driver and used/free bytes,
+budget limits, VM virtual-capacity reservations, private builder reservations, and base fingerprints
+with age/current/expired flags. Shared copy-on-write blocks are counted only by Incus pool usage;
+virtual disk limits and compressed image sizes are separate quantities. Missing telemetry is an
+explicit gap, including inaccessible L0 host evidence and unavailable measured builder peaks.
+Status does not build, refresh, repair or collect garbage and bounds its Incus probes to three seconds.
+
 The active holder is reported as `yard + project + run + purpose`. Project is the canonical Subyard
 project name from managed workspace metadata, and run is a new public correlation ID per acquire.
 Before metadata convergence, a safe enclosing legacy project ID is reported unchanged with
@@ -123,10 +173,10 @@ publishes controller fingerprints, lease IDs/capabilities, absolute checkout pat
 command lines, guest endpoints or the full failure reason. A
 quarantined or recovering slot instead exposes bounded recovery metadata:
 `last_failure_event_id`, `incident_id`, `recovery_attempt` and `next_recovery_at`. For an available
-retained slot, the attribution columns are empty.
+empty slot, the attribution columns are empty.
 
-The runner requires the broker's `attribution-v2` capability from read-only status before it sends
-the exact `acquire-v2` request. Legacy acquire is not supported, and the runner never downgrades in
+The runner requires `attribution-v2`, `environment-acquire-v3` and `disposable-v1` from read-only
+status before it sends the exact typed `acquire-v3` request. Legacy acquire is not supported, and the runner never downgrades in
 response to status or acquire failure. Only a typed busy response plus bounded `--wait` permits
 another request for the same slot; a transport failure or any other unknown outcome ends the
 attempt. A `held` busy response
@@ -136,7 +186,7 @@ the complete response before retrying; a missing, extra or malformed owner field
 unknown and prevents another acquire.
 
 Use redacted status to inspect the configured pool, explicitly choose an available slot number, then
-run against the two VMs in only that slot. For example, after choosing slot 1:
+run against the selected environment in only that slot. P0 always requests `subyard-pair`. For example, after choosing slot 1:
 
 ```sh
 slot=1
@@ -148,7 +198,11 @@ dev/agent-e2e.sh --slot "$slot" --purpose real-host-check --vm 1 -- \
 ```
 
 The runner filters private and ignored files, verifies the worktree bundle and removes its guest
-worktree. Every lease-taking invocation prints `yard + project + run + purpose` for attribution.
+worktree. Every lease-taking invocation prints `yard + project + run + purpose`, environment type,
+VM count and base fingerprint. Human status includes the environment type and per-VM resources.
+`--type android-test` selects one guest; omit `--vm` to run on all actual guests. Explicit `--vm 2`,
+`--vm both`, `--ssh 2` and pair boundary checks fail before acquiring an Android lease. The default
+`--type subyard-pair` preserves existing pair callers.
 
 For first SSH trust and continuation of ordinary remote commands, run the focused fixture on a
 free slot:
@@ -231,7 +285,7 @@ dev/agent-e2e.sh --slot "$slot" --purpose incus-group-reexec --vm 1 -- \
 | `boundary` | one broker lease; SSH connect deadlines | read-only facade, routes and negative probes | required in smoke and full |
 | `transport` | both allocated VMs; bounded SSH disconnect probe | one marker-owned remote sleep and temporary controller log | required in smoke and full |
 | `nested-teardown` | VM2, KVM and nested Incus; bounded install, boot and cleanup waits | marker-owned outer VM, nested yard and data-boundary fixtures | targeted diagnostic; required in full |
-| `dependencies` | retained guest baseline; 20-minute cold Go download deadline | marker-owned cold caches only | periodic targeted bootstrap diagnostic |
+| `dependencies` | immutable image baseline; 20-minute cold Go download deadline | marker-owned cold caches only | periodic targeted bootstrap diagnostic |
 | `real-incus` | VM1 when targeted/smoke and in the full owner chain; VM2 also runs it as a full-matrix prerequisite; KVM, persistent Incus pool and 15-minute mutation deadlines | marked project, container, VM and image aliases | required in smoke and full |
 | `profile-resource` | VM1 and current candidate | temporary dependency-free resource/state and bound-resource profile | targeted diagnostic; full covers only the dependency-free resource portion |
 | `release` | VM1 fixture with two-VM allocation/preflight; bounded nested install/boot deadlines | fresh candidate yards, current and legacy convergence | targeted diagnostic; covered by the full owner chain |
@@ -240,7 +294,7 @@ dev/agent-e2e.sh --slot "$slot" --purpose incus-group-reexec --vm 1 -- \
 | `reboot-verify` | VM1, real Incus and cached image preparation; published v0.8.0/candidate fixture; two boot checks with bounded power reconciliation | marked upgrade fixture, two guest reboots, snapshotted/restored host power runtime | targeted transport/recovery diagnostic |
 | `release-smoke` (internal phase) | VM1, pinned v0.14.0 installer, candidate package and one reboot | marked yard/project plus retained operator and guest data | required in smoke and full; not a standalone lane |
 | `peer` | both VMs and synthetic keys | marked cross-owner RPC, project and credential fixtures | smoke covers fresh init/projects/RPC; full adds offline and credential scenarios |
-| `peer-cleanup`, `cleanup` | same retained allocation | exact marked fixtures and run worktrees | standalone idempotent cleanup/verifier |
+| `peer-cleanup`, `cleanup` | current disposable allocation | exact marked fixtures and run worktrees | standalone idempotent cleanup/verifier |
 | `--lane full` | all prerequisites above | union of the marked scopes | periodic manual and risk-selected exhaustive matrix; includes release smoke |
 
 The integration selection fixtures use only marker-owned yards on allocated VM1. They exercise
@@ -340,10 +394,10 @@ configuration and port-collision scenarios; it does not install coding-agent CLI
 The focused SSH and Codex configuration modes reuse the pinned Orca package cache after SHA-256
 verification when available. They verify runtime integration, not a fresh Orca package download.
 
-For SSH fixture debugging, opt in to `SUBYARD_E2E_ORCA_KEEP_FAILED=1` to retain a failed marked
-fixture after revoking its key grants. The runner still releases the VM lease. On that same slot,
-rerun with `SUBYARD_E2E_ORCA_RESUME` set to the reported fixture directory; the current candidate
-reconciles the existing yards and repeats the assertions. Successful runs remove the fixture.
+For SSH fixture debugging, capture evidence before the lease ends. A fixture retained with
+`SUBYARD_E2E_ORCA_KEEP_FAILED=1` is inspectable only within the same active lease. A new invocation
+gets clean VMs, so `SUBYARD_E2E_ORCA_RESUME` cannot continue a previous lease. Record the failure,
+evidence and remaining checks in the current task plan and rerun the independent segment.
 
 For a narrow predecessor upgrade check, set `SUBYARD_E2E_ORCA_UPGRADE_FROM` to an exact published
 version and `SUBYARD_E2E_ORCA_UPGRADE_INSTALLER_SHA256` to that release's installer asset digest.
@@ -375,7 +429,7 @@ dev/e2e/p0-acceptance.sh --list-lanes
 dev/e2e/p0-acceptance.sh --slot "$slot"
 dev/e2e/p0-acceptance.sh --slot "$slot" --lane full
 dev/e2e/p0-acceptance.sh --slot "$slot" --lane peer
-dev/e2e/p0-acceptance.sh --slot "$slot" --lane source-upgrade --resume
+dev/e2e/p0-acceptance.sh --slot "$slot" --lane source-upgrade
 SUBYARD_P0_WAIT_SECONDS=1200 \
   dev/e2e/p0-acceptance.sh --slot "$slot" --lane power-systemd
 ```
@@ -383,10 +437,10 @@ SUBYARD_P0_WAIT_SECONDS=1200 \
 `SUBYARD_P0_WAIT_SECONDS` is a non-negative number of seconds passed to the atomic broker acquire;
 zero keeps the fail-fast default. The `power-systemd` parser project is fully ephemeral: the lane
 removes its marker-owned project and restores the snapshotted host unit/runtime before the phase is
-checkpointed. The fixed `subyard-e2e-*` Ubuntu image alias is retained in the disposable allocation's
+reported. The fixed `subyard-e2e-*` Ubuntu image alias is retained in the disposable allocation's
 default Incus project, just like the real-Incus base-image aliases, so a later launch does not include
 an unbounded remote transfer. Outer allocation teardown removes the alias with the Incus pool.
-`--resume` never depends on retaining the parser project's mutable resources.
+The image alias disappears with the disposable disk at release.
 
 The cache fill and local launch both emit progress. Their independent positive-integer overrides are
 `SUBYARD_SYSTEMD255_IMAGE_TIMEOUT_SECONDS` and
@@ -399,7 +453,7 @@ runs nested teardown, a real-Incus platform check, source upgrade and power-syst
 The two chains join before the shared release-smoke phase and full peer checks, followed by cleanup
 and final boundary verification. Host-free `./tests/run.sh`, prepared loopback SSH/crypto contracts
 and the owner engine-release contract run in their own required gates and are not repeated here.
-The parallel matrix checkpoints are committed atomically only after both chains pass. It has a
+The parallel matrix passes only after both chains pass. It has a
 210-minute kernel-monotonic work deadline by default (`SUBYARD_P0_FULL_MATRIX_TIMEOUT_SECONDS`).
 The controller reads `/proc/uptime`, so host wall-clock corrections cannot expire the matrix or its
 shutdown grace periods early. On expiry, runner children get a bounded 30-second TERM grace and
@@ -407,11 +461,18 @@ shutdown grace periods early. On expiry, runner children get a bounded 30-second
 broker lease time for final checks.
 
 Each phase prints its bundle hash and duration. The runner keeps one bounded, redacted JSON evidence
-record per public run and one checkpoint per slot under its private controller state. A checkpoint
-contains only slot resource generation, bundle hash, passed lanes and marker-owned inventory. Resume
-fails closed after slot rebuild, selection of another slot or any public worktree change. Evidence
-never contains lease credentials, guest endpoints, command payloads, controller paths or ambient
-environment. The latest 20 records are retained.
+record per public run under its private controller state, including each phase's result, source hash,
+base fingerprint and allocation generation. It prints the evidence path; the latest 20 records are
+retained. Copy evidence needed for longer-lived tasks before that retention window expires.
+Evidence never contains lease credentials, guest endpoints, command payloads or ambient environment.
+
+The current task plan is the durable checklist: record passed, failed and pending segments, the
+exact tested source and baseline identities, and evidence paths. Reassess prior passes after relevant
+source or baseline changes. Do not infer test progress from VM files or a previous lease's slot.
+`--resume` and `--keep-failed` are rejected by P0 with these instructions. Invoke only remaining
+independent `--lane` segments; each prepares its prerequisites on fresh VMs. Reboot continuation
+within one active lease still works. A required full P0 always runs fresh within a single lease;
+a collection of targeted passes does not replace that gate. No Markdown parser executes the plan.
 
 Open an unrestricted root guest session or run a root command:
 
@@ -443,47 +504,38 @@ one request or use one slot as affinity for another.
 Before guest access, the runner prints the exact assignment and the broker installs the same public
 context at `/run/subyard-e2e-lease.json`. Normal payloads also receive
 `SUBYARD_E2E_YARD`, `SUBYARD_E2E_PROJECT`, `SUBYARD_E2E_RUN_ID`,
-`SUBYARD_E2E_PURPOSE`, `SUBYARD_E2E_SLOT` and `SUBYARD_E2E_VM`.
+`SUBYARD_E2E_PURPOSE`, `SUBYARD_E2E_SLOT`, `SUBYARD_E2E_VM`, `SUBYARD_E2E_TYPE`
+and `SUBYARD_E2E_BASE_FINGERPRINT`.
 
 ## Lifecycle and fencing
 
-Acquire atomically reserves an `available` slot as `provisioning`, then the root broker creates or
-starts its pair. Only after both guests are ready does the broker install the ephemeral guest key,
-open forwarding through that slot's dedicated data account and publish `held`.
+Acquire atomically reserves an `available` slot as `provisioning` with the requested type and
+resource budget. The broker creates one or two fresh guests from the selected validated base.
+Only after every guest is ready does it install the ephemeral key, open forwarding through the
+slot's dedicated data account and publish `held`.
 
 Release, heartbeat expiry, operator drain or outer stop:
 
 1. removes the data-account forwarding key and kills that account's sessions;
-2. removes the ephemeral key from both guest root accounts when their agents are reachable;
-3. for each running guest, best-effort runs bounded `sync` and `fstrim -av` to return free blocks
-   to the pool;
-4. stops both VMs;
-5. publishes `available` only after stop is verified.
+2. removes guest lease keys when agents are reachable;
+3. verifies marker ownership, stops and deletes the disposable VM disks;
+4. publishes `available` only after cleanup is verified.
 
-The pair shares one bounded trim budget. A slow first trim therefore reduces the time available to
-the second trim instead of consuming the request time reserved for both verified stops.
+A rebooting guest does not prevent fencing at the data route. No subsequent lease receives a prior
+lease's disk or key. Generation, epoch, lease ID and server-side capability verification fence old
+credentials after release and reuse.
 
-If a guest is rebooting and its agent is temporarily unavailable, the already-fenced data route
-still permits a verified stop. The next acquire replaces every guest lease key before it publishes
-forwarding, so the previous credential cannot become reachable again.
-
-Provisioning, fencing or stop failure makes only that slot `quarantined`, and it is never handed to
-another caller. Lease identity is fenced by slot generation, lease epoch, lease ID and a server-side
-capability verifier; old credentials cannot revive after release or reuse.
-
-Quarantine is destructive because these slots are disposable. Before deletion, the broker fsyncs
-an immutable incident with the available project, VM and service diagnostics to its root-only local
-spool. It then verifies the managed project and every existing VM marker, refuses projects with
-foreign instances, deletes both VM disks in the slot pair, provisions both guests through the
-normal fresh-acquire path, verifies their stop and increments `resource_generation` before making
-the slot `available`. Deleting the disks also deletes their APT caches; ordinary release and
-reacquire retain both. Failure to persist the local incident or any ambiguous ownership evidence
-leaves the slot quarantined without deletion.
+Provisioning or cleanup failure quarantines only the affected slot. Before destructive recovery,
+the broker fsyncs a local incident and verifies project/VM ownership, refusing foreign or ambiguous
+resources. Recovery cleans the disposable allocation and returns an empty slot to the pool; the
+next lease provisions its requested environment from a validated base. Failure to persist the
+incident or prove ownership leaves the slot quarantined without deletion. Ordinary resource
+shortage is a retryable admission refusal and does not quarantine a healthy empty slot.
 
 The root reaper starts recovery immediately after the incident is durable. Failed rebuilds retry
 after 1, 5 and 15 minutes, then hourly without an attempt limit. A temporary Incus, image, network
 or capacity failure delays recovery; it does not turn quarantine into a permanent terminal state.
-The manual command starts the same full-pair workflow immediately:
+The manual command starts the same slot recovery workflow immediately:
 
 ```sh
 yard -Y test-yard test-vms recover --slot "$slot"
@@ -512,6 +564,14 @@ fingerprints, keys, guest command payloads or agent output. Full bounded evidenc
 immutable JSON artifact under `$SUBYARD_HOME/logs/test-vms-broker-incidents/` and referenced by
 `incident_id`.
 
+The host sink also saves a bounded observation in `test-vms-broker-incidents/host/<incident_id>.json`:
+visible host/allocation cgroup memory limits, current/peak values, OOM counters, outer instance state,
+and classified kernel OOM events from the preceding 15 minutes. Collection has a five-second
+budget and records missing measurements explicitly. Its timestamp is the collection time, not a
+claim to have measured the failure's peak. Kernel messages and private cgroup paths are not copied.
+Retries preserve the first observation; its retention follows the incident. An agent's broker
+status cannot substitute for this L0 evidence across the outer allocation boundary.
+
 The broker writes its local durable spool first. The physical-host sink validates and ingests
 records idempotently by ID, then acknowledges them; sink downtime therefore delays only host-wide
 visibility and never blocks a rebuild. Unresolved incidents are retained. Resolved artifacts are
@@ -534,8 +594,8 @@ dev/agent-e2e.sh --slot "$slot" --verify-boundary
 ```
 
 The operator owns outer `start`, `stop` and teardown. Agents use only leases allocated by the
-broker. Outer-yard teardown removes the retained VM disks and their APT caches with the containing
-yard storage. An unavailable outer yard produces the stable `test environment unavailable` error
+broker. Release removes disposable VM disks; outer-yard teardown also removes base images and
+the containing yard storage. An unavailable outer yard produces the stable `test environment unavailable` error
 instead of attempting recovery.
 
 A runtime release automatically installs the compatible physical-host sink before updating an

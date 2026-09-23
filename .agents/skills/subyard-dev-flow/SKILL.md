@@ -38,6 +38,16 @@ requirements when the task depends on them.
    Planned checks on available allocated VMs are agent work: complete them before
    reporting readiness.
 
+## Test progress across leases
+
+- Keep passed, failed and pending segments in the current task plan with the tested source hash,
+  environment/base fingerprint and controller evidence paths. Reassess affected results when those
+  identities change; copy evidence needed beyond the runner's retention window.
+- Every lease gets disposable VMs. Never infer progress or reuse fixtures from a released VM.
+  Run remaining independent `--lane` segments with their own fresh setup. P0 rejects cross-lease
+  `--resume`; reboot continuation is valid only within the same active lease.
+- Required full P0 gates remain one fresh run; targeted passes cannot substitute for them.
+
 ## Test execution and delegation
 
 - Run short checks directly. For long runs, use one worker with

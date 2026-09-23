@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Developer checks on an allocated two-VM lab via restricted L1 SSH.
+# Developer checks on disposable typed environments via restricted L1 SSH.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -36,6 +36,9 @@ LEASE_PROJECT=""
 LEASE_RUN=""
 LEASE_PURPOSE=""
 LEASE_REQUESTED_SLOT=""
+ENVIRONMENT_TYPE=subyard-pair
+VM_COUNT=2
+BASE_FINGERPRINT=""
 WAIT_SECONDS=0
 declare -A GUEST_DIRS=()
 declare -A VM_IP=()
@@ -63,7 +66,7 @@ usage() {
 Usage:
   dev/agent-e2e.sh [--yard NAME] --prepare
   dev/agent-e2e.sh [--yard NAME] --status [--json]
-  dev/agent-e2e.sh [--yard NAME] --slot N [--wait DURATION] [--purpose LABEL] [--vm 1|2|both] -- COMMAND [ARG...]
+  dev/agent-e2e.sh [--yard NAME] --slot N [--wait DURATION] [--purpose LABEL] [--type subyard-pair|android-test] [--vm 1|2|both] -- COMMAND [ARG...]
   dev/agent-e2e.sh [--yard NAME] --slot N [--purpose LABEL] --ssh 1|2 [-- COMMAND [ARG...]]
   dev/agent-e2e.sh [--yard NAME] --slot N [--purpose LABEL] --ssh-stdin 1|2 -- COMMAND [ARG...]
   dev/agent-e2e.sh [--yard NAME] --slot N --verify-boundary
@@ -79,8 +82,9 @@ NAME defaults to test-yard. During a temporary migration, select the old yard ex
 accepts standard controller keys through the bounded forced-command facade. Every run creates a
 separate ephemeral guest key.
 
-The operator owns the outer test yard. Acquire creates or starts only the selected inner slot pair;
-release fences access and stops that pair without deleting its disks. e2e-vm-1 and e2e-vm-2 are
+The operator owns the outer test yard. Acquire creates disposable VMs from an immutable base;
+release fences access and deletes their disks. --type defaults to subyard-pair (two VMs);
+android-test selects one VM. The default VM selection includes every VM of that type. e2e-vm-1 and e2e-vm-2 are
 lease-relative selectors, not physical slot names. Every invocation acquires a new lease; use one
 script or one interactive SSH session when several steps must share mutable guest state. Every
 lease-taking mode requires --slot N, atomically requests that broker slot and never falls back.
@@ -246,8 +250,8 @@ render_client_config() {
       [ -z "$BASTION_HOST_KEY_ALIAS" ] || [ "$BASTION_HOST_KEY_ALIAS" = none ] \
         || printf '    HostKeyAlias %s\n' "$BASTION_HOST_KEY_ALIAS"
     fi
-    if [ "${#VM_IP[@]}" -eq 2 ]; then
-      for selector in 1 2; do
+    if [ "${#VM_IP[@]}" -gt 0 ]; then
+      for ((selector=1; selector<=${#VM_IP[@]}; selector++)); do
         alias="e2e-vm-$selector"
         printf '\nHost %s\n' "$alias"
         printf '    HostName %s\n' "${VM_IP[$selector]}"
@@ -408,8 +412,8 @@ derive_purpose() {
 lease_acquire_request() {
   local client="$1" fingerprint="$2" key_type="$3" key_blob="$4"
   [ -n "$LEASE_REQUESTED_SLOT" ] || die "an exact --slot is required before acquiring an E2E lease"
-  printf 'acquire-v2 %s %s %s %s %s %s %s %s %s\n' \
-    "$client" "$fingerprint" "$LEASE_YARD" "$LEASE_PROJECT" "$LEASE_RUN" \
+  printf 'acquire-v3 %s %s %s %s %s %s %s %s %s %s\n' \
+    "$ENVIRONMENT_TYPE" "$client" "$fingerprint" "$LEASE_YARD" "$LEASE_PROJECT" "$LEASE_RUN" \
     "$LEASE_PURPOSE" "$key_type" "$key_blob" "$LEASE_REQUESTED_SLOT"
 }
 
@@ -441,11 +445,11 @@ format_duration() {
 
 render_pool_status() {
   local response="$1" now slot state yard project run purpose acquired expires reference
-  local reference_epoch age detail
+  local reference_epoch age detail environment resources
   now="$(date -u +%s)"
-  printf '%-8s %-12s %-16s %-32s %-10s %-24s %-8s %s\n' \
-    SLOT STATE YARD PROJECT RUN PURPOSE AGE EXPIRES
-  while IFS=$'\t' read -r slot state yard project run purpose acquired expires; do
+  printf '%-8s %-12s %-16s %-32s %-10s %-24s %-8s %-14s %-14s %s\n' \
+    SLOT STATE YARD PROJECT RUN PURPOSE AGE EXPIRES TYPE RESOURCES
+  while IFS=$'\t' read -r slot state yard project run purpose acquired expires environment resources; do
     age=-
     detail=-
     if [ "$state" != available ]; then
@@ -463,8 +467,8 @@ render_pool_status() {
         fi
       fi
     fi
-    printf '%-8s %-12s %-16s %-32s %-10s %-24s %-8s %s\n' \
-      "$slot" "$state" "$yard" "$project" "$run" "$purpose" "$age" "$detail"
+    printf '%-8s %-12s %-16s %-32s %-10s %-24s %-8s %-14s %-14s %s\n' \
+      "$slot" "$state" "$yard" "$project" "$run" "$purpose" "$age" "$detail" "$environment" "$resources"
   done < <(jq -r '
     .pool.slots[] |
     [
@@ -476,9 +480,24 @@ render_pool_status() {
       (if (.acquired_at // "") | startswith("0001-") then "-"
        else (.acquired_at // "-") end),
       (if (.expires_at // "") | startswith("0001-") then "-"
-       else (.expires_at // "-") end)
+       else (.expires_at // "-") end),
+      (.environment.type // "-"),
+      (if .environment then
+         "\(.environment.vm_count)x cpu=\(.environment.cpu_per_vm) ram=\(.environment.memory_per_vm) disk=\(.environment.disk_per_vm)"
+       else "-" end)
     ] | @tsv
   ' <<<"$response")
+  jq -r '
+    select(.resources != null) | .resources |
+    "Memory: available=\(.memory.available_bytes // "unknown") reserved=\(.reserved_vm_memory_bytes) bytes; L0=\(.outer_host_evidence)",
+    "Storage: driver=\(.storage.driver // "unknown") physical_used=\(.storage.physical_used_bytes // "unknown") physical_free=\(.storage.physical_free_bytes // "unknown") virtual_reserved=\(.reserved_vm_virtual_disk_bytes) bytes",
+    "Budgets: disk=\(.budgets.disk_bytes) cache=\(.budgets.cache_bytes) bytes",
+    (.bases[] | "Base: type=\(.type) fingerprint=\(.fingerprint) age=\(.age_seconds)s current=\(.current) expired=\(.expired)"),
+    (if .builder then "Builder: type=\(.builder.type) reserved_memory=\(.builder.reserved_memory_bytes) reserved_disk_peak=\(.builder.reserved_disk_peak_bytes) bytes; observed_peak=\(.builder.observed_peak)" else empty end),
+    (if .last_build_error then "Base failure: \(.last_build_error)" else empty end),
+    (.errors[]? | "Telemetry gap: " + .)
+  ' <<<"$response"
+
 }
 
 validate_exact_busy_response() {
@@ -567,10 +586,22 @@ parse_lease_grant() {
     && [ "$response_run" = "$LEASE_RUN" ] \
     && [ "$response_purpose" = "$LEASE_PURPOSE" ] \
     || die "facade changed the requested lease attribution"
-  count="$(jq '.grant.targets | length' <<<"$response")"
-  [ "$count" = 2 ] || die "facade returned an incomplete VM pair"
+  jq -e --arg environment "$ENVIRONMENT_TYPE" --argjson count "$VM_COUNT" '
+    (.grant.environment | keys | sort) ==
+      ["cpu_per_vm", "disk_per_vm", "lifecycle", "memory_per_vm", "type", "vm_count"] and
+    .grant.environment.type == $environment and .grant.environment.vm_count == $count and
+    .grant.environment.lifecycle == "disposable-v1" and
+    (.grant.environment.cpu_per_vm | type == "number" and . >= 1 and . == floor) and
+    (.grant.environment.memory_per_vm | type == "string" and test("^[1-9][0-9]*(MiB|GiB|MB|GB)$")) and
+    (.grant.environment.disk_per_vm | type == "string" and test("^[1-9][0-9]*(MiB|GiB|MB|GB)$")) and
+    (.grant.base_fingerprint | type == "string" and test("^[a-f0-9]{64}$")) and
+    (.grant.targets | type == "array" and length == $count)
+  ' <<<"$response" >/dev/null 2>&1 \
+    || die "facade returned an invalid disposable environment grant"
+  BASE_FINGERPRINT="$(jq -r '.grant.base_fingerprint' <<<"$response")"
+  count="$VM_COUNT"
   VM_IP=(); VM_HOST_KEY=()
-  for selector in 1 2; do
+  for ((selector=1; selector<=count; selector++)); do
     name="$(jq -r --argjson selector "$selector" \
       '.grant.targets[] | select(.selector == $selector) | .name' <<<"$response")"
     address="$(jq -r --argjson selector "$selector" \
@@ -586,7 +617,9 @@ parse_lease_grant() {
     VM_IP[$selector]="$address"
     VM_HOST_KEY[$selector]="$key_type $key_blob"
   done
-  printf 'e2e-vm-1 %s\ne2e-vm-2 %s\n' "${VM_HOST_KEY[1]}" "${VM_HOST_KEY[2]}" > "$GUEST_KNOWN_HOSTS"
+  for ((selector=1; selector<=count; selector++)); do
+    printf 'e2e-vm-%s %s\n' "$selector" "${VM_HOST_KEY[$selector]}"
+  done > "$GUEST_KNOWN_HOSTS"
   chmod 0600 "$GUEST_KNOWN_HOSTS"
 }
 
@@ -636,9 +669,10 @@ acquire_lease() {
     die "broker capability probe failed"
   fi
   jq -e 'type == "object" and .schema_version == 1 and .status == "ok" and
-    (.capabilities | type == "array" and index("attribution-v2") != null)' \
+    (.capabilities | type == "array" and index("attribution-v2") != null and
+      index("environment-acquire-v3") != null and index("disposable-v1") != null)' \
     <<<"$status_response" >/dev/null \
-    || die "broker does not support required attribution-v2 acquire"
+    || die "broker does not support required attribution-v2/environment-acquire-v3/disposable-v1 acquire"
   request="$(lease_acquire_request "$client" "$fingerprint" "$type" "$blob")"
   started=$SECONDS
   last_report=-30
@@ -679,11 +713,23 @@ acquire_lease() {
       write_client_config
       printf 'E2E lease: yard=%s project=%s run=%s purpose=%s slot=%s' \
         "$LEASE_YARD" "$LEASE_PROJECT" "$LEASE_RUN" "$LEASE_PURPOSE" "$LEASE_SLOT" >&2
-      printf '\n' >&2
+      printf ' type=%s vms=%s base=%s\n' "$ENVIRONMENT_TYPE" "$VM_COUNT" "$BASE_FINGERPRINT" >&2
       return 0
     fi
     reason="$(jq -r '.reason // empty' <<<"$response")"
     state="$(jq -r '.state // empty' <<<"$response")"
+    if [ "$code" = capacity ]; then
+      jq -e '
+        (keys | sort) == ["code", "message", "reason", "schema_version", "status"] and
+        .schema_version == 1 and .status == "error" and .code == "capacity" and
+        (.reason == "memory" or .reason == "disk") and
+        (.message | type == "string" and length > 0 and length <= 1024 and test("^[^\\x00-\\x1f\\x7f]+$"))
+      ' <<<"$response" >/dev/null 2>&1 \
+        || die "lease acquire outcome is unknown; refusing a second allocation"
+      printf 'agent-e2e: retryable capacity refusal for %s: resource=%s; retry after resources become available\n' \
+        "$LEASE_REQUESTED_SLOT" "$reason" >&2
+      return 4
+    fi
     if [ "$code" != busy ]; then
       die "lease acquire failed (${code:-invalid_response}: ${reason:-unspecified})"
     fi
@@ -797,6 +843,7 @@ valid_ipv4() {
 }
 
 verify_boundary() {
+  [ "$ENVIRONMENT_TYPE" = subyard-pair ] || die "--verify-boundary requires subyard-pair"
   local before after output vm pty_log transfer_log probe expected_hash actual_hash rc
   local -a requested=()
   before="$(facade_request status | jq -c --arg slot "$LEASE_SLOT" '
@@ -983,6 +1030,8 @@ write_guest_command() {
 	printf 'export SUBYARD_E2E_PURPOSE=%q\n' "$LEASE_PURPOSE"
 	printf 'export SUBYARD_E2E_SLOT=%q\n' "$LEASE_SLOT"
 	printf 'export SUBYARD_E2E_GENERATION=%q\n' "$LEASE_GENERATION"
+	printf 'export SUBYARD_E2E_TYPE=%q\n' "$ENVIRONMENT_TYPE"
+	printf 'export SUBYARD_E2E_BASE_FINGERPRINT=%q\n' "$BASE_FINGERPRINT"
 	printf 'export SUBYARD_E2E_VM=%q\n' "$vm"
 	if [ "${1:-}" = ./bin/yard ]; then
 		printf '/usr/sbin/runuser -u dev -- env HOME=/home/dev USER=dev LOGNAME=dev ./dev/build-engine.sh\n'
@@ -1070,7 +1119,7 @@ set_requested_slot() {
 }
 
 main() {
-  local selector=both root bundle bundle_hash vm run_failed=0 cleanup_failed=0
+  local selector=all root bundle bundle_hash vm run_failed=0 cleanup_failed=0
   local mode=run ssh_vm='' ssh_stdin=0 wait_value purpose_override='' status_json=0 slot_value=''
   local status_response
   local -a selected=() command=()
@@ -1084,6 +1133,9 @@ main() {
 	      set_requested_slot "$slot_value" --slot
 	      shift 2
         ;;
+      --type)
+        [ "$#" -ge 2 ] || die "--type needs subyard-pair or android-test"
+        ENVIRONMENT_TYPE="$2"; shift 2 ;;
       --vm) [ "$#" -ge 2 ] || die "--vm needs 1, 2 or both"; selector="$2"; shift 2 ;;
       --ssh) [ "$#" -ge 2 ] || die "--ssh needs 1 or 2"; mode=ssh; ssh_vm="$2"; shift 2 ;;
       --ssh-stdin)
@@ -1118,6 +1170,16 @@ main() {
       *) die "unknown argument '$1' (put the guest command after --)" ;;
     esac
   done
+  case "$ENVIRONMENT_TYPE" in
+    subyard-pair) VM_COUNT=2 ;;
+    android-test)
+      VM_COUNT=1
+      [ "$selector" != 2 ] && [ "$selector" != both ] && [ "$ssh_vm" != 2 ] \
+        || die "android-test has only VM 1; selectors 2 and both are invalid"
+      [ "$mode" != verify ] || die "--verify-boundary requires subyard-pair"
+      ;;
+    *) die "--type must be subyard-pair or android-test" ;;
+  esac
   configure_yard_scope
   [ "$status_json" = 0 ] || [ "$mode" = status ] || die "--json is valid only with --status"
   [ -z "$purpose_override" ] || [ "$mode" != status ] || die "--purpose is not valid with --status"
@@ -1169,7 +1231,7 @@ main() {
   esac
 
   [ "${#command[@]}" -gt 0 ] || die "a guest command is required after --"
-  case "$selector" in 1) selected=(1) ;; 2) selected=(2) ;; both) selected=(1 2) ;; *) die "--vm must be 1, 2 or both" ;; esac
+  case "$selector" in all) for ((vm=1; vm<=VM_COUNT; vm++)); do selected+=("$vm"); done ;; 1) selected=(1) ;; 2) selected=(2) ;; both) selected=(1 2) ;; *) die "--vm must be 1, 2 or both" ;; esac
   root="$REPO_ROOT"
   git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
     || die "agent E2E must run from a Git worktree"

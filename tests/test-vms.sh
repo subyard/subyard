@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Host-free contracts for the retained L1 physical provisioner.
+# Host-free contracts for the L1 physical provisioner.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -81,6 +81,28 @@ grep -Fq 'E2E_BROKER_SOURCE' "$PROVISION" \
   && ! grep -Fq 'systemctl start "$(basename "$SERVICE_PATH")"' \
     "$ROOT/scripts/install-test-vms-host-sink.sh" \
   || fail "broker spool producer and host sink are not rolled out sink-first"
+
+# Execute the real validation/config serialization in a temporary config directory.
+provision_config_fixture="$TMP/provision-config.sh"
+{
+  printf '#!/usr/bin/env bash\nset -euo pipefail\n'
+  sed -n '/^: "${NESTED_E2E_VMS:=0}"/,/^if \[ "\$NESTED_E2E_VMS" = 0 \]; then/p' "$PROVISION" \
+    | sed '$d' | sed "s|/etc/subyard|$TMP/config|g"
+  printf 'cat "$config_candidate"\n'
+} > "$provision_config_fixture"
+config_result="$(E2E_DISK_BUDGET=120GiB E2E_CACHE_BUDGET=20GiB E2E_DISK_RESERVE=6GiB \
+  E2E_MEMORY_RESERVE=3GiB E2E_VM_OVERHEAD=768MiB bash "$provision_config_fixture")"
+for expected in E2E_DISK_BUDGET=120GiB E2E_CACHE_BUDGET=20GiB E2E_DISK_RESERVE=6GiB \
+  E2E_MEMORY_RESERVE=3GiB E2E_VM_OVERHEAD=768MiB \
+  E2E_RECIPE_ROOT=/usr/local/libexec/subyard/e2e-recipes; do
+  grep -Fxq "$expected" <<<"$config_result" \
+    || fail "provisioning lost a configured budget: $expected"
+done
+for budget_name in E2E_DISK_BUDGET E2E_CACHE_BUDGET E2E_DISK_RESERVE E2E_MEMORY_RESERVE E2E_VM_OVERHEAD; do
+  if env "$budget_name=0GiB" bash "$provision_config_fixture" >/dev/null 2>&1; then
+    fail "provisioning accepted invalid budget $budget_name"
+  fi
+done
 
 mkdir -p "$TMP/invoke-bin"
 cat > "$TMP/invoke-bin/incus" <<'SH'

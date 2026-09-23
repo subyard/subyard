@@ -445,6 +445,9 @@ func (runtime *Runtime) peerSSHSmoke(ctx context.Context, source, peerIP string)
 
 func (runtime *Runtime) ensurePeerTrust(ctx context.Context) error {
 	cfg := runtime.Config
+	if cfg.guestCount() != 2 {
+		return nil
+	}
 	vm1, vm2 := cfg.vm(1), cfg.vm(2)
 	ip1, err := runtime.vmIP(ctx, vm1)
 	if err != nil {

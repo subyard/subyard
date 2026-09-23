@@ -134,9 +134,18 @@ func NewCoreActionRegistry() (*domain.ActionRegistry, error) {
 			Recovery: domain.RecoveryNotNeeded,
 		},
 		{
+			Action: "test-vms.refresh", Summary: "Refresh test VM base image", Effect: domain.ActionMutation,
+			Impacts: []domain.ActionImpact{domain.ImpactYardRuntime}, Recovery: domain.RecoveryRecreatable,
+		},
+		{
 			Action: "test-vms.revoke", Summary: "Revoke test VM lease slot", Effect: domain.ActionMutation,
 			Impacts:  []domain.ActionImpact{domain.ImpactYardRuntime, domain.ImpactSharedWorkload},
 			Recovery: domain.RecoveryRecreatable,
+		},
+		{
+			Action: "test-vms.retire-legacy", Summary: "Retire legacy test VM data", Effect: domain.ActionDestruction,
+			Impacts:  []domain.ActionImpact{domain.ImpactPersistentData, domain.ImpactYardRuntime},
+			Recovery: domain.RecoveryIrreversible,
 		},
 		{
 			Action: "test-vms.recover", Summary: "Recover test VM lease slot", Effect: domain.ActionMutation,

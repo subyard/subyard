@@ -160,11 +160,13 @@ func (cli *CLI) runTestVMLogs(ctx context.Context, arguments []string) int {
 }
 
 type testVMExecution struct {
-	action      string
-	slot        int
-	identity    testvmsruntime.LeaseIdentity
-	hasSnapshot bool
-	noOp        bool
+	environment    string
+	action         string
+	slot           int
+	identity       testvmsruntime.LeaseIdentity
+	hasSnapshot    bool
+	legacyRetained bool
+	noOp           bool
 }
 
 const testVMStatusMaxBytes = 64 << 10
@@ -189,6 +191,7 @@ func (cli *CLI) prepareTestVMExecution(
 		return nil, errors.New("nested E2E VMs require a container yard")
 	}
 	action := ""
+	environment := ""
 	slot := 0
 	var expectedGeneration, expectedEpoch uint64
 	var expectedGenerationSet, expectedEpochSet bool
@@ -233,6 +236,10 @@ func (cli *CLI) prepareTestVMExecution(
 			if strings.HasPrefix(argument, "-") {
 				return nil, fmt.Errorf("unknown test-vms option %q", argument)
 			}
+			if action == "refresh" && environment == "" {
+				environment = argument
+				continue
+			}
 			if action != "" {
 				return nil, errors.New("test-vms accepts one command")
 			}
@@ -240,11 +247,18 @@ func (cli *CLI) prepareTestVMExecution(
 		}
 	}
 	switch action {
+	case "refresh":
+		if environment != testvmsruntime.EnvironmentPair && environment != testvmsruntime.EnvironmentAndroid {
+			return nil, errors.New("refresh requires subyard-pair or android-test")
+		}
+		if slot != 0 {
+			return nil, errors.New("--slot is not valid for refresh")
+		}
 	case "status":
 		if slot != 0 {
 			return nil, errors.New("--slot is not valid for status")
 		}
-	case "revoke", "recover":
+	case "revoke", "recover", "retire-legacy":
 		if slot == 0 {
 			return nil, fmt.Errorf("%s requires --slot N", action)
 		}
@@ -254,7 +268,7 @@ func (cli *CLI) prepareTestVMExecution(
 	if expectedGenerationSet != expectedEpochSet {
 		return nil, errors.New("forwarded test VM target identity requires generation and epoch")
 	}
-	if expectedGenerationSet && action != "revoke" && action != "recover" {
+	if expectedGenerationSet && (action == "status" || action == "refresh") {
 		return nil, errors.New("forwarded test VM target identity requires revoke or recover")
 	}
 	// A remote invocation is preflighted by the owner after forwarding. A local
@@ -272,13 +286,14 @@ func (cli *CLI) prepareTestVMExecution(
 			return nil, fmt.Errorf("yard %q must be running", loaded.Context.YardInstanceName)
 		}
 	}
-	execution := &testVMExecution{action: action, slot: slot}
-	if action == "revoke" || action == "recover" {
+	execution := &testVMExecution{action: action, slot: slot, environment: environment}
+	if action != "status" && action != "refresh" {
 		slotSnapshot, err := cli.probeTestVMSlot(ctx, loaded, slot)
 		if err != nil {
 			return nil, err
 		}
 		slotState := slotSnapshot.State
+		execution.legacyRetained = slotSnapshot.LegacyRetained
 		execution.identity = testvmsruntime.LeaseIdentity{
 			SlotID:             slotSnapshot.SlotID,
 			ResourceGeneration: slotSnapshot.ResourceGeneration,
@@ -302,7 +317,17 @@ func (cli *CLI) prepareTestVMExecution(
 			default:
 				return nil, fmt.Errorf("test VM slot %d cannot be revoked while %s", slot, slotState)
 			}
+		case "retire-legacy":
+			if !slotSnapshot.LegacyRetained {
+				return nil, errors.New("slot has no legacy retained data")
+			}
+			if slotState != testvmsruntime.SlotAvailable && slotState != testvmsruntime.SlotQuarantined {
+				return nil, fmt.Errorf("test VM slot %d cannot be retired while %s", slot, slotState)
+			}
 		case "recover":
+			if slotSnapshot.LegacyRetained {
+				return nil, errors.New("legacy retained data requires test-vms retire-legacy --slot N")
+			}
 			switch slotState {
 			case testvmsruntime.SlotAvailable, testvmsruntime.SlotRecovering:
 				execution.noOp = true
@@ -312,7 +337,7 @@ func (cli *CLI) prepareTestVMExecution(
 			}
 		}
 		if !execution.noOp {
-			if slotSnapshot.ResourceGeneration == 0 || slotSnapshot.LeaseEpoch == 0 {
+			if slotSnapshot.ResourceGeneration == 0 || (slotSnapshot.LeaseEpoch == 0 && action != "retire-legacy") {
 				return nil, errors.New("test VM broker returned an incomplete lease target identity")
 			}
 		}
@@ -321,7 +346,7 @@ func (cli *CLI) prepareTestVMExecution(
 }
 
 func (execution *testVMExecution) remoteArguments(arguments []string) ([]string, error) {
-	if execution == nil || execution.action == "status" {
+	if execution == nil || execution.action == "status" || execution.action == "refresh" {
 		return append([]string(nil), arguments...), nil
 	}
 	if !execution.hasSnapshot {
@@ -366,8 +391,8 @@ func (cli *CLI) probeTestVMSlot(
 	if err := json.Unmarshal(result.Stdout, &response); err != nil {
 		return testvmsruntime.LeaseSlot{}, fmt.Errorf("decode test VM broker status: %w", err)
 	}
-	if response.SchemaVersion != testvmsruntime.LeaseSchemaVersion || response.Status != "ok" ||
-		response.Pool == nil || response.Pool.SchemaVersion != testvmsruntime.LeaseSchemaVersion ||
+	if response.SchemaVersion != testvmsruntime.LeaseProtocolVersion || response.Status != "ok" ||
+		response.Pool == nil || (response.Pool.SchemaVersion != 1 && response.Pool.SchemaVersion != testvmsruntime.LeaseSchemaVersion) ||
 		response.Pool.ResourceType != "agent-e2e" || response.Pool.ResourceID != "test-vms" {
 		return testvmsruntime.LeaseSlot{}, errors.New("test VM broker returned an invalid status response")
 	}
@@ -377,6 +402,9 @@ func (cli *CLI) probeTestVMSlot(
 	wanted := fmt.Sprintf("slot-%03d", slot)
 	for _, candidate := range response.Pool.Slots {
 		if candidate.SlotID == wanted {
+			if response.Pool.SchemaVersion == 1 {
+				candidate.LegacyRetained = true
+			}
 			return candidate, nil
 		}
 	}
@@ -417,19 +445,33 @@ func (execution *testVMExecution) actionPlan() (domain.ActionID, domain.ActionDe
 	}
 	consequences := []string{"read the configured test VM lease pool"}
 	switch execution.action {
+	case "refresh":
+		return "test-vms.refresh", domain.ActionDelta{Changed: true, Consequences: []string{
+			"build and validate a new immutable base for " + execution.environment,
+			"reserve builder resources; preserve active leases and the previous base on failure",
+		}}, nil
 	case "status":
 		return "test-vms.status", domain.ActionDelta{Consequences: consequences}, nil
+	case "retire-legacy":
+		consequences = []string{
+			fmt.Sprintf("permanently delete the stopped retained guest disks and snapshots of slot %d", execution.slot),
+			"retained guest files cannot be recovered; subsequent leases start with clean disposable disks",
+		}
+		return "test-vms.retire-legacy", domain.ActionDelta{Changed: !execution.noOp, Consequences: consequences}, nil
 	case "revoke":
 		consequences = []string{
 			fmt.Sprintf("fence and stop active lease slot %d", execution.slot),
-			"retain both VM disks and the slot network/project",
+			"delete disposable guest disks and snapshots after verified stop",
+		}
+		if execution.legacyRetained {
+			consequences[1] = "retain legacy guest disks until explicit retirement"
 		}
 		return "test-vms.revoke", domain.ActionDelta{Changed: !execution.noOp, Consequences: consequences}, nil
 	case "recover":
 		consequences = []string{
 			fmt.Sprintf("immediately recover quarantined lease slot %d", execution.slot),
-			"save incident evidence, then delete both marker-owned disposable VM disks",
-			"provision and verify a clean two-VM pair before publishing the slot as available",
+			"save incident evidence, then stop and delete exact allocation-owned VM disks and snapshots",
+			"verify empty working storage before publishing the slot as available",
 		}
 		return "test-vms.recover", domain.ActionDelta{Changed: !execution.noOp, Consequences: consequences}, nil
 	default:
@@ -468,9 +510,17 @@ func (cli *CLI) executeTestVMs(
 		argument = fmt.Sprintf("revoke-slot-%d", execution.slot)
 	} else if execution.action == "recover" {
 		argument = fmt.Sprintf("recover-slot-%d", execution.slot)
+	} else if execution.action == "retire-legacy" {
+		argument = fmt.Sprintf("retire-legacy-slot-%d", execution.slot)
+	}
+	if execution.action == "refresh" {
+		argument = "refresh-" + execution.environment
 	}
 	arguments := []string{argument}
-	if execution.action != "status" {
+	if execution.action == "refresh" {
+		arguments = append(arguments, "--yes")
+	}
+	if execution.action != "status" && execution.action != "refresh" {
 		arguments = append(arguments,
 			"--expect-resource-generation", strconv.FormatUint(execution.identity.ResourceGeneration, 10),
 			"--expect-lease-epoch", strconv.FormatUint(execution.identity.LeaseEpoch, 10),

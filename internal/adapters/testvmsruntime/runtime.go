@@ -18,6 +18,10 @@ import (
 const provisionedGuestCount = 2
 
 type Runtime struct {
+	allocation       *LeaseIdentity
+	memoryProbe      func() (MemoryCapacity, error)
+	usageProbe       func(context.Context, LeaseSlot, string) allocationUsage
+	cacheProbe       func(context.Context) (CacheUsage, error)
 	Config           Config
 	ConfigPath       string
 	Runner           CommandRunner
@@ -93,8 +97,8 @@ func (runtime *Runtime) Run(ctx context.Context, arguments []string, environment
 				return fmt.Errorf("%s requires a positive integer", argument)
 			}
 			value, err := strconv.ParseUint(arguments[index], 10, 64)
-			if err != nil || value == 0 {
-				return fmt.Errorf("%s requires a positive integer", argument)
+			if err != nil || (value == 0 && argument != "--expect-lease-epoch") {
+				return fmt.Errorf("%s requires an unsigned integer (generation must be positive)", argument)
 			}
 			if argument == "--expect-resource-generation" {
 				if expectedGenerationSet {
@@ -121,7 +125,7 @@ func (runtime *Runtime) Run(ctx context.Context, arguments []string, environment
 	}
 	action := positional[0]
 	expectsLeaseIdentity := strings.HasPrefix(action, "revoke-slot-") ||
-		strings.HasPrefix(action, "recover-slot-")
+		strings.HasPrefix(action, "recover-slot-") || strings.HasPrefix(action, "retire-legacy-slot-")
 	if expectsLeaseIdentity && (!expectedGenerationSet || !expectedEpochSet) {
 		return errors.New("complete lease target identity is required")
 	}
@@ -166,6 +170,23 @@ func (runtime *Runtime) Run(ctx context.Context, arguments []string, environment
 	}
 	if _, err := runtime.Runner.LookPath(runtime.Config.Incus); err != nil {
 		return errors.New("inner Incus is not installed")
+	}
+	if strings.HasPrefix(action, "refresh-") {
+		if !yes {
+			return errors.New("confirmation required (re-run with --yes for automation)")
+		}
+		return runtime.RefreshBase(ctx, LeaseStore{Path: runtime.Config.leaseState(), SlotCount: runtime.Config.SlotCount, Now: runtime.Now}, strings.TrimPrefix(action, "refresh-"))
+	}
+	if strings.HasPrefix(action, "retire-legacy-slot-") {
+		if !yes {
+			return errors.New("confirmation required (re-run with --yes for automation)")
+		}
+		number, err := strconv.Atoi(strings.TrimPrefix(action, "retire-legacy-slot-"))
+		if err != nil || number < 1 || number > runtime.Config.SlotCount {
+			return errors.New("invalid legacy retirement slot")
+		}
+		return runtime.RetireLegacySlot(ctx, LeaseStore{Path: runtime.Config.leaseState(), SlotCount: runtime.Config.SlotCount, Now: runtime.Now},
+			LeaseIdentity{SlotID: fmt.Sprintf("slot-%03d", number), ResourceGeneration: expectedGeneration, LeaseEpoch: expectedEpoch})
 	}
 	if strings.HasPrefix(action, "revoke-slot-") {
 		if !yes {
@@ -232,6 +253,7 @@ func (runtime *Runtime) Run(ctx context.Context, arguments []string, environment
 		})
 	case "status":
 		return (Facade{
+			OnStatus: func(pool LeasePool) ResourceStatus { return runtime.ResourceStatus(ctx, pool) },
 			Store: LeaseStore{
 				Path: runtime.Config.leaseState(), SlotCount: runtime.Config.SlotCount, Now: runtime.Now,
 			},
@@ -289,7 +311,7 @@ func (runtime *Runtime) runGC(ctx context.Context) error {
 func (runtime *Runtime) provisionPair(ctx context.Context) (err error) {
 	cfg := runtime.Config
 	fmt.Fprintf(runtime.Stdout,
-		"Create or start one retained two-VM lease slot with SSH and passwordless sudo.\n")
+		"Create or start the lease environment with SSH and passwordless sudo.\n")
 	if err = runtime.restrictAgentAccess("provisioning"); err != nil {
 		return err
 	}
@@ -312,7 +334,7 @@ func (runtime *Runtime) provisionPair(ctx context.Context) (err error) {
 	if err = writePrivateFile(cfg.knownHosts(), nil); err != nil {
 		return err
 	}
-	for index := 1; index <= provisionedGuestCount; index++ {
+	for index := 1; index <= cfg.guestCount(); index++ {
 		if err = runtime.ensureVM(ctx, cfg.vm(index)); err != nil {
 			return err
 		}
@@ -320,12 +342,12 @@ func (runtime *Runtime) provisionPair(ctx context.Context) (err error) {
 	if err = runtime.tightenProject(ctx); err != nil {
 		return err
 	}
-	for index := 1; index <= provisionedGuestCount; index++ {
+	for index := 1; index <= cfg.guestCount(); index++ {
 		if err = runtime.startVM(ctx, cfg.vm(index)); err != nil {
 			return err
 		}
 	}
-	for index := 1; index <= provisionedGuestCount; index++ {
+	for index := 1; index <= cfg.guestCount(); index++ {
 		vm := cfg.vm(index)
 		if err = runtime.waitAgent(ctx, vm); err != nil {
 			return err
@@ -346,21 +368,21 @@ func (runtime *Runtime) provisionPair(ctx context.Context) (err error) {
 	if err = runtime.ensurePeerTrust(ctx); err != nil {
 		return err
 	}
-	for index := 1; index <= provisionedGuestCount; index++ {
+	for index := 1; index <= cfg.guestCount(); index++ {
 		if err = runtime.sshSmoke(ctx, cfg.vm(index)); err != nil {
 			return err
 		}
 	}
 	_ = os.Remove(cfg.revokedKey())
 	fmt.Fprintln(runtime.Stdout,
-		"  [ ok ] both VMs are ready for lease context and bounded agent access")
+		"  [ ok ] all VMs are ready for lease context and bounded agent access")
 	return nil
 }
 
 func (runtime *Runtime) ensureProject(ctx context.Context) error {
 	cfg := runtime.Config
-	totalCPU := strconv.Itoa(cfg.CPU * 2)
-	totalMemory := doubleSize(cfg.Memory)
+	totalCPU := strconv.Itoa(cfg.CPU * cfg.guestCount())
+	totalMemory := cfg.totalSize(cfg.Memory)
 	exists, err := runtime.projectPresence(ctx)
 	if err != nil {
 		return fmt.Errorf("inventory inner Incus projects: %w", err)
@@ -386,7 +408,7 @@ func (runtime *Runtime) ensureProject(ctx context.Context) error {
 			return err
 		}
 		if number, parseErr := strconv.Atoi(strings.TrimSpace(currentCPU)); parseErr == nil &&
-			number < cfg.CPU*2 {
+			number < cfg.CPU*cfg.guestCount() {
 			if _, err := runtime.incus(ctx, "project", "set", cfg.Project, "limits.cpu", totalCPU); err != nil {
 				return err
 			}
@@ -414,8 +436,8 @@ func (runtime *Runtime) ensureProject(ctx context.Context) error {
 			_, err := runtime.incus(ctx, "project", "create", cfg.Project,
 				"-c", "features.images=false",
 				"-c", "user.subyard.managed="+managedMarker,
-				"-c", "limits.instances=2",
-				"-c", "limits.virtual-machines=2",
+				"-c", "limits.instances="+strconv.Itoa(cfg.guestCount()),
+				"-c", "limits.virtual-machines="+strconv.Itoa(cfg.guestCount()),
 				"-c", "limits.cpu="+totalCPU,
 				"-c", "limits.memory="+totalMemory,
 				"-c", "restricted=true")
@@ -426,7 +448,7 @@ func (runtime *Runtime) ensureProject(ctx context.Context) error {
 		fmt.Fprintf(runtime.Stdout, "  [ ok ] created inner Incus project %q\n", cfg.Project)
 	}
 	for _, setting := range [][2]string{
-		{"limits.instances", "2"}, {"limits.virtual-machines", "2"},
+		{"limits.instances", strconv.Itoa(cfg.guestCount())}, {"limits.virtual-machines", strconv.Itoa(cfg.guestCount())},
 		{"restricted", "true"}, {"restricted.networks.access", cfg.Network},
 		{"user.subyard.managed", managedMarker},
 	} {
@@ -459,7 +481,7 @@ func (runtime *Runtime) ensureProject(ctx context.Context) error {
 
 func (cfg Config) validateManagedNames(names []string) error {
 	for _, name := range names {
-		if name != cfg.vm(1) && name != cfg.vm(2) {
+		if name != cfg.vm(1) && (cfg.guestCount() != 2 || name != cfg.vm(2)) {
 			return fmt.Errorf("unexpected instance blocks reconciliation: %s", name)
 		}
 	}
@@ -476,7 +498,7 @@ func (runtime *Runtime) ensureVM(ctx context.Context, vm string) error {
 		if strings.TrimSpace(kind) != "VIRTUAL-MACHINE" {
 			return fmt.Errorf("managed name %q is not a virtual machine", vm)
 		}
-		if err := runtime.requireVMMarker(ctx, vm); err != nil {
+		if err := runtime.requireAllocationMarker(ctx, vm); err != nil {
 			return err
 		}
 	} else {
@@ -521,10 +543,14 @@ func (runtime *Runtime) initVM(ctx context.Context, vm string) error {
 	}
 	const attempts = 4
 	for attempt := 1; attempt <= attempts; attempt++ {
-		_, err := runtime.incus(ctx, "init", cfg.Image, vm, "--vm", "--project", cfg.Project,
-			"-c", "limits.cpu="+strconv.Itoa(cfg.CPU),
-			"-c", "limits.memory="+cfg.Memory,
-			"-c", "user.subyard.managed="+managedMarker)
+		args := []string{"init", cfg.Image, vm, "--vm", "--project", cfg.Project,
+			"-c", "limits.cpu=" + strconv.Itoa(cfg.CPU), "-c", "limits.memory=" + cfg.Memory,
+			"-c", "user.subyard.managed=" + managedMarker}
+		if runtime.allocation != nil {
+			args = append(args, "-c", "user.subyard.generation="+strconv.FormatUint(runtime.allocation.ResourceGeneration, 10),
+				"-c", "user.subyard.lease-epoch="+strconv.FormatUint(runtime.allocation.LeaseEpoch, 10))
+		}
+		_, err := runtime.incus(ctx, args...)
 		if err == nil || !remoteImageLookupError(err) || attempt == attempts {
 			return err
 		}
@@ -549,7 +575,7 @@ func remoteImageLookupError(err error) bool {
 func (runtime *Runtime) tightenProject(ctx context.Context) error {
 	cfg := runtime.Config
 	for _, setting := range [][2]string{
-		{"limits.cpu", strconv.Itoa(cfg.CPU * 2)}, {"limits.memory", doubleSize(cfg.Memory)},
+		{"limits.cpu", strconv.Itoa(cfg.CPU * cfg.guestCount())}, {"limits.memory", cfg.totalSize(cfg.Memory)},
 	} {
 		if _, err := runtime.incus(ctx, "project", "set", cfg.Project, setting[0], setting[1]); err != nil {
 			return err
@@ -583,7 +609,8 @@ func (runtime *Runtime) gc(ctx context.Context) error {
 	store := LeaseStore{
 		Path: runtime.Config.leaseState(), SlotCount: runtime.Config.SlotCount, Now: runtime.Now,
 	}
-	return runtime.ReapExpired(ctx, store)
+	leaseErr := runtime.ReapExpired(ctx, store)
+	return errors.Join(leaseErr, runtime.ReapImages(ctx, store))
 }
 
 func (runtime *Runtime) cleanupManaged(ctx context.Context, quiet bool) error {
@@ -606,11 +633,11 @@ func (runtime *Runtime) cleanupManaged(ctx context.Context, quiet bool) error {
 			return errors.New("could not inventory managed project before cleanup")
 		}
 		for _, name := range names {
-			if name != cfg.vm(1) && name != cfg.vm(2) {
+			if name != cfg.vm(1) && (cfg.guestCount() != 2 || name != cfg.vm(2)) {
 				return fmt.Errorf("unexpected instance blocks cleanup: %s", name)
 			}
 		}
-		for index := 1; index <= 2; index++ {
+		for index := 1; index <= cfg.guestCount(); index++ {
 			vm := cfg.vm(index)
 			if !runtime.vmExists(ctx, vm) {
 				continue

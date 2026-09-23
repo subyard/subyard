@@ -105,6 +105,10 @@ func (sink *HostSink) Sync(ctx context.Context) error {
 			))
 			continue
 		}
+		if evidenceErr := sink.saveHostEvidence(ctx, instance, batch.Incidents); evidenceErr != nil {
+			result = errors.Join(result, evidenceErr)
+			continue
+		}
 		if ackErr := sink.ack(ctx, instance, batch); ackErr != nil {
 			result = errors.Join(result, ackErr)
 			continue
@@ -407,12 +411,18 @@ func (sink *HostSink) rotateIncidents(
 		if err != nil {
 			return err
 		}
+		size := info.Size()
+		if hostInfo, err := os.Stat(filepath.Join(directory, "host", entry.Name())); err == nil {
+			size += hostInfo.Size()
+		} else if !os.IsNotExist(err) {
+			return err
+		}
 		closed = append(closed, closedIncident{
 			path: path,
 			at:   success.at,
-			size: info.Size(),
+			size: size,
 		})
-		closedBytes += info.Size()
+		closedBytes += size
 	}
 	sort.Slice(closed, func(i, j int) bool {
 		if closed[i].at.Equal(closed[j].at) {
@@ -426,6 +436,10 @@ func (sink *HostSink) rotateIncidents(
 			continue
 		}
 		if err := os.Remove(incident.path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		hostPath := filepath.Join(directory, "host", filepath.Base(incident.path))
+		if err := os.Remove(hostPath); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 		closedBytes -= incident.size

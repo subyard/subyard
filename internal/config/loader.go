@@ -597,6 +597,7 @@ func resetInheritedContext(values environment) {
 		"YARD_NAME", "ACCESS_KIND", "ENVIRONMENT_PROFILES", "YARD_KIND", "YARD_INSTANCE_NAME", "INCUS_PROJECT",
 		"INCUS_BRIDGE", "SSH_HOST", "SSH_PORT", "OWNER_ENDPOINT", "OWNER_YARD_NAME", "SHIFT_MODE",
 		"FORWARD_SSH_AGENT", "DEV_SUDO", "DEV_UID", "DEV_USER", "YARD_TEMPLATE", "NESTED_E2E_VMS",
+		"E2E_DISK_BUDGET", "E2E_CACHE_BUDGET", "E2E_DISK_RESERVE", "E2E_MEMORY_RESERVE", "E2E_VM_OVERHEAD",
 		"E2E_VM_IMAGE", "E2E_VM_CPU", "E2E_VM_MEMORY", "E2E_VM_DISK", "E2E_VM_SLOT_COUNT", "E2E_VM_BOOT_TIMEOUT",
 		"SUBYARD_STATE_DIR", "RESTRICTED_DISK_PATHS",
 		"HOST_BASE", "SRV_VOLUME", "ALLOWS_CODING_TOOLS",
@@ -973,6 +974,11 @@ func contextFrom(
 	setDefault(values, "SSH_HOST", "yard", tracker, defaultLayer)
 	setDefault(values, "DEV_USER", "dev", tracker, defaultLayer)
 	setDefault(values, "NESTED_E2E_VMS", "0", tracker, defaultLayer)
+	setDefault(values, "E2E_DISK_BUDGET", "160GiB", tracker, defaultLayer)
+	setDefault(values, "E2E_CACHE_BUDGET", "24GiB", tracker, defaultLayer)
+	setDefault(values, "E2E_DISK_RESERVE", "5GiB", tracker, defaultLayer)
+	setDefault(values, "E2E_MEMORY_RESERVE", "2GiB", tracker, defaultLayer)
+	setDefault(values, "E2E_VM_OVERHEAD", "512MiB", tracker, defaultLayer)
 	setDefault(values, "E2E_VM_IMAGE", "images:debian/13/cloud", tracker, defaultLayer)
 	setDefault(values, "E2E_VM_CPU", "2", tracker, defaultLayer)
 	setDefault(values, "E2E_VM_MEMORY", "4GiB", tracker, defaultLayer)
@@ -1134,6 +1140,11 @@ func validateE2EConfig(values environment) error {
 			return 0, fmt.Errorf("%s must use a positive MiB or GiB value", name)
 		}
 		return amount * factor, nil
+	}
+	for _, name := range []string{"E2E_DISK_BUDGET", "E2E_CACHE_BUDGET", "E2E_DISK_RESERVE", "E2E_MEMORY_RESERVE", "E2E_VM_OVERHEAD"} {
+		if _, err := sizeMiB(name); err != nil {
+			return err
+		}
 	}
 	if _, err := sizeMiB("E2E_VM_MEMORY"); err != nil {
 		return err

@@ -16,8 +16,7 @@ import (
 
 const (
 	// VM disks are thin-provisioned; preserve real host headroom instead of summing virtual maxima.
-	HostReserveBytes       = uint64(5 * 1024 * 1024 * 1024)
-	InitialVMHeadroomBytes = uint64(1024 * 1024 * 1024)
+	HostReserveBytes = uint64(5 * 1024 * 1024 * 1024)
 
 	// Keep best-effort trim below the facade request lifetime so verified stop retains its budget.
 	retainedGuestTrimTimeout      = 15 * time.Second
@@ -32,7 +31,7 @@ func (runtime *Runtime) AcquireSlot(
 	if err != nil {
 		return grant, err
 	}
-	var acquired LeaseGrant
+	acquired := grant
 	err = withFileLock(runtime.slotLifecycleLock(grant.SlotID), func() error {
 		var acquireErr error
 		acquired, acquireErr = runtime.acquireSlotLocked(ctx, store, grant, publicKey, slot)
@@ -49,7 +48,38 @@ func (runtime *Runtime) acquireSlotLocked(
 	slot int,
 ) (LeaseGrant, error) {
 	child := runtime.slotRuntime(slot, publicKey)
-	if err := child.preflightSlotCapacity(ctx); err != nil {
+	if grant.Environment == nil {
+		return grant, errors.New("explicit disposable environment is required")
+	}
+	child.Config = child.Config.withEnvironment(*grant.Environment)
+	child.allocation = &LeaseIdentity{SlotID: grant.SlotID, ResourceGeneration: grant.ResourceGeneration, LeaseEpoch: grant.LeaseEpoch}
+	stored, err := storeSlot(store, grant.SlotID)
+	if err != nil {
+		return grant, err
+	}
+	if stored.LegacyRetained {
+		exists, err := child.projectPresence(ctx)
+		if err != nil {
+			return grant, err
+		}
+		if exists {
+			if err := child.requireProjectMarker(ctx); err != nil {
+				return grant, err
+			}
+			names, err := child.projectInstances(ctx)
+			if err != nil {
+				return grant, err
+			}
+			if len(names) != 0 {
+				return grant, ErrLegacyRetained
+			}
+		}
+		if err := store.mutateOwned(grant, func(slot *LeaseSlot, _ time.Time) error { slot.LegacyRetained = false; return nil }); err != nil {
+			return grant, err
+		}
+	}
+	grant, err = runtime.prepareEnvironment(ctx, store, grant, child)
+	if err != nil {
 		return grant, err
 	}
 	if err := child.ensureSlotNetwork(ctx); err != nil {
@@ -58,13 +88,18 @@ func (runtime *Runtime) acquireSlotLocked(
 	if err := child.provisionPair(ctx); err != nil {
 		return grant, err
 	}
-	for selector := 1; selector <= 2; selector++ {
+	// Optimized drivers may materialize their native image cache during init.
+	// This check occurs before opening forwarding or returning a held grant.
+	if err := runtime.checkCacheBudget(ctx); err != nil {
+		return grant, errors.New("working image cache exceeds budget or cannot be measured")
+	}
+	for selector := 1; selector <= child.Config.guestCount(); selector++ {
 		if err := child.installLeaseContext(ctx, child.Config.vm(selector), grant); err != nil {
 			return grant, err
 		}
 	}
 	grant.DataUser = child.Config.AgentUser
-	for selector := 1; selector <= 2; selector++ {
+	for selector := 1; selector <= child.Config.guestCount(); selector++ {
 		vm := child.Config.vm(selector)
 		address, err := child.vmIP(ctx, vm)
 		if err != nil {
@@ -246,7 +281,12 @@ func (runtime *Runtime) finishDrainingSlot(
 	if err != nil {
 		return err
 	}
-	evidence, stopErr := runtime.slotRuntime(number, "").stopRetainedWithEvidence(ctx)
+	child := runtime.slotRuntime(number, "")
+	child.useLeaseSlot(slot)
+	evidence, stopErr := child.stopRetainedWithEvidence(ctx)
+	if stopErr == nil && slot.Environment != nil {
+		stopErr = child.deleteAllocation(ctx)
+	}
 	runtime.recordStopOutcome(slot, evidence, stopErr)
 	finishErr := store.FinishDrain(slot.SlotID, stopErr)
 	if stopErr == nil {
@@ -328,8 +368,7 @@ func (runtime *Runtime) slotLifecycleLock(slotID string) string {
 }
 
 func (runtime *Runtime) RecoverSlot(ctx context.Context, store LeaseStore, slotID string) error {
-	if _, err := storeSlot(store, slotID); errors.Is(err, ErrCorruptLeaseState) ||
-		errors.Is(err, ErrUnsupportedLeaseState) {
+	if _, err := storeSlot(store, slotID); errors.Is(err, ErrCorruptLeaseState) {
 		if rebuildErr := store.rebuildCorruptPoolForRecovery(slotID); rebuildErr != nil {
 			return rebuildErr
 		}
@@ -380,6 +419,19 @@ func (runtime *Runtime) ReconcilePool(ctx context.Context, store LeaseStore) err
 func (runtime *Runtime) cleanupRetiringSlot(ctx context.Context, slot int) error {
 	child := runtime.slotRuntime(slot, "")
 	child.prepareDefaults()
+	exists, err := child.projectPresence(ctx)
+	if err != nil {
+		return err
+	}
+	if exists {
+		names, err := child.projectInstances(ctx)
+		if err != nil {
+			return err
+		}
+		if len(names) != 0 {
+			return errors.New("idle slot contains untracked instances; explicit recovery is required before pool shrink")
+		}
+	}
 	if err := child.cleanupManaged(ctx, true); err != nil {
 		return err
 	}
@@ -481,36 +533,6 @@ func (runtime *Runtime) slotRuntime(slot int, publicKey string) *Runtime {
 	}
 }
 
-func (runtime *Runtime) preflightSlotCapacity(ctx context.Context) error {
-	missing := 0
-	for selector := 1; selector <= 2; selector++ {
-		if !runtime.vmExists(ctx, runtime.Config.vm(selector)) {
-			missing++
-		}
-	}
-	if missing == 0 {
-		return nil
-	}
-	available := runtime.AvailableBytes
-	if available == nil {
-		available = filesystemAvailableBytes
-	}
-	path := runtime.capacityPath()
-	free, err := available(path)
-	if err != nil {
-		return fmt.Errorf("inspect test-vms pool capacity: %w", err)
-	}
-	required := HostReserveBytes + uint64(missing)*InitialVMHeadroomBytes
-	if free < required {
-		return fmt.Errorf(
-			"insufficient test-vms pool capacity: %d missing VM(s) need %d MiB initial headroom plus %d MiB host reserve, %d MiB available on %s",
-			missing, missing*int(InitialVMHeadroomBytes/(1024*1024)),
-			HostReserveBytes/(1024*1024), free/(1024*1024), path,
-		)
-	}
-	return nil
-}
-
 func (runtime *Runtime) capacityPath() string {
 	path := runtime.Config.StateDir
 	for {
@@ -580,13 +602,32 @@ func (runtime *Runtime) stopRetainedWithEvidence(ctx context.Context) (stopEvide
 	if err := runtime.requireProjectMarker(ctx); err != nil {
 		return evidence, err
 	}
+	var names []string
+	if runtime.allocation != nil {
+		names, err = runtime.projectInstances(ctx)
+		if err != nil {
+			return evidence, err
+		}
+		if err := runtime.Config.validateManagedNames(names); err != nil {
+			return evidence, err
+		}
+		for _, name := range names {
+			if err := runtime.requireAllocationMarker(ctx, name); err != nil {
+				return evidence, err
+			}
+		}
+	} else {
+		// Preserve retained lease stop semantics during the explicit migration window.
+		for selector := 1; selector <= runtime.Config.guestCount(); selector++ {
+			vm := runtime.Config.vm(selector)
+			if runtime.vmExists(ctx, vm) {
+				names = append(names, vm)
+			}
+		}
+	}
 	trimCtx, cancelTrim := context.WithTimeout(ctx, retainedGuestTrimTotalTimeout)
 	defer cancelTrim()
-	for selector := 1; selector <= 2; selector++ {
-		vm := runtime.Config.vm(selector)
-		if !runtime.vmExists(ctx, vm) {
-			continue
-		}
+	for _, vm := range names {
 		state, err := runtime.incus(ctx, "list", vm, "--project", runtime.Config.Project,
 			"-f", "csv", "-c", "s")
 		if err != nil {
@@ -598,7 +639,9 @@ func (runtime *Runtime) stopRetainedWithEvidence(ctx context.Context) (stopEvide
 				runtime.installManagedGuestKeys(ctx, vm),
 				runtime.removeLeaseContext(ctx, vm),
 			)
-			runtime.trimRetainedGuest(trimCtx, vm)
+			if runtime.allocation == nil {
+				runtime.trimRetainedGuest(trimCtx, vm)
+			}
 			stopErr := runtime.stopRunningVM(ctx, vm)
 			if stopErr != nil {
 				return evidence, errors.Join(keyCleanupErr, stopErr)
@@ -681,6 +724,213 @@ func (runtime *Runtime) stopRunningVM(ctx context.Context, vm string) error {
 	if strings.TrimSpace(state) != "STOPPED" {
 		return errors.Join(stopErr,
 			fmt.Errorf("%s remained in state %q after stop", vm, strings.TrimSpace(state)))
+	}
+	return nil
+}
+
+func (runtime *Runtime) useLeaseSlot(slot LeaseSlot) {
+	if slot.Environment == nil {
+		return
+	}
+	runtime.Config = runtime.Config.withEnvironment(*slot.Environment)
+	runtime.allocation = &LeaseIdentity{SlotID: slot.SlotID, ResourceGeneration: slot.ResourceGeneration, LeaseEpoch: slot.LeaseEpoch}
+}
+
+func (runtime *Runtime) requireAllocationMarker(ctx context.Context, vm string) error {
+	if err := runtime.requireVMMarker(ctx, vm); err != nil {
+		return err
+	}
+	if runtime.allocation == nil {
+		return nil
+	}
+	for _, marker := range []struct {
+		key   string
+		value uint64
+	}{
+		{"user.subyard.generation", runtime.allocation.ResourceGeneration},
+		{"user.subyard.lease-epoch", runtime.allocation.LeaseEpoch},
+	} {
+		value, err := runtime.incus(ctx, "config", "get", vm, marker.key, "--project", runtime.Config.Project)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(value) != strconv.FormatUint(marker.value, 10) {
+			return fmt.Errorf("VM %q allocation marker mismatch", vm)
+		}
+	}
+	return nil
+}
+
+// Incus instance deletion removes its root volume and snapshots. Every existing
+// instance must match this exact allocation, and every stop is verified first.
+func (runtime *Runtime) deleteAllocation(ctx context.Context) error {
+	if runtime.allocation == nil {
+		return errors.New("disposable cleanup requires allocation identity")
+	}
+	exists, err := runtime.projectPresence(ctx)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	if err := runtime.requireProjectMarker(ctx); err != nil {
+		return err
+	}
+	names, err := runtime.projectInstances(ctx)
+	if err != nil {
+		return err
+	}
+	if err := runtime.Config.validateManagedNames(names); err != nil {
+		return err
+	}
+	for _, vm := range names {
+		if err := runtime.requireAllocationMarker(ctx, vm); err != nil {
+			return err
+		}
+		state, err := runtime.incus(ctx, "list", vm, "--project", runtime.Config.Project, "-f", "csv", "-c", "s")
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(state) != "STOPPED" {
+			return fmt.Errorf("VM %q is not stopped before deletion", vm)
+		}
+	}
+	for _, vm := range names {
+		if _, err := runtime.incus(ctx, "delete", vm, "--project", runtime.Config.Project); err != nil {
+			return err
+		}
+	}
+	remaining, err := runtime.projectInstances(ctx)
+	if err != nil {
+		return err
+	}
+	if len(remaining) != 0 {
+		return errors.New("allocation instances remain after deletion")
+	}
+	return nil
+}
+
+// RetireLegacySlot is the explicit destructive migration from retained guest
+// data. The operator's observed counters fence the whole operation, including
+// never-leased slots whose epoch is zero.
+func (runtime *Runtime) RetireLegacySlot(ctx context.Context, store LeaseStore, expected LeaseIdentity) error {
+	runtime.prepareDefaults()
+	number, err := slotNumber(expected.SlotID, runtime.Config.SlotCount)
+	if err != nil || expected.ResourceGeneration == 0 {
+		return errors.New("complete legacy retirement identity is required")
+	}
+	return withFileLock(runtime.slotLifecycleLock(expected.SlotID), func() error {
+		if err := store.withLock(true, func(pool *LeasePool) error {
+			slot, err := findSlot(pool, expected.SlotID)
+			if err != nil {
+				return err
+			}
+			if !slotMatchesLeaseIdentity(*slot, expected) {
+				return ErrLeaseTargetStale
+			}
+			if !slot.LegacyRetained {
+				return errors.New("slot has no legacy retained data")
+			}
+			if slot.State != SlotAvailable && slot.State != SlotQuarantined {
+				return fmt.Errorf("cannot retire legacy slot while %s", slot.State)
+			}
+			slot.State = SlotDraining
+			slot.FailureReason = "explicit legacy retirement"
+			return nil
+		}); err != nil {
+			return err
+		}
+		child := runtime.slotRuntime(number, "")
+		// Legacy instances do not have allocation counters. Verify every managed
+		// name and marker before stopping anything under the operator's fence.
+		cleanupErr := child.verifyLegacyRetirementOwnership(ctx)
+		if cleanupErr == nil {
+			cleanupErr = child.stopRetained(ctx)
+		}
+		if cleanupErr == nil {
+			cleanupErr = child.deleteStoppedLegacyPair(ctx)
+		}
+		if cleanupErr != nil {
+			return errors.Join(cleanupErr, store.FinishDrain(expected.SlotID, cleanupErr))
+		}
+		return store.withLock(true, func(pool *LeasePool) error {
+			slot, err := findSlot(pool, expected.SlotID)
+			if err != nil {
+				return err
+			}
+			if !slotMatchesLeaseIdentity(*slot, expected) || slot.State != SlotDraining {
+				return ErrLeaseTargetStale
+			}
+			clearLease(slot)
+			slot.LegacyRetained = false
+			slot.State = SlotAvailable
+			return nil
+		})
+	})
+}
+
+func (runtime *Runtime) deleteStoppedLegacyPair(ctx context.Context) error {
+	exists, err := runtime.projectPresence(ctx)
+	if err != nil || !exists {
+		return err
+	}
+	if err := runtime.requireProjectMarker(ctx); err != nil {
+		return err
+	}
+	names, err := runtime.projectInstances(ctx)
+	if err != nil {
+		return err
+	}
+	if err := runtime.Config.validateManagedNames(names); err != nil {
+		return err
+	}
+	for _, vm := range names {
+		if err := runtime.requireVMMarker(ctx, vm); err != nil {
+			return err
+		}
+		state, err := runtime.incus(ctx, "list", vm, "--project", runtime.Config.Project, "-f", "csv", "-c", "s")
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(state) != "STOPPED" {
+			return fmt.Errorf("legacy VM %q is not stopped", vm)
+		}
+	}
+	for _, vm := range names {
+		if _, err := runtime.incus(ctx, "delete", vm, "--project", runtime.Config.Project); err != nil {
+			return err
+		}
+	}
+	names, err = runtime.projectInstances(ctx)
+	if err != nil {
+		return err
+	}
+	if len(names) != 0 {
+		return errors.New("legacy instances remain after retirement")
+	}
+	return nil
+}
+
+func (runtime *Runtime) verifyLegacyRetirementOwnership(ctx context.Context) error {
+	exists, err := runtime.projectPresence(ctx)
+	if err != nil || !exists {
+		return err
+	}
+	if err := runtime.requireProjectMarker(ctx); err != nil {
+		return err
+	}
+	names, err := runtime.projectInstances(ctx)
+	if err != nil {
+		return err
+	}
+	if err := runtime.Config.validateManagedNames(names); err != nil {
+		return err
+	}
+	for _, vm := range names {
+		if err := runtime.requireVMMarker(ctx, vm); err != nil {
+			return err
+		}
 	}
 	return nil
 }

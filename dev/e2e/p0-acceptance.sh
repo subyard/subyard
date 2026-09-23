@@ -40,8 +40,6 @@ declare -A DEFAULT_BUILD_CACHE_BEFORE=()
 declare -A MODULE_CACHE_BEFORE=()
 declare -A HOME_STATE_BEFORE=()
 P0_LANE=smoke
-P0_RESUME=0
-P0_CHECKPOINT=''
 P0_EVIDENCE=''
 P0_FAILURE_LOG=''
 P0_CURRENT_PHASE='startup'
@@ -51,9 +49,11 @@ P0_STARTED_PID=''
 FULL_P0_LANES=(boundary transport nested-teardown release source-upgrade power-systemd release-smoke peer cleanup)
 
 # Reuse one ordinary broker lease for the full matrix. This avoids the retired raw SSH-config
-# export and ensures every direct and bundled command addresses the same retained pair.
+# export and ensures every direct and bundled command addresses the same disposable pair.
 # shellcheck source=dev/agent-e2e.sh
 . "$ROOT/dev/agent-e2e.sh"
+ENVIRONMENT_TYPE=subyard-pair
+VM_COUNT=2
 
 die() { printf 'p0-acceptance: %s\n' "$*" >&2; exit 2; }
 p0_monotonic_seconds() {
@@ -84,13 +84,14 @@ usage() {
   cat <<'EOF'
 Usage:
   dev/e2e/p0-acceptance.sh --slot N
-  dev/e2e/p0-acceptance.sh --slot N --lane NAME [--resume]
+  dev/e2e/p0-acceptance.sh --slot N --lane NAME
   dev/e2e/p0-acceptance.sh --list-lanes
 
 The --slot N form runs the release smoke. Use --lane full for the complete compatibility and
 recovery matrix. Targeted lanes are diagnostics; they do not replace the release smoke.
---resume reuses passed checkpoints only for the same slot resource generation and exact
-worktree bundle hash; pass the same --slot N to request that retained allocation again.
+Every lane sets up its own prerequisites on clean VMs. Record passed, failed and pending
+lanes with source/baseline identity and evidence in the current task plan; invoke remaining
+lanes explicitly. A required full P0 must always run fresh within one lease.
 EOF
 }
 list_lanes() {
@@ -118,7 +119,7 @@ parse_arguments() {
         lane_seen=1
         shift 2
         ;;
-      --resume) P0_RESUME=1; shift ;;
+      --resume|--keep-failed) die 'VM state is disposable between leases; record progress and evidence in the current task plan, then run remaining --lane segments with fresh setup' ;;
       --list-lanes) list_lanes; exit 0 ;;
       -h | --help) usage; exit 0 ;;
       *) die "unknown argument '$1'" ;;
@@ -130,8 +131,6 @@ parse_arguments() {
   esac
   [ "$lane_seen" = 0 ] || [ "$BROKER_RECOVERY_ONLY" = 0 ] \
     || die 'broker-recovery-only cannot be combined with --lane'
-  [ "$P0_RESUME" = 0 ] || [ "$P0_LANE" != cleanup ] \
-    || die '--resume is not meaningful for cleanup'
   [ -n "$LEASE_REQUESTED_SLOT" ] \
     || die '--slot N is required for every executable P0 lane'
   if [ "$PEERS_ONLY" = 1 ] && [ "$lane_seen" = 0 ]; then
@@ -161,71 +160,10 @@ public_tree_hash() {
   done < <(git -C "$ROOT" ls-files --cached --others --exclude-standard -z | sort -z)
 }
 prepare_run_records() {
-  local checkpoint_dir evidence_dir temp
-  checkpoint_dir="$STATE_ROOT/p0-checkpoints"
-  evidence_dir="$STATE_ROOT/evidence"
-  install -d -m 0700 "$checkpoint_dir" "$evidence_dir"
-  P0_CHECKPOINT="$checkpoint_dir/$LEASE_SLOT.json"
+  local evidence_dir="$STATE_ROOT/evidence"
+  install -d -m 0700 "$evidence_dir"
   P0_EVIDENCE="$evidence_dir/p0-$LEASE_RUN.json"
-  if [ "$P0_RESUME" = 1 ]; then
-    [ -r "$P0_CHECKPOINT" ] || die "no checkpoint exists for $LEASE_SLOT"
-    jq -e --arg slot "$LEASE_SLOT" --argjson generation "$LEASE_GENERATION" \
-      --arg bundle "$P0_BUNDLE_HASH" '
-      .schema_version == 1 and
-      .allocation == {slot: $slot, resource_generation: $generation} and
-      .bundle_hash == $bundle and
-      (.lanes | type == "object") and
-      (.resource_inventory | type == "array")
-    ' "$P0_CHECKPOINT" >/dev/null \
-      || die 'checkpoint does not match this allocation generation and exact bundle hash'
-    return
-  fi
-  temp="$(mktemp "$checkpoint_dir/.checkpoint.XXXXXX")"
-  jq -n --arg slot "$LEASE_SLOT" --argjson generation "$LEASE_GENERATION" \
-    --arg bundle "$P0_BUNDLE_HASH" --arg marker "subyard-p0-$TOKEN" '
-    {
-      schema_version: 1,
-      allocation: {slot: $slot, resource_generation: $generation},
-      bundle_hash: $bundle,
-      lanes: {},
-      resource_inventory: [
-        ("marker:" + $marker),
-        "guest:vm1", "guest:vm2",
-        "fixture:peer", "fixture:source-upgrade", "fixture:real-incus",
-        "fixture:power-systemd"
-      ]
-    }
-  ' > "$temp"
-  chmod 0600 "$temp"
-  mv -f "$temp" "$P0_CHECKPOINT"
-}
-checkpoint_passed() {
-  jq -e --arg lane "$1" '.lanes[$lane] == "passed"' "$P0_CHECKPOINT" >/dev/null
-}
-mark_checkpoint_passed() {
-  local lane="$1" temp
-  temp="$(mktemp "$(dirname "$P0_CHECKPOINT")/.checkpoint.XXXXXX")"
-  jq --arg lane "$lane" '.lanes[$lane] = "passed"' "$P0_CHECKPOINT" > "$temp"
-  chmod 0600 "$temp"
-  mv -f "$temp" "$P0_CHECKPOINT"
-}
-full_matrix_checkpoint_passed() {
-  local phase
-  for phase in nested-teardown release source-upgrade power-systemd; do
-    checkpoint_passed "$phase" || return 1
-  done
-}
-mark_full_matrix_passed() {
-  local temp
-  temp="$(mktemp "$(dirname "$P0_CHECKPOINT")/.checkpoint.XXXXXX")"
-  jq '
-    .lanes["nested-teardown"] = "passed" |
-    .lanes["release"] = "passed" |
-    .lanes["source-upgrade"] = "passed" |
-    .lanes["power-systemd"] = "passed"
-  ' "$P0_CHECKPOINT" > "$temp"
-  chmod 0600 "$temp"
-  mv -f "$temp" "$P0_CHECKPOINT"
+  printf 'P0 evidence: %s\n' "$P0_EVIDENCE"
 }
 write_evidence() {
   local phase="$1" status="$2" rc="$3" duration="$4" temp oldest capacity keeper
@@ -241,6 +179,8 @@ write_evidence() {
     --arg run "$LEASE_RUN" --arg slot "$LEASE_SLOT" \
     --argjson generation "$LEASE_GENERATION" --arg bundle "$P0_BUNDLE_HASH" \
     --argjson capacity "$capacity" --arg keeper "$keeper" \
+    --arg base "$BASE_FINGERPRINT" \
+    --argjson phases "$(if [ -r "$P0_EVIDENCE" ]; then jq -c ' .phases // {}' "$P0_EVIDENCE"; else printf '{}'; fi)" \
     --arg failure_log "$P0_FAILURE_LOG" \
     --argjson full_owner_duration "$FULL_OWNER_DURATION" \
     --argjson full_aux_duration "$FULL_AUX_DURATION" '
@@ -250,6 +190,8 @@ write_evidence() {
       requested_lane: $lane,
       allocation: {slot: $slot, resource_generation: $generation},
       bundle_hash: $bundle,
+      base_fingerprint: $base,
+      phases: ($phases + {($phase): {status: $status, exit_status: $rc, duration_seconds: $duration}}),
       last_phase: $phase,
       status: $status,
       exit_status: $rc,
@@ -357,11 +299,6 @@ collect_failure_diagnostics() { # <stage> <truncate|append>
 }
 run_phase() {
   local phase="$1" started duration now; shift
-  if [ "$P0_RESUME" = 1 ] && checkpoint_passed "$phase"; then
-    printf '  [ ok ] phase=%s skipped from matching checkpoint bundle=%s\n' \
-      "$phase" "$P0_BUNDLE_HASH"
-    return 0
-  fi
   P0_CURRENT_PHASE="$phase"
   started="$(p0_monotonic_seconds)"
   P0_PHASE_STARTED="$started"
@@ -369,7 +306,6 @@ run_phase() {
   "$@"
   now="$(p0_monotonic_seconds)"
   duration=$((now - started))
-  mark_checkpoint_passed "$phase"
   write_evidence "$phase" passed 0 "$duration"
   printf '  [ ok ] phase=%s duration=%ss\n' "$phase" "$duration"
 }
@@ -1091,11 +1027,6 @@ full_parallel_matrix() {
 
 run_full_matrix_phase() {
   local started duration now
-  if [ "$P0_RESUME" = 1 ] && full_matrix_checkpoint_passed; then
-    printf '  [ ok ] parallel release matrix skipped from matching checkpoint bundle=%s\n' \
-      "$P0_BUNDLE_HASH"
-    return 0
-  fi
   P0_CURRENT_PHASE=parallel-matrix
   started="$(p0_monotonic_seconds)"
   P0_PHASE_STARTED="$started"
@@ -1112,7 +1043,6 @@ run_full_matrix_phase() {
   full_parallel_matrix
   [ ! -e "$FULL_SOURCE_ARM_FILE" ] && [ ! -e "$FULL_POWER_ARM_FILE" ] \
     || die 'parallel release matrix retained an armed fixture after success'
-  mark_full_matrix_passed
   now="$(p0_monotonic_seconds)"
   duration=$((now - started))
   write_evidence parallel-matrix passed 0 "$duration"
@@ -1394,10 +1324,10 @@ case "$P0_LANE" in
     ;;
 esac
 
-if [ "$P0_LANE" = full ] && [ "$P0_RESUME" = 0 ]; then
+if [ "$P0_LANE" = full ]; then
   printf 'ok: full P0 compatibility and recovery matrix passed within one broker lease\n'
-elif [ "$P0_LANE" = smoke ] && [ "$P0_RESUME" = 0 ]; then
+elif [ "$P0_LANE" = smoke ]; then
   printf 'ok: P0 release smoke passed within one broker lease\n'
 else
-  printf 'ok: targeted or resumed P0 lane %s passed; fresh release smoke is still required\n' "$P0_LANE"
+  printf 'ok: targeted P0 lane %s passed; fresh release smoke is still required\n' "$P0_LANE"
 fi

@@ -811,7 +811,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		return 0
 	case "@test-vms":
 		fmt.Fprintf(cli.options.Stdout,
-			"Usage: %s test-vms <logs [-n N] [-f] [--slot N] | status | revoke --slot N | recover --slot N>\n",
+			"Usage: %s test-vms <logs [-n N] [-f] [--slot N] | status | refresh subyard-pair|android-test | revoke --slot N | recover --slot N | retire-legacy --slot N>\n",
 			cli.options.Program)
 		return 0
 	case "@teardown":

@@ -83,6 +83,7 @@ install -m 0755 "$artifact" "$bundle_stage/bin/yard-engine"
 install -m 0755 "$REPO/bin/yard" "$bundle_stage/bin/yard"
 runtime_list="$bundle_stage/.runtime-inputs"
 runtime_extras=(
+  scripts/e2e-lab/base.sh
   scripts/github-broker.sh
   config/profiles/github/profile.conf
   config/profiles/github/provision.sh
@@ -124,6 +125,7 @@ install -m 0755 "$RUNTIME_INSTALLER" "$bundle_stage/scripts/install-runtime-rele
 install -m 0644 "$MIGRATION_REGISTRY" "$bundle_stage/config/migrations.json"
 install -m 0644 "$RELEASE_TRANSITION_REGISTRY" "$bundle_stage/config/release-transition.json"
 for required in \
+  scripts/e2e-lab/base.sh \
   scripts/install-runtime-release.sh \
   scripts/install-ssh-relay.sh \
   scripts/install-test-vms-host-sink.sh \

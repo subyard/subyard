@@ -18,7 +18,7 @@ keys||@keys||forward|mutate|dynamic|public|lifecycle|keys|keys [command]|manage 
 ssh-agent||@ssh-agent||deny|mutate|dynamic|public|lifecycle|ssh-agent|ssh-agent <command>|grant temporary host SSH-key access to the yard and Orca|--key --ttl --json --yes --help|unlock status lock
 shell||@shell||forward|mutate|never|public|lifecycle|project-shell|shell [project]|open a dev shell, optionally in a project directory|--root --yes --help|
 provision||@provision||forward|mutate|dynamic|public|lifecycle|profiles|provision [profile]|install a profile toolchain into the yard|-l --list --yes --help|
-test-vms||@test-vms||forward|mutate|dynamic|public|lifecycle|simple|test-vms <command>|manage leased nested VM slots and read the owner-wide broker log|--slot -n -f --yes --help|logs status revoke recover
+test-vms||@test-vms||forward|mutate|dynamic|public|lifecycle|simple|test-vms <command>|manage leased nested VM slots and read the owner-wide broker log|--slot -n -f --yes --help|logs status refresh revoke recover retire-legacy
 stop||@lifecycle||forward|mutate|dynamic|public|lifecycle|stop|stop [--force]|stop the yard and protect active Remote-SSH sessions|--force --yes --help|
 teardown|uninstall|@teardown||forward|mutate|dynamic|public|lifecycle|teardown|teardown|delete the yard; optionally keep persistent data|--keep-data --yes --help|
 sync||@project||local|mutate|dynamic|public|projects|project-target|sync [path]|create a new independent snapshot copy in the yard|--name --target --yes --help|

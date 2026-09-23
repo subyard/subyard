@@ -363,7 +363,7 @@ func TestTestVMRecoverAvailableSlotIsNoOpBeforeConfirmation(t *testing.T) {
 	instance := incus.Instances["subyard/yard"]
 	instance.Status = "Running"
 	incus.Instances["subyard/yard"] = instance
-	probe := &testVMStatusProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","state":"available"},{"slot_id":"slot-002","state":"available"}]}}`)}
+	probe := &testVMStatusProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":2,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","state":"available"},{"slot_id":"slot-002","state":"available"}]}}`)}
 	prompt := &testkit.Prompt{}
 	runner := &testkit.ScriptedAdapter{}
 	program, err := New(Options{
@@ -389,7 +389,7 @@ func TestTestVMRecoverInProgressIsNoOpBeforeConfirmation(t *testing.T) {
 	instance := incus.Instances["subyard/yard"]
 	instance.Status = "Running"
 	incus.Instances["subyard/yard"] = instance
-	probe := &testVMStatusProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":1,"state":"available"},{"slot_id":"slot-002","resource_generation":4,"lease_epoch":8,"state":"recovering"}]}}`)}
+	probe := &testVMStatusProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":2,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":1,"state":"available"},{"slot_id":"slot-002","resource_generation":4,"lease_epoch":8,"state":"recovering"}]}}`)}
 	prompt := &testkit.Prompt{}
 	runner := &testkit.ScriptedAdapter{}
 	program, err := New(Options{
@@ -756,5 +756,31 @@ func testDefinition(name string) command.Definition {
 	return command.Definition{
 		Name: name, Effect: command.EffectMutate,
 		Confirmation: command.ConfirmationDynamic, Remote: command.RemoteForward,
+	}
+}
+
+func TestLegacyVMRetirementRequiresDefaultNoAndExactIdentity(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	environment = append(environment, "NESTED_E2E_VMS=1", "SUBYARD_OPERATION_ID=retire-legacy")
+	incus := lifecycleIncus()
+	instance := incus.Instances["subyard/yard"]
+	instance.Status = "Running"
+	incus.Instances["subyard/yard"] = instance
+	probe := &testVMStatusProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":2,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":7,"lease_epoch":0,"state":"available","legacy_retained":true}]}}`)}
+	prompt := &testkit.Prompt{Answers: []bool{true}}
+	runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{Schema: 1, OperationID: "retire-legacy", Status: "ok"}}}}
+	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"test-vms", "retire-legacy", "--slot", "1"},
+		Environment: environment, WorkingDir: root, Incus: incus, ProjectData: probe, AdapterRunner: runner, Prompt: prompt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("retirement returned %d", code)
+	}
+	if len(prompt.Requests) != 1 || prompt.Requests[0].Default != domain.ConfirmationDefaultNo {
+		t.Fatalf("retirement prompt: %#v", prompt.Requests)
+	}
+	if len(runner.Requests) != 1 || !slices.Equal(runner.Requests[0].Arguments, []string{"retire-legacy-slot-1", "--expect-resource-generation", "7", "--expect-lease-epoch", "0", "--yes"}) {
+		t.Fatalf("retirement requests: %#v", runner.Requests)
 	}
 }

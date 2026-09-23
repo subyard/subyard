@@ -63,6 +63,7 @@ func (runtime *Runtime) handleQuarantineLocked(
 		return err
 	}
 	child := runtime.slotRuntime(number, "")
+	child.useLeaseSlot(slot)
 	if fenceErr := child.restrictAgentAccess("quarantined"); fenceErr != nil {
 		cause = errors.Join(
 			cause,
@@ -312,67 +313,18 @@ func (runtime *Runtime) rebuildSlotPair(ctx context.Context, slot LeaseSlot) err
 		return err
 	}
 	child := runtime.slotRuntime(number, "")
+	child.useLeaseSlot(slot)
 	child.prepareDefaults()
-	if err := child.restrictAgentAccess("quarantine-rebuild"); err != nil {
-		return err
+	if slot.LegacyRetained {
+		return ErrLegacyRetained
 	}
-	exists, err := child.projectPresence(ctx)
-	if err != nil {
-		return fmt.Errorf("inventory quarantined slot project: %w", err)
-	}
-	if exists {
-		if _, err := runtime.eventRecorder().Record(BrokerEvent{
-			Kind:               "rebuild.delete",
-			SlotID:             slot.SlotID,
-			ResourceGeneration: slot.ResourceGeneration,
-			LeaseEpoch:         slot.LeaseEpoch,
-			RecoveryAttempt:    slot.RecoveryAttempt,
-			IncidentID:         slot.IncidentID,
-			Context:            leaseContextFromSlot(slot),
-		}); err != nil {
-			return fmt.Errorf("persist rebuild delete event: %w", err)
-		}
-		if err := child.deleteManagedPairForRebuild(ctx); err != nil {
-			return err
-		}
-	}
-	if err := child.preflightSlotCapacity(ctx); err != nil {
-		return err
-	}
-	for _, path := range []string{
-		child.Config.knownHosts(),
-		child.Config.revokedKey(),
-		child.Config.failureLog(),
-	} {
-		_ = os.Remove(path)
-	}
-	if _, err := runtime.eventRecorder().Record(BrokerEvent{
-		Kind:               "rebuild.create",
-		SlotID:             slot.SlotID,
-		ResourceGeneration: slot.ResourceGeneration,
-		LeaseEpoch:         slot.LeaseEpoch,
-		RecoveryAttempt:    slot.RecoveryAttempt,
-		IncidentID:         slot.IncidentID,
-		Context:            leaseContextFromSlot(slot),
-	}); err != nil {
-		return fmt.Errorf("persist rebuild create event: %w", err)
-	}
-	if err := child.provisionPair(ctx); err != nil {
-		return err
+	if slot.Environment == nil {
+		return errors.New("missing allocation environment; explicit legacy retirement required")
 	}
 	if err := child.stopRetained(ctx); err != nil {
 		return err
 	}
-	_, err = runtime.eventRecorder().Record(BrokerEvent{
-		Kind:               "rebuild.verified",
-		SlotID:             slot.SlotID,
-		ResourceGeneration: slot.ResourceGeneration + 1,
-		LeaseEpoch:         slot.LeaseEpoch,
-		RecoveryAttempt:    slot.RecoveryAttempt,
-		IncidentID:         slot.IncidentID,
-		Context:            leaseContextFromSlot(slot),
-	})
-	return err
+	return child.deleteAllocation(ctx)
 }
 
 func (runtime *Runtime) removeQuarantinedGuestKeys(ctx context.Context) error {
@@ -387,12 +339,12 @@ func (runtime *Runtime) removeQuarantinedGuestKeys(ctx context.Context) error {
 		return err
 	}
 	var result error
-	for selector := 1; selector <= 2; selector++ {
+	for selector := 1; selector <= runtime.Config.guestCount(); selector++ {
 		vm := runtime.Config.vm(selector)
 		if !runtime.vmExists(ctx, vm) {
 			continue
 		}
-		if err := runtime.requireVMMarker(ctx, vm); err != nil {
+		if err := runtime.requireAllocationMarker(ctx, vm); err != nil {
 			result = errors.Join(result, err)
 			continue
 		}
@@ -421,47 +373,9 @@ func (runtime *Runtime) removeQuarantinedGuestKeys(ctx context.Context) error {
 	return result
 }
 
-func (runtime *Runtime) deleteManagedPairForRebuild(ctx context.Context) error {
-	exists, err := runtime.projectPresence(ctx)
-	if err != nil {
-		return fmt.Errorf("inventory quarantined slot project before delete: %w", err)
-	}
-	if !exists {
-		return nil
-	}
-	if err := runtime.requireProjectMarker(ctx); err != nil {
-		return err
-	}
-	names, err := runtime.projectInstances(ctx)
-	if err != nil {
-		return fmt.Errorf("inventory quarantined slot project: %w", err)
-	}
-	if err := runtime.Config.validateManagedNames(names); err != nil {
-		return err
-	}
-	for _, name := range names {
-		if err := runtime.requireVMMarker(ctx, name); err != nil {
-			return err
-		}
-	}
-	for _, name := range names {
-		if _, err := runtime.incus(
-			ctx,
-			"delete",
-			"--force",
-			name,
-			"--project",
-			runtime.Config.Project,
-		); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (runtime *Runtime) recoveryDiagnostics(ctx context.Context) map[string]string {
 	cfg := runtime.Config
-	diagnostics := map[string]string{}
+	diagnostics := map[string]string{"capacity": runtime.capacityEvidence()}
 	if payload, err := os.ReadFile(cfg.failureLog()); err == nil {
 		diagnostics["legacy_failure_log"] = string(payload)
 	}
@@ -469,7 +383,7 @@ func (runtime *Runtime) recoveryDiagnostics(ctx context.Context) map[string]stri
 		if value, err := runtime.incus(ctx, "project", "show", cfg.Project); err == nil {
 			diagnostics["project"] = value
 		}
-		for selector := 1; selector <= 2; selector++ {
+		for selector := 1; selector <= cfg.guestCount(); selector++ {
 			vm := cfg.vm(selector)
 			if !runtime.vmExists(ctx, vm) {
 				continue

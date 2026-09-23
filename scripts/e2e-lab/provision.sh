@@ -430,6 +430,12 @@ EOF
 [ "$(id -u)" = 0 ] || { printf 'test-vms provision requires root inside the yard\n' >&2; exit 1; }
 : "${NESTED_E2E_VMS:=0}"
 : "${DEV_USER:=dev}"
+: "${E2E_DISK_BUDGET:=160GiB}"
+: "${E2E_CACHE_BUDGET:=24GiB}"
+: "${E2E_DISK_RESERVE:=5GiB}"
+: "${E2E_MEMORY_RESERVE:=2GiB}"
+: "${E2E_VM_OVERHEAD:=512MiB}"
+E2E_RECIPE_ROOT=/usr/local/libexec/subyard/e2e-recipes
 : "${E2E_VM_IMAGE:=images:debian/13/cloud}"
 : "${E2E_VM_CPU:=4}"
 : "${E2E_VM_MEMORY:=4GiB}"
@@ -447,6 +453,10 @@ case "$NESTED_E2E_VMS" in 0 | 1) ;; *) printf 'invalid NESTED_E2E_VMS\n' >&2; ex
 [[ "$E2E_VM_CPU" =~ ^[1-9][0-9]*$ ]] || { printf 'invalid E2E_VM_CPU\n' >&2; exit 1; }
 [[ "$E2E_VM_MEMORY" =~ ^[1-9][0-9]*(MiB|GiB)$ ]] || { printf 'invalid E2E_VM_MEMORY\n' >&2; exit 1; }
 [[ "$E2E_VM_DISK" =~ ^[1-9][0-9]*(MiB|GiB)$ ]] || { printf 'invalid E2E_VM_DISK\n' >&2; exit 1; }
+for e2e_budget_name in E2E_DISK_BUDGET E2E_CACHE_BUDGET E2E_DISK_RESERVE E2E_MEMORY_RESERVE E2E_VM_OVERHEAD; do
+  [[ "${!e2e_budget_name}" =~ ^[1-9][0-9]*(MiB|GiB)$ ]] \
+    || { printf 'invalid %s\n' "$e2e_budget_name" >&2; exit 1; }
+done
 case "$E2E_VM_DISK" in
   *GiB) e2e_disk_mib=$(( ${E2E_VM_DISK%GiB} * 1024 )) ;;
   *MiB) e2e_disk_mib=${E2E_VM_DISK%MiB} ;;
@@ -488,6 +498,12 @@ trap 'rm -f -- "$config_candidate"' EXIT
 {
   printf 'NESTED_E2E_VMS=%q\n' "$NESTED_E2E_VMS"
   printf 'DEV_USER=%q\n' "$DEV_USER"
+  printf 'E2E_DISK_BUDGET=%q\n' "$E2E_DISK_BUDGET"
+  printf 'E2E_CACHE_BUDGET=%q\n' "$E2E_CACHE_BUDGET"
+  printf 'E2E_DISK_RESERVE=%q\n' "$E2E_DISK_RESERVE"
+  printf 'E2E_MEMORY_RESERVE=%q\n' "$E2E_MEMORY_RESERVE"
+  printf 'E2E_VM_OVERHEAD=%q\n' "$E2E_VM_OVERHEAD"
+  printf 'E2E_RECIPE_ROOT=%q\n' "$E2E_RECIPE_ROOT"
   printf 'E2E_VM_IMAGE=%q\n' "$E2E_VM_IMAGE"
   printf 'E2E_VM_CPU=%q\n' "$E2E_VM_CPU"
   printf 'E2E_VM_MEMORY=%q\n' "$E2E_VM_MEMORY"

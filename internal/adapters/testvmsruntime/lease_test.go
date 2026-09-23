@@ -590,7 +590,7 @@ func TestLeaseStoreRejectsUnsafeAttributionBeforeMutation(t *testing.T) {
 	}
 }
 
-func TestLeaseStoreLoadsAdditiveSchemaAndPreservesAttribution(t *testing.T) {
+func TestLeaseStoreMigratesV1AndPreservesRetainedDataAndAttribution(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "leases.json")
 	payload := `{
 	  "schema_version": 1,
@@ -616,7 +616,7 @@ func TestLeaseStoreLoadsAdditiveSchemaAndPreservesAttribution(t *testing.T) {
 		t.Fatal(err)
 	}
 	slot := pool.Slots[0]
-	if pool.SchemaVersion != LeaseSchemaVersion ||
+	if pool.SchemaVersion != LeaseSchemaVersion || !slot.LegacyRetained ||
 		slot.ResourceGeneration != 7 ||
 		slot.LeaseEpoch != 11 ||
 		slot.Project != "Subyard/Subyard" ||

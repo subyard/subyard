@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Real disposable-host acceptance for broker logging and quarantine rebuild.
+# Real disposable-host acceptance for broker logging, recovery and disk deletion.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
@@ -10,6 +10,7 @@ OUTER_INSTANCE="yard-$YARD"
 STATE_PARENT=''
 NEIGHBOR_PID=''
 VICTIM_PID=''
+REUSE_PID=''
 NEIGHBOR_CONFIG=''
 RECLAIM_MARKER=''
 RECLAIM_FIXTURE=/var/tmp/subyard-p0-release-reclaim
@@ -142,10 +143,10 @@ cleanup() {
     outer_root systemctl start \
       subyard-test-vms-lease-reaper.timer >/dev/null 2>&1
   fi
-  for client in victim neighbor; do
+  for client in victim neighbor reuse; do
     [ -z "$STATE_PARENT" ] || : > "$STATE_PARENT/$client.release"
   done
-  for pid in "$VICTIM_PID" "$NEIGHBOR_PID"; do
+  for pid in "$VICTIM_PID" "$NEIGHBOR_PID" "$REUSE_PID"; do
     [ -z "$pid" ] || stop_holder_child "$pid" >/dev/null 2>&1 || rc=3
   done
   if [ -n "$STATE_PARENT" ]; then
@@ -170,7 +171,7 @@ status() {
 wait_for_ready() {
   local client="$1" pid="$2" attempts="${P0_BROKER_READY_ATTEMPTS:-1200}"
   # A cold remote image import can consume more than five minutes before the
-  # retained pair reaches its separately bounded P0 boot and SSH checks. Keep
+  # disposable pair reaches its separately bounded P0 boot and SSH checks. Keep
   # this outer acceptance watchdog large enough for both phases.
   for _ in $(seq 1 "$attempts"); do
     [ ! -s "$STATE_PARENT/$client.ready" ] || return 0
@@ -230,8 +231,11 @@ hold_lease() (
   # shellcheck source=dev/agent-e2e.sh
   . "$RUNNER"
 
+  # Variables consumed by the sourced runner functions.
+  # shellcheck disable=SC2034
   LOCAL_TEMP="$(mktemp -d "$STATE_PARENT/$client-runtime.XXXXXX")"
   LEASE_PURPOSE="$purpose"
+  # shellcheck disable=SC2034
   LEASE_REQUESTED_SLOT="$requested_slot"
   holder_cleanup() {
     local rc=$?
@@ -250,8 +254,9 @@ hold_lease() (
   acquire_lease || { : > "$STATE_PARENT/$client.failed"; exit 1; }
   start_lease_keeper
   ready_temp="$(mktemp "$STATE_PARENT/.$client.ready.XXXXXX")"
-  printf '%s\t%s\t%s\t%s\t%s\n' \
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$LEASE_SLOT" "$CLIENT_CONFIG" "$LEASE_PROJECT" "$LEASE_RUN" "$LEASE_PURPOSE" \
+    "$LEASE_GENERATION" "$BASE_FINGERPRINT" \
     > "$ready_temp"
   mv -f "$ready_temp" "$STATE_PARENT/$client.ready"
   while [ ! -e "$STATE_PARENT/$client.release" ]; do sleep 1; done
@@ -269,18 +274,17 @@ reclaim_held_pair_capacity() {
   [[ "$available" =~ ^[0-9]+$ ]] \
     || die "could not measure nested pool reserve after trimming held $label pair"
   # A full two-slot pool can legitimately sit below the create headroom while
-  # all four retained disks exist. Recovery deletes the quarantined pair before
-  # its authoritative capacity preflight, so record the reserve here without
-  # rejecting the healthy held neighbor prematurely.
+  # all four disposable disks exist. Admission has already reserved the complete
+  # allocations. Record physical reserve without changing those commitments.
   printf '  [ ok ] held %s pair trimmed; nested pool reserve=%s\n' \
     "$label" "$available"
 }
 
 wait_for_pair_ssh() {
-  local config="$1" vm attempt ready
+  local config="$1" vm ready
   for vm in 1 2; do
     ready=0
-    for attempt in $(seq 1 120); do
+    for _ in $(seq 1 120); do
       if ssh -F "$config" -T -o ConnectTimeout=3 "e2e-vm-$vm" -- true \
         </dev/null >/dev/null 2>&1; then
         ready=1
@@ -295,7 +299,7 @@ wait_for_pair_ssh() {
 resolve_root_image() {
   local slot="$1" vm="$2" project
   [[ "$slot" =~ ^[1-9][0-9]*$ ]] && [[ "$vm" =~ ^e2e-vm-[12]$ ]] \
-    || die 'refusing unsafe retained VM path inputs'
+    || die 'refusing unsafe disposable VM path inputs'
   project="subyard-e2e-vms-slot-$slot"
   outer_root sh -eu -s -- "$project" "$vm" <<'EOF'
 project=$1
@@ -320,7 +324,7 @@ EOF
 root_image_allocated_bytes() {
   local path="$1" metadata blocks block_size
   [[ "$path" =~ ^/srv/incus-e2e/storage/virtual-machines/subyard-e2e-vms-slot-[1-9][0-9]*_e2e-vm-[12]/root\.img$ ]] \
-    || die "refusing unsafe retained root image path $path"
+    || die "refusing unsafe disposable root image path $path"
   metadata="$(outer_root stat -c '%b %B' -- "$path")"
   read -r blocks block_size <<<"$metadata"
   [[ "$blocks" =~ ^[0-9]+$ ]] && [[ "$block_size" =~ ^[1-9][0-9]*$ ]] \
@@ -378,21 +382,55 @@ slot_pair_identity() {
   for vm in e2e-vm-1 e2e-vm-2; do
     uuid="$(outer_root incus config get "$vm" volatile.uuid --project "$project")"
     [[ "$uuid" =~ ^[0-9a-f-]{36}$ ]] \
-      || die "retained $vm has no stable VM identity"
+      || die "disposable $vm has no VM identity"
     printf '%s=%s\n' "$vm" "$uuid"
   done
 }
 
-assert_slot_pair_stopped() {
-  local slot="$1" project inventory
+assert_slot_empty() {
+  local slot="$1" project inventory volumes
   project="subyard-e2e-vms-slot-$slot"
+  [ "$(outer_root incus project get "$project" user.subyard.managed)" = test-vms-v1 ] \
+    || die "slot-$slot project lost its ownership marker"
   inventory="$(outer_root incus list --project "$project" --format json)"
-  jq -e '
-    length == 2 and
-    ([.[].name] | sort) == ["e2e-vm-1", "e2e-vm-2"] and
-    all(.[]; .status == "Stopped")
-  ' <<<"$inventory" >/dev/null \
-    || die "slot-$slot retained pair was deleted, replaced or left running"
+  jq -e 'length == 0' <<<"$inventory" >/dev/null \
+    || die "slot-$slot retained disposable instances after release/recovery"
+  volumes="$(outer_root incus storage volume list default --project "$project" --format json)"
+  jq -e 'all(.[]; .type != "virtual-machine" and .type != "container")' <<<"$volumes" >/dev/null \
+    || die "slot-$slot retained instance root volumes after release/recovery"
+}
+
+pool_used_bytes() {
+  local resources used
+  resources="$(outer_root incus query /1.0/storage-pools/default/resources)"
+  used="$(jq -er '.space.used | select(type == "number" and . >= 0 and . == floor)' <<<"$resources")" \
+    || die 'could not measure physical Incus pool usage'
+  printf '%s\n' "$used"
+}
+
+assert_root_image_removed() {
+  local path="$1"
+  [[ "$path" =~ ^/srv/incus-e2e/storage/virtual-machines/subyard-e2e-vms-slot-[1-9][0-9]*_e2e-vm-[12]/root\.img$ ]] \
+    || die 'refusing unsafe deleted root-image assertion'
+  outer_root sh -eu -c '[ ! -e "$1" ] && [ ! -L "$1" ]' _ "$path" \
+    || die "disposable root image still exists: $path"
+}
+
+wait_for_pool_reclaim() {
+  local before="$1" minimum="$2" used now deadline
+  now="$(recovery_monotonic_seconds)"
+  deadline=$((now + 120))
+  while true; do
+    used="$(pool_used_bytes)"
+    if [ "$((before - used))" -ge "$minimum" ]; then
+      printf '%s\n' "$((before - used))"
+      return 0
+    fi
+    now="$(recovery_monotonic_seconds)"
+    [ "$now" -lt "$deadline" ] || break
+    sleep 2
+  done
+  die "pool reclaimed too few physical bytes: before=$before after=$used minimum=$minimum"
 }
 
 install_candidate_update() {
@@ -540,38 +578,20 @@ jq -e '
   all(.pool.slots[]; .state == "available")
 ' <<<"$initial" >/dev/null \
   || die 'run only against an empty two-slot candidate broker'
-initial_generation="$(jq -r '
-  .pool.slots[] | select(.slot_id == "slot-001") | .resource_generation
-' <<<"$initial")"
 
-victim_attempt=1
-while true; do
-  start_holder_child hold_lease victim quarantine-victim slot-001 \
-    >"$STATE_PARENT/victim.log" 2>&1
-  VICTIM_PID="$HOLDER_STARTED_PID"
-  if wait_for_ready victim "$VICTIM_PID"; then
-    break
-  fi
+start_holder_child hold_lease victim quarantine-victim slot-001 \
+  >"$STATE_PARENT/victim.log" 2>&1
+VICTIM_PID="$HOLDER_STARTED_PID"
+if ! wait_for_ready victim "$VICTIM_PID"; then
   stop_holder_child "$VICTIM_PID" \
     || die 'victim holder did not stop after its readiness timeout'
   VICTIM_PID=''
-  report_slot_diagnostics slot-001 \
-    "victim provisioning attempt $victim_attempt failed"
-  [ "$victim_attempt" -lt 3 ] \
-    || die 'victim lease did not become ready after 3 automatic rebuilds'
-  wait_for_slot_state slot-001 available "$RECOVERY_WAIT_SECONDS" >/dev/null \
-    || { report_slot_diagnostics slot-001 'victim automatic rebuild timed out';
-         die 'victim provisioning quarantine did not recover'; }
-  for marker in \
-    "$STATE_PARENT/victim.ready" \
-    "$STATE_PARENT/victim.failed" \
-    "$STATE_PARENT/victim.release"; do
-    [ ! -e "$marker" ] || find "$marker" -delete
-  done
-  victim_attempt=$((victim_attempt + 1))
-done
+  report_slot_diagnostics slot-001 'victim provisioning failed'
+  die 'victim lease did not become ready; inspect admission or provisioning evidence before retrying'
+fi
 
 IFS=$'\t' read -r VICTIM_SLOT VICTIM_CONFIG VICTIM_PROJECT _victim_run _victim_purpose \
+  _victim_generation _victim_base \
   < "$STATE_PARENT/victim.ready"
 [ "$VICTIM_SLOT" = slot-001 ] || die "victim received $VICTIM_SLOT"
 for vm in 1 2; do
@@ -581,34 +601,18 @@ done
 reclaim_held_pair_capacity "$VICTIM_CONFIG" victim
 stop_slot_pair 1
 
-neighbor_attempt=1
-while true; do
-  start_holder_child hold_lease neighbor held-neighbor slot-002 \
-    >"$STATE_PARENT/neighbor.log" 2>&1
-  NEIGHBOR_PID="$HOLDER_STARTED_PID"
-  if wait_for_ready neighbor "$NEIGHBOR_PID"; then
-    break
-  fi
+start_holder_child hold_lease neighbor held-neighbor slot-002 \
+  >"$STATE_PARENT/neighbor.log" 2>&1
+NEIGHBOR_PID="$HOLDER_STARTED_PID"
+if ! wait_for_ready neighbor "$NEIGHBOR_PID"; then
   stop_holder_child "$NEIGHBOR_PID" \
     || die 'neighbor holder did not stop after its readiness timeout'
   NEIGHBOR_PID=''
-  report_slot_diagnostics slot-002 \
-    "neighbor provisioning attempt $neighbor_attempt failed"
-  [ "$neighbor_attempt" -lt 3 ] \
-    || die 'neighbor lease did not become ready after 3 automatic rebuilds'
-  wait_for_slot_state slot-002 available "$RECOVERY_WAIT_SECONDS" >/dev/null \
-    || { report_slot_diagnostics slot-002 'neighbor automatic rebuild timed out';
-         die 'neighbor provisioning quarantine did not recover'; }
-  for marker in \
-    "$STATE_PARENT/neighbor.ready" \
-    "$STATE_PARENT/neighbor.failed" \
-    "$STATE_PARENT/neighbor.release"; do
-    [ ! -e "$marker" ] || find "$marker" -delete
-  done
-  neighbor_attempt=$((neighbor_attempt + 1))
-done
+  report_slot_diagnostics slot-002 'neighbor provisioning failed'
+  die 'neighbor lease did not become ready; inspect admission or provisioning evidence before retrying'
+fi
 IFS=$'\t' read -r NEIGHBOR_SLOT NEIGHBOR_CONFIG NEIGHBOR_PROJECT \
-  neighbor_run _neighbor_purpose \
+  neighbor_run _neighbor_purpose _neighbor_generation neighbor_base \
   < "$STATE_PARENT/neighbor.ready"
 [ "$NEIGHBOR_SLOT" = slot-002 ] || die "neighbor received $NEIGHBOR_SLOT"
 [ -n "$NEIGHBOR_PROJECT" ] && [ "$NEIGHBOR_PROJECT" = "$VICTIM_PROJECT" ] \
@@ -656,10 +660,9 @@ neighbor_heartbeat="$(jq -r '
   .pool.slots[] | select(.slot_id == "slot-002") | .last_heartbeat_at
 ' <<<"$quarantined")"
 
-# Keep recovery paused until the held neighbor's guests are stopped. Otherwise
-# the constrained acceptance host can start a doomed first rebuild attempt,
-# consume the diagnostic recovery attempt before the deterministic failure
-# boundary is fully staged. The lease and its heartbeat remain held throughout.
+# Keep the held neighbor stopped during release maintenance to exercise renewal
+# independently of guest availability. Recovery only deletes the failed allocation;
+# it does not boot an idle replacement. The neighbor lease remains held throughout.
 stop_slot_pair 2
 
 # Exercise the release owner while the neighbor remains held and the incident
@@ -688,20 +691,24 @@ outer_root systemctl start subyard-test-vms-lease-reaper.timer
 REAPER_TIMER_STOPPED=0
 outer_root systemctl start --no-block subyard-test-vms-lease-reaper.service
 
+quarantined_generation="$(jq -r '
+  .pool.slots[] | select(.slot_id == "slot-001") | .resource_generation
+' <<<"$quarantined")"
 available="$(wait_for_slot_state slot-001 available "$RECOVERY_WAIT_SECONDS")" \
-  || { report_slot_diagnostics slot-001 'automatic rebuild timed out';
-       die 'root reaper did not automatically rebuild slot-001'; }
+  || { report_slot_diagnostics slot-001 'automatic cleanup timed out';
+       die 'root reaper did not automatically clean slot-001'; }
 new_generation="$(jq -r '
   .pool.slots[] | select(.slot_id == "slot-001") | .resource_generation
 ' <<<"$available")"
-[ "$new_generation" -eq "$((initial_generation + 1))" ] \
-  || die "resource generation changed from $initial_generation to $new_generation"
+[ "$new_generation" -eq "$((quarantined_generation + 1))" ] \
+  || die "recovery generation changed from $quarantined_generation to $new_generation"
+assert_slot_empty 1
 jq -e --arg project "$NEIGHBOR_PROJECT" '
   (.pool.slots[] | select(.slot_id == "slot-002")) as $neighbor |
   $neighbor.state == "held" and
   $neighbor.project == $project
 ' <<<"$available" >/dev/null \
-  || die 'automatic rebuild changed the held neighbor'
+  || die 'automatic cleanup changed the held neighbor'
 
 # Force immediate host-wide collection rather than waiting for the one-minute
 # timer, then use the public global command without -Y.
@@ -709,8 +716,8 @@ sudo -n systemctl start subyard-test-vms-host-sink.service
 global_log="$(./bin/yard test-vms logs -n 100000 --slot 1)"
 jq -s -e --arg incident "$incident_id" '
   any(.[]; .kind == "slot.quarantined" and .incident_id == $incident) and
-  any(.[]; .kind == "rebuild.delete" and .incident_id == $incident) and
-  any(.[]; .kind == "rebuild.create" and .incident_id == $incident) and
+  any(.[]; .kind == "recovery.start" and .incident_id == $incident) and
+  all(.[]; .kind != "rebuild.create" or .incident_id != $incident) and
   any(.[]; .kind == "recovery.available" and .incident_id == $incident)
 ' <<<"$global_log" >/dev/null || {
   jq -s '
@@ -718,7 +725,7 @@ jq -s -e --arg incident "$incident_id" '
       select(.slot_id == "slot-001") |
       {kind, incident_id, recovery_attempt}]
   ' <<<"$global_log" >&2
-  die 'global broker log omitted the quarantine/rebuild timeline'
+  die 'global broker log omitted the quarantine/recovery timeline'
 }
 
 incident="$SUBYARD_HOME/logs/test-vms-broker-incidents/$incident_id.json"
@@ -782,19 +789,21 @@ minimum_observable_delta=$((RECLAIM_FIXTURE_BYTES / 2))
   || die "VM1 fixture allocation was not observable: baseline=$vm1_baseline fixture=$vm1_with_fixture requested=$RECLAIM_FIXTURE_BYTES"
 [ "$vm2_fixture_delta" -ge "$minimum_observable_delta" ] \
   || die "VM2 fixture allocation was not observable: baseline=$vm2_baseline fixture=$vm2_with_fixture requested=$RECLAIM_FIXTURE_BYTES"
-remove_reclaim_fixture "$NEIGHBOR_CONFIG"
-RECLAIM_MARKER=''
-vm1_before_release="$(root_image_allocated_bytes "$vm1_root_image")"
-vm2_before_release="$(root_image_allocated_bytes "$vm2_root_image")"
-# Derive each release threshold from that VM's observed growth. The one-half
-# allowance covers bounded guest shutdown writes after fstrim while remaining
-# large enough that an unrelated metadata decrease cannot satisfy the check.
-vm1_minimum_reclaim=$(((vm1_fixture_delta + 1) / 2))
-vm2_minimum_reclaim=$(((vm2_fixture_delta + 1) / 2))
-[ "$((vm1_before_release - vm1_baseline))" -ge "$vm1_minimum_reclaim" ] \
-  || die "VM1 deleted fixture left too few observable blocks for release: baseline=$vm1_baseline fixture=$vm1_with_fixture before=$vm1_before_release minimum=$vm1_minimum_reclaim"
-[ "$((vm2_before_release - vm2_baseline))" -ge "$vm2_minimum_reclaim" ] \
-  || die "VM2 deleted fixture left too few observable blocks for release: baseline=$vm2_baseline fixture=$vm2_with_fixture before=$vm2_before_release minimum=$vm2_minimum_reclaim"
+# Leave both marked files present. Only product release may remove their disks;
+# guest deletion/TRIM before release would hide a retained-VM regression.
+[ "$(outer_root incus storage list --format json | jq -r '.[] | select(.name == "default") | .driver')" = dir ] \
+  || die 'this physical root.img accounting fixture requires the dir storage driver'
+[ "$(outer_root stat -f -c %t /srv/incus-e2e/storage)" = ef53 ] \
+  || die 'this root-block reclaim assertion requires an ext-family backing filesystem without shared reflink extents'
+pool_before_release="$(pool_used_bytes)"
+# dir roots on the verified ext-family filesystem have independently allocated
+# blocks (dir on reflink-capable filesystems would not). Permit at most 256 MiB of
+# concurrent metadata/log growth while requiring nearly all observed root blocks
+# to disappear from actual pool use, not just from a logical quota counter.
+pool_reclaim_allowance=$((256 * 1024 * 1024))
+minimum_pool_reclaim=$((vm1_with_fixture + vm2_with_fixture - pool_reclaim_allowance))
+[ "$minimum_pool_reclaim" -ge "$((2 * minimum_observable_delta))" ] \
+  || die 'observed root allocations are too small for the bounded reclaim allowance'
 
 : > "$STATE_PARENT/neighbor.release"
 wait "$NEIGHBOR_PID" \
@@ -802,6 +811,7 @@ wait "$NEIGHBOR_PID" \
        sed -n '1,240p' "$STATE_PARENT/neighbor.log" >&2;
        die 'held neighbor did not release cleanly'; }
 NEIGHBOR_PID=''
+RECLAIM_MARKER=''
 released="$(wait_for_slot_state slot-002 available 60)" \
   || { report_slot_diagnostics slot-002 'held neighbor did not return to the pool';
        die 'held neighbor did not return to the pool'; }
@@ -810,36 +820,46 @@ jq -e --argjson generation "$neighbor_generation" '
   all(.pool.slots[]; .state == "available") and
   $slot.resource_generation == $generation
 ' <<<"$released" >/dev/null \
-  || die 'normal release rebuilt the retained pair or left the pool unavailable'
-vm1_after_release="$(root_image_allocated_bytes "$vm1_root_image")"
-vm2_after_release="$(root_image_allocated_bytes "$vm2_root_image")"
-vm1_release_delta=$((vm1_before_release - vm1_after_release))
-vm2_release_delta=$((vm2_before_release - vm2_after_release))
-[ "$vm1_release_delta" -ge "$vm1_minimum_reclaim" ] \
-  || die "normal release reclaimed too few VM1 root.img blocks: before=$vm1_before_release after=$vm1_after_release observed_fixture=$vm1_fixture_delta minimum=$vm1_minimum_reclaim"
-[ "$vm2_release_delta" -ge "$vm2_minimum_reclaim" ] \
-  || die "normal release reclaimed too few VM2 root.img blocks: before=$vm2_before_release after=$vm2_after_release observed_fixture=$vm2_fixture_delta minimum=$vm2_minimum_reclaim"
-[ "$(slot_pair_identity 2)" = "$pair_identity_before" ] \
-  || die 'normal release replaced the retained VM pair'
-assert_slot_pair_stopped 2
+  || die 'normal release changed the allocation generation or left the pool unavailable'
+assert_slot_empty 2
+assert_root_image_removed "$vm1_root_image"
+assert_root_image_removed "$vm2_root_image"
+release_pool_delta="$(wait_for_pool_reclaim "$pool_before_release" "$minimum_pool_reclaim")"
 
-SUBYARD_E2E_STATE_DIR="$STATE_PARENT/reuse" \
-  "$RUNNER" --yard "$YARD" --slot 2 --purpose retained-pair-reuse --vm both -- \
-  test ! -e "$RECLAIM_FIXTURE"
+start_holder_child hold_lease reuse disposable-pair-reuse slot-002 \
+  >"$STATE_PARENT/reuse.log" 2>&1
+REUSE_PID="$HOLDER_STARTED_PID"
+wait_for_ready reuse "$REUSE_PID" \
+  || { report_slot_diagnostics slot-002 'fresh allocation was not reusable';
+       die 'fresh allocation was not reusable'; }
+IFS=$'\t' read -r REUSE_SLOT REUSE_CONFIG _reuse_project _reuse_run _reuse_purpose \
+  reuse_generation reuse_base < "$STATE_PARENT/reuse.ready"
+[ "$REUSE_SLOT" = slot-002 ] && [ "$reuse_generation" -eq "$((neighbor_generation + 1))" ] \
+  || die 'next lease did not receive a fresh allocation generation'
+[ "$reuse_base" = "$neighbor_base" ] \
+  || die 'fresh lease unexpectedly changed the validated immutable base'
+pair_identity_after="$(slot_pair_identity 2)"
+for vm in e2e-vm-1 e2e-vm-2; do
+  old_uuid="$(sed -n "s/^$vm=//p" <<<"$pair_identity_before")"
+  new_uuid="$(sed -n "s/^$vm=//p" <<<"$pair_identity_after")"
+  [ -n "$new_uuid" ] && [ "$new_uuid" != "$old_uuid" ] \
+    || die "next lease reused $vm identity"
+  [ "$(outer_root incus config get "$vm" volatile.base_image --project subyard-e2e-vms-slot-2)" = "$reuse_base" ] \
+    || die "next lease $vm was not created from its granted base"
+  ssh -F "$REUSE_CONFIG" -T "$vm" -- test ! -e "$RECLAIM_FIXTURE"
+done
+: > "$STATE_PARENT/reuse.release"
+wait "$REUSE_PID" || die 'fresh reuse lease did not release cleanly'
+REUSE_PID=''
 final="$(wait_for_slot_state slot-002 available 60)" \
-  || { report_slot_diagnostics slot-002 'retained pair was not reusable';
-       die 'retained pair was not reusable'; }
-jq -e --argjson generation "$neighbor_generation" '
+  || die 'fresh allocation did not return to the pool'
+jq -e --argjson generation "$reuse_generation" '
   (.pool.slots[] | select(.slot_id == "slot-002")) as $slot |
   all(.pool.slots[]; .state == "available") and
   $slot.resource_generation == $generation
 ' <<<"$final" >/dev/null \
   || die 'candidate pool was not fully reusable after acceptance'
-assert_slot_pair_stopped 2
-[ "$(slot_pair_identity 2)" = "$pair_identity_before" ] \
-  || die 'retained VM pair identity changed during reuse'
-
-printf '  [ ok ] release reclaimed VM1=%s/observed-%s and VM2=%s/observed-%s allocated root.img bytes without replacing retained VMs\n' \
-  "$vm1_release_delta" "$vm1_fixture_delta" \
-  "$vm2_release_delta" "$vm2_fixture_delta"
-printf 'ok: host-wide broker log, immutable incident, held rollback, automatic clean rebuild and retained-disk reclaim\n'
+assert_slot_empty 2
+printf '  [ ok ] release removed both root images and reclaimed %s physical pool bytes (minimum=%s allowance=%s); fresh generation=%s base=%s\n' \
+  "$release_pool_delta" "$minimum_pool_reclaim" "$pool_reclaim_allowance" "$reuse_generation" "$reuse_base"
+printf 'ok: host-wide broker log, immutable incident, held rollback, automatic cleanup and disposable-disk reclaim\n'

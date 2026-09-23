@@ -51,7 +51,7 @@ OWNER_BASELINE_IMAGES=''
 OWNER_BASELINE_CAPTURED=0
 OWNER_BASE_IMAGE="${P0_REAL_INCUS_CONTAINER_CACHE_ALIAS:-subyard-e2e-debian-13-cloud-container}"
 OWNER_BASE_IMAGE_CREATED=0
-OWNER_DIAGNOSTIC_VM_MEMORY="${P0_E2E_DIAGNOSTIC_VM_MEMORY:-700MiB}"
+OWNER_DIAGNOSTIC_VM_MEMORY="${P0_E2E_DIAGNOSTIC_VM_MEMORY:-2GiB}"
 OWNER_DIAGNOSTIC_VM_BOOT_TIMEOUT="${P0_E2E_DIAGNOSTIC_VM_BOOT_TIMEOUT:-600}"
 OWNER_DIAGNOSTIC_DEV_UID="${P0_E2E_DIAGNOSTIC_DEV_UID:-1001}"
 
@@ -360,6 +360,21 @@ prepare_owner_go_cache() {
   export SUBYARD_CONFIG_HOME="$OWNER_CONFIG_HOME"
 }
 
+require_broker_fixture_capacity() {
+  local memory_kib available_bytes total_bytes
+  memory_kib="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)"
+  read -r total_bytes available_bytes < <(df -B1 --output=size,avail "$ROOT" | tail -n1)
+  # Two simultaneous pairs reserve 8GiB plus per-VM overhead and host headroom.
+  # The first immutable 10GiB base needs a conservative 30GiB publication peak;
+  # later pairs, cached images and the release fixture also share this filesystem.
+  [[ "$memory_kib" =~ ^[0-9]+$ ]] && [ "$memory_kib" -ge $((15 * 1024 * 1024)) ] \
+    || die 'nested broker acceptance requires an allocated host with at least 16GiB RAM; the default 4GiB pair VM is too small'
+  [[ "$total_bytes" =~ ^[0-9]+$ ]] && [[ "$available_bytes" =~ ^[0-9]+$ ]] \
+    && [ "$total_bytes" -ge $((75 * 1024 * 1024 * 1024)) ] \
+    && [ "$available_bytes" -ge $((60 * 1024 * 1024 * 1024)) ] \
+    || die 'nested broker acceptance requires an allocated 80GiB-or-larger disk with 60GiB free before setup'
+}
+
 write_owner_registration() { # <yard> <template> <ssh-port> [slot-count]
   local yard="$1" template="$2" port="$3" slots="${4:-2}" registration
   local selection='AGENTS=none'
@@ -382,6 +397,9 @@ write_owner_registration() { # <yard> <template> <ssh-port> [slot-count]
     "$slots" "$OWNER_DIAGNOSTIC_VM_BOOT_TIMEOUT" \
     "$OWNER_BASE_IMAGE" "$OWNER_BASE_IMAGE" \
     > "$registration"
+  if [ "$template" = test-vms ]; then
+    printf 'LIMITS_MEMORY=14GiB\n' >> "$registration"
+  fi
   chmod 0600 "$registration"
 }
 
@@ -784,7 +802,7 @@ reclaim_owner_lease_capacity() {
   local minimum=$((7 * 1024 * 1024 * 1024))
 
   # The predecessor migration and real-Incus contracts have completed. Reclaim
-  # only outputs that later owner updates no longer read before retaining four
+  # only outputs that later owner updates no longer read before allocating four
   # nested VM disks concurrently.
   for path in \
     "$RENAME_BASE_ROOT" \
@@ -804,7 +822,7 @@ reclaim_owner_lease_capacity() {
   done < <(incus image list --project default --format csv -c f)
   # P0 builds use the marker-owned cache above. The outer VM is a disposable
   # lease, so its reproducible build and dependency caches need not compete
-  # with the four retained nested VM disks used by the isolation contract.
+  # with the four disposable nested VM disks used by the isolation contract.
   default_build_before="$(p0_capacity_cache_bytes "$P0_CAPACITY_DEFAULT_BUILD_CACHE")"
   env -u GOCACHE go clean -cache
   default_build_after="$(p0_capacity_cache_bytes "$P0_CAPACITY_DEFAULT_BUILD_CACHE")"
@@ -837,6 +855,7 @@ run_nested_broker_acceptance() {
 
 owner() (
   [ "$SUBYARD_E2E_VM" = 1 ] || die 'owner lane requires VM1'
+  require_broker_fixture_capacity
 	trap owner_cleanup EXIT
   prepare_owner_go_cache
 	YARD_BUILD_VERSION="$P0_OWNER_VERSION" dev/build-engine.sh --force >/dev/null
@@ -866,7 +885,7 @@ owner() (
   ! incus exec yard-test-yard --project subyard-test-yard -- id -nG dev | tr ' ' '\n' \
     | grep -Eq '^(incus-admin|yard)$' || die 'dev retained a privileged L1 group'
   # All migration and recovery fixtures have finished compiling. Drop only
-  # this run's disposable Go cache before retaining both nested VM pairs;
+  # this run's disposable Go cache before allocating both nested VM pairs;
   # production broker memory and capacity defaults remain unchanged.
   prepare_broker_recovery_update
   p0_capacity_reset_build_cache
@@ -911,6 +930,7 @@ owner_migration() (
 
 broker_recovery_owner() (
   [ "$SUBYARD_E2E_VM" = 1 ] || die 'broker recovery owner lane requires VM1'
+  require_broker_fixture_capacity
   trap owner_cleanup EXIT
   prepare_owner_go_cache
   YARD_BUILD_VERSION="$P0_OWNER_VERSION" dev/build-engine.sh --force >/dev/null
@@ -918,7 +938,7 @@ broker_recovery_owner() (
   OWNER_BASELINE_IMAGES="$(incus image list --project default --format csv -c f)"
   OWNER_BASELINE_CAPTURED=1
   ensure_owner_base_image
-  OWNER_DIAGNOSTIC_VM_MEMORY="${P0_BROKER_RECOVERY_VM_MEMORY:-700MiB}"
+  OWNER_DIAGNOSTIC_VM_MEMORY="${P0_BROKER_RECOVERY_VM_MEMORY:-2GiB}"
   install_owner_runtime
   prepare_broker_recovery_update
   prepare_owner_image_cache_project subyard-test-yard
@@ -2243,8 +2263,12 @@ capacity_verify_cleanup() {
     p0_capacity_remove_root_if_empty
     ;;
   profile-resource)
+    p0_capacity_use_build_cache
+    ensure_owner_incus profile-resource
     profile_resource
     bash dev/e2e/bind-resource-profile.sh
+    p0_capacity_remove_build_cache
+    p0_capacity_remove_root_if_empty
     ;;
   owner) owner ;;
   owner-migration) owner_migration ;;

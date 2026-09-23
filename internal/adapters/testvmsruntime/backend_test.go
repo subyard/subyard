@@ -1,6 +1,7 @@
 package testvmsruntime
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -31,6 +32,18 @@ func fixtureBackend(t *testing.T) *Backend {
 		[]byte("fixture-download\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	for _, name := range recipeFiles {
+		path := filepath.Join(root, filepath.FromSlash(name))
+		if _, err := os.Stat(path); err == nil {
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("fixture recipe: "+name+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	client := filepath.Join(root, "client")
 	return &Backend{
 		RepositoryRoot: root, Dispatcher: dispatcher, Project: "subyard-test",
@@ -40,6 +53,8 @@ func fixtureBackend(t *testing.T) *Backend {
 			"E2E_VM_IMAGE": "images:debian/13/cloud", "E2E_VM_CPU": "2",
 			"E2E_VM_MEMORY": "4GiB", "E2E_VM_DISK": "10GiB",
 			"E2E_VM_SLOT_COUNT": "2", "E2E_VM_BOOT_TIMEOUT": "300",
+			"E2E_DISK_BUDGET": "120GiB", "E2E_CACHE_BUDGET": "20GiB",
+			"E2E_DISK_RESERVE": "6GiB", "E2E_MEMORY_RESERVE": "3GiB", "E2E_VM_OVERHEAD": "768MiB",
 			"SUBYARD_E2E_CLIENT_EXPORT_DIR": client,
 		},
 		Output: io.Discard,
@@ -49,6 +64,7 @@ func fixtureBackend(t *testing.T) *Backend {
 func TestBackendApplyInstallsCurrentEngineAndPublishesRoute(t *testing.T) {
 	backend := fixtureBackend(t)
 	var power []string
+	recipesInstalled := false
 	backend.Start = func(context.Context) error {
 		power = append(power, "start")
 		return nil
@@ -71,10 +87,29 @@ func TestBackendApplyInstallsCurrentEngineAndPublishesRoute(t *testing.T) {
 		case joined == "exec yard-test --project subyard-test -- mv -f -- "+
 			DefaultInstalledPath+".new "+DefaultInstalledPath:
 			return nil, nil, nil
+		case strings.Contains(joined, " install-recipes "):
+			archive, err := io.ReadAll(stdin)
+			if err != nil {
+				return nil, nil, err
+			}
+			expected, _, err := recipeBundle(backend.RepositoryRoot)
+			if err != nil || !bytes.Equal(archive, expected) {
+				return nil, nil, fmt.Errorf("wrong recipe payload: %v", err)
+			}
+			recipesInstalled = true
+			return nil, nil, nil
 		case strings.HasSuffix(joined, "-- bash -euo pipefail -s"):
+			if !recipesInstalled {
+				return nil, nil, fmt.Errorf("provisioning started before recipe installation")
+			}
 			payload, err := io.ReadAll(stdin)
 			if err != nil || string(payload) != "fixture-download\nfixture-provision\n" {
 				return nil, nil, fmt.Errorf("wrong provision payload: %q", payload)
+			}
+			for _, name := range []string{"E2E_DISK_BUDGET", "E2E_CACHE_BUDGET", "E2E_DISK_RESERVE", "E2E_MEMORY_RESERVE", "E2E_VM_OVERHEAD"} {
+				if !strings.Contains(joined, "--env "+name+"="+backend.Environment[name]+" ") {
+					return nil, nil, fmt.Errorf("provisioning lost %s", name)
+				}
 			}
 			if !strings.Contains(joined, "--env E2E_AGENT_PUBLIC_KEY= --") {
 				return nil, nil, fmt.Errorf("default-open admission retained a static controller key")
@@ -249,6 +284,9 @@ func TestDisabledBackendRemovesPublishedRoute(t *testing.T) {
 		case joined == "exec yard-test --project subyard-test -- mv -f -- "+
 			DefaultInstalledPath+".new "+DefaultInstalledPath:
 			return nil, nil, nil
+		case strings.Contains(joined, " install-recipes "):
+			_, _ = io.Copy(io.Discard, stdin)
+			return nil, nil, nil
 		case strings.HasSuffix(joined, "-- bash -euo pipefail -s"):
 			_, _ = io.Copy(io.Discard, stdin)
 			return nil, nil, nil
@@ -265,4 +303,35 @@ func TestDisabledBackendRemovesPublishedRoute(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(client, "current")); !os.IsNotExist(err) {
 		t.Fatalf("current route remains: %v", err)
 	}
+}
+
+func TestBackendBudgetsAndRecipeChangesRequireReconcile(t *testing.T) {
+	backend := fixtureBackend(t)
+	original, err := backend.state()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"E2E_DISK_BUDGET", "E2E_CACHE_BUDGET", "E2E_DISK_RESERVE", "E2E_MEMORY_RESERVE", "E2E_VM_OVERHEAD"} {
+		before := backend.Environment[name]
+		backend.Environment[name] = "7GiB"
+		changed, err := backend.state()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if changed.marker == original.marker {
+			t.Errorf("%s change did not invalidate convergence", name)
+		}
+		backend.Environment[name] = before
+	}
+	if err := os.WriteFile(filepath.Join(backend.RepositoryRoot, recipeFiles[0]), []byte("changed recipe\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := backend.state()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed.marker == original.marker {
+		t.Fatal("recipe change did not invalidate convergence")
+	}
+
 }

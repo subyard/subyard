@@ -19,7 +19,8 @@ import (
 const provisioningSafetyMargin = 30 * time.Minute
 
 const (
-	LeaseSchemaVersion            = 1
+	LeaseSchemaVersion            = 2
+	LeaseProtocolVersion          = 1
 	LeaseRecoverySchemaVersion    = 1
 	LeaseAttributionSchemaVersion = 2
 	LeaseAttributionSchemaV1      = 1
@@ -40,6 +41,7 @@ var (
 	ErrInvalidSlot           = errors.New("invalid slot")
 	ErrLeaseBusy             = errors.New("busy")
 	ErrLeaseLost             = errors.New("lease lost")
+	ErrLegacyRetained        = errors.New("legacy retained data requires explicit retirement")
 	ErrLeaseTargetStale      = errors.New("lease target is stale")
 )
 
@@ -86,31 +88,35 @@ type LeaseOwnerSnapshot struct {
 }
 
 type LeaseSlot struct {
-	SlotID                string    `json:"slot_id"`
-	ResourceGeneration    uint64    `json:"resource_generation"`
-	LeaseEpoch            uint64    `json:"lease_epoch"`
-	State                 SlotState `json:"state"`
-	ClientID              string    `json:"client_id,omitempty"`
-	ControllerFingerprint string    `json:"controller_fingerprint,omitempty"`
-	DisplayLabel          string    `json:"display_label,omitempty"`
-	Yard                  string    `json:"yard,omitempty"`
-	Project               string    `json:"project,omitempty"`
-	Checkout              string    `json:"checkout,omitempty"`
-	Run                   string    `json:"run,omitempty"`
-	Purpose               string    `json:"purpose,omitempty"`
-	LeaseID               string    `json:"lease_id,omitempty"`
-	CapabilityHash        string    `json:"capability_hash,omitempty"`
-	AcquiredAt            time.Time `json:"acquired_at,omitempty"`
-	ProvisioningStartedAt time.Time `json:"provisioning_started_at,omitempty"`
-	ReadyAt               time.Time `json:"ready_at,omitempty"`
-	LastHeartbeatAt       time.Time `json:"last_heartbeat_at,omitempty"`
-	ExpiresAt             time.Time `json:"expires_at,omitempty"`
-	FailureReason         string    `json:"failure_reason,omitempty"`
-	LastFailureEventID    string    `json:"last_failure_event_id,omitempty"`
-	IncidentID            string    `json:"incident_id,omitempty"`
-	RecoveryAttempt       uint64    `json:"recovery_attempt"`
-	NextRecoveryAt        time.Time `json:"next_recovery_at,omitempty"`
-	RecoveryStartedAt     time.Time `json:"recovery_started_at,omitempty"`
+	Environment           *EnvironmentSpec `json:"environment,omitempty"`
+	BaseFingerprint       string           `json:"base_fingerprint,omitempty"`
+	Reserved              bool             `json:"reserved,omitempty"`
+	LegacyRetained        bool             `json:"legacy_retained,omitempty"`
+	SlotID                string           `json:"slot_id"`
+	ResourceGeneration    uint64           `json:"resource_generation"`
+	LeaseEpoch            uint64           `json:"lease_epoch"`
+	State                 SlotState        `json:"state"`
+	ClientID              string           `json:"client_id,omitempty"`
+	ControllerFingerprint string           `json:"controller_fingerprint,omitempty"`
+	DisplayLabel          string           `json:"display_label,omitempty"`
+	Yard                  string           `json:"yard,omitempty"`
+	Project               string           `json:"project,omitempty"`
+	Checkout              string           `json:"checkout,omitempty"`
+	Run                   string           `json:"run,omitempty"`
+	Purpose               string           `json:"purpose,omitempty"`
+	LeaseID               string           `json:"lease_id,omitempty"`
+	CapabilityHash        string           `json:"capability_hash,omitempty"`
+	AcquiredAt            time.Time        `json:"acquired_at,omitempty"`
+	ProvisioningStartedAt time.Time        `json:"provisioning_started_at,omitempty"`
+	ReadyAt               time.Time        `json:"ready_at,omitempty"`
+	LastHeartbeatAt       time.Time        `json:"last_heartbeat_at,omitempty"`
+	ExpiresAt             time.Time        `json:"expires_at,omitempty"`
+	FailureReason         string           `json:"failure_reason,omitempty"`
+	LastFailureEventID    string           `json:"last_failure_event_id,omitempty"`
+	IncidentID            string           `json:"incident_id,omitempty"`
+	RecoveryAttempt       uint64           `json:"recovery_attempt"`
+	NextRecoveryAt        time.Time        `json:"next_recovery_at,omitempty"`
+	RecoveryStartedAt     time.Time        `json:"recovery_started_at,omitempty"`
 }
 
 type LeasePool struct {
@@ -138,15 +144,17 @@ type leaseRecoverySlot struct {
 }
 
 type LeaseGrant struct {
-	SlotID             string        `json:"slot_id"`
-	ResourceGeneration uint64        `json:"resource_generation,omitempty"`
-	LeaseID            string        `json:"lease_id"`
-	Capability         string        `json:"capability"`
-	LeaseEpoch         uint64        `json:"lease_epoch"`
-	ExpiresAt          time.Time     `json:"expires_at"`
-	Context            *LeaseContext `json:"context,omitempty"`
-	DataUser           string        `json:"data_user,omitempty"`
-	Targets            []LeaseTarget `json:"targets,omitempty"`
+	Environment        *EnvironmentSpec `json:"environment,omitempty"`
+	BaseFingerprint    string           `json:"base_fingerprint,omitempty"`
+	SlotID             string           `json:"slot_id"`
+	ResourceGeneration uint64           `json:"resource_generation,omitempty"`
+	LeaseID            string           `json:"lease_id"`
+	Capability         string           `json:"capability"`
+	LeaseEpoch         uint64           `json:"lease_epoch"`
+	ExpiresAt          time.Time        `json:"expires_at"`
+	Context            *LeaseContext    `json:"context,omitempty"`
+	DataUser           string           `json:"data_user,omitempty"`
+	Targets            []LeaseTarget    `json:"targets,omitempty"`
 }
 
 // LeaseIdentity is the non-secret identity of one concrete lease-backed VM pair.
@@ -257,7 +265,7 @@ func (store LeaseStore) AcquireSlot(
 		return LeaseGrant{}, fmt.Errorf("%w: %q", ErrInvalidSlot, slotID)
 	}
 	context := legacyLeaseContext(label, purpose)
-	return store.acquireSlot(clientID, fingerprint, label, purpose, context, slotID)
+	return store.acquireSlot(clientID, fingerprint, label, purpose, context, slotID, nil)
 }
 
 func (store LeaseStore) AcquireV2Slot(
@@ -275,13 +283,40 @@ func (store LeaseStore) AcquireV2Slot(
 		return LeaseGrant{}, err
 	}
 	return store.acquireSlot(
-		clientID, fingerprint, contextDisplayLabel(context), purpose, &context, slotID,
+		clientID, fingerprint, contextDisplayLabel(context), purpose, &context, slotID, nil,
 	)
+}
+
+func (store LeaseStore) AcquireV3Slot(spec EnvironmentSpec, clientID, fingerprint, yard, project, run, purpose, slotID string) (LeaseGrant, error) {
+	if err := spec.Validate(); err != nil {
+		return LeaseGrant{}, err
+	}
+	number, err := slotNumber(slotID, store.SlotCount)
+	if err != nil || slotID != fmt.Sprintf("slot-%03d", number) {
+		return LeaseGrant{}, fmt.Errorf("%w: %q", ErrInvalidSlot, slotID)
+	}
+	attribution := LeaseContext{SchemaVersion: LeaseAttributionSchemaVersion, Yard: yard, Project: project, Run: run, Purpose: purpose}
+	if err := validateLeaseContext(attribution); err != nil {
+		return LeaseGrant{}, err
+	}
+	return store.acquireSlot(clientID, fingerprint, contextDisplayLabel(attribution), purpose, &attribution, slotID, &spec)
+}
+
+// AbortProvisioning is only for a rejected admission before any working VM was created.
+func (store LeaseStore) AbortProvisioning(grant LeaseGrant) error {
+	return store.mutateOwned(grant, func(slot *LeaseSlot, _ time.Time) error {
+		if slot.State != SlotProvisioning {
+			return ErrLeaseLost
+		}
+		clearLease(slot)
+		slot.State = SlotAvailable
+		return nil
+	})
 }
 
 func (store LeaseStore) acquireSlot(
 	clientID, fingerprint, label, purpose string, context *LeaseContext,
-	requestedSlot string,
+	requestedSlot string, environment *EnvironmentSpec,
 ) (LeaseGrant, error) {
 	if requestedSlot == "" {
 		return LeaseGrant{}, fmt.Errorf("%w: exact slot is required", ErrInvalidSlot)
@@ -322,6 +357,11 @@ func (store LeaseStore) acquireSlot(
 			if err != nil {
 				return err
 			}
+			if environment != nil {
+				spec := *environment
+				slot.Environment = &spec
+				slot.ResourceGeneration++
+			}
 			slot.LeaseEpoch++
 			slot.State = SlotProvisioning
 			slot.ClientID = clientID
@@ -347,7 +387,8 @@ func (store LeaseStore) acquireSlot(
 			slot.NextRecoveryAt = time.Time{}
 			slot.RecoveryStartedAt = time.Time{}
 			grant = LeaseGrant{
-				SlotID: slot.SlotID, ResourceGeneration: slot.ResourceGeneration,
+				Environment: slot.Environment,
+				SlotID:      slot.SlotID, ResourceGeneration: slot.ResourceGeneration,
 				LeaseID: leaseID, Capability: capability,
 				LeaseEpoch: slot.LeaseEpoch, ExpiresAt: slot.ExpiresAt,
 			}
@@ -538,7 +579,7 @@ func (store LeaseStore) BeginExpectedDrain(
 
 func (store LeaseStore) BeginRecovery(slotID string) error {
 	_, _, err := store.BeginScheduledRecovery(slotID, true)
-	if !errors.Is(err, ErrCorruptLeaseState) && !errors.Is(err, ErrUnsupportedLeaseState) {
+	if !errors.Is(err, ErrCorruptLeaseState) {
 		return err
 	}
 	return store.rebuildCorruptPoolForRecovery(slotID)
@@ -800,6 +841,13 @@ func (store LeaseStore) load() (LeasePool, error) {
 	if err := json.Unmarshal(payload, &pool); err != nil {
 		return pool, fmt.Errorf("%w: %v", ErrCorruptLeaseState, err)
 	}
+	if pool.SchemaVersion == 1 {
+		// The old broker retained guest data between leases. Never treat it as disposable.
+		for index := range pool.Slots {
+			pool.Slots[index].LegacyRetained = true
+		}
+		pool.SchemaVersion = LeaseSchemaVersion
+	}
 	if pool.SchemaVersion != LeaseSchemaVersion {
 		return pool, ErrUnsupportedLeaseState
 	}
@@ -907,8 +955,7 @@ func (store LeaseStore) rebuildCorruptPoolForRecovery(slotID string) error {
 		return err
 	}
 	return store.withRawLock(func() error {
-		if _, loadErr := store.load(); !errors.Is(loadErr, ErrCorruptLeaseState) &&
-			!errors.Is(loadErr, ErrUnsupportedLeaseState) {
+		if _, loadErr := store.load(); !errors.Is(loadErr, ErrCorruptLeaseState) {
 			if loadErr == nil {
 				return errors.New("lease state changed while preparing recovery")
 			}
@@ -939,7 +986,7 @@ func (store LeaseStore) rebuildCorruptPoolForRecovery(slotID string) error {
 			}
 			pool.Slots = append(pool.Slots, LeaseSlot{
 				SlotID: fmt.Sprintf("slot-%03d", index), ResourceGeneration: 1,
-				State: state, FailureReason: reason, NextRecoveryAt: store.now(),
+				State: state, LegacyRetained: true, FailureReason: reason, NextRecoveryAt: store.now(),
 			})
 		}
 		return store.writePool(pool)
@@ -984,6 +1031,9 @@ func (store LeaseStore) PrepareResize() ([]LeaseSlot, error) {
 		}
 		for index := store.SlotCount; index < len(pool.Slots); index++ {
 			slot := &pool.Slots[index]
+			if slot.LegacyRetained {
+				return fmt.Errorf("cannot shrink pool: %s requires explicit legacy retirement", slot.SlotID)
+			}
 			if slot.State == SlotDraining && slot.FailureReason == "pool resize" {
 				continue
 			}
@@ -1012,6 +1062,9 @@ func (store LeaseStore) ResizePlan() (int, []LeaseSlot, error) {
 		}
 		for index := store.SlotCount; index < current; index++ {
 			slot := pool.Slots[index]
+			if slot.LegacyRetained {
+				return fmt.Errorf("cannot shrink pool: %s requires explicit legacy retirement", slot.SlotID)
+			}
 			if slot.State != SlotAvailable &&
 				(slot.State != SlotDraining || slot.FailureReason != "pool resize") {
 				return fmt.Errorf("cannot shrink pool: retiring %s is %s",
@@ -1067,6 +1120,9 @@ func findSlot(pool *LeasePool, id string) (*LeaseSlot, error) {
 }
 
 func clearLease(slot *LeaseSlot) {
+	slot.Environment = nil
+	slot.BaseFingerprint = ""
+	slot.Reserved = false
 	slot.ClientID = ""
 	slot.ControllerFingerprint = ""
 	slot.DisplayLabel = ""

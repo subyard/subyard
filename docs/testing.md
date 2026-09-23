@@ -133,7 +133,7 @@ not contain executable command lines and do not run them.
 | T1 | Affected host-free package, race, shell, CLI, frontend, or Rust checks. Typical target: at most 3 minutes; registry metadata identifies larger explicit budgets. |
 | T2 | The core host-free gate, `./tests/run.sh`. It remains required by the merge workflow and is not narrowed by the selector. The `host-free:all` fallback composite also includes Veranda checks. |
 | T3 | Existing targeted E2E lanes or real-host checks for affected physical boundaries. |
-| T4 | A fresh full P0: `dev/e2e/p0-acceptance.sh --slot N --lane full` without `--resume`. |
+| T4 | A fresh full P0: `dev/e2e/p0-acceptance.sh --slot N --lane full`. |
 
 Run the applicable T0 check while developing, then use the selector to identify the T1 and T3
 lower bound. Run T2 when the merge workflow requires it. If `full_p0.required` is true, run T4.
@@ -145,7 +145,16 @@ are not covered by the full matrix.
 
 Targeted evidence shows that the selected contracts and physical boundaries passed for the analyzed
 change. It does not replace the fresh release smoke required before publication:
-`dev/e2e/p0-acceptance.sh --slot N` without `--resume`. This VM gate is run externally and manually;
+`dev/e2e/p0-acceptance.sh --slot N`. This VM gate is run externally and manually;
 GitHub workflows do not receive VM access or enforce it automatically. The exhaustive `--lane full`
 matrix is periodic manual evidence and is also required when `full_p0.required` is true, an operator
 requests it, or targeted runtime evidence exposes broader coupling.
+
+## Continue work across leases
+
+Keep passed, failed and pending test segments in the current task plan, with the exact source hash,
+base fingerprint and controller evidence paths. A freed VM belongs to nobody and its disk is deleted;
+never store the task checklist there or depend on a later lease restoring fixtures. Run remaining
+independent P0 segments with `--lane NAME`; every segment sets up its own prerequisites. Source or
+baseline changes require reassessing affected passes. In-lease reboot continuation is supported;
+cross-lease `--resume` is rejected. Required fresh full P0 gates cannot be assembled from separate runs.

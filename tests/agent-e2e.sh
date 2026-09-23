@@ -278,11 +278,11 @@ LEASE_GENERATION=7
 LEASE_REQUESTED_SLOT='slot-002'
 lease_request="$(lease_acquire_request client SHA256:key ssh-ed25519 keyblob)"
 [ "$lease_request" = \
-    "acquire-v2 client SHA256:key default Subyard-2 $run_a contract-tests ssh-ed25519 keyblob slot-002" ] \
-  || fail "runner did not carry canonical attribution through acquire-v2"
+    "acquire-v3 subyard-pair client SHA256:key default Subyard-2 $run_a contract-tests ssh-ed25519 keyblob slot-002" ] \
+  || fail "runner did not carry canonical attribution through acquire-v3"
 exact_request="$(lease_acquire_request client SHA256:key ssh-ed25519 keyblob)"
 [ "$exact_request" = \
-  "acquire-v2 client SHA256:key default Subyard-2 $run_a contract-tests ssh-ed25519 keyblob slot-002" ] \
+  "acquire-v3 subyard-pair client SHA256:key default Subyard-2 $run_a contract-tests ssh-ed25519 keyblob slot-002" ] \
   || fail "runner did not retain the existing exact-slot acquire protocol"
 LEASE_REQUESTED_SLOT='slot-002'
 LEASE_SLOT='slot-002'
@@ -938,12 +938,12 @@ owner_incus_call="$TMP/p0-owner-incus-call"
 grep -Fq 'WAIT_SECONDS="${SUBYARD_P0_WAIT_SECONDS:-0}"' \
   "$ROOT/dev/e2e/p0-acceptance.sh" \
   || fail 'P0 acceptance cannot wait atomically for shared broker capacity'
-grep -Fq '.allocation == {slot: $slot, resource_generation: $generation}' \
-  "$ROOT/dev/e2e/p0-acceptance.sh" \
-  && grep -Fq '.bundle_hash == $bundle' "$ROOT/dev/e2e/p0-acceptance.sh" \
-  && grep -Fq "die 'checkpoint does not match this allocation generation and exact bundle hash'" \
-    "$ROOT/dev/e2e/p0-acceptance.sh" \
-  || fail 'P0 resume checkpoint does not fail closed on allocation or bundle drift'
+set +e
+resume_output="$(bash "$ROOT/dev/e2e/p0-acceptance.sh" --slot 1 --resume 2>&1)"
+resume_rc=$?
+set -e
+[ "$resume_rc" = 2 ] && grep -Fq 'current task plan' <<<"$resume_output" \
+  || fail 'P0 allowed cross-lease resume instead of directing task-plan progress'
 grep -Fq 'P0_CURRENT_PHASE=final-verify' "$ROOT/dev/e2e/p0-acceptance.sh" \
   && grep -Fq 'run_phase cleanup cleanup_lane' "$ROOT/dev/e2e/p0-acceptance.sh" \
   && [ "$(grep -c '^    verify_boundary$' "$ROOT/dev/e2e/p0-acceptance.sh")" -eq 1 ] \
@@ -1543,6 +1543,41 @@ awk '
   END { exit !(armed && staged && armed + 1 == staged) }
 ' "$ROOT/dev/e2e/p0-broker-recovery.sh" \
   || fail 'reclaim cleanup marker is armed before a fixture can exist'
+# Disposable release must prove both instance and root-volume absence. An empty
+# instance inventory alone must not hide retained disk resources.
+slot_empty_source="$(sed -n '/^assert_slot_empty() {/,/^}/p' \
+  "$ROOT/dev/e2e/p0-broker-recovery.sh")"
+for slot_inventory_case in empty instances root-volume foreign-project; do
+  set +e
+  SLOT_EMPTY_SOURCE="$slot_empty_source" SLOT_INVENTORY_CASE="$slot_inventory_case" bash -c '
+    set -euo pipefail
+    eval "$SLOT_EMPTY_SOURCE"
+    die() { exit 2; }
+    outer_root() {
+      case "$*" in
+        "incus project get subyard-e2e-vms-slot-2 user.subyard.managed")
+          if [ "$SLOT_INVENTORY_CASE" = foreign-project ]; then printf "foreign\n";
+          else printf "test-vms-v1\n"; fi ;;
+        "incus list --project subyard-e2e-vms-slot-2 --format json")
+          if [ "$SLOT_INVENTORY_CASE" = instances ]; then printf "[{\"name\":\"e2e-vm-1\"}]\n";
+          else printf "[]\n"; fi ;;
+        "incus storage volume list default --project subyard-e2e-vms-slot-2 --format json")
+          if [ "$SLOT_INVENTORY_CASE" = root-volume ]; then printf "[{\"type\":\"virtual-machine\"}]\n";
+          else printf "[]\n"; fi ;;
+        *) exit 3 ;;
+      esac
+    }
+    assert_slot_empty 2
+  '
+  slot_inventory_rc=$?
+  set -e
+  if [ "$slot_inventory_case" = empty ]; then
+    [ "$slot_inventory_rc" = 0 ] || fail 'empty owned disposable slot was rejected'
+  else
+    [ "$slot_inventory_rc" = 2 ] \
+      || fail "disposable release accepted $slot_inventory_case: rc=$slot_inventory_rc"
+  fi
+done
 grep -Fq '"$runtime_root/current/bin/yard" update \' \
   "$ROOT/dev/e2e/p0-broker-recovery.sh" \
   && ! grep -Fq 'scripts/install-runtime-release.sh' \
@@ -2047,7 +2082,7 @@ grep -Fq 'request.Yard != os.Getenv("SUBYARD_TEST_V0111_YARD")' "$v0111_host_fre
   || fail 'host-free v0.11.1 recovery does not prove the named-yard process request'
 ensure_identity
 lease_blob="$(awk '{print $2}' "$IDENTITY.pub")"
-lease_response="$(printf '{"schema_version":1,"status":"ok","grant":{"slot_id":"slot-001","resource_generation":5,"lease_id":"aabb","capability":"ccdd","lease_epoch":3,"data_user":"subyard-e2e-slot-1","targets":[{"selector":1,"name":"e2e-vm-1","address":"10.42.1.11","host_key_type":"ssh-ed25519","host_key_blob":"%s"},{"selector":2,"name":"e2e-vm-2","address":"10.42.1.12","host_key_type":"ssh-ed25519","host_key_blob":"%s"}]}}' "$lease_blob" "$lease_blob")"
+lease_response="$(printf '{"schema_version":1,"status":"ok","grant":{"environment":{"type":"subyard-pair","vm_count":2,"cpu_per_vm":4,"memory_per_vm":"4GiB","disk_per_vm":"20GiB","lifecycle":"disposable-v1"},"base_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","slot_id":"slot-001","resource_generation":5,"lease_id":"aabb","capability":"ccdd","lease_epoch":3,"data_user":"subyard-e2e-slot-1","targets":[{"selector":1,"name":"e2e-vm-1","address":"10.42.1.11","host_key_type":"ssh-ed25519","host_key_blob":"%s"},{"selector":2,"name":"e2e-vm-2","address":"10.42.1.12","host_key_type":"ssh-ed25519","host_key_blob":"%s"}]}}' "$lease_blob" "$lease_blob")"
 if (parse_lease_grant "$lease_response") >/dev/null 2>&1; then
   fail "contextless lease grant was accepted"
 fi
@@ -2058,13 +2093,31 @@ LEASE_YARD=default
 LEASE_PROJECT=Subyard/Attribution
 LEASE_RUN='run-a'
 LEASE_PURPOSE=contract-tests
-structured_response="$(printf '{"schema_version":1,"status":"ok","grant":{"slot_id":"slot-002","resource_generation":5,"lease_id":"eeff","capability":"1122","lease_epoch":4,"context":{"schema_version":2,"yard":"default","project":"Subyard/Attribution","run":"run-a","purpose":"contract-tests"},"data_user":"subyard-e2e-slot-2","targets":[{"selector":1,"name":"e2e-vm-1","address":"10.42.2.11","host_key_type":"ssh-ed25519","host_key_blob":"%s"},{"selector":2,"name":"e2e-vm-2","address":"10.42.2.12","host_key_type":"ssh-ed25519","host_key_blob":"%s"}]}}' "$lease_blob" "$lease_blob")"
+structured_response="$(printf '{"schema_version":1,"status":"ok","grant":{"environment":{"type":"subyard-pair","vm_count":2,"cpu_per_vm":4,"memory_per_vm":"4GiB","disk_per_vm":"20GiB","lifecycle":"disposable-v1"},"base_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","slot_id":"slot-002","resource_generation":5,"lease_id":"eeff","capability":"1122","lease_epoch":4,"context":{"schema_version":2,"yard":"default","project":"Subyard/Attribution","run":"run-a","purpose":"contract-tests"},"data_user":"subyard-e2e-slot-2","targets":[{"selector":1,"name":"e2e-vm-1","address":"10.42.2.11","host_key_type":"ssh-ed25519","host_key_blob":"%s"},{"selector":2,"name":"e2e-vm-2","address":"10.42.2.12","host_key_type":"ssh-ed25519","host_key_blob":"%s"}]}}' "$lease_blob" "$lease_blob")"
 parse_lease_grant "$structured_response" \
   || fail "structured lease grant was rejected"
 [ "$LEASE_SLOT" = slot-002 ] && [ "$DATA_USER" = subyard-e2e-slot-2 ] \
   && [ "$LEASE_GENERATION" = 5 ] \
   && [ "${VM_IP[1]}" = 10.42.2.11 ] && [ "${VM_IP[2]}" = 10.42.2.12 ] \
   || fail "lease grant did not materialize exact attributed transport state"
+for grant_filter in 'del(.grant.environment)' '.grant.environment.lifecycle = "retained"' '.grant.environment.vm_count = 1' '.grant.base_fingerprint = "invalid"'; do
+  invalid_environment="$(jq -c "$grant_filter" <<<"$structured_response")"
+  if (parse_lease_grant "$invalid_environment") >/dev/null 2>&1; then
+    fail "invalid disposable grant accepted: $grant_filter"
+  fi
+done
+(
+  ENVIRONMENT_TYPE=android-test
+  VM_COUNT=1
+  android_grant="$(jq -c '.grant.environment.type = "android-test" | .grant.environment.vm_count = 1 | .grant.environment.memory_per_vm = "8GiB" | .grant.environment.disk_per_vm = "40GiB" | .grant.targets = [.grant.targets[0]]' <<<"$structured_response")"
+  parse_lease_grant "$android_grant"
+  [ "${#VM_IP[@]}" = 1 ] && [ "$(wc -l < "$GUEST_KNOWN_HOSTS")" = 1 ] \
+    || fail 'Android transport retained a second target'
+  android_config="$(render_client_config)"
+  [ "$(grep -c '^Host e2e-vm-' <<<"$android_config")" = 1 ] \
+    || fail 'Android SSH config exposed an unexpected guest'
+) || fail 'Android single-target transport rejected a valid grant'
+parse_lease_grant "$structured_response"
 legacy_context="$(jq -c '.grant.context = {schema_version:1, project:"Subyard/Attribution", checkout:"checkout-a", run:"run-a", purpose:"contract-tests"}' <<<"$structured_response")"
 if (parse_lease_grant "$legacy_context") >/dev/null 2>&1; then
   fail "legacy lease attribution was accepted"
@@ -2135,7 +2188,7 @@ resolve_bastion_route
 [ "$BASTION_KNOWN_HOSTS" = "$route_registry/test-yard/current/known_hosts" ] \
   || fail "product-owned bastion route lost its pinned host key"
 
-status_fixture='{"schema_version":1,"status":"ok","capabilities":["attribution-v2"],"pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":1,"lease_epoch":3,"state":"held","yard":"default","project":"Subyard-2","run":"run-a","purpose":"contract-tests","acquired_at":"2026-07-26T20:00:00Z","expires_at":"2026-07-26T20:20:00Z"},{"slot_id":"slot-002","resource_generation":1,"lease_epoch":2,"state":"available"},{"slot_id":"slot-003","resource_generation":1,"lease_epoch":0,"state":"available","acquired_at":"0001-01-01T00:00:00Z","expires_at":"0001-01-01T00:00:00Z"}]}}'
+status_fixture='{"schema_version":1,"status":"ok","capabilities":["attribution-v2","environment-acquire-v3","disposable-v1"],"pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":1,"lease_epoch":3,"state":"held","yard":"default","project":"Subyard-2","run":"run-a","purpose":"contract-tests","acquired_at":"2026-07-26T20:00:00Z","expires_at":"2026-07-26T20:20:00Z"},{"slot_id":"slot-002","resource_generation":1,"lease_epoch":2,"state":"available"},{"slot_id":"slot-003","resource_generation":1,"lease_epoch":0,"state":"available","acquired_at":"0001-01-01T00:00:00Z","expires_at":"0001-01-01T00:00:00Z"}]}}'
 rendered_status="$(render_pool_status "$status_fixture")"
 printf '%s\n' "$rendered_status" | grep -Fq 'SLOT     STATE' \
   && printf '%s\n' "$rendered_status" | grep -Fq 'Subyard-2' \
@@ -2187,10 +2240,10 @@ busy_nonheld_owner='{"schema_version":1,"status":"error","code":"busy","state":"
 busy_mismatch='{"schema_version":1,"status":"error","code":"busy","state":"held","reason":"provisioning","message":"untrusted mismatch"}'
 busy_unknown_schema='{"schema_version":2,"status":"error","code":"busy","state":"held","reason":"busy","message":"untrusted schema"}'
 invalid='{"schema_version":1,"status":"error","code":"invalid_request","reason":"invalid_slot","message":"invalid slot_id"}'
-status='{"schema_version":1,"status":"ok","capabilities":["attribution-v2"],"pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-002","resource_generation":1,"lease_epoch":1,"state":"held"}]}}'
+status='{"schema_version":1,"status":"ok","capabilities":["attribution-v2","environment-acquire-v3","disposable-v1"],"pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-002","resource_generation":1,"lease_epoch":1,"state":"held"}]}}'
 status_without_v2='{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-002","resource_generation":1,"lease_epoch":1,"state":"available"}]}}'
-grant='{"schema_version":1,"status":"ok","grant":{"slot_id":"slot-002","resource_generation":1,"lease_id":"aabbccdd","lease_epoch":2,"capability":"eeff0011","data_user":"subyard-e2e-slot-2","targets":[{"selector":1,"name":"e2e-vm-1","address":"10.42.2.11","host_key_type":"ssh-ed25519","host_key_blob":"YWJjZA=="},{"selector":2,"name":"e2e-vm-2","address":"10.42.2.12","host_key_type":"ssh-ed25519","host_key_blob":"YWJjZA=="}]}}'
-wrong_grant='{"schema_version":1,"status":"ok","grant":{"slot_id":"slot-001","resource_generation":1,"lease_id":"badc0ffe","lease_epoch":3,"capability":"facefeed","data_user":"subyard-e2e-slot-1","targets":[{"selector":1,"name":"e2e-vm-1","address":"10.42.1.11","host_key_type":"ssh-ed25519","host_key_blob":"YWJjZA=="},{"selector":2,"name":"e2e-vm-2","address":"10.42.1.12","host_key_type":"ssh-ed25519","host_key_blob":"YWJjZA=="}]}}'
+grant='{"schema_version":1,"status":"ok","grant":{"environment":{"type":"subyard-pair","vm_count":2,"cpu_per_vm":4,"memory_per_vm":"4GiB","disk_per_vm":"20GiB","lifecycle":"disposable-v1"},"base_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","slot_id":"slot-002","resource_generation":1,"lease_id":"aabbccdd","lease_epoch":2,"capability":"eeff0011","data_user":"subyard-e2e-slot-2","targets":[{"selector":1,"name":"e2e-vm-1","address":"10.42.2.11","host_key_type":"ssh-ed25519","host_key_blob":"YWJjZA=="},{"selector":2,"name":"e2e-vm-2","address":"10.42.2.12","host_key_type":"ssh-ed25519","host_key_blob":"YWJjZA=="}]}}'
+wrong_grant='{"schema_version":1,"status":"ok","grant":{"environment":{"type":"subyard-pair","vm_count":2,"cpu_per_vm":4,"memory_per_vm":"4GiB","disk_per_vm":"20GiB","lifecycle":"disposable-v1"},"base_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","slot_id":"slot-001","resource_generation":1,"lease_id":"badc0ffe","lease_epoch":3,"capability":"facefeed","data_user":"subyard-e2e-slot-1","targets":[{"selector":1,"name":"e2e-vm-1","address":"10.42.1.11","host_key_type":"ssh-ed25519","host_key_blob":"YWJjZA=="},{"selector":2,"name":"e2e-vm-2","address":"10.42.1.12","host_key_type":"ssh-ed25519","host_key_blob":"YWJjZA=="}]}}'
 case "$command" in
   status)
     printf '%s\n' "$command" >> "$FAKE_FACADE_LOG"
@@ -2200,13 +2253,16 @@ case "$command" in
       printf '%s\n' "$status"
     fi
     ;;
-  acquire-v2\ *|acquire\ *)
+  acquire-v3\ *|acquire\ *)
     printf '%s\n' "$command" >> "$FAKE_FACADE_LOG"
-    read -r _ _ _ request_yard request_project request_run request_purpose _ _ _ <<<"$command"
+    read -r _ request_type _ _ request_yard request_project request_run request_purpose _ _ _ <<<"$command"
     grant="$(jq -c --arg yard "$request_yard" --arg project "$request_project" \
       --arg run "$request_run" --arg purpose "$request_purpose" \
       '.grant.context = {schema_version:2, yard:$yard, project:$project, run:$run, purpose:$purpose}' \
       <<<"$grant")"
+    if [ "$request_type" = android-test ]; then
+      grant="$(jq -c '.grant.environment.type = "android-test" | .grant.environment.vm_count = 1 | .grant.environment.memory_per_vm = "8GiB" | .grant.environment.disk_per_vm = "40GiB" | .grant.targets = [.grant.targets[0]]' <<<"$grant")"
+    fi
     wrong_grant="$(jq -c --arg yard "$request_yard" --arg project "$request_project" \
       --arg run "$request_run" --arg purpose "$request_purpose" \
       '.grant.context = {schema_version:2, yard:$yard, project:$project, run:$run, purpose:$purpose}' \
@@ -2227,6 +2283,8 @@ case "$command" in
       late-grant) sleep 2; printf '%s\n' "$grant" ;;
       outcome-unknown) exit 255 ;;
       wrong-grant) printf '%s\n' "$wrong_grant" ;;
+      android-success) printf '%s\n' "$grant" ;;
+      capacity) printf '%s\n' '{"schema_version":1,"status":"error","code":"capacity","reason":"memory","message":"insufficient memory"}' ;;
       wait-success) [ "$count" -eq 1 ] && printf '%s\n' "$busy" || printf '%s\n' "$grant" ;;
       *) printf '%s\n' "$busy" ;;
     esac
@@ -2316,11 +2374,36 @@ missing_capability_output="$(
 missing_capability_rc=$?
 set -e
 [ "$missing_capability_rc" = 2 ] \
-  && grep -Fq 'broker does not support required attribution-v2 acquire' \
+  && grep -Fq 'broker does not support required attribution-v2/environment-acquire-v3/disposable-v1 acquire' \
     <<<"$missing_capability_output" \
   && [ "$(grep -c '^status$' "$RUNNER_FIXTURE/facade.log")" = 1 ] \
   && ! grep -q '^acquire' "$RUNNER_FIXTURE/facade.log" \
   || fail "runner downgraded to legacy acquire: $missing_capability_output"
+
+for selector_args in '--vm 2' '--vm both' '--ssh 2' '--verify-boundary'; do
+  new_runner_fixture "invalid-android-${selector_args// /-}"
+  set +e
+  # Deliberately split the flag/value fixture.
+  # shellcheck disable=SC2086
+  android_output="$(run_runner_fixture android-success --type android-test --slot 2 $selector_args -- true 2>&1)"
+  android_rc=$?
+  set -e
+  [ "$android_rc" = 2 ] && [ ! -s "$RUNNER_FIXTURE/facade.log" ] \
+    || fail "android selector validation acquired a lease: $android_output"
+done
+new_runner_fixture android-success
+run_runner_fixture android-success --type android-test --slot 2 --ssh 1 -- true >/dev/null 2>&1 \
+  || fail 'single-VM Android grant failed'
+grep -q '^acquire-v3 android-test ' "$RUNNER_FIXTURE/facade.log" \
+  || fail 'Android request lost its environment type'
+new_runner_fixture capacity
+set +e
+capacity_output="$(run_runner_fixture capacity --slot 2 --wait 1s --ssh 1 -- true 2>&1)"
+capacity_rc=$?
+set -e
+[ "$capacity_rc" = 4 ] && grep -Fq 'retryable capacity refusal' <<<"$capacity_output" \
+  && [ "$(grep -c '^acquire' "$RUNNER_FIXTURE/facade.log")" = 1 ] \
+  || fail "capacity refusal was not typed and fail-fast: $capacity_output"
 
 new_runner_fixture exact-busy
 set +e

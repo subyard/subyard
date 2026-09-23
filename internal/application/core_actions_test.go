@@ -109,6 +109,12 @@ func TestCoreActionRegistryClassifiesTestVMAndProjectRemovalVariants(t *testing.
 			default_: domain.ConfirmationDefaultYes,
 		},
 		{
+			action: "test-vms.retire-legacy", effect: domain.ActionDestruction,
+			impacts:  []domain.ActionImpact{domain.ImpactPersistentData, domain.ImpactYardRuntime},
+			recovery: domain.RecoveryIrreversible, policy: domain.ActionConfirmationPromptDefaultNo,
+			default_: domain.ConfirmationDefaultNo,
+		},
+		{
 			action: "test-vms.recover", effect: domain.ActionMutation,
 			impacts:  []domain.ActionImpact{domain.ImpactSharedWorkload, domain.ImpactYardRuntime},
 			recovery: domain.RecoveryRecreatable, policy: domain.ActionConfirmationPromptDefaultYes,

@@ -35,7 +35,7 @@ func TestLoadNamedContext(t *testing.T) {
 : "${STORAGE_PATH:=$SUBYARD_HOME/incus/storage}"
 : "${HOST_BASE:=${RESTRICTED_DISK_PATHS:-/srv/subyard}}"`)
 	writeFixture(t, filepath.Join(shipped, "yards", "profiles", "test-vms.env"), "NESTED_E2E_VMS=1\nE2E_VM_CPU=2\nFORWARD_SSH_AGENT=0\n")
-	writeFixture(t, filepath.Join(yardDir, "named.env"), "YARD_TEMPLATE=test-vms\nSSH_PORT=3333\nINSTANCE_NAME=fixture-yard\nE2E_VM_CPU=1\nHOST_BASE="+root+"/host/../host\nRESTRICTED_DISK_PATHS="+root+"/host\n")
+	writeFixture(t, filepath.Join(yardDir, "named.env"), "YARD_TEMPLATE=test-vms\nSSH_PORT=3333\nINSTANCE_NAME=fixture-yard\nE2E_VM_CPU=1\nE2E_DISK_BUDGET=3GiB\nE2E_CACHE_BUDGET=3GiB\nE2E_DISK_RESERVE=3GiB\nE2E_MEMORY_RESERVE=3GiB\nE2E_VM_OVERHEAD=3GiB\nHOST_BASE="+root+"/host/../host\nRESTRICTED_DISK_PATHS="+root+"/host\n")
 
 	loaded, err := Load(LoadOptions{
 		RepositoryRoot: root,
@@ -59,6 +59,14 @@ func TestLoadNamedContext(t *testing.T) {
 	}
 	if loaded.Environment["E2E_VM_CPU"] != "1" {
 		t.Fatalf("yard settings did not override the selected template: %#v", loaded.Environment)
+	}
+	for _, name := range []string{"E2E_DISK_BUDGET", "E2E_CACHE_BUDGET", "E2E_DISK_RESERVE", "E2E_MEMORY_RESERVE", "E2E_VM_OVERHEAD"} {
+		if loaded.Environment[name] != "3GiB" {
+			t.Fatalf("budget override lost: %s", name)
+		}
+		if err := ValidateSetting(ScopeYard, name, "3GiB", false); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if ctx.Paths.HostBase != filepath.Join(root, "host") {
 		t.Fatalf("host base was not normalized: %s", ctx.Paths.HostBase)
@@ -804,6 +812,12 @@ func TestRetiredCodexAssignmentsCannotAffectExportsOrOtherSettings(t *testing.T)
 
 func TestE2EConfigValidation(t *testing.T) {
 	valid := environment{
+		"E2E_DISK_BUDGET":    "160GiB",
+		"E2E_CACHE_BUDGET":   "24GiB",
+		"E2E_DISK_RESERVE":   "5GiB",
+		"E2E_MEMORY_RESERVE": "2GiB",
+		"E2E_VM_OVERHEAD":    "512MiB",
+
 		"E2E_VM_IMAGE": "images:debian/13/cloud", "E2E_VM_CPU": "2",
 		"E2E_VM_MEMORY": "4GiB", "E2E_VM_DISK": "10GiB",
 		"E2E_VM_SLOT_COUNT": "2", "E2E_VM_BOOT_TIMEOUT": "300",
@@ -812,6 +826,12 @@ func TestE2EConfigValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, value := range map[string]string{
+		"E2E_DISK_BUDGET":    "0GiB",
+		"E2E_CACHE_BUDGET":   "0GiB",
+		"E2E_DISK_RESERVE":   "0GiB",
+		"E2E_MEMORY_RESERVE": "0GiB",
+		"E2E_VM_OVERHEAD":    "0GiB",
+
 		"E2E_VM_IMAGE": "-unsafe", "E2E_VM_CPU": "0", "E2E_VM_MEMORY": "4GB",
 		"E2E_VM_DISK": "9GiB", "E2E_VM_SLOT_COUNT": "0", "E2E_VM_BOOT_TIMEOUT": "29",
 	} {
@@ -860,6 +880,12 @@ func TestEngineReexecDoesNotLeakPriorYardContext(t *testing.T) {
 			"HOST_BASE": "/srv/subyard", "YARD_KIND": "container", "SHIFT_MODE": "shift",
 			"FORWARD_SSH_AGENT": "0", "DEV_SUDO": "0", "DEV_UID": "1000",
 			"YARD_TEMPLATE": "stale", "NESTED_E2E_VMS": "1",
+			"E2E_DISK_BUDGET":    "999GiB",
+			"E2E_CACHE_BUDGET":   "999GiB",
+			"E2E_DISK_RESERVE":   "999GiB",
+			"E2E_MEMORY_RESERVE": "999GiB",
+			"E2E_VM_OVERHEAD":    "999GiB",
+
 			"CODING_TOOL_INTEGRATIONS": "unknown-prior-tool", "ALLOWS_CODING_TOOLS": "false",
 		},
 	})
@@ -876,6 +902,12 @@ func TestEngineReexecDoesNotLeakPriorYardContext(t *testing.T) {
 	if ctx.NestedE2EVMs || loaded.Environment["YARD_TEMPLATE"] != "" {
 		t.Fatalf("prior E2E context leaked into named reload: %#v", loaded.Environment)
 	}
+	for name, expected := range map[string]string{"E2E_DISK_BUDGET": "160GiB", "E2E_CACHE_BUDGET": "24GiB", "E2E_DISK_RESERVE": "5GiB", "E2E_MEMORY_RESERVE": "2GiB", "E2E_VM_OVERHEAD": "512MiB"} {
+		if loaded.Environment[name] != expected {
+			t.Fatalf("prior budget leaked: %s", name)
+		}
+	}
+
 }
 
 func TestMultilineAndNestedDefaults(t *testing.T) {

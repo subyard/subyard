@@ -19,7 +19,7 @@ func TestFacadeContractAndRedaction(t *testing.T) {
 	var output bytes.Buffer
 	facade := Facade{Store: store, Output: &output}
 	key := strings.Fields(fixturePublicKey(t))
-	command := "acquire-v2 client SHA256:key default Subyard-2 run-a tests " +
+	command := "acquire-v3 subyard-pair client SHA256:key default Subyard-2 run-a tests " +
 		key[0] + " " + key[1] + " slot-001"
 	if err := facade.Run(command); err != nil {
 		t.Fatal(err)
@@ -90,7 +90,7 @@ func TestFacadeAcquireRequiresExactSlotWithoutMutatingAnyConfiguredPool(t *testi
 	for _, slotCount := range []int{1, 2, 3} {
 		t.Run("slots="+strconv.Itoa(slotCount), func(t *testing.T) {
 			for _, command := range []string{
-				"acquire-v2 client SHA256:key default Subyard-2 run-a tests " + key[0] + " " + key[1],
+				"acquire-v3 subyard-pair client SHA256:key default Subyard-2 run-a tests " + key[0] + " " + key[1],
 			} {
 				name := strings.Fields(command)[0]
 				t.Run(name+"/absent", func(t *testing.T) {
@@ -182,6 +182,61 @@ func TestFacadeRejectsLegacyAcquireWithoutTouchingLeaseState(t *testing.T) {
 	}
 }
 
+func TestFacadeRejectsAndroidOnArmBeforeLeaseMutation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "leases.json")
+	store := LeaseStore{Path: path, SlotCount: 1}
+	initial, err := json.Marshal(LeasePool{
+		SchemaVersion: LeaseSchemaVersion, ResourceType: "agent-e2e", ResourceID: "test-vms",
+		Slots: []LeaseSlot{{SlotID: "slot-001", ResourceGeneration: 1, State: SlotAvailable}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, initial, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := fixtureConfig(t)
+	var output bytes.Buffer
+	provisioned, quarantined := false, false
+	facade := Facade{
+		Store: store, Output: &output,
+		EnvironmentSpec: func(name string) (EnvironmentSpec, error) {
+			return cfg.environmentSpecForArch(name, "arm64")
+		},
+		OnAcquire: func(grant LeaseGrant, _ string) (LeaseGrant, error) {
+			provisioned = true
+			return grant, nil
+		},
+		OnQuarantine: func(LeaseGrant, error) error {
+			quarantined = true
+			return nil
+		},
+	}
+	key := strings.Fields(fixturePublicKey(t))
+	command := "acquire-v3 android-test client SHA256:key default Subyard-2 run-a tests " +
+		key[0] + " " + key[1] + " slot-001"
+	if err := facade.Run(command); err != nil {
+		t.Fatal(err)
+	}
+	var response facadeResponse
+	if err := json.Unmarshal(output.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != "invalid_request" || response.Reason != "unsupported_environment" || response.Grant != nil || provisioned || quarantined {
+		t.Fatalf("unsupported architecture reached provisioning: %s", output.String())
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(initial, after) {
+		t.Fatalf("unsupported architecture changed lease pool: before=%s after=%s", initial, after)
+	}
+	if _, err := os.Stat(path + ".lock"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unsupported architecture touched lease lock: %v", err)
+	}
+}
+
 func assertMissingSlotResponse(t *testing.T, payload []byte) {
 	t.Helper()
 	var response struct {
@@ -210,7 +265,7 @@ func TestFacadeExactSlotAcquireDoesNotFallback(t *testing.T) {
 		},
 	}
 	key := strings.Fields(fixturePublicKey(t))
-	base := "acquire-v2 client SHA256:key default Subyard-2 run-a tests " +
+	base := "acquire-v3 subyard-pair client SHA256:key default Subyard-2 run-a tests " +
 		key[0] + " " + key[1]
 	if err := facade.Run(base + " slot-002"); err != nil {
 		t.Fatal(err)
@@ -343,7 +398,7 @@ func TestFacadeExactUnavailableResponseIsTypedAndRedacted(t *testing.T) {
 			}
 			var output bytes.Buffer
 			facade := Facade{Store: store, Output: &output}
-			command := "acquire-v2 client SHA256:key test-yard Subyard-2 run-b unit-tests " +
+			command := "acquire-v3 subyard-pair client SHA256:key test-yard Subyard-2 run-b unit-tests " +
 				key[0] + " " + key[1] + " slot-002"
 			if err := facade.Run(command); err != nil {
 				t.Fatal(err)
@@ -424,13 +479,13 @@ func TestFacadeAdvertisesAndAcceptsAttributionV2(t *testing.T) {
 	if err := facade.Run("status"); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), `"capabilities":["attribution-v2"]`) {
+	if !strings.Contains(output.String(), `"capabilities":["attribution-v2","environment-acquire-v3","disposable-v1"]`) {
 		t.Fatalf("status omitted attribution capability: %s", output.String())
 	}
 	output.Reset()
 	key := strings.Fields(fixturePublicKey(t))
 	command := strings.Join([]string{
-		"acquire-v2", "client", "SHA256:key", "default", "Subyard-2",
+		"acquire-v3", "subyard-pair", "client", "SHA256:key", "default", "Subyard-2",
 		"run-a", "tests", key[0], key[1], "slot-002",
 	}, " ")
 	if err := facade.Run(command); err != nil {
@@ -467,7 +522,7 @@ func TestFacadeReleaseReplayAndWrongCredentialsReturnLeaseLost(t *testing.T) {
 		},
 	}
 	key := strings.Fields(fixturePublicKey(t))
-	if err := facade.Run("acquire-v2 client SHA256:key default Subyard-2 run-a tests " +
+	if err := facade.Run("acquire-v3 subyard-pair client SHA256:key default Subyard-2 run-a tests " +
 		key[0] + " " + key[1] + " slot-001"); err != nil {
 		t.Fatal(err)
 	}
@@ -521,7 +576,7 @@ func TestFacadeRejectsUnboundedInput(t *testing.T) {
 	output.Reset()
 	key := strings.Fields(fixturePublicKey(t))
 	if err := facade.Run(
-		"acquire-v2 client SHA256:key /home/dev/private Subyard-2 run-a tests " +
+		"acquire-v3 subyard-pair client SHA256:key /home/dev/private Subyard-2 run-a tests " +
 			key[0] + " " + key[1] + " slot-001",
 	); err != nil {
 		t.Fatal(err)

@@ -28,6 +28,13 @@ var (
 )
 
 type Config struct {
+	Environment         *EnvironmentSpec
+	DiskBudget          string
+	CacheBudget         string
+	DiskReserve         string
+	MemoryReserve       string
+	VMOverhead          string
+	RecipeRoot          string
 	Enabled             bool
 	Project             string
 	Network             string
@@ -85,7 +92,13 @@ func ConfigFromValues(values map[string]string) (Config, error) {
 		return Config{}, err
 	}
 	result := Config{
-		Enabled: enabled == "1", Project: value("E2E_VM_PROJECT", "subyard-e2e-vms"),
+		DiskBudget:    value("E2E_DISK_BUDGET", "160GiB"),
+		CacheBudget:   value("E2E_CACHE_BUDGET", "24GiB"),
+		DiskReserve:   value("E2E_DISK_RESERVE", "5GiB"),
+		MemoryReserve: value("E2E_MEMORY_RESERVE", "2GiB"),
+		VMOverhead:    value("E2E_VM_OVERHEAD", "512MiB"),
+		RecipeRoot:    value("E2E_RECIPE_ROOT", "/usr/local/libexec/subyard/e2e-recipes"),
+		Enabled:       enabled == "1", Project: value("E2E_VM_PROJECT", "subyard-e2e-vms"),
 		Network: value("E2E_VM_NETWORK", "incusbr0"),
 		Prefix:  value("E2E_VM_PREFIX", "e2e-vm"), Image: value("E2E_VM_IMAGE", "images:debian/13/cloud"),
 		CPU: cpu, Memory: value("E2E_VM_MEMORY", "4GiB"), Disk: value("E2E_VM_DISK", "20GiB"),
@@ -108,6 +121,13 @@ func ConfigFromValues(values map[string]string) (Config, error) {
 }
 
 func (cfg Config) Validate() error {
+	for _, value := range []string{cfg.DiskBudget, cfg.CacheBudget, cfg.DiskReserve, cfg.MemoryReserve, cfg.VMOverhead} {
+		if value != "" {
+			if _, err := sizeMiB(value); err != nil {
+				return errors.New("invalid test environment budget")
+			}
+		}
+	}
 	if !safeName.MatchString(cfg.Project) {
 		return fmt.Errorf("unsafe E2E_VM_PROJECT %q", cfg.Project)
 	}
@@ -192,11 +212,17 @@ func sizeMiB(value string) (int, error) {
 	if match == nil {
 		return 0, errors.New("invalid size")
 	}
-	number, _ := strconv.Atoi(match[1])
+	number, err := strconv.ParseUint(match[1], 10, 64)
+	if err != nil || number == 0 || number > 1<<30 {
+		return 0, errors.New("size outside supported range")
+	}
 	if match[2] == "GiB" {
 		number *= 1024
 	}
-	return number, nil
+	if number > 1<<30 {
+		return 0, errors.New("size outside supported range")
+	}
+	return int(number), nil
 }
 
 func doubleSize(value string) string {

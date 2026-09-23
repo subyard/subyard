@@ -28,6 +28,11 @@ type Backend struct {
 }
 
 type backendState struct {
+	diskBudget      string
+	cacheBudget     string
+	diskReserve     string
+	memoryReserve   string
+	vmOverhead      string
 	enabled         string
 	cpu             string
 	image           string
@@ -127,6 +132,9 @@ func (backend *Backend) Apply(ctx context.Context) (err error) {
 		"--", "mv", "-f", "--", installCandidate, DefaultInstalledPath); err != nil {
 		return err
 	}
+	if err := backend.installRecipes(ctx); err != nil {
+		return err
+	}
 	downloadHelper, err := os.Open(state.downloadHelper)
 	if err != nil {
 		return err
@@ -137,12 +145,23 @@ func (backend *Backend) Apply(ctx context.Context) (err error) {
 		return err
 	}
 	defer provision.Close()
+	budgetValues := map[string]string{
+		"E2E_DISK_BUDGET":    state.diskBudget,
+		"E2E_CACHE_BUDGET":   state.cacheBudget,
+		"E2E_DISK_RESERVE":   state.diskReserve,
+		"E2E_MEMORY_RESERVE": state.memoryReserve,
+		"E2E_VM_OVERHEAD":    state.vmOverhead,
+	}
 	arguments := []string{"exec", backend.Instance, "--project", backend.Project}
 	for _, name := range []string{
+		"E2E_DISK_BUDGET", "E2E_CACHE_BUDGET", "E2E_DISK_RESERVE", "E2E_MEMORY_RESERVE", "E2E_VM_OVERHEAD",
 		"NESTED_E2E_VMS", "DEV_USER", "E2E_VM_IMAGE", "E2E_VM_CPU", "E2E_VM_MEMORY",
 		"E2E_VM_DISK", "E2E_VM_SLOT_COUNT", "E2E_VM_BOOT_TIMEOUT", "E2E_BROKER_SOURCE",
 	} {
 		value := backend.Environment[name]
+		if value == "" {
+			value = budgetValues[name]
+		}
 		if name == "E2E_BROKER_SOURCE" && value == "" {
 			value = state.brokerSource
 		}
@@ -189,6 +208,12 @@ func (backend *Backend) state() (backendState, error) {
 		return fallback
 	}
 	state := backendState{
+		diskBudget:    value("E2E_DISK_BUDGET", "160GiB"),
+		cacheBudget:   value("E2E_CACHE_BUDGET", "24GiB"),
+		diskReserve:   value("E2E_DISK_RESERVE", "5GiB"),
+		memoryReserve: value("E2E_MEMORY_RESERVE", "2GiB"),
+		vmOverhead:    value("E2E_VM_OVERHEAD", "512MiB"),
+
 		enabled: value("NESTED_E2E_VMS", "0"), cpu: value("E2E_VM_CPU", "4"),
 		image:           value("E2E_VM_IMAGE", "images:debian/13/cloud"),
 		memory:          value("E2E_VM_MEMORY", "4GiB"),
@@ -228,12 +253,16 @@ func (backend *Backend) state() (backendState, error) {
 	if err != nil {
 		return state, err
 	}
+	recipeHash, err := recipeBundleDigest(backend.RepositoryRoot)
+	if err != nil {
+		return state, err
+	}
 	state.engineHash = engineHash
-	revision := sha256.Sum256([]byte(engineHash + "\n" + provisionHash + "\n" + downloadHash + "\n"))
+	revision := sha256.Sum256([]byte(engineHash + "\n" + provisionHash + "\n" + downloadHash + "\n" + recipeHash + "\n"))
 	state.marker = strings.Join([]string{
 		state.enabled, hex.EncodeToString(revision[:]), state.image, state.cpu,
 		state.memory, state.disk, state.slotCount, state.bootTimeout,
-		state.brokerSource,
+		state.brokerSource, state.diskBudget, state.cacheBudget, state.diskReserve, state.memoryReserve, state.vmOverhead,
 	}, ":")
 	return state, nil
 }

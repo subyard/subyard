@@ -89,9 +89,13 @@ func main() {
 				Path: cfg.LeaseStatePath(), SlotCount: cfg.SlotCount,
 			}
 			err = (testvmsruntime.Facade{
-				Store:  store,
-				Output: os.Stdout,
-				Events: events,
+				OnStatus: func(pool testvmsruntime.LeasePool) testvmsruntime.ResourceStatus {
+					return runtime.ResourceStatus(ctx, pool)
+				},
+				EnvironmentSpec: cfg.EnvironmentSpec,
+				Store:           store,
+				Output:          os.Stdout,
+				Events:          events,
 				OnAcquire: func(grant testvmsruntime.LeaseGrant, publicKey string) (
 					testvmsruntime.LeaseGrant, error,
 				) {

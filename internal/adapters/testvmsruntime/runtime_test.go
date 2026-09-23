@@ -419,11 +419,8 @@ func TestEnsureVMRetriesTransientRemoteImageLookup(t *testing.T) {
 	}
 }
 
-func TestAcquireSlotRejectsInsufficientCapacityBeforeMutation(t *testing.T) {
+func TestAcquireSlotRejectsUntypedGrantBeforeMutation(t *testing.T) {
 	runtime := &Runtime{Config: fixtureConfig(t)}
-	runtime.AvailableBytes = func(string) (uint64, error) {
-		return HostReserveBytes + 2*InitialVMHeadroomBytes - 1, nil
-	}
 	var mutations int
 	runtime.Runner = &fakeRunner{handler: func(_ string, arguments, _ []string, _ io.Reader) ([]byte, []byte, error) {
 		joined := strings.Join(arguments, " ")
@@ -439,11 +436,11 @@ func TestAcquireSlotRejectsInsufficientCapacityBeforeMutation(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = runtime.AcquireSlot(context.Background(), store, grant, fixturePublicKey(t))
-	if err == nil || !strings.Contains(err.Error(), "insufficient test-vms pool capacity") {
-		t.Fatalf("capacity error = %v", err)
+	if err == nil || !strings.Contains(err.Error(), "explicit disposable environment is required") {
+		t.Fatalf("untyped acquire error = %v", err)
 	}
 	if mutations != 0 {
-		t.Fatalf("capacity preflight performed %d mutation(s)", mutations)
+		t.Fatalf("untyped acquire performed %d mutation(s)", mutations)
 	}
 }
 
@@ -967,9 +964,9 @@ func TestUnavailableInnerIncusIsNotTreatedAsAnAbsentProject(t *testing.T) {
 		!strings.Contains(err.Error(), "Failed to connect to local daemon") {
 		t.Fatalf("release inventory error = %v", err)
 	}
-	err = runtime.deleteManagedPairForRebuild(context.Background())
+	err = runtime.deleteStoppedLegacyPair(context.Background())
 	if err == nil ||
-		!strings.Contains(err.Error(), "inventory quarantined slot project before delete") {
+		!strings.Contains(err.Error(), "Failed to connect to local daemon") {
 		t.Fatalf("rebuild inventory error = %v", err)
 	}
 	if strings.Contains(callsText(runner.calls), "incus delete ") ||
@@ -1299,7 +1296,7 @@ func TestExistingProjectRejectsUnexpectedInstances(t *testing.T) {
 	}
 }
 
-func TestRecoveryDeletesTheEntireOwnedPairAndRejectsForeignInventory(t *testing.T) {
+func TestLegacyRetirementDeletesStoppedOwnedPairAndRejectsForeignInventory(t *testing.T) {
 	for _, test := range []struct {
 		name        string
 		inventory   string
@@ -1343,12 +1340,17 @@ func TestRecoveryDeletesTheEntireOwnedPairAndRejectsForeignInventory(t *testing.
 				case "project get " + cfg.Project + " user.subyard.managed":
 					return []byte(managedMarker + "\n"), nil, nil
 				case "list --project " + cfg.Project + " -f csv -c n":
+					if deletes == test.wantDeletes && test.wantError == "" {
+						return nil, nil, nil
+					}
 					return []byte(test.inventory), nil, nil
 				case "config get e2e-vm-1 user.subyard.managed --project " + cfg.Project,
 					"config get e2e-vm-2 user.subyard.managed --project " + cfg.Project:
 					return []byte(managedMarker + "\n"), nil, nil
-				case "delete --force e2e-vm-1 --project " + cfg.Project,
-					"delete --force e2e-vm-2 --project " + cfg.Project:
+				case "list e2e-vm-1 --project " + cfg.Project + " -f csv -c s", "list e2e-vm-2 --project " + cfg.Project + " -f csv -c s":
+					return []byte("STOPPED"), nil, nil
+				case "delete e2e-vm-1 --project " + cfg.Project,
+					"delete e2e-vm-2 --project " + cfg.Project:
 					deletes++
 					return nil, nil, nil
 				default:
@@ -1356,7 +1358,7 @@ func TestRecoveryDeletesTheEntireOwnedPairAndRejectsForeignInventory(t *testing.
 				}
 			}}
 			runtime := &Runtime{Config: cfg, Runner: runner}
-			err := runtime.deleteManagedPairForRebuild(context.Background())
+			err := runtime.deleteStoppedLegacyPair(context.Background())
 			if test.wantError != "" {
 				if err == nil || !strings.Contains(err.Error(), test.wantError) {
 					t.Fatalf("foreign inventory error = %v", err)
