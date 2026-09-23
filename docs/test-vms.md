@@ -47,6 +47,9 @@ yard -Y test-yard status
 yard -Y test-yard test-vms status
 ```
 
+`test-vms status` prints JSON with indentation and line breaks. Add `--json` for compact
+machine output; both formats contain the same fields.
+
 A `test-vms` initialization also converges a root-owned physical-host log sink and its one-minute
 timer. The outer yard receives no mount or socket that can write the host log root.
 

@@ -57,7 +57,7 @@ func resolveCoreCommand(definition command.Definition) (coreCommandBehavior, err
 		behavior.shellActions = func(root string) map[string]map[string]shelladapter.Action {
 			path := filepath.Join(root, "scripts/e2e-lab/invoke.sh")
 			return map[string]map[string]shelladapter.Action{"test-vms": {
-				"up": {Path: path, Direct: true}, "status": {Path: path, Direct: true},
+				"up": {Path: path, Direct: true}, "status": {Path: path, Direct: true, Capture: true},
 				"down": {Path: path, Direct: true}, "revoke": {Path: path, Direct: true},
 				"recover": {Path: path, Direct: true},
 				"refresh": {Path: path, Direct: true}, "retire-legacy": {Path: path, Direct: true},

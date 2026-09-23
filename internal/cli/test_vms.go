@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -160,6 +161,7 @@ func (cli *CLI) runTestVMLogs(ctx context.Context, arguments []string) int {
 }
 
 type testVMExecution struct {
+	json           bool
 	environment    string
 	action         string
 	slot           int
@@ -191,6 +193,7 @@ func (cli *CLI) prepareTestVMExecution(
 		return nil, errors.New("nested E2E VMs require a container yard")
 	}
 	action := ""
+	jsonOutput := false
 	environment := ""
 	slot := 0
 	var expectedGeneration, expectedEpoch uint64
@@ -198,6 +201,8 @@ func (cli *CLI) prepareTestVMExecution(
 	for index := 0; index < len(arguments); index++ {
 		argument := arguments[index]
 		switch argument {
+		case "--json":
+			jsonOutput = true
 		case "-y", "--yes":
 		case "-h", "--help":
 			return nil, errors.New("help is not an executable test-vms operation")
@@ -246,6 +251,9 @@ func (cli *CLI) prepareTestVMExecution(
 			action = argument
 		}
 	}
+	if jsonOutput && action != "status" {
+		return nil, errors.New("--json is supported only by test-vms status")
+	}
 	switch action {
 	case "refresh":
 		if environment != testvmsruntime.EnvironmentPair && environment != testvmsruntime.EnvironmentAndroid {
@@ -286,7 +294,7 @@ func (cli *CLI) prepareTestVMExecution(
 			return nil, fmt.Errorf("yard %q must be running", loaded.Context.YardInstanceName)
 		}
 	}
-	execution := &testVMExecution{action: action, slot: slot, environment: environment}
+	execution := &testVMExecution{action: action, slot: slot, environment: environment, json: jsonOutput}
 	if action != "status" && action != "refresh" {
 		slotSnapshot, err := cli.probeTestVMSlot(ctx, loaded, slot)
 		if err != nil {
@@ -533,6 +541,12 @@ func (cli *CLI) executeTestVMs(
 		Context: structuredCommandContext(loaded),
 	}
 	result, stderr, err := orchestrator.RunAdapter(ctx, plan, request, nil)
+	if execution.action == "status" && !execution.json {
+		var formatted bytes.Buffer
+		if json.Indent(&formatted, []byte(stderr), "", "  ") == nil {
+			stderr = formatted.String()
+		}
+	}
 	writeAdapterDiagnostics(diagnostics, stderr)
 	var exitErr *exec.ExitError
 	if err != nil && errors.As(err, &exitErr) &&

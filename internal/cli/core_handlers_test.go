@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -20,6 +21,66 @@ import (
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
+
+func TestTestVMStatusFormatsPublicOutput(t *testing.T) {
+	const payload = `{"status":"ok","pool":{"slots":[{"slot_id":"slot-001","resource_generation":9007199254740993,"state":"available"}]}}`
+	for _, tc := range []struct {
+		name    string
+		json    bool
+		failure bool
+	}{
+		{name: "formatted"},
+		{name: "compact", json: true},
+		{name: "diagnostic", failure: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			environment = append(environment, "NESTED_E2E_VMS=1")
+			incus := lifecycleIncus()
+			instance := incus.Instances["subyard/yard"]
+			instance.Status = "Running"
+			incus.Instances["subyard/yard"] = instance
+			output := payload
+			ending := ""
+			if tc.failure {
+				output = "broker unavailable"
+				ending = "exit 1\n"
+			}
+			path := filepath.Join(root, "scripts", "e2e-lab", "invoke.sh")
+			if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+				t.Fatal(err)
+			}
+			writeCLIFile(t, path, "#!/bin/sh\n[ \"$*\" = status ] || exit 2\nprintf '%s\\n' '"+output+"'\n"+ending, 0755)
+			arguments := []string{"test-vms", "status"}
+			if tc.json {
+				arguments = append(arguments, "--json")
+			}
+			var stdout, stderr bytes.Buffer
+			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments,
+				Environment: environment, WorkingDir: root, Incus: incus, Stdout: &stdout, Stderr: &stderr})
+			if err != nil {
+				t.Fatal(err)
+			}
+			code := program.Run(context.Background())
+			if tc.failure {
+				if code == 0 || !strings.Contains(stdout.String()+stderr.String(), output) {
+					t.Fatalf("lost failure: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+				}
+				return
+			}
+			if code != 0 || stderr.Len() != 0 {
+				t.Fatalf("status: code=%d stderr=%q", code, stderr.String())
+			}
+			var compact bytes.Buffer
+			if err := json.Compact(&compact, stdout.Bytes()); err != nil || compact.String() != payload {
+				t.Fatalf("status data changed: %q (%v)", stdout.String(), err)
+			}
+			if tc.json && stdout.String() != payload+"\n" || !tc.json && !strings.Contains(stdout.String(), "\n  \"pool\": {\n    \"slots\": [") {
+				t.Fatalf("wrong formatting: %q", stdout.String())
+			}
+		})
+	}
+}
 
 func TestTestVMsUsesTypedWorkerInvocation(t *testing.T) {
 	root, environment, _ := nativeFixture(t)

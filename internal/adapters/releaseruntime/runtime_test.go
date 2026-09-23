@@ -110,37 +110,49 @@ func TestCandidateBlockedInspectionCheckReturnsStructuredPublicOutcome(t *testin
 		Direction:     releasetransition.DirectionActivateTarget,
 	}
 
-	t.Run("check", func(t *testing.T) {
-		var stdout, stderr bytes.Buffer
-		runtime := New(Config{Stdout: &stdout, Stderr: &stderr})
-		prepared, err := prepareCandidateTransitionForTest(runtime,
-			context.Background(), options{check: true, root: root}, candidate, request,
-		)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if prepared.Action != "update.check" || prepared.Changed || prepared.RefreshConfigs {
-			t.Fatalf("prepared check = %#v", prepared)
-		}
-		if err := prepared.Execute(context.Background()); err != nil {
-			t.Fatal(err)
-		}
-		var output struct {
-			Outcome *releasetransition.Outcome `json:"outcome"`
-		}
-		if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &output); err != nil {
-			t.Fatalf("check output = %q: %v", stdout.String(), err)
-		}
-		if output.Outcome == nil ||
-			output.Outcome.Status != releasetransition.StatusOperatorActionRequired ||
-			output.Outcome.Code != releasetransition.CodeMigrationStale ||
-			output.Outcome.Active != "release-a" || output.Outcome.Previous == nil ||
-			*output.Outcome.Previous != "release-z" || output.Outcome.Target != "release-b" ||
-			output.Outcome.Transaction == nil || output.Outcome.Retry != "run yard update --check" {
-			t.Fatalf("check public outcome = %#v", output.Outcome)
-		}
-	})
-
+	for _, compact := range []bool{false, true} {
+		t.Run(fmt.Sprintf("check/compact=%t", compact), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			runtime := New(Config{Stdout: &stdout, Stderr: &stderr, Environment: map[string]string{"HOME": root}})
+			arguments := []string{"--check", "--runtime-root", root}
+			if compact {
+				arguments = append(arguments, "--json")
+			}
+			parsed, _, err := runtime.parse(arguments)
+			if err != nil {
+				t.Fatal(err)
+			}
+			prepared, err := prepareCandidateTransitionForTest(runtime,
+				context.Background(), parsed, candidate, request,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if prepared.Action != "update.check" || prepared.Changed || prepared.RefreshConfigs {
+				t.Fatalf("prepared check = %#v", prepared)
+			}
+			if err := prepared.Execute(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(stdout.String(), "\n  \"outcome\": {") == compact {
+				t.Fatalf("wrong formatting: %q", stdout.String())
+			}
+			var output struct {
+				Outcome *releasetransition.Outcome `json:"outcome"`
+			}
+			if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &output); err != nil {
+				t.Fatalf("check output = %q: %v", stdout.String(), err)
+			}
+			if output.Outcome == nil ||
+				output.Outcome.Status != releasetransition.StatusOperatorActionRequired ||
+				output.Outcome.Code != releasetransition.CodeMigrationStale ||
+				output.Outcome.Active != "release-a" || output.Outcome.Previous == nil ||
+				*output.Outcome.Previous != "release-z" || output.Outcome.Target != "release-b" ||
+				output.Outcome.Transaction == nil || output.Outcome.Retry != "run yard update --check" {
+				t.Fatalf("check public outcome = %#v", output.Outcome)
+			}
+		})
+	}
 	t.Run("mutation", func(t *testing.T) {
 		runtime := New(Config{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
 		_, err := prepareCandidateTransitionForTest(runtime,
@@ -178,8 +190,8 @@ func TestCandidateInvalidRegistryOutcomeStaysStructured(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, field := range []string{
-			`"code":"registry-invalid"`, `"active":"release-a"`,
-			`"previous":"release-z"`, `"target":"release-b"`,
+			`"code": "registry-invalid"`, `"active": "release-a"`,
+			`"previous": "release-z"`, `"target": "release-b"`,
 		} {
 			if !strings.Contains(stdout.String(), field) {
 				t.Fatalf("invalid registry check output = %q", stdout.String())
@@ -1217,8 +1229,8 @@ func TestPrepareTransitionCheckOfProtectedRecoveryIsReadOnly(t *testing.T) {
 	if err := prepared.Execute(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(stdout.String(), `"status":"recovering"`) ||
-		!strings.Contains(stdout.String(), `"target":"1.2.3-aaaaaaaaaaaa"`) {
+	if !strings.Contains(stdout.String(), `"status": "recovering"`) ||
+		!strings.Contains(stdout.String(), `"target": "1.2.3-aaaaaaaaaaaa"`) {
 		t.Fatalf("protected recovery check output = %q", stdout.String())
 	}
 	after, err := os.ReadFile(fixture.journalPath)

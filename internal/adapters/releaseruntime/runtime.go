@@ -470,7 +470,7 @@ func (runtime *Runtime) PrepareTransition(
 		var public publicReleaseInspectionError
 		if errors.As(err, &public) {
 			if parsed.check {
-				return runtime.preparePublicInspectionOutcome(public.outcome), nil
+				return runtime.preparePublicInspectionOutcome(parsed, public.outcome), nil
 			}
 			return Prepared{}, transitionOutcomeError(public.outcome)
 		}
@@ -579,7 +579,7 @@ func (runtime *Runtime) PrepareTransition(
 	var public publicReleaseInspectionError
 	if errors.As(err, &public) {
 		if parsed.check {
-			return runtime.preparePublicInspectionOutcome(public.outcome), nil
+			return runtime.preparePublicInspectionOutcome(parsed, public.outcome), nil
 		}
 		return Prepared{}, verifiedPreparationError{
 			cause: transitionOutcomeError(public.outcome), prepared: verifiedPreparation,
@@ -592,7 +592,7 @@ func (runtime *Runtime) PrepareTransition(
 		"install a compatible release, then run yard update --check",
 	)
 	if parsed.check {
-		return runtime.preparePublicInspectionOutcome(outcome), nil
+		return runtime.preparePublicInspectionOutcome(parsed, outcome), nil
 	}
 	return Prepared{}, verifiedPreparationError{
 		cause: transitionOutcomeError(outcome), prepared: verifiedPreparation,
@@ -968,7 +968,7 @@ func (runtime *Runtime) prepareVerifiedTransition(
 			return Prepared{}, fmt.Errorf("candidate returned an inconsistent release outcome: %w", err)
 		}
 		if parsed.check {
-			return runtime.preparePublicInspectionOutcome(*response.Outcome), nil
+			return runtime.preparePublicInspectionOutcome(parsed, *response.Outcome), nil
 		}
 		return Prepared{}, publicReleaseInspectionError{
 			cause: transitionOutcomeError(*response.Outcome), outcome: *response.Outcome,
@@ -1018,7 +1018,7 @@ func (runtime *Runtime) prepareInspectedCandidateTransition(
 			Action: "update.check", Changed: false, Consequences: nil,
 			ActiveLauncher: filepath.Join(parsed.root, "current", "bin", "yard"),
 			run: func(context.Context) error {
-				return json.NewEncoder(runtime.config.Stdout).Encode(inspection)
+				return runtime.writeInspection(parsed, inspection)
 			},
 		}, nil
 	}
@@ -1194,11 +1194,19 @@ func sameProtectedSnapshot(
 		bytes.Equal(left.Payload, right.Payload)
 }
 
-func (runtime *Runtime) preparePublicInspectionOutcome(outcome releasetransition.Outcome) Prepared {
+func (runtime *Runtime) writeInspection(parsed options, value any) error {
+	encoder := json.NewEncoder(runtime.config.Stdout)
+	if !parsed.json {
+		encoder.SetIndent("", "  ")
+	}
+	return encoder.Encode(value)
+}
+
+func (runtime *Runtime) preparePublicInspectionOutcome(parsed options, outcome releasetransition.Outcome) Prepared {
 	return Prepared{
 		Action: "update.check",
 		run: func(context.Context) error {
-			return json.NewEncoder(runtime.config.Stdout).Encode(struct {
+			return runtime.writeInspection(parsed, struct {
 				Outcome releasetransition.Outcome `json:"outcome"`
 			}{Outcome: outcome})
 		},
@@ -1316,12 +1324,12 @@ func transitionOutcomeError(outcome releasetransition.Outcome) error {
 type options struct {
 	expectedLinks                                           *runtimeLinkSnapshot
 	channel, version, root, cache, repository, baseURL, tag string
-	offline, check, rollback, force, versionExplicit        bool
+	offline, check, rollback, force, versionExplicit, json  bool
 }
 
 func (runtime *Runtime) prepareHelp() Prepared {
 	return Prepared{Action: "update.help", run: func(context.Context) error {
-		fmt.Fprintln(runtime.config.Stdout, "Usage: yard update [--check] [--version VERSION] [--offline] [--rollback] [--force]")
+		fmt.Fprintln(runtime.config.Stdout, "Usage: yard update [--check [--json]] [--version VERSION] [--offline] [--rollback] [--force]")
 		return nil
 	}}
 }
@@ -1435,6 +1443,8 @@ func (runtime *Runtime) parse(arguments []string) (options, bool, error) {
 			result.offline = true
 		case "--check":
 			result.check = true
+		case "--json":
+			result.json = true
 		case "--rollback":
 			result.rollback = true
 		case "--force":
@@ -1445,6 +1455,9 @@ func (runtime *Runtime) parse(arguments []string) (options, bool, error) {
 		default:
 			return result, false, fmt.Errorf("unknown option %q", arguments[index])
 		}
+	}
+	if result.json && !result.check {
+		return result, false, errors.New("--json requires --check")
 	}
 	if result.channel != "stable" {
 		return result, false, fmt.Errorf("unsupported channel %q", result.channel)
