@@ -28,7 +28,7 @@ func TestResourceStatusIsReadOnlyAndSeparatesPhysicalUsage(t *testing.T) {
 		}
 	}}
 	rt := Runtime{Config: cfg, Runner: runner, Now: func() time.Time { return now }, cacheProbe: func(context.Context) (CacheUsage, error) {
-		return CacheUsage{ChargedBytes: 1234, Accounting: "conservative-shared-inclusive"}, nil
+		return CacheUsage{Driver: "zfs", ChargedBytes: 1234, Accounting: "conservative-shared-inclusive"}, nil
 	}, usageProbe: func(_ context.Context, _ LeaseSlot, _ string) allocationUsage {
 		return allocationUsage{memory: 3 << 30, disk: 5 << 30, memoryKnown: true, diskKnown: true}
 	}}
@@ -55,7 +55,7 @@ func TestResourceStatusIsReadOnlyAndSeparatesPhysicalUsage(t *testing.T) {
 	}
 	before, _ := os.ReadFile(rt.imageRegistryPath())
 	value := rt.ResourceStatus(context.Background(), LeasePool{Slots: []LeaseSlot{{SlotID: "slot-001", State: SlotHeld, Environment: &spec, Reserved: true, LeaseID: "secret-lease"}}})
-	if value.Storage == nil || value.Storage.Used != 1<<30 || value.Storage.Free != 99<<30 || value.Storage.Driver != "zfs" {
+	if value.Storage == nil || value.Storage.Used != 1<<30 || value.Storage.BudgetUsed != 1<<30 || value.Storage.Free != 99<<30 || value.Storage.Driver != "zfs" {
 		t.Fatalf("incorrect physical pool telemetry: %+v", value.Storage)
 	}
 	if value.Cache == nil || value.Cache.ChargedBytes != 1234 || value.Cache.PhysicalBytes != nil {

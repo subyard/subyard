@@ -27,10 +27,11 @@ type ResourceStatus struct {
 }
 
 type PoolStorageStatus struct {
-	Driver string `json:"driver"`
-	Total  uint64 `json:"physical_total_bytes"`
-	Used   uint64 `json:"physical_used_bytes"`
-	Free   uint64 `json:"physical_free_bytes"`
+	Driver     string `json:"driver"`
+	Total      uint64 `json:"physical_total_bytes"`
+	Used       uint64 `json:"physical_used_bytes"`
+	Free       uint64 `json:"physical_free_bytes"`
+	BudgetUsed uint64 `json:"budget_used_bytes"`
 }
 
 type BuilderResourceStatus struct {
@@ -102,7 +103,7 @@ func (rt *Runtime) ResourceStatus(ctx context.Context, pool LeasePool) ResourceS
 	}
 	storage, err := rt.storageCapacity(ctx)
 	if err == nil {
-		result.Storage = &PoolStorageStatus{Driver: "unknown", Total: storage.Total, Used: storage.Used, Free: storage.Total - storage.Used}
+		result.Storage = &PoolStorageStatus{Driver: "unknown", Total: storage.Total, Used: storage.Used, Free: storage.Total - storage.Used, BudgetUsed: storage.BudgetUsed}
 		body, driverErr := rt.incus(ctx, "query", "/1.0/storage-pools/default")
 		var info struct {
 			Driver string `json:"driver"`

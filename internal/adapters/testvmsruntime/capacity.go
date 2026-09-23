@@ -171,8 +171,9 @@ func budgetBytes(value, fallback string) uint64 {
 }
 
 type StorageCapacity struct {
-	Total uint64 `json:"total_bytes"`
-	Used  uint64 `json:"used_bytes"`
+	Total      uint64 `json:"total_bytes"`
+	Used       uint64 `json:"used_bytes"`
+	BudgetUsed uint64 `json:"budget_used_bytes"`
 }
 
 func (runtime *Runtime) storageCapacity(ctx context.Context) (StorageCapacity, error) {
@@ -192,7 +193,11 @@ func (runtime *Runtime) storageCapacity(ctx context.Context) (StorageCapacity, e
 	if response.Space.Total == 0 || response.Space.Used > response.Space.Total {
 		return StorageCapacity{}, errors.New("invalid pool capacity")
 	}
-	return StorageCapacity{Total: response.Space.Total, Used: response.Space.Used}, nil
+	charged, err := runtime.diskBudgetUsage(ctx, response.Space.Used)
+	if err != nil {
+		return StorageCapacity{}, err
+	}
+	return StorageCapacity{Total: response.Space.Total, Used: response.Space.Used, BudgetUsed: charged}, nil
 }
 
 func environmentCommitment(spec EnvironmentSpec, overhead uint64) (memory, disk uint64) {
@@ -227,7 +232,7 @@ func checkCapacity(memory MemoryCapacity, storage StorageCapacity, ram, disk, ra
 	if disk > free || diskReserve > free-disk {
 		return &CapacityError{"disk", "insufficient storage headroom"}
 	}
-	if storage.Used > diskBudget || disk > diskBudget-storage.Used {
+	if storage.BudgetUsed > diskBudget || disk > diskBudget-storage.BudgetUsed {
 		return &CapacityError{"disk", "broker disk budget exceeded"}
 	}
 	return nil
@@ -286,6 +291,7 @@ func (runtime *Runtime) reserveEnvironment(ctx context.Context, store LeaseStore
 		memory.Available = min(memoryBefore, memory.Available)
 		storage.Total = min(storageBefore.Total, storage.Total)
 		storage.Used = max(storageBefore.Used, storage.Used)
+		storage.BudgetUsed = max(storageBefore.BudgetUsed, storage.BudgetUsed)
 		if err := checkCapacity(memory, storage, ram, disk,
 			budgetBytes(runtime.Config.MemoryReserve, "2GiB"), budgetBytes(runtime.Config.DiskReserve, "5GiB"),
 			budgetBytes(runtime.Config.DiskBudget, "160GiB")); err != nil {

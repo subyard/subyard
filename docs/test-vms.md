@@ -76,6 +76,14 @@ A typed `capacity` refusal identifies `memory` or `disk` and is safe to retry af
 freed. It does not quarantine a healthy slot. Partial provisioning failures are cleaned up and
 recovered automatically after 1, 5 and 15 minutes, then hourly while the slot remains eligible.
 
+Physical headroom is checked against the entire backing filesystem. With the `dir` driver,
+the disk budget instead charges the inner daemon's image cache and allocated blocks in its VM
+and VM-snapshot directories, plus outstanding growth and builder commitments. This includes
+retained and orphan VM disks; unrelated files elsewhere on the backing filesystem do not consume
+the broker budget. Status reports this charge separately as `budget_used_bytes`. For `btrfs`
+and `zfs`, budget accounting retains the conservative whole-pool usage bound. Missing or unsafe
+usage measurements refuse admission; they never waive the budget or physical reserve.
+
 Admission settings use ordinary shipped/shared/host/yard/command configuration precedence and are
 installed by `yard init`. These initial defaults still require workload peak measurements:
 

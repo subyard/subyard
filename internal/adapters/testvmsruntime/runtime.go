@@ -22,6 +22,7 @@ type Runtime struct {
 	memoryProbe      func() (MemoryCapacity, error)
 	usageProbe       func(context.Context, LeaseSlot, string) allocationUsage
 	cacheProbe       func(context.Context) (CacheUsage, error)
+	diskUsageProbe   func(context.Context) (uint64, error)
 	Config           Config
 	ConfigPath       string
 	Runner           CommandRunner

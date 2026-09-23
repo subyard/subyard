@@ -94,11 +94,15 @@ func TestCapacityAdmissionKeepsReservesAndRejectsOverflow(t *testing.T) {
 		ram, disk, mr, dr, budget uint64
 		resource                  string
 	}{
-		{"exact", MemoryCapacity{Available: 10}, StorageCapacity{Total: 30, Used: 10}, 8, 15, 2, 5, 25, ""},
-		{"memory reserve", MemoryCapacity{Available: 10}, StorageCapacity{Total: 30, Used: 10}, 9, 15, 2, 5, 25, "memory"},
-		{"filesystem reserve", MemoryCapacity{Available: 10}, StorageCapacity{Total: 30, Used: 10}, 8, 16, 2, 5, 30, "disk"},
-		{"budget", MemoryCapacity{Available: 10}, StorageCapacity{Total: 30, Used: 10}, 8, 15, 2, 5, 24, "disk"},
-		{"overflow", MemoryCapacity{Available: 10}, StorageCapacity{Total: 30, Used: 10}, ^uint64(0), 15, 2, 5, 25, "memory"},
+		{"exact", MemoryCapacity{Available: 10}, StorageCapacity{Total: 30, Used: 10, BudgetUsed: 10}, 8, 15, 2, 5, 25, ""},
+		{"memory reserve", MemoryCapacity{Available: 10}, StorageCapacity{Total: 30, Used: 10, BudgetUsed: 10}, 9, 15, 2, 5, 25, "memory"},
+		{"filesystem reserve", MemoryCapacity{Available: 10}, StorageCapacity{Total: 30, Used: 10, BudgetUsed: 10}, 8, 16, 2, 5, 30, "disk"},
+		{"budget", MemoryCapacity{Available: 10}, StorageCapacity{Total: 30, Used: 10, BudgetUsed: 10}, 8, 15, 2, 5, 24, "disk"},
+		{"overflow", MemoryCapacity{Available: 10}, StorageCapacity{Total: 30, Used: 10, BudgetUsed: 10}, ^uint64(0), 15, 2, 5, 25, "memory"},
+		{"unrelated backing usage", MemoryCapacity{Available: 10}, StorageCapacity{Total: 472, Used: 125, BudgetUsed: 1}, 8, 40, 2, 5, 160, ""},
+		{"physical headroom still required", MemoryCapacity{Available: 10}, StorageCapacity{Total: 169, Used: 125, BudgetUsed: 1}, 8, 40, 2, 5, 160, "disk"},
+		{"budget already exceeded", MemoryCapacity{Available: 10}, StorageCapacity{Total: 472, Used: 125, BudgetUsed: 161}, 8, 0, 2, 5, 160, "disk"},
+		{"disk overflow", MemoryCapacity{Available: 10}, StorageCapacity{Total: ^uint64(0), BudgetUsed: 1}, 8, ^uint64(0), 2, 5, ^uint64(0), "disk"},
 		{"invalid storage", MemoryCapacity{Available: 10}, StorageCapacity{Total: 9, Used: 10}, 8, 0, 2, 0, 25, "disk"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -146,7 +150,7 @@ func TestConcurrentMixedAdmissionAndRetryAfterRelease(t *testing.T) {
 		}
 		return nil, nil, fmt.Errorf("unexpected mutation: %v", args)
 	}}
-	rt := &Runtime{Config: cfg, Runner: runner, memoryProbe: func() (MemoryCapacity, error) { return MemoryCapacity{Available: 11 << 30}, nil }}
+	rt := &Runtime{Config: cfg, Runner: runner, diskUsageProbe: func(context.Context) (uint64, error) { return 10 << 30, nil }, memoryProbe: func() (MemoryCapacity, error) { return MemoryCapacity{Available: 11 << 30}, nil }}
 	var group sync.WaitGroup
 	results := make([]error, 2)
 	for i := range grants {
@@ -227,7 +231,7 @@ func TestAdmissionCreditsOnlyConfirmedExistingAllocation(t *testing.T) {
 				}
 				return nil, nil, fmt.Errorf("unexpected command: %v", args)
 			}}
-			rt := &Runtime{Config: cfg, Runner: runner, memoryProbe: func() (MemoryCapacity, error) {
+			rt := &Runtime{Config: cfg, Runner: runner, diskUsageProbe: func(context.Context) (uint64, error) { return 40 << 30, nil }, memoryProbe: func() (MemoryCapacity, error) {
 				return MemoryCapacity{Available: 16 << 30}, nil
 			}}
 			var capacity *CapacityError
@@ -253,11 +257,14 @@ func TestAdmissionBoundsFreeSpaceWhenGuestReleasesCreditedUsage(t *testing.T) {
 		builder        bool
 		memory         [2]uint64
 		storageUsed    [2]uint64
+		budgetUsed     [2]uint64
 	}{
-		{"reserve memory", "memory", false, [2]uint64{11 << 30, 18 << 30}, [2]uint64{20 << 30, 20 << 30}},
-		{"reserve disk", "disk", false, [2]uint64{30 << 30, 30 << 30}, [2]uint64{50 << 30, 20 << 30}},
-		{"builder memory", "memory", true, [2]uint64{11 << 30, 18 << 30}, [2]uint64{20 << 30, 20 << 30}},
-		{"builder disk", "disk", true, [2]uint64{30 << 30, 30 << 30}, [2]uint64{50 << 30, 20 << 30}},
+		{"reserve memory", "memory", false, [2]uint64{11 << 30, 18 << 30}, [2]uint64{20 << 30, 20 << 30}, [2]uint64{20 << 30, 20 << 30}},
+		{"reserve disk", "disk", false, [2]uint64{30 << 30, 30 << 30}, [2]uint64{50 << 30, 20 << 30}, [2]uint64{20 << 30, 20 << 30}},
+		{"builder memory", "memory", true, [2]uint64{11 << 30, 18 << 30}, [2]uint64{20 << 30, 20 << 30}, [2]uint64{20 << 30, 20 << 30}},
+		{"builder disk", "disk", true, [2]uint64{30 << 30, 30 << 30}, [2]uint64{50 << 30, 20 << 30}, [2]uint64{20 << 30, 20 << 30}},
+		{"reserve budget", "disk", false, [2]uint64{30 << 30, 30 << 30}, [2]uint64{20 << 30, 20 << 30}, [2]uint64{115 << 30, 85 << 30}},
+		{"builder budget", "disk", true, [2]uint64{30 << 30, 30 << 30}, [2]uint64{20 << 30, 20 << 30}, [2]uint64{115 << 30, 85 << 30}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			cfg := fixtureConfig(t)
@@ -283,7 +290,7 @@ func TestAdmissionBoundsFreeSpaceWhenGuestReleasesCreditedUsage(t *testing.T) {
 				}
 			}
 			memoryReads, storageReads := 0, 0
-			rt := &Runtime{Config: cfg, cacheProbe: func(context.Context) (CacheUsage, error) { return CacheUsage{}, nil },
+			rt := &Runtime{Config: cfg, diskUsageProbe: func(context.Context) (uint64, error) { return test.budgetUsed[min(storageReads-1, 1)], nil }, cacheProbe: func(context.Context) (CacheUsage, error) { return CacheUsage{}, nil },
 				memoryProbe: func() (MemoryCapacity, error) {
 					index := min(memoryReads, 1)
 					memoryReads++

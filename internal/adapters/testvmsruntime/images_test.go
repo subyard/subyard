@@ -301,9 +301,9 @@ func TestBuilderAdmissionUsesSequentialPeakAndKeepsOtherReservations(t *testing.
 	if err := store.mutateOwned(grant, func(slot *LeaseSlot, _ time.Time) error { slot.Reserved = true; return nil }); err != nil {
 		t.Fatal(err)
 	}
-	runtime := Runtime{Config: cfg, cacheProbe: func(context.Context) (CacheUsage, error) { return CacheUsage{}, nil }, memoryProbe: func() (MemoryCapacity, error) { return MemoryCapacity{Available: 256 << 30}, nil }, Runner: &fakeRunner{handler: func(_ string, args, _ []string, _ io.Reader) ([]byte, []byte, error) {
+	runtime := Runtime{Config: cfg, diskUsageProbe: func(context.Context) (uint64, error) { return 10 << 30, nil }, cacheProbe: func(context.Context) (CacheUsage, error) { return CacheUsage{}, nil }, memoryProbe: func() (MemoryCapacity, error) { return MemoryCapacity{Available: 256 << 30}, nil }, Runner: &fakeRunner{handler: func(_ string, args, _ []string, _ io.Reader) ([]byte, []byte, error) {
 		if strings.Join(args, " ") == "query /1.0/storage-pools/default/resources" {
-			return []byte(`{"space":{"total":171798691840,"used":10737418240}}`), nil, nil
+			return []byte(`{"space":{"total":507085107200,"used":133920153600}}`), nil, nil
 		}
 		return nil, nil, errors.New("unexpected command")
 	}}}
@@ -371,7 +371,7 @@ func TestWarmAcquireRechecksUpstreamFingerprint(t *testing.T) {
 			}
 			now := time.Now()
 			oldUpstream, newUpstream := strings.Repeat("a", 64), strings.Repeat("b", 64)
-			runtime := Runtime{Config: cfg, Now: func() time.Time { return now }, memoryProbe: func() (MemoryCapacity, error) { return MemoryCapacity{Available: 256 << 30}, nil }, cacheProbe: func(context.Context) (CacheUsage, error) { return CacheUsage{}, nil }}
+			runtime := Runtime{Config: cfg, diskUsageProbe: func(context.Context) (uint64, error) { return 10 << 30, nil }, Now: func() time.Time { return now }, memoryProbe: func() (MemoryCapacity, error) { return MemoryCapacity{Available: 256 << 30}, nil }, cacheProbe: func(context.Context) (CacheUsage, error) { return CacheUsage{}, nil }}
 			recipe, err := runtime.recipeDigest(EnvironmentPair)
 			if err != nil {
 				t.Fatal(err)
