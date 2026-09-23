@@ -92,7 +92,7 @@ func ConfigFromValues(values map[string]string) (Config, error) {
 		return Config{}, err
 	}
 	result := Config{
-		DiskBudget:    value("E2E_DISK_BUDGET", "160GiB"),
+		DiskBudget:    value("E2E_DISK_BUDGET", "0GiB"),
 		CacheBudget:   value("E2E_CACHE_BUDGET", "24GiB"),
 		DiskReserve:   value("E2E_DISK_RESERVE", "5GiB"),
 		MemoryReserve: value("E2E_MEMORY_RESERVE", "2GiB"),
@@ -121,7 +121,10 @@ func ConfigFromValues(values map[string]string) (Config, error) {
 }
 
 func (cfg Config) Validate() error {
-	for _, value := range []string{cfg.DiskBudget, cfg.CacheBudget, cfg.DiskReserve, cfg.MemoryReserve, cfg.VMOverhead} {
+	for index, value := range []string{cfg.DiskBudget, cfg.CacheBudget, cfg.DiskReserve, cfg.MemoryReserve, cfg.VMOverhead} {
+		if index == 0 && value == "0GiB" {
+			continue
+		}
 		if value != "" {
 			if _, err := sizeMiB(value); err != nil {
 				return errors.New("invalid test environment budget")

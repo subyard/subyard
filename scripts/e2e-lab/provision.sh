@@ -430,7 +430,7 @@ EOF
 [ "$(id -u)" = 0 ] || { printf 'test-vms provision requires root inside the yard\n' >&2; exit 1; }
 : "${NESTED_E2E_VMS:=0}"
 : "${DEV_USER:=dev}"
-: "${E2E_DISK_BUDGET:=160GiB}"
+: "${E2E_DISK_BUDGET:=0GiB}"
 : "${E2E_CACHE_BUDGET:=24GiB}"
 : "${E2E_DISK_RESERVE:=5GiB}"
 : "${E2E_MEMORY_RESERVE:=2GiB}"
@@ -454,6 +454,7 @@ case "$NESTED_E2E_VMS" in 0 | 1) ;; *) printf 'invalid NESTED_E2E_VMS\n' >&2; ex
 [[ "$E2E_VM_MEMORY" =~ ^[1-9][0-9]*(MiB|GiB)$ ]] || { printf 'invalid E2E_VM_MEMORY\n' >&2; exit 1; }
 [[ "$E2E_VM_DISK" =~ ^[1-9][0-9]*(MiB|GiB)$ ]] || { printf 'invalid E2E_VM_DISK\n' >&2; exit 1; }
 for e2e_budget_name in E2E_DISK_BUDGET E2E_CACHE_BUDGET E2E_DISK_RESERVE E2E_MEMORY_RESERVE E2E_VM_OVERHEAD; do
+  if [ "$e2e_budget_name" = E2E_DISK_BUDGET ] && [ "${!e2e_budget_name}" = 0GiB ]; then continue; fi
   [[ "${!e2e_budget_name}" =~ ^[1-9][0-9]*(MiB|GiB)$ ]] \
     || { printf 'invalid %s\n' "$e2e_budget_name" >&2; exit 1; }
 done

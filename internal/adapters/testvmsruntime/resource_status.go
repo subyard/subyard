@@ -89,7 +89,7 @@ func (rt *Runtime) ResourceStatus(ctx context.Context, pool LeasePool) ResourceS
 		now = rt.Now()
 	}
 	result := ResourceStatus{OuterHostEvidence: "unavailable: allocation boundary", WorkingDiskEvidence: "unknown", Slots: []SlotResourceStatus{}, Bases: []BaseResourceStatus{}, Budgets: map[string]uint64{
-		"disk_bytes":           budgetBytes(rt.Config.DiskBudget, "160GiB"),
+		"disk_bytes":           budgetBytes(rt.Config.DiskBudget, "0GiB"),
 		"cache_bytes":          budgetBytes(rt.Config.CacheBudget, "24GiB"),
 		"disk_reserve_bytes":   budgetBytes(rt.Config.DiskReserve, "5GiB"),
 		"memory_reserve_bytes": budgetBytes(rt.Config.MemoryReserve, "2GiB"),

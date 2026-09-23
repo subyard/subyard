@@ -455,6 +455,9 @@ func validateSettingValue(definition SettingDefinition, value string) error {
 			return fmt.Errorf("must be in range %d..%d", definition.Minimum, definition.Maximum)
 		}
 	case SettingSize:
+		if definition.Name == "E2E_DISK_BUDGET" && value == "0GiB" {
+			return nil
+		}
 		if err := validateSize(value); err != nil {
 			return err
 		}

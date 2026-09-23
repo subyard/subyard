@@ -100,10 +100,6 @@ chmod 0700 "$TMP/bin/systemctl"
 . "$ROOT/dev/e2e/lib-p0-capacity.sh"
 
 p0_capacity_init 123
-P0_E2E_MIN_ROOT_AVAILABLE_BYTES=1 \
-P0_E2E_MIN_AVAILABLE_INODES=1 \
-P0_E2E_MIN_TMP_SIZE_BYTES=1 \
-P0_E2E_MIN_TMP_AVAILABLE_BYTES=1 \
   p0_capacity_preflight >/dev/null
 grep -Fxq '120 incus storage show default --project default' "$P0_FAKE_TIMEOUT_LOG" \
   || fail "P0 Incus cold-start query is not bounded at 120 seconds"
@@ -113,6 +109,12 @@ grep -Fxq '120 incus storage show default --project default' "$P0_FAKE_TIMEOUT_L
   || fail "P0 module cache is not the reusable Go cache"
 [ "$(cat "$GOCACHE/.subyard-p0-marker")" = subyard-p0-123 ] \
   || fail "P0 build cache is not marker-owned"
+
+# Tiny observed space is diagnostic; only the broker decides VM disk admission.
+(
+  df() { printf 'Available\n1\n'; }
+  p0_capacity_preflight >/dev/null
+) || fail "P0 applied its own disk admission threshold"
 
 install -d -m 0755 "$P0_CAPACITY_MODULE_CACHE/cache/download"
 printf 'module\n' > "$P0_CAPACITY_MODULE_CACHE/cache/download/fixture"
@@ -129,10 +131,6 @@ export P0_FAKE_TIMEOUT_FAIL_ONCE=1
 export P0_FAKE_TIMEOUT_FAIL_MARKER="$TMP/timeout-failed-once"
 p0_capacity_init 135
 if ! SUBYARD_E2E_VM=2 \
-  P0_E2E_MIN_ROOT_AVAILABLE_BYTES=1 \
-  P0_E2E_MIN_AVAILABLE_INODES=1 \
-  P0_E2E_MIN_TMP_SIZE_BYTES=1 \
-  P0_E2E_MIN_TMP_AVAILABLE_BYTES=1 \
   p0_capacity_preflight >/dev/null; then
   fail "P0 Incus cold-start query did not recover after one timeout"
 fi
@@ -303,10 +301,6 @@ run_recovery_preflight() {
     "$source" > "$P0_FAKE_INCUS_STATE"
   : > "$P0_FAKE_INCUS_LOG"
   SUBYARD_E2E_VM=1 \
-  P0_E2E_MIN_ROOT_AVAILABLE_BYTES=1 \
-  P0_E2E_MIN_AVAILABLE_INODES=1 \
-  P0_E2E_MIN_TMP_SIZE_BYTES=1 \
-  P0_E2E_MIN_TMP_AVAILABLE_BYTES=1 \
     bash "$ROOT/dev/e2e/p0-guest.sh" capacity-preflight "$token" >/dev/null
   grep -Fxq 'storage delete default --project default' "$P0_FAKE_INCUS_LOG" \
     || fail "stale test pool at $source was not deleted"
@@ -336,10 +330,6 @@ printf 'config:\n  source: %s\nstatus: Unavailable\nused_by: []\n' \
 : > "$P0_FAKE_INCUS_LOG"
 set +e
 SUBYARD_E2E_VM=1 \
-P0_E2E_MIN_ROOT_AVAILABLE_BYTES=1 \
-P0_E2E_MIN_AVAILABLE_INODES=1 \
-P0_E2E_MIN_TMP_SIZE_BYTES=1 \
-P0_E2E_MIN_TMP_AVAILABLE_BYTES=1 \
   bash "$ROOT/dev/e2e/p0-guest.sh" capacity-preflight 137 >/dev/null 2>&1
 current_missing_pool_rc=$?
 set -e
@@ -360,10 +350,6 @@ printf 'config:\n  source: %s\nstatus: Created\nused_by: []\n' \
 : > "$P0_FAKE_INCUS_LOG"
 set +e
 SUBYARD_E2E_VM=1 \
-P0_E2E_MIN_ROOT_AVAILABLE_BYTES=1 \
-P0_E2E_MIN_AVAILABLE_INODES=1 \
-P0_E2E_MIN_TMP_SIZE_BYTES=1 \
-P0_E2E_MIN_TMP_AVAILABLE_BYTES=1 \
   bash "$ROOT/dev/e2e/p0-guest.sh" capacity-preflight 138 >/dev/null 2>&1
 current_existing_pool_rc=$?
 set -e
@@ -383,10 +369,6 @@ printf 'config:\n  source: %s\nstatus: Unavailable\nused_by: []\n' \
   "$existing_source" > "$P0_FAKE_INCUS_STATE"
 : > "$P0_FAKE_INCUS_LOG"
 SUBYARD_E2E_VM=1 \
-P0_E2E_MIN_ROOT_AVAILABLE_BYTES=1 \
-P0_E2E_MIN_AVAILABLE_INODES=1 \
-P0_E2E_MIN_TMP_SIZE_BYTES=1 \
-P0_E2E_MIN_TMP_AVAILABLE_BYTES=1 \
   bash "$ROOT/dev/e2e/p0-guest.sh" capacity-preflight 129 >/dev/null
 [ ! -s "$P0_FAKE_INCUS_LOG" ] || fail "pool with an existing source caused cleanup mutations"
 [ -e "$P0_FAKE_INCUS_STATE" ] || fail "pool with an existing source was deleted"
@@ -414,10 +396,6 @@ assert_unsafe_active_residue() {
   : > "$P0_FAKE_INCUS_LOG"
   : > "$P0_FAKE_INCUS_PROJECT"
   if SUBYARD_E2E_VM=1 \
-    P0_E2E_MIN_ROOT_AVAILABLE_BYTES=1 \
-    P0_E2E_MIN_AVAILABLE_INODES=1 \
-    P0_E2E_MIN_TMP_SIZE_BYTES=1 \
-    P0_E2E_MIN_TMP_AVAILABLE_BYTES=1 \
       bash "$ROOT/dev/e2e/p0-guest.sh" capacity-preflight "$token" >/dev/null 2>&1; then
     fail "$expected_message was accepted"
   fi
@@ -470,10 +448,6 @@ export P0_FAKE_INCUS_MARKER=subyard-p0-114
 write_active_pool_state "$existing_stale_pool_root" Created
 : > "$P0_FAKE_INCUS_LOG"
 if ! SUBYARD_E2E_VM=1 \
-  P0_E2E_MIN_ROOT_AVAILABLE_BYTES=1 \
-  P0_E2E_MIN_AVAILABLE_INODES=1 \
-  P0_E2E_MIN_TMP_SIZE_BYTES=1 \
-  P0_E2E_MIN_TMP_AVAILABLE_BYTES=1 \
     bash "$ROOT/dev/e2e/p0-guest.sh" capacity-preflight 136 >/dev/null; then
   fail "marker-owned stale P0 pool with an existing source did not converge"
 fi
@@ -502,10 +476,6 @@ export P0_FAKE_INCUS_MARKER=
 write_active_pool_state "$markerless_migrated_root" Created
 : > "$P0_FAKE_INCUS_LOG"
 if ! SUBYARD_E2E_VM=1 \
-  P0_E2E_MIN_ROOT_AVAILABLE_BYTES=1 \
-  P0_E2E_MIN_AVAILABLE_INODES=1 \
-  P0_E2E_MIN_TMP_SIZE_BYTES=1 \
-  P0_E2E_MIN_TMP_AVAILABLE_BYTES=1 \
     bash "$ROOT/dev/e2e/p0-guest.sh" capacity-preflight 139 >/dev/null; then
   fail "exact markerless migrated P0 project did not converge"
 fi
@@ -527,10 +497,6 @@ printf '# %s\nYARD_TEMPLATE=test-vms\n' subyard-p0-999 \
 write_active_pool_state "$unbound_markerless_root" Created
 : > "$P0_FAKE_INCUS_LOG"
 if SUBYARD_E2E_VM=1 \
-  P0_E2E_MIN_ROOT_AVAILABLE_BYTES=1 \
-  P0_E2E_MIN_AVAILABLE_INODES=1 \
-  P0_E2E_MIN_TMP_SIZE_BYTES=1 \
-  P0_E2E_MIN_TMP_AVAILABLE_BYTES=1 \
     bash "$ROOT/dev/e2e/p0-guest.sh" capacity-preflight 140 >/dev/null 2>&1; then
   fail "markerless project with a foreign migration marker was recovered"
 fi
@@ -556,10 +522,6 @@ export P0_FAKE_INCUS_TEST_VMS_REVISION=foreign-revision
 write_active_pool_state "$unsafe_markerless_root" Created
 : > "$P0_FAKE_INCUS_LOG"
 if SUBYARD_E2E_VM=1 \
-  P0_E2E_MIN_ROOT_AVAILABLE_BYTES=1 \
-  P0_E2E_MIN_AVAILABLE_INODES=1 \
-  P0_E2E_MIN_TMP_SIZE_BYTES=1 \
-  P0_E2E_MIN_TMP_AVAILABLE_BYTES=1 \
     bash "$ROOT/dev/e2e/p0-guest.sh" capacity-preflight 141 >/dev/null 2>&1; then
   fail "markerless project with a foreign broker revision was recovered"
 fi
@@ -588,10 +550,6 @@ export P0_FAKE_INCUS_MARKER=subyard-p0-120
 write_active_pool_state "$active_stale_root" Unavailable
 : > "$P0_FAKE_INCUS_LOG"
 if ! SUBYARD_E2E_VM=1 \
-  P0_E2E_MIN_ROOT_AVAILABLE_BYTES=1 \
-  P0_E2E_MIN_AVAILABLE_INODES=1 \
-  P0_E2E_MIN_TMP_SIZE_BYTES=1 \
-  P0_E2E_MIN_TMP_AVAILABLE_BYTES=1 \
     bash "$ROOT/dev/e2e/p0-guest.sh" capacity-preflight 127 >/dev/null; then
   fail "marker-owned active P0 residue did not converge"
 fi
@@ -612,10 +570,6 @@ export P0_FAKE_INCUS_MARKER=subyard-p0-119
 write_active_pool_state "$online_stale_root" Created
 : > "$P0_FAKE_INCUS_LOG"
 if SUBYARD_E2E_VM=1 \
-  P0_E2E_MIN_ROOT_AVAILABLE_BYTES=1 \
-  P0_E2E_MIN_AVAILABLE_INODES=1 \
-  P0_E2E_MIN_TMP_SIZE_BYTES=1 \
-  P0_E2E_MIN_TMP_AVAILABLE_BYTES=1 \
     bash "$ROOT/dev/e2e/p0-guest.sh" capacity-preflight 128 >/dev/null 2>&1; then
   fail "available P0 pool was recovered as stale"
 fi
@@ -632,10 +586,6 @@ printf 'config:\n  source: %s\nstatus: Unavailable\nused_by: []\n' \
   "$foreign_source" > "$P0_FAKE_INCUS_STATE"
 : > "$P0_FAKE_INCUS_LOG"
 if SUBYARD_E2E_VM=1 \
-  P0_E2E_MIN_ROOT_AVAILABLE_BYTES=1 \
-  P0_E2E_MIN_AVAILABLE_INODES=1 \
-  P0_E2E_MIN_TMP_SIZE_BYTES=1 \
-  P0_E2E_MIN_TMP_AVAILABLE_BYTES=1 \
     bash "$ROOT/dev/e2e/p0-guest.sh" capacity-preflight 126 >/dev/null 2>&1; then
   fail "foreign unavailable pool passed capacity preflight"
 fi

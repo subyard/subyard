@@ -1221,10 +1221,16 @@ func TestReconcilePoolRetriesPhysicalShrinkAndRejectsForeignNetwork(t *testing.T
 
 func TestConfigRejectsUnsafeRuntimeValues(t *testing.T) {
 	base := map[string]string{"NESTED_E2E_VMS": "1"}
-	if _, err := ConfigFromValues(base); err != nil {
+	if cfg, err := ConfigFromValues(base); err != nil || cfg.DiskBudget != "0GiB" {
 		t.Fatal(err)
 	}
+	for _, value := range []string{"0GiB", "160GiB"} {
+		if cfg, err := ConfigFromValues(map[string]string{"E2E_DISK_BUDGET": value}); err != nil || cfg.DiskBudget != value {
+			t.Fatalf("disk quota %q: %v", value, err)
+		}
+	}
 	for name, value := range map[string]string{
+		"E2E_DISK_BUDGET": "-1GiB", "E2E_CACHE_BUDGET": "0GiB", "E2E_DISK_RESERVE": "0GiB",
 		"E2E_VM_PROJECT": "../foreign", "E2E_VM_CPU": "0",
 		"E2E_VM_DISK": "9GiB", "E2E_VM_SLOT_COUNT": "0",
 		"E2E_VM_BOOT_TIMEOUT": "1801", "E2E_AGENT_HOME": "/home/dev",

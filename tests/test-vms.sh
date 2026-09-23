@@ -98,7 +98,10 @@ for expected in E2E_DISK_BUDGET=120GiB E2E_CACHE_BUDGET=20GiB E2E_DISK_RESERVE=6
   grep -Fxq "$expected" <<<"$config_result" \
     || fail "provisioning lost a configured budget: $expected"
 done
-for budget_name in E2E_DISK_BUDGET E2E_CACHE_BUDGET E2E_DISK_RESERVE E2E_MEMORY_RESERVE E2E_VM_OVERHEAD; do
+config_result="$(E2E_DISK_BUDGET=0GiB bash "$provision_config_fixture")"
+grep -Fxq E2E_DISK_BUDGET=0GiB <<<"$config_result" \
+  || fail "provisioning lost the unlimited disk quota"
+for budget_name in E2E_CACHE_BUDGET E2E_DISK_RESERVE E2E_MEMORY_RESERVE E2E_VM_OVERHEAD; do
   if env "$budget_name=0GiB" bash "$provision_config_fixture" >/dev/null 2>&1; then
     fail "provisioning accepted invalid budget $budget_name"
   fi

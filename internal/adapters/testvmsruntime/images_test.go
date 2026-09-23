@@ -288,6 +288,7 @@ func TestRecipeRequestKeepsItsResolvedGeneration(t *testing.T) {
 
 func TestBuilderAdmissionUsesSequentialPeakAndKeepsOtherReservations(t *testing.T) {
 	cfg := fixtureConfig(t)
+	cfg.DiskBudget = "160GiB"
 	cfg.Memory, cfg.Disk = "4GiB", "20GiB"
 	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 2}
 	spec, err := cfg.environmentSpecForArch(EnvironmentAndroid, "amd64")
@@ -321,6 +322,13 @@ func TestBuilderAdmissionUsesSequentialPeakAndKeepsOtherReservations(t *testing.
 	var capacity *CapacityError
 	if err := runtime.admitBuild(context.Background(), store, grant, 9<<30, 120<<30, &registry); !errors.As(err, &capacity) || capacity.Resource != "disk" {
 		t.Fatalf("builder ignored another held legacy pair: %v", err)
+	}
+	runtime.Config.DiskBudget = "0GiB"
+	if err := runtime.admitBuild(context.Background(), store, grant, 9<<30, 120<<30, &registry); err != nil {
+		t.Fatalf("unlimited quota rejected sufficient physical space: %v", err)
+	}
+	if err := runtime.admitBuild(context.Background(), store, grant, 9<<30, 340<<30, &registry); !errors.As(err, &capacity) || capacity.Resource != "disk" {
+		t.Fatalf("unlimited quota ignored held pair growth and physical reserve: %v", err)
 	}
 	stale := grant
 	stale.LeaseEpoch++

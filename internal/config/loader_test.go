@@ -825,8 +825,15 @@ func TestE2EConfigValidation(t *testing.T) {
 	if err := validateE2EConfig(valid); err != nil {
 		t.Fatal(err)
 	}
+	valid["E2E_DISK_BUDGET"] = "0GiB"
+	if err := validateE2EConfig(valid); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateSetting(ScopeYard, "E2E_DISK_BUDGET", "0GiB", false); err != nil {
+		t.Fatal(err)
+	}
 	for name, value := range map[string]string{
-		"E2E_DISK_BUDGET":    "0GiB",
+		"E2E_DISK_BUDGET":    "-1GiB",
 		"E2E_CACHE_BUDGET":   "0GiB",
 		"E2E_DISK_RESERVE":   "0GiB",
 		"E2E_MEMORY_RESERVE": "0GiB",
@@ -902,7 +909,7 @@ func TestEngineReexecDoesNotLeakPriorYardContext(t *testing.T) {
 	if ctx.NestedE2EVMs || loaded.Environment["YARD_TEMPLATE"] != "" {
 		t.Fatalf("prior E2E context leaked into named reload: %#v", loaded.Environment)
 	}
-	for name, expected := range map[string]string{"E2E_DISK_BUDGET": "160GiB", "E2E_CACHE_BUDGET": "24GiB", "E2E_DISK_RESERVE": "5GiB", "E2E_MEMORY_RESERVE": "2GiB", "E2E_VM_OVERHEAD": "512MiB"} {
+	for name, expected := range map[string]string{"E2E_DISK_BUDGET": "0GiB", "E2E_CACHE_BUDGET": "24GiB", "E2E_DISK_RESERVE": "5GiB", "E2E_MEMORY_RESERVE": "2GiB", "E2E_VM_OVERHEAD": "512MiB"} {
 		if loaded.Environment[name] != expected {
 			t.Fatalf("prior budget leaked: %s", name)
 		}

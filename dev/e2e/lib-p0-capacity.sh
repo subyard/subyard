@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared storage layout, capacity checks and guarded cleanup for the two-VM P0 lane.
+# Shared storage layout, capacity diagnostics and guarded cleanup for the two-VM P0 lane.
 
 p0_capacity_die() {
   printf 'p0-capacity: %s\n' "$*" >&2
@@ -327,10 +327,6 @@ p0_capacity_query_default_pool() {
 p0_capacity_preflight() {
   local root_available inode_available tmp_size tmp_available pool_source='' stale=''
   local pool_state='' pool_rc query_timeout="${P0_E2E_INCUS_QUERY_TIMEOUT:-120}"
-  local min_root="${P0_E2E_MIN_ROOT_AVAILABLE_BYTES:-3221225472}"
-  local min_inodes="${P0_E2E_MIN_AVAILABLE_INODES:-100000}"
-  local min_tmp_size="${P0_E2E_MIN_TMP_SIZE_BYTES:-536870912}"
-  local min_tmp_available="${P0_E2E_MIN_TMP_AVAILABLE_BYTES:-268435456}"
 
   p0_capacity_recover_stale_roots || return
   p0_capacity_reset_build_cache || return
@@ -366,20 +362,8 @@ p0_capacity_preflight() {
   inode_available="$(df --output=iavail "$P0_CAPACITY_STATE_ROOT" | awk 'NR==2 {print $1}')"
   tmp_size="$(df -B1 --output=size /tmp | awk 'NR==2 {print $1}')"
   tmp_available="$(df -B1 --output=avail /tmp | awk 'NR==2 {print $1}')"
-  [[ "$root_available" =~ ^[0-9]+$ ]] && [ "$root_available" -ge "$min_root" ] \
-    || p0_capacity_die "root filesystem needs at least $min_root available bytes; have ${root_available:-unknown}" \
-    || return
-  [[ "$inode_available" =~ ^[0-9]+$ ]] && [ "$inode_available" -ge "$min_inodes" ] \
-    || p0_capacity_die "root filesystem needs at least $min_inodes available inodes; have ${inode_available:-unknown}" \
-    || return
-  [[ "$tmp_size" =~ ^[0-9]+$ ]] && [ "$tmp_size" -ge "$min_tmp_size" ] \
-    || p0_capacity_die "/tmp needs at least $min_tmp_size total bytes; have ${tmp_size:-unknown}" \
-    || return
-  [[ "$tmp_available" =~ ^[0-9]+$ ]] && [ "$tmp_available" -ge "$min_tmp_available" ] \
-    || p0_capacity_die "/tmp needs at least $min_tmp_available available bytes; have ${tmp_available:-unknown}" \
-    || return
-
-  printf '  [ ok ] capacity reserve root_available=%s inodes_available=%s tmp_size=%s tmp_available=%s\n' \
+  # The broker owns disk admission; these samples are diagnostics only.
+  printf '  [ ok ] capacity sample root_available=%s inodes_available=%s tmp_size=%s tmp_available=%s\n' \
     "$root_available" "$inode_available" "$tmp_size" "$tmp_available"
   printf '  [ ok ] Go caches disposable_build=%s reusable_modules=%s default_build_before=%s\n' \
     "$(p0_capacity_cache_bytes "$P0_CAPACITY_BUILD_CACHE")" \

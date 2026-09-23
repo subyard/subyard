@@ -577,7 +577,6 @@ start_capacity_monitors() {
 
 capacity_report() {
   local vm log report root_used root_available inode_used tmp_used memory_used memory_available
-  local min_root_available="${P0_E2E_MIN_PEAK_ROOT_RESERVE_BYTES:-1073741824}"
   local min_memory_available="${P0_E2E_MIN_PEAK_MEMORY_RESERVE_BYTES:-268435456}"
   stop_capacity_monitors
   for vm in 1 2; do
@@ -598,8 +597,6 @@ capacity_report() {
     ' "$log")"
     [ -n "$report" ] || die "VM$vm capacity monitor recorded no samples"
     read -r root_used root_available inode_used tmp_used memory_used memory_available <<<"$report"
-    [ "$root_available" -ge "$min_root_available" ] \
-      || die "VM$vm peak root reserve fell below $min_root_available bytes: $root_available"
     [ "$memory_available" -ge "$min_memory_available" ] \
       || die "VM$vm peak memory reserve fell below $min_memory_available bytes: $memory_available"
     printf '  [ ok ] VM%s measured peak root_used=%s root_reserve=%s inode_used=%s tmp_used=%s memory_used=%s memory_reserve=%s\n' \

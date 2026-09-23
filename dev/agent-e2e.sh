@@ -491,7 +491,7 @@ render_pool_status() {
     select(.resources != null) | .resources |
     "Memory: available=\(.memory.available_bytes // "unknown") reserved=\(.reserved_vm_memory_bytes) bytes; L0=\(.outer_host_evidence)",
     "Storage: driver=\(.storage.driver // "unknown") physical_used=\(.storage.physical_used_bytes // "unknown") physical_free=\(.storage.physical_free_bytes // "unknown") virtual_reserved=\(.reserved_vm_virtual_disk_bytes) bytes",
-    "Budgets: disk=\(.budgets.disk_bytes) cache=\(.budgets.cache_bytes) bytes",
+    "Budgets: disk=\(if .budgets.disk_bytes == 0 then "unlimited" else (.budgets.disk_bytes | tostring) end) cache=\(.budgets.cache_bytes) bytes",
     (.bases[] | "Base: type=\(.type) fingerprint=\(.fingerprint) age=\(.age_seconds)s current=\(.current) expired=\(.expired)"),
     (if .builder then "Builder: type=\(.builder.type) reserved_memory=\(.builder.reserved_memory_bytes) reserved_disk_peak=\(.builder.reserved_disk_peak_bytes) bytes; observed_peak=\(.builder.observed_peak)" else empty end),
     (if .last_build_error then "Base failure: \(.last_build_error)" else empty end),

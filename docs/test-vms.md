@@ -89,14 +89,18 @@ installed by `yard init`. These initial defaults still require workload peak mea
 
 | Setting | Initial value | Purpose |
 | --- | ---: | --- |
-| `E2E_DISK_BUDGET` | `160GiB` | Total broker disk budget |
+| `E2E_DISK_BUDGET` | `0GiB` | Optional total disk quota; `0GiB` means no fixed ceiling |
 | `E2E_CACHE_BUDGET` | `24GiB` | Base and build cache budget |
 | `E2E_DISK_RESERVE` | `5GiB` | Free physical storage reserve |
 | `E2E_MEMORY_RESERVE` | `2GiB` | Memory headroom outside VM commitments |
 | `E2E_VM_OVERHEAD` | `512MiB` | Additional RAM reserved per VM |
 
-Values must be positive `MiB` or `GiB` sizes. Recipe installation uses a fixed root-owned path;
-there is no public setting that lets an agent substitute executable recipe sources.
+Values must be positive `MiB` or `GiB` sizes, except `E2E_DISK_BUDGET=0GiB`, which disables
+the optional quota. Physical free-space reserves and outstanding VM/builder commitments always
+apply. Status reports `budgets.disk_bytes=0` for an unlimited quota. Existing positive configured
+quotas remain effective; set the yard value to `0GiB` and run `yard init` to remove one.
+Recipe installation uses a fixed root-owned path; there is no public setting that lets an agent
+substitute executable recipe sources.
 
 Both types use the generic host baseline: Go bootstrap, compiler/build utilities, ShellCheck,
 Git, curl, jq, ripgrep, SSH, archive tools and the product Incus installer. The `android-test`
@@ -134,9 +138,10 @@ This operation asks for destructive confirmation with a default of No. Review an
 needed legacy data first. An empty, correctly marked legacy project can be adopted automatically.
 
 The nested broker lanes (`release`, `full` and broker recovery) need a larger allocated test host:
-at least 16 GiB RAM and an 80 GiB disk, with 60 GiB free before their setup. Their diagnostic
+at least 16 GiB RAM. Disk admission belongs to the broker: it checks physical headroom and
+outstanding commitments, while the test scripts only report disk measurements. Their diagnostic
 broker uses 2 GiB / 10 GiB guests, two concurrent pairs, normal safety reserves and the immutable
-image publication peak. The default 4 GiB / 20 GiB pair guest cannot host that nested matrix.
+image publication peak. The default 4 GiB pair guest cannot host that nested matrix.
 Use an operator-configured pool with larger pair limits; the lane checks capacity before setup.
 These diagnostic limits do not validate the production Android type's 8 GiB / 40 GiB contract.
 

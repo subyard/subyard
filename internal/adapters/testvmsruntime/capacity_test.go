@@ -103,6 +103,9 @@ func TestCapacityAdmissionKeepsReservesAndRejectsOverflow(t *testing.T) {
 		{"physical headroom still required", MemoryCapacity{Available: 10}, StorageCapacity{Total: 169, Used: 125, BudgetUsed: 1}, 8, 40, 2, 5, 160, "disk"},
 		{"budget already exceeded", MemoryCapacity{Available: 10}, StorageCapacity{Total: 472, Used: 125, BudgetUsed: 161}, 8, 0, 2, 5, 160, "disk"},
 		{"disk overflow", MemoryCapacity{Available: 10}, StorageCapacity{Total: ^uint64(0), BudgetUsed: 1}, 8, ^uint64(0), 2, 5, ^uint64(0), "disk"},
+		{"unlimited quota", MemoryCapacity{Available: 10}, StorageCapacity{Total: 472, Used: 200, BudgetUsed: 200}, 8, 60, 2, 5, 0, ""},
+		{"unlimited quota keeps disk reserve", MemoryCapacity{Available: 10}, StorageCapacity{Total: 264, Used: 200, BudgetUsed: 200}, 8, 60, 2, 5, 0, "disk"},
+		{"unlimited quota keeps memory reserve", MemoryCapacity{Available: 9}, StorageCapacity{Total: 472, Used: 200, BudgetUsed: 200}, 8, 60, 2, 5, 0, "memory"},
 		{"invalid storage", MemoryCapacity{Available: 10}, StorageCapacity{Total: 9, Used: 10}, 8, 0, 2, 0, 25, "disk"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -268,6 +271,7 @@ func TestAdmissionBoundsFreeSpaceWhenGuestReleasesCreditedUsage(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			cfg := fixtureConfig(t)
+			cfg.DiskBudget = "160GiB"
 			cfg.Memory, cfg.Disk = "4GiB", "20GiB"
 			store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 2}
 			pair, _ := cfg.EnvironmentSpec(EnvironmentPair)

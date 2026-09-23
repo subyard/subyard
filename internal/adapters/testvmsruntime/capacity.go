@@ -166,6 +166,9 @@ func budgetBytes(value, fallback string) uint64 {
 	if value == "" {
 		value = fallback
 	}
+	if value == "0GiB" { // An optional disk quota; physical reserves still apply.
+		return 0
+	}
 	n, _ := sizeMiB(value)
 	return uint64(n) * 1024 * 1024
 }
@@ -232,7 +235,7 @@ func checkCapacity(memory MemoryCapacity, storage StorageCapacity, ram, disk, ra
 	if disk > free || diskReserve > free-disk {
 		return &CapacityError{"disk", "insufficient storage headroom"}
 	}
-	if storage.BudgetUsed > diskBudget || disk > diskBudget-storage.BudgetUsed {
+	if diskBudget != 0 && (storage.BudgetUsed > diskBudget || disk > diskBudget-storage.BudgetUsed) {
 		return &CapacityError{"disk", "broker disk budget exceeded"}
 	}
 	return nil
@@ -294,7 +297,7 @@ func (runtime *Runtime) reserveEnvironment(ctx context.Context, store LeaseStore
 		storage.BudgetUsed = max(storageBefore.BudgetUsed, storage.BudgetUsed)
 		if err := checkCapacity(memory, storage, ram, disk,
 			budgetBytes(runtime.Config.MemoryReserve, "2GiB"), budgetBytes(runtime.Config.DiskReserve, "5GiB"),
-			budgetBytes(runtime.Config.DiskBudget, "160GiB")); err != nil {
+			budgetBytes(runtime.Config.DiskBudget, "0GiB")); err != nil {
 			return err
 		}
 		slot.Reserved = true

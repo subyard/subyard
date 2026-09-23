@@ -974,7 +974,7 @@ func contextFrom(
 	setDefault(values, "SSH_HOST", "yard", tracker, defaultLayer)
 	setDefault(values, "DEV_USER", "dev", tracker, defaultLayer)
 	setDefault(values, "NESTED_E2E_VMS", "0", tracker, defaultLayer)
-	setDefault(values, "E2E_DISK_BUDGET", "160GiB", tracker, defaultLayer)
+	setDefault(values, "E2E_DISK_BUDGET", "0GiB", tracker, defaultLayer)
 	setDefault(values, "E2E_CACHE_BUDGET", "24GiB", tracker, defaultLayer)
 	setDefault(values, "E2E_DISK_RESERVE", "5GiB", tracker, defaultLayer)
 	setDefault(values, "E2E_MEMORY_RESERVE", "2GiB", tracker, defaultLayer)
@@ -1142,6 +1142,9 @@ func validateE2EConfig(values environment) error {
 		return amount * factor, nil
 	}
 	for _, name := range []string{"E2E_DISK_BUDGET", "E2E_CACHE_BUDGET", "E2E_DISK_RESERVE", "E2E_MEMORY_RESERVE", "E2E_VM_OVERHEAD"} {
+		if name == "E2E_DISK_BUDGET" && values[name] == "0GiB" {
+			continue
+		}
 		if _, err := sizeMiB(name); err != nil {
 			return err
 		}

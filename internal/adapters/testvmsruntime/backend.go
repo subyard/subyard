@@ -208,7 +208,7 @@ func (backend *Backend) state() (backendState, error) {
 		return fallback
 	}
 	state := backendState{
-		diskBudget:    value("E2E_DISK_BUDGET", "160GiB"),
+		diskBudget:    value("E2E_DISK_BUDGET", "0GiB"),
 		cacheBudget:   value("E2E_CACHE_BUDGET", "24GiB"),
 		diskReserve:   value("E2E_DISK_RESERVE", "5GiB"),
 		memoryReserve: value("E2E_MEMORY_RESERVE", "2GiB"),

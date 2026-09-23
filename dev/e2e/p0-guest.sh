@@ -361,18 +361,11 @@ prepare_owner_go_cache() {
 }
 
 require_broker_fixture_capacity() {
-  local memory_kib available_bytes total_bytes
+  local memory_kib
   memory_kib="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)"
-  read -r total_bytes available_bytes < <(df -B1 --output=size,avail "$ROOT" | tail -n1)
   # Two simultaneous pairs reserve 8GiB plus per-VM overhead and host headroom.
-  # The first immutable 10GiB base needs a conservative 30GiB publication peak;
-  # later pairs, cached images and the release fixture also share this filesystem.
   [[ "$memory_kib" =~ ^[0-9]+$ ]] && [ "$memory_kib" -ge $((15 * 1024 * 1024)) ] \
     || die 'nested broker acceptance requires an allocated host with at least 16GiB RAM; the default 4GiB pair VM is too small'
-  [[ "$total_bytes" =~ ^[0-9]+$ ]] && [[ "$available_bytes" =~ ^[0-9]+$ ]] \
-    && [ "$total_bytes" -ge $((75 * 1024 * 1024 * 1024)) ] \
-    && [ "$available_bytes" -ge $((60 * 1024 * 1024 * 1024)) ] \
-    || die 'nested broker acceptance requires an allocated 80GiB-or-larger disk with 60GiB free before setup'
 }
 
 write_owner_registration() { # <yard> <template> <ssh-port> [slot-count]
@@ -775,31 +768,17 @@ ensure_owner_base_image() {
 }
 
 reclaim_broker_recovery_capacity() {
-  local available capacity_path=/var/lib/subyard/test-vms/slots
-  local minimum=$((7 * 1024 * 1024 * 1024))
   if [ "$OWNER_BASE_IMAGE_CREATED" = 1 ]; then
     incus image delete "$OWNER_BASE_IMAGE" --project default >/dev/null
     OWNER_BASE_IMAGE_CREATED=0
   fi
   p0_capacity_remove_build_cache
   p0_capacity_use_build_cache
-  while ! incus exec yard-test-yard --project subyard-test-yard -- \
-    test -e "$capacity_path"; do
-    [ "$capacity_path" != / ] || break
-    capacity_path="$(dirname "$capacity_path")"
-  done
-  available="$(incus exec yard-test-yard --project subyard-test-yard -- \
-    df -B1 --output=avail "$capacity_path" | awk 'NR == 2 {print $1}')"
-  [[ "$available" =~ ^[0-9]+$ ]] && [ "$available" -ge "$minimum" ] \
-    || die "broker recovery fixture needs at least $minimum pool bytes; have ${available:-unknown}"
-  printf '  [ ok ] broker recovery fixture pool reserve available=%s required=%s\n' \
-    "$available" "$minimum"
 }
 
 reclaim_owner_lease_capacity() {
-  local available capacity_path=/var/lib/subyard/test-vms/slots fingerprint path
+  local fingerprint path
   local default_build_before default_build_after
-  local minimum=$((7 * 1024 * 1024 * 1024))
 
   # The predecessor migration and real-Incus contracts have completed. Reclaim
   # only outputs that later owner updates no longer read before allocating four
@@ -829,17 +808,8 @@ reclaim_owner_lease_capacity() {
   p0_capacity_reclaim_go_module_cache
   p0_capacity_remove_build_cache
   p0_capacity_use_build_cache
-  while ! incus exec yard-test-yard --project subyard-test-yard -- \
-    test -e "$capacity_path"; do
-    [ "$capacity_path" != / ] || break
-    capacity_path="$(dirname "$capacity_path")"
-  done
-  available="$(incus exec yard-test-yard --project subyard-test-yard -- \
-    df -B1 --output=avail "$capacity_path" | awk 'NR == 2 {print $1}')"
-  [[ "$available" =~ ^[0-9]+$ ]] && [ "$available" -ge "$minimum" ] \
-    || die "owner lease fixture needs at least $minimum pool bytes; have ${available:-unknown}"
-  printf '  [ ok ] owner lease fixture pool reserve available=%s required=%s default_build=%s->%s\n' \
-    "$available" "$minimum" "$default_build_before" "$default_build_after"
+  printf '  [ ok ] owner fixture caches reclaimed default_build=%s->%s\n' \
+    "$default_build_before" "$default_build_after"
 }
 
 run_nested_broker_acceptance() {
