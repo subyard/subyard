@@ -768,19 +768,24 @@ func TestLegacyVMRetirementRequiresDefaultNoAndExactIdentity(t *testing.T) {
 	incus.Instances["subyard/yard"] = instance
 	probe := &testVMStatusProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":2,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":7,"lease_epoch":0,"state":"available","legacy_retained":true}]}}`)}
 	prompt := &testkit.Prompt{Answers: []bool{true}}
-	runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{Schema: 1, OperationID: "retire-legacy", Status: "ok"}}}}
+	if err := os.MkdirAll(filepath.Join(root, "scripts/e2e-lab"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(root, "scripts/e2e-lab/invoke.sh"), "#!/bin/sh\nprintf '%s\\n' \"$@\" > retirement-arguments\n", 0o700)
+	var stderr bytes.Buffer
 	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"test-vms", "retire-legacy", "--slot", "1"},
-		Environment: environment, WorkingDir: root, Incus: incus, ProjectData: probe, AdapterRunner: runner, Prompt: prompt})
+		Environment: environment, WorkingDir: root, Incus: incus, ProjectData: probe, Prompt: prompt, Stderr: &stderr})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if code := program.Run(context.Background()); code != 0 {
-		t.Fatalf("retirement returned %d", code)
+		t.Fatalf("retirement returned %d: %s", code, stderr.String())
 	}
 	if len(prompt.Requests) != 1 || prompt.Requests[0].Default != domain.ConfirmationDefaultNo {
 		t.Fatalf("retirement prompt: %#v", prompt.Requests)
 	}
-	if len(runner.Requests) != 1 || !slices.Equal(runner.Requests[0].Arguments, []string{"retire-legacy-slot-1", "--expect-resource-generation", "7", "--expect-lease-epoch", "0", "--yes"}) {
-		t.Fatalf("retirement requests: %#v", runner.Requests)
+	arguments, err := os.ReadFile(filepath.Join(root, "retirement-arguments"))
+	if err != nil || string(arguments) != "retire-legacy-slot-1\n--expect-resource-generation\n7\n--expect-lease-epoch\n0\n--yes\n" {
+		t.Fatalf("retirement arguments: %q, error: %v", arguments, err)
 	}
 }
