@@ -31,6 +31,7 @@ type Config struct {
 	RepositoryRoot string
 	Stdout         io.Writer
 	Stderr         io.Writer
+	Progress       io.Writer
 	HTTPClient     *http.Client
 }
 
@@ -450,6 +451,7 @@ func (runtime *Runtime) PrepareTransition(
 	if !filepath.IsAbs(configHome) {
 		return Prepared{}, errors.New("release transition config home must be absolute")
 	}
+	runtime.progress(parsed, "Inspecting the installed release...")
 	protected, err := runtime.inspectProtectedTransition(
 		ctx, parsed.root, configHome, yard, inheritedSettingIDs,
 	)
@@ -513,6 +515,7 @@ func (runtime *Runtime) PrepareTransition(
 		if parsed.offline {
 			return Prepared{}, errors.New("offline mode requires --version")
 		}
+		runtime.progress(parsed, "Checking for the latest stable release...")
 		parsed.tag, err = runtime.latestTag(ctx, parsed.repository)
 		if err != nil {
 			return Prepared{}, err
@@ -551,6 +554,7 @@ func (runtime *Runtime) PrepareTransition(
 		InheritedSettingIDs: slices.Clone(inheritedSettingIDs),
 		SourceIngress:       sourceIngress,
 	}
+	runtime.progress(parsed, "Checking update requirements...")
 	prepared, err := runtime.prepareVerifiedCandidateTransition(ctx, parsed, verified, request)
 	if err == nil {
 		return prepared, nil
@@ -1218,6 +1222,12 @@ type publishedCandidate struct {
 	root    string
 }
 
+func (runtime *Runtime) progress(options options, format string, arguments ...any) {
+	if !options.check && runtime.config.Progress != nil {
+		fmt.Fprintf(runtime.config.Progress, format+"\n", arguments...)
+	}
+}
+
 func (runtime *Runtime) publishCandidate(
 	ctx context.Context,
 	options options,
@@ -1234,12 +1244,16 @@ func (runtime *Runtime) publishCandidate(
 	paths := make([]string, 4)
 	for index, suffix := range []string{"", ".sha256", ".manifest.json", ".provenance.json"} {
 		paths[index] = filepath.Join(directory, name+suffix)
+		if !options.offline {
+			runtime.progress(options, "Downloading %s...", name+suffix)
+		}
 		if err := runtime.fetch(ctx, options, name+suffix, paths[index]); err != nil {
 			return publishedCandidate{}, "", fmt.Errorf(
 				"release download failed; current runtime was not changed: %w", err,
 			)
 		}
 	}
+	runtime.progress(options, "Verifying and unpacking release %s...", options.version)
 	target, digest, err := releaseBundleIdentity(options.version, paths[0])
 	if err != nil {
 		return publishedCandidate{}, "", fmt.Errorf("derive downloaded release identity: %w", err)

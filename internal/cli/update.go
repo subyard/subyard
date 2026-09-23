@@ -84,6 +84,7 @@ func (cli *CLI) releaseRuntimeConfig(environment map[string]string) releaserunti
 		RepositoryRoot: cli.options.RepositoryRoot,
 		Stdout:         cli.options.Stdout,
 		Stderr:         cli.options.Stderr,
+		Progress:       cli.updateProgress,
 	}
 }
 

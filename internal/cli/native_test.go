@@ -509,9 +509,11 @@ func TestUpdateUsesThePreparedReleaseAcrossRPCPlanAndExecute(t *testing.T) {
 		"MIGRATION_FINALIZE_CAPTURE="+filepath.Join(root, "migration-finalize.log"),
 	)
 	configApplier := &recordingConfigApplier{}
+	var stdout bytes.Buffer
 	program, err := New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment,
 		Clock: testkit.NewManualClock(time.Unix(100, 0)), Config: configApplier,
+		Stdout: &stdout,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -536,6 +538,9 @@ func TestUpdateUsesThePreparedReleaseAcrossRPCPlanAndExecute(t *testing.T) {
 		t.Fatal(err)
 	}
 	plan := result.(domain.OperationPlan)
+	if stdout.Len() != 0 {
+		t.Fatalf("RPC preparation wrote unframed output: %q", stdout.String())
+	}
 	if plan.Effect != domain.CommandMutate || plan.Confirmation != domain.ConfirmationPromptDefaultYes ||
 		plan.Assessment == nil || plan.Assessment.Action != "update.activate" ||
 		plan.ConfirmationRequest == nil || plan.ConfirmationRequest.Default != domain.ConfirmationDefaultYes ||
@@ -688,6 +693,10 @@ func TestUpdateTypedConfirmationSeparatesCheckActivationAndRollbackPreflight(t *
 			t.Fatalf("code=%d stderr=%q", code, stderr.String())
 		}
 		preview := strings.Index(stdout.String(), "Update: release-old -> 1.2.3\n")
+		progress := strings.Index(stdout.String(), "Checking update requirements...\n")
+		if progress < 0 || progress >= preview || !strings.Contains(stdout.String(), "Downloading subyard-1.2.3-") {
+			t.Fatalf("expected update progress before the preview: %q", stdout.String())
+		}
 		confirmation := strings.Index(stdout.String(), "Proceed? [Y/n]")
 		if preview < 0 || confirmation <= preview || strings.Count(stdout.String(), "Proceed?") != 1 {
 			t.Fatalf("expected release versions before a single confirmation: %q", stdout.String())

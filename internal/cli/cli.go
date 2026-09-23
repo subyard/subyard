@@ -102,6 +102,7 @@ type CLI struct {
 	openTerminal                 func() (*os.File, error)
 	effectiveUID                 func() int
 	retainedAdapterCompatibility bool
+	updateProgress               io.Writer
 	releaseTransitionChild       bool
 	configApplyRepair            *configApplyRepairPermit
 	orcaInitRepair               *configApplyRepairPermit
@@ -109,6 +110,7 @@ type CLI struct {
 
 func (cli *CLI) rpcOperation(operationID string) *CLI {
 	operation := *cli
+	operation.updateProgress = nil
 	operation.env = maps.Clone(cli.env)
 	operation.env["SUBYARD_OPERATION_ID"] = operationID
 	operation.inventoryRoutes = maps.Clone(cli.inventoryRoutes)
@@ -342,6 +344,7 @@ func New(options Options) (*CLI, error) {
 }
 
 func (cli *CLI) Run(ctx context.Context) int {
+	cli.updateProgress = cli.options.Stdout
 	arguments := append([]string(nil), cli.options.Arguments...)
 	yard, explicit, yes, remaining, err := parseGlobals(arguments, cli.env["SUBYARD_YARD"])
 	if err != nil {
