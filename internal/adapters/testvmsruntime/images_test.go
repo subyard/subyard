@@ -153,8 +153,8 @@ func TestBuilderCleanupRequiresPhysicalProofAndRecoversUncommittedImages(t *test
 }
 
 func TestImagePruneRetainsCurrentExpiredAndUnknownReferences(t *testing.T) {
-	for _, referenced := range []bool{false, true} {
-		t.Run(fmt.Sprint(referenced), func(t *testing.T) {
+	for _, reference := range []string{"none", "physical", "quarantined"} {
+		t.Run(reference, func(t *testing.T) {
 			cfg := fixtureConfig(t)
 			if err := os.MkdirAll(cfg.StateDir, 0700); err != nil {
 				t.Fatal(err)
@@ -168,6 +168,25 @@ func TestImagePruneRetainsCurrentExpiredAndUnknownReferences(t *testing.T) {
 			current.CreatedAt = now.Add(-10 * 24 * time.Hour)
 			registry := ImageRegistry{SchemaVersion: 1, Owner: owner, Bases: []BaseImage{old, current}}
 			store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1}
+			if reference == "quarantined" {
+				spec, err := cfg.EnvironmentSpec(EnvironmentPair)
+				if err != nil {
+					t.Fatal(err)
+				}
+				grant, err := store.AcquireV3Slot(spec, "client", "SHA256:key", "yard", "Project", "run", "tests", "slot-001")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := store.mutateOwned(grant, func(slot *LeaseSlot, _ time.Time) error {
+					slot.BaseFingerprint = old.Fingerprint
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+				if err := store.Quarantine(grant, errors.New("fixture stop failure")); err != nil {
+					t.Fatal(err)
+				}
+			}
 			deleted := false
 			metadata := incusImage{Fingerprint: old.Fingerprint, Type: "virtual-machine", Architecture: old.Architecture, Properties: map[string]string{"user.subyard.base_owner": owner, "user.subyard.base_key": old.Key, "user.subyard.base_recipe": old.Recipe}}
 			runner := &fakeRunner{handler: func(_ string, args, _ []string, _ io.Reader) ([]byte, []byte, error) {
@@ -186,7 +205,7 @@ func TestImagePruneRetainsCurrentExpiredAndUnknownReferences(t *testing.T) {
 					p, _ := json.Marshal(metadata)
 					return p, nil, nil
 				case "list --all-projects --format json":
-					if referenced {
+					if reference == "physical" {
 						return []byte(`[{"config":{"volatile.base_image":"` + old.Fingerprint + `"}}]`), nil, nil
 					}
 					return []byte("[]"), nil, nil
@@ -201,13 +220,70 @@ func TestImagePruneRetainsCurrentExpiredAndUnknownReferences(t *testing.T) {
 				t.Fatal(err)
 			}
 			wantBases := 1
+			referenced := reference != "none"
 			if referenced {
 				wantBases++
 			}
 			if deleted == referenced || len(registry.Bases) != wantBases {
 				t.Fatalf("unsafe prune: deleted=%v bases=%d", deleted, len(registry.Bases))
 			}
+			if reference == "quarantined" {
+				if err := store.BeginRecovery("slot-001"); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := store.FinishRecovery("slot-001", nil, "", ""); err != nil {
+					t.Fatal(err)
+				}
+				if err := runtime.pruneImages(context.Background(), store, &registry, true); err != nil {
+					t.Fatal(err)
+				}
+				if !deleted || len(registry.Bases) != 1 {
+					t.Fatal("obsolete base retained after verified drain removed its last pin")
+				}
+			}
 		})
+	}
+}
+
+func TestImageBuildWaitCancellationPreservesActiveBuilder(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "images.lock")
+	active, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer active.Close()
+	if err := syscall.Flock(int(active.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Flock(int(active.Fd()), syscall.LOCK_UN)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	operationResult := errors.New("operation ran")
+	done := make(chan error, 1)
+	go func() {
+		done <- imageBuildLock(ctx, path, func() error { return operationResult })
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("waiting request did not cancel: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("waiting request blocked behind active builder")
+	}
+	probe, err := os.OpenFile(path, os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer probe.Close()
+	if err := syscall.Flock(int(probe.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != syscall.EWOULDBLOCK && err != syscall.EAGAIN {
+		t.Fatalf("canceled waiter disturbed active builder lock: %v", err)
+	}
+	if err := syscall.Flock(int(active.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+	if err := imageBuildLock(context.Background(), path, func() error { return operationResult }); !errors.Is(err, operationResult) {
+		t.Fatalf("subsequent request could not acquire released builder: %v", err)
 	}
 }
 

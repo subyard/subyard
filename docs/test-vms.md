@@ -347,6 +347,26 @@ dev/agent-e2e.sh --slot "$slot" --purpose integration-remote --vm 1 -- \
 
 These are targeted lifecycle checks. See the skill for publication and broader coverage criteria.
 
+To check the environment pool itself, choose two available slots and run:
+
+```sh
+python3 dev/e2e/environment-lifecycle.py --slot "$slot" --peer-slot "$peer_slot" \
+  --output-dir .build/environment-lifecycle-RUN
+```
+
+This controller holds independent leases through the runner. It checks concurrent pair requests,
+mixed pair/Android allocations, warm base reuse, fresh VM1 identities and working state, guest
+resource limits, dev cache ownership and KVM access, then verifies that release removes working
+reservations. The output directory must be new; it contains bounded runner logs, redacted status
+samples and `summary.json`. Add `--require-cold` after installing a changed recipe to require new
+base fingerprints for both types. Equal fingerprints and sampled builder state do not establish
+an exact build count. Only VM1 is directly measured; VM2 composition/readiness comes from the
+broker. This check does not replace broker recovery or Android application acceptance.
+Use `--disk-isolation` to fill peer VM1's root filesystem to `ENOSPC` while checking that the
+other held allocation remains responsive and writable. The writer is bounded by the guest disk
+capacity and a five-minute deadline; its unlinked temporary file is reclaimed when closed or when
+the process exits. This mode records storage samples before filling, while full, and after cleanup.
+
 Android/GPU, real credentials and external-service profiles use separate explicitly prerequisite-
 gated lanes. A generic dependency-free resource pass does not report those handlers green.
 

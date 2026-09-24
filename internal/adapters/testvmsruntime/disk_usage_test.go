@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -105,6 +107,67 @@ func TestMeasureDirVMUsageRejectsUnsafeRoots(t *testing.T) {
 	}
 	if _, err := measureDirVMUsage(context.Background(), root); err == nil {
 		t.Fatal("symlinked VM root accepted")
+	}
+}
+
+func TestMeasureDirVMUsageCountsVMMetadataWithoutFollowingLinks(t *testing.T) {
+	root, err := os.MkdirTemp("", "vm-") // Unix socket paths have a small length limit.
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := os.MkdirAll(filepath.Join(root, "storage-pools", "default"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	vm := filepath.Join(root, "storage-pools", "default", "virtual-machines", "builder")
+	if err := os.MkdirAll(vm, 0700); err != nil {
+		t.Fatal(err)
+	}
+	vars := filepath.Join(vm, "OVMF_VARS.fd")
+	if err := os.WriteFile(vars, make([]byte, 8192), 0600); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(root, "outside")
+	if err := os.WriteFile(outside, make([]byte, 16384), 0600); err != nil {
+		t.Fatal(err)
+	}
+	base, err := measureDirVMUsage(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	links := []string{filepath.Join(vm, "qemu.nvram"), filepath.Join(vm, "outside-link")}
+	for i, target := range []string{filepath.Base(vars), outside} {
+		if err := os.Symlink(target, links[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	socket := filepath.Join(vm, "qemu.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	blocks := func(path string) uint64 {
+		t.Helper()
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return uint64(info.Sys().(*syscall.Stat_t).Blocks) * 512
+	}
+	want := base + blocks(links[0]) + blocks(links[1]) + blocks(socket)
+	got, err := measureDirVMUsage(context.Background(), root)
+	if err != nil || got != want {
+		t.Fatalf("VM usage=%d want=%d err=%v", got, want, err)
+	}
+	if _, err := cacheBlocks(context.Background(), vm, map[cacheInode]bool{}); err == nil {
+		t.Fatal("cache accounting accepted VM metadata")
+	}
+	if err := syscall.Mkfifo(filepath.Join(vm, "unexpected-fifo"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := measureDirVMUsage(context.Background(), root); err == nil {
+		t.Fatal("VM accounting accepted unsupported entry")
 	}
 }
 

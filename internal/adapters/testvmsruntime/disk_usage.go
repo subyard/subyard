@@ -84,5 +84,7 @@ func optionalCacheBlocks(ctx context.Context, root string, seen map[cacheInode]b
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return 0, errors.New("invalid virtual machine storage root")
 	}
-	return cacheBlocks(ctx, root, seen)
+	// Incus VM volumes contain metadata symlinks and can contain live sockets.
+	// WalkDir does not follow them; charge only each entry's own inode blocks.
+	return allocatedBlocks(ctx, root, seen, true)
 }

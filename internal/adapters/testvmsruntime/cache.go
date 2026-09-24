@@ -157,6 +157,10 @@ func (runtime *Runtime) nativeImageCacheCharge(ctx context.Context) (uint64, err
 type cacheInode struct{ device, inode uint64 }
 
 func cacheBlocks(ctx context.Context, root string, seen map[cacheInode]bool) (uint64, error) {
+	return allocatedBlocks(ctx, root, seen, false)
+}
+
+func allocatedBlocks(ctx context.Context, root string, seen map[cacheInode]bool, allowVMMetadata bool) (uint64, error) {
 	if err := rejectSymlinkPath(root); err != nil {
 		return 0, err
 	}
@@ -179,7 +183,11 @@ func cacheBlocks(ctx context.Context, root string, seen map[cacheInode]bool) (ui
 		if err != nil {
 			return err
 		}
-		if info.Mode()&os.ModeSymlink != 0 || (!info.IsDir() && !info.Mode().IsRegular()) {
+		mode := info.Mode()
+		if !mode.IsDir() && !mode.IsRegular() && (!allowVMMetadata || mode&(os.ModeSymlink|os.ModeSocket) == 0) {
+			if allowVMMetadata {
+				return errors.New("unsupported virtual machine storage entry")
+			}
 			return errors.New("unsupported cache entry")
 		}
 		stat, ok := info.Sys().(*syscall.Stat_t)
