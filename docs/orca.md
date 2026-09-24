@@ -213,7 +213,8 @@ are not reconfigured by this repair.
 Each Subyard project has one Orca group containing its canonical
 `/srv/workspaces/<project-id>/src` root and every nested Git checkout. The root is always
 registered: as a Git repository when it is a Git root, or as a folder otherwise. The
-group and root initially use the Subyard project's name. Nested checkouts use paths
+group initially uses `<project> / <owner-host>` with the owner's Subyard HostID;
+the root uses the Subyard project's name. Nested checkouts use paths
 relative to the root, such as `private` or `packages/backend`.
 
 Discovery includes ignored, hidden, vendor and fixture directories, nested repositories
@@ -236,6 +237,9 @@ yard orca sync
 ```
 
 Repeated sync preserves group IDs, manual names, colors and display order. Subyard owns
+automatic group titles: sync adds the host suffix to legacy project-only titles and
+refreshes it when the installed hook receives an updated HostID through `yard init`.
+Manually renamed groups retain their titles. Subyard also owns
 membership: project checkouts moved elsewhere are returned to the project's group. On
 first registration, existing project checkouts in a mixed user group move into a dedicated
 project group; unrelated entries and the user group's properties are preserved. Group

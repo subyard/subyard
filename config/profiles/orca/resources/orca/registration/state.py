@@ -78,6 +78,8 @@ class State:
                     or not isinstance(entry.get("pending_repos", {}), dict)):
                 raise ValueError()
             group_id = entry.get("group_id")
+            if "group_name" in entry and not isinstance(entry["group_name"], str):
+                raise ValueError()
             if group_id is not None:
                 if not isinstance(group_id, str) or not group_id or group_id in ids:
                     raise ValueError()

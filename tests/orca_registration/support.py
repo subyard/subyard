@@ -61,6 +61,10 @@ class Catalog:
         elif method == "projectGroup.delete":
             self.groups = [g for g in self.groups if g["id"] != params["groupId"]]
             result = {}
+        elif method == "projectGroup.update":
+            group = next(g for g in self.groups if g["id"] == params["groupId"])
+            group.update(params["updates"])
+            result = {"group": group}
         elif method == "projectGroup.create":
             group = {"id": "group-" + str(len(self.groups) + 1), "name": params["name"],
                      "parentPath": params.get("parentPath"), "createdFrom": params["createdFrom"],

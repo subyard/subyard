@@ -269,9 +269,24 @@ install_release() {
   ok "installed verified Orca $ORCA_VERSION release"
 }
 
+registration_host_name() {
+  local name path="$SUBYARD_CONFIG_HOME/host-id"
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    [ -f "$path" ] && [ ! -L "$path" ] || return 1
+    name="$(cat -- "$path")" || return 1
+  else
+    name="$(hostname)" || return 1
+    name="${name%.}"
+  fi
+  [[ "$name" =~ ^[a-zA-Z0-9._][a-zA-Z0-9._-]*$ ]] &&
+    [ "$name" != . ] && [ "$name" != .. ] || return 1
+  printf '%s\n' "$name"
+}
+
 render_registration_hook() {
-  local version
+  local version host_name
   version="$(registration_contract_version)" || return 1
+  host_name="$(registration_host_name)" || return 1
   cat <<SYNC_HEAD
 #!/usr/bin/env bash
 set -euo pipefail
@@ -284,7 +299,7 @@ flock -s 9
 systemctl is-active --quiet $ORCA_UNIT || exit 0
 /usr/bin/python3 -B $ORCA_REGISTRATION/settings.py
 status=0
-report="\$(/usr/bin/python3 -B $ORCA_REGISTRATION/main.py sync)" || status=\$?
+report="\$(/usr/bin/python3 -B $ORCA_REGISTRATION/main.py sync --host-name '$host_name')" || status=\$?
 if ! jq -e '(.ready | type == "boolean") and (.errors | type == "array") and (.warnings | type == "array")' <<<"\$report" >/dev/null; then
   printf 'Orca project registration failed; run yard orca status\n' >&2
   exit 1
@@ -616,9 +631,10 @@ service_enabled() {
 
 # Read-only discovery, kind and group checks use the same component as the project hook.
 project_registration_report() {
-  local report
+  local report host_name
+  host_name="$(registration_host_name)" || return 1
   report="$(yexec runuser -u "${DEV_USER:-dev}" -- /usr/bin/python3 -B \
-    "$ORCA_REGISTRATION/main.py" status)" || true
+    "$ORCA_REGISTRATION/main.py" status --host-name "$host_name")" || true
   jq -e '(.ready | type == "boolean") and
     (.registered | type == "number") and (.total | type == "number") and
     .registered >= 0 and .registered <= .total and

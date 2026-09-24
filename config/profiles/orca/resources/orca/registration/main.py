@@ -21,6 +21,7 @@ def main():
     parser.add_argument("command", choices=("sync", "status"))
     parser.add_argument("--workspaces", default="/srv/workspaces")
     parser.add_argument("--state", default="/srv/agents/orca")
+    parser.add_argument("--host-name", default="")
     args = parser.parse_args()
     report = {"ready": False, "registered": 0, "total": 0,
               "errors": [], "warnings": [], "projects": []}
@@ -35,7 +36,8 @@ def main():
         scan = discover(args.workspaces, deadline=min(deadline, time.monotonic() + 20))
         report["total"] = sum(len(project.roots) for project in scan.projects)
         rpc = RuntimeRPC(Path(args.state) / "config/orca/orca-runtime.json", deadline=deadline)
-        report = reconcile(scan, rpc, args.state, apply=args.command == "sync", deadline=deadline)
+        report = reconcile(scan, rpc, args.state, apply=args.command == "sync", deadline=deadline,
+                           host_name=args.host_name)
     except DeadlineExceeded:
         report["errors"].append("Orca registration time budget exhausted; result is incomplete")
     except Exception:

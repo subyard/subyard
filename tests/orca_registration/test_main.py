@@ -22,6 +22,7 @@ class MainTests(unittest.TestCase):
 
     def run_cli(self, command):
         result = subprocess.run([sys.executable, "-B", str(COMPONENT / "main.py"), command,
+                                 "--host-name", "owner-host",
                                  "--workspaces", str(self.workspaces), "--state", str(self.state)],
                                 capture_output=True, text=True, timeout=5)
         self.assertEqual("", result.stderr)
@@ -86,6 +87,7 @@ class MainTests(unittest.TestCase):
         code, report = self.run_cli("sync")
         self.assertEqual(0, code, report)
         self.assertEqual((2, 2), (report["registered"], report["total"]))
+        self.assertEqual("Sample / owner-host", self.rpc.groups[0]["name"])
         self.rpc.calls.clear()
         code, report = self.run_cli("status")
         self.assertEqual(0, code, report)

@@ -44,7 +44,17 @@ def _local(record):
     return record.get("executionHostId") in (None, "local") and record.get("connectionId") is None
 
 
-def _group(state, entry, project, rpc):
+def _group_name(project, host_name):
+    return project.name + " / " + host_name if host_name else project.name
+
+
+def _group_name_differs(group, entry, project, host_name):
+    return (bool(host_name) and group.get("name") in (project.name, entry.get("group_name"))
+            and group.get("name") != _group_name(project, host_name))
+
+
+def _group(state, entry, project, rpc, host_name):
+    name = _group_name(project, host_name)
     groups = _records(rpc, "projectGroup.list", "groups")
     group_id = entry.get("group_id")
     if group_id:
@@ -52,6 +62,19 @@ def _group(state, entry, project, rpc):
         if mapped:
             if not _local(mapped):
                 raise RpcError("Mapped Orca group belongs to another execution host")
+            if _group_name_differs(mapped, entry, project, host_name):
+                try:
+                    rpc.call("projectGroup.update", {"groupId": group_id, "updates": {"name": name}})
+                except RpcError as error:
+                    if not error.unknown:
+                        raise
+                mapped = next((group for group in _records(rpc, "projectGroup.list", "groups")
+                               if group["id"] == group_id), None)
+                if mapped is None or mapped.get("name") != name or not _local(mapped):
+                    raise RpcError("Orca project group name is unconfirmed")
+            if mapped.get("name") == name and entry.get("group_name") != name:
+                entry["group_name"] = name
+                state.save()
             return group_id
     pending = entry.get("pending_group")
     if pending:
@@ -67,16 +90,17 @@ def _group(state, entry, project, rpc):
             raise RpcError("Ambiguous pending Orca group identity")
         if matches:
             entry["group_id"] = matches[0]["id"]
+            entry["group_name"] = pending["name"]
             del entry["pending_group"]
             state.save()
-            return entry["group_id"]
+            return _group(state, entry, project, rpc, host_name)
         if pending["runtime_id"] == rpc.runtime_id:
             raise RpcError("Pending Orca group creation has no confirmed result; retry after runtime recovery")
         # A different runtime cannot later finish a request from the old process.
         del entry["pending_group"]
     entry.pop("group_id", None)
     entry["pending_group"] = {"before_ids": [group["id"] for group in groups],
-                              "runtime_id": rpc.runtime_id, "name": project.name}
+                              "runtime_id": rpc.runtime_id, "name": name}
     state.save()
 
     def before_send(runtime_id):
@@ -85,7 +109,7 @@ def _group(state, entry, project, rpc):
         state.save()
 
     try:
-        result = rpc.call("projectGroup.create", {"name": project.name,
+        result = rpc.call("projectGroup.create", {"name": name,
                           "parentPath": project.root, "createdFrom": "migration"}, before_send=before_send)
         created = result.get("group")
         if (not isinstance(created, dict) or not isinstance(created.get("id"), str)
@@ -93,6 +117,7 @@ def _group(state, entry, project, rpc):
                 or created["id"] in entry["pending_group"]["before_ids"]):
             raise RpcError("Orca returned an invalid created group", unknown=True)
         entry["group_id"] = created["id"]
+        entry["group_name"] = name
         del entry["pending_group"]
         state.save()
         return created["id"]
@@ -102,7 +127,7 @@ def _group(state, entry, project, rpc):
             state.save()
             raise
         # Never resend create merely because the response was lost.
-        return _group(state, entry, project, rpc)
+        return _group(state, entry, project, rpc, host_name)
 
 
 def _write_and_read(rpc, method, params, path):
@@ -191,7 +216,7 @@ def _apply_repo(state, entry, root, group_id, rpc):
             raise RpcError("Orca repository membership is unconfirmed: " + root.path)
 
 
-def _report_catalog(report, scan, state, rpc):
+def _report_catalog(report, scan, state, rpc, host_name):
     groups = _records(rpc, "projectGroup.list", "groups")
     repos = _records(rpc, "repo.list", "repos")
     group_ids = {group["id"] for group in groups if _local(group)}
@@ -205,6 +230,9 @@ def _report_catalog(report, scan, state, rpc):
     for project in scan.projects:
         entry = state.data["projects"].get(project.project_id, {})
         group_id = entry.get("group_id")
+        group = next((group for group in groups if group["id"] == group_id), None)
+        if group and _local(group) and _group_name_differs(group, entry, project, host_name):
+            report["errors"].append(project.project_id + ": project group name differs")
         detail = {"projectId": project.project_id, "name": project.name,
                   "groupId": group_id, "repos": []}
         report["projects"].append(detail)
@@ -306,7 +334,7 @@ def _prune_missing(report, scan, state, rpc):
         state.save()
 
 
-def reconcile(scan, rpc, state_dir, apply=True, deadline=None):
+def reconcile(scan, rpc, state_dir, apply=True, deadline=None, host_name=""):
     deadline = deadline if deadline is not None else time.monotonic() + 65
     report = {"ready": False, "registered": 0,
               "total": sum(len(project.roots) for project in scan.projects),
@@ -326,7 +354,7 @@ def reconcile(scan, rpc, state_dir, apply=True, deadline=None):
                         report["errors"].append("Project identity root differs: " + project.project_id)
                         continue
                     try:
-                        group_id = _group(state, entry, project, rpc)
+                        group_id = _group(state, entry, project, rpc, host_name)
                     except RpcError as error:
                         report["errors"].append(project.project_id + ": " + str(error))
                         continue
@@ -339,7 +367,7 @@ def reconcile(scan, rpc, state_dir, apply=True, deadline=None):
                         except RpcError as error:
                             report["errors"].append(root.path + ": " + str(error))
                 _prune_missing(report, scan, state, rpc)
-            _report_catalog(report, scan, state, rpc)
+            _report_catalog(report, scan, state, rpc, host_name)
     except (RpcError, StateError) as error:
         report["errors"].append(str(error))
     report["errors"] = list(dict.fromkeys(report["errors"]))

@@ -10,6 +10,8 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 # shellcheck source=tests/helpers/test-context.sh
 . "$ROOT/tests/helpers/test-context.sh"
 setup_test_context "$TMP"
+printf 'owner-host\n' >"$SUBYARD_CONFIG_HOME/host-id"
+chmod 0600 "$SUBYARD_CONFIG_HOME/host-id"
 export HOME="$TMP/home" SUBYARD_NO_AUDIT=1 PATH="$TMP/bin:$PATH"
 export ORCA_TEST_LOG="$TMP/commands.log" ORCA_TEST_ROUTE="$TMP/route"
 export ORCA_TEST_CAPTURE="$TMP/capture" ORCA_TEST_GUEST="$TMP/guest"
@@ -237,7 +239,7 @@ case "${1:-}" in
         done
         "${command[@]}"
         ;;
-      *' /usr/bin/python3 -B /usr/local/libexec/subyard/orca-registration/main.py status ')
+      *' /usr/bin/python3 -B /usr/local/libexec/subyard/orca-registration/main.py status --host-name owner-host ')
         if [ -e "$state_root/project-counts-fail" ]; then
           exit 1
         elif [ -e "$state_root/project-counts-drift" ]; then
@@ -412,6 +414,9 @@ for source in "$ROOT"/config/profiles/orca/resources/orca/registration/*.py; do
   cmp -s "$source" "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration/${source##*/}" \
     || fail 'registration component was not installed intact'
 done
+grep -Fq -- "sync --host-name 'owner-host'" \
+  "$ORCA_TEST_GUEST/usr/local/libexec/subyard/projects-changed.d/orca" \
+  || fail 'installed project hook did not receive the owner HostID'
 observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
 jq -e '.state == "current" and (.actual | test("^[0-9a-f]{64}$")) and .actual == .desired' \
   <<<"$observation" >/dev/null || fail 'installed runtime contract was not observed as current'

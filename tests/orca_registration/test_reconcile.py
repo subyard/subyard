@@ -25,9 +25,11 @@ class ReconcileTests(unittest.TestCase):
         self.state = Path(self.tmp.name) / "state"
         self.root = project(self.workspaces)
         self.rpc = Catalog()
+        self.host_name = "owner-host"
 
     def run_sync(self, apply=True):
-        return self.reconcile(self.discover(self.workspaces), self.rpc, self.state, apply=apply)
+        return self.reconcile(self.discover(self.workspaces), self.rpc, self.state, apply=apply,
+                              host_name=self.host_name)
 
     def sidecar(self):
         return json.loads((self.state / "subyard-registration.json").read_text())
@@ -38,6 +40,7 @@ class ReconcileTests(unittest.TestCase):
         report = self.run_sync()
         self.assertTrue(report["ready"], report)
         self.assertEqual((3, 3), (report["registered"], report["total"]))
+        self.assertEqual(["Sample / owner-host"] * 2, [g["name"] for g in self.rpc.groups])
         repos = {r["path"]: r for r in self.rpc.repos}
         self.assertEqual("Sample", repos[str(self.root)]["displayName"])
         self.assertEqual("packages/backend", repos[str(self.root / "packages/backend")]["displayName"])
@@ -47,6 +50,43 @@ class ReconcileTests(unittest.TestCase):
         self.assertTrue(self.run_sync()["ready"])
         self.assertEqual(before, (self.rpc.groups, self.rpc.repos))
         self.assertEqual(2, len(self.sidecar()["projects"]))
+
+    def test_legacy_group_name_and_host_rename_converge_without_replacing_group(self):
+        self.host_name = ""
+        self.assertTrue(self.run_sync()["ready"])
+        group = self.rpc.groups[0]
+        group.update(color="purple", tabOrder=31)
+        original = copy.deepcopy(group)
+        sidecar = self.sidecar()
+        del sidecar["projects"]["sample-id"]["group_name"]
+        (self.state / "subyard-registration.json").write_text(json.dumps(sidecar))
+        for host in ("owner-host", "renamed-host"):
+            self.host_name = host
+            self.assertFalse(self.run_sync(apply=False)["ready"])
+            self.assertTrue(self.run_sync()["ready"])
+            self.assertEqual(dict(original, name="Sample / " + host), group)
+            self.rpc.calls.clear()
+            self.assertTrue(self.run_sync()["ready"])
+            self.assertFalse(any(method == "projectGroup.update" for method, _ in self.rpc.calls))
+
+    def test_group_rename_unknown_response_requires_readback(self):
+        self.assertTrue(self.run_sync()["ready"])
+        self.host_name = "renamed-host"
+        def lost(method, params):
+            if method == "projectGroup.update":
+                raise self.error("lost response", unknown=True)
+        self.rpc.after = lost
+        self.assertTrue(self.run_sync()["ready"])
+        self.assertEqual("Sample / renamed-host", self.rpc.groups[0]["name"])
+
+        original_call = self.rpc.call
+        def not_applied(method, params=None, **kwargs):
+            if method == "projectGroup.update":
+                raise self.error("lost response", unknown=True)
+            return original_call(method, params, **kwargs)
+        self.rpc.call = not_applied
+        self.host_name = "another-host"
+        self.assertFalse(self.run_sync()["ready"])
 
     def test_existing_manual_group_and_names_preserved_while_only_project_repos_move(self):
         group = self.rpc.call("projectGroup.create", {"name": "Manual", "createdFrom": "manual"})["group"]
@@ -66,6 +106,7 @@ class ReconcileTests(unittest.TestCase):
         self.assertNotEqual(group["id"], self.rpc.repos[0]["projectGroupId"])
         self.rpc.groups[1].update(name="Renamed group", color="blue", tabOrder=19)
         self.rpc.repos[0].update(displayName="Renamed root", projectGroupOrder=9)
+        self.host_name = "renamed-host"
         before = copy.deepcopy((self.rpc.groups, self.rpc.repos))
         self.assertTrue(self.run_sync()["ready"])
         self.assertEqual(before, (self.rpc.groups, self.rpc.repos))
