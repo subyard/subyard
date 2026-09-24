@@ -277,6 +277,13 @@ activation observes and reconciles all registered local yards, using the same sc
 as the completed release's readiness check. Pending source migrations retain their
 selected-yard scope across recovery because they can rename yard registrations.
 This config reconciliation leaves stopped or absent yards untouched.
+
+Activation observers do not print diagnostics. Return expected drift as
+`Converged: false`, persistent notices as `V2ActivationObservation.Warnings`, and
+failures as errors. The operation boundary renders current `Outcome.Warnings`
+once, sorted and deduplicated. Public error details use `ActivationDiagnostic`;
+raw guest errors stay private.
+
 Each compiled capability classifies its bounded resources as preserve, transform, canonicalize,
 reset or block before confirmation. An authorized reset is a successful, journaled one-time result;
 unknown or ambiguous state produces a structured operator-action outcome without overwriting it.

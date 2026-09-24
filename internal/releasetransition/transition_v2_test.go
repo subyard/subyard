@@ -3557,12 +3557,14 @@ func TestV2TransitionDoesNotFabricateLinksWhenPostMutationObservationFails(t *te
 }
 
 type v2TestReconciler struct {
-	id           string
-	converged    bool
-	drift        Fingerprint
-	observes     int
-	reconciles   int
-	consequences []string
+	id            string
+	converged     bool
+	drift         Fingerprint
+	observes      int
+	reconciles    int
+	consequences  []string
+	warnings      []string
+	driftWarnings []string
 }
 
 type v2PostErrorReconciler struct {
@@ -3694,6 +3696,63 @@ func TestV2TransitionRunsOwnerCleanupBeforeRecoveryGC(t *testing.T) {
 	}
 }
 
+func TestV2ActivationWarningsReachOutcomesAndClearAfterRepair(t *testing.T) {
+	t.Run("invalid public warnings are rejected", func(t *testing.T) {
+		for _, warning := range []string{"", "unsafe\nmessage", strings.Repeat("x", maxDiagnosticText+1)} {
+			transition, _, _ := v2TransitionFixture(t, nil)
+			transition.options.Reconcilers = []V2ActivationReconciler{&v2TestReconciler{warnings: []string{warning}}}
+			if _, err := transition.Inspect(context.Background(), Goal{Target: "release-a", Direction: DirectionActivateTarget}); err == nil {
+				t.Fatal("invalid warning was accepted")
+			}
+		}
+	})
+
+	t.Run("persistent warning is deduplicated", func(t *testing.T) {
+		reconciler := &v2TestReconciler{
+			warnings: []string{"yard default: handler refresh deferred", "yard default: handler refresh deferred"},
+		}
+		transition, _, _ := v2TransitionFixture(t, nil)
+		transition.options.Reconcilers = []V2ActivationReconciler{reconciler, &v2TestReconciler{
+			id:        "second-runtime",
+			converged: true,
+			warnings:  []string{"another persistent warning", "yard default: handler refresh deferred"},
+		}}
+		goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
+		inspection, err := transition.Inspect(context.Background(), goal)
+		if err != nil || inspection.Outcome == nil || len(inspection.Outcome.Warnings) != 2 ||
+			inspection.Outcome.Warnings[0] != "another persistent warning" ||
+			inspection.Outcome.Warnings[1] != "yard default: handler refresh deferred" {
+			t.Fatalf("inspection warnings = %#v, err=%v", inspection.Outcome, err)
+		}
+		outcome, err := transition.Converge(context.Background(), Execution{
+			Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
+		})
+		if err != nil || outcome.Status != StatusReady || len(outcome.Warnings) != 2 ||
+			outcome.Warnings[0] != "another persistent warning" ||
+			outcome.Warnings[1] != "yard default: handler refresh deferred" {
+			t.Fatalf("execution warnings = %#v, err=%v", outcome, err)
+		}
+	})
+
+	t.Run("transient warning clears after repair", func(t *testing.T) {
+		reconciler := &v2TestReconciler{driftWarnings: []string{"repairable runtime drift"}}
+		transition, _, _ := v2TransitionFixture(t, nil)
+		transition.options.Reconcilers = []V2ActivationReconciler{reconciler}
+		goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
+		inspection, err := transition.Inspect(context.Background(), goal)
+		if err != nil || inspection.Outcome == nil || len(inspection.Outcome.Warnings) != 1 ||
+			inspection.Outcome.Warnings[0] != "repairable runtime drift" {
+			t.Fatalf("inspection warnings = %#v, err=%v", inspection.Outcome, err)
+		}
+		outcome, err := transition.Converge(context.Background(), Execution{
+			Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
+		})
+		if err != nil || outcome.Status != StatusReady || len(outcome.Warnings) != 0 {
+			t.Fatalf("execution retained cleared warning: %#v, err=%v", outcome, err)
+		}
+	})
+}
+
 func TestV2TransitionRetainsRecoveryUntilOwnerCleanupSucceeds(t *testing.T) {
 	cleanupErr := errors.New("owner archive cleanup unavailable")
 	owner := &v2TestOwnerRegistration{
@@ -3701,6 +3760,9 @@ func TestV2TransitionRetainsRecoveryUntilOwnerCleanupSucceeds(t *testing.T) {
 	}
 	transition, _, _ := v2TransitionFixture(t, nil)
 	transition.options.OwnerRegistration = owner
+	transition.options.Reconcilers = []V2ActivationReconciler{&v2TestReconciler{
+		warnings: []string{"yard stopped: refresh deferred"},
+	}}
 	goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
 	inspection, err := transition.Inspect(context.Background(), goal)
 	if err != nil {
@@ -3709,8 +3771,9 @@ func TestV2TransitionRetainsRecoveryUntilOwnerCleanupSucceeds(t *testing.T) {
 	outcome, err := transition.Converge(context.Background(), Execution{
 		Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
 	})
-	if err != nil || outcome.Status != StatusReady || len(outcome.Warnings) != 1 ||
-		outcome.Warnings[0] != "recovery cleanup is pending" || owner.cleanups != 1 {
+	if err != nil || outcome.Status != StatusReady || len(outcome.Warnings) != 2 ||
+		outcome.Warnings[0] != "recovery cleanup is pending" ||
+		outcome.Warnings[1] != "yard stopped: refresh deferred" || owner.cleanups != 1 {
 		t.Fatalf("failed owner cleanup outcome = %#v owner=%#v err=%v", outcome, owner, err)
 	}
 	owner.cleanupErr = nil
@@ -3719,7 +3782,8 @@ func TestV2TransitionRetainsRecoveryUntilOwnerCleanupSucceeds(t *testing.T) {
 		t.Fatal(err)
 	}
 	outcome, err = transition.Converge(context.Background(), Execution{Plan: resume.Plan})
-	if err != nil || outcome.Status != StatusReady || len(outcome.Warnings) != 0 ||
+	if err != nil || outcome.Status != StatusReady || len(outcome.Warnings) != 1 ||
+		outcome.Warnings[0] != "yard stopped: refresh deferred" ||
 		owner.cleanups != 2 {
 		t.Fatalf("resumed owner cleanup outcome = %#v owner=%#v err=%v", outcome, owner, err)
 	}
@@ -3805,7 +3869,15 @@ func (reconciler *v2TestReconciler) Observe(context.Context, ReleasePair, Releas
 	if drift == "" {
 		drift = digestB
 	}
-	return V2ActivationObservation{Actual: map[bool]Fingerprint{true: digestA, false: drift}[reconciler.converged], Desired: digestA, Converged: reconciler.converged, Consequences: slices.Clone(reconciler.consequences)}, nil
+	warnings := slices.Clone(reconciler.warnings)
+	if !reconciler.converged {
+		warnings = append(warnings, reconciler.driftWarnings...)
+	}
+	return V2ActivationObservation{
+		Actual:  map[bool]Fingerprint{true: digestA, false: drift}[reconciler.converged],
+		Desired: digestA, Converged: reconciler.converged,
+		Consequences: slices.Clone(reconciler.consequences), Warnings: warnings,
+	}, nil
 }
 
 func (reconciler *v2TestReconciler) Reconcile(context.Context, ReleaseLinks) error {

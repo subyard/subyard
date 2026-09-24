@@ -83,15 +83,15 @@ func TestMaterializedConfigObservationReportsSourceManagedOwnershipConflict(t *t
 			if err == nil || observed.Converged {
 				t.Fatalf("ownership conflict was accepted: %#v, %v", observed, err)
 			}
-			if !strings.Contains(stderr.String(), "yard default legacy integrations:") ||
-				!strings.Contains(stderr.String(), "integration ownership conflict") {
-				t.Fatalf("update hid the ownership diagnostic: %q", stderr.String())
+			if !strings.Contains(err.Error(), "yard default legacy integrations:") ||
+				!strings.Contains(err.Error(), "integration ownership conflict") {
+				t.Fatalf("update lost the ownership diagnostic: %v", err)
 			}
-			if path == "/etc/subyard/agent-project-hooks" && !strings.Contains(stderr.String(), path) {
-				t.Fatalf("known conflicting path was hidden: %q", stderr.String())
+			if path == "/etc/subyard/agent-project-hooks" && !strings.Contains(err.Error(), path) {
+				t.Fatalf("known conflicting path was hidden: %v", err)
 			}
-			if stdout.Len() != 0 || strings.Contains(stderr.String(), "untrusted-secret") {
-				t.Fatal("diagnostic polluted protocol output or exposed an untrusted path")
+			if stdout.Len() != 0 || stderr.Len() != 0 || strings.Contains(err.Error(), "untrusted-secret") {
+				t.Fatal("observation wrote console output or exposed an untrusted path")
 			}
 			var diagnostic interface{ ActivationDiagnostic() (string, string) }
 			if errors.As(err, &diagnostic) != (test.want != "") {
@@ -100,8 +100,7 @@ func TestMaterializedConfigObservationReportsSourceManagedOwnershipConflict(t *t
 			if test.want != "" {
 				message, retry := diagnostic.ActivationDiagnostic()
 				if !strings.Contains(message, test.want) || !strings.Contains(message, path) ||
-					!strings.Contains(retry, "'incus' 'exec' 'yard' '--project' 'subyard' '--' '"+test.command+"'") ||
-					!strings.Contains(stderr.String(), retry) {
+					!strings.Contains(retry, "'incus' 'exec' 'yard' '--project' 'subyard' '--' '"+test.command+"'") {
 					t.Fatalf("incomplete diagnostic: %q / %q", message, retry)
 				}
 			}
@@ -178,11 +177,11 @@ esac
 	if _, err := os.Stat(filepath.Join(home, "orca-applied")); !os.IsNotExist(err) {
 		t.Fatal("assessment changed guest files")
 	}
-	if !strings.Contains(diagnostics.String(), "stopped") || !strings.Contains(diagnostics.String(), "deferred") {
-		t.Fatalf("stopped yard deferral was hidden: %s", diagnostics.String())
+	if len(before.Warnings) != 1 || !strings.Contains(before.Warnings[0], "yard stopped:") || !strings.Contains(before.Warnings[0], "deferred") {
+		t.Fatalf("stopped yard deferral was hidden: %v", before.Warnings)
 	}
-	if strings.Contains(diagnostics.String(), "yard default:") || strings.Contains(diagnostics.String(), "yard named:") {
-		t.Fatalf("repairable Orca drift emitted a warning during assessment: %s", diagnostics.String())
+	if diagnostics.Len() != 0 {
+		t.Fatalf("Orca observation wrote console output: %s", diagnostics.String())
 	}
 	writeCLIFile(t, filepath.Join(home, "fail-orca"), "", 0o600)
 	if err := reconciler.Reconcile(ctx, releasetransition.ReleaseLinks{}); err == nil {
@@ -2353,11 +2352,10 @@ func TestActivationStageReconcilerUsesInstallVerificationAsItsFixedPoint(t *test
 	}
 }
 
-func TestActivationStageReconcilerReportsPrivateApplyDiagnostics(t *testing.T) {
+func TestActivationStageReconcilerReturnsApplyDiagnostics(t *testing.T) {
 	platform := newInitPlatformFixture()
 	platform.converged[ports.ReconcileStageTestVMs] = false
 	platform.applyErr = errors.New("bounded private detail")
-	var diagnostics bytes.Buffer
 	reconciler := &activationStageReconciler{
 		id: "test-vm-broker", stage: ports.ReconcileStageTestVMs,
 		inspectApplicability: func(context.Context) (activationApplicability, error) {
@@ -2366,14 +2364,12 @@ func TestActivationStageReconcilerReportsPrivateApplyDiagnostics(t *testing.T) {
 		platform: func(context.Context, activationApplicability) (ports.ReconcileStageRunner, error) {
 			return platform, nil
 		},
-		diagnostics: &diagnostics,
 	}
 	err := reconciler.Reconcile(context.Background(), releasetransition.ReleaseLinks{})
 	var phased interface{ ActivationPhase() string }
 	if !errors.As(err, &phased) || phased.ActivationPhase() != "apply" ||
-		!strings.Contains(diagnostics.String(),
-			`activation reconciler "test-vm-broker" apply: bounded private detail`) {
-		t.Fatalf("apply error=%v diagnostics=%q", err, diagnostics.String())
+		!errors.Is(err, platform.applyErr) {
+		t.Fatalf("apply error lost its phase or cause: %v", err)
 	}
 }
 

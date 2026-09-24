@@ -192,7 +192,6 @@ type activationStageReconciler struct {
 	inspectApplicability func(context.Context) (activationApplicability, error)
 	platform             func(context.Context, activationApplicability) (ports.ReconcileStageRunner, error)
 	authorize            func(context.Context) error
-	diagnostics          io.Writer
 }
 
 type activationStageError struct {
@@ -355,15 +354,6 @@ func (reconciler *activationStageReconciler) failure(phase string, err error) er
 	if err == nil {
 		return nil
 	}
-	if reconciler.diagnostics != nil {
-		fmt.Fprintf(
-			reconciler.diagnostics,
-			"yard: release transition activation reconciler %q %s: %v\n",
-			reconciler.id,
-			phase,
-			err,
-		)
-	}
 	return activationStageError{phase: phase, err: err}
 }
 
@@ -480,7 +470,6 @@ func (cli *CLI) brokerActivationReconciler(
 	}
 	return &activationStageReconciler{
 		id: "test-vm-broker", stage: ports.ReconcileStageTestVMs,
-		diagnostics: cli.options.Stderr,
 		inspectApplicability: func(ctx context.Context) (activationApplicability, error) {
 			values, err := options()
 			if err != nil {
@@ -596,7 +585,6 @@ func (cli *CLI) powerActivationReconciler(
 ) releasetransition.V2ActivationReconciler {
 	return &activationStageReconciler{
 		id: "host-power", stage: ports.ReconcileStagePower,
-		diagnostics: cli.options.Stderr,
 		inspectApplicability: func(context.Context) (activationApplicability, error) {
 			return inspectPowerActivationApplicability(cli.env)
 		},
@@ -761,8 +749,7 @@ func (reconciler *materializedConfigActivationReconciler) Observe(
 	for _, target := range targets {
 		assessment, assessErr := operation.assessConfigTarget(ctx, target, true)
 		if assessErr != nil {
-			operation.errorf("yard %s materialized config: %v", target.Name, assessErr)
-			return releasetransition.V2ActivationObservation{}, assessErr
+			return releasetransition.V2ActivationObservation{}, fmt.Errorf("yard %s materialized config: %w", target.Name, assessErr)
 		}
 		integrationScope := ""
 		var managedPaths []string
@@ -771,19 +758,16 @@ func (reconciler *materializedConfigActivationReconciler) Observe(
 		if runtime, ok := platform.(reconcileruntime.Runtime); ok && target.Loaded.Integrations.AllowsCodingTools {
 			integrationScope, managedPaths, err = runtime.IntegrationScope()
 			if err != nil {
-				operation.errorf("yard %s integration scope: %v", target.Name, err)
-				return releasetransition.V2ActivationObservation{}, err
+				return releasetransition.V2ActivationObservation{}, fmt.Errorf("yard %s integration scope: %w", target.Name, err)
 			}
 			if assessment.State == "drift" || assessment.State == "converged" {
 				platform, _, err = prepareLegacyIntegrationAdoption(ctx, target.Loaded.Integrations, platform)
 				if err != nil {
-					operation.errorf("yard %s legacy integrations: %v", target.Name, err)
 					return releasetransition.V2ActivationObservation{}, fmt.Errorf("yard %s legacy integrations: %w", target.Name, err)
 				}
 				integration, err = platform.(reconcileruntime.Runtime).IntegrationPlan(ctx)
 				if err != nil {
-					operation.errorf("yard %s integration plan: %v", target.Name, err)
-					return releasetransition.V2ActivationObservation{}, err
+					return releasetransition.V2ActivationObservation{}, fmt.Errorf("yard %s integration plan: %w", target.Name, err)
 				}
 				if captureIntegrationPlans {
 					reconciler.integrationPlans[target.Name] = integration

@@ -8,6 +8,10 @@ data. Project background, specs, and planning live in a separate private repo.
 For features, fixes, refactoring, tests, and developer documentation, use
 [Subyard dev-flow](.agents/skills/subyard-dev-flow/SKILL.md).
 
+Readiness checks return state and diagnostics; the operation boundary renders them.
+Expected drift is not a warning. Follow the
+[activation diagnostic contract](docs/control-plane.md#release-migrations).
+
 ## Private overlay
 If `private/AGENTS.md` exists locally (it is gitignored and lives in the separate private repo),
 read and follow it **in addition** to this file. It carries private, non-public working rules

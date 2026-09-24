@@ -797,6 +797,21 @@ func TestRollbackDoesNotExecuteRetainedEngineBeforeVerification(t *testing.T) {
 	}
 }
 
+func TestUpdatePrintsFinalWarnings(t *testing.T) {
+	var stdout bytes.Buffer
+	program := &CLI{options: Options{Stdout: &stdout}}
+	program.printUpdateResult(&releaseExecution{
+		prepared: releaseruntime.Prepared{Action: "update.activate"},
+		inspection: &releasetransition.Inspection{Outcome: &releasetransition.Outcome{
+			Status: releasetransition.StatusReady, Active: "release-b",
+			Warnings: []string{"yard stopped: refresh deferred"},
+		}},
+	}, true)
+	if strings.Count(stdout.String(), "Warning: yard stopped: refresh deferred") != 1 {
+		t.Fatalf("final warning missing or repeated: %q", stdout.String())
+	}
+}
+
 func TestUpdatePrintsFinalReadinessAndFailsOnDrift(t *testing.T) {
 	for _, drift := range []bool{false, true} {
 		t.Run(fmt.Sprintf("drift=%v", drift), func(t *testing.T) {

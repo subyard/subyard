@@ -2148,7 +2148,7 @@ esac
 	}
 }
 
-func TestCandidateTransitionPrintsValidatedReadyWarnings(t *testing.T) {
+func TestCandidateTransitionDoesNotPrintIntermediateWarnings(t *testing.T) {
 	root := t.TempDir()
 	inspection := `{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the exact typed migration and release activation plan"]},"outcome":{"status":"migration-required","reachedGoal":false,"active":"release-a","target":"release-b","code":"transition-required","message":"the release transition has not started","retry":"run yard update"}}}`
 	ready := `{"schemaVersion":1,"outcome":{"status":"ready","reachedGoal":true,"active":"release-b","previous":"release-a","target":"release-b","code":"ready","message":"verified","transaction":"tx-0123456789abcdef","warnings":["recovery cleanup is pending"]}}`
@@ -2183,7 +2183,7 @@ esac
 	if err := prepared.Execute(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if got := stderr.String(); got != "warning: release transition: recovery cleanup is pending\n" {
+	if got := stderr.String(); got != "" {
 		t.Fatalf("ready warnings = %q", got)
 	}
 }

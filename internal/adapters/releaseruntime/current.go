@@ -252,8 +252,12 @@ func (runtime *Runtime) PrepareCurrentTransition(ctx context.Context, arguments 
 		if err := execute(ctx); err != nil {
 			return err
 		}
-		if err := runtime.verifyCurrentConvergence(ctx, parsed.root, configHome, current, owner, request); err != nil {
+		outcome, err := runtime.verifyCurrentConvergence(ctx, parsed.root, configHome, current, owner, request)
+		if err != nil {
 			return err
+		}
+		for _, warning := range outcome.Warnings {
+			fmt.Fprintf(runtime.config.Stdout, "Warning: %s\n", warning)
 		}
 		_, err = fmt.Fprintf(runtime.config.Stdout, "Installed release %s: ready\n", current)
 		return err
@@ -418,6 +422,9 @@ func (runtime *Runtime) prepareCurrentReport(parsed currentOptions, report curre
 		for _, blocker := range report.Blockers {
 			fmt.Fprintf(&output, "Blocked: %s; next: %s\n", blocker.Message, blocker.Retry)
 		}
+		for _, warning := range report.Outcome.Warnings {
+			fmt.Fprintf(&output, "Warning: %s\n", warning)
+		}
 		if report.MetadataIssue != "" {
 			fmt.Fprintf(&output, "Details: %s\n", report.MetadataIssue)
 		}
@@ -541,20 +548,20 @@ func (runtime *Runtime) recoverCurrentScope(ctx context.Context, root, configHom
 
 // Completing historical activation may reveal a fresh current-release scope.
 // Inspect that state without extending the previous authorization to new work.
-func (runtime *Runtime) verifyCurrentConvergence(ctx context.Context, root, configHome string, current releasetransition.ReleaseID, owner candidateVerification, request releasetransition.ProcessRequest) error {
+func (runtime *Runtime) verifyCurrentConvergence(ctx context.Context, root, configHome string, current releasetransition.ReleaseID, owner candidateVerification, request releasetransition.ProcessRequest) (releasetransition.Outcome, error) {
 	inspection, activationOwned, err := runtime.inspectCompletedTransition(ctx, root, configHome, current, owner, request)
 	if err != nil {
-		return err
+		return releasetransition.Outcome{}, err
 	}
 	if !activationOwned {
-		return errors.New("the installed transition owner cannot verify final runtime readiness; run yard update")
+		return releasetransition.Outcome{}, errors.New("the installed transition owner cannot verify final runtime readiness; run yard update")
 	}
 	outcome := *inspection.Outcome
 	if outcome.Status != releasetransition.StatusReady {
 		outcome.Retry = CurrentReleaseRetry(outcome)
-		return transitionOutcomeError(outcome)
+		return outcome, transitionOutcomeError(outcome)
 	}
-	return nil
+	return outcome, nil
 }
 
 func (runtime *Runtime) inspectCompletedTransition(ctx context.Context, root, configHome string, current releasetransition.ReleaseID, owner candidateVerification, request releasetransition.ProcessRequest) (releasetransition.Inspection, bool, error) {

@@ -19,6 +19,29 @@ import (
 
 type currentNoNetwork struct{ t *testing.T }
 
+func TestCurrentReportPreservesWarningsInHumanAndJSONOutput(t *testing.T) {
+	for _, asJSON := range []bool{false, true} {
+		var stdout, stderr bytes.Buffer
+		runtime := New(Config{Stdout: &stdout, Stderr: &stderr})
+		report := currentReport{Current: "release-b", Outcome: releasetransition.Outcome{
+			Status: releasetransition.StatusReady, Warnings: []string{"yard stopped: refresh deferred"},
+		}}
+		prepared := runtime.prepareCurrentReport(currentOptions{json: asJSON}, report)
+		if err := prepared.Execute(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if stderr.Len() != 0 || strings.Count(stdout.String(), report.Outcome.Warnings[0]) != 1 {
+			t.Fatalf("warning missing, repeated or on stderr: stdout=%q stderr=%q", stdout.String(), stderr.String())
+		}
+		if asJSON {
+			var decoded currentReport
+			if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil || len(decoded.Outcome.Warnings) != 1 {
+				t.Fatalf("warning lost from JSON: %q, %v", stdout.String(), err)
+			}
+		}
+	}
+}
+
 func (transport currentNoNetwork) RoundTrip(*http.Request) (*http.Response, error) {
 	transport.t.Error("current migration contacted release network")
 	return nil, errors.New("network forbidden")

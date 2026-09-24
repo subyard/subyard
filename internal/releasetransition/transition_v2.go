@@ -98,6 +98,7 @@ type V2ActivationObservation struct {
 	Desired      Fingerprint `json:"desired"`
 	Converged    bool        `json:"converged"`
 	Consequences []string    `json:"consequences,omitempty"`
+	Warnings     []string    `json:"warnings,omitempty"`
 }
 
 type V2Transition struct {
@@ -148,6 +149,7 @@ type v2Observation struct {
 	work                   []v2Work
 	activationScope        []v2ActivationScope
 	activationConsequences []string
+	activationWarnings     []string
 	observationScope       Fingerprint
 	activationFixed        bool
 	replacement            *JournalReplacement
@@ -312,7 +314,8 @@ func (transition *V2Transition) inspect(ctx context.Context, goal Goal, processV
 	}, nil
 }
 
-func (transition *V2Transition) inspectionOutcome(observation v2Observation) Outcome {
+func (transition *V2Transition) inspectionOutcome(observation v2Observation) (outcome Outcome) {
+	defer func() { outcome = withActivationWarnings(outcome, observation.activationWarnings) }()
 	journal := observation.journal
 	completedHistory := transition.completedJournalMatches(observation)
 	if journal != nil && journal.Checkpoint == JournalComplete && journal.Goal != observation.goal {
@@ -422,10 +425,12 @@ func (transition *V2Transition) preflightConverge(
 			observation.links, goal.Target, transaction,
 			blocker.Code, blocker.Message, blocker.Retry,
 		)
+		outcome = withActivationWarnings(outcome, observation.activationWarnings)
 		return "", &outcome, nil
 	}
 	if outcome := transition.completedResumeOutcome(observation, execution.Plan); outcome != nil &&
 		outcome.Status != StatusReady {
+		*outcome = withActivationWarnings(*outcome, observation.activationWarnings)
 		return "", outcome, nil
 	}
 	if observation.journal != nil && observation.journal.Checkpoint == JournalComplete &&
@@ -439,6 +444,7 @@ func (transition *V2Transition) preflightConverge(
 				transactionIDPointer(observation.journal.Transaction), CodePlanStale,
 				"the authorized release transition bindings changed",
 				"run yard update --check")
+			outcome = withActivationWarnings(outcome, observation.activationWarnings)
 			return "", &outcome, nil
 		}
 		return "", nil, nil
@@ -455,6 +461,7 @@ func (transition *V2Transition) preflightConverge(
 		outcome := v2OperatorOutcome(observation.links, goal.Target, transaction,
 			CodePlanStale, "the inspected release transition changed before convergence",
 			"run yard update --check")
+		outcome = withActivationWarnings(outcome, observation.activationWarnings)
 		return "", &outcome, nil
 	}
 	if len(observation.work) == 0 && transition.fixedPoint(observation) {
@@ -462,12 +469,14 @@ func (transition *V2Transition) preflightConverge(
 			Active: observation.links.Active, Previous: cloneReleaseID(observation.links.Previous),
 			Target: goal.Target,
 		})
+		outcome = withActivationWarnings(outcome, observation.activationWarnings)
 		return "", &outcome, nil
 	}
 	if !transition.options.VerifyAuthorization(plan, execution.Authorization) {
 		outcome := v2OperatorOutcome(observation.links, goal.Target, nil,
 			CodeConfirmationRequired, "the exact release transition plan is not authorized",
 			"review and confirm the update plan")
+		outcome = withActivationWarnings(outcome, observation.activationWarnings)
 		return "", &outcome, nil
 	}
 	return plan, nil, nil
@@ -857,8 +866,7 @@ func (transition *V2Transition) cleanupReady(
 	outcome Outcome,
 ) Outcome {
 	if err := transition.cleanupOwnerRegistration(ctx, transaction); err != nil {
-		outcome.Warnings = append(outcome.Warnings, "recovery cleanup is pending")
-		return outcome
+		return withActivationWarnings(outcome, []string{"recovery cleanup is pending"})
 	}
 	if err := transition.inject("before-recovery-gc"); err == nil {
 		err = transition.store.CleanupTransactions(transaction)
@@ -866,8 +874,7 @@ func (transition *V2Transition) cleanupReady(
 			return outcome
 		}
 	}
-	outcome.Warnings = append(outcome.Warnings, "recovery cleanup is pending")
-	return outcome
+	return withActivationWarnings(outcome, []string{"recovery cleanup is pending"})
 }
 
 func (transition *V2Transition) cleanupOwnerRegistration(
@@ -2513,6 +2520,10 @@ func (transition *V2Transition) observeActivation(
 		if err := validateActivationObservation(id, actual); err != nil {
 			return err
 		}
+		observation.activationWarnings = canonicalWarnings(append(observation.activationWarnings, actual.Warnings...))
+		if len(observation.activationWarnings) > 64 {
+			return invalid("release transition reported too many activation warnings")
+		}
 		if !actual.Converged {
 			observation.activationConsequences = append(observation.activationConsequences, actual.Consequences...)
 			observation.decisions = append(observation.decisions, RedactedDecision{
@@ -2537,6 +2548,7 @@ func (transition *V2Transition) observeActivation(
 		})
 		observation.activationFixed = observation.activationFixed && actual.Converged
 	}
+	observation.activationWarnings = canonicalWarnings(observation.activationWarnings)
 	return nil
 }
 
@@ -2646,7 +2658,7 @@ func (transition *V2Transition) reconcileActivation(
 	if guardErr != nil || guardOutcome.Code != "" {
 		return guardOutcome, guardErr
 	}
-	id, fixed := transition.activationFixedPointStatus(ctx, journal.Releases, links)
+	id, fixed, warnings := transition.activationFixedPointStatus(ctx, journal.Releases, links)
 	if !fixed {
 		message := "activation reconcilers did not retain their aggregate fixed point"
 		if id != "" {
@@ -2655,10 +2667,10 @@ func (transition *V2Transition) reconcileActivation(
 				id,
 			)
 		}
-		return v2RecoveringOutcome(links, journal.Goal.Target,
+		return withActivationWarnings(v2RecoveringOutcome(links, journal.Goal.Target,
 			transactionIDPointer(journal.Transaction), CodeDependencyUnavailable,
 			message,
-		), nil
+		), warnings), nil
 	}
 	return Outcome{}, nil
 }
@@ -2693,33 +2705,33 @@ func (transition *V2Transition) reduceActivationReconcilerFailure(
 	}
 	if len(observation.blockers) != 0 {
 		blocker := observation.blockers[0]
-		return v2OperatorOutcome(
+		return withActivationWarnings(v2OperatorOutcome(
 			observation.links, journal.Goal.Target,
 			transactionIDPointer(journal.Transaction), blocker.Code,
 			blocker.Message, blocker.Retry,
-		)
+		), observation.activationWarnings)
 	}
 	if observation.journal == nil || observation.journal.Transaction != journal.Transaction {
-		return v2OperatorOutcome(
+		return withActivationWarnings(v2OperatorOutcome(
 			observation.links, journal.Goal.Target,
 			transactionIDPointer(journal.Transaction), CodeRecoveryAmbiguous,
 			"protected transition facts changed during activation reconciliation",
 			"run yard update --check",
-		)
+		), observation.activationWarnings)
 	}
 	if after.Actual != before.Actual && !after.Converged {
-		return v2OperatorOutcome(
+		return withActivationWarnings(v2OperatorOutcome(
 			observation.links, journal.Goal.Target,
 			transactionIDPointer(journal.Transaction), CodeRecoveryAmbiguous,
 			fmt.Sprintf("activation reconciler %q reached an unknown state during %s", id, phase),
 			"run yard update --check",
-		)
+		), observation.activationWarnings)
 	}
-	return v2RecoveringOutcome(
+	return withActivationWarnings(v2RecoveringOutcome(
 		observation.links, journal.Goal.Target,
 		transactionIDPointer(journal.Transaction), CodeDependencyUnavailable,
 		fmt.Sprintf("activation reconciler %q failed during %s", id, phase),
-	)
+	), observation.activationWarnings)
 }
 
 func activationObservationBlocker(id string, err error) Blocker {
@@ -2760,7 +2772,28 @@ func validateActivationObservation(id string, observation V2ActivationObservatio
 	if observation.Converged && observation.Actual != observation.Desired {
 		return invalid("activation reconciler %q reported a false fixed point", id)
 	}
+	if len(observation.Warnings) > 64 {
+		return invalid("activation reconciler %q reported too many warnings", id)
+	}
+	for _, warning := range observation.Warnings {
+		if err := validateText(warning, "activation warning", maxDiagnosticText, true); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func withActivationWarnings(outcome Outcome, warnings []string) Outcome {
+	if len(warnings) == 0 {
+		return outcome
+	}
+	outcome.Warnings = canonicalWarnings(append(slices.Clone(outcome.Warnings), warnings...))
+	return outcome
+}
+
+func canonicalWarnings(warnings []string) []string {
+	slices.Sort(warnings)
+	return slices.Compact(warnings)
 }
 
 func (transition *V2Transition) guardJournalLinks(
@@ -2828,7 +2861,13 @@ func (transition *V2Transition) evaluateCurrent(
 			Decision: step.Decision, Expected: step.Expected, Desired: step.Desired,
 		}
 	}
-	return Evaluate(TransitionFacts{
+	fixedPointVerified := false
+	var warnings []string
+	if len(pending) == 0 && ((journal.Releases.From == journal.Releases.Target &&
+		initialReleaseLinks(links, journal.Releases)) || activatedReleaseLinks(links, journal.Releases)) {
+		_, fixedPointVerified, warnings = transition.activationFixedPointStatus(ctx, journal.Releases, links)
+	}
+	outcome := Evaluate(TransitionFacts{
 		Goal: journal.Goal, Releases: journal.Releases, Links: links, Journal: &journal,
 		CurrentPlan: journal.ResumePlan, CurrentIntents: intents,
 		VerifiedAuthorizationPlan:  journal.AuthorizationPlan,
@@ -2836,12 +2875,9 @@ func (transition *V2Transition) evaluateCurrent(
 		CurrentRegistryDigest:      transition.registryDigest,
 		CurrentCatalogDigest:       transition.catalog.Digest(),
 		CurrentAuthorizationDigest: journal.AuthorizationDigest,
-		FixedPointVerified: len(pending) == 0 &&
-			((journal.Releases.From == journal.Releases.Target &&
-				initialReleaseLinks(links, journal.Releases)) ||
-				activatedReleaseLinks(links, journal.Releases)) &&
-			transition.activationFixedPoint(ctx, journal.Releases, links),
-	}), nil
+		FixedPointVerified:         fixedPointVerified,
+	})
+	return withActivationWarnings(outcome, warnings), nil
 }
 
 func (transition *V2Transition) activationFixedPoint(
@@ -2849,7 +2885,7 @@ func (transition *V2Transition) activationFixedPoint(
 	releases ReleasePair,
 	links ReleaseLinks,
 ) bool {
-	_, fixed := transition.activationFixedPointStatus(ctx, releases, links)
+	_, fixed, _ := transition.activationFixedPointStatus(ctx, releases, links)
 	return fixed
 }
 
@@ -2857,22 +2893,26 @@ func (transition *V2Transition) activationFixedPointStatus(
 	ctx context.Context,
 	releases ReleasePair,
 	links ReleaseLinks,
-) (string, bool) {
+) (string, bool, []string) {
+	warnings := []string{}
 	for _, reconciler := range transition.options.Reconcilers {
 		if reconciler == nil {
-			return "", false
+			return "", false, warnings
 		}
 		id := reconciler.ID()
 		if validateSafeID(id, "activation reconciler ID") != nil {
-			return "", false
+			return "", false, warnings
 		}
 		actual, err := reconciler.Observe(ctx, releases, links)
-		if err != nil || validateActivationObservation(id, actual) != nil ||
-			!actual.Converged {
-			return id, false
+		if err != nil || validateActivationObservation(id, actual) != nil {
+			return id, false, warnings
+		}
+		warnings = canonicalWarnings(append(warnings, actual.Warnings...))
+		if !actual.Converged {
+			return id, false, warnings
 		}
 	}
-	return "", true
+	return "", true, canonicalWarnings(warnings)
 }
 
 func (transition *V2Transition) cachedGoal(plan PlanToken) (Goal, bool) {

@@ -94,6 +94,7 @@ func (reconciler *orcaRuntimeActivationReconciler) Observe(
 	}
 	actual := make([]observation, 0, len(targets))
 	converged := true
+	var warnings []string
 	for _, target := range targets {
 		state, err := orcaActivationPlatform(operation, target).ObserveOrcaRuntime(ctx)
 		if err != nil {
@@ -107,16 +108,16 @@ func (reconciler *orcaRuntimeActivationReconciler) Observe(
 			Instance: target.Loaded.Context.YardInstanceName, State: kind, Digest: state.Actual}
 		actual = append(actual, entry)
 		converged = converged && state.State != "stale"
-		if state.State == "deferred" && operation.options.Stderr != nil {
-			fmt.Fprintf(operation.options.Stderr,
-				"yard %s: installed Orca handler refresh deferred while the yard is stopped; run init after starting it\n", target.Name)
+		if state.State == "deferred" {
+			warnings = append(warnings, fmt.Sprintf(
+				"yard %s: installed Orca handler refresh deferred while the yard is stopped; run init after starting it", target.Name))
 		}
 	}
 	actualDigest := desiredDigest
 	if !converged {
 		actualDigest, err = activationStageFingerprint(actual)
 	}
-	return releasetransition.V2ActivationObservation{Actual: actualDigest, Desired: desiredDigest, Converged: converged}, err
+	return releasetransition.V2ActivationObservation{Actual: actualDigest, Desired: desiredDigest, Converged: converged, Warnings: warnings}, err
 }
 
 func (reconciler *orcaRuntimeActivationReconciler) Reconcile(ctx context.Context, _ releasetransition.ReleaseLinks) error {

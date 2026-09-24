@@ -1165,11 +1165,6 @@ func (runtime *Runtime) prepareInspectedCandidateTransition(
 				}
 				return transitionOutcomeError(*converged.Outcome)
 			}
-			for _, warning := range converged.Outcome.Warnings {
-				if runtime.config.Stderr != nil {
-					fmt.Fprintf(runtime.config.Stderr, "warning: release transition: %s\n", warning)
-				}
-			}
 			return nil
 		},
 	}, nil
