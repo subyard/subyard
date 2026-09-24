@@ -3,6 +3,7 @@
 
 Usage: python3 dev/e2e/environment-lifecycle.py --slot N --peer-slot M \
     --output-dir .build/environment-lifecycle-RUN [--require-cold]
+Single slot: --slot N --pair-only --output-dir .build/pair-reuse-RUN
 
 Only VM1 is probed. Pair VM2 readiness/resources are broker evidence. No Android
 SDK/GPU, outer-host lifecycle, raw SSH, or broker credentials are involved.
@@ -333,20 +334,59 @@ class Controller:
             lease.record.update(exit_code=lease.process.returncode, interrupted=True)
 
 
+def pair_reuse(controller, slot, require_cold):
+    """Check reuse across sequential leases without reserving a second slot."""
+    first = controller.acquire("first-pair", slot, "subyard-pair")
+    controller.ready(first)
+    fingerprint = first.record["base_fingerprint"]
+    idle = controller.release(first)
+    warm = controller.acquire("warm-pair", slot, "subyard-pair")
+    controller.ready(warm)
+    require(warm.record["base_fingerprint"] == fingerprint, "warm pair base changed")
+    distinct_identity(first.ready, warm.ready)
+    final = controller.release(warm)
+    require(current_bases(final).get("subyard-pair") == fingerprint,
+            "pair base not retained after release")
+    summary = controller.summary
+    changed = fingerprint != summary["initial_bases"].get("subyard-pair")
+    if require_cold:
+        require(changed, "cold pair fingerprint not observed")
+    summary.update(published_bases={"subyard-pair": fingerprint},
+                   fingerprint_changed={"subyard-pair": changed},
+                   idle_storage={"before_warm": idle["resources"].get("storage"),
+                                 "after_warm": final["resources"].get("storage")})
+    require(all("storage" in status["resources"] for status in (idle, final)),
+            "storage telemetry missing")
+    summary["idle_budget_delta_bytes"] = (final["resources"]["storage"]["budget_used_bytes"] -
+                                          idle["resources"]["storage"]["budget_used_bytes"])
+    summary["all_slots_available_at_end"] = all(
+        item["state"] == "available" for item in final["pool"]["slots"])
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--slot", required=True, type=int)
-    parser.add_argument("--peer-slot", required=True, type=int)
+    parser.add_argument("--peer-slot", type=int)
+    parser.add_argument("--pair-only", action="store_true",
+                        help="check two sequential pair leases in one slot; no Android allocation")
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--require-cold", action="store_true",
-                        help="require both types to publish fingerprints different from initial current bases")
+                        help="require tested types to publish fingerprints different from initial current bases")
     parser.add_argument("--disk-isolation", action="store_true",
                         help="fill peer VM1 root disk to ENOSPC while checking a held neighbor")
     args = parser.parse_args()
-    if not (1 <= args.slot <= 999 and 1 <= args.peer_slot <= 999 and args.slot != args.peer_slot):
-        parser.error("choose distinct slots from 1 to 999")
+    if not 1 <= args.slot <= 999:
+        parser.error("choose a slot from 1 to 999")
+    if args.pair_only:
+        if args.peer_slot is not None or args.disk_isolation:
+            parser.error("--pair-only does not use --peer-slot or --disk-isolation")
+        numbers = (args.slot,)
+    else:
+        if args.peer_slot is None or not 1 <= args.peer_slot <= 999 or args.slot == args.peer_slot:
+            parser.error("choose distinct --slot and --peer-slot from 1 to 999")
+        numbers = (args.slot, args.peer_slot)
     args.output_dir.mkdir(parents=True, exist_ok=False)
-    slots = ["slot-%03d" % number for number in (args.slot, args.peer_slot)]
+    slots = ["slot-%03d" % number for number in numbers]
     controller = Controller(args.output_dir, slots)
     summary = controller.summary
     started = time.monotonic()
@@ -362,70 +402,74 @@ def main():
                              "tracked_diff_sha256": hashlib.sha256(diff).hexdigest(),
                              "fixture_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
         summary["require_cold"] = args.require_cold
+        summary["pair_only"] = args.pair_only
         initial = controller.snapshot("initial")
         for slot in slots:
             require(slot_status(initial, slot)["state"] == "available", slot + " is not available")
         summary["initial_bases"] = current_bases(initial)
-        first = controller.acquire("first-pair", slots[0], "subyard-pair")
-        peer = controller.acquire("peer-pair", slots[1], "subyard-pair")
-        controller.ready(first, peer)
-        require(first.record["base_fingerprint"] == peer.record["base_fingerprint"],
-                "concurrent same-type requests used different bases")
-        distinct_identity(first.ready, peer.ready)
-        if args.disk_isolation:
-            controller.snapshot("before-disk-fill")
-            peer.send("fill")
-            full = controller.event(peer, "full")
-            require(0 < full["written_bytes"] <= peer.ready["root_disk_bytes"], "invalid disk fill size")
-            controller.snapshot("disk-full")
+        if args.pair_only:
+            pair_reuse(controller, slots[0], args.require_cold)
+        else:
+            first = controller.acquire("first-pair", slots[0], "subyard-pair")
+            peer = controller.acquire("peer-pair", slots[1], "subyard-pair")
+            controller.ready(first, peer)
+            require(first.record["base_fingerprint"] == peer.record["base_fingerprint"],
+                    "concurrent same-type requests used different bases")
+            distinct_identity(first.ready, peer.ready)
+            if args.disk_isolation:
+                controller.snapshot("before-disk-fill")
+                peer.send("fill")
+                full = controller.event(peer, "full")
+                require(0 < full["written_bytes"] <= peer.ready["root_disk_bytes"], "invalid disk fill size")
+                controller.snapshot("disk-full")
+                first.send("probe")
+                neighbor = controller.event(first, "identity")
+                require(same_identity(first.ready, neighbor) and neighbor["root_writable"],
+                        "neighbor failed while peer disk was full")
+                peer.send("clear")
+                cleared = controller.event(peer, "cleared")
+                require(cleared["free_bytes"] > 0, "guest space not reclaimed after closing fill file")
+                controller.snapshot("disk-cleared")
+                summary["disk_isolation"] = {"full": full, "cleared": cleared, "neighbor_writable": True}
+            controller.release(peer)
+            if args.disk_isolation:
+                first.send("probe")
+                neighbor = controller.event(first, "identity")
+                require(same_identity(first.ready, neighbor) and neighbor["root_writable"],
+                        "neighbor failed after peer disk release")
+            android = controller.acquire("first-android", slots[1], "android-test")
+            mixed = controller.ready(android)
+            require(slot_status(mixed, first.slot)["state"] == "held" and
+                    slot_status(mixed, first.slot)["run"] == first.ready["run"],
+                    "pair neighbor not held during Android acquisition")
             first.send("probe")
-            neighbor = controller.event(first, "identity")
-            require(same_identity(first.ready, neighbor) and neighbor["root_writable"],
-                    "neighbor failed while peer disk was full")
-            peer.send("clear")
-            cleared = controller.event(peer, "cleared")
-            require(cleared["free_bytes"] > 0, "guest space not reclaimed after closing fill file")
-            controller.snapshot("disk-cleared")
-            summary["disk_isolation"] = {"full": full, "cleared": cleared, "neighbor_writable": True}
-        controller.release(peer)
-        if args.disk_isolation:
-            first.send("probe")
-            neighbor = controller.event(first, "identity")
-            require(same_identity(first.ready, neighbor) and neighbor["root_writable"],
-                    "neighbor failed after peer disk release")
-        android = controller.acquire("first-android", slots[1], "android-test")
-        mixed = controller.ready(android)
-        require(slot_status(mixed, first.slot)["state"] == "held" and
-                slot_status(mixed, first.slot)["run"] == first.ready["run"],
-                "pair neighbor not held during Android acquisition")
-        first.send("probe")
-        require(same_identity(first.ready, controller.event(first, "identity")),
-                "held neighbor changed identity")
-        idle = controller.release(first, android)
-        bases = {lease.kind: lease.record["base_fingerprint"] for lease in (first, android)}
-        summary["published_bases"] = bases
-        summary["fingerprint_changed"] = {kind: fingerprint != summary["initial_bases"].get(kind)
-                                          for kind, fingerprint in bases.items()}
-        if args.require_cold:
-            require(all(summary["fingerprint_changed"].values()), "cold build fingerprints not observed")
-        warm_pair = controller.acquire("warm-pair", slots[0], "subyard-pair")
-        warm_android = controller.acquire("warm-android", slots[1], "android-test")
-        controller.ready(warm_pair, warm_android)
-        for fresh in (warm_pair, warm_android):
-            require(fresh.record["base_fingerprint"] == bases[fresh.kind], "warm base changed")
-            for prior in (first, peer, android):
-                distinct_identity(fresh.ready, prior.ready)
-        distinct_identity(warm_pair.ready, warm_android.ready)
-        final = controller.release(warm_pair, warm_android)
-        require(all(current_bases(final).get(kind) == fingerprint for kind, fingerprint in bases.items()),
-                "current bases not retained after release")
-        summary["idle_storage"] = {"before_warm": idle["resources"].get("storage"),
-                                   "after_warm": final["resources"].get("storage")}
-        before = idle["resources"].get("storage", {}).get("budget_used_bytes")
-        after = final["resources"].get("storage", {}).get("budget_used_bytes")
-        require(before is not None and after is not None, "dedicated storage budget telemetry missing")
-        summary["idle_budget_delta_bytes"] = after - before
-        summary["all_slots_available_at_end"] = all(item["state"] == "available" for item in final["pool"]["slots"])
+            require(same_identity(first.ready, controller.event(first, "identity")),
+                    "held neighbor changed identity")
+            idle = controller.release(first, android)
+            bases = {lease.kind: lease.record["base_fingerprint"] for lease in (first, android)}
+            summary["published_bases"] = bases
+            summary["fingerprint_changed"] = {kind: fingerprint != summary["initial_bases"].get(kind)
+                                              for kind, fingerprint in bases.items()}
+            if args.require_cold:
+                require(all(summary["fingerprint_changed"].values()), "cold build fingerprints not observed")
+            warm_pair = controller.acquire("warm-pair", slots[0], "subyard-pair")
+            warm_android = controller.acquire("warm-android", slots[1], "android-test")
+            controller.ready(warm_pair, warm_android)
+            for fresh in (warm_pair, warm_android):
+                require(fresh.record["base_fingerprint"] == bases[fresh.kind], "warm base changed")
+                for prior in (first, peer, android):
+                    distinct_identity(fresh.ready, prior.ready)
+            distinct_identity(warm_pair.ready, warm_android.ready)
+            final = controller.release(warm_pair, warm_android)
+            require(all(current_bases(final).get(kind) == fingerprint for kind, fingerprint in bases.items()),
+                    "current bases not retained after release")
+            summary["idle_storage"] = {"before_warm": idle["resources"].get("storage"),
+                                       "after_warm": final["resources"].get("storage")}
+            before = idle["resources"].get("storage", {}).get("budget_used_bytes")
+            after = final["resources"].get("storage", {}).get("budget_used_bytes")
+            require(before is not None and after is not None, "dedicated storage budget telemetry missing")
+            summary["idle_budget_delta_bytes"] = after - before
+            summary["all_slots_available_at_end"] = all(item["state"] == "available" for item in final["pool"]["slots"])
         summary["result"] = "passed"
     except (Exception, KeyboardInterrupt) as error:
         summary.update(result="failed", error=str(error))
@@ -437,7 +481,8 @@ def main():
         except Exception as error:
             summary.update(result="failed", cleanup_error=str(error))
         summary["builder_samples"] = [sample for sample in controller.snapshots if sample["builder"]]
-        summary["singleflight_evidence_limit"] = "same published fingerprint plus sampled builder state; samples cannot count unobserved builds"
+        summary["singleflight_evidence_limit"] = ("sequential leases only" if args.pair_only else
+            "same published fingerprint plus sampled builder state; samples cannot count unobserved builds")
         summary.update(finished_at=utc(), duration_seconds=round(time.monotonic() - started, 2))
         (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print("environment-lifecycle: %s; %s" % (summary["result"], args.output_dir / "summary.json"))

@@ -84,6 +84,11 @@ the broker budget. Status reports this charge separately as `budget_used_bytes`.
 and `zfs`, budget accounting retains the conservative whole-pool usage bound. Missing or unsafe
 usage measurements refuse admission; they never waive the budget or physical reserve.
 
+Deleting a file inside a `dir`-backed guest need not immediately reduce the host blocks charged
+to its virtual disk. The disk-exhaustion check observed guest free space return after closing
+the temporary file, while host allocation stayed high until release deleted the root volume.
+Use the broker's physical usage and remaining-growth fields when assessing headroom.
+
 Admission settings use ordinary shipped/shared/host/yard/command configuration precedence and are
 installed by `yard init`. These initial defaults still require workload peak measurements:
 
@@ -347,7 +352,45 @@ dev/agent-e2e.sh --slot "$slot" --purpose integration-remote --vm 1 -- \
 
 These are targeted lifecycle checks. See the skill for publication and broader coverage criteria.
 
-To check the environment pool itself, choose two available slots and run:
+To check disk exhaustion within one standard pair while other agents use their own slots:
+
+```sh
+bash dev/e2e/slot-disk-isolation.sh "$slot" .build/slot-disk-isolation-RUN
+```
+
+This uses one lease with two 4 GiB / 20 GiB guests. It fills VM1's root filesystem to
+`ENOSPC`, verifies that VM2 remains writable, reclaims the fill file, then releases the
+allocation and checks that its working reservation is gone. The output directory must be
+new. The check uses the runner's ordinary admission and never changes resource limits.
+It does not establish another agent's workload health or exercise nested broker recovery.
+
+For the broker's physical storage adapter contract, use VM1 of one standard pair:
+
+```sh
+dev/agent-e2e.sh --slot "$slot" --type subyard-pair --purpose broker-storage-contract --vm 1 -- \
+  bash dev/e2e/broker-storage-contract.sh
+```
+
+The launcher compiles as `dev`, then uses guest-local passwordless sudo for the opt-in test.
+The test requires root and the runner's guest context. It creates a uniquely owned
+`dir` pool and tiny empty VM images, with at most one 512 MiB firmware VM running inside the
+allocated guest. It exercises production deletion guards, root/snapshot removal, pinned image
+retention and pruning, and cleanup from a persisted builder record. It downloads no guest OS.
+It does not run a complete nested broker or establish guest OS/agent readiness; use host-free
+broker tests and the ordinary pair lifecycle checks for those separate contracts.
+
+To check clean pair reuse with two sequential leases in one available slot:
+
+```sh
+python3 dev/e2e/environment-lifecycle.py --slot "$slot" --pair-only \
+  --output-dir .build/pair-reuse-RUN
+```
+
+This mode requests only `subyard-pair`. It verifies cached base reuse, fresh VM1 identities,
+absence of the previous lease's marker, resources, dev cache/KVM access, and release cleanup.
+Other agents can keep using their slots; their usage may change aggregate storage samples.
+
+To check the mixed environment pool, choose two available slots and run:
 
 ```sh
 python3 dev/e2e/environment-lifecycle.py --slot "$slot" --peer-slot "$peer_slot" \
