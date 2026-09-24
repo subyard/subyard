@@ -181,9 +181,14 @@ esac
 	if !strings.Contains(diagnostics.String(), "stopped") || !strings.Contains(diagnostics.String(), "deferred") {
 		t.Fatalf("stopped yard deferral was hidden: %s", diagnostics.String())
 	}
+	if strings.Contains(diagnostics.String(), "yard default:") || strings.Contains(diagnostics.String(), "yard named:") {
+		t.Fatalf("repairable Orca drift emitted a warning during assessment: %s", diagnostics.String())
+	}
 	writeCLIFile(t, filepath.Join(home, "fail-orca"), "", 0o600)
 	if err := reconciler.Reconcile(ctx, releasetransition.ReleaseLinks{}); err == nil {
 		t.Fatal("failed helper installation was accepted")
+	} else if !strings.Contains(err.Error(), "yard default Orca runtime refresh:") {
+		t.Fatalf("failed helper installation lost its diagnostic: %v", err)
 	}
 	if err := os.Remove(filepath.Join(home, "fail-orca")); err != nil {
 		t.Fatal(err)

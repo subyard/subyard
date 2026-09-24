@@ -107,10 +107,6 @@ func (reconciler *orcaRuntimeActivationReconciler) Observe(
 			Instance: target.Loaded.Context.YardInstanceName, State: kind, Digest: state.Actual}
 		actual = append(actual, entry)
 		converged = converged && state.State != "stale"
-		if state.State == "stale" && operation.options.Stderr != nil {
-			fmt.Fprintf(operation.options.Stderr,
-				"yard %s: installed Orca project handler is stale or incomplete; run yard init or yard update\n", target.Name)
-		}
 		if state.State == "deferred" && operation.options.Stderr != nil {
 			fmt.Fprintf(operation.options.Stderr,
 				"yard %s: installed Orca handler refresh deferred while the yard is stopped; run init after starting it\n", target.Name)
