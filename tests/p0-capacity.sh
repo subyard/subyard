@@ -226,7 +226,6 @@ export P0_FAKE_INCUS_STATE="$TMP/incus-state"
 cat > "$TMP/bin/id" <<'EOF'
 #!/bin/bash
 case "$*" in
-  -u) printf '1000\n' ;;
   -un) printf 'dev\n' ;;
   -nG) printf 'dev %s\n' "${P0_FAKE_ACTIVE_GROUP-incus-admin}" ;;
   *) exec /usr/bin/id "$@" ;;

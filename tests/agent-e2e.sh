@@ -1084,7 +1084,7 @@ grep -Fq 'recover_stale_source_upgrade_fixture' "$ROOT/dev/e2e/p0-guest.sh" \
     "$ROOT/dev/e2e/p0-guest.sh" \
   && grep -Fq 'timeout --signal=TERM --kill-after="$kill_after"' \
     "$ROOT/dev/e2e/p0-guest.sh" \
-  && grep -A3 -F 'capacity_preflight()' "$ROOT/dev/e2e/p0-guest.sh" \
+  && sed -n '/^capacity_preflight() {/,/^}/p' "$ROOT/dev/e2e/p0-guest.sh" \
     | grep -Fq 'recover_stale_source_upgrade_fixture' \
   || fail 'P0 preflight cannot recover a marker-owned interrupted source-upgrade fixture'
 source_recovery_function="$(awk '
