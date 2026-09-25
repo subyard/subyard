@@ -40,6 +40,10 @@ printf '%s\n' \
   '#!/bin/bash' \
   'set -euo pipefail' \
   'case "$*" in' \
+  '  "-n -E /usr/sbin/runuser -u dev -g incus-admin -- "*)' \
+  '    printf "activate-incus-group\n" >> "$P0_FAKE_SUDO_LOG"' \
+  '    [ "${P0_FAKE_GROUP_DENIED:-0}" = 0 ] || exit 1' \
+  '    shift 8; export P0_FAKE_ACTIVE_GROUP=incus-admin; exec "$@" ;;' \
   '  "-n systemctl restart incus.service")' \
   '    printf "%s\n" "$*" >> "$P0_FAKE_SUDO_LOG"' \
   '    ;;' \
@@ -219,6 +223,16 @@ if (p0_capacity_require_persistent_path /dev/shm fixture-tmpfs) >/dev/null 2>&1;
 fi
 
 export P0_FAKE_INCUS_STATE="$TMP/incus-state"
+cat > "$TMP/bin/id" <<'EOF'
+#!/bin/bash
+case "$*" in
+  -u) printf '1000\n' ;;
+  -un) printf 'dev\n' ;;
+  -nG) printf 'dev %s\n' "${P0_FAKE_ACTIVE_GROUP-incus-admin}" ;;
+  *) exec /usr/bin/id "$@" ;;
+esac
+EOF
+chmod 0700 "$TMP/bin/id"
 export P0_FAKE_INCUS_LOG="$TMP/incus-log"
 export P0_FAKE_INCUS_PROJECT="$TMP/incus-project"
 export P0_FAKE_INCUS_MARKER=
@@ -309,6 +323,18 @@ run_recovery_preflight() {
 }
 
 run_recovery_preflight 124 /var/tmp/subyard-nested-teardown.fixture/storage
+
+# The fresh operator has no persisted membership; recovery gets a process-local group.
+: > "$P0_FAKE_SUDO_LOG"
+P0_FAKE_ACTIVE_GROUP='' run_recovery_preflight 142 /var/tmp/subyard-nested-teardown.fixture/storage
+[ "$(cat "$P0_FAKE_SUDO_LOG")" = activate-incus-group ] \
+  || fail 'fresh preflight did not activate Incus access exactly once'
+: > "$P0_FAKE_INCUS_LOG"
+if P0_FAKE_ACTIVE_GROUP='' P0_FAKE_GROUP_DENIED=1 SUBYARD_E2E_VM=1 \
+  bash "$ROOT/dev/e2e/p0-guest.sh" capacity-preflight 143 >/dev/null 2>&1; then
+  fail 'preflight accepted denied Incus group activation'
+fi
+[ ! -s "$P0_FAKE_INCUS_LOG" ] || fail 'denied preflight mutated Incus state'
 
 stale_pool_root="$HOME/.cache/subyard-p0-121"
 install -d -m 0700 "$stale_pool_root"

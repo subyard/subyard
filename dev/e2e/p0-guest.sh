@@ -1926,6 +1926,14 @@ recover_stale_real_incus_fixture() {
 }
 
 capacity_preflight() {
+  # Fresh bases install Incus without granting the operator membership yet.
+  # Give only this recovery process access; yard init still owns membership.
+  if command -v incus >/dev/null 2>&1 && [ "$(id -u)" != 0 ] \
+    && ! id -nG | tr ' ' '\n' | grep -qx incus-admin; then
+    exec sudo -n -E /usr/sbin/runuser -u "$(id -un)" -g incus-admin -- \
+      env HOME="$HOME" PATH="$PATH" \
+      bash "$ROOT/dev/e2e/p0-guest.sh" capacity-preflight "$TOKEN"
+  fi
   recover_stale_source_upgrade_fixture
   recover_stale_real_incus_fixture
   recover_stale_test_default_pool
