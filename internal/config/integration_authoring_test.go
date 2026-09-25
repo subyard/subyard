@@ -10,12 +10,14 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/domain"
+
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestYardIntegrationWriteMigratesFullRegistration(t *testing.T) {
 	for _, source := range []string{"flat", "private"} {
 		t.Run(source, func(t *testing.T) {
-			root := t.TempDir()
+			root := testkit.TempDir(t)
 			configHome := filepath.Join(root, "state")
 			configDir := filepath.Join(root, "config")
 			path := filepath.Join(configHome, "yards/demo.env")
@@ -65,7 +67,7 @@ func TestYardIntegrationWriteMigratesFullRegistration(t *testing.T) {
 }
 
 func TestYardIntegrationWriteRejectsStaleSource(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	path := filepath.Join(root, "yards/demo.env")
 	writeFixture(t, path, "SSH_PORT=2244\n")
 	loaded := Loaded{Context: domain.Context{YardName: "demo", Paths: domain.RuntimePaths{ConfigHome: root, ConfigDir: filepath.Join(root, "config")}}}
@@ -87,7 +89,7 @@ func TestYardIntegrationWriteRejectsStaleSource(t *testing.T) {
 }
 
 func TestYardIntegrationWriteRejectsSameBytesReplacementAndPreservesNoOp(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	path := filepath.Join(root, "yards/default/config.env")
 	writeFixture(t, path, "CODING_TOOL_INTEGRATIONS='codex'\n")
 	loaded := Loaded{Context: domain.Context{YardName: "default", Paths: domain.RuntimePaths{ConfigHome: root}}}
@@ -119,7 +121,7 @@ func TestYardIntegrationWriteRejectsSameBytesReplacementAndPreservesNoOp(t *test
 func TestYardIntegrationWriteRejectsNewSourceAuthority(t *testing.T) {
 	for _, existing := range []bool{false, true} {
 		t.Run(fmt.Sprint(existing), func(t *testing.T) {
-			root := t.TempDir()
+			root := testkit.TempDir(t)
 			path := filepath.Join(root, "yards/default/config.env")
 			if existing {
 				writeFixture(t, path, "CODING_TOOL_INTEGRATIONS='codex'\n")
@@ -142,7 +144,7 @@ func TestYardIntegrationWriteRejectsNewSourceAuthority(t *testing.T) {
 }
 
 func TestPersistentCASGuardHoldsLockBeforeMutation(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	path := filepath.Join(root, "config.env")
 	writeFixture(t, path, "CODING_TOOL_INTEGRATIONS='codex'\n")
 	before, err := ReadPersistentFileSnapshot(root, path)

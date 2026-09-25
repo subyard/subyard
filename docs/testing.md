@@ -8,6 +8,10 @@ This guide documents how to run checks and interpret their evidence.
 Use the skill's [risk-based selection policy](../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk)
 for both adding tests and choosing which existing checks to run.
 
+Use `testkit.WriteFile` for exact file modes and `testkit.TempDir` for private
+fixture roots. Keep raw calls for creation-semantics tests. The Go race gate runs uncached under
+umasks `0002`, `0022` and `0077` in separate processes.
+
 ## Run the core checks
 
 `./tests/run.sh` checks the current source files, including uncommitted edits. No Git history,

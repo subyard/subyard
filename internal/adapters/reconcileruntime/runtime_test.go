@@ -647,15 +647,11 @@ func TestSSHProbeOwnsProxyAndClientConfig(t *testing.T) {
 	if err := os.Mkdir(unitDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(unitDir, "subyard-ssh-relay-2222.socket"), []byte(
-		"[Socket]\nListenStream=127.0.0.1:2222\nAccept=no\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(unitDir, "subyard-ssh-relay-2222.socket"), []byte(
+		"[Socket]\nListenStream=127.0.0.1:2222\nAccept=no\n"), 0o644)
 	service := filepath.Join(unitDir, "subyard-ssh-relay-2222.service")
-	if err := os.WriteFile(service, []byte(
-		"[Service]\nExecStart=/usr/lib/systemd/systemd-socket-proxyd 10.0.0.2:22\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, service, []byte(
+		"[Service]\nExecStart=/usr/lib/systemd/systemd-socket-proxyd 10.0.0.2:22\n"), 0o644)
 	runtime.Environment = append(runtime.Environment, "SUBYARD_SSH_RELAY_UNIT_DIR="+unitDir,
 		fmt.Sprintf("SUBYARD_SSH_RELAY_EXPECTED_UID=%d", os.Geteuid()))
 	assertStage(t, runtime, "ssh", true, "matching VM loopback relay")

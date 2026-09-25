@@ -11,6 +11,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/shellquote"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 const fixturePublicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA fixture"
@@ -480,9 +481,7 @@ func writeRemoteFile(t *testing.T, path, payload string, mode os.FileMode) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte(payload), mode); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, []byte(payload), mode)
 }
 
 func assertRemoteFileContains(t *testing.T, path, expected string) {

@@ -45,12 +45,8 @@ func TestProjectHooksProbeUsesExactDispatcherAndSelectedList(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if err := os.WriteFile(dispatcher, source, 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(hooks, []byte("/usr/local/bin/selected-hook\n"), 0o644); err != nil {
-				t.Fatal(err)
-			}
+			testkit.WriteFile(t, dispatcher, source, 0o755)
+			testkit.WriteFile(t, hooks, []byte("/usr/local/bin/selected-hook\n"), 0o644)
 			runtime := Runtime{RepositoryRoot: "../../..", Executor: projectHooksFileExecutor{root}, Environment: []string{
 				"CODING_TOOL_INTEGRATIONS=selected", "AGENT_selected_PROJECTS_CHANGED=/usr/local/bin/selected-hook",
 				"AGENT_disabled_PROJECTS_CHANGED=/usr/local/bin/not-selected",

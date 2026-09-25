@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestVersionedConfigSyncAppliesOnlyTypedSelectedHostSettings(t *testing.T) {
@@ -826,10 +827,7 @@ func TestEnsureHostIDRepairsLegacyConfigurationRootMode(t *testing.T) {
 }
 
 func TestHostIDRenameUpdatesIdentityAndManifestAtomically(t *testing.T) {
-	configHome := t.TempDir()
-	if err := os.Chmod(configHome, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	configHome := testkit.TempDir(t)
 	writeSyncTestFile(t, HostIDPath(configHome), "owner-a\n", 0o600)
 	manifest := Manifest{
 		SchemaVersion: manifestSchema, Generation: 3,
@@ -866,10 +864,7 @@ func TestHostIDRenameUpdatesIdentityAndManifestAtomically(t *testing.T) {
 }
 
 func TestHostIDRenameRejectsUnsafeAndNoopNames(t *testing.T) {
-	configHome := t.TempDir()
-	if err := os.Chmod(configHome, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	configHome := testkit.TempDir(t)
 	writeSyncTestFile(t, HostIDPath(configHome), "owner-a\n", 0o600)
 	for _, candidate := range []string{"owner-a", "", "../owner-b", "owner/b"} {
 		if _, err := PrepareHostIDRename(configHome, candidate); err == nil {
@@ -890,10 +885,7 @@ func TestHostIDRenameRecoveryUsesHostIDAsCommitPoint(t *testing.T) {
 		{name: "finish after identity publish", published: true, wantHostID: "owner-b", wantManifest: "owner-b"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			configHome := t.TempDir()
-			if err := os.Chmod(configHome, 0o700); err != nil {
-				t.Fatal(err)
-			}
+			configHome := testkit.TempDir(t)
 			writeSyncTestFile(t, HostIDPath(configHome), "owner-a\n", 0o600)
 			manifest := Manifest{
 				SchemaVersion: manifestSchema, Generation: 2,
@@ -1076,12 +1068,7 @@ func writeSyncTestFile(t *testing.T, path, content string, mode os.FileMode) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte(content), mode); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(path, mode); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, []byte(content), mode)
 }
 
 func assertSyncTestFile(t *testing.T, path, expected string, mode os.FileMode) {

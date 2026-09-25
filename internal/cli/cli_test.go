@@ -478,9 +478,7 @@ func repositoryRoot(t *testing.T) string {
 
 func writeCLIFile(t *testing.T, path, contents string, mode os.FileMode) {
 	t.Helper()
-	if err := os.WriteFile(path, []byte(contents), mode); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, []byte(contents), mode)
 }
 
 func trustedSSHMock(t *testing.T) string {

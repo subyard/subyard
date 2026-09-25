@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestReadyRequiresSafeExactActiveRelay(t *testing.T) {
@@ -15,17 +17,13 @@ func TestReadyRequiresSafeExactActiveRelay(t *testing.T) {
 	if err := os.Mkdir(unitDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit \"${SYSTEMCTL_STATUS:-0}\"\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, bin, []byte("#!/bin/sh\nexit \"${SYSTEMCTL_STATUS:-0}\"\n"), 0o700)
 	uid := os.Geteuid()
 	socket := filepath.Join(unitDir, "subyard-ssh-relay-2222.socket")
 	service := filepath.Join(unitDir, "subyard-ssh-relay-2222.service")
 	write := func(path, contents string, mode os.FileMode) {
 		t.Helper()
-		if err := os.WriteFile(path, []byte(contents), mode); err != nil {
-			t.Fatal(err)
-		}
+		testkit.WriteFile(t, path, []byte(contents), mode)
 	}
 	write(socket, "[Socket]\nListenStream=127.0.0.1:2222\nAccept=no\n", 0o644)
 	write(service, "[Service]\nExecStart=/usr/lib/systemd/systemd-socket-proxyd 10.0.0.2:22\n", 0o644)

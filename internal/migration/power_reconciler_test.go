@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestPreviousRuntimeOptionsRequireRetainedRegularExecutable(t *testing.T) {
@@ -195,7 +197,5 @@ func materializedPowerUnit(t *testing.T, templatePath, reconciler string) string
 
 func writePowerMigrationFile(t *testing.T, path, contents string, mode os.FileMode) {
 	t.Helper()
-	if err := os.WriteFile(path, []byte(contents), mode); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, []byte(contents), mode)
 }

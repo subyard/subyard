@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 type paseoCleanupFixture struct {
@@ -29,7 +31,7 @@ func newPaseoCleanupFixture(t *testing.T) paseoCleanupFixture {
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Fatal("Paseo cleanup tests require python3")
 	}
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	source, err := os.ReadFile("../../../config/agents/paseo/cleanup.sh")
 	if err != nil {
 		t.Fatal(err)

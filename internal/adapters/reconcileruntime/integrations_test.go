@@ -643,9 +643,7 @@ func TestIntegrationInventoryAdoptsExactSelectedArtifactsOnlyInitially(t *testin
 	if err := os.Mkdir(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filePath, []byte("selected rules"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filePath, []byte("selected rules"), 0o644)
 	if err := os.Chown(filePath, -1, os.Getuid()); err != nil {
 		t.Fatal(err)
 	}
@@ -780,8 +778,8 @@ func TestIntegrationInventoryAdoptionRejectsDriftAndStaleAssessment(t *testing.T
 				if err := os.Symlink(root+"/other", path); err != nil {
 					t.Fatal(err)
 				}
-			} else if err := os.WriteFile(path, []byte("desired"), 0o644); err != nil {
-				t.Fatal(err)
+			} else {
+				testkit.WriteFile(t, path, []byte("desired"), 0o644)
 			}
 			if scenario == "link-target" {
 				if err := os.Lchown(path, -1, gid); err != nil {

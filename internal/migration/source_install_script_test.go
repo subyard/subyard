@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 type sourceInstallFixture struct {
@@ -917,9 +919,7 @@ func writeTestFile(t *testing.T, path string, mode os.FileMode, contents string)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte(contents), mode); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, []byte(contents), mode)
 }
 
 func readTestFile(t *testing.T, path string) []byte {

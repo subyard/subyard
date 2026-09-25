@@ -1,5 +1,5 @@
-// Package testkit contains deterministic, side-effect-free implementations of
-// application ports. Production packages must never import it.
+// Package testkit provides test doubles and filesystem fixtures.
+// Production packages must never import it.
 package testkit
 
 import (

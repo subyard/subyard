@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 const emptyTreeSHA1 = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
@@ -463,16 +465,12 @@ func writeFile(t *testing.T, repo, name, contents string, mode os.FileMode) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir fixture parent: %v", err)
 	}
-	if err := os.WriteFile(path, []byte(contents), mode); err != nil {
-		t.Fatalf("write fixture %s: %v", name, err)
-	}
+	testkit.WriteFile(t, path, []byte(contents), mode)
 }
 
 func writeExecutable(t *testing.T, path, contents string) {
 	t.Helper()
-	if err := os.WriteFile(path, []byte(contents), 0o755); err != nil {
-		t.Fatalf("write executable fixture: %v", err)
-	}
+	testkit.WriteFile(t, path, []byte(contents), 0o755)
 }
 
 func removePath(t *testing.T, path string) {

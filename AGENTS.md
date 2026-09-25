@@ -12,6 +12,9 @@ Readiness checks return state and diagnostics; the operation boundary renders th
 Expected drift is not a warning. Follow the
 [activation diagnostic contract](docs/control-plane.md#release-migrations).
 
+Do not rely on umask for exact file modes. Preserve permission validation; use
+`testkit.WriteFile` for exact fixture modes and `testkit.TempDir` for private roots.
+
 ## Private overlay
 If `private/AGENTS.md` exists locally (it is gitignored and lives in the separate private repo),
 read and follow it **in addition** to this file. It carries private, non-public working rules

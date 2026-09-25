@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestYardRegistrationRepairMovesFlatRegistrationToRecovery(t *testing.T) {
@@ -81,10 +83,7 @@ func TestYardRegistrationRepairMovesFlatRegistrationToRecovery(t *testing.T) {
 }
 
 func TestPlanYardRegistrationRepairRejectsInvalidOrIncompleteRegistration(t *testing.T) {
-	configHome := t.TempDir()
-	if err := os.Chmod(configHome, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	configHome := testkit.TempDir(t)
 	for _, name := range []string{"", "default", "../escape"} {
 		if _, err := PlanYardRegistrationRepair(configHome, name); err == nil {
 			t.Fatalf("accepted unsafe yard name %q", name)
@@ -244,10 +243,7 @@ func TestYardRegistrationRepairRechecksSourcesAfterPreparingRecovery(t *testing.
 
 func registrationRepairFixture(t *testing.T) (string, string, string) {
 	t.Helper()
-	configHome := t.TempDir()
-	if err := os.Chmod(configHome, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	configHome := testkit.TempDir(t)
 	nestedPath := filepath.Join(configHome, "yards", "named", "config.env")
 	flatPath := filepath.Join(configHome, "yards", "named.env")
 	writeRegistrationRepairFile(t, nestedPath, []byte("YARD_TEMPLATE=test-vms\nSSH_PORT=2223\n"), 0o600)
@@ -260,7 +256,5 @@ func writeRegistrationRepairFile(t *testing.T, path string, content []byte, mode
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, content, mode); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, content, mode)
 }

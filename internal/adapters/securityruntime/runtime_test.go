@@ -16,6 +16,7 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/resource"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestSecurityRuntimeRejectsStaticSocketMountWithoutHostAccess(t *testing.T) {
@@ -344,13 +345,11 @@ func TestSecurityRuntimeReportsForwardedSSHAgentBoundaryOnlyWhenEnabled(t *testi
 
 func TestSecurityRuntimeRequiresPrivateIdentityMode(t *testing.T) {
 	runtime := testRuntime(t)
-	root := filepath.Join(t.TempDir(), "keys")
+	root := filepath.Join(testkit.TempDir(t), "keys")
 	if err := os.MkdirAll(filepath.Join(root, "identity"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "identity", "age.txt"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(root, "identity", "age.txt"), []byte("x"), 0o644)
 	runtime.Environment["SUBYARD_KEYS_ROOT"] = root
 	var diagnostics bytes.Buffer
 	runtime.Stderr = &diagnostics
@@ -394,12 +393,15 @@ func TestSecurityRuntimeReportsActiveSSHAgentAccess(t *testing.T) {
 func TestSecurityRuntimeWarnsWhenSSHAgentStateCannotBeInspected(t *testing.T) {
 	runtime := testRuntime(t)
 	runtime.Yard.YardName = "test"
-	runtime.Yard.Paths.DataHome = t.TempDir()
+	runtime.Yard.Paths.DataHome = testkit.TempDir(t)
 	directory := sshagentruntime.Directory(runtime.Yard.Paths.DataHome, runtime.Yard.YardName)
 	if err := os.MkdirAll(filepath.Dir(directory), 0700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Mkdir(directory, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(directory, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(directory) })

@@ -3395,9 +3395,7 @@ func writeConfigCommandFile(t *testing.T, path, contents string, modes ...os.Fil
 	if len(modes) != 0 {
 		mode = modes[0]
 	}
-	if err := os.WriteFile(path, []byte(contents), mode); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, []byte(contents), mode)
 }
 
 func writeConfigAuthoringEditor(t *testing.T, body string) string {

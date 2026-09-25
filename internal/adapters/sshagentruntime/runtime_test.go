@@ -6,22 +6,26 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"encoding/pem"
-	"golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/agent"
-	"golang.org/x/sys/unix"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Subyard/Subyard/internal/testkit"
+	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
+	"golang.org/x/sys/unix"
 )
 
 func TestManagerRejectsUnsafeDirectoryAndInvalidTTL(t *testing.T) {
-	root := t.TempDir()
-	os.Chmod(root, 0700)
+	root := testkit.TempDir(t)
 	dir := filepath.Join(root, "grant")
 	if err := os.Mkdir(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	m := Manager{Config: Config{Directory: dir}}
@@ -135,10 +139,14 @@ func TestDaemonPendingGrantCanBeLockedAndCannotRestartGrant(t *testing.T) {
 }
 
 func TestUnsafePathsDoNotCreateOrTruncateFiles(t *testing.T) {
-	root := t.TempDir()
-	os.Chmod(root, 0700)
+	root := testkit.TempDir(t)
 	public := filepath.Join(root, "public")
-	os.Mkdir(public, 0755)
+	if err := os.Mkdir(public, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(public, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	child := filepath.Join(public, "grant")
 	if err := validateDirectory(child, true); err == nil {
 		t.Fatal("accepted public parent")
@@ -147,7 +155,7 @@ func TestUnsafePathsDoNotCreateOrTruncateFiles(t *testing.T) {
 		t.Fatal("created directory before rejecting parent")
 	}
 	victim := filepath.Join(root, "victim")
-	os.WriteFile(victim, []byte("preserve"), 0600)
+	testkit.WriteFile(t, victim, []byte("preserve"), 0o600)
 	link := filepath.Join(root, "linked")
 	os.Link(victim, link)
 	if f, err := protectedFile(link, os.O_WRONLY|os.O_TRUNC); err == nil {

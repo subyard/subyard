@@ -2506,7 +2506,5 @@ func writeReleaseTransitionTestFile(t *testing.T, path string, payload []byte, m
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, payload, mode); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, payload, mode)
 }

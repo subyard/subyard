@@ -10,6 +10,16 @@ cp "$ROOT/tests/run.sh" "$fixture/tests/run.sh"
 printf '#!/usr/bin/env bash\n' > "$fixture/bin/yard"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/tools/go"
 cp "$tmp/tools/go" "$tmp/tools/gofmt"
+cat > "$tmp/tools/go" <<'SH'
+#!/usr/bin/env bash
+set -eu
+case " $* " in
+  *' test -race '*)
+    printf '%s %s\n' "$(umask)" "$*" >> "$RUNNER_GO_LOG"
+    [ "$(umask)" != "${RUNNER_FAIL_UMASK:-}" ] || exit 24
+    ;;
+esac
+SH
 chmod +x "$tmp/tools/"*
 cat > "$fixture/dev/build-engine.sh" <<'SH'
 #!/usr/bin/env bash
@@ -25,12 +35,18 @@ for suite in unit contract integration; do
 done
 
 run_fixture() {
-  env PATH="$tmp/tools:$PATH" bash "$fixture/tests/run.sh" > "$tmp/$1.out" 2>&1
+  env PATH="$tmp/tools:$PATH" RUNNER_GO_LOG="$tmp/$1.go" \
+    bash "$fixture/tests/run.sh" > "$tmp/$1.out" 2>&1
 }
 summary_path() { sed -n 's/^RESULTS //p' "$tmp/$1.out"; }
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
 run_fixture success
+awk '$1 != "0002" && $1 != "0022" && $1 != "0077" { exit 1 }
+  !/-count=1/ { exit 1 }
+  { masks[$1]++; count++ }
+  END { if (count != 3 || masks["0002"] != 1 || masks["0022"] != 1 || masks["0077"] != 1) exit 1 }
+' "$tmp/success.go" || fail 'Go tests did not run uncached under each umask'
 summary="$(summary_path success)"
 awk -F '\t' '
   NR == 1 { if ($0 != "kind\tsuite\tcheck\tstatus\texit_code\tduration_seconds\tlog") exit 1; next }
@@ -47,6 +63,12 @@ unit_log="$(awk -F '\t' '$3 == "tests/unit.sh" { print $7 }' "$summary")"
 grep -q 'hidden successful output' "$(dirname "$summary")/$unit_log" || fail 'successful log was lost'
 run_fixture second
 [ "$(summary_path second)" != "$summary" ] && [ -f "$summary" ] || fail 'second run overwrote first run'
+
+rc=0
+RUNNER_FAIL_UMASK=0022 run_fixture umask-failure || rc=$?
+[ "$rc" -eq 24 ] || fail 'umask matrix hid a failed Go run'
+! grep -q '^0077 ' "$tmp/umask-failure.go" || fail 'umask matrix continued after failure'
+! grep -q 'RUN build' "$tmp/umask-failure.out" || fail 'runner built after a failed Go run'
 
 # Preserve the child's exact failure and stop before the next test/suite.
 printf '#!/usr/bin/env bash\nprintf "expected failure detail\\n" >&2\nexit 23\n' > "$fixture/tests/unit.sh"
