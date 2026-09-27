@@ -548,30 +548,22 @@ guest_json_projection_hash() {
 }
 
 capture_orca_runtime_json() {
-  guest_root jq -e '
-    (.hooks | type == "object" and length > 0) and
-    (.statusLine != null)
-  ' /home/dev/.claude/settings.json >/dev/null \
-    || die 'Orca did not add Claude hooks and status line'
-  CLAUDE_HOOKS_COUNT="$(guest_root jq -er '.hooks | length | select(. > 0)' \
-    /home/dev/.claude/settings.json 2>/dev/null)" \
-    || die 'Orca did not add Claude hooks'
-  CLAUDE_HOOKS_HASH="$(guest_json_projection_hash '.hooks' \
-    /home/dev/.claude/settings.json)" \
-    || die 'Claude hooks could not be fingerprinted'
-  CLAUDE_STATUS_HASH="$(guest_json_projection_hash '.statusLine | select(. != null)' \
-    /home/dev/.claude/settings.json)" \
-    || die 'Orca did not add a Claude status line'
-
   guest_root runuser -u dev -- python3 -c '
 import json
 import os
 import tempfile
 
+def update_claude(value):
+    value.setdefault("env", {}).update({"SUBYARD_E2E_RUNTIME_ADDITION": "claude-runtime"})
+    # Orca skips hook installation when the Claude CLI is absent. This fixture
+    # tests config preservation, so seed harmless user hooks in that case.
+    if not value.get("hooks"):
+        value["hooks"] = {"SessionStart": [{"hooks": [{"type": "command", "command": "true"}]}]}
+    if value.get("statusLine") is None:
+        value["statusLine"] = {"type": "command", "command": "printf subyard-e2e"}
+
 updates = {
-    "/home/dev/.claude/settings.json": lambda value: value.setdefault("env", {}).update(
-        {"SUBYARD_E2E_RUNTIME_ADDITION": "claude-runtime"}
-    ),
+    "/home/dev/.claude/settings.json": update_claude,
     "/home/dev/.pi/agent/settings.json": lambda value: value.setdefault(
         "runtimeAdditions", {}
     ).update({"subyardE2E": {"enabled": True, "generation": 1}}),
@@ -594,6 +586,21 @@ for path, update in updates.items():
         if temporary is not None:
             os.unlink(temporary)
 ' >/dev/null || die 'synthetic runtime JSON additions could not be prepared'
+
+  guest_root jq -e '
+    (.hooks | type == "object" and length > 0) and
+    (.statusLine != null)
+  ' /home/dev/.claude/settings.json >/dev/null \
+    || die 'Claude hook preservation fixture is unavailable'
+  CLAUDE_HOOKS_COUNT="$(guest_root jq -er '.hooks | length | select(. > 0)' \
+    /home/dev/.claude/settings.json 2>/dev/null)" \
+    || die 'Claude hook preservation fixture is empty'
+  CLAUDE_HOOKS_HASH="$(guest_json_projection_hash '.hooks' \
+    /home/dev/.claude/settings.json)" \
+    || die 'Claude hooks could not be fingerprinted'
+  CLAUDE_STATUS_HASH="$(guest_json_projection_hash '.statusLine | select(. != null)' \
+    /home/dev/.claude/settings.json)" \
+    || die 'Claude status-line preservation fixture is unavailable'
 
   CLAUDE_RUNTIME_HASH="$(guest_json_projection_hash \
     '{env: {SUBYARD_E2E_RUNTIME_ADDITION: .env.SUBYARD_E2E_RUNTIME_ADDITION}}' \
@@ -1149,6 +1156,8 @@ yard update --check --offline --version "$release_version"
 if [ "$EXISTING_YARD" = 1 ]; then
   stage 'initializing an existing yard with Orca and materialized agent configs selected'
   yard init --yes
+  # Seed the optional package cache before observing and completing activation.
+  [ "$CODEX_CONFIG" = 0 ] || prepare_cached_orca_guest
   stage 'completing and verifying the public release transition before Orca startup'
   yard update --offline --version "$release_version" --yes \
     >"$STATE/release-before-up.out" 2>"$STATE/release-before-up.err" \
@@ -1182,14 +1191,35 @@ if [ "$EXISTING_YARD" = 1 ]; then
 else
   stage 'bootstrapping an uninitialized yard interactively with one confirmation'
 fi
-[ "$CODEX_CONFIG" = 0 ] || prepare_cached_orca_guest
 export SUBYARD_TTY_TEST_ENGINE="$YARD_BIN"
 # A real controlling terminal catches background-handler stops that --yes and
 # redirected stdin hide. Enter accepts the normal top-level default-yes prompt.
-env -u ASSUME_YES timeout --signal=TERM --kill-after=5s 1800 \
-  script --quiet --return --command 'exec "$SUBYARD_TTY_TEST_ENGINE" orca up' /dev/null \
-  <<< '' >"$STATE/bootstrap-terminal.out" 2>&1 \
-  || { tail -n 60 "$STATE/bootstrap-terminal.out" >&2; die 'interactive Orca bootstrap failed'; }
+if ! env -u ASSUME_YES timeout --signal=TERM --kill-after=5s 1800 \
+  python3 - >"$STATE/bootstrap-terminal.out" 2>&1 <<'PY_ORCA_PROMPT'
+import os
+import pty
+import sys
+
+seen = b""
+sent = False
+
+def read_output(fd):
+    global seen, sent
+    data = os.read(fd, 4096)
+    seen = (seen + data)[-8192:]
+    if not sent and b"Proceed? [Y/n]" in seen:
+        os.write(fd, b"\n")
+        sent = True
+    return data
+
+status = pty.spawn([os.environ["SUBYARD_TTY_TEST_ENGINE"], "orca", "up"],
+                   master_read=read_output, stdin_read=lambda fd: b"")
+sys.exit(os.waitstatus_to_exitcode(status))
+PY_ORCA_PROMPT
+then
+  tail -n 60 "$STATE/bootstrap-terminal.out" >&2
+  die 'interactive Orca bootstrap failed'
+fi
 [ "$(grep -Fc 'Proceed? [Y/n]' "$STATE/bootstrap-terminal.out")" = 1 ] \
   || die 'interactive Orca bootstrap did not use exactly one default-yes confirmation'
 status_reached=0

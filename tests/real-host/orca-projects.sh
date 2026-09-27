@@ -507,10 +507,11 @@ guest_dev test ! -e "$stale_folder/.git" \
   && guest_dev test ! -e "$stale_gone" \
   || die 'registration repaired project filesystem content'
 
-stage 'repairing missing dispatcher and stale selected-hook list through explicit init'
+stage 'preserving a changed hook list and repairing the missing dispatcher through explicit init'
 recovery_source="$STATE/host/recovery-source"
 mkdir -p "$recovery_source"
 printf 'recovery\n' > "$recovery_source/content.txt"
+guest_root cp /etc/subyard/agent-project-hooks /tmp/orca-project-hooks-original
 guest_root rm -f -- /usr/local/libexec/subyard/projects-changed
 guest_root sh -c 'printf "%s\n" stale-hook > /etc/subyard/agent-project-hooks'
 if ! yard sync "$recovery_source" --name recovery-project --yes \
@@ -520,11 +521,20 @@ fi
 grep -Fq "optional agent project hook failed; run 'yard init'" "$STATE/recovery.out" "$STATE/recovery.err" \
   || die 'project success did not include the hook recovery warning'
 assert_absent_repo /srv/workspaces/recovery-project/src
+if yard init --yes >"$STATE/changed-hooks.out" 2>"$STATE/changed-hooks.err"; then
+  die 'init silently overwrote the changed owned hook list'
+fi
+grep -Fq 'owned artifact drift at "/etc/subyard/agent-project-hooks"' "$STATE/changed-hooks.err" \
+  || die 'init did not report the changed hook ownership conflict'
+guest_root grep -Fxq stale-hook /etc/subyard/agent-project-hooks \
+  || die 'init changed the conflicting hook list'
+# Undo only this fixture's injected edit; missing owned files remain repairable.
+guest_root cp /tmp/orca-project-hooks-original /etc/subyard/agent-project-hooks
 yard init --yes >/dev/null
 guest_root test -x /usr/local/libexec/subyard/projects-changed \
   && [ "$(guest_root sha256sum /etc/subyard/agent-project-hooks | cut -d ' ' -f 1)" = \
     "$(printf '\n' | sha256sum | cut -d ' ' -f 1)" ] \
-  || die 'explicit init did not repair dispatcher and selected-hook list'
+  || die 'explicit init did not repair the dispatcher while preserving the selected-hook list'
 local_dispatcher_hash="$(sha256sum "$ROOT/config/projects-changed.sh" | cut -d ' ' -f 1)"
 guest_dispatcher_hash="$(guest_root sha256sum /usr/local/libexec/subyard/projects-changed | cut -d ' ' -f 1)"
 [ "$local_dispatcher_hash" = "$guest_dispatcher_hash" ] \

@@ -52,15 +52,21 @@ func TestRefreshConfigsUsesTypedAtomicGuestWrites(t *testing.T) {
 	if err := runtime.RefreshConfigs(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(incus.ExecCalls) != 6 {
-		t.Fatalf("typed config writes = %d, want 6 selected-agent writes", len(incus.ExecCalls))
+	if len(incus.ExecCalls) != 10 {
+		t.Fatalf("config refresh calls = %d, want 6 writes and 4 inventory operations", len(incus.ExecCalls))
 	}
+	for index, mode := range map[int]string{0: "configs-prepare", 4: "configs-commit", 5: "configs-prepare", 9: "configs-commit"} {
+		if command := incus.ExecCalls[index].Request.Command; len(command) != 5 || command[4] != mode {
+			t.Fatalf("inventory operation %d: %v", index, command)
+		}
+	}
+	writes := append(incus.ExecCalls[1:4:4], incus.ExecCalls[6:9]...)
 	wantDestinations := []string{
 		"/home/dev/.config/opencode/AGENTS.md",
 		"/home/dev/.config/opencode/opencode.jsonc",
 		"/home/dev/.config/opencode/repo.rules",
 	}
-	for index, call := range incus.ExecCalls {
+	for index, call := range writes {
 		if call.Project != "subyard" || call.Name != "yard" ||
 			len(call.Request.Command) != 7 ||
 			call.Request.Command[0] != "sh" ||
@@ -77,7 +83,7 @@ func TestRefreshConfigsUsesTypedAtomicGuestWrites(t *testing.T) {
 			t.Fatalf("unselected agent config destination %q", destination)
 		}
 		if index >= 3 {
-			first := incus.ExecCalls[index-3].Request
+			first := writes[index-3].Request
 			if !slices.Equal(first.Command, call.Request.Command) ||
 				!bytes.Equal(first.Stdin, call.Request.Stdin) {
 				t.Fatalf("config refresh %d is not idempotent", index-3)
@@ -203,7 +209,7 @@ func TestRefreshConfigsFollowsHostInstructionSymlink(t *testing.T) {
 	if err := os.Symlink("../dotfiles/agents/AGENTS.md", source); err != nil {
 		t.Fatal(err)
 	}
-	incus := runningIncus(1)
+	incus := runningIncus(3)
 	runtime := Runtime{
 		Environment: []string{"CODING_TOOL_INTEGRATIONS=claude", "HOST_CLAUDE_MD=" + source},
 		Incus:       incus, Executor: incus,
@@ -214,9 +220,9 @@ func TestRefreshConfigsFollowsHostInstructionSymlink(t *testing.T) {
 	if err := runtime.RefreshConfigs(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(incus.ExecCalls) != 1 ||
-		incus.ExecCalls[0].Request.Command[5] != "/home/dev/.claude/CLAUDE.md" ||
-		!bytes.Equal(incus.ExecCalls[0].Request.Stdin, payload) {
+	if len(incus.ExecCalls) != 3 ||
+		incus.ExecCalls[1].Request.Command[5] != "/home/dev/.claude/CLAUDE.md" ||
+		!bytes.Equal(incus.ExecCalls[1].Request.Stdin, payload) {
 		t.Fatalf("symlinked Claude instructions were not copied: %#v", incus.ExecCalls)
 	}
 }

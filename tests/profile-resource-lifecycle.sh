@@ -10,6 +10,9 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 # shellcheck source=tests/helpers/test-context.sh
 . "$ROOT/tests/helpers/test-context.sh"
 setup_test_context "$TMP"
+# shellcheck source=config/profiles/orca/release.env
+. "$ROOT/config/profiles/orca/release.env"
+export ORCA_TEST_VERSION="$ORCA_VERSION"
 export HOME="$TMP/home" SUBYARD_NO_AUDIT=1 PATH="$TMP/bin:$PATH"
 export SUBYARD_CONFIG_HOST_DIR="$SUBYARD_CONFIG_HOME/overrides/host"
 export SUBYARD_CONFIG_GENERATED_DIR="$SUBYARD_CONFIG_HOME/generated"
@@ -63,7 +66,7 @@ case "${1:-}" in
       *' pkill -TERM -u dev -f -- '* | *' pkill -KILL -u dev -f -- '*)
         : > "$state_root/legacy-stopped" ;;
       *' dpkg --print-architecture '*) printf 'amd64\n' ;;
-      *' dpkg-query -W '*orca-ide*) printf '1.4.159\n' ;;
+      *' dpkg-query -W '*orca-ide*) printf '%s\n' "$ORCA_TEST_VERSION" ;;
       *' bash -se -- dev /usr/bin/orca-ide /srv/agents/orca ') printf '0 0\n' ;;
       *' bash -se -- '*'orca-registration.sha256'*)
         cat >/dev/null

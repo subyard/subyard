@@ -200,6 +200,44 @@ def main():
     wanted = {key(e): e for e in desired}
     if len(previous) != len(records) or len(wanted) != len(desired):
         raise ValueError('duplicate inventory entry')
+    if mode in ('configs-prepare', 'configs-commit'):
+        # Config refresh acknowledges existing ownership only. It cannot adopt,
+        # retire or finish a pending package/link/hook reconciliation.
+        if not established:
+            return
+        by_path = {e.get('path'): e for e in records if e.get('path')}
+        for entry in desired:
+            if entry['kind'] not in ('file', 'structured') or not entry['path'].startswith(home + '/'):
+                raise ValueError('invalid config inventory entry')
+            record = by_path.get(entry['path'])
+            if record is None:
+                continue
+            if any(record.get(k) != entry.get(k) for k in ('id', 'kind', 'path', 'format')):
+                raise OwnershipConflict('owned artifact drift', entry['path'])
+            current = actual(entry)
+            if mode == 'configs-prepare':
+                if entry['kind'] == 'file':
+                    if current not in (None, record['digest'], record.get('pending_digest'), record.get('config_pending_digest')):
+                        raise OwnershipConflict('owned artifact drift', entry['path'])
+                    # A previous refresh may have written its bytes before an
+                    # interruption. Preserve that evidence when intent changes.
+                    if current is not None and current == record.get('config_pending_digest'):
+                        record['digest'] = current
+                if record['digest'] != entry['digest'] or 'config_pending_digest' in record:
+                    record['config_pending_digest'] = entry['digest']
+            else:
+                if record.get('config_pending_digest', record['digest']) != entry['digest']:
+                    raise ValueError('config inventory intent is stale')
+                if entry['kind'] == 'file' and (current != entry['digest'] or actual_metadata(entry) != expected_metadata(entry, home, uid)):
+                    raise OwnershipConflict('owned artifact drift', entry['path'])
+                record['digest'] = entry['digest']
+                record.pop('config_pending_digest', None)
+        updated = encode(dict(inventory, entries=records))
+        with open(path, 'rb') as stream:
+            unchanged = stream.read() == updated
+        if not unchanged:
+            atomic(path, updated)
+        return
     observed = {}
     metadata = {}
     changed = records != [clean(e) for e in desired]
@@ -211,7 +249,7 @@ def main():
         current_metadata = actual_metadata(entry)
         if current_metadata is not None:
             metadata[name] = current_metadata
-        if entry['kind'] in ('file', 'link') and current not in (None, entry['digest'], entry.get('pending_digest')):
+        if entry['kind'] in ('file', 'link') and current not in (None, entry['digest'], entry.get('pending_digest'), entry.get('config_pending_digest')):
             raise OwnershipConflict('owned artifact drift', entry['path'])
         if name not in wanted:
             if (entry['kind'] in ('file', 'link') and current is not None
@@ -286,7 +324,7 @@ def main():
         if entry['kind'] in ('file', 'link') and os.path.lexists(entry['path']):
             parent = open_parent(entry['path'])
             try:
-                if (actual(entry) not in (entry['digest'], entry.get('pending_digest'))
+                if (actual(entry) not in (entry['digest'], entry.get('pending_digest'), entry.get('config_pending_digest'))
                         or actual_metadata(entry) != expected_metadata(entry, home, uid)):
                     raise OwnershipConflict('owned artifact drift', entry['path'])
                 os.unlink(os.path.basename(entry['path']), dir_fd=parent)

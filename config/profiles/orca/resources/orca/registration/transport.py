@@ -1,4 +1,4 @@
-"""Small adapter for Orca 1.4.159's authenticated local runtime RPC.
+"""Small adapter for Orca's authenticated local runtime RPC.
 
 The token is read afresh for each connection and never included in diagnostics.
 There are no transport retries: a lost write response requires catalog recovery.

@@ -10,6 +10,9 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 # shellcheck source=tests/helpers/test-context.sh
 . "$ROOT/tests/helpers/test-context.sh"
 setup_test_context "$TMP"
+# shellcheck source=config/profiles/orca/release.env
+. "$ROOT/config/profiles/orca/release.env"
+export ORCA_TEST_VERSION="$ORCA_VERSION"
 printf 'owner-host\n' >"$SUBYARD_CONFIG_HOME/host-id"
 chmod 0600 "$SUBYARD_CONFIG_HOME/host-id"
 export HOME="$TMP/home" SUBYARD_NO_AUDIT=1 PATH="$TMP/bin:$PATH"
@@ -220,7 +223,7 @@ case "${1:-}" in
         rm -f "$ingress"
         ;;
       *' dpkg --print-architecture '*) printf 'amd64\n' ;;
-      *' dpkg-query -W '*orca-ide*) printf '1.4.159\n' ;;
+      *' dpkg-query -W '*orca-ide*) printf '%s\n' "$ORCA_TEST_VERSION" ;;
       *' nft list chain inet subyard_orca input '*)
         [ -f "$ingress" ] || exit 1
         printf 'chain input { comment "subyard-orca-managed"; }\n'

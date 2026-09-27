@@ -49,15 +49,35 @@ func (runtime Runtime) RefreshConfigs(ctx context.Context) error {
 		output = io.Discard
 	}
 	fmt.Fprintf(output, "Refresh agent instructions and configs in %s\n", runtime.Yard.YardInstanceName)
-	copied := make(map[string]bool)
+	// Read once so the inventory intent describes exactly the bytes applied.
+	payloads := make(map[string][]byte)
+	entries := []integrationArtifact{}
 	for _, file := range files {
 		payload, err := file.readSource()
+		if os.IsNotExist(err) {
+			continue
+		}
 		if err != nil {
-			if os.IsNotExist(err) {
-				fmt.Fprintf(output, "  [ ok ] %s: no source — skipping\n", file.label)
-				continue
-			}
 			return err
+		}
+		payloads[file.destination] = payload
+		entry := integrationArtifact{ID: file.integration, Kind: "file", Path: file.destination, Digest: fmt.Sprintf("%x", sha256.Sum256(payload))}
+		if file.ownedFormat != "" {
+			entry.Kind, entry.Format = "structured", file.ownedFormat
+		}
+		entries = append(entries, entry)
+	}
+	if len(entries) != 0 {
+		if _, err := runtime.integrationInventory(ctx, "configs-prepare", entries, ""); err != nil {
+			return err
+		}
+	}
+	copied := make(map[string]bool)
+	for _, file := range files {
+		payload, exists := payloads[file.destination]
+		if !exists {
+			fmt.Fprintf(output, "  [ ok ] %s: no source — skipping\n", file.label)
+			continue
 		}
 		if err := runtime.applyGuestConfig(ctx, file, payload); err != nil {
 			return fmt.Errorf("apply %s: %w", file.label, err)
@@ -65,6 +85,11 @@ func (runtime Runtime) RefreshConfigs(ctx context.Context) error {
 		copied[file.label] = true
 		fmt.Fprintf(output, "  [ ok ] %s -> ~%s/%s\n",
 			file.label, runtime.devUser(), strings.TrimPrefix(file.destination, "/home/"+runtime.devUser()+"/"))
+	}
+	if len(entries) != 0 {
+		if _, err := runtime.integrationInventory(ctx, "configs-commit", entries, ""); err != nil {
+			return err
+		}
 	}
 	for _, agent := range strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")) {
 		if !copied[agent+" config"] && !copied[agent+" rules"] {
