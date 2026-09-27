@@ -169,6 +169,20 @@ func TestResourceCommandSessionDoesNotPrompt(t *testing.T) {
 	}
 }
 
+func TestResourceCommandSessionPreservesChildExitCode(t *testing.T) {
+	root, environment, _ := resourceCommandFixture(t)
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "view", "--exit=23"},
+		Environment: environment, WorkingDir: root,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 23 {
+		t.Fatalf("code=%d, want 23", code)
+	}
+}
+
 func TestResourceCommandNoOpMutationDoesNotPromptOrApply(t *testing.T) {
 	root, environment, applyLog := resourceCommandFixture(t)
 	prompt := &testkit.Prompt{}
@@ -559,6 +573,7 @@ case "${SUBYARD_RESOURCE_MODE:-}" in
         >"$SUBYARD_REPOSITORY_ROOT/resource-session-env.log"
     fi
     printf 'applied %s\n' "$verb"
+    case "$*" in *--exit=*) exit "${*##*--exit=}" ;; esac
     ;;
   *)
 	[ -z "${API_TOKEN:-}" ] || { echo leaked-secret >&2; exit 76; }

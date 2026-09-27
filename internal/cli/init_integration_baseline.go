@@ -34,10 +34,20 @@ func captureInitIntegrationBaseline(loaded config.Loaded) (*initIntegrationBasel
 		if !initIntegrationSetting(name) {
 			continue
 		}
+		// A new settings file can add unset trace entries without changing any
+		// integration input (for example when bootstrap saves environment profiles).
+		// Keep every assigned resolution and its exact source identity.
+		resolutions := make([]config.SettingResolution, 0, len(trace.Resolutions))
+		for _, resolution := range trace.Resolutions {
+			if resolution.Status != "unset" {
+				resolutions = append(resolutions, resolution)
+			}
+		}
+		trace.Resolutions = resolutions
 		baseline.Settings[name] = trace
 		paths := []string{}
 		for _, resolution := range trace.Resolutions {
-			if resolution.Status != "unset" && filepath.IsAbs(resolution.Path) {
+			if filepath.IsAbs(resolution.Path) {
 				paths = append(paths, resolution.Path)
 			}
 		}

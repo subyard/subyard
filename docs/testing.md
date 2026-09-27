@@ -50,6 +50,17 @@ handling, latest-release installation and preservation of a working binary after
 Mocks do not establish compatibility with a real CLI release. Check its native `execpolicy check`
 against the shipped rules for that evidence; real client approve/deny needs separate acceptance.
 
+## Choose the VM allocation
+
+Android acceptance runs on one `android-test` VM (8 GiB RAM / 40 GiB disk). Ordinary full P0
+uses the standard `subyard-pair` (two 4 GiB / 20 GiB guests) for its two-host scenarios. It does
+not recursively run the separate physical broker pool diagnostic. Do not request two 16 GiB
+guests for Android or ordinary full P0.
+
+`--vm 1` only selects where a command runs; it does not turn a pair allocation into a singleton.
+Use `--type android-test` when allocating one VM. Commands and exact coverage are documented in
+[the VM guide](test-vms.md#agent-workflow).
+
 ## Select additional checks
 
 Subyard's change-impact selector prints a conservative set of recommendations for a repository

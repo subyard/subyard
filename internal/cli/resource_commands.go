@@ -155,6 +155,10 @@ func (cli *CLI) runResourceCommand(
 	}, nil)
 	writeAdapterDiagnostics(cli.options.Stderr, diagnostics)
 	if err != nil {
+		var sessionExit *resourceSessionExitError
+		if errors.As(err, &sessionExit) {
+			return sessionExit.code
+		}
 		cli.errorf("%s: apply: %v", definition.Command, err)
 		return 1
 	}
@@ -347,6 +351,12 @@ type resourceApplyRunner struct {
 	consequences []string
 }
 
+type resourceSessionExitError struct{ code int }
+
+func (err *resourceSessionExitError) Error() string {
+	return fmt.Sprintf("resource session exited with status %d", err.code)
+}
+
 func (runner *resourceApplyRunner) Run(
 	ctx context.Context,
 	request domain.AdapterRequest,
@@ -422,6 +432,9 @@ func (runner *resourceApplyRunner) Run(
 		}
 		var exitError *exec.ExitError
 		if errors.As(runErr, &exitError) {
+			if runner.effect == domain.ActionSession && exitError.ExitCode() >= 0 {
+				return result, "", &resourceSessionExitError{code: exitError.ExitCode()}
+			}
 			return result, "", fmt.Errorf("resource handler exited with status %d", exitError.ExitCode())
 		}
 		return result, "", fmt.Errorf("run resource handler: %w", runErr)

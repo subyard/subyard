@@ -429,9 +429,7 @@ esac
 			wantCode := 1
 			if trap != "signal" {
 				trapCommand = "trap 'exit " + strings.TrimPrefix(trap, "exit") + "' INT"
-				if trap == "exit0" {
-					wantCode = 0
-				}
+				wantCode, _ = strconv.Atoi(strings.TrimPrefix(trap, "exit"))
 			}
 			handler = strings.Replace(handler, "INTERRUPT_TRAP", trapCommand, 1)
 			writeCLIFile(t, filepath.Join(root, "config", "profiles", "fixture", "resources", "demo", "handler.sh"), handler, 0o700)

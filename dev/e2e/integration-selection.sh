@@ -133,6 +133,12 @@ elif [ "$KIND" = vm ]; then
 else
   printf 'YARD_KIND=%s\n' "$KIND" >> "$config"
 fi
+# Ordinary modes keep package work bounded through an inherited empty selection.
+# It is deliberately not a per-yard override: init must consume this inherited intent.
+if [ "$KIND" != default ] && [ "$KIND" != special ]; then
+  printf 'AGENTS=none\n' > "$SUBYARD_CONFIG_HOME/config.env"
+  chmod 0600 "$SUBYARD_CONFIG_HOME/config.env"
+fi
 chmod 0600 "$config"
 # Keep only the retained test platform directory operator-owned; Incus children stay root-owned.
 platform_root="$HOME/.cache/subyard-e2e-platform"
@@ -199,8 +205,10 @@ if [ "$KIND" = default ]; then
   printf 'ok: fresh logical default converges five integrations; observer disable/enable preserves data and retires service/proxy\n'
   exit 0
 fi
-jq -e '.selection.present and (.selection.requested | length) == 0 and (.selection.effective | length) == 0 and .observed == "ready"' "$STATE/status.json" >/dev/null \
-  || die 'fresh named yard did not converge to explicit empty selection'
+if [ "$KIND" != special ]; then
+  jq -e '.selection.present and (.selection.requested | length) == 0 and (.selection.effective | length) == 0 and .observed == "ready"' "$STATE/status.json" >/dev/null \
+    || die 'fresh named yard did not preserve the inherited empty selection'
+fi
 if [ "$KIND" = container ]; then
   paseo_sentinel="/srv/agents/paseo/data/.cleanup-preservation-$token"
   guest sh -eu -c '
@@ -275,7 +283,7 @@ if [ "$KIND" = container ]; then
     || die 'Paseo cleanup did not restore ready unselected integration status'
 fi
 if [ "$KIND" = special ]; then
-  jq -e '.selection.allows_coding_tools == false' "$STATE/status.json" >/dev/null
+  jq -e '.selection.allows_coding_tools == false and (.selection.effective | length) == 0 and .observed == "ready"' "$STATE/status.json" >/dev/null
   guest sh -eu -c 'for file in /usr/local/bin/ccusage /usr/local/bin/codex /usr/local/bin/opencode /usr/local/bin/paseo; do [ ! -e "$file" ]; done'
   before="$(sha256sum "$config")"
   if yard integration enable claude --yes > "$STATE/forbidden.log" 2>&1; then die 'special role accepted coding integration'; fi
@@ -286,7 +294,7 @@ fi
 
 yard integration enable claude --yes
 yard integration status --json | jq -e '.observed == "ready" and .selection.requested == ["claude"]' >/dev/null
-# Adopt a trustworthy inherited legacy request into this existing yard only.
+# A host-level legacy request remains inherited; init must not freeze it per yard.
 sed -i '/^CODING_TOOL_INTEGRATIONS=/d' "$config"
 printf 'AGENTS=claude\n' > "$SUBYARD_CONFIG_HOME/config.env"
 chmod 0600 "$SUBYARD_CONFIG_HOME/config.env"
@@ -295,8 +303,6 @@ if [ "$KIND" = container ]; then
   incus_stopped=1
   sudo -n systemctl stop incus.service incus.socket
   if yard init --yes > "$STATE/stopped-incus-init.log" 2>&1; then die 'init accepted an unavailable existing daemon'; fi
-  grep -Fq 'cannot establish existing integration intent' "$STATE/stopped-incus-init.log" \
-    || die 'stopped-daemon init failed outside the integration intent guard'
   [ "$(sha256sum "$config" "$SUBYARD_CONFIG_HOME/config.env")" = "$before" ] \
     || die 'stopped-daemon init changed inherited integration intent'
   sudo -n systemctl start incus.socket incus.service
@@ -304,8 +310,14 @@ if [ "$KIND" = container ]; then
   printf 'ok: unavailable existing Incus preserves inherited integration intent\n'
 fi
 yard init --yes
-grep -Eq '^CODING_TOOL_INTEGRATIONS=.*claude' "$config" || die 'existing requested selection was not adopted'
-printf '' > "$SUBYARD_CONFIG_HOME/config.env"
+if grep -q '^CODING_TOOL_INTEGRATIONS=' "$config"; then die 'init froze an inherited legacy selection per yard'; fi
+yard integration status --json | jq -e '.selection.requested == ["claude"] and .observed == "ready"' >/dev/null
+# A legacy alias explicitly authored in the yard remains the one migration case.
+printf 'AGENTS=none\n' > "$SUBYARD_CONFIG_HOME/config.env"
+printf 'AGENTS=claude\n' >> "$config"
+yard init --yes
+grep -Eq '^CODING_TOOL_INTEGRATIONS=.*claude' "$config" || die 'explicit local legacy selection was not canonicalized'
+if grep -q '^AGENTS=' "$config"; then die 'canonicalization retained the local legacy alias'; fi
 yard integration status --json | jq -e '.selection.requested == ["claude"] and .observed == "ready"' >/dev/null
 inventory_before="$(guest sha256sum /var/lib/subyard/integrations/inventory.json)"
 yard integration enable claude --yes
@@ -354,12 +366,12 @@ yard integration status --json | jq -e '.observed == "ready"' >/dev/null
 if [ "$KIND" = upgrade ]; then
   yard integration enable claude --yes
   guest sh -eu -c 'install -d /srv/workspaces/selection-preserve/src; printf "%s\n" keep > /srv/workspaces/selection-preserve/src/data'
-  # Existing inherited tools are suppressed; authored forbidden nonempty is separately rejected.
+  # Inherited requested tools remain visible, while this role suppresses their effective set.
   sed -i '/^CODING_TOOL_INTEGRATIONS=/d; /^YARD_KIND=/d' "$config"
   printf 'AGENTS=claude\n' > "$SUBYARD_CONFIG_HOME/config.env"
   printf 'YARD_TEMPLATE=test-vms\nE2E_VM_SLOT_COUNT=1\n' >> "$config"
   yard init --yes
-  yard integration status --json | jq -e '.selection.allows_coding_tools == false and (.selection.effective | length) == 0 and .observed == "ready"' >/dev/null
+  yard integration status --json | jq -e '.selection.allows_coding_tools == false and .selection.requested == ["claude"] and (.selection.effective | length) == 0 and .observed == "ready"' >/dev/null
   guest sh -eu -c '
     [ ! -e /usr/local/bin/ccusage ]
     [ ! -L /home/dev/.claude/projects ]

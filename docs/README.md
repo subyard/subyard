@@ -18,6 +18,8 @@ choices that widen it.
 
 ## Optional integrations
 
+- [Android emulator leases](android.md) — request isolated phone/tablet runtimes and clean image caches.
+
 - [Paseo Desktop](paseo.md) — expose coding agents through a headless Paseo daemon and its hosted
   relay.
 - [Orca remote server](orca.md) — run a pinned Orca server in a yard and connect over Tailscale or

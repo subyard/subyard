@@ -505,10 +505,16 @@ func TestRepositoryResourceActionMatrix(t *testing.T) {
 		recovery domain.RecoveryClass
 	}
 	expected := []expectedAction{
-		{resource: "emulator", localID: "up", verb: "up", effect: domain.ActionMutation, impacts: []domain.ActionImpact{domain.ImpactHostOS}, recovery: domain.RecoveryReversible},
-		{resource: "emulator", localID: "down", verb: "down", effect: domain.ActionMutation, impacts: []domain.ActionImpact{domain.ImpactHostOS}, recovery: domain.RecoveryReversible},
+		{resource: "emulator", localID: "catalog", verb: "catalog", effect: domain.ActionRead, recovery: domain.RecoveryNotNeeded},
 		{resource: "emulator", localID: "status", verb: "status", effect: domain.ActionRead, recovery: domain.RecoveryNotNeeded},
+		{resource: "emulator", localID: "run", verb: "run", effect: domain.ActionSession, recovery: domain.RecoveryNotNeeded},
+		{resource: "emulator", localID: "acquire", verb: "acquire", effect: domain.ActionBoundedWrite, recovery: domain.RecoveryNotNeeded},
+		{resource: "emulator", localID: "renew", verb: "renew", effect: domain.ActionBoundedWrite, recovery: domain.RecoveryNotNeeded},
+		{resource: "emulator", localID: "release", verb: "release", effect: domain.ActionBoundedWrite, recovery: domain.RecoveryNotNeeded},
+		{resource: "emulator", localID: "cache", verb: "cache", effect: domain.ActionBoundedWrite, recovery: domain.RecoveryNotNeeded},
 		{resource: "emulator", localID: "view", verb: "view", effect: domain.ActionSession, recovery: domain.RecoveryNotNeeded},
+		{resource: "emulator", localID: "revoke", verb: "revoke", effect: domain.ActionMutation, impacts: []domain.ActionImpact{domain.ImpactSharedWorkload}, recovery: domain.RecoveryReversible},
+		{resource: "emulator", localID: "down", verb: "down", effect: domain.ActionMutation, impacts: []domain.ActionImpact{domain.ImpactSharedWorkload}, recovery: domain.RecoveryReversible},
 
 		{resource: "qa-bot-broker", localID: "up", verb: "up", effect: domain.ActionMutation, impacts: []domain.ActionImpact{domain.ImpactSharedWorkload}, recovery: domain.RecoveryRecreatable},
 		{resource: "qa-bot-broker", localID: "seed", verb: "seed", effect: domain.ActionMutation, impacts: []domain.ActionImpact{domain.ImpactSharedWorkload}, recovery: domain.RecoveryReversible},
@@ -578,7 +584,7 @@ func TestRepositoryResourceActionMatrix(t *testing.T) {
 	}
 
 	wantVerbs := map[string][]string{
-		"emulator":        {"up", "down", "status", "view"},
+		"emulator":        {"catalog", "status", "run", "acquire", "renew", "release", "cache", "view", "revoke", "down"},
 		"qa-bot-broker":   {"up", "seed", "expose", "status", "logs", "smoke", "down", "destroy"},
 		"staging-gateway": {"up", "start", "stop", "status", "logs", "shell", "down", "destroy", "list"},
 		"orca":            {"up", "is-up", "status", "pair", "restart", "sync", "logs", "down"},

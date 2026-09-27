@@ -80,7 +80,8 @@ Physical headroom is checked against the entire backing filesystem. With the `di
 the disk budget instead charges the inner daemon's image cache and allocated blocks in its VM
 and VM-snapshot directories, plus outstanding growth and builder commitments. This includes
 retained and orphan VM disks; unrelated files elsewhere on the backing filesystem do not consume
-the broker budget. Status reports this charge separately as `budget_used_bytes`. For `btrfs`
+the broker budget. VM symlinks contribute only their own allocated blocks and are never followed;
+symlinked storage roots are rejected. Status reports this charge separately as `budget_used_bytes`. For `btrfs`
 and `zfs`, budget accounting retains the conservative whole-pool usage bound. Missing or unsafe
 usage measurements refuse admission; they never waive the budget or physical reserve.
 
@@ -142,13 +143,19 @@ yard -Y test-yard test-vms retire-legacy --slot N
 This operation asks for destructive confirmation with a default of No. Review and preserve any
 needed legacy data first. An empty, correctly marked legacy project can be adopted automatically.
 
-The nested broker lanes (`release`, `full` and broker recovery) need a larger allocated test host:
-at least 16 GiB RAM. Disk admission belongs to the broker: it checks physical headroom and
-outstanding commitments, while the test scripts only report disk measurements. Their diagnostic
-broker uses 2 GiB / 10 GiB guests, two concurrent pairs, normal safety reserves and the immutable
-image publication peak. The default 4 GiB pair guest cannot host that nested matrix.
-Use an operator-configured pool with larger pair limits; the lane checks capacity before setup.
-These diagnostic limits do not validate the production Android type's 8 GiB / 40 GiB contract.
+Ordinary `release` and `full` P0 use the standard `subyard-pair` (4 GiB / 20 GiB per guest).
+They check broker installation, legacy migration, active/inactive runtime updates and rollback,
+without recursively allocating another four-VM broker pool. Android acceptance uses one
+`android-test` VM (8 GiB / 40 GiB); it does not need a pair or 16 GiB guests.
+
+Physical candidate-broker cross-slot isolation and quarantine/rebuild remain a separate, explicit
+diagnostic (`SUBYARD_P0_BROKER_RECOVERY_ONLY=1`). That diagnostic creates nested VM pairs and
+checks capacity before setup; it is not an automatic full P0 requirement. Select it only when the
+changed broker behavior needs that physical evidence and a suitable target is available. Its
+capacity requirements are not a reason to enlarge the ordinary development pool. Broker admission,
+fencing and recovery logic also have focused host-free race tests, which do not substitute for
+physical isolation evidence. The operator-owned outer broker's successful lease does not prove
+the candidate broker code.
 
 ## Agent workflow
 
@@ -225,6 +232,34 @@ VM count and base fingerprint. Human status includes the environment type and pe
 `--type android-test` selects one guest; omit `--vm` to run on all actual guests. Explicit `--vm 2`,
 `--vm both`, `--ssh 2` and pair boundary checks fail before acquiring an Android lease. The default
 `--type subyard-pair` preserves existing pair callers.
+
+For Android acceptance, request **one** `android-test` VM (8 GiB RAM / 40 GiB disk):
+
+```sh
+dev/agent-e2e.sh --slot "$slot" --type android-test --purpose android-pool-runtime -- \
+  bash dev/e2e/android-pool-runtime.sh
+```
+
+A single VM can host the Android yard and both emulator pool slots. A pair is needed for tests
+that actually coordinate two independent hosts, such as the full P0 matrix; it is not a general
+requirement for Subyard development. `--vm 1` on the default `subyard-pair` only selects where
+the payload runs: the broker still allocates both guests. Use `--type android-test` to allocate
+only one. The generic Android VM base does not include the SDK; the fixture provisions it.
+The fixture sleeps an idle leased device's display while another device boots, retaining its
+lease and ADB access. This avoids spending software-rendering CPU on an unused display; both
+devices still run concurrently with their configured RAM and screen dimensions.
+The attached viewer check deliberately delays scrcpy's server launch by 20 seconds to verify
+bounded startup waiting on a real device, without allocating another emulator.
+
+After a viewer-only change, pass `--lane viewer` to `dev/e2e/android-pool-runtime.sh`.
+It checks owner and yard viewers, delayed startup, attachment without lease renewal or release,
+and a standalone viewer alongside the borrowed lease, then cleans up. It uses the same single VM.
+
+After a recovery change, pass `--lane recovery` to
+`dev/e2e/android-pool-runtime.sh`. This lane performs its own fresh setup and image preparation,
+then checks viewers, pool and yard restarts, remote owner execution, cache pruning and cleanup.
+It skips the separate L2 builds, concurrent device lifecycle and expiry checks; retain their
+source-specific evidence when those paths are unchanged. The default remains the complete lane.
 
 For first SSH trust and continuation of ordinary remote commands, run the focused fixture on a
 free slot:
@@ -526,7 +561,7 @@ The cache fill and local launch both emit progress. Their independent positive-i
 `SUBYARD_SYSTEMD255_RESTART_TIMEOUT_SECONDS`. A timed-out cache fill or launch fails once with its
 operation and limit. The fixture never starts a second remote pull or launch after a timeout.
 
-The full matrix keeps the long historical owner, release and broker chain on VM1. VM2 independently
+The full matrix keeps the historical owner, release and broker-migration chain on VM1. VM2 independently
 runs nested teardown, a real-Incus platform check, source upgrade and power-systemd in that order.
 The two chains join before the shared release-smoke phase and full peer checks, followed by cleanup
 and final boundary verification. Host-free `./tests/run.sh`, prepared loopback SSH/crypto contracts
@@ -566,10 +601,11 @@ held slot, immediate busy, wait progress and timeout diagnostics use the bounded
 a controller identity, lease credential, endpoint, host key or private path. The raw OpenSSH config
 and lease capability are internal temporary files and are not an agent API.
 
-Every wrapper invocation is a new lease for only the requested slot. The printed `e2e-vm-1` and
-`e2e-vm-2` selectors always mean the two guests inside that outer pair, never global slot names.
-Stateful multi-step work must stay in one script invocation or one interactive SSH session. Once
-leased, the agent has unrestricted root in both guests and may create arbitrary nested yards,
+Every wrapper invocation is a new lease for only the requested slot. For `subyard-pair`,
+`e2e-vm-1` and `e2e-vm-2` select its two guests; `android-test` has only `e2e-vm-1`. These are
+guests within the allocation, never global slot names. Stateful multi-step work must stay in one
+script invocation or one interactive SSH session. Once leased, the agent has unrestricted root
+in its allocated guests and may create arbitrary nested yards,
 brokers and leases. Nested slots are a separate namespace: inspect the nested broker's local status
 and choose its slot locally instead of copying the outer `SUBYARD_E2E_SLOT`. `--slot N` requests only
 the corresponding broker lease; it never enables direct VM, Incus or raw SSH access.

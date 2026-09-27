@@ -138,7 +138,8 @@ yard -Y demo integration disable codex
 yard -Y demo integration status codex
 ```
 
-`CODING_TOOL_INTEGRATIONS` stores the complete requested set in the selected yard's
+`CODING_TOOL_INTEGRATIONS` selects the complete requested set through profiles and
+persistent configuration. Integration enable/disable writes a yard override in
 `yards/<name>/config.env`. An empty assignment explicitly selects no integrations;
 an absent assignment remains distinguishable from empty. The compatibility input
 `AGENTS=none` means empty. Unknown IDs, duplicate IDs and dependency cycles are errors.
@@ -147,13 +148,15 @@ disabling Codex while Paseo still requests it is rejected. Status reports the re
 set, effective set, dependency reasons, configuration source and observed yard readiness.
 An ID filters membership and dependency details; readiness describes the whole yard.
 
-The first owner-side initialization materializes the selection. A fresh default yard
-gets `claude codex opencode pi aiobserver`; a fresh named yard gets an explicit empty
-set. Existing yards retain their trustworthy requested configuration through bounded
-adoption of that selected yard. Subyard does not infer intent from installed binaries
-or change other yards during adoption. If previous intent cannot be established, set
-`CODING_TOOL_INTEGRATIONS` explicitly with `yard config set --scope yard` before init.
-The default yard uses the same scalar and file configuration layout as named yards.
+`yard init` uses the selection resolved from profiles and persistent configuration;
+no tool-selection argument or explicit per-yard assignment is required. Default and
+named yards inherit `claude codex opencode pi aiobserver` unless their profiles or
+settings select another set. Init preserves inheritance, so later profile changes
+remain effective. It only canonicalizes an explicit local legacy `AGENTS` assignment;
+registered configuration sources are consumed without a local selection write.
+Subyard does not infer intent from installed binaries or change other yards during
+adoption. The default yard uses the same scalar and file configuration layout as
+named yards.
 
 Enable and disable require an existing, running yard with its core substrate ready.
 A stopped or missing yard fails before confirmation or configuration changes. The

@@ -731,6 +731,7 @@ acquire_lease() {
       return 4
     fi
     if [ "$code" != busy ]; then
+      reason="$(jq -r '.reason // .message // empty' <<<"$response")"
       die "lease acquire failed (${code:-invalid_response}: ${reason:-unspecified})"
     fi
     validate_exact_busy_response "$response" \

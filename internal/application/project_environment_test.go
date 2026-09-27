@@ -22,7 +22,7 @@ func TestProjectEnvironmentUpStagesProtectedInputAndNativeManifest(t *testing.T)
 		return ports.InstanceExecResult{}, nil
 	}}
 	runner := ProjectEnvironmentRunner{
-		Data: data, Yard: domain.Context{DevUID: 1000}, Project: cloneRecord(), HasSecret: true,
+		Data: data, Yard: domain.Context{DevUID: 1000, YardName: "test-yard"}, Project: cloneRecord(), HasSecret: true,
 		Profile: ProjectEnvironmentProfile{
 			BaseImage: "ubuntu:24.04", Caches: []string{"/srv/cache/npm"},
 			Features: []string{"browser"}, Devices: []string{"kvm"},
@@ -59,6 +59,8 @@ func TestProjectEnvironmentUpStagesProtectedInputAndNativeManifest(t *testing.T)
 	}
 	joined := strings.Join(dockerRun, " ")
 	if len(dockerRun) == 0 || !strings.Contains(joined, "PUBLIC_VALUE=visible") ||
+		!slices.Contains(dockerRun, "SUBYARD_PROJECT_ID="+runner.Project.ProjectID) ||
+		!slices.Contains(dockerRun, "SUBYARD_YARD_NAME=test-yard") ||
 		!strings.Contains(joined, "/run/subyard/profile.env:ro") || strings.Contains(joined, "hidden") {
 		t.Fatalf("unsafe Docker invocation: %#v", dockerRun)
 	}

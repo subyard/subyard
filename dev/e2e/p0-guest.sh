@@ -51,7 +51,7 @@ OWNER_BASELINE_IMAGES=''
 OWNER_BASELINE_CAPTURED=0
 OWNER_BASE_IMAGE="${P0_REAL_INCUS_CONTAINER_CACHE_ALIAS:-subyard-e2e-debian-13-cloud-container}"
 OWNER_BASE_IMAGE_CREATED=0
-OWNER_DIAGNOSTIC_VM_MEMORY="${P0_E2E_DIAGNOSTIC_VM_MEMORY:-2GiB}"
+OWNER_DIAGNOSTIC_VM_MEMORY="${P0_E2E_DIAGNOSTIC_VM_MEMORY:-700MiB}"
 OWNER_DIAGNOSTIC_VM_BOOT_TIMEOUT="${P0_E2E_DIAGNOSTIC_VM_BOOT_TIMEOUT:-600}"
 OWNER_DIAGNOSTIC_DEV_UID="${P0_E2E_DIAGNOSTIC_DEV_UID:-1001}"
 
@@ -390,9 +390,6 @@ write_owner_registration() { # <yard> <template> <ssh-port> [slot-count]
     "$slots" "$OWNER_DIAGNOSTIC_VM_BOOT_TIMEOUT" \
     "$OWNER_BASE_IMAGE" "$OWNER_BASE_IMAGE" \
     > "$registration"
-  if [ "$template" = test-vms ]; then
-    printf 'LIMITS_MEMORY=14GiB\n' >> "$registration"
-  fi
   chmod 0600 "$registration"
 }
 
@@ -776,42 +773,6 @@ reclaim_broker_recovery_capacity() {
   p0_capacity_use_build_cache
 }
 
-reclaim_owner_lease_capacity() {
-  local fingerprint path
-  local default_build_before default_build_after
-
-  # The predecessor migration and real-Incus contracts have completed. Reclaim
-  # only outputs that later owner updates no longer read before allocating four
-  # nested VM disks concurrently.
-  for path in \
-    "$RENAME_BASE_ROOT" \
-    "$ROOT/.build/p0-current-base-release"; do
-    [ ! -e "$path" ] || {
-      case "$path" in
-        "$P0_CAPACITY_STATE_ROOT"/* | "$ROOT"/.build/p0-*-release) ;;
-        *) die "unsafe owner lease-capacity cleanup path $path" ;;
-      esac
-      p0_capacity_delete_tree "$path"
-    }
-  done
-  while IFS= read -r fingerprint; do
-    [ -n "$fingerprint" ] || continue
-    printf '%s\n' "$OWNER_BASELINE_IMAGES" | grep -Fxq "$fingerprint" \
-      || incus image delete "$fingerprint" --project default >/dev/null
-  done < <(incus image list --project default --format csv -c f)
-  # P0 builds use the marker-owned cache above. The outer VM is a disposable
-  # lease, so its reproducible build and dependency caches need not compete
-  # with the four disposable nested VM disks used by the isolation contract.
-  default_build_before="$(p0_capacity_cache_bytes "$P0_CAPACITY_DEFAULT_BUILD_CACHE")"
-  env -u GOCACHE go clean -cache
-  default_build_after="$(p0_capacity_cache_bytes "$P0_CAPACITY_DEFAULT_BUILD_CACHE")"
-  p0_capacity_reclaim_go_module_cache
-  p0_capacity_remove_build_cache
-  p0_capacity_use_build_cache
-  printf '  [ ok ] owner fixture caches reclaimed default_build=%s->%s\n' \
-    "$default_build_before" "$default_build_after"
-}
-
 run_nested_broker_acceptance() {
   local script="$1"
   env \
@@ -825,7 +786,6 @@ run_nested_broker_acceptance() {
 
 owner() (
   [ "$SUBYARD_E2E_VM" = 1 ] || die 'owner lane requires VM1'
-  require_broker_fixture_capacity
 	trap owner_cleanup EXIT
   prepare_owner_go_cache
 	YARD_BUILD_VERSION="$P0_OWNER_VERSION" dev/build-engine.sh --force >/dev/null
@@ -854,21 +814,6 @@ owner() (
     || die 'nested state permissions did not converge'
   ! incus exec yard-test-yard --project subyard-test-yard -- id -nG dev | tr ' ' '\n' \
     | grep -Eq '^(incus-admin|yard)$' || die 'dev retained a privileged L1 group'
-  # All migration and recovery fixtures have finished compiling. Drop only
-  # this run's disposable Go cache before allocating both nested VM pairs;
-  # production broker memory and capacity defaults remain unchanged.
-  prepare_broker_recovery_update
-  p0_capacity_reset_build_cache
-  reclaim_owner_lease_capacity
-  run_nested_broker_acceptance dev/e2e/p1-lease-acceptance.sh
-  write_owner_registration test-yard test-vms 2224 3
-  p0_apply_release_update ./bin/yard "$P0_OWNER_VERSION"
-  p0_retry_init_after_plan_stale ./bin/yard -Y test-yard init --yes
-  run_nested_broker_acceptance dev/e2e/p1-lease-acceptance.sh
-  write_owner_registration test-yard test-vms 2224 2
-  p0_apply_release_update ./bin/yard "$P0_OWNER_VERSION"
-  p0_retry_init_after_plan_stale ./bin/yard -Y test-yard init --yes
-  run_nested_broker_acceptance dev/e2e/p0-broker-recovery.sh
   owner_project_contract
   env PATH=/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin ./bin/yard --version >/dev/null
   env PATH=/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin ./bin/yard -Y test-yard list >/dev/null
@@ -912,13 +857,23 @@ broker_recovery_owner() (
   install_owner_runtime
   prepare_broker_recovery_update
   prepare_owner_image_cache_project subyard-test-yard
-  write_owner_registration test-yard test-vms 2224
+  write_owner_registration test-yard test-vms 2224 1
   ./bin/yard -Y test-yard init --yes
   ./bin/yard -Y test-yard start --yes
+  p0_capacity_remove_build_cache
+  p0_capacity_use_build_cache
+  run_nested_broker_acceptance dev/e2e/p1-lease-acceptance.sh
+  write_owner_registration test-yard test-vms 2224 3
+  p0_apply_release_update ./bin/yard "$P0_OWNER_VERSION"
+  p0_retry_init_after_plan_stale ./bin/yard -Y test-yard init --yes
+  run_nested_broker_acceptance dev/e2e/p1-lease-acceptance.sh
+  write_owner_registration test-yard test-vms 2224 2
+  p0_apply_release_update ./bin/yard "$P0_OWNER_VERSION"
+  p0_retry_init_after_plan_stale ./bin/yard -Y test-yard init --yes
   reclaim_broker_recovery_capacity
   run_nested_broker_acceptance dev/e2e/p0-broker-recovery.sh
   ./bin/yard -Y test-yard teardown --yes
-  printf 'ok: VM1 broker logging and quarantine rebuild acceptance\n'
+  printf 'ok: VM1 broker leases, slot resizing, logging and quarantine rebuild acceptance\n'
 )
 
 install_peer_wrapper() {

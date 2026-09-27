@@ -1219,12 +1219,12 @@ prepare_run_records
 if [ "$BROKER_RECOVERY_ONLY" = 1 ]; then
   HOME_STATE_BEFORE[1]="$(home_state 1)"
   run_phase capacity-preflight run_vm 1 capacity-preflight
-  run_phase broker-recovery run_vm 1 broker-recovery-owner
+  run_phase broker-physical run_vm 1 broker-recovery-owner
   run_phase cleanup run_vm 1 capacity-verify-cleanup
   [ "$(home_state 1)" = "${HOME_STATE_BEFORE[1]}" ] \
     || die 'VM1 operator home permissions or ownership changed'
   assert_no_worktrees
-  printf 'ok: P0 broker logging and quarantine rebuild acceptance passed\n'
+  printf 'ok: P0 physical broker leases, slot resizing and recovery acceptance passed\n'
   exit 0
 fi
 
@@ -1322,7 +1322,7 @@ case "$P0_LANE" in
 esac
 
 if [ "$P0_LANE" = full ]; then
-  printf 'ok: full P0 compatibility and recovery matrix passed within one broker lease\n'
+  printf 'ok: full P0 owner, release and peer matrix passed within one broker lease\n'
 elif [ "$P0_LANE" = smoke ]; then
   printf 'ok: P0 release smoke passed within one broker lease\n'
 else

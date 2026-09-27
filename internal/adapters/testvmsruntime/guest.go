@@ -56,9 +56,10 @@ func (runtime *Runtime) waitAgent(ctx context.Context, vm string) error {
 	}
 	fmt.Fprintf(runtime.Stdout, "  [ ok ] %s Incus agent is ready\n", vm)
 	if err := runtime.progress(ctx, "waiting for "+vm+" cloud-init", func() error {
+		// Plain "status: done" can still exit nonzero; retain the error details.
 		_, err := runtime.guest(ctx, vm, nil, "timeout",
 			fmt.Sprintf("%d", int(runtime.Config.BootTimeout.Seconds())),
-			"cloud-init", "status", "--wait")
+			"cloud-init", "status", "--wait", "--long")
 		return err
 	}); err != nil {
 		return err

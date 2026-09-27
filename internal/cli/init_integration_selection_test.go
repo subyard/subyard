@@ -44,23 +44,17 @@ func TestInitIntegrationSelectionWithAbsentIncusSocket(t *testing.T) {
 	}
 	ctx := context.Background()
 	proposed, selection, err := program.prepareInitIntegrationSelection(ctx, loaded, nil)
-	if err != nil || selection == nil || len(proposed.Integrations.Requested) != 0 {
-		t.Fatalf("cold named init did not plan empty selection: selection=%v err=%v", selection, err)
+	if err != nil || selection != nil || strings.Join(proposed.Integrations.Requested, " ") != "codex" {
+		t.Fatalf("cold named init did not preserve inherited selection: selection=%v proposed=%#v err=%v", selection, proposed.Integrations, err)
 	}
-	execution := &initExecution{loaded: proposed, integrationSelection: selection}
-	if err := selection.check(ctx, program, execution); err != nil {
-		t.Fatal(err)
-	}
-	// A stopped daemon (including after package removal) keeps its state. A
-	// missing socket must neither clear its inherited intent nor pass a stale plan.
+	// A stopped daemon (including after package removal) must not cause init to
+	// materialize or clear an inherited selection.
 	if err := os.Mkdir(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := selection.check(ctx, program, execution); err == nil {
-		t.Fatal("newly appeared Incus state did not invalidate cold-init plan")
-	}
-	if _, _, err := program.prepareInitIntegrationSelection(ctx, loaded, nil); err == nil {
-		t.Fatal("unavailable existing daemon was treated as a cold installation")
+	again, next, err := program.prepareInitIntegrationSelection(ctx, loaded, nil)
+	if err != nil || next != nil || strings.Join(again.Integrations.Requested, " ") != "codex" {
+		t.Fatalf("unavailable Incus changed inherited selection: selection=%v proposed=%#v err=%v", next, again.Integrations, err)
 	}
 	content, err := os.ReadFile(path)
 	if err != nil || string(content) != "SSH_PORT=2223\n" {
@@ -182,14 +176,16 @@ func TestInitLegacyAdoptionPreservesIntentAndRejectsStaleEvidenceBeforeSettings(
 func TestInitIntegrationSelectionFreshAndAdopted(t *testing.T) {
 	for _, test := range []struct {
 		name, yard, settings, command, want string
-		existing, source, reject            bool
+		existing, source, reject, inherited bool
 	}{
-		{name: "fresh default", yard: "default", want: "codex paseo"},
-		{name: "fresh named", yard: "demo", want: ""},
-		{name: "existing named roots", yard: "demo", existing: true, want: "codex paseo"},
+		{name: "fresh default", yard: "default", want: "codex paseo", inherited: true},
+		{name: "fresh named", yard: "demo", want: "codex paseo", inherited: true},
+		{name: "existing named roots", yard: "demo", existing: true, want: "codex paseo", inherited: true},
 		{name: "legacy roots", yard: "demo", settings: "AGENTS=paseo\n", existing: true, want: "paseo"},
-		{name: "source adoption rejected", yard: "demo", existing: true, source: true, reject: true},
+		{name: "source inherited roots", yard: "demo", existing: true, source: true, want: "codex paseo", inherited: true},
+		{name: "source legacy roots", yard: "demo", settings: "AGENTS=paseo\n", source: true, want: "paseo", inherited: true},
 		{name: "temporary adoption rejected", yard: "demo", command: "CODING_TOOL_INTEGRATIONS=codex", reject: true},
+		{name: "source temporary adoption rejected", yard: "demo", source: true, command: "CODING_TOOL_INTEGRATIONS=codex", reject: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root, environment, _ := nativeFixture(t)
@@ -219,6 +215,10 @@ func TestInitIntegrationSelectionFreshAndAdopted(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			before, err := readConfigAuthoringTarget(target)
+			if err != nil {
+				t.Fatal(err)
+			}
 			proposed, plan, err := program.prepareInitIntegrationSelection(context.Background(), loaded, nil)
 			if test.reject {
 				if err == nil {
@@ -229,12 +229,18 @@ func TestInitIntegrationSelectionFreshAndAdopted(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if plan == nil || strings.Join(proposed.Integrations.Requested, " ") != test.want {
+			if strings.Join(proposed.Integrations.Requested, " ") != test.want {
 				t.Fatalf("plan=%#v proposed=%#v", plan, proposed.Integrations)
 			}
-			before, err := readConfigAuthoringTarget(target)
-			if err != nil {
-				t.Fatal(err)
+			if test.inherited {
+				after, err := readConfigAuthoringTarget(target)
+				if err != nil || plan != nil || !sameConfigAuthoringSnapshot(before, after) || before.Identity != after.Identity {
+					t.Fatalf("init replaced inherited configuration: plan=%#v error=%v", plan, err)
+				}
+				return
+			}
+			if plan == nil {
+				t.Fatal("explicit local legacy selection was not migrated")
 			}
 			if !sameConfigAuthoringSnapshot(before, plan.before) {
 				t.Fatal("planning changed persistent settings")
@@ -257,7 +263,7 @@ func TestInitIntegrationSelectionFreshAndAdopted(t *testing.T) {
 	}
 }
 
-func TestInitProfileBootstrapDoesNotRequireIncusToClearInheritedSelection(t *testing.T) {
+func TestInitProfileBootstrapPreservesInheritedSelectionWithoutIncus(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	environment = withoutCommandSetting(environment, "SSH_PORT")
 	writeCLIFile(t, filepath.Join(root, "config/agents.env"), "CODING_TOOL_INTEGRATIONS=codex\nAGENT_codex_COMMAND=codex\n", 0o600)
@@ -279,19 +285,96 @@ func TestInitProfileBootstrapDoesNotRequireIncusToClearInheritedSelection(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if selection == nil || selection.instanceExists != nil || len(proposed.Integrations.Requested) != 0 {
+	if selection != nil || strings.Join(proposed.Integrations.Requested, " ") != "codex" {
 		t.Fatalf("fresh bootstrap selection: plan=%#v proposed=%#v", selection, proposed.Integrations)
 	}
 	if _, err := os.Stat(bootstrap.targetPath); !os.IsNotExist(err) {
 		t.Fatalf("bootstrap planning wrote registration: %v", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(bootstrap.targetPath), 0o700); err != nil {
-		t.Fatal(err)
+	if string(bootstrap.content) != "SSH_PORT=2234\n" {
+		t.Fatalf("init inserted a tool override into the profile: %q", bootstrap.content)
 	}
-	writeCLIFile(t, bootstrap.targetPath, "SSH_PORT=2299\n", 0o600)
-	execution := &initExecution{loaded: proposed, bootstrap: bootstrap, integrationSelection: selection}
-	if err := selection.check(context.Background(), program, execution); !errors.Is(err, domain.ErrPlanStale) {
-		t.Fatalf("bootstrap accepted a concurrently created registration: %v", err)
+}
+
+func TestInitPreservesProfileSelectionAcrossRuns(t *testing.T) {
+	for _, source := range []bool{false, true} {
+		for _, restricted := range []bool{false, true} {
+			t.Run(fmt.Sprintf("source=%t/restricted=%t", source, restricted), func(t *testing.T) {
+				root, environment, _ := nativeFixture(t)
+				writeCLIFile(t, filepath.Join(root, "config/agents.env"), "AGENT_codex_COMMAND=codex\nAGENT_paseo_DEPENDS=codex\n", 0o600)
+				profile := filepath.Join(root, "config/yards/profiles/tools.env")
+				target := filepath.Join(root, "state/yards/demo/config.env")
+				for _, path := range []string{profile, target} {
+					if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				writeCLIFile(t, profile, fmt.Sprintf("CODING_TOOL_INTEGRATIONS=codex\nALLOWS_CODING_TOOLS=%t\n", !restricted), 0o600)
+				writeCLIFile(t, target, "YARD_TEMPLATE=tools\nSSH_PORT=2223\n", 0o600)
+				before, err := readConfigAuthoringTarget(target)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if source {
+					if err := configsync.RegisterSource(filepath.Join(root, "state"), t.TempDir()); err != nil {
+						t.Fatal(err)
+					}
+				}
+				platform := newInitPlatformFixture()
+				platform.converged[ports.ReconcileStageInstance] = false
+				program, err := New(Options{RepositoryRoot: root, Environment: environment, InitPlatform: platform})
+				if err != nil {
+					t.Fatal(err)
+				}
+				prepare := func(want string) *initExecution {
+					t.Helper()
+					// Each init invocation starts from persistent inputs, not the previous
+					// command's resolved runtime environment.
+					program, err = New(Options{RepositoryRoot: root, Environment: environment, InitPlatform: platform})
+					if err != nil {
+						t.Fatal(err)
+					}
+					loaded, err := program.loadContext("demo")
+					if err != nil {
+						t.Fatal(err)
+					}
+					execution, err := program.prepareInitExecution(context.Background(), loaded, nil, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					selection := execution.loaded.Integrations
+					if execution.integrationSelection != nil || strings.Join(selection.Requested, " ") != want {
+						t.Fatalf("init overrode profile selection: %#v", selection)
+					}
+					if restricted && (len(selection.Effective) != 0 || execution.loaded.Environment["CODING_TOOL_INTEGRATIONS"] != "") {
+						t.Fatal("restricted profile enabled tools")
+					}
+					return execution
+				}
+				for range 2 {
+					if err := prepare("codex").run(context.Background(), program, io.Discard); err != nil {
+						t.Fatal(err)
+					}
+				}
+				stale := prepare("codex")
+				applied := len(platform.applied)
+				hooks := platform.projectHooks
+				writeCLIFile(t, profile, fmt.Sprintf("CODING_TOOL_INTEGRATIONS=paseo\nALLOWS_CODING_TOOLS=%t\n", !restricted), 0o600)
+				if err := stale.run(context.Background(), program, io.Discard); !errors.Is(err, domain.ErrPlanStale) {
+					t.Fatalf("changed profile accepted by stale init: %v", err)
+				}
+				if len(platform.applied) != applied || platform.projectHooks != hooks {
+					t.Fatal("stale init changed runtime")
+				}
+				if err := prepare("paseo").run(context.Background(), program, io.Discard); err != nil {
+					t.Fatal(err)
+				}
+				after, err := readConfigAuthoringTarget(target)
+				if err != nil || !sameConfigAuthoringSnapshot(before, after) || before.Identity != after.Identity {
+					t.Fatalf("init froze profile selection in yard settings: %v", err)
+				}
+			})
+		}
 	}
 }
 
@@ -371,7 +454,7 @@ func TestInitIntegrationSelectionRejectsStalePlan(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	writeCLIFile(t, target, "SSH_PORT=2223\n", 0o600)
+	writeCLIFile(t, target, "SSH_PORT=2223\nAGENTS=codex\n", 0o600)
 	platform := newInitPlatformFixture()
 	platform.converged[ports.ReconcileStageInstance] = false
 	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, InitPlatform: platform})
@@ -387,14 +470,12 @@ func TestInitIntegrationSelectionRejectsStalePlan(t *testing.T) {
 		t.Fatal(err)
 	}
 	execution := &initExecution{loaded: proposed, integrationSelection: plan}
-	platform.converged[ports.ReconcileStageInstance] = true
-	if err := plan.check(context.Background(), program, execution); err == nil {
-		t.Fatal("concurrent instance creation accepted")
-	}
-	platform.converged[ports.ReconcileStageInstance] = false
 	value := "codex"
 	if err := config.WritePersistentAssignment(filepath.Join(root, "state"), target, "CODING_TOOL_INTEGRATIONS", &value); err != nil {
 		t.Fatal(err)
+	}
+	if err := plan.check(context.Background(), program, execution); !errors.Is(err, config.ErrPersistentTargetStale) {
+		t.Fatalf("concurrent requested selection accepted: %v", err)
 	}
 	if err := plan.apply(execution); err == nil {
 		t.Fatal("concurrent requested selection overwritten")
@@ -443,15 +524,17 @@ func TestFreshNamedSelectionClearsDerivedRuntimeLinks(t *testing.T) {
 	}
 }
 
-func TestInitRejectsCanonicalIntegrationInputsChangedAfterPlan(t *testing.T) {
-	for _, change := range []string{"selection", "role", "same-bytes replacement"} {
+func TestInitRejectsIntegrationInputsChangedAfterPlan(t *testing.T) {
+	for _, change := range []string{"selection", "role", "same-bytes replacement", "new explicit selection", "new role"} {
 		t.Run(change, func(t *testing.T) {
 			root, environment, _ := nativeFixture(t)
 			path := filepath.Join(root, "state/yards/default/config.env")
 			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			writeCLIFile(t, path, "CODING_TOOL_INTEGRATIONS=''\n", 0o600)
+			if !strings.HasPrefix(change, "new ") {
+				writeCLIFile(t, path, "CODING_TOOL_INTEGRATIONS=''\n", 0o600)
+			}
 			profile := filepath.Join(root, "config/yards/profiles/test-vms.env")
 			if err := os.MkdirAll(filepath.Dir(profile), 0o700); err != nil {
 				t.Fatal(err)
@@ -471,9 +554,13 @@ func TestInitRejectsCanonicalIntegrationInputsChangedAfterPlan(t *testing.T) {
 				t.Fatal(err)
 			}
 			if execution.integrationSelection != nil {
-				t.Fatal("fixture must already have canonical desired state")
+				t.Fatal("fixture must not require a selection write")
 			}
 			switch change {
+			case "new explicit selection":
+				writeCLIFile(t, path, "CODING_TOOL_INTEGRATIONS=''\n", 0o600)
+			case "new role":
+				writeCLIFile(t, path, "YARD_TEMPLATE=test-vms\n", 0o600)
 			case "selection":
 				writeCLIFile(t, path, "CODING_TOOL_INTEGRATIONS=codex\n", 0o600)
 			case "role":
@@ -485,7 +572,7 @@ func TestInitRejectsCanonicalIntegrationInputsChangedAfterPlan(t *testing.T) {
 				}
 			}
 			if err := execution.checkIntegrationBaseline(program); !errors.Is(err, domain.ErrPlanStale) {
-				t.Fatalf("changed canonical inputs accepted: %v", err)
+				t.Fatalf("changed integration inputs accepted: %v", err)
 			}
 			if err := execution.run(context.Background(), program, io.Discard); !errors.Is(err, domain.ErrPlanStale) {
 				t.Fatalf("changed inputs reached runtime: %v", err)

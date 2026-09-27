@@ -204,6 +204,8 @@ func (runner ProjectEnvironmentRunner) up(
 	for _, key := range keys {
 		arguments = append(arguments, "-e", key+"="+runner.Profile.Environment[key])
 	}
+	arguments = append(arguments, "-e", "SUBYARD_PROJECT_ID="+runner.Project.ProjectID,
+		"-e", "SUBYARD_YARD_NAME="+runner.Yard.YardName)
 	var warnings strings.Builder
 	for _, device := range runner.Profile.Devices {
 		switch device {

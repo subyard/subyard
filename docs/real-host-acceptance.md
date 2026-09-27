@@ -79,11 +79,16 @@ two-owner peer phase starts a fresh candidate yard twice and exercises real remo
 offline recovery and credential exchange remain in the full peer phase. Cleanup and a final boundary
 check close the run.
 
-The explicit `--lane full` matrix remains the exhaustive compatibility and recovery run. It retains
-historical migration, broker, nested teardown, source upgrade, power/systemd and full peer scenarios,
-and includes the same release-smoke phase before peer acceptance. It assumes the host-free core,
+The explicit `--lane full` matrix runs on the ordinary 4 GiB pair. It retains
+historical migration, broker runtime activation/rollback, nested teardown, source upgrade,
+power/systemd and full peer scenarios, and includes the same release-smoke phase before peer acceptance. It assumes the host-free core,
 loopback SSH/crypto and engine-release contracts have already passed, so it does not repeat them on
-the VMs. Only these disposable VMs observe real KVM and kernel behavior.
+the VMs. Only these disposable VMs observe real KVM and kernel behavior. Physical candidate-broker
+cross-slot isolation and quarantine/rebuild are an explicit separate diagnostic, not recursively
+run inside every full P0. See [test VM capacity and scope](test-vms.md#operator-setup).
+
+Android acceptance needs only one `--type android-test` VM (8 GiB / 40 GiB). A pair is used for
+scenarios with two independent hosts; `--vm 1` alone still allocates the default pair.
 
 Exercise a synthetic project through `sync`, ordinary TTL-refreshed `list`, forced `list --live`,
 `shell`, `export`, and `remove`; test an

@@ -51,6 +51,24 @@ case "${1:-}" in
   exec)
     [ -e "$state_root/up" ] || exit 1
     case " $* " in
+      *' python3 /usr/local/lib/subyard-android/client.py _wire '*)
+        IFS= read -r request
+        case "$request" in
+          *'"operation": "status"'*)
+            if [ -e "$state_root/android-lease" ]; then
+              printf '%s\n' '{"ok":true,"result":{"slots":[{"slot_id":"fixture-0","state":"held"}]}}'
+            else
+              printf '%s\n' '{"ok":true,"result":{"slots":[]}}'
+            fi
+            ;;
+          *'"operation": "drain"'*)
+            rm -f "$state_root/android-lease"
+            printf '%s\n' '{"ok":true,"result":{"stopped":true}}'
+            ;;
+          *) printf '%s\n' '{"ok":false,"error":"request","message":"unexpected Android fixture request"}' ;;
+        esac
+        ;;
+      *' systemctl is-active --quiet subyard-android-pool.service '*) : ;;
       *' sh -s -- /srv/staging/_lease bot canonical '*)
         script="$(cat)"
         case "$script" in
@@ -122,8 +140,7 @@ check_resource_usage "$staging_handler" start invalid/zone
 check_resource_usage "$staging_handler" up --source
 check_resource_usage "$staging_handler" logs --purge
 check_resource_usage "$orca_handler" logs --unknown
-check_resource_usage "$ROOT/config/profiles/android/resources/emulator/handler.sh" up --unknown
-check_resource_usage "$ROOT/config/profiles/android/resources/emulator/handler.sh" view --unknown
+check_resource_usage "$ROOT/config/profiles/android/resources/emulator/handler.sh" run --unknown
 
 # A valid mutation against a stopped yard is a runtime/precondition failure, not usage.
 mv "$TMP/up" "$TMP/stopped"
@@ -304,48 +321,41 @@ for handler in "${probe_handlers[@]}"; do
 done
 touch "$TMP/up"
 
-# Controller-owned resources use their state probe and never scan the shared process table.
-rm -f "$TMP/listening"
+# Android status is pool-service readiness plus a broker read; it owns no L1 runtime.
+: > "$RESOURCE_TEST_LOG"
 "$ROOT/bin/yard" emu status >"$TMP/emu-status.out"
-grep -Fq 'still booting' "$TMP/emu-status.out" \
-  || fail 'emulator status did not use its process probe while adb was down'
-grep -Fq 'emulator-control.sh is-running' "$RESOURCE_TEST_LOG" \
-  || fail 'emulator status did not use controller-owned state'
-if grep -Fq 'pgrep -u dev -f --' "$RESOURCE_TEST_LOG"; then
-  fail 'controller-owned status scanned the shared process table'
+grep -Fq '"slots": []' "$TMP/emu-status.out" \
+  || fail 'emulator status did not report the empty broker pool'
+grep -Fq 'client.py _wire' "$RESOURCE_TEST_LOG" \
+  || fail 'emulator status did not reach the owner broker transport'
+if grep -Eq 'emulator-control|pgrep -u dev -f --|config device' "$RESOURCE_TEST_LOG"; then
+  fail 'emulator status retained an L1 runtime probe'
 fi
 
 # Representative reverse lifecycle paths execute through the generic dispatcher and fake Incus.
+touch "$TMP/android-lease"
 SUBYARD_RESOURCE_MODE=prepare "$ROOT/config/profiles/android/resources/emulator/handler.sh" \
   down >"$TMP/emu-down-plan.json"
-grep -Fq 'remove the host-loopback emulator proxy devices' "$TMP/emu-down-plan.json" \
-  || fail 'emulator prepare lost a device from the streamed device list'
+grep -Fq 'close selected Android leases and stop their runtimes' "$TMP/emu-down-plan.json" \
+  || fail 'emulator down did not assess the held broker lease'
 if ! "$ROOT/bin/yard" emu down --yes >"$TMP/emu-down.out" 2>&1; then
   cat "$TMP/emu-down.out" >&2
   tail -n 20 "$RESOURCE_TEST_LOG" >&2
-  fail 'controller-owned emulator down failed'
+  fail 'broker-owned emulator down failed'
+fi
+grep -Fq '"stopped": true' "$TMP/emu-down.out" || fail 'emulator down did not receive the broker drain acknowledgement'
+[ ! -e "$TMP/android-lease" ] || fail 'emulator down did not drain the fixture lease'
+if grep -Eq 'config device|emulator-control|pkill -TERM -u dev -f --' "$RESOURCE_TEST_LOG"; then
+  fail 'emulator down retained an L1 runtime mutation'
 fi
 "$ROOT/bin/yard" staging stop --yes >/dev/null
 "$ROOT/bin/yard" qa-pool down --yes >/dev/null
 "$ROOT/bin/yard" orca down --yes >/dev/null
-grep -Fq 'config device remove' "$RESOURCE_TEST_LOG" || fail 'emulator down did not remove its bridge'
-grep -Fq 'emulator-control.sh stop' "$RESOURCE_TEST_LOG" \
-  || fail 'emulator stop did not target its owned process group'
-if grep -Fq 'pkill -TERM -u dev -f --' "$RESOURCE_TEST_LOG"; then
-  fail 'controller-owned stop used the legacy process-table fallback'
-fi
 grep -Fq 'docker exec subyard-staging-canonical' "$RESOURCE_TEST_LOG" \
   || fail 'staging stop did not reach its profile mechanic'
 grep -Fq 'docker stop subyard-qa-broker' "$RESOURCE_TEST_LOG" \
   || fail 'qa-pool down did not reach its profile mechanic'
 grep -Fq 'systemctl disable --now subyard-orca.service' "$RESOURCE_TEST_LOG" \
   || fail 'Orca down did not reach its profile-owned service'
-
-# Before the controller's first launch, an already-running pre-upgrade emulator remains manageable.
-: > "$RESOURCE_TEST_LOG"
-rm -f "$TMP/control-available" "$TMP/legacy-stopped"
-"$ROOT/bin/yard" emu down --yes >/dev/null
-grep -Fq 'pkill -TERM -u dev -f -- ^(' "$RESOURCE_TEST_LOG" \
-  || fail 'legacy emulator stop did not use the strict migration identity'
 
 printf 'ok: profile-owned resources dispatch and reverse lifecycle paths remain generic\n'

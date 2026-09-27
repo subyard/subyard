@@ -525,18 +525,15 @@ assert_direct_normalizer_is_pure() {
     || die 'direct normalization changed the scoped operator tree'
 }
 
-verify_migrated_yard_registration() { # [adopted]
+verify_migrated_yard_registration() {
   operator_env bash -c '
     set -euo pipefail
-    { sed "s/^YARD_TEMPLATE=e2e-vms$/YARD_TEMPLATE=test-vms/" "$1"
-      if [ "$3" = adopted ]; then printf "%s\n" "$4"; fi
-    } | cmp - "$2"
+    sed "s/^YARD_TEMPLATE=e2e-vms$/YARD_TEMPLATE=test-vms/" "$1" | cmp - "$2"
   ' _ "$SOURCE_ROOT/private/yards/e2e-yard.env" \
-    "$OPERATOR_HOME/.config/subyard/yards/test-yard/config.env" \
-    "${1:-}" "CODING_TOOL_INTEGRATIONS=''"
+    "$OPERATOR_HOME/.config/subyard/yards/test-yard/config.env"
 }
 
-verify_migration() { # [adopted]
+verify_migration() {
   local runtime="$OPERATOR_HOME/.subyard/runtime/current/bin/yard"
   [ "$(operator_env readlink "$OPERATOR_HOME/.local/bin/yard")" = "$runtime" ] \
     && [ "$(operator_env readlink "$OPERATOR_HOME/.local/bin/sy")" = "$runtime" ] \
@@ -545,8 +542,8 @@ verify_migration() { # [adopted]
     || die 'source checkout was changed or removed'
   operator_env cmp "$SOURCE_ROOT/private/config.env" "$OPERATOR_HOME/.config/subyard/config.env" \
     || die 'host settings were not migrated'
-  verify_migrated_yard_registration "${1:-}" \
-    || die 'named test yard registration differs from its authorized migration and adoption'
+  verify_migrated_yard_registration \
+    || die 'named test yard registration differs from its authorized migration'
   operator_env cmp "$SOURCE_ROOT/private/agents/codex/repo.rules" \
     "$OPERATOR_HOME/.config/subyard/overrides/host/agents/codex/repo.rules" \
     || die 'private agent asset was not migrated'
@@ -1085,7 +1082,7 @@ finish() {
   fi
   [ "$(operator_yard --version)" = "yard $VERSION_B" ] \
     || die 'rejected source restore changed the active runtime'
-  verify_migration adopted
+  verify_migration
   p0_retry_init_after_plan_stale operator_yard -Y "$YARD_NAME" init --yes
   operator_yard -Y "$YARD_NAME" check
   verify_config_workflow

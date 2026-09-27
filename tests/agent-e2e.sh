@@ -915,13 +915,22 @@ set -e
   "file://$ROOT/.build/p0-current-base-release" \
   "update --runtime-root $TMP/release-update-home/runtime --version 0.8.1-p0.current-base --yes")" ] \
   || fail 'P0 release-impact update does not use its exact local synthetic release'
-owner_capacity_reclaim_source="$(awk '
-  /^reclaim_owner_lease_capacity\(\)/ { copying=1 }
-  copying { print }
-  copying && /^}$/ { exit }
-' "$ROOT/dev/e2e/p0-guest.sh")"
-! grep -Fq '"$ROOT/.build/p0-owner-release"' <<<"$owner_capacity_reclaim_source" \
-  || fail 'P0 owner capacity reclaim deletes a release artifact used by later updates'
+owner_source="$(sed -n '/^owner() ($/,/^)/p' "$ROOT/dev/e2e/p0-guest.sh")"
+broker_physical_source="$(sed -n '/^broker_recovery_owner() ($/,/^)/p' "$ROOT/dev/e2e/p0-guest.sh")"
+[ -n "$owner_source" ] && [ -n "$broker_physical_source" ] \
+  && grep -Fq 'owner_profile_migration_contract' <<<"$owner_source" \
+  && grep -Fq 'seed-test-vms-legacy-state.sh' <<<"$owner_source" \
+  && grep -Fq 'owner_project_contract' <<<"$owner_source" \
+  && grep -Fq './bin/yard -Y test-yard teardown --yes' <<<"$owner_source" \
+  && ! grep -Eq 'require_broker_fixture_capacity|run_nested_broker_acceptance|reclaim_owner_lease_capacity' <<<"$owner_source" \
+  || fail 'ordinary P0 owner either lost release coverage or allocates nested broker VMs'
+[ "$(grep -Fc 'run_nested_broker_acceptance dev/e2e/p1-lease-acceptance.sh' <<<"$broker_physical_source")" = 2 ] \
+  && grep -Fq 'require_broker_fixture_capacity' <<<"$broker_physical_source" \
+  && grep -Fq 'run_nested_broker_acceptance dev/e2e/p0-broker-recovery.sh' <<<"$broker_physical_source" \
+  && grep -Fq 'write_owner_registration test-yard test-vms 2224 1' <<<"$broker_physical_source" \
+  && grep -Fq 'write_owner_registration test-yard test-vms 2224 3' <<<"$broker_physical_source" \
+  && grep -Fq 'write_owner_registration test-yard test-vms 2224 2' <<<"$broker_physical_source" \
+  || fail 'explicit broker diagnostic lost its physical lease and recovery coverage'
 p0_incus_root="$TMP/p0-incus-bootstrap/platform"
 p0_incus_storage="$p0_incus_root/incus/incus/storage"
 owner_incus_call="$TMP/p0-owner-incus-call"
@@ -2240,6 +2249,7 @@ busy_nonheld_owner='{"schema_version":1,"status":"error","code":"busy","state":"
 busy_mismatch='{"schema_version":1,"status":"error","code":"busy","state":"held","reason":"provisioning","message":"untrusted mismatch"}'
 busy_unknown_schema='{"schema_version":2,"status":"error","code":"busy","state":"held","reason":"busy","message":"untrusted schema"}'
 invalid='{"schema_version":1,"status":"error","code":"invalid_request","reason":"invalid_slot","message":"invalid slot_id"}'
+quarantined='{"schema_version":1,"status":"error","code":"quarantined","message":"slot provisioning failed"}'
 status='{"schema_version":1,"status":"ok","capabilities":["attribution-v2","environment-acquire-v3","disposable-v1"],"pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-002","resource_generation":1,"lease_epoch":1,"state":"held"}]}}'
 status_without_v2='{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-002","resource_generation":1,"lease_epoch":1,"state":"available"}]}}'
 grant='{"schema_version":1,"status":"ok","grant":{"environment":{"type":"subyard-pair","vm_count":2,"cpu_per_vm":4,"memory_per_vm":"4GiB","disk_per_vm":"20GiB","lifecycle":"disposable-v1"},"base_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","slot_id":"slot-002","resource_generation":1,"lease_id":"aabbccdd","lease_epoch":2,"capability":"eeff0011","data_user":"subyard-e2e-slot-2","targets":[{"selector":1,"name":"e2e-vm-1","address":"10.42.2.11","host_key_type":"ssh-ed25519","host_key_blob":"YWJjZA=="},{"selector":2,"name":"e2e-vm-2","address":"10.42.2.12","host_key_type":"ssh-ed25519","host_key_blob":"YWJjZA=="}]}}'
@@ -2273,6 +2283,7 @@ case "$command" in
     printf '%s\n' "$count" > "$FAKE_ACQUIRE_COUNT"
     case "$FAKE_SCENARIO" in
       invalid) printf '%s\n' "$invalid" ;;
+      quarantined) printf '%s\n' "$quarantined" ;;
       busy-missing-owner) printf '%s\n' "$busy_missing_owner" ;;
       busy-extra-owner) printf '%s\n' "$busy_extra_owner" ;;
       busy-extra-top-level) printf '%s\n' "$busy_extra_top_level" ;;
@@ -2428,6 +2439,18 @@ set -e
   && [ "$(grep -c '^acquire' "$RUNNER_FIXTURE/facade.log")" = 1 ] \
   && grep -Eq '^acquire.* slot-002$' "$RUNNER_FIXTURE/facade.log" \
   || fail "invalid exact slot response retried or lost its typed reason: $invalid_output"
+
+# A real broker provisioning failure has no machine reason; show its public message.
+new_runner_fixture quarantined-provisioning
+set +e
+quarantined_output="$(run_runner_fixture quarantined --slot 2 --ssh 1 -- true 2>&1)"
+quarantined_rc=$?
+set -e
+[ "$quarantined_rc" = 2 ] \
+  && grep -Fq 'quarantined: slot provisioning failed' <<<"$quarantined_output" \
+  && ! grep -Fq 'quarantined: unspecified' <<<"$quarantined_output" \
+  && [ "$(grep -c '^acquire' "$RUNNER_FIXTURE/facade.log")" = 1 ] \
+  || fail "quarantined acquire did not use its public diagnostic message: $quarantined_output"
 
 # A mismatched successful grant is released with its returned credentials before guest access.
 new_runner_fixture wrong-grant
@@ -3832,17 +3855,14 @@ source_finish="$(sed -n '/^finish() {/,/^}/p' "$ROOT/dev/e2e/p0-source-upgrade.s
   operator_env() { "$@"; }
   eval "$(sed -n '/^verify_migrated_yard_registration() {/,/^}/p' "$ROOT/dev/e2e/p0-source-upgrade.sh")"
   verify_migrated_yard_registration || fail 'initial source registration comparison failed'
-  if verify_migrated_yard_registration adopted >/dev/null 2>&1; then
-    fail 'adopted registration comparison accepted a missing selection'
-  fi
   printf "CODING_TOOL_INTEGRATIONS=''\n" >> "$migrated"
-  verify_migrated_yard_registration adopted || fail 'authorized empty adoption was rejected'
   if verify_migrated_yard_registration >/dev/null 2>&1; then
-    fail 'pre-adoption comparison accepted a premature selection write'
+    fail 'registration comparison accepted an unauthorized local selection'
   fi
+  sed 's/^YARD_TEMPLATE=e2e-vms$/YARD_TEMPLATE=test-vms/' "$original" > "$migrated"
   sed -i 's/^SSH_PORT=2223$/SSH_PORT=2224/' "$migrated"
-  if verify_migrated_yard_registration adopted >/dev/null 2>&1; then
-    fail 'adoption comparison accepted unrelated setting drift'
+  if verify_migrated_yard_registration >/dev/null 2>&1; then
+    fail 'registration comparison accepted unrelated setting drift'
   fi
 ) || fail 'source-upgrade registration comparison did not retain exact migration evidence'
 source_normalizer_function="$(sed -n '/^assert_direct_normalizer_is_pure() {/,/^}/p' \

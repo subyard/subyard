@@ -129,6 +129,12 @@ find_candidate_launcher() {
     || die 'could not identify the one verified published candidate launcher'
 }
 
+yard_config_fingerprint() {
+  operator_env sh -c '
+    if [ -e "$1" ]; then sha256sum "$1" | { read -r digest _; printf "%s\n" "$digest"; }; else printf absent; fi
+  ' _ "$YARD_CONFIG"
+}
+
 assert_preserved_user_state() {
   guest sh -eu -c '
     [ "$(cat /home/dev/.claude/auth.json)" = legacy-auth ]
@@ -367,25 +373,28 @@ jq -e '
   || die 'successful upgrade did not adopt the ordinary five integrations'
 assert_preserved_user_state
 
-info 'materializing the canonical per-yard selection through explicit init'
+info 'repeating init without materializing an inherited selection'
+config_before="$(yard_config_fingerprint)"
 operator_yard init --yes
-operator_env grep -Eq '^CODING_TOOL_INTEGRATIONS=' "$YARD_CONFIG" \
-  || die 'explicit candidate init did not persist the default requested set'
+[ "$(yard_config_fingerprint)" = "$config_before" ] \
+  || die 'init rewrote the inherited default-yard settings'
+operator_env test ! -e "$YARD_CONFIG" \
+  || die 'init materialized a default-yard selection from inherited settings'
 operator_yard integration status --json | jq -e '
   .observed == "ready" and
   .selection.requested == ["claude","codex","opencode","pi","aiobserver"]
-' >/dev/null || die 'explicit candidate init changed the adopted requested set'
+' >/dev/null || die 'explicit init changed the inherited requested set'
 assert_preserved_user_state
 
-info 'repeating explicit init without rewriting stable integration evidence'
+info 'repeating init without rewriting stable integration evidence'
 inventory_before="$(guest sha256sum "$INVENTORY")"
-config_before="$(operator_env sha256sum "$YARD_CONFIG")"
+config_before="$(yard_config_fingerprint)"
 state_before="$(legacy_fingerprint)"
 operator_yard init --yes
 [ "$(guest sha256sum "$INVENTORY")" = "$inventory_before" ] \
   || die 'repeated init rewrote stable integration inventory'
-[ "$(operator_env sha256sum "$YARD_CONFIG")" = "$config_before" ] \
-  || die 'repeated init rewrote stable requested settings'
+[ "$(yard_config_fingerprint)" = "$config_before" ] \
+  || die 'repeated init rewrote inherited default-yard settings'
 [ "$(legacy_fingerprint)" = "$state_before" ] \
   || die 'repeated init changed stable integration artifacts'
 
