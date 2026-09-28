@@ -109,6 +109,12 @@ func (cli *CLI) runConfigAuthoring(
 			intended = config.PersistentFileSnapshot{Exists: false}
 		}
 		unchanged := sameConfigAuthoringSnapshot(snapshot, intended)
+		if !unchanged {
+			if err := cli.checkResourceConfigChange(ctx, loaded, request); err != nil {
+				cli.errorf("config %s: %v", action, err)
+				return 1
+			}
+		}
 		if !cli.planConfigAction(ctx, loaded, request.action, request.assumeYes, unchanged,
 			fmt.Sprintf("%s %s in persistent %s settings at %s",
 				action, request.name, request.scope, path)) {
@@ -125,6 +131,10 @@ func (cli *CLI) runConfigAuthoring(
 				return 1
 			}
 			defer unlock()
+			if err := cli.checkResourceConfigChange(ctx, loaded, request); err != nil {
+				cli.errorf("config %s: %v", action, err)
+				return 1
+			}
 			if request.name == "YARD_TEMPLATE" {
 				if err := config.ValidateYardTemplateIntegrations(loaded, request.value); err != nil {
 					cli.errorf("config %s: %v", action, err)

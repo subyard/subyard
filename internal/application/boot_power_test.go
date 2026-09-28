@@ -156,6 +156,37 @@ func TestBootPowerReconcilerRestoresDesiredState(t *testing.T) {
 	}
 }
 
+func TestBootPowerPostStartRunsOnlyAfterSuccessfulStartInsidePolicyLock(t *testing.T) {
+	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+		"p/running": managedPowerInstance("p", "running", "Running", PowerRunning),
+		"p/start":   managedPowerInstance("p", "start", "Stopped", PowerRunning),
+	}}
+	locked, cleanups := false, 0
+	reconciler := BootPowerReconciler{
+		Inventory: fake, Instances: fake, Power: fake,
+		Network: networkGuardFunc(func(context.Context, []string) error { return nil }),
+		NetworkPolicy: bootNetworkPolicyFunc(func(_ context.Context, _ yardnetwork.Yard, start func() error) error {
+			locked = true
+			defer func() { locked = false }()
+			return start()
+		}),
+		AfterStart: func(_ context.Context, yard yardnetwork.Yard) error {
+			cleanups++
+			if !locked || yard.Name != "start" || fake.Instances["p/start"].Status != "Running" {
+				t.Fatalf("cleanup ran before start or outside network lock: yard=%+v locked=%t", yard, locked)
+			}
+			return nil
+		},
+		EnsureNetworkLock: ensureBootNetworkLock,
+	}
+	if _, err := reconciler.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if cleanups != 1 {
+		t.Fatalf("cleanup ran %d times; expected only newly started instance", cleanups)
+	}
+}
+
 func TestBootPowerReconcilerInitializesLockBeforeInventory(t *testing.T) {
 	inventoryCalled := false
 	failure := errors.New("lock unavailable")

@@ -13,8 +13,10 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/networkruntime"
 	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
 	"github.com/Subyard/Subyard/internal/application"
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
 
@@ -44,21 +46,79 @@ func networkYard(y domain.Context) yardnetwork.Yard {
 }
 
 func (cli *CLI) networkService(yards []domain.Context) *yardnetwork.Service {
+	var service *yardnetwork.Service
 	if cli.options.NetworkPolicy != nil {
-		return cli.options.NetworkPolicy
+		copy := *cli.options.NetworkPolicy
+		service = &copy
+	} else {
+		incus, _ := cli.statusPorts()
+		host, ok := incus.(yardnetwork.Host)
+		if !ok {
+			return nil
+		}
+		bridges := []string{}
+		for _, y := range yards {
+			if y.IncusBridge != "" && !slices.Contains(bridges, y.IncusBridge) {
+				bridges = append(bridges, y.IncusBridge)
+			}
+		}
+		service = &yardnetwork.Service{Host: host, Lock: networkruntime.HostLock{}, Guard: func(ctx context.Context) error { return (hostruntime.NetworkGuard{}).Check(ctx, bridges) }}
 	}
-	incus, _ := cli.statusPorts()
-	host, ok := incus.(yardnetwork.Host)
-	if !ok {
-		return nil
+	if service.ContractSource != nil {
+		return service
 	}
-	bridges := []string{}
-	for _, y := range yards {
-		if y.IncusBridge != "" && !slices.Contains(bridges, y.IncusBridge) {
-			bridges = append(bridges, y.IncusBridge)
+	publicIngress := false
+	for _, definition := range cli.resources.Definitions() {
+		if definition.Proxy != nil && definition.Proxy.AddressPolicy == resource.ProxyAddressOwnerIPv4UDP {
+			publicIngress = true
+			break
 		}
 	}
-	return &yardnetwork.Service{Host: host, Lock: networkruntime.HostLock{}, Guard: func(ctx context.Context) error { return (hostruntime.NetworkGuard{}).Check(ctx, bridges) }}
+	if !publicIngress {
+		return service
+	}
+	contexts := make(map[string]domain.Context, len(yards))
+	for _, yard := range yards {
+		contexts[yard.YardName] = yard
+	}
+	var inventoryRoot domain.Context
+	if len(yards) != 0 {
+		inventoryRoot = yards[0]
+	}
+	service.ContractSource = func(yard yardnetwork.Yard) ([]resource.ProxyContract, error) {
+		context, found := contexts[yard.Name]
+		if !found {
+			if inventoryRoot.Paths.ConfigDir == "" || inventoryRoot.Paths.ConfigHome == "" {
+				return nil, errors.New("resource ingress inventory root is unavailable")
+			}
+			if yard.Name != "default" {
+				if _, err := config.FindYardRegistrationFile(inventoryRoot.Paths.ConfigDir,
+					inventoryRoot.Paths.ConfigHome, yard.Name); err != nil {
+					if errors.Is(err, config.ErrUnknownYard) {
+						// A saved binding can outlive a removed yard registration.
+						return nil, nil
+					}
+					return nil, err
+				}
+			}
+			context = inventoryRoot
+		}
+		if found && networkYard(context) != yard {
+			return nil, fmt.Errorf("resource ingress yard %q is not registered", yard.Name)
+		}
+		loaded, err := cli.loadInventoryLoaded(yard.Name, config.Loaded{Context: context})
+		if err != nil {
+			return nil, err
+		}
+		if loaded.Context.AccessKind != domain.AccessLocal || networkYard(loaded.Context) != yard ||
+			loaded.Context.Paths.ConfigDir != context.Paths.ConfigDir ||
+			loaded.Context.Paths.ConfigHome != context.Paths.ConfigHome ||
+			loaded.Context.Paths.DataHome != context.Paths.DataHome {
+			return nil, fmt.Errorf("resource ingress yard %q configuration changed", yard.Name)
+		}
+		return cli.resources.ProxyContracts(strings.Fields(loaded.Environment["ENVIRONMENT_PROFILES"])), nil
+	}
+	return service
 }
 
 func (prepared *preparedCommand) prepareNetwork(ctx context.Context, _ *initBootstrap) error {

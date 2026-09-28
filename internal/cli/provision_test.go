@@ -48,6 +48,37 @@ func TestProvisionSelectionUsesYardThenProjectProfiles(t *testing.T) {
 	}
 }
 
+func TestDedicatedProvisionRequiresOptIn(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	writeProvisionProfile(t, root, "service")
+	writeCLIFile(t, filepath.Join(root, "config/profiles/service/profile.conf"), "PROFILE_NAME=service\nPROVISION_SCOPE=dedicated\n", 0o600)
+	writeProvisionProfile(t, root, "android")
+	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := program.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, selection := range []string{"", "android", "service"} {
+		loaded.Environment["ENVIRONMENT_PROFILES"] = selection
+		execution, err := program.prepareProvisionExecution(loaded, nil, nil)
+		if err != nil || slices.Contains(execution.profiles, "service") {
+			t.Fatalf("ordinary yard selected dedicated service: %v, %v", execution, err)
+		}
+	}
+	if _, err := program.prepareProvisionExecution(loaded, []string{"service"}, nil); err == nil {
+		t.Fatal("explicit hook bypassed the dedicated-yard boundary")
+	}
+	loaded.Environment["EXCLUSIVE_ENVIRONMENT_PROFILE"] = "service"
+	loaded.Environment["ENVIRONMENT_PROFILES"] = "service"
+	execution, err := program.prepareProvisionExecution(loaded, nil, nil)
+	if err != nil || !slices.Equal(execution.profiles, []string{"service"}) {
+		t.Fatalf("dedicated service selection failed: %v, %v", execution, err)
+	}
+}
+
 func TestGitHubProvisionDefaultDoesNotChangeOtherProfileSelection(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	writeProvisionProfile(t, root, "github")

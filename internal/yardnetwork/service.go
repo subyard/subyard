@@ -5,18 +5,29 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/netip"
 	"slices"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/resource"
 )
 
 type Service struct {
 	Host  Host
 	Lock  Locker
 	Guard func(context.Context) error
+	// ContractSource resolves selected, registry-validated resource contracts for
+	// each yard. An error aborts planning before any network mutation.
+	ContractSource func(Yard) ([]resource.ProxyContract, error)
+	// UseApprovedIngress is for the root boot reconciler only. It verifies the
+	// exact previously applied ingress projection without reading yard settings.
+	UseApprovedIngress bool
+	// ClearStaleUDP removes only stale connection tracking for a verified,
+	// owned public UDP endpoint after a boot-time instance start.
+	ClearStaleUDP func(context.Context, netip.AddrPort) error
 }
 
 type Status struct {
@@ -47,11 +58,74 @@ func (s Service) Prepare(ctx context.Context, yards []Yard, change Change) (Plan
 	if err != nil {
 		return Plan{}, err
 	}
-	snapshot, err := s.Host.InspectNetwork(ctx, yards)
+	snapshot, err := s.inspectNetwork(ctx, yards)
 	if err != nil {
 		return Plan{}, err
 	}
+	if s.UseApprovedIngress {
+		if s.ContractSource != nil {
+			return Plan{}, errors.New("boot ingress verification cannot use a resource contract source")
+		}
+		if err := applyApprovedBootIngress(&snapshot, stored.Policy); err != nil {
+			return Plan{}, err
+		}
+	}
 	return buildPlan(stored, snapshot, change)
+}
+
+func applyApprovedBootIngress(snapshot *Snapshot, policy Policy) error {
+	bindings := make(map[Yard]Binding, len(policy.Bindings))
+	for _, binding := range policy.Bindings {
+		bindings[binding.Yard] = binding
+	}
+	for index := range snapshot.Yards {
+		yard := &snapshot.Yards[index]
+		binding, exists := bindings[yard.Yard]
+		if !exists {
+			continue
+		}
+		approvedDevices := make(map[string]bool, len(binding.ApprovedIngress))
+		for _, approved := range binding.ApprovedIngress {
+			expected := approved.proxy(binding)
+			if !yard.InstanceFound || yard.InstanceInfo.Type != domain.YardVM ||
+				!maps.Equal(yard.InstanceInfo.LocalDevices[approved.Device], expected) ||
+				!maps.Equal(yard.InstanceInfo.Devices[approved.Device], expected) ||
+				yard.InstanceInfo.LocalConfig["user.subyard.resource."+approved.Device] != (resource.ProxyContract{}).OwnershipValue(expected) {
+				return fmt.Errorf("%w: approved public ingress for yard %s changed", ErrNotConverged, yard.Name)
+			}
+			approvedDevices[approved.Device] = true
+			yard.IngressContracts = append(yard.IngressContracts, resource.ProxyContract{
+				Profile: approved.Device, Resource: approved.Device, Device: approved.Device,
+				Connect:       fmt.Sprintf("udp:guest:%d", approved.GuestPort),
+				AddressPolicy: resource.ProxyAddressOwnerIPv4UDP, OwnershipMetadata: true,
+			})
+		}
+		if len(approvedDevices) != 0 {
+			for name, device := range yard.InstanceInfo.Devices {
+				if device["type"] == "proxy" && device["bind"] != "instance" &&
+					(strings.HasPrefix(device["listen"], "udp:") || strings.HasPrefix(device["connect"], "udp:")) &&
+					!approvedDevices[name] {
+					return fmt.Errorf("%w: unapproved host UDP proxy in yard %s", ErrNotConverged, yard.Name)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (s Service) inspectNetwork(ctx context.Context, yards []Yard) (Snapshot, error) {
+	snapshot, err := s.Host.InspectNetwork(ctx, yards)
+	if err != nil || s.ContractSource == nil {
+		return snapshot, err
+	}
+	for i := range snapshot.Yards {
+		contracts, resolveErr := s.ContractSource(snapshot.Yards[i].Yard)
+		if resolveErr != nil {
+			return Snapshot{}, fmt.Errorf("resolve resource contracts for yard %s: %w", snapshot.Yards[i].Name, resolveErr)
+		}
+		snapshot.Yards[i].IngressContracts = contracts
+	}
+	return snapshot, nil
 }
 
 func mergeYards(yards []Yard, p Policy) ([]Yard, error) {
@@ -80,6 +154,9 @@ func mergeYards(yards []Yard, p Policy) ([]Yard, error) {
 }
 
 func (s Service) Apply(ctx context.Context, approved Plan) error {
+	if s.UseApprovedIngress {
+		return errors.New("boot ingress verification is read-only")
+	}
 	if s.Lock == nil {
 		return errors.New("host network policy lock is required")
 	}
@@ -341,7 +418,7 @@ func (s Service) forgetLocked(ctx context.Context, y Yard) error {
 	if err != nil {
 		return err
 	}
-	snapshot, err := s.Host.InspectNetwork(ctx, yards)
+	snapshot, err := s.inspectNetwork(ctx, yards)
 	if err != nil {
 		return err
 	}

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/sha256"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -50,14 +51,15 @@ type DashboardContract struct {
 // still owns lifecycle and address validation; the typed metadata lets the global
 // security checker distinguish that exact route from an arbitrary public proxy.
 type ProxyContract struct {
-	Profile              string
-	Resource             string
-	Device               string
-	AdvertiseHostSetting string
-	HostPortSetting      string
-	Connect              string
-	AddressPolicy        ProxyAddressPolicy
-	OwnershipMetadata    bool
+	Profile               string
+	Resource              string
+	Device                string
+	AdvertiseHostSetting  string
+	HostPortSetting       string
+	OwnerInterfaceSetting string
+	Connect               string
+	AddressPolicy         ProxyAddressPolicy
+	OwnershipMetadata     bool
 }
 
 type ProxyAddressPolicy string
@@ -65,10 +67,26 @@ type ProxyAddressPolicy string
 const (
 	ProxyAddressTailscaleOnly       ProxyAddressPolicy = "tailscale-only"
 	ProxyAddressLoopbackOrTailscale ProxyAddressPolicy = "loopback-or-tailscale"
+	ProxyAddressOwnerIPv4UDP        ProxyAddressPolicy = "owner-ipv4-udp"
 )
+
+// ExplicitOwnerIPv4 accepts only a unicast interface address, including a
+// private address used by an allocated test owner. The caller must prove that
+// the address belongs to the configured owner interface.
+func ExplicitOwnerIPv4(address netip.Addr) bool {
+	return address.Is4() && address.IsGlobalUnicast() && !address.IsLoopback() &&
+		!address.IsLinkLocalUnicast()
+}
 
 func (contract ProxyContract) OwnershipKey() string {
 	return "user.subyard.resource." + contract.Device
+}
+
+// GuestUDPPort is the fixed guest-side port declared by a public UDP proxy.
+func (contract ProxyContract) GuestUDPPort() (int, bool) {
+	text, ok := strings.CutPrefix(contract.Connect, "udp:guest:")
+	port, err := strconv.Atoi(text)
+	return port, ok && err == nil && port >= 1 && port <= 65535 && strconv.Itoa(port) == text
 }
 
 func (contract ProxyContract) OwnershipValue(device map[string]string) string {
@@ -286,6 +304,9 @@ func loadDefinition(root, path string) (Definition, []domain.ActionDefinition, e
 	if (endpoint != nil || bootstrap) && proxy == nil {
 		return Definition{}, nil, fmt.Errorf("endpoint defaults and profile bootstrap require PROXY in %s", path)
 	}
+	if proxy != nil && proxy.AddressPolicy == ProxyAddressOwnerIPv4UDP && bootstrap {
+		return Definition{}, nil, fmt.Errorf("public UDP ingress requires an already initialized yard in %s", path)
+	}
 	if !domain.SafeName(command) || !domain.SafeName(bringUp) || !domain.SafeName(shutdown) ||
 		handler == "" || title == "" || len(values.actions) == 0 {
 		return Definition{}, nil, fmt.Errorf("resource descriptor is incomplete: %s", path)
@@ -452,6 +473,23 @@ func parseProxyContract(profile, resourceName, record, path string) (*ProxyContr
 		return nil, nil
 	}
 	fields := strings.Fields(record)
+	if len(fields) == 7 && fields[6] == string(ProxyAddressOwnerIPv4UDP) {
+		device, advertiseSetting, portSetting, interfaceSetting, connect := fields[0], fields[1], fields[2], fields[3], fields[4]
+		contract := ProxyContract{Connect: connect}
+		if !domain.SafeName(device) || !safeSettingName(advertiseSetting) || !safeSettingName(portSetting) ||
+			!safeSettingName(interfaceSetting) || fields[5] != "owner-metadata-v1" {
+			return nil, fmt.Errorf("invalid owner IPv4 UDP PROXY record %q in %s", record, path)
+		}
+		if _, valid := contract.GuestUDPPort(); !valid {
+			return nil, fmt.Errorf("invalid owner IPv4 UDP PROXY record %q in %s", record, path)
+		}
+		return &ProxyContract{
+			Profile: profile, Resource: resourceName, Device: device,
+			AdvertiseHostSetting: advertiseSetting, HostPortSetting: portSetting,
+			OwnerInterfaceSetting: interfaceSetting, Connect: connect,
+			AddressPolicy: ProxyAddressOwnerIPv4UDP, OwnershipMetadata: true,
+		}, nil
+	}
 	if len(fields) < 5 || len(fields) > 6 {
 		return nil, fmt.Errorf("invalid PROXY record %q in %s", record, path)
 	}
@@ -521,6 +559,11 @@ func assessmentClass(value string) (domain.ActionEffect, []domain.ActionImpact, 
 		return domain.ActionMutation, []domain.ActionImpact{domain.ImpactExternalSystem}, true
 	case "security-change":
 		return domain.ActionMutation, []domain.ActionImpact{domain.ImpactAccess, domain.ImpactSecurity, domain.ImpactTrust}, true
+	case "public-ingress-change":
+		return domain.ActionMutation, []domain.ActionImpact{
+			domain.ImpactAccess, domain.ImpactHostIncus, domain.ImpactHostNetwork,
+			domain.ImpactSecurity, domain.ImpactSharedWorkload, domain.ImpactTrust,
+		}, true
 	case "shared-workload-change":
 		return domain.ActionMutation, []domain.ActionImpact{domain.ImpactSharedWorkload}, true
 	case "bootstrap-change":

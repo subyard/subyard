@@ -25,7 +25,7 @@ bundle="$(dirname "$hook")"
 error_file="$(mktemp)"
 trap 'rm -f -- "$error_file"' EXIT
 
-env_args=(--env DEV_USER="${DEV_USER:-dev}")
+env_args=(--env DEV_USER="${DEV_USER:-dev}" --env EXCLUSIVE_ENVIRONMENT_PROFILE="${EXCLUSIVE_ENVIRONMENT_PROFILE:-}" --env YARD_KIND="${YARD_KIND:-container}")
 # shellcheck disable=SC1090
 . "$config"
 while IFS= read -r name; do

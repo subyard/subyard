@@ -13,6 +13,8 @@ subyard_require_engine_context
 . "$SCRIPT_DIR/lib/ui.sh"
 # shellcheck source=scripts/lib/host.sh
 . "$SCRIPT_DIR/lib/host.sh"
+# shellcheck source=scripts/lib-vm-page-reporting.sh
+. "$SCRIPT_DIR/lib-vm-page-reporting.sh"
 
 INCUS_PROJECT="${INCUS_PROJECT:-subyard}"
 RESTRICTED_DISK_PATHS="${RESTRICTED_DISK_PATHS:-}"
@@ -21,10 +23,22 @@ INCUS_NETWORK="${INCUS_NETWORK:-${INCUS_BRIDGE:-incusbr0}}"
 
 # --- preconditions -----------------------------------------------------------
 incus_preflight
+if vm_page_reporting_required; then
+  [ "${YARD_KIND:-}" = vm ] || die "VM_FREE_PAGE_REPORTING requires YARD_KIND=vm"
+  vm_page_reporting_check_host || die "VM Free Page Reporting host preflight failed"
+  if incus project show "$INCUS_PROJECT" >/dev/null 2>&1; then
+    vm_page_reporting_check_profile "$INCUS_PROJECT" \
+      || die "VM profile has raw QEMU configuration"
+  fi
+fi
 
+project_policy_summary="Apply the restricted policy: nesting allow, host disks/unix-char/proxy allowed (disk sources kept under '$RESTRICTED_DISK_PATHS' by tooling, not Incus policy — needed for idmapped 'shift' mounts)."
+if vm_page_reporting_required; then
+  project_policy_summary+=" Permit low-level VM configuration in this project so the owner can set Free Page Reporting on its existing QEMU balloon."
+fi
 announce_confirm "Subyard Phase 1 — create restricted Incus project" \
   "Create Incus project '$INCUS_PROJECT' (if absent)." \
-  "Apply the restricted policy: nesting allow, host disks/unix-char/proxy allowed (disk sources kept under '$RESTRICTED_DISK_PATHS' by tooling, not Incus policy — needed for idmapped 'shift' mounts)." \
+  "$project_policy_summary" \
   "Reversible: 'incus project delete $INCUS_PROJECT' removes it."
 
 # --- 1. create project (idempotent) ------------------------------------------
@@ -40,12 +54,19 @@ fi
 # restricted=true keeps sensitive features off; re-enable only what the yard needs.
 echo "Restricted policy:"
 set_key() {
-  incus project set "$INCUS_PROJECT" "$1" "$2"
+  incus project set "$INCUS_PROJECT" "$1" "$2" </dev/null
   ok "$1=$2"
 }
 set_key restricted true
 set_key restricted.containers.nesting allow
 set_key restricted.containers.privilege unprivileged
+if vm_page_reporting_required; then
+  [ "${YARD_KIND:-}" = vm ] || die "VM_FREE_PAGE_REPORTING requires YARD_KIND=vm"
+  # Incus 6.0.6 groups raw.qemu.conf under this broad project permission.
+  # Only the owner adapter writes the fixed balloon override; the guest never
+  # receives the Incus socket or project credentials.
+  set_key restricted.virtual-machines.lowlevel allow
+fi
 # Device-cgroup BPF interception is required only when this trusted test yard hosts
 # a nested Incus VM lab. Keep the project-level permission explicitly blocked for
 # every normal yard; allowing it broadens the L0/L1 syscall boundary.

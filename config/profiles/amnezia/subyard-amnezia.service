@@ -1,0 +1,20 @@
+[Unit]
+Description=Subyard AmneziaWG VPN
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+ConditionPathExists=/srv/amnezia/settings.json
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/lib/subyard-amnezia/runtime.py start
+ExecStop=/usr/bin/python3 /usr/local/lib/subyard-amnezia/runtime.py stop
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=multi-user.target

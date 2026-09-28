@@ -11,8 +11,11 @@ import (
 	"net/netip"
 	"slices"
 	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/resource"
 )
 
 const (
@@ -40,11 +43,53 @@ type Policy struct {
 
 // Binding retains the original settings so disabling isolation restores them.
 type Binding struct {
-	Yard           Yard              `json:"yard"`
-	IPv4           string            `json:"ipv4"`
-	MAC            string            `json:"mac"`
-	OriginalNIC    map[string]string `json:"originalNic"`
-	OriginalAccess string            `json:"originalAccess"`
+	Yard            Yard              `json:"yard"`
+	IPv4            string            `json:"ipv4"`
+	MAC             string            `json:"mac"`
+	OriginalNIC     map[string]string `json:"originalNic"`
+	OriginalAccess  string            `json:"originalAccess"`
+	ApprovedIngress []ApprovedIngress `json:"approvedIngress,omitempty"`
+}
+
+// ApprovedIngress is the exact registry-authorized route last applied by the
+// owner network policy. The boot reconciler can verify it without reading an
+// operator-controlled configuration tree.
+type ApprovedIngress struct {
+	Device    string `json:"device"`
+	Listen    string `json:"listen"`
+	GuestPort int    `json:"guestPort"`
+
+	legacyFingerprint *string
+}
+
+func (approved *ApprovedIngress) UnmarshalJSON(content []byte) error {
+	type plain ApprovedIngress
+	var wire struct {
+		plain
+		Fingerprint json.RawMessage `json:"fingerprint"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(content))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&wire); err != nil {
+		return err
+	}
+	*approved = ApprovedIngress(wire.plain)
+	// Older policies stored this derived value. Validate it against the full
+	// binding during normalization, but never write it back to the policy.
+	if wire.Fingerprint != nil {
+		var fingerprint string
+		if err := json.Unmarshal(wire.Fingerprint, &fingerprint); err != nil {
+			return err
+		}
+		approved.legacyFingerprint = &fingerprint
+	}
+	return nil
+}
+
+func (approved ApprovedIngress) proxy(binding Binding) map[string]string {
+	return map[string]string{"type": "proxy", "listen": approved.Listen,
+		"connect": "udp:" + binding.IPv4 + ":" + strconv.Itoa(approved.GuestPort),
+		"bind":    "host", "nat": "true"}
 }
 
 func Decode(content []byte) (Policy, error) {
@@ -72,6 +117,9 @@ func Decode(content []byte) (Policy, error) {
 func Encode(policy Policy) ([]byte, error) {
 	policy.Links = slices.Clone(policy.Links)
 	policy.Bindings = slices.Clone(policy.Bindings)
+	for index := range policy.Bindings {
+		policy.Bindings[index].ApprovedIngress = slices.Clone(policy.Bindings[index].ApprovedIngress)
+	}
 	if err := policy.normalize(); err != nil {
 		return nil, err
 	}
@@ -149,7 +197,8 @@ func (policy *Policy) normalize() error {
 	identities := map[string]bool{}
 	addresses := map[string]bool{}
 	macs := map[string]bool{}
-	for _, binding := range policy.Bindings {
+	for index := range policy.Bindings {
+		binding := &policy.Bindings[index]
 		ip, ipErr := netip.ParseAddr(binding.IPv4)
 		mac, macErr := net.ParseMAC(binding.MAC)
 		if !domain.SafeName(binding.Yard.Name) || !domain.SafeName(binding.Yard.Project) || !domain.SafeName(binding.Yard.Instance) || !domain.SafeName(binding.Yard.Network) || bindings[binding.Yard.Name] || ipErr != nil || !ip.Is4() || macErr != nil || len(mac) != 6 || mac[0]&1 != 0 || binding.OriginalNIC["type"] != "nic" || binding.OriginalNIC["network"] != binding.Yard.Network {
@@ -165,6 +214,27 @@ func (policy *Policy) normalize() error {
 		identities[identity] = true
 		addresses[address] = true
 		macs[macIdentity] = true
+		devices := map[string]bool{}
+		for approvedIndex := range binding.ApprovedIngress {
+			approved := &binding.ApprovedIngress[approvedIndex]
+			listen, listenErr := netip.ParseAddrPort(strings.TrimPrefix(approved.Listen, "udp:"))
+			if !domain.SafeName(approved.Device) || devices[approved.Device] ||
+				approved.GuestPort < 1 || approved.GuestPort > 65535 ||
+				!strings.HasPrefix(approved.Listen, "udp:") || listenErr != nil ||
+				!resource.ExplicitOwnerIPv4(listen.Addr()) || listen.Port() == 0 ||
+				"udp:"+listen.String() != approved.Listen {
+				return errors.New("network policy contains an invalid approved resource ingress")
+			}
+			if approved.legacyFingerprint != nil &&
+				*approved.legacyFingerprint != (resource.ProxyContract{}).OwnershipValue(approved.proxy(*binding)) {
+				return errors.New("network policy contains an invalid approved resource ingress fingerprint")
+			}
+			approved.legacyFingerprint = nil
+			devices[approved.Device] = true
+		}
+		sort.Slice(binding.ApprovedIngress, func(i, j int) bool {
+			return binding.ApprovedIngress[i].Device < binding.ApprovedIngress[j].Device
+		})
 	}
 	for _, names := range [][]string{policy.PendingStart, policy.Removing} {
 		seenNames := map[string]bool{}

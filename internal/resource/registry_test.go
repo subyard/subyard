@@ -3,6 +3,7 @@ package resource
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -12,6 +13,21 @@ import (
 
 	"github.com/Subyard/Subyard/internal/domain"
 )
+
+func TestExplicitOwnerIPv4(t *testing.T) {
+	for _, test := range []struct {
+		address string
+		want    bool
+	}{
+		{"203.0.113.10", true}, {"10.20.30.40", true},
+		{"0.0.0.0", false}, {"127.0.0.1", false},
+		{"169.254.1.1", false}, {"224.0.0.1", false}, {"::1", false},
+	} {
+		if got := ExplicitOwnerIPv4(netip.MustParseAddr(test.address)); got != test.want {
+			t.Fatalf("%s: got %t want %t", test.address, got, test.want)
+		}
+	}
+}
 
 func TestAssessPrepareResultCombinesTrustedMetadataWithValidatedDelta(t *testing.T) {
 	registry, actions := testActionRegistry(t)
@@ -343,6 +359,55 @@ SHUTDOWN=down
 	}
 }
 
+func TestLoadPublicUDPContractIsValidatedGenerically(t *testing.T) {
+	for _, test := range []struct {
+		profile, name, record string
+		valid                 bool
+	}{
+		{"sample", "relay", "sample-relay SAMPLE_IPV4 SAMPLE_PORT SAMPLE_INTERFACE udp:guest:41999 owner-metadata-v1 owner-ipv4-udp", true},
+		{"other", "relay", "other-relay OTHER_IPV4 OTHER_PORT OTHER_INTERFACE udp:guest:51821 owner-metadata-v1 owner-ipv4-udp", true},
+		{"sample", "relay", "../relay SAMPLE_IPV4 SAMPLE_PORT SAMPLE_INTERFACE udp:guest:41999 owner-metadata-v1 owner-ipv4-udp", false},
+		{"sample", "relay", "sample-relay SAMPLE_IPV4 SAMPLE_PORT SAMPLE_INTERFACE udp:guest:0 owner-metadata-v1 owner-ipv4-udp", false},
+		{"sample", "relay", "sample-relay SAMPLE_IPV4 SAMPLE_PORT SAMPLE_INTERFACE udp:guest:041999 owner-metadata-v1 owner-ipv4-udp", false},
+		{"sample", "relay", "sample-relay SAMPLE_IPV4 SAMPLE_PORT SAMPLE_INTERFACE udp:guest:41999 owner-ipv4-udp", false},
+		{"sample", "relay", "sample-relay SAMPLE_IPV4 SAMPLE_PORT SAMPLE_INTERFACE tcp:127.0.0.1:41999 owner-metadata-v1 owner-ipv4-udp", false},
+	} {
+		root := t.TempDir()
+		writeTestResource(t, root, test.profile, test.name, fmt.Sprintf(`
+HANDLER=resources/%s/handler.sh
+TITLE="VPN"
+PROXY=%q
+ACTION="up up security-change reversible"
+ACTION="down down security-change reversible"
+`, test.name, test.record))
+		registry, err := Load(root)
+		if test.valid && err != nil || !test.valid && err == nil {
+			t.Fatalf("record %q valid=%t: %v", test.record, test.valid, err)
+		}
+		if test.valid {
+			contract := registry.ProxyContracts([]string{test.profile})[0]
+			if contract.AddressPolicy != ProxyAddressOwnerIPv4UDP || contract.OwnerInterfaceSetting == "" || !contract.OwnershipMetadata {
+				t.Fatalf("unexpected UDP contract: %+v", contract)
+			}
+			if port, valid := contract.GuestUDPPort(); !valid || port < 1 {
+				t.Fatalf("invalid guest UDP port: %+v", contract)
+			}
+		}
+	}
+	root := t.TempDir()
+	writeTestResource(t, root, "sample", "relay", `
+HANDLER=resources/relay/handler.sh
+TITLE="Relay"
+PROXY="sample-relay SAMPLE_IPV4 SAMPLE_PORT SAMPLE_INTERFACE udp:guest:41999 owner-metadata-v1 owner-ipv4-udp"
+BOOTSTRAP=profile
+ACTION="up up public-ingress-change reversible"
+ACTION="down down public-ingress-change reversible"
+`)
+	if _, err := Load(root); err == nil {
+		t.Fatal("public UDP ingress accepted profile bootstrap that could nest the yard lock")
+	}
+}
+
 func TestLoadDerivesExplicitDashboardContract(t *testing.T) {
 	root := t.TempDir()
 	writeTestResource(t, root, "sample", "dashboard", `
@@ -505,6 +570,10 @@ func TestRepositoryResourceActionMatrix(t *testing.T) {
 		recovery domain.RecoveryClass
 	}
 	expected := []expectedAction{
+		{resource: "vpn", localID: "up", verb: "up", effect: domain.ActionMutation, impacts: []domain.ActionImpact{domain.ImpactAccess, domain.ImpactHostIncus, domain.ImpactHostNetwork, domain.ImpactSecurity, domain.ImpactSharedWorkload, domain.ImpactTrust}, recovery: domain.RecoveryReversible},
+		{resource: "vpn", localID: "down", verb: "down", effect: domain.ActionMutation, impacts: []domain.ActionImpact{domain.ImpactAccess, domain.ImpactHostIncus, domain.ImpactHostNetwork, domain.ImpactSecurity, domain.ImpactSharedWorkload, domain.ImpactTrust}, recovery: domain.RecoveryReversible},
+		{resource: "vpn", localID: "status", verb: "status", effect: domain.ActionRead, recovery: domain.RecoveryNotNeeded},
+		{resource: "vpn", localID: "is-up", verb: "is-up", effect: domain.ActionRead, recovery: domain.RecoveryNotNeeded},
 		{resource: "emulator", localID: "catalog", verb: "catalog", effect: domain.ActionRead, recovery: domain.RecoveryNotNeeded},
 		{resource: "emulator", localID: "status", verb: "status", effect: domain.ActionRead, recovery: domain.RecoveryNotNeeded},
 		{resource: "emulator", localID: "run", verb: "run", effect: domain.ActionSession, recovery: domain.RecoveryNotNeeded},

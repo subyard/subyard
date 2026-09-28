@@ -1,0 +1,524 @@
+#!/usr/bin/env python3
+"""Behavioral checks for Amnezia's owner handler and guest runtime."""
+import contextlib
+import copy
+import hashlib
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+from types import SimpleNamespace
+import unittest
+from unittest import mock
+
+
+ROOT = Path(__file__).resolve().parents[2]
+PROFILE = ROOT / 'config/profiles/amnezia'
+
+
+def load_module(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+handler = load_module('amnezia_owner_test', PROFILE / 'resources/vpn/handler.py')
+runtime = load_module('amnezia_guest_test', PROFILE / 'runtime.py')
+
+
+def result(stdout=b'', code=0):
+    return subprocess.CompletedProcess([], code, stdout, b'')
+
+
+class OwnerHandlerTest(unittest.TestCase):
+    def setUp(self):
+        values = {
+            'SUBYARD_ENGINE_CONTEXT': '1', 'EXCLUSIVE_ENVIRONMENT_PROFILE': 'amnezia',
+            'YARD_KIND': 'vm', 'YARD_NAME': 'personal-vpn',
+            'ENVIRONMENT_PROFILES': 'amnezia', 'SUBYARD_RESOURCE_MODE': 'prepare',
+            'RESOURCE_VPN_IPV4': '', 'RESOURCE_VPN_INTERFACE': '', 'RESOURCE_VPN_PORT': '51820',
+        }
+        patch = mock.patch.dict(os.environ, values)
+        patch.start()
+        self.addCleanup(patch.stop)
+        handler.YARD = 'yard-personal-vpn'
+        handler.PROJECT = 'subyard-personal-vpn'
+
+    def instance(self):
+        return {'name': handler.YARD, 'project': handler.PROJECT,
+                'type': 'virtual-machine', 'status': 'Running',
+                'config': {}, 'devices': {},
+                'expanded_devices': {'eth0': {'type': 'nic', 'ipv4.address': '10.80.0.10'}}}
+
+    def test_disabled_status_with_unset_endpoint_is_read_only(self):
+        os.environ.update(SUBYARD_RESOURCE_MODE='apply', SUBYARD_RESOURCE_ACTION='status',
+                          SUBYARD_OPERATION_ID='op-test')
+        with mock.patch.object(handler, 'inspect', return_value=self.instance()), \
+                mock.patch.object(handler, 'runtime_status', return_value={'ready': False, 'running': False, 'enabled': False}), \
+                mock.patch.object(handler, 'incus', side_effect=AssertionError('status wrote Incus state')), \
+                mock.patch.object(sys, 'argv', ['vpn', 'status']), io.StringIO() as output, contextlib.redirect_stdout(output):
+            self.assertEqual(handler.main(), 0)
+            status = json.loads(output.getvalue())
+        self.assertFalse(status['ready'])
+        self.assertFalse(status['ingress'])
+
+    def test_unselected_up_and_malformed_arguments_never_reach_target(self):
+        os.environ['ENVIRONMENT_PROFILES'] = ''
+        with mock.patch.object(handler, 'inspect', side_effect=AssertionError('unselected yard inspected')), \
+                mock.patch.object(sys, 'argv', ['vpn', 'up']):
+            with self.assertRaisesRegex(RuntimeError, 'selected'):
+                handler.main()
+        with mock.patch.object(sys, 'argv', ['vpn', 'up', 'extra']), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(handler.main(), 2)
+
+    def test_unselected_dedicated_down_prepares_read_only_and_stops_runtime(self):
+        os.environ['ENVIRONMENT_PROFILES'] = ''
+        instance = self.instance()
+        with mock.patch.object(handler, 'inspect', return_value=instance), \
+                mock.patch.object(handler, 'runtime_status', return_value={'ready': True, 'running': True, 'enabled': True}), \
+                mock.patch.object(handler, 'incus', side_effect=AssertionError('prepare mutated Incus')), \
+                mock.patch.object(handler, 'guest', side_effect=AssertionError('prepare stopped guest')), \
+                mock.patch.object(sys, 'argv', ['vpn', 'down']), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(handler.main(), 0)
+        assessment = json.loads(output.getvalue())
+        self.assertTrue(assessment['changed'])
+        self.assertEqual(assessment['action'], 'down')
+
+        os.environ.update(SUBYARD_RESOURCE_MODE='apply', SUBYARD_RESOURCE_ACTION='down',
+                          SUBYARD_OPERATION_ID='op-test')
+        with mock.patch.object(handler, 'inspect', return_value=instance), \
+                mock.patch.object(handler, 'guest') as guest, \
+                mock.patch.object(sys, 'argv', ['vpn', 'down']):
+            self.assertEqual(handler.main(), 0)
+        guest.assert_called_once_with('python3', handler.RUNTIME, 'down')
+
+    def test_live_route_requires_durable_service_enablement(self):
+        instance = self.instance()
+        device = {'type': 'proxy', 'bind': 'host', 'nat': 'true',
+                  'listen': 'udp:10.20.30.40:51820', 'connect': 'udp:10.80.0.10:51820'}
+        instance['devices'][handler.DEVICE] = device
+        instance['config'][handler.KEY] = handler.fingerprint(device)
+        with mock.patch.object(handler, 'endpoint', return_value=('', '', '', device)), \
+                mock.patch.object(handler, 'runtime_status', return_value={'ready': True, 'enabled': False}):
+            self.assertFalse(handler.ready(instance))
+
+    def test_owner_collision_and_foreign_proxy_are_rejected(self):
+        want = {'type': 'proxy', 'bind': 'host', 'nat': 'true',
+                'listen': 'udp:10.20.30.40:51820', 'connect': 'udp:10.80.0.10:51820'}
+        with mock.patch.object(handler, 'run', return_value=result(b'udp UNCONN 0 0 10.20.30.40:51820 0.0.0.0:*\n')):
+            with self.assertRaisesRegex(RuntimeError, 'already bound'):
+                handler.collisions(want)
+
+        def foreign_proxy(*args, **_):
+            if args[0] == 'ss':
+                return result()
+            if args[:2] == ('incus', 'list'):
+                return result(json.dumps([{'name': 'other', 'project': 'other',
+                                           'expanded_devices': {'route': want}}]).encode())
+            raise AssertionError(args)
+
+        with mock.patch.object(handler, 'run', side_effect=foreign_proxy):
+            with self.assertRaisesRegex(RuntimeError, 'another Incus proxy'):
+                handler.collisions(want)
+        for listener in ('udp:10.20.30.40:51819-51821',
+                         'udp:0.0.0.0:51700,51820', 'udp:[::]:51819,51820-51822'):
+            with self.subTest(listener=listener):
+                foreign = want | {'listen': listener}
+                with mock.patch.object(handler, 'run', side_effect=lambda *args, **_: (
+                        result() if args[0] == 'ss' else
+                        result(json.dumps([{'name': 'other', 'project': 'other',
+                                            'expanded_devices': {'route': foreign}}]).encode()))):
+                    with self.assertRaisesRegex(RuntimeError, 'another Incus proxy'):
+                        handler.collisions(want)
+        foreign = {'type': 'proxy', 'bind': 'instance',
+                   'listen': 'udp:0.0.0.0:51700,51819-51821',
+                   'connect': 'udp:127.0.0.1:51820'}
+        with mock.patch.object(handler, 'run', side_effect=lambda *args, **_: (
+                result() if args[0] == 'ss' else
+                result(json.dumps([{'name': 'other', 'project': 'other',
+                                    'expanded_devices': {'route': foreign}}]).encode()))), \
+                mock.patch.object(handler, 'query', return_value=[]):
+            handler.collisions(want)
+        with mock.patch.object(handler, 'run', side_effect=lambda *args, **_: (
+                result() if args[0] == 'ss' else result(b'[]'))), \
+                mock.patch.object(handler, 'query', side_effect=lambda path: (
+                    [{'name': 'incusbr0', 'managed': True}] if path == '/1.0/networks?recursion=1' else
+                    [{'listen_address': '10.20.30.40', 'config': {}, 'ports': [
+                        {'protocol': 'udp', 'listen_port': '51700,51819-51821'}]}])):
+            with self.assertRaisesRegex(RuntimeError, 'network forward'):
+                handler.collisions(want)
+        instance = self.instance()
+        instance['devices'][handler.DEVICE] = want
+        instance['config'][handler.KEY] = 'v1:' + '0' * 64
+        with self.assertRaisesRegex(RuntimeError, 'foreign or modified'):
+            handler.owned(instance)
+
+    def test_pending_route_recovers_and_rollback_removes_only_its_device(self):
+        state = self.instance()
+        foreign = {'type': 'proxy', 'listen': 'tcp:127.0.0.1:2022'}
+        state['devices']['foreign'] = foreign
+        state['expanded_devices']['foreign'] = foreign
+        state['config'][handler.KEY] = 'v1:pending:' + 'a' * 64
+        want = {'type': 'proxy', 'bind': 'host', 'nat': 'true',
+                'listen': 'udp:10.20.30.40:51820', 'connect': 'udp:10.80.0.10:51820'}
+        writes = []
+
+        def incus(*args, **_):
+            writes.append(args)
+            if args[:3] == ('config', 'unset', handler.YARD):
+                state['config'].pop(handler.KEY, None)
+            elif args[:3] == ('config', 'set', handler.YARD):
+                state['config'][handler.KEY] = args[4]
+            elif args[:3] == ('config', 'device', 'add'):
+                self.assertEqual(args[4], handler.DEVICE)
+                state['devices'][handler.DEVICE] = want.copy()
+                state['expanded_devices'][handler.DEVICE] = want.copy()
+            elif args[:3] == ('config', 'device', 'remove'):
+                self.assertEqual(args[4], handler.DEVICE)
+                state['devices'].pop(handler.DEVICE, None)
+                state['expanded_devices'].pop(handler.DEVICE, None)
+            else:
+                raise AssertionError(args)
+            return result()
+
+        with mock.patch.object(handler, 'inspect', side_effect=lambda: copy.deepcopy(state)), \
+                mock.patch.object(handler, 'incus', side_effect=incus), \
+                mock.patch.object(handler, 'guest', return_value=result()) as guest:
+            handler.ensure_ingress(want)
+            self.assertEqual(state['config'][handler.KEY], handler.fingerprint(want))
+            self.assertEqual(state['devices'][handler.DEVICE], want)
+            os.environ.update(SUBYARD_RESOURCE_MODE='apply', SUBYARD_RESOURCE_ACTION='up',
+                              SUBYARD_OPERATION_ID='op-test')
+            with mock.patch.object(sys, 'argv', ['vpn', 'rollback-ingress']):
+                self.assertEqual(handler.main(), 0)
+        self.assertNotIn(handler.DEVICE, state['devices'])
+        self.assertNotIn(handler.KEY, state['config'])
+        self.assertEqual(state['devices']['foreign'], foreign)
+        self.assertTrue(any(action[:3] == ('config', 'device', 'remove') for action in writes))
+        guest.assert_called_once_with('python3', handler.RUNTIME, 'down')
+
+    def test_shutdown_failure_keeps_pending_retry_intent_until_guest_stops(self):
+        for verb, action in (('down', 'down'), ('rollback-ingress', 'up')):
+            with self.subTest(verb=verb):
+                self.check_shutdown_retry(verb, action)
+
+    def test_late_up_readiness_failure_keeps_pending_rollback_intent(self):
+        os.environ.update(SUBYARD_RESOURCE_MODE='apply', SUBYARD_RESOURCE_ACTION='up',
+                          SUBYARD_OPERATION_ID='op-test')
+        state = self.instance()
+        want = {'type': 'proxy', 'bind': 'host', 'nat': 'true',
+                'listen': 'udp:10.20.30.40:51820', 'connect': 'udp:10.80.0.10:51820'}
+
+        def publish(_):
+            state['devices'][handler.DEVICE] = want.copy()
+            state['expanded_devices'][handler.DEVICE] = want.copy()
+            state['config'][handler.KEY] = handler.fingerprint(want)
+
+        def incus(*args, **_):
+            if args[:3] == ('config', 'set', handler.YARD):
+                state['config'][handler.KEY] = args[4]
+            elif args[:3] == ('config', 'device', 'remove'):
+                state['devices'].pop(handler.DEVICE, None)
+                state['expanded_devices'].pop(handler.DEVICE, None)
+            else:
+                raise AssertionError(args)
+            return result()
+
+        with mock.patch.object(handler, 'inspect', side_effect=lambda: copy.deepcopy(state)), \
+                mock.patch.object(handler, 'endpoint', return_value=('10.20.30.40', 'eth0', '51820', want)), \
+                mock.patch.object(handler, 'collisions'), \
+                mock.patch.object(handler, 'guest', return_value=result()), \
+                mock.patch.object(handler, 'ensure_ingress', side_effect=publish), \
+                mock.patch.object(handler, 'ready', return_value=False), \
+                mock.patch.object(handler, 'incus', side_effect=incus), \
+                mock.patch.object(sys, 'argv', ['vpn', 'up']):
+            with self.assertRaisesRegex(RuntimeError, 'did not converge'):
+                handler.main()
+        self.assertNotIn(handler.DEVICE, state['devices'])
+        self.assertEqual(state['config'][handler.KEY],
+                         handler.fingerprint(want).replace('v1:', 'v1:pending:', 1))
+
+    def check_shutdown_retry(self, verb, action):
+        os.environ.update(ENVIRONMENT_PROFILES='', SUBYARD_RESOURCE_MODE='apply',
+                          SUBYARD_RESOURCE_ACTION=action, SUBYARD_OPERATION_ID='op-test')
+        state = self.instance()
+        device = {'type': 'proxy', 'bind': 'host', 'nat': 'true',
+                  'listen': 'udp:10.20.30.40:51820', 'connect': 'udp:10.80.0.10:51820'}
+        state['devices'][handler.DEVICE] = device.copy()
+        state['expanded_devices'][handler.DEVICE] = device.copy()
+        state['config'][handler.KEY] = handler.fingerprint(device)
+        protected_state = {'server': 'synthetic-server-key', 'client': 'synthetic-client-key'}
+
+        def incus(*args, **_):
+            if args[:3] == ('config', 'set', handler.YARD):
+                state['config'][handler.KEY] = args[4]
+            elif args[:3] == ('config', 'device', 'remove'):
+                state['devices'].pop(handler.DEVICE, None)
+                state['expanded_devices'].pop(handler.DEVICE, None)
+            elif args[:3] == ('config', 'unset', handler.YARD):
+                state['config'].pop(handler.KEY, None)
+            else:
+                raise AssertionError(args)
+            return result()
+
+        attempts = 0
+        def guest(*args, **_):
+            nonlocal attempts
+            self.assertEqual(args, ('python3', handler.RUNTIME, 'down'))
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError('guest shutdown unavailable')
+            return result()
+
+        with mock.patch.object(handler, 'inspect', side_effect=lambda: copy.deepcopy(state)), \
+                mock.patch.object(handler, 'incus', side_effect=incus), \
+                mock.patch.object(handler, 'guest', side_effect=guest), \
+                mock.patch.object(sys, 'argv', ['vpn', verb]):
+            with self.assertRaisesRegex(RuntimeError, 'guest shutdown unavailable'):
+                handler.main()
+            self.assertNotIn(handler.DEVICE, state['devices'])
+            self.assertEqual(state['config'][handler.KEY],
+                             handler.fingerprint(device).replace('v1:', 'v1:pending:', 1))
+            self.assertEqual(protected_state['server'], 'synthetic-server-key')
+            self.assertEqual(handler.main(), 0)
+        self.assertNotIn(handler.KEY, state['config'])
+        self.assertEqual(attempts, 2)
+        self.assertEqual(protected_state['client'], 'synthetic-client-key')
+
+
+class GuestRuntimeTest(unittest.TestCase):
+    def root_owned_stat(self):
+        original = Path.lstat
+
+        def fake_lstat(path):
+            info = original(path)
+            return SimpleNamespace(st_uid=0, st_mode=info.st_mode)
+
+        return mock.patch.object(Path, 'lstat', fake_lstat)
+
+    def test_state_modes_and_types_are_enforced(self):
+        with tempfile.TemporaryDirectory() as directory, self.root_owned_stat():
+            root = Path(directory) / 'state'
+            root.mkdir(mode=0o700)
+            root.chmod(0o700)
+            secret = root / 'awg0.conf'
+            secret.write_text('synthetic-server-key\n')
+            secret.chmod(0o644)
+            with self.assertRaisesRegex(RuntimeError, 'unsafe ownership or permissions'):
+                runtime.protected(secret)
+            secret.chmod(0o600)
+            runtime.protected(secret)
+            link = root / 'link'
+            link.symlink_to(secret)
+            with self.assertRaises(RuntimeError):
+                runtime.protected(link)
+            root.chmod(0o755)
+            with self.assertRaises(RuntimeError):
+                runtime.protected(root, True)
+
+    def test_firewall_readiness_detects_effective_rule_drift(self):
+        with tempfile.TemporaryDirectory() as directory, self.root_owned_stat():
+            record = Path(directory) / 'firewall.json'
+            record.write_text(json.dumps({'policy': hashlib.sha256(b'declared-rules').hexdigest(),
+                                          'effective': 'expected-rules'}))
+            record.chmod(0o600)
+            with mock.patch.object(runtime, 'FIREWALL_STATE', record), \
+                    mock.patch.object(runtime, 'firewall_owned', return_value=True), \
+                    mock.patch.object(runtime, 'firewall_policy', return_value='declared-rules'), \
+                    mock.patch.object(runtime, 'firewall_digest', return_value='expected-rules'):
+                self.assertTrue(runtime.firewall_ready())
+                with mock.patch.object(runtime, 'firewall_digest', return_value='modified-rules'):
+                    self.assertFalse(runtime.firewall_ready())
+
+    def test_firewall_allows_ping_only_to_the_tunnel_address(self):
+        with tempfile.TemporaryDirectory() as directory, self.root_owned_stat():
+            state = Path(directory)
+            state.chmod(0o700)
+            settings = state / 'settings.json'
+            settings.write_text('{"endpoint":"10.20.30.40","port":51820}\n')
+            settings.chmod(0o600)
+            with mock.patch.object(runtime, 'STATE', state):
+                policy = runtime.firewall_policy()
+        self.assertIn('iifname "awg0" ip daddr 10.90.0.1 ip protocol icmp icmp type echo-request accept', policy)
+        self.assertIn('iifname "awg0" drop', policy)
+
+    def test_effective_container_drift_prevents_ready_and_up_restarts_without_key_change(self):
+        expected = {'State': {'Running': True},
+                    'Config': {'Image': runtime.IMAGE, 'Entrypoint': ['/bin/bash'],
+                               'Cmd': ['/opt/amnezia/start.sh']},
+                    'HostConfig': {'NetworkMode': 'host'},
+                    'Mounts': [{'Type': 'bind', 'Source': str(runtime.STATE / 'awg0.conf'),
+                                'Destination': '/etc/amnezia/awg0.conf', 'RW': False},
+                               {'Type': 'bind', 'Source': str(runtime.ROOT / 'container.sh'),
+                                'Destination': '/opt/amnezia/start.sh', 'RW': False}]}
+
+        def command(*args, **_):
+            if args[:3] == ('systemctl', 'is-active', '--quiet'):
+                return result()
+            if args[:4] == ('docker', 'exec', runtime.CONTAINER, 'awg'):
+                return result(b'51820\n')
+            return result()
+
+        with mock.patch.object(runtime, 'container', return_value=expected), \
+                mock.patch.object(runtime, 'firewall_ready', return_value=True), \
+                mock.patch.object(runtime, 'run', side_effect=command):
+            self.assertTrue(runtime.observe()['ready'])
+            for mutate in (lambda value: value['HostConfig'].update(NetworkMode='bridge'),
+                           lambda value: value['Mounts'][0].update(RW=True),
+                           lambda value: value['Mounts'][1].update(Source='/tmp/foreign-start.sh'),
+                           lambda value: value['Config'].update(Entrypoint=['/bin/sh']),
+                           lambda value: value['Config'].update(Cmd=['/bin/false']),
+                           lambda value: value['Config'].update(Image='other-image')):
+                with self.subTest(mutate=mutate):
+                    drifted = copy.deepcopy(expected)
+                    mutate(drifted)
+                    with mock.patch.object(runtime, 'container', return_value=drifted):
+                        self.assertFalse(runtime.observe()['ready'])
+        with mock.patch.object(runtime, 'container', return_value=expected), \
+                mock.patch.object(runtime, 'firewall_ready', return_value=True), \
+                mock.patch.object(runtime, 'run', side_effect=lambda *args, **kwargs: (
+                    result(code=3) if args[:3] == ('systemctl', 'is-active', '--quiet') else command(*args, **kwargs))):
+            self.assertFalse(runtime.observe()['ready'])
+
+        with tempfile.TemporaryDirectory() as directory, self.root_owned_stat():
+            state = Path(directory)
+            state.chmod(0o700)
+            for name, content in (('awg0.conf', 'synthetic-server-key\n'),
+                                  ('client.conf', 'PrivateKey = synthetic-client-key\n'),
+                                  ('settings.json', '{"endpoint": "10.20.30.40", "port": 51820}\n')):
+                path = state / name
+                path.write_text(content)
+                path.chmod(0o600)
+            calls = []
+            with mock.patch.object(runtime, 'STATE', state), \
+                    mock.patch.object(runtime, 'observe', side_effect=[{'ready': False}, {'ready': True}]), \
+                    mock.patch.object(runtime, 'run', side_effect=lambda *args, **_: (calls.append(args), result())[1]):
+                runtime.up('10.20.30.40', 51820)
+            self.assertIn(('systemctl', 'restart', runtime.UNIT), calls)
+            self.assertEqual((state / 'awg0.conf').read_text(), 'synthetic-server-key\n')
+            self.assertIn('synthetic-client-key', (state / 'client.conf').read_text())
+
+    def test_repeated_up_endpoint_change_and_down_preserve_synthetic_keys(self):
+        with tempfile.TemporaryDirectory() as directory, self.root_owned_stat():
+            root = Path(directory) / 'state'
+            keys = iter(('synthetic-server-key', 'synthetic-client-key',
+                         'synthetic-psk', 'synthetic-server-public', 'synthetic-client-public'))
+            with mock.patch.object(runtime, 'STATE', root), mock.patch.object(runtime, 'awg', side_effect=lambda *_: next(keys)):
+                runtime.initialize('10.20.30.40', 51820)
+            server = (root / 'awg0.conf').read_text()
+            client = (root / 'client.conf').read_text()
+            self.assertIn('synthetic-server-key', server)
+            self.assertIn('synthetic-client-key', client)
+            self.assertEqual(root.stat().st_mode & 0o777, 0o700)
+            for name in ('awg0.conf', 'client.conf', 'settings.json'):
+                self.assertEqual((root / name).stat().st_mode & 0o777, 0o600)
+            commands = []
+
+            def command(*args, **_):
+                commands.append(args)
+                return result()
+
+            with mock.patch.object(runtime, 'STATE', root), \
+                    mock.patch.object(runtime, 'observe', return_value={'ready': True, 'running': True, 'enabled': True}), \
+                    mock.patch.object(runtime, 'run', side_effect=command):
+                runtime.up('10.20.30.40', 51820)
+                runtime.up('10.20.30.40', 51820)
+                self.assertEqual((root / 'awg0.conf').read_text(), server)
+                self.assertEqual((root / 'client.conf').read_text(), client)
+                runtime.up('10.20.30.41', 51820)
+                self.assertEqual((root / 'awg0.conf').read_text(), server)
+                self.assertIn('synthetic-client-key', (root / 'client.conf').read_text())
+                self.assertIn('Endpoint = 10.20.30.41:51820', (root / 'client.conf').read_text())
+
+                real_open = open
+                def lock_open(path, *args, **kwargs):
+                    if path == '/run/subyard-amnezia.lock':
+                        return real_open(root / 'lock', 'a')
+                    return real_open(path, *args, **kwargs)
+
+                with mock.patch.object(runtime.os, 'geteuid', return_value=0), \
+                        mock.patch.object(runtime, 'open', lock_open, create=True), \
+                        mock.patch.object(runtime, 'container', return_value=None), \
+                        mock.patch.object(runtime, 'firewall') as firewall, \
+                        mock.patch.object(sys, 'argv', ['runtime', 'down']):
+                    self.assertEqual(runtime.main(), 0)
+                firewall.assert_called_with(remove=True)
+            self.assertEqual((root / 'awg0.conf').read_text(), server)
+            self.assertIn('synthetic-client-key', (root / 'client.conf').read_text())
+            self.assertTrue(any(args[:3] == ('systemctl', 'disable', '--now') for args in commands))
+
+
+class ProfileProvisionTest(unittest.TestCase):
+    def test_check_detects_modes_and_owner_and_apply_repairs_modes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'profile'
+            source.mkdir()
+            destination = root / 'installed'
+            unit = root / 'subyard-amnezia.service'
+            for name in ('runtime.py', 'container.sh', 'release.env', 'subyard-amnezia.service'):
+                shutil.copyfile(PROFILE / name, source / name)
+            script = (PROFILE / 'provision.sh').read_text().replace(
+                'destination=/usr/local/lib/subyard-amnezia', f'destination={destination}').replace(
+                'unit=/etc/systemd/system/subyard-amnezia.service', f'unit={unit}')
+            provision = source / 'provision.sh'
+            provision.write_text(script)
+            bin_dir = root / 'bin'
+            bin_dir.mkdir()
+            commands = {
+                'id': '#!/bin/sh\n[ "$1" = -u ] && { echo 0; exit; }; exec /usr/bin/id "$@"\n',
+                'dpkg-query': '#!/bin/sh\necho "install ok installed"\n',
+                'docker': '#!/bin/sh\nexit 0\n',
+                'apt-get': '#!/bin/sh\nexit 0\n',
+                'systemctl': '#!/bin/sh\nexit 0\n',
+                'stat': ('#!/bin/sh\n'
+                         '[ "$1" = -c ] && [ "$2" = "%u:%g:%a" ] || exit 2\n'
+                         'mode="$(/usr/bin/stat -c %a "$3")" || exit\n'
+                         'printf "%s:%s:%s\\n" "${PROFILE_FAKE_UID:-0}" 0 "$mode"\n'),
+                'install': ('#!/bin/bash\nset -euo pipefail\n'
+                            'owner= group= args=()\n'
+                            'while [ "$#" -gt 0 ]; do\n'
+                            '  case "$1" in\n'
+                            '    -o) owner="$2"; shift 2 ;;\n'
+                            '    -g) group="$2"; shift 2 ;;\n'
+                            '    *) args+=("$1"); shift ;;\n'
+                            '  esac\n'
+                            'done\n'
+                            '[ "$owner" = 0 ] && [ "$group" = 0 ] || exit 9\n'
+                            'exec /usr/bin/install "${args[@]}"\n'),
+            }
+            for name, body in commands.items():
+                path = bin_dir / name
+                path.write_text(body)
+                path.chmod(0o755)
+            environment = os.environ | {'PATH': f'{bin_dir}:{os.environ["PATH"]}',
+                                        'EXCLUSIVE_ENVIRONMENT_PROFILE': 'amnezia', 'YARD_KIND': 'vm'}
+
+            def invoke(*arguments, environment_override=None):
+                return subprocess.run(['bash', str(provision), *arguments],
+                                      env=environment | (environment_override or {}),
+                                      capture_output=True, text=True)
+
+            applied = invoke()
+            self.assertEqual(applied.returncode, 0, applied.stderr)
+            self.assertEqual(invoke('--check').returncode, 0)
+            for path, mode in ((destination, 0o777), (destination / 'runtime.py', 0o666),
+                               (destination / 'container.sh', 0o666),
+                               (destination / 'release.env', 0o666), (unit, 0o666)):
+                with self.subTest(path=path):
+                    path.chmod(mode)
+                    self.assertEqual(invoke('--check').returncode, 10)
+                    self.assertEqual(invoke().returncode, 0)
+                    self.assertEqual(invoke('--check').returncode, 0)
+            self.assertEqual(invoke('--check', environment_override={'PROFILE_FAKE_UID': '1000'}).returncode, 10)
+
+
+if __name__ == '__main__':
+    unittest.main()

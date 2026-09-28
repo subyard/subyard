@@ -71,7 +71,11 @@ if [ "${YARD_KIND:-container}" = vm ]; then
   # a valid DNAT path, so VMs use a root-owned userspace relay bound only to loopback.
   vm_ipv4="$(incus_instance_primary_ipv4 "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")"
   [ -n "$vm_ipv4" ] || die "VM '$YARD_INSTANCE_NAME' has no IPv4 address for its SSH proxy"
-  if device_exists eth0; then
+  if [ "${VM_PIN_IPV4:-0}" = 1 ]; then
+    ! device_exists eth0 || die 'pinned VM must use its profile-owned primary NIC'
+    pinned_ipv4="$(incus profile device get default eth0 ipv4.address "${PROJ[@]}")"
+    [ "$pinned_ipv4" = "$vm_ipv4" ] || die 'VM primary IPv4 pin is missing or divergent; rerun init'
+  elif device_exists eth0; then
     incus config device set "$YARD_INSTANCE_NAME" eth0 ipv4.address="$vm_ipv4" "${PROJ[@]}"
   else
     incus config device override "$YARD_INSTANCE_NAME" eth0 ipv4.address="$vm_ipv4" "${PROJ[@]}"

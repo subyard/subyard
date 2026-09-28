@@ -877,6 +877,176 @@ func TestProjectProbeOwnsRestrictedPolicy(t *testing.T) {
 	}
 }
 
+type vmPinIncusFixture struct {
+	*testkit.Incus
+	pinned   bool
+	pinErr   error
+	pinCalls []bool
+}
+
+func (fixture *vmPinIncusFixture) PinVMIPv4(_ context.Context, _ yardnetwork.Yard, apply bool) (bool, error) {
+	fixture.pinCalls = append(fixture.pinCalls, apply)
+	return fixture.pinned, fixture.pinErr
+}
+
+func TestVMPageReportingIsFixedAndScoped(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "scripts"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(root, "scripts", "03-create-subyard.sh"), []byte(
+		"#!/bin/sh\ncase \"$1\" in --check-page-reporting) exit 0 ;; --check-page-reporting-guest) exit \"${MOCK_GUEST_EXIT:-0}\" ;; esac\nexit 1\n"), 0o700)
+	incus := &vmPinIncusFixture{pinned: true, Incus: &testkit.Incus{
+		ServerInfo: ports.ServerInfo{Environment: "incus", Version: "6.0.6-debian13"},
+		Reconcile: ports.ReconcileState{
+			ProjectFound: true, ProfileFound: true, VolumeFound: true, InstanceFound: true,
+			ProjectConfig: map[string]string{
+				"restricted": "true", "restricted.containers.nesting": "allow",
+				"restricted.containers.privilege":    "unprivileged",
+				"restricted.containers.interception": "block",
+				"restricted.devices.disk":            "allow", "restricted.devices.disk.paths": "",
+				"restricted.devices.unix-char": "allow", "restricted.devices.proxy": "allow",
+			},
+			ProfileDevices: map[string]map[string]string{
+				"root": {"type": "disk", "pool": "default", "path": "/", "size": "10GiB"},
+				"eth0": {"type": "nic", "network": "incusbr0"},
+			},
+			Instance: ports.InstanceInfo{
+				Status: "Running", Config: map[string]string{}, LocalConfig: map[string]string{
+					"limits.cpu": "1", "limits.memory": "1GiB",
+				},
+				LocalDevices: map[string]map[string]string{
+					"srv": {"type": "disk", "source": "yard-srv", "path": "/srv", "pool": "default"},
+				},
+				Devices: map[string]map[string]string{
+					"root": {"type": "disk", "pool": "default", "path": "/", "size": "10GiB"},
+					"eth0": {"type": "nic", "network": "incusbr0"},
+					"srv":  {"source": "yard-srv", "path": "/srv", "pool": "default", "type": "disk"},
+				},
+			},
+		},
+	}}
+	runtime := Runtime{
+		Incus: incus, RepositoryRoot: root, Environment: []string{
+			"VM_FREE_PAGE_REPORTING=1", "VM_PIN_IPV4=1", "ALLOWS_HOST_ACCESS=false",
+			"LIMITS_CPU=1", "LIMITS_MEMORY=1GiB", "ROOT_DISK_SIZE=10GiB",
+		},
+		Yard: domain.Context{YardKind: domain.YardVM},
+	}
+	assertStage(t, runtime, "project", false, "missing low-level permission")
+	incus.Reconcile.ProjectConfig["restricted.virtual-machines.lowlevel"] = "allow"
+	assertStage(t, runtime, "project", true, "dedicated project permission")
+	assertStageConverged(t, runtime, false, "missing reporting override")
+	incus.Reconcile.Instance.Config["raw.qemu.conf"] = vmPageReportingConfig
+	incus.Reconcile.Instance.LocalConfig["raw.qemu.conf"] = vmPageReportingConfig
+	assertStageConverged(t, runtime, true, "fixed reporting override")
+	runtime.Environment = append(runtime.Environment, "MOCK_GUEST_EXIT=10")
+	assertStageConverged(t, runtime, false, "guest reporting feature unavailable")
+	runtime.Environment[len(runtime.Environment)-1] = "MOCK_GUEST_EXIT=1"
+	if _, err := runtime.CheckStage(context.Background(), "instance"); err == nil ||
+		!strings.Contains(err.Error(), "Free Page Reporting guest check") {
+		t.Fatalf("unexpected guest probe failure was not diagnosed: %v", err)
+	}
+	runtime.Environment = runtime.Environment[:len(runtime.Environment)-1]
+	incus.pinned = false
+	assertStageConverged(t, runtime, false, "missing pinned guest IPv4")
+	incus.pinned = true
+	incus.Reconcile.Instance.Devices["host-cache"] = map[string]string{"type": "disk", "source": "/srv/host-cache", "path": "/mnt/cache"}
+	if _, err := runtime.CheckStage(context.Background(), "instance"); err == nil {
+		t.Fatal("inherited host disk bypassed ALLOWS_HOST_ACCESS=false")
+	}
+	delete(incus.Reconcile.Instance.Devices, "host-cache")
+	incus.Reconcile.Instance.Devices["host-kvm"] = map[string]string{"type": "unix-char", "source": "/dev/kvm", "path": "/dev/kvm"}
+	if _, err := runtime.CheckStage(context.Background(), "instance"); err == nil {
+		t.Fatal("inherited host device bypassed ALLOWS_HOST_ACCESS=false")
+	}
+	delete(incus.Reconcile.Instance.Devices, "host-kvm")
+	incus.Reconcile.Instance.LocalDevices["root"] = map[string]string{"type": "disk", "pool": "other", "path": "/", "size": "20GiB"}
+	incus.Reconcile.Instance.Devices["root"] = incus.Reconcile.Instance.LocalDevices["root"]
+	if _, err := runtime.CheckStage(context.Background(), "instance"); err == nil {
+		t.Fatal("local root override bypassed ROOT_DISK_SIZE")
+	}
+	delete(incus.Reconcile.Instance.LocalDevices, "root")
+	incus.Reconcile.Instance.Devices["root"] = map[string]string{
+		"type": "disk", "pool": "default", "path": "/", "size": "20GiB",
+	}
+	if _, err := runtime.CheckStage(context.Background(), "instance"); err == nil {
+		t.Fatal("effective root size mismatch bypassed ROOT_DISK_SIZE")
+	}
+	incus.Reconcile.Instance.Devices["root"]["size"] = "10GiB"
+	incus.Reconcile.Instance.Devices["subyard-e2e-routes"] = map[string]string{"type": "disk", "source": "/data/e2e/routes"}
+	if _, err := runtime.CheckStage(context.Background(), "instance"); err == nil {
+		t.Fatal("inherited shared route mount bypassed ALLOWS_HOST_ACCESS=false")
+	}
+	delete(incus.Reconcile.Instance.Devices, "subyard-e2e-routes")
+	assertStageConverged(t, runtime, true, "host device boundary restored")
+	incus.Reconcile.Instance.LocalDevices["eth0"] = map[string]string{
+		"type": "nic", "network": "incusbr0", "ipv4.address": "10.0.0.2",
+	}
+	incus.Reconcile.Instance.Devices["eth0"] = incus.Reconcile.Instance.LocalDevices["eth0"]
+	if bounded, err := runtime.vmDeviceBoundary(incus.Reconcile); err != nil || !bounded {
+		t.Fatalf("managed local IPv4 pin was rejected by host access boundary: %t, %v", bounded, err)
+	}
+	incus.Reconcile.Instance.Devices["eth0"]["network"] = "foreign"
+	if bounded, err := runtime.vmDeviceBoundary(incus.Reconcile); err == nil || bounded {
+		t.Fatalf("foreign primary NIC bypassed host access boundary: %t, %v", bounded, err)
+	}
+	delete(incus.Reconcile.Instance.LocalDevices, "eth0")
+	incus.Reconcile.Instance.Devices["eth0"] = incus.Reconcile.ProfileDevices["eth0"]
+	incus.Reconcile.Instance.Config["raw.qemu"] = "-device virtio-balloon-pci"
+	if _, err := runtime.CheckStage(context.Background(), "instance"); err == nil {
+		t.Fatal("foreign raw QEMU configuration accepted")
+	}
+	delete(incus.Reconcile.Instance.Config, "raw.qemu")
+	delete(incus.Reconcile.Instance.LocalConfig, "raw.qemu.conf")
+	if _, err := runtime.CheckStage(context.Background(), "instance"); err == nil {
+		t.Fatal("inherited reporting override accepted")
+	}
+	incus.Reconcile.Instance.LocalConfig["raw.qemu.conf"] = vmPageReportingConfig
+	incus.ServerInfo.Version = "6.1.0"
+	if _, err := runtime.CheckStage(context.Background(), "project"); err == nil {
+		t.Fatal("unsupported Incus version accepted")
+	}
+	runtime.Yard.YardKind = domain.YardContainer
+	if _, err := runtime.CheckStage(context.Background(), "project"); err == nil {
+		t.Fatal("VM container accepted")
+	}
+	runtime.Yard.YardKind = domain.YardVM
+	incus.ServerInfo.Version = "6.0.6-debian13"
+	testkit.WriteFile(t, filepath.Join(root, "scripts", "03-create-subyard.sh"), []byte(
+		"#!/bin/sh\nexit 1\n"), 0o700)
+	if err := runtime.ApplyStage(context.Background(), "instance"); err == nil ||
+		!strings.Contains(err.Error(), "Free Page Reporting preflight") || len(incus.ConfigUpdates) != 0 {
+		t.Fatalf("failed reporting preflight changed power metadata or gave no diagnostic: %v, %#v", err, incus.ConfigUpdates)
+	}
+	runtime.Environment = nil
+	assertStage(t, runtime, "project", true, "ordinary yard ignores VM policy")
+	testkit.WriteFile(t, filepath.Join(root, "scripts", "03-create-subyard.sh"), []byte(
+		"#!/bin/sh\nexit 0\n"), 0o700)
+	runtime.Environment = []string{"VM_PIN_IPV4=1", "ALLOWS_HOST_ACCESS=false", "LIMITS_CPU=2", "LIMITS_MEMORY=2GiB"}
+	incus.Reconcile.Instance.LocalConfig["limits.cpu"] = "2"
+	incus.Reconcile.Instance.LocalConfig["limits.memory"] = "2GiB"
+	assertStageConverged(t, runtime, true, "IPv4 pin and resource limits work without page reporting")
+}
+
+func TestVMMissingHostToolsAreRepairableIncusStageDrift(t *testing.T) {
+	bin := t.TempDir()
+	incus := &testkit.Incus{ServerInfo: ports.ServerInfo{Version: "6.0.6"},
+		Reconcile: ports.ReconcileState{HostPoolFound: true, HostNetworkFound: true}}
+	runtime := Runtime{Incus: incus, Yard: domain.Context{YardKind: domain.YardVM},
+		Environment: []string{"VM_FREE_PAGE_REPORTING=1", "PATH=" + bin}}
+	converged, err := runtime.CheckStage(context.Background(), ports.ReconcileStageIncus)
+	if err != nil || converged {
+		t.Fatalf("absent QEMU should be repairable stage drift: converged %t, err %v", converged, err)
+	}
+	testkit.WriteFile(t, filepath.Join(bin, "qemu-system-x86_64"), []byte("#!/bin/sh\nexit 0\n"), 0o700)
+	testkit.WriteFile(t, filepath.Join(bin, "conntrack"), []byte("#!/bin/sh\nexit 0\n"), 0o700)
+	converged, err = runtime.CheckStage(context.Background(), ports.ReconcileStageIncus)
+	if err != nil || !converged {
+		t.Fatalf("installed VM host tools should converge stage: converged %t, err %v", converged, err)
+	}
+}
+
 func TestInstanceProbeOwnsVolumeAndNestedBoundary(t *testing.T) {
 	deviceRoot := t.TempDir()
 	bin := t.TempDir()
@@ -1035,6 +1205,17 @@ func TestExtrasDesiredStateIsParsedAndValidatedInGo(t *testing.T) {
 	values, err = runtime.extrasContext()
 	if err != nil || values["SUBYARD_EXTRAS_DEVICES"] != "" {
 		t.Fatalf("VM inherited container-only device extras: %#v, %v", values, err)
+	}
+	for name, contents := range map[string]string{
+		"mount":  "YARD_MOUNTS='cache:/srv/cache:rw:0755'\n",
+		"cap":    "YARD_CAPS='fuse'\n",
+		"device": "YARD_DEVICES='gpu'\n",
+	} {
+		writeProfile(name, contents)
+		runtime.Environment = []string{"ENVIRONMENT_PROFILES=" + name, "ALLOWS_HOST_ACCESS=false"}
+		if _, err := runtime.extrasContext(); err == nil {
+			t.Fatalf("host-free role accepted %s from selected profile", name)
+		}
 	}
 	writeProfile("bad", "YARD_MOUNTS='../escape:/srv/cache:rw:0755'\n")
 	runtime.Environment = []string{"ENVIRONMENT_PROFILES=bad"}

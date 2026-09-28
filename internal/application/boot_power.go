@@ -23,11 +23,14 @@ type BootPowerResult struct {
 }
 
 type BootPowerReconciler struct {
-	Inventory         ports.InstanceInventory
-	Instances         ports.Incus
-	Power             ports.InstancePowerManager
-	Network           ports.HostNetworkGuard
-	NetworkPolicy     BootNetworkPolicy
+	Inventory     ports.InstanceInventory
+	Instances     ports.Incus
+	Power         ports.InstancePowerManager
+	Network       ports.HostNetworkGuard
+	NetworkPolicy BootNetworkPolicy
+	// AfterStart runs inside NetworkPolicy.WithStart's host network lock, only
+	// after a stopped instance has been started successfully.
+	AfterStart        func(context.Context, yardnetwork.Yard) error
 	EnsureNetworkLock func() error
 	Clock             ports.Clock
 	IncusWait         time.Duration
@@ -97,9 +100,13 @@ func (reconciler BootPowerReconciler) Run(ctx context.Context) (BootPowerResult,
 			result.AlreadyRunning = append(result.AlreadyRunning, reference)
 		case "stopped":
 			var startErr error
-			if err := reconciler.NetworkPolicy.WithStart(ctx, bootNetworkYard(instance), func() error {
+			yard := bootNetworkYard(instance)
+			if err := reconciler.NetworkPolicy.WithStart(ctx, yard, func() error {
 				startErr = reconciler.Power.SetInstancePower(ctx, instance.Project, instance.Name, "start", false)
-				return startErr
+				if startErr != nil || reconciler.AfterStart == nil {
+					return startErr
+				}
+				return reconciler.AfterStart(ctx, yard)
 			}); err != nil {
 				if startErr != nil {
 					return result, fmt.Errorf("start %s: %w", reference, err)

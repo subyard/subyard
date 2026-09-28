@@ -794,9 +794,9 @@ func (cli *CLI) Run(ctx context.Context) int {
 	case "@list":
 		return cli.runProjectList(ctx, loaded, explicit, commandArguments)
 	case "@state":
-		return cli.runProjectState(ctx, loadedContext, commandArguments, false)
+		return cli.runProjectState(ctx, loaded, commandArguments, false)
 	case "@project-state":
-		return cli.runProjectState(ctx, loadedContext, commandArguments, true)
+		return cli.runProjectState(ctx, loaded, commandArguments, true)
 	case "@remote":
 		fmt.Fprintf(cli.options.Stdout, "Usage: %s remote add <name> <user@host> [--yard <yard>] | repair-key <name> | remove <name> | list\n", cli.options.Program)
 		return 0
@@ -1032,11 +1032,10 @@ func (cli *CLI) statusFacts(loaded config.Loaded) ports.StatusFactsReader {
 	environment["SUBYARD_REPOSITORY_ROOT"] = cli.options.RepositoryRoot
 	environment["PROG"] = cli.options.Program
 	definitions := cli.resources.Definitions()
-	if profiles := strings.Fields(loaded.Environment["ENVIRONMENT_PROFILES"]); len(profiles) != 0 {
-		definitions = slices.DeleteFunc(definitions, func(definition resource.Definition) bool {
-			return !slices.Contains(profiles, definition.Profile)
-		})
-	}
+	profiles := strings.Fields(loaded.Environment["ENVIRONMENT_PROFILES"])
+	definitions = slices.DeleteFunc(definitions, func(definition resource.Definition) bool {
+		return !slices.Contains(profiles, definition.Profile)
+	})
 	incusPort, executor := cli.statusPorts()
 	return statusruntime.Runtime{
 		Environment: environment, Resources: definitions, Program: cli.options.Program,
@@ -1925,10 +1924,15 @@ func (cli *CLI) loadInventoryLoaded(name string, loaded config.Loaded) (config.L
 
 func (cli *CLI) runProjectState(
 	ctx context.Context,
-	yard domain.Context,
+	loaded config.Loaded,
 	arguments []string,
 	ownerEndpoint bool,
 ) int {
+	if loaded.Environment["ALLOWS_PROJECTS"] == "false" && projectStateRequiresProjects(arguments, ownerEndpoint) {
+		cli.errorf("project state: selected yard role does not accept work projects")
+		return 1
+	}
+	yard := loaded.Context
 	store, err := openProjectStore(ctx, yard.Paths.StateDir)
 	if err != nil {
 		cli.errorf("open project state: %v", err)
@@ -2108,6 +2112,25 @@ func (cli *CLI) runProjectState(
 		return fail(fmt.Errorf("unknown action %q", action))
 	}
 	return 0
+}
+
+func projectStateRequiresProjects(arguments []string, ownerEndpoint bool) bool {
+	if len(arguments) == 0 {
+		return false
+	}
+	if ownerEndpoint {
+		switch arguments[0] {
+		case "preview", "reserve", "upsert":
+			return true
+		}
+		return false
+	}
+	switch arguments[0] {
+	case "write", "set", "upsert-yard":
+		return true
+	default:
+		return false
+	}
 }
 
 func (cli *CLI) runMigration(ctx context.Context, yard string, arguments []string) int {
@@ -2632,7 +2655,7 @@ func (cli *CLI) routeProjectSource(
 	source string,
 	explicitTarget string,
 ) (string, error) {
-	stores, err := cli.projectStores(ctx, yard)
+	stores, err := cli.projectStoresReadOnly(ctx, yard)
 	if err != nil {
 		return "", err
 	}

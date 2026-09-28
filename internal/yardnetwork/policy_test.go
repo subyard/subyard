@@ -2,8 +2,58 @@ package yardnetwork
 
 import (
 	"reflect"
+	"strconv"
+	"strings"
 	"testing"
+
+	"github.com/Subyard/Subyard/internal/resource"
 )
+
+func TestApprovedIngressReadsLegacyFingerprintWithoutPersistingIt(t *testing.T) {
+	approved := ApprovedIngress{Device: "sample-relay", Listen: "udp:10.20.30.40:42000", GuestPort: 41999}
+	binding := Binding{Yard: Yard{Name: "private", Project: "subyard-private", Instance: "yard-private", Network: "incusbr0"},
+		IPv4: "10.80.0.10", MAC: "00:16:3e:00:00:10", OriginalNIC: map[string]string{"type": "nic", "network": "incusbr0"},
+		ApprovedIngress: []ApprovedIngress{approved}}
+	policy := Policy{Schema: SchemaVersion, Bindings: []Binding{binding}}
+	content, err := Encode(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(content), "fingerprint") {
+		t.Fatal("new policy persisted a derived fingerprint")
+	}
+	legacyHash := (resource.ProxyContract{}).OwnershipValue(approved.proxy(binding))
+	for _, test := range []struct {
+		name, extra string
+		valid       bool
+	}{
+		{"current", "", true},
+		{"legacy", `,"fingerprint":` + strconv.Quote(legacyHash), true},
+		{"wrong legacy hash", `,"fingerprint":"v1:wrong"`, false},
+		{"empty legacy hash", `,"fingerprint":""`, false},
+		{"null legacy hash", `,"fingerprint":null`, false},
+		{"non-string legacy hash", `,"fingerprint":42`, false},
+		{"unknown ingress field", `,"unexpected":true`, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			input := strings.Replace(string(content), `"guestPort":41999`, `"guestPort":41999`+test.extra, 1)
+			decoded, err := Decode([]byte(input))
+			if !test.valid {
+				if err == nil {
+					t.Fatal("malformed approval was accepted")
+				}
+				return
+			}
+			if err != nil || !reflect.DeepEqual(decoded, policy) {
+				t.Fatalf("approval changed during decode: %+v, %v", decoded, err)
+			}
+			rewritten, err := Encode(decoded)
+			if err != nil || string(rewritten) != string(content) {
+				t.Fatalf("policy rewrite did not use canonical route parameters: %s, %v", rewritten, err)
+			}
+		})
+	}
+}
 
 func TestLinksAreSymmetricExplicitAndSurviveIsolationToggle(t *testing.T) {
 	policy, err := Decode(nil)

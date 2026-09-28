@@ -330,6 +330,11 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 		if err := execution.integrationSelection.check(ctx, cli, execution); err != nil {
 			return "", domain.ActionDelta{}, err
 		}
+		if cli.options.InitPlatform == nil && execution.mode == initReconcile {
+			if err := execution.refreshOrphanIngress(ctx, cli); err != nil {
+				return "", domain.ActionDelta{}, err
+			}
+		}
 		if err := execution.refreshAssessment(ctx); err != nil {
 			return "", domain.ActionDelta{}, err
 		}

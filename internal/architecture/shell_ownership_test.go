@@ -225,7 +225,8 @@ func TestPhysicalShellConsumesOnlyPreparedControlPlaneState(t *testing.T) {
 	allowedSources := map[string]bool{
 		"runtime.sh": true, "engine-context.sh": true, "ui.sh": true,
 		"lib-power.sh": true, "host.sh": true, "ssh-config.sh": true,
-		"ai-observer-proxy.sh": true,
+		"ai-observer-proxy.sh":     true,
+		"lib-vm-page-reporting.sh": true, "lib-vm-storage.sh": true,
 	}
 	forbidden := []string{
 		"SUBYARD_CONFIG_LOADED", "SUBYARD_PROFILES_DIR", "YARD_TEMPLATE", "OWNER_ENDPOINT",
@@ -355,6 +356,8 @@ func productionShellContracts() map[string]shellContract {
 		"scripts/migrate-source-install.sh":    {"bootstrap", "internal/migration/v2_source_ingress.go", `migrate-source-install.sh`},
 		"scripts/restore-source-install.sh":    {"embedded", "scripts/migrate-source-install.sh", `restore-source-install.sh`},
 		"scripts/lib-power.sh":                 {"library", "scripts/lifecycle-guard.sh", `lib-power.sh`},
+		"scripts/lib-vm-page-reporting.sh":     {"library", "scripts/02-create-project.sh", `lib-vm-page-reporting.sh`},
+		"scripts/lib-vm-storage.sh":            {"library", "scripts/03-create-subyard.sh", `lib-vm-storage.sh`},
 		"scripts/lib-service.sh":               {"library", "config/profiles/android/resources/emulator/handler.sh", `lib-service.sh`},
 		"scripts/lib/engine-context.sh":        {"library", "scripts/01-install-incus.sh", `lib/engine-context.sh`},
 		"scripts/lib/download.sh":              {"library", "scripts/lib/host.sh", `lib/download.sh`},
@@ -367,6 +370,9 @@ func productionShellContracts() map[string]shellContract {
 		"scripts/teardown-physical.sh":         {"leaf", goPrepared, `"scripts/teardown-physical.sh"`},
 		"scripts/vscode-remote-maintenance.sh": {"embedded", "scripts/lifecycle-guard.sh", `vscode-remote-maintenance.sh`},
 
+		"config/profiles/amnezia/container.sh":                           {"profile", "config/profiles/amnezia/provision.sh", `container.sh`},
+		"config/profiles/amnezia/provision.sh":                           {"profile", "internal/cli/provision.go", `"provision.sh"`},
+		"config/profiles/amnezia/resources/vpn/handler.sh":               {"profile", "config/profiles/amnezia/resources/vpn.res", `HANDLER=resources/vpn/handler.sh`},
 		"config/profiles/android/emulator-control.sh":                    {"profile", "config/profiles/android/pool-install.sh", `emulator-control.sh`},
 		"config/profiles/android/emulator-run.sh":                        {"profile", "config/profiles/android/pool-install.sh", `emulator-run.sh`},
 		"config/profiles/android/pool-install.sh":                        {"profile", "config/profiles/android/provision.sh", `pool-install.sh`},

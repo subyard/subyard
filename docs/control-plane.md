@@ -617,6 +617,88 @@ while other prepare failures, precondition failures, and invalid plans return 1.
 schema is unchanged. Resource preparation currently uses its dedicated non-RPC pipeline, so this
 exit-status contract does not imply an RPC resource-preparation interface.
 
+### Dedicated profiles and VM capabilities
+
+Core code consumes profile declarations; it must not branch on a profile name or service port.
+A profile's `profile.conf` can declare `PROVISION_SCOPE=dedicated`. Such a hook is excluded from
+implicit all-profile provisioning and requires a named yard whose shipped role declares
+`EXCLUSIVE_ENVIRONMENT_PROFILE=<profile>`. An empty `ENVIRONMENT_PROFILES` excludes dedicated
+profile provisioning and selected-resource probing; discovering a descriptor never enables its service.
+
+Shipped yard roles may declare `REQUIRED_YARD_KIND=vm`, `ALLOWS_CODING_TOOLS=false`,
+`ALLOWS_HOST_ACCESS=false` and `ALLOWS_PROJECTS=false`. Host-access exclusion rejects mounts,
+links, host instruction files, arbitrary device/capability declarations, SSH agent forwarding and
+nested E2E access. These constraints are validated after configuration precedence is resolved.
+Before startup and during convergence, effective Incus devices are checked too: inherited host
+mappings and local root-disk overrides cannot bypass the role or its root disk bound.
+
+The generic VM settings are:
+
+| Setting | Contract |
+| --- | --- |
+| `VM_FREE_PAGE_REPORTING=1` | Set the existing virtio balloon's fixed reporting property and guest reporting order 1; reject unsupported Incus/QEMU or conflicting raw configuration. No arbitrary QEMU input is accepted. |
+| `VM_PIN_IPV4=1` | Pin the private primary NIC to its observed DHCP address after ownership and collision checks. |
+| `ROOT_DISK_SIZE` | Bound the root disk at creation; refuse implicit resizing of an existing VM. |
+| `SRV_VOLUME_TYPE=block` | Attach an owned custom block volume and mount its ext4 filesystem at `/srv` by UUID. |
+| `SRV_VOLUME_SIZE` | Required explicit size for block storage; refuse foreign volumes or size changes. |
+
+The block-volume adapter formats only a newly marked blank volume. It never hides nonempty `/srv`
+or overwrites an existing filesystem. The ordinary teardown state-retention policy still applies.
+Reporting returns unused guest pages to the immediate owner; it does not change configured memory,
+inflate the balloon, or reserve capacity for other workloads.
+The owner persists guest reporting order 1 through a root-owned `/etc/tmpfiles.d` rule and applies it
+after the VM agent becomes ready. The guest readiness check verifies the negotiated reporting feature,
+the exact rule and its permissions, and the live kernel order; drift remains a read-only diagnostic.
+Reporting and IPv4 pinning are opt-in enforcement capabilities: `0` or an unset value does not undo
+an override or address pin already installed on an existing VM, nor revoke its project permission.
+These inputs are not runtime on/off switches.
+
+### Explicit owner UDP ingress
+
+A profile can declare one exact IPv4 NAT route to a pinned VM address:
+
+```text
+PROXY="service-port RESOURCE_SERVICE_IPV4 RESOURCE_SERVICE_PORT RESOURCE_SERVICE_INTERFACE udp:guest:12345 owner-metadata-v1 owner-ipv4-udp"
+```
+
+`RESOURCE_<ID>_IPV4`, `_INTERFACE` and `_PORT` are typed yard/command settings. The IPv4 must be an
+explicit owner address on the selected interface; wildcard publication is forbidden. The descriptor
+declares the guest port. Its bring-up and shutdown use `public-ingress-change reversible` action
+metadata. Automatic endpoint allocation and `BOOTSTRAP` are not supported for public UDP routes.
+
+The handler prepares the concrete endpoint and runtime effects without mutation. After one shared
+confirmation, the engine serializes the operation with yard configuration changes, rechecks the
+plan, applies the handler and reconciles the matching ingress ACL. The route must have the exact
+declared device shape and `user.subyard.resource.<device>` ownership fingerprint. Foreign or
+modified same-name devices are refused. Network isolation allows only the selected, declared and
+owned route; it does not grant broad UDP access. Failed network reconciliation invokes the handler's
+internal `rollback-ingress` under the original bring-up operation to close its route. The engine
+verifies that both the proxy and ownership marker are absent before accepting a no-op or removing
+the matching ACL allowance, and checks closure again after ACL cleanup.
+For Amnezia, that rollback also disables the guest runtime while preserving VPN state; a later
+bring-up re-enables it.
+
+Isolation persists the approved route's device, owner endpoint and guest port in the existing
+network-policy binding. Boot restoration derives its ownership fingerprint from those parameters
+and the binding's guest address without loading profile files. It requires an exact match with the
+current local and effective proxy, ownership marker, pinned guest address and ACL. Older policies
+with a stored fingerprint remain readable after validation; subsequent writes omit that redundant
+field. Missing or changed approval blocks managed starts. Ordinary reconciliation continues to
+use selected profile contracts; shutdown and deselection remove the persisted allowance.
+After a managed VM is newly started during owner boot, the reconciler checks its current owned
+public UDP route under the host network lock and clears only stale, untranslated IPv4 UDP
+connection-tracking entries for that exact owner address and port. A missing host `conntrack`
+tool is repaired by the VM prerequisite stage of `init`; boot never installs packages.
+
+Before changing an active route's endpoint, template or profile selection through `config set/unset`,
+run its shutdown verb. The read-only shutdown assessment must report no remaining enabled runtime
+or ingress. After manual profile deselection, `init` assesses the dedicated resource's declared
+shutdown, closes its exact owned route, and runs that shutdown under the same operation. Unverified
+guest shutdown retains the pending ownership marker and blocks further initialization so a retry
+cannot silently reopen the service. Guest data is preserved. Stop the resource before editing its
+files manually; invalid configuration or ambiguous ownership fails closed and requires correction
+before reconciliation.
+
 ## Test topology
 
 `./tests/run.sh` verifies gofmt, vet, race tests, a fuzz smoke and a static build; syntax-checks every

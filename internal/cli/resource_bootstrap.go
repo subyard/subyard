@@ -224,6 +224,11 @@ func (bootstrap *resourceBootstrap) refresh(ctx context.Context, cli *CLI) error
 		if err := bootstrap.init.integrationSelection.check(ctx, cli, bootstrap.init); err != nil {
 			return err
 		}
+		if cli.options.InitPlatform == nil && bootstrap.init.mode == initReconcile {
+			if err := bootstrap.init.refreshOrphanIngress(ctx, cli); err != nil {
+				return err
+			}
+		}
 		before := bootstrap.init.consequences()
 		if err := bootstrap.init.refreshAssessment(ctx); err != nil {
 			return err

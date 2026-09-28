@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -39,6 +40,8 @@ const (
 	SettingRegularFilePath SettingValueType = "regular-file"
 	SettingSHA256          SettingValueType = "sha256"
 	SettingVersion         SettingValueType = "version"
+	SettingIPv4            SettingValueType = "ipv4"
+	SettingInterface       SettingValueType = "interface"
 )
 
 type SettingScope string
@@ -71,6 +74,24 @@ type SettingDefinition struct {
 }
 
 var catalog = map[string]SettingDefinition{
+	"ALLOWS_HOST_ACCESS": scalar("yard-security", SettingBoolean, SettingYardInit, false,
+		scopes(ScopeShipped), enum("true", "false")),
+	"ALLOWS_PROJECTS": scalar("yard-security", SettingBoolean, SettingYardInit, false,
+		scopes(ScopeShipped), enum("true", "false")),
+	"EXCLUSIVE_ENVIRONMENT_PROFILE": scalar("yard-security", SettingName, SettingYardInit, false,
+		scopes(ScopeShipped)),
+	"REQUIRED_YARD_KIND": scalar("yard-runtime", SettingString, SettingYardInit, false,
+		scopes(ScopeShipped), enum("container", "vm")),
+	"VM_FREE_PAGE_REPORTING": scalar("yard-runtime", SettingBoolean, SettingYardInit, true,
+		scopes(ScopeShipped, ScopeYard, ScopeCommand), enum("0", "1")),
+	"VM_PIN_IPV4": scalar("yard-runtime", SettingBoolean, SettingYardInit, true,
+		scopes(ScopeShipped, ScopeYard, ScopeCommand), enum("0", "1")),
+	"ROOT_DISK_SIZE": scalar("yard-storage", SettingSize, SettingYardInit, true,
+		scopes(ScopeShipped, ScopeYard, ScopeCommand)),
+	"SRV_VOLUME_SIZE": scalar("yard-storage", SettingSize, SettingYardInit, true,
+		scopes(ScopeShipped, ScopeYard, ScopeCommand)),
+	"SRV_VOLUME_TYPE": scalar("yard-storage", SettingString, SettingYardInit, true,
+		scopes(ScopeShipped, ScopeYard, ScopeCommand), enum("filesystem", "block")),
 	"ALLOWS_CODING_TOOLS": scalar("yard-security", SettingBoolean, SettingYardInit, false,
 		scopes(ScopeShipped), enum("true", "false")),
 	"ACCESS_KIND": scalar("remote-connection", SettingString, SettingNextCommand, false,
@@ -282,10 +303,39 @@ func LookupSetting(name string) (SettingDefinition, bool) {
 		return definition, true
 	}
 	definition, ok := agentSettingDefinition(name)
+	if !ok {
+		definition, ok = resourceSettingDefinition(name)
+	}
 	if ok {
 		definition.Name = name
 	}
 	return definition, ok
+}
+
+// Resource endpoint names follow the same scoped namespace pattern as agent
+// settings. Descriptors choose the resource ID; core never registers profile names.
+func resourceSettingDefinition(name string) (SettingDefinition, bool) {
+	rest, ok := strings.CutPrefix(name, "RESOURCE_")
+	if !ok {
+		return SettingDefinition{}, false
+	}
+	for _, suffix := range []string{"_IPV4", "_INTERFACE", "_PORT"} {
+		id, found := strings.CutSuffix(rest, suffix)
+		if !found || id != strings.ToUpper(id) || !domain.SafeName(strings.ToLower(id)) {
+			continue
+		}
+		definition := scalar("resource-endpoint", SettingString, SettingNextCommand, false,
+			scopes(ScopeShipped, ScopeYard, ScopeCommand))
+		if suffix == "_PORT" {
+			definition.Type, definition.Minimum, definition.Maximum = SettingPort, 1, 65535
+		} else if suffix == "_IPV4" {
+			definition.Type, definition.Optional = SettingIPv4, true
+		} else {
+			definition.Type, definition.Optional = SettingInterface, true
+		}
+		return definition, true
+	}
+	return SettingDefinition{}, false
 }
 
 func SettingCatalog() []SettingDefinition {
@@ -426,6 +476,21 @@ func validateSettingValue(definition SettingDefinition, value string) error {
 		return fmt.Errorf("must be one of %s", strings.Join(definition.Enum, ", "))
 	}
 	switch definition.Type {
+	case SettingIPv4:
+		address, err := netip.ParseAddr(value)
+		if err != nil || !address.Is4() || !address.IsGlobalUnicast() || address.IsLoopback() || address.IsLinkLocalUnicast() {
+			return errors.New("must be one explicit unicast IPv4 address")
+		}
+	case SettingInterface:
+		if len(value) > 15 || value == "." || value == ".." || value == "" {
+			return errors.New("must be one network interface name")
+		}
+		for _, character := range value {
+			if !(character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+				character >= '0' && character <= '9' || strings.ContainsRune("_.-", character)) {
+				return errors.New("must be one network interface name")
+			}
+		}
 	case SettingString, SettingMultiline:
 		if controlCharacter(value, definition.Type == SettingMultiline) {
 			return errors.New("contains unsafe control characters")

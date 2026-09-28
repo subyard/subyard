@@ -45,19 +45,48 @@ type initBootstrap struct {
 }
 
 type initExecution struct {
-	integrationSelection *initIntegrationSelection
-	integrationBaseline  *initIntegrationBaseline
-	integrationAdoption  reconcileruntime.IntegrationPlan
-	loaded               config.Loaded
-	mode                 initMode
-	bootstrap            *initBootstrap
-	plan                 application.ReconcilePlan
-	platform             ports.InitPlatform
-	powerYards           []domain.Context
-	hostID               string
-	hostIDPending        bool
-	configsChanged       bool
-	hooksApplicable      bool
+	operationID           string
+	integrationSelection  *initIntegrationSelection
+	integrationBaseline   *initIntegrationBaseline
+	integrationAdoption   reconcileruntime.IntegrationPlan
+	loaded                config.Loaded
+	mode                  initMode
+	bootstrap             *initBootstrap
+	plan                  application.ReconcilePlan
+	platform              ports.InitPlatform
+	powerYards            []domain.Context
+	hostID                string
+	hostIDPending         bool
+	configsChanged        bool
+	hooksApplicable       bool
+	orphanIngress         *orphanIngressPlan
+	orphanIngressDeferred bool
+}
+
+func (execution *initExecution) refreshOrphanIngress(ctx context.Context, cli *CLI) error {
+	err := execution.orphanIngress.refresh(ctx, cli, execution.loaded)
+	if execution.orphanIngressDeferred && errors.Is(err, errOrphanIngressAccessDeferred) {
+		return nil
+	}
+	return err
+}
+
+func (execution *initExecution) finishDeferredOrphanIngress(ctx context.Context, cli *CLI, output io.Writer) error {
+	if !execution.orphanIngressDeferred {
+		return nil
+	}
+	incusStage := application.InitStages(execution.loaded.Context)[0]
+	if err := (application.Reconciler{Stages: []application.ReconcileStage{incusStage},
+		Runner: execution.platform, Reporter: initReporter{output: output}}).Apply(ctx); err != nil {
+		return err
+	}
+	if err := execution.orphanIngress.refresh(ctx, cli, execution.loaded); err != nil {
+		if errors.Is(err, domain.ErrPlanStale) {
+			return fmt.Errorf("%w: deselected public ingress was discovered after owner Incus access was restored; rerun init for a new assessment and approval", domain.ErrPlanStale)
+		}
+		return fmt.Errorf("inspect deselected public ingress after restoring owner Incus access: %w", err)
+	}
+	return nil
 }
 
 type initReporter struct{ output io.Writer }
@@ -376,6 +405,17 @@ func (cli *CLI) prepareInitExecution(
 		loaded: loaded, mode: mode, bootstrap: bootstrap, platform: platform, powerYards: powerYards,
 		integrationSelection: selection, integrationBaseline: baseline,
 	}
+	if mode == initReconcile && cli.options.InitPlatform == nil {
+		execution.orphanIngress, err = cli.prepareOrphanIngress(ctx, loaded)
+		if errors.Is(err, errOrphanIngressAccessDeferred) {
+			execution.orphanIngressDeferred = true
+		} else if err != nil {
+			return nil, fmt.Errorf("inspect deselected public ingress: %w", err)
+		}
+		if execution.orphanIngress != nil && cli.baseEnv["SUBYARD_SG_REEXEC"] == "1" {
+			return nil, fmt.Errorf("%w: deselected public ingress needs a new init assessment and approval from a fresh owner session", domain.ErrPlanStale)
+		}
+	}
 	if bootstrap == nil && mode == initReconcile && slices.Equal(baseline.Selection.Requested, loaded.Integrations.Requested) {
 		execution.platform, execution.integrationAdoption, err = prepareLegacyIntegrationAdoption(ctx, baseline.Selection, execution.platform)
 		if err != nil {
@@ -440,6 +480,11 @@ func (execution *initExecution) consequences() []string {
 	if execution.hostIDPending {
 		hostIDConsequences = append(hostIDConsequences, "record owner HostID "+execution.hostID)
 	}
+	hostIDConsequences = append(hostIDConsequences, execution.orphanIngress.consequences()...)
+	if execution.orphanIngressDeferred {
+		hostIDConsequences = append(hostIDConsequences,
+			"restore owner Incus access and inspect deselected public ingress; any discovered route requires a new init approval")
+	}
 	switch execution.mode {
 	case initConfigs:
 		return append(hostIDConsequences, "refresh in-yard agent instructions and default configs")
@@ -476,7 +521,7 @@ func (execution *initExecution) actionPlan() (domain.ActionID, domain.ActionDelt
 		return "", domain.ActionDelta{}, errors.New("init execution is required")
 	}
 	action := domain.ActionID("yard.init.reconcile")
-	changed := execution.plan.Pending() != 0 || execution.bootstrap != nil || execution.hostIDPending || execution.integrationSelection != nil
+	changed := execution.plan.Pending() != 0 || execution.bootstrap != nil || execution.hostIDPending || execution.integrationSelection != nil || execution.orphanIngress != nil || execution.orphanIngressDeferred
 	switch execution.mode {
 	case initReconcile:
 		if execution.hooksOnly() {
@@ -500,7 +545,7 @@ func (execution *initExecution) actionPlan() (domain.ActionID, domain.ActionDelt
 
 func (execution *initExecution) hooksOnly() bool {
 	return execution.mode == initReconcile && execution.plan.Pending() == 0 &&
-		execution.bootstrap == nil && !execution.hostIDPending && execution.integrationSelection == nil
+		execution.bootstrap == nil && !execution.hostIDPending && execution.integrationSelection == nil && execution.orphanIngress == nil && !execution.orphanIngressDeferred
 }
 
 func (execution *initExecution) validateOrcaRepair(ctx context.Context, cli *CLI) error {
@@ -573,6 +618,12 @@ func (cli *CLI) printInitPlan(execution *initExecution) {
 	for _, consequence := range integrationAdoptionConsequences(execution.loaded.Context.YardName, execution.integrationAdoption) {
 		fmt.Fprintf(cli.options.Stdout, "  [do  ] %s\n", consequence)
 	}
+	for _, consequence := range execution.orphanIngress.consequences() {
+		fmt.Fprintf(cli.options.Stdout, "  [do  ] %s\n", consequence)
+	}
+	if execution.orphanIngressDeferred {
+		fmt.Fprintln(cli.options.Stdout, "  [do  ] restore owner Incus access and inspect deselected public ingress before continuing")
+	}
 	for _, step := range execution.plan.Steps {
 		state := "do"
 		if step.Converged {
@@ -594,12 +645,22 @@ func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Wri
 	if err := execution.checkIntegrationAdoption(ctx); err != nil {
 		return err
 	}
+	if cli.options.InitPlatform == nil && execution.mode == initReconcile {
+		if err := execution.refreshOrphanIngress(ctx, cli); err != nil {
+			return err
+		}
+	}
 	if execution.hooksOnly() {
 		execution.retryProjectHooks(ctx, output)
 		return nil
 	}
 	if err := execution.integrationSelection.check(ctx, cli, execution); err != nil {
 		return err
+	}
+	if !execution.orphanIngressDeferred {
+		if err := execution.orphanIngress.apply(ctx, cli, execution.loaded, execution.operationID); err != nil {
+			return fmt.Errorf("close deselected public ingress: %w", err)
+		}
 	}
 	if err := execution.integrationSelection.apply(execution); err != nil {
 		return err
@@ -620,6 +681,12 @@ func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Wri
 		return fmt.Errorf("initialize owner HostID: %w", err)
 	}
 	fmt.Fprintf(output, "  [ ok ] owner HostID: %s\n", hostID)
+	// Persist the already approved named-yard registration before Incus may
+	// re-exec init in an incus-admin session. The orphan check still precedes
+	// every later reconcile stage and never applies a newly discovered route.
+	if err := execution.finishDeferredOrphanIngress(ctx, cli, output); err != nil {
+		return err
+	}
 	if execution.mode == initConfigs {
 		if err := execution.checkReleaseConfigOwnership(ctx, cli); err != nil {
 			return err
@@ -716,6 +783,7 @@ func (adapter initAdapter) Run(
 	if request.Adapter != "init" || request.Action != "reconcile" || adapter.execution == nil {
 		return domain.AdapterResult{}, "", errors.New("invalid init adapter request")
 	}
+	adapter.execution.operationID = request.OperationID
 	if err := adapter.execution.run(ctx, adapter.cli, adapter.output); err != nil {
 		return domain.AdapterResult{}, "", err
 	}

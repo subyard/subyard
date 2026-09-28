@@ -155,8 +155,9 @@ func NewCoreActionRegistry() (*domain.ActionRegistry, error) {
 		{
 			Action: "yard.init.reconcile", Summary: "Reconcile yard", Effect: domain.ActionMutation,
 			Impacts: []domain.ActionImpact{
-				domain.ImpactHostIncus, domain.ImpactHostNetwork, domain.ImpactHostOS,
+				domain.ImpactAccess, domain.ImpactHostIncus, domain.ImpactHostNetwork, domain.ImpactHostOS,
 				domain.ImpactLocalMetadata, domain.ImpactPersistentData, domain.ImpactYardRuntime,
+				domain.ImpactSecurity, domain.ImpactTrust,
 			},
 			Recovery: domain.RecoveryRecreatable,
 		},

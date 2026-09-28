@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/resource"
 )
 
 // Yard is a resolved local instance identity. CLI selectors never reach Incus.
@@ -42,18 +43,19 @@ type ACL struct {
 
 type ObservedYard struct {
 	Yard
-	ProjectFound   bool
-	ProjectETag    string
-	ProjectConfig  map[string]string
-	ProfileFound   bool
-	ProfileETag    string
-	ProfileDevices map[string]map[string]string
-	ProfileUsedBy  []string
-	InstanceFound  bool
-	InstanceInfo   ports.InstanceInfo
-	IPv4           string
-	MAC            string
-	ACL            ACL
+	IngressContracts []resource.ProxyContract
+	ProjectFound     bool
+	ProjectETag      string
+	ProjectConfig    map[string]string
+	ProfileFound     bool
+	ProfileETag      string
+	ProfileDevices   map[string]map[string]string
+	ProfileUsedBy    []string
+	InstanceFound    bool
+	InstanceInfo     ports.InstanceInfo
+	IPv4             string
+	MAC              string
+	ACL              ACL
 }
 
 type Network struct {

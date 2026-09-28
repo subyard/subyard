@@ -33,27 +33,28 @@ const (
 )
 
 type projectExecution struct {
-	OwnerConnection *ownerinventory.Connection
-	Loaded          config.Loaded
-	YardIdentity    string
-	Arguments       []string
-	Environment     map[string]string
-	Record          domain.ProjectRecord
-	Store           *state.FileStore
-	Commit          projectCommit
-	Profile         application.ProjectEnvironmentProfile
-	SecretPath      string
-	HostLinks       []string
-	Reservation     *state.ProjectReservation
-	OperationID     string
-	ExplicitName    bool
-	RequestedName   string
-	RemoteReserved  bool
-	PreviewExisting *domain.ProjectRecord
-	ActionChanged   bool
-	WorkspaceNames  []string
-	CopyObserved    bool
-	Removal         projectRemovalObservation
+	OwnerConnection  *ownerinventory.Connection
+	Loaded           config.Loaded
+	YardIdentity     string
+	Arguments        []string
+	Environment      map[string]string
+	Record           domain.ProjectRecord
+	Store            *state.FileStore
+	Commit           projectCommit
+	Profile          application.ProjectEnvironmentProfile
+	SecretPath       string
+	HostLinks        []string
+	Reservation      *state.ProjectReservation
+	OperationID      string
+	ExplicitName     bool
+	RequestedName    string
+	RemoteReserved   bool
+	PreviewExisting  *domain.ProjectRecord
+	ActionChanged    bool
+	WorkspaceNames   []string
+	CopyObserved     bool
+	Removal          projectRemovalObservation
+	RequiresProjects bool
 }
 
 type projectRemovalObservation struct {
@@ -429,6 +430,7 @@ func (cli *CLI) prepareProjectExecution(
 ) (execution *projectExecution, err error) {
 	defer func() {
 		if err == nil && execution != nil {
+			execution.RequiresProjects = projectCommandRequiresProjects(definition.Name)
 			err = cli.captureProjectOwner(execution)
 		}
 	}()
@@ -444,6 +446,22 @@ func (cli *CLI) prepareProjectExecution(
 	default:
 		return nil, nil
 	}
+}
+
+func projectCommandRequiresProjects(name string) bool {
+	switch name {
+	case "sync", "bind", "clone", "code", "shell", "up":
+		return true
+	default:
+		return false
+	}
+}
+
+func requireProjectRole(loaded config.Loaded) error {
+	if loaded.Environment["ALLOWS_PROJECTS"] == "false" {
+		return errors.New("selected yard role does not accept work projects")
+	}
+	return nil
 }
 
 // Capture the registration during preparation without creating locks or state.
@@ -478,6 +496,9 @@ func (cli *CLI) captureProjectOwner(execution *projectExecution) error {
 }
 
 func (cli *CLI) beginProjectMutation(ctx context.Context, execution *projectExecution) (func(), error) {
+	if err := cli.recheckProjectRole(execution); err != nil {
+		return nil, err
+	}
 	if execution == nil || execution.OwnerConnection == nil {
 		return func() {}, nil
 	}
@@ -487,6 +508,17 @@ func (cli *CLI) beginProjectMutation(ctx context.Context, execution *projectExec
 		return nil, fmt.Errorf("revalidate project owner: %w", err)
 	}
 	return release, nil
+}
+
+func (cli *CLI) recheckProjectRole(execution *projectExecution) error {
+	if execution == nil || !execution.RequiresProjects {
+		return nil
+	}
+	fresh, err := cli.loadInventoryLoaded(execution.Loaded.Context.YardName, execution.Loaded)
+	if err != nil {
+		return fmt.Errorf("recheck project yard role: %w", err)
+	}
+	return requireProjectRole(fresh)
 }
 
 func openProjectPreparationStore(ctx context.Context, yard domain.Context) (*state.FileStore, error) {
@@ -503,6 +535,21 @@ func (cli *CLI) prepareProjectInventory(
 	loaded config.Loaded,
 	arguments []string,
 ) (*projectExecution, error) {
+	if loaded.Environment["ALLOWS_PROJECTS"] == "false" {
+		store, err := openProjectStoreReadOnly(loaded.Context.Paths.StateDir)
+		if err != nil {
+			return nil, err
+		}
+		records, err := store.List(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if len(records) != 0 {
+			return nil, errors.New("selected yard role does not accept work projects; remove existing projects before init or provision")
+		}
+		return &projectExecution{Loaded: loaded, Arguments: arguments,
+			Environment: map[string]string{"SUBYARD_PROJECT_PROFILES": ""}}, nil
+	}
 	store, err := openProjectPreparationStore(ctx, loaded.Context)
 	if err != nil {
 		return nil, err
@@ -577,7 +624,7 @@ func (cli *CLI) prepareProjectImport(
 	if err != nil {
 		return nil, err
 	}
-	selectedLoaded, err := cli.activateProjectContext(selected, loaded)
+	selectedLoaded, err := cli.activateProjectContext(selected, loaded, true)
 	if err != nil {
 		return nil, err
 	}
@@ -653,7 +700,7 @@ func (cli *CLI) prepareProjectClone(
 	if err != nil {
 		return nil, err
 	}
-	selectedLoaded, err := cli.activateProjectContext(selected, loaded)
+	selectedLoaded, err := cli.activateProjectContext(selected, loaded, true)
 	if err != nil {
 		return nil, err
 	}
@@ -704,6 +751,9 @@ func (cli *CLI) previewProjectAdmission(
 	explicit bool,
 	workspaceNames ...string,
 ) (state.Admission, error) {
+	if err := requireProjectRole(loaded); err != nil {
+		return state.Admission{}, err
+	}
 	if loaded.Context.AccessKind != domain.AccessRemote {
 		if store == nil {
 			return state.Admission{}, errors.New("project store is required")
@@ -765,12 +815,12 @@ func (cli *CLI) prepareExistingProject(
 	revalidate := name != "shell" && name != "info"
 	readOnlyProject := readOnly || name == "remove"
 	match, err := cli.resolveProjectForCommand(
-		ctx, loaded, selector, explicit, revalidate, readOnlyProject,
+		ctx, loaded, selector, explicit, revalidate, true,
 	)
 	if err != nil {
 		return nil, err
 	}
-	selectedLoaded, err := cli.activateProjectContext(match.Yard, loaded)
+	selectedLoaded, err := cli.activateProjectContext(match.Yard, loaded, projectCommandRequiresProjects(name))
 	if err != nil {
 		return nil, err
 	}
@@ -926,8 +976,13 @@ func (cli *CLI) resolveProjectForCommand(
 	return cli.resolveGlobalProject(ctx, loaded.Context, selector)
 }
 
-func (cli *CLI) activateProjectContext(name string, loaded config.Loaded) (config.Loaded, error) {
+func (cli *CLI) activateProjectContext(name string, loaded config.Loaded, requireProjects bool) (config.Loaded, error) {
 	if selected, ok := cli.inventoryRoutes[name]; ok {
+		if requireProjects {
+			if err := requireProjectRole(selected); err != nil {
+				return config.Loaded{}, err
+			}
+		}
 		for key, value := range selected.Environment {
 			cli.env[key] = value
 		}
@@ -937,11 +992,21 @@ func (cli *CLI) activateProjectContext(name string, loaded config.Loaded) (confi
 		return selected, nil
 	}
 	if name == loaded.Context.YardName {
+		if requireProjects {
+			if err := requireProjectRole(loaded); err != nil {
+				return config.Loaded{}, err
+			}
+		}
 		return loaded, nil
 	}
 	selected, err := cli.loadInventoryLoaded(name, loaded)
 	if err != nil {
 		return config.Loaded{}, err
+	}
+	if requireProjects {
+		if err := requireProjectRole(selected); err != nil {
+			return config.Loaded{}, err
+		}
 	}
 	for _, key := range []string{
 		"YARD_NAME", "ACCESS_KIND", "ENVIRONMENT_PROFILES", "YARD_KIND", "YARD_INSTANCE_NAME", "INCUS_PROJECT",

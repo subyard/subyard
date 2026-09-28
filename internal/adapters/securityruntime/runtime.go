@@ -5,11 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,15 +27,16 @@ import (
 var ErrContract = errors.New("security contract failed")
 
 type Runtime struct {
-	RepositoryRoot      string
-	Environment         map[string]string
-	Yard                domain.Context
-	Incus               ports.Incus
-	Stdout              io.Writer
-	Stderr              io.Writer
-	State               func(context.Context, Runtime) (ports.ReconcileState, bool, error)
-	ProxyContracts      []resource.ProxyContract
-	ResolveOwnerAddress func(context.Context, string) (string, error)
+	RepositoryRoot       string
+	Environment          map[string]string
+	Yard                 domain.Context
+	Incus                ports.Incus
+	Stdout               io.Writer
+	Stderr               io.Writer
+	State                func(context.Context, Runtime) (ports.ReconcileState, bool, error)
+	ProxyContracts       []resource.ProxyContract
+	ResolveOwnerAddress  func(context.Context, string) (string, error)
+	OwnerIPv4OnInterface func(string, string) bool
 }
 
 type finding struct {
@@ -257,7 +261,7 @@ func (runtime Runtime) liveFindings(ctx context.Context, state ports.ReconcileSt
 			}
 		}
 		if runtime.proxyContract(name) != nil {
-			if err := runtime.checkOwnedProxy(ctx, name, device, instance.LocalConfig); err != nil {
+			if err := runtime.checkOwnedProxy(ctx, name, device, instance.LocalConfig, instance.Devices["eth0"], instance.LocalDevices[name]); err != nil {
 				result = append(result, finding{"fail", err.Error()})
 			}
 		} else if deviceType == "proxy" && !loopbackProxy(device["listen"]) {
@@ -284,10 +288,15 @@ func (runtime Runtime) checkOwnedProxy(
 	name string,
 	device map[string]string,
 	instanceConfig map[string]string,
+	guestNIC map[string]string,
+	localDevice map[string]string,
 ) error {
 	contract := runtime.proxyContract(name)
 	if contract == nil {
 		return fmt.Errorf("proxy device %q is not loopback-only or declared by an active resource: %s", name, device["listen"])
+	}
+	if contract.AddressPolicy == resource.ProxyAddressOwnerIPv4UDP {
+		return runtime.checkOwnedPublicUDPProxy(name, device, instanceConfig, guestNIC, localDevice, *contract)
 	}
 	if device["type"] != "proxy" {
 		return fmt.Errorf("device %q does not have the proxy type required by its typed resource contract", name)
@@ -331,6 +340,72 @@ func (runtime Runtime) checkOwnedProxy(
 		return fmt.Errorf("proxy device %q does not match its typed resource contract", name)
 	}
 	return nil
+}
+
+func (runtime Runtime) checkOwnedPublicUDPProxy(name string, device, instanceConfig, guestNIC, localDevice map[string]string, contract resource.ProxyContract) error {
+	guestPort, validGuestPort := contract.GuestUDPPort()
+	if !validGuestPort || contract.AddressPolicy != resource.ProxyAddressOwnerIPv4UDP ||
+		contract.Profile == "" || contract.Resource == "" || contract.Device != name || !contract.OwnershipMetadata ||
+		runtime.Yard.YardKind != domain.YardVM || runtime.Yard.YardName == "" || runtime.Yard.YardName == "default" ||
+		!slices.Contains(strings.Fields(runtime.Environment["ENVIRONMENT_PROFILES"]), contract.Profile) {
+		return fmt.Errorf("proxy device %q has no valid public UDP VM contract", name)
+	}
+	if len(device) != 5 || !maps.Equal(device, localDevice) || device["type"] != "proxy" || device["bind"] != "host" || device["nat"] != "true" {
+		return fmt.Errorf("proxy device %q has invalid UDP NAT options", name)
+	}
+	for key := range device {
+		switch key {
+		case "type", "bind", "nat", "listen", "connect":
+		default:
+			return fmt.Errorf("proxy device %q contains options outside its UDP contract", name)
+		}
+	}
+	if instanceConfig[contract.OwnershipKey()] != contract.OwnershipValue(device) {
+		return fmt.Errorf("proxy device %q is missing matching owner-side resource metadata", name)
+	}
+	address, err := netip.ParseAddr(runtime.Environment[contract.AdvertiseHostSetting])
+	if err != nil || !resource.ExplicitOwnerIPv4(address) {
+		return fmt.Errorf("proxy device %q requires one explicit owner IPv4 address", name)
+	}
+	interfaceName := runtime.Environment[contract.OwnerInterfaceSetting]
+	validInterface := runtime.OwnerIPv4OnInterface
+	if validInterface == nil {
+		validInterface = ownerIPv4OnInterface
+	}
+	if interfaceName == "" || !validInterface(interfaceName, address.String()) {
+		return fmt.Errorf("proxy device %q owner IPv4 is not active on its configured interface", name)
+	}
+	portText := runtime.Environment[contract.HostPortSetting]
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 || strconv.Itoa(port) != portText {
+		return fmt.Errorf("proxy device %q has no valid owner UDP port", name)
+	}
+	guestIP := guestNIC["ipv4.address"]
+	guest, err := netip.ParseAddr(guestIP)
+	if err != nil || !guest.Is4() || !guest.IsPrivate() || guestNIC["type"] != "nic" ||
+		device["listen"] != "udp:"+address.String()+":"+portText ||
+		device["connect"] != "udp:"+guest.String()+":"+strconv.Itoa(guestPort) {
+		return fmt.Errorf("proxy device %q does not match its pinned guest IPv4 UDP route", name)
+	}
+	return nil
+}
+
+func ownerIPv4OnInterface(name, address string) bool {
+	iface, err := net.InterfaceByName(name)
+	if err != nil || iface.Flags&net.FlagUp == 0 {
+		return false
+	}
+	addrs, err := iface.Addrs()
+	if err != nil {
+		return false
+	}
+	for _, assigned := range addrs {
+		prefix, err := netip.ParsePrefix(assigned.String())
+		if err == nil && prefix.Addr().String() == address {
+			return true
+		}
+	}
+	return false
 }
 
 func exactProxyOptions(device map[string]string) bool {

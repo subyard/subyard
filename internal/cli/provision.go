@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -96,6 +97,17 @@ func (cli *CLI) prepareProvisionExecution(
 	seen := make(map[string]bool, len(selected))
 	profiles := make([]string, 0, len(selected))
 	for _, name := range selected {
+		scope, err := config.ProfileProvisionScope(filepath.Join(cli.options.RepositoryRoot, "config"), name)
+		if err != nil {
+			return nil, err
+		}
+		if scope == "dedicated" && (loaded.Environment["EXCLUSIVE_ENVIRONMENT_PROFILE"] != name ||
+			!slices.Contains(strings.Fields(loaded.Environment["ENVIRONMENT_PROFILES"]), name)) {
+			if want == name {
+				return nil, fmt.Errorf("profile %q requires the selected dedicated-yard preset", name)
+			}
+			continue
+		}
 		if name == "github" && want == "" && !githubbroker.ProfileEnabled(loaded.Context.YardName, loaded.Environment) {
 			continue
 		}

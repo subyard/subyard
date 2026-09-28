@@ -15,6 +15,10 @@ subyard_require_engine_context
 . "$SCRIPT_DIR/lib-power.sh"
 # shellcheck source=scripts/lib/host.sh
 . "$SCRIPT_DIR/lib/host.sh"
+# shellcheck source=scripts/lib-vm-storage.sh
+. "$SCRIPT_DIR/lib-vm-storage.sh"
+# shellcheck source=scripts/lib-vm-page-reporting.sh
+. "$SCRIPT_DIR/lib-vm-page-reporting.sh"
 
 INCUS_PROJECT="${INCUS_PROJECT:-subyard}"
 YARD_INSTANCE_NAME="${YARD_INSTANCE_NAME:-yard}"
@@ -27,12 +31,21 @@ DEV_USER="${DEV_USER:-dev}"
 BRIDGE="${INCUS_BRIDGE:-${INCUS_NETWORK:-incusbr0}}"
 YARD_LABEL="${YARD_NAME:-default}"
 desired_power="${SUBYARD_POWER_DESIRED:-}"
-case "$desired_power" in running | stopped) ;; *) die "prepared desired power is required" ;; esac
 
 PROJ=(--project "$INCUS_PROJECT")
 device_exists() { incus config device list "$YARD_INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null | grep -qx "$1"; }
 device_get() { incus config device get "$YARD_INSTANCE_NAME" "$1" "$2" "${PROJ[@]}" 2>/dev/null || true; }
 instance_get() { incus config get "$YARD_INSTANCE_NAME" "$1" "${PROJ[@]}" 2>/dev/null || true; }
+reporting_preflight() {
+  vm_page_reporting_required || die "VM_FREE_PAGE_REPORTING is not enabled"
+  [ "$YARD_KIND" = vm ] || die "VM_FREE_PAGE_REPORTING requires YARD_KIND=vm"
+  vm_page_reporting_check_host || die "VM Free Page Reporting host preflight failed"
+  vm_page_reporting_check_profile "$INCUS_PROJECT" || die "VM profile has raw QEMU configuration"
+  if incus info "$YARD_INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1; then
+    vm_page_reporting_check_raw "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" true \
+      || die "VM has conflicting raw QEMU configuration"
+  fi
+}
 incus_apparmor_state() {
   local service_environment token quote c name value seen=0 state=restored i
   command -v systemctl >/dev/null 2>&1 || return 1
@@ -101,6 +114,34 @@ reconcile_e2e_route_mount() {
 incus_preflight
 incus project show "$INCUS_PROJECT" >/dev/null 2>&1 \
   || die "project '$INCUS_PROJECT' missing — run scripts/02-create-project.sh first"
+case "${SRV_VOLUME_TYPE:-filesystem}" in
+  filesystem) ;;
+  block) [ "$YARD_KIND" = vm ] || die 'block SRV_VOLUME_TYPE requires YARD_KIND=vm' ;;
+  *) die 'SRV_VOLUME_TYPE must be filesystem or block' ;;
+esac
+case "${ALLOWS_HOST_ACCESS:-true}" in true | false) ;; *) die 'invalid ALLOWS_HOST_ACCESS' ;; esac
+[ "${VM_PIN_IPV4:-0}" != 1 ] || [ "$YARD_KIND" = vm ] || die 'VM_PIN_IPV4 requires YARD_KIND=vm'
+if [ "${1:-}" = --check-page-reporting ]; then
+  [ "$#" = 1 ] || die "--check-page-reporting takes no additional arguments"
+  reporting_preflight
+  exit 0
+fi
+if [ "${1:-}" = --check-page-reporting-guest ]; then
+  [ "$#" = 1 ] || die "--check-page-reporting-guest takes no additional arguments"
+  vm_page_reporting_required && [ "$YARD_KIND" = vm ] \
+    || die "VM Free Page Reporting guest check requires an opted-in VM"
+  vm_page_reporting_check_guest "$INCUS_PROJECT" "$YARD_INSTANCE_NAME"
+  exit $?
+fi
+if [ "${1:-}" = --check-vm-storage ]; then
+  [ "$#" = 1 ] && [ "${SRV_VOLUME_TYPE:-filesystem}" = block ] || die 'invalid VM storage check'
+  vm_storage_check
+  exit 0
+fi
+case "$desired_power" in running | stopped) ;; *) die "prepared desired power is required" ;; esac
+if vm_page_reporting_required; then
+  reporting_preflight
+fi
 
 # The Go Apply path supplies its fresh observation before writing power metadata.
 # Standalone adapter calls observe here, before instance, route or power mutation.
@@ -125,6 +166,7 @@ announce_confirm "Subyard Phase 2 — create yard instance" \
   "Pass /dev/kvm through (container) and attach a persistent '$SRV_VOLUME' volume at /srv." \
   "Reversible: 'incus delete -f $YARD_INSTANCE_NAME ${PROJ[*]}' removes it."
 power_nm_prepare_reader || die "$POWER_ERROR"
+vm_storage_prepare
 
 # --- 1. create instance (idempotent) -----------------------------------------
 echo "Instance:"
@@ -181,10 +223,46 @@ else
     die "instance creation failed"
   fi
 fi
+vm_storage_check_device_boundary true \
+  || die 'existing instance has an unexpected effective host device or root disk override'
 
-# Every yard receives the same non-secret route/host-key registry. The test-vms backend writes it
-# on the owner host; no project enrollment or checkout-local artifact is involved.
-reconcile_e2e_route_mount
+if vm_page_reporting_required || [ "$YARD_KIND" = vm ] || [ "${ALLOWS_HOST_ACCESS:-true}" = false ]; then
+  # raw.qemu.conf is a non-live setting. Stop through the normal session/network
+  # guard before changing it, then let the existing desired-power fence start it.
+  vm_drift=0
+  if vm_page_reporting_required; then
+    [ "$(instance_get raw.qemu.conf)" = "$VM_PAGE_REPORTING_CONF" ] || vm_drift=1
+  fi
+  if [ "$YARD_KIND" = vm ]; then
+    [ -z "${LIMITS_CPU:-}" ] || [ "$(instance_get limits.cpu)" = "$LIMITS_CPU" ] || vm_drift=1
+    [ -z "${LIMITS_MEMORY:-}" ] || [ "$(instance_get limits.memory)" = "$LIMITS_MEMORY" ] || vm_drift=1
+  fi
+  if [ "${ALLOWS_HOST_ACCESS:-true}" = false ]; then
+    device_exists subyard-e2e-routes && vm_drift=1
+  fi
+  if [ "$vm_drift" = 1 ] \
+    && [ "$(power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")" = RUNNING ]; then
+    "$SCRIPT_DIR/lifecycle-guard.sh" stop --reconcile \
+      || die "could not safely stop the yard to reconcile VM settings"
+  fi
+  if vm_page_reporting_required; then
+    incus config set "$YARD_INSTANCE_NAME" raw.qemu.conf "$VM_PAGE_REPORTING_CONF" "${PROJ[@]}" \
+      || die "could not enable Free Page Reporting on the existing QEMU balloon"
+    vm_page_reporting_check_raw "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" true \
+      || die "VM Free Page Reporting setting did not converge"
+  fi
+  if [ "$YARD_KIND" = vm ]; then
+    [ -z "${LIMITS_CPU:-}" ] || incus config set "$YARD_INSTANCE_NAME" limits.cpu "$LIMITS_CPU" "${PROJ[@]}"
+    [ -z "${LIMITS_MEMORY:-}" ] || incus config set "$YARD_INSTANCE_NAME" limits.memory "$LIMITS_MEMORY" "${PROJ[@]}"
+  fi
+  if [ "${ALLOWS_HOST_ACCESS:-true}" = false ] && device_exists subyard-e2e-routes; then
+    incus config device remove "$YARD_INSTANCE_NAME" subyard-e2e-routes "${PROJ[@]}" >/dev/null
+  fi
+fi
+if [ "${ALLOWS_HOST_ACCESS:-true}" != false ]; then
+  # Ordinary yards receive the non-secret route/host-key registry.
+  reconcile_e2e_route_mount
+fi
 
 # When the Incus daemon deliberately has AppArmor disabled, an unprivileged yard still sees the
 # host kernel's AppArmor indicator but cannot read its securityfs profile inventory. Docker then
@@ -323,6 +401,9 @@ fi
 
 # --- 4. persistent /srv volume (idempotent) ----------------------------------
 echo "Storage (/srv):"
+if [ "${SRV_VOLUME_TYPE:-filesystem}" = block ]; then
+  vm_storage_attach
+else
 if incus storage volume show "$SRV_POOL" "$SRV_VOLUME" "${PROJ[@]}" >/dev/null 2>&1; then
   ok "volume '$SRV_VOLUME' exists"
 else
@@ -347,12 +428,24 @@ if ! device_exists srv; then
     pool="$SRV_POOL" source="$SRV_VOLUME" path=/srv >/dev/null
   ok "attached '$SRV_VOLUME' at /srv"
 fi
+fi
 
 # Attach boot devices before the first start. Incus 6.0 cannot hot-add virtiofs to a running VM
 # when its first PCI function is already occupied by the balloon device.
+vm_storage_check_device_boundary false \
+  || die 'instance has an unexpected effective host device or root disk override'
 state="$(power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")"
 [ "$state" = RUNNING ] || info "starting $YARD_INSTANCE_NAME temporarily (was: ${state:-unknown})"
 power_start_guarded "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" "$BRIDGE" || die "$POWER_ERROR"
+if [ "${SRV_VOLUME_TYPE:-filesystem}" = block ]; then
+  vm_storage_mount
+fi
+if vm_page_reporting_required; then
+  incus_wait_instance_agent "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" \
+    || die 'VM agent did not become ready for Free Page Reporting verification'
+  vm_page_reporting_prepare_guest "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" \
+    || die 'VM Free Page Reporting guest configuration failed'
+fi
 
 # --- summary -----------------------------------------------------------------
 echo

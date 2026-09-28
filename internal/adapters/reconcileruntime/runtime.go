@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,6 +35,10 @@ type YardNetworkPolicy interface {
 	Check(context.Context, yardnetwork.Yard) error
 	Ensure(context.Context, yardnetwork.Yard) error
 	WithStart(context.Context, yardnetwork.Yard, func() error) error
+}
+
+type vmIPv4Pinner interface {
+	PinVMIPv4(context.Context, yardnetwork.Yard, bool) (bool, error)
 }
 
 type Runtime struct {
@@ -245,7 +250,57 @@ func probeConverged(err error) (bool, error) {
 	return false, err
 }
 
+const vmPageReportingConfig = "[device \"qemu_balloon\"]\nfree-page-reporting = \"on\""
+
+func (runtime Runtime) vmPageReporting(ctx context.Context) (bool, error) {
+	if runtime.environmentValue("VM_FREE_PAGE_REPORTING") != "1" {
+		return false, nil
+	}
+	if runtime.Yard.YardKind != domain.YardVM {
+		return false, errors.New("VM_FREE_PAGE_REPORTING requires YARD_KIND=vm")
+	}
+	if runtime.Incus == nil {
+		return false, errors.New("Incus reader is required for VM Free Page Reporting")
+	}
+	server, err := runtime.Incus.Server(ctx)
+	if err != nil {
+		return false, fmt.Errorf("inspect Incus for VM Free Page Reporting: %w", err)
+	}
+	if server.Version != "6.0.6" && !strings.HasPrefix(server.Version, "6.0.6-") {
+		return false, fmt.Errorf("unsupported Incus version %q for VM Free Page Reporting (tested: 6.0.6)", server.Version)
+	}
+	return true, nil
+}
+
+func vmRawQEMUConverged(instance ports.InstanceInfo) (bool, error) {
+	for key, value := range instance.Config {
+		if !strings.HasPrefix(key, "raw.qemu") || value == "" {
+			continue
+		}
+		if key != "raw.qemu.conf" || value != vmPageReportingConfig {
+			return false, fmt.Errorf("unexpected effective %s on VM", key)
+		}
+	}
+	for key, value := range instance.LocalConfig {
+		if !strings.HasPrefix(key, "raw.qemu") || value == "" {
+			continue
+		}
+		if key != "raw.qemu.conf" || value != vmPageReportingConfig {
+			return false, fmt.Errorf("unexpected local %s on VM", key)
+		}
+	}
+	if instance.Config["raw.qemu.conf"] != "" && instance.LocalConfig["raw.qemu.conf"] == "" {
+		return false, errors.New("VM raw.qemu.conf must be owner-managed locally, not inherited")
+	}
+	return instance.LocalConfig["raw.qemu.conf"] == vmPageReportingConfig &&
+		instance.Config["raw.qemu.conf"] == vmPageReportingConfig, nil
+}
+
 func (runtime Runtime) projectConverged(ctx context.Context) (bool, error) {
+	reporting, err := runtime.vmPageReporting(ctx)
+	if err != nil {
+		return false, err
+	}
 	ready, err := runtime.incusReady(ctx)
 	if err != nil || !ready {
 		return false, err
@@ -273,15 +328,27 @@ func (runtime Runtime) projectConverged(ctx context.Context) (bool, error) {
 			return false, nil
 		}
 	}
+	if reporting && state.ProjectConfig["restricted.virtual-machines.lowlevel"] != "allow" {
+		return false, nil
+	}
 	_, root := state.ProfileDevices["root"]
 	_, network := state.ProfileDevices["eth0"]
 	return state.ProfileFound && root && network, nil
 }
 
 func (runtime Runtime) instanceConverged(ctx context.Context) (bool, error) {
+	reporting, err := runtime.vmPageReporting(ctx)
+	if err != nil {
+		return false, err
+	}
 	ready, err := runtime.incusReady(ctx)
 	if err != nil || !ready {
 		return false, err
+	}
+	if reporting {
+		if err := runtime.runScript(ctx, runtime.Stderr, "03-create-subyard.sh", "--check-page-reporting"); err != nil {
+			return false, fmt.Errorf("VM Free Page Reporting preflight: %w", err)
+		}
 	}
 	appArmorDisabled := false
 	if runtime.Yard.YardKind == domain.YardContainer {
@@ -294,8 +361,47 @@ func (runtime Runtime) instanceConverged(ctx context.Context) (bool, error) {
 	if err != nil || !state.InstanceFound || !state.VolumeFound {
 		return false, err
 	}
+	if bounded, err := runtime.vmDeviceBoundary(state); err != nil || !bounded {
+		return false, err
+	}
+	if reporting {
+		converged, err := vmRawQEMUConverged(state.Instance)
+		if err != nil || !converged {
+			return false, err
+		}
+	}
+	if runtime.Yard.YardKind == domain.YardVM {
+		for key, want := range map[string]string{"limits.cpu": runtime.environmentValue("LIMITS_CPU"),
+			"limits.memory": runtime.environmentValue("LIMITS_MEMORY")} {
+			if want != "" && state.Instance.LocalConfig[key] != want {
+				return false, nil
+			}
+		}
+	}
+	if runtime.environmentValue("VM_PIN_IPV4") == "1" {
+		if runtime.Yard.YardKind != domain.YardVM {
+			return false, errors.New("VM_PIN_IPV4 requires YARD_KIND=vm")
+		}
+		pinner, ok := runtime.Incus.(vmIPv4Pinner)
+		if !ok {
+			return false, errors.New("native VM IPv4 pinning is unavailable")
+		}
+		pinned, err := pinner.PinVMIPv4(ctx, runtime.networkPolicyYard(), false)
+		if err != nil || !pinned {
+			return false, err
+		}
+	}
 	switch {
 	case strings.EqualFold(state.Instance.Status, "running"):
+		if reporting {
+			if err := runtime.runScript(ctx, io.Discard, "03-create-subyard.sh", "--check-page-reporting-guest"); err != nil {
+				var exit *exec.ExitError
+				if errors.As(err, &exit) && exit.ExitCode() == 10 {
+					return false, nil
+				}
+				return false, fmt.Errorf("VM Free Page Reporting guest check: %w", err)
+			}
+		}
 	case strings.EqualFold(state.Instance.Status, "stopped"):
 		// A completed desired=stopped yard is intentionally idle. Every other stopped state
 		// needs the existing instance stage to enter its guarded temporary-power fence before
@@ -309,16 +415,31 @@ func (runtime Runtime) instanceConverged(ctx context.Context) (bool, error) {
 	pool, volume := runtime.volumeNames()
 	devices := state.Instance.LocalDevices
 	srv, exists := devices["srv"]
-	if !exists || srv["source"] != volume || srv["path"] != "/srv" || srv["pool"] != pool {
+	wantPath := "/srv"
+	if runtime.environmentValue("SRV_VOLUME_TYPE") == "block" {
+		wantPath = ""
+	}
+	if !exists || srv["source"] != volume || srv["path"] != wantPath || srv["pool"] != pool {
 		return false, nil
 	}
-	routeSource := filepath.Join(runtime.Yard.Paths.DataHome, "e2e", "routes")
-	routeMount := devices["subyard-e2e-routes"]
-	if routeMount["type"] != "disk" ||
-		routeMount["source"] != routeSource ||
-		routeMount["path"] != "/var/lib/subyard/e2e-routes" ||
-		routeMount["readonly"] != "true" {
-		return false, nil
+	if runtime.environmentValue("SRV_VOLUME_TYPE") == "block" {
+		if err := runtime.runScript(ctx, runtime.Stderr, "03-create-subyard.sh", "--check-vm-storage"); err != nil {
+			var exit *exec.ExitError
+			if errors.As(err, &exit) && exit.ExitCode() == 10 {
+				return false, nil
+			}
+			return false, err
+		}
+	}
+	if runtime.environmentValue("ALLOWS_HOST_ACCESS") != "false" {
+		routeSource := filepath.Join(runtime.Yard.Paths.DataHome, "e2e", "routes")
+		routeMount := devices["subyard-e2e-routes"]
+		if routeMount["type"] != "disk" ||
+			routeMount["source"] != routeSource ||
+			routeMount["path"] != "/var/lib/subyard/e2e-routes" ||
+			routeMount["readonly"] != "true" {
+			return false, nil
+		}
 	}
 	dockerAppArmor, dockerAppArmorPresent := devices["subyard-docker-apparmor"]
 	if runtime.Yard.YardKind != domain.YardContainer {
@@ -366,6 +487,78 @@ func (runtime Runtime) instanceConverged(ctx context.Context) (bool, error) {
 	if _, err := os.Stat(filepath.Join(root, "kvm")); err == nil &&
 		!charDeviceMatches(devices["kvm"], "/dev/kvm") {
 		return false, nil
+	}
+	return true, nil
+}
+
+// vmDeviceBoundary checks the effective Incus devices, including profile inheritance.
+// A local root override can bypass a project profile disk limit; a foreign disk or
+// host device can bypass a role that forbids host access. Neither is safe to repair
+// by silently deleting devices that Subyard does not own.
+func (runtime Runtime) vmDeviceBoundary(state ports.ReconcileState) (bool, error) {
+	size := runtime.environmentValue("ROOT_DISK_SIZE")
+	noHost := runtime.environmentValue("ALLOWS_HOST_ACCESS") == "false"
+	if size == "" && !noHost {
+		return true, nil
+	}
+	profileRoot := state.ProfileDevices["root"]
+	if size != "" && profileRoot["size"] != size {
+		return false, nil
+	}
+	if _, overridden := state.Instance.LocalDevices["root"]; overridden {
+		return false, errors.New("local root disk overrides the managed project profile")
+	}
+	root := state.Instance.Devices["root"]
+	if profileRoot["type"] != "disk" || profileRoot["path"] != "/" ||
+		profileRoot["pool"] == "" || profileRoot["source"] != "" ||
+		!maps.Equal(root, profileRoot) {
+		return false, errors.New("effective root disk differs from the managed project profile")
+	}
+	if !noHost {
+		return true, nil
+	}
+	profileNIC := state.ProfileDevices["eth0"]
+	effectiveNIC := maps.Clone(state.Instance.Devices["eth0"])
+	managedNIC := maps.Clone(profileNIC)
+	for _, key := range []string{"ipv4.address", "hwaddr"} {
+		delete(effectiveNIC, key)
+		delete(managedNIC, key)
+	}
+	if profileNIC["type"] != "nic" || profileNIC["network"] == "" ||
+		!maps.Equal(effectiveNIC, managedNIC) {
+		return false, errors.New("effective eth0 differs from the managed project profile")
+	}
+	pool, volume := runtime.volumeNames()
+	for name, device := range state.Instance.Devices {
+		switch device["type"] {
+		case "disk":
+			if name == "root" {
+				continue
+			}
+			if name == "srv" {
+				local := state.Instance.LocalDevices[name]
+				path := "/srv"
+				if runtime.environmentValue("SRV_VOLUME_TYPE") == "block" {
+					path = ""
+				}
+				if maps.Equal(device, local) && device["pool"] == pool &&
+					device["source"] == volume && device["path"] == path &&
+					(path != "" || device["io.bus"] == "virtio-scsi") {
+					continue
+				}
+			}
+		case "nic":
+			if name == "eth0" {
+				continue
+			}
+		case "proxy":
+			// Host-bound proxies admit traffic into the guest. Instance-bound
+			// proxies expose host services to the guest and violate this role.
+			if device["bind"] != "instance" {
+				continue
+			}
+		}
+		return false, fmt.Errorf("effective device %q violates ALLOWS_HOST_ACCESS=false", name)
 	}
 	return true, nil
 }
@@ -460,6 +653,25 @@ func (runtime Runtime) incusReady(ctx context.Context) (bool, error) {
 }
 
 func (runtime Runtime) incusConverged(ctx context.Context) (bool, error) {
+	if runtime.Yard.YardKind == domain.YardVM {
+		path := runtime.environmentValue("PATH")
+		if path == "" {
+			path = os.Getenv("PATH")
+		}
+		qemuFound := false
+		for _, directory := range filepath.SplitList(path) {
+			if executable(filepath.Join(directory, "qemu-system-x86_64")) {
+				qemuFound = true
+				break
+			}
+		}
+		if !qemuFound {
+			return false, nil
+		}
+		if _, found := hostruntime.FindConntrack(path, "/usr/sbin", "/sbin"); !found {
+			return false, nil
+		}
+	}
 	if runtime.Incus == nil {
 		return false, errors.New("Incus reader is required")
 	}
@@ -640,6 +852,17 @@ func (runtime Runtime) powerService() application.PowerService {
 }
 
 func (runtime Runtime) applyInstanceStage(ctx context.Context) error {
+	reporting, err := runtime.vmPageReporting(ctx)
+	if err != nil {
+		return err
+	}
+	if reporting {
+		// The fixed override, project/profile and QEMU capability must be known
+		// before any power metadata or target state is changed.
+		if err := runtime.runScript(ctx, runtime.Stderr, "03-create-subyard.sh", "--check-page-reporting"); err != nil {
+			return fmt.Errorf("VM Free Page Reporting preflight: %w", err)
+		}
+	}
 	if runtime.NetworkPolicy == nil {
 		return errors.New("yard network policy service is required")
 	}
@@ -656,7 +879,7 @@ func (runtime Runtime) applyInstanceStage(ctx context.Context) error {
 		}
 	}
 	desired := application.InitialPower(runtime.Yard)
-	_, err := runtime.Incus.Instance(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName)
+	_, err = runtime.Incus.Instance(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName)
 	if err == nil {
 		intent, ensureErr := runtime.powerService().Ensure(ctx, runtime.Yard)
 		if ensureErr != nil {
@@ -676,6 +899,22 @@ func (runtime Runtime) applyInstanceStage(ctx context.Context) error {
 		}, "03-create-subyard.sh", "--yes")
 	}); err != nil {
 		return err
+	}
+	if runtime.environmentValue("VM_PIN_IPV4") == "1" {
+		if runtime.Yard.YardKind != domain.YardVM {
+			return errors.New("VM_PIN_IPV4 requires YARD_KIND=vm")
+		}
+		pinner, ok := runtime.Incus.(vmIPv4Pinner)
+		if !ok {
+			return errors.New("native VM IPv4 pinning is unavailable")
+		}
+		pinned, err := pinner.PinVMIPv4(ctx, runtime.networkPolicyYard(), true)
+		if err != nil {
+			return err
+		}
+		if !pinned {
+			return errors.New("VM IPv4 was not pinned after its guarded boot")
+		}
 	}
 	return runtime.powerService().Set(ctx, runtime.Yard, desired, false)
 }
@@ -779,6 +1018,13 @@ func (runtime Runtime) extrasContext() (map[string]string, error) {
 				}
 			}
 			return nil, err
+		}
+		if base["ALLOWS_HOST_ACCESS"] == "false" {
+			for _, name := range []string{"YARD_MOUNTS", "YARD_CAPS", "YARD_DEVICES"} {
+				if strings.TrimSpace(values[name]) != "" {
+					return nil, fmt.Errorf("selected yard role forbids %s in %s", name, path)
+				}
+			}
 		}
 		for _, mount := range strings.Fields(values["YARD_MOUNTS"]) {
 			parts := strings.Split(mount, ":")
@@ -1033,6 +1279,12 @@ func (runtime Runtime) sshConverged(ctx context.Context) (bool, error) {
 	connect := "tcp:127.0.0.1:22"
 	if runtime.Yard.YardKind == domain.YardVM {
 		address := state.Instance.LocalDevices["eth0"]["ipv4.address"]
+		if runtime.environmentValue("VM_PIN_IPV4") == "1" {
+			if _, overridden := state.Instance.LocalDevices["eth0"]; overridden {
+				return false, errors.New("VM SSH transport requires profile-pinned eth0 without a local override")
+			}
+			address = state.ProfileDevices["eth0"]["ipv4.address"]
+		}
 		if address == "" || !runtime.vmSSHRelayConverged(ctx, address, port) {
 			return false, nil
 		}

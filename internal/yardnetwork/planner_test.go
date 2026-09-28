@@ -3,6 +3,9 @@ package yardnetwork
 import (
 	"strings"
 	"testing"
+
+	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/resource"
 )
 
 func networkFixture() Snapshot {
@@ -12,6 +15,66 @@ func networkFixture() Snapshot {
 		s.Yards = append(s.Yards, ObservedYard{Yard: y, ProjectFound: true, ProfileFound: true, ProjectConfig: map[string]string{"restricted": "true"}, ProfileDevices: map[string]map[string]string{"eth0": {"type": "nic", "network": "incusbr0", "name": "eth0"}}, IPv4: []string{"10.80.0.10", "10.80.0.11", "10.80.0.12"}[i], MAC: []string{"00:16:3e:00:00:10", "00:16:3e:00:00:11", "00:16:3e:00:00:12"}[i], ACL: ACL{Name: ACLName(y)}})
 	}
 	return s
+}
+
+func TestIsolationAllowsOnlySelectedOwnedPublicUDPGuestPort(t *testing.T) {
+	s := networkFixture()
+	s.Yards[0].Name = "personal-relay"
+	s.Yards[0].InstanceFound = true
+	s.Yards[0].InstanceInfo.Type = domain.YardVM
+	s.Yards[0].InstanceInfo.LocalDevices = map[string]map[string]string{}
+	s.Yards[0].InstanceInfo.Devices = map[string]map[string]string{}
+	s.Yards[0].InstanceInfo.LocalConfig = map[string]string{}
+	device := map[string]string{
+		"type": "proxy", "listen": "udp:203.0.113.10:42000",
+		"connect": "udp:10.80.0.10:41999", "bind": "host", "nat": "true",
+	}
+	s.Yards[0].InstanceInfo.LocalDevices["sample-relay"] = device
+	s.Yards[0].InstanceInfo.Devices["sample-relay"] = device
+	contract := resource.ProxyContract{Profile: "sample", Resource: "relay", Device: "sample-relay", Connect: "udp:guest:41999", AddressPolicy: resource.ProxyAddressOwnerIPv4UDP, OwnershipMetadata: true}
+	s.Yards[0].IngressContracts = []resource.ProxyContract{contract}
+	s.Yards[0].InstanceInfo.LocalConfig[contract.OwnershipKey()] = contract.OwnershipValue(device)
+	on := true
+	check := func(want bool) {
+		t.Helper()
+		policy, _ := Decode(nil)
+		plan, err := buildPlan(StoredPolicy{Policy: policy}, s, Change{Isolation: &on})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, update := range plan.Updates {
+			if update.Yard.Name != "personal-relay" {
+				continue
+			}
+			found := false
+			for _, rule := range update.ACL.Ingress {
+				if rule.Protocol == "udp" && rule.DestinationPort == "41999" && rule.Source == "" {
+					found = true
+				}
+			}
+			if found != want {
+				t.Fatalf("UDP ingress found=%t want=%t: %+v", found, want, update.ACL.Ingress)
+			}
+			return
+		}
+		t.Fatal("VPN yard update absent")
+	}
+	check(true)
+	s.Yards[0].IngressContracts = nil
+	check(false)
+	s.Yards[0].IngressContracts = []resource.ProxyContract{contract}
+	delete(s.Yards[0].InstanceInfo.LocalConfig, contract.OwnershipKey())
+	check(false)
+	s.Yards[0].InstanceInfo.LocalConfig[contract.OwnershipKey()] = "v1:pending:" + strings.TrimPrefix(contract.OwnershipValue(device), "v1:")
+	check(false)
+	s.Yards[0].InstanceInfo.LocalConfig[contract.OwnershipKey()] = contract.OwnershipValue(device)
+	device["nat"] = "false"
+	s.Yards[0].InstanceInfo.LocalConfig[contract.OwnershipKey()] = contract.OwnershipValue(device)
+	check(false)
+	device["nat"] = "true"
+	s.Yards[0].InstanceInfo.LocalConfig[contract.OwnershipKey()] = contract.OwnershipValue(device)
+	delete(s.Yards[0].InstanceInfo.LocalDevices, "sample-relay")
+	check(false)
 }
 
 func TestPlannerAcceptsProductDefaultNICWithoutExplicitInterfaceName(t *testing.T) {

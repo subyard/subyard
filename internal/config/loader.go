@@ -340,6 +340,9 @@ func load(
 		return domain.Context{}, nil, err
 	}
 	normalizeAgentPersistLinks(values, tracker, defaultLayer)
+	if err := validateProfileConstraints(configDir, yardName, values); err != nil {
+		return domain.Context{}, nil, err
+	}
 	ctx, err := contextFrom(root, yardName, values, tracker, defaultLayer, normalizationLayer)
 	if err == nil {
 		err = applySavedResourceEndpoints(root, options, ctx, values, tracker)
@@ -602,6 +605,8 @@ func resetInheritedContext(values environment) {
 		"SUBYARD_STATE_DIR", "RESTRICTED_DISK_PATHS",
 		"HOST_BASE", "SRV_VOLUME", "ALLOWS_CODING_TOOLS",
 		"CODING_TOOL_INTEGRATIONS", "INTEGRATION_HOST_LINKS",
+		"VM_FREE_PAGE_REPORTING", "VM_PIN_IPV4", "ALLOWS_HOST_ACCESS", "ALLOWS_PROJECTS",
+		"EXCLUSIVE_ENVIRONMENT_PROFILE", "REQUIRED_YARD_KIND", "ROOT_DISK_SIZE", "SRV_VOLUME_TYPE", "SRV_VOLUME_SIZE",
 	} {
 		delete(values, name)
 	}

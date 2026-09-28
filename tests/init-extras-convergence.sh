@@ -54,6 +54,9 @@ chmod +x "$TMP/bin/incus"
 extras_check() { "$ROOT/scripts/09-yard-extras.sh" --check >/dev/null 2>&1; }
 
 extras_check || fail "matching extras rejected"
+export ALLOWS_HOST_ACCESS=false
+! extras_check || fail "host-free role accepted a profile mount"
+ALLOWS_HOST_ACCESS=true
 MOCK_DEVICES='yx-cache yx-stale'
 ! extras_check || fail "stale yx-* device accepted"
 MOCK_DEVICES=''

@@ -164,11 +164,14 @@ func main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "_power-reconcile" {
 		client := incusclient.New(os.Getenv("SUBYARD_INCUS_SOCKET"), "projects")
+		bootPolicy := &yardnetwork.Service{Host: client, Lock: networkruntime.HostLock{},
+			UseApprovedIngress: true, ClearStaleUDP: (hostruntime.ConntrackCleaner{}).Clear}
 		os.Exit(cli.RunBootPower(ctx, os.Args[2:], os.Stdout, os.Stderr,
 			application.BootPowerReconciler{
 				Inventory: client, Instances: client, Power: client,
 				Network:           hostruntime.NetworkGuard{},
-				NetworkPolicy:     &yardnetwork.Service{Host: client, Lock: networkruntime.HostLock{}},
+				NetworkPolicy:     bootPolicy,
+				AfterStart:        bootPolicy.ClearBootStaleUDP,
 				EnsureNetworkLock: networkruntime.EnsureHostLock,
 			}))
 	}

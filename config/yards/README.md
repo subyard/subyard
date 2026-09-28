@@ -52,5 +52,6 @@ SSH_PORT=2223
 ```
 
 For an isolated Hermes backend, see the [Hermes profile guide](../../docs/hermes.md).
+For a dedicated VPN VM, see the [Amnezia profile guide](../../docs/amnezia.md).
 
 See also [`docs/test-vms.md`](../../docs/test-vms.md) and [`docs/keys.md`](../../docs/keys.md).

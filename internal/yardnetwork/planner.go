@@ -12,7 +12,11 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
+
+	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/resource"
 )
 
 var ErrNotConverged = errors.New("yard network policy is not converged; run yard network reconcile")
@@ -151,6 +155,9 @@ func buildPlan(stored StoredPolicy, snapshot Snapshot, change Change) (Plan, err
 						u.ACL.Ingress = append(u.ACL.Ingress, Rule{Action: "allow", State: "enabled", Source: other.IPv4 + "/32"})
 					}
 				}
+				for _, port := range ownedPublicUDPIngressPorts(y, b) {
+					u.ACL.Ingress = append(u.ACL.Ingress, Rule{Action: "allow", State: "enabled", Protocol: "udp", DestinationPort: port})
+				}
 				prefix, _ := netip.ParsePrefix(snapshot.Networks[y.Network].Config["ipv4.address"])
 				u.ACL.Ingress = append(u.ACL.Ingress, Rule{Action: "allow", State: "enabled", Source: prefix.Addr().String() + "/32", Protocol: "tcp", DestinationPort: "22"})
 			}
@@ -185,6 +192,69 @@ func buildPlan(stored StoredPolicy, snapshot Snapshot, change Change) (Plan, err
 	sum := sha256.Sum256(fingerprint)
 	plan.Fingerprint = hex.EncodeToString(sum[:])
 	return plan, nil
+}
+
+// Only selected, registry-validated contracts and matching owned Incus routes
+// may extend a yard's default-deny isolation ACL.
+func ownedPublicUDPIngressPorts(y ObservedYard, binding Binding) []string {
+	var ports []string
+	for _, approved := range approvedPublicUDPIngress(y, binding) {
+		port := strconv.Itoa(approved.GuestPort)
+		if !slices.Contains(ports, port) {
+			ports = append(ports, port)
+		}
+	}
+	return ports
+}
+
+func approvedPublicUDPIngress(y ObservedYard, binding Binding) []ApprovedIngress {
+	if y.Name == "" || y.Name == "default" || !y.InstanceFound || y.InstanceInfo.Type != domain.YardVM {
+		return nil
+	}
+	var approved []ApprovedIngress
+	for _, contract := range y.IngressContracts {
+		guestPort, valid := contract.GuestUDPPort()
+		if !valid || contract.AddressPolicy != resource.ProxyAddressOwnerIPv4UDP || !contract.OwnershipMetadata ||
+			contract.Profile == "" || contract.Resource == "" || contract.Device == "" ||
+			!ownedPublicUDPIngress(y, binding, contract, guestPort) {
+			continue
+		}
+		device := y.InstanceInfo.LocalDevices[contract.Device]
+		approved = append(approved, ApprovedIngress{Device: contract.Device, Listen: device["listen"],
+			GuestPort: guestPort})
+	}
+	sort.Slice(approved, func(i, j int) bool { return approved[i].Device < approved[j].Device })
+	return approved
+}
+
+func ownedPublicUDPIngress(y ObservedYard, binding Binding, contract resource.ProxyContract, guestPort int) bool {
+	device := y.InstanceInfo.LocalDevices[contract.Device]
+	if len(device) != 5 || device["type"] != "proxy" || device["nat"] != "true" || device["bind"] != "host" ||
+		device["connect"] != "udp:"+binding.IPv4+":"+strconv.Itoa(guestPort) {
+		return false
+	}
+	if !maps.Equal(device, y.InstanceInfo.Devices[contract.Device]) {
+		return false
+	}
+	for key := range device {
+		switch key {
+		case "type", "listen", "connect", "nat", "bind":
+		default:
+			return false
+		}
+	}
+	listen, ok := strings.CutPrefix(device["listen"], "udp:")
+	if !ok {
+		return false
+	}
+	address, portText, ok := strings.Cut(listen, ":")
+	parsed, err := netip.ParseAddr(address)
+	port, portErr := strconv.Atoi(portText)
+	if !ok || err != nil || !resource.ExplicitOwnerIPv4(parsed) ||
+		portErr != nil || port < 1 || port > 65535 || strconv.Itoa(port) != portText {
+		return false
+	}
+	return y.InstanceInfo.LocalConfig[contract.OwnershipKey()] == contract.OwnershipValue(device)
 }
 
 func sameACL(a, b ACL) bool {
@@ -223,6 +293,12 @@ func planBindings(p *Policy, s Snapshot) error {
 				ip, _ := netip.ParseAddr(b.IPv4)
 				if !prefix.Contains(ip) || ip == prefix.Addr() || ip == prefix.Masked().Addr() || !prefix.Contains(ip.Next()) {
 					return fmt.Errorf("yard %s fixed IPv4 no longer belongs to its bridge", y.Name)
+				}
+			}
+			for index := range p.Bindings {
+				if p.Bindings[index].Yard == y.Yard {
+					p.Bindings[index].ApprovedIngress = approvedPublicUDPIngress(y, b)
+					break
 				}
 			}
 			continue
@@ -276,6 +352,7 @@ func planBindings(p *Policy, s Snapshot) error {
 			return fmt.Errorf("yard %s has an invalid NIC MAC address", y.Name)
 		}
 		b := Binding{Yard: y.Yard, IPv4: ip, MAC: strings.ToLower(mac), OriginalNIC: maps.Clone(nic), OriginalAccess: y.ProjectConfig["restricted.networks.access"]}
+		b.ApprovedIngress = approvedPublicUDPIngress(y, b)
 		if err = validateYard(y, b); err != nil {
 			return err
 		}

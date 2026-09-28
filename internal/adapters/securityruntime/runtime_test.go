@@ -86,6 +86,63 @@ func TestSecurityRuntimeAcceptsExactOwnedTailscaleProxy(t *testing.T) {
 	}
 }
 
+func TestSecurityRuntimePublicUDPProxyRequiresExactOwnerAndGuest(t *testing.T) {
+	contract := resource.ProxyContract{
+		Profile: "sample", Resource: "relay", Device: "sample-relay",
+		AdvertiseHostSetting: "SAMPLE_IPV4", HostPortSetting: "SAMPLE_PORT",
+		OwnerInterfaceSetting: "SAMPLE_INTERFACE", Connect: "udp:guest:41999",
+		AddressPolicy: resource.ProxyAddressOwnerIPv4UDP, OwnershipMetadata: true,
+	}
+	for _, scenario := range []struct {
+		name   string
+		mutate func(*Runtime, *ports.ReconcileState)
+		valid  bool
+	}{
+		{"exact", nil, true},
+		{"wrong profile", func(r *Runtime, _ *ports.ReconcileState) { r.Environment["ENVIRONMENT_PROFILES"] = "" }, false},
+		{"default yard", func(r *Runtime, _ *ports.ReconcileState) { r.Yard.YardName = "default" }, false},
+		{"other template", func(r *Runtime, _ *ports.ReconcileState) { r.Environment["YARD_TEMPLATE"] = "other" }, true},
+		{"wrong kind", func(r *Runtime, _ *ports.ReconcileState) { r.Yard.YardKind = domain.YardContainer }, false},
+		{"owner IP moved", func(r *Runtime, _ *ports.ReconcileState) {
+			r.OwnerIPv4OnInterface = func(string, string) bool { return false }
+		}, false},
+		{"wrong guest pin", func(_ *Runtime, s *ports.ReconcileState) { s.Instance.Devices["eth0"]["ipv4.address"] = "10.80.0.11" }, false},
+		{"wrong NAT", func(_ *Runtime, s *ports.ReconcileState) { s.Instance.Devices["sample-relay"]["nat"] = "false" }, false},
+		{"extra option", func(_ *Runtime, s *ports.ReconcileState) {
+			s.Instance.Devices["sample-relay"]["proxy_protocol"] = "true"
+		}, false},
+		{"inherited proxy", func(_ *Runtime, s *ports.ReconcileState) { delete(s.Instance.LocalDevices, "sample-relay") }, false},
+		{"unowned", func(_ *Runtime, s *ports.ReconcileState) { delete(s.Instance.LocalConfig, contract.OwnershipKey()) }, false},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			runtime := testRuntime(t)
+			runtime.Yard.YardName = "personal-relay"
+			runtime.Yard.YardKind = domain.YardVM
+			runtime.Environment["YARD_TEMPLATE"] = "sample"
+			runtime.Environment["ENVIRONMENT_PROFILES"] = "sample"
+			runtime.Environment["SAMPLE_IPV4"] = "10.20.30.40"
+			runtime.Environment["SAMPLE_PORT"] = "42000"
+			runtime.Environment["SAMPLE_INTERFACE"] = "eth0"
+			runtime.OwnerIPv4OnInterface = func(name, address string) bool { return name == "eth0" && address == "10.20.30.40" }
+			runtime.ProxyContracts = []resource.ProxyContract{contract}
+			state := safeState()
+			state.Instance.Devices["eth0"] = map[string]string{"type": "nic", "ipv4.address": "10.80.0.10"}
+			device := map[string]string{"type": "proxy", "listen": "udp:10.20.30.40:42000", "connect": "udp:10.80.0.10:41999", "bind": "host", "nat": "true"}
+			state.Instance.Devices["sample-relay"] = device
+			state.Instance.LocalDevices["sample-relay"] = device
+			state.Instance.LocalConfig[contract.OwnershipKey()] = contract.OwnershipValue(device)
+			if scenario.mutate != nil {
+				scenario.mutate(&runtime, &state)
+			}
+			runtime.State = func(context.Context, Runtime) (ports.ReconcileState, bool, error) { return state, true, nil }
+			_, err := runtime.CheckSecurity(context.Background(), true, true)
+			if (err == nil) != scenario.valid {
+				t.Fatalf("valid=%t err=%v", scenario.valid, err)
+			}
+		})
+	}
+}
+
 func TestSecurityRuntimeRejectsLoopbackForTailscaleOnlyProxy(t *testing.T) {
 	runtime := testRuntime(t)
 	runtime.Environment["HERMES_DASHBOARD_ADVERTISE_HOST"] = "127.0.0.1"

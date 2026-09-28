@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 01-install-incus.sh — Phase 1: install Incus, grant the operator incus-admin,
 # init a dir pool under $HOME/.subyard. Idempotent. Self-elevates via sudo.
-# Only `incus` is installed here (qemu is lazy in vm mode).
+# QEMU and conntrack are installed only for VM yards.
 # Env: SUBYARD_USER, SUBYARD_HOME, STORAGE_POOL, STORAGE_PATH, INCUS_BRIDGE, MIN_INCUS_VER.
 # Flags: -y; --zabbly (install/upgrade incus from the Zabbly LTS-6.0 repo, for nested Docker);
 #        --upgrade-only (only ensure incus >= MIN_INCUS_VER, skip group/storage/init).
@@ -74,8 +74,13 @@ if [ "$UPGRADE_ONLY" = 1 ]; then
   # host's internet once. The install path runs this guard too (step 5 below).
   nm_unmanaged_guard "$INCUS_BRIDGE"
 else
+  vm_qemu_note=()
+  if [ "${YARD_KIND:-container}" = vm ]; then
+    vm_qemu_note=("Install qemu-system-x86 and conntrack for VM yards if missing (apt).")
+  fi
   announce "Subyard Phase 1 — install & initialize Incus" \
     "Install the 'incus' package if missing (apt)." \
+    "${vm_qemu_note[@]}" \
     "Add user '$OPERATOR_USER' to group 'incus-admin' — this grants Incus access ≈ root on this host." \
     "Create the storage pool directory: $STORAGE_PATH" \
     "Run 'incus admin init': dir pool '$STORAGE_POOL' + bridge '$INCUS_BRIDGE' (only if not already initialized)."
@@ -164,6 +169,35 @@ if [ "$UPGRADE_ONLY" = 1 ]; then
   echo
   ok "Incus is $(_iver)."
   exit 0
+fi
+
+if [ "${YARD_KIND:-container}" = vm ]; then
+  echo "Dependency: QEMU for VM yards"
+  if command -v qemu-system-x86_64 >/dev/null 2>&1; then
+    ok "qemu-system-x86_64 present"
+  else
+    command -v apt-get >/dev/null 2>&1 \
+      || die "no apt-get; install qemu-system-x86 for the VM and re-run"
+    info "installing qemu-system-x86 for the VM"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends qemu-system-x86 \
+      || die "qemu-system-x86 install failed"
+    command -v qemu-system-x86_64 >/dev/null 2>&1 \
+      || die "qemu-system-x86_64 is unavailable after qemu-system-x86 installation"
+    ok "qemu-system-x86_64 installed"
+  fi
+  echo "Dependency: conntrack for VM public UDP recovery"
+  if command -v conntrack >/dev/null 2>&1; then
+    ok "conntrack present"
+  else
+    command -v apt-get >/dev/null 2>&1 \
+      || die "no apt-get; install conntrack for the VM and re-run"
+    info "installing conntrack for VM public UDP recovery"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends conntrack \
+      || die "conntrack install failed"
+    command -v conntrack >/dev/null 2>&1 \
+      || die "conntrack is unavailable after installation"
+    ok "conntrack installed"
+  fi
 fi
 
 # --- 2. grant operator access to the Incus socket ---------------------------

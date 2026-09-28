@@ -72,6 +72,12 @@ func (cli *CLI) runResourceCommand(
 	}
 	resourceConsequences := slices.Clone(assessment.Consequences)
 	assessment = bootstrap.augment(assessment)
+	ingress, err := cli.prepareResourceIngress(ctx, loaded, definition, invocation.verb)
+	if err != nil {
+		cli.errorf("%s: prepare ingress: %v", definition.Command, err)
+		return 1
+	}
+	assessment = ingress.augment(assessment)
 	localAction, ok := localResourceAction(definition, assessment.Action)
 	if !ok {
 		cli.errorf("%s: %v", definition.Command, fmt.Errorf(
@@ -106,6 +112,14 @@ func (cli *CLI) runResourceCommand(
 		(assessment.Effect == domain.ActionMutation || assessment.Effect == domain.ActionDestruction) {
 		return 0
 	}
+	if ingress != nil && assessment.Changed {
+		unlock, lockErr := lockIntegrationYard(ctx, loaded)
+		if lockErr != nil {
+			cli.errorf("%s: lock ingress yard: %v", definition.Command, lockErr)
+			return 1
+		}
+		defer unlock()
+	}
 	if assessment.Changed &&
 		(assessment.Effect == domain.ActionMutation || assessment.Effect == domain.ActionDestruction) {
 		if err := bootstrap.refresh(ctx, cli); err != nil {
@@ -125,6 +139,11 @@ func (cli *CLI) runResourceCommand(
 			return 1
 		}
 		refreshed = bootstrap.augment(refreshed)
+		if err := ingress.refresh(ctx, cli); err != nil {
+			cli.errorf("%s: refresh ingress: %v", definition.Command, err)
+			return 1
+		}
+		refreshed = ingress.augment(refreshed)
 		if refreshed.Action != assessment.Action {
 			cli.errorf("%s: %v: resource action changed after confirmation",
 				definition.Command, domain.ErrPlanStale)
@@ -144,6 +163,7 @@ func (cli *CLI) runResourceCommand(
 		cli: cli, loaded: loaded, definition: definition, verb: invocation.verb,
 		localAction: localAction, effect: assessment.Effect, arguments: slices.Clone(invocation.arguments),
 		bootstrap: bootstrap, consequences: resourceConsequences,
+		ingress: ingress,
 	}
 	orchestrator.Runner = runner
 	_, diagnostics, err := orchestrator.RunAdapter(ctx, plan, domain.AdapterRequest{
@@ -349,6 +369,7 @@ type resourceApplyRunner struct {
 	arguments    []string
 	bootstrap    *resourceBootstrap
 	consequences []string
+	ingress      *resourceIngress
 }
 
 type resourceSessionExitError struct{ code int }
@@ -427,6 +448,9 @@ func (runner *resourceApplyRunner) Run(
 		}
 	}
 	if runErr != nil {
+		if rollbackErr := runner.ingress.rollback(runner, request.OperationID); rollbackErr != nil {
+			return result, "", fmt.Errorf("run resource handler: %w; owned ingress rollback failed: %v", runErr, rollbackErr)
+		}
 		if ctx.Err() != nil {
 			return result, "", fmt.Errorf("run resource handler: %w", ctx.Err())
 		}
@@ -438,6 +462,9 @@ func (runner *resourceApplyRunner) Run(
 			return result, "", fmt.Errorf("resource handler exited with status %d", exitError.ExitCode())
 		}
 		return result, "", fmt.Errorf("run resource handler: %w", runErr)
+	}
+	if err := runner.ingress.apply(ctx, runner, request.OperationID); err != nil {
+		return result, "", err
 	}
 	result.Status = "ok"
 	return result, "", nil

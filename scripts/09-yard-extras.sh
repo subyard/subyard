@@ -39,6 +39,10 @@ case "$SHIFT_MODE" in shift) SHIFT_OPT="shift=true" ;; *) SHIFT_OPT="" ;; esac
 read -r -a u_mounts <<<"${SUBYARD_EXTRAS_MOUNTS:-}"
 read -r -a u_caps <<<"${SUBYARD_EXTRAS_CAPABILITIES:-}"
 read -r -a u_devs <<<"${SUBYARD_EXTRAS_DEVICES:-}"
+if [ "${ALLOWS_HOST_ACCESS:-true}" = false ] \
+   && { [ "${#u_mounts[@]}" -gt 0 ] || [ "${#u_caps[@]}" -gt 0 ] || [ "${#u_devs[@]}" -gt 0 ]; }; then
+  die 'selected yard role forbids profile mounts, capabilities and devices'
+fi
 
 # Resolve the desired device/capability set once. Both --check and reconcile consume this state,
 # so profile interpretation has a single owner and cannot drift from init's convergence probe.
