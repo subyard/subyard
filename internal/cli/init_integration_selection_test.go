@@ -263,6 +263,79 @@ func TestInitIntegrationSelectionFreshAndAdopted(t *testing.T) {
 	}
 }
 
+func TestInitSourceManagedSelectionUsesDefaultsWithoutWriting(t *testing.T) {
+	for _, test := range []struct {
+		name, yard, settings, shared, profile, want string
+	}{
+		{name: "bare default", yard: "default", want: "codex claude"},
+		{name: "profile default", yard: "default", settings: "YARD_TEMPLATE=fixture\n", profile: "CODING_TOOL_INTEGRATIONS=codex\n", want: "codex"},
+		{name: "shared selection", yard: "default", shared: "CODING_TOOL_INTEGRATIONS=claude\n", want: "claude"},
+		{name: "legacy yard selection", yard: "default", settings: "AGENTS=claude\n", want: "claude"},
+		{name: "explicit selection", yard: "default", settings: "CODING_TOOL_INTEGRATIONS=claude\n", want: "claude"},
+		{name: "explicit empty", yard: "default", settings: "CODING_TOOL_INTEGRATIONS=''\n"},
+		{name: "legacy empty", yard: "default", settings: "AGENTS=none\n"},
+		{name: "named profile", yard: "demo", settings: "YARD_TEMPLATE=fixture\nSSH_PORT=2223\n", profile: "CODING_TOOL_INTEGRATIONS=codex\n", want: "codex"},
+		{name: "restricted profile", yard: "demo", settings: "YARD_TEMPLATE=fixture\nSSH_PORT=2223\n", profile: "ALLOWS_CODING_TOOLS=false\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			writeCLIFile(t, filepath.Join(root, "config/agents.env"), "CODING_TOOL_INTEGRATIONS='codex claude'\nAGENT_codex_COMMAND=codex\nAGENT_claude_COMMAND=claude\n", 0o600)
+			configHome := filepath.Join(root, "state")
+			target := filepath.Join(configHome, "yards", test.yard, "config.env")
+			shared := filepath.Join(configHome, "overrides/shared/config.env")
+			profile := filepath.Join(root, "config/yards/profiles/fixture.env")
+			for path, content := range map[string]string{target: test.settings, shared: test.shared, profile: test.profile} {
+				if content != "" {
+					if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+						t.Fatal(err)
+					}
+					writeCLIFile(t, path, content, 0o600)
+				}
+			}
+			if err := configsync.RegisterSource(configHome, testkit.TempDir(t)); err != nil {
+				t.Fatal(err)
+			}
+			before := map[string]initIntegrationSource{}
+			for _, path := range []string{target, shared, profile, configsync.SourceRecordPath(configHome)} {
+				snapshot, err := readInitIntegrationSource(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				before[path] = snapshot
+			}
+			arguments := []string{"init"}
+			if test.yard != "default" {
+				arguments = []string{"-Y", test.yard, "init"}
+			}
+			platform := newInitPlatformFixture()
+			for range 2 {
+				var output bytes.Buffer
+				program, err := New(Options{RepositoryRoot: root, Arguments: arguments,
+					Environment: append(environment, "ASSUME_YES=1"), InitPlatform: platform,
+					Stdout: &output, Stderr: &output})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if code := program.Run(context.Background()); code != 0 {
+					t.Fatalf("init failed: code=%d output=%s", code, output.String())
+				}
+				if got := program.env["CODING_TOOL_INTEGRATIONS"]; got != test.want {
+					t.Fatalf("effective integrations=%q, want %q", got, test.want)
+				}
+				for path, snapshot := range before {
+					after, err := readInitIntegrationSource(path)
+					if err != nil || after != snapshot {
+						t.Fatalf("init changed source-managed configuration %s: %v", path, err)
+					}
+				}
+			}
+			if !platform.converged[ports.ReconcileStageProject] || platform.projectHooks != 2 {
+				t.Fatal("init did not reconcile and retry project hooks")
+			}
+		})
+	}
+}
+
 func TestInitProfileBootstrapPreservesInheritedSelectionWithoutIncus(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	environment = withoutCommandSetting(environment, "SSH_PORT")
@@ -293,6 +366,12 @@ func TestInitProfileBootstrapPreservesInheritedSelectionWithoutIncus(t *testing.
 	}
 	if string(bootstrap.content) != "SSH_PORT=2234\n" {
 		t.Fatalf("init inserted a tool override into the profile: %q", bootstrap.content)
+	}
+	if err := configsync.RegisterSource(filepath.Join(root, "state"), testkit.TempDir(t)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := program.prepareInitIntegrationSelection(context.Background(), loaded, bootstrap); err == nil || !strings.Contains(err.Error(), "source-managed") {
+		t.Fatalf("profile bootstrap accepted a source-managed registration write: %v", err)
 	}
 }
 
@@ -525,7 +604,7 @@ func TestFreshNamedSelectionClearsDerivedRuntimeLinks(t *testing.T) {
 }
 
 func TestInitRejectsIntegrationInputsChangedAfterPlan(t *testing.T) {
-	for _, change := range []string{"selection", "role", "same-bytes replacement", "new explicit selection", "new role"} {
+	for _, change := range []string{"selection", "role", "same-bytes replacement", "new explicit selection", "new role", "source selection", "source profile"} {
 		t.Run(change, func(t *testing.T) {
 			root, environment, _ := nativeFixture(t)
 			path := filepath.Join(root, "state/yards/default/config.env")
@@ -540,6 +619,12 @@ func TestInitRejectsIntegrationInputsChangedAfterPlan(t *testing.T) {
 				t.Fatal(err)
 			}
 			writeCLIFile(t, profile, "ALLOWS_CODING_TOOLS=false\n", 0o600)
+			if strings.HasPrefix(change, "source ") {
+				writeCLIFile(t, path, "YARD_TEMPLATE=test-vms\n", 0o600)
+				if err := configsync.RegisterSource(filepath.Join(root, "state"), testkit.TempDir(t)); err != nil {
+					t.Fatal(err)
+				}
+			}
 			platform := newInitPlatformFixture()
 			program, err := New(Options{RepositoryRoot: root, Environment: environment, InitPlatform: platform})
 			if err != nil {
@@ -561,10 +646,12 @@ func TestInitRejectsIntegrationInputsChangedAfterPlan(t *testing.T) {
 				writeCLIFile(t, path, "CODING_TOOL_INTEGRATIONS=''\n", 0o600)
 			case "new role":
 				writeCLIFile(t, path, "YARD_TEMPLATE=test-vms\n", 0o600)
-			case "selection":
+			case "selection", "source selection":
 				writeCLIFile(t, path, "CODING_TOOL_INTEGRATIONS=codex\n", 0o600)
 			case "role":
 				writeCLIFile(t, path, "CODING_TOOL_INTEGRATIONS=''\nYARD_TEMPLATE=test-vms\n", 0o600)
+			case "source profile":
+				writeCLIFile(t, profile, "ALLOWS_CODING_TOOLS=true\n", 0o600)
 			default:
 				writeCLIFile(t, path+".new", "CODING_TOOL_INTEGRATIONS=''\n", 0o600)
 				if err := os.Rename(path+".new", path); err != nil {

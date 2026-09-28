@@ -156,7 +156,9 @@ remain effective. It only canonicalizes an explicit local legacy `AGENTS` assign
 registered configuration sources are consumed without a local selection write.
 Subyard does not infer intent from installed binaries or change other yards during
 adoption. The default yard uses the same scalar and file configuration layout as
-named yards.
+named yards. An explicit empty selection stays empty. For source-managed
+configuration, change the requested set in the registered source and sync it before
+running init again.
 
 Enable and disable require an existing, running yard with its core substrate ready.
 A stopped or missing yard fails before confirmation or configuration changes. The
