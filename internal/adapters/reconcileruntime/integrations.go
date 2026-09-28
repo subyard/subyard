@@ -281,7 +281,11 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 							}
 						}
 					}
-					return integrationObservation{}, fmt.Errorf("integration ownership conflict: %s at %q; managed artifacts were preserved", conflict.Reason, conflict.Path)
+					command := []string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--", "namei", "-l", "--", conflict.Path}
+					return integrationObservation{}, integrationOwnershipError{
+						message: fmt.Sprintf("integration ownership conflict in yard %s: %s at %q; managed artifacts were preserved", runtime.Yard.YardName, conflict.Reason, conflict.Path),
+						retry:   shellquote.Command(command),
+					}
 				}
 			}
 		}

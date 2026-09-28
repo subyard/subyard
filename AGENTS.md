@@ -12,6 +12,11 @@ Readiness checks return state and diagnostics; the operation boundary renders th
 Expected drift is not a warning. Follow the
 [activation diagnostic contract](docs/control-plane.md#release-migrations).
 
+Before suggesting CLI commands, check the [generated CLI reference](docs/cli-reference.md)
+or the command's `--help`. Registry completion flags apply to whole command families,
+not every subcommand. Regenerate help changes with `make cli-docs` and verify with
+`make cli-docs-check`.
+
 Do not rely on umask for exact file modes. Preserve permission validation; use
 `testkit.WriteFile` for exact fixture modes and `testkit.TempDir` for private roots.
 

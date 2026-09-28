@@ -41,14 +41,61 @@ func TestReleaseActivationRefreshesOrcaBeforeMaterializedConfig(t *testing.T) {
 	}
 }
 
+func TestMaterializedConfigObservationDirectsToReadOnlyDiagnostic(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	configHome := filepath.Join(root, "state")
+	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join(environment, "\n")+"\n", 0o600)
+	manifestPath := filepath.Join(root, "config", "commands.registry")
+	manifest, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, manifestPath, string(manifest)+"config||@config||local|mutate|dynamic|public|lifecycle|config|config|config|--all-local --help|status\n", 0o600)
+	cause := errors.New("private transport detail")
+	fake := &testkit.Incus{Err: cause}
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{RepositoryRoot: root, Environment: environment,
+		Incus: fake, Executor: fake, Stdout: &stdout, Stderr: &stderr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciler := &materializedConfigActivationReconciler{
+		cli: program, yard: "default", configHome: configHome, scopeResolved: true,
+	}
+	observed, err := reconciler.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+	var diagnostic interface{ ActivationDiagnostic() (string, string) }
+	if !errors.Is(err, cause) || !errors.As(err, &diagnostic) || observed.Converged {
+		t.Fatalf("observation lost its failure: %#v, %v", observed, err)
+	}
+	message, retry := diagnostic.ActivationDiagnostic()
+	if !strings.Contains(message, "yard default") || !strings.Contains(message, "materialized config") ||
+		strings.Contains(message, cause.Error()) || retry != "run yard -Y default config status" {
+		t.Fatalf("unsafe or unactionable diagnostic: %q / %q", message, retry)
+	}
+	if stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatal("observation printed diagnostics")
+	}
+	// The suggested command must reach the underlying failure even when normal
+	// commands are blocked by an unfinished release transition.
+	installUnfinishedMutationGateFixture(t, root, environment, filepath.Join(root, "data", "runtime"))
+	program.options.Arguments = strings.Fields(strings.TrimPrefix(retry, "run yard "))
+	if code := program.Run(context.Background()); code != 1 || !strings.Contains(stderr.String(), cause.Error()) {
+		t.Fatalf("diagnostic command failed to expose the cause: code=%d stderr=%q", code, stderr.String())
+	}
+	if len(fake.ExecCalls) != 0 || len(fake.ConfigUpdates) != 0 || len(fake.PowerUpdates) != 0 {
+		t.Fatal("diagnostic command attempted a mutation")
+	}
+}
+
 func TestMaterializedConfigObservationReportsSourceManagedOwnershipConflict(t *testing.T) {
 	for _, test := range []struct{ path, detail, want, command string }{
-		{path: "/etc/subyard/agent-project-hooks"},
+		{path: "/etc/subyard/agent-project-hooks", want: "unowned selected artifact", command: "namei"},
+		{path: "/home/dev/.claude/CLAUDE.md", want: "unowned selected artifact", command: "namei"},
 		{path: "/untrusted-secret", detail: "unrecognized core content"},
 		{path: "/usr/local/libexec/subyard/projects-changed", detail: "unrecognized core content", want: "contents do not match", command: "sha256sum"},
 		{path: "/usr/local/libexec/subyard/projects-changed", detail: "unsafe core metadata", want: "owned by root:root", command: "namei"},
 		{path: "/usr/local/libexec/subyard/projects-changed", detail: "unsafe core ancestor", want: "parent directories", command: "namei"},
-		{path: "/usr/local/libexec/subyard/projects-changed", detail: "untrusted-secret"},
+		{path: "/usr/local/libexec/subyard/projects-changed", detail: "untrusted-secret", want: "unowned selected artifact", command: "namei"},
 	} {
 		path := test.path
 		t.Run(path+"/"+test.detail, func(t *testing.T) {
@@ -94,15 +141,18 @@ func TestMaterializedConfigObservationReportsSourceManagedOwnershipConflict(t *t
 				t.Fatal("observation wrote console output or exposed an untrusted path")
 			}
 			var diagnostic interface{ ActivationDiagnostic() (string, string) }
-			if errors.As(err, &diagnostic) != (test.want != "") {
-				t.Fatalf("unexpected public diagnostic: %v", err)
+			if !errors.As(err, &diagnostic) {
+				t.Fatalf("missing public diagnostic: %v", err)
 			}
+			message, retry := diagnostic.ActivationDiagnostic()
 			if test.want != "" {
-				message, retry := diagnostic.ActivationDiagnostic()
 				if !strings.Contains(message, test.want) || !strings.Contains(message, path) ||
 					!strings.Contains(retry, "'incus' 'exec' 'yard' '--project' 'subyard' '--' '"+test.command+"'") {
 					t.Fatalf("incomplete diagnostic: %q / %q", message, retry)
 				}
+			} else if message != "yard default: cannot inspect legacy integrations for release activation" ||
+				retry != "run yard -Y default integration status" {
+				t.Fatalf("unsafe or unactionable fallback: %q / %q", message, retry)
 			}
 			if len(fake.ExecCalls) != 3 || slices.Contains(fake.ExecCalls[2].Request.Command, "apply") ||
 				!slices.Contains(fake.ExecCalls[2].Request.Command, "observe") || len(fake.ConfigUpdates) != 0 || len(fake.PowerUpdates) != 0 {

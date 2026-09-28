@@ -283,6 +283,10 @@ Activation observers do not print diagnostics. Return expected drift as
 failures as errors. The operation boundary renders current `Outcome.Warnings`
 once, sorted and deduplicated. Public error details use `ActivationDiagnostic`;
 raw guest errors stay private.
+Materialized-config observation failures identify the yard and inspection phase, with a
+read-only config or integration status command. Known integration ownership conflicts retain
+their validated path and inspection command across the release boundary; they must not send
+`migrate --check` back to itself as the only next step.
 
 Each compiled capability classifies its bounded resources as preserve, transform, canonicalize,
 reset or block before confirmation. An authorized reset is a successful, journaled one-time result;

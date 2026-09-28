@@ -7,6 +7,7 @@ choices that widen it.
 
 ## Operator guides
 
+- [CLI reference](cli-reference.md) — generated public command help and invocation syntax.
 - [Configuration](configuration.md) — inspect, author and synchronize shared, host and per-yard
   settings.
 - [Named yards](../config/yards/README.md) — run independent yards on one owner host.

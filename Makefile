@@ -1,13 +1,19 @@
 GO ?= go
 VERSION ?= 0.1.0-dev
 
-.PHONY: build package test verify clean
+.PHONY: build package test verify clean cli-docs cli-docs-check
 
 build:
 	@PATH="$$(dirname "$$(command -v $(GO))"):$${PATH}" YARD_BUILD_VERSION="$(VERSION)" ./dev/build-engine.sh
 
 test:
 	$(GO) test ./...
+
+cli-docs: build
+	python3 dev/generate-cli-docs.py
+
+cli-docs-check: build
+	python3 dev/generate-cli-docs.py --check
 
 verify:
 	./tests/run.sh

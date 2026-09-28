@@ -28,6 +28,11 @@ compiler with `go version` after the first build.
 
 ## Build and test
 
+`make cli-docs` builds the current CLI and regenerates [the command reference](cli-reference.md)
+from its actual public command help. `make cli-docs-check` verifies that the checked-in reference
+is current, and CI runs this check. Generation uses a temporary home and public configuration,
+without operator settings.
+
 ```sh
 make build
 ./tests/run.sh
