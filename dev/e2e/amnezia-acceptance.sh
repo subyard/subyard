@@ -7,7 +7,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 . "$ROOT/dev/agent-e2e.sh"
 
 lane=full
-usage() { printf 'Usage: dev/e2e/amnezia-acceptance.sh --slot N [--lane full|reboot]\n'; }
+usage() { printf 'Usage: dev/e2e/amnezia-acceptance.sh --slot N [--lane full|reboot|recovery]\n'; }
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --slot)
@@ -16,8 +16,8 @@ while [ "$#" -gt 0 ]; do
       shift 2
       ;;
     --lane)
-      [ "$#" -ge 2 ] || die '--lane requires full or reboot'
-      case "$2" in full|reboot) lane="$2" ;; *) die '--lane requires full or reboot' ;; esac
+      [ "$#" -ge 2 ] || die '--lane requires full, reboot or recovery'
+      case "$2" in full|reboot|recovery) lane="$2" ;; *) die '--lane requires full, reboot or recovery' ;; esac
       shift 2
       ;;
     -h|--help) usage; exit 0 ;;
@@ -164,6 +164,15 @@ if [ "$lane" = full ]; then
 fi
 owner_phase isolation
 client_probe
+if [ "$lane" = recovery ]; then
+  owner_phase recovery-state-mount
+  client_probe
+  owner_phase recovery-agent-loss
+  client_probe
+  guest 2 env SUBYARD_E2E_VM=2 bash "${GUEST_DIRS[2]}/src/dev/e2e/amnezia-client.sh" cleanup </dev/null
+  printf 'amnezia_acceptance=result-pass source_bundle_sha256=%s lane=%s\n' "$bundle_hash" "$lane"
+  exit 0
+fi
 if [ "$lane" = full ]; then
   printf 'amnezia_acceptance_stage=free-page-reporting-before-reboot\n'
   guest 1 env SUBYARD_E2E_VM=1 bash "${GUEST_DIRS[1]}/src/dev/e2e/vm-page-reporting.sh" \

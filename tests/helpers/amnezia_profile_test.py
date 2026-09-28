@@ -97,7 +97,7 @@ class OwnerHandlerTest(unittest.TestCase):
                 mock.patch.object(handler, 'guest') as guest, \
                 mock.patch.object(sys, 'argv', ['vpn', 'down']):
             self.assertEqual(handler.main(), 0)
-        guest.assert_called_once_with('python3', handler.RUNTIME, 'down')
+        guest.assert_called_once_with('python3', handler.RUNTIME, 'down', timeout=20)
 
     def test_live_route_requires_durable_service_enablement(self):
         instance = self.instance()
@@ -202,12 +202,60 @@ class OwnerHandlerTest(unittest.TestCase):
         self.assertNotIn(handler.KEY, state['config'])
         self.assertEqual(state['devices']['foreign'], foreign)
         self.assertTrue(any(action[:3] == ('config', 'device', 'remove') for action in writes))
-        guest.assert_called_once_with('python3', handler.RUNTIME, 'down')
+        guest.assert_called_once_with('python3', handler.RUNTIME, 'down', timeout=20)
 
     def test_shutdown_failure_keeps_pending_retry_intent_until_guest_stops(self):
         for verb, action in (('down', 'down'), ('rollback-ingress', 'up')):
             with self.subTest(verb=verb):
                 self.check_shutdown_retry(verb, action)
+
+    def test_down_assesses_owned_ingress_when_guest_status_is_unavailable(self):
+        device = {'type': 'proxy', 'bind': 'host', 'nat': 'true',
+                  'listen': 'udp:10.20.30.40:51820', 'connect': 'udp:10.80.0.10:51820'}
+        for pending_only in (False, True):
+            with self.subTest(pending_only=pending_only):
+                instance = self.instance()
+                instance['config'][handler.KEY] = handler.fingerprint(device)
+                if pending_only:
+                    instance['config'][handler.KEY] = instance['config'][handler.KEY].replace('v1:', 'v1:pending:', 1)
+                else:
+                    instance['devices'][handler.DEVICE] = device
+                with mock.patch.object(handler, 'inspect', return_value=instance), \
+                        mock.patch.object(handler, 'runtime_status', side_effect=RuntimeError('guest unavailable')) as status, \
+                        mock.patch.object(handler, 'incus', side_effect=AssertionError('prepare mutated Incus')), \
+                        mock.patch.object(handler, 'guest', side_effect=AssertionError('prepare changed guest')), \
+                        contextlib.redirect_stdout(io.StringIO()) as output:
+                    handler.prepare('down')
+                status.assert_not_called()
+                assessment = json.loads(output.getvalue())
+                self.assertTrue(assessment['changed'])
+                self.assertIn('pending cleanup', assessment['consequences'][0])
+                with mock.patch.object(handler, 'inspect', return_value=instance), \
+                        mock.patch.object(handler, 'runtime_status', return_value={
+                            'ready': True, 'running': True, 'enabled': True}) as status, \
+                        contextlib.redirect_stdout(io.StringIO()) as refreshed:
+                    handler.prepare('down')
+                status.assert_not_called()
+                self.assertEqual(json.loads(refreshed.getvalue()), assessment)
+                with mock.patch.object(handler, 'inspect', return_value=instance), \
+                        mock.patch.object(handler, 'runtime_status', side_effect=RuntimeError('guest unavailable')) as status:
+                    with self.assertRaisesRegex(RuntimeError, 'guest unavailable'):
+                        handler.prepare('up')
+                status.assert_called_once_with(instance)
+        with mock.patch.object(handler, 'inspect', return_value=self.instance()), \
+                mock.patch.object(handler, 'runtime_status', side_effect=RuntimeError('guest unavailable')) as status:
+            with self.assertRaisesRegex(RuntimeError, 'guest unavailable'):
+                handler.prepare('down')
+        status.assert_called_once()
+
+    def test_guest_shutdown_timeout_is_bounded_and_reported_as_unverified(self):
+        with self.assertRaises(subprocess.TimeoutExpired):
+            handler.run(sys.executable, '-c', 'import time; time.sleep(1)', timeout=0.02)
+        with mock.patch.object(handler, 'guest', side_effect=subprocess.TimeoutExpired(['incus', 'exec'], 20)) as guest:
+            with self.assertRaisesRegex(RuntimeError, 'guest shutdown is unverified') as failure:
+                handler.shutdown_guest()
+        self.assertIsInstance(failure.exception.__cause__, subprocess.TimeoutExpired)
+        guest.assert_called_once_with('python3', handler.RUNTIME, 'down', timeout=20)
 
     def test_late_up_readiness_failure_keeps_pending_rollback_intent(self):
         os.environ.update(SUBYARD_RESOURCE_MODE='apply', SUBYARD_RESOURCE_ACTION='up',
@@ -272,6 +320,7 @@ class OwnerHandlerTest(unittest.TestCase):
         def guest(*args, **_):
             nonlocal attempts
             self.assertEqual(args, ('python3', handler.RUNTIME, 'down'))
+            self.assertEqual(_.get('timeout'), 20)
             attempts += 1
             if attempts == 1:
                 raise RuntimeError('guest shutdown unavailable')
@@ -281,7 +330,7 @@ class OwnerHandlerTest(unittest.TestCase):
                 mock.patch.object(handler, 'incus', side_effect=incus), \
                 mock.patch.object(handler, 'guest', side_effect=guest), \
                 mock.patch.object(sys, 'argv', ['vpn', verb]):
-            with self.assertRaisesRegex(RuntimeError, 'guest shutdown unavailable'):
+            with self.assertRaisesRegex(RuntimeError, 'guest shutdown is unverified'):
                 handler.main()
             self.assertNotIn(handler.DEVICE, state['devices'])
             self.assertEqual(state['config'][handler.KEY],
@@ -322,6 +371,32 @@ class GuestRuntimeTest(unittest.TestCase):
             root.chmod(0o755)
             with self.assertRaises(RuntimeError):
                 runtime.protected(root, True)
+
+    def test_state_mount_required_before_keys_endpoint_edits_or_start(self):
+        with tempfile.TemporaryDirectory() as directory:
+            srv = Path(directory) / 'srv'
+            srv.mkdir()
+            state = srv / 'amnezia'
+            with mock.patch.object(runtime, 'STATE', state), \
+                    mock.patch.object(runtime, 'awg') as awg, \
+                    mock.patch.object(runtime, 'container') as container:
+                self.assertFalse(os.path.ismount(srv))
+                with self.assertRaisesRegex(RuntimeError, 'not mounted'):
+                    runtime.initialize('10.20.30.40', 51820)
+                self.assertFalse(state.exists())
+                state.mkdir()
+                with self.assertRaisesRegex(RuntimeError, 'not mounted'):
+                    runtime.up('10.20.30.41', 51820)
+                with self.assertRaisesRegex(RuntimeError, 'not mounted'):
+                    runtime.start()
+                awg.assert_not_called()
+                container.assert_not_called()
+            link = Path(directory) / 'srv-link'
+            link.symlink_to(srv, target_is_directory=True)
+            with mock.patch.object(runtime, 'STATE', link / 'amnezia'), \
+                    mock.patch.object(runtime.os.path, 'ismount', return_value=True):
+                with self.assertRaisesRegex(RuntimeError, 'not mounted'):
+                    runtime.initialize('10.20.30.40', 51820)
 
     def test_firewall_readiness_detects_effective_rule_drift(self):
         with tempfile.TemporaryDirectory() as directory, self.root_owned_stat():
@@ -398,6 +473,7 @@ class GuestRuntimeTest(unittest.TestCase):
                 path.chmod(0o600)
             calls = []
             with mock.patch.object(runtime, 'STATE', state), \
+                    mock.patch.object(runtime.os.path, 'ismount', return_value=True), \
                     mock.patch.object(runtime, 'observe', side_effect=[{'ready': False}, {'ready': True}]), \
                     mock.patch.object(runtime, 'run', side_effect=lambda *args, **_: (calls.append(args), result())[1]):
                 runtime.up('10.20.30.40', 51820)
@@ -410,7 +486,9 @@ class GuestRuntimeTest(unittest.TestCase):
             root = Path(directory) / 'state'
             keys = iter(('synthetic-server-key', 'synthetic-client-key',
                          'synthetic-psk', 'synthetic-server-public', 'synthetic-client-public'))
-            with mock.patch.object(runtime, 'STATE', root), mock.patch.object(runtime, 'awg', side_effect=lambda *_: next(keys)):
+            with mock.patch.object(runtime, 'STATE', root), \
+                    mock.patch.object(runtime.os.path, 'ismount', return_value=True), \
+                    mock.patch.object(runtime, 'awg', side_effect=lambda *_: next(keys)):
                 runtime.initialize('10.20.30.40', 51820)
             server = (root / 'awg0.conf').read_text()
             client = (root / 'client.conf').read_text()
@@ -426,6 +504,7 @@ class GuestRuntimeTest(unittest.TestCase):
                 return result()
 
             with mock.patch.object(runtime, 'STATE', root), \
+                    mock.patch.object(runtime.os.path, 'ismount', return_value=True), \
                     mock.patch.object(runtime, 'observe', return_value={'ready': True, 'running': True, 'enabled': True}), \
                     mock.patch.object(runtime, 'run', side_effect=command):
                 runtime.up('10.20.30.40', 51820)

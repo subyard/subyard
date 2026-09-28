@@ -675,6 +675,9 @@ owned route; it does not grant broad UDP access. Failed network reconciliation i
 internal `rollback-ingress` under the original bring-up operation to close its route. The engine
 verifies that both the proxy and ownership marker are absent before accepting a no-op or removing
 the matching ACL allowance, and checks closure again after ACL cleanup.
+Bring-up requires a converged network policy. Shutdown and rollback may remove only that route's
+persisted approval and exact UDP allowance, including after an interrupted shutdown; they refuse
+unrelated ACL, NIC or project drift instead of reconciling it as part of a resource action.
 For Amnezia, that rollback also disables the guest runtime while preserving VPN state; a later
 bring-up re-enables it.
 

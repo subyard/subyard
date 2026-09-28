@@ -15,8 +15,8 @@ YARD = os.environ.get('YARD_INSTANCE_NAME', '')
 PROJECT = os.environ.get('INCUS_PROJECT', '')
 
 
-def run(*args, check=True):
-    result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+def run(*args, check=True, timeout=None):
+    result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=timeout)
     if check and result.returncode:
         raise RuntimeError('owner or guest command failed: ' + args[0])
     return result
@@ -26,8 +26,8 @@ def incus(*args, check=True):
     return run('incus', *args, '--project', PROJECT, check=check)
 
 
-def guest(*args, check=True):
-    return run('incus', 'exec', YARD, '--project', PROJECT, '--', *args, check=check)
+def guest(*args, check=True, timeout=None):
+    return run('incus', 'exec', YARD, '--project', PROJECT, '--', *args, check=check, timeout=timeout)
 
 
 def query(path):
@@ -202,8 +202,8 @@ def prepare(verb):
             raise RuntimeError('VPN target is not a VM')
         if instance.get('status') != 'Running':
             raise RuntimeError('start the dedicated VPN yard before changing its service')
-        status = runtime_status(instance)
         if verb == 'up':
+            status = runtime_status(instance)
             address, interface, port, want = endpoint(instance)
             collisions(want)
             projects = guest('find', '/srv/workspaces', '-mindepth', '1', '-maxdepth', '1', '-print', '-quit')
@@ -214,11 +214,23 @@ def prepare(verb):
                 consequences = [f'Enable the pinned AmneziaWG service in {YARD}; preserve existing keys and peers',
                                 f'Publish UDP {address}:{port} on {interface} to {want["connect"]}']
         else:
-            changed = bool(device or instance['config'].get(KEY) or status['running'] or status['enabled'])
+            changed = bool(device or instance['config'].get(KEY))
+            if not changed:
+                status = runtime_status(instance)
+                changed = bool(status['running'] or status['enabled'])
             if changed:
-                consequences = [f'Close the owned VPN ingress and disable AmneziaWG in {YARD}; preserve keys and peers']
+                consequences = [f'Close the owned VPN ingress in {YARD} and attempt guest shutdown; '
+                                'retain pending cleanup if the guest remains unavailable; preserve keys and peers']
     print(json.dumps(dict(schema='yard.resource-action-assessment.v1', action=verb,
                           changed=changed, consequences=consequences)))
+
+
+def shutdown_guest():
+    try:
+        # Docker receives 15 seconds to stop; leave room in the engine's 30-second rollback.
+        guest('python3', RUNTIME, 'down', timeout=20)
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError('owned VPN ingress closed; guest shutdown is unverified; retry vpn down') from error
 
 
 def main():
@@ -245,7 +257,7 @@ def main():
         raise RuntimeError('prepared resource action does not match')
     if verb == 'rollback-ingress':
         remove_ingress(retain_pending=True)
-        guest('python3', RUNTIME, 'down')
+        shutdown_guest()
         remove_ingress()
     elif verb == 'status':
         settings_valid()
@@ -255,7 +267,7 @@ def main():
                               ingress=bool(owned(instance)))))
     elif verb == 'down':
         remove_ingress(retain_pending=True)
-        guest('python3', RUNTIME, 'down')
+        shutdown_guest()
         remove_ingress()
     else:
         settings_valid()

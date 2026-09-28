@@ -53,6 +53,53 @@ verify_deselected() {
     | jq -e '(.ready or .running or .enabled) | not' >/dev/null \
     || die 'deselected VPN runtime remains enabled'
 }
+verify_pending_ingress() {
+  incus query '/1.0/instances/yard-vpn-e2e?project=subyard-vpn-e2e' \
+    | jq -e '(.devices["amnezia-vpn"] == null) and
+             (.config["user.subyard.resource.amnezia-vpn"] | test("^v1:pending:[0-9a-f]{64}$"))' >/dev/null \
+    || die 'unverified shutdown did not leave only the pending ingress marker'
+}
+restart_vpn_guest() {
+  incus restart yard-vpn-e2e --project subyard-vpn-e2e --timeout 120 >/dev/null
+  YARD_KIND=vm incus_wait_instance_agent subyard-vpn-e2e yard-vpn-e2e \
+    || die 'VPN guest agent did not return after nested guest restart'
+}
+capture_agent_loss_state() {
+  local diagnostic="$fixture/recovery-agent-loss.units"
+  install -m 0600 /dev/null "$diagnostic"
+  guest sh -ceu '
+    systemctl show incus-agent.service \
+      --property=LoadState --property=ActiveState --property=SubState --property=UnitFileState
+    systemctl show subyard-amnezia-e2e-agent-loss.timer \
+      --property=LoadState --property=ActiveState --property=SubState --property=Result
+    systemctl show subyard-amnezia-e2e-agent-loss.service \
+      --property=LoadState --property=ActiveState --property=SubState \
+      --property=Result --property=ExecMainStatus
+  ' >"$diagnostic" 2>&1 || true
+  cat "$diagnostic"
+}
+wait_vpn_runtime_settled() {
+  for _ in $(seq 1 45); do
+    if guest python3 /usr/local/lib/subyard-amnezia/runtime.py observe \
+      | jq -e '(.ready and .running and .enabled) or ((.running | not) and (.enabled | not))' >/dev/null; then
+      return
+    fi
+    sleep 2
+  done
+  die 'VPN runtime did not settle before shutdown retry'
+}
+capture_retry_down_state() {
+  guest sh -ceu '
+    systemctl show subyard-amnezia.service \
+      --property=ActiveState --property=SubState --property=Result --property=ExecMainStatus
+    if docker container inspect subyard-amnezia \
+      --format "container_status={{.State.Status}} running={{.State.Running}} exit_code={{.State.ExitCode}}"; then
+      :
+    else
+      printf "container_status=absent\n"
+    fi
+  ' || true
+}
 case "$phase" in
   bootstrap)
     [ ! -f "$SUBYARD_CONFIG_HOME/yards/vpn-e2e/config.env" ] || die 'expected a fresh VPN yard'
@@ -106,6 +153,120 @@ assert not s["running"] and not s["enabled"] and not s["state_present"], s
     [ "$(signature)" = "$before" ] || die 'shutdown changed VPN state'
     yard vpn status
     guest systemctl is-enabled subyard-amnezia.service && die 'service remains enabled'
+    ;;
+  recovery-agent-loss)
+    # The transient unit runs inside the nested VPN VM. It makes the next
+    # owner-side guest call unavailable without changing the outer yard.
+    guest systemctl is-active --quiet incus-agent.service \
+      || die 'nested VPN guest agent service is not active before fault injection'
+    agent_fragment="$(guest systemctl show incus-agent.service --property=FragmentPath --value)"
+    case "$agent_fragment" in
+      /run/systemd/system/*) agent_action=(/usr/bin/systemctl stop incus-agent.service) ;;
+      *) agent_action=(/usr/bin/systemctl mask --runtime --now incus-agent.service) ;;
+    esac
+    guest systemd-run --unit=subyard-amnezia-e2e-agent-loss --on-active=1s \
+      --timer-property=AccuracySec=1s \
+      "${agent_action[@]}" >/dev/null
+    agent_unavailable=0
+    for _ in $(seq 1 20); do
+      if ! guest true >/dev/null 2>&1; then
+        agent_unavailable=1
+        break
+      fi
+      sleep 1
+    done
+    if [ "$agent_unavailable" != 1 ]; then
+      capture_agent_loss_state
+      die 'nested VPN guest agent did not become unavailable'
+    fi
+    down_output="$fixture/recovery-agent-loss.down"
+    install -m 0600 /dev/null "$down_output"
+    printf 'amnezia_recovery_agent_step=lost-agent-down\n'
+    if yard vpn down --yes >"$down_output" 2>&1; then
+      die 'VPN shutdown unexpectedly verified after nested guest agent loss'
+    fi
+    if ! grep -Fq 'guest shutdown is unverified' "$down_output"; then
+      tail -n 20 "$down_output" >&2
+      die 'VPN shutdown failed before reporting unverified guest cleanup'
+    fi
+    printf 'amnezia_recovery_agent_step=pending-ingress\n'
+    verify_pending_ingress
+    printf 'amnezia_recovery_agent_step=nested-restart\n'
+    restart_vpn_guest
+    printf 'amnezia_recovery_agent_step=state-after-restart\n'
+    verify_state
+    printf 'amnezia_recovery_agent_step=runtime-settled-after-restart\n'
+    wait_vpn_runtime_settled
+    printf 'amnezia_recovery_agent_step=verified-down\n'
+    retry_down_output="$fixture/recovery-agent-loss.retry-down"
+    install -m 0600 /dev/null "$retry_down_output"
+    retry_started=$SECONDS
+    if ! yard vpn down --yes >"$retry_down_output" 2>&1; then
+      printf 'amnezia_recovery_agent_retry_down_seconds=%s\n' "$((SECONDS - retry_started))" >&2
+      tail -n 20 "$retry_down_output" >&2
+      capture_retry_down_state >&2
+      die 'VPN shutdown remained unverified after guest recovery'
+    fi
+    printf 'amnezia_recovery_agent_retry_down_seconds=%s\n' "$((SECONDS - retry_started))"
+    printf 'amnezia_recovery_agent_step=disabled-verify\n'
+    verify_disabled
+    printf 'amnezia_recovery_agent_step=re-up\n'
+    yard vpn up --yes
+    printf 'amnezia_recovery_agent_step=enabled-verify\n'
+    verify_enabled
+    ;;
+  recovery-state-mount)
+    printf 'amnezia_recovery_mount_step=initial-down\n'
+    mount_down_output="$fixture/recovery-state-mount.down"
+    install -m 0600 /dev/null "$mount_down_output"
+    mount_down_started=$SECONDS
+    if ! yard vpn down --yes >"$mount_down_output" 2>&1; then
+      printf 'amnezia_recovery_mount_down_seconds=%s\n' "$((SECONDS - mount_down_started))" >&2
+      tail -n 20 "$mount_down_output" >&2
+      capture_retry_down_state >&2
+      die 'VPN shutdown failed before state-mount recovery'
+    fi
+    printf 'amnezia_recovery_mount_down_seconds=%s\n' "$((SECONDS - mount_down_started))"
+    verify_disabled
+    docker_root="$(guest docker info --format '{{.DockerRootDir}}')" \
+      || die 'could not inspect nested Docker data root'
+    case "$docker_root" in
+      /srv|/srv/*) die 'nested Docker data root is under the VPN state mount' ;;
+    esac
+    guest systemctl stop subyard-amnezia.service docker.service docker.socket >/dev/null
+    guest sh -ceu '
+      findmnt -n /srv >/dev/null
+      umount /srv
+      test ! -e /srv/workspaces
+      install -d -m 0700 /srv/workspaces
+      test ! -e /srv/amnezia
+    '
+    if guest python3 -c '
+import importlib.util
+spec = importlib.util.spec_from_file_location("runtime", "/usr/local/lib/subyard-amnezia/runtime.py")
+runtime = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(runtime)
+runtime.initialize("1.1.1.1", 51820)
+' >/dev/null 2>&1; then
+      die 'runtime initialize accepted an unmounted state volume'
+    fi
+    guest systemctl start docker.service
+    guest docker info >/dev/null || die 'nested Docker did not restart after state unmount'
+    if guest findmnt -n /srv >/dev/null 2>&1; then
+      die 'nested Docker start remounted the VPN state volume'
+    fi
+    if yard vpn up --yes >/dev/null 2>&1; then
+      die 'VPN up accepted an unmounted state volume'
+    fi
+    if guest python3 /usr/local/lib/subyard-amnezia/runtime.py start >/dev/null 2>&1; then
+      die 'runtime start accepted an unmounted state volume'
+    fi
+    guest test ! -e /srv/amnezia || die 'runtime wrote VPN state into the root filesystem'
+    guest rmdir /srv/workspaces
+    guest systemctl start subyard-amnezia.service
+    guest findmnt -n /srv >/dev/null || die 'service mount dependency did not restore /srv'
+    yard vpn up --yes
+    verify_enabled
     ;;
   restart-enabled)
     yard stop --yes

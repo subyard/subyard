@@ -137,6 +137,9 @@ func TestResourceIngressPreviewScopesOneACLAndVerifiesActualRoute(t *testing.T) 
 	if err := preview.ValidateAfter(actual); err != nil {
 		t.Fatal(err)
 	}
+	if err := service.Apply(ctx, actual); err != nil {
+		t.Fatal(err)
+	}
 	selected = false
 	deselected, err := service.Prepare(ctx, yards, Change{})
 	if err != nil || deselected.Fingerprint == actual.Fingerprint {
@@ -152,15 +155,15 @@ func TestResourceIngressPreviewScopesOneACLAndVerifiesActualRoute(t *testing.T) 
 	}
 	host.snapshot.Yards[0].InstanceInfo.LocalConfig[contract.OwnershipKey()] =
 		"v1:pending:" + strings.TrimPrefix(contract.OwnershipValue(device), "v1:")
-	if _, err := service.PreviewResourceIngress(ctx, yards, target, contract, "10.20.30.41", 42000, true); err != nil {
-		t.Fatalf("owned pending endpoint was not recoverable: %v", err)
+	if _, err := service.PreviewResourceIngress(ctx, yards, target, contract, "", 0, false); err != nil {
+		t.Fatalf("owned pending endpoint could not finish shutdown: %v", err)
 	}
 	host.snapshot.Yards[0].InstanceInfo.LocalConfig[contract.OwnershipKey()] = contract.OwnershipValue(device)
 	delete(host.snapshot.Yards[0].InstanceInfo.LocalDevices, "sample-relay")
 	delete(host.snapshot.Yards[0].InstanceInfo.Devices, "sample-relay")
 	host.snapshot.Yards[0].InstanceInfo.LocalConfig[contract.OwnershipKey()] = "v1:pending:" + strings.Repeat("a", 64)
-	if _, err := service.PreviewResourceIngress(ctx, yards, target, contract, "10.20.30.41", 42000, true); err != nil {
-		t.Fatalf("orphaned pending marker was not recoverable: %v", err)
+	if _, err := service.PreviewResourceIngress(ctx, yards, target, contract, "", 0, false); err != nil {
+		t.Fatalf("orphaned pending marker could not finish shutdown: %v", err)
 	}
 	host.snapshot.Yards[0].InstanceInfo.LocalConfig[contract.OwnershipKey()] = "untrusted"
 	if _, err := service.PreviewResourceIngress(ctx, yards, target, contract, "10.20.30.41", 42000, true); err == nil {
@@ -268,12 +271,91 @@ func TestResourceIngressRollbackClosesOnlyApprovedTargetACLAllowance(t *testing.
 
 	// A drifted target NIC must never be repaired under rollback authority.
 	host.snapshot.Yards[0].ProfileDevices["eth0"]["security.mac_filtering"] = "false"
-	drift, err := service.PreviewResourceIngress(ctx, yards, target, contract, "", 0, false)
+	if _, err := service.PreviewResourceIngress(ctx, yards, target, contract, "", 0, false); err == nil {
+		t.Fatal("unrelated target NIC drift passed closure preview")
+	}
+}
+
+func TestResourceIngressRejectsTargetDriftButAllowsInterruptedShutdown(t *testing.T) {
+	ctx := context.Background()
+	host := newMemoryHost()
+	service := memoryService(host)
+	contract := resource.ProxyContract{Profile: "sample", Resource: "relay", Device: "sample-relay",
+		Connect: "udp:guest:41999", OwnerInterfaceSetting: "SAMPLE_INTERFACE",
+		AddressPolicy: resource.ProxyAddressOwnerIPv4UDP, OwnershipMetadata: true}
+	service.ContractSource = func(Yard) ([]resource.ProxyContract, error) { return []resource.ProxyContract{contract}, nil }
+	target := host.snapshot.Yards[0].Yard
+	device := map[string]string{"type": "proxy", "listen": "udp:10.20.30.40:42000",
+		"connect": "udp:10.80.0.10:41999", "bind": "host", "nat": "true"}
+	instance := &host.snapshot.Yards[0].InstanceInfo
+	instance.Type = domain.YardVM
+	instance.LocalDevices = map[string]map[string]string{contract.Device: maps.Clone(device)}
+	instance.Devices = map[string]map[string]string{contract.Device: maps.Clone(device),
+		"eth0": {"type": "nic", "ipv4.address": "10.80.0.10"}}
+	instance.LocalConfig = map[string]string{contract.OwnershipKey(): contract.OwnershipValue(device), "volatile.vm.needs_reset": "true"}
+	instance.Config = maps.Clone(instance.LocalConfig)
+	yards := fixtureYards(host)
+	on := true
+	initial, err := service.Prepare(ctx, yards, Change{Isolation: &on})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := preview.ValidateRollback(drift, contract); err == nil {
-		t.Fatal("unrelated target NIC drift passed rollback validation")
+	if err := service.Apply(ctx, initial); err != nil {
+		t.Fatal(err)
+	}
+	published, stored := cloneValue(host.snapshot), cloneValue(host.stored)
+	for _, drift := range []string{"extra ACL rule", "missing ACL rule", "NIC", "project"} {
+		t.Run(drift, func(t *testing.T) {
+			host.snapshot = cloneValue(published)
+			observed := &host.snapshot.Yards[0]
+			switch drift {
+			case "extra ACL rule":
+				observed.ACL.Ingress = append(observed.ACL.Ingress, Rule{Action: "allow", State: "enabled", Source: "192.0.2.1/32"})
+			case "missing ACL rule":
+				observed.ACL.Ingress = slices.DeleteFunc(observed.ACL.Ingress, func(rule Rule) bool { return rule.Protocol == "tcp" })
+			case "NIC":
+				observed.ProfileDevices["eth0"]["security.mac_filtering"] = "false"
+			case "project":
+				observed.ProjectConfig["restricted.networks.access"] = ""
+			}
+			for _, up := range []bool{true, false} {
+				if _, err := service.PreviewResourceIngress(ctx, yards, target, contract, "10.20.30.40", 42000, up); err == nil {
+					t.Fatalf("up=%v accepted unrelated target drift", up)
+				}
+			}
+		})
+	}
+	for _, routePresent := range []bool{false, true} {
+		host.snapshot, host.stored = cloneValue(published), cloneValue(stored)
+		instance := &host.snapshot.Yards[0].InstanceInfo
+		if !routePresent {
+			delete(instance.LocalDevices, contract.Device)
+			delete(instance.Devices, contract.Device)
+		}
+		instance.LocalConfig[contract.OwnershipKey()] = "v1:pending:" + contract.OwnershipValue(device)[3:]
+		instance.Config[contract.OwnershipKey()] = instance.LocalConfig[contract.OwnershipKey()]
+		retry, err := service.PreviewResourceIngress(ctx, yards, target, contract, "", 0, false)
+		if err != nil || !retry.Before.Changed || !retry.After.Changed {
+			t.Fatalf("pending shutdown cannot clean only its allowance: %+v, %v", retry, err)
+		}
+		delete(instance.LocalDevices, contract.Device)
+		delete(instance.Devices, contract.Device)
+		delete(instance.LocalConfig, contract.OwnershipKey())
+		delete(instance.Config, contract.OwnershipKey())
+		actual, err := service.Prepare(ctx, yards, Change{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := retry.ValidateAfter(actual); err != nil {
+			t.Fatal(err)
+		}
+		if err := service.Apply(ctx, actual); err != nil {
+			t.Fatal(err)
+		}
+		verified, err := service.Prepare(ctx, yards, Change{})
+		if err != nil || verified.Changed || len(host.stored.Policy.Bindings[0].ApprovedIngress) != 0 {
+			t.Fatalf("shutdown retry did not converge: changed=%v err=%v", verified.Changed, err)
+		}
 	}
 }
 

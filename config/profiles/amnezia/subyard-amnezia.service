@@ -3,6 +3,7 @@ Description=Subyard AmneziaWG VPN
 After=network-online.target docker.service
 Wants=network-online.target
 Requires=docker.service
+RequiresMountsFor=/srv
 ConditionPathExists=/srv/amnezia/settings.json
 
 [Service]

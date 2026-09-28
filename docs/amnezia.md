@@ -81,8 +81,10 @@ yard -Y vpn vpn status
 ```
 
 `down` removes the owned public ingress before disabling the guest service. It retains the entire
-state directory. Start the yard first if it is stopped. To change the endpoint or deselect the
-profile, run `down` first; configuration commands reject changes while its service remains enabled.
+state directory. If the guest agent is unavailable, `down` still closes an owned ingress and retains
+pending cleanup; retry `down` when guest access returns to verify shutdown. Start the yard first if
+it is stopped. To change the endpoint or deselect the profile, run `down` first; configuration
+commands reject changes while its service remains enabled.
 If a profile was manually deselected, `init` assesses and closes its exact owned ingress and calls
 the profile's declared shutdown. If guest shutdown cannot be verified, it retains cleanup intent
 and stops reconciliation with recovery instructions. Removing a UDP proxy alone does not terminate
@@ -94,6 +96,10 @@ Guest service enablement survives a restart. A disabled service stays disabled. 
 follows Subyard's managed desired-power workflow and host network guards; no independent Incus
 autostart bypass is installed. Stopping another yard does not stop this VM. Free Page Reporting
 returns idle guest memory to the immediate owner but does not reserve RAM or CPU priority.
+
+The VPN service requires the dedicated `/srv` state volume to be mounted. If it is unavailable,
+bring-up stops without creating replacement keys on the VM root disk; repair the mount through
+`yard -Y vpn init` before retrying `vpn up`.
 
 For a runtime update: protect a current state backup, run `vpn down`, update the Subyard runtime,
 run `yard -Y vpn init` and `yard -Y vpn provision amnezia`, then `vpn up`. The image digest changes
@@ -133,3 +139,7 @@ Use `--lane reboot` for a focused fresh check of enabled and disabled restart/re
 client connectivity, and two Free Page Reporting cycles after reboot. It creates its own fixtures
 and does not reuse a released lease. Both lanes keep client traffic active during enabled owner
 reboots and verify recovery with isolation enabled and disabled.
+
+Use `--lane recovery` for a focused fresh check of ingress closure while the guest agent is
+unavailable, shutdown retry, and refusal to create state on an unmounted `/srv`. It also checks
+systemd mount restoration, unchanged keys and peers, and client connectivity after recovery.

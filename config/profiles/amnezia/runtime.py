@@ -73,7 +73,13 @@ def awg(command, data=None):
                IMAGE, command, data=data).stdout.decode().strip()
 
 
+def require_state_mount():
+    if not stat.S_ISDIR(STATE.parent.lstat().st_mode) or not os.path.ismount(STATE.parent):
+        raise RuntimeError('VPN state volume is not mounted at /srv')
+
+
 def initialize(endpoint, port):
+    require_state_mount()
     if STATE.exists() or STATE.is_symlink():
         protected(STATE, True)
         for name in ('awg0.conf', 'client.conf', 'settings.json'):
@@ -243,6 +249,7 @@ def up(endpoint, port):
 
 
 def start():
+    require_state_mount()
     protected(STATE, True)
     protected(STATE / 'awg0.conf')
     value = container()

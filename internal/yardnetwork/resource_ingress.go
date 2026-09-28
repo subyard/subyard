@@ -59,8 +59,13 @@ func (preview IngressPreview) ValidateRollback(closure IngressPreview, contract 
 		closure.Before.Fingerprint != closure.After.Fingerprint {
 		return errors.New("resource ingress rollback left a proxy or ownership marker")
 	}
-	actual := closure.Before
-	if err := scopedResourceIngressPlan(actual, preview.Target); err != nil {
+	return validateResourceIngressRemoval(closure.Before, preview.Target, contract)
+}
+
+// Shutdown and rollback may finish an interrupted closure, but cannot repair
+// unrelated target drift under resource-operation authority.
+func validateResourceIngressRemoval(actual Plan, target Yard, contract resource.ProxyContract) error {
+	if err := scopedResourceIngressPlan(actual, target); err != nil {
 		return err
 	}
 	if !actual.Changed {
@@ -68,15 +73,15 @@ func (preview IngressPreview) ValidateRollback(closure IngressPreview, contract 
 	}
 	guestPort, valid := contract.GuestUDPPort()
 	if !valid || contract.AddressPolicy != resource.ProxyAddressOwnerIPv4UDP ||
-		preview.Before.Changed || len(actual.Updates) > 1 || actual.Change != (Change{}) {
-		return errors.New("resource ingress rollback has unapproved network effects")
+		len(actual.Updates) > 1 || actual.Change != (Change{}) {
+		return errors.New("resource ingress removal has unapproved network effects")
 	}
 	expectedPolicy := actual.Before.Policy
 	expectedPolicy.Bindings = slices.Clone(expectedPolicy.Bindings)
 	removedApproval := false
 	for index := range expectedPolicy.Bindings {
 		binding := &expectedPolicy.Bindings[index]
-		if binding.Yard != preview.Target {
+		if binding.Yard != target {
 			continue
 		}
 		binding.ApprovedIngress = slices.Clone(binding.ApprovedIngress)
@@ -92,30 +97,30 @@ func (preview IngressPreview) ValidateRollback(closure IngressPreview, contract 
 		}
 	}
 	if !removedApproval {
-		return errors.New("resource ingress rollback has no approved route to close")
+		return errors.New("resource ingress removal has no approved route to close")
 	}
 	expectedPolicy.Revision++
 	if !reflect.DeepEqual(actual.Policy, expectedPolicy) {
-		return errors.New("resource ingress rollback would change network policy")
+		return errors.New("resource ingress removal would change network policy")
 	}
 	if !actual.Physical {
 		if len(actual.Updates) != 0 {
-			return errors.New("resource ingress rollback has unapproved network effects")
+			return errors.New("resource ingress removal has unapproved network effects")
 		}
 		return nil // Another owned route may still require the same guest UDP ACL port.
 	}
 	if len(actual.Updates) != 1 {
-		return errors.New("resource ingress rollback has unapproved network effects")
+		return errors.New("resource ingress removal has unapproved network effects")
 	}
 	update := actual.Updates[0]
 	current := update.Yard.ACL
 	wanted := update.ACL
-	if update.Yard.Yard != preview.Target || update.RemoveACL ||
+	if update.Yard.Yard != target || update.RemoveACL ||
 		!maps.Equal(update.NIC, update.Yard.ProfileDevices["eth0"]) ||
 		update.Access != update.Yard.ProjectConfig["restricted.networks.access"] ||
 		!current.Exists || !wanted.Exists || current.Name != wanted.Name || current.ETag != wanted.ETag ||
 		!maps.Equal(current.Config, wanted.Config) || !slices.Equal(current.Egress, wanted.Egress) {
-		return errors.New("resource ingress rollback would change more than the target ACL")
+		return errors.New("resource ingress removal would change more than the target ACL")
 	}
 	allowance := Rule{Action: "allow", State: "enabled", Protocol: "udp", DestinationPort: strconv.Itoa(guestPort)}
 	removed := false
@@ -128,7 +133,7 @@ func (preview IngressPreview) ValidateRollback(closure IngressPreview, contract 
 		remaining = append(remaining, rule)
 	}
 	if !removed || !slices.Equal(remaining, wanted.Ingress) {
-		return errors.New("resource ingress rollback would change unrelated ACL rules")
+		return errors.New("resource ingress removal would change unrelated ACL rules")
 	}
 	return nil
 }
@@ -163,6 +168,9 @@ func (s Service) PreviewResourceIngress(ctx context.Context, yards []Yard, targe
 	}
 	if err := scopedResourceIngressPlan(before, target); err != nil {
 		return IngressPreview{}, err
+	}
+	if up && before.Changed {
+		return IngressPreview{}, fmt.Errorf("resource ingress bring-up requires a converged network policy: %w", ErrNotConverged)
 	}
 	index := -1
 	for i := range snapshot.Yards {
@@ -245,6 +253,11 @@ func (s Service) PreviewResourceIngress(ctx context.Context, yards []Yard, targe
 	}
 	if err := scopedResourceIngressPlan(after, target); err != nil {
 		return IngressPreview{}, err
+	}
+	if !up {
+		if err := validateResourceIngressRemoval(after, target, contract); err != nil {
+			return IngressPreview{}, err
+		}
 	}
 	return IngressPreview{Before: before, After: after, Target: target}, nil
 }
