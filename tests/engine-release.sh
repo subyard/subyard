@@ -116,6 +116,8 @@ jq -e '.schemaVersion == 1 and .kind == "runtime" and .version == "1.0.0-test" a
   || fail 'runtime bundle manifest is incompatible'
 bundle_list="$TMP/runtime-bundle.list"
 tar -tzf "$bundle_one" > "$bundle_list"
+! grep -Eq '^\./config/profiles/[^/]+/tests/' "$bundle_list" \
+  || fail 'runtime bundle contains profile-owned tests'
 grep -Fxq './bin/yard' "$bundle_list" \
   && grep -Fxq './bin/yard-engine' "$bundle_list" \
   && grep -Fxq './scripts/install-runtime-release.sh' "$bundle_list" \

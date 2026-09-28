@@ -32,5 +32,7 @@ jobs:
           shellcheck -x -S warning bin/yard completions/yard.bash "${shell_files[@]}"
       - name: Yard-safe verification gate
         run: ./tests/run.sh
+      - name: Profile-owned host-free checks
+        run: bash dev/test-profiles.sh
       - name: Real local crypto and OpenSSH adapter contracts
         run: bash tests/real-host/adapter-contracts.sh

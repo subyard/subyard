@@ -91,7 +91,7 @@ check_go_race() {
   local mask
   for mask in 0002 0022 0077; do
     printf 'Go race tests: umask=%s\n' "$mask"
-    (umask "$mask"; go -C "$ROOT" test -race -count=1 ./...)
+    (umask "$mask"; go -C "$ROOT" test -race -count=1 ./cmd/... ./internal/...)
   done
 }
 
@@ -100,7 +100,7 @@ run_check go-toolchain command -v go
 CURRENT_SUITE=go
 printf 'SUITE go\n'
 run_check gofmt check_format
-run_check go-vet go -C "$ROOT" vet ./...
+run_check go-vet go -C "$ROOT" vet ./cmd/... ./internal/...
 run_check go-race check_go_race
 run_check go-fuzz go -C "$ROOT" test ./internal/command -run '^$' -fuzz '^FuzzParseDoesNotPanic$' -fuzztime=1000x
 run_check build "$ROOT/dev/build-engine.sh"

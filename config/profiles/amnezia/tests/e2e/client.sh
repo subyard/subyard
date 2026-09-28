@@ -3,7 +3,7 @@
 # The synthetic client configuration is transferred by the controller, never printed here.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 CONFIG_DIR=/var/tmp/subyard-amnezia-client
 CONFIG="$CONFIG_DIR/client.conf"
 CONTAINER=subyard-amnezia-e2e-client

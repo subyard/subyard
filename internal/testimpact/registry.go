@@ -37,9 +37,23 @@ func BuiltInRegistry() (Registry, error) {
 			Rationale:     "required core host-free merge gate",
 		},
 		{
+			ID:            "profiles:host-free",
+			Tier:          "T1",
+			Argv:          []string{"bash", "dev/test-profiles.sh"},
+			BudgetSeconds: 180,
+			Rationale:     "host-free checks owned by source profiles",
+		},
+		{
+			ID:            "profiles:e2e",
+			Tier:          "T3",
+			Argv:          []string{"bash", "dev/test-profiles.sh", "--e2e"},
+			BudgetSeconds: 3600,
+			Rationale:     "live acceptance owned by source profiles; requires an allocated slot",
+		},
+		{
 			ID:            "host-free:all",
 			Tier:          "T2",
-			Members:       []string{"host-free:core", "veranda:build", "veranda:check", "veranda:rust-test", "veranda:test"},
+			Members:       []string{"host-free:core", "profiles:host-free", "veranda:build", "veranda:check", "veranda:rust-test", "veranda:test"},
 			BudgetSeconds: 2700,
 			Rationale:     "universal host-free fallback including Veranda",
 		},
@@ -72,7 +86,6 @@ func BuiltInRegistry() (Registry, error) {
 
 	shellTests := []string{
 		"agent-e2e", "agent-selection", "aiobserver-provision", "aiobserver-proxy", "android-provision-check", "build-engine",
-		"amnezia-profile",
 		"ccusage-provision", "cli-contract", "codex-agent-defaults", "codex-agent-provision",
 		"command-registry", "create-subyard-docker-apparmor", "docker-forwarding-convergence",
 		"emulator-process-control",

@@ -378,6 +378,7 @@ func universalFallback(changes []testimpact.Change, resultErrors []testimpact.Re
 func emergencyHostFreeChecks() []testimpact.CheckRecommendation {
 	return []testimpact.CheckRecommendation{
 		{ID: "host-free:core", Tier: "T2", BudgetSeconds: 1800, Rationale: "required core host-free merge gate"},
+		{ID: "profiles:host-free", Tier: "T1", BudgetSeconds: 180, Rationale: "host-free checks owned by source profiles"},
 		{ID: "veranda:build", Tier: "T1", BudgetSeconds: 180, Rationale: "Veranda production build"},
 		{ID: "veranda:check", Tier: "T1", BudgetSeconds: 180, Rationale: "Veranda static checks"},
 		{ID: "veranda:rust-test", Tier: "T1", BudgetSeconds: 300, Rationale: "Veranda Rust tests without desktop dependencies"},

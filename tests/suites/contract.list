@@ -1,6 +1,5 @@
 # CLI, context, registry, convergence and policy contracts.
 agent-e2e.sh
-amnezia-profile.sh
 cli-contract.sh
 command-registry.sh
 create-subyard-docker-apparmor.sh

@@ -17,8 +17,7 @@ import unittest
 from unittest import mock
 
 
-ROOT = Path(__file__).resolve().parents[2]
-PROFILE = ROOT / 'config/profiles/amnezia'
+PROFILE = Path(__file__).resolve().parents[1]
 
 
 def load_module(name, path):

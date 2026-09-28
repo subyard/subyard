@@ -1,4 +1,4 @@
-package config
+package amnezia_test
 
 import (
 	"os"
@@ -6,12 +6,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestAmneziaDedicatedPreset(t *testing.T) {
-	root := filepath.Clean(filepath.Join("..", ".."))
+	root := filepath.Clean(filepath.Join("..", "..", "..", ".."))
 	preset, err := os.ReadFile(filepath.Join(root, "config/profiles/amnezia/yard.env"))
 	if err != nil {
 		t.Fatal(err)
@@ -37,9 +38,12 @@ func TestAmneziaDedicatedPreset(t *testing.T) {
 			home := testkit.TempDir(t)
 			configHome := filepath.Join(home, "config")
 			writeFixture(t, filepath.Join(configHome, "yards", test.yard, "config.env"), test.content)
-			command := cloneStringMap(test.command)
+			command := make(map[string]string)
+			for key, value := range test.command {
+				command[key] = value
+			}
 			command["SUBYARD_CONFIG_HOME"] = configHome
-			loaded, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: test.yard, DisablePrivate: true, Environment: command})
+			loaded, err := config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: test.yard, DisablePrivate: true, Environment: command})
 			if test.wantError {
 				if err == nil {
 					t.Fatal("unsafe VPN selection accepted")
@@ -60,4 +64,12 @@ func TestAmneziaDedicatedPreset(t *testing.T) {
 			}
 		})
 	}
+}
+
+func writeFixture(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, path, []byte(content), 0o600)
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run only on an allocated owner; retain the fixture for same-lease data-path checks.
 set -euo pipefail
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 phase="${1:-init}"
 die() { printf 'amnezia-profile-e2e: %s\n' "$*" >&2; exit 1; }
 [ -n "${SUBYARD_E2E_VM:-}" ] || die 'run through dev/agent-e2e.sh'
@@ -19,7 +19,9 @@ export SUBYARD_OPERATOR_HOME="$HOME" SUBYARD_NO_AUDIT=1 SUBYARD_KEYS_SYSTEMD_SKI
 export MIN_DISK_GIB=1
 # shellcheck source=scripts/lib/host.sh
 . "$root/scripts/lib/host.sh"
-"$root/dev/build-engine.sh"
+# Guest source trees are disposable across reboots; keep this lease's engine on disk.
+"$root/dev/build-engine.sh" --output "$fixture/yard"
+install -D -m 0755 "$fixture/yard" "$root/.build/yard"
 yard() { "$root/.build/yard" -Y vpn-e2e "$@"; }
 guest() { incus exec yard-vpn-e2e --project subyard-vpn-e2e -- "$@"; }
 signature() {

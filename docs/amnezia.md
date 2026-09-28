@@ -124,7 +124,7 @@ recovery from loss of the VPS without an external backup.
 On an available allocated two-VM test slot, run:
 
 ```sh
-dev/e2e/amnezia-acceptance.sh --slot N
+config/profiles/amnezia/tests/e2e/acceptance.sh --slot N
 ```
 
 The check creates a dedicated VPN VM on the first test host and a compatible upstream AmneziaWG

@@ -2,12 +2,12 @@
 # Exercise the owner and client on one disposable two-VM lease and one source bundle.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd -P)"
 # shellcheck source=dev/agent-e2e.sh
 . "$ROOT/dev/agent-e2e.sh"
 
 lane=full
-usage() { printf 'Usage: dev/e2e/amnezia-acceptance.sh --slot N [--lane full|reboot|recovery]\n'; }
+usage() { printf 'Usage: config/profiles/amnezia/tests/e2e/acceptance.sh --slot N [--lane full|reboot|recovery]\n'; }
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --slot)
@@ -32,6 +32,12 @@ diagnose_failure() {
   local rc="$1"
   if [ "$rc" -ne 0 ] && [ -n "${GUEST_DIRS[1]:-}" ]; then
     printf 'amnezia_acceptance_failure_exit=%s\n' "$rc" >&2
+    guest 1 timeout 15 free -b >&2 || true
+    guest 1 timeout 15 sh -c '
+      journalctl -k -b --no-pager -o short-iso \
+        | grep -iE "out of memory|oom-kill|killed process" | tail -n 30
+      journalctl -b -u systemd-oomd --no-pager -n 20
+    ' >&2 || true
     guest 1 timeout 15 systemctl show subyard-power-reconcile.service \
       --property=LoadState --property=ActiveState --property=SubState \
       --property=Result --property=ExecMainStatus \
@@ -40,6 +46,10 @@ diagnose_failure() {
       --no-pager -n 60 >&2 || true
     guest 1 timeout 15 incus list yard-vpn-e2e --project subyard-vpn-e2e \
       --format csv -c ns >&2 || true
+    guest 1 timeout 15 incus info yard-vpn-e2e --project subyard-vpn-e2e \
+      --show-log >&2 || true
+    guest 1 timeout 15 incus console yard-vpn-e2e --project subyard-vpn-e2e \
+      --show-log | tail -n 100 >&2 || true
   fi
   return "$rc"
 }
@@ -65,27 +75,28 @@ prepare_guest 2 "$bundle" "$bundle_hash"
 owner_phase() {
   local phase="$1" directory="${GUEST_DIRS[1]}"
   printf 'amnezia_acceptance_stage=owner-%s\n' "$phase"
-  write_guest_command 1 "$directory" bash dev/e2e/amnezia-profile.sh "$phase" \
+  write_guest_command 1 "$directory" bash config/profiles/amnezia/tests/e2e/owner.sh "$phase" \
     | guest 1 dd "of=$directory/run.sh" status=none
   guest 1 chmod 0700 "$directory/run.sh" </dev/null
   guest 1 "$directory/run.sh" </dev/null
+  printf 'amnezia_acceptance_stage=owner-%s result=pass\n' "$phase"
 }
 
 client_probe() {
   printf 'amnezia_acceptance_stage=client-probe\n'
-  guest 2 env SUBYARD_E2E_VM=2 bash "${GUEST_DIRS[2]}/src/dev/e2e/amnezia-client.sh" \
+  guest 2 env SUBYARD_E2E_VM=2 bash "${GUEST_DIRS[2]}/src/config/profiles/amnezia/tests/e2e/client.sh" \
     probe --owner-ip "${VM_IP[1]}" --owner-port 22 --private-ip "${VM_IP[2]}" </dev/null
 }
 
 client_denied() {
   printf 'amnezia_acceptance_stage=client-denied\n'
-  guest 2 env SUBYARD_E2E_VM=2 bash "${GUEST_DIRS[2]}/src/dev/e2e/amnezia-client.sh" \
+  guest 2 env SUBYARD_E2E_VM=2 bash "${GUEST_DIRS[2]}/src/config/profiles/amnezia/tests/e2e/client.sh" \
     denied </dev/null
 }
 
 client_reboot_traffic() {
   printf 'amnezia_acceptance_stage=client-reboot-traffic\n'
-  guest 2 env SUBYARD_E2E_VM=2 bash "${GUEST_DIRS[2]}/src/dev/e2e/amnezia-client.sh" \
+  guest 2 env SUBYARD_E2E_VM=2 bash "${GUEST_DIRS[2]}/src/config/profiles/amnezia/tests/e2e/client.sh" \
     reboot-traffic </dev/null
 }
 
@@ -133,11 +144,16 @@ reboot_owner() {
 }
 
 verify_boot_result() {
-  local state started
+  local state started rc
+  printf 'amnezia_acceptance_stage=verify-boot-result\n'
   state="$(guest 1 systemctl show subyard-power-reconcile.service \
     --property=LoadState --property=ActiveState --property=SubState \
     --property=Result --property=ExecMainStatus \
-    --property=ExecMainStartTimestampMonotonic </dev/null)"
+    --property=ExecMainStartTimestampMonotonic </dev/null)" || {
+      rc=$?
+      printf 'amnezia_acceptance_boot_state_read_exit=%s\n' "$rc" >&2
+      return "$rc"
+    }
   printf '%s\n' "$state"
   started="$(sed -n 's/^ExecMainStartTimestampMonotonic=//p' <<<"$state")"
   grep -Fxq 'LoadState=loaded' <<<"$state" \
@@ -169,7 +185,7 @@ if [ "$lane" = recovery ]; then
   client_probe
   owner_phase recovery-agent-loss
   client_probe
-  guest 2 env SUBYARD_E2E_VM=2 bash "${GUEST_DIRS[2]}/src/dev/e2e/amnezia-client.sh" cleanup </dev/null
+  guest 2 env SUBYARD_E2E_VM=2 bash "${GUEST_DIRS[2]}/src/config/profiles/amnezia/tests/e2e/client.sh" cleanup </dev/null
   printf 'amnezia_acceptance=result-pass source_bundle_sha256=%s lane=%s\n' "$bundle_hash" "$lane"
   exit 0
 fi
@@ -208,5 +224,5 @@ reboot_owner
 owner_phase verify-disabled
 verify_boot_result
 client_denied
-guest 2 env SUBYARD_E2E_VM=2 bash "${GUEST_DIRS[2]}/src/dev/e2e/amnezia-client.sh" cleanup </dev/null
+guest 2 env SUBYARD_E2E_VM=2 bash "${GUEST_DIRS[2]}/src/config/profiles/amnezia/tests/e2e/client.sh" cleanup </dev/null
 printf 'amnezia_acceptance=result-pass source_bundle_sha256=%s lane=%s\n' "$bundle_hash" "$lane"

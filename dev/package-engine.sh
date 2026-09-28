@@ -110,6 +110,7 @@ runtime_extras=(
 } | sort -zu > "$runtime_list"
 while IFS= read -r -d '' relative; do
   [ -e "$REPO/$relative" ] || continue
+  case "$relative" in config/profiles/*/tests/*) continue ;; esac
   case "$relative" in
     scripts/*|config/*|completions/*) ;;
     *) printf 'package-engine: runtime allowlist escaped: %s\n' "$relative" >&2; exit 1 ;;

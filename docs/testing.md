@@ -34,7 +34,18 @@ never overwrite each other's results. Logs stay local until explicitly removed;
 they are not uploaded by CI. Agents should read the summary first and open only
 the relevant log when a check fails.
 
-GitHub CI runs the full core gate, warning-level ShellCheck and
+Profile-specific assertions live in `config/profiles/<name>/tests/`. Each profile owns its
+host-free `tests/run.sh` and any live acceptance scripts. Run all profile host-free checks with
+`bash dev/test-profiles.sh`, or invoke one profile's runner directly. Core tests exercise generic
+APIs with synthetic fixtures; profile tests check their preset and runtime through those APIs.
+Profile test directories are excluded from runtime release bundles.
+For profile-owned live checks, use `bash dev/test-profiles.sh --e2e --slot N` or a
+profile's `tests/e2e/acceptance.sh` directly, following the VM allocation guide below.
+The shared runner discovers entrypoints and forwards arguments; each profile owns its
+fixtures, assertions and lease cleanup. The impact selector recommends this live entrypoint
+for changes to profile E2E tests.
+
+GitHub CI runs the full core gate, profile host-free checks, warning-level ShellCheck and
 `bash tests/real-host/adapter-contracts.sh` in one `verify` job on every branch push and pull request;
 tag pushes are reserved for the independent Release workflow. Native Paseo uses the same branch/PR
 trigger boundary, while Release builds its native artifacts independently.

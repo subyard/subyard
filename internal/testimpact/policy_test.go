@@ -59,7 +59,7 @@ func TestRegistryContainsRequiredChecksAndFixedCommands(t *testing.T) {
 	if !ok {
 		t.Fatal("registry is missing host-free:all")
 	}
-	wantMembers := []string{"host-free:core", "veranda:build", "veranda:check", "veranda:rust-test", "veranda:test"}
+	wantMembers := []string{"host-free:core", "profiles:host-free", "veranda:build", "veranda:check", "veranda:rust-test", "veranda:test"}
 	if all.Tier != "T2" || len(all.Argv) != 0 || !reflect.DeepEqual(all.Members, wantMembers) {
 		t.Fatalf("host-free:all = %#v, want non-executing T2 composite with members %v", all, wantMembers)
 	}
@@ -67,7 +67,7 @@ func TestRegistryContainsRequiredChecksAndFixedCommands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Expand(host-free:all) error = %v", err)
 	}
-	wantExpanded := []string{"host-free:core", "veranda:build", "veranda:check", "veranda:rust-test", "veranda:test"}
+	wantExpanded := []string{"host-free:core", "profiles:host-free", "veranda:build", "veranda:check", "veranda:rust-test", "veranda:test"}
 	if got := checkIDs(expanded); !reflect.DeepEqual(got, wantExpanded) {
 		t.Fatalf("Expand(host-free:all) IDs = %v, want %v", got, wantExpanded)
 	}
@@ -626,6 +626,9 @@ func TestPolicyRealHostTestPathsSelectOwningChecksWithoutRiskDomains(t *testing.
 		{"tests/real-host/orca-projects.sh", "e2e:orca-projects"},
 		{"tests/real-host/orca-projects-helper.py", "e2e:orca-projects"},
 		{"tests/orca_registration/test_reconcile.py", "shell:orca-profile-resource"},
+		{"config/profiles/example/tests/test_runtime.py", "profiles:host-free"},
+		{"config/profiles/example/tests/e2e/acceptance.sh", "profiles:e2e"},
+		{"dev/test-profiles.sh", "profiles:host-free"},
 		{"tests/real-host/ssh-credential-peer.sh", "e2e:ssh-credential-peer"},
 		{"tests/real-host/ssh-rpc.sh", "e2e:ssh-rpc"},
 	}

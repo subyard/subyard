@@ -198,12 +198,16 @@ func TestCriticalShellCallerGraphIsExact(t *testing.T) {
 func TestShellTestsStayOutsideProductionTrees(t *testing.T) {
 	root := filepath.Clean(filepath.Join("..", ".."))
 	productionCommands := map[string]bool{
-		filepath.Join(root, "dev", "test-impact.sh"): true,
+		filepath.Join(root, "dev", "test-impact.sh"):   true,
+		filepath.Join(root, "dev", "test-profiles.sh"): true,
 	}
 	for _, directory := range []string{"scripts", "config", "dev"} {
 		err := filepath.WalkDir(filepath.Join(root, directory), func(path string, entry os.DirEntry, err error) error {
 			if err != nil {
 				return err
+			}
+			if entry.IsDir() && profileTestPath(path) {
+				return filepath.SkipDir
 			}
 			if productionCommands[path] {
 				return nil
@@ -425,6 +429,15 @@ func shellFiles(t *testing.T, root string) []string {
 	return sourceFiles(t, []string{root}, func(path string) bool { return strings.HasSuffix(path, ".sh") })
 }
 
+func profileTestPath(path string) bool {
+	_, relative, found := strings.Cut(filepath.ToSlash(path), "/config/profiles/")
+	if !found {
+		return false
+	}
+	_, relative, found = strings.Cut(relative, "/")
+	return found && (relative == "tests" || strings.HasPrefix(relative, "tests/"))
+}
+
 func sourceFiles(t *testing.T, roots []string, include func(string) bool) []string {
 	t.Helper()
 	var result []string
@@ -435,6 +448,9 @@ func sourceFiles(t *testing.T, roots []string, include func(string) bool) []stri
 			}
 			if err != nil {
 				return err
+			}
+			if entry.IsDir() && profileTestPath(path) {
+				return filepath.SkipDir
 			}
 			if !entry.IsDir() && entry.Type().IsRegular() && include(path) {
 				result = append(result, path)

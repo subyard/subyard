@@ -91,4 +91,22 @@ summary="$(summary_path syntax)"
 awk -F '\t' '$1 == "check" && $3 == "syntax" && $4 == "failed" { found=1 }
   END { exit !found }' "$summary" || fail 'syntax failure missing from summary'
 ! grep -q 'RUN go-toolchain' "$tmp/syntax.out" || fail 'runner continued after syntax failure'
-printf 'ok: runner preserves results, logs, fail-fast and failure exit codes\n'
+
+# Profiles own their test entrypoints; discovery does not require core registration.
+cp "$ROOT/dev/test-profiles.sh" "$fixture/dev/test-profiles.sh"
+mkdir -p "$fixture/config/profiles/example/tests"
+printf '#!/usr/bin/env bash\nprintf "profile check ran\\n"\n' \
+  > "$fixture/config/profiles/example/tests/run.sh"
+bash "$fixture/dev/test-profiles.sh" > "$tmp/profiles.out" 2>&1
+grep -q 'profile check ran' "$tmp/profiles.out" || fail 'profile tests were not discovered'
+printf '#!/usr/bin/env bash\nexit 29\n' > "$fixture/config/profiles/example/tests/run.sh"
+rc=0
+bash "$fixture/dev/test-profiles.sh" > "$tmp/profiles-failure.out" 2>&1 || rc=$?
+[ "$rc" -eq 29 ] || fail 'profile runner hid the original failure'
+mkdir -p "$fixture/config/profiles/example/tests/e2e"
+printf '#!/usr/bin/env bash\nprintf "profile e2e %%s\\n" "$*"\n' \
+  > "$fixture/config/profiles/example/tests/e2e/acceptance.sh"
+bash "$fixture/dev/test-profiles.sh" --e2e --slot 7 > "$tmp/profiles-e2e.out" 2>&1
+grep -Fxq 'profile e2e --slot 7' "$tmp/profiles-e2e.out" \
+  || fail 'profile E2E selection or arguments were lost'
+printf 'ok: runners preserve results, logs, fail-fast and failure exit codes\n'
