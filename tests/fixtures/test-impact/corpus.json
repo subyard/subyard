@@ -143,11 +143,11 @@
       "id": "history-13",
       "changes": [
         {"status":"M","similarity":null,"old_path":"config/profiles/orca/resources/orca/handler.sh","new_path":"config/profiles/orca/resources/orca/handler.sh","old_mode":"100755","new_mode":"100755"},
-        {"status":"M","similarity":null,"old_path":"tests/orca-profile-resource.sh","new_path":"tests/orca-profile-resource.sh","old_mode":"100755","new_mode":"100755"},
-        {"status":"M","similarity":null,"old_path":"tests/real-host/orca-resource.sh","new_path":"tests/real-host/orca-resource.sh","old_mode":"100755","new_mode":"100755"}
+        {"status":"M","similarity":null,"old_path":"config/profiles/orca/tests/orca-profile-resource.sh","new_path":"config/profiles/orca/tests/orca-profile-resource.sh","old_mode":"100755","new_mode":"100755"},
+        {"status":"M","similarity":null,"old_path":"config/profiles/orca/tests/e2e/orca-resource.sh","new_path":"config/profiles/orca/tests/e2e/orca-resource.sh","old_mode":"100755","new_mode":"100755"}
       ],
       "category": "leaf", "expected_full": false,
-      "required_check_sets": ["e2e:orca-resource", "go:resource", "host-free:core", "p0:profile-resource", "shell:orca-profile-resource", "shell:profile-resource-lifecycle", "shell:provision-profile-check"],
+      "required_check_sets": ["e2e:orca-resource", "go:resource", "p0:profile-resource", "profiles:host-free", "shell:profile-resource-lifecycle", "shell:provision-profile-check"],
       "required_e2e_checks": ["e2e:orca-resource", "p0:profile-resource"]
     },
     {
@@ -268,10 +268,10 @@
       "id": "history-26",
       "changes": [
         {"status":"M","similarity":null,"old_path":"config/profiles/subyard-dev/provision.sh","new_path":"config/profiles/subyard-dev/provision.sh","old_mode":"100755","new_mode":"100755"},
-        {"status":"M","similarity":null,"old_path":"tests/subyard-dev-provision.sh","new_path":"tests/subyard-dev-provision.sh","old_mode":"100755","new_mode":"100755"}
+        {"status":"M","similarity":null,"old_path":"config/profiles/subyard-dev/tests/subyard-dev-provision.sh","new_path":"config/profiles/subyard-dev/tests/subyard-dev-provision.sh","old_mode":"100755","new_mode":"100755"}
       ],
       "category": "leaf", "expected_full": false,
-      "required_check_sets": ["go:resource", "host-free:core", "p0:profile-resource", "shell:profile-resource-lifecycle", "shell:provision-profile-check"],
+      "required_check_sets": ["go:resource", "p0:profile-resource", "profiles:host-free", "shell:profile-resource-lifecycle", "shell:provision-profile-check"],
       "required_e2e_checks": ["p0:profile-resource"]
     },
     {
@@ -287,14 +287,14 @@
         {"status":"M","similarity":null,"old_path":"config/profiles/openclaw/provision.sh","new_path":"config/profiles/openclaw/provision.sh","old_mode":"100755","new_mode":"100755"}
       ],
       "category": "leaf", "expected_full": false,
-      "required_check_sets": ["go:resource", "p0:profile-resource", "shell:openclaw-provision-check", "shell:openclaw-resource-protocol", "shell:profile-resource-lifecycle", "shell:provision-profile-check"],
+      "required_check_sets": ["go:resource", "p0:profile-resource", "profiles:host-free", "shell:profile-resource-lifecycle", "shell:provision-profile-check"],
       "required_e2e_checks": ["p0:profile-resource"]
     },
     {
       "id": "history-29",
       "changes": [{"status":"M","similarity":null,"old_path":"config/profiles/openclaw/provision.sh","new_path":"config/profiles/openclaw/provision.sh","old_mode":"100755","new_mode":"100755"}],
       "category": "leaf", "expected_full": false,
-      "required_check_sets": ["go:resource", "p0:profile-resource", "shell:openclaw-provision-check", "shell:openclaw-resource-protocol", "shell:profile-resource-lifecycle", "shell:provision-profile-check"],
+      "required_check_sets": ["go:resource", "p0:profile-resource", "profiles:host-free", "shell:profile-resource-lifecycle", "shell:provision-profile-check"],
       "required_e2e_checks": ["p0:profile-resource"]
     },
     {

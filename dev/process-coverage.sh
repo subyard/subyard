@@ -51,6 +51,7 @@ bundle_hash="$(sha256sum "$bundle" | awk '{print $1}')"
 
 cat > "$shell_hook" <<'EOF'
 case "$0" in
+  "$SUBYARD_COVERAGE_ROOT"/config/profiles/*/tests/*) ;;
   "$SUBYARD_COVERAGE_ROOT"/scripts/*|"$SUBYARD_COVERAGE_ROOT"/config/profiles/*|"$SUBYARD_COVERAGE_ROOT"/config/agents/*)
     printf '%s\n' "${0#"$SUBYARD_COVERAGE_ROOT"/}" >> "$SUBYARD_SHELL_COVERAGE_LOG"
     ;;
@@ -80,6 +81,19 @@ while IFS= read -r test_name; do
   printf '  [ .. ] process contract tests/%s\n' "$test_name"
   YARD_ENGINE_PATH="$TEMP/yard" bash "$ROOT/tests/$test_name"
 done < "$ROOT/tests/suites/process.list"
+for process_list in "$ROOT"/config/profiles/*/tests/process.list; do
+  [ -f "$process_list" ] || continue
+  profile_tests="${process_list%/process.list}"
+  while IFS= read -r test_name; do
+    case "$test_name" in ''|'# '*) continue ;; esac
+    [[ "$test_name" != /* && "$test_name" != *'..'* && "$test_name" != */* ]] \
+      || die "invalid profile process test path in ${process_list#"$ROOT/"}"
+    test_path="$profile_tests/$test_name"
+    [ -f "$test_path" ] || die "missing profile process test ${test_path#"$ROOT/"}"
+    printf '  [ .. ] process contract %s/%s\n' "${profile_tests#"$ROOT/"}" "$test_name"
+    YARD_ENGINE_PATH="$TEMP/yard" bash "$test_path"
+  done < "$process_list"
+done
 unset BASH_ENV GOCOVERDIR SUBYARD_COVERAGE_ROOT SUBYARD_SHELL_COVERAGE_LOG
 
 go tool covdata merge -i="$package_cov,$process_cov" -o "$merged_cov"

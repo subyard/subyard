@@ -146,12 +146,14 @@ grep -Fxq './bin/yard' "$bundle_list" \
   && grep -Fxq './config/agents/codex/provision.sh' "$bundle_list" \
   && grep -Fxq './config/agents/aiobserver/provision.sh' "$bundle_list" \
   && grep -Fxq './scripts/lib/ai-observer-proxy.sh' "$bundle_list" \
-  && grep -Fxq './config/profiles/hermes/resources/dashboard.res' "$bundle_list" \
-  && grep -Fxq './config/profiles/hermes/resources/dashboard/handler.sh' "$bundle_list" \
-  && grep -Fxq './config/profiles/hermes/yard.env' "$bundle_list" \
   || fail 'runtime bundle does not contain the complete launcher contract'
-! grep -Fxq './config/profiles/hermes/hermes-release-resolve.py' "$bundle_list" \
-  || fail 'runtime bundle contains the retired Hermes release resolver'
+# Every profile owns its asset inventory; packaging must preserve all runtime
+# inputs, including hooks, regardless of the user's selected profiles.
+while IFS= read -r -d '' profile_asset; do
+  case "$profile_asset" in */tests/*|*.go|*/go.mod|*/go.sum) continue ;; esac
+  grep -Fxq "./$profile_asset" "$bundle_list" \
+    || fail "runtime bundle omitted profile asset: $profile_asset"
+done < <(find config/profiles -type f -print0)
 grep -Fxq './runtime-files.sha256' "$bundle_list" \
   || fail 'runtime bundle exact file manifest is missing'
 ! grep -Fq "$(basename "$staging_canary")" "$bundle_list" \

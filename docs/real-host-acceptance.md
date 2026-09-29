@@ -61,7 +61,7 @@ Temporary shared SSH-agent access has a focused disposable-host check:
 ```sh
 dev/agent-e2e.sh --slot "$slot" --purpose orca-ssh-agent --vm 1 -- \
   env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_SSH_AGENT=1 \
-  bash tests/real-host/orca-bootstrap.sh
+  bash config/profiles/orca/tests/e2e/orca-bootstrap.sh
 ```
 
 It unlocks a generated encrypted key through a real terminal and checks Git pushes

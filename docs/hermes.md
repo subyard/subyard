@@ -109,7 +109,7 @@ dev/agent-e2e.sh --prepare
 dev/agent-e2e.sh --status
 slot=1  # Choose an available configured slot from status.
 dev/agent-e2e.sh --slot "$slot" --purpose hermes-profile --vm both -- \
-  ./dev/e2e/hermes-profile.sh
+  ./config/profiles/hermes/tests/e2e/hermes-profile.sh
 ```
 
 Upstream references:

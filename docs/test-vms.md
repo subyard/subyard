@@ -237,7 +237,7 @@ For Android acceptance, request **one** `android-test` VM (8 GiB RAM / 40 GiB di
 
 ```sh
 dev/agent-e2e.sh --slot "$slot" --type android-test --purpose android-pool-runtime -- \
-  bash dev/e2e/android-pool-runtime.sh
+  bash config/profiles/android/tests/e2e/android-pool-runtime.sh
 ```
 
 A single VM can host the Android yard and both emulator pool slots. A pair is needed for tests
@@ -251,12 +251,12 @@ devices still run concurrently with their configured RAM and screen dimensions.
 The attached viewer check deliberately delays scrcpy's server launch by 20 seconds to verify
 bounded startup waiting on a real device, without allocating another emulator.
 
-After a viewer-only change, pass `--lane viewer` to `dev/e2e/android-pool-runtime.sh`.
+After a viewer-only change, pass `--lane viewer` to `config/profiles/android/tests/e2e/android-pool-runtime.sh`.
 It checks owner and yard viewers, delayed startup, attachment without lease renewal or release,
 and a standalone viewer alongside the borrowed lease, then cleans up. It uses the same single VM.
 
 After a recovery change, pass `--lane recovery` to
-`dev/e2e/android-pool-runtime.sh`. This lane performs its own fresh setup and image preparation,
+`config/profiles/android/tests/e2e/android-pool-runtime.sh`. This lane performs its own fresh setup and image preparation,
 then checks viewers, pool and yard restarts, remote owner execution, cache pruning and cleanup.
 It skips the separate L2 builds, concurrent device lifecycle and expiry checks; retain their
 source-specific evidence when those paths are unchanged. The default remains the complete lane.
@@ -452,14 +452,14 @@ Orca has three real-host fixtures. Run each on VM1 of an explicitly selected ava
 
 ```sh
 dev/agent-e2e.sh --slot "$slot" --purpose orca-bootstrap --vm 1 -- \
-  env SUBYARD_E2E_ORCA_BOOTSTRAP=1 bash tests/real-host/orca-bootstrap.sh
+  env SUBYARD_E2E_ORCA_BOOTSTRAP=1 bash config/profiles/orca/tests/e2e/orca-bootstrap.sh
 dev/agent-e2e.sh --slot "$slot" --purpose orca-existing-yard --vm 1 -- \
   env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_EXISTING_YARD=1 \
-  bash tests/real-host/orca-bootstrap.sh
+  bash config/profiles/orca/tests/e2e/orca-bootstrap.sh
 dev/agent-e2e.sh --slot "$slot" --purpose orca-resource --vm 1 -- \
-  env SUBYARD_E2E_ORCA_RESOURCE=1 bash tests/real-host/orca-resource.sh
+  env SUBYARD_E2E_ORCA_RESOURCE=1 bash config/profiles/orca/tests/e2e/orca-resource.sh
 dev/agent-e2e.sh --slot "$slot" --purpose orca-projects --vm 1 -- \
-  env SUBYARD_E2E_ORCA_PROJECTS=1 bash tests/real-host/orca-projects.sh
+  env SUBYARD_E2E_ORCA_PROJECTS=1 bash config/profiles/orca/tests/e2e/orca-projects.sh
 ```
 
 Bootstrap installs a packaged candidate and exercises public commands through a real terminal.
@@ -468,7 +468,7 @@ For the narrow Codex configuration regression, run:
 ```sh
 dev/agent-e2e.sh --slot "$slot" --purpose orca-codex-config --vm 1 -- \
   env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_CODEX_CONFIG=1 \
-  bash tests/real-host/orca-bootstrap.sh
+  bash config/profiles/orca/tests/e2e/orca-bootstrap.sh
 ```
 
 This mode seeds representative TOML runtime additions, verifies that they do not block readiness,
@@ -482,7 +482,7 @@ For Codex permissions across terminal and Orca launches:
 ```sh
 dev/agent-e2e.sh --slot "$slot" --purpose codex-permissions --vm 1 -- \
   env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_CODEX_PERMISSIONS=1 \
-  bash tests/real-host/orca-bootstrap.sh
+  bash config/profiles/orca/tests/e2e/orca-bootstrap.sh
 ```
 
 This focused mode installs the native Codex CLI and stock Orca in a disposable yard.
@@ -496,7 +496,7 @@ For temporary SSH-key access, run the focused current-candidate fixture:
 ```sh
 dev/agent-e2e.sh --slot "$slot" --purpose orca-ssh-agent --vm 1 -- \
   env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_SSH_AGENT=1 \
-  bash tests/real-host/orca-bootstrap.sh
+  bash config/profiles/orca/tests/e2e/orca-bootstrap.sh
 ```
 
 It initializes two isolated yards, starts stock Orca and uses a synthetic encrypted key with a

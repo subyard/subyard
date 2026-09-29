@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestExplicitOwnerIPv4(t *testing.T) {
@@ -526,177 +527,30 @@ func TestLoadRejectsInvalidActionDescriptors(t *testing.T) {
 	}
 }
 
-func TestLoadRepositoryResources(t *testing.T) {
-	root := filepath.Clean(filepath.Join("..", ".."))
+func TestLoadIndexesSyntheticResource(t *testing.T) {
+	root := testkit.TempDir(t)
+	writeTestResource(t, root, "sample", "service", `
+COMMAND=svc
+HANDLER=resources/service/handler.sh
+TITLE="Sample service"
+ACTION="status status read-only not-needed"
+ACTION="up up yard-change reversible"
+ACTION="down down host-change reversible"
+`)
 	registry, err := Load(root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	definitions := registry.Definitions()
-	if len(definitions) == 0 {
-		t.Fatal("repository resources were not found")
+	if len(definitions) != 1 {
+		t.Fatalf("synthetic resource count = %d, want 1", len(definitions))
 	}
-	for _, definition := range definitions {
-		if _, ok := registry.Lookup(definition.Command); !ok {
-			t.Fatalf("resource command is not indexed: %s", definition.Command)
-		}
-		if byName, ok := registry.Lookup(definition.Name); !ok || byName.HandlerPath() != definition.HandlerPath() {
-			t.Fatalf("resource name and command differ: %s", definition.Name)
-		}
-		content, err := os.ReadFile(definition.HandlerPath())
-		if err != nil {
-			t.Fatal(err)
-		}
-		source := string(content)
-		if !strings.Contains(source, "subyard_require_engine_context") ||
-			strings.Contains(source, "subyard_context_load") || strings.Contains(source, "lib/config.sh") {
-			t.Errorf("resource handler does not consume only prepared context: %s", definition.HandlerPath())
-		}
+	definition := definitions[0]
+	if byCommand, ok := registry.Lookup("svc"); !ok || byCommand.HandlerPath() != definition.HandlerPath() {
+		t.Fatalf("resource command is not indexed: %s", definition.Command)
 	}
-}
-
-func TestRepositoryResourceActionMatrix(t *testing.T) {
-	root := filepath.Clean(filepath.Join("..", ".."))
-	registry, err := Load(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	type expectedAction struct {
-		resource string
-		localID  string
-		verb     string
-		effect   domain.ActionEffect
-		impacts  []domain.ActionImpact
-		recovery domain.RecoveryClass
-	}
-	expected := []expectedAction{
-		{resource: "vpn", localID: "up", verb: "up", effect: domain.ActionMutation, impacts: []domain.ActionImpact{domain.ImpactAccess, domain.ImpactHostIncus, domain.ImpactHostNetwork, domain.ImpactSecurity, domain.ImpactSharedWorkload, domain.ImpactTrust}, recovery: domain.RecoveryReversible},
-		{resource: "vpn", localID: "down", verb: "down", effect: domain.ActionMutation, impacts: []domain.ActionImpact{domain.ImpactAccess, domain.ImpactHostIncus, domain.ImpactHostNetwork, domain.ImpactSecurity, domain.ImpactSharedWorkload, domain.ImpactTrust}, recovery: domain.RecoveryReversible},
-		{resource: "vpn", localID: "status", verb: "status", effect: domain.ActionRead, recovery: domain.RecoveryNotNeeded},
-		{resource: "vpn", localID: "is-up", verb: "is-up", effect: domain.ActionRead, recovery: domain.RecoveryNotNeeded},
-		{resource: "emulator", localID: "catalog", verb: "catalog", effect: domain.ActionRead, recovery: domain.RecoveryNotNeeded},
-		{resource: "emulator", localID: "status", verb: "status", effect: domain.ActionRead, recovery: domain.RecoveryNotNeeded},
-		{resource: "emulator", localID: "run", verb: "run", effect: domain.ActionSession, recovery: domain.RecoveryNotNeeded},
-		{resource: "emulator", localID: "acquire", verb: "acquire", effect: domain.ActionBoundedWrite, recovery: domain.RecoveryNotNeeded},
-		{resource: "emulator", localID: "renew", verb: "renew", effect: domain.ActionBoundedWrite, recovery: domain.RecoveryNotNeeded},
-		{resource: "emulator", localID: "release", verb: "release", effect: domain.ActionBoundedWrite, recovery: domain.RecoveryNotNeeded},
-		{resource: "emulator", localID: "cache", verb: "cache", effect: domain.ActionBoundedWrite, recovery: domain.RecoveryNotNeeded},
-		{resource: "emulator", localID: "view", verb: "view", effect: domain.ActionSession, recovery: domain.RecoveryNotNeeded},
-		{resource: "emulator", localID: "revoke", verb: "revoke", effect: domain.ActionMutation, impacts: []domain.ActionImpact{domain.ImpactSharedWorkload}, recovery: domain.RecoveryReversible},
-		{resource: "emulator", localID: "down", verb: "down", effect: domain.ActionMutation, impacts: []domain.ActionImpact{domain.ImpactSharedWorkload}, recovery: domain.RecoveryReversible},
-
-		{resource: "qa-bot-broker", localID: "up", verb: "up", effect: domain.ActionMutation, impacts: []domain.ActionImpact{domain.ImpactSharedWorkload}, recovery: domain.RecoveryRecreatable},
-		{resource: "qa-bot-broker", localID: "seed", verb: "seed", effect: domain.ActionMutation, impacts: []domain.ActionImpact{domain.ImpactSharedWorkload}, recovery: domain.RecoveryReversible},
-		{resource: "qa-bot-broker", localID: "expose", verb: "expose", effect: domain.ActionMutation, impacts: []domain.ActionImpact{domain.ImpactAccess, domain.ImpactSecurity, domain.ImpactTrust}, recovery: domain.RecoveryReversible},
-		{resource: "qa-bot-broker", localID: "status", verb: "status", effect: domain.ActionRead, recovery: domain.RecoveryNotNeeded},
-		{resource: "qa-bot-broker", localID: "logs", verb: "logs", effect: domain.ActionRead, recovery: domain.RecoveryNotNeeded},
-		{resource: "qa-bot-broker", localID: "smoke", verb: "smoke", effect: domain.ActionMutation, impacts: []domain.ActionImpact{domain.ImpactSharedWorkload}, recovery: domain.RecoveryReversible},
-		{resource: "qa-bot-broker", localID: "down", verb: "down", effect: domain.ActionDestruction, impacts: []domain.ActionImpact{domain.ImpactYardRuntime}, recovery: domain.RecoveryRecreatable},
-		{resource: "qa-bot-broker", localID: "destroy", verb: "destroy", effect: domain.ActionDestruction, impacts: []domain.ActionImpact{domain.ImpactYardRuntime}, recovery: domain.RecoveryRecreatable},
-		{resource: "qa-bot-broker", localID: "destroy-purge", verb: "destroy", effect: domain.ActionDestruction, impacts: []domain.ActionImpact{domain.ImpactPersistentData}, recovery: domain.RecoveryIrreversible},
-
-		{resource: "staging-gateway", localID: "up", verb: "up", effect: domain.ActionMutation, impacts: []domain.ActionImpact{domain.ImpactSharedWorkload}, recovery: domain.RecoveryRecreatable},
-		{resource: "staging-gateway", localID: "start", verb: "start", effect: domain.ActionMutation, impacts: []domain.ActionImpact{domain.ImpactSharedWorkload}, recovery: domain.RecoveryReversible},
-		{resource: "staging-gateway", localID: "stop", verb: "stop", effect: domain.ActionMutation, impacts: []domain.ActionImpact{domain.ImpactSharedWorkload}, recovery: domain.RecoveryReversible},
-		{resource: "staging-gateway", localID: "status", verb: "status", effect: domain.ActionRead, recovery: domain.RecoveryNotNeeded},
-		{resource: "staging-gateway", localID: "logs", verb: "logs", effect: domain.ActionRead, recovery: domain.RecoveryNotNeeded},
-		{resource: "staging-gateway", localID: "shell", verb: "shell", effect: domain.ActionSession, recovery: domain.RecoveryNotNeeded},
-		{resource: "staging-gateway", localID: "down", verb: "down", effect: domain.ActionDestruction, impacts: []domain.ActionImpact{domain.ImpactYardRuntime}, recovery: domain.RecoveryRecreatable},
-		{resource: "staging-gateway", localID: "destroy", verb: "destroy", effect: domain.ActionDestruction, impacts: []domain.ActionImpact{domain.ImpactYardRuntime}, recovery: domain.RecoveryRecreatable},
-		{resource: "staging-gateway", localID: "destroy-purge", verb: "destroy", effect: domain.ActionDestruction, impacts: []domain.ActionImpact{domain.ImpactPersistentData}, recovery: domain.RecoveryIrreversible},
-		{resource: "staging-gateway", localID: "list", verb: "list", effect: domain.ActionRead, recovery: domain.RecoveryNotNeeded},
-
-		{resource: "orca", localID: "up", verb: "up", effect: domain.ActionMutation, impacts: []domain.ActionImpact{
-			domain.ImpactAccess, domain.ImpactHostIncus, domain.ImpactHostNetwork, domain.ImpactHostOS,
-			domain.ImpactLocalMetadata, domain.ImpactPersistentData, domain.ImpactSecurity,
-			domain.ImpactTrust, domain.ImpactYardRuntime,
-		}, recovery: domain.RecoveryRecreatable},
-		{resource: "orca", localID: "is-up", verb: "is-up", effect: domain.ActionRead, recovery: domain.RecoveryNotNeeded},
-		{resource: "orca", localID: "status", verb: "status", effect: domain.ActionRead, recovery: domain.RecoveryNotNeeded},
-		{resource: "orca", localID: "pair", verb: "pair", effect: domain.ActionMutation, impacts: []domain.ActionImpact{domain.ImpactExternalSystem}, recovery: domain.RecoveryReversible},
-		{resource: "orca", localID: "restart", verb: "restart", effect: domain.ActionMutation, impacts: []domain.ActionImpact{domain.ImpactYardRuntime}, recovery: domain.RecoveryReversible},
-		{resource: "orca", localID: "sync", verb: "sync", effect: domain.ActionBoundedWrite, recovery: domain.RecoveryNotNeeded},
-		{resource: "orca", localID: "logs", verb: "logs", effect: domain.ActionRead, recovery: domain.RecoveryNotNeeded},
-		{resource: "orca", localID: "down", verb: "down", effect: domain.ActionMutation, impacts: []domain.ActionImpact{domain.ImpactHostOS}, recovery: domain.RecoveryReversible},
-
-		{resource: "dashboard", localID: "up", verb: "up", effect: domain.ActionMutation, impacts: []domain.ActionImpact{domain.ImpactAccess, domain.ImpactSecurity, domain.ImpactTrust}, recovery: domain.RecoveryReversible},
-		{resource: "dashboard", localID: "is-up", verb: "is-up", effect: domain.ActionRead, recovery: domain.RecoveryNotNeeded},
-		{resource: "dashboard", localID: "status", verb: "status", effect: domain.ActionRead, recovery: domain.RecoveryNotNeeded},
-		{resource: "dashboard", localID: "down", verb: "down", effect: domain.ActionMutation, impacts: []domain.ActionImpact{domain.ImpactAccess, domain.ImpactSecurity, domain.ImpactTrust}, recovery: domain.RecoveryReversible},
-	}
-
-	definitions := make(map[domain.ActionID]domain.ActionDefinition)
-	for _, definition := range registry.ActionDefinitions() {
-		if _, duplicate := definitions[definition.Action]; duplicate {
-			t.Fatalf("duplicate shipped action definition %q", definition.Action)
-		}
-		definitions[definition.Action] = definition
-	}
-	if len(definitions) != len(expected) {
-		t.Fatalf("shipped action definitions = %d, want %d", len(definitions), len(expected))
-	}
-	for _, action := range expected {
-		qualified, ok := registry.LookupAction(action.resource, action.verb, action.localID)
-		if !ok {
-			t.Errorf("missing %s action %s for verb %s", action.resource, action.localID, action.verb)
-			continue
-		}
-		definition, ok := definitions[qualified]
-		if !ok {
-			t.Errorf("lookup %q has no domain definition", qualified)
-			continue
-		}
-		if definition.Effect != action.effect || definition.Recovery != action.recovery ||
-			!reflect.DeepEqual(definition.Impacts, action.impacts) {
-			t.Errorf("%q classification = effect %q impacts %#v recovery %q", qualified, definition.Effect, definition.Impacts, definition.Recovery)
-		}
-	}
-
-	wantVerbs := map[string][]string{
-		"emulator":        {"catalog", "status", "run", "acquire", "renew", "release", "cache", "view", "revoke", "down"},
-		"qa-bot-broker":   {"up", "seed", "expose", "status", "logs", "smoke", "down", "destroy"},
-		"staging-gateway": {"up", "start", "stop", "status", "logs", "shell", "down", "destroy", "list"},
-		"orca":            {"up", "is-up", "status", "pair", "restart", "sync", "logs", "down"},
-		"dashboard":       {"up", "is-up", "status", "down"},
-	}
-	for resourceName, verbs := range wantVerbs {
-		definition, ok := registry.Lookup(resourceName)
-		if !ok || !slices.Equal(definition.Verbs, verbs) {
-			t.Errorf("%s verbs = %#v, want %#v", resourceName, definition.Verbs, verbs)
-		}
-	}
-	if _, ok := registry.LookupAction("staging", "e2e", "e2e"); ok {
-		t.Error("deferred staging e2e remains declared")
-	}
-	for _, resourceName := range []string{"qa-pool", "staging"} {
-		for _, localID := range []string{"destroy", "destroy-purge"} {
-			if _, ok := registry.LookupAction(resourceName, "destroy", localID); !ok {
-				t.Errorf("%s %s is not reachable through destroy", resourceName, localID)
-			}
-		}
-	}
-
-	for _, descriptor := range []string{
-		"config/profiles/android/resources/emulator.res",
-		"config/profiles/openclaw/resources/qa-bot-broker.res",
-		"config/profiles/openclaw/resources/staging-gateway.res",
-		"config/profiles/orca/resources/orca.res",
-		"config/profiles/hermes/resources/dashboard.res",
-	} {
-		content, err := os.ReadFile(filepath.Join(root, descriptor))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if strings.Contains(string(content), "VERBS=") {
-			t.Errorf("legacy VERBS remains in %s", descriptor)
-		}
-	}
-	emulatorHandler, err := os.ReadFile(filepath.Join(root, "config/profiles/android/resources/emulator/handler.sh"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(emulatorHandler), "down | stop)") {
-		t.Error("undeclared emulator stop alias remains reachable")
+	if byName, ok := registry.Lookup("service"); !ok || byName.HandlerPath() != definition.HandlerPath() {
+		t.Fatalf("resource name and command differ: %s", definition.Name)
 	}
 }
 
@@ -911,12 +765,8 @@ func writeTestResource(t *testing.T, root, profile, name, descriptor string) {
 		t.Fatal(err)
 	}
 	handler := filepath.Join(directory, name, "handler.sh")
-	if err := os.WriteFile(handler, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(directory, name+".res"), []byte(strings.TrimSpace(descriptor)+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, handler, []byte("#!/bin/sh\nexit 0\n"), 0o700)
+	testkit.WriteFile(t, filepath.Join(directory, name+".res"), []byte(strings.TrimSpace(descriptor)+"\n"), 0o600)
 }
 
 func testActionRegistry(t *testing.T) (Registry, *domain.ActionRegistry) {

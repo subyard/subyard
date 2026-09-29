@@ -177,7 +177,7 @@ controller_main() {
   cleanup_guest 1
   prepared=0
   if [ "$run_hermes" = 1 ]; then
-    run_guest 1 "$bundle" "$bundle_hash" bash dev/e2e/hermes-profile.sh
+    run_guest 1 "$bundle" "$bundle_hash" bash config/profiles/hermes/tests/e2e/hermes-profile.sh
     cleanup_guest 1
   fi
   ok 'GitHub broker reboot lifecycle passed on one retained lease'

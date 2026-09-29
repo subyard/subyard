@@ -3,4 +3,4 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 python3 -B "$ROOT/config/profiles/amnezia/tests/test_runtime.py"
-go -C "$ROOT" test -race -count=1 ./config/profiles/amnezia/tests
+bash "$ROOT/tests/helpers/profile-go.sh" amnezia

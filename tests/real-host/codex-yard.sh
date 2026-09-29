@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Sourced by the focused Orca bootstrap mode on a disposable lease VM.
 # Run: SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_CODEX_PERMISSIONS=1 \
-#   dev/agent-e2e.sh --slot N --purpose codex-permissions -- bash tests/real-host/orca-bootstrap.sh
+#   dev/agent-e2e.sh --slot N --purpose codex-permissions -- bash config/profiles/orca/tests/e2e/orca-bootstrap.sh
 # Variables such as pairing are owned by the sourcing bootstrap fixture.
 # shellcheck disable=SC2154
 set -euo pipefail
