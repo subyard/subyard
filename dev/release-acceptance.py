@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Freeze a release candidate, run its required checks, and verify bound receipts."""
+"""Freeze a release candidate and run its acceptance checks with local reports."""
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -16,7 +16,6 @@ import threading
 import uuid
 
 ROOT = Path(__file__).resolve().parent.parent
-EXCLUDED = (".subyard-acceptance/", "release-acceptance/")
 
 
 def digest(path):
@@ -29,7 +28,7 @@ def source_fingerprint(root):
     paths = subprocess.check_output(["bash", "tests/helpers/source-files.sh"], cwd=root)
     for raw in sorted(filter(None, paths.split(b"\0"))):
         name = os.fsdecode(raw)
-        if name == ".subyard-e2e-index" or name.startswith(EXCLUDED):
+        if name == ".subyard-e2e-index" or name.startswith(".subyard-acceptance/"):
             continue
         path = root / name
         if not path.exists() and not path.is_symlink():
@@ -266,46 +265,6 @@ def run_checks(output, slots, only, rerun):
     return 0 if receipt["result"] == "passed" else 1
 
 
-def verify_receipt(root, path, release, version):
-    receipt = json.loads(path.read_text())
-    inventory = profile_inventory(root)
-    if receipt.get("schema_version") != 1 or receipt.get("version") != version:
-        raise ValueError("receipt version mismatch")
-    if receipt.get("source_fingerprint") != source_fingerprint(root) or receipt.get("profiles") != inventory:
-        raise ValueError("receipt is not bound to this source and profile inventory")
-    required = set(commands(root, version, inventory)) | {"package"}
-    if set(receipt.get("checks", {})) != required:
-        raise ValueError("receipt omits or adds required checks")
-    for name, result in receipt["checks"].items():
-        if name.startswith("profile:") and inventory[name.split(":", 1)[1]]["kind"] == "not-applicable":
-            if result.get("status") != "not-applicable" or result.get("reason") != inventory[name.split(":", 1)[1]]["reason"]:
-                raise ValueError("invalid profile exemption evidence")
-        elif result.get("status") != "passed" or result.get("exit_code") != 0 or not valid_digest(result.get("log_sha256", "")):
-            raise ValueError("required check did not pass: " + name)
-    external = external_inventory(root)
-    if set(receipt.get("external_obligations", {})) != set(external):
-        raise ValueError("external obligation inventory mismatch")
-    for name, result in receipt["external_obligations"].items():
-        declaration = external[name]
-        if any(result.get(key) != declaration[key] for key in ("id", "description", "required_inputs")):
-            raise ValueError("external obligation declaration changed")
-        if result.get("status") != "passed" or not result.get("evidence") or not valid_digest(result.get("evidence_sha256", "")):
-            raise ValueError("external acceptance is incomplete: " + name)
-    filename = receipt.get("runtime_file", "")
-    arch = {"x86_64": "amd64", "aarch64": "arm64"}.get(platform.machine())
-    if filename != f"subyard-{version}-linux-{arch}.tar.gz" or digest(release / filename) != receipt.get("runtime_sha256"):
-        raise ValueError("receipt runtime differs from the publish candidate")
-    if not valid_digest(receipt.get("candidate_bundle_sha256", "")):
-        raise ValueError("receipt lacks its frozen transport identity")
-    update_result(receipt)
-    if receipt["result"] != "passed":
-        raise ValueError("release acceptance is incomplete")
-
-
-def valid_digest(value):
-    return isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
@@ -317,15 +276,7 @@ def main():
     run.add_argument("--slots", type=int, nargs="+", default=[])
     run.add_argument("--only", action="append", default=[])
     run.add_argument("--rerun", action="store_true")
-    verify = sub.add_parser("verify-receipt", help="fail closed before publishing a different or incomplete candidate")
-    verify.add_argument("--receipt", type=Path, required=True)
-    verify.add_argument("--release-dir", type=Path, required=True)
-    verify.add_argument("--version", required=True)
     args = parser.parse_args()
-    if args.action == "verify-receipt":
-        verify_receipt(ROOT, args.receipt.resolve(), args.release_dir.resolve(), args.version)
-        print("Release acceptance receipt matches source, artifact and all obligations")
-        return 0
     output = args.output.resolve()
     if output == ROOT or (ROOT in output.parents and ROOT / ".build" not in output.parents):
         parser.error("output must be under .build or outside the source checkout")

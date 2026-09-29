@@ -58,7 +58,7 @@ make a shipped profile optional to release verification.
 
 ### One release candidate
 
-The same profile inventory is used by local acceptance, branch CI preflight and the release gate.
+The same profile inventory is used by local acceptance and branch CI preflight.
 Create a frozen public source snapshot and one installable runtime, then run its pending checks:
 
 ```sh
@@ -90,12 +90,10 @@ evidence leaves the overall result incomplete even when `reproducible_result` is
 actual external check evidence and its SHA-256 in the corresponding receipt entry only after that
 check passes on the same candidate. Do not put credentials or private payloads in receipts.
 
-Before tagging, preserve a complete public receipt at `release-acceptance/VERSION.json`. The Release
-workflow checks its source fingerprint, required inventory, successful results, external evidence
-references and exact native runtime digest before publication. Missing, partial or mismatched
-receipts fail closed. Receipt files themselves are excluded from the source fingerprint so adding
-evidence does not change the candidate. The receipt is reviewed test evidence, not a cryptographic
-attestation of a remote execution service. Cross-compiled assets retain their separate build checks.
+Acceptance receipts and logs stay in the local output directory and are not committed to the
+repository. The Release workflow gates publication on the checks it runs itself; physical VM and
+external-service acceptance are performed separately. Cross-compiled assets retain their separate
+build checks.
 
 GitHub CI runs the full core gate, profile host-free checks, warning-level ShellCheck and
 `bash tests/real-host/adapter-contracts.sh` in one `verify` job on every branch push and pull request;

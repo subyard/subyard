@@ -149,5 +149,6 @@ dedicated release host because it depends on a live container/VM and Incus socke
 
 Before publication, follow [one release candidate](testing.md#one-release-candidate) to freeze and
 verify core plus every shipped profile. Branch CI validates the same complete profile inventory;
-its host-free subset does not claim physical acceptance. Tagged Release requires the corresponding
-`release-acceptance/VERSION.json` receipt and rejects a different source or runtime artifact.
+its host-free subset does not claim physical acceptance. Tagged Release gates publication on its
+own checks. Physical and external-service acceptance results stay local and are not committed or
+required by the Release workflow.
