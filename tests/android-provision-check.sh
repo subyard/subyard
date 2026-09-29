@@ -45,10 +45,8 @@ UNIT
 for source in pool.py client.py runtime.sh; do
   cp "$ROOT/config/profiles/android/$source" "$test_root/usr/local/lib/subyard-android/$source"
 done
-for command in yard yard-emu; do
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$test_root/srv/cache/android-sdk/.subyard/bin/$command"
-  chmod +x "$test_root/srv/cache/android-sdk/.subyard/bin/$command"
-done
+printf '#!/usr/bin/env bash\nexit 0\n' > "$test_root/srv/cache/android-sdk/.subyard/bin/android-broker"
+chmod +x "$test_root/srv/cache/android-sdk/.subyard/bin/android-broker"
 /usr/bin/python3 -c 'import socket, sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' \
   "$test_root/srv/cache/android-sdk/.subyard/control.sock"
 for command in curl unzip flock setsid cage Xwayland socat systemctl slirp4netns ip; do
@@ -82,6 +80,22 @@ before="$(find "$tmp" -type f -exec sha256sum {} + | sort | sha256sum)"
 env "${common_env[@]}" bash "$HOOK" --check >/dev/null
 after="$(find "$tmp" -type f -exec sha256sum {} + | sort | sha256sum)"
 [ "$before" = "$after" ] || { printf 'FAIL: Android check mutated state\n' >&2; exit 1; }
+
+# The renamed client is required; retired aliases must trigger upgrade cleanup.
+client_bin="$test_root/srv/cache/android-sdk/.subyard/bin"
+mv "$client_bin/android-broker" "$tmp/android-broker"
+status=0
+env "${common_env[@]}" bash "$HOOK" --check >/dev/null || status=$?
+[ "$status" -eq 10 ] || { printf 'FAIL: missing broker client accepted\n' >&2; exit 1; }
+mv "$tmp/android-broker" "$client_bin/android-broker"
+for retired in yard yard-emu; do
+  ln -s missing-client "$client_bin/$retired"
+  status=0
+  env "${common_env[@]}" bash "$HOOK" --check >/dev/null || status=$?
+  [ "$status" -eq 10 ] || { printf 'FAIL: retired client accepted\n' >&2; exit 1; }
+  rm "$client_bin/$retired"
+done
+env "${common_env[@]}" bash "$HOOK" --check >/dev/null
 
 # Runtime dependencies must converge even when SDK binaries already exist.
 for library in libpulse0 libnss3; do

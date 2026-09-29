@@ -258,8 +258,8 @@ check_box() {
     mkdir -p "$GRADLE_USER_HOME"
     [ ! -e "$GRADLE_USER_HOME/$2" ]
     printf "%s\n" "$1" > "$GRADLE_USER_HOME/$3"
-    yard-emu status >/dev/null
-    yard-emu catalog >/dev/null
+    android-broker status >/dev/null
+    android-broker catalog >/dev/null
   ' _ "$own" ".subyard-parallel-$other" ".subyard-parallel-$own" \
     > "$work/check-$own.log" 2>&1
 }
@@ -413,7 +413,7 @@ bounded_incus_exec 45 docker exec -u 1000:1000 "$legacy_box_rebuilt" bash -ceu '
   [ ! -e /dev/kvm ] && [ ! -e /dev/dri ]
   [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]
   [ ! -e "$GRADLE_USER_HOME/legacy-gradle-marker" ]
-  yard-emu status >/dev/null
+  android-broker status >/dev/null
 ' _ "$name_a" > "$work/legacy-rebuild-check.log" 2>&1
 printf 'android-pool-projects legacy-rebuild=PASS workspace=preserved sdk=readonly devices=absent gradle=fresh\n'
 printf 'android-pool-projects=PASS\n'

@@ -9,24 +9,40 @@ for command in emulator-run.sh emulator-control.sh; do
   fi
 done
 
-# The generated emulator facade must preserve the CLI already installed on PATH.
+# Execute the client's install section in a temporary profile-owned directory.
+# Repeated installation retires old aliases without shadowing the owner's CLI.
 tmp="$(mktemp -d)"
 trap 'rm -rf -- "$tmp"' EXIT
-mkdir -p "$tmp/facade" "$tmp/alias" "$tmp/home/.local/bin"
-sed -n '/"$PUBLIC_ROOT\/bin\/yard" <<\x27EOF\x27/,/^EOF/p' \
-  "$ROOT/config/profiles/android/pool-install.sh" | sed '1d;$d' > "$tmp/facade/yard"
-chmod +x "$tmp/facade/yard"
-ln -s "$tmp/facade/yard" "$tmp/alias/yard"
-cat > "$tmp/home/.local/bin/yard" <<'EOF'
+mkdir -p "$tmp/public/bin" "$tmp/owner"
+touch "$tmp/public/bin/yard"
+ln -s missing-client "$tmp/public/bin/yard-emu"
+sed -n '/^install -m 0755 .*bin\/android-broker/,/^# Retire the old staged/p' \
+  "$ROOT/config/profiles/android/pool-install.sh" | sed '$d' > "$tmp/install-client.sh"
+for _attempt in 1 2; do
+  PUBLIC_ROOT="$tmp/public" bash "$tmp/install-client.sh"
+  [ -x "$tmp/public/bin/android-broker" ]
+  for retired in yard yard-emu; do
+    [ ! -e "$tmp/public/bin/$retired" ] && [ ! -L "$tmp/public/bin/$retired" ]
+  done
+done
+cat > "$tmp/owner/yard" <<'EOF'
 #!/usr/bin/env bash
-[ "$#" = 2 ] && [ "$1" = status ] && [ "$2" = 'argument with spaces' ] || exit 99
 printf 'installed CLI\n'
-exit 23
 EOF
-chmod +x "$tmp/home/.local/bin/yard"
+chmod +x "$tmp/owner/yard"
+PATH="$tmp/public/bin:$tmp/owner:$PATH" yard > "$tmp/output"
+grep -Fxq 'installed CLI' "$tmp/output"
+
+# Redirect only the installed Python payload path to a fixture.
+cat > "$tmp/client.py" <<'EOF'
+import sys
+assert sys.argv[1:] == ['run', '--', 'argument with spaces']
+print('broker client')
+sys.exit(23)
+EOF
+sed -i "s@/usr/local/lib/subyard-android/client.py@$tmp/client.py@" "$tmp/public/bin/android-broker"
 status=0
-HOME="$tmp/home" PATH="$tmp/facade:$tmp/alias:$tmp/home/.local/bin:$PATH" \
-  "$tmp/facade/yard" status 'argument with spaces' > "$tmp/output" || status=$?
-[ "$status" = 23 ] && grep -Fxq 'installed CLI' "$tmp/output" \
-  || { printf 'FAIL: Android facade hid installed yard CLI\n' >&2; exit 1; }
-printf 'ok: manual emulator bypasses disabled\n'
+"$tmp/public/bin/android-broker" run -- 'argument with spaces' > "$tmp/output" || status=$?
+[ "$status" = 23 ] && grep -Fxq 'broker client' "$tmp/output" \
+  || { printf 'FAIL: broker wrapper lost arguments or exit code\n' >&2; exit 1; }
+printf 'ok: broker client installation and retired manual entrypoints\n'

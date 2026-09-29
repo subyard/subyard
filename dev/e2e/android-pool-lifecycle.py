@@ -12,7 +12,7 @@ import sys
 import tempfile
 import threading
 import time
-EMU = os.environ.get("YARD_EMU", "yard-emu")
+EMU = os.environ.get("YARD_EMU", "android-broker")
 ADB = os.environ.get("ADB", "/srv/cache/android-sdk/platform-tools/adb")
 if not Path(ADB).is_file():
     ADB = "adb"

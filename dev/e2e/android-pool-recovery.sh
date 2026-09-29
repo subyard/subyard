@@ -84,7 +84,7 @@ cleanup() {
     guest 60 bash -c '
       [ "$(cat "$1/.marker" 2>/dev/null)" = subyard-android-pool-recovery-v1 ] || exit 2
       for lease in "$1"/first.json "$1"/second.json; do
-        [ ! -f "$lease" ] || yard-emu release --lease-file "$lease" >/dev/null 2>&1 || true
+        [ ! -f "$lease" ] || android-broker release --lease-file "$lease" >/dev/null 2>&1 || true
       done
       find "$1" -depth -delete
     ' _ "$lease_dir" </dev/null >/dev/null 2>&1 || {
@@ -137,7 +137,7 @@ elif mode == 'adb':
     print('api=35 generation=' + str(value['allocation']['generation']))
 elif mode == 'stale':
     value = lease(sys.argv[2])
-    result = call('yard-emu', 'renew', '--lease-file', sys.argv[2])
+    result = call('android-broker', 'renew', '--lease-file', sys.argv[2])
     assert result.returncode == 1 and result.stderr.startswith(b'Android stale:')
     endpoint = value['endpoint']
     deadline = time.monotonic() + 30
@@ -155,7 +155,7 @@ elif mode == 'stale':
         time.sleep(0.5)
     else:
         raise AssertionError('old endpoint stayed open')
-    result = call('yard-emu', 'status')
+    result = call('android-broker', 'status')
     assert result.returncode == 0
     slot = next(s for s in json.loads(result.stdout)['slots']
                 if s['slot_id'] == value['allocation']['slot_id'])
@@ -163,15 +163,15 @@ elif mode == 'stale':
     print('stale=PASS endpoint=closed generation=' + str(slot['generation']))
 elif mode == 'advanced':
     value = lease(sys.argv[2])
-    result = call('yard-emu', 'status')
+    result = call('android-broker', 'status')
     assert result.returncode == 0
     slot = next(s for s in json.loads(result.stdout)['slots']
                 if s['slot_id'] == value['allocation']['slot_id'])
     assert slot['state'] == 'available' and slot['generation'] > value['allocation']['generation']
     print('generation-advanced=PASS')
 elif mode == 'idle':
-    status = call('yard-emu', 'status')
-    catalog = call('yard-emu', 'catalog')
+    status = call('android-broker', 'status')
+    catalog = call('android-broker', 'catalog')
     assert status.returncode == 0 and catalog.returncode == 0
     slots = json.loads(status.stdout)['slots']
     assert slots and all(slot['state'] == 'available' for slot in slots)
@@ -219,7 +219,7 @@ if ! command -v xvfb-run >/dev/null; then
 fi
 
 printf 'android-pool-recovery phase=pool-service\n'
-guest 1320 yard-emu acquire --device phone --api 35 --lease-file "$first" \
+guest 1320 android-broker acquire --device phone --api 35 --lease-file "$first" \
   </dev/null >/dev/null
 check_guest 150 adb "$first"
 printf 'android-pool-recovery phase=owner-viewer\n'
@@ -262,7 +262,7 @@ check_guest 60 stale "$first"
 printf 'android-pool-recovery pool-restart=PASS\n'
 
 printf 'android-pool-recovery phase=yard-stop-start\n'
-guest 1320 yard-emu acquire --device phone --api 35 --lease-file "$second" \
+guest 1320 android-broker acquire --device phone --api 35 --lease-file "$second" \
   </dev/null >/dev/null
 check_guest 150 adb "$second" "$first"
 yard 180 stop --yes >/dev/null

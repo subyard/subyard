@@ -192,7 +192,7 @@ if [ "$lane" = full ]; then
   timeout --foreground --kill-after=15 1320 "${incus_binary[@]}" --project "$project" exec "$instance" \
     --user 1000 --group 1000 --env HOME=/home/dev -- env \
     PATH=/srv/cache/android-sdk/.subyard/bin:/srv/cache/android-sdk/platform-tools:/opt/jdk-17/bin:/usr/bin:/bin \
-    yard-emu run --device tablet --api 36 --purpose android-pool-runtime -- \
+    android-broker run --device tablet --api 36 --purpose android-pool-runtime -- \
     sh -c 'adb shell getprop ro.build.version.sdk && exit 23' >"$adb_log" 2>&1 || adb_status=$?
   if [ "$adb_status" -ne 23 ]; then
     printf 'android adb status=%s\n' "$adb_status" >&2

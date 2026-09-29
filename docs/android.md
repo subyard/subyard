@@ -5,8 +5,13 @@ lease and returns to the pool after its emulator, compositor, ADB server and con
 stopped. Each allocation starts with fresh Android userdata and no snapshots. Existing personal
 AVDs are neither imported into the pool nor removed.
 
-Enable the `android` profile through the normal yard configuration and run `yard init`. The yard
-needs x86_64 KVM. The shipped `config/profiles/android/profile.conf` explicitly selects
+Select the `android` profile through the normal yard configuration and run `yard init`, then
+`yard provision android` on the owner host (use `yard -Y NAME` for a named yard). Init prepares
+the yard and prints a provisioning hint; it does not install the Android toolchain. Provisioning
+installs the shared SDK at `/srv/cache/android-sdk`, JDK at `/opt/jdk-17`, the in-yard client and
+the pool service. It also writes `/etc/profile.d/subyard-android.sh`; open a new login shell after
+installation to load the SDK environment. A selected profile alone does not prove installation.
+The yard needs x86_64 KVM. The shipped `config/profiles/android/profile.conf` explicitly selects
 `EMULATOR_GPU=software-gles`: headless SwiftShader OpenGL ES without a GPU render node or
 compositor. Guest Vulkan is explicitly disabled in this mode to reduce startup work on small
 VMs. Verbose guest-to-host log forwarding is silenced; guest log buffers remain available through
@@ -36,11 +41,14 @@ also check this minimum free-space allowance. It is not a userdata quota: an SDK
 require a larger virtual partition, and writes can consume additional disk space. Size the yard
 for the expected workload. Capacity errors never shrink the configured pool or stop another consumer's lease.
 
+Once provisioned, agents run these commands **inside the yard**. The local client connects
+directly to the pool's Unix socket; it does not require host command execution or Incus access.
+
 ```sh
-yard emu catalog
-yard emu status
-yard emu run --device phone --api 35 -- ./run-device-tests.sh
-yard emu run --device tablet --api 36 --wait 120 -- bash
+android-broker catalog
+android-broker status
+android-broker run --device phone --api 35 -- ./run-device-tests.sh
+android-broker run --device tablet --api 36 --wait 120 -- bash
 ```
 
 The defaults are `EMULATOR_SHARING=shared`, `EMULATOR_POOL_SIZE=2`, `EMULATOR_DEVICE=phone`,
@@ -88,9 +96,9 @@ runtime services.
 For explicit multi-step use, choose a new private lease-file path:
 
 ```sh
-yard emu acquire --device phone --api 35 --lease-file /tmp/my-android-lease.json
-yard emu renew --lease-file /tmp/my-android-lease.json
-yard emu release --lease-file /tmp/my-android-lease.json
+android-broker acquire --device phone --api 35 --lease-file /tmp/my-android-lease.json
+android-broker renew --lease-file /tmp/my-android-lease.json
+android-broker release --lease-file /tmp/my-android-lease.json
 ```
 
 Acquire prints JSON containing allocation metadata and the connection environment. The secret
@@ -101,9 +109,11 @@ without capabilities or connection endpoints. `--yard`, `--project` and `--purpo
 attribution when the client is outside a managed workspace; these labels do not authorize access.
 Project environments receive their yard name and project ID from the normal environment launcher.
 
-The provisioned `yard emu` client is available inside the yard and Android project environments.
-L2 mounts the SDK, JDK and client code read-only and needs no KVM, Incus or sudo access. Normal owner
-commands use the profile handler; `yard -Y OWNER/YARD emu ...` follows the standard owner routing.
+The provisioned `android-broker` client is available inside the yard and Android project environments.
+L2 mounts the SDK, JDK and client code read-only and needs no KVM, Incus or sudo access. On the
+owner host, `yard emu ...` uses the profile handler; `yard -Y OWNER/YARD emu ...` follows the
+standard owner routing.
+The Android profile does not install a `yard` binary inside the yard.
 The command, its lease file and ADB relay live in the environment where the command executes. For a
 remote owner, use `run` to execute work there; its Unix socket is not a controller-local endpoint.
 
@@ -112,8 +122,8 @@ home at `/home/dev/.gradle` in that container; it survives container stops and i
 the environment is recreated. A writable Gradle cache is never shared across container boundaries.
 
 ```sh
-yard emu view --device tablet --api 35
-yard emu view --lease-file /tmp/my-android-lease.json
+android-broker view --device tablet --api 35
+android-broker view --lease-file /tmp/my-android-lease.json
 ```
 
 The viewer requires `scrcpy` and ADB in the invoking environment. It is view-only unless
@@ -131,10 +141,10 @@ the invoking environment must be trusted while its local viewer is open.
 GUI sockets are not mounted into agent environments.
 
 ```sh
-yard emu cache prepare --api 35
-yard emu cache prepare --api 36
-yard emu cache prune --dry-run
-yard emu cache prune
+android-broker cache prepare --api 35
+android-broker cache prepare --api 36
+android-broker cache prune --dry-run
+android-broker cache prune
 ```
 
 Prepare images before starting emulators when the pool is idle. It installs one requested API,
