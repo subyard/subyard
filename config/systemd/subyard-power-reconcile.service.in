@@ -2,8 +2,9 @@
 Description=Restore guarded Subyard desired power state
 Wants=network-online.target incus.service incus.socket
 After=network-online.target NetworkManager.service incus.service incus.socket
-StartLimitIntervalSec=15min
-StartLimitBurst=6
+# Login-unlocked storage can be unavailable for an arbitrarily long time.
+# Only temporary exit 75 retries; each attempt and the retry rate stay bounded.
+StartLimitIntervalSec=0
 
 [Service]
 Type=exec
@@ -12,7 +13,7 @@ TimeoutStartSec=120
 RuntimeMaxSec=120
 Restart=no
 RestartForceExitStatus=75
-RestartSec=10s
+RestartSec=30s
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=read-only

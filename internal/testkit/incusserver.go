@@ -34,6 +34,7 @@ type IncusServer struct {
 	execSteps   []IncusServerExecStep
 	execCalls   []IncusServerExecCall
 	powerCalls  []IncusServerPowerCall
+	powerErrors []string
 	operations  map[string]*incusOperation
 	eventQuery  string
 	nextOp      int
@@ -165,6 +166,12 @@ func (fake *IncusServer) PowerCalls() []IncusServerPowerCall {
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
 	return append([]IncusServerPowerCall(nil), fake.powerCalls...)
+}
+
+func (fake *IncusServer) QueuePowerErrors(messages ...string) {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	fake.powerErrors = append(fake.powerErrors, messages...)
 }
 
 func (fake *IncusServer) SetExtensions(extensions ...string) {
@@ -301,10 +308,16 @@ func (fake *IncusServer) setPower(writer http.ResponseWriter, request *http.Requ
 	fake.powerCalls = append(fake.powerCalls, IncusServerPowerCall{
 		Project: project, Name: name, Action: input.Action, Force: input.Force,
 	})
-	if input.Action == "start" {
-		instance["status"] = "Running"
-	} else {
-		instance["status"] = "Stopped"
+	var operationError string
+	if len(fake.powerErrors) > 0 {
+		operationError, fake.powerErrors = fake.powerErrors[0], fake.powerErrors[1:]
+	}
+	if operationError == "" {
+		if input.Action == "start" {
+			instance["status"] = "Running"
+		} else {
+			instance["status"] = "Stopped"
+		}
 	}
 	fake.nextOp++
 	id := fmt.Sprintf("operation-%d", fake.nextOp)
@@ -312,6 +325,7 @@ func (fake *IncusServer) setPower(writer http.ResponseWriter, request *http.Requ
 	close(stdinDone)
 	operation := &incusOperation{
 		id: id, cancelled: make(chan struct{}), stdinDone: stdinDone, callIndex: -1,
+		step: IncusServerExecStep{OperationError: operationError},
 	}
 	fake.operations[id] = operation
 	fake.mu.Unlock()

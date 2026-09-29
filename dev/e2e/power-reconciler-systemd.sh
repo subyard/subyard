@@ -86,31 +86,19 @@ attempt_count() {
   printf '%s\n' "$((lines - 1))"
 }
 
-has_start_limit() {
-  local snapshot
-  snapshot="$(unit_state_snapshot)" || return 1
-  grep -Fxq 'ActiveState=failed' <<<"$snapshot" \
-    && grep -Fxq 'SubState=failed' <<<"$snapshot" \
-    && grep -Fxq 'Result=exit-code' <<<"$snapshot" \
-    && grep -Fxq 'ExecMainStatus=75' <<<"$snapshot" \
-    && [ "$(attempt_count)" = 6 ] \
-    && grep -Fxq 'NRestarts=6' <<<"$snapshot"
-}
-
-has_start_limit_journal() {
-  sudo -n journalctl -b -u "$UNIT" --no-pager -o cat \
-    | grep -F 'Start request repeated too quickly' >/dev/null
+has_attempt() {
+  [ "$(attempt_count)" -ge 1 ]
 }
 
 has_load_and_limits() {
   local snapshot wants
   snapshot="$(sudo -n "$SYSTEMCTL_BIN" show "$UNIT" \
-    --property=LoadState --property=StartLimitIntervalUSec --property=StartLimitBurst \
+    --property=LoadState --property=StartLimitIntervalUSec --property=RestartUSec \
     --property=TimeoutStartUSec --property=RuntimeMaxUSec --property=Wants)" || return 1
   wants="$(sed -n 's/^Wants=//p' <<<"$snapshot")"
   grep -Fxq 'LoadState=loaded' <<<"$snapshot" \
-    && grep -Fxq 'StartLimitIntervalUSec=15min' <<<"$snapshot" \
-    && grep -Fxq 'StartLimitBurst=6' <<<"$snapshot" \
+    && grep -Fxq 'StartLimitIntervalUSec=0' <<<"$snapshot" \
+    && grep -Fxq 'RestartUSec=30s' <<<"$snapshot" \
     && grep -Fxq 'TimeoutStartUSec=2min' <<<"$snapshot" \
     && grep -Fxq 'RuntimeMaxUSec=2min' <<<"$snapshot" \
     && [[ " $wants " == *' incus.service '* ]] \
@@ -223,8 +211,10 @@ case "$mode" in
   timeout)
     sleep 300
     ;;
-  persistent-75)
-    exit 75
+  retry-late)
+    if [ "$attempts" -le 8 ]; then exit 75; fi
+    if [ "$attempts" -eq 9 ]; then exit 0; fi
+    exit 76
     ;;
   *)
     exit 64
@@ -237,7 +227,7 @@ EOF
 materialize_unit() {
   local mode="$1"
   case "$mode" in
-    success|retry-once|exit-one|signal|timeout|persistent-75) ;;
+    success|retry-once|exit-one|signal|timeout|retry-late) ;;
     *) die "unknown mode: $mode" ;;
   esac
   CURRENT_MODE="$mode"
@@ -252,7 +242,8 @@ materialize_unit() {
   {
     printf '# %s\n' "$MARKER"
     printf '[Service]\n'
-    printf 'RestartSec=100ms\n'
+    # Inspect the production delay first; accelerate the subsequent retry cases.
+    if [ "$mode" != success ]; then printf 'RestartSec=100ms\n'; fi
     printf 'RuntimeDirectory=%s\nRuntimeDirectoryPreserve=yes\n' "$RUNTIME_DIR"
   } | sudo -n install -o root -g root -m 0644 /dev/stdin "$DROPIN_PATH"
   sudo -n "$SYSTEMCTL_BIN" daemon-reload
@@ -277,12 +268,15 @@ start_case() {
   printf '# %s\n%s\n' "$MARKER" "$CURRENT_MODE" \
     | sudo -n install -o root -g root -m 0600 /dev/stdin "$MODE_PATH"
   sudo -n "$SYSTEMCTL_BIN" start --no-block "$UNIT"
+  # An inactive unit already reports success before the queued start executes.
+  wait_for 'the first helper execution' has_attempt
 }
 
 # Mutations caught by this test:
 # - Removing RestartForceExitStatus=75 or changing it so a transient 75 does not restart.
 # - Changing the normal zero/one exit handling or the service result reported by PID1.
-# - Disabling or altering the production 15-minute, six-start rate limit.
+# - Exhausting retries before login-unlocked storage becomes available.
+# - Removing or altering the production delay between temporary failures.
 # - Removing or altering either production two-minute execution bound.
 # - Replacing the production unit with one that does not load or execute under real systemd.
 preflight_runtime_paths
@@ -321,11 +315,10 @@ wait_for 'terminal runtime timeout without a restart' \
   has_terminal_state failed failed timeout
 [ "$(attempt_count)" = 1 ] || die 'runtime timeout was restarted'
 
-materialize_unit persistent-75
+materialize_unit retry-late
 start_case
-wait_for 'the production six-start limit after persistent exit 75' \
-  has_start_limit
-has_start_limit_journal \
-  || die 'systemd journal omitted the start-limit terminal diagnostic'
+wait_for 'recovery after storage becomes available beyond six attempts' \
+  has_unit_state inactive dead success 0
+[ "$(attempt_count)" = 9 ] || die 'late storage recovery did not execute exactly nine times'
 
-printf 'ok: production power reconciler systemd restart and start-limit contract\n'
+printf 'ok: production power reconciler systemd retry and late-storage recovery contract\n'

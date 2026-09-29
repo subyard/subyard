@@ -110,9 +110,13 @@ before running `yard init` or manually starting the yard:
 sudo journalctl -b -u subyard-power-reconcile.service --no-pager -n 200
 ```
 
-The reconciler keeps Incus autostart disabled and uses bounded systemd retries for transient Incus,
-storage, or host-network readiness failures. A persistent failure remains failed and visible in this
-journal instead of bypassing the route guards.
+The reconciler keeps Incus autostart disabled and retries temporary Incus or storage unavailability
+every 30 seconds, with a two-minute execution limit per attempt. There is no total attempt limit:
+a storage pool inside a login-unlocked home cannot become available until the operator signs in.
+After it becomes available to Incus, the next attempt restores desired-running yards through the
+ordinary network guards. Invalid managed-yard metadata and network-safety failures remain failed
+and visible in this journal; they do not trigger automatic retries. Failure to read the Incus
+inventory within its readiness timeout also remains retryable.
 
 Use two synthetic credential peers to exercise pinned SOPS/age tooling and the real SSH path:
 reciprocal trust, a shared record, an exclusive assignment move, sync, materialization and revoke.

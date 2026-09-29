@@ -14,6 +14,7 @@ import (
 	"github.com/Subyard/Subyard/internal/contracttest"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
+	"github.com/Subyard/Subyard/internal/yardnetwork"
 	"github.com/lxc/incus/v6/shared/api"
 )
 
@@ -108,6 +109,46 @@ func TestOfficialClientListsAndChangesInstancePower(t *testing.T) {
 	if len(calls) != 1 || calls[0].Project != "subyard-a" || calls[0].Name != "yard-a" ||
 		calls[0].Action != "start" || calls[0].Force {
 		t.Fatalf("unexpected power call: %#v", calls)
+	}
+}
+
+func TestOfficialClientClassifiesAsyncPowerErrors(t *testing.T) {
+	for _, scenario := range []struct {
+		message   string
+		temporary bool
+	}{
+		{`Storage pool "default" unavailable on this server`, true},
+		{`Storage pool "yard-data" unavailable on this server`, true},
+		{`Storage pool "default" not found`, false},
+		{`Failed to mount storage pool "default": permission denied`, false},
+		{`invalid instance configuration`, false},
+		{`Storage pool "" unavailable on this server`, false},
+	} {
+		t.Run(scenario.message, func(t *testing.T) {
+			server, err := testkit.NewIncusServer(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = server.Close() })
+			server.SetInstance("subyard", "yard", map[string]any{
+				"name": "yard", "project": "subyard", "type": "container", "status": "Stopped",
+			})
+			server.QueuePowerErrors(scenario.message, scenario.message)
+			client := New(server.SocketPath)
+			for caller, err := range map[string]error{
+				"boot": client.SetInstancePower(context.Background(), "subyard", "yard", "start", false),
+				"network": client.NetworkPower(context.Background(), yardnetwork.Yard{
+					Project: "subyard", Instance: "yard",
+				}, "start"),
+			} {
+				if err == nil || !strings.Contains(err.Error(), scenario.message) {
+					t.Fatalf("%s operation error was lost: %v", caller, err)
+				}
+				if got := errors.Is(err, ports.ErrIncusUnavailable); got != scenario.temporary {
+					t.Fatalf("%s temporary = %v, want %v: %v", caller, got, scenario.temporary, err)
+				}
+			}
+		})
 	}
 }
 

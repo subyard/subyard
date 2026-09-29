@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -139,7 +140,7 @@ func (client *Client) SetInstancePower(
 		return normalizeError(action+" instance", err)
 	}
 	if err := operation.Wait(); err != nil {
-		return normalizeError("wait for "+action+" instance", err)
+		return normalizeOperationError("wait for "+action+" instance", operation.Get(), err)
 	}
 	return nil
 }
@@ -280,7 +281,7 @@ func (client *Client) exec(
 			Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), ExitCode: exitCode,
 		}
 		if err != nil {
-			return result, normalizeError("wait for instance command", err)
+			return result, normalizeOperationError("wait for instance command", operation.Get(), err)
 		}
 		if exitCode != 0 {
 			return result, fmt.Errorf("instance command exited with status %d", exitCode)
@@ -389,7 +390,7 @@ func (client *Client) SetInstanceConfig(
 		return normalizeError("update instance config", err)
 	}
 	if err := operation.Wait(); err != nil {
-		return normalizeError("wait for instance config update", err)
+		return normalizeOperationError("wait for instance config update", operation.Get(), err)
 	}
 	return nil
 }
@@ -405,7 +406,7 @@ func updateInstanceDevices(
 		return normalizeError("update instance devices", err)
 	}
 	if err := operation.Wait(); err != nil {
-		return normalizeError("wait for instance device update", err)
+		return normalizeOperationError("wait for instance device update", operation.Get(), err)
 	}
 	return nil
 }
@@ -583,6 +584,18 @@ func normalizeError(operation string, err error) error {
 		return fmt.Errorf("%s: %w: %w", operation, ports.ErrIncusUnavailable, err)
 	}
 	return fmt.Errorf("%s: %w", operation, err)
+}
+
+func normalizeOperationError(description string, operation api.Operation, err error) error {
+	// Incus reports pool readiness as HTTP 503, but async operations retain only
+	// the message in Err and the SDK returns errors.New(Err) from Wait. Recover
+	// this exact server error without retrying arbitrary operation failures.
+	pool, prefix := strings.CutPrefix(operation.Err, `Storage pool "`)
+	pool, suffix := strings.CutSuffix(pool, `" unavailable on this server`)
+	if prefix && suffix && pool != "" && !strings.ContainsAny(pool, "\"\\\r\n") {
+		return fmt.Errorf("%s: %w: %w", description, ports.ErrIncusUnavailable, err)
+	}
+	return normalizeError(description, err)
 }
 
 func cloneMap(source map[string]string) map[string]string {

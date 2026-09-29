@@ -379,7 +379,7 @@ assert_unit_matches() {
   manager_state="$(sudo -n systemctl show subyard-power-reconcile.service \
     --property=LoadState --property=NeedDaemonReload --property=Type --property=Restart \
     --property=RestartForceExitStatus --property=TimeoutStartUSec --property=RuntimeMaxUSec \
-    --property=StartLimitIntervalUSec --property=StartLimitBurst)" \
+    --property=StartLimitIntervalUSec --property=StartLimitBurst --property=RestartUSec)" \
     || die 'cannot observe installed power reconciler manager state'
   grep -Fxq "LoadState=$expected_load" <<<"$manager_state" \
     && grep -Fxq 'NeedDaemonReload=no' <<<"$manager_state" \
@@ -398,8 +398,8 @@ assert_unit_matches() {
     5)
       grep -Fxq 'Type=exec' <<<"$manager_state" \
         && grep -Fxq 'RuntimeMaxUSec=2min' <<<"$manager_state" \
-        && grep -Fxq 'StartLimitIntervalUSec=15min' <<<"$manager_state" \
-        && grep -Fxq 'StartLimitBurst=6' <<<"$manager_state" \
+        && grep -Fxq 'StartLimitIntervalUSec=0' <<<"$manager_state" \
+        && grep -Fxq 'RestartUSec=30s' <<<"$manager_state" \
         || die "candidate power reconciler manager properties did not converge: ${manager_state//$'\n'/, }"
       ;;
     *) die "unsupported power reconciler layout assertion: $layout" ;;

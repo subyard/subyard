@@ -645,7 +645,7 @@ func (client *Client) NetworkPower(ctx context.Context, yard yardnetwork.Yard, a
 		return normalizeError(action+" network-managed instance", err)
 	}
 	if err := operation.WaitContext(powerContext); err != nil {
-		return normalizeError("wait for "+action+" network-managed instance", err)
+		return normalizeOperationError("wait for "+action+" network-managed instance", operation.Get(), err)
 	}
 	return nil
 }
