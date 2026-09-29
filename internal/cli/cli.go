@@ -814,6 +814,9 @@ func (cli *CLI) Run(ctx context.Context) int {
 		return 0
 	case "@provision":
 		fmt.Fprintf(cli.options.Stdout, "Usage: %s provision [profile | --list]\n", cli.options.Program)
+		fmt.Fprintln(cli.options.Stdout, "With a profile, persist its selection for this yard, reconcile prerequisites and install its toolchain under one confirmation.")
+		fmt.Fprintln(cli.options.Stdout, "Existing profiles are preserved. Profiles without an install hook only reconcile the yard; dedicated-role restrictions still apply.")
+		fmt.Fprintln(cli.options.Stdout, "Without a profile, install the selected toolchains without changing profile selection. --list lists available install hooks.")
 		return 0
 	case "@test-vms":
 		fmt.Fprintf(cli.options.Stdout,

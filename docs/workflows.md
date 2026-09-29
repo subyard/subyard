@@ -60,7 +60,7 @@ normal removal deletes the yard workspace; `--soft` keeps that copy after removi
 | `yard code [project]` | Open a project with VS Code Remote-SSH. |
 | `yard export [project]` | Create a patch from a synced yard copy. |
 | `yard remove [project]` | Detach or remove a project. |
-| `yard provision [profile]` | Apply a toolchain profile directly to the yard. |
+| `yard provision [profile]` | Enable a profile, reconcile its yard prerequisites and install its toolchain. |
 | `yard up`, `yard down`, `yard info [project]` | Manage or inspect an optional L2 project environment. |
 | `yard space [--refresh]` | Show disk usage for local yards. |
 | `yard test-vms <command>` | Inspect or manage the retained nested test-VM pool. |
@@ -131,6 +131,26 @@ or starts it, `yard up --rebuild PROJECT` rebuilds it, and `yard down PROJECT` s
 profiles can also contribute L1 requirements, reconciled by `yard init`, and named resources
 managed through their own lifecycle commands.
 The [control-plane guide](control-plane.md#profile-resources) documents that extension contract.
+
+To enable a profile and prepare its tools in one operation, run:
+
+```sh
+yard provision android
+yard -Y demo provision subyard-dev
+```
+
+An explicit profile is appended to the selected yard's persistent `ENVIRONMENT_PROFILES`;
+other profiles and host-wide settings are preserved. The command plans profile selection,
+yard initialization and toolchain installation together, then asks for one confirmation.
+Profiles without a `provision.sh` hook still enable their yard requirements. Dedicated profiles
+continue to require their matching named-yard preset. Resource service bring-up remains a
+separate operation. Repeating the command reconciles drift; after a partial failure, rerun it
+to finish the already selected profile. A fully converged run does not prompt. If configuration is managed through a registered sync
+source, enable a new profile in that source first; provision can still reconcile an already
+selected profile. Temporary `ENVIRONMENT_PROFILES` overrides are not persisted by this command.
+
+Without an explicit profile, `yard provision` retains its toolchain-selection behavior and
+does not change persisted profile selection. `yard provision --list` lists installable hooks.
 
 ### Resource examples
 

@@ -54,7 +54,7 @@ func TestResourceBootstrapProfileCASFailureDoesNotReserveEndpoint(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	b := &resourceBootstrap{initial: loaded, loaded: loaded, definition: definition,
+	b := &profileBootstrap{initial: loaded, loaded: loaded, definition: definition,
 		selectionPath: path, selection: snapshot, profiles: "existing fixture",
 		request: resourceendpoint.Request{Directory: filepath.Join(root, "data", "resource-endpoints"), Yard: "default", Resource: "fixture.demo", Host: "127.0.0.1", PreferredPort: 6768, ReservedPorts: reserved}}
 	probes := 0

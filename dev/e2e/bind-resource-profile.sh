@@ -8,7 +8,7 @@ YARD_NAME=''
 
 die() { printf 'bind-resource-profile-e2e: %s\n' "$*" >&2; exit 2; }
 [ "${SUBYARD_E2E_VM:-}" = 1 ] || die 'run on VM1 through dev/agent-e2e.sh'
-for command in go incus jq sudo; do
+for command in go incus jq sudo sg; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
 sudo -n true || die 'passwordless sudo is required on the disposable VM'
@@ -20,7 +20,17 @@ incus() {
     /usr/bin/incus "$@"
   fi
 }
-yard() { "$ROOT/.build/yard" -Y "$YARD_NAME" "$@"; }
+yard() {
+  # First init can enroll this user, but cannot update its parent shell's groups.
+  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+    local command
+    printf -v command '%q ' "$ROOT/.build/yard" -Y "$YARD_NAME" "$@"
+    sg incus-admin -c "exec $command"
+  else
+    "$ROOT/.build/yard" -Y "$YARD_NAME" "$@"
+  fi
+}
 
 cleanup() {
   local rc=$?
@@ -94,4 +104,34 @@ if incus exec "$instance" --project "$project" -- test -e /srv/workspaces/live-b
   die 'normal bind removal left its generated workspace wrapper'
 fi
 
-printf 'ok: resource-only Orca init and bind detach cleanup\n'
+# A generic profile must be selected and its mount requirement reconciled before
+# its hook runs. This fixture is created only in the disposable runner checkout.
+profile=fixture-provision
+[ ! -e "$ROOT/config/profiles/$profile" ] || die 'provision fixture already exists'
+mkdir "$ROOT/config/profiles/$profile"
+mkdir -p "$STATE/host/provision-prerequisite"
+printf 'ready\n' > "$STATE/host/provision-prerequisite/ready"
+printf 'PROFILE_NAME=%s\nYARD_MOUNTS=provision-prerequisite:/mnt/provision-prerequisite:ro:0755\n' \
+  "$profile" > "$ROOT/config/profiles/$profile/profile.conf"
+cat > "$ROOT/config/profiles/$profile/provision.sh" <<'HOOK'
+#!/usr/bin/env bash
+# subyard-provision-check-v1
+set -euo pipefail
+marker=/var/lib/subyard-fixture-provision
+if [ "${1:-}" = --check ]; then
+  [ -f /mnt/provision-prerequisite/ready ] && [ -f "$marker" ] && exit 0
+  exit 10
+fi
+[ "$(cat /mnt/provision-prerequisite/ready)" = ready ]
+[ ! -e "$marker" ]
+printf 'installed\n' > "$marker"
+chmod 0600 "$marker"
+HOOK
+chmod 0755 "$ROOT/config/profiles/$profile/provision.sh"
+yard provision "$profile" --yes
+grep -Fq 'orca fixture-provision' "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/config.env" \
+  || die 'provision lost profile selection'
+incus exec "$instance" --project "$project" -- test -f /var/lib/subyard-fixture-provision
+# A converged repeat has no prompt and must not run the non-repeatable fixture hook.
+yard provision "$profile" </dev/null
+printf 'ok: resource-only init, bind detach and generic profile activation\n'

@@ -2,23 +2,27 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/resourceendpoint"
 )
 
-// A resource bootstrap composes desired configuration, init and the resource's
-// own assessment. Preparation remains read-only; the normal resource action
-// owns the single confirmation before any of these changes are applied.
-type resourceBootstrap struct {
+// A profile bootstrap composes desired configuration and init for provision or
+// resource bring-up. Its caller owns assessment and the single confirmation.
+type profileBootstrap struct {
+	profile       string
+	command       string
 	loaded        config.Loaded
 	initial       config.Loaded
 	definition    resource.Definition
@@ -31,17 +35,37 @@ type resourceBootstrap struct {
 	manager       resourceendpoint.Manager
 }
 
-func (cli *CLI) prepareResourceBootstrap(ctx context.Context, loaded config.Loaded, definition resource.Definition, verb string) (*resourceBootstrap, error) {
+func (cli *CLI) prepareResourceBootstrap(ctx context.Context, loaded config.Loaded, definition resource.Definition, verb string) (*profileBootstrap, error) {
 	if !definition.Bootstrap || verb != definition.BringUp {
 		return nil, nil
 	}
-	bootstrap := &resourceBootstrap{loaded: loaded, initial: loaded, definition: definition}
+	return cli.prepareProfileBootstrap(ctx, loaded, definition.Profile, definition.Command, &definition)
+}
+
+// Shared activation path for explicit provision and resource bring-up.
+func (cli *CLI) prepareProfileBootstrap(ctx context.Context, loaded config.Loaded, profile, command string, resourceDefinition *resource.Definition) (*profileBootstrap, error) {
+	if resourceDefinition == nil {
+		for _, resolution := range loaded.Settings["ENVIRONMENT_PROFILES"].Resolutions {
+			if resolution.Status == "effective" && resolution.Scope == "command" {
+				return nil, fmt.Errorf("cannot activate a profile with a temporary ENVIRONMENT_PROFILES override; configure the selected yard's persistent settings")
+			}
+		}
+	}
+	definition := resource.Definition{}
+	if resourceDefinition != nil {
+		definition = *resourceDefinition
+	}
+	bootstrap := &profileBootstrap{loaded: loaded, initial: loaded, definition: definition, profile: profile, command: command}
 	bootstrap.loaded.Environment = maps.Clone(loaded.Environment)
 	profiles := strings.Fields(loaded.Environment["ENVIRONMENT_PROFILES"])
-	if !slices.Contains(profiles, definition.Profile) {
-		profiles = append(profiles, definition.Profile)
+	if !slices.Contains(profiles, profile) {
+		profiles = append(profiles, profile)
 		bootstrap.profiles = strings.Join(profiles, " ")
-		bootstrap.loaded.Environment["ENVIRONMENT_PROFILES"] = bootstrap.profiles
+		var err error
+		bootstrap.loaded, err = config.WithEnvironmentProfiles(bootstrap.loaded, profiles)
+		if err != nil {
+			return nil, err
+		}
 		path, err := configScalarAuthoringPath(loaded, config.ScopeYard)
 		if err != nil {
 			return nil, err
@@ -51,6 +75,9 @@ func (cli *CLI) prepareResourceBootstrap(ctx context.Context, loaded config.Load
 		if err != nil {
 			return nil, err
 		}
+	}
+	if err := bootstrap.checkSelectionSource(); err != nil {
+		return nil, err
 	}
 	if definition.Endpoint != nil {
 		host, port := config.ResourceEndpointOverrides(loaded, definition)
@@ -77,10 +104,17 @@ func (cli *CLI) prepareResourceBootstrap(ctx context.Context, loaded config.Load
 	if err != nil {
 		return nil, err
 	}
+	if resourceDefinition == nil {
+		execution.provisionProfile = profile
+		if runtime, ok := execution.platform.(reconcileruntime.Runtime); ok {
+			runtime.ProvisionProfile = profile
+			execution.platform = runtime
+		}
+	}
 	if bootstrap.selectionPath != "" && execution.integrationSelection != nil {
 		write := execution.integrationSelection.write
 		if write == nil {
-			return nil, fmt.Errorf("resource bootstrap requires a prepared integration settings write")
+			return nil, fmt.Errorf("profile bootstrap requires a prepared integration settings write")
 		}
 		write.Content, err = config.EditPersistentAssignmentContent(write.Path, write.Content, "ENVIRONMENT_PROFILES", &bootstrap.profiles)
 		if err != nil {
@@ -142,19 +176,19 @@ func (cli *CLI) resourceReservedPorts(current config.Loaded, definition resource
 	return ports, nil
 }
 
-func (bootstrap *resourceBootstrap) previewEndpoint(ctx context.Context) (resourceendpoint.Plan, error) {
+func (bootstrap *profileBootstrap) previewEndpoint(ctx context.Context) (resourceendpoint.Plan, error) {
 	bounded, cancel := context.WithTimeout(ctx, resourcePrepareTimeout)
 	defer cancel()
 	return bootstrap.manager.Preview(bounded, bootstrap.request)
 }
 
-func (bootstrap *resourceBootstrap) augment(assessment domain.ActionAssessment) domain.ActionAssessment {
+func (bootstrap *profileBootstrap) augment(assessment domain.ActionAssessment) domain.ActionAssessment {
 	if bootstrap == nil {
 		return assessment
 	}
 	consequences := []string{}
 	if bootstrap.selectionPath != "" {
-		consequences = append(consequences, "enable profile "+bootstrap.definition.Profile+" for yard "+bootstrap.loaded.Context.YardName+" while preserving existing profiles")
+		consequences = append(consequences, "enable profile "+bootstrap.profile+" for yard "+bootstrap.loaded.Context.YardName+" while preserving existing profiles")
 	}
 	if bootstrap.endpoint != nil && (bootstrap.endpoint.HostSource != "saved" || bootstrap.endpoint.PortSource != "saved") {
 		// Explicit overrides can already be recorded; an idempotent commit does not
@@ -174,7 +208,7 @@ func (bootstrap *resourceBootstrap) augment(assessment domain.ActionAssessment) 
 	return assessment
 }
 
-func (bootstrap *resourceBootstrap) refresh(ctx context.Context, cli *CLI) error {
+func (bootstrap *profileBootstrap) refresh(ctx context.Context, cli *CLI) error {
 	if bootstrap == nil {
 		return nil
 	}
@@ -191,6 +225,9 @@ func (bootstrap *resourceBootstrap) refresh(ctx context.Context, cli *CLI) error
 		if fresh.Settings[name].EffectiveValue != trace.EffectiveValue {
 			return fmt.Errorf("%w: %s changed after confirmation", domain.ErrPlanStale, name)
 		}
+	}
+	if err := bootstrap.checkSelectionSource(); err != nil {
+		return err
 	}
 	if bootstrap.selectionPath != "" {
 		current, err := readConfigAuthoringTarget(bootstrap.selectionPath)
@@ -242,7 +279,7 @@ func (bootstrap *resourceBootstrap) refresh(ctx context.Context, cli *CLI) error
 	return nil
 }
 
-func (bootstrap *resourceBootstrap) apply(ctx context.Context, cli *CLI) error {
+func (bootstrap *profileBootstrap) apply(ctx context.Context, cli *CLI) error {
 	if bootstrap == nil {
 		return nil
 	}
@@ -279,7 +316,7 @@ func (bootstrap *resourceBootstrap) apply(ctx context.Context, cli *CLI) error {
 	}
 	if bootstrap.init != nil {
 		if cli.options.InitPlatform == nil && !bootstrap.init.hooksOnly() {
-			if err := cli.prepareSudoPrivileges(ctx, cli.options.Stderr, cli.effectiveUID(), bootstrap.definition.Command); err != nil {
+			if err := cli.prepareSudoPrivileges(ctx, cli.options.Stderr, cli.effectiveUID(), bootstrap.command); err != nil {
 				return err
 			}
 			bootstrap.init.rebuildPlatform(cli)
@@ -288,6 +325,20 @@ func (bootstrap *resourceBootstrap) apply(ctx context.Context, cli *CLI) error {
 		if err := bootstrap.init.run(ctx, cli, cli.options.Stdout); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func (bootstrap *profileBootstrap) checkSelectionSource() error {
+	if bootstrap.selectionPath == "" {
+		return nil
+	}
+	_, err := os.Lstat(filepath.Join(bootstrap.loaded.Context.Paths.ConfigHome, config.SourceRecordRelativePath))
+	if err == nil {
+		return errors.New("configuration is source-managed; enable the profile through the registered source before provisioning")
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
 	return nil
 }

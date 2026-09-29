@@ -206,9 +206,13 @@ func (session *ownerRPCSession) integrationStatus(ctx context.Context, yard doma
 
 func (prepared *preparedCommand) prepareRemoteOperation(ctx context.Context) error {
 	cli := prepared.CLI
-	request, err := parseIntegrationArguments(prepared.Arguments)
-	if err != nil {
-		return err
+	var request integrationRequest
+	if prepared.Definition.Handler == "@integration" {
+		var err error
+		request, err = parseIntegrationArguments(prepared.Arguments)
+		if err != nil {
+			return err
+		}
 	}
 	session, err := cli.openOwnerRPC(ctx, prepared.Loaded.Context)
 	if err != nil {

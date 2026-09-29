@@ -45,6 +45,7 @@ type initBootstrap struct {
 }
 
 type initExecution struct {
+	provisionProfile      string
 	requestedProfile      string
 	profileProvision      *provisionExecution
 	profileSetup          *initProfileSet
@@ -878,6 +879,7 @@ func (execution *initExecution) rebuildPlatform(cli *CLI) {
 	execution.platform = cli.initPlatform(execution.loaded, execution.powerYards)
 	if runtime, ok := execution.platform.(reconcileruntime.Runtime); ok {
 		runtime.InitProfile = execution.requestedProfile
+		runtime.ProvisionProfile = execution.provisionProfile
 		if execution.integrationAdoption.AdoptionFingerprint != "" {
 			runtime.AdoptLegacyIntegrations = true
 			runtime.LegacyIntegrationFingerprint = execution.integrationAdoption.AdoptionFingerprint

@@ -21,6 +21,7 @@ import (
 )
 
 type provisionExecution struct {
+	explicitProfile     string
 	endpoint            *provisionEndpoint
 	profiles            []string
 	changedProfiles     []string
@@ -131,13 +132,16 @@ func (cli *CLI) prepareProvisionExecution(
 		seen[name] = true
 		if !byName[name] {
 			if want != "" {
-				return nil, fmt.Errorf("profile %q has no provision hook", name)
+				info, err := os.Stat(filepath.Join(cli.options.RepositoryRoot, "config", "profiles", name))
+				if err != nil || !info.IsDir() {
+					return nil, fmt.Errorf("unknown environment profile %q", name)
+				}
 			}
 			continue
 		}
 		profiles = append(profiles, name)
 	}
-	return &provisionExecution{profiles: profiles}, nil
+	return &provisionExecution{profiles: profiles, explicitProfile: want}, nil
 }
 
 func provisionableProfiles(root string) ([]string, error) {

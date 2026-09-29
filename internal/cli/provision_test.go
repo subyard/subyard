@@ -266,6 +266,8 @@ func TestProvisionCLIAndRPCUseNativeRunner(t *testing.T) {
 
 func TestProvisionNoOpSkipsPromptAndApply(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
+	platform := convergedProvisionInit(t, root)
+	writeCLIFile(t, filepath.Join(root, "config", "host.env"), "ENVIRONMENT_PROFILES=subyard-dev\n", 0o600)
 	writeProvisionProfile(t, root, "subyard-dev")
 	incus := lifecycleIncus()
 	instance := incus.Instances["subyard/yard"]
@@ -279,7 +281,7 @@ func TestProvisionNoOpSkipsPromptAndApply(t *testing.T) {
 	program, err := New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"provision", "subyard-dev"},
 		Environment: append(environment, "SUBYARD_OPERATION_ID=provision-noop"),
-		WorkingDir:  root, Incus: incus, AdapterRunner: runner, Prompt: prompt,
+		WorkingDir:  root, Incus: incus, AdapterRunner: runner, Prompt: prompt, InitPlatform: platform,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -300,4 +302,17 @@ func writeProvisionProfile(t *testing.T, root, name string) {
 	}
 	writeCLIFile(t, filepath.Join(directory, "profile.conf"), "PROFILE_NAME="+name+"\n", 0o600)
 	writeCLIFile(t, filepath.Join(directory, "provision.sh"), "#!/usr/bin/env bash\n# subyard-provision-check-v1\ntrue\n", 0o700)
+}
+
+func convergedProvisionInit(t *testing.T, root string) *initPlatformFixture {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(root, "state"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(root, "state", "host-id"), "5034c950-74d0-46c4-9428-b7835e602109\n", 0o600)
+	platform := newInitPlatformFixture()
+	for stage := range platform.converged {
+		platform.converged[stage] = true
+	}
+	return platform
 }

@@ -204,7 +204,7 @@ func (cli *CLI) prepareCommand(ctx context.Context, request prepareCommandReques
 		request.OnResolved(prepared.Loaded, slices.Clone(prepared.Arguments))
 	}
 	prepared.policy = commandPolicy(prepared.Definition, prepared.Loaded.Context, prepared.Arguments, prepared.Project)
-	if prepared.Definition.Handler == "@integration" && prepared.Loaded.Context.AccessKind == domain.AccessRemote {
+	if (prepared.Definition.Handler == "@integration" || (prepared.Definition.Handler == "@provision" && !slices.Contains(prepared.Arguments, "--list") && !slices.Contains(prepared.Arguments, "-l"))) && prepared.Loaded.Context.AccessKind == domain.AccessRemote {
 		if err = prepared.prepareRemoteOperation(ctx); err != nil {
 			return nil, &commandPreparationError{phase: "prepare", err: err}
 		}
@@ -467,7 +467,7 @@ func (prepared *preparedCommand) prepareLifecycle(ctx context.Context, _ *initBo
 	return nil
 }
 
-func (prepared *preparedCommand) prepareProvision(_ context.Context, _ *initBootstrap) error {
+func (prepared *preparedCommand) prepareProvision(ctx context.Context, _ *initBootstrap) error {
 	execution, err := prepared.CLI.prepareProvisionExecution(prepared.Loaded, prepared.Arguments, prepared.Project)
 	if err != nil {
 		return err
@@ -475,6 +475,14 @@ func (prepared *preparedCommand) prepareProvision(_ context.Context, _ *initBoot
 	if execution.list {
 		prepared.displayOnly = func() { execution.printList(prepared.CLI.options.Stdout) }
 		return nil
+	}
+	var bootstrap *profileBootstrap
+	if execution.explicitProfile != "" {
+		bootstrap, err = prepared.CLI.prepareProfileBootstrap(ctx, prepared.Loaded, execution.explicitProfile, prepared.Definition.Name, nil)
+		if err != nil {
+			return err
+		}
+		prepared.Loaded = bootstrap.loaded
 	}
 	var notes []string
 	readAddresses := prepared.CLI.provisionEndpointAddresses
@@ -490,13 +498,35 @@ func (prepared *preparedCommand) prepareProvision(_ context.Context, _ *initBoot
 	}
 	prepared.policy = execution.policy(prepared.Definition, prepared.Loaded.Context)
 	prepared.assess = func(ctx context.Context) (domain.ActionID, domain.ActionDelta, error) {
-		if err := prepared.CLI.observeProvisionExecution(ctx, prepared.Loaded, prepared.Definition, execution); err != nil {
+		if err := bootstrap.refresh(ctx, prepared.CLI); err != nil {
 			return "", domain.ActionDelta{}, err
 		}
-		return execution.actionPlan(prepared.Definition, prepared.Loaded.Context)
+		var err error
+		if bootstrap != nil && bootstrap.init != nil {
+			observation := *bootstrap.init
+			observation.profileProvision = execution
+			err = prepared.CLI.observeInitProfileProvision(ctx, &observation)
+		} else {
+			err = prepared.CLI.observeProvisionExecution(ctx, prepared.Loaded, prepared.Definition, execution)
+		}
+		if err != nil {
+			return "", domain.ActionDelta{}, err
+		}
+		action, delta, err := execution.actionPlan(prepared.Definition, prepared.Loaded.Context)
+		assessment := bootstrap.augment(domain.ActionAssessment{Changed: delta.Changed, Consequences: delta.Consequences})
+		delta.Changed, delta.Consequences = assessment.Changed, assessment.Consequences
+		return action, delta, err
 	}
 	prepared.refresh = prepared.assess
 	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (domain.AdapterResult, error) {
+		if bootstrap != nil {
+			if err := bootstrap.apply(ctx, prepared.CLI); err != nil {
+				return domain.AdapterResult{}, err
+			}
+			if err := execution.endpoint.acceptProfileBootstrap(prepared.CLI, bootstrap); err != nil {
+				return domain.AdapterResult{}, err
+			}
+		}
 		return prepared.CLI.executeProvision(ctx, orchestrator, prepared.Loaded, prepared.Plan, execution, diagnostics)
 	}
 	return nil

@@ -98,6 +98,7 @@ func TestProvisionEndpointRPCConsentAndStaleChecks(t *testing.T) {
 	for _, scenario := range []string{"apply", "decline", "provision failed", "address changed", "config changed", "ingress appeared", "source appeared"} {
 		t.Run(scenario, func(t *testing.T) {
 			program, loaded, path, runner := provisionEndpointFixture(t)
+			program.options.InitPlatform = convergedProvisionInit(t, program.options.RepositoryRoot)
 			addresses, _ := program.provisionEndpointAddresses()
 			program.provisionEndpointAddresses = func() ([]hostruntime.OwnerIPv4, error) { return addresses, nil }
 			before, _ := os.ReadFile(path)

@@ -5,9 +5,9 @@ lease and returns to the pool after its emulator, compositor, ADB server and con
 stopped. Each allocation starts with fresh Android userdata and no snapshots. Existing personal
 AVDs are neither imported into the pool nor removed.
 
-Select the `android` profile through the normal yard configuration and run `yard init`, then
-`yard provision android` on the owner host (use `yard -Y NAME` for a named yard). Init prepares
-the yard and prints a provisioning hint; it does not install the Android toolchain. Provisioning
+Run `yard provision android` on the owner host (use `yard -Y NAME provision android` for a
+named yard). This adds Android to that yard's profiles while preserving existing selections,
+reconciles yard prerequisites, and installs the toolchain under one confirmation. Provisioning
 installs the shared SDK at `/srv/cache/android-sdk`, JDK at `/opt/jdk-17`, the in-yard client and
 the pool service. It also writes `/etc/profile.d/subyard-android.sh`; open a new login shell after
 installation to load the SDK environment. A selected profile alone does not prove installation.

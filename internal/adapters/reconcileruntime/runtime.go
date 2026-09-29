@@ -53,19 +53,21 @@ type Runtime struct {
 	// the dispatcher. Resolved yard settings must not become command overrides.
 	LaunchEnvironment []string
 	// InitProfile preserves the explicitly selected profile across owner-group reexec.
-	InitProfile    string
-	Stdin          io.Reader
-	Stdout         io.Writer
-	Stderr         io.Writer
-	Incus          ports.Incus
-	ConfigWriter   ports.InstanceConfigWriter
-	Executor       ports.InstanceExecutor
-	Yard           domain.Context
-	PowerYards     []domain.Context
-	SRVPool        string
-	SRVVolume      string
-	HostDeviceRoot string
-	NetworkPolicy  YardNetworkPolicy
+	InitProfile string
+	// ProvisionProfile resumes composed provisioning after owner-group reexec.
+	ProvisionProfile string
+	Stdin            io.Reader
+	Stdout           io.Writer
+	Stderr           io.Writer
+	Incus            ports.Incus
+	ConfigWriter     ports.InstanceConfigWriter
+	Executor         ports.InstanceExecutor
+	Yard             domain.Context
+	PowerYards       []domain.Context
+	SRVPool          string
+	SRVVolume        string
+	HostDeviceRoot   string
+	NetworkPolicy    YardNetworkPolicy
 }
 
 func (runtime Runtime) CheckStage(ctx context.Context, stage ports.ReconcileStageID) (bool, error) {
@@ -742,11 +744,11 @@ func (runtime Runtime) installIncus(ctx context.Context) error {
 	}
 	dispatcher := runtime.environmentValue("SUBYARD_DISPATCHER_PATH")
 	if dispatcher == "" || runtime.LaunchEnvironment == nil || runtime.environmentValue("SUBYARD_SG_REEXEC") == "1" {
-		return errors.New("open a fresh incus-admin session, then rerun the same yard init command")
+		return errors.New("open a fresh incus-admin session, then rerun the same yard command")
 	}
 	sg, err := runtime.executableFromPath("sg")
 	if err != nil {
-		return errors.New("open a fresh incus-admin session, then rerun the same yard init command")
+		return errors.New("open a fresh incus-admin session, then rerun the same yard command")
 	}
 	arguments, err := runtime.initReexecArguments(dispatcher)
 	if err != nil {
@@ -766,6 +768,12 @@ func (runtime Runtime) initReexecArguments(dispatcher string) ([]string, error) 
 	arguments := []string{dispatcher}
 	if runtime.Yard.YardName != "" {
 		arguments = append(arguments, "-Y", runtime.Yard.YardName)
+	}
+	if runtime.ProvisionProfile != "" {
+		if !domain.SafeName(runtime.ProvisionProfile) {
+			return nil, errors.New("invalid provision profile for owner-group reexec")
+		}
+		return append(arguments, "provision", runtime.ProvisionProfile, "--yes"), nil
 	}
 	arguments = append(arguments, "init", "--yes")
 	if runtime.InitProfile != "" {

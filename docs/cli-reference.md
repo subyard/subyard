@@ -144,10 +144,13 @@ Usage: yard shell [--root] [PROJECT] [-- COMMAND...]
 
 ## provision
 
-install a profile toolchain into the yard.
+enable a profile, reconcile the yard and install its toolchain.
 
 ```text
 Usage: yard provision [profile | --list]
+With a profile, persist its selection for this yard, reconcile prerequisites and install its toolchain under one confirmation.
+Existing profiles are preserved. Profiles without an install hook only reconcile the yard; dedicated-role restrictions still apply.
+Without a profile, install the selected toolchains without changing profile selection. --list lists available install hooks.
 ```
 
 ## test-vms

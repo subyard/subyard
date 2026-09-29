@@ -405,7 +405,7 @@ type resourceApplyRunner struct {
 	localAction   string
 	effect        domain.ActionEffect
 	arguments     []string
-	bootstrap     *resourceBootstrap
+	bootstrap     *profileBootstrap
 	consequences  []string
 	ingress       *resourceIngress
 	startupIntent *resourceStartupIntent
