@@ -319,6 +319,9 @@ safe_attribution_yard() {
 
 resolve_workspace_attribution() {
   local root="$1" canonical workspace_root relative project_dir metadata project yard
+  if [ -n "${SUBYARD_E2E_CONTROLLER_WORKSPACE:-}" ]; then
+    root="$SUBYARD_E2E_CONTROLLER_WORKSPACE"
+  fi
   canonical="$(git -C "$root" rev-parse --show-toplevel 2>/dev/null)" \
     || die "cannot identify the E2E worktree"
   canonical="$(realpath -e -- "$canonical")" \
@@ -987,6 +990,16 @@ worktree_paths() {
 
 build_bundle() {
   local root="$1" bundle="$2" path resolved count=0 archive inventory inventory_dir
+  if [ -n "${SUBYARD_E2E_CANDIDATE_BUNDLE:-}" ]; then
+    [[ "${SUBYARD_E2E_CANDIDATE_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] \
+      || die 'SUBYARD_E2E_CANDIDATE_SHA256 must be a lowercase SHA-256 digest'
+    [ -f "$SUBYARD_E2E_CANDIDATE_BUNDLE" ] && [ ! -L "$SUBYARD_E2E_CANDIDATE_BUNDLE" ] \
+      || die 'SUBYARD_E2E_CANDIDATE_BUNDLE must be a regular non-symlink archive'
+    [ "$(sha256sum "$SUBYARD_E2E_CANDIDATE_BUNDLE" | awk '{print $1}')" = "$SUBYARD_E2E_CANDIDATE_SHA256" ] \
+      || die 'SUBYARD_E2E_CANDIDATE_BUNDLE checksum mismatch'
+    cp -- "$SUBYARD_E2E_CANDIDATE_BUNDLE" "$bundle"
+    return
+  fi
   local -a paths=()
   while IFS= read -r -d '' path; do
     if [ ! -e "$root/$path" ] && [ ! -L "$root/$path" ]; then continue; fi
@@ -1035,7 +1048,7 @@ write_guest_command() {
 	printf 'export SUBYARD_E2E_BASE_FINGERPRINT=%q\n' "$BASE_FINGERPRINT"
 	printf 'export SUBYARD_E2E_VM=%q\n' "$vm"
 	if [ "${1:-}" = ./bin/yard ]; then
-		printf '/usr/sbin/runuser -u dev -- env HOME=/home/dev USER=dev LOGNAME=dev ./dev/build-engine.sh\n'
+		printf '/usr/sbin/runuser -u dev -- env HOME=/home/dev USER=dev LOGNAME=dev make build\n'
 	fi
 	printf 'exec /usr/sbin/runuser -u dev -- env HOME=/home/dev USER=dev LOGNAME=dev'
 	printf ' %q' "$@"

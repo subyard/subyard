@@ -30,11 +30,11 @@ jobs:
         run: |
           mapfile -t shell_files < <(find scripts dev config/profiles config/agents tests -type f -name '*.sh' -print | sort)
           shellcheck -x -S warning bin/yard completions/yard.bash "${shell_files[@]}"
+      - name: Complete shipped profile acceptance inventory
+        run: bash dev/test-profiles.sh --e2e --list
       - name: Yard-safe verification gate
-        run: ./tests/run.sh
+        run: make verify
       - name: CLI reference freshness
         run: make cli-docs-check
-      - name: Profile-owned host-free checks
-        run: bash dev/test-profiles.sh
       - name: Real local crypto and OpenSSH adapter contracts
         run: bash tests/real-host/adapter-contracts.sh

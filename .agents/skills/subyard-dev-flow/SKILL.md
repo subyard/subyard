@@ -64,7 +64,9 @@ requirements when the task depends on them.
   VMs alone does not justify using them.
 - Before publishing a runtime release, run the fresh release smoke
   (`dev/e2e/p0-acceptance.sh --slot N`) and release compatibility checks documented in
-  [Development](../../../docs/development.md). This publication gate does not apply to every
+  [Development](../../../docs/development.md), plus the declared acceptance checks of all shipped
+  profiles against the same candidate. A core-only pass is not release acceptance; missing required
+  profile results leave it incomplete. This publication gate does not apply to every
   development edit. Existing CI/merge checks remain unchanged; full P0 is a separate risk-based
   or explicitly requested check, not a synonym for release smoke.
 - Once relevant checks pass, broaden or repeat them only for a new change, failure or unresolved
@@ -98,6 +100,8 @@ requirements when the task depends on them.
 
 ## Boundaries
 
+- Keep optional-profile implementation and tests in the owning profile. Core provides generic
+  extension contracts and synthetic fixtures, without profile-specific branches or assertions.
 - Keep public files generic and in English. Keep private material in the overlay;
   never print or store secrets in task notes or reports.
 - Use allocated test targets within the VM guide's ownership boundary. The outer

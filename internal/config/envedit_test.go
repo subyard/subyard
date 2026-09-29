@@ -62,8 +62,8 @@ func TestCreatePersistentFileRefusesExistingTarget(t *testing.T) {
 	if err := os.MkdirAll(configHome, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(configHome, "yards", "hermes", "config.env")
-	content := []byte("ENVIRONMENT_PROFILES=hermes\n")
+	path := filepath.Join(configHome, "yards", "sample-service", "config.env")
+	content := []byte("ENVIRONMENT_PROFILES=sample-service\n")
 	if err := CreatePersistentFile(configHome, path, content); err != nil {
 		t.Fatal(err)
 	}
@@ -90,8 +90,8 @@ func TestCreatePersistentFileRefusesExistingTarget(t *testing.T) {
 
 func TestCreatePersistentFileCreatesMissingConfigurationRoot(t *testing.T) {
 	configHome := filepath.Join(t.TempDir(), "missing")
-	path := filepath.Join(configHome, "yards", "hermes", "config.env")
-	content := []byte("ENVIRONMENT_PROFILES=hermes\n")
+	path := filepath.Join(configHome, "yards", "sample-service", "config.env")
+	content := []byte("ENVIRONMENT_PROFILES=sample-service\n")
 	if err := CreatePersistentFile(configHome, path, content); err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func TestReadPersistentFileSnapshotIsStrictlyReadOnlyAndProtected(t *testing.T) 
 	if err := os.Chmod(configHome, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(configHome, "yards", "hermes", "config.env")
+	path := filepath.Join(configHome, "yards", "sample-service", "config.env")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestReadPersistentFileSnapshotIsStrictlyReadOnlyAndProtected(t *testing.T) 
 		t.Fatal("read-only snapshot changed file identity or mode")
 	}
 
-	missing := filepath.Join(configHome, "yards", "hermes", "missing.env")
+	missing := filepath.Join(configHome, "yards", "sample-service", "missing.env")
 	missingSnapshot, err := ReadPersistentFileSnapshot(configHome, missing)
 	if err != nil || missingSnapshot.Exists {
 		t.Fatalf("missing snapshot = %#v, err=%v", missingSnapshot, err)
@@ -159,7 +159,7 @@ func TestCompareAndSwapPersistentFileUsesProtectedIdentity(t *testing.T) {
 	if err := os.Chmod(configHome, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	directory := filepath.Join(configHome, "yards", "hermes")
+	directory := filepath.Join(configHome, "yards", "sample-service")
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +211,7 @@ func TestCompareAndSwapPersistentFileConvergesAcrossPublicationFaults(t *testing
 			if err := os.Chmod(configHome, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			directory := filepath.Join(configHome, "yards", "hermes")
+			directory := filepath.Join(configHome, "yards", "sample-service")
 			if err := os.MkdirAll(directory, 0o700); err != nil {
 				t.Fatal(err)
 			}

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -110,7 +111,7 @@ func (cli *CLI) prepareProvisionEndpointWithBootstrap(loaded config.Loaded, prof
 	}
 	for _, name := range slices.Sorted(maps.Keys(plan.values)) {
 		value := plan.values[name]
-		if err := config.ValidateSetting(config.ScopeYard, name, value, false); err != nil {
+		if err := loaded.Catalog.ValidateSetting(config.ScopeYard, name, value, false); err != nil {
 			return nil, nil, err
 		}
 		plan.content, err = config.EditPersistentAssignmentContent(plan.path, plan.content, name, &value)
@@ -146,7 +147,7 @@ func (plan *provisionEndpoint) checkWithInstance(ctx context.Context, cli *CLI, 
 	if err := plan.checkSource(); err != nil {
 		return err
 	}
-	options := config.LoadOptions{RepositoryRoot: cli.options.RepositoryRoot, OperatorHome: plan.initial.Context.Paths.OperatorHome, YardName: plan.initial.Context.YardName, Environment: cli.baseEnv}
+	options := config.LoadOptions{Catalog: &cli.catalog, RepositoryRoot: cli.options.RepositoryRoot, OperatorHome: plan.initial.Context.Paths.OperatorHome, YardName: plan.initial.Context.YardName, Environment: cli.baseEnv}
 	if plan.bootstrap != nil {
 		options.YardSettingsFile = plan.bootstrap.sourcePath
 	}
@@ -217,4 +218,54 @@ func (plan *provisionEndpoint) apply(ctx context.Context, cli *CLI) error {
 		return err
 	}
 	return config.CompareAndSwapPersistentFile(plan.initial.Context.Paths.ConfigHome, plan.path, plan.before, plan.content)
+}
+
+// Accept only the exact settings writes already approved and published by init.
+func (plan *provisionEndpoint) acceptProfileBootstrap(cli *CLI, bootstrap *profileBootstrap) error {
+	if plan == nil {
+		return nil
+	}
+	expected := plan.before.Content
+	var err error
+	if bootstrap.selectionPath != "" {
+		expected, err = config.EditPersistentAssignmentContent(plan.path, expected, "ENVIRONMENT_PROFILES", &bootstrap.profiles)
+		if err != nil {
+			return err
+		}
+	}
+	if bootstrap.init != nil && bootstrap.init.integrationSelection != nil && bootstrap.init.integrationSelection.write != nil {
+		expected = bootstrap.init.integrationSelection.write.Content
+	}
+	current, err := readInitSelectionSnapshot(plan.initial.Context.Paths.ConfigHome, plan.path)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(current.Content, expected) {
+		return domain.ErrPlanStale
+	}
+	fresh, err := config.Load(config.LoadOptions{RepositoryRoot: cli.options.RepositoryRoot, OperatorHome: plan.initial.Context.Paths.OperatorHome, YardName: plan.initial.Context.YardName, Environment: cli.baseEnv})
+	if err != nil {
+		return err
+	}
+	for name, trace := range plan.initial.Settings {
+		want := trace.EffectiveValue
+		if name == "ENVIRONMENT_PROFILES" && bootstrap.selectionPath != "" {
+			want = bootstrap.profiles
+		}
+		if bootstrap.init != nil && bootstrap.init.integrationSelection != nil && (name == "CODING_TOOL_INTEGRATIONS" || name == "AGENTS") {
+			continue
+		}
+		if fresh.Settings[name].EffectiveValue != want {
+			return domain.ErrPlanStale
+		}
+	}
+	plan.initial, plan.before, plan.content = fresh, current, current.Content
+	for _, name := range slices.Sorted(maps.Keys(plan.values)) {
+		value := plan.values[name]
+		plan.content, err = config.EditPersistentAssignmentContent(plan.path, plan.content, name, &value)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }

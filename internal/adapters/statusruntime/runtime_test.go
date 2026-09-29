@@ -439,7 +439,7 @@ func TestRuntimeReportsSelectedProfilesAndAgentsWithVerifiedDashboard(t *testing
 			}}
 			facts, err := (Runtime{
 				Environment: map[string]string{
-					"ENVIRONMENT_PROFILES": "android orca", "CODING_TOOL_INTEGRATIONS": "codex aiobserver",
+					"ENVIRONMENT_PROFILES": "sample-api sample-runtime", "CODING_TOOL_INTEGRATIONS": "codex aiobserver",
 					"AI_OBSERVER_HOST_PORT": "18080",
 				},
 				Executor: executor, Incus: incus,
@@ -451,7 +451,7 @@ func TestRuntimeReportsSelectedProfilesAndAgentsWithVerifiedDashboard(t *testing
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !slices.Equal(facts.Profiles, []string{"android", "orca"}) {
+			if !slices.Equal(facts.Profiles, []string{"sample-api", "sample-runtime"}) {
 				t.Fatalf("profiles = %#v", facts.Profiles)
 			}
 			wantAgents := []domain.AgentStatus{

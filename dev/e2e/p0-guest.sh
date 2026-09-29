@@ -1191,7 +1191,15 @@ peer_prepare_finish() {
   [ -s "$PEER_SSH_DIR/id_ed25519" ] && [ -s "$PEER_SSH_DIR/id_ed25519.pub" ] \
     || die 'synthetic peer SSH identity is incomplete'
   install -d -m 0700 "$release" "$PEER_ROOT/bin"
-  "$PEER_ROOT/src/dev/package-engine.sh" --output-dir "$release" --version "$version" >/dev/null
+  if [ -e "$PEER_ROOT/src/.subyard-acceptance/candidate.json" ]; then
+    # shellcheck source=tests/helpers/release-candidate.sh
+    . "$PEER_ROOT/src/tests/helpers/release-candidate.sh"
+    release_candidate_prepare "$PEER_ROOT/src" >/dev/null
+    version="$(jq -er '.version' "$PEER_ROOT/src/.subyard-acceptance/candidate.json")"
+    cp -a "$PEER_ROOT/src/.subyard-acceptance/release/." "$release/"
+  else
+    "$PEER_ROOT/src/dev/package-engine.sh" --output-dir "$release" --version "$version" >/dev/null
+  fi
   HOME="$PEER_ROOT/home" SUBYARD_HOME="$PEER_DATA_ROOT" \
     SUBYARD_CONFIG_HOME="$PEER_ROOT/config" YARD_BIN_DIR="$PEER_ROOT/bin" \
     YARD_SHELL_RC="$PEER_ROOT/home/.bashrc" YARD_LOGIN_RC="$PEER_ROOT/home/.profile" \

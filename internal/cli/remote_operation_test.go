@@ -126,7 +126,7 @@ func TestExactRPCRequiresCapabilityAndDiscardsOnDisconnect(t *testing.T) {
 }
 
 func TestRemoteIntegrationUsesOneOwnerRPCSession(t *testing.T) {
-	for _, kind := range []string{"accept", "ssh-trust-denied", "owner-clock-ahead", "owner-clock-behind", "no-op", "preconfirmed-prompt", "decline", "old-owner", "disconnect", "status", "cleanup-check", "rpc-status", "rpc-status-wrong-yard"} {
+	for _, kind := range []string{"provision", "accept", "ssh-trust-denied", "owner-clock-ahead", "owner-clock-behind", "no-op", "preconfirmed-prompt", "decline", "old-owner", "disconnect", "status", "cleanup-check", "rpc-status", "rpc-status-wrong-yard"} {
 		t.Run(kind, func(t *testing.T) {
 			selection := "CODING_TOOL_INTEGRATIONS=\n"
 			if kind == "no-op" {
@@ -145,6 +145,26 @@ func TestRemoteIntegrationUsesOneOwnerRPCSession(t *testing.T) {
 			owner, err := prepareIntegrationTest(t, cli, ownerArgs...)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if kind == "provision" {
+				writeProvisionProfile(t, cli.options.RepositoryRoot, "sample")
+				cli, err = New(cli.options)
+				if err != nil {
+					t.Fatal(err)
+				}
+				cli.options.InitPlatform = newInitPlatformFixture()
+				loaded, err := cli.loadContext("default")
+				if err != nil {
+					t.Fatal(err)
+				}
+				definition, _ := cli.manifest.Lookup("provision")
+				ownerArgs = []string{"sample"}
+				owner, err = cli.prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: ownerArgs})
+				if err != nil {
+					t.Fatal(err)
+				}
+				// The controller must never use this local init platform.
+				cli.options.InitPlatform = &initPlatformFixture{preflightErr: errors.New("controller init is forbidden")}
 			}
 			if kind == "no-op" && (!owner.Plan.Confirmed || owner.Plan.Confirmation != domain.ConfirmationNever || !operationPlanNoOp(owner.Plan)) {
 				t.Fatalf("fixture did not produce a native no-op plan: %#v", owner.Plan)
@@ -183,7 +203,8 @@ while True:
  if method=='rpc.negotiate':send(req,{'capabilities':[] if kind=='old-owner' else ['operation-exact-plan-v1']})
  elif method=='operation.plan':
   with open(root+'/plan.json') as source:plan=json.load(source)
-  if req['params']!={'command':'integration','arguments':['cleanup' if kind=='cleanup-check' else 'enable','codex'],'exact':True}:sys.exit(4)
+  expected={'command':'provision','arguments':['sample'],'exact':True} if kind=='provision' else {'command':'integration','arguments':['cleanup' if kind=='cleanup-check' else 'enable','codex'],'exact':True}
+  if req['params']!=expected:sys.exit(4)
   send(req,plan)
   if kind=='disconnect':sys.exit(0)
  elif method=='operation.execute':

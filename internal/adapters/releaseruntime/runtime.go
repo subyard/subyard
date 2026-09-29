@@ -47,8 +47,8 @@ type Prepared struct {
 	TargetVersion  string
 	// RepairCurrent identifies protected recovery of the active release before release selection.
 	RepairCurrent bool
-	run            func(context.Context) error
-	check          func(context.Context) (releasetransition.Inspection, error)
+	run           func(context.Context) error
+	check         func(context.Context) (releasetransition.Inspection, error)
 }
 
 type verifiedPreparationError struct {

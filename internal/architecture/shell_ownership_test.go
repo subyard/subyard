@@ -1,6 +1,9 @@
 package architecture
 
 import (
+	"bytes"
+	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -9,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/command"
+	"github.com/Subyard/Subyard/internal/profile"
 )
 
 func TestProductionShellIsReachableAndLeafOnly(t *testing.T) {
@@ -67,7 +71,7 @@ func TestProductionShellIsReachableAndLeafOnly(t *testing.T) {
 		}
 	}
 
-	contracts := productionShellContracts()
+	contracts := productionShellContracts(t)
 	leafContracts := productionLeafContracts()
 	actual := append(shellFiles(t, filepath.Join(root, "scripts")),
 		shellFiles(t, filepath.Join(root, "config", "profiles"))...)
@@ -238,7 +242,7 @@ func TestPhysicalShellConsumesOnlyPreparedControlPlaneState(t *testing.T) {
 		"stage_registry", "source_control_plane",
 	}
 	sourcePattern := regexp.MustCompile(`(?m)^[[:space:]]*\.[[:space:]]+["']?([^"';[:space:]]+)`)
-	for path, contract := range productionShellContracts() {
+	for path, contract := range productionShellContracts(t) {
 		if contract.kind != "leaf" {
 			continue
 		}
@@ -323,10 +327,22 @@ type shellContract struct {
 	reference string
 }
 
-func productionShellContracts() map[string]shellContract {
+type profileShellOwnerManifest struct {
+	SchemaVersion int                 `json:"schema_version"`
+	Owners        []profileShellOwner `json:"owners"`
+}
+
+type profileShellOwner struct {
+	Path      string `json:"path"`
+	Kind      string `json:"kind"`
+	Owner     string `json:"owner"`
+	Reference string `json:"reference"`
+}
+
+func productionShellContracts(t *testing.T) map[string]shellContract {
 	goReconcile := "internal/adapters/reconcileruntime/runtime.go"
 	goPrepared := "internal/cli/prepared_command.go"
-	return map[string]shellContract{
+	contracts := map[string]shellContract{
 		"scripts/lib/ai-observer-proxy.sh":      {"library", "scripts/reconcile-integrations.sh", `lib/ai-observer-proxy.sh`},
 		"config/agents/aiobserver/provision.sh": {"profile", "config/agents.env", `agents/aiobserver/provision.sh`},
 		"config/agents/ccusage/provision.sh":    {"profile", "config/agents.env", `agents/ccusage/provision.sh`},
@@ -348,8 +364,7 @@ func productionShellContracts() map[string]shellContract {
 		"scripts/e2e-lab/provision.sh":          {"embedded", "internal/adapters/testvmsruntime/backend.go", `"provision.sh"`},
 		"scripts/install-key-tools.sh":          {"leaf", goReconcile, `"install-key-tools.sh"`},
 		"scripts/install-keys-auto-sync.sh":     {"leaf", goReconcile, `"install-keys-auto-sync.sh"`},
-		"scripts/github-broker.sh":              {"leaf", goReconcile, `"github-broker.sh"`},
-		"config/profiles/github/provision.sh":   {"profile", "scripts/github-broker.sh", `provision.sh`},
+		"scripts/profile-services.sh":           {"leaf", goReconcile, `"profile-services.sh"`},
 		"scripts/install-power-reconciler.sh":   {"leaf", goReconcile, `"install-power-reconciler.sh"`},
 		"scripts/install-ssh-relay.sh":          {"embedded", "scripts/07-ssh-access.sh", `install-ssh-relay.sh`},
 		"scripts/ssh-agent-environment.sh":      {"embedded", "internal/cli/ssh_agent.go", `"ssh-agent-environment.sh"`},
@@ -373,26 +388,80 @@ func productionShellContracts() map[string]shellContract {
 		"scripts/provision-profile.sh":         {"profile", goPrepared, `"scripts/provision-profile.sh"`},
 		"scripts/teardown-physical.sh":         {"leaf", goPrepared, `"scripts/teardown-physical.sh"`},
 		"scripts/vscode-remote-maintenance.sh": {"embedded", "scripts/lifecycle-guard.sh", `vscode-remote-maintenance.sh`},
-
-		"config/profiles/amnezia/container.sh":                           {"profile", "config/profiles/amnezia/provision.sh", `container.sh`},
-		"config/profiles/amnezia/provision.sh":                           {"profile", "internal/cli/provision.go", `"provision.sh"`},
-		"config/profiles/amnezia/resources/vpn/handler.sh":               {"profile", "config/profiles/amnezia/resources/vpn.res", `HANDLER=resources/vpn/handler.sh`},
-		"config/profiles/android/emulator-control.sh":                    {"profile", "config/profiles/android/pool-install.sh", `emulator-control.sh`},
-		"config/profiles/android/emulator-run.sh":                        {"profile", "config/profiles/android/pool-install.sh", `emulator-run.sh`},
-		"config/profiles/android/pool-install.sh":                        {"profile", "config/profiles/android/provision.sh", `pool-install.sh`},
-		"config/profiles/android/provision.sh":                           {"profile", "internal/cli/provision.go", `"provision.sh"`},
-		"config/profiles/android/resources/emulator/handler.sh":          {"profile", "config/profiles/android/resources/emulator.res", `HANDLER=resources/emulator/handler.sh`},
-		"config/profiles/android/resources/emulator/process-identity.sh": {"library", "config/profiles/android/provision.sh", `process-identity.sh`},
-		"config/profiles/android/runtime.sh":                             {"profile", "config/profiles/android/pool.py", `runtime.sh`},
-		"config/profiles/hermes/provision.sh":                            {"profile", "internal/cli/provision.go", `"provision.sh"`},
-		"config/profiles/hermes/resources/dashboard/handler.sh":          {"profile", "config/profiles/hermes/resources/dashboard.res", `HANDLER=resources/dashboard/handler.sh`},
-		"config/profiles/openclaw/provision.sh":                          {"profile", "internal/cli/provision.go", `"provision.sh"`},
-		"config/profiles/openclaw/resources/qa-bot-broker/handler.sh":    {"profile", "config/profiles/openclaw/resources/qa-bot-broker.res", `HANDLER=resources/qa-bot-broker/handler.sh`},
-		"config/profiles/openclaw/resources/staging-gateway/handler.sh":  {"profile", "config/profiles/openclaw/resources/staging-gateway.res", `HANDLER=resources/staging-gateway/handler.sh`},
-		"config/profiles/openclaw/resources/staging-gateway/sy-stage.sh": {"embedded", "config/profiles/openclaw/resources/staging-gateway/handler.sh", `sy-stage.sh`},
-		"config/profiles/orca/resources/orca/handler.sh":                 {"profile", "config/profiles/orca/resources/orca.res", `HANDLER=resources/orca/handler.sh`},
-		"config/profiles/subyard-dev/provision.sh":                       {"profile", "internal/cli/provision.go", `"provision.sh"`},
 	}
+	root := filepath.Join("..", "..")
+	definitions, err := profile.Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, definition := range definitions {
+		declaration := filepath.ToSlash(filepath.Join("config", "profiles", definition.Name, "profile.json"))
+		if definition.Runtime != nil {
+			handler := filepath.ToSlash(filepath.Join("config", "profiles", definition.Name, definition.Runtime.Handler))
+			contracts[handler] = shellContract{"profile", declaration, definition.Runtime.Handler}
+		}
+		if definition.GuestEnvironment != nil {
+			handler := filepath.ToSlash(filepath.Join("config", "profiles", definition.Name, definition.GuestEnvironment.Handler))
+			contracts[handler] = shellContract{"profile", declaration, definition.GuestEnvironment.Handler}
+		}
+		if definition.OwnerService == "" {
+			continue
+		}
+		directory := filepath.ToSlash(filepath.Join("config", "profiles", definition.Name))
+		owner := directory + "/" + definition.OwnerService
+		contracts[owner] = shellContract{"profile", directory + "/profile.json", definition.OwnerService}
+		provision := directory + "/provision.sh"
+		if _, err := os.Stat(filepath.Join(root, provision)); err == nil {
+			contracts[provision] = shellContract{"profile", owner, "provision.sh"}
+		} else if !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+	}
+	addProfileShellOwnerManifests(t, root, contracts)
+	return contracts
+
+}
+
+func addProfileShellOwnerManifests(t *testing.T, root string, contracts map[string]shellContract) {
+	t.Helper()
+	paths, err := filepath.Glob(filepath.Join(root, "config", "profiles", "*", "tests", "shell-owners.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range paths {
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > 64<<10 {
+			t.Fatalf("invalid profile shell ownership manifest %s: %v", path, err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var manifest profileShellOwnerManifest
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&manifest); err != nil || decoder.Decode(new(any)) != io.EOF || manifest.SchemaVersion != 1 || len(manifest.Owners) == 0 {
+			t.Fatalf("invalid profile shell ownership manifest %s: %v", path, err)
+		}
+		profileName := filepath.Base(filepath.Dir(filepath.Dir(path)))
+		profilePrefix := "config/profiles/" + profileName + "/"
+		for _, owner := range manifest.Owners {
+			if !safeShellOwnerPath(owner.Path) || !strings.HasPrefix(owner.Path, profilePrefix) ||
+				!safeShellOwnerPath(owner.Owner) || owner.Reference == "" || len(owner.Reference) > 256 ||
+				owner.Kind != "profile" && owner.Kind != "library" && owner.Kind != "embedded" {
+				t.Fatalf("invalid profile shell owner entry in %s: %+v", path, owner)
+			}
+			if _, exists := contracts[owner.Path]; exists {
+				t.Fatalf("duplicate shell ownership contract for %s", owner.Path)
+			}
+			contracts[owner.Path] = shellContract{owner.Kind, owner.Owner, owner.Reference}
+		}
+	}
+}
+
+func safeShellOwnerPath(value string) bool {
+	return value != "" && !filepath.IsAbs(value) && filepath.ToSlash(filepath.Clean(value)) == value &&
+		!strings.ContainsAny(value, "\\\r\n\t") && value != ".." && !strings.HasPrefix(value, "../")
 }
 
 type leafContract struct {
@@ -412,7 +481,7 @@ func productionLeafContracts() map[string]leafContract {
 		"scripts/09-yard-extras.sh":           {"reconcile", "ports.ReconcileStageExtras"},
 		"scripts/install-key-tools.sh":        {"reconcile", "ports.ReconcileStageKeys"},
 		"scripts/install-keys-auto-sync.sh":   {"reconcile", "ports.ReconcileStageKeys"},
-		"scripts/github-broker.sh":            {"reconcile", "ports.ReconcileStageGitHub"},
+		"scripts/profile-services.sh":         {"reconcile", "ports.ReconcileStageProfileServices"},
 		"scripts/install-power-reconciler.sh": {"reconcile", "ports.ReconcileStagePower"},
 		"scripts/install-test-vms-host-sink.sh": {
 			"reconcile", "ports.ReconcileStageTestVMs",

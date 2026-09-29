@@ -61,7 +61,7 @@ Temporary shared SSH-agent access has a focused disposable-host check:
 ```sh
 dev/agent-e2e.sh --slot "$slot" --purpose orca-ssh-agent --vm 1 -- \
   env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_SSH_AGENT=1 \
-  bash tests/real-host/orca-bootstrap.sh
+  bash config/profiles/orca/tests/e2e/orca-bootstrap.sh
 ```
 
 It unlocks a generated encrypted key through a real terminal and checks Git pushes
@@ -158,7 +158,7 @@ The focused fixture uses a synthetic App key and never mints a real GitHub token
 keeps one exact slot lease while it prepares, reboots, verifies recovery, and cleans up the VM.
 
 ```sh
-dev/e2e/github-broker.sh --slot "$slot"
+config/profiles/github/tests/e2e/acceptance.sh --slot "$slot"
 ```
 
 Add `--hermes` to run the broader Hermes profile fixture under the same lease; `--wait 60m`

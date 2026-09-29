@@ -16,10 +16,10 @@ import (
 
 func TestProvisionSelectionUsesYardThenProjectProfiles(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
-	writeProvisionProfile(t, root, "android")
-	writeProvisionProfile(t, root, "hermes")
-	writeProvisionProfile(t, root, "openclaw")
-	writeProvisionProfile(t, root, "subyard-dev")
+	writeProvisionProfile(t, root, "sample-a")
+	writeProvisionProfile(t, root, "sample-h")
+	writeProvisionProfile(t, root, "sample-o")
+	writeProvisionProfile(t, root, "sample-s")
 	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment})
 	if err != nil {
 		t.Fatal(err)
@@ -28,23 +28,23 @@ func TestProvisionSelectionUsesYardThenProjectProfiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	loaded.Environment["ENVIRONMENT_PROFILES"] = "openclaw android"
+	loaded.Environment["ENVIRONMENT_PROFILES"] = "sample-o sample-a"
 	execution, err := program.prepareProvisionExecution(loaded, nil, &projectExecution{
-		Environment: map[string]string{"SUBYARD_PROJECT_PROFILES": "android subyard-dev"},
+		Environment: map[string]string{"SUBYARD_PROJECT_PROFILES": "sample-a sample-s"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(execution.profiles, []string{"openclaw", "android", "subyard-dev"}) {
+	if !slices.Equal(execution.profiles, []string{"sample-o", "sample-a", "sample-s"}) {
 		t.Fatalf("profiles=%v", execution.profiles)
 	}
-	loaded.Environment["ENVIRONMENT_PROFILES"] = "hermes"
+	loaded.Environment["ENVIRONMENT_PROFILES"] = "sample-h"
 	execution, err = program.prepareProvisionExecution(loaded, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(execution.profiles, []string{"hermes"}) {
-		t.Fatalf("Hermes no-argument profiles=%v", execution.profiles)
+	if !slices.Equal(execution.profiles, []string{"sample-h"}) {
+		t.Fatalf("SampleService no-argument profiles=%v", execution.profiles)
 	}
 }
 
@@ -52,7 +52,7 @@ func TestDedicatedProvisionRequiresOptIn(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	writeProvisionProfile(t, root, "service")
 	writeCLIFile(t, filepath.Join(root, "config/profiles/service/profile.conf"), "PROFILE_NAME=service\nPROVISION_SCOPE=dedicated\n", 0o600)
-	writeProvisionProfile(t, root, "android")
+	writeProvisionProfile(t, root, "sample-a")
 	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment})
 	if err != nil {
 		t.Fatal(err)
@@ -61,7 +61,7 @@ func TestDedicatedProvisionRequiresOptIn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, selection := range []string{"", "android", "service"} {
+	for _, selection := range []string{"", "sample-a", "service"} {
 		loaded.Environment["ENVIRONMENT_PROFILES"] = selection
 		execution, err := program.prepareProvisionExecution(loaded, nil, nil)
 		if err != nil || slices.Contains(execution.profiles, "service") {
@@ -79,10 +79,11 @@ func TestDedicatedProvisionRequiresOptIn(t *testing.T) {
 	}
 }
 
-func TestGitHubProvisionDefaultDoesNotChangeOtherProfileSelection(t *testing.T) {
+func TestDeclaredProvisionSelectionPreservesLegacyProfiles(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
-	writeProvisionProfile(t, root, "github")
-	writeProvisionProfile(t, root, "android")
+	writeProvisionProfile(t, root, "selected")
+	writeProvisionProfile(t, root, "legacy")
+	testkit.WriteFile(t, filepath.Join(root, "config", "profiles", "selected", "profile.json"), []byte(`{"schema_version":1,"selected_provision_only":true,"default_yards":["default"],"disabled_when":{"DISABLE_SERVICE":"1"}}`), 0o644)
 	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment})
 	if err != nil {
 		t.Fatal(err)
@@ -91,18 +92,25 @@ func TestGitHubProvisionDefaultDoesNotChangeOtherProfileSelection(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	empty, selected := "", "github android"
+	empty, selected := "", "selected legacy"
 	for _, scenario := range []struct {
 		yard      string
 		selection *string
-		github    bool
+		disabled  bool
+		selected  bool
 	}{
-		{yard: "default", github: true}, {yard: "other", github: false},
-		{yard: "default", selection: &empty, github: false},
-		{yard: "other", selection: &selected, github: true},
+		{yard: "default", selected: true}, {yard: "other", selected: false},
+		{yard: "default", selection: &empty, selected: false},
+		{yard: "other", selection: &selected, selected: true},
+		{yard: "default", disabled: true, selected: false},
+		{yard: "other", selection: &selected, disabled: true, selected: false},
 	} {
 		loaded.Context.YardName = scenario.yard
 		delete(loaded.Environment, "ENVIRONMENT_PROFILES")
+		delete(loaded.Environment, "DISABLE_SERVICE")
+		if scenario.disabled {
+			loaded.Environment["DISABLE_SERVICE"] = "1"
+		}
 		if scenario.selection != nil {
 			loaded.Environment["ENVIRONMENT_PROFILES"] = *scenario.selection
 		}
@@ -110,7 +118,7 @@ func TestGitHubProvisionDefaultDoesNotChangeOtherProfileSelection(t *testing.T) 
 		if err != nil {
 			t.Fatal(err)
 		}
-		if slices.Contains(execution.profiles, "github") != scenario.github || !slices.Contains(execution.profiles, "android") {
+		if slices.Contains(execution.profiles, "selected") != scenario.selected || !slices.Contains(execution.profiles, "legacy") {
 			t.Fatalf("unexpected profile selection for %s: %v", scenario.yard, execution.profiles)
 		}
 	}
@@ -139,8 +147,8 @@ func TestProvisionRejectsHookWithoutCheckProtocol(t *testing.T) {
 
 func TestProvisionAssessmentChecksRunningProfilesReadOnly(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
-	writeProvisionProfile(t, root, "android")
-	writeProvisionProfile(t, root, "openclaw")
+	writeProvisionProfile(t, root, "sample-a")
+	writeProvisionProfile(t, root, "sample-o")
 	incus := lifecycleIncus()
 	instance := incus.Instances["subyard/yard"]
 	instance.Status = "Running"
@@ -161,7 +169,7 @@ func TestProvisionAssessmentChecksRunningProfilesReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	loaded.Environment["YARD_PROFILES"] = "android openclaw"
+	loaded.Environment["YARD_PROFILES"] = "sample-a sample-o"
 	execution, err := program.prepareProvisionExecution(loaded, nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -175,19 +183,19 @@ func TestProvisionAssessmentChecksRunningProfilesReadOnly(t *testing.T) {
 	}
 	action, delta, err := execution.actionPlan(definition, loaded.Context)
 	if err != nil || action != "yard.provision" || !delta.Changed ||
-		!slices.Equal(execution.changedProfiles, []string{"openclaw"}) {
+		!slices.Equal(execution.changedProfiles, []string{"sample-o"}) {
 		t.Fatalf("action=%q delta=%#v changed=%v err=%v",
 			action, delta, execution.changedProfiles, err)
 	}
 	if len(runner.Requests) != 2 || runner.Requests[0].Action != "profile-check" ||
-		!slices.Equal(runner.Requests[0].Arguments, []string{"--check", "android"}) {
+		!slices.Equal(runner.Requests[0].Arguments, []string{"--check", "sample-a"}) {
 		t.Fatalf("checks=%#v", runner.Requests)
 	}
 }
 
 func TestProvisionCLIAndRPCUseNativeRunner(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
-	writeProvisionProfile(t, root, "subyard-dev")
+	writeProvisionProfile(t, root, "sample-s")
 	for _, rpcMode := range []bool{false, true} {
 		incus := lifecycleIncus()
 		instance := incus.Instances["subyard/yard"]
@@ -244,12 +252,12 @@ func TestProvisionCLIAndRPCUseNativeRunner(t *testing.T) {
 			}
 		}
 		if len(runner.Requests) != 5 || runner.Requests[3].Action != "profile" ||
-			!slices.Equal(runner.Requests[3].Arguments, []string{"subyard-dev"}) {
+			!slices.Equal(runner.Requests[3].Arguments, []string{"sample-s"}) {
 			t.Fatalf("rpc=%v physical=%v", rpcMode, runner.Requests)
 		}
 		for _, index := range []int{0, 1, 2, 4} {
 			if runner.Requests[index].Action != "profile-check" ||
-				!slices.Equal(runner.Requests[index].Arguments, []string{"--check", "subyard-dev"}) {
+				!slices.Equal(runner.Requests[index].Arguments, []string{"--check", "sample-s"}) {
 				t.Fatalf("rpc=%v check[%d]=%#v", rpcMode, index, runner.Requests[index])
 			}
 		}
@@ -258,7 +266,9 @@ func TestProvisionCLIAndRPCUseNativeRunner(t *testing.T) {
 
 func TestProvisionNoOpSkipsPromptAndApply(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
-	writeProvisionProfile(t, root, "subyard-dev")
+	platform := convergedProvisionInit(t, root)
+	writeCLIFile(t, filepath.Join(root, "config", "host.env"), "ENVIRONMENT_PROFILES=sample-s\n", 0o600)
+	writeProvisionProfile(t, root, "sample-s")
 	incus := lifecycleIncus()
 	instance := incus.Instances["subyard/yard"]
 	instance.Status = "Running"
@@ -269,9 +279,9 @@ func TestProvisionNoOpSkipsPromptAndApply(t *testing.T) {
 	}}}
 	prompt := &testkit.Prompt{}
 	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Arguments: []string{"provision", "subyard-dev"},
+		RepositoryRoot: root, Program: "yard", Arguments: []string{"provision", "sample-s"},
 		Environment: append(environment, "SUBYARD_OPERATION_ID=provision-noop"),
-		WorkingDir:  root, Incus: incus, AdapterRunner: runner, Prompt: prompt,
+		WorkingDir:  root, Incus: incus, AdapterRunner: runner, Prompt: prompt, InitPlatform: platform,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -292,4 +302,17 @@ func writeProvisionProfile(t *testing.T, root, name string) {
 	}
 	writeCLIFile(t, filepath.Join(directory, "profile.conf"), "PROFILE_NAME="+name+"\n", 0o600)
 	writeCLIFile(t, filepath.Join(directory, "provision.sh"), "#!/usr/bin/env bash\n# subyard-provision-check-v1\ntrue\n", 0o700)
+}
+
+func convergedProvisionInit(t *testing.T, root string) *initPlatformFixture {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(root, "state"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(root, "state", "host-id"), "5034c950-74d0-46c4-9428-b7835e602109\n", 0o600)
+	platform := newInitPlatformFixture()
+	for stage := range platform.converged {
+		platform.converged[stage] = true
+	}
+	return platform
 }

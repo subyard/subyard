@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "settings": [
+    {
+      "name": "ORCA_ADVERTISE_HOST",
+      "type": "string",
+      "scopes": [
+        "shipped",
+        "host",
+        "yard",
+        "command"
+      ],
+      "application": "next-command",
+      "syncable": true,
+      "optional": true
+    },
+    {
+      "name": "ORCA_HOST_PORT",
+      "type": "port",
+      "scopes": [
+        "shipped",
+        "host",
+        "yard",
+        "command"
+      ],
+      "application": "next-command",
+      "syncable": true,
+      "optional": true,
+      "minimum": 1,
+      "maximum": 65535,
+      "host_listener": true
+    }
+  ],
+  "runtime": {
+    "activation_id": "orca-runtime",
+    "handler": "runtime.sh"
+  },
+  "guest_environment": {
+    "handler": "ssh-agent-environment.sh"
+  }
+}

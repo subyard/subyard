@@ -78,3 +78,13 @@ func validateProfileConstraints(configDir, yard string, values environment) erro
 	}
 	return nil
 }
+
+// WithEnvironmentProfiles validates a planned selection without writing settings.
+func WithEnvironmentProfiles(loaded Loaded, profiles []string) (Loaded, error) {
+	loaded.Environment = cloneEnvironment(loaded.Environment)
+	loaded.Environment["ENVIRONMENT_PROFILES"] = strings.Join(profiles, " ")
+	if err := validateProfileConstraints(loaded.Context.Paths.ConfigDir, loaded.Context.YardName, loaded.Environment); err != nil {
+		return Loaded{}, err
+	}
+	return loaded, nil
+}

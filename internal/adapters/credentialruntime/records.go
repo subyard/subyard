@@ -193,6 +193,14 @@ func (runtime *Runtime) findScope(credentialID string) (ledgerScope, error) {
 }
 
 func (runtime *Runtime) publish(ctx context.Context, scope ledgerScope, spec revisionSpec, payload []byte) (domain.CredentialMetadata, error) {
+	if _, _, err := runtime.consumerPath(spec.Consumer, spec.Zone); err != nil {
+		return domain.CredentialMetadata{}, err
+	}
+	if spec.State == "active" {
+		if err := runtime.validateConsumerPayload(spec.Consumer, payload); err != nil {
+			return domain.CredentialMetadata{}, err
+		}
+	}
 	identity, err := runtime.Identity()
 	if err != nil {
 		return domain.CredentialMetadata{}, err
@@ -516,6 +524,10 @@ func (runtime *Runtime) rejectProductionPayload(payload []byte) error {
 }
 
 func (runtime *Runtime) validateImportPath(path string) (string, error) {
+	return runtime.validateImportSource(path, true)
+}
+
+func (runtime *Runtime) validateImportSource(path string, protected bool) (string, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return "", fmt.Errorf("credential source is not a regular file: %s", path)
@@ -523,7 +535,7 @@ func (runtime *Runtime) validateImportPath(path string) (string, error) {
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return "", fmt.Errorf("credential import refuses non-regular files and symlinks: %s", path)
 	}
-	if info.Mode().Perm() != 0o600 && info.Mode().Perm() != 0o400 {
+	if protected && info.Mode().Perm() != 0o600 && info.Mode().Perm() != 0o400 {
 		return "", fmt.Errorf("credential source must have mode 0600 or 0400: %s", path)
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)

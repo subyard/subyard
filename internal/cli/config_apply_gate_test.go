@@ -16,31 +16,31 @@ import (
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
-type orcaRepairPlatformFixture struct {
+type sampleRepairPlatformFixture struct {
 	*initPlatformFixture
-	observation *ports.OrcaRuntimeObservation
+	observation *ports.RuntimeObservation
 }
 
-func (fixture *orcaRepairPlatformFixture) ObserveOrcaRuntime(context.Context) (ports.OrcaRuntimeObservation, error) {
+func (fixture *sampleRepairPlatformFixture) ObserveProfileRuntimes(context.Context) (map[string]ports.RuntimeObservation, error) {
 	if fixture.observation != nil {
-		return *fixture.observation, nil
+		return map[string]ports.RuntimeObservation{"sample-runtime": *fixture.observation}, nil
 	}
-	observation := ports.OrcaRuntimeObservation{State: "current", Actual: strings.Repeat("b", 64), Desired: strings.Repeat("b", 64)}
-	if !fixture.converged[ports.ReconcileStageOrca] {
+	observation := ports.RuntimeObservation{State: "current", Actual: strings.Repeat("b", 64), Desired: strings.Repeat("b", 64)}
+	if !fixture.converged[ports.ReconcileStageProfileRuntimes] {
 		observation.State, observation.Actual = "stale", strings.Repeat("a", 64)
 	}
-	return observation, nil
+	return map[string]ports.RuntimeObservation{"sample-runtime": observation}, nil
 }
 
-func TestOrcaInitRepairUsesCompletedGateWithoutAdmittingOtherDrift(t *testing.T) {
-	for _, scenario := range []string{"repair", "config drift", "unselected Orca", "unfinished", "rollback", "unfinished rollback", "journal changed", "current convergence", "absent race", "replacement stale"} {
+func TestProfileRuntimeInitRepairUsesCompletedGateWithoutAdmittingOtherDrift(t *testing.T) {
+	for _, scenario := range []string{"repair", "config drift", "unselected ProfileRuntime", "unfinished", "rollback", "unfinished rollback", "journal changed", "current convergence", "absent race", "replacement stale"} {
 		t.Run(scenario, func(t *testing.T) {
-			fixture := newConfigApplyRepairFixture(t, scenario == "unselected Orca")
-			platform := &orcaRepairPlatformFixture{initPlatformFixture: newInitPlatformFixture()}
+			fixture := newConfigApplyRepairFixture(t, scenario == "unselected ProfileRuntime")
+			platform := &sampleRepairPlatformFixture{initPlatformFixture: newInitPlatformFixture()}
 			for stage := range platform.converged {
 				platform.converged[stage] = true
 			}
-			platform.converged[ports.ReconcileStageOrca] = false
+			platform.converged[ports.ReconcileStageProfileRuntimes] = false
 			fixture.cli.options.InitPlatform = platform
 			fake := fixture.cli.options.Executor.(*testkit.Incus)
 			fake.ExecSteps = nil
@@ -82,8 +82,8 @@ func TestOrcaInitRepairUsesCompletedGateWithoutAdmittingOtherDrift(t *testing.T)
 				}
 				writeCLIFile(t, fixture.journalPath, string(payload), 0o600)
 			}
-			permit, err := fixture.cli.prepareOrcaInitRepair(context.Background(), "default", nil, fixture.outcome)
-			admitted := scenario != "unselected Orca" && scenario != "unfinished" && scenario != "unfinished rollback"
+			permit, err := fixture.cli.prepareProfileInitRepair(context.Background(), "default", nil, fixture.outcome)
+			admitted := scenario != "unselected ProfileRuntime" && scenario != "unfinished" && scenario != "unfinished rollback"
 			if err != nil || (permit != nil) != admitted {
 				t.Fatalf("repair admission: permit=%#v err=%v", permit, err)
 			}
@@ -102,13 +102,13 @@ func TestOrcaInitRepairUsesCompletedGateWithoutAdmittingOtherDrift(t *testing.T)
 			}
 			switch scenario {
 			case "current convergence":
-				platform.observation = &ports.OrcaRuntimeObservation{
+				platform.observation = &ports.RuntimeObservation{
 					State: "current", Actual: strings.Repeat("b", 64), Desired: strings.Repeat("b", 64),
 				}
 			case "absent race":
-				platform.observation = &ports.OrcaRuntimeObservation{State: "absent"}
+				platform.observation = &ports.RuntimeObservation{State: "absent"}
 			case "replacement stale":
-				platform.observation = &ports.OrcaRuntimeObservation{
+				platform.observation = &ports.RuntimeObservation{
 					State: "stale", Actual: strings.Repeat("c", 64), Desired: strings.Repeat("b", 64),
 				}
 			}
@@ -123,7 +123,7 @@ func TestOrcaInitRepairUsesCompletedGateWithoutAdmittingOtherDrift(t *testing.T)
 			if scenario == "absent race" || scenario == "replacement stale" {
 				if err == nil {
 					unlock()
-					t.Fatal("changed Orca contract admitted after confirmation")
+					t.Fatal("changed ProfileRuntime contract admitted after confirmation")
 				}
 				return
 			}
@@ -131,7 +131,7 @@ func TestOrcaInitRepairUsesCompletedGateWithoutAdmittingOtherDrift(t *testing.T)
 				t.Fatal(err)
 			}
 			defer unlock()
-			platform.converged[ports.ReconcileStageOrca] = true
+			platform.converged[ports.ReconcileStageProfileRuntimes] = true
 			writeCLIFile(t, fixture.readyMarker, "ready\n", 0o600)
 			if err := fixture.cli.finishConfigApplyRepair(context.Background(), permit); err != nil {
 				t.Fatal(err)
@@ -418,11 +418,12 @@ type configApplyRepairFixture struct {
 
 func newConfigApplyRepairFixture(t *testing.T, named bool) configApplyRepairFixture {
 	root, environment, _ := nativeFixture(t)
-	orcaHandler := filepath.Join(root, "config", "profiles", "orca", "resources", "orca", "handler.sh")
-	if err := os.MkdirAll(filepath.Dir(orcaHandler), 0o700); err != nil {
+	writeRuntimeProfileFixture(t, root)
+	sampleHandler := filepath.Join(root, "config", "profiles", "sample", "runtime.sh")
+	if err := os.MkdirAll(filepath.Dir(sampleHandler), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	writeCLIFile(t, orcaHandler, "#!/bin/sh\nprintf '%s\\n' '{\"state\":\"absent\",\"actual\":\"\",\"desired\":\"\"}'\n", 0o700)
+	writeCLIFile(t, sampleHandler, "#!/bin/sh\nprintf '%s\\n' '{\"state\":\"absent\",\"actual\":\"\",\"desired\":\"\"}'\n", 0o700)
 	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join([]string{
 		"SHIFT_MODE=shift", "FORWARD_SSH_AGENT=0", "DEV_SUDO=0", "DEV_UID=1000",
 		"DEV_USER=dev", "SSH_PORT=2222",

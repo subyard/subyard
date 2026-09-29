@@ -15,7 +15,8 @@ yard config paths
 
 `config fields` is the public typed field reference. It reports the shipped default, kind, type,
 allowed scopes, syncability, merge mode, application mode and domain owner from the same catalog
-used by the production resolver. `config show` lists effective non-secret settings, their winning
+used by the production resolver. Optional profiles declare their typed scalar fields and defaults
+in shipped `profile.json`; these declarations join the core catalog for each operation. `config show` lists effective non-secret settings, their winning
 scope and source, and how they are consumed. Passing one setting name shows every applicable layer
 as `effective`, `overridden`, or `unset`. Unknown fields, wrong scopes and invalid values fail
 closed; secret inputs and unrelated environment variables are not settings.

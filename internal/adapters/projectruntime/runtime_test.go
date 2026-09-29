@@ -49,7 +49,7 @@ func TestObserveUsesInjectedIncusAndFallsBackFromSSH(t *testing.T) {
 			AccessKind: domain.AccessLocal, IncusProject: "subyard", YardInstanceName: "yard", SSHHost: "yard",
 		}, []domain.ProjectRecord{
 			{ProjectID: "known-12345678", YardPath: "/srv/workspaces/known-12345678/src"},
-			{ProjectID: "box-12345678", YardPath: "/srv/workspaces/box-12345678/src", Target: "openclaw"},
+			{ProjectID: "box-12345678", YardPath: "/srv/workspaces/box-12345678/src", Target: "sample-profile"},
 		}, true,
 	)
 	if err != nil || !observation.Running || !observation.Reached || len(observation.Live) != 1 ||

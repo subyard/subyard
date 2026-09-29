@@ -6,10 +6,8 @@
     "profile-live-tests": ["profiles:host-free", "profiles:e2e"],
     "yard-network": ["go:yardnetwork", "go:adapters/networkruntime", "go:adapters/incusclient", "go:cli", "go:application", "go:adapters/reconcileruntime", "shell:init-network-convergence", "e2e:yard-network-policy", "p0:real-incus", "p0:power-systemd", "p0:reboot-verify", "p0:peer"],
     "android-profile": [
-      "shell:android-provision-check",
-      "shell:emulator-process-control",
-      "shell:emulator-process-identity",
-      "shell:emulator-resource-protocol",
+      "profiles:e2e",
+      "profiles:host-free",
       "p0:profile-resource"
     ],
     "boot-power": [
@@ -98,10 +96,9 @@
     "go-state": ["go:state"],
     "go-testkit": ["go:testkit", "host-free:core"],
     "hermes-profile": [
+      "profiles:e2e",
+      "profiles:host-free",
       "e2e:hermes-profile",
-      "shell:hermes-dashboard-resource",
-      "shell:hermes-e2e-contract",
-      "shell:hermes-provision",
       "p0:profile-resource"
     ],
     "host-free-all": ["host-free:all"],
@@ -128,12 +125,12 @@
       "p0:source-upgrade"
     ],
     "openclaw-profile": [
-      "shell:openclaw-provision-check",
-      "shell:openclaw-resource-protocol",
+      "profiles:host-free",
       "p0:profile-resource"
     ],
     "orca-profile": [
-      "shell:orca-profile-resource",
+      "profiles:e2e",
+      "profiles:host-free",
       "e2e:orca-bootstrap",
       "e2e:orca-resource",
       "e2e:orca-projects",
@@ -166,7 +163,7 @@
     "real-orca-bootstrap": ["e2e:orca-bootstrap"],
     "codex-permissions": ["e2e:codex-permissions"],
     "real-orca-projects": ["e2e:orca-projects"],
-    "orca-registration-tests": ["shell:orca-profile-resource"],
+    "orca-registration-tests": ["profiles:host-free"],
     "real-ssh-credential-contract": ["e2e:ssh-credential-peer"],
     "real-ssh-rpc-contract": ["e2e:ssh-rpc"],
     "selector-self": [
@@ -285,7 +282,7 @@
     {
       "id": "hermes-profile-e2e",
       "priority": 986,
-      "pattern": "^dev/e2e/hermes-profile\\.sh$",
+      "pattern": "^config/profiles/hermes/tests/e2e/hermes-profile\\.sh$",
       "check_sets": ["hermes-profile", "profile-generic"],
       "risk_domains": ["external-service-profile", "profile-resource"]
     },
@@ -320,7 +317,7 @@
     {
       "id": "real-orca-contract-test",
       "priority": 981,
-      "pattern": "^tests/real-host/orca-resource\\.sh$",
+      "pattern": "^config/profiles/orca/tests/e2e/orca-resource\\.sh$",
       "check_sets": ["real-orca-contract"],
       "risk_domains": []
     },
@@ -334,21 +331,21 @@
     {
       "id": "real-orca-bootstrap-test",
       "priority": 981,
-      "pattern": "^tests/real-host/orca-bootstrap\\.sh$",
+      "pattern": "^config/profiles/orca/tests/e2e/orca-bootstrap\\.sh$",
       "check_sets": ["real-orca-bootstrap"],
       "risk_domains": []
     },
     {
       "id": "real-orca-projects-test",
       "priority": 980,
-      "pattern": "^tests/real-host/orca-projects(-helper)?\\.(sh|py)$",
+      "pattern": "^config/profiles/orca/tests/e2e/orca-projects(-helper)?\\.(sh|py)$",
       "check_sets": ["real-orca-projects"],
       "risk_domains": []
     },
     {
       "id": "orca-registration-test",
       "priority": 980,
-      "pattern": "^tests/orca_registration/.*\\.py$",
+      "pattern": "^config/profiles/orca/tests/orca_registration/.*\\.py$",
       "check_sets": ["orca-registration-tests"],
       "risk_domains": []
     },
@@ -400,6 +397,13 @@
       "pattern": "^dev/e2e/(lib-p0-init-retry|p0-broker-recovery)\\.sh$",
       "check_sets": ["e2e-infrastructure"],
       "risk_domains": ["checkpoint-resume"]
+    },
+    {
+      "id": "profile-test-support",
+      "priority": 966,
+      "pattern": "^(tests/helpers/profile-go\\.sh|internal/testkit/profilecontract/.*\\.go)$",
+      "check_sets": ["profile-tests"],
+      "risk_domains": []
     },
     {
       "id": "profile-owned-live-tests",
@@ -510,7 +514,7 @@
       "id": "generic-profile-configuration",
       "priority": 840,
       "pattern": "^(config/profiles/(default|subyard-dev)/.*|scripts/provision-profile\\.sh)$",
-      "check_sets": ["profile-generic"],
+      "check_sets": ["profile-generic", "profile-tests"],
       "risk_domains": ["profile-resource"]
     },
     {
@@ -710,13 +714,6 @@
       "risk_domains": ["ssh-remote-transport"]
     },
     {
-      "id": "github-broker",
-      "priority": 625,
-      "pattern": "^(internal/githubbroker/.*|scripts/github-broker\\.sh|config/profiles/github/.*|dev/e2e/github-broker\\.sh)$",
-      "check_sets": ["host-free-core", "ssh-transport"],
-      "risk_domains": ["credential-profile", "ssh-remote-transport", "boot-lifecycle"]
-    },
-    {
       "id": "internal-sshidentity",
       "priority": 590,
       "pattern": "^internal/sshidentity/.*$",
@@ -743,6 +740,20 @@
       "pattern": "^internal/credential/.*$",
       "check_sets": ["credential-profile"],
       "risk_domains": ["credential-profile"]
+    },
+    {
+      "id": "internal-profile",
+      "priority": 565,
+      "pattern": "^internal/profile/.*$",
+      "check_sets": ["host-free-core", "profile-tests", "credential-profile"],
+      "risk_domains": ["profile-resource", "credential-profile", "boot-lifecycle"]
+    },
+    {
+      "id": "internal-observerroute",
+      "priority": 564,
+      "pattern": "^internal/observerroute/.*$",
+      "check_sets": ["host-free-core"],
+      "risk_domains": ["profile-resource"]
     },
     {
       "id": "internal-resource",
@@ -846,7 +857,7 @@
       "id": "profile-configuration",
       "priority": 435,
       "pattern": "^config/profiles/.*$",
-      "check_sets": ["profile-generic"],
+      "check_sets": ["profile-generic", "profile-tests"],
       "risk_domains": ["profile-resource"]
     },
     {

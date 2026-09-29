@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "default_yards": ["default"],
+  "disabled_when": {"NESTED_E2E_VMS": "1"},
+  "selected_provision_only": true,
+  "owner_service": "owner.sh",
+  "native": [{"package": "cmd/broker", "path": "bin/broker"}],
+  "consumers": [{"id": "github-app-key", "zone": "global", "path": "github/github-app.pem", "format": "rsa-private-key"}],
+  "managed_paths": [
+    {"root": "data", "path": "github-broker/{yard}-engine"},
+    {"root": "data", "path": "github-broker/{yard}.json"},
+    {"root": "operator", "path": ".config/systemd/user/subyard-github-{yard}.service"}
+  ],
+  "setup": {
+    "title": "Connect GitHub",
+    "instructions": [
+      "Create a GitHub App, install it on the repositories you want to allow, and download its RSA private key.",
+      "App settings: https://github.com/settings/apps",
+      "Use the numeric App ID from its settings (not the client ID) and the installation ID from its installation URL.",
+      "The App key stays on the owner host; commands in the yard receive temporary installation tokens."
+    ],
+    "config_file": "github-app.json",
+    "fields": [
+      {"name": "app_id", "label": "App ID", "kind": "numeric-string"},
+      {"name": "installation_id", "label": "Installation ID", "kind": "positive-integer"}
+    ],
+    "consumer": "github-app-key",
+    "zone": "global",
+    "label": "github-app",
+    "key_override_field": "private_key_file",
+    "followup": "Repository access has not been tested. In the yard, run: subyard-github run -- gh repo view OWNER/REPO"
+  }
+}

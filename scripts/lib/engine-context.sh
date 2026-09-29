@@ -16,12 +16,35 @@ subyard_require_engine_context() {
     || subyard_context_error "unsupported engine context schema"
 
   local name
+  SUBYARD_PROFILE_GUEST_ENVIRONMENT_HOOKS="${SUBYARD_PROFILE_GUEST_ENVIRONMENT_HOOKS:-}"
   for name in SUBYARD_OPERATOR_HOME SUBYARD_CONFIG_DIR SUBYARD_CONFIG_HOME SUBYARD_HOME \
     STORAGE_PATH HOST_BASE RESTRICTED_DISK_PATHS ACCESS_KIND YARD_KIND YARD_INSTANCE_NAME \
     INCUS_PROJECT INCUS_BRIDGE SSH_HOST DEV_USER DEV_UID DEV_SUDO FORWARD_SSH_AGENT \
-    NESTED_E2E_VMS; do
+    NESTED_E2E_VMS SUBYARD_PROFILE_GUEST_ENVIRONMENT_HOOKS; do
     [ -n "${!name+x}" ] || subyard_context_error "engine context is missing $name"
   done
+}
+
+subyard_apply_profile_guest_environment_hooks() {
+  local profile_root="$1" instance="$2" project="$3" dev_user="$4" hook_list="$5" hook
+  [ "$#" -eq 5 ] || return 2
+  [ -n "$hook_list" ] || return 0
+  while IFS= read -r hook; do
+    [ -n "$hook" ] || continue
+    case "$hook" in "$profile_root"/*) ;; *)
+      printf 'subyard adapter: invalid profile guest environment hook\n' >&2
+      return 1
+      ;;
+    esac
+    [ -f "$hook" ] && [ ! -L "$hook" ] && [ -x "$hook" ] || {
+      printf 'subyard adapter: profile guest environment hook is unavailable\n' >&2
+      return 1
+    }
+    incus exec "$instance" --project "$project" -- sh -eu -s -- ensure "$dev_user" < "$hook" || {
+      printf 'subyard adapter: could not configure a profile guest environment\n' >&2
+      return 1
+    }
+  done <<< "$hook_list"
 }
 
 path_is_broad_host_root() {
@@ -56,6 +79,7 @@ subyard_elevated_context() {
     SUBYARD_TEST_VMS_SINK_ENGINE_SOURCE SUBYARD_TEST_VMS_SINK_LIBEXEC_DIR \
     SUBYARD_TEST_VMS_SINK_PATH SUBYARD_TEST_VMS_SINK_SERVICE_PATH \
     SUBYARD_TEST_VMS_SINK_TIMER_PATH \
+    SUBYARD_PROFILE_GUEST_ENVIRONMENT_HOOKS \
     SUBYARD_TEARDOWN_KEEP_SHARED \
     SUBYARD_KEYS_CONSUMER_ROOT SUBYARD_KEYS_ROOT SUBYARD_KEYS_RUNTIME_DIR \
     SUBYARD_KEYS_SYSTEMD_DIR SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE SUBYARD_KEYS_TOOLS_DIR \

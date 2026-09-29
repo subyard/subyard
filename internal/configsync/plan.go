@@ -32,6 +32,10 @@ func BuildPlan(options Options) (Plan, error) {
 		defer unlock()
 		options.ConfigLocked = true
 	}
+	catalog, err := config.LoadCatalog(options.RepositoryRoot)
+	if err != nil {
+		return Plan{}, err
+	}
 	if err := validateExistingConfigurationRoot(options.ConfigHome); err != nil {
 		return Plan{}, err
 	}
@@ -49,7 +53,7 @@ func BuildPlan(options Options) (Plan, error) {
 	if err != nil {
 		return Plan{}, err
 	}
-	source, err := readSource(options, hostID)
+	source, err := readSource(options, hostID, catalog)
 	if err != nil {
 		return Plan{}, err
 	}
@@ -62,7 +66,7 @@ func BuildPlan(options Options) (Plan, error) {
 			"managed configuration belongs to owner host %q, not %q", previous.HostID, hostID,
 		)
 	}
-	if err := validateCandidate(options, source, previous); err != nil {
+	if err := validateCandidate(options, source, previous, catalog); err != nil {
 		return Plan{}, fmt.Errorf("candidate configuration: %w", err)
 	}
 	plan := Plan{
@@ -206,7 +210,12 @@ func guardDeletedYardDefinition(options Options, path string) error {
 	return nil
 }
 
-func validateCandidate(options Options, source sourceSnapshot, previous Manifest) error {
+func validateCandidate(
+	options Options,
+	source sourceSnapshot,
+	previous Manifest,
+	catalog config.Catalog,
+) error {
 	previousFiles := map[string]struct{}{}
 	for _, file := range previous.Files {
 		previousFiles[file.Path] = struct{}{}
@@ -288,7 +297,7 @@ func validateCandidate(options Options, source sourceSnapshot, previous Manifest
 		}
 		yardSettings[name] = path
 	}
-	environment := candidateEnvironment(options.Environment, options.ConfigHome)
+	environment := candidateEnvironment(options.Environment, options.ConfigHome, catalog)
 	sharedAssetSource := filepath.Join(source.root, "shared", "overrides", "agents")
 	hostAssetSource := filepath.Join(
 		source.root, "hosts", source.hostID, "overrides", "agents",
@@ -323,7 +332,7 @@ func validateCandidate(options Options, source sourceSnapshot, previous Manifest
 	contexts := make([]config.Loaded, 0, len(yardNames)+1)
 	load := func(name string) error {
 		loaded, err := config.Load(config.LoadOptions{
-			RepositoryRoot: options.RepositoryRoot, OperatorHome: options.OperatorHome,
+			Catalog: &catalog, RepositoryRoot: options.RepositoryRoot, OperatorHome: options.OperatorHome,
 			YardName: name, Environment: environment, DisablePrivate: true,
 			ConfigLocked: options.ConfigLocked, LayerPaths: layerPaths,
 		})
@@ -367,10 +376,14 @@ func candidateAssetRoot(
 	return liveRoot
 }
 
-func candidateEnvironment(source map[string]string, configHome string) map[string]string {
+func candidateEnvironment(
+	source map[string]string,
+	configHome string,
+	catalog config.Catalog,
+) map[string]string {
 	result := make(map[string]string, len(source)+1)
 	for name, value := range source {
-		if _, setting := config.LookupSetting(name); setting {
+		if _, setting := catalog.LookupSetting(name); setting {
 			continue
 		}
 		result[name] = value

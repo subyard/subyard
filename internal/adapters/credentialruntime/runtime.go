@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/profile"
 )
 
 const (
@@ -53,8 +54,9 @@ type Config struct {
 }
 
 type Runtime struct {
-	config Config
-	env    map[string]string
+	config    Config
+	consumers []profile.Consumer
+	env       map[string]string
 
 	idDirectory    string
 	ageIdentity    string
@@ -122,7 +124,28 @@ func New(config Config) (*Runtime, error) {
 	if !filepath.IsAbs(tools) {
 		return nil, errors.New("credential tools directory must be absolute")
 	}
+	definitions, err := profile.Load(config.RepositoryRoot)
+	if err != nil {
+		return nil, err
+	}
 	runtime := &Runtime{config: config, env: environment}
+	consumerIDs := map[string]bool{"none": true, "staging-env": true, "qa-secrets": true, "qa-pool": true}
+	consumerPaths := []string{"staging", "qa-pool"}
+	for _, definition := range definitions {
+		for _, consumer := range definition.Consumers {
+			if consumerIDs[consumer.ID] {
+				return nil, fmt.Errorf("credential consumer ID collision: %s", consumer.ID)
+			}
+			for _, path := range consumerPaths {
+				if consumer.Path == path || strings.HasPrefix(consumer.Path, path+string(filepath.Separator)) || strings.HasPrefix(path, consumer.Path+string(filepath.Separator)) {
+					return nil, errors.New("credential consumer materialization paths overlap")
+				}
+			}
+			consumerIDs[consumer.ID] = true
+			consumerPaths = append(consumerPaths, consumer.Path)
+			runtime.consumers = append(runtime.consumers, consumer)
+		}
+	}
 	runtime.idDirectory = filepath.Join(config.Root, "identity")
 	runtime.ageIdentity = filepath.Join(runtime.idDirectory, "age.txt")
 	runtime.signingKey = filepath.Join(runtime.idDirectory, "signing_ed25519")

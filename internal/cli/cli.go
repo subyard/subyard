@@ -90,6 +90,7 @@ type Options struct {
 }
 
 type CLI struct {
+	catalog                      config.Catalog
 	provisionEndpointAddresses   func() ([]hostruntime.OwnerIPv4, error)
 	options                      Options
 	env                          map[string]string
@@ -107,7 +108,7 @@ type CLI struct {
 	updateProgress               io.Writer
 	releaseTransitionChild       bool
 	configApplyRepair            *configApplyRepairPermit
-	orcaInitRepair               *configApplyRepairPermit
+	profileInitRepair            *configApplyRepairPermit
 }
 
 func (cli *CLI) rpcOperation(operationID string) *CLI {
@@ -140,7 +141,7 @@ func (cli *CLI) runReleaseTransitionYardCommandIO(
 ) error {
 	operationID := cli.ensureOperationID()
 	operation := cli.rpcOperation(operationID)
-	environment := freshMigrationEnvironment(cli.baseEnv, cli.options.RepositoryRoot)
+	environment := cli.freshMigrationEnvironment(cli.baseEnv, cli.options.RepositoryRoot)
 	operation.env = maps.Clone(environment)
 	operation.env["SUBYARD_OPERATION_ID"] = operationID
 	operation.baseEnv = maps.Clone(environment)
@@ -157,7 +158,7 @@ func (cli *CLI) runReleaseTransitionYardCommandIO(
 	operation.options.Stderr = stderr
 	operation.releaseTransitionChild = true
 	operation.configApplyRepair = nil
-	operation.orcaInitRepair = nil
+	operation.profileInitRepair = nil
 	if code := operation.Run(ctx); code != 0 {
 		return fmt.Errorf("yard command exited with status %d", code)
 	}
@@ -304,6 +305,19 @@ func New(options Options) (*CLI, error) {
 			return nil, err
 		}
 	}
+	settings, err := config.LoadCatalog(root)
+	if err != nil {
+		return nil, err
+	}
+	for _, definition := range settings.Profiles() {
+		if definition.Runtime == nil {
+			continue
+		}
+		switch definition.Runtime.ActivationID {
+		case "materialized-config", "test-vm-broker", "test-yard-route-consumers", "host-power":
+			return nil, fmt.Errorf("profile runtime activation ID conflicts with core: %s", definition.Runtime.ActivationID)
+		}
+	}
 	resources, err := resource.Load(root)
 	if err != nil {
 		return nil, err
@@ -328,7 +342,7 @@ func New(options Options) (*CLI, error) {
 		activeEnvironment[name] = value
 	}
 	cli := &CLI{
-		options: options, env: activeEnvironment, baseEnv: baseEnvironment,
+		catalog: settings, options: options, env: activeEnvironment, baseEnv: baseEnvironment,
 		manifest: manifest, resources: resources, inventoryRoutes: make(map[string]config.Loaded),
 		discoveredOwners: make(map[string]ownerinventory.Connection), coreActions: coreActions,
 	}
@@ -461,12 +475,12 @@ func (cli *CLI) Run(ctx context.Context) int {
 			}
 		}
 		if outcome != nil && core && definition.Handler == "@init" {
-			permit, err := cli.prepareOrcaInitRepair(ctx, yard, commandArguments, *outcome)
+			permit, err := cli.prepareProfileInitRepair(ctx, yard, commandArguments, *outcome)
 			if err != nil {
 				cli.errorf("init release repair: %v", err)
 				return 1
 			}
-			cli.orcaInitRepair = permit
+			cli.profileInitRepair = permit
 			if permit != nil {
 				outcome = nil
 			}
@@ -628,7 +642,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		if behavior.prepare != nil {
 			prepared, prepareErr := cli.prepareCommand(ctx, prepareCommandRequest{
 				Loaded: loaded, Definition: definition, Arguments: commandArguments,
-				ExplicitYard: explicit, ReadOnly: readOnlyInvocation, Bootstrap: bootstrap,
+				ExplicitYard: explicit, ReadOnly: readOnlyInvocation, Bootstrap: bootstrap, InteractiveSetup: true,
 				OnResolved: func(resolved config.Loaded, arguments []string) {
 					remote := ""
 					if resolved.Context.AccessKind == domain.AccessRemote {
@@ -807,12 +821,16 @@ func (cli *CLI) Run(ctx context.Context) int {
 		return 0
 	case "@init":
 		fmt.Fprintf(cli.options.Stdout, "Usage: %s init [--configs | --reset | --profile <name>] [--yes]\n", cli.options.Program)
+		fmt.Fprintln(cli.options.Stdout, "\nInteractive init offers initial setup declared by selected profiles.\nLeave a setup field empty to skip; --yes and non-interactive runs leave profile settings unchanged.")
 		return 0
 	case "@lifecycle":
 		fmt.Fprintf(cli.options.Stdout, "Usage: %s %s\n", cli.options.Program, definition.Display)
 		return 0
 	case "@provision":
 		fmt.Fprintf(cli.options.Stdout, "Usage: %s provision [profile | --list]\n", cli.options.Program)
+		fmt.Fprintln(cli.options.Stdout, "With a profile, persist its selection for this yard, reconcile prerequisites and install its toolchain under one confirmation.")
+		fmt.Fprintln(cli.options.Stdout, "Existing profiles are preserved. Profiles without an install hook only reconcile the yard; dedicated-role restrictions still apply.")
+		fmt.Fprintln(cli.options.Stdout, "Without a profile, install the selected toolchains without changing profile selection. --list lists available install hooks.")
 		return 0
 	case "@test-vms":
 		fmt.Fprintf(cli.options.Stdout,
@@ -1921,10 +1939,10 @@ func (cli *CLI) loadInventoryLoaded(name string, loaded config.Loaded) (config.L
 		delete(environment, key)
 	}
 	return config.Load(config.LoadOptions{
-		RepositoryRoot: cli.options.RepositoryRoot,
-		OperatorHome:   loaded.Context.Paths.OperatorHome,
-		YardName:       name,
-		Environment:    environment,
+		Catalog: &cli.catalog, RepositoryRoot: cli.options.RepositoryRoot,
+		OperatorHome: loaded.Context.Paths.OperatorHome,
+		YardName:     name,
+		Environment:  environment,
 	})
 }
 
@@ -2208,7 +2226,7 @@ func (cli *CLI) runMigration(ctx context.Context, yard string, arguments []strin
 		}
 		repositoryRoot = payloadRepositoryRoot
 	}
-	migrationEnvironment := freshMigrationEnvironment(
+	migrationEnvironment := cli.freshMigrationEnvironment(
 		cli.baseEnv,
 		repositoryRoot,
 	)
@@ -2374,13 +2392,13 @@ func (cli *CLI) runMigration(ctx context.Context, yard string, arguments []strin
 // no longer exist. Keep process/bootstrap inputs, but make every migration
 // child load the target runtime's shipped config and the operator's persisted
 // configuration from scratch.
-func freshMigrationEnvironment(
+func (cli *CLI) freshMigrationEnvironment(
 	inherited map[string]string,
 	repositoryRoot string,
 ) map[string]string {
 	environment := make(map[string]string, len(inherited)+1)
 	for name, value := range inherited {
-		if _, setting := config.LookupSetting(name); setting || config.IsLegacySetting(name) {
+		if _, setting := cli.catalog.LookupSetting(name); setting || config.IsLegacySetting(name) {
 			continue
 		}
 		switch name {
@@ -3077,12 +3095,19 @@ var structuredRuntimeRoleKeys = map[string]struct{}{
 func structuredCommandContext(loaded config.Loaded) map[string]string {
 	values := structuredAdapterContext(loaded.Context)
 	for name, value := range loaded.Environment {
-		_, setting := config.LookupSetting(name)
+		_, setting := loaded.Catalog.LookupSetting(name)
 		_, runtimeRole := structuredRuntimeRoleKeys[name]
 		if setting || runtimeRole {
 			values[name] = value
 		}
 	}
+	var hooks []string
+	for _, definition := range loaded.Catalog.Profiles() {
+		if definition.GuestEnvironment != nil {
+			hooks = append(hooks, filepath.Join(definition.Root, definition.GuestEnvironment.Handler))
+		}
+	}
+	values["SUBYARD_PROFILE_GUEST_ENVIRONMENT_HOOKS"] = strings.Join(hooks, "\n")
 	return values
 }
 
@@ -3392,6 +3417,7 @@ func (cli *CLI) resolveContextWithYardSettings(yard, yardSettingsFile string) (c
 		operatorHome = cli.env["HOME"]
 	}
 	return config.Load(config.LoadOptions{
+		Catalog:          &cli.catalog,
 		RepositoryRoot:   cli.options.RepositoryRoot,
 		OperatorHome:     operatorHome,
 		YardName:         yard,
@@ -3410,6 +3436,7 @@ func (cli *CLI) resolveContextAllowPending(yard string) (config.Loaded, error) {
 		operatorHome = cli.env["HOME"]
 	}
 	return config.Load(config.LoadOptions{
+		Catalog:                 &cli.catalog,
 		RepositoryRoot:          cli.options.RepositoryRoot,
 		OperatorHome:            operatorHome,
 		YardName:                yard,
@@ -3756,13 +3783,13 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			}
 			if outcome != nil {
 				if definition.Handler == "@init" {
-					operationCLI.orcaInitRepair, gateErr = operationCLI.prepareOrcaInitRepair(
+					operationCLI.profileInitRepair, gateErr = operationCLI.prepareProfileInitRepair(
 						ctx, handler.loaded.Context.YardName, params.Arguments, *outcome)
 					if gateErr != nil {
 						return nil, operationRPCError("mutation_gate_failed", gateErr)
 					}
 				}
-				if operationCLI.orcaInitRepair == nil {
+				if operationCLI.profileInitRepair == nil {
 					return nil, mutationGateRPCError(*outcome)
 				}
 			}
@@ -3845,8 +3872,8 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 				return nil, operationRPCError("mutation_gate_failed", gateErr)
 			}
 			if outcome != nil {
-				if planned.Definition.Handler != "@init" || planned.CLI.orcaInitRepair == nil ||
-					!sameConfigApplyGate(planned.CLI.orcaInitRepair.gate, *outcome) {
+				if planned.Definition.Handler != "@init" || planned.CLI.profileInitRepair == nil ||
+					!sameConfigApplyGate(planned.CLI.profileInitRepair.gate, *outcome) {
 					return nil, mutationGateRPCError(*outcome)
 				}
 			}

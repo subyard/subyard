@@ -51,7 +51,7 @@ jobs:
         run: |
           mapfile -t shell_files < <(find scripts dev config/profiles config/agents tests -type f -name '*.sh' -print | sort)
           shellcheck -x -S warning bin/yard completions/yard.bash "${shell_files[@]}"
-          ./tests/run.sh
+          make verify
       - uses: actions/download-artifact@v8
         with:
           pattern: paseo-headless-*
@@ -71,6 +71,11 @@ jobs:
           done
       - name: Verify released updater compatibility
         run: python3 dev/verify-release-upgrades.py --release-dir .build/release --version "${GITHUB_REF_NAME#v}"
+      - name: Verify complete physical acceptance receipt
+        run: |
+          python3 dev/release-acceptance.py verify-receipt \
+            --receipt "release-acceptance/${GITHUB_REF_NAME#v}.json" \
+            --release-dir .build/release --version "${GITHUB_REF_NAME#v}"
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}

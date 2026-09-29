@@ -102,13 +102,25 @@ func (execution *initExecution) checkIntegrationBaseline(cli *CLI) error {
 	if execution.integrationBaseline == nil {
 		return nil
 	}
-	options := config.LoadOptions{RepositoryRoot: cli.options.RepositoryRoot, OperatorHome: execution.loaded.Context.Paths.OperatorHome, YardName: execution.loaded.Context.YardName, Environment: cli.baseEnv}
+	options := config.LoadOptions{Catalog: &cli.catalog, RepositoryRoot: cli.options.RepositoryRoot, OperatorHome: execution.loaded.Context.Paths.OperatorHome, YardName: execution.loaded.Context.YardName, Environment: cli.baseEnv}
 	if execution.bootstrap != nil {
 		options.YardSettingsFile = execution.bootstrap.sourcePath
 	}
 	loaded, err := config.Load(options)
 	if err != nil {
 		return err
+	}
+	if execution.profileSetup != nil {
+		for _, setup := range execution.profileSetup.items {
+			if !setup.definition.Selected(loaded.Context.YardName, loaded.Environment) {
+				return fmt.Errorf("%w: profile selection changed", domain.ErrPlanStale)
+			}
+		}
+		for _, name := range []string{"SUBYARD_KEYS_ROOT", "SUBYARD_KEYS_CONSUMER_ROOT", "SUBYARD_KEYS_TOOLS_DIR"} {
+			if loaded.Environment[name] != execution.loaded.Environment[name] {
+				return fmt.Errorf("%w: profile credential location changed", domain.ErrPlanStale)
+			}
+		}
 	}
 	current, err := captureInitIntegrationBaseline(loaded)
 	if err != nil {

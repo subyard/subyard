@@ -146,7 +146,7 @@ func TestDesiredDigestIsSemanticAndRequiresObject(t *testing.T) {
 
 func TestJSONMaterializationPreservesRuntimeFieldsAndRetiresOwnedFields(t *testing.T) {
 	harness := newGuestHarness(t)
-	harness.writeDestination(t, `{"managed":{"old":1,"keep":"stale"},"hooks":["runtime"],"statusLine":"orca"}`)
+	harness.writeDestination(t, `{"managed":{"old":1,"keep":"stale"},"hooks":["runtime"],"statusLine":"profile-state"}`)
 
 	harness.apply(t, []byte(`{"managed":{"old":1,"keep":"wanted"}}`))
 	harness.apply(t, []byte(`{"managed":{"keep":"next","fresh":true}}`))
@@ -154,7 +154,7 @@ func TestJSONMaterializationPreservesRuntimeFieldsAndRetiresOwnedFields(t *testi
 	got := harness.readDestination(t)
 	want := map[string]any{
 		"managed": map[string]any{"keep": "next", "fresh": true},
-		"hooks":   []any{"runtime"}, "statusLine": "orca",
+		"hooks":   []any{"runtime"}, "statusLine": "profile-state",
 	}
 	if !jsonEqual(got, want) {
 		t.Fatalf("materialized JSON = %#v, want %#v", got, want)
@@ -164,7 +164,7 @@ func TestJSONMaterializationPreservesRuntimeFieldsAndRetiresOwnedFields(t *testi
 		t.Fatalf("observation = %#v", observation)
 	}
 	before := observation.Fingerprint
-	got["orcaRuntime"] = map[string]any{"hook": true}
+	got["profileRuntime"] = map[string]any{"hook": true}
 	payload, err := json.Marshal(got)
 	if err != nil {
 		t.Fatal(err)
@@ -181,7 +181,7 @@ func TestJSONMaterializationPreservesRuntimeFieldsAndRetiresOwnedFields(t *testi
 		t.Fatal(err)
 	}
 	if bytes.Contains(baseline, []byte("wanted")) || bytes.Contains(baseline, []byte("next")) ||
-		bytes.Contains(baseline, []byte("orcaRuntime")) {
+		bytes.Contains(baseline, []byte("profileRuntime")) {
 		t.Fatalf("baseline contains configuration values: %s", baseline)
 	}
 }

@@ -93,15 +93,15 @@ func TestValidateGraphTrustAssignmentAndBackoff(t *testing.T) {
 	}
 }
 
-func TestGitHubConsumerRequiresGlobalZone(t *testing.T) {
+func TestProfileConsumerMetadataValidation(t *testing.T) {
 	record := metadata("actor-a-000000000001-aaaaaaaa", "actor-a", 1)
-	record.Consumer, record.Zone = "github-app-key", "global"
+	record.Consumer, record.Zone = "fixture-key", "global"
 	if err := ValidateRevisions([]domain.CredentialMetadata{record}); err != nil {
 		t.Fatal(err)
 	}
-	record.Zone = "another"
+	record.Consumer = "../unsafe"
 	if err := ValidateRevisions([]domain.CredentialMetadata{record}); err == nil {
-		t.Fatal("incoming GitHub consumer could overwrite a different zone")
+		t.Fatal("unsafe profile consumer accepted")
 	}
 }
 

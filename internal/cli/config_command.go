@@ -219,7 +219,7 @@ func (cli *CLI) runConfig(ctx context.Context, loaded config.Loaded, arguments [
 
 func (cli *CLI) writeConfigFields(loaded config.Loaded, requested string) int {
 	if requested != "" {
-		definition, ok := config.LookupSetting(requested)
+		definition, ok := loaded.Catalog.LookupSetting(requested)
 		if !ok {
 			cli.errorf("config fields: unknown setting %q", requested)
 			return 2

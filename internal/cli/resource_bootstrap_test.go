@@ -25,9 +25,15 @@ func bootstrapCommandFixture(t *testing.T) (string, []string, string) {
 	}
 	content = []byte(strings.ReplaceAll(string(content), "run run host-change reversible", "run run bootstrap-change recreatable"))
 	content = []byte(strings.ReplaceAll(string(content), `ACTION="run-purge run persistent-data-destruction irreversible"`+"\n", ""))
-	content = append(content, []byte("BOOTSTRAP=profile\nPROXY=\"demo ORCA_ADVERTISE_HOST ORCA_HOST_PORT tcp:127.0.0.1:6768 loopback-or-tailscale\"\n")...)
+	content = append(content, []byte("BOOTSTRAP=profile\nPROXY=\"demo DEMO_ADVERTISE_HOST DEMO_HOST_PORT tcp:127.0.0.1:6768 loopback-or-tailscale\"\n")...)
 	writeCLIFile(t, path, string(content), 0600)
 	writeCLIFile(t, filepath.Join(root, "config", "host.env"), "ENVIRONMENT_PROFILES=existing\n", 0600)
+	writeCLIFile(t, filepath.Join(root, "config", "profiles", "fixture", "profile.json"), `{
+ "schema_version":1,"settings":[
+ {"name":"DEMO_ADVERTISE_HOST","type":"string","scopes":["shipped","host","yard","command"],"application":"next-command","optional":true},
+ {"name":"DEMO_HOST_PORT","type":"port","scopes":["shipped","host","yard","command"],"application":"next-command","optional":true,"minimum":1,"maximum":65535,"host_listener":true},
+ {"name":"OTHER_LISTENER_PORT","type":"port","scopes":["shipped","host","yard","command"],"application":"next-command","optional":true,"minimum":1,"maximum":65535,"host_listener":true}
+ ]}`, 0o600)
 	return root, environment, applyLog
 }
 
@@ -54,7 +60,7 @@ func TestResourceBootstrapProfileCASFailureDoesNotReserveEndpoint(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	b := &resourceBootstrap{initial: loaded, loaded: loaded, definition: definition,
+	b := &profileBootstrap{initial: loaded, loaded: loaded, definition: definition,
 		selectionPath: path, selection: snapshot, profiles: "existing fixture",
 		request: resourceendpoint.Request{Directory: filepath.Join(root, "data", "resource-endpoints"), Yard: "default", Resource: "fixture.demo", Host: "127.0.0.1", PreferredPort: 6768, ReservedPorts: reserved}}
 	probes := 0
@@ -86,8 +92,8 @@ func TestResourceBootstrapProfileCASFailureDoesNotReserveEndpoint(t *testing.T) 
 func TestResourceEndpointReservesPortsOfStoppedLocalYards(t *testing.T) {
 	root, environment, _ := bootstrapCommandFixture(t)
 	for name, contents := range map[string]string{
-		"other":  "SSH_PORT=6769\nORCA_HOST_PORT=6768\nADB_PROXY_PORT=6770\n",
-		"remote": "ACCESS_KIND=remote\nOWNER_ENDPOINT=owner.example\nOWNER_YARD_NAME=default\nSSH_PORT=6771\nORCA_HOST_PORT=6772\n",
+		"other":  "SSH_PORT=6769\nDEMO_HOST_PORT=6768\nOTHER_LISTENER_PORT=6770\n",
+		"remote": "ACCESS_KIND=remote\nOWNER_ENDPOINT=owner.example\nOWNER_YARD_NAME=default\nSSH_PORT=6771\nDEMO_HOST_PORT=6772\n",
 	} {
 		path := filepath.Join(root, "state", "yards", name, "config.env")
 		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
@@ -128,7 +134,7 @@ func TestResourceBootstrapPersistsEndpointAndLoadsItForNextCommand(t *testing.T)
 		t.Fatal(err)
 	}
 	writeCLIFile(t, path, string(content)+"ENDPOINT_DEFAULTS=\"tailscale-self 6768\"\n", 0600)
-	writeCLIFile(t, filepath.Join(root, "config", "host.env"), "ENVIRONMENT_PROFILES=existing\nORCA_ADVERTISE_HOST=127.0.0.1\nORCA_HOST_PORT=16768\n", 0600)
+	writeCLIFile(t, filepath.Join(root, "config", "host.env"), "ENVIRONMENT_PROFILES=existing\nDEMO_ADVERTISE_HOST=127.0.0.1\nDEMO_HOST_PORT=16768\n", 0600)
 	platform := newInitPlatformFixture()
 	var stderr bytes.Buffer
 	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "run", "--yes"}, Environment: environment, WorkingDir: root, Stderr: &stderr, InitPlatform: platform})
@@ -153,7 +159,7 @@ func TestResourceBootstrapPersistsEndpointAndLoadsItForNextCommand(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Environment["ENVIRONMENT_PROFILES"] != "existing fixture" || loaded.Environment["ORCA_HOST_PORT"] != "16768" || loaded.Environment["ORCA_ADVERTISE_HOST"] != "127.0.0.1" {
+	if loaded.Environment["ENVIRONMENT_PROFILES"] != "existing fixture" || loaded.Environment["DEMO_HOST_PORT"] != "16768" || loaded.Environment["DEMO_ADVERTISE_HOST"] != "127.0.0.1" {
 		t.Fatal("next command lost saved profile or endpoint")
 	}
 	next, err = New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "status"}, Environment: environment, Stdout: &status})

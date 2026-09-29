@@ -23,6 +23,27 @@ grep -Fq 'target=/var/lib/subyard/e2e-routes' "$ROOT/scripts/03-create-subyard.s
 [ "$IDENTITY" = "$TMP/client/id_ed25519" ] \
   || fail "controller identity is not shared outside yard-scoped state"
 
+candidate_bundle="$TMP/candidate.tar.gz"
+candidate_copy="$TMP/candidate-copy.tar.gz"
+printf 'frozen candidate bundle\n' > "$candidate_bundle"
+candidate_hash="$(sha256sum "$candidate_bundle" | awk '{print $1}')"
+SUBYARD_E2E_CANDIDATE_BUNDLE="$candidate_bundle" \
+  SUBYARD_E2E_CANDIDATE_SHA256="$candidate_hash" \
+  build_bundle "$ROOT" "$candidate_copy"
+cmp -s "$candidate_bundle" "$candidate_copy" \
+  || fail 'candidate bundle was not reused byte-for-byte'
+for candidate_case in bad-hash missing nonregular; do
+  set +e
+  case "$candidate_case" in
+    bad-hash) ( SUBYARD_E2E_CANDIDATE_BUNDLE="$candidate_bundle" SUBYARD_E2E_CANDIDATE_SHA256="$(printf '%064d' 0)" build_bundle "$ROOT" "$TMP/bad" ) ;;
+    missing) ( SUBYARD_E2E_CANDIDATE_BUNDLE="$TMP/missing" SUBYARD_E2E_CANDIDATE_SHA256="$candidate_hash" build_bundle "$ROOT" "$TMP/missing-copy" ) ;;
+    nonregular) mkdir "$TMP/candidate-dir"; ( SUBYARD_E2E_CANDIDATE_BUNDLE="$TMP/candidate-dir" SUBYARD_E2E_CANDIDATE_SHA256="$candidate_hash" build_bundle "$ROOT" "$TMP/dir-copy" ) ;;
+  esac >/dev/null 2>&1
+  candidate_rc=$?
+  set -e
+  [ "$candidate_rc" -ne 0 ] || fail "candidate bundle $candidate_case input was accepted"
+done
+
 staging_bundle="$TMP/staging-bundle.tar.gz"
 unreachable_sentinel="$TMP/unreachable-finalization"
 late_staging_path="$TMP/late-staging-path"
@@ -253,6 +274,18 @@ printf '%s\n' \
   > "$SUBYARD_E2E_WORKSPACES_ROOT/Subyard-2-05398f45/.subyard-meta.json"
 [ "$(resolve_workspace_attribution "$fixture")" = $'default\tSubyard-2' ] \
   || fail "runner did not use canonical workspace metadata"
+export SUBYARD_E2E_CONTROLLER_WORKSPACE="$fixture"
+[ "$(resolve_workspace_attribution "$TMP/frozen/source")" = $'default\tSubyard-2' ] \
+  || fail "controller workspace override did not preserve managed attribution"
+unset SUBYARD_E2E_CONTROLLER_WORKSPACE
+unmanaged="$TMP/unmanaged/src"
+mkdir -p "$unmanaged"
+git -C "$unmanaged" init -q
+export SUBYARD_E2E_CONTROLLER_WORKSPACE="$unmanaged"
+if (resolve_workspace_attribution "$fixture") >/dev/null 2>&1; then
+  fail "runner accepted an unmanaged controller workspace override"
+fi
+unset SUBYARD_E2E_CONTROLLER_WORKSPACE
 cp "$SUBYARD_E2E_WORKSPACES_ROOT/Subyard-2-05398f45/.subyard-meta.json" "$TMP/valid-meta"
 printf '%s\n' \
   '{"schema":1,"projectId":"foreign","name":"Subyard-2","yard":"default"}' \
@@ -336,7 +369,7 @@ grep -Fxq 'export SUBYARD_E2E_YARD=test-yard' "$TMP/run.sh" \
   && grep -Fxq 'export SUBYARD_E2E_GENERATION=7' "$TMP/run.sh" \
   || fail "guest command omitted public lease context"
 write_guest_command 1 "$command_root" ./bin/yard --version > "$TMP/yard-run.sh"
-grep -Fxq '/usr/sbin/runuser -u dev -- env HOME=/home/dev USER=dev LOGNAME=dev ./dev/build-engine.sh' \
+grep -Fxq '/usr/sbin/runuser -u dev -- env HOME=/home/dev USER=dev LOGNAME=dev make build' \
   "$TMP/yard-run.sh" \
   || fail "direct guest yard command does not build its explicit development engine"
 grep -Fxq 'exec /usr/sbin/runuser -u dev -- env HOME=/home/dev USER=dev LOGNAME=dev ./bin/yard --version' \

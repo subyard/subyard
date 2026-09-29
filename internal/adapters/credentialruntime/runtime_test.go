@@ -341,14 +341,7 @@ func TestPayloadImportDenylistAndConsumerMapping(t *testing.T) {
 	if _, _, err := runtime.consumerPath("staging-env", "../prod"); err == nil {
 		t.Fatal("consumer zone traversal was accepted")
 	}
-	github, mapped, err := runtime.consumerPath("github-app-key", "global")
-	if err != nil || !mapped || github != filepath.Join(runtime.config.ConsumerRoot, "github", "github-app.pem") ||
-		runtime.detectConsumer(github) != "github-app-key" || runtime.detectZone(github) != "global" {
-		t.Fatalf("GitHub consumer mapping drifted: path=%q mapped=%v err=%v", github, mapped, err)
-	}
-	if _, _, err := runtime.consumerPath("github-app-key", "another"); err == nil {
-		t.Fatal("multiple zones could overwrite the shared GitHub key")
-	}
+
 }
 
 func TestWorkflowArgumentValidationIsDirectAndSideEffectFree(t *testing.T) {
@@ -365,7 +358,6 @@ func TestWorkflowArgumentValidationIsDirectAndSideEffectFree(t *testing.T) {
 		{"label", "--unknown"},
 		{"label", "--zone", "production"},
 		{"label", "--consumer", "../unsafe"},
-		{"label", "--consumer", "github-app-key", "--zone", "another"},
 	} {
 		if _, err := parseAdd(arguments); err == nil {
 			t.Fatalf("invalid keys add arguments were accepted: %#v", arguments)

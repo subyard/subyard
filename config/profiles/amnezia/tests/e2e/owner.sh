@@ -2,6 +2,15 @@
 # Run only on an allocated owner; retain the fixture for same-lease data-path checks.
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+# shellcheck source=tests/helpers/release-candidate.sh
+. "$root/tests/helpers/release-candidate.sh"
+if YARD_BIN="$(release_candidate_prepare "$root")"; then
+  unset YARD_ENGINE_PATH
+else
+  candidate_rc=$?
+  [ "$candidate_rc" = 1 ] || exit "$candidate_rc"
+  YARD_BIN="$root/.build/yard"
+fi
 phase="${1:-init}"
 die() { printf 'amnezia-profile-e2e: %s\n' "$*" >&2; exit 1; }
 [ -n "${SUBYARD_E2E_VM:-}" ] || die 'run through dev/agent-e2e.sh'
@@ -20,9 +29,11 @@ export MIN_DISK_GIB=1
 # shellcheck source=scripts/lib/host.sh
 . "$root/scripts/lib/host.sh"
 # Guest source trees are disposable across reboots; keep this lease's engine on disk.
-"$root/dev/build-engine.sh" --output "$fixture/yard"
-install -D -m 0755 "$fixture/yard" "$root/.build/yard"
-yard() { "$root/.build/yard" -Y vpn-e2e "$@"; }
+if [ "$YARD_BIN" = "$root/.build/yard" ]; then
+  "$root/dev/build-engine.sh" --output "$fixture/yard"
+  install -D -m 0755 "$fixture/yard" "$YARD_BIN"
+fi
+yard() { "$YARD_BIN" -Y vpn-e2e "$@"; }
 guest() { incus exec yard-vpn-e2e --project subyard-vpn-e2e -- "$@"; }
 signature() {
   guest sh -c 'cd /srv/amnezia && sha256sum awg0.conf client.conf settings.json' | sha256sum
@@ -312,7 +323,7 @@ runtime.initialize("1.1.1.1", 51820)
     verify_enabled
     ;;
   work-stop)
-    "$root/.build/yard" -Y work-e2e stop --yes
+    "$YARD_BIN" -Y work-e2e stop --yes
     verify_enabled
     guest docker stats --no-stream --format 'vpn_cpu={{.CPUPerc}} vpn_memory={{.MemUsage}}' subyard-amnezia
     ;;
@@ -334,8 +345,8 @@ SSH_PORT=2226
 CONFIG
       chmod 0600 "$definition"
     fi
-    "$root/.build/yard" -Y work-e2e init --yes
-    "$root/.build/yard" -Y work-e2e start --yes
+    "$YARD_BIN" -Y work-e2e init --yes
+    "$YARD_BIN" -Y work-e2e start --yes
     incus exec yard-work-e2e --project subyard-work-e2e -- \
       test ! -e /usr/local/lib/subyard-amnezia/runtime.py
     # A bounded neighbor workload; no priority or throughput guarantee is asserted.

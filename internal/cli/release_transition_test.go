@@ -24,20 +24,22 @@ import (
 	"github.com/Subyard/Subyard/internal/testyardmigration"
 )
 
-func TestReleaseActivationRefreshesOrcaBeforeMaterializedConfig(t *testing.T) {
-	program, err := New(Options{RepositoryRoot: repositoryRoot(t), Environment: []string{"HOME=" + t.TempDir()}})
+func TestReleaseActivationRefreshesProfileRuntimeBeforeMaterializedConfig(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	writeRuntimeProfileFixture(t, root)
+	program, err := New(Options{RepositoryRoot: root, Environment: environment})
 	if err != nil {
 		t.Fatal(err)
 	}
 	reconcilers := program.activationReconcilers(releasetransition.ProcessRequest{})
-	orca := slices.IndexFunc(reconcilers, func(reconciler releasetransition.V2ActivationReconciler) bool {
-		return reconciler.ID() == "orca-runtime"
+	sample := slices.IndexFunc(reconcilers, func(reconciler releasetransition.V2ActivationReconciler) bool {
+		return reconciler.ID() == "sample-runtime"
 	})
 	configs := slices.IndexFunc(reconcilers, func(reconciler releasetransition.V2ActivationReconciler) bool {
 		return reconciler.ID() == "materialized-config"
 	})
-	if orca < 0 || configs < 0 || orca >= configs {
-		t.Fatalf("release integration hooks can run before Orca refresh: orca=%d configs=%d", orca, configs)
+	if sample < 0 || configs < 0 || sample >= configs {
+		t.Fatalf("release integration hooks can run before ProfileRuntime refresh: sample=%d configs=%d", sample, configs)
 	}
 }
 
@@ -162,8 +164,9 @@ func TestMaterializedConfigObservationReportsSourceManagedOwnershipConflict(t *t
 	}
 }
 
-func TestOrcaActivationRepairsAllLocalInstalledContracts(t *testing.T) {
+func TestProfileRuntimeActivationRepairsAllLocalInstalledContracts(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
+	writeRuntimeProfileFixture(t, root)
 	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join(environment, "\n")+"\n", 0o600)
 	home := filepath.Join(root, "state")
 	seedCurrentReleaseLedger(t, root, home)
@@ -179,7 +182,7 @@ func TestOrcaActivationRepairsAllLocalInstalledContracts(t *testing.T) {
 		}
 		writeCLIFile(t, path, content, 0o600)
 	}
-	handler := filepath.Join(root, "config", "profiles", "orca", "resources", "orca", "handler.sh")
+	handler := filepath.Join(root, "config", "profiles", "sample", "runtime.sh")
 	if err := os.MkdirAll(filepath.Dir(handler), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -188,24 +191,23 @@ func TestOrcaActivationRepairsAllLocalInstalledContracts(t *testing.T) {
 	current := fmt.Sprintf(`{"state":"current","actual":%q,"desired":%q}`, newDigest, newDigest)
 	writeCLIFile(t, handler, `#!/bin/sh
 set -eu
-[ "$1" = _runtime-contract ]
 [ "$SUBYARD_ENGINE_CONTEXT" = 1 ]
 yard_name="${YARD_NAME:-default}"
-state="$SUBYARD_CONFIG_HOME/orca-$yard_name"
-case "$2" in
+state="$SUBYARD_CONFIG_HOME/sample-$yard_name"
+case "$1" in
   observe) cat "$state" ;;
   apply)
-    [ "$3" = orca-activation-test ]
-    [ ! -e "$SUBYARD_CONFIG_HOME/fail-orca" ] || exit 9
+    [ "$2" = sample-activation-test ]
+    [ ! -e "$SUBYARD_CONFIG_HOME/fail-sample" ] || exit 9
     printf '%s\n' '`+current+`' > "$state"
-    printf '%s\n' "$yard_name" >> "$SUBYARD_CONFIG_HOME/orca-applied"
+    printf '%s\n' "$yard_name" >> "$SUBYARD_CONFIG_HOME/sample-applied"
     cat "$state"
     ;;
   *) exit 90 ;;
 esac
 `, 0o700)
 	for _, name := range []string{"default", "named"} {
-		writeCLIFile(t, filepath.Join(home, "orca-"+name), stale, 0o600)
+		writeCLIFile(t, filepath.Join(home, "sample-"+name), stale, 0o600)
 	}
 	incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
 		"subyard/yard": {Status: "running"}, "named-project/named-yard": {Status: "running"},
@@ -213,33 +215,33 @@ esac
 	}}
 	var diagnostics bytes.Buffer
 	program, err := New(Options{RepositoryRoot: root, Environment: append(environment,
-		"SUBYARD_OPERATION_ID=orca-activation-test", "PATH="+os.Getenv("PATH")),
+		"SUBYARD_OPERATION_ID=sample-activation-test", "PATH="+os.Getenv("PATH")),
 		Incus: incus, Executor: incus, Stderr: &diagnostics})
 	if err != nil {
 		t.Fatal(err)
 	}
-	reconciler := program.orcaActivationReconciler(releasetransition.ProcessRequest{ConfigHome: home})
+	reconciler := program.profileActivationReconciler(releasetransition.ProcessRequest{ConfigHome: home}, "sample-runtime")
 	ctx := context.Background()
 	before, err := reconciler.Observe(ctx, releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
 	if err != nil || before.Converged || before.Actual == before.Desired {
 		t.Fatalf("initial observation: %#v, %v", before, err)
 	}
-	if _, err := os.Stat(filepath.Join(home, "orca-applied")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(home, "sample-applied")); !os.IsNotExist(err) {
 		t.Fatal("assessment changed guest files")
 	}
 	if len(before.Warnings) != 1 || !strings.Contains(before.Warnings[0], "yard stopped:") || !strings.Contains(before.Warnings[0], "deferred") {
 		t.Fatalf("stopped yard deferral was hidden: %v", before.Warnings)
 	}
 	if diagnostics.Len() != 0 {
-		t.Fatalf("Orca observation wrote console output: %s", diagnostics.String())
+		t.Fatalf("ProfileRuntime observation wrote console output: %s", diagnostics.String())
 	}
-	writeCLIFile(t, filepath.Join(home, "fail-orca"), "", 0o600)
+	writeCLIFile(t, filepath.Join(home, "fail-sample"), "", 0o600)
 	if err := reconciler.Reconcile(ctx, releasetransition.ReleaseLinks{}); err == nil {
 		t.Fatal("failed helper installation was accepted")
-	} else if !strings.Contains(err.Error(), "yard default Orca runtime refresh:") {
+	} else if !strings.Contains(err.Error(), "yard default profile runtime refresh:") {
 		t.Fatalf("failed helper installation lost its diagnostic: %v", err)
 	}
-	if err := os.Remove(filepath.Join(home, "fail-orca")); err != nil {
+	if err := os.Remove(filepath.Join(home, "fail-sample")); err != nil {
 		t.Fatal(err)
 	}
 	if err := reconciler.Reconcile(ctx, releasetransition.ReleaseLinks{}); err != nil {
@@ -252,14 +254,15 @@ esac
 	if err := reconciler.Reconcile(ctx, releasetransition.ReleaseLinks{}); err != nil {
 		t.Fatal(err)
 	}
-	applied, err := os.ReadFile(filepath.Join(home, "orca-applied"))
+	applied, err := os.ReadFile(filepath.Join(home, "sample-applied"))
 	if err != nil || string(applied) != "default\nnamed\n" {
 		t.Fatalf("scope/retry/no-op: %q, %v", applied, err)
 	}
 }
 
-func TestOrcaActivationDefersLegacyYardLoadingUntilSourceMigrationsComplete(t *testing.T) {
+func TestProfileRuntimeActivationDefersLegacyYardLoadingUntilSourceMigrationsComplete(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
+	writeRuntimeProfileFixture(t, root)
 	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join(environment, "\n")+"\n", 0o600)
 	home := filepath.Join(root, "state")
 	legacy := filepath.Join(home, "yards", "hermes", "config.env")
@@ -278,7 +281,7 @@ func TestOrcaActivationDefersLegacyYardLoadingUntilSourceMigrationsComplete(t *t
 	request := releasetransition.ProcessRequest{
 		ConfigHome: home, ArtifactDigest: releasetransition.Fingerprint(strings.Repeat("c", 64)),
 	}
-	reconciler := program.orcaActivationReconciler(request)
+	reconciler := program.profileActivationReconciler(request, "sample-runtime")
 	releases := releasetransition.ReleasePair{Target: "1.1.0-test-aaaaaaaaaaaa"}
 	pending, err := reconciler.Observe(context.Background(), releases, releasetransition.ReleaseLinks{})
 	if err != nil || pending.Converged || pending.Actual == pending.Desired {
@@ -2557,4 +2560,14 @@ func writeReleaseTransitionTestFile(t *testing.T, path string, payload []byte, m
 		t.Fatal(err)
 	}
 	testkit.WriteFile(t, path, payload, mode)
+}
+
+func writeRuntimeProfileFixture(t *testing.T, root string) {
+	t.Helper()
+	directory := filepath.Join(root, "config", "profiles", "sample")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(directory, "runtime.sh"), "#!/bin/sh\nprintf '%s\\n' '{\"state\":\"absent\",\"actual\":\"\",\"desired\":\"\"}'\n", 0o700)
+	writeCLIFile(t, filepath.Join(directory, "profile.json"), `{"schema_version":1,"runtime":{"activation_id":"sample-runtime","handler":"runtime.sh"}}`, 0o600)
 }

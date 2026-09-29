@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "obligations": [
+    {
+      "id": "openclaw-staging-gateway-live",
+      "description": "Bring up the isolated staging gateway, validate its production-fingerprint guard against a real staging bot token, start and stop the gateway, and verify lease cleanup.",
+      "required_inputs": [
+        "OpenClaw source tree with scripts/vasily available in the allocated yard",
+        "yard Docker image/build access",
+        "generated staging environment and a staging-only Telegram bot token",
+        "operator-maintained production bot fingerprint denylist",
+        "authorized exclusive-key consent for the staging zone"
+      ]
+    },
+    {
+      "id": "openclaw-qa-broker-live",
+      "description": "Deploy the QA credential broker, seed a staging bot pool, exercise distinct concurrent leases and exhaustion, then release leases and stop the broker.",
+      "required_inputs": [
+        "OpenClaw source tree containing qa/convex-credential-broker/convex.json",
+        "yard Docker image and network access for Convex and Node deployment images",
+        "generated maintainer and CI Convex secrets",
+        "synthetic or dedicated staging Telegram bot credentials and group identifiers"
+      ]
+    }
+  ]
+}

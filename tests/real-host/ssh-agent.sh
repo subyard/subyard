@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Sourced by the focused Orca bootstrap mode on a disposable lease VM.
 # Run: SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_SSH_AGENT=1 \
-#   bash tests/real-host/orca-bootstrap.sh
+#   bash config/profiles/orca/tests/e2e/orca-bootstrap.sh
 # Variables token and pairing belong to the sourcing bootstrap fixture.
 # shellcheck disable=SC2154
 set -euo pipefail

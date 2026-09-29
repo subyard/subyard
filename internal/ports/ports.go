@@ -175,24 +175,24 @@ type AdapterRunner interface {
 type ReconcileStageID string
 
 const (
-	ReconcileStageIncus         ReconcileStageID = "incus"
-	ReconcileStageProject       ReconcileStageID = "project"
-	ReconcileStageNetwork       ReconcileStageID = "network"
-	ReconcileStageNetworkPolicy ReconcileStageID = "network-policy"
-	ReconcileStagePowerImport   ReconcileStageID = "power-import"
-	ReconcileStageInstance      ReconcileStageID = "instance"
-	ReconcileStageMounts        ReconcileStageID = "mounts"
-	ReconcileStageProvision     ReconcileStageID = "provision"
-	ReconcileStageTestVMs       ReconcileStageID = "test-vms"
-	ReconcileStageSSH           ReconcileStageID = "ssh"
-	ReconcileStageGitIdentity   ReconcileStageID = "git-identity"
-	ReconcileStageGitHub        ReconcileStageID = "github"
-	ReconcileStageExtras        ReconcileStageID = "extras"
-	ReconcileStagePower         ReconcileStageID = "power"
-	ReconcileStageKeys          ReconcileStageID = "keys"
-	ReconcileStageSecurity      ReconcileStageID = "security"
-	ReconcileStageOrca          ReconcileStageID = "orca-runtime"
-	ReconcileStageFinalize      ReconcileStageID = "finalize"
+	ReconcileStageIncus           ReconcileStageID = "incus"
+	ReconcileStageProject         ReconcileStageID = "project"
+	ReconcileStageNetwork         ReconcileStageID = "network"
+	ReconcileStageNetworkPolicy   ReconcileStageID = "network-policy"
+	ReconcileStagePowerImport     ReconcileStageID = "power-import"
+	ReconcileStageInstance        ReconcileStageID = "instance"
+	ReconcileStageMounts          ReconcileStageID = "mounts"
+	ReconcileStageProvision       ReconcileStageID = "provision"
+	ReconcileStageTestVMs         ReconcileStageID = "test-vms"
+	ReconcileStageSSH             ReconcileStageID = "ssh"
+	ReconcileStageGitIdentity     ReconcileStageID = "git-identity"
+	ReconcileStageProfileServices ReconcileStageID = "profile-services"
+	ReconcileStageExtras          ReconcileStageID = "extras"
+	ReconcileStagePower           ReconcileStageID = "power"
+	ReconcileStageKeys            ReconcileStageID = "keys"
+	ReconcileStageSecurity        ReconcileStageID = "security"
+	ReconcileStageProfileRuntimes ReconcileStageID = "profile-runtimes"
+	ReconcileStageFinalize        ReconcileStageID = "finalize"
 )
 
 type ReconcileStageRunner interface {
@@ -206,18 +206,28 @@ type InitPlatform interface {
 	Preflight(context.Context, bool) error
 	ConfigsConverged(context.Context) (bool, error)
 	RefreshConfigs(context.Context) error
-	ObserveOrcaRuntime(context.Context) (OrcaRuntimeObservation, error)
+	ObserveProfileRuntimes(context.Context) (map[string]RuntimeObservation, error)
+	ApplyProfileRuntime(context.Context, string, string, string, string) error
 	ProjectHooksApplicable(context.Context) (bool, error)
 	RunProjectHooks(context.Context) error
 	Teardown(context.Context) error
 }
 
-// OrcaRuntimeObservation describes the installed, profile-owned registration
-// contract. A stopped yard defers observation without starting the instance.
-type OrcaRuntimeObservation struct {
-	State   string `json:"state"`
-	Actual  string `json:"actual"`
-	Desired string `json:"desired"`
+type RuntimeState string
+
+const (
+	RuntimeStateAbsent   RuntimeState = "absent"
+	RuntimeStateDeferred RuntimeState = "deferred"
+	RuntimeStateCurrent  RuntimeState = "current"
+	RuntimeStateStale    RuntimeState = "stale"
+)
+
+// RuntimeObservation describes a declared profile hook's installed contract.
+// A stopped yard defers observation without starting the instance.
+type RuntimeObservation struct {
+	State   RuntimeState `json:"state"`
+	Actual  string       `json:"actual"`
+	Desired string       `json:"desired"`
 }
 
 type RemoteTransport interface {

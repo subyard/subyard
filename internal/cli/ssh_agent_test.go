@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/Subyard/Subyard/internal/application"
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ports"
 )
 
 func TestSSHAgentStatusDoesNotCreateState(t *testing.T) {
@@ -25,6 +27,72 @@ func TestSSHAgentStatusDoesNotCreateState(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "data")); !os.IsNotExist(err) {
 		t.Fatalf("status created data: %v", err)
+	}
+}
+
+type sshAgentDispatchExecutor struct {
+	requests []ports.InstanceExecRequest
+	failAt   int
+}
+
+func (executor *sshAgentDispatchExecutor) Exec(
+	_ context.Context, _, _ string, request ports.InstanceExecRequest,
+) (ports.InstanceExecResult, error) {
+	request.Command = append([]string(nil), request.Command...)
+	request.Stdin = append([]byte(nil), request.Stdin...)
+	executor.requests = append(executor.requests, request)
+	if executor.failAt == len(executor.requests) {
+		return ports.InstanceExecResult{ExitCode: 9}, nil
+	}
+	return ports.InstanceExecResult{}, nil
+}
+
+func TestSSHAgentEnvironmentIncludesDeselectedProfileHooksAndStopsOnFailure(t *testing.T) {
+	root, _, _ := nativeFixture(t)
+	writeCLIFile(t, filepath.Join(root, "scripts", "ssh-agent-environment.sh"), "generic", 0o700)
+	for _, item := range []struct{ name, body string }{
+		{"selected", "selected hook"}, {"deselected", "deselected hook"},
+	} {
+		directory := filepath.Join(root, "config", "profiles", item.name)
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeCLIFile(t, filepath.Join(directory, "profile.json"), `{"schema_version":1,"guest_environment":{"handler":"guest.sh"}}`, 0o600)
+		writeCLIFile(t, filepath.Join(directory, "guest.sh"), item.body, 0o700)
+	}
+	catalog, err := config.LoadCatalog(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scripts, err := sshAgentEnvironmentScripts(root, catalog.Profiles())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scripts) != 3 || string(scripts[0]) != "generic" || string(scripts[1]) != "deselected hook" || string(scripts[2]) != "selected hook" {
+		t.Fatalf("dispatch order/payloads: %q", scripts)
+	}
+	yard := domain.Context{IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev"}
+	executor := &sshAgentDispatchExecutor{}
+	if err := applySSHAgentEnvironment(context.Background(), executor, yard, scripts); err != nil {
+		t.Fatal(err)
+	}
+	if len(executor.requests) != 3 {
+		t.Fatalf("executed %d setup scripts, want generic plus both profile hooks", len(executor.requests))
+	}
+	for _, request := range executor.requests {
+		if strings.Join(request.Command, " ") != "sh -eu -s -- ensure dev" {
+			t.Fatalf("unexpected guest setup command %q", request.Command)
+		}
+	}
+	executor = &sshAgentDispatchExecutor{failAt: 2}
+	if err := applySSHAgentEnvironment(context.Background(), executor, yard, scripts); err == nil || len(executor.requests) != 2 {
+		t.Fatalf("failed hook was ignored or dispatch continued: requests=%d err=%v", len(executor.requests), err)
+	}
+	if err := os.Remove(filepath.Join(root, "config", "profiles", "deselected", "guest.sh")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sshAgentEnvironmentScripts(root, catalog.Profiles()); err == nil {
+		t.Fatal("missing snapshotted hook was accepted")
 	}
 }
 

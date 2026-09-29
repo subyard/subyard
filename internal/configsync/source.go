@@ -35,13 +35,14 @@ type sourceSnapshot struct {
 	commit     string
 	digest     string
 	hostID     string
+	catalog    config.Catalog
 	manifest   SourceManifest
 	files      map[string]candidateFile
 	yardNames  []string
 	scalarPath map[string]string
 }
 
-func readSource(options Options, hostID string) (sourceSnapshot, error) {
+func readSource(options Options, hostID string, catalog config.Catalog) (sourceSnapshot, error) {
 	root, err := filepath.Abs(options.SourceRoot)
 	if err != nil {
 		return sourceSnapshot{}, err
@@ -95,7 +96,7 @@ func readSource(options Options, hostID string) (sourceSnapshot, error) {
 	}
 	snapshot := sourceSnapshot{
 		root: root, id: digestBytes([]byte(identityRoot)), commit: commit, hostID: hostID,
-		manifest: manifest, files: map[string]candidateFile{},
+		catalog: catalog, manifest: manifest, files: map[string]candidateFile{},
 		scalarPath: map[string]string{},
 	}
 	if err := validateTopLevelRoles(root); err != nil {
@@ -234,7 +235,7 @@ func (snapshot *sourceSnapshot) readConfig(
 		}
 		return nil
 	}
-	applications, err := settingApplications(source)
+	applications, err := settingApplications(snapshot.catalog, source)
 	if err != nil {
 		return err
 	}
@@ -243,7 +244,7 @@ func (snapshot *sourceSnapshot) readConfig(
 		return err
 	}
 	for _, name := range names {
-		definition, err := config.ValidateSettingName(scope, name, true)
+		definition, err := snapshot.catalog.ValidateSettingName(scope, name, true)
 		if err != nil {
 			return err
 		}
@@ -550,7 +551,7 @@ func validateOwnedMode(path string, info os.FileInfo, directory bool) error {
 	return nil
 }
 
-func settingApplications(path string) ([]config.SettingApplication, error) {
+func settingApplications(catalog config.Catalog, path string) ([]config.SettingApplication, error) {
 	names, err := config.AssignedSettingNames(path)
 	if err != nil {
 		return nil, err
@@ -558,7 +559,7 @@ func settingApplications(path string) ([]config.SettingApplication, error) {
 	seen := map[config.SettingApplication]struct{}{}
 	var result []config.SettingApplication
 	for _, name := range names {
-		definition, ok := config.LookupSetting(name)
+		definition, ok := catalog.LookupSetting(name)
 		if !ok {
 			continue
 		}

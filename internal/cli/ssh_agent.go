@@ -18,8 +18,45 @@ import (
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/sshidentity"
 )
+
+func sshAgentEnvironmentScripts(repositoryRoot string, profiles []profile.Definition) ([][]byte, error) {
+	setup, err := os.ReadFile(filepath.Join(repositoryRoot, "scripts", "ssh-agent-environment.sh"))
+	if err != nil {
+		return nil, errors.New("SSH agent environment adapter is unavailable")
+	}
+	result := [][]byte{setup}
+	for _, definition := range profiles {
+		if definition.GuestEnvironment == nil {
+			continue
+		}
+		hook, err := definition.ReadExecutable(definition.GuestEnvironment.Handler)
+		if err != nil {
+			return nil, errors.New("profile guest environment adapter is unavailable")
+		}
+		result = append(result, hook)
+	}
+	return result, nil
+}
+
+func applySSHAgentEnvironment(
+	ctx context.Context,
+	executor ports.InstanceExecutor,
+	yard domain.Context,
+	scripts [][]byte,
+) error {
+	for _, script := range scripts {
+		result, err := executor.Exec(ctx, yard.IncusProject, yard.YardInstanceName, ports.InstanceExecRequest{
+			Command: []string{"sh", "-eu", "-s", "--", "ensure", yard.DevUser}, Stdin: script,
+		})
+		if err != nil || result.ExitCode != 0 {
+			return errors.New("could not configure the yard SSH-agent environment")
+		}
+	}
+	return nil
+}
 
 type sshAgentInvocation struct {
 	verb, key       string
@@ -120,7 +157,7 @@ func (cli *CLI) runSSHAgent(ctx context.Context, loaded config.Loaded, definitio
 		}
 		return cli.writeSSHAgentStatus(status, invocation.json)
 	}
-	var setup []byte
+	var setupScripts [][]byte
 	if invocation.verb == "unlock" {
 		if cli.operatorTerminal == nil || !cli.operatorTerminal() {
 			cli.errorf("ssh-agent unlock requires a terminal on the owner host for the key passphrase")
@@ -143,7 +180,7 @@ func (cli *CLI) runSSHAgent(ctx context.Context, loaded config.Loaded, definitio
 			cli.errorf("SSH access requires a running yard; run yard start first")
 			return 1
 		}
-		setup, err = os.ReadFile(filepath.Join(cli.options.RepositoryRoot, "scripts", "ssh-agent-environment.sh"))
+		setupScripts, err = sshAgentEnvironmentScripts(cli.options.RepositoryRoot, loaded.Catalog.Profiles())
 		if err != nil {
 			cli.errorf("SSH agent environment adapter is unavailable")
 			return 1
@@ -154,7 +191,7 @@ func (cli *CLI) runSSHAgent(ctx context.Context, loaded config.Loaded, definitio
 		consequences = []string{
 			fmt.Sprintf("allow processes in yard %s to authenticate with the selected SSH key for %s", yard.YardName, invocation.ttl),
 			"replace any existing temporary grant for this yard; the host's ordinary agent is unchanged",
-			"configure the yard environment and, if needed for first setup, restart Orca once",
+			"configure the yard SSH environment and repair installed profile guest services",
 			"expiry and lock stop new authentication, not already authenticated SSH connections",
 		}
 	}
@@ -173,11 +210,8 @@ func (cli *CLI) runSSHAgent(ctx context.Context, loaded config.Loaded, definitio
 		_, executor := cli.statusPorts()
 		setupCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
-		result, err := executor.Exec(setupCtx, yard.IncusProject, yard.YardInstanceName, ports.InstanceExecRequest{
-			Command: []string{"sh", "-eu", "-s", "--", "ensure", yard.DevUser}, Stdin: setup,
-		})
-		if err != nil || result.ExitCode != 0 {
-			return errors.New("could not configure the yard SSH-agent environment")
+		if err := applySSHAgentEnvironment(setupCtx, executor, yard, setupScripts); err != nil {
+			return err
 		}
 		status, err = manager.Unlock(ctx, invocation.key, invocation.ttl)
 		return err

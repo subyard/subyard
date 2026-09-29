@@ -985,6 +985,59 @@ func TestPublicSourceManifestSchemaMatchesRuntime(t *testing.T) {
 	}
 }
 
+func TestVersionedConfigSyncUsesOperationLocalProfileCatalog(t *testing.T) {
+	repositoryRoot := testkit.TempDir(t)
+	profilePath := filepath.Join(repositoryRoot, "config", "profiles", "fixture", "profile.json")
+	writeSyncTestFile(t, profilePath, `{
+  "schema_version": 1,
+  "settings": [{
+    "name": "FIXTURE_PORT",
+    "type": "port",
+    "scopes": ["host", "command"],
+    "application": "yard-init",
+    "minimum": 1,
+    "maximum": 65535,
+    "syncable": true
+  }]
+}
+`, 0o600)
+	catalog, err := config.LoadCatalog(repositoryRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fixture := newSyncFixture(t, "owner-a")
+	fixture.root = repositoryRoot
+	fixture.writeSource("hosts/owner-a/config.env", "FIXTURE_PORT=2345\n")
+	fixture.commit("profile setting")
+
+	snapshot, err := readSource(fixture.options(false), fixture.hostID, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applications := snapshot.files["config.env"].Applications
+	if len(applications) != 1 || applications[0] != config.SettingYardInit {
+		t.Fatalf("profile setting applications = %v, want [%s]", applications, config.SettingYardInit)
+	}
+	environment := candidateEnvironment(map[string]string{
+		"FIXTURE_PORT": "2345", "UNRELATED": "kept",
+	}, fixture.configHome, catalog)
+	if _, exists := environment["FIXTURE_PORT"]; exists || environment["UNRELATED"] != "kept" {
+		t.Fatalf("candidate environment did not remove catalog settings: %v", environment)
+	}
+
+	fixture.writeSource("hosts/owner-a/config.env", "FIXTURE_PORT=invalid\n")
+	fixture.commit("invalid profile setting")
+	invalid, err := readSource(fixture.options(false), fixture.hostID, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateCandidate(fixture.options(false), invalid, Manifest{}, catalog); err == nil ||
+		!strings.Contains(err.Error(), "FIXTURE_PORT") {
+		t.Fatalf("invalid profile setting error = %v", err)
+	}
+}
+
 type syncFixture struct {
 	t            *testing.T
 	root         string

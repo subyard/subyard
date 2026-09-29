@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
 	"github.com/Subyard/Subyard/internal/adapters/sshagentruntime"
@@ -14,6 +15,7 @@ import (
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
 
@@ -115,12 +117,22 @@ func (cli *CLI) observeTeardownExecution(
 		suffix = "-" + loaded.Context.YardName
 	}
 	paths := []string{
-		filepath.Join(loaded.Context.Paths.DataHome, "github-broker", loaded.Context.YardName+"-engine"),
-		filepath.Join(loaded.Context.Paths.OperatorHome, ".config", "systemd", "user", "subyard-github-"+loaded.Context.YardName+".service"),
-		filepath.Join(loaded.Context.Paths.DataHome, "github-broker", loaded.Context.YardName+".json"),
 		loaded.Context.Paths.StateDir,
 		filepath.Join(loaded.Context.Paths.OperatorHome, ".ssh", "subyard"+suffix+".config"),
 		filepath.Join(loaded.Context.Paths.DataHome, "space"+suffix+".cache"),
+	}
+	definitions, err := profile.Load(cli.options.RepositoryRoot)
+	if err != nil {
+		return err
+	}
+	for _, definition := range definitions {
+		for _, managed := range definition.ManagedPaths {
+			root := loaded.Context.Paths.DataHome
+			if managed.Root == "operator" {
+				root = loaded.Context.Paths.OperatorHome
+			}
+			paths = append(paths, filepath.Join(root, strings.ReplaceAll(managed.Path, "{yard}", loaded.Context.YardName)))
+		}
 	}
 	for _, path := range paths {
 		_, statErr := os.Lstat(path)

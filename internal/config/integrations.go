@@ -168,7 +168,7 @@ func ValidateYardTemplateIntegrations(loaded Loaded, template string) error {
 	path := filepath.Join(loaded.Context.Paths.ConfigDir, "yards", "profiles", template+".env")
 	values := cloneEnvironment(loaded.Environment)
 	delete(values, "ALLOWS_CODING_TOOLS")
-	if err := applyEnvFileValidated(path, values, ScopeShipped, false, nil); err != nil {
+	if err := loaded.Catalog.applyEnvFileValidated(path, values, ScopeShipped, false, nil); err != nil {
 		if os.IsNotExist(err) {
 			return fmt.Errorf("unknown YARD_TEMPLATE %q", template)
 		}

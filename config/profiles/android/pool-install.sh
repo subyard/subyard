@@ -85,22 +85,12 @@ done
 chmod 0755 "$INSTALL_ROOT/runtime.sh"
 install -m 0644 "$stage/config.json" /etc/subyard-android.json
 install -m 0644 "$stage/unit" "$UNIT"
-install -m 0755 /dev/stdin "$PUBLIC_ROOT/bin/yard-emu" <<'EOF'
+install -m 0755 /dev/stdin "$PUBLIC_ROOT/bin/android-broker" <<'EOF'
 #!/usr/bin/env bash
 exec /usr/bin/python3 /usr/local/lib/subyard-android/client.py "$@"
 EOF
-install -m 0755 /dev/stdin "$PUBLIC_ROOT/bin/yard" <<'EOF'
-#!/usr/bin/env bash
-if [ "${1:-}" = emu ]; then
-  shift
-  exec "$(dirname "$0")/yard-emu" "$@"
-fi
-while IFS= read -r yard; do
-  [ "$yard" -ef "$0" ] || exec "$yard" "$@"
-done < <(type -aP yard)
-printf 'yard: this environment exposes yard emu; use the owner CLI for other commands\n' >&2
-exit 127
-EOF
+# Remove only the retired clients in the profile-owned SDK directory.
+rm -f -- "$PUBLIC_ROOT/bin/yard" "$PUBLIC_ROOT/bin/yard-emu"
 # Retire the old staged entrypoints without touching any user AVD or unknown process.
 if [ -d /tmp/subyard-android ] && [ ! -L /tmp/subyard-android ]; then
   install -m 0755 "$PROFILE_DIR/emulator-run.sh" /tmp/subyard-android/emulator-run.sh

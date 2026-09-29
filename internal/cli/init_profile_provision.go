@@ -153,7 +153,7 @@ func (cli *CLI) executeInitProfileProvision(ctx context.Context, execution *init
 		if !bytes.Equal(current.Content, expected) {
 			return domain.AdapterResult{}, domain.ErrPlanStale
 		}
-		fresh, err := config.Load(config.LoadOptions{RepositoryRoot: cli.options.RepositoryRoot, OperatorHome: execution.loaded.Context.Paths.OperatorHome, YardName: execution.loaded.Context.YardName, Environment: cli.baseEnv})
+		fresh, err := config.Load(config.LoadOptions{Catalog: &cli.catalog, RepositoryRoot: cli.options.RepositoryRoot, OperatorHome: execution.loaded.Context.Paths.OperatorHome, YardName: execution.loaded.Context.YardName, Environment: cli.baseEnv})
 		if err != nil {
 			return domain.AdapterResult{}, err
 		}

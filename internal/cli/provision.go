@@ -16,11 +16,12 @@ import (
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
-	"github.com/Subyard/Subyard/internal/githubbroker"
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/resource"
 )
 
 type provisionExecution struct {
+	explicitProfile     string
 	endpoint            *provisionEndpoint
 	profiles            []string
 	changedProfiles     []string
@@ -98,6 +99,16 @@ func (cli *CLI) prepareProvisionExecution(
 	default:
 		selected = append(selected, available...)
 	}
+	declarations, err := profile.Load(cli.options.RepositoryRoot)
+	if err != nil {
+		return nil, err
+	}
+	selectionOnly := map[string]bool{}
+	for _, declaration := range declarations {
+		if declaration.SelectedProvisionOnly {
+			selectionOnly[declaration.Name] = !declaration.Selected(loaded.Context.YardName, loaded.Environment)
+		}
+	}
 	seen := make(map[string]bool, len(selected))
 	profiles := make([]string, 0, len(selected))
 	for _, name := range selected {
@@ -112,7 +123,7 @@ func (cli *CLI) prepareProvisionExecution(
 			}
 			continue
 		}
-		if name == "github" && want == "" && !githubbroker.ProfileEnabled(loaded.Context.YardName, loaded.Environment) {
+		if want == "" && selectionOnly[name] {
 			continue
 		}
 		if seen[name] {
@@ -121,13 +132,16 @@ func (cli *CLI) prepareProvisionExecution(
 		seen[name] = true
 		if !byName[name] {
 			if want != "" {
-				return nil, fmt.Errorf("profile %q has no provision hook", name)
+				info, err := os.Stat(filepath.Join(cli.options.RepositoryRoot, "config", "profiles", name))
+				if err != nil || !info.IsDir() {
+					return nil, fmt.Errorf("unknown environment profile %q", name)
+				}
 			}
 			continue
 		}
 		profiles = append(profiles, name)
 	}
-	return &provisionExecution{profiles: profiles}, nil
+	return &provisionExecution{profiles: profiles, explicitProfile: want}, nil
 }
 
 func provisionableProfiles(root string) ([]string, error) {

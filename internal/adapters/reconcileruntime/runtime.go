@@ -21,8 +21,8 @@ import (
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
-	"github.com/Subyard/Subyard/internal/githubbroker"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/sshidentity"
@@ -43,7 +43,10 @@ type vmIPv4Pinner interface {
 
 type Runtime struct {
 	RepositoryRoot string
-	Environment    []string
+	// Profiles is the immutable per-operation profile snapshot when supplied by
+	// the caller. Nil falls back to loading the shipped declarations from disk.
+	Profiles    []profile.Definition
+	Environment []string
 	// AdoptLegacyIntegrations permits one initial, exact ownership adoption during
 	// a reviewed init plan. Ordinary integration commands leave it false.
 	AdoptLegacyIntegrations bool
@@ -54,19 +57,21 @@ type Runtime struct {
 	// the dispatcher. Resolved yard settings must not become command overrides.
 	LaunchEnvironment []string
 	// InitProfile preserves the explicitly selected profile across owner-group reexec.
-	InitProfile    string
-	Stdin          io.Reader
-	Stdout         io.Writer
-	Stderr         io.Writer
-	Incus          ports.Incus
-	ConfigWriter   ports.InstanceConfigWriter
-	Executor       ports.InstanceExecutor
-	Yard           domain.Context
-	PowerYards     []domain.Context
-	SRVPool        string
-	SRVVolume      string
-	HostDeviceRoot string
-	NetworkPolicy  YardNetworkPolicy
+	InitProfile string
+	// ProvisionProfile resumes composed provisioning after owner-group reexec.
+	ProvisionProfile string
+	Stdin            io.Reader
+	Stdout           io.Writer
+	Stderr           io.Writer
+	Incus            ports.Incus
+	ConfigWriter     ports.InstanceConfigWriter
+	Executor         ports.InstanceExecutor
+	Yard             domain.Context
+	PowerYards       []domain.Context
+	SRVPool          string
+	SRVVolume        string
+	HostDeviceRoot   string
+	NetworkPolicy    YardNetworkPolicy
 }
 
 func (runtime Runtime) CheckStage(ctx context.Context, stage ports.ReconcileStageID) (bool, error) {
@@ -99,8 +104,8 @@ func (runtime Runtime) CheckStage(ctx context.Context, stage ports.ReconcileStag
 		return runtime.testVMsConverged(ctx)
 	case ports.ReconcileStageKeys:
 		return runtime.keysConverged(ctx)
-	case ports.ReconcileStageGitHub:
-		return runtime.githubConverged(ctx)
+	case ports.ReconcileStageProfileServices:
+		return runtime.profileServicesConverged(ctx)
 	case ports.ReconcileStageSSH:
 		return runtime.sshConverged(ctx)
 	case ports.ReconcileStageProvision:
@@ -115,15 +120,26 @@ func (runtime Runtime) CheckStage(ctx context.Context, stage ports.ReconcileStag
 		err = runtime.runScriptEnvironment(ctx, nil, desired, "09-yard-extras.sh", "--check")
 	case ports.ReconcileStageSecurity:
 		return runtime.securityConverged(ctx)
-	case ports.ReconcileStageOrca:
-		observation, err := runtime.ObserveOrcaRuntime(ctx)
+	case ports.ReconcileStageProfileRuntimes:
+		observations, err := runtime.ObserveProfileRuntimes(ctx)
 		if err != nil {
 			return false, err
 		}
-		if observation.State == "deferred" {
-			runtime.reportOrcaDeferred()
+		activationIDs := make([]string, 0, len(observations))
+		for activationID := range observations {
+			activationIDs = append(activationIDs, activationID)
 		}
-		return observation.State != "stale", nil
+		sort.Strings(activationIDs)
+		for _, activationID := range activationIDs {
+			observation := observations[activationID]
+			if observation.State == ports.RuntimeStateDeferred {
+				runtime.reportProfileRuntimeDeferred(activationID)
+			}
+			if observation.State == ports.RuntimeStateStale {
+				return false, nil
+			}
+		}
+		return true, nil
 	default:
 		return false, fmt.Errorf("unknown reconcile stage %q", stage)
 	}
@@ -180,8 +196,8 @@ func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStag
 			return err
 		}
 		return runtime.runScript(ctx, runtime.Stderr, "install-keys-auto-sync.sh", "--yes")
-	case ports.ReconcileStageGitHub:
-		return runtime.runScriptEnvironment(ctx, runtime.Stderr, runtime.githubEnvironment(), "github-broker.sh", "--yes")
+	case ports.ReconcileStageProfileServices:
+		return runtime.runScript(ctx, runtime.Stderr, "profile-services.sh", "--yes")
 	case ports.ReconcileStageSSH:
 		return runtime.runScript(ctx, runtime.Stderr, "07-ssh-access.sh", "--yes")
 	case ports.ReconcileStageProvision:
@@ -189,7 +205,7 @@ func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStag
 			return err
 		}
 		// Base provisioning makes a fresh guest reachable before repairing installed hooks.
-		if err := runtime.applyOrcaRuntime(ctx); err != nil {
+		if err := runtime.applyProfileRuntimes(ctx); err != nil {
 			return err
 		}
 		plan, err := runtime.IntegrationPlan(ctx)
@@ -209,8 +225,8 @@ func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStag
 	case ports.ReconcileStageSecurity:
 		_, err := runtime.securityRuntime().CheckSecurity(ctx, true, false)
 		return err
-	case ports.ReconcileStageOrca:
-		return runtime.applyOrcaRuntime(ctx)
+	case ports.ReconcileStageProfileRuntimes:
+		return runtime.applyProfileRuntimes(ctx)
 	default:
 		return fmt.Errorf("unknown reconcile stage %q", stage)
 	}
@@ -743,11 +759,11 @@ func (runtime Runtime) installIncus(ctx context.Context) error {
 	}
 	dispatcher := runtime.environmentValue("SUBYARD_DISPATCHER_PATH")
 	if dispatcher == "" || runtime.LaunchEnvironment == nil || runtime.environmentValue("SUBYARD_SG_REEXEC") == "1" {
-		return errors.New("open a fresh incus-admin session, then rerun the same yard init command")
+		return errors.New("open a fresh incus-admin session, then rerun the same yard command")
 	}
 	sg, err := runtime.executableFromPath("sg")
 	if err != nil {
-		return errors.New("open a fresh incus-admin session, then rerun the same yard init command")
+		return errors.New("open a fresh incus-admin session, then rerun the same yard command")
 	}
 	arguments, err := runtime.initReexecArguments(dispatcher)
 	if err != nil {
@@ -767,6 +783,12 @@ func (runtime Runtime) initReexecArguments(dispatcher string) ([]string, error) 
 	arguments := []string{dispatcher}
 	if runtime.Yard.YardName != "" {
 		arguments = append(arguments, "-Y", runtime.Yard.YardName)
+	}
+	if runtime.ProvisionProfile != "" {
+		if !domain.SafeName(runtime.ProvisionProfile) {
+			return nil, errors.New("invalid provision profile for owner-group reexec")
+		}
+		return append(arguments, "provision", runtime.ProvisionProfile, "--yes"), nil
 	}
 	arguments = append(arguments, "init", "--yes")
 	if runtime.InitProfile != "" {
@@ -1396,7 +1418,34 @@ func (runtime Runtime) sshConverged(ctx context.Context) (bool, error) {
 	if result.ExitCode != 0 {
 		return false, nil
 	}
-	return err == nil, err
+	if err != nil {
+		return false, err
+	}
+	if !domain.SafeName(user) {
+		return false, errors.New("profile guest environment requires a valid development user")
+	}
+	definitions, err := runtime.profileDefinitions()
+	if err != nil {
+		return false, err
+	}
+	for _, definition := range definitions {
+		if definition.GuestEnvironment == nil {
+			continue
+		}
+		hook, err := runtime.readProfileHook(definition, definition.GuestEnvironment.Handler)
+		if err != nil {
+			return false, fmt.Errorf("read profile guest environment hook for %s: %w", definition.Name, err)
+		}
+		result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName,
+			ports.InstanceExecRequest{Command: []string{"sh", "-eu", "-s", "--", "check", user}, Stdin: hook})
+		if err != nil {
+			return false, err
+		}
+		if result.ExitCode != 0 {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func (runtime Runtime) vmSSHRelayConverged(ctx context.Context, address, port string) bool {
@@ -1835,21 +1884,14 @@ func (runtime Runtime) runPathEnvironment(
 	return nil
 }
 
-func (runtime Runtime) githubEnvironment() map[string]string {
-	enabled := "0"
-	if githubbroker.ProfileEnabled(runtime.Yard.YardName, runtimeEnvironment(runtime.Environment)) {
-		enabled = "1"
-	}
-	return map[string]string{"SUBYARD_GITHUB_ENABLED": enabled}
-}
-func (runtime Runtime) githubConverged(ctx context.Context) (bool, error) {
-	environment := runtime.githubEnvironment()
+func (runtime Runtime) profileServicesConverged(ctx context.Context) (bool, error) {
+	environment := map[string]string{}
 	state, err := runtime.reconcileState(ctx)
 	if err != nil {
 		return false, err
 	}
 	if state.InstanceFound && strings.EqualFold(state.Instance.Status, "stopped") && instanceIntentionallyStopped(state.Instance) {
-		environment["SUBYARD_GITHUB_STOPPED"] = "1"
+		environment["SUBYARD_PROFILE_STOPPED"] = "1"
 	}
-	return probeConverged(runtime.runScriptEnvironment(ctx, nil, environment, "github-broker.sh", "--check"))
+	return probeConverged(runtime.runScriptEnvironment(ctx, nil, environment, "profile-services.sh", "--check"))
 }

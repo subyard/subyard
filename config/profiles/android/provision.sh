@@ -65,7 +65,12 @@ if [ "$check_only" -eq 1 ]; then
   [ "$(stat -c '%u:%g' "$jdk_home" 2>/dev/null)" = "$root_owner" ] || changed=1
   [ "$(stat -c '%u:%g' "$sdk_root" 2>/dev/null)" = "$root_owner" ] || changed=1
   public_root="$(rooted "$PUBLIC_ROOT")"
-  [ -x "$public_root/bin/yard-emu" ] && [ -x "$public_root/bin/yard" ] || changed=1
+  [ -x "$public_root/bin/android-broker" ] || changed=1
+  for retired in yard yard-emu; do
+    if [ -e "$public_root/bin/$retired" ] || [ -L "$public_root/bin/$retired" ]; then
+      changed=1
+    fi
+  done
   config="$(rooted /etc/subyard-android.json)"
   python3 - "$config" "$ANDROID_SDK_ROOT" "$PUBLIC_ROOT" "${EMULATOR_POOL_SIZE:-2}" \
     "$ANDROID_API" "${EMULATOR_DEVICE:-phone}" "${ANDROID_VARIANT:-google_apis}" \

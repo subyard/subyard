@@ -117,12 +117,13 @@ func lifecycleShellActions(root string) map[string]map[string]shelladapter.Actio
 }
 
 type prepareCommandRequest struct {
-	Loaded       config.Loaded
-	Definition   command.Definition
-	Arguments    []string
-	ExplicitYard bool
-	ReadOnly     bool
-	Bootstrap    *initBootstrap
+	Loaded           config.Loaded
+	Definition       command.Definition
+	Arguments        []string
+	ExplicitYard     bool
+	ReadOnly         bool
+	InteractiveSetup bool
+	Bootstrap        *initBootstrap
 	// OnResolved lets the direct boundary audit canonical inputs before assessment.
 	OnResolved func(config.Loaded, []string)
 }
@@ -132,29 +133,30 @@ type commandAssessment func(context.Context) (domain.ActionID, domain.ActionDelt
 // A prepared command owns one execution closure and its captured typed state.
 // Project admission is shared lifecycle state, not a second execution variant.
 type preparedCommand struct {
-	CLI             *CLI
-	Definition      command.Definition
-	Arguments       []string
-	Loaded          config.Loaded
-	Plan            domain.OperationPlan
-	exactState      string
-	ownerPlan       bool
-	Project         *projectExecution
-	release         *releaseExecution
-	policy          domain.CommandPolicy
-	assess          commandAssessment
-	refresh         commandAssessment
-	execute         func(context.Context, *application.Orchestrator, io.Writer) (domain.AdapterResult, error)
-	closeResource   func() error
-	preview         func()
-	displayOnly     func()
-	printResult     func(domain.AdapterResult)
-	remoteArguments func([]string) ([]string, error)
-	executeNoOp     bool
-	closed          bool
-	executed        bool
-	closeOnce       sync.Once
-	closeErr        error
+	CLI              *CLI
+	Definition       command.Definition
+	Arguments        []string
+	Loaded           config.Loaded
+	Plan             domain.OperationPlan
+	exactState       string
+	ownerPlan        bool
+	interactiveSetup bool
+	Project          *projectExecution
+	release          *releaseExecution
+	policy           domain.CommandPolicy
+	assess           commandAssessment
+	refresh          commandAssessment
+	execute          func(context.Context, *application.Orchestrator, io.Writer) (domain.AdapterResult, error)
+	closeResource    func() error
+	preview          func()
+	displayOnly      func()
+	printResult      func(domain.AdapterResult)
+	remoteArguments  func([]string) ([]string, error)
+	executeNoOp      bool
+	closed           bool
+	executed         bool
+	closeOnce        sync.Once
+	closeErr         error
 }
 
 type commandPreparationError struct {
@@ -180,7 +182,7 @@ func (cli *CLI) prepareCommand(ctx context.Context, request prepareCommandReques
 	}
 	operationID := cli.ensureOperationID()
 	prepared := &preparedCommand{CLI: cli, Definition: request.Definition,
-		Arguments: slices.Clone(request.Arguments), Loaded: request.Loaded}
+		Arguments: slices.Clone(request.Arguments), Loaded: request.Loaded, interactiveSetup: request.InteractiveSetup && !request.ReadOnly}
 	defer func() {
 		if err != nil {
 			_ = prepared.Close()
@@ -202,7 +204,7 @@ func (cli *CLI) prepareCommand(ctx context.Context, request prepareCommandReques
 		request.OnResolved(prepared.Loaded, slices.Clone(prepared.Arguments))
 	}
 	prepared.policy = commandPolicy(prepared.Definition, prepared.Loaded.Context, prepared.Arguments, prepared.Project)
-	if prepared.Definition.Handler == "@integration" && prepared.Loaded.Context.AccessKind == domain.AccessRemote {
+	if (prepared.Definition.Handler == "@integration" || (prepared.Definition.Handler == "@provision" && !slices.Contains(prepared.Arguments, "--list") && !slices.Contains(prepared.Arguments, "-l"))) && prepared.Loaded.Context.AccessKind == domain.AccessRemote {
 		if err = prepared.prepareRemoteOperation(ctx); err != nil {
 			return nil, &commandPreparationError{phase: "prepare", err: err}
 		}
@@ -318,7 +320,13 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 	if err := cli.prepareInitProfileProvision(ctx, prepared.Loaded, execution, prepared.Arguments); err != nil {
 		return err
 	}
-	if err := execution.validateOrcaRepair(ctx, cli); err != nil {
+	if prepared.interactiveSetup {
+		execution.profileSetup, err = cli.prepareInitProfiles(ctx, execution, prepared.Arguments)
+		if err != nil {
+			return err
+		}
+	}
+	if err := execution.validateProfileRepair(ctx, cli); err != nil {
 		return err
 	}
 	prepared.exactState = operationStateDigest(struct {
@@ -364,11 +372,11 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 		}
 	}
 	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (domain.AdapterResult, error) {
-		if cli.orcaInitRepair != nil {
-			if err := execution.validateOrcaRepair(ctx, cli); err != nil {
+		if cli.profileInitRepair != nil {
+			if err := execution.validateProfileRepair(ctx, cli); err != nil {
 				return domain.AdapterResult{}, err
 			}
-			unlock, err := cli.lockConfigApplyRepair(ctx, cli.orcaInitRepair)
+			unlock, err := cli.lockConfigApplyRepair(ctx, cli.profileInitRepair)
 			if err != nil {
 				return domain.AdapterResult{}, err
 			}
@@ -390,8 +398,8 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 				fmt.Fprintln(diagnostics, "  [ ok ] Subyard initialized")
 			}
 		}
-		if err == nil && cli.orcaInitRepair != nil {
-			err = cli.finishConfigApplyRepair(ctx, cli.orcaInitRepair)
+		if err == nil && cli.profileInitRepair != nil {
+			err = cli.finishConfigApplyRepair(ctx, cli.profileInitRepair)
 		}
 		return result, err
 	}
@@ -459,7 +467,7 @@ func (prepared *preparedCommand) prepareLifecycle(ctx context.Context, _ *initBo
 	return nil
 }
 
-func (prepared *preparedCommand) prepareProvision(_ context.Context, _ *initBootstrap) error {
+func (prepared *preparedCommand) prepareProvision(ctx context.Context, _ *initBootstrap) error {
 	execution, err := prepared.CLI.prepareProvisionExecution(prepared.Loaded, prepared.Arguments, prepared.Project)
 	if err != nil {
 		return err
@@ -467,6 +475,14 @@ func (prepared *preparedCommand) prepareProvision(_ context.Context, _ *initBoot
 	if execution.list {
 		prepared.displayOnly = func() { execution.printList(prepared.CLI.options.Stdout) }
 		return nil
+	}
+	var bootstrap *profileBootstrap
+	if execution.explicitProfile != "" {
+		bootstrap, err = prepared.CLI.prepareProfileBootstrap(ctx, prepared.Loaded, execution.explicitProfile, prepared.Definition.Name, nil)
+		if err != nil {
+			return err
+		}
+		prepared.Loaded = bootstrap.loaded
 	}
 	var notes []string
 	readAddresses := prepared.CLI.provisionEndpointAddresses
@@ -482,13 +498,35 @@ func (prepared *preparedCommand) prepareProvision(_ context.Context, _ *initBoot
 	}
 	prepared.policy = execution.policy(prepared.Definition, prepared.Loaded.Context)
 	prepared.assess = func(ctx context.Context) (domain.ActionID, domain.ActionDelta, error) {
-		if err := prepared.CLI.observeProvisionExecution(ctx, prepared.Loaded, prepared.Definition, execution); err != nil {
+		if err := bootstrap.refresh(ctx, prepared.CLI); err != nil {
 			return "", domain.ActionDelta{}, err
 		}
-		return execution.actionPlan(prepared.Definition, prepared.Loaded.Context)
+		var err error
+		if bootstrap != nil && bootstrap.init != nil {
+			observation := *bootstrap.init
+			observation.profileProvision = execution
+			err = prepared.CLI.observeInitProfileProvision(ctx, &observation)
+		} else {
+			err = prepared.CLI.observeProvisionExecution(ctx, prepared.Loaded, prepared.Definition, execution)
+		}
+		if err != nil {
+			return "", domain.ActionDelta{}, err
+		}
+		action, delta, err := execution.actionPlan(prepared.Definition, prepared.Loaded.Context)
+		assessment := bootstrap.augment(domain.ActionAssessment{Changed: delta.Changed, Consequences: delta.Consequences})
+		delta.Changed, delta.Consequences = assessment.Changed, assessment.Consequences
+		return action, delta, err
 	}
 	prepared.refresh = prepared.assess
 	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (domain.AdapterResult, error) {
+		if bootstrap != nil {
+			if err := bootstrap.apply(ctx, prepared.CLI); err != nil {
+				return domain.AdapterResult{}, err
+			}
+			if err := execution.endpoint.acceptProfileBootstrap(prepared.CLI, bootstrap); err != nil {
+				return domain.AdapterResult{}, err
+			}
+		}
 		return prepared.CLI.executeProvision(ctx, orchestrator, prepared.Loaded, prepared.Plan, execution, diagnostics)
 	}
 	return nil

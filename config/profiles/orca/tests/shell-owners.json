@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "owners": [
+    {"path": "config/profiles/orca/resources/orca/handler.sh", "kind": "profile", "owner": "config/profiles/orca/resources/orca.res", "reference": "HANDLER=resources/orca/handler.sh"}
+  ]
+}

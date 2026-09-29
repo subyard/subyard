@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "owners": [
+    {"path": "config/profiles/hermes/provision.sh", "kind": "profile", "owner": "internal/cli/provision.go", "reference": "\"provision.sh\""},
+    {"path": "config/profiles/hermes/resources/dashboard/handler.sh", "kind": "profile", "owner": "config/profiles/hermes/resources/dashboard.res", "reference": "HANDLER=resources/dashboard/handler.sh"}
+  ]
+}

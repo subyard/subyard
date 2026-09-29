@@ -35,10 +35,13 @@ without operator settings.
 
 ```sh
 make build
-./tests/run.sh
+make verify
 ```
 
-`make build` writes the ignored developer candidate `.build/yard` atomically. The source-tree
+`make build` writes the ignored developer candidate `.build/yard` atomically and builds declared
+profile binaries under `.build/profiles/<name>/`. `make verify` runs core and profile host-free
+checks together. Packaging builds the same declared binaries for the target architecture, excluding
+profile Go sources and test directories from runtime bundles. The source-tree
 `bin/yard` launcher uses that explicit candidate and never compiles or downloads a toolchain at
 runtime. Production does not use the source checkout:
 
@@ -141,3 +144,10 @@ ticks over one second. The expected step from the core baseline is explained by 
 HTTP and WebSocket client graph now being linked into the sole production binary. RPC remains
 request-driven with no background polling. Real snapshot latency is recorded separately on the
 dedicated release host because it depends on a live container/VM and Incus socket.
+
+### Combined profile release acceptance
+
+Before publication, follow [one release candidate](testing.md#one-release-candidate) to freeze and
+verify core plus every shipped profile. Branch CI validates the same complete profile inventory;
+its host-free subset does not claim physical acceptance. Tagged Release requires the corresponding
+`release-acceptance/VERSION.json` receipt and rejects a different source or runtime artifact.

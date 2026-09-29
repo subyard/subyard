@@ -109,4 +109,43 @@ printf '#!/usr/bin/env bash\nprintf "profile e2e %%s\\n" "$*"\n' \
 bash "$fixture/dev/test-profiles.sh" --e2e --slot 7 > "$tmp/profiles-e2e.out" 2>&1
 grep -Fxq 'profile e2e --slot 7' "$tmp/profiles-e2e.out" \
   || fail 'profile E2E selection or arguments were lost'
+bash "$fixture/dev/test-profiles.sh" --e2e --list > "$tmp/profiles-list.out"
+grep -Fxq $'runner\texample\tconfig/profiles/example/tests/e2e/acceptance.sh' \
+  "$tmp/profiles-list.out" || fail 'profile runner listing is incomplete'
+! grep -q 'profile e2e' "$tmp/profiles-list.out" \
+  || fail 'profile listing executed an acceptance runner'
+
+# Discovery must never turn an omitted profile obligation into a passing gate.
+mkdir -p "$fixture/config/profiles/undeclared/tests/e2e"
+rc=0
+bash "$fixture/dev/test-profiles.sh" --e2e > "$tmp/profiles-missing.out" 2>&1 || rc=$?
+[ "$rc" -ne 0 ] || fail 'missing profile acceptance runner was silently skipped'
+grep -q 'undeclared incomplete' "$tmp/profiles-missing.out" || fail 'missing profile was not identified'
+rc=0
+bash "$fixture/dev/test-profiles.sh" --e2e --list > "$tmp/profiles-list-missing.out" 2>&1 || rc=$?
+[ "$rc" -ne 0 ] || fail 'profile listing accepted a missing required runner'
+grep -q 'undeclared incomplete' "$tmp/profiles-list-missing.out" \
+  || fail 'profile listing did not identify the missing runner'
+! grep -q '^profile e2e' "$tmp/profiles-missing.out" \
+  || fail 'a profile ran before the complete acceptance inventory was validated'
+printf ' \n\t\n' > "$fixture/config/profiles/undeclared/tests/e2e/acceptance.not-applicable"
+rc=0
+bash "$fixture/dev/test-profiles.sh" --e2e > "$tmp/profiles-empty-reason.out" 2>&1 || rc=$?
+[ "$rc" -ne 0 ] || fail 'not-applicable without a reason was accepted'
+printf 'No runtime assets; reserved fixture directory.\n' \
+  > "$fixture/config/profiles/undeclared/tests/e2e/acceptance.not-applicable"
+bash "$fixture/dev/test-profiles.sh" --e2e > "$tmp/profiles-exempt.out" 2>&1
+grep -q 'undeclared not-applicable: No runtime assets' "$tmp/profiles-exempt.out" \
+  || fail 'explicit not-applicable reason was lost'
+printf '#!/usr/bin/env bash\nexit 0\n' > "$fixture/config/profiles/undeclared/tests/e2e/acceptance.sh"
+rc=0
+bash "$fixture/dev/test-profiles.sh" --e2e > "$tmp/profiles-conflict.out" 2>&1 || rc=$?
+[ "$rc" -ne 0 ] || fail 'conflicting runner and exemption were accepted'
+
+empty="$tmp/empty"
+mkdir -p "$empty/dev" "$empty/config/profiles"
+cp "$ROOT/dev/test-profiles.sh" "$empty/dev/test-profiles.sh"
+rc=0
+bash "$empty/dev/test-profiles.sh" > "$tmp/profiles-empty.out" 2>&1 || rc=$?
+[ "$rc" -ne 0 ] || fail 'empty profile discovery passed'
 printf 'ok: runners preserve results, logs, fail-fast and failure exit codes\n'

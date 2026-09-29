@@ -45,8 +45,10 @@ type initBootstrap struct {
 }
 
 type initExecution struct {
+	provisionProfile      string
 	requestedProfile      string
 	profileProvision      *provisionExecution
+	profileSetup          *initProfileSet
 	operationID           string
 	integrationSelection  *initIntegrationSelection
 	integrationBaseline   *initIntegrationBaseline
@@ -327,6 +329,7 @@ func (cli *CLI) initPlatformWithDispatcher(
 	incusPort, executor := cli.statusPorts()
 	configWriter, _ := incusPort.(ports.InstanceConfigWriter)
 	return reconcileruntime.Runtime{
+		Profiles:          loaded.Catalog.Profiles(),
 		RepositoryRoot:    cli.options.RepositoryRoot,
 		Environment:       environmentList(cli.env, environment),
 		LaunchEnvironment: environmentList(cli.baseEnv, nil),
@@ -362,6 +365,7 @@ func (cli *CLI) powerYardContexts(current config.Loaded) ([]domain.Context, erro
 		environment["SUBYARD_CONFIG_HOME"] = current.Context.Paths.ConfigHome
 		environment["SUBYARD_HOME"] = current.Context.Paths.DataHome
 		loaded, err := config.Load(config.LoadOptions{
+			Catalog:        &cli.catalog,
 			RepositoryRoot: cli.options.RepositoryRoot,
 			OperatorHome:   operatorHome,
 			YardName:       name,
@@ -487,6 +491,7 @@ func (execution *initExecution) consequences() []string {
 	}
 	hostIDConsequences := execution.profileProvisionConsequences()
 	hostIDConsequences = append(hostIDConsequences, integrationAdoptionConsequences(execution.loaded.Context.YardName, execution.integrationAdoption)...)
+	hostIDConsequences = append(hostIDConsequences, execution.profileSetup.consequences()...)
 	if execution.integrationSelection != nil {
 		hostIDConsequences = append(hostIDConsequences, "record the selected yard's requested integration set")
 	}
@@ -538,7 +543,7 @@ func (execution *initExecution) actionPlan() (domain.ActionID, domain.ActionDelt
 		return "", domain.ActionDelta{}, errors.New("init execution is required")
 	}
 	action := domain.ActionID("yard.init.reconcile")
-	changed := execution.profileProvisionChanged() || execution.plan.Pending() != 0 || execution.bootstrap != nil || execution.hostIDPending || execution.integrationSelection != nil || execution.orphanIngress != nil || execution.orphanIngressDeferred
+	changed := execution.profileSetup != nil || execution.profileProvisionChanged() || execution.plan.Pending() != 0 || execution.bootstrap != nil || execution.hostIDPending || execution.integrationSelection != nil || execution.orphanIngress != nil || execution.orphanIngressDeferred
 	switch execution.mode {
 	case initReconcile:
 		if execution.hooksOnly() {
@@ -561,12 +566,12 @@ func (execution *initExecution) actionPlan() (domain.ActionID, domain.ActionDelt
 }
 
 func (execution *initExecution) hooksOnly() bool {
-	return !execution.profileProvisionChanged() && execution.mode == initReconcile && execution.plan.Pending() == 0 &&
+	return execution.profileSetup == nil && !execution.profileProvisionChanged() && execution.mode == initReconcile && execution.plan.Pending() == 0 &&
 		execution.bootstrap == nil && !execution.hostIDPending && execution.integrationSelection == nil && execution.orphanIngress == nil && !execution.orphanIngressDeferred
 }
 
-func (execution *initExecution) validateOrcaRepair(ctx context.Context, cli *CLI) error {
-	if cli.orcaInitRepair == nil {
+func (execution *initExecution) validateProfileRepair(ctx context.Context, cli *CLI) error {
+	if cli.profileInitRepair == nil {
 		return nil
 	}
 	if execution.mode != initReconcile || execution.bootstrap != nil || execution.hostIDPending {
@@ -577,7 +582,7 @@ func (execution *initExecution) validateOrcaRepair(ctx context.Context, cli *CLI
 	if err != nil {
 		return err
 	}
-	if !cli.orcaInitRepair.matchesRequestedConfigs([]configTargetAssessment{assessment}) {
+	if !cli.profileInitRepair.matchesRequestedConfigs([]configTargetAssessment{assessment}) {
 		return errors.New("init release repair requires the persisted yard configuration without overrides")
 	}
 	return nil
@@ -586,6 +591,9 @@ func (execution *initExecution) validateOrcaRepair(ctx context.Context, cli *CLI
 func (execution *initExecution) refreshAssessment(ctx context.Context) error {
 	if execution == nil {
 		return errors.New("init execution is required")
+	}
+	if err := execution.profileSetup.check(); err != nil {
+		return err
 	}
 	if err := execution.checkIntegrationAdoption(ctx); err != nil {
 		return err
@@ -659,6 +667,9 @@ func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Wri
 	if err := execution.checkIntegrationBaseline(cli); err != nil {
 		return err
 	}
+	if err := execution.profileSetup.check(); err != nil {
+		return err
+	}
 	if err := execution.checkIntegrationAdoption(ctx); err != nil {
 		return err
 	}
@@ -698,6 +709,9 @@ func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Wri
 		return fmt.Errorf("initialize owner HostID: %w", err)
 	}
 	fmt.Fprintf(output, "  [ ok ] owner HostID: %s\n", hostID)
+	if err := execution.profileSetup.apply(ctx, execution, output); err != nil {
+		return err
+	}
 	// Persist the already approved named-yard registration before Incus may
 	// re-exec init in an incus-admin session. The orphan check still precedes
 	// every later reconcile stage and never applies a newly discovered route.
@@ -867,6 +881,7 @@ func (execution *initExecution) rebuildPlatform(cli *CLI) {
 	execution.platform = cli.initPlatform(execution.loaded, execution.powerYards)
 	if runtime, ok := execution.platform.(reconcileruntime.Runtime); ok {
 		runtime.InitProfile = execution.requestedProfile
+		runtime.ProvisionProfile = execution.provisionProfile
 		if execution.integrationAdoption.AdoptionFingerprint != "" {
 			runtime.AdoptLegacyIntegrations = true
 			runtime.LegacyIntegrationFingerprint = execution.integrationAdoption.AdoptionFingerprint

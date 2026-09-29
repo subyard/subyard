@@ -138,9 +138,10 @@ recovery, while unlock uses the normal mutation gate. This workflow does not use
 payloads or the persistent `yard keys` ledger.
 
 The shared `scripts/ssh-agent-environment.sh` physical leaf installs and checks the guest shell
-fallback, OpenSSH client default and Orca systemd environment. Both SSH initialization and
-explicit unlock use it; repeated
-grants do not restart Orca. See [temporary SSH access](ssh-agent.md) for the public command contract
+fallback and OpenSSH client default. Shipped `profile.json` declarations supply service-specific
+`guest_environment` hooks; SSH initialization, readiness and explicit unlock invoke every declared
+hook, including deselected profiles with installed services. The Orca profile owns its systemd
+drop-in and durable refresh marker; repeated grants do not restart an already-current service. See [temporary SSH access](ssh-agent.md) for the public command contract
 and the distinction between expiring signatures and already authenticated SSH sessions.
 
 ### RPC
@@ -794,3 +795,64 @@ Capture results outside the public repository and never include credentials or p
   handler, implement silent `is-up`, and test at least probe plus reverse lifecycle behavior.
 
 Choose validation for these changes using the skill's risk-based test-selection policy.
+
+
+## Profile extensions
+
+Optional behavior and its tests belong to `config/profiles/<name>/`. A shipped `profile.json`
+(schema version `1`) extends existing profile provisioning with declarations read by
+`internal/profile`; profiles without that file retain their existing provision hook behavior.
+This is a local shipped-package contract, not a registry of operator-supplied executable code.
+Unknown fields, unsupported versions, unsafe relative paths and duplicate consumer IDs fail closed.
+
+- `default_yards` supplies selection when `ENVIRONMENT_PROFILES` is absent. An explicit list,
+  including an empty list, wins; matching `disabled_when` conditions disable selection.
+  `selected_provision_only` applies this selection to implicit provisioning.
+- `native` lists Go package directories and artifact paths relative to the profile. Development
+  and release builds discover these declarations; installed profiles contain the native artifacts.
+- `consumers` declares credential ID, zone, relative materialization path and format (`file` or
+  `rsa-private-key`). Core owns protected storage, transfer and validation of these generic formats.
+- `setup` declares nonsecret fields, prompts, config filename and an owned credential consumer.
+  Interactive init prepares these inputs before its existing single confirmation. It checks
+  descriptor/config/source drift before applying; automation never answers profile prompts.
+- `owner_service` names an executable Bash hook. Core invokes it only with prepared engine context,
+  passing `SUBYARD_PROFILE_SELECTED=0|1`, including unselected profiles so they can clean up.
+  `--check` inspects convergence; `--yes` reconciles; `--remove` removes owned service state.
+  `--pause` writes exactly `paused` when it stops an active service, otherwise nothing;
+  `--resume` restores that service. Core retains the paused profile IDs and restores earlier
+  services if a later pause fails. Hooks own their service-specific identity and recovery guards.
+  `SUBYARD_PROFILE_STOPPED=1` asks readiness checks to honor the yard's stopped intent.
+- `managed_paths` declares owned `data`/`operator` paths for teardown assessment, with optional
+  `{yard}` substitution; the hook still owns physical cleanup and ownership checks.
+
+Descriptors contain no secrets. Config and credential data stay outside immutable release roots.
+Profile changes must preserve existing persisted paths and update/rollback behavior or declare a
+migration. Core contract tests use synthetic profiles; concrete implementations, composition checks
+and live acceptance belong to profile runners. Release verification aggregates their results as
+specified in [testing](testing.md).
+
+### Profile settings and installed runtime hooks
+
+The shipped `config/profiles/*/profile.json` v1 descriptors may declare `settings`, `runtime`
+and `guest_environment`. These extend the existing profile registry; operator configuration cannot
+supply declarations or executable hooks. Profile setting names must not collide with core fields,
+dynamic core namespaces or another profile. The loader resolves one operation-local catalog before
+reading configuration layers. Validation, provenance, field discovery, authoring, sync and command
+context use that catalog. Defaults retain lowest precedence. A `host_listener` port participates
+in generic owner-port collision checks.
+
+A `runtime` declaration contains an `activation_id` and relative executable `handler`. The ID is
+unique across profile and core activation stages and remains durable across release transitions.
+The hook accepts `observe`, or `apply OPERATION_ID ACTUAL_SHA256 DESIRED_SHA256`, and emits only a
+bounded JSON object with `state`, `actual` and `desired`. States are `absent`, `deferred`, `current`
+and `stale`; installed states carry lowercase SHA-256 fingerprints. Observe must not mutate state.
+Core bounds execution and output, checks the assessment before apply, and verifies the resulting
+state separately. Missing/stopped yards are absent/deferred without starting them. Hooks run in
+activation-ID order before integration project hooks; update and rollback inspect all local yards.
+The Orca profile retains its existing `orca-runtime` identity and wire fingerprints.
+
+A `guest_environment` handler accepts `check|ensure DEV_USER` through the existing root guest
+execution boundary. Its source is read only from the validated shipped profile. `check` reports
+readiness; `ensure` performs the previously assessed repair. Profile selection does not suppress
+repair of an installed service. Core owns transport, confirmation and orchestration; each profile
+owns its service paths, diagnostics and restart mechanics.

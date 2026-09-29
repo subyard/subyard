@@ -159,7 +159,7 @@ func TestProjectCloneOwnsSequenceAndMetadata(t *testing.T) {
 	}
 	var metadata map[string]any
 	if err := json.Unmarshal(data.requests[3].Stdin, &metadata); err != nil ||
-		metadata["projectId"] != cloneRecord().ProjectID || metadata["target"] != "openclaw" ||
+		metadata["projectId"] != cloneRecord().ProjectID || metadata["target"] != "sample-profile" ||
 		metadata["yard"] != "default" {
 		t.Fatalf("invalid portable metadata: %q err=%v", data.requests[3].Stdin, err)
 	}
@@ -211,7 +211,7 @@ func TestProjectMetadataIsCanonicalAndNewlineTerminated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"schema":1,"yard":"default","projectId":"demo-12345678","name":"Demo","mode":"git","target":"openclaw","importedAt":"2026-07-22T00:00:00Z"}` + "\n"
+	want := `{"schema":1,"yard":"default","projectId":"demo-12345678","name":"Demo","mode":"git","target":"sample-profile","importedAt":"2026-07-22T00:00:00Z"}` + "\n"
 	if string(payload) != want {
 		t.Fatalf("metadata=%q", payload)
 	}
@@ -221,7 +221,7 @@ func TestProjectRemoveCleansEnvironmentBeforeWorkspace(t *testing.T) {
 	data := &projectDataStub{run: func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
 		if len(request.Command) >= 2 && request.Command[0] == "docker" && request.Command[1] == "inspect" {
 			return ports.InstanceExecResult{
-				Stdout: []byte("sha256:owned-container\t1\tdemo-12345678\topenclaw\n"),
+				Stdout: []byte("sha256:owned-container\t1\tdemo-12345678\tsample-profile\n"),
 			}, nil
 		}
 		return ports.InstanceExecResult{}, nil
@@ -248,7 +248,7 @@ func TestProjectRemoveRejectsUnownedEnvironmentBeforeDestructiveSteps(t *testing
 	data := &projectDataStub{run: func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
 		if len(request.Command) >= 2 && request.Command[0] == "docker" && request.Command[1] == "inspect" {
 			return ports.InstanceExecResult{
-				Stdout: []byte("sha256:foreign-container\t1\tother-project\topenclaw\n"),
+				Stdout: []byte("sha256:foreign-container\t1\tother-project\tsample-profile\n"),
 			}, nil
 		}
 		return ports.InstanceExecResult{}, nil
@@ -368,9 +368,9 @@ func TestProjectRemoveDetachesBindWithoutDeletingHostData(t *testing.T) {
 
 func TestBindWorkspaceCleanupUsesTrustedProfileTarget(t *testing.T) {
 	record := cloneRecord()
-	record.Mode, record.Target = domain.ProjectBind, "openclaw"
+	record.Mode, record.Target = domain.ProjectBind, "sample-profile"
 	command := bindWorkspaceCleanupCommand(record, "default")
-	if command[len(command)-1] != "openclaw" ||
+	if command[len(command)-1] != "sample-profile" ||
 		!strings.Contains(command[2], `(.target // "yard") == $target`) {
 		t.Fatalf("bind cleanup target guard drifted: %#v", command)
 	}
@@ -397,14 +397,14 @@ func TestBindWorkspaceCleanupResumesSafeIntermediateStates(t *testing.T) {
 				}
 			}
 			if state == "full" || state == "metadata-only" {
-				metadata := []byte(`{"schema":1,"projectId":"demo-12345678","mode":"bind","target":"openclaw"}`)
+				metadata := []byte(`{"schema":1,"projectId":"demo-12345678","mode":"bind","target":"sample-profile"}`)
 				if err := os.WriteFile(filepath.Join(root, ".subyard-meta.json"), metadata, 0o600); err != nil {
 					t.Fatal(err)
 				}
 			}
 			record := cloneRecord()
 			record.ProjectID, record.YardPath = id, filepath.Join(root, "src")
-			record.Mode, record.Target = domain.ProjectBind, "openclaw"
+			record.Mode, record.Target = domain.ProjectBind, "sample-profile"
 			command := bindWorkspaceCleanupCommand(record, "default")
 			output, err := exec.Command(command[0], command[1:]...).CombinedOutput()
 			if err != nil || (string(output) != "present" && string(output) != "missing") {
@@ -827,6 +827,6 @@ func cloneRecord() domain.ProjectRecord {
 	return domain.ProjectRecord{
 		Schema: 1, ProjectID: "demo-12345678", Name: "Demo",
 		HostPath: "https://example.invalid/demo.git", YardPath: "/srv/workspaces/demo-12345678/src",
-		Mode: domain.ProjectGit, SSHHost: "yard", Target: "openclaw", ImportedAt: "2026-07-22T00:00:00Z",
+		Mode: domain.ProjectGit, SSHHost: "yard", Target: "sample-profile", ImportedAt: "2026-07-22T00:00:00Z",
 	}
 }
