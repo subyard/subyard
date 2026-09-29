@@ -8,3 +8,4 @@ ACTION="status status read-only not-needed"
 ACTION="is-up is-up read-only not-needed"
 BRINGUP=up
 SHUTDOWN=down
+STARTUP=bringup

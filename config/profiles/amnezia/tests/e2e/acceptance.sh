@@ -7,7 +7,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd -P)"
 . "$ROOT/dev/agent-e2e.sh"
 
 lane=full
-usage() { printf 'Usage: config/profiles/amnezia/tests/e2e/acceptance.sh --slot N [--lane full|reboot|recovery]\n'; }
+usage() { printf 'Usage: config/profiles/amnezia/tests/e2e/acceptance.sh --slot N [--lane full|reboot|recovery|startup|disabled|reconnect]\n'; }
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --slot)
@@ -16,8 +16,8 @@ while [ "$#" -gt 0 ]; do
       shift 2
       ;;
     --lane)
-      [ "$#" -ge 2 ] || die '--lane requires full, reboot or recovery'
-      case "$2" in full|reboot|recovery) lane="$2" ;; *) die '--lane requires full, reboot or recovery' ;; esac
+      [ "$#" -ge 2 ] || die '--lane requires full, reboot, recovery, startup, disabled or reconnect'
+      case "$2" in full|reboot|recovery|startup|disabled|reconnect) lane="$2" ;; *) die '--lane requires full, reboot, recovery, startup, disabled or reconnect' ;; esac
       shift 2
       ;;
     -h|--help) usage; exit 0 ;;
@@ -32,6 +32,21 @@ diagnose_failure() {
   local rc="$1"
   if [ "$rc" -ne 0 ] && [ -n "${GUEST_DIRS[1]:-}" ]; then
     printf 'amnezia_acceptance_failure_exit=%s\n' "$rc" >&2
+    # Bound read-only probes and report timings only, never runtime/config contents.
+    guest 1 timeout 100 bash -c '
+      probe() {
+        local label="$1" started=$SECONDS rc=0
+        shift
+        timeout 20 "$@" >/dev/null 2>&1 || rc=$?
+        printf "startup_probe=%s duration_seconds=%s exit=%s\n" "$label" "$((SECONDS - started))" "$rc"
+      }
+      probe guest-observe incus exec yard-vpn-e2e --project subyard-vpn-e2e -- \
+        python3 /usr/local/lib/subyard-amnezia/runtime.py observe
+      probe owner-config incus query "/1.0/instances?recursion=1&all-projects=true"
+      probe owner-state incus list --all-projects --format=json
+      probe guest-projects incus exec yard-vpn-e2e --project subyard-vpn-e2e -- \
+        find /srv/workspaces -mindepth 1 -maxdepth 1 -print -quit
+    ' >&2 || true
     guest 1 timeout 15 free -b >&2 || true
     guest 1 timeout 15 sh -c '
       journalctl -k -b --no-pager -o short-iso \
@@ -168,8 +183,11 @@ verify_boot_result() {
 # First init grants Incus access through the product's normal bootstrap. A new
 # dev session then receives that group membership for the remaining commands.
 owner_phase bootstrap
-owner_phase init
-owner_phase up
+if [ "$lane" = disabled ] || [ "$lane" = reconnect ]; then
+  owner_phase init-isolated
+else
+  owner_phase init
+fi
 transfer_client_config
 client_probe
 if [ "$lane" = full ]; then
@@ -200,29 +218,52 @@ if [ "$lane" = full ]; then
   owner_phase work-stop
   client_probe
 fi
-owner_phase restart-enabled
-client_probe
-client_reboot_traffic
-reboot_owner
-owner_phase verify-enabled
-verify_boot_result
-client_probe
-printf 'amnezia_acceptance_stage=free-page-reporting\n'
-guest 1 env SUBYARD_E2E_VM=1 bash "${GUEST_DIRS[1]}/src/dev/e2e/vm-page-reporting.sh" \
-  subyard-vpn-e2e yard-vpn-e2e </dev/null
-owner_phase isolation-off
-client_probe
-client_reboot_traffic
-reboot_owner
-owner_phase verify-enabled
-verify_boot_result
-client_probe
+if [ "$lane" != disabled ] && [ "$lane" != reconnect ]; then
+  if [ "$lane" = startup ]; then
+    owner_phase repeat
+  fi
+  owner_phase restart-enabled
+  client_probe
+  client_reboot_traffic
+  reboot_owner
+  owner_phase verify-enabled
+  verify_boot_result
+  client_probe
+  if [ "$lane" != startup ]; then
+    printf 'amnezia_acceptance_stage=free-page-reporting\n'
+    guest 1 env SUBYARD_E2E_VM=1 bash "${GUEST_DIRS[1]}/src/dev/e2e/vm-page-reporting.sh" \
+      subyard-vpn-e2e yard-vpn-e2e </dev/null
+    owner_phase isolation-off
+    client_probe
+    client_reboot_traffic
+    reboot_owner
+    owner_phase verify-enabled
+    verify_boot_result
+    client_probe
+  fi
+fi
 owner_phase down
 client_denied
-owner_phase restart-disabled
+if [ "$lane" != reconnect ]; then
+  owner_phase restart-disabled
+fi
+client_reboot_traffic
 reboot_owner
 owner_phase verify-disabled
 verify_boot_result
 client_denied
+if [ "$lane" = reconnect ]; then
+  # Prove that packets sent while disabled created the stale pre-NAT flow.
+  # Print only its presence, never connection tuples.
+  guest 1 bash -ceu '
+    endpoint="$1"
+    entries="$(conntrack -L -f ipv4 -p udp --orig-dst "$endpoint" \
+      --orig-port-dst 51820 --reply-src "$endpoint" 2>/dev/null)"
+    [ -n "$entries" ] || { printf "expected stale untranslated UDP flow\n" >&2; exit 1; }
+    printf "ok: stale untranslated UDP flow present before explicit up\n"
+  ' -- "${VM_IP[1]}" </dev/null
+fi
+owner_phase up
+client_probe
 guest 2 env SUBYARD_E2E_VM=2 bash "${GUEST_DIRS[2]}/src/config/profiles/amnezia/tests/e2e/client.sh" cleanup </dev/null
 printf 'amnezia_acceptance=result-pass source_bundle_sha256=%s lane=%s\n' "$bundle_hash" "$lane"

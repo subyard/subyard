@@ -77,6 +77,12 @@ func (cli *CLI) runResourceCommand(
 		cli.errorf("%s: prepare ingress: %v", definition.Command, err)
 		return 1
 	}
+	intent, err := cli.prepareResourceStartupIntent(ctx, loaded, definition, invocation.verb)
+	if err != nil {
+		cli.errorf("%s: prepare startup intent: %v", definition.Command, err)
+		return 1
+	}
+	assessment = intent.augment(assessment)
 	assessment = ingress.augment(assessment)
 	localAction, ok := localResourceAction(definition, assessment.Action)
 	if !ok {
@@ -126,6 +132,10 @@ func (cli *CLI) runResourceCommand(
 			cli.errorf("%s: refresh bootstrap: %v", definition.Command, err)
 			return 1
 		}
+		if err := intent.refresh(ctx, cli); err != nil {
+			cli.errorf("%s: refresh startup intent: %v", definition.Command, err)
+			return 1
+		}
 		refreshedOutput, refreshErr := cli.prepareResource(ctx, loaded, definition, invocation.arguments)
 		if refreshErr != nil {
 			cli.errorf("%s: refresh assessment: %v", definition.Command, refreshErr)
@@ -143,6 +153,7 @@ func (cli *CLI) runResourceCommand(
 			cli.errorf("%s: refresh ingress: %v", definition.Command, err)
 			return 1
 		}
+		refreshed = intent.augment(refreshed)
 		refreshed = ingress.augment(refreshed)
 		if refreshed.Action != assessment.Action {
 			cli.errorf("%s: %v: resource action changed after confirmation",
@@ -158,12 +169,18 @@ func (cli *CLI) runResourceCommand(
 			return 1
 		}
 	}
+	if ingress != nil && ingress.up && assessment.Changed && cli.options.NetworkPolicy == nil {
+		if err := cli.prepareSudoPrivileges(ctx, cli.options.Stderr, cli.effectiveUID(), definition.Command); err != nil {
+			cli.errorf("%s: authorize public UDP recovery: %v", definition.Command, err)
+			return 1
+		}
+	}
 
 	runner := &resourceApplyRunner{
 		cli: cli, loaded: loaded, definition: definition, verb: invocation.verb,
 		localAction: localAction, effect: assessment.Effect, arguments: slices.Clone(invocation.arguments),
 		bootstrap: bootstrap, consequences: resourceConsequences,
-		ingress: ingress,
+		ingress: ingress, startupIntent: intent,
 	}
 	orchestrator.Runner = runner
 	_, diagnostics, err := orchestrator.RunAdapter(ctx, plan, domain.AdapterRequest{
@@ -229,15 +246,36 @@ func (cli *CLI) prepareResource(
 	definition resource.Definition,
 	arguments []string,
 ) ([]byte, error) {
+	return cli.prepareResourceMode(ctx, loaded, definition, arguments, "prepare")
+}
+
+func (cli *CLI) prepareResourceMode(
+	ctx context.Context,
+	loaded config.Loaded,
+	definition resource.Definition,
+	arguments []string,
+	mode string,
+) ([]byte, error) {
+	return cli.prepareResourceModeTimeout(ctx, loaded, definition, arguments, mode, resourcePrepareTimeout)
+}
+
+func (cli *CLI) prepareResourceModeTimeout(
+	ctx context.Context,
+	loaded config.Loaded,
+	definition resource.Definition,
+	arguments []string,
+	mode string,
+	timeout time.Duration,
+) ([]byte, error) {
 	if err := validateResourceHandler(definition.HandlerPath()); err != nil {
 		return nil, err
 	}
-	prepareContext, cancel := context.WithTimeout(ctx, resourcePrepareTimeout)
+	prepareContext, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	command := exec.CommandContext(prepareContext, definition.HandlerPath(), arguments...)
 	configureResourceProcess(command)
 	command.Dir = cli.options.WorkingDir
-	command.Env = cli.resourceEnvironment(loaded, definition, "prepare", "", "")
+	command.Env = cli.resourceEnvironment(loaded, definition, mode, "", "")
 	command.Stdin = nil
 	stdout := &boundedResourceBuffer{limit: resource.MaxPrepareOutputBytes}
 	stderr := &boundedResourceBuffer{limit: resource.MaxPrepareOutputBytes}
@@ -360,16 +398,17 @@ func localResourceAction(definition resource.Definition, action domain.ActionID)
 }
 
 type resourceApplyRunner struct {
-	cli          *CLI
-	loaded       config.Loaded
-	definition   resource.Definition
-	verb         string
-	localAction  string
-	effect       domain.ActionEffect
-	arguments    []string
-	bootstrap    *resourceBootstrap
-	consequences []string
-	ingress      *resourceIngress
+	cli           *CLI
+	loaded        config.Loaded
+	definition    resource.Definition
+	verb          string
+	localAction   string
+	effect        domain.ActionEffect
+	arguments     []string
+	bootstrap     *resourceBootstrap
+	consequences  []string
+	ingress       *resourceIngress
+	startupIntent *resourceStartupIntent
 }
 
 type resourceSessionExitError struct{ code int }
@@ -464,6 +503,14 @@ func (runner *resourceApplyRunner) Run(
 		return result, "", fmt.Errorf("run resource handler: %w", runErr)
 	}
 	if err := runner.ingress.apply(ctx, runner, request.OperationID); err != nil {
+		return result, "", err
+	}
+	if err := runner.startupIntent.commit(ctx, runner.cli); err != nil {
+		if runner.ingress != nil && runner.ingress.up {
+			if rollbackErr := runner.ingress.rollback(runner, request.OperationID); rollbackErr != nil {
+				return result, "", fmt.Errorf("record startup intent: %w; owned ingress rollback failed: %v", err, rollbackErr)
+			}
+		}
 		return result, "", err
 	}
 	result.Status = "ok"

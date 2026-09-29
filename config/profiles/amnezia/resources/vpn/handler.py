@@ -10,6 +10,7 @@ import sys
 
 DEVICE = 'amnezia-vpn'
 KEY = 'user.subyard.resource.' + DEVICE
+STARTUP = 'user.subyard.startup.' + DEVICE
 RUNTIME = '/usr/local/lib/subyard-amnezia/runtime.py'
 YARD = os.environ.get('YARD_INSTANCE_NAME', '')
 PROJECT = os.environ.get('INCUS_PROJECT', '')
@@ -126,7 +127,7 @@ def collisions(want):
         fields = line.split()
         if len(fields) >= 5 and fields[-2] in (f'{address}:{port}', f'0.0.0.0:{port}', f'*:{port}', f'[::]:{port}'):
             raise RuntimeError('owner UDP port is already bound')
-    instances = json.loads(run('incus', 'list', '--all-projects', '--format=json').stdout)
+    instances = query('/1.0/instances?recursion=1&all-projects=true')
     for instance in instances:
         for name, device in instance.get('expanded_devices', {}).items():
             if instance['name'] == YARD and instance.get('project', 'default') == PROJECT and name == DEVICE:
@@ -192,7 +193,7 @@ def ensure_ingress(want):
         raise
 
 
-def prepare(verb):
+def prepare(verb, prestart=False):
     changed, consequences = False, []
     if verb in ('up', 'down'):
         settings_valid(verb == 'up')
@@ -200,16 +201,30 @@ def prepare(verb):
         device = owned(instance)
         if instance.get('type') != 'virtual-machine':
             raise RuntimeError('VPN target is not a VM')
+        stopped = instance.get('status') == 'Stopped'
         if instance.get('status') != 'Running':
-            raise RuntimeError('start the dedicated VPN yard before changing its service')
+            if prestart and verb == 'up' and stopped:
+                pass
+            elif verb == 'down' and stopped and not device and not instance['config'].get(KEY) and instance['config'].get(STARTUP) in ('pending', 'disabled'):
+                print(json.dumps(dict(schema='yard.resource-action-assessment.v1', action=verb,
+                                      changed=False, consequences=[])))
+                return
+            else:
+                raise RuntimeError('start the dedicated VPN yard before changing its service')
         if verb == 'up':
-            status = runtime_status(instance)
+            if not prestart:
+                status = runtime_status(instance)
             address, interface, port, want = endpoint(instance)
             collisions(want)
-            projects = guest('find', '/srv/workspaces', '-mindepth', '1', '-maxdepth', '1', '-print', '-quit')
-            if projects.stdout:
-                raise RuntimeError('VPN cannot run in a yard containing work projects')
-            changed = device != want or instance['config'].get(KEY) != fingerprint(want) or not status['ready'] or not status['enabled']
+            if prestart:
+                if device or instance['config'].get(KEY):
+                    raise RuntimeError('first-start VPN activation requires no existing ingress')
+                changed = True
+            else:
+                projects = guest('find', '/srv/workspaces', '-mindepth', '1', '-maxdepth', '1', '-print', '-quit')
+                if projects.stdout:
+                    raise RuntimeError('VPN cannot run in a yard containing work projects')
+                changed = device != want or instance['config'].get(KEY) != fingerprint(want) or not status['ready'] or not status['enabled']
             if changed:
                 consequences = [f'Enable the pinned AmneziaWG service in {YARD}; preserve existing keys and peers',
                                 f'Publish UDP {address}:{port} on {interface} to {want["connect"]}']
@@ -245,8 +260,8 @@ def main():
         raise RuntimeError('typed owner context is required')
     verb = args[0]
     mode = os.environ.get('SUBYARD_RESOURCE_MODE', '')
-    if mode == 'prepare' and verb != 'rollback-ingress':
-        prepare(verb)
+    if mode in ('prepare', 'prepare-start') and verb != 'rollback-ingress':
+        prepare(verb, mode == 'prepare-start')
         return 0
     if verb == 'is-up':
         return 0 if ready(inspect()) else 1
@@ -266,9 +281,13 @@ def main():
         print(json.dumps(dict(ready=ready(instance), running=status['running'], enabled=status['enabled'],
                               ingress=bool(owned(instance)))))
     elif verb == 'down':
-        remove_ingress(retain_pending=True)
-        shutdown_guest()
-        remove_ingress()
+        instance = inspect()
+        if instance.get('status') == 'Stopped' and not owned(instance) and not instance['config'].get(KEY) and instance['config'].get(STARTUP) in ('pending', 'disabled'):
+            pass
+        else:
+            remove_ingress(retain_pending=True)
+            shutdown_guest()
+            remove_ingress()
     else:
         settings_valid()
         instance = inspect()

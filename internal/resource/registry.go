@@ -28,6 +28,7 @@ type Definition struct {
 	Dashboard *DashboardContract
 	Endpoint  *EndpointDefaults
 	Bootstrap bool
+	Startup   bool
 	path      string
 	actions   []actionDeclaration
 }
@@ -307,6 +308,13 @@ func loadDefinition(root, path string) (Definition, []domain.ActionDefinition, e
 	if proxy != nil && proxy.AddressPolicy == ProxyAddressOwnerIPv4UDP && bootstrap {
 		return Definition{}, nil, fmt.Errorf("public UDP ingress requires an already initialized yard in %s", path)
 	}
+	startup := values.singletons["STARTUP"]
+	if startup != "" && startup != "bringup" {
+		return Definition{}, nil, fmt.Errorf("invalid STARTUP record %q in %s", startup, path)
+	}
+	if startup != "" && (proxy == nil || proxy.AddressPolicy != ProxyAddressOwnerIPv4UDP || bootstrap) {
+		return Definition{}, nil, fmt.Errorf("startup requires a public UDP resource without bootstrap in %s", path)
+	}
 	if !domain.SafeName(command) || !domain.SafeName(bringUp) || !domain.SafeName(shutdown) ||
 		handler == "" || title == "" || len(values.actions) == 0 {
 		return Definition{}, nil, fmt.Errorf("resource descriptor is incomplete: %s", path)
@@ -356,6 +364,9 @@ func loadDefinition(root, path string) (Definition, []domain.ActionDefinition, e
 	if bootstrap && !bootstrapAction(actionDefinitions, declarations, bringUp) {
 		return Definition{}, nil, fmt.Errorf("profile bootstrap bring-up must use bootstrap-change with recoverable mutation in %s", path)
 	}
+	if startup != "" && !startupAction(actionDefinitions, declarations, bringUp) {
+		return Definition{}, nil, fmt.Errorf("startup bring-up must use public-ingress-change with reversible mutation in %s", path)
+	}
 	profileRoot := filepath.Join(root, "config", "profiles", profile)
 	handlerPath := filepath.Clean(filepath.Join(profileRoot, handler))
 	relative, err := filepath.Rel(profileRoot, handlerPath)
@@ -384,7 +395,7 @@ func loadDefinition(root, path string) (Definition, []domain.ActionDefinition, e
 	return Definition{
 		Profile: profile, Name: name, Command: command, Handler: handler,
 		BringUp: bringUp, Shutdown: shutdown, Verbs: verbs, Title: title, path: resolvedHandlerPath,
-		Proxy: proxy, Dashboard: dashboard, Endpoint: endpoint, Bootstrap: bootstrap, actions: declarations,
+		Proxy: proxy, Dashboard: dashboard, Endpoint: endpoint, Bootstrap: bootstrap, Startup: startup != "", actions: declarations,
 	}, actionDefinitions, nil
 }
 
@@ -447,6 +458,31 @@ func bootstrapAction(
 		return true
 	}
 	return false
+}
+
+func startupAction(definitions []domain.ActionDefinition, declarations []actionDeclaration, bringUp string) bool {
+	found := false
+	for _, declaration := range declarations {
+		if declaration.verb != bringUp {
+			continue
+		}
+		found = true
+		valid := false
+		for _, definition := range definitions {
+			if definition.Action != declaration.action {
+				continue
+			}
+			valid = definition.Effect == domain.ActionMutation && definition.Recovery == domain.RecoveryReversible &&
+				slices.Contains(definition.Impacts, domain.ImpactHostNetwork) &&
+				slices.Contains(definition.Impacts, domain.ImpactHostIncus) &&
+				slices.Contains(definition.Impacts, domain.ImpactSecurity)
+			break
+		}
+		if !valid {
+			return false
+		}
+	}
+	return found
 }
 
 func parseDashboardContract(record, path string) (*DashboardContract, error) {
@@ -598,7 +634,7 @@ func readDescriptor(path string) (descriptorValues, error) {
 	defer file.Close()
 	allowed := map[string]struct{}{
 		"COMMAND": {}, "HANDLER": {}, "TITLE": {}, "ACTION": {}, "BRINGUP": {}, "SHUTDOWN": {},
-		"PROXY": {}, "DASHBOARD": {}, "ENDPOINT_DEFAULTS": {}, "BOOTSTRAP": {},
+		"PROXY": {}, "DASHBOARD": {}, "ENDPOINT_DEFAULTS": {}, "BOOTSTRAP": {}, "STARTUP": {},
 	}
 	values := descriptorValues{singletons: make(map[string]string)}
 	scanner := bufio.NewScanner(file)

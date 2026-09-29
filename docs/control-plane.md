@@ -585,6 +585,7 @@ ACTION="<local-id> <public-verb> <assessment-class> <recovery-class>"
 ACTION="..."
 BRINGUP=<verb>
 SHUTDOWN=<verb>
+STARTUP=bringup                   # optional first-start activation after provisioning
 PROXY="..."                       # optional typed owner-host proxy contract
 DASHBOARD="http HOST_SETTING PORT_SETTING /path" # optional browser endpoint metadata
 ENDPOINT_DEFAULTS="tailscale-self 6768" # optional automatic owner endpoint policy
@@ -620,6 +621,26 @@ Resource handlers reserve prepare exit status 2 for invalid command-line argumen
 while other prepare failures, precondition failures, and invalid plans return 1. The successful plan
 schema is unchanged. Resource preparation currently uses its dedicated non-RPC pipeline, so this
 exit-status contract does not imply an RPC resource-preparation interface.
+
+`STARTUP=bringup` opts a selected dedicated VM resource into first-start activation. It requires
+an owner IPv4 UDP proxy and the declared bring-up/shutdown actions. Successful selected-profile
+provisioning records owner-local `pending` intent only when no intent exists. Explicit
+`init --profile NAME` includes that profile's provisioning in the initialization assessment;
+plain `init` remains infrastructure reconciliation. Repeat provisioning preserves intent. An exact
+already-owned legacy ingress without startup intent remains unarmed; partial or foreign ingress
+is rejected rather than treated as a new service.
+
+The first explicit `yard start` assesses the handler in trusted `prepare-start` mode while the VM
+is stopped, including its exact endpoint and host network effects. After one confirmation it starts
+the VM, verifies the ordinary handler preconditions, and applies bring-up with normal ingress
+verification and rollback. A failed activation retains pending intent for a later explicit retry.
+Only one selected startup resource per yard is supported. Ordinary host boot does not perform a
+pending first activation or execute profile handlers.
+
+Successful bring-up records `enabled`; explicit shutdown records `disabled`, even before first
+activation. Guest service enablement and owned ingress handle later starts and reboots. Repeated
+provisioning and yard starts preserve explicit disablement until the resource's bring-up verb is
+invoked. Owner intent is separate from ingress ownership and pending ingress cleanup.
 
 ### Dedicated profiles and VM capabilities
 
@@ -668,7 +689,14 @@ PROXY="service-port RESOURCE_SERVICE_IPV4 RESOURCE_SERVICE_PORT RESOURCE_SERVICE
 `RESOURCE_<ID>_IPV4`, `_INTERFACE` and `_PORT` are typed yard/command settings. The IPv4 must be an
 explicit owner address on the selected interface; wildcard publication is forbidden. The descriptor
 declares the guest port. Its bring-up and shutdown use `public-ingress-change reversible` action
-metadata. Automatic endpoint allocation and `BOOTSTRAP` are not supported for public UDP routes.
+metadata. Automatic port allocation and `BOOTSTRAP` are not supported for public UDP routes.
+Explicit provisioning of a selected profile in a local named VM yard can fill missing owner
+IPv4/interface settings from one unambiguous active public IPv4. Explicit values take precedence;
+ambiguous or non-public-only hosts receive a manual-configuration diagnostic. Discovery is local
+to the owner, is included in the provisioning assessment, and writes both settings atomically
+after successful guest provisioning. It rechecks the address, configuration and absence of ingress
+before writing. It never enables the service or publishes a route. Source-managed settings must
+be authored through their registered source.
 
 The handler prepares the concrete endpoint and runtime effects without mutation. After one shared
 confirmation, the engine serializes the operation with yard configuration changes, rechecks the
@@ -696,6 +724,10 @@ After a managed VM is newly started during owner boot, the reconciler checks its
 public UDP route under the host network lock and clears only stale, untranslated IPv4 UDP
 connection-tracking entries for that exact owner address and port. A missing host `conntrack`
 tool is repaired by the VM prerequisite stage of `init`; boot never installs packages.
+A changed public UDP bring-up performs the same bounded cleanup after route and service
+verification, restricted to the selected resource endpoint. This lets an existing client reconnect
+after sending packets while the service was disabled. Root authorization happens after confirmation
+and before activation; a no-op bring-up does not request privileges or clear connections.
 
 Before changing an active route's endpoint, template or profile selection through `config set/unset`,
 run its shutdown verb. The read-only shutdown assessment must report no remaining enabled runtime

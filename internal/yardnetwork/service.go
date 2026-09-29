@@ -22,11 +22,11 @@ type Service struct {
 	// ContractSource resolves selected, registry-validated resource contracts for
 	// each yard. An error aborts planning before any network mutation.
 	ContractSource func(Yard) ([]resource.ProxyContract, error)
-	// UseApprovedIngress is for the root boot reconciler only. It verifies the
-	// exact previously applied ingress projection without reading yard settings.
+	// UseApprovedIngress verifies the exact previously applied ingress projection
+	// without reading yard settings. Boot restore and post-activation recovery use it.
 	UseApprovedIngress bool
 	// ClearStaleUDP removes only stale connection tracking for a verified,
-	// owned public UDP endpoint after a boot-time instance start.
+	// owned public UDP endpoint after boot or resource activation.
 	ClearStaleUDP func(context.Context, netip.AddrPort) error
 }
 

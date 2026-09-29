@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -119,5 +120,119 @@ SHUTDOWN=down
 				t.Fatalf("persisted %s change passed ingress refresh: %v", test.name, err)
 			}
 		})
+	}
+}
+
+func TestResourceShutdownProbeWaitsForReadOnlyGuestAssessment(t *testing.T) {
+	root, environment, applyLog := resourceCommandFixture(t)
+	handler := filepath.Join(root, "config", "profiles", "fixture", "resources", "demo", "handler.sh")
+	writeCLIFile(t, handler, `#!/bin/sh
+set -eu
+[ "${SUBYARD_RESOURCE_MODE:-}" = prepare ] || exit 70
+counter="$SUBYARD_REPOSITORY_ROOT/shutdown-probe"
+if [ ! -e "$counter" ]; then
+  : >"$counter"
+  exit 1
+fi
+printf '{"schema":"yard.resource-action-assessment.v1","action":"purge","changed":false,"consequences":[]}\n'
+`, 0o700)
+	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := program.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, ok := program.resources.Lookup("demo")
+	if !ok {
+		t.Fatal("fixture resource unavailable")
+	}
+	runner := &resourceApplyRunner{cli: program, loaded: loaded, definition: definition, localAction: "purge"}
+	if err := (&resourceIngress{}).probeShutdown(context.Background(), runner); err != nil {
+		t.Fatalf("shutdown probe did not recover after guest became ready: %v", err)
+	}
+	if _, err := os.Stat(applyLog); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read-only retry reached mutation: %v", err)
+	}
+}
+
+func TestResourceShutdownProbeRejectsRemainingRuntime(t *testing.T) {
+	root, environment, _ := resourceCommandFixture(t)
+	handler := filepath.Join(root, "config", "profiles", "fixture", "resources", "demo", "handler.sh")
+	writeCLIFile(t, handler, `#!/bin/sh
+set -eu
+printf '{"schema":"yard.resource-action-assessment.v1","action":"purge","changed":true,"consequences":["fixture remains enabled"]}\n'
+`, 0o700)
+	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := program.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, _ := program.resources.Lookup("demo")
+	runner := &resourceApplyRunner{cli: program, loaded: loaded, definition: definition, localAction: "purge"}
+	if err := (&resourceIngress{}).probeShutdown(context.Background(), runner); err == nil || !strings.Contains(err.Error(), "did not converge") {
+		t.Fatalf("remaining enabled resource passed shutdown verification: %v", err)
+	}
+}
+
+func TestResourceIngressClearsOnlySelectedVerifiedUDPRoute(t *testing.T) {
+	yard := yardnetwork.Yard{Name: "private", Project: "subyard-private", Instance: "yard-private", Network: "incusbr0"}
+	device := func(port string) map[string]string {
+		return map[string]string{"type": "proxy", "listen": "udp:10.20.30.40:" + port,
+			"connect": "udp:10.80.0.10:41999", "bind": "host", "nat": "true"}
+	}
+	selected, other := device("42000"), device("42001")
+	marker := resource.ProxyContract{}
+	instance := ports.InstanceInfo{Type: domain.YardVM, Status: "Running",
+		LocalDevices: map[string]map[string]string{"selected": maps.Clone(selected), "other": maps.Clone(other)},
+		Devices: map[string]map[string]string{"selected": maps.Clone(selected), "other": maps.Clone(other),
+			"eth0": {"type": "nic", "ipv4.address": "10.80.0.10"}},
+		LocalConfig: map[string]string{"user.subyard.resource.selected": marker.OwnershipValue(selected),
+			"user.subyard.resource.other": marker.OwnershipValue(other)}}
+	host := &rollbackIngressHost{snapshot: yardnetwork.Snapshot{Yards: []yardnetwork.ObservedYard{{
+		Yard: yard, InstanceFound: true, InstanceInfo: instance,
+	}}}}
+	var cleared []netip.AddrPort
+	service := &yardnetwork.Service{Host: host, Lock: testNetworkPolicyLock{},
+		ClearStaleUDP: func(_ context.Context, endpoint netip.AddrPort) error {
+			cleared = append(cleared, endpoint)
+			return nil
+		}}
+	ingress := &resourceIngress{service: service, preview: yardnetwork.IngressPreview{Target: yard},
+		address: "10.20.30.40", port: 42000}
+	if err := ingress.clearStaleUDP(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(cleared) != 1 || cleared[0] != netip.MustParseAddrPort("10.20.30.40:42000") {
+		t.Fatalf("cleanup escaped selected endpoint: %v", cleared)
+	}
+	cleared = nil
+	ingress.port = 42002
+	if err := ingress.clearStaleUDP(context.Background()); err == nil || !strings.Contains(err.Error(), "not found") || len(cleared) != 0 {
+		t.Fatalf("missing selected endpoint passed recovery: cleaned=%v err=%v", cleared, err)
+	}
+	ingress.port = 42000
+	host.snapshot.Yards[0].InstanceInfo.Devices["other"]["nat"] = "false"
+	if err := ingress.clearStaleUDP(context.Background()); err == nil || len(cleared) != 0 {
+		t.Fatalf("drifted owned route passed recovery: cleaned=%v err=%v", cleared, err)
+	}
+	host.snapshot.Yards[0].InstanceInfo.Devices["other"]["nat"] = "true"
+	failure := errors.New("cleanup failed")
+	service.ClearStaleUDP = func(context.Context, netip.AddrPort) error { return failure }
+	if err := ingress.clearStaleUDP(context.Background()); !errors.Is(err, failure) {
+		t.Fatalf("cleanup failure did not block activation: %v", err)
+	}
+}
+
+func TestResourceIngressNoOpUpHasNoUDPRecoveryEffect(t *testing.T) {
+	ingress := &resourceIngress{up: true}
+	assessment := domain.ActionAssessment{Changed: false}
+	got := ingress.augment(assessment)
+	if got.Changed || len(got.Consequences) != 0 {
+		t.Fatalf("no-op up unexpectedly requested UDP cleanup: %+v", got)
 	}
 }

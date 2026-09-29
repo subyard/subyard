@@ -53,18 +53,20 @@ type Runtime struct {
 	// LaunchEnvironment is the unresolved CLI input, used only when restarting
 	// the dispatcher. Resolved yard settings must not become command overrides.
 	LaunchEnvironment []string
-	Stdin             io.Reader
-	Stdout            io.Writer
-	Stderr            io.Writer
-	Incus             ports.Incus
-	ConfigWriter      ports.InstanceConfigWriter
-	Executor          ports.InstanceExecutor
-	Yard              domain.Context
-	PowerYards        []domain.Context
-	SRVPool           string
-	SRVVolume         string
-	HostDeviceRoot    string
-	NetworkPolicy     YardNetworkPolicy
+	// InitProfile preserves the explicitly selected profile across owner-group reexec.
+	InitProfile    string
+	Stdin          io.Reader
+	Stdout         io.Writer
+	Stderr         io.Writer
+	Incus          ports.Incus
+	ConfigWriter   ports.InstanceConfigWriter
+	Executor       ports.InstanceExecutor
+	Yard           domain.Context
+	PowerYards     []domain.Context
+	SRVPool        string
+	SRVVolume      string
+	HostDeviceRoot string
+	NetworkPolicy  YardNetworkPolicy
 }
 
 func (runtime Runtime) CheckStage(ctx context.Context, stage ports.ReconcileStageID) (bool, error) {
@@ -741,17 +743,16 @@ func (runtime Runtime) installIncus(ctx context.Context) error {
 	}
 	dispatcher := runtime.environmentValue("SUBYARD_DISPATCHER_PATH")
 	if dispatcher == "" || runtime.LaunchEnvironment == nil || runtime.environmentValue("SUBYARD_SG_REEXEC") == "1" {
-		return errors.New("open a fresh incus-admin session, then rerun yard init")
+		return errors.New("open a fresh incus-admin session, then rerun the same yard init command")
 	}
 	sg, err := runtime.executableFromPath("sg")
 	if err != nil {
-		return errors.New("open a fresh incus-admin session, then rerun yard init")
+		return errors.New("open a fresh incus-admin session, then rerun the same yard init command")
 	}
-	arguments := []string{dispatcher}
-	if runtime.Yard.YardName != "" {
-		arguments = append(arguments, "-Y", runtime.Yard.YardName)
+	arguments, err := runtime.initReexecArguments(dispatcher)
+	if err != nil {
+		return err
 	}
-	arguments = append(arguments, "init", "--yes")
 	words := []string{"env", "SUBYARD_SG_REEXEC=1", "ASSUME_YES=1"}
 	for _, argument := range arguments {
 		words = append(words, shellquote.Word(argument))
@@ -760,6 +761,21 @@ func (runtime Runtime) installIncus(ctx context.Context) error {
 	environment := append([]string(nil), runtime.LaunchEnvironment...)
 	environment = append(environment, "SUBYARD_SG_REEXEC=1", "ASSUME_YES=1")
 	return syscall.Exec(sg, []string{"sg", "incus-admin", "-c", command}, environment)
+}
+
+func (runtime Runtime) initReexecArguments(dispatcher string) ([]string, error) {
+	arguments := []string{dispatcher}
+	if runtime.Yard.YardName != "" {
+		arguments = append(arguments, "-Y", runtime.Yard.YardName)
+	}
+	arguments = append(arguments, "init", "--yes")
+	if runtime.InitProfile != "" {
+		if !domain.SafeName(runtime.InitProfile) {
+			return nil, errors.New("invalid init profile for owner-group reexec")
+		}
+		arguments = append(arguments, "--profile", runtime.InitProfile)
+	}
+	return arguments, nil
 }
 
 func charDeviceMatches(device map[string]string, path string) bool {

@@ -16,30 +16,51 @@ VM access. The SSH port defaults to 2225; select another unused port if necessar
 yard -Y vpn init --profile amnezia
 ```
 
+This initializes the dedicated VM and provisions the selected profile, including the pinned VPN
+runtime. A separate `provision amnezia` is not needed. Repeat `init --profile amnezia` to retry an
+interrupted installation. Plain `init` continues to reconcile the base yard without installing
+environment-profile toolchains.
+
 If this first initialization added you to `incus-admin`, open a new login session before
-continuing so subsequent commands receive that group membership. Start the VM explicitly:
+continuing so subsequent commands receive that group membership. Then start the yard:
 
 ```sh
 yard -Y vpn start
-yard -Y vpn provision amnezia
 yard -Y vpn vpn status
 ```
 
-Initialization and provisioning leave the VPN disabled. Configure the exact IPv4 and interface
-present on the owner host, then explicitly enable it:
+Profile initialization and explicit provisioning fill missing owner IPv4/interface settings when
+exactly one suitable public IPv4 is assigned to an active owner interface. The proposed settings
+appear in the operation assessment and are saved together. Existing nonempty settings and the
+port are preserved. Repeating provisioning does not switch a saved endpoint.
+No external IP-discovery service is used: an upstream NAT address is not a local owner address.
+
+Fresh initialization and provisioning leave the VPN stopped and arm its first activation on `yard start`.
+The first start assesses the exact public endpoint and service effects before one confirmation;
+it enables the guest service and publishes the owned UDP route. Later stops and starts preserve
+the enabled service. An explicit `vpn down` disables it persistently, including across repeated
+provisioning and yard restarts; use `vpn up` to enable it again.
+
+If there is no unique public address/interface, provisioning leaves the missing settings empty
+and prints which settings to supply. Set them before the first `yard start`. Specify an interface
+to narrow discovery, or an exact owner IPv4 to discover its interface, then rerun provisioning.
+Private and special-use addresses are never selected automatically; an explicitly supplied private IPv4 is allowed for test owners.
+For a manual endpoint or a different port:
 
 ```sh
 yard -Y vpn config set RESOURCE_VPN_IPV4 203.0.113.10 --scope yard
 yard -Y vpn config set RESOURCE_VPN_INTERFACE eth0 --scope yard
 yard -Y vpn config set RESOURCE_VPN_PORT 51820 --scope yard
-yard -Y vpn vpn up
+yard -Y vpn start
 ```
 
 Replace the documentation address and interface with the owner's real values. The advertised
 address must be assigned directly to that interface; a VPS behind another NAT is not covered.
-Provider firewalls must independently permit that exact UDP port. `up` assesses its endpoint and
-service effects before one confirmation. It rejects socket/proxy/forward collisions and foreign
-ownership metadata. Repeating it preserves keys and peers.
+Source-managed configuration must receive endpoint settings through its registered source.
+Provider firewalls must independently permit that exact UDP port. First activation and explicit
+`vpn up` reject socket/proxy/forward collisions and foreign ownership metadata. Repeating them
+preserves keys and peers. If activation fails after the VM starts, fix the reported cause and
+retry `yard start`; the failed first activation remains pending.
 
 The profile uses the upstream AmneziaWG image pinned in
 [`release.env`](../config/profiles/amnezia/release.env), with AmneziaVPN 5.0.3.0 as the protocol
@@ -90,7 +111,9 @@ the profile's declared shutdown. If guest shutdown cannot be verified, it retain
 and stops reconciliation with recovery instructions. Removing a UDP proxy alone does not terminate
 an established tunnel.
 A failed bring-up rollback also disables the guest service while preserving keys and peers; run
-`up` again to re-enable it.
+`up` again to re-enable it. Bring-up also clears stale untranslated UDP connection state for the
+verified endpoint, allowing an existing client to reconnect after a disabled interval. This host
+step may require sudo authentication after the operation confirmation.
 
 Guest service enablement survives a restart. A disabled service stays disabled. VM boot itself
 follows Subyard's managed desired-power workflow and host network guards; no independent Incus
@@ -102,7 +125,7 @@ bring-up stops without creating replacement keys on the VM root disk; repair the
 `yard -Y vpn init` before retrying `vpn up`.
 
 For a runtime update: protect a current state backup, run `vpn down`, update the Subyard runtime,
-run `yard -Y vpn init` and `yard -Y vpn provision amnezia`, then `vpn up`. The image digest changes
+run `yard -Y vpn init --profile amnezia`, then `vpn up`. The image digest changes
 only with the profile release. Provisioning preserves service enablement and keys; it does not run
 an independent upstream updater. A service already running an older image requires explicit `up`
 to replace it.
@@ -110,8 +133,8 @@ to replace it.
 Back up `/srv/amnezia` while the service is down, using an encrypted backup tool and a destination
 outside the VPS. Preserve root ownership, directory mode `0700` and file mode `0600`. Keep the
 matching pinned profile version and non-secret endpoint settings with the recovery instructions.
-For recovery, provision a fresh dedicated VM, restore that directory before its first `vpn up`,
-restore the endpoint settings, then enable and verify the client. Do not restore onto an active
+For recovery, initialize a fresh dedicated VM and disable its pending startup with `vpn down`.
+Start the VM, restore that directory and the endpoint settings, then run `vpn up` and verify the client. Do not restore onto an active
 service or merge two independently generated state directories. `teardown --keep-data` retains the
 state volume; ordinary destructive teardown can remove it and requires its existing confirmation.
 
@@ -143,3 +166,14 @@ reboots and verify recovery with isolation enabled and disabled.
 Use `--lane recovery` for a focused fresh check of ingress closure while the guest agent is
 unavailable, shutdown retry, and refusal to create state on an unmounted `/srv`. It also checks
 systemd mount restoration, unchanged keys and peers, and client connectivity after recovery.
+
+Use `--lane startup` to check the shortened `init --profile` → `start` workflow, repeated profile
+initialization, client connectivity, and enabled/explicitly disabled stop/start and host reboot
+recovery. This lane omits the workload and Free Page Reporting measurements.
+
+Use `--lane disabled` for a fresh first activation with isolation already enabled, followed by
+repeated shutdown, disabled stop/start/provision/reboot recovery, and explicit re-enablement.
+
+Use `--lane reconnect` for first activation with isolation enabled, then shutdown and an owner
+reboot with retained client traffic. It verifies a stale untranslated UDP flow exists before
+explicit bring-up and that the same client reconnects without replacing its configuration.

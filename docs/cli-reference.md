@@ -43,7 +43,7 @@ and closes their active connections.
 install or reconcile Incus, the yard and its core configuration.
 
 ```text
-Usage: yard init [--configs | --reset] [--yes]
+Usage: yard init [--configs | --reset | --profile <name>] [--yes]
 ```
 
 ## start

@@ -107,44 +107,41 @@ case "$phase" in
     [ ! -f "$SUBYARD_CONFIG_HOME/yards/vpn-e2e/config.env" ] || die 'expected a fresh VPN yard'
     yard init --profile amnezia --yes
     ;;
-  init)
+  init|init-isolated)
     if [ ! -f "$SUBYARD_CONFIG_HOME/yards/vpn-e2e/config.env" ]; then
       yard init --profile amnezia --yes
     else
       yard init --yes
     fi
-    yard start --yes
-    yard init --yes
-    yard provision amnezia --yes
-    yard vpn status
-    guest python3 -c '
-import json, subprocess
-s = json.loads(subprocess.check_output(["python3", "/usr/local/lib/subyard-amnezia/runtime.py", "observe"]))
-assert not s["running"] and not s["enabled"] and not s["state_present"], s
-'
-    guest findmnt -n -o FSTYPE,SIZE /srv
-    yard security --require-live --quiet
-    ;;
-  up)
+    incus list yard-vpn-e2e --project subyard-vpn-e2e --format csv -c s \
+      | grep -Fxq STOPPED || die 'profile init did not restore stopped power intent'
+    # The allocated owner has a private address; configure it through the product
+    # while stopped, before the first start publishes the endpoint.
     route="$(ip -4 -j route get 1.1.1.1)"
     address="$(jq -r '.[0].prefsrc' <<<"$route")"
     interface="$(jq -r '.[0].dev' <<<"$route")"
     yard config set RESOURCE_VPN_IPV4 "$address" --scope yard --yes
     yard config set RESOURCE_VPN_INTERFACE "$interface" --scope yard --yes
     yard config set RESOURCE_VPN_PORT 51820 --scope yard --yes
-    yard vpn up --yes
+    if [ "$phase" = init-isolated ]; then
+      yard network isolation on --yes
+    fi
+    yard start --yes
+    signature > "$fixture/state.sha256"
+    chmod 0600 "$fixture/state.sha256"
+    verify_enabled
+    guest findmnt -n -o FSTYPE,SIZE /srv
+    ;;
+  up)
     before="$(signature)"
     yard vpn up --yes
+    yard vpn up --yes
     [ "$(signature)" = "$before" ] || die 'repeat up changed VPN state'
-    printf '%s\n' "$before" > "$fixture/state.sha256"
-    chmod 0600 "$fixture/state.sha256"
-    yard vpn status
-    yard security --require-live --quiet
+    verify_enabled
     ;;
   repeat)
     before="$(signature)"
-    yard init --yes
-    yard provision amnezia --yes
+    yard init --profile amnezia --yes
     [ "$(signature)" = "$before" ] || die 'repeat reconciliation changed VPN state'
     yard vpn status
     ;;

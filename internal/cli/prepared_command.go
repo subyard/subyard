@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/adapters/hostruntime"
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
 	"github.com/Subyard/Subyard/internal/application"
@@ -314,6 +315,9 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 	if err != nil {
 		return err
 	}
+	if err := cli.prepareInitProfileProvision(ctx, prepared.Loaded, execution, prepared.Arguments); err != nil {
+		return err
+	}
 	if err := execution.validateOrcaRepair(ctx, cli); err != nil {
 		return err
 	}
@@ -336,6 +340,9 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 			}
 		}
 		if err := execution.refreshAssessment(ctx); err != nil {
+			return "", domain.ActionDelta{}, err
+		}
+		if err := cli.observeInitProfileProvision(ctx, execution); err != nil {
 			return "", domain.ActionDelta{}, err
 		}
 		// Another init can finish provisioning while this broader action awaits approval.
@@ -377,6 +384,12 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 		result, _, err := orchestrator.RunAdapter(ctx, prepared.Plan, domain.AdapterRequest{
 			Schema: shelladapter.ProtocolSchema, OperationID: prepared.Plan.OperationID, Adapter: "init", Action: "reconcile",
 		}, nil)
+		if err == nil && execution.profileProvisionChanged() {
+			result, err = cli.executeInitProfileProvision(ctx, execution, orchestrator, prepared.Plan, diagnostics)
+			if err == nil {
+				fmt.Fprintln(diagnostics, "  [ ok ] Subyard initialized")
+			}
+		}
 		if err == nil && cli.orcaInitRepair != nil {
 			err = cli.finishConfigApplyRepair(ctx, cli.orcaInitRepair)
 		}
@@ -385,12 +398,29 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 	return nil
 }
 
-func (prepared *preparedCommand) prepareLifecycle(_ context.Context, _ *initBootstrap) error {
+func (prepared *preparedCommand) prepareLifecycle(ctx context.Context, _ *initBootstrap) error {
 	execution, err := prepareLifecycleExecution(prepared.Definition, prepared.Arguments)
 	if err != nil {
 		return err
 	}
 	prepared.policy = execution.policy(prepared.Definition, prepared.Loaded.Context)
+	var startup *resourceStartup
+	if execution.action == "start" {
+		startup, err = prepared.CLI.prepareResourceStartup(ctx, prepared.Loaded)
+		if err != nil {
+			return err
+		}
+		if startup != nil {
+			prepared.policy.Consequences = append(prepared.policy.Consequences, startup.consequences...)
+			prepared.assess = func(ctx context.Context) (domain.ActionID, domain.ActionDelta, error) {
+				if err := startup.refresh(ctx, prepared.CLI); err != nil {
+					return "", domain.ActionDelta{}, err
+				}
+				return "yard.start", domain.ActionDelta{Changed: true, Consequences: slices.Clone(prepared.policy.Consequences)}, nil
+			}
+			prepared.refresh = prepared.assess
+		}
+	}
 	if execution.action == "stop" {
 		prepared.assess = func(ctx context.Context) (domain.ActionID, domain.ActionDelta, error) {
 			if err := prepared.CLI.observeLifecycleExecution(ctx, prepared.Loaded.Context, execution); err != nil {
@@ -401,7 +431,30 @@ func (prepared *preparedCommand) prepareLifecycle(_ context.Context, _ *initBoot
 		prepared.refresh = prepared.assess
 	}
 	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (domain.AdapterResult, error) {
-		return prepared.CLI.executeLifecycle(ctx, orchestrator, prepared.Loaded.Context, prepared.Plan, execution, diagnostics)
+		if startup == nil {
+			return prepared.CLI.executeLifecycle(ctx, orchestrator, prepared.Loaded.Context, prepared.Plan, execution, diagnostics)
+		}
+		unlock, err := lockIntegrationYard(ctx, prepared.Loaded)
+		if err != nil {
+			return domain.AdapterResult{}, err
+		}
+		defer unlock()
+		if err := startup.refresh(ctx, prepared.CLI); err != nil {
+			return domain.AdapterResult{}, err
+		}
+		if prepared.CLI.options.NetworkPolicy == nil {
+			if err := prepared.CLI.prepareSudoPrivileges(ctx, diagnostics, prepared.CLI.effectiveUID(), execution.action); err != nil {
+				return domain.AdapterResult{}, err
+			}
+		}
+		result, err := prepared.CLI.executeLifecycle(ctx, orchestrator, prepared.Loaded.Context, prepared.Plan, execution, diagnostics)
+		if err != nil || result.Status != "ok" {
+			return result, err
+		}
+		if err := startup.apply(ctx, prepared.CLI, prepared.Plan.OperationID); err != nil {
+			return result, fmt.Errorf("yard started but resource activation is pending: %w", err)
+		}
+		return result, nil
 	}
 	return nil
 }
@@ -414,6 +467,18 @@ func (prepared *preparedCommand) prepareProvision(_ context.Context, _ *initBoot
 	if execution.list {
 		prepared.displayOnly = func() { execution.printList(prepared.CLI.options.Stdout) }
 		return nil
+	}
+	var notes []string
+	readAddresses := prepared.CLI.provisionEndpointAddresses
+	if readAddresses == nil {
+		readAddresses = hostruntime.OwnerIPv4Addresses
+	}
+	execution.endpoint, notes, err = prepared.CLI.prepareProvisionEndpoint(prepared.Loaded, execution.profiles, readAddresses)
+	if err != nil {
+		return err
+	}
+	for _, note := range notes {
+		fmt.Fprintln(prepared.CLI.options.Stderr, note)
 	}
 	prepared.policy = execution.policy(prepared.Definition, prepared.Loaded.Context)
 	prepared.assess = func(ctx context.Context) (domain.ActionID, domain.ActionDelta, error) {

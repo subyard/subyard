@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
+	"os"
 	"os/exec"
 	"reflect"
 	"slices"
@@ -11,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/adapters/hostruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/resource"
@@ -45,6 +48,9 @@ func (cli *CLI) prepareResourceIngress(ctx context.Context, loaded config.Loaded
 	service := cli.networkService(contexts)
 	if service == nil {
 		return nil, errors.New("owner network policy adapter is unavailable")
+	}
+	if cli.options.NetworkPolicy == nil {
+		service.ClearStaleUDP = clearResourceStaleUDP
 	}
 	// Use the prepared selection for the target yard while resolving other
 	// yards from their own persisted configuration.
@@ -83,7 +89,14 @@ func (cli *CLI) prepareResourceIngress(ctx context.Context, loaded config.Loaded
 }
 
 func (ingress *resourceIngress) augment(assessment domain.ActionAssessment) domain.ActionAssessment {
-	if ingress == nil || !ingress.preview.After.Changed {
+	if ingress == nil {
+		return assessment
+	}
+	if ingress.up && (assessment.Changed || ingress.preview.After.Changed) {
+		assessment.Consequences = append(assessment.Consequences,
+			"clear stale UDP connection state for the exact approved owner endpoint")
+	}
+	if !ingress.preview.After.Changed {
 		return assessment
 	}
 	verb := "remove"
@@ -165,6 +178,17 @@ func (ingress *resourceIngress) apply(ctx context.Context, runner *resourceApply
 	if err == nil && ingress.up {
 		err = ingress.probeReady(ctx, runner)
 	}
+	if err == nil && ingress.up {
+		err = ingress.clearStaleUDP(ctx)
+	}
+	if err == nil && !ingress.up {
+		for _, update := range actual.Updates {
+			if update.Yard.Yard == ingress.preview.Target && strings.EqualFold(update.Yard.InstanceInfo.Status, "running") {
+				err = ingress.probeShutdown(ctx, runner)
+				break
+			}
+		}
+	}
 	if err == nil {
 		return nil
 	}
@@ -175,6 +199,102 @@ func (ingress *resourceIngress) apply(ctx context.Context, runner *resourceApply
 		return fmt.Errorf("coordinate resource ingress isolation: %w; rollback ingress failed: %v", err, rollbackErr)
 	}
 	return fmt.Errorf("coordinate resource ingress isolation: %w; owned public ingress rolled back", err)
+}
+
+func clearResourceStaleUDP(ctx context.Context, endpoint netip.AddrPort) error {
+	path, found := hostruntime.FindConntrack("", "/usr/sbin", "/sbin", "/usr/bin")
+	if !found {
+		return errors.New("conntrack is required for public UDP resource recovery; rerun yard init")
+	}
+	cleaner := hostruntime.ConntrackCleaner{Lookup: func(string) (string, error) { return path, nil }}
+	if os.Geteuid() != 0 {
+		cleaner.Run = func(ctx context.Context, _ string, arguments ...string) ([]byte, error) {
+			return exec.CommandContext(ctx, "sudo", append([]string{"-n", "--", path}, arguments...)...).Output()
+		}
+	}
+	return cleaner.Clear(ctx, endpoint)
+}
+
+func (ingress *resourceIngress) clearStaleUDP(ctx context.Context) error {
+	if ingress.service.ClearStaleUDP == nil {
+		return errors.New("public UDP conntrack cleaner is unavailable")
+	}
+	owner, err := netip.ParseAddr(ingress.address)
+	if err != nil || !resource.ExplicitOwnerIPv4(owner) || ingress.port < 1 || ingress.port > 65535 {
+		return errors.New("public UDP resource endpoint is invalid")
+	}
+	expected := netip.AddrPortFrom(owner, uint16(ingress.port))
+	verified := *ingress.service
+	verified.UseApprovedIngress = true
+	verified.ContractSource = nil
+	seen := false
+	verified.ClearStaleUDP = func(ctx context.Context, endpoint netip.AddrPort) error {
+		if endpoint != expected {
+			return nil
+		}
+		seen = true
+		return ingress.service.ClearStaleUDP(ctx, endpoint)
+	}
+	if verified.Lock == nil {
+		return errors.New("host network policy lock is required for UDP recovery")
+	}
+	release, err := verified.Lock.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	if err := verified.ClearBootStaleUDP(ctx, ingress.preview.Target); err != nil {
+		return err
+	}
+	if !seen {
+		return errors.New("approved public UDP resource endpoint was not found")
+	}
+	return nil
+}
+
+// Removing an ingress ACL can restart a running VM. Wait for its agent and
+// verify the resource's own read-only shutdown assessment before recording a
+// disabled startup intent. Retrying preparation never retries the mutation.
+func (ingress *resourceIngress) probeShutdown(ctx context.Context, runner *resourceApplyRunner) error {
+	bounded, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	var lastErr error
+	for {
+		output, err := runner.cli.prepareResource(bounded, runner.loaded, runner.definition, []string{runner.definition.Shutdown})
+		if err == nil {
+			assessment, assessErr := runner.cli.resources.AssessPrepareResult(
+				runner.cli.coreActions, runner.definition.Command, runner.definition.Shutdown, output)
+			if assessErr != nil {
+				return assessErr
+			}
+			local, ok := localResourceAction(runner.definition, assessment.Action)
+			if !ok || local != runner.localAction {
+				return domain.ErrPlanStale
+			}
+			if assessment.Changed {
+				return errors.New("resource shutdown did not converge after ingress reconciliation")
+			}
+			return nil
+		}
+		if errors.Is(err, resource.ErrResourceUsageInvalid) {
+			return err
+		}
+		lastErr = err
+		if bounded.Err() != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return fmt.Errorf("resource shutdown remains unverified after network restart: %w", lastErr)
+		}
+		select {
+		case <-bounded.Done():
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return fmt.Errorf("resource shutdown remains unverified after network restart: %w", lastErr)
+		case <-time.After(2 * time.Second):
+		}
+	}
 }
 
 func (ingress *resourceIngress) probeReady(ctx context.Context, runner *resourceApplyRunner) error {

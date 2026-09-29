@@ -45,6 +45,8 @@ type initBootstrap struct {
 }
 
 type initExecution struct {
+	requestedProfile      string
+	profileProvision      *provisionExecution
 	operationID           string
 	integrationSelection  *initIntegrationSelection
 	integrationBaseline   *initIntegrationBaseline
@@ -205,13 +207,13 @@ func (cli *CLI) loadInitContext(
 		if preset.Context.AccessKind != domain.AccessLocal {
 			return config.Loaded{}, nil, errors.New("--profile is only supported for local yards")
 		}
-		if name := firstInitProfileConflict(existing, existingPath, preset, source); name != "" {
+		if name := cli.firstInitProfileConflict(existing, existingPath, preset, source); name != "" {
 			return config.Loaded{}, nil, fmt.Errorf(
 				"named yard %q conflicts with profile %q at setting %s; use plain init for an intentionally customized yard",
 				yard, request.profile, name,
 			)
 		}
-		if name := firstInitProfileOverride(existing, preset, source); name != "" {
+		if name := cli.firstInitProfileOverride(existing, preset, source); name != "" {
 			return config.Loaded{}, nil, fmt.Errorf(
 				"command environment overrides profile %q at setting %s",
 				request.profile, name,
@@ -229,7 +231,7 @@ func (cli *CLI) loadInitContext(
 	if loaded.Context.AccessKind != domain.AccessLocal {
 		return config.Loaded{}, nil, errors.New("--profile is only supported for local yards")
 	}
-	if name := firstInitProfileOverride(loaded, loaded, source); name != "" {
+	if name := cli.firstInitProfileOverride(loaded, loaded, source); name != "" {
 		return config.Loaded{}, nil, fmt.Errorf(
 			"command environment overrides profile %q at setting %s",
 			request.profile, name,
@@ -240,7 +242,7 @@ func (cli *CLI) loadInitContext(
 	}, nil
 }
 
-func firstInitProfileOverride(
+func (cli *CLI) firstInitProfileOverride(
 	loaded config.Loaded,
 	preset config.Loaded,
 	presetPath string,
@@ -252,6 +254,13 @@ func firstInitProfileOverride(
 	}
 	sort.Strings(names)
 	for _, name := range names {
+		if cli.initProfileEndpointSetting(preset, name) {
+			for _, resolution := range loaded.Settings[name].Resolutions {
+				if resolution.Scope == string(config.ScopeYard) && resolution.Status != "unset" {
+					presetValues[name] = resolution.Value
+				}
+			}
+		}
 		if loaded.Environment[name] != presetValues[name] {
 			return name
 		}
@@ -259,7 +268,7 @@ func firstInitProfileOverride(
 	return ""
 }
 
-func firstInitProfileConflict(
+func (cli *CLI) firstInitProfileConflict(
 	existing config.Loaded,
 	existingPath string,
 	preset config.Loaded,
@@ -273,6 +282,9 @@ func firstInitProfileConflict(
 	}
 	sort.Strings(names)
 	for _, name := range names {
+		if cli.initProfileEndpointSetting(preset, name) {
+			continue
+		}
 		if value, ok := existingValues[name]; !ok || value != presetValues[name] {
 			return name
 		}
@@ -402,8 +414,12 @@ func (cli *CLI) prepareInitExecution(
 		platform = cli.initPlatform(loaded, powerYards)
 	}
 	execution := &initExecution{
-		loaded: loaded, mode: mode, bootstrap: bootstrap, platform: platform, powerYards: powerYards,
+		requestedProfile: request.profile, loaded: loaded, mode: mode, bootstrap: bootstrap, platform: platform, powerYards: powerYards,
 		integrationSelection: selection, integrationBaseline: baseline,
+	}
+	if runtime, ok := execution.platform.(reconcileruntime.Runtime); ok {
+		runtime.InitProfile = request.profile
+		execution.platform = runtime
 	}
 	if mode == initReconcile && cli.options.InitPlatform == nil {
 		execution.orphanIngress, err = cli.prepareOrphanIngress(ctx, loaded)
@@ -469,7 +485,8 @@ func (execution *initExecution) consequences() []string {
 	if execution.hooksOnly() {
 		return []string{"retry installed project hooks once for active resources"}
 	}
-	hostIDConsequences := integrationAdoptionConsequences(execution.loaded.Context.YardName, execution.integrationAdoption)
+	hostIDConsequences := execution.profileProvisionConsequences()
+	hostIDConsequences = append(hostIDConsequences, integrationAdoptionConsequences(execution.loaded.Context.YardName, execution.integrationAdoption)...)
 	if execution.integrationSelection != nil {
 		hostIDConsequences = append(hostIDConsequences, "record the selected yard's requested integration set")
 	}
@@ -521,7 +538,7 @@ func (execution *initExecution) actionPlan() (domain.ActionID, domain.ActionDelt
 		return "", domain.ActionDelta{}, errors.New("init execution is required")
 	}
 	action := domain.ActionID("yard.init.reconcile")
-	changed := execution.plan.Pending() != 0 || execution.bootstrap != nil || execution.hostIDPending || execution.integrationSelection != nil || execution.orphanIngress != nil || execution.orphanIngressDeferred
+	changed := execution.profileProvisionChanged() || execution.plan.Pending() != 0 || execution.bootstrap != nil || execution.hostIDPending || execution.integrationSelection != nil || execution.orphanIngress != nil || execution.orphanIngressDeferred
 	switch execution.mode {
 	case initReconcile:
 		if execution.hooksOnly() {
@@ -544,7 +561,7 @@ func (execution *initExecution) actionPlan() (domain.ActionID, domain.ActionDelt
 }
 
 func (execution *initExecution) hooksOnly() bool {
-	return execution.mode == initReconcile && execution.plan.Pending() == 0 &&
+	return !execution.profileProvisionChanged() && execution.mode == initReconcile && execution.plan.Pending() == 0 &&
 		execution.bootstrap == nil && !execution.hostIDPending && execution.integrationSelection == nil && execution.orphanIngress == nil && !execution.orphanIngressDeferred
 }
 
@@ -706,8 +723,10 @@ func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Wri
 		return err
 	}
 	execution.retryProjectHooks(ctx, output)
-	if err := cli.printInitProvisionHint(ctx, execution, output); err != nil {
-		return err
+	if execution.profileProvision == nil {
+		if err := cli.printInitProvisionHint(ctx, execution, output); err != nil {
+			return err
+		}
 	}
 	finalizer := application.Reconciler{
 		Stages: []application.ReconcileStage{application.FinalizeStage()},
@@ -716,7 +735,9 @@ func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Wri
 	if err := finalizer.Apply(ctx); err != nil {
 		return err
 	}
-	fmt.Fprintln(output, "  [ ok ] Subyard initialized")
+	if execution.profileProvision == nil {
+		fmt.Fprintln(output, "  [ ok ] Subyard initialized")
+	}
 	return nil
 }
 
@@ -844,9 +865,12 @@ func (execution *initExecution) checkReleaseConfigOwnership(ctx context.Context,
 
 func (execution *initExecution) rebuildPlatform(cli *CLI) {
 	execution.platform = cli.initPlatform(execution.loaded, execution.powerYards)
-	if runtime, ok := execution.platform.(reconcileruntime.Runtime); ok && execution.integrationAdoption.AdoptionFingerprint != "" {
-		runtime.AdoptLegacyIntegrations = true
-		runtime.LegacyIntegrationFingerprint = execution.integrationAdoption.AdoptionFingerprint
+	if runtime, ok := execution.platform.(reconcileruntime.Runtime); ok {
+		runtime.InitProfile = execution.requestedProfile
+		if execution.integrationAdoption.AdoptionFingerprint != "" {
+			runtime.AdoptLegacyIntegrations = true
+			runtime.LegacyIntegrationFingerprint = execution.integrationAdoption.AdoptionFingerprint
+		}
 		execution.platform = runtime
 	}
 }

@@ -67,6 +67,42 @@ class OwnerHandlerTest(unittest.TestCase):
         self.assertFalse(status['ready'])
         self.assertFalse(status['ingress'])
 
+    def test_first_start_prepares_from_stopped_vm_without_guest_access(self):
+        instance = self.instance()
+        instance['status'] = 'Stopped'
+        instance['config'][handler.STARTUP] = 'pending'
+        os.environ.update(RESOURCE_VPN_IPV4='10.20.30.40', RESOURCE_VPN_INTERFACE='eth0',
+                          SUBYARD_RESOURCE_MODE='prepare-start')
+        want = {'type': 'proxy', 'bind': 'host', 'nat': 'true',
+                'listen': 'udp:10.20.30.40:51820', 'connect': 'udp:10.80.0.10:51820'}
+        with mock.patch.object(handler, 'inspect', return_value=instance), \
+                mock.patch.object(handler, 'endpoint', return_value=('10.20.30.40', 'eth0', '51820', want)), \
+                mock.patch.object(handler, 'collisions'), \
+                mock.patch.object(handler, 'guest', side_effect=AssertionError('prestart reached guest')), \
+                mock.patch.object(handler, 'runtime_status', side_effect=AssertionError('prestart probed guest')), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            handler.prepare('up', prestart=True)
+        assessment = json.loads(output.getvalue())
+        self.assertTrue(assessment['changed'])
+        self.assertIn('Publish UDP 10.20.30.40:51820', assessment['consequences'][1])
+
+    def test_pending_stopped_yard_allows_endpoint_authoring_and_down(self):
+        instance = self.instance()
+        instance['status'] = 'Stopped'
+        instance['config'][handler.STARTUP] = 'pending'
+        with mock.patch.object(handler, 'inspect', return_value=instance), \
+                mock.patch.object(handler, 'guest', side_effect=AssertionError('stopped guest accessed')), \
+                mock.patch.object(handler, 'runtime_status', side_effect=AssertionError('stopped guest probed')), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            handler.prepare('down')
+        self.assertFalse(json.loads(output.getvalue())['changed'])
+        os.environ.update(SUBYARD_RESOURCE_MODE='apply', SUBYARD_RESOURCE_ACTION='down',
+                          SUBYARD_OPERATION_ID='op-test')
+        with mock.patch.object(handler, 'inspect', return_value=instance), \
+                mock.patch.object(handler, 'guest', side_effect=AssertionError('stopped guest accessed')), \
+                mock.patch.object(sys, 'argv', ['vpn', 'down']):
+            self.assertEqual(handler.main(), 0)
+
     def test_unselected_up_and_malformed_arguments_never_reach_target(self):
         os.environ['ENVIRONMENT_PROFILES'] = ''
         with mock.patch.object(handler, 'inspect', side_effect=AssertionError('unselected yard inspected')), \
@@ -118,36 +154,33 @@ class OwnerHandlerTest(unittest.TestCase):
         def foreign_proxy(*args, **_):
             if args[0] == 'ss':
                 return result()
-            if args[:2] == ('incus', 'list'):
-                return result(json.dumps([{'name': 'other', 'project': 'other',
-                                           'expanded_devices': {'route': want}}]).encode())
             raise AssertionError(args)
 
-        with mock.patch.object(handler, 'run', side_effect=foreign_proxy):
+        with mock.patch.object(handler, 'run', side_effect=foreign_proxy), \
+                mock.patch.object(handler, 'query', return_value=[
+                    {'name': 'other', 'project': 'other', 'expanded_devices': {'route': want}}]):
             with self.assertRaisesRegex(RuntimeError, 'another Incus proxy'):
                 handler.collisions(want)
         for listener in ('udp:10.20.30.40:51819-51821',
                          'udp:0.0.0.0:51700,51820', 'udp:[::]:51819,51820-51822'):
             with self.subTest(listener=listener):
                 foreign = want | {'listen': listener}
-                with mock.patch.object(handler, 'run', side_effect=lambda *args, **_: (
-                        result() if args[0] == 'ss' else
-                        result(json.dumps([{'name': 'other', 'project': 'other',
-                                            'expanded_devices': {'route': foreign}}]).encode()))):
+                with mock.patch.object(handler, 'run', side_effect=foreign_proxy), \
+                        mock.patch.object(handler, 'query', return_value=[
+                            {'name': 'other', 'project': 'other', 'expanded_devices': {'route': foreign}}]):
                     with self.assertRaisesRegex(RuntimeError, 'another Incus proxy'):
                         handler.collisions(want)
         foreign = {'type': 'proxy', 'bind': 'instance',
                    'listen': 'udp:0.0.0.0:51700,51819-51821',
                    'connect': 'udp:127.0.0.1:51820'}
-        with mock.patch.object(handler, 'run', side_effect=lambda *args, **_: (
-                result() if args[0] == 'ss' else
-                result(json.dumps([{'name': 'other', 'project': 'other',
-                                    'expanded_devices': {'route': foreign}}]).encode()))), \
-                mock.patch.object(handler, 'query', return_value=[]):
-            handler.collisions(want)
-        with mock.patch.object(handler, 'run', side_effect=lambda *args, **_: (
-                result() if args[0] == 'ss' else result(b'[]'))), \
+        with mock.patch.object(handler, 'run', side_effect=foreign_proxy), \
                 mock.patch.object(handler, 'query', side_effect=lambda path: (
+                    [{'name': 'other', 'project': 'other', 'expanded_devices': {'route': foreign}}]
+                    if path == '/1.0/instances?recursion=1&all-projects=true' else [])):
+            handler.collisions(want)
+        with mock.patch.object(handler, 'run', side_effect=foreign_proxy), \
+                mock.patch.object(handler, 'query', side_effect=lambda path: (
+                    [] if path == '/1.0/instances?recursion=1&all-projects=true' else
                     [{'name': 'incusbr0', 'managed': True}] if path == '/1.0/networks?recursion=1' else
                     [{'listen_address': '10.20.30.40', 'config': {}, 'ports': [
                         {'protocol': 'udp', 'listen_port': '51700,51819-51821'}]}])):

@@ -17,13 +17,17 @@ import (
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/githubbroker"
+	"github.com/Subyard/Subyard/internal/resource"
 )
 
 type provisionExecution struct {
-	profiles           []string
-	changedProfiles    []string
-	requiresPowerCycle bool
-	list               bool
+	endpoint            *provisionEndpoint
+	profiles            []string
+	changedProfiles     []string
+	startupSeeds        []resource.Definition
+	startupSeedDeferred bool
+	requiresPowerCycle  bool
+	list                bool
 }
 
 type provisionReporter struct{ output io.Writer }
@@ -169,12 +173,17 @@ func (execution *provisionExecution) policy(
 	if execution.requiresPowerCycle {
 		profiles = execution.profiles
 	}
+	consequences := []string{
+		fmt.Sprintf("provision profiles [%s] in %s", strings.Join(profiles, ", "), yard.YardInstanceName),
+		"temporarily start the yard if required and restore its desired power",
+	}
+	consequences = append(consequences, execution.endpoint.consequences()...)
+	for _, definition := range execution.startupSeeds {
+		consequences = append(consequences, "arm first-start activation of "+definition.Command+" after provisioning; no public ingress is opened yet")
+	}
 	return domain.CommandPolicy{
 		Name: definition.Name, Effect: domain.CommandEffect(definition.Effect),
-		RemotePolicy: domain.RemotePolicy(definition.Remote), Consequences: []string{
-			fmt.Sprintf("provision profiles [%s] in %s", strings.Join(profiles, ", "), yard.YardInstanceName),
-			"temporarily start the yard if required and restore its desired power",
-		},
+		RemotePolicy: domain.RemotePolicy(definition.Remote), Consequences: consequences,
 	}
 }
 
@@ -185,7 +194,7 @@ func (execution *provisionExecution) actionPlan(
 	if execution == nil || execution.list {
 		return "", domain.ActionDelta{}, errors.New("provision execution is required")
 	}
-	changed := execution.requiresPowerCycle || len(execution.changedProfiles) != 0
+	changed := execution.requiresPowerCycle || len(execution.changedProfiles) != 0 || execution.endpoint != nil || len(execution.startupSeeds) != 0
 	delta := domain.ActionDelta{Changed: changed}
 	if changed {
 		delta.Consequences = execution.policy(definition, yard).Consequences
@@ -204,6 +213,11 @@ func (cli *CLI) observeProvisionExecution(
 	}
 	execution.changedProfiles = nil
 	execution.requiresPowerCycle = false
+	execution.startupSeeds = nil
+	execution.startupSeedDeferred = false
+	if err := execution.endpoint.check(ctx, cli); err != nil {
+		return err
+	}
 	if len(execution.profiles) == 0 {
 		return nil
 	}
@@ -213,6 +227,18 @@ func (cli *CLI) observeProvisionExecution(
 	)
 	if err != nil {
 		return err
+	}
+	for _, definition := range cli.selectedStartupResources(loaded) {
+		if !slices.Contains(execution.profiles, definition.Profile) {
+			continue
+		}
+		eligible, err := startupSeedEligible(loaded, instance, definition)
+		if err != nil {
+			return err
+		}
+		if eligible {
+			execution.startupSeeds = append(execution.startupSeeds, definition)
+		}
 	}
 	if strings.EqualFold(instance.Status, "stopped") {
 		execution.requiresPowerCycle = true
@@ -314,5 +340,37 @@ func (cli *CLI) executeProvision(
 	}
 	result, stderr, err := orchestrator.RunAdapter(ctx, plan, request, nil)
 	writeAdapterDiagnostics(diagnostics, stderr)
+	if err == nil && result.Status == "ok" {
+		err = execution.endpoint.apply(ctx, cli)
+		if err == nil && len(execution.startupSeeds) != 0 {
+			unlock, lockErr := lockIntegrationYard(ctx, loaded)
+			if lockErr != nil {
+				return result, lockErr
+			}
+			defer unlock()
+			for _, definition := range execution.startupSeeds {
+				instance, readErr := incusPort.Instance(ctx, loaded.Context.IncusProject, loaded.Context.YardInstanceName)
+				if readErr != nil {
+					err = readErr
+					break
+				}
+				eligible, readErr := startupSeedEligible(loaded, instance, definition)
+				if readErr != nil {
+					err = readErr
+					break
+				}
+				if !eligible {
+					if execution.startupSeedDeferred {
+						continue
+					}
+					err = domain.ErrPlanStale
+					break
+				}
+				if err = cli.setStartupIntent(ctx, loaded, definition, "", startupPending); err != nil {
+					break
+				}
+			}
+		}
+	}
 	return result, err
 }

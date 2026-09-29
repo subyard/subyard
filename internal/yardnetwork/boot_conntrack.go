@@ -13,9 +13,10 @@ import (
 	"github.com/Subyard/Subyard/internal/resource"
 )
 
-// ClearBootStaleUDP runs only after a successful boot-time start, while the
-// caller holds the host network lock. It derives endpoints from fresh Incus
-// state, never from a user-supplied command or a profile-specific setting.
+// ClearBootStaleUDP runs after a successful boot-time start or resource
+// activation, while the caller holds the host network lock. It derives
+// endpoints from fresh Incus state, never from a user-supplied command or a
+// profile-specific setting.
 func (s Service) ClearBootStaleUDP(ctx context.Context, target Yard) error {
 	if !s.UseApprovedIngress {
 		return errors.New("boot UDP cleanup requires boot network policy mode")

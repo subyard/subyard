@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/Subyard/Subyard/internal/adapters/credentialmeta"
+	"github.com/Subyard/Subyard/internal/adapters/hostruntime"
 	"github.com/Subyard/Subyard/internal/adapters/incusclient"
 	"github.com/Subyard/Subyard/internal/adapters/projectruntime"
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
@@ -89,6 +90,7 @@ type Options struct {
 }
 
 type CLI struct {
+	provisionEndpointAddresses   func() ([]hostruntime.OwnerIPv4, error)
 	options                      Options
 	env                          map[string]string
 	baseEnv                      map[string]string
@@ -804,7 +806,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		fmt.Fprintf(cli.options.Stdout, "Usage: %s %s\n", cli.options.Program, definition.Display)
 		return 0
 	case "@init":
-		fmt.Fprintf(cli.options.Stdout, "Usage: %s init [--configs | --reset] [--yes]\n", cli.options.Program)
+		fmt.Fprintf(cli.options.Stdout, "Usage: %s init [--configs | --reset | --profile <name>] [--yes]\n", cli.options.Program)
 		return 0
 	case "@lifecycle":
 		fmt.Fprintf(cli.options.Stdout, "Usage: %s %s\n", cli.options.Program, definition.Display)

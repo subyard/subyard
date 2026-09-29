@@ -193,6 +193,14 @@ func NewCoreActionRegistry() (*domain.ActionRegistry, error) {
 			Impacts: []domain.ActionImpact{domain.ImpactHostNetwork, domain.ImpactYardRuntime, domain.ImpactAccess}, Recovery: domain.RecoveryReversible,
 		},
 		{
+			Action: "yard.start", Summary: "Start yard and activate its selected resource", Effect: domain.ActionMutation,
+			Impacts: []domain.ActionImpact{
+				domain.ImpactAccess, domain.ImpactHostIncus, domain.ImpactHostNetwork,
+				domain.ImpactSecurity, domain.ImpactSharedWorkload, domain.ImpactTrust, domain.ImpactYardRuntime,
+			},
+			Recovery: domain.RecoveryReversible,
+		},
+		{
 			Action: "yard.stop", Summary: "Stop yard", Effect: domain.ActionMutation,
 			Impacts:  []domain.ActionImpact{domain.ImpactAccess, domain.ImpactYardRuntime},
 			Recovery: domain.RecoveryReversible,
