@@ -325,7 +325,19 @@ func (cli *CLI) queryIntegrationStatus(ctx context.Context, loaded config.Loaded
 		status.Observed = "stopped"
 		return status, nil
 	}
-	plan, err := cli.integrationRuntime(loaded).IntegrationPlan(ctx)
+	runtime := cli.integrationRuntime(loaded)
+	if native, ok := runtime.(reconcileruntime.Runtime); ok {
+		// Status must assess the same initial ownership adoption as activation.
+		// Preparation only observes; publishing inventory still requires apply.
+		prepared, _, err := prepareLegacyIntegrationAdoption(ctx, loaded.Integrations, native)
+		if err != nil {
+			status.Observed = "conflict"
+			status.Detail = err.Error()
+			return status, nil
+		}
+		runtime = prepared.(reconcileruntime.Runtime)
+	}
+	plan, err := runtime.IntegrationPlan(ctx)
 	if err != nil {
 		status.Observed = "conflict"
 		status.Detail = err.Error()

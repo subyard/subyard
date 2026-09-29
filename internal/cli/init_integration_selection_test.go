@@ -66,9 +66,11 @@ type initAdoptionExecutor struct {
 	fingerprint string
 	conflict    bool
 	observed    bool
+	requests    []ports.InstanceExecRequest
 }
 
 func (fixture *initAdoptionExecutor) Exec(_ context.Context, _, _ string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	fixture.requests = append(fixture.requests, request)
 	if len(request.Command) == 5 && request.Command[0] == "python3" {
 		var input struct {
 			Adopt bool `json:"adopt"`

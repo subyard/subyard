@@ -13,6 +13,7 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
+	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -197,6 +198,51 @@ func TestIntegrationStatusStoppedReadOnly(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(path))), "generated", "integration-locks", "default.lock")); !os.IsNotExist(err) {
 		t.Fatalf("status acquired lock: %v", err)
+	}
+}
+
+func TestIntegrationStatusAssessesLegacyAdoptionReadOnly(t *testing.T) {
+	for _, conflict := range []bool{false, true} {
+		name := "matching legacy files"
+		if conflict {
+			name = "ownership conflict"
+		}
+		t.Run(name, func(t *testing.T) {
+			cli, incus, _, settingsPath, _ := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=codex\n")
+			root := cli.options.RepositoryRoot
+			writeCLIFile(t, filepath.Join(root, "config/projects-changed.sh"), "#!/bin/sh\nexit 0\n", 0o644)
+			instructions := filepath.Join(root, "instructions.md")
+			writeCLIFile(t, instructions, "Selected instructions\n", 0o644)
+			writeCLIFile(t, filepath.Join(root, "config/host.env"), "HOST_CODEX_AGENTS_MD="+instructions+"\n", 0o600)
+			incus.Reconcile = ports.ReconcileState{InstanceFound: true, Instance: incus.Instances["subyard/yard"]}
+			executor := &initAdoptionExecutor{fingerprint: strings.Repeat("a", 64), conflict: conflict}
+			cli.options.IntegrationRuntime = nil
+			cli.options.Executor = executor
+			loaded, err := cli.loadContext("default")
+			if err != nil {
+				t.Fatal(err)
+			}
+			status, err := cli.queryIntegrationStatus(context.Background(), loaded, "")
+			if err != nil || !executor.observed {
+				t.Fatalf("status skipped initial adoption: %#v, %v", status, err)
+			}
+			if conflict {
+				if status.Observed != "conflict" || !strings.Contains(status.Detail, "/home/dev/.codex/AGENTS.md") {
+					t.Fatalf("status lost adoption conflict: %#v", status)
+				}
+			} else if status.Observed != "pending" || !strings.Contains(status.Detail, "adopt existing file") {
+				t.Fatalf("matching legacy file was not reported as pending: %#v", status)
+			}
+			for _, request := range executor.requests {
+				if slices.Contains(request.Command, "apply") || slices.Contains(request.Command, "commit") {
+					t.Fatal("status attempted to publish integration ownership")
+				}
+			}
+			settings, err := os.ReadFile(settingsPath)
+			if err != nil || string(settings) != "CODING_TOOL_INTEGRATIONS=codex\n" || len(incus.ConfigUpdates) != 0 || len(incus.PowerUpdates) != 0 {
+				t.Fatal("status changed desired settings or yard state")
+			}
+		})
 	}
 }
 

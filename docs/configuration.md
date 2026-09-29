@@ -195,6 +195,9 @@ lists the paths it will manage. Existing plain files and links must match the
 selected templates, targets and metadata exactly; existing JSON/TOML documents
 also need a protected matching materialization baseline. Unrelated fields and
 session targets remain preserved. Unknown or changed state fails before adoption.
+`yard integration status` assesses this same initial adoption without changing files or
+creating inventory. Matching legacy artifacts appear as pending work; a conflict identifies
+the first artifact or prerequisite that prevents adoption.
 Release activation reconciles running ordinary yards before refreshing their configs,
 including unfinished inventory application. Stopped yards remain unchanged.
 Integration enable/disable does not perform this initial adoption. Interrupted
