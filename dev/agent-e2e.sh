@@ -1035,7 +1035,7 @@ write_guest_command() {
 	printf 'export SUBYARD_E2E_BASE_FINGERPRINT=%q\n' "$BASE_FINGERPRINT"
 	printf 'export SUBYARD_E2E_VM=%q\n' "$vm"
 	if [ "${1:-}" = ./bin/yard ]; then
-		printf '/usr/sbin/runuser -u dev -- env HOME=/home/dev USER=dev LOGNAME=dev ./dev/build-engine.sh\n'
+		printf '/usr/sbin/runuser -u dev -- env HOME=/home/dev USER=dev LOGNAME=dev make build\n'
 	fi
 	printf 'exec /usr/sbin/runuser -u dev -- env HOME=/home/dev USER=dev LOGNAME=dev'
 	printf ' %q' "$@"

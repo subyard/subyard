@@ -44,6 +44,9 @@ install or reconcile Incus, the yard and its core configuration.
 
 ```text
 Usage: yard init [--configs | --reset | --profile <name>] [--yes]
+
+Interactive init offers initial setup declared by selected profiles.
+Leave a setup field empty to skip; --yes and non-interactive runs leave profile settings unchanged.
 ```
 
 ## start
@@ -112,8 +115,9 @@ Host-side encrypted credential ledger:
   resolve <credential-id> --choose <revision>|--rotate [--file PATH]
   move <credential-id> @peer
 
-Static consumers: staging-env, qa-secrets, qa-pool, github-app-key (global zone).
+Builtin consumers: staging-env, qa-secrets, qa-pool.
 Secret values are read only after confirmation from a protected file, stdin or a silent TTY.
+Profile consumer: github-app-key (global zone).
 ```
 
 ## ssh-agent

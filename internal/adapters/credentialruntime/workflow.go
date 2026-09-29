@@ -155,9 +155,12 @@ Host-side encrypted credential ledger:
   resolve <credential-id> --choose <revision>|--rotate [--file PATH]
   move <credential-id> @peer
 
-Static consumers: staging-env, qa-secrets, qa-pool, github-app-key (global zone).
+Builtin consumers: staging-env, qa-secrets, qa-pool.
 Secret values are read only after confirmation from a protected file, stdin or a silent TTY.
 `)
+	for _, consumer := range runtime.consumers {
+		fmt.Fprintf(runtime.config.Stdout, "Profile consumer: %s (%s zone).\n", consumer.ID, consumer.Zone)
+	}
 	return nil
 }
 
@@ -213,6 +216,9 @@ func parseAdd(arguments []string) (addOptions, error) {
 func (runtime *Runtime) prepareAdd(ctx context.Context, arguments []string) (Prepared, error) {
 	options, err := parseAdd(arguments)
 	if err != nil {
+		return Prepared{}, err
+	}
+	if _, _, err := runtime.consumerPath(options.consumer, options.zone); err != nil {
 		return Prepared{}, err
 	}
 	if err := runtime.requireInitialized(); err != nil {
@@ -348,6 +354,9 @@ func (runtime *Runtime) prepareImport(ctx context.Context, arguments []string) (
 		options.zone = runtime.detectZone(real)
 	}
 	if err := validateClassification(options.label, options.kind, options.zone, options.consumer); err != nil {
+		return Prepared{}, err
+	}
+	if _, _, err := runtime.consumerPath(options.consumer, options.zone); err != nil {
 		return Prepared{}, err
 	}
 	info, err := os.Stat(real)
@@ -1790,6 +1799,9 @@ func (runtime *Runtime) materializeCredential(ctx context.Context, scope ledgerS
 		return err
 	}
 	defer clear(payload)
+	if err := runtime.validateConsumerPayload(head.Consumer, payload); err != nil {
+		return err
+	}
 	if err := atomicWrite(destination, payload, 0o600); err != nil {
 		return err
 	}
@@ -1813,13 +1825,20 @@ func (runtime *Runtime) consumerPath(consumerName, zone string) (string, bool, e
 		destination = filepath.Join(runtime.config.ConsumerRoot, "qa-pool", "secrets.env")
 	case "qa-pool":
 		destination = filepath.Join(runtime.config.ConsumerRoot, "qa-pool", "pool.jsonl")
-	case "github-app-key":
-		if zone != "global" {
-			return "", false, errors.New("github-app-key requires the global zone")
-		}
-		destination = filepath.Join(runtime.config.ConsumerRoot, "github", "github-app.pem")
 	default:
-		return "", false, errors.New("invalid credential consumer")
+		for _, consumer := range runtime.consumers {
+			if consumer.ID != consumerName {
+				continue
+			}
+			if consumer.Zone != zone {
+				return "", false, fmt.Errorf("%s requires the %s zone", consumerName, consumer.Zone)
+			}
+			destination = filepath.Join(runtime.config.ConsumerRoot, consumer.Path)
+			break
+		}
+		if destination == "" {
+			return "", false, errors.New("invalid credential consumer")
+		}
 	}
 	if !pathWithin(destination, runtime.config.ConsumerRoot) {
 		return "", false, errors.New("credential consumer escapes its root")
@@ -1837,14 +1856,22 @@ func (runtime *Runtime) detectConsumer(path string) string {
 		return "qa-secrets"
 	case clean == filepath.Join(runtime.config.ConsumerRoot, "qa-pool", "pool.jsonl"):
 		return "qa-pool"
-	case clean == filepath.Join(runtime.config.ConsumerRoot, "github", "github-app.pem"):
-		return "github-app-key"
 	default:
+		for _, consumer := range runtime.consumers {
+			if clean == filepath.Join(runtime.config.ConsumerRoot, consumer.Path) {
+				return consumer.ID
+			}
+		}
 		return "none"
 	}
 }
 
 func (runtime *Runtime) detectZone(path string) string {
+	for _, consumer := range runtime.consumers {
+		if filepath.Clean(path) == filepath.Join(runtime.config.ConsumerRoot, consumer.Path) {
+			return consumer.Zone
+		}
+	}
 	if runtime.detectConsumer(path) == "staging-env" {
 		return strings.TrimSuffix(filepath.Base(path), ".env")
 	}
@@ -1983,11 +2010,8 @@ func validateClassification(label, kind, zone, consumerName string) error {
 	if zone == "prod" || zone == "production" {
 		return errors.New("production credentials are outside the Subyard credential ledger scope")
 	}
-	if !contains([]string{"none", "staging-env", "qa-secrets", "qa-pool", "github-app-key"}, consumerName) {
+	if !domain.SafeName(consumerName) {
 		return fmt.Errorf("invalid consumer %q", consumerName)
-	}
-	if consumerName == "github-app-key" && zone != "global" {
-		return errors.New("github-app-key requires the global zone")
 	}
 	return nil
 }

@@ -79,11 +79,11 @@ func LoadConfig(path, defaultKeyFile string) (Config, error) {
 			cfg.PrivateKeyFile = filepath.Join(filepath.Dir(path), "generated", "github", "github-app.pem")
 		}
 	}
-	return cfg, validateConfig(cfg)
+	return cfg, ValidateConfig(cfg)
 }
 
 func NewIssuer(cfg Config) (*Issuer, error) {
-	if err := validateConfig(cfg); err != nil {
+	if err := ValidateConfig(cfg); err != nil {
 		return nil, err
 	}
 	key, err := loadKey(cfg.PrivateKeyFile)
@@ -217,6 +217,19 @@ func loadKey(path string) (*rsa.PrivateKey, error) {
 		return nil, errors.New("read github private key")
 	}
 	defer clear(data)
+	return parsePrivateKey(data)
+}
+
+// ValidatePrivateKey checks an imported PEM without exposing its contents.
+func ValidatePrivateKey(data []byte) error {
+	_, err := parsePrivateKey(data)
+	return err
+}
+
+func parsePrivateKey(data []byte) (*rsa.PrivateKey, error) {
+	if len(data) > maxKeyBytes {
+		return nil, errors.New("github private key is too large")
+	}
 	block, rest := pem.Decode(data)
 	if block == nil || len(bytes.TrimSpace(rest)) != 0 {
 		return nil, errors.New("invalid github private key")
@@ -239,7 +252,8 @@ func loadKey(path string) (*rsa.PrivateKey, error) {
 	return key, nil
 }
 
-func validateConfig(cfg Config) error {
+// ValidateConfig checks App identifiers and the owner-side key path without reading the key.
+func ValidateConfig(cfg Config) error {
 	if cfg.AppID == "" || len(cfg.AppID) > 64 || strings.IndexFunc(cfg.AppID, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
 		return errors.New("invalid github app id")
 	}

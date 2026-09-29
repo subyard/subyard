@@ -110,6 +110,18 @@ func (execution *initExecution) checkIntegrationBaseline(cli *CLI) error {
 	if err != nil {
 		return err
 	}
+	if execution.profileSetup != nil {
+		for _, setup := range execution.profileSetup.items {
+			if !setup.definition.Selected(loaded.Context.YardName, loaded.Environment) {
+				return fmt.Errorf("%w: profile selection changed", domain.ErrPlanStale)
+			}
+		}
+		for _, name := range []string{"SUBYARD_KEYS_ROOT", "SUBYARD_KEYS_CONSUMER_ROOT", "SUBYARD_KEYS_TOOLS_DIR"} {
+			if loaded.Environment[name] != execution.loaded.Environment[name] {
+				return fmt.Errorf("%w: profile credential location changed", domain.ErrPlanStale)
+			}
+		}
+	}
 	current, err := captureInitIntegrationBaseline(loaded)
 	if err != nil {
 		return err

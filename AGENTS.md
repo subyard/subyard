@@ -8,6 +8,10 @@ data. Project background, specs, and planning live in a separate private repo.
 For features, fixes, refactoring, tests, and developer documentation, use
 [Subyard dev-flow](.agents/skills/subyard-dev-flow/SKILL.md).
 
+Optional-profile behavior and tests belong to the owning profile, not core. Core owns generic
+extension contracts and synthetic contract tests; do not add profile-specific branches or assertions.
+Moving tests must preserve release acceptance coverage of core and all shipped profiles.
+
 Readiness checks return state and diagnostics; the operation boundary renders them.
 Expected drift is not a warning. Follow the
 [activation diagnostic contract](docs/control-plane.md#release-migrations).

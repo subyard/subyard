@@ -29,7 +29,10 @@ yard -Y hermes config show FORWARD_SSH_AGENT
 yard -Y hermes security --require-live
 ```
 
-See [GitHub App access](github.md) for owner-side setup and the short-lived `gh` workflow. Hermes
+Interactive `init` offers GitHub App setup: enter the App ID, installation ID and the downloaded
+PEM path on the owner host. It creates the protected config and imports the key after the ordinary
+init confirmation. Enter postpones setup; plain `yard -Y hermes init` resumes it later.
+See [GitHub App access](github.md) for details and the short-lived `gh` workflow. Hermes
 receives the same client without receiving the App key or a persistent GitHub credential.
 
 Provisioning installs only these generic OS prerequisites:

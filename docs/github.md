@@ -18,9 +18,52 @@ yard -Y <yard> config set ENVIRONMENT_PROFILES "<current entries> github" --scop
 yard -Y <yard> init
 ```
 
-Create a GitHub App, choose its repository permissions, install it on the intended repositories,
-and generate an RSA private key in the App settings. Subyard neither creates the App nor grants
-additional access. Follow [GitHub’s App setup](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app).
+Implementation, owner-service hooks, setup declarations and tests live in
+[`config/profiles/github/`](../config/profiles/github/). The profile ships its own native broker/client
+binary; the core invokes it through the [profile extension contract](control-plane.md#profile-extensions).
+
+## First-time setup
+
+Run ordinary `yard -Y <yard> init` in a terminal **on the owner host**. When the `github`
+profile is selected and App settings or the default key are missing, init offers a short setup
+conversation:
+
+1. Create a GitHub App, choose its repository permissions, install it on the intended repositories,
+   and download its RSA private key. Follow [GitHub’s App setup](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app).
+2. Enter the numeric **App ID** from the App settings (not the client ID), then the positive
+   **installation ID** from the installation URL, for example the numeric suffix of
+   `https://github.com/settings/installations/12345678`.
+3. Enter the downloaded PEM's path on that owner host. `~/` is supported. If the encrypted ledger
+   already has the key, init restores its consumer instead of asking for another download.
+4. Review the ordinary init plan and confirm once. Init protects the selected PEM, imports it into
+   the encrypted ledger, materializes the key and creates the mode-`0600` App JSON automatically.
+
+No manual JSON, import flags or separate materialization command is needed. Input collection
+reads source metadata only; the downloaded key is read and its permissions tightened only after
+confirmation. The source must be an operator-owned regular file, not a symbolic or hard link.
+The original download is kept. The key follows the ledger's normal synchronization to trusted
+credential peers; use the manual `--local-only` import below if it must stay on this host.
+
+Enter at any field postpones setup; run interactive init again to resume. End-of-input cancels
+preparation without applying setup. Existing valid settings are reused, and missing default key
+material can be restored without duplicating a ledger entry. Existing malformed settings or
+unsafe key files are reported and preserved for explicit repair. Key rotation remains a
+`yard keys rotate` operation.
+
+`--yes`, `ASSUME_YES=1`, non-interactive runs, RPC planning, `init --configs` and `init --reset`
+do not collect setup input. A direct non-interactive init reports how to finish setup on the
+owner host. Remote controllers do not receive the App key or prompt for a local download.
+For a fresh Hermes yard, its preset already selects `hermes github`; after creating the yard,
+plain `yard -Y hermes init` also resumes any postponed setup.
+
+The approved key setup runs before Incus provisioning can restart init in a new group session.
+If later provisioning fails, the saved App setup remains available to the next init. Invalid PEM
+contents are rejected before publishing a credential or App JSON; source permissions may already
+have been tightened. Setup validates the local key and config, but does not contact GitHub or mint
+a token. Verify actual installation permissions afterward with a wrapped command against an
+intended repository, as shown below.
+
+## Manual setup and automation
 
 The owner host keeps the GitHub App configuration in `$SUBYARD_CONFIG_HOME/github-app.json` (normally `~/.config/subyard/github-app.json`). Its
 schema is:
@@ -34,7 +77,7 @@ schema is:
 
 `app_id` contains digits and `installation_id` is a positive integer. Keep the JSON as an
 operator-owned, non-symlink mode-`0600`/`0400` file. Import the downloaded PEM on the owner host
-through [yard keys](keys.md):
+through [yard keys](keys.md) (interactive init does these steps for you):
 
 ```sh
 chmod 0600 /secure/path/github-app.pem
@@ -71,10 +114,13 @@ Concurrent ledger conflicts retain the last verified consumer until resolved, as
 SSH transport, starts again after stop/start or reboot, and does not require an interactive owner
 SSH session. The profile also installs the short local skill for supported agents.
 
-Use the client wrapper for GitHub CLI commands:
+## Use and verify access
+
+Use the client wrapper for GitHub CLI commands against a repository available to the App:
 
 ```sh
-subyard-github run -- gh repo view
+subyard-github status
+subyard-github run -- gh repo view owner/repo
 ```
 
 `subyard-github status` reports `{"configured":false}` until protected App settings are installed. No token is minted by this check.

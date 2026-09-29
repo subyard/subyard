@@ -83,6 +83,16 @@ printf 'ignored qa secret\n' > "$qa_canary"
 printf 'untracked local input\n' > "$untracked_canary"
 chmod 0600 "$staging_canary" "$qa_canary" "$untracked_canary"
 trap 'rm -f -- "$staging_canary" "$qa_canary" "$untracked_canary"; rm -rf "$TMP"' EXIT
+# A newly added profile must package without requiring a staged Git entry.
+fixture_profile="$ROOT/config/profiles/package-fixture"
+mkdir -p "$fixture_profile/cmd/worker" "$fixture_profile/tests"
+printf '%s\n' '{"schema_version":1,"native":[{"package":"cmd/worker","path":"bin/worker"}]}' \
+  > "$fixture_profile/profile.json"
+printf '%s\n' '# Synthetic profile' > "$fixture_profile/profile.conf"
+printf '%s\n' 'package main' 'import "fmt"' 'func main() { fmt.Println("profile native fixture") }' \
+  > "$fixture_profile/cmd/worker/main.go"
+printf '%s\n' 'runtime fixture' > "$fixture_profile/asset.txt"
+printf '%s\n' '# Test-only fixture' > "$fixture_profile/tests/run.sh"
 legacy_installer="$ROOT/tests/fixtures/migrations/v0.1.0-install-runtime-release.sh"
 [ "$(sha256sum "$legacy_installer" | cut -d' ' -f1)" = \
   168dbaa00dfe3d86471358993e63d6b50c02d5af4bb136a6da3c4e39229780dd ] \
@@ -116,8 +126,11 @@ jq -e '.schemaVersion == 1 and .kind == "runtime" and .version == "1.0.0-test" a
   || fail 'runtime bundle manifest is incompatible'
 bundle_list="$TMP/runtime-bundle.list"
 tar -tzf "$bundle_one" > "$bundle_list"
-! grep -Eq '^\./config/profiles/[^/]+/tests/' "$bundle_list" \
-  || fail 'runtime bundle contains profile-owned tests'
+! grep -Eq '^\./config/profiles/[^/]+/(tests/|.*\.go$)' "$bundle_list" \
+  || fail 'runtime bundle contains profile-owned tests or Go source'
+grep -Fxq './config/profiles/package-fixture/asset.txt' "$bundle_list" \
+  && grep -Fxq './config/profiles/package-fixture/bin/worker' "$bundle_list" \
+  || fail 'runtime bundle omitted untracked profile assets or native executable'
 grep -Fxq './bin/yard' "$bundle_list" \
   && grep -Fxq './bin/yard-engine' "$bundle_list" \
   && grep -Fxq './scripts/install-runtime-release.sh' "$bundle_list" \
@@ -148,6 +161,8 @@ grep -Fxq './runtime-files.sha256' "$bundle_list" \
 bundle_extract="$TMP/bundle-extract"
 install -d "$bundle_extract"
 tar -xzf "$bundle_one" -C "$bundle_extract"
+[ "$("$bundle_extract/config/profiles/package-fixture/bin/worker")" = "profile native fixture" ] \
+  || fail 'packaged native profile executable does not run'
 (
   cd "$bundle_extract"
   sha256sum -c runtime-files.sha256 >/dev/null
@@ -288,6 +303,10 @@ artifact_arm="$("$ROOT/dev/package-engine.sh" --output-dir "$release" --version 
 jq -e '.os == "linux" and .arch == "arm64" and .version == "1.0.0-test"' \
   "$artifact_arm.manifest.json" >/dev/null \
   || fail 'arm64 release contract was not published'
+tar -xOf "$release/subyard-1.0.0-test-linux-arm64.tar.gz" \
+  ./config/profiles/package-fixture/bin/worker > "$TMP/profile-arm64"
+[ "$(od -An -tu2 -j18 -N2 "$TMP/profile-arm64" | tr -d ' ')" = 183 ] \
+  || fail 'native profile executable was not cross-compiled for arm64'
 for paseo_arch in amd64 arm64; do
   paseo_asset="$release/paseo-headless-0.2.1-linux-$paseo_arch.tar.gz"
   printf 'paseo test fixture for %s\n' "$paseo_arch" > "$paseo_asset"

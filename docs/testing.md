@@ -45,6 +45,11 @@ The shared runner discovers entrypoints and forwards arguments; each profile own
 fixtures, assertions and lease cleanup. The impact selector recommends this live entrypoint
 for changes to profile E2E tests.
 
+Moving checks into profiles changes ownership, not release coverage: release acceptance must
+aggregate core and all shipped profiles' declared checks against the same candidate. Missing or
+failed required profile checks leave acceptance incomplete; optional runtime selection does not
+make a shipped profile optional to release verification.
+
 GitHub CI runs the full core gate, profile host-free checks, warning-level ShellCheck and
 `bash tests/real-host/adapter-contracts.sh` in one `verify` job on every branch push and pull request;
 tag pushes are reserved for the independent Release workflow. Native Paseo uses the same branch/PR

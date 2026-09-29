@@ -230,7 +230,6 @@ test "$(loginctl show-user dev --property=Linger --value)" = yes \
 incus exec "$instance" --project "$project" --user "$dev_uid" --group "$dev_gid" \
   --env HOME=/home/dev -- sh -euc '
 fail() { printf "Hermes substrate assertion failed: %s\n" "$*" >&2; exit 1; }
-test -L "$HOME/.hermes/skills/subyard-github" || fail "GitHub skill is missing"
 test ! -e "$HOME/.local/bin/hermes" && test ! -L "$HOME/.local/bin/hermes" \
   || fail "Subyard installed a Hermes launcher"
 ! command -v tailscale >/dev/null 2>&1 || fail "Tailscale leaked into the guest"

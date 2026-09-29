@@ -125,7 +125,7 @@ func newInitPlatformFixture() *initPlatformFixture {
 		ports.ReconcileStageNetworkPolicy,
 		ports.ReconcileStagePowerImport, ports.ReconcileStageInstance, ports.ReconcileStageMounts,
 		ports.ReconcileStageProvision, ports.ReconcileStageTestVMs, ports.ReconcileStageSSH,
-		ports.ReconcileStageGitHub, ports.ReconcileStageGitIdentity, ports.ReconcileStageExtras, ports.ReconcileStagePower,
+		ports.ReconcileStageProfileServices, ports.ReconcileStageGitIdentity, ports.ReconcileStageExtras, ports.ReconcileStagePower,
 		ports.ReconcileStageKeys, ports.ReconcileStageSecurity, ports.ReconcileStageOrca,
 	} {
 		converged[id] = true

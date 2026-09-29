@@ -117,12 +117,13 @@ func lifecycleShellActions(root string) map[string]map[string]shelladapter.Actio
 }
 
 type prepareCommandRequest struct {
-	Loaded       config.Loaded
-	Definition   command.Definition
-	Arguments    []string
-	ExplicitYard bool
-	ReadOnly     bool
-	Bootstrap    *initBootstrap
+	Loaded           config.Loaded
+	Definition       command.Definition
+	Arguments        []string
+	ExplicitYard     bool
+	ReadOnly         bool
+	InteractiveSetup bool
+	Bootstrap        *initBootstrap
 	// OnResolved lets the direct boundary audit canonical inputs before assessment.
 	OnResolved func(config.Loaded, []string)
 }
@@ -132,29 +133,30 @@ type commandAssessment func(context.Context) (domain.ActionID, domain.ActionDelt
 // A prepared command owns one execution closure and its captured typed state.
 // Project admission is shared lifecycle state, not a second execution variant.
 type preparedCommand struct {
-	CLI             *CLI
-	Definition      command.Definition
-	Arguments       []string
-	Loaded          config.Loaded
-	Plan            domain.OperationPlan
-	exactState      string
-	ownerPlan       bool
-	Project         *projectExecution
-	release         *releaseExecution
-	policy          domain.CommandPolicy
-	assess          commandAssessment
-	refresh         commandAssessment
-	execute         func(context.Context, *application.Orchestrator, io.Writer) (domain.AdapterResult, error)
-	closeResource   func() error
-	preview         func()
-	displayOnly     func()
-	printResult     func(domain.AdapterResult)
-	remoteArguments func([]string) ([]string, error)
-	executeNoOp     bool
-	closed          bool
-	executed        bool
-	closeOnce       sync.Once
-	closeErr        error
+	CLI              *CLI
+	Definition       command.Definition
+	Arguments        []string
+	Loaded           config.Loaded
+	Plan             domain.OperationPlan
+	exactState       string
+	ownerPlan        bool
+	interactiveSetup bool
+	Project          *projectExecution
+	release          *releaseExecution
+	policy           domain.CommandPolicy
+	assess           commandAssessment
+	refresh          commandAssessment
+	execute          func(context.Context, *application.Orchestrator, io.Writer) (domain.AdapterResult, error)
+	closeResource    func() error
+	preview          func()
+	displayOnly      func()
+	printResult      func(domain.AdapterResult)
+	remoteArguments  func([]string) ([]string, error)
+	executeNoOp      bool
+	closed           bool
+	executed         bool
+	closeOnce        sync.Once
+	closeErr         error
 }
 
 type commandPreparationError struct {
@@ -180,7 +182,7 @@ func (cli *CLI) prepareCommand(ctx context.Context, request prepareCommandReques
 	}
 	operationID := cli.ensureOperationID()
 	prepared := &preparedCommand{CLI: cli, Definition: request.Definition,
-		Arguments: slices.Clone(request.Arguments), Loaded: request.Loaded}
+		Arguments: slices.Clone(request.Arguments), Loaded: request.Loaded, interactiveSetup: request.InteractiveSetup && !request.ReadOnly}
 	defer func() {
 		if err != nil {
 			_ = prepared.Close()
@@ -317,6 +319,12 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 	}
 	if err := cli.prepareInitProfileProvision(ctx, prepared.Loaded, execution, prepared.Arguments); err != nil {
 		return err
+	}
+	if prepared.interactiveSetup {
+		execution.profileSetup, err = cli.prepareInitProfiles(ctx, execution, prepared.Arguments)
+		if err != nil {
+			return err
+		}
 	}
 	if err := execution.validateOrcaRepair(ctx, cli); err != nil {
 		return err

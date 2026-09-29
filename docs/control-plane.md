@@ -794,3 +794,38 @@ Capture results outside the public repository and never include credentials or p
   handler, implement silent `is-up`, and test at least probe plus reverse lifecycle behavior.
 
 Choose validation for these changes using the skill's risk-based test-selection policy.
+
+
+## Profile extensions
+
+Optional behavior and its tests belong to `config/profiles/<name>/`. A shipped `profile.json`
+(schema version `1`) extends existing profile provisioning with declarations read by
+`internal/profile`; profiles without that file retain their existing provision hook behavior.
+This is a local shipped-package contract, not a registry of operator-supplied executable code.
+Unknown fields, unsupported versions, unsafe relative paths and duplicate consumer IDs fail closed.
+
+- `default_yards` supplies selection when `ENVIRONMENT_PROFILES` is absent. An explicit list,
+  including an empty list, wins; matching `disabled_when` conditions disable selection.
+  `selected_provision_only` applies this selection to implicit provisioning.
+- `native` lists Go package directories and artifact paths relative to the profile. Development
+  and release builds discover these declarations; installed profiles contain the native artifacts.
+- `consumers` declares credential ID, zone, relative materialization path and format (`file` or
+  `rsa-private-key`). Core owns protected storage, transfer and validation of these generic formats.
+- `setup` declares nonsecret fields, prompts, config filename and an owned credential consumer.
+  Interactive init prepares these inputs before its existing single confirmation. It checks
+  descriptor/config/source drift before applying; automation never answers profile prompts.
+- `owner_service` names an executable Bash hook. Core invokes it only with prepared engine context,
+  passing `SUBYARD_PROFILE_SELECTED=0|1`, including unselected profiles so they can clean up.
+  `--check` inspects convergence; `--yes` reconciles; `--remove` removes owned service state.
+  `--pause` writes exactly `paused` when it stops an active service, otherwise nothing;
+  `--resume` restores that service. Core retains the paused profile IDs and restores earlier
+  services if a later pause fails. Hooks own their service-specific identity and recovery guards.
+  `SUBYARD_PROFILE_STOPPED=1` asks readiness checks to honor the yard's stopped intent.
+- `managed_paths` declares owned `data`/`operator` paths for teardown assessment, with optional
+  `{yard}` substitution; the hook still owns physical cleanup and ownership checks.
+
+Descriptors contain no secrets. Config and credential data stay outside immutable release roots.
+Profile changes must preserve existing persisted paths and update/rollback behavior or declare a
+migration. Core contract tests use synthetic profiles; concrete implementations, composition checks
+and live acceptance belong to profile runners. Release verification aggregates their results as
+specified in [testing](testing.md).

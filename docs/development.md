@@ -35,10 +35,13 @@ without operator settings.
 
 ```sh
 make build
-./tests/run.sh
+make verify
 ```
 
-`make build` writes the ignored developer candidate `.build/yard` atomically. The source-tree
+`make build` writes the ignored developer candidate `.build/yard` atomically and builds declared
+profile binaries under `.build/profiles/<name>/`. `make verify` runs core and profile host-free
+checks together. Packaging builds the same declared binaries for the target architecture, excluding
+profile Go sources and test directories from runtime bundles. The source-tree
 `bin/yard` launcher uses that explicit candidate and never compiles or downloads a toolchain at
 runtime. Production does not use the source checkout:
 

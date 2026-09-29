@@ -79,10 +79,11 @@ func TestDedicatedProvisionRequiresOptIn(t *testing.T) {
 	}
 }
 
-func TestGitHubProvisionDefaultDoesNotChangeOtherProfileSelection(t *testing.T) {
+func TestDeclaredProvisionSelectionPreservesLegacyProfiles(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
-	writeProvisionProfile(t, root, "github")
-	writeProvisionProfile(t, root, "android")
+	writeProvisionProfile(t, root, "selected")
+	writeProvisionProfile(t, root, "legacy")
+	testkit.WriteFile(t, filepath.Join(root, "config", "profiles", "selected", "profile.json"), []byte(`{"schema_version":1,"selected_provision_only":true,"default_yards":["default"],"disabled_when":{"DISABLE_SERVICE":"1"}}`), 0o644)
 	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment})
 	if err != nil {
 		t.Fatal(err)
@@ -91,18 +92,25 @@ func TestGitHubProvisionDefaultDoesNotChangeOtherProfileSelection(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	empty, selected := "", "github android"
+	empty, selected := "", "selected legacy"
 	for _, scenario := range []struct {
 		yard      string
 		selection *string
-		github    bool
+		disabled  bool
+		selected  bool
 	}{
-		{yard: "default", github: true}, {yard: "other", github: false},
-		{yard: "default", selection: &empty, github: false},
-		{yard: "other", selection: &selected, github: true},
+		{yard: "default", selected: true}, {yard: "other", selected: false},
+		{yard: "default", selection: &empty, selected: false},
+		{yard: "other", selection: &selected, selected: true},
+		{yard: "default", disabled: true, selected: false},
+		{yard: "other", selection: &selected, disabled: true, selected: false},
 	} {
 		loaded.Context.YardName = scenario.yard
 		delete(loaded.Environment, "ENVIRONMENT_PROFILES")
+		delete(loaded.Environment, "DISABLE_SERVICE")
+		if scenario.disabled {
+			loaded.Environment["DISABLE_SERVICE"] = "1"
+		}
 		if scenario.selection != nil {
 			loaded.Environment["ENVIRONMENT_PROFILES"] = *scenario.selection
 		}
@@ -110,7 +118,7 @@ func TestGitHubProvisionDefaultDoesNotChangeOtherProfileSelection(t *testing.T) 
 		if err != nil {
 			t.Fatal(err)
 		}
-		if slices.Contains(execution.profiles, "github") != scenario.github || !slices.Contains(execution.profiles, "android") {
+		if slices.Contains(execution.profiles, "selected") != scenario.selected || !slices.Contains(execution.profiles, "legacy") {
 			t.Fatalf("unexpected profile selection for %s: %v", scenario.yard, execution.profiles)
 		}
 	}

@@ -21,7 +21,6 @@ import (
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
-	"github.com/Subyard/Subyard/internal/githubbroker"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/shellquote"
@@ -99,8 +98,8 @@ func (runtime Runtime) CheckStage(ctx context.Context, stage ports.ReconcileStag
 		return runtime.testVMsConverged(ctx)
 	case ports.ReconcileStageKeys:
 		return runtime.keysConverged(ctx)
-	case ports.ReconcileStageGitHub:
-		return runtime.githubConverged(ctx)
+	case ports.ReconcileStageProfileServices:
+		return runtime.profileServicesConverged(ctx)
 	case ports.ReconcileStageSSH:
 		return runtime.sshConverged(ctx)
 	case ports.ReconcileStageProvision:
@@ -180,8 +179,8 @@ func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStag
 			return err
 		}
 		return runtime.runScript(ctx, runtime.Stderr, "install-keys-auto-sync.sh", "--yes")
-	case ports.ReconcileStageGitHub:
-		return runtime.runScriptEnvironment(ctx, runtime.Stderr, runtime.githubEnvironment(), "github-broker.sh", "--yes")
+	case ports.ReconcileStageProfileServices:
+		return runtime.runScript(ctx, runtime.Stderr, "profile-services.sh", "--yes")
 	case ports.ReconcileStageSSH:
 		return runtime.runScript(ctx, runtime.Stderr, "07-ssh-access.sh", "--yes")
 	case ports.ReconcileStageProvision:
@@ -1835,21 +1834,14 @@ func (runtime Runtime) runPathEnvironment(
 	return nil
 }
 
-func (runtime Runtime) githubEnvironment() map[string]string {
-	enabled := "0"
-	if githubbroker.ProfileEnabled(runtime.Yard.YardName, runtimeEnvironment(runtime.Environment)) {
-		enabled = "1"
-	}
-	return map[string]string{"SUBYARD_GITHUB_ENABLED": enabled}
-}
-func (runtime Runtime) githubConverged(ctx context.Context) (bool, error) {
-	environment := runtime.githubEnvironment()
+func (runtime Runtime) profileServicesConverged(ctx context.Context) (bool, error) {
+	environment := map[string]string{}
 	state, err := runtime.reconcileState(ctx)
 	if err != nil {
 		return false, err
 	}
 	if state.InstanceFound && strings.EqualFold(state.Instance.Status, "stopped") && instanceIntentionallyStopped(state.Instance) {
-		environment["SUBYARD_GITHUB_STOPPED"] = "1"
+		environment["SUBYARD_PROFILE_STOPPED"] = "1"
 	}
-	return probeConverged(runtime.runScriptEnvironment(ctx, nil, environment, "github-broker.sh", "--check"))
+	return probeConverged(runtime.runScriptEnvironment(ctx, nil, environment, "profile-services.sh", "--check"))
 }

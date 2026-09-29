@@ -158,7 +158,7 @@ The focused fixture uses a synthetic App key and never mints a real GitHub token
 keeps one exact slot lease while it prepares, reboots, verifies recovery, and cleans up the VM.
 
 ```sh
-dev/e2e/github-broker.sh --slot "$slot"
+config/profiles/github/tests/e2e/acceptance.sh --slot "$slot"
 ```
 
 Add `--hermes` to run the broader Hermes profile fixture under the same lease; `--wait 60m`

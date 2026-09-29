@@ -24,28 +24,6 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-func TestProfileEnabledDefaultsAndExplicitSelection(t *testing.T) {
-	cases := []struct {
-		name string
-		yard string
-		env  map[string]string
-		want bool
-	}{
-		{name: "default yard", yard: "default", want: true},
-		{name: "other yard", yard: "hermes", want: false},
-		{name: "explicit enable", yard: "hermes", env: map[string]string{"ENVIRONMENT_PROFILES": "base github"}, want: true},
-		{name: "explicit disable", yard: "default", env: map[string]string{"ENVIRONMENT_PROFILES": "base"}, want: false},
-		{name: "nested vm disabled", yard: "default", env: map[string]string{"NESTED_E2E_VMS": "1", "ENVIRONMENT_PROFILES": "github"}, want: false},
-	}
-	for _, test := range cases {
-		t.Run(test.name, func(t *testing.T) {
-			if got := ProfileEnabled(test.yard, test.env); got != test.want {
-				t.Fatalf("ProfileEnabled() = %t, want %t", got, test.want)
-			}
-		})
-	}
-}
-
 func TestRunServerRejectsInvalidTransportConfigWithoutLeakingInput(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "transport.json")

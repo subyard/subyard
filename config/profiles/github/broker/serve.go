@@ -29,22 +29,6 @@ func GuestSocket(developer string) string {
 	return "/home/" + developer + "/.local/share/subyard/github.sock"
 }
 
-// ProfileEnabled supplies only this profile's defaults, preserving legacy selection for all others.
-func ProfileEnabled(yard string, environment map[string]string) bool {
-	if environment["NESTED_E2E_VMS"] == "1" {
-		return false
-	}
-	if profiles, explicit := environment["ENVIRONMENT_PROFILES"]; explicit {
-		for _, profile := range strings.Fields(profiles) {
-			if profile == "github" {
-				return true
-			}
-		}
-		return false
-	}
-	return yard == "default"
-}
-
 func RunServer(ctx context.Context, filename string) error {
 	data, err := readProtected(filename, maxConfigBytes)
 	if err != nil {

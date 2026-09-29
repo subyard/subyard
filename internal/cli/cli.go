@@ -628,7 +628,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		if behavior.prepare != nil {
 			prepared, prepareErr := cli.prepareCommand(ctx, prepareCommandRequest{
 				Loaded: loaded, Definition: definition, Arguments: commandArguments,
-				ExplicitYard: explicit, ReadOnly: readOnlyInvocation, Bootstrap: bootstrap,
+				ExplicitYard: explicit, ReadOnly: readOnlyInvocation, Bootstrap: bootstrap, InteractiveSetup: true,
 				OnResolved: func(resolved config.Loaded, arguments []string) {
 					remote := ""
 					if resolved.Context.AccessKind == domain.AccessRemote {
@@ -807,6 +807,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		return 0
 	case "@init":
 		fmt.Fprintf(cli.options.Stdout, "Usage: %s init [--configs | --reset | --profile <name>] [--yes]\n", cli.options.Program)
+		fmt.Fprintln(cli.options.Stdout, "\nInteractive init offers initial setup declared by selected profiles.\nLeave a setup field empty to skip; --yes and non-interactive runs leave profile settings unchanged.")
 		return 0
 	case "@lifecycle":
 		fmt.Fprintf(cli.options.Stdout, "Usage: %s %s\n", cli.options.Program, definition.Display)

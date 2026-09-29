@@ -142,28 +142,28 @@ jq -e '.transport=="inbound" and .trusted==true' "$remote_keys/peers/default.jso
 expected="$TMP/expected"
 openssl genrsa -out "$expected" 2048 >/dev/null 2>&1
 chmod 0600 "$expected"
-"$ROOT/.build/yard" keys import "$expected" --label real-ssh --zone global --consumer github-app-key \
+"$ROOT/.build/yard" keys import "$expected" --label real-ssh --zone ssh-fixture --consumer staging-env \
   --yes >/dev/null
 credential="$("$ROOT/.build/yard" keys list | awk -F '\t' '$8=="real-ssh" {print $1}')"
 [ -n "$credential" ] || fail 'synthetic SSH credential was not created'
 "$ROOT/.build/yard" keys sync @remote-two --now --yes >/dev/null
-ssh peer-two -- bash -lc "$(printf '%q' 'yard keys materialize global --yes')" >/dev/null
-cmp -s "$expected" "$remote_root/consumer/github/github-app.pem" \
+ssh peer-two -- bash -lc "$(printf '%q' 'yard keys materialize ssh-fixture --yes')" >/dev/null
+cmp -s "$expected" "$remote_root/consumer/staging/ssh-fixture.env" \
   || fail 'real SSH peer did not decrypt the synchronized credential'
 if grep -R -E -q -- 'BEGIN (RSA )?PRIVATE KEY' "$local_keys" "$remote_keys"; then
   fail 'synthetic plaintext reached an SSH-synchronized ledger'
 fi
-[ "$(stat -c %a "$remote_root/consumer/github/github-app.pem")" = 600 ] \
-  || fail 'GitHub key materialization has unsafe permissions'
+[ "$(stat -c %a "$remote_root/consumer/staging/ssh-fixture.env")" = 600 ] \
+  || fail 'credential materialization has unsafe permissions'
 openssl genrsa -out "$expected" 2048 >/dev/null 2>&1
 "$ROOT/.build/yard" keys rotate "$credential" --file "$expected" --yes >/dev/null
 "$ROOT/.build/yard" keys sync @remote-two --now --yes >/dev/null
-cmp -s "$expected" "$remote_root/consumer/github/github-app.pem" \
-  || fail 'SSH peer did not automatically materialize the rotated GitHub key'
+cmp -s "$expected" "$remote_root/consumer/staging/ssh-fixture.env" \
+  || fail 'SSH peer did not automatically materialize the rotated credential'
 "$ROOT/.build/yard" keys revoke "$credential" --yes >/dev/null
 "$ROOT/.build/yard" keys sync @remote-two --now --yes >/dev/null
-ssh peer-two -- bash -lc "$(printf '%q' 'yard keys materialize global --yes')" >/dev/null
-[ ! -e "$remote_root/consumer/github/github-app.pem" ] \
+ssh peer-two -- bash -lc "$(printf '%q' 'yard keys materialize ssh-fixture --yes')" >/dev/null
+[ ! -e "$remote_root/consumer/staging/ssh-fixture.env" ] \
   || fail 'revoked SSH credential remained materialized'
 
-printf 'ok: real OpenSSH GitHub key import, trust, sync, rotation and revoke contract\n'
+printf 'ok: real OpenSSH credential import, trust, sync, rotation and revoke contract\n'

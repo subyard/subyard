@@ -62,15 +62,20 @@ grep -Fq 'run: go test -race -shuffle=on -count=3 ./...' "$DEEP_WORKFLOW" \
   || fail 'deep CI must run repeated race tests and bounded parser fuzzing'
 
 for workflow in "$CI_WORKFLOW" "$RELEASE_WORKFLOW"; do
+  grep -Fq 'make verify' "$workflow" \
+    || fail "$(basename "$workflow") must verify core and shipped profiles"
   grep -Fq "bash $RUNNER" "$workflow" \
     || fail "$(basename "$workflow") must invoke the shared runner"
   ! grep -Fq 'scripts/install-key-tools.sh' "$workflow" \
     || fail "$(basename "$workflow") bypasses the prepared-context runner"
 done
 
-grep -Fq 'run: ./tests/run.sh' "$CI_WORKFLOW" \
+grep -Fq 'run: make verify' "$CI_WORKFLOW" \
   && grep -Fq 'shellcheck -x -S warning' "$CI_WORKFLOW" \
   || fail 'CI must run the core and ShellCheck gates'
+verify_recipe="$(awk '/^verify:/ {inside=1; next} inside && /^[^[:space:]]/ {exit} inside {print}' "$ROOT/Makefile")"
+[[ "$verify_recipe" == *'./tests/run.sh'* && "$verify_recipe" == *'bash dev/test-profiles.sh'* ]] \
+  || fail 'shared verification gate must include core and profile checks'
 line_of() {
   grep -nF "$2" "$1" | head -n1 | cut -d: -f1
 }

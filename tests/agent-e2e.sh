@@ -336,7 +336,7 @@ grep -Fxq 'export SUBYARD_E2E_YARD=test-yard' "$TMP/run.sh" \
   && grep -Fxq 'export SUBYARD_E2E_GENERATION=7' "$TMP/run.sh" \
   || fail "guest command omitted public lease context"
 write_guest_command 1 "$command_root" ./bin/yard --version > "$TMP/yard-run.sh"
-grep -Fxq '/usr/sbin/runuser -u dev -- env HOME=/home/dev USER=dev LOGNAME=dev ./dev/build-engine.sh' \
+grep -Fxq '/usr/sbin/runuser -u dev -- env HOME=/home/dev USER=dev LOGNAME=dev make build' \
   "$TMP/yard-run.sh" \
   || fail "direct guest yard command does not build its explicit development engine"
 grep -Fxq 'exec /usr/sbin/runuser -u dev -- env HOME=/home/dev USER=dev LOGNAME=dev ./bin/yard --version' \

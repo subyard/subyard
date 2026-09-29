@@ -5,9 +5,11 @@ VERSION ?= 0.1.0-dev
 
 build:
 	@PATH="$$(dirname "$$(command -v $(GO))"):$${PATH}" YARD_BUILD_VERSION="$(VERSION)" ./dev/build-engine.sh
+	@PATH="$$(dirname "$$(command -v $(GO))"):$${PATH}" ./dev/build-profiles.sh
 
 test:
-	$(GO) test ./...
+	$(GO) test ./cmd/... ./internal/...
+	bash dev/test-profiles.sh
 
 cli-docs: build
 	python3 dev/generate-cli-docs.py
@@ -17,6 +19,7 @@ cli-docs-check: build
 
 verify:
 	./tests/run.sh
+	bash dev/test-profiles.sh
 
 clean:
 	@find .build -maxdepth 1 -type f -name 'yard' -delete 2>/dev/null || true

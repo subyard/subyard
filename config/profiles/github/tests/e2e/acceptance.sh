@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../../../../.." && pwd)"
 MODE="${1:-normal}"
 CHECKPOINT="$HOME/.cache/subyard-github-e2e-checkpoint.json"
 STATE=''
@@ -33,7 +33,7 @@ controller_main() {
   boot_down=0 boot_ready=0 prepared=0 cleanup_failed=0 rc=0 system_rc=0
   system_state='' power_snapshot='' power_started='' power_ready=0
   wait_value='' wait_number='' run_hermes=0
-  usage() { printf 'Usage: dev/e2e/github-broker.sh --slot N [--wait N|Ns|Nm] [--hermes]\n' >&2; return 2; }
+  usage() { printf 'Usage: config/profiles/github/tests/e2e/acceptance.sh --slot N [--wait N|Ns|Nm] [--hermes]\n' >&2; return 2; }
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --slot)
@@ -80,7 +80,7 @@ controller_main() {
         cleanup_guest 1 >/dev/null 2>&1 || cleanup_failed=1
       fi
       if [ "$cleanup_failed" = 0 ]; then
-        run_guest 1 "$bundle" "$bundle_hash" bash dev/e2e/github-broker.sh --cleanup \
+        run_guest 1 "$bundle" "$bundle_hash" bash config/profiles/github/tests/e2e/acceptance.sh --cleanup \
           >/dev/null 2>&1 || cleanup_failed=1
         cleanup_guest 1 >/dev/null 2>&1 || cleanup_failed=1
       fi
@@ -110,9 +110,9 @@ controller_main() {
   bundle_hash="$(sha256sum "$bundle" | awk '{print $1}')"
   ok "worktree bundle ready (sha256=$bundle_hash)"
   info 'removing any prior marked GitHub broker checkpoint'
-  run_guest 1 "$bundle" "$bundle_hash" bash dev/e2e/github-broker.sh --cleanup
+  run_guest 1 "$bundle" "$bundle_hash" bash config/profiles/github/tests/e2e/acceptance.sh --cleanup
   cleanup_guest 1
-  run_guest 1 "$bundle" "$bundle_hash" bash dev/e2e/github-broker.sh --prepare-reboot
+  run_guest 1 "$bundle" "$bundle_hash" bash config/profiles/github/tests/e2e/acceptance.sh --prepare-reboot
   prepared=1
   cleanup_guest 1
   before_boot="$(timeout --foreground 15 ssh -F "$CLIENT_CONFIG" -T \
@@ -173,7 +173,7 @@ controller_main() {
     sleep 1
   done
   [ "$power_ready" = 1 ] || die 'owner power reconciler did not finish after reboot'
-  run_guest 1 "$bundle" "$bundle_hash" bash dev/e2e/github-broker.sh --verify-reboot
+  run_guest 1 "$bundle" "$bundle_hash" bash config/profiles/github/tests/e2e/acceptance.sh --verify-reboot
   cleanup_guest 1
   prepared=0
   if [ "$run_hermes" = 1 ]; then
@@ -208,7 +208,18 @@ incus() {
     /usr/bin/incus "$@"
   fi
 }
-yard() { "$ROOT/.build/yard" "$@"; }
+yard() {
+  # Init may add the owner to incus-admin in a child session. Subsequent
+  # fixture commands need a fresh group session for the host policy lock too.
+  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+    local command
+    printf -v command '%q ' "$ROOT/.build/yard" "$@"
+    sg incus-admin -c "$command"
+  else
+    "$ROOT/.build/yard" "$@"
+  fi
+}
 systemctl_user() {
   local runtime_dir
   runtime_dir="/run/user/$(id -u)"
@@ -225,7 +236,7 @@ guest_dev() {
   incus exec "$INSTANCE" --project "$PROJECT" --user "$DEV_UID" --group "$DEV_GID" \
     --env HOME=/home/dev --env USER=dev --env LOGNAME=dev -- "$@"
 }
-hermes_yard() { "$ROOT/.build/yard" -Y "$HERMES_YARD" "$@"; }
+hermes_yard() { yard -Y "$HERMES_YARD" "$@"; }
 hermes_setting() {
   local output
   output="$(hermes_yard config show "$1")"
@@ -460,6 +471,7 @@ else
 fi
 export STATE MARKER
 [ -x "$ROOT/.build/yard" ] || { command -v go >/dev/null 2>&1 || die 'Go is required'; "$ROOT/dev/build-engine.sh" --force; }
+"$ROOT/dev/build-profiles.sh"
 incus info >/dev/null 2>&1 || die 'Incus owner API is unavailable on the disposable VM'
 if [ "$MODE" = --verify-reboot ] || [ "$MODE" = --cleanup ]; then
   if incus project show "$PROJECT" >/dev/null 2>&1 || [ "$MODE" = --verify-reboot ]; then
@@ -473,7 +485,7 @@ if [ -S /var/lib/incus/unix.socket ] && [ ! -w /var/lib/incus/unix.socket ] \
   && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin \
   && ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin; then
   printf -v reexec 'exec env SUBYARD_E2E_VM=%q bash %q %q' \
-    "$SUBYARD_E2E_VM" "$ROOT/dev/e2e/github-broker.sh" "$MODE"
+    "$SUBYARD_E2E_VM" "$ROOT/config/profiles/github/tests/e2e/acceptance.sh" "$MODE"
   exec sg incus-admin -c "$reexec"
 fi
 

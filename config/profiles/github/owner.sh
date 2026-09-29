@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Physical convergence of the selected GitHub profile and its owner-side user service.
 set -euo pipefail
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROFILE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+root="$(cd "$PROFILE_DIR/../../.." && pwd)"
+SCRIPT_DIR="$root/scripts"
 # shellcheck source=scripts/lib/engine-context.sh
 . "$SCRIPT_DIR/lib/engine-context.sh"
 subyard_require_engine_context
@@ -12,7 +14,6 @@ subyard_require_engine_context
 
 mode=apply
 case "${1:-}" in --check) mode=check ;; --remove) mode=remove ;; --pause) mode=pause ;; --resume) mode=resume ;; --yes|'') ;; *) die 'invalid GitHub broker lifecycle argument' ;; esac
-root="$(cd "$SCRIPT_DIR/.." && pwd)"
 yard="${SUBYARD_YARD:-default}"
 case "$yard" in ''|*[!a-zA-Z0-9_-]*) die 'invalid GitHub broker yard' ;; esac
 unit="subyard-github-$yard.service"
@@ -22,11 +23,12 @@ state_dir="$SUBYARD_HOME/github-broker"
 runtime_file="$state_dir/$yard.json"
 broker_engine="$state_dir/$yard-engine"
 app_config="$SUBYARD_CONFIG_HOME/github-app.json"
-engine="${SUBYARD_DISPATCHER_PATH:-}"
-profile_dir="$root/config/profiles/github"
+engine="$PROFILE_DIR/bin/broker"
+[ -x "$engine" ] || engine="$root/.build/profiles/github/bin/broker"
+profile_dir="$PROFILE_DIR"
 guest_engine=/usr/local/libexec/subyard/github-client
 marker='# Managed by Subyard GitHub broker'
-enabled="${SUBYARD_GITHUB_ENABLED:-0}"
+enabled="${SUBYARD_PROFILE_SELECTED:-0}"
 [ "$mode" != remove ] || enabled=0
 
 operator="${SUBYARD_USER:-$(id -un)}"
@@ -88,7 +90,7 @@ if [ "$mode" = pause ] || [ "$mode" = resume ]; then
   exit 0
 fi
 guest_hook() {
-  tar -C "$profile_dir" -cf - . | incus exec "$YARD_INSTANCE_NAME" --project "$INCUS_PROJECT" \
+  tar -C "$profile_dir" -cf - provision.sh SKILL.md bin/subyard-github | incus exec "$YARD_INSTANCE_NAME" --project "$INCUS_PROJECT" \
     --env DEV_USER="$DEV_USER" -- bash -euo pipefail -c '
       bundle="$(mktemp -d /tmp/subyard-github.XXXXXX)"
       trap '\''rm -rf -- "$bundle"'\'' EXIT
@@ -140,7 +142,7 @@ if [ "$mode" = check ]; then
   user_systemctl is-enabled --quiet "$unit" 2>/dev/null || exit 1
   [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" = yes ] || exit 1
   cmp -s "$engine" "$broker_engine" || exit 1
-  [ "${SUBYARD_GITHUB_STOPPED:-0}" != 1 ] || exit 0
+  [ "${SUBYARD_PROFILE_STOPPED:-0}" != 1 ] || exit 0
   user_systemctl is-active --quiet "$unit" 2>/dev/null || exit 1
   wanted="$(sha256sum "$engine" | cut -d' ' -f1)"
   actual="$(incus exec "$YARD_INSTANCE_NAME" --project "$INCUS_PROJECT" -- sha256sum "$guest_engine" 2>/dev/null | cut -d' ' -f1)" || exit 1

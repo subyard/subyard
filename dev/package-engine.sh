@@ -84,33 +84,30 @@ install -m 0755 "$REPO/bin/yard" "$bundle_stage/bin/yard"
 runtime_list="$bundle_stage/.runtime-inputs"
 runtime_extras=(
   scripts/e2e-lab/base.sh
-  scripts/github-broker.sh
-  config/profiles/github/profile.conf
-  config/profiles/github/provision.sh
-  config/profiles/github/bin/subyard-github
-  config/profiles/github/SKILL.md
   scripts/lib/ai-observer-proxy.sh
   scripts/lib/engine-context.sh
   scripts/install-ssh-relay.sh
   scripts/install-test-vms-host-sink.sh
   scripts/reconcile-integrations.sh
+  scripts/profile-services.sh
   config/agents/codex/provision.sh
   config/agents/aiobserver/provision.sh
-  config/profiles/hermes/resources/dashboard.res
-  config/profiles/hermes/resources/dashboard/handler.sh
-  config/profiles/hermes/yard.env
   config/systemd/subyard-test-vms-host-sink.service.in
   config/systemd/subyard-test-vms-host-sink.timer.in
 )
 {
   git -C "$REPO" ls-files --cached -z -- scripts config completions
+  # Profile directories own their runtime inputs, including new checkout files.
+  (cd "$REPO" && find config/profiles -type f -print0)
   for relative in "${runtime_extras[@]}"; do
     [ -f "$REPO/$relative" ] && printf '%s\0' "$relative"
   done
 } | sort -zu > "$runtime_list"
 while IFS= read -r -d '' relative; do
   [ -e "$REPO/$relative" ] || continue
-  case "$relative" in config/profiles/*/tests/*) continue ;; esac
+  case "$relative" in
+    config/profiles/*/tests/*|config/profiles/*/*.go|config/profiles/*/go.mod|config/profiles/*/go.sum) continue ;;
+  esac
   case "$relative" in
     scripts/*|config/*|completions/*) ;;
     *) printf 'package-engine: runtime allowlist escaped: %s\n' "$relative" >&2; exit 1 ;;
@@ -122,6 +119,8 @@ while IFS= read -r -d '' relative; do
   cp -p -- "$REPO/$relative" "$bundle_stage/$relative"
 done < "$runtime_list"
 rm -f -- "$runtime_list"
+GOOS="$goos" GOARCH="$goarch" "$SCRIPT_DIR/build-profiles.sh" \
+  --output-dir "$bundle_stage/config/profiles"
 install -m 0755 "$RUNTIME_INSTALLER" "$bundle_stage/scripts/install-runtime-release.sh"
 install -m 0644 "$MIGRATION_REGISTRY" "$bundle_stage/config/migrations.json"
 install -m 0644 "$RELEASE_TRANSITION_REGISTRY" "$bundle_stage/config/release-transition.json"
