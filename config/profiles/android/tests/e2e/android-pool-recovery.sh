@@ -10,6 +10,8 @@ elif [ "$#" -ne 5 ]; then
   fail 'usage: script ROOT STATE YARD PROJECT INSTANCE [--viewer-only]'
 fi
 root="$1" state="$2" yard_name="$3" project="$4" instance="$5"
+. "$root/tests/helpers/release-candidate.sh"
+if YARD_BIN="$(release_candidate_prepare "$root")"; then unset YARD_ENGINE_PATH; else candidate_rc=$?; [ "$candidate_rc" = 1 ] || exit "$candidate_rc"; YARD_BIN="$root/.build/yard"; fi
 [[ "$root" = /* && "$state" = /* ]] || fail 'root and state must be absolute paths'
 for name in "$yard_name" "$project" "$instance"; do
   [[ "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]*$ ]] || fail 'invalid fixture identifier'
@@ -18,7 +20,7 @@ done
   || fail 'state is not the retained Android fixture'
 [ "${SUBYARD_E2E_VM:-}" = 1 ] && [ -r /run/subyard-e2e-lease.json ] \
   || fail 'requires the allocated Android E2E VM'
-[ -x "$root/.build/yard" ] || fail 'candidate yard binary is missing'
+[ -x "$YARD_BIN" ] || fail 'candidate yard binary is missing'
 [ -r "$root/config/profiles/android/tests/e2e/android-pool-viewer.py" ] || fail 'viewer helper is missing'
 export SUBYARD_OPERATOR_HOME="$HOME" SUBYARD_CONFIG_HOME="$state/config" SUBYARD_HOME="$state/data"
 export STORAGE_PATH="$HOME/.cache/subyard-e2e-platform/incus/incus/storage"
@@ -40,10 +42,10 @@ yard() {
   shift
   if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
     && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
-    printf -v command '%q ' "$root/.build/yard" -Y "$yard_name" "$@"
+    printf -v command '%q ' "$YARD_BIN" -Y "$yard_name" "$@"
     timeout --foreground "$(remaining "$seconds")" sg incus-admin -c "exec $command"
   else
-    timeout --foreground "$(remaining "$seconds")" "$root/.build/yard" -Y "$yard_name" "$@"
+    timeout --foreground "$(remaining "$seconds")" "$YARD_BIN" -Y "$yard_name" "$@"
   fi
 }
 incus_exec() {
@@ -227,7 +229,7 @@ owner_lease="$work/owner-view.json"
 (umask 077; guest 30 cat "$first" > "$owner_lease")
 before_view="$(check_guest 30 allocation "$first")"
 phase_log="$work/owner-viewer.log"
-printf -v viewer_command '%q ' "$root/.build/yard" -Y "$yard_name" emu view \
+printf -v viewer_command '%q ' "$YARD_BIN" -Y "$yard_name" emu view \
   --lease-file "$owner_lease" -- --time-limit=30 --max-size=640 --no-audio
 timeout --foreground "$(remaining 210)" env ADB="$owner_adb" \
   PATH="$work/subyard-e2e-scrcpy:$work/platform-tools:$PATH" SDL_RENDER_DRIVER=software \

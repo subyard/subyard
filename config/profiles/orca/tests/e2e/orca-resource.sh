@@ -3,8 +3,19 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+RUNTIME_ROOT="$ROOT"
+if [ -e "$ROOT/.subyard-acceptance/candidate.json" ]; then
+  # shellcheck source=tests/helpers/release-candidate.sh
+  . "$ROOT/tests/helpers/release-candidate.sh"
+  YARD_ENGINE_PATH="$(release_candidate_prepare "$ROOT")"
+  RUNTIME_ROOT="$(dirname "$(dirname "$YARD_ENGINE_PATH")")"
+else
+  YARD_ENGINE_PATH="$ROOT/.build/yard"
+  bash "$ROOT/dev/build-engine.sh" >/dev/null
+fi
+export YARD_ENGINE_PATH
 # shellcheck source=config/profiles/orca/release.env
-. "$ROOT/config/profiles/orca/release.env"
+. "$RUNTIME_ROOT/config/profiles/orca/release.env"
 # shellcheck source=tests/helpers/test-context.sh
 . "$ROOT/tests/helpers/test-context.sh"
 
@@ -95,7 +106,7 @@ done
 install -d -m 0755 /etc/subyard /usr/local/libexec/subyard/projects-changed.d
 : > /etc/subyard/agent-project-hooks
 YARD
-"${incus[@]}" file push "$ROOT/config/projects-changed.sh" \
+"${incus[@]}" file push "$RUNTIME_ROOT/config/projects-changed.sh" \
   "$instance/usr/local/libexec/subyard/projects-changed" --mode 0755
 if "${incus[@]}" exec "$instance" -- command -v tailscale >/dev/null 2>&1; then
   die 'Tailscale unexpectedly exists inside the yard'
@@ -155,19 +166,17 @@ printf '%s\n' "$advertise" >"$work/advertise"
 setup_test_context "$work/context" "$project" "$instance"
 export PATH="$fakebin:$PATH"
 export ORCA_ADVERTISE_HOST="$advertise" ORCA_HOST_PORT="$host_port" ASSUME_YES=1
-export YARD_ENGINE_PATH="$ROOT/.build/yard"
-bash "$ROOT/dev/build-engine.sh" >/dev/null
 
 run_orca() {
   # This fixture builds its own minimal Incus instance. Exercise the physical
   # resource adapter; orca-bootstrap/orca-projects cover the complete native CLI.
   local assessment action
   assessment="$(SUBYARD_RESOURCE_MODE=prepare \
-    "$ROOT/config/profiles/orca/resources/orca/handler.sh" "$@")" || return
+    "$RUNTIME_ROOT/config/profiles/orca/resources/orca/handler.sh" "$@")" || return
   action="$(jq -er '.action' <<<"$assessment")" || return
   SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION="$action" \
     SUBYARD_OPERATION_ID=orca-resource-acceptance \
-    "$ROOT/config/profiles/orca/resources/orca/handler.sh" "$@"
+    "$RUNTIME_ROOT/config/profiles/orca/resources/orca/handler.sh" "$@"
 }
 
 server_cli() {
@@ -606,7 +615,7 @@ set +e
 timeout --signal=TERM --kill-after=2s 3s \
   env SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION=logs \
   SUBYARD_OPERATION_ID=orca-resource-acceptance \
-  "$ROOT/config/profiles/orca/resources/orca/handler.sh" logs --follow >"$work/logs-follow.out" 2>&1
+  "$RUNTIME_ROOT/config/profiles/orca/resources/orca/handler.sh" logs --follow >"$work/logs-follow.out" 2>&1
 follow_status=$?
 set -e
 [ "$follow_status" -eq 124 ] || die "logs --follow exited with status $follow_status before timeout"

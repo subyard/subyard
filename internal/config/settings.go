@@ -82,6 +82,7 @@ type settingAssignment struct {
 }
 
 type settingTracker struct {
+	catalog      Catalog
 	integrations IntegrationSelection
 	layers       []settingLayer
 	assignments  map[string][]settingAssignment
@@ -116,7 +117,7 @@ func (tracker *settingTracker) record(
 	line int,
 	detail string,
 ) {
-	if _, ok := LookupSetting(name); !ok {
+	if _, ok := tracker.catalog.LookupSetting(name); !ok {
 		return
 	}
 	tracker.order++
@@ -155,21 +156,21 @@ func (tracker *settingTracker) configurationLayers() []ConfigurationLayer {
 
 func (tracker *settingTracker) traces(values environment) map[string]SettingTrace {
 	names := make(map[string]struct{}, len(catalog)+len(tracker.assignments))
-	for name := range catalog {
-		names[name] = struct{}{}
+	for _, definition := range tracker.catalog.SettingCatalog() {
+		names[definition.Name] = struct{}{}
 	}
 	for name := range tracker.assignments {
 		names[name] = struct{}{}
 	}
 	for name := range values {
-		if _, ok := LookupSetting(name); ok {
+		if _, ok := tracker.catalog.LookupSetting(name); ok {
 			names[name] = struct{}{}
 		}
 	}
 
 	result := make(map[string]SettingTrace, len(names))
 	for name := range names {
-		definition, ok := LookupSetting(name)
+		definition, ok := tracker.catalog.LookupSetting(name)
 		if !ok {
 			continue
 		}
@@ -281,7 +282,7 @@ func SyncableFileMappings(loaded Loaded) []FileSettingMapping {
 }
 
 func ResolvedSettingCatalog(loaded Loaded) []SettingDefinition {
-	result := SettingCatalog()
+	result := loaded.Catalog.SettingCatalog()
 	for index := range result {
 		result[index] = ResolvedSettingDefinition(loaded, result[index])
 	}

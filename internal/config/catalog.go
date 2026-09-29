@@ -55,22 +55,23 @@ const (
 )
 
 type SettingDefinition struct {
-	Name        string
-	Kind        SettingKind
-	Type        SettingValueType
-	Aliases     []string
-	Scopes      []SettingScope
-	Syncable    bool
-	Sensitive   bool
-	Merge       string
-	Application SettingApplication
-	Owner       string
-	Enum        []string
-	Minimum     int
-	Maximum     int
-	Optional    bool
-	Default     string
-	HasDefault  bool
+	Name         string
+	Kind         SettingKind
+	Type         SettingValueType
+	Aliases      []string
+	Scopes       []SettingScope
+	Syncable     bool
+	Sensitive    bool
+	Merge        string
+	Application  SettingApplication
+	Owner        string
+	Enum         []string
+	Minimum      int
+	Maximum      int
+	Optional     bool
+	Default      string
+	HostListener bool
+	HasDefault   bool
 }
 
 var catalog = map[string]SettingDefinition{
@@ -96,14 +97,6 @@ var catalog = map[string]SettingDefinition{
 		scopes(ScopeShipped), enum("true", "false")),
 	"ACCESS_KIND": scalar("remote-connection", SettingString, SettingNextCommand, false,
 		scopes(ScopeHost, ScopeYard, ScopeCommand), enum("local", "remote")),
-	"ADB_CONSOLE_EMULATOR_PORT": scalar("port", SettingPort, SettingNextCommand, true,
-		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand), optionalRange(1, 65535)),
-	"ADB_CONSOLE_PROXY_PORT": scalar("port", SettingPort, SettingNextCommand, true,
-		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand), optionalRange(1, 65535)),
-	"ADB_EMULATOR_PORT": scalar("port", SettingPort, SettingNextCommand, true,
-		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand), numberRange(1, 65535)),
-	"ADB_PROXY_PORT": scalar("port", SettingPort, SettingNextCommand, true,
-		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand), numberRange(1, 65535)),
 	"AI_OBSERVER_HOST_PORT": scalar("agent-integration", SettingPort, SettingYardInit, true,
 		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand), optionalRange(1024, 65535)),
 	"CODING_TOOL_INTEGRATIONS": scalar("coding-tool-integration", SettingNameList, SettingYardInit, true,
@@ -150,10 +143,6 @@ var catalog = map[string]SettingDefinition{
 		scopes(ScopeShipped, ScopeShared, ScopeHost, ScopeYard, ScopeCommand), numberRange(1, 1<<20-1)),
 	"FORWARD_SSH_AGENT": scalar("yard-security", SettingBoolean, SettingYardInit, true,
 		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand)),
-	"HERMES_DASHBOARD_ADVERTISE_HOST": scalar("hermes-dashboard-resource", SettingString, SettingNextCommand, true,
-		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand), optional()),
-	"HERMES_DASHBOARD_HOST_PORT": scalar("hermes-dashboard-resource", SettingPort, SettingNextCommand, true,
-		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand), optionalRange(1, 65535)),
 	"HOST_BASE": scalar("host-storage", SettingAbsolutePath, SettingNextCommand, false,
 		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand)),
 	"HOST_CLAUDE_MD": scalar("host-files", SettingAbsolutePath, SettingYardInit, true,
@@ -176,10 +165,6 @@ var catalog = map[string]SettingDefinition{
 		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand), optional()),
 	"NESTED_E2E_VMS": scalar("yard-security", SettingBoolean, SettingYardInit, true,
 		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand)),
-	"ORCA_ADVERTISE_HOST": scalar("orca-resource", SettingString, SettingNextCommand, true,
-		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand), optional()),
-	"ORCA_HOST_PORT": scalar("orca-resource", SettingPort, SettingNextCommand, true,
-		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand), optionalRange(1, 65535)),
 	"REMOTE_DEV_USER": scalar("remote-connection", SettingName, SettingNextCommand, false,
 		scopes(ScopeHost, ScopeYard, ScopeCommand), optional()),
 	"REMOTE_SSH_PORT": scalar("remote-connection", SettingPort, SettingNextCommand, false,
@@ -195,7 +180,7 @@ var catalog = map[string]SettingDefinition{
 	"SSH_HOST": scalar("yard-identity", SettingName, SettingNextCommand, false,
 		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand)),
 	"SSH_PORT": scalar("host-network", SettingPort, SettingNextCommand, true,
-		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand), numberRange(1, 65535)),
+		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand), numberRange(1, 65535), hostListener()),
 	"STORAGE_PATH": scalar("host-storage", SettingAbsolutePath, SettingYardInit, false,
 		scopes(ScopeShipped, ScopeHost, ScopeCommand)),
 	"SUBYARD_AGE_SHA256_AMD64": scalar("credential-tools", SettingSHA256, SettingYardInit, true,
@@ -297,7 +282,10 @@ func enum(values ...string) definitionOption {
 	}
 }
 
-func LookupSetting(name string) (SettingDefinition, bool) {
+func (settings Catalog) LookupSetting(name string) (SettingDefinition, bool) {
+	if definition, ok := settings.profiles[name]; ok {
+		return definition, true
+	}
 	if definition, ok := catalog[name]; ok {
 		definition.Name = name
 		return definition, true
@@ -338,10 +326,13 @@ func resourceSettingDefinition(name string) (SettingDefinition, bool) {
 	return SettingDefinition{}, false
 }
 
-func SettingCatalog() []SettingDefinition {
+func (settings Catalog) SettingCatalog() []SettingDefinition {
 	result := make([]SettingDefinition, 0, len(catalog))
 	for name, definition := range catalog {
 		definition.Name = name
+		result = append(result, definition)
+	}
+	for _, definition := range settings.profiles {
 		result = append(result, definition)
 	}
 	sort.Slice(result, func(left, right int) bool {
@@ -404,8 +395,8 @@ func agentSettingDefinition(name string) (SettingDefinition, bool) {
 	return SettingDefinition{}, false
 }
 
-func ValidateSetting(scope SettingScope, name, value string, requireSyncable bool) error {
-	definition, err := ValidateSettingName(scope, name, requireSyncable)
+func (settings Catalog) ValidateSetting(scope SettingScope, name, value string, requireSyncable bool) error {
+	definition, err := settings.ValidateSettingName(scope, name, requireSyncable)
 	if err != nil {
 		return err
 	}
@@ -431,12 +422,12 @@ func ValidateNonSecretContent(name, value string) error {
 	return nil
 }
 
-func ValidateSettingName(
+func (settings Catalog) ValidateSettingName(
 	scope SettingScope,
 	name string,
 	requireSyncable bool,
 ) (SettingDefinition, error) {
-	definition, ok := LookupSetting(name)
+	definition, ok := settings.LookupSetting(name)
 	if !ok {
 		return SettingDefinition{}, fmt.Errorf("unknown setting %q", name)
 	}
@@ -670,4 +661,17 @@ func secretLike(name, value string) bool {
 		}
 	}
 	return false
+}
+
+// Core-only helpers are used by isolated contracts. Operations use their loaded catalog.
+func LookupSetting(name string) (SettingDefinition, bool) { return (Catalog{}).LookupSetting(name) }
+func SettingCatalog() []SettingDefinition                 { return (Catalog{}).SettingCatalog() }
+func ValidateSetting(scope SettingScope, name, value string, syncable bool) error {
+	return (Catalog{}).ValidateSetting(scope, name, value, syncable)
+}
+func ValidateSettingName(scope SettingScope, name string, syncable bool) (SettingDefinition, error) {
+	return (Catalog{}).ValidateSettingName(scope, name, syncable)
+}
+func hostListener() definitionOption {
+	return func(definition *SettingDefinition) { definition.HostListener = true }
 }

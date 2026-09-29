@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "owners": [
+    {"path": "config/profiles/android/emulator-control.sh", "kind": "profile", "owner": "config/profiles/android/pool-install.sh", "reference": "emulator-control.sh"},
+    {"path": "config/profiles/android/emulator-run.sh", "kind": "profile", "owner": "config/profiles/android/pool-install.sh", "reference": "emulator-run.sh"},
+    {"path": "config/profiles/android/pool-install.sh", "kind": "profile", "owner": "config/profiles/android/provision.sh", "reference": "pool-install.sh"},
+    {"path": "config/profiles/android/provision.sh", "kind": "profile", "owner": "internal/cli/provision.go", "reference": "\"provision.sh\""},
+    {"path": "config/profiles/android/resources/emulator/handler.sh", "kind": "profile", "owner": "config/profiles/android/resources/emulator.res", "reference": "HANDLER=resources/emulator/handler.sh"},
+    {"path": "config/profiles/android/resources/emulator/process-identity.sh", "kind": "library", "owner": "config/profiles/android/provision.sh", "reference": "process-identity.sh"},
+    {"path": "config/profiles/android/runtime.sh", "kind": "profile", "owner": "config/profiles/android/pool.py", "reference": "runtime.sh"}
+  ]
+}

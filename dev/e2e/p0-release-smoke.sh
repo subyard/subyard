@@ -10,6 +10,9 @@ set -euo pipefail
 OLD_VERSION=0.14.0
 OLD_INSTALLER_SHA256=a78c10910c0886a8d01c0a2e77718b21ce58e45fa7f0de6064bc1f351d56028b
 CANDIDATE_VERSION="0.14.1-p0.smoke.$TOKEN"
+if [ -e "$ROOT/.subyard-acceptance/candidate.json" ]; then
+  CANDIDATE_VERSION="$(jq -er '.version' "$ROOT/.subyard-acceptance/candidate.json")"
+fi
 INSTALLER="$STATE_ROOT/subyard-install-baseline.sh"
 SMOKE_PROJECT=ReleaseSmoke
 SMOKE_SOURCE="$OPERATOR_HOME/$SMOKE_PROJECT"
@@ -30,8 +33,16 @@ verify_smoke_state() {
 prepare_smoke() {
   prepare_fixture
   p0_capacity_reset_build_cache
-  "$ROOT/dev/package-engine.sh" --output-dir "$RELEASE_ROOT" \
-    --version "$CANDIDATE_VERSION" >/dev/null
+  if [ -e "$ROOT/.subyard-acceptance/candidate.json" ]; then
+    # shellcheck source=tests/helpers/release-candidate.sh
+    . "$ROOT/tests/helpers/release-candidate.sh"
+    release_candidate_prepare "$ROOT" >/dev/null
+    mkdir -p "$RELEASE_ROOT"
+    cp -a "$ROOT/.subyard-acceptance/release/." "$RELEASE_ROOT/"
+  else
+    "$ROOT/dev/package-engine.sh" --output-dir "$RELEASE_ROOT" \
+      --version "$CANDIDATE_VERSION" >/dev/null
+  fi
   chmod -R a+rX "$RELEASE_ROOT"
   info "installing published baseline $OLD_VERSION"
   curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 180 \

@@ -138,9 +138,10 @@ recovery, while unlock uses the normal mutation gate. This workflow does not use
 payloads or the persistent `yard keys` ledger.
 
 The shared `scripts/ssh-agent-environment.sh` physical leaf installs and checks the guest shell
-fallback, OpenSSH client default and Orca systemd environment. Both SSH initialization and
-explicit unlock use it; repeated
-grants do not restart Orca. See [temporary SSH access](ssh-agent.md) for the public command contract
+fallback and OpenSSH client default. Shipped `profile.json` declarations supply service-specific
+`guest_environment` hooks; SSH initialization, readiness and explicit unlock invoke every declared
+hook, including deselected profiles with installed services. The Orca profile owns its systemd
+drop-in and durable refresh marker; repeated grants do not restart an already-current service. See [temporary SSH access](ssh-agent.md) for the public command contract
 and the distinction between expiring signatures and already authenticated SSH sessions.
 
 ### RPC
@@ -829,3 +830,29 @@ Profile changes must preserve existing persisted paths and update/rollback behav
 migration. Core contract tests use synthetic profiles; concrete implementations, composition checks
 and live acceptance belong to profile runners. Release verification aggregates their results as
 specified in [testing](testing.md).
+
+### Profile settings and installed runtime hooks
+
+The shipped `config/profiles/*/profile.json` v1 descriptors may declare `settings`, `runtime`
+and `guest_environment`. These extend the existing profile registry; operator configuration cannot
+supply declarations or executable hooks. Profile setting names must not collide with core fields,
+dynamic core namespaces or another profile. The loader resolves one operation-local catalog before
+reading configuration layers. Validation, provenance, field discovery, authoring, sync and command
+context use that catalog. Defaults retain lowest precedence. A `host_listener` port participates
+in generic owner-port collision checks.
+
+A `runtime` declaration contains an `activation_id` and relative executable `handler`. The ID is
+unique across profile and core activation stages and remains durable across release transitions.
+The hook accepts `observe`, or `apply OPERATION_ID ACTUAL_SHA256 DESIRED_SHA256`, and emits only a
+bounded JSON object with `state`, `actual` and `desired`. States are `absent`, `deferred`, `current`
+and `stale`; installed states carry lowercase SHA-256 fingerprints. Observe must not mutate state.
+Core bounds execution and output, checks the assessment before apply, and verifies the resulting
+state separately. Missing/stopped yards are absent/deferred without starting them. Hooks run in
+activation-ID order before integration project hooks; update and rollback inspect all local yards.
+The Orca profile retains its existing `orca-runtime` identity and wire fingerprints.
+
+A `guest_environment` handler accepts `check|ensure DEV_USER` through the existing root guest
+execution boundary. Its source is read only from the validated shipped profile. `check` reports
+readiness; `ensure` performs the previously assessed repair. Profile selection does not suppress
+repair of an installed service. Core owns transport, confirmation and orchestration; each profile
+owns its service paths, diagnostics and restart mechanics.

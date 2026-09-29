@@ -3,6 +3,15 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+# shellcheck source=tests/helpers/release-candidate.sh
+. "$ROOT/tests/helpers/release-candidate.sh"
+if YARD_BIN="$(release_candidate_prepare "$ROOT")"; then
+  unset YARD_ENGINE_PATH
+else
+  candidate_rc=$?
+  [ "$candidate_rc" = 1 ] || exit "$candidate_rc"
+  YARD_BIN="$ROOT/.build/yard"
+fi
 STATE=""
 YARD=""
 TAILSCALE_IP=""
@@ -12,15 +21,15 @@ die() { printf 'hermes-profile-e2e: %s\n' "$*" >&2; exit 2; }
 for command in curl ip python3 sg sudo tar timeout; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
-if [ ! -x "$ROOT/.build/yard" ]; then
+if [ ! -x "$YARD_BIN" ]; then
   command -v go >/dev/null 2>&1 || die "Go is required in the leased VM"
-  "$ROOT/dev/build-engine.sh"
+  "$ROOT/dev/build-engine.sh"; YARD_BIN="$ROOT/.build/yard"
 fi
 
 yard() {
   local name="$1"
   shift
-  "$ROOT/.build/yard" -Y "$name" "$@"
+  "$YARD_BIN" -Y "$name" "$@"
 }
 
 setting() {

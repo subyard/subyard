@@ -204,6 +204,11 @@ quarantined or recovering slot instead exposes bounded recovery metadata:
 `last_failure_event_id`, `incident_id`, `recovery_attempt` and `next_recovery_at`. For an available
 empty slot, the attribution columns are empty.
 
+Frozen physical acceptance may set `SUBYARD_E2E_CONTROLLER_WORKSPACE` to the managed controller
+checkout for lease attribution when candidate source runs from a temporary snapshot. The runner
+still resolves and validates that checkout and its project metadata; this does not change the
+source root copied to guests.
+
 The runner requires `attribution-v2`, `environment-acquire-v3` and `disposable-v1` from read-only
 status before it sends the exact typed `acquire-v3` request. Legacy acquire is not supported, and the runner never downgrades in
 response to status or acquire failure. Only a typed busy response plus bounded `--wait` permits

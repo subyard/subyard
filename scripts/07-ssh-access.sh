@@ -159,11 +159,21 @@ incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" --env PUBKEY="$PUBKEY" --env DEV_U
 ' || die "could not authorize the key in the yard"
 ok "$DEV_USER@$SSH_HOST authorized for your key"
 
-# Install the fixed yard agent fallback for new shells and the Orca service. The
-# same helper is used by first unlock to upgrade yards initialized by older releases.
+# Install the generic yard shell/OpenSSH agent fallback. The same helper is used
+# by first unlock to upgrade yards initialized by older releases.
 incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- sh -eu -s -- ensure "$DEV_USER" \
   < "$SCRIPT_DIR/ssh-agent-environment.sh" \
   || die "could not configure the yard SSH agent environment"
+
+# Profile handlers repair service-specific environment for every shipped profile,
+# including deselected profiles whose services may already be installed.
+PROFILE_HOOKS="${SUBYARD_PROFILE_GUEST_ENVIRONMENT_HOOKS:-}"
+if [ -n "$PROFILE_HOOKS" ]; then
+  PROFILE_ROOT="$(cd "$SCRIPT_DIR/../config/profiles" && pwd)"
+  subyard_apply_profile_guest_environment_hooks \
+    "$PROFILE_ROOT" "$YARD_INSTANCE_NAME" "$INCUS_PROJECT" "$DEV_USER" "$PROFILE_HOOKS" \
+    || die "could not configure a profile guest environment"
+fi
 
 # --- 4. ~/.ssh Host entry via an Include (does not rewrite your config) -------
 echo "SSH client config:"

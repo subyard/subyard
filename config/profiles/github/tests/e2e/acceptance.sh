@@ -2,6 +2,15 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../../../../.." && pwd)"
+# shellcheck source=tests/helpers/release-candidate.sh
+. "$ROOT/tests/helpers/release-candidate.sh"
+if YARD_BIN="$(release_candidate_prepare "$ROOT")"; then
+  unset YARD_ENGINE_PATH
+else
+  candidate_rc=$?
+  [ "$candidate_rc" = 1 ] || exit "$candidate_rc"
+  YARD_BIN="$ROOT/.build/yard"
+fi
 MODE="${1:-normal}"
 CHECKPOINT="$HOME/.cache/subyard-github-e2e-checkpoint.json"
 STATE=''
@@ -214,10 +223,10 @@ yard() {
   if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
     && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
     local command
-    printf -v command '%q ' "$ROOT/.build/yard" "$@"
+    printf -v command '%q ' "$YARD_BIN" "$@"
     sg incus-admin -c "$command"
   else
-    "$ROOT/.build/yard" "$@"
+    "$YARD_BIN" "$@"
   fi
 }
 systemctl_user() {
@@ -470,8 +479,8 @@ else
   chmod 0600 "$STATE/.marker"
 fi
 export STATE MARKER
-[ -x "$ROOT/.build/yard" ] || { command -v go >/dev/null 2>&1 || die 'Go is required'; "$ROOT/dev/build-engine.sh" --force; }
-"$ROOT/dev/build-profiles.sh"
+[ -x "$YARD_BIN" ] || { command -v go >/dev/null 2>&1 || die 'Go is required'; "$ROOT/dev/build-engine.sh" --force; YARD_BIN="$ROOT/.build/yard"; }
+[ "$YARD_BIN" != "$ROOT/.build/yard" ] || "$ROOT/dev/build-profiles.sh"
 incus info >/dev/null 2>&1 || die 'Incus owner API is unavailable on the disposable VM'
 if [ "$MODE" = --verify-reboot ] || [ "$MODE" = --cleanup ]; then
   if incus project show "$PROJECT" >/dev/null 2>&1 || [ "$MODE" = --verify-reboot ]; then

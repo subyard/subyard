@@ -97,7 +97,7 @@ func (cli *CLI) integrationSelectionContext(loaded config.Loaded, requested []st
 	environment["CODING_TOOL_INTEGRATIONS"] = strings.Join(requested, " ")
 	environment["SUBYARD_CONFIG_HOME"] = loaded.Context.Paths.ConfigHome
 	environment["SUBYARD_HOME"] = loaded.Context.Paths.DataHome
-	return config.Load(config.LoadOptions{RepositoryRoot: cli.options.RepositoryRoot, OperatorHome: loaded.Context.Paths.OperatorHome, YardName: loaded.Context.YardName, Environment: environment})
+	return config.Load(config.LoadOptions{Catalog: &cli.catalog, RepositoryRoot: cli.options.RepositoryRoot, OperatorHome: loaded.Context.Paths.OperatorHome, YardName: loaded.Context.YardName, Environment: environment})
 }
 
 func (cli *CLI) persistentIntegrationContext(loaded config.Loaded) (config.Loaded, error) {
@@ -109,7 +109,7 @@ func (cli *CLI) persistentIntegrationContext(loaded config.Loaded) (config.Loade
 	delete(environment, "SUBYARD_ENGINE_CONTEXT")
 	environment["SUBYARD_CONFIG_HOME"] = loaded.Context.Paths.ConfigHome
 	environment["SUBYARD_HOME"] = loaded.Context.Paths.DataHome
-	persistent, err := config.Load(config.LoadOptions{RepositoryRoot: cli.options.RepositoryRoot, OperatorHome: loaded.Context.Paths.OperatorHome, YardName: loaded.Context.YardName, Environment: environment})
+	persistent, err := config.Load(config.LoadOptions{Catalog: &cli.catalog, RepositoryRoot: cli.options.RepositoryRoot, OperatorHome: loaded.Context.Paths.OperatorHome, YardName: loaded.Context.YardName, Environment: environment})
 	if err != nil {
 		return persistent, err
 	}
@@ -273,7 +273,7 @@ func (prepared *preparedCommand) prepareIntegration(ctx context.Context, _ *init
 func integrationConfigurationFingerprint(loaded config.Loaded) string {
 	values := map[string]string{}
 	for name, value := range loaded.Environment {
-		if _, known := config.LookupSetting(name); known || name == "INTEGRATION_HOST_LINKS" {
+		if _, known := loaded.Catalog.LookupSetting(name); known || name == "INTEGRATION_HOST_LINKS" {
 			values[name] = value
 		}
 	}

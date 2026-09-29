@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "owners": [
+    {"path": "config/profiles/openclaw/provision.sh", "kind": "profile", "owner": "internal/cli/provision.go", "reference": "\"provision.sh\""},
+    {"path": "config/profiles/openclaw/resources/qa-bot-broker/handler.sh", "kind": "profile", "owner": "config/profiles/openclaw/resources/qa-bot-broker.res", "reference": "HANDLER=resources/qa-bot-broker/handler.sh"},
+    {"path": "config/profiles/openclaw/resources/staging-gateway/handler.sh", "kind": "profile", "owner": "config/profiles/openclaw/resources/staging-gateway.res", "reference": "HANDLER=resources/staging-gateway/handler.sh"},
+    {"path": "config/profiles/openclaw/resources/staging-gateway/sy-stage.sh", "kind": "embedded", "owner": "config/profiles/openclaw/resources/staging-gateway/handler.sh", "reference": "sy-stage.sh"}
+  ]
+}

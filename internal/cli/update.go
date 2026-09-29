@@ -93,7 +93,7 @@ func (cli *CLI) releaseRuntimeConfig(environment map[string]string) releaserunti
 func (cli *CLI) releaseTransitionInheritedSettingIDs() []string {
 	inheritedSettingIDs := make([]string, 0)
 	for name := range cli.baseEnv {
-		if _, setting := config.LookupSetting(name); setting {
+		if _, setting := cli.catalog.LookupSetting(name); setting {
 			inheritedSettingIDs = append(inheritedSettingIDs, name)
 		}
 	}

@@ -1736,6 +1736,12 @@ func TestStructuredStartAutomationSkipsOnlyTheLocalPrompt(t *testing.T) {
 
 func TestProductionStartAdapterUsesGuardedShellHandler(t *testing.T) {
 	fixtureRoot, environment, _ := nativeFixture(t)
+	profileRoot := filepath.Join(fixtureRoot, "config", "profiles", "synthetic")
+	if err := os.MkdirAll(profileRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(profileRoot, "profile.json"), `{"schema_version":1,"settings":[{"name":"SAMPLE_PROFILE_VALUE","type":"string","scopes":["command"],"application":"next-command","optional":true}],"guest_environment":{"handler":"guest.sh"}}`, 0o600)
+	writeCLIFile(t, filepath.Join(profileRoot, "guest.sh"), "#!/bin/sh\n", 0o700)
 	program, err := New(Options{
 		RepositoryRoot: fixtureRoot, Program: "yard", Environment: environment, WorkingDir: fixtureRoot,
 	})
@@ -1787,17 +1793,19 @@ exit 90
 	if remoteValues["OWNER_ENDPOINT"] != remoteContext.OwnerEndpoint || remoteValues["OWNER_YARD_NAME"] != remoteContext.OwnerYardName {
 		t.Fatalf("structured adapter context lost remote route: %#v", remoteValues)
 	}
-	commandValues := structuredCommandContext(config.Loaded{Context: loaded.Context, Environment: map[string]string{
-		"CCUSAGE_PROVISION":                "/config/agents/ccusage/provision.sh",
-		"E2E_VM_SLOT_COUNT":                "2",
-		"AGENT_codex_CONFIG":               "/config/agents/codex/config.toml",
-		"HOST_OPENCODE_AGENTS_MD":          "/home/operator/.config/opencode/AGENTS.md",
-		"YARD_RUNTIME_ROOT":                "/opt/subyard/runtime",
-		"SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE": "1",
-		"SUBYARD_CONFIG_SECRETS_DIR":       "/home/operator/.config/subyard/secrets",
-		"AGENT_codex_TOKEN":                "must-not-cross",
-		"AWS_SECRET_ACCESS_KEY":            "must-not-cross",
-		"UNRELATED_AMBIENT_VALUE":          "must-not-cross",
+	commandValues := structuredCommandContext(config.Loaded{Catalog: program.catalog, Context: loaded.Context, Environment: map[string]string{
+		"CCUSAGE_PROVISION":                       "/config/agents/ccusage/provision.sh",
+		"E2E_VM_SLOT_COUNT":                       "2",
+		"AGENT_codex_CONFIG":                      "/config/agents/codex/config.toml",
+		"HOST_OPENCODE_AGENTS_MD":                 "/home/operator/.config/opencode/AGENTS.md",
+		"YARD_RUNTIME_ROOT":                       "/opt/subyard/runtime",
+		"SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE":        "1",
+		"SUBYARD_CONFIG_SECRETS_DIR":              "/home/operator/.config/subyard/secrets",
+		"AGENT_codex_TOKEN":                       "must-not-cross",
+		"AWS_SECRET_ACCESS_KEY":                   "must-not-cross",
+		"UNRELATED_AMBIENT_VALUE":                 "must-not-cross",
+		"SAMPLE_PROFILE_VALUE":                    "profile-value",
+		"SUBYARD_PROFILE_GUEST_ENVIRONMENT_HOOKS": "forged-hook-list",
 	}})
 	for name, expected := range map[string]string{
 		"CCUSAGE_PROVISION":                "/config/agents/ccusage/provision.sh",
@@ -1806,10 +1814,14 @@ exit 90
 		"HOST_OPENCODE_AGENTS_MD":          "/home/operator/.config/opencode/AGENTS.md",
 		"YARD_RUNTIME_ROOT":                "/opt/subyard/runtime",
 		"SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE": "1",
+		"SAMPLE_PROFILE_VALUE":             "profile-value",
 	} {
 		if commandValues[name] != expected {
 			t.Fatalf("structured command context lost %s: %#v", name, commandValues)
 		}
+	}
+	if want := filepath.Join(profileRoot, "guest.sh"); commandValues["SUBYARD_PROFILE_GUEST_ENVIRONMENT_HOOKS"] != want {
+		t.Fatalf("profile hook list was not rebuilt from the catalog: got=%q want=%q", commandValues["SUBYARD_PROFILE_GUEST_ENVIRONMENT_HOOKS"], want)
 	}
 	for _, name := range []string{
 		"SUBYARD_CONFIG_SECRETS_DIR", "AGENT_codex_TOKEN",
@@ -2048,7 +2060,7 @@ func TestNativeStatusUsesTypedPortsAndRendersParityFields(t *testing.T) {
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"-Y", "default", "status"}, Environment: environment,
 		WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Incus: fakeIncus, Executor: fakeIncus,
 		StatusFacts: statusFactsStub{value: domain.StatusFacts{
-			Profiles: []string{"android", "orca"},
+			Profiles: []string{"sample", "another"},
 			Agents: []domain.AgentStatus{
 				{Name: "codex", State: "enabled"},
 				{Name: "aiobserver", State: "up", URL: "http://127.0.0.1:18080/"},
@@ -2068,7 +2080,7 @@ func TestNativeStatusUsesTypedPortsAndRendersParityFields(t *testing.T) {
 	for _, expected := range []string{
 		"yard  RUNNING", "desired  running", "ip       10.0.0.2", "host-demo",
 		"services ssh/docker = active/active", "vscode   key=yes server=yes git-id=yes",
-		"projects 1", "profiles android orca", "codex", "enabled", "aiobserver", "up",
+		"projects 1", "profiles sample another", "codex", "enabled", "aiobserver", "up",
 		"http://127.0.0.1:18080/", "android   emulator", "security static-only", "space    1G",
 	} {
 		if !strings.Contains(stdout.String(), expected) {

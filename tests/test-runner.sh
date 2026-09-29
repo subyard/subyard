@@ -109,6 +109,11 @@ printf '#!/usr/bin/env bash\nprintf "profile e2e %%s\\n" "$*"\n' \
 bash "$fixture/dev/test-profiles.sh" --e2e --slot 7 > "$tmp/profiles-e2e.out" 2>&1
 grep -Fxq 'profile e2e --slot 7' "$tmp/profiles-e2e.out" \
   || fail 'profile E2E selection or arguments were lost'
+bash "$fixture/dev/test-profiles.sh" --e2e --list > "$tmp/profiles-list.out"
+grep -Fxq $'runner\texample\tconfig/profiles/example/tests/e2e/acceptance.sh' \
+  "$tmp/profiles-list.out" || fail 'profile runner listing is incomplete'
+! grep -q 'profile e2e' "$tmp/profiles-list.out" \
+  || fail 'profile listing executed an acceptance runner'
 
 # Discovery must never turn an omitted profile obligation into a passing gate.
 mkdir -p "$fixture/config/profiles/undeclared/tests/e2e"
@@ -116,6 +121,11 @@ rc=0
 bash "$fixture/dev/test-profiles.sh" --e2e > "$tmp/profiles-missing.out" 2>&1 || rc=$?
 [ "$rc" -ne 0 ] || fail 'missing profile acceptance runner was silently skipped'
 grep -q 'undeclared incomplete' "$tmp/profiles-missing.out" || fail 'missing profile was not identified'
+rc=0
+bash "$fixture/dev/test-profiles.sh" --e2e --list > "$tmp/profiles-list-missing.out" 2>&1 || rc=$?
+[ "$rc" -ne 0 ] || fail 'profile listing accepted a missing required runner'
+grep -q 'undeclared incomplete' "$tmp/profiles-list-missing.out" \
+  || fail 'profile listing did not identify the missing runner'
 ! grep -q '^profile e2e' "$tmp/profiles-missing.out" \
   || fail 'a profile ran before the complete acceptance inventory was validated'
 printf ' \n\t\n' > "$fixture/config/profiles/undeclared/tests/e2e/acceptance.not-applicable"

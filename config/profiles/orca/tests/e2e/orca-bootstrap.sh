@@ -822,7 +822,13 @@ token="$(printf '%s' "${STATE##*.}" | tr '[:upper:]' '[:lower:]')"
 PROJECT="subyard-orca-bootstrap-$token"
 INSTANCE="yard-orca-bootstrap-$token"
 
-bash "$ROOT/dev/build-engine.sh" >/dev/null
+if [ -e "$ROOT/.subyard-acceptance/candidate.json" ]; then
+  # shellcheck source=tests/helpers/release-candidate.sh
+  . "$ROOT/tests/helpers/release-candidate.sh"
+  YARD_BIN="$(release_candidate_prepare "$ROOT")"
+else
+  bash "$ROOT/dev/build-engine.sh" >/dev/null
+fi
 # Keep the disposable VM's prepared toolchain caches when isolating the operator home.
 GOMODCACHE="$(go env GOMODCACHE)"
 GOCACHE="$(go env GOCACHE)"
@@ -952,8 +958,15 @@ PY_UPGRADE_DEFAULT
 fi
 release_version=0.13.3-orca-bootstrap-e2e
 [ -z "$HANDLER_ACCEPTANCE" ] || release_version=0.14.1-orca-handler-e2e
-bash "$STATE/source/dev/package-engine.sh" --version "$release_version" \
-  --output-dir "$STATE/release" >/dev/null
+if [ -e "$ROOT/.subyard-acceptance/candidate.json" ]; then
+  [ -z "$UPGRADE_FROM" ] || die 'the mutated upgrade fixture requires a separate candidate'
+  release_version="$(jq -er '.version' "$ROOT/.subyard-acceptance/candidate.json")"
+  mkdir -p "$STATE/release"
+  cp -a "$ROOT/.subyard-acceptance/release/." "$STATE/release/"
+else
+  bash "$STATE/source/dev/package-engine.sh" --version "$release_version" \
+    --output-dir "$STATE/release" >/dev/null
+fi
 if [ -n "$UPGRADE_FROM" ]; then
   stage "installing published Subyard $UPGRADE_FROM and starting Orca before the upgrade"
   published_installer="$STATE/published-install.sh"

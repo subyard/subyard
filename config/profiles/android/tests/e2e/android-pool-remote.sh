@@ -5,6 +5,8 @@ set -euo pipefail
 fail() { printf 'android-pool-remote: %s\n' "$*" >&2; exit 1; }
 [ "$#" -eq 5 ] || [ "$#" -eq 6 ] || fail 'usage: script ROOT STATE YARD PROJECT INSTANCE [OWNER_ADB]'
 root="$1" state="$2" yard_name="$3" project="$4" instance="$5"
+. "$root/tests/helpers/release-candidate.sh"
+if YARD_BIN="$(release_candidate_prepare "$root")"; then unset YARD_ENGINE_PATH; else candidate_rc=$?; [ "$candidate_rc" = 1 ] || exit "$candidate_rc"; YARD_BIN="$root/.build/yard"; fi
 owner_adb="${6:-}"
 [[ "$root" = /* && "$state" = /* ]] || fail 'root and state must be absolute paths'
 [[ "$yard_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]*$ \
@@ -14,7 +16,7 @@ owner_adb="${6:-}"
   || fail 'state is not the retained Android fixture'
 [ "${SUBYARD_E2E_VM:-}" = 1 ] && [ -r /run/subyard-e2e-lease.json ] \
   || fail 'requires the allocated Android E2E VM'
-[ -x "$root/.build/yard" ] && [ -x /usr/sbin/sshd ] || fail 'candidate yard or sshd is missing'
+[ -x "$YARD_BIN" ] && [ -x /usr/sbin/sshd ] || fail 'candidate yard or sshd is missing'
 if [ -n "$owner_adb" ]; then
   [[ "$owner_adb" = "$state"/android-recovery.*/platform-tools/adb ]] && [ -x "$owner_adb" ] \
     || fail 'owner ADB is not the copied fixture tool'
@@ -25,16 +27,17 @@ done
 sudo -n true || fail 'passwordless sudo is required in the allocated VM'
 
 export SUBYARD_OPERATOR_HOME="$HOME" SUBYARD_CONFIG_HOME="$state/config" SUBYARD_HOME="$state/data"
+export YARD_BIN
 export STORAGE_PATH="$HOME/.cache/subyard-e2e-platform/incus/incus/storage"
 export SUBYARD_NO_AUDIT=1 SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 MIN_DISK_GIB=1
 owner() {
   local command
   if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
     && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
-    printf -v command '%q ' "$root/.build/yard" -Y "$yard_name" "$@"
+    printf -v command '%q ' "$YARD_BIN" -Y "$yard_name" "$@"
     timeout --foreground 45 sg incus-admin -c "exec $command"
   else
-    timeout --foreground 45 "$root/.build/yard" -Y "$yard_name" "$@"
+    timeout --foreground 45 "$YARD_BIN" -Y "$yard_name" "$@"
   fi
 }
 [ "$(owner config show INCUS_PROJECT | sed -n 's/^effective: //p')" = "$project" ] \
@@ -159,7 +162,7 @@ env.update(SUBYARD_OPERATOR_HOME=home, SUBYARD_CONFIG_HOME=state + "/config",
            SUBYARD_HOME=state + "/data", SUBYARD_REPOSITORY_ROOT=root,
            STORAGE_PATH=storage, SUBYARD_NO_AUDIT="1", SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE="1",
            SUBYARD_OPERATION_ID=inner[0].split("=", 1)[1])
-os.execve(root + "/.build/yard", [root + "/.build/yard", "-Y", yard, "emu", *arguments], env)
+os.execve(os.environ["YARD_BIN"], [os.environ["YARD_BIN"], "-Y", yard, "emu", *arguments], env)
 '''.replace('VALUES', repr((root, state, yard, home, storage, payload)), 1)
 pathlib.Path(path).write_text(source)
 PY
@@ -219,7 +222,7 @@ controller() {
   if [ "$1" = run ]; then seconds=1320; fi
   PATH="$work/client-bin:$PATH" SUBYARD_CONFIG_HOME="$work/controller-config" \
     SUBYARD_HOME="$work/controller-data" timeout --foreground "$seconds" \
-    "$root/.build/yard" -Y remote emu "$@" </dev/null
+    "$YARD_BIN" -Y remote emu "$@" </dev/null
 }
 owner emu catalog > "$work/local-catalog.json"
 controller catalog > "$work/remote-catalog.json" 2> "$work/remote-catalog.err" \

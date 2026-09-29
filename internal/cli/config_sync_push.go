@@ -363,13 +363,13 @@ func (cli *CLI) exportPersistentConfig(
 	if err := os.RemoveAll(hostRoot); err != nil {
 		return err
 	}
-	if err := exportConfigScalarFile(
+	if err := exportConfigScalarFile(loaded.Catalog,
 		filepath.Join(loaded.Context.Paths.ConfigHome, "overrides", "shared", "config.env"),
 		filepath.Join(sharedRoot, "config.env"), config.ScopeShared,
 	); err != nil {
 		return err
 	}
-	if err := exportConfigScalarFile(
+	if err := exportConfigScalarFile(loaded.Catalog,
 		filepath.Join(loaded.Context.Paths.ConfigHome, "config.env"),
 		filepath.Join(hostRoot, "config.env"), config.ScopeHost,
 	); err != nil {
@@ -394,7 +394,7 @@ func (cli *CLI) exportPersistentConfig(
 		destination := filepath.Join(
 			hostRoot, "yards", target.Name, "config.env",
 		)
-		if err := exportConfigScalarFile(
+		if err := exportConfigScalarFile(loaded.Catalog,
 			source, destination, config.ScopeYard,
 		); err != nil {
 			return fmt.Errorf("yard %s: %w", target.Name, err)
@@ -454,7 +454,7 @@ func (cli *CLI) exportPersistentConfig(
 }
 
 func exportConfigScalarFile(
-	source string,
+	settings config.Catalog, source string,
 	destination string,
 	scope config.SettingScope,
 ) error {
@@ -467,12 +467,12 @@ func exportConfigScalarFile(
 	}
 	names := make([]string, 0, len(values))
 	for name, value := range values {
-		definition, ok := config.LookupSetting(name)
+		definition, ok := settings.LookupSetting(name)
 		if !ok || definition.Kind != config.SettingScalar ||
 			!definition.Syncable || definition.Sensitive {
 			continue
 		}
-		if err := config.ValidateSetting(scope, name, value, true); err != nil {
+		if err := settings.ValidateSetting(scope, name, value, true); err != nil {
 			return err
 		}
 		names = append(names, name)

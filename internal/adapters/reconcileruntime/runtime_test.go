@@ -14,6 +14,7 @@ import (
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
@@ -668,6 +669,7 @@ func TestSSHProbeOwnsProxyAndClientConfig(t *testing.T) {
 	incus.ExecSteps = []testkit.IncusExecStep{{Result: ports.InstanceExecResult{ExitCode: 1}}}
 	assertStage(t, runtime, "ssh", false, "guest missing canonical public key")
 	runtime.RepositoryRoot = filepath.Join("..", "..", "..")
+	runtime.Profiles = []profile.Definition{}
 	incus.ExecSteps = []testkit.IncusExecStep{{}, {Result: ports.InstanceExecResult{ExitCode: 1}}}
 	assertStage(t, runtime, "ssh", false, "guest missing SSH agent environment")
 	incus.ExecSteps = []testkit.IncusExecStep{{}, {}}
@@ -680,6 +682,25 @@ func TestSSHProbeOwnsProxyAndClientConfig(t *testing.T) {
 	if len(last) < 4 || last[0] != "grep" || last[1] != "-qxF" {
 		t.Fatalf("guest authorization probe does not match the canonical public key: %q", last)
 	}
+	profileRoot := filepath.Join(root, "profile")
+	if err := os.Mkdir(profileRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	guestHook := filepath.Join(profileRoot, "guest-environment.sh")
+	definition := profile.Definition{Name: "synthetic", Root: profileRoot,
+		GuestEnvironment: &profile.GuestEnvironmentHook{Handler: "guest-environment.sh"}}
+	runtime.Profiles = []profile.Definition{definition}
+	testkit.WriteFile(t, guestHook, []byte("exit 1\n"), 0o700)
+	incus.ExecSteps = []testkit.IncusExecStep{{}, {}, {Result: ports.InstanceExecResult{ExitCode: 1}}}
+	assertStage(t, runtime, "ssh", false, "stale profile guest environment despite current generic helper")
+	profileProbe := incus.ExecCalls[len(incus.ExecCalls)-1].Request
+	if strings.Join(profileProbe.Command, " ") != "sh -eu -s -- check dev" || string(profileProbe.Stdin) != "exit 1\n" {
+		t.Fatalf("profile guest environment probe = %#v", profileProbe)
+	}
+	testkit.WriteFile(t, guestHook, []byte("exit 0\n"), 0o700)
+	incus.ExecSteps = []testkit.IncusExecStep{{}, {}, {}}
+	assertStage(t, runtime, "ssh", true, "converged profile guest environment")
+	runtime.Profiles = []profile.Definition{}
 	runtime.Yard.NestedE2EVMs = true
 	incus.ExecSteps = []testkit.IncusExecStep{{}, {}}
 	assertStage(t, runtime, "ssh", true, "nested guest authorizes restricted canonical key")

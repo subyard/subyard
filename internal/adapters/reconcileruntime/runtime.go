@@ -22,6 +22,7 @@ import (
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/sshidentity"
@@ -42,7 +43,10 @@ type vmIPv4Pinner interface {
 
 type Runtime struct {
 	RepositoryRoot string
-	Environment    []string
+	// Profiles is the immutable per-operation profile snapshot when supplied by
+	// the caller. Nil falls back to loading the shipped declarations from disk.
+	Profiles    []profile.Definition
+	Environment []string
 	// AdoptLegacyIntegrations permits one initial, exact ownership adoption during
 	// a reviewed init plan. Ordinary integration commands leave it false.
 	AdoptLegacyIntegrations bool
@@ -116,15 +120,26 @@ func (runtime Runtime) CheckStage(ctx context.Context, stage ports.ReconcileStag
 		err = runtime.runScriptEnvironment(ctx, nil, desired, "09-yard-extras.sh", "--check")
 	case ports.ReconcileStageSecurity:
 		return runtime.securityConverged(ctx)
-	case ports.ReconcileStageOrca:
-		observation, err := runtime.ObserveOrcaRuntime(ctx)
+	case ports.ReconcileStageProfileRuntimes:
+		observations, err := runtime.ObserveProfileRuntimes(ctx)
 		if err != nil {
 			return false, err
 		}
-		if observation.State == "deferred" {
-			runtime.reportOrcaDeferred()
+		activationIDs := make([]string, 0, len(observations))
+		for activationID := range observations {
+			activationIDs = append(activationIDs, activationID)
 		}
-		return observation.State != "stale", nil
+		sort.Strings(activationIDs)
+		for _, activationID := range activationIDs {
+			observation := observations[activationID]
+			if observation.State == ports.RuntimeStateDeferred {
+				runtime.reportProfileRuntimeDeferred(activationID)
+			}
+			if observation.State == ports.RuntimeStateStale {
+				return false, nil
+			}
+		}
+		return true, nil
 	default:
 		return false, fmt.Errorf("unknown reconcile stage %q", stage)
 	}
@@ -190,7 +205,7 @@ func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStag
 			return err
 		}
 		// Base provisioning makes a fresh guest reachable before repairing installed hooks.
-		if err := runtime.applyOrcaRuntime(ctx); err != nil {
+		if err := runtime.applyProfileRuntimes(ctx); err != nil {
 			return err
 		}
 		plan, err := runtime.IntegrationPlan(ctx)
@@ -210,8 +225,8 @@ func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStag
 	case ports.ReconcileStageSecurity:
 		_, err := runtime.securityRuntime().CheckSecurity(ctx, true, false)
 		return err
-	case ports.ReconcileStageOrca:
-		return runtime.applyOrcaRuntime(ctx)
+	case ports.ReconcileStageProfileRuntimes:
+		return runtime.applyProfileRuntimes(ctx)
 	default:
 		return fmt.Errorf("unknown reconcile stage %q", stage)
 	}
@@ -1403,7 +1418,34 @@ func (runtime Runtime) sshConverged(ctx context.Context) (bool, error) {
 	if result.ExitCode != 0 {
 		return false, nil
 	}
-	return err == nil, err
+	if err != nil {
+		return false, err
+	}
+	if !domain.SafeName(user) {
+		return false, errors.New("profile guest environment requires a valid development user")
+	}
+	definitions, err := runtime.profileDefinitions()
+	if err != nil {
+		return false, err
+	}
+	for _, definition := range definitions {
+		if definition.GuestEnvironment == nil {
+			continue
+		}
+		hook, err := runtime.readProfileHook(definition, definition.GuestEnvironment.Handler)
+		if err != nil {
+			return false, fmt.Errorf("read profile guest environment hook for %s: %w", definition.Name, err)
+		}
+		result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName,
+			ports.InstanceExecRequest{Command: []string{"sh", "-eu", "-s", "--", "check", user}, Stdin: hook})
+		if err != nil {
+			return false, err
+		}
+		if result.ExitCode != 0 {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func (runtime Runtime) vmSSHRelayConverged(ctx context.Context, address, port string) bool {

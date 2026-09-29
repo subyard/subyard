@@ -43,7 +43,7 @@ func (cli *CLI) runConfigAuthoring(
 		cli.errorf("config %s: %v", action, err)
 		return 2
 	}
-	definition, err := config.ValidateSettingName(
+	definition, err := loaded.Catalog.ValidateSettingName(
 		request.scope, request.name, action == "import" || action == "edit",
 	)
 	if err != nil {
@@ -59,7 +59,7 @@ func (cli *CLI) runConfigAuthoring(
 			return 2
 		}
 		if action == "set" {
-			if err := config.ValidateSetting(
+			if err := loaded.Catalog.ValidateSetting(
 				request.scope, request.name, request.value, false,
 			); err != nil {
 				cli.errorf("config set: %v", err)

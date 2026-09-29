@@ -3,6 +3,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+YARD_BIN="$ROOT/.build/yard"
+RUNTIME_ROOT="$ROOT"
 STATE=''
 YARD_NAME=''
 PROJECT=''
@@ -34,7 +36,7 @@ incus() {
   fi
 }
 
-yard() { "$ROOT/.build/yard" -Y "$YARD_NAME" "$@"; }
+yard() { "$YARD_BIN" -Y "$YARD_NAME" "$@"; }
 guest_root() { incus --project "$PROJECT" exec "$INSTANCE" -- "$@"; }
 guest_dev() {
   incus --project "$PROJECT" exec "$INSTANCE" --user 1000 --group 1000 \
@@ -49,7 +51,7 @@ cleanup() {
   trap - EXIT INT TERM
   set +e
   if [ "$REMOTE_ADDED" -eq 1 ]; then
-    "$ROOT/.build/yard" remote remove orca-self --yes >/dev/null 2>&1 || rc=3
+    "$YARD_BIN" remote remove orca-self --yes >/dev/null 2>&1 || rc=3
   fi
   if [ -n "$SSHD_PID" ] && kill -0 "$SSHD_PID" 2>/dev/null; then
     kill -TERM "$SSHD_PID" 2>/dev/null || true
@@ -148,7 +150,14 @@ OWNER_PORT="$(free_port)"
 [ "$SSH_PORT" != "$ORCA_PORT" ] && [ "$SSH_PORT" != "$OWNER_PORT" ] \
   && [ "$ORCA_PORT" != "$OWNER_PORT" ] || die 'failed to allocate distinct fixture ports'
 
-bash "$ROOT/dev/build-engine.sh" >/dev/null
+if [ -e "$ROOT/.subyard-acceptance/candidate.json" ]; then
+  # shellcheck source=tests/helpers/release-candidate.sh
+  . "$ROOT/tests/helpers/release-candidate.sh"
+  YARD_BIN="$(release_candidate_prepare "$ROOT")"
+  RUNTIME_ROOT="$(dirname "$(dirname "$YARD_BIN")")"
+else
+  bash "$ROOT/dev/build-engine.sh" >/dev/null
+fi
 install -d -m 0700 "$STATE/home" "$STATE/config/yards/$YARD_NAME" "$STATE/data" "$STATE/host"
 export HOME="$STATE/home"
 export SUBYARD_OPERATOR_HOME="$HOME"
@@ -535,7 +544,7 @@ guest_root test -x /usr/local/libexec/subyard/projects-changed \
   && [ "$(guest_root sha256sum /etc/subyard/agent-project-hooks | cut -d ' ' -f 1)" = \
     "$(printf '\n' | sha256sum | cut -d ' ' -f 1)" ] \
   || die 'explicit init did not repair the dispatcher while preserving the selected-hook list'
-local_dispatcher_hash="$(sha256sum "$ROOT/config/projects-changed.sh" | cut -d ' ' -f 1)"
+local_dispatcher_hash="$(sha256sum "$RUNTIME_ROOT/config/projects-changed.sh" | cut -d ' ' -f 1)"
 guest_dispatcher_hash="$(guest_root sha256sum /usr/local/libexec/subyard/projects-changed | cut -d ' ' -f 1)"
 [ "$local_dispatcher_hash" = "$guest_dispatcher_hash" ] \
   || die 'explicit init installed a stale project dispatcher'
@@ -580,7 +589,7 @@ ssh-keygen -q -t ed25519 -N '' -f "$STATE/bootstrap-key"
 ssh-keyscan -T 2 -p "$OWNER_PORT" 127.0.0.1 >/dev/null 2>&1 || true
 public_key="$(<"$STATE/bootstrap-key.pub")"
 printf 'command="/usr/bin/python3 %s forced-command %s %s %s %s %s %s %s %s",no-agent-forwarding,no-X11-forwarding,no-pty,permitopen="127.0.0.1:%s" %s\n' \
-  "$ROOT/config/profiles/orca/tests/e2e/orca-projects-helper.py" "$ROOT/.build/yard" "$ROOT" \
+  "$ROOT/config/profiles/orca/tests/e2e/orca-projects-helper.py" "$YARD_BIN" "$RUNTIME_ROOT" \
   "$HOME" "$SUBYARD_CONFIG_HOME" "$SUBYARD_HOME" "$YARD_NAME" "$SSH_PORT" "$STORAGE_PATH" \
   "$SSH_PORT" "$public_key" > "$STATE/authorized_keys"
 chmod 0600 "$STATE/authorized_keys"
@@ -641,9 +650,9 @@ SSH
 chmod 0755 "$STATE/bin/ssh"
 export ORCA_E2E_SSH_CONFIG="$HOME/.ssh/config"
 export PATH="$STATE/bin:$PATH"
-"$ROOT/.build/yard" remote add orca-self orca-owner-self --yard "$YARD_NAME" --yes >/dev/null
+"$YARD_BIN" remote add orca-self orca-owner-self --yard "$YARD_NAME" --yes >/dev/null
 REMOTE_ADDED=1
-"$ROOT/.build/yard" -Y orca-self sync "$remote_source" --name remote-sync --yes >/dev/null
+"$YARD_BIN" -Y orca-self sync "$remote_source" --name remote-sync --yes >/dev/null
 remote_group="$(group_id /srv/workspaces/remote-sync/src)"
 assert_repo /srv/workspaces/remote-sync/src folder "$remote_group" remote-sync
 

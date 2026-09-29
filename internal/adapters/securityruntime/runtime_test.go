@@ -93,12 +93,12 @@ func TestSecurityRuntimeValidatesObserverTailscaleRoute(t *testing.T) {
 
 func TestSecurityRuntimeAcceptsExactOwnedTailscaleProxy(t *testing.T) {
 	runtime := testRuntime(t)
-	runtime.Environment["HERMES_DASHBOARD_ADVERTISE_HOST"] = "owner.tailnet.ts.net"
-	runtime.Environment["HERMES_DASHBOARD_HOST_PORT"] = "19119"
+	runtime.Environment["SAMPLE_DASHBOARD_ADVERTISE_HOST"] = "owner.tailnet.ts.net"
+	runtime.Environment["SAMPLE_DASHBOARD_HOST_PORT"] = "19119"
 	contract := resource.ProxyContract{
-		Profile: "hermes", Resource: "dashboard", Device: "hermes-dashboard",
-		AdvertiseHostSetting: "HERMES_DASHBOARD_ADVERTISE_HOST",
-		HostPortSetting:      "HERMES_DASHBOARD_HOST_PORT",
+		Profile: "sample", Resource: "dashboard", Device: "sample-dashboard",
+		AdvertiseHostSetting: "SAMPLE_DASHBOARD_ADVERTISE_HOST",
+		HostPortSetting:      "SAMPLE_DASHBOARD_HOST_PORT",
 		Connect:              "tcp:127.0.0.1:9119",
 		AddressPolicy:        resource.ProxyAddressTailscaleOnly,
 		OwnershipMetadata:    true,
@@ -108,12 +108,12 @@ func TestSecurityRuntimeAcceptsExactOwnedTailscaleProxy(t *testing.T) {
 		return "100.101.102.103", nil
 	}
 	state := safeState()
-	state.Instance.Devices["hermes-dashboard"] = map[string]string{
+	state.Instance.Devices["sample-dashboard"] = map[string]string{
 		"type": "proxy", "listen": "tcp:100.101.102.103:19119",
 		"connect": "tcp:127.0.0.1:9119", "bind": "host",
 	}
 	state.Instance.LocalConfig[contract.OwnershipKey()] = contract.OwnershipValue(
-		state.Instance.Devices["hermes-dashboard"],
+		state.Instance.Devices["sample-dashboard"],
 	)
 	runtime.State = func(context.Context, Runtime) (ports.ReconcileState, bool, error) {
 		return state, true, nil
@@ -182,12 +182,12 @@ func TestSecurityRuntimePublicUDPProxyRequiresExactOwnerAndGuest(t *testing.T) {
 
 func TestSecurityRuntimeRejectsLoopbackForTailscaleOnlyProxy(t *testing.T) {
 	runtime := testRuntime(t)
-	runtime.Environment["HERMES_DASHBOARD_ADVERTISE_HOST"] = "127.0.0.1"
-	runtime.Environment["HERMES_DASHBOARD_HOST_PORT"] = "19119"
+	runtime.Environment["SAMPLE_DASHBOARD_ADVERTISE_HOST"] = "127.0.0.1"
+	runtime.Environment["SAMPLE_DASHBOARD_HOST_PORT"] = "19119"
 	contract := resource.ProxyContract{
-		Profile: "hermes", Resource: "dashboard", Device: "hermes-dashboard",
-		AdvertiseHostSetting: "HERMES_DASHBOARD_ADVERTISE_HOST",
-		HostPortSetting:      "HERMES_DASHBOARD_HOST_PORT",
+		Profile: "sample", Resource: "dashboard", Device: "sample-dashboard",
+		AdvertiseHostSetting: "SAMPLE_DASHBOARD_ADVERTISE_HOST",
+		HostPortSetting:      "SAMPLE_DASHBOARD_HOST_PORT",
 		Connect:              "tcp:127.0.0.1:9119",
 		AddressPolicy:        resource.ProxyAddressTailscaleOnly,
 		OwnershipMetadata:    true,
@@ -223,12 +223,12 @@ func TestSecurityRuntimeRejectsProxyOutsideOwnedContract(t *testing.T) {
 	for name, device := range tests {
 		t.Run(name, func(t *testing.T) {
 			runtime := testRuntime(t)
-			runtime.Environment["HERMES_DASHBOARD_ADVERTISE_HOST"] = "owner.tailnet.ts.net"
-			runtime.Environment["HERMES_DASHBOARD_HOST_PORT"] = "19119"
+			runtime.Environment["SAMPLE_DASHBOARD_ADVERTISE_HOST"] = "owner.tailnet.ts.net"
+			runtime.Environment["SAMPLE_DASHBOARD_HOST_PORT"] = "19119"
 			contract := resource.ProxyContract{
-				Profile: "hermes", Resource: "dashboard", Device: "hermes-dashboard",
-				AdvertiseHostSetting: "HERMES_DASHBOARD_ADVERTISE_HOST",
-				HostPortSetting:      "HERMES_DASHBOARD_HOST_PORT",
+				Profile: "sample", Resource: "dashboard", Device: "sample-dashboard",
+				AdvertiseHostSetting: "SAMPLE_DASHBOARD_ADVERTISE_HOST",
+				HostPortSetting:      "SAMPLE_DASHBOARD_HOST_PORT",
 				Connect:              "tcp:127.0.0.1:9119",
 				AddressPolicy:        resource.ProxyAddressTailscaleOnly,
 				OwnershipMetadata:    true,
@@ -238,7 +238,7 @@ func TestSecurityRuntimeRejectsProxyOutsideOwnedContract(t *testing.T) {
 				return "100.101.102.103", nil
 			}
 			state := safeState()
-			deviceName := "hermes-dashboard"
+			deviceName := "sample-dashboard"
 			if name == "unexpected device" {
 				deviceName = "foreign-dashboard"
 			}
@@ -256,12 +256,12 @@ func TestSecurityRuntimeRejectsProxyOutsideOwnedContract(t *testing.T) {
 
 func TestSecurityRuntimeRejectsOwnedProxyWithoutMatchingMetadata(t *testing.T) {
 	runtime := testRuntime(t)
-	runtime.Environment["HERMES_DASHBOARD_ADVERTISE_HOST"] = "owner.tailnet.ts.net"
-	runtime.Environment["HERMES_DASHBOARD_HOST_PORT"] = "19119"
+	runtime.Environment["SAMPLE_DASHBOARD_ADVERTISE_HOST"] = "owner.tailnet.ts.net"
+	runtime.Environment["SAMPLE_DASHBOARD_HOST_PORT"] = "19119"
 	contract := resource.ProxyContract{
-		Profile: "hermes", Resource: "dashboard", Device: "hermes-dashboard",
-		AdvertiseHostSetting: "HERMES_DASHBOARD_ADVERTISE_HOST",
-		HostPortSetting:      "HERMES_DASHBOARD_HOST_PORT",
+		Profile: "sample", Resource: "dashboard", Device: "sample-dashboard",
+		AdvertiseHostSetting: "SAMPLE_DASHBOARD_ADVERTISE_HOST",
+		HostPortSetting:      "SAMPLE_DASHBOARD_HOST_PORT",
 		Connect:              "tcp:127.0.0.1:9119",
 		AddressPolicy:        resource.ProxyAddressTailscaleOnly,
 		OwnershipMetadata:    true,
@@ -285,11 +285,11 @@ func TestSecurityRuntimeRejectsOwnedProxyWithoutMatchingMetadata(t *testing.T) {
 
 func TestSecurityRuntimeAcceptsExactTypedProxyWithoutOptionalOwnershipMetadata(t *testing.T) {
 	runtime := testRuntime(t)
-	runtime.Environment["ORCA_ADVERTISE_HOST"] = "127.0.0.1"
-	runtime.Environment["ORCA_HOST_PORT"] = "17678"
+	runtime.Environment["SAMPLE_SERVER_ADVERTISE_HOST"] = "127.0.0.1"
+	runtime.Environment["SAMPLE_SERVER_HOST_PORT"] = "17678"
 	contract := resource.ProxyContract{
-		Profile: "orca", Resource: "orca", Device: "orca-server",
-		AdvertiseHostSetting: "ORCA_ADVERTISE_HOST", HostPortSetting: "ORCA_HOST_PORT",
+		Profile: "sample", Resource: "sample-service", Device: "sample-server",
+		AdvertiseHostSetting: "SAMPLE_SERVER_ADVERTISE_HOST", HostPortSetting: "SAMPLE_SERVER_HOST_PORT",
 		Connect: "tcp:127.0.0.1:6768", AddressPolicy: resource.ProxyAddressLoopbackOrTailscale,
 	}
 	runtime.ProxyContracts = []resource.ProxyContract{contract}

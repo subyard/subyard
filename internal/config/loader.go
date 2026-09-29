@@ -13,6 +13,7 @@ import (
 )
 
 type LoadOptions struct {
+	Catalog                 *Catalog
 	RepositoryRoot          string
 	OperatorHome            string
 	YardName                string
@@ -36,6 +37,7 @@ type LayerPaths struct {
 }
 
 type Loaded struct {
+	Catalog             Catalog
 	Integrations        IntegrationSelection
 	Context             domain.Context
 	Environment         map[string]string
@@ -60,6 +62,15 @@ func IsRetiredYardTemplate(err error) bool {
 
 func Load(options LoadOptions) (Loaded, error) {
 	tracker := newSettingTracker()
+	if options.Catalog != nil {
+		tracker.catalog = *options.Catalog
+	} else {
+		var err error
+		tracker.catalog, err = LoadCatalog(options.RepositoryRoot)
+		if err != nil {
+			return Loaded{}, err
+		}
+	}
 	ctx, values, err := load(options, tracker)
 	if err != nil {
 		return Loaded{}, err
@@ -69,7 +80,7 @@ func Load(options LoadOptions) (Loaded, error) {
 		environment[name] = value
 	}
 	return Loaded{
-		Context: ctx, Environment: environment, Settings: tracker.traces(values),
+		Catalog: tracker.catalog, Context: ctx, Environment: environment, Settings: tracker.traces(values),
 		ConfigurationLayers: tracker.configurationLayers(), Integrations: tracker.integrations,
 	}, nil
 }
@@ -133,6 +144,15 @@ func load(
 	defaultLayer := tracker.addLayer(
 		"default", "shipped defaults", configDir, pathPresent(configDir), settingAny,
 	)
+	for _, definition := range tracker.catalog.SettingCatalog() {
+		if !definition.HasDefault {
+			continue
+		}
+		if values[definition.Name] == "" {
+			values[definition.Name] = definition.Default
+		}
+		tracker.record(defaultLayer, definition.Name, values[definition.Name], "", 0, "profile default")
+	}
 	for _, name := range []string{"incus.project.env", "subyard.env", "host.env", "agents.env", "ports.env"} {
 		path := filepath.Join(configDir, name)
 		if err := applyOptionalTracked(path, values, tracker, defaultLayer); err != nil {
@@ -316,8 +336,8 @@ func load(
 		"command", "command override", "environment", true, settingAny,
 	)
 	for name, value := range commandEnvironment {
-		if _, ok := LookupSetting(name); ok {
-			if err := ValidateSetting(ScopeCommand, name, value, false); err != nil {
+		if _, ok := tracker.catalog.LookupSetting(name); ok {
+			if err := tracker.catalog.ValidateSetting(ScopeCommand, name, value, false); err != nil {
 				return domain.Context{}, nil, fmt.Errorf("environment: %w", err)
 			}
 		}
@@ -366,7 +386,11 @@ func normalizeAIObserverPort(values environment, tracker *settingTracker, sshPor
 		selected = selected || agent == "aiobserver"
 	}
 	if selected {
-		for _, name := range []string{"SSH_PORT", "ADB_PROXY_PORT", "ADB_CONSOLE_PROXY_PORT", "ORCA_HOST_PORT", "HERMES_DASHBOARD_HOST_PORT"} {
+		for _, definition := range tracker.catalog.SettingCatalog() {
+			if !definition.HostListener {
+				continue
+			}
+			name := definition.Name
 			if values[name] == values["AI_OBSERVER_HOST_PORT"] {
 				return fmt.Errorf("AI_OBSERVER_HOST_PORT collides with %s; choose another port", name)
 			}
@@ -626,12 +650,22 @@ func applyYardConfigTracked(
 	// applied first and the named-yard settings file wins last.
 	// Probe a copy because env files are declarative but may contain defaults that
 	// depend on the existing normalized environment.
+	settings := Catalog{}
+	if tracker != nil {
+		settings = tracker.catalog
+	} else {
+		var err error
+		settings, err = LoadCatalog(filepath.Dir(configDir))
+		if err != nil {
+			return err
+		}
+	}
 	probe := make(environment, len(values))
 	for name, value := range values {
 		probe[name] = value
 	}
 	delete(probe, "YARD_TEMPLATE")
-	if err := applyEnvFileValidated(yardFile, probe, ScopeYard, syncSource, nil); err != nil {
+	if err := settings.applyEnvFileValidated(yardFile, probe, ScopeYard, syncSource, nil); err != nil {
 		return err
 	}
 	if template := probe["YARD_TEMPLATE"]; template != "" {
@@ -653,7 +687,7 @@ func applyYardConfigTracked(
 			return fmt.Errorf("unknown YARD_TEMPLATE %q in %s", template, yardFile)
 		}
 		if tracker == nil {
-			if err := applyEnvFileValidated(
+			if err := settings.applyEnvFileValidated(
 				templateFile, values, ScopeShipped, false, nil,
 			); err != nil {
 				return err
@@ -670,7 +704,7 @@ func applyYardConfigTracked(
 		}
 	}
 	if tracker == nil {
-		return applyEnvFileValidated(yardFile, values, ScopeYard, syncSource, nil)
+		return settings.applyEnvFileValidated(yardFile, values, ScopeYard, syncSource, nil)
 	}
 	yardLayer := tracker.addLayer("yard", "scalar settings", yardFile, true, settingAny)
 	return applyEnvFileTrackedValidated(
@@ -703,13 +737,13 @@ func applyEnvFileTrackedValidated(
 	scope SettingScope,
 	requireSyncable bool,
 ) error {
-	return applyEnvFileValidated(path, values, scope, requireSyncable,
+	return tracker.catalog.applyEnvFileValidated(path, values, scope, requireSyncable,
 		func(name, value string, line int) {
 			tracker.record(layer, name, value, path, line, "")
 		})
 }
 
-func applyEnvFileValidated(
+func (settings Catalog) applyEnvFileValidated(
 	path string,
 	values environment,
 	scope SettingScope,
@@ -753,7 +787,7 @@ func applyEnvFileValidated(
 		delete(probe, legacy)
 	}
 	for _, assignment := range assignments {
-		if err := ValidateSetting(scope, assignment.name, assignment.value, requireSyncable); err != nil {
+		if err := settings.ValidateSetting(scope, assignment.name, assignment.value, requireSyncable); err != nil {
 			return fmt.Errorf("%s:%d: %w", path, assignment.line, err)
 		}
 	}
@@ -1177,4 +1211,8 @@ func validateE2EConfig(values environment) error {
 		return errors.New("E2E_VM_IMAGE contains unsafe characters")
 	}
 	return nil
+}
+
+func applyEnvFileValidated(path string, values environment, scope SettingScope, syncable bool, observer assignmentObserver) error {
+	return (Catalog{}).applyEnvFileValidated(path, values, scope, syncable, observer)
 }

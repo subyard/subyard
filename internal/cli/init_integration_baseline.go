@@ -102,7 +102,7 @@ func (execution *initExecution) checkIntegrationBaseline(cli *CLI) error {
 	if execution.integrationBaseline == nil {
 		return nil
 	}
-	options := config.LoadOptions{RepositoryRoot: cli.options.RepositoryRoot, OperatorHome: execution.loaded.Context.Paths.OperatorHome, YardName: execution.loaded.Context.YardName, Environment: cli.baseEnv}
+	options := config.LoadOptions{Catalog: &cli.catalog, RepositoryRoot: cli.options.RepositoryRoot, OperatorHome: execution.loaded.Context.Paths.OperatorHome, YardName: execution.loaded.Context.YardName, Environment: cli.baseEnv}
 	if execution.bootstrap != nil {
 		options.YardSettingsFile = execution.bootstrap.sourcePath
 	}

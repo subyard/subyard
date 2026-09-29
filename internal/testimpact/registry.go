@@ -85,7 +85,7 @@ func BuiltInRegistry() (Registry, error) {
 	)
 
 	shellTests := []string{
-		"agent-e2e", "agent-selection", "aiobserver-provision", "aiobserver-proxy", "build-engine",
+		"agent-e2e", "agent-selection", "aiobserver-provision", "aiobserver-proxy", "build-engine", "release-acceptance",
 		"ccusage-provision", "cli-contract", "codex-agent-defaults", "codex-agent-provision",
 		"command-registry", "create-subyard-docker-apparmor", "docker-forwarding-convergence",
 		"engine-release", "init-extras-convergence", "init-network-convergence", "init-project-convergence",
@@ -94,7 +94,7 @@ func BuiltInRegistry() (Registry, error) {
 		"p0-capacity", "paseo-agent-contract", "paseo-project-sync",
 		"power-reconciler-systemd-255-launch", "power-reconciler-systemd",
 		"profile-resource-lifecycle", "project-registry-convergence",
-		"prompt-contract", "provision-profile-check", "remote-projects",
+		"prompt-contract", "provision-profile-check", "release-candidate", "remote-projects",
 		"runtime-privilege-reexec", "ssh-config", "ssh-transport-identity", "ssh-agent-environment",
 		"teardown-runtime-preservation", "test-vms",
 		"vscode-remote-maintenance", "workflow-real-adapter-gate", "yard-extras-convergence",

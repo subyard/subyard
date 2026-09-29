@@ -1,5 +1,5 @@
 #!/bin/sh
-# Root guest helper, shared by yard init and SSH agent unlock. No credentials enter here.
+# Generic guest shell and OpenSSH agent defaults. Profile services own their unit hooks.
 set -eu
 mode=${1:-}
 dev_user=${2:-}
@@ -10,9 +10,6 @@ case "$dev_user" in ''|[!a-zA-Z_]*|*[!a-zA-Z0-9_-]*) exit 2 ;; esac
 profile=/etc/profile.d/subyard-ssh-agent.sh
 client_dir=/etc/ssh/ssh_config.d
 client_config=$client_dir/50-subyard-agent.conf
-unit_dir=/etc/systemd/system/subyard-orca.service.d
-dropin=$unit_dir/50-subyard-ssh-agent.conf
-pending=$unit_dir/.subyard-ssh-agent-refresh-pending
 profile_body=$(cat <<EOF
 # Managed by Subyard. Preserve session-forwarded agents when present.
 if [ "\${HOME:-}" = /home/$dev_user ] && [ -z "\${SSH_AUTH_SOCK:-}" ]; then
@@ -21,7 +18,6 @@ if [ "\${HOME:-}" = /home/$dev_user ] && [ -z "\${SSH_AUTH_SOCK:-}" ]; then
 fi
 EOF
 )
-dropin_body=$(printf '[Service]\nEnvironment=SSH_AUTH_SOCK=/home/%s/.ssh/subyard-agent.sock' "$dev_user")
 # OpenSSH 9.6 Match parsing rejects nested escaped quotes. Expand only a constant
 # presence marker so socket contents never undergo shell splitting or globbing.
 client_body=$(cat <<'EOF'
@@ -57,38 +53,23 @@ publish() {
     trap - EXIT HUP INT TERM
 }
 
-for directory in /etc /etc/profile.d /etc/ssh /etc/systemd /etc/systemd/system; do
+for directory in /etc /etc/profile.d /etc/ssh; do
     safe_directory "$directory" || exit 1
 done
-for file in "$profile" "$client_config" "$dropin" "$pending"; do safe_file "$file" || exit 1; done
-for directory in "$client_dir" "$unit_dir"; do
-    if [ -e "$directory" ] || [ -L "$directory" ]; then
-        safe_directory "$directory" || exit 1
-    elif [ "$mode" = ensure ]; then
-        mkdir -m 755 "$directory"
-    else
-        exit 1
-    fi
-done
+safe_file "$profile" || exit 1
+safe_file "$client_config" || exit 1
+if [ -e "$client_dir" ] || [ -L "$client_dir" ]; then
+    safe_directory "$client_dir" || exit 1
+elif [ "$mode" = ensure ]; then
+    mkdir -m 755 "$client_dir"
+else
+    exit 1
+fi
 if [ "$mode" = check ]; then
-    matches "$profile" "$profile_body" && matches "$client_config" "$client_body" &&
-        matches "$dropin" "$dropin_body" && [ ! -e "$pending" ]
+    matches "$profile" "$profile_body" && matches "$client_config" "$client_body"
     exit $?
 fi
 
 matches "$profile" "$profile_body" || publish "$profile" "$profile_body"
 matches "$client_config" "$client_body" || publish "$client_config" "$client_body"
-if ! matches "$dropin" "$dropin_body"; then
-    # Persist the refresh intent before changing the unit, so interrupted setup retries it.
-    publish "$pending" 'pending'
-    publish "$dropin" "$dropin_body"
-fi
-if [ -e "$pending" ]; then
-    systemctl daemon-reload
-    if systemctl is-active --quiet subyard-orca.service; then
-        systemctl restart subyard-orca.service
-    fi
-    rm -f -- "$pending"
-fi
-matches "$profile" "$profile_body" && matches "$client_config" "$client_body" &&
-    matches "$dropin" "$dropin_body"
+matches "$profile" "$profile_body" && matches "$client_config" "$client_body"

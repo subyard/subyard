@@ -5,6 +5,8 @@ set -euo pipefail
 fail() { printf 'android-pool-projects: %s\n' "$*" >&2; exit 1; }
 [ "$#" -eq 5 ] || fail 'usage: script ROOT STATE YARD PROJECT INSTANCE'
 root="$1" state="$2" yard_name="$3" project="$4" instance="$5"
+. "$root/tests/helpers/release-candidate.sh"
+if YARD_BIN="$(release_candidate_prepare "$root")"; then unset YARD_ENGINE_PATH; else candidate_rc=$?; [ "$candidate_rc" = 1 ] || exit "$candidate_rc"; YARD_BIN="$root/.build/yard"; fi
 [[ "$root" = /* && "$state" = /* ]] || fail 'root and state must be absolute paths'
 [[ "$yard_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]*$ ]] || fail 'invalid yard name'
 [[ "$project" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]*$ ]] || fail 'invalid Incus project'
@@ -13,7 +15,7 @@ root="$1" state="$2" yard_name="$3" project="$4" instance="$5"
   || fail 'state is not the retained Android fixture'
 [ "${SUBYARD_E2E_VM:-}" = 1 ] && [ -r /run/subyard-e2e-lease.json ] \
   || fail 'requires the allocated Android E2E VM'
-[ -x "$root/.build/yard" ] || fail 'candidate yard binary is missing'
+[ -x "$YARD_BIN" ] || fail 'candidate yard binary is missing'
 for command in curl git incus sg sudo timeout; do
   command -v "$command" >/dev/null || fail "missing $command"
 done
@@ -35,10 +37,10 @@ yard_command() {
   shift
   if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
     && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
-    printf -v command '%q ' "$root/.build/yard" -Y "$yard_name" "$@"
+    printf -v command '%q ' "$YARD_BIN" -Y "$yard_name" "$@"
     timeout --foreground "$seconds" sg incus-admin -c "exec $command"
   else
-    timeout --foreground "$seconds" "$root/.build/yard" -Y "$yard_name" "$@"
+    timeout --foreground "$seconds" "$YARD_BIN" -Y "$yard_name" "$@"
   fi
 }
 bounded_yard() { local seconds="$1"; shift; yard_command "$(remaining "$seconds")" "$@"; }
@@ -339,11 +341,15 @@ printf 'android-pool-projects rebuild=PASS source=preserved other-gradle=preserv
 # Reconstruct only the previous mount/device shape with the current engine. This is not a
 # published legacy release: its dedicated writable SDK/Gradle directories stay outside the
 # managed SDK and are removed by this marker-guarded fixture cleanup.
+runtime_root="$root"
+if [ -e "$root/.subyard-acceptance/candidate.json" ]; then
+  runtime_root="$(dirname "$(dirname "$YARD_BIN")")"
+fi
 legacy_source="$work/legacy-source"
 install -d -m 0700 "$legacy_source/bin"
-cp -a "$root/config" "$legacy_source/config"
-ln -s "$root/bin/yard-engine" "$legacy_source/bin/yard-engine"
-ln -s "$root/scripts" "$legacy_source/scripts"
+cp -a "$runtime_root/config" "$legacy_source/config"
+ln -s "$YARD_BIN" "$legacy_source/bin/yard-engine"
+ln -s "$runtime_root/scripts" "$legacy_source/scripts"
 cat > "$legacy_source/config/profiles/android/profile.conf" <<EOF
 PROFILE_NAME=android
 PROJECT_ENV_BASE_IMAGE=subyard-android-env:1
@@ -367,11 +373,11 @@ legacy_yard() {
   shift
   if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
     && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
-    printf -v command '%q ' env "SUBYARD_REPOSITORY_ROOT=$legacy_source" "$root/.build/yard" -Y "$yard_name" "$@"
+    printf -v command '%q ' env "SUBYARD_REPOSITORY_ROOT=$legacy_source" "$YARD_BIN" -Y "$yard_name" "$@"
     timeout --foreground "$(remaining "$seconds")" sg incus-admin -c "exec $command"
   else
     timeout --foreground "$(remaining "$seconds")" env "SUBYARD_REPOSITORY_ROOT=$legacy_source" \
-      "$root/.build/yard" -Y "$yard_name" "$@"
+      "$YARD_BIN" -Y "$yard_name" "$@"
   fi
 }
 printf 'android-pool-projects phase=legacy-l2-rebuild\n'

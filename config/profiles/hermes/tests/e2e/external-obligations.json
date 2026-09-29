@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "obligations": [
+    {
+      "id": "hermes-live-provider",
+      "description": "Exercise the Hermes application against its configured model provider. The reproducible VM lane verifies the installed substrate, dashboard and persistent state without a paid provider account.",
+      "required_inputs": [
+        "Authorized test model-provider account",
+        "Prepared Hermes application configuration"
+      ]
+    }
+  ]
+}

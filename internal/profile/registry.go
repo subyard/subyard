@@ -46,17 +46,20 @@ type Setup struct {
 	Followup         string   `json:"followup"`
 }
 type Definition struct {
-	SchemaVersion         int               `json:"schema_version"`
-	Name                  string            `json:"-"`
-	Root                  string            `json:"-"`
-	DefaultYards          []string          `json:"default_yards,omitempty"`
-	DisabledWhen          map[string]string `json:"disabled_when,omitempty"`
-	SelectedProvisionOnly bool              `json:"selected_provision_only,omitempty"`
-	OwnerService          string            `json:"owner_service,omitempty"`
-	Native                []Native          `json:"native,omitempty"`
-	Consumers             []Consumer        `json:"consumers,omitempty"`
-	ManagedPaths          []ManagedPath     `json:"managed_paths,omitempty"`
-	Setup                 *Setup            `json:"setup,omitempty"`
+	SchemaVersion         int                   `json:"schema_version"`
+	Name                  string                `json:"-"`
+	Root                  string                `json:"-"`
+	DefaultYards          []string              `json:"default_yards,omitempty"`
+	DisabledWhen          map[string]string     `json:"disabled_when,omitempty"`
+	SelectedProvisionOnly bool                  `json:"selected_provision_only,omitempty"`
+	OwnerService          string                `json:"owner_service,omitempty"`
+	Native                []Native              `json:"native,omitempty"`
+	Consumers             []Consumer            `json:"consumers,omitempty"`
+	ManagedPaths          []ManagedPath         `json:"managed_paths,omitempty"`
+	Setup                 *Setup                `json:"setup,omitempty"`
+	Settings              []Setting             `json:"settings,omitempty"`
+	Runtime               *RuntimeHook          `json:"runtime,omitempty"`
+	GuestEnvironment      *GuestEnvironmentHook `json:"guest_environment,omitempty"`
 }
 
 func (definition Definition) Selected(yard string, environment map[string]string) bool {
@@ -84,7 +87,9 @@ func Load(root string) ([]Definition, error) {
 	}
 	result := make([]Definition, 0, len(paths))
 	consumers := map[string]bool{}
-	settings := map[string]bool{}
+	setupPaths := map[string]bool{}
+	settingNames := map[string]bool{}
+	activationIDs := map[string]bool{}
 	for _, path := range paths {
 		info, err := os.Lstat(path)
 		if err != nil {
@@ -122,10 +127,22 @@ func Load(root string) ([]Definition, error) {
 			consumers[consumer.ID] = true
 		}
 		if definition.Setup != nil {
-			if settings[definition.Setup.ConfigFile] {
+			if setupPaths[definition.Setup.ConfigFile] {
 				return nil, errors.New("profile setup configuration path collision")
 			}
-			settings[definition.Setup.ConfigFile] = true
+			setupPaths[definition.Setup.ConfigFile] = true
+		}
+		for _, setting := range definition.Settings {
+			if settingNames[setting.Name] {
+				return nil, fmt.Errorf("duplicate profile setting %s", setting.Name)
+			}
+			settingNames[setting.Name] = true
+		}
+		if definition.Runtime != nil {
+			if activationIDs[definition.Runtime.ActivationID] {
+				return nil, fmt.Errorf("duplicate profile runtime activation ID %s", definition.Runtime.ActivationID)
+			}
+			activationIDs[definition.Runtime.ActivationID] = true
 		}
 		result = append(result, definition)
 	}
@@ -222,6 +239,9 @@ func (definition Definition) validate() error {
 		if !found {
 			return errors.New("setup references undeclared credential consumer")
 		}
+	}
+	if err := definition.validateExtensions(); err != nil {
+		return err
 	}
 	return nil
 }

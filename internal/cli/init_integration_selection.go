@@ -117,7 +117,7 @@ func (selection *initIntegrationSelection) check(ctx context.Context, cli *CLI, 
 	} else if registered {
 		return fmt.Errorf("%w: integration selection became source-managed", domain.ErrPlanStale)
 	}
-	options := config.LoadOptions{RepositoryRoot: cli.options.RepositoryRoot, OperatorHome: execution.loaded.Context.Paths.OperatorHome, YardName: execution.loaded.Context.YardName, Environment: cli.baseEnv}
+	options := config.LoadOptions{Catalog: &cli.catalog, RepositoryRoot: cli.options.RepositoryRoot, OperatorHome: execution.loaded.Context.Paths.OperatorHome, YardName: execution.loaded.Context.YardName, Environment: cli.baseEnv}
 	if execution.bootstrap != nil {
 		options.YardSettingsFile = execution.bootstrap.sourcePath
 	}

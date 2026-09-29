@@ -16,7 +16,7 @@ func TestPreviewIsReadOnlyAndSelectsAutomaticEndpoint(t *testing.T) {
 		Occupied: func(_ context.Context, _ string, port int) (bool, error) { return port == 6768, nil },
 	}
 	plan, err := manager.Preview(context.Background(), Request{
-		Directory: directory, Yard: "demo", Resource: "orca.orca",
+		Directory: directory, Yard: "demo", Resource: "sample-runtime.sample-runtime",
 		PreferredPort: 6768, ReservedPorts: []int{6769},
 	})
 	if err != nil {
@@ -38,7 +38,7 @@ func TestCommitPersistsEndpointAndPreviewReusesItWithoutLiveProbe(t *testing.T) 
 		Discover: func(context.Context) (string, error) { return "owner.example.ts.net", nil },
 		Occupied: func(context.Context, string, int) (bool, error) { return false, nil },
 	}
-	request := Request{Directory: directory, Yard: "demo", Resource: "orca.orca", PreferredPort: 6768}
+	request := Request{Directory: directory, Yard: "demo", Resource: "sample-runtime.sample-runtime", PreferredPort: 6768}
 	plan, err := manager.Preview(context.Background(), request)
 	if err != nil {
 		t.Fatalf("Preview: %v", err)
@@ -46,7 +46,7 @@ func TestCommitPersistsEndpointAndPreviewReusesItWithoutLiveProbe(t *testing.T) 
 	if err := manager.Commit(context.Background(), request, plan); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
-	host, port, exists, err := ReadSaved(directory, "demo", "orca.orca")
+	host, port, exists, err := ReadSaved(directory, "demo", "sample-runtime.sample-runtime")
 	if err != nil || !exists || host != plan.Host || port != plan.Port {
 		t.Fatalf("ReadSaved = %q %d %v, %v", host, port, exists, err)
 	}
@@ -69,7 +69,7 @@ func TestExplicitValuesWinAndAreReserved(t *testing.T) {
 		Discover: func(context.Context) (string, error) { return "", errors.New("must not discover") },
 		Occupied: func(context.Context, string, int) (bool, error) { return false, errors.New("must not probe") },
 	}
-	first := Request{Directory: directory, Yard: "one", Resource: "orca.orca", Host: "127.0.0.1", Port: "17000", PreferredPort: 6768}
+	first := Request{Directory: directory, Yard: "one", Resource: "sample-runtime.sample-runtime", Host: "127.0.0.1", Port: "17000", PreferredPort: 6768}
 	plan, err := manager.Preview(context.Background(), first)
 	if err != nil {
 		t.Fatalf("Preview explicit: %v", err)
@@ -81,7 +81,7 @@ func TestExplicitValuesWinAndAreReserved(t *testing.T) {
 		t.Fatalf("Commit explicit: %v", err)
 	}
 	_, err = manager.Preview(context.Background(), Request{
-		Directory: directory, Yard: "two", Resource: "orca.orca",
+		Directory: directory, Yard: "two", Resource: "sample-runtime.sample-runtime",
 		Host: "127.0.0.1", Port: "17000", PreferredPort: 6768,
 	})
 	if !errors.Is(err, ErrPortReserved) {
@@ -94,7 +94,7 @@ func TestExplicitPortCannotUseCallerReservation(t *testing.T) {
 	protectParent(t, directory)
 	manager := Manager{Discover: func(context.Context) (string, error) { return "127.0.0.1", nil }}
 	_, err := manager.Preview(context.Background(), Request{
-		Directory: directory, Yard: "demo", Resource: "orca.orca", Host: "127.0.0.1",
+		Directory: directory, Yard: "demo", Resource: "sample-runtime.sample-runtime", Host: "127.0.0.1",
 		Port: "2222", PreferredPort: 6768, ReservedPorts: []int{2222},
 	})
 	if !errors.Is(err, ErrPortReserved) {
@@ -109,8 +109,8 @@ func TestCommitRejectsStaleAutomaticSelection(t *testing.T) {
 		Discover: func(context.Context) (string, error) { return "owner.example.ts.net", nil },
 		Occupied: func(context.Context, string, int) (bool, error) { return false, nil },
 	}
-	requestOne := Request{Directory: directory, Yard: "one", Resource: "orca.orca", PreferredPort: 6768}
-	requestTwo := Request{Directory: directory, Yard: "two", Resource: "orca.orca", PreferredPort: 6768}
+	requestOne := Request{Directory: directory, Yard: "one", Resource: "sample-runtime.sample-runtime", PreferredPort: 6768}
+	requestTwo := Request{Directory: directory, Yard: "two", Resource: "sample-runtime.sample-runtime", PreferredPort: 6768}
 	planOne, err := manager.Preview(context.Background(), requestOne)
 	if err != nil {
 		t.Fatal(err)
@@ -135,8 +135,8 @@ func TestConcurrentCommitsSerializeInitialAllocation(t *testing.T) {
 		Occupied: func(context.Context, string, int) (bool, error) { return false, nil },
 	}
 	requests := []Request{
-		{Directory: directory, Yard: "one", Resource: "orca.orca", PreferredPort: 6768},
-		{Directory: directory, Yard: "two", Resource: "orca.orca", PreferredPort: 6768},
+		{Directory: directory, Yard: "one", Resource: "sample-runtime.sample-runtime", PreferredPort: 6768},
+		{Directory: directory, Yard: "two", Resource: "sample-runtime.sample-runtime", PreferredPort: 6768},
 	}
 	plans := make([]Plan, len(requests))
 	for index, request := range requests {
@@ -233,8 +233,8 @@ func TestCommitWithDoesNotInvokeCallbackForStaleEndpointPlan(t *testing.T) {
 		Discover: func(context.Context) (string, error) { return "owner.example.ts.net", nil },
 		Occupied: func(context.Context, string, int) (bool, error) { return false, nil },
 	}
-	first := Request{Directory: directory, Yard: "one", Resource: "orca.orca", PreferredPort: 6768}
-	second := Request{Directory: directory, Yard: "two", Resource: "orca.orca", PreferredPort: 6768}
+	first := Request{Directory: directory, Yard: "one", Resource: "sample-runtime.sample-runtime", PreferredPort: 6768}
+	second := Request{Directory: directory, Yard: "two", Resource: "sample-runtime.sample-runtime", PreferredPort: 6768}
 	firstPlan, err := manager.Preview(context.Background(), first)
 	if err != nil {
 		t.Fatal(err)
@@ -266,7 +266,7 @@ func TestCommitWithCallbackFailureDoesNotPublishEndpoint(t *testing.T) {
 		Discover: func(context.Context) (string, error) { return "owner.example.ts.net", nil },
 		Occupied: func(context.Context, string, int) (bool, error) { return false, nil },
 	}
-	request := Request{Directory: directory, Yard: "demo", Resource: "orca.orca", PreferredPort: 6768}
+	request := Request{Directory: directory, Yard: "demo", Resource: "sample-runtime.sample-runtime", PreferredPort: 6768}
 	plan, err := manager.Preview(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
@@ -308,7 +308,7 @@ func TestCommitWithInvokesCallbackForExistingExactAllocation(t *testing.T) {
 		Discover: func(context.Context) (string, error) { return "owner.example.ts.net", nil },
 		Occupied: func(context.Context, string, int) (bool, error) { return false, nil },
 	}
-	request := Request{Directory: directory, Yard: "demo", Resource: "orca.orca", PreferredPort: 6768}
+	request := Request{Directory: directory, Yard: "demo", Resource: "sample-runtime.sample-runtime", PreferredPort: 6768}
 	plan, err := manager.Preview(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
@@ -345,7 +345,7 @@ func TestReadSavedRejectsSymlinkState(t *testing.T) {
 	if err := os.Symlink(target, filepath.Join(directory, "state.json")); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := ReadSaved(directory, "demo", "orca.orca"); err == nil {
+	if _, _, _, err := ReadSaved(directory, "demo", "sample-runtime.sample-runtime"); err == nil {
 		t.Fatal("symlink state was accepted")
 	}
 }

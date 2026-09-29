@@ -56,6 +56,47 @@ aggregate core and all shipped profiles' declared checks against the same candid
 failed required profile checks leave acceptance incomplete; optional runtime selection does not
 make a shipped profile optional to release verification.
 
+### One release candidate
+
+The same profile inventory is used by local acceptance, branch CI preflight and the release gate.
+Create a frozen public source snapshot and one installable runtime, then run its pending checks:
+
+```sh
+python3 dev/release-acceptance.py prepare --version 0.14.1 --output .build/release-acceptance
+python3 dev/release-acceptance.py run --output .build/release-acceptance --slots 1 2 3
+```
+
+Select available slots using `dev/agent-e2e.sh --status`; each slot runs one controller at a time.
+Source fingerprints use Git executable-bit semantics; snapshots normalize public file modes explicitly,
+so the checkout umask cannot change the candidate. The source snapshot, runtime assets, transport
+archive, logs and `receipt.json` remain in the output
+directory. Every controller receives the same checksum-verified transport archive; profile fixtures
+execute the packaged engine and runtime assets. The core smoke installs those assets through the
+public updater, including reboot, rollback and roll-forward. Local verification, ShellCheck,
+process coverage, real local adapters and updater compatibility precede physical checks.
+Run the aggregator from the managed workspace checkout: it supplies that workspace for lease
+attribution while executing controllers and guest payloads from the frozen candidate.
+
+A repeated `run` executes only checks without a passing result. Use `--only profile:NAME` or
+`--only p0-release-smoke` for a remaining independent check; `--rerun` also repeats passed checks.
+A physical retry always allocates fresh VMs. It never resumes a fixture across leases. Source or
+artifact changes reject reuse; prepare a new candidate in a new directory. Logs are retained per
+attempt and include the controllers' source and environment evidence.
+
+Profile-owned `tests/e2e/external-obligations.json` declares checks requiring an authorized external
+application/account. The receipt distinguishes these from reproducible VM results and initially
+marks them `not-run`; synthetic credentials do not prove external API acceptance. Missing external
+evidence leaves the overall result incomplete even when `reproducible_result` is `passed`. Record
+actual external check evidence and its SHA-256 in the corresponding receipt entry only after that
+check passes on the same candidate. Do not put credentials or private payloads in receipts.
+
+Before tagging, preserve a complete public receipt at `release-acceptance/VERSION.json`. The Release
+workflow checks its source fingerprint, required inventory, successful results, external evidence
+references and exact native runtime digest before publication. Missing, partial or mismatched
+receipts fail closed. Receipt files themselves are excluded from the source fingerprint so adding
+evidence does not change the candidate. The receipt is reviewed test evidence, not a cryptographic
+attestation of a remote execution service. Cross-compiled assets retain their separate build checks.
+
 GitHub CI runs the full core gate, profile host-free checks, warning-level ShellCheck and
 `bash tests/real-host/adapter-contracts.sh` in one `verify` job on every branch push and pull request;
 tag pushes are reserved for the independent Release workflow. Native Paseo uses the same branch/PR

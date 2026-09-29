@@ -326,7 +326,7 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 			return err
 		}
 	}
-	if err := execution.validateOrcaRepair(ctx, cli); err != nil {
+	if err := execution.validateProfileRepair(ctx, cli); err != nil {
 		return err
 	}
 	prepared.exactState = operationStateDigest(struct {
@@ -372,11 +372,11 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 		}
 	}
 	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (domain.AdapterResult, error) {
-		if cli.orcaInitRepair != nil {
-			if err := execution.validateOrcaRepair(ctx, cli); err != nil {
+		if cli.profileInitRepair != nil {
+			if err := execution.validateProfileRepair(ctx, cli); err != nil {
 				return domain.AdapterResult{}, err
 			}
-			unlock, err := cli.lockConfigApplyRepair(ctx, cli.orcaInitRepair)
+			unlock, err := cli.lockConfigApplyRepair(ctx, cli.profileInitRepair)
 			if err != nil {
 				return domain.AdapterResult{}, err
 			}
@@ -398,8 +398,8 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 				fmt.Fprintln(diagnostics, "  [ ok ] Subyard initialized")
 			}
 		}
-		if err == nil && cli.orcaInitRepair != nil {
-			err = cli.finishConfigApplyRepair(ctx, cli.orcaInitRepair)
+		if err == nil && cli.profileInitRepair != nil {
+			err = cli.finishConfigApplyRepair(ctx, cli.profileInitRepair)
 		}
 		return result, err
 	}

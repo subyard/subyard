@@ -79,20 +79,20 @@ func TestRealInitPlatformCarriesOnlyPreparedSudoContext(t *testing.T) {
 }
 
 type initPlatformFixture struct {
-	converged        map[ports.ReconcileStageID]bool
-	applied          []ports.ReconcileStageID
-	preflightFresh   []bool
-	preflightErr     error
-	applyErr         error
-	configs          int
-	configsConverged bool
-	configChecks     []bool
-	teardowns        int
-	projectHooks     int
-	projectHooksErr  error
-	hooksApplicable  bool
-	hooksBeforeOrca  bool
-	readyOnOrca      string
+	converged                 map[ports.ReconcileStageID]bool
+	applied                   []ports.ReconcileStageID
+	preflightFresh            []bool
+	preflightErr              error
+	applyErr                  error
+	configs                   int
+	configsConverged          bool
+	configChecks              []bool
+	teardowns                 int
+	projectHooks              int
+	projectHooksErr           error
+	hooksApplicable           bool
+	hooksBeforeProfileRuntime bool
+	readyOnProfileRuntime     string
 }
 
 func (fixture *initPlatformFixture) InstanceExists(context.Context) (bool, error) {
@@ -104,13 +104,16 @@ func (fixture *initPlatformFixture) ProjectHooksApplicable(context.Context) (boo
 }
 
 func (fixture *initPlatformFixture) RunProjectHooks(context.Context) error {
-	fixture.hooksBeforeOrca = !fixture.converged[ports.ReconcileStageOrca]
+	fixture.hooksBeforeProfileRuntime = !fixture.converged[ports.ReconcileStageProfileRuntimes]
 	fixture.projectHooks++
 	return fixture.projectHooksErr
 }
 
-func (fixture *initPlatformFixture) ObserveOrcaRuntime(context.Context) (ports.OrcaRuntimeObservation, error) {
-	return ports.OrcaRuntimeObservation{State: "absent"}, nil
+func (fixture *initPlatformFixture) ObserveProfileRuntimes(context.Context) (map[string]ports.RuntimeObservation, error) {
+	return map[string]ports.RuntimeObservation{"sample-runtime": {State: "absent"}}, nil
+}
+func (fixture *initPlatformFixture) ApplyProfileRuntime(ctx context.Context, _, _, _, _ string) error {
+	return fixture.ApplyStage(ctx, ports.ReconcileStageProfileRuntimes)
 }
 
 func (fixture *initPlatformFixture) ConfigsConverged(context.Context) (bool, error) {
@@ -126,7 +129,7 @@ func newInitPlatformFixture() *initPlatformFixture {
 		ports.ReconcileStagePowerImport, ports.ReconcileStageInstance, ports.ReconcileStageMounts,
 		ports.ReconcileStageProvision, ports.ReconcileStageTestVMs, ports.ReconcileStageSSH,
 		ports.ReconcileStageProfileServices, ports.ReconcileStageGitIdentity, ports.ReconcileStageExtras, ports.ReconcileStagePower,
-		ports.ReconcileStageKeys, ports.ReconcileStageSecurity, ports.ReconcileStageOrca,
+		ports.ReconcileStageKeys, ports.ReconcileStageSecurity, ports.ReconcileStageProfileRuntimes,
 	} {
 		converged[id] = true
 	}
@@ -135,8 +138,8 @@ func newInitPlatformFixture() *initPlatformFixture {
 }
 
 func TestParseInitProfile(t *testing.T) {
-	request, err := parseInitArguments([]string{"--profile", "hermes", "--yes"})
-	if err != nil || request.mode != initReconcile || request.profile != "hermes" {
+	request, err := parseInitArguments([]string{"--profile", "sample-service", "--yes"})
+	if err != nil || request.mode != initReconcile || request.profile != "sample-service" {
 		t.Fatalf("unexpected init request: %#v err=%v", request, err)
 	}
 
@@ -146,10 +149,10 @@ func TestParseInitProfile(t *testing.T) {
 		want      string
 	}{
 		{name: "missing value", arguments: []string{"--profile"}, want: "needs a value"},
-		{name: "duplicate", arguments: []string{"--profile", "hermes", "--profile", "android"}, want: "only once"},
-		{name: "unsafe", arguments: []string{"--profile", "../hermes"}, want: "invalid profile"},
-		{name: "configs", arguments: []string{"--configs", "--profile", "hermes"}, want: "cannot be used together"},
-		{name: "reset", arguments: []string{"--profile", "hermes", "--reset"}, want: "cannot be used together"},
+		{name: "duplicate", arguments: []string{"--profile", "sample-service", "--profile", "sample-device"}, want: "only once"},
+		{name: "unsafe", arguments: []string{"--profile", "../sample-service"}, want: "invalid profile"},
+		{name: "configs", arguments: []string{"--configs", "--profile", "sample-service"}, want: "cannot be used together"},
+		{name: "reset", arguments: []string{"--profile", "sample-service", "--reset"}, want: "cannot be used together"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := parseInitArguments(test.arguments)
@@ -331,11 +334,11 @@ func withoutCommandSetting(environment []string, name string) []string {
 func TestLoadInitProfileUsesShippedPresetForUnknownYard(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	environment = withoutCommandSetting(environment, "SSH_PORT")
-	preset := filepath.Join(root, "config", "profiles", "hermes", "yard.env")
+	preset := filepath.Join(root, "config", "profiles", "sample-service", "yard.env")
 	if err := os.MkdirAll(filepath.Dir(preset), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	content := "ENVIRONMENT_PROFILES=hermes\nAGENTS=codex\nSSH_PORT=2234\n"
+	content := "ENVIRONMENT_PROFILES=sample-service\nAGENTS=codex\nSSH_PORT=2234\n"
 	writeCLIFile(t, preset, content, 0o600)
 	program, err := New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
@@ -345,17 +348,17 @@ func TestLoadInitProfileUsesShippedPresetForUnknownYard(t *testing.T) {
 	}
 
 	loaded, bootstrap, err := program.loadInitContext(
-		"custom-name", true, []string{"--profile", "hermes"},
+		"custom-name", true, []string{"--profile", "sample-service"},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if loaded.Context.YardName != "custom-name" || loaded.Context.SSHPort != 2234 ||
-		loaded.Environment["ENVIRONMENT_PROFILES"] != "hermes" || loaded.Environment["CODING_TOOL_INTEGRATIONS"] != "codex" {
+		loaded.Environment["ENVIRONMENT_PROFILES"] != "sample-service" || loaded.Environment["CODING_TOOL_INTEGRATIONS"] != "codex" {
 		t.Fatalf("profile preset was not loaded for selected yard: %#v %#v", loaded.Context, loaded.Environment)
 	}
 	target := filepath.Join(root, "state", "yards", "custom-name", "config.env")
-	if bootstrap == nil || bootstrap.profile != "hermes" || bootstrap.sourcePath != preset ||
+	if bootstrap == nil || bootstrap.profile != "sample-service" || bootstrap.sourcePath != preset ||
 		bootstrap.targetPath != target || string(bootstrap.content) != content {
 		t.Fatalf("unexpected bootstrap: %#v", bootstrap)
 	}
@@ -370,14 +373,14 @@ func TestLoadInitProfileRejectsCommandOverridesOfPresetSettings(t *testing.T) {
 		override string
 		want     string
 	}{
-		{name: "profiles", override: "ENVIRONMENT_PROFILES=openclaw", want: "ENVIRONMENT_PROFILES"},
+		{name: "profiles", override: "ENVIRONMENT_PROFILES=sample-build", want: "ENVIRONMENT_PROFILES"},
 		{name: "agents", override: "CODING_TOOL_INTEGRATIONS=claude", want: "CODING_TOOL_INTEGRATIONS"},
 		{name: "host mounts", override: "HOST_MOUNTS=/tmp:/mnt/host:ro:0755", want: "HOST_MOUNTS"},
 		{name: "host links", override: "HOST_LINKS=.claude/sessions:/mnt/host/agent-sessions/claude/sessions", want: "HOST_LINKS"},
 		{name: "Claude instructions", override: "HOST_CLAUDE_MD=/tmp/CLAUDE.md", want: "HOST_CLAUDE_MD"},
 		{name: "Codex instructions", override: "HOST_CODEX_AGENTS_MD=/tmp/AGENTS.md", want: "HOST_CODEX_AGENTS_MD"},
 		{name: "OpenCode instructions", override: "HOST_OPENCODE_AGENTS_MD=/tmp/AGENTS.md", want: "HOST_OPENCODE_AGENTS_MD"},
-		{name: "capabilities", override: "YARD_CAPABILITIES=android", want: "YARD_CAPABILITIES"},
+		{name: "capabilities", override: "YARD_CAPABILITIES=sample-device", want: "YARD_CAPABILITIES"},
 		{name: "caps", override: "YARD_CAPS=fuse", want: "YARD_CAPS"},
 		{name: "devices", override: "YARD_DEVICES=gpu", want: "YARD_DEVICES"},
 		{name: "yard mounts", override: "YARD_MOUNTS=cache:/srv/cache:rw:0755", want: "YARD_MOUNTS"},
@@ -401,11 +404,11 @@ func TestLoadInitProfileRejectsCommandOverridesOfPresetSettings(t *testing.T) {
 				return strings.HasPrefix(value, setting)
 			})
 			environment = append(environment, test.override)
-			preset := filepath.Join(root, "config", "profiles", "hermes", "yard.env")
+			preset := filepath.Join(root, "config", "profiles", "sample-service", "yard.env")
 			if err := os.MkdirAll(filepath.Dir(preset), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			writeCLIFile(t, preset, `ENVIRONMENT_PROFILES=hermes
+			writeCLIFile(t, preset, `ENVIRONMENT_PROFILES=sample-service
 CODING_TOOL_INTEGRATIONS=codex
 HOST_MOUNTS=
 HOST_LINKS=
@@ -429,10 +432,10 @@ SSH_PORT=2234
 			}
 
 			_, bootstrap, err := program.loadInitContext(
-				"custom-name", true, []string{"--profile", "hermes"},
+				"custom-name", true, []string{"--profile", "sample-service"},
 			)
 			if err == nil || !strings.Contains(err.Error(),
-				"command environment overrides profile \"hermes\" at setting "+test.want) ||
+				"command environment overrides profile \"sample-service\" at setting "+test.want) ||
 				bootstrap != nil {
 				t.Fatalf("profile command override: bootstrap=%#v err=%v", bootstrap, err)
 			}
@@ -447,11 +450,11 @@ func TestLoadInitProfileAllowsMatchingCommandValue(t *testing.T) {
 		return strings.HasPrefix(value, "CODING_TOOL_INTEGRATIONS=")
 	})
 	environment = append(environment, "CODING_TOOL_INTEGRATIONS=codex")
-	preset := filepath.Join(root, "config", "profiles", "hermes", "yard.env")
+	preset := filepath.Join(root, "config", "profiles", "sample-service", "yard.env")
 	if err := os.MkdirAll(filepath.Dir(preset), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	writeCLIFile(t, preset, "ENVIRONMENT_PROFILES=hermes\nAGENTS=codex\nSSH_PORT=2234\n", 0o600)
+	writeCLIFile(t, preset, "ENVIRONMENT_PROFILES=sample-service\nAGENTS=codex\nSSH_PORT=2234\n", 0o600)
 	program, err := New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 	})
@@ -460,7 +463,7 @@ func TestLoadInitProfileAllowsMatchingCommandValue(t *testing.T) {
 	}
 
 	loaded, bootstrap, err := program.loadInitContext(
-		"custom-name", true, []string{"--profile", "hermes"},
+		"custom-name", true, []string{"--profile", "sample-service"},
 	)
 	if err != nil || bootstrap == nil || loaded.Environment["CODING_TOOL_INTEGRATIONS"] != "codex" {
 		t.Fatalf("matching command value was rejected: loaded=%#v bootstrap=%#v err=%v",
@@ -477,22 +480,22 @@ func TestInitProfileExistingDefinitionMustMatchPreset(t *testing.T) {
 		{
 			name: "semantic match",
 			existing: "# locally documented\n" +
-				"ENVIRONMENT_PROFILES='hermes'\nAGENTS=\"codex\"\nSSH_PORT=2234\n",
+				"ENVIRONMENT_PROFILES='sample-service'\nAGENTS=\"codex\"\nSSH_PORT=2234\n",
 		},
 		{
 			name:     "conflict",
-			existing: "ENVIRONMENT_PROFILES=hermes\nAGENTS=claude\nSSH_PORT=2234\n",
-			wantErr:  "conflicts with profile \"hermes\" at setting CODING_TOOL_INTEGRATIONS",
+			existing: "ENVIRONMENT_PROFILES=sample-service\nAGENTS=claude\nSSH_PORT=2234\n",
+			wantErr:  "conflicts with profile \"sample-service\" at setting CODING_TOOL_INTEGRATIONS",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root, environment, _ := nativeFixture(t)
 			environment = withoutCommandSetting(environment, "SSH_PORT")
-			preset := filepath.Join(root, "config", "profiles", "hermes", "yard.env")
+			preset := filepath.Join(root, "config", "profiles", "sample-service", "yard.env")
 			if err := os.MkdirAll(filepath.Dir(preset), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			writeCLIFile(t, preset, "ENVIRONMENT_PROFILES=hermes\nAGENTS=codex\nSSH_PORT=2234\n", 0o600)
+			writeCLIFile(t, preset, "ENVIRONMENT_PROFILES=sample-service\nAGENTS=codex\nSSH_PORT=2234\n", 0o600)
 			target := filepath.Join(root, "state", "yards", "custom-name", "config.env")
 			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 				t.Fatal(err)
@@ -506,7 +509,7 @@ func TestInitProfileExistingDefinitionMustMatchPreset(t *testing.T) {
 			}
 
 			loaded, bootstrap, err := program.loadInitContext(
-				"custom-name", true, []string{"--profile", "hermes"},
+				"custom-name", true, []string{"--profile", "sample-service"},
 			)
 			if test.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
@@ -531,11 +534,11 @@ func TestInitProfileReusesSupportedLegacyDefinition(t *testing.T) {
 		t.Run(location, func(t *testing.T) {
 			root, environment, _ := nativeFixture(t)
 			environment = withoutCommandSetting(environment, "SSH_PORT")
-			preset := filepath.Join(root, "config", "profiles", "hermes", "yard.env")
+			preset := filepath.Join(root, "config", "profiles", "sample-service", "yard.env")
 			if err := os.MkdirAll(filepath.Dir(preset), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			content := "ENVIRONMENT_PROFILES=hermes\nAGENTS=codex\nSSH_PORT=2234\n"
+			content := "ENVIRONMENT_PROFILES=sample-service\nAGENTS=codex\nSSH_PORT=2234\n"
 			writeCLIFile(t, preset, content, 0o600)
 			legacy := filepath.Join(root, "private", "yards", "custom-name.env")
 			if location == "flat config home" {
@@ -553,7 +556,7 @@ func TestInitProfileReusesSupportedLegacyDefinition(t *testing.T) {
 			}
 
 			loaded, bootstrap, err := program.loadInitContext(
-				"custom-name", true, []string{"--profile", "hermes"},
+				"custom-name", true, []string{"--profile", "sample-service"},
 			)
 			if err != nil || bootstrap != nil || loaded.Environment["CODING_TOOL_INTEGRATIONS"] != "codex" {
 				t.Fatalf("legacy definition was not reused: loaded=%#v bootstrap=%#v err=%v",
@@ -570,11 +573,11 @@ func TestInitProfileReusesSupportedLegacyDefinition(t *testing.T) {
 func TestInitProfileReusesPrivateDefinitionFromEffectiveConfigDir(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	environment = withoutCommandSetting(environment, "SSH_PORT")
-	preset := filepath.Join(root, "config", "profiles", "hermes", "yard.env")
+	preset := filepath.Join(root, "config", "profiles", "sample-service", "yard.env")
 	if err := os.MkdirAll(filepath.Dir(preset), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	content := "ENVIRONMENT_PROFILES=hermes\nAGENTS=codex\nSSH_PORT=2234\n"
+	content := "ENVIRONMENT_PROFILES=sample-service\nAGENTS=codex\nSSH_PORT=2234\n"
 	writeCLIFile(t, preset, content, 0o600)
 	alternateConfig := filepath.Join(root, "installed", "config")
 	if err := os.MkdirAll(alternateConfig, 0o700); err != nil {
@@ -595,7 +598,7 @@ func TestInitProfileReusesPrivateDefinitionFromEffectiveConfigDir(t *testing.T) 
 	}
 
 	loaded, bootstrap, err := program.loadInitContext(
-		"custom-name", true, []string{"--profile", "hermes"},
+		"custom-name", true, []string{"--profile", "sample-service"},
 	)
 	if err != nil || bootstrap != nil || loaded.Environment["CODING_TOOL_INTEGRATIONS"] != "codex" {
 		t.Fatalf("effective private definition was not reused: loaded=%#v bootstrap=%#v err=%v",
@@ -606,11 +609,11 @@ func TestInitProfileReusesPrivateDefinitionFromEffectiveConfigDir(t *testing.T) 
 func TestInitProfileRejectsRemoteContextBeforeBootstrap(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	environment = withoutCommandSetting(environment, "SSH_PORT")
-	preset := filepath.Join(root, "config", "profiles", "hermes", "yard.env")
+	preset := filepath.Join(root, "config", "profiles", "sample-service", "yard.env")
 	if err := os.MkdirAll(filepath.Dir(preset), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	writeCLIFile(t, preset, "ENVIRONMENT_PROFILES=hermes\nAGENTS=codex\nSSH_PORT=2234\n", 0o600)
+	writeCLIFile(t, preset, "ENVIRONMENT_PROFILES=sample-service\nAGENTS=codex\nSSH_PORT=2234\n", 0o600)
 	environment = append(environment, "ACCESS_KIND=remote", "OWNER_ENDPOINT=operator@example.test")
 	program, err := New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
@@ -620,7 +623,7 @@ func TestInitProfileRejectsRemoteContextBeforeBootstrap(t *testing.T) {
 	}
 
 	_, bootstrap, err := program.loadInitContext(
-		"custom-name", true, []string{"--profile", "hermes"},
+		"custom-name", true, []string{"--profile", "sample-service"},
 	)
 	if err == nil || !strings.Contains(err.Error(), "only supported for local yards") || bootstrap != nil {
 		t.Fatalf("remote profile bootstrap: bootstrap=%#v err=%v", bootstrap, err)
@@ -641,8 +644,8 @@ func (fixture *initPlatformFixture) ApplyStage(_ context.Context, stage ports.Re
 	}
 	fixture.applied = append(fixture.applied, stage)
 	fixture.converged[stage] = true
-	if stage == ports.ReconcileStageOrca && fixture.readyOnOrca != "" {
-		if err := os.WriteFile(fixture.readyOnOrca, []byte("ready\n"), 0o600); err != nil {
+	if stage == ports.ReconcileStageProfileRuntimes && fixture.readyOnProfileRuntime != "" {
+		if err := os.WriteFile(fixture.readyOnProfileRuntime, []byte("ready\n"), 0o600); err != nil {
 			return err
 		}
 	}
@@ -1082,7 +1085,7 @@ func TestNativeInitOwnsPlanResumeAndFinalization(t *testing.T) {
 	}
 }
 
-func TestInitRepairsOrcaBeforeHooksInProvisionedYard(t *testing.T) {
+func TestInitRepairsProfileRuntimeBeforeHooksInProvisionedYard(t *testing.T) {
 	for _, scenario := range []string{"repair", "failure", "declined"} {
 		t.Run(scenario, func(t *testing.T) {
 			root, environment, _ := nativeFixture(t)
@@ -1091,9 +1094,9 @@ func TestInitRepairsOrcaBeforeHooksInProvisionedYard(t *testing.T) {
 				platform.converged[stage] = true
 			}
 			platform.converged[ports.ReconcileStageFinalize] = true
-			platform.converged[ports.ReconcileStageOrca] = false
+			platform.converged[ports.ReconcileStageProfileRuntimes] = false
 			if scenario == "failure" {
-				platform.applyErr = errors.New("injected Orca installation failure")
+				platform.applyErr = errors.New("injected ProfileRuntime installation failure")
 			}
 			arguments := []string{"init"}
 			if scenario != "declined" {
@@ -1113,9 +1116,9 @@ func TestInitRepairsOrcaBeforeHooksInProvisionedYard(t *testing.T) {
 				}
 				return
 			}
-			if code != 0 || platform.hooksBeforeOrca || platform.projectHooks != 1 ||
-				!slices.Equal(platform.applied, []ports.ReconcileStageID{ports.ReconcileStageOrca}) {
-				t.Fatalf("repair order: code=%d hooks=%d before=%v applied=%v output=%s", code, platform.projectHooks, platform.hooksBeforeOrca, platform.applied, output.String())
+			if code != 0 || platform.hooksBeforeProfileRuntime || platform.projectHooks != 1 ||
+				!slices.Equal(platform.applied, []ports.ReconcileStageID{ports.ReconcileStageProfileRuntimes}) {
+				t.Fatalf("repair order: code=%d hooks=%d before=%v applied=%v output=%s", code, platform.projectHooks, platform.hooksBeforeProfileRuntime, platform.applied, output.String())
 			}
 		})
 	}
@@ -1125,14 +1128,14 @@ func TestCompletedReleaseRepairRunsOrdinaryInitBeforeProjectHooks(t *testing.T) 
 	fixture := newConfigApplyRepairFixture(t, false)
 	writeCLIFile(t, filepath.Join(fixture.cli.env["SUBYARD_CONFIG_HOME"], "host-id"),
 		"owner-a\n", 0o600)
-	platform := &orcaRepairPlatformFixture{initPlatformFixture: newInitPlatformFixture()}
+	platform := &sampleRepairPlatformFixture{initPlatformFixture: newInitPlatformFixture()}
 	for stage := range platform.converged {
 		platform.converged[stage] = true
 	}
 	platform.converged[ports.ReconcileStageProvision] = false
-	platform.converged[ports.ReconcileStageOrca] = false
+	platform.converged[ports.ReconcileStageProfileRuntimes] = false
 	platform.converged[ports.ReconcileStageFinalize] = true
-	platform.readyOnOrca = fixture.readyMarker
+	platform.readyOnProfileRuntime = fixture.readyMarker
 	fixture.cli.options.InitPlatform = platform
 	fixture.cli.options.Arguments = []string{"init", "--yes"}
 	var output bytes.Buffer
@@ -1156,17 +1159,17 @@ func TestCompletedReleaseRepairRunsOrdinaryInitBeforeProjectHooks(t *testing.T) 
 		t.Fatalf("completed release init repair failed with code %d: %s", code, output.String())
 	}
 	if !slices.Equal(platform.applied, []ports.ReconcileStageID{
-		ports.ReconcileStageProvision, ports.ReconcileStageOrca,
+		ports.ReconcileStageProvision, ports.ReconcileStageProfileRuntimes,
 	}) {
 		t.Fatalf("release repair bypassed ordinary init order: %v", platform.applied)
 	}
-	if platform.hooksBeforeOrca || platform.projectHooks != 1 {
-		t.Fatalf("project hooks ran before Orca repair: before=%v attempts=%d",
-			platform.hooksBeforeOrca, platform.projectHooks)
+	if platform.hooksBeforeProfileRuntime || platform.projectHooks != 1 {
+		t.Fatalf("project hooks ran before ProfileRuntime repair: before=%v attempts=%d",
+			platform.hooksBeforeProfileRuntime, platform.projectHooks)
 	}
 }
 
-func TestOrcaRepairValidationRejectsUnsafeInitShapes(t *testing.T) {
+func TestProfileRuntimeRepairValidationRejectsUnsafeInitShapes(t *testing.T) {
 	permit := &configApplyRepairPermit{requestedTargets: map[string]string{"default": "desired"}}
 	for _, test := range []struct {
 		name      string
@@ -1177,18 +1180,18 @@ func TestOrcaRepairValidationRejectsUnsafeInitShapes(t *testing.T) {
 		{name: "new host identity", execution: initExecution{mode: initReconcile, hostIDPending: true}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			cli := &CLI{orcaInitRepair: permit}
-			if err := test.execution.validateOrcaRepair(context.Background(), cli); err == nil {
+			cli := &CLI{profileInitRepair: permit}
+			if err := test.execution.validateProfileRepair(context.Background(), cli); err == nil {
 				t.Fatal("unsafe init shape was admitted by completed release repair")
 			}
 		})
 	}
 }
 
-func TestOrcaRepairValidationRejectsChangedEffectiveConfiguration(t *testing.T) {
+func TestProfileRuntimeRepairValidationRejectsChangedEffectiveConfiguration(t *testing.T) {
 	fixture := newConfigApplyRepairFixture(t, false)
-	platform := &orcaRepairPlatformFixture{initPlatformFixture: newInitPlatformFixture()}
-	platform.converged[ports.ReconcileStageOrca] = false
+	platform := &sampleRepairPlatformFixture{initPlatformFixture: newInitPlatformFixture()}
+	platform.converged[ports.ReconcileStageProfileRuntimes] = false
 	fixture.cli.options.InitPlatform = platform
 	fake := fixture.cli.options.Executor.(*testkit.Incus)
 	fake.ExecSteps = nil
@@ -1206,15 +1209,15 @@ func TestOrcaRepairValidationRejectsChangedEffectiveConfiguration(t *testing.T) 
 			appendHashSteps(t, fake, target.Loaded)
 		}
 	}
-	permit, err := fixture.cli.prepareOrcaInitRepair(
+	permit, err := fixture.cli.prepareProfileInitRepair(
 		context.Background(), "default", nil, fixture.outcome)
 	if err != nil || permit == nil {
-		t.Fatalf("prepare Orca repair permit: permit=%#v err=%v", permit, err)
+		t.Fatalf("prepare ProfileRuntime repair permit: permit=%#v err=%v", permit, err)
 	}
-	fixture.cli.orcaInitRepair = permit
+	fixture.cli.profileInitRepair = permit
 	loaded.Context.DevUID++
 	execution := initExecution{loaded: loaded, mode: initReconcile}
-	if err := execution.validateOrcaRepair(context.Background(), fixture.cli); err == nil ||
+	if err := execution.validateProfileRepair(context.Background(), fixture.cli); err == nil ||
 		!strings.Contains(err.Error(), "without overrides") {
 		t.Fatalf("changed effective configuration was admitted: %v", err)
 	}
@@ -1239,11 +1242,11 @@ func TestInitProfileCreatesDefinitionOnlyAfterConfirmationAndPreflight(t *testin
 		t.Run(test.name, func(t *testing.T) {
 			root, environment, _ := nativeFixture(t)
 			environment = withoutCommandSetting(environment, "SSH_PORT")
-			preset := filepath.Join(root, "config", "profiles", "hermes", "yard.env")
+			preset := filepath.Join(root, "config", "profiles", "sample-service", "yard.env")
 			if err := os.MkdirAll(filepath.Dir(preset), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			content := "ENVIRONMENT_PROFILES=hermes\nAGENTS=codex\nSSH_PORT=2234\n"
+			content := "ENVIRONMENT_PROFILES=sample-service\nAGENTS=codex\nSSH_PORT=2234\n"
 			writeCLIFile(t, preset, content, 0o600)
 			platform := newInitPlatformFixture()
 			platform.preflightErr = test.preflightErr
@@ -1252,7 +1255,7 @@ func TestInitProfileCreatesDefinitionOnlyAfterConfirmationAndPreflight(t *testin
 				platform.converged[ports.ReconcileStageProject] = true
 			}
 			prompt := &testkit.Prompt{Answers: []bool{test.confirm}}
-			arguments := []string{"-Y", "hermes", "init", "--profile", "hermes"}
+			arguments := []string{"-Y", "sample-service", "init", "--profile", "sample-service"}
 			var stdout, stderr bytes.Buffer
 			program, err := New(Options{
 				RepositoryRoot: root, Program: "yard", Arguments: arguments,
@@ -1262,7 +1265,7 @@ func TestInitProfileCreatesDefinitionOnlyAfterConfirmationAndPreflight(t *testin
 			if err != nil {
 				t.Fatal(err)
 			}
-			target := filepath.Join(root, "state", "yards", "hermes", "config.env")
+			target := filepath.Join(root, "state", "yards", "sample-service", "config.env")
 			if _, err := os.Lstat(target); !os.IsNotExist(err) {
 				t.Fatalf("definition existed before init: %v", err)
 			}
@@ -1296,7 +1299,7 @@ func TestNativeInitProfileIsAdvertisedAndUnknownPresetDoesNotWrite(t *testing.T)
 	root, environment, _ := nativeFixture(t)
 	program, err := New(Options{
 		RepositoryRoot: root, Program: "yard",
-		Arguments:   []string{"-Y", "hermes", "init", "--profile", "missing", "--yes"},
+		Arguments:   []string{"-Y", "sample-service", "init", "--profile", "missing", "--yes"},
 		Environment: environment, WorkingDir: root, InitPlatform: newInitPlatformFixture(),
 	})
 	if err != nil {
@@ -1312,7 +1315,7 @@ func TestNativeInitProfileIsAdvertisedAndUnknownPresetDoesNotWrite(t *testing.T)
 		!strings.Contains(stderr.String(), "has no named-yard preset") {
 		t.Fatalf("unknown profile: code=%d stderr=%q", code, stderr.String())
 	}
-	target := filepath.Join(root, "state", "yards", "hermes", "config.env")
+	target := filepath.Join(root, "state", "yards", "sample-service", "config.env")
 	if _, err := os.Lstat(target); !os.IsNotExist(err) {
 		t.Fatalf("unknown profile wrote a definition: %v", err)
 	}

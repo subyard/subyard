@@ -122,10 +122,10 @@ func (ingress *resourceIngress) refresh(ctx context.Context, cli *CLI) error {
 		return nil
 	}
 	freshLoaded, err := config.Load(config.LoadOptions{
-		RepositoryRoot: cli.options.RepositoryRoot,
-		OperatorHome:   ingress.loaded.Context.Paths.OperatorHome,
-		YardName:       ingress.loaded.Context.YardName,
-		Environment:    cli.baseEnv,
+		Catalog: &cli.catalog, RepositoryRoot: cli.options.RepositoryRoot,
+		OperatorHome: ingress.loaded.Context.Paths.OperatorHome,
+		YardName:     ingress.loaded.Context.YardName,
+		Environment:  cli.baseEnv,
 	})
 	if err != nil {
 		return err

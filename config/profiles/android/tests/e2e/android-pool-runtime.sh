@@ -14,9 +14,18 @@ case "$lane" in full|recovery|viewer) ;; *) printf 'invalid Android test lane\n'
 [ "${SUBYARD_E2E_VM:-}" = 1 ] || { printf 'android-pool-runtime: requires VM1\n' >&2; exit 1; }
 [ -r /run/subyard-e2e-lease.json ] || { printf 'android-pool-runtime: missing E2E lease guard\n' >&2; exit 1; }
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+# shellcheck source=tests/helpers/release-candidate.sh
+. "$root/tests/helpers/release-candidate.sh"
+if YARD_BIN="$(release_candidate_prepare "$root")"; then
+  unset YARD_ENGINE_PATH
+else
+  candidate_rc=$?
+  [ "$candidate_rc" = 1 ] || exit "$candidate_rc"
+  YARD_BIN="$root/.build/yard"
+fi
 for command in go incus sudo timeout; do command -v "$command" >/dev/null || exit 1; done
 sudo -n true
-[ -x "$root/.build/yard" ] || "$root/dev/build-engine.sh"
+[ -x "$YARD_BIN" ] || { "$root/dev/build-engine.sh"; YARD_BIN="$root/.build/yard"; }
 hold_seconds="${ANDROID_DIAGNOSTIC_HOLD_SECONDS:-0}"
 [[ "$hold_seconds" =~ ^[0-9]+$ ]] || { printf 'ANDROID_DIAGNOSTIC_HOLD_SECONDS must be an integer\n' >&2; exit 1; }
 hold_seconds=$((10#$hold_seconds))
@@ -38,10 +47,10 @@ yard() {
   if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
     && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
     local command
-    printf -v command '%q ' "$root/.build/yard" -Y "$YARD_NAME" "$@"
+    printf -v command '%q ' "$YARD_BIN" -Y "$YARD_NAME" "$@"
     sg incus-admin -c "exec $command"
   else
-    "$root/.build/yard" -Y "$YARD_NAME" "$@"
+    "$YARD_BIN" -Y "$YARD_NAME" "$@"
   fi
 }
 project=''

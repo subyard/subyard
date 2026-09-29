@@ -137,7 +137,12 @@ func (cli *CLI) resourceReservedPorts(current config.Loaded, definition resource
 	if err != nil {
 		return nil, err
 	}
-	settings := []string{"SSH_PORT", "ADB_PROXY_PORT", "ADB_CONSOLE_PROXY_PORT", "AI_OBSERVER_HOST_PORT"}
+	settings := []string{"AI_OBSERVER_HOST_PORT"}
+	for _, field := range current.Catalog.SettingCatalog() {
+		if field.HostListener {
+			settings = append(settings, field.Name)
+		}
+	}
 	for _, item := range cli.resources.Definitions() {
 		if item.Proxy != nil && !slices.Contains(settings, item.Proxy.HostPortSetting) {
 			settings = append(settings, item.Proxy.HostPortSetting)
@@ -154,7 +159,7 @@ func (cli *CLI) resourceReservedPorts(current config.Loaded, definition resource
 			}
 			environment["SUBYARD_CONFIG_HOME"] = current.Context.Paths.ConfigHome
 			environment["SUBYARD_HOME"] = current.Context.Paths.DataHome
-			loaded, err = config.Load(config.LoadOptions{RepositoryRoot: cli.options.RepositoryRoot,
+			loaded, err = config.Load(config.LoadOptions{Catalog: &cli.catalog, RepositoryRoot: cli.options.RepositoryRoot,
 				OperatorHome: current.Context.Paths.OperatorHome, YardName: name, Environment: environment})
 			if err != nil {
 				return nil, fmt.Errorf("inspect owner ports for yard %s: %w", name, err)
@@ -213,10 +218,10 @@ func (bootstrap *profileBootstrap) refresh(ctx context.Context, cli *CLI) error 
 		return nil
 	}
 	fresh, err := config.Load(config.LoadOptions{
-		RepositoryRoot: cli.options.RepositoryRoot,
-		OperatorHome:   bootstrap.initial.Environment["SUBYARD_OPERATOR_HOME"],
-		YardName:       bootstrap.initial.Context.YardName,
-		Environment:    cli.baseEnv,
+		Catalog: &cli.catalog, RepositoryRoot: cli.options.RepositoryRoot,
+		OperatorHome: bootstrap.initial.Environment["SUBYARD_OPERATOR_HOME"],
+		YardName:     bootstrap.initial.Context.YardName,
+		Environment:  cli.baseEnv,
 	})
 	if err != nil {
 		return err

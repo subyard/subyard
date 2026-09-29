@@ -81,8 +81,14 @@ line_of() {
 }
 
 release_adapter_line="$(line_of "$RELEASE_WORKFLOW" "run: bash $RUNNER")"
+release_build_line="$(line_of "$RELEASE_WORKFLOW" 'name: Build release assets')"
+release_receipt_line="$(line_of "$RELEASE_WORKFLOW" 'dev/release-acceptance.py verify-receipt')"
 release_publish_line="$(line_of "$RELEASE_WORKFLOW" 'name: Publish GitHub Release')"
 [ "$release_adapter_line" -lt "$release_publish_line" ] \
   || fail 'Release must pass the real-adapter gate before publishing assets'
+[ "$release_build_line" -lt "$release_receipt_line" ] && [ "$release_receipt_line" -lt "$release_publish_line" ] \
+  || fail 'Release must verify the acceptance receipt after assets and before publishing'
+grep -Fq 'bash dev/test-profiles.sh --e2e --list' "$CI_WORKFLOW" \
+  || fail 'CI must preflight the shipped profile E2E inventory'
 
 printf 'ok: CI and Release share the prepared-context real-adapter gate\n'

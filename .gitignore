@@ -4,6 +4,9 @@
 # Scratch space for local inputs (e.g. third-party devcontainer files); not published.
 /temp/
 
+# Generated immutable release-acceptance candidate and extraction state.
+/.subyard-acceptance/
+
 # Local Go build/install artifacts.
 /.build/
 
@@ -32,3 +35,7 @@
 # broker.conf stay host-only. Only the *.example templates are committed.
 /config/qa-pool/*
 !/config/qa-pool/*.example
+
+# Frozen release acceptance payload (created only in disposable source snapshots).
+/.subyard-acceptance/
+/.subyard-e2e-index

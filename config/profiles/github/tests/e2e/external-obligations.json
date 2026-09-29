@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "obligations": [
+    {
+      "id": "github-app-live-api",
+      "description": "Exercise GitHub App permissions and real token use against an authorized sandbox repository. The reproducible VM lane uses a synthetic App key and does not call the real API.",
+      "required_inputs": [
+        "Configured test GitHub App installation",
+        "Authorized sandbox repository and separately supplied credentials"
+      ]
+    }
+  ]
+}

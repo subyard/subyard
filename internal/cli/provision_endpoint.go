@@ -111,7 +111,7 @@ func (cli *CLI) prepareProvisionEndpointWithBootstrap(loaded config.Loaded, prof
 	}
 	for _, name := range slices.Sorted(maps.Keys(plan.values)) {
 		value := plan.values[name]
-		if err := config.ValidateSetting(config.ScopeYard, name, value, false); err != nil {
+		if err := loaded.Catalog.ValidateSetting(config.ScopeYard, name, value, false); err != nil {
 			return nil, nil, err
 		}
 		plan.content, err = config.EditPersistentAssignmentContent(plan.path, plan.content, name, &value)
@@ -147,7 +147,7 @@ func (plan *provisionEndpoint) checkWithInstance(ctx context.Context, cli *CLI, 
 	if err := plan.checkSource(); err != nil {
 		return err
 	}
-	options := config.LoadOptions{RepositoryRoot: cli.options.RepositoryRoot, OperatorHome: plan.initial.Context.Paths.OperatorHome, YardName: plan.initial.Context.YardName, Environment: cli.baseEnv}
+	options := config.LoadOptions{Catalog: &cli.catalog, RepositoryRoot: cli.options.RepositoryRoot, OperatorHome: plan.initial.Context.Paths.OperatorHome, YardName: plan.initial.Context.YardName, Environment: cli.baseEnv}
 	if plan.bootstrap != nil {
 		options.YardSettingsFile = plan.bootstrap.sourcePath
 	}

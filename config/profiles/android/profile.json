@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "settings": [
+    {
+      "name": "ADB_CONSOLE_EMULATOR_PORT",
+      "type": "port",
+      "scopes": [
+        "shipped",
+        "host",
+        "yard",
+        "command"
+      ],
+      "application": "next-command",
+      "syncable": true,
+      "optional": true,
+      "minimum": 1,
+      "maximum": 65535,
+      "default": "5554"
+    },
+    {
+      "name": "ADB_CONSOLE_PROXY_PORT",
+      "type": "port",
+      "scopes": [
+        "shipped",
+        "host",
+        "yard",
+        "command"
+      ],
+      "application": "next-command",
+      "syncable": true,
+      "optional": true,
+      "minimum": 1,
+      "maximum": 65535,
+      "default": "",
+      "host_listener": true
+    },
+    {
+      "name": "ADB_EMULATOR_PORT",
+      "type": "port",
+      "scopes": [
+        "shipped",
+        "host",
+        "yard",
+        "command"
+      ],
+      "application": "next-command",
+      "syncable": true,
+      "minimum": 1,
+      "maximum": 65535,
+      "default": "5555"
+    },
+    {
+      "name": "ADB_PROXY_PORT",
+      "type": "port",
+      "scopes": [
+        "shipped",
+        "host",
+        "yard",
+        "command"
+      ],
+      "application": "next-command",
+      "syncable": true,
+      "minimum": 1,
+      "maximum": 65535,
+      "default": "15555",
+      "host_listener": true
+    }
+  ]
+}

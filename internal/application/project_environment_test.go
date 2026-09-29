@@ -45,7 +45,7 @@ func TestProjectEnvironmentUpStagesProtectedInputAndNativeManifest(t *testing.T)
 		t.Fatalf("protected input was not staged once: %#v", streams)
 	}
 	var manifest map[string]any
-	if err := json.Unmarshal(streams[1], &manifest); err != nil || manifest["profile"] != "openclaw" {
+	if err := json.Unmarshal(streams[1], &manifest); err != nil || manifest["profile"] != "sample-profile" {
 		t.Fatalf("invalid native manifest: %q err=%v", streams[1], err)
 	}
 	if strings.Contains(string(streams[1]), "hidden") {
@@ -85,7 +85,7 @@ func TestProjectEnvironmentManifestIsCanonical(t *testing.T) {
 	if err := json.Unmarshal(payload, &document); err != nil {
 		t.Fatal(err)
 	}
-	if document.Profile != "openclaw" || document.Image != "ubuntu:24.04" ||
+	if document.Profile != "sample-profile" || document.Image != "ubuntu:24.04" ||
 		!slices.Equal(document.EnvKeys, []string{"PUBLIC_VALUE"}) || len(document.Secrets) != 1 {
 		t.Fatalf("manifest=%s", payload)
 	}
@@ -112,14 +112,14 @@ func TestProjectEnvironmentRejectsControlSocketMount(t *testing.T) {
 }
 
 func TestProjectEnvironmentInfoAndDownUseDataPlane(t *testing.T) {
-	manifestJSON := "{\"profile\":\"openclaw\"}\n"
+	manifestJSON := "{\"profile\":\"sample-profile\"}\n"
 	data := &projectDataStub{run: func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
 		if len(request.Command) == 2 && request.Command[0] == "cat" {
 			return ports.InstanceExecResult{Stdout: []byte(manifestJSON)}, nil
 		}
 		if len(request.Command) >= 3 && request.Command[0] == "docker" &&
 			request.Command[1] == "inspect" && request.Command[2] == "-f" {
-			return ports.InstanceExecResult{Stdout: []byte("sha256:owned\t1\tdemo-12345678\topenclaw\n")}, nil
+			return ports.InstanceExecResult{Stdout: []byte("sha256:owned\t1\tdemo-12345678\tsample-profile\n")}, nil
 		}
 		return ports.InstanceExecResult{}, nil
 	}}
@@ -148,7 +148,7 @@ func TestProjectEnvironmentExistingBoxUsesImmutableIDForStartAndSessionLinks(t *
 		if len(command) >= 3 && command[0] == "docker" &&
 			command[1] == "inspect" && command[2] == "-f" {
 			return ports.InstanceExecResult{
-				Stdout: []byte("sha256:owned\t1\tdemo-12345678\topenclaw\n"),
+				Stdout: []byte("sha256:owned\t1\tdemo-12345678\tsample-profile\n"),
 			}, nil
 		}
 		return ports.InstanceExecResult{}, nil
@@ -242,7 +242,7 @@ func TestProjectEnvironmentRebuildRecreatesOwnedBox(t *testing.T) {
 			return ports.InstanceExecResult{ExitCode: 1}, errors.New("missing")
 		}
 		if len(command) >= 3 && command[0] == "docker" && command[1] == "inspect" && command[2] == "-f" {
-			return ports.InstanceExecResult{Stdout: []byte("sha256:owned\t1\tdemo-12345678\topenclaw\n")}, nil
+			return ports.InstanceExecResult{Stdout: []byte("sha256:owned\t1\tdemo-12345678\tsample-profile\n")}, nil
 		}
 		return ports.InstanceExecResult{}, nil
 	}}

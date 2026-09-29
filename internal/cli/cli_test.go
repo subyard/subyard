@@ -423,7 +423,7 @@ func TestMigrationPathsLoadExplicitMachineContext(t *testing.T) {
 
 func TestMigrationEnvironmentDropsPreviousRuntimeContext(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "candidate")
-	environment := freshMigrationEnvironment(map[string]string{
+	environment := (&CLI{}).freshMigrationEnvironment(map[string]string{
 		"HOME":                           "/operator",
 		"PATH":                           "/usr/bin",
 		"SUBYARD_CONFIG_HOME":            "/operator/.config/subyard",

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -58,6 +59,133 @@ func TestRegistryRejectsUnsafeDeclarations(t *testing.T) {
 		t.Fatal("accepted duplicate consumer")
 	}
 }
+
+func TestProfileExtensionsLoadAndValidate(t *testing.T) {
+	root := testkit.TempDir(t)
+	if got, err := Load(root); err != nil || len(got) != 0 {
+		t.Fatalf("empty registry: profiles=%v err=%v", got, err)
+	}
+	good := Definition{
+		Settings: []Setting{
+			{Name: "SAMPLE_HOST_PORT", Type: "port", Scopes: []string{"host", "yard", "command"}, Application: "next-command", Optional: true, Minimum: 1, Maximum: 65535, HostListener: true},
+			{Name: "OPENCLAW_CACHE_SIZE", Type: "size", Scopes: []string{"shipped", "yard"}, Application: "yard-init", Default: stringPointer("1GiB")},
+		},
+		Runtime:          &RuntimeHook{ActivationID: "fixture-runtime", Handler: "runtime.sh"},
+		GuestEnvironment: &GuestEnvironmentHook{Handler: "guest.sh"},
+	}
+	path := fixture(t, root, "fixture", "", good)
+	dir := filepath.Dir(path)
+	testkit.WriteFile(t, filepath.Join(dir, "runtime.sh"), []byte("#!/bin/sh\n"), 0o700)
+	testkit.WriteFile(t, filepath.Join(dir, "guest.sh"), []byte("#!/bin/sh\n"), 0o700)
+	loaded, err := Load(root)
+	if err != nil || len(loaded) != 1 || loaded[0].Runtime == nil || loaded[0].GuestEnvironment == nil || loaded[0].Settings[0].Name != "SAMPLE_HOST_PORT" || loaded[0].Settings[1].Type != "size" {
+		t.Fatalf("extension load: profiles=%+v err=%v", loaded, err)
+	}
+}
+
+func TestProfileExtensionRejectsInvalidAndDuplicateDeclarations(t *testing.T) {
+	invalid := []Setting{
+		{Name: "lower", Type: "string", Scopes: []string{"yard"}, Application: "yard-init"},
+		{Name: "BAD", Type: "object", Scopes: []string{"yard"}, Application: "yard-init"},
+		{Name: "BAD", Type: "string", Scopes: []string{"yard", "yard"}, Application: "yard-init"},
+		{Name: "BAD", Type: "string", Scopes: []string{"yard"}, Application: "later"},
+		{Name: "BAD", Type: "integer", Scopes: []string{"yard"}, Application: "yard-init", Minimum: 5, Maximum: 2},
+		{Name: "BAD", Type: "string", Scopes: []string{"yard"}, Application: "yard-init", HostListener: true},
+		{Name: "BAD", Type: "port", Scopes: []string{"yard"}, Application: "yard-init", Minimum: 0, Maximum: 65536},
+		{Name: "BAD", Type: "integer", Scopes: []string{"yard"}, Application: "yard-init", Minimum: 2, Maximum: 4, Default: stringPointer("5")},
+		{Name: "BAD", Type: "string", Scopes: []string{"yard"}, Application: "yard-init", Enum: []string{"x", "x"}},
+	}
+	for i, setting := range invalid {
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
+			root := testkit.TempDir(t)
+			fixture(t, root, "fixture", "", Definition{Settings: []Setting{setting}})
+			if _, err := Load(root); err == nil {
+				t.Fatalf("accepted invalid setting %+v", setting)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name          string
+		first, second Definition
+	}{
+		{"setting", Definition{Settings: []Setting{{Name: "SAME", Type: "string", Scopes: []string{"yard"}, Application: "yard-init"}}}, Definition{Settings: []Setting{{Name: "SAME", Type: "string", Scopes: []string{"host"}, Application: "next-command"}}}},
+		{"activation", Definition{Runtime: &RuntimeHook{ActivationID: "same", Handler: "runtime.sh"}}, Definition{Runtime: &RuntimeHook{ActivationID: "same", Handler: "runtime.sh"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := testkit.TempDir(t)
+			for _, name := range []string{"one", "two"} {
+				declaration := tc.first
+				if name == "two" {
+					declaration = tc.second
+				}
+				path := fixture(t, root, name, "", declaration)
+				if declaration.Runtime != nil {
+					testkit.WriteFile(t, filepath.Join(filepath.Dir(path), "runtime.sh"), []byte("#!/bin/sh\n"), 0o700)
+				}
+			}
+			if _, err := Load(root); err == nil {
+				t.Fatal("accepted cross-profile collision")
+			}
+		})
+	}
+}
+
+func TestProfileExtensionRejectsSymlinkHook(t *testing.T) {
+	root := testkit.TempDir(t)
+	path := fixture(t, root, "fixture", "", Definition{Runtime: &RuntimeHook{ActivationID: "fixture-runtime", Handler: "nested/runtime.sh"}})
+	dir := filepath.Dir(path)
+	if err := os.Mkdir(filepath.Join(dir, "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(dir, "real.sh"), []byte("#!/bin/sh\n"), 0o700)
+	if err := os.Symlink("../real.sh", filepath.Join(dir, "nested", "runtime.sh")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(root); err == nil {
+		t.Fatal("accepted symlinked profile handler")
+	}
+}
+
+func TestReadExecutableRejectsSubstitutedHookAndSymlinkRoot(t *testing.T) {
+	root := testkit.TempDir(t)
+	path := fixture(t, root, "fixture", "", Definition{GuestEnvironment: &GuestEnvironmentHook{Handler: "guest.sh"}})
+	dir := filepath.Dir(path)
+	hook := filepath.Join(dir, "guest.sh")
+	testkit.WriteFile(t, hook, []byte("safe\n"), 0o700)
+	definitions, err := Load(root)
+	if err != nil || len(definitions) != 1 {
+		t.Fatalf("load profile: definitions=%+v err=%v", definitions, err)
+	}
+	definition := definitions[0]
+	if got, err := definition.ReadExecutable("guest.sh"); err != nil || string(got) != "safe\n" {
+		t.Fatalf("read executable: got=%q err=%v", got, err)
+	}
+	if err := os.Remove(hook); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(root, "outside.sh")
+	testkit.WriteFile(t, outside, []byte("unsafe\n"), 0o700)
+	if err := os.Symlink(outside, hook); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := definition.ReadExecutable("guest.sh"); err == nil {
+		t.Fatal("accepted a hook replaced by a symlink after catalog load")
+	}
+	if err := os.Remove(hook); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(dir, dir+"-real"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(dir+"-real", dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := definition.ReadExecutable("guest.sh"); err == nil {
+		t.Fatal("accepted a profile root replaced by a symlink after catalog load")
+	}
+}
+
+func stringPointer(value string) *string { return &value }
 
 func TestRegistrySelectionAndSettings(t *testing.T) {
 	d := Definition{Name: "fixture", DefaultYards: []string{"default"}, DisabledWhen: map[string]string{"FIXTURE_OFF": "1"}}

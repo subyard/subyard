@@ -73,8 +73,8 @@ func TestCanonicalYardIdentity(t *testing.T) {
 		ownerinventory.Connection{
 			HostID: "remote-owner", Destination: "dev@remote.example",
 			Yards: map[string]ownerinventory.YardRoute{
-				"default":  {SSHHost: "yard-remote"},
-				"openclaw": {SSHHost: "yard-remote-openclaw"},
+				"default":      {SSHHost: "yard-remote"},
+				"sample-build": {SSHHost: "yard-remote-sample-build"},
 			},
 		},
 	); err != nil {
@@ -93,8 +93,8 @@ func TestCanonicalYardIdentity(t *testing.T) {
 		},
 		{
 			name: "local named",
-			yard: domain.Context{YardName: "openclaw", AccessKind: domain.AccessLocal},
-			want: "local-owner/openclaw",
+			yard: domain.Context{YardName: "sample-build", AccessKind: domain.AccessLocal},
+			want: "local-owner/sample-build",
 		},
 		{
 			name: "remote default explicit",
@@ -115,10 +115,10 @@ func TestCanonicalYardIdentity(t *testing.T) {
 		{
 			name: "remote named",
 			yard: domain.Context{
-				YardName: "openclaw", AccessKind: domain.AccessRemote,
-				OwnerEndpoint: "dev@remote.example", OwnerYardName: "openclaw",
+				YardName: "sample-build", AccessKind: domain.AccessRemote,
+				OwnerEndpoint: "dev@remote.example", OwnerYardName: "sample-build",
 			},
-			want: "remote-owner/openclaw",
+			want: "remote-owner/sample-build",
 		},
 	}
 	for _, test := range tests {

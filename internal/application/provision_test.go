@@ -86,23 +86,23 @@ func TestProvisionAppliesOnlyChangedProfilesAndVerifiesThem(t *testing.T) {
 	fixture := &provisionFixture{
 		instance: managedProvisionInstance("Running", PowerRunning),
 		checkRuns: map[string][]string{
-			"android":  {"converged"},
-			"openclaw": {"changed", "converged"},
+			"sample-a": {"converged"},
+			"sample-b": {"changed", "converged"},
 		},
 	}
-	runner := provisionRunnerFixture(fixture, "android", "openclaw")
+	runner := provisionRunnerFixture(fixture, "sample-a", "sample-b")
 	if _, _, err := runner.Run(context.Background(), provisionRequest(), nil); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(fixture.profiles, []string{"openclaw"}) ||
-		!slices.Equal(fixture.checks, []string{"android", "openclaw", "openclaw"}) {
+	if !slices.Equal(fixture.profiles, []string{"sample-b"}) ||
+		!slices.Equal(fixture.checks, []string{"sample-a", "sample-b", "sample-b"}) {
 		t.Fatalf("profiles=%v checks=%v", fixture.profiles, fixture.checks)
 	}
 }
 
 func TestProvisionRestoresTemporarilyStartedYard(t *testing.T) {
 	fixture := &provisionFixture{instance: managedProvisionInstance("Stopped", PowerStopped)}
-	runner := provisionRunnerFixture(fixture, "android", "openclaw")
+	runner := provisionRunnerFixture(fixture, "sample-a", "sample-b")
 	result, _, err := runner.Run(context.Background(), provisionRequest(), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -114,14 +114,14 @@ func TestProvisionRestoresTemporarilyStartedYard(t *testing.T) {
 		!slices.Equal(fixture.arguments[1], []string{"stop", "--reconcile"}) {
 		t.Fatalf("lifecycle arguments=%v", fixture.arguments)
 	}
-	if !slices.Equal(fixture.profiles, []string{"android", "openclaw"}) {
+	if !slices.Equal(fixture.profiles, []string{"sample-a", "sample-b"}) {
 		t.Fatalf("profiles=%v", fixture.profiles)
 	}
 }
 
 func TestProvisionFailsClosedBeforeTemporaryStartWithoutGuard(t *testing.T) {
 	fixture := &provisionFixture{instance: managedProvisionInstance("Stopped", PowerRunning)}
-	runner := provisionRunnerFixture(fixture, "subyard-dev")
+	runner := provisionRunnerFixture(fixture, "sample-runtime")
 	runner.GuardStart = nil
 	if _, _, err := runner.Run(context.Background(), provisionRequest(), nil); err == nil ||
 		!strings.Contains(err.Error(), "network policy start guard is required") {
@@ -134,7 +134,7 @@ func TestProvisionFailsClosedBeforeTemporaryStartWithoutGuard(t *testing.T) {
 
 func TestProvisionPolicyFailurePreventsTemporaryStart(t *testing.T) {
 	fixture := &provisionFixture{instance: managedProvisionInstance("Stopped", PowerRunning)}
-	runner := provisionRunnerFixture(fixture, "subyard-dev")
+	runner := provisionRunnerFixture(fixture, "sample-runtime")
 	runner.GuardStart = func(context.Context, func() error) error { return errors.New("policy incomplete") }
 	if _, _, err := runner.Run(context.Background(), provisionRequest(), nil); err == nil ||
 		!strings.Contains(err.Error(), "policy incomplete") {
@@ -146,8 +146,8 @@ func TestProvisionPolicyFailurePreventsTemporaryStart(t *testing.T) {
 }
 
 func TestProvisionRestoresPowerAfterHookFailure(t *testing.T) {
-	fixture := &provisionFixture{instance: managedProvisionInstance("Stopped", PowerStopped), fail: "openclaw"}
-	runner := provisionRunnerFixture(fixture, "android", "openclaw")
+	fixture := &provisionFixture{instance: managedProvisionInstance("Stopped", PowerStopped), fail: "sample-b"}
+	runner := provisionRunnerFixture(fixture, "sample-a", "sample-b")
 	if _, _, err := runner.Run(context.Background(), provisionRequest(), nil); err == nil {
 		t.Fatal("expected hook failure")
 	}
@@ -158,7 +158,7 @@ func TestProvisionRestoresPowerAfterHookFailure(t *testing.T) {
 
 func TestProvisionKeepsDesiredRunningYardStarted(t *testing.T) {
 	fixture := &provisionFixture{instance: managedProvisionInstance("Stopped", PowerRunning)}
-	runner := provisionRunnerFixture(fixture, "subyard-dev")
+	runner := provisionRunnerFixture(fixture, "sample-runtime")
 	if _, _, err := runner.Run(context.Background(), provisionRequest(), nil); err != nil {
 		t.Fatal(err)
 	}

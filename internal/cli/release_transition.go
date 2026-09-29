@@ -79,7 +79,7 @@ func (cli *CLI) runReleaseTransition(ctx context.Context, arguments []string) in
 
 func (cli *CLI) activationReconcilers(request releasetransition.ProcessRequest) []releasetransition.V2ActivationReconciler {
 	reconcilers := cli.nonConfigActivationReconcilers(request)
-	// Integration reconciliation runs project hooks, so repair installed Orca first.
+	// Integration reconciliation runs project hooks, so repair installed profile runtimes first.
 	materialized := &materializedConfigActivationReconciler{
 		cli: cli, yard: request.Yard, configHome: request.ConfigHome,
 		goal: releasetransition.Goal{
@@ -88,18 +88,21 @@ func (cli *CLI) activationReconcilers(request releasetransition.ProcessRequest) 
 		artifactDigest: request.ArtifactDigest,
 		registryDigest: request.RegistryDigest,
 	}
-	return slices.Insert(reconcilers, 1, releasetransition.V2ActivationReconciler(materialized))
+	return slices.Insert(reconcilers, len(cli.profileRuntimeIDs()), releasetransition.V2ActivationReconciler(materialized))
 }
 
 // Keep the complete set of non-config activation owners shared by release
 // transitions and bounded materialized-config repair admission.
 func (cli *CLI) nonConfigActivationReconcilers(request releasetransition.ProcessRequest) []releasetransition.V2ActivationReconciler {
-	return []releasetransition.V2ActivationReconciler{
-		cli.orcaActivationReconciler(request),
+	var result []releasetransition.V2ActivationReconciler
+	for _, id := range cli.profileRuntimeIDs() {
+		result = append(result, cli.profileActivationReconciler(request, id))
+	}
+	return append(result, []releasetransition.V2ActivationReconciler{
 		cli.brokerActivationReconciler(request),
 		cli.routeConsumerActivationReconciler(request),
 		cli.powerActivationReconciler(request),
-	}
+	}...)
 }
 
 type ownerRegistrationTransition struct {
@@ -505,7 +508,7 @@ func (cli *CLI) brokerActivationReconciler(
 func (cli *CLI) releaseTransitionTestYardOptions(
 	request releasetransition.ProcessRequest,
 ) (testyardmigration.Options, error) {
-	environment := freshMigrationEnvironment(cli.baseEnv, cli.options.RepositoryRoot)
+	environment := cli.freshMigrationEnvironment(cli.baseEnv, cli.options.RepositoryRoot)
 	dataHome := environment["SUBYARD_HOME"]
 	if dataHome == "" {
 		operatorHome := environment["SUBYARD_OPERATOR_HOME"]
@@ -592,7 +595,7 @@ func (cli *CLI) powerActivationReconciler(
 			// All registered yards must be loaded from candidate configuration,
 			// without treating the active CLI's resolved settings as overrides.
 			operation := *cli
-			operation.baseEnv = freshMigrationEnvironment(cli.baseEnv, cli.options.RepositoryRoot)
+			operation.baseEnv = cli.freshMigrationEnvironment(cli.baseEnv, cli.options.RepositoryRoot)
 			operation.env = maps.Clone(operation.baseEnv)
 			yard := request.Yard
 			if yard == "" {
@@ -715,7 +718,7 @@ func (err materializedConfigObservationError) ActivationDiagnostic() (string, st
 
 func (reconciler *materializedConfigActivationReconciler) operation() *CLI {
 	operation := *reconciler.cli
-	environment := freshMigrationEnvironment(
+	environment := operation.freshMigrationEnvironment(
 		reconciler.cli.baseEnv,
 		reconciler.cli.options.RepositoryRoot,
 	)
@@ -973,7 +976,7 @@ func (cli *CLI) resolveReleaseTransitionContext(
 	yard string,
 	configHome string,
 ) (config.Loaded, error) {
-	environment := freshMigrationEnvironment(cli.baseEnv, cli.options.RepositoryRoot)
+	environment := cli.freshMigrationEnvironment(cli.baseEnv, cli.options.RepositoryRoot)
 	if configHome != "" {
 		environment["SUBYARD_CONFIG_HOME"] = configHome
 	}
@@ -982,10 +985,10 @@ func (cli *CLI) resolveReleaseTransitionContext(
 		operatorHome = environment["HOME"]
 	}
 	options := config.LoadOptions{
-		RepositoryRoot: cli.options.RepositoryRoot,
-		OperatorHome:   operatorHome,
-		YardName:       yard,
-		Environment:    environment,
+		Catalog: &cli.catalog, RepositoryRoot: cli.options.RepositoryRoot,
+		OperatorHome: operatorHome,
+		YardName:     yard,
+		Environment:  environment,
 	}
 	loaded, err := config.Load(options)
 	if err == nil || yard != testyardmigration.LegacyYard ||

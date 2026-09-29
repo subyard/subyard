@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Real-host regression for resource-only init and bind wrapper cleanup.
+# Real-host regression for minimal init and bind wrapper cleanup.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -69,7 +69,7 @@ port=$((35000 + ($$ % 15000)))
 cat > "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/config.env" <<EOF
 SSH_PORT=$port
 CODING_TOOL_INTEGRATIONS=
-ENVIRONMENT_PROFILES=orca
+ENVIRONMENT_PROFILES=
 HOST_BASE=$STATE/host
 RESTRICTED_DISK_PATHS=$STATE/host
 FORWARD_SSH_AGENT=0
@@ -129,9 +129,9 @@ chmod 0600 "$marker"
 HOOK
 chmod 0755 "$ROOT/config/profiles/$profile/provision.sh"
 yard provision "$profile" --yes
-grep -Fq 'orca fixture-provision' "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/config.env" \
+grep -Fxq "ENVIRONMENT_PROFILES='fixture-provision'" "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/config.env" \
   || die 'provision lost profile selection'
 incus exec "$instance" --project "$project" -- test -f /var/lib/subyard-fixture-provision
 # A converged repeat has no prompt and must not run the non-repeatable fixture hook.
 yard provision "$profile" </dev/null
-printf 'ok: resource-only init, bind detach and generic profile activation\n'
+printf 'ok: minimal init, bind detach and generic profile activation\n'
