@@ -13,3 +13,7 @@ approvals_reviewer = "user"      # commit/push prompts are routed to the operato
 sandbox_mode = "danger-full-access"
 
 # Sudo is governed by DEV_SUDO (config/subyard.env), not gated here.
+
+[tui]
+# Keep mouse selection and copying in the terminal, including remote Orca panes.
+fullscreen_transcript = false

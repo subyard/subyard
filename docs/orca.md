@@ -202,6 +202,14 @@ paths bypass this Bash integration, but the native Codex CLI still loads the yar
 commit/push rules across projects, profiles and account-specific `CODEX_HOME` values.
 See [Codex permissions across projects](configuration.md#codex-permissions-across-projects).
 
+The shipped Codex configuration uses `tui.fullscreen_transcript=false` so mouse
+selection belongs to the terminal and works with **Copy** and **Ctrl+Shift+C**,
+including Orca 1.4.217's Codex launch wrapper. This default applies when Codex
+reads the yard configuration. To use Codex's fullscreen transcript instead, set
+`tui.fullscreen_transcript=true` in an `AGENT_codex_CONFIG` override or pass
+`-c tui.fullscreen_transcript=true` for one launch. After updating Subyard, run
+`yard config apply` and start a new Codex session.
+
 `orca up` repairs fresh and existing stock defaults through Orca's settings API.
 The installed project hook also checks them on `orca sync` and subsequent
 `yard init` runs while Orca is active. Other settings and explicitly customized
