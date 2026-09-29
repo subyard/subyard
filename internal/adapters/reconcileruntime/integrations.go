@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
+	"github.com/Subyard/Subyard/internal/observerroute"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/shellquote"
 )
@@ -318,8 +319,8 @@ func (runtime Runtime) observeIntegrations(ctx context.Context) (IntegrationPlan
 	proxy := instance.Devices["ai-observer"]
 	proxyMarker := instance.Config["user.subyard.ai_observer_proxy"]
 	if proxy != nil {
-		port := strings.TrimPrefix(strings.TrimPrefix(proxyMarker, "v1:"), "pending:")
-		if !strings.HasPrefix(proxyMarker, "v1:") || len(proxy) != 4 || proxy["type"] != "proxy" || proxy["bind"] != "host" || proxy["listen"] != "tcp:127.0.0.1:"+port || proxy["connect"] != "tcp:127.0.0.1:8080" {
+		host, _, _ := observerroute.Owned(proxyMarker, proxy)
+		if host == "" {
 			return plan, observed, errors.New("AI Observer proxy ownership is unknown or changed")
 		}
 	}
@@ -377,7 +378,7 @@ func (runtime Runtime) observeIntegrations(ctx context.Context) (IntegrationPlan
 		fingerprints = append(fingerprints, observation.Fingerprint)
 		plan.Changed = plan.Changed || !observation.Converged
 	}
-	ready, err := runtime.aiObserverConverged(instance)
+	ready, err := runtime.aiObserverConverged(ctx, instance)
 	if err != nil {
 		return plan, observed, err
 	}

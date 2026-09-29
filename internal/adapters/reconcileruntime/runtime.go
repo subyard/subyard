@@ -1416,7 +1416,7 @@ func (runtime Runtime) provisionConverged(ctx context.Context) (bool, error) {
 	}
 	instance := state.Instance
 	marker, _ := instance.EffectiveConfig("user.subyard.ccusage_version")
-	if observerReady, err := runtime.aiObserverConverged(instance); err != nil || !observerReady {
+	if observerReady, err := runtime.aiObserverConverged(ctx, instance); err != nil || !observerReady {
 		return false, err
 	}
 	if strings.EqualFold(instance.Status, "stopped") {

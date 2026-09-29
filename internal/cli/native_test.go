@@ -2104,6 +2104,14 @@ func TestAIObserverStatusRendersWorkingLocalAndRemoteTunnelHints(t *testing.T) {
 			},
 		},
 		{
+			name: "remote container direct Tailscale route",
+			yard: domain.Context{YardKind: domain.YardContainer, SSHHost: "yard"},
+			agent: domain.AgentStatus{Name: "aiobserver", State: "up", DashboardPort: 18080,
+				URL: "http://100.101.102.103:18080/"},
+			ownerEndpoint: "operator@owner.example",
+			want:          []string{"http://100.101.102.103:18080/"},
+		},
+		{
 			name: "remote container owner tunnel",
 			yard: domain.Context{YardKind: domain.YardContainer, SSHHost: "yard"},
 			agent: domain.AgentStatus{
@@ -2133,6 +2141,9 @@ func TestAIObserverStatusRendersWorkingLocalAndRemoteTunnelHints(t *testing.T) {
 			var output bytes.Buffer
 			program := &CLI{options: Options{Stdout: &output}}
 			program.printAgentStatus(test.yard, test.agent, test.ownerEndpoint)
+			if strings.Contains(test.agent.URL, "100.101.") && strings.Contains(output.String(), "ssh") {
+				t.Fatalf("Tailscale route unexpectedly requires a tunnel: %s", output.String())
+			}
 			for _, want := range test.want {
 				if !strings.Contains(output.String(), want) {
 					t.Fatalf("agent status omitted %q: %s", want, output.String())

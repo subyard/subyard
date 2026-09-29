@@ -1249,6 +1249,10 @@ func (cli *CLI) printYardStatus(ctx context.Context, loaded config.Loaded) int {
 func aiObserverTunnelArguments(
 	yard domain.Context, agent domain.AgentStatus, ownerEndpoint string,
 ) []string {
+	if parsed, err := url.Parse(agent.URL); err == nil && parsed.Hostname() != "" &&
+		parsed.Hostname() != "localhost" && !net.ParseIP(parsed.Hostname()).IsLoopback() {
+		return nil
+	}
 	port := strconv.Itoa(agent.DashboardPort)
 	options := []string{"-o", "ExitOnForwardFailure=yes"}
 	if yard.YardKind == domain.YardVM && ownerEndpoint != "" && yard.SSHHost != "" {

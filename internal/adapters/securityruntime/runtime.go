@@ -20,6 +20,7 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/sshagentruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/observerroute"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/resource"
 )
@@ -260,7 +261,11 @@ func (runtime Runtime) liveFindings(ctx context.Context, state ports.ReconcileSt
 					fmt.Sprintf("unix-char device %q is outside the supported allowlist: %s", name, source)})
 			}
 		}
-		if runtime.proxyContract(name) != nil {
+		if name == "ai-observer" && deviceType == "proxy" && !loopbackProxy(device["listen"]) {
+			if err := runtime.checkObserverProxy(ctx, device, instance.LocalConfig); err != nil {
+				result = append(result, finding{"fail", err.Error()})
+			}
+		} else if runtime.proxyContract(name) != nil {
 			if err := runtime.checkOwnedProxy(ctx, name, device, instance.LocalConfig, instance.Devices["eth0"], instance.LocalDevices[name]); err != nil {
 				result = append(result, finding{"fail", err.Error()})
 			}
@@ -281,6 +286,24 @@ func (runtime Runtime) liveFindings(ctx context.Context, state ports.ReconcileSt
 			"device-cgroup BPF interception is enabled while NESTED_E2E_VMS is disabled"})
 	}
 	return result
+}
+
+func (runtime Runtime) checkObserverProxy(ctx context.Context, device, instanceConfig map[string]string) error {
+	host, port, ready := observerroute.Owned(instanceConfig[observerroute.Key], device)
+	if !ready || !observerroute.TailscaleAddress(host) || port != runtime.Environment["AI_OBSERVER_HOST_PORT"] ||
+		!slices.Contains(strings.Fields(runtime.Environment["CODING_TOOL_INTEGRATIONS"]), "aiobserver") ||
+		runtime.Yard.YardKind == domain.YardVM {
+		return errors.New("AI Observer proxy does not match its selected, owned Tailscale route")
+	}
+	resolver := runtime.ResolveOwnerAddress
+	if resolver == nil {
+		resolver = resolveOwnerAddress
+	}
+	address, err := resolver(ctx, host)
+	if err != nil || address != host {
+		return errors.New("AI Observer proxy is not bound to an active owner Tailscale address")
+	}
+	return nil
 }
 
 func (runtime Runtime) checkOwnedProxy(

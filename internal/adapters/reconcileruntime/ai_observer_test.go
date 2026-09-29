@@ -1,15 +1,20 @@
 package reconcileruntime
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestAIObserverConvergenceTracksPackageSelectionAndRoute(t *testing.T) {
+	bin := t.TempDir()
+	testkit.WriteFile(t, filepath.Join(bin, "tailscale"), []byte("#!/bin/sh\nexit 1\n"), 0o755)
+	t.Setenv("PATH", bin)
 	hook := filepath.Join(t.TempDir(), "provision.sh")
 	if err := os.WriteFile(hook, []byte("hello\n"), 0o755); err != nil {
 		t.Fatal(err)
@@ -25,7 +30,7 @@ func TestAIObserverConvergenceTracksPackageSelectionAndRoute(t *testing.T) {
 	}}}
 	assert := func(want bool) {
 		t.Helper()
-		got, err := runtime.aiObserverConverged(instance)
+		got, err := runtime.aiObserverConverged(context.Background(), instance)
 		if err != nil || got != want {
 			t.Fatalf("converged = %v, %v; want %v", got, err, want)
 		}

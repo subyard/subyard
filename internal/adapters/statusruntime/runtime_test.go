@@ -416,50 +416,57 @@ func TestRuntimeProbesPreparedResources(t *testing.T) {
 }
 
 func TestRuntimeReportsSelectedProfilesAndAgentsWithVerifiedDashboard(t *testing.T) {
-	root := t.TempDir()
-	dataHome := filepath.Join(root, "data")
-	if err := writeSpaceCache(filepath.Join(dataHome, "space.cache"), "1G", time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	executor := &spaceExecutorStub{result: ports.InstanceExecResult{ExitCode: 0}}
-	incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
-		"subyard/yard": {
-			Name: "yard", Project: "subyard", Status: "Running",
-			Config: map[string]string{"user.subyard.ai_observer_proxy": "v1:18080"},
-			Devices: map[string]map[string]string{"ai-observer": {
-				"type": "proxy", "listen": "tcp:127.0.0.1:18080",
-				"connect": "tcp:127.0.0.1:8080", "bind": "host",
-			}},
-		},
-	}}
-	facts, err := (Runtime{
-		Environment: map[string]string{
-			"ENVIRONMENT_PROFILES": "android orca", "CODING_TOOL_INTEGRATIONS": "codex aiobserver",
-			"AI_OBSERVER_HOST_PORT": "18080",
-		},
-		Executor: executor, Incus: incus,
-	}).ReadStatusFacts(context.Background(), domain.Context{
-		YardName: "default", YardKind: domain.YardContainer,
-		IncusProject: "subyard", YardInstanceName: "yard",
-		Paths: domain.RuntimePaths{DataHome: dataHome},
-	}, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Equal(facts.Profiles, []string{"android", "orca"}) {
-		t.Fatalf("profiles = %#v", facts.Profiles)
-	}
-	wantAgents := []domain.AgentStatus{
-		{Name: "codex", State: "rules-ok", Hint: "installed policy + home matcher: commit/push prompt; session approvals unverified"},
-		{Name: "aiobserver", State: "up", URL: "http://127.0.0.1:18080/", DashboardPort: 18080},
-	}
-	if !reflect.DeepEqual(facts.Agents, wantAgents) {
-		t.Fatalf("agents = %#v, want %#v", facts.Agents, wantAgents)
-	}
-	if len(executor.calls) != 2 || !slices.ContainsFunc(executor.calls, func(call ports.InstanceExecRequest) bool {
-		return slices.Equal(call.Command, []string{"/usr/local/bin/ai-observer-check"})
-	}) {
-		t.Fatalf("AI Observer probes = %#v", executor.calls)
+	for _, route := range []struct{ host, marker string }{
+		{"127.0.0.1", "v1:18080"},
+		{"100.101.102.103", "v2:100.101.102.103:18080"},
+	} {
+		t.Run(route.host, func(t *testing.T) {
+			root := t.TempDir()
+			dataHome := filepath.Join(root, "data")
+			if err := writeSpaceCache(filepath.Join(dataHome, "space.cache"), "1G", time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			executor := &spaceExecutorStub{result: ports.InstanceExecResult{ExitCode: 0}}
+			incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+				"subyard/yard": {
+					Name: "yard", Project: "subyard", Status: "Running",
+					Config: map[string]string{"user.subyard.ai_observer_proxy": route.marker},
+					Devices: map[string]map[string]string{"ai-observer": {
+						"type": "proxy", "listen": "tcp:" + route.host + ":18080",
+						"connect": "tcp:127.0.0.1:8080", "bind": "host",
+					}},
+				},
+			}}
+			facts, err := (Runtime{
+				Environment: map[string]string{
+					"ENVIRONMENT_PROFILES": "android orca", "CODING_TOOL_INTEGRATIONS": "codex aiobserver",
+					"AI_OBSERVER_HOST_PORT": "18080",
+				},
+				Executor: executor, Incus: incus,
+			}).ReadStatusFacts(context.Background(), domain.Context{
+				YardName: "default", YardKind: domain.YardContainer,
+				IncusProject: "subyard", YardInstanceName: "yard",
+				Paths: domain.RuntimePaths{DataHome: dataHome},
+			}, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(facts.Profiles, []string{"android", "orca"}) {
+				t.Fatalf("profiles = %#v", facts.Profiles)
+			}
+			wantAgents := []domain.AgentStatus{
+				{Name: "codex", State: "rules-ok", Hint: "installed policy + home matcher: commit/push prompt; session approvals unverified"},
+				{Name: "aiobserver", State: "up", URL: "http://" + route.host + ":18080/", DashboardPort: 18080},
+			}
+			if !reflect.DeepEqual(facts.Agents, wantAgents) {
+				t.Fatalf("agents = %#v, want %#v", facts.Agents, wantAgents)
+			}
+			if len(executor.calls) != 2 || !slices.ContainsFunc(executor.calls, func(call ports.InstanceExecRequest) bool {
+				return slices.Equal(call.Command, []string{"/usr/local/bin/ai-observer-check"})
+			}) {
+				t.Fatalf("AI Observer probes = %#v", executor.calls)
+			}
+		})
 	}
 }
 

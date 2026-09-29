@@ -101,6 +101,22 @@ func (cli *CLI) releaseTransitionInheritedSettingIDs() []string {
 	return inheritedSettingIDs
 }
 
+func (cli *CLI) printUpdatePreview(execution *releaseExecution) {
+	if _, update := updateDirection(execution.prepared.Action); !update {
+		return
+	}
+	if execution.prepared.RepairCurrent {
+		fmt.Fprintln(cli.options.Stdout, "The current release needs repair before updating.")
+		fmt.Fprintf(cli.options.Stdout, "This run will repair release %s; checking for a newer release is deferred.\n",
+			execution.prepared.TargetRelease)
+		return
+	}
+	fmt.Fprintf(cli.options.Stdout, "Update: %s -> %s\n",
+		firstNonempty(execution.prepared.SourceVersion, execution.prepared.SourceRelease, "unknown"),
+		firstNonempty(execution.prepared.TargetVersion, execution.prepared.TargetRelease, "unknown"),
+	)
+}
+
 func (cli *CLI) executeRelease(ctx context.Context, orchestrator *application.Orchestrator,
 	plan domain.OperationPlan, execution *releaseExecution) (domain.AdapterResult, error) {
 	orchestrator.Runner = releaseAdapter{prepared: execution.prepared}
@@ -117,7 +133,11 @@ func (cli *CLI) executeRelease(ctx context.Context, orchestrator *application.Or
 	}
 	if _, update := updateDirection(execution.prepared.Action); update && runErr == nil && result.Status == "ok" {
 		if cli.updateProgress != nil {
-			fmt.Fprintln(cli.updateProgress, "Checking the updated release...")
+			if execution.prepared.RepairCurrent {
+				fmt.Fprintln(cli.updateProgress, "Checking the repaired release...")
+			} else {
+				fmt.Fprintln(cli.updateProgress, "Checking the updated release...")
+			}
 		}
 		inspection, checkErr := execution.prepared.Check(ctx)
 		if checkErr == nil {
@@ -139,7 +159,14 @@ func (cli *CLI) printUpdateResult(execution *releaseExecution, success bool) {
 		return
 	}
 	output := cli.options.Stdout
-	if success {
+	if execution.prepared.RepairCurrent {
+		if success {
+			fmt.Fprintln(output, "\n  [ ok ] Current release repaired successfully")
+		} else {
+			fmt.Fprintln(output, "\n  [FAIL] Current release repair did not complete successfully")
+		}
+		fmt.Fprintln(output, "  No newer release was checked or installed.")
+	} else if success {
 		fmt.Fprintln(output, "\n  [ ok ] Update completed successfully")
 	} else {
 		fmt.Fprintln(output, "\n  [FAIL] Update did not complete successfully")
@@ -162,6 +189,8 @@ func (cli *CLI) printUpdateResult(execution *releaseExecution, success bool) {
 	}
 	if outcome.Retry != "" {
 		fmt.Fprintf(output, "  Next: %s\n", outcome.Retry)
+	} else if success && execution.prepared.RepairCurrent {
+		fmt.Fprintln(output, "  Next: run yard update again to check for and install a newer release")
 	}
 }
 

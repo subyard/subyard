@@ -22,7 +22,16 @@ Bare `yard status` shows the summary of all known yards. Detailed status lists s
 profiles, enabled agents and shared resources. A selected profile can have stopped
 resources; use `yard -Y default emu status` for Android emulator details.
 
-For container yards, the dashboard is published only on the owner's `127.0.0.1`.
+For container yards, the dashboard is published on the owner's active Tailscale IPv4
+address when available. Detailed status prints that direct URL, including when the
+command runs over SSH on the owner. Open it from a device on the same tailnet with
+access permitted by its Tailscale policy. Without an active Tailscale IPv4, the
+dashboard remains on the owner's `127.0.0.1` for SSH forwarding.
+
+After upgrading an existing loopback installation, run `yard -Y default init` to
+migrate the managed proxy. Repeat initialization also reconciles address changes.
+The proxy binds one exact address; it never binds all host interfaces.
+
 Its default port is the SSH port plus 20000, wrapped into the range 1024–65535
 (SSH port 2222 gives dashboard port 22222). Choose an explicit unused port if another
 service uses it:
@@ -32,7 +41,7 @@ yard -Y default config set AI_OBSERVER_HOST_PORT 18080 --scope yard
 yard -Y default init
 ```
 
-For a remote owner or a VM yard, detailed status prints the SSH tunnel command and
+For a remote owner using a loopback route, or a VM yard, detailed status prints the SSH tunnel command and
 the browser URL to use after starting that tunnel. Status itself does not start a
 tunnel or open the browser.
 

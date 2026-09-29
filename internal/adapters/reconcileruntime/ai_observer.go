@@ -1,17 +1,18 @@
 package reconcileruntime
 
 import (
+	"context"
 	"crypto/sha256"
 	"fmt"
-	"maps"
 	"slices"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/observerroute"
 	"github.com/Subyard/Subyard/internal/ports"
 )
 
-func (runtime Runtime) aiObserverConverged(instance ports.InstanceInfo) (bool, error) {
+func (runtime Runtime) aiObserverConverged(ctx context.Context, instance ports.InstanceInfo) (bool, error) {
 	selected := slices.Contains(strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")), "aiobserver")
 	marker := instance.Config["user.subyard.ai_observer_provision"]
 	proxyMarker := instance.Config["user.subyard.ai_observer_proxy"]
@@ -26,10 +27,8 @@ func (runtime Runtime) aiObserverConverged(instance ports.InstanceInfo) (bool, e
 		return proxyMarker == "", nil
 	}
 	port := runtime.environmentValue("AI_OBSERVER_HOST_PORT")
-	device := instance.Devices["ai-observer"]
-	return port != "" && proxyMarker == "v1:"+port && maps.Equal(device, map[string]string{
-		"type": "proxy", "bind": "host", "listen": "tcp:127.0.0.1:" + port, "connect": "tcp:127.0.0.1:8080",
-	}), nil
+	host, observedPort, ready := observerroute.Owned(proxyMarker, instance.Devices["ai-observer"])
+	return ready && observedPort == port && host == observerroute.Host(ctx), nil
 }
 
 // Both the package and its inputs must converge. Docker bind mounts retain the

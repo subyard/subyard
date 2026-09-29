@@ -75,6 +75,11 @@ release without fetching another version. Its final human-readable summary repor
 the active and previous releases, with blockers and next steps when needed. An unsuccessful final
 check exits nonzero and records a failed update; `yard update --check` prints indented JSON; add `--json` for compact machine output.
 
+If the protected transition requires repair of the active release, `yard update` first repairs that
+release and ends the invocation before checking for a newer version. Its preview and final result
+identify the repair explicitly; after a successful repair, run `yard update` again to check for and
+install a newer release.
+
 Structured update history is durable outside the installed runtime. Each committed activation or rollback,
 plus direct preparation failures and declined confirmations, records a structured attempt under
 `$SUBYARD_HOME/logs/updates`; the newest 30 attempts are retained. `yard logs --updates [-n N]`

@@ -45,6 +45,8 @@ type Prepared struct {
 	SourceVersion  string
 	TargetRelease  string
 	TargetVersion  string
+	// RepairCurrent identifies protected recovery of the active release before release selection.
+	RepairCurrent bool
 	run            func(context.Context) error
 	check          func(context.Context) (releasetransition.Inspection, error)
 }
@@ -776,11 +778,16 @@ func (runtime *Runtime) prepareProtectedTransition(
 			protected.target.candidate.release, retry,
 		)
 	}
-	return runtime.prepareInspectedCandidateTransition(
+	prepared, err := runtime.prepareInspectedCandidateTransition(
 		parsed, protected.owner, protected.target,
 		protected.request, protected.inspection,
 		protected.activationReconciliationOwned, nil,
 	)
+	if err == nil && !parsed.check {
+		prepared.RepairCurrent = protected.inspection.Outcome.Active == protected.request.Target &&
+			protected.inspection.Outcome.Status != releasetransition.StatusReady
+	}
+	return prepared, err
 }
 
 func (runtime *Runtime) prepareRetainedTransition(

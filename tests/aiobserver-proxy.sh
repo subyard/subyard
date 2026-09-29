@@ -35,7 +35,17 @@ elif args[:3]==['config','device','add']:
 else: raise RuntimeError(args)
 with open(path,'w') as f: json.dump(state,f)
 PY
-chmod +x "$temporary/bin/incus"
+cat >"$temporary/bin/tailscale" <<'SH'
+#!/bin/sh
+[ "$*" = 'ip -4' ] || exit 2
+[ -n "${OBSERVER_TAIL_ADDRESS:-}" ] || exit 1
+printf '%s\n' "$OBSERVER_TAIL_ADDRESS"
+SH
+cat >"$temporary/bin/ip" <<'SH'
+#!/bin/sh
+printf '[{"addr_info":[{"local":"%s"}]}]\n' "${OBSERVER_ACTIVE_ADDRESS:-}"
+SH
+chmod +x "$temporary/bin/incus" "$temporary/bin/tailscale" "$temporary/bin/ip"
 export PATH="$temporary/bin:$PATH"
 # shellcheck source=scripts/lib/ai-observer-proxy.sh
 . "$ROOT/scripts/lib/ai-observer-proxy.sh"
@@ -54,6 +64,36 @@ subyard_ai_observer_proxy 1
 AI_OBSERVER_HOST_PORT=22223
 subyard_ai_observer_proxy 1
 jq -e '.devices["ai-observer"].listen == "tcp:127.0.0.1:22223"' "$OBSERVER_PROXY_STATE" >/dev/null
+# Never publish a wildcard, LAN address, ambiguous output or inactive Tailscale IP.
+for address in 0.0.0.0 192.168.1.1 100.063.1.2 100.064.1.2 100.128.1.2 100.100.01.2 '100.100.1.2 100.100.1.3'; do
+  [ "$(OBSERVER_TAIL_ADDRESS="$address" OBSERVER_ACTIVE_ADDRESS="$address" subyard_ai_observer_host)" = 127.0.0.1 ] \
+    || fail 'unsafe owner address accepted'
+done
+[ "$(OBSERVER_TAIL_ADDRESS=100.100.1.2 OBSERVER_ACTIVE_ADDRESS=100.100.1.3 subyard_ai_observer_host)" = 127.0.0.1 ] \
+  || fail 'inactive Tailscale address accepted'
+
+# Migrate the exact legacy loopback route to the active owner Tailscale address.
+export OBSERVER_TAIL_ADDRESS=100.101.102.103 OBSERVER_ACTIVE_ADDRESS=100.101.102.103
+subyard_ai_observer_proxy 1
+jq -e '.devices["ai-observer"].listen == "tcp:100.101.102.103:22223" and
+  .config["user.subyard.ai_observer_proxy"] == "v2:100.101.102.103:22223"' "$OBSERVER_PROXY_STATE" >/dev/null
+before="$(wc -l <"$OBSERVER_PROXY_LOG")"
+subyard_ai_observer_proxy 1
+[ "$(wc -l <"$OBSERVER_PROXY_LOG")" = "$before" ] || fail 'exact Tailscale route was mutated'
+export OBSERVER_TAIL_ADDRESS=100.101.102.104 OBSERVER_ACTIVE_ADDRESS=100.101.102.104
+if OBSERVER_PROXY_FAIL=1 subyard_ai_observer_proxy 1; then fail 'Tailscale publication failure accepted'; fi
+subyard_ai_observer_proxy 1
+jq -e '.devices["ai-observer"].listen == "tcp:100.101.102.104:22223"' "$OBSERVER_PROXY_STATE" >/dev/null
+# A divergent owned device must remain untouched.
+jq '.devices["ai-observer"].connect="tcp:127.0.0.1:9999"' "$OBSERVER_PROXY_STATE" >"$temporary/divergent.json"
+mv "$temporary/divergent.json" "$OBSERVER_PROXY_STATE"
+before="$(wc -l <"$OBSERVER_PROXY_LOG")"
+if subyard_ai_observer_proxy 1; then fail 'divergent Tailscale route accepted'; fi
+[ "$(wc -l <"$OBSERVER_PROXY_LOG")" = "$before" ] || fail 'divergent route mutated'
+jq '.devices["ai-observer"].connect="tcp:127.0.0.1:8080"' "$OBSERVER_PROXY_STATE" >"$temporary/restored.json"
+mv "$temporary/restored.json" "$OBSERVER_PROXY_STATE"
+# Disable cleans up an owned Tailscale route even after its address goes away.
+unset OBSERVER_TAIL_ADDRESS OBSERVER_ACTIVE_ADDRESS
 subyard_ai_observer_proxy 0
 jq -e '.devices == {} and .config == {}' "$OBSERVER_PROXY_STATE" >/dev/null
 YARD_KIND=vm

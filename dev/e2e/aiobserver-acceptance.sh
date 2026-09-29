@@ -8,13 +8,15 @@ YARD_NAME=''
 PROJECT=''
 INSTANCE=''
 MARKER=''
+TAILSCALE_FIXTURE=0
+tail_address=100.100.100.42
 
 die() { printf 'aiobserver-acceptance: %s\n' "$*" >&2; exit 2; }
 info() { printf '  [ .. ] %s\n' "$*"; }
 ok() { printf '  [ ok ] %s\n' "$*"; }
 
 [ "${SUBYARD_E2E_VM:-}" = 1 ] || die 'run on VM1 through dev/agent-e2e.sh'
-for command in curl go incus jq python3 ss sudo; do
+for command in curl go incus jq python3 ss sudo sg; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
 sudo -n true || die 'passwordless sudo is required on the disposable VM'
@@ -26,13 +28,29 @@ incus() {
     /usr/bin/incus "$@"
   fi
 }
-yard() { "$ROOT/.build/yard" -Y "$YARD_NAME" "$@"; }
+yard() {
+  # Init can enroll the user in incus-admin without changing this shell's groups.
+  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+    local command
+    printf -v command '%q ' "$ROOT/.build/yard" -Y "$YARD_NAME" "$@"
+    sg incus-admin -c "exec $command"
+  else
+    "$ROOT/.build/yard" -Y "$YARD_NAME" "$@"
+  fi
+}
 guest() { incus exec "$INSTANCE" --project "$PROJECT" -- "$@"; }
 
 cleanup() {
   local rc=$? managed=''
   trap - EXIT INT TERM
   set +e
+  if [ "$TAILSCALE_FIXTURE" = 1 ]; then
+    sudo -n ip address del "$tail_address/32" dev lo
+    if sudo -n grep -Fqx "# $MARKER" /usr/local/bin/tailscale; then
+      sudo -n rm -- /usr/local/bin/tailscale
+    fi
+  fi
   if [ -n "$PROJECT" ] && [ -n "$INSTANCE" ] \
     && incus project show "$PROJECT" >/dev/null 2>&1 \
     && incus config show "$INSTANCE" --project "$PROJECT" >/dev/null 2>&1; then
@@ -356,5 +374,39 @@ grep -Eq '^[[:space:]]+profiles[[:space:]]+orca$' <<<"$status_output" \
 grep -Eq "^[[:space:]]+aiobserver[[:space:]]+up[[:space:]]+\\(http://127\\.0\\.0\\.1:$observer_port/\\)$" \
   <<<"$status_output" || die 'detailed status omitted the healthy observer owner URL'
 ok 'detailed status reports the selected profiles and healthy dashboard URL'
+
+# Exercise the real Incus bind using a synthetic owner Tailscale address, without
+# joining a real tailnet or using account credentials on the disposable VM.
+command -v tailscale >/dev/null 2>&1 && die 'Tailscale fixture requires a host without an existing tailscale CLI'
+[ ! -e /usr/local/bin/tailscale ] && [ ! -L /usr/local/bin/tailscale ] \
+  || die 'refusing to replace an existing tailscale path'
+info 'migrating the legacy loopback dashboard to an active owner Tailscale address'
+cat >"$STATE/tailscale" <<EOF
+#!/bin/sh
+# $MARKER
+[ "\$*" = 'ip -4' ] || exit 1
+printf '%s\\n' '$tail_address'
+EOF
+sudo -n install -m 0755 "$STATE/tailscale" /usr/local/bin/tailscale
+TAILSCALE_FIXTURE=1
+sudo -n ip address add "$tail_address/32" dev lo
+yard init --yes
+[ "$(incus config get "$INSTANCE" user.subyard.ai_observer_proxy --project "$PROJECT")" = \
+    "v2:$tail_address:$observer_port" ] || die 'Tailscale proxy receipt did not converge'
+[ "$(incus config device get "$INSTANCE" ai-observer listen --project "$PROJECT")" = \
+    "tcp:$tail_address:$observer_port" ] || die 'dashboard did not bind the exact Tailscale address'
+curl --noproxy '*' -fsS --max-time 10 "http://$tail_address:$observer_port/api/logs?limit=1" \
+  | jq -e . >/dev/null || die 'dashboard HTTP is unavailable through the Tailscale address'
+yard status >"$STATE/tailscale-status"
+grep -Fq "(http://$tail_address:$observer_port/)" "$STATE/tailscale-status" \
+  || die 'detailed status omitted the Tailscale dashboard URL'
+yard security >/dev/null
+container_id="$(guest docker inspect -f '{{.Id}}' subyard-ai-observer)"
+yard init --yes
+[ "$(guest docker inspect -f '{{.Id}}' subyard-ai-observer)" = "$container_id" ] \
+  || die 'Tailscale repeat init replaced the observer container'
+[ "$(guest stat -c '%d:%i' /srv/agents/ai-observer/data/ai-observer.duckdb)" = "$database_inode" ] \
+  || die 'Tailscale migration replaced the observer database'
+ok 'Tailscale route migration, HTTP access, status, security and repeat init passed'
 
 printf 'ok: AI Observer real container-yard lifecycle\n'

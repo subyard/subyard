@@ -491,12 +491,7 @@ func (prepared *preparedCommand) prepareUpdate(ctx context.Context, _ *initBoots
 	prepared.release = execution
 	prepared.executeNoOp = true
 	prepared.preview = func() {
-		if _, ok := updateDirection(execution.prepared.Action); ok {
-			fmt.Fprintf(prepared.CLI.options.Stdout, "Update: %s -> %s\n",
-				firstNonempty(execution.prepared.SourceVersion, execution.prepared.SourceRelease, "unknown"),
-				firstNonempty(execution.prepared.TargetVersion, execution.prepared.TargetRelease, "unknown"),
-			)
-		}
+		prepared.CLI.printUpdatePreview(execution)
 	}
 	prepared.assess = func(context.Context) (domain.ActionID, domain.ActionDelta, error) {
 		return execution.prepared.Action, domain.ActionDelta{Changed: execution.prepared.Changed, Consequences: execution.prepared.Consequences}, nil

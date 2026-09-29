@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/observerroute"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/resource"
 )
@@ -101,10 +102,11 @@ func (runtime Runtime) agentStatus(
 				status.State = "?"
 			default:
 				status.State = "up"
-				if yard.YardKind == domain.YardContainer && runtime.aiObserverRouteReady(ctx, yard) {
-					status.URL = "http://127.0.0.1:" + runtime.Environment["AI_OBSERVER_HOST_PORT"] + "/"
-				} else if yard.YardKind == domain.YardContainer {
-					status.Hint = runtime.program() + " init"
+				if yard.YardKind == domain.YardContainer {
+					status.URL = runtime.aiObserverURL(ctx, yard)
+					if status.URL == "" {
+						status.Hint = runtime.program() + " init"
+					}
 				}
 			}
 		}
@@ -113,26 +115,21 @@ func (runtime Runtime) agentStatus(
 	return result
 }
 
-func (runtime Runtime) aiObserverRouteReady(ctx context.Context, yard domain.Context) bool {
-	port, err := strconv.Atoi(runtime.Environment["AI_OBSERVER_HOST_PORT"])
-	if err != nil || port < 1024 || port > 65535 || strconv.Itoa(port) != runtime.Environment["AI_OBSERVER_HOST_PORT"] ||
-		runtime.Incus == nil {
-		return false
+func (runtime Runtime) aiObserverURL(ctx context.Context, yard domain.Context) string {
+	if runtime.Incus == nil {
+		return ""
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, runtime.probeTimeout())
 	defer cancel()
 	instance, err := runtime.Incus.Instance(probeCtx, yard.IncusProject, yard.YardInstanceName)
 	if err != nil {
-		return false
+		return ""
 	}
-	device := instance.Devices["ai-observer"]
-	if len(device) != 4 {
-		return false
+	host, port, ready := observerroute.Owned(instance.Config[observerroute.Key], instance.Devices["ai-observer"])
+	if !ready || port != runtime.Environment["AI_OBSERVER_HOST_PORT"] {
+		return ""
 	}
-	return instance.Config["user.subyard.ai_observer_proxy"] == "v1:"+strconv.Itoa(port) &&
-		device["type"] == "proxy" && device["bind"] == "host" &&
-		device["listen"] == "tcp:127.0.0.1:"+strconv.Itoa(port) &&
-		device["connect"] == "tcp:127.0.0.1:8080"
+	return "http://" + host + ":" + port + "/"
 }
 
 func (runtime Runtime) probeTimeout() time.Duration {

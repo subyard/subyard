@@ -54,6 +54,43 @@ func TestSecurityRuntimeRejectsManagedDiskOutsideHostBase(t *testing.T) {
 	}
 }
 
+func TestSecurityRuntimeValidatesObserverTailscaleRoute(t *testing.T) {
+	for _, failure := range []string{"", "unselected", "foreign", "divergent", "inactive", "pending", "extra option"} {
+		t.Run(failure, func(t *testing.T) {
+			runtime := testRuntime(t)
+			runtime.Environment["CODING_TOOL_INTEGRATIONS"] = "aiobserver"
+			runtime.Environment["AI_OBSERVER_HOST_PORT"] = "22222"
+			runtime.ResolveOwnerAddress = func(context.Context, string) (string, error) {
+				if failure == "inactive" {
+					return "", errors.New("inactive")
+				}
+				return "100.101.102.103", nil
+			}
+			state := safeState()
+			device := map[string]string{"type": "proxy", "bind": "host", "listen": "tcp:100.101.102.103:22222", "connect": "tcp:127.0.0.1:8080"}
+			state.Instance.Devices["ai-observer"] = device
+			state.Instance.LocalConfig["user.subyard.ai_observer_proxy"] = "v2:100.101.102.103:22222"
+			switch failure {
+			case "unselected":
+				runtime.Environment["CODING_TOOL_INTEGRATIONS"] = "codex"
+			case "foreign":
+				delete(state.Instance.LocalConfig, "user.subyard.ai_observer_proxy")
+			case "divergent":
+				device["connect"] = "tcp:127.0.0.1:9999"
+			case "pending":
+				state.Instance.LocalConfig["user.subyard.ai_observer_proxy"] = "v2:pending:100.101.102.103:22222"
+			case "extra option":
+				device["nat"] = "true"
+			}
+			runtime.State = func(context.Context, Runtime) (ports.ReconcileState, bool, error) { return state, true, nil }
+			_, err := runtime.CheckSecurity(context.Background(), true, true)
+			if (err != nil) != (failure != "") {
+				t.Fatalf("security error = %v", err)
+			}
+		})
+	}
+}
+
 func TestSecurityRuntimeAcceptsExactOwnedTailscaleProxy(t *testing.T) {
 	runtime := testRuntime(t)
 	runtime.Environment["HERMES_DASHBOARD_ADVERTISE_HOST"] = "owner.tailnet.ts.net"
