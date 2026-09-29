@@ -847,8 +847,9 @@ The hook accepts `observe`, or `apply OPERATION_ID ACTUAL_SHA256 DESIRED_SHA256`
 bounded JSON object with `state`, `actual` and `desired`. States are `absent`, `deferred`, `current`
 and `stale`; installed states carry lowercase SHA-256 fingerprints. Observe must not mutate state.
 Core bounds execution and output, checks the assessment before apply, and verifies the resulting
-state separately. Missing/stopped yards are absent/deferred without starting them. Hooks run in
-activation-ID order before integration project hooks; update and rollback inspect all local yards.
+state separately. Hook paths retain the updater's pinned directory descriptor; symbolic links
+below that anchor are rejected. Missing/stopped yards are absent/deferred without starting them.
+Hooks run in activation-ID order before integration project hooks; update and rollback inspect all local yards.
 The Orca profile retains its existing `orca-runtime` identity and wire fingerprints.
 
 A `guest_environment` handler accepts `check|ensure DEV_USER` through the existing root guest

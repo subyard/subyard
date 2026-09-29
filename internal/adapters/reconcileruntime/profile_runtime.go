@@ -213,14 +213,11 @@ func (runtime Runtime) runProfileRuntimeHandler(
 	action string,
 	arguments ...string,
 ) ([]byte, []byte, error) {
-	cleanPath, err := profileHookPath(definition.Root, definition.Runtime.Handler)
+	cleanPath, err := definition.ExecutablePath(definition.Runtime.Handler)
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve profile runtime handler: %w", err)
 	}
-	root, err := filepath.Abs(definition.Root)
-	if err != nil {
-		return nil, nil, fmt.Errorf("resolve profile runtime root: %w", err)
-	}
+	root := strings.TrimSuffix(cleanPath, string(filepath.Separator)+definition.Runtime.Handler)
 	timeout := profileRuntimeObserveLimit
 	if action == "apply" {
 		timeout = profileRuntimeApplyLimit
@@ -258,47 +255,6 @@ func (runtime Runtime) runProfileRuntimeHandler(
 
 func (runtime Runtime) readProfileHook(definition profile.Definition, handler string) ([]byte, error) {
 	return definition.ReadExecutable(handler)
-}
-
-func profileHookPath(root, handler string) (string, error) {
-	if root == "" || handler == "" || filepath.IsAbs(handler) || filepath.Clean(handler) != handler || handler == "." ||
-		handler == ".." || strings.HasPrefix(handler, ".."+string(filepath.Separator)) {
-		return "", errors.New("profile hook path is invalid")
-	}
-	root, err := filepath.Abs(root)
-	if err != nil {
-		return "", fmt.Errorf("resolve profile hook root: %w", err)
-	}
-	path, err := filepath.Abs(filepath.Join(root, handler))
-	if err != nil {
-		return "", fmt.Errorf("resolve profile hook path: %w", err)
-	}
-	relative, err := filepath.Rel(root, path)
-	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return "", errors.New("profile hook path escapes profile root")
-	}
-	resolvedRoot, err := filepath.EvalSymlinks(root)
-	rootInfo, rootErr := os.Lstat(root)
-	if err != nil || rootErr != nil || !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 || resolvedRoot != root {
-		return "", errors.New("profile hook root must be a real directory")
-	}
-	parent := root
-	components := strings.Split(relative, string(filepath.Separator))
-	for _, component := range components[:len(components)-1] {
-		parent = filepath.Join(parent, component)
-		parentInfo, parentErr := os.Lstat(parent)
-		if parentErr != nil || !parentInfo.IsDir() || parentInfo.Mode()&os.ModeSymlink != 0 {
-			return "", errors.New("profile hook path must not traverse symlinks")
-		}
-	}
-	info, err := os.Lstat(path)
-	if err != nil {
-		return "", fmt.Errorf("inspect profile hook: %w", err)
-	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o111 == 0 {
-		return "", errors.New("profile hook must be a non-symlink executable file")
-	}
-	return path, nil
 }
 
 func decodeProfileRuntimeObservation(payload []byte) (ports.RuntimeObservation, error) {

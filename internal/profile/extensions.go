@@ -194,37 +194,74 @@ func (definition Definition) validateExecutable(path string) error {
 	return nil
 }
 
-// ReadExecutable validates a profile-owned executable against the current filesystem
-// state before returning its contents. This also rejects a profile root whose path
-// now resolves through a symlink, even if the declaration was loaded earlier.
-func (definition Definition) ReadExecutable(path string) ([]byte, error) {
+// ExecutablePath revalidates a profile hook and keeps updater-pinned directory
+// descriptors intact. Ordinary roots and all descendants must remain real paths.
+func (definition Definition) ExecutablePath(path string) (string, error) {
+	if definition.Root == "" {
+		return "", errors.New("profile root is unavailable")
+	}
 	if !relative(path) {
-		return nil, errors.New("handler path escapes profile")
+		return "", errors.New("handler path escapes profile")
 	}
 	root, err := filepath.Abs(definition.Root)
 	if err != nil {
-		return nil, errors.New("profile root cannot be resolved")
+		return "", errors.New("profile root cannot be resolved")
+	}
+	// Child hook processes do not inherit the engine's descriptor table.
+	if strings.HasPrefix(root, "/proc/self/fd/") {
+		root = fmt.Sprintf("/proc/%d/fd/%s", os.Getpid(), strings.TrimPrefix(root, "/proc/self/fd/"))
 	}
 	resolvedRoot, err := filepath.EvalSymlinks(root)
 	rootInfo, rootErr := os.Lstat(root)
-	if err != nil || rootErr != nil || !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 || resolvedRoot != root {
-		return nil, errors.New("profile root must be a real directory")
+	if err != nil || rootErr != nil || !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 {
+		return "", errors.New("profile root must be a real directory")
+	}
+	if resolvedRoot != root {
+		// Only the kernel directory-descriptor anchor may be a symlink. Check
+		// every component below it, including the profile package's ancestors.
+		anchor := strings.TrimSuffix(profileDescriptorRoot.FindString(root), "/")
+		if anchor == "" {
+			return "", errors.New("profile root must be a real directory")
+		}
+		info, err := os.Stat(anchor)
+		if err != nil || !info.IsDir() {
+			return "", errors.New("profile directory descriptor is unavailable")
+		}
+		current := anchor
+		for _, part := range strings.Split(strings.TrimPrefix(root, anchor+"/"), string(filepath.Separator)) {
+			current = filepath.Join(current, part)
+			info, err := os.Lstat(current)
+			if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+				return "", errors.New("profile root must not traverse symlinks")
+			}
+		}
 	}
 	current := root
 	for _, part := range strings.Split(path, string(filepath.Separator)) {
 		current = filepath.Join(current, part)
 		info, statErr := os.Lstat(current)
 		if statErr != nil || info.Mode()&os.ModeSymlink != 0 {
-			return nil, errors.New("handler path must not traverse symlinks")
+			return "", errors.New("handler path must not traverse symlinks")
 		}
 		if current != filepath.Join(root, path) && !info.IsDir() {
-			return nil, errors.New("handler parent must be a directory")
+			return "", errors.New("handler parent must be a directory")
 		}
 	}
 	info, err := os.Lstat(current)
 	resolved, resolveErr := filepath.EvalSymlinks(current)
-	if err != nil || resolveErr != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 || resolved != filepath.Join(root, path) {
-		return nil, errors.New("handler must be an executable regular file within profile root")
+	if err != nil || resolveErr != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 || resolved != filepath.Join(resolvedRoot, path) {
+		return "", errors.New("handler must be an executable regular file within profile root")
+	}
+	return current, nil
+}
+
+var profileDescriptorRoot = regexp.MustCompile(`^/proc/[1-9][0-9]*/fd/(0|[1-9][0-9]*)/`)
+
+// ReadExecutable shares the runtime hook's validation before reading guest hooks.
+func (definition Definition) ReadExecutable(path string) ([]byte, error) {
+	current, err := definition.ExecutablePath(path)
+	if err != nil {
+		return nil, err
 	}
 	return os.ReadFile(current)
 }
