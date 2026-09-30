@@ -13,6 +13,7 @@ import (
 	"io"
 	"maps"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
@@ -78,6 +79,7 @@ type Options struct {
 	ProjectVSCode      ports.VSCode
 	ProjectObserver    ports.ProjectObserver
 	StatusFacts        ports.StatusFactsReader
+	LocalAddresses     func() ([]netip.Addr, error)
 	Credentials        ports.CredentialMetadataReader
 	AdapterRunner      ports.AdapterRunner
 	InitPlatform       ports.InitPlatform
@@ -1119,7 +1121,8 @@ With -Y/--yard or @<yard>, show detailed status for that one yard.
 				cli.errorf("remote status: %v", statusErr)
 				return 1
 			}
-			fmt.Fprintf(cli.options.Stdout, "%s/%s  %s\n", hostID, yard.Name, status.State)
+			fmt.Fprintf(cli.options.Stdout, "%s/%s  %s\n", hostID, yard.Name, displayYardState(status.State, status.StartState))
+			cli.printAddressWait(status.WaitingForAddresses)
 			fmt.Fprintf(cli.options.Stdout, "  projects %d\n", status.ProjectCount)
 			fmt.Fprintf(cli.options.Stdout, "  ssh      %s:%d\n",
 				status.Context.DevUser, status.Context.SSHPort)
@@ -1133,7 +1136,8 @@ With -Y/--yard or @<yard>, show detailed status for that one yard.
 				return 1
 			}
 			fmt.Fprintf(cli.options.Stdout, "%s/%s  %s\n",
-				loaded.Context.OwnerEndpoint, status.Context.YardName, status.State)
+				loaded.Context.OwnerEndpoint, status.Context.YardName, displayYardState(status.State, status.StartState))
+			cli.printAddressWait(status.WaitingForAddresses)
 			fmt.Fprintf(cli.options.Stdout, "  projects %d\n", status.ProjectCount)
 			fmt.Fprintf(cli.options.Stdout, "  ssh      %s:%d\n",
 				status.Context.DevUser, status.Context.SSHPort)
@@ -1156,7 +1160,8 @@ With -Y/--yard or @<yard>, show detailed status for that one yard.
 			}
 			first = false
 			fmt.Fprintf(cli.options.Stdout, "%s/%s  %s\n",
-				result.inventory.HostID, yard.Name, yard.State)
+				result.inventory.HostID, yard.Name, displayYardState(yard.State, yard.StartState))
+			cli.printAddressWait(yard.WaitingForAddresses)
 			fmt.Fprintf(cli.options.Stdout, "  instance %s (%s)\n", yard.Instance, yard.Kind)
 			fmt.Fprintf(cli.options.Stdout, "  ssh      %s:%d\n", yard.DevUser, yard.SSHPort)
 			fmt.Fprintf(cli.options.Stdout, "  projects %d\n", len(yard.Projects))
@@ -1174,6 +1179,7 @@ func (cli *CLI) printYardStatus(ctx context.Context, loaded config.Loaded) int {
 	incusPort, executor := cli.statusPorts()
 	service := application.StatusService{
 		Incus: incusPort, Executor: executor, Store: store, Facts: cli.statusFacts(loaded),
+		LocalAddresses: cli.localAddresses,
 	}
 	status, err := service.Read(ctx, loaded.Context)
 	if err != nil {
@@ -1184,9 +1190,10 @@ func (cli *CLI) printYardStatus(ctx context.Context, loaded config.Loaded) int {
 	if label == "default" {
 		label = "yard"
 	}
-	fmt.Fprintf(cli.options.Stdout, "%s  %s\n", label, status.State)
+	fmt.Fprintf(cli.options.Stdout, "%s  %s\n", label, displayYardState(status.State, status.StartState))
 	fmt.Fprintf(cli.options.Stdout, "  desired  %s  (initialized=%s, incus-autostart=%s)\n",
 		status.Desired, status.Initialized, status.IncusAutostart)
+	cli.printAddressWait(status.WaitingForAddresses)
 	resolvedImage := string(status.ResolvedYardImage)
 	if resolvedImage == "" {
 		resolvedImage = "unknown"
@@ -1430,15 +1437,17 @@ func (cli *CLI) runYards(ctx context.Context, loaded config.Loaded, arguments []
 	}
 	results := cli.allOwnerInventoriesReadOnly(ctx, loaded, false)
 	type yardOutput struct {
-		YardRef           domain.YardRef           `json:"yardRef"`
-		AccessKind        domain.AccessKind        `json:"accessKind"`
-		YardKind          domain.YardKind          `json:"yardKind"`
-		YardInstanceName  string                   `json:"yardInstanceName"`
-		State             string                   `json:"state"`
-		Projects          int                      `json:"projects"`
-		YardImageRef      domain.YardImageRef      `json:"yardImageRef,omitempty"`
-		ResolvedYardImage domain.ResolvedYardImage `json:"resolvedYardImage,omitempty"`
-		OwnerEndpoint     string                   `json:"ownerEndpoint,omitempty"`
+		YardRef             domain.YardRef           `json:"yardRef"`
+		AccessKind          domain.AccessKind        `json:"accessKind"`
+		YardKind            domain.YardKind          `json:"yardKind"`
+		YardInstanceName    string                   `json:"yardInstanceName"`
+		State               string                   `json:"state"`
+		StartState          domain.StartState        `json:"startState,omitempty"`
+		WaitingForAddresses []string                 `json:"waitingForAddresses,omitempty"`
+		Projects            int                      `json:"projects"`
+		YardImageRef        domain.YardImageRef      `json:"yardImageRef,omitempty"`
+		ResolvedYardImage   domain.ResolvedYardImage `json:"resolvedYardImage,omitempty"`
+		OwnerEndpoint       string                   `json:"ownerEndpoint,omitempty"`
 	}
 	var rows []yardOutput
 	code := 0
@@ -1482,6 +1491,7 @@ func (cli *CLI) runYards(ctx context.Context, loaded config.Loaded, arguments []
 				YardRef:    domain.YardRef{HostID: result.inventory.HostID, YardName: yard.Name},
 				AccessKind: accessKind, YardKind: domain.YardKind(yard.Kind),
 				YardInstanceName: yard.Instance, State: stateValue, Projects: len(yard.Projects),
+				StartState: yard.StartState, WaitingForAddresses: yard.WaitingForAddresses,
 				YardImageRef: yard.YardImageRef, ResolvedYardImage: yard.ResolvedYardImage,
 				OwnerEndpoint: endpoints[result.inventory.HostID],
 			})
@@ -1495,20 +1505,20 @@ func (cli *CLI) runYards(ctx context.Context, loaded config.Loaded, arguments []
 		return code
 	}
 	if verbose {
-		fmt.Fprintf(cli.options.Stdout, "%-24s %-6s %-9s %-16s %-9s %-8s %-24s %-24s %s\n",
+		fmt.Fprintf(cli.options.Stdout, "%-24s %-6s %-9s %-16s %-19s %-8s %-24s %-24s %s\n",
 			"NAME", "ACCESS", "KIND", "INSTANCE", "STATE", "PROJECTS", "DESIRED IMAGE", "RESOLVED IMAGE", "OWNER ENDPOINT")
 		for _, row := range rows {
-			fmt.Fprintf(cli.options.Stdout, "%-24s %-6s %-9s %-16s %-9s %-8d %-24s %-24s %s\n",
-				row.YardRef.String(), row.AccessKind, row.YardKind, row.YardInstanceName, row.State,
+			fmt.Fprintf(cli.options.Stdout, "%-24s %-6s %-9s %-16s %-19s %-8d %-24s %-24s %s\n",
+				row.YardRef.String(), row.AccessKind, row.YardKind, row.YardInstanceName, displayYardState(row.State, row.StartState),
 				row.Projects, row.YardImageRef, row.ResolvedYardImage, row.OwnerEndpoint)
 		}
 		return code
 	}
-	fmt.Fprintf(cli.options.Stdout, "%-24s %-6s %-9s %-16s %-9s %s\n",
+	fmt.Fprintf(cli.options.Stdout, "%-24s %-6s %-9s %-16s %-19s %s\n",
 		"NAME", "ACCESS", "KIND", "INSTANCE", "STATE", "PROJECTS")
 	for _, row := range rows {
-		fmt.Fprintf(cli.options.Stdout, "%-24s %-6s %-9s %-16s %-9s %d\n",
-			row.YardRef.String(), row.AccessKind, row.YardKind, row.YardInstanceName, row.State, row.Projects)
+		fmt.Fprintf(cli.options.Stdout, "%-24s %-6s %-9s %-16s %-19s %d\n",
+			row.YardRef.String(), row.AccessKind, row.YardKind, row.YardInstanceName, displayYardState(row.State, row.StartState), row.Projects)
 	}
 	return code
 }
@@ -4104,7 +4114,8 @@ func (handler *rpcHandler) status(ctx context.Context) (domain.YardStatus, error
 	incusPort, executor := handler.cli.statusPorts()
 	return (application.StatusService{
 		Incus: incusPort, Executor: executor, Store: store,
-		Facts: handler.cli.statusFacts(handler.loaded),
+		Facts:          handler.cli.statusFacts(handler.loaded),
+		LocalAddresses: handler.cli.localAddresses,
 	}).Read(ctx, handler.loaded.Context)
 }
 

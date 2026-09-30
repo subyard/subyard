@@ -116,18 +116,24 @@ func (source cliOwnerSource) Projects(ctx context.Context, yard domain.Context) 
 
 func (source cliOwnerSource) Runtime(
 	ctx context.Context, yard domain.Context,
-) (string, domain.ResolvedYardImage, error) {
+) (application.OwnerYardRuntime, error) {
 	incusPort, _ := source.cli.statusPorts()
 	instance, err := incusPort.Instance(ctx, yard.IncusProject, yard.YardInstanceName)
 	if errors.Is(err, ports.ErrInstanceNotFound) {
-		return "NOT_CREATED", "", nil
+		return application.OwnerYardRuntime{State: "NOT_CREATED"}, nil
 	}
 	if err != nil {
-		return "UNKNOWN", "", nil
+		return application.OwnerYardRuntime{State: "UNKNOWN"}, nil
 	}
 	// Incus records the immutable fingerprint of the image actually used to
 	// create the instance. Never substitute the desired input when it is absent.
-	return instance.Status, domain.ResolvedYardImage(instance.Config["volatile.base_image"]), nil
+	startState, waiting, err := application.StartAddressReadiness(instance, source.cli.localAddresses)
+	if err != nil {
+		return application.OwnerYardRuntime{}, err
+	}
+	return application.OwnerYardRuntime{State: instance.Status,
+		ResolvedYardImage: domain.ResolvedYardImage(instance.Config["volatile.base_image"]),
+		StartState:        startState, WaitingForAddresses: waiting}, nil
 }
 
 func (cli *CLI) ownerInventory(ctx context.Context, loaded config.Loaded) (domain.OwnerInventory, error) {

@@ -2,7 +2,7 @@
 Description=Restore guarded Subyard desired power state
 Wants=network-online.target incus.service incus.socket
 After=network-online.target NetworkManager.service incus.service incus.socket
-# Login-unlocked storage can be unavailable for an arbitrarily long time.
+# Login-unlocked storage and local proxy addresses can be unavailable indefinitely.
 # Only temporary exit 75 retries; each attempt and the retry rate stay bounded.
 StartLimitIntervalSec=0
 
@@ -12,6 +12,7 @@ ExecStart=@SUBYARD_POWER_RECONCILER@ _power-reconcile
 TimeoutStartSec=120
 RuntimeMaxSec=120
 Restart=no
+SuccessExitStatus=75
 RestartForceExitStatus=75
 RestartSec=30s
 NoNewPrivileges=true

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"sort"
 	"strings"
 	"time"
@@ -20,6 +21,12 @@ type BootPowerResult struct {
 	Started        []string
 	Stopped        []string
 	AlreadyRunning []string
+	Waiting        []BootAddressWait
+}
+
+type BootAddressWait struct {
+	Instance  string
+	Addresses []string
 }
 
 type BootPowerReconciler struct {
@@ -34,6 +41,7 @@ type BootPowerReconciler struct {
 	EnsureNetworkLock func() error
 	Clock             ports.Clock
 	IncusWait         time.Duration
+	LocalAddresses    func() ([]netip.Addr, error)
 }
 
 func (reconciler BootPowerReconciler) HasManaged(ctx context.Context) (bool, error) {
@@ -99,6 +107,14 @@ func (reconciler BootPowerReconciler) Run(ctx context.Context) (BootPowerResult,
 			}
 			result.AlreadyRunning = append(result.AlreadyRunning, reference)
 		case "stopped":
+			_, addresses, err := StartAddressReadiness(instance, reconciler.LocalAddresses)
+			if err != nil {
+				return result, fmt.Errorf("prepare start %s: %w", reference, err)
+			}
+			if len(addresses) != 0 {
+				result.Waiting = append(result.Waiting, BootAddressWait{Instance: reference, Addresses: addresses})
+				continue
+			}
 			var startErr error
 			yard := bootNetworkYard(instance)
 			if err := reconciler.NetworkPolicy.WithStart(ctx, yard, func() error {
@@ -109,6 +125,12 @@ func (reconciler BootPowerReconciler) Run(ctx context.Context) (BootPowerResult,
 				return reconciler.AfterStart(ctx, yard)
 			}); err != nil {
 				if startErr != nil {
+					// An address can disappear between observation and Incus binding.
+					_, addresses, observationErr := StartAddressReadiness(instance, reconciler.LocalAddresses)
+					if observationErr == nil && len(addresses) != 0 {
+						result.Waiting = append(result.Waiting, BootAddressWait{Instance: reference, Addresses: addresses})
+						continue
+					}
 					return result, fmt.Errorf("start %s: %w", reference, err)
 				}
 				return result, reconciler.stopRunningFailClosed(
@@ -122,6 +144,9 @@ func (reconciler BootPowerReconciler) Run(ctx context.Context) (BootPowerResult,
 		if err := reconciler.Network.Check(ctx, bridges); err != nil {
 			return result, reconciler.stopRunningFailClosed(ctx, err)
 		}
+	}
+	if len(result.Waiting) != 0 {
+		return result, ports.ErrHostAddressUnavailable
 	}
 	return result, nil
 }

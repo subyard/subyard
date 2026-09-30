@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"net/netip"
 	"sort"
 	"strings"
 	"time"
@@ -12,11 +13,12 @@ import (
 )
 
 type StatusService struct {
-	Incus        ports.Incus
-	Executor     ports.InstanceExecutor
-	Store        ports.ProjectStore
-	Facts        ports.StatusFactsReader
-	ProbeTimeout time.Duration
+	Incus          ports.Incus
+	Executor       ports.InstanceExecutor
+	Store          ports.ProjectStore
+	Facts          ports.StatusFactsReader
+	ProbeTimeout   time.Duration
+	LocalAddresses func() ([]netip.Addr, error)
 }
 
 func (service StatusService) Read(ctx context.Context, yard domain.Context) (domain.YardStatus, error) {
@@ -31,6 +33,10 @@ func (service StatusService) Read(ctx context.Context, yard domain.Context) (dom
 		return domain.YardStatus{}, err
 	}
 	running := strings.EqualFold(instance.Status, "running")
+	startState, waiting, err := StartAddressReadiness(instance, service.LocalAddresses)
+	if err != nil {
+		return domain.YardStatus{}, err
+	}
 	records, err := service.Store.List(ctx)
 	if err != nil {
 		return domain.YardStatus{}, err
@@ -41,6 +47,7 @@ func (service StatusService) Read(ctx context.Context, yard domain.Context) (dom
 	}
 	status := domain.YardStatus{
 		Context: yard, State: strings.ToUpper(instance.Status),
+		StartState: startState, WaitingForAddresses: waiting,
 		ResolvedYardImage: domain.ResolvedYardImage(instance.Config["volatile.base_image"]),
 		Desired:           valueOr(instance.Config["user.subyard.desired_power"], "unmanaged"),
 		Initialized:       valueOr(instance.Config["user.subyard.initialized"], "no"),

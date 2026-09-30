@@ -10,8 +10,9 @@ import (
 )
 
 var (
-	ErrInstanceNotFound = errors.New("instance not found")
-	ErrIncusUnavailable = errors.New("Incus is temporarily unavailable")
+	ErrInstanceNotFound       = errors.New("instance not found")
+	ErrIncusUnavailable       = errors.New("Incus is temporarily unavailable")
+	ErrHostAddressUnavailable = errors.New("host proxy address is not available")
 )
 
 type ServerInfo struct {

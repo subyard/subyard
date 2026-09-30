@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -35,14 +36,18 @@ func RunBootPower(
 		return 2
 	}
 	result, err := reconciler.Run(ctx)
-	if err != nil {
+	if err != nil && !errors.Is(err, ports.ErrHostAddressUnavailable) {
 		fmt.Fprintf(stderr, "subyard-power: FAIL: %v\n", err)
 		if errors.Is(err, ports.ErrIncusUnavailable) {
 			return bootPowerTemporaryFailure
 		}
 		return 1
 	}
-	if len(result.Started)+len(result.Stopped)+len(result.AlreadyRunning) == 0 {
+	for _, waiting := range result.Waiting {
+		fmt.Fprintf(stdout, "subyard-power: waiting-for-address %s: %s\n",
+			waiting.Instance, strings.Join(waiting.Addresses, ", "))
+	}
+	if len(result.Started)+len(result.Stopped)+len(result.AlreadyRunning)+len(result.Waiting) == 0 {
 		fmt.Fprintln(stdout, "subyard-power: no managed yards")
 		return 0
 	}
@@ -54,6 +59,9 @@ func RunBootPower(
 	}
 	for _, reference := range result.AlreadyRunning {
 		fmt.Fprintf(stdout, "subyard-power: %s already running\n", reference)
+	}
+	if errors.Is(err, ports.ErrHostAddressUnavailable) {
+		return bootPowerTemporaryFailure
 	}
 	fmt.Fprintln(stdout, "subyard-power: desired power restored")
 	return 0

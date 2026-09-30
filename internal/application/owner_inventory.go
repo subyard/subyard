@@ -15,7 +15,14 @@ type OwnerYardSource interface {
 	HostID(context.Context) (string, error)
 	Yards(context.Context) ([]domain.Context, error)
 	Projects(context.Context, domain.Context) ([]domain.ProjectRecord, error)
-	Runtime(context.Context, domain.Context) (string, domain.ResolvedYardImage, error)
+	Runtime(context.Context, domain.Context) (OwnerYardRuntime, error)
+}
+
+type OwnerYardRuntime struct {
+	State               string
+	ResolvedYardImage   domain.ResolvedYardImage
+	StartState          domain.StartState
+	WaitingForAddresses []string
 }
 
 type OwnerInventoryBuilder struct {
@@ -51,15 +58,15 @@ func (builder OwnerInventoryBuilder) Read(ctx context.Context) (domain.OwnerInve
 		if err != nil {
 			return domain.OwnerInventory{}, fmt.Errorf("read projects for yard %q: %w", yard.YardName, err)
 		}
-		state, resolvedImage, err := builder.Source.Runtime(ctx, yard)
+		runtime, err := builder.Source.Runtime(ctx, yard)
 		if err != nil {
 			return domain.OwnerInventory{}, fmt.Errorf("read state for yard %q: %w", yard.YardName, err)
 		}
-		state = strings.ToUpper(state)
 		entry := domain.OwnerYard{
 			Name: yard.YardName, Kind: string(yard.YardKind), Instance: yard.YardInstanceName,
-			State: state, SSHPort: yard.SSHPort, DevUser: yard.DevUser,
-			YardImageRef: yard.YardImageRef, ResolvedYardImage: resolvedImage,
+			State: strings.ToUpper(runtime.State), SSHPort: yard.SSHPort, DevUser: yard.DevUser,
+			YardImageRef: yard.YardImageRef, ResolvedYardImage: runtime.ResolvedYardImage,
+			StartState: runtime.StartState, WaitingForAddresses: runtime.WaitingForAddresses,
 			Projects: make([]domain.OwnerProject, 0, len(records)),
 		}
 		for _, record := range records {

@@ -571,6 +571,33 @@ The `network-policy` init stage runs after host networking and before instance c
 ordinary starts, init finalization, the test VM backend, boot restoration and teardown
 use the same policy service. Existing NetworkManager and host-route guards still apply.
 
+### Boot address readiness
+
+The boot power reconciler inspects effective Incus devices before starting an initialized,
+managed yard with `desired_power=running`. A host-bound, non-NAT TCP/UDP proxy that listens
+on a missing local IPv4 or IPv6 address puts the yard in `WAITING_FOR_ADDRESS`. Loopback,
+wildcard, Unix-socket, NAT and instance-bound listeners do not require this wait.
+The exact proxy binding and desired power remain unchanged; other ready yards can start.
+
+`yard status` and `yard yards` render this start state. Detailed status lists the missing
+addresses. `yard.status`, owner inventory and `yard yards --json` preserve the physical
+`state` and add `startState: "waiting-for-address"` and `waitingForAddresses` while waiting.
+`internal/application/start_readiness.go` owns this derived state; it is not a second
+persisted power intent or a cached replacement for Incus state.
+
+The reconciler checks active local interfaces once per waiting yard and exits with
+temporary status 75. The installed systemd unit treats that as expected and retries after
+30 seconds, with no process kept alive between attempts. It uses local interface inspection
+and the local Incus API, without DNS, connection probes or external network requests.
+Once the address appears, the next attempt performs the ordinary guarded start. Local
+observation errors, malformed listener endpoints, port conflicts and network-guard failures remain
+errors; a permanent failure ends host-wide reconciliation even if another yard is waiting.
+
+The targeted real-Incus/PID1 check is `dev/e2e/proxy-address-wait.sh`, run through the
+allocated VM runner. It exercises delayed address appearance, independent starts and
+automatic recovery, and measures cumulative retry CPU and IP traffic in a dedicated slice.
+IP traffic results require a successful local positive control and exclude the Incus daemon.
+
 ### Credential ledger
 
 

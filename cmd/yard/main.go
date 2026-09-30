@@ -170,6 +170,7 @@ func main() {
 				NetworkPolicy:     bootPolicy,
 				AfterStart:        bootPolicy.ClearBootStaleUDP,
 				EnsureNetworkLock: networkruntime.EnsureHostLock,
+				LocalAddresses:    hostruntime.LocalAddresses,
 			}))
 	}
 	root, err := repositoryRoot()

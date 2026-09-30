@@ -3,6 +3,7 @@ package domain
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"strings"
 	"time"
 )
@@ -19,15 +20,17 @@ type OwnerProject struct {
 }
 
 type OwnerYard struct {
-	Name              string            `json:"name"`
-	Kind              string            `json:"kind"`
-	Instance          string            `json:"instance"`
-	State             string            `json:"state"`
-	SSHPort           int               `json:"sshPort"`
-	DevUser           string            `json:"devUser"`
-	YardImageRef      YardImageRef      `json:"yardImageRef,omitempty"`
-	ResolvedYardImage ResolvedYardImage `json:"resolvedYardImage,omitempty"`
-	Projects          []OwnerProject    `json:"projects"`
+	Name                string            `json:"name"`
+	Kind                string            `json:"kind"`
+	Instance            string            `json:"instance"`
+	State               string            `json:"state"`
+	StartState          StartState        `json:"startState,omitempty"`
+	WaitingForAddresses []string          `json:"waitingForAddresses,omitempty"`
+	SSHPort             int               `json:"sshPort"`
+	DevUser             string            `json:"devUser"`
+	YardImageRef        YardImageRef      `json:"yardImageRef,omitempty"`
+	ResolvedYardImage   ResolvedYardImage `json:"resolvedYardImage,omitempty"`
+	Projects            []OwnerProject    `json:"projects"`
 }
 
 type OwnerInventory struct {
@@ -53,6 +56,16 @@ func (inventory OwnerInventory) Validate() error {
 	yards := make(map[string]struct{}, len(inventory.Yards))
 	projects := make(map[string]struct{})
 	for _, yard := range inventory.Yards {
+		if (yard.StartState != "" && yard.StartState != StartWaitingForAddress) ||
+			(yard.StartState == StartWaitingForAddress) != (len(yard.WaitingForAddresses) != 0) ||
+			len(yard.WaitingForAddresses) > 1024 {
+			return fmt.Errorf("invalid start readiness for owner yard %q", yard.Name)
+		}
+		for _, address := range yard.WaitingForAddresses {
+			if _, err := netip.ParseAddr(address); err != nil {
+				return fmt.Errorf("invalid waiting address for owner yard %q", yard.Name)
+			}
+		}
 		if !SafeName(yard.Name) {
 			return fmt.Errorf("invalid owner yard name %q", yard.Name)
 		}

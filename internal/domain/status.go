@@ -1,5 +1,9 @@
 package domain
 
+type StartState string
+
+const StartWaitingForAddress StartState = "waiting-for-address"
+
 type SharedResourceStatus struct {
 	Profile string `json:"profile"`
 	Name    string `json:"name"`
@@ -25,17 +29,19 @@ type StatusFacts struct {
 }
 
 type YardStatus struct {
-	Context           Context           `json:"context"`
-	ResolvedYardImage ResolvedYardImage `json:"resolvedYardImage,omitempty"`
-	State             string            `json:"state"`
-	Desired           string            `json:"desired"`
-	Initialized       string            `json:"initialized"`
-	IncusAutostart    string            `json:"incusAutostart"`
-	IP                string            `json:"ip,omitempty"`
-	SSHConfigured     bool              `json:"sshConfigured"`
-	Mounts            []string          `json:"mounts"`
-	Services          string            `json:"services,omitempty"`
-	VSCode            string            `json:"vscode,omitempty"`
-	ProjectCount      int               `json:"projectCount"`
-	Facts             StatusFacts       `json:"facts"`
+	Context             Context           `json:"context"`
+	ResolvedYardImage   ResolvedYardImage `json:"resolvedYardImage,omitempty"`
+	State               string            `json:"state"`
+	StartState          StartState        `json:"startState,omitempty"`
+	WaitingForAddresses []string          `json:"waitingForAddresses,omitempty"`
+	Desired             string            `json:"desired"`
+	Initialized         string            `json:"initialized"`
+	IncusAutostart      string            `json:"incusAutostart"`
+	IP                  string            `json:"ip,omitempty"`
+	SSHConfigured       bool              `json:"sshConfigured"`
+	Mounts              []string          `json:"mounts"`
+	Services            string            `json:"services,omitempty"`
+	VSCode              string            `json:"vscode,omitempty"`
+	ProjectCount        int               `json:"projectCount"`
+	Facts               StatusFacts       `json:"facts"`
 }
