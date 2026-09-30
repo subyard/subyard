@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -370,7 +371,40 @@ func load(
 	if err == nil {
 		err = normalizeAIObserverPort(values, tracker, ctx.SSHPort)
 	}
+	if err == nil {
+		err = normalizeWebPreviewPort(values, tracker, ctx.SSHPort)
+	}
 	return ctx, values, err
+}
+
+func normalizeWebPreviewPort(values environment, tracker *settingTracker, sshPort int) error {
+	const name = "WEB_PREVIEW_HOST_PORT"
+	if values[name] == "" {
+		values[name] = strconv.Itoa(1024 + (sshPort+30000-1024)%64512)
+		tracker.normalize(name, values[name], "derived from SSH_PORT")
+	}
+	port, err := strconv.Atoi(values[name])
+	if err != nil || port < 1024 || port > 65535 || strconv.Itoa(port) != values[name] {
+		return fmt.Errorf("%s must be a canonical port in range 1024..65535", name)
+	}
+	profiles := strings.Fields(values["ENVIRONMENT_PROFILES"])
+	for _, definition := range tracker.catalog.SettingCatalog() {
+		if !definition.HostListener || definition.Name == name {
+			continue
+		}
+		if owner, profile := strings.CutPrefix(definition.Owner, "profile:"); profile && !slices.Contains(profiles, owner) {
+			continue
+		}
+		if listenerPort, err := strconv.Atoi(values[definition.Name]); err == nil && listenerPort == port {
+			return fmt.Errorf("%s collides with %s; choose another port", name, definition.Name)
+		}
+	}
+	if slices.Contains(strings.Fields(values["CODING_TOOL_INTEGRATIONS"]), "aiobserver") {
+		if observerPort, err := strconv.Atoi(values["AI_OBSERVER_HOST_PORT"]); err == nil && observerPort == port {
+			return fmt.Errorf("%s collides with AI_OBSERVER_HOST_PORT; choose another port", name)
+		}
+	}
+	return nil
 }
 
 // A yard already needs a distinct SSH port on its owner. Offset that port into

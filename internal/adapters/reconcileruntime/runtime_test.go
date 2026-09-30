@@ -13,6 +13,7 @@ import (
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/previewroute"
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/Subyard/Subyard/internal/yardnetwork"
@@ -818,12 +819,19 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	incus.Reconcile.Instance.Config["user.subyard.preview_sha256"] = previewHash
+	endpointHash := runtime.previewEndpointHash(context.Background())
+	incus.Reconcile.Instance.Config[previewroute.EndpointKey] = endpointHash
 	assertStage(t, runtime, "provision", true, "matching stopped provision marker")
 	for _, marker := range []string{"", "pending", "stale"} {
 		incus.Reconcile.Instance.Config["user.subyard.preview_sha256"] = marker
 		assertStage(t, runtime, "provision", false, "stopped preview helper needs installation")
 	}
 	incus.Reconcile.Instance.Config["user.subyard.preview_sha256"] = previewHash
+	for _, marker := range []string{"", "pending", "stale"} {
+		incus.Reconcile.Instance.Config[previewroute.EndpointKey] = marker
+		assertStage(t, runtime, "provision", false, "stopped preview endpoint needs installation")
+	}
+	incus.Reconcile.Instance.Config[previewroute.EndpointKey] = endpointHash
 	runtime.Environment = []string{
 		"CODING_TOOL_INTEGRATIONS=codex", "CCUSAGE_VERSION=1.2.3",
 	}

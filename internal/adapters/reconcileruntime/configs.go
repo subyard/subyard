@@ -284,7 +284,7 @@ func (file guestConfigFile) readSource() ([]byte, error) {
 }
 
 const previewInstructions = `<!-- subyard-preview -->
-For a static web preview, run ` + "`subyard-preview <relative-static-dir>`" + ` from the Git workspace and keep it running with your background/async process mechanism. Share the printed link. Preview is available only while the helper runs and a preview-enabled ` + "`yard code`" + ` SSH session is active.
+For a static web preview, run ` + "`subyard-preview <relative-static-dir>`" + ` from the Git workspace and keep it running with your background/async process mechanism. Share the printed URL. An owner Tailscale URL requires device reachability and Tailnet policy access; a loopback URL requires an active preview-enabled ` + "`yard code`" + ` SSH session. The helper must stay running for either URL.
 <!-- /subyard-preview -->
 `
 

@@ -74,21 +74,30 @@ Use [temporary SSH access](ssh-agent.md) when Git inside a yard needs one of the
 
 ## Static web previews
 
-Open a project with `yard code`, then run this inside its Git checkout:
+Run this inside a project's Git checkout:
 
 ```sh
 subyard-preview dist
 ```
 
-The directory is relative to the Git workspace root. The helper prints
-`Preview: http://127.0.0.1:8765/`; open that link on the machine running VS Code.
-Agents can keep the foreground helper running through their usual background process mechanism
-and share the printed link. File edits appear on the next request.
+The directory is relative to the Git workspace root. For a container yard with an active owner
+Tailscale IPv4 address, the helper prints `Preview: http://<owner-tailscale-ip>:<preview-port>/`.
+Open or share that printed URL from a device that can reach the owner under its Tailnet policy.
+This direct URL does not require a `yard code` SSH session. Agents can keep the foreground helper
+running through their usual background process mechanism. File edits appear on the next request.
 
-The helper and the dedicated Remote-SSH connection must stay active. Closing either stops access.
-Local, named and remote yards use the same loopback-only URL. Only one preview can use the fixed
-controller port at a time; `yard code` reports a busy port before opening VS Code. Ordinary yard
-SSH aliases have no preview forwarding.
+The owner proxy listens only on that active Tailscale address. Its default port is the yard's
+SSH host port plus 30000, wrapping into `1024..65535` if needed: default SSH port `2222`
+gives preview port `32222`.
+Set `WEB_PREVIEW_HOST_PORT` to choose a different owner port, then repeat `yard init`.
+Repeat `yard init` after the owner's Tailscale address or proxy configuration changes.
+The helper must stay running for the URL to work.
+
+VM yards and owners without an active Tailscale IPv4 address use
+`Preview: http://127.0.0.1:8765/`. Open the project with `yard code` and use that link on the
+machine running VS Code. Both the helper and its dedicated Remote-SSH connection must stay active.
+Only one forwarded preview can use the fixed controller port at a time; `yard code` reports a busy
+port before opening VS Code. Ordinary yard SSH aliases have no preview forwarding.
 
 Preview directories must be readable and contain static files; the helper does not build the
 project. Symlinks, parent traversal, `.git`, special files and directory listings are rejected.

@@ -48,7 +48,7 @@ run_check() {
   printf -v CHECK_LOG '%03d.log' "$CHECK_COUNT"
   printf 'RUN %s\n' "$CHECK_NAME"
   # Do not put this command in an if/||: that disables errexit inside functions.
-  (trap - EXIT; "$@") > "$RUN_DIR/$CHECK_LOG" 2>&1
+  (trap - EXIT; "$@") < /dev/null > "$RUN_DIR/$CHECK_LOG" 2>&1
   record_check 0
 }
 

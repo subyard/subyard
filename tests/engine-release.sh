@@ -147,6 +147,7 @@ grep -Fxq './bin/yard' "$bundle_list" \
   && grep -Fxq './config/agents/codex/provision.sh' "$bundle_list" \
   && grep -Fxq './config/agents/aiobserver/provision.sh' "$bundle_list" \
   && grep -Fxq './scripts/lib/ai-observer-proxy.sh' "$bundle_list" \
+  && grep -Fxq './scripts/lib/preview-proxy.sh' "$bundle_list" \
   || fail 'runtime bundle does not contain the complete launcher contract'
 # Every profile owns its asset inventory; packaging must preserve all runtime
 # inputs, including hooks, regardless of the user's selected profiles.

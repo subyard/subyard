@@ -85,6 +85,7 @@ runtime_list="$bundle_stage/.runtime-inputs"
 runtime_extras=(
   scripts/e2e-lab/base.sh
   scripts/lib/ai-observer-proxy.sh
+  scripts/lib/preview-proxy.sh
   scripts/lib/engine-context.sh
   scripts/install-ssh-relay.sh
   scripts/install-test-vms-host-sink.sh

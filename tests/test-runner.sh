@@ -64,6 +64,17 @@ grep -q 'hidden successful output' "$(dirname "$summary")/$unit_log" || fail 'su
 run_fixture second
 [ "$(summary_path second)" != "$summary" ] && [ -f "$summary" ] || fail 'second run overwrote first run'
 
+# Child commands must not consume the manifest supplying the runner's loop.
+printf '#!/usr/bin/env bash\ncat >/dev/null\n' > "$fixture/tests/unit.sh"
+printf 'unit.sh\nafter-stdin.sh\n' > "$fixture/tests/suites/unit.list"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$fixture/tests/after-stdin.sh"
+run_fixture stdin-consuming
+summary="$(summary_path stdin-consuming)"
+awk -F '\t' '$1 == "check" && $3 == "tests/after-stdin.sh" && $4 == "passed" { found=1 }
+  END { exit !found }' "$summary" || fail 'child stdin consumption skipped the next declared check'
+printf 'unit.sh\n' > "$fixture/tests/suites/unit.list"
+rm "$fixture/tests/after-stdin.sh"
+
 rc=0
 RUNNER_FAIL_UMASK=0022 run_fixture umask-failure || rc=$?
 [ "$rc" -eq 24 ] || fail 'umask matrix hid a failed Go run'

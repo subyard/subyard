@@ -14,6 +14,8 @@ subyard_require_engine_context
 . "$SCRIPT_DIR/lib/ui.sh"
 # shellcheck source=scripts/lib/host.sh
 . "$SCRIPT_DIR/lib/host.sh"
+# shellcheck source=scripts/lib/preview-proxy.sh
+. "$SCRIPT_DIR/lib/preview-proxy.sh"
 
 INCUS_PROJECT="${INCUS_PROJECT:-subyard}"
 YARD_INSTANCE_NAME="${YARD_INSTANCE_NAME:-yard}"
@@ -35,7 +37,8 @@ announce_confirm "Subyard Phase 3 — provision the yard ($YARD_INSTANCE_NAME)" 
   "Inside the yard: create user '$DEV_USER' + groups (yard/kvm/docker), lay out /srv, enable ssh & docker." \
   "Inside the yard: install the pinned native ccusage reporter." \
   "Inside the yard: bootstrap enabled agent CLIs when missing." \
-  "On the host: reconcile the selected AI Observer dashboard on loopback (containers only)." \
+  "On the host: reconcile the selected AI Observer dashboard on its owned container route." \
+  "On the host: publish static preview on one active Tailscale address (containers only)." \
   "On the host: set the /dev/kvm device GID to the in-yard 'kvm' group." \
   "On the host: copy instructions for enabled agents into the yard, if present." \
   "This pulls packages from the network and changes the yard's userspace (not the host system)."
@@ -51,6 +54,8 @@ PREVIEW_SOURCE="$SCRIPT_DIR/../config/preview/subyard-preview"
 PREVIEW_SHA256="$(sha256sum "$PREVIEW_SOURCE" | cut -d ' ' -f1)"
 incus config set "$YARD_INSTANCE_NAME" user.subyard.preview_sha256 pending "${PROJ[@]}" \
   || die "could not invalidate preview convergence"
+incus config set "$YARD_INSTANCE_NAME" user.subyard.preview_endpoint_sha256 pending "${PROJ[@]}" \
+  || die "could not invalidate preview endpoint convergence"
 
 if [ "${ALLOWS_CODING_TOOLS:-true}" != false ]; then
 incus config set "$YARD_INSTANCE_NAME" user.subyard.ccusage_version pending "${PROJ[@]}" \
@@ -179,6 +184,24 @@ incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- sh -eu -c '
   mv -fT -- "$temporary" /usr/local/bin/subyard-preview
 ' < "$PREVIEW_SOURCE" || die "static preview helper installation failed"
 ok "static preview helper ready"
+PREVIEW_ENDPOINT="$(subyard_preview_endpoint)" || die "static preview endpoint publication failed"
+PREVIEW_ENDPOINT_SHA256="$(printf '%s\n' "$PREVIEW_ENDPOINT" | sha256sum | cut -d ' ' -f1)"
+printf '%s\n' "$PREVIEW_ENDPOINT" | incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- sh -eu -c '
+  [ ! -L /etc/subyard ]
+  install -d -m 0755 -o root -g root /etc/subyard
+  temporary=$(mktemp /etc/subyard/.preview.XXXXXX)
+  trap '\''rm -f -- "$temporary"'\'' EXIT HUP INT TERM
+  cat > "$temporary"
+  chown root:root "$temporary"
+  chmod 0644 "$temporary"
+  if [ ! -L /etc/subyard/preview.json ] &&
+      [ "$(stat -c "%F|%a|%u:%g" /etc/subyard/preview.json 2>/dev/null || true)" = "regular file|644|0:0" ] &&
+      cmp -s "$temporary" /etc/subyard/preview.json; then
+    exit 0
+  fi
+  mv -fT -- "$temporary" /etc/subyard/preview.json
+' || die "static preview endpoint metadata installation failed"
+ok "static preview endpoint ready"
 
 if [ "${ALLOWS_CODING_TOOLS:-true}" != false ]; then
 # --- 2. provision the core usage reporter -----------------------------------
@@ -230,6 +253,8 @@ fi
 # --- summary -----------------------------------------------------------------
 incus config set "$YARD_INSTANCE_NAME" user.subyard.preview_sha256 "$PREVIEW_SHA256" "${PROJ[@]}" \
   || die "could not record preview convergence"
+incus config set "$YARD_INSTANCE_NAME" user.subyard.preview_endpoint_sha256 "$PREVIEW_ENDPOINT_SHA256" "${PROJ[@]}" \
+  || die "could not record preview endpoint convergence"
 if [ "${ALLOWS_CODING_TOOLS:-true}" != false ]; then
 incus config set "$YARD_INSTANCE_NAME" user.subyard.ccusage_version "$CCUSAGE_VERSION" "${PROJ[@]}" \
   || die "could not record ccusage convergence"

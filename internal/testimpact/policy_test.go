@@ -123,7 +123,7 @@ func TestRegistryNamedE2EChecksUsePreparedRunnableEntrypoints(t *testing.T) {
 		t.Fatalf("BuiltInRegistry() error = %v", err)
 	}
 	want := map[string][]string{
-		"e2e:preview": {"dev/e2e/preview-acceptance.sh"},
+		"e2e:preview": {"dev/e2e/preview-acceptance.sh", "--tailnet"},
 		"e2e:ssh-unknown-host": {
 			"dev/agent-e2e.sh", "--purpose", "ssh-unknown-host", "--vm", "1", "--",
 			"bash", "tests/real-host/ssh-unknown-host.sh",

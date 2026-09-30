@@ -2,6 +2,8 @@
 """Serve an explicitly selected static directory from the current Git checkout."""
 
 import errno
+import ipaddress
+import json
 import mimetypes
 import os
 import shutil
@@ -14,6 +16,47 @@ from urllib.parse import unquote, urlsplit
 
 ADDRESS = ("127.0.0.1", 8765)
 URL = "http://127.0.0.1:8765/"
+ENDPOINT_FILE = "/etc/subyard/preview.json"
+
+
+def endpoint_fields(pairs):
+    fields = dict(pairs)
+    if len(fields) != len(pairs):
+        raise ValueError
+    return fields
+
+
+def parse_endpoint(payload):
+    endpoint = json.loads(payload, object_pairs_hook=endpoint_fields)
+    if not isinstance(endpoint, dict) or set(endpoint) != {"version", "host", "port"}:
+        raise ValueError
+    version, host, port = endpoint["version"], endpoint["host"], endpoint["port"]
+    if type(version) is not int or version != 1 or type(port) is not int or not isinstance(host, str):
+        raise ValueError
+    address = ipaddress.IPv4Address(host)
+    if str(address) != host:
+        raise ValueError
+    if host == ADDRESS[0]:
+        if port != ADDRESS[1]:
+            raise ValueError
+    elif address not in ipaddress.IPv4Network("100.64.0.0/10") or not 1024 <= port <= 65535:
+        raise ValueError
+    return "http://%s:%d/" % (host, port)
+
+
+def endpoint_url():
+    try:
+        fd = os.open(ENDPOINT_FILE, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return URL
+    with os.fdopen(fd, "rb") as source:
+        metadata = os.fstat(source.fileno())
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o022 or metadata.st_size > 1024:
+            raise ValueError
+        payload = source.read(1025)
+        if len(payload) > 1024:
+            raise ValueError
+        return parse_endpoint(payload)
 
 
 def components(path):
@@ -154,6 +197,10 @@ def main():
         os.close(workspace_fd)
     try:
         try:
+            url = endpoint_url()
+        except (OSError, ValueError):
+            return fail("invalid preview endpoint metadata")
+        try:
             server = PreviewServer(ADDRESS, PreviewHandler)
         except OSError as error:
             if error.errno == errno.EADDRINUSE:
@@ -162,7 +209,7 @@ def main():
         with server:
             server.root_fd = root_fd
             try:
-                print("Preview: " + URL, flush=True)
+                print("Preview: " + url, flush=True)
                 server.serve_forever()
             except KeyboardInterrupt:
                 pass

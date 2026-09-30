@@ -5,9 +5,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 # shellcheck source=dev/agent-e2e.sh
 . "$ROOT/dev/agent-e2e.sh"
 
-usage() { printf 'Usage: dev/e2e/preview-acceptance.sh --slot N [--remote-only]\n'; }
+usage() { printf 'Usage: dev/e2e/preview-acceptance.sh --slot N [--remote-only] [--tailnet]\n'; }
 slot_seen=0
 remote_only=0
+tailnet=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --slot)
@@ -17,6 +18,7 @@ while [ "$#" -gt 0 ]; do
       slot_seen=1
       shift 2 ;;
     --remote-only) remote_only=1; shift ;;
+    --tailnet) tailnet=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die 'unknown argument' ;;
   esac
@@ -33,6 +35,7 @@ payload() {
     env HOME=/home/dev USER=dev LOGNAME=dev \
     SUBYARD_E2E_RUN_ID="$LEASE_RUN" SUBYARD_E2E_VM="$vm" \
     SUBYARD_E2E_TYPE=subyard-pair "$@" \
+    SUBYARD_PREVIEW_TAILNET="$tailnet" \
     bash -c 'cd "$1"; shift; exec bash "$@"' subyard \
     "${GUEST_DIRS[$vm]}/src" "${GUEST_DIRS[$vm]}/src/dev/e2e/preview-lifecycle.sh" "$phase"
 }
@@ -92,11 +95,14 @@ guest 1 chown dev:dev "$guest_root/peer-key" "$guest_root/peer-known-hosts" "$gu
 guest 1 chmod 0600 "$guest_root/peer-key" "$guest_root/peer-known-hosts" "$guest_root/peer-config"
 
 printf 'preview acceptance: source SHA-256 %s\n' "$bundle_hash"
-payload 2 owner-setup
+payload 2 owner-setup SUBYARD_PREVIEW_PEER_IP="${VM_IP[1]}"
 payload 1 controller \
   SUBYARD_PREVIEW_REMOTE_ONLY="$remote_only" \
   SUBYARD_PREVIEW_PEER_CONFIG="$guest_root/peer-config" \
   SUBYARD_PREVIEW_PEER_IP="${VM_IP[2]}"
+if [ "$tailnet" = 1 ]; then
+  printf 'ok: synthetic owner Tailnet route, fallback and peer HTTP verified\n'
+fi
 if [ "$remote_only" = 1 ]; then
   printf 'ok: remote ProxyJump preview lifecycle verified\n'
 else

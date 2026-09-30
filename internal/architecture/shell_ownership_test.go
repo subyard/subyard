@@ -234,6 +234,7 @@ func TestPhysicalShellConsumesOnlyPreparedControlPlaneState(t *testing.T) {
 		"runtime.sh": true, "engine-context.sh": true, "ui.sh": true,
 		"lib-power.sh": true, "host.sh": true, "ssh-config.sh": true,
 		"ai-observer-proxy.sh":     true,
+		"preview-proxy.sh":         true,
 		"lib-vm-page-reporting.sh": true, "lib-vm-storage.sh": true,
 	}
 	forbidden := []string{
@@ -344,6 +345,7 @@ func productionShellContracts(t *testing.T) map[string]shellContract {
 	goPrepared := "internal/cli/prepared_command.go"
 	contracts := map[string]shellContract{
 		"scripts/lib/ai-observer-proxy.sh":      {"library", "scripts/reconcile-integrations.sh", `lib/ai-observer-proxy.sh`},
+		"scripts/lib/preview-proxy.sh":          {"library", "scripts/04-provision-subyard.sh", `lib/preview-proxy.sh`},
 		"config/agents/aiobserver/provision.sh": {"profile", "config/agents.env", `agents/aiobserver/provision.sh`},
 		"config/agents/ccusage/provision.sh":    {"profile", "config/agents.env", `agents/ccusage/provision.sh`},
 		"config/agents/codex/provision.sh":      {"profile", "config/agents.env", `agents/codex/provision.sh`},

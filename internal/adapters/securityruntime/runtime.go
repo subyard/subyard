@@ -22,6 +22,7 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/observerroute"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/previewroute"
 	"github.com/Subyard/Subyard/internal/resource"
 )
 
@@ -261,7 +262,11 @@ func (runtime Runtime) liveFindings(ctx context.Context, state ports.ReconcileSt
 					fmt.Sprintf("unix-char device %q is outside the supported allowlist: %s", name, source)})
 			}
 		}
-		if name == "ai-observer" && deviceType == "proxy" && !loopbackProxy(device["listen"]) {
+		if name == previewroute.DeviceName {
+			if err := runtime.checkPreviewProxy(ctx, device, instance.LocalDevices[name], instance.LocalConfig); err != nil {
+				result = append(result, finding{"fail", err.Error()})
+			}
+		} else if name == "ai-observer" && deviceType == "proxy" && !loopbackProxy(device["listen"]) {
 			if err := runtime.checkObserverProxy(ctx, device, instance.LocalConfig); err != nil {
 				result = append(result, finding{"fail", err.Error()})
 			}
@@ -286,6 +291,23 @@ func (runtime Runtime) liveFindings(ctx context.Context, state ports.ReconcileSt
 			"device-cgroup BPF interception is enabled while NESTED_E2E_VMS is disabled"})
 	}
 	return result
+}
+
+func (runtime Runtime) checkPreviewProxy(ctx context.Context, device, localDevice, instanceConfig map[string]string) error {
+	host, port, ready := previewroute.Owned(instanceConfig[previewroute.Key], device)
+	if !ready || port != runtime.Environment["WEB_PREVIEW_HOST_PORT"] ||
+		runtime.Yard.YardKind != domain.YardContainer || !maps.Equal(device, localDevice) {
+		return errors.New("static preview proxy does not match its owned container Tailscale route")
+	}
+	resolver := runtime.ResolveOwnerAddress
+	if resolver == nil {
+		resolver = resolveOwnerAddress
+	}
+	address, err := resolver(ctx, host)
+	if err != nil || address != host {
+		return errors.New("static preview proxy is not bound to an active owner Tailscale address")
+	}
+	return nil
 }
 
 func (runtime Runtime) checkObserverProxy(ctx context.Context, device, instanceConfig map[string]string) error {

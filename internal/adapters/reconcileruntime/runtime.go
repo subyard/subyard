@@ -1490,6 +1490,9 @@ func (runtime Runtime) provisionConverged(ctx context.Context) (bool, error) {
 	if observerReady, err := runtime.aiObserverConverged(ctx, instance); err != nil || !observerReady {
 		return false, err
 	}
+	if !runtime.previewRouteConverged(ctx, instance) {
+		return false, nil
+	}
 	if strings.EqualFold(instance.Status, "stopped") {
 		previewHash, err := runtime.previewSourceHash()
 		if err != nil {
@@ -1497,6 +1500,11 @@ func (runtime Runtime) provisionConverged(ctx context.Context) (bool, error) {
 		}
 		installedHash, _ := instance.EffectiveConfig("user.subyard.preview_sha256")
 		if installedHash != previewHash {
+			return false, nil
+		}
+		endpointHash := runtime.previewEndpointHash(ctx)
+		installedEndpointHash, _ := instance.EffectiveConfig("user.subyard.preview_endpoint_sha256")
+		if installedEndpointHash != endpointHash {
 			return false, nil
 		}
 		if runtime.environmentValue("ALLOWS_CODING_TOOLS") == "false" {

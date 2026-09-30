@@ -2,18 +2,27 @@
 """Host-free HTTP and process contracts for the foreground preview helper."""
 
 import http.client
+import json
 import os
 from pathlib import Path
+import runpy
 import selectors
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import unittest
 
 
 HELPER = Path(__file__).resolve().parents[1] / "config/preview/subyard-preview"
 ADDRESS = ("127.0.0.1", 8765)
+PREVIEW = runpy.run_path(str(HELPER))
+LAUNCH = (
+    "import runpy, sys; helper = runpy.run_path(sys.argv.pop(1)); "
+    "helper['main'].__globals__['ENDPOINT_FILE'] = sys.argv.pop(1); "
+    "sys.exit(helper['main']())"
+)
 
 
 class PreviewTest(unittest.TestCase):
@@ -21,6 +30,7 @@ class PreviewTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="subyard-preview-test-")
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name)
+        self.endpoint = self.base / "preview.json"
         self.checkout = self.base / "checkout"
         self.checkout.mkdir(mode=0o700)
         subprocess.run(["git", "init", "-q", str(self.checkout)], check=True)
@@ -36,7 +46,8 @@ class PreviewTest(unittest.TestCase):
 
     def launch(self, *args, cwd=None):
         process = subprocess.Popen(
-            [str(HELPER), *args], cwd=cwd or self.nested,
+            [sys.executable, "-c", LAUNCH, str(HELPER), str(self.endpoint), *args],
+            cwd=cwd or self.nested,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         self.addCleanup(self.stop, process)
@@ -53,13 +64,13 @@ class PreviewTest(unittest.TestCase):
         process.stdout.close()
         process.stderr.close()
 
-    def start(self, directory="site", cwd=None):
+    def start(self, directory="site", cwd=None, url="http://127.0.0.1:8765/"):
         process = self.launch(directory, cwd=cwd)
         with selectors.DefaultSelector() as selector:
             selector.register(process.stdout, selectors.EVENT_READ)
             self.assertTrue(selector.select(timeout=5), "preview did not report readiness")
         line = process.stdout.readline()
-        self.assertEqual(line, b"Preview: http://127.0.0.1:8765/\n")
+        self.assertEqual(line, ("Preview: " + url + "\n").encode())
         self.assertIsNone(process.poll())
         return process
 
@@ -198,6 +209,66 @@ class PreviewTest(unittest.TestCase):
             listener.bind(ADDRESS)
             listener.listen()
             self.assertIn(b"127.0.0.1:8765 is already in use", self.reject("site"))
+            self.write(self.endpoint, b'{"version":1,"host":"100.64.1.20","port":32222}', 0o644)
+            self.assertIn(b"127.0.0.1:8765 is already in use", self.reject("site"))
+
+    def test_installed_endpoint_advertises_owner_but_serves_guest_loopback(self):
+        endpoint = {"version": 1, "host": "100.64.1.20", "port": 32222}
+        self.write(self.endpoint, json.dumps(endpoint).encode(), 0o644)
+        process = self.start(url="http://100.64.1.20:32222/")
+        self.assertEqual(self.request()[2], b"first preview")
+        with socket.socket() as other_address:
+            other_address.bind(("127.0.0.2", ADDRESS[1]))
+        self.stop(process)
+        self.write(self.endpoint, b'{"version":1,"host":"127.0.0.1","port":8765}', 0o644)
+        self.start()
+        self.assertEqual(self.request()[2], b"first preview")
+
+    def test_endpoint_schema_and_address_validation(self):
+        for host, port in (("127.0.0.1", 8765), ("100.64.0.0", 1024), ("100.127.255.255", 65535)):
+            payload = json.dumps({"version": 1, "host": host, "port": port})
+            self.assertEqual(PREVIEW["parse_endpoint"](payload), "http://%s:%d/" % (host, port))
+        valid = {"version": 1, "host": "100.64.1.20", "port": 32222}
+        invalid = [
+            {}, [], None, {**valid, "extra": 1}, {**valid, "version": 2},
+            {**valid, "version": True}, {**valid, "version": 1.0},
+            {**valid, "port": True}, {**valid, "port": "32222"}, {**valid, "port": 32222.0},
+            {**valid, "port": 1023}, {**valid, "port": 65536},
+            {**valid, "host": "127.0.0.1"}, {**valid, "host": "127.0.0.2"},
+            {**valid, "host": "100.63.255.255"}, {**valid, "host": "100.128.0.0"},
+            {**valid, "host": "100.064.1.20"}, {**valid, "host": "::1"},
+            {**valid, "host": "owner.example"}, {**valid, "host": 100},
+        ]
+        for endpoint in invalid:
+            with self.subTest(endpoint=endpoint), self.assertRaises(ValueError):
+                PREVIEW["parse_endpoint"](json.dumps(endpoint))
+        for payload in ("not JSON", '{"version":1,"host":"127.0.0.1","port":8765,"port":8765}'):
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                PREVIEW["parse_endpoint"](payload)
+
+    def test_invalid_endpoint_metadata_fails_before_listening(self):
+        valid = b'{"version":1,"host":"127.0.0.1","port":8765}'
+        for payload, mode in ((b"invalid JSON", 0o644), (valid + b" " * 1024, 0o644), (valid, 0o664), (valid, 0o646)):
+            with self.subTest(payload=payload[:20], mode=mode):
+                self.write(self.endpoint, payload, mode)
+                self.assertEqual(self.reject("site"), b"subyard-preview: invalid preview endpoint metadata\n")
+        self.endpoint.unlink()
+        for kind in ("symlink", "fifo", "directory"):
+            with self.subTest(kind=kind):
+                if kind == "symlink":
+                    self.endpoint.symlink_to(self.base / "missing")
+                elif kind == "fifo":
+                    os.mkfifo(self.endpoint, 0o600)
+                else:
+                    self.endpoint.mkdir(mode=0o700)
+                self.assertEqual(self.reject("site"), b"subyard-preview: invalid preview endpoint metadata\n")
+                if kind == "directory":
+                    self.endpoint.rmdir()
+                else:
+                    self.endpoint.unlink()
+        with socket.socket() as listener:
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(ADDRESS)
 
 
 if __name__ == "__main__":

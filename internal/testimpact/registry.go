@@ -61,7 +61,7 @@ func BuiltInRegistry() (Registry, error) {
 
 	goPackages := []string{
 		"application", "audit", "cli", "command", "config", "configsync", "credential",
-		"domain", "migration", "ownerinventory", "ports", "releasetransition", "resource", "resourceendpoint", "rpc", "shellquote",
+		"domain", "migration", "ownerinventory", "ports", "previewroute", "releasetransition", "resource", "resourceendpoint", "rpc", "shellquote",
 		"sshidentity", "sshrelay", "sshtrust", "state", "systemdunit", "testyardmigration", "yardnetwork",
 		"adapters/configmaterial", "adapters/credentialmeta", "adapters/credentialruntime", "adapters/hostruntime",
 		"adapters/incusclient", "adapters/networkruntime", "adapters/projectruntime", "adapters/reconcileruntime",
@@ -86,13 +86,13 @@ func BuiltInRegistry() (Registry, error) {
 
 	shellTests := []string{
 		"agent-e2e", "agent-selection", "aiobserver-provision", "aiobserver-proxy", "build-engine", "release-acceptance",
-		"ccusage-provision", "cli-contract", "codex-agent-defaults", "codex-agent-provision",
+		"ccusage-provision", "cli-contract", "codex-agent-defaults", "codex-agent-provision", "codex-legacy-config",
 		"command-registry", "create-subyard-docker-apparmor", "docker-forwarding-convergence",
 		"engine-release", "init-extras-convergence", "init-network-convergence", "init-project-convergence",
 		"install-incus-data-home", "install-runtime-release-rollback", "key-tools-install", "lib-power-network",
 		"lifecycle-guard", "opencode-agent-defaults", "opencode-agent-provision",
 		"p0-capacity", "paseo-agent-contract", "paseo-project-sync",
-		"power-reconciler-systemd-255-launch", "power-reconciler-systemd", "preview",
+		"power-reconciler-systemd-255-launch", "power-reconciler-systemd", "preview", "preview-proxy",
 		"profile-resource-lifecycle", "project-registry-convergence",
 		"prompt-contract", "provision-profile-check", "release-candidate", "remote-projects",
 		"runtime-privilege-reexec", "ssh-config", "ssh-transport-identity", "ssh-agent-environment",
@@ -168,8 +168,8 @@ func BuiltInRegistry() (Registry, error) {
 	checks = append(checks,
 		Check{
 			ID: "e2e:preview", Tier: "T3",
-			Argv:          []string{"dev/e2e/preview-acceptance.sh"},
-			BudgetSeconds: 3600, Rationale: "local, named and remote SSH static preview lifecycle on a disposable VM pair",
+			Argv:          []string{"dev/e2e/preview-acceptance.sh", "--tailnet"},
+			BudgetSeconds: 3600, Rationale: "local, named and remote SSH and owner Tailnet static preview lifecycle on a disposable VM pair",
 		},
 		Check{
 			ID: "e2e:yard-network-policy", Tier: "T3",

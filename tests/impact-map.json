@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "check_sets": {
-    "web-preview": ["shell:preview", "go:adapters/reconcileruntime", "go:adapters/projectruntime", "e2e:preview"],
+    "web-preview": ["shell:preview", "shell:preview-proxy", "go:previewroute", "go:adapters/reconcileruntime", "go:adapters/securityruntime", "go:adapters/projectruntime", "e2e:preview"],
     "release-smoke": ["shell:agent-e2e", "p0:smoke"],
     "profile-tests": ["profiles:host-free"],
     "profile-live-tests": ["profiles:host-free", "profiles:e2e"],
@@ -234,14 +234,14 @@
     {
       "id": "web-preview-source",
       "priority": 1002,
-      "pattern": "^(config/preview/.*|internal/adapters/reconcileruntime/preview\\.go|internal/adapters/projectruntime/vscode\\.go)$",
+      "pattern": "^(config/preview/.*|scripts/lib/preview-proxy\\.sh|internal/previewroute/.*|internal/adapters/reconcileruntime/preview\\.go|internal/adapters/projectruntime/vscode\\.go)$",
       "check_sets": ["web-preview"],
       "risk_domains": ["ssh-remote-transport"]
     },
     {
       "id": "web-preview-tests",
       "priority": 1002,
-      "pattern": "^(tests/preview\\.(py|sh)|dev/e2e/preview-(acceptance|lifecycle)\\.sh|internal/adapters/reconcileruntime/preview(_inventory)?_test\\.go|internal/adapters/projectruntime/vscode_test\\.go)$",
+      "pattern": "^(tests/preview\\.(py|sh)|tests/preview-proxy\\.sh|dev/e2e/preview-(acceptance|lifecycle)\\.sh|internal/adapters/reconcileruntime/preview(_inventory)?_test\\.go|internal/adapters/projectruntime/vscode_test\\.go)$",
       "check_sets": ["web-preview"],
       "risk_domains": []
     },

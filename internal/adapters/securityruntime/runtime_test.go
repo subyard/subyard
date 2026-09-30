@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/sshagentruntime"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/previewroute"
 	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
@@ -51,6 +53,76 @@ func TestSecurityRuntimeRejectsManagedDiskOutsideHostBase(t *testing.T) {
 	_, err := runtime.CheckSecurity(context.Background(), true, true)
 	if !errors.Is(err, ErrContract) {
 		t.Fatalf("expected contract failure, got %v", err)
+	}
+}
+
+func TestSecurityRuntimeValidatesPreviewTailscaleRoute(t *testing.T) {
+	for _, failure := range []string{
+		"", "foreign", "inherited receipt", "inherited device", "local device divergence",
+		"divergent", "wrong port", "inactive", "different active address", "pending",
+		"extra option", "loopback", "wildcard", "LAN", "wrong type", "VM", "unknown kind",
+	} {
+		t.Run(failure, func(t *testing.T) {
+			runtime := testRuntime(t)
+			runtime.Yard.YardKind = domain.YardContainer
+			runtime.Environment["WEB_PREVIEW_HOST_PORT"] = "32222"
+			runtime.ResolveOwnerAddress = func(context.Context, string) (string, error) {
+				if failure == "inactive" {
+					return "", errors.New("inactive")
+				}
+				if failure == "different active address" {
+					return "100.101.102.104", nil
+				}
+				return "100.101.102.103", nil
+			}
+			state := safeState()
+			device := previewroute.Device("100.101.102.103", "32222")
+			marker := "v1:100.101.102.103:32222"
+			state.Instance.Config[previewroute.Key] = marker
+			state.Instance.LocalConfig[previewroute.Key] = marker
+			state.Instance.Devices[previewroute.DeviceName] = device
+			state.Instance.LocalDevices[previewroute.DeviceName] = device
+			switch failure {
+			case "foreign":
+				delete(state.Instance.Config, previewroute.Key)
+				delete(state.Instance.LocalConfig, previewroute.Key)
+			case "inherited receipt":
+				delete(state.Instance.LocalConfig, previewroute.Key)
+			case "inherited device":
+				delete(state.Instance.LocalDevices, previewroute.DeviceName)
+			case "local device divergence":
+				local := maps.Clone(device)
+				local["connect"] = "tcp:127.0.0.1:9999"
+				state.Instance.LocalDevices[previewroute.DeviceName] = local
+			case "divergent":
+				device["connect"] = "tcp:127.0.0.1:9999"
+			case "wrong port":
+				runtime.Environment["WEB_PREVIEW_HOST_PORT"] = "32223"
+			case "pending":
+				state.Instance.LocalConfig[previewroute.Key] = "v1:pending:100.101.102.103:32222"
+			case "extra option":
+				device["nat"] = "true"
+			case "loopback", "wildcard", "LAN":
+				host := map[string]string{"loopback": "127.0.0.1", "wildcard": "0.0.0.0", "LAN": "192.168.1.2"}[failure]
+				device["listen"] = "tcp:" + host + ":32222"
+				state.Instance.LocalConfig[previewroute.Key] = "v1:" + host + ":32222"
+			case "wrong type":
+				device["type"] = "disk"
+			case "VM":
+				runtime.Yard.YardKind = domain.YardVM
+			case "unknown kind":
+				runtime.Yard.YardKind = ""
+			}
+			runtime.State = func(context.Context, Runtime) (ports.ReconcileState, bool, error) { return state, true, nil }
+			security, err := runtime.CheckSecurity(context.Background(), true, true)
+			if failure == "" {
+				if err != nil || security != "live" {
+					t.Fatalf("owned preview security=%q error=%v", security, err)
+				}
+			} else if !errors.Is(err, ErrContract) || security != "FAIL" {
+				t.Fatalf("unsafe preview security=%q error=%v", security, err)
+			}
+		})
 	}
 }
 

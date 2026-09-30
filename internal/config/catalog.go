@@ -99,6 +99,8 @@ var catalog = map[string]SettingDefinition{
 		scopes(ScopeHost, ScopeYard, ScopeCommand), enum("local", "remote")),
 	"AI_OBSERVER_HOST_PORT": scalar("agent-integration", SettingPort, SettingYardInit, true,
 		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand), optionalRange(1024, 65535)),
+	"WEB_PREVIEW_HOST_PORT": scalar("web-preview", SettingPort, SettingYardInit, true,
+		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand), optionalRange(1024, 65535), hostListener()),
 	"CODING_TOOL_INTEGRATIONS": scalar("coding-tool-integration", SettingNameList, SettingYardInit, true,
 		scopes(ScopeShipped, ScopeShared, ScopeHost, ScopeYard, ScopeCommand)),
 	"YARD_IMAGE": scalar("yard-runtime", SettingImageReference, SettingYardInit, true,

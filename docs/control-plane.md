@@ -482,6 +482,16 @@ controller role revalidation uses its registration and the resolved code alias s
 
 Core provisioning atomically installs `subyard-preview` as root-owned mode `0755`. Running-yard
 convergence checks its bytes and metadata; stopped yards use the installed source-hash marker.
+The helper always serves guest loopback `127.0.0.1:8765` in the foreground. Provisioning installs
+root-owned mode `0644` endpoint metadata at `/etc/subyard/preview.json`: version `1`, host and port.
+For a container yard with an active owner Tailscale IPv4 address, an owner proxy listens only on
+that exact address and forwards to the guest helper. Its port defaults to the SSH host port plus
+30000, wrapping into `1024..65535` (`2222` gives `32222`), with `WEB_PREVIEW_HOST_PORT` as the override. VM yards and owners
+without an active Tailscale address install the loopback endpoint. Repeat init after address or
+proxy changes. The helper validates the bounded endpoint file before listening and prints its URL
+only after binding; a missing file retains the legacy/source-checkout loopback URL. Direct Tailscale
+access requires device reachability and Tailnet policy access, plus the running helper; loopback
+access also needs the dedicated `code` SSH session.
 Selected supported agent instruction adapters preserve host text and add a short preview block
 through the existing inventory. Initial legacy adoption can accept exact original source bytes
 after consent; that digest is input-only and does not change the stored ownership schema.
