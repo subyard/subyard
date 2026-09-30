@@ -218,6 +218,7 @@ client_cli() {
 
 assert_paired_terminal_io() {
   local pairing="$1" profile="$2" repos create handle='' ready=0 send read_result close
+  local isolation="${3:-1}"
   local error rc deadline echoed=0
   repos="$work/$profile-terminal-repos.json"
   create="$work/$profile-terminal-create.json"
@@ -295,8 +296,10 @@ assert_paired_terminal_io() {
 import json, sys
 from pathlib import Path
 actual = json.loads(Path("/tmp/subyard-codex-launch.json").read_text())
-assert actual == ["--model", "fixture", sys.argv[1]], "paired Codex launch overrode the yard configuration"
-' "$profile" || terminal_fail 'Codex configuration arguments' 0 "$read_result"
+expected = (["--no-daemon"] if sys.argv[2] == "1" else []) + ["--model", "fixture", sys.argv[1]]
+assert actual["args"] == expected, "paired Codex launch lost isolation or overrode the yard configuration"
+assert actual["isolate"] == (None if sys.argv[2] == "1" else "0"), "paired Codex did not follow server settings"
+' "$profile" "$isolation" || terminal_fail 'Codex configuration arguments' 0 "$read_result"
 
   error="$work/$profile-terminal-send.err"
   if client_cli "$pairing" "$profile" terminal send --terminal "$handle" \
@@ -532,9 +535,14 @@ import json
 import os
 import sys
 from pathlib import Path
+if sys.argv[1:] == ["--help"]:
+    print("Usage: codex [OPTIONS] [PROMPT]\n  --no-daemon  Run in-process")
+    raise SystemExit(0)
 assert os.environ["HOME"] == "/home/dev", "Codex did not inherit the yard home"
 assert os.environ.get("CODEX_HOME", "/home/dev/.codex") == "/home/dev/.codex", "Codex config home was overridden"
-Path("/tmp/subyard-codex-launch.json").write_text(json.dumps(sys.argv[1:]))
+Path("/tmp/subyard-codex-launch.json").write_text(json.dumps({
+    "args": sys.argv[1:], "isolate": os.environ.get("ORCA_CODEX_ISOLATE")
+}))
 CLI
 chmod 0755 /usr/local/bin/codex
 YARD
@@ -558,7 +566,8 @@ deadline = time.monotonic() + 15
 while not record.exists() and time.monotonic() < deadline:
     time.sleep(0.1)
 assert record.exists(), "Orca agent launcher did not execute native Codex"
-assert json.loads(record.read_text()) == [], "Orca agent launcher overrode the yard Codex config"
+assert json.loads(record.read_text()) == {"args": ["--no-daemon"], "isolate": None}, \
+    "Orca agent launcher lost isolation or overrode the yard Codex config"
 rpc.call("terminal.close", {"terminal": created["terminal"]["handle"]})
 PY
 
@@ -567,6 +576,32 @@ first_pair="$("${incus[@]}" exec "$instance" -- \
   jq -er '.pairing | select(.available == true) | .url' /srv/agents/orca/ready.json)"
 client_status "$first_pair" client-a
 stage 'exercising terminal input and output through the paired stock client'
+assert_paired_terminal_io "$first_pair" client-a
+stage 'checking server isolation opt-out and preservation through repeated up'
+"${incus[@]}" exec "$instance" -- runuser -u dev -- python3 -B - <<'PY'
+import sys
+sys.path.insert(0, "/usr/local/libexec/subyard/orca-registration")
+from transport import RuntimeRPC
+rpc = RuntimeRPC("/srv/agents/orca/config/orca/orca-runtime.json")
+rpc.call("settings.update", {"codexTerminalServerIsolation": False})
+PY
+run_orca up
+"${incus[@]}" exec "$instance" -- runuser -u dev -- python3 -B - <<'PY'
+import sys
+sys.path.insert(0, "/usr/local/libexec/subyard/orca-registration")
+from transport import RuntimeRPC
+rpc = RuntimeRPC("/srv/agents/orca/config/orca/orca-runtime.json")
+assert rpc.call("settings.get")["settings"]["codexTerminalServerIsolation"] is False, \
+    "repeated up reset server isolation preferences"
+PY
+assert_paired_terminal_io "$first_pair" client-a 0
+"${incus[@]}" exec "$instance" -- runuser -u dev -- python3 -B - <<'PY'
+import sys
+sys.path.insert(0, "/usr/local/libexec/subyard/orca-registration")
+from transport import RuntimeRPC
+rpc = RuntimeRPC("/srv/agents/orca/config/orca/orca-runtime.json")
+rpc.call("settings.update", {"codexTerminalServerIsolation": True})
+PY
 assert_paired_terminal_io "$first_pair" client-a
 "${incus[@]}" exec "$instance" -- bash -se <<'YARD'
 id=gamma-12345678
