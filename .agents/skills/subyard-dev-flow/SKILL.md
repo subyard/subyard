@@ -85,8 +85,10 @@ requirements when the task depends on them.
 
 ## Test execution and delegation
 
+- Use `model="gpt-6.1-sol"`, `reasoning_effort="high"` for main tasks, and
+  `model="gpt-6.1-sol"`, `reasoning_effort="low"` for cheap mechanical work.
 - Run short checks directly. For long runs, use one worker with
-  `model="gpt-5.6-terra"`, `reasoning_effort="medium"`, `fork_turns="none"`;
+  `model="gpt-6.1-sol"`, `reasoning_effort="low"`, `fork_turns="none"`;
   run locally if unavailable.
 - Pass the working directory, exact commands, source state, known facts, relevant
   file/section references and result paths. Do not copy chat history or whole
