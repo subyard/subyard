@@ -1,6 +1,7 @@
 package reconcileruntime
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -18,12 +19,13 @@ import (
 )
 
 type guestConfigFile struct {
-	integration    string
-	label          string
-	source         string
-	destination    string
-	followSymlinks bool
-	ownedFormat    string
+	integration         string
+	label               string
+	source              string
+	destination         string
+	followSymlinks      bool
+	previewInstructions bool
+	ownedFormat         string
 }
 
 func (runtime Runtime) RefreshConfigs(ctx context.Context) error {
@@ -232,11 +234,11 @@ func (runtime Runtime) guestConfigFiles() ([]guestConfigFile, error) {
 	files := []guestConfigFile{}
 	instructions := map[string]guestConfigFile{
 		"claude": {label: "Claude instructions", source: runtime.environmentValue("HOST_CLAUDE_MD"),
-			destination: home + "/.claude/CLAUDE.md", followSymlinks: true},
+			destination: home + "/.claude/CLAUDE.md", followSymlinks: true, previewInstructions: true},
 		"codex": {label: "Codex instructions", source: runtime.environmentValue("HOST_CODEX_AGENTS_MD"),
-			destination: home + "/.codex/AGENTS.md", followSymlinks: true},
+			destination: home + "/.codex/AGENTS.md", followSymlinks: true, previewInstructions: true},
 		"opencode": {label: "OpenCode instructions", source: runtime.environmentValue("HOST_OPENCODE_AGENTS_MD"),
-			destination: home + "/.config/opencode/AGENTS.md", followSymlinks: true},
+			destination: home + "/.config/opencode/AGENTS.md", followSymlinks: true, previewInstructions: true},
 	}
 	values := make(map[string]string)
 	for _, entry := range runtime.Environment {
@@ -249,7 +251,7 @@ func (runtime Runtime) guestConfigFiles() ([]guestConfigFile, error) {
 		return nil, err
 	}
 	for _, agent := range strings.Fields(values["CODING_TOOL_INTEGRATIONS"]) {
-		if instruction, ok := instructions[agent]; ok {
+		if instruction, ok := instructions[agent]; ok && values["ALLOWS_CODING_TOOLS"] != "false" {
 			instruction.integration = agent
 			files = append(files, instruction)
 		}
@@ -265,11 +267,45 @@ func (runtime Runtime) guestConfigFiles() ([]guestConfigFile, error) {
 }
 
 func (file guestConfigFile) readSource() ([]byte, error) {
-	return (config.MaterializedAsset{Source: file.source, FollowSymlinks: file.followSymlinks}).ReadSource()
+	payload, err := (config.MaterializedAsset{Source: file.source, FollowSymlinks: file.followSymlinks}).ReadSource()
+	if !file.previewInstructions {
+		return payload, err
+	}
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	if bytes.Contains(payload, []byte(previewInstructions)) {
+		return payload, nil
+	}
+	if len(payload) != 0 {
+		payload = append(payload, '\n', '\n')
+	}
+	return append(payload, previewInstructions...), nil
 }
+
+const previewInstructions = `<!-- subyard-preview -->
+For a static web preview, run ` + "`subyard-preview <relative-static-dir>`" + ` from the Git workspace and keep it running with your background/async process mechanism. Share the printed link. Preview is available only while the helper runs and a preview-enabled ` + "`yard code`" + ` SSH session is active.
+<!-- /subyard-preview -->
+`
 
 func (file guestConfigFile) sourceHash() (string, error) {
 	payload, err := file.readSource()
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(payload)), nil
+}
+
+// The unchanged host digest is evidence for consented initial legacy adoption;
+// the effective payload remains the desired managed identity.
+func (file guestConfigFile) legacySourceHash() (string, error) {
+	if !file.previewInstructions {
+		return "", nil
+	}
+	payload, err := (config.MaterializedAsset{Source: file.source, FollowSymlinks: file.followSymlinks}).ReadSource()
+	if os.IsNotExist(err) {
+		return "", nil
+	}
 	if err != nil {
 		return "", err
 	}

@@ -10,7 +10,7 @@ trap 'rm -rf "$TMP"' EXIT
 # disposable index of today's public files, even when the source has no .git.
 bash "$ROOT/tests/helpers/source-files.sh" > "$TMP/source-files"
 mkdir "$TMP/source"
-tar -C "$ROOT" --null -T "$TMP/source-files" -cf - | tar -C "$TMP/source" -xf -
+tar -C "$ROOT" --null -T "$TMP/source-files" -cf - | tar -C "$TMP/source" -xpf -
 ROOT="$TMP/source"
 git -C "$ROOT" init --quiet
 git -C "$ROOT" add --all
@@ -143,6 +143,7 @@ grep -Fxq './bin/yard' "$bundle_list" \
   && grep -Fxq './config/commands.registry' "$bundle_list" \
   && grep -Fxq './config/migrations.json' "$bundle_list" \
   && grep -Fxq './config/release-transition.json' "$bundle_list" \
+  && grep -Fxq './config/preview/subyard-preview' "$bundle_list" \
   && grep -Fxq './config/agents/codex/provision.sh' "$bundle_list" \
   && grep -Fxq './config/agents/aiobserver/provision.sh' "$bundle_list" \
   && grep -Fxq './scripts/lib/ai-observer-proxy.sh' "$bundle_list" \
@@ -162,7 +163,10 @@ grep -Fxq './runtime-files.sha256' "$bundle_list" \
   || fail 'runtime bundle contains an untracked host-local canary'
 bundle_extract="$TMP/bundle-extract"
 install -d "$bundle_extract"
-tar -xzf "$bundle_one" -C "$bundle_extract"
+tar -xpzf "$bundle_one" -C "$bundle_extract"
+[ "$(stat -c '%a' "$bundle_extract/config/preview/subyard-preview")" = 755 ] \
+  && cmp -s "$ROOT/config/preview/subyard-preview" "$bundle_extract/config/preview/subyard-preview" \
+  || fail 'runtime bundle changed preview helper bytes or executable mode'
 [ "$("$bundle_extract/config/profiles/package-fixture/bin/worker")" = "profile native fixture" ] \
   || fail 'packaged native profile executable does not run'
 (

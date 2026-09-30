@@ -32,6 +32,7 @@ setup_test_context() { # <temp-root> [incus-project] [instance-name]
   export YARD_INSTANCE_NAME="${3:-yard}"
   export ACCESS_KIND=local
   export SSH_HOST=yard
+  export SSH_CODE_HOST=yard.code
   export DEV_USER=dev
   export SSH_PORT=2222
 }

@@ -48,15 +48,16 @@ type IntegrationPlan struct {
 }
 
 type integrationArtifact struct {
-	ID         string `json:"id"`
-	Kind       string `json:"kind"`
-	Path       string `json:"path,omitempty"`
-	Digest     string `json:"digest"`
-	Format     string `json:"format,omitempty"`
-	Target     string `json:"target,omitempty"`
-	FileTarget bool   `json:"file_target,omitempty"`
-	Content    string `json:"content,omitempty"`
-	Mode       int    `json:"mode,omitempty"`
+	ID           string `json:"id"`
+	Kind         string `json:"kind"`
+	Path         string `json:"path,omitempty"`
+	Digest       string `json:"digest"`
+	SourceDigest string `json:"source_digest,omitempty"`
+	Format       string `json:"format,omitempty"`
+	Target       string `json:"target,omitempty"`
+	FileTarget   bool   `json:"file_target,omitempty"`
+	Content      string `json:"content,omitempty"`
+	Mode         int    `json:"mode,omitempty"`
 }
 type integrationObservation struct {
 	Fingerprint string                `json:"fingerprint"`
@@ -151,6 +152,10 @@ func (runtime Runtime) integrationArtifacts() ([]integrationArtifact, error) {
 			return nil, err
 		}
 		entry := integrationArtifact{ID: file.integration, Kind: "file", Path: file.destination, Digest: fmt.Sprintf("%x", sha256.Sum256(payload))}
+		entry.SourceDigest, err = file.legacySourceHash()
+		if err != nil {
+			return nil, err
+		}
 		if file.ownedFormat != "" {
 			entry.Kind = "structured"
 			entry.Format = file.ownedFormat

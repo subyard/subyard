@@ -836,7 +836,8 @@ func TestEngineReexecDoesNotLeakPriorYardContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := loaded.Context
-	if ctx.YardInstanceName != "yard-named" || ctx.IncusProject != "subyard-named" || ctx.SSHHost != "yard-named" {
+	if ctx.YardInstanceName != "yard-named" || ctx.IncusProject != "subyard-named" || ctx.SSHHost != "yard-named" ||
+		ctx.CodeSSHHost != "yard-named.code" || loaded.Environment["SSH_CODE_HOST"] != ctx.CodeSSHHost {
 		t.Fatalf("prior context leaked into named reload: %#v", ctx)
 	}
 	if loaded.Integrations.Present || !loaded.Integrations.AllowsCodingTools {

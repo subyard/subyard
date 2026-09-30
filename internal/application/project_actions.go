@@ -128,6 +128,10 @@ func (runner ProjectActionRunner) code(ctx context.Context) (string, error) {
 	if runner.YardIdentity == "" {
 		return "", errors.New("canonical yard identity is required for VS Code")
 	}
+	codeHost := runner.Yard.CodeSSHHost
+	if !domain.SafeSSHTarget(codeHost) || codeHost == runner.Project.SSHHost {
+		return "", errors.New("dedicated VS Code SSH access is not configured; run yard init")
+	}
 	if err := runner.codeTargetReady(ctx); err != nil {
 		return "", err
 	}
@@ -143,11 +147,11 @@ func (runner ProjectActionRunner) code(ctx context.Context) (string, error) {
 	if !filepath.IsAbs(runner.WorkspaceDirectory) {
 		return "", errors.New("controller workspace directory must be absolute")
 	}
-	workspaceName := base64.RawURLEncoding.EncodeToString([]byte(runner.Project.SSHHost)) +
+	workspaceName := base64.RawURLEncoding.EncodeToString([]byte(codeHost)) +
 		"." + runner.Project.ProjectID
 	workspaceNamespace := filepath.Join(runner.WorkspaceDirectory, workspaceName)
 	workspace := filepath.Join(workspaceNamespace, runner.Project.Name+".code-workspace")
-	remoteAuthority := "ssh-remote+" + runner.Project.SSHHost
+	remoteAuthority := "ssh-remote+" + codeHost
 	remoteURI := (&url.URL{
 		Scheme: "vscode-remote", Host: remoteAuthority,
 		Path: runner.Project.YardPath,
@@ -200,7 +204,7 @@ func (runner ProjectActionRunner) code(ctx context.Context) (string, error) {
 	if _, err := runner.VSCode.Run(ctx, workspace); err != nil {
 		return "", err
 	}
-	return message + fmt.Sprintf("opened %s (%s:%s) in VS Code\n", runner.Project.Name, runner.Project.SSHHost, runner.Project.YardPath), nil
+	return message + fmt.Sprintf("opened %s (%s:%s) in VS Code\n", runner.Project.Name, codeHost, runner.Project.YardPath), nil
 }
 
 func (runner ProjectActionRunner) codeTargetReady(ctx context.Context) error {

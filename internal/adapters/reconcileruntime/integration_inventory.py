@@ -65,11 +65,16 @@ def expected_metadata(entry, home, uid):
     return [owner, group, mode]
 
 def adoptable_selected(entry, current, home, uid):
-    return (entry['kind'] in ('file', 'link') and current == entry['digest']
+    accepted = {entry['digest']}
+    # Instruction composition accepts the exact original host bytes only through
+    # the existing explicit initial-adoption gate. This is input, not ownership.
+    if entry['kind'] == 'file' and entry.get('source_digest'):
+        accepted.add(entry['source_digest'])
+    return (entry['kind'] in ('file', 'link') and current in accepted
             and actual_metadata(entry) == expected_metadata(entry, home, uid))
 
 def clean(entry):
-    return {k: v for k, v in entry.items() if k != 'content'}
+    return {k: v for k, v in entry.items() if k not in ('content', 'source_digest')}
 
 def core_adoption_problem(entry, current):
     # These shared core files predate the integration inventory. Recognize only
@@ -192,6 +197,11 @@ def main():
     for entry in records + desired:
         if entry['kind'] not in ('file', 'link', 'structured', 'package') or not entry['id']:
             raise ValueError('invalid inventory entry')
+        source_digest = entry.get('source_digest')
+        if source_digest is not None and (entry['kind'] != 'file'
+                or not isinstance(source_digest, str) or len(source_digest) != 64
+                or any(c not in '0123456789abcdef' for c in source_digest)):
+            raise ValueError('invalid source evidence')
         if entry['kind'] != 'package' and (not entry['path'].startswith(home + '/') and entry['path'] not in ('/usr/local/libexec/subyard/projects-changed', '/etc/subyard/agent-project-hooks') or os.path.normpath(entry['path']) != entry['path']):
             raise ValueError('invalid artifact destination')
     def key(entry):
@@ -203,14 +213,14 @@ def main():
     if mode in ('configs-prepare', 'configs-commit'):
         # Config refresh acknowledges existing ownership only. It cannot adopt,
         # retire or finish a pending package/link/hook reconciliation.
-        if not established:
-            return
         by_path = {e.get('path'): e for e in records if e.get('path')}
         for entry in desired:
             if entry['kind'] not in ('file', 'structured') or not entry['path'].startswith(home + '/'):
                 raise ValueError('invalid config inventory entry')
             record = by_path.get(entry['path'])
             if record is None:
+                if mode == 'configs-prepare' and entry['kind'] == 'file' and actual(entry) is not None:
+                    raise unowned_selected(entry, actual(entry))
                 continue
             if any(record.get(k) != entry.get(k) for k in ('id', 'kind', 'path', 'format')):
                 raise OwnershipConflict('owned artifact drift', entry['path'])
@@ -232,6 +242,8 @@ def main():
                     raise OwnershipConflict('owned artifact drift', entry['path'])
                 record['digest'] = entry['digest']
                 record.pop('config_pending_digest', None)
+        if not established:
+            return
         updated = encode(dict(inventory, entries=records))
         with open(path, 'rb') as stream:
             unchanged = stream.read() == updated
@@ -282,7 +294,8 @@ def main():
             raise OwnershipConflict('legacy integration artifact has no ownership evidence', candidate)
     adoption = [[clean(entry), metadata[key(entry)]] for entry in adopted]
     fingerprint = digest(encode([home, uid, records, released, observed, metadata,
-                                 [clean(e) for e in desired], not established, adopt, adoption]))
+                                 [clean(e) for e in desired], not established, adopt, adoption,
+                                 [e.get('source_digest') for e in desired]]))
     expected = request.get('expected')
     if expected and fingerprint != expected:
         raise ValueError('integration plan is stale')

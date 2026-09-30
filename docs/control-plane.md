@@ -463,6 +463,21 @@ Native `clone`, `sync`, `bind`, `remove`, `code` and `export` actions use `@proj
 shell handlers. The in-yard VS Code session probe is a lifecycle safety leaf. The retired project
 handlers and `state/*` shims must not return.
 
+`code` uses the resolved context's dedicated `codeSshHost` alias for its controller workspace.
+The alias shares the yard's identity and host-key pins, but forwards only controller loopback
+`127.0.0.1:8765` to yard loopback `127.0.0.1:8765`. Its separate control-socket prefix and
+`ControlPersist no` isolate preview from ordinary yard connections. SSH convergence requires
+both aliases so repeated init upgrades older snippets. The controller checks port availability
+before launching VS Code; `ExitOnForwardFailure yes` handles a later bind race.
+Owner-inventory project resolution retains a matching explicitly selected remote alias, so
+controller role revalidation uses its registration and the resolved code alias stays consistent.
+
+Core provisioning atomically installs `subyard-preview` as root-owned mode `0755`. Running-yard
+convergence checks its bytes and metadata; stopped yards use the installed source-hash marker.
+Selected supported agent instruction adapters preserve host text and add a short preview block
+through the existing inventory. Initial legacy adoption can accept exact original source bytes
+after consent; that digest is input-only and does not change the stored ownership schema.
+
 Remote registration, trust repair, removal and listing are native. Preparation probes the trusted
 owner and scans the yard key without local mutation; old and new fingerprints enter the operation
 plan before confirmation. Apply consumes that prepared evidence and atomically rolls back local

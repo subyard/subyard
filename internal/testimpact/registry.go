@@ -92,7 +92,7 @@ func BuiltInRegistry() (Registry, error) {
 		"install-incus-data-home", "install-runtime-release-rollback", "key-tools-install", "lib-power-network",
 		"lifecycle-guard", "opencode-agent-defaults", "opencode-agent-provision",
 		"p0-capacity", "paseo-agent-contract", "paseo-project-sync",
-		"power-reconciler-systemd-255-launch", "power-reconciler-systemd",
+		"power-reconciler-systemd-255-launch", "power-reconciler-systemd", "preview",
 		"profile-resource-lifecycle", "project-registry-convergence",
 		"prompt-contract", "provision-profile-check", "release-candidate", "remote-projects",
 		"runtime-privilege-reexec", "ssh-config", "ssh-transport-identity", "ssh-agent-environment",
@@ -166,6 +166,11 @@ func BuiltInRegistry() (Registry, error) {
 		})
 	}
 	checks = append(checks,
+		Check{
+			ID: "e2e:preview", Tier: "T3",
+			Argv:          []string{"dev/e2e/preview-acceptance.sh"},
+			BudgetSeconds: 3600, Rationale: "local, named and remote SSH static preview lifecycle on a disposable VM pair",
+		},
 		Check{
 			ID: "e2e:yard-network-policy", Tier: "T3",
 			Argv:          []string{"dev/e2e/yard-network-policy.sh"},

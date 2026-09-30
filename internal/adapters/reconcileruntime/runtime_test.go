@@ -2,7 +2,6 @@ package reconcileruntime
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -581,7 +580,9 @@ func TestSSHProbeOwnsProxyAndClientConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(home, ".ssh", "subyard.config"), []byte(
-		"Host yard\n    Port 2222\n    IdentityFile \""+identity+"\"\n"+
+		"Host yard.code\n    LocalForward 127.0.0.1:8765 127.0.0.1:8765\n"+
+			"    ExitOnForwardFailure yes\n    ControlPath ~/.ssh/subyard-code-cm-%C\n    ControlPersist no\n"+
+			"Host yard yard.code\n    Port 2222\n    IdentityFile \""+identity+"\"\n"+
 			"    IdentitiesOnly yes\n    StrictHostKeyChecking yes\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -618,6 +619,16 @@ func TestSSHProbeOwnsProxyAndClientConfig(t *testing.T) {
 		Environment: []string{"PATH=" + bin},
 	}
 	assertStage(t, runtime, "ssh", true, "matching SSH state")
+	snippetPath := filepath.Join(home, ".ssh", "subyard.config")
+	previewSnippet, err := os.ReadFile(snippetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, snippetPath, []byte(
+		"Host yard\n    Port 2222\n    IdentityFile \""+identity+"\"\n"+
+			"    IdentitiesOnly yes\n    StrictHostKeyChecking yes\n"), 0o600)
+	assertStage(t, runtime, "ssh", false, "legacy snippet needs dedicated preview access")
+	testkit.WriteFile(t, snippetPath, previewSnippet, 0o600)
 	if err := os.Chmod(identity, 0o640); err != nil {
 		t.Fatal(err)
 	}
@@ -718,7 +729,7 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 			{Result: ports.InstanceExecResult{Stdout: []byte(" 7f 45 4c 46\n")}},
 			{Result: ports.InstanceExecResult{Stdout: []byte("ccusage 1.2.3\n")}},
 			{Result: ports.InstanceExecResult{Stdout: []byte(configHash + "  config\n")}},
-			{}, {Result: ports.InstanceExecResult{ExitCode: 1}, Err: errors.New("not a link")}, {},
+			{}, {Result: ports.InstanceExecResult{ExitCode: 1}, Err: errors.New("not a link")}, {}, {},
 		}
 	}
 	instructions := filepath.Join(t.TempDir(), "AGENTS.md")
@@ -726,7 +737,10 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 	if err := os.WriteFile(instructions, payload, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	digest := fmt.Sprintf("%x", sha256.Sum256(payload))
+	digest, err := (guestConfigFile{source: instructions, previewInstructions: true}).sourceHash()
+	if err != nil {
+		t.Fatal(err)
+	}
 	incus := &testkit.Incus{
 		ServerInfo: ports.ServerInfo{Environment: "incus"},
 		ExecSteps:  steps("regular file|755|0:0", digest),
@@ -761,7 +775,10 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 		"CODING_TOOL_INTEGRATIONS=opencode", "CCUSAGE_VERSION=1.2.3",
 		"HOST_OPENCODE_AGENTS_MD=" + linkedInstructions,
 	}
-	linkedDigest := fmt.Sprintf("%x", sha256.Sum256([]byte("updated\n")))
+	linkedDigest, err := (guestConfigFile{source: linkedInstructions, followSymlinks: true, previewInstructions: true}).sourceHash()
+	if err != nil {
+		t.Fatal(err)
+	}
 	incus.ExecSteps = steps("regular file|755|0:0", linkedDigest)
 	assertStage(t, runtime, "provision", true, "symlinked host instructions")
 	runtime.Environment = []string{
@@ -786,7 +803,7 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 	incus.ExecSteps = steps("regular file|755|0:0", linkedDigest)
 	assertStage(t, runtime, "provision", true, "other provisioning facts remain ready")
 	incus.ExecSteps = steps("regular file|755|0:0", linkedDigest)
-	incus.ExecSteps[len(incus.ExecSteps)-1] = testkit.IncusExecStep{
+	incus.ExecSteps[len(incus.ExecSteps)-2] = testkit.IncusExecStep{
 		Result: ports.InstanceExecResult{ExitCode: 1},
 		Err:    errors.New("dispatcher drift"),
 	}
@@ -796,7 +813,17 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 		"user.subyard.managed": "true", "user.subyard.initialized": "true",
 		"user.subyard.desired_power": "stopped", "user.subyard.ccusage_version": "1.2.3",
 	}}
+	previewHash, err := runtime.previewSourceHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	incus.Reconcile.Instance.Config["user.subyard.preview_sha256"] = previewHash
 	assertStage(t, runtime, "provision", true, "matching stopped provision marker")
+	for _, marker := range []string{"", "pending", "stale"} {
+		incus.Reconcile.Instance.Config["user.subyard.preview_sha256"] = marker
+		assertStage(t, runtime, "provision", false, "stopped preview helper needs installation")
+	}
+	incus.Reconcile.Instance.Config["user.subyard.preview_sha256"] = previewHash
 	runtime.Environment = []string{
 		"CODING_TOOL_INTEGRATIONS=codex", "CCUSAGE_VERSION=1.2.3",
 	}

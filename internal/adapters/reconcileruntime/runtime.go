@@ -1345,7 +1345,13 @@ func (runtime Runtime) sshConverged(ctx context.Context) (bool, error) {
 	if sshHost == "" {
 		sshHost = runtime.environmentDefault("SSH_HOST", "yard")
 	}
-	if err != nil || !hasLine(string(snippetContents), "Host "+sshHost) ||
+	codeHost := domain.CodeSSHHost(sshHost)
+	if err != nil || !hasLine(string(snippetContents), "Host "+sshHost+" "+codeHost) ||
+		!hasLine(string(snippetContents), "Host "+codeHost) ||
+		!hasLine(string(snippetContents), "    LocalForward 127.0.0.1:8765 127.0.0.1:8765") ||
+		!hasLine(string(snippetContents), "    ExitOnForwardFailure yes") ||
+		!hasLine(string(snippetContents), "    ControlPath ~/.ssh/subyard-code-cm-%C") ||
+		!hasLine(string(snippetContents), "    ControlPersist no") ||
 		!hasLine(string(snippetContents), "    Port "+port) ||
 		!hasLine(string(snippetContents), "    StrictHostKeyChecking yes") {
 		return false, nil
@@ -1485,6 +1491,14 @@ func (runtime Runtime) provisionConverged(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	if strings.EqualFold(instance.Status, "stopped") {
+		previewHash, err := runtime.previewSourceHash()
+		if err != nil {
+			return false, err
+		}
+		installedHash, _ := instance.EffectiveConfig("user.subyard.preview_sha256")
+		if installedHash != previewHash {
+			return false, nil
+		}
 		if runtime.environmentValue("ALLOWS_CODING_TOOLS") == "false" {
 			return instanceIntentionallyStopped(instance) && marker == "", nil
 		}
@@ -1588,6 +1602,9 @@ jq -e '."ip-forward-no-drop" == true' /etc/docker/daemon.json >/dev/null \
 		return false, nil
 	}
 	if ok, err := runtime.projectHooksConverged(ctx); err != nil || !ok {
+		return false, err
+	}
+	if ok, err := runtime.previewConverged(ctx); err != nil || !ok {
 		return false, err
 	}
 	if runtime.environmentValue("ALLOWS_CODING_TOOLS") == "false" {

@@ -92,6 +92,7 @@ runtime_extras=(
   scripts/profile-services.sh
   config/agents/codex/provision.sh
   config/agents/aiobserver/provision.sh
+  config/preview/subyard-preview
   config/systemd/subyard-test-vms-host-sink.service.in
   config/systemd/subyard-test-vms-host-sink.timer.in
 )
@@ -135,6 +136,7 @@ for required in \
   config/commands.registry \
   config/migrations.json \
   config/release-transition.json \
+  config/preview/subyard-preview \
   completions/yard.bash; do
   [ -f "$bundle_stage/$required" ] \
     || { printf 'package-engine: runtime allowlist omitted %s\n' "$required" >&2; exit 1; }

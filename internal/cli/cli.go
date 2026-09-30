@@ -971,7 +971,7 @@ func (cli *CLI) projectVSCode() ports.VSCode {
 	if err != nil {
 		return nil
 	}
-	return transport.Process{Program: program, Env: environmentList(cli.env, nil), MaxBytes: 4 << 20}
+	return projectruntime.VSCode{Process: transport.Process{Program: program, Env: environmentList(cli.env, nil), MaxBytes: 4 << 20}}
 }
 
 func (cli *CLI) projectDeviceManager() ports.InstanceDeviceManager {

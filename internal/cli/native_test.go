@@ -172,7 +172,7 @@ printf '%s\0' "$@" > "$CODE_LOG"
 		t.Fatalf("code failed: code=%d stderr=%q", code, codeStderr.String())
 	}
 	wantWorkspace := filepath.Join(
-		configHome, "workspaces", "eWFyZA.demo-12345678", "Demo.code-workspace",
+		configHome, "workspaces", "eWFyZC5jb2Rl.demo-12345678", "Demo.code-workspace",
 	)
 	codeArguments, readErr := os.ReadFile(codeLog)
 	if readErr != nil || string(codeArguments) != wantWorkspace+"\x00" ||
@@ -189,7 +189,7 @@ printf '%s\0' "$@" > "$CODE_LOG"
 		Settings        map[string]string `json:"settings"`
 	}
 	if err := json.Unmarshal(workspacePayload, &workspace); err != nil ||
-		workspace.RemoteAuthority != "ssh-remote+yard" ||
+		workspace.RemoteAuthority != "ssh-remote+yard.code" ||
 		workspace.Settings["window.title"] != "${rootNameShort} — Yard SSH: owner-a/default" ||
 		strings.Contains(workspace.Settings["window.title"], "yard-") {
 		t.Fatalf("code workspace identity drifted: workspace=%#v err=%v", workspace, err)

@@ -867,6 +867,21 @@ func (cli *CLI) ownerYardRouteWithMode(
 			break
 		}
 	}
+	ownerYard := loaded.Context.OwnerYardName
+	if ownerYard == "" {
+		ownerYard = "default"
+	}
+	// An explicitly selected compatibility alias already supplies its controller
+	// registration and data-plane route. Keep it so role revalidation reloads that
+	// registration, rather than treating the owner's yard name as a local alias.
+	if loaded.Context.AccessKind == domain.AccessRemote && destination != "" &&
+		loaded.Context.OwnerEndpoint == destination && ownerYard == yardName &&
+		cli.env["SUBYARD_YARD_EXPLICIT"] != "" && cli.env["SUBYARD_YARD"] == loaded.Context.YardName {
+		if route.SSHHost != "" && route.SSHHost != loaded.Context.SSHHost {
+			return "", domain.Context{}, fmt.Errorf("%w: remote yard alias conflicts with the registered owner route", domain.ErrPlanStale)
+		}
+		return loaded.Context.YardName, loaded.Context, nil
+	}
 	if route.SSHHost != "" {
 		contextValue := loaded.Context
 		contextValue.YardName = yardName
@@ -874,6 +889,7 @@ func (cli *CLI) ownerYardRouteWithMode(
 		contextValue.OwnerEndpoint = destination
 		contextValue.OwnerYardName = yardName
 		contextValue.SSHHost = route.SSHHost
+		contextValue.CodeSSHHost = domain.CodeSSHHost(route.SSHHost)
 		contextValue.Paths.StateDir = filepath.Join(contextValue.Paths.DataHome,
 			"owner-inventory", "routing", hostID, yardName, "projects")
 		if legacyDiscovery && len(discovered.LegacyNames) == 1 {
@@ -890,6 +906,7 @@ func (cli *CLI) ownerYardRouteWithMode(
 		environment["OWNER_ENDPOINT"] = destination
 		environment["OWNER_YARD_NAME"] = yardName
 		environment["SSH_HOST"] = route.SSHHost
+		environment["SSH_CODE_HOST"] = contextValue.CodeSSHHost
 		environment["SUBYARD_STATE_DIR"] = contextValue.Paths.StateDir
 		routeKey := hostID + "/" + yardName
 		cli.inventoryRoutes[routeKey] = config.Loaded{

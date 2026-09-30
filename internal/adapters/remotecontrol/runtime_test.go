@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -15,6 +16,35 @@ import (
 )
 
 const fixturePublicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA fixture"
+
+func TestRemotePreviewAliasesHaveSeparateEffectiveSSHOptions(t *testing.T) {
+	runtime := remoteFixture(t)
+	prepared := domain.RemotePrepared{Spec: domain.RemoteSpec{
+		LegacyAlias: "demo", OwnerEndpoint: "owner.example",
+	}, Owner: domain.RemoteInfo{SSHPort: 2233, DevUser: "dev"}}
+	path := filepath.Join(testkit.TempDir(t), "ssh.config")
+	testkit.WriteFile(t, path, runtime.renderSnippet(prepared, "/tmp/fixture-key"), 0o600)
+	options := func(alias string) string {
+		t.Helper()
+		output, err := exec.Command("ssh", "-G", "-F", path, alias).Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.NewReplacer("[", "", "]", "").Replace(string(output))
+	}
+	normal, code := options("yard-demo"), options("yard-demo.code")
+	for _, value := range []string{"hostname 127.0.0.1\n", "port 2233\n", "proxyjump owner.example\n", "hostkeyalias subyard-remote-demo\n"} {
+		if !strings.Contains(normal, value) || !strings.Contains(code, value) {
+			t.Fatalf("shared remote route missing %q", value)
+		}
+	}
+	if strings.Contains(normal, "localforward ") || !strings.Contains(code, "localforward 127.0.0.1:8765 127.0.0.1:8765\n") ||
+		!strings.Contains(code, "exitonforwardfailure yes\n") ||
+		!strings.Contains(normal, "/subyard-cm-") || !strings.Contains(code, "/subyard-code-cm-") ||
+		!strings.Contains(code, "controlpersist no\n") {
+		t.Fatalf("preview transport isolation failed:\nnormal=%s\ncode=%s", normal, code)
+	}
+}
 
 func TestLookupAndListReadRegistryAndCache(t *testing.T) {
 	runtime := remoteFixture(t)

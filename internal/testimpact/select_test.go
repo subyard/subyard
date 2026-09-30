@@ -28,6 +28,37 @@ func TestSelectEmptyDiffReturnsAnEmptySelectedPlan(t *testing.T) {
 	}
 }
 
+func TestSelectPreviewPathsRecommendBoundedLifecycle(t *testing.T) {
+	policy, registry := selectorFixture(t)
+	for _, path := range []string{
+		"config/preview/subyard-preview",
+		"internal/adapters/reconcileruntime/preview.go",
+		"internal/adapters/projectruntime/vscode.go",
+		"tests/preview.py", "tests/preview.sh",
+		"dev/e2e/preview-acceptance.sh", "dev/e2e/preview-lifecycle.sh",
+		"internal/adapters/reconcileruntime/preview_test.go",
+		"internal/adapters/reconcileruntime/preview_inventory_test.go",
+		"internal/adapters/projectruntime/vscode_test.go",
+	} {
+		t.Run(path, func(t *testing.T) {
+			got := Select(policy, registry, ChangeSet{SchemaVersion: 1, Changes: []Change{modifiedChange(path)}})
+			wantHostFree := []string{"go:adapters/projectruntime", "go:adapters/reconcileruntime", "shell:preview"}
+			if !reflect.DeepEqual(recommendationIDs(got.HostFreeChecks), wantHostFree) ||
+				!reflect.DeepEqual(recommendationIDs(got.E2EChecks), []string{"e2e:preview"}) ||
+				got.FullP0.Required || len(got.Errors) != 0 {
+				t.Fatalf("preview selection=%#v", got)
+			}
+			production := path == "config/preview/subyard-preview" ||
+				path == "internal/adapters/reconcileruntime/preview.go" ||
+				path == "internal/adapters/projectruntime/vscode.go"
+			if production && !slices.Equal(got.RiskDomains, []string{"ssh-remote-transport"}) ||
+				!production && len(got.RiskDomains) != 0 {
+				t.Fatalf("risk domains=%v", got.RiskDomains)
+			}
+		})
+	}
+}
+
 func TestSelectClassifiesDocumentationTestsLeafPackagesAndSpecialProfiles(t *testing.T) {
 	policy, registry := selectorFixture(t)
 	tests := []struct {

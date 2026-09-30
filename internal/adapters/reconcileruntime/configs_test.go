@@ -102,7 +102,11 @@ func TestConfigsConvergedComparesSourceAndGuestHashesReadOnly(t *testing.T) {
 	if err := os.WriteFile(source, payload, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	hash := fmt.Sprintf("%x", sha256.Sum256(payload))
+	effective, err := (guestConfigFile{source: source, previewInstructions: true}).readSource()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := fmt.Sprintf("%x", sha256.Sum256(effective))
 	for _, test := range []struct {
 		name   string
 		stdout string
@@ -222,7 +226,8 @@ func TestRefreshConfigsFollowsHostInstructionSymlink(t *testing.T) {
 	}
 	if len(incus.ExecCalls) != 3 ||
 		incus.ExecCalls[1].Request.Command[5] != "/home/dev/.claude/CLAUDE.md" ||
-		!bytes.Equal(incus.ExecCalls[1].Request.Stdin, payload) {
+		!bytes.HasPrefix(incus.ExecCalls[1].Request.Stdin, payload) ||
+		!bytes.Contains(incus.ExecCalls[1].Request.Stdin, []byte(previewInstructions)) {
 		t.Fatalf("symlinked Claude instructions were not copied: %#v", incus.ExecCalls)
 	}
 }
@@ -368,8 +373,9 @@ func TestConfigsConvergedUsesOwnedTOMLObservationForImportedSource(t *testing.T)
 	if err := os.WriteFile(source, []byte("model = \"gpt-5\"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	incus := runningIncus(1)
-	incus.ExecSteps[0].Result.Stdout = []byte(`{"converged":true,"fingerprint":"` + strings.Repeat("a", 64) + `"}`)
+	incus := runningIncus(2)
+	incus.ExecSteps[0].Result.Stdout = []byte(fmt.Sprintf("%x  /home/dev/.codex/AGENTS.md\n", sha256.Sum256([]byte(previewInstructions))))
+	incus.ExecSteps[1].Result.Stdout = []byte(`{"converged":true,"fingerprint":"` + strings.Repeat("a", 64) + `"}`)
 	runtime := Runtime{
 		Environment: []string{"CODING_TOOL_INTEGRATIONS=codex", "AGENT_codex_CONFIG=" + source, "AGENT_codex_CONFIG_DEST=.codex/config.toml"},
 		Incus:       incus, Executor: incus,
@@ -379,8 +385,85 @@ func TestConfigsConvergedUsesOwnedTOMLObservationForImportedSource(t *testing.T)
 	if err != nil || !converged {
 		t.Fatalf("owned TOML observation rejected: converged=%v err=%v", converged, err)
 	}
-	request := incus.ExecCalls[0].Request
+	request := incus.ExecCalls[1].Request
 	if len(request.Command) == 0 || request.Command[0] != "python3" || len(request.Stdin) == 0 {
 		t.Fatal("TOML observation did not use the guest ownership adapter")
+	}
+}
+
+func TestPreviewInstructionsComposeOnlySelectedEffectivePayloads(t *testing.T) {
+	root := testkit.TempDir(t)
+	source := filepath.Join(root, "instructions.md")
+	host := []byte("Host instructions stay byte-for-byte intact.")
+	testkit.WriteFile(t, source, host, 0o600)
+	for _, agent := range []string{"claude", "codex", "opencode"} {
+		t.Run(agent, func(t *testing.T) {
+			key := map[string]string{"claude": "HOST_CLAUDE_MD", "codex": "HOST_CODEX_AGENTS_MD", "opencode": "HOST_OPENCODE_AGENTS_MD"}[agent]
+			runtime := Runtime{Environment: []string{
+				"CODING_TOOL_INTEGRATIONS=" + agent, key + "=" + source,
+				"AGENT_" + agent + "_RULES=" + source, "AGENT_" + agent + "_RULES_DEST=rules",
+			}}
+			files, err := runtime.guestConfigFiles()
+			if err != nil || len(files) != 2 || files[0].integration != agent {
+				t.Fatalf("selected files=%#v err=%v", files, err)
+			}
+			effective, err := files[0].readSource()
+			if err != nil || !bytes.HasPrefix(effective, host) || bytes.Count(effective, []byte("<!-- subyard-preview -->")) != 1 {
+				t.Fatalf("effective instruction=%q err=%v", effective, err)
+			}
+			again, err := files[0].readSource()
+			if err != nil || !bytes.Equal(effective, again) {
+				t.Fatalf("repeat composition changed bytes: %v", err)
+			}
+			asset, err := files[1].readSource()
+			if err != nil || !bytes.Equal(asset, host) {
+				t.Fatalf("rules asset changed: %v", err)
+			}
+			digest, err := files[0].sourceHash()
+			if err != nil || digest != fmt.Sprintf("%x", sha256.Sum256(effective)) || digest == fmt.Sprintf("%x", sha256.Sum256(host)) {
+				t.Fatalf("effective hash=%q err=%v", digest, err)
+			}
+			legacy, err := files[0].legacySourceHash()
+			if err != nil || legacy != fmt.Sprintf("%x", sha256.Sum256(host)) {
+				t.Fatalf("legacy source hash=%q err=%v", legacy, err)
+			}
+			assetLegacy, err := files[1].legacySourceHash()
+			if err != nil || assetLegacy != "" {
+				t.Fatalf("config asset has legacy instruction evidence: %q %v", assetLegacy, err)
+			}
+			original, err := os.ReadFile(source)
+			if err != nil || !bytes.Equal(original, host) {
+				t.Fatal("host instructions changed")
+			}
+			files[0].source = filepath.Join(root, "missing")
+			missing, err := files[0].readSource()
+			if err != nil || string(missing) != previewInstructions {
+				t.Fatalf("missing source effective instruction=%q err=%v", missing, err)
+			}
+			if legacy, err := files[0].legacySourceHash(); err != nil || legacy != "" {
+				t.Fatalf("missing source has legacy evidence: %q %v", legacy, err)
+			}
+			files[0].source = ""
+			empty, err := files[0].readSource()
+			if err != nil || string(empty) != previewInstructions {
+				t.Fatalf("unset source effective instruction=%q err=%v", empty, err)
+			}
+		})
+	}
+	for _, environment := range [][]string{
+		{"CODING_TOOL_INTEGRATIONS=pi"},
+		{"CODING_TOOL_INTEGRATIONS=codex", "ALLOWS_CODING_TOOLS=false"},
+		{"CODING_TOOL_INTEGRATIONS="},
+	} {
+		files, err := (Runtime{Environment: environment}).guestConfigFiles()
+		if err != nil || len(files) != 0 {
+			t.Fatalf("unselected instruction files=%#v err=%v", files, err)
+		}
+	}
+	composed := filepath.Join(root, "composed.md")
+	testkit.WriteFile(t, composed, append(append([]byte(nil), host...), previewInstructions...), 0o600)
+	result, err := (guestConfigFile{source: composed, previewInstructions: true}).readSource()
+	if err != nil || bytes.Count(result, []byte(previewInstructions)) != 1 {
+		t.Fatalf("duplicate preview paragraph: %v", err)
 	}
 }

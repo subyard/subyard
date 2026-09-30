@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ownerinventory"
@@ -189,6 +190,10 @@ func TestReadOnlyOwnerInventoriesDoNotRefreshOrMigrateConnections(t *testing.T) 
 		len(results[1].inventory.Yards) != 1 || results[1].inventory.Yards[0].Projects[0].Name != "Remote" {
 		t.Fatalf("read-only inventories=%#v", results)
 	}
+	_, route, err := program.ownerYardRouteReadOnly(context.Background(), loaded, "remote-owner", "default")
+	if err != nil || route.CodeSSHHost != "yard-remote.code" || route.CodeSSHHost == loaded.Context.CodeSSHHost {
+		t.Fatalf("remote code route inherited the local alias: route=%#v err=%v", route, err)
+	}
 	afterConnection, err := os.ReadFile(connectionPath)
 	if err != nil {
 		t.Fatal(err)
@@ -199,6 +204,108 @@ func TestReadOnlyOwnerInventoriesDoNotRefreshOrMigrateConnections(t *testing.T) 
 	}
 	if !bytes.Equal(afterConnection, beforeConnection) || !bytes.Equal(afterCache, beforeCache) {
 		t.Fatal("read-only project resolution rewrote owner inventory state")
+	}
+}
+
+func TestNamedCodePreservesExplicitRemoteAliasWithoutOwnerRouteWrites(t *testing.T) {
+	for _, ownerYard := range []string{"default", "build"} {
+		t.Run(ownerYard, func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+			aliasDirectory := filepath.Join(configHome, "yards", "preview-remote")
+			if err := os.MkdirAll(aliasDirectory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			ownerAssignment := ""
+			if ownerYard != "default" {
+				ownerAssignment = "OWNER_YARD_NAME=" + ownerYard + "\n"
+			}
+			testkit.WriteFile(t, filepath.Join(aliasDirectory, "config.env"), []byte(
+				"ACCESS_KIND=remote\nOWNER_ENDPOINT=dev@remote.example\nSSH_HOST=yard-preview-remote\n"+ownerAssignment), 0o600)
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard", Environment: append(environment, "SUBYARD_HOST_ID=local-owner"), WorkingDir: root,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := program.loadContext("preview-remote")
+			if err != nil {
+				t.Fatal(err)
+			}
+			program.env["SUBYARD_YARD_EXPLICIT"], program.env["SUBYARD_YARD"] = "1", loaded.Context.YardName
+			ownerRoot := filepath.Join(loaded.Context.Paths.DataHome, "owner-inventory")
+			connection := ownerinventory.Connection{HostID: "remote-owner", Destination: "dev@remote.example"}
+			connections := ownerinventory.Connections{Root: ownerRoot}
+			if err := connections.Write(connection); err != nil {
+				t.Fatal(err)
+			}
+			remote := inventoryResult("remote-owner", ownerYard, "Preview")
+			if err := (ownerinventory.Cache{Root: ownerRoot}).Write(ownerinventory.Snapshot{
+				FetchedAt: time.Now().UTC(), Inventory: remote.inventory,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			protected := []string{filepath.Join(ownerRoot, "connections", "remote-owner.json"), filepath.Join(ownerRoot, "owners", "remote-owner.json")}
+			before := make([][]byte, len(protected))
+			for index, path := range protected {
+				before[index], err = os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			store, err := state.NewFileStore(loaded.Context.Paths.StateDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			record := domain.ProjectRecord{Schema: 1, ProjectID: "preview-id", Name: "Preview", HostPath: "/host/Preview",
+				YardPath: state.YardPath("preview-id"), Mode: domain.ProjectSync, SSHHost: loaded.Context.SSHHost, Target: "yard"}
+			if err := store.Put(context.Background(), record); err != nil {
+				t.Fatal(err)
+			}
+			match, err := program.resolveOwnerProjectFromInventories(context.Background(), loaded, "Preview", true, true,
+				[]ownerInventoryResult{inventoryResult("local-owner", "default", ""), remote})
+			if err != nil || match.Yard != "preview-remote" || match.Record != record {
+				t.Fatalf("named remote project resolved through a different route: match=%#v err=%v", match, err)
+			}
+			selected, err := program.activateProjectContext(match.Yard, loaded, true)
+			if err != nil || selected.Context != loaded.Context || selected.Environment["SSH_CODE_HOST"] != "yard-preview-remote.code" {
+				t.Fatalf("selected alias changed: selected=%#v err=%v", selected.Context, err)
+			}
+			if err := program.recheckProjectRole(&projectExecution{Loaded: selected, RequiresProjects: true}); err != nil {
+				t.Fatalf("role recheck treated the owner yard as a controller registration: %v", err)
+			}
+			identity, err := canonicalYardIdentity(selected)
+			if err != nil || identity != "remote-owner/"+ownerYard {
+				t.Fatalf("canonical identity=%q err=%v", identity, err)
+			}
+			workspaceRoot := filepath.Join(root, "workspaces")
+			runner := application.ProjectActionRunner{Data: projectActionObservationProbe{}, Yard: selected.Context,
+				Project: record, YardIdentity: identity, WorkspaceDirectory: workspaceRoot}
+			if _, _, err := runner.Run(context.Background(), domain.AdapterRequest{Adapter: "project", Action: "code"}, nil); err != nil {
+				t.Fatal(err)
+			}
+			workspace := filepath.Join(workspaceRoot, base64.RawURLEncoding.EncodeToString([]byte(selected.Context.CodeSSHHost))+"."+record.ProjectID, "Preview.code-workspace")
+			payload, err := os.ReadFile(workspace)
+			var document struct {
+				RemoteAuthority string `json:"remoteAuthority"`
+			}
+			if err != nil || json.Unmarshal(payload, &document) != nil || document.RemoteAuthority != "ssh-remote+yard-preview-remote.code" {
+				t.Fatalf("wrong controller code authority: %q err=%v", payload, err)
+			}
+			for index, path := range protected {
+				after, err := os.ReadFile(path)
+				if err != nil || !bytes.Equal(after, before[index]) {
+					t.Fatalf("read-only alias routing changed owner evidence: %s err=%v", path, err)
+				}
+			}
+			connection.Yards = map[string]ownerinventory.YardRoute{ownerYard: {SSHHost: "yard-conflicting"}}
+			if err := connections.Write(connection); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := program.ownerYardRouteReadOnly(context.Background(), loaded, "remote-owner", ownerYard); !errors.Is(err, domain.ErrPlanStale) {
+				t.Fatalf("conflicting persisted route was bypassed: %v", err)
+			}
+		})
 	}
 }
 

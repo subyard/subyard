@@ -11,6 +11,7 @@ paseo-agent-contract.sh
 power-reconciler-systemd-255-launch.sh
 power-reconciler-systemd.sh
 prompt-contract.sh
+preview.sh
 release-candidate.sh
 release-acceptance.sh
 provision-profile-check.sh

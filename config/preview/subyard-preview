@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""Serve an explicitly selected static directory from the current Git checkout."""
+
+import errno
+import mimetypes
+import os
+import shutil
+import stat
+import subprocess
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import unquote, urlsplit
+
+
+ADDRESS = ("127.0.0.1", 8765)
+URL = "http://127.0.0.1:8765/"
+
+
+def components(path):
+    parts = path.split("/")
+    if "\0" in path or ".." in parts or ".git" in parts:
+        raise ValueError
+    return [part for part in parts if part not in ("", ".")]
+
+
+def open_child(parent, name, directory=False):
+    # Never follow symlinks, including ones swapped in during a request. NONBLOCK
+    # keeps a replaced regular file from blocking on a FIFO before fstat rejects it.
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    if directory:
+        flags |= os.O_DIRECTORY
+    fd = os.open(name, flags, dir_fd=parent)
+    mode = os.fstat(fd).st_mode
+    if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)) or not mode & 0o444:
+        os.close(fd)
+        raise ValueError
+    if stat.S_ISDIR(mode) and not mode & 0o111:
+        os.close(fd)
+        raise ValueError
+    return fd
+
+
+def open_path(root, parts, directory=False):
+    fd = open_child(root, ".", directory=True)
+    try:
+        for i, part in enumerate(parts):
+            child = open_child(fd, part, directory or i < len(parts) - 1)
+            os.close(fd)
+            fd = child
+        return fd
+    except (OSError, ValueError):
+        os.close(fd)
+        raise
+
+
+class PreviewHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        pass
+
+    def version_string(self):
+        return "subyard-preview"
+
+    def end_headers(self):
+        self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
+    def send_error(self, code, message=None, explain=None):
+        body = b"Not found\n" if code == 404 else b"Request failed\n"
+        self.send_response(code)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def do_HEAD(self):
+        self.serve_file(head=True)
+
+    def do_GET(self):
+        self.serve_file(head=False)
+
+    def serve_file(self, head):
+        fd = None
+        try:
+            path = unquote(urlsplit(self.path).path, errors="strict")
+            if not path.startswith("/"):
+                raise ValueError
+            parts = components(path)
+            fd = open_path(self.server.root_fd, parts)
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                child = open_child(fd, "index.html")
+                os.close(fd)
+                fd = child
+                parts.append("index.html")
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ValueError
+        except (OSError, ValueError):
+            if fd is not None:
+                os.close(fd)
+            self.send_error(404)
+            return
+        with os.fdopen(fd, "rb") as source:
+            self.send_response(200)
+            content_type = mimetypes.guess_type(parts[-1])[0] or "application/octet-stream"
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(os.fstat(source.fileno()).st_size))
+            self.end_headers()
+            if not head:
+                shutil.copyfileobj(source, self.wfile)
+
+
+class PreviewServer(HTTPServer):
+    def handle_error(self, request, client_address):
+        print("subyard-preview: request failed", file=sys.stderr)
+
+    def get_request(self):
+        request, address = super().get_request()
+        request.settimeout(10)
+        return request, address
+
+
+def fail(message):
+    print("subyard-preview: " + message, file=sys.stderr)
+    return 1
+
+
+def main():
+    if sys.argv[1:] in (["--help"], ["-h"]):
+        print("Usage: subyard-preview <relative-dir>")
+        print("Serve a static directory relative to the current Git checkout root.")
+        return 0
+    if len(sys.argv) != 2 or not sys.argv[1] or os.path.isabs(sys.argv[1]):
+        return fail("expected one relative directory")
+    try:
+        parts = components(sys.argv[1])
+    except ValueError:
+        return fail("unsafe preview directory")
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True, timeout=5,
+        )
+        workspace = os.fsdecode(result.stdout.rstrip(b"\n"))
+        if not os.path.isabs(workspace) or os.path.commonpath([workspace, os.getcwd()]) != workspace:
+            raise ValueError
+        workspace_fd = os.open(workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return fail("run from a Git checkout")
+    try:
+        root_fd = open_path(workspace_fd, parts, directory=True)
+    except (OSError, ValueError):
+        return fail("preview directory is unavailable or unsafe")
+    finally:
+        os.close(workspace_fd)
+    try:
+        try:
+            server = PreviewServer(ADDRESS, PreviewHandler)
+        except OSError as error:
+            if error.errno == errno.EADDRINUSE:
+                return fail("127.0.0.1:8765 is already in use")
+            return fail("cannot listen on 127.0.0.1:8765")
+        with server:
+            server.root_fd = root_fd
+            try:
+                print("Preview: " + URL, flush=True)
+                server.serve_forever()
+            except KeyboardInterrupt:
+                pass
+    finally:
+        os.close(root_fd)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -178,7 +178,7 @@ fi
 # --- 4. ~/.ssh Host entry via an Include (does not rewrite your config) -------
 echo "SSH client config:"
 sshdir="$HOME/.ssh"; install -d -m 700 "$sshdir"
-# Per-yard snippet: the default yard keeps ~/.ssh/subyard.config (byte-identical); a named
+# Per-yard snippet: the default yard keeps ~/.ssh/subyard.config; a named
 # yard gets its own ~/.ssh/subyard-<name>.config so several yards' Host blocks never collide
 # and teardown of one removes only that file. Its Include line is added per file (below).
 snip_name="$(ssh_yard_snippet_name "${YARD_NAME:-}")"
@@ -263,7 +263,14 @@ snip_temp="$(mktemp "$sshdir/.subyard-snippet.XXXXXX")" \
   || { rm -f -- "$snip_backup"; die "could not stage SSH client config"; }
 if ! cat > "$snip_temp" <<EOF
 # Managed by Subyard (scripts/07-ssh-access.sh) — regenerated on setup; do not edit.
-Host $SSH_HOST
+Host ${SSH_CODE_HOST:?resolved code alias is required}
+    LocalForward 127.0.0.1:8765 127.0.0.1:8765
+    ExitOnForwardFailure yes
+    ControlMaster auto
+    ControlPath ~/.ssh/subyard-code-cm-%C
+    ControlPersist no
+
+Host $SSH_HOST $SSH_CODE_HOST
     HostName 127.0.0.1
     Port $SSH_PORT
     User $DEV_USER

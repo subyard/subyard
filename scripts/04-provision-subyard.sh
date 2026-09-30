@@ -45,6 +45,13 @@ info "waiting for $YARD_INSTANCE_NAME agent"
 incus_wait_instance_agent "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" \
   || die "instance '$YARD_INSTANCE_NAME' agent did not become ready"
 
+PREVIEW_SOURCE="$SCRIPT_DIR/../config/preview/subyard-preview"
+[ -f "$PREVIEW_SOURCE" ] && [ ! -L "$PREVIEW_SOURCE" ] && [ -r "$PREVIEW_SOURCE" ] \
+  || die "static preview helper source is unavailable"
+PREVIEW_SHA256="$(sha256sum "$PREVIEW_SOURCE" | cut -d ' ' -f1)"
+incus config set "$YARD_INSTANCE_NAME" user.subyard.preview_sha256 pending "${PROJ[@]}" \
+  || die "could not invalidate preview convergence"
+
 if [ "${ALLOWS_CODING_TOOLS:-true}" != false ]; then
 incus config set "$YARD_INSTANCE_NAME" user.subyard.ccusage_version pending "${PROJ[@]}" \
   || die "could not invalidate ccusage convergence"
@@ -156,6 +163,23 @@ systemctl enable --now ssh docker
 EOS
 ok "in-yard provisioning complete"
 
+# The helper owns no service or persistent preview state.
+incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- sh -eu -c '
+  install -d -m 0755 -o root -g root /usr/local/bin
+  temporary=$(mktemp /usr/local/bin/.subyard-preview.XXXXXX)
+  trap '\''rm -f -- "$temporary"'\'' EXIT HUP INT TERM
+  cat > "$temporary"
+  chown root:root "$temporary"
+  chmod 0755 "$temporary"
+  if [ ! -L /usr/local/bin/subyard-preview ] && \
+      [ "$(stat -c "%F|%a|%u:%g" /usr/local/bin/subyard-preview 2>/dev/null || true)" = "regular file|755|0:0" ] && \
+      cmp -s "$temporary" /usr/local/bin/subyard-preview; then
+    exit 0
+  fi
+  mv -fT -- "$temporary" /usr/local/bin/subyard-preview
+' < "$PREVIEW_SOURCE" || die "static preview helper installation failed"
+ok "static preview helper ready"
+
 if [ "${ALLOWS_CODING_TOOLS:-true}" != false ]; then
 # --- 2. provision the core usage reporter -----------------------------------
 # Unconditional because usage is a core command rather than an CODING_TOOL_INTEGRATIONS entry.
@@ -204,6 +228,8 @@ else
 fi
 
 # --- summary -----------------------------------------------------------------
+incus config set "$YARD_INSTANCE_NAME" user.subyard.preview_sha256 "$PREVIEW_SHA256" "${PROJ[@]}" \
+  || die "could not record preview convergence"
 if [ "${ALLOWS_CODING_TOOLS:-true}" != false ]; then
 incus config set "$YARD_INSTANCE_NAME" user.subyard.ccusage_version "$CCUSAGE_VERSION" "${PROJ[@]}" \
   || die "could not record ccusage convergence"

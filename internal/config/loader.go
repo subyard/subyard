@@ -1107,6 +1107,7 @@ func contextFrom(
 			StateDir:       stateDir,
 		},
 	}
+	values["SSH_CODE_HOST"] = domain.CodeSSHHost(ctx.SSHHost)
 	if ctx.AccessKind == domain.AccessRemote && ctx.OwnerYardName == "" {
 		ctx.OwnerYardName = "default"
 	}

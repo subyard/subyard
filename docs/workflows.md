@@ -72,6 +72,30 @@ normal removal deletes the yard workspace; `--soft` keeps that copy after removi
 
 Use [temporary SSH access](ssh-agent.md) when Git inside a yard needs one of the owner's SSH keys.
 
+## Static web previews
+
+Open a project with `yard code`, then run this inside its Git checkout:
+
+```sh
+subyard-preview dist
+```
+
+The directory is relative to the Git workspace root. The helper prints
+`Preview: http://127.0.0.1:8765/`; open that link on the machine running VS Code.
+Agents can keep the foreground helper running through their usual background process mechanism
+and share the printed link. File edits appear on the next request.
+
+The helper and the dedicated Remote-SSH connection must stay active. Closing either stops access.
+Local, named and remote yards use the same loopback-only URL. Only one preview can use the fixed
+controller port at a time; `yard code` reports a busy port before opening VS Code. Ordinary yard
+SSH aliases have no preview forwarding.
+
+Preview directories must be readable and contain static files; the helper does not build the
+project. Symlinks, parent traversal, `.git`, special files and directory listings are rejected.
+Repeat `yard init` to install the helper and update an older local SSH snippet; refresh an older
+remote registration to install its dedicated preview alias.
+Remote projects require the owner registration described below (`yard host add`).
+
 ## Select local and remote yards
 
 One owner host can run several independent local yards, each with its own instance, persistent
