@@ -5,10 +5,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 # shellcheck source=dev/agent-e2e.sh
 . "$ROOT/dev/agent-e2e.sh"
 
-usage() { printf 'Usage: dev/e2e/preview-acceptance.sh --slot N [--remote-only] [--tailnet]\n'; }
+usage() { printf 'Usage: dev/e2e/preview-acceptance.sh --slot N [--remote-only] [--tailnet] [--canonical]\n'; }
 slot_seen=0
 remote_only=0
 tailnet=0
+canonical=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --slot)
@@ -19,6 +20,7 @@ while [ "$#" -gt 0 ]; do
       shift 2 ;;
     --remote-only) remote_only=1; shift ;;
     --tailnet) tailnet=1; shift ;;
+    --canonical) canonical=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die 'unknown argument' ;;
   esac
@@ -36,6 +38,7 @@ payload() {
     SUBYARD_E2E_RUN_ID="$LEASE_RUN" SUBYARD_E2E_VM="$vm" \
     SUBYARD_E2E_TYPE=subyard-pair "$@" \
     SUBYARD_PREVIEW_TAILNET="$tailnet" \
+    SUBYARD_PREVIEW_CANONICAL="$canonical" \
     bash -c 'cd "$1"; shift; exec bash "$@"' subyard \
     "${GUEST_DIRS[$vm]}/src" "${GUEST_DIRS[$vm]}/src/dev/e2e/preview-lifecycle.sh" "$phase"
 }

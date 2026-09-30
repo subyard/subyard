@@ -406,6 +406,8 @@ func (cli *CLI) Run(ctx context.Context) int {
 		(core && definition.Handler == "@config" && (configReadOnlyInvocation(commandArguments) || configSyncCheck || configSyncStatus)) ||
 		(core && definition.Handler == "@test-vms" && testVMStatusInvocation(commandArguments)) ||
 		(core && definition.Handler == "@integration" && integrationReadOnlyInvocation(commandArguments)) ||
+		(core && definition.Handler == "@project-state" && len(commandArguments) > 0 &&
+			(commandArguments[0] == "check-role" || commandArguments[0] == "preview")) ||
 		(core && definition.Handler == "@network" && len(commandArguments) > 0 && commandArguments[0] == "status") ||
 		(core && definition.Handler == "@update" && slices.Contains(commandArguments, "--check"))
 	if core && definition.Handler == "@ssh-agent" {
@@ -1952,12 +1954,29 @@ func (cli *CLI) runProjectState(
 	arguments []string,
 	ownerEndpoint bool,
 ) int {
+	if ownerEndpoint && len(arguments) > 0 && arguments[0] == "check-role" {
+		if len(arguments) != 1 {
+			cli.errorf("internal: _project-state check-role takes no arguments")
+			return 2
+		}
+		if err := requireProjectRole(loaded); err != nil {
+			cli.errorf("project state: %v", err)
+			return 1
+		}
+		return 0
+	}
 	if loaded.Environment["ALLOWS_PROJECTS"] == "false" && projectStateRequiresProjects(arguments, ownerEndpoint) {
 		cli.errorf("project state: selected yard role does not accept work projects")
 		return 1
 	}
 	yard := loaded.Context
-	store, err := openProjectStore(ctx, yard.Paths.StateDir)
+	var store *state.FileStore
+	var err error
+	if ownerEndpoint && len(arguments) > 0 && arguments[0] == "preview" {
+		store, err = state.NewFileStore(yard.Paths.StateDir)
+	} else {
+		store, err = openProjectStore(ctx, yard.Paths.StateDir)
+	}
 	if err != nil {
 		cli.errorf("open project state: %v", err)
 		return 1

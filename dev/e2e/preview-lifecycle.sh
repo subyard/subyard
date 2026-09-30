@@ -10,9 +10,11 @@ VM="${SUBYARD_E2E_VM:?allocated VM is required}"
 PHASE="${1:-}"
 REMOTE_ONLY="${SUBYARD_PREVIEW_REMOTE_ONLY:-0}"
 TAILNET="${SUBYARD_PREVIEW_TAILNET:-0}"
+CANONICAL="${SUBYARD_PREVIEW_CANONICAL:-0}"
 TAILNET_ADDRESS=100.64.12.20
 case "$REMOTE_ONLY" in 0|1) ;; *) printf 'preview-lifecycle: invalid fixture scope\n' >&2; exit 2 ;; esac
 case "$TAILNET" in 0|1) ;; *) printf 'preview-lifecycle: invalid Tailnet fixture scope\n' >&2; exit 2 ;; esac
+case "$CANONICAL" in 0|1) ;; *) printf 'preview-lifecycle: invalid canonical fixture scope\n' >&2; exit 2 ;; esac
 case "$VM:$PHASE" in 1:controller|2:owner-setup|2:owner-cleanup) ;; *) printf 'preview-lifecycle: invalid phase or VM\n' >&2; exit 2 ;; esac
 STATE="/var/tmp/subyard-preview-$RUN_ID"
 MARKER="subyard-preview-acceptance-v1:$RUN_ID:$VM"
@@ -78,6 +80,9 @@ cleanup_state() {
   [ -e "$STATE" ] || return 0
   [ -d "$STATE" ] && [ ! -L "$STATE" ] && [ "$(cat "$STATE/.marker" 2>/dev/null)" = "$MARKER" ] \
     || { printf 'preview-lifecycle: refusing unowned cleanup\n' >&2; return 1; }
+  if [ -f "$STATE/project-role-config.backup" ]; then
+    install -m 0600 "$STATE/project-role-config.backup" "$SUBYARD_CONFIG_HOME/yards/$NAME/config.env" || failed=1
+  fi
   stop_sessions
   if [ -f "$STATE/sshd.pid" ]; then
     sudo -n python3 - "$STATE" <<'PY' || failed=1
@@ -331,13 +336,13 @@ assert_no_listener() {
   ! ss -Hltn 'sport = :8765' | grep -q . || fail 'unexpected preview listener remains'
 }
 check_preview() {
-  local name="$1" alias="$2" command path preview_url=http://127.0.0.1:8765/ preview_port code_pid
+  local name="$1" alias="$2" selector="${3:-$1}" command path preview_url=http://127.0.0.1:8765/ preview_port code_pid
   if [ "$TAILNET" = 1 ] && [ "$name" = preview-remote ]; then
     preview_port="$(peer sed -n 's/^WEB_PREVIEW_HOST_PORT=//p' "$STATE/config/yards/$NAME/config.env")"
     preview_url="http://$TAILNET_ADDRESS:$preview_port/"
   fi
   export PREVIEW_EXPECTED_ALIAS="$alias.code"
-  yard -Y "$name" sync "$STATE/PreviewFixture" --yes > "$STATE/sync-$name.log" 2>&1 || {
+  yard -Y "$selector" sync "$STATE/PreviewFixture" --yes > "$STATE/sync-$name.log" 2>&1 || {
     tail -n 80 "$STATE/sync-$name.log" >&2
     fail 'fixture sync failed'
   }
@@ -366,12 +371,12 @@ PY
   for _ in {1..50}; do [ ! -f "$STATE/busy.ready" ] || break; sleep 0.1; done
   [ -f "$STATE/busy.ready" ] || fail 'collision listener failed'
   rm -f "$STATE/code.called"
-  if yard -Y "$name" code PreviewFixture > "$STATE/busy-code.log" 2>&1; then fail 'yard code accepted an occupied preview port'; fi
+  if yard -Y "$selector" code PreviewFixture > "$STATE/busy-code.log" 2>&1; then fail 'yard code accepted an occupied preview port'; fi
   [ ! -f "$STATE/code.called" ] || fail 'VS Code was invoked before the collision check'
   grep -Fq 'preview port 127.0.0.1:8765 is unavailable' "$STATE/busy-code.log" || fail 'collision diagnostic is unclear'
   kill "$BUSY_PID"; wait "$BUSY_PID" 2>/dev/null || true; BUSY_PID=''
   rm -f "$STATE/busy.ready"
-  yard -Y "$name" code PreviewFixture > "$STATE/code-$name.log" 2>&1 || fail 'yard code failed'
+  yard -Y "$selector" code PreviewFixture > "$STATE/code-$name.log" 2>&1 || fail 'yard code failed'
   [ -f "$STATE/code.called" ] && [ -s "$STATE/project.path" ] || fail 'VS Code did not receive the workspace'
   path="$(cat "$STATE/project.path")"
   printf -v command 'cd %q; printf "%%s\\n" "$$" > .preview-test.pid; exec subyard-preview site' "$path"
@@ -531,6 +536,63 @@ yard remote add preview-remote "$OWNER_ALIAS" --yard "$NAME" --yes \
     tail -n 80 "$STATE/remote-add.log" >&2
     fail 'production remote registration failed'
   }
-check_preview preview-remote yard-preview-remote
+if [ "$CANONICAL" = 1 ]; then
+  owner_id="$(peer cat "$STATE/config/host-id")"
+  [[ "$owner_id" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]] || fail 'invalid canonical owner identity'
+  check_preview preview-remote yard-preview-remote "$owner_id/$NAME"
+  # The controller's default role permits projects; only the owner can deny this yard.
+  peer bash -s -- "$STATE" "$RUN_ID" "$NAME" <<'EOS'
+set -euo pipefail
+state="$1" run="$2" name="$3"
+[ "$(cat "$state/.marker")" = "subyard-preview-acceptance-v1:$run:2" ]
+root="$(cat "$state/source-root")"
+case "$root" in /tmp/subyard-worktree.*/src) ;; *) exit 2 ;; esac
+preset="$root/config/yards/profiles/canonical-no-projects.env"
+[ ! -e "$preset" ] && [ ! -L "$preset" ]
+install -d -m 0755 "${preset%/*}"
+printf 'ALLOWS_PROJECTS=false\n' > "$preset"
+chmod 0644 "$preset"
+cp "$state/config/yards/$name/config.env" "$state/project-role-config.backup"
+chmod 0600 "$state/project-role-config.backup"
+chown dev:dev "$state/project-role-config.backup"
+printf 'YARD_TEMPLATE=canonical-no-projects\n' >> "$state/config/yards/$name/config.env"
+EOS
+  # Keep the inventory fresh before snapshotting so refusals cannot refresh the cache.
+  yard list --live > "$STATE/role-inventory.log" 2>&1 || fail 'role fixture inventory refresh failed'
+  cat > "$STATE/state-fingerprint.py" <<'PY'
+import hashlib, os, pathlib, stat, sys
+digest = hashlib.sha256()
+for directory in sys.argv[1:]:
+    root = pathlib.Path(directory)
+    for path in sorted([root, *root.rglob("*")]):
+        info = path.lstat()
+        digest.update(repr((str(path.relative_to(root)), info.st_mode, info.st_uid, info.st_gid)).encode())
+        if stat.S_ISREG(info.st_mode):
+            digest.update(path.read_bytes())
+        elif stat.S_ISLNK(info.st_mode):
+            digest.update(os.readlink(path).encode())
+print(digest.hexdigest())
+PY
+  controller_before="$(python3 "$STATE/state-fingerprint.py" "$STATE/config" "$STATE/data")"
+  owner_before="$(peer python3 - "$STATE/config" "$STATE/data" < "$STATE/state-fingerprint.py")"
+  rm -f "$STATE/code.called"
+  for command in sync code; do
+    arguments=(PreviewFixture)
+    [ "$command" != sync ] || arguments=("$STATE/PreviewFixture")
+    if yard -Y "$owner_id/$NAME" "$command" "${arguments[@]}" --yes > "$STATE/denied-$command.log" 2>&1; then
+      fail "canonical $command accepted a denied owner role"
+    fi
+    grep -Fq 'selected yard role does not accept work projects' "$STATE/denied-$command.log" \
+      || fail "canonical $command did not report the owner role denial"
+    [ ! -f "$STATE/code.called" ] || fail 'role denial reached VS Code'
+    [ "$(python3 "$STATE/state-fingerprint.py" "$STATE/config" "$STATE/data")" = "$controller_before" ] \
+      || fail 'denied assessment changed controller state'
+    [ "$(peer python3 - "$STATE/config" "$STATE/data" < "$STATE/state-fingerprint.py")" = "$owner_before" ] \
+      || fail 'denied assessment changed owner state'
+  done
+  printf 'ok: canonical remote sync/code and owner role denial without state writes\n'
+else
+  check_preview preview-remote yard-preview-remote
+fi
 grep -Fqx "proxyjump $OWNER_ALIAS" "$STATE/code.options" || fail 'remote code alias lost ProxyJump'
 printf 'ok: remote owner stays free of controller-port preview listeners\n'

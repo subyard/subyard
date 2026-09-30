@@ -432,6 +432,9 @@ func (cli *CLI) prepareProjectExecution(
 		if err == nil && execution != nil {
 			execution.RequiresProjects = projectCommandRequiresProjects(definition.Name)
 			err = cli.captureProjectOwner(execution)
+			if err == nil && execution.Loaded.Context.AccessKind == domain.AccessRemote {
+				err = cli.recheckProjectRole(ctx, execution)
+			}
 		}
 	}()
 	switch definition.Name {
@@ -496,22 +499,31 @@ func (cli *CLI) captureProjectOwner(execution *projectExecution) error {
 }
 
 func (cli *CLI) beginProjectMutation(ctx context.Context, execution *projectExecution) (func(), error) {
-	if err := cli.recheckProjectRole(execution); err != nil {
+	release := func() {}
+	if execution != nil && execution.OwnerConnection != nil {
+		store := ownerinventory.Connections{Root: filepath.Join(execution.Loaded.Context.Paths.DataHome, "owner-inventory")}
+		var err error
+		release, err = store.BeginHostMutation(ctx, *execution.OwnerConnection)
+		if err != nil {
+			return nil, fmt.Errorf("revalidate project owner: %w", err)
+		}
+	}
+	if err := cli.recheckProjectRole(ctx, execution); err != nil {
+		release()
 		return nil, err
-	}
-	if execution == nil || execution.OwnerConnection == nil {
-		return func() {}, nil
-	}
-	store := ownerinventory.Connections{Root: filepath.Join(execution.Loaded.Context.Paths.DataHome, "owner-inventory")}
-	release, err := store.BeginHostMutation(ctx, *execution.OwnerConnection)
-	if err != nil {
-		return nil, fmt.Errorf("revalidate project owner: %w", err)
 	}
 	return release, nil
 }
 
-func (cli *CLI) recheckProjectRole(execution *projectExecution) error {
+func (cli *CLI) recheckProjectRole(ctx context.Context, execution *projectExecution) error {
 	if execution == nil || !execution.RequiresProjects {
+		return nil
+	}
+	if execution.Loaded.Context.AccessKind == domain.AccessRemote {
+		_, err := cli.remoteProjectStateCall(ctx, execution.Loaded.Context, []string{"check-role"})
+		if err != nil {
+			return fmt.Errorf("recheck project yard role on owner: %w", err)
+		}
 		return nil
 	}
 	fresh, err := cli.loadInventoryLoaded(execution.Loaded.Context.YardName, execution.Loaded)
@@ -751,10 +763,10 @@ func (cli *CLI) previewProjectAdmission(
 	explicit bool,
 	workspaceNames ...string,
 ) (state.Admission, error) {
-	if err := requireProjectRole(loaded); err != nil {
-		return state.Admission{}, err
-	}
 	if loaded.Context.AccessKind != domain.AccessRemote {
+		if err := requireProjectRole(loaded); err != nil {
+			return state.Admission{}, err
+		}
 		if store == nil {
 			return state.Admission{}, errors.New("project store is required")
 		}
@@ -978,7 +990,7 @@ func (cli *CLI) resolveProjectForCommand(
 
 func (cli *CLI) activateProjectContext(name string, loaded config.Loaded, requireProjects bool) (config.Loaded, error) {
 	if selected, ok := cli.inventoryRoutes[name]; ok {
-		if requireProjects {
+		if requireProjects && selected.Context.AccessKind != domain.AccessRemote {
 			if err := requireProjectRole(selected); err != nil {
 				return config.Loaded{}, err
 			}
@@ -992,7 +1004,7 @@ func (cli *CLI) activateProjectContext(name string, loaded config.Loaded, requir
 		return selected, nil
 	}
 	if name == loaded.Context.YardName {
-		if requireProjects {
+		if requireProjects && loaded.Context.AccessKind != domain.AccessRemote {
 			if err := requireProjectRole(loaded); err != nil {
 				return config.Loaded{}, err
 			}
@@ -1003,7 +1015,7 @@ func (cli *CLI) activateProjectContext(name string, loaded config.Loaded, requir
 	if err != nil {
 		return config.Loaded{}, err
 	}
-	if requireProjects {
+	if requireProjects && selected.Context.AccessKind != domain.AccessRemote {
 		if err := requireProjectRole(selected); err != nil {
 			return config.Loaded{}, err
 		}

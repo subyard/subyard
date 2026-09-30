@@ -3,13 +3,18 @@ package cli
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ownerinventory"
+	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/state"
 )
 
@@ -138,6 +143,140 @@ func TestProjectRoleRecheckedBeforeMutation(t *testing.T) {
 	}
 	if _, err := os.Lstat(stateDirectory); !os.IsNotExist(err) {
 		t.Fatalf("denied mutation created state: %v", err)
+	}
+}
+
+func TestCanonicalRemoteProjectRoleRecheckedOnOwner(t *testing.T) {
+	for _, name := range []string{"sync", "code"} {
+		t.Run(name, func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			// The controller role is unrelated to the selected remote owner's role.
+			writeDisabledProjectRole(t, root)
+			program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root})
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := program.loadContext("default")
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := ownerinventory.Connections{Root: filepath.Join(loaded.Context.Paths.DataHome, "owner-inventory")}
+			connection := ownerinventory.Connection{HostID: "remote-owner", Destination: "owner-alias",
+				Yards: map[string]ownerinventory.YardRoute{"build": {SSHHost: "yard-remote"}}}
+			if err := store.Write(connection); err != nil {
+				t.Fatal(err)
+			}
+			route, _, err := program.ownerYardRouteReadOnly(context.Background(), loaded, connection.HostID, "build")
+			if err != nil {
+				t.Fatal(err)
+			}
+			selected, err := program.activateProjectContext(route, loaded, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			bin := filepath.Join(root, "fake-bin")
+			if err := os.MkdirAll(bin, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			calls, denied := filepath.Join(root, "owner-calls"), filepath.Join(root, "owner-denied")
+			writeCLIFile(t, filepath.Join(bin, "ssh"), "#!/bin/sh\n"+trustedSSHMock(t)+
+				"printf '%s\\n' \"$*\" >> "+shellquote.Word(calls)+"\n"+
+				"if [ -f "+shellquote.Word(denied)+" ]; then printf 'selected yard role does not accept work projects\\n' >&2; exit 1; fi\nexit 0\n", 0o700)
+			t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+			execution := &projectExecution{Loaded: selected, RequiresProjects: projectCommandRequiresProjects(name)}
+			if err := program.captureProjectOwner(execution); err != nil {
+				t.Fatal(err)
+			}
+			release, err := program.beginProjectMutation(context.Background(), execution)
+			if err != nil {
+				t.Fatalf("canonical %s failed owner role revalidation: %v", name, err)
+			}
+			release()
+			payload, err := os.ReadFile(calls)
+			if err != nil || !strings.Contains(string(payload), "check-role") || !strings.Contains(string(payload), "build") {
+				t.Fatalf("role check did not select the owner yard: %q err=%v", payload, err)
+			}
+			before := nativeTreeSnapshot(t, store.Root)
+			writeCLIFile(t, denied, "denied\n", 0o600)
+			physicalWork := false
+			prepared := &preparedCommand{CLI: program, Project: execution, Plan: domain.OperationPlan{Confirmed: true},
+				execute: func(context.Context, *application.Orchestrator, io.Writer) (domain.AdapterResult, error) {
+					physicalWork = true
+					return domain.AdapterResult{Status: "ok"}, nil
+				}}
+			if _, err := prepared.Execute(context.Background(), &application.Orchestrator{}, io.Discard); err == nil ||
+				!strings.Contains(err.Error(), "role on owner") || physicalWork {
+				t.Fatalf("owner role change reached %s execution: physical=%v err=%v", name, physicalWork, err)
+			}
+			if after := nativeTreeSnapshot(t, store.Root); !slices.Equal(before, after) {
+				t.Fatalf("role refusal changed controller routing state: before=%v after=%v", before, after)
+			}
+			if _, err := os.Lstat(selected.Context.Paths.StateDir); !os.IsNotExist(err) {
+				t.Fatalf("role refusal created project state: %v", err)
+			}
+		})
+	}
+}
+
+func TestOwnerProjectAssessmentDoesNotWriteState(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		for _, test := range []struct {
+			name string
+			args []string
+			deny bool
+			code int
+		}{
+			{"role allowed", []string{"check-role"}, false, 0},
+			{"role denied", []string{"check-role"}, true, 1},
+			{"role invalid", []string{"check-role", "extra"}, false, 2},
+			{"preview allowed", []string{"preview", "/host/New", "sync", "New", "0"}, false, 0},
+			{"preview denied", []string{"preview", "/host/New", "sync", "New", "0"}, true, 1},
+		} {
+			t.Run(test.name+map[bool]string{false: "/absent", true: "/legacy"}[legacy], func(t *testing.T) {
+				root, environment, stateDirectory := nativeFixture(t)
+				manifest := filepath.Join(root, "config", "commands.registry")
+				current, err := os.ReadFile(manifest)
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeCLIFile(t, manifest, string(current)+"_project-state||@project-state||local|mutate|dynamic|hidden|internal|none|_project-state|owner project state||\n", 0o600)
+				if legacy {
+					store, err := state.NewFileStore(stateDirectory)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := store.Put(context.Background(), domain.ProjectRecord{Schema: 1,
+						ProjectID: "legacy-id", Name: "Legacy", HostPath: "/host/Legacy",
+						YardPath: state.YardPath("legacy-id"), Mode: domain.ProjectSync, SSHHost: "yard", Target: "yard"}); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Chmod(filepath.Join(stateDirectory, "legacy-id.json"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				// A read-only endpoint must also bypass release recovery before dispatch.
+				runtimeRoot := filepath.Join(root, "runtime")
+				environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot,
+					"V2_GATE_CAPTURE="+filepath.Join(root, "recovery-called"))
+				installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
+				if test.deny {
+					writeDisabledProjectRole(t, root)
+				}
+				var stderr bytes.Buffer
+				program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment,
+					Arguments: append([]string{"_project-state"}, test.args...), Stderr: &stderr, Stdout: io.Discard})
+				if err != nil {
+					t.Fatal(err)
+				}
+				before := nativeTreeSnapshot(t, root)
+				if code := program.Run(context.Background()); code != test.code {
+					t.Fatalf("owner assessment code=%d want=%d stderr=%q", code, test.code, stderr.String())
+				}
+				if after := nativeTreeSnapshot(t, root); !slices.Equal(before, after) {
+					t.Fatalf("assessment changed state: before=%v after=%v", before, after)
+				}
+			})
+		}
 	}
 }
 

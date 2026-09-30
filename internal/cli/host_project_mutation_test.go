@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ownerinventory"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 type hostMutationPrompt func(context.Context, domain.ConfirmationRequest) (bool, error)
@@ -114,5 +116,116 @@ func TestPreparedProjectRejectsRemovedOwnerBeforeRefreshOrPhysicalWork(t *testin
 	}
 	if err := cli.captureProjectOwner(&projectExecution{Loaded: config.Loaded{Context: yard}}); !errors.Is(err, domain.ErrPlanStale) {
 		t.Fatalf("removed canonical route still prepares: %v", err)
+	}
+}
+
+func TestPreparedProjectRejectsChangedOwnerBeforeRoleCheckOrPhysicalWork(t *testing.T) {
+	for _, change := range []string{"route", "endpoint", "trust"} {
+		t.Run(change, func(t *testing.T) {
+			ctx := context.Background()
+			data := testkit.TempDir(t)
+			store := ownerinventory.Connections{Root: filepath.Join(data, "owner-inventory")}
+			snapshot := ownerinventory.Snapshot{FetchedAt: time.Now(), Inventory: inventoryResult("owner-a", "build", "").inventory}
+			_, trust := hostAddSSHFixture(t, snapshot.Inventory)
+			connection := ownerinventory.Connection{HostID: "owner-a", Destination: "owner-alias", Trust: &trust,
+				Yards: map[string]ownerinventory.YardRoute{"build": {SSHHost: "yard-alias"}}}
+			if err := store.Register(connection, snapshot); err != nil {
+				t.Fatal(err)
+			}
+			routing := filepath.Join(store.Root, "routing", connection.HostID)
+			yard := domain.Context{YardName: "build", AccessKind: domain.AccessRemote,
+				OwnerEndpoint: connection.Destination, OwnerYardName: "build", SSHHost: "yard-alias"}
+			yard.Paths.DataHome = data
+			yard.Paths.StateDir = filepath.Join(routing, "build", "projects")
+			project := &projectExecution{Loaded: config.Loaded{Context: yard}, RequiresProjects: true}
+			cli := &CLI{options: Options{WorkingDir: data, Stderr: io.Discard}}
+			if err := cli.captureProjectOwner(project); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := openProjectPreparationStore(ctx, yard); err != nil {
+				t.Fatal(err)
+			}
+			changed := connection
+			switch change {
+			case "route":
+				changed.Yards = map[string]ownerinventory.YardRoute{"build": {SSHHost: "yard-replacement"}}
+			case "endpoint":
+				changed.Destination = "replacement-owner"
+			case "trust":
+				_, replacement := hostAddSSHFixture(t, snapshot.Inventory)
+				changed.Trust = &replacement
+			}
+			if err := changed.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			payload, err := json.Marshal(changed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			connectionPath := filepath.Join(store.Root, "connections", connection.HostID+".json")
+			// Replace persisted routing metadata after assessment, keeping a valid connection.
+			testkit.WriteFile(t, connectionPath, payload, 0o600)
+			protected := []struct {
+				path    string
+				payload []byte
+				mode    os.FileMode
+			}{
+				{path: connectionPath},
+				{path: filepath.Join(store.Root, "owners", connection.HostID+".json")},
+			}
+			for index := range protected {
+				protected[index].payload, err = os.ReadFile(protected[index].path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				info, err := os.Stat(protected[index].path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				protected[index].mode = info.Mode().Perm()
+			}
+			fakeBin := testkit.TempDir(t)
+			sshLog := filepath.Join(data, "ssh.called")
+			testkit.WriteFile(t, filepath.Join(fakeBin, "ssh"), []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SSH_INVOCATION_LOG\"\nexit 99\n"), 0o700)
+			t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			cli.env = map[string]string{"PATH": fakeBin, "SSH_INVOCATION_LOG": sshLog}
+			called := false
+			prepared := &preparedCommand{CLI: cli, Project: project,
+				Plan: domain.OperationPlan{Confirmed: true, Assessment: &domain.ActionAssessment{
+					Action: "project.sync", Changed: true, Effect: domain.ActionMutation}},
+				refresh: func(context.Context) (domain.ActionID, domain.ActionDelta, error) {
+					called = true
+					return "project.sync", domain.ActionDelta{Changed: true}, nil
+				},
+				execute: func(context.Context, *application.Orchestrator, io.Writer) (domain.AdapterResult, error) {
+					called = true
+					return domain.AdapterResult{Status: "ok"}, nil
+				},
+			}
+			if _, err := prepared.Execute(ctx, &application.Orchestrator{}, io.Discard); !errors.Is(err, domain.ErrPlanStale) || called {
+				t.Fatalf("changed owner reached project execution: called=%v err=%v", called, err)
+			}
+			if err := prepared.Close(); err != nil {
+				t.Fatal(err)
+			}
+			for _, path := range []string{sshLog, routing, yard.Paths.StateDir} {
+				if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("stale command created %s: %v", path, err)
+				}
+			}
+			for _, before := range protected {
+				after, err := os.ReadFile(before.path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				info, err := os.Stat(before.path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(after, before.payload) || info.Mode().Perm() != before.mode {
+					t.Fatalf("stale command changed controller metadata: %s", before.path)
+				}
+			}
+		})
 	}
 }

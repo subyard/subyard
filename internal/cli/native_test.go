@@ -4801,7 +4801,7 @@ printf '%s\n' '{"projectId":"Demo-2","name":"Demo-2","existing":null}'
 	}
 	loaded := config.Loaded{Context: domain.Context{
 		AccessKind: domain.AccessRemote, OwnerEndpoint: "dev@owner.example", SSHHost: "yard",
-	}}
+	}, Environment: map[string]string{"ALLOWS_PROJECTS": "false"}}
 	admission, err := program.previewProjectAdmission(
 		context.Background(), loaded, nil, "/host/Demo", domain.ProjectSync, "Demo", false,
 	)

@@ -271,7 +271,13 @@ func TestNamedCodePreservesExplicitRemoteAliasWithoutOwnerRouteWrites(t *testing
 			if err != nil || selected.Context != loaded.Context || selected.Environment["SSH_CODE_HOST"] != "yard-preview-remote.code" {
 				t.Fatalf("selected alias changed: selected=%#v err=%v", selected.Context, err)
 			}
-			if err := program.recheckProjectRole(&projectExecution{Loaded: selected, RequiresProjects: true}); err != nil {
+			bin := filepath.Join(root, "fake-bin")
+			if err := os.MkdirAll(bin, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			testkit.WriteFile(t, filepath.Join(bin, "ssh"), []byte("#!/bin/sh\n"+trustedSSHMock(t)+"exit 0\n"), 0o700)
+			t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+			if err := program.recheckProjectRole(context.Background(), &projectExecution{Loaded: selected, RequiresProjects: true}); err != nil {
 				t.Fatalf("role recheck treated the owner yard as a controller registration: %v", err)
 			}
 			identity, err := canonicalYardIdentity(selected)

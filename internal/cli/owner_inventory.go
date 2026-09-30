@@ -872,8 +872,7 @@ func (cli *CLI) ownerYardRouteWithMode(
 		ownerYard = "default"
 	}
 	// An explicitly selected compatibility alias already supplies its controller
-	// registration and data-plane route. Keep it so role revalidation reloads that
-	// registration, rather than treating the owner's yard name as a local alias.
+	// registration and data-plane route. Keep its configured SSH authorities.
 	if loaded.Context.AccessKind == domain.AccessRemote && destination != "" &&
 		loaded.Context.OwnerEndpoint == destination && ownerYard == yardName &&
 		cli.env["SUBYARD_YARD_EXPLICIT"] != "" && cli.env["SUBYARD_YARD"] == loaded.Context.YardName {

@@ -285,6 +285,15 @@ and resource generation throughout the run.
 
 ### Test lanes and gates
 
+Canonical remote project routing uses the focused preview fixture on a fresh pair:
+
+```sh
+dev/e2e/preview-acceptance.sh --slot N --remote-only --canonical
+```
+
+It checks `sync` and `code` through `HostID/yard`, real SSH forwarding, and owner
+role refusal without changing controller or owner state.
+
 The same-host network policy acceptance creates synthetic local yards and verifies explicit
 links, isolation toggles, spoofing protection and managed lifecycle behavior. Choose an available
 slot from fresh status, then run:

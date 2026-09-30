@@ -131,6 +131,9 @@ removal takes the exclusive lock, refreshes authoritative inventory after waitin
 remaining projects or unknown routing state. The empty project store's regular `.lock` file
 does not count as a project. Mutation locks live outside the removable routing tree; a prepared
 command whose registration was removed fails before performing project work.
+Project admission and execution check the selected yard's current role on its owner.
+Remote checks use a read-only owner query after route validation, without loading
+the owner's yard name as a controller registration or opening project state.
 
 ### Temporary SSH-key access
 
@@ -477,8 +480,8 @@ The alias shares the yard's identity and host-key pins, but forwards only contro
 `ControlPersist no` isolate preview from ordinary yard connections. SSH convergence requires
 both aliases so repeated init upgrades older snippets. The controller checks port availability
 before launching VS Code; `ExitOnForwardFailure yes` handles a later bind race.
-Owner-inventory project resolution retains a matching explicitly selected remote alias, so
-controller role revalidation uses its registration and the resolved code alias stays consistent.
+Owner-inventory project resolution retains a matching explicitly selected remote alias,
+so the resolved code alias stays consistent.
 
 Core provisioning atomically installs `subyard-preview` as root-owned mode `0755`. Running-yard
 convergence checks its bytes and metadata; stopped yards use the installed source-hash marker.
