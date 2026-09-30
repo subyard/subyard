@@ -148,7 +148,9 @@ enable a profile, reconcile the yard and install its toolchain.
 
 ```text
 Usage: yard provision [profile | --list]
-With a profile, persist its selection for this yard, reconcile prerequisites and install its toolchain under one confirmation.
+With a profile, reconcile prerequisites and install its toolchain under one confirmation.
+Without a registered config sync source, a new profile is added to this yard's persistent selection.
+With a registered source, select new profiles in that source, commit and run config sync first. Already selected profiles can be provisioned directly.
 Existing profiles are preserved. Profiles without an install hook only reconcile the yard; dedicated-role restrictions still apply.
 Without a profile, install the selected toolchains without changing profile selection. --list lists available install hooks.
 ```

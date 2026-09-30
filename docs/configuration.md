@@ -416,6 +416,18 @@ Keep private desired settings in a separate clean Git checkout. Do not turn the 
 consumers and support tools. `.gitignore`, a symlink farm or recursive `rsync --delete` is not an
 ownership boundary.
 
+Git is optional. Without a registered sync source, persistent settings are authored locally with
+`config set`, `config import` or `config edit`, and `yard provision <profile>` can add a profile to
+the selected yard. Connecting a source does not make every local path sync-managed: the sync
+manifest records the imported files, and unmanaged local paths remain local.
+
+Sync owns whole files, including scalar `config.env` files, rather than individual assignments.
+An imported file occupies its ordinary shared, host or yard scope; Git is not an additional
+precedence layer. A local `config set` can edit that file, but a later confirmed import restores
+its contents from the source. Use `config sync push` to publish intended persistent edits through
+the versioned workflow. There is no separate persistent local scalar override above an imported
+file in the same scope. Local settings in other scopes still follow the precedence described above.
+
 Release installation and migration never ask for a Git URL or require network access. Connect the
 private repository explicitly once on each physical owner host:
 
@@ -543,6 +555,44 @@ yard -Y owner-host/default config sync pull --apply
 
 The checkout and Git authentication stay on the owner host; the controller does not upload or cache
 the repository and there is no implicit all-host fan-out.
+
+### Enabling a profile with a registered source
+
+When any configuration sync source is registered, `yard provision <profile>` refuses to add a new
+profile locally, even if the source does not manage that yard's settings file. It can still
+reconcile and install an already selected profile. If it reports `configuration is source-managed`,
+select the profile in the registered source before provisioning.
+
+For Android in the default yard, run these read-only commands on the owner host:
+
+```sh
+yard -Y default config sync path
+yard -Y default config sync status --offline
+yard -Y default config show ENVIRONMENT_PROFILES
+```
+
+Use the reported checkout path and HostID to edit
+`hosts/<HostID>/yards/default/config.env` in that checkout. Create the directory and file if absent.
+Add `android` to one `ENVIRONMENT_PROFILES` assignment, preserving the effective profile names
+reported by `config show` and all other settings in the file. An explicit yard selection replaces
+the inherited list, so copying only the new profile would drop inherited profiles.
+
+Commit this source edit through the configuration repository's normal Git workflow. Sync requires
+clean, tracked managed paths; an uncommitted edit is rejected. Then import the checkout and provision:
+
+```sh
+yard -Y default config sync
+yard -Y default provision android
+```
+
+If sync reports an existing unmanaged target, preserve its needed syncable yard settings in the
+source and commit them first. Review the exact adoption plan and run
+`yard -Y default config sync --adopt`, then provision after the import succeeds. Adoption replaces
+the whole local file and makes it source-managed.
+
+Bare `config sync` imports the registered checkout without fetching or pushing. `--apply` refreshes
+materialized file settings and is not required for this scalar profile selection. For a remote yard,
+the checkout path belongs to its owner host; edit and commit the source there.
 
 ### Bootstrapping an existing host
 

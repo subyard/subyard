@@ -172,15 +172,18 @@ yard provision android
 yard -Y demo provision subyard-dev
 ```
 
-An explicit profile is appended to the selected yard's persistent `ENVIRONMENT_PROFILES`;
-other profiles and host-wide settings are preserved. The command plans profile selection,
+Without a registered configuration sync source, an explicit profile is appended to the selected
+yard's persistent `ENVIRONMENT_PROFILES`; other profiles and host-wide settings are preserved.
+The command plans profile selection,
 yard initialization and toolchain installation together, then asks for one confirmation.
 Profiles without a `provision.sh` hook still enable their yard requirements. Dedicated profiles
 continue to require their matching named-yard preset. Resource service bring-up remains a
 separate operation. Repeating the command reconciles drift; after a partial failure, rerun it
-to finish the already selected profile. A fully converged run does not prompt. If configuration is managed through a registered sync
-source, enable a new profile in that source first; provision can still reconcile an already
-selected profile. Temporary `ENVIRONMENT_PROFILES` overrides are not persisted by this command.
+to finish the already selected profile. A fully converged run does not prompt. With a registered
+sync source, enable a new profile in that source, commit the change and sync it first; follow the
+[source-managed profile workflow](configuration.md#enabling-a-profile-with-a-registered-source).
+Provision can still reconcile an already selected profile. Temporary `ENVIRONMENT_PROFILES`
+overrides are not persisted by this command.
 
 Without an explicit profile, `yard provision` retains its toolchain-selection behavior and
 does not change persisted profile selection. `yard provision --list` lists installable hooks.

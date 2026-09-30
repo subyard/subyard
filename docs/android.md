@@ -6,9 +6,13 @@ stopped. Each allocation starts with fresh Android userdata and no snapshots. Ex
 AVDs are neither imported into the pool nor removed.
 
 Run `yard provision android` on the owner host (use `yard -Y NAME provision android` for a
-named yard). This adds Android to that yard's profiles while preserving existing selections,
-reconciles yard prerequisites, and installs the toolchain under one confirmation. Provisioning
-installs the shared SDK at `/srv/cache/android-sdk`, JDK at `/opt/jdk-17`, the in-yard client and
+named yard). Without a registered configuration sync source, this adds Android to that yard's
+profiles while preserving existing selections. With a registered source, select Android in the
+source, commit the change and run `yard config sync` first; follow the
+[source-managed profile workflow](configuration.md#enabling-a-profile-with-a-registered-source).
+An already selected profile can be provisioned directly in either case. Provisioning reconciles
+yard prerequisites and installs the toolchain under one confirmation. It installs the shared SDK
+at `/srv/cache/android-sdk`, JDK at `/opt/jdk-17`, the in-yard client and
 the pool service. It also writes `/etc/profile.d/subyard-android.sh`; open a new login shell after
 installation to load the SDK environment. A selected profile alone does not prove installation.
 The yard needs x86_64 KVM. The shipped `config/profiles/android/profile.conf` explicitly selects
