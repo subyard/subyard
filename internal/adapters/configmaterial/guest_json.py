@@ -391,6 +391,30 @@ def legacy_json_matches(current, baseline):
     return hashlib.sha256(payload).hexdigest() == baseline["desired_digest"]
 
 
+def legacy_toml_matches(current, baseline):
+    # Schema1 binds the historical template's exact bytes. Shipped templates
+    # recover its owned values without trusting the new template or runtime edits.
+    for payload in globals().get("LEGACY_TEMPLATES", []):
+        if hashlib.sha256(payload.encode()).hexdigest() != baseline["desired_digest"]:
+            continue
+        previous = parse_document(payload)
+        owned = sorted(ownership(previous), key=lambda entry: (entry["path"], entry["kind"]))
+        if owned != baseline["owned"]:
+            return False
+        for entry in owned:
+            found, value = lookup(current, pointer_parts(entry["path"]))
+            _, expected = lookup(previous, pointer_parts(entry["path"]))
+            if not found:
+                return False
+            if entry["kind"] == "empty-object":
+                if not isinstance(value, dict):
+                    return False
+            elif not json_equal(value, expected):
+                return False
+        return True
+    return False
+
+
 def toml_fingerprint_payload(value):
     # Preserve TOML scalar types (including dates and non-finite floats) without
     # persisting values in the ownership baseline or exposing them in diagnostics.
@@ -609,7 +633,7 @@ def main():
                     elif FORMAT == "json":
                         adoptable = legacy_json_matches(current, baseline)
                     else:
-                        adoptable = converged
+                        adoptable = converged or legacy_toml_matches(current, baseline)
                     if not adoptable:
                         raise MaterializationError("adoption owned fields or evidence changed")
                 bound_digest += ":" + desired_digest

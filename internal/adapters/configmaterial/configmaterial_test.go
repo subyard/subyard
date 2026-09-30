@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestTOMLMaterializationPreservesRuntimeFields(t *testing.T) {
@@ -389,11 +390,12 @@ func TestJSONObservationRejectsUnsafeStateRootWithoutMutation(t *testing.T) {
 }
 
 type guestHarness struct {
-	t           *testing.T
-	root        string
-	state       string
-	destination string
-	format      string
+	t               *testing.T
+	root            string
+	state           string
+	destination     string
+	format          string
+	legacyTemplates [][]byte
 }
 
 func newGuestHarness(t *testing.T) guestHarness {
@@ -453,7 +455,7 @@ func (h guestHarness) request(payload []byte, mode string) (ports.InstanceExecRe
 		format = "json"
 	}
 	return materializationRequest(format, mode, "dev", h.destination, os.Getuid(), payload,
-		h.state, os.Getuid(), filepath.Join(h.root, "home", "dev"))
+		h.state, os.Getuid(), filepath.Join(h.root, "home", "dev"), h.legacyTemplates...)
 }
 
 func (h guestHarness) run(payload []byte, mode string) (string, error) {
@@ -723,6 +725,73 @@ func TestJSONAdoptionAllowsTemplateEvolutionOnlyWithUnchangedHistoricalFields(t 
 			}
 			if got := h.readDestination(t); !jsonEqual(got, want) {
 				t.Fatalf("template update lost foreign fields or retained obsolete managed fields: %#v", got)
+			}
+		})
+	}
+}
+
+func TestTOMLAdoptionUsesExactHistoricalTemplateEvidence(t *testing.T) {
+	previous := []byte("# Original template\nmanaged = 'old'\n[empty]\n")
+	desired := []byte("# Updated template comments\nmanaged = 'old'\n[empty]\n")
+	current := "managed = 'old'\n[empty]\nadded = true\n[runtime]\nkeep = 'synthetic-private-value'\n"
+	for _, problem := range []string{"none", "template", "managed", "owned", "digest"} {
+		t.Run(problem, func(t *testing.T) {
+			h := newGuestHarness(t)
+			h.format = "toml"
+			h.apply(t, previous)
+			if err := os.Remove(h.receiptPath(t)); err != nil {
+				t.Fatal(err)
+			}
+			h.legacyTemplates = [][]byte{previous}
+			h.writeDestination(t, current)
+			switch problem {
+			case "template":
+				h.legacyTemplates = [][]byte{desired}
+			case "managed":
+				h.writeDestination(t, strings.Replace(current, "'old'", "'changed-private-value'", 1))
+			case "owned", "digest":
+				path := h.baselinePath(t)
+				payload, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var baseline map[string]any
+				if err := json.Unmarshal(payload, &baseline); err != nil {
+					t.Fatal(err)
+				}
+				if problem == "owned" {
+					baseline["owned"] = []any{}
+				} else {
+					baseline["desired_digest"] = strings.Repeat("0", 64)
+				}
+				payload, _ = json.Marshal(baseline)
+				testkit.WriteFile(t, path, payload, 0600)
+			}
+			before := snapshotMaterialization(t, h.root)
+			if problem != "none" {
+				stderr, err := h.run(desired, ModeAssessAdopt)
+				if err == nil || strings.Contains(stderr, "private-value") {
+					t.Fatalf("unsafe historical adoption: error=%v stderr=%q", err, stderr)
+				}
+			} else {
+				observed := h.observeMode(t, desired, ModeAssessAdopt)
+				if !observed.Adoptable || observed.Converged {
+					t.Fatal("comment-only template update rejected unchanged historical fields")
+				}
+				evolved := h.observeMode(t, []byte("managed = 'new'\n"), ModeAssessAdopt)
+				if !evolved.Adoptable || evolved.Fingerprint == observed.Fingerprint {
+					t.Fatal("historical evidence did not bind the new desired template")
+				}
+			}
+			if !jsonEqual(before, snapshotMaterialization(t, h.root)) {
+				t.Fatal("historical adoption assessment modified files")
+			}
+			if problem == "none" {
+				h.apply(t, desired)
+				payload, err := os.ReadFile(h.destination)
+				if err != nil || string(payload) != current || !h.observe(t, desired).Converged {
+					t.Fatal("ownership publication changed runtime additions or TOML formatting")
+				}
 			}
 		})
 	}

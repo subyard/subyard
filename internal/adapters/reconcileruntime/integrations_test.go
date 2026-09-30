@@ -201,6 +201,61 @@ func TestPrepareLegacyIntegrationAdoptionSkipsUnavailableIncus(t *testing.T) {
 	}
 }
 
+func TestIntegrationConfigAdoptionReadsShippedHistoricalTemplates(t *testing.T) {
+	for _, kind := range []string{"absent", "regular", "symlink-directory", "symlink-template"} {
+		t.Run(kind, func(t *testing.T) {
+			root := testkit.TempDir(t)
+			directory := filepath.Join(root, "config", "agents", "fixture", "legacy-config")
+			historical := []byte("# Previous template\nmanaged = 'old'\n")
+			if kind != "absent" {
+				if err := os.MkdirAll(filepath.Dir(directory), 0755); err != nil {
+					t.Fatal(err)
+				}
+				if kind == "symlink-directory" {
+					target := testkit.TempDir(t)
+					if err := os.Symlink(target, directory); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					if err := os.Mkdir(directory, 0755); err != nil {
+						t.Fatal(err)
+					}
+					path := filepath.Join(directory, "previous.toml")
+					if kind == "symlink-template" {
+						target := filepath.Join(root, "outside.toml")
+						testkit.WriteFile(t, target, historical, 0644)
+						if err := os.Symlink(target, path); err != nil {
+							t.Fatal(err)
+						}
+					} else {
+						testkit.WriteFile(t, path, historical, 0644)
+					}
+				}
+			}
+			incus := runningIncus(1)
+			incus.ExecSteps[0].Result.Stdout = []byte(`{"converged":false,"adoptable":true,"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`)
+			runtime := Runtime{RepositoryRoot: root, Executor: incus,
+				Yard: domain.Context{DevUser: "dev", DevUID: 1000}}
+			file := guestConfigFile{integration: "fixture", ownedFormat: "toml", destination: "/home/dev/.fixture/config.toml"}
+			_, err := runtime.observeIntegrationConfigFile(context.Background(), configmaterial.ModeAssessAdopt, file, []byte("managed = 'new'\n"))
+			unsafe := strings.HasPrefix(kind, "symlink-")
+			if unsafe {
+				if err == nil || len(incus.ExecCalls) != 0 {
+					t.Fatal("unsafe historical template reached guest observation")
+				}
+				return
+			}
+			if err != nil || len(incus.ExecCalls) != 1 {
+				t.Fatalf("historical template assessment: %v", err)
+			}
+			command := incus.ExecCalls[0].Request.Command
+			if command[4] != configmaterial.ModeAssessAdopt || strings.Contains(command[3], "LEGACY_TEMPLATES = ") != (kind == "regular") {
+				t.Fatal("historical templates were not scoped to their owning integration")
+			}
+		})
+	}
+}
+
 func TestPrepareLegacyIntegrationAdoptionBindsInitialSnapshotOnly(t *testing.T) {
 	root := t.TempDir()
 	for path, content := range map[string]string{

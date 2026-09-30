@@ -123,6 +123,13 @@ identity, schema version, template digest, owned paths and a digest of the owned
 configuration values. A missing or
 outdated baseline requires application even if the managed values already match.
 
+Legacy TOML baselines bind the original template's exact bytes, including comments.
+An integration can ship historical templates in `config/agents/<id>/legacy-config/*.toml`
+so initial integration adoption can verify an unchanged older document after the template changes.
+The historical file must match the baseline's SHA-256 and owned paths, and the document must still
+match all historical owned values. Runtime additions remain untouched. Unknown templates and
+changed owned fields remain conflicts; the new template alone is not proof of prior ownership.
+
 Subyard serializes its own writes per asset and atomically replaces the destination before updating
 the baseline. Retrying an interrupted application converges. Invalid JSON or an invalid baseline
 fails without overwriting it; diagnostics omit configuration contents. Running tools do not share

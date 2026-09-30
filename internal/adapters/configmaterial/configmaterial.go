@@ -72,12 +72,12 @@ func DesiredDigestFor(format string, payload []byte) (string, error) {
 	}
 }
 
-func Request(format, mode, developer, destination string, uid int, payload []byte) (ports.InstanceExecRequest, error) {
+func Request(format, mode, developer, destination string, uid int, payload []byte, legacyTemplates ...[]byte) (ports.InstanceExecRequest, error) {
 	if uid <= 0 {
 		uid = 1000
 	}
 	return materializationRequest(format, mode, developer, destination, uid, payload,
-		guestStateRoot, 0, "/home/"+developer)
+		guestStateRoot, 0, "/home/"+developer, legacyTemplates...)
 }
 
 func DesiredDigest(payload []byte) (string, error) {
@@ -290,7 +290,7 @@ func jsonRequest(
 	return materializationRequest("json", mode, developer, destination, uid, payload, stateRoot, stateUID, allowedHome)
 }
 
-func materializationRequest(format, mode, developer, destination string, uid int, payload []byte, stateRoot string, stateUID int, allowedHome string) (ports.InstanceExecRequest, error) {
+func materializationRequest(format, mode, developer, destination string, uid int, payload []byte, stateRoot string, stateUID int, allowedHome string, legacyTemplates ...[]byte) (ports.InstanceExecRequest, error) {
 	if mode != ModeObserve && mode != ModeApply && mode != ModeAssessAdopt && mode != ModeAssessRetire && mode != ModeRetire {
 		return ports.InstanceExecRequest{}, errors.New("invalid JSON materialization mode")
 	}
@@ -318,6 +318,14 @@ func materializationRequest(format, mode, developer, destination string, uid int
 	program := strings.ReplaceAll(guestJSONProgram, "@STATE_ROOT@", stateRoot)
 	program = strings.ReplaceAll(program, "@STATE_UID@", fmt.Sprint(stateUID))
 	program = strings.ReplaceAll(program, "@FORMAT@", format)
+	if format == "toml" && len(legacyTemplates) != 0 {
+		templates := make([]string, 0, len(legacyTemplates))
+		for _, template := range legacyTemplates {
+			templates = append(templates, string(template))
+		}
+		encoded, _ := json.Marshal(templates)
+		program = "LEGACY_TEMPLATES = " + string(encoded) + "\n" + program
+	}
 	if format == "toml" {
 		// Execute the embedded, self-contained writer in its own namespace so its
 		// helpers cannot collide with ownership or validation functions.

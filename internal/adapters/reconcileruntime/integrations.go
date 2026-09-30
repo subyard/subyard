@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/observerroute"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/shellquote"
@@ -352,7 +353,7 @@ func (runtime Runtime) observeIntegrations(ctx context.Context) (IntegrationPlan
 		if observed.Initial && runtime.AdoptLegacyIntegrations {
 			mode = configmaterial.ModeAssessAdopt
 		}
-		observation, err := runtime.observeIntegrationConfig(ctx, file.ownedFormat, mode, file.destination, payload)
+		observation, err := runtime.observeIntegrationConfigFile(ctx, mode, file, payload)
 		if err != nil {
 			return plan, observed, err
 		}
@@ -499,7 +500,7 @@ func (runtime Runtime) PrepareLegacyIntegrationAdoption(ctx context.Context) (Ru
 		if err != nil {
 			return runtime, IntegrationPlan{}, err
 		}
-		observation, err := candidate.observeIntegrationConfig(ctx, file.ownedFormat, configmaterial.ModeAssessAdopt, file.destination, payload)
+		observation, err := candidate.observeIntegrationConfigFile(ctx, configmaterial.ModeAssessAdopt, file, payload)
 		if err != nil {
 			return runtime, IntegrationPlan{}, err
 		}
@@ -519,8 +520,39 @@ func (runtime Runtime) PrepareLegacyIntegrationAdoption(ctx context.Context) (Ru
 	return candidate, plan, nil
 }
 
-func (runtime Runtime) observeIntegrationConfig(ctx context.Context, format, mode, path string, payload []byte) (configmaterial.Observation, error) {
-	request, err := configmaterial.Request(format, mode, runtime.devUser(), path, runtime.Yard.DevUID, payload)
+func (runtime Runtime) observeIntegrationConfigFile(ctx context.Context, mode string, file guestConfigFile, payload []byte) (configmaterial.Observation, error) {
+	var templates [][]byte
+	if mode == configmaterial.ModeAssessAdopt && file.ownedFormat == "toml" {
+		root := filepath.Join(runtime.RepositoryRoot, "config", "agents", file.integration, "legacy-config")
+		info, err := os.Lstat(root)
+		if err != nil && !os.IsNotExist(err) {
+			return configmaterial.Observation{}, err
+		}
+		if err == nil {
+			if !info.IsDir() {
+				return configmaterial.Observation{}, errors.New("legacy config templates must be a real directory")
+			}
+			entries, err := os.ReadDir(root)
+			if err != nil {
+				return configmaterial.Observation{}, err
+			}
+			for _, entry := range entries {
+				if filepath.Ext(entry.Name()) != ".toml" {
+					continue
+				}
+				template, err := (config.MaterializedAsset{Source: filepath.Join(root, entry.Name())}).ReadSource()
+				if err != nil {
+					return configmaterial.Observation{}, err
+				}
+				templates = append(templates, template)
+			}
+		}
+	}
+	return runtime.observeIntegrationConfig(ctx, file.ownedFormat, mode, file.destination, payload, templates...)
+}
+
+func (runtime Runtime) observeIntegrationConfig(ctx context.Context, format, mode, path string, payload []byte, legacyTemplates ...[]byte) (configmaterial.Observation, error) {
+	request, err := configmaterial.Request(format, mode, runtime.devUser(), path, runtime.Yard.DevUID, payload, legacyTemplates...)
 	if err != nil {
 		return configmaterial.Observation{}, err
 	}

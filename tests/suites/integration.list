@@ -5,6 +5,7 @@ aiobserver-proxy.sh
 ccusage-provision.sh
 codex-agent-defaults.sh
 codex-agent-provision.sh
+codex-legacy-config.sh
 engine-release.sh
 key-tools-install.sh
 init-project-convergence.sh
