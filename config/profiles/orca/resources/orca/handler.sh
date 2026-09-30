@@ -494,6 +494,8 @@ CAPTURE
   # Remote clients can send their own stock YOLO argument, bypassing server defaults.
   # Keep the native CLI and SSH/VS Code shells unchanged; this is a launch default,
   # not a security boundary against explicit commands or in-session mode changes.
+  # An existing function suppresses Orca's own wrapper; codex_launch.py also owns
+  # its supported --no-daemon policy and managed-account hook preparation.
   cat >"$codex_profile" <<CODEX_PROFILE
 if [ "\${SUBYARD_ORCA_CODEX_CONFIG:-}" = 1 ]; then
   codex() { /usr/bin/python3 -B $ORCA_REGISTRATION/codex_launch.py "\$@"; }
