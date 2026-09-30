@@ -5,7 +5,9 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B - "$ROOT" <<'PY'
 import importlib.util
 import os
 from pathlib import Path
+import shutil
 import sys
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -18,6 +20,59 @@ spec.loader.exec_module(m)
 
 
 class TestAcceptance(unittest.TestCase):
+    def test_prepare_uses_plain_sources_and_retains_only_needed_artifacts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            checkout = directory / "checkout"
+            for name in ("dev/agent-e2e.sh", "scripts/lib/runtime.sh", "tests/helpers/source-files.sh"):
+                target = checkout / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(root / name, target)
+            (checkout / ".gitignore").write_text("/.build/\n/private/\n/.subyard-acceptance/\n")
+            (checkout / "input.txt").write_text("current uncommitted input\n")
+            (checkout / "private").mkdir()
+            (checkout / "private/excluded.txt").write_text("excluded fixture\n")
+            package = checkout / "dev/package-engine.sh"
+            package.write_text('''#!/usr/bin/env bash
+set -euo pipefail
+[ "$1" = --output-dir ] && [ "$3" = --version ]
+printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
+'''.replace("ARCH", {"x86_64": "amd64", "aarch64": "arm64"}[m.platform.machine()]))
+            output = checkout / ".build/acceptance"
+            inventory = {"sample": {"kind": "runner", "path": "sample-acceptance.sh"}}
+            check_output = m.subprocess.check_output
+            def tool_output(command, **kwargs):
+                if command == ["go", "version"]:
+                    return "go version fixture"
+                return check_output(command, **kwargs)
+            with patch.object(m, "ROOT", checkout), \
+                 patch.object(m, "profile_inventory", return_value=inventory), \
+                 patch.object(m, "external_inventory", return_value={}), \
+                 patch.object(m.subprocess, "check_output", side_effect=tool_output):
+                m.prepare(output, "test")
+                source, receipt = m.load_bound(output)
+                self.assertEqual(source, output / "source")
+                self.assertEqual((source / "input.txt").read_text(), "current uncommitted input\n")
+                self.assertEqual({path.name for path in output.iterdir()},
+                                 {"source", "candidate-bundle.tar.gz", "receipt.json", receipt["checks"]["package"]["log"]})
+                self.assertFalse(list(source.rglob(".git")))
+                self.assertFalse((source / "private").exists())
+                with tarfile.open(output / "candidate-bundle.tar.gz") as archive:
+                    names = set(archive.getnames())
+                    self.assertIn("input.txt", names)
+                    self.assertIn(".subyard-acceptance/candidate.json", names)
+                    self.assertIn(".subyard-acceptance/release/" + receipt["runtime_file"], names)
+                    self.assertFalse(any(".git" in Path(name).parts for name in names))
+                    self.assertNotIn(".subyard-e2e-index", names)
+                (source / "input.txt").write_text("changed after preparation\n")
+                with self.assertRaisesRegex(ValueError, "frozen source fingerprint mismatch"):
+                    m.load_bound(output)
+                (source / "input.txt").write_text("current uncommitted input\n")
+                runtime = source / ".subyard-acceptance/release" / receipt["runtime_file"]
+                runtime.write_text("changed runtime\n")
+                with self.assertRaisesRegex(ValueError, "candidate release assets changed"):
+                    m.load_bound(output)
+
     def test_complete_status_requires_every_obligation(self):
         for check, external, expected in (
             ("pending", "passed", "incomplete"),

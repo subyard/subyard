@@ -19,14 +19,6 @@ command -v jq >/dev/null 2>&1 || die 'jq is required'
 unset SUBYARD_E2E_SLOT
 
 cd "$ROOT"
-if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  git init -q
-  git config user.name fixture
-  git config user.email fixture@example.invalid
-  git add -A
-  git commit -qm fixture
-fi
-
 dev/agent-e2e.sh --prepare
 status="$(dev/agent-e2e.sh --status --json)" \
   || die 'cannot read broker-local status'

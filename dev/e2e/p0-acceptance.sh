@@ -157,7 +157,7 @@ public_tree_hash() {
       continue
     fi
     printf '%s\0%s\0%s\0%s\0' "$path" "$kind" "$mode" "$digest"
-  done < <(git -C "$ROOT" ls-files --cached --others --exclude-standard -z | sort -z)
+  done < <(bash "$ROOT/tests/helpers/source-files.sh" | sort -z)
 }
 prepare_run_records() {
   local evidence_dir="$STATE_ROOT/evidence"
@@ -636,12 +636,13 @@ verify_cache_lifecycle() {
 }
 
 prepare_source_archive() {
-  local vm="$1" revision commit hash remote_hash
+  local vm="$1" revision commit hash remote_hash history_root
   revision="${SUBYARD_P0_SOURCE_REVISION:-7c67ee3}"
-  commit="$(git -C "$ROOT" rev-parse --verify "$revision^{commit}")" \
+  history_root="${SUBYARD_E2E_CONTROLLER_WORKSPACE:-$ROOT}"
+  commit="$(git -C "$history_root" rev-parse --verify "$revision^{commit}")" \
     || die "source revision $revision is unavailable"
   SOURCE_ARCHIVE="$(mktemp /tmp/subyard-p0-source.XXXXXX.tar.gz)"
-  git -C "$ROOT" archive --format=tar "$commit" | gzip -n > "$SOURCE_ARCHIVE"
+  git -C "$history_root" archive --format=tar "$commit" | gzip -n > "$SOURCE_ARCHIVE"
   hash="$(sha256sum "$SOURCE_ARCHIVE" | cut -d' ' -f1)"
   SOURCE_ARCHIVE_REMOTE="/tmp/subyard-p0-source-$TOKEN.tar.gz"
   p0_guest "$vm" \

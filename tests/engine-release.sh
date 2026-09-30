@@ -6,14 +6,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-# Packaging intentionally uses a Git index as its production allowlist. Give it a
-# disposable index of today's public files, even when the source has no .git.
+# Copy today's public inputs because the packaging checks add local fixtures.
 bash "$ROOT/tests/helpers/source-files.sh" > "$TMP/source-files"
 mkdir "$TMP/source"
 tar -C "$ROOT" --null -T "$TMP/source-files" -cf - | tar -C "$TMP/source" -xpf -
 ROOT="$TMP/source"
-git -C "$ROOT" init --quiet
-git -C "$ROOT" add --all
 cd "$ROOT"
 
 release="$TMP/release"
@@ -80,7 +77,7 @@ qa_canary="$(mktemp "$ROOT/config/qa-pool/.package-canary.XXXXXX")"
 untracked_canary="$(mktemp --suffix=.txt "$ROOT/config/staging/.package-untracked-canary.XXXXXX")"
 printf 'ignored staging secret\n' > "$staging_canary"
 printf 'ignored qa secret\n' > "$qa_canary"
-printf 'untracked local input\n' > "$untracked_canary"
+printf 'untracked public input\n' > "$untracked_canary"
 chmod 0600 "$staging_canary" "$qa_canary" "$untracked_canary"
 trap 'rm -f -- "$staging_canary" "$qa_canary" "$untracked_canary"; rm -rf "$TMP"' EXIT
 # A newly added profile must package without requiring a staged Git entry.
@@ -160,8 +157,9 @@ grep -Fxq './runtime-files.sha256' "$bundle_list" \
   || fail 'runtime bundle exact file manifest is missing'
 ! grep -Fq "$(basename "$staging_canary")" "$bundle_list" \
   && ! grep -Fq "$(basename "$qa_canary")" "$bundle_list" \
-  && ! grep -Fq "$(basename "$untracked_canary")" "$bundle_list" \
-  || fail 'runtime bundle contains an untracked host-local canary'
+  || fail 'runtime bundle contains an ignored host-local canary'
+grep -Fq "$(basename "$untracked_canary")" "$bundle_list" \
+  || fail 'runtime bundle omitted an untracked public input'
 bundle_extract="$TMP/bundle-extract"
 install -d "$bundle_extract"
 tar -xpzf "$bundle_one" -C "$bundle_extract"
@@ -186,7 +184,8 @@ jq -e '.schemaVersion == 1 and .version == "1.0.0-test" and .rpc.min == 1 and .r
   .projectStateSchema == 1 and .credentialSchema == 1' "$artifact_one.manifest.json" >/dev/null
 jq -e '.schemaVersion == 1 and .version == "1.0.0-test" and
   .sourceRepository == "github.com/Dmitry-Borodin/Subyard" and
-  .canonicalRepository == "github.com/Subyard/Subyard" and (.sha256 | length == 64)' \
+  .canonicalRepository == "github.com/Subyard/Subyard" and .sourceRevision == "unknown" and
+  (.sha256 | length == 64)' \
   "$artifact_one.provenance.json" >/dev/null
 rpc_negotiate "$artifact_one" 1.0.0-test 1 compatible artifact-one-v1
 rpc_negotiate "$artifact_one" 1.0.0-test 2 incompatible artifact-one-v2

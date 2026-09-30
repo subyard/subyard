@@ -24,7 +24,7 @@ done
 
 case "$VERSION" in ''|*[!A-Za-z0-9._+-]*) printf 'package-engine: unsafe version: %s\n' "$VERSION" >&2; exit 2 ;; esac
 command -v go >/dev/null 2>&1 || { printf 'package-engine: Go is required\n' >&2; exit 2; }
-command -v git >/dev/null 2>&1 || { printf 'package-engine: Git is required\n' >&2; exit 2; }
+command -v rg >/dev/null 2>&1 || { printf 'package-engine: ripgrep is required\n' >&2; exit 2; }
 command -v jq >/dev/null 2>&1 || { printf 'package-engine: jq is required\n' >&2; exit 2; }
 command -v sha256sum >/dev/null 2>&1 || { printf 'package-engine: sha256sum is required\n' >&2; exit 2; }
 case "$TARGET_ARCH" in amd64 | arm64) ;; *) printf 'package-engine: unsupported architecture: %s\n' "$TARGET_ARCH" >&2; exit 2 ;; esac
@@ -61,7 +61,8 @@ printf '{"schemaVersion":1,"version":"%s","os":"%s","arch":"%s","rpc":{"min":1,"
   > "$artifact.manifest.json"
 artifact_hash="$(cut -d' ' -f1 "$artifact.sha256")"
 revision=unknown
-if candidate_revision="$(git -C "$REPO" rev-parse --verify HEAD 2>/dev/null)" \
+if [ -e "$REPO/.git" ] \
+  && candidate_revision="$(git -C "$REPO" rev-parse --verify HEAD 2>/dev/null)" \
   && [[ "$candidate_revision" =~ ^[0-9a-f]{40,64}$ ]]; then
   revision="$candidate_revision"
 fi
@@ -98,9 +99,10 @@ runtime_extras=(
   config/systemd/subyard-test-vms-host-sink.timer.in
 )
 {
-  git -C "$REPO" ls-files --cached -z -- scripts config completions
-  # Profile directories own their runtime inputs, including new checkout files.
-  (cd "$REPO" && find config/profiles -type f -print0)
+  bash "$REPO/tests/helpers/source-files.sh" \
+    | while IFS= read -r -d '' relative; do
+        case "$relative" in scripts/*|config/*|completions/*) printf '%s\0' "$relative" ;; esac
+      done
   for relative in "${runtime_extras[@]}"; do
     [ -f "$REPO/$relative" ] && printf '%s\0' "$relative"
   done
