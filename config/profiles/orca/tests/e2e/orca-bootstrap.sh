@@ -935,14 +935,13 @@ if [ "$CODEX_PERMISSIONS" = 1 ]; then
 fi
 
 stage 'installing a packaged candidate through the public release installer'
-# The VM receives public source without Git metadata. Give packaging its normal
-# tracked-file allowlist in a disposable copy, without altering the checkout.
-bash "$ROOT/tests/helpers/source-files.sh" >"$STATE/source-files"
-mkdir "$STATE/source"
-tar -C "$ROOT" --null -T "$STATE/source-files" -cf - | tar -C "$STATE/source" -xf -
-git -C "$STATE/source" init --quiet
-git -C "$STATE/source" add --all
+package_source="$ROOT"
 if [ -n "$UPGRADE_FROM" ]; then
+  # Only the source-mutating upgrade fixture needs a disposable public copy.
+  mkdir "$STATE/source"
+  bash "$ROOT/tests/helpers/source-files.sh" \
+    | tar -C "$ROOT" --null -T - -cf - | tar -C "$STATE/source" -xf -
+  package_source="$STATE/source"
   # The predecessor must be converged: its released updater cannot change
   # targets while an existing activation needs repair. Only the candidate
   # introduces this new desired value, in both local yards.
@@ -964,7 +963,7 @@ if [ -e "$ROOT/.subyard-acceptance/candidate.json" ]; then
   mkdir -p "$STATE/release"
   cp -a "$ROOT/.subyard-acceptance/release/." "$STATE/release/"
 else
-  bash "$STATE/source/dev/package-engine.sh" --version "$release_version" \
+  bash "$package_source/dev/package-engine.sh" --version "$release_version" \
     --output-dir "$STATE/release" >/dev/null
 fi
 if [ -n "$UPGRADE_FROM" ]; then

@@ -332,22 +332,29 @@ build_bundle "$fixture" "$bundle"
 contents="$(tar -tzf "$bundle" | sort)"
 printf '%s\n' "$contents" | grep -Fxq dirty.txt || fail "dirty untracked file was not copied"
 printf '%s\n' "$contents" | grep -Fxq tracked.txt || fail "modified tracked file was not copied"
-printf '%s\n' "$contents" | grep -Fxq .subyard-e2e-index \
-  || fail "tracked-file inventory was not copied"
+! printf '%s\n' "$contents" | grep -Fxq .subyard-e2e-index \
+  || fail "obsolete Git inventory entered the worktree bundle"
 ! printf '%s\n' "$contents" | grep -Fxq removed.txt || fail "deleted tracked file entered the bundle"
 ! printf '%s\n' "$contents" | grep -Eq '(^|/)(private|temp|\.git)(/|$)|ignored\.secret' \
   || fail "ignored or private data entered the worktree bundle"
-inventory="$(tar -xOf "$bundle" .subyard-e2e-index | tr '\0' '\n')"
-printf '%s\n' "$inventory" | grep -Fxq tracked.txt \
-  || fail "tracked-file inventory omitted a tracked path"
-! printf '%s\n' "$inventory" | grep -Fxq dirty.txt \
-  || fail "tracked-file inventory classified an untracked path as tracked"
+source_copy="$TMP/source-copy"
+mkdir "$source_copy"
+tar -xzf "$bundle" -C "$source_copy"
+build_bundle "$source_copy" "$TMP/source-copy.tar.gz"
+cmp -s "$bundle" "$TMP/source-copy.tar.gz" \
+  || fail "source bundling depends on Git metadata"
 
 ln -s /etc/passwd "$fixture/escaping-link"
 if (build_bundle "$fixture" "$TMP/unsafe.tar.gz") >/dev/null 2>&1; then
   fail "worktree bundling accepted a symlink outside the repository"
 fi
 rm "$fixture/escaping-link"
+
+ln -s private "$fixture/private-alias"
+if (build_bundle "$fixture" "$TMP/private-alias.tar.gz") >/dev/null 2>&1; then
+  fail "worktree bundling traversed a symlink into private inputs"
+fi
+rm "$fixture/private-alias"
 
 command_root="$TMP/command path"
 mkdir -p "$command_root/src"
@@ -2578,10 +2585,8 @@ guest() {
   esac
   "$@"
 }
-mock_bundle="$TMP/mock.tar.gz"
-tar -C "$fixture" -czf "$mock_bundle" tracked.txt
-mock_hash="$(sha256sum "$mock_bundle" | awk '{print $1}')"
-run_guest 1 "$mock_bundle" "$mock_hash" test -f tracked.txt \
+run_guest 1 "$bundle" "$(sha256sum "$bundle" | awk '{print $1}')" \
+  sh -c 'test -f tracked.txt && test ! -e .git' \
   || fail "mock guest command failed"
 guest_directory="${GUEST_DIRS[1]:-}"
 case "$guest_directory" in /tmp/subyard-worktree.*) ;; *) fail "guest run directory was not retained for cleanup" ;; esac
@@ -4092,7 +4097,6 @@ mkdir -p "$consumer_fixture/dev/e2e" "$consumer_registry/test-yard/current"
 cp "$ROOT/dev/e2e/release-migration-consumer.sh" "$consumer_fixture/dev/e2e/"
 touch "$consumer_registry/test-yard/current/route.tsv" \
   "$consumer_registry/test-yard/current/known_hosts"
-git -C "$consumer_fixture" init -q
 cat > "$consumer_fixture/dev/agent-e2e.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail

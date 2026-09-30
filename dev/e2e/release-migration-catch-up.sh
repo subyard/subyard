@@ -382,11 +382,11 @@ prepare_consumer() {
   host_incus exec "$CONSUMER_INSTANCE" --project "$CONSUMER_PROJECT" -- true \
     >/dev/null 2>&1 || die "consumer container did not become ready"
   host_incus exec "$CONSUMER_INSTANCE" --project "$CONSUMER_PROJECT" -- \
-    /bin/sh -c 'command -v git >/dev/null 2>&1 &&
+    /bin/sh -c 'command -v rg >/dev/null 2>&1 &&
       command -v jq >/dev/null 2>&1 &&
       command -v ssh >/dev/null 2>&1 || {
         apt-get update -qq
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git jq openssh-client
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ripgrep jq openssh-client
       }'
   ! host_incus config device get "$CONSUMER_INSTANCE" subyard-e2e-routes type \
     --project "$CONSUMER_PROJECT" >/dev/null 2>&1 \
@@ -1184,7 +1184,7 @@ verify_data_plane() {
     sh -c 'id dev >/dev/null 2>&1 || useradd --create-home --shell /bin/bash dev'
   (
     cd "$ROOT"
-    git ls-files --cached --others --exclude-standard -z \
+    bash tests/helpers/source-files.sh \
       | sort -z \
       | tar --null -T - -czf "$bundle"
   )

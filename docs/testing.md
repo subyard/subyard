@@ -17,8 +17,8 @@ umasks `0002`, `0022` and `0077` in separate processes.
 `./tests/run.sh` checks the current source files, including uncommitted edits. No Git history,
 clean checkout, base commit or `.git` directory is required. Install the tools listed in
 [the test guide](test-vms.md), including Git and ripgrep: tests of Git behavior create their own
-temporary repositories. The release packaging test also creates its own index of the current public
-files; it does not change the source checkout's index.
+temporary repositories. The release packaging test uses a disposable copy of the current public
+files because it adds fixtures; that copy needs no Git metadata.
 
 The runner prints one start/result line per check and a final `SUMMARY` with its
 status, check count, elapsed seconds and original exit code. Successful check output
@@ -68,9 +68,11 @@ python3 dev/release-acceptance.py run --output .build/release-acceptance --slots
 
 Select available slots using `dev/agent-e2e.sh --status`; each slot runs one controller at a time.
 Source fingerprints use Git executable-bit semantics; snapshots normalize public file modes explicitly,
-so the checkout umask cannot change the candidate. The source snapshot, runtime assets, transport
-archive, logs and `receipt.json` remain in the output
-directory. Every controller receives the same checksum-verified transport archive; profile fixtures
+so the checkout umask cannot change the candidate. One plain source copy is retained for local
+checks and controllers, with the runtime assets under its `.subyard-acceptance/release/` directory.
+The output also retains the transport archive, logs and `receipt.json`; the intermediate source
+archive is removed after extraction. Neither the source copy nor the VM payload needs a Git
+repository or index. Every controller receives the same checksum-verified transport archive; profile fixtures
 execute the packaged engine and runtime assets. The core smoke installs those assets through the
 public updater, including reboot, rollback and roll-forward. Local verification, ShellCheck,
 process coverage, real local adapters and updater compatibility precede physical checks.

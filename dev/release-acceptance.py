@@ -11,6 +11,7 @@ import platform
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 import threading
 import uuid
@@ -28,7 +29,7 @@ def source_fingerprint(root):
     paths = subprocess.check_output(["bash", "tests/helpers/source-files.sh"], cwd=root)
     for raw in sorted(filter(None, paths.split(b"\0"))):
         name = os.fsdecode(raw)
-        if name == ".subyard-e2e-index" or name.startswith(".subyard-acceptance/"):
+        if name.startswith(".subyard-acceptance/"):
             continue
         path = root / name
         if not path.exists() and not path.is_symlink():
@@ -54,10 +55,10 @@ def clean_environment():
     return env
 
 
-def bundle(root, destination):
-    subprocess.run(["bash", "-c", '. "$1"; build_bundle "$2" "$3"',
+def bundle(root, destination, *extra_paths):
+    subprocess.run(["bash", "-c", '. "$1"; build_bundle "$2" "$3" "${@:4}"',
                     "release-acceptance", str(root / "dev/agent-e2e.sh"),
-                    str(root), str(destination)], cwd=root, env=clean_environment(), check=True)
+                    str(root), str(destination), *extra_paths], cwd=root, env=clean_environment(), check=True)
 
 
 def profile_inventory(root):
@@ -145,21 +146,19 @@ def prepare(output, version):
     if any(output.iterdir()):
         raise ValueError("prepare requires an empty output directory")
     original = source_fingerprint(ROOT)
-    source_archive = output / "source.tar.gz"
-    bundle(ROOT, source_archive)
     root = output / "source"
     root.mkdir()
-    with tarfile.open(source_archive, "r:gz") as archive:
-        for member in archive.getmembers():
-            if member.name.startswith("/") or ".." in Path(member.name).parts or not (member.isfile() or member.isdir()):
-                raise ValueError("unsafe source archive member")
-        archive.extractall(root, filter="data")
-        for member in archive.getmembers():
-            path = root / member.name
-            path.chmod(0o755 if member.isdir() or member.mode & 0o111 else 0o644)
-    (root / ".subyard-e2e-index").unlink(missing_ok=True)
-    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
-    subprocess.run(["git", "add", "--all"], cwd=root, check=True)
+    with tempfile.TemporaryDirectory(prefix=".source-", dir=output) as temporary:
+        source_archive = Path(temporary) / "source.tar.gz"
+        bundle(ROOT, source_archive)
+        with tarfile.open(source_archive, "r:gz") as archive:
+            for member in archive.getmembers():
+                if member.name.startswith("/") or ".." in Path(member.name).parts or not (member.isfile() or member.isdir()):
+                    raise ValueError("unsafe source archive member")
+            archive.extractall(root, filter="data")
+            for member in archive.getmembers():
+                path = root / member.name
+                path.chmod(0o755 if member.isdir() or member.mode & 0o111 else 0o644)
     if source_fingerprint(root) != original or source_fingerprint(ROOT) != original:
         raise ValueError("source changed while freezing the candidate")
     inventory = profile_inventory(root)  # Fail before packaging or allocating any VM.
@@ -185,9 +184,9 @@ def prepare(output, version):
     receipt["release_files"] = {path.name: digest(path) for path in sorted(release.iterdir()) if path.is_file()}
     metadata = {key: receipt[key] for key in ("version", "runtime_file", "runtime_sha256")}
     (root / ".subyard-acceptance/candidate.json").write_text(json.dumps(metadata) + "\n")
-    subprocess.run(["git", "add", "-f", ".subyard-acceptance/candidate.json", ".subyard-acceptance/release"], cwd=root, check=True)
     transport = output / "candidate-bundle.tar.gz"
-    bundle(root, transport)
+    bundle(root, transport, ".subyard-acceptance/candidate.json",
+           *(".subyard-acceptance/release/" + name for name in receipt["release_files"]))
     receipt["candidate_bundle_sha256"] = digest(transport)
     save(output, receipt)
     print(f"PREPARED {output / 'receipt.json'}", flush=True)

@@ -38,4 +38,3 @@
 
 # Frozen release acceptance payload (created only in disposable source snapshots).
 /.subyard-acceptance/
-/.subyard-e2e-index

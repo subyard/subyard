@@ -322,9 +322,7 @@ resolve_workspace_attribution() {
   if [ -n "${SUBYARD_E2E_CONTROLLER_WORKSPACE:-}" ]; then
     root="$SUBYARD_E2E_CONTROLLER_WORKSPACE"
   fi
-  canonical="$(git -C "$root" rev-parse --show-toplevel 2>/dev/null)" \
-    || die "cannot identify the E2E worktree"
-  canonical="$(realpath -e -- "$canonical")" \
+  canonical="$(realpath -e -- "$root")" \
     || die "cannot canonicalize the E2E worktree"
   workspace_root=/srv/workspaces
   if [ "${SUBYARD_E2E_TEST_MODE:-}" = 1 ] &&
@@ -985,11 +983,12 @@ cleanup_on_exit() {
 }
 
 worktree_paths() {
-  git ls-files --cached --others --exclude-standard -z
+  bash "$REPO_ROOT/tests/helpers/source-files.sh" "$@"
 }
 
 build_bundle() {
-  local root="$1" bundle="$2" path resolved count=0 archive inventory inventory_dir
+  local root="$1" bundle="$2" path directory resolved count=0
+  shift 2
   if [ -n "${SUBYARD_E2E_CANDIDATE_BUNDLE:-}" ]; then
     [[ "${SUBYARD_E2E_CANDIDATE_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] \
       || die 'SUBYARD_E2E_CANDIDATE_SHA256 must be a lowercase SHA-256 digest'
@@ -1008,29 +1007,19 @@ build_bundle() {
         die "refusing non-public worktree path '$path'"
         ;;
     esac
+    directory="$root"
+    [[ "$path" != */* ]] || directory="$root/${path%/*}"
+    [ "$(realpath "$directory")" = "$directory" ] \
+      || die "refusing symlinked worktree directory: '$path'"
     if [ -L "$root/$path" ]; then
       resolved="$(realpath "$root/$path")" || die "cannot resolve symlink '$path'"
       case "$resolved" in "$root"/*) ;; *) die "refusing symlink outside the worktree: '$path'" ;; esac
     fi
     paths+=("$path")
     count=$((count + 1))
-  done < <(cd "$root" && worktree_paths)
+  done < <(worktree_paths "$root" --follow; if [ "$#" -gt 0 ]; then printf '%s\0' "$@"; fi)
   [ "$count" -gt 0 ] || die "public worktree is empty"
-  inventory_dir="$(mktemp -d "$(dirname "$bundle")/.bundle-index.XXXXXX")"
-  inventory="$inventory_dir/.subyard-e2e-index"
-  while IFS= read -r -d '' path; do
-    if [ -e "$root/$path" ] || [ -L "$root/$path" ]; then
-      printf '%s\0' "$path"
-    fi
-  done < <(git -C "$root" ls-files --cached -z) > "$inventory"
-  chmod 0600 "$inventory"
-  touch -d @0 "$inventory"
-  archive="$bundle.tar"
-  printf '%s\0' "${paths[@]}" | tar -C "$root" --null -T - -cf "$archive"
-  tar -C "$inventory_dir" -rf "$archive" .subyard-e2e-index
-  gzip -n < "$archive" > "$bundle"
-  rm -f -- "$archive"
-  find "$inventory_dir" -depth -delete
+  printf '%s\0' "${paths[@]}" | tar -C "$root" --null -T - -cf - | gzip -n > "$bundle"
 }
 
 write_guest_command() {
@@ -1076,16 +1065,6 @@ prepare_guest() {
     || { printf 'agent-e2e: VM%s source directory creation failed\n' "$vm" >&2; return 2; }
   guest "$vm" tar -xzf "$directory/worktree.tar.gz" -C "$directory/src" </dev/null \
     || { printf 'agent-e2e: VM%s worktree extraction failed\n' "$vm" >&2; return 2; }
-  if guest "$vm" test -f "$directory/src/.subyard-e2e-index" </dev/null; then
-    guest "$vm" bash -c '
-      root="$1"
-      inventory="$root/.subyard-e2e-index"
-      git -C "$root" init -q
-      xargs -0 -r git -C "$root" --literal-pathspecs add -f -- < "$inventory"
-      rm -f -- "$inventory"
-    ' _ "$directory/src" </dev/null \
-      || { printf 'agent-e2e: VM%s Git index reconstruction failed\n' "$vm" >&2; return 2; }
-  fi
   PREPARED_DIRECTORY="$directory"
 }
 
@@ -1247,8 +1226,7 @@ main() {
   [ "${#command[@]}" -gt 0 ] || die "a guest command is required after --"
   case "$selector" in all) for ((vm=1; vm<=VM_COUNT; vm++)); do selected+=("$vm"); done ;; 1) selected=(1) ;; 2) selected=(2) ;; both) selected=(1 2) ;; *) die "--vm must be 1, 2 or both" ;; esac
   root="$REPO_ROOT"
-  git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
-    || die "agent E2E must run from a Git worktree"
+  command -v rg >/dev/null 2>&1 || die "ripgrep is required"
   command -v tar >/dev/null 2>&1 || die "tar is required"
   command -v sha256sum >/dev/null 2>&1 || die "sha256sum is required"
 
