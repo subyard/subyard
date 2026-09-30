@@ -159,6 +159,7 @@ type retryableIntegrationExecutor struct {
 	hookAttempts   int
 	failFirstHook  bool
 	hookReady      string
+	requests       []ports.InstanceExecRequest
 }
 
 type preparedAdoptionExecutor struct {
@@ -352,6 +353,7 @@ func TestIntegrationScopeBindsDesiredArtifactsWithoutRuntimeProbes(t *testing.T)
 }
 
 func (fixture *retryableIntegrationExecutor) Exec(_ context.Context, _, _ string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	fixture.requests = append(fixture.requests, request)
 	command := strings.Join(request.Command, "\x00")
 	if len(request.Command) >= 5 && request.Command[0] == "python3" && strings.Contains(request.Command[3], "Version 1 records observed ownership only") {
 		switch request.Command[4] {
@@ -388,6 +390,37 @@ func (fixture *retryableIntegrationExecutor) Exec(_ context.Context, _, _ string
 		}
 	}
 	return ports.InstanceExecResult{}, nil
+}
+
+func TestIntegrationConvergenceNeverExecutesHealthProbes(t *testing.T) {
+	root := testkit.TempDir(t)
+	for _, path := range []string{"config", "scripts"} {
+		if err := os.Mkdir(filepath.Join(root, path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	testkit.WriteFile(t, filepath.Join(root, "config/projects-changed.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o644)
+	testkit.WriteFile(t, filepath.Join(root, "scripts/reconcile-integrations.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	executor := &retryableIntegrationExecutor{serviceChanged: true}
+	instance := ports.InstanceInfo{Status: "Running", Config: map[string]string{}, Devices: map[string]map[string]string{}}
+	runtime := Runtime{
+		RepositoryRoot: root, Executor: executor,
+		Incus:       &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: instance}},
+		Yard:        domain.Context{IncusProject: "test", YardInstanceName: "yard", DevUser: "dev", DevUID: os.Getuid()},
+		Environment: []string{"CODING_TOOL_INTEGRATIONS=sample", "AGENT_sample_HEALTH=sentinel-health"},
+	}
+	plan, err := runtime.IntegrationPlan(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.ApplyIntegrations(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	for _, request := range executor.requests {
+		if slices.Contains(request.Command, "sentinel-health") {
+			t.Fatal("service health entered installation convergence")
+		}
+	}
 }
 
 func TestIntegrationHookFailureLeavesInventoryPendingForRetry(t *testing.T) {

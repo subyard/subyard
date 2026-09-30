@@ -126,7 +126,7 @@ func TestExactRPCRequiresCapabilityAndDiscardsOnDisconnect(t *testing.T) {
 }
 
 func TestRemoteIntegrationUsesOneOwnerRPCSession(t *testing.T) {
-	for _, kind := range []string{"provision", "accept", "ssh-trust-denied", "owner-clock-ahead", "owner-clock-behind", "no-op", "preconfirmed-prompt", "decline", "old-owner", "disconnect", "status", "cleanup-check", "rpc-status", "rpc-status-wrong-yard"} {
+	for _, kind := range []string{"provision", "accept", "ssh-trust-denied", "owner-clock-ahead", "owner-clock-behind", "no-op", "preconfirmed-prompt", "decline", "old-owner", "disconnect", "status", "cleanup-check", "rpc-status", "rpc-status-wrong-yard", "rpc-status-invalid-health"} {
 		t.Run(kind, func(t *testing.T) {
 			selection := "CODING_TOOL_INTEGRATIONS=\n"
 			if kind == "no-op" {
@@ -212,7 +212,9 @@ while True:
   send(req,{'plan':plan['plan'],'result':{'schema':1,'operationId':req['operationId'],'status':'ok'}})
  elif method=='integration.status':
   if not req['params'].get('ownerOnly'):sys.exit(7)
-  send(req,{'yard':'other' if kind=='rpc-status-wrong-yard' else 'default','selection':{'present':True},'observed':'stopped'})
+  status={'yard':'other' if kind=='rpc-status-wrong-yard' else 'default','selection':{'present':True},'observed':'stopped'}
+  if kind=='rpc-status-invalid-health':status['health']={'unselected':'ready'}
+  send(req,status)
  else:sys.exit(6)
 `, 0700)
 			t.Setenv("PATH", folder+":"+os.Getenv("PATH"))
@@ -230,8 +232,8 @@ while True:
 				result, err := handler.Handle(context.Background(), rpc.Call{
 					Method: "integration.status", OperationID: "controller-status", Params: json.RawMessage(`{}`),
 				}, nil)
-				if kind == "rpc-status-wrong-yard" {
-					if err == nil || !strings.Contains(err.Error(), "invalid integration status") {
+				if kind == "rpc-status-wrong-yard" || kind == "rpc-status-invalid-health" {
+					if err == nil || !strings.Contains(err.Error(), "invalid integration") {
 						t.Fatalf("mismatched owner status accepted: %v", err)
 					}
 				} else if err != nil || result.(integrationStatus).Observed != "stopped" {

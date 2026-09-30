@@ -41,7 +41,7 @@ func TestPublicSettingsExampleCoversStaticCatalog(t *testing.T) {
 	for _, pattern := range []string{
 		"AGENT_<name>_CONFIG", "AGENT_<name>_RULES", "AGENT_<name>_CONFIG_DEST",
 		"AGENT_<name>_RULES_DEST", "AGENT_<name>_PROVISION", "AGENT_<name>_COMMAND",
-		"AGENT_<name>_CHECK", "AGENT_<name>_PROJECTS_CHANGED", "AGENT_<name>_DEPENDS",
+		"AGENT_<name>_CHECK", "AGENT_<name>_HEALTH", "AGENT_<name>_PROJECTS_CHANGED", "AGENT_<name>_DEPENDS",
 		"AGENT_<name>_PERSIST",
 	} {
 		if !strings.Contains(string(content), pattern) {

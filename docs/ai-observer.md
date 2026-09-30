@@ -58,12 +58,23 @@ service and removes its dashboard proxy. The database is retained. Re-enabling t
 integration resumes collection from the saved positions.
 
 Inside the yard, `ai-observer status` and `ai-observer logs` inspect the service.
-`ai-observer-check` is the bounded readiness check used during reconciliation.
-The pinned watcher imports existing history before starting its HTTP server.
-During installation, Subyard waits up to ten minutes for readiness and reports
-progress while waiting. If that deadline expires, it restores the previous
-runtime and retains the database. Ordinary readiness checks remain bounded to
-20 seconds.
+`ai-observer-check` remains the bounded HTTP readiness command for operators.
+Provisioning verifies the exact owned image, mounts, enabled service, and running
+container with a short bounded check; HTTP readiness does not gate installation.
+The pinned watcher imports existing history before opening its HTTP server, so
+the integration health state can report `starting` while a large history imports.
+`yard init` and agent reconciliation during upgrades can therefore finish without
+waiting for history size. A `starting` state means the owned container is running
+while HTTP is unavailable; it does not show whether backfill is progressing or
+complete. `unknown` means the bounded runtime probe could not establish state.
+Use `ai-observer logs` for service diagnostics. Repeated initialization leaves an
+already running import alone. The persistent database retains per-file checkpoints
+if the service restarts.
+
+The background startup contract applies once the new release owns activation.
+An older protected transition still uses its original checks. If it is already
+blocked, resolve its blocker and finish the exact installed transition before
+an ordinary update; this change does not supersede that saved transition plan.
 
 Upstream: [AI Observer](https://github.com/tobilg/ai-observer),
 [watch mode](https://github.com/tobilg/ai-observer/blob/v0.5.0/README.md#watch-command).

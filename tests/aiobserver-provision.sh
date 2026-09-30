@@ -167,7 +167,11 @@ case "${1:-}" in
       exit 1
     fi
     touch "$root/active"
-    printf '%s\n' true >"$root/containers/subyard-ai-observer/running"
+    if [ "${AI_OBSERVER_FAKE_RUNTIME_STOPPED:-0}" = 1 ]; then
+      printf '%s\n' false >"$root/containers/subyard-ai-observer/running"
+    else
+      printf '%s\n' true >"$root/containers/subyard-ai-observer/running"
+    fi
     ;;
   stop)
     rm -f "$root/active"
@@ -193,13 +197,6 @@ if [ "${AI_OBSERVER_FAKE_HTTP_FAIL:-0}" = 1 ]; then
   printf 'probe-output-should-stay-private\n' >&2
   exit 22
 fi
-if [ -f "${AI_OBSERVER_FAKE_ROOT:?}/http-failures-left" ]; then
-  failures=$(cat "$AI_OBSERVER_FAKE_ROOT/http-failures-left")
-  if [ "$failures" -gt 0 ]; then
-    printf '%s\n' "$((failures - 1))" >"$AI_OBSERVER_FAKE_ROOT/http-failures-left"
-    exit 52
-  fi
-fi
 [ "$(cat "${AI_OBSERVER_FAKE_ROOT:?}/containers/subyard-ai-observer/running" 2>/dev/null)" = true ]
 [ "${*: -1}" = http://127.0.0.1:8080/health ]
 printf '{"status":"ok"}\n'
@@ -210,7 +207,7 @@ export PATH="$TMP/bin:$PATH"
 run_hook() {
   local test_root="$1" dev_home="$2" integrations="$3" context="${4:-}"
   AI_OBSERVER_TEST_ROOT="$test_root" \
-    AI_OBSERVER_STARTUP_TIMEOUT_SECONDS="${AI_OBSERVER_STARTUP_TIMEOUT_SECONDS:-3}" \
+    AI_OBSERVER_CHECK_TIMEOUT_SECONDS=3 \
     AI_OBSERVER_TEST_ALLOW_NON_ROOT=1 \
     AI_OBSERVER_TEST_DEV_HOME="$dev_home" \
     AI_OBSERVER_CONTEXT="$context" \
@@ -230,13 +227,17 @@ run_hook "$test_root" "$dev_home" 'claude codex aiobserver'
 
 wrapper="$test_root/usr/local/bin/ai-observer"
 check="$test_root/usr/local/bin/ai-observer-check"
+installed="$test_root/usr/local/bin/ai-observer-installed"
+health="$test_root/usr/local/bin/ai-observer-health"
 unit="$test_root/etc/systemd/system/subyard-ai-observer.service"
 state="$test_root/srv/agents/ai-observer"
 managed_marker="$test_root/etc/subyard/ai-observer/managed"
 container="$AI_OBSERVER_FAKE_ROOT/containers/subyard-ai-observer"
-for file in "$wrapper" "$check" "$unit" "$managed_marker"; do assert_file "$file"; done
+for file in "$wrapper" "$check" "$installed" "$health" "$unit" "$managed_marker"; do assert_file "$file"; done
 [ "$(stat -c %a "$wrapper")" = 755 ] || fail 'wrapper mode is not 0755'
 [ "$(stat -c %a "$check")" = 755 ] || fail 'check mode is not 0755'
+[ "$(stat -c %a "$installed")" = 755 ] || fail 'installed check mode is not 0755'
+[ "$(stat -c %a "$health")" = 755 ] || fail 'health check mode is not 0755'
 [ "$(stat -c %a "$unit")" = 644 ] || fail 'unit mode is not 0644'
 [ "$(stat -c %a "$managed_marker")" = 644 ] || fail 'managed marker mode is not 0644'
 [ "$(cat "$managed_marker")" = subyard-ai-observer-v1 ] || fail 'managed marker content drifted'
@@ -257,7 +258,9 @@ grep -Fxq 'AI_OBSERVER_API_PORT=8080' "$container/env" || fail 'API port env mis
   || fail 'container exposes a credential, OTLP, Docker, or LAN boundary'
 grep -Fq 'ExecStart='"$wrapper"' run' "$unit" || fail 'unit does not use the managed wrapper'
 grep -Fq 'ExecStop='"$wrapper"' stop' "$unit" || fail 'unit stop is not controlled'
-"$check" >/dev/null || fail 'installed readiness check failed'
+"$check" >/dev/null || fail 'installed HTTP readiness check failed'
+"$installed" >/dev/null || fail 'installed convergence check failed'
+[ "$("$health" | jq -r .state)" = ready ] || fail 'installed health state is not ready'
 [ "$("$wrapper" --version)" = 'ai-observer 0.5.0' ] || fail 'wrapper version command failed'
 status_output="$("$wrapper" status)" || fail 'wrapper status command failed'
 [[ "$status_output" == *'ai-observer 0.5.0 ready'* ]] || fail 'wrapper status omitted readiness'
@@ -303,7 +306,7 @@ printf 'outer-static-old-spec\n' >"$container/spec"
 : >"$FAKE_LOG"
 SECONDS=0
 set +e
-AI_OBSERVER_STARTUP_TIMEOUT_SECONDS=10 AI_OBSERVER_FAKE_CREATE_BIND_MODE_DRIFT=1 \
+AI_OBSERVER_FAKE_CREATE_BIND_MODE_DRIFT=1 \
   run_hook "$test_root" "$dev_home" 'claude codex aiobserver' \
   >"$TMP/outer-static-drift.log" 2>&1
 outer_static_status=$?
@@ -470,58 +473,41 @@ printf 'tampered\n' >"$container/spec"
 if "$check" >/dev/null 2>&1; then fail 'check accepted container configuration drift'; fi
 printf 'stale-spec\n' >"$container/spec"
 
-cat >"$TMP/bin/sleep" <<'SH'
-#!/usr/bin/env bash
-# Keep the failed-readiness retry regression independent of wall-clock waiting.
-exit 0
-SH
-chmod +x "$TMP/bin/sleep"
-SECONDS=0
-if AI_OBSERVER_FAKE_HTTP_FAIL=1 run_hook "$test_root" "$dev_home" \
-  'claude codex aiobserver' >"$TMP/readiness-failure.log" 2>&1; then
-  fail 'unhealthy replacement unexpectedly passed readiness'
-fi
-[ "$SECONDS" -le 5 ] || fail 'unhealthy startup exceeded its total wait budget'
-grep -Fq 'startup readiness timed out after 3 seconds' "$TMP/readiness-failure.log" \
-  || fail 'failed startup omitted its deadline diagnostic'
-grep -Fxq 'ai-observer-check: HTTP readiness failed' "$TMP/readiness-failure.log" \
-  || fail 'failed provision omitted the final readiness predicate before rollback'
-! grep -Fq 'probe-output-should-stay-private' "$TMP/readiness-failure.log" \
-  || fail 'failed provision exposed raw probe output'
-[ "$(cat "$container/spec")" = stale-spec ] \
-  || fail 'readiness failure did not restore the previous container'
-[ "$(cat "$state/data/sentinel")" = 'persistent data' ] \
-  || fail 'readiness failure damaged persistent data'
-
-# A healthy first backfill can outlast the old thirty-probe startup window.
-# This case counts retries; the real startup deadline is checked above. Freeze
-# only the provision shell's clock so slow mock processes cannot spend its budget.
-cat >"$TMP/startup-clock.sh" <<'SH'
-if [ "$0" = "${AI_OBSERVER_FAKE_CLOCK_HOOK:-}" ]; then
-  unset SECONDS
-  SECONDS=0
-  startup_clock_sleeps=0
-  sleep() {
-    startup_clock_sleeps=$((startup_clock_sleeps + 1))
-    # Bound the virtual clock too: a thirty-sixth failure must time out.
-    if [ "$startup_clock_sleeps" -ge 36 ]; then
-      SECONDS="$AI_OBSERVER_STARTUP_TIMEOUT_SECONDS"
-    fi
-  }
-fi
-SH
-printf '35\n' >"$AI_OBSERVER_FAKE_ROOT/http-failures-left"
+# HTTP can remain unavailable while the pinned watcher backfills. Provisioning
+# must accept the active, exact owned runtime and report its state without
+# printing curl stderr or rolling back the container.
 : >"$FAKE_LOG"
-if ! BASH_ENV="$TMP/startup-clock.sh" AI_OBSERVER_FAKE_CLOCK_HOOK="$HOOK" \
-  AI_OBSERVER_STARTUP_TIMEOUT_SECONDS=15 run_hook "$test_root" "$dev_home" \
-  'claude codex aiobserver' >"$TMP/slow-startup.log" 2>&1; then
-  fail 'slow initial backfill was rolled back before HTTP became ready'
-fi
-[ "$(grep -c '^curl ' "$FAKE_LOG")" = 36 ] \
-  || fail 'slow initial backfill did not survive all thirty-five failed probes'
-"$check" >/dev/null || fail 'slow initial backfill did not become ready'
+AI_OBSERVER_FAKE_HTTP_FAIL=1 run_hook "$test_root" "$dev_home" \
+  'claude codex aiobserver' >"$TMP/starting.log" 2>&1 \
+  || fail 'running backfill was rolled back before HTTP became ready'
+grep -Fq 'installed (starting)' "$TMP/starting.log" \
+  || fail 'provision did not report starting while HTTP was unavailable'
+! grep -Fq 'probe-output-should-stay-private' "$TMP/starting.log" \
+  || fail 'provision exposed raw health probe output'
+starting_health="$(AI_OBSERVER_FAKE_HTTP_FAIL=1 "$health")"
+[ "$starting_health" = '{"state":"starting"}' ] \
+  || fail 'health hook did not emit the exact starting state'
+starting_status="$(AI_OBSERVER_FAKE_HTTP_FAIL=1 "$wrapper" status)"
+[[ "$starting_status" == *'ai-observer 0.5.0 starting'* ]] \
+  || fail 'operator status did not report starting during backfill'
+: >"$FAKE_LOG"
+AI_OBSERVER_FAKE_HTTP_FAIL=1 run_hook "$test_root" "$dev_home" 'claude codex aiobserver' >/dev/null
+assert_log_absent '^docker (create|rename|rm|stop)'
+assert_log_absent '^systemctl (start|restart|stop|disable)'
+[ "$(cat "$container/running")" = true ] || fail 'starting rerun stopped the watcher'
 [ "$(cat "$state/data/sentinel")" = 'persistent data' ] \
-  || fail 'slow initial backfill damaged persistent data'
+  || fail 'starting import damaged persistent data'
+if AI_OBSERVER_FAKE_HTTP_FAIL=1 "$check" >/dev/null 2>&1; then
+  fail 'strict HTTP check accepted the starting health state'
+fi
+ready_health="$("$health")"
+[ "$ready_health" = '{"state":"ready"}' ] \
+  || fail 'health hook did not emit the exact ready state'
+SECONDS=0
+unknown_health="$(AI_OBSERVER_FAKE_DOCKER_DELAY=5 "$health")"
+[ "$unknown_health" = '{"state":"unknown"}' ] \
+  || fail 'health hook did not classify a timed out runtime inspection as unknown'
+[ "$SECONDS" -le 3 ] || fail 'health hook exceeded its bounded probe time'
 
 printf 'foreign\n' >"$container/owner"
 : >"$FAKE_LOG"
@@ -531,8 +517,25 @@ printf 'ai-observer-v1\n' >"$container/owner"
 "$wrapper" disable
 [ ! -e "$AI_OBSERVER_FAKE_ROOT/enabled" ] || fail 'disable left unit enabled'
 [ ! -e "$AI_OBSERVER_FAKE_ROOT/active" ] || fail 'disable left unit active'
+[ "$("$health")" = '{"state":"failed"}' ] || fail 'health hook did not report the stopped service'
 [ -d "$container" ] || fail 'disable removed managed container'
 [ -f "$state/data/sentinel" ] || fail 'disable removed persistent data'
+
+early_root="$TMP/early-root"
+early_home="$TMP/early-home"
+early_fake="$TMP/early-fake"
+mkdir -p "$early_root" "$early_home" "$early_fake/containers" "$early_fake/images"
+if AI_OBSERVER_FAKE_ROOT="$early_fake" AI_OBSERVER_FAKE_RUNTIME_STOPPED=1 \
+  run_hook "$early_root" "$early_home" aiobserver >"$TMP/early-failure.log" 2>&1; then
+  fail 'provision accepted a service whose managed container exited immediately'
+fi
+[ ! -e "$early_fake/containers/subyard-ai-observer" ] \
+  || fail 'failed early runtime was not rolled back'
+if [ -e "$early_fake/enabled" ] || [ -e "$early_fake/active" ]; then
+  fail 'failed early runtime left its unit enabled or active'
+fi
+grep -Fq 'previous runtime restored' "$TMP/early-failure.log" \
+  || fail 'early runtime failure omitted rollback result'
 
 empty_root="$TMP/empty-root"
 empty_home="$TMP/empty-home"

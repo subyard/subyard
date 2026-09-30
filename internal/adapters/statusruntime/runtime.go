@@ -66,9 +66,36 @@ func (runtime Runtime) agentStatus(
 	running bool,
 ) []domain.AgentStatus {
 	agents := strings.Fields(runtime.Environment["CODING_TOOL_INTEGRATIONS"])
+	health := runtime.ReadIntegrationHealth(ctx, yard, running)
 	result := make([]domain.AgentStatus, 0, len(agents))
 	for _, name := range agents {
 		status := domain.AgentStatus{Name: name, State: "enabled"}
+		if name == "aiobserver" {
+			if port, err := strconv.Atoi(runtime.Environment["AI_OBSERVER_HOST_PORT"]); err == nil &&
+				port >= 1024 && port <= 65535 && strconv.Itoa(port) == runtime.Environment["AI_OBSERVER_HOST_PORT"] {
+				status.DashboardPort = port
+			}
+		}
+		if state, present := health[name]; present {
+			switch state {
+			case "ready":
+				status.State = "up"
+				if name == "aiobserver" && yard.YardKind == domain.YardContainer {
+					status.URL = runtime.aiObserverURL(ctx, yard)
+					if status.URL == "" {
+						status.Hint = runtime.program() + " init"
+					}
+				}
+			case "starting":
+				status.State, status.Hint = "starting", "service started; readiness pending"
+			case "failed":
+				status.State, status.Hint = "down", runtime.program()+" init"
+			default:
+				status.State = "?"
+			}
+			result = append(result, status)
+			continue
+		}
 		switch name {
 		case "codex":
 			status = runtime.codexRulesStatus(ctx, yard, running)
@@ -80,10 +107,6 @@ func (runtime Runtime) agentStatus(
 			continue
 		}
 		status.State = "?"
-		if port, err := strconv.Atoi(runtime.Environment["AI_OBSERVER_HOST_PORT"]); err == nil &&
-			port >= 1024 && port <= 65535 && strconv.Itoa(port) == runtime.Environment["AI_OBSERVER_HOST_PORT"] {
-			status.DashboardPort = port
-		}
 		if running && runtime.Executor != nil {
 			probeCtx, cancel := context.WithTimeout(ctx, runtime.probeTimeout())
 			probe, err := runtime.Executor.Exec(

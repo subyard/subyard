@@ -201,6 +201,34 @@ func TestIntegrationStatusStoppedReadOnly(t *testing.T) {
 	}
 }
 
+func TestIntegrationStatusSeparatesHealthFromConvergence(t *testing.T) {
+	cli, incus, runtime, _, output := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=sample\n")
+	writeCLIFile(t, filepath.Join(cli.options.RepositoryRoot, "config", "agents.env"), "AGENT_sample_COMMAND=sample\nAGENT_sample_HEALTH=sample-health\nAGENT_other_COMMAND=other\nAGENT_other_HEALTH=other-health\n", 0o600)
+	runtime.plan.Changed = false
+	cli.options.Executor = incus
+	loaded, err := cli.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range []string{"starting", "ready", "failed"} {
+		incus.ExecSteps = append(incus.ExecSteps, testkit.IncusExecStep{Result: ports.InstanceExecResult{Stdout: []byte(`{"state":"` + state + `"}`)}})
+		status, err := cli.queryIntegrationStatus(context.Background(), loaded, "")
+		if err != nil || status.Observed != "ready" || status.Health["sample"] != state || runtime.applied != 0 {
+			t.Fatalf("health changed convergence: status=%#v err=%v", status, err)
+		}
+		output.Reset()
+		cli.printIntegrationStatus(status, false)
+		if !strings.Contains(output.String(), "sample health: "+state) {
+			t.Fatalf("missing advisory health: %s", output.String())
+		}
+	}
+	calls := len(incus.ExecCalls)
+	status, err := cli.queryIntegrationStatus(context.Background(), loaded, "other")
+	if err != nil || len(status.Health) != 0 || len(incus.ExecCalls) != calls {
+		t.Fatalf("status probed an unselected integration: %#v, %v", status, err)
+	}
+}
+
 func TestIntegrationStatusAssessesLegacyAdoptionReadOnly(t *testing.T) {
 	for _, conflict := range []bool{false, true} {
 		name := "matching legacy files"

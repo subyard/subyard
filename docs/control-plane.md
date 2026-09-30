@@ -55,6 +55,14 @@ and reconciliation. Guest ownership evidence covers structured fields, plain fil
 files, derived session links and known service receipts; evidence conflicts preserve artifacts.
 See [per-yard selection](configuration.md#per-yard-coding-tool-selection) for user-visible semantics.
 
+`AGENT_<name>_CHECK` is a package-owned installation/convergence probe; release activation
+may require it to succeed. Long-running service initialization belongs outside that gate.
+Optional `AGENT_<name>_HEALTH` probes report advisory service health for `yard status` and
+`yard integration status`: one JSON object with only `state`, one of `ready`, `starting`,
+`failed`, or `unknown`. Queries bound execution to five seconds and accept at most 1024 bytes;
+an unavailable, invalid, or timed-out probe reports `unknown`. Health never enters a release
+plan or its fingerprint. Installation can be converged while a service is still starting.
+
 ## Stable interfaces
 
 ### Commands

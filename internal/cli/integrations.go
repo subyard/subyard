@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
+	"github.com/Subyard/Subyard/internal/adapters/statusruntime"
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
@@ -291,6 +292,7 @@ type integrationStatus struct {
 	Observed      string                      `json:"observed"`
 	ObservedScope string                      `json:"observed_scope"`
 	Detail        string                      `json:"detail,omitempty"`
+	Health        map[string]string           `json:"health,omitempty"`
 }
 
 func (cli *CLI) queryIntegrationStatus(ctx context.Context, loaded config.Loaded, id string) (integrationStatus, error) {
@@ -348,6 +350,16 @@ func (cli *CLI) queryIntegrationStatus(ctx context.Context, loaded config.Loaded
 		status.Observed = "pending"
 		status.Detail = strings.Join(plan.Steps, "; ")
 	}
+	_, executor := cli.statusPorts()
+	healthEnvironment := loaded.Environment
+	if id != "" {
+		healthEnvironment = maps.Clone(loaded.Environment)
+		healthEnvironment["CODING_TOOL_INTEGRATIONS"] = ""
+		if slices.Contains(status.Selection.Effective, id) {
+			healthEnvironment["CODING_TOOL_INTEGRATIONS"] = id
+		}
+	}
+	status.Health = (statusruntime.Runtime{Environment: healthEnvironment, Executor: executor}).ReadIntegrationHealth(ctx, loaded.Context, true)
 	return status, nil
 }
 func (cli *CLI) printIntegrationStatus(status integrationStatus, jsonOutput bool) {
@@ -380,5 +392,10 @@ func (cli *CLI) printIntegrationStatus(status integrationStatus, jsonOutput bool
 	}
 	if status.Detail != "" {
 		fmt.Fprintln(cli.options.Stdout, status.Detail)
+	}
+	for _, name := range status.Selection.Effective {
+		if state, present := status.Health[name]; present {
+			fmt.Fprintf(cli.options.Stdout, "%s health: %s\n", name, state)
+		}
 	}
 }

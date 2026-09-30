@@ -24,12 +24,6 @@ else
   [ "$(id -u)" -eq 0 ] || die 'must run as root'
 fi
 
-startup_timeout=600
-if [ -n "$TEST_ROOT" ]; then
-  startup_timeout="${AI_OBSERVER_STARTUP_TIMEOUT_SECONDS:-600}"
-fi
-[[ "$startup_timeout" =~ ^[1-9][0-9]*$ ]] || die 'invalid startup timeout'
-
 case "$DEV_USER" in ''|*[!A-Za-z0-9._-]*|-*|.|..) die 'invalid developer user' ;; esac
 if [ -n "$CONTEXT" ] && [[ ! "$CONTEXT" =~ ^[0-9a-f]{64}$ ]]; then
   die 'AI_OBSERVER_CONTEXT must be a lowercase SHA-256 when set'
@@ -51,6 +45,8 @@ DATA_DIR="$STATE_ROOT/data"
 EMPTY_ROOT="$STATE_ROOT/empty"
 BIN_PATH="$(root_path /usr/local/bin/ai-observer)"
 CHECK_PATH="$(root_path /usr/local/bin/ai-observer-check)"
+INSTALLED_PATH="$(root_path /usr/local/bin/ai-observer-installed)"
+HEALTH_PATH="$(root_path /usr/local/bin/ai-observer-health)"
 UNIT_PATH="$(root_path /etc/systemd/system/$UNIT)"
 MANAGED_MARKER="$(root_path /etc/subyard/ai-observer/managed)"
 EXPECTED_FILE_OWNER="$DEV_UID:$DEV_GID"
@@ -164,6 +160,8 @@ validate_managed_file() {
 }
 validate_managed_file "$BIN_PATH" "$FILE_MARKER"
 validate_managed_file "$CHECK_PATH" "$FILE_MARKER"
+validate_managed_file "$INSTALLED_PATH" "$FILE_MARKER"
+validate_managed_file "$HEALTH_PATH" "$FILE_MARKER"
 validate_managed_file "$UNIT_PATH" "$FILE_MARKER"
 if [ -e "$MANAGED_MARKER" ] || [ -L "$MANAGED_MARKER" ]; then
   validate_managed_file "$MANAGED_MARKER" "$STATE_MARKER_VALUE"
@@ -185,6 +183,8 @@ printf -v q_ports '%q' "$EXPECTED_PORTS"
 printf -v q_marker '%q' "$MANAGED_MARKER"
 printf -v q_unit_path '%q' "$UNIT_PATH"
 printf -v q_check_path '%q' "$CHECK_PATH"
+printf -v q_installed_path '%q' "$INSTALLED_PATH"
+printf -v q_health_path '%q' "$HEALTH_PATH"
 printf -v q_file_owner '%q' "$EXPECTED_FILE_OWNER"
 printf -v q_test_mode '%q' "$([ -n "$TEST_ROOT" ] && printf 1 || printf 0)"
 
@@ -200,6 +200,8 @@ owner_label=$q_owner_label
 managed_marker=$q_marker
 unit_path=$q_unit_path
 check_path=$q_check_path
+installed_path=$q_installed_path
+health_path=$q_health_path
 expected_file_owner=$q_file_owner
 test_mode=$q_test_mode
 die() { printf 'ai-observer: %s\\n' "\$*" >&2; exit 1; }
@@ -229,6 +231,16 @@ verify_control_files() {
   [ "\$(stat -c '%u:%g' "\$check_path")" = "\$expected_file_owner" ] \
     || die 'managed readiness check ownership drifted'
   grep -Fxq '$FILE_MARKER' "\$check_path" || die 'managed readiness check marker is missing'
+  [ -f "\$installed_path" ] && [ ! -L "\$installed_path" ] \
+    || die 'managed installation check is missing'
+  [ "\$(stat -c '%u:%g' "\$installed_path")" = "\$expected_file_owner" ] \
+    || die 'managed installation check ownership drifted'
+  grep -Fxq '$FILE_MARKER' "\$installed_path" || die 'managed installation check marker is missing'
+  [ -f "\$health_path" ] && [ ! -L "\$health_path" ] \
+    || die 'managed health check is missing'
+  [ "\$(stat -c '%u:%g' "\$health_path")" = "\$expected_file_owner" ] \
+    || die 'managed health check ownership drifted'
+  grep -Fxq '$FILE_MARKER' "\$health_path" || die 'managed health check marker is missing'
 }
 verify_owned_container() {
   container_exists || die 'managed container is missing'
@@ -259,7 +271,10 @@ case "\${1:-}" in
   status)
     verify_control_files
     verify_owned_container
-    "\$check_path"
+    health_state="\$("\$health_path" | jq -er '.state')" \
+      || die 'managed health status is unavailable'
+    case "\$health_state" in ready|starting|failed|unknown) ;; *) die 'managed health status is invalid' ;; esac
+    printf 'ai-observer %s %s\\n' "\$version" "\$health_state"
     printf 'dashboard http://127.0.0.1:8080/\\n'
     ;;
   logs)
@@ -300,10 +315,12 @@ die() { printf 'ai-observer-check: %s\\n' "\$*" >&2; exit 1; }
 # Static specification drift cannot recover while waiting for HTTP startup.
 drift() { printf 'ai-observer-check: %s\\n' "\$*" >&2; exit 2; }
 check_timeout=20
+mode="\${1:-ready}"
+case "\$mode" in ready|installed) ;; *) die 'invalid check mode' ;; esac
 if [ "\$test_mode" = 1 ]; then check_timeout="\${AI_OBSERVER_CHECK_TIMEOUT_SECONDS:-20}"; fi
 case "\$check_timeout" in ''|*[!0-9]*|0) die 'invalid readiness timeout' ;; esac
 if [ "\${AI_OBSERVER_CHECK_INNER:-0}" != 1 ]; then
-  if timeout --foreground "\$check_timeout" env AI_OBSERVER_CHECK_INNER=1 "\$0"; then
+  if timeout --foreground "\$check_timeout" env AI_OBSERVER_CHECK_INNER=1 "\$0" "\$mode"; then
     exit 0
   else
     status=\$?
@@ -344,9 +361,45 @@ grep -Fxq 'AI_OBSERVER_DATABASE_PATH=/app/data/ai-observer.duckdb' <<<"\$env" \
   || drift 'database path drifted'
 grep -Fxq 'AI_OBSERVER_API_PORT=8080' <<<"\$env" || drift 'API port drifted'
 [ "\$(container_value '{{.State.Running}}')" = true ] || die 'container is not running'
+if [ "\$mode" = installed ]; then
+  printf 'ai-observer %s installed\\n' $q_version
+  exit 0
+fi
 curl --fail --silent --show-error --connect-timeout 2 --max-time 5 \
   http://127.0.0.1:8080/health >/dev/null || die 'HTTP readiness failed'
 printf 'ai-observer %s ready\\n' $q_version
+EOF
+
+cat >"$temporary/ai-observer-installed" <<EOF
+#!/usr/bin/env bash
+$FILE_MARKER
+set -euo pipefail
+exec $q_check_path installed
+EOF
+
+cat >"$temporary/ai-observer-health" <<EOF
+#!/usr/bin/env bash
+$FILE_MARKER
+set -euo pipefail
+installed_path=$q_installed_path
+if timeout --foreground 2 "\$installed_path" >/dev/null 2>&1; then
+  installed_status=0
+else
+  installed_status=\$?
+fi
+if [ "\$installed_status" != 0 ]; then
+  case "\$installed_status" in
+    1|2) printf '{"state":"failed"}\\n' ;;
+    *) printf '{"state":"unknown"}\\n' ;;
+  esac
+  exit 0
+fi
+if timeout --foreground 1 curl --fail --silent --connect-timeout 1 --max-time 1 \
+  http://127.0.0.1:8080/health >/dev/null 2>&1; then
+  printf '{"state":"ready"}\\n'
+else
+  printf '{"state":"starting"}\\n'
+fi
 EOF
 
 cat >"$temporary/$UNIT" <<EOF
@@ -371,19 +424,24 @@ WantedBy=multi-user.target
 EOF
 printf '%s\n' "$STATE_MARKER_VALUE" >"$temporary/managed"
 chmod 0755 "$temporary/ai-observer" "$temporary/ai-observer-check"
+chmod 0755 "$temporary/ai-observer-installed" "$temporary/ai-observer-health"
 chmod 0644 "$temporary/$UNIT" "$temporary/managed"
 
 files_match=1
 cmp -s "$temporary/ai-observer" "$BIN_PATH" || files_match=0
 cmp -s "$temporary/ai-observer-check" "$CHECK_PATH" || files_match=0
+cmp -s "$temporary/ai-observer-installed" "$INSTALLED_PATH" || files_match=0
+cmp -s "$temporary/ai-observer-health" "$HEALTH_PATH" || files_match=0
 cmp -s "$temporary/$UNIT" "$UNIT_PATH" || files_match=0
 cmp -s "$temporary/managed" "$MANAGED_MARKER" || files_match=0
 
 if container_matches && [ "$files_match" = 1 ] &&
   timeout 10 systemctl is-enabled --quiet "$UNIT" &&
   timeout 10 systemctl is-active --quiet "$UNIT" &&
-  "$CHECK_PATH" >/dev/null; then
-  printf 'AI Observer %s is already ready.\n' "$VERSION"
+  "$INSTALLED_PATH" >/dev/null; then
+  health_state="$("$HEALTH_PATH" | jq -r '.state' 2>/dev/null || printf unknown)"
+  case "$health_state" in ready|starting|failed|unknown) ;; *) health_state=unknown ;; esac
+  printf 'AI Observer %s is already installed (%s).\n' "$VERSION" "$health_state"
   exit 0
 fi
 
@@ -402,6 +460,8 @@ backup_file() {
 }
 bin_existed="$(backup_file "$BIN_PATH" bin)"
 check_existed="$(backup_file "$CHECK_PATH" check)"
+installed_existed="$(backup_file "$INSTALLED_PATH" installed)"
+health_existed="$(backup_file "$HEALTH_PATH" health)"
 unit_existed="$(backup_file "$UNIT_PATH" unit)"
 marker_existed="$(backup_file "$MANAGED_MARKER" marker)"
 was_enabled=0; was_active=0
@@ -433,6 +493,8 @@ rollback() {
   fi
   restore_file "$BIN_PATH" bin "$bin_existed"
   restore_file "$CHECK_PATH" check "$check_existed"
+  restore_file "$INSTALLED_PATH" installed "$installed_existed"
+  restore_file "$HEALTH_PATH" health "$health_existed"
   restore_file "$UNIT_PATH" unit "$unit_existed"
   restore_file "$MANAGED_MARKER" marker "$marker_existed"
   timeout 10 systemctl daemon-reload >/dev/null 2>&1 || true
@@ -457,6 +519,8 @@ install_atomic() {
 
 install_atomic "$temporary/ai-observer" "$BIN_PATH" 0755
 install_atomic "$temporary/ai-observer-check" "$CHECK_PATH" 0755
+install_atomic "$temporary/ai-observer-installed" "$INSTALLED_PATH" 0755
+install_atomic "$temporary/ai-observer-health" "$HEALTH_PATH" 0755
 install_atomic "$temporary/$UNIT" "$UNIT_PATH" 0644
 install_atomic "$temporary/managed" "$MANAGED_MARKER" 0644
 
@@ -516,54 +580,33 @@ else
     || { rollback; die 'unit start failed; previous runtime restored'; }
 fi
 
-ready=0
-check_status=0
-# Upstream watch --backfill imports history synchronously before starting HTTP.
-# Keep ordinary status checks short, but give initial import its own bounded wait.
-startup_started=$SECONDS
-startup_deadline=$((startup_started + startup_timeout))
-next_progress=$((startup_started + 15))
-: >"$temporary/readiness-error"
-printf 'AI Observer: waiting for initial history import and HTTP readiness (up to %s seconds)\n' \
-  "$startup_timeout"
-while [ "$SECONDS" -lt "$startup_deadline" ]; do
-  remaining=$((startup_deadline - SECONDS))
-  [ "$remaining" -gt 0 ] || break
-  if timeout --foreground "$remaining" "$CHECK_PATH" >/dev/null 2>"$temporary/readiness-attempt-error"; then
-    ready=1
+installed_status=1
+for attempt in 1 2; do
+  if "$INSTALLED_PATH" >/dev/null 2>"$temporary/installed-error"; then
+    installed_status=0
     break
   else
-    check_status=$?
+    installed_status=$?
   fi
-  diagnostic="$(sed -n '/^ai-observer-check: /{p;q;}' "$temporary/readiness-attempt-error")"
-  if [ -n "$diagnostic" ]; then
-    printf '%s\n' "$diagnostic" >"$temporary/readiness-error"
-  fi
-  [ "$check_status" != 2 ] || break
-  if [ "$SECONDS" -ge "$next_progress" ]; then
-    printf 'AI Observer: waiting for HTTP readiness (%s seconds elapsed)\n' \
-      "$((SECONDS - startup_started))"
-    next_progress=$((SECONDS + 15))
-  fi
-  [ "$SECONDS" -lt "$startup_deadline" ] || break
-  sleep 1
+  [ "$installed_status" != 2 ] || break
+  [ "$attempt" -eq 2 ] || sleep 1
 done
-if [ "$ready" != 1 ]; then
-  # Keep the generated check's fixed diagnostic before rollback removes the candidate.
-  # Raw subprocess stderr can contain private paths or settings and stays in the temp file.
-  sed -n '/^ai-observer-check: /{p;q;}' "$temporary/readiness-error" >&2
-  if [ "$check_status" = 2 ]; then
-    rollback
-    die 'container specification verification failed; previous runtime restored'
-  fi
-  printf 'AI Observer provision: startup readiness timed out after %s seconds; initial history import may still be running\n' \
-    "$startup_timeout" >&2
+if [ "$installed_status" != 0 ]; then
+  # Report only the stable predicate; Docker/systemd output may contain private details.
+  sed -n '/^ai-observer-check: /{p;q;}' "$temporary/installed-error" >&2
   rollback
-  die 'readiness failed; previous runtime restored'
+  die 'owned runtime did not start correctly; previous runtime restored'
 fi
+
+health_state="$("$HEALTH_PATH" | jq -r '.state' 2>/dev/null || printf unknown)"
+case "$health_state" in
+  ready|starting|unknown) ;;
+  failed) rollback; die 'owned runtime failed its startup health check; previous runtime restored' ;;
+  *) rollback; die 'owned runtime returned an invalid startup health state; previous runtime restored' ;;
+esac
 
 if [ -n "$rollback_container" ]; then
   timeout 20 docker rm "$rollback_container" >/dev/null \
     || { rollback; die 'could not retire previous managed container'; }
 fi
-printf 'AI Observer %s installed and ready.\n' "$VERSION"
+printf 'AI Observer %s installed (%s).\n' "$VERSION" "$health_state"

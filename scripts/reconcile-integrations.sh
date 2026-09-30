@@ -76,9 +76,14 @@ for _agent in ${CODING_TOOL_INTEGRATIONS:-}; do
     incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- timeout 90 "$_check" \
       || die "$_agent package check failed"
   fi
-  ok "$_agent CLI ready"
+  _health_var="AGENT_${_agent}_HEALTH"
+  if [ -n "${!_health_var:-}" ]; then
+    ok "$_agent package installed; service health is reported by yard status"
+  else
+    ok "$_agent CLI ready"
+  fi
 done
-unset _agent _agent_env _check_var _check _provision_var _provision
+unset _agent _agent_env _check_var _check _health_var _provision_var _provision
 
 # Stop a previously managed observer when it is removed from the exact agent list.
 if [ "$_aiobserver_selected" = 0 ]; then

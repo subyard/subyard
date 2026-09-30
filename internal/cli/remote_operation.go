@@ -201,6 +201,12 @@ func (session *ownerRPCSession) integrationStatus(ctx context.Context, yard doma
 		!slices.Contains([]string{"ready", "pending", "conflict", "stopped", "missing", "unknown"}, status.Observed) {
 		return integrationStatus{}, errors.New("owner returned an invalid integration status")
 	}
+	for name, state := range status.Health {
+		if !slices.Contains(status.Selection.Effective, name) || (id != "" && name != id) ||
+			!slices.Contains([]string{"ready", "starting", "failed", "unknown"}, state) {
+			return integrationStatus{}, errors.New("owner returned an invalid integration health status")
+		}
+	}
 	return status, nil
 }
 

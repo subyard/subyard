@@ -9,6 +9,7 @@ PROJECT=''
 INSTANCE=''
 MARKER=''
 TAILSCALE_FIXTURE=0
+YARD_RUNTIME_ROOT=''
 tail_address=100.100.100.42
 
 die() { printf 'aiobserver-acceptance: %s\n' "$*" >&2; exit 2; }
@@ -28,46 +29,33 @@ incus() {
     /usr/bin/incus "$@"
   fi
 }
-yard() {
+yard_engine() {
+  local engine="$ROOT/.build/yard"
+  if [ -x "$YARD_RUNTIME_ROOT/current/bin/yard" ]; then
+    engine="$YARD_RUNTIME_ROOT/current/bin/yard"
+  fi
   # Init can enroll the user in incus-admin without changing this shell's groups.
   if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
     && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
     local command
-    printf -v command '%q ' "$ROOT/.build/yard" -Y "$YARD_NAME" "$@"
+    printf -v command '%q ' "$engine" "$@"
     sg incus-admin -c "exec $command"
   else
-    "$ROOT/.build/yard" -Y "$YARD_NAME" "$@"
+    "$engine" "$@"
   fi
 }
+yard() { yard_engine -Y "$YARD_NAME" "$@"; }
 guest() { incus exec "$INSTANCE" --project "$PROJECT" -- "$@"; }
 
 cleanup() {
-  local rc=$? managed=''
+  local rc=$?
   trap - EXIT INT TERM
   set +e
+  # The lease broker deletes the disposable VM, including its nested Incus state.
   if [ "$TAILSCALE_FIXTURE" = 1 ]; then
     sudo -n ip address del "$tail_address/32" dev lo
     if sudo -n grep -Fqx "# $MARKER" /usr/local/bin/tailscale; then
       sudo -n rm -- /usr/local/bin/tailscale
-    fi
-  fi
-  if [ -n "$PROJECT" ] && [ -n "$INSTANCE" ] \
-    && incus project show "$PROJECT" >/dev/null 2>&1 \
-    && incus config show "$INSTANCE" --project "$PROJECT" >/dev/null 2>&1; then
-    managed="$(incus config get "$INSTANCE" user.subyard.managed --project "$PROJECT" 2>/dev/null)"
-  fi
-  if [ -n "$YARD_NAME" ] && [ -n "${SUBYARD_CONFIG_HOME:-}" ] \
-    && [ -f "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/config.env" ] \
-    && grep -Fqx "# $MARKER" "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/config.env"; then
-    if [ -z "$managed" ] || [ "$managed" = true ]; then
-      install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/platform-sentinel"
-      printf 'SSH_PORT=64998\n' > "$SUBYARD_CONFIG_HOME/yards/platform-sentinel/config.env"
-      chmod 0600 "$SUBYARD_CONFIG_HOME/yards/platform-sentinel/config.env"
-      yard teardown --yes >/dev/null 2>&1 || rc=3
-    else
-      printf 'aiobserver-acceptance: refusing to teardown unmanaged instance %s/%s\n' \
-        "$PROJECT" "$INSTANCE" >&2
-      rc=3
     fi
   fi
   if [ -n "$STATE" ] && [[ "$STATE" = /var/tmp/subyard-aiobserver.* ]] \
@@ -89,6 +77,7 @@ INSTANCE="yard-$YARD_NAME"
 export SUBYARD_OPERATOR_HOME="$HOME"
 export SUBYARD_CONFIG_HOME="$STATE/config"
 export SUBYARD_HOME="$STATE/data"
+export YARD_RUNTIME_ROOT="$SUBYARD_HOME/runtime"
 export STORAGE_PATH="$HOME/.cache/subyard-e2e-platform/incus/incus/storage"
 export SUBYARD_NO_AUDIT=1
 export SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1
@@ -126,6 +115,7 @@ EOF
 chmod 0600 "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/config.env"
 
 backfill_marker="backfill-$token"
+large_backfill_marker="large-backfill-$token"
 live_marker="live-$token"
 resume_marker="resume-$token"
 source_resume_marker="source-resume-$token"
@@ -144,12 +134,12 @@ backfill_records="${SUBYARD_E2E_OBSERVER_BACKFILL_RECORDS:-0}"
 [[ "$backfill_records" =~ ^(0|[1-9][0-9]*)$ ]] || die 'invalid synthetic backfill record count'
 if [ "$backfill_records" -gt 0 ]; then
   info "seeding $backfill_records synthetic history records"
-  python3 - "$(dirname "$claude_file")" "$backfill_records" "$now" <<'PY'
+  python3 - "$(dirname "$claude_file")" "$backfill_records" "$now" "$large_backfill_marker" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-root, count, timestamp = Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+root, count, timestamp, marker = Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3], sys.argv[4]
 for batch in range((count + 999) // 1000):
     with (root / f"backlog-{batch}.jsonl").open("w") as output:
         for index in range(batch * 1000, min(count, (batch + 1) * 1000)):
@@ -159,15 +149,30 @@ for batch in range((count + 999) // 1000):
                 "cwd": "/synthetic/aiobserver-e2e",
                 "message": {
                     "id": f"backlog-{index}", "role": "user", "type": "message",
-                    "content": [{"type": "text", "text": "Synthetic startup backlog"}],
+                    "content": [{"type": "text", "text": marker if index == count - 1 else "Synthetic startup backlog"}],
                 },
             }
             output.write(json.dumps(record) + "\n")
 PY
 fi
 
-info 'building the current candidate and initializing a container yard'
-YARD_BUILD_VERSION=0.11.3 "$ROOT/dev/build-engine.sh" --force
+base_version="0.16.4-e2e.$token"
+candidate_version="0.16.5-e2e.$token"
+base_release="$STATE/release-base"
+candidate_release="$STATE/release-candidate"
+runtime_arch="$(go env GOARCH)"
+base_bundle="$base_release/subyard-$base_version-linux-$runtime_arch.tar.gz"
+info 'building native base and update candidates before starting observer backfill'
+YARD_BUILD_VERSION="$base_version" "$ROOT/dev/build-engine.sh" --force
+"$ROOT/dev/package-engine.sh" --output-dir "$base_release" --version "$base_version" >/dev/null
+"$ROOT/dev/package-engine.sh" --output-dir "$candidate_release" --version "$candidate_version" >/dev/null
+chmod -R a+rX "$base_release" "$candidate_release"
+"$ROOT/scripts/install-runtime-release.sh" \
+  --runtime-root "$YARD_RUNTIME_ROOT" \
+  --bundle "$base_bundle" --checksum "$base_bundle.sha256" \
+  --manifest "$base_bundle.manifest.json" \
+  --provenance "$base_bundle.provenance.json" >/dev/null
+info 'initializing a container yard with the native base runtime'
 yard init --yes
 yard start --yes
 
@@ -210,9 +215,83 @@ jq -e --arg claude '/mnt/host/agent-sessions/claude/projects:/sessions/claude:ro
   <<<"$binds" >/dev/null || die 'observer bind mounts are wrong'
 guest systemctl is-enabled --quiet subyard-ai-observer.service \
   || die 'observer service is not enabled'
-guest /usr/local/bin/ai-observer-check >/dev/null || die 'observer readiness check failed'
-curl -fsS --max-time 10 "http://127.0.0.1:$observer_port/health" >/dev/null \
-  || die 'owner dashboard route is unavailable'
+container_id="$(guest docker inspect -f '{{.Id}}' subyard-ai-observer)"
+update_runtime() {
+  info 'activating the verified local runtime update'
+  local old_release_target
+  old_release_target="$(readlink "$YARD_RUNTIME_ROOT/current")"
+  YARD_RELEASE_BASE_URL="file://$candidate_release" \
+    yard update --version "$candidate_version" --yes
+  [ "$(readlink "$YARD_RUNTIME_ROOT/current")" != "$old_release_target" ] \
+    || die 'runtime update did not activate the candidate release'
+  [ "$(yard --version)" = "yard $candidate_version" ] \
+    || die 'candidate runtime version is not active'
+  [ "$(guest docker inspect -f '{{.Id}}' subyard-ai-observer)" = "$container_id" ] \
+    || die 'release activation replaced the observer container'
+}
+if [ "$backfill_records" -gt 0 ]; then
+  health_state="$(guest /usr/local/bin/ai-observer-health | jq -er '.state')"
+  [ "$health_state" = starting ] || die "large backfill did not hold health in starting state (got $health_state)"
+  yard integration status aiobserver --json | jq -e \
+    '.observed == "ready" and .health.aiobserver == "starting"' >/dev/null \
+    || die 'native integration status did not separate installation from startup health'
+  yard status | grep -Eq '^[[:space:]]+aiobserver[[:space:]]+starting[[:space:]]' \
+    || die 'native yard status did not report pending observer readiness'
+  guest /usr/local/bin/ai-observer-installed >/dev/null \
+    || die 'observer installation checks failed during backfill'
+  if guest /usr/local/bin/ai-observer-check >/dev/null 2>&1; then
+    die 'strict HTTP readiness passed before the large backfill completed'
+  fi
+  info 'repeating native init while the observer is still backfilling'
+  yard init --yes
+  [ "$(guest docker inspect -f '{{.Id}}' subyard-ai-observer)" = "$container_id" ] \
+    || die 'repeat init replaced the observer container during backfill'
+  guest systemctl is-active --quiet subyard-ai-observer.service \
+    || die 'repeat init stopped the observer service during backfill'
+  [ "$(guest docker inspect -f '{{.State.Running}}' subyard-ai-observer)" = true ] \
+    || die 'repeat init killed the observer container during backfill'
+  [ "$(guest /usr/local/bin/ai-observer-health | jq -er '.state')" = starting ] \
+    || die 'repeat init did not leave the observer in its backfill state'
+  guest /usr/local/bin/ai-observer-installed >/dev/null \
+    || die 'observer installation checks failed after repeat init'
+  if guest /usr/local/bin/ai-observer-check >/dev/null 2>&1; then
+    die 'strict HTTP readiness passed while the large backfill was still running'
+  fi
+  info 'updating the yard through the verified local runtime release during backfill'
+  update_runtime
+  [ "$(guest /usr/local/bin/ai-observer-health | jq -er '.state')" = starting ] \
+    || die 'release activation did not tolerate the observer backfill state'
+  if guest /usr/local/bin/ai-observer-check >/dev/null 2>&1; then
+    die 'strict HTTP readiness passed before release activation completed the backfill'
+  fi
+
+  info 'waiting up to 20 minutes for the synthetic observer backfill to finish'
+  ready=0
+  deadline=$((SECONDS + 1200))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    health_state="$(guest /usr/local/bin/ai-observer-health | jq -er '.state')"
+    case "$health_state" in
+      ready)
+        if guest /usr/local/bin/ai-observer-check >/dev/null 2>&1 \
+          && curl -fsS --max-time 10 "http://127.0.0.1:$observer_port/health" >/dev/null; then
+          ready=1
+          break
+        fi
+        ;;
+      starting) ;;
+      failed) die 'observer reported failed during large backfill' ;;
+      unknown) ;;
+      *) die "observer returned invalid health state during backfill: $health_state" ;;
+    esac
+    sleep 5
+  done
+  [ "$ready" = 1 ] || die 'observer did not become strictly ready within 20 minutes'
+else
+  update_runtime
+  guest /usr/local/bin/ai-observer-check >/dev/null || die 'observer readiness check failed'
+  curl -fsS --max-time 10 "http://127.0.0.1:$observer_port/health" >/dev/null \
+    || die 'owner dashboard route is unavailable'
+fi
 ok 'pinned container, service, read-only session mounts, and owner proxy converged'
 
 api_contains() {
@@ -236,6 +315,10 @@ api_contains() {
 
 api_contains guest "$backfill_marker" || die 'pre-existing Claude session was not backfilled'
 api_contains owner "$backfill_marker" || die 'backfilled Claude session is absent through owner HTTP'
+if [ "$backfill_records" -gt 0 ]; then
+  api_contains owner "$large_backfill_marker" \
+    || die 'the last synthetic backfill record is absent through owner HTTP'
+fi
 ok 'pre-existing Claude session was backfilled and is queryable through both API routes'
 
 live_time="$(date -u +'%Y-%m-%dT%H:%M:%S.000Z')"
@@ -277,18 +360,9 @@ restarts_after="$(guest systemctl show subyard-ai-observer.service --property=NR
 api_contains owner "$backfill_marker" || die 'service recovery lost backfilled data'
 ok 'systemd recovered a killed observer container with its data intact'
 
-write_integrations() {
-  local integrations="$1" temporary="$STATE/config.env.new"
-  sed "s/^CODING_TOOL_INTEGRATIONS=.*/CODING_TOOL_INTEGRATIONS=$integrations/" \
-    "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/config.env" > "$temporary"
-  chmod 0600 "$temporary"
-  mv -fT "$temporary" "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/config.env"
-}
-
 info 'removing Claude as an ingestion source while keeping AI Observer selected'
 container_before_source_change="$(guest docker inspect -f '{{.Id}}' subyard-ai-observer)"
-write_integrations 'codex aiobserver'
-yard init --yes
+yard integration disable claude --yes
 container_without_claude="$(guest docker inspect -f '{{.Id}}' subyard-ai-observer)"
 [ "$container_without_claude" != "$container_before_source_change" ] \
   || die 'removing Claude did not replace the observer container'
@@ -312,12 +386,17 @@ printf '%s\n' \
   "{\"type\":\"user\",\"timestamp\":\"$source_resume_time\",\"sessionId\":\"claude-$token\",\"cwd\":\"/synthetic/aiobserver-e2e\",\"message\":{\"id\":\"claude-source-message-$token\",\"role\":\"user\",\"type\":\"message\",\"content\":[{\"type\":\"text\",\"text\":\"$source_resume_marker\"}]}}" \
   >> "$claude_file"
 info 'restoring Claude as an ingestion source'
-write_integrations 'claude codex aiobserver'
-yard init --yes
+yard integration enable claude --yes
 [ "$(guest docker inspect -f '{{.Id}}' subyard-ai-observer)" != "$container_without_claude" ] \
   || die 'restoring Claude did not replace the observer container'
-[ "$(incus config get "$INSTANCE" user.subyard.ai_observer_provision --project "$PROJECT")" = \
-    "$initial_provision_marker" ] || die 'restoring Claude did not restore its convergence identity'
+# Enabling an integration appends it to the requested order, which also changes
+# the derived HOST_LINKS bytes. Bind subsequent checks to that canonical intent.
+initial_provision_marker="$(incus config get \
+  "$INSTANCE" user.subyard.ai_observer_provision --project "$PROJECT")"
+[[ "$initial_provision_marker" =~ ^[0-9a-f]{64}$ ]] \
+  || die 'restoring Claude did not publish a valid convergence identity'
+[ "$initial_provision_marker" != "$without_claude_marker" ] \
+  || die 'restoring Claude did not update the observer convergence identity'
 [ "$(guest stat -c '%d:%i' /srv/agents/ai-observer/data/ai-observer.duckdb)" = \
     "$database_inode" ] || die 'restoring Claude replaced the observer database'
 binds="$(guest docker inspect -f '{{json .HostConfig.Binds}}' subyard-ai-observer)"
@@ -330,8 +409,7 @@ api_contains owner "$source_resume_marker" \
 ok 'selected ingestion source changes converged without losing the database'
 
 info 'deselecting AI Observer while retaining its database'
-write_integrations 'claude codex'
-yard init --yes
+yard integration disable aiobserver --yes
 guest systemctl is-active --quiet subyard-ai-observer.service \
   && die 'deselection left the observer service active'
 [ "$(guest docker inspect -f '{{.State.Running}}' subyard-ai-observer)" = false ] \
@@ -357,8 +435,7 @@ printf '%s\n' \
   "{\"timestamp\":\"$resume_time\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"$resume_marker\"}]}}" \
   >> "$codex_file"
 info 'reselecting AI Observer and checking resume from persistent state'
-write_integrations 'claude codex aiobserver'
-yard init --yes
+yard integration enable aiobserver --yes
 [ "$(incus config get "$INSTANCE" user.subyard.ai_observer_provision --project "$PROJECT")" = \
     "$initial_provision_marker" ] || die 'reselection did not restore the original convergence identity'
 [ "$(guest stat -c '%d:%i' /srv/agents/ai-observer/data/ai-observer.duckdb)" = \
@@ -390,7 +467,7 @@ EOF
 sudo -n install -m 0755 "$STATE/tailscale" /usr/local/bin/tailscale
 TAILSCALE_FIXTURE=1
 sudo -n ip address add "$tail_address/32" dev lo
-yard init --yes
+yard_engine migrate --yes
 [ "$(incus config get "$INSTANCE" user.subyard.ai_observer_proxy --project "$PROJECT")" = \
     "v2:$tail_address:$observer_port" ] || die 'Tailscale proxy receipt did not converge'
 [ "$(incus config device get "$INSTANCE" ai-observer listen --project "$PROJECT")" = \
