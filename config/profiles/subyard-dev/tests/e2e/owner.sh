@@ -23,10 +23,14 @@ incus() {
   fi
 }
 yard() {
-  if [ -n "$CANDIDATE_ENGINE" ]; then
-    "$CANDIDATE_ENGINE" -Y "$YARD_NAME" "$@"
+  local engine="${CANDIDATE_ENGINE:-$ROOT/.build/yard}" command
+  # Init refreshes its child session; the fixture's parent keeps the old groups.
+  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+    printf -v command '%q ' "$engine" -Y "$YARD_NAME" "$@"
+    sg incus-admin -c "exec $command"
   else
-    "$ROOT/.build/yard" -Y "$YARD_NAME" "$@"
+    "$engine" -Y "$YARD_NAME" "$@"
   fi
 }
 
@@ -96,6 +100,7 @@ provision_log="$STATE/provision-first.out"
 yard provision subyard-dev --yes > "$provision_log"
 grep -Fq 'provisioning subyard-dev' "$provision_log" \
   || die 'public provision did not apply the selected profile hook'
+yard start
 
 check_guest_state() {
   # shellcheck disable=SC2016

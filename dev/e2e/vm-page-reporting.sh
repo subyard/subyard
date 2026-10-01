@@ -42,7 +42,10 @@ guest sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'
 sleep 35
 for round in 1 2; do
   baseline="$(rss)"
-  guest python3 - <<'PY' &
+  # Nested page faults can take longer than 30 seconds. Bound the allocation,
+  # but sample its RSS until it completes so the fully touched peak is included.
+  timeout --foreground 210 incus exec "$instance" --project "$project" -- \
+    timeout --kill-after=5 180 python3 - <<'PY' &
 import mmap
 from pathlib import Path
 import struct
@@ -62,13 +65,12 @@ pages.close()
 PY
   allocation=$!
   peak="$baseline"
-  for _ in $(seq 1 30); do
+  while kill -0 "$allocation" 2>/dev/null; do
     current="$(rss)"
     [ "$current" -le "$peak" ] || peak="$current"
-    kill -0 "$allocation" 2>/dev/null || break
     sleep 1
   done
-  wait "$allocation"
+  wait "$allocation" || die 'bounded guest allocation did not complete'
   printf 'reporting_allocation_round=%s baseline_bytes=%s peak_bytes=%s\n' "$round" "$baseline" "$peak"
   sleep 35
   reclaimed=0

@@ -91,6 +91,7 @@ provision_first="$STATE/provision-first.out"
 yard provision openclaw --yes > "$provision_first"
 grep -Fq 'provisioning openclaw' "$provision_first" \
   || die 'public provision did not apply the selected OpenClaw profile hook'
+yard start
 
 check_guest_state() {
   local docs_hash

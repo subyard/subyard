@@ -18,12 +18,12 @@ fi
 ! grep -q -- '--purpose' "$tmp/missing"
 bash "$tmp/$controller" --slot 7 > "$tmp/calls"
 [ "$(wc -l < "$tmp/calls")" -eq 6 ]
-grep -Fxq -- '--slot 7 --purpose orca-bootstrap --vm 1 -- env SUBYARD_E2E_ORCA_BOOTSTRAP=1 bash config/profiles/orca/tests/e2e/orca-bootstrap.sh' "$tmp/calls"
-grep -Fxq -- '--slot 7 --purpose orca-bootstrap --vm 1 -- env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_EXISTING_YARD=1 bash config/profiles/orca/tests/e2e/orca-bootstrap.sh' "$tmp/calls"
-grep -Fxq -- '--slot 7 --purpose orca-resource --vm 1 -- env SUBYARD_E2E_ORCA_RESOURCE=1 bash config/profiles/orca/tests/e2e/orca-resource.sh' "$tmp/calls"
-grep -Fxq -- '--slot 7 --purpose orca-projects --vm 1 -- env SUBYARD_E2E_ORCA_PROJECTS=1 bash config/profiles/orca/tests/e2e/orca-projects.sh' "$tmp/calls"
-grep -Fxq -- '--slot 7 --purpose orca-ssh-agent --vm 1 -- env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_SSH_AGENT=1 bash config/profiles/orca/tests/e2e/orca-bootstrap.sh' "$tmp/calls"
-grep -Fxq -- '--slot 7 --purpose codex-permissions --vm 1 -- env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_CODEX_PERMISSIONS=1 bash config/profiles/orca/tests/e2e/orca-bootstrap.sh' "$tmp/calls"
+grep -Fxq -- '--slot 7 --type android-test --purpose orca-bootstrap --vm 1 -- env SUBYARD_E2E_ORCA_BOOTSTRAP=1 bash config/profiles/orca/tests/e2e/orca-bootstrap.sh' "$tmp/calls"
+grep -Fxq -- '--slot 7 --type android-test --purpose orca-bootstrap --vm 1 -- env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_EXISTING_YARD=1 bash config/profiles/orca/tests/e2e/orca-bootstrap.sh' "$tmp/calls"
+grep -Fxq -- '--slot 7 --type android-test --purpose orca-resource --vm 1 -- env SUBYARD_E2E_ORCA_RESOURCE=1 bash config/profiles/orca/tests/e2e/orca-resource.sh' "$tmp/calls"
+grep -Fxq -- '--slot 7 --type android-test --purpose orca-projects --vm 1 -- env SUBYARD_E2E_ORCA_PROJECTS=1 bash config/profiles/orca/tests/e2e/orca-projects.sh' "$tmp/calls"
+grep -Fxq -- '--slot 7 --type android-test --purpose orca-ssh-agent --vm 1 -- env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_SSH_AGENT=1 bash config/profiles/orca/tests/e2e/orca-bootstrap.sh' "$tmp/calls"
+grep -Fxq -- '--slot 7 --type android-test --purpose codex-permissions --vm 1 -- env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_CODEX_PERMISSIONS=1 bash config/profiles/orca/tests/e2e/orca-bootstrap.sh' "$tmp/calls"
 rc=0
 PROFILE_CONTROLLER_EXIT=23 bash "$tmp/$controller" --slot 7 > "$tmp/failure" 2>&1 || rc=$?
 [ "$rc" -eq 23 ]

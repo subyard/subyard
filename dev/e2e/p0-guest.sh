@@ -1353,7 +1353,11 @@ decode_frames() { # framed-input json-lines-output
 
 peer_rpc() {
   local request response body remote_engine remote_root
+  local version="p0-peer-vm-$((3 - SUBYARD_E2E_VM))"
   valid_ip "$PEER_IP" || die 'peer IP is invalid'
+  if [ -e "$PEER_ROOT/src/.subyard-acceptance/candidate.json" ]; then
+    version="$(jq -er '.version' "$PEER_ROOT/src/.subyard-acceptance/candidate.json")"
+  fi
   remote_root="/home/dev/.cache/subyard-p0-$TOKEN/peer/subyard/runtime/current"
   remote_engine="$remote_root/bin/yard-engine"
   request="$PEER_ROOT/rpc-request"; response="$PEER_ROOT/rpc-response"; body="$PEER_ROOT/rpc-body"
@@ -1363,7 +1367,7 @@ peer_rpc() {
     "$remote_engine" rpc --stdio \
     < "$request" > "$response"
   decode_frames "$response" "$body"
-  jq -e --arg version "p0-peer-vm-$((3 - SUBYARD_E2E_VM))" \
+  jq -e --arg version "$version" \
     'select(.id=="negotiate" and .error==null and .result.version==1 and .result.engineVersion==$version)' \
     "$body" >/dev/null \
     || die 'cross-owner negotiation failed'

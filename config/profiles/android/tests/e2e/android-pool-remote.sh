@@ -136,12 +136,12 @@ cp "$work/client-key.pub" "$work/authorized_keys"
 chmod 0600 "$work/authorized_keys"
 # Generic remote commands use SSH shell forwarding, not the owner RPC transport.
 # Parse the exact public CLI request without evaluating SSH_ORIGINAL_COMMAND.
-python3 - "$work/owner-command" "$root" "$state" "$yard_name" "$HOME" "$STORAGE_PATH" "$run_payload" <<'PY'
+python3 - "$work/owner-command" "$root" "$state" "$yard_name" "$HOME" "$STORAGE_PATH" "$run_payload" "$YARD_BIN" <<'PY'
 import pathlib, sys
-path, root, state, yard, home, storage, payload = sys.argv[1:]
+path, root, state, yard, home, storage, payload, yard_bin = sys.argv[1:]
 source = '''#!/usr/bin/python3
 import os, re, shlex, sys
-root, state, yard, home, storage, payload = VALUES
+root, state, yard, home, storage, payload, yard_bin = VALUES
 try:
     outer = shlex.split(os.environ.get("SSH_ORIGINAL_COMMAND", ""))
     if outer[:1] == ["--"]:
@@ -162,8 +162,8 @@ env.update(SUBYARD_OPERATOR_HOME=home, SUBYARD_CONFIG_HOME=state + "/config",
            SUBYARD_HOME=state + "/data", SUBYARD_REPOSITORY_ROOT=root,
            STORAGE_PATH=storage, SUBYARD_NO_AUDIT="1", SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE="1",
            SUBYARD_OPERATION_ID=inner[0].split("=", 1)[1])
-os.execve(os.environ["YARD_BIN"], [os.environ["YARD_BIN"], "-Y", yard, "emu", *arguments], env)
-'''.replace('VALUES', repr((root, state, yard, home, storage, payload)), 1)
+os.execve(yard_bin, [yard_bin, "-Y", yard, "emu", *arguments], env)
+'''.replace('VALUES', repr((root, state, yard, home, storage, payload, yard_bin)), 1)
 pathlib.Path(path).write_text(source)
 PY
 chmod 0700 "$work/owner-command"

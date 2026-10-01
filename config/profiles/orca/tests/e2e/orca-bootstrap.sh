@@ -91,7 +91,16 @@ incus() {
     /usr/bin/incus "$@"
   fi
 }
-yard() { timeout --signal=TERM --kill-after=5s 900 "$YARD_BIN" "$@"; }
+yard() {
+  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+    local command
+    printf -v command '%q ' "$YARD_BIN" "$@"
+    timeout --signal=TERM --kill-after=5s 900 sg incus-admin -c "exec $command"
+  else
+    timeout --signal=TERM --kill-after=5s 900 "$YARD_BIN" "$@"
+  fi
+}
 guest_root() { incus --project "$PROJECT" exec "$INSTANCE" -- "$@"; }
 guest_dev() {
   incus --project "$PROJECT" exec "$INSTANCE" --user 1000 --group 1000 \
@@ -1210,6 +1219,8 @@ if ! env -u ASSUME_YES timeout --signal=TERM --kill-after=5s 1800 \
   python3 - >"$STATE/bootstrap-terminal.out" 2>&1 <<'PY_ORCA_PROMPT'
 import os
 import pty
+import shlex
+import subprocess
 import sys
 
 seen = b""
@@ -1224,7 +1235,12 @@ def read_output(fd):
         sent = True
     return data
 
-status = pty.spawn([os.environ["SUBYARD_TTY_TEST_ENGINE"], "orca", "up"],
+command = [os.environ["SUBYARD_TTY_TEST_ENGINE"], "orca", "up"]
+if "incus-admin" not in subprocess.check_output(["id", "-nG"], text=True).split():
+    user = subprocess.check_output(["id", "-un"], text=True).strip()
+    if "incus-admin" in subprocess.check_output(["id", "-nG", user], text=True).split():
+        command = ["sg", "incus-admin", "-c", shlex.join(["exec", *command])]
+status = pty.spawn(command,
                    master_read=read_output, stdin_read=lambda fd: b"")
 sys.exit(os.waitstatus_to_exitcode(status))
 PY_ORCA_PROMPT
@@ -1235,8 +1251,14 @@ fi
 [ "$(grep -Fc 'Proceed? [Y/n]' "$STATE/bootstrap-terminal.out")" = 1 ] \
   || die 'interactive Orca bootstrap did not use exactly one default-yes confirmation'
 status_reached=0
+# Init refreshes its own process groups; the parent fixture shell remains stale.
+status_command='exec "$SUBYARD_TTY_TEST_ENGINE" orca status'
+if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
+  && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+  printf -v status_command 'exec sg incus-admin -c %q' "$status_command"
+fi
 timeout --signal=TERM --kill-after=5s 60 \
-  script --quiet --return --command 'exec "$SUBYARD_TTY_TEST_ENGINE" orca status' /dev/null \
+  script --quiet --return --command "$status_command" /dev/null \
   >"$STATE/status-terminal.out" 2>&1 \
   && grep -Fq 'Orca profile selected for yard init' "$STATE/status-terminal.out" \
   && status_reached=1

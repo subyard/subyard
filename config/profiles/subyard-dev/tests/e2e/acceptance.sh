@@ -18,5 +18,6 @@ while [ "$#" -gt 0 ]; do
 done
 [[ "$slot" =~ ^[1-9][0-9]*$ ]] || { usage >&2; exit 2; }
 
-bash "$ROOT/dev/agent-e2e.sh" --slot "$slot" --purpose subyard-dev-provision --vm 1 -- \
+# This owner-only lane uses the generic singleton baseline.
+bash "$ROOT/dev/agent-e2e.sh" --slot "$slot" --type android-test --purpose subyard-dev-provision --vm 1 -- \
   bash config/profiles/subyard-dev/tests/e2e/owner.sh

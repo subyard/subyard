@@ -36,7 +36,17 @@ incus() {
   fi
 }
 
-yard() { "$YARD_BIN" -Y "$YARD_NAME" "$@"; }
+yard() {
+  # Init refreshes its child session; the fixture's parent keeps the old groups.
+  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+    local command
+    printf -v command '%q ' "$YARD_BIN" -Y "$YARD_NAME" "$@"
+    sg incus-admin -c "exec $command"
+  else
+    "$YARD_BIN" -Y "$YARD_NAME" "$@"
+  fi
+}
 guest_root() { incus --project "$PROJECT" exec "$INSTANCE" -- "$@"; }
 guest_dev() {
   incus --project "$PROJECT" exec "$INSTANCE" --user 1000 --group 1000 \
