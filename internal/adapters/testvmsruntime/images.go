@@ -560,7 +560,7 @@ func (rt *Runtime) admitBuild(ctx context.Context, store LeaseStore, pending Lea
 		storage.Total = min(storageBefore.Total, storage.Total)
 		storage.Used = max(storageBefore.Used, storage.Used)
 		storage.BudgetUsed = max(storageBefore.BudgetUsed, storage.BudgetUsed)
-		return checkCapacity(memory, storage, ram, disk, budgetBytes(rt.Config.MemoryReserve, "2GiB"),
+		return checkCapacity(memory, storage, ram, disk, budgetBytes(rt.Config.MemoryReserve, "8GiB"),
 			budgetBytes(rt.Config.DiskReserve, "5GiB"), budgetBytes(rt.Config.DiskBudget, "0GiB"))
 	})
 }

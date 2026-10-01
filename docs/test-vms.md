@@ -72,6 +72,10 @@ grant. Virtual capacity is distinct from physical storage usage and retained ima
 The broker reserves the full requested environment's RAM and bounded disk growth atomically,
 including concurrent provisioning, held VMs and the base-image builder. It accounts for current
 outer-yard memory, configured safety reserves, measured image size and filesystem/pool headroom.
+Confirmed resident anonymous/shared memory is already reflected in available memory and is
+deducted from each existing VM commitment. Admission reserves only its remaining growth.
+With no other outstanding growth, a standard 9 GiB pair needs 17 GiB available to preserve the
+default 8 GiB reserve. Existing allocations and builders can require additional headroom.
 A typed `capacity` refusal identifies `memory` or `disk` and is safe to retry after resources are
 freed. It does not quarantine a healthy slot. Partial provisioning failures are cleaned up and
 recovered automatically after 1, 5 and 15 minutes, then hourly while the slot remains eligible.
@@ -104,7 +108,7 @@ installed by `yard init`. These initial defaults still require workload peak mea
 | `E2E_DISK_BUDGET` | `0GiB` | Optional total disk quota; `0GiB` means no fixed ceiling |
 | `E2E_CACHE_BUDGET` | `24GiB` | Base and build cache budget |
 | `E2E_DISK_RESERVE` | `5GiB` | Free physical storage reserve |
-| `E2E_MEMORY_RESERVE` | `2GiB` | Memory headroom outside VM commitments |
+| `E2E_MEMORY_RESERVE` | `8GiB` | Memory headroom outside VM commitments |
 | `E2E_VM_OVERHEAD` | `512MiB` | Additional RAM reserved per VM |
 
 Values must be positive `MiB` or `GiB` sizes, except `E2E_DISK_BUDGET=0GiB`, which disables

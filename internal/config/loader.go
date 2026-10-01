@@ -1059,7 +1059,7 @@ func contextFrom(
 	setDefault(values, "E2E_DISK_BUDGET", "0GiB", tracker, defaultLayer)
 	setDefault(values, "E2E_CACHE_BUDGET", "24GiB", tracker, defaultLayer)
 	setDefault(values, "E2E_DISK_RESERVE", "5GiB", tracker, defaultLayer)
-	setDefault(values, "E2E_MEMORY_RESERVE", "2GiB", tracker, defaultLayer)
+	setDefault(values, "E2E_MEMORY_RESERVE", "8GiB", tracker, defaultLayer)
 	setDefault(values, "E2E_VM_OVERHEAD", "512MiB", tracker, defaultLayer)
 	setDefault(values, "E2E_VM_IMAGE", "images:debian/13/cloud", tracker, defaultLayer)
 	setDefault(values, "E2E_VM_CPU", "2", tracker, defaultLayer)

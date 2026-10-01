@@ -93,7 +93,7 @@ func (rt *Runtime) ResourceStatus(ctx context.Context, pool LeasePool) ResourceS
 		"disk_bytes":           budgetBytes(rt.Config.DiskBudget, "0GiB"),
 		"cache_bytes":          budgetBytes(rt.Config.CacheBudget, "24GiB"),
 		"disk_reserve_bytes":   budgetBytes(rt.Config.DiskReserve, "5GiB"),
-		"memory_reserve_bytes": budgetBytes(rt.Config.MemoryReserve, "2GiB"),
+		"memory_reserve_bytes": budgetBytes(rt.Config.MemoryReserve, "8GiB"),
 		"vm_overhead_bytes":    budgetBytes(rt.Config.VMOverhead, "512MiB"),
 	}}
 	memory, err := rt.readMemoryCapacity()

@@ -211,7 +211,7 @@ func (backend *Backend) state() (backendState, error) {
 		diskBudget:    value("E2E_DISK_BUDGET", "0GiB"),
 		cacheBudget:   value("E2E_CACHE_BUDGET", "24GiB"),
 		diskReserve:   value("E2E_DISK_RESERVE", "5GiB"),
-		memoryReserve: value("E2E_MEMORY_RESERVE", "2GiB"),
+		memoryReserve: value("E2E_MEMORY_RESERVE", "8GiB"),
 		vmOverhead:    value("E2E_VM_OVERHEAD", "512MiB"),
 
 		enabled: value("NESTED_E2E_VMS", "0"), cpu: value("E2E_VM_CPU", "4"),

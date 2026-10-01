@@ -132,6 +132,68 @@ func TestSizeRejectsOverflow(t *testing.T) {
 	}
 }
 
+func TestMemoryReserveAppliesToWorkingVMsAndSequentialBuilder(t *testing.T) {
+	for _, builder := range []bool{false, true} {
+		for _, test := range []struct {
+			name, reserve string
+			available     uint64
+			refused       bool
+		}{
+			{"available headroom", "", 18 << 30, false},
+			{"exact default reserve", "", 17 << 30, false},
+			{"below default reserve", "", (17 << 30) - 1, true},
+			{"insufficient for updated reserve", "", 15 << 30, true},
+			{"explicit override", "2GiB", 11 << 30, false},
+		} {
+			t.Run(fmt.Sprintf("builder=%t/%s", builder, test.name), func(t *testing.T) {
+				cfg := fixtureConfig(t)
+				cfg.Memory, cfg.Disk, cfg.MemoryReserve = "4GiB", "20GiB", test.reserve
+				store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1}
+				pair, err := cfg.EnvironmentSpec(EnvironmentPair)
+				if err != nil {
+					t.Fatal(err)
+				}
+				grant, err := store.AcquireV3Slot(pair, "client", "SHA256:key", "yard", "Project", "run", "reserve", "slot-001")
+				if err != nil {
+					t.Fatal(err)
+				}
+				rt := &Runtime{
+					Config: cfg,
+					memoryProbe: func() (MemoryCapacity, error) {
+						return MemoryCapacity{Available: test.available}, nil
+					},
+					diskUsageProbe: func(context.Context) (uint64, error) { return 10 << 30, nil },
+					cacheProbe:     func(context.Context) (CacheUsage, error) { return CacheUsage{}, nil },
+					Runner: &fakeRunner{handler: func(_ string, args, _ []string, _ io.Reader) ([]byte, []byte, error) {
+						if strings.Join(args, " ") == "query /1.0/storage-pools/default/resources" {
+							return []byte(`{"space":{"total":536870912000,"used":10737418240}}`), nil, nil
+						}
+						return nil, nil, fmt.Errorf("unexpected mutation: %v", args)
+					}},
+				}
+				if builder {
+					if err := store.mutateOwned(grant, func(slot *LeaseSlot, _ time.Time) error { slot.Reserved = true; return nil }); err != nil {
+						t.Fatal(err)
+					}
+					// The builder is smaller than the pending pair; its sequential
+					// peak must still leave the pair's default memory reserve.
+					err = rt.admitBuild(context.Background(), store, grant, 5<<30, 20<<30, &ImageRegistry{})
+				} else {
+					err = rt.reserveEnvironment(context.Background(), store, grant)
+				}
+				if test.refused {
+					var capacity *CapacityError
+					if !errors.As(err, &capacity) || capacity.Resource != "memory" {
+						t.Fatalf("memory reserve was not protected: %v", err)
+					}
+				} else if err != nil {
+					t.Fatalf("confirmed headroom was not usable: %v", err)
+				}
+			})
+		}
+	}
+}
+
 func TestConcurrentMixedAdmissionAndRetryAfterRelease(t *testing.T) {
 	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 2}
 	cfg := fixtureConfig(t)
@@ -153,7 +215,7 @@ func TestConcurrentMixedAdmissionAndRetryAfterRelease(t *testing.T) {
 		}
 		return nil, nil, fmt.Errorf("unexpected mutation: %v", args)
 	}}
-	rt := &Runtime{Config: cfg, Runner: runner, diskUsageProbe: func(context.Context) (uint64, error) { return 10 << 30, nil }, memoryProbe: func() (MemoryCapacity, error) { return MemoryCapacity{Available: 11 << 30}, nil }}
+	rt := &Runtime{Config: cfg, Runner: runner, diskUsageProbe: func(context.Context) (uint64, error) { return 10 << 30, nil }, memoryProbe: func() (MemoryCapacity, error) { return MemoryCapacity{Available: 17 << 30}, nil }}
 	var group sync.WaitGroup
 	results := make([]error, 2)
 	for i := range grants {
@@ -235,7 +297,7 @@ func TestAdmissionCreditsOnlyConfirmedExistingAllocation(t *testing.T) {
 				return nil, nil, fmt.Errorf("unexpected command: %v", args)
 			}}
 			rt := &Runtime{Config: cfg, Runner: runner, diskUsageProbe: func(context.Context) (uint64, error) { return 40 << 30, nil }, memoryProbe: func() (MemoryCapacity, error) {
-				return MemoryCapacity{Available: 16 << 30}, nil
+				return MemoryCapacity{Available: 20 << 30}, nil
 			}}
 			var capacity *CapacityError
 			if err := rt.reserveEnvironment(context.Background(), store, grant); !errors.As(err, &capacity) || capacity.Resource != "memory" {
@@ -262,9 +324,9 @@ func TestAdmissionBoundsFreeSpaceWhenGuestReleasesCreditedUsage(t *testing.T) {
 		storageUsed    [2]uint64
 		budgetUsed     [2]uint64
 	}{
-		{"reserve memory", "memory", false, [2]uint64{11 << 30, 18 << 30}, [2]uint64{20 << 30, 20 << 30}, [2]uint64{20 << 30, 20 << 30}},
+		{"reserve memory", "memory", false, [2]uint64{15 << 30, 22 << 30}, [2]uint64{20 << 30, 20 << 30}, [2]uint64{20 << 30, 20 << 30}},
 		{"reserve disk", "disk", false, [2]uint64{30 << 30, 30 << 30}, [2]uint64{50 << 30, 20 << 30}, [2]uint64{20 << 30, 20 << 30}},
-		{"builder memory", "memory", true, [2]uint64{11 << 30, 18 << 30}, [2]uint64{20 << 30, 20 << 30}, [2]uint64{20 << 30, 20 << 30}},
+		{"builder memory", "memory", true, [2]uint64{15 << 30, 22 << 30}, [2]uint64{20 << 30, 20 << 30}, [2]uint64{20 << 30, 20 << 30}},
 		{"builder disk", "disk", true, [2]uint64{30 << 30, 30 << 30}, [2]uint64{50 << 30, 20 << 30}, [2]uint64{20 << 30, 20 << 30}},
 		{"reserve budget", "disk", false, [2]uint64{30 << 30, 30 << 30}, [2]uint64{20 << 30, 20 << 30}, [2]uint64{115 << 30, 85 << 30}},
 		{"builder budget", "disk", true, [2]uint64{30 << 30, 30 << 30}, [2]uint64{20 << 30, 20 << 30}, [2]uint64{115 << 30, 85 << 30}},

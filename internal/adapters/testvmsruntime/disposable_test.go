@@ -17,8 +17,14 @@ import (
 
 func TestFacadeDisposableAdmissionAndLegacyRequestRejection(t *testing.T) {
 	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1}
+	cfg := fixtureConfig(t)
 	var output bytes.Buffer
-	facade := Facade{Store: store, Output: &output}
+	facade := Facade{
+		Store: store, Output: &output,
+		EnvironmentSpec: func(name string) (EnvironmentSpec, error) {
+			return cfg.environmentSpecForArch(name, "amd64")
+		},
+	}
 	for _, command := range []string{"acquire ignored", "acquire-v2 ignored", "acquire-v3 unknown ignored"} {
 		if err := facade.Run(command); err != nil {
 			t.Fatal(err)

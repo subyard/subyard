@@ -433,7 +433,7 @@ EOF
 : "${E2E_DISK_BUDGET:=0GiB}"
 : "${E2E_CACHE_BUDGET:=24GiB}"
 : "${E2E_DISK_RESERVE:=5GiB}"
-: "${E2E_MEMORY_RESERVE:=2GiB}"
+: "${E2E_MEMORY_RESERVE:=8GiB}"
 : "${E2E_VM_OVERHEAD:=512MiB}"
 E2E_RECIPE_ROOT=/usr/local/libexec/subyard/e2e-recipes
 : "${E2E_VM_IMAGE:=images:debian/13/cloud}"

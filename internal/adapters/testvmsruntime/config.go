@@ -95,7 +95,7 @@ func ConfigFromValues(values map[string]string) (Config, error) {
 		DiskBudget:    value("E2E_DISK_BUDGET", "0GiB"),
 		CacheBudget:   value("E2E_CACHE_BUDGET", "24GiB"),
 		DiskReserve:   value("E2E_DISK_RESERVE", "5GiB"),
-		MemoryReserve: value("E2E_MEMORY_RESERVE", "2GiB"),
+		MemoryReserve: value("E2E_MEMORY_RESERVE", "8GiB"),
 		VMOverhead:    value("E2E_VM_OVERHEAD", "512MiB"),
 		RecipeRoot:    value("E2E_RECIPE_ROOT", "/usr/local/libexec/subyard/e2e-recipes"),
 		Enabled:       enabled == "1", Project: value("E2E_VM_PROJECT", "subyard-e2e-vms"),
