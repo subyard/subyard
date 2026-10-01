@@ -62,6 +62,14 @@ grep -Fq 'run: go test -race -shuffle=on -count=3 ./...' "$DEEP_WORKFLOW" \
   || fail 'deep CI must run repeated race tests and bounded parser fuzzing'
 
 for workflow in "$CI_WORKFLOW" "$RELEASE_WORKFLOW"; do
+  native_engine_job="$(awk '/^  native-engine-arm64:/ {inside=1; next} inside && /^  [^[:space:]]/ {exit} inside {print}' "$workflow")"
+  grep -Fxq '    runs-on: ubuntu-24.04-arm' <<<"$native_engine_job" \
+    && grep -Fxq '          go-version-file: go.mod' <<<"$native_engine_job" \
+    && grep -Fxq '          persist-credentials: false' <<<"$native_engine_job" \
+    && grep -Fxq '          dev/build-engine.sh' <<<"$native_engine_job" \
+    && grep -Fxq '          .build/yard --version' <<<"$native_engine_job" \
+    && grep -Fxq '        run: go test -count=1 ./cmd/... ./internal/...' <<<"$native_engine_job" \
+    || fail "$(basename "$workflow") must build, run and test the native ARM64 engine"
   grep -Fq 'make verify' "$workflow" \
     || fail "$(basename "$workflow") must verify core and shipped profiles"
   grep -Fq "bash $RUNNER" "$workflow" \
@@ -69,6 +77,8 @@ for workflow in "$CI_WORKFLOW" "$RELEASE_WORKFLOW"; do
   ! grep -Fq 'scripts/install-key-tools.sh' "$workflow" \
     || fail "$(basename "$workflow") bypasses the prepared-context runner"
 done
+grep -Fxq '    needs: [native-engine-arm64, paseo-headless]' "$RELEASE_WORKFLOW" \
+  || fail 'Release publication must require native ARM64 engine and Paseo checks'
 
 grep -Fq 'run: make verify' "$CI_WORKFLOW" \
   && grep -Fq 'shellcheck -x -S warning' "$CI_WORKFLOW" \

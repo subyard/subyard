@@ -40,6 +40,9 @@ ENVIRONMENT_TYPE=subyard-pair
 VM_COUNT=2
 BASE_FINGERPRINT=""
 WAIT_SECONDS=0
+E2E_ACTIVE_PHASE=""
+E2E_PHASE_STARTED=0
+E2E_PHASE_VM=""
 declare -A GUEST_DIRS=()
 declare -A VM_IP=()
 declare -A VM_HOST_KEY=()
@@ -47,6 +50,33 @@ declare -A VM_HOST_KEY=()
 die() { printf 'agent-e2e: %s\n' "$*" >&2; exit 2; }
 info() { printf '  [ .. ] %s\n' "$*"; }
 ok() { printf '  [ ok ] %s\n' "$*"; }
+
+# Controller-only timings contain fixed fields, never command or lease data.
+phase_marker() {
+  local phase="$1" state="$2" duration="$3" rc="$4" vm="${5:-}"
+  case "$phase" in allocation|packing|transport|guest|guest-cleanup|cleanup/release) ;; *) return 0 ;; esac
+  case "$state" in start|end) ;; *) return 0 ;; esac
+  [[ "$duration" =~ ^[0-9]+$ && "$rc" =~ ^[0-9]+$ ]] || return 0
+  case "$vm" in ''|1|2) ;; *) return 0 ;; esac
+  { printf 'E2E_PHASE phase=%s state=%s duration_seconds=%s exit_code=%s' "$phase" "$state" "$duration" "$rc"
+    [ -z "$vm" ] || printf ' vm=%s' "$vm"
+    printf '\n'
+  } >&2 || true
+}
+
+phase_start() {
+  E2E_ACTIVE_PHASE="$1"
+  E2E_PHASE_STARTED=$SECONDS
+  E2E_PHASE_VM="${2:-}"
+  phase_marker "$E2E_ACTIVE_PHASE" start 0 0 "$E2E_PHASE_VM"
+}
+
+phase_end() {
+  local rc="$1" duration=$((SECONDS - E2E_PHASE_STARTED))
+  [ "$duration" -ge 0 ] || duration=0
+  [ -z "$E2E_ACTIVE_PHASE" ] || phase_marker "$E2E_ACTIVE_PHASE" end "$duration" "$rc" "$E2E_PHASE_VM"
+  E2E_ACTIVE_PHASE=""
+}
 
 configure_yard_scope() {
   case "$E2E_YARD" in
@@ -800,8 +830,17 @@ release_lease() {
 }
 
 lease_keeper() {
-  local owner_pid="$1" response
-  while sleep 60; do
+  local owner_pid="$1" response keeper_timer_pid=''
+  trap 'if [ -n "${keeper_timer_pid:-}" ]; then
+    kill "$keeper_timer_pid" >/dev/null 2>&1 || true
+    wait "$keeper_timer_pid" >/dev/null 2>&1 || true
+  fi' EXIT
+  trap 'exit 0' INT TERM
+  while true; do
+    sleep 60 &
+    keeper_timer_pid=$!
+    wait "$keeper_timer_pid" || return 0
+    keeper_timer_pid=''
     if ! response="$(facade_request "$(lease_command renew)")" ||
       [ "$(jq -r '.status // empty' <<<"$response")" != ok ]; then
       [ -z "$LEASE_KEEPER_LOG" ] \
@@ -953,23 +992,34 @@ quote_ssh_command() {
 }
 
 cleanup_guest() {
-  local vm="$1" directory="${GUEST_DIRS[$1]:-}"
+  local vm="$1" directory="${GUEST_DIRS[$1]:-}" rc=0
   [ -n "$directory" ] || return 0
-  case "$directory" in /tmp/subyard-worktree.*) ;; *) return 1 ;; esac
-  guest "$vm" sudo -n find "$directory" -depth -delete </dev/null || return $?
+  phase_start guest-cleanup "$vm"
+  case "$directory" in /tmp/subyard-worktree.*) ;; *) phase_end 1; return 1 ;; esac
+  if [ "${2:-}" = quiet ]; then
+    guest "$vm" sudo -n find "$directory" -depth -delete </dev/null >/dev/null 2>&1 || rc=$?
+  else
+    guest "$vm" sudo -n find "$directory" -depth -delete </dev/null || rc=$?
+  fi
+  phase_end "$rc"
+  [ "$rc" = 0 ] || return "$rc"
   unset 'GUEST_DIRS[$vm]'
 }
 
 cleanup_on_exit() {
-  local rc=$? vm cleanup_failed=0
+  local rc=$? vm cleanup_failed=0 started=$SECONDS
   trap - EXIT INT TERM
   set +e
+  # Interrupted work stays incomplete; EXIT closes terminal failures only.
+  if [ "${1:-}" != interrupted ]; then phase_end "$rc"; fi
+  E2E_ACTIVE_PHASE=""
+  phase_marker cleanup/release start 0 0
   if [ -n "$LEASE_KEEPER_PID" ]; then
     kill "$LEASE_KEEPER_PID" >/dev/null 2>&1 || true
     wait "$LEASE_KEEPER_PID" >/dev/null 2>&1 || true
   fi
   for vm in "${!GUEST_DIRS[@]}"; do
-    cleanup_guest "$vm" >/dev/null 2>&1 || cleanup_failed=1
+    cleanup_guest "$vm" quiet >/dev/null || cleanup_failed=1
   done
   if [ -n "$LOCAL_TEMP" ]; then
     case "$LOCAL_TEMP" in /tmp/subyard-agent-e2e.*|"${TMPDIR:-/tmp}"/subyard-agent-e2e.*)
@@ -979,6 +1029,7 @@ cleanup_on_exit() {
   fi
   release_lease || cleanup_failed=1
   [ "$cleanup_failed" = 0 ] || rc=3
+  phase_marker cleanup/release end "$((SECONDS - started))" "$((cleanup_failed * 3))"
   exit "$rc"
 }
 
@@ -1019,7 +1070,7 @@ build_bundle() {
     count=$((count + 1))
   done < <(worktree_paths "$root" --follow; if [ "$#" -gt 0 ]; then printf '%s\0' "$@"; fi)
   [ "$count" -gt 0 ] || die "public worktree is empty"
-  printf '%s\0' "${paths[@]}" | tar -C "$root" --null -T - -cf - | gzip -n > "$bundle"
+  printf '%s\0' "${paths[@]}" | LC_ALL=C sort -z | tar -C "$root" --null -T - -cf - | gzip -n > "$bundle"
 }
 
 write_guest_command() {
@@ -1069,16 +1120,22 @@ prepare_guest() {
 }
 
 run_guest() {
-  local vm="$1" bundle="$2" expected_hash="$3" directory; shift 3
-  prepare_guest "$vm" "$bundle" "$expected_hash" || return
+  local vm="$1" bundle="$2" expected_hash="$3" directory rc=0; shift 3
+  phase_start transport "$vm"
+  prepare_guest "$vm" "$bundle" "$expected_hash" || { rc=$?; phase_end "$rc"; return "$rc"; }
   directory="$PREPARED_DIRECTORY"
   write_guest_command "$vm" "$directory" "$@" \
     | guest "$vm" dd "of=$directory/run.sh" status=none \
-    || { printf 'agent-e2e: VM%s command transfer failed\n' "$vm" >&2; return 2; }
+    || { printf 'agent-e2e: VM%s command transfer failed\n' "$vm" >&2; phase_end 2; return 2; }
   guest "$vm" chmod 0700 "$directory/run.sh" </dev/null \
-    || { printf 'agent-e2e: VM%s command preparation failed\n' "$vm" >&2; return 2; }
+    || { printf 'agent-e2e: VM%s command preparation failed\n' "$vm" >&2; phase_end 2; return 2; }
+  phase_end 0
   printf '\n== e2e-vm-%s ==\n' "$vm"
+  phase_start guest "$vm"
   guest "$vm" "$directory/run.sh" </dev/null 2>&1 | normalize_terminal_progress
+  rc=$?
+  phase_end "$rc"
+  return "$rc"
 }
 
 normalize_terminal_progress() {
@@ -1090,18 +1147,20 @@ normalize_terminal_progress() {
 }
 
 run_direct_ssh() {
-  local vm="$1" forward_stdin="$2" command; shift 2
+  local vm="$1" forward_stdin="$2" command rc; shift 2
+  phase_start guest "$vm"
   if [ "$#" -gt 0 ]; then
     command="$(quote_ssh_command "$@")"
     if [ "$forward_stdin" = 1 ]; then
       ssh -F "$CLIENT_CONFIG" -T "e2e-vm-$vm" -- "$command"
-      return
+      rc=$?; phase_end "$rc"; return "$rc"
     fi
     ssh -F "$CLIENT_CONFIG" -T "e2e-vm-$vm" -- "$command" </dev/null
-    return
+    rc=$?; phase_end "$rc"; return "$rc"
   fi
   [ "$forward_stdin" = 0 ] || die "--ssh-stdin requires a command"
   ssh -F "$CLIENT_CONFIG" -tt "e2e-vm-$vm"
+  rc=$?; phase_end "$rc"; return "$rc"
 }
 
 set_requested_slot() {
@@ -1205,18 +1264,24 @@ main() {
       ;;
     verify)
       [ "${#command[@]}" -eq 0 ] || die "--verify-boundary takes no command"
-      trap cleanup_on_exit EXIT INT TERM
+      trap cleanup_on_exit EXIT
+      trap 'cleanup_on_exit interrupted' INT TERM
       LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
+      phase_start allocation
       acquire_lease
+      phase_end "$?"
       start_lease_keeper
       verify_boundary
       return
       ;;
     ssh)
       case "$ssh_vm" in 1 | 2) ;; *) die "--ssh needs VM selector 1 or 2" ;; esac
-      trap cleanup_on_exit EXIT INT TERM
+      trap cleanup_on_exit EXIT
+      trap 'cleanup_on_exit interrupted' INT TERM
       LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
+      phase_start allocation
       acquire_lease
+      phase_end "$?"
       start_lease_keeper
       run_direct_ssh "$ssh_vm" "$ssh_stdin" "${command[@]}"
       return
@@ -1230,14 +1295,19 @@ main() {
   command -v tar >/dev/null 2>&1 || die "tar is required"
   command -v sha256sum >/dev/null 2>&1 || die "sha256sum is required"
 
-  trap cleanup_on_exit EXIT INT TERM
+  trap cleanup_on_exit EXIT
+  trap 'cleanup_on_exit interrupted' INT TERM
   LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
+  phase_start allocation
   acquire_lease
+  phase_end "$?"
   start_lease_keeper
   bundle="$LOCAL_TEMP/worktree.tar.gz"
   info "packing current public worktree"
+  phase_start packing
   build_bundle "$root" "$bundle"
   bundle_hash="$(sha256sum "$bundle" | awk '{print $1}')"
+  phase_end "$?"
   ok "worktree bundle ready (sha256=$bundle_hash)"
 
   for vm in "${selected[@]}"; do

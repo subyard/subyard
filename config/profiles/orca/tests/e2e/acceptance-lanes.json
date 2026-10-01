@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "lanes": [
+    {"id": "bootstrap", "arguments": ["--lane", "bootstrap"]},
+    {"id": "existing-yard", "arguments": ["--lane", "existing-yard"]},
+    {"id": "resource", "arguments": ["--lane", "resource"]},
+    {"id": "projects", "arguments": ["--lane", "projects"]},
+    {"id": "ssh-agent", "arguments": ["--lane", "ssh-agent"]},
+    {"id": "codex-permissions", "arguments": ["--lane", "codex-permissions"]}
+  ]
+}

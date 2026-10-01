@@ -76,6 +76,11 @@ A typed `capacity` refusal identifies `memory` or `disk` and is safe to retry af
 freed. It does not quarantine a healthy slot. Partial provisioning failures are cleaned up and
 recovered automatically after 1, 5 and 15 minutes, then hourly while the slot remains eligible.
 
+When slot memory evidence is unknown or partial, `memory_evidence_reason` reports a bounded
+guard/query classification, such as `incus_query_deadline` or `cgroup_processes_not_isolated`.
+It contains no process IDs or paths. Unknown usage retains its commitment; the reason does not
+waive admission guards or reserves.
+
 Physical headroom is checked against the entire backing filesystem. With the `dir` driver,
 the disk budget instead charges the inner daemon's image cache and allocated blocks in its VM
 and VM-snapshot directories, plus outstanding growth and builder commitments. This includes

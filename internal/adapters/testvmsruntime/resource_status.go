@@ -48,6 +48,7 @@ type SlotResourceStatus struct {
 	ConfirmedAnonMemory   uint64 `json:"confirmed_anon_shmem_bytes"`
 	RemainingMemory       uint64 `json:"remaining_memory_growth_bytes"`
 	MemoryEvidence        string `json:"memory_evidence"`
+	MemoryEvidenceReason  string `json:"memory_evidence_reason,omitempty"`
 	VirtualDiskCapacity   uint64 `json:"virtual_disk_capacity_bytes"`
 	ConfirmedPhysicalDisk uint64 `json:"confirmed_physical_disk_bytes"`
 	RemainingDisk         uint64 `json:"remaining_disk_growth_bytes"`
@@ -146,6 +147,10 @@ func (rt *Runtime) ResourceStatus(ctx context.Context, pool LeasePool) ResourceS
 			memoryScope = result.Memory.scope
 		}
 		usage := rt.allocationUsage(ctx, slot, memoryScope)
+		memoryReason := ""
+		if !usage.memoryKnown {
+			memoryReason = usage.memoryReason.String()
+		}
 		if usage.diskKnown {
 			confirmedDiskSlots++
 		}
@@ -154,9 +159,10 @@ func (rt *Runtime) ResourceStatus(ctx context.Context, pool LeasePool) ResourceS
 		result.Slots = append(result.Slots, SlotResourceStatus{
 			SlotID: slot.SlotID, Environment: spec.Name,
 			MemoryCommitment: ram, ConfirmedAnonMemory: usage.memory,
-			RemainingMemory:     ram - min(ram, usage.memory),
-			MemoryEvidence:      usageEvidence(usage.memoryKnown, usage.memory, "qemu_cgroup_anon_shmem"),
-			VirtualDiskCapacity: disk, ConfirmedPhysicalDisk: usage.disk,
+			RemainingMemory:      ram - min(ram, usage.memory),
+			MemoryEvidence:       usageEvidence(usage.memoryKnown, usage.memory, "qemu_cgroup_anon_shmem"),
+			MemoryEvidenceReason: memoryReason,
+			VirtualDiskCapacity:  disk, ConfirmedPhysicalDisk: usage.disk,
 			RemainingDisk: disk - min(disk, usage.disk),
 			DiskEvidence:  usageEvidence(usage.diskKnown, usage.disk, "dir_ext4_allocated_blocks"),
 		})
