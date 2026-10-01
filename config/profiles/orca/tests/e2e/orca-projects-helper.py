@@ -148,6 +148,7 @@ def valid_yard_action(command, yard_name):
     if command[1] in minimum_lengths:
         return len(command) >= minimum_lengths[command[1]]
     expected_lengths = {
+        "check-role": 2,
         "finalize": 10,
         "abort": 3,
         "upsert": (6, 9),

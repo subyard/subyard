@@ -93,6 +93,7 @@ class TransportTests(unittest.TestCase):
         with self.assertRaises(self.error) as caught:
             self.client(self.metadata, timeout=0.04).call("projectGroup.create", {"name": "Fixture"})
         self.assertTrue(caught.exception.unknown)
+        self.assertIn("projectGroup.create", str(caught.exception))
         self.assertNotIn("fixture-token", str(caught.exception))
 
     def test_rpc_rejection_is_known_failure_without_server_secret_text(self):

@@ -125,13 +125,20 @@ orca_repo_id() {
 }
 
 orca_registration_hash() {
+  local files=() path
+  if [ "$#" -gt 0 ]; then
+    for path in "$1"/config/profiles/orca/resources/orca/registration/*.py; do
+      files+=("/usr/local/libexec/subyard/orca-registration/${path##*/}")
+    done
+  fi
   guest_root sh -c '
     set -eu
-    for path in /usr/local/libexec/subyard/orca-registration/*.py; do
+    [ "$#" -gt 0 ] || set -- /usr/local/libexec/subyard/orca-registration/*.py
+    for path do
       digest="$(sha256sum "$path" | cut -d " " -f 1)"
       printf "%s  %s\n" "$digest" "${path##*/}"
     done | sha256sum | cut -d " " -f 1
-  '
+  ' sh "${files[@]}"
 }
 
 orca_hook_hash() {
@@ -146,6 +153,19 @@ release_orca_helper_hash() {
       printf '%s  %s\n' "$digest" "${path##*/}"
     done
   } | sha256sum | cut -d ' ' -f 1
+}
+
+seed_handler_cache() {
+  guest_dev python3 - /srv/workspaces/handler-upgrade/src/.build/cache <<'YARD'
+import os, sys
+os.makedirs(sys.argv[1], exist_ok=True)
+fd = os.open(sys.argv[1], os.O_RDONLY | os.O_DIRECTORY)
+try:
+    for index in range(100001):
+        os.close(os.open(str(index), os.O_WRONLY | os.O_CREAT, 0o600, dir_fd=fd))
+finally:
+    os.close(fd)
+YARD
 }
 
 run_candidate_handler_acceptance() {
@@ -225,6 +245,8 @@ EOF_SECONDARY_HANDLER
   legacy_hook="$(orca_hook_hash)"
   primary_pid="$(guest_root systemctl show -p MainPID --value subyard-orca.service)"
 
+  stage 'seeding a large cache before candidate activation'
+  seed_handler_cache
   stage "updating the $mode predecessor to candidate $target_version"
   YARD_RELEASE_BASE_URL="file://$STATE/release" \
     yard update --version "$target_version" --yes >"$STATE/handler-candidate-update.out" \
@@ -241,6 +263,10 @@ EOF_SECONDARY_HANDLER
   [ "$(orca_hook_hash)" != "$legacy_hook" ] \
     || die 'candidate update retained the legacy Orca hook'
   target_hook="$(orca_hook_hash)"
+  guest_root systemctl is-enabled --quiet subyard-orca-discovery.timer \
+    || die 'candidate activation did not enable periodic discovery'
+  guest_root systemctl is-active --quiet subyard-orca-discovery.timer \
+    || die 'candidate activation did not schedule periodic discovery'
   [ "$(guest_root systemctl show -p MainPID --value subyard-orca.service)" = "$primary_pid" ] \
     || die 'candidate helper refresh restarted active Orca'
   PROJECT="$primary_project-secondary"
@@ -281,14 +307,19 @@ EOF_SECONDARY_HANDLER
     || die 'rollback with the candidate helper lost the saved checkout'
   assert_orca_runtime_json_preserved
   client_status "$pairing" upgrade-client
+  # Deliberately restoring published legacy code also restores its file limit.
+  # Keep the cache for candidate/retained-helper checks, not this legacy repair.
+  guest_dev rm -rf -- /srv/workspaces/handler-upgrade/src/.build/cache
   yard orca up --yes >/dev/null
   restored_helper="$(orca_registration_hash)"
   restored_hook="$(orca_hook_hash)"
-  [ "$restored_helper" = "$rollback_helper" ] \
+  # Published old installers overwrite their files without deleting new modules.
+  [ "$(orca_registration_hash "$rollback_root")" = "$rollback_helper" ] \
     && [ "$restored_hook" != "$target_hook" ] \
     || die 'old Orca up did not restore its helper contract'
 
   stage 'checking stopped-yard deferred repair with simultaneous candidate config drift'
+  seed_handler_cache
   yard stop --yes >/dev/null
   YARD_RELEASE_BASE_URL="file://$STATE/release" \
     yard update --version "$target_version" --yes >/dev/null || die 'stopped-yard forward update failed'

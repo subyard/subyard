@@ -29,7 +29,7 @@ class State:
     def __enter__(self):
         try:
             if self.apply:
-                self.directory.mkdir(parents=True, exist_ok=True)
+                self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
             flags = os.O_NOFOLLOW | os.O_NONBLOCK | (os.O_RDWR | os.O_CREAT if self.apply else os.O_RDONLY)
             try:
                 self.lock = os.open(self.directory / "subyard-registration.lock", flags, 0o600)
@@ -76,6 +76,10 @@ class State:
             if (not isinstance(project_id, str) or not project_id or not isinstance(entry, dict)
                     or not isinstance(entry.get("root"), str) or not entry["root"].startswith("/")
                     or not isinstance(entry.get("pending_repos", {}), dict)):
+                raise ValueError()
+            if (not isinstance(entry.get("known_roots", []), list)
+                    or not all(isinstance(path, str) and path.startswith(entry["root"] + "/")
+                               and os.path.normpath(path) == path for path in entry.get("known_roots", []))):
                 raise ValueError()
             group_id = entry.get("group_id")
             if "group_name" in entry and not isinstance(entry["group_name"], str):

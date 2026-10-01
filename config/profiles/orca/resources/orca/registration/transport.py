@@ -27,6 +27,7 @@ class RuntimeRPC:
         self.runtime_id = None
 
     def call(self, method, params=None, before_send=None):
+        started = time.monotonic()
         write = method not in ("repo.list", "projectGroup.list", "folderWorkspace.list",
                                "settings.get", "session.tabs.listAll")
         sent = False
@@ -100,6 +101,7 @@ class RuntimeRPC:
                             raise RpcError("Orca runtime returned invalid envelope", unknown=write)
                         return frame["result"]
         except (TimeoutError, socket.timeout):
-            raise RpcError("Orca runtime request timed out", unknown=write and sent) from None
+            raise RpcError(f"Orca runtime request timed out: {method} ({time.monotonic() - started:.1f}s)",
+                           unknown=write and sent) from None
         except OSError:
             raise RpcError("Orca runtime connection failed", unknown=write and sent) from None

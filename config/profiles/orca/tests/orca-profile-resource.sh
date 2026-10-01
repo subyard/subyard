@@ -106,11 +106,11 @@ case "${1:-}" in
         mapped=()
         if [[ "${command[0]}" = /tmp/subyard-orca.* ]]; then
           for index in 0 1 2 3 4; do mapped+=("$guest${command[$index]}"); done
-          mapped+=("${command[5]}")
+          mapped+=("${command[5]}" "$guest${command[6]}" "$guest${command[7]}")
         else
           mapped+=("${command[0]}")
-          for index in 1 2 3 4 5 6; do mapped+=("$guest${command[$index]}"); done
-          mapped+=("${command[@]:7}")
+          for index in 1 2 3 4 5 6 7 8; do mapped+=("$guest${command[$index]}"); done
+          mapped+=("${command[@]:9}")
         fi
         export ORCA_TEST_GUEST_ROOT="$guest" ORCA_TEST_STATE_ROOT="$state_root"
         stat() {
@@ -129,7 +129,12 @@ case "${1:-}" in
           fi
           command mv "$@"
         }
-        export -f stat chown mv
+        systemctl() {
+          if [ "${1:-}" = is-enabled ] && [[ "${*: -1}" = *subyard-orca-discovery.timer ]]; then
+            [ -f "$ORCA_TEST_STATE_ROOT/discovery-enabled" ]
+          else return 0; fi
+        }
+        export -f stat chown mv systemctl
         /bin/bash -se -- "${mapped[@]}"
         ;;
       *' test -x /usr/local/libexec/subyard/projects-changed '*)
@@ -208,6 +213,18 @@ case "${1:-}" in
       *' systemctl is-active --quiet subyard-orca.service '*)
         [ -f "$service" ]
         ;;
+      *' systemctl enable --now subyard-orca-discovery.timer '*)
+        touch "$state_root/discovery-enabled" "$state_root/discovery-active"
+        ;;
+      *' systemctl is-enabled --quiet subyard-orca-discovery.timer '*)
+        [ -f "$state_root/discovery-enabled" ]
+        ;;
+      *' systemctl is-active --quiet subyard-orca-discovery.timer '*)
+        [ -f "$state_root/discovery-active" ]
+        ;;
+      *' systemctl is-active --quiet subyard-orca-discovery.service '*) exit 1 ;;
+      *' systemctl start subyard-orca-discovery.timer '*) touch "$state_root/discovery-active" ;;
+      *' systemctl stop subyard-orca-discovery.timer '*) rm -f "$state_root/discovery-active" ;;
       *' systemctl start subyard-orca.service '*|*' systemctl restart subyard-orca.service '*)
         [ ! -e "$state_root/fail-restart" ] || exit 1
         touch "$service" "$ingress"

@@ -33,7 +33,9 @@ ORCA_CODEX_PROFILE=/etc/profile.d/subyard-orca-codex.sh
 ORCA_CONTRACT_DIGEST=/usr/local/libexec/subyard/orca-contract.sha256
 ORCA_REGISTRATION_DIGEST=/usr/local/libexec/subyard/orca-registration.sha256
 ORCA_REGISTRATION_LOCK=/usr/local/libexec/subyard/orca-registration.lock
-ORCA_CONTRACT_VERSION=4
+ORCA_DISCOVERY_UNIT=subyard-orca-discovery.service
+ORCA_DISCOVERY_TIMER=subyard-orca-discovery.timer
+ORCA_CONTRACT_VERSION=5
 ORCA_GUEST_PORT=6768
 ORCA_RUNTIME_CHANGED=0
 ORCA_TMP_DIR=
@@ -284,7 +286,7 @@ registration_host_name() {
 }
 
 render_registration_hook() {
-  local version host_name
+  local version host_name mode="${1:-sync}"
   version="$(registration_contract_version)" || return 1
   host_name="$(registration_host_name)" || return 1
   cat <<SYNC_HEAD
@@ -299,7 +301,7 @@ flock -s 9
 systemctl is-active --quiet $ORCA_UNIT || exit 0
 /usr/bin/python3 -B $ORCA_REGISTRATION/settings.py
 status=0
-report="\$(/usr/bin/python3 -B $ORCA_REGISTRATION/main.py sync --host-name '$host_name')" || status=\$?
+report="\$(/usr/bin/python3 -B $ORCA_REGISTRATION/main.py $mode --host-name '$host_name')" || status=\$?
 if ! jq -e '(.ready | type == "boolean") and (.errors | type == "array") and (.warnings | type == "array")' <<<"\$report" >/dev/null; then
   printf 'Orca project registration failed; run yard orca status\n' >&2
   exit 1
@@ -309,6 +311,42 @@ jq -r '"Orca checkouts registered: \(.registered)/\(.total)"' <<<"\$report"
 jq -e '.ready' <<<"\$report" >/dev/null || status=1
 exit "\$status"
 SYNC_HEAD
+}
+
+render_discovery_service() {
+  cat <<UNIT
+[Unit]
+Description=Subyard Orca repository discovery portion
+After=$ORCA_UNIT
+PartOf=$ORCA_UNIT
+
+[Service]
+Type=oneshot
+User=${DEV_USER:-dev}
+Group=${DEV_USER:-dev}
+Environment=HOME=/home/${DEV_USER:-dev}
+ExecStart=$ORCA_REGISTRATION/discover
+TimeoutStartSec=100
+UMask=0077
+Nice=10
+UNIT
+}
+
+render_discovery_timer() {
+  cat <<UNIT
+[Unit]
+Description=Periodically discover Subyard Orca repositories
+PartOf=$ORCA_UNIT
+
+[Timer]
+OnBootSec=15s
+OnUnitInactiveSec=15s
+AccuracySec=1s
+Unit=$ORCA_DISCOVERY_UNIT
+
+[Install]
+WantedBy=timers.target
+UNIT
 }
 
 registration_desired_digest() {
@@ -323,6 +361,13 @@ registration_desired_digest() {
       printf '644 0:0 %s ' "${source##*/}"
       sha256sum "$source" | awk '{print $1}'
     done
+    printf '755 0:0 discover '
+    render_registration_hook discover | sha256sum | awk '{print $1}'
+    printf '644 0:0 discovery-service '
+    render_discovery_service | sha256sum | awk '{print $1}'
+    printf '644 0:0 discovery-timer '
+    render_discovery_timer | sha256sum | awk '{print $1}'
+    printf 'enabled discovery-timer\n'
     printf '644 0:0 lock\n'
     printf '644 0:0 marker %s\n' "$version"
   } | sha256sum | awk '{print $1}'
@@ -335,9 +380,11 @@ observe_registration_contract() {
   mapfile -t names < <(cd "$RESOURCE_DIR/registration" && printf '%s\n' ./*.py | sed 's#^./##')
   yexec bash -se -- "$desired" "$ORCA_SYNC" "$ORCA_REGISTRATION" \
     "$ORCA_REGISTRATION_DIGEST" "$ORCA_REGISTRATION_LOCK" "$ORCA_EXEC" \
-    "/etc/systemd/system/$ORCA_UNIT" "${names[@]}" <<'YARD'
+    "/etc/systemd/system/$ORCA_UNIT" "/etc/systemd/system/$ORCA_DISCOVERY_UNIT" \
+    "/etc/systemd/system/$ORCA_DISCOVERY_TIMER" "${names[@]}" <<'YARD'
 set -euo pipefail
-desired="$1"; hook="$2"; directory="$3"; marker="$4"; lock="$5"; executable="$6"; unit="$7"; shift 7
+desired="$1"; hook="$2"; directory="$3"; marker="$4"; lock="$5"; executable="$6"; unit="$7"
+discovery_service="$8"; discovery_timer="$9"; shift 9
 if [ ! -e "$executable" ] && [ ! -e "$unit" ] && [ ! -e "$hook" ] &&
   [ ! -e "$directory" ] && [ ! -e "$marker" ] && [ ! -e "$lock" ]; then
   printf '{"state":"absent","actual":"","desired":""}\n'
@@ -368,6 +415,20 @@ actual="$({
       *) printf 'unexpected %s\n' "${installed##*/}" ;;
     esac
   done
+  for artifact in "$directory/discover" "$discovery_service" "$discovery_timer"; do
+    case "$artifact" in
+      "$directory/discover") label=discover ;;
+      "$discovery_service") label=discovery-service ;;
+      *) label=discovery-timer ;;
+    esac
+    if [ -f "$artifact" ]; then
+      printf '%s %s:%s %s ' "$(stat -c %a "$artifact")" "$(stat -c %u "$artifact")" "$(stat -c %g "$artifact")" "$label"
+      sha256sum "$artifact" | awk '{print $1}'
+    else printf 'missing %s\n' "$label"; fi
+  done
+  if systemctl is-enabled --quiet "${discovery_timer##*/}"; then
+    printf 'enabled discovery-timer\n'
+  else printf 'disabled discovery-timer\n'; fi
   if [ -f "$lock" ]; then
     printf '%s %s:%s lock\n' "$(stat -c %a "$lock")" "$(stat -c %u "$lock")" "$(stat -c %g "$lock")"
   else
@@ -394,6 +455,9 @@ stage_registration_contract() {
   local sync="$ORCA_TMP_DIR/orca-sync"
   local source desired version
   render_registration_hook >"$sync"
+  render_registration_hook discover >"$ORCA_TMP_DIR/discover"
+  render_discovery_service >"$ORCA_TMP_DIR/$ORCA_DISCOVERY_UNIT"
+  render_discovery_timer >"$ORCA_TMP_DIR/$ORCA_DISCOVERY_TIMER"
   chmod 0755 "$sync"
   desired="$(registration_desired_digest)" || die "Orca registration helper contract unavailable"
   version="$(registration_contract_version)" || die "Orca registration helper contract unavailable"
@@ -406,17 +470,22 @@ stage_registration_contract() {
     incus file push "$source" "$YARD_INSTANCE_NAME$ORCA_GUEST_TMP_DIR/${source##*/}" \
       "${PROJ[@]}" --mode 0644 >/dev/null
   done
+  for source in "$ORCA_TMP_DIR/discover" "$ORCA_TMP_DIR/$ORCA_DISCOVERY_UNIT" "$ORCA_TMP_DIR/$ORCA_DISCOVERY_TIMER"; do
+    incus file push "$source" "$YARD_INSTANCE_NAME$ORCA_GUEST_TMP_DIR/${source##*/}" "${PROJ[@]}" --mode 0644 >/dev/null
+  done
   yexec bash -se -- "$ORCA_GUEST_TMP_DIR" "$ORCA_SYNC" "$ORCA_REGISTRATION" \
-    "$ORCA_REGISTRATION_DIGEST" "$ORCA_REGISTRATION_LOCK" "$version" <<'YARD'
+    "$ORCA_REGISTRATION_DIGEST" "$ORCA_REGISTRATION_LOCK" "$version" \
+    "/etc/systemd/system/$ORCA_DISCOVERY_UNIT" "/etc/systemd/system/$ORCA_DISCOVERY_TIMER" <<'YARD'
 set -euo pipefail
 stage="$1"; hook="$2"; directory="$3"; marker="$4"; lock="$5"; version="$6"
+discovery_service="$7"; discovery_timer="$8"
 install -d -m 0755 "$(dirname "$lock")"
 touch "$lock"
 chmod 0644 "$lock"
 chown 0:0 "$lock"
 exec 9>"$lock"
 flock -x 9
-install -d -m 0755 "$directory" "$(dirname "$hook")"
+install -d -m 0755 "$directory" "$(dirname "$hook")" "$(dirname "$discovery_service")"
 rm -f -- "$marker"
 for installed in "$directory"/*.py; do
   [ -e "$installed" ] || continue
@@ -424,11 +493,16 @@ for installed in "$directory"/*.py; do
 done
 for source in "$stage"/*.py; do install -m 0644 "$source" "$directory/${source##*/}"; done
 install -m 0755 "$stage/orca-sync" "$hook"
+install -m 0755 "$stage/discover" "$directory/discover"
+install -m 0644 "$stage/${discovery_service##*/}" "$discovery_service"
+install -m 0644 "$stage/${discovery_timer##*/}" "$discovery_timer"
 temporary="$marker.$$"
 printf '%s\n' "$version" >"$temporary"
 chmod 0644 "$temporary"
 mv "$temporary" "$marker"
 YARD
+  yexec systemctl daemon-reload
+  yexec systemctl enable --now "$ORCA_DISCOVERY_TIMER" >/dev/null
 }
 
 stage_runtime_contract() {
@@ -708,7 +782,12 @@ service_contract_endpoint_ready() {
 up_converged() {
   release_ready && dependencies_ready && runtime_contract_ready && service_enabled &&
     service_ready && ingress_active && route_matches && owner_endpoint_ready &&\
-    automatic_project_hook_ready && codex_defaults_ready && projects_synced
+    automatic_project_hook_ready && discovery_scheduled && codex_defaults_ready && projects_synced
+}
+
+discovery_scheduled() {
+  yexec systemctl is-enabled --quiet "$ORCA_DISCOVERY_TIMER" &&
+    yexec systemctl is-active --quiet "$ORCA_DISCOVERY_TIMER"
 }
 
 cmd_up() {
@@ -742,6 +821,7 @@ cmd_up() {
     die "Orca owner endpoint failed readiness; route and service were rolled back"
   fi
   run_project_sync
+  yexec systemctl start "$ORCA_DISCOVERY_TIMER"
   codex_defaults_ready || die "Orca Codex launch defaults did not converge"
   automatic_project_hook_ready && projects_synced || die "Orca project registration did not converge"
   ok "Orca ready through $ORCA_TRANSPORT at $ORCA_ADVERTISE_HOST:$ORCA_HOST_PORT"
@@ -779,6 +859,7 @@ cmd_pair() {
       || die "Orca mobile pairing request could not be installed"
   fi
   yexec systemctl restart "$ORCA_UNIT"
+  yexec systemctl start "$ORCA_DISCOVERY_TIMER"
   wait_service_ready || die "Orca did not become ready after restart"
   if [ "$ORCA_PAIR_PENDING" -eq 1 ]; then
     clear_mobile_request || die "Orca mobile pairing request could not be cleared"
@@ -807,6 +888,7 @@ cmd_restart() {
   yexec systemctl is-active --quiet "$ORCA_UNIT" \
     || die "Orca is not running; run '$(yard_cmd_hint) orca up' first"
   yexec systemctl restart "$ORCA_UNIT"
+  yexec systemctl start "$ORCA_DISCOVERY_TIMER"
   wait_service_endpoint_ready || die "Orca did not become ready after restart"
   ok "Orca service restarted"
 }
@@ -821,6 +903,7 @@ cmd_status() {
     warn "Orca profile is not selected in ENVIRONMENT_PROFILES; yard init will omit it"
   fi
   if release_ready; then ok "pinned release verified"; else warn "pinned release missing or corrupt"; fi
+  if discovery_scheduled; then ok "periodic repository discovery scheduled"; else warn "repository discovery timer inactive; run 'yard orca up'"; fi
   if service_endpoint_ready; then service_is_ready=1; ok "service ready"; else warn "service inactive or not ready"; fi
   if ingress_active; then ok "L1 ingress guard active"; else warn "L1 ingress guard inactive"; fi
   if device_exists; then
@@ -852,6 +935,12 @@ cmd_status() {
       while IFS= read -r diagnostic; do
         warn "$diagnostic"
       done < <(jq -r '.errors[], .warnings[]' <<<"$report")
+      if jq -e '.discovery' <<<"$report" >/dev/null; then
+        info "repository discovery: $(jq -r '.discovery.state + " (generation " + (.discovery.generation | tostring) + ")"' <<<"$report")"
+        while IFS= read -r diagnostic; do
+          warn "$diagnostic"
+        done < <(jq -r '.discovery.errors[]' <<<"$report")
+      fi
     else
       warn "project registration status unavailable; run '$(yard_cmd_hint) orca up'"
     fi
@@ -877,15 +966,26 @@ cmd_down() {
   ingress_active && guarded=1
   device_exists && routed=1
   if [ "$active" -eq 0 ] && [ "$guarded" -eq 0 ] && [ "$routed" -eq 0 ]; then
+    stop_discovery
     ok "Orca already down"
     return 0
   fi
+  stop_discovery
   remove_route
   yexec systemctl disable --now "$ORCA_UNIT" >/dev/null 2>&1 || true
   if yexec test -x "$ORCA_INGRESS"; then
     yexec "$ORCA_INGRESS" down
   fi
   ok "Orca stopped and unpublished; state preserved"
+}
+
+stop_discovery() {
+  local unit
+  for unit in "$ORCA_DISCOVERY_TIMER" "$ORCA_DISCOVERY_UNIT"; do
+    if yexec systemctl is-active --quiet "$unit"; then
+      yexec systemctl stop "$unit"
+    fi
+  done
 }
 
 emit_resource_assessment() { # <local-action> <true|false> [fixed consequence...]
@@ -960,6 +1060,7 @@ prepare_resource() { # <public-verb>
         route_matches || changed=true
         owner_endpoint_ready || changed=true
         automatic_project_hook_ready || changed=true
+        discovery_scheduled || changed=true
         codex_defaults_ready || changed=true
         projects_synced || changed=true
       else
@@ -995,12 +1096,14 @@ prepare_resource() { # <public-verb>
         || die "Orca is not running; run '$(yard_cmd_hint) orca up' first"
       registration_contract_ready \
         || die "Orca project helper is stale or incomplete; run '$(yard_cmd_hint) init' first"
-      # Always run an explicit scan, including diagnostics for stale paths on an otherwise ready catalog.
+      # Repair known roots without restarting a recursive workspace traversal.
       emit_resource_assessment sync true "reconcile Subyard project groups, roots and nested Git checkouts"
       ;;
     down)
       svc_require_yard_running
-      if yexec systemctl is-active --quiet "$ORCA_UNIT" || ingress_active || device_exists; then
+      if yexec systemctl is-active --quiet "$ORCA_UNIT" || ingress_active || device_exists ||
+        yexec systemctl is-active --quiet "$ORCA_DISCOVERY_TIMER" ||
+        yexec systemctl is-active --quiet "$ORCA_DISCOVERY_UNIT"; then
         emit_resource_assessment down true \
           "stop the Orca service and ingress guard and remove its owned owner-host proxy"
       else

@@ -8,9 +8,31 @@ import math
 import os
 import time
 
-from discovery import verify_missing, verify_root
+from discovery import include_known, verify_missing, verify_root
 from state import State, StateError
 from transport import RpcError
+
+
+class CatalogRPC:
+    """Reuse catalogs on no-op roots; invalidate before every possible mutation."""
+    def __init__(self, rpc):
+        self.rpc = rpc
+        self.catalogs = {}
+
+    @property
+    def runtime_id(self):
+        return self.rpc.runtime_id
+
+    def refresh(self):
+        self.catalogs.clear()
+
+    def call(self, method, params=None, before_send=None):
+        if method in ("repo.list", "projectGroup.list"):
+            if method not in self.catalogs:
+                self.catalogs[method] = self.rpc.call(method, params, before_send=before_send)
+            return self.catalogs[method]
+        self.refresh()
+        return self.rpc.call(method, params, before_send=before_send)
 
 
 def _records(rpc, method, key):
@@ -148,6 +170,14 @@ def _apply_repo(state, entry, root, group_id, rpc):
     repos = _records(rpc, "repo.list", "repos")
     repo = _repo_at(repos, root.path)
     pending_repos = entry.setdefault("pending_repos", {})
+    if (repo is None or root.path in pending_repos or repo.get("displayName") in (None, "")
+            or repo.get("kind", "git") != root.kind or repo.get("projectGroupId") != group_id
+            or root.kind == "git" and repo.get("externalWorktreeVisibility") != "hide"):
+        # Recheck before changing a cached record; a client may have edited it
+        # while other known roots were being validated.
+        rpc.refresh()
+        repos = _records(rpc, "repo.list", "repos")
+        repo = _repo_at(repos, root.path)
     pending = pending_repos.get(root.path)
     if repo is None:
         if pending is None:
@@ -271,9 +301,9 @@ def _report_catalog(report, scan, state, rpc, host_name):
 
 
 def _prune_missing(report, scan, state, rpc):
-    # An incomplete pass is never evidence for deletion. Missing project roots
-    # may be temporarily unmounted, so warnings also inhibit automatic cleanup.
-    if report["errors"] or scan.warnings:
+    # Missing project roots may be temporarily unmounted. A known checkout
+    # losing Git metadata is retained without blocking independent missing paths.
+    if report["errors"] or any(not project.roots for project in scan.projects):
         return
     groups = {group["id"] for group in _records(rpc, "projectGroup.list", "groups") if _local(group)}
     owners = {entry["group_id"]: entry["root"] for entry in state.data["projects"].values()
@@ -299,6 +329,7 @@ def _prune_missing(report, scan, state, rpc):
         if any(item["worktree"].startswith(repo["id"] + "::") and item["tabs"] for item in snapshots):
             report["warnings"].append("Missing Orca checkout has session tabs and is retained: " + repo["path"])
             continue
+        rpc.refresh()
         current = _repo_at(_records(rpc, "repo.list", "repos"), repo["path"])
         if current != repo or not verify_missing(scan, repo["path"]):
             raise RpcError("Orca cleanup candidate changed; retry sync: " + repo["path"])
@@ -314,6 +345,7 @@ def _prune_missing(report, scan, state, rpc):
         group_id = entry.get("group_id")
         if project_id in active or group_id not in owners or not verify_missing(scan, entry["root"]):
             continue
+        rpc.refresh()
         groups = _records(rpc, "projectGroup.list", "groups")
         repos = _records(rpc, "repo.list", "repos")
         folders = _records(rpc, "folderWorkspace.list", "folderWorkspaces")
@@ -334,13 +366,25 @@ def _prune_missing(report, scan, state, rpc):
         state.save()
 
 
-def reconcile(scan, rpc, state_dir, apply=True, deadline=None, host_name=""):
+def reconcile(scan, rpc, state_dir, apply=True, deadline=None, host_name="", known_paths=None):
     deadline = deadline if deadline is not None else time.monotonic() + 65
     report = {"ready": False, "registered": 0,
               "total": sum(len(project.roots) for project in scan.projects),
               "errors": list(scan.errors), "warnings": list(scan.warnings), "projects": []}
     try:
         with State(state_dir, apply, deadline) as state:
+            rpc = CatalogRPC(rpc)
+            if known_paths is not None:
+                paths = list(known_paths)
+                for entry in state.data["projects"].values():
+                    paths.extend(entry.get("known_roots", []))
+                # Upgrade without a rescan: adopt verified local native Git roots.
+                paths.extend(repo["path"] for repo in _records(rpc, "repo.list", "repos")
+                             if _local(repo) and repo.get("kind", "git") == "git")
+                include_known(scan, paths, deadline)
+                report["errors"].extend(scan.errors)
+                report["warnings"].extend(scan.warnings)
+                report["total"] = sum(len(project.roots) for project in scan.projects)
             if apply:
                 for project in scan.projects:
                     if not project.roots:
@@ -353,6 +397,15 @@ def reconcile(scan, rpc, state_dir, apply=True, deadline=None, host_name=""):
                     if entry["root"] != project.root:
                         report["errors"].append("Project identity root differs: " + project.project_id)
                         continue
+                    roots = set(entry.get("known_roots", []))
+                    roots.update(root.path for root in project.roots
+                                 if root.kind == "git" and root.path != project.root)
+                    # A failed Git probe must not erase the only durable fact
+                    # about a root adopted before background discovery reaches it.
+                    roots = sorted(path for path in roots if not verify_missing(scan, path))
+                    if entry.get("known_roots") != roots:
+                        entry["known_roots"] = roots
+                        state.save()
                     try:
                         group_id = _group(state, entry, project, rpc, host_name)
                     except RpcError as error:
@@ -367,6 +420,7 @@ def reconcile(scan, rpc, state_dir, apply=True, deadline=None, host_name=""):
                         except RpcError as error:
                             report["errors"].append(root.path + ": " + str(error))
                 _prune_missing(report, scan, state, rpc)
+            rpc.refresh()
             _report_catalog(report, scan, state, rpc, host_name)
     except (RpcError, StateError) as error:
         report["errors"].append(str(error))

@@ -162,9 +162,11 @@ class ReconcileTests(unittest.TestCase):
         before = copy.deepcopy(self.rpc.repos)
         self.assertTrue(self.run_sync(apply=False)["ready"])
         self.assertEqual(before, self.rpc.repos)
-        report = self.run_sync()
+        report = self.reconcile(self.discover(self.workspaces, recursive=False),
+                                self.rpc, self.state, known_paths=[])
         self.assertTrue(report["ready"], report)
         self.assertEqual([str(self.root), str(self.root / "former")], [r["path"] for r in self.rpc.repos])
+        self.assertTrue(report["warnings"])
         self.assertTrue((self.root / "former").is_dir())
         self.assertTrue(self.run_sync()["ready"])
 

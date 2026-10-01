@@ -32,6 +32,7 @@ class MainTests(unittest.TestCase):
     def start_server(self):
         metadata = self.state / "config/orca/orca-runtime.json"
         metadata.parent.mkdir(parents=True)
+        self.state.chmod(0o700)
         endpoint = str(Path(self.tmp.name) / "socket")
         metadata.write_text(json.dumps({"transports": [{"kind": "unix", "endpoint": endpoint}],
                                        "runtimeId": "runtime-1", "authToken": "fixture-token"}))
@@ -84,6 +85,7 @@ class MainTests(unittest.TestCase):
     def test_full_cli_wire_sync_status_and_manual_membership_repair(self):
         init_git(self.root / "nested")
         self.start_server()
+        self.assertEqual(0, self.run_cli("discover")[0])
         code, report = self.run_cli("sync")
         self.assertEqual(0, code, report)
         self.assertEqual((2, 2), (report["registered"], report["total"]))

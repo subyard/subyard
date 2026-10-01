@@ -88,6 +88,23 @@ free_port() {
 
 catalog() { orca_rpc repo.list; }
 groups() { orca_rpc projectGroup.list; }
+probe_runtime() {
+  # Compare cheap native requests after a failure, without logging their payloads.
+  guest_dev python3 -B - <<'YARD' || true
+import importlib.util, time
+spec = importlib.util.spec_from_file_location('fixture', '/tmp/orca-projects-helper.py')
+fixture = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(fixture)
+for method in ('status.get', 'projectGroup.list', 'repo.list'):
+    started = time.monotonic()
+    try:
+        fixture.call_any_result('/srv/agents/orca/config/orca/orca-runtime.json', method, None)
+        result = 'responded'
+    except fixture.SafeRpcError as error:
+        result = str(error)
+    print(f'orcaprobe: {method}: {result} ({time.monotonic() - started:.1f}s)', flush=True)
+YARD
+}
 repo_id() {
   local path="$1"
   catalog | jq -er --arg path "$path" '
@@ -110,6 +127,24 @@ assert_repo() {
       ($name == "" or .displayName == $name))] | length == 1' >/dev/null \
     || die "Orca repository did not converge: $path"
 }
+await_repo() {
+  local path="$1"
+  for _ in $(seq 1 120); do
+    if catalog | jq -e --arg path "$path" '.repos | any(.path == $path and .projectGroupId != null)' >/dev/null; then
+      return 0
+    fi
+    sleep 2
+  done
+  die "periodic Orca discovery did not register: $path"
+}
+
+pause_discovery() {
+  guest_root systemctl stop subyard-orca-discovery.timer subyard-orca-discovery.service
+}
+resume_discovery() {
+  guest_root systemctl start subyard-orca-discovery.timer
+}
+
 assert_absent_repo() {
   local path="$1"
   catalog | jq -e --arg path "$path" '[.repos[] | select(.path == $path)] | length == 0' >/dev/null \
@@ -286,7 +321,7 @@ ln -s . "$root/cycle"
 mkdir -p "$root/plain/deep/directory"
 printf 'root-dirty\n' > "$root/fixture.txt"
 YARD
-# A real project event for another project performs the global registration pass.
+# Project events register mandatory roots; nested roots arrive in periodic portions.
 yard sync "$folder_source" --name folder-discovery-event --yes >/dev/null
 
 expected_paths=(
@@ -305,6 +340,7 @@ expected_paths=(
 for path in "${expected_paths[@]}"; do
   name="${path#"$clone_root"/}"
   [ "$path" = "$clone_root" ] && name=clone-project
+  await_repo "$path"
   assert_repo "$path" git "$clone_group" "$name"
 done
 assert_absent_repo "$clone_root/link-outside"
@@ -326,7 +362,7 @@ assert_git_checkout "$clone_root/modules/submodule" submodule
 assert_git_checkout "$clone_root/linked/one" linked-one linked
 assert_git_checkout "$clone_root/linked/two" linked-two linked
 
-stage 'discovering a newly added nested checkout on explicit sync'
+stage 'discovering a newly added nested checkout periodically'
 guest_dev bash -se -- "$clone_root/new/nested" <<'YARD'
 set -euo pipefail
 path=$1
@@ -337,40 +373,31 @@ git -C "$path" add fixture.txt
 git -C "$path" -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm initial
 printf 'new-nested-dirty\n' > "$path/fixture.txt"
 YARD
-assert_absent_repo "$clone_root/new/nested"
+await_repo "$clone_root/new/nested"
 yard orca sync --yes >/dev/null
 assert_repo "$clone_root/new/nested" git "$clone_group" new/nested
 assert_git_checkout "$clone_root/new/nested" new-nested
 
-stage 'reporting a partial scan while continuing other checkout registrations'
+stage 'keeping known-root readiness during an incomplete or inaccessible background scan'
 guest_dev git init -q "$clone_root/partial-good"
 guest_root install -d -m 0444 "$clone_root/partial-aaa-unsearchable"
 guest_root install -d -m 000 "$clone_root/partial-unreadable"
-assert_absent_repo "$clone_root/partial-good"
-if ! yard sync "$folder_source" --name folder-partial-event --yes \
-  >"$STATE/partial-project.out" 2>"$STATE/partial-project.err"; then
-  die 'partial Orca discovery undid a successful project sync'
-fi
-grep -Fq 'optional agent project hook failed' "$STATE/partial-project.out" "$STATE/partial-project.err" \
-  || die 'project sync did not report the partial discovery warning'
+yard sync "$folder_source" --name folder-partial-event --yes >/dev/null
+await_repo "$clone_root/partial-good"
 assert_repo "$clone_root/partial-good" git "$clone_group" partial-good
-if yard orca sync --yes >"$STATE/partial-sync.out" 2>"$STATE/partial-sync.err"; then
-  die 'explicit sync accepted an incomplete workspace scan'
-fi
+yard orca sync --yes >/dev/null
 yard orca status >"$STATE/partial-status.out" 2>&1
 grep -Fq "$clone_root/partial-aaa-unsearchable" "$STATE/partial-status.out" \
   || die 'status did not diagnose the unsearchable discovery path'
 grep -Fq "$clone_root/partial-unreadable" "$STATE/partial-status.out" \
   || die 'status did not diagnose the unreadable discovery path'
-grep -Fq 'registration incomplete' "$STATE/partial-status.out" \
-  || die 'status did not report incomplete registration'
-if grep -Fq 'project groups and kinds verified' "$STATE/partial-status.out"; then
-  die 'status falsely reported readiness after an incomplete scan'
-fi
+grep -Fq 'project groups and kinds verified' "$STATE/partial-status.out" \
+  || die 'unfinished discovery blocked known-root readiness'
 guest_root chmod 0755 "$clone_root/partial-aaa-unsearchable" "$clone_root/partial-unreadable"
 yard orca sync --yes >/dev/null
 
 stage 'preserving manual presentation while repairing owned membership only'
+pause_discovery
 manual_group_json="$(orca_rpc projectGroup.create \
   '{"name":"Manual mixed group","createdFrom":"manual"}')"
 manual_group="$(jq -er '.group.id' <<<"$manual_group_json")"
@@ -457,6 +484,7 @@ done
 catalog | jq -e --arg id "$foreign_id" --arg group "$manual_group" '
   .repos | any(.id == $id and .projectGroupId == $group)' >/dev/null \
   || die 'project-group recreation changed the foreign repository'
+resume_discovery
 
 stage 'keeping root identity and terminal session across folder/git/folder transitions'
 folder_id="$(repo_id "$folder_root")"
@@ -501,6 +529,7 @@ stale_gone="$clone_root/stale-gone"
 stale_folder_id="$(repo_id "$stale_folder")"
 saved_gone="$clone_root/saved-gone"
 guest_dev git init -q "$saved_gone"
+await_repo "$saved_gone"
 yard orca sync --yes >/dev/null
 saved_gone_id="$(repo_id "$saved_gone")"
 saved_session="$(orca_rpc session.tabs.createTerminal \
@@ -527,6 +556,7 @@ guest_dev test ! -e "$stale_folder/.git" \
   || die 'registration repaired project filesystem content'
 
 stage 'preserving a changed hook list and repairing the missing dispatcher through explicit init'
+pause_discovery
 recovery_source="$STATE/host/recovery-source"
 mkdir -p "$recovery_source"
 printf 'recovery\n' > "$recovery_source/content.txt"
@@ -560,6 +590,7 @@ guest_dispatcher_hash="$(guest_root sha256sum /usr/local/libexec/subyard/project
   || die 'explicit init installed a stale project dispatcher'
 recovery_group="$(group_id /srv/workspaces/recovery-project/src)"
 assert_repo /srv/workspaces/recovery-project/src folder "$recovery_group" recovery-project
+resume_discovery
 
 stage 'keeping stopped Orca stopped through project actions and explicit init'
 yard orca down --yes >/dev/null
@@ -580,14 +611,77 @@ assert_repo /srv/workspaces/stopped-project/src folder "$stopped_group" stopped-
 
 stage 'running the project removal hook to prune Orca records while retaining bind source data'
 guest_dev git init -q "$clone_root/remove-event-child"
-assert_absent_repo "$clone_root/remove-event-child"
 yard remove bind-project --yes >/dev/null
 [ -f "$bind_source/content.txt" ] || die 'bind removal deleted the owner source data'
 assert_absent_repo "$bind_root"
 groups | jq -e --arg id "$bind_group" '.groups | all(.id != $id)' >/dev/null \
   || die 'project removal retained its empty Orca group'
+await_repo "$clone_root/remove-event-child"
 assert_repo "$clone_root/remove-event-child" git "$clone_group" remove-event-child
 guest_dev test ! -e "$bind_root" || die 'project removal left the bound workspace mounted'
+
+stage 'keeping project actions ready while a large flat cache is scanned'
+guest_dev python3 - "$clone_root/.build/flat-cache" <<'YARD'
+import os, sys
+os.makedirs(sys.argv[1], exist_ok=True)
+fd = os.open(sys.argv[1], os.O_RDONLY | os.O_DIRECTORY)
+try:
+    for index in range(100001):
+        os.close(os.open(str(index), os.O_WRONLY | os.O_CREAT, 0o600, dir_fd=fd))
+finally:
+    os.close(fd)
+YARD
+# Wait for the real timer to visit the cache, without forcing a recursive sync.
+for _ in $(seq 1 90); do
+  discovery="$(guest_dev python3 -B /usr/local/libexec/subyard/orca-registration/main.py status)"
+  if jq -e '.ready and .discovery.state == "scanning"' <<<"$discovery" >/dev/null; then break; fi
+  sleep 2
+done
+jq -e '.ready and .discovery.state == "scanning"' <<<"$discovery" >/dev/null \
+  || die 'large-cache background portion was not observed'
+yard sync "$folder_source" --name cache-discovery-event --yes >/dev/null
+yard init --yes >/dev/null
+# Readiness stays true while discovery resumes after an actual worker stop/restart.
+guest_root systemctl stop subyard-orca-discovery.service
+guest_root systemctl start subyard-orca-discovery.service
+yard orca sync --yes >/dev/null
+
+stage 'registering at least one thousand native Git roots including .build'
+guest_dev python3 - "$clone_root/.build/capacity" <<'YARD'
+import os, shutil, subprocess, sys
+seed = sys.argv[1] + '/seed'
+os.makedirs(seed, exist_ok=True)
+subprocess.run(['git', '-C', seed, 'init', '-q'], check=True)
+for index in range(1000):
+    target = sys.argv[1] + '/checkout-' + str(index)
+    os.makedirs(target, exist_ok=True)
+    shutil.copytree(seed + '/.git', target + '/.git', ignore=shutil.ignore_patterns('hooks', 'info'))
+YARD
+for _ in $(seq 1 150); do
+  if catalog | jq -e --arg prefix "$clone_root/.build/capacity/checkout-" \
+    '[.repos[] | select(.path | startswith($prefix))] | length == 1000' >/dev/null; then break; fi
+  sleep 4
+done
+catalog | jq -e --arg prefix "$clone_root/.build/capacity/checkout-" \
+  '[.repos[] | select(.path | startswith($prefix))] | length == 1000' >/dev/null \
+  || die 'native Orca did not register one thousand Git roots'
+stage 'one thousand roots registered; syncing the known catalog'
+if ! yard orca sync --yes >/dev/null; then
+  probe_runtime
+  die 'known-root sync failed with one thousand roots'
+fi
+guest_root systemctl is-active --quiet subyard-orca-discovery.timer
+stage 'known catalog synced; stopping Orca and discovery'
+yard orca down --yes >/dev/null
+if guest_root systemctl is-active --quiet subyard-orca-discovery.timer; then die 'down left the discovery timer active'; fi
+stage 'Orca and discovery stopped; starting with one thousand roots'
+if ! yard orca up --yes >/dev/null; then
+  probe_runtime
+  die 'Orca startup failed with one thousand roots'
+fi
+guest_root systemctl is-active --quiet subyard-orca-discovery.timer
+stage 'Orca and discovery ready with one thousand roots'
+
 
 stage 'registering a remote sync through the real AccessRemote SSH path'
 remote_source="$STATE/host/remote-source"
@@ -622,7 +716,9 @@ GatewayPorts no
 LogLevel VERBOSE
 EOF
 /usr/sbin/sshd -t -f "$STATE/sshd_config"
-/usr/sbin/sshd -D -e -f "$STATE/sshd_config" >"$STATE/sshd.log" 2>&1 &
+# The owner RPC child needs the Incus group added by init, just like yard().
+printf -v sshd_command '%q ' /usr/sbin/sshd -D -e -f "$STATE/sshd_config"
+sg incus-admin -c "exec $sshd_command" >"$STATE/sshd.log" 2>&1 &
 SSHD_PID=$!
 for _ in $(seq 1 50); do
   kill -0 "$SSHD_PID" 2>/dev/null || {

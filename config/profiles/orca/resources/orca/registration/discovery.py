@@ -126,7 +126,7 @@ def verify_missing(scan, path):
     return False
 
 
-def discover(workspaces, deadline=None, max_entries=1000000):
+def discover(workspaces, deadline=None, max_entries=1000000, recursive=True):
     workspaces = os.path.abspath(workspaces)
     scan = Scan(workspaces=workspaces)
     deadline = deadline if deadline is not None else time.monotonic() + 20.0
@@ -141,12 +141,10 @@ def discover(workspaces, deadline=None, max_entries=1000000):
             raise ScanLimit("time")
 
     def entries(fd):
-        found = []
         with os.scandir(fd) as iterator:
             for item in iterator:
                 check()
-                found.append((item.name, item.is_dir(follow_symlinks=False)))
-        return sorted(found)
+                yield item.name, item.is_dir(follow_symlinks=False)
 
     def walk(project, root_fd):
         # Iterators hold at most one descriptor per depth, without Python recursion.
@@ -176,7 +174,7 @@ def discover(workspaces, deadline=None, max_entries=1000000):
                         if kind == "unknown":
                             scan.errors.append("Git root could not be verified: " + path)
                     try:
-                        children = iter(entries(fd))
+                        children = iter(entries(fd)) if recursive else iter(())
                     except OSError:
                         scan.errors.append("Directory scan failed: " + path)
                         children = iter(())
@@ -262,3 +260,31 @@ def discover(workspaces, deadline=None, max_entries=1000000):
     except OSError:
         scan.errors.append("Workspace directory is unavailable or changed during discovery")
     return scan
+
+
+def include_known(scan, paths, deadline):
+    """Validate registry facts without enumerating the files below known roots."""
+    for project in scan.projects:
+        if not project.roots:
+            continue
+        known = {root.path for root in project.roots}
+        for path in sorted(set(paths)):
+            if path in known or not path.startswith(project.root + "/"):
+                continue
+            if os.path.normpath(path) != path:
+                scan.errors.append("Invalid known checkout path")
+                continue
+            if verify_missing(scan, path):
+                continue
+            root = Root(path, os.path.relpath(path, project.root), "git")
+            if verify_root(root, deadline):
+                project.roots.append(root)
+            else:
+                # Losing .git is not deletion evidence; keep native data intact.
+                folder = Root(path, root.name, "folder")
+                if verify_root(folder, deadline):
+                    scan.warnings.append("Known checkout lost Git metadata; record is retained: " + path)
+                else:
+                    root.kind = "unknown"
+                    project.roots.append(root)
+                    scan.errors.append("Known Git root could not be verified: " + path)

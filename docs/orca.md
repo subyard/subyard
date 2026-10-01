@@ -183,10 +183,18 @@ Desktop as described above.
 
 ## Projects and lifecycle
 
-Workspace discovery remains recursive through ignored directories, including `.build`.
-It allows up to one million filesystem entries within its 20-second scan budget.
-If either limit is reached, status identifies the exhausted limit and reports incomplete
-discovery; existing Orca records are retained until a complete scan can verify cleanup.
+Repository discovery runs periodically in the yard, including ignored directories and
+`.build`. Status, project hooks and release activation validate known repository roots
+without scanning their files. Ordinary cache files do not consume a readiness budget;
+there is no per-file watcher or global file-count limit. At least 1000 Git roots are supported.
+
+The profile's systemd timer runs bounded discovery portions. A durable SQLite queue and
+Linux directory cookies resume across invocations and restarts, rotating between directories
+so a large cache does not starve other workspace trees. No ordinary file contents are read
+or sorted. Project roots become eligible for another pass after one minute even while
+another tree's scan continues; a changing directory can defer a new checkout until a later
+pass. A huge full traversal can take time while known roots remain
+usable. `status` reports discovery progress separately from registration readiness.
 
 Subyard replaces Orca's stock Codex YOLO launch default with an explicit empty
 argument setting. With the default account, Codex then reads the yard's
@@ -249,14 +257,14 @@ symlinks and Git's internal directories. Distinct linked-worktree paths remain s
 entries even when they share a repository or remote. Use Orca's native Git diff for each
 checkout; Subyard does not create sessions automatically.
 
-`up` and `pair` reconcile this complete set. Later Subyard clone, sync, bind and remove
-actions invoke the same hook. An explicit `init` repairs the common dispatcher and retries
+`up` and `pair` reconcile known roots and schedule discovery. Later Subyard clone, sync, bind and remove
+actions invoke the same registration hook, adding their canonical root immediately. An explicit `init` repairs the common dispatcher and retries
 installed hooks once for active resources, including when provisioning is already current.
 These hooks do not start a stopped Orca service. Run `orca up` to install or repair the
 Orca component and register projects accumulated while it was stopped.
 
-There is no background discovery. An ordinary nested `git clone` becomes visible after
-the next Subyard project action or explicit sync:
+An ordinary nested `git clone` becomes visible after a subsequent background portion.
+Explicit sync repairs known registrations without waiting for a full traversal:
 
 ```sh
 yard orca sync
@@ -271,7 +279,7 @@ first registration, existing project checkouts in a mixed user group move into a
 project group; unrelated entries and the user group's properties are preserved. Group
 names may coincide or be renamed without merging project identities.
 
-After a complete successful scan, sync removes missing checkouts from their Subyard-managed
+When registration succeeds, sync removes proven missing checkouts from their Subyard-managed
 Orca groups. This includes existing registrations from earlier Subyard versions. Ownership
 requires both membership in the recorded project group and a path inside that project;
 unrelated groups, remote records and manually added nested folders are left alone.
@@ -280,8 +288,9 @@ discards the removed record's worktree metadata; it does not delete files on dis
 Empty groups of removed Subyard projects are also removed, unless they contain child groups
 or native Orca folder workspaces. These rules apply to project hooks as well as explicit sync.
 
-Cleanup is skipped on scan or registration errors, including unavailable workspaces and
-scan limits. A registered project whose root is missing also inhibits cleanup: its mount may
+Cleanup is skipped on registration or workspace-boundary errors. An unfinished background
+pass never proves absence: cleanup requires an independent filesystem check below the same
+workspace identity. A registered project whose root is missing also inhibits cleanup: its mount may
 be temporarily unavailable. Missing paths are checked again before removal. Existing directories
 that lose Git metadata retain their old records with a warning. Sync does not restore files or Git history.
 Manually deleted Orca entries and groups for existing directories are registered again.
@@ -290,9 +299,11 @@ and session data.
 
 An individual registration failure does not undo a successful Subyard project action;
 the command displays a warning and other checkouts are still attempted. Explicit `orca sync`
-fails when registration is incomplete. `status` reports partial scans, missing entries,
-kind mismatches and incorrect membership. Discovery and RPC calls are bounded; reaching
-a limit is reported as incomplete. Rerun after resolving the reported problem.
+fails when known-root registration is incomplete. `status` reports missing entries, kind
+mismatches and incorrect membership as registration failures. Unreadable discovery directories
+are reported separately and retried by later passes; an unfinished portion is ordinary progress.
+RPC and registration calls remain bounded and report real failures. `down` stops discovery work
+and preserves its queue; `up` resumes it without starting another watcher.
 
 If a creation request has an unknown result, sync first checks the catalog. It avoids
 sending another create while the first request could still finish. If the pending result
