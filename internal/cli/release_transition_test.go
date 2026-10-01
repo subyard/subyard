@@ -220,7 +220,7 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	reconciler := program.profileActivationReconciler(releasetransition.ProcessRequest{ConfigHome: home}, "sample-runtime")
+	reconciler := program.profileActivationReconciler(releasetransition.ProcessRequest{Yard: "new-yard", ConfigHome: home}, "sample-runtime")
 	ctx := context.Background()
 	before, err := reconciler.Observe(ctx, releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
 	if err != nil || before.Converged || before.Actual == before.Desired {
@@ -1570,7 +1570,7 @@ func TestPowerActivationReloadsRegisteredYardSelection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reconciler := program.powerActivationReconciler(releasetransition.ProcessRequest{ConfigHome: configHome}).(*activationStageReconciler)
+	reconciler := program.powerActivationReconciler(releasetransition.ProcessRequest{Yard: "new-yard", ConfigHome: configHome}).(*activationStageReconciler)
 	platform, err := reconciler.platform(context.Background(), activationApplicability{state: "installed", applies: true})
 	if err != nil {
 		t.Fatalf("candidate power observation inherited another yard's selection: %v", err)
@@ -1694,7 +1694,7 @@ func TestMaterializedConfigReconcileUsesTargetContextForRevalidation(t *testing.
 	program.options.Executor = fake
 
 	reconciler := &materializedConfigActivationReconciler{
-		cli: program, yard: "default", configHome: configHome,
+		cli: program, yard: "new-yard", configHome: configHome,
 	}
 	initial, err := reconciler.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
 	if err != nil {
@@ -2071,15 +2071,17 @@ func TestCompletedMaterializedConfigReadinessDoesNotDependOnSelectedYard(t *test
 	if sourceBootstrap := observe(program, "default", sourceRelease); sourceBootstrap.Converged {
 		t.Fatalf("source transition ignored drift in another local yard: %#v", sourceBootstrap)
 	}
-	fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{Result: ports.InstanceExecResult{
-		Stdout: []byte(strings.Repeat("0", 64) + "  /home/dev/.codex/rules/repo.rules\n"),
-	}})
 	activeRelease := releasetransition.ReleasePair{From: "release-b", Target: "release-b"}
 	bootstrap := observe(updateProgram, "default", activeRelease)
-	nextCommand := observe(program, testyardmigration.CurrentYard, activeRelease)
-	if !reflect.DeepEqual(bootstrap, nextCommand) || bootstrap.Converged {
-		t.Fatalf("completed readiness depends on selected yard: bootstrap=%#v next=%#v",
-			bootstrap, nextCommand)
+	for _, yard := range []string{testyardmigration.CurrentYard, "new-yard"} {
+		fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{Result: ports.InstanceExecResult{
+			Stdout: []byte(strings.Repeat("0", 64) + "  /home/dev/.codex/rules/repo.rules\n"),
+		}})
+		nextCommand := observe(program, yard, activeRelease)
+		if !reflect.DeepEqual(bootstrap, nextCommand) || bootstrap.Converged {
+			t.Fatalf("completed readiness depends on selected yard %s: bootstrap=%#v next=%#v",
+				yard, bootstrap, nextCommand)
+		}
 	}
 	mismatched := &materializedConfigActivationReconciler{
 		cli: program, yard: "default", configHome: configHome,
@@ -2095,6 +2097,10 @@ func TestCompletedMaterializedConfigReadinessDoesNotDependOnSelectedYard(t *test
 	if err != nil || !mismatchedObservation.Converged || mismatched.allLocal {
 		t.Fatalf("mismatched journal widened scope: %#v allLocal=%t err=%v",
 			mismatchedObservation, mismatched.allLocal, err)
+	}
+	mismatched.yard = "new-yard"
+	if _, err := mismatched.Observe(context.Background(), activeRelease, releasetransition.ReleaseLinks{}); !errors.Is(err, config.ErrUnknownYard) {
+		t.Fatalf("selected migration scope accepted an unregistered yard: %v", err)
 	}
 
 	completedStore, err := releasetransition.NewPOSIXV2Store(configHome)

@@ -597,11 +597,7 @@ func (cli *CLI) powerActivationReconciler(
 			operation := *cli
 			operation.baseEnv = cli.freshMigrationEnvironment(cli.baseEnv, cli.options.RepositoryRoot)
 			operation.env = maps.Clone(operation.baseEnv)
-			yard := request.Yard
-			if yard == "" {
-				yard = "default"
-			}
-			loaded, err := operation.resolveReleaseTransitionContext(yard, request.ConfigHome)
+			loaded, err := operation.resolveReleaseTransitionContext("default", request.ConfigHome)
 			if err != nil {
 				return nil, err
 			}
@@ -745,13 +741,16 @@ func (reconciler *materializedConfigActivationReconciler) Observe(
 	if !domain.SafeName(yard) {
 		return releasetransition.V2ActivationObservation{}, errors.New("materialized config yard is invalid")
 	}
+	if err := reconciler.resolveScope(releases); err != nil {
+		return releasetransition.V2ActivationObservation{}, err
+	}
+	if reconciler.allLocal {
+		yard = "default"
+	}
 	operation := reconciler.operation()
 	loaded, err := operation.resolveReleaseTransitionContext(yard, reconciler.configHome)
 	if err != nil {
 		return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{err, yard, "configuration", "config status", "inspect"}
-	}
-	if err := reconciler.resolveScope(releases); err != nil {
-		return releasetransition.V2ActivationObservation{}, err
 	}
 	targets, err := operation.localConfigTargets(loaded, reconciler.allLocal)
 	if err != nil {
@@ -945,7 +944,7 @@ func (reconciler *materializedConfigActivationReconciler) Reconcile(
 	}
 	operation := reconciler.reconcileCLI()
 	yard := reconciler.yard
-	if yard == "" {
+	if yard == "" || reconciler.allLocal {
 		yard = "default"
 	}
 	loaded, err := operation.resolveReleaseTransitionContext(yard, reconciler.configHome)

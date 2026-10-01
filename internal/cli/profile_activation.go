@@ -30,11 +30,8 @@ func (reconciler *profileRuntimeActivationReconciler) targets() (*CLI, []configT
 	environment := operation.freshMigrationEnvironment(operation.baseEnv, operation.options.RepositoryRoot)
 	environment["SUBYARD_OPERATION_ID"] = operation.env["SUBYARD_OPERATION_ID"]
 	operation.baseEnv, operation.env = environment, maps.Clone(environment)
-	yard := reconciler.request.Yard
-	if yard == "" {
-		yard = "default"
-	}
-	loaded, err := operation.resolveReleaseTransitionContext(yard, reconciler.request.ConfigHome)
+	// Host-wide inventory must not require the caller's yard to exist.
+	loaded, err := operation.resolveReleaseTransitionContext("default", reconciler.request.ConfigHome)
 	if err != nil {
 		return nil, nil, err
 	}
