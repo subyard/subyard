@@ -47,6 +47,15 @@ for the expected workload. Capacity errors never shrink the configured pool or s
 Once provisioned, agents run these commands **inside the yard**. The local client connects
 directly to the pool's Unix socket; it does not require host command execution or Incus access.
 
+From the owner host, use a login shell to load the SDK profile's PATH (select a named yard with
+`-Y NAME`):
+
+```sh
+yard shell -- bash -lc 'android-broker status'
+```
+
+Inside the yard:
+
 ```sh
 android-broker catalog
 android-broker status
