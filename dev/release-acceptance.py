@@ -337,7 +337,7 @@ def phase_events(output, name, log, offset, seen, final=False):
                     seen.add(key)
                     event(output, "phase", check=name, phase=marker[2].decode(),
                           state={b" .. ": "started", b" ok ": "passed", b"fail": "failed"}[marker[1]])
-            stage = re.fullmatch(rb"E2E_PHASE phase=(allocation|packing|transport|guest|guest-cleanup|cleanup/release) state=(start|end) duration_seconds=([0-9]{1,9}) exit_code=([0-9]{1,3})(?: vm=([12]))?\n", line)
+            stage = re.fullmatch(rb"E2E_PHASE phase=(allocation|packing|transport|guest|guest-cleanup|cleanup/release|fixture/[a-z0-9-]{1,60}) state=(start|end) duration_seconds=([0-9]{1,9}) exit_code=([0-9]{1,3})(?: vm=([12]))?\n", line)
             if (stage and int(stage[4]) <= 255
                 and (stage[2] != b"start" or (stage[3] == b"0" and stage[4] == b"0"))
                 and bool(stage[5]) == (stage[1] in (b"transport", b"guest", b"guest-cleanup"))):
@@ -509,7 +509,11 @@ def is_live(name):
     return name == "p0-release-smoke" or name.startswith("profile:")
 
 
-def preflight(output=None, only=(), exclude=(), broker_status=None, external_readiness=None):
+def preflight(output=None, only=(), exclude=(), broker_status=None, external_readiness=None, slots=(), types=()):
+    if len(set(slots)) != len(slots) or any(type(slot) is not int or slot < 1 or slot > 999 for slot in slots):
+        raise ValueError("slots must be unique integers from 1 to 999")
+    if any(not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", kind) for kind in types):
+        raise ValueError("invalid environment type selection")
     if output:
         root, receipt = load_bound(output)
     else:
@@ -547,6 +551,41 @@ def preflight(output=None, only=(), exclude=(), broker_status=None, external_rea
                               ("bash", "python3", "go", "make", "rg", "shellcheck", "git", "jq", "tar", "gzip", "sha256sum", "systemd-analyze", "script")},
               "physical_prerequisites": ["explicitly approved slots", "available managed test environment; fresh leases per attempt"],
               "broker": public_broker_status(broker_status)}
+    broker = report["broker"]
+    observed_slots = {int(slot["id"].split("-")[1]): slot for slot in broker.get("slots", [])}
+    selected_slots = [observed_slots.get(slot, {"id": f"slot-{slot}", "state": "unknown"}) for slot in slots]
+    headroom = broker.get("headroom", {})
+    physical = any(check["physical"] and check["selected"] and check["status"] not in ("passed", "not-applicable")
+                   for check in report["checks"])
+    shortages = []
+    if physical:
+        shortages = [slot["id"] + ": " + slot["state"] for slot in selected_slots
+                     if slot["state"] not in ("available", "unknown")]
+        shortages += [kind + " headroom exhausted" for kind in ("memory", "disk") if headroom.get(kind + "_bytes") == 0]
+    report["capacity_summary"] = {
+        "selected_slots": selected_slots, "selected_types": list(dict.fromkeys(types)),
+        "headroom_bytes": {kind: headroom.get(kind + "_bytes") for kind in ("memory", "disk")},
+        "observed_at": broker.get("observed_at"), "age_seconds": broker.get("age_seconds"),
+        "freshness": broker.get("freshness", "unknown"),
+        "planning": "insufficient" if shortages else "unknown" if physical else "not-required",
+        "shortages": shortages,
+        "prerequisites": {"physical": report["physical_prerequisites"] if physical else [],
+                          "missing_local_tools": [tool for tool, available in report["local_tools"].items() if not available],
+                          "external": report["external_prerequisites"]},
+        "authority": "planning snapshot only; request requirements and current native broker admission remain authoritative",
+        "continuation": "after capacity changes, run --output DIR --only CHECK on the same frozen candidate; passed checks are retained",
+    }
+    summary = report["capacity_summary"]
+    slot_text = ",".join(slot["id"] + ":" + slot["state"] + "/" + slot.get("type", "unknown") for slot in selected_slots) or "unknown"
+    missing_tools = ",".join(summary["prerequisites"]["missing_local_tools"]) or "none"
+    external_unknown = sum(item["readiness"] != "available" for item in report["external_prerequisites"])
+    numeric = {key: value if value is not None else "unknown"
+               for key, value in {**summary["headroom_bytes"], "age": summary["age_seconds"]}.items()}
+    print(f"CAPACITY slots={slot_text} types={','.join(summary['selected_types']) or 'unknown'} "
+          f"memory_headroom_bytes={numeric['memory']} disk_headroom_bytes={numeric['disk']} "
+          f"observed_at={summary['observed_at'] or 'unknown'} age_seconds={numeric['age']} planning={summary['planning']} "
+          f"prerequisites=approved-slots,managed-environment missing_local_tools={missing_tools} external_not_ready={external_unknown}",
+          file=sys.stderr, flush=True)
     print(json.dumps(report, indent=2, sort_keys=True))
     return report
 
@@ -561,12 +600,29 @@ def public_broker_status(path):
         if value.get("schema_version") != 1 or value.get("status") != "ok":
             raise ValueError("invalid status")
         slots = value.get("pool", {}).get("slots", [])
-        result = {"status": "observed", "freshness": "unknown; supplied file snapshot", "slots": []}
+        result = {"status": "observed", "observed_at": None, "age_seconds": None,
+                  "freshness": "unknown; supplied file snapshot", "slots": []}
+        observed_at = value.get("observed_at")
+        if isinstance(observed_at, str) and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2})", observed_at):
+            try:
+                observed = datetime.fromisoformat(observed_at.replace("Z", "+00:00")).astimezone(timezone.utc)
+                age = (datetime.now(timezone.utc) - observed).total_seconds()
+                result["observed_at"] = observed.isoformat()
+                if age >= 0:
+                    result.update(age_seconds=int(age), freshness="supplied file snapshot; age is not an admission guarantee")
+                else:
+                    result["freshness"] = "unknown; observation timestamp is in the future"
+            except (ValueError, OverflowError):
+                pass
         states = {"available", "unavailable", "held", "provisioning", "draining", "quarantined"}
         for slot in slots[:999]:
             identifier = slot.get("slot_id", "")
             if re.fullmatch(r"slot-[0-9]{1,3}", identifier) and slot.get("state") in states:
-                result["slots"].append({"id": identifier, "state": slot["state"]})
+                public_slot = {"id": identifier, "state": slot["state"]}
+                kind = (slot.get("environment") or {}).get("type")
+                if kind in ("subyard-pair", "android-test"):
+                    public_slot["type"] = kind
+                result["slots"].append(public_slot)
         resources = value.get("resources", {})
         for kind, keys in (("memory", ("available_bytes", "cgroup_limit_bytes", "cgroup_current_bytes")),
                            ("storage", ("physical_total_bytes", "physical_used_bytes", "physical_free_bytes", "budget_used_bytes"))):
@@ -848,6 +904,8 @@ def main():
     pre.add_argument("--exclude", action="append", default=[])
     pre.add_argument("--broker-status", type=Path, help="already-collected public broker JSON; no live query")
     pre.add_argument("--external-readiness", type=Path, help="JSON obligation IDs mapped to available/unavailable/unknown")
+    pre.add_argument("--slots", type=int, nargs="+", default=[], help="explicit slots being considered; does not reserve them")
+    pre.add_argument("--types", nargs="+", default=[], help="environment types being considered; planning inputs only")
     imp = sub.add_parser("import", help="explicitly inherit named passing evidence between bound candidates")
     imp.add_argument("--output", type=Path, required=True)
     imp.add_argument("--from", dest="source_output", type=Path, required=True)
@@ -857,9 +915,9 @@ def main():
     superseded.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.action == "preflight":
-        preflight(args.output.resolve() if args.output else None, args.only, args.exclude,
-                  args.broker_status, args.external_readiness)
-        return 0
+        report = preflight(args.output.resolve() if args.output else None, args.only, args.exclude,
+                           args.broker_status, args.external_readiness, args.slots, args.types)
+        return 1 if report["capacity_summary"]["planning"] == "insufficient" else 0
     output = args.output.resolve()
     if output == ROOT or (ROOT in output.parents and ROOT / ".build" not in output.parents):
         parser.error("output must be under .build or outside the source checkout")

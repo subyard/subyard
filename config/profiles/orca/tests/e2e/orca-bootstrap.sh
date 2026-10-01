@@ -111,6 +111,16 @@ orca_rpc() {
   guest_dev /usr/bin/python3 -B /tmp/orca-projects-helper.py rpc "$@"
 }
 
+stock_orca_probe() {
+  stage 'probing pinned stock operations in a disposable profile'
+  # Predecessor fixtures keep their old server. Probe the pinned independent
+  # client already required by this fixture, without changing that server.
+  install_stock_orca_client
+  python3 -B "$ROOT/config/profiles/orca/tests/e2e/orca-projects-helper.py" stock-probe \
+    --version "$ORCA_VERSION" \
+    --registration "$ROOT/config/profiles/orca/resources/orca/registration"
+}
+
 orca_catalog_has() {
   local path="$1"
   orca_rpc repo.list | jq -e --arg path "$path" \
@@ -947,6 +957,7 @@ if [ "$SSH_AGENT" = 1 ]; then
   yard init --yes
   prepare_cached_orca_guest
   yard orca up --yes
+  stock_orca_probe
   ORCA_PORT="$(setting_value ORCA_HOST_PORT)"
   assert_orca_readiness
   install_stock_orca_client
@@ -964,6 +975,7 @@ if [ "$CODEX_PERMISSIONS" = 1 ]; then
   yard init --yes
   prepare_cached_orca_guest
   yard orca up --yes
+  stock_orca_probe
   ORCA_PORT="$(setting_value ORCA_HOST_PORT)"
   assert_orca_readiness
   pairing="$(yard orca pair --yes | tail -n1)"
@@ -1026,6 +1038,7 @@ if [ -n "$UPGRADE_FROM" ]; then
     || die 'published release transition did not complete before the upgrade fixture'
   yard orca up --yes >"$STATE/published-orca-up.out" 2>"$STATE/published-orca-up.err" \
     || die 'published Orca startup failed'
+  stock_orca_probe
   ORCA_PORT="$(setting_value ORCA_HOST_PORT)"
   assert_orca_readiness
   capture_orca_runtime_json
@@ -1321,6 +1334,7 @@ esac
 [ "$ORCA_PORT" != 6768 ] || die 'automatic endpoint selection reused the occupied preferred port'
 guest_root systemctl is-active --quiet subyard-orca.service \
   || die 'Orca did not start through the production bootstrap path'
+stock_orca_probe
 guest_root test -x /usr/local/libexec/subyard/projects-changed \
   || die 'Orca bootstrap did not run the existing init reconciler'
 [ "$(incus --project "$PROJECT" config device get "$INSTANCE" orca-server listen)" = \

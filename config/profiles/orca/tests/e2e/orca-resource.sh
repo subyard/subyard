@@ -490,6 +490,11 @@ run_orca up
 "${incus[@]}" exec "$instance" -- test -x /usr/bin/orca-ide
 [ "$("${incus[@]}" exec "$instance" -- dpkg-query -W -f='${Version}' orca-ide)" = \
   "$ORCA_VERSION" ] || die 'nested yard did not install the pinned deb'
+stage 'probing pinned stock operations in a disposable profile'
+"${incus[@]}" file push "$ROOT/config/profiles/orca/tests/e2e/orca-projects-helper.py" \
+  "$instance/tmp/orca-projects-helper.py" --mode 0755
+"${incus[@]}" exec "$instance" -- runuser -u dev -- python3 -B \
+  /tmp/orca-projects-helper.py stock-probe --version "$ORCA_VERSION" --resource-settings
 "${incus[@]}" exec "$instance" -- nft list chain inet subyard_orca input |
   grep -Fq 'comment "subyard-orca-managed"'
 [ "$("${incus[@]}" exec "$instance" -- stat -c %a /srv/agents/orca/ready.json)" = 600 ] \

@@ -53,14 +53,23 @@ yard() {
     "$YARD_BIN" -Y "$YARD_NAME" "$@"
   fi
 }
+# shellcheck source=config/profiles/android/tests/e2e/android-pool-phases.sh
+. "$root/config/profiles/android/tests/e2e/android-pool-phases.sh"
+android_fixture=runtime
+android_phase_begin setup
 project=''
 instance=''
 monitor_pid=''
 monitor_stop=''
+monitor_host_stop="$state/monitor-stop"
 incus_binary=(/usr/bin/incus)
 cleanup() {
   status=$?
   trap - EXIT INT TERM
+  android_phase_end "$status"
+  android_phase_begin cleanup
+  cleanup_status=0
+  touch "$monitor_host_stop"
   if [ -n "$monitor_pid" ] && [ -n "$project" ] && [ -n "$instance" ]; then
     timeout 20 "${incus_binary[@]}" --project "$project" exec "$instance" -- \
       touch "$monitor_stop" >/dev/null 2>&1 || true
@@ -73,11 +82,9 @@ cleanup() {
     wait "$monitor_pid" 2>/dev/null || true
   fi
   if [ "$status" -ne 0 ] && [ -n "$project" ] && [ -n "$instance" ]; then
-    timeout 30 sudo -n /usr/bin/incus --project "$project" exec "$instance" -- journalctl \
-      -u subyard-android-pool.service -u 'subyard-android-slot-*.service' -n 200 --no-pager \
-      | sed -E 's/(token|credential|secret)[^ ]*/[redacted]/Ig' >&2 || true
-    timeout 15 sudo -n /usr/bin/incus --project "$project" exec "$instance" -- namei -l \
-      /srv/cache/android-sdk/platform-tools/adb /srv/cache/android-sdk/emulator/emulator >&2 || true
+    timeout 15 "${incus_binary[@]}" --project "$project" exec "$instance" -- python3 - --once \
+      < "$root/config/profiles/android/tests/e2e/android-pool-monitor.py" \
+      || printf 'android-display-observation query=unavailable screen_state=unknown\n' >&2
     if [ "$hold_seconds" -gt 0 ]; then
       hold="$state/diagnostic-ready"
       : > "$hold"
@@ -89,10 +96,16 @@ cleanup() {
   if yard teardown --yes > "$state/teardown.log" 2>&1; then
     printf 'android cleanup=passed\n'
   else
-    sed -n '1,100p' "$state/teardown.log" >&2
-    status=3
+    printf 'android cleanup=failed\n' >&2
+    cleanup_status=3
+    [ "$status" -ne 0 ] || status=3
   fi
-  sudo -n find "$state" -depth -delete >/dev/null 2>&1 || true
+  sudo -n find "$state" -depth -delete >/dev/null 2>&1 || {
+    printf 'android cleanup=state-removal-failed\n' >&2
+    cleanup_status=3
+    [ "$status" -ne 0 ] || status=3
+  }
+  android_phase_end "$cleanup_status"
   exit "$status"
 }
 trap cleanup EXIT
@@ -166,36 +179,56 @@ if [ "$catalog_failed" -ne 0 ]; then
   sed -n '1,80p' "$host_catalog" >&2
   exit 1
 fi
+android_phase_end 0
+if [ "$lane" != viewer ]; then
+android_phase_begin remote-owner-route
 printf 'android phase=remote-owner-route\n'
 timeout --foreground --kill-after=10 150 bash "$root/config/profiles/android/tests/e2e/android-pool-remote.sh" \
   "$root" "$state" "$YARD_NAME" "$project" "$instance"
+fi
+android_phase_begin images
 printf 'android phase=prepare-images\n'
 # Install both SDK packages while the pool is idle, before starting any emulator.
 # These public calls exercise the real installer and cache, never a diagnostic seed.
 yard emu cache prepare --api 35
 yard emu cache prepare --api 36
-yard emu cache prepare --api 35
-if [ "$lane" = full ]; then
-  monitor_stop="/run/subyard-e2e-android-monitor-$token.stop"
-  monitor_log="$state/first-boot-monitor.log"
-  incus_binary=(/usr/bin/incus)
-  if [ -S /var/lib/incus/unix.socket ] && [ ! -w /var/lib/incus/unix.socket ]; then
-    incus_binary=(sudo -n /usr/bin/incus)
-  fi
-  (
-    set -o pipefail
-    timeout --foreground --kill-after=10 9000 "${incus_binary[@]}" --project "$project" exec "$instance" -- \
-      python3 -u - "$monitor_stop" < "$root/config/profiles/android/tests/e2e/android-pool-monitor.py" 2>&1 \
-      | tee "$monitor_log"
-  ) &
-  monitor_pid=$!
-  for ((attempt = 0; attempt < 100; attempt++)); do
-    grep -Fxq 'android-boot-monitor ready' "$monitor_log" 2>/dev/null && break
-    kill -0 "$monitor_pid" 2>/dev/null || break
-    sleep 0.1
+[ "$lane" = viewer ] || yard emu cache prepare --api 35
+android_phase_end 0
+# Monitor all viewer and restart windows, including diagnostic lanes.
+monitor_stop="/run/subyard-e2e-android-monitor-$token.stop"
+monitor_log="$state/first-boot-monitor.log"
+incus_binary=(/usr/bin/incus)
+if [ -S /var/lib/incus/unix.socket ] && [ ! -w /var/lib/incus/unix.socket ]; then
+  incus_binary=(sudo -n /usr/bin/incus)
+fi
+(
+  monitor_deadline=$(( $(android_phase_now) + 9000 ))
+  last_monitor_status=''
+  while [ ! -e "$monitor_host_stop" ]; do
+    monitor_seconds=$((monitor_deadline - $(android_phase_now)))
+    [ "$monitor_seconds" -gt 0 ] || break
+    monitor_status=0
+    timeout --foreground --kill-after=10 "$monitor_seconds" "${incus_binary[@]}" --project "$project" exec "$instance" -- \
+      python3 -u - "$monitor_stop" < "$root/config/profiles/android/tests/e2e/android-pool-monitor.py" 2>/dev/null \
+      || monitor_status=$?
+    [ ! -e "$monitor_host_stop" ] || break
+    if [ "$last_monitor_status" != "$monitor_status" ]; then
+      printf 'android-boot-monitor transport_exit=%s observation=unknown\n' "$monitor_status"
+      last_monitor_status="$monitor_status"
+    fi
+    sleep 2
   done
-  grep -Fxq 'android-boot-monitor ready' "$monitor_log" 2>/dev/null \
-    || { printf 'android boot monitor did not start\n' >&2; exit 1; }
+) > >(tee "$monitor_log") &
+monitor_pid=$!
+for ((attempt = 0; attempt < 100; attempt++)); do
+  grep -Fxq 'android-boot-monitor ready' "$monitor_log" 2>/dev/null && break
+  kill -0 "$monitor_pid" 2>/dev/null || break
+  sleep 0.1
+done
+grep -Fxq 'android-boot-monitor ready' "$monitor_log" 2>/dev/null \
+  || { printf 'android boot monitor did not start\n' >&2; exit 1; }
+if [ "$lane" = full ]; then
+  android_phase_begin boot
   adb_log="$state/adb-getprop.log"
   adb_status=0
   timeout --foreground --kill-after=15 1320 "${incus_binary[@]}" --project "$project" exec "$instance" \
@@ -216,36 +249,72 @@ if [ "$lane" = full ]; then
   }
   # The L2 fixture exercises concurrent leases and clean reuse through its normal agent facade.
   bash "$root/config/profiles/android/tests/e2e/android-pool-projects.sh" "$root" "$state" "$YARD_NAME" "$project" "$instance"
-  timeout 20 "${incus_binary[@]}" --project "$project" exec "$instance" -- touch "$monitor_stop" \
-    || { printf 'android boot monitor stop marker failed\n' >&2; exit 1; }
-  monitor_status=0
-  wait "$monitor_pid" || monitor_status=$?
-  monitor_pid=''
-  timeout 20 "${incus_binary[@]}" --project "$project" exec "$instance" -- rm -f -- "$monitor_stop" || true
-  [ "$monitor_status" -eq 0 ] || { printf 'android boot monitor failed: %s\n' "$monitor_status" >&2; exit 1; }
 fi
+android_phase_end 0
+if [ "$lane" != recovery ]; then
+android_phase_begin viewer-dependencies
 printf 'android phase=viewer-dependencies\n'
 # Test-only virtual display and checksum-pinned official scrcpy portable release.
 # https://github.com/Genymobile/scrcpy/blob/master/doc/linux.md
 incus --project "$project" exec "$instance" -- bash -ceu '
+  phase() {
+    local name="$1" started=$SECONDS result=0
+    shift
+    printf "E2E_PHASE phase=fixture/dependencies-%s state=start duration_seconds=0 exit_code=0\n" "$name"
+    "$@" || result=$?
+    printf "E2E_PHASE phase=fixture/dependencies-%s state=end duration_seconds=%s exit_code=%s\n" "$name" "$((SECONDS-started))" "$result"
+    return "$result"
+  }
   export DEBIAN_FRONTEND=noninteractive
-  timeout 180 apt-get update -qq
-  timeout 180 apt-get install -y -qq xvfb xauth
+  phase packages-update timeout 180 apt-get update -qq
+  phase packages-install timeout 180 apt-get install -y -qq xvfb xauth
   tools=/opt/subyard-e2e-scrcpy
   install -d -m 0755 "$tools"
-  curl -fLsS --connect-timeout 15 --max-time 120 \
+  phase scrcpy-download curl -fLsS --connect-timeout 15 --max-time 120 \
     https://github.com/Genymobile/scrcpy/releases/download/v4.1/scrcpy-linux-x86_64-v4.1.tar.gz \
     -o "$tools/release.tar.gz"
   printf "%s  %s\n" ad56ae8bfeedf41e824945c11dbf55fcb092b3e615b9b486f48a50e30d389635 \
     "$tools/release.tar.gz" | sha256sum -c -
-  tar -xzf "$tools/release.tar.gz" --strip-components=1 -C "$tools"
+  phase scrcpy-extract tar -xzf "$tools/release.tar.gz" --strip-components=1 -C "$tools"
   rm "$tools/release.tar.gz"
 '
+fi
+android_phase_end 0
+# Emit only validated numeric versions, once per fixture.
+incus --project "$project" exec "$instance" -- python3 - <<'PYVERSIONS'
+import re
+import subprocess
+import tempfile
+for tool, command in (("emulator", ["/srv/cache/android-sdk/emulator/emulator", "-version"]),
+                      ("scrcpy", ["/opt/subyard-e2e-scrcpy/scrcpy", "--version"])):
+    try:
+        with tempfile.TemporaryFile() as stream:
+            result = subprocess.run(command, stdout=stream, stderr=subprocess.STDOUT, timeout=10)
+            stream.seek(0)
+            output = stream.read(4097)
+        if result.returncode or len(output) > 4096:
+            raise ValueError()
+        pattern = rb'Android emulator version ([0-9]{1,6}(?:\.[0-9]{1,6}){1,3}) \(build_id ([0-9]{1,12})\)' if tool == "emulator" else rb'scrcpy ([0-9]{1,6}(?:\.[0-9]{1,6}){1,3})'
+        matches = re.findall(pattern, output)
+        if len(matches) != 1:
+            raise ValueError()
+        if tool == "emulator":
+            version, build = (part.decode("ascii") for part in matches[0])
+            print("android-version emulator=" + version + " build=" + build, flush=True)
+        else:
+            print("android-version scrcpy=" + matches[0].decode("ascii"), flush=True)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        print("android-version " + tool + "=unknown", flush=True)
+PYVERSIONS
+android_phase_begin phone-recovery
 viewer_args=()
 [ "$lane" != viewer ] || viewer_args=(--viewer-only)
+[ "$lane" != recovery ] || viewer_args=(--recovery-only)
 timeout --foreground --kill-after=60 7200 bash "$root/config/profiles/android/tests/e2e/android-pool-recovery.sh" \
   "$root" "$state" "$YARD_NAME" "$project" "$instance" "${viewer_args[@]}"
+android_phase_end 0
 [ "$lane" != viewer ] || exit 0
+android_phase_begin prune-redownload
 printf 'android phase=prune-redownload\n'
 yard emu cache prune --dry-run > "$state/prune-dry.json"
 yard emu cache prune > "$state/prune-apply.json"

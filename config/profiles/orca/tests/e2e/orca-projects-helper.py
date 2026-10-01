@@ -7,9 +7,12 @@ import os
 from pathlib import Path
 import re
 import shlex
+import signal
 import socket
 import stat
+import subprocess
 import sys
+import tempfile
 import time
 import uuid
 
@@ -113,6 +116,209 @@ def rpc_call(arguments):
     return 0
 
 
+def snapshot_tabs(result):
+    snapshots = result.get("snapshots") if isinstance(result, dict) else None
+    if not isinstance(snapshots, list) or any(
+        not isinstance(item, dict) or not isinstance(item.get("worktree"), str)
+        or not isinstance(item.get("tabs"), list)
+        or any(not isinstance(tab, dict) or not isinstance(tab.get("id"), str)
+               or not tab["id"] for tab in item["tabs"])
+        for item in snapshots
+    ):
+        raise SafeRpcError("invalid session snapshots")
+    return snapshots
+
+
+def recovery_document(value):
+    if (not isinstance(value, dict) or not isinstance(value.get("settings"), dict)
+            or not isinstance(value["settings"].get("codexTerminalServerIsolation"), bool)):
+        raise SafeRpcError("invalid recovery settings export")
+    return value
+
+
+def cli_result(value):
+    if (not isinstance(value, dict) or value.get("ok") is not True
+            or not isinstance(value.get("result"), dict)):
+        raise SafeRpcError("invalid stock CLI envelope")
+    return value["result"]
+
+
+def check_resource_settings(rpc):
+    """Check the exact setting operations used by the resource fixture."""
+    for expected in (False, True):
+        label = "true" if expected else "false"
+        try:
+            rpc.call("settings.update", {"codexTerminalServerIsolation": expected})
+        except Exception:
+            raise SafeRpcError(f"settings.update {label} unavailable") from None
+        try:
+            result = rpc.call("settings.get")
+        except Exception:
+            raise SafeRpcError(f"settings.get after {label} unavailable") from None
+        settings = result.get("settings") if isinstance(result, dict) else None
+        if (not isinstance(settings, dict)
+                or not isinstance(settings.get("codexTerminalServerIsolation"), bool)):
+            raise SafeRpcError(f"settings.get after {label} invalid Boolean projection")
+        if settings["codexTerminalServerIsolation"] is not expected:
+            raise SafeRpcError(f"settings.get after {label} Boolean readback mismatch")
+
+
+def stock_probe(arguments):
+    """Probe only a disposable profile: never use the caller's accounts or runtime."""
+    phase = "version"
+    server = None
+    try:
+        sys.path.insert(0, arguments.registration)
+        from reconcile import _records
+        from settings import codex_defaults
+
+        with tempfile.TemporaryDirectory(prefix="subyard-orca-stock-probe.") as directory:
+            root = Path(directory)
+            environment = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(root / "home"),
+                           "XDG_CONFIG_HOME": str(root / "config"),
+                           "XDG_DATA_HOME": str(root / "data"),
+                           "XDG_STATE_HOME": str(root / "state")}
+            for path in environment.values():
+                if path.startswith(directory):
+                    Path(path).mkdir(mode=0o700)
+
+            def cli(*command):
+                result = subprocess.run([arguments.binary, *command], env=environment,
+                                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                        timeout=15, check=True)
+                return result.stdout
+
+            if cli("--version").decode().strip() != arguments.version:
+                print("orca-stock-probe: unavailable: pinned stock binary version mismatch", file=sys.stderr)
+                return 2
+            metadata = root / "config/orca/orca-runtime.json"
+
+            class RPC:
+                def call(self, method, params=None):
+                    return call_any_result(metadata, method, params)
+
+            rpc = RPC()
+
+            def stop():
+                nonlocal server
+                if server is None:
+                    return
+                try:
+                    os.killpg(server.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    server.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    os.killpg(server.pid, signal.SIGKILL)
+                    server.wait(timeout=5)
+                    raise SafeRpcError("stock runtime did not stop") from None
+                finally:
+                    server = None
+
+            def start():
+                nonlocal server
+                with socket.socket() as listener:
+                    listener.bind(("127.0.0.1", 0))
+                    port = listener.getsockname()[1]
+                server = subprocess.Popen(
+                    [arguments.binary, "serve", "--no-pairing", "--port", str(port)],
+                    env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+                deadline = time.monotonic() + 20
+                while time.monotonic() < deadline and server.poll() is None:
+                    if metadata.is_file():
+                        try:
+                            rpc.call("status.get")
+                            return
+                        except SafeRpcError:
+                            pass
+                    time.sleep(0.1)
+                raise SafeRpcError("stock runtime did not become reachable")
+
+            try:
+                phase = "startup"
+                start()
+                if arguments.resource_settings:
+                    phase = "resource settings contract"
+                    check_resource_settings(rpc)
+                phase = "registration and terminal snapshots"
+                codex_defaults(rpc, apply=True)
+                project = root / "project"
+                project.mkdir(mode=0o700)
+                group = rpc.call("projectGroup.create", {
+                    "name": "Stock probe", "parentPath": str(project), "createdFrom": "migration"
+                })["group"]["id"]
+                repo = rpc.call("repo.add", {"path": str(project), "kind": "folder"})["repo"]["id"]
+                rpc.call("projectGroup.moveProject", {"repo": "id:" + repo, "groupId": group})
+
+                def check_projects():
+                    if not any(item["id"] == group for item in _records(rpc, "projectGroup.list", "groups")):
+                        raise SafeRpcError("project group missing from snapshot")
+                    if not any(item["id"] == repo and item.get("projectGroupId") == group
+                               and item.get("path") == str(project) and item.get("kind") == "folder"
+                               for item in _records(rpc, "repo.list", "repos")):
+                        raise SafeRpcError("project missing from snapshot")
+
+                check_projects()
+                tab = rpc.call("session.tabs.createTerminal", {
+                    "worktree": "id:" + repo + "::" + str(project), "activate": False,
+                    "command": "printf 'stock-probe\\n'", "clientMutationId": "stock-probe"
+                })["tab"]["id"]
+
+                def check_tab():
+                    snapshots = snapshot_tabs(rpc.call("session.tabs.listAll"))
+                    if not any(item["worktree"].startswith(repo + "::")
+                               and any(saved["id"] == tab for saved in item["tabs"])
+                               for item in snapshots):
+                        raise SafeRpcError("terminal missing from snapshot")
+
+                check_tab()
+                phase = "recovery export shutdown"
+                stop()
+                phase = "recovery exports CLI"
+                exports = cli_result(json.loads(cli("profile", "state", "exports", "--json")))
+                phase = "recovery settings export schema"
+                data_file = Path(exports["dataFile"])
+                if not data_file.resolve().is_relative_to(root):
+                    raise SafeRpcError("recovery export escaped disposable profile")
+                # Stock owns SQLite authority. Its recovery command publishes
+                # canonical JSON; ordinary shutdown need not create that file.
+                cli_result(json.loads(cli("profile", "state", "rollback", "--current-sqlite", "--json")))
+                document = recovery_document(json.loads(data_file.read_text()))
+                expected = not document["settings"]["codexTerminalServerIsolation"]
+                document["settings"]["codexTerminalServerIsolation"] = expected
+                data_file.write_text(json.dumps(document))
+                phase = "recovery import CLI"
+                result = cli_result(json.loads(cli("profile", "state", "rollback", "--current-json", "--json")))
+                phase = "recovery import schema"
+                if result.get("storage") != "json" or result.get("restoredPath") != str(data_file):
+                    raise SafeRpcError("invalid recovery import result")
+                phase = "recovery restart"
+                start()
+                phase = "recovered terminal and project snapshots"
+                check_tab()
+                check_projects()
+                stop()
+                phase = "recovered settings export"
+                cli_result(json.loads(cli("profile", "state", "rollback", "--current-sqlite", "--json")))
+                restored = recovery_document(json.loads(data_file.read_text()))
+                if restored["settings"]["codexTerminalServerIsolation"] is not expected:
+                    raise SafeRpcError("recovery setting did not survive import")
+            finally:
+                stop()
+        print("ok: pinned stock Orca registration, terminal snapshots and recovery setting export/import")
+        return 0
+    except SafeRpcError as error:
+        print(f"orca-stock-probe: {phase}: {error}", file=sys.stderr)
+        return 1
+    except Exception:
+        # CLI output, profile exports and upstream exceptions may contain private state.
+        print(f"orca-stock-probe: {phase}: failed", file=sys.stderr)
+        return 1
+
+
 def parse_yard_command(original):
     try:
         outer = shlex.split(original)
@@ -206,6 +412,13 @@ def main():
     rpc.add_argument("params", nargs="?")
     rpc.add_argument("--state", default="/srv/agents/orca")
 
+    probe = subparsers.add_parser("stock-probe")
+    probe.add_argument("--binary", default="/usr/bin/orca-ide")
+    probe.add_argument("--version", required=True)
+    probe.add_argument("--registration", default="/usr/local/libexec/subyard/orca-registration")
+    probe.add_argument("--resource-settings", action="store_true",
+                       help="check the resource fixture's exact settings.get/update shapes")
+
     forced = subparsers.add_parser("forced-command")
     forced.add_argument("engine")
     forced.add_argument("repository")
@@ -219,6 +432,8 @@ def main():
     arguments = parser.parse_args()
     if arguments.command == "rpc":
         return rpc_call(arguments)
+    if arguments.command == "stock-probe":
+        return stock_probe(arguments)
     return forced_command(arguments)
 
 

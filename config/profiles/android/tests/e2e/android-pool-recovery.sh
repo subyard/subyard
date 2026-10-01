@@ -4,13 +4,19 @@ set -euo pipefail
 
 fail() { printf 'android-pool-recovery: %s\n' "$*" >&2; exit 1; }
 viewer_only=0
-if [ "$#" -eq 6 ] && [ "$6" = --viewer-only ]; then
-  viewer_only=1
-elif [ "$#" -ne 5 ]; then
-  fail 'usage: script ROOT STATE YARD PROJECT INSTANCE [--viewer-only]'
-fi
+recovery_only=0
+case "$#:${6:-}" in
+  5:) ;;
+  6:--viewer-only) viewer_only=1 ;;
+  6:--recovery-only) recovery_only=1 ;;
+  *) fail 'usage: script ROOT STATE YARD PROJECT INSTANCE [--viewer-only|--recovery-only]' ;;
+esac
 root="$1" state="$2" yard_name="$3" project="$4" instance="$5"
 . "$root/tests/helpers/release-candidate.sh"
+# shellcheck source=config/profiles/android/tests/e2e/android-pool-phases.sh
+. "$root/config/profiles/android/tests/e2e/android-pool-phases.sh"
+android_fixture=recovery
+android_phase_begin setup
 if YARD_BIN="$(release_candidate_prepare "$root")"; then unset YARD_ENGINE_PATH; else candidate_rc=$?; [ "$candidate_rc" = 1 ] || exit "$candidate_rc"; YARD_BIN="$root/.build/yard"; fi
 [[ "$root" = /* && "$state" = /* ]] || fail 'root and state must be absolute paths'
 for name in "$yard_name" "$project" "$instance"; do
@@ -76,11 +82,18 @@ phase_log=''
 cleanup() {
   local result=$?
   trap - EXIT INT TERM
-  if [ "$result" -ne 0 ] && [ -s "$phase_log" ]; then
-    printf 'android-pool-recovery: failure log (last 20 lines)\n' >&2
-    tail -n 20 "$phase_log" | sed -E \
-      's/(token|credential|secret|password|authorization|api[_-]?key)[=: ][^[:space:]]+/[redacted]/Ig' >&2
+  recovery_cleanup=1
+  android_phase_end "$result"
+  if [ "$result" -ne 0 ]; then
+    # Numeric observations only; never copy arbitrary viewer output into evidence.
+    if [ -s "$phase_log" ]; then
+      python3 - --summary "$phase_log" "$result" < "$root/config/profiles/android/tests/e2e/android-pool-viewer.py" || true
+    fi
+    incus_exec 15 -- python3 - --once < "$root/config/profiles/android/tests/e2e/android-pool-monitor.py" \
+      || printf 'android-display-observation query=unavailable screen_state=unknown\n' >&2
   fi
+  android_phase_begin cleanup
+  local cleanup_result=0
   if [ -n "$lease_dir" ]; then
     recovery_cleanup=1
     guest 60 bash -c '
@@ -91,9 +104,11 @@ cleanup() {
       find "$1" -depth -delete
     ' _ "$lease_dir" </dev/null >/dev/null 2>&1 || {
       printf 'android-pool-recovery: private lease cleanup could not complete\n' >&2
+      cleanup_result=3
       [ "$result" -ne 0 ] || result=3
     }
   fi
+  android_phase_end "$cleanup_result"
   printf 'android-pool-recovery: evidence=%s\n' "$work" >&2
   exit "$result"
 }
@@ -207,26 +222,34 @@ guest 30 bash -c 'printf "%s\n" subyard-android-pool-recovery-v1 > "$1/.marker"'
 first="$lease_dir/first.json"
 second="$lease_dir/second.json"
 
-# Owner run executes its payload on this VM; reuse the yard's verified SDK tools.
+# Final remote execution always needs owner ADB, including recovery-only.
 incus_exec 45 -- tar -C /srv/cache/android-sdk -cf - platform-tools \
   | tar -C "$work" -xf -
 owner_adb="$work/platform-tools/adb"
 [ -x "$owner_adb" ] || fail 'owner ADB is missing'
 timeout 15 "$owner_adb" version >/dev/null
-# The owner's viewer must cross the runtime network namespace just like remote ADB.
-incus_exec 45 -- tar -C /opt -cf - subyard-e2e-scrcpy | tar -C "$work" -xf -
-if ! command -v xvfb-run >/dev/null; then
-  timeout 120 sudo -n env DEBIAN_FRONTEND=noninteractive apt-get update -qq
-  timeout 180 sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq xvfb xauth
+if [ "$recovery_only" = 0 ]; then
+  # The owner's viewer crosses the runtime network namespace like remote ADB.
+  incus_exec 45 -- tar -C /opt -cf - subyard-e2e-scrcpy | tar -C "$work" -xf -
+  if ! command -v xvfb-run >/dev/null; then
+    android_phase_begin owner-packages
+    timeout 120 sudo -n env DEBIAN_FRONTEND=noninteractive apt-get update -qq
+    timeout 180 sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq xvfb xauth
+  fi
+  incus_exec 30 -- sh -c 'cat > /opt/subyard-e2e-capture.py; chmod 0644 /opt/subyard-e2e-capture.py' < "$root/config/profiles/android/tests/e2e/android-pool-capture.py" >/dev/null
 fi
-
+android_phase_begin boot
 printf 'android-pool-recovery phase=pool-service\n'
 guest 1320 android-broker acquire --device phone --api 35 --lease-file "$first" \
   </dev/null >/dev/null
 check_guest 150 adb "$first"
+android_phase_end 0
+if [ "$recovery_only" = 0 ]; then
+android_phase_begin owner-capture
 printf 'android-pool-recovery phase=owner-viewer\n'
 owner_lease="$work/owner-view.json"
 (umask 077; guest 30 cat "$first" > "$owner_lease")
+chmod 0600 "$owner_lease"
 before_view="$(check_guest 30 allocation "$first")"
 phase_log="$work/owner-viewer.log"
 printf -v viewer_command '%q ' "$YARD_BIN" -Y "$yard_name" emu view \
@@ -235,17 +258,24 @@ timeout --foreground "$(remaining 210)" env ADB="$owner_adb" \
   PATH="$work/subyard-e2e-scrcpy:$work/platform-tools:$PATH" SDL_RENDER_DRIVER=software \
   xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp' \
   sg incus-admin -c "exec $viewer_command" > "$phase_log" 2>&1
-grep -Fq 'Texture:' "$phase_log" || fail 'owner viewer did not render a video frame'
+python3 - --summary "$phase_log" 0 < "$root/config/profiles/android/tests/e2e/android-pool-viewer.py"
+grep -Eq '^INFO: Texture: [0-9]{1,4}x[0-9]{1,4}$' "$phase_log" || fail 'owner viewer did not render a video frame'
 [ "$(check_guest 30 allocation "$first")" = "$before_view" ] \
   || fail 'owner viewer released or renewed the attached lease'
 printf 'android-pool-recovery owner-viewer=PASS lease=unchanged\n'
+android_phase_begin attached-standalone-capture
 printf 'android-pool-recovery phase=viewer\n'
 phase_log="$work/viewer.log"
 guest 1440 python3 - "$first" < "$root/config/profiles/android/tests/e2e/android-pool-viewer.py" \
   > "$phase_log" 2>&1
+# Forward only native phase markers and validated numeric capture summaries.
+python3 - --summary "$phase_log" 0 < "$root/config/profiles/android/tests/e2e/android-pool-viewer.py"
+android_phase_end 0
 printf 'android-pool-recovery viewer=PASS server-start-delay=20s\n'
 phase_log=''
+fi
 [ "$viewer_only" = 0 ] || exit 0
+android_phase_begin pool-restart
 incus_exec 120 -- systemctl restart subyard-android-pool.service </dev/null
 await_idle() {
   local observed units attempt
@@ -263,6 +293,7 @@ await_idle
 check_guest 60 stale "$first"
 printf 'android-pool-recovery pool-restart=PASS\n'
 
+android_phase_begin yard-restart
 printf 'android-pool-recovery phase=yard-stop-start\n'
 guest 1320 android-broker acquire --device phone --api 35 --lease-file "$second" \
   </dev/null >/dev/null
@@ -273,6 +304,7 @@ await_idle
 check_guest 60 stale "$second"
 printf 'android-pool-recovery yard-restart=PASS\n'
 
+android_phase_begin final-remote
 phase_log="$work/final-adb.log"
 timeout --foreground "$(remaining 1440)" bash "$root/config/profiles/android/tests/e2e/android-pool-remote.sh" \
   "$root" "$state" "$yard_name" "$project" "$instance" "$owner_adb" \

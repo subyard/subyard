@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 
 root = Path(sys.argv[1])
@@ -218,12 +218,98 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             self.assertEqual(excluded["status"], "pending")
             self.assertNotIn("do-not-export", json.dumps(report))
             self.assertEqual(report["broker"]["memory"]["available_bytes"], 42)
+            self.assertEqual(report["capacity_summary"]["planning"], "unknown")
+            self.assertIsNone(report["capacity_summary"]["observed_at"])
+            self.assertIsNone(report["capacity_summary"]["headroom_bytes"]["memory"])
             self.assertIn("GitHub CI", report["architecture_responsibility"]["arm64"])
             self.assertEqual(report["external_prerequisites"][0]["readiness"], "available")
             self.assertEqual(report["external_prerequisites"][0]["status"], "not-run")
             readiness.write_text('{"sample:account":"passed"}')
             with patch.object(m, "ROOT", checkout), self.assertRaisesRegex(ValueError, "invalid external readiness"):
                 m.preflight(external_readiness=readiness)
+
+    def test_capacity_planning_complete_incomplete_legacy_and_observation_freshness(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            checkout = fixture_checkout(directory)
+            status = directory / "status.json"
+            value = {"schema_version": 1, "status": "ok", "private": "do-not-export",
+                "pool": {"slots": [{"slot_id": "slot-001", "state": "available",
+                    "environment": {"type": "subyard-pair", "credential": "do-not-export"}}]},
+                "resources": {"memory": {"available_bytes": 1000},
+                    "storage": {"physical_free_bytes": 2000, "budget_used_bytes": 100},
+                    "budgets": {"memory_reserve_bytes": 100, "disk_reserve_bytes": 200, "disk_bytes": 0},
+                    "slots": [{"remaining_memory_growth_bytes": 300, "remaining_disk_growth_bytes": 400}],
+                    "builder": {"reserved_memory_bytes": 50, "reserved_disk_peak_bytes": 60}}}
+            inventory = m.profile_inventory(checkout)
+            def inspect(only=("profile:sample",)):
+                status.write_text(json.dumps(value))
+                compact = io.StringIO()
+                with patch.object(m, "ROOT", checkout), patch.object(m, "profile_inventory", return_value=inventory), \
+                     patch.object(m, "execute", side_effect=AssertionError("execution")), \
+                     patch.object(m, "bundle", side_effect=AssertionError("packaging")), \
+                     patch.object(m.subprocess, "run", side_effect=AssertionError("mutation/authentication")), \
+                     redirect_stderr(compact), redirect_stdout(io.StringIO()):
+                    report = m.preflight(only=only, broker_status=status, slots=[1], types=["subyard-pair"])
+                self.assertEqual(len(compact.getvalue().splitlines()), 1)
+                self.assertIn("CAPACITY slots=slot-001:", compact.getvalue())
+                self.assertIn("types=subyard-pair", compact.getvalue())
+                self.assertIn("prerequisites=", compact.getvalue())
+                self.assertNotIn("do-not-export", compact.getvalue())
+                return report
+            before = set(checkout.rglob("*"))
+            report = inspect()
+            summary = report["capacity_summary"]
+            self.assertEqual(summary["selected_slots"], [{"id": "slot-001", "state": "available", "type": "subyard-pair"}])
+            self.assertEqual(summary["selected_types"], ["subyard-pair"])
+            self.assertEqual(summary["headroom_bytes"], {"memory": 550, "disk": 1340})
+            self.assertEqual(summary["planning"], "unknown")  # Positive headroom does not prove a request fits.
+            self.assertIsNone(summary["observed_at"])
+            self.assertIsNone(summary["age_seconds"])
+            self.assertTrue(summary["prerequisites"]["physical"])
+            self.assertNotIn("do-not-export", json.dumps(report))
+            self.assertEqual(before, set(checkout.rglob("*")))
+            value["pool"]["slots"][0]["environment"]["type"] = "do-not-export"
+            self.assertNotIn("do-not-export", json.dumps(inspect()))
+            value["pool"]["slots"][0]["environment"]["type"] = "subyard-pair"
+            del value["resources"]["slots"][0]["remaining_memory_growth_bytes"]
+            self.assertIsNone(inspect()["capacity_summary"]["headroom_bytes"]["memory"])
+            value["resources"]["slots"][0]["remaining_memory_growth_bytes"] = 300
+            value["resources"]["errors"] = ["legacy_reservation_unknown", "do-not-export"]
+            self.assertEqual(inspect()["capacity_summary"]["headroom_bytes"], {"memory": None, "disk": None})
+            del value["resources"]["errors"]
+            measured_now = m.datetime(2026, 1, 1, 0, 1, tzinfo=m.timezone.utc)
+            for observed, age, freshness in (("2026-01-01T00:00:00Z", 60, "supplied file snapshot"),
+                ("2026-01-01T00:02:00Z", None, "unknown; observation timestamp is in the future"),
+                ("2026-01-01T00:00:00", None, "unknown"), ("2026-99-01T00:00:00Z", None, "unknown"),
+                ("0001-01-01T00:00:00+01:00", None, "unknown"),
+                ("do-not-export", None, "unknown")):
+                value["observed_at"] = observed
+                with patch.object(m, "datetime", wraps=m.datetime) as clock:
+                    clock.now.return_value = measured_now
+                    summary = inspect()["capacity_summary"]
+                self.assertEqual(summary["age_seconds"], age)
+                self.assertIn(freshness, summary["freshness"])
+                self.assertNotIn("do-not-export", json.dumps(summary))
+                if observed == "2026-01-01T00:00:00Z":
+                    self.assertEqual(summary["observed_at"], "2026-01-01T00:00:00+00:00")
+            value["resources"]["memory"]["available_bytes"] = 100
+            summary = inspect()["capacity_summary"]
+            self.assertEqual(summary["planning"], "insufficient")
+            self.assertEqual(summary["shortages"], ["memory headroom exhausted"])
+            value["resources"]["memory"]["available_bytes"] = 1000
+            value["pool"]["slots"][0]["state"] = "held"
+            self.assertEqual(inspect()["capacity_summary"]["shortages"], ["slot-001: held"])
+            local_summary = inspect(only=["verify"])["capacity_summary"]
+            self.assertEqual(local_summary["planning"], "not-required")
+            self.assertEqual(local_summary["shortages"], [])
+            status.write_text(json.dumps(value))
+            with patch.object(m, "ROOT", checkout), patch.object(m, "profile_inventory", return_value=inventory), \
+                 patch.object(m, "execute", side_effect=AssertionError("execution")), \
+                 patch.object(sys, "argv", ["acceptance", "preflight", "--broker-status", str(status),
+                                          "--slots", "1", "--types", "subyard-pair"]), redirect_stdout(io.StringIO()):
+                self.assertEqual(m.main(), 1)
+            self.assertEqual(before, set(checkout.rglob("*")))
 
     def test_first_order_dynamic_dispatch_resume_and_exclusions(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -517,6 +603,33 @@ while True: time.sleep(1)
             self.assertEqual(events[1]["phase"], "cleanup/release")
             self.assertNotIn("secret-do-not-export", json.dumps(events))
 
+    def test_fixture_phases_are_bounded_and_preserve_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            log = output / "markers.log"
+            log.write_bytes(
+                b"E2E_PHASE phase=fixture/setup state=start duration_seconds=0 exit_code=0\n"
+                b"E2E_PHASE phase=fixture/setup state=end duration_seconds=17 exit_code=23\n"
+                b"E2E_PHASE phase=fixture/cleanup state=start duration_seconds=0 exit_code=0\n"
+                b"E2E_PHASE phase=fixture/cleanup state=end duration_seconds=2 exit_code=0\n"
+                b"E2E_PHASE phase=fixture/private=do-not-export state=end duration_seconds=1 exit_code=0\n"
+                b"E2E_PHASE phase=fixture/setup state=start duration_seconds=1 exit_code=0\n"
+                b"E2E_PHASE phase=fixture/setup state=end duration_seconds=1 exit_code=256\n"
+                b"E2E_PHASE phase=fixture/setup state=end duration_seconds=-1 exit_code=0\n"
+                b"E2E_PHASE phase=fixture/setup state=end duration_seconds=1 exit_code=0 vm=1\n"
+                b"E2E_PHASE phase=fixture/" + b"x" * 61 +
+                b" state=end duration_seconds=1 exit_code=0\n" + b"x" * 5000 + b"\n"
+                b"E2E_PHASE phase=fixture/unfinished state=start duration_seconds=0 exit_code=0\n"
+                b"E2E_PHASE phase=fixture/unfinished state=end duration_seconds=1 exit_code=0")
+            m.phase_events(output, "profile:sample", log, 0, set(), final=True)
+            events = [json.loads(line) for line in (output / "events.jsonl").read_text().splitlines()]
+            self.assertEqual([(item["phase"], item["state"], item["duration_seconds"], item["exit_code"])
+                              for item in events], [
+                ("fixture/setup", "start", 0, 0), ("fixture/setup", "end", 17, 23),
+                ("fixture/cleanup", "start", 0, 0), ("fixture/cleanup", "end", 2, 0),
+                ("fixture/unfinished", "start", 0, 0)])
+            self.assertNotIn("do-not-export", json.dumps(events))
+
     def test_interrupted_attempt_saved_and_blocked_worker_stops_queue(self):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary)
@@ -549,6 +662,19 @@ while True: time.sleep(1)
                 self.assertEqual(persisted["checks"]["profile:sample/one"]["duration_seconds"], 0.7)
                 self.assertEqual(persisted["checks"]["verify"]["status"], "passed")
                 m.STOP.clear()
+                calls.clear()
+                def pass_after_capacity_change(name, *args):
+                    calls.append(name)
+                    return {"status": "passed", "exit_code": 0, "duration_seconds": 1}
+                with patch.object(m, "execute", side_effect=pass_after_capacity_change):
+                    self.assertEqual(m.run_checks(output, [1], ["profile:sample/one"], False), 1)
+                persisted = json.loads((output / "receipt.json").read_text())
+                self.assertEqual(calls, ["profile:sample/one"])
+                self.assertEqual(persisted["checks"]["verify"]["status"], "passed")
+                self.assertEqual(persisted["checks"]["profile:sample/two"]["status"], "pending")
+                self.assertEqual(persisted["source_fingerprint"], "a" * 64)
+                self.assertEqual(persisted["candidate_bundle_sha256"], "b" * 64)
+                self.assertEqual(persisted["result"], "incomplete")
 
     def test_single_collector_lock(self):
         with tempfile.TemporaryDirectory() as temporary:

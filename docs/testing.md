@@ -62,7 +62,7 @@ The same profile inventory is used by local acceptance and branch CI preflight.
 Check prerequisites before packaging or acquiring a VM, then freeze the final candidate:
 
 ```sh
-python3 dev/release-acceptance.py preflight
+python3 dev/release-acceptance.py preflight --slots 1 2 3 --types subyard-pair android-test
 python3 dev/release-acceptance.py prepare --version 0.14.1 --output .build/release-acceptance
 python3 dev/release-acceptance.py run --output .build/release-acceptance --slots 1 2 3
 ```
@@ -70,8 +70,16 @@ python3 dev/release-acceptance.py run --output .build/release-acceptance --slots
 Preflight reads the worktree or `--output` frozen candidate. It never authenticates or allocates;
 `--broker-status FILE` accepts an already-collected public status, and `--external-readiness FILE`
 accepts obligation IDs mapped to `available`, `unavailable` or `unknown`. Readiness declarations
-are planning inputs, not passing evidence. Missing telemetry leaves capacity unknown; native
-broker admission remains authoritative. Use `run --first CHECK` to prioritize the original
+are planning inputs, not passing evidence. `--slots` and `--types` identify the contemplated requests;
+they do not reserve capacity or change controller dispatch. A compact `CAPACITY` line on stderr
+summarizes these selections, numeric headroom, observation time/age and prerequisites; stdout remains
+the JSON report. Missing observation time stays unknown, independent of file read time or mtime.
+Missing telemetry and legacy reservations leave headroom unknown. Observed unavailable selected
+slots or exhausted headroom report planning `insufficient` and exit 1 before packaging or local checks.
+Positive headroom does not prove the selected types fit: compare it with their actual resource contract
+and preserve the reported reserves. Run this worktree preflight before `prepare` and the local gates
+to avoid an obviously unsuitable attempt. The supplied snapshot is advisory; current native broker
+admission remains authoritative. Use `run --first CHECK` to prioritize the original
 regression after required local gates. Explicit `--exclude CHECK` leaves the required gate incomplete.
 
 Select available slots using `dev/agent-e2e.sh --status`; each slot runs one controller at a time.
@@ -89,6 +97,11 @@ attribution while executing controllers and guest payloads from the frozen candi
 
 A repeated `run` executes only checks without a passing result. Use `--only profile:NAME` or
 `--only p0-release-smoke` for a remaining independent check; `--rerun` also repeats passed checks.
+After capacity changes, inspect a new supplied snapshot with `preflight --output DIR`, then continue
+the same frozen candidate with `run --output DIR --slots N --only CHECK`. Passing local checks remain
+bound to that identity and are retained; capacity alone does not require another `prepare`.
+Planning insufficiency is distinct from an actual typed broker refusal recorded as `blocked` with
+`capacity_memory` or `capacity_disk`. Both leave required physical acceptance incomplete.
 Profiles may declare independent checks in `tests/e2e/acceptance-lanes.json` with schema version 1
 and ordered `lanes` entries containing `id` and runner `arguments`. The collector requires every
 lane to pass and accepts `--only profile:NAME/ID` for one lane. Available approved slots take the
@@ -101,6 +114,11 @@ and Go toolchain against preparation; receipts retain measured execution and ava
 `receipt.json` records terminal results, including `blocked` capacity refusal and `interrupted`
 execution. `events.jsonl` retains starts, results, minute heartbeats and bounded controller phases;
 phase durations use the controller clock. An unfinished phase has no successful end marker.
+Fixtures may emit `E2E_PHASE phase=fixture/NAME state=start|end duration_seconds=N exit_code=N`
+with a lowercase name of up to 60 letters, digits or hyphens. Start markers use zero duration and
+exit code; end markers retain the measured duration and original exit code (0–255). The collector
+projects only this bounded grammar into phase events, without copying fixture output. A successful
+cleanup phase does not change a preceding failure into a pass.
 Use `supersede --output DIR` to retire an idle candidate while preserving its original evidence.
 Only one mutating collector may use an output directory at a time.
 

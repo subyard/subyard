@@ -232,6 +232,10 @@ guest_root systemctl is-active --quiet subyard-orca.service \
   || die 'Orca did not start through the production resource handler'
 incus --project "$PROJECT" file push "$ROOT/config/profiles/orca/tests/e2e/orca-projects-helper.py" \
   "$INSTANCE/tmp/orca-projects-helper.py" --mode 0755
+# shellcheck source=config/profiles/orca/release.env
+. "$RUNTIME_ROOT/config/profiles/orca/release.env"
+stage 'probing pinned stock operations in a disposable profile'
+guest_dev python3 -B /tmp/orca-projects-helper.py stock-probe --version "$ORCA_VERSION"
 
 stage 'creating projects through clone, sync, and bind production commands'
 guest_seed="/tmp/orca-projects-$token"

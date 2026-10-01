@@ -283,13 +283,20 @@ bounded startup waiting on a real device, without allocating another emulator.
 
 After a viewer-only change, pass `--lane viewer` to `config/profiles/android/tests/e2e/android-pool-runtime.sh`.
 It checks owner and yard viewers, delayed startup, attachment without lease renewal or release,
-and a standalone viewer alongside the borrowed lease, then cleans up. It uses the same single VM.
+and a standalone viewer alongside the borrowed lease, then cleans up. It prepares both API35 and
+API36 images, skipping the separate remote route and repeated API35 preparation assertions.
+Those assertions remain in the full lane. It uses the same single VM.
 
 After a recovery change, pass `--lane recovery` to
 `config/profiles/android/tests/e2e/android-pool-runtime.sh`. This lane performs its own fresh setup and image preparation,
-then checks viewers, pool and yard restarts, remote owner execution, cache pruning and cleanup.
+then checks pool and yard restarts, stale lease fencing, final remote owner execution, cache pruning
+and cleanup. It boots both phones across the restart sequence and skips viewer subtests and scrcpy
+installation. The full lane retains the owner, attached and standalone viewers before recovery.
 It skips the separate L2 builds, concurrent device lifecycle and expiry checks; retain their
-source-specific evidence when those paths are unchanged. The default remains the complete lane.
+source-specific evidence when those paths are unchanged. The default remains the complete lane. Android fixtures emit bounded `E2E_PHASE` durations and exit
+codes, validated numeric tool versions, capture observations and read-only numeric monitor samples.
+Unknown, incomplete or timed-out display queries remain unknown. Scrcpy download and extraction
+are measured separately; these timings do not establish a reusable dependency cache.
 
 For first SSH trust and continuation of ordinary remote commands, run the focused fixture on a
 free slot:
