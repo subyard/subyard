@@ -3,6 +3,7 @@ package testvmsruntime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -16,6 +17,63 @@ import (
 type allocationUsage struct {
 	memory, disk           uint64
 	memoryKnown, diskKnown bool
+	memoryReason           memoryEvidenceReason
+}
+
+// memoryEvidenceReason contains only public classifications, never probe data.
+type memoryEvidenceReason uint8
+
+const (
+	memoryEvidenceUnavailable memoryEvidenceReason = iota
+	memoryReservationUnavailable
+	memorySlotInvalid
+	memoryBoundaryUnavailable
+	memoryIncusQueryFailed
+	memoryIncusQueryDeadline
+	memoryIdentityInvalid
+	memoryStateInvalid
+	memoryPIDInvalid
+	memoryMembershipUnavailable
+	memoryMembershipInvalid
+	memoryOutsideBoundary
+	memoryProcessesUnavailable
+	memoryProcessesNotIsolated
+	memoryDescendantsUnavailable
+	memoryDescendantsInvalid
+	memoryDescendantsPresent
+	memoryCountersUnavailable
+	memoryCountersInvalid
+	memoryCountersOverflow
+)
+
+func (reason memoryEvidenceReason) String() string {
+	names := [...]string{
+		"unavailable", "reservation_unavailable", "slot_invalid", "memory_boundary_unavailable",
+		"incus_query_failed", "incus_query_deadline", "instance_identity_invalid", "instance_state_invalid", "instance_pid_invalid",
+		"cgroup_membership_unavailable", "cgroup_membership_invalid", "cgroup_outside_memory_boundary",
+		"cgroup_processes_unavailable", "cgroup_processes_not_isolated",
+		"cgroup_descendants_unavailable", "cgroup_descendants_invalid", "cgroup_descendants_present",
+		"memory_counters_unavailable", "memory_counters_invalid", "memory_counters_overflow",
+	}
+	if int(reason) >= len(names) {
+		return names[0]
+	}
+	return names[reason]
+}
+
+func (usage *allocationUsage) failMemory(reason memoryEvidenceReason) {
+	// Keep the first failure in stable VM order, even if later probes succeed.
+	if usage.memoryReason == memoryEvidenceUnavailable {
+		usage.memoryReason = reason
+	}
+	usage.memoryKnown = false
+}
+
+func incusMemoryReason(ctx context.Context, err error) memoryEvidenceReason {
+	if errors.Is(err, context.DeadlineExceeded) || ctx.Err() == context.DeadlineExceeded {
+		return memoryIncusQueryDeadline
+	}
+	return memoryIncusQueryFailed
 }
 
 func (rt *Runtime) allocationUsage(ctx context.Context, slot LeaseSlot, memoryScope string) allocationUsage {
@@ -23,11 +81,11 @@ func (rt *Runtime) allocationUsage(ctx context.Context, slot LeaseSlot, memorySc
 		return rt.usageProbe(ctx, slot, memoryScope)
 	}
 	if slot.Environment == nil || !slot.Reserved {
-		return allocationUsage{}
+		return allocationUsage{memoryReason: memoryReservationUnavailable}
 	}
 	index, err := slotNumber(slot.SlotID, rt.Config.SlotCount)
 	if err != nil {
-		return allocationUsage{}
+		return allocationUsage{memoryReason: memorySlotInvalid}
 	}
 	child := rt.slotRuntime(index, "")
 	child.useLeaseSlot(slot)
@@ -38,11 +96,15 @@ func (rt *Runtime) allocationUsage(ctx context.Context, slot LeaseSlot, memorySc
 		_ = json.Unmarshal([]byte(body), &pool)
 	}
 	result := allocationUsage{memoryKnown: memoryScope != "", diskKnown: pool.Driver == "dir"}
+	if memoryScope == "" {
+		result.failMemory(memoryBoundaryUnavailable)
+	}
 	for i := 1; i <= slot.Environment.Count; i++ {
 		vm := child.Config.vm(i)
 		body, err := rt.incus(ctx, "query", "/1.0/instances/"+vm+"?project="+child.Config.Project)
 		if err != nil {
-			result.memoryKnown, result.diskKnown = false, false
+			result.failMemory(incusMemoryReason(ctx, err))
+			result.diskKnown = false
 			continue
 		}
 		var instance struct {
@@ -53,7 +115,8 @@ func (rt *Runtime) allocationUsage(ctx context.Context, slot LeaseSlot, memorySc
 			instance.Config["user.subyard.managed"] != managedMarker ||
 			instance.Config["user.subyard.generation"] != strconv.FormatUint(slot.ResourceGeneration, 10) ||
 			instance.Config["user.subyard.lease-epoch"] != strconv.FormatUint(slot.LeaseEpoch, 10) {
-			result.memoryKnown, result.diskKnown = false, false
+			result.failMemory(memoryIdentityInvalid)
+			result.diskKnown = false
 			continue
 		}
 		if memoryScope != "" {
@@ -67,19 +130,24 @@ func (rt *Runtime) allocationUsage(ctx context.Context, slot LeaseSlot, memorySc
 					if state.Status == "Stopped" {
 						// A stopped VM has no QEMU resident memory.
 					} else if state.Status == "Running" && state.PID > 1 {
-						if used, ok := qemuAnonymousBytes("/proc", "/sys/fs/cgroup", state.PID, memoryScope); ok && result.memory <= ^uint64(0)-used {
-							result.memory += used
+						used, ok, reason := qemuAnonymousUsage("/proc", "/sys/fs/cgroup", state.PID, memoryScope)
+						if !ok {
+							result.failMemory(reason)
+						} else if result.memory > ^uint64(0)-used {
+							result.failMemory(memoryCountersOverflow)
 						} else {
-							result.memoryKnown = false
+							result.memory += used
 						}
+					} else if state.Status == "Running" {
+						result.failMemory(memoryPIDInvalid)
 					} else {
-						result.memoryKnown = false
+						result.failMemory(memoryStateInvalid)
 					}
 				} else {
-					result.memoryKnown = false
+					result.failMemory(memoryStateInvalid)
 				}
 			} else {
-				result.memoryKnown = false
+				result.failMemory(incusMemoryReason(ctx, err))
 			}
 		}
 		if pool.Driver == "dir" {
@@ -104,10 +172,15 @@ func (rt *Runtime) allocationUsage(ctx context.Context, slot LeaseSlot, memorySc
 }
 
 func qemuAnonymousBytes(procRoot, cgroupRoot string, pid int, boundary string) (uint64, bool) {
+	used, ok, _ := qemuAnonymousUsage(procRoot, cgroupRoot, pid, boundary)
+	return used, ok
+}
+
+func qemuAnonymousUsage(procRoot, cgroupRoot string, pid int, boundary string) (uint64, bool, memoryEvidenceReason) {
 	name := strconv.Itoa(pid)
 	body, err := os.ReadFile(filepath.Join(procRoot, name, "cgroup"))
 	if err != nil {
-		return 0, false
+		return 0, false, memoryMembershipUnavailable
 	}
 	var relative string
 	for _, line := range strings.Split(string(body), "\n") {
@@ -116,41 +189,47 @@ func qemuAnonymousBytes(procRoot, cgroupRoot string, pid int, boundary string) (
 		}
 	}
 	if relative == "" || strings.Contains(relative, "..") || strings.Contains(relative, " (deleted)") {
-		return 0, false
+		return 0, false, memoryMembershipInvalid
 	}
 	group := filepath.Join(cgroupRoot, relative)
 	if group == boundary || !strings.HasPrefix(group, boundary+string(os.PathSeparator)) {
-		return 0, false
+		return 0, false, memoryOutsideBoundary
 	}
 	// A shared service cgroup could contain unrelated processes. Give credit
 	// only to a leaf containing this QEMU process alone.
 	procs, err := os.ReadFile(filepath.Join(group, "cgroup.procs"))
-	if err != nil || strings.TrimSpace(string(procs)) != name {
-		return 0, false
+	if err != nil {
+		return 0, false, memoryProcessesUnavailable
+	}
+	if strings.TrimSpace(string(procs)) != name {
+		return 0, false, memoryProcessesNotIsolated
 	}
 	// memory.stat includes descendants. Do not credit an unrelated process
 	// hidden in a child cgroup of this QEMU cgroup.
 	cgroupStats, err := os.ReadFile(filepath.Join(group, "cgroup.stat"))
 	if err != nil {
-		return 0, false
+		return 0, false, memoryDescendantsUnavailable
 	}
 	foundDescendants := false
 	for _, line := range strings.Split(string(cgroupStats), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 2 && fields[0] == "nr_descendants" {
 			descendants, err := strconv.ParseUint(fields[1], 10, 64)
-			if err != nil || descendants != 0 {
-				return 0, false
+			if err != nil {
+				return 0, false, memoryDescendantsInvalid
+			}
+			if descendants != 0 {
+				return 0, false, memoryDescendantsPresent
 			}
 			foundDescendants = true
 		}
 	}
 	if !foundDescendants {
-		return 0, false
+		return 0, false, memoryDescendantsInvalid
 	}
 	stats, err := os.ReadFile(filepath.Join(group, "memory.stat"))
 	if err != nil {
-		return 0, false
+		return 0, false, memoryCountersUnavailable
 	}
 	var anon, shmem uint64
 	var foundAnon, foundShmem bool
@@ -161,7 +240,7 @@ func qemuAnonymousBytes(procRoot, cgroupRoot string, pid int, boundary string) (
 		}
 		value, err := strconv.ParseUint(fields[1], 10, 64)
 		if err != nil {
-			return 0, false
+			return 0, false, memoryCountersInvalid
 		}
 		switch fields[0] {
 		case "anon":
@@ -170,10 +249,13 @@ func qemuAnonymousBytes(procRoot, cgroupRoot string, pid int, boundary string) (
 			shmem, foundShmem = value, true
 		}
 	}
-	if !foundAnon || !foundShmem || anon > ^uint64(0)-shmem {
-		return 0, false
+	if !foundAnon || !foundShmem {
+		return 0, false, memoryCountersInvalid
 	}
-	return anon + shmem, true
+	if anon > ^uint64(0)-shmem {
+		return 0, false, memoryCountersOverflow
+	}
+	return anon + shmem, true, memoryEvidenceUnavailable
 }
 
 func exclusiveBlocks(ctx context.Context, root string) (uint64, bool) {

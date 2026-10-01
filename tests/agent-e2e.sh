@@ -17,6 +17,67 @@ grep -Fq 'target=/var/lib/subyard/e2e-routes' "$ROOT/scripts/03-create-subyard.s
 # shellcheck source=dev/agent-e2e.sh
 . "$ROOT/dev/agent-e2e.sh"
 
+assert_phase_markers() {
+  local output="$1" expected="$2" line events='' phase state duration rc vm
+  while IFS= read -r line; do
+    case "$line" in E2E_PHASE*) ;; *) continue ;; esac
+    [[ "$line" =~ ^E2E_PHASE\ phase=(allocation|packing|transport|guest|guest-cleanup|cleanup/release)\ state=(start|end)\ duration_seconds=([0-9]+)\ exit_code=([0-9]+)(\ vm=([12]))?$ ]] \
+      || fail "unsafe or malformed phase marker: $line"
+    phase="${BASH_REMATCH[1]}" state="${BASH_REMATCH[2]}" duration="${BASH_REMATCH[3]}"
+    rc="${BASH_REMATCH[4]}" vm="${BASH_REMATCH[6]:--}"
+    [ "$state" != start ] || { [ "$duration" = 0 ] && [ "$rc" = 0 ]; } \
+      || fail 'phase start contains a duration or failure'
+    events+="${events:+$'\n'}$phase:$state:$rc:$vm"
+  done <<<"$output"
+  [ "$events" = "$expected" ] || fail "unexpected phase order/status: $events"
+}
+
+# A closed telemetry stream must not fail the operation or reset its clock.
+(
+  before=$SECONDS
+  phase_start packing 2>&-
+  phase_end 23 2>&-
+  [ "$SECONDS" -ge "$before" ] && [ -z "$E2E_ACTIVE_PHASE" ]
+) || fail 'telemetry output failure changed controller behavior'
+# Capture stderr separately: phase telemetry must never enter command stdout.
+phase_clock_stdout="$(
+  { phase_start packing; SECONDS=$((SECONDS + 2)); phase_end 23;
+    phase_marker 'command-secret' end 2 23;
+    phase_marker guest end 2 23 'private-path';
+  } 2>"$TMP/phase-clock.log"
+)"
+[ -z "$phase_clock_stdout" ] || fail 'phase markers leaked to stdout'
+phase_clock_output="$(cat "$TMP/phase-clock.log")"
+assert_phase_markers "$phase_clock_output" $'packing:start:0:-\npacking:end:23:-'
+[[ "$phase_clock_output" =~ state=end\ duration_seconds=([0-9]+) ]] \
+  && [ "${BASH_REMATCH[1]}" -ge 2 ] || fail 'phase timing lost elapsed controller seconds'
+
+# Keeper shutdown must reap its timer and close captured streams immediately.
+keeper_probe_dir="$TMP/keeper-probe"
+mkdir "$keeper_probe_dir"
+keeper_probe_rc=0
+keeper_probe_output="$(timeout 5 bash -c '
+  set -euo pipefail
+  . "$1/dev/agent-e2e.sh"
+  timer_file="$2/timer"
+  sleep() {
+    printf "%s\n" "$BASHPID" > "$timer_file"
+    exec /bin/sleep "$@"
+  }
+  start_lease_keeper
+  trap "kill \"\$LEASE_KEEPER_PID\" >/dev/null 2>&1 || true" EXIT
+  for ((attempt=0; attempt<100; attempt++)); do
+    [ ! -s "$timer_file" ] || break
+    /bin/sleep 0.01
+  done
+  [ -s "$timer_file" ]
+  timer_pid="$(cat "$timer_file")"
+  kill -TERM "$LEASE_KEEPER_PID"
+  wait "$LEASE_KEEPER_PID"
+  ! kill -0 "$timer_pid" >/dev/null 2>&1
+' _ "$ROOT" "$keeper_probe_dir" 2>&1)" || keeper_probe_rc=$?
+[ "$keeper_probe_rc" = 0 ] || fail "keeper left its timer/capture pipe open: $keeper_probe_rc $keeper_probe_output"
+
 [ "$E2E_YARD" = test-yard ] || fail "agent runner default yard is not test-yard"
 [ "$STATE_ROOT" = "$TMP/client/yards/test-yard" ] \
   || fail "default generated client state is not yard-scoped"
@@ -151,6 +212,14 @@ set -e
   && [ "$(cat "$cleanup_retry_state" 2>/dev/null || true)" = \
     $'255|/tmp/subyard-worktree.cleanup-retry\n0|\nattempts=2' ] \
   || fail "guest staging failure aborts caller-owned cleanup or loses its staged path"
+assert_phase_markers "$(cat "$TMP/unreachable-staging.log")" \
+  $'transport:start:0:2\ntransport:end:2:2'
+assert_phase_markers "$(cat "$TMP/late-staging.log")" \
+  $'transport:start:0:2\ntransport:end:2:2\nguest-cleanup:start:0:2\nguest-cleanup:end:0:2'
+assert_phase_markers "$(cat "$TMP/command-transfer.log")" \
+  $'transport:start:0:2\ntransport:end:2:2\nguest-cleanup:start:0:2\nguest-cleanup:end:0:2'
+assert_phase_markers "$(cat "$TMP/cleanup-retry.log")" \
+  $'guest-cleanup:start:0:2\nguest-cleanup:end:255:2\nguest-cleanup:start:0:2\nguest-cleanup:end:0:2'
 
 p0_cleanup_function_source="$(
   for function_name in run_source_vm clean_source_host armed_fixture_vm \
@@ -2334,7 +2403,7 @@ case "$command" in
       late-grant) sleep 2; printf '%s\n' "$grant" ;;
       outcome-unknown) exit 255 ;;
       wrong-grant) printf '%s\n' "$wrong_grant" ;;
-      android-success) printf '%s\n' "$grant" ;;
+      android-success|phase-*) printf '%s\n' "$grant" ;;
       capacity) printf '%s\n' '{"schema_version":1,"status":"error","code":"capacity","reason":"memory","message":"insufficient memory"}' ;;
       wait-success) [ "$count" -eq 1 ] && printf '%s\n' "$busy" || printf '%s\n' "$grant" ;;
       *) printf '%s\n' "$busy" ;;
@@ -2342,9 +2411,30 @@ case "$command" in
     ;;
   release\ *)
     printf '%s\n' "$command" >> "$FAKE_FACADE_LOG"
+    [ "$FAKE_SCENARIO" != phase-release-failure ] || exit 23
     printf '%s\n' '{"schema_version":1,"status":"ok","message":"released"}'
     ;;
-  *) printf 'other %s\n' "$command" >> "$FAKE_FACADE_LOG"; exit 0 ;;
+  *)
+    printf 'other %s\n' "$command" >> "$FAKE_FACADE_LOG"
+    case "$FAKE_SCENARIO" in
+      phase-direct-failure) exit 23 ;;
+      phase-interrupt) kill -TERM "$PPID"; exit 0 ;;
+      phase-*)
+        case "$command" in
+          mktemp\ *) printf '/tmp/subyard-worktree.phase-fixture\n' ;;
+          dd\ *)
+            cat >/dev/null
+            [ "$FAKE_SCENARIO" != phase-transfer-failure ] || exit 23
+            ;;
+          sha256sum\ *) printf '%s  bundle\n' "$FAKE_BUNDLE_HASH" ;;
+          /tmp/subyard-worktree.*/run.sh)
+            [ "$FAKE_SCENARIO" != phase-guest-failure ] || exit 23
+            ;;
+        esac
+        ;;
+    esac
+    exit 0
+    ;;
 esac
 EOF
   chmod +x "$RUNNER_FIXTURE/bin/ssh"
@@ -2360,6 +2450,7 @@ run_runner_fixture() {
     FAKE_FACADE_LOG="$RUNNER_FIXTURE/facade.log" \
     FAKE_ACQUIRE_COUNT="$RUNNER_FIXTURE/acquire-count" \
     FAKE_SCENARIO="$scenario" \
+    FAKE_BUNDLE_HASH="$candidate_hash" \
     "$RUNNER_UNDER_TEST" "$@"
 }
 
@@ -2405,6 +2496,15 @@ for runner_mode in \
     && grep -Fq 'an exact --slot is required' <<<"$missing_slot_output" \
     && [ ! -s "$RUNNER_FIXTURE/facade.log" ] \
     || fail "runner accepted a slotless lease mode ($runner_mode): $missing_slot_output"
+  assert_phase_markers "$missing_slot_output" ''
+  new_runner_fixture "blocked-${runner_mode%% *}"
+  set +e
+  blocked_mode_output="$(run_runner_fixture busy --slot 2 $runner_mode 2>&1)"
+  blocked_mode_rc=$?
+  set -e
+  [ "$blocked_mode_rc" = 2 ] || fail "telemetry changed blocked lease mode ($runner_mode) exit"
+  assert_phase_markers "$blocked_mode_output" \
+    $'allocation:start:0:-\nallocation:end:2:-\ncleanup/release:start:0:-\ncleanup/release:end:0:-'
 done
 
 # Informational modes remain slotless and status never issues an acquire request.
@@ -2443,8 +2543,11 @@ for selector_args in '--vm 2' '--vm both' '--ssh 2' '--verify-boundary'; do
     || fail "android selector validation acquired a lease: $android_output"
 done
 new_runner_fixture android-success
-run_runner_fixture android-success --type android-test --slot 2 --ssh 1 -- true >/dev/null 2>&1 \
+run_runner_fixture android-success --type android-test --slot 2 --ssh 1 -- true >"$TMP/android-success.log" 2>&1 \
   || fail 'single-VM Android grant failed'
+android_success_output="$(cat "$TMP/android-success.log")"
+assert_phase_markers "$android_success_output" \
+  $'allocation:start:0:-\nallocation:end:0:-\nguest:start:0:1\nguest:end:0:1\ncleanup/release:start:0:-\ncleanup/release:end:0:-'
 grep -q '^acquire-v3 android-test ' "$RUNNER_FIXTURE/facade.log" \
   || fail 'Android request lost its environment type'
 new_runner_fixture capacity
@@ -2455,6 +2558,8 @@ set -e
 [ "$capacity_rc" = 4 ] && grep -Fq 'retryable capacity refusal' <<<"$capacity_output" \
   && [ "$(grep -c '^acquire' "$RUNNER_FIXTURE/facade.log")" = 1 ] \
   || fail "capacity refusal was not typed and fail-fast: $capacity_output"
+assert_phase_markers "$capacity_output" \
+  $'allocation:start:0:-\nallocation:end:4:-\ncleanup/release:start:0:-\ncleanup/release:end:0:-'
 
 new_runner_fixture exact-busy
 set +e
@@ -2468,6 +2573,8 @@ set -e
   && [ "$(grep -c '^acquire' "$RUNNER_FIXTURE/facade.log")" = 1 ] \
   && grep -Eq '^acquire.* slot-002$' "$RUNNER_FIXTURE/facade.log" \
   || fail "exact busy response was not immediate, redacted, and slot-pinned: $busy_output"
+assert_phase_markers "$busy_output" \
+  $'allocation:start:0:-\nallocation:end:2:-\ncleanup/release:start:0:-\ncleanup/release:end:0:-'
 
 new_runner_fixture exact-invalid
 set +e
@@ -2569,6 +2676,51 @@ set -e
   && [ "$(grep -c '^acquire' "$RUNNER_FIXTURE/facade.log")" = 1 ] \
   && [ "$(grep -c '^release' "$RUNNER_FIXTURE/facade.log")" = 1 ] \
   || fail "late exact-slot grant was accepted or not released: $late_grant_output"
+
+# The controller records only fixed phase fields, including terminal failures and interruption.
+for phase_scenario in success guest-failure transfer-failure direct-failure release-failure interrupt; do
+  new_runner_fixture "phase-$phase_scenario"
+  phase_args=(--vm 1 -- sh -c 'printf command-secret')
+  case "$phase_scenario" in
+    direct-failure|release-failure) phase_args=(--ssh 1 -- sh -c 'printf command-secret') ;;
+    interrupt) phase_args=(--ssh 1) ;;
+  esac
+  set +e
+  SUBYARD_E2E_CANDIDATE_BUNDLE="$candidate_bundle" \
+    SUBYARD_E2E_CANDIDATE_SHA256="$candidate_hash" \
+    run_runner_fixture "phase-$phase_scenario" --slot 2 "${phase_args[@]}" >"$TMP/phase-$phase_scenario.log" 2>&1
+  phase_rc=$?
+  set -e
+  phase_output="$(cat "$TMP/phase-$phase_scenario.log")"
+  phase_expected=$'allocation:start:0:-\nallocation:end:0:-'
+  case "$phase_scenario" in
+    success|guest-failure)
+      guest_rc=0; expected_rc=0
+      if [ "$phase_scenario" = guest-failure ]; then guest_rc=23; expected_rc=1; fi
+      phase_expected+=$'\npacking:start:0:-\npacking:end:0:-\ntransport:start:0:1\ntransport:end:0:1\nguest:start:0:1'
+      phase_expected+=$'\n'"guest:end:$guest_rc:1"
+      phase_expected+=$'\nguest-cleanup:start:0:1\nguest-cleanup:end:0:1\ncleanup/release:start:0:-\ncleanup/release:end:0:-'
+      ;;
+    transfer-failure)
+      expected_rc=1
+      phase_expected+=$'\npacking:start:0:-\npacking:end:0:-\ntransport:start:0:1\ntransport:end:2:1\nguest-cleanup:start:0:1\nguest-cleanup:end:0:1\ncleanup/release:start:0:-\ncleanup/release:end:0:-'
+      ;;
+    direct-failure)
+      expected_rc=23
+      phase_expected+=$'\nguest:start:0:1\nguest:end:23:1\ncleanup/release:start:0:-\ncleanup/release:end:0:-'
+      ;;
+    release-failure)
+      expected_rc=3
+      phase_expected+=$'\nguest:start:0:1\nguest:end:0:1\ncleanup/release:start:0:-\ncleanup/release:end:3:-'
+      ;;
+    interrupt)
+      expected_rc=0 # Preserve the runner's existing signal-trap exit status.
+      phase_expected+=$'\nguest:start:0:1\ncleanup/release:start:0:-\ncleanup/release:end:0:-'
+      ;;
+  esac
+  [ "$phase_rc" = "$expected_rc" ] || fail "phase telemetry changed $phase_scenario exit: $phase_rc"
+  assert_phase_markers "$phase_output" "$phase_expected"
+done
 
 # Model direct guest SSH and cleanup locally.
 guest() {

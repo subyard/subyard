@@ -59,12 +59,20 @@ make a shipped profile optional to release verification.
 ### One release candidate
 
 The same profile inventory is used by local acceptance and branch CI preflight.
-Create a frozen public source snapshot and one installable runtime, then run its pending checks:
+Check prerequisites before packaging or acquiring a VM, then freeze the final candidate:
 
 ```sh
+python3 dev/release-acceptance.py preflight
 python3 dev/release-acceptance.py prepare --version 0.14.1 --output .build/release-acceptance
 python3 dev/release-acceptance.py run --output .build/release-acceptance --slots 1 2 3
 ```
+
+Preflight reads the worktree or `--output` frozen candidate. It never authenticates or allocates;
+`--broker-status FILE` accepts an already-collected public status, and `--external-readiness FILE`
+accepts obligation IDs mapped to `available`, `unavailable` or `unknown`. Readiness declarations
+are planning inputs, not passing evidence. Missing telemetry leaves capacity unknown; native
+broker admission remains authoritative. Use `run --first CHECK` to prioritize the original
+regression after required local gates. Explicit `--exclude CHECK` leaves the required gate incomplete.
 
 Select available slots using `dev/agent-e2e.sh --status`; each slot runs one controller at a time.
 Source fingerprints use Git executable-bit semantics; snapshots normalize public file modes explicitly,
@@ -81,9 +89,28 @@ attribution while executing controllers and guest payloads from the frozen candi
 
 A repeated `run` executes only checks without a passing result. Use `--only profile:NAME` or
 `--only p0-release-smoke` for a remaining independent check; `--rerun` also repeats passed checks.
+Profiles may declare independent checks in `tests/e2e/acceptance-lanes.json` with schema version 1
+and ordered `lanes` entries containing `id` and runner `arguments`. The collector requires every
+lane to pass and accepts `--only profile:NAME/ID` for one lane. Available approved slots take the
+next queued check after their controller exits; a failed or blocked worker stops its queue.
 A physical retry always allocates fresh VMs. It never resumes a fixture across leases. Source or
 artifact changes reject reuse; prepare a new candidate in a new directory. Logs are retained per
-attempt and include the controllers' source and environment evidence.
+attempt and include the controllers' source and environment evidence. The run checks its platform
+and Go toolchain against preparation; receipts retain measured execution and available VM base identities.
+
+`receipt.json` records terminal results, including `blocked` capacity refusal and `interrupted`
+execution. `events.jsonl` retains starts, results, minute heartbeats and bounded controller phases;
+phase durations use the controller clock. An unfinished phase has no successful end marker.
+Use `supersede --output DIR` to retire an idle candidate while preserving its original evidence.
+Only one mutating collector may use an output directory at a time.
+
+Explicit `import --output NEW --from OLD --check CHECK` copies passing command-bound evidence
+between bound candidates with matching source and release assets, retaining inherited provenance.
+Only provenance generation timestamps may differ; artifact identities and original metadata hashes remain bound.
+Local evidence also requires its recorded execution environment to match.
+`--allow-other-profile-tests` permits a profile check to survive changes confined to other shipped
+profiles' test directories. Its runtime, assets, inventory, own profile and shared inputs must
+remain identical. This exception never applies to local gates or continuous release smoke.
 
 Profile-owned `tests/e2e/external-obligations.json` declares checks requiring an authorized external
 application/account. The receipt distinguishes these from reproducible VM results and initially
@@ -99,8 +126,10 @@ build checks.
 
 GitHub CI runs the full core gate, profile host-free checks, warning-level ShellCheck and
 `bash tests/real-host/adapter-contracts.sh` in one `verify` job on every branch push and pull request;
-tag pushes are reserved for the independent Release workflow. Native Paseo uses the same branch/PR
-trigger boundary, while Release builds its native artifacts independently.
+tag pushes are reserved for the independent Release workflow. Basic native ARM64 engine build,
+execution and Go tests run on GitHub's ARM runner in CI and gate Release publication. ARM requires
+no local agent access or workflow authorization. Native Paseo uses the same branch/PR trigger
+boundary, while Release builds its native artifacts independently.
 The separate nightly/manual Deep CI runs repeated Go race tests and one minute of parser fuzzing.
 Both workflows use standard Ubuntu runners, read-only repository permissions and no artifact uploads.
 Veranda, native Paseo and live P0 acceptance remain separate checks.

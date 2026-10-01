@@ -75,6 +75,9 @@ requirements when the task depends on them.
 
 ## Test progress across leases
 
+- For acceptance, check prerequisites and capacity first; ARM runs in GitHub CI only.
+  Repair with targeted checks, then freeze the final candidate. Run the original regression
+  before the remaining required gates; a blocked check is incomplete, never passed.
 - Keep passed, failed and pending segments in the current task plan with the tested source hash,
   environment/base fingerprint and controller evidence paths. Reassess affected results when those
   identities change; copy evidence needed beyond the runner's retention window.

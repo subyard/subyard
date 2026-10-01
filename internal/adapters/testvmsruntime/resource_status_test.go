@@ -29,6 +29,8 @@ func TestResourceStatusIsReadOnlyAndSeparatesPhysicalUsage(t *testing.T) {
 	}}
 	rt := Runtime{Config: cfg, Runner: runner, Now: func() time.Time { return now }, cacheProbe: func(context.Context) (CacheUsage, error) {
 		return CacheUsage{Driver: "zfs", ChargedBytes: 1234, Accounting: "conservative-shared-inclusive"}, nil
+	}, memoryProbe: func() (MemoryCapacity, error) {
+		return MemoryCapacity{Available: 16 << 30, scope: "synthetic-boundary"}, nil
 	}, usageProbe: func(_ context.Context, _ LeaseSlot, _ string) allocationUsage {
 		return allocationUsage{memory: 3 << 30, disk: 5 << 30, memoryKnown: true, diskKnown: true}
 	}}
@@ -69,9 +71,12 @@ func TestResourceStatusIsReadOnlyAndSeparatesPhysicalUsage(t *testing.T) {
 		value.Slots[0].ConfirmedAnonMemory != 3<<30 || value.Slots[0].MemoryEvidence != "qemu_cgroup_anon_shmem" {
 		t.Fatalf("measured working usage not separated from commitments: %+v", value)
 	}
-	rt.usageProbe = func(_ context.Context, _ LeaseSlot, _ string) allocationUsage { return allocationUsage{} }
+	rt.usageProbe = func(_ context.Context, _ LeaseSlot, _ string) allocationUsage {
+		return allocationUsage{memoryReason: memoryIncusQueryDeadline}
+	}
 	unknown := rt.ResourceStatus(context.Background(), LeasePool{Slots: []LeaseSlot{{SlotID: "slot-001", State: SlotHeld, Environment: &spec, Reserved: true}}})
-	if unknown.WorkingDiskEvidence != "unknown" || len(unknown.Slots) != 1 || unknown.Slots[0].RemainingDisk != unknown.VirtualDiskCapacity || unknown.Slots[0].DiskEvidence != "unknown" {
+	if unknown.WorkingDiskEvidence != "unknown" || len(unknown.Slots) != 1 || unknown.Slots[0].RemainingDisk != unknown.VirtualDiskCapacity || unknown.Slots[0].DiskEvidence != "unknown" || unknown.Slots[0].MemoryEvidenceReason != "incus_query_deadline" ||
+		unknown.Slots[0].ConfirmedAnonMemory != 0 || unknown.Slots[0].RemainingMemory != unknown.ReservedMemory {
 		t.Fatalf("unknown usage received unsafe credit: %+v", unknown)
 	}
 	if value.OuterHostEvidence != "unavailable: allocation boundary" || !value.Bases[0].Current || value.Bases[0].AgeSeconds != 3600 {
@@ -81,6 +86,22 @@ func TestResourceStatusIsReadOnlyAndSeparatesPhysicalUsage(t *testing.T) {
 		t.Fatal("unusable image concealed or selected as current")
 	}
 	body, _ := json.Marshal(value)
+	if bytes.Contains(body, []byte("memory_evidence_reason")) {
+		t.Fatal("known memory evidence included a failure reason")
+	}
+	unknownBody, _ := json.Marshal(unknown)
+	if !bytes.Contains(unknownBody, []byte(`"memory_evidence_reason":"incus_query_deadline"`)) {
+		t.Fatal("unknown memory evidence omitted its bounded reason")
+	}
+	rt.usageProbe = func(_ context.Context, _ LeaseSlot, _ string) allocationUsage {
+		return allocationUsage{memory: 1024, memoryReason: memoryProcessesNotIsolated}
+	}
+	partial := rt.ResourceStatus(context.Background(), LeasePool{Slots: []LeaseSlot{{SlotID: "slot-001", State: SlotHeld, Environment: &spec, Reserved: true}}})
+	if partial.Slots[0].MemoryEvidence != "partial_qemu_cgroup_anon_shmem" ||
+		partial.Slots[0].MemoryEvidenceReason != "cgroup_processes_not_isolated" ||
+		partial.ConfirmedAnonMemory != 1024 || partial.Slots[0].RemainingMemory != partial.ReservedMemory-1024 {
+		t.Fatalf("partial memory semantics changed: %+v", partial.Slots[0])
+	}
 	for _, secret := range []string{"secret-lease", "private-builder-path", "private/path", registry.Owner} {
 		if bytes.Contains(body, []byte(secret)) {
 			t.Fatalf("status leaked %s", secret)
