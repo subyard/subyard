@@ -11,6 +11,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/adapters/hostruntime"
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/rpc"
 	"github.com/Subyard/Subyard/internal/testkit"
@@ -95,7 +96,7 @@ SHUTDOWN=down
 }
 
 func TestProvisionEndpointRPCConsentAndStaleChecks(t *testing.T) {
-	for _, scenario := range []string{"apply", "decline", "provision failed", "address changed", "config changed", "ingress appeared", "source appeared"} {
+	for _, scenario := range []string{"apply", "registered source", "decline", "provision failed", "address changed", "config changed", "ingress appeared", "unmigrated source appeared"} {
 		t.Run(scenario, func(t *testing.T) {
 			program, loaded, path, runner := provisionEndpointFixture(t)
 			program.options.InitPlatform = convergedProvisionInit(t, program.options.RepositoryRoot)
@@ -144,15 +145,16 @@ func TestProvisionEndpointRPCConsentAndStaleChecks(t *testing.T) {
 				incus := program.options.Incus.(*testkit.Incus)
 				instance := incus.Instances[loaded.Context.IncusProject+"/"+loaded.Context.YardInstanceName]
 				instance.Config["user.subyard.resource.sample-relay"] = "foreign"
-			case "source appeared":
-				if err := os.MkdirAll(filepath.Join(loaded.Context.Paths.ConfigHome, ".sync"), 0o700); err != nil {
+			case "registered source":
+				if err := configsync.RegisterSource(loaded.Context.Paths.ConfigHome, testkit.TempDir(t)); err != nil {
 					t.Fatal(err)
 				}
-				writeCLIFile(t, filepath.Join(loaded.Context.Paths.ConfigHome, config.SourceRecordRelativePath), "{}\n", 0o600)
+			case "unmigrated source appeared":
+				writeUnmigratedSettingsManifest(t, loaded.Context.Paths.ConfigHome)
 			}
 			expected, _ := os.ReadFile(path)
 			_, err := handler.Handle(context.Background(), rpc.Call{ID: "execute", OperationID: "endpoint", Method: "operation.execute", Params: json.RawMessage(`{"confirmed":true}`)}, emit)
-			if scenario == "apply" {
+			if scenario == "apply" || scenario == "registered source" {
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -195,5 +197,46 @@ func TestProvisionEndpointAmbiguousAndUnselectedRemainUnchanged(t *testing.T) {
 		if (len(notes) == 1) != (profiles[0] == "sample") {
 			t.Fatalf("notes=%v", notes)
 		}
+	}
+}
+
+func TestProvisionEndpointCreatesBoundedGitOnlyYardOverride(t *testing.T) {
+	program, loaded, path, _ := provisionEndpointFixture(t)
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The endpoint's owner-local port is intentionally outside Git settings.
+	content = []byte(strings.ReplaceAll(string(content), "RESOURCE_RELAY_PORT=42000\n", ""))
+	program.baseEnv["RESOURCE_RELAY_PORT"] = "42000"
+	gitPath := filepath.Join(loaded.Context.Paths.ConfigHome, config.GitSettingsRelativePath, "yards/vpn/config.env")
+	if err := os.MkdirAll(filepath.Dir(gitPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, gitPath, string(content), 0o600)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := configsync.RegisterSource(loaded.Context.Paths.ConfigHome, testkit.TempDir(t)); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = program.loadContext("vpn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, _, err := program.prepareProvisionEndpoint(loaded, []string{"sample"}, program.provisionEndpointAddresses)
+	if err != nil || plan == nil {
+		t.Fatalf("endpoint plan=%v, %v", plan, err)
+	}
+	if err := plan.apply(context.Background(), program); err != nil {
+		t.Fatal(err)
+	}
+	local, err := os.ReadFile(path)
+	if err != nil || string(local) != "RESOURCE_RELAY_INTERFACE='eth0'\nRESOURCE_RELAY_IPV4='8.8.8.8'\n" {
+		t.Fatalf("local endpoint adopted unrelated settings: %q, %v", local, err)
+	}
+	cached, err := os.ReadFile(gitPath)
+	if err != nil || string(cached) != string(content) {
+		t.Fatalf("Git fallback changed: %q, %v", cached, err)
 	}
 }

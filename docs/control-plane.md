@@ -759,8 +759,8 @@ IPv4/interface settings from one unambiguous active public IPv4. Explicit values
 ambiguous or non-public-only hosts receive a manual-configuration diagnostic. Discovery is local
 to the owner, is included in the provisioning assessment, and writes both settings atomically
 after successful guest provisioning. It rechecks the address, configuration and absence of ingress
-before writing. It never enables the service or publishes a route. Source-managed settings must
-be authored through their registered source.
+before writing. It never enables the service or publishes a route. These local settings override
+Git fallback settings; source registration does not prohibit the local write.
 
 The handler prepares the concrete endpoint and runtime effects without mutation. After one shared
 confirmation, the engine serializes the operation with yard configuration changes, rechecks the

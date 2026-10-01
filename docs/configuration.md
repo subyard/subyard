@@ -28,7 +28,8 @@ configuration:
 
 | Path | Role |
 |---|---|
-| `overrides/shared/config.env` | Explicitly shareable scalar settings |
+| `overrides/shared/config.env` | Local explicitly shareable scalar settings |
+| `.sync/settings/` | Offline Git fallback settings and file assets, managed by sync |
 | `config.env` | Host-wide scalar settings |
 | `overrides/shared/` | Explicitly shareable non-secret file settings |
 | `overrides/host/` | File settings specific to this owner host |
@@ -69,11 +70,9 @@ YARD_TEMPLATE=test-vms
 Scalar precedence is:
 
 ```text
-shipped defaults
-  -> explicitly shareable scalar settings
-  -> host-wide scalar settings
-  -> named-yard derivations and selected shipped profile
-  -> named-yard scalar settings
+shipped defaults, named-yard derivations and selected shipped profile
+  -> Git shared -> Git host -> Git yard settings
+  -> local shared -> local host -> local yard settings
   -> current command environment
 ```
 
@@ -89,7 +88,9 @@ is the authoritative explanation of the actual chain, including derived values. 
 
 Known file settings, such as coding-agent configuration and rules, start with a shipped file and may
 be replaced by the matching file under `overrides/shared`, `overrides/host`, or a yard's
-`overrides` directory (including `yards/default/overrides`). Their precedence is shipped, shared, host, yard, then a command override.
+`overrides` directory (including `yards/default/overrides`). Git-derived files are cached under
+`.sync/settings/` using the same relative paths. Their precedence is shipped, Git shared/host/yard,
+local shared/host/yard, then a command override. A local shared file therefore overrides a Git yard file.
 
 These directories currently override known file settings only. They are not generic scalar
 configuration directories.
@@ -164,9 +165,9 @@ remain effective. It only canonicalizes an explicit local legacy `AGENTS` assign
 registered configuration sources are consumed without a local selection write.
 Subyard does not infer intent from installed binaries or change other yards during
 adoption. The default yard uses the same scalar and file configuration layout as
-named yards. An explicit empty selection stays empty. For source-managed
-configuration, change the requested set in the registered source and sync it before
-running init again.
+named yards. An explicit empty selection stays empty. A local selection overrides the Git fallback;
+use `config set CODING_TOOL_INTEGRATIONS "<requested tools>" --scope yard --git` to save the
+selection in the registered source and immediately commit and push it.
 
 Enable and disable require an existing, running yard with its core substrate ready.
 A stopped or missing yard fails before confirmation or configuration changes. The
@@ -236,11 +237,10 @@ public-safe `message`. Apply receives the observed fingerprint, must recheck it 
 and may return the same observation shape; Subyard observes again afterward to verify convergence. Hooks must not include
 credentials, configuration contents or other secrets in fingerprints, steps, errors or output.
 
-When a configuration source is registered, enable/disable rejects local selection
-writes. Edit the selected yard's full requested set in that source, run `yard config
-sync`, then `yard init` to reconcile. `config sync --apply` refreshes file consumers and
-does not replace the integration lifecycle. The ordinary `config set` followed by
-explicit `config sync push` workflow remains available.
+Integration enable/disable saves the requested selection locally, including when a Git source is
+registered. `config sync --apply` refreshes file consumers and does not replace the integration
+lifecycle. To publish the selection, use `config set CODING_TOOL_INTEGRATIONS "<requested tools>"
+--scope yard --git`; a pre-existing local selection remains effective until it is unset.
 
 The shipped `test-vms` role has `ALLOWS_CODING_TOOLS=false`. Its inherited tools are
 suppressed, explicit nonempty selections fail, and agent-only utilities such as
@@ -346,18 +346,27 @@ Repair uses persisted configuration; differing command overrides are rejected be
 An unfinished or invalid release transition still requires `yard update`; config apply does not
 perform unrelated activation work. When several yards drift, use `--all-local` to cover them all.
 
-Use the typed persistent writers before publishing a change:
+Use the typed persistent writers to save locally or in Git:
 
 ```sh
-yard config set <SETTING> <VALUE> --scope shared|host|yard
-yard config unset <SETTING> --scope shared|host|yard
-yard config import <FILE_SETTING> <path> --scope shared|host|yard
-yard config edit <FILE_SETTING> --scope shared|host|yard
+yard config set <SETTING> <VALUE> --scope shared|host|yard [--local | --git]
+yard config unset <SETTING> --scope shared|host|yard [--local | --git]
+yard config import <FILE_SETTING> <path> --scope shared|host|yard [--local | --git]
+yard config edit <FILE_SETTING> --scope shared|host|yard [--local | --git]
 ```
 
 Select a non-default yard with `-Y <yard>` before using `--scope yard`. Each writer validates the
 catalog type and scope, rejects secret-looking content and asks before changing the persistent
 configuration. `config edit` requires `VISUAL` or `EDITOR` to name one executable.
+
+The default is local storage; `--local` makes that choice explicit and needs no Git source.
+`--git` saves only the selected assignment or file in the registered source, creates one commit
+with an automatic message that omits the value, and pushes the exact upstream immediately. It
+does not publish unrelated local overrides. Local values still take precedence: an explicit empty
+assignment is a value, while `config unset` removes the local assignment and reveals the Git
+fallback. `config unset --git` removes the Git assignment and leaves any local value intact.
+File settings have no `unset` command; removing a local file override requires an explicit file
+removal. Secrets and runtime state never enter Git settings.
 
 Register a remote owner once with `yard host add <user@host-or-ssh-alias>`. The confirmation includes
 the concrete SSH server-key SHA256 fingerprint, authoritative HostID and discovered yards. Subsequent
@@ -416,17 +425,19 @@ Keep private desired settings in a separate clean Git checkout. Do not turn the 
 consumers and support tools. `.gitignore`, a symlink farm or recursive `rsync --delete` is not an
 ownership boundary.
 
-Git is optional. Without a registered sync source, persistent settings are authored locally with
-`config set`, `config import` or `config edit`, and `yard provision <profile>` can add a profile to
-the selected yard. Connecting a source does not make every local path sync-managed: the sync
-manifest records the imported files, and unmanaged local paths remain local.
+Git is optional. `config set`, `config import` and `config edit` save locally by default, and
+`yard provision <profile>` can add a profile locally whether or not a source is registered.
+Use `--git` on a typed writer to save only that setting in Git with immediate commit and push.
 
-Sync owns whole files, including scalar `config.env` files, rather than individual assignments.
-An imported file occupies its ordinary shared, host or yard scope; Git is not an additional
-precedence layer. A local `config set` can edit that file, but a later confirmed import restores
-its contents from the source. Use `config sync push` to publish intended persistent edits through
-the versioned workflow. There is no separate persistent local scalar override above an imported
-file in the same scope. Local settings in other scopes still follow the precedence described above.
+Sync stores Git-derived scalar and file settings under `$SUBYARD_CONFIG_HOME/.sync/settings/`,
+using their normal relative paths. The cache provides offline fallback; it never replaces persistent
+local overrides. Local shared/host/yard settings take precedence over all Git settings. Absence
+means fallback, while an explicit empty local assignment remains effective.
+
+The next sync migrates an older whole-file import: files matching the recorded digest move to the
+Git cache, and changed files remain local to preserve operator edits. Before changing a legacy
+managed local file, complete this migration with `yard config sync`. Runtime rollback verifies
+that the retained release supports the installed Git cache before planning or executing the rollback.
 
 Release installation and migration never ask for a Git URL or require network access. Connect the
 private repository explicitly once on each physical owner host:
@@ -480,8 +491,8 @@ hosts/                          # optional host overlays
 `shared/` and the selected `hosts/<HostID>/` overlay are independent and optional. A source with
 only the manifest is a valid empty desired state. A selected host directory may contain only
 `overrides/` or `yards/`; its `config.env` is optional. An existing
-`hosts/<HostID>/yards/<yard>/` entry still requires `config.env`, because the directory declares a
-yard that needs an unambiguous scalar definition. Scalar assignments must be syncable in their
+`hosts/<HostID>/yards/<yard>/` entry for a non-default yard still requires `config.env`, because
+the directory declares a yard that needs an unambiguous scalar definition. Scalar assignments must be syncable in their
 exact shared, host or yard scope. Versioned file settings are regular, non-executable files at
 catalog-known paths below `overrides/agents`; path assignments in `config.env` are rejected. The
 source manifest schema is
@@ -501,7 +512,7 @@ network access:
 ```sh
 yard config sync status
 yard config sync pull --apply
-yard config sync push -m "Update host configuration" --apply
+yard config sync push --apply
 ```
 
 `sync status` fetches by default and reports registration, sanitized remote, branch/upstream,
@@ -510,11 +521,10 @@ generation and recovery state. `--offline` uses cached refs. A fetch/auth failur
 available local diagnostics and exits non-zero. Automation is manual.
 
 `sync pull` permits only a clean fast-forward of the exact upstream, validates the candidate before
-one confirmation, then imports it transactionally. `sync push` exports only explicit
-catalog-known, syncable, non-secret persistent settings, creates one commit from `-m` using the
-operator's Git identity, validates/imports it locally and pushes only `HEAD` to the exact upstream
-without force. It never reads configuration back from a running container and never exports keys,
-secrets, projects, generated state or arbitrary runtime files. Dirty, conflicted, detached,
+one confirmation, then refreshes the Git cache transactionally. `sync push` transports already
+committed checkout changes to the exact upstream without force; it never exports local overrides
+or creates a commit. Its optional `-m`/`--message` argument remains accepted for compatibility.
+Use typed writers with `--git` to create and push a setting change. Dirty, conflicted, detached,
 upstream-less or diverged checkouts fail closed; Subyard does not stash, merge, rebase, reset or
 resolve conflicts.
 
@@ -524,14 +534,12 @@ needed. A changing sync prints the source commit and exact redacted managed-path
 same top-level confirmation. It does not run `yard init`, start, stop, teardown, project operations
 or remote fan-out. Remaining follow-up commands are printed by application mode.
 
-For bare checkout-to-live import, an existing unmanaged target requires a reviewed first import with
-`--adopt`. `sync push` instead adopts only its own exact validated persistent export. Later local
-edits are reported as managed drift and restored only through the confirmed exact plan. A path
-removed from Git is deleted only when the local manifest owned its previous exact digest. Removing a
+An existing unmanaged Git-cache target requires a reviewed first import with `--adopt`. Later cache
+drift is restored only through the confirmed exact plan. A path removed from Git is deleted only
+when the manifest owned its previous exact digest; local overrides remain untouched. Removing a
 yard definition fails while its Incus yard or project state still exists; sync never becomes
-teardown. Removing the selected host subtree means an intentionally empty host overlay: the exact
-plan removes only its previously managed paths, subject to the same digest, drift and in-use guards.
-Unmanaged local paths are left alone.
+teardown. Removing the selected host subtree removes only its previously managed cache paths,
+subject to the same digest, drift and in-use guards.
 
 The source must be an operator-owned Git worktree root with a clean selected subtree. Tracked,
 untracked, ignored, unmerged, symlinked, hard-linked, executable or group/world-writable inputs fail
@@ -558,77 +566,20 @@ the repository and there is no implicit all-host fan-out.
 
 ### Enabling a profile with a registered source
 
-When any configuration sync source is registered, `yard provision <profile>` refuses to add a new
-profile locally, even if the source does not manage that yard's settings file. It can still
-reconcile and install an already selected profile. If it reports `configuration is source-managed`,
-select the profile in the registered source before provisioning.
+`yard provision <profile>` adds a missing profile to the selected yard's local settings, preserving
+its existing effective selections, and provisions it under one confirmation. This works with or
+without a registered source. An already selected profile can also be provisioned directly.
 
-For Android in the default yard, run these read-only commands on the owner host:
+To save the selection in Git explicitly, inspect the current list and preserve all entries:
 
 ```sh
-yard -Y default config sync path
-yard -Y default config sync status --offline
 yard -Y default config show ENVIRONMENT_PROFILES
-```
-
-Use the reported checkout path and HostID to edit
-`hosts/<HostID>/yards/default/config.env` in that checkout. Create the directory and file if absent.
-Add `android` to one `ENVIRONMENT_PROFILES` assignment, preserving the effective profile names
-reported by `config show` and all other settings in the file. An explicit yard selection replaces
-the inherited list, so copying only the new profile would drop inherited profiles.
-
-Commit this source edit through the configuration repository's normal Git workflow. Sync requires
-clean, tracked managed paths; an uncommitted edit is rejected. Then import the checkout and provision:
-
-```sh
-yard -Y default config sync
+yard -Y default config set ENVIRONMENT_PROFILES "<current entries> android" --scope yard --git
 yard -Y default provision android
 ```
 
-If sync reports an existing unmanaged target, preserve its needed syncable yard settings in the
-source and commit them first. Review the exact adoption plan and run
-`yard -Y default config sync --adopt`, then provision after the import succeeds. Adoption replaces
-the whole local file and makes it source-managed.
-
-Bare `config sync` imports the registered checkout without fetching or pushing. `--apply` refreshes
-materialized file settings and is not required for this scalar profile selection. For a remote yard,
-the checkout path belongs to its owner host; edit and commit the source there.
-
-### Bootstrapping an existing host
-
-Before creating optional settings, classify current values with `yard config fields` and inspect
-their provenance with `yard config show`. Only fields marked `syncable: yes` may be copied:
-
-- portable fields that explicitly allow `shared` go to `shared/config.env`;
-- host-specific fields go to `hosts/<HostID>/config.env`;
-- named-yard fields go to `hosts/<HostID>/yards/<yard>/config.env`;
-- catalog-known agent config and rules files keep their relative path below the matching
-  `overrides/agents` directory;
-- secrets, keys, generated consumers, project state, host identity, desired power and support tools
-  stay local and are never copied.
-
-A minimal empty remote can be initialized without reading or copying the whole live root:
-
-```sh
-yard config sync connect \
-  git@github.com:you/subyard-config.git \
-  --host-id replace-with-stable-host-id \
-  --init
-```
-
-For an existing repository, connect it directly. To publish real persistent settings, change them
-through the typed writer and let `sync push` build the exact managed export:
-
-```sh
-yard config sync connect \
-  git@github.com:you/subyard-config.git \
-  --host-id replace-with-stable-host-id
-yard config set SSH_PORT 2222 --scope host
-yard config sync push -m "Set host SSH port"
-```
-
-Do not copy `~/.config/subyard` recursively. In particular, do not add ignored secret or runtime
-paths just to make the worktree appear clean: selected ignored and untracked source paths are
-rejected. After `connect`, the checkout path and saved local `host-id` are authoritative. Each
-additional owner host runs its own `sync connect`; a matching subtree does not need to exist in Git
-when that host uses only shared settings.
+The Git save commits and pushes immediately. An existing local `ENVIRONMENT_PROFILES` assignment
+still masks the Git value; remove it with `yard -Y default config unset ENVIRONMENT_PROFILES
+--scope yard` when you want to use the fallback. `--apply` refreshes materialized file settings and
+is not required for scalar profile selection. Remote writes and provisioning run on the selected
+owner host.

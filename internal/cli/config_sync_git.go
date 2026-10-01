@@ -503,7 +503,7 @@ func writeConfigSyncStatusNext(
 	case state.Relation == "behind":
 		fmt.Fprintf(output, "  next: %s config sync pull --apply\n", program)
 	case state.Relation == "ahead":
-		fmt.Fprintf(output, "  next: %s config sync push -m <message>\n", program)
+		fmt.Fprintf(output, "  next: %s config sync push\n", program)
 	case state.Relation == "diverged":
 		fmt.Fprintln(output,
 			"  next: reconcile the diverged branch manually; Subyard will not merge, rebase or force")

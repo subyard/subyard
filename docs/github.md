@@ -10,7 +10,8 @@ The `test-vms` backend does not receive the broker profile.
 
 For a fresh default yard, run `yard init` to converge the shipped selection. For an existing yard,
 edit its registered yard setting through the supported yard configuration path, preserving the
-current list, then run `yard init` (or the normal `yard config sync` workflow for a synced source).
+current list, then run `yard init`. The write is local by default; add `--git` to commit and push
+only that selection to a registered source. Local settings continue to override the Git fallback.
 For example, the yard-scoped writer documented in [configuration](configuration.md) is:
 
 ```sh

@@ -127,18 +127,18 @@ func (cli *CLI) runConfig(ctx context.Context, loaded config.Loaded, arguments [
 	}
 	if len(arguments) == 0 || commandHelpRequested(arguments) {
 		fmt.Fprintf(cli.options.Stdout,
-			"Usage: %s config fields [SETTING] | show [SETTING] | paths | set|unset|import|edit ... | status [--all-local] | apply [--all-local] [--yes] | sync <command>\n"+
+			"Usage: %s config fields [SETTING] | show [SETTING] | paths | set|unset|import|edit ... --scope <scope> [--local|--git] | status [--all-local] | apply [--all-local] [--yes] | sync <command>\n"+
 				"  fields  list the typed public settings contract (read-only)\n"+
 				"  show    explain effective Subyard settings and their sources (read-only)\n"+
 				"  paths   list configuration sources and storage roles (read-only)\n"+
-				"  set     write a typed persistent scalar setting\n"+
-				"  unset   remove a persistent scalar setting\n"+
-				"  import  replace a typed persistent file setting from a file\n"+
-				"  edit    edit a typed persistent file setting with VISUAL or EDITOR\n"+
+				"  set     save a typed scalar locally (default/--local) or commit/push it (--git)\n"+
+				"  unset   remove a local scalar override or a Git assignment (--git)\n"+
+				"  import  save a typed file locally or commit/push it (--git)\n"+
+				"  edit    edit a typed file with VISUAL/EDITOR; --git commits and pushes\n"+
 				"  repair-registration <yard> [--check] [--yes]  preserve a shadowed flat registration in recovery\n"+
 				"  status  check materialized file settings in running local yards (read-only)\n"+
 				"  apply   refresh materialized file settings in running local yards\n"+
-				"  sync    connect, inspect, pull, push or import versioned non-secret settings\n",
+				"  sync    connect, inspect, pull, push committed changes or cache Git settings\n",
 			cli.options.Program)
 		return 0
 	}
@@ -441,23 +441,24 @@ func (cli *CLI) writeConfigSyncHelp() {
 			"       %s config sync path\n"+
 			"       %s config sync status [--offline]\n"+
 			"       %s config sync pull [--apply] [--yes]\n"+
-			"       %s config sync push -m <message> [--apply] [--yes]\n\n"+
+			"       %s config sync push [--apply] [--yes]\n\n"+
 			"Versioned sync is manual; no background pull or push runs automatically.\n"+
 			"  connect  clone, register and import a private Git configuration source\n"+
 			"  path     print the registered owner-host checkout path\n"+
 			"  status   show registration, Git relation, conflicts and applied generation\n"+
 			"  pull     fetch, fast-forward and transactionally import remote settings\n"+
-			"  push     export persistent syncable settings, commit and push upstream\n"+
+			"  push     push committed checkout changes to the exact upstream\n"+
 			"  --apply  also refresh affected file settings in running local yards\n\n"+
 			"Examples:\n"+
 			"  %s config sync connect <git-url> --apply\n"+
 			"  %s config sync status\n"+
 			"  %s config sync pull --apply\n"+
-			"  %s config sync push -m \"Update host configuration\" --apply\n\n"+
-			"push uses the current operator account's configured Git author. It exports only\n"+
-			"explicit catalog-known, syncable, non-secret persistent settings. It never reads\n"+
-			"configuration back from running containers and never exports keys, secrets,\n"+
-			"project data, generated state or arbitrary runtime files.\n",
+			"  %s config sync push --apply\n\n"+
+			"Use config set/unset/import/edit --scope <scope> --git to save one setting\n"+
+			"with immediate commit and push. The default (or --local) saves locally.\n"+
+			"Sync refreshes the Git cache and preserves local overrides. Secrets, keys,\n"+
+			"project data and runtime state never enter Git settings. Legacy -m is\n"+
+			"accepted by sync push, which creates no commits.\n",
 		cli.options.Program, cli.options.Program, cli.options.Program,
 		cli.options.Program, cli.options.Program, cli.options.Program,
 		cli.options.Program, cli.options.Program, cli.options.Program,
@@ -741,7 +742,8 @@ func (cli *CLI) materializeConfigSyncPlan(
 }
 
 func configSyncPathYard(path string) (string, bool) {
-	parts := strings.Split(filepath.ToSlash(path), "/")
+	path = strings.TrimPrefix(filepath.ToSlash(path), config.GitSettingsRelativePath+"/")
+	parts := strings.Split(path, "/")
 	if len(parts) >= 3 && parts[0] == "yards" && domain.SafeName(parts[1]) {
 		return parts[1], true
 	}

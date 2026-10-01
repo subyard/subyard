@@ -6,11 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/config"
-	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/domain"
 )
 
@@ -50,16 +50,6 @@ func (cli *CLI) prepareInitIntegrationSelection(ctx context.Context, loaded conf
 	if selection.Provenance.Scope == "command" {
 		return config.Loaded{}, nil, errors.New("cannot adopt temporary CODING_TOOL_INTEGRATIONS or AGENTS command overrides; configure the selected yard's profile or persistent settings")
 	}
-	if _, registered, err := configsync.ReadSourceRecord(loaded.Context.Paths.ConfigHome); err != nil {
-		return config.Loaded{}, nil, err
-	} else if registered {
-		if bootstrap != nil {
-			return config.Loaded{}, nil, errors.New("yard definition is source-managed; define the selected yard in its source and sync before init")
-		}
-		// The loader already resolved the profile and source settings. Init consumes
-		// that intent without writing a local override of the registered source.
-		return loaded, nil, nil
-	}
 	if explicitCanonical {
 		return loaded, nil, nil
 	}
@@ -67,6 +57,13 @@ func (cli *CLI) prepareInitIntegrationSelection(ctx context.Context, loaded conf
 		// Inherited profile settings remain inherited, including on a fresh named
 		// yard. Only an explicit local legacy assignment needs canonicalization.
 		return loaded, nil, nil
+	}
+	gitRoot := filepath.Join(loaded.Context.Paths.ConfigHome, filepath.FromSlash(config.GitSettingsRelativePath))
+	if strings.HasPrefix(selection.Provenance.Path, gitRoot+string(filepath.Separator)) {
+		return loaded, nil, nil
+	}
+	if err := config.CheckLocalSettingsWritable(loaded.Context.Paths.ConfigHome); err != nil {
+		return config.Loaded{}, nil, err
 	}
 	desired := selection.Requested
 	if !selection.AllowsCodingTools {
@@ -112,10 +109,8 @@ func (selection *initIntegrationSelection) check(ctx context.Context, cli *CLI, 
 	if !sameConfigAuthoringSnapshot(current, selection.before) || current.Identity != selection.before.Identity {
 		return fmt.Errorf("%w: yard integration settings changed", domain.ErrPlanStale)
 	}
-	if _, registered, err := configsync.ReadSourceRecord(execution.loaded.Context.Paths.ConfigHome); err != nil {
+	if err := config.CheckLocalSettingsWritable(execution.loaded.Context.Paths.ConfigHome); err != nil {
 		return err
-	} else if registered {
-		return fmt.Errorf("%w: integration selection became source-managed", domain.ErrPlanStale)
 	}
 	options := config.LoadOptions{Catalog: &cli.catalog, RepositoryRoot: cli.options.RepositoryRoot, OperatorHome: execution.loaded.Context.Paths.OperatorHome, YardName: execution.loaded.Context.YardName, Environment: cli.baseEnv}
 	if execution.bootstrap != nil {

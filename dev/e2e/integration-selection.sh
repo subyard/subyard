@@ -4,11 +4,12 @@ set -Eeuo pipefail
 umask 022
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 KIND="${1:-container}"
-case "$KIND" in container|cold|vm|special|default|upgrade) ;; *) printf 'usage: %s [container|cold|vm|special|default|upgrade]\n' "$0" >&2; exit 2 ;; esac
+case "$KIND" in container|cold|vm|special|default|upgrade|local-first) ;; *) printf 'usage: %s [container|cold|vm|special|default|upgrade|local-first]\n' "$0" >&2; exit 2 ;; esac
 die() { printf 'integration-selection: %s\n' "$*" >&2; exit 1; }
 trap 'printf "integration-selection: failure at line %s (exit %s)\n" "$LINENO" "$?" >&2' ERR
 [ "${SUBYARD_E2E_VM:-}" = 1 ] || die 'run through dev/agent-e2e.sh on an allocated VM'
 for command in jq python3 sudo ss sg; do command -v "$command" >/dev/null || die "$command is required"; done
+if [ "$KIND" = local-first ]; then command -v git >/dev/null || die 'git is required'; fi
 sudo -n true || die 'passwordless sudo is required on the disposable VM'
 if [ "$KIND" = cold ]; then
   # Only a fresh allocated host with no Incus workloads may become a cold fixture.
@@ -122,7 +123,7 @@ if [ "$KIND" = default ]; then
   printf 'INCUS_PROJECT=%s\nYARD_INSTANCE_NAME=%s\n' "$PROJECT" "$INSTANCE" > "$SUBYARD_CONFIG_HOME/config.env"
   chmod 0600 "$SUBYARD_CONFIG_HOME/config.env"
   printf 'YARD_KIND=container\n' >> "$config"
-elif [ "$KIND" = upgrade ]; then
+elif [ "$KIND" = upgrade ] || [ "$KIND" = local-first ]; then
   printf 'YARD_KIND=container\n' >> "$config"
 elif [ "$KIND" = special ]; then
   printf 'YARD_TEMPLATE=test-vms\nE2E_VM_SLOT_COUNT=1\n' >> "$config"
@@ -208,6 +209,51 @@ fi
 if [ "$KIND" != special ]; then
   jq -e '.selection.present and (.selection.requested | length) == 0 and (.selection.effective | length) == 0 and .observed == "ready"' "$STATE/status.json" >/dev/null \
     || die 'fresh named yard did not preserve the inherited empty selection'
+fi
+if [ "$KIND" = local-first ]; then
+  # This source belongs only to the marked fixture; never register operator Git.
+  source="$STATE/settings-source"
+  checkout="$STATE/settings-checkout"
+  host_id="$(cat "$SUBYARD_CONFIG_HOME/host-id")"
+  source_yard="$source/hosts/$host_id/yards/$YARD_NAME/config.env"
+  cached="$SUBYARD_CONFIG_HOME/.sync/settings/yards/$YARD_NAME/config.env"
+  install -d -m 0700 "${source_yard%/*}"
+  printf '{"schemaVersion":1}\n' > "$source/subyard-config.json"
+  printf 'CODING_TOOL_INTEGRATIONS=\n' > "$source_yard"
+  chmod 0600 "$source/subyard-config.json" "$source_yard"
+  git -C "$source" init -q
+  git -C "$source" add -- subyard-config.json "hosts/$host_id/yards/$YARD_NAME/config.env"
+  git -C "$source" -c user.name='Subyard Test' -c user.email=test@invalid commit -qm 'Seed isolated integration settings'
+  yard config sync connect "$source" --checkout "$checkout" --yes
+  cmp "$source_yard" "$cached" || die 'connect did not cache Git yard settings'
+  yard config unset CODING_TOOL_INTEGRATIONS --scope host --yes
+  yard integration status --json | jq -e --arg path "$cached" \
+    '.selection.requested == [] and .selection.provenance.Path == $path and .observed == "ready"' >/dev/null \
+    || die 'initialized yard did not consume cached Git integration selection'
+  yard init --yes
+  if grep -q '^CODING_TOOL_INTEGRATIONS=' "$config"; then die 'init copied inherited Git selection locally'; fi
+  before="$(sha256sum "$cached" "$source_yard")"
+  yard integration enable claude --yes
+  yard integration status --json | jq -e --arg path "$config" \
+    '.selection.requested == ["claude"] and .selection.provenance.Path == $path and .observed == "ready"' >/dev/null \
+    || die 'registered source prevented local integration activation'
+  [ "$(sha256sum "$cached" "$source_yard")" = "$before" ] || die 'local activation edited Git settings'
+  local_before="$(sha256sum "$config")"
+  printf 'CODING_TOOL_INTEGRATIONS=codex\n' > "$source_yard"
+  git -C "$source" add -- "hosts/$host_id/yards/$YARD_NAME/config.env"
+  git -C "$source" -c user.name='Subyard Test' -c user.email=test@invalid commit -qm 'Change isolated fallback selection'
+  yard config sync pull --yes
+  cmp "$source_yard" "$cached" || die 'pull did not update the cached fallback'
+  yard config sync --yes
+  [ "$(sha256sum "$config")" = "$local_before" ] || die 'sync overwrote local integration selection'
+  yard integration status --json | jq -e '.selection.requested == ["claude"] and .observed == "ready"' >/dev/null \
+    || die 'refreshed Git fallback displaced the local integration selection'
+  yard integration disable claude --yes
+  yard integration status --json | jq -e --arg path "$config" \
+    '.selection.requested == [] and .selection.effective == [] and .selection.provenance.Path == $path and .observed == "ready"' >/dev/null \
+    || die 'explicit empty local selection failed to mask the Git fallback'
+  printf 'ok: initialized container uses cached Git settings; local activation and explicit empty survive sync\n'
+  exit 0
 fi
 if [ "$KIND" = container ]; then
   paseo_sentinel="/srv/agents/paseo/data/.cleanup-preservation-$token"

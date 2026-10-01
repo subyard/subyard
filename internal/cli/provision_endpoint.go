@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"os"
-	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -102,9 +100,6 @@ func (cli *CLI) prepareProvisionEndpointWithBootstrap(loaded config.Loaded, prof
 	if err != nil {
 		return nil, nil, err
 	}
-	if !plan.before.Exists && bootstrap == nil {
-		return nil, nil, errors.New("initialize the named yard before automatically configuring its owner endpoint")
-	}
 	plan.content = plan.before.Content
 	if bootstrap != nil {
 		plan.content = bootstrap.content
@@ -126,14 +121,7 @@ func (cli *CLI) prepareProvisionEndpointWithBootstrap(loaded config.Loaded, prof
 }
 
 func (plan *provisionEndpoint) checkSource() error {
-	_, err := os.Lstat(filepath.Join(plan.initial.Context.Paths.ConfigHome, config.SourceRecordRelativePath))
-	if err == nil {
-		return errors.New("configuration is source-managed; set the resource endpoint through the registered source")
-	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return nil
+	return config.CheckLocalSettingsWritable(plan.initial.Context.Paths.ConfigHome)
 }
 
 func (plan *provisionEndpoint) check(ctx context.Context, cli *CLI) error {
@@ -216,6 +204,9 @@ func (plan *provisionEndpoint) apply(ctx context.Context, cli *CLI) error {
 	defer unlock()
 	if err := plan.check(ctx, cli); err != nil {
 		return err
+	}
+	if !plan.before.Exists {
+		return config.CreatePersistentFile(plan.initial.Context.Paths.ConfigHome, plan.path, plan.content)
 	}
 	return config.CompareAndSwapPersistentFile(plan.initial.Context.Paths.ConfigHome, plan.path, plan.before, plan.content)
 }

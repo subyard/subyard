@@ -189,7 +189,7 @@ _yard() {
         filenames=true; local IFS=$'\n'
         COMPREPLY=( $(compgen -f -- "$cur") )
       else
-        COMPREPLY=( $(compgen -W "--scope --all-local --yes --help" -- "$cur") )
+        COMPREPLY=( $(compgen -W "--scope --local --git --all-local --yes --help" -- "$cur") )
       fi
       ;;
     clone)

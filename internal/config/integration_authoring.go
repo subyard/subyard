@@ -12,8 +12,8 @@ import (
 const SourceRecordRelativePath = ".sync/source.json"
 
 // YardIntegrationWrite is a bounded prepared edit of the canonical yard config.
-// Migration preserves the complete older registration before archiving a local
-// flat file. A private compatibility source is copied and remains untouched.
+// Migration preserves the complete older local registration before archiving a
+// flat file. Private compatibility sources are copied; Git settings stay fallback.
 type YardIntegrationWrite struct {
 	Path         string
 	Before       PersistentFileSnapshot
@@ -58,7 +58,12 @@ func PlanYardIntegrationWrite(loaded Loaded, requested []string) (*YardIntegrati
 			if !plan.SourceBefore.Exists {
 				return nil, ErrPersistentTargetStale
 			}
-			content = plan.SourceBefore.Content
+			// Git settings remain a fallback. A local selection must not adopt
+			// unrelated cached assignments as permanent local overrides.
+			gitRoot := filepath.Join(root, filepath.FromSlash(GitSettingsRelativePath))
+			if !strings.HasPrefix(plan.SourcePath, gitRoot+string(filepath.Separator)) {
+				content = plan.SourceBefore.Content
+			}
 		}
 		flat := filepath.Join(root, "yards", name+".env")
 		plan.FlatBefore, err = readOptionalIntegrationSnapshot(root, flat)
@@ -185,12 +190,5 @@ func readOptionalIntegrationSnapshot(root, path string) (PersistentFileSnapshot,
 }
 
 func (plan *YardIntegrationWrite) checkSourceAuthority() error {
-	source, err := readOptionalIntegrationSnapshot(plan.root, filepath.Join(plan.root, filepath.FromSlash(SourceRecordRelativePath)))
-	if err != nil {
-		return err
-	}
-	if source.Exists {
-		return errors.New("configuration is source-managed; integration selection must be changed through the registered source")
-	}
-	return nil
+	return CheckLocalSettingsWritable(plan.root)
 }

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -23,6 +24,15 @@ type profileInstallFixture struct {
 	installed bool
 	fail      bool
 	applies   int
+}
+
+func writeUnmigratedSettingsManifest(t *testing.T, configHome string) {
+	t.Helper()
+	path := filepath.Join(configHome, ".sync/manifest.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, path, `{"schemaVersion":1,"files":[{"path":"config.env"}]}`, 0o600)
 }
 
 func TestProvisionBootstrapPreservesGroupReexecContinuation(t *testing.T) {
@@ -78,7 +88,7 @@ func (f *profileInstallFixture) Run(_ context.Context, request domain.AdapterReq
 
 func TestProvisionActivatesProfile(t *testing.T) {
 	for _, yard := range []string{"default", "demo"} {
-		for _, scenario := range []string{"apply", "decline", "stale", "source appeared", "init failure", "hook failure", "no hook"} {
+		for _, scenario := range []string{"apply", "registered source", "decline", "stale", "unmigrated source appeared", "init failure", "hook failure", "no hook"} {
 			t.Run(yard+"/"+scenario, func(t *testing.T) {
 				root, environment, _ := nativeFixture(t)
 				writeProvisionProfile(t, root, "sample")
@@ -106,7 +116,10 @@ func TestProvisionActivatesProfile(t *testing.T) {
 					if string(content) != original || len(platform.applied) != 0 || runner.applies != 0 {
 						t.Fatal("mutated before consent")
 					}
-					if scenario == "source appeared" {
+					if scenario == "unmigrated source appeared" {
+						writeUnmigratedSettingsManifest(t, filepath.Join(root, "state"))
+					}
+					if scenario == "registered source" {
 						if err := configsync.RegisterSource(filepath.Join(root, "state"), filepath.Join(root, "checkout")); err != nil {
 							t.Fatal(err)
 						}
@@ -134,7 +147,7 @@ func TestProvisionActivatesProfile(t *testing.T) {
 				incus.Instances[instance.Project+"/"+instance.Name] = instance
 				code := program.Run(context.Background())
 				want := 0
-				if scenario != "apply" && scenario != "no hook" {
+				if scenario != "apply" && scenario != "registered source" && scenario != "no hook" {
 					want = 1
 				}
 				if code != want {
@@ -144,7 +157,7 @@ func TestProvisionActivatesProfile(t *testing.T) {
 					t.Fatalf("prompts=%v", prompt.requests)
 				}
 				content, _ := os.ReadFile(path)
-				if scenario == "decline" || scenario == "stale" || scenario == "source appeared" {
+				if scenario == "decline" || scenario == "stale" || scenario == "unmigrated source appeared" {
 					if strings.Contains(string(content), "sample") || len(platform.applied) != 0 || runner.applies != 0 {
 						t.Fatal("declined/stale operation mutated state")
 					}
@@ -195,10 +208,10 @@ func TestProvisionActivatesProfile(t *testing.T) {
 	}
 }
 
-func TestProvisionActivationRejectsSourceManagedSelection(t *testing.T) {
+func TestProvisionActivationAllowsRegisteredSource(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	writeProvisionProfile(t, root, "sample")
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment})
+	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, InitPlatform: newInitPlatformFixture()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,11 +222,49 @@ func TestProvisionActivationRejectsSourceManagedSelection(t *testing.T) {
 	if err := configsync.RegisterSource(filepath.Join(root, "state"), filepath.Join(root, "checkout")); err != nil {
 		t.Fatal(err)
 	}
-	_, err = program.prepareProfileBootstrap(context.Background(), loaded, "sample", "provision", nil)
-	if err == nil || !strings.Contains(err.Error(), "source-managed") {
-		t.Fatalf("guard=%v", err)
+	bootstrap, err := program.prepareProfileBootstrap(context.Background(), loaded, "sample", "provision", nil)
+	if err != nil || bootstrap == nil || bootstrap.profiles != "sample" {
+		t.Fatalf("registered source blocked local activation: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(root, "state", "yards", "default", "config.env")); !os.IsNotExist(err) {
-		t.Fatal("source-managed selection written")
+		t.Fatal("planning wrote selection")
+	}
+}
+
+func TestProvisionActivationKeepsGitOnlyYardSettingsAsFallback(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	writeProvisionProfile(t, root, "sample")
+	configHome := filepath.Join(root, "state")
+	gitPath := filepath.Join(configHome, config.GitSettingsRelativePath, "yards/demo/config.env")
+	if err := os.MkdirAll(filepath.Dir(gitPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	original := "ENVIRONMENT_PROFILES=existing\nSSH_PORT=2345\n"
+	writeCLIFile(t, gitPath, original, 0o600)
+	if err := configsync.RegisterSource(configHome, testkit.TempDir(t)); err != nil {
+		t.Fatal(err)
+	}
+	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, InitPlatform: newInitPlatformFixture()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := program.loadContext("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootstrap, err := program.prepareProfileBootstrap(context.Background(), loaded, "sample", "provision", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bootstrap.apply(context.Background(), program); err != nil {
+		t.Fatal(err)
+	}
+	local, err := os.ReadFile(filepath.Join(configHome, "yards/demo/config.env"))
+	if err != nil || string(local) != "ENVIRONMENT_PROFILES='existing sample'\n" {
+		t.Fatalf("profile activation copied unrelated fallback settings: %q, %v", local, err)
+	}
+	cached, err := os.ReadFile(gitPath)
+	if err != nil || string(cached) != original {
+		t.Fatalf("profile activation changed Git fallback: %q, %v", cached, err)
 	}
 }

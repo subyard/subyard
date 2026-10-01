@@ -8,7 +8,7 @@ import (
 
 const (
 	sourceSchema   = 1
-	manifestSchema = 1
+	manifestSchema = 2
 )
 
 var (
@@ -63,9 +63,10 @@ type Plan struct {
 	Digest             string
 	Adopt              bool
 
-	options  Options
-	desired  map[string]candidateFile
-	previous Manifest
+	options     Options
+	desired     map[string]candidateFile
+	previous    Manifest
+	localInputs []localInputObservation
 }
 
 func (plan Plan) NeedsApply() bool {

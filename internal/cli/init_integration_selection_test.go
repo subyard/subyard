@@ -185,7 +185,7 @@ func TestInitIntegrationSelectionFreshAndAdopted(t *testing.T) {
 		{name: "existing named roots", yard: "demo", existing: true, want: "codex paseo", inherited: true},
 		{name: "legacy roots", yard: "demo", settings: "AGENTS=paseo\n", existing: true, want: "paseo"},
 		{name: "source inherited roots", yard: "demo", existing: true, source: true, want: "codex paseo", inherited: true},
-		{name: "source legacy roots", yard: "demo", settings: "AGENTS=paseo\n", source: true, want: "paseo", inherited: true},
+		{name: "source legacy roots", yard: "demo", settings: "AGENTS=paseo\n", source: true, want: "paseo"},
 		{name: "temporary adoption rejected", yard: "demo", command: "CODING_TOOL_INTEGRATIONS=codex", reject: true},
 		{name: "source temporary adoption rejected", yard: "demo", source: true, command: "CODING_TOOL_INTEGRATIONS=codex", reject: true},
 	} {
@@ -265,7 +265,7 @@ func TestInitIntegrationSelectionFreshAndAdopted(t *testing.T) {
 	}
 }
 
-func TestInitSourceManagedSelectionUsesDefaultsWithoutWriting(t *testing.T) {
+func TestInitGitFallbackSelectionUsesDefaultsWithoutWriting(t *testing.T) {
 	for _, test := range []struct {
 		name, yard, settings, shared, profile, want string
 	}{
@@ -283,8 +283,8 @@ func TestInitSourceManagedSelectionUsesDefaultsWithoutWriting(t *testing.T) {
 			root, environment, _ := nativeFixture(t)
 			writeCLIFile(t, filepath.Join(root, "config/agents.env"), "CODING_TOOL_INTEGRATIONS='codex claude'\nAGENT_codex_COMMAND=codex\nAGENT_claude_COMMAND=claude\n", 0o600)
 			configHome := filepath.Join(root, "state")
-			target := filepath.Join(configHome, "yards", test.yard, "config.env")
-			shared := filepath.Join(configHome, "overrides/shared/config.env")
+			target := filepath.Join(configHome, config.GitSettingsRelativePath, "yards", test.yard, "config.env")
+			shared := filepath.Join(configHome, config.GitSettingsRelativePath, "overrides/shared/config.env")
 			profile := filepath.Join(root, "config/yards/profiles/fixture.env")
 			for path, content := range map[string]string{target: test.settings, shared: test.shared, profile: test.profile} {
 				if content != "" {
@@ -298,7 +298,7 @@ func TestInitSourceManagedSelectionUsesDefaultsWithoutWriting(t *testing.T) {
 				t.Fatal(err)
 			}
 			before := map[string]initIntegrationSource{}
-			for _, path := range []string{target, shared, profile, configsync.SourceRecordPath(configHome)} {
+			for _, path := range []string{target, shared, profile, configsync.SourceRecordPath(configHome), filepath.Join(configHome, "yards", test.yard, "config.env")} {
 				snapshot, err := readInitIntegrationSource(path)
 				if err != nil {
 					t.Fatal(err)
@@ -372,8 +372,8 @@ func TestInitProfileBootstrapPreservesInheritedSelectionWithoutIncus(t *testing.
 	if err := configsync.RegisterSource(filepath.Join(root, "state"), testkit.TempDir(t)); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := program.prepareInitIntegrationSelection(context.Background(), loaded, bootstrap); err == nil || !strings.Contains(err.Error(), "source-managed") {
-		t.Fatalf("profile bootstrap accepted a source-managed registration write: %v", err)
+	if _, selection, err := program.prepareInitIntegrationSelection(context.Background(), loaded, bootstrap); err != nil || selection != nil {
+		t.Fatalf("registered source blocked inherited bootstrap selection: %v", err)
 	}
 }
 

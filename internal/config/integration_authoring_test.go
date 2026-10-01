@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -118,7 +119,7 @@ func TestYardIntegrationWriteRejectsSameBytesReplacementAndPreservesNoOp(t *test
 	}
 }
 
-func TestYardIntegrationWriteRejectsNewSourceAuthority(t *testing.T) {
+func TestYardIntegrationWriteRejectsUnmigratedSourceOwnership(t *testing.T) {
 	for _, existing := range []bool{false, true} {
 		t.Run(fmt.Sprint(existing), func(t *testing.T) {
 			root := testkit.TempDir(t)
@@ -131,15 +132,48 @@ func TestYardIntegrationWriteRejectsNewSourceAuthority(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			writeFixture(t, filepath.Join(root, SourceRecordRelativePath), "{}\n")
-			if err := plan.Apply(); err == nil || !strings.Contains(err.Error(), "source-managed") {
-				t.Fatalf("new source accepted: %v", err)
+			if err := os.MkdirAll(filepath.Join(root, ".sync"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			testkit.WriteFile(t, filepath.Join(root, ".sync/manifest.json"), []byte(`{"schemaVersion":1,"files":[{"path":"yards/default/config.env"}]}`), 0o600)
+			if err := plan.Apply(); err == nil || !strings.Contains(err.Error(), "migrate Git settings") {
+				t.Fatalf("unmigrated ownership accepted: %v", err)
 			}
 			current, err := readOptionalIntegrationSnapshot(root, path)
 			if err != nil || !samePersistentFileSnapshotExact(current, plan.Before) {
-				t.Fatalf("source-managed target changed: %v", err)
+				t.Fatalf("unmigrated target changed: %v", err)
 			}
 		})
+	}
+}
+
+func TestYardIntegrationWriteKeepsGitSettingsAsFallback(t *testing.T) {
+	root := testkit.TempDir(t)
+	path := filepath.Join(root, GitSettingsRelativePath, "yards/demo/config.env")
+	original := "SSH_PORT=2244\nYARD_TEMPLATE=fixture\nCODING_TOOL_INTEGRATIONS=codex\n"
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, path, []byte(original), 0o600)
+	testkit.WriteFile(t, filepath.Join(root, SourceRecordRelativePath), []byte("{}\n"), 0o600)
+	loaded := Loaded{Context: domain.Context{YardName: "demo", Paths: domain.RuntimePaths{ConfigHome: root, ConfigDir: filepath.Join(root, "config")}}}
+	plan, err := PlanYardIntegrationWrite(loaded, []string{"pi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(plan.Content) != "CODING_TOOL_INTEGRATIONS='pi'\n" {
+		t.Fatalf("cached settings became local overrides: %q", plan.Content)
+	}
+	if err := plan.Apply(); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(plan.Path)
+	if err != nil || !bytes.Equal(content, plan.Content) {
+		t.Fatalf("local selection=%q, %v", content, err)
+	}
+	content, err = os.ReadFile(path)
+	if err != nil || string(content) != original {
+		t.Fatalf("Git fallback changed: %q, %v", content, err)
 	}
 }
 

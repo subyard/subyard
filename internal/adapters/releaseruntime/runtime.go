@@ -301,6 +301,11 @@ func (runtime *Runtime) inspectProtectedTransition(
 		InheritedSettingIDs: slices.Clone(inheritedSettingIDs),
 		SourceIngress:       journal.SourceIngress,
 	}
+	if outcome, err := runtime.inspectConfigLayoutRollback(ctx, verifiedTarget, request); err != nil {
+		return nil, publicCandidateFailure(err)
+	} else if outcome != nil {
+		return nil, publicReleaseInspectionError{cause: transitionOutcomeError(*outcome), outcome: *outcome}
+	}
 	response, err := runtime.invokeVerifiedCandidateTransition(ctx, verifiedOwner, request, "")
 	if err != nil {
 		return nil, publicCandidateFailure(err)
@@ -962,6 +967,14 @@ func (runtime *Runtime) prepareVerifiedTransition(
 	request releasetransition.ProcessRequest,
 	revalidation *replacementRevalidation,
 ) (Prepared, error) {
+	if outcome, err := runtime.inspectConfigLayoutRollback(ctx, target, request); err != nil {
+		return Prepared{}, err
+	} else if outcome != nil {
+		if parsed.check {
+			return runtime.preparePublicInspectionOutcome(parsed, *outcome), nil
+		}
+		return Prepared{}, publicReleaseInspectionError{cause: transitionOutcomeError(*outcome), outcome: *outcome}
+	}
 	response, err := runtime.invokeVerifiedCandidateTransition(ctx, owner, request, "")
 	if err != nil {
 		return Prepared{}, err
@@ -1076,6 +1089,11 @@ func (runtime *Runtime) prepareInspectedCandidateTransition(
 			}
 			if verifiedTarget.registryDigest != target.registryDigest {
 				return fmt.Errorf("%w: target runtime registry changed after inspection", domain.ErrPlanStale)
+			}
+			if outcome, err := runtime.inspectConfigLayoutRollback(ctx, verifiedTarget, request); err != nil {
+				return err
+			} else if outcome != nil {
+				return publicReleaseInspectionError{cause: transitionOutcomeError(*outcome), outcome: *outcome}
 			}
 			verifiedOwner := verifiedTarget
 			if owner.candidate.release != target.candidate.release {

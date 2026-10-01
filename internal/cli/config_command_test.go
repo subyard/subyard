@@ -1406,7 +1406,7 @@ func TestConfigSyncCheckIsReadOnlyAndMutationPromptsOnce(t *testing.T) {
 		applyPrompt.Requests[0].Default != domain.ConfirmationDefaultYes {
 		t.Fatalf("config sync requests=%#v", applyPrompt.Requests)
 	}
-	content, err = os.ReadFile(filepath.Join(configHome, "config.env"))
+	content, err = os.ReadFile(filepath.Join(configHome, config.GitSettingsRelativePath, "config.env"))
 	if err != nil || string(content) != "SSH_PORT=2290\n" {
 		t.Fatalf("config sync did not apply host settings: %q %v", content, err)
 	}
@@ -1581,15 +1581,19 @@ func TestConfigSyncCheckLeavesRecoveryPendingAndMutationRecoversFirst(t *testing
 	if len(prompt.Requests) != 1 ||
 		prompt.Requests[0].Summary != "Synchronize persistent configuration" ||
 		prompt.Requests[0].Default != domain.ConfirmationDefaultYes ||
-		!strings.Contains(strings.Join(prompt.Requests[0].Consequences, "\n"), "adopt config.env") {
+		!strings.Contains(strings.Join(prompt.Requests[0].Consequences, "\n"), "add .sync/settings/config.env") {
 		t.Fatalf("recovery-first sync requests=%#v", prompt.Requests)
 	}
 	if _, err := os.Lstat(filepath.Join(configHome, ".sync", "transaction.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("successful recovery left its journal: %v", err)
 	}
-	content, err := os.ReadFile(filepath.Join(configHome, "config.env"))
+	content, err := os.ReadFile(filepath.Join(configHome, config.GitSettingsRelativePath, "config.env"))
 	if err != nil || string(content) != "SSH_PORT=2291\n" {
 		t.Fatalf("recovery-first sync did not apply source: %q %v", content, err)
+	}
+	local, err := os.ReadFile(filepath.Join(configHome, "config.env"))
+	if err != nil || string(local) != string(before) {
+		t.Fatalf("recovery-first sync lost restored local settings: %q %v", local, err)
 	}
 }
 
@@ -1828,7 +1832,7 @@ func TestConfigSourceConnectClonesRegistersAndAppliesWithOnePrompt(t *testing.T)
 			t.Fatalf("source connect omitted %q:\n%s", expected, stdout.String())
 		}
 	}
-	content, err := os.ReadFile(filepath.Join(configHome, "config.env"))
+	content, err := os.ReadFile(filepath.Join(configHome, config.GitSettingsRelativePath, "config.env"))
 	if err != nil || string(content) != "SSH_PORT=2292\n" {
 		t.Fatalf("source connect did not apply host config: %q %v", content, err)
 	}
@@ -1947,7 +1951,7 @@ func TestConfigSourceConnectOnboardsSharedOnlySource(t *testing.T) {
 		t.Fatalf("source connect printed a configuration value:\n%s", stdout.String())
 	}
 	content, err := os.ReadFile(
-		filepath.Join(configHome, "overrides", "shared", "config.env"),
+		filepath.Join(configHome, config.GitSettingsRelativePath, "overrides", "shared", "config.env"),
 	)
 	if err != nil || string(content) != "YARD_IMAGE=images:debian/13\n" {
 		t.Fatalf("source connect did not apply shared settings: %q %v", content, err)
@@ -2082,7 +2086,7 @@ func TestConfigSyncTransitionsBetweenSharedOnlyAndHostOverlay(t *testing.T) {
 		t.Fatalf("apply host overlay: code=%d stdout=%s stderr=%s",
 			code, stdout.String(), stderr.String())
 	}
-	content, err = os.ReadFile(filepath.Join(configHome, "config.env"))
+	content, err = os.ReadFile(filepath.Join(configHome, config.GitSettingsRelativePath, "config.env"))
 	if err != nil || string(content) != "SSH_PORT=2294\n" {
 		t.Fatalf("host overlay was not applied: %q %v", content, err)
 	}
@@ -2125,7 +2129,7 @@ func TestConfigSyncTransitionsBetweenSharedOnlyAndHostOverlay(t *testing.T) {
 		t.Fatalf("remove host overlay: code=%d stdout=%s stderr=%s",
 			code, stdout.String(), stderr.String())
 	}
-	if _, err := os.Lstat(filepath.Join(configHome, "config.env")); !errors.Is(
+	if _, err := os.Lstat(filepath.Join(configHome, config.GitSettingsRelativePath, "config.env")); !errors.Is(
 		err, os.ErrNotExist,
 	) {
 		t.Fatalf("managed host overlay survived removal: %v", err)
@@ -2264,6 +2268,50 @@ printf '%s\n' "$@" >"$SUBYARD_TEST_SSH_LOG"
 			t.Fatalf("remote source forwarding omitted %q:\n%s", expected, output)
 		}
 	}
+	snapshotLocal := func() map[string]config.PersistentFileSnapshot {
+		t.Helper()
+		files := map[string]config.PersistentFileSnapshot{}
+		if err := filepath.Walk(configHome, func(path string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() {
+				return err
+			}
+			files[path], err = config.ReadPersistentFileSnapshot(configHome, path)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return files
+	}
+	before := snapshotLocal()
+	stderr.Reset()
+	program, err = New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments:   []string{"-Y", "remote", "config", "set", "SSH_PORT", "2456", "--scope", "yard", "--git", "--yes"},
+		Environment: environment, WorkingDir: root,
+		Stdout: &bytes.Buffer{}, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("remote Git authoring: code=%d stderr=%s", code, stderr.String())
+	}
+	forwarded, err = os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		`'\''yard'\'' '\''-Y'\'' '\''inner'\'' '\''config'\'' '\''set'\'' '\''SSH_PORT'\'' '\''2456'\''`,
+		`'\''--scope'\'' '\''yard'\''`,
+		`'\''--git'\''`, `'\''--yes'\''`,
+	} {
+		if !strings.Contains(string(forwarded), expected) {
+			t.Fatalf("remote Git authoring omitted %q:\n%s", expected, forwarded)
+		}
+	}
+	if after := snapshotLocal(); !reflect.DeepEqual(after, before) {
+		t.Fatal("remote Git authoring changed controller-local configuration")
+	}
 }
 
 func TestConfigSyncStatusNotConfiguredAndOldSourceCommandsAreRemoved(t *testing.T) {
@@ -2331,9 +2379,9 @@ func TestConfigSyncStatusNotConfiguredAndOldSourceCommandsAreRemoved(t *testing.
 		"config sync connect <git-url>",
 		"config sync status",
 		"config sync pull --apply",
-		"config sync push -m",
+		"config sync push",
 		"no background pull or push",
-		"never reads",
+		"runtime state never enter Git settings",
 	} {
 		if !strings.Contains(stdout.String(), expected) {
 			t.Fatalf("sync help omitted %q:\n%s", expected, stdout.String())
@@ -2591,7 +2639,7 @@ func TestConfigSyncPullFetchesFastForwardsAndImports(t *testing.T) {
 		t.Fatalf("declined pull changed registered checkout:\nbefore=%#v\nafter=%#v",
 			checkoutStateBeforeDecline, after)
 	}
-	if content, err := os.ReadFile(filepath.Join(configHome, "config.env")); err != nil ||
+	if content, err := os.ReadFile(filepath.Join(configHome, config.GitSettingsRelativePath, "config.env")); err != nil ||
 		strings.TrimSpace(string(content)) != "SSH_PORT=2295" {
 		t.Fatalf("declined pull changed live settings: %q err=%v", content, err)
 	}
@@ -2634,7 +2682,7 @@ func TestConfigSyncPullFetchesFastForwardsAndImports(t *testing.T) {
 		prompt.Requests[0].Default != domain.ConfirmationDefaultYes {
 		t.Fatalf("pull requests=%#v", prompt.Requests)
 	}
-	content, err := os.ReadFile(filepath.Join(configHome, "config.env"))
+	content, err := os.ReadFile(filepath.Join(configHome, config.GitSettingsRelativePath, "config.env"))
 	if err != nil || strings.TrimSpace(string(content)) != "SSH_PORT=2296" {
 		t.Fatalf("pull did not import remote settings: %q %v", content, err)
 	}
@@ -3059,7 +3107,7 @@ func TestConfigSyncOnlineStatusFetchesWithoutMutatingRegisteredCheckout(t *testi
 func TestConfigSetAndSyncPushCommitPersistentHostSettings(t *testing.T) {
 	root, home, configHome, environment := configCommandFixture(t)
 	remote, _ := configBareSourceRepository(
-		t, "owner-a", "SSH_PORT=2297\n",
+		t, "owner-a", "SSH_PORT=2297\nDEV_SUDO=1\n",
 	)
 	environment = append(environment,
 		"GIT_AUTHOR_NAME=Subyard Test",
@@ -3118,7 +3166,7 @@ func TestConfigSetAndSyncPushCommitPersistentHostSettings(t *testing.T) {
 	stderr.Reset()
 	declineProgram, err := New(Options{
 		RepositoryRoot: root, Program: "yard",
-		Arguments:   []string{"config", "sync", "push", "-m", "Declined update"},
+		Arguments:   []string{"config", "set", "SSH_PORT", "2298", "--scope", "host", "--git"},
 		Environment: environment, WorkingDir: root, Prompt: declinePrompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
@@ -3157,7 +3205,7 @@ func TestConfigSetAndSyncPushCommitPersistentHostSettings(t *testing.T) {
 	writeConfigCommandFile(t,
 		filepath.Join(configHome, "secrets", "must-not-export"), "credential\n")
 	if code := run(
-		"config", "sync", "push", "-m", "Update SSH port", "--yes",
+		"config", "set", "SSH_PORT", "2298", "--scope", "host", "--git", "--yes",
 	); code != 0 {
 		t.Fatalf("config push: code=%d stdout=%s stderr=%s",
 			code, stdout.String(), stderr.String())
@@ -3165,12 +3213,17 @@ func TestConfigSetAndSyncPushCommitPersistentHostSettings(t *testing.T) {
 	versioned := configSourceGitOutput(
 		t, remote, "show", "HEAD:hosts/owner-a/config.env",
 	)
-	if strings.TrimSpace(versioned) != "SSH_PORT='2298'" {
+	if strings.TrimSpace(versioned) != "SSH_PORT='2298'\nDEV_SUDO=1" {
 		t.Fatalf("pushed host config = %q", versioned)
 	}
-	shared := configSourceGitOutput(
-		t, remote, "show", "HEAD:shared/config.env",
-	)
+	treeBeforeShared := configSourceGitOutput(t, remote, "ls-tree", "-r", "--name-only", "HEAD")
+	if strings.Contains(treeBeforeShared, "shared/config.env") {
+		t.Fatalf("selected host write exported shared local settings: %s", treeBeforeShared)
+	}
+	if code := run("config", "set", "E2E_VM_CPU", "3", "--scope", "shared", "--git", "--yes"); code != 0 {
+		t.Fatalf("selected shared write: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	shared := configSourceGitOutput(t, remote, "show", "HEAD:shared/config.env")
 	if strings.TrimSpace(shared) != "E2E_VM_CPU='3'" {
 		t.Fatalf("pushed shared config = %q", shared)
 	}
@@ -3296,7 +3349,7 @@ func TestConfigSyncPushRejectsConcurrentRemoteAdvanceWithoutForce(t *testing.T) 
 	stderr.Reset()
 	if code := run(Options{
 		Arguments: []string{
-			"config", "sync", "push", "-m", "Local host update",
+			"config", "set", "SSH_PORT", "2302", "--scope", "host", "--git",
 		},
 		Prompt: prompt, Stdout: &stdout, Stderr: &stderr,
 	}); code != 1 ||

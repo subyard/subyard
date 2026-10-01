@@ -7,19 +7,19 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/domain"
-	"github.com/Subyard/Subyard/internal/shellquote"
 )
 
 type configSyncPushOptions struct {
 	message     string
 	materialize bool
+	authoring   *configAuthoringRequest
+	content     []byte
 }
 
 type preparedConfigSyncPush struct {
@@ -57,13 +57,22 @@ func (cli *CLI) runConfigSyncPush(
 		cli.errorf("config sync push: %v", err)
 		return 2
 	}
-	assumeYes = assumeYes || parsedYes
+	return cli.runConfigSyncPushRequest(ctx, loaded, request, assumeYes || parsedYes)
+}
+
+func (cli *CLI) runConfigSyncPushRequest(ctx context.Context, loaded config.Loaded, request configSyncPushOptions, assumeYes bool) int {
 	prepared, err := cli.prepareConfigSyncPush(ctx, loaded, request)
 	if err != nil {
 		cli.errorf("config sync push: %v", err)
 		return 1
 	}
 	defer prepared.cleanup(cli, ctx)
+	if request.authoring != nil && (prepared.createdCommit || prepared.preview.NeedsApply()) {
+		if err := cli.checkResourceConfigChange(ctx, loaded, *request.authoring); err != nil {
+			cli.errorf("config --git: %v", err)
+			return 1
+		}
+	}
 
 	fmt.Fprintln(cli.options.Stdout, "Versioned configuration push")
 	fmt.Fprintf(cli.options.Stdout, "  checkout: %s\n", prepared.checkout)
@@ -118,6 +127,20 @@ func (cli *CLI) runConfigSyncPush(
 			"config sync push: checkout, live configuration and upstream are already converged")
 		return 0
 	}
+	if request.authoring != nil && (prepared.createdCommit || prepared.preview.NeedsApply()) {
+		if request.authoring.scope == config.ScopeYard {
+			unlock, err := lockIntegrationYard(ctx, loaded)
+			if err != nil {
+				cli.errorf("config --git: %v", err)
+				return 1
+			}
+			defer unlock()
+		}
+		if err := cli.checkResourceConfigChange(ctx, loaded, *request.authoring); err != nil {
+			cli.errorf("config --git: %v", err)
+			return 1
+		}
+	}
 	adapter := &configSyncPushAdapter{cli: cli, prepared: prepared}
 	orchestrator.Runner = adapter
 	if _, _, err := orchestrator.RunAdapter(ctx, operation, domain.AdapterRequest{
@@ -146,7 +169,11 @@ func (cli *CLI) runConfigSyncPush(
 			)
 			return 1
 		}
-		refspec := "HEAD:refs/heads/" + prepared.remoteBranch
+		if err := cli.checkConfigGitPushTarget(ctx, prepared.checkout, prepared.remote, prepared.remoteURL); err != nil {
+			cli.errorf("config sync push: %v; upstream was not changed", err)
+			return 1
+		}
+		refspec := adapter.plan.SourceCommit + ":refs/heads/" + prepared.remoteBranch
 		if err := cli.configGitRun(
 			ctx, prepared.checkout, "push", "--porcelain", "--",
 			prepared.remote, refspec,
@@ -196,10 +223,10 @@ func parseConfigSyncPushOptions(
 			)
 		}
 	}
-	if strings.TrimSpace(result.message) == "" ||
-		strings.ContainsAny(result.message, "\x00\r\n") {
+	if result.message != "" && (strings.TrimSpace(result.message) == "" ||
+		strings.ContainsAny(result.message, "\x00\r\n")) {
 		return result, false, errors.New(
-			"a single-line commit message is required with -m",
+			"-m must contain a non-empty single-line commit message",
 		)
 	}
 	return result, assumeYes, nil
@@ -242,12 +269,8 @@ func (cli *CLI) prepareConfigSyncPush(
 			state.Worktree, record.Checkout,
 		)
 	}
-	if _, err := cli.configGitInspectOutput(
-		ctx, record.Checkout, "var", "GIT_AUTHOR_IDENT",
-	); err != nil {
-		return nil, errors.New(
-			"Git author identity is not configured; set user.name and user.email for the operator account",
-		)
+	if err := cli.checkConfigGitPushTarget(ctx, record.Checkout, state.RemoteName, state.RemoteRaw); err != nil {
+		return nil, err
 	}
 	remoteBranch := strings.TrimPrefix(
 		state.Upstream, state.RemoteName+"/",
@@ -301,35 +324,48 @@ func (cli *CLI) prepareConfigSyncPush(
 		prepared.cleanup(cli, ctx)
 		return nil, fmt.Errorf("protect export candidate: %w", err)
 	}
-	if err := cli.exportPersistentConfig(
-		loaded, repository.checkout, syncState.HostID,
-	); err != nil {
-		prepared.cleanup(cli, ctx)
-		return nil, fmt.Errorf("export persistent configuration: %w", err)
-	}
-	if err := hardenConfigCandidate(repository.checkout); err != nil {
-		prepared.cleanup(cli, ctx)
-		return nil, fmt.Errorf("protect exported configuration: %w", err)
-	}
-	if err := cli.configGitRun(
-		ctx, repository.checkout, "add", "--all", "--", ".",
-	); err != nil {
-		prepared.cleanup(cli, ctx)
-		return nil, fmt.Errorf("stage configuration export: %w", err)
-	}
-	staged, err := cli.configGitOutput(
-		ctx, repository.checkout, "diff", "--cached", "--quiet", "--exit-code",
-	)
-	if err != nil {
-		_ = staged
-		if err := cli.configGitRun(
-			ctx, repository.checkout, "commit", "--quiet", "-m", request.message,
-		); err != nil {
+	candidateOptions := options
+	candidateOptions.SourceRoot = repository.checkout
+	candidateOptions.SourceIdentityRoot = record.Checkout
+	if request.authoring != nil {
+		// Validate source boundaries before any writer can follow a tracked
+		// symlink in the isolated checkout outside that checkout.
+		if _, err := configsync.BuildPlan(candidateOptions); err != nil {
 			prepared.cleanup(cli, ctx)
-			return nil, fmt.Errorf("create configuration commit: %w", err)
+			return nil, fmt.Errorf("validate configuration before selected change: %w", err)
 		}
-		prepared.createdCommit = true
-		prepared.pushRequired = true
+		paths, err := cli.exportSelectedConfig(loaded, repository.checkout, syncState.HostID, *request.authoring, request.content)
+		if err != nil {
+			prepared.cleanup(cli, ctx)
+			return nil, fmt.Errorf("prepare selected configuration change: %w", err)
+		}
+		if err := hardenConfigCandidate(repository.checkout); err != nil {
+			prepared.cleanup(cli, ctx)
+			return nil, err
+		}
+		if len(paths) != 0 {
+			if err := cli.configGitRun(ctx, repository.checkout, append([]string{"add", "--all", "--"}, paths...)...); err != nil {
+				prepared.cleanup(cli, ctx)
+				return nil, fmt.Errorf("stage selected configuration change: %w", err)
+			}
+		}
+		staged, err := cli.configGitOutput(ctx, repository.checkout, "diff", "--cached", "--name-only")
+		if err != nil {
+			prepared.cleanup(cli, ctx)
+			return nil, err
+		}
+		if strings.TrimSpace(staged) != "" {
+			if _, err := cli.configGitInspectOutput(ctx, record.Checkout, "var", "GIT_AUTHOR_IDENT"); err != nil {
+				prepared.cleanup(cli, ctx)
+				return nil, errors.New("Git author identity is not configured; set user.name and user.email for the operator account")
+			}
+			if err := cli.configGitRun(ctx, repository.checkout, "commit", "--quiet", "-m", request.message); err != nil {
+				prepared.cleanup(cli, ctx)
+				return nil, fmt.Errorf("create configuration commit: %w", err)
+			}
+			prepared.createdCommit = true
+			prepared.pushRequired = true
+		}
 	}
 	prepared.candidate, err = cli.configGitOutput(
 		ctx, repository.checkout, "rev-parse", "--verify", "HEAD",
@@ -339,9 +375,6 @@ func (cli *CLI) prepareConfigSyncPush(
 		return nil, err
 	}
 	prepared.candidate = strings.TrimSpace(prepared.candidate)
-	candidateOptions := options
-	candidateOptions.SourceRoot = repository.checkout
-	candidateOptions.SourceIdentityRoot = record.Checkout
 	prepared.preview, err = configsync.BuildPlan(candidateOptions)
 	if err != nil {
 		prepared.cleanup(cli, ctx)
@@ -350,167 +383,12 @@ func (cli *CLI) prepareConfigSyncPush(
 	return prepared, nil
 }
 
-func (cli *CLI) exportPersistentConfig(
-	loaded config.Loaded,
-	candidate string,
-	hostID string,
-) error {
-	hostRoot := filepath.Join(candidate, "hosts", hostID)
-	sharedRoot := filepath.Join(candidate, "shared")
-	if err := os.RemoveAll(sharedRoot); err != nil {
-		return err
-	}
-	if err := os.RemoveAll(hostRoot); err != nil {
-		return err
-	}
-	if err := exportConfigScalarFile(loaded.Catalog,
-		filepath.Join(loaded.Context.Paths.ConfigHome, "overrides", "shared", "config.env"),
-		filepath.Join(sharedRoot, "config.env"), config.ScopeShared,
-	); err != nil {
-		return err
-	}
-	if err := exportConfigScalarFile(loaded.Catalog,
-		filepath.Join(loaded.Context.Paths.ConfigHome, "config.env"),
-		filepath.Join(hostRoot, "config.env"), config.ScopeHost,
-	); err != nil {
-		return err
-	}
-	targets, err := cli.localConfigTargets(loaded, true)
-	if err != nil {
-		return err
-	}
-	mappings := map[string]config.FileSettingMapping{}
-	for _, target := range targets {
-		for _, mapping := range config.SyncableFileMappings(target.Loaded) {
-			mappings[mapping.Relative] = mapping
-		}
-		if target.Name == "default" {
-			continue
-		}
-		source := configScalarLayerPath(target.Loaded, "yard")
-		if source == "" {
-			continue
-		}
-		destination := filepath.Join(
-			hostRoot, "yards", target.Name, "config.env",
-		)
-		if err := exportConfigScalarFile(loaded.Catalog,
-			source, destination, config.ScopeYard,
-		); err != nil {
-			return fmt.Errorf("yard %s: %w", target.Name, err)
-		}
-		if _, err := os.Lstat(destination); errors.Is(err, os.ErrNotExist) {
-			if err := writeExportedConfigFile(destination, nil, 0o600); err != nil {
-				return fmt.Errorf("yard %s: %w", target.Name, err)
-			}
-		} else if err != nil {
-			return fmt.Errorf("yard %s: %w", target.Name, err)
-		}
-	}
-	relativeNames := make([]string, 0, len(mappings))
-	for relative := range mappings {
-		relativeNames = append(relativeNames, relative)
-	}
-	sort.Strings(relativeNames)
-	for _, relative := range relativeNames {
-		mapping := mappings[relative]
-		for _, layer := range []struct {
-			source string
-			target string
-		}{
-			{
-				filepath.Join(loaded.Context.Paths.ConfigHome,
-					"overrides", "shared", "agents", filepath.FromSlash(relative)),
-				filepath.Join(sharedRoot,
-					"overrides", "agents", filepath.FromSlash(relative)),
-			},
-			{
-				filepath.Join(loaded.Context.Paths.ConfigHome,
-					"overrides", "host", "agents", filepath.FromSlash(relative)),
-				filepath.Join(hostRoot,
-					"overrides", "agents", filepath.FromSlash(relative)),
-			},
-		} {
-			if err := exportConfigAsset(mapping.Name, layer.source, layer.target); err != nil {
-				return err
-			}
-		}
-		for _, target := range targets {
-			if target.Name == "default" {
-				continue
-			}
-			if err := exportConfigAsset(
-				mapping.Name,
-				filepath.Join(loaded.Context.Paths.ConfigHome, "yards", target.Name,
-					"overrides", "agents", filepath.FromSlash(relative)),
-				filepath.Join(hostRoot, "yards", target.Name,
-					"overrides", "agents", filepath.FromSlash(relative)),
-			); err != nil {
-				return err
-			}
-		}
+func (cli *CLI) checkConfigGitPushTarget(ctx context.Context, checkout, remote, expectedURL string) error {
+	urls, err := cli.configGitInspectOutput(ctx, checkout, "remote", "get-url", "--push", "--all", remote)
+	if err != nil || strings.TrimSpace(urls) != expectedURL {
+		return errors.New("upstream must have one push URL matching the registered configuration source")
 	}
 	return nil
-}
-
-func exportConfigScalarFile(
-	settings config.Catalog, source string,
-	destination string,
-	scope config.SettingScope,
-) error {
-	values, err := config.ReadAssignments(source)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	names := make([]string, 0, len(values))
-	for name, value := range values {
-		definition, ok := settings.LookupSetting(name)
-		if !ok || definition.Kind != config.SettingScalar ||
-			!definition.Syncable || definition.Sensitive {
-			continue
-		}
-		if err := settings.ValidateSetting(scope, name, value, true); err != nil {
-			return err
-		}
-		names = append(names, name)
-	}
-	if len(names) == 0 {
-		return nil
-	}
-	sort.Strings(names)
-	var content strings.Builder
-	for _, name := range names {
-		content.WriteString(name)
-		content.WriteByte('=')
-		content.WriteString(shellquote.Word(values[name]))
-		content.WriteByte('\n')
-	}
-	return writeExportedConfigFile(destination, []byte(content.String()), 0o600)
-}
-
-func exportConfigAsset(name, source, destination string) error {
-	info, err := os.Lstat(source)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() ||
-		info.Size() > 8<<20 {
-		return fmt.Errorf("file setting %s is not a bounded regular file", name)
-	}
-	content, err := os.ReadFile(source)
-	if err != nil {
-		return err
-	}
-	if err := config.ValidateNonSecretContent(name, string(content)); err != nil {
-		return err
-	}
-	return writeExportedConfigFile(destination, content, 0o600)
 }
 
 func writeExportedConfigFile(path string, content []byte, mode os.FileMode) error {
@@ -521,15 +399,6 @@ func writeExportedConfigFile(path string, content []byte, mode os.FileMode) erro
 		return err
 	}
 	return os.Chmod(path, mode)
-}
-
-func configScalarLayerPath(loaded config.Loaded, scope string) string {
-	for _, layer := range loaded.ConfigurationLayers {
-		if layer.Scope == scope && layer.Role == "scalar settings" && layer.Present {
-			return layer.Path
-		}
-	}
-	return ""
 }
 
 func (prepared *preparedConfigSyncPush) cleanup(cli *CLI, ctx context.Context) {
@@ -566,6 +435,24 @@ func (adapter *configSyncPushAdapter) Run(
 		return domain.AdapterResult{}, "", errors.New(
 			"checkout HEAD changed after preview; rerun push",
 		)
+	}
+	record, registered, err := configsync.ReadSourceRecord(prepared.options.ConfigHome)
+	if err != nil || !registered || record.Checkout != prepared.checkout {
+		return domain.AdapterResult{}, "", errors.New("configuration source registration changed after preview")
+	}
+	state := adapter.cli.inspectConfigGit(ctx, prepared.checkout)
+	verifyConfigGitRegistration(record, &state)
+	if state.Problem != nil || state.Worktree != "clean" || state.Branch != prepared.branch || state.Upstream != prepared.upstream {
+		return domain.AdapterResult{}, "", errors.New("registered checkout or upstream changed after preview")
+	}
+	// Recheck local overrides before advancing the registered checkout. Apply
+	// repeats this exact check under the configuration lock before publishing.
+	previewOptions := prepared.options
+	previewOptions.SourceRoot = prepared.repository.checkout
+	previewOptions.SourceIdentityRoot = prepared.checkout
+	preview, err := configsync.BuildPlan(previewOptions)
+	if err != nil || preview.Digest != prepared.preview.Digest {
+		return domain.AdapterResult{}, "", errors.New("configuration source or local settings changed after preview; rerun push")
 	}
 	if err := adapter.cli.fetchRegisteredConfigUpstream(
 		ctx, prepared.checkout, prepared.remote, prepared.remoteURL,

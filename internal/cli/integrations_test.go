@@ -109,18 +109,35 @@ func TestIntegrationDependencyDisableAndTemporaryOverrideRejected(t *testing.T) 
 		t.Fatalf("override error=%v", err)
 	}
 }
-func TestIntegrationSourceGuardPreventsWrite(t *testing.T) {
-	cli, _, _, path, _ := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=\n")
+func TestIntegrationRegisteredSourceAllowsLocalWrite(t *testing.T) {
+	cli, _, runtime, path, output := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=\n")
 	if err := configsync.RegisterSource(filepath.Join(cli.options.RepositoryRoot, "state"), filepath.Join(cli.options.RepositoryRoot, "checkout")); err != nil {
 		t.Fatal(err)
 	}
+	prepared, err := prepareIntegrationTest(t, cli, "enable", "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.Close()
+	if code := cli.runPreparedCommand(context.Background(), prepared, true); code != 0 || runtime.applied != 1 {
+		t.Fatalf("local activation=%d %s", code, output)
+	}
+	after, _ := os.ReadFile(path)
+	if !strings.Contains(string(after), "CODING_TOOL_INTEGRATIONS='codex'") {
+		t.Fatalf("local selection missing: %q", after)
+	}
+}
+
+func TestIntegrationUnmigratedOwnershipPreventsWrite(t *testing.T) {
+	cli, _, runtime, path, _ := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=\n")
+	writeUnmigratedSettingsManifest(t, filepath.Join(cli.options.RepositoryRoot, "state"))
 	before, _ := os.ReadFile(path)
-	if _, err := prepareIntegrationTest(t, cli, "enable", "codex"); err == nil || !strings.Contains(err.Error(), "source-managed") {
+	if _, err := prepareIntegrationTest(t, cli, "enable", "codex"); err == nil || !strings.Contains(err.Error(), "migrate Git settings") {
 		t.Fatalf("guard=%v", err)
 	}
 	after, _ := os.ReadFile(path)
-	if !bytes.Equal(before, after) {
-		t.Fatal("source-managed file changed")
+	if !bytes.Equal(before, after) || runtime.applied != 0 {
+		t.Fatal("unmigrated settings changed")
 	}
 }
 func TestIntegrationDesiredPersistsOnApplyFailureAndRetry(t *testing.T) {

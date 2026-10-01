@@ -101,7 +101,7 @@ func applyLocked(plan Plan) (returnErr error) {
 	}
 	for _, change := range plan.Changes {
 		if change.Action == "adopt" || change.Action == "record-converged" ||
-			change.Action == "record-deleted" {
+			change.Action == "record-deleted" || change.Action == "retain-local" {
 			continue
 		}
 		target := filepath.Join(plan.options.ConfigHome, filepath.FromSlash(change.Path))

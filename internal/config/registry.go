@@ -21,6 +21,7 @@ func YardNames(configDir, configHome string) ([]string, error) {
 	}{
 		{directory: filepath.Join(configDir, "..", "private", "yards")},
 		{directory: filepath.Join(configHome, "yards"), allowNested: true},
+		{directory: filepath.Join(configHome, GitSettingsRelativePath, "yards"), allowNested: true},
 	} {
 		entries, err := os.ReadDir(root.directory)
 		if errors.Is(err, os.ErrNotExist) {
@@ -77,7 +78,8 @@ func FindYardRegistrationFile(configDir, configHome, name string) (string, error
 	if name == "default" || !domain.SafeName(name) {
 		return "", fmt.Errorf("%w %q", ErrUnknownYard, name)
 	}
-	return findFirstYardFile(YardFileCandidates(configDir, configHome, name), name)
+	candidates := append(YardFileCandidates(configDir, configHome, name), filepath.Join(configHome, GitSettingsRelativePath, "yards", name, "config.env"))
+	return findFirstYardFile(candidates, name)
 }
 
 func findFirstYardFile(candidates []string, name string) (string, error) {

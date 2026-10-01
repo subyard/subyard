@@ -28,13 +28,22 @@ type LoadOptions struct {
 	YardDirs                []string
 }
 
+const GitSettingsRelativePath = ".sync/settings"
+
 type LayerPaths struct {
-	SharedSettings string
-	SharedAssets   string
-	HostSettings   string
-	HostAssets     string
-	YardSettings   map[string]string
-	YardAssets     map[string]string
+	ExcludedLocalPaths map[string]bool
+	GitSharedSettings  string
+	GitHostSettings    string
+	GitYardSettings    map[string]string
+	GitSharedAssets    string
+	GitHostAssets      string
+	GitYardAssets      map[string]string
+	SharedSettings     string
+	SharedAssets       string
+	HostSettings       string
+	HostAssets         string
+	YardSettings       map[string]string
+	YardAssets         map[string]string
 }
 
 type Loaded struct {
@@ -160,97 +169,6 @@ func load(
 			return domain.Context{}, nil, err
 		}
 	}
-	sharedSettingsFile := filepath.Join(configHome, "overrides", "shared", "config.env")
-	if options.LayerPaths != nil {
-		sharedSettingsFile = options.LayerPaths.SharedSettings
-	}
-	sharedSettingsExist, err := regularFileExists(sharedSettingsFile)
-	if err != nil {
-		return domain.Context{}, nil, err
-	}
-	sharedSettingsLayer := tracker.addLayer(
-		"shared", "scalar settings", sharedSettingsFile, sharedSettingsExist, settingScalar,
-	)
-	if sharedSettingsExist {
-		if err := applyEnvFileTrackedValidated(
-			sharedSettingsFile, values, tracker, sharedSettingsLayer,
-			ScopeShared, options.SyncSource,
-		); err != nil {
-			return domain.Context{}, nil, err
-		}
-	}
-	logicalAssets := agentAssetMappings(values, configDir)
-	sharedAssets := filepath.Join(configHome, "overrides", "shared", "agents")
-	if options.LayerPaths != nil {
-		sharedAssets = options.LayerPaths.SharedAssets
-	}
-	sharedLayer := tracker.addLayer(
-		"shared", "file settings", sharedAssets, pathPresent(sharedAssets), settingFile,
-	)
-	if err := applyAgentAssetLayer(values, logicalAssets,
-		sharedAssets, tracker, sharedLayer); err != nil {
-		return domain.Context{}, nil, err
-	}
-
-	hostSettingsFile := filepath.Join(configHome, "config.env")
-	if options.LayerPaths != nil {
-		hostSettingsFile = options.LayerPaths.HostSettings
-	}
-	hostSettingsExist, err := regularFileExists(hostSettingsFile)
-	if err != nil {
-		return domain.Context{}, nil, err
-	}
-	hostSettingsPath := hostSettingsFile
-	hostSettingsPresent := hostSettingsExist
-	if !hostSettingsExist && !options.DisablePrivate && options.LayerPaths == nil {
-		privateConfig := filepath.Join(configDir, "..", "private", "config.env")
-		if pathPresent(privateConfig) {
-			hostSettingsPath = privateConfig
-			hostSettingsPresent = true
-		}
-	}
-	hostSettingsLayer := tracker.addLayer(
-		"host", "scalar settings", hostSettingsPath, hostSettingsPresent, settingAny,
-	)
-	if hostSettingsExist {
-		if err := applyEnvFileTrackedValidated(
-			hostSettingsFile, values, tracker, hostSettingsLayer,
-			ScopeHost, options.SyncSource,
-		); err != nil {
-			return domain.Context{}, nil, err
-		}
-		if err := validateBootstrapConfigHome(values, configHome, hostSettingsFile); err != nil {
-			return domain.Context{}, nil, err
-		}
-	} else if !options.DisablePrivate && options.LayerPaths == nil {
-		// Source checkouts retain a read-only compatibility input until the
-		// installer moves it into configHome/config.env.
-		privateConfig := filepath.Join(configDir, "..", "private", "config.env")
-		if pathPresent(privateConfig) {
-			if err := applyEnvFileTrackedValidated(
-				privateConfig, values, tracker, hostSettingsLayer, ScopeHost, false,
-			); err != nil {
-				return domain.Context{}, nil, err
-			}
-		}
-		if err := validateBootstrapConfigHome(values, configHome, privateConfig); err != nil {
-			return domain.Context{}, nil, err
-		}
-	}
-	values["SUBYARD_CONFIG_DIR"] = configDir
-	extendAgentAssetMappings(logicalAssets, values)
-	hostAssets := filepath.Join(configHome, "overrides", "host", "agents")
-	if options.LayerPaths != nil {
-		hostAssets = options.LayerPaths.HostAssets
-	}
-	hostFileLayer := tracker.addLayer(
-		"host", "file settings", hostAssets, pathPresent(hostAssets), settingFile,
-	)
-	if err := applyAgentAssetLayer(values, logicalAssets,
-		hostAssets, tracker, hostFileLayer); err != nil {
-		return domain.Context{}, nil, err
-	}
-
 	yardName := options.YardName
 	if yardName == "" {
 		yardName = values["SUBYARD_YARD"]
@@ -258,78 +176,139 @@ func load(
 	if explicit := commandEnvironment["SUBYARD_YARD"]; explicit != "" && options.YardName == "" {
 		yardName = explicit
 	}
-	if yardName == "" || yardName == "default" {
+	if yardName == "" {
 		yardName = "default"
-		defaultYardFile := filepath.Join(configHome, "yards", "default", "config.env")
-		if options.LayerPaths != nil {
-			defaultYardFile = options.LayerPaths.YardSettings["default"]
-		}
-		if defaultYardFile != "" {
-			info, statErr := os.Lstat(defaultYardFile)
-			switch {
-			case errors.Is(statErr, os.ErrNotExist):
-			case statErr != nil:
-				return domain.Context{}, nil, statErr
-			case !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0:
-				return domain.Context{}, nil, fmt.Errorf(
-					"default yard settings must be a regular non-symlink file: %s", defaultYardFile,
-				)
-			default:
-				if err := applyYardConfigTracked(
-					configDir, yardName, defaultYardFile, values, tracker, options.SyncSource,
-				); err != nil {
-					return domain.Context{}, nil, err
-				}
-				if err := validateBootstrapConfigHome(values, configHome, defaultYardFile); err != nil {
-					return domain.Context{}, nil, err
-				}
-			}
-		}
+	}
+	if !domain.SafeName(yardName) {
+		return domain.Context{}, nil, fmt.Errorf("invalid yard name %q", yardName)
+	}
+	gitRoot := filepath.Join(configHome, GitSettingsRelativePath)
+	gitShared := filepath.Join(gitRoot, "overrides", "shared", "config.env")
+	gitHost := filepath.Join(gitRoot, "config.env")
+	gitYard := filepath.Join(gitRoot, "yards", yardName, "config.env")
+	localShared := filepath.Join(configHome, "overrides", "shared", "config.env")
+	localHost := filepath.Join(configHome, "config.env")
+	localYard := filepath.Join(configHome, "yards", yardName, "config.env")
+	if options.LayerPaths != nil {
+		gitShared, gitHost, gitYard = options.LayerPaths.GitSharedSettings, options.LayerPaths.GitHostSettings, options.LayerPaths.GitYardSettings[yardName]
+		localShared, localHost, localYard = options.LayerPaths.SharedSettings, options.LayerPaths.HostSettings, options.LayerPaths.YardSettings[yardName]
 	} else {
-		if !domain.SafeName(yardName) {
-			return domain.Context{}, nil, fmt.Errorf("invalid yard name %q", yardName)
+		hostExists, err := regularFileExists(localHost)
+		if err != nil {
+			return domain.Context{}, nil, err
 		}
-		yardDerivationLayer := tracker.addLayer(
-			"yard", "derived", "yard name "+yardName, true, settingScalar,
-			"HOST_BASE", "INCUS_PROJECT", "YARD_INSTANCE_NAME", "RESTRICTED_DISK_PATHS",
-			"SRV_VOLUME", "SSH_HOST",
-		)
-		applyYardDerivations(yardName, values, tracker, yardDerivationLayer)
-		yardFile := ""
-		if options.YardSettingsFile != "" {
-			yardFile = options.YardSettingsFile
-		} else if options.LayerPaths != nil {
-			yardFile = options.LayerPaths.YardSettings[yardName]
-			if yardFile == "" {
-				return domain.Context{}, nil, fmt.Errorf("unknown yard %q", yardName)
+		if !hostExists && !options.DisablePrivate {
+			privateConfig := filepath.Join(configDir, "..", "private", "config.env")
+			if pathPresent(privateConfig) {
+				localHost = privateConfig
 			}
-		} else {
-			yardFile, err = findYardFile(root, yardName, values, options.YardDirs)
+		}
+		if yardName != "default" && options.YardSettingsFile == "" {
+			localYard, err = findYardFile(root, yardName, values, options.YardDirs)
+			if err != nil {
+				return domain.Context{}, nil, err
+			}
+			if localYard == gitYard {
+				localYard = ""
+			}
+		}
+	}
+	if options.YardSettingsFile != "" && yardName != "default" {
+		localYard = options.YardSettingsFile
+	}
+	if yardName != "default" && localYard == "" && gitYard == "" {
+		return domain.Context{}, nil, fmt.Errorf("%w %q", ErrUnknownYard, yardName)
+	}
+	if yardName != "default" {
+		yardDerivationLayer := tracker.addLayer("yard", "derived", "yard name "+yardName, true, settingScalar,
+			"HOST_BASE", "INCUS_PROJECT", "YARD_INSTANCE_NAME", "RESTRICTED_DISK_PATHS", "SRV_VOLUME", "SSH_HOST")
+		applyYardDerivations(yardName, values, tracker, yardDerivationLayer)
+	}
+	// Select the profile from both yard layers before applying it once. Local
+	// assignments, including an explicit empty template, override the Git cache.
+	probe := cloneEnvironment(values)
+	delete(probe, "YARD_TEMPLATE")
+	yardPresent := false
+	templateSource := gitYard
+	for _, path := range []string{gitYard, localYard} {
+		if options.LayerPaths != nil && path == localYard && options.LayerPaths.ExcludedLocalPaths[path] {
+			continue
+		}
+		if path == "" {
+			continue
+		}
+		exists, err := regularFileExists(path)
+		if err != nil {
+			return domain.Context{}, nil, err
+		}
+		if exists {
+			yardPresent = true
+			templateSource = path
+			if err := tracker.catalog.applyEnvFileValidated(path, probe, ScopeYard, options.SyncSource || path == gitYard, nil); err != nil {
+				return domain.Context{}, nil, err
+			}
+		}
+	}
+	if yardName != "default" && !yardPresent {
+		return domain.Context{}, nil, fmt.Errorf("%w %q", ErrUnknownYard, yardName)
+	}
+	if err := applyYardTemplateTracked(configDir, yardName, probe["YARD_TEMPLATE"], templateSource, values, tracker); err != nil {
+		return domain.Context{}, nil, err
+	}
+	logicalAssets := agentAssetMappings(values, configDir)
+	gitSharedAssets := filepath.Join(gitRoot, "overrides", "shared", "agents")
+	gitHostAssets := filepath.Join(gitRoot, "overrides", "host", "agents")
+	gitYardAssets := filepath.Join(gitRoot, "yards", yardName, "overrides", "agents")
+	sharedAssets := filepath.Join(configHome, "overrides", "shared", "agents")
+	hostAssets := filepath.Join(configHome, "overrides", "host", "agents")
+	yardAssets := filepath.Join(configHome, "yards", yardName, "overrides", "agents")
+	if options.LayerPaths != nil {
+		gitSharedAssets, gitHostAssets, gitYardAssets = options.LayerPaths.GitSharedAssets, options.LayerPaths.GitHostAssets, options.LayerPaths.GitYardAssets[yardName]
+		sharedAssets, hostAssets, yardAssets = options.LayerPaths.SharedAssets, options.LayerPaths.HostAssets, options.LayerPaths.YardAssets[yardName]
+	}
+	for _, layer := range []struct {
+		path, assets, scope, role, assetRole string
+		syncable                             bool
+	}{
+		{gitShared, gitSharedAssets, "shared", "Git scalar settings", "Git file settings", true},
+		{gitHost, gitHostAssets, "host", "Git scalar settings", "Git file settings", true},
+		{gitYard, gitYardAssets, "yard", "Git scalar settings", "Git file settings", true},
+		{localShared, sharedAssets, "shared", "scalar settings", "file settings", options.SyncSource},
+		{localHost, hostAssets, "host", "scalar settings", "file settings", options.SyncSource},
+		{localYard, yardAssets, "yard", "scalar settings", "file settings", options.SyncSource},
+	} {
+		if yardName != "default" && layer.scope == "yard" {
+			derivation := tracker.addLayer("yard", "derived", "yard name "+yardName, true, settingScalar,
+				"HOST_BASE", "INCUS_PROJECT", "YARD_INSTANCE_NAME", "RESTRICTED_DISK_PATHS", "SRV_VOLUME", "SSH_HOST")
+			applyYardDerivations(yardName, values, tracker, derivation)
+		}
+		exists := false
+		if layer.path != "" && !(options.LayerPaths != nil && layer.role == "scalar settings" && options.LayerPaths.ExcludedLocalPaths[layer.path]) {
+			exists, err = regularFileExists(layer.path)
 			if err != nil {
 				return domain.Context{}, nil, err
 			}
 		}
-		if err := applyYardConfigTracked(
-			configDir, yardName, yardFile, values, tracker, options.SyncSource,
-		); err != nil {
+		id := tracker.addLayer(layer.scope, layer.role, layer.path, exists, settingScalar)
+		if exists {
+			if err := applyEnvFileTrackedValidated(layer.path, values, tracker, id, SettingScope(layer.scope), layer.syncable); err != nil {
+				return domain.Context{}, nil, err
+			}
+			if err := validateBootstrapConfigHome(values, configHome, layer.path); err != nil {
+				return domain.Context{}, nil, err
+			}
+		}
+		extendAgentAssetMappings(logicalAssets, values)
+		assetLayer := tracker.addLayer(layer.scope, layer.assetRole, layer.assets, pathPresent(layer.assets), settingFile)
+		var excluded map[string]bool
+		if options.LayerPaths != nil && layer.assetRole == "file settings" {
+			excluded = options.LayerPaths.ExcludedLocalPaths
+		}
+		if err := applyAgentAssetLayer(values, logicalAssets, layer.assets, tracker, assetLayer, excluded); err != nil {
 			return domain.Context{}, nil, err
 		}
-		if err := validateBootstrapConfigHome(values, configHome, yardFile); err != nil {
-			return domain.Context{}, nil, err
-		}
 	}
-	extendAgentAssetMappings(logicalAssets, values)
-	yardAssets := filepath.Join(configHome, "yards", yardName, "overrides", "agents")
-	if options.LayerPaths != nil {
-		yardAssets = options.LayerPaths.YardAssets[yardName]
-	}
-	yardFileLayer := tracker.addLayer(
-		"yard", "file settings", yardAssets, pathPresent(yardAssets), settingFile,
-	)
-	if err := applyAgentAssetLayer(values, logicalAssets,
-		yardAssets, tracker, yardFileLayer); err != nil {
-		return domain.Context{}, nil, err
-	}
+	values["SUBYARD_CONFIG_DIR"] = configDir
 
 	// The process environment is the final layer. Engine-forwarded contexts
 	// have already had inherited yard fields removed above.
@@ -565,12 +544,16 @@ func applyAgentAssetLayer(
 	agentsRoot string,
 	tracker *settingTracker,
 	layer settingLayerID,
+	excluded map[string]bool,
 ) error {
 	if agentsRoot == "" {
 		return nil
 	}
 	for name, relative := range mappings {
 		candidate := filepath.Join(agentsRoot, relative)
+		if excluded[candidate] {
+			continue
+		}
 		exists, err := regularFileExists(candidate)
 		if err != nil {
 			return fmt.Errorf("%s override: %w", name, err)
@@ -702,7 +685,20 @@ func applyYardConfigTracked(
 	if err := settings.applyEnvFileValidated(yardFile, probe, ScopeYard, syncSource, nil); err != nil {
 		return err
 	}
-	if template := probe["YARD_TEMPLATE"]; template != "" {
+	if err := applyYardTemplateTracked(configDir, yardName, probe["YARD_TEMPLATE"], yardFile, values, tracker); err != nil {
+		return err
+	}
+	if tracker == nil {
+		return settings.applyEnvFileValidated(yardFile, values, ScopeYard, syncSource, nil)
+	}
+	yardLayer := tracker.addLayer("yard", "scalar settings", yardFile, true, settingAny)
+	return applyEnvFileTrackedValidated(
+		yardFile, values, tracker, yardLayer, ScopeYard, syncSource,
+	)
+}
+
+func applyYardTemplateTracked(configDir, yardName, template, yardFile string, values environment, tracker *settingTracker) error {
+	if template != "" {
 		if !domain.SafeName(template) {
 			return fmt.Errorf("invalid YARD_TEMPLATE %q in %s", template, yardFile)
 		}
@@ -719,6 +715,16 @@ func applyYardConfigTracked(
 		}
 		if info.IsDir() {
 			return fmt.Errorf("unknown YARD_TEMPLATE %q in %s", template, yardFile)
+		}
+		settings := Catalog{}
+		if tracker != nil {
+			settings = tracker.catalog
+		} else {
+			var err error
+			settings, err = LoadCatalog(filepath.Dir(configDir))
+			if err != nil {
+				return err
+			}
 		}
 		if tracker == nil {
 			if err := settings.applyEnvFileValidated(
@@ -737,13 +743,7 @@ func applyYardConfigTracked(
 			}
 		}
 	}
-	if tracker == nil {
-		return settings.applyEnvFileValidated(yardFile, values, ScopeYard, syncSource, nil)
-	}
-	yardLayer := tracker.addLayer("yard", "scalar settings", yardFile, true, settingAny)
-	return applyEnvFileTrackedValidated(
-		yardFile, values, tracker, yardLayer, ScopeYard, syncSource,
-	)
+	return nil
 }
 
 func applyEnvFileTracked(
@@ -1015,6 +1015,15 @@ func setYardDefault(
 	tracker *settingTracker,
 	layer settingLayerID,
 ) {
+	if tracker != nil {
+		assignments := tracker.assignments[name]
+		if len(assignments) > 0 {
+			previous := tracker.layers[assignments[len(assignments)-1].Layer]
+			if previous.Scope == "yard" && (previous.Role == "scalar settings" || previous.Role == "Git scalar settings") {
+				return
+			}
+		}
+	}
 	if values[name] == "" || values[name] == generic {
 		values[name] = derived
 		tracker.record(layer, name, derived, "", 0, "derived from yard name")

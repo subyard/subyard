@@ -2,10 +2,8 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"maps"
-	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -338,12 +336,5 @@ func (bootstrap *profileBootstrap) checkSelectionSource() error {
 	if bootstrap.selectionPath == "" {
 		return nil
 	}
-	_, err := os.Lstat(filepath.Join(bootstrap.loaded.Context.Paths.ConfigHome, config.SourceRecordRelativePath))
-	if err == nil {
-		return errors.New("configuration is source-managed; enable the profile through the registered source before provisioning")
-	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return nil
+	return config.CheckLocalSettingsWritable(bootstrap.loaded.Context.Paths.ConfigHome)
 }

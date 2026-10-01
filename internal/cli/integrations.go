@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"sort"
@@ -16,7 +17,6 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/statusruntime"
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/config"
-	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 )
@@ -121,14 +121,7 @@ func (cli *CLI) persistentIntegrationContext(loaded config.Loaded) (config.Loade
 }
 
 func integrationSourceGuard(loaded config.Loaded) error {
-	_, registered, err := configsync.ReadSourceRecord(loaded.Context.Paths.ConfigHome)
-	if err != nil {
-		return err
-	}
-	if registered {
-		return errors.New("configuration is source-managed; edit the yard CODING_TOOL_INTEGRATIONS in the registered source, run config sync, then init to reconcile")
-	}
-	return nil
+	return config.CheckLocalSettingsWritable(loaded.Context.Paths.ConfigHome)
 }
 
 func (prepared *preparedCommand) prepareIntegration(ctx context.Context, _ *initBootstrap) error {
@@ -209,7 +202,8 @@ func (prepared *preparedCommand) prepareIntegration(ctx context.Context, _ *init
 		Write   *config.YardIntegrationWrite
 	}{plan.Fingerprint, write})
 	consequences := slices.Clone(plan.Steps)
-	if write.SourcePath != "" || write.FlatBefore.Exists {
+	gitRoot := filepath.Join(loaded.Context.Paths.ConfigHome, filepath.FromSlash(config.GitSettingsRelativePath))
+	if write.FlatBefore.Exists || (write.SourcePath != "" && !strings.HasPrefix(write.SourcePath, gitRoot+string(filepath.Separator))) {
 		consequences = append(consequences, "Preserve and migrate the complete legacy yard registration to canonical config")
 	}
 	if desiredChanged {

@@ -833,8 +833,8 @@ func (cli *CLI) Run(ctx context.Context) int {
 	case "@provision":
 		fmt.Fprintf(cli.options.Stdout, "Usage: %s provision [profile | --list]\n", cli.options.Program)
 		fmt.Fprintln(cli.options.Stdout, "With a profile, reconcile prerequisites and install its toolchain under one confirmation.")
-		fmt.Fprintln(cli.options.Stdout, "Without a registered config sync source, a new profile is added to this yard's persistent selection.")
-		fmt.Fprintln(cli.options.Stdout, "With a registered source, select new profiles in that source, commit and run config sync first. Already selected profiles can be provisioned directly.")
+		fmt.Fprintln(cli.options.Stdout, "A new profile is added to this yard's local selection, including with a registered Git source.")
+		fmt.Fprintln(cli.options.Stdout, "Use config set ENVIRONMENT_PROFILES with --scope yard --git to save the selection in Git explicitly.")
 		fmt.Fprintln(cli.options.Stdout, "Existing profiles are preserved. Profiles without an install hook only reconcile the yard; dedicated-role restrictions still apply.")
 		fmt.Fprintln(cli.options.Stdout, "Without a profile, install the selected toolchains without changing profile selection. --list lists available install hooks.")
 		return 0

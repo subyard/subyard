@@ -149,8 +149,8 @@ enable a profile, reconcile the yard and install its toolchain.
 ```text
 Usage: yard provision [profile | --list]
 With a profile, reconcile prerequisites and install its toolchain under one confirmation.
-Without a registered config sync source, a new profile is added to this yard's persistent selection.
-With a registered source, select new profiles in that source, commit and run config sync first. Already selected profiles can be provisioned directly.
+A new profile is added to this yard's local selection, including with a registered Git source.
+Use config set ENVIRONMENT_PROFILES with --scope yard --git to save the selection in Git explicitly.
 Existing profiles are preserved. Profiles without an install hook only reconcile the yard; dedicated-role restrictions still apply.
 Without a profile, install the selected toolchains without changing profile selection. --list lists available install hooks.
 ```
@@ -305,16 +305,16 @@ Usage: yard integration enable|disable <id> | cleanup <id> [--check] | status [i
 inspect, author, sync and reconcile Subyard settings.
 
 ```text
-Usage: yard config fields [SETTING] | show [SETTING] | paths | set|unset|import|edit ... | status [--all-local] | apply [--all-local] [--yes] | sync <command>
+Usage: yard config fields [SETTING] | show [SETTING] | paths | set|unset|import|edit ... --scope <scope> [--local|--git] | status [--all-local] | apply [--all-local] [--yes] | sync <command>
   fields  list the typed public settings contract (read-only)
   show    explain effective Subyard settings and their sources (read-only)
   paths   list configuration sources and storage roles (read-only)
-  set     write a typed persistent scalar setting
-  unset   remove a persistent scalar setting
-  import  replace a typed persistent file setting from a file
-  edit    edit a typed persistent file setting with VISUAL or EDITOR
+  set     save a typed scalar locally (default/--local) or commit/push it (--git)
+  unset   remove a local scalar override or a Git assignment (--git)
+  import  save a typed file locally or commit/push it (--git)
+  edit    edit a typed file with VISUAL/EDITOR; --git commits and pushes
   repair-registration <yard> [--check] [--yes]  preserve a shadowed flat registration in recovery
   status  check materialized file settings in running local yards (read-only)
   apply   refresh materialized file settings in running local yards
-  sync    connect, inspect, pull, push or import versioned non-secret settings
+  sync    connect, inspect, pull, push committed changes or cache Git settings
 ```

@@ -66,6 +66,15 @@ func BuildPlan(options Options) (Plan, error) {
 			"managed configuration belongs to owner host %q, not %q", previous.HostID, hostID,
 		)
 	}
+	allowedAssets := map[string]bool{}
+	for _, mapping := range options.FileSettings {
+		allowedAssets[filepath.ToSlash(filepath.Clean(mapping.Relative))] = true
+	}
+	for _, file := range previous.Files {
+		if asset, _ := managedSettingRole(localSettingsPath(file.Path)); asset != "" && !allowedAssets[asset] {
+			return Plan{}, errors.New("config sync manifest contains an unknown file setting")
+		}
+	}
 	if err := validateCandidate(options, source, previous, catalog); err != nil {
 		return Plan{}, fmt.Errorf("candidate configuration: %w", err)
 	}
@@ -74,6 +83,10 @@ func BuildPlan(options Options) (Plan, error) {
 		SourceDigest: source.digest, HostID: hostID, InitializeHostID: initializeHostID,
 		PreviousGeneration: previous.Generation, Generation: previous.Generation + 1,
 		Adopt: options.Adopt, options: options, desired: source.files, previous: previous,
+	}
+	plan.localInputs, err = observeLocalInputs(options.ConfigHome, source, previous)
+	if err != nil {
+		return Plan{}, err
 	}
 	previousFiles := make(map[string]ManagedFile, len(previous.Files))
 	for _, file := range previous.Files {
@@ -84,6 +97,37 @@ func BuildPlan(options Options) (Plan, error) {
 			return Plan{}, fmt.Errorf("managed manifest repeats path %q", file.Path)
 		}
 		previousFiles[file.Path] = file
+	}
+	if previous.SchemaVersion == 1 {
+		for _, file := range previous.Files {
+			delete(previousFiles, file.Path)
+			live, err := observeLocalInput(options.ConfigHome, file.Path)
+			if err != nil {
+				return Plan{}, err
+			}
+			if !live.Exists {
+				if err := guardDeletedGitYard(options, source, previous, file.Path); err != nil {
+					return Plan{}, err
+				}
+				continue
+			}
+			if live.Digest != file.Digest || live.Mode != file.Mode {
+				plan.Changes = append(plan.Changes, Change{
+					Path: file.Path, Action: "retain-local", BeforeDigest: live.Digest,
+					AfterDigest: live.Digest, Mode: live.Mode,
+					Detail: "preserve changed legacy setting as a local override; relinquish Git ownership",
+				})
+				continue
+			}
+			if err := guardDeletedGitYard(options, source, previous, file.Path); err != nil {
+				return Plan{}, err
+			}
+			plan.Changes = append(plan.Changes, Change{
+				Path: file.Path, Action: "delete", BeforeDigest: live.Digest, Mode: live.Mode,
+				Applications: applicationsForPath(file.Path),
+				Detail:       "move unchanged legacy setting to Git fallback storage",
+			})
+		}
 	}
 	desiredPaths := make([]string, 0, len(source.files))
 	for path := range source.files {
@@ -158,7 +202,7 @@ func BuildPlan(options Options) (Plan, error) {
 		if err != nil {
 			return Plan{}, err
 		}
-		if err := guardDeletedYardDefinition(options, path); err != nil {
+		if err := guardDeletedGitYard(options, source, previous, path); err != nil {
 			return Plan{}, err
 		}
 		if !exists {
@@ -182,7 +226,7 @@ func BuildPlan(options Options) (Plan, error) {
 	sort.Slice(plan.Changes, func(left, right int) bool {
 		return plan.Changes[left].Path < plan.Changes[right].Path
 	})
-	plan.ManifestChanged = initializeHostID || previous.SchemaVersion == 0 ||
+	plan.ManifestChanged = initializeHostID || previous.SchemaVersion != manifestSchema ||
 		previous.SourceID != source.id || previous.SourceCommit != source.commit ||
 		previous.SourceDigest != source.digest || len(plan.Changes) != 0
 	if !plan.ManifestChanged {
@@ -216,118 +260,68 @@ func validateCandidate(
 	previous Manifest,
 	catalog config.Catalog,
 ) error {
-	previousFiles := map[string]struct{}{}
-	for _, file := range previous.Files {
-		previousFiles[file.Path] = struct{}{}
+	excluded, err := legacyLocalExclusions(options.ConfigHome, previous)
+	if err != nil {
+		return err
 	}
-	selectScalar := func(target string) (string, error) {
-		if candidate, ok := source.files[target]; ok {
-			return candidate.SourcePath, nil
-		}
-		if _, managed := previousFiles[target]; managed {
+	selectLocal := func(target string) (string, error) {
+		path := filepath.Join(options.ConfigHome, filepath.FromSlash(target))
+		if excluded[path] {
 			return "", nil
 		}
-		path := filepath.Join(options.ConfigHome, filepath.FromSlash(target))
-		if _, exists, err := inspectLiveFile(options.ConfigHome, path); err != nil {
+		live, err := observeLocalInput(options.ConfigHome, target)
+		if err != nil {
 			return "", err
-		} else if exists {
+		}
+		if live.Exists {
 			return path, nil
 		}
 		return "", nil
 	}
-	shared, err := selectScalar("overrides/shared/config.env")
+	selectGit := func(target string) string {
+		if candidate, ok := source.files[gitSettingsPath(target)]; ok {
+			return candidate.SourcePath
+		}
+		return ""
+	}
+	shared, err := selectLocal("overrides/shared/config.env")
 	if err != nil {
 		return err
 	}
-	host, err := selectScalar("config.env")
+	host, err := selectLocal("config.env")
 	if err != nil {
 		return err
 	}
-	yardSettings := map[string]string{}
-	yardNames := map[string]struct{}{}
-	for _, name := range source.yardNames {
-		yardNames[name] = struct{}{}
-	}
-	liveYards := filepath.Join(options.ConfigHome, "yards")
-	entries, err := os.ReadDir(liveYards)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
+	yardNames, err := candidateYardNames(options.ConfigHome, source, previous)
+	if err != nil {
 		return err
 	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if !entry.IsDir() {
-			if strings.HasSuffix(name, ".env") {
-				return fmt.Errorf("legacy yard input %s must be migrated before versioned sync", name)
-			}
-			continue
-		}
-		if !domain.SafeName(name) {
-			return fmt.Errorf("invalid live yard directory %q", name)
-		}
+	localYards := map[string]string{}
+	gitYards := map[string]string{}
+	assetYards := append([]string{"default"}, yardNames...)
+	for _, name := range assetYards {
 		target := filepath.ToSlash(filepath.Join("yards", name, "config.env"))
-		if _, managed := previousFiles[target]; managed {
-			if _, desired := source.files[target]; !desired {
-				continue
-			}
-		}
-		path := filepath.Join(liveYards, name, "config.env")
-		if _, exists, err := inspectLiveFile(options.ConfigHome, path); err != nil {
-			return err
-		} else if exists {
-			if name != "default" {
-				yardNames[name] = struct{}{}
-			}
-		}
-	}
-	defaultSettings, err := selectScalar("yards/default/config.env")
-	if err != nil {
-		return err
-	}
-	if defaultSettings != "" {
-		yardSettings["default"] = defaultSettings
-	}
-	for name := range yardNames {
-		target := filepath.ToSlash(filepath.Join("yards", name, "config.env"))
-		path, err := selectScalar(target)
+		localYards[name], err = selectLocal(target)
 		if err != nil {
 			return err
 		}
-		if path == "" {
-			return fmt.Errorf("yard %s has no candidate definition", name)
-		}
-		yardSettings[name] = path
+		gitYards[name] = selectGit(target)
 	}
 	environment := candidateEnvironment(options.Environment, options.ConfigHome, catalog)
-	sharedAssetSource := filepath.Join(source.root, "shared", "overrides", "agents")
-	hostAssetSource := filepath.Join(
-		source.root, "hosts", source.hostID, "overrides", "agents",
-	)
 	layerPaths := &config.LayerPaths{
-		SharedSettings: shared,
-		SharedAssets: candidateAssetRoot(
-			source.files, previous, "overrides/shared/agents/",
-			sharedAssetSource, filepath.Join(options.ConfigHome, "overrides", "shared", "agents"),
-		),
-		HostSettings: host,
-		HostAssets: candidateAssetRoot(
-			source.files, previous, "overrides/host/agents/",
-			hostAssetSource, filepath.Join(options.ConfigHome, "overrides", "host", "agents"),
-		),
-		YardSettings: yardSettings, YardAssets: map[string]string{},
-	}
-	assetYards := []string{"default"}
-	for name := range yardNames {
-		assetYards = append(assetYards, name)
+		SharedSettings: shared, HostSettings: host, YardSettings: localYards,
+		GitSharedSettings: selectGit("overrides/shared/config.env"),
+		GitHostSettings:   selectGit("config.env"), GitYardSettings: gitYards,
+		SharedAssets:    filepath.Join(options.ConfigHome, "overrides", "shared", "agents"),
+		HostAssets:      filepath.Join(options.ConfigHome, "overrides", "host", "agents"),
+		GitSharedAssets: filepath.Join(source.root, "shared", "overrides", "agents"),
+		GitHostAssets:   filepath.Join(source.root, "hosts", source.hostID, "overrides", "agents"),
+		YardAssets:      map[string]string{}, GitYardAssets: map[string]string{},
+		ExcludedLocalPaths: excluded,
 	}
 	for _, name := range assetYards {
-		sourceRoot := filepath.Join(
-			source.root, "hosts", source.hostID, "yards", name, "overrides", "agents",
-		)
-		prefix := filepath.ToSlash(filepath.Join("yards", name, "overrides", "agents")) + "/"
-		layerPaths.YardAssets[name] = candidateAssetRoot(
-			source.files, previous, prefix, sourceRoot,
-			filepath.Join(options.ConfigHome, "yards", name, "overrides", "agents"),
-		)
+		layerPaths.YardAssets[name] = filepath.Join(options.ConfigHome, "yards", name, "overrides", "agents")
+		layerPaths.GitYardAssets[name] = filepath.Join(source.root, "hosts", source.hostID, "yards", name, "overrides", "agents")
 	}
 	contexts := make([]config.Loaded, 0, len(yardNames)+1)
 	load := func(name string) error {
@@ -345,35 +339,12 @@ func validateCandidate(
 	if err := load("default"); err != nil {
 		return err
 	}
-	names := make([]string, 0, len(yardNames))
-	for name := range yardNames {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
+	for _, name := range yardNames {
 		if err := load(name); err != nil {
 			return err
 		}
 	}
 	return validateInventory(contexts)
-}
-
-func candidateAssetRoot(
-	desired map[string]candidateFile,
-	previous Manifest,
-	targetPrefix, sourceRoot, liveRoot string,
-) string {
-	for path := range desired {
-		if strings.HasPrefix(filepath.ToSlash(path), targetPrefix) {
-			return sourceRoot
-		}
-	}
-	for _, file := range previous.Files {
-		if strings.HasPrefix(filepath.ToSlash(file.Path), targetPrefix) {
-			return sourceRoot
-		}
-	}
-	return liveRoot
 }
 
 func candidateEnvironment(
@@ -511,7 +482,7 @@ func readManifest(configHome string) (Manifest, error) {
 	if err := requireJSONEOF(decoder); err != nil {
 		return Manifest{}, err
 	}
-	if manifest.SchemaVersion != manifestSchema {
+	if manifest.SchemaVersion != 1 && manifest.SchemaVersion != manifestSchema {
 		return Manifest{}, fmt.Errorf(
 			"unsupported config sync manifest schema %d", manifest.SchemaVersion,
 		)
@@ -521,6 +492,19 @@ func readManifest(configHome string) (Manifest, error) {
 		!validHexDigest(manifest.SourceID, sha256.Size*2) ||
 		!validHexDigest(manifest.SourceDigest, sha256.Size*2) {
 		return Manifest{}, errors.New("config sync manifest is invalid")
+	}
+	for _, file := range manifest.Files {
+		localPath := file.Path
+		if manifest.SchemaVersion == manifestSchema {
+			localPath = localSettingsPath(file.Path)
+		}
+		_, validRole := managedSettingRole(localPath)
+		if !safeRelative(file.Path) ||
+			!validRole ||
+			(manifest.SchemaVersion == manifestSchema &&
+				!strings.HasPrefix(file.Path, config.GitSettingsRelativePath+"/")) {
+			return Manifest{}, errors.New("config sync manifest contains an invalid managed path")
+		}
 	}
 	return manifest, nil
 }
@@ -542,7 +526,8 @@ func validHexDigest(value string, length int) bool {
 }
 
 func deletedYardDefinition(path string) (string, bool) {
-	parts := strings.Split(filepath.ToSlash(path), "/")
+	path = strings.TrimPrefix(filepath.ToSlash(path), config.GitSettingsRelativePath+"/")
+	parts := strings.Split(path, "/")
 	if len(parts) == 3 && parts[0] == "yards" && parts[2] == "config.env" &&
 		domain.SafeName(parts[1]) && parts[1] != "default" {
 		return parts[1], true
@@ -569,12 +554,14 @@ func planDigest(plan Plan) string {
 		Generation       uint64
 		Changes          []Change
 		Adopt            bool
+		LocalInputs      []localInputObservation
 	}
 	content, _ := json.Marshal(digestPlan{
 		SourceID: plan.SourceID, SourceCommit: plan.SourceCommit,
 		SourceDigest: plan.SourceDigest, HostID: plan.HostID,
 		InitializeHostID: plan.InitializeHostID, Previous: plan.PreviousGeneration,
 		Generation: plan.Generation, Changes: plan.Changes, Adopt: plan.Adopt,
+		LocalInputs: plan.localInputs,
 	})
 	sum := sha256.Sum256(content)
 	return hex.EncodeToString(sum[:])

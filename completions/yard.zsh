@@ -196,12 +196,15 @@ _yard() {
             _describe -t scopes 'persistent scope' scopes
           elif [[ ${words[2]} == import ]]; then
             _arguments '--scope[persistent scope]:scope:(shared host yard)' \
+              '--local[save locally (default)]' '--git[save, commit and push in Git]' \
               '--yes[skip confirmation]' '1:setting:' '2:file:_files'
           elif [[ ${words[2]} == set ]]; then
             _arguments '--scope[persistent scope]:scope:(shared host yard)' \
+              '--local[save locally (default)]' '--git[save, commit and push in Git]' \
               '--yes[skip confirmation]' '1:setting:' '2:value:'
           elif [[ ${words[2]} == unset || ${words[2]} == edit ]]; then
             _arguments '--scope[persistent scope]:scope:(shared host yard)' \
+              '--local[save locally (default)]' '--git[save, commit and push in Git]' \
               '--yes[skip confirmation]' '1:setting:'
           else
             _arguments ${registry_options[@]}

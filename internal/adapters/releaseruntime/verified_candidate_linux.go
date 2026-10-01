@@ -23,12 +23,13 @@ import (
 )
 
 type verifiedPublishedCandidate struct {
-	candidate      publishedCandidate
-	root           *os.File
-	engine         *os.File
-	manifestDigest releasetransition.Fingerprint
-	registryDigest releasetransition.Fingerprint
-	version        string
+	commandManifestBound bool
+	candidate            publishedCandidate
+	root                 *os.File
+	engine               *os.File
+	manifestDigest       releasetransition.Fingerprint
+	registryDigest       releasetransition.Fingerprint
+	version              string
 }
 
 func (candidate *verifiedPublishedCandidate) Close() error {
@@ -101,6 +102,9 @@ func (runtime *Runtime) verifyPublishedCandidate(
 			verified.engine, err = sealVerifiedEngine(file, entry.digest)
 		} else {
 			err = verifyCandidateFile(file, entry.digest)
+			if err == nil && entry.path == "config/commands.registry" {
+				verified.commandManifestBound = true
+			}
 			if err == nil && entry.path == "config/release-transition.json" {
 				verified.registryDigest = releasetransition.Fingerprint(
 					hex.EncodeToString(entry.digest[:]),

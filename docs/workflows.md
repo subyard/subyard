@@ -181,7 +181,7 @@ continue to require their matching named-yard preset. Resource service bring-up 
 separate operation. Repeating the command reconciles drift; after a partial failure, rerun it
 to finish the already selected profile. A fully converged run does not prompt. With a registered
 sync source, enable a new profile in that source, commit the change and sync it first; follow the
-[source-managed profile workflow](configuration.md#enabling-a-profile-with-a-registered-source).
+[local and Git profile settings workflow](configuration.md#enabling-a-profile-with-a-registered-source).
 Provision can still reconcile an already selected profile. Temporary `ENVIRONMENT_PROFILES`
 overrides are not persisted by this command.
 

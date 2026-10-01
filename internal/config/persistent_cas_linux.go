@@ -20,7 +20,9 @@ func CompareAndSwapPersistentFile(
 	expected PersistentFileSnapshot,
 	desired []byte,
 ) error {
-	return compareAndSwapPersistentFile(configHome, path, expected, desired, nil)
+	return compareAndSwapPersistentFileGuarded(configHome, path, expected, desired, func() error {
+		return checkLocalSettingsTargetWritable(configHome, path)
+	}, nil)
 }
 
 func compareAndSwapPersistentFile(

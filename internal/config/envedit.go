@@ -274,6 +274,9 @@ func writePersistentAssignment(
 		return err
 	}
 	defer unlock()
+	if err := checkLocalSettingsTargetWritable(configHome, path); err != nil {
+		return err
+	}
 	current, err := persistentFileSnapshot(path)
 	if err != nil {
 		return err
@@ -352,6 +355,9 @@ func WritePersistentFileIfUnchanged(
 		return err
 	}
 	defer unlock()
+	if err := checkLocalSettingsTargetWritable(configHome, path); err != nil {
+		return err
+	}
 	current, err := persistentFileSnapshot(path)
 	if err != nil {
 		return err
@@ -417,6 +423,9 @@ func CreatePersistentFile(configHome, path string, content []byte) error {
 		return err
 	}
 	defer unlock()
+	if err := checkLocalSettingsTargetWritable(configHome, path); err != nil {
+		return err
+	}
 	return persistFile(configHome, path, content, false)
 }
 

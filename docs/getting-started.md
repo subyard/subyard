@@ -60,7 +60,9 @@ yard config paths
 ```
 
 Common non-secret settings can be synchronized between owner hosts through an explicitly connected
-Git checkout. The runtime never connects a configuration repository automatically. Run
+Git checkout. Settings save locally by default; use a typed config writer with `--git` to save one
+change with immediate commit and push. Local settings override the offline Git fallback. The
+runtime never connects a configuration repository automatically. Run
 `yard config sync help` for setup, status, pull, and push examples, and read the full
 [configuration guide](configuration.md) for scopes, validation, file settings, and synchronization.
 

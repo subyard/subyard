@@ -90,7 +90,8 @@ to its virtual disk. The disk-exhaustion check observed guest free space return 
 the temporary file, while host allocation stayed high until release deleted the root volume.
 Use the broker's physical usage and remaining-growth fields when assessing headroom.
 
-Admission settings use ordinary shipped/shared/host/yard/command configuration precedence and are
+Admission settings use shipped defaults, Git shared/host/yard, local shared/host/yard, then command
+configuration precedence and are
 installed by `yard init`. These initial defaults still require workload peak measurements:
 
 | Setting | Initial value | Purpose |
@@ -376,7 +377,9 @@ dev/agent-e2e.sh --slot "$slot" --purpose integration-selection --vm 1 -- \
 The `cold` mode first removes Incus from an empty disposable baseline, then runs the container
 lifecycle through product installation. Container checks also stop the installed daemon and verify
 that init refuses to replace an existing yard's inherited integration intent before restarting it.
-Other modes are `vm`, `default`, `special` (fresh test-vms role), and `upgrade` (owned
+The `local-first` mode connects an isolated Git source to an initialized container, enables an
+integration locally, and verifies that source pull/sync preserve the local selection and explicit
+empty override. Other modes are `vm`, `default`, `special` (fresh test-vms role), and `upgrade` (owned
 ordinary-yard artifacts retired when adopting the test-vms role). The `default` mode installs
 all five fresh-default integrations and needs their normal package download access. Test config,
 physical project and instance names, and teardown are isolated from the retained host baseline.

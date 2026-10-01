@@ -30,16 +30,17 @@ var forbiddenSourceComponents = map[string]struct{}{
 }
 
 type sourceSnapshot struct {
-	root       string
-	id         string
-	commit     string
-	digest     string
-	hostID     string
-	catalog    config.Catalog
-	manifest   SourceManifest
-	files      map[string]candidateFile
-	yardNames  []string
-	scalarPath map[string]string
+	root         string
+	id           string
+	commit       string
+	digest       string
+	hostID       string
+	catalog      config.Catalog
+	manifest     SourceManifest
+	files        map[string]candidateFile
+	yardNames    []string
+	scalarPath   map[string]string
+	fileSettings []config.FileSettingMapping
 }
 
 func readSource(options Options, hostID string, catalog config.Catalog) (sourceSnapshot, error) {
@@ -97,7 +98,7 @@ func readSource(options Options, hostID string, catalog config.Catalog) (sourceS
 	snapshot := sourceSnapshot{
 		root: root, id: digestBytes([]byte(identityRoot)), commit: commit, hostID: hostID,
 		catalog: catalog, manifest: manifest, files: map[string]candidateFile{},
-		scalarPath: map[string]string{},
+		scalarPath: map[string]string{}, fileSettings: options.FileSettings,
 	}
 	if err := validateTopLevelRoles(root); err != nil {
 		return sourceSnapshot{}, err
@@ -254,7 +255,7 @@ func (snapshot *sourceSnapshot) readConfig(
 			)
 		}
 	}
-	target = filepath.ToSlash(target)
+	target = filepath.ToSlash(filepath.Join(config.GitSettingsRelativePath, target))
 	snapshot.files[target] = candidateFile{
 		SourcePath: source, Content: content, Digest: digestBytes(content), Mode: 0o600,
 		Applications: applications,
@@ -314,7 +315,7 @@ func (snapshot *sourceSnapshot) readOverrides(
 		if err := config.ValidateNonSecretContent(mapping.Name, string(content)); err != nil {
 			return fmt.Errorf("%s: %w", filepath.ToSlash(relative), err)
 		}
-		target := filepath.ToSlash(filepath.Join(targetRoot, relative))
+		target := filepath.ToSlash(filepath.Join(config.GitSettingsRelativePath, targetRoot, relative))
 		snapshot.files[target] = candidateFile{
 			SourcePath: path, Content: content, Digest: digestBytes(content), Mode: 0o644,
 			Applications: []config.SettingApplication{mapping.Application},

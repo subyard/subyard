@@ -22,6 +22,8 @@ type configAuthoringRequest struct {
 	inputPath string
 	scope     config.SettingScope
 	assumeYes bool
+	git       bool
+	storage   string
 }
 
 func (cli *CLI) runConfigAuthoring(
@@ -50,6 +52,16 @@ func (cli *CLI) runConfigAuthoring(
 		cli.errorf("config %s: %v", action, err)
 		return 2
 	}
+	if !request.git {
+		if err := config.CheckLocalSettingsWritable(loaded.Context.Paths.ConfigHome); err != nil {
+			cli.errorf("config %s: %v", action, err)
+			return 1
+		}
+	}
+	if request.git && (!definition.Syncable || definition.Sensitive) {
+		cli.errorf("config %s: %s cannot be saved in Git", action, request.name)
+		return 2
+	}
 	if action == "set" || action == "unset" {
 		if definition.Kind != config.SettingScalar {
 			cli.errorf(
@@ -60,7 +72,7 @@ func (cli *CLI) runConfigAuthoring(
 		}
 		if action == "set" {
 			if err := loaded.Catalog.ValidateSetting(
-				request.scope, request.name, request.value, false,
+				request.scope, request.name, request.value, request.git,
 			); err != nil {
 				cli.errorf("config set: %v", err)
 				return 2
@@ -82,6 +94,9 @@ func (cli *CLI) runConfigAuthoring(
 				cli.errorf("config %s: %v", action, err)
 				return 2
 			}
+		}
+		if request.git {
+			return cli.runConfigGitAuthoring(ctx, loaded, request, nil)
 		}
 		path, err := configScalarAuthoringPath(loaded, request.scope)
 		if err != nil {
@@ -179,7 +194,15 @@ func (cli *CLI) runConfigAuthoring(
 		}
 		content, err = readConfigAuthoringFile(source)
 	} else {
-		content, err = cli.editConfigAuthoringFile(ctx, snapshot.Content)
+		draft := snapshot.Content
+		if request.git {
+			draft, err = readConfigAuthoringFile(loaded.Environment[request.name])
+			if err != nil {
+				cli.errorf("config edit: %v", err)
+				return 1
+			}
+		}
+		content, err = cli.editConfigAuthoringFile(ctx, draft)
 	}
 	if err != nil {
 		cli.errorf("config %s: %v", action, err)
@@ -188,6 +211,9 @@ func (cli *CLI) runConfigAuthoring(
 	if err := config.ValidateNonSecretContent(request.name, string(content)); err != nil {
 		cli.errorf("config %s: %v", action, err)
 		return 1
+	}
+	if request.git {
+		return cli.runConfigGitAuthoring(ctx, loaded, request, content)
 	}
 	intended := config.PersistentFileSnapshot{Exists: true, Content: content}
 	unchanged := sameConfigAuthoringSnapshot(snapshot, intended)
@@ -243,6 +269,12 @@ func parseConfigAuthoringRequest(
 				return request, errors.New("--scope may be specified only once")
 			}
 			request.scope = config.SettingScope(arguments[index])
+		case "--local", "--git":
+			if request.storage != "" {
+				return request, errors.New("choose --local or --git only once")
+			}
+			request.storage = arguments[index]
+			request.git = request.storage == "--git"
 		case "-y", "--yes":
 			request.assumeYes = true
 		default:
