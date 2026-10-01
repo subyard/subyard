@@ -3154,6 +3154,45 @@ func (err v2PublicActivationError) ActivationDiagnostic() (string, string) {
 	return err.message, err.retry
 }
 
+func TestV2TransitionPreservesPublicReconcileDiagnostic(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		cause          error
+		message, retry string
+	}{
+		{"public", fmt.Errorf("private wrapper: %w", v2PublicActivationError{
+			"yard demo: integration reconciliation failed", "run yard -Y demo integration status",
+		}), "yard demo: integration reconciliation failed", "run yard -Y demo integration status"},
+		{"raw", errors.New("private failure"), "", ""},
+		{"empty", v2PublicActivationError{}, "", ""},
+		{"multiline", v2PublicActivationError{"unsafe\nmessage", "run yard update"}, "", ""},
+		{"oversized", v2PublicActivationError{strings.Repeat("x", maxDiagnosticText+1), "run yard update"}, "", ""},
+		{"unsafe action", v2PublicActivationError{"known message", "inspect; mutate"}, "", ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			transition, _, _ := v2TransitionFixture(t, nil)
+			transition.options.Reconcilers = []V2ActivationReconciler{
+				&v2FailingReconciler{id: "materialized-config", reconcileErr: test.cause},
+			}
+			inspection, err := transition.Inspect(context.Background(), Goal{Target: "release-a", Direction: DirectionActivateTarget})
+			if err != nil {
+				t.Fatal(err)
+			}
+			outcome, err := transition.Converge(context.Background(), Execution{
+				Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
+			})
+			message, retry := test.message, test.retry
+			if message == "" {
+				message, retry = `activation reconciler "materialized-config" failed during reconcile`, "run yard update"
+			}
+			if err != nil || outcome.Status != StatusRecovering || outcome.Code != CodeDependencyUnavailable ||
+				outcome.Message != message || outcome.Retry != retry || strings.Contains(outcome.Message, "private") {
+				t.Fatalf("reconcile diagnostic = %#v, err=%v", outcome, err)
+			}
+		})
+	}
+}
+
 func TestV2TransitionReportsCompletedActivationObservationFailureAsBlocker(t *testing.T) {
 	transition, _, _ := v2TransitionFixture(t, nil)
 	transition.options.Reconcilers = []V2ActivationReconciler{&v2TestReconciler{}}
@@ -3382,6 +3421,7 @@ func TestV2TransitionReobservesFailedActivationReconcilerResult(t *testing.T) {
 	tests := []struct {
 		name       string
 		post       V2ActivationObservation
+		failure    error
 		wantStatus PublicStatus
 		wantCode   OutcomeCode
 	}{
@@ -3401,10 +3441,17 @@ func TestV2TransitionReobservesFailedActivationReconcilerResult(t *testing.T) {
 			wantStatus: StatusOperatorActionRequired,
 			wantCode:   CodeRecoveryAmbiguous,
 		},
+		{
+			name:       "public diagnostic does not override third state guard",
+			post:       V2ActivationObservation{Actual: digestC, Desired: digestA},
+			failure:    v2PublicActivationError{"public reconcile detail", "run yard -Y demo integration status"},
+			wantStatus: StatusOperatorActionRequired,
+			wantCode:   CodeRecoveryAmbiguous,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			reconciler := &v2PostErrorReconciler{post: test.post}
+			reconciler := &v2PostErrorReconciler{post: test.post, reconcileErr: test.failure}
 			transition, _, _ := v2TransitionFixture(t, nil)
 			transition.options.Reconcilers = []V2ActivationReconciler{reconciler}
 			goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
@@ -3421,6 +3468,10 @@ func TestV2TransitionReobservesFailedActivationReconcilerResult(t *testing.T) {
 					"outcome=%#v err=%v post-error observations=%d",
 					outcome, err, reconciler.postErrorObservations,
 				)
+			}
+			if test.failure != nil && (strings.Contains(outcome.Message, "public reconcile detail") ||
+				outcome.Retry != "run yard update --check") {
+				t.Fatalf("reconcile diagnostic replaced recovery guard: %#v", outcome)
 			}
 		})
 	}
@@ -3569,6 +3620,7 @@ type v2TestReconciler struct {
 
 type v2PostErrorReconciler struct {
 	post                  V2ActivationObservation
+	reconcileErr          error
 	failed                bool
 	postErrorObservations int
 }
@@ -3836,6 +3888,9 @@ func (reconciler *v2PostErrorReconciler) Observe(
 
 func (reconciler *v2PostErrorReconciler) Reconcile(context.Context, ReleaseLinks) error {
 	reconciler.failed = true
+	if reconciler.reconcileErr != nil {
+		return reconciler.reconcileErr
+	}
 	return errors.New("private reconciler failure")
 }
 

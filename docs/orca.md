@@ -183,6 +183,11 @@ Desktop as described above.
 
 ## Projects and lifecycle
 
+Workspace discovery remains recursive through ignored directories, including `.build`.
+It allows up to one million filesystem entries within its 20-second scan budget.
+If either limit is reached, status identifies the exhausted limit and reports incomplete
+discovery; existing Orca records are retained until a complete scan can verify cleanup.
+
 Subyard replaces Orca's stock Codex YOLO launch default with an explicit empty
 argument setting. With the default account, Codex then reads the yard's
 `~/.codex/config.toml`, including

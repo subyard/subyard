@@ -63,7 +63,7 @@ def _git_kind(path, fd, marker, deadline):
     try:
         remaining = min(3.0, deadline - time.monotonic())
         if remaining <= 0:
-            raise ScanLimit()
+            raise ScanLimit("time")
         probe = subprocess.run(["git", "rev-parse", "--show-toplevel"],
                                cwd="/proc/self/fd/" + str(fd), pass_fds=(fd,),
                                env=environment, capture_output=True, timeout=remaining)
@@ -126,7 +126,7 @@ def verify_missing(scan, path):
     return False
 
 
-def discover(workspaces, deadline=None, max_entries=100000):
+def discover(workspaces, deadline=None, max_entries=1000000):
     workspaces = os.path.abspath(workspaces)
     scan = Scan(workspaces=workspaces)
     deadline = deadline if deadline is not None else time.monotonic() + 20.0
@@ -135,8 +135,10 @@ def discover(workspaces, deadline=None, max_entries=100000):
     def check():
         nonlocal entries_left
         entries_left -= 1
-        if entries_left < 0 or time.monotonic() >= deadline:
-            raise ScanLimit()
+        if entries_left < 0:
+            raise ScanLimit("entry")
+        if time.monotonic() >= deadline:
+            raise ScanLimit("time")
 
     def entries(fd):
         found = []
@@ -255,8 +257,8 @@ def discover(workspaces, deadline=None, max_entries=100000):
                     os.close(project_fd)
         finally:
             os.close(base_fd)
-    except ScanLimit:
-        scan.errors.append("Workspace discovery limit reached; expected repository set is incomplete")
+    except ScanLimit as error:
+        scan.errors.append("Workspace discovery " + str(error) + " limit reached; expected repository set is incomplete")
     except OSError:
         scan.errors.append("Workspace directory is unavailable or changed during discovery")
     return scan

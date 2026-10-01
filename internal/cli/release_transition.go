@@ -694,25 +694,25 @@ func (applier releaseTransitionConfigApplier) ApplyConfig(
 
 func (*materializedConfigActivationReconciler) ID() string { return "materialized-config" }
 
-type materializedConfigObservationError struct {
-	cause                error
-	yard, phase, command string
+type materializedConfigActivationError struct {
+	cause                        error
+	yard, phase, command, action string
 }
 
-func (err materializedConfigObservationError) Error() string {
+func (err materializedConfigActivationError) Error() string {
 	return fmt.Sprintf("yard %s %s: %v", err.yard, err.phase, err.cause)
 }
 
-func (err materializedConfigObservationError) Unwrap() error { return err.cause }
+func (err materializedConfigActivationError) Unwrap() error { return err.cause }
 
-func (err materializedConfigObservationError) ActivationDiagnostic() (string, string) {
+func (err materializedConfigActivationError) ActivationDiagnostic() (string, string) {
 	// Preserve more specific, explicitly public diagnostics from the adapter.
 	var diagnostic interface{ ActivationDiagnostic() (string, string) }
 	if errors.As(err.cause, &diagnostic) {
 		return diagnostic.ActivationDiagnostic()
 	}
 	// Only validated yard names and fixed phase/command text cross this boundary.
-	return fmt.Sprintf("yard %s: cannot inspect %s for release activation", err.yard, err.phase),
+	return fmt.Sprintf("yard %s: cannot %s %s for release activation", err.yard, err.action, err.phase),
 		fmt.Sprintf("run yard -Y %s %s", err.yard, err.command)
 }
 
@@ -748,14 +748,14 @@ func (reconciler *materializedConfigActivationReconciler) Observe(
 	operation := reconciler.operation()
 	loaded, err := operation.resolveReleaseTransitionContext(yard, reconciler.configHome)
 	if err != nil {
-		return releasetransition.V2ActivationObservation{}, materializedConfigObservationError{err, yard, "configuration", "config status"}
+		return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{err, yard, "configuration", "config status", "inspect"}
 	}
 	if err := reconciler.resolveScope(releases); err != nil {
 		return releasetransition.V2ActivationObservation{}, err
 	}
 	targets, err := operation.localConfigTargets(loaded, reconciler.allLocal)
 	if err != nil {
-		return releasetransition.V2ActivationObservation{}, materializedConfigObservationError{err, yard, "local yard configurations", "config status --all-local"}
+		return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{err, yard, "local yard configurations", "config status --all-local", "inspect"}
 	}
 	type targetFingerprint struct {
 		Name         string `json:"name"`
@@ -774,7 +774,7 @@ func (reconciler *materializedConfigActivationReconciler) Observe(
 	for _, target := range targets {
 		assessment, assessErr := operation.assessConfigTarget(ctx, target, true)
 		if assessErr != nil {
-			return releasetransition.V2ActivationObservation{}, materializedConfigObservationError{assessErr, target.Name, "materialized config", "config status"}
+			return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{assessErr, target.Name, "materialized config", "config status", "inspect"}
 		}
 		integrationScope := ""
 		var managedPaths []string
@@ -783,16 +783,16 @@ func (reconciler *materializedConfigActivationReconciler) Observe(
 		if runtime, ok := platform.(reconcileruntime.Runtime); ok && target.Loaded.Integrations.AllowsCodingTools {
 			integrationScope, managedPaths, err = runtime.IntegrationScope()
 			if err != nil {
-				return releasetransition.V2ActivationObservation{}, materializedConfigObservationError{err, target.Name, "integration scope", "integration status"}
+				return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{err, target.Name, "integration scope", "integration status", "inspect"}
 			}
 			if assessment.State == "drift" || assessment.State == "converged" {
 				platform, _, err = prepareLegacyIntegrationAdoption(ctx, target.Loaded.Integrations, platform)
 				if err != nil {
-					return releasetransition.V2ActivationObservation{}, materializedConfigObservationError{err, target.Name, "legacy integrations", "integration status"}
+					return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{err, target.Name, "legacy integrations", "integration status", "inspect"}
 				}
 				integration, err = platform.(reconcileruntime.Runtime).IntegrationPlan(ctx)
 				if err != nil {
-					return releasetransition.V2ActivationObservation{}, materializedConfigObservationError{err, target.Name, "integration plan", "integration status"}
+					return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{err, target.Name, "integration plan", "integration status", "inspect"}
 				}
 				if captureIntegrationPlans {
 					reconciler.integrationPlans[target.Name] = integration
@@ -960,7 +960,7 @@ func (reconciler *materializedConfigActivationReconciler) Reconcile(
 	// before the ordinary config refresh can replace any unowned bytes.
 	for _, target := range targets {
 		if err := reconciler.reconcileIntegrationTarget(ctx, operation, target); err != nil {
-			return err
+			return materializedConfigActivationError{err, target.Name, "integrations", "integration status", "reconcile"}
 		}
 	}
 	selector := func() ([]configTarget, error) {

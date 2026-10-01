@@ -528,6 +528,19 @@ Use typed writers with `--git` to create and push a setting change. Dirty, confl
 upstream-less or diverged checkouts fail closed; Subyard does not stash, merge, rebase, reset or
 resolve conflicts.
 
+Native `sync pull` and `sync push` remove group/world write permissions from the registered
+checkout before importing it. Permission repair is included in their confirmed plan even when
+the committed settings and live configuration already match. Declining leaves the checkout
+unchanged.
+
+Git does not store these write permissions. An external Git checkout or merge can recreate files
+or directories with unsafe modes. After publishing source edits upstream, use `config sync pull`
+to import them through the protected workflow. If bare `config sync` or `--check` reports
+`source file is group/world writable` or `source directory is group/world writable` for a clean
+registered checkout, use `config sync pull` to restore safe permissions and import the source.
+The candidate must still pass source validation and unmanaged-target adoption checks before
+permission repair can be confirmed. The read-only commands never repair permissions silently.
+
 `--check` is read-only, never prompts, and exits non-zero when an apply or local manifest update is
 needed. A changing sync prints the source commit and exact redacted managed-path plan, then asks once.
 `--apply` composes the import with `yard config apply` for affected running local yards under the
