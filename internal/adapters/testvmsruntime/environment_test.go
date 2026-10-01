@@ -38,6 +38,13 @@ func TestNamedEnvironments(t *testing.T) {
 	if _, err := cfg.EnvironmentSpec(EnvironmentAndroid); (err == nil) != (runtime.GOARCH == "amd64") {
 		t.Fatalf("host architecture resolution mismatch for %s: %v", runtime.GOARCH, err)
 	}
+	pair, _ := cfg.EnvironmentSpec(EnvironmentPair)
+	for _, count := range []int{0, 1, 2, 3} {
+		pair.Count = count
+		if err := pair.Validate(); (err == nil) != (count == 1 || count == 2) {
+			t.Fatalf("pair count %d validation = %v", count, err)
+		}
+	}
 	spec, _ := cfg.environmentSpecForArch(EnvironmentAndroid, "amd64")
 	spec.Count = 2
 	if err := spec.Validate(); err == nil {
@@ -63,18 +70,24 @@ func TestNamedEnvironmentIncusResourceRequests(t *testing.T) {
 		memory string
 		disk   string
 	}{
+		{EnvironmentPair, 1, "4GiB", "20GiB"},
 		{EnvironmentPair, 2, "4GiB", "20GiB"},
 		{EnvironmentAndroid, 1, "8GiB", "40GiB"},
 	} {
-		t.Run(test.name, func(t *testing.T) {
+		t.Run(test.name+"/"+strconv.Itoa(test.count), func(t *testing.T) {
 			spec, err := base.environmentSpecForArch(test.name, "amd64")
 			if err != nil {
+				t.Fatal(err)
+			}
+			spec.Count = test.count
+			if err := spec.Validate(); err != nil {
 				t.Fatal(err)
 			}
 			if spec.Count != test.count || spec.CPU != 4 || spec.Memory != test.memory || spec.Disk != test.disk {
 				t.Fatalf("unexpected named environment contract: %+v", spec)
 			}
 			cfg := base.withEnvironment(spec)
+			memoryMiB, _ := sizeMiB(test.memory)
 			cfg.Image = "local:" + strings.Repeat("a", 64)
 			runner := &fakeRunner{handler: func(_ string, args, _ []string, _ io.Reader) ([]byte, []byte, error) {
 				switch strings.Join(args, " ") {
@@ -105,7 +118,7 @@ func TestNamedEnvironmentIncusResourceRequests(t *testing.T) {
 						"features.images=false", "limits.instances=" + strconv.Itoa(test.count),
 						"limits.virtual-machines=" + strconv.Itoa(test.count),
 						"limits.cpu=" + strconv.Itoa(4*test.count),
-						"limits.memory=8192MiB",
+						"limits.memory=" + strconv.Itoa(memoryMiB*test.count) + "MiB",
 					} {
 						if !strings.Contains(joined, setting) {
 							t.Errorf("project create omitted %s: %s", setting, joined)

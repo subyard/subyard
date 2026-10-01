@@ -113,6 +113,52 @@ func TestResourceStatusIsReadOnlyAndSeparatesPhysicalUsage(t *testing.T) {
 	}
 }
 
+func TestResourceStatusScalesRequestedVMCount(t *testing.T) {
+	for _, count := range []int{1, 2} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			cfg := fixtureConfig(t)
+			cfg.Memory, cfg.Disk = "4GiB", "20GiB"
+			spec, err := cfg.EnvironmentSpec(EnvironmentPair)
+			if err != nil {
+				t.Fatal(err)
+			}
+			spec.Count = count
+			rt := Runtime{
+				Config: cfg,
+				memoryProbe: func() (MemoryCapacity, error) {
+					return MemoryCapacity{Available: 16 << 30}, nil
+				},
+				diskUsageProbe: func(context.Context) (uint64, error) { return 1 << 30, nil },
+				cacheProbe:     func(context.Context) (CacheUsage, error) { return CacheUsage{}, nil },
+				usageProbe: func(context.Context, LeaseSlot, string) allocationUsage {
+					return allocationUsage{memoryKnown: true, diskKnown: true}
+				},
+				Runner: &fakeRunner{handler: func(_ string, args, _ []string, _ io.Reader) ([]byte, []byte, error) {
+					switch strings.Join(args, " ") {
+					case "query /1.0/storage-pools/default/resources":
+						return []byte(`{"space":{"total":107374182400,"used":1073741824}}`), nil, nil
+					case "query /1.0/storage-pools/default":
+						return []byte(`{"driver":"zfs"}`), nil, nil
+					default:
+						return nil, nil, fmt.Errorf("unexpected status operation: %v", args)
+					}
+				}},
+			}
+			status := rt.ResourceStatus(context.Background(), LeasePool{Slots: []LeaseSlot{
+				{SlotID: "slot-001", State: SlotHeld, Environment: &spec, Reserved: true},
+			}})
+			wantMemory, wantDisk := uint64(count)*(9<<29), uint64(count)*(20<<30)
+			if len(status.Errors) != 0 || status.ReservedMemory != wantMemory || status.VirtualDiskCapacity != wantDisk || len(status.Slots) != 1 {
+				t.Fatalf("wrong aggregate commitments: %+v", status)
+			}
+			slot := status.Slots[0]
+			if slot.MemoryCommitment != wantMemory || slot.RemainingMemory != wantMemory || slot.VirtualDiskCapacity != wantDisk || slot.RemainingDisk != wantDisk {
+				t.Fatalf("wrong slot commitments: %+v", slot)
+			}
+		})
+	}
+}
+
 func TestRefreshFailurePreservesPreviousBaseAndLeasePool(t *testing.T) {
 	cfg := fixtureConfig(t)
 	cfg.RecipeRoot = t.TempDir()

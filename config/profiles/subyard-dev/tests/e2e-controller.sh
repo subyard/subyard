@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf -- "$tmp"' EXIT
-controller=config/profiles/hermes/tests/e2e/acceptance.sh
+controller=config/profiles/subyard-dev/tests/e2e/acceptance.sh
 mkdir -p "$tmp/$(dirname "$controller")" "$tmp/dev"
 cp "$ROOT/$controller" "$tmp/$controller"
 cat > "$tmp/dev/agent-e2e.sh" <<'SH'
@@ -17,7 +17,7 @@ if bash "$tmp/$controller" > "$tmp/missing" 2>&1; then
 fi
 ! grep -q -- '--purpose' "$tmp/missing"
 bash "$tmp/$controller" --slot 7 > "$tmp/calls"
-grep -Fxq -- '--slot 7 --vm-count 1 --purpose hermes-profile --vm 1 -- bash config/profiles/hermes/tests/e2e/hermes-profile.sh' "$tmp/calls"
+grep -Fxq -- '--slot 7 --vm-count 1 --purpose subyard-dev-provision --vm 1 -- bash config/profiles/subyard-dev/tests/e2e/owner.sh' "$tmp/calls"
 rc=0
 PROFILE_CONTROLLER_EXIT=23 bash "$tmp/$controller" --slot 7 > "$tmp/failure" 2>&1 || rc=$?
 [ "$rc" -eq 23 ]

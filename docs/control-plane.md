@@ -822,7 +822,7 @@ contain no real secret. The opt-in E2E VM subset is documented in
 ## E2E VM acceptance lane
 
 Host-free fakes cannot prove Incus, kernel, network, mount, systemd, or real SSH behavior. The
-operator maintains a configurable pool of disposable two-VM pairs. The canonical pool, exact-slot,
+operator maintains a configurable pool of disposable one- or two-VM allocations. The canonical pool, exact-slot,
 lease, nested-slot, and cleanup contract lives in [Agent E2E VM pool](test-vms.md). The
 release smoke is `dev/e2e/p0-acceptance.sh --slot N`; the full compatibility matrix is
 `dev/e2e/p0-acceptance.sh --slot N --lane full`. Choose checks using

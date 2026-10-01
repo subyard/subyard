@@ -13,7 +13,7 @@ const (
 )
 
 // EnvironmentSpec is resolved by the broker's trusted configuration. Clients
-// select a name, never arbitrary devices, privileges or resource limits.
+// select a name and supported guest count, never arbitrary devices, privileges or resource limits.
 type EnvironmentSpec struct {
 	Name      string `json:"type"`
 	Count     int    `json:"vm_count"`
@@ -47,7 +47,7 @@ func (spec EnvironmentSpec) Validate() error {
 	if spec.Lifecycle != DisposableLifecycle || spec.CPU < 1 {
 		return errors.New("invalid environment lifecycle or CPU limit")
 	}
-	if (spec.Name != EnvironmentPair || spec.Count != 2) &&
+	if (spec.Name != EnvironmentPair || (spec.Count != 1 && spec.Count != 2)) &&
 		(spec.Name != EnvironmentAndroid || spec.Count != 1) {
 		return errors.New("invalid named environment composition")
 	}

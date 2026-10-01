@@ -62,6 +62,8 @@ controller_main() {
   [ -n "$slot" ] || { usage; return 2; }
   # shellcheck source=dev/agent-e2e.sh
   . "$ROOT/dev/agent-e2e.sh"
+  VM_COUNT_REQUESTED=1
+  VM_COUNT=1
   set_requested_slot "$slot" --slot
   # shellcheck disable=SC2034
   LEASE_PURPOSE='github-broker'

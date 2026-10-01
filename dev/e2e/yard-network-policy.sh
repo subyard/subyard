@@ -60,6 +60,7 @@ controller_main() {
   target_alias="e2e-vm-$target_vm"
   # shellcheck source=dev/agent-e2e.sh
   . "$ROOT/dev/agent-e2e.sh"
+  VM_COUNT_REQUESTED="$target_vm"
   set_requested_slot "$slot" --slot
   # Consumed dynamically by the sourced lease client.
   # shellcheck disable=SC2034

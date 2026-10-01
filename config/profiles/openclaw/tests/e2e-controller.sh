@@ -23,7 +23,7 @@ if bash "$tmp/$controller" --slot 0 > "$tmp/zero" 2>&1; then
   printf 'FAIL: OpenClaw controller accepted slot zero\n' >&2; exit 1
 fi
 bash "$tmp/$controller" --slot 7 > "$tmp/calls"
-grep -Fxq -- '--slot 7 --purpose openclaw-provision --vm 1 -- bash config/profiles/openclaw/tests/e2e/owner.sh' "$tmp/calls"
+grep -Fxq -- '--slot 7 --vm-count 1 --purpose openclaw-provision --vm 1 -- bash config/profiles/openclaw/tests/e2e/owner.sh' "$tmp/calls"
 rc=0
 PROFILE_CONTROLLER_EXIT=23 bash "$tmp/$controller" --slot 7 > "$tmp/failure" 2>&1 || rc=$?
 [ "$rc" -eq 23 ]

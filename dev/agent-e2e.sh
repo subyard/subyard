@@ -38,6 +38,7 @@ LEASE_PURPOSE=""
 LEASE_REQUESTED_SLOT=""
 ENVIRONMENT_TYPE=subyard-pair
 VM_COUNT=2
+VM_COUNT_REQUESTED=''
 BASE_FINGERPRINT=""
 WAIT_SECONDS=0
 E2E_ACTIVE_PHASE=""
@@ -96,10 +97,10 @@ usage() {
 Usage:
   dev/agent-e2e.sh [--yard NAME] --prepare
   dev/agent-e2e.sh [--yard NAME] --status [--json]
-  dev/agent-e2e.sh [--yard NAME] --slot N [--wait DURATION] [--purpose LABEL] [--type subyard-pair|android-test] [--vm 1|2|both] -- COMMAND [ARG...]
-  dev/agent-e2e.sh [--yard NAME] --slot N [--purpose LABEL] --ssh 1|2 [-- COMMAND [ARG...]]
-  dev/agent-e2e.sh [--yard NAME] --slot N [--purpose LABEL] --ssh-stdin 1|2 -- COMMAND [ARG...]
-  dev/agent-e2e.sh [--yard NAME] --slot N --verify-boundary
+  dev/agent-e2e.sh [--yard NAME] --slot N [--wait DURATION] [--purpose LABEL] [--type subyard-pair|android-test] [--vm-count 1|2] [--vm 1|2|both] -- COMMAND [ARG...]
+  dev/agent-e2e.sh [--yard NAME] --slot N [--purpose LABEL] [--vm-count 1|2] --ssh 1|2 [-- COMMAND [ARG...]]
+  dev/agent-e2e.sh [--yard NAME] --slot N [--purpose LABEL] [--vm-count 1|2] --ssh-stdin 1|2 -- COMMAND [ARG...]
+  dev/agent-e2e.sh [--yard NAME] --slot N [--vm-count 1|2] --verify-boundary
 
 The normal form copies the current tracked, dirty and non-ignored public worktree to each selected
 VM, runs COMMAND as dev, streams output and removes every run directory. A direct ./bin/yard command
@@ -114,7 +115,9 @@ separate ephemeral guest key.
 
 The operator owns the outer test yard. Acquire creates disposable VMs from an immutable base;
 release fences access and deletes their disks. --type defaults to subyard-pair (two VMs);
-android-test selects one VM. The default VM selection includes every VM of that type. e2e-vm-1 and e2e-vm-2 are
+--vm-count 1 requests one standard VM instead. android-test supports only one larger VM.
+--vm selects the payload destination without changing the allocation count. The default VM
+selection includes every requested VM. e2e-vm-1 and e2e-vm-2 are
 lease-relative selectors, not physical slot names. Every invocation acquires a new lease; use one
 script or one interactive SSH session when several steps must share mutable guest state. Every
 lease-taking mode requires --slot N, atomically requests that broker slot and never falls back.
@@ -443,9 +446,25 @@ derive_purpose() {
 lease_acquire_request() {
   local client="$1" fingerprint="$2" key_type="$3" key_blob="$4"
   [ -n "$LEASE_REQUESTED_SLOT" ] || die "an exact --slot is required before acquiring an E2E lease"
-  printf 'acquire-v3 %s %s %s %s %s %s %s %s %s %s\n' \
+  printf 'acquire-v3 %s %s %s %s %s %s %s %s %s %s' \
     "$ENVIRONMENT_TYPE" "$client" "$fingerprint" "$LEASE_YARD" "$LEASE_PROJECT" "$LEASE_RUN" \
     "$LEASE_PURPOSE" "$key_type" "$key_blob" "$LEASE_REQUESTED_SLOT"
+  [ -z "$VM_COUNT_REQUESTED" ] || printf ' %s' "$VM_COUNT_REQUESTED"
+  printf '\n'
+}
+
+resolve_vm_count() {
+  case "$ENVIRONMENT_TYPE" in
+    subyard-pair) VM_COUNT=2 ;;
+    android-test) VM_COUNT=1 ;;
+    *) die "--type must be subyard-pair or android-test" ;;
+  esac
+  if [ -n "$VM_COUNT_REQUESTED" ]; then
+    case "$VM_COUNT_REQUESTED" in 1|2) ;; *) die '--vm-count must be 1 or 2' ;; esac
+    [ "$ENVIRONMENT_TYPE" != android-test ] || [ "$VM_COUNT_REQUESTED" = 1 ] \
+      || die 'android-test supports only --vm-count 1'
+    VM_COUNT="$VM_COUNT_REQUESTED"
+  fi
 }
 
 facade_request() {
@@ -674,6 +693,7 @@ lease_grant_matches_request() {
 }
 
 acquire_lease() {
+  resolve_vm_count
   local client fingerprint type blob response code reason state started last_report request
   local status_response workspace_context elapsed sleep_seconds attempt=0 last_state='' last_reason=''
   local owner_display='' owner_yard='' owner_project='' owner_run='' owner_purpose=''
@@ -704,6 +724,10 @@ acquire_lease() {
       index("environment-acquire-v3") != null and index("disposable-v1") != null)' \
     <<<"$status_response" >/dev/null \
     || die "broker does not support required attribution-v2/environment-acquire-v3/disposable-v1 acquire"
+  if [ -n "$VM_COUNT_REQUESTED" ]; then
+    jq -e '(.capabilities // []) | index("vm-count-v1") != null' <<<"$status_response" >/dev/null \
+      || die 'broker does not support explicit VM counts (vm-count-v1)'
+  fi
   request="$(lease_acquire_request "$client" "$fingerprint" "$type" "$blob")"
   started=$SECONDS
   last_report=-30
@@ -940,7 +964,7 @@ verify_boundary() {
     return 1
   fi
 
-  for vm in 1 2; do
+  for ((vm=1; vm<=VM_COUNT; vm++)); do
     [ "$(guest "$vm" sudo -n id -u </dev/null)" = 0 ] \
       || { printf 'agent-e2e: VM%s direct SSH/passwordless sudo failed\n' "$vm" >&2; return 1; }
     expected_hash="$(printf '\0subyard-binary-stdin\377' | sha256sum | awk '{print $1}')"
@@ -1188,6 +1212,11 @@ main() {
       --type)
         [ "$#" -ge 2 ] || die "--type needs subyard-pair or android-test"
         ENVIRONMENT_TYPE="$2"; shift 2 ;;
+      --vm-count)
+        [ "$#" -ge 2 ] || die '--vm-count needs 1 or 2'
+        [ -z "$VM_COUNT_REQUESTED" ] || die '--vm-count may be specified only once'
+        case "$2" in 1|2) VM_COUNT_REQUESTED="$2" ;; *) die '--vm-count must be 1 or 2' ;; esac
+        shift 2 ;;
       --vm) [ "$#" -ge 2 ] || die "--vm needs 1, 2 or both"; selector="$2"; shift 2 ;;
       --ssh) [ "$#" -ge 2 ] || die "--ssh needs 1 or 2"; mode=ssh; ssh_vm="$2"; shift 2 ;;
       --ssh-stdin)
@@ -1222,16 +1251,20 @@ main() {
       *) die "unknown argument '$1' (put the guest command after --)" ;;
     esac
   done
+  resolve_vm_count
   case "$ENVIRONMENT_TYPE" in
-    subyard-pair) VM_COUNT=2 ;;
+    subyard-pair) ;;
     android-test)
-      VM_COUNT=1
       [ "$selector" != 2 ] && [ "$selector" != both ] && [ "$ssh_vm" != 2 ] \
         || die "android-test has only VM 1; selectors 2 and both are invalid"
       [ "$mode" != verify ] || die "--verify-boundary requires subyard-pair"
       ;;
     *) die "--type must be subyard-pair or android-test" ;;
   esac
+  if [ "$VM_COUNT" = 1 ]; then
+    [ "$selector" != 2 ] && [ "$selector" != both ] && [ "$ssh_vm" != 2 ] \
+      || die 'one-VM allocation has only VM 1; selectors 2 and both are invalid'
+  fi
   configure_yard_scope
   [ "$status_json" = 0 ] || [ "$mode" = status ] || die "--json is valid only with --status"
   [ -z "$purpose_override" ] || [ "$mode" != status ] || die "--purpose is not valid with --status"

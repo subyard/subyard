@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestFacadeContractAndRedaction(t *testing.T) {
@@ -479,8 +481,18 @@ func TestFacadeAdvertisesAndAcceptsAttributionV2(t *testing.T) {
 	if err := facade.Run("status"); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), `"capabilities":["attribution-v2","environment-acquire-v3","disposable-v1"]`) {
-		t.Fatalf("status omitted attribution capability: %s", output.String())
+	var status facadeResponse
+	if err := json.Unmarshal(output.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	for _, capability := range []string{"attribution-v2", "environment-acquire-v3", DisposableLifecycle, "vm-count-v1"} {
+		found := false
+		for _, advertised := range status.Capabilities {
+			found = found || advertised == capability
+		}
+		if !found {
+			t.Fatalf("status omitted %s capability: %s", capability, output.String())
+		}
 	}
 	output.Reset()
 	key := strings.Fields(fixturePublicKey(t))
@@ -501,6 +513,73 @@ func TestFacadeAdvertisesAndAcceptsAttributionV2(t *testing.T) {
 		response.Grant.Context.Project != "Subyard-2" ||
 		response.Grant.Context.Checkout != "" {
 		t.Fatalf("v2 response = %s", output.String())
+	}
+}
+
+func TestFacadeRequestedVMCount(t *testing.T) {
+	key := fixturePublicKey(t)
+	for _, test := range []struct {
+		typeName, count string
+		wantCount       int
+	}{
+		{EnvironmentPair, "", 2},
+		{EnvironmentPair, "1", 1},
+		{EnvironmentPair, "2", 2},
+		{EnvironmentAndroid, "", 1},
+		{EnvironmentAndroid, "1", 1},
+		{EnvironmentAndroid, "2", 0},
+		{EnvironmentPair, "0", 0},
+		{EnvironmentPair, "3", 0},
+		{EnvironmentPair, "-1", 0},
+		{EnvironmentPair, "+1", 0},
+		{EnvironmentPair, "01", 0},
+		{EnvironmentPair, "1.0", 0},
+		{EnvironmentPair, "many", 0},
+	} {
+		t.Run(test.typeName+"/"+test.count, func(t *testing.T) {
+			store := LeaseStore{Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 1}
+			var output bytes.Buffer
+			provisioned := false
+			cfg := Config{CPU: 4, Memory: "4GiB", Disk: "20GiB"}
+			facade := Facade{
+				Store: store, Output: &output,
+				EnvironmentSpec: func(name string) (EnvironmentSpec, error) {
+					return cfg.environmentSpecForArch(name, "amd64")
+				},
+				OnAcquire: func(grant LeaseGrant, _ string) (LeaseGrant, error) {
+					provisioned = true
+					return grant, nil
+				},
+			}
+			command := "acquire-v3 " + test.typeName + " client SHA256:key yard Project run tests " + key + " slot-001"
+			if test.count != "" {
+				command += " " + test.count
+			}
+			if err := facade.Run(command); err != nil {
+				t.Fatal(err)
+			}
+			var response facadeResponse
+			if err := json.Unmarshal(output.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if test.wantCount == 0 {
+				if response.Code != "invalid_request" || response.Reason != "invalid_vm_count" || response.Grant != nil || provisioned {
+					t.Fatalf("invalid count reached admission: %s", output.String())
+				}
+				if _, err := os.Stat(store.Path); !os.IsNotExist(err) {
+					t.Fatalf("invalid count mutated lease state: %v", err)
+				}
+				return
+			}
+			if response.Status != "ok" || !provisioned || response.Grant == nil || response.Grant.Environment == nil ||
+				response.Grant.Environment.Name != test.typeName || response.Grant.Environment.Count != test.wantCount {
+				t.Fatalf("requested count was not granted: %s", output.String())
+			}
+			slot, err := storeSlot(store, "slot-001")
+			if err != nil || slot.Environment == nil || slot.Environment.Count != test.wantCount {
+				t.Fatalf("requested count was not persisted: %+v, %v", slot, err)
+			}
+		})
 	}
 }
 

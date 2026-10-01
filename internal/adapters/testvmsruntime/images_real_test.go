@@ -3,6 +3,7 @@
 package testvmsruntime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -85,7 +86,7 @@ func TestRealBrokerStorageContract(t *testing.T) {
 			}
 			for _, vm := range names {
 				marker, markerErr := call("config", "get", vm, "user.subyard.base_owner", "--project", project)
-				if (vm != "e2e-vm-1" && vm != "e2e-base-1") || markerErr != nil || strings.TrimSpace(marker) != owner || child.requireVMMarker(cleanupCtx, vm) != nil {
+				if (vm != "e2e-vm-1" && vm != "e2e-vm-2" && vm != "e2e-base-1") || markerErr != nil || strings.TrimSpace(marker) != owner || child.requireVMMarker(cleanupCtx, vm) != nil {
 					t.Errorf("cleanup refuses unowned instance in %s", project)
 					continue
 				}
@@ -129,9 +130,11 @@ func TestRealBrokerStorageContract(t *testing.T) {
 	command("storage", "create", name, "dir", "user.subyard.base_owner="+owner)
 	poolCreated = true
 	createVM := func(project, vm, key string, extra ...string) {
-		command("project", "create", project, "-c", "features.images=false", "-c", "user.subyard.managed="+managedMarker,
-			"-c", "user.subyard.base_owner="+owner)
-		createdProjects[project] = true
+		if !createdProjects[project] {
+			command("project", "create", project, "-c", "features.images=false", "-c", "user.subyard.managed="+managedMarker,
+				"-c", "user.subyard.base_owner="+owner)
+			createdProjects[project] = true
+		}
 		args := []string{"init", vm, "--empty", "--vm", "--no-profiles", "--project", project, "-s", name,
 			"-c", "limits.cpu=1", "-c", "limits.memory=512MiB", "-d", "root,size=1GiB",
 			"-c", "user.subyard.managed=" + managedMarker, "-c", "user.subyard.base_owner=" + owner, "-c", "user.subyard.base_key=" + key}
@@ -171,7 +174,7 @@ func TestRealBrokerStorageContract(t *testing.T) {
 	}
 	// This local store exercises disposable pin/drain state. Physical fixtures
 	// remain a single tiny firmware VM, not a provisioned broker environment.
-	spec := EnvironmentSpec{Name: EnvironmentPair, Count: 2, CPU: 1, Memory: "512MiB", Disk: "10GiB", Lifecycle: DisposableLifecycle}
+	spec := EnvironmentSpec{Name: EnvironmentPair, Count: 1, CPU: 1, Memory: "512MiB", Disk: "10GiB", Lifecycle: DisposableLifecycle}
 	grant, err := store.AcquireV3Slot(spec, "storage-contract", "SHA256:synthetic", "yard", "Project", "run", "storage-contract", "slot-001")
 	must(err)
 	rt.allocation = &LeaseIdentity{SlotID: grant.SlotID, ResourceGeneration: grant.ResourceGeneration, LeaseEpoch: grant.LeaseEpoch}
@@ -251,4 +254,49 @@ func TestRealBrokerStorageContract(t *testing.T) {
 		t.Fatal("builder reservation remains after verified cleanup")
 	}
 	t.Log("persisted builder cleanup removed staging root and uncommitted image; current base preserved")
+
+	// Exercise counted facade grants against real Incus using the same validated
+	// firmware base. OS provisioning and SSH remain outside this storage contract.
+	command("profile", "device", "add", "default", "root", "disk", "pool="+name, "path=/", "size=10GiB", "--project", rt.Config.Project)
+	for _, count := range []int{1, 2, 1} {
+		var output bytes.Buffer
+		facade := Facade{Store: store, Output: &output, EnvironmentSpec: func(string) (EnvironmentSpec, error) { return spec, nil }}
+		must(facade.Run(fmt.Sprintf("acquire-v3 %s storage-contract SHA256:synthetic yard Project run storage-contract %s slot-001 %d",
+			EnvironmentPair, fixturePublicKey(t), count)))
+		var response facadeResponse
+		must(json.Unmarshal(output.Bytes(), &response))
+		if response.Grant == nil || response.Grant.Environment.Count != count {
+			t.Fatalf("counted facade grant: %s", output.String())
+		}
+		allocation := *response.Grant
+		child := *rt
+		child.Config = rt.Config.withEnvironment(*allocation.Environment)
+		child.Config.Image = "local:" + current.Fingerprint
+		child.allocation = &LeaseIdentity{SlotID: allocation.SlotID, ResourceGeneration: allocation.ResourceGeneration, LeaseEpoch: allocation.LeaseEpoch}
+		command("project", "set", rt.Config.Project, "limits.instances", fmt.Sprint(count))
+		command("project", "set", rt.Config.Project, "limits.virtual-machines", fmt.Sprint(count))
+		for i := 1; i <= child.Config.guestCount(); i++ {
+			must(child.initVM(ctx, child.Config.vm(i)))
+			command("config", "set", child.Config.vm(i), "user.subyard.base_owner", owner, "--project", child.Config.Project)
+			command("start", child.Config.vm(i), "--project", child.Config.Project)
+		}
+		names, err := child.projectInstances(ctx)
+		must(err)
+		if len(names) != count {
+			t.Fatalf("requested %d VMs, Incus created %d", count, len(names))
+		}
+		for _, vm := range names {
+			if command("config", "get", vm, "limits.memory", "--project", child.Config.Project) != spec.Memory ||
+				command("list", vm, "--project", child.Config.Project, "-f", "csv", "-c", "s") != "RUNNING" {
+				t.Fatal("counted allocation did not start with trusted memory limits")
+			}
+			command("stop", vm, "--force", "--project", child.Config.Project)
+		}
+		must(store.BeginDrain(allocation))
+		must(child.deleteAllocation(ctx))
+		assertVolumes(child.Config.Project, false)
+		must(store.FinishDrain(allocation.SlotID, nil))
+		assertImage(current, true)
+		t.Logf("requested/created/started/deleted %d VMs from the same validated base", count)
+	}
 }

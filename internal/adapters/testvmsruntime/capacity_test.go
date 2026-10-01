@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func memoryFixture(t *testing.T) (string, string, func(string, string)) {
@@ -136,23 +138,28 @@ func TestMemoryReserveAppliesToWorkingVMsAndSequentialBuilder(t *testing.T) {
 	for _, builder := range []bool{false, true} {
 		for _, test := range []struct {
 			name, reserve string
+			count         int
 			available     uint64
 			refused       bool
 		}{
-			{"available headroom", "", 18 << 30, false},
-			{"exact default reserve", "", 17 << 30, false},
-			{"below default reserve", "", (17 << 30) - 1, true},
-			{"insufficient for updated reserve", "", 15 << 30, true},
-			{"explicit override", "2GiB", 11 << 30, false},
+			{"available headroom", "", 2, 18 << 30, false},
+			{"exact default reserve", "", 2, 17 << 30, false},
+			{"below default reserve", "", 2, (17 << 30) - 1, true},
+			{"insufficient for updated reserve", "", 2, 15 << 30, true},
+			{"explicit override", "2GiB", 2, 11 << 30, false},
+			{"single exact default reserve", "", 1, 25 << 29, false},
+			{"single below default reserve", "", 1, (25 << 29) - 1, true},
+			{"pair refused at single headroom", "", 2, 25 << 29, true},
 		} {
 			t.Run(fmt.Sprintf("builder=%t/%s", builder, test.name), func(t *testing.T) {
 				cfg := fixtureConfig(t)
 				cfg.Memory, cfg.Disk, cfg.MemoryReserve = "4GiB", "20GiB", test.reserve
-				store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1}
+				store := LeaseStore{Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 1}
 				pair, err := cfg.EnvironmentSpec(EnvironmentPair)
 				if err != nil {
 					t.Fatal(err)
 				}
+				pair.Count = test.count
 				grant, err := store.AcquireV3Slot(pair, "client", "SHA256:key", "yard", "Project", "run", "reserve", "slot-001")
 				if err != nil {
 					t.Fatal(err)
@@ -175,9 +182,9 @@ func TestMemoryReserveAppliesToWorkingVMsAndSequentialBuilder(t *testing.T) {
 					if err := store.mutateOwned(grant, func(slot *LeaseSlot, _ time.Time) error { slot.Reserved = true; return nil }); err != nil {
 						t.Fatal(err)
 					}
-					// The builder is smaller than the pending pair; its sequential
-					// peak must still leave the pair's default memory reserve.
-					err = rt.admitBuild(context.Background(), store, grant, 5<<30, 20<<30, &ImageRegistry{})
+					// The builder uses one VM; admission must leave room for the
+					// larger of the sequential builder and working environment.
+					err = rt.admitBuild(context.Background(), store, grant, 9<<29, 20<<30, &ImageRegistry{})
 				} else {
 					err = rt.reserveEnvironment(context.Background(), store, grant)
 				}
@@ -188,6 +195,12 @@ func TestMemoryReserveAppliesToWorkingVMsAndSequentialBuilder(t *testing.T) {
 					}
 				} else if err != nil {
 					t.Fatalf("confirmed headroom was not usable: %v", err)
+				}
+				if !builder {
+					slot, slotErr := storeSlot(store, grant.SlotID)
+					if slotErr != nil || slot.Reserved == test.refused {
+						t.Fatalf("reservation after admission: %+v, %v", slot, slotErr)
+					}
 				}
 			})
 		}

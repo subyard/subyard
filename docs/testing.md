@@ -150,7 +150,8 @@ not recursively run the separate physical broker pool diagnostic. Do not request
 guests for Android or ordinary full P0.
 
 `--vm 1` only selects where a command runs; it does not turn a pair allocation into a singleton.
-Use `--type android-test` when allocating one VM. Commands and exact coverage are documented in
+Use `--vm-count 1` for one standard VM; `--type android-test` retains the larger Android
+singleton. Commands and exact coverage are documented in
 [the VM guide](test-vms.md#agent-workflow).
 
 ## Select additional checks

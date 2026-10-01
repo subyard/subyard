@@ -61,7 +61,7 @@ func (facade Facade) Run(originalCommand string) error {
 		}
 		return facade.write(facadeResponse{
 			SchemaVersion: LeaseProtocolVersion, Status: "ok",
-			Capabilities: []string{"attribution-v2", "environment-acquire-v3", DisposableLifecycle}, Pool: &pool, Resources: resources,
+			Capabilities: []string{"attribution-v2", "environment-acquire-v3", DisposableLifecycle, "vm-count-v1"}, Pool: &pool, Resources: resources,
 		})
 	case "acquire", "acquire-v2":
 		return facade.writeAcquireError("invalid_request", "unsupported_acquire", "use acquire-v3 with an explicit environment type")
@@ -69,8 +69,8 @@ func (facade Facade) Run(originalCommand string) error {
 		if len(fields) == 10 {
 			return facade.writeAcquireError("invalid_request", "missing_slot_id", "acquire-v3 requires TYPE client_id fingerprint yard project run purpose key_type key_blob slot_id")
 		}
-		if len(fields) != 11 {
-			return facade.writeError("invalid_request", "acquire-v3 requires TYPE client_id fingerprint yard project run purpose key_type key_blob slot_id")
+		if len(fields) != 11 && len(fields) != 12 {
+			return facade.writeError("invalid_request", "acquire-v3 requires TYPE client_id fingerprint yard project run purpose key_type key_blob slot_id [vm_count]")
 		}
 		resolve := facade.EnvironmentSpec
 		if resolve == nil {
@@ -83,6 +83,15 @@ func (facade Facade) Run(originalCommand string) error {
 		spec, err := resolve(fields[1])
 		if err != nil {
 			return facade.writeAcquireError("invalid_request", "unsupported_environment", "unsupported environment type")
+		}
+		if len(fields) == 12 {
+			if fields[11] != "1" && fields[11] != "2" {
+				return facade.writeAcquireError("invalid_request", "invalid_vm_count", "vm_count must be 1 or 2")
+			}
+			spec.Count, _ = strconv.Atoi(fields[11])
+			if err := spec.Validate(); err != nil {
+				return facade.writeAcquireError("invalid_request", "invalid_vm_count", "unsupported VM count for environment type")
+			}
 		}
 		publicKey := fields[8] + " " + fields[9]
 		if _, keyErr := normalizedPublicKey(publicKey); keyErr != nil || fields[8] != "ssh-ed25519" {

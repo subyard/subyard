@@ -17,7 +17,7 @@ if bash "$tmp/$controller" > "$tmp/missing" 2>&1; then
 fi
 ! grep -q -- '--purpose' "$tmp/missing"
 bash "$tmp/$controller" --slot 7 > "$tmp/calls"
-grep -Fxq -- '--slot 7 --type android-test --purpose android-pool-runtime --vm 1 -- bash config/profiles/android/tests/e2e/android-pool-runtime.sh --lane full' "$tmp/calls"
+grep -Fxq -- '--slot 7 --type android-test --vm-count 1 --purpose android-pool-runtime --vm 1 -- bash config/profiles/android/tests/e2e/android-pool-runtime.sh --lane full' "$tmp/calls"
 rc=0
 PROFILE_CONTROLLER_EXIT=23 bash "$tmp/$controller" --slot 7 > "$tmp/failure" 2>&1 || rc=$?
 [ "$rc" -eq 23 ]

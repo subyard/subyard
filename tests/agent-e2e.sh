@@ -17,6 +17,43 @@ grep -Fq 'target=/var/lib/subyard/e2e-routes' "$ROOT/scripts/03-create-subyard.s
 # shellcheck source=dev/agent-e2e.sh
 . "$ROOT/dev/agent-e2e.sh"
 
+# Globals below are consumed by the extracted P0 functions.
+# shellcheck disable=SC2034
+(
+  for function_name in lane_vm_count preflight_lane dependency_lane clean_peers cleanup_lane; do
+    eval "$(sed -n "/^${function_name}() {/,/^}/p" "$ROOT/dev/e2e/p0-acceptance.sh")"
+  done
+  BROKER_RECOVERY_ONLY=0
+  P0_NESTED_VM=1
+  for P0_LANE in smoke full peer; do
+    [ "$(lane_vm_count)" = 2 ] || fail "two-host P0 lane lost its pair: $P0_LANE"
+  done
+  for P0_LANE in boundary nested-teardown transport dependencies real-incus profile-resource release \
+    source-upgrade power-systemd reboot-verify peer-cleanup cleanup; do
+    [ "$(lane_vm_count)" = 1 ] || fail "single-host P0 lane requested a pair: $P0_LANE"
+  done
+  P0_LANE=nested-teardown P0_NESTED_VM=2
+  [ "$(lane_vm_count)" = 2 ] || fail 'explicit VM2 nested teardown lost its selected guest'
+  BROKER_RECOVERY_ONLY=1
+  [ "$(lane_vm_count)" = 1 ] || fail 'broker diagnostic requested an unused outer guest'
+  for VM_COUNT in 1 2; do
+    calls=''
+    run_vm() {
+      [ "$1" -le "$VM_COUNT" ] || fail 'P0 accessed an unallocated guest'
+      calls+="$*"$'\n'
+    }
+    clean_source_host() { :; }
+    assert_no_worktrees() { :; }
+    preflight_lane
+    cleanup_lane
+    dependency_lane
+    [ "$(printf '%s' "$calls" | awk '$2 == "capacity-preflight" {n++} END {print n}')" = "$((VM_COUNT + 1))" ] \
+      || fail 'P0 preflight skipped an allocated guest'
+    [ "$(printf '%s' "$calls" | awk '$2 == "capacity-verify-cleanup" {n++} END {print n}')" = "$VM_COUNT" ] \
+      || fail 'P0 cleanup skipped an allocated guest'
+  done
+) || fail 'P0 allocation count or guest dispatch is inconsistent'
+
 assert_phase_markers() {
   local output="$1" expected="$2" line events='' phase state duration rc vm
   while IFS= read -r line; do
@@ -386,6 +423,12 @@ exact_request="$(lease_acquire_request client SHA256:key ssh-ed25519 keyblob)"
 [ "$exact_request" = \
   "acquire-v3 subyard-pair client SHA256:key default Subyard-2 $run_a contract-tests ssh-ed25519 keyblob slot-002" ] \
   || fail "runner did not retain the existing exact-slot acquire protocol"
+(
+  VM_COUNT_REQUESTED=1
+  resolve_vm_count
+  [ "$VM_COUNT" = 1 ] && [ "$(lease_acquire_request client SHA256:key ssh-ed25519 keyblob)" = \
+    "$exact_request 1" ] || fail 'explicit VM count did not reach the acquire request'
+)
 LEASE_REQUESTED_SLOT='slot-002'
 LEASE_SLOT='slot-002'
 lease_grant_matches_request || fail "matching exact-slot grant was rejected"
@@ -2235,6 +2278,13 @@ done
   [ "$(grep -c '^Host e2e-vm-' <<<"$android_config")" = 1 ] \
     || fail 'Android SSH config exposed an unexpected guest'
 ) || fail 'Android single-target transport rejected a valid grant'
+(
+  VM_COUNT=1
+  singleton_grant="$(jq -c '.grant.environment.vm_count = 1 | .grant.targets = [.grant.targets[0]]' <<<"$structured_response")"
+  parse_lease_grant "$singleton_grant"
+  [ "${#VM_IP[@]}" = 1 ] && [ "$(grep -c '^Host e2e-vm-' <<<"$(render_client_config)")" = 1 ] \
+    || fail 'standard singleton exposed a second guest'
+) || fail 'standard singleton transport rejected a valid grant'
 parse_lease_grant "$structured_response"
 legacy_context="$(jq -c '.grant.context = {schema_version:1, project:"Subyard/Attribution", checkout:"checkout-a", run:"run-a", purpose:"contract-tests"}' <<<"$structured_response")"
 if (parse_lease_grant "$legacy_context") >/dev/null 2>&1; then
@@ -2359,7 +2409,7 @@ busy_mismatch='{"schema_version":1,"status":"error","code":"busy","state":"held"
 busy_unknown_schema='{"schema_version":2,"status":"error","code":"busy","state":"held","reason":"busy","message":"untrusted schema"}'
 invalid='{"schema_version":1,"status":"error","code":"invalid_request","reason":"invalid_slot","message":"invalid slot_id"}'
 quarantined='{"schema_version":1,"status":"error","code":"quarantined","message":"slot provisioning failed"}'
-status='{"schema_version":1,"status":"ok","capabilities":["attribution-v2","environment-acquire-v3","disposable-v1"],"pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-002","resource_generation":1,"lease_epoch":1,"state":"held"}]}}'
+status='{"schema_version":1,"status":"ok","capabilities":["attribution-v2","environment-acquire-v3","disposable-v1","vm-count-v1"],"pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-002","resource_generation":1,"lease_epoch":1,"state":"held"}]}}'
 status_without_v2='{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-002","resource_generation":1,"lease_epoch":1,"state":"available"}]}}'
 grant='{"schema_version":1,"status":"ok","grant":{"environment":{"type":"subyard-pair","vm_count":2,"cpu_per_vm":4,"memory_per_vm":"4GiB","disk_per_vm":"20GiB","lifecycle":"disposable-v1"},"base_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","slot_id":"slot-002","resource_generation":1,"lease_id":"aabbccdd","lease_epoch":2,"capability":"eeff0011","data_user":"subyard-e2e-slot-2","targets":[{"selector":1,"name":"e2e-vm-1","address":"10.42.2.11","host_key_type":"ssh-ed25519","host_key_blob":"YWJjZA=="},{"selector":2,"name":"e2e-vm-2","address":"10.42.2.12","host_key_type":"ssh-ed25519","host_key_blob":"YWJjZA=="}]}}'
 wrong_grant='{"schema_version":1,"status":"ok","grant":{"environment":{"type":"subyard-pair","vm_count":2,"cpu_per_vm":4,"memory_per_vm":"4GiB","disk_per_vm":"20GiB","lifecycle":"disposable-v1"},"base_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","slot_id":"slot-001","resource_generation":1,"lease_id":"badc0ffe","lease_epoch":3,"capability":"facefeed","data_user":"subyard-e2e-slot-1","targets":[{"selector":1,"name":"e2e-vm-1","address":"10.42.1.11","host_key_type":"ssh-ed25519","host_key_blob":"YWJjZA=="},{"selector":2,"name":"e2e-vm-2","address":"10.42.1.12","host_key_type":"ssh-ed25519","host_key_blob":"YWJjZA=="}]}}'
@@ -2368,19 +2418,24 @@ case "$command" in
     printf '%s\n' "$command" >> "$FAKE_FACADE_LOG"
     if [ "$FAKE_SCENARIO" = status-without-v2 ]; then
       printf '%s\n' "$status_without_v2"
+    elif [ "$FAKE_SCENARIO" = status-without-vm-count ]; then
+      jq -c '.capabilities -= ["vm-count-v1"]' <<<"$status"
     else
       printf '%s\n' "$status"
     fi
     ;;
   acquire-v3\ *|acquire\ *)
     printf '%s\n' "$command" >> "$FAKE_FACADE_LOG"
-    read -r _ request_type _ _ request_yard request_project request_run request_purpose _ _ _ <<<"$command"
+    read -r _ request_type _ _ request_yard request_project request_run request_purpose _ _ _ request_count <<<"$command"
     grant="$(jq -c --arg yard "$request_yard" --arg project "$request_project" \
       --arg run "$request_run" --arg purpose "$request_purpose" \
       '.grant.context = {schema_version:2, yard:$yard, project:$project, run:$run, purpose:$purpose}' \
       <<<"$grant")"
     if [ "$request_type" = android-test ]; then
       grant="$(jq -c '.grant.environment.type = "android-test" | .grant.environment.vm_count = 1 | .grant.environment.memory_per_vm = "8GiB" | .grant.environment.disk_per_vm = "40GiB" | .grant.targets = [.grant.targets[0]]' <<<"$grant")"
+    fi
+    if [ "$request_count" = 1 ] && [ "$FAKE_SCENARIO" != count-mismatch ]; then
+      grant="$(jq -c '.grant.environment.vm_count = 1 | .grant.targets = [.grant.targets[0]]' <<<"$grant")"
     fi
     wrong_grant="$(jq -c --arg yard "$request_yard" --arg project "$request_project" \
       --arg run "$request_run" --arg purpose "$request_purpose" \
@@ -2403,7 +2458,7 @@ case "$command" in
       late-grant) sleep 2; printf '%s\n' "$grant" ;;
       outcome-unknown) exit 255 ;;
       wrong-grant) printf '%s\n' "$wrong_grant" ;;
-      android-success|phase-*) printf '%s\n' "$grant" ;;
+      android-success|count-success|count-mismatch|phase-*) printf '%s\n' "$grant" ;;
       capacity) printf '%s\n' '{"schema_version":1,"status":"error","code":"capacity","reason":"memory","message":"insufficient memory"}' ;;
       wait-success) [ "$count" -eq 1 ] && printf '%s\n' "$busy" || printf '%s\n' "$grant" ;;
       *) printf '%s\n' "$busy" ;;
@@ -2550,6 +2605,48 @@ assert_phase_markers "$android_success_output" \
   $'allocation:start:0:-\nallocation:end:0:-\nguest:start:0:1\nguest:end:0:1\ncleanup/release:start:0:-\ncleanup/release:end:0:-'
 grep -q '^acquire-v3 android-test ' "$RUNNER_FIXTURE/facade.log" \
   || fail 'Android request lost its environment type'
+
+count_case=0
+new_runner_fixture empty-count
+count_rc=0
+run_runner_fixture count-success --slot 2 --vm-count '' -- true \
+  >"$TMP/count-empty.log" 2>&1 || count_rc=$?
+[ "$count_rc" = 2 ] && [ ! -s "$RUNNER_FIXTURE/facade.log" ] \
+  || fail 'empty explicit count was treated as an omitted count'
+for count_args in '--vm-count 0' '--vm-count 3' '--vm-count 01' '--vm-count 1 --vm-count 2' \
+  '--vm-count 1 --vm 2' '--vm-count 1 --vm both' '--vm-count 1 --ssh 2' \
+  '--vm-count 1 --ssh-stdin 2' '--type android-test --vm-count 2'; do
+  count_case=$((count_case + 1))
+  new_runner_fixture "invalid-count-$count_case"
+  count_rc=0
+  # shellcheck disable=SC2086
+  run_runner_fixture count-success --slot 2 $count_args -- true >"$TMP/count-invalid.log" 2>&1 || count_rc=$?
+  [ "$count_rc" = 2 ] && [ ! -s "$RUNNER_FIXTURE/facade.log" ] \
+    || fail "invalid count/selector reached the facade: $count_args"
+done
+new_runner_fixture status-without-vm-count
+count_rc=0
+run_runner_fixture status-without-vm-count --slot 2 --vm-count 1 --ssh 1 -- true \
+  >"$TMP/count-capability.log" 2>&1 || count_rc=$?
+[ "$count_rc" = 2 ] && [ "$(cat "$RUNNER_FIXTURE/facade.log")" = status ] \
+  && grep -Fq 'broker does not support explicit VM counts' "$TMP/count-capability.log" \
+  || fail 'explicit count was silently downgraded on an older broker'
+for requested_count in 1 2; do
+  new_runner_fixture "count-success-$requested_count"
+  run_runner_fixture count-success --slot 2 --vm-count "$requested_count" --ssh 1 -- true \
+    >"$TMP/count-success-$requested_count.log" 2>&1 || fail 'explicit count request failed'
+  awk -v count="$requested_count" '$1 == "acquire-v3" { found=1; if (NF != 12 || $12 != count) exit 1 } END { if (!found) exit 1 }' \
+    "$RUNNER_FIXTURE/facade.log" || fail 'wire request lost the explicit count'
+  ! grep -Fq 'e2e-vm-2' "$TMP/count-success-$requested_count.log" \
+    || fail 'singleton accessed a second guest'
+done
+new_runner_fixture count-mismatch
+count_rc=0
+run_runner_fixture count-mismatch --slot 2 --vm-count 1 --ssh 1 -- true \
+  >"$TMP/count-mismatch.log" 2>&1 || count_rc=$?
+[ "$count_rc" = 2 ] && ! grep -q '^other ' "$RUNNER_FIXTURE/facade.log" \
+  && grep -q '^release ' "$RUNNER_FIXTURE/facade.log" \
+  || fail 'mismatched VM count reached guest access or leaked its lease'
 new_runner_fixture capacity
 set +e
 capacity_output="$(run_runner_fixture capacity --slot 2 --wait 1s --ssh 1 -- true 2>&1)"

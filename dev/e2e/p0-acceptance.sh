@@ -49,7 +49,7 @@ P0_STARTED_PID=''
 FULL_P0_LANES=(boundary transport nested-teardown release source-upgrade power-systemd release-smoke peer cleanup)
 
 # Reuse one ordinary broker lease for the full matrix. This avoids the retired raw SSH-config
-# export and ensures every direct and bundled command addresses the same disposable pair.
+# export and ensures every direct and bundled command addresses the same disposable allocation.
 # shellcheck source=dev/agent-e2e.sh
 . "$ROOT/dev/agent-e2e.sh"
 ENVIRONMENT_TYPE=subyard-pair
@@ -141,7 +141,17 @@ parse_arguments() {
     *) die 'SUBYARD_P0_NESTED_VM must be 1 or 2' ;;
   esac
 }
+lane_vm_count() {
+  [ "$BROKER_RECOVERY_ONLY" = 0 ] || { printf '1\n'; return; }
+  case "$P0_LANE" in
+    smoke|full|peer) printf '2\n' ;;
+    nested-teardown) printf '%s\n' "$P0_NESTED_VM" ;;
+    *) printf '1\n' ;;
+  esac
+}
 parse_arguments "$@"
+VM_COUNT_REQUESTED="$(lane_vm_count)"
+resolve_vm_count
 public_tree_hash() {
   local path kind mode digest
   while IFS= read -r -d '' path; do
@@ -179,7 +189,7 @@ write_evidence() {
     --arg run "$LEASE_RUN" --arg slot "$LEASE_SLOT" \
     --argjson generation "$LEASE_GENERATION" --arg bundle "$P0_BUNDLE_HASH" \
     --argjson capacity "$capacity" --arg keeper "$keeper" \
-    --arg base "$BASE_FINGERPRINT" \
+    --arg base "$BASE_FINGERPRINT" --argjson vm_count "$VM_COUNT" \
     --argjson phases "$(if [ -r "$P0_EVIDENCE" ]; then jq -c ' .phases // {}' "$P0_EVIDENCE"; else printf '{}'; fi)" \
     --arg failure_log "$P0_FAILURE_LOG" \
     --argjson full_owner_duration "$FULL_OWNER_DURATION" \
@@ -188,7 +198,7 @@ write_evidence() {
       schema_version: 1,
       run: $run,
       requested_lane: $lane,
-      allocation: {slot: $slot, resource_generation: $generation},
+      allocation: {slot: $slot, resource_generation: $generation, vm_count: $vm_count},
       bundle_hash: $bundle,
       base_fingerprint: $base,
       phases: ($phases + {($phase): {status: $status, exit_status: $rc, duration_seconds: $duration}}),
@@ -203,7 +213,7 @@ write_evidence() {
         auxiliary_seconds: $full_aux_duration
       },
       failure_log: (if $failure_log == "" then null else $failure_log end),
-      resource_inventory: ["guest:vm1", "guest:vm2", "marker-owned-only"]
+      resource_inventory: ([range(1; $vm_count + 1) | "guest:vm\(.)"] + ["marker-owned-only"])
     }
   ' > "$temp"
   chmod 0600 "$temp"
@@ -221,7 +231,7 @@ capacity_evidence_json() {
   local summary='{}'
   [ -n "$CAPACITY_LOG_DIR" ] && [ -d "$CAPACITY_LOG_DIR" ] \
     || { printf '{}\n'; return; }
-  for vm in 1 2; do
+  for ((vm=1; vm<=VM_COUNT; vm++)); do
     log="$CAPACITY_LOG_DIR/vm$vm.tsv"
     [ -r "$log" ] || continue
     values="$(awk -F '\t' '
@@ -281,7 +291,7 @@ collect_failure_diagnostics() { # <stage> <truncate|append>
     [ -z "$LEASE_KEEPER_LOG" ] || tail -n 20 "$LEASE_KEEPER_LOG" 2>/dev/null || true
     printf '\n== broker status (redacted facade) ==\n'
     facade_request status 2>&1 || true
-    for vm in 1 2; do
+    for ((vm=1; vm<=VM_COUNT; vm++)); do
       printf '\n== VM%s capacity tail ==\n' "$vm"
       log="${CAPACITY_LOG_DIR:+$CAPACITY_LOG_DIR/vm$vm.tsv}"
       [ -z "$log" ] || tail -n 20 "$log" 2>/dev/null || true
@@ -397,9 +407,10 @@ clean_power_systemd_host() {
   run_power_systemd_vm "$vm" dev/e2e/power-reconciler-upgrade.sh clean "$TOKEN"
 }
 clean_peers() {
-  local rc=0
-  run_vm 1 peer-clean || rc=$?
-  run_vm 2 peer-clean || rc=$?
+  local rc=0 vm
+  for ((vm=1; vm<=VM_COUNT; vm++)); do
+    run_vm "$vm" peer-clean || rc=$?
+  done
   return "$rc"
 }
 clean_source_host() {
@@ -446,10 +457,10 @@ cleanup_armed_full_fixtures() {
 }
 stop_capacity_monitors() {
   local vm pid
-  for vm in 1 2; do
+  for ((vm=1; vm<=VM_COUNT; vm++)); do
     [ -z "${CAPACITY_FLAG[$vm]:-}" ] || find "${CAPACITY_FLAG[$vm]}" -delete 2>/dev/null || true
   done
-  for vm in 1 2; do
+  for ((vm=1; vm<=VM_COUNT; vm++)); do
     pid="${CAPACITY_PID[$vm]:-}"
     [ -z "$pid" ] || wait "$pid" >/dev/null 2>&1 || true
     CAPACITY_PID[$vm]=''
@@ -564,7 +575,7 @@ EOF
 start_capacity_monitors() {
   local vm flag log
   CAPACITY_LOG_DIR="$(mktemp -d /tmp/subyard-p0-capacity.XXXXXX)"
-  for vm in 1 2; do
+  for ((vm=1; vm<=VM_COUNT; vm++)); do
     flag="$CAPACITY_LOG_DIR/vm$vm.running"
     log="$CAPACITY_LOG_DIR/vm$vm.tsv"
     : > "$flag"
@@ -579,7 +590,7 @@ capacity_report() {
   local vm log report root_used root_available inode_used tmp_used memory_used memory_available
   local min_memory_available="${P0_E2E_MIN_PEAK_MEMORY_RESERVE_BYTES:-268435456}"
   stop_capacity_monitors
-  for vm in 1 2; do
+  for ((vm=1; vm<=VM_COUNT; vm++)); do
     log="$CAPACITY_LOG_DIR/vm$vm.tsv"
     report="$(awk -F '\t' '
       NF == 7 {
@@ -607,7 +618,7 @@ capacity_report() {
 
 assert_capacity_transport_stable() {
   local vm log first_unreachable
-  for vm in 1 2; do
+  for ((vm=1; vm<=VM_COUNT; vm++)); do
     log="$CAPACITY_LOG_DIR/vm$vm.tsv"
     [ -r "$log" ] || die "VM$vm capacity monitor log is missing"
     first_unreachable="$(awk -F '\t' '$2 == "unreachable" { print $1; exit }' "$log")"
@@ -623,7 +634,7 @@ targeted_capacity_report() {
 
 verify_cache_lifecycle() {
   local vm after default_after module_after growth max_growth=33554432
-  for vm in 1 2; do
+  for ((vm=1; vm<=VM_COUNT; vm++)); do
     after="$(capacity_cache_snapshot "$vm")"
     IFS=$'\t' read -r default_after module_after <<<"$after"
     growth=$((default_after - DEFAULT_BUILD_CACHE_BEFORE[$vm]))
@@ -818,7 +829,7 @@ trap 'exit 143' TERM
 
 assert_no_worktrees() {
   local vm leftover
-  for vm in 1 2; do
+  for ((vm=1; vm<=VM_COUNT; vm++)); do
     leftover="$(ssh -F "$CONFIG" -T "e2e-vm-$vm" -- \
       find /tmp -maxdepth 1 -type d -name 'subyard-worktree.*' -print -quit)"
     [ -z "$leftover" ] || die "VM$vm retained an agent worktree"
@@ -1050,7 +1061,7 @@ run_full_matrix_phase() {
 
 preflight_lane() {
   local vm
-  for vm in 1 2; do
+  for ((vm=1; vm<=VM_COUNT; vm++)); do
     run_vm "$vm" capacity-preflight
     run_vm "$vm" dependency-verify
   done
@@ -1059,13 +1070,13 @@ preflight_lane() {
 dependency_lane() {
   run_vm 1 capacity-preflight
   run_vm 1 dependency-bootstrap
-  run_vm 2 dependency-verify
+  run_vm 1 dependency-verify
 }
 
 nested_teardown_lane() {
   # This is a host-boundary invariant, not a role-specific one. Duplicating a memory-intensive
   # nested QEMU fixture in one lease adds no coverage and increases cumulative resident-pressure
-  # risk. Exercise one explicitly selectable VM and keep both under the capacity/transport canary.
+  # risk. Exercise one explicitly selectable VM and monitor every allocated guest.
   run_vm "$P0_NESTED_VM" nested-teardown
 }
 
@@ -1166,7 +1177,7 @@ peer_lane() {
   clean_peers
   PEERS_READY=0
 
-  for vm in 1 2; do
+  for ((vm=1; vm<=VM_COUNT; vm++)); do
     ssh -F "$CONFIG" -T "e2e-vm-$vm" -- test ! -e "/tmp/subyard-p0-peer-$TOKEN" \
       || die "VM$vm retained its peer fixture"
     p0_guest "$vm" \
@@ -1190,7 +1201,7 @@ cleanup_lane() {
   local vm
   clean_peers
   clean_source_host
-  for vm in 1 2; do
+  for ((vm=1; vm<=VM_COUNT; vm++)); do
     run_vm "$vm" capacity-verify-cleanup
   done
   assert_no_worktrees
@@ -1230,7 +1241,10 @@ if [ "$BROKER_RECOVERY_ONLY" = 1 ]; then
 fi
 
 vm1_ip="$(ssh -F "$CONFIG" -G e2e-vm-1 | awk '$1=="hostname" {print $2; exit}')"
-vm2_ip="$(ssh -F "$CONFIG" -G e2e-vm-2 | awk '$1=="hostname" {print $2; exit}')"
+vm2_ip=''
+if [ "$VM_COUNT" = 2 ]; then
+  vm2_ip="$(ssh -F "$CONFIG" -G e2e-vm-2 | awk '$1=="hostname" {print $2; exit}')"
+fi
 
 case "$P0_LANE" in
   boundary) run_phase boundary verify_boundary ;;
@@ -1289,7 +1303,7 @@ case "$P0_LANE" in
   peer-cleanup) run_phase peer-cleanup cleanup_lane ;;
   cleanup) run_phase cleanup cleanup_lane ;;
   smoke|full)
-    for vm in 1 2; do
+    for ((vm=1; vm<=VM_COUNT; vm++)); do
       snapshot="$(capacity_cache_snapshot "$vm")"
       IFS=$'\t' read -r DEFAULT_BUILD_CACHE_BEFORE[$vm] MODULE_CACHE_BEFORE[$vm] <<<"$snapshot"
       HOME_STATE_BEFORE[$vm]="$(home_state "$vm")"
@@ -1310,7 +1324,7 @@ case "$P0_LANE" in
     run_phase cleanup cleanup_lane
     P0_CURRENT_PHASE=final-verify
     P0_PHASE_STARTED="$(p0_monotonic_seconds)"
-    for vm in 1 2; do
+    for ((vm=1; vm<=VM_COUNT; vm++)); do
       [ "$(home_state "$vm")" = "${HOME_STATE_BEFORE[$vm]}" ] \
         || die "VM$vm operator home permissions or ownership changed"
     done

@@ -2,7 +2,7 @@
 
 The `test-vms` profile runs a root-owned lease broker inside a trusted outer yard. Its configured
 pool contains one or more shared slots and defaults to two. Each lease selects `subyard-pair`
-(two VMs) or `android-test` (one VM). Slots own isolated inner Incus projects and networks;
+(one or two standard VMs) or `android-test` (one larger VM). Slots own isolated inner Incus projects and networks;
 each acquire creates fresh VM disks from a versioned immutable base. Release fences access and
 deletes the disposable disks. No guest state survives a lease as a supported continuation mechanism.
 
@@ -63,11 +63,14 @@ while retiring slots are held, provisioning, draining or quarantined.
 
 | Type | Guests | RAM per guest | Virtual disk per guest |
 | --- | ---: | ---: | ---: |
-| `subyard-pair` | 2 | 4 GiB | 20 GiB |
+| `subyard-pair` | 1 or 2 | 4 GiB | 20 GiB |
 | `android-test` | 1 | 8 GiB | 40 GiB |
 
 These are initial type defaults; the broker reports the actual CPU, RAM and disk contract in the
 grant. Virtual capacity is distinct from physical storage usage and retained image/cache costs.
+`--vm-count 1` requests a single standard guest; omitted count preserves the type defaults
+(two standard guests or one Android guest). The historical `subyard-pair` type name is retained
+so singleton and pair allocations reuse the same prepared base.
 
 The broker reserves the full requested environment's RAM and bounded disk growth atomically,
 including concurrent provisioning, held VMs and the base-image builder. It accounts for current
@@ -153,7 +156,9 @@ yard -Y test-yard test-vms retire-legacy --slot N
 This operation asks for destructive confirmation with a default of No. Review and preserve any
 needed legacy data first. An empty, correctly marked legacy project can be adopted automatically.
 
-Ordinary `release` and `full` P0 use the standard `subyard-pair` (4 GiB / 20 GiB per guest).
+Ordinary P0 uses the standard `subyard-pair` resources (4 GiB / 20 GiB per guest).
+Smoke, full and peer scenarios request two guests; independent single-host lanes request one.
+An explicit `SUBYARD_P0_NESTED_VM=2` retains two guests for that selector.
 They check broker installation, legacy migration, active/inactive runtime updates and rollback,
 without recursively allocating another four-VM broker pool. Android acceptance uses one
 `android-test` VM (8 GiB / 40 GiB); it does not need a pair or 16 GiB guests.
@@ -229,15 +234,22 @@ contains exactly the safe owner fields `display_label`, `yard`, `project`, `run`
 the complete response before retrying; a missing, extra or malformed owner field makes the outcome
 unknown and prevents another acquire.
 
+Explicit `--vm-count` requests additionally require `vm-count-v1`. The facade accepts
+`acquire-v3 TYPE client_id fingerprint yard project run purpose key_type key_blob slot_id [vm_count]`.
+The optional count is exactly `1` or `2`; Android supports only `1`. Unsupported counts are
+rejected before slot acquisition. Older requests omit the count and preserve their type default.
+An older broker without the capability refuses explicit-count runs before acquisition; update
+and initialize it through the normal operator workflow before using the new acceptance controllers.
+
 Use redacted status to inspect the configured pool, explicitly choose an available slot number, then
 run against the selected environment in only that slot. P0 always requests `subyard-pair`. For example, after choosing slot 1:
 
 ```sh
 slot=1
-dev/agent-e2e.sh --slot "$slot" --purpose host-free-suite -- ./tests/run.sh
-dev/agent-e2e.sh --slot "$slot" --wait 20m --purpose host-free-suite -- ./tests/run.sh
+dev/agent-e2e.sh --slot "$slot" --vm-count 1 --purpose host-free-suite -- ./tests/run.sh
+dev/agent-e2e.sh --slot "$slot" --vm-count 1 --wait 20m --purpose host-free-suite -- ./tests/run.sh
 dev/e2e/p0-acceptance.sh --slot "$slot"
-dev/agent-e2e.sh --slot "$slot" --purpose real-host-check --vm 1 -- \
+dev/agent-e2e.sh --slot "$slot" --vm-count 1 --purpose real-host-check --vm 1 -- \
   ./tests/some-real-host-check.sh
 ```
 
@@ -258,8 +270,11 @@ dev/agent-e2e.sh --slot "$slot" --type android-test --purpose android-pool-runti
 A single VM can host the Android yard and both emulator pool slots. A pair is needed for tests
 that actually coordinate two independent hosts, such as the full P0 matrix; it is not a general
 requirement for Subyard development. `--vm 1` on the default `subyard-pair` only selects where
-the payload runs: the broker still allocates both guests. Use `--type android-test` to allocate
-only one. The generic Android VM base does not include the SDK; the fixture provisions it.
+the payload runs: the broker still allocates both guests unless `--vm-count 1` is supplied.
+That singleton reserves 4.5 GiB including VM overhead, rather than the pair's 9 GiB.
+OpenClaw, GitHub, Hermes, Orca and subyard-dev acceptance request one standard guest; Amnezia
+retains its owner/client pair. Android retains its larger guest. The generic Android VM base
+does not include the SDK; the fixture provisions it.
 The fixture sleeps an idle leased device's display while another device boots, retaining its
 lease and ADB access. This avoids spending software-rendering CPU on an unused display; both
 devices still run concurrently with their configured RAM and screen dimensions.
@@ -627,8 +642,8 @@ held slot, immediate busy, wait progress and timeout diagnostics use the bounded
 a controller identity, lease credential, endpoint, host key or private path. The raw OpenSSH config
 and lease capability are internal temporary files and are not an agent API.
 
-Every wrapper invocation is a new lease for only the requested slot. For `subyard-pair`,
-`e2e-vm-1` and `e2e-vm-2` select its two guests; `android-test` has only `e2e-vm-1`. These are
+Every wrapper invocation is a new lease for only the requested slot. For a two-VM `subyard-pair`,
+`e2e-vm-1` and `e2e-vm-2` select its two guests; any singleton has only `e2e-vm-1`. These are
 guests within the allocation, never global slot names. Stateful multi-step work must stay in one
 script invocation or one interactive SSH session. Once leased, the agent has unrestricted root
 in its allocated guests and may create arbitrary nested yards,
