@@ -19,20 +19,22 @@ import (
 // Exercise the real CLI -> init runtime -> exec -> new CLI path. Only the
 // privileged installer, group switch and unavailable Incus socket are replaced.
 func TestIncusGroupReexecPreservesCommandEnvironment(t *testing.T) {
-	for _, guarded := range []bool{false, true} {
-		name := "first init"
-		if guarded {
-			name = "second failure does not loop"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, scenario := range []string{"first init", "second failure does not loop", "resource continuation"} {
+		t.Run(scenario, func(t *testing.T) {
 			root, environment, _ := nativeFixture(t)
+			if scenario == "resource continuation" {
+				root, environment, _ = bootstrapCommandFixture(t)
+			}
 			values := environmentMap(environment)
 			delete(values, "SSH_PORT")
 			values["DEV_UID"] = "2001" // Explicit launch override beats the named file.
 			values["SUBYARD_TEST_REEXEC_ROOT"] = root
 			values["SUBYARD_TEST_REEXEC_PHASE"] = "install"
-			if guarded {
+			if scenario == "second failure does not loop" {
 				values["SUBYARD_SG_REEXEC"] = "1"
+			}
+			if scenario == "resource continuation" {
+				values["SUBYARD_TEST_RESOURCE_REEXEC"] = "1"
 			}
 			bin := filepath.Join(root, "bin")
 			if err := os.MkdirAll(bin, 0o700); err != nil {
@@ -44,7 +46,14 @@ func TestIncusGroupReexecPreservesCommandEnvironment(t *testing.T) {
 				t.Fatal(err)
 			}
 			writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), "SSH_PORT=2222\n", 0o600)
-			writeCLIFile(t, filepath.Join(yards, "demo.env"), "SSH_PORT=2233\nDEV_UID=3001\n", 0o600)
+			yardPath := filepath.Join(yards, "demo.env")
+			if scenario == "resource continuation" {
+				yardPath = filepath.Join(yards, "demo", "config.env")
+				if err := os.MkdirAll(filepath.Dir(yardPath), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeCLIFile(t, yardPath, "SSH_PORT=2233\nDEV_UID=3001\nCODING_TOOL_INTEGRATIONS=\n", 0o600)
 			writeCLIFile(t, filepath.Join(root, "scripts", "01-install-incus.sh"),
 				"#!/bin/sh\n[ \"$SSH_PORT\" = 2233 ] && [ \"$DEV_UID\" = 2001 ] || exit 72\n"+
 					"printf installed > \"$SUBYARD_TEST_REEXEC_ROOT/installed\"\n", 0o700)
@@ -67,9 +76,16 @@ func TestIncusGroupReexecPreservesCommandEnvironment(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(root, "installed")); err != nil {
 				t.Fatalf("installer did not receive the resolved named context: %v", err)
 			}
+			if scenario == "resource continuation" {
+				if got := readResourceApplyLog(t, filepath.Join(root, "resource-apply.log")); got != strings.Join(resourceReexecArguments, " ")+"\n" {
+					t.Fatalf("group re-exec did not apply the requested resource: %q", got)
+				}
+			}
 		})
 	}
 }
+
+var resourceReexecArguments = []string{"run", "--label=two words '$HOME'", "--", "--yes"}
 
 func TestIncusGroupReexecProcess(t *testing.T) {
 	phase := os.Getenv("SUBYARD_TEST_REEXEC_PHASE")
@@ -77,26 +93,51 @@ func TestIncusGroupReexecProcess(t *testing.T) {
 		return
 	}
 	root := os.Getenv("SUBYARD_TEST_REEXEC_ROOT")
-	program, err := New(Options{
+	resourceContinuation := os.Getenv("SUBYARD_TEST_RESOURCE_REEXEC") == "1"
+	options := Options{
 		RepositoryRoot: root, DispatcherPath: filepath.Join(root, "bin", "dispatcher"),
 		Program: "yard", Environment: os.Environ(),
+		Stdout: os.Stdout, Stderr: os.Stderr,
 		Incus: &testkit.Incus{Err: errors.New("group membership is not active")},
-	})
+	}
+	if resourceContinuation {
+		options.InitPlatform = newInitPlatformFixture()
+		if phase == "child" {
+			for index, argument := range os.Args {
+				if argument == "--" {
+					options.Arguments = os.Args[index+1:]
+					break
+				}
+			}
+		}
+	}
+	program, err := New(options)
 	if err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := program.loadContext("demo")
+	loaded, err := program.resolveContextWithYardSettings("demo", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if phase == "install" {
-		err := program.initPlatform(loaded, nil).ApplyStage(context.Background(), ports.ReconcileStageIncus)
+		platform := program.initPlatform(loaded, nil)
+		if resourceContinuation {
+			definition, _ := program.resources.Lookup("demo")
+			bootstrap, err := program.prepareResourceBootstrap(context.Background(), loaded, definition, resourceReexecArguments)
+			if err != nil || bootstrap == nil || bootstrap.init == nil {
+				t.Fatalf("prepare resource bootstrap: %v", err)
+			}
+			program.options.InitPlatform = nil
+			bootstrap.init.rebuildPlatform(program)
+			platform = bootstrap.init.platform
+		}
+		err := platform.ApplyStage(context.Background(), ports.ReconcileStageIncus)
 		if os.Getenv("SUBYARD_SG_REEXEC") == "1" && err != nil && strings.Contains(err.Error(), "fresh incus-admin session") {
 			return
 		}
 		t.Fatalf("expected process replacement or the retry guard, got %v", err)
 	}
-	if !slices.Equal(os.Args[len(os.Args)-4:], []string{"-Y", "demo", "init", "--yes"}) {
+	if !resourceContinuation && !slices.Equal(os.Args[len(os.Args)-4:], []string{"-Y", "demo", "init", "--yes"}) {
 		t.Fatalf("re-exec lost the named init selection: %q", os.Args)
 	}
 	if os.Getenv("SUBYARD_SG_REEXEC") != "1" || os.Getenv("ASSUME_YES") != "1" {
@@ -112,5 +153,23 @@ func TestIncusGroupReexecProcess(t *testing.T) {
 	}
 	if program.baseEnv["DEV_UID"] != "2001" || loaded.Environment["DEV_UID"] != "2001" {
 		t.Fatal("group re-exec lost an explicit command override")
+	}
+	if resourceContinuation {
+		// The plain init continuation ends without executing the resource.
+		if slices.Equal(options.Arguments, []string{"-Y", "demo", "init", "--yes"}) {
+			return
+		}
+		want := append([]string{"-Y", "demo", "--yes", "demo"}, resourceReexecArguments...)
+		if !slices.Equal(options.Arguments, want) {
+			t.Fatalf("re-exec changed resource argument boundaries: %q", options.Arguments)
+		}
+		prompt := &testkit.Prompt{}
+		program.options.Prompt = prompt
+		if code := program.Run(context.Background()); code != 0 {
+			t.Fatalf("resumed resource command exited %d", code)
+		}
+		if len(prompt.Requests) != 0 {
+			t.Fatal("re-exec requested a second confirmation")
+		}
 	}
 }

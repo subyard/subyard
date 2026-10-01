@@ -45,3 +45,31 @@ func TestInitReexecResumesComposedProvision(t *testing.T) {
 		})
 	}
 }
+
+func TestInitReexecResumesResourceBringUp(t *testing.T) {
+	for _, yard := range []string{"", "default", "tools"} {
+		t.Run(yard, func(t *testing.T) {
+			runtime := Runtime{Yard: domain.Context{YardName: yard}, ResourceCommand: "sample",
+				ResourceArguments: []string{"run", "two words '$HOME'", "--", "--yes"}}
+			want := []string{"/opt/yard"}
+			if yard != "" {
+				want = append(want, "-Y", yard)
+			}
+			want = append(want, "--yes", "sample", "run", "two words '$HOME'", "--", "--yes")
+			args, err := runtime.initReexecArguments("/opt/yard")
+			if err != nil || !reflect.DeepEqual(args, want) {
+				t.Fatalf("args=%v err=%v", args, err)
+			}
+		})
+	}
+	for _, runtime := range []Runtime{
+		{ResourceCommand: "../sample", ResourceArguments: []string{"run"}},
+		{ResourceCommand: "sample"},
+		{ResourceArguments: []string{"run"}},
+		{ResourceCommand: "sample", ResourceArguments: []string{"../run"}},
+	} {
+		if _, err := runtime.initReexecArguments("/opt/yard"); err == nil {
+			t.Fatalf("invalid resource continuation accepted: command=%q arguments=%q", runtime.ResourceCommand, runtime.ResourceArguments)
+		}
+	}
+}

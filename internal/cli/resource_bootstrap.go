@@ -33,11 +33,24 @@ type profileBootstrap struct {
 	manager       resourceendpoint.Manager
 }
 
-func (cli *CLI) prepareResourceBootstrap(ctx context.Context, loaded config.Loaded, definition resource.Definition, verb string) (*profileBootstrap, error) {
-	if !definition.Bootstrap || verb != definition.BringUp {
+func (cli *CLI) prepareResourceBootstrap(ctx context.Context, loaded config.Loaded, definition resource.Definition, arguments []string) (*profileBootstrap, error) {
+	if !definition.Bootstrap || len(arguments) == 0 || arguments[0] != definition.BringUp {
 		return nil, nil
 	}
-	return cli.prepareProfileBootstrap(ctx, loaded, definition.Profile, definition.Command, &definition)
+	bootstrap, err := cli.prepareProfileBootstrap(ctx, loaded, definition.Profile, definition.Command, &definition)
+	if err != nil {
+		return nil, err
+	}
+	if bootstrap.init != nil {
+		bootstrap.init.resourceCommand = definition.Command
+		bootstrap.init.resourceArguments = slices.Clone(arguments)
+		if runtime, ok := bootstrap.init.platform.(reconcileruntime.Runtime); ok {
+			runtime.ResourceCommand = definition.Command
+			runtime.ResourceArguments = slices.Clone(arguments)
+			bootstrap.init.platform = runtime
+		}
+	}
+	return bootstrap, nil
 }
 
 // Shared activation path for explicit provision and resource bring-up.

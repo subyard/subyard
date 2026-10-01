@@ -43,7 +43,7 @@ func (cli *CLI) runResourceCommand(
 		))
 		return 2
 	}
-	bootstrap, err := cli.prepareResourceBootstrap(ctx, loaded, definition, invocation.verb)
+	bootstrap, err := cli.prepareResourceBootstrap(ctx, loaded, definition, invocation.arguments)
 	if err != nil {
 		cli.errorf("%s: prepare bootstrap: %v", definition.Command, err)
 		return 1

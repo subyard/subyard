@@ -45,6 +45,8 @@ type initBootstrap struct {
 }
 
 type initExecution struct {
+	resourceCommand       string
+	resourceArguments     []string
 	provisionProfile      string
 	requestedProfile      string
 	profileProvision      *provisionExecution
@@ -882,6 +884,8 @@ func (execution *initExecution) rebuildPlatform(cli *CLI) {
 	if runtime, ok := execution.platform.(reconcileruntime.Runtime); ok {
 		runtime.InitProfile = execution.requestedProfile
 		runtime.ProvisionProfile = execution.provisionProfile
+		runtime.ResourceCommand = execution.resourceCommand
+		runtime.ResourceArguments = slices.Clone(execution.resourceArguments)
 		if execution.integrationAdoption.AdoptionFingerprint != "" {
 			runtime.AdoptLegacyIntegrations = true
 			runtime.LegacyIntegrationFingerprint = execution.integrationAdoption.AdoptionFingerprint

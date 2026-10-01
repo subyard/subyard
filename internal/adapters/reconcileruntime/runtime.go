@@ -60,18 +60,21 @@ type Runtime struct {
 	InitProfile string
 	// ProvisionProfile resumes composed provisioning after owner-group reexec.
 	ProvisionProfile string
-	Stdin            io.Reader
-	Stdout           io.Writer
-	Stderr           io.Writer
-	Incus            ports.Incus
-	ConfigWriter     ports.InstanceConfigWriter
-	Executor         ports.InstanceExecutor
-	Yard             domain.Context
-	PowerYards       []domain.Context
-	SRVPool          string
-	SRVVolume        string
-	HostDeviceRoot   string
-	NetworkPolicy    YardNetworkPolicy
+	// ResourceCommand and ResourceArguments resume validated resource bring-up.
+	ResourceCommand   string
+	ResourceArguments []string
+	Stdin             io.Reader
+	Stdout            io.Writer
+	Stderr            io.Writer
+	Incus             ports.Incus
+	ConfigWriter      ports.InstanceConfigWriter
+	Executor          ports.InstanceExecutor
+	Yard              domain.Context
+	PowerYards        []domain.Context
+	SRVPool           string
+	SRVVolume         string
+	HostDeviceRoot    string
+	NetworkPolicy     YardNetworkPolicy
 }
 
 func (runtime Runtime) CheckStage(ctx context.Context, stage ports.ReconcileStageID) (bool, error) {
@@ -783,6 +786,13 @@ func (runtime Runtime) initReexecArguments(dispatcher string) ([]string, error) 
 	arguments := []string{dispatcher}
 	if runtime.Yard.YardName != "" {
 		arguments = append(arguments, "-Y", runtime.Yard.YardName)
+	}
+	if runtime.ResourceCommand != "" || len(runtime.ResourceArguments) != 0 {
+		if !domain.SafeName(runtime.ResourceCommand) || len(runtime.ResourceArguments) == 0 || !domain.SafeName(runtime.ResourceArguments[0]) {
+			return nil, errors.New("invalid resource continuation for owner-group reexec")
+		}
+		arguments = append(arguments, "--yes", runtime.ResourceCommand)
+		return append(arguments, runtime.ResourceArguments...), nil
 	}
 	if runtime.ProvisionProfile != "" {
 		if !domain.SafeName(runtime.ProvisionProfile) {
