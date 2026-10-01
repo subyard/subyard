@@ -23,20 +23,21 @@ type configSyncPushOptions struct {
 }
 
 type preparedConfigSyncPush struct {
-	checkout       string
-	branch         string
-	upstream       string
-	remote         string
-	remoteBranch   string
-	expectedHead   string
-	expectedRemote string
-	remoteURL      string
-	candidate      string
-	preview        configsync.Plan
-	options        configsync.Options
-	repository     *configGitCandidate
-	createdCommit  bool
-	pushRequired   bool
+	checkout          string
+	branch            string
+	upstream          string
+	remote            string
+	remoteBranch      string
+	expectedHead      string
+	expectedRemote    string
+	remoteURL         string
+	candidate         string
+	preview           configsync.Plan
+	options           configsync.Options
+	repository        *configGitCandidate
+	createdCommit     bool
+	pushRequired      bool
+	repairPermissions bool
 }
 
 func (cli *CLI) runConfigSyncPush(
@@ -83,8 +84,12 @@ func (cli *CLI) runConfigSyncPushRequest(ctx context.Context, loaded config.Load
 		fmt.Fprintln(cli.options.Stdout, "  commit: no new persistent configuration changes")
 	}
 	writeConfigSyncPlan(cli.options.Stdout, prepared.preview)
-	changed := prepared.pushRequired || prepared.preview.NeedsApply()
+	changed := prepared.pushRequired || prepared.repairPermissions || prepared.preview.NeedsApply()
 	consequences := []string{}
+	if prepared.repairPermissions {
+		consequences = append(consequences,
+			"remove group/world write permissions from the registered configuration checkout")
+	}
 	if changed && prepared.createdCommit {
 		consequences = append(consequences,
 			"advance the registered checkout with one configuration commit")
@@ -379,6 +384,11 @@ func (cli *CLI) prepareConfigSyncPush(
 	if err != nil {
 		prepared.cleanup(cli, ctx)
 		return nil, fmt.Errorf("validate exported candidate: %w", err)
+	}
+	prepared.repairPermissions, err = clonedConfigSourcePermissions(record.Checkout, false)
+	if err != nil {
+		prepared.cleanup(cli, ctx)
+		return nil, fmt.Errorf("inspect checkout permissions: %w", err)
 	}
 	return prepared, nil
 }

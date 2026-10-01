@@ -295,6 +295,8 @@ Activation observers do not print diagnostics. Return expected drift as
 failures as errors. The operation boundary renders current `Outcome.Warnings`
 once, sorted and deduplicated. Public error details use `ActivationDiagnostic`;
 raw guest errors stay private.
+Recoverable reconcile failures retain validated public diagnostics after reobservation;
+ambiguous state and protected transition guards retain their own recovery instructions.
 Materialized-config observation failures identify the yard and inspection phase, with a
 read-only config or integration status command. Known integration ownership conflicts retain
 their validated path and inspection command across the release boundary; they must not send

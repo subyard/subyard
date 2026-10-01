@@ -2639,7 +2639,7 @@ func (transition *V2Transition) reconcileActivation(
 				phase = phased.ActivationPhase()
 			}
 			return transition.reduceActivationReconcilerFailure(
-				ctx, journal, reconciler, id, phase, links, before,
+				ctx, journal, reconciler, id, phase, links, before, err,
 			), nil
 		}
 		actual, err := reconciler.Observe(ctx, journal.Releases, links)
@@ -2683,6 +2683,7 @@ func (transition *V2Transition) reduceActivationReconcilerFailure(
 	phase string,
 	links ReleaseLinks,
 	before V2ActivationObservation,
+	reconcileErr error,
 ) Outcome {
 	after, err := reconciler.Observe(ctx, journal.Releases, links)
 	if err != nil || validateActivationObservation(id, after) != nil {
@@ -2727,11 +2728,13 @@ func (transition *V2Transition) reduceActivationReconcilerFailure(
 			"run yard update --check",
 		), observation.activationWarnings)
 	}
-	return withActivationWarnings(v2RecoveringOutcome(
+	outcome := v2RecoveringOutcome(
 		observation.links, journal.Goal.Target,
 		transactionIDPointer(journal.Transaction), CodeDependencyUnavailable,
 		fmt.Sprintf("activation reconciler %q failed during %s", id, phase),
-	), observation.activationWarnings)
+	)
+	outcome.Message, outcome.Retry = publicActivationDiagnostic(reconcileErr, outcome.Message, outcome.Retry)
+	return withActivationWarnings(outcome, observation.activationWarnings)
 }
 
 func activationObservationBlocker(id string, err error) Blocker {
@@ -2743,6 +2746,14 @@ func activationObservationBlocker(id string, err error) Blocker {
 		code = CodeActivationAmbiguous
 		message = fmt.Sprintf("activation reconciler %q reports ambiguous activation topology", id)
 	}
+	message, retry = publicActivationDiagnostic(err, message, retry)
+	return Blocker{
+		Code: code, Resource: "activation." + id, Message: message,
+		Retry: retry,
+	}
+}
+
+func publicActivationDiagnostic(err error, message, retry string) (string, string) {
 	// Adapters may explicitly provide a public diagnostic; never expose raw
 	// errors from guest commands, configuration parsing or transport failures.
 	var diagnostic interface{ ActivationDiagnostic() (string, string) }
@@ -2753,10 +2764,7 @@ func activationObservationBlocker(id string, err error) Blocker {
 			message, retry = publicMessage, publicRetry
 		}
 	}
-	return Blocker{
-		Code: code, Resource: "activation." + id, Message: message,
-		Retry: retry,
-	}
+	return message, retry
 }
 
 func validateActivationObservation(id string, observation V2ActivationObservation) error {

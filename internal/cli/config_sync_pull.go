@@ -14,15 +14,16 @@ import (
 )
 
 type preparedConfigSyncPull struct {
-	checkout       string
-	expectedHead   string
-	expectedRemote string
-	remote         string
-	remoteURL      string
-	preview        configsync.Plan
-	options        configsync.Options
-	candidate      *configGitCandidate
-	fastForward    bool
+	checkout          string
+	expectedHead      string
+	expectedRemote    string
+	remote            string
+	remoteURL         string
+	preview           configsync.Plan
+	options           configsync.Options
+	candidate         *configGitCandidate
+	fastForward       bool
+	repairPermissions bool
 }
 
 func (cli *CLI) runConfigSyncPull(
@@ -67,8 +68,12 @@ func (cli *CLI) runConfigSyncPull(
 	}
 	writeConfigSyncPlan(cli.options.Stdout, prepared.preview)
 
-	changed := prepared.fastForward || prepared.preview.NeedsApply()
+	changed := prepared.fastForward || prepared.repairPermissions || prepared.preview.NeedsApply()
 	consequences := []string{}
+	if prepared.repairPermissions {
+		consequences = append(consequences,
+			"remove group/world write permissions from the registered configuration checkout")
+	}
 	if changed && prepared.fastForward {
 		consequences = append(consequences,
 			"fast-forward the registered configuration checkout")
@@ -218,6 +223,11 @@ func (cli *CLI) prepareConfigSyncPull(
 	if err != nil {
 		prepared.cleanup(cli, ctx)
 		return nil, fmt.Errorf("validate upstream candidate: %w", err)
+	}
+	prepared.repairPermissions, err = clonedConfigSourcePermissions(record.Checkout, false)
+	if err != nil {
+		prepared.cleanup(cli, ctx)
+		return nil, fmt.Errorf("inspect checkout permissions: %w", err)
 	}
 	return prepared, nil
 }

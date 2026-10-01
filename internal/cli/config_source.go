@@ -512,8 +512,14 @@ func (cli *CLI) cloneConfigSourceWithEnvironment(
 }
 
 func hardenClonedConfigSource(root string) error {
+	_, err := clonedConfigSourcePermissions(root, true)
+	return err
+}
+
+func clonedConfigSourcePermissions(root string, apply bool) (bool, error) {
 	gitDirectory := filepath.Join(root, ".git")
-	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+	needsRepair := false
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -536,8 +542,13 @@ func hardenClonedConfigSource(root string) error {
 		if protected == info.Mode().Perm() {
 			return nil
 		}
+		needsRepair = true
+		if !apply {
+			return nil
+		}
 		return os.Chmod(path, protected)
 	})
+	return needsRepair, err
 }
 
 func hardenConfigCandidate(root string) error {

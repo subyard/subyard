@@ -1,4 +1,8 @@
 from pathlib import Path
+from contextlib import contextmanager
+from itertools import chain
+from types import SimpleNamespace
+import shutil
 import tempfile
 import time
 import unittest
@@ -40,6 +44,28 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual([("Sample", "git"), ("nested", "git")],
                          [(r.name, r.kind) for r in scan.projects[0].roots])
 
+    def test_large_build_directory_keeps_nested_checkouts_discoverable(self):
+        import discovery
+        build = self.root / ".build"
+        init_git(build / "checkout")
+        (self.root / ".gitignore").write_text(".build/\n")
+        original = discovery.os.scandir
+
+        @contextmanager
+        def crowded(fd):
+            with original(fd) as iterator:
+                if Path("/proc/self/fd/" + str(fd)).resolve() == build:
+                    artifacts = (SimpleNamespace(name=f"artifact-{index}", is_dir=lambda **_: False)
+                                 for index in range(100001))
+                    yield chain(iterator, artifacts)
+                else:
+                    yield iterator
+
+        with mock.patch.object(discovery.os, "scandir", side_effect=crowded):
+            scan = self.discover(self.workspaces)
+        self.assertEqual([], scan.errors)
+        self.assertEqual(["Sample", ".build/checkout"], [r.name for r in scan.projects[0].roots])
+
     def test_git_files_for_submodule_and_two_worktrees_are_distinct(self):
         init_git(self.root, commit=True)
         upstream = Path(self.tmp.name) / "upstream"
@@ -53,6 +79,19 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(["Sample", "checkout-one", "checkout-two", "module"],
                          [r.name for r in scan.projects[0].roots])
         self.assertNotIn(str(upstream), [r.path for r in scan.projects[0].roots])
+
+    def test_thousand_git_repositories_are_discovered_with_default_budget(self):
+        upstream = Path(self.tmp.name) / "upstream"
+        init_git(upstream)
+        for index in range(1000):
+            checkout = self.root / ".build" / f"checkout-{index:04d}"
+            checkout.mkdir(parents=True)
+            shutil.copytree(upstream / ".git", checkout / ".git",
+                            ignore=shutil.ignore_patterns("hooks", "info"))
+        scan = self.discover(self.workspaces)
+        self.assertEqual([], scan.errors)
+        self.assertEqual(1001, len(scan.projects[0].roots))
+        self.assertEqual(1000, sum(root.kind == "git" for root in scan.projects[0].roots))
 
     def test_broken_git_is_error_and_not_folder_transition(self):
         (self.root / ".git").write_text("gitdir: /nonexistent/orca-fixture\n")
@@ -125,8 +164,9 @@ class DiscoveryTests(unittest.TestCase):
         self.assertTrue(scan.errors)
         self.assertEqual("Sample", scan.projects[0].roots[0].name)
         limited = self.discover(self.workspaces, max_entries=1)
-        self.assertTrue(limited.errors)
-        self.assertTrue(self.discover(self.workspaces, deadline=time.monotonic() - 1).errors)
+        self.assertEqual(["Workspace discovery entry limit reached; expected repository set is incomplete"], limited.errors)
+        expired = self.discover(self.workspaces, deadline=time.monotonic() - 1)
+        self.assertEqual(["Workspace discovery time limit reached; expected repository set is incomplete"], expired.errors)
 
     def test_unreadable_project_does_not_skip_later_projects(self):
         project(self.workspaces, "zzz-healthy", "Healthy")
