@@ -3,8 +3,10 @@ import contextlib
 import copy
 import importlib.util
 import io
+import json
 from pathlib import Path
 import subprocess
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -89,42 +91,84 @@ class StockProbeTests(unittest.TestCase):
                 self.assertEqual(1, probe.stock_probe(arguments))
             self.assertEqual("orca-stock-probe: version: failed\n", output.getvalue())
 
-    def test_resource_settings_exact_updates_and_readback_order(self):
-        rpc = unittest.mock.Mock()
-        rpc.call.side_effect = [{}, {"settings": {"codexTerminalServerIsolation": False}},
-                               {}, {"settings": {"codexTerminalServerIsolation": True}}]
-        probe.check_resource_settings(rpc)
-        self.assertEqual([
-            unittest.mock.call("settings.update", {"codexTerminalServerIsolation": False}),
-            unittest.mock.call("settings.get"),
-            unittest.mock.call("settings.update", {"codexTerminalServerIsolation": True}),
-            unittest.mock.call("settings.get"),
-        ], rpc.call.call_args_list)
+    def test_isolation_recovery_preserves_full_document_for_both_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data_file = root / "data.json"
+            document = {"settings": {"codexTerminalServerIsolation": True,
+                                     "other": "synthetic-private-payload"},
+                        "repos": [{"id": "repo-1"}], "grants": [{"id": "client-1"}]}
+            data_file.write_text(json.dumps(document))
+            cli = unittest.mock.Mock(side_effect=lambda *command: json.dumps({
+                "ok": True, "result": {"dataFile": str(data_file)} if command[2] == "exports"
+                else {"storage": "json", "restoredPath": str(data_file)}
+            }))
+            for before, value in ((True, False), (False, True)):
+                self.assertIs(value, probe.isolation_settings(cli, root, value, before))
+                document["settings"]["codexTerminalServerIsolation"] = value
+                self.assertEqual(document, json.loads(data_file.read_text()))
+                self.assertIs(value, probe.isolation_settings(cli, root, expected=value))
+            self.assertEqual([
+                unittest.mock.call("profile", "state", "exports", "--json"),
+                unittest.mock.call("profile", "state", "rollback", "--current-sqlite", "--json"),
+                unittest.mock.call("profile", "state", "rollback", "--current-json", "--json"),
+                unittest.mock.call("profile", "state", "exports", "--json"),
+                unittest.mock.call("profile", "state", "rollback", "--current-sqlite", "--json"),
+            ] * 2, cli.call_args_list)
 
-    def test_resource_settings_rejection_is_sanitized_and_not_retried(self):
-        for prefix, operation in (([], "settings.update false"),
-                                  ([{}], "settings.get after false"),
-                                  ([{}, {"settings": {"codexTerminalServerIsolation": False}}],
-                                   "settings.update true")):
-            rpc = unittest.mock.Mock()
-            rpc.call.side_effect = [*prefix, RuntimeError("synthetic-private-payload")]
-            with self.subTest(operation=operation), self.assertRaises(probe.SafeRpcError) as error:
-                probe.check_resource_settings(rpc)
-            self.assertEqual(operation + " unavailable", str(error.exception))
-            self.assertEqual(len(prefix) + 1, rpc.call.call_count)
+    def test_isolation_readback_mismatch_stops_before_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data_file = root / "data.json"
+            before = json.dumps({"settings": {"codexTerminalServerIsolation": True}})
+            data_file.write_text(before)
+            cli = unittest.mock.Mock(side_effect=[
+                json.dumps({"ok": True, "result": {"dataFile": str(data_file)}}),
+                json.dumps({"ok": True, "result": {}}),
+            ])
+            with self.assertRaisesRegex(probe.SafeRpcError, "readback mismatch"):
+                probe.isolation_settings(cli, root, value=True, expected=False)
+            self.assertEqual(before, data_file.read_text())
+            self.assertEqual(2, cli.call_count)
 
-    def test_resource_settings_invalid_boolean_projection_stops_before_next_write(self):
-        for result in (None, [], {}, {"settings": None}, {"settings": []},
-                       {"settings": {}}, {"settings": {"codexTerminalServerIsolation": 0}},
-                       {"settings": {"codexTerminalServerIsolation": "synthetic-private-payload"}},
-                       {"settings": {"codexTerminalServerIsolation": True}}):
-            rpc = unittest.mock.Mock()
-            rpc.call.side_effect = [{}, result]
-            with self.subTest(result=result), self.assertRaises(probe.SafeRpcError) as error:
-                probe.check_resource_settings(rpc)
-            self.assertIn("settings.get after false", str(error.exception))
-            self.assertNotIn("synthetic-private-payload", str(error.exception))
-            self.assertEqual(2, rpc.call.call_count)
+    def test_isolation_export_rejects_escape_and_symlink_before_recovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            link = root / "link.json"
+            link.symlink_to(root / "data.json")
+            for path in (root.parent / "synthetic-private-payload.json", link):
+                cli = unittest.mock.Mock(return_value=json.dumps({
+                    "ok": True, "result": {"dataFile": str(path)}}))
+                with self.subTest(path=path), self.assertRaises(probe.SafeRpcError) as error:
+                    probe.isolation_settings(cli, root, False)
+                self.assertEqual("recovery export escaped profile", str(error.exception))
+                self.assertEqual(1, cli.call_count)
+
+    def test_isolation_import_result_is_validated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data_file = root / "data.json"
+            for result in ({}, {"storage": "sqlite", "restoredPath": str(data_file)},
+                           {"storage": "json", "restoredPath": "synthetic-private-payload"}):
+                data_file.write_text(json.dumps({"settings": {"codexTerminalServerIsolation": True}}))
+                cli = unittest.mock.Mock(side_effect=[
+                    json.dumps({"ok": True, "result": {"dataFile": str(data_file)}}),
+                    json.dumps({"ok": True, "result": {}}),
+                    json.dumps({"ok": True, "result": result}),
+                ])
+                with self.subTest(result=result), self.assertRaises(probe.SafeRpcError) as error:
+                    probe.isolation_settings(cli, root, False)
+                self.assertEqual("invalid recovery import result", str(error.exception))
+                self.assertEqual(3, cli.call_count)
+
+    def test_isolation_command_failure_does_not_echo_private_payload(self):
+        arguments = argparse.Namespace(binary="/synthetic/orca", state="/synthetic/profile",
+                                       value="false", expect=None)
+        with patch.object(probe.subprocess, "run", side_effect=subprocess.CalledProcessError(
+            1, [], output=b"synthetic-private-payload")):
+            with contextlib.redirect_stderr(io.StringIO()) as output:
+                self.assertEqual(1, probe.set_isolation(arguments))
+            self.assertEqual("orca-isolation: stock recovery failed\n", output.getvalue())
 
     def test_resource_settings_mode_is_opt_in(self):
         for flags, expected in (([], False), (["--resource-settings"], True)):

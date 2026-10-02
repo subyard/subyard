@@ -143,24 +143,51 @@ def cli_result(value):
     return value["result"]
 
 
-def check_resource_settings(rpc):
-    """Check the exact setting operations used by the resource fixture."""
-    for expected in (False, True):
-        label = "true" if expected else "false"
-        try:
-            rpc.call("settings.update", {"codexTerminalServerIsolation": expected})
-        except Exception:
-            raise SafeRpcError(f"settings.update {label} unavailable") from None
-        try:
-            result = rpc.call("settings.get")
-        except Exception:
-            raise SafeRpcError(f"settings.get after {label} unavailable") from None
-        settings = result.get("settings") if isinstance(result, dict) else None
-        if (not isinstance(settings, dict)
-                or not isinstance(settings.get("codexTerminalServerIsolation"), bool)):
-            raise SafeRpcError(f"settings.get after {label} invalid Boolean projection")
-        if settings["codexTerminalServerIsolation"] is not expected:
-            raise SafeRpcError(f"settings.get after {label} Boolean readback mismatch")
+def isolation_settings(cli, root, value=None, expected=None):
+    """Use stock recovery while stopped; never expose the full private document."""
+    exports = cli_result(json.loads(cli("profile", "state", "exports", "--json")))
+    data_file = Path(exports["dataFile"])
+    if data_file.is_symlink() or not data_file.resolve().is_relative_to(root.resolve()):
+        raise SafeRpcError("recovery export escaped profile")
+    # SQLite owns ordinary runtime state. Stock publishes its canonical JSON.
+    cli_result(json.loads(cli("profile", "state", "rollback", "--current-sqlite", "--json")))
+    document = recovery_document(json.loads(data_file.read_text()))
+    actual = document["settings"]["codexTerminalServerIsolation"]
+    if expected is not None and actual is not expected:
+        raise SafeRpcError("recovery setting readback mismatch")
+    if value is not None:
+        document["settings"]["codexTerminalServerIsolation"] = value
+        data_file.write_text(json.dumps(document))
+        result = cli_result(json.loads(cli("profile", "state", "rollback", "--current-json", "--json")))
+        if result.get("storage") != "json" or result.get("restoredPath") != str(data_file):
+            raise SafeRpcError("invalid recovery import result")
+        return value
+    return actual
+
+
+def set_isolation(arguments):
+    root = Path(arguments.state)
+    environment = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(Path.home()),
+                   "XDG_CONFIG_HOME": str(root / "config"),
+                   "XDG_DATA_HOME": str(root / "data"),
+                   "XDG_STATE_HOME": str(root / "state")}
+
+    def cli(*command):
+        return subprocess.run([arguments.binary, *command], env=environment,
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              timeout=15, check=True).stdout
+
+    try:
+        value = None if arguments.value is None else arguments.value == "true"
+        expected = None if arguments.expect is None else arguments.expect == "true"
+        isolation_settings(cli, root, value, expected)
+        print("ok: stock Orca isolation recovery setting")
+        return 0
+    except SafeRpcError as error:
+        print(f"orca-isolation: {error}", file=sys.stderr)
+    except Exception:
+        print("orca-isolation: stock recovery failed", file=sys.stderr)
+    return 1
 
 
 def stock_probe(arguments):
@@ -240,9 +267,6 @@ def stock_probe(arguments):
             try:
                 phase = "startup"
                 start()
-                if arguments.resource_settings:
-                    phase = "resource settings contract"
-                    check_resource_settings(rpc)
                 phase = "registration and terminal snapshots"
                 codex_defaults(rpc, apply=True)
                 project = root / "project"
@@ -277,35 +301,20 @@ def stock_probe(arguments):
                 check_tab()
                 phase = "recovery export shutdown"
                 stop()
-                phase = "recovery exports CLI"
-                exports = cli_result(json.loads(cli("profile", "state", "exports", "--json")))
-                phase = "recovery settings export schema"
-                data_file = Path(exports["dataFile"])
-                if not data_file.resolve().is_relative_to(root):
-                    raise SafeRpcError("recovery export escaped disposable profile")
-                # Stock owns SQLite authority. Its recovery command publishes
-                # canonical JSON; ordinary shutdown need not create that file.
-                cli_result(json.loads(cli("profile", "state", "rollback", "--current-sqlite", "--json")))
-                document = recovery_document(json.loads(data_file.read_text()))
-                expected = not document["settings"]["codexTerminalServerIsolation"]
-                document["settings"]["codexTerminalServerIsolation"] = expected
-                data_file.write_text(json.dumps(document))
-                phase = "recovery import CLI"
-                result = cli_result(json.loads(cli("profile", "state", "rollback", "--current-json", "--json")))
-                phase = "recovery import schema"
-                if result.get("storage") != "json" or result.get("restoredPath") != str(data_file):
-                    raise SafeRpcError("invalid recovery import result")
-                phase = "recovery restart"
-                start()
-                phase = "recovered terminal and project snapshots"
-                check_tab()
-                check_projects()
-                stop()
-                phase = "recovered settings export"
-                cli_result(json.loads(cli("profile", "state", "rollback", "--current-sqlite", "--json")))
-                restored = recovery_document(json.loads(data_file.read_text()))
-                if restored["settings"]["codexTerminalServerIsolation"] is not expected:
-                    raise SafeRpcError("recovery setting did not survive import")
+                phase = "recovery settings export"
+                before = isolation_settings(cli, root)
+                values = (False, True) if arguments.resource_settings else (not before,)
+                for expected in values:
+                    phase = "recovery setting import"
+                    isolation_settings(cli, root, expected)
+                    phase = "recovery restart"
+                    start()
+                    phase = "recovered terminal and project snapshots"
+                    check_tab()
+                    check_projects()
+                    stop()
+                    phase = "recovered settings export"
+                    isolation_settings(cli, root, expected=expected)
             finally:
                 stop()
         print("ok: pinned stock Orca registration, terminal snapshots and recovery setting export/import")
@@ -417,7 +426,13 @@ def main():
     probe.add_argument("--version", required=True)
     probe.add_argument("--registration", default="/usr/local/libexec/subyard/orca-registration")
     probe.add_argument("--resource-settings", action="store_true",
-                       help="check the resource fixture's exact settings.get/update shapes")
+                       help="check both resource isolation values through stock recovery and restart")
+
+    isolation = subparsers.add_parser("set-isolation")
+    isolation.add_argument("--binary", default="/usr/bin/orca-ide")
+    isolation.add_argument("--state", default="/srv/agents/orca")
+    isolation.add_argument("--value", choices=("false", "true"))
+    isolation.add_argument("--expect", choices=("false", "true"))
 
     forced = subparsers.add_parser("forced-command")
     forced.add_argument("engine")
@@ -434,6 +449,10 @@ def main():
         return rpc_call(arguments)
     if arguments.command == "stock-probe":
         return stock_probe(arguments)
+    if arguments.command == "set-isolation":
+        if arguments.value is None and arguments.expect is None:
+            parser.error("set-isolation requires --value or --expect")
+        return set_isolation(arguments)
     return forced_command(arguments)
 
 

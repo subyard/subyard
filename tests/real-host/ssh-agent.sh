@@ -51,18 +51,26 @@ import os
 import pty
 import re
 import select
+import shlex
 import signal
+import subprocess
 import sys
 import time
 
 pid, terminal = pty.fork()
 if pid == 0:
     os.environ["LC_ALL"] = "C"
-    os.execv(sys.argv[1], [sys.argv[1], "ssh-agent", "unlock", "--key", sys.argv[2],
-                         "--ttl", sys.argv[3], "--yes"])
+    command = [sys.argv[1], "ssh-agent", "unlock", "--key", sys.argv[2],
+               "--ttl", sys.argv[3], "--yes"]
+    if "incus-admin" not in subprocess.check_output(["id", "-nG"], text=True).split():
+        user = subprocess.check_output(["id", "-un"], text=True).strip()
+        if "incus-admin" in subprocess.check_output(["id", "-nG", user], text=True).split():
+            command = ["sg", "incus-admin", "-c", shlex.join(["exec", *command])]
+    os.execvp(command[0], command)
 deadline = time.monotonic() + 35
 buffer = b""
 attempts = 0
+rejected = False
 try:
     while time.monotonic() < deadline:
         done, status = os.waitpid(pid, os.WNOHANG)
@@ -84,6 +92,7 @@ try:
             # Exercise ordinary operator cancellation after a rejected password.
             # SIGKILL would bypass CLI cleanup and only test the pending watchdog.
             os.write(terminal, b"\x03")
+            rejected = attempts > 0
             buffer = b""
             continue
         if b"enter passphrase for" in buffer.lower():
@@ -122,8 +131,10 @@ except (OSError, RuntimeError) as failure:
     for value in (sys.argv[2], sys.argv[4]):
         diagnostic = diagnostic.replace(value, "<fixture credential>")
     print(f"ssh-agent-e2e: {failure}; passphrase prompts={attempts}", file=sys.stderr)
+    if rejected:
+        print("ssh-agent-e2e: native passphrase rejected and cancelled", file=sys.stderr)
     for line in diagnostic.splitlines():
-        if line.startswith(("yard:", "SSH key access:")):
+        if line.startswith(("yard:", os.path.basename(sys.argv[1]) + ":", "SSH key access:")):
             print(line[:1000], file=sys.stderr)
     sys.exit(1)
 finally:
@@ -255,6 +266,8 @@ stage 'unlocking in a real PTY and proving detached Git and Orca signing'
 if agent_unlock 2m wrong-public-fixture-passphrase > "$STATE/agent-wrong-passphrase.out" 2>&1; then
   die 'wrong passphrase unexpectedly unlocked the key'
 fi
+grep -Fxq 'ssh-agent-e2e: native passphrase rejected and cancelled' "$STATE/agent-wrong-passphrase.out" \
+  || die 'wrong passphrase check did not reach native rejection and cancellation'
 [ "$(agent_status)" = locked ] || die 'failed passphrase left an active grant'
 if agent_dev "$agent_fetch" > "$STATE/agent-wrong-passphrase-fetch.out" 2>&1; then
   die 'Git authenticated after a failed passphrase'

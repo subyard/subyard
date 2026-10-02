@@ -1511,13 +1511,29 @@ if [ "$EXISTING_YARD" = 1 ]; then
     || { report_config_failure "$STATE/config-sync-check.err"; die 'public config sync did not converge'; }
   yard config status >"$STATE/config-sync-status.out" 2>"$STATE/config-sync-status.err" \
     || die 'config sync --apply did not converge materialized settings'
+  assert_materialized_json "$desired_two" "$ROOT/config/agents/pi/settings.json" \
+    || die 'config sync --apply changed the persistent local JSON override'
+  assert_orca_runtime_json_preserved
+  assert_orca_readiness
+  client_status "$pairing" paired-client
+
+  stage 'materializing the synced Git fallback after retiring the fixture-owned local override'
+  # Local imports take precedence over Git; file settings have no unset command.
+  local_claude="$SUBYARD_CONFIG_HOME/overrides/host/agents/claude/settings.json"
+  [ -f "$local_claude" ] && [ ! -L "$local_claude" ] && cmp -s -- "$desired_two" "$local_claude" \
+    || die 'local Claude override no longer matches the fixture-owned import'
+  rm -- "$local_claude"
+  yard config apply --yes >"$STATE/config-sync-fallback-apply.out" 2>"$STATE/config-sync-fallback-apply.err" \
+    || { report_config_failure "$STATE/config-sync-fallback-apply.err"; die 'public config apply did not materialize the Git fallback'; }
+  yard config status >"$STATE/config-sync-fallback-status.out" 2>"$STATE/config-sync-fallback-status.err" \
+    || die 'config apply did not converge the synced Git fallback'
   assert_materialized_json "$desired_sync" "$ROOT/config/agents/pi/settings.json" \
-    || die 'config sync --apply did not materialize its managed JSON fields'
+    || die 'config apply did not materialize synced Git fallback fields'
   guest_root jq -e '
     .autoMemoryDirectory == "~/.claude-memory-e2e-sync" and
     (.env | has("SUBYARD_E2E_MANAGED_SETTING") | not)
   ' /home/dev/.claude/settings.json >/dev/null \
-    || die 'config sync --apply did not honor the tracked managed settings'
+    || die 'config apply did not honor the tracked Git fallback settings'
   assert_orca_runtime_json_preserved
   assert_orca_readiness
   client_status "$pairing" paired-client

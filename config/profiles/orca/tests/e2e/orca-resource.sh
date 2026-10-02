@@ -188,6 +188,15 @@ server_cli() {
     /usr/bin/orca-ide "$@"
 }
 
+server_isolation() {
+  run_orca down
+  if "${incus[@]}" exec "$instance" -- systemctl is-active --quiet subyard-orca.service; then
+    die 'Orca must be stopped before recovery settings changes'
+  fi
+  "${incus[@]}" exec "$instance" -- runuser -u dev -- python3 -B \
+    /tmp/orca-projects-helper.py set-isolation --state /srv/agents/orca "$@"
+}
+
 client_status() {
   local pairing="$1" profile="$2"
   local output="$work/$profile-status.json"
@@ -583,31 +592,16 @@ client_status "$first_pair" client-a
 stage 'exercising terminal input and output through the paired stock client'
 assert_paired_terminal_io "$first_pair" client-a
 stage 'checking server isolation opt-out and preservation through repeated up'
-"${incus[@]}" exec "$instance" -- runuser -u dev -- python3 -B - <<'PY'
-import sys
-sys.path.insert(0, "/usr/local/libexec/subyard/orca-registration")
-from transport import RuntimeRPC
-rpc = RuntimeRPC("/srv/agents/orca/config/orca/orca-runtime.json")
-rpc.call("settings.update", {"codexTerminalServerIsolation": False})
-PY
+server_isolation --value false
 run_orca up
-"${incus[@]}" exec "$instance" -- runuser -u dev -- python3 -B - <<'PY'
-import sys
-sys.path.insert(0, "/usr/local/libexec/subyard/orca-registration")
-from transport import RuntimeRPC
-rpc = RuntimeRPC("/srv/agents/orca/config/orca/orca-runtime.json")
-assert rpc.call("settings.get")["settings"]["codexTerminalServerIsolation"] is False, \
-    "repeated up reset server isolation preferences"
-PY
+run_orca up
 assert_paired_terminal_io "$first_pair" client-a 0
-"${incus[@]}" exec "$instance" -- runuser -u dev -- python3 -B - <<'PY'
-import sys
-sys.path.insert(0, "/usr/local/libexec/subyard/orca-registration")
-from transport import RuntimeRPC
-rpc = RuntimeRPC("/srv/agents/orca/config/orca/orca-runtime.json")
-rpc.call("settings.update", {"codexTerminalServerIsolation": True})
-PY
+# Read the stock-owned value after repeated up before restoring isolation.
+server_isolation --expect false --value true
+run_orca up
 assert_paired_terminal_io "$first_pair" client-a
+server_isolation --expect true
+run_orca up
 "${incus[@]}" exec "$instance" -- bash -se <<'YARD'
 id=gamma-12345678
 root="/srv/workspaces/$id"
