@@ -286,9 +286,9 @@ class Controller:
             resource = next(item for item in status["resources"]["slots"] if item["slot_id"] == lease.slot)
             require(resource["virtual_disk_capacity_bytes"] == spec["vm_count"] * disk,
                     "broker virtual disk reservation differs from actual environment")
-            require(resource["memory_commitment_bytes"] == spec["vm_count"] *
-                    (ram + status["resources"]["budgets"]["vm_overhead_bytes"]),
-                    "broker RAM reservation differs from actual environment")
+            require(resource["memory_commitment_bytes"] == 0 and
+                    resource["remaining_memory_growth_bytes"] == 0,
+                    "held environment retained a pending RAM reservation")
             lease.record.update(environment=spec, base_fingerprint=held["base_fingerprint"], resources=resource)
         return status
 

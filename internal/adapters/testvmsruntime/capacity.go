@@ -32,8 +32,7 @@ type MemoryCapacity struct {
 	EventsAvailable        bool   `json:"events_available"`
 	LimitAvailable         bool   `json:"limit_available"`
 	OuterHostEvidence      string `json:"outer_host_evidence"`
-	// scope is the cgroup whose free space bounds admission. VM usage is credited
-	// only when its dedicated cgroup is inside this boundary.
+	// scope identifies the limiting cgroup and must match across admission samples.
 	scope string
 }
 
@@ -211,7 +210,16 @@ func environmentCommitment(spec EnvironmentSpec, overhead uint64) (memory, disk 
 		uint64(spec.Count) * budgetBytes(spec.Disk, "20GiB")
 }
 
-func (runtime *Runtime) outstandingCommitment(ctx context.Context, slot LeaseSlot, overhead uint64, memoryScope string) (uint64, uint64, error) {
+func pendingMemory(slot LeaseSlot, memory uint64) uint64 {
+	// Cancellation can change provisioning to draining while a start is still
+	// in flight. Keep its admitted promise until readiness or confirmed cleanup.
+	if slot.State == SlotProvisioning || (slot.Reserved && slot.ReadyAt.IsZero() && slot.State != SlotHeld) {
+		return memory
+	}
+	return 0
+}
+
+func (runtime *Runtime) outstandingCommitment(ctx context.Context, slot LeaseSlot, overhead uint64) (uint64, uint64, error) {
 	spec := slot.Environment
 	if spec == nil {
 		legacy, err := runtime.Config.EnvironmentSpec(EnvironmentPair)
@@ -221,12 +229,14 @@ func (runtime *Runtime) outstandingCommitment(ctx context.Context, slot LeaseSlo
 		spec = &legacy
 	}
 	memory, disk := environmentCommitment(*spec, overhead)
-	used := runtime.allocationUsage(ctx, slot, memoryScope)
-	return memory - min(memory, used.memory), disk - min(disk, used.disk), nil
+	// Occupied guest RAM is already accounted for by host MemAvailable.
+	memory = pendingMemory(slot, memory)
+	used := runtime.allocationUsage(ctx, slot)
+	return memory, disk - min(disk, used.disk), nil
 }
 
-// Full commitments intentionally remain conservative: actual usage is reported
-// separately, and shared CoW blocks are counted only by Incus at the pool level.
+// Admission covers pending RAM promises and bounded disk growth. Shared CoW
+// blocks are counted only by Incus at the pool level.
 func checkCapacity(memory MemoryCapacity, storage StorageCapacity, ram, disk, ramReserve, diskReserve, diskBudget uint64) error {
 	if ram > memory.Available || ramReserve > memory.Available-ram {
 		return &CapacityError{"memory", "insufficient confirmed memory reserve"}
@@ -276,16 +286,16 @@ func (runtime *Runtime) reserveEnvironment(ctx context.Context, store LeaseStore
 			if current.State == SlotAvailable || current.State == SlotUnavailable {
 				continue
 			}
-			m, d, err := runtime.outstandingCommitment(ctx, current, overhead, memoryScope)
+			m, d, err := runtime.outstandingCommitment(ctx, current, overhead)
 			if err != nil {
 				return err
 			}
 			ram += m
 			disk += d
 		}
-		// Bound free space on both sides of usage sampling. A guest can also
-		// release credited RAM or disk blocks; the later free-space sample
-		// alone would then count the same bytes twice.
+		// Bound free space on both sides of disk sampling. Host RAM can change
+		// concurrently; the later disk sample alone can double-count released
+		// blocks that received allocation credit.
 		memory, err = runtime.readMemoryCapacity()
 		if err != nil || memory.scope != memoryScope {
 			return &CapacityError{"memory", "memory telemetry unavailable"}

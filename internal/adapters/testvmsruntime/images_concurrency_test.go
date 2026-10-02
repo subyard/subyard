@@ -114,6 +114,9 @@ func TestConcurrentColdPrepareBuildsOnceAndPreservesBothPins(t *testing.T) {
 		case strings.HasPrefix(command, "project create "+project+" "):
 			projectExists, owner = true, properties()["user.subyard.base_owner"]
 		case strings.HasPrefix(command, "init images:"+upstream+" e2e-base-1 "):
+			if properties()["boot.autostart"] != "false" {
+				return nil, nil, errors.New("builder can start without admission after daemon restart")
+			}
 			builds++
 			vmExists, buildKey = true, properties()["user.subyard.base_key"]
 		case strings.HasPrefix(command, "publish e2e-base-1 "):
@@ -166,7 +169,7 @@ func TestConcurrentColdPrepareBuildsOnceAndPreservesBothPins(t *testing.T) {
 			memoryProbe:    func() (MemoryCapacity, error) { return MemoryCapacity{Available: 64 << 30}, nil },
 			diskUsageProbe: func(context.Context) (uint64, error) { return 10 << 30, nil },
 			cacheProbe:     func(context.Context) (CacheUsage, error) { return CacheUsage{}, nil },
-			usageProbe:     func(context.Context, LeaseSlot, string) allocationUsage { return allocationUsage{} },
+			usageProbe:     func(context.Context, LeaseSlot) allocationUsage { return allocationUsage{} },
 		}
 		rt.prepareDefaults()
 		return rt

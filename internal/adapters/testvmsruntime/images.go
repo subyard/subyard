@@ -415,6 +415,7 @@ ssh_pwauth: false
 `
 	if _, err := builder.incus(ctx, "init", source, vm, "--vm", "--project", cfg.Project,
 		"-c", "limits.cpu="+fmt.Sprint(spec.CPU), "-c", "limits.memory="+spec.Memory,
+		"-c", "boot.autostart=false",
 		"-c", "user.subyard.managed="+managedMarker, "-c", "user.subyard.base_owner="+registry.Owner,
 		"-c", "user.subyard.base_key="+buildKey, "-c", "cloud-init.user-data="+cloud); err != nil {
 		return result, err
@@ -537,7 +538,7 @@ func (rt *Runtime) admitBuild(ctx context.Context, store LeaseStore, pending Lea
 			if slot.Environment != nil && !slot.Reserved {
 				continue
 			}
-			m, d, err := rt.outstandingCommitment(ctx, slot, overhead, memoryScope)
+			m, d, err := rt.outstandingCommitment(ctx, slot, overhead)
 			if err != nil {
 				return err
 			}

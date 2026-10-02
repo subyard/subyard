@@ -32,8 +32,8 @@ func TestResourceStatusIsReadOnlyAndSeparatesPhysicalUsage(t *testing.T) {
 	}, memoryProbe: func() (MemoryCapacity, error) {
 		return capPhysicalMemory(MemoryCapacity{Available: 32 << 30, scope: "synthetic-boundary",
 			OuterHostEvidence: "unavailable: allocation boundary"}, 16<<30), nil
-	}, usageProbe: func(_ context.Context, _ LeaseSlot, _ string) allocationUsage {
-		return allocationUsage{memory: 3 << 30, disk: 5 << 30, memoryKnown: true, diskKnown: true}
+	}, usageProbe: func(_ context.Context, _ LeaseSlot) allocationUsage {
+		return allocationUsage{disk: 5 << 30, diskKnown: true}
 	}}
 	empty := rt.ResourceStatus(context.Background(), LeasePool{})
 	if len(empty.Bases) != 0 {
@@ -64,20 +64,20 @@ func TestResourceStatusIsReadOnlyAndSeparatesPhysicalUsage(t *testing.T) {
 	if value.Cache == nil || value.Cache.ChargedBytes != 1234 || value.Cache.PhysicalBytes != nil {
 		t.Fatal("cache charge omitted or mislabeled physical")
 	}
-	if value.VirtualDiskCapacity != 2*budgetBytes(spec.Disk, "20GiB") || value.ReservedMemory == 0 || value.Builder.DiskPeak != 120<<30 {
+	if value.VirtualDiskCapacity != 2*budgetBytes(spec.Disk, "20GiB") || value.ReservedMemory != 0 || value.Builder.DiskPeak != 120<<30 {
 		t.Fatal("reservations omitted or mixed with physical usage")
 	}
 	if len(value.Slots) != 1 || value.ConfirmedWorkingDisk != 5<<30 || value.WorkingDiskEvidence != "complete" ||
 		value.Slots[0].RemainingDisk != value.VirtualDiskCapacity-5<<30 ||
-		value.Slots[0].ConfirmedAnonMemory != 3<<30 || value.Slots[0].MemoryEvidence != "qemu_cgroup_anon_shmem" {
+		value.Slots[0].MemoryCommitment != 0 || value.Slots[0].RemainingMemory != 0 {
 		t.Fatalf("measured working usage not separated from commitments: %+v", value)
 	}
-	rt.usageProbe = func(_ context.Context, _ LeaseSlot, _ string) allocationUsage {
-		return allocationUsage{memoryReason: memoryIncusQueryDeadline}
+	rt.usageProbe = func(_ context.Context, _ LeaseSlot) allocationUsage {
+		return allocationUsage{}
 	}
 	unknown := rt.ResourceStatus(context.Background(), LeasePool{Slots: []LeaseSlot{{SlotID: "slot-001", State: SlotHeld, Environment: &spec, Reserved: true}}})
-	if unknown.WorkingDiskEvidence != "unknown" || len(unknown.Slots) != 1 || unknown.Slots[0].RemainingDisk != unknown.VirtualDiskCapacity || unknown.Slots[0].DiskEvidence != "unknown" || unknown.Slots[0].MemoryEvidenceReason != "incus_query_deadline" ||
-		unknown.Slots[0].ConfirmedAnonMemory != 0 || unknown.Slots[0].RemainingMemory != unknown.ReservedMemory {
+	if unknown.WorkingDiskEvidence != "unknown" || len(unknown.Slots) != 1 || unknown.Slots[0].RemainingDisk != unknown.VirtualDiskCapacity || unknown.Slots[0].DiskEvidence != "unknown" ||
+		unknown.Slots[0].MemoryCommitment != 0 || unknown.Slots[0].RemainingMemory != 0 {
 		t.Fatalf("unknown usage received unsafe credit: %+v", unknown)
 	}
 	if value.OuterHostEvidence != "unavailable: allocation boundary" || !value.Bases[0].Current || value.Bases[0].AgeSeconds != 3600 {
@@ -92,22 +92,6 @@ func TestResourceStatusIsReadOnlyAndSeparatesPhysicalUsage(t *testing.T) {
 		t.Fatal("unusable image concealed or selected as current")
 	}
 	body, _ := json.Marshal(value)
-	if bytes.Contains(body, []byte("memory_evidence_reason")) {
-		t.Fatal("known memory evidence included a failure reason")
-	}
-	unknownBody, _ := json.Marshal(unknown)
-	if !bytes.Contains(unknownBody, []byte(`"memory_evidence_reason":"incus_query_deadline"`)) {
-		t.Fatal("unknown memory evidence omitted its bounded reason")
-	}
-	rt.usageProbe = func(_ context.Context, _ LeaseSlot, _ string) allocationUsage {
-		return allocationUsage{memory: 1024, memoryReason: memoryProcessesNotIsolated}
-	}
-	partial := rt.ResourceStatus(context.Background(), LeasePool{Slots: []LeaseSlot{{SlotID: "slot-001", State: SlotHeld, Environment: &spec, Reserved: true}}})
-	if partial.Slots[0].MemoryEvidence != "partial_qemu_cgroup_anon_shmem" ||
-		partial.Slots[0].MemoryEvidenceReason != "cgroup_processes_not_isolated" ||
-		partial.ConfirmedAnonMemory != 1024 || partial.Slots[0].RemainingMemory != partial.ReservedMemory-1024 {
-		t.Fatalf("partial memory semantics changed: %+v", partial.Slots[0])
-	}
 	for _, secret := range []string{"secret-lease", "private-builder-path", "private/path", registry.Owner} {
 		if bytes.Contains(body, []byte(secret)) {
 			t.Fatalf("status leaked %s", secret)
@@ -136,8 +120,8 @@ func TestResourceStatusScalesRequestedVMCount(t *testing.T) {
 				},
 				diskUsageProbe: func(context.Context) (uint64, error) { return 1 << 30, nil },
 				cacheProbe:     func(context.Context) (CacheUsage, error) { return CacheUsage{}, nil },
-				usageProbe: func(context.Context, LeaseSlot, string) allocationUsage {
-					return allocationUsage{memoryKnown: true, diskKnown: true}
+				usageProbe: func(context.Context, LeaseSlot) allocationUsage {
+					return allocationUsage{diskKnown: true}
 				},
 				Runner: &fakeRunner{handler: func(_ string, args, _ []string, _ io.Reader) ([]byte, []byte, error) {
 					switch strings.Join(args, " ") {
@@ -151,7 +135,7 @@ func TestResourceStatusScalesRequestedVMCount(t *testing.T) {
 				}},
 			}
 			status := rt.ResourceStatus(context.Background(), LeasePool{Slots: []LeaseSlot{
-				{SlotID: "slot-001", State: SlotHeld, Environment: &spec, Reserved: true},
+				{SlotID: "slot-001", State: SlotProvisioning, Environment: &spec, Reserved: true},
 			}})
 			wantMemory, wantDisk := uint64(count)*(9<<29), uint64(count)*(20<<30)
 			if len(status.Errors) != 0 || status.ReservedMemory != wantMemory || status.VirtualDiskCapacity != wantDisk || len(status.Slots) != 1 {
@@ -160,6 +144,16 @@ func TestResourceStatusScalesRequestedVMCount(t *testing.T) {
 			slot := status.Slots[0]
 			if slot.MemoryCommitment != wantMemory || slot.RemainingMemory != wantMemory || slot.VirtualDiskCapacity != wantDisk || slot.RemainingDisk != wantDisk {
 				t.Fatalf("wrong slot commitments: %+v", slot)
+			}
+			for _, state := range []SlotState{SlotHeld, SlotDraining, SlotQuarantined, SlotRecovering} {
+				status := rt.ResourceStatus(context.Background(), LeasePool{Slots: []LeaseSlot{
+					{SlotID: "slot-001", State: state, Environment: &spec, Reserved: true, ReadyAt: time.Now()},
+				}})
+				if len(status.Errors) != 0 || len(status.Slots) != 1 || status.ReservedMemory != 0 ||
+					status.Slots[0].MemoryCommitment != 0 || status.Slots[0].RemainingMemory != 0 ||
+					status.VirtualDiskCapacity != wantDisk || status.Slots[0].RemainingDisk != wantDisk {
+					t.Fatalf("%s retained RAM or lost its disk promise: %+v", state, status)
+				}
 			}
 		})
 	}

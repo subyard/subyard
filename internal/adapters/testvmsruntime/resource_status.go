@@ -15,7 +15,6 @@ type ResourceStatus struct {
 	Budgets              map[string]uint64      `json:"budgets"`
 	ReservedMemory       uint64                 `json:"reserved_vm_memory_bytes"`
 	VirtualDiskCapacity  uint64                 `json:"reserved_vm_virtual_disk_bytes"`
-	ConfirmedAnonMemory  uint64                 `json:"confirmed_anon_shmem_bytes"`
 	ConfirmedWorkingDisk uint64                 `json:"confirmed_working_disk_physical_bytes"`
 	WorkingDiskEvidence  string                 `json:"working_disk_evidence"`
 	Slots                []SlotResourceStatus   `json:"slots"`
@@ -45,10 +44,7 @@ type SlotResourceStatus struct {
 	SlotID                string `json:"slot_id"`
 	Environment           string `json:"type"`
 	MemoryCommitment      uint64 `json:"memory_commitment_bytes"`
-	ConfirmedAnonMemory   uint64 `json:"confirmed_anon_shmem_bytes"`
 	RemainingMemory       uint64 `json:"remaining_memory_growth_bytes"`
-	MemoryEvidence        string `json:"memory_evidence"`
-	MemoryEvidenceReason  string `json:"memory_evidence_reason,omitempty"`
 	VirtualDiskCapacity   uint64 `json:"virtual_disk_capacity_bytes"`
 	ConfirmedPhysicalDisk uint64 `json:"confirmed_physical_disk_bytes"`
 	RemainingDisk         uint64 `json:"remaining_disk_growth_bytes"`
@@ -139,30 +135,20 @@ func (rt *Runtime) ResourceStatus(ctx context.Context, pool LeasePool) ResourceS
 			continue
 		}
 		ram, disk := environmentCommitment(*spec, result.Budgets["vm_overhead_bytes"])
+		ram = pendingMemory(slot, ram)
 		result.ReservedMemory += ram
 		result.VirtualDiskCapacity += disk
 		measuredSlots++
-		memoryScope := ""
-		if result.Memory != nil {
-			memoryScope = result.Memory.scope
-		}
-		usage := rt.allocationUsage(ctx, slot, memoryScope)
-		memoryReason := ""
-		if !usage.memoryKnown {
-			memoryReason = usage.memoryReason.String()
-		}
+		usage := rt.allocationUsage(ctx, slot)
 		if usage.diskKnown {
 			confirmedDiskSlots++
 		}
-		result.ConfirmedAnonMemory += usage.memory
 		result.ConfirmedWorkingDisk += usage.disk
 		result.Slots = append(result.Slots, SlotResourceStatus{
 			SlotID: slot.SlotID, Environment: spec.Name,
-			MemoryCommitment: ram, ConfirmedAnonMemory: usage.memory,
-			RemainingMemory:      ram - min(ram, usage.memory),
-			MemoryEvidence:       usageEvidence(usage.memoryKnown, usage.memory, "qemu_cgroup_anon_shmem"),
-			MemoryEvidenceReason: memoryReason,
-			VirtualDiskCapacity:  disk, ConfirmedPhysicalDisk: usage.disk,
+			MemoryCommitment:    ram,
+			RemainingMemory:     ram,
+			VirtualDiskCapacity: disk, ConfirmedPhysicalDisk: usage.disk,
 			RemainingDisk: disk - min(disk, usage.disk),
 			DiskEvidence:  usageEvidence(usage.diskKnown, usage.disk, "dir_ext4_allocated_blocks"),
 		})

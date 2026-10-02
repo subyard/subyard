@@ -207,7 +207,7 @@ func TestMemoryReserveAppliesToWorkingVMsAndSequentialBuilder(t *testing.T) {
 	}
 }
 
-func TestConcurrentMixedAdmissionAndRetryAfterRelease(t *testing.T) {
+func TestConcurrentMixedAdmissionAndRetryAfterReady(t *testing.T) {
 	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 2}
 	cfg := fixtureConfig(t)
 	cfg.Memory, cfg.Disk = "4GiB", "20GiB"
@@ -260,11 +260,9 @@ func TestConcurrentMixedAdmissionAndRetryAfterRelease(t *testing.T) {
 	if err := store.AbortProvisioning(grants[loser]); err != nil {
 		t.Fatal(err)
 	}
-	// Confirmed cleanup releases the winner; the same untouched slot can retry.
-	if err := store.BeginDrain(grants[winner]); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.FinishDrain(grants[winner].SlotID, nil); err != nil {
+	// Once ready, the winner is accounted for by host available memory. Its
+	// configured RAM must not be reserved again for a later allocation.
+	if _, err := store.MarkHeld(grants[winner]); err != nil {
 		t.Fatal(err)
 	}
 	retried, err := store.AcquireV3Slot(*grants[loser].Environment, "client", "SHA256:key", "yard", "Project", "retry", "capacity", grants[loser].SlotID)
@@ -272,14 +270,79 @@ func TestConcurrentMixedAdmissionAndRetryAfterRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := rt.reserveEnvironment(context.Background(), store, retried); err != nil {
-		t.Fatalf("capacity not reusable: %v", err)
+		t.Fatalf("ready allocation retained its startup RAM promise: %v", err)
 	}
 	if err := rt.reserveEnvironment(context.Background(), store, grants[loser]); !errors.Is(err, ErrLeaseLost) {
 		t.Fatalf("stale grant accepted: %v", err)
 	}
 }
 
-func TestAdmissionCreditsOnlyConfirmedExistingAllocation(t *testing.T) {
+func TestCanceledProvisioningRetainsMemoryUntilCleanup(t *testing.T) {
+	for _, expire := range []bool{false, true} {
+		t.Run(fmt.Sprintf("expire=%t", expire), func(t *testing.T) {
+			cfg := fixtureConfig(t)
+			cfg.Memory, cfg.Disk = "4GiB", "20GiB"
+			store := LeaseStore{Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 2}
+			spec, _ := cfg.EnvironmentSpec(EnvironmentPair)
+			spec.Count = 1
+			first, err := store.AcquireV3Slot(spec, "client", "SHA256:key", "yard", "Project", "first", "capacity", "slot-001")
+			if err != nil {
+				t.Fatal(err)
+			}
+			rt := Runtime{Config: cfg,
+				memoryProbe:    func() (MemoryCapacity, error) { return MemoryCapacity{Available: 25 << 29}, nil },
+				diskUsageProbe: func(context.Context) (uint64, error) { return 10 << 30, nil },
+				usageProbe:     func(context.Context, LeaseSlot) allocationUsage { return allocationUsage{} },
+				Runner: &fakeRunner{handler: func(_ string, args, _ []string, _ io.Reader) ([]byte, []byte, error) {
+					if strings.Join(args, " ") == "query /1.0/storage-pools/default/resources" {
+						return []byte(`{"space":{"total":536870912000,"used":10737418240}}`), nil, nil
+					}
+					return nil, nil, fmt.Errorf("unexpected command: %v", args)
+				}},
+			}
+			if err := rt.reserveEnvironment(context.Background(), store, first); err != nil {
+				t.Fatal(err)
+			}
+			if expire {
+				err = store.mutateOwned(first, func(slot *LeaseSlot, now time.Time) error { slot.ExpiresAt = now.Add(-time.Second); return nil })
+			} else {
+				err = store.BeginDrainAll("cancel provisioning")
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			next, err := store.AcquireV3Slot(spec, "client", "SHA256:key", "yard", "Project", "next", "capacity", "slot-002")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, state := range []SlotState{SlotDraining, SlotQuarantined, SlotRecovering} {
+				slot, err := storeSlot(store, first.SlotID)
+				if err != nil || slot.State != state {
+					t.Fatalf("expected %s: %+v %v", state, slot, err)
+				}
+				var capacity *CapacityError
+				if err := rt.reserveEnvironment(context.Background(), store, next); !errors.As(err, &capacity) || capacity.Resource != "memory" {
+					t.Fatalf("%s released an unfinished startup promise: %v", state, err)
+				}
+				if state == SlotDraining {
+					err = store.FinishDrain(first.SlotID, errors.New("stop unconfirmed"))
+				} else if state == SlotQuarantined {
+					_, _, err = store.BeginScheduledRecovery(first.SlotID, true)
+				} else {
+					_, err = store.FinishRecovery(first.SlotID, nil, "", "")
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := rt.reserveEnvironment(context.Background(), store, next); err != nil {
+				t.Fatalf("confirmed cleanup retained startup RAM: %v", err)
+			}
+		})
+	}
+}
+
+func TestAdmissionCreditsOnlyConfirmedExistingDisk(t *testing.T) {
 	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 2}
 	cfg := fixtureConfig(t)
 	cfg.Memory, cfg.Disk = "4GiB", "20GiB"
@@ -313,12 +376,12 @@ func TestAdmissionCreditsOnlyConfirmedExistingAllocation(t *testing.T) {
 				return MemoryCapacity{Available: 20 << 30}, nil
 			}}
 			var capacity *CapacityError
-			if err := rt.reserveEnvironment(context.Background(), store, grant); !errors.As(err, &capacity) || capacity.Resource != "memory" {
-				t.Fatalf("missing usage credit did not reject conservatively: %v", err)
+			if err := rt.reserveEnvironment(context.Background(), store, grant); !errors.As(err, &capacity) || capacity.Resource != "disk" {
+				t.Fatalf("missing disk usage credit did not reject conservatively: %v", err)
 			}
-			rt.usageProbe = func(_ context.Context, slot LeaseSlot, _ string) allocationUsage {
+			rt.usageProbe = func(_ context.Context, slot LeaseSlot) allocationUsage {
 				if slot.SlotID == "slot-001" {
-					return allocationUsage{memory: 7 << 30, disk: 30 << 30}
+					return allocationUsage{disk: 30 << 30}
 				}
 				return allocationUsage{}
 			}
@@ -329,7 +392,7 @@ func TestAdmissionCreditsOnlyConfirmedExistingAllocation(t *testing.T) {
 	}
 }
 
-func TestAdmissionBoundsFreeSpaceWhenGuestReleasesCreditedUsage(t *testing.T) {
+func TestAdmissionBoundsChangingHostCapacityAndDiskCredit(t *testing.T) {
 	for _, test := range []struct {
 		name, resource string
 		builder        bool
@@ -383,12 +446,9 @@ func TestAdmissionBoundsFreeSpaceWhenGuestReleasesCreditedUsage(t *testing.T) {
 					}
 					return capPhysicalMemory(MemoryCapacity{Available: 32 << 30, scope: "synthetic-boundary"}, test.memory[index]), nil
 				},
-				usageProbe: func(_ context.Context, slot LeaseSlot, scope string) allocationUsage {
-					if scope != "synthetic-boundary" {
-						t.Fatal("physical sample replaced the visible cgroup credit boundary")
-					}
+				usageProbe: func(_ context.Context, slot LeaseSlot) allocationUsage {
 					if slot.SlotID == first.SlotID {
-						return allocationUsage{memory: 7 << 30, disk: 30 << 30}
+						return allocationUsage{disk: 30 << 30}
 					}
 					return allocationUsage{}
 				},
@@ -427,24 +487,7 @@ func TestAdmissionBoundsFreeSpaceWhenGuestReleasesCreditedUsage(t *testing.T) {
 	}
 }
 
-func TestPhysicalUsageRequiresDedicatedCgroupAndAllocatedBlocks(t *testing.T) {
-	proc, group, write := memoryFixture(t)
-	write(filepath.Join(proc, "123/cgroup"), "0::/vm/one\n")
-	write(filepath.Join(group, "vm/one/cgroup.procs"), "123\n")
-	write(filepath.Join(group, "vm/one/cgroup.stat"), "nr_descendants 0\n")
-	write(filepath.Join(group, "vm/one/memory.stat"), "anon 1048576\nshmem 524288\nfile 99999999\n")
-	if used, ok := qemuAnonymousBytes(proc, group, 123, group); !ok || used != 1572864 {
-		t.Fatalf("dedicated cgroup: %d %v", used, ok)
-	}
-	write(filepath.Join(group, "vm/one/cgroup.procs"), "123\n456\n")
-	if _, ok := qemuAnonymousBytes(proc, group, 123, group); ok {
-		t.Fatal("credited shared cgroup")
-	}
-	write(filepath.Join(group, "vm/one/cgroup.procs"), "123\n")
-	write(filepath.Join(group, "vm/one/cgroup.stat"), "nr_descendants 1\n")
-	if _, ok := qemuAnonymousBytes(proc, group, 123, group); ok {
-		t.Fatal("credited child cgroup usage")
-	}
+func TestDiskUsageRequiresAllocatedBlocks(t *testing.T) {
 	volume := filepath.Join(t.TempDir(), "volume")
 	if err := os.Mkdir(volume, 0700); err != nil {
 		t.Fatal(err)

@@ -20,7 +20,7 @@ const provisionedGuestCount = 2
 type Runtime struct {
 	allocation       *LeaseIdentity
 	memoryProbe      func() (MemoryCapacity, error)
-	usageProbe       func(context.Context, LeaseSlot, string) allocationUsage
+	usageProbe       func(context.Context, LeaseSlot) allocationUsage
 	cacheProbe       func(context.Context) (CacheUsage, error)
 	diskUsageProbe   func(context.Context) (uint64, error)
 	Config           Config

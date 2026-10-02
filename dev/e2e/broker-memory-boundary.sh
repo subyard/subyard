@@ -225,6 +225,16 @@ assert_held_unchanged() {
       cat /proc/sys/kernel/random/boot_id </dev/null)" = "${GUEST_BOOT[$guest]}" ] \
       || die "held guest $guest restarted or lost access"
   done
+  assert_held_ram_released
+}
+
+assert_held_ram_released() {
+  runtime_yard -Y test-yard test-vms status --json | jq -e '
+    .resources.reserved_vm_memory_bytes == 0 and
+    (.resources.slots | length == 1) and
+    .resources.slots[0].memory_commitment_bytes == 0 and
+    .resources.slots[0].remaining_memory_growth_bytes == 0' >/dev/null \
+    || die 'held allocation retained a startup RAM promise'
 }
 
 holder_failure() {
@@ -329,6 +339,8 @@ for guest in 1 2; do
   GUEST_BOOT[$guest]="$(ssh -F "$HELD_CONFIG" -T -o ConnectTimeout=10 "e2e-vm-$guest" -- \
     cat /proc/sys/kernel/random/boot_id </dev/null)"
 done
+assert_held_ram_released
+printf '  [ ok ] ready guests release startup RAM promises to host accounting\n'
 
 release="$(dirname "$P0_BROKER_RECOVERY_UPDATE_ARTIFACT")"
 runtime_root="$SUBYARD_HOME/runtime"

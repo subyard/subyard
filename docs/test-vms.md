@@ -72,9 +72,14 @@ grant. Virtual capacity is distinct from physical storage usage and retained ima
 (two standard guests or one Android guest). The historical `subyard-pair` type name is retained
 so singleton and pair allocations reuse the same prepared base.
 
-The broker reserves the full requested environment's RAM and bounded disk growth atomically,
-including concurrent provisioning, held VMs and the base-image builder. It accounts for current
-outer-yard memory, configured safety reserves, measured image size and filesystem/pool headroom.
+The broker reserves each requested environment's RAM atomically while it is being provisioned,
+including concurrent requests and the base-image builder. Once the grant is held, occupied RAM
+is accounted for by host available memory; ready, stopped and empty environments retain no RAM
+growth promise. Working VMs and builders have autostart disabled; each new allocation passes admission.
+An interrupted provisioning request retains its admitted RAM promise until cleanup finishes,
+because an in-flight start may still consume it.
+Bounded disk growth remains reserved for existing allocations. Admission also accounts for
+configured safety reserves, measured image size and filesystem/pool headroom.
 Memory admission uses the lower of visible memory/cgroup headroom and physical-owner
 `MemAvailable` on both sides of usage sampling. An enabled backend receives one fixed read-only
 Incus file bind from the owner's `/proc/meminfo` to `/var/lib/subyard/host-meminfo`; setup and active
@@ -84,18 +89,15 @@ malformed or unverified physical counters refuse admission rather than falling b
 Swap is not RAM headroom. Status reports `physical_available_bytes` and
 `physical_available_known` separately from the limiting visible cgroup; this does not establish
 outer-host cgroup limits, peaks or OOM counters.
-Confirmed resident anonymous/shared memory is already reflected in available memory and is
-deducted from each existing VM commitment. Admission reserves only its remaining growth.
-With no other outstanding growth, a standard 9 GiB pair needs 17 GiB available to preserve the
-default 8 GiB reserve. Existing allocations and builders can require additional headroom.
+No per-VM resident memory measurement is needed. Status reports pending RAM promises through
+`reserved_vm_memory_bytes` and per-slot `memory_commitment_bytes` and
+`remaining_memory_growth_bytes`; held slots report zero in these fields. With no other pending
+requests, a standard 4.5 GiB singleton needs 12.5 GiB available and a 9 GiB pair needs 17 GiB
+available to preserve the default 8 GiB host reserve. Other provisioning requests and builders
+can require additional headroom.
 A typed `capacity` refusal identifies `memory` or `disk` and is safe to retry after resources are
 freed. It does not quarantine a healthy slot. Partial provisioning failures are cleaned up and
 recovered automatically after 1, 5 and 15 minutes, then hourly while the slot remains eligible.
-
-When slot memory evidence is unknown or partial, `memory_evidence_reason` reports a bounded
-guard/query classification, such as `incus_query_deadline` or `cgroup_processes_not_isolated`.
-It contains no process IDs or paths. Unknown usage retains its commitment; the reason does not
-waive admission guards or reserves.
 
 Physical headroom is checked against the entire backing filesystem. With the `dir` driver,
 the disk budget instead charges the inner daemon's image cache and allocated blocks in its VM
