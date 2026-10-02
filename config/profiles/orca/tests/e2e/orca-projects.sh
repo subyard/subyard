@@ -275,6 +275,39 @@ guest_dev /usr/local/libexec/subyard/projects-changed >/dev/null
 yard init --yes >/dev/null
 assert_no_managed_duplicates
 
+stage 'pruning missing ungrouped build checkouts through explicit and periodic sync'
+pause_discovery
+for mode in sync periodic; do
+  stale_build="$clone_root/.build/cleanup-trial/$mode/checkout"
+  guest_dev git init -q "$stale_build"
+  legacy_repo="$(orca_rpc repo.add "$(rpc_params --arg path "$stale_build" '{path:$path,kind:"git"}')")"
+  jq -e '.repo.projectGroupId == null' <<<"$legacy_repo" >/dev/null \
+    || die 'legacy cleanup fixture already belongs to a group'
+  guest_dev rm -rf -- "$stale_build"
+  if [ "$mode" = sync ]; then
+    yard orca sync --yes >/dev/null
+  else
+    resume_discovery
+    for _ in $(seq 1 60); do
+      catalog | jq -e --arg path "$stale_build" '.repos | all(.path != $path)' >/dev/null && break
+      sleep 2
+    done
+  fi
+  assert_absent_repo "$stale_build"
+done
+if [ "${SUBYARD_E2E_ORCA_CLEANUP_ONLY:-}" = 1 ]; then
+  sleep 3
+  yard orca restart --yes >/dev/null
+  for mode in sync periodic; do
+    assert_absent_repo "$clone_root/.build/cleanup-trial/$mode/checkout"
+  done
+  assert_repo "$clone_root" git "$clone_group" clone-project
+  assert_repo "$folder_root" folder "$folder_group" folder-project
+  assert_repo "$bind_root" folder "$bind_group" bind-project
+  printf 'ok: explicit and periodic Orca cleanup persists after restart\n'
+  exit 0
+fi
+
 stage 'discovering ignored, hidden, vendor, fixture, deep, submodule, and linked worktrees'
 guest_dev bash -se -- "$clone_root" "$guest_seed" <<'YARD'
 set -euo pipefail

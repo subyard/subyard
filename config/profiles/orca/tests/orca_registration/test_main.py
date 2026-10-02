@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 from pathlib import Path
 import socket
 import subprocess
@@ -100,6 +101,20 @@ class MainTests(unittest.TestCase):
         self.assertEqual((1, 2), (report["registered"], report["total"]))
         self.assertEqual(0, self.run_cli("sync")[0])
         self.assertEqual(1, len(self.rpc.groups))
+
+    def test_sync_and_periodic_discovery_prune_missing_ungrouped_git_checkouts(self):
+        self.start_server()
+        self.assertEqual(0, self.run_cli("sync")[0])
+        for command in ("sync", "discover"):
+            with self.subTest(command=command):
+                path = self.root / ".build/cleanup-trial" / command
+                init_git(path)
+                repo = self.rpc.call("repo.add", {"path": str(path), "kind": "git"})["repo"]
+                shutil.rmtree(path)
+                code, report = self.run_cli(command)
+                self.assertEqual(0, code, report)
+                self.assertNotIn(repo["id"], [record["id"] for record in self.rpc.repos])
+                self.assertEqual(0, self.run_cli(command)[0])
 
     def test_fifo_project_metadata_fails_promptly_without_hanging_discovery(self):
         metadata = self.root.parent / ".subyard-meta.json"

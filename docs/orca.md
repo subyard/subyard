@@ -281,8 +281,11 @@ names may coincide or be renamed without merging project identities.
 
 When registration succeeds, sync removes proven missing checkouts from their Subyard-managed
 Orca groups. This includes existing registrations from earlier Subyard versions. Ownership
-requires both membership in the recorded project group and a path inside that project;
-unrelated groups, remote records and manually added nested folders are left alone.
+requires membership in the recorded project group and a path inside that project.
+Ungrouped Git records below an active, reconciled project root are also cleaned up,
+including legacy or interrupted registrations. Explicit membership in an unrelated
+group, remote records and manually added nested folders are left alone. Periodic
+discovery uses the same cleanup rules as explicit sync.
 Records with open or saved session tabs are retained with a warning. Orca's removal API
 discards the removed record's worktree metadata; it does not delete files on disk.
 Empty groups of removed Subyard projects are also removed, unless they contain child groups

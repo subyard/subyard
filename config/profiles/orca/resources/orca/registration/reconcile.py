@@ -308,10 +308,16 @@ def _prune_missing(report, scan, state, rpc):
     groups = {group["id"] for group in _records(rpc, "projectGroup.list", "groups") if _local(group)}
     owners = {entry["group_id"]: entry["root"] for entry in state.data["projects"].values()
               if entry.get("group_id") in groups}
+    active_roots = {project.root for project in scan.projects
+                    if state.data["projects"].get(project.project_id, {}).get("group_id") in owners}
     desired = {root.path for project in scan.projects for root in project.roots}
     candidates = []
     for repo in _records(rpc, "repo.list", "repos"):
         root = owners.get(repo.get("projectGroupId"))
+        if repo.get("projectGroupId") is None:
+            # Legacy or interrupted registrations may not have membership yet.
+            # Only nested Git paths of a reconciled active project are owned here.
+            root = next((root for root in active_roots if repo["path"].startswith(root + "/")), None)
         if (root and _local(repo) and repo["path"] not in desired
                 and (repo["path"] == root or repo["path"].startswith(root + "/"))
                 and (repo["path"] == root or repo.get("kind", "git") == "git")

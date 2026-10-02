@@ -180,6 +180,35 @@ class ReconcileTests(unittest.TestCase):
         self.assertEqual([], self.rpc.groups)
         self.assertEqual({}, self.sidecar()["projects"])
 
+    def test_missing_ungrouped_git_checkouts_pruned_with_the_same_safety_guards(self):
+        self.assertTrue(self.run_sync()["ready"])
+        path = self.root / ".build/cleanup-trial/checkout"
+        init_git(path)
+        repo = self.rpc.call("repo.add", {"path": str(path), "kind": "git"})["repo"]
+        # Legacy or interrupted registration has no managed membership.
+        # Neither the discovery inventory nor sidecar knows this root.
+        retained = []
+        for label, changes in (
+                ("manual", {"projectGroupId": "manual"}),
+                ("unknown-group", {"projectGroupId": "unknown"}),
+                ("remote", {"executionHostId": "remote"}),
+                ("connected", {"connectionId": "remote"}),
+                ("folder", {"kind": "folder"}),
+                ("saved", {})):
+            record = dict(repo, id=label, path=str(path / label), **changes)
+            self.rpc.repos.append(record)
+            retained.append(copy.deepcopy(record))
+        self.rpc.snapshots = [{"worktree": "saved::/old/worktree", "tabs": [{"id": "saved"}]}]
+        shutil.rmtree(path)
+        before = copy.deepcopy(self.rpc.repos)
+        self.assertTrue(self.run_sync(apply=False)["ready"])
+        self.assertEqual(before, self.rpc.repos)
+        report = self.reconcile(self.discover(self.workspaces, recursive=False),
+                                self.rpc, self.state, known_paths=[])
+        self.assertTrue(report["ready"], report)
+        self.assertEqual(before[:1] + retained, self.rpc.repos)
+        self.assertTrue(any("session tabs" in warning for warning in report["warnings"]))
+
     def test_cleanup_preserves_session_tabs_manual_and_remote_records(self):
         init_git(self.root / "gone")
         self.assertTrue(self.run_sync()["ready"])
