@@ -112,6 +112,17 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "_test-vms-host-memory-check" {
+		if len(os.Args) != 2 {
+			fmt.Fprintln(os.Stderr, "invalid physical memory check invocation")
+			os.Exit(1)
+		}
+		if err := testvmsruntime.CheckHostMemory(); err != nil {
+			fmt.Fprintf(os.Stderr, "test-vms: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "_test-vms-worker" {
 		configPath := os.Getenv("SUBYARD_TEST_VMS_CONFIG")
 		if configPath == "" {

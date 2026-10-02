@@ -3,6 +3,8 @@ package testvmsruntime
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -65,6 +67,8 @@ func TestBackendApplyInstallsCurrentEngineAndPublishesRoute(t *testing.T) {
 	backend := fixtureBackend(t)
 	var power []string
 	recipesInstalled := false
+	memory := backendMemoryFixture(false)
+	memoryValidated := false
 	backend.Start = func(context.Context) error {
 		power = append(power, "start")
 		return nil
@@ -74,18 +78,30 @@ func TestBackendApplyInstallsCurrentEngineAndPublishesRoute(t *testing.T) {
 		return nil
 	}
 	runner := &fakeRunner{handler: func(_ string, arguments, _ []string, stdin io.Reader) ([]byte, []byte, error) {
+		if body, handled := memory.handle(t, arguments); handled {
+			return body, nil, nil
+		}
 		joined := strings.Join(arguments, " ")
 		switch {
 		case joined == "list yard-test --project subyard-test -f csv -c s":
 			return []byte("STOPPED\n"), nil, nil
 		case strings.HasPrefix(joined, "file push "):
+			if memory.Devices[hostMemoryDevice] == nil {
+				return nil, nil, errors.New("engine staged before physical source installation")
+			}
 			if !strings.Contains(joined,
 				backend.Dispatcher+" yard-test"+DefaultInstalledPath+".new") {
 				return nil, nil, fmt.Errorf("wrong engine push: %s", joined)
 			}
 			return nil, nil, nil
+		case joined == "exec yard-test --project subyard-test -- "+DefaultInstalledPath+".new _test-vms-host-memory-check":
+			memoryValidated = true
+			return nil, nil, nil
 		case joined == "exec yard-test --project subyard-test -- mv -f -- "+
 			DefaultInstalledPath+".new "+DefaultInstalledPath:
+			if !memoryValidated {
+				return nil, nil, errors.New("engine published before physical source validation")
+			}
 			return nil, nil, nil
 		case strings.Contains(joined, " install-recipes "):
 			archive, err := io.ReadAll(stdin)
@@ -188,7 +204,11 @@ func TestBackendConvergenceUsesExactBundleAndLiveRoute(t *testing.T) {
 		t.Fatal(err)
 	}
 	outer := "STOPPED"
+	memory := backendMemoryFixture(true)
 	runner := &fakeRunner{handler: func(_ string, arguments, _ []string, _ io.Reader) ([]byte, []byte, error) {
+		if body, handled := memory.handle(t, arguments); handled {
+			return body, nil, nil
+		}
 		switch strings.Join(arguments, " ") {
 		case "config get yard-test user.subyard.test_vms_revision --project subyard-test":
 			return []byte(state.marker + "\n"), nil, nil
@@ -215,6 +235,13 @@ func TestBackendConvergenceUsesExactBundleAndLiveRoute(t *testing.T) {
 	if !converged {
 		t.Fatal("exact stopped backend was not converged")
 	}
+	delete(memory.Devices, hostMemoryDevice)
+	delete(memory.ExpandedDevices, hostMemoryDevice)
+	if converged, err := backend.Converged(context.Background()); err != nil || converged {
+		t.Fatalf("missing telemetry ignored despite matching engine marker: %t %v", converged, err)
+	}
+	memory.Devices[hostMemoryDevice] = hostMemoryDeviceSpec()
+	memory.ExpandedDevices[hostMemoryDevice] = hostMemoryDeviceSpec()
 	outer = "RUNNING"
 	converged, err = backend.Converged(context.Background())
 	if err != nil {
@@ -274,7 +301,15 @@ func TestDisabledBackendRemovesPublishedRoute(t *testing.T) {
 	if err := os.Symlink(filepath.Base(generation), filepath.Join(client, "current")); err != nil {
 		t.Fatal(err)
 	}
+	memory := backendMemoryFixture(true)
+	provisioned := false
 	backend.Runner = &fakeRunner{handler: func(_ string, arguments, _ []string, stdin io.Reader) ([]byte, []byte, error) {
+		if body, handled := memory.handle(t, arguments); handled {
+			if !provisioned {
+				t.Fatal("physical source retired before disabling the broker")
+			}
+			return body, nil, nil
+		}
 		joined := strings.Join(arguments, " ")
 		switch {
 		case joined == "list yard-test --project subyard-test -f csv -c s":
@@ -289,6 +324,7 @@ func TestDisabledBackendRemovesPublishedRoute(t *testing.T) {
 			return nil, nil, nil
 		case strings.HasSuffix(joined, "-- bash -euo pipefail -s"):
 			_, _ = io.Copy(io.Discard, stdin)
+			provisioned = true
 			return nil, nil, nil
 		case strings.HasPrefix(joined, "config set yard-test user.subyard.test_vms_revision "):
 			return nil, nil, nil
@@ -302,6 +338,115 @@ func TestDisabledBackendRemovesPublishedRoute(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(client, "current")); !os.IsNotExist(err) {
 		t.Fatalf("current route remains: %v", err)
+	}
+	if memory.Config[hostMemoryOwnerKey] != "" || memory.Devices[hostMemoryDevice] != nil {
+		t.Fatal("disabled backend retained the owned physical memory device")
+	}
+}
+
+func backendMemoryFixture(installed bool) *hostMemoryInstance {
+	instance := &hostMemoryInstance{Config: map[string]string{}, Devices: map[string]map[string]string{}, ExpandedDevices: map[string]map[string]string{}}
+	if installed {
+		instance.Config[hostMemoryOwnerKey] = hostMemoryOwnerVersion
+		instance.Devices[hostMemoryDevice] = hostMemoryDeviceSpec()
+		instance.ExpandedDevices[hostMemoryDevice] = hostMemoryDeviceSpec()
+	}
+	return instance
+}
+
+func (instance *hostMemoryInstance) handle(t *testing.T, args []string) ([]byte, bool) {
+	t.Helper()
+	joined := strings.Join(args, " ")
+	switch {
+	case joined == "query /1.0/instances/yard-test?project=subyard-test":
+		body, err := json.Marshal(instance)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return body, true
+	case joined == "config set yard-test "+hostMemoryOwnerKey+" pending:v1 --project subyard-test":
+		instance.Config[hostMemoryOwnerKey] = "pending:v1"
+	case joined == "config set yard-test "+hostMemoryOwnerKey+" v1 --project subyard-test":
+		instance.Config[hostMemoryOwnerKey] = "v1"
+	case joined == "config device add yard-test "+hostMemoryDevice+" disk --project subyard-test source=/proc/meminfo path="+hostMemoryPath+" readonly=true":
+		instance.Devices[hostMemoryDevice] = hostMemoryDeviceSpec()
+		instance.ExpandedDevices[hostMemoryDevice] = hostMemoryDeviceSpec()
+	case joined == "config device remove yard-test "+hostMemoryDevice+" --project subyard-test":
+		delete(instance.Devices, hostMemoryDevice)
+		delete(instance.ExpandedDevices, hostMemoryDevice)
+	case joined == "config unset yard-test "+hostMemoryOwnerKey+" --project subyard-test":
+		delete(instance.Config, hostMemoryOwnerKey)
+	default:
+		return nil, false
+	}
+	return nil, true
+}
+
+func TestBackendRejectsUnsafePhysicalSourceBeforeEnginePublication(t *testing.T) {
+	backend := fixtureBackend(t)
+	backend.DesiredPower = "running"
+	backend.Start = func(context.Context) error { t.Fatal("running yard was restarted"); return nil }
+	backend.Stop = backend.Start
+	memory := backendMemoryFixture(false)
+	backend.Runner = &fakeRunner{handler: func(_ string, arguments, _ []string, _ io.Reader) ([]byte, []byte, error) {
+		if body, handled := memory.handle(t, arguments); handled {
+			return body, nil, nil
+		}
+		joined := strings.Join(arguments, " ")
+		switch {
+		case joined == "list yard-test --project subyard-test -f csv -c s":
+			return []byte("RUNNING\n"), nil, nil
+		case strings.HasPrefix(joined, "file push "):
+			return nil, nil, nil
+		case strings.HasSuffix(joined, "_test-vms-host-memory-check"):
+			return nil, nil, errors.New("unverified memory source")
+		default:
+			t.Fatalf("mutation after failed source validation: %v", arguments)
+			return nil, nil, nil
+		}
+	}}
+	if err := backend.Apply(context.Background()); err == nil {
+		t.Fatal("unverified physical source accepted")
+	}
+}
+
+func TestBackendPhysicalSourcePreservesConflictingDevices(t *testing.T) {
+	for _, name := range []string{"unowned", "writable", "extra option", "inherited", "missing effective device", "occupied target", "unknown owner"} {
+		t.Run(name, func(t *testing.T) {
+			backend := fixtureBackend(t)
+			memory := backendMemoryFixture(true)
+			switch name {
+			case "unowned":
+				delete(memory.Config, hostMemoryOwnerKey)
+			case "writable":
+				memory.Devices[hostMemoryDevice]["readonly"] = "false"
+			case "extra option":
+				memory.Devices[hostMemoryDevice]["recursive"] = "true"
+			case "inherited":
+				delete(memory.Devices, hostMemoryDevice)
+			case "missing effective device":
+				delete(memory.ExpandedDevices, hostMemoryDevice)
+			case "occupied target":
+				memory.ExpandedDevices["foreign"] = map[string]string{"path": hostMemoryPath}
+			case "unknown owner":
+				memory.Config[hostMemoryOwnerKey] = "foreign"
+			}
+			backend.Runner = &fakeRunner{handler: func(_ string, arguments, _ []string, _ io.Reader) ([]byte, []byte, error) {
+				if strings.Join(arguments, " ") != "query /1.0/instances/yard-test?project=subyard-test" {
+					t.Fatalf("conflicting device was mutated: %v", arguments)
+				}
+				body, _ := json.Marshal(memory)
+				return body, nil, nil
+			}}
+			for _, enabled := range []bool{true, false} {
+				if converged, err := backend.hostMemoryConverged(context.Background(), enabled); err == nil || converged {
+					t.Fatalf("conflicting device reported convergence: enabled=%t converged=%t err=%v", enabled, converged, err)
+				}
+				if err := backend.reconcileHostMemory(context.Background(), enabled); err == nil {
+					t.Fatalf("conflicting device accepted: enabled=%t", enabled)
+				}
+			}
+		})
 	}
 }
 

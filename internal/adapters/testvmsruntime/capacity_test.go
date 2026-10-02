@@ -167,7 +167,7 @@ func TestMemoryReserveAppliesToWorkingVMsAndSequentialBuilder(t *testing.T) {
 				rt := &Runtime{
 					Config: cfg,
 					memoryProbe: func() (MemoryCapacity, error) {
-						return MemoryCapacity{Available: test.available}, nil
+						return capPhysicalMemory(MemoryCapacity{Available: 32 << 30, scope: "synthetic-boundary"}, test.available), nil
 					},
 					diskUsageProbe: func(context.Context) (uint64, error) { return 10 << 30, nil },
 					cacheProbe:     func(context.Context) (CacheUsage, error) { return CacheUsage{}, nil },
@@ -336,13 +336,18 @@ func TestAdmissionBoundsFreeSpaceWhenGuestReleasesCreditedUsage(t *testing.T) {
 		memory         [2]uint64
 		storageUsed    [2]uint64
 		budgetUsed     [2]uint64
+		missingSecond  bool
 	}{
-		{"reserve memory", "memory", false, [2]uint64{15 << 30, 22 << 30}, [2]uint64{20 << 30, 20 << 30}, [2]uint64{20 << 30, 20 << 30}},
-		{"reserve disk", "disk", false, [2]uint64{30 << 30, 30 << 30}, [2]uint64{50 << 30, 20 << 30}, [2]uint64{20 << 30, 20 << 30}},
-		{"builder memory", "memory", true, [2]uint64{15 << 30, 22 << 30}, [2]uint64{20 << 30, 20 << 30}, [2]uint64{20 << 30, 20 << 30}},
-		{"builder disk", "disk", true, [2]uint64{30 << 30, 30 << 30}, [2]uint64{50 << 30, 20 << 30}, [2]uint64{20 << 30, 20 << 30}},
-		{"reserve budget", "disk", false, [2]uint64{30 << 30, 30 << 30}, [2]uint64{20 << 30, 20 << 30}, [2]uint64{115 << 30, 85 << 30}},
-		{"builder budget", "disk", true, [2]uint64{30 << 30, 30 << 30}, [2]uint64{20 << 30, 20 << 30}, [2]uint64{115 << 30, 85 << 30}},
+		{"reserve memory", "memory", false, [2]uint64{15 << 30, 22 << 30}, [2]uint64{20 << 30, 20 << 30}, [2]uint64{20 << 30, 20 << 30}, false},
+		{"reserve disk", "disk", false, [2]uint64{30 << 30, 30 << 30}, [2]uint64{50 << 30, 20 << 30}, [2]uint64{20 << 30, 20 << 30}, false},
+		{"builder memory", "memory", true, [2]uint64{15 << 30, 22 << 30}, [2]uint64{20 << 30, 20 << 30}, [2]uint64{20 << 30, 20 << 30}, false},
+		{"builder disk", "disk", true, [2]uint64{30 << 30, 30 << 30}, [2]uint64{50 << 30, 20 << 30}, [2]uint64{20 << 30, 20 << 30}, false},
+		{"reserve budget", "disk", false, [2]uint64{30 << 30, 30 << 30}, [2]uint64{20 << 30, 20 << 30}, [2]uint64{115 << 30, 85 << 30}, false},
+		{"builder budget", "disk", true, [2]uint64{30 << 30, 30 << 30}, [2]uint64{20 << 30, 20 << 30}, [2]uint64{115 << 30, 85 << 30}, false},
+		{"reserve physical memory falls", "memory", false, [2]uint64{22 << 30, 15 << 30}, [2]uint64{20 << 30, 20 << 30}, [2]uint64{20 << 30, 20 << 30}, false},
+		{"builder physical memory falls", "memory", true, [2]uint64{22 << 30, 15 << 30}, [2]uint64{20 << 30, 20 << 30}, [2]uint64{20 << 30, 20 << 30}, false},
+		{"reserve second physical sample missing", "memory", false, [2]uint64{30 << 30, 30 << 30}, [2]uint64{20 << 30, 20 << 30}, [2]uint64{20 << 30, 20 << 30}, true},
+		{"builder second physical sample missing", "memory", true, [2]uint64{30 << 30, 30 << 30}, [2]uint64{20 << 30, 20 << 30}, [2]uint64{20 << 30, 20 << 30}, true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			cfg := fixtureConfig(t)
@@ -373,9 +378,15 @@ func TestAdmissionBoundsFreeSpaceWhenGuestReleasesCreditedUsage(t *testing.T) {
 				memoryProbe: func() (MemoryCapacity, error) {
 					index := min(memoryReads, 1)
 					memoryReads++
-					return MemoryCapacity{Available: test.memory[index]}, nil
+					if test.missingSecond && index == 1 {
+						return MemoryCapacity{}, errors.New("physical memory source unavailable")
+					}
+					return capPhysicalMemory(MemoryCapacity{Available: 32 << 30, scope: "synthetic-boundary"}, test.memory[index]), nil
 				},
-				usageProbe: func(_ context.Context, slot LeaseSlot, _ string) allocationUsage {
+				usageProbe: func(_ context.Context, slot LeaseSlot, scope string) allocationUsage {
+					if scope != "synthetic-boundary" {
+						t.Fatal("physical sample replaced the visible cgroup credit boundary")
+					}
 					if slot.SlotID == first.SlotID {
 						return allocationUsage{memory: 7 << 30, disk: 30 << 30}
 					}
@@ -399,7 +410,17 @@ func TestAdmissionBoundsFreeSpaceWhenGuestReleasesCreditedUsage(t *testing.T) {
 			if !errors.As(err, &capacity) || capacity.Resource != test.resource {
 				t.Fatalf("released usage counted twice: %v", err)
 			}
-			if memoryReads != 2 || storageReads != 2 {
+			if !test.builder {
+				slot, slotErr := storeSlot(store, next.SlotID)
+				if slotErr != nil || slot.Reserved {
+					t.Fatalf("refused admission reserved the slot: %+v, %v", slot, slotErr)
+				}
+			}
+			wantStorageReads := 2
+			if test.missingSecond {
+				wantStorageReads = 1
+			}
+			if memoryReads != 2 || storageReads != wantStorageReads {
 				t.Fatalf("capacity was not bracketed around usage: memory %d storage %d", memoryReads, storageReads)
 			}
 		})

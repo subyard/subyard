@@ -75,6 +75,15 @@ so singleton and pair allocations reuse the same prepared base.
 The broker reserves the full requested environment's RAM and bounded disk growth atomically,
 including concurrent provisioning, held VMs and the base-image builder. It accounts for current
 outer-yard memory, configured safety reserves, measured image size and filesystem/pool headroom.
+Memory admission uses the lower of visible memory/cgroup headroom and physical-owner
+`MemAvailable` on both sides of usage sampling. An enabled backend receives one fixed read-only
+Incus file bind from the owner's `/proc/meminfo` to `/var/lib/subyard/host-meminfo`; setup and active
+broker updates reconcile it without restarting a running outer yard. The candidate verifies live
+procfs and the exact read-only file mount before replacing the installed broker engine. Missing,
+malformed or unverified physical counters refuse admission rather than falling back to LXCFS.
+Swap is not RAM headroom. Status reports `physical_available_bytes` and
+`physical_available_known` separately from the limiting visible cgroup; this does not establish
+outer-host cgroup limits, peaks or OOM counters.
 Confirmed resident anonymous/shared memory is already reflected in available memory and is
 deducted from each existing VM commitment. Admission reserves only its remaining growth.
 With no other outstanding growth, a standard 9 GiB pair needs 17 GiB available to preserve the
@@ -201,7 +210,8 @@ dev/agent-e2e.sh --status
 dev/agent-e2e.sh --status --json
 ```
 
-Status also reports visible memory/cgroup evidence, physical Incus pool driver and used/free bytes,
+Status also reports visible memory/cgroup evidence, verified physical-owner memory availability,
+physical Incus pool driver and used/free bytes,
 budget limits, VM virtual-capacity reservations, private builder reservations, and base fingerprints
 with age/current/expired flags. Shared copy-on-write blocks are counted only by Incus pool usage;
 virtual disk limits and compressed image sizes are separate quantities. Missing telemetry is an
@@ -374,6 +384,19 @@ independent yard SSH ports and an idempotent retry, then removes its marked oper
 ```sh
 dev/agent-e2e.sh --slot "$slot" --purpose incus-group-reexec --vm 1 -- \
   bash dev/e2e/incus-group-reexec.sh
+```
+
+The physical-memory regression creates a marked broker yard on VM1. It checks the live
+read-only owner meminfo bind, rejects missing and ordinary-file sources, repairs a removed
+device without restarting the yard, and verifies boot persistence. It holds a small nested
+pair during ordinary update and rollback, checking lease identity, guest uptime and continued
+renewal. Its cold base builder reserves 30 GiB of disk before the nested pair can start,
+so use the generic 40 GiB `android-test` target; the standard 20 GiB guest has insufficient
+disk headroom. The fixture verifies available disk before requesting the nested lease:
+
+```sh
+dev/agent-e2e.sh --slot "$slot" --type android-test --purpose broker-memory-boundary --vm 1 -- \
+  bash dev/e2e/broker-memory-boundary.sh
 ```
 
 | Lane | Prerequisites and timeout | Mutable scope | Classification |

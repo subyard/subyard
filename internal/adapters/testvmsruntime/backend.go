@@ -56,6 +56,9 @@ func (backend *Backend) Converged(ctx context.Context) (bool, error) {
 	if backend.Runner == nil {
 		backend.Runner = ProcessRunner{}
 	}
+	if ok, err := backend.hostMemoryConverged(ctx, state.enabled == "1"); err != nil || !ok {
+		return false, err
+	}
 	marker, err := backend.incus(ctx, "config", "get", backend.Instance,
 		"user.subyard.test_vms_revision", "--project", backend.Project)
 	if err != nil || strings.TrimSpace(marker) != state.marker {
@@ -119,6 +122,11 @@ func (backend *Backend) Apply(ctx context.Context) (err error) {
 		}
 	}()
 
+	if state.enabled == "1" {
+		if err := backend.reconcileHostMemory(ctx, true); err != nil {
+			return err
+		}
+	}
 	// Replacing an executing binary through SFTP fails with ETXTBSY. Publish a
 	// sibling candidate and rename it into place so active lease workers keep
 	// their old inode while the next invocation sees the new engine.
@@ -127,6 +135,15 @@ func (backend *Backend) Apply(ctx context.Context) (err error) {
 		backend.Instance+installCandidate, "--project", backend.Project,
 		"--create-dirs", "--uid", "0", "--gid", "0", "--mode", "0755"); err != nil {
 		return err
+	}
+	if state.enabled == "1" {
+		// Use the candidate checker even when upgrading an older broker. Fresh
+		// setup has no broker config yet, and the installed engine stays intact
+		// if the live source cannot be established.
+		if _, err := backend.incus(ctx, "exec", backend.Instance, "--project", backend.Project,
+			"--", installCandidate, "_test-vms-host-memory-check"); err != nil {
+			return err
+		}
 	}
 	if _, err := backend.incus(ctx, "exec", backend.Instance, "--project", backend.Project,
 		"--", "mv", "-f", "--", installCandidate, DefaultInstalledPath); err != nil {
@@ -182,8 +199,13 @@ func (backend *Backend) Apply(ctx context.Context) (err error) {
 		if err := backend.publishRoute(ctx, state); err != nil {
 			return err
 		}
-	} else if err := backend.removeRoute(state); err != nil {
-		return err
+	} else {
+		if err := backend.reconcileHostMemory(ctx, false); err != nil {
+			return err
+		}
+		if err := backend.removeRoute(state); err != nil {
+			return err
+		}
 	}
 	if _, err := backend.incus(ctx, "config", "set", backend.Instance,
 		"user.subyard.test_vms_revision", state.marker, "--project", backend.Project); err != nil {

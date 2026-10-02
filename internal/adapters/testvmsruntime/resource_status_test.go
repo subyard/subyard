@@ -30,7 +30,8 @@ func TestResourceStatusIsReadOnlyAndSeparatesPhysicalUsage(t *testing.T) {
 	rt := Runtime{Config: cfg, Runner: runner, Now: func() time.Time { return now }, cacheProbe: func(context.Context) (CacheUsage, error) {
 		return CacheUsage{Driver: "zfs", ChargedBytes: 1234, Accounting: "conservative-shared-inclusive"}, nil
 	}, memoryProbe: func() (MemoryCapacity, error) {
-		return MemoryCapacity{Available: 16 << 30, scope: "synthetic-boundary"}, nil
+		return capPhysicalMemory(MemoryCapacity{Available: 32 << 30, scope: "synthetic-boundary",
+			OuterHostEvidence: "unavailable: allocation boundary"}, 16<<30), nil
 	}, usageProbe: func(_ context.Context, _ LeaseSlot, _ string) allocationUsage {
 		return allocationUsage{memory: 3 << 30, disk: 5 << 30, memoryKnown: true, diskKnown: true}
 	}}
@@ -81,6 +82,11 @@ func TestResourceStatusIsReadOnlyAndSeparatesPhysicalUsage(t *testing.T) {
 	}
 	if value.OuterHostEvidence != "unavailable: allocation boundary" || !value.Bases[0].Current || value.Bases[0].AgeSeconds != 3600 {
 		t.Fatal("missing scope/base age evidence")
+	}
+	if value.Memory == nil || value.Memory.Available != 16<<30 || !value.Memory.PhysicalAvailableKnown ||
+		value.Memory.PhysicalAvailable != 16<<30 || value.Memory.OuterHostEvidence != value.OuterHostEvidence ||
+		value.Memory.PeakAvailable || value.Memory.EventsAvailable {
+		t.Fatal("physical MemAvailable was omitted or presented as full outer-host telemetry")
 	}
 	if value.Bases[0].Unusable || !value.Bases[1].Unusable || value.Bases[1].Current {
 		t.Fatal("unusable image concealed or selected as current")

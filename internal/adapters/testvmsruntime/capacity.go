@@ -20,23 +20,26 @@ func (err *CapacityError) Error() string {
 }
 
 type MemoryCapacity struct {
-	Available         uint64 `json:"available_bytes"`
-	Current           uint64 `json:"cgroup_current_bytes"`
-	Limit             uint64 `json:"cgroup_limit_bytes"`
-	Peak              uint64 `json:"cgroup_peak_bytes,omitempty"`
-	OOM               uint64 `json:"cgroup_oom_events"`
-	OOMKills          uint64 `json:"cgroup_oom_kills"`
-	PeakAvailable     bool   `json:"peak_available"`
-	EventsAvailable   bool   `json:"events_available"`
-	LimitAvailable    bool   `json:"limit_available"`
-	OuterHostEvidence string `json:"outer_host_evidence"`
+	Available              uint64 `json:"available_bytes"`
+	PhysicalAvailable      uint64 `json:"physical_available_bytes"`
+	PhysicalAvailableKnown bool   `json:"physical_available_known"`
+	Current                uint64 `json:"cgroup_current_bytes"`
+	Limit                  uint64 `json:"cgroup_limit_bytes"`
+	Peak                   uint64 `json:"cgroup_peak_bytes,omitempty"`
+	OOM                    uint64 `json:"cgroup_oom_events"`
+	OOMKills               uint64 `json:"cgroup_oom_kills"`
+	PeakAvailable          bool   `json:"peak_available"`
+	EventsAvailable        bool   `json:"events_available"`
+	LimitAvailable         bool   `json:"limit_available"`
+	OuterHostEvidence      string `json:"outer_host_evidence"`
 	// scope is the cgroup whose free space bounds admission. VM usage is credited
 	// only when its dedicated cgroup is inside this boundary.
 	scope string
 }
 
 // The visible cgroup root bounds the broker and all its descendants. We also
-// cap against host MemAvailable; a large cgroup limit cannot promise physical RAM.
+// cap against visible MemAvailable, which may be virtualized by LXCFS. Broker
+// admission adds a verified physical-owner bound in readMemoryCapacity.
 func memoryCapacity(procRoot, cgroupRoot string) (MemoryCapacity, error) {
 	return memoryCapacityForProcess(procRoot, cgroupRoot, "self")
 }
@@ -321,5 +324,13 @@ func (runtime *Runtime) readMemoryCapacity() (MemoryCapacity, error) {
 	if runtime.memoryProbe != nil {
 		return runtime.memoryProbe()
 	}
-	return memoryCapacity("/proc", "/sys/fs/cgroup")
+	visible, err := memoryCapacity("/proc", "/sys/fs/cgroup")
+	if err != nil || !runtime.Config.Enabled {
+		return visible, err
+	}
+	physical, err := readHostMemoryAvailable(hostMemoryPath)
+	if err != nil {
+		return visible, err
+	}
+	return capPhysicalMemory(visible, physical), nil
 }

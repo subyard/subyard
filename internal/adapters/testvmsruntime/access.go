@@ -192,6 +192,9 @@ func (runtime *Runtime) doctor(ctx context.Context, want map[string]string) erro
 		}
 		return nil
 	}
+	if err := CheckHostMemory(); err != nil {
+		return err
+	}
 	for _, command := range []string{cfg.Incus, "qemu-system-x86_64", "nft"} {
 		if _, err := runtime.Runner.LookPath(command); err != nil {
 			return fmt.Errorf("required command is missing: %s", command)
