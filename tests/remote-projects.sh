@@ -61,7 +61,7 @@ if [[ "$joined" == *yard* && "$joined" == *rpc* && "$joined" == *--stdio* ]]; th
     SUBYARD_HOME="$REMOTE_TEST_STATE/owner-data" \
     SUBYARD_CONFIG_DIR="$REMOTE_TEST_SHIPPED" \
     SUBYARD_NO_AUDIT=1 \
-    "$REMOTE_TEST_ROOT/bin/yard" rpc --stdio
+    "$REMOTE_TEST_STATE/../runtime/bin/yard" rpc --stdio
 fi
 if [[ "$joined" == *_info* ]]; then
   case "$(cat "$REMOTE_TEST_STATE/info-mode" 2>/dev/null || printf fail)" in
@@ -84,7 +84,7 @@ if [[ "$joined" == *'yard-remote'*'docker inspect "$1"'* ]]; then
   exit 0
 fi
 if [[ "$joined" == *'yard-remote'*"'docker' 'inspect' '-f'"* ]]; then
-  printf 'sha256:owned-container\t1\tdemo-12345678\topenclaw\n'
+  printf 'sha256:owned-container\t1\tdemo-12345678\tsynthetic\n'
   exit 0
 fi
 if [[ "$joined" == *'yard-remote'*"'docker' 'rm'"* || "$joined" == *'/srv/env-secrets/'* ]]; then
@@ -106,6 +106,7 @@ chmod 755 "$TMP/bin/ssh"
 # shellcheck source=tests/helpers/test-context.sh
 . "$ROOT/tests/helpers/test-context.sh"
 setup_test_context "$TMP"
+setup_test_repository "$TMP" "$ROOT"
 # Exercise resolver-owned registry paths and named-yard identity.
 unset SUBYARD_STATE_DIR ACCESS_KIND YARD_INSTANCE_NAME INCUS_PROJECT SSH_HOST
 chmod 0700 "$TMP/config/yards/remote/projects"
@@ -137,13 +138,13 @@ ENV
 
 # Remote overview uses the HostID-keyed owner snapshot and a fresh cache avoids another SSH call.
 printf 'one\n' > "$REMOTE_TEST_STATE/info-mode"
-output="$($ROOT/bin/yard yards)"
+output="$($TMP/runtime/bin/yard yards)"
 assert_projects "$output" 1
 printf 'null\n' > "$REMOTE_TEST_STATE/info-mode"
-output="$($ROOT/bin/yard yards)"
+output="$($TMP/runtime/bin/yard yards)"
 assert_projects "$output" 1
 printf 'fail\n' > "$REMOTE_TEST_STATE/info-mode"
-output="$($ROOT/bin/yard yards)"
+output="$($TMP/runtime/bin/yard yards)"
 assert_projects "$output" 1
 
 state_file="$SUBYARD_CONFIG_HOME/yards/remote/projects/demo-12345678.json"
@@ -161,10 +162,10 @@ write_state() {
     importedAt:"test", target:$target, registrySource:"yard"
   }' > "$REMOTE_TEST_STATE/owner-config/projects/demo-12345678.json"
   chmod 0600 "$REMOTE_TEST_STATE/owner-config/projects/demo-12345678.json"
-  "$ROOT/bin/yard" list --live >/dev/null
+  "$TMP/runtime/bin/yard" list --live >/dev/null
 }
 run_remove() {
-  "$ROOT/bin/yard" -Y owner-a/default remove demo-12345678 "$@" --yes
+  "$TMP/runtime/bin/yard" -Y owner-a/default remove demo-12345678 "$@" --yes
 }
 
 # L1 removal has no L2 promise, warning, or owner-host cleanup call.
@@ -178,7 +179,7 @@ assert_not_contains "$output" 'box teardown'
 
 # An unreachable in-yard L2 environment fails during read-only removal preflight, before either
 # controller state or workspace deletion can change.
-write_state openclaw
+write_state synthetic
 printf 'fail\n' > "$REMOTE_TEST_STATE/cleanup-mode"
 rm -f "$REMOTE_TEST_STATE/data-cleanup" "$REMOTE_TEST_STATE/workspace-delete" "$REMOTE_TEST_STATE/owner-calls"
 if output="$(run_remove 2>&1)"; then fail 'remote L2 removal ignored failed environment preflight'; fi

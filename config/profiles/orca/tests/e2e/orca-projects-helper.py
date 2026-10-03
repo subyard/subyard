@@ -2,9 +2,11 @@
 """Sanitized stock-Orca RPC client and forced-command fixture for orca-projects.sh."""
 
 import argparse
+import grp
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import shlex
 import signal
@@ -409,7 +411,12 @@ def forced_command(arguments):
         "MIN_DISK_GIB": "1",
     }
     environment.update(additions)
-    os.execve(arguments.engine, [arguments.engine, *command], environment)
+    argv = [arguments.engine, *command]
+    group = grp.getgrnam("incus-admin").gr_gid
+    user = pwd.getpwuid(os.getuid()).pw_name
+    if group not in [os.getegid(), *os.getgroups()] and group in os.getgrouplist(user, os.getgid()):
+        os.execve("/usr/bin/sg", ["sg", "incus-admin", "-c", "exec " + shlex.join(argv)], environment)
+    os.execve(arguments.engine, argv, environment)
 
 
 def main():

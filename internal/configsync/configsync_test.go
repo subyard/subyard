@@ -198,7 +198,7 @@ func TestVersionedConfigSyncPreservesUnmanagedDefaultYardSettings(t *testing.T) 
 	fixture.writeSource("hosts/owner-a/config.env", "SSH_PORT=2233\n")
 	fixture.commit("host setting")
 	defaultSettings := filepath.Join(fixture.configHome, "yards", "default", "config.env")
-	writeSyncTestFile(t, defaultSettings, "ENVIRONMENT_PROFILES=orca\n", 0o600)
+	writeSyncTestFile(t, defaultSettings, "ENVIRONMENT_PROFILES=synthetic\n", 0o600)
 
 	plan, err := BuildPlan(fixture.options(false))
 	if err != nil {
@@ -212,13 +212,13 @@ func TestVersionedConfigSyncPreservesUnmanagedDefaultYardSettings(t *testing.T) 
 	if err := Apply(plan); err != nil {
 		t.Fatal(err)
 	}
-	assertSyncTestFile(t, defaultSettings, "ENVIRONMENT_PROFILES=orca\n", 0o600)
+	assertSyncTestFile(t, defaultSettings, "ENVIRONMENT_PROFILES=synthetic\n", 0o600)
 }
 
 func TestVersionedConfigSyncManagesOptionalDefaultYardSettings(t *testing.T) {
 	fixture := newSyncFixture(t, "owner-a")
 	fixture.writeSource(
-		"hosts/owner-a/yards/default/config.env", "ENVIRONMENT_PROFILES=orca\n",
+		"hosts/owner-a/yards/default/config.env", "ENVIRONMENT_PROFILES=synthetic\n",
 	)
 	fixture.commit("default yard setting")
 
@@ -230,7 +230,7 @@ func TestVersionedConfigSyncManagesOptionalDefaultYardSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	defaultSettings := filepath.Join(fixture.configHome, config.GitSettingsRelativePath, "yards", "default", "config.env")
-	assertSyncTestFile(t, defaultSettings, "ENVIRONMENT_PROFILES=orca\n", 0o600)
+	assertSyncTestFile(t, defaultSettings, "ENVIRONMENT_PROFILES=synthetic\n", 0o600)
 
 	if err := os.Remove(filepath.Join(fixture.source, "hosts", "owner-a", "yards", "default", "config.env")); err != nil {
 		t.Fatal(err)

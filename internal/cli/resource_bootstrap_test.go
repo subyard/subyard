@@ -10,7 +10,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/resourceendpoint"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
@@ -206,6 +208,105 @@ func TestResourceBootstrapPreservesProfilesAndInitializesAfterConsent(t *testing
 	}
 	if got := readResourceApplyLog(t, applyLog); got != "run\n" {
 		t.Fatalf("apply=%q", got)
+	}
+}
+
+func TestResourceBootstrapResumesResourceAfterPlatformRebuild(t *testing.T) {
+	root, environment, _ := bootstrapCommandFixture(t)
+	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment,
+		InitPlatform: newInitPlatformFixture()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := program.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, _ := program.resources.Lookup("demo")
+	bootstrap, err := program.prepareResourceBootstrap(context.Background(), loaded, definition, []string{"run", "--fixture-value", "two words"})
+	if err != nil || bootstrap == nil || bootstrap.init == nil {
+		t.Fatalf("bootstrap=%#v err=%v", bootstrap, err)
+	}
+	// Applying bootstrap rebuilds the real adapter after acquiring sudo privileges.
+	program.options.InitPlatform = nil
+	bootstrap.init.rebuildPlatform(program)
+	runtime := bootstrap.init.platform.(reconcileruntime.Runtime)
+	if runtime.ResourceCommand != "demo" || !slices.Equal(runtime.ResourceArguments, []string{"run", "--fixture-value", "two words"}) {
+		t.Fatalf("owner-group reexec lost the outer resource command: %q, %q", runtime.ResourceCommand, runtime.ResourceArguments)
+	}
+}
+
+func TestResourceBootstrapKeepsGitOnlyYardSettingsAsFallback(t *testing.T) {
+	root, environment, _ := bootstrapCommandFixture(t)
+	descriptor := filepath.Join(root, "config", "profiles", "fixture", "resources", "demo.res")
+	content, err := os.ReadFile(descriptor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, descriptor, string(content)+"ENDPOINT_DEFAULTS=\"tailscale-self 6768\"\n", 0o600)
+	writeCLIFile(t, filepath.Join(root, "config", "ports.env"), "SSH_PORT=2222\n", 0o600)
+	configHome := filepath.Join(root, "state")
+	cached := filepath.Join(configHome, config.GitSettingsRelativePath, "yards", "cached", "config.env")
+	if err := os.MkdirAll(filepath.Dir(cached), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "data"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	original := "ENVIRONMENT_PROFILES=existing\nYARD_IMAGE=cache:image\n"
+	testkit.WriteFile(t, cached, []byte(original), 0o600)
+	if err := configsync.RegisterSource(configHome, testkit.TempDir(t)); err != nil {
+		t.Fatal(err)
+	}
+	platform := newInitPlatformFixture()
+	environment = append(environment, "DEMO_ADVERTISE_HOST=127.0.0.1", "DEMO_HOST_PORT=16768")
+	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, InitPlatform: platform})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := program.loadContext("cached")
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, _ := program.resources.Lookup("demo")
+	arguments := []string{"run", "--fixture-value", "two words"}
+	bootstrap, err := program.prepareResourceBootstrap(context.Background(), loaded, definition, arguments)
+	if err != nil || bootstrap == nil || bootstrap.init == nil {
+		t.Fatalf("bootstrap=%#v err=%v", bootstrap, err)
+	}
+	if err := bootstrap.apply(context.Background(), program); err != nil {
+		t.Fatal(err)
+	}
+	local := filepath.Join(configHome, "yards", "cached", "config.env")
+	content, err = os.ReadFile(local)
+	if err != nil || string(content) != "ENVIRONMENT_PROFILES='existing fixture'\n" {
+		t.Fatalf("local profile selection copied cached settings: %q, %v", content, err)
+	}
+	host, port, exists, err := resourceendpoint.ReadSaved(filepath.Join(root, "data", "resource-endpoints"), "cached", "fixture.demo")
+	if err != nil || !exists || host != "127.0.0.1" || port != 16768 {
+		t.Fatalf("saved endpoint=%q:%d exists=%v err=%v", host, port, exists, err)
+	}
+	content, err = os.ReadFile(cached)
+	if err != nil || string(content) != original {
+		t.Fatalf("resource bootstrap changed cached settings: %q, %v", content, err)
+	}
+	nextProgram, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment})
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := nextProgram.loadContext("cached")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.Environment["ENVIRONMENT_PROFILES"] != "existing fixture" || next.Environment["YARD_IMAGE"] != "cache:image" {
+		t.Fatalf("next command lost local selection or Git fallback: profiles=%q image=%q", next.Environment["ENVIRONMENT_PROFILES"], next.Environment["YARD_IMAGE"])
+	}
+	// Owner-group reexec rebuilds the adapter after publishing the local selection.
+	program.options.InitPlatform = nil
+	bootstrap.init.rebuildPlatform(program)
+	runtime := bootstrap.init.platform.(reconcileruntime.Runtime)
+	if runtime.Yard.YardName != "cached" || runtime.ResourceCommand != "demo" || !slices.Equal(runtime.ResourceArguments, arguments) {
+		t.Fatalf("owner-group reexec lost the selected yard or outer resource arguments: %s, %q, %q", runtime.Yard.YardName, runtime.ResourceCommand, runtime.ResourceArguments)
 	}
 }
 

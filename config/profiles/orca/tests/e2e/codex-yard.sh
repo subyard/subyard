@@ -11,7 +11,7 @@ set -euo pipefail
   && [ "$(<"$STATE/.marker")" = subyard-orca-bootstrap-e2e-v1 ] \
   || { printf 'codex-yard-e2e: use the marked focused Orca bootstrap fixture\n' >&2; exit 2; }
 
-helper="$ROOT/tests/real-host/codex-permissions.py"
+helper="$ROOT/config/profiles/orca/tests/e2e/codex-permissions.py"
 guest_helper=/tmp/subyard-codex-permissions.py
 workspace_one=/srv/workspaces/codex-policy-one/src
 workspace_two=/srv/workspaces/codex-policy-two/src

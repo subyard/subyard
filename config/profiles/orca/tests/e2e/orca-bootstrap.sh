@@ -107,6 +107,46 @@ guest_dev() {
     --env HOME=/home/dev -- "$@"
 }
 
+print_bootstrap_service_diagnostics() {
+  local unit="$STATE/bootstrap-unit.out" journal="$STATE/bootstrap-journal.out"
+  install -m 0600 /dev/null "$unit"
+  install -m 0600 /dev/null "$journal"
+  guest_root timeout --signal=TERM --kill-after=2s 10 systemctl show subyard-orca.service \
+    -p ActiveState -p SubState -p Result -p ExecMainStatus >"$unit" 2>/dev/null || true
+  guest_root timeout --signal=TERM --kill-after=2s 10 journalctl \
+    -u subyard-orca.service --no-pager -n 40 -o cat >"$journal" 2>/dev/null || true
+  python3 - "$unit" "$STATE/bootstrap-terminal.out" "$journal" <<'PY_BOOTSTRAP_DIAGNOSTICS'
+import pathlib
+import re
+import sys
+
+for label, name in zip(("bootstrap-unit", "bootstrap-terminal", "bootstrap-journal"), sys.argv[1:]):
+    try:
+        with pathlib.Path(name).open("rb") as source:
+            size = source.seek(0, 2)
+            source.seek(max(0, size - 8192))
+            data = source.read(8192)
+        if size > 8192:
+            data = data.partition(b"\n")[2]
+    except OSError:
+        data = b""
+    text = data.decode(errors="replace").replace("\r", "\n")
+    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+    # Follow the upgrade diagnostic's conservative capability redaction, also
+    # stripping every URL and the stock Orca capability field names.
+    text = re.sub(r"(?i)[a-z][a-z0-9+.-]*://\S+", "<redacted>", text)
+    text = re.sub(r"(?im)^.*(?:authorization|bearer|pairing|token|secret|password|publicKeyB64|capability).*$", "<redacted>", text)
+    text = re.sub(r"[A-Za-z0-9_+/=-]{64,}", "<redacted>", text)
+    lines = text.splitlines()
+    if label == "bootstrap-terminal":
+        lines = [line for line in lines if re.search(r"(?i)orca|service|start|ready|active|fail|error|exit", line)]
+    for line in lines[-20:]:
+        print(f"{label}: {line[:512]}", file=sys.stderr)
+    if not lines:
+        print(f"{label}: diagnostics unavailable", file=sys.stderr)
+PY_BOOTSTRAP_DIAGNOSTICS
+}
+
 orca_rpc() {
   guest_dev /usr/bin/python3 -B /tmp/orca-projects-helper.py rpc "$@"
 }
@@ -964,8 +1004,8 @@ if [ "$SSH_AGENT" = 1 ]; then
   pairing="$(yard orca pair --yes | tail -n1)"
   case "$pairing" in orca://pair\?code=*) ;; *) die 'Orca did not return a private pairing link' ;; esac
   client_status "$pairing" ssh-agent-client
-  # shellcheck source=tests/real-host/ssh-agent.sh
-  . "$ROOT/tests/real-host/ssh-agent.sh"
+  # shellcheck source=config/profiles/orca/tests/e2e/ssh-agent.sh
+  . "$ROOT/config/profiles/orca/tests/e2e/ssh-agent.sh"
   exit 0
 fi
 
@@ -981,43 +1021,15 @@ if [ "$CODEX_PERMISSIONS" = 1 ]; then
   pairing="$(yard orca pair --yes | tail -n1)"
   case "$pairing" in orca://pair\?code=*) ;; *) die 'Orca did not return a private pairing link' ;; esac
   client_status "$pairing" codex-permissions-client
-  # shellcheck source=tests/real-host/codex-yard.sh
-  . "$ROOT/tests/real-host/codex-yard.sh"
+  # shellcheck source=config/profiles/orca/tests/e2e/codex-yard.sh
+  . "$ROOT/config/profiles/orca/tests/e2e/codex-yard.sh"
   exit 0
 fi
 
 stage 'installing a packaged candidate through the public release installer'
-package_source="$ROOT"
-if [ -n "$UPGRADE_FROM" ]; then
-  # Only the source-mutating upgrade fixture needs a disposable public copy.
-  mkdir "$STATE/source"
-  bash "$ROOT/tests/helpers/source-files.sh" \
-    | tar -C "$ROOT" --null -T - -cf - | tar -C "$STATE/source" -xf -
-  package_source="$STATE/source"
-  # The predecessor must be converged: its released updater cannot change
-  # targets while an existing activation needs repair. Only the candidate
-  # introduces this new desired value, in both local yards.
-  python3 - "$STATE/source/config/agents/claude/settings.json" <<'PY_UPGRADE_DEFAULT'
-import json
-import pathlib
-import sys
-path = pathlib.Path(sys.argv[1])
-value = json.loads(path.read_text())
-value["autoMemoryDirectory"] = "~/.claude-memory-upgrade-fixture"
-path.write_text(json.dumps(value) + "\n")
-PY_UPGRADE_DEFAULT
-fi
-release_version=0.13.3-orca-bootstrap-e2e
-[ -z "$HANDLER_ACCEPTANCE" ] || release_version=0.14.1-orca-handler-e2e
-if [ -e "$ROOT/.subyard-acceptance/candidate.json" ]; then
-  [ -z "$UPGRADE_FROM" ] || die 'the mutated upgrade fixture requires a separate candidate'
-  release_version="$(jq -er '.version' "$ROOT/.subyard-acceptance/candidate.json")"
-  mkdir -p "$STATE/release"
-  cp -a "$ROOT/.subyard-acceptance/release/." "$STATE/release/"
-else
-  bash "$package_source/dev/package-engine.sh" --version "$release_version" \
-    --output-dir "$STATE/release" >/dev/null
-fi
+# shellcheck source=config/profiles/orca/tests/e2e/orca-release-prepare.sh
+. "$ROOT/config/profiles/orca/tests/e2e/orca-release-prepare.sh"
+orca_prepare_bootstrap_release
 if [ -n "$UPGRADE_FROM" ]; then
   stage "installing published Subyard $UPGRADE_FROM and starting Orca before the upgrade"
   published_installer="$STATE/published-install.sh"
@@ -1289,11 +1301,14 @@ status = pty.spawn(command,
 sys.exit(os.waitstatus_to_exitcode(status))
 PY_ORCA_PROMPT
 then
-  tail -n 60 "$STATE/bootstrap-terminal.out" >&2
+  print_bootstrap_service_diagnostics
   die 'interactive Orca bootstrap failed'
 fi
 [ "$(grep -Fc 'Proceed? [Y/n]' "$STATE/bootstrap-terminal.out")" = 1 ] \
   || die 'interactive Orca bootstrap did not use exactly one default-yes confirmation'
+stage 'checking Orca service immediately after interactive bootstrap'
+guest_root systemctl is-active --quiet subyard-orca.service \
+  || { print_bootstrap_service_diagnostics; die 'Orca did not start through the production bootstrap path'; }
 status_reached=0
 # Init refreshes its own process groups; the parent fixture shell remains stale.
 status_command='exec "$SUBYARD_TTY_TEST_ENGINE" orca status'
@@ -1322,6 +1337,9 @@ else
 fi
 [ "$status_reached" = 1 ] \
   || { sed -n '1,40p' "$STATE/status-terminal.out" >&2; die 'interactive status did not reach the Orca resource'; }
+status_output="$(yard -Y default status)"
+grep -Eq '^[[:space:]]+profiles[[:space:]]+subyard-dev orca$' <<<"$status_output" \
+  || die 'detailed status did not render the selected Orca composition'
 profiles="$(setting_value ENVIRONMENT_PROFILES)"
 [ "$profiles" = 'subyard-dev orca' ] \
   || die "Orca bootstrap did not preserve the selected profiles: $profiles"
@@ -1333,7 +1351,7 @@ case "$ORCA_PORT" in
 esac
 [ "$ORCA_PORT" != 6768 ] || die 'automatic endpoint selection reused the occupied preferred port'
 guest_root systemctl is-active --quiet subyard-orca.service \
-  || die 'Orca did not start through the production bootstrap path'
+  || { print_bootstrap_service_diagnostics; die 'Orca did not start through the production bootstrap path'; }
 stock_orca_probe
 guest_root test -x /usr/local/libexec/subyard/projects-changed \
   || die 'Orca bootstrap did not run the existing init reconciler'
@@ -1484,7 +1502,7 @@ client_status "$desktop_pair_after_mobile" desktop-after-mobile-client
 client_status "$(tail -n1 "$mobile_pair_one")" mobile-client-one
 assert_no_pairing_capability_logs
 if [ "$EXISTING_YARD" = 1 ]; then
-  stage 'syncing and applying a tracked desired config while preserving runtime state and the grant'
+  stage 'syncing a tracked fallback while preserving local settings, runtime state and the grant'
   sync_host_id="$(<"$SUBYARD_CONFIG_HOME/host-id")"
   case "$sync_host_id" in
     ''|*[!A-Za-z0-9._-]*) die 'config sync host identity is unavailable' ;;
@@ -1512,28 +1530,44 @@ if [ "$EXISTING_YARD" = 1 ]; then
   yard config status >"$STATE/config-sync-status.out" 2>"$STATE/config-sync-status.err" \
     || die 'config sync --apply did not converge materialized settings'
   assert_materialized_json "$desired_two" "$ROOT/config/agents/pi/settings.json" \
-    || die 'config sync --apply changed the persistent local JSON override'
+    || die 'config sync --apply replaced the local managed JSON fields'
   assert_orca_runtime_json_preserved
   assert_orca_readiness
   client_status "$pairing" paired-client
 
-  stage 'materializing the synced Git fallback after retiring the fixture-owned local override'
-  # Local imports take precedence over Git; file settings have no unset command.
+  stage 'removing only the fixture local file override to apply the cached Git fallback'
   local_claude="$SUBYARD_CONFIG_HOME/overrides/host/agents/claude/settings.json"
-  [ -f "$local_claude" ] && [ ! -L "$local_claude" ] && cmp -s -- "$desired_two" "$local_claude" \
-    || die 'local Claude override no longer matches the fixture-owned import'
+  [[ "$STATE" =~ ^/var/tmp/subyard-orca-bootstrap\.[A-Za-z0-9]{6,}$ ]] \
+    && [ "$(readlink -f -- "$STATE")" = "$STATE" ] \
+    && [ "$(stat -c %u "$STATE")" = "$EUID" ] \
+    && [ -f "$STATE/.marker" ] && [ ! -L "$STATE/.marker" ] \
+    && [ "$(<"$STATE/.marker")" = subyard-orca-bootstrap-e2e-v1 ] \
+    && [ "$SUBYARD_CONFIG_HOME" = "$STATE/config" ] \
+    && [ -f "$local_claude" ] && [ ! -L "$local_claude" ] \
+    && [ "$(readlink -f -- "$local_claude")" = "$local_claude" ] \
+    && [ "$(stat -c %u "$local_claude")" = "$EUID" ] \
+    || die 'local Claude override is not a canonical fixture-owned file'
+  [ "$(setting_value AGENT_claude_CONFIG)" = "$local_claude" ] \
+    && cmp -s "$desired_two" "$local_claude" \
+    || die 'config sync changed the selected local Claude override'
+  # File settings have no unset command; this exact fixture-owned file reveals Git fallback.
   rm -- "$local_claude"
-  yard config apply --yes >"$STATE/config-sync-fallback-apply.out" 2>"$STATE/config-sync-fallback-apply.err" \
-    || { report_config_failure "$STATE/config-sync-fallback-apply.err"; die 'public config apply did not materialize the Git fallback'; }
-  yard config status >"$STATE/config-sync-fallback-status.out" 2>"$STATE/config-sync-fallback-status.err" \
-    || die 'config apply did not converge the synced Git fallback'
+  cached_claude="$SUBYARD_CONFIG_HOME/.sync/settings/overrides/host/agents/claude/settings.json"
+  [ "$(setting_value AGENT_claude_CONFIG)" = "$cached_claude" ] \
+    && cmp -s "$desired_sync" "$cached_claude" \
+    || die 'removing the local Claude override did not reveal the cached Git template'
+  assert_config_drift git-fallback
+  yard config apply --yes >"$STATE/config-apply-git-fallback.out" 2>"$STATE/config-apply-git-fallback.err" \
+    || { report_config_failure "$STATE/config-apply-git-fallback.err"; die 'public config apply did not materialize Git fallback'; }
+  yard config status >"$STATE/config-git-fallback-status.out" 2>"$STATE/config-git-fallback-status.err" \
+    || die 'config status did not converge after Git fallback apply'
   assert_materialized_json "$desired_sync" "$ROOT/config/agents/pi/settings.json" \
-    || die 'config apply did not materialize synced Git fallback fields'
+    || die 'config apply did not materialize the cached Git JSON fields'
   guest_root jq -e '
     .autoMemoryDirectory == "~/.claude-memory-e2e-sync" and
     (.env | has("SUBYARD_E2E_MANAGED_SETTING") | not)
   ' /home/dev/.claude/settings.json >/dev/null \
-    || die 'config apply did not honor the tracked Git fallback settings'
+    || die 'config apply did not honor the cached Git managed settings'
   assert_orca_runtime_json_preserved
   assert_orca_readiness
   client_status "$pairing" paired-client

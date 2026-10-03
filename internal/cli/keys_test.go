@@ -287,7 +287,7 @@ func TestCredentialPreparedActionsReachCoreRegistry(t *testing.T) {
 		"keys.resolve-choose", "keys.resolve-rotate", "keys.materialize", "keys.sync",
 		"keys.auto-sync-pause", "keys.auto-sync-resume", "keys.trust", "keys.untrust", "keys.move",
 		"keys.revoke", "keys.delete-tombstone", "keys.exchange.trust-import",
-		"keys.exchange.untrust-import", "keys.exchange.refresh", "keys.auto-worker", "keys.init-store",
+		"keys.exchange.untrust-import", "keys.exchange.stop-consumer", "keys.exchange.refresh", "keys.auto-worker", "keys.init-store",
 	} {
 		changed := !strings.Contains(string(action), ".help") &&
 			!strings.Contains(string(action), ".list") &&

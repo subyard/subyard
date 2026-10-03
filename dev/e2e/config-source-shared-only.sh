@@ -14,7 +14,7 @@ esac
 if [ "$(id -u)" != 0 ]; then
   exec sudo -n env "SUBYARD_E2E_VM=$SUBYARD_E2E_VM" bash "$0"
 fi
-for command in git ssh ssh-keygen ssh-keyscan sshd; do
+for command in git ssh ssh-keygen ssh-keyscan sshd script; do
   command -v "$command" >/dev/null 2>&1 || fail "$command is required"
 done
 sshd_path="$(command -v sshd)"
@@ -47,6 +47,7 @@ yard="$PWD/.build/yard"
 
 operator_home="$test_root/operator"
 config_home="$operator_home/.config/subyard"
+git_settings="$config_home/.sync/settings"
 data_home="$operator_home/.subyard"
 checkout="$operator_home/.local/share/subyard-config"
 seed="$test_root/seed"
@@ -129,9 +130,14 @@ yard_environment=(
 run_yard() {
   "${yard_environment[@]}" "$yard" "$@"
 }
+run_yard_interactive() {
+  local command_line
+  printf -v command_line '%q ' "${yard_environment[@]}" "$yard" "$@"
+  SHELL=/bin/bash script --echo never -qefc "$command_line" /dev/null
+}
 
 decline_output="$test_root/decline.out"
-if printf 'n\n' | run_yard config source connect "$origin" \
+if printf 'n\n' | run_yard_interactive config sync connect "$origin" \
   --host-id e2e-shared-only >"$decline_output" 2>&1; then
   fail "declined source connect succeeded"
 fi
@@ -139,39 +145,39 @@ grep -Fq 'operation declined' "$decline_output" ||
   fail "declined source connect returned the wrong diagnostic"
 [ ! -e "$checkout" ] || fail "declined source connect left its checkout"
 [ ! -e "$config_home/host-id" ] || fail "declined source connect saved host identity"
-[ ! -e "$config_home/overrides/shared/config.env" ] ||
+[ ! -e "$git_settings/overrides/shared/config.env" ] ||
   fail "declined source connect changed shared settings"
-if run_yard config source path >/dev/null 2>&1; then
+if run_yard config sync path >/dev/null 2>&1; then
   fail "declined source connect registered a source"
 fi
 
 connect_output="$test_root/connect.out"
-printf 'y\n' | run_yard config source connect "$origin" \
+printf 'y\n' | run_yard_interactive config sync connect "$origin" \
   --host-id e2e-shared-only >"$connect_output" 2>&1
-[ "$(grep -Fc 'Proceed? [y/N]' "$connect_output")" = 1 ] ||
+[ "$(grep -Fc 'Proceed? [Y/n]' "$connect_output")" = 1 ] ||
   fail "source connect did not ask exactly once"
-grep -Fq 'overrides/shared/config.env' "$connect_output" ||
+grep -Fq '.sync/settings/overrides/shared/config.env' "$connect_output" ||
   fail "source connect omitted the exact shared managed path"
-grep -Fq 'config source: connected' "$connect_output" ||
+grep -Fq 'config sync: connected' "$connect_output" ||
   fail "source connect did not report registration"
 if grep -Fq 'images:debian/13' "$connect_output"; then
   fail "source connect printed a configuration value"
 fi
 [ "$(cat "$config_home/host-id")" = e2e-shared-only ] ||
   fail "source connect did not persist local HostID"
-[ "$(cat "$config_home/overrides/shared/config.env")" = 'YARD_IMAGE=images:debian/13' ] ||
+[ "$(cat "$git_settings/overrides/shared/config.env")" = 'YARD_IMAGE=images:debian/13' ] ||
   fail "source connect did not apply shared settings"
 [ ! -e "$checkout/hosts" ] || fail "source connect created a host entry in Git"
 [ -z "$(git -C "$checkout" status --porcelain=v1 --untracked-files=all)" ] ||
   fail "source connect changed its Git worktree"
-[ "$(run_yard config source path)" = "$checkout" ] ||
+[ "$(run_yard config sync path)" = "$checkout" ] ||
   fail "registered source path is not authoritative"
 
 show_output="$test_root/show-shared.out"
 run_yard config show YARD_IMAGE >"$show_output"
 grep -Fq 'effective: images:debian/13' "$show_output" ||
   fail "shared setting is not effective"
-grep -Fq "$config_home/overrides/shared/config.env:1" "$show_output" ||
+grep -Fq "$git_settings/overrides/shared/config.env:1" "$show_output" ||
   fail "shared setting provenance is missing"
 run_yard config sync --check >"$test_root/check-converged.out"
 run_yard config sync >"$test_root/sync-converged.out"
@@ -200,13 +206,13 @@ if run_yard config sync --check --adopt >"$host_check" 2>&1; then
 fi
 grep -Fq 'changes required' "$host_check" ||
   fail "host overlay --check omitted its non-converged result"
-grep -Fq 'config.env' "$host_check" ||
+grep -Fq '.sync/settings/config.env' "$host_check" ||
   fail "host overlay --check omitted its exact managed path"
-printf 'y\n' | run_yard config sync --adopt >"$test_root/sync-host.out" 2>&1
+printf 'y\n' | run_yard_interactive config sync --adopt >"$test_root/sync-host.out" 2>&1
 run_yard config show YARD_IMAGE >"$test_root/show-host.out"
 grep -Fq 'effective: images:ubuntu/24.04' "$test_root/show-host.out" ||
   fail "selected host overlay did not override shared settings"
-grep -Fq "$config_home/config.env:1" "$test_root/show-host.out" ||
+grep -Fq "$git_settings/config.env:1" "$test_root/show-host.out" ||
   fail "host setting provenance is missing"
 [ -z "$(git -C "$checkout" status --porcelain=v1 --untracked-files=all)" ] ||
   fail "host overlay sync changed its Git worktree"
@@ -229,11 +235,13 @@ if run_yard config sync --check >"$remove_check" 2>&1; then
 fi
 grep -Fq 'delete' "$remove_check" ||
   fail "removed host overlay did not produce an explicit delete plan"
-grep -Fq 'config.env' "$remove_check" ||
+grep -Fq '.sync/settings/config.env' "$remove_check" ||
   fail "removed host overlay delete plan omitted its path"
-printf 'y\n' | run_yard config sync >"$test_root/sync-remove.out" 2>&1
-[ ! -e "$config_home/config.env" ] ||
+printf 'y\n' | run_yard_interactive config sync >"$test_root/sync-remove.out" 2>&1
+[ ! -e "$git_settings/config.env" ] ||
   fail "previously managed host settings survived source removal"
+[ -f "$config_home/config.env" ] && [ ! -s "$config_home/config.env" ] ||
+  fail "sync changed unmanaged local host settings"
 [ "$(cat "$config_home/local-only.keep")" = 'local sentinel' ] ||
   fail "sync removed unmanaged local data"
 run_yard config show YARD_IMAGE >"$test_root/show-restored-shared.out"

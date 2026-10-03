@@ -382,7 +382,7 @@ func (fixture *retryableIntegrationExecutor) Exec(_ context.Context, _, _ string
 		fixture.hookAttempts++
 		if fixture.hookReady != "" {
 			if _, err := os.Stat(fixture.hookReady); err != nil {
-				return ports.InstanceExecResult{ExitCode: 1}, errors.New("Orca handler is not ready for integration hooks")
+				return ports.InstanceExecResult{ExitCode: 1}, errors.New("fixture profile handler is not ready for integration hooks")
 			}
 		}
 		if fixture.failFirstHook && fixture.hookAttempts == 1 {

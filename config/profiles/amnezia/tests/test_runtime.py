@@ -9,9 +9,11 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -29,6 +31,7 @@ def load_module(name, path):
 
 handler = load_module('amnezia_owner_test', PROFILE / 'resources/vpn/handler.py')
 runtime = load_module('amnezia_guest_test', PROFILE / 'runtime.py')
+boot_observer = load_module('amnezia_boot_test', PROFILE / 'tests/e2e/first-boot-observer.py')
 
 
 def result(stdout=b'', code=0):
@@ -629,6 +632,141 @@ class ProfileProvisionTest(unittest.TestCase):
                     self.assertEqual(invoke().returncode, 0)
                     self.assertEqual(invoke('--check').returncode, 0)
             self.assertEqual(invoke('--check', environment_override={'PROFILE_FAKE_UID': '1000'}).returncode, 10)
+
+
+class FirstBootObserverTest(unittest.TestCase):
+    def test_cancel_preserves_owner_process_group_and_native_signal_exit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            directory.chmod(0o700)
+            incus = directory / 'incus'
+            incus.write_text('#!/bin/sh\nexit 1\n')
+            incus.chmod(0o755)
+            marker = directory / 'init-process'
+            native = [sys.executable, '-c', '''import json, os, sys, time
+fd = os.open(sys.argv[1] + '.tmp', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+os.write(fd, json.dumps({'pid': os.getpid(), 'group': os.getpgrp()}).encode()); os.close(fd)
+os.rename(sys.argv[1] + '.tmp', sys.argv[1])
+time.sleep(60)
+''', str(marker)]
+            wrapper = subprocess.Popen([sys.executable, '-B', boot_observer.__file__, '--', *native],
+                                       env=os.environ | {'PATH': f'{directory}:{os.environ["PATH"]}'},
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+            process = None
+            try:
+                deadline = time.monotonic() + 5
+                while not marker.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue(marker.exists(), 'native init did not start')
+                process = json.loads(marker.read_text())
+                self.assertEqual(process['group'], wrapper.pid)
+                wrapper.send_signal(signal.SIGTERM)
+                wrapper.communicate(timeout=5)
+                self.assertEqual(wrapper.returncode, 143)
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(process['pid'], 0)
+            finally:
+                try:
+                    os.killpg(wrapper.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                if process is not None:
+                    try:
+                        os.kill(process['pid'], signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                wrapper.communicate(timeout=5)
+
+    def test_exit_reason_survives_empty_stopped_logs_without_private_or_foreign_fields(self):
+        events = [
+            {'type': 'lifecycle', 'project': 'foreign', 'metadata': {
+                'action': 'instance-started', 'source': '/1.0/instances/yard-vpn-e2e'}},
+            {'type': 'logging', 'metadata': {'message': 'Instance stopped', 'context': {
+                'project': 'subyard-vpn-e2e', 'instance': 'foreign', 'reason': 'host-error'}}},
+            {'type': 'logging', 'metadata': {'message': 'Instance stopped', 'context': {
+                'project': 'subyard-vpn-e2e', 'instance': 'yard-vpn-e2e',
+                'reason': 'guest-panic', 'target': 'stop', 'private': 'synthetic-private-value'},
+                'requestor': 'synthetic-private-value', 'config': 'synthetic-private-value'}},
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            directory.chmod(0o700)
+            fake = directory / 'incus.py'
+            fake.write_text('''import json, os, signal, sys, time
+from pathlib import Path
+root = Path(__file__).parent
+def write(name, value=''):
+    fd = os.open(root / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.write(fd, value.encode()); os.close(fd)
+if sys.argv[1] == 'monitor':
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    for event in json.loads((root / 'events').read_text()):
+        print(json.dumps(event), flush=True)
+    write('monitor-pid', str(os.getpid()))
+    time.sleep(60)
+elif sys.argv[1] == 'query':
+    print(json.dumps({'status': 'Stopped', 'pid': 0, 'memory': {'usage': 0},
+                      'private': 'synthetic-private-value'}))
+    if not (root / 'state-read').exists(): write('state-read')
+elif sys.argv[1] == 'console':
+    pass  # The post-stop console is empty, as in the observed failure.
+''')
+            fake.chmod(0o600)
+            (directory / 'events').write_text(json.dumps(events))
+            (directory / 'events').chmod(0o600)
+            init = [sys.executable, '-c', '''import sys, time
+from pathlib import Path
+root = Path(sys.argv[1])
+deadline = time.monotonic() + 5
+while not ((root / 'monitor-pid').exists() and (root / 'state-read').exists()):
+    if time.monotonic() > deadline: sys.exit(99)
+    time.sleep(0.01)
+sys.exit(17)
+''', str(directory)]
+            pending = [True]
+            def arguments(*args):
+                if args[0] == 'monitor' and pending:
+                    pending.clear()
+                    raise OSError('Incus not installed yet')
+                return [sys.executable, str(fake), *args]
+            with mock.patch.object(boot_observer, 'incus_arguments', side_effect=arguments), \
+                    io.StringIO() as output, contextlib.redirect_stdout(output):
+                self.assertEqual(boot_observer.run(init), 17)
+                retained = output.getvalue()
+            rows = [json.loads(line.split('=', 1)[1]) for line in retained.splitlines()]
+            self.assertTrue(any(row.get('state') == 'Stopped' for row in rows))
+            self.assertEqual(rows[-1]['shutdown_reason'], 'guest-panic')
+            self.assertEqual(rows[-1]['subscription'], 'ready')
+            self.assertTrue(any(row.get('gap') == 'monitor_unavailable' for row in rows))
+            self.assertNotIn('synthetic-private-value', retained)
+            self.assertNotIn('host-error', retained)
+            self.assertFalse(any('action' in row for row in rows))
+            with self.assertRaises(ProcessLookupError):
+                os.kill(int((directory / 'monitor-pid').read_text()), 0)
+
+    def test_observation_deadline_preserves_init_and_probe_timeout_reaps_child(self):
+        with mock.patch.object(boot_observer, 'incus_arguments', side_effect=OSError), \
+                io.StringIO() as output, contextlib.redirect_stdout(output):
+            self.assertEqual(boot_observer.run([sys.executable, '-c', 'raise SystemExit(23)']), 23)
+            self.assertIn('monitor_unavailable', output.getvalue())
+        with io.StringIO() as output, contextlib.redirect_stdout(output):
+            self.assertEqual(boot_observer.run([sys.executable, '-c', 'raise SystemExit(24)'], duration=0), 24)
+            self.assertIn('deadline', output.getvalue())
+            self.assertEqual(boot_observer.run([sys.executable, '-c', 'pass'], duration=0), 0)
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            directory.chmod(0o700)
+            pid = directory / 'probe-pid'
+            command = [sys.executable, '-c', '''import os, signal, sys, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+os.write(fd, str(os.getpid()).encode()); os.close(fd)
+time.sleep(60)
+''', str(pid)]
+            with mock.patch.object(boot_observer, 'incus_arguments', return_value=command):
+                self.assertIsNone(boot_observer.probe('query'))
+            with self.assertRaises(ProcessLookupError):
+                os.kill(int(pid.read_text()), 0)
 
 
 if __name__ == '__main__':

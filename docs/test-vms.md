@@ -287,6 +287,10 @@ That singleton reserves 4.5 GiB including VM overhead, rather than the pair's 9 
 OpenClaw, GitHub, Hermes, Orca and subyard-dev acceptance request one standard guest; Amnezia
 retains its owner/client pair. Android retains its larger guest. The generic Android VM base
 does not include the SDK; the fixture provisions it.
+The full lane first checks the default phone (API 36), including native and remote use,
+viewers, recovery, APK installation, clean userdata on reuse and lease expiry. It then checks
+the API 35 phone and API 36 tablet concurrently, including phone reuse while the tablet remains
+held. Complete acceptance requires both phases.
 The fixture sleeps an idle leased device's display while another device boots, retaining its
 lease and ADB access. This avoids spending software-rendering CPU on an unused display; both
 devices still run concurrently with their configured RAM and screen dimensions.

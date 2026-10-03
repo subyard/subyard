@@ -1268,7 +1268,9 @@ func (runtime Runtime) securityRuntime() securityruntime.Runtime {
 }
 
 func (runtime Runtime) securityConverged(ctx context.Context) (bool, error) {
-	_, err := runtime.securityRuntime().CheckSecurity(ctx, true, true)
+	checker := runtime.securityRuntime()
+	checker.Stdout, checker.Stderr = io.Discard, io.Discard
+	_, err := checker.CheckSecurity(ctx, true, true)
 	if err == nil {
 		return true, nil
 	}

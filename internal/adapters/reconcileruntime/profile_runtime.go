@@ -227,6 +227,11 @@ func (runtime Runtime) runProfileRuntimeHandler(
 	command := exec.CommandContext(callContext, cleanPath, append([]string{action}, arguments...)...)
 	command.Dir = root
 	command.Env = runtime.Environment
+	if strings.HasPrefix(runtime.RepositoryRoot, "/proc/self/fd/") {
+		// The hook does not inherit the engine's repository descriptor.
+		parentRoot := strings.Replace(runtime.RepositoryRoot, "/proc/self/", fmt.Sprintf("/proc/%d/", os.Getpid()), 1)
+		command.Env = append(command.Environ(), "SUBYARD_REPOSITORY_ROOT="+parentRoot)
+	}
 	command.Stdin = nil
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.Cancel = func() error {
@@ -298,6 +303,11 @@ type profileRuntimeBoundedBuffer struct {
 	bytes.Buffer
 	limit    int
 	exceeded bool
+}
+
+// io.Copy must use Write rather than the embedded buffer's unbounded ReadFrom.
+func (buffer *profileRuntimeBoundedBuffer) ReadFrom(reader io.Reader) (int64, error) {
+	return io.Copy(struct{ io.Writer }{buffer}, reader)
 }
 
 func (buffer *profileRuntimeBoundedBuffer) Write(value []byte) (int, error) {

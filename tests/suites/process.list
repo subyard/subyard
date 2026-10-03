@@ -5,7 +5,6 @@ init-extras-convergence.sh
 init-network-convergence.sh
 init-project-convergence.sh
 lifecycle-guard.sh
-profile-resource-lifecycle.sh
 project-registry-convergence.sh
 remote-projects.sh
 yard-keys.sh

@@ -20,10 +20,11 @@ type Native struct {
 	Path    string `json:"path"`
 }
 type Consumer struct {
-	ID     string `json:"id"`
-	Zone   string `json:"zone"`
-	Path   string `json:"path"`
-	Format string `json:"format"`
+	ID          string `json:"id"`
+	Zone        string `json:"zone"`
+	Path        string `json:"path"`
+	Format      string `json:"format"`
+	StopHandler string `json:"stop_handler,omitempty"`
 }
 type ManagedPath struct {
 	Root string `json:"root"`
@@ -46,20 +47,21 @@ type Setup struct {
 	Followup         string   `json:"followup"`
 }
 type Definition struct {
-	SchemaVersion         int                   `json:"schema_version"`
-	Name                  string                `json:"-"`
-	Root                  string                `json:"-"`
-	DefaultYards          []string              `json:"default_yards,omitempty"`
-	DisabledWhen          map[string]string     `json:"disabled_when,omitempty"`
-	SelectedProvisionOnly bool                  `json:"selected_provision_only,omitempty"`
-	OwnerService          string                `json:"owner_service,omitempty"`
-	Native                []Native              `json:"native,omitempty"`
-	Consumers             []Consumer            `json:"consumers,omitempty"`
-	ManagedPaths          []ManagedPath         `json:"managed_paths,omitempty"`
-	Setup                 *Setup                `json:"setup,omitempty"`
-	Settings              []Setting             `json:"settings,omitempty"`
-	Runtime               *RuntimeHook          `json:"runtime,omitempty"`
-	GuestEnvironment      *GuestEnvironmentHook `json:"guest_environment,omitempty"`
+	SchemaVersion              int                   `json:"schema_version"`
+	Name                       string                `json:"-"`
+	Root                       string                `json:"-"`
+	DefaultYards               []string              `json:"default_yards,omitempty"`
+	DisabledWhen               map[string]string     `json:"disabled_when,omitempty"`
+	SelectedProvisionOnly      bool                  `json:"selected_provision_only,omitempty"`
+	OwnerService               string                `json:"owner_service,omitempty"`
+	Native                     []Native              `json:"native,omitempty"`
+	Consumers                  []Consumer            `json:"consumers,omitempty"`
+	CredentialImportExclusions [][]string            `json:"credential_import_exclusions,omitempty"`
+	ManagedPaths               []ManagedPath         `json:"managed_paths,omitempty"`
+	Setup                      *Setup                `json:"setup,omitempty"`
+	Settings                   []Setting             `json:"settings,omitempty"`
+	Runtime                    *RuntimeHook          `json:"runtime,omitempty"`
+	GuestEnvironment           *GuestEnvironmentHook `json:"guest_environment,omitempty"`
 }
 
 func (definition Definition) Selected(yard string, environment map[string]string) bool {
@@ -80,6 +82,16 @@ func Load(root string) ([]Definition, error) {
 	root, err := filepath.Abs(root)
 	if err != nil {
 		return nil, err
+	}
+	// Installed releases may be selected through runtime/current. Bind ordinary
+	// repository aliases once, while retaining the updater's descriptor authority.
+	if !pinnedRepositoryRoot.MatchString(root) {
+		resolved, resolveErr := filepath.EvalSymlinks(root)
+		if resolveErr == nil {
+			root = resolved
+		} else if !errors.Is(resolveErr, os.ErrNotExist) {
+			return nil, resolveErr
+		}
 	}
 	paths, err := filepath.Glob(filepath.Join(root, "config", "profiles", "*", "profile.json"))
 	if err != nil {
@@ -192,11 +204,39 @@ func (definition Definition) validate() error {
 		nativePaths[native.Path] = true
 	}
 	for _, consumer := range definition.Consumers {
-		if !domain.SafeName(consumer.ID) || !domain.SafeName(consumer.Zone) || !relative(consumer.Path) {
+		path := strings.ReplaceAll(consumer.Path, "{zone}", "zone")
+		if !domain.SafeName(consumer.ID) || consumer.ID == "none" ||
+			consumer.Zone != "*" && !domain.SafeName(consumer.Zone) || !relative(path) || strings.ContainsAny(path, "{}") {
 			return errors.New("invalid profile credential declaration")
+		}
+		if strings.Contains(consumer.Path, "{zone}") && (consumer.Zone != "*" || strings.Count(consumer.Path, "{zone}") != 1 || strings.Contains(filepath.Dir(consumer.Path), "{zone}")) {
+			return errors.New("credential zone placeholder requires a wildcard zone and a filename")
 		}
 		if consumer.Format != "file" && consumer.Format != "rsa-private-key" {
 			return errors.New("unsupported profile credential format")
+		}
+		if consumer.StopHandler != "" {
+			if err := definition.validateExecutable(consumer.StopHandler); err != nil {
+				return fmt.Errorf("credential stop handler: %w", err)
+			}
+		}
+	}
+	if len(definition.CredentialImportExclusions) > 32 {
+		return errors.New("too many profile credential import exclusions")
+	}
+	for _, fragments := range definition.CredentialImportExclusions {
+		if len(fragments) == 0 || len(fragments) > 8 {
+			return errors.New("credential import exclusion requires bounded directory fragments")
+		}
+		for _, fragment := range fragments {
+			if len(fragment) < 3 || len(fragment) > 256 || !strings.HasPrefix(fragment, "/") || !strings.HasSuffix(fragment, "/") {
+				return errors.New("credential import exclusion requires slash-delimited directory fragments")
+			}
+			for _, part := range strings.Split(fragment[1:len(fragment)-1], "/") {
+				if !domain.SafeID(part) {
+					return errors.New("invalid credential import exclusion directory fragment")
+				}
+			}
 		}
 	}
 	for _, path := range definition.ManagedPaths {

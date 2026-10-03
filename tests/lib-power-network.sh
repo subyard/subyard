@@ -254,6 +254,35 @@ incus_wait_instance_agent test-project test-yard || fail "instance agent did not
   fi
 )
 
+# Cloud-image seeding can require two boots before the first executable agent.
+(
+  probe_limits="$tmp/vm-agent-probe-limits"
+  timeout() {
+    printf '%s\n' "$2" >> "$probe_limits"
+    shift 2
+    "$@"
+  }
+  sleep() { SECONDS=$((SECONDS + arrival)); }
+  unset SUBYARD_INCUS_AGENT_WAIT_TIMEOUT
+  for arrival in 301 599 600; do
+    reset_case
+    : > "$probe_limits"
+    SECONDS=0
+    MOCK_INCUS_EXEC_READY_AFTER=2
+    if YARD_KIND=vm incus_wait_instance_agent test-project test-yard; then
+      [ "$arrival" -lt 600 ] || fail "VM agent exceeded its absolute deadline"
+    else
+      [ "$arrival" -eq 600 ] || fail "cloud VM agent was rejected before its deadline"
+    fi
+    [ "$(head -n 1 "$probe_limits")" = 5 ] || fail "VM agent probe exceeded five seconds"
+    if [ "$arrival" -eq 599 ]; then
+      [ "$(tail -n 1 "$probe_limits")" = 1 ] || fail "VM agent probe exceeded remaining time"
+    elif [ "$arrival" -eq 600 ]; then
+      [ "$(cat "$MOCK_INCUS_EXEC_COUNT")" = 1 ] || fail "VM agent deadline started another probe"
+    fi
+  done
+)
+
 reset_case
 started=$SECONDS
 if MOCK_INCUS_EXEC_HANG=1 SUBYARD_INCUS_AGENT_WAIT_TIMEOUT=1 \

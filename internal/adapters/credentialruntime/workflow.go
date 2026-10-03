@@ -155,7 +155,7 @@ Host-side encrypted credential ledger:
   resolve <credential-id> --choose <revision>|--rotate [--file PATH]
   move <credential-id> @peer
 
-Builtin consumers: staging-env, qa-secrets, qa-pool.
+Consumer none keeps credentials encrypted without materializing a file.
 Secret values are read only after confirmation from a protected file, stdin or a silent TTY.
 `)
 	for _, consumer := range runtime.consumers {
@@ -1123,7 +1123,7 @@ func (runtime *Runtime) prepareMove(ctx context.Context, arguments []string) (Pr
 		consequences = append(consequences, "resume ciphertext sync and target materialization without publishing another epoch")
 	} else {
 		consequences = append(consequences,
-			fmt.Sprintf("stop and verify the old staging consumer for zone %q", plan.zone),
+			fmt.Sprintf("stop and verify the old assigned consumer for zone %q", plan.zone),
 			fmt.Sprintf("publish authority assignment epoch %d", plan.nextEpoch),
 			"sync and materialize on the target before reporting success")
 	}
@@ -1147,6 +1147,9 @@ func (runtime *Runtime) planMove(ctx context.Context, credentialID, targetName s
 	}
 	if !head.Exclusive {
 		return movePlan{}, fmt.Errorf("credential %q is not exclusive", credentialID)
+	}
+	if _, err := runtime.consumerStopHandler(head.Consumer, head.Zone); err != nil {
+		return movePlan{}, err
 	}
 	if head.AuthorityHost != identity.ActorID {
 		return movePlan{}, errors.New("only the immutable authority host may move this credential")
@@ -1258,7 +1261,7 @@ func (runtime *Runtime) executeMove(ctx context.Context, plan movePlan) error {
 			head.AssignmentEpoch != plan.expectedEpoch || head.AssignedYard != plan.current {
 			return errors.New("exclusive assignment changed while awaiting confirmation")
 		}
-		if err := runtime.stopAssignedConsumer(ctx, plan.current, plan.zone); err != nil {
+		if err := runtime.stopAssignedConsumer(ctx, plan.current, head.Consumer, plan.zone); err != nil {
 			return errors.New("old assigned yard is unreachable or could not confirm stop; handoff aborted")
 		}
 		payload, err := runtime.decrypt(ctx, sharedLedger, head)
@@ -1392,6 +1395,17 @@ func (runtime *Runtime) prepareExchange(arguments []string) (Prepared, error) {
 				_ = os.Remove(state)
 				return runtime.rebuildAllowedSigners()
 			})
+		}), nil
+	case "stop-consumer":
+		if len(arguments) != 2 {
+			return Prepared{}, errors.New("stop-consumer needs a consumer ID and zone")
+		}
+		consumer, zone := arguments[0], arguments[1]
+		if _, err := runtime.consumerStopHandler(consumer, zone); err != nil {
+			return Prepared{}, err
+		}
+		return runtime.mutation("keys.exchange.stop-consumer", true, []string{"stop and verify the assigned credential consumer"}, func(ctx context.Context) error {
+			return runtime.runConsumerStopHandler(ctx, consumer, zone)
 		}), nil
 	case "refresh":
 		if len(arguments) > 1 || len(arguments) == 1 && !domain.SafeID(arguments[0]) {
@@ -1815,67 +1829,59 @@ func (runtime *Runtime) consumerPath(consumerName, zone string) (string, bool, e
 	if !validZone(zone) {
 		return "", false, errors.New("invalid credential zone")
 	}
-	var destination string
-	switch consumerName {
-	case "none", "":
+	if consumerName == "none" || consumerName == "" {
 		return "", false, nil
-	case "staging-env":
-		destination = filepath.Join(runtime.config.ConsumerRoot, "staging", zone+".env")
-	case "qa-secrets":
-		destination = filepath.Join(runtime.config.ConsumerRoot, "qa-pool", "secrets.env")
-	case "qa-pool":
-		destination = filepath.Join(runtime.config.ConsumerRoot, "qa-pool", "pool.jsonl")
-	default:
-		for _, consumer := range runtime.consumers {
-			if consumer.ID != consumerName {
-				continue
-			}
-			if consumer.Zone != zone {
-				return "", false, fmt.Errorf("%s requires the %s zone", consumerName, consumer.Zone)
-			}
-			destination = filepath.Join(runtime.config.ConsumerRoot, consumer.Path)
-			break
-		}
-		if destination == "" {
-			return "", false, errors.New("invalid credential consumer")
-		}
 	}
-	if !pathWithin(destination, runtime.config.ConsumerRoot) {
-		return "", false, errors.New("credential consumer escapes its root")
+	for _, consumer := range runtime.consumers {
+		if consumer.ID != consumerName {
+			continue
+		}
+		if consumer.Zone != "*" && consumer.Zone != zone {
+			return "", false, fmt.Errorf("%s requires the %s zone", consumerName, consumer.Zone)
+		}
+		destination := filepath.Join(runtime.config.ConsumerRoot, strings.ReplaceAll(consumer.Path, "{zone}", zone))
+		if !pathWithin(destination, runtime.config.ConsumerRoot) {
+			return "", false, errors.New("credential consumer escapes its root")
+		}
+		return destination, true, nil
 	}
-	return destination, true, nil
+	return "", false, errors.New("invalid credential consumer")
 }
 
 func (runtime *Runtime) detectConsumer(path string) string {
-	clean := filepath.Clean(path)
-	staging := filepath.Join(runtime.config.ConsumerRoot, "staging") + string(filepath.Separator)
-	switch {
-	case strings.HasPrefix(clean, staging) && strings.HasSuffix(clean, ".env"):
-		return "staging-env"
-	case clean == filepath.Join(runtime.config.ConsumerRoot, "qa-pool", "secrets.env"):
-		return "qa-secrets"
-	case clean == filepath.Join(runtime.config.ConsumerRoot, "qa-pool", "pool.jsonl"):
-		return "qa-pool"
-	default:
-		for _, consumer := range runtime.consumers {
-			if clean == filepath.Join(runtime.config.ConsumerRoot, consumer.Path) {
-				return consumer.ID
-			}
-		}
-		return "none"
-	}
+	consumer, _ := runtime.detectConsumerZone(path)
+	return consumer
 }
 
 func (runtime *Runtime) detectZone(path string) string {
+	_, zone := runtime.detectConsumerZone(path)
+	return zone
+}
+
+func (runtime *Runtime) detectConsumerZone(path string) (string, string) {
+	clean := filepath.Clean(path)
 	for _, consumer := range runtime.consumers {
-		if filepath.Clean(path) == filepath.Join(runtime.config.ConsumerRoot, consumer.Path) {
-			return consumer.Zone
+		zone := consumer.Zone
+		if zone == "*" {
+			zone = "global"
+		}
+		if strings.Contains(consumer.Path, "{zone}") {
+			pattern := filepath.Join(runtime.config.ConsumerRoot, consumer.Path)
+			prefix, suffix, _ := strings.Cut(pattern, "{zone}")
+			if !strings.HasPrefix(clean, prefix) || !strings.HasSuffix(clean, suffix) || len(clean) < len(prefix)+len(suffix) {
+				continue
+			}
+			zone = clean[len(prefix) : len(clean)-len(suffix)]
+			if !validZone(zone) {
+				continue
+			}
+		}
+		destination, mapped, err := runtime.consumerPath(consumer.ID, zone)
+		if err == nil && mapped && destination == clean {
+			return consumer.ID, zone
 		}
 	}
-	if runtime.detectConsumer(path) == "staging-env" {
-		return strings.TrimSuffix(filepath.Base(path), ".env")
-	}
-	return "global"
+	return "none", "global"
 }
 
 func (runtime *Runtime) checkExclusive(ctx context.Context, zone string) error {
@@ -1965,14 +1971,8 @@ func (runtime *Runtime) assignmentExec(ctx context.Context, assignment string, a
 	return runtime.callPeerContext(ctx, peer, contextName, arguments)
 }
 
-func (runtime *Runtime) stopAssignedConsumer(ctx context.Context, assignment, zone string) error {
-	output, err := runtime.assignmentExec(ctx, assignment, "staging", "status", zone)
-	if err != nil {
-		return err
-	}
-	if strings.Contains(string(output), "gateway: running") {
-		_, err = runtime.assignmentExec(ctx, assignment, "staging", "stop", zone, "--yes")
-	}
+func (runtime *Runtime) stopAssignedConsumer(ctx context.Context, assignment, consumer, zone string) error {
+	_, err := runtime.assignmentExec(ctx, assignment, "_keys-exchange", "stop-consumer", consumer, zone, "--yes")
 	return err
 }
 

@@ -1,6 +1,21 @@
 #!/usr/bin/env bash
 # Deterministic, host-free context shared by tests that bypass the normal config layers.
 
+setup_test_repository() { # <fixture-root> <source-root> [engine-path]
+  local fixture="${1:?}" source="${2:?}"
+  install -d -m 0700 "$fixture/runtime/bin" "$fixture/runtime/config"
+  cp -a "$source/scripts" "$fixture/runtime/"
+  cp -a "$source/config/." "$fixture/runtime/config/"
+  find "$fixture/runtime/config/profiles" -depth -delete
+  install -d -m 0700 "$fixture/runtime/config/profiles/synthetic"
+  printf 'PROFILE_NAME=synthetic\nPROJECT_ENV_BASE_IMAGE=debian:13\n' \
+    > "$fixture/runtime/config/profiles/synthetic/profile.conf"
+  printf '%s\n' '{"schema_version":1,"consumers":[{"id":"synthetic-consumer","zone":"*","path":"fixture/{zone}.env","format":"file"}]}' \
+    > "$fixture/runtime/config/profiles/synthetic/profile.json"
+  cp "$source/bin/yard" "$fixture/runtime/bin/yard"
+  export YARD_ENGINE_PATH="${3:-${YARD_ENGINE_PATH:-$source/.build/yard}}"
+}
+
 setup_test_context() { # <temp-root> [incus-project] [instance-name]
   local root="${1:?setup_test_context needs a temp root}"
   install -d -m 0700 "$root/home" "$root/config" "$root/subyard"

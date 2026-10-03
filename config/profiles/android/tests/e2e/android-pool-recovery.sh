@@ -5,11 +5,13 @@ set -euo pipefail
 fail() { printf 'android-pool-recovery: %s\n' "$*" >&2; exit 1; }
 viewer_only=0
 recovery_only=0
+native_debug=0
 case "$#:${6:-}" in
   5:) ;;
+  6:--viewer-native-debug) viewer_only=1; native_debug=1 ;;
   6:--viewer-only) viewer_only=1 ;;
   6:--recovery-only) recovery_only=1 ;;
-  *) fail 'usage: script ROOT STATE YARD PROJECT INSTANCE [--viewer-only|--recovery-only]' ;;
+  *) fail 'usage: script ROOT STATE YARD PROJECT INSTANCE [--viewer-only|--recovery-only|--viewer-native-debug]' ;;
 esac
 root="$1" state="$2" yard_name="$3" project="$4" instance="$5"
 . "$root/tests/helpers/release-candidate.sh"
@@ -87,7 +89,7 @@ cleanup() {
   if [ "$result" -ne 0 ]; then
     # Numeric observations only; never copy arbitrary viewer output into evidence.
     if [ -s "$phase_log" ]; then
-      python3 - --summary "$phase_log" "$result" < "$root/config/profiles/android/tests/e2e/android-pool-viewer.py" || true
+      python3 "$root/config/profiles/android/tests/e2e/android-pool-viewer.py" --summary "$phase_log" "$result" || true
     fi
     incus_exec 15 -- python3 - --once < "$root/config/profiles/android/tests/e2e/android-pool-monitor.py" \
       || printf 'android-display-observation query=unavailable screen_state=unknown\n' >&2
@@ -133,7 +135,7 @@ def lease(path):
     assert info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o600
     value = json.load(open(path))
     assert value['allocation']['request']['device'] == 'phone'
-    assert value['allocation']['request']['api'] == 35
+    assert value['allocation']['request']['api'] == 36
     return value
 if mode == 'allocation':
     sys.path.insert(0, '/usr/local/lib/subyard-android')
@@ -150,8 +152,8 @@ elif mode == 'adb':
     env = dict(os.environ, ANDROID_SERIAL=value['allocation']['android_serial'],
                ADB_SERVER_SOCKET='localfilesystem:' + value['endpoint'])
     result = call('adb', 'shell', 'getprop', 'ro.build.version.sdk', timeout=120, env=env)
-    assert result.returncode == 0 and result.stdout.strip() == b'35'
-    print('api=35 generation=' + str(value['allocation']['generation']))
+    assert result.returncode == 0 and result.stdout.strip() == b'36'
+    print('api=36 generation=' + str(value['allocation']['generation']))
 elif mode == 'stale':
     value = lease(sys.argv[2])
     result = call('android-broker', 'renew', '--lease-file', sys.argv[2])
@@ -236,29 +238,60 @@ if [ "$recovery_only" = 0 ]; then
     timeout 120 sudo -n env DEBIAN_FRONTEND=noninteractive apt-get update -qq
     timeout 180 sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq xvfb xauth
   fi
+  if [ "$native_debug" = 1 ]; then
+    if ! command -v gdb >/dev/null; then
+      android_phase_begin owner-native-debugger-packages
+      timeout 120 sudo -n env DEBIAN_FRONTEND=noninteractive apt-get update -qq
+      timeout 180 sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gdb
+    fi
+    incus_exec 30 -- sh -c 'cat > /opt/subyard-e2e-native-debug.py; chmod 0644 /opt/subyard-e2e-native-debug.py' < "$root/config/profiles/android/tests/helpers/scrcpy-native-debug.py" >/dev/null
+  fi
   incus_exec 30 -- sh -c 'cat > /opt/subyard-e2e-capture.py; chmod 0644 /opt/subyard-e2e-capture.py' < "$root/config/profiles/android/tests/e2e/android-pool-capture.py" >/dev/null
+  incus_exec 30 -- sh -c 'cat > /opt/subyard-e2e-view-window.py; chmod 0644 /opt/subyard-e2e-view-window.py' < "$root/config/profiles/android/tests/helpers/scrcpy-view-window.py" >/dev/null
 fi
 android_phase_begin boot
 printf 'android-pool-recovery phase=pool-service\n'
-guest 1320 android-broker acquire --device phone --api 35 --lease-file "$first" \
+guest 1320 android-broker acquire --lease-file "$first" \
   </dev/null >/dev/null
 check_guest 150 adb "$first"
 android_phase_end 0
 if [ "$recovery_only" = 0 ]; then
 android_phase_begin owner-capture
 printf 'android-pool-recovery phase=owner-viewer\n'
+owner_viewer_path="$work/subyard-e2e-scrcpy:$work/platform-tools:$PATH"
+viewer_window_args=()
+if [ "$native_debug" = 1 ]; then
+  viewer_window_args=(--time-limit=30)
+  install -d -m 0700 "$work/native-debug/bin"
+  install -m 0644 "$root/config/profiles/android/tests/helpers/scrcpy-native-debug.py" "$work/native-debug/scrcpy-native-debug.py"
+  cat > "$work/native-debug/bin/scrcpy" <<'NATIVE_SHIM'
+#!/bin/sh
+exec /usr/bin/python3 "$(dirname "$0")/../scrcpy-native-debug.py" --gdb /usr/bin/gdb -- "$(dirname "$0")/../../subyard-e2e-scrcpy/scrcpy" "$@"
+NATIVE_SHIM
+  chmod 0755 "$work/native-debug/bin/scrcpy"
+  owner_viewer_path="$work/native-debug/bin:$owner_viewer_path"
+else
+  install -d -m 0700 "$work/capture-window/bin"
+  install -m 0644 "$root/config/profiles/android/tests/helpers/scrcpy-view-window.py" "$work/capture-window/scrcpy-view-window.py"
+  cat > "$work/capture-window/bin/scrcpy" <<'WINDOW_SHIM'
+#!/bin/sh
+exec /usr/bin/python3 "$(dirname "$0")/../scrcpy-view-window.py" -- "$(dirname "$0")/../../subyard-e2e-scrcpy/scrcpy" "$@"
+WINDOW_SHIM
+  chmod 0755 "$work/capture-window/bin/scrcpy"
+  owner_viewer_path="$work/capture-window/bin:$owner_viewer_path"
+fi
 owner_lease="$work/owner-view.json"
 (umask 077; guest 30 cat "$first" > "$owner_lease")
 chmod 0600 "$owner_lease"
 before_view="$(check_guest 30 allocation "$first")"
 phase_log="$work/owner-viewer.log"
 printf -v viewer_command '%q ' "$YARD_BIN" -Y "$yard_name" emu view \
-  --lease-file "$owner_lease" -- --time-limit=30 --max-size=640 --no-audio
+  --lease-file "$owner_lease" -- "${viewer_window_args[@]}" --max-size=640 --no-audio --verbosity=debug
 timeout --foreground "$(remaining 210)" env ADB="$owner_adb" \
-  PATH="$work/subyard-e2e-scrcpy:$work/platform-tools:$PATH" SDL_RENDER_DRIVER=software \
+  PATH="$owner_viewer_path" SDL_RENDER_DRIVER=software \
   xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp' \
   sg incus-admin -c "exec $viewer_command" > "$phase_log" 2>&1
-python3 - --summary "$phase_log" 0 < "$root/config/profiles/android/tests/e2e/android-pool-viewer.py"
+python3 "$root/config/profiles/android/tests/e2e/android-pool-viewer.py" --summary "$phase_log" 0
 grep -Eq '^INFO: Texture: [0-9]{1,4}x[0-9]{1,4}$' "$phase_log" || fail 'owner viewer did not render a video frame'
 [ "$(check_guest 30 allocation "$first")" = "$before_view" ] \
   || fail 'owner viewer released or renewed the attached lease'
@@ -266,10 +299,12 @@ printf 'android-pool-recovery owner-viewer=PASS lease=unchanged\n'
 android_phase_begin attached-standalone-capture
 printf 'android-pool-recovery phase=viewer\n'
 phase_log="$work/viewer.log"
-guest 1440 python3 - "$first" < "$root/config/profiles/android/tests/e2e/android-pool-viewer.py" \
+native_args=()
+[ "$native_debug" = 0 ] || native_args=(--native-debug)
+guest 1440 python3 - "$first" "${native_args[@]}" < "$root/config/profiles/android/tests/e2e/android-pool-viewer.py" \
   > "$phase_log" 2>&1
 # Forward only native phase markers and validated numeric capture summaries.
-python3 - --summary "$phase_log" 0 < "$root/config/profiles/android/tests/e2e/android-pool-viewer.py"
+python3 "$root/config/profiles/android/tests/e2e/android-pool-viewer.py" --summary "$phase_log" 0
 android_phase_end 0
 printf 'android-pool-recovery viewer=PASS server-start-delay=20s\n'
 phase_log=''
@@ -295,7 +330,7 @@ printf 'android-pool-recovery pool-restart=PASS\n'
 
 android_phase_begin yard-restart
 printf 'android-pool-recovery phase=yard-stop-start\n'
-guest 1320 android-broker acquire --device phone --api 35 --lease-file "$second" \
+guest 1320 android-broker acquire --lease-file "$second" \
   </dev/null >/dev/null
 check_guest 150 adb "$second" "$first"
 yard 180 stop --yes >/dev/null
@@ -309,8 +344,8 @@ phase_log="$work/final-adb.log"
 timeout --foreground "$(remaining 1440)" bash "$root/config/profiles/android/tests/e2e/android-pool-remote.sh" \
   "$root" "$state" "$yard_name" "$project" "$instance" "$owner_adb" \
   > "$phase_log" 2>&1
-grep -Fxq 'android-pool-remote run=PASS sdk=35 exit=23 slots=available' "$phase_log" \
+grep -Fxq 'android-pool-remote run=PASS sdk=36 exit=23 slots=available' "$phase_log" \
   || fail 'final remote owner Android run did not report PASS'
 check_guest 45 advanced "$second"
-printf 'android-pool-recovery public-remote-run-api=35 result=PASS\n'
+printf 'android-pool-recovery public-remote-run-api=36 result=PASS\n'
 printf 'android-pool-recovery=PASS\n'

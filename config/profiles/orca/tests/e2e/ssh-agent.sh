@@ -47,8 +47,10 @@ agent_unlock() {
   # Only this synthetic fixture passphrase is sent; captured terminal bytes are never printed.
   timeout --signal=TERM --kill-after=3s 45 python3 - "$YARD_BIN" "$agent_key" "$ttl" "$passphrase" <<'PY'
 import errno
+import grp
 import os
 import pty
+import pwd
 import re
 import select
 import shlex
@@ -62,11 +64,11 @@ if pid == 0:
     os.environ["LC_ALL"] = "C"
     command = [sys.argv[1], "ssh-agent", "unlock", "--key", sys.argv[2],
                "--ttl", sys.argv[3], "--yes"]
-    if "incus-admin" not in subprocess.check_output(["id", "-nG"], text=True).split():
-        user = subprocess.check_output(["id", "-un"], text=True).strip()
-        if "incus-admin" in subprocess.check_output(["id", "-nG", user], text=True).split():
-            command = ["sg", "incus-admin", "-c", shlex.join(["exec", *command])]
-    os.execvp(command[0], command)
+    group = grp.getgrnam("incus-admin").gr_gid
+    user = pwd.getpwuid(os.getuid()).pw_name
+    if group not in [os.getegid(), *os.getgroups()] and group in os.getgrouplist(user, os.getgid()):
+        command = ["/usr/bin/sg", "incus-admin", "-c", "exec " + shlex.join(command)]
+    os.execv(command[0], command)
 deadline = time.monotonic() + 35
 buffer = b""
 attempts = 0

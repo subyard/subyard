@@ -199,7 +199,7 @@ svc_require_yard_running
 # zone config (non-secret knobs) + defaults
 PROFILE=openclaw
 SOURCE_BIND=""                              # optional: a yard path to bind as the source tree
-GATEWAY_CMD="scripts/vasily gateway run"
+GATEWAY_CMD="scripts/vasily gateway run"      # legacy compatibility preset; override per zone for another launcher
 BUILD_CMD=""                                # optional: rebuild cmd run in the runner (cwd /workspace)
                                             #   before the gateway launches, so 'restart' picks up live edits
 BOT_LEASE_KEY=bot                           # lease key = bot identity (shared across zones)

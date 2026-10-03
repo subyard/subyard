@@ -100,7 +100,7 @@ provision_log="$STATE/provision-first.out"
 yard provision subyard-dev --yes > "$provision_log"
 grep -Fq 'provisioning subyard-dev' "$provision_log" \
   || die 'public provision did not apply the selected profile hook'
-yard start
+yard start --yes
 
 check_guest_state() {
   # shellcheck disable=SC2016

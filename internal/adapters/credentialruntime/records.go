@@ -559,10 +559,25 @@ func (runtime *Runtime) validateImportSource(path string, protected bool) (strin
 	if strings.Contains(clean, "/.codex/") || strings.Contains(clean, "/.claude/") ||
 		strings.Contains(clean, "/.pi/") || strings.Contains(clean, "/.config/opencode/") ||
 		strings.HasSuffix(clean, "/auth.json") || strings.HasSuffix(clean, "/credentials/oauth.json") ||
-		strings.Contains(clean, "/srv/staging/") && strings.Contains(clean, "/creds/") {
+		runtime.importExcluded(clean) {
 		return "", fmt.Errorf("mutable coding-agent/OAuth stores cannot be imported into the credential ledger: %s", path)
 	}
 	return real, nil
+}
+
+// A shipped profile excludes a path when all literal fragments in any one
+// conjunction occur in its canonical path, regardless of their order.
+func (runtime *Runtime) importExcluded(path string) bool {
+	for _, fragments := range runtime.importExclusions {
+		matches := true
+		for _, fragment := range fragments {
+			matches = matches && strings.Contains(path, fragment)
+		}
+		if matches {
+			return true
+		}
+	}
+	return false
 }
 
 func readFingerprints(path string) (map[string]struct{}, error) {

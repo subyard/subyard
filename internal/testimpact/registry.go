@@ -93,7 +93,7 @@ func BuiltInRegistry() (Registry, error) {
 		"lifecycle-guard", "opencode-agent-defaults", "opencode-agent-provision",
 		"p0-capacity", "paseo-agent-contract", "paseo-project-sync",
 		"power-reconciler-systemd-255-launch", "power-reconciler-systemd", "preview", "preview-proxy",
-		"profile-resource-lifecycle", "project-registry-convergence",
+		"project-registry-convergence",
 		"prompt-contract", "provision-profile-check", "release-candidate", "remote-projects",
 		"runtime-privilege-reexec", "ssh-config", "ssh-transport-identity", "ssh-agent-environment",
 		"teardown-runtime-preservation", "test-vms",

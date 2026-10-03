@@ -300,6 +300,21 @@ def _report_catalog(report, scan, state, rpc, host_name):
                 report["errors"].append(root.path + ": " + "; ".join(reasons))
 
 
+def _session_snapshots(rpc):
+    result = rpc.call("session.tabs.listAll")
+    snapshots = result.get("snapshots") if isinstance(result, dict) else None
+    if (not isinstance(snapshots, list) or any(
+            not isinstance(item, dict) or not isinstance(item.get("worktree"), str)
+            or not isinstance(item.get("tabs"), list) for item in snapshots)):
+        raise RpcError("Orca returned an invalid session tab catalog; cleanup skipped")
+    return snapshots
+
+
+def _has_saved_tabs(snapshots, repo):
+    return any(item["worktree"].startswith(repo["id"] + "::") and item["tabs"]
+               for item in snapshots)
+
+
 def _prune_missing(report, scan, state, rpc):
     # Missing project roots may be temporarily unmounted. A known checkout
     # losing Git metadata is retained without blocking independent missing paths.
@@ -327,12 +342,25 @@ def _prune_missing(report, scan, state, rpc):
         if time.monotonic() >= state.deadline:
             raise RpcError("Orca registration time budget exhausted")
         # This API also covers saved tabs of now-missing linked worktrees.
-        snapshots = rpc.call("session.tabs.listAll").get("snapshots")
-        if (not isinstance(snapshots, list) or any(
-                not isinstance(item, dict) or not isinstance(item.get("worktree"), str)
-                or not isinstance(item.get("tabs"), list) for item in snapshots)):
-            raise RpcError("Orca returned an invalid session tab catalog; cleanup skipped")
-        if any(item["worktree"].startswith(repo["id"] + "::") and item["tabs"] for item in snapshots):
+        try:
+            snapshots = _session_snapshots(rpc)
+        except RpcError as error:
+            if not error.timed_out or error.unknown:
+                raise
+            # The pinned Orca session inventory can be incomplete while cold. A
+            # second read may preserve a positively observed saved tab, but can
+            # never prove absence well enough to authorize deletion.
+            try:
+                retry_snapshots = _session_snapshots(rpc)
+            except RpcError:
+                raise error from None
+            if not _has_saved_tabs(retry_snapshots, repo):
+                raise error from None
+            report["warnings"].append(
+                "Missing Orca checkout has session tabs and is retained: " + repo["path"]
+            )
+            return
+        if _has_saved_tabs(snapshots, repo):
             report["warnings"].append("Missing Orca checkout has session tabs and is retained: " + repo["path"])
             continue
         rpc.refresh()

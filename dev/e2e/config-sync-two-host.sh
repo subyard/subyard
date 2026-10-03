@@ -127,8 +127,7 @@ case "$MODE" in
     "$yard" config sync connect \
       "file://$REMOTE_ROOT/remote.git" --host-id host-a \
       --checkout "$STATE/host-a/checkout" --init --yes
-    "$yard" config set YARD_IMAGE images:debian/12 --scope shared --yes
-    "$yard" config sync push -m "Host A shared setting" --yes
+    "$yard" config set YARD_IMAGE images:debian/12 --scope shared --git --yes
     "$yard" config sync status --offline
     printf 'ok: host A initialized and pushed shared configuration\n'
     ;;
@@ -145,8 +144,7 @@ case "$MODE" in
     show_output="$("$yard" config show YARD_IMAGE)"
     grep -Fq 'effective: images:debian/12' <<<"$show_output" \
       || fail "host B did not import host A's shared setting"
-    "$yard" config set YARD_IMAGE images:debian/13 --scope shared --yes
-    "$yard" config sync push -m "Host B shared setting" --yes
+    "$yard" config set YARD_IMAGE images:debian/13 --scope shared --git --yes
     "$yard" config sync status --offline
     printf 'ok: host B imported host A and pushed the reverse change\n'
     ;;

@@ -105,6 +105,8 @@ for id in alpha-12345678 beta-12345678; do
 done
 install -d -m 0755 /etc/subyard /usr/local/libexec/subyard/projects-changed.d
 : > /etc/subyard/agent-project-hooks
+printf 'subyard-orca-resource-fixture-v1\n' > /etc/subyard/.orca-resource-fixture
+chmod 0644 /etc/subyard/.orca-resource-fixture
 YARD
 "${incus[@]}" file push "$RUNTIME_ROOT/config/projects-changed.sh" \
   "$instance/usr/local/libexec/subyard/projects-changed" --mode 0755
@@ -185,17 +187,80 @@ server_cli() {
     XDG_CONFIG_HOME=/srv/agents/orca/config \
     XDG_DATA_HOME=/srv/agents/orca/data \
     XDG_STATE_HOME=/srv/agents/orca/state \
-    /usr/bin/orca-ide "$@"
+    bash -c 'umask 077; exec /usr/bin/orca-ide "$@"' orca-profile-fixture "$@"
 }
 
-server_isolation() {
+profile_isolation_json() {
+  "${incus[@]}" exec "$instance" -- runuser -u dev -- python3 -I -B - "$1" "$2" "${3:-}" <<'PY'
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+def require(condition, message):
+    if not condition:
+        raise ValueError(message)
+
+marker = Path("/etc/subyard/.orca-resource-fixture")
+require(marker.resolve() == marker and stat.S_ISREG(marker.stat().st_mode), 'unsafe fixture marker')
+require(marker.stat().st_uid == 0 and stat.S_IMODE(marker.stat().st_mode) == 0o644, 'unsafe fixture owner')
+require(marker.read_text() == 'subyard-orca-resource-fixture-v1\n', 'unowned fixture')
+root = Path("/srv/agents/orca/config/orca/profiles")
+path = Path(sys.argv[1])
+require(root.resolve() == root and path.resolve() == path, 'unsafe profile path')
+require(path.name == 'orca-data.json' and path.parent.parent == root, 'unexpected profile export')
+require(re.fullmatch('[A-Za-z0-9][A-Za-z0-9_-]{0,127}', path.parent.name), 'invalid profile id')
+require(path.parent.is_dir() and path.parent.stat().st_uid == os.getuid(), 'unsafe profile owner')
+if sys.argv[2] == "check":
+    require(not path.exists() or (path.is_file() and path.stat().st_uid == os.getuid()), 'unsafe export owner')
+    raise SystemExit(0)
+require(path.is_file() and path.stat().st_uid == os.getuid(), 'unsafe export owner')
+require(sys.argv[2] in ('true', 'false', 'read'), 'invalid isolation value')
+require(stat.S_IMODE(path.stat().st_mode) == 0o600, "unsafe export mode")
+data = json.loads(path.read_text())
+require(isinstance(data, dict) and isinstance(data.get('settings'), dict), 'invalid profile settings')
+require(type(data["settings"].get("codexTerminalServerIsolation")) is bool, 'invalid isolation Boolean')
+require(sys.argv[3] in ('', 'true', 'false'), 'invalid expected isolation value')
+if sys.argv[3]:
+    require(data["settings"]["codexTerminalServerIsolation"] is (sys.argv[3] == "true"), 'isolation readback mismatch')
+if sys.argv[2] != "read":
+    data["settings"]["codexTerminalServerIsolation"] = sys.argv[2] == "true"
+    path.chmod(0o600)
+    path.write_text(json.dumps(data) + "\n")
+PY
+}
+
+set_server_isolation() {
+  local isolation="$1" expected="${2:-}" data_file
+  # Stock settings RPC deliberately excludes this Desktop-owned preference.
+  # Its offline recovery CLI validates and preserves the complete profile state.
   run_orca down
   if "${incus[@]}" exec "$instance" -- systemctl is-active --quiet subyard-orca.service; then
     die 'Orca must be stopped before recovery settings changes'
   fi
-  "${incus[@]}" exec "$instance" -- runuser -u dev -- python3 -B \
-    /tmp/orca-projects-helper.py set-isolation --state /srv/agents/orca "$@"
+  server_cli profile state exports --json >"$work/isolation-exports.json"
+  jq -e '.ok == true' "$work/isolation-exports.json" >/dev/null
+  data_file="$(jq -er '.result.dataFile' "$work/isolation-exports.json")"
+  profile_isolation_json "$data_file" check
+  server_cli profile state rollback --current-sqlite --json >"$work/isolation-export.json"
+  jq -e --arg path "$data_file" \
+    '.ok == true and .result.storage == "sqlite" and .result.dataFile == $path' \
+    "$work/isolation-export.json" >/dev/null
+  profile_isolation_json "$data_file" "$isolation" "$expected"
+  if [ "$isolation" != read ]; then
+    server_cli profile state rollback --current-json --json >"$work/isolation-import.json"
+    jq -e --arg path "$data_file" \
+      '.ok == true and .result.storage == "json" and .result.restoredPath == $path' \
+      "$work/isolation-import.json" >/dev/null
+  fi
+  run_orca up
+  first_pair="$("${incus[@]}" exec "$instance" -- \
+    jq -er '.pairing | select(.available == true and .scope == "runtime") | .url' \
+    /srv/agents/orca/ready.json)"
+  client_status "$first_pair" client-a
 }
+
 
 client_status() {
   local pairing="$1" profile="$2"
@@ -505,7 +570,7 @@ stage 'probing pinned stock operations in a disposable profile'
 "${incus[@]}" exec "$instance" -- runuser -u dev -- python3 -B \
   /tmp/orca-projects-helper.py stock-probe --version "$ORCA_VERSION" --resource-settings
 "${incus[@]}" exec "$instance" -- nft list chain inet subyard_orca input |
-  grep -Fq 'comment "subyard-orca-managed"'
+  grep -F 'comment "subyard-orca-managed"' >/dev/null
 [ "$("${incus[@]}" exec "$instance" -- stat -c %a /srv/agents/orca/ready.json)" = 600 ] \
   || die 'pairing readiness file is not mode 0600'
 "${incus[@]}" exec "$instance" -- jq -e '
@@ -592,16 +657,13 @@ client_status "$first_pair" client-a
 stage 'exercising terminal input and output through the paired stock client'
 assert_paired_terminal_io "$first_pair" client-a
 stage 'checking server isolation opt-out and preservation through repeated up'
-server_isolation --value false
-run_orca up
+set_server_isolation false
 run_orca up
 assert_paired_terminal_io "$first_pair" client-a 0
 # Read the stock-owned value after repeated up before restoring isolation.
-server_isolation --expect false --value true
-run_orca up
+set_server_isolation true false
 assert_paired_terminal_io "$first_pair" client-a
-server_isolation --expect true
-run_orca up
+set_server_isolation read true
 "${incus[@]}" exec "$instance" -- bash -se <<'YARD'
 id=gamma-12345678
 root="/srv/workspaces/$id"

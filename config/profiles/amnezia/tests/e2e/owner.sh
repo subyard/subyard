@@ -116,7 +116,8 @@ capture_retry_down_state() {
 case "$phase" in
   bootstrap)
     [ ! -f "$SUBYARD_CONFIG_HOME/yards/vpn-e2e/config.env" ] || die 'expected a fresh VPN yard'
-    yard init --profile amnezia --yes
+    python3 -B "$root/config/profiles/amnezia/tests/e2e/first-boot-observer.py" -- \
+      "$YARD_BIN" -Y vpn-e2e init --profile amnezia --yes
     ;;
   init|init-isolated)
     if [ ! -f "$SUBYARD_CONFIG_HOME/yards/vpn-e2e/config.env" ]; then

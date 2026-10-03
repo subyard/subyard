@@ -99,7 +99,7 @@ func (check HostCheck) evaluate(facts HostFacts, options CheckOptions) []finding
 	if facts.KVM {
 		add("KVM device", "ok", "/dev/kvm present")
 	} else {
-		add("KVM device", "warn", "/dev/kvm missing — needed for VM mode and the Android emulator")
+		add("KVM device", "warn", "/dev/kvm missing — needed for hardware-accelerated virtualization")
 	}
 	if check.Yard.NestedE2EVMs {
 		for _, path := range []string{"/dev/kvm", "/dev/vsock", "/dev/vhost-vsock", "/dev/net/tun"} {

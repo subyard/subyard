@@ -6,6 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+bash "$ROOT/tests/helpers/vm-page-reporting.sh"
 export SUBYARD_E2E_STATE_DIR="$TMP/client"
 
 grep -Fq 'SUBYARD_E2E_ROUTE_REGISTRY:-/var/lib/subyard/e2e-routes' \
@@ -455,6 +456,15 @@ tar -xzf "$bundle" -C "$source_copy"
 build_bundle "$source_copy" "$TMP/source-copy.tar.gz"
 cmp -s "$bundle" "$TMP/source-copy.tar.gz" \
   || fail "source bundling depends on Git metadata"
+for path_order in z zr; do
+  (
+    # Enumeration order must not change the candidate transport checksum.
+    worktree_paths() { bash "$ROOT/tests/helpers/source-files.sh" "$@" | LC_ALL=C sort "-$path_order"; }
+    build_bundle "$fixture" "$TMP/order-$path_order.tar.gz"
+  )
+done
+cmp -s "$TMP/order-z.tar.gz" "$TMP/order-zr.tar.gz" \
+  || fail "source bundle checksum depends on path enumeration order"
 
 ln -s /etc/passwd "$fixture/escaping-link"
 if (build_bundle "$fixture" "$TMP/unsafe.tar.gz") >/dev/null 2>&1; then
@@ -1527,8 +1537,10 @@ grep -Fq 'p0_capacity_recover_stale_roots' "$ROOT/dev/e2e/lib-p0-capacity.sh" \
   || fail 'P0 preflight cannot distinguish orphaned from active marker-owned cache state'
 grep -Fq 'OWNER_DIAGNOSTIC_DEV_UID="${P0_E2E_DIAGNOSTIC_DEV_UID:-1001}"' \
   "$ROOT/dev/e2e/p0-guest.sh" \
-  && grep -Fq 'chown -R "$OWNER_DIAGNOSTIC_DEV_UID:$OWNER_DIAGNOSTIC_DEV_UID" "$bound"' \
-    "$ROOT/dev/e2e/p0-guest.sh" \
+  && grep -Fq 'local dev_uid="${PROJECT_CONTRACT_UID:-$OWNER_DIAGNOSTIC_DEV_UID}"' \
+    "$ROOT/dev/e2e/lib-owner-project-contract.sh" \
+  && grep -Fq 'chown -R "$dev_uid:$dev_uid" "$bound"' \
+    "$ROOT/dev/e2e/lib-owner-project-contract.sh" \
   || fail "P0 bind fixture is not owned by its configured diagnostic yard UID"
 owner_sink_cleanup_function="$(sed -n '/^cleanup_owner_test_vms_sink() {/,/^}/p' \
   "$ROOT/dev/e2e/p0-guest.sh")"

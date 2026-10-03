@@ -379,7 +379,6 @@ func productionShellContracts(t *testing.T) map[string]shellContract {
 		"scripts/lib-power.sh":                 {"library", "scripts/lifecycle-guard.sh", `lib-power.sh`},
 		"scripts/lib-vm-page-reporting.sh":     {"library", "scripts/02-create-project.sh", `lib-vm-page-reporting.sh`},
 		"scripts/lib-vm-storage.sh":            {"library", "scripts/03-create-subyard.sh", `lib-vm-storage.sh`},
-		"scripts/lib-service.sh":               {"library", "config/profiles/android/resources/emulator/handler.sh", `lib-service.sh`},
 		"scripts/lib/engine-context.sh":        {"library", "scripts/01-install-incus.sh", `lib/engine-context.sh`},
 		"scripts/lib/download.sh":              {"library", "scripts/lib/host.sh", `lib/download.sh`},
 		"scripts/lib/host.sh":                  {"library", "scripts/01-install-incus.sh", `lib/host.sh`},
@@ -405,6 +404,12 @@ func productionShellContracts(t *testing.T) map[string]shellContract {
 		if definition.GuestEnvironment != nil {
 			handler := filepath.ToSlash(filepath.Join("config", "profiles", definition.Name, definition.GuestEnvironment.Handler))
 			contracts[handler] = shellContract{"profile", declaration, definition.GuestEnvironment.Handler}
+		}
+		for _, consumer := range definition.Consumers {
+			if consumer.StopHandler != "" {
+				handler := filepath.ToSlash(filepath.Join("config", "profiles", definition.Name, consumer.StopHandler))
+				contracts[handler] = shellContract{"profile", declaration, consumer.StopHandler}
+			}
 		}
 		if definition.OwnerService == "" {
 			continue
@@ -448,7 +453,10 @@ func addProfileShellOwnerManifests(t *testing.T, root string, contracts map[stri
 		profileName := filepath.Base(filepath.Dir(filepath.Dir(path)))
 		profilePrefix := "config/profiles/" + profileName + "/"
 		for _, owner := range manifest.Owners {
-			if !safeShellOwnerPath(owner.Path) || !strings.HasPrefix(owner.Path, profilePrefix) ||
+			ownedPath := strings.HasPrefix(owner.Path, profilePrefix) ||
+				owner.Kind == "library" && strings.HasPrefix(owner.Path, "scripts/") &&
+					strings.HasPrefix(owner.Owner, profilePrefix)
+			if !safeShellOwnerPath(owner.Path) || !ownedPath ||
 				!safeShellOwnerPath(owner.Owner) || owner.Reference == "" || len(owner.Reference) > 256 ||
 				owner.Kind != "profile" && owner.Kind != "library" && owner.Kind != "embedded" {
 				t.Fatalf("invalid profile shell owner entry in %s: %+v", path, owner)

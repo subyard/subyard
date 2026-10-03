@@ -93,8 +93,23 @@ class TransportTests(unittest.TestCase):
         with self.assertRaises(self.error) as caught:
             self.client(self.metadata, timeout=0.04).call("projectGroup.create", {"name": "Fixture"})
         self.assertTrue(caught.exception.unknown)
+        self.assertTrue(caught.exception.timed_out)
         self.assertIn("projectGroup.create", str(caught.exception))
         self.assertNotIn("fixture-token", str(caught.exception))
+
+    def test_read_timeout_is_known_and_never_retried_by_transport(self):
+        requests = []
+
+        def stall(request, _):
+            requests.append(request["method"])
+            time.sleep(0.15)
+
+        self.server(stall)
+        with self.assertRaises(self.error) as caught:
+            self.client(self.metadata, timeout=0.04).call("session.tabs.listAll")
+        self.assertFalse(caught.exception.unknown)
+        self.assertTrue(caught.exception.timed_out)
+        self.assertEqual(["session.tabs.listAll"], requests)
 
     def test_rpc_rejection_is_known_failure_without_server_secret_text(self):
         self.server(lambda request, _: self.frame(request, ok=False,
@@ -102,6 +117,7 @@ class TransportTests(unittest.TestCase):
         with self.assertRaises(self.error) as caught:
             self.client(self.metadata).call("repo.add", {"path": "/fixture"})
         self.assertFalse(caught.exception.unknown)
+        self.assertFalse(caught.exception.timed_out)
         self.assertNotIn("fixture-token-one", str(caught.exception))
 
     def test_bad_metadata_has_sanitized_failure(self):

@@ -140,7 +140,6 @@
     "profile-generic": [
       "profiles:host-free",
       "go:resource",
-      "shell:profile-resource-lifecycle",
       "shell:provision-profile-check",
       "p0:profile-resource"
     ],
@@ -162,6 +161,7 @@
     "real-credential-contract": ["e2e:credential-tools"],
     "real-orca-contract": ["e2e:orca-resource"],
     "real-orca-bootstrap": ["e2e:orca-bootstrap"],
+    "real-orca-ssh-agent": ["e2e:orca-ssh-agent"],
     "codex-permissions": ["e2e:codex-permissions"],
     "real-orca-projects": ["e2e:orca-projects"],
     "orca-registration-tests": ["profiles:host-free"],
@@ -339,8 +339,15 @@
     {
       "id": "codex-permissions-test",
       "priority": 982,
-      "pattern": "^tests/real-host/codex-(yard\\.sh|permissions\\.py)$",
+      "pattern": "^config/profiles/orca/tests/e2e/codex-(yard\\.sh|permissions\\.py)$",
       "check_sets": ["codex-permissions"],
+      "risk_domains": []
+    },
+    {
+      "id": "real-orca-ssh-agent-test",
+      "priority": 982,
+      "pattern": "^config/profiles/orca/tests/e2e/ssh-agent\\.sh$",
+      "check_sets": ["real-orca-ssh-agent"],
       "risk_domains": []
     },
     {
@@ -416,7 +423,7 @@
     {
       "id": "profile-test-support",
       "priority": 966,
-      "pattern": "^(tests/helpers/profile-go\\.sh|internal/testkit/profilecontract/.*\\.go)$",
+      "pattern": "^(tests/helpers/(profile-go|resource-lifecycle)\\.sh|internal/testkit/profilecontract/.*\\.go)$",
       "check_sets": ["profile-tests"],
       "risk_domains": []
     },
@@ -724,7 +731,7 @@
     {
       "id": "ssh-agent-runtime",
       "priority": 620,
-      "pattern": "^(internal/adapters/sshagentruntime/.*|internal/cli/ssh_agent(_test)?\\.go|scripts/ssh-agent-environment\\.sh|tests/(real-host/)?ssh-agent(-environment)?\\.sh)$",
+      "pattern": "^(internal/adapters/sshagentruntime/.*|internal/cli/ssh_agent(_test)?\\.go|scripts/ssh-agent-environment\\.sh|tests/ssh-agent-environment\\.sh)$",
       "check_sets": ["ssh-agent", "ssh-transport", "cli-control"],
       "risk_domains": ["ssh-remote-transport"]
     },

@@ -71,4 +71,24 @@ PROFILE_CONTROLLER_EXIT=23 bash "$tmp/$controller" --slot 7 --lane projects > "$
 [ "$rc" -eq 23 ]
 sed -n '4p' "$tmp/expected" > "$tmp/expected-lane"
 diff -u "$tmp/expected-lane" "$PROFILE_CONTROLLER_CALLS"
+python3 -B - "$ROOT/config/profiles/orca/tests/e2e/orca-projects-helper.py" <<'PY'
+import importlib.util
+import shlex
+import sys
+
+spec = importlib.util.spec_from_file_location("orca_projects_helper", sys.argv[1])
+helper = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(helper)
+for name, argv, accepted in (
+    ("selected yard", ["-Y", "fixture", "_project-state", "check-role"], True),
+    ("default yard", ["_project-state", "check-role"], True),
+    ("extra argument", ["-Y", "fixture", "_project-state", "check-role", "extra"], False),
+    ("foreign yard", ["-Y", "foreign", "_project-state", "check-role"], False),
+):
+    inner = "SUBYARD_OPERATION_ID=fixture:role exec " + shlex.join(["yard", *argv])
+    command, environment = helper.parse_yard_command(shlex.join(["bash", "-lc", inner]))
+    assert command == argv and environment == {"SUBYARD_OPERATION_ID": "fixture:role"}, name
+    assert helper.valid_yard_action(command, "fixture") is accepted, name
+print("ok: owner role check preserves exact arity and selected yard")
+PY
 printf 'ok: complete and independent lane dispatch, argument rejection and failure propagation\n'

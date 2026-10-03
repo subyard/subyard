@@ -27,7 +27,6 @@ done
 sudo -n true || fail 'passwordless sudo is required in the allocated VM'
 
 export SUBYARD_OPERATOR_HOME="$HOME" SUBYARD_CONFIG_HOME="$state/config" SUBYARD_HOME="$state/data"
-export YARD_BIN
 export STORAGE_PATH="$HOME/.cache/subyard-e2e-platform/incus/incus/storage"
 export SUBYARD_NO_AUDIT=1 SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 MIN_DISK_GIB=1
 owner() {
@@ -119,9 +118,9 @@ if os.environ.get("SUBYARD_CONFIG_HOME") != owner_config:
 result = subprocess.run([adb, "shell", "getprop", "ro.build.version.sdk"],
                         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE, timeout=120)
-if result.returncode != 0 or result.stdout.strip() != b"35":
-    sys.exit("remote owner ADB did not report SDK 35")
-print("35", flush=True)
+if result.returncode != 0 or result.stdout.strip() != b"36":
+    sys.exit("remote owner ADB did not report SDK 36")
+print("36", flush=True)
 sys.exit(23)
 '''.replace('VALUES', repr((owner_config, adb)), 1)
 pathlib.Path(path).write_text(source)
@@ -151,7 +150,7 @@ try:
     assert len(inner) >= 6 and inner[1:5] == ["yard", "-Y", yard, "emu"]
     arguments = inner[5:]
     assert arguments in (["catalog"], ["status"]) or (payload and arguments ==
-        ["run", "--api", "35", "--device", "phone", "--", "/usr/bin/python3", payload])
+        ["run", "--", "/usr/bin/python3", payload])
     assert re.fullmatch(r"SUBYARD_OPERATION_ID=[A-Za-z0-9_-]{1,128}", inner[0])
 except (AssertionError, ValueError):
     sys.exit("android-pool-remote: rejected SSH command")
@@ -248,10 +247,10 @@ assert len(remote_status['slots']) == 2 and all(slot['state'] == 'available' for
 PY
 if [ -n "$run_payload" ]; then
   run_status=0
-  controller run --api 35 --device phone -- /usr/bin/python3 "$run_payload" \
+  controller run -- /usr/bin/python3 "$run_payload" \
     > "$work/remote-run.out" 2> "$work/remote-run.err" || run_status=$?
   [ "$run_status" -eq 23 ] || fail "remote run returned $run_status instead of payload exit 23"
-  [ "$(tr -d '\r' < "$work/remote-run.out")" = 35 ] || fail 'remote run changed payload stdout'
+  [ "$(tr -d '\r' < "$work/remote-run.out")" = 36 ] || fail 'remote run changed payload stdout'
   controller status > "$work/remote-after.json" 2> "$work/remote-after.err" \
     || fail 'remote status after run failed'
   python3 - "$work/remote-after.json" <<'PY'
@@ -260,7 +259,7 @@ slots = json.load(open(sys.argv[1]))['slots']
 assert len(slots) == 2 and all(slot['state'] == 'available' for slot in slots), \
     'remote run did not release its lease'
 PY
-  printf 'android-pool-remote run=PASS sdk=35 exit=23 slots=available\n'
+  printf 'android-pool-remote run=PASS sdk=36 exit=23 slots=available\n'
 fi
 [ "$(sha256sum "$owner_config" | cut -d' ' -f1)" = "$owner_hash" ] \
   || fail 'remote reads changed owner registration'

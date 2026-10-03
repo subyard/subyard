@@ -260,6 +260,10 @@ check_box() {
     mkdir -p "$GRADLE_USER_HOME"
     [ ! -e "$GRADLE_USER_HOME/$2" ]
     printf "%s\n" "$1" > "$GRADLE_USER_HOME/$3"
+    command -v android-broker >/dev/null
+    command -v adb >/dev/null
+    command -v sdkmanager >/dev/null
+    android-broker --help | grep -q catalog
     android-broker status >/dev/null
     android-broker catalog >/dev/null
   ' _ "$own" ".subyard-parallel-$other" ".subyard-parallel-$own" \
@@ -313,7 +317,7 @@ bounded_incus_exec 6600 docker exec -u 1000:1000 "$box_a" \
 grep -Fxq 'android pool lifecycle: PASS' "$work/l2-lifecycle.log" \
   || fail 'L2 Android lease lifecycle did not report PASS'
 printf 'android-pool-projects l2-lifecycle=PASS\n'
-printf 'android-pool-projects l2-emulator-api=35 install=PASS fresh-userdata=PASS\n'
+printf 'android-pool-projects l2-emulator-api=36 install=PASS fresh-userdata=PASS\n'
 
 printf 'android-pool-projects phase=rebuild\n'
 diagnostic_logs=("$work/down-a.log")

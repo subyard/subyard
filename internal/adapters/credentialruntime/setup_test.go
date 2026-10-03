@@ -277,10 +277,10 @@ func TestValidateConsumerFileRejectsUnsafeFiles(t *testing.T) {
 
 func TestProfileConsumersRejectMaterializationCollisions(t *testing.T) {
 	for _, item := range []struct{ name, id, path string }{
-		{"builtin-id", "staging-env", "other/key"},
+		{"duplicate-id", "fixture-env", "other/key"},
 		{"unmapped-id", "none", "other/key"},
-		{"builtin-path", "another", "staging/fixture.env"},
-		{"builtin-directory", "another", "qa-pool"},
+		{"dynamic-path", "another", "mapped/fixture.env"},
+		{"dynamic-directory", "another", "mapped"},
 		{"duplicate-path", "another", "fixture/key.pem"},
 		{"nested-path", "another", "fixture/key.pem/child"},
 		{"parent-path", "another", "fixture"},

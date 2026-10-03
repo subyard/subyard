@@ -17,6 +17,7 @@ fail() { printf 'credential-tools: %s\n' "$*" >&2; exit 1; }
 # shellcheck source=tests/helpers/test-context.sh
 . "$ROOT/tests/helpers/test-context.sh"
 setup_test_context "$TMP"
+setup_test_repository "$TMP" "$ROOT"
 export HOME="$TMP/home"
 export SUBYARD_NO_AUDIT=1
 keys_base="$SUBYARD_CONFIG_HOME/key-hosts"
@@ -36,10 +37,10 @@ SUBYARD_KEYS_CONSUMER_ROOT=$TMP/consumer-two
 EOF
 unset SUBYARD_KEYS_ROOT ACCESS_KIND YARD_INSTANCE_NAME INCUS_PROJECT SSH_HOST
 
-yard_one() { "$ROOT/bin/yard" -Y one "$@"; }
-yard_two() { "$ROOT/bin/yard" -Y two "$@"; }
+yard_one() { "$TMP/runtime/bin/yard" -Y one "$@"; }
+yard_two() { "$TMP/runtime/bin/yard" -Y two "$@"; }
 bootstrap_keys() {
-  "$ROOT/bin/yard" -Y "$1" _keys-init
+  "$TMP/runtime/bin/yard" -Y "$1" _keys-init
 }
 
 bootstrap_keys one >/dev/null
@@ -49,7 +50,7 @@ yard_one keys trust @two --yes >/dev/null
 expected="$TMP/expected"
 printf 'subyard-synthetic-real-crypto-fixture\n' > "$expected"
 chmod 0600 "$expected"
-yard_one keys add real-crypto --kind file --zone real-crypto --consumer staging-env --file "$expected" --yes >/dev/null
+yard_one keys add real-crypto --kind file --zone real-crypto --consumer synthetic-consumer --file "$expected" --yes >/dev/null
 credential="$(yard_one keys list | awk -F '\t' '$8=="real-crypto" {print $1}')"
 [ -n "$credential" ] || fail 'synthetic credential was not created'
 record="$(find "$keys_base/one/shared/records/$credential" -type f -name '*.json' -print -quit)"
@@ -62,12 +63,12 @@ fi
 
 yard_one keys sync @two --now --yes >/dev/null
 yard_two keys materialize real-crypto --yes >/dev/null
-cmp -s "$expected" "$TMP/consumer-two/staging/real-crypto.env" \
+cmp -s "$expected" "$TMP/consumer-two/fixture/real-crypto.env" \
   || fail 'real age/SOPS payload did not decrypt on the trusted peer'
 yard_one keys revoke "$credential" --yes >/dev/null
 yard_one keys sync @two --now --yes >/dev/null
 yard_two keys materialize real-crypto --yes >/dev/null
-[ ! -e "$TMP/consumer-two/staging/real-crypto.env" ] \
+[ ! -e "$TMP/consumer-two/fixture/real-crypto.env" ] \
   || fail 'revoked synthetic credential remained materialized'
 
 printf 'ok: real pinned age/SOPS encrypt, sync, decrypt and revoke contract\n'

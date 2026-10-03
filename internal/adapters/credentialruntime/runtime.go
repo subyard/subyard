@@ -54,9 +54,11 @@ type Config struct {
 }
 
 type Runtime struct {
-	config    Config
-	consumers []profile.Consumer
-	env       map[string]string
+	config           Config
+	consumers        []profile.Consumer
+	consumerOwners   map[string]profile.Definition
+	importExclusions [][]string
+	env              map[string]string
 
 	idDirectory    string
 	ageIdentity    string
@@ -128,22 +130,28 @@ func New(config Config) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
-	runtime := &Runtime{config: config, env: environment}
-	consumerIDs := map[string]bool{"none": true, "staging-env": true, "qa-secrets": true, "qa-pool": true}
-	consumerPaths := []string{"staging", "qa-pool"}
+	runtime := &Runtime{config: config, env: environment, consumerOwners: map[string]profile.Definition{}}
+	consumerIDs := map[string]bool{"none": true}
+	var consumerPaths []string
 	for _, definition := range definitions {
+		runtime.importExclusions = append(runtime.importExclusions, definition.CredentialImportExclusions...)
 		for _, consumer := range definition.Consumers {
 			if consumerIDs[consumer.ID] {
 				return nil, fmt.Errorf("credential consumer ID collision: %s", consumer.ID)
 			}
+			reservedPath := consumer.Path
+			if strings.Contains(reservedPath, "{zone}") {
+				reservedPath = filepath.Dir(reservedPath)
+			}
 			for _, path := range consumerPaths {
-				if consumer.Path == path || strings.HasPrefix(consumer.Path, path+string(filepath.Separator)) || strings.HasPrefix(path, consumer.Path+string(filepath.Separator)) {
+				if pathWithin(reservedPath, path) || pathWithin(path, reservedPath) {
 					return nil, errors.New("credential consumer materialization paths overlap")
 				}
 			}
 			consumerIDs[consumer.ID] = true
-			consumerPaths = append(consumerPaths, consumer.Path)
+			consumerPaths = append(consumerPaths, reservedPath)
 			runtime.consumers = append(runtime.consumers, consumer)
+			runtime.consumerOwners[consumer.ID] = definition
 		}
 	}
 	runtime.idDirectory = filepath.Join(config.Root, "identity")
@@ -640,6 +648,11 @@ type limitedBuffer struct {
 	bytes.Buffer
 	limit    int
 	exceeded bool
+}
+
+// Do not inherit bytes.Buffer.ReadFrom: io.Copy would bypass the output limit.
+func (buffer *limitedBuffer) ReadFrom(reader io.Reader) (int64, error) {
+	return io.Copy(struct{ io.Writer }{buffer}, reader)
 }
 
 func (buffer *limitedBuffer) Write(payload []byte) (int, error) {

@@ -210,22 +210,70 @@ class Images:
                     env=dict(os.environ, JAVA_HOME=self.java_home, HOME=str(home), TMPDIR=str(temporary),
                              ANDROID_USER_HOME=str(home / '.android'), XDG_CACHE_HOME=str(home / '.cache')),
                     stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
                 deadline = time.monotonic() + 900
+                prefix, tail, seen = b'', b'', 0
+                nonblocking = False
+
+                def drain():
+                    nonlocal prefix, tail, seen
+                    drained = 0
+                    # At most 64 KiB per turn; noisy output cannot starve guards.
+                    for _ in range(4):
+                        try:
+                            chunk = os.read(process.stdout.fileno(), 16384)
+                        except BlockingIOError:
+                            break
+                        if not chunk:
+                            break
+                        drained += len(chunk)
+                        seen += len(chunk)
+                        take = min(len(chunk), 8192 - len(prefix))
+                        prefix += chunk[:take]
+                        tail = (tail + chunk[take:])[-8192:]
+                    return drained
+
                 try:
+                    os.set_blocking(process.stdout.fileno(), False)
+                    nonblocking = True
                     while process.poll() is None:
-                        require(not cancel.wait(0.2), 'cancelled', 'allocation cancelled')
+                        drained = drain()
+                        require(not cancel.wait(0 if drained else 0.2), 'cancelled', 'allocation cancelled')
                         require(time.monotonic() < deadline, 'download', 'image installation exceeded 900 seconds')
                         require(shutil.disk_usage(self.root).free > self.disk_headroom, 'capacity',
                                 'image installation stopped to preserve yard disk headroom')
-                    require(process.returncode == 0, 'download',
-                            f'SDK image installation failed (exit {process.returncode}); '
-                            'check licensing, disk space and download access')
                 finally:
                     if process.poll() is None:
                         with contextlib.suppress(ProcessLookupError):
                             os.killpg(process.pid, signal.SIGKILL)
                     process.wait()
+                    try:
+                        if nonblocking:
+                            drain()
+                    finally:
+                        process.stdout.close()
+                if process.returncode != 0:
+                    truncated = seen > len(prefix) + len(tail)
+                    output = prefix + (b'\n' if truncated else b'') + tail
+                    observed = [name for name, pattern in (
+                        ('dns', rb'\bUnknownHostException\b'),
+                        ('tls', rb'\bSSLHandshakeException\b'),
+                        ('connect', rb'\bConnectException\b'),
+                        ('network_timeout', rb'\bSocketTimeoutException\b'),
+                        ('no_space', rb'No space left on device'),
+                        ('license_rejected', rb'license[^\n]{0,256}(?:not accepted|not been accepted)'),
+                        ('checksum', rb'checksum (?:mismatch|verification failed)'),
+                        ('package_missing', rb'Failed to find package'),
+                    ) if re.search(pattern, output, re.IGNORECASE)]
+                    try:
+                        free_bytes = shutil.disk_usage(self.root).free
+                    except OSError:
+                        free_bytes = -1
+                    raise PoolError('download',
+                        f'SDK image installation failed (exit {process.returncode}); '
+                        'check licensing, disk space and download access; '
+                        f'observed={",".join(observed) or "unknown"} free_bytes={free_bytes} '
+                        f'truncated={int(truncated)}')
                 installed = sdk.joinpath(*image['package'].split(';'))
                 properties = dict(line.split('=', 1) for line in (installed / 'source.properties').read_text().splitlines()
                                   if '=' in line and not line.startswith('#'))
@@ -533,7 +581,7 @@ class Runtime:
              '/usr/local/lib/subyard-android/runtime.sh'])
         self.start_network(slot, directory, cancel, namespace)
         deadline = time.monotonic() + BOOT_TIMEOUT
-        wifi_configured = False
+        wifi_state = {}
         while time.monotonic() < deadline:
             require(not cancel.is_set(), 'cancelled', 'allocation cancelled')
             pid = self.pid(slot)
@@ -544,8 +592,7 @@ class Runtime:
             ready = False
             try:
                 process = self.connect(slot)
-                ready, configured = self.adb_ready(process, configure_wifi=not wifi_configured)
-                wifi_configured = wifi_configured or configured
+                ready, _ = self.adb_ready(process, wifi_state=wifi_state)
             except (subprocess.SubprocessError, OSError, PoolError):
                 pass
             finally:
@@ -565,8 +612,10 @@ class Runtime:
         raise PoolError('boot_timeout', f'Android boot did not complete within {BOOT_TIMEOUT} seconds')
 
     @staticmethod
-    def adb_ready(process, timeout=5, configure_wifi=False):
-        """Return (ready, Wi-Fi configured) without starting a host ADB daemon."""
+    def adb_ready(process, timeout=5, wifi_state=None):
+        """Return (ready, connection submitted) through the existing private ADB server."""
+        if wifi_state is None:
+            wifi_state = {}
         deadline = time.monotonic() + timeout
         buffered = bytearray()
 
@@ -594,12 +643,25 @@ class Runtime:
         # Android can report boot completion while its initial Wi-Fi setting is still off.
         # Initialize the guest radio explicitly, then wait for local IPv4 configuration.
         # A clean image can retain a disabled default network even after radio enable.
-        # Submit one explicit connection per boot, then let association/DHCP finish.
-        connect = ('elif cmd wifi connect-network AndroidWifi open >/dev/null 2>&1; then echo 2; '
-                   if configure_wifi else '')
+        # Submission is asynchronous, and boot-complete can survive a framework restart.
+        # Submit once per observed framework/service lifetime, without interrupting pending DHCP.
+        submitted_for = wifi_state.get('submitted_for', '')
+        if not re.fullmatch(r'[1-9][0-9]{0,9}', str(submitted_for)):
+            submitted_for = ''
         request('shell:if [ "$(getprop sys.boot_completed)" = 1 ]; then '
+                'framework=$(pidof system_server); '
+                'case "$framework" in ""|*[!0-9]*|0*) exit 1;; esac; '
+                '[ "${#framework}" -le 10 ] || exit 1; '
+                'case "$(service check wifi)" in '
+                '"Service wifi: not found") printf "%s:missing\\n" "$framework"; exit;; '
+                '"Service wifi: found") ;; *) exit 1;; esac; '
                 'if [ "$(settings get global wifi_on)" = 0 ]; then svc wifi enable >/dev/null || exit 1; fi; '
-                'if ip -4 addr show scope global | grep -q " inet "; then echo 1; ' + connect + 'fi; fi')
+                'if ip -4 addr show scope global | grep -q " inet "; then '
+                'printf "%s:ready\\n" "$framework"; '
+                f'elif [ "$framework" != "{submitted_for}" ] && '
+                'cmd wifi connect-network AndroidWifi open >/dev/null 2>&1; then '
+                'printf "%s:submitted\\n" "$framework"; '
+                'else printf "%s:pending\\n" "$framework"; fi; fi')
         if read(4) != b'OKAY':
             return False, False
         line = bytearray()
@@ -609,7 +671,15 @@ class Runtime:
                 return False, False
             line.extend(byte)
             if byte == b'\n':
-                return line.strip() == b'1', line.strip() == b'2'
+                match = re.fullmatch(rb'([1-9][0-9]{0,9}):(ready|submitted|pending|missing)', line.strip())
+                if not match:
+                    return False, False
+                framework, state = match.groups()
+                if state == b'missing':
+                    wifi_state.pop('submitted_for', None)
+                elif state == b'submitted':
+                    wifi_state['submitted_for'] = framework.decode('ascii')
+                return state == b'ready', state == b'submitted'
         return False, False
 
     def start_network(self, slot, directory, cancel, namespace):

@@ -103,131 +103,8 @@ clean_peer_data() {
   p0_capacity_remove_root_if_empty
 }
 
-owner_project_contract() {
-  local root="/tmp/subyard-p0-project-$TOKEN"
-  local source="$root/one/P0Project"
-  local bound="$root/two/P0Project"
-  local rejected="$root/three/P0Project"
-  local git_url='file:///tmp/P0Project.git'
-  local completions patch projects reservation replay retried sync_pid_one sync_pid_two
-  clean_tree "$root" "$MARKER"
-  install -d -m 0700 "$source" "$bound" "$rejected"
-  printf '%s\n' "$MARKER" > "$root/.subyard-p0-marker"
-  printf '%s\nbase\n' "$MARKER" > "$source/result.txt"
-  printf 'bound\n' > "$bound/result.txt"
-  printf 'rejected\n' > "$rejected/result.txt"
-  # The disposable outer VM has dev=1000, while its Debian cloud image reserves
-  # 1000 and the nested diagnostic yard therefore uses dev=1001. A real bind
-  # source must belong to the configured yard UID for shift=true to preserve
-  # private permissions; stage this test-owned tree the same way.
-  sudo -n chown -R "$OWNER_DIAGNOSTIC_DEV_UID:$OWNER_DIAGNOSTIC_DEV_UID" "$bound"
-  incus exec yard-test-yard --project subyard-test-yard -- \
-    runuser -u dev -- git init --bare /tmp/P0Project.git >/dev/null
-  ./bin/yard -Y test-yard bind "$bound" --yes >/dev/null
-  ./bin/yard -Y test-yard clone "$git_url" --yes >/dev/null
-  ./bin/yard -Y test-yard sync "$source" --target openclaw --yes >/dev/null
-  printf '%s\nsecond\n' "$MARKER" > "$source/result.txt"
-  ./bin/yard -Y test-yard sync "$source" --target openclaw --yes >/dev/null
-  printf '%s\nthird\n' "$MARKER" > "$source/result.txt"
-  ./bin/yard -Y test-yard sync "$source" --target openclaw --yes >/dev/null
-  projects="$(./bin/yard -Y test-yard list)"
-  [ "$(awk '$1 == "P0Project" { count++ } END { print count+0 }' <<<"$projects")" = 1 ] \
-    && [ "$(awk '$1 == "P0Project-2" { count++ } END { print count+0 }' <<<"$projects")" = 1 ] \
-    && [ "$(awk '$1 == "P0Project-3" { count++ } END { print count+0 }' <<<"$projects")" = 1 ] \
-    && [ "$(awk '$1 == "P0Project-4" { count++ } END { print count+0 }' <<<"$projects")" = 1 ] \
-    && [ "$(awk '$1 == "P0Project-5" { count++ } END { print count+0 }' <<<"$projects")" = 1 ] \
-    || die 'same-source syncs did not receive independent canonical names'
-  completions="$(./bin/yard -Y test-yard list --complete-projects)"
-  for project in P0Project P0Project-2 P0Project-3 P0Project-4 P0Project-5; do
-    grep -Fxq "$project" <<<"$completions" \
-      || die "project completion omitted $project"
-  done
-  incus exec yard-test-yard --project subyard-test-yard -- \
-    jq -e '
-      .identityVersion == 2 and .projectId == "P0Project-5" and
-      .name == "P0Project-5" and .yard == "test-yard"
-    ' /srv/workspaces/P0Project-5/.subyard-meta.json >/dev/null \
-    || die 'canonical project metadata was not published'
-  ./bin/yard -Y test-yard shell P0Project-3 --yes -- grep -Fxq base result.txt
-  ./bin/yard -Y test-yard shell P0Project-4 --yes -- grep -Fxq second result.txt
-  ./bin/yard -Y test-yard shell P0Project-5 --yes -- grep -Fxq third result.txt
-  if ./bin/yard -Y test-yard sync "$rejected" --name P0Project --yes \
-    >/dev/null 2>&1; then
-    die 'explicit colliding project name reached physical mutation'
-  fi
-  [ "$(./bin/yard -Y test-yard list | awk '
-    $1 ~ /^P0Project(-[2-5])?$/ { count++ }
-    END { print count+0 }
-  ')" = 5 ] \
-    || die 'explicit collision changed the project inventory'
-  ./bin/yard -Y test-yard bind "$bound" --yes >/dev/null
-  if ./bin/yard -Y test-yard sync "$bound" --yes >/dev/null 2>&1; then
-    die 'same source changed mode from bind to sync'
-  fi
-  printf '%s\nconcurrent\n' "$MARKER" > "$source/result.txt"
-  ./bin/yard -Y test-yard sync "$source" --target openclaw --yes >/dev/null &
-  sync_pid_one=$!
-  ./bin/yard -Y test-yard sync "$source" --target openclaw --yes >/dev/null &
-  sync_pid_two=$!
-  wait "$sync_pid_one"
-  wait "$sync_pid_two"
-  projects="$(./bin/yard -Y test-yard list)"
-  [ "$(awk '$1 == "P0Project-6" || $1 == "P0Project-7" { count++ } END { print count+0 }' <<<"$projects")" = 2 ] \
-    || die 'concurrent same-source syncs did not receive distinct canonical names'
-  ./bin/yard -Y test-yard remove P0Project-5 --soft --yes >/dev/null
-  ./bin/yard -Y test-yard sync "$source" --target openclaw --yes >/dev/null
-  ./bin/yard -Y test-yard shell P0Project-8 --yes -- grep -Fxq concurrent result.txt
-  incus exec yard-test-yard --project subyard-test-yard -- \
-    test -d /srv/workspaces/P0Project-5/src \
-    || die 'soft-removed workspace was not retained'
-  for project in P0Project-9 P0Project-10; do
-    ./bin/yard -Y test-yard clone "$git_url" --yes >/dev/null
-    ./bin/yard -Y test-yard shell "$project" --yes -- test -d .git
-  done
-  ./bin/yard -Y test-yard shell P0Project-9 --yes -- touch independent-copy
-  ./bin/yard -Y test-yard shell P0Project-2 --yes -- test ! -e independent-copy
-  ./bin/yard -Y test-yard shell P0Project-10 --yes -- test ! -e independent-copy
-  ./bin/yard -Y test-yard clone "$git_url" --name P0CloneNamed --yes >/dev/null
-  ./bin/yard -Y test-yard shell P0CloneNamed --yes -- test -d .git
-  if ./bin/yard -Y test-yard clone "$git_url" --name P0CloneNamed --yes >/dev/null 2>&1; then
-    die 'explicit clone collision was accepted'
-  fi
-  ./bin/yard -Y test-yard remove P0Project-9 --yes >/dev/null
-  ./bin/yard -Y test-yard shell P0Project-10 --yes -- test -d .git
-  ./bin/yard -Y test-yard shell P0CloneNamed --yes -- test -d .git
-  reservation="$(./bin/yard -Y test-yard _project-state reserve \
-    "p0-interrupted-$TOKEN" "/tmp/p0-interrupted-$TOKEN" sync P0Interrupted 0)"
-  replay="$(./bin/yard -Y test-yard _project-state reserve \
-    "p0-interrupted-$TOKEN" "/tmp/p0-interrupted-$TOKEN" sync P0Interrupted 0)"
-  [ "$reservation" = "$replay" ] \
-    && jq -e '.projectId == "P0Interrupted" and .reserved == true' <<<"$reservation" >/dev/null \
-    || die 'owner reservation replay changed canonical identity'
-  ./bin/yard -Y test-yard _project-state abort "p0-interrupted-$TOKEN"
-  retried="$(./bin/yard -Y test-yard _project-state reserve \
-    "p0-retried-$TOKEN" "/tmp/p0-interrupted-$TOKEN" sync P0Interrupted 0)"
-  jq -e '.projectId == "P0Interrupted" and .reserved == true' <<<"$retried" >/dev/null \
-    || die 'owner reservation abort did not release canonical identity'
-  ./bin/yard -Y test-yard _project-state abort "p0-retried-$TOKEN"
-  ./bin/yard -Y test-yard shell P0Project --yes -- \
-    grep -Fxq bound result.txt
-  ./bin/yard -Y test-yard remove P0Project --yes >/dev/null
-  ./bin/yard -Y test-yard shell P0Project-2 --yes -- \
-    test -d .git
-  ./bin/yard -Y test-yard remove P0Project-2 --yes >/dev/null
-  ./bin/yard -Y test-yard up P0Project-3 --yes >/dev/null
-  ./bin/yard -Y test-yard info P0Project-3 | grep -Fq '"profile": "openclaw"'
-  ./bin/yard -Y test-yard down P0Project-3 --yes >/dev/null
-  env PATH=/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin ./bin/yard -Y test-yard code P0Project-3 --yes >/dev/null
-  ./bin/yard -Y test-yard shell P0Project-3 --yes -- sh -c 'printf "mutated\n" >> result.txt'
-  ./bin/yard -Y test-yard shell P0Project-4 --yes -- grep -Fxq second result.txt
-  ./bin/yard -Y test-yard export P0Project-3 --yes >/dev/null
-  patch="$(grep -RIl -- 'mutated' "${SUBYARD_HOME:-$HOME/.subyard}/exports" | head -n1)"
-  [ -n "$patch" ] || die 'project export did not contain the guest change'
-  ./bin/yard -Y test-yard remove P0Project-3 --yes >/dev/null
-  ./bin/yard -Y test-yard shell P0Project-4 --yes -- grep -Fxq second result.txt
-  find "$patch" -delete
-  clean_tree "$root" "$MARKER"
-}
+# shellcheck source=dev/e2e/lib-owner-project-contract.sh
+. "$ROOT/dev/e2e/lib-owner-project-contract.sh"
 
 owner_cleanup() {
   local rc=$? source="/tmp/subyard-p0-project-$TOKEN" patch fingerprint yard registration vm
@@ -814,7 +691,12 @@ owner() (
     || die 'nested state permissions did not converge'
   ! incus exec yard-test-yard --project subyard-test-yard -- id -nG dev | tr ' ' '\n' \
     | grep -Eq '^(incus-admin|yard)$' || die 'dev retained a privileged L1 group'
-  owner_project_contract
+  # Exercise L2 ownership through a synthetic profile, independently of shipped toolchains.
+  # shellcheck source=tests/helpers/test-context.sh
+  . "$ROOT/tests/helpers/test-context.sh"
+  setup_test_repository "$OWNER_ROOT/project-runtime" "$ROOT"
+  PROJECT_CONTRACT_BIN="$OWNER_ROOT/project-runtime/runtime/bin/yard" owner_project_contract synthetic
+  unset YARD_ENGINE_PATH
   env PATH=/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin ./bin/yard --version >/dev/null
   env PATH=/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin ./bin/yard -Y test-yard list >/dev/null
   env PATH=/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin ./bin/yard -Y test-yard status >/dev/null
@@ -898,6 +780,10 @@ install_peer_wrapper() {
     printf 'export SUBYARD_KEYS_ROOT=%q SUBYARD_KEYS_TOOLS_DIR=%q SUBYARD_KEYS_CONSUMER_ROOT=%q\n' \
       "$PEER_KEYS_ROOT" "$PEER_KEYS_TOOLS" "$PEER_KEYS_CONSUMER_ROOT"
     printf 'export SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 SUBYARD_NO_AUDIT=1\n'
+    printf 'case "${1:-}" in keys|_keys-exchange)\n'
+    printf '  export YARD_ENGINE_PATH=%q\n' "$PEER_DATA_ROOT/runtime/current/bin/yard-engine"
+    printf '  exec %q "$@"\n' "$PEER_ROOT/credentials/runtime/bin/yard"
+    printf ';; esac\n'
     printf 'exec %q/yard "$@"\n' "$PEER_ROOT/bin"
   } > "$wrapper"
   chmod 0755 "$wrapper"
@@ -1210,6 +1096,15 @@ peer_prepare_finish() {
     && [ "$("$PEER_ROOT/bin/yard" --version)" = "yard $version" ] \
     || die 'peer standalone release is not active'
   (
+    # Keep the synthetic declaration outside the installed immutable release.
+    # shellcheck source=tests/helpers/test-context.sh
+    . "$PEER_ROOT/src/tests/helpers/test-context.sh"
+    setup_test_repository "$PEER_ROOT/credentials" "$PEER_DATA_ROOT/runtime/current" \
+      "$PEER_DATA_ROOT/runtime/current/bin/yard-engine"
+    [ "$("$PEER_ROOT/credentials/runtime/bin/yard" --version)" = "yard $version" ] \
+      || die 'synthetic credential runtime did not select the installed peer engine'
+  )
+  (
     # shellcheck source=tests/helpers/test-context.sh
     . "$PEER_ROOT/src/tests/helpers/test-context.sh"
     setup_test_context "$PEER_ROOT"
@@ -1352,12 +1247,13 @@ decode_frames() { # framed-input json-lines-output
 }
 
 peer_rpc() {
-  local request response body remote_engine remote_root
-  local version="p0-peer-vm-$((3 - SUBYARD_E2E_VM))"
-  valid_ip "$PEER_IP" || die 'peer IP is invalid'
+  local request response body remote_engine remote_root expected_version
+  expected_version="p0-peer-vm-$((3 - SUBYARD_E2E_VM))"
   if [ -e "$PEER_ROOT/src/.subyard-acceptance/candidate.json" ]; then
-    version="$(jq -er '.version' "$PEER_ROOT/src/.subyard-acceptance/candidate.json")"
+    expected_version="$(jq -er '.version | select(type == "string" and length > 0)' \
+      "$PEER_ROOT/src/.subyard-acceptance/candidate.json")"
   fi
+  valid_ip "$PEER_IP" || die 'peer IP is invalid'
   remote_root="/home/dev/.cache/subyard-p0-$TOKEN/peer/subyard/runtime/current"
   remote_engine="$remote_root/bin/yard-engine"
   request="$PEER_ROOT/rpc-request"; response="$PEER_ROOT/rpc-response"; body="$PEER_ROOT/rpc-body"
@@ -1367,7 +1263,7 @@ peer_rpc() {
     "$remote_engine" rpc --stdio \
     < "$request" > "$response"
   decode_frames "$response" "$body"
-  jq -e --arg version "$version" \
+  jq -e --arg version "$expected_version" \
     'select(.id=="negotiate" and .error==null and .result.version==1 and .result.engineVersion==$version)' \
     "$body" >/dev/null \
     || die 'cross-owner negotiation failed'
@@ -1420,7 +1316,7 @@ peer_credentials() {
   printf 'subyard-synthetic-p0-cross-owner\n' > "$expected"; chmod 0600 "$expected"
   "$PEER_YARD_ENTRY" keys trust @peer --yes >/dev/null
   "$PEER_YARD_ENTRY" keys add p0-cross-owner --kind file --zone p0-cross-owner \
-    --consumer staging-env --file "$expected" --yes >/dev/null
+    --consumer synthetic-consumer --file "$expected" --yes >/dev/null
   credential="$("$PEER_YARD_ENTRY" keys list | awk -F '\t' '$8=="p0-cross-owner" {print $1}')"
   [ -n "$credential" ] || die 'cross-owner credential was not created'
   "$PEER_YARD_ENTRY" keys sync @peer --now --yes >/dev/null
@@ -1428,7 +1324,7 @@ peer_credentials() {
     "$(printf '%q' 'yard keys materialize p0-cross-owner --yes')" >/dev/null
   source_hash="$(sha256sum "$expected" | awk '{print $1}')"
   remote_hash="$(peer_ssh "dev@$PEER_IP" -- sha256sum \
-    "/home/dev/.cache/subyard-p0-$TOKEN/peer/consumer/staging/p0-cross-owner.env" \
+    "/home/dev/.cache/subyard-p0-$TOKEN/peer/consumer/fixture/p0-cross-owner.env" \
     | awk '{print $1}')"
   [ "$source_hash" = "$remote_hash" ] || die 'cross-owner credential materialization differs'
   "$PEER_YARD_ENTRY" keys revoke "$credential" --yes >/dev/null
@@ -1436,7 +1332,7 @@ peer_credentials() {
   peer_ssh "dev@$PEER_IP" -- bash -lc \
     "$(printf '%q' 'yard keys materialize p0-cross-owner --yes')" >/dev/null
   ! peer_ssh "dev@$PEER_IP" -- test -e \
-    "/home/dev/.cache/subyard-p0-$TOKEN/peer/consumer/staging/p0-cross-owner.env" \
+    "/home/dev/.cache/subyard-p0-$TOKEN/peer/consumer/fixture/p0-cross-owner.env" \
     || die 'revoked cross-owner credential remains materialized'
   "$PEER_YARD_ENTRY" remote remove peer --yes >/dev/null
   printf 'ok: real cross-owner credential trust, sync and revoke\n'

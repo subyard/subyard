@@ -147,7 +147,7 @@
         {"status":"M","similarity":null,"old_path":"config/profiles/orca/tests/e2e/orca-resource.sh","new_path":"config/profiles/orca/tests/e2e/orca-resource.sh","old_mode":"100755","new_mode":"100755"}
       ],
       "category": "leaf", "expected_full": false,
-      "required_check_sets": ["e2e:orca-resource", "go:resource", "p0:profile-resource", "profiles:host-free", "shell:profile-resource-lifecycle", "shell:provision-profile-check"],
+      "required_check_sets": ["e2e:orca-resource", "go:resource", "p0:profile-resource", "profiles:host-free", "shell:provision-profile-check"],
       "required_e2e_checks": ["e2e:orca-resource", "p0:profile-resource"]
     },
     {
@@ -271,7 +271,7 @@
         {"status":"M","similarity":null,"old_path":"config/profiles/subyard-dev/tests/subyard-dev-provision.sh","new_path":"config/profiles/subyard-dev/tests/subyard-dev-provision.sh","old_mode":"100755","new_mode":"100755"}
       ],
       "category": "leaf", "expected_full": false,
-      "required_check_sets": ["go:resource", "p0:profile-resource", "profiles:host-free", "shell:profile-resource-lifecycle", "shell:provision-profile-check"],
+      "required_check_sets": ["go:resource", "p0:profile-resource", "profiles:host-free", "shell:provision-profile-check"],
       "required_e2e_checks": ["p0:profile-resource"]
     },
     {
@@ -287,14 +287,14 @@
         {"status":"M","similarity":null,"old_path":"config/profiles/openclaw/provision.sh","new_path":"config/profiles/openclaw/provision.sh","old_mode":"100755","new_mode":"100755"}
       ],
       "category": "leaf", "expected_full": false,
-      "required_check_sets": ["go:resource", "p0:profile-resource", "profiles:host-free", "shell:profile-resource-lifecycle", "shell:provision-profile-check"],
+      "required_check_sets": ["go:resource", "p0:profile-resource", "profiles:host-free", "shell:provision-profile-check"],
       "required_e2e_checks": ["p0:profile-resource"]
     },
     {
       "id": "history-29",
       "changes": [{"status":"M","similarity":null,"old_path":"config/profiles/openclaw/provision.sh","new_path":"config/profiles/openclaw/provision.sh","old_mode":"100755","new_mode":"100755"}],
       "category": "leaf", "expected_full": false,
-      "required_check_sets": ["go:resource", "p0:profile-resource", "profiles:host-free", "shell:profile-resource-lifecycle", "shell:provision-profile-check"],
+      "required_check_sets": ["go:resource", "p0:profile-resource", "profiles:host-free", "shell:provision-profile-check"],
       "required_e2e_checks": ["p0:profile-resource"]
     },
     {

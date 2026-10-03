@@ -115,9 +115,12 @@ Host-side encrypted credential ledger:
   resolve <credential-id> --choose <revision>|--rotate [--file PATH]
   move <credential-id> @peer
 
-Builtin consumers: staging-env, qa-secrets, qa-pool.
+Consumer none keeps credentials encrypted without materializing a file.
 Secret values are read only after confirmation from a protected file, stdin or a silent TTY.
 Profile consumer: github-app-key (global zone).
+Profile consumer: staging-env (* zone).
+Profile consumer: qa-secrets (* zone).
+Profile consumer: qa-pool (* zone).
 ```
 
 ## ssh-agent

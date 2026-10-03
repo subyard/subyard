@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "credential_import_exclusions": [["/srv/staging/", "/creds/"]],
+  "consumers": [
+    {"id": "staging-env", "zone": "*", "path": "staging/{zone}.env", "format": "file", "stop_handler": "consumer-stop.sh"},
+    {"id": "qa-secrets", "zone": "*", "path": "qa-pool/secrets.env", "format": "file", "stop_handler": "consumer-stop.sh"},
+    {"id": "qa-pool", "zone": "*", "path": "qa-pool/pool.jsonl", "format": "file", "stop_handler": "consumer-stop.sh"}
+  ]
+}

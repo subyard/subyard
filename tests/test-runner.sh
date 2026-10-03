@@ -33,6 +33,11 @@ for suite in unit contract integration; do
   printf '%s.sh\n' "$suite" > "$fixture/tests/suites/$suite.list"
   printf '#!/usr/bin/env bash\nprintf "hidden successful output\\n"\n' > "$fixture/tests/$suite.sh"
 done
+# A child that reads stdin must not consume the remaining manifest entries.
+printf 'contract.sh\nafter-input.sh\n' > "$fixture/tests/suites/contract.list"
+printf '#!/usr/bin/env bash\ncat >/dev/null\nprintf "hidden successful output\\n"\n' \
+  > "$fixture/tests/contract.sh"
+printf '#!/usr/bin/env bash\nprintf "following test ran\\n"\n' > "$fixture/tests/after-input.sh"
 
 run_fixture() {
   env PATH="$tmp/tools:$PATH" RUNNER_GO_LOG="$tmp/$1.go" \
@@ -53,7 +58,7 @@ awk -F '\t' '
   $4 != "passed" || $5 != 0 || $6 !~ /^[0-9]+$/ { exit 1 }
   $1 == "check" && $3 ~ /^tests\// { suites[$2]++ }
   $1 == "run" { completed++ }
-  END { if (suites["unit"] != 1 || suites["contract"] != 1 || suites["integration"] != 1 || completed != 1) exit 1 }
+  END { if (suites["unit"] != 1 || suites["contract"] != 2 || suites["integration"] != 1 || completed != 1) exit 1 }
 ' "$summary" || fail 'successful result is incomplete or malformed'
 ! grep -q 'hidden successful output' "$tmp/success.out" || fail 'successful output leaked to console'
 while IFS=$'\t' read -r kind _ _ _ _ _ log; do

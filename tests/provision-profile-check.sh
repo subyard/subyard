@@ -4,7 +4,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf -- "$tmp"' EXIT
-mkdir -p "$tmp/bin" "$tmp/home" "$tmp/config-home" "$tmp/storage" "$tmp/host"
+mkdir -p "$tmp/runtime/scripts/lib" "$tmp/runtime/config/profiles/synthetic" "$tmp/bin" "$tmp/home" "$tmp/config-home" "$tmp/storage" "$tmp/host"
+
+cp "$ROOT/scripts/provision-profile.sh" "$tmp/runtime/scripts/"
+cp "$ROOT/scripts/lib/engine-context.sh" "$tmp/runtime/scripts/lib/"
+: > "$tmp/runtime/config/profiles/synthetic/profile.conf"
+printf '#!/bin/sh\n# subyard-provision-check-v1\nexit 0\n' > "$tmp/runtime/config/profiles/synthetic/provision.sh"
 
 cat > "$tmp/bin/incus" <<'INCUS'
 #!/usr/bin/env bash
@@ -38,15 +43,15 @@ engine_env=(
 )
 
 output="$(env "${engine_env[@]}" PROVISION_CHECK_STATUS=0 \
-  bash "$ROOT/scripts/provision-profile.sh" --check subyard-dev)"
+  bash "$tmp/runtime/scripts/provision-profile.sh" --check synthetic)"
 [ "$output" = converged ] || { printf 'FAIL: converged output=%q\n' "$output" >&2; exit 1; }
 
 output="$(env "${engine_env[@]}" PROVISION_CHECK_STATUS=10 \
-  bash "$ROOT/scripts/provision-profile.sh" --check subyard-dev)"
+  bash "$tmp/runtime/scripts/provision-profile.sh" --check synthetic)"
 [ "$output" = changed ] || { printf 'FAIL: changed output=%q\n' "$output" >&2; exit 1; }
 
 if env "${engine_env[@]}" PROVISION_CHECK_STATUS=7 \
-  bash "$ROOT/scripts/provision-profile.sh" --check subyard-dev >/dev/null 2>&1; then
+  bash "$tmp/runtime/scripts/provision-profile.sh" --check synthetic >/dev/null 2>&1; then
   printf 'FAIL: malformed hook check status was accepted\n' >&2
   exit 1
 fi

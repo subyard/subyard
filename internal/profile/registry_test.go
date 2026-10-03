@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,6 +42,12 @@ func TestRegistryRejectsUnsafeDeclarations(t *testing.T) {
 		`{"schema_version":1,"managed_paths":[{"root":"data","path":"../escape"}]}`,
 		`{"schema_version":1,"owner_service":"../owner.sh"}`,
 		`{"schema_version":1} {}`,
+		`{"schema_version":1,"consumers":[{"id":"none","zone":"*","path":"fixture/key","format":"file"}]}`,
+		`{"schema_version":1,"consumers":[{"id":"fixture","zone":"global","path":"fixture/{zone}.env","format":"file"}]}`,
+		`{"schema_version":1,"consumers":[{"id":"fixture","zone":"*","path":"{zone}/key","format":"file"}]}`,
+		`{"schema_version":1,"consumers":[{"id":"fixture","zone":"*","path":"fixture/{unknown}.env","format":"file"}]}`,
+		`{"schema_version":1,"consumers":[{"id":"fixture","zone":"*","path":"fixture/{zone}-{zone}.env","format":"file"}]}`,
+		`{"schema_version":1,"consumers":[{"id":"fixture","zone":"*","path":"fixture/{zone}.env","format":"file","stop_handler":"../escape"}]}`,
 	} {
 		t.Run(data, func(t *testing.T) {
 			root := testkit.TempDir(t)
@@ -68,7 +75,7 @@ func TestProfileExtensionsLoadAndValidate(t *testing.T) {
 	good := Definition{
 		Settings: []Setting{
 			{Name: "SAMPLE_HOST_PORT", Type: "port", Scopes: []string{"host", "yard", "command"}, Application: "next-command", Optional: true, Minimum: 1, Maximum: 65535, HostListener: true},
-			{Name: "OPENCLAW_CACHE_SIZE", Type: "size", Scopes: []string{"shipped", "yard"}, Application: "yard-init", Default: stringPointer("1GiB")},
+			{Name: "SAMPLE_CACHE_SIZE", Type: "size", Scopes: []string{"shipped", "yard"}, Application: "yard-init", Default: stringPointer("1GiB")},
 		},
 		Runtime:          &RuntimeHook{ActivationID: "fixture-runtime", Handler: "runtime.sh"},
 		GuestEnvironment: &GuestEnvironmentHook{Handler: "guest.sh"},
@@ -186,6 +193,84 @@ func TestReadExecutableRejectsSubstitutedHookAndSymlinkRoot(t *testing.T) {
 }
 
 func stringPointer(value string) *string { return &value }
+
+func TestReadExecutableThroughPinnedRepository(t *testing.T) {
+	root := testkit.TempDir(t)
+	path := fixture(t, root, "fixture", "", Definition{GuestEnvironment: &GuestEnvironmentHook{Handler: "guest.sh"}})
+	testkit.WriteFile(t, filepath.Join(filepath.Dir(path), "guest.sh"), []byte("safe\n"), 0o700)
+	pin, err := os.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pin.Close()
+	for _, owner := range []string{"self", strconv.Itoa(os.Getpid())} {
+		alias := fmt.Sprintf("/proc/%s/fd/%d", owner, pin.Fd())
+		definitions, err := Load(alias)
+		if err != nil || len(definitions) != 1 {
+			t.Fatalf("load pinned profile: %v, %v", definitions, err)
+		}
+		if got, err := definitions[0].ReadExecutable("guest.sh"); err != nil || string(got) != "safe\n" {
+			t.Fatalf("read pinned executable: %q, %v", got, err)
+		}
+	}
+}
+
+func TestLoadBindsRepositorySelector(t *testing.T) {
+	root := testkit.TempDir(t)
+	for _, name := range []string{"first", "second"} {
+		path := fixture(t, filepath.Join(root, name), "fixture", "", Definition{GuestEnvironment: &GuestEnvironmentHook{Handler: "guest.sh"}})
+		testkit.WriteFile(t, filepath.Join(filepath.Dir(path), "guest.sh"), []byte(name+"\n"), 0o700)
+	}
+	selector := filepath.Join(root, "current")
+	if err := os.Symlink("first", selector); err != nil {
+		t.Fatal(err)
+	}
+	definitions, err := Load(selector)
+	if err != nil || len(definitions) != 1 {
+		t.Fatalf("load selected repository: %v, %v", definitions, err)
+	}
+	if err := os.Remove(selector); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("second", selector); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := definitions[0].ReadExecutable("guest.sh"); err != nil || string(got) != "first\n" {
+		t.Fatalf("loaded hook followed changed repository selector: %q, %v", got, err)
+	}
+}
+
+func TestPinnedExecutableRejectsSubstitutedPackagePaths(t *testing.T) {
+	for _, changed := range []string{"config", "config/profiles", "config/profiles/fixture", "config/profiles/fixture/hooks", "config/profiles/fixture/hooks/guest.sh"} {
+		t.Run(changed, func(t *testing.T) {
+			root := testkit.TempDir(t)
+			path := fixture(t, root, "fixture", "", Definition{GuestEnvironment: &GuestEnvironmentHook{Handler: "hooks/guest.sh"}})
+			if err := os.Mkdir(filepath.Join(filepath.Dir(path), "hooks"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			testkit.WriteFile(t, filepath.Join(filepath.Dir(path), "hooks", "guest.sh"), []byte("safe\n"), 0o700)
+			pin, err := os.Open(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer pin.Close()
+			definitions, err := Load(fmt.Sprintf("/proc/self/fd/%d", pin.Fd()))
+			if err != nil || len(definitions) != 1 {
+				t.Fatalf("load pinned profile: %v, %v", definitions, err)
+			}
+			target := filepath.Join(root, changed)
+			if err := os.Rename(target, target+"-real"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target+"-real", target); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := definitions[0].ReadExecutable("hooks/guest.sh"); err == nil {
+				t.Fatal("accepted a substituted path below the repository descriptor")
+			}
+		})
+	}
+}
 
 func TestRegistrySelectionAndSettings(t *testing.T) {
 	d := Definition{Name: "fixture", DefaultYards: []string{"default"}, DisabledWhen: map[string]string{"FIXTURE_OFF": "1"}}

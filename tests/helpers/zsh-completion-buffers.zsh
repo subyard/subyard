@@ -45,7 +45,7 @@ zpty -w completion $'autoload -Uz compinit; compinit -D -i; print -r -- COMPI""N
 wait_for_marker COMPINIT_READY initialization 300
 zpty -w completion $'yard() { case "$1" in --list) print -r -l -- code shell provision remote keys ;; --command-completion) case "$2" in code) print -r -- project ;; shell) print -r -- project-shell ;; provision) print -r -- profiles ;; remote|keys) print -r -- "$2" ;; esac ;; --command-options) ;; --command-verbs) case "$2" in remote) print -r -- "add repair-key remove list" ;; keys) print -r -- "trust untrust sync move" ;; esac ;; list) case "$2" in --complete-projects) print -r -- Alpha; print -r -- completions/owner; print -r -- "Native Project/Owner"; print -r -- skills; print -r -- Subyard/alpha; print -r -- Subyard/beta ;; --complete-yards) print -r -- default; print -r -- owner/dev; print -r -- tools ;; esac ;; esac }\n'
 zpty -w completion $'source "$TEST_ZSH_COMPLETION_FILE"\n'
-zpty -w completion $'_yard_repo() { print -r -- "$TEST_ZSH_RUNTIME_ROOT" }\ncompdef _yard yard\nbindkey -e\nbindkey "^Xc" complete-word\nreport_buffer() { print -r -- "RESULT:$BUFFER"; }\nzle -N report_buffer\nbindkey "^Xr" report_buffer\nprint -r -- SET""UP_READY\n'
+zpty -w completion $'_yard_repo() { print -r -- "$TEST_ZSH_RUNTIME_ROOT" }\n_yard_profiles() { print -r -l -- synthetic another }\ncompdef _yard yard\nbindkey -e\nbindkey "^Xc" complete-word\nreport_buffer() { print -r -- "RESULT:$BUFFER"; }\nzle -N report_buffer\nbindkey "^Xr" report_buffer\nprint -r -- SET""UP_READY\n'
 wait_for_marker SETUP_READY setup 100
 
 complete_buffer() {
@@ -80,10 +80,10 @@ buffers="$({
   complete_buffer yard-option 'yard -Y to'
   complete_buffer remote 'yard remote remove to'
   complete_buffer keys 'yard keys trust @to'
-  complete_buffer profile 'yard provision ope'
+  complete_buffer profile 'yard provision syn'
   complete_buffer directory 'yard code compl'
 })"
-expected=$'empty:yard code \nunique:yard code skills \nambiguous:yard code Subyard/\nsibling:yard shell skills \nat-yard:yard @tools \nyard-option:yard -Y tools \nremote:yard remote remove tools \nkeys:yard keys trust @tools \nprofile:yard provision openclaw \ndirectory:yard code completions'
+expected=$'empty:yard code \nunique:yard code skills \nambiguous:yard code Subyard/\nsibling:yard shell skills \nat-yard:yard @tools \nyard-option:yard -Y tools \nremote:yard remote remove tools \nkeys:yard keys trust @tools \nprofile:yard provision synthetic \ndirectory:yard code completions'
 [[ $buffers == $expected ]] || {
   print -u2 -r -- "Zsh native multi-record completion did not preserve separate candidates: $buffers"
   exit 1

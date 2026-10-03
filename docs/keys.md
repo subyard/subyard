@@ -50,12 +50,15 @@ there is no separate credential-ledger initialization step.
 Import accepts only a regular, non-symlink mode-`0600`/`0400` file. Preview reads metadata only. A real
 import keeps the legacy source; verify the materialized consumer and its service before separately
 removing that duplicate. Secret input otherwise comes from a silent TTY, stdin, or `--file`, never an
-argument or environment variable. Core consumers are `staging-env`, `qa-secrets` and `qa-pool`. Shipped profiles declare additional
-consumers; the GitHub profile owns `github-app-key`. That consumer requires zone `global` and materializes the PEM at
+argument or environment variable. The OpenClaw profile declares `staging-env`, `qa-secrets` and `qa-pool`, preserving their generated
+staging and QA paths. The GitHub profile owns `github-app-key`. That consumer requires zone `global` and materializes the PEM at
 `$SUBYARD_KEYS_CONSUMER_ROOT/github/github-app.pem` for the owner-side
 [GitHub broker](github.md); it never delivers the key into a yard. Interactive `yard init` can
 collect the App identifiers and PEM path, import this consumer and create the protected App
-settings in one confirmed setup. Broad `.codex`, `.claude`, OAuth, and mutable staging-runner credential paths are rejected.
+settings in one confirmed setup. Broad `.codex`, `.claude` and OAuth credential paths are rejected.
+The OpenClaw profile also excludes mutable staging-runner credentials through its shipped
+`credential_import_exclusions`: a canonical source containing both `/srv/staging/` and `/creds/`
+is rejected before any contents are read.
 
 ## Merge and recovery rules
 
@@ -82,8 +85,9 @@ for 24 hours. Use `auto-sync pause|resume` for an active route's explicit policy
 credential synchronization.
 
 Exclusive credentials have an authority host and a `host-id/yard-context` assignment epoch.
-`move <id> @peer` first verifies the old supported staging consumer stopped, publishes the new assignment,
-then syncs/materializes the target.
+`move <id> @peer` first invokes the old consumer's shipped profile stop hook and verifies it stopped, publishes the new assignment,
+then syncs/materializes the target. Missing handlers, unreachable owners and failed stop verification
+abort before publishing a new assignment.
 Supported `yard staging start` fails closed without a fresh authority grant. This is cooperative control-
 plane fencing; a manually kept-alive process on a compromised or partitioned host requires an external
 epoch-checking proxy or distinct pool identity.

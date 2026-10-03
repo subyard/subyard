@@ -6,10 +6,10 @@ lane=full
 if [ "$#" -eq 2 ] && [ "$1" = --lane ]; then
   lane="$2"
 elif [ "$#" -ne 0 ]; then
-  printf 'usage: android-pool-runtime.sh [--lane full|recovery|viewer]\n' >&2
+  printf 'usage: android-pool-runtime.sh [--lane full|recovery|viewer|viewer-native-debug|sdk-images]\n' >&2
   exit 2
 fi
-case "$lane" in full|recovery|viewer) ;; *) printf 'invalid Android test lane\n' >&2; exit 2 ;; esac
+case "$lane" in full|recovery|viewer|viewer-native-debug|sdk-images) ;; *) printf 'invalid Android test lane\n' >&2; exit 2 ;; esac
 
 [ "${SUBYARD_E2E_VM:-}" = 1 ] || { printf 'android-pool-runtime: requires VM1\n' >&2; exit 1; }
 [ -r /run/subyard-e2e-lease.json ] || { printf 'android-pool-runtime: missing E2E lease guard\n' >&2; exit 1; }
@@ -180,7 +180,7 @@ if [ "$catalog_failed" -ne 0 ]; then
   exit 1
 fi
 android_phase_end 0
-if [ "$lane" != viewer ]; then
+if [ "$lane" != viewer ] && [ "$lane" != viewer-native-debug ] && [ "$lane" != sdk-images ]; then
 android_phase_begin remote-owner-route
 printf 'android phase=remote-owner-route\n'
 timeout --foreground --kill-after=10 150 bash "$root/config/profiles/android/tests/e2e/android-pool-remote.sh" \
@@ -188,12 +188,13 @@ timeout --foreground --kill-after=10 150 bash "$root/config/profiles/android/tes
 fi
 android_phase_begin images
 printf 'android phase=prepare-images\n'
-# Install both SDK packages while the pool is idle, before starting any emulator.
+# Normal lanes prepare both APIs before boot; sdk-images prepares only API 36.
 # These public calls exercise the real installer and cache, never a diagnostic seed.
-yard emu cache prepare --api 35
+[ "$lane" = sdk-images ] || yard emu cache prepare --api 35
 yard emu cache prepare --api 36
-[ "$lane" = viewer ] || yard emu cache prepare --api 35
+[ "$lane" = viewer ] || [ "$lane" = viewer-native-debug ] || [ "$lane" = sdk-images ] || yard emu cache prepare --api 35
 android_phase_end 0
+[ "$lane" != sdk-images ] || exit 0
 # Monitor all viewer and restart windows, including diagnostic lanes.
 monitor_stop="/run/subyard-e2e-android-monitor-$token.stop"
 monitor_log="$state/first-boot-monitor.log"
@@ -234,7 +235,7 @@ if [ "$lane" = full ]; then
   timeout --foreground --kill-after=15 1320 "${incus_binary[@]}" --project "$project" exec "$instance" \
     --user 1000 --group 1000 --env HOME=/home/dev -- env \
     PATH=/srv/cache/android-sdk/.subyard/bin:/srv/cache/android-sdk/platform-tools:/opt/jdk-17/bin:/usr/bin:/bin \
-    android-broker run --device tablet --api 36 --purpose android-pool-runtime -- \
+    android-broker run --purpose android-pool-runtime -- \
     sh -c 'adb shell getprop ro.build.version.sdk && exit 23' >"$adb_log" 2>&1 || adb_status=$?
   if [ "$adb_status" -ne 23 ]; then
     printf 'android adb status=%s\n' "$adb_status" >&2
@@ -247,8 +248,6 @@ if [ "$lane" = full ]; then
     sed -n '1,20p' "$adb_log" >&2
     exit 1
   }
-  # The L2 fixture exercises concurrent leases and clean reuse through its normal agent facade.
-  bash "$root/config/profiles/android/tests/e2e/android-pool-projects.sh" "$root" "$state" "$YARD_NAME" "$project" "$instance"
 fi
 android_phase_end 0
 if [ "$lane" != recovery ]; then
@@ -268,6 +267,9 @@ incus --project "$project" exec "$instance" -- bash -ceu '
   export DEBIAN_FRONTEND=noninteractive
   phase packages-update timeout 180 apt-get update -qq
   phase packages-install timeout 180 apt-get install -y -qq xvfb xauth
+  if [ "$1" = viewer-native-debug ]; then
+    phase native-debugger-install timeout 180 apt-get install -y -qq gdb
+  fi
   tools=/opt/subyard-e2e-scrcpy
   install -d -m 0755 "$tools"
   phase scrcpy-download curl -fLsS --connect-timeout 15 --max-time 120 \
@@ -277,7 +279,7 @@ incus --project "$project" exec "$instance" -- bash -ceu '
     "$tools/release.tar.gz" | sha256sum -c -
   phase scrcpy-extract tar -xzf "$tools/release.tar.gz" --strip-components=1 -C "$tools"
   rm "$tools/release.tar.gz"
-'
+' _ "$lane"
 fi
 android_phase_end 0
 # Emit only validated numeric versions, once per fixture.
@@ -309,11 +311,19 @@ PYVERSIONS
 android_phase_begin phone-recovery
 viewer_args=()
 [ "$lane" != viewer ] || viewer_args=(--viewer-only)
+[ "$lane" != viewer-native-debug ] || viewer_args=(--viewer-native-debug)
 [ "$lane" != recovery ] || viewer_args=(--recovery-only)
 timeout --foreground --kill-after=60 7200 bash "$root/config/profiles/android/tests/e2e/android-pool-recovery.sh" \
   "$root" "$state" "$YARD_NAME" "$project" "$instance" "${viewer_args[@]}"
 android_phase_end 0
 [ "$lane" != viewer ] || exit 0
+[ "$lane" != viewer-native-debug ] || exit 0
+if [ "$lane" = full ]; then
+  android_phase_begin projects
+  # The L2 fixture exercises concurrent leases and clean reuse through its normal agent facade.
+  bash "$root/config/profiles/android/tests/e2e/android-pool-projects.sh" "$root" "$state" "$YARD_NAME" "$project" "$instance"
+  android_phase_end 0
+fi
 android_phase_begin prune-redownload
 printf 'android phase=prune-redownload\n'
 yard emu cache prune --dry-run > "$state/prune-dry.json"
@@ -355,5 +365,5 @@ if grep -Eq '^subyard-android-slot-[0-9]{3}-[1-9][0-9]*([[:space:]]|$)' <<<"$nam
   printf 'android runtime namespaces remain after run\n' >&2
   exit 1
 fi
-printf '35\n'
+printf '36\n'
 printf 'android_pool_runtime=passed\n'

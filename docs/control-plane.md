@@ -876,7 +876,18 @@ Unknown fields, unsupported versions, unsafe relative paths and duplicate consum
 - `native` lists Go package directories and artifact paths relative to the profile. Development
   and release builds discover these declarations; installed profiles contain the native artifacts.
 - `consumers` declares credential ID, zone, relative materialization path and format (`file` or
-  `rsa-private-key`). Core owns protected storage, transfer and validation of these generic formats.
+  `rsa-private-key`). Zone `*` accepts any validated credential zone; a single `{zone}` filename
+  placeholder expands to that zone. Dynamic paths reserve their parent subtree, and overlapping
+  materialization paths fail before execution. An optional `stop_handler` names a shipped executable
+  that receives dispatcher path, yard context and zone, with no credential payload. The internal
+  exchange boundary invokes it only after consent and requires successful stop verification before
+  publishing an exclusive assignment. Hook output is bounded and discarded; cancellation terminates
+  its process group. Core owns protected storage, transfer and generic format validation.
+- `credential_import_exclusions` declares up to 32 alternatives, each containing 1–8 literal
+  slash-delimited directory fragments of at most 256 bytes. Import rejects a canonical source path
+  when all fragments of any alternative occur anywhere in it, in any order. Fragments are normalized
+  directory names, without traversal, wildcards or control characters. Only shipped declarations
+  supply this policy; generic coding-tool authentication-store exclusions remain core-owned.
 - `setup` declares nonsecret fields, prompts, config filename and an owned credential consumer.
   Interactive init prepares these inputs before its existing single confirmation. It checks
   descriptor/config/source drift before applying; automation never answers profile prompts.

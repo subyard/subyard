@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,6 +48,43 @@ exit 9
 	}
 }
 
+func TestObserveProfileRuntimeThroughPinnedRepository(t *testing.T) {
+	for _, handler := range []string{"runtime.sh", "hooks/runtime.sh"} {
+		t.Run(handler, func(t *testing.T) {
+			runtime := profileRuntimeFixture(t, `#!/bin/sh
+set -eu
+[ -r ./profile.json ]
+[ -r "$SUBYARD_REPOSITORY_ROOT/config/profiles/synthetic/profile.json" ]
+printf '{"state":"absent","actual":"","desired":""}\n'
+`)
+			profileRoot := filepath.Join(runtime.RepositoryRoot, "config", "profiles", "synthetic")
+			if handler != "runtime.sh" {
+				if err := os.Mkdir(filepath.Join(profileRoot, "hooks"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(filepath.Join(profileRoot, "runtime.sh"), filepath.Join(profileRoot, handler)); err != nil {
+					t.Fatal(err)
+				}
+				declaration := fmt.Sprintf(`{"schema_version":1,"runtime":{"activation_id":"synthetic-runtime","handler":%q}}`, handler)
+				testkit.WriteFile(t, filepath.Join(profileRoot, "profile.json"), []byte(declaration), 0o600)
+			}
+			pin, err := os.Open(runtime.RepositoryRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer pin.Close()
+			for _, owner := range []string{"self", fmt.Sprint(os.Getpid())} {
+				runtime.RepositoryRoot = fmt.Sprintf("/proc/%s/fd/%d", owner, pin.Fd())
+				runtime.Environment = []string{"SUBYARD_REPOSITORY_ROOT=" + runtime.RepositoryRoot}
+				observations, err := runtime.ObserveProfileRuntimes(context.Background())
+				if err != nil || observations["synthetic-runtime"].State != ports.RuntimeStateAbsent {
+					t.Fatalf("pinned observations = %#v, %v", observations, err)
+				}
+			}
+		})
+	}
+}
+
 func TestObserveProfileRuntimesRejectsUnavailableAndAmbiguousState(t *testing.T) {
 	runtime := profileRuntimeFixture(t, "#!/bin/sh\nexit 0\n")
 	runtime.Incus = &testkit.Incus{Err: errors.New("incus unavailable")}
@@ -72,7 +110,7 @@ func TestObserveProfileRuntimeValidatesBoundedStrictJSON(t *testing.T) {
 		{name: "bad digest", output: `{"state":"current","actual":"abc","desired":"abc"}`},
 		{name: "unknown field", output: `{"state":"absent","actual":"","desired":"","extra":true}`},
 		{name: "trailing", output: `{"state":"absent","actual":"","desired":""} {}`},
-		{name: "oversize", output: strings.Repeat("x", profileRuntimeOutputLimit+1)},
+		{name: "oversize valid JSON", output: `{"state":"absent","actual":"","desired":""}` + strings.Repeat(" ", profileRuntimeOutputLimit)},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

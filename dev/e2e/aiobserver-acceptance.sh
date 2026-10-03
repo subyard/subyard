@@ -107,7 +107,7 @@ cat > "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/config.env" <<EOF
 # $MARKER
 SSH_PORT=$ssh_port
 CODING_TOOL_INTEGRATIONS=claude codex aiobserver
-ENVIRONMENT_PROFILES=orca
+ENVIRONMENT_PROFILES=
 HOST_BASE=$STATE/host
 RESTRICTED_DISK_PATHS=$STATE/host
 FORWARD_SSH_AGENT=0
@@ -446,8 +446,8 @@ api_contains owner "$resume_marker" || die 'reselection did not ingest the recor
 ok 'reselection preserved history and resumed ingestion'
 
 status_output="$(yard status)"
-grep -Eq '^[[:space:]]+profiles[[:space:]]+orca$' <<<"$status_output" \
-  || die 'detailed status did not render the selected resource-only profile'
+grep -Eq '^[[:space:]]+profiles[[:space:]]+all$' <<<"$status_output" \
+  || die 'detailed status did not render the empty profile selection'
 grep -Eq "^[[:space:]]+aiobserver[[:space:]]+up[[:space:]]+\\(http://127\\.0\\.0\\.1:$observer_port/\\)$" \
   <<<"$status_output" || die 'detailed status omitted the healthy observer owner URL'
 ok 'detailed status reports the selected profiles and healthy dashboard URL'

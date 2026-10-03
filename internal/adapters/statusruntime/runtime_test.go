@@ -261,9 +261,11 @@ func TestRuntimeUsesTheSameMeasurementCommandForSyncAndAsyncRefresh(t *testing.T
 		t.Fatal(err)
 	}
 	runtime.Environment["SPACE_COMMAND"] = commandPath
-	if !runtime.startSpaceRefresh(yard, filepath.Join(root, "async-space.cache")) {
+	cache := filepath.Join(root, "async-space.cache")
+	if !runtime.startSpaceRefresh(yard, cache) {
 		t.Fatal("async refresh did not start")
 	}
+	t.Cleanup(func() { waitSpaceCache(t, cache, "1G") })
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if payload, err := os.ReadFile(commandPath); err == nil {

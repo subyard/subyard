@@ -330,15 +330,15 @@ func TestPayloadImportDenylistAndConsumerMapping(t *testing.T) {
 		t.Fatalf("unrelated staging payload was rejected: %v", err)
 	}
 
-	staging, mapped, err := runtime.consumerPath("staging-env", "demo")
+	staging, mapped, err := runtime.consumerPath("fixture-env", "demo")
 	if err != nil || !mapped ||
-		staging != filepath.Join(runtime.config.ConsumerRoot, "staging", "demo.env") {
+		staging != filepath.Join(runtime.config.ConsumerRoot, "mapped", "demo.env") {
 		t.Fatalf("staging consumer mapping drifted: path=%q mapped=%v err=%v", staging, mapped, err)
 	}
-	if runtime.detectConsumer(staging) != "staging-env" || runtime.detectZone(staging) != "demo" {
+	if runtime.detectConsumer(staging) != "fixture-env" || runtime.detectZone(staging) != "demo" {
 		t.Fatalf("consumer detection drifted for %s", staging)
 	}
-	if _, _, err := runtime.consumerPath("staging-env", "../prod"); err == nil {
+	if _, _, err := runtime.consumerPath("fixture-env", "../prod"); err == nil {
 		t.Fatal("consumer zone traversal was accepted")
 	}
 
@@ -346,11 +346,11 @@ func TestPayloadImportDenylistAndConsumerMapping(t *testing.T) {
 
 func TestWorkflowArgumentValidationIsDirectAndSideEffectFree(t *testing.T) {
 	options, err := parseAdd([]string{
-		"API token", "--kind", "token", "--zone", "qa", "--consumer", "staging-env",
+		"API token", "--kind", "token", "--zone", "qa", "--consumer", "fixture-env",
 		"--exclusive", "--yes",
 	})
 	if err != nil || options.label != "API token" || options.kind != "token" ||
-		options.zone != "qa" || options.consumer != "staging-env" || !options.exclusive {
+		options.zone != "qa" || options.consumer != "fixture-env" || !options.exclusive {
 		t.Fatalf("keys add parse drifted: %#v err=%v", options, err)
 	}
 	for _, arguments := range [][]string{
@@ -946,6 +946,8 @@ func credentialFixture(t *testing.T) *Runtime {
 	for _, name := range []string{"sops", "age-keygen"} {
 		writeCredentialFile(t, filepath.Join(tools, "bin", name), "#!/bin/sh\nexit 0\n", 0o700)
 	}
+	writeCredentialFile(t, filepath.Join(root, "checkout", "config", "profiles", "mapping", "stop.sh"), "#!/bin/sh\nexit 0\n", 0o700)
+	writeCredentialFile(t, filepath.Join(root, "checkout", "config", "profiles", "mapping", "profile.json"), `{"schema_version":1,"consumers":[{"id":"fixture-env","zone":"*","path":"mapped/{zone}.env","format":"file","stop_handler":"stop.sh"}]}`, 0o600)
 	runtime, err := New(Config{
 		RepositoryRoot: filepath.Join(root, "checkout"),
 		Root:           filepath.Join(root, "credentials"),
@@ -1008,7 +1010,7 @@ func credentialMetadata(revision, actor string, counter int64) domain.Credential
 		Kind:          "token",
 		Zone:          "qa",
 		Scope:         "staging",
-		Consumer:      "staging-env",
+		Consumer:      "fixture-env",
 		State:         "active",
 		RecipientActors: []string{
 			"actor-a",

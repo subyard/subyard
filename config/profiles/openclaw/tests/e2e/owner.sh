@@ -6,6 +6,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd -P)"
 STATE=''
 YARD_NAME=''
 YARD_BIN=''
+TOKEN=''
+MARKER=openclaw-profile-e2e-v1
 
 die() { printf 'openclaw-e2e: %s\n' "$*" >&2; exit 2; }
 [ "${SUBYARD_E2E_VM:-}" = 1 ] || die 'run on VM1 through dev/agent-e2e.sh'
@@ -22,12 +24,28 @@ incus() {
     /usr/bin/incus "$@"
   fi
 }
-yard() { "$YARD_BIN" -Y "$YARD_NAME" "$@"; }
+yard() {
+  # Init may update account membership without refreshing this fixture's groups.
+  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+    local command
+    printf -v command '%q ' "$YARD_BIN" -Y "$YARD_NAME" "$@"
+    sg incus-admin -c "$command"
+  else
+    "$YARD_BIN" -Y "$YARD_NAME" "$@"
+  fi
+}
+
+# shellcheck source=dev/e2e/lib-owner-project-contract.sh
+. "$ROOT/dev/e2e/lib-owner-project-contract.sh"
 
 cleanup() {
   local rc=$?
   trap - EXIT INT TERM
   set +e
+  if [ -n "$TOKEN" ]; then
+    project_contract_clean_tree "/tmp/subyard-p0-project-$TOKEN" "$MARKER" || rc=3
+  fi
   if [ -n "$YARD_NAME" ] && [ -f "${SUBYARD_CONFIG_HOME:-}/yards/$YARD_NAME/config.env" ]; then
     install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/platform-sentinel"
     printf 'SSH_PORT=64997\n' > "$SUBYARD_CONFIG_HOME/yards/platform-sentinel/config.env"
@@ -46,6 +64,7 @@ trap cleanup EXIT INT TERM
 STATE="$(mktemp -d /var/tmp/subyard-openclaw.XXXXXX)"
 printf '%s\n' openclaw-profile-e2e-v1 > "$STATE/.marker"
 token="$(printf '%s' "${STATE##*.}" | tr '[:upper:]' '[:lower:]')"
+TOKEN="$token"
 YARD_NAME="openclaw-e2e-$token"
 export SUBYARD_OPERATOR_HOME="$HOME"
 export SUBYARD_CONFIG_HOME="$STATE/config"
@@ -91,7 +110,7 @@ provision_first="$STATE/provision-first.out"
 yard provision openclaw --yes > "$provision_first"
 grep -Fq 'provisioning openclaw' "$provision_first" \
   || die 'public provision did not apply the selected OpenClaw profile hook'
-yard start
+yard start --yes
 
 check_guest_state() {
   local docs_hash
@@ -125,6 +144,23 @@ check_guest_state() {
 }
 check_guest_state
 
+# Preserve the real OpenClaw L2 project scenario after its generic P0 fixture moved.
+export SUBYARD_TEST_PROJECT_ENGINE="$YARD_BIN"
+cat > "$STATE/project-yard" <<'PROJECT_YARD'
+#!/usr/bin/env bash
+set -euo pipefail
+if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
+  && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+  printf -v command '%q ' "$SUBYARD_TEST_PROJECT_ENGINE" "$@"
+  exec sg incus-admin -c "exec $command"
+fi
+exec "$SUBYARD_TEST_PROJECT_ENGINE" "$@"
+PROJECT_YARD
+chmod 0700 "$STATE/project-yard"
+printf 'openclaw_e2e_stage=projects\n'
+PROJECT_CONTRACT_BIN="$STATE/project-yard" PROJECT_CONTRACT_YARD="$YARD_NAME" \
+  PROJECT_CONTRACT_UID="$(id -u dev)" owner_project_contract openclaw
+
 # Exercise staging container bring-up and teardown with a synthetic denylist fingerprint.
 # Up leaves the gateway stopped; it does not need source code, bot credentials, or exclusive-key consent.
 staging_status="$STATE/staging-status.out"
@@ -133,12 +169,83 @@ yard staging status > "$staging_status"
 yard qa-pool status > "$qa_status"
 grep -Fq "(no runner)" "$staging_status" || die 'fresh yard unexpectedly has a staging runner'
 grep -Fq "(no broker)" "$qa_status" || die 'fresh yard unexpectedly has a QA broker'
+install -d -m 0700 "$SUBYARD_CONFIG_HOME/overrides/host/staging"
+printf "GATEWAY_CMD='exec sleep infinity'\nSOURCE_BIND=/srv/staging-fixture\nIMAGE_DOCKERFILE=Dockerfile\nIMAGE_TAG=subyard-staging-fixture\n" \
+  > "$SUBYARD_CONFIG_HOME/overrides/host/staging/canonical.conf"
+chmod 0600 "$SUBYARD_CONFIG_HOME/overrides/host/staging/canonical.conf"
+yard shell --root -- install -d -m 0700 -o dev -g dev /srv/staging-fixture
+yard shell -- sh -eu -c 'cat > /srv/staging-fixture/Dockerfile' <<'GATEWAY_IMAGE'
+FROM ubuntu:24.04
+RUN apt-get update && apt-get install -y --no-install-recommends jq util-linux && rm -rf /var/lib/apt/lists/*
+GATEWAY_IMAGE
 yard staging up --yes > "$STATE/staging-up.out"
 yard staging status > "$staging_status"
 grep -Fq 'subyard-staging-canonical' "$staging_status" \
   || die 'staging status did not report its brought-up runner'
 grep -Fq 'gateway: down' "$staging_status" \
   || die 'staging bring-up unexpectedly started the gateway'
+
+# A compatible gateway command is an explicit input: no sibling app or account is needed.
+write_staging_config() { # <staging-marker> <public-fixture-token>
+  yard shell -- sh -eu -s -- "$1" "$2" <<'STAGING_CONFIG'
+directory=/srv/staging/canonical/vasily/openclaw
+install -d -m 0700 "$directory"
+jq -n --argjson staging "$1" --arg token "$2" \
+  '{_subyardStaging:$staging,channels:{telegram:{botToken:$token}}}' \
+  > "$directory/openclaw.json"
+chmod 0600 "$directory/openclaw.json"
+STAGING_CONFIG
+}
+assert_no_staging_lease() {
+  incus exec "$instance" --project "$project" -- test ! -e /srv/staging/_lease/bot.json \
+    || die 'refused or stopped staging gateway retained a bot lease'
+}
+printf 'openclaw_e2e_stage=staging-guard\n'
+write_staging_config false openclaw-e2e-synthetic-staging-token
+if yard staging start --yes > "$STATE/staging-unmarked.out" 2>&1; then
+  die 'staging start accepted an unmarked config'
+fi
+grep -Fq 'config not marked staging' "$STATE/staging-unmarked.out" \
+  || die 'unmarked staging config failed for an unexpected reason'
+assert_no_staging_lease
+write_staging_config true openclaw-e2e-synthetic-denylist-token
+if yard staging start --yes > "$STATE/staging-denied.out" 2>&1; then
+  die 'staging start accepted a denied bot fingerprint'
+fi
+grep -Fq 'fingerprint matches a recorded PROD fingerprint' "$STATE/staging-denied.out" \
+  || die 'denied bot fingerprint failed for an unexpected reason'
+assert_no_staging_lease
+
+printf 'openclaw_e2e_stage=staging-gateway\n'
+write_staging_config true openclaw-e2e-synthetic-staging-token
+yard staging start --yes > "$STATE/staging-start.out"
+yard staging status > "$staging_status"
+grep -Fq 'gateway: running' "$staging_status" || die 'configured gateway did not start'
+epoch="$(incus exec "$instance" --project "$project" -- \
+  jq -er '.holder == "canonical" and (.epoch | type == "number")' /srv/staging/_lease/bot.json)"
+[ "$epoch" = true ] || die 'running gateway did not own its bot lease'
+epoch="$(incus exec "$instance" --project "$project" -- jq -er .epoch /srv/staging/_lease/bot.json)"
+yard staging start --yes > "$STATE/staging-start-repeat.out"
+[ "$(incus exec "$instance" --project "$project" -- jq -er .epoch /srv/staging/_lease/bot.json)" = "$epoch" ] \
+  || die 'converged gateway start changed its lease epoch'
+gateway_pid="$(incus exec "$instance" --project "$project" -- \
+  docker exec subyard-staging-canonical cat /srv/staging/canonical/run/gateway.pid)"
+[[ "$gateway_pid" =~ ^[1-9][0-9]*$ ]] || die 'running gateway has an invalid process ID'
+yard staging stop --yes > "$STATE/staging-stop.out"
+yard staging status > "$staging_status"
+grep -Fq 'gateway: down' "$staging_status" || die 'configured gateway did not stop'
+incus exec "$instance" --project "$project" -- sh -eu -s -- "$gateway_pid" <<'VERIFY_GATEWAY_STOP'
+[ "$(docker inspect -f '{{.State.Running}}' subyard-staging-canonical)" = true ]
+docker exec subyard-staging-canonical sh -eu -c '
+  if state="$(cat "/proc/$1/stat" 2>/dev/null)"; then
+    state="${state##*) }"
+    [ "${state%% *}" = Z ]
+  else
+    [ ! -e "/proc/$1/stat" ]
+  fi
+' sh "$1"
+VERIFY_GATEWAY_STOP
+assert_no_staging_lease
 if yard qa-pool up --yes > "$STATE/qa-up.out" 2>&1; then
   die 'QA resource accepted bring-up without a broker source and generated secrets'
 fi
@@ -168,6 +275,6 @@ after="$(incus exec "$instance" --project "$project" -- sh -eu -c \
 [ "$before" = "$after" ] || die 'converged provision changed cache/config metadata'
 check_guest_state
 
-# This lane covers public provisioning and the staging container lifecycle. The external
+# This lane covers public provisioning, L2 projects, and the configured staging gateway. The external
 # obligations in external-obligations.json remain separately incomplete.
-printf 'ok: OpenClaw init, toolchain/cache ownership, provisioning idempotency, and staging container lifecycle\n'
+printf 'ok: OpenClaw provisioning, L2 projects, staging guards, gateway lifecycle, and lease cleanup\n'

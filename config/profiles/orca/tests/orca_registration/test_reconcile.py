@@ -31,6 +31,13 @@ class ReconcileTests(unittest.TestCase):
         return self.reconcile(self.discover(self.workspaces), self.rpc, self.state, apply=apply,
                               host_name=self.host_name)
 
+    def prepare_missing_repo(self):
+        init_git(self.root / "gone")
+        self.assertTrue(self.run_sync()["ready"])
+        repo = next(repo for repo in self.rpc.repos if repo["path"] == str(self.root / "gone"))
+        shutil.rmtree(self.root / "gone")
+        return repo
+
     def sidecar(self):
         return json.loads((self.state / "subyard-registration.json").read_text())
 
@@ -229,6 +236,137 @@ class ReconcileTests(unittest.TestCase):
         self.rpc.snapshots.clear()
         self.assertTrue(self.run_sync()["ready"])
         self.assertEqual(before[:1] + before[2:], self.rpc.repos)
+
+    def test_timed_out_saved_tab_read_retries_once_and_positive_result_preserves_repo(self):
+        repo = self.prepare_missing_repo()
+        original_call = self.rpc.call
+        deadline = 12345.0
+        self.rpc.deadline = deadline
+        list_calls = 0
+        observed_deadlines = []
+
+        def timeout_then_saved_tab(method, params=None, **kwargs):
+            nonlocal list_calls
+            if method == "session.tabs.listAll":
+                list_calls += 1
+                observed_deadlines.append(self.rpc.deadline)
+                if list_calls == 1:
+                    raise self.error("first read timed out", timed_out=True)
+                return {"snapshots": [{"worktree": repo["id"] + "::/old/worktree",
+                                       "tabs": [{"id": "saved"}]}]}
+            return original_call(method, params, **kwargs)
+
+        self.rpc.call = timeout_then_saved_tab
+        report = self.run_sync()
+        self.assertTrue(report["ready"], report)
+        self.assertEqual(2, list_calls)
+        self.assertEqual([deadline, deadline], observed_deadlines)
+        self.assertEqual(deadline, self.rpc.deadline)
+        self.assertIn(repo, self.rpc.repos)
+        self.assertTrue(any("session tabs" in warning for warning in report["warnings"]))
+        self.assertFalse(any(method == "repo.rm" for method, _ in self.rpc.calls))
+
+    def test_positive_fallback_stops_all_later_repo_and_empty_group_pruning(self):
+        first_path = self.root / "gone-first"
+        later_path = self.root / "gone-later"
+        retired_root = project(self.workspaces, "zz-retired")
+        for path in (first_path, later_path, retired_root):
+            init_git(path)
+        self.assertTrue(self.run_sync()["ready"])
+        first = next(repo for repo in self.rpc.repos if repo["path"] == str(first_path))
+        later = next(repo for repo in self.rpc.repos if repo["path"] == str(later_path))
+        retired = next(repo for repo in self.rpc.repos if repo["path"] == str(retired_root))
+        shutil.rmtree(first_path)
+        shutil.rmtree(later_path)
+        shutil.rmtree(retired_root.parent)
+
+        # Fix candidate order so the positive fallback occurs before another
+        # missing repo and an otherwise deletable project group.
+        active = [repo for repo in self.rpc.repos
+                  if repo["path"] == str(self.root)]
+        self.rpc.repos = active + [first, later]
+        self.assertNotIn(retired, self.rpc.repos)
+        before_repos = copy.deepcopy(self.rpc.repos)
+        before_groups = copy.deepcopy(self.rpc.groups)
+        original_call = self.rpc.call
+        list_calls = 0
+
+        def timeout_then_saved_tab(method, params=None, **kwargs):
+            nonlocal list_calls
+            if method == "session.tabs.listAll":
+                list_calls += 1
+                if list_calls == 1:
+                    raise self.error("first read timed out", timed_out=True)
+                return {"snapshots": [{"worktree": first["id"] + "::/old/worktree",
+                                       "tabs": [{"id": "saved"}]}]}
+            return original_call(method, params, **kwargs)
+
+        self.rpc.call = timeout_then_saved_tab
+        report = self.run_sync()
+        self.assertTrue(report["ready"], report)
+        self.assertEqual(before_groups, self.rpc.groups)
+        self.assertEqual(before_repos, self.rpc.repos)
+        self.assertEqual(2, list_calls)
+        self.assertFalse(any(method in ("repo.rm", "projectGroup.delete")
+                             for method, _ in self.rpc.calls))
+        self.assertTrue(any("session tabs" in warning for warning in report["warnings"]))
+
+    def test_timed_out_saved_tab_read_never_prunes_without_positive_retry_evidence(self):
+        outcomes = (
+            ("empty", {"snapshots": []}),
+            ("unrelated", {"snapshots": [{"worktree": "other::/worktree", "tabs": [{"id": "saved"}]}]}),
+            ("invalid", {"snapshots": [{"worktree": "missing-tabs"}]}),
+            ("second-timeout", self.error("second read timed out", timed_out=True)),
+        )
+        for index, (name, retry_result) in enumerate(outcomes):
+            with self.subTest(name=name):
+                self.rpc = Catalog()
+                self.state = Path(self.tmp.name) / ("state-" + str(index))
+                repo = self.prepare_missing_repo()
+                original_call = self.rpc.call
+                list_calls = 0
+
+                def timeout_then_result(method, params=None, **kwargs):
+                    nonlocal list_calls
+                    if method == "session.tabs.listAll":
+                        list_calls += 1
+                        if list_calls == 1:
+                            raise self.error("original saved-tab read timed out", timed_out=True)
+                        if isinstance(retry_result, Exception):
+                            raise retry_result
+                        return retry_result
+                    return original_call(method, params, **kwargs)
+
+                self.rpc.call = timeout_then_result
+                report = self.run_sync()
+                self.assertFalse(report["ready"], report)
+                self.assertEqual(2, list_calls)
+                self.assertIn("original saved-tab read timed out", " ".join(report["errors"]))
+                self.assertIn(repo, self.rpc.repos)
+                self.assertFalse(any(method == "repo.rm" for method, _ in self.rpc.calls))
+
+    def test_saved_tab_read_retries_only_typed_known_timeout(self):
+        for index, error in enumerate((self.error("known read failure"),
+                                        self.error("ambiguous timeout", unknown=True, timed_out=True))):
+            with self.subTest(unknown=error.unknown, timed_out=error.timed_out):
+                self.rpc = Catalog()
+                self.state = Path(self.tmp.name) / ("state-no-retry-" + str(index))
+                self.prepare_missing_repo()
+                original_call = self.rpc.call
+                list_calls = 0
+
+                def fail_without_retry(method, params=None, **kwargs):
+                    nonlocal list_calls
+                    if method == "session.tabs.listAll":
+                        list_calls += 1
+                        raise error
+                    return original_call(method, params, **kwargs)
+
+                self.rpc.call = fail_without_retry
+                report = self.run_sync()
+                self.assertFalse(report["ready"], report)
+                self.assertEqual(1, list_calls)
+                self.assertFalse(any(method == "repo.rm" for method, _ in self.rpc.calls))
 
     def test_cleanup_skips_incomplete_scan_and_unavailable_or_changed_workspace(self):
         init_git(self.root / "gone")

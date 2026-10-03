@@ -115,8 +115,9 @@ owner_endpoint_ready() {
 }
 
 ingress_active() {
+  # Drain the stream so a matching marker cannot cause producer SIGPIPE.
   yexec nft list chain inet subyard_orca input 2>/dev/null |
-    grep -Fq 'comment "subyard-orca-managed"'
+    grep -F 'comment "subyard-orca-managed"' >/dev/null
 }
 
 wait_service_ready() {
@@ -532,7 +533,7 @@ case "${1:-}" in
   up)
     port="${2:?guest port is required}"
     if nft list table inet "$table" >/dev/null 2>&1; then
-      nft list chain inet "$table" input | grep -Fq "comment \"$marker\"" \
+      nft list chain inet "$table" input | grep -F "comment \"$marker\"" >/dev/null \
         || { printf 'refusing unowned nft table inet %s\n' "$table" >&2; exit 1; }
       nft delete table inet "$table"
     fi
@@ -542,7 +543,7 @@ case "${1:-}" in
     ;;
   down)
     if nft list table inet "$table" >/dev/null 2>&1; then
-      nft list chain inet "$table" input | grep -Fq "comment \"$marker\"" \
+      nft list chain inet "$table" input | grep -F "comment \"$marker\"" >/dev/null \
         || { printf 'refusing unowned nft table inet %s\n' "$table" >&2; exit 1; }
       nft delete table inet "$table"
     fi

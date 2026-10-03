@@ -6,3 +6,6 @@ bash "$ROOT/tests/helpers/profile-go.sh" openclaw
 bash "$ROOT/config/profiles/openclaw/tests/openclaw-provision-check.sh"
 bash "$ROOT/config/profiles/openclaw/tests/openclaw-resource-protocol.sh"
 bash "$ROOT/config/profiles/openclaw/tests/e2e-controller.sh"
+bash "$ROOT/tests/yard-keys.sh" "$ROOT/config/profiles/openclaw/tests/credential-scenario.sh"
+bash "$ROOT/config/profiles/openclaw/tests/consumer-stop.sh"
+bash "$ROOT/config/profiles/openclaw/tests/resource-lifecycle.sh"

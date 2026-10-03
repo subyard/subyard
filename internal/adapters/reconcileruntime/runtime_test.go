@@ -1,6 +1,7 @@
 package reconcileruntime
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -18,6 +19,33 @@ import (
 	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
+
+func TestSecurityAssessmentDoesNotRenderDrift(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	runtime := Runtime{
+		RepositoryRoot: testkit.TempDir(t), Stdout: &stdout, Stderr: &stderr,
+		Yard: domain.Context{YardName: "sample", IncusProject: "subyard-sample", YardInstanceName: "yard-sample"},
+		Incus: &testkit.Incus{Reconcile: ports.ReconcileState{
+			ProjectFound: true, InstanceFound: true,
+			Instance: ports.InstanceInfo{Devices: map[string]map[string]string{
+				"sample-relay": {"type": "proxy", "listen": "udp:192.0.2.1:41999", "connect": "udp:10.80.0.2:41999"},
+			}},
+		}},
+	}
+	converged, err := runtime.CheckStage(context.Background(), ports.ReconcileStageSecurity)
+	if err != nil || converged {
+		t.Fatalf("security drift: converged=%v, err=%v", converged, err)
+	}
+	if stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("assessment rendered drift: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if err := runtime.ApplyStage(context.Background(), ports.ReconcileStageSecurity); err == nil {
+		t.Fatal("security operation accepted an undeclared public proxy")
+	}
+	if !strings.Contains(stderr.String(), `proxy device "sample-relay" is not loopback-only or declared by an active resource`) {
+		t.Fatalf("security operation omitted its diagnostic: %q", stderr.String())
+	}
+}
 
 type networkPolicyFixture struct {
 	checkErr  error
@@ -1282,14 +1310,14 @@ func TestExtrasDesiredStateIsParsedAndValidatedInGo(t *testing.T) {
 
 func TestExtrasAcceptsResourceOnlyProfileAndRejectsUnknownProfile(t *testing.T) {
 	root := t.TempDir()
-	resources := filepath.Join(root, "config", "profiles", "orca", "resources")
+	resources := filepath.Join(root, "config", "profiles", "synthetic", "resources")
 	if err := os.MkdirAll(resources, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(resources, "orca.res"), []byte("resource\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(resources, "sample.res"), []byte("resource\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	runtime := Runtime{RepositoryRoot: root, Environment: []string{"ENVIRONMENT_PROFILES=orca"}}
+	runtime := Runtime{RepositoryRoot: root, Environment: []string{"ENVIRONMENT_PROFILES=synthetic"}}
 	values, err := runtime.extrasContext()
 	if err != nil {
 		t.Fatalf("resource-only profile was rejected: %v", err)

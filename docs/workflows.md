@@ -199,7 +199,12 @@ an opt-in staging gateway isolated from production. The same profile owns `yard 
 credential broker that leases distinct staging test bots to concurrent OpenClaw QA runs. These
 commands require the OpenClaw profile's prerequisites and resource configuration. The shipped
 [OpenClaw L1 guide](../config/profiles/openclaw/openclaw-l1.md) covers that profile's build and test
-lane.
+lane. The staging zone's `GATEWAY_CMD` selects the application's launcher explicitly. The default
+`scripts/vasily gateway run` is a legacy compatibility preset; a sibling checkout is not required
+by Subyard. Set the zone configuration under `overrides/host/staging/<zone>.conf` to use another
+compatible command, with its own source/image and staging configuration. The profile's disposable
+VM acceptance uses a synthetic gateway to verify fingerprint guards, start/stop and lease cleanup;
+real application/provider checks require their declared external inputs.
 
 Use [`yard keys`](keys.md) for selected static staging and QA credentials. The ledger stays on the
 owner host and materializes only an authorized consumer file; it does not synchronize coding-agent

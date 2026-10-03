@@ -165,33 +165,8 @@ func (setting Setting) validateDefault(value string) error {
 }
 
 func (definition Definition) validateExecutable(path string) error {
-	if !relative(path) {
-		return errors.New("handler path escapes profile")
-	}
-	root, err := filepath.EvalSymlinks(definition.Root)
-	if err != nil {
-		return errors.New("profile root cannot be resolved")
-	}
-	current := definition.Root
-	for _, part := range strings.Split(path, string(filepath.Separator)) {
-		current = filepath.Join(current, part)
-		info, err := os.Lstat(current)
-		if err != nil || info.Mode()&os.ModeSymlink != 0 {
-			return errors.New("handler path must not traverse symlinks")
-		}
-		if current != filepath.Join(definition.Root, path) && !info.IsDir() {
-			return errors.New("handler parent must be a directory")
-		}
-	}
-	info, err := os.Lstat(current)
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
-		return errors.New("handler must be an executable regular file")
-	}
-	resolved, err := filepath.EvalSymlinks(current)
-	if err != nil || resolved != filepath.Join(root, path) {
-		return errors.New("handler must remain within profile root")
-	}
-	return nil
+	_, err := definition.ExecutablePath(path)
+	return err
 }
 
 // ExecutablePath revalidates a profile hook and keeps updater-pinned directory
@@ -256,6 +231,8 @@ func (definition Definition) ExecutablePath(path string) (string, error) {
 }
 
 var profileDescriptorRoot = regexp.MustCompile(`^/proc/[1-9][0-9]*/fd/(0|[1-9][0-9]*)/`)
+
+var pinnedRepositoryRoot = regexp.MustCompile(`^/proc/(self|[1-9][0-9]*)/fd/(0|[1-9][0-9]*)$`)
 
 // ReadExecutable shares the runtime hook's validation before reading guest hooks.
 func (definition Definition) ReadExecutable(path string) ([]byte, error) {

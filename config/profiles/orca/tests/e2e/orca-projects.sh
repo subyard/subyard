@@ -36,17 +36,18 @@ incus() {
   fi
 }
 
-yard() {
-  # Init refreshes its child session; the fixture's parent keeps the old groups.
+yard_engine() {
+  local command
+  # Init refreshes its child session; this fixture can retain the old groups.
   if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
     && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
-    local command
-    printf -v command '%q ' "$YARD_BIN" -Y "$YARD_NAME" "$@"
+    printf -v command '%q ' "$YARD_BIN" "$@"
     sg incus-admin -c "exec $command"
   else
-    "$YARD_BIN" -Y "$YARD_NAME" "$@"
+    "$YARD_BIN" "$@"
   fi
 }
+yard() { yard_engine -Y "$YARD_NAME" "$@"; }
 guest_root() { incus --project "$PROJECT" exec "$INSTANCE" -- "$@"; }
 guest_dev() {
   incus --project "$PROJECT" exec "$INSTANCE" --user 1000 --group 1000 \
@@ -61,7 +62,7 @@ cleanup() {
   trap - EXIT INT TERM
   set +e
   if [ "$REMOTE_ADDED" -eq 1 ]; then
-    "$YARD_BIN" remote remove orca-self --yes >/dev/null 2>&1 || rc=3
+    yard_engine remote remove orca-self --yes >/dev/null 2>&1 || rc=3
   fi
   if [ -n "$SSHD_PID" ] && kill -0 "$SSHD_PID" 2>/dev/null; then
     kill -TERM "$SSHD_PID" 2>/dev/null || true
@@ -89,17 +90,20 @@ free_port() {
 catalog() { orca_rpc repo.list; }
 groups() { orca_rpc projectGroup.list; }
 probe_runtime() {
-  # Compare cheap native requests after a failure, without logging their payloads.
+  # Probe saved-tab protection and cheap native requests without logging payloads.
   guest_dev python3 -B - <<'YARD' || true
 import importlib.util, time
 spec = importlib.util.spec_from_file_location('fixture', '/tmp/orca-projects-helper.py')
 fixture = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fixture)
-for method in ('status.get', 'projectGroup.list', 'repo.list'):
+for method in ('session.tabs.listAll', 'status.get', 'projectGroup.list', 'repo.list'):
     started = time.monotonic()
     try:
-        fixture.call_any_result('/srv/agents/orca/config/orca/orca-runtime.json', method, None)
+        response = fixture.call_any_result('/srv/agents/orca/config/orca/orca-runtime.json', method, None)
         result = 'responded'
+        if method == 'session.tabs.listAll':
+            snapshots = fixture.snapshot_tabs(response)
+            result += f' snapshots={len(snapshots)} tabs={sum(len(item["tabs"]) for item in snapshots)}'
     except fixture.SafeRpcError as error:
         result = str(error)
     print(f'orcaprobe: {method}: {result} ({time.monotonic() - started:.1f}s)', flush=True)
@@ -793,9 +797,9 @@ SSH
 chmod 0755 "$STATE/bin/ssh"
 export ORCA_E2E_SSH_CONFIG="$HOME/.ssh/config"
 export PATH="$STATE/bin:$PATH"
-"$YARD_BIN" remote add orca-self orca-owner-self --yard "$YARD_NAME" --yes >/dev/null
+yard_engine remote add orca-self orca-owner-self --yard "$YARD_NAME" --yes >/dev/null
 REMOTE_ADDED=1
-"$YARD_BIN" -Y orca-self sync "$remote_source" --name remote-sync --yes >/dev/null
+yard_engine -Y orca-self sync "$remote_source" --name remote-sync --yes >/dev/null
 remote_group="$(group_id /srv/workspaces/remote-sync/src)"
 assert_repo /srv/workspaces/remote-sync/src folder "$remote_group" remote-sync
 

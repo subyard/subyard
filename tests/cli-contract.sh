@@ -34,7 +34,10 @@ completion_words="$({
   # shellcheck source=completions/yard.bash
   . "$ROOT/completions/yard.bash"
   COMP_WORDS=("$ROOT/bin/yard" init --r); COMP_CWORD=2; _yard; printf '%s\n' "${COMPREPLY[@]}"
-  COMP_WORDS=("$ROOT/bin/yard" provision ope); COMP_CWORD=2; _yard; printf '%s\n' "${COMPREPLY[@]}"
+  mkdir -p "$CLI_TMP/profiles/config/profiles/synthetic"
+  : > "$CLI_TMP/profiles/config/profiles/synthetic/profile.conf"
+  _yard_repo(){ printf '%s\n' "$CLI_TMP/profiles"; }
+  COMP_WORDS=("$ROOT/bin/yard" provision syn); COMP_CWORD=2; _yard; printf '%s\n' "${COMPREPLY[@]}"
   COMP_WORDS=("$ROOT/bin/yard" --res); COMP_CWORD=1; _yard; printf '%s\n' "${COMPREPLY[@]}"
   COMP_WORDS=("$ROOT/bin/yard" integration en); COMP_CWORD=2; _yard; printf '%s\n' "${COMPREPLY[@]}"
   COMP_WORDS=("$ROOT/bin/yard" -Y demo integration dis); COMP_CWORD=4; _yard; printf '%s\n' "${COMPREPLY[@]}"
@@ -43,7 +46,7 @@ completion_words="$({
   COMP_WORDS=("$ROOT/bin/yard" config sync push --a); COMP_CWORD=4; _yard; printf '%s\n' "${COMPREPLY[@]}"
 } | sort -u)"
 grep -qx -- '--reset' <<<"$completion_words" || fail 'Bash completion omitted manifest init options'
-grep -qx -- 'openclaw' <<<"$completion_words" || fail 'Bash completion omitted profile values'
+grep -qx -- 'synthetic' <<<"$completion_words" || fail 'Bash completion omitted profile values'
 grep -qx -- '--resources' <<<"$completion_words" || fail 'Bash completion omitted global resources option'
 grep -qx -- 'enable' <<<"$completion_words" || fail 'Bash completion omitted integration enable'
 grep -qx -- 'disable' <<<"$completion_words" || fail 'Bash completion omitted selected-yard integration disable'

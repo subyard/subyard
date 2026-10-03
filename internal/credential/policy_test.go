@@ -210,7 +210,7 @@ func TestExclusiveAccessOwnsAssignmentTrustAndFreshness(t *testing.T) {
 func metadata(revision, actor string, counter int64) domain.CredentialMetadata {
 	return domain.CredentialMetadata{
 		SchemaVersion: 1, CredentialID: "cred-0123456789abcdef0123456789abcdef", RevisionID: revision,
-		Label: "fixture", Kind: "token", Zone: "fixture", Scope: "staging", Consumer: "staging-env",
+		Label: "fixture", Kind: "token", Zone: "fixture", Scope: "staging", Consumer: "synthetic-consumer",
 		State: "active", RecipientActors: []string{"actor-a"}, Syncable: true,
 		ActorID: actor, ActorCounter: counter, Timestamp: time.Unix(100, 0),
 	}

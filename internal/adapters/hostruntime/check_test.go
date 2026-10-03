@@ -132,7 +132,7 @@ func TestHostCheckDoesNotRecommendStorageCapacity(t *testing.T) {
 	if !strings.Contains(got, "[ ok ] 32 GiB free on / (fs: test)") {
 		t.Fatalf("storage fact was not reported as ready:\n%s", got)
 	}
-	if strings.Contains(got, "50 GiB") || strings.Contains(got, "android profile wants") {
+	if strings.Contains(got, "50 GiB") || strings.Contains(got, "profile wants") {
 		t.Fatalf("storage recommendation leaked into host check:\n%s", got)
 	}
 }

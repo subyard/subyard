@@ -29,6 +29,114 @@ def load(name):
     return module
 
 poolmod, client = load('pool'), load('client')
+lifecycle = load('tests/e2e/android-pool-lifecycle')
+
+
+class ClientBridge(unittest.TestCase):
+    def test_coalesced_process_ack_and_payload_are_delivered_before_eof(self):
+        payload = b'\x00synthetic-stream-payload\xff'
+        output = b'{"ok":true,"result":{}}\n' + payload
+        command = 'import sys; sys.stdout.buffer.write(' + repr(output) + '); sys.stdout.buffer.flush()'
+        channel = subprocess.Popen([sys.executable, '-I', '-B', '-c', command],
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        local, peer = socket.socketpair()
+        peer.settimeout(3)
+        try:
+            channel.wait(timeout=5)
+            self.assertEqual(client.response(channel), {})
+            self.assertEqual(channel.stdout.peek(1), payload)
+            client.bridge(local, channel)
+            received = bytearray()
+            while chunk := peer.recv(65536):
+                received.extend(chunk)
+            self.assertEqual(bytes(received), payload)
+            self.assertTrue(channel.stdin.closed and channel.stdout.closed)
+            self.assertEqual(channel.returncode, 0)
+        finally:
+            local.close()
+            peer.close()
+            if not channel.stdout.closed:
+                client.close(channel)
+
+    def test_coalesced_socket_ack_and_payload_are_delivered_before_eof(self):
+        payload = b'\x00synthetic-stream-payload\xff'
+        channel, remote = socket.socketpair()
+        local, peer = socket.socketpair()
+        peer.settimeout(3)
+        try:
+            remote.sendall(b'{"ok":true,"result":{}}\n' + payload)
+            remote.shutdown(socket.SHUT_WR)
+            self.assertEqual(client.response(channel), {})
+            client.bridge(local, channel)
+            received = bytearray()
+            while chunk := peer.recv(65536):
+                received.extend(chunk)
+            self.assertEqual(bytes(received), payload)
+            self.assertEqual(channel.fileno(), -1)
+        finally:
+            for stream in (channel, remote, local, peer):
+                stream.close()
+
+
+class LifecycleObservation(unittest.TestCase):
+    def test_http_response_before_completion_timeout_remains_failed_and_private(self):
+        now, limits = 0, []
+        def stalled(*args, **kwargs):
+            nonlocal now
+            limits.append(kwargs['timeout'])
+            now += kwargs['timeout']
+            raise subprocess.TimeoutExpired(['private-command'], kwargs['timeout'],
+                output=b'HTTP/1.0 204 No Content\r\nPrivate: private-output\r\n',
+                stderr=b'private-stderr')
+        lease = dict(endpoint='/synthetic-adb', allocation=dict(android_serial='emulator-5554'))
+        observed = io.StringIO()
+        with patch.object(lifecycle.subprocess, 'run', side_effect=stalled), \
+                patch.object(lifecycle.time, 'monotonic', side_effect=lambda: now), \
+                patch.object(lifecycle.time, 'sleep'), contextlib.redirect_stdout(observed):
+            with self.assertRaises(lifecycle.Failure) as raised:
+                lifecycle.require_network_and_renderer(lease)
+        self.assertIn('first=completion_timeout(http=204)', str(raised.exception))
+        self.assertIn('last=completion_timeout(http=204)', str(raised.exception))
+        self.assertEqual(sum(limits[:-1]), 90)
+        self.assertEqual(limits[-1], 5, 'failure-only observation has its own five-second bound')
+        self.assertIn('adb=timeout', observed.getvalue())
+        self.assertNotIn('private-', observed.getvalue() + str(raised.exception))
+
+    def test_slow_power_sample_recovers_without_accepting_awake_device(self):
+        with patch.object(lifecycle, 'adb', side_effect=[
+            '', lifecycle.CommandTimeout('slow'), 'mWakefulness=Awake', 'mWakefulness=Asleep'
+        ]), patch.object(lifecycle.time, 'sleep'), contextlib.redirect_stdout(io.StringIO()):
+            lifecycle.idle_display({})
+
+        with patch.object(lifecycle, 'adb', side_effect=[
+            '', lifecycle.Failure('device unavailable')
+        ]), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(lifecycle.Failure, 'device unavailable'):
+                lifecycle.idle_display({})
+
+    def test_power_observation_deadline_remains_bounded(self):
+        now = 0
+        def sample(*args, **kwargs):
+            nonlocal now
+            if args[2] == 'input':
+                return ''
+            now += kwargs['timeout']
+            raise lifecycle.CommandTimeout('slow')
+        with patch.object(lifecycle, 'adb', side_effect=sample), \
+                patch.object(lifecycle.time, 'monotonic', side_effect=lambda: now), \
+                patch.object(lifecycle.time, 'sleep'), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(lifecycle.Failure, 'within 20 seconds'):
+                lifecycle.idle_display({})
+        self.assertEqual(now, 20)
+
+    def test_command_failure_reports_no_arguments(self):
+        with patch.object(lifecycle.subprocess, 'run', side_effect=subprocess.TimeoutExpired(['private-argument'], 5)):
+            with self.assertRaises(lifecycle.CommandTimeout) as raised:
+                lifecycle.call(['private-argument'], timeout=5)
+        self.assertNotIn('private-argument', str(raised.exception))
+        with patch.object(lifecycle.subprocess, 'run', side_effect=FileNotFoundError('private-argument')):
+            with self.assertRaisesRegex(lifecycle.Failure, '^command unavailable$'):
+                lifecycle.call(['private-argument'])
 
 
 class Runtime:
@@ -502,11 +610,11 @@ out.write(b'OKAY')
 out.flush()
 if not request().startswith(b'shell:'):
     raise SystemExit(6)
-out.write(b'OKAY1\n')
+out.write(b'OKAY101:ready\n')
 out.flush()
 '''
         cases = [(protocol, True, 1, 0),
-                 (protocol.replace("b'OKAY1\\n'", "b'OKAY0\\n'"), False, 1, 0),
+                 (protocol.replace("b'OKAY101:ready\\n'", "b'OKAY101:pending\\n'"), False, 1, 0),
                  ('import os; os.read(0, 64)', False, 0.1, 0),
                  ('import sys; sys.stdin.buffer.read()', False, 0.1, None)]
         for program, expected, timeout, exit_code in cases:
@@ -531,7 +639,8 @@ out.flush()
         commands = self.root / 'readiness-bin'
         commands.mkdir()
         for name, variable in (('getprop', 'BOOT_COMPLETE'), ('ip', 'GUEST_ADDRESS'),
-                               ('settings', 'WIFI_ENABLED')):
+                               ('settings', 'WIFI_ENABLED'), ('pidof', 'FRAMEWORK_PID'),
+                               ('service', 'WIFI_SERVICE')):
             command = commands / name
             command.write_text('#!/bin/sh\nprintf "%s\\n" "$' + variable + '"\n')
             command.chmod(0o755)
@@ -568,7 +677,7 @@ os.write(1, result.stdout)
         cases = [
             # A configured address is ready and never creates another saved network.
             ('1', '1', address, '0', '0', True, (True, False), False, False),
-            # A visible but unconfigured network asks for one manual connection per generation.
+            # A visible but unconfigured network asks for one connection per framework lifetime.
             ('1', '1', '', '0', '0', True, (False, True), False, True),
             # A failed connection does not claim either readiness or configuration.
             ('1', '1', '', '0', '1', True, (False, False), False, True),
@@ -588,12 +697,13 @@ os.write(1, result.stdout)
                 env = dict(os.environ, BOOT_COMPLETE=boot, GUEST_ADDRESS=address,
                            WIFI_ENABLED=wifi, WIFI_EXIT=wifi_exit, WIFI_CALL=str(wifi_call),
                            CONNECT_EXIT=connect_exit, CONNECT_CALL=str(connect_call),
+                           FRAMEWORK_PID='101', WIFI_SERVICE='Service wifi: found',
                            PATH=str(commands) + ':' + os.environ['PATH'])
                 process = subprocess.Popen([sys.executable, '-c', protocol], env=env,
                                            stdin=subprocess.PIPE, stdout=subprocess.PIPE)
                 try:
                     self.assertEqual(poolmod.Runtime.adb_ready(process, timeout=1,
-                                                                configure_wifi=configure), expected)
+                                                                wifi_state={} if configure else {'submitted_for': '101'}), expected)
                 finally:
                     process.stdin.close()
                     process.wait(timeout=2)
@@ -604,6 +714,72 @@ os.write(1, result.stdout)
                 self.assertEqual(connect_call.exists(), connect)
                 if connect:
                     self.assertEqual(connect_call.read_text(), 'wifi connect-network AndroidWifi open\n')
+
+    def test_wifi_submission_recovers_only_after_framework_or_service_change(self):
+        commands = self.root / 'framework-readiness-bin'
+        commands.mkdir()
+        for name, value in (
+            ('pidof', '$FRAMEWORK_PID'), ('service', '$WIFI_SERVICE'),
+            ('getprop', '1'), ('settings', '1'), ('ip', '$GUEST_ADDRESS')):
+            path = commands / name
+            path.write_text('#!/bin/sh\nprintf "%s\\n" "' + value + '"\n')
+            path.chmod(0o755)
+        submissions = self.root / 'wifi-submissions'
+        command = commands / 'cmd'
+        command.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$SUBMISSIONS"\n')
+        command.chmod(0o755)
+        protocol = r'''
+import os, subprocess
+
+def request():
+    size = int(os.read(0, 4), 16)
+    result = b''
+    while len(result) < size:
+        result += os.read(0, size - len(result))
+    return result
+
+assert request() == b'host:transport:emulator-5554'
+os.write(1, b'OKAY')
+command = request()
+assert command.startswith(b'shell:')
+os.write(1, b'OKAY')
+result = subprocess.run(['/bin/sh', '-c', command[6:].decode()], stdout=subprocess.PIPE)
+os.write(1, result.stdout)
+'''
+        state = {}
+        def probe(pid='101', service='Service wifi: found', address=''):
+            env = dict(os.environ, FRAMEWORK_PID=pid, WIFI_SERVICE=service,
+                       GUEST_ADDRESS=address, SUBMISSIONS=str(submissions),
+                       PATH=str(commands) + ':' + os.environ['PATH'])
+            process = subprocess.Popen([sys.executable, '-c', protocol], env=env,
+                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+            try:
+                return poolmod.Runtime.adb_ready(process, timeout=1, wifi_state=state)
+            finally:
+                process.stdin.close()
+                process.wait(timeout=2)
+                process.stdout.close()
+        def count():
+            return len(submissions.read_text().splitlines()) if submissions.exists() else 0
+
+        self.assertEqual(probe(), (False, True))
+        self.assertEqual(probe(), (False, False))
+        self.assertEqual(count(), 1, 'pending DHCP must not trigger another connection')
+        self.assertEqual(probe(pid='202'), (False, True))
+        self.assertEqual(probe(pid='202'), (False, False))
+        self.assertEqual(count(), 2, 'new framework must receive one connection')
+        self.assertEqual(probe(pid='202', address='    inet 10.0.2.16/24'), (True, False))
+        self.assertEqual(probe(pid='202', service='Service wifi: not found'), (False, False))
+        self.assertEqual(probe(pid='202'), (False, True))
+        self.assertEqual(probe(pid='202'), (False, False))
+        self.assertEqual(count(), 3, 'returning service must receive one connection')
+        for pid, service in [('garbage', 'Service wifi: found'), ('0', 'Service wifi: found'),
+                             ('202 303', 'Service wifi: found'),
+                             ('12345678901', 'Service wifi: found'), ('202', 'unexpected')]:
+            self.assertEqual(probe(pid=pid, service=service, address='    inet 10.0.2.16/24'),
+                             (False, False))
+        self.assertEqual(count(), 3, 'malformed identity must not submit a connection')
+        self.assertEqual(probe(pid='202'), (False, False))
 
     def test_viewer_relay_selects_scrcpy_forward_and_fences_clients(self):
         endpoint = str(self.root / 'viewer-adb.sock')
@@ -981,6 +1157,34 @@ os.write(1, result.stdout)
             server.shutdown()
             server.server_close()
 
+    def test_viewer_reports_signed_child_status_and_releases_its_lease(self):
+        address = str(self.root / 'control.sock')
+        server = poolmod.Server(address, poolmod.Handler)
+        server.pool = self.pool
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        original_spawn = subprocess.Popen
+        try:
+            for program, child_status in (
+                ('raise SystemExit(139)', 139),
+                ('import os, resource, signal; resource.setrlimit(resource.RLIMIT_CORE, (0, 0)); '
+                 'os.kill(os.getpid(), signal.SIGSEGV)', -11),
+            ):
+                with self.subTest(child_status=child_status):
+                    def spawn(command, *args, **kwargs):
+                        if command[0] == 'scrcpy':
+                            command = [sys.executable, '-I', '-B', '-c', program]
+                        return original_spawn(command, *args, **kwargs)
+                    with patch.object(client, 'CONTROL', address), \
+                            patch.object(client.subprocess, 'Popen', side_effect=spawn), \
+                            contextlib.redirect_stderr(io.StringIO()) as output:
+                        self.assertEqual(client.main(['view']), 139)
+                    self.assertEqual(output.getvalue(), f'Android viewer: child returncode {child_status}\n')
+                    self.assertFalse(self.runtime.running)
+                    self.assertTrue(all(slot['state'] == 'available' for slot in self.pool.status()['slots']))
+        finally:
+            server.shutdown()
+            server.server_close()
+
     def test_authorized_revoke_fences_tunnel_and_retries_quarantine(self):
         public = str(self.root / 'control.sock')
         admin = str(self.root / 'admin.sock')
@@ -1096,6 +1300,102 @@ os.write(1, result.stdout)
             client.CONTROL = previous
             server.shutdown()
             server.server_close()
+
+    @patch.object(poolmod.shutil, 'disk_usage', return_value=SimpleNamespace(free=64 * 1024**3))
+    def test_sdk_installer_failure_diagnostics_are_bounded_private_and_atomic(self, _disk):
+        sdk = self.root / 'diagnostic-sdk'
+        (sdk / 'licenses').mkdir(parents=True)
+        (sdk / 'licenses/android-sdk-license').write_text('accepted\n')
+        installer = sdk / 'cmdline-tools/latest/bin/sdkmanager'
+        installer.parent.mkdir(parents=True)
+        image = dict(key='a' * 64, package='system-images;android-36;google_apis;x86_64',
+                     revision='1.0.0', size=16, sha1='b' * 40)
+        images = poolmod.Images(self.root / 'diagnostic-images', sdk)
+        real_popen, calls = subprocess.Popen, []
+        def spawn(args, **kwargs):
+            process = real_popen(args, **kwargs)
+            calls.append((process, args, kwargs))
+            return process
+        for known in (True, False):
+            with self.subTest(known=known):
+                installer.write_text(f'#!{sys.executable}\n' + """
+import os, pathlib, sys, time
+target = pathlib.Path(sys.argv[1].removeprefix('--sdk_root='))
+assert sys.argv[2] == 'system-images;android-36;google_apis;x86_64'
+assert (target / 'licenses/android-sdk-license').read_text() == 'accepted\\n'
+assert os.environ['HOME'] == str(target.parent / 'home')
+assert os.environ['TMPDIR'] == str(target.parent / 'tmp')
+partial = target.joinpath(*sys.argv[2].split(';'))
+partial.mkdir(parents=True)
+(partial / 'system.img').write_bytes(b'partial')
+os.write(1, b'private-token /private/path 192.0.2.17 ' +
+         (b'java.net.UnknownHost' if KNOWN else b'private-unknown'))
+time.sleep(.3)
+os.write(2, b'Exception\\n' if KNOWN else b'private-unknown\\n')
+os.write(1, b'Z' * 100000)
+os.write(2, b'java.net.ConnectException\\n')
+os.write(1, b'Z' * 100000)
+os.write(2, (b'No space left on device' if KNOWN else b'private-unknown') + b' private-token\\n')
+raise SystemExit(7)
+""".replace('KNOWN', repr(known)))
+                installer.chmod(0o755)
+                with patch.object(poolmod.subprocess, 'Popen', side_effect=spawn):
+                    with self.assertRaises(poolmod.PoolError) as raised:
+                        images.ensure(image, threading.Event())
+                message = str(raised.exception)
+                self.assertIn('observed=' + ('dns,no_space' if known else 'unknown'), message)
+                self.assertIn('exit 7', message)
+                self.assertIn('free_bytes=' + str(64 * 1024**3), message)
+                self.assertIn('truncated=1', message)
+                for private in ('private-token', '/private/path', '192.0.2.17', str(self.root)):
+                    self.assertNotIn(private, message)
+                self.assertFalse(images.cached(image))
+                self.assertFalse(list(images.root.glob('download-*')))
+                process, args, kwargs = calls[-1]
+                self.assertEqual(args[0], str(installer))
+                self.assertEqual(args[2], image['package'])
+                self.assertEqual(kwargs['stdin'], subprocess.DEVNULL)
+                self.assertEqual(kwargs['stdout'], subprocess.PIPE)
+                self.assertEqual(kwargs['stderr'], subprocess.STDOUT)
+                self.assertTrue(kwargs['start_new_session'])
+                self.assertTrue(process.stdout.closed)
+                self.assertEqual(process.returncode, 7)
+
+    @patch.object(poolmod.shutil, 'disk_usage', return_value=SimpleNamespace(free=64 * 1024**3))
+    def test_noisy_sdk_installer_cancellation_still_kills_reaps_and_removes_stage(self, _disk):
+        sdk = self.root / 'noisy-sdk'
+        installer = sdk / 'cmdline-tools/latest/bin/sdkmanager'
+        installer.parent.mkdir(parents=True)
+        installer.write_text(f'#!{sys.executable}\nimport os\nwhile True: os.write(1, b"private-token" * 16384)\n')
+        installer.chmod(0o755)
+        image = dict(key='a' * 64, package='system-images;android-36;google_apis;x86_64',
+                     revision='1.0.0', size=16, sha1='b' * 40)
+        images = poolmod.Images(self.root / 'noisy-images', sdk)
+        class CancelAfterOutput:
+            def __init__(self):
+                self.reads = 0
+            def is_set(self):
+                return self.reads >= 3
+            def wait(self, seconds):
+                if seconds == 0:
+                    self.reads += 1
+                else:
+                    time.sleep(seconds)
+                return self.is_set()
+        real_popen, processes = subprocess.Popen, []
+        def spawn(*args, **kwargs):
+            process = real_popen(*args, **kwargs)
+            processes.append(process)
+            return process
+        started = time.monotonic()
+        with patch.object(poolmod.subprocess, 'Popen', side_effect=spawn):
+            with self.assertRaisesRegex(poolmod.PoolError, 'allocation cancelled'):
+                images.ensure(image, CancelAfterOutput())
+        self.assertLess(time.monotonic() - started, 3)
+        self.assertLess(processes[0].returncode, 0)
+        self.assertTrue(processes[0].stdout.closed)
+        self.assertFalse(images.cached(image))
+        self.assertFalse(list(images.root.glob('download-*')))
 
     @patch.object(poolmod.shutil, 'disk_usage', return_value=SimpleNamespace(free=64 * 1024**3))
     def test_single_download_atomic_pin_prune_and_redownload(self, _disk_usage):

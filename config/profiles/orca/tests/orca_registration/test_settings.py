@@ -26,7 +26,7 @@ class SettingsTests(unittest.TestCase):
             with self.subTest(arguments=arguments):
                 original = {"agentDefaultArgs": {"claude": "--verbose", **arguments},
                             "agentDefaultEnv": {"codex": {"EXAMPLE": "retained"}},
-                            "codexTerminalServerIsolation": False,
+                            "futurePreference": False,
                             "theme": "dark", "unrelated": {"retained": True}}
                 rpc = SettingsRPC(original)
                 self.assertFalse(codex_defaults(rpc))

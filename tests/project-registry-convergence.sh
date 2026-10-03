@@ -79,6 +79,7 @@ chmod 755 "$TMP/bin/ssh"
 # shellcheck source=tests/helpers/test-context.sh
 . "$ROOT/tests/helpers/test-context.sh"
 setup_test_context "$TMP"
+setup_test_repository "$TMP" "$ROOT"
 # Exercise resolver-owned registry paths and named-yard identity.
 unset SUBYARD_STATE_DIR ACCESS_KIND YARD_INSTANCE_NAME INCUS_PROJECT SSH_HOST
 export PATH="$TMP/bin:$PATH"
@@ -90,38 +91,38 @@ export REGISTRY_TEST_STATE="$TMP/state"
 # The hidden owner endpoint creates a yard-originated record without importing a foreign path.
 owner_id='demo-12345678'
 owner_state="$SUBYARD_CONFIG_HOME/projects/$owner_id.json"
-"$ROOT/bin/yard" _project-state upsert "$owner_id" Demo sync openclaw
+"$TMP/runtime/bin/yard" _project-state upsert "$owner_id" Demo sync synthetic
 assert_json "$owner_state" \
   '.projectId == "demo-12345678" and .name == "Demo" and .mode == "sync" and
-   .target == "openclaw" and .hostPath == "" and .yardPath == "/srv/workspaces/demo-12345678/src" and
+   .target == "synthetic" and .hostPath == "" and .yardPath == "/srv/workspaces/demo-12345678/src" and
    .sshHost == "yard" and .registrySource == "yard"'
-output="$("$ROOT/bin/yard" list)"
-assert_contains "$output" 'openclaw'
+output="$("$TMP/runtime/bin/yard" list)"
+assert_contains "$output" 'synthetic'
 assert_contains "$output" 'OWNER'
 
 # A later foreign upsert may refresh mode/target, but must not erase a real owner-host source path.
 jq '.hostPath="/owner/Demo"' "$owner_state" > "$owner_state.tmp" \
   && chmod 600 "$owner_state.tmp" && mv "$owner_state.tmp" "$owner_state"
-"$ROOT/bin/yard" _project-state upsert "$owner_id" Demo git yard
+"$TMP/runtime/bin/yard" _project-state upsert "$owner_id" Demo git yard
 assert_json "$owner_state" \
   '.hostPath == "/owner/Demo" and .mode == "git" and .target == "yard" and
    (has("registrySource") | not)'
-"$ROOT/bin/yard" _project-state unregister "$owner_id"
+"$TMP/runtime/bin/yard" _project-state unregister "$owner_id"
 [ -e "$owner_state" ] || fail 'foreign unregister removed a full owner-local record'
 wrong_source_key="$(printf %s /wrong/source | sha256sum | cut -d' ' -f1)"
-if "$ROOT/bin/yard" _project-state remove "$owner_id" "$wrong_source_key" >/dev/null 2>&1; then
+if "$TMP/runtime/bin/yard" _project-state remove "$owner_id" "$wrong_source_key" >/dev/null 2>&1; then
   fail 'owner removal accepted a mismatched source'
 fi
 [ -e "$owner_state" ] || fail 'mismatched owner removal changed project state'
 owner_source_key="$(printf %s /owner/Demo | sha256sum | cut -d' ' -f1)"
-"$ROOT/bin/yard" _project-state remove "$owner_id" "$owner_source_key"
+"$TMP/runtime/bin/yard" _project-state remove "$owner_id" "$owner_source_key"
 [ ! -e "$owner_state" ] || fail 'matching owner removal retained project state'
 
 # Synthetic records are removed symmetrically, and validation cannot escape the state directory.
-"$ROOT/bin/yard" _project-state upsert "$owner_id" Demo sync yard
-"$ROOT/bin/yard" _project-state unregister "$owner_id"
+"$TMP/runtime/bin/yard" _project-state upsert "$owner_id" Demo sync yard
+"$TMP/runtime/bin/yard" _project-state unregister "$owner_id"
 [ ! -e "$owner_state" ] || fail 'foreign unregister kept its synthetic owner record'
-if "$ROOT/bin/yard" _project-state upsert ../escape Bad sync yard >/dev/null 2>&1; then
+if "$TMP/runtime/bin/yard" _project-state upsert ../escape Bad sync yard >/dev/null 2>&1; then
   fail 'owner endpoint accepted an unsafe project id'
 fi
 
@@ -131,7 +132,7 @@ cat > "$REGISTRY_TEST_STATE/live-meta.json" <<'JSON'
 {"schema":1,"projectId":"../escape","name":"Unsafe ID","mode":"sync","target":"yard"}
 {"schema":1,"projectId":"unsafe-target-12345678","name":"Unsafe target","mode":"sync","target":"../../tmp"}
 JSON
-output="$("$ROOT/bin/yard" list --live 2>&1)"
+output="$("$TMP/runtime/bin/yard" list --live 2>&1)"
 legacy_state="$SUBYARD_CONFIG_HOME/projects/legacy-12345678.json"
 [ ! -e "$legacy_state" ] || fail 'live list imported L1 metadata into the owner registry'
 assert_not_contains "$output" 'Legacy'
@@ -144,7 +145,7 @@ rm -f "$REGISTRY_TEST_STATE/live-meta.json"
 cat > "$SUBYARD_CONFIG_HOME/yards/inner.env" <<'ENV'
 SSH_PORT=3333
 ENV
-"$ROOT/bin/yard" -Y inner _project-state upsert named-12345678 Named sync yard
+"$TMP/runtime/bin/yard" -Y inner _project-state upsert named-12345678 Named sync yard
 named_state="$SUBYARD_CONFIG_HOME/yards/inner/projects/named-12345678.json"
 assert_json "$named_state" '.sshHost == "yard-inner" and .hostPath == "" and .target == "yard"'
 
@@ -158,7 +159,7 @@ ENV
 mkdir -p "$TMP/projects/RemoteDemo"
 printf 'demo\n' > "$TMP/projects/RemoteDemo/file.txt"
 remote_id=RemoteDemo
-"$ROOT/bin/yard" -Y remote sync "$TMP/projects/RemoteDemo" --target yard --yes >/dev/null
+"$TMP/runtime/bin/yard" -Y remote sync "$TMP/projects/RemoteDemo" --target yard --yes >/dev/null
 remote_state="$SUBYARD_CONFIG_HOME/yards/remote/projects/$remote_id.json"
 [ ! -e "$remote_state" ] || fail 'native sync published obsolete controller project state'
 [ -s "$REGISTRY_TEST_STATE/owner-calls" ] || fail 'native sync did not converge owner state'
@@ -169,13 +170,13 @@ cp "$REGISTRY_TEST_STATE/yard-meta.json" "$REGISTRY_TEST_STATE/yard-meta-first.j
 
 rm -f "$REGISTRY_TEST_STATE/tar-stream"
 printf 'second\n' > "$TMP/projects/RemoteDemo/file.txt"
-"$ROOT/bin/yard" -Y remote sync "$TMP/projects/RemoteDemo" --target yard --yes >/dev/null
+"$TMP/runtime/bin/yard" -Y remote sync "$TMP/projects/RemoteDemo" --target yard --yes >/dev/null
 [ -e "$REGISTRY_TEST_STATE/tar-stream" ] || fail 'second native sync did not stream the project archive'
 jq -e '.projectId == "RemoteDemo-2" and .name == "RemoteDemo-2"' \
   "$REGISTRY_TEST_STATE/yard-meta.json" >/dev/null \
   || fail 'second native sync reused the first owner identity'
 printf 'third\n' > "$TMP/projects/RemoteDemo/file.txt"
-"$ROOT/bin/yard" -Y remote sync "$TMP/projects/RemoteDemo" --target yard --yes >/dev/null
+"$TMP/runtime/bin/yard" -Y remote sync "$TMP/projects/RemoteDemo" --target yard --yes >/dev/null
 jq -e '.projectId == "RemoteDemo-3" and .name == "RemoteDemo-3"' \
   "$REGISTRY_TEST_STATE/yard-meta.json" >/dev/null \
   || fail 'third native sync reused an earlier owner identity'
@@ -198,7 +199,7 @@ jq -n '{
 chmod 0600 "$stale_controller_state"
 mkdir -p "$TMP/other/StaleDemo"
 printf 'stale\n' > "$TMP/other/StaleDemo/file.txt"
-"$ROOT/bin/yard" -Y remote sync "$TMP/other/StaleDemo" --target yard --yes >/dev/null
+"$TMP/runtime/bin/yard" -Y remote sync "$TMP/other/StaleDemo" --target yard --yes >/dev/null
 if ! jq -e '.projectId == "StaleDemo-3" and .name == "StaleDemo-3" and
   .target == "yard"' \
   "$REGISTRY_TEST_STATE/yard-meta.json" >/dev/null; then
@@ -211,12 +212,12 @@ fi
 # Native remote clone owns the data-plane sequence and then converges both registries.
 : > "$REGISTRY_TEST_STATE/owner-calls"
 clone_id=ForeignClone
-"$ROOT/bin/yard" -Y remote clone https://example.invalid/repo.git ForeignClone \
-  --target openclaw --yes >/dev/null
+"$TMP/runtime/bin/yard" -Y remote clone https://example.invalid/repo.git ForeignClone \
+  --target synthetic --yes >/dev/null
 clone_state="$SUBYARD_CONFIG_HOME/yards/remote/projects/$clone_id.json"
 [ ! -e "$clone_state" ] || fail 'native clone published obsolete controller project state'
 [ -s "$REGISTRY_TEST_STATE/owner-calls" ] || fail 'native clone did not converge owner state'
-jq -e '.projectId == $id and .mode == "git" and .target == "openclaw"' --arg id "$clone_id" \
+jq -e '.projectId == $id and .mode == "git" and .target == "synthetic"' --arg id "$clone_id" \
   "$REGISTRY_TEST_STATE/yard-meta.json" >/dev/null || fail 'clone metadata omitted its target'
 
 printf 'ok: native sync and clone preserve registry ownership\n'

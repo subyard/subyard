@@ -16,7 +16,7 @@ func TestReaderProjectsMetadataWithoutPayload(t *testing.T) {
 	metadata := domain.CredentialMetadata{
 		SchemaVersion: 1, CredentialID: "cred-0123456789abcdef0123456789abcdef",
 		RevisionID: "actor-a-000000000001-aaaaaaaa", Label: "fixture", Kind: "token", Zone: "fixture",
-		Scope: "staging", Consumer: "staging-env", State: "active",
+		Scope: "staging", Consumer: "synthetic-consumer", State: "active",
 		RecipientActors: []string{"actor-a"}, Syncable: true, ActorID: "actor-a",
 		ActorCounter: 1, Timestamp: time.Unix(100, 0).UTC(),
 	}

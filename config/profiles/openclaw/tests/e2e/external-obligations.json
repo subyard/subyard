@@ -5,7 +5,7 @@
       "id": "openclaw-staging-gateway-live",
       "description": "Bring up the isolated staging gateway, validate its production-fingerprint guard against a real staging bot token, start and stop the gateway, and verify lease cleanup.",
       "required_inputs": [
-        "OpenClaw source tree with scripts/vasily available in the allocated yard",
+        "Configured OpenClaw-compatible gateway command and source/image in the allocated yard (the legacy scripts/vasily launcher is optional)",
         "yard Docker image/build access",
         "generated staging environment and a staging-only Telegram bot token",
         "operator-maintained production bot fingerprint denylist",

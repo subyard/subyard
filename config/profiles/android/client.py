@@ -122,7 +122,7 @@ def bridge(local, channel):
     worker.start()
     try:
         while True:
-            data = os.read(remote_read.fileno(), 65536)
+            data = channel.recv(65536) if isinstance(channel, socket.socket) else remote_read.read1(65536)
             if not data:
                 break
             local.sendall(data)
@@ -596,6 +596,8 @@ def main(argv=None):
                        '--port=' + port, '--tunnel-host=127.0.0.1', '--tunnel-port=' + port]
         child = subprocess.Popen(command, env=dict(os.environ, **environment), start_new_session=True)
         code = child.wait()
+        if args.verb == 'view' and code:
+            print(f'Android viewer: child returncode {code}', file=sys.stderr)
         if code and viewer_server and viewer_server.failure:
             print('Android viewer: ' + viewer_server.failure, file=sys.stderr)
         if heartbeat_failed.is_set():

@@ -371,6 +371,9 @@ func credentialActionDefinitions() []domain.ActionDefinition {
 		},
 		mutation("keys.exchange.trust-import", "Accept reciprocal credential trust", peers, domain.RecoveryReversible),
 		mutation("keys.exchange.untrust-import", "Remove reciprocal credential trust", peers, domain.RecoveryReversible),
+		mutation("keys.exchange.stop-consumer", "Stop assigned credential consumer", []domain.ActionImpact{
+			domain.ImpactSecurity, domain.ImpactYardRuntime,
+		}, domain.RecoveryReversible),
 		mutation("keys.exchange.refresh", "Refresh exchanged credentials", []domain.ActionImpact{
 			domain.ImpactExternalSystem, domain.ImpactLocalMetadata, domain.ImpactPersistentData,
 			domain.ImpactSecurity, domain.ImpactYardRuntime,

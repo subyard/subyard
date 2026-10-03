@@ -242,8 +242,7 @@ case "${1:-}" in
       *' dpkg --print-architecture '*) printf 'amd64\n' ;;
       *' dpkg-query -W '*orca-ide*) printf '%s\n' "$ORCA_TEST_VERSION" ;;
       *' nft list chain inet subyard_orca input '*)
-        [ -f "$ingress" ] || exit 1
-        printf 'chain input { comment "subyard-orca-managed"; }\n'
+        nft list chain inet subyard_orca input
         ;;
       *' jq -e '*|*' jq -er '*)
         [ ! -e "$state_root/fail-service-ready" ] || exit 1
@@ -271,6 +270,35 @@ case "${1:-}" in
         ;;
     esac
     ;;
+esac
+MOCK
+
+cat >"$TMP/bin/nft" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+state_root="$(cd "$(dirname "$0")/.." && pwd)"
+printf 'nft %s\n' "$*" >>"$state_root/commands.log"
+case "${1:-} ${2:-}" in
+  'list table') [ -f "$state_root/ingress" ] ;;
+  'list chain')
+    [ -f "$state_root/ingress" ] || exit 1
+    mode="$(cat "$state_root/nft-mode" 2>/dev/null || printf owned)"
+    # A finite stream larger than the pipe buffer exposes early-closing readers.
+    python3 - "$mode" <<'PY'
+import os
+import signal
+import sys
+
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+marker = "foreign" if sys.argv[1] == "foreign" else "subyard-orca-managed"
+os.write(1, f'chain input {{ comment "{marker}"; }}\n'.encode())
+for _ in range(64):
+    os.write(1, b"# trailing rules\n" * 4096)
+PY
+    [ "$mode" != error ] || exit 42
+    ;;
+  'delete table') rm -f "$state_root/ingress" ;;
+  'add table') touch "$state_root/ingress" ;;
 esac
 MOCK
 
@@ -530,6 +558,32 @@ for invalid in '--unknown' '--mobile --mobile' '--mobile extra'; do
 done
 
 restart_count="$(count_log 'systemctl restart subyard-orca.service')"
+ORCA_ADVERTISE_HOST=owner.example-tailnet.ts.net ORCA_HOST_PORT=17678 SUBYARD_RESOURCE_MODE=prepare \
+  "$ROOT/config/profiles/orca/resources/orca/handler.sh" up >"$TMP/nft-plan.json"
+jq -e '.changed == false' "$TMP/nft-plan.json" >/dev/null \
+  || fail 'owned ingress was reported as drift after its marker matched'
+for verb in up down; do
+  bash "$ORCA_TEST_CAPTURE/orca-ingress" "$verb" 6768 \
+    || fail "$verb rejected owned ingress after its marker matched"
+  touch "$ORCA_TEST_INGRESS"
+done
+for mode in foreign error; do
+  printf '%s\n' "$mode" >"$TMP/nft-mode"
+  ORCA_ADVERTISE_HOST=owner.example-tailnet.ts.net ORCA_HOST_PORT=17678 SUBYARD_RESOURCE_MODE=prepare \
+    "$ROOT/config/profiles/orca/resources/orca/handler.sh" up >"$TMP/nft-plan.json"
+  jq -e '.changed == true' "$TMP/nft-plan.json" >/dev/null \
+    || fail "ingress assessment accepted a $mode nft listing"
+  mutations="$(count_log 'nft delete table') $(count_log 'nft add')"
+  for verb in up down; do
+    if bash "$ORCA_TEST_CAPTURE/orca-ingress" "$verb" 6768 >"$TMP/nft-refusal.out" 2>&1; then
+      fail "$verb accepted a $mode nft listing"
+    fi
+    [ -f "$ORCA_TEST_INGRESS" ] || fail "$verb deleted an unverified ingress table"
+  done
+  [ "$(count_log 'nft delete table') $(count_log 'nft add')" = "$mutations" ] \
+    || fail "ingress guards mutated the table after a $mode nft listing"
+done
+rm -f "$TMP/nft-mode"
 run_orca up --yes >/dev/null
 [ "$(count_log 'systemctl restart subyard-orca.service')" -eq "$restart_count" ] \
   || fail 'identical up restarted an unchanged runtime'

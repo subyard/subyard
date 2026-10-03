@@ -107,13 +107,11 @@ func TestSelectClassifiesDocumentationTestsLeafPackagesAndSpecialProfiles(t *tes
 			checkSets: []string{
 				"e2e:orca-bootstrap", "e2e:orca-projects", "e2e:orca-resource", "go:resource", "p0:profile-resource",
 				"profiles:e2e", "profiles:host-free",
-				"shell:profile-resource-lifecycle",
 				"shell:provision-profile-check",
 			},
 			riskDomains: []string{"orca-gpu-profile", "profile-resource"},
 			hostFreeIDs: []string{
-				"go:resource", "profiles:host-free",
-				"shell:profile-resource-lifecycle", "shell:provision-profile-check",
+				"go:resource", "profiles:host-free", "shell:provision-profile-check",
 			},
 			e2eIDs:       []string{"e2e:orca-bootstrap", "e2e:orca-projects", "e2e:orca-resource", "p0:profile-resource", "profiles:e2e"},
 			fullRequired: false,

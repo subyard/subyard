@@ -29,6 +29,9 @@ trap cleanup EXIT
 fail() { printf 'ssh-credential-peer: %s\n' "$*" >&2; exit 1; }
 # shellcheck source=tests/helpers/loopback-sshd.sh
 . "$ROOT/tests/helpers/loopback-sshd.sh"
+# shellcheck source=tests/helpers/test-context.sh
+. "$ROOT/tests/helpers/test-context.sh"
+setup_test_repository "$TMP" "$ROOT"
 
 local_root="$TMP/local"
 remote_root="$TMP/remote"
@@ -42,7 +45,7 @@ bootstrap_keys() { # context-root keys-root
   HOME="$1/home" SUBYARD_OPERATOR_HOME="$1/home" SUBYARD_CONFIG_HOME="$1/config" \
     SUBYARD_HOME="$1/data" HOST_BASE="$1/host-data" RESTRICTED_DISK_PATHS="$1/host-data" \
     SUBYARD_KEYS_ROOT="$2" SUBYARD_KEYS_TOOLS_DIR="$TOOLS_DIR" \
-    YARD_ENGINE_PATH="$ROOT/.build/yard" "$ROOT/bin/yard" _keys-init
+    YARD_ENGINE_PATH="$ROOT/.build/yard" "$TMP/runtime/bin/yard" _keys-init
 }
 bootstrap_keys "$local_root" "$local_keys" >/dev/null
 bootstrap_keys "$remote_root" "$remote_keys" >/dev/null
@@ -71,7 +74,7 @@ export RESTRICTED_DISK_PATHS=$remote_root/host-data
 export SUBYARD_KEYS_ROOT=$remote_keys
 export SUBYARD_KEYS_TOOLS_DIR=$TOOLS_DIR
 export SUBYARD_KEYS_CONSUMER_ROOT=$remote_root/consumer
-export SUBYARD_REPOSITORY_ROOT=$ROOT
+export SUBYARD_REPOSITORY_ROOT=$TMP/runtime
 export SUBYARD_NO_AUDIT=1
 export PATH=$TMP/remote-bin:/usr/bin:/bin
 exec /bin/bash -c "\${SSH_ORIGINAL_COMMAND:?missing SSH command}"
@@ -130,6 +133,7 @@ export RESTRICTED_DISK_PATHS="$local_root/host-data"
 export SUBYARD_KEYS_ROOT="$local_keys"
 export SUBYARD_KEYS_TOOLS_DIR="$TOOLS_DIR"
 export SUBYARD_KEYS_CONSUMER_ROOT="$local_root/consumer"
+export SUBYARD_REPOSITORY_ROOT="$TMP/runtime"
 export SUBYARD_NO_AUDIT=1
 export PATH="$TMP/client-bin:$PATH"
 
@@ -142,28 +146,28 @@ jq -e '.transport=="inbound" and .trusted==true' "$remote_keys/peers/default.jso
 expected="$TMP/expected"
 openssl genrsa -out "$expected" 2048 >/dev/null 2>&1
 chmod 0600 "$expected"
-"$ROOT/.build/yard" keys import "$expected" --label real-ssh --zone ssh-fixture --consumer staging-env \
+"$ROOT/.build/yard" keys import "$expected" --label real-ssh --zone ssh-fixture --consumer synthetic-consumer \
   --yes >/dev/null
 credential="$("$ROOT/.build/yard" keys list | awk -F '\t' '$8=="real-ssh" {print $1}')"
 [ -n "$credential" ] || fail 'synthetic SSH credential was not created'
 "$ROOT/.build/yard" keys sync @remote-two --now --yes >/dev/null
 ssh peer-two -- bash -lc "$(printf '%q' 'yard keys materialize ssh-fixture --yes')" >/dev/null
-cmp -s "$expected" "$remote_root/consumer/staging/ssh-fixture.env" \
+cmp -s "$expected" "$remote_root/consumer/fixture/ssh-fixture.env" \
   || fail 'real SSH peer did not decrypt the synchronized credential'
 if grep -R -E -q -- 'BEGIN (RSA )?PRIVATE KEY' "$local_keys" "$remote_keys"; then
   fail 'synthetic plaintext reached an SSH-synchronized ledger'
 fi
-[ "$(stat -c %a "$remote_root/consumer/staging/ssh-fixture.env")" = 600 ] \
+[ "$(stat -c %a "$remote_root/consumer/fixture/ssh-fixture.env")" = 600 ] \
   || fail 'credential materialization has unsafe permissions'
 openssl genrsa -out "$expected" 2048 >/dev/null 2>&1
 "$ROOT/.build/yard" keys rotate "$credential" --file "$expected" --yes >/dev/null
 "$ROOT/.build/yard" keys sync @remote-two --now --yes >/dev/null
-cmp -s "$expected" "$remote_root/consumer/staging/ssh-fixture.env" \
+cmp -s "$expected" "$remote_root/consumer/fixture/ssh-fixture.env" \
   || fail 'SSH peer did not automatically materialize the rotated credential'
 "$ROOT/.build/yard" keys revoke "$credential" --yes >/dev/null
 "$ROOT/.build/yard" keys sync @remote-two --now --yes >/dev/null
 ssh peer-two -- bash -lc "$(printf '%q' 'yard keys materialize ssh-fixture --yes')" >/dev/null
-[ ! -e "$remote_root/consumer/staging/ssh-fixture.env" ] \
+[ ! -e "$remote_root/consumer/fixture/ssh-fixture.env" ] \
   || fail 'revoked SSH credential remained materialized'
 
 printf 'ok: real OpenSSH credential import, trust, sync, rotation and revoke contract\n'

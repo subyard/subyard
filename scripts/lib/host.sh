@@ -110,8 +110,9 @@ incus_preflight() {
 incus_wait_instance_agent() {
   local project="${1:?project required}" instance="${2:?instance required}"
   local wait_timeout=120 deadline remaining probe_timeout
-  # Nested VMs can spend over two minutes in firmware and early boot.
-  [ "${YARD_KIND:-}" != vm ] || wait_timeout=300
+  # Cloud-image seeding can reboot a VM before its agent accepts connections.
+  # Allow two boot sequences while keeping one absolute deadline.
+  [ "${YARD_KIND:-}" != vm ] || wait_timeout=600
   wait_timeout="${SUBYARD_INCUS_AGENT_WAIT_TIMEOUT:-$wait_timeout}"
   [[ "$wait_timeout" =~ ^[1-9][0-9]*$ ]] || return 2
   deadline=$((SECONDS + wait_timeout))

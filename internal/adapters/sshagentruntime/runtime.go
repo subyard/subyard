@@ -25,6 +25,7 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/sys/unix"
+	"golang.org/x/term"
 )
 
 // MaxTTL is the largest lifetime accepted by OpenSSH ssh-add's signed-second parser.
@@ -354,7 +355,36 @@ func (m Manager) Unlock(ctx context.Context, key string, ttl time.Duration) (Sta
 	add.WaitDelay = 2 * time.Second
 	add.Stdout = io.Discard
 	add.Stderr = io.Discard
-	if err := add.Run(); err != nil {
+	// A forced child exit skips OpenSSH's terminal cleanup. Keep the controlling
+	// terminal's state until ssh-add has exited, including WaitDelay's kill fallback.
+	tty, ttyErr := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	// Headless callers have no controlling terminal or installed tty device.
+	if ttyErr != nil && !errors.Is(ttyErr, unix.ENXIO) &&
+		!errors.Is(ttyErr, unix.ENODEV) && !errors.Is(ttyErr, unix.ENOENT) {
+		return Status{}, errors.New("cannot open SSH key unlock terminal")
+	}
+	var terminalState *term.State
+	if ttyErr == nil {
+		defer tty.Close()
+		terminalState, err = term.GetState(int(tty.Fd()))
+		if err != nil {
+			return Status{}, errors.New("cannot inspect SSH key unlock terminal")
+		}
+	}
+	addErr := add.Run()
+	if terminalState != nil {
+		var flushErr error
+		if addErr != nil {
+			// Match OpenSSH's cancellation cleanup before restoring echo: a killed
+			// child can leave a partially entered passphrase in terminal input.
+			flushErr = unix.IoctlSetInt(int(tty.Fd()), unix.TCFLSH, unix.TCIFLUSH)
+		}
+		restoreErr := term.Restore(int(tty.Fd()), terminalState)
+		if flushErr != nil || restoreErr != nil {
+			return Status{}, errors.New("cannot restore SSH key unlock terminal")
+		}
+	}
+	if addErr != nil {
 		return Status{}, errors.New("SSH key unlock failed or was cancelled")
 	}
 	response, err := control(ctx, m.Config.Directory, "activate")

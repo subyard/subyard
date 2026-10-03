@@ -16,7 +16,7 @@ if bash "$tmp/$controller" > "$tmp/missing" 2>&1; then
   printf 'FAIL: controller accepted a missing slot\n' >&2; exit 1
 fi
 if grep -q -- '--purpose' "$tmp/missing"; then exit 1; fi
-for lane in full recovery viewer; do
+for lane in full recovery viewer viewer-native-debug sdk-images; do
   arguments=(--slot 7)
   [[ "$lane" = full ]] || arguments+=(--lane "$lane")
   bash "$tmp/$controller" "${arguments[@]}" > "$tmp/calls"
@@ -34,4 +34,5 @@ for arguments in '--slot' '--slot 0' '--slot 7 --lane' '--slot 7 --lane unknown'
   if grep -q -- '--purpose' "$tmp/invalid"; then exit 1; fi
 done
 python3 -B "$ROOT/config/profiles/android/tests/helpers/android-e2e-evidence-test.py"
+python3 -B "$ROOT/config/profiles/android/tests/helpers/scrcpy-view-window-test.py"
 printf 'ok: Android lane dispatch, arity, failure and cleanup contracts\n'

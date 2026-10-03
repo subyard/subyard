@@ -243,7 +243,7 @@ func TestRPCResyncReturnsFullSnapshotAndContinuesMonotonicSessionEvents(t *testi
 	metadata := domain.CredentialMetadata{
 		SchemaVersion: 1, CredentialID: "cred-0123456789abcdef0123456789abcdef",
 		RevisionID: "actor-a-000000000001-aaaaaaaa", Label: "fixture", Kind: "token", Zone: "fixture",
-		Scope: "staging", Consumer: "staging-env", State: "active",
+		Scope: "staging", Consumer: "synthetic-consumer", State: "active",
 		RecipientActors: []string{"actor-a"}, Syncable: true, ActorID: "actor-a",
 		ActorCounter: 1, Timestamp: time.Unix(100, 0).UTC(),
 	}
@@ -2066,7 +2066,7 @@ func TestNativeStatusUsesTypedPortsAndRendersParityFields(t *testing.T) {
 				{Name: "aiobserver", State: "up", URL: "http://127.0.0.1:18080/"},
 			},
 			Shared: []domain.SharedResourceStatus{{
-				Profile: "android", Name: "emulator", State: "up", Hint: "yard emu down",
+				Profile: "sample", Name: "service", State: "up", Hint: "yard service down",
 			}},
 			Security: "static-only", Space: "1G  (in-yard rootfs, 1s ago)",
 		}},
@@ -2081,7 +2081,7 @@ func TestNativeStatusUsesTypedPortsAndRendersParityFields(t *testing.T) {
 		"yard  RUNNING", "desired  running", "ip       10.0.0.2", "host-demo",
 		"services ssh/docker = active/active", "vscode   key=yes server=yes git-id=yes",
 		"projects 1", "profiles sample another", "codex", "enabled", "aiobserver", "up",
-		"http://127.0.0.1:18080/", "android   emulator", "security static-only", "space    1G",
+		"http://127.0.0.1:18080/", "sample    service", "security static-only", "space    1G",
 	} {
 		if !strings.Contains(stdout.String(), expected) {
 			t.Fatalf("status omitted %q:\n%s", expected, stdout.String())
@@ -2203,20 +2203,20 @@ func TestRemoteStatusFactsPreserveProfilesAgentsAndResources(t *testing.T) {
 	status := domain.YardStatus{
 		Context: domain.Context{YardKind: domain.YardContainer, SSHHost: "yard"},
 		Facts: domain.StatusFacts{
-			Profiles: []string{"hermes"},
+			Profiles: []string{"sample"},
 			Agents: []domain.AgentStatus{{
 				Name: "aiobserver", State: "up", DashboardPort: 18080,
 				URL: "http://127.0.0.1:18080/",
 			}},
 			Shared: []domain.SharedResourceStatus{{
-				Profile: "hermes", Name: "dashboard", State: "up",
+				Profile: "sample", Name: "dashboard", State: "up",
 				URL: "http://owner.tailnet.ts.net:19119/",
 			}},
 		},
 	}
 	program.printRemoteStatusFacts(status, "operator@owner.example")
 	for _, want := range []string{
-		"profiles hermes", "aiobserver", "operator@owner.example", "hermes", "dashboard",
+		"profiles sample", "aiobserver", "operator@owner.example", "sample", "dashboard",
 		"http://owner.tailnet.ts.net:19119/",
 	} {
 		if !strings.Contains(output.String(), want) {
@@ -4056,7 +4056,7 @@ func TestNativeLiveListDoesNotImportL1Metadata(t *testing.T) {
 		Reached: true,
 		Live: []domain.ProjectRecord{{
 			Schema: 1, ProjectID: "live-12345678", Name: "Live", Mode: domain.ProjectSync,
-			YardPath: "/srv/workspaces/live-12345678/src", SSHHost: "yard", Target: "openclaw",
+			YardPath: "/srv/workspaces/live-12345678/src", SSHHost: "yard", Target: "synthetic",
 		}},
 		Presence: map[string]domain.ProjectPresence{"live-12345678": domain.ProjectPresent},
 		Boxes:    map[string]domain.ProjectBoxState{"live-12345678": domain.ProjectBoxNone},

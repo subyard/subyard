@@ -14,9 +14,10 @@ import uuid
 
 
 class RpcError(Exception):
-    def __init__(self, message, unknown=False):
+    def __init__(self, message, unknown=False, timed_out=False):
         super().__init__(message)
         self.unknown = unknown
+        self.timed_out = timed_out
 
 
 class RuntimeRPC:
@@ -102,6 +103,6 @@ class RuntimeRPC:
                         return frame["result"]
         except (TimeoutError, socket.timeout):
             raise RpcError(f"Orca runtime request timed out: {method} ({time.monotonic() - started:.1f}s)",
-                           unknown=write and sent) from None
+                           unknown=write and sent, timed_out=True) from None
         except OSError:
             raise RpcError("Orca runtime connection failed", unknown=write and sent) from None
