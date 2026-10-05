@@ -333,6 +333,29 @@ and resource generation throughout the run.
 
 ### Test lanes and gates
 
+The focused published-release configuration check uses one fresh pair and a synthetic private
+SSH Git remote. It installs the same pinned `v0.17.3` artifact on both hosts, verifies two-way
+configuration convergence, and rejects dirty, diverged and conflicted checkouts without changing
+live settings or remote refs:
+
+```sh
+bash dev/e2e/config-sync-acceptance.sh --slot "$slot"
+```
+
+The published-release boot check uses one standard VM. It installs pinned `v0.17.3` through the
+supported installer, reboots the VM, observes the installed power service waiting for a missing
+synthetic proxy address, then verifies automatic startup when a marked boot service supplies it.
+It checks independent ready-yard startup, desired power, root-owned runtime/unit, host networking
+guards, the default route and cleanup:
+
+```sh
+bash dev/e2e/proxy-address-boot.sh --slot "$slot"
+```
+
+Both controllers keep one lease through their phases and remove only their marked fixtures.
+They require public release/image download access and prove the pinned published runtime;
+they do not substitute for current-candidate release acceptance or external-account checks.
+
 Canonical remote project routing uses the focused preview fixture on a fresh pair:
 
 ```sh
