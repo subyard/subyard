@@ -9,8 +9,35 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/testkit"
 	"golang.org/x/crypto/ssh"
 )
+
+func TestRouteConsumerActivationUsesGitTemplateWithLocalSlotOverride(t *testing.T) {
+	options, state := routeConsumerFixture(t, StateCurrent, true)
+	root := filepath.Dir(options.ConfigHome)
+	options.RepositoryRoot = brokerRepository(t, filepath.Join(root, "candidate"))
+	options.Environment = withEnvironment(options.Environment, "HOME", root)
+	local := filepath.Join(options.ConfigHome, "yards", CurrentYard, "config.env")
+	testkit.WriteFile(t, local, []byte("E2E_VM_SLOT_COUNT=3\n"), 0o600)
+	gitYard := filepath.Join(options.ConfigHome, config.GitSettingsRelativePath, "yards", CurrentYard)
+	if err := os.MkdirAll(gitYard, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(gitYard, "config.env"), []byte("YARD_TEMPLATE=test-vms\n"), 0o600)
+
+	observed, err := PrepareRouteConsumerActivation(context.Background(), options)
+	if err != nil || observed != StateCurrent {
+		t.Fatalf("layered route registration: state=%q err=%v", observed, err)
+	}
+	if got := read(t, local); got != "E2E_VM_SLOT_COUNT=3\n" {
+		t.Fatalf("read-only observation changed the local override: %q", got)
+	}
+	if strings.Contains(read(t, state.calls), "config device") {
+		t.Fatal("route activation observation mutated devices")
+	}
+}
 
 func TestRouteConsumersCommitAttachesExistingRunningYard(t *testing.T) {
 	options, state := routeConsumerFixture(t, StateCurrent, true)
@@ -243,6 +270,18 @@ esac
 	write(t, incus, `#!/bin/sh
 set -eu
 printf '%s\n' "$*" >> "$ROUTE_INCUS_CALLS"
+if [ "$*" = "project list --format=json" ]; then
+  if [ "$(cat "$ROUTE_OWNER")" = legacy ]; then
+    printf '[{"name":"subyard-e2e-yard"}]\n'
+  else
+    printf '[{"name":"subyard-test-yard"}]\n'
+  fi
+  exit 0
+fi
+if [ "$*" = "project get subyard-test-yard features.images" ]; then
+  printf 'false\n'
+  exit 0
+fi
 device_json() {
   case "$(cat "$1")" in
     missing) printf '{}' ;;

@@ -6,7 +6,49 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
+
+func TestBrokerRuntimeUsesGitTemplateWithLocalSlotOverride(t *testing.T) {
+	options, _ := brokerRuntimeFixture(t, "RUNNING", "active")
+	local := filepath.Join(options.ConfigHome, "yards", CurrentYard, "config.env")
+	testkit.WriteFile(t, local, []byte("E2E_VM_SLOT_COUNT=3\n"), 0o600)
+	gitYard := filepath.Join(options.ConfigHome, config.GitSettingsRelativePath, "yards", CurrentYard)
+	if err := os.MkdirAll(gitYard, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(gitYard, "config.env"), []byte("YARD_TEMPLATE=test-vms\n"), 0o600)
+
+	state, yard, err := PrepareBrokerRuntimeTarget(context.Background(), options)
+	if err != nil || state != BrokerRuntimeActive || yard != CurrentYard {
+		t.Fatalf("layered broker registration: state=%q yard=%q err=%v", state, yard, err)
+	}
+	if got := read(t, local); got != "E2E_VM_SLOT_COUNT=3\n" {
+		t.Fatalf("read-only observation changed the local override: %q", got)
+	}
+}
+
+func TestBrokerRuntimeRejectsLocalTemplateOverrideOverGit(t *testing.T) {
+	for _, template := range []string{"", "other"} {
+		t.Run(template, func(t *testing.T) {
+			options, _ := brokerRuntimeFixture(t, "RUNNING", "active")
+			testkit.WriteFile(t, filepath.Join(options.RepositoryRoot, "config", "yards", "profiles", "other.env"), nil, 0o600)
+			local := filepath.Join(options.ConfigHome, "yards", CurrentYard, "config.env")
+			testkit.WriteFile(t, local, []byte("YARD_TEMPLATE="+template+"\nE2E_VM_SLOT_COUNT=3\n"), 0o600)
+			gitYard := filepath.Join(options.ConfigHome, config.GitSettingsRelativePath, "yards", CurrentYard)
+			if err := os.MkdirAll(gitYard, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			testkit.WriteFile(t, filepath.Join(gitYard, "config.env"), []byte("YARD_TEMPLATE=test-vms\n"), 0o600)
+			if state, _, err := PrepareBrokerRuntimeTarget(context.Background(), options); err == nil ||
+				!strings.Contains(err.Error(), "test-yard does not select YARD_TEMPLATE=test-vms") {
+				t.Fatalf("local template %q: state=%q err=%v", template, state, err)
+			}
+		})
+	}
+}
 
 func TestBrokerRuntimeOperationSkipsAnAlreadyCurrentActiveBroker(t *testing.T) {
 	options, state := brokerRuntimeFixture(t, "RUNNING", "active")

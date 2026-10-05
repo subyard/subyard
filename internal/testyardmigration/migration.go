@@ -971,7 +971,18 @@ func inspectRegistrationSet(options Options) (registrationSet, error) {
 			return registrationSet{}, err
 		}
 		if !selectsTestVMs(string(payload)) {
-			return registrationSet{}, errors.New("test-yard does not select YARD_TEMPLATE=test-vms")
+			// A local override may inherit its template from the Git yard layer.
+			// Keep the protected local registration as the migration resource.
+			if !filepath.IsAbs(options.RepositoryRoot) {
+				return registrationSet{}, errors.New("test-yard does not select YARD_TEMPLATE=test-vms")
+			}
+			loaded, err := loadBrokerYard(options, CurrentYard)
+			if err != nil {
+				return registrationSet{}, err
+			}
+			if loaded.Environment["YARD_TEMPLATE"] != "test-vms" {
+				return registrationSet{}, errors.New("test-yard does not select YARD_TEMPLATE=test-vms")
+			}
 		}
 		result.current = true
 		result.currentRegistration = foundCurrent[0].path
