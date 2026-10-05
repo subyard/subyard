@@ -20,6 +20,13 @@ clean checkout, base commit or `.git` directory is required. Install the tools l
 temporary repositories. The release packaging test uses a disposable copy of the current public
 files because it adds fixtures; that copy needs no Git metadata.
 
+`make test`, `./tests/run.sh` and the host-free profile runner place disposable fixtures in
+`/tmp`, independently of a workspace-local `TMPDIR`, so Orca cannot discover them in the
+working project. Bulk Git-root fixtures also enforce this location when run directly.
+Local discovery tests share one Git directory across their checkout paths; hook-observation
+tests use synthetic Git metadata. The Orca projects acceptance fixture on disposable VMs
+still checks 1000 separate native repositories.
+
 The runner prints one start/result line per check and a final `SUMMARY` with its
 status, check count, elapsed seconds and original exit code. Successful check output
 stays in separate logs under a unique `.build/test-runs/run.*/` directory. On the

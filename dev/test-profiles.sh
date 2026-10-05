@@ -45,6 +45,9 @@ if [ "$list" = 1 ]; then
   printf '%s\n' "${records[@]}"
   exit 0
 fi
+if [ "$suite" = run.sh ]; then
+  export TMPDIR=/tmp
+fi
 # Check the complete inventory before a live runner can acquire a lease.
 for record in "${records[@]}"; do
   IFS=$'\t' read -r kind profile path <<<"$record"

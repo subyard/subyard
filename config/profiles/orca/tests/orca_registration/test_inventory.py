@@ -15,7 +15,7 @@ from reconcile import reconcile
 
 class InventoryTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp = tempfile.TemporaryDirectory(prefix="subyard-orca-inventory.", dir="/tmp")
         self.addCleanup(self.tmp.cleanup)
         self.workspaces = Path(self.tmp.name) / "workspaces"
         self.root = project(self.workspaces)
@@ -135,7 +135,8 @@ class InventoryTests(unittest.TestCase):
         for index in range(1000):
             checkout = self.root / ".build" / str(index)
             checkout.mkdir(parents=True)
-            shutil.copytree(upstream / ".git", checkout / ".git", ignore=shutil.ignore_patterns("hooks", "info"))
+            # Each path remains a native Git root while sharing one fixture repository.
+            (checkout / ".git").write_text(f"gitdir: {upstream / '.git'}\n")
         paths, _ = self.advance()
         self.assertEqual(1000, len(paths))
         self.assertTrue(self.sync()["ready"])

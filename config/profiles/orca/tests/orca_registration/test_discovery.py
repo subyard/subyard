@@ -2,7 +2,6 @@ from pathlib import Path
 from contextlib import contextmanager
 from itertools import chain
 from types import SimpleNamespace
-import shutil
 import tempfile
 import time
 import unittest
@@ -15,7 +14,7 @@ class DiscoveryTests(unittest.TestCase):
     def setUp(self):
         from discovery import discover
         self.discover = discover
-        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp = tempfile.TemporaryDirectory(prefix="subyard-orca-discovery.", dir="/tmp")
         self.addCleanup(self.tmp.cleanup)
         self.workspaces = Path(self.tmp.name) / "workspaces"
         self.root = project(self.workspaces)
@@ -80,14 +79,14 @@ class DiscoveryTests(unittest.TestCase):
                          [r.name for r in scan.projects[0].roots])
         self.assertNotIn(str(upstream), [r.path for r in scan.projects[0].roots])
 
-    def test_thousand_git_repositories_are_discovered_with_default_budget(self):
+    def test_thousand_git_roots_are_discovered_with_default_budget(self):
         upstream = Path(self.tmp.name) / "upstream"
         init_git(upstream)
         for index in range(1000):
             checkout = self.root / ".build" / f"checkout-{index:04d}"
             checkout.mkdir(parents=True)
-            shutil.copytree(upstream / ".git", checkout / ".git",
-                            ignore=shutil.ignore_patterns("hooks", "info"))
+            # Keep native Git probes without duplicating a thousand repositories.
+            (checkout / ".git").write_text(f"gitdir: {upstream / '.git'}\n")
         scan = self.discover(self.workspaces)
         self.assertEqual([], scan.errors)
         self.assertEqual(1001, len(scan.projects[0].roots))

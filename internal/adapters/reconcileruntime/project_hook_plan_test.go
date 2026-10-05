@@ -192,6 +192,8 @@ func TestProjectHookDispatcherEnforcesManifestBeforeAnyHook(t *testing.T) {
 }
 
 func TestProjectHookObservationBoundsUniquePaths(t *testing.T) {
+	// Bulk metadata fixtures must stay outside the workspace even with a local TMPDIR.
+	t.Setenv("TMPDIR", "/tmp")
 	for _, scenario := range []struct {
 		name                  string
 		gitRoots, directories int
@@ -212,27 +214,25 @@ func TestProjectHookObservationBoundsUniquePaths(t *testing.T) {
 			dispatcher := filepath.Join(root, "libexec", "projects-changed")
 			hook := dispatcher + ".d/owned"
 			workspace := filepath.Join(root, "workspaces", "project", "src")
-			seed := filepath.Join(root, "seed")
-			for _, path := range []string{filepath.Dir(hook), filepath.Join(root, "etc"), workspace, seed} {
+			for _, path := range []string{filepath.Dir(hook), filepath.Join(root, "etc"), workspace} {
 				if err := os.MkdirAll(path, 0o700); err != nil {
 					t.Fatal(err)
 				}
 			}
-			if output, err := exec.Command("git", "init", "-q", "--template=", seed).CombinedOutput(); err != nil {
-				t.Fatalf("native Git fixture: %v %s", err, output)
-			}
 			for index := range scenario.gitRoots {
 				checkout := filepath.Join(workspace, ".build", "capacity", fmt.Sprint(index), ".git")
-				if err := os.CopyFS(checkout, os.DirFS(filepath.Join(seed, ".git"))); err != nil {
+				if err := os.MkdirAll(checkout, 0o700); err != nil {
 					t.Fatal(err)
 				}
+				// Observation hashes metadata paths; it never invokes Git.
+				testkit.WriteFile(t, filepath.Join(checkout, "config"), []byte("[core]\n\tbare = false\n"), 0o600)
 			}
 			for index := range scenario.directories {
 				if err := os.MkdirAll(filepath.Join(workspace, "retained", fmt.Sprint(index), "nested"), 0o700); err != nil {
 					t.Fatal(err)
 				}
 			}
-			// Native Git creates its own modes; normalize the isolated fixture explicitly.
+			// Normalize fixture modes independently of the caller's umask.
 			if err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 				if err != nil {
 					return err

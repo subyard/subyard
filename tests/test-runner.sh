@@ -13,6 +13,7 @@ cp "$tmp/tools/go" "$tmp/tools/gofmt"
 cat > "$tmp/tools/go" <<'SH'
 #!/usr/bin/env bash
 set -eu
+[ "${TMPDIR:-}" = /tmp ] || exit 25
 case " $* " in
   *' test -race '*)
     printf '%s %s\n' "$(umask)" "$*" >> "$RUNNER_GO_LOG"
@@ -40,7 +41,7 @@ printf '#!/usr/bin/env bash\ncat >/dev/null\nprintf "hidden successful output\\n
 printf '#!/usr/bin/env bash\nprintf "following test ran\\n"\n' > "$fixture/tests/after-input.sh"
 
 run_fixture() {
-  env PATH="$tmp/tools:$PATH" RUNNER_GO_LOG="$tmp/$1.go" \
+  env PATH="$tmp/tools:$PATH" RUNNER_GO_LOG="$tmp/$1.go" TMPDIR="$fixture/.build" \
     bash "$fixture/tests/run.sh" > "$tmp/$1.out" 2>&1
 }
 summary_path() { sed -n 's/^RESULTS //p' "$tmp/$1.out"; }
@@ -111,18 +112,26 @@ awk -F '\t' '$1 == "check" && $3 == "syntax" && $4 == "failed" { found=1 }
 # Profiles own their test entrypoints; discovery does not require core registration.
 cp "$ROOT/dev/test-profiles.sh" "$fixture/dev/test-profiles.sh"
 mkdir -p "$fixture/config/profiles/example/tests"
-printf '#!/usr/bin/env bash\nprintf "profile check ran\\n"\n' \
+printf '#!/usr/bin/env bash\n[ "$TMPDIR" = /tmp ] || exit 25\nprintf "profile check ran\\n"\n' \
   > "$fixture/config/profiles/example/tests/run.sh"
-bash "$fixture/dev/test-profiles.sh" > "$tmp/profiles.out" 2>&1
+TMPDIR="$fixture/.build" bash "$fixture/dev/test-profiles.sh" > "$tmp/profiles.out" 2>&1
 grep -q 'profile check ran' "$tmp/profiles.out" || fail 'profile tests were not discovered'
+cp "$ROOT/Makefile" "$fixture/Makefile"
+TMPDIR="$fixture/.build" PATH="$tmp/tools:$PATH" \
+  make -s -C "$fixture" test > "$tmp/make-test.out" 2>&1
+grep -q 'profile check ran' "$tmp/make-test.out" || fail 'make test skipped profile tests'
 printf '#!/usr/bin/env bash\nexit 29\n' > "$fixture/config/profiles/example/tests/run.sh"
 rc=0
 bash "$fixture/dev/test-profiles.sh" > "$tmp/profiles-failure.out" 2>&1 || rc=$?
 [ "$rc" -eq 29 ] || fail 'profile runner hid the original failure'
 mkdir -p "$fixture/config/profiles/example/tests/e2e"
-printf '#!/usr/bin/env bash\nprintf "profile e2e %%s\\n" "$*"\n' \
-  > "$fixture/config/profiles/example/tests/e2e/acceptance.sh"
-bash "$fixture/dev/test-profiles.sh" --e2e --slot 7 > "$tmp/profiles-e2e.out" 2>&1
+cat > "$fixture/config/profiles/example/tests/e2e/acceptance.sh" <<'SH'
+#!/usr/bin/env bash
+[ -z "${EXPECTED_TMPDIR:-}" ] || [ "$TMPDIR" = "$EXPECTED_TMPDIR" ] || exit 26
+printf 'profile e2e %s\n' "$*"
+SH
+TMPDIR="$fixture/.build" EXPECTED_TMPDIR="$fixture/.build" \
+  bash "$fixture/dev/test-profiles.sh" --e2e --slot 7 > "$tmp/profiles-e2e.out" 2>&1
 grep -Fxq 'profile e2e --slot 7' "$tmp/profiles-e2e.out" \
   || fail 'profile E2E selection or arguments were lost'
 bash "$fixture/dev/test-profiles.sh" --e2e --list > "$tmp/profiles-list.out"
