@@ -14,6 +14,27 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+func TestRouteConsumersObserveGitTemplateWithLocalSlotCount(t *testing.T) {
+	options, _ := routeConsumerFixture(t, StateCurrent, true)
+	root := filepath.Dir(options.ConfigHome)
+	options.RepositoryRoot = brokerRepository(t, filepath.Join(root, "candidate"))
+	options.Environment = withEnvironment(options.Environment, "SUBYARD_OPERATOR_HOME", root)
+	write(t, filepath.Join(options.ConfigHome, config.GitSettingsRelativePath, "yards", CurrentYard, "config.env"),
+		"YARD_TEMPLATE=test-vms\nE2E_VM_SLOT_COUNT=3\n")
+	local := filepath.Join(options.ConfigHome, "yards", CurrentYard, "config.env")
+	testkit.WriteFile(t, local, []byte("E2E_VM_SLOT_COUNT='4'\n"), 0o600)
+	before, err := PrepareRouteConsumers(context.Background(), options)
+	if err != nil {
+		t.Fatalf("layered route observation: %v", err)
+	}
+	if err := CommitRouteConsumers(context.Background(), options, before); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyRouteConsumers(context.Background(), options, before); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRouteConsumerActivationUsesGitTemplateWithLocalSlotOverride(t *testing.T) {
 	options, state := routeConsumerFixture(t, StateCurrent, true)
 	root := filepath.Dir(options.ConfigHome)

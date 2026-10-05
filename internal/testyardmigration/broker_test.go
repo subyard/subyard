@@ -11,6 +11,27 @@ import (
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
+func TestBrokerRuntimeObservesGitTemplateWithLocalSlotCount(t *testing.T) {
+	options, _ := brokerRuntimeFixture(t, "RUNNING", "active")
+	gitRegistration := filepath.Join(options.ConfigHome, config.GitSettingsRelativePath, "yards", CurrentYard, "config.env")
+	write(t, gitRegistration, "YARD_TEMPLATE=test-vms\nE2E_VM_SLOT_COUNT=3\n")
+	localRegistration := filepath.Join(options.ConfigHome, "yards", CurrentYard, "config.env")
+	testkit.WriteFile(t, localRegistration, []byte("E2E_VM_SLOT_COUNT='4'\n"), 0o600)
+	loaded, err := loadBrokerYard(options, CurrentYard)
+	if err != nil || !loaded.Context.NestedE2EVMs || loaded.Environment["E2E_VM_SLOT_COUNT"] != "4" {
+		t.Fatalf("effective broker config: nested=%t slots=%q err=%v", loaded.Context.NestedE2EVMs, loaded.Environment["E2E_VM_SLOT_COUNT"], err)
+	}
+	state, yard, err := PrepareBrokerRuntimeTarget(context.Background(), options)
+	if err != nil || state != BrokerRuntimeActive || yard != CurrentYard {
+		t.Fatalf("layered broker observation: state=%q yard=%q err=%v", state, yard, err)
+	}
+	// An explicit local role change still overrides the cached Git template.
+	testkit.WriteFile(t, localRegistration, []byte("YARD_TEMPLATE=''\nE2E_VM_SLOT_COUNT=4\n"), 0o600)
+	if _, _, err := PrepareBrokerRuntimeTarget(context.Background(), options); err == nil {
+		t.Fatal("local template removal was ignored")
+	}
+}
+
 func TestBrokerRuntimeUsesGitTemplateWithLocalSlotOverride(t *testing.T) {
 	options, _ := brokerRuntimeFixture(t, "RUNNING", "active")
 	local := filepath.Join(options.ConfigHome, "yards", CurrentYard, "config.env")

@@ -41,6 +41,10 @@ requirements when the task depends on them.
 
 ## Choose checks by risk
 
+- Normal checks and acceptance test the current public worktree, including uncommitted and
+  untracked public inputs. Installed-runtime and reboot checks package that worktree and install
+  the resulting candidate through the supported installer. Use a published release only as an
+  explicit problem-reproduction baseline; a pass on it does not establish current-worktree acceptance.
 - Start with the smallest existing check that proves the changed behavior. Add a regression
   case only for a distinct failure or observable contract not already covered. Assert outcomes;
   source-text assertions belong only to explicit source-level contracts. If a small change needs

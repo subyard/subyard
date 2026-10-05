@@ -7,9 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/Subyard/Subyard/internal/ports"
 )
 
 type Backend struct {
@@ -46,6 +49,55 @@ type backendState struct {
 	clientDirectory string
 	provision       string
 	downloadHelper  string
+}
+
+// ObserveSlotCountRepair admits only count drift against an otherwise fully
+// converged installed backend. Ordinary init still owns pool and shrink guards.
+func (backend *Backend) ObserveSlotCountRepair(ctx context.Context) (ports.RuntimeObservation, error) {
+	ineligible := ports.RuntimeObservation{State: ports.RuntimeStateAbsent}
+	state, err := backend.state()
+	if err != nil {
+		return ineligible, err
+	}
+	if state.enabled != "1" {
+		return ineligible, nil
+	}
+	if _, err := positiveInt(state.slotCount, "E2E_VM_SLOT_COUNT"); err != nil {
+		return ineligible, err
+	}
+	if backend.Runner == nil {
+		backend.Runner = ProcessRunner{}
+	}
+	marker, err := backend.incus(ctx, "config", "get", backend.Instance,
+		"user.subyard.test_vms_revision", "--project", backend.Project)
+	if err != nil {
+		return ineligible, err
+	}
+	marker = strings.TrimSpace(marker)
+	parts := strings.Split(marker, ":")
+	if len(parts) < 14 {
+		return ineligible, nil
+	}
+	// Seven fields follow the count; image references can contain colons.
+	count := parts[len(parts)-8]
+	if _, err := positiveInt(count, "installed E2E_VM_SLOT_COUNT"); err != nil {
+		return ineligible, nil
+	}
+	installed := *backend
+	installed.Environment = maps.Clone(backend.Environment)
+	installed.Environment["E2E_VM_SLOT_COUNT"] = count
+	// This verifies the complete marker, memory ownership, route and worker.
+	if converged, err := installed.Converged(ctx); err != nil || !converged {
+		return ineligible, err
+	}
+	actual, desired := sha256.Sum256([]byte(marker)), sha256.Sum256([]byte(state.marker))
+	observation := ports.RuntimeObservation{
+		State: ports.RuntimeStateStale, Actual: hex.EncodeToString(actual[:]), Desired: hex.EncodeToString(desired[:]),
+	}
+	if marker == state.marker {
+		observation.State = ports.RuntimeStateCurrent
+	}
+	return observation, nil
 }
 
 func (backend *Backend) Converged(ctx context.Context) (bool, error) {

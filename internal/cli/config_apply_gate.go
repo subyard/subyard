@@ -21,7 +21,7 @@ import (
 	"github.com/Subyard/Subyard/internal/releasetransition"
 )
 
-// configApplyRepairPermit admits config apply or Profile runtime init repair behind
+// configApplyRepairPermit admits config apply or bounded runtime init repair behind
 // a verified, completed release transition. It is deliberately local
 // to the CLI: no environment value or public command can manufacture it.
 type configApplyRepairPermit struct {
@@ -225,13 +225,6 @@ func (cli *CLI) prepareActivationRepairMode(
 	if len(requestedDesired) != len(requested) {
 		return nil, nil
 	}
-	if requireDrift && len(driftedNames) == 0 {
-		return nil, nil
-	}
-	if gateReady && len(driftedNames) != 0 {
-		return nil, nil
-	}
-
 	request := releasetransition.ProcessRequest{
 		SchemaVersion: releasetransition.ProcessProtocolSchemaV1,
 		RuntimeRoot:   options.RuntimeRoot, ConfigHome: options.ConfigHome, Yard: yard,
@@ -258,6 +251,35 @@ func (cli *CLI) prepareActivationRepairMode(
 			// Bind the target contract, allowing only its observed drift to shrink.
 			observation.Actual, observation.Converged = observation.Desired, true
 		}
+		if stage, ok := reconciler.(*activationStageReconciler); profileInit && ok && stage.stage == ports.ReconcileStageTestVMs {
+			applicability, err := stage.inspectApplicability(ctx)
+			if err != nil {
+				return nil, nil
+			}
+			if _, selected := requested[applicability.target]; selected && applicability.applies {
+				platform, err := stage.platform(ctx, applicability)
+				if err != nil {
+					return nil, nil
+				}
+				if owner, ok := platform.(interface {
+					ObserveTestVMSlotCountRepair(context.Context) (ports.RuntimeObservation, error)
+				}); ok {
+					contract, err := owner.ObserveTestVMSlotCountRepair(ctx)
+					if err != nil || !validSlotCountRepairObservation(contract) {
+						return nil, nil
+					}
+					selectedRuntimes[applicability.target+"/@test-vm-slot-count"] = contract
+					facts.OtherActivations = append(facts.OtherActivations, configApplyActivationFact{
+						ID: stage.ID() + ".slot-count", Actual: releasetransition.Fingerprint(contract.Desired),
+						Desired: releasetransition.Fingerprint(contract.Desired), Converged: true,
+					})
+					if contract.State == ports.RuntimeStateStale {
+						driftedNames = append(driftedNames, applicability.target)
+					}
+					observation.Actual, observation.Converged = observation.Desired, true
+				}
+			}
+		}
 		if !observation.Converged || observation.Actual != observation.Desired {
 			return nil, nil
 		}
@@ -265,6 +287,9 @@ func (cli *CLI) prepareActivationRepairMode(
 			ID: reconciler.ID(), Actual: observation.Actual,
 			Desired: observation.Desired, Converged: observation.Converged,
 		})
+	}
+	if requireDrift && len(driftedNames) == 0 || gateReady && len(driftedNames) != 0 {
+		return nil, nil
 	}
 	sort.Slice(facts.ConfigTargets, func(i, j int) bool {
 		return facts.ConfigTargets[i].Name < facts.ConfigTargets[j].Name
@@ -277,6 +302,7 @@ func (cli *CLI) prepareActivationRepairMode(
 		return nil, err
 	}
 	sort.Strings(driftedNames)
+	driftedNames = slices.Compact(driftedNames)
 	return &configApplyRepairPermit{
 		yard: yard, allLocal: allLocal, configHome: options.ConfigHome,
 		journal: snapshot, ledger: ledgerSnapshot, gate: outcome, factsFingerprint: fingerprint,
@@ -286,6 +312,17 @@ func (cli *CLI) prepareActivationRepairMode(
 		selectedRuntimes:    selectedRuntimes,
 		profileInit:         profileInit,
 	}, nil
+}
+
+func validSlotCountRepairObservation(observation ports.RuntimeObservation) bool {
+	if observation.HookBinding != "" ||
+		!validConfigApplyActivationObservation(releasetransition.V2ActivationObservation{
+			Actual: releasetransition.Fingerprint(observation.Actual), Desired: releasetransition.Fingerprint(observation.Desired),
+		}) {
+		return false
+	}
+	return observation.State == ports.RuntimeStateCurrent && observation.Actual == observation.Desired ||
+		observation.State == ports.RuntimeStateStale && observation.Actual != observation.Desired
 }
 
 func readConfigApplyRegistry(root string) ([]byte, error) {

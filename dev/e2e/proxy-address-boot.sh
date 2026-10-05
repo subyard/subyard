@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Published release acceptance: delayed host proxy address across a real disposable-VM reboot.
+# Current-worktree acceptance: delayed host proxy address across a real disposable-VM reboot.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
@@ -23,7 +23,8 @@ controller_main() {
     set +e
     if [ "$prepared" = 1 ]; then
       cleanup_guest 1 quiet >/dev/null 2>&1 || failed=1
-      run_guest 1 "$bundle" "$bundle_hash" bash dev/e2e/proxy-address-boot.sh clean "$token" \
+      run_guest 1 "$bundle" "$bundle_hash" env SUBYARD_E2E_PROXY_SOURCE_SHA256="$bundle_hash" \
+        bash dev/e2e/proxy-address-boot.sh clean "$token" \
         || failed=1
     fi
     [ "$failed" = 0 ] || rc=3
@@ -42,7 +43,8 @@ controller_main() {
   token="$LEASE_GENERATION"
   [[ "$token" =~ ^[1-9][0-9]*$ ]] || die 'invalid lease generation'
   prepared=1
-  run_guest 1 "$bundle" "$bundle_hash" bash dev/e2e/proxy-address-boot.sh prepare "$token"
+  run_guest 1 "$bundle" "$bundle_hash" env SUBYARD_E2E_PROXY_SOURCE_SHA256="$bundle_hash" \
+    bash dev/e2e/proxy-address-boot.sh prepare "$token"
   cleanup_guest 1
   before_boot="$(ssh -F "$CLIENT_CONFIG" -T e2e-vm-1 -- cat /proc/sys/kernel/random/boot_id)"
   timeout --foreground 20 ssh -F "$CLIENT_CONFIG" -T \
@@ -65,10 +67,11 @@ controller_main() {
   done
   [ "$up" = 1 ] || die 'VM did not return with a new boot ID'
   printf 'evidence: preboot=%s postboot=%s\n' "$before_boot" "$after_boot"
-  run_guest 1 "$bundle" "$bundle_hash" bash dev/e2e/proxy-address-boot.sh resume "$token"
+  run_guest 1 "$bundle" "$bundle_hash" env SUBYARD_E2E_PROXY_SOURCE_SHA256="$bundle_hash" \
+    bash dev/e2e/proxy-address-boot.sh resume "$token"
   cleanup_guest 1
   prepared=0
-  ok 'published release restored desired power automatically after delayed-address reboot'
+  ok 'current-worktree runtime restored desired power automatically after delayed-address reboot'
   exit 0
 }
 
@@ -80,9 +83,14 @@ esac
 # Reuse disposable operator, guarded runtime snapshot/restore and marker-owned project cleanup.
 # shellcheck source=dev/e2e/power-reconciler-upgrade.sh
 . "$ROOT/dev/e2e/power-reconciler-upgrade.sh"
-VERSION=0.17.3
-INSTALLER_SHA256=a78c10910c0886a8d01c0a2e77718b21ce58e45fa7f0de6064bc1f351d56028b
-INSTALLER="$STATE_ROOT/subyard-install-stable.sh"
+if [ -e "$ROOT/.subyard-acceptance/candidate.json" ]; then
+  CANDIDATE_VERSION="$(jq -er '.version' "$ROOT/.subyard-acceptance/candidate.json")"
+fi
+SOURCE_BUNDLE_SHA256="${SUBYARD_E2E_PROXY_SOURCE_SHA256:-}"
+SOURCE_BUNDLE_STATE="$STATE_ROOT/source-bundle.sha256"
+RUNTIME_ARCHIVE="$RELEASE_ROOT/subyard-$CANDIDATE_VERSION-linux-amd64.tar.gz"
+RUNTIME_DIGEST_STATE="$STATE_ROOT/runtime-artifact.sha256"
+RUNTIME_MANIFEST="$STATE_ROOT/runtime-files.expected.sha256"
 ADDRESS=192.0.2.123
 INTERFACE="sypb$TOKEN"
 READY=z-ready
@@ -175,21 +183,39 @@ ensure_platform() {
 }
 
 assert_guards() {
-  # Use the installed release's read-only guard implementation.
+  # Use the installed candidate's read-only guard implementation.
   operator_env env SUBYARD_SUDO_PREAUTHORIZED=1 bash -c '
     set -euo pipefail
     . "$1/scripts/lib-power.sh"
     power_nm_prepare_reader
     power_host_safe incusbr0 || { printf "%s\n" "$POWER_ERROR" >&2; exit 1; }
   ' _ "$OPERATOR_HOME/.subyard/runtime/current"
-  printf 'evidence: release NetworkManager and default-route guards passed\n'
+  printf 'evidence: candidate NetworkManager and default-route guards passed\n'
+}
+assert_source() {
+  [[ "$SOURCE_BUNDLE_SHA256" =~ ^[0-9a-f]{64}$ ]] || die 'source bundle checksum is required'
+  [ "$(sha256sum "$ROOT/../worktree.tar.gz" | awk '{print $1}')" = "$SOURCE_BUNDLE_SHA256" ] \
+    || die 'transported worktree does not match the controller source bundle'
 }
 assert_release() {
-  local target snapshot
-  [ "$(operator_yard --version)" = "yard $VERSION" ] || die 'unexpected installed release'
+  local target snapshot digest
+  assert_source
+  [ "$(read_fixture_value "$SOURCE_BUNDLE_STATE")" = "$SOURCE_BUNDLE_SHA256" ] \
+    || die 'source bundle changed across reboot'
+  digest="$(read_fixture_value "$RUNTIME_DIGEST_STATE")"
+  [ "$(sha256sum "$RUNTIME_ARCHIVE" | awk '{print $1}')" = "$digest" ] \
+    || die 'candidate artifact changed across reboot'
+  [ "$(operator_yard --version)" = "yard $CANDIDATE_VERSION" ] || die 'unexpected installed candidate'
   target="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
+  [ "$target" = "releases/$CANDIDATE_VERSION-${digest:0:12}" ] \
+    && [ "$target" = "$(read_fixture_value "$CANDIDATE_RELEASE_TARGET_STATE")" ] \
+    || die 'installed runtime differs from the transported candidate artifact'
+  operator_env cmp "$RUNTIME_MANIFEST" "$OPERATOR_HOME/.subyard/runtime/$target/runtime-files.sha256" \
+    || die 'installed runtime manifest differs from the candidate artifact'
+  operator_env bash -c 'cd "$1" && sha256sum -c runtime-files.sha256 >/dev/null' _ \
+    "$OPERATOR_HOME/.subyard/runtime/$target" || die 'installed runtime checksum mismatch'
   operator_env cmp "$OPERATOR_HOME/.subyard/runtime/$target/bin/yard-engine" "$RECONCILER" \
-    || die 'boot runtime differs from published engine'
+    || die 'boot runtime differs from the candidate engine'
   for path in "$RECONCILER" "$UNIT"; do
     sudo -n test -f "$path" && sudo -n test ! -L "$path" \
       && [ "$(sudo -n stat -c %u:%g "$path")" = 0:0 ] || die 'boot runtime is not root-owned'
@@ -197,8 +223,8 @@ assert_release() {
   [ "$(sudo -n stat -c %a "$RECONCILER")" = 755 ] \
     && [ "$(sudo -n stat -c %a "$UNIT")" = 644 ] || die 'unexpected boot runtime permissions'
   operator_env cat "$OPERATOR_HOME/.subyard/runtime/$target/config/systemd/subyard-power-reconcile.service.in" \
-    > "$STATE_ROOT/published.service.in"
-  assert_unit_matches "$STATE_ROOT/published.service.in" loaded 5
+    > "$STATE_ROOT/candidate.service.in"
+  assert_unit_matches "$STATE_ROOT/candidate.service.in" loaded 5
   snapshot="$(sudo -n systemctl show subyard-power-reconcile.service -p FragmentPath -p DropInPaths)"
   grep -Fxq "FragmentPath=$UNIT" <<<"$snapshot" \
     && grep -Fxq 'DropInPaths=' <<<"$snapshot" || die 'unexpected boot unit override'
@@ -207,13 +233,15 @@ assert_release() {
       && [ "$(incus config get "$name" user.subyard.desired_power --project "$PROJECT")" = running ] \
       || die 'desired power or Incus autostart changed'
   done
-  printf 'evidence: published_release=%s boot_runtime_sha256=%s root_owned=yes persistent_unit=yes\n' \
-    "$VERSION" "$(sudo -n sha256sum "$RECONCILER" | awk '{print $1}')"
+  printf 'evidence: source_bundle_sha256=%s candidate_version=%s runtime_artifact_sha256=%s boot_runtime_sha256=%s root_owned=yes persistent_unit=yes\n' \
+    "$SOURCE_BUNDLE_SHA256" "$CANDIDATE_VERSION" "$digest" \
+    "$(sudo -n sha256sum "$RECONCILER" | awk '{print $1}')"
   assert_guards
 }
 
 prepare_proxy() {
   [[ "$TOKEN" =~ ^[0-9]{1,10}$ ]] || die 'token is too long for dummy interface'
+  assert_source
   ensure_platform
   incus list --all-projects --format json | jq -e \
     'all(.[]; (.expanded_config["user.subyard.managed"] // .config["user.subyard.managed"] // "false") != "true")' \
@@ -228,12 +256,27 @@ prepare_proxy() {
   sudo -n test ! -e "$ADDRESS_UNIT_PATH" && sudo -n test ! -L "$ADDRESS_UNIT_PATH" \
     || die 'address unit already exists'
   prepare_fixture
-  curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 180 \
-    "https://github.com/Subyard/Subyard/releases/download/v$VERSION/subyard-install.sh" -o "$INSTALLER"
-  [ "$(sha256sum "$INSTALLER" | awk '{print $1}')" = "$INSTALLER_SHA256" ] \
-    || die 'published stable installer checksum changed'
-  chmod 0755 "$INSTALLER"
-  operator_env "$INSTALLER" --version "$VERSION" --yes
+  write_fixture_value "$SOURCE_BUNDLE_STATE" "$SOURCE_BUNDLE_SHA256"
+  p0_capacity_reset_build_cache
+  if [ -e "$ROOT/.subyard-acceptance/candidate.json" ]; then
+    # shellcheck source=tests/helpers/release-candidate.sh
+    . "$ROOT/tests/helpers/release-candidate.sh"
+    release_candidate_prepare "$ROOT" >/dev/null
+    install -d -m 0755 "$RELEASE_ROOT"
+    cp -a "$ROOT/.subyard-acceptance/release/." "$RELEASE_ROOT/"
+  else
+    info "packaging transported current worktree as $CANDIDATE_VERSION"
+    "$ROOT/dev/package-engine.sh" --output-dir "$RELEASE_ROOT" \
+      --version "$CANDIDATE_VERSION" >/dev/null
+  fi
+  chmod -R a+rX "$RELEASE_ROOT"
+  write_fixture_value "$RUNTIME_DIGEST_STATE" "$(sha256sum "$RUNTIME_ARCHIVE" | awk '{print $1}')"
+  tar -xOzf "$RUNTIME_ARCHIVE" ./runtime-files.sha256 > "$RUNTIME_MANIFEST"
+  chmod 0644 "$RUNTIME_MANIFEST"
+  operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
+    "$RELEASE_ROOT/subyard-install.sh" --version "$CANDIDATE_VERSION" --yes
+  write_fixture_value "$CANDIDATE_RELEASE_TARGET_STATE" \
+    "$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
   printf '%s\n' "$MARKER" > "$PROJECT_MUTATION_ARMED"
   incus project create "$PROJECT" -c features.images=false \
     -c user.subyard.p0-power-systemd="$MARKER" >/dev/null
@@ -307,7 +350,7 @@ DELIVER
   sudo -n systemctl enable "$ADDRESS_UNIT"
   write_fixture_value "$PHASE_STATE" proxy-ready
   PRESERVE_FIXTURE=1
-  ok 'published release and marker-owned delayed address are ready for reboot'
+  ok 'current-worktree runtime and marker-owned delayed address are ready for reboot'
 }
 
 resume_proxy() {
@@ -345,7 +388,7 @@ resume_proxy() {
   printf 'ok: explicit boot waiting, independent RUNNING, delayed address and automatic RUNNING passed\n'
 }
 
-for command in sudo incus ip jq systemctl curl timeout go; do
+for command in sudo incus ip jq systemctl timeout go tar; do
   command -v "$command" >/dev/null || die "$command is required"
 done
 sudo -n true || die 'passwordless sudo is required on the disposable VM'

@@ -1074,6 +1074,20 @@ func (runtime Runtime) testVMsReadiness(ctx context.Context, diagnostic bool) (b
 	return backend.Converged(ctx)
 }
 
+// ObserveTestVMSlotCountRepair retains host-sink and power ownership checks
+// before the CLI admits ordinary init behind completed release readiness.
+func (runtime Runtime) ObserveTestVMSlotCountRepair(ctx context.Context) (ports.RuntimeObservation, error) {
+	ineligible := ports.RuntimeObservation{State: ports.RuntimeStateAbsent}
+	if !runtime.Yard.NestedE2EVMs || !runtime.testVMHostSinkConverged(ctx) {
+		return ineligible, nil
+	}
+	intent, err := runtime.powerService().Intent(ctx, runtime.Yard)
+	if err != nil {
+		return ineligible, err
+	}
+	return runtime.testVMBackend(intent.Desired).ObserveSlotCountRepair(ctx)
+}
+
 func (runtime Runtime) testVMHostSinkConverged(ctx context.Context) bool {
 	return runtime.testVMHostSinkFailure(ctx) == nil
 }

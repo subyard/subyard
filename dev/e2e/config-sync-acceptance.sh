@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Published stable configuration sync over protected SSH in one disposable pair lease.
+# Current-worktree configuration sync over protected SSH in one disposable pair lease.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
@@ -22,12 +22,12 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 [ -n "$LEASE_REQUESTED_SLOT" ] || die '--slot N is required'
-for command in git rg tar sha256sum ssh ssh-keygen; do
+for command in git rg tar sha256sum ssh ssh-keygen jq; do
   command -v "$command" >/dev/null || die "$command is required"
 done
 
 LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
-LEASE_PURPOSE=published-config-sync
+LEASE_PURPOSE=config-sync-acceptance
 STATE=/var/lib/subyard-config-sync-e2e
 REMOTE_ROOT=/srv/subyard-config-sync-e2e
 fixture() {
@@ -41,7 +41,7 @@ cleanup_acceptance() {
   set +e
   for vm in 1 2; do
     if [ -n "${GUEST_DIRS[$vm]:-}" ]; then
-      fixture "$vm" published-cleanup >/dev/null 2>&1 || cleanup_failed=1
+      fixture "$vm" acceptance-cleanup >/dev/null 2>&1 || cleanup_failed=1
     fi
   done
   [ "$cleanup_failed" = 0 ] || rc=3
@@ -54,17 +54,34 @@ trap cleanup_acceptance EXIT INT TERM
 acquire_lease
 start_lease_keeper
 bundle="$LOCAL_TEMP/worktree.tar.gz"
-build_bundle "$ROOT" "$bundle"
+extra_paths=()
+if [ -e "$ROOT/.subyard-acceptance/candidate.json" ]; then
+  extra_paths=(.subyard-acceptance/candidate.json .subyard-acceptance/release)
+fi
+build_bundle "$ROOT" "$bundle" "${extra_paths[@]}"
 bundle_hash="$(sha256sum "$bundle" | cut -d' ' -f1)"
 printf 'config-sync controller source bundle sha256=%s\n' "$bundle_hash"
 for vm in 1 2; do
   prepare_guest "$vm" "$bundle" "$bundle_hash"
-  for command in git ssh ssh-keygen curl jq sha256sum systemctl; do
+  for command in git ssh ssh-keygen jq sha256sum systemctl; do
     guest "$vm" sh -c 'command -v "$1" >/dev/null' _ "$command" </dev/null
   done
   guest "$vm" test -x /usr/sbin/sshd </dev/null
+done
+fixture 1 acceptance-package
+# Package the transported source once, then stream identical assets to the peer.
+assets="$LOCAL_TEMP/runtime-assets.tar.gz"
+guest 1 tar -C "${GUEST_DIRS[1]}/src/.build/config-sync-release" -czf - . </dev/null >"$assets"
+assets_hash="$(sha256sum "$assets" | cut -d' ' -f1)"
+guest 2 dd "of=${GUEST_DIRS[2]}/runtime-assets.tar.gz" status=none <"$assets"
+[ "$(guest 2 sha256sum "${GUEST_DIRS[2]}/runtime-assets.tar.gz" </dev/null | cut -d' ' -f1)" = "$assets_hash" ] \
+  || die 'peer runtime-asset transport checksum mismatch'
+guest 2 install -d -m 0700 "${GUEST_DIRS[2]}/src/.build/config-sync-release" </dev/null
+guest 2 tar -xzf "${GUEST_DIRS[2]}/runtime-assets.tar.gz" -C "${GUEST_DIRS[2]}/src/.build/config-sync-release" </dev/null
+printf 'evidence: source_bundle_sha256=%s runtime_assets_sha256=%s\n' "$bundle_hash" "$assets_hash"
+for vm in 1 2; do
   host="host-$([ "$vm" = 1 ] && printf a || printf b)"
-  fixture "$vm" published-prepare "$host"
+  fixture "$vm" acceptance-prepare "$host"
   guest "$vm" cat "$STATE/release-identity" </dev/null >"$LOCAL_TEMP/release-$vm"
   ssh-keygen -q -t ed25519 -N '' -C subyard-config-sync-synthetic -f "$LOCAL_TEMP/$host-key"
   chmod 0600 "$LOCAL_TEMP/$host-key"
@@ -74,9 +91,9 @@ for vm in 1 2; do
   guest 1 chmod 0600 "$STATE/$host.pub" </dev/null
 done
 cmp -s "$LOCAL_TEMP/release-1" "$LOCAL_TEMP/release-2" \
-  || die 'hosts installed different published runtime artifacts or provenance'
-printf 'evidence: published_release_identity=%s\n' "$(cat "$LOCAL_TEMP/release-1")"
-fixture 1 published-server
+  || die 'hosts installed different current-worktree runtime artifacts or provenance'
+printf 'evidence: current_worktree_runtime_identity=%s\n' "$(cat "$LOCAL_TEMP/release-1")"
+fixture 1 acceptance-server
 # Pin the public host key through the already authenticated lease transport.
 guest 1 cat "$REMOTE_ROOT/server-key.pub" </dev/null >"$LOCAL_TEMP/server-key.pub"
 awk '{print "sync-private " $1 " " $2}' "$LOCAL_TEMP/server-key.pub" >"$LOCAL_TEMP/known-hosts"
@@ -84,17 +101,17 @@ chmod 0600 "$LOCAL_TEMP/known-hosts"
 for vm in 1 2; do
   host="host-$([ "$vm" = 1 ] && printf a || printf b)"
   guest "$vm" dd "of=$STATE/$host/known-hosts" status=none <"$LOCAL_TEMP/known-hosts"
-  fixture "$vm" published-auth "$host" "${VM_IP[1]}"
+  fixture "$vm" acceptance-auth "$host" "${VM_IP[1]}"
 done
-fixture 1 published-connect host-a
-fixture 2 published-connect host-b
-fixture 1 published-change host-a images:debian/12
-fixture 2 published-pull host-b images:debian/12
-fixture 1 published-verify host-a images:debian/12
-fixture 2 published-change host-b images:debian/13
-fixture 1 published-pull host-a images:debian/13
-fixture 2 published-verify host-b images:debian/13
-fixture 1 published-fail-closed host-a
-fixture 2 published-verify host-b images:debian/13
-for vm in 1 2; do fixture "$vm" published-cleanup; done
-ok 'published stable SSH sync, bidirectional live convergence and fail-closed recovery passed'
+fixture 1 acceptance-connect host-a
+fixture 2 acceptance-connect host-b
+fixture 1 acceptance-change host-a images:debian/12
+fixture 2 acceptance-pull host-b images:debian/12
+fixture 1 acceptance-verify host-a images:debian/12
+fixture 2 acceptance-change host-b images:debian/13
+fixture 1 acceptance-pull host-a images:debian/13
+fixture 2 acceptance-verify host-b images:debian/13
+fixture 1 acceptance-fail-closed host-a
+fixture 2 acceptance-verify host-b images:debian/13
+for vm in 1 2; do fixture "$vm" acceptance-cleanup; done
+ok 'current-worktree SSH sync, bidirectional live convergence and fail-closed recovery passed'

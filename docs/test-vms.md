@@ -12,8 +12,11 @@ outer yard, enter its shell, reach its Incus socket or invoke arbitrary lifecycl
 ## Running tests
 
 Choose checks using [Subyard dev-flow](../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk).
-This guide describes VM access, prerequisites and execution. When building or running the full
-host-free suite, use the current public worktree:
+This guide describes VM access, prerequisites and execution. Normal checks use the current public
+worktree, including uncommitted and untracked public files. Installed-runtime and reboot checks
+package this source and install the resulting candidate. A published release is only an explicit
+problem-reproduction baseline, as described in the skill's testing policy.
+For the full host-free suite:
 
 ```sh
 make build
@@ -333,8 +336,8 @@ and resource generation throughout the run.
 
 ### Test lanes and gates
 
-The focused published-release configuration check uses one fresh pair and a synthetic private
-SSH Git remote. It installs the same pinned `v0.17.3` artifact on both hosts, verifies two-way
+The focused configuration check uses one fresh pair and a synthetic private SSH Git remote.
+It installs the same runtime artifact built from the current worktree on both hosts, verifies two-way
 configuration convergence, and rejects dirty, diverged and conflicted checkouts without changing
 live settings or remote refs:
 
@@ -342,7 +345,7 @@ live settings or remote refs:
 bash dev/e2e/config-sync-acceptance.sh --slot "$slot"
 ```
 
-The published-release boot check uses one standard VM. It installs pinned `v0.17.3` through the
+The boot check uses one standard VM. It packages the current worktree and installs it through the
 supported installer, reboots the VM, observes the installed power service waiting for a missing
 synthetic proxy address, then verifies automatic startup when a marked boot service supplies it.
 It checks independent ready-yard startup, desired power, root-owned runtime/unit, host networking
@@ -353,8 +356,9 @@ bash dev/e2e/proxy-address-boot.sh --slot "$slot"
 ```
 
 Both controllers keep one lease through their phases and remove only their marked fixtures.
-They require public release/image download access and prove the pinned published runtime;
-they do not substitute for current-candidate release acceptance or external-account checks.
+They report the source bundle and installed artifact identities. The boot check requires public
+package/image download access. These focused results prove their current-candidate scenarios;
+they do not replace the combined release acceptance gate or external-account checks.
 
 Canonical remote project routing uses the focused preview fixture on a fresh pair:
 
