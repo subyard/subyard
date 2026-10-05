@@ -64,6 +64,7 @@ for _agent in ${CODING_TOOL_INTEGRATIONS:-}; do
     --env DEV_USER="$DEV_USER"
     --env CODING_TOOL_INTEGRATIONS="${CODING_TOOL_INTEGRATIONS:-}"
     --env AI_OBSERVER_CONTEXT="${AI_OBSERVER_CONTEXT:-}"
+    --env AI_OBSERVER_FRONTEND_URL="${AI_OBSERVER_FRONTEND_URL:-}"
     --env YARD_VERSION="${YARD_VERSION:-}"
   )
   incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" "${_agent_env[@]}" \

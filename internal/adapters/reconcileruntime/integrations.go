@@ -638,11 +638,14 @@ func (runtime Runtime) ApplyIntegrations(ctx context.Context, plan IntegrationPl
 	if err := runtime.RefreshConfigs(ctx); err != nil {
 		return err
 	}
-	identity, err := runtime.aiObserverProvisionIdentity()
+	frontendURL := runtime.aiObserverFrontendURL(ctx)
+	identity, err := runtime.aiObserverProvisionIdentity(frontendURL)
 	if err != nil {
 		return err
 	}
-	if err := runtime.runScriptEnvironment(ctx, runtime.Stderr, map[string]string{"AI_OBSERVER_CONTEXT": identity}, "reconcile-integrations.sh"); err != nil {
+	if err := runtime.runScriptEnvironment(ctx, runtime.Stderr, map[string]string{
+		"AI_OBSERVER_CONTEXT": identity, "AI_OBSERVER_FRONTEND_URL": frontendURL,
+	}, "reconcile-integrations.sh"); err != nil {
 		return err
 	}
 	// Keep the inventory pending until hooks succeed so the same requested

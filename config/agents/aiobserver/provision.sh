@@ -12,6 +12,7 @@ STATE_MARKER_VALUE=subyard-ai-observer-v1
 DEV_USER="${DEV_USER:-dev}"
 INTEGRATIONS="${CODING_TOOL_INTEGRATIONS:-}"
 CONTEXT="${AI_OBSERVER_CONTEXT:-}"
+FRONTEND_URL="${AI_OBSERVER_FRONTEND_URL:-http://localhost:8080}"
 TEST_ROOT="${AI_OBSERVER_TEST_ROOT:-}"
 
 die() { printf 'AI Observer provision: %s\n' "$*" >&2; exit 1; }
@@ -27,6 +28,10 @@ fi
 case "$DEV_USER" in ''|*[!A-Za-z0-9._-]*|-*|.|..) die 'invalid developer user' ;; esac
 if [ -n "$CONTEXT" ] && [[ ! "$CONTEXT" =~ ^[0-9a-f]{64}$ ]]; then
   die 'AI_OBSERVER_CONTEXT must be a lowercase SHA-256 when set'
+fi
+if ! [[ "$FRONTEND_URL" =~ ^http://[A-Za-z0-9.-]+:([1-9][0-9]{3,4})$ ]] \
+  || [ "${BASH_REMATCH[1]}" -lt 1024 ] || [ "${BASH_REMATCH[1]}" -gt 65535 ]; then
+  die 'AI_OBSERVER_FRONTEND_URL must be an HTTP origin with an unprivileged port'
 fi
 id -u "$DEV_USER" >/dev/null 2>&1 || die "developer user '$DEV_USER' does not exist"
 DEV_UID="$(id -u "$DEV_USER")"
@@ -115,7 +120,8 @@ SPEC="$(printf '%s\n' \
   '127.0.0.1:8080:8080' 'AI_OBSERVER_CLAUDE_PATH=/sessions/claude' \
   'AI_OBSERVER_CODEX_PATH=/sessions/codex' \
   'AI_OBSERVER_DATABASE_PATH=/app/data/ai-observer.duckdb' \
-  'AI_OBSERVER_API_PORT=8080' 'watch all --backfill' | sha256sum | cut -d' ' -f1)"
+  'AI_OBSERVER_API_PORT=8080' "AI_OBSERVER_FRONTEND_URL=$FRONTEND_URL" \
+  'watch all --backfill' | sha256sum | cut -d' ' -f1)"
 
 container_exists() { timeout 10 docker container inspect "$CONTAINER" >/dev/null 2>&1; }
 container_value() { timeout 10 docker inspect -f "$1" "$CONTAINER" 2>/dev/null; }
@@ -140,7 +146,8 @@ container_matches() {
   grep -Fxq 'AI_OBSERVER_CLAUDE_PATH=/sessions/claude' <<<"$env" || return 1
   grep -Fxq 'AI_OBSERVER_CODEX_PATH=/sessions/codex' <<<"$env" || return 1
   grep -Fxq 'AI_OBSERVER_DATABASE_PATH=/app/data/ai-observer.duckdb' <<<"$env" || return 1
-  grep -Fxq 'AI_OBSERVER_API_PORT=8080' <<<"$env"
+  grep -Fxq 'AI_OBSERVER_API_PORT=8080' <<<"$env" || return 1
+  grep -Fxq "AI_OBSERVER_FRONTEND_URL=$FRONTEND_URL" <<<"$env"
 }
 
 if container_exists && ! container_is_owned; then
@@ -180,6 +187,7 @@ printf -v q_spec '%q' "$SPEC"
 printf -v q_user '%q' "$DEV_UID:$DEV_GID"
 printf -v q_binds '%q' "$EXPECTED_BINDS"
 printf -v q_ports '%q' "$EXPECTED_PORTS"
+printf -v q_frontend_url '%q' "$FRONTEND_URL"
 printf -v q_marker '%q' "$MANAGED_MARKER"
 printf -v q_unit_path '%q' "$UNIT_PATH"
 printf -v q_check_path '%q' "$CHECK_PATH"
@@ -310,6 +318,7 @@ spec=$q_spec
 expected_user=$q_user
 expected_binds=$q_binds
 expected_ports=$q_ports
+frontend_url=$q_frontend_url
 test_mode=$q_test_mode
 die() { printf 'ai-observer-check: %s\\n' "\$*" >&2; exit 1; }
 # Static specification drift cannot recover while waiting for HTTP startup.
@@ -360,6 +369,7 @@ grep -Fxq 'AI_OBSERVER_CODEX_PATH=/sessions/codex' <<<"\$env" || drift 'Codex se
 grep -Fxq 'AI_OBSERVER_DATABASE_PATH=/app/data/ai-observer.duckdb' <<<"\$env" \
   || drift 'database path drifted'
 grep -Fxq 'AI_OBSERVER_API_PORT=8080' <<<"\$env" || drift 'API port drifted'
+grep -Fxq "AI_OBSERVER_FRONTEND_URL=\$frontend_url" <<<"\$env" || drift 'dashboard origin drifted'
 [ "\$(container_value '{{.State.Running}}')" = true ] || die 'container is not running'
 if [ "\$mode" = installed ]; then
   printf 'ai-observer %s installed\\n' $q_version
@@ -555,6 +565,7 @@ if ! container_matches; then
     --env AI_OBSERVER_CODEX_PATH=/sessions/codex \
     --env AI_OBSERVER_DATABASE_PATH=/app/data/ai-observer.duckdb \
     --env AI_OBSERVER_API_PORT=8080 \
+    --env "AI_OBSERVER_FRONTEND_URL=$FRONTEND_URL" \
     "$IMAGE" watch all --backfill >/dev/null; then
     if container_exists && container_is_expected_candidate; then
       candidate_created=1

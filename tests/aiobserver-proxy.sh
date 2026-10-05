@@ -81,6 +81,12 @@ before="$(wc -l <"$OBSERVER_PROXY_LOG")"
 subyard_ai_observer_proxy 1
 [ "$(wc -l <"$OBSERVER_PROXY_LOG")" = "$before" ] || fail 'exact Tailscale route was mutated'
 export OBSERVER_TAIL_ADDRESS=100.101.102.104 OBSERVER_ACTIVE_ADDRESS=100.101.102.104
+# Provisioned origins must not publish a different address after a stale observation.
+export AI_OBSERVER_FRONTEND_URL=http://100.101.102.103:22223
+before="$(wc -l <"$OBSERVER_PROXY_LOG")"
+if subyard_ai_observer_proxy 1; then fail 'stale prepared origin accepted'; fi
+[ "$(wc -l <"$OBSERVER_PROXY_LOG")" = "$before" ] || fail 'stale origin mutated the route'
+export AI_OBSERVER_FRONTEND_URL=http://100.101.102.104:22223
 if OBSERVER_PROXY_FAIL=1 subyard_ai_observer_proxy 1; then fail 'Tailscale publication failure accepted'; fi
 subyard_ai_observer_proxy 1
 jq -e '.devices["ai-observer"].listen == "tcp:100.101.102.104:22223"' "$OBSERVER_PROXY_STATE" >/dev/null
@@ -94,6 +100,7 @@ jq '.devices["ai-observer"].connect="tcp:127.0.0.1:8080"' "$OBSERVER_PROXY_STATE
 mv "$temporary/restored.json" "$OBSERVER_PROXY_STATE"
 # Disable cleans up an owned Tailscale route even after its address goes away.
 unset OBSERVER_TAIL_ADDRESS OBSERVER_ACTIVE_ADDRESS
+unset AI_OBSERVER_FRONTEND_URL
 subyard_ai_observer_proxy 0
 jq -e '.devices == {} and .config == {}' "$OBSERVER_PROXY_STATE" >/dev/null
 YARD_KIND=vm

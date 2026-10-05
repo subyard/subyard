@@ -31,6 +31,11 @@ dashboard remains on the owner's `127.0.0.1` for SSH forwarding.
 After upgrading an existing loopback installation, run `yard -Y default init` to
 migrate the managed proxy. Repeat initialization also reconciles address changes.
 The proxy binds one exact address; it never binds all host interfaces.
+Provisioning also configures that dashboard origin for upstream CORS and WebSocket
+checks. Repeat initialization updates it when the address or published port changes.
+If the page loads but shows `Disconnected`, the WebSocket can be rejecting the
+browser origin; after installing the fixed runtime, repeat `yard init` and reload
+the page. The WebSocket uses the dashboard port and needs no separate network rule.
 
 Its default port is the SSH port plus 20000, wrapped into the range 1024–65535
 (SSH port 2222 gives dashboard port 22222). Choose an explicit unused port if another

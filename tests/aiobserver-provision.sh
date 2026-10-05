@@ -205,12 +205,13 @@ chmod +x "$TMP/bin/docker" "$TMP/bin/systemctl" "$TMP/bin/curl"
 export PATH="$TMP/bin:$PATH"
 
 run_hook() {
-  local test_root="$1" dev_home="$2" integrations="$3" context="${4:-}"
+  local test_root="$1" dev_home="$2" integrations="$3" context="${4:-}" frontend_url="${5:-http://localhost:8080}"
   AI_OBSERVER_TEST_ROOT="$test_root" \
     AI_OBSERVER_CHECK_TIMEOUT_SECONDS=3 \
     AI_OBSERVER_TEST_ALLOW_NON_ROOT=1 \
     AI_OBSERVER_TEST_DEV_HOME="$dev_home" \
     AI_OBSERVER_CONTEXT="$context" \
+    AI_OBSERVER_FRONTEND_URL="$frontend_url" \
     DEV_USER="$(id -un)" \
     CODING_TOOL_INTEGRATIONS="$integrations" \
     bash "$HOOK"
@@ -254,6 +255,7 @@ grep -Fxq 'AI_OBSERVER_CLAUDE_PATH=/sessions/claude' "$container/env" || fail 'C
 grep -Fxq 'AI_OBSERVER_CODEX_PATH=/sessions/codex' "$container/env" || fail 'Codex path env missing'
 grep -Fxq 'AI_OBSERVER_DATABASE_PATH=/app/data/ai-observer.duckdb' "$container/env" || fail 'database env missing'
 grep -Fxq 'AI_OBSERVER_API_PORT=8080' "$container/env" || fail 'API port env missing'
+grep -Fxq 'AI_OBSERVER_FRONTEND_URL=http://localhost:8080' "$container/env" || fail 'dashboard origin env missing'
 ! grep -Eqi 'docker[.]sock|4318|0[.]0[.]0[.]0' "$container/binds" "$container/ports" "$container/env" \
   || fail 'container exposes a credential, OTLP, Docker, or LAN boundary'
 grep -Fq 'ExecStart='"$wrapper"' run' "$unit" || fail 'unit does not use the managed wrapper'
@@ -426,6 +428,36 @@ if run_hook "$test_root" "$dev_home" 'claude codex aiobserver' invalid >/dev/nul
 fi
 
 run_hook "$test_root" "$dev_home" 'claude codex aiobserver' >/dev/null
+
+# The browser origin is part of the exact owned runtime, including after migration.
+printf 'persistent origin data\n' >"$state/data/origin-sentinel"
+origin_spec="$(cat "$container/spec")"
+for origin in http://100.100.100.42:22222 http://100.100.100.43:22223 http://127.0.0.1:18080; do
+  : >"$FAKE_LOG"
+  run_hook "$test_root" "$dev_home" 'claude codex aiobserver' '' "$origin" >/dev/null
+  grep -Fxq "AI_OBSERVER_FRONTEND_URL=$origin" "$container/env" || fail 'published origin was not forwarded'
+  [ "$(cat "$container/spec")" != "$origin_spec" ] || fail 'origin change did not change the specification'
+  origin_spec="$(cat "$container/spec")"
+  grep -Eq '^docker create ' "$FAKE_LOG" || fail 'origin change did not recreate the container'
+  "$installed" >/dev/null || fail 'installed check rejected the published origin'
+  : >"$FAKE_LOG"
+  run_hook "$test_root" "$dev_home" 'claude codex aiobserver' '' "$origin" >/dev/null
+  assert_log_absent '^docker (create|rename|rm|stop)'
+  assert_log_absent '^systemctl (start|restart|stop|disable)'
+done
+sed -i '/^AI_OBSERVER_FRONTEND_URL=/d' "$container/env"
+if "$installed" >"$TMP/origin-drift.log" 2>&1; then fail 'installed check accepted a missing dashboard origin'; fi
+grep -Fxq 'ai-observer-check: dashboard origin drifted' "$TMP/origin-drift.log" \
+  || fail 'dashboard origin drift omitted its diagnostic'
+for origin in '*' http://127.0.0.1:80 http://127.0.0.1:65536 http://127.0.0.1:8080/path; do
+  : >"$FAKE_LOG"
+  if run_hook "$test_root" "$dev_home" 'claude codex aiobserver' '' "$origin" >/dev/null 2>&1; then
+    fail 'invalid dashboard origin was accepted'
+  fi
+  assert_log_absent '^docker |^systemctl '
+done
+run_hook "$test_root" "$dev_home" 'claude codex aiobserver' >/dev/null
+[ "$(cat "$state/data/origin-sentinel")" = 'persistent origin data' ] || fail 'origin migration damaged data'
 
 rm -f "$AI_OBSERVER_FAKE_ROOT/active"
 : >"$FAKE_LOG"

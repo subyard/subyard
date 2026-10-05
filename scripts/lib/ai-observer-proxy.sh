@@ -46,6 +46,11 @@ subyard_ai_observer_proxy() {
   fi
   host=127.0.0.1
   [ "$selected" != 1 ] || host="$(subyard_ai_observer_host)" || return 1
+  if [ "$selected" = 1 ] && [ -n "${AI_OBSERVER_FRONTEND_URL:-}" ] &&
+    [ "$AI_OBSERVER_FRONTEND_URL" != "http://$host:$port" ]; then
+    printf 'AI Observer: prepared dashboard origin changed; retry reconciliation\n' >&2
+    return 1
+  fi
   desired="v1:$port"
   [ "$host" = 127.0.0.1 ] || desired="v2:$host:$port"
 

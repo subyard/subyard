@@ -47,6 +47,30 @@ yard_engine() {
 yard() { yard_engine -Y "$YARD_NAME" "$@"; }
 guest() { incus exec "$INSTANCE" --project "$PROJECT" -- "$@"; }
 
+assert_websocket() {
+  python3 - "$1" <<'PY'
+import socket
+import sys
+from urllib.parse import urlsplit
+
+origin = sys.argv[1]
+url = urlsplit(origin)
+for allowed, expected in [(origin, 101), ("http://unrelated.invalid:8080", 403)]:
+    with socket.create_connection((url.hostname, url.port), timeout=5) as connection:
+        request = "\r\n".join([
+            "GET /ws HTTP/1.1", f"Host: {url.netloc}",
+            "Connection: Upgrade", "Upgrade: websocket",
+            "Sec-WebSocket-Version: 13", "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==",
+            f"Origin: {allowed}", "", "",
+        ])
+        connection.sendall(request.encode())
+        with connection.makefile("rb") as response:
+            status = int(response.readline(8192).split()[1])
+        if status != expected:
+            sys.exit(f"WebSocket returned {status}; expected {expected}")
+PY
+}
+
 cleanup() {
   local rc=$?
   trap - EXIT INT TERM
@@ -293,6 +317,7 @@ else
     || die 'owner dashboard route is unavailable'
 fi
 ok 'pinned container, service, read-only session mounts, and owner proxy converged'
+assert_websocket "http://127.0.0.1:$observer_port"
 
 api_contains() {
   local location="$1" marker="$2" response=''
@@ -472,6 +497,8 @@ yard_engine migrate --yes
     "v2:$tail_address:$observer_port" ] || die 'Tailscale proxy receipt did not converge'
 [ "$(incus config device get "$INSTANCE" ai-observer listen --project "$PROJECT")" = \
     "tcp:$tail_address:$observer_port" ] || die 'dashboard did not bind the exact Tailscale address'
+guest /usr/local/bin/ai-observer-check >/dev/null || die 'observer readiness after origin migration failed'
+assert_websocket "http://$tail_address:$observer_port"
 curl --noproxy '*' -fsS --max-time 10 "http://$tail_address:$observer_port/api/logs?limit=1" \
   | jq -e . >/dev/null || die 'dashboard HTTP is unavailable through the Tailscale address'
 yard status >"$STATE/tailscale-status"
@@ -484,6 +511,6 @@ yard init --yes
   || die 'Tailscale repeat init replaced the observer container'
 [ "$(guest stat -c '%d:%i' /srv/agents/ai-observer/data/ai-observer.duckdb)" = "$database_inode" ] \
   || die 'Tailscale migration replaced the observer database'
-ok 'Tailscale route migration, HTTP access, status, security and repeat init passed'
+ok 'Tailscale route migration, HTTP/WebSocket access, status, security and repeat init passed'
 
 printf 'ok: AI Observer real container-yard lifecycle\n'
