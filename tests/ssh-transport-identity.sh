@@ -138,6 +138,18 @@ cleanup_block="$(sed -n '/^sshdir=/,/^known=/p' "$teardown_script" | sed '$d')"
   export SUBYARD_OPERATOR_HOME="$cleanup_home"
   OPERATOR_USER="$(id -un)"
   export YARD_SNIP=subyard-demo.config
+  TEARDOWN_GUARD="$ROOT/scripts/lib/teardown-plan.py"
+  SUBYARD_TEARDOWN_ARTIFACTS="$(python3 -B - "$TEARDOWN_GUARD" "$cleanup_home/.ssh/$YARD_SNIP" <<'PY'
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("guard", sys.argv[1])
+guard = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(guard)
+with guard.artifact_parent(sys.argv[2]) as (fd, name):
+    binding = guard.artifact_digest(guard.artifact_entries(fd, name))
+print(json.dumps([{"Path": sys.argv[2], "Binding": binding}]))
+PY
+)"
+  export SUBYARD_TEARDOWN_ARTIFACTS
   # Run the real child bash without host privileges. Its source pathname is
   # deliberately unavailable, as it is after the actual identity drop.
   sudo() {
@@ -166,8 +178,8 @@ legacy_config_tmp_pattern="\$cfg.tmp"
 typed_ssh_dir="sshdir=\"\$SUBYARD_OPERATOR_HOME/.ssh\""
 typed_ssh_paths="snip=\"\$sshdir/\$YARD_SNIP\"; cfg=\"\$sshdir/config\""
 root_snippet_remove="rm -f \"\$snip\""
-remove_helper_call="rm -f -- \"\$1\" && ssh_config_remove_exact \"\$2\" \"\$3\""
-operator_identity_drop="sudo -n -u \"\$OPERATOR_USER\" -- bash -s"
+remove_helper_call="python3 -B - remove-artifact"
+operator_identity_drop="sudo -n -u \"\$OPERATOR_USER\" -- env"
 positional_helper_arguments="bash -s -- \"\$snip\" \"\$cfg\" \"Include \$YARD_SNIP\""
 ! grep -Fq "$legacy_config_tmp_pattern" "$teardown_script" \
   || fail 'teardown still writes or renames through predictable config.tmp'
@@ -180,7 +192,7 @@ fi
 ! grep -Fq "$root_snippet_remove" "$teardown_script" \
   || fail 'teardown root still removes the operator SSH snippet'
 grep -Fq "$remove_helper_call" "$teardown_script" \
-  || fail 'teardown does not remove the snippet and Include in one operator child'
+  || fail 'teardown does not guard snippet removal in the operator child'
 grep -Fq "$operator_identity_drop" "$teardown_script" \
   || fail 'teardown does not drop non-interactively to the operator for SSH cleanup'
 grep -Fq "$positional_helper_arguments" \

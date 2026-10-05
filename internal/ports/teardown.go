@@ -19,6 +19,16 @@ type TeardownResource struct {
 	Binding string `json:"binding"`
 }
 
+// TeardownArtifact binds an approved path to metadata only, never file contents.
+type TeardownArtifact struct {
+	Path    string
+	Binding string
+}
+
+// TeardownPlanStaleExitCode carries the physical guard's typed refusal through
+// shell and profile-service subprocesses without parsing their diagnostics.
+const TeardownPlanStaleExitCode = 75
+
 // CheckTeardownResources permits disappearing approved resources, never added
 // identities or altered ownership/content metadata before destructive apply.
 func CheckTeardownResources(approved, current []TeardownResource) error {

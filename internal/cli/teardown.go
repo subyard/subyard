@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -62,6 +63,10 @@ func (baseline *resetTeardownBaseline) steps() []domain.OperationStep {
 
 func (baseline *resetTeardownBaseline) resources() []ports.TeardownResource {
 	return append([]ports.TeardownResource{}, baseline.execution.snapshot.Resources...)
+}
+
+func (baseline *resetTeardownBaseline) artifacts() []ports.TeardownArtifact {
+	return append([]ports.TeardownArtifact{}, baseline.execution.snapshot.Artifacts...)
 }
 
 func (baseline *resetTeardownBaseline) check(ctx context.Context, cli *CLI) error {
@@ -159,7 +164,7 @@ func (cli *CLI) observeTeardownExecution(
 			incusState.VolumeFound || incusState.HostNetworkFound || incusState.HostPoolFound
 	}
 	suffix := ""
-	if loaded.Context.YardName != "" {
+	if loaded.Context.YardName != "" && loaded.Context.YardName != "default" {
 		suffix = "-" + loaded.Context.YardName
 	}
 	paths := []string{
@@ -249,6 +254,14 @@ func (cli *CLI) executeTeardown(
 		return domain.AdapterResult{}, errors.New("teardown inventory exceeds physical guard limit")
 	}
 	contextValues["SUBYARD_TEARDOWN_INVENTORY"] = string(inventory)
+	artifacts, err := json.Marshal(execution.snapshot.Artifacts)
+	if err != nil {
+		return domain.AdapterResult{}, err
+	}
+	if len(artifacts) > 64<<10 {
+		return domain.AdapterResult{}, errors.New("teardown artifacts exceed physical guard limit")
+	}
+	contextValues["SUBYARD_TEARDOWN_ARTIFACTS"] = string(artifacts)
 	if execution.physicalChanged && cli.options.AdapterRunner == nil {
 		if err := cli.prepareSudoPrivileges(
 			ctx, diagnostics, cli.effectiveUID(), "teardown",
@@ -304,6 +317,10 @@ func (cli *CLI) executeTeardown(
 		return runErr
 	})
 	writeAdapterDiagnostics(diagnostics, stderr)
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == ports.TeardownPlanStaleExitCode {
+		err = fmt.Errorf("%w: teardown artifact changed before deletion", domain.ErrPlanStale)
+	}
 	if err == nil && result.Status == "ok" {
 		err = cli.verifyTeardown(ctx, loaded, execution)
 	}

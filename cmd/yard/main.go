@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"syscall"
@@ -16,6 +17,7 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/testvmsruntime"
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/cli"
+	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
@@ -41,6 +43,10 @@ func main() {
 		}
 		if err := profile.RunServices(ctx, os.Args[2], os.Args[3:], processEnvironment(), os.Stdout, os.Stderr); err != nil {
 			fmt.Fprintln(os.Stderr, err)
+			var exit *exec.ExitError
+			if errors.As(err, &exit) && exit.ExitCode() == ports.TeardownPlanStaleExitCode {
+				os.Exit(ports.TeardownPlanStaleExitCode)
+			}
 			os.Exit(1)
 		}
 		return

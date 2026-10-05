@@ -46,6 +46,7 @@ type Runtime struct {
 	RepositoryRoot string
 	// TeardownResources is the approved pre-consent reset inventory; nil is unprepared.
 	TeardownResources []ports.TeardownResource
+	TeardownArtifacts []ports.TeardownArtifact
 	// Profiles is the immutable per-operation profile snapshot when supplied by
 	// the caller. Nil falls back to loading the shipped declarations from disk.
 	Profiles []profile.Definition
@@ -838,7 +839,7 @@ func (runtime Runtime) Preflight(ctx context.Context, fresh bool) error {
 }
 
 func (runtime Runtime) Teardown(ctx context.Context) error {
-	if runtime.TeardownResources == nil {
+	if runtime.TeardownResources == nil || runtime.TeardownArtifacts == nil {
 		return errors.New("approved exact reset teardown inventory is required")
 	}
 	current, err := runtime.TeardownInventory(ctx)
@@ -855,6 +856,13 @@ func (runtime Runtime) Teardown(ctx context.Context) error {
 	if len(payload) > 64<<10 {
 		return errors.New("reset teardown inventory exceeds physical guard limit")
 	}
+	artifacts, err := json.Marshal(runtime.TeardownArtifacts)
+	if err != nil {
+		return err
+	}
+	if len(artifacts) > 64<<10 {
+		return errors.New("reset teardown artifacts exceed physical guard limit")
+	}
 	keepShared := "0"
 	if hasOtherRegisteredLocalYard(runtime.Yard.YardName, runtime.powerYards()) {
 		keepShared = "1"
@@ -864,9 +872,14 @@ func (runtime Runtime) Teardown(ctx context.Context) error {
 			map[string]string{
 				"SUBYARD_TEARDOWN_KEEP_DATA":   "0",
 				"SUBYARD_TEARDOWN_INVENTORY":   string(payload),
+				"SUBYARD_TEARDOWN_ARTIFACTS":   string(artifacts),
 				"SUBYARD_TEARDOWN_KEEP_SHARED": keepShared,
 			}, "teardown-physical.sh", "--yes")
 	})
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == ports.TeardownPlanStaleExitCode {
+		return fmt.Errorf("%w: reset teardown artifact changed before deletion", domain.ErrPlanStale)
+	}
 	if err != nil {
 		return err
 	}

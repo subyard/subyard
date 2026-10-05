@@ -53,6 +53,7 @@ bridge_gone=0; pool_gone=0
 [ "$have_incus" = 1 ] || { bridge_gone=1; pool_gone=1; }
 
 python3 "$TEARDOWN_GUARD" guard-all "$INCUS_PROJECT" || die "plan_stale: teardown inventory changed before apply"
+python3 "$TEARDOWN_GUARD" guard-artifacts || exit 75
 bash "$SCRIPT_DIR/profile-services.sh" --remove
 
 echo "Instance:"
@@ -160,12 +161,17 @@ snip="$sshdir/$YARD_SNIP"; cfg="$sshdir/config"
 # A verified runtime may be pinned through a root process's /proc/PID/fd.
 # Send the already-loaded helper; the operator cannot reopen that source path.
 # shellcheck disable=SC2016
-if ! {
+{
   declare -f ssh_config_remove_exact &&
-    printf '%s\n' 'rm -f -- "$1" && ssh_config_remove_exact "$2" "$3"'
-} | sudo -n -u "$OPERATOR_USER" -- bash -s -- "$snip" "$cfg" "Include $YARD_SNIP"; then
+    printf '%s\n' 'set -e' "python3 -B - remove-artifact \"\$1\" <<'SUBYARD_TEARDOWN_GUARD_CODE'" &&
+    cat "$TEARDOWN_GUARD" &&
+    printf '%s\n' 'SUBYARD_TEARDOWN_GUARD_CODE' 'ssh_config_remove_exact "$2" "$3"'
+} | sudo -n -u "$OPERATOR_USER" -- env "SUBYARD_TEARDOWN_ARTIFACTS=$SUBYARD_TEARDOWN_ARTIFACTS" \
+  bash -s -- "$snip" "$cfg" "Include $YARD_SNIP" || {
+  cleanup_status=$?
+  [ "$cleanup_status" != 75 ] || exit 75
   die "could not remove this yard's operator SSH config"
-fi
+}
 ok "removed ~/.ssh/$YARD_SNIP (if present)"
 ok "removed 'Include $YARD_SNIP' from ~/.ssh/config (if present)"
 known="$SUBYARD_HOME/ssh/known_hosts"
@@ -176,7 +182,7 @@ if [ -f "$known" ] && [ -n "${SSH_PORT:-}" ]; then
 fi
 state_cleanup="$(subyard_state_remove_canonical \
   "$YARD_STATE_DIR" "$SUBYARD_CONFIG_HOME" "${YARD_NAME:-}")" \
-  || die "refusing unsafe yard state path: $YARD_STATE_DIR"
+  || { state_status=$?; [ "$state_status" != 75 ] || exit 75; die "refusing unsafe yard state path: $YARD_STATE_DIR"; }
 case "$state_cleanup" in
   removed) ok "removed yard state $YARD_STATE_DIR" ;;
   absent) ok "yard state already absent: $YARD_STATE_DIR" ;;
@@ -189,7 +195,9 @@ if [ -n "${YARD_NAME:-}" ]; then
 else
   rmdir --ignore-fail-on-non-empty "$SUBYARD_CONFIG_HOME" 2>/dev/null || true
 fi
-rm -f "$YARD_SPACE_CACHE" "$YARD_SPACE_CACHE.lock" "$YARD_SPACE_CACHE.tmp" 2>/dev/null || true
+for cache in "$YARD_SPACE_CACHE" "$YARD_SPACE_CACHE.lock" "$YARD_SPACE_CACHE.tmp"; do
+  python3 "$TEARDOWN_GUARD" remove-artifact "$cache" || exit 75
+done
 if [ "$KEEP_DATA" = 1 ]; then
   ok "kept data: $STORAGE_PATH (and $SUBYARD_HOME)"
 elif [ "$pool_gone" = 1 ]; then

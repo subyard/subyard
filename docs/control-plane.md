@@ -987,7 +987,12 @@ Unknown fields, unsupported versions, unsafe relative paths and duplicate consum
   services if a later pause fails. Hooks own their service-specific identity and recovery guards.
   `SUBYARD_PROFILE_STOPPED=1` asks readiness checks to honor the yard's stopped intent.
 - `managed_paths` declares owned `data`/`operator` paths for teardown assessment, with optional
-  `{yard}` substitution; the hook still owns physical cleanup and ownership checks.
+  `{yard}` substitution; the hook still owns physical cleanup and ownership checks. Teardown and
+  `init --reset` carry approved metadata bindings in `SUBYARD_TEARDOWN_ARTIFACTS`. Removal hooks
+  use `scripts/lib/teardown-plan.py guard-artifact PATH` before service mutations and
+  `remove-artifact PATH` at deletion. Bindings cover device/inode, UID/GID, mode, size, mtime,
+  ctime and symlink targets without reading file contents. The bounded guard permits an approved
+  artifact to disappear, rejects additions or replacement, and returns exit 75 for `plan_stale`.
 
 Descriptors contain no secrets. Config and credential data stay outside immutable release roots.
 Profile changes must preserve existing persisted paths and update/rollback behavior or declare a

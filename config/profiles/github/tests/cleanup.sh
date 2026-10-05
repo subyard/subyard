@@ -13,6 +13,15 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
   setup_test_context "$TMP/partial-init"
   export SUBYARD_PROFILE_SELECTED=0 SUBYARD_YARD=default
   export INCUS_LOG="$TMP/partial-init/incus.log"
+  SUBYARD_TEARDOWN_ARTIFACTS="$(python3 - "$SUBYARD_HOME" "$SUBYARD_OPERATOR_HOME" <<'PY'
+import json, sys
+data, operator = sys.argv[1:]
+print(json.dumps([{'Path': path, 'Binding': ''} for path in (
+    data + '/github-broker/default-engine', data + '/github-broker/default.json',
+    operator + '/.config/systemd/user/subyard-github-default.service')]))
+PY
+)"
+  export SUBYARD_TEARDOWN_ARTIFACTS
   mkdir -p "$TMP/bin"
   cat > "$TMP/bin/incus" <<'INCUS'
 #!/usr/bin/env bash

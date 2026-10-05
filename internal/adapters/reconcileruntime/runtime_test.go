@@ -150,14 +150,15 @@ func TestResetTeardownUsesNetworkPolicyBoundary(t *testing.T) {
 	}
 	marker := filepath.Join(root, "teardown-called")
 	if err := os.WriteFile(filepath.Join(root, "scripts", "teardown-physical.sh"), []byte(
-		"#!/bin/sh\n: > \"$TEARDOWN_MARKER\"\n",
+		"#!/bin/sh\n[ \"$SUBYARD_TEARDOWN_ARTIFACTS\" = \"$EXPECTED_TEARDOWN_ARTIFACTS\" ] || exit 91\n: > \"$TEARDOWN_MARKER\"\n",
 	), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	policy := &networkPolicyFixture{startErr: errors.New("policy incomplete")}
 	runtime := Runtime{
-		RepositoryRoot: root, Environment: []string{"TEARDOWN_MARKER=" + marker}, NetworkPolicy: policy,
+		RepositoryRoot: root, Environment: []string{"TEARDOWN_MARKER=" + marker, "EXPECTED_TEARDOWN_ARTIFACTS=[]"}, NetworkPolicy: policy,
 		Incus: &testkit.Incus{}, TeardownResources: []ports.TeardownResource{},
+		TeardownArtifacts: []ports.TeardownArtifact{},
 		Yard: domain.Context{
 			YardName: "default", IncusProject: "subyard",
 			YardInstanceName: "yard", IncusBridge: "incusbr0",
@@ -176,6 +177,10 @@ func TestResetTeardownUsesNetworkPolicyBoundary(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); err != nil || len(policy.started) != 2 {
 		t.Fatalf("guarded teardown marker=%v policy calls=%#v", err, policy.started)
+	}
+	testkit.WriteFile(t, filepath.Join(root, "scripts", "teardown-physical.sh"), []byte("#!/bin/sh\nexit 75\n"), 0700)
+	if err := runtime.Teardown(context.Background()); !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatalf("physical stale refusal lost its error type: %v", err)
 	}
 }
 

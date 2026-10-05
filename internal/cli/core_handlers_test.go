@@ -655,6 +655,13 @@ func TestTeardownRejectsUnknownInputAndPublishesMode(t *testing.T) {
 		runner.Requests[0].Context["SUBYARD_TEARDOWN_KEEP_SHARED"] != "0" {
 		t.Fatalf("requests=%#v", runner.Requests)
 	}
+	var artifacts []ports.TeardownArtifact
+	if err := json.Unmarshal([]byte(runner.Requests[0].Context["SUBYARD_TEARDOWN_ARTIFACTS"]), &artifacts); err != nil || len(artifacts) == 0 {
+		t.Fatalf("physical teardown lost approved artifact scope: count=%d err=%v", len(artifacts), err)
+	}
+	if artifacts[1].Path != filepath.Join(root, "home", ".ssh", "subyard.config") || artifacts[2].Path != filepath.Join(root, "data", "space.cache") {
+		t.Fatalf("default-yard artifacts differ from physical cleanup paths: %#v", artifacts)
+	}
 }
 
 func TestLifecycleExecutionBuildsTypedStopDelta(t *testing.T) {

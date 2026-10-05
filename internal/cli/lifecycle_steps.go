@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"syscall"
 
 	"github.com/Subyard/Subyard/internal/adapters/sshagentruntime"
 	"github.com/Subyard/Subyard/internal/config"
@@ -16,10 +17,7 @@ import (
 	"github.com/Subyard/Subyard/internal/ports"
 )
 
-type teardownArtifact struct {
-	Path    string
-	Binding string
-}
+type teardownArtifact = ports.TeardownArtifact
 type teardownSnapshot struct {
 	Resources    []ports.TeardownResource
 	Artifacts    []teardownArtifact
@@ -31,14 +29,24 @@ type teardownSnapshot struct {
 
 // Only filesystem metadata is inspected; protected configuration is never read.
 func teardownArtifactBinding(root string) (string, error) {
-	var entries []struct {
+	type artifactEntry struct {
 		Path     string
-		Mode     fs.FileMode
+		Mode     uint32
 		Size     int64
 		Modified int64
+		Device   uint64
+		Inode    uint64
+		UID      uint32
+		GID      uint32
+		Changed  int64
+		Link     string
 	}
+	var entries []artifactEntry
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
+			if path == root && errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
 			return err
 		}
 		if len(entries) >= 4096 {
@@ -48,23 +56,30 @@ func teardownArtifactBinding(root string) (string, error) {
 		if err != nil {
 			return err
 		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			return errors.New("native teardown artifact identity is unavailable")
+		}
+		link := ""
+		if info.Mode()&fs.ModeSymlink != 0 {
+			link, err = os.Readlink(path)
+			if err != nil {
+				return err
+			}
+		}
 		relative, err := filepath.Rel(root, path)
 		if err != nil {
 			return err
 		}
-		entries = append(entries, struct {
-			Path     string
-			Mode     fs.FileMode
-			Size     int64
-			Modified int64
-		}{relative, info.Mode(), info.Size(), info.ModTime().UnixNano()})
+		entries = append(entries, artifactEntry{relative, stat.Mode, info.Size(), info.ModTime().UnixNano(),
+			uint64(stat.Dev), stat.Ino, stat.Uid, stat.Gid, stat.Ctim.Nano(), link})
 		return nil
 	})
-	if errors.Is(err, os.ErrNotExist) {
-		return "", nil
-	}
 	if err != nil {
 		return "", err
+	}
+	if len(entries) == 0 {
+		return "", nil
 	}
 	return operationStateDigest(entries), nil
 }
@@ -105,7 +120,7 @@ func (cli *CLI) captureTeardownSnapshot(ctx context.Context, loaded config.Loade
 		if err != nil {
 			return nil, err
 		}
-		snapshot.Artifacts = append(snapshot.Artifacts, teardownArtifact{path, binding})
+		snapshot.Artifacts = append(snapshot.Artifacts, teardownArtifact{Path: path, Binding: binding})
 	}
 	snapshot.Registered, err = cli.powerYardContexts(loaded)
 	if err != nil {

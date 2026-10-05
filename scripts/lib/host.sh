@@ -90,7 +90,11 @@ subyard_state_remove_canonical() {
   elif [ ! -d "$state_dir" ]; then
     return 2
   else
-    rm -rf -- "$state_dir"
+    if [ -n "${SUBYARD_TEARDOWN_ARTIFACTS:-}" ]; then
+      python3 "${BASH_SOURCE[0]%/*}/teardown-plan.py" remove-artifact "$state_dir" || return
+    else
+      rm -rf -- "$state_dir"
+    fi
     printf 'removed\n'
   fi
 }

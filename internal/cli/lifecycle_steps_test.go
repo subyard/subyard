@@ -4,14 +4,21 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
+	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
+	"golang.org/x/sys/unix"
 )
 
 func TestStopCapturedNoOpRejectsNewWork(t *testing.T) {
@@ -38,8 +45,8 @@ func TestStopCapturedNoOpRejectsNewWork(t *testing.T) {
 
 func TestTeardownSnapshotRejectsNewResourceAndArtifactChanges(t *testing.T) {
 	resource := ports.TeardownResource{Kind: "instance", Name: "approved", Binding: strings.Repeat("a", 64)}
-	approved := &teardownSnapshot{Resources: []ports.TeardownResource{resource}, Artifacts: []teardownArtifact{{"owned", "before"}}}
-	converged := &teardownSnapshot{Artifacts: []teardownArtifact{{"owned", ""}}}
+	approved := &teardownSnapshot{Resources: []ports.TeardownResource{resource}, Artifacts: []teardownArtifact{{Path: "owned", Binding: "before"}}}
+	converged := &teardownSnapshot{Artifacts: []teardownArtifact{{Path: "owned"}}}
 	if err := checkTeardownSnapshot(approved, converged); err != nil {
 		t.Fatal(err)
 	}
@@ -47,9 +54,156 @@ func TestTeardownSnapshotRejectsNewResourceAndArtifactChanges(t *testing.T) {
 	if err := checkTeardownSnapshot(approved, newTarget); !errors.Is(err, domain.ErrPlanStale) {
 		t.Fatalf("new resource accepted: %v", err)
 	}
-	altered := &teardownSnapshot{Resources: approved.Resources, Artifacts: []teardownArtifact{{"owned", "after"}}}
+	altered := &teardownSnapshot{Resources: approved.Resources, Artifacts: []teardownArtifact{{Path: "owned", Binding: "after"}}}
 	if err := checkTeardownSnapshot(approved, altered); !errors.Is(err, domain.ErrPlanStale) {
 		t.Fatalf("artifact drift accepted: %v", err)
+	}
+}
+
+func TestTeardownArtifactReplacementRejectsPreservedMetadata(t *testing.T) {
+	for _, kind := range []string{"file", "symlink", "contents"} {
+		t.Run(kind, func(t *testing.T) {
+			root := testkit.TempDir(t)
+			path := filepath.Join(root, "owned")
+			if kind == "symlink" {
+				if err := os.Symlink("before", path); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				testkit.WriteFile(t, path, []byte("before"), 0600)
+			}
+			before, err := teardownArtifactBinding(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Lstat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Filesystems may share ctime ticks across immediate writes.
+			time.Sleep(20 * time.Millisecond)
+			if kind == "symlink" {
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink("after!", path); err != nil {
+					t.Fatal(err)
+				}
+				stamp := unix.NsecToTimespec(info.ModTime().UnixNano())
+				if err := unix.UtimesNanoAt(unix.AT_FDCWD, path, []unix.Timespec{stamp, stamp}, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if kind == "file" {
+					replacement := filepath.Join(root, "replacement")
+					testkit.WriteFile(t, replacement, []byte("after!"), 0600)
+					if err := os.Rename(replacement, path); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := os.WriteFile(path, []byte("after!"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			after, err := teardownArtifactBinding(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			approved := &teardownSnapshot{Artifacts: []teardownArtifact{{Path: path, Binding: before}}}
+			current := &teardownSnapshot{Artifacts: []teardownArtifact{{Path: path, Binding: after}}}
+			if err := checkTeardownSnapshot(approved, current); !errors.Is(err, domain.ErrPlanStale) {
+				t.Fatalf("%s drift with preserved size and permissions accepted: %v", kind, err)
+			}
+		})
+	}
+}
+
+func TestTeardownAndResetRejectArtifactReplacementBeforeApply(t *testing.T) {
+	for _, reset := range []bool{false, true} {
+		t.Run(map[bool]string{false: "teardown", true: "reset"}[reset], func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard", Environment: environment,
+				WorkingDir: root, Incus: lifecycleIncus(), NetworkPolicy: allowTestNetworkPolicy(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := program.loadContext("default")
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded.Context.Paths.StateDir = testkit.TempDir(t)
+			path := filepath.Join(loaded.Context.Paths.StateDir, "owned.json")
+			testkit.WriteFile(t, path, []byte("before"), 0600)
+			execution := &teardownExecution{}
+			var baseline *resetTeardownBaseline
+			if reset {
+				baseline, err = program.prepareResetTeardownBaseline(context.Background(), loaded)
+				if err != nil {
+					t.Fatal(err)
+				}
+				init := &initExecution{loaded: loaded, mode: initReset, resetBaseline: baseline, teardownResources: baseline.resources()}
+				init.rebuildPlatform(program)
+				runtime := init.platform.(reconcileruntime.Runtime)
+				if operationStateDigest(runtime.TeardownArtifacts) != operationStateDigest(baseline.artifacts()) {
+					t.Fatal("reset platform rebuild lost approved artifact scope")
+				}
+				execution = baseline.execution
+			} else if err := program.observeTeardownExecution(context.Background(), loaded, execution); err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			replacement := filepath.Join(testkit.TempDir(t), "replacement")
+			testkit.WriteFile(t, replacement, []byte("after!"), 0600)
+			if err := os.Chtimes(replacement, info.ModTime(), info.ModTime()); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(replacement, path); err != nil {
+				t.Fatal(err)
+			}
+			if reset {
+				err = baseline.check(context.Background(), program)
+			} else {
+				err = program.observeTeardownExecution(context.Background(), loaded, execution)
+			}
+			if !errors.Is(err, domain.ErrPlanStale) {
+				t.Fatalf("replacement accepted before destructive apply: %v", err)
+			}
+		})
+	}
+}
+
+func TestTeardownPhysicalStaleRefusalRetainsErrorType(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	command := exec.Command("sh", "-c", "exit 75")
+	exitErr := command.Run()
+	if exitErr == nil {
+		t.Fatal("stale fixture did not fail")
+	}
+	runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Err: exitErr}}}
+	incus := lifecycleIncus()
+	incus.Reconcile.InstanceFound = true
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Environment: environment,
+		WorkingDir: root, Incus: incus, AdapterRunner: runner, NetworkPolicy: allowTestNetworkPolicy(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := program.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = program.executeTeardown(context.Background(), &application.Orchestrator{Runner: runner, Clock: wallClock{}}, loaded,
+		domain.OperationPlan{OperationID: "stale-teardown", Confirmed: true}, &teardownExecution{}, io.Discard)
+	if !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatalf("physical drift lost plan_stale type: %v", err)
 	}
 }
 

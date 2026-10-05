@@ -112,10 +112,21 @@ if [ "$enabled" != 1 ]; then
     fi
     exit 0
   fi
+  if [ "$mode" = remove ]; then
+    for artifact in "$unit_file" "$runtime_file" "$broker_engine"; do
+      python3 "$SCRIPT_DIR/lib/teardown-plan.py" guard-artifact "$artifact" \
+        || exit 75
+    done
+  fi
   if [ -e "$unit_file" ] || [ -L "$unit_file" ]; then
     owned_service || die 'refusing to remove unmanaged GitHub broker service'
     user_systemctl disable --now "$unit" >/dev/null
-    rm -- "$unit_file"
+    if [ "$mode" = remove ]; then
+      python3 "$SCRIPT_DIR/lib/teardown-plan.py" remove-artifact "$unit_file" \
+        || exit 75
+    else
+      rm -- "$unit_file"
+    fi
     user_systemctl daemon-reload
   fi
   # The host authorization is already gone; guest cleanup needs a running instance.
@@ -125,10 +136,20 @@ if [ "$enabled" != 1 ]; then
     fi
     incus exec "$YARD_INSTANCE_NAME" --project "$INCUS_PROJECT" -- rm -f -- "$guest_engine"
   fi
-  [ ! -L "$runtime_file" ] || die 'unsafe GitHub broker runtime file'
-  [ ! -e "$runtime_file" ] || rm -- "$runtime_file"
-  [ ! -L "$broker_engine" ] || die 'unsafe GitHub broker engine path'
-  [ ! -e "$broker_engine" ] || rm -- "$broker_engine"
+  if [ "$mode" = remove ]; then
+    python3 "$SCRIPT_DIR/lib/teardown-plan.py" remove-artifact "$runtime_file" \
+      || exit 75
+  else
+    [ ! -L "$runtime_file" ] || die 'unsafe GitHub broker runtime file'
+    [ ! -e "$runtime_file" ] || rm -- "$runtime_file"
+  fi
+  if [ "$mode" = remove ]; then
+    python3 "$SCRIPT_DIR/lib/teardown-plan.py" remove-artifact "$broker_engine" \
+      || exit 75
+  else
+    [ ! -L "$broker_engine" ] || die 'unsafe GitHub broker engine path'
+    [ ! -e "$broker_engine" ] || rm -- "$broker_engine"
+  fi
   exit
 fi
 

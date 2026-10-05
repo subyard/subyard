@@ -11,4 +11,5 @@ for mask in 0002 0022 0077; do
   (umask "$mask"; go -C "$ROOT" test -race -count=1 ./config/profiles/github/...)
 done
 bash "$ROOT/config/profiles/github/tests/cleanup.sh"
+bash "$ROOT/config/profiles/github/tests/teardown-identity.sh"
 bash "$ROOT/config/profiles/github/tests/composition.sh"
