@@ -19,12 +19,15 @@ import (
 
 type currentNoNetwork struct{ t *testing.T }
 
-func TestCurrentReportPreservesWarningsInHumanAndJSONOutput(t *testing.T) {
+func TestCurrentReportPreservesDiagnosticsInHumanAndJSONOutput(t *testing.T) {
 	for _, asJSON := range []bool{false, true} {
 		var stdout, stderr bytes.Buffer
 		runtime := New(Config{Stdout: &stdout, Stderr: &stderr})
 		report := currentReport{Current: "release-b", Outcome: releasetransition.Outcome{
-			Status: releasetransition.StatusReady, Warnings: []string{"yard stopped: refresh deferred"},
+			Status: releasetransition.StatusOperatorActionRequired, Warnings: []string{"yard stopped: refresh deferred"},
+		}, Blockers: []releasetransition.Blocker{
+			{Resource: "yard.fixture", Message: "the candidate resource changed", Retry: "run yard update --check"},
+			{Message: "the transition is blocked", Retry: "run yard update --check"},
 		}}
 		prepared := runtime.prepareCurrentReport(currentOptions{json: asJSON}, report)
 		if err := prepared.Execute(context.Background()); err != nil {
@@ -35,8 +38,15 @@ func TestCurrentReportPreservesWarningsInHumanAndJSONOutput(t *testing.T) {
 		}
 		if asJSON {
 			var decoded currentReport
-			if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil || len(decoded.Outcome.Warnings) != 1 {
-				t.Fatalf("warning lost from JSON: %q, %v", stdout.String(), err)
+			if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil || len(decoded.Outcome.Warnings) != 1 ||
+				len(decoded.Blockers) != 2 || decoded.Blockers[0].Resource != "yard.fixture" {
+				t.Fatalf("diagnostics lost from JSON: %q, %v", stdout.String(), err)
+			}
+		} else {
+			for _, expected := range []string{"Blocked (yard.fixture): the candidate resource changed", "Blocked: the transition is blocked"} {
+				if !strings.Contains(stdout.String(), expected) {
+					t.Fatalf("missing %q in %q", expected, stdout.String())
+				}
 			}
 		}
 	}

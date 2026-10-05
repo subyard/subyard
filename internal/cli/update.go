@@ -31,6 +31,7 @@ type releaseExecution struct {
 	failurePhase string
 	failureCode  string
 	inspection   *releasetransition.Inspection
+	outcome      *releasetransition.Outcome
 }
 
 func (execution *releaseExecution) Close() error {
@@ -135,6 +136,9 @@ func (cli *CLI) executeRelease(ctx context.Context, orchestrator *application.Or
 	if executionFailed {
 		execution.failurePhase = "execute"
 		execution.failureCode = "execution_failed"
+		if outcome, ok := releaseruntime.TransitionOutcome(runErr); ok {
+			execution.outcome = &outcome
+		}
 	}
 	if result.Status == "ok" && execution.prepared.RefreshConfigs {
 		runErr = errors.Join(runErr, cli.refreshReleaseConfig(ctx, execution))
@@ -179,18 +183,28 @@ func (cli *CLI) printUpdateResult(execution *releaseExecution, success bool) {
 	} else {
 		fmt.Fprintln(output, "\n  [FAIL] Update did not complete successfully")
 	}
-	if execution.inspection == nil {
+	outcome := execution.outcome
+	if execution.inspection != nil {
+		outcome = execution.inspection.Outcome
+	} else {
 		fmt.Fprintln(output, "  Final readiness: not verified")
+	}
+	if outcome == nil {
 		return
 	}
-	outcome := execution.inspection.Outcome
 	fmt.Fprintf(output, "  Status: %s\n  Active release: %s\n", outcome.Status, outcome.Active)
 	if outcome.Previous != nil {
 		fmt.Fprintf(output, "  Previous release: %s\n", *outcome.Previous)
 	}
 	fmt.Fprintf(output, "  %s\n", outcome.Message)
-	for _, blocker := range execution.inspection.Blockers {
-		fmt.Fprintf(output, "  Blocked: %s\n", blocker.Message)
+	if execution.inspection != nil {
+		for _, blocker := range execution.inspection.Blockers {
+			if blocker.Resource != "" {
+				fmt.Fprintf(output, "  Blocked (%s): %s\n", blocker.Resource, blocker.Message)
+			} else {
+				fmt.Fprintf(output, "  Blocked: %s\n", blocker.Message)
+			}
+		}
 	}
 	for _, warning := range outcome.Warnings {
 		fmt.Fprintf(output, "  Warning: %s\n", warning)

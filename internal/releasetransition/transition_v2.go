@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
@@ -926,7 +927,12 @@ func (transition *V2Transition) reducePostMutationFailure(
 	ctx context.Context,
 	fallback JournalRecord,
 	cause error,
-) (Outcome, error) {
+) (outcome Outcome, resultErr error) {
+	defer func() {
+		if outcome.Status == StatusOperatorActionRequired || outcome.Status == StatusRecovering {
+			outcome = withPublicFailureCause(outcome, cause, "")
+		}
+	}()
 	links, linksErr := transition.options.ObserveLinks(ctx)
 	if linksErr != nil || links.Validate() != nil {
 		return v2OperatorOutcome(
@@ -1008,11 +1014,13 @@ func (transition *V2Transition) reducePostMutationFailure(
 			"run yard update --check",
 		), nil
 	}
-	return v2RecoveringOutcome(
+	outcome = v2RecoveringOutcome(
 		observation.links, journal.Goal.Target,
 		transactionIDPointer(journal.Transaction), CodeVerificationFailed,
 		"the release transition was interrupted after a durable mutation checkpoint",
-	), nil
+	)
+	outcome.Message, outcome.Retry = publicActivationDiagnostic(cause, outcome.Message, outcome.Retry)
+	return outcome, nil
 }
 
 func (transition *V2Transition) observe(ctx context.Context, goal Goal) (v2Observation, error) {
@@ -1557,12 +1565,21 @@ func (transition *V2Transition) observeResume(
 		}
 		observation.blockers = append(observation.blockers, ingressPlan.Blockers...)
 	}
-	capabilityPlan, err := newTestVMSettingsV2Capability(
-		transition.options.ConfigHome, transition.options.InheritedSettingIDs,
-		ingressPlan.Prospective,
-	).Inspect()
-	if err != nil {
-		return err
+	var capabilityPlan settingsV2Plan
+	for _, step := range journal.Steps {
+		migration, exists := transition.migration(step.Migration)
+		if exists && migration.Kind == "test-vms-settings-v1-to-v2" {
+			// Ledger-only steps retain migration scope; activation-only repair
+			// must not reopen completed settings migration history.
+			capabilityPlan, err = newTestVMSettingsV2Capability(
+				transition.options.ConfigHome, transition.options.InheritedSettingIDs,
+				ingressPlan.Prospective,
+			).Inspect()
+			if err != nil {
+				return err
+			}
+			break
+		}
 	}
 	observation.blockers = append(observation.blockers, capabilityPlan.Blockers...)
 	ownerSettingsView := settingsViewAfterPlan(
@@ -2684,7 +2701,13 @@ func (transition *V2Transition) reduceActivationReconcilerFailure(
 	links ReleaseLinks,
 	before V2ActivationObservation,
 	reconcileErr error,
-) Outcome {
+) (outcome Outcome) {
+	defer func() {
+		if outcome.Status == StatusOperatorActionRequired {
+			outcome = withPublicFailureCause(outcome, reconcileErr,
+				fmt.Sprintf("activation reconciler %q failed during %s", id, phase))
+		}
+	}()
 	after, err := reconciler.Observe(ctx, journal.Releases, links)
 	if err != nil || validateActivationObservation(id, after) != nil {
 		links, _, _ = transition.guardJournalLinks(ctx, journal)
@@ -2728,7 +2751,7 @@ func (transition *V2Transition) reduceActivationReconcilerFailure(
 			"run yard update --check",
 		), observation.activationWarnings)
 	}
-	outcome := v2RecoveringOutcome(
+	outcome = v2RecoveringOutcome(
 		observation.links, journal.Goal.Target,
 		transactionIDPointer(journal.Transaction), CodeDependencyUnavailable,
 		fmt.Sprintf("activation reconciler %q failed during %s", id, phase),
@@ -2759,12 +2782,40 @@ func publicActivationDiagnostic(err error, message, retry string) (string, strin
 	var diagnostic interface{ ActivationDiagnostic() (string, string) }
 	if errors.As(err, &diagnostic) {
 		publicMessage, publicRetry := diagnostic.ActivationDiagnostic()
-		if validateText(publicMessage, "activation diagnostic", maxDiagnosticText, true) == nil &&
+		if utf8.ValidString(publicMessage) && utf8.ValidString(publicRetry) &&
+			validateText(publicMessage, "activation diagnostic", maxDiagnosticText, true) == nil &&
 			validateSafeAction(publicRetry) == nil {
 			message, retry = publicMessage, publicRetry
 		}
 	}
 	return message, retry
+}
+
+func withPublicFailureCause(outcome Outcome, cause error, fallback string) Outcome {
+	message, _ := publicActivationDiagnostic(cause, fallback, "")
+	if message == "" || message == outcome.Message {
+		return outcome
+	}
+	// Keep the recovery explanation and its protected retry action even when
+	// the original public diagnostic consumes the entire protocol text budget.
+	recovery := outcome.Message
+	if len(message)+len(recovery)+2 > maxDiagnosticText {
+		recovery = boundedFailureText(recovery, maxDiagnosticText/2)
+		message = boundedFailureText(message, maxDiagnosticText-len(recovery)-2)
+	}
+	outcome.Message = message + "; " + recovery
+	return outcome
+}
+
+func boundedFailureText(message string, maximum int) string {
+	if len(message) <= maximum {
+		return message
+	}
+	end := maximum - len("...")
+	for !utf8.RuneStart(message[end]) {
+		end--
+	}
+	return strings.TrimSpace(message[:end]) + "..."
 }
 
 func validateActivationObservation(id string, observation V2ActivationObservation) error {

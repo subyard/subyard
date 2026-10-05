@@ -3,7 +3,6 @@ package testvmsruntime
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/url"
 	"reflect"
 )
@@ -31,34 +30,34 @@ func (backend *Backend) hostMemoryInstance(ctx context.Context) (hostMemoryInsta
 		return instance, err
 	}
 	if err := json.Unmarshal([]byte(body), &instance); err != nil {
-		return instance, errors.New("physical memory device evidence invalid")
+		return instance, doctorCheck("physical memory device evidence invalid", nil)
 	}
 	if instance.Config == nil || instance.Devices == nil || instance.ExpandedDevices == nil {
-		return instance, errors.New("physical memory device evidence incomplete")
+		return instance, doctorCheck("physical memory device evidence incomplete", nil)
 	}
 	marker := instance.Config[hostMemoryOwnerKey]
 	if marker != "" && marker != hostMemoryOwnerVersion && marker != "pending:"+hostMemoryOwnerVersion {
-		return instance, errors.New("physical memory device ownership conflict")
+		return instance, doctorCheck("physical memory device ownership conflict", nil)
 	}
 	device := instance.Devices[hostMemoryDevice]
 	if device != nil && (marker == "" || !reflect.DeepEqual(device, hostMemoryDeviceSpec())) {
-		return instance, errors.New("physical memory device ownership conflict")
+		return instance, doctorCheck("physical memory device ownership conflict", nil)
 	}
 	if device != nil && !reflect.DeepEqual(instance.ExpandedDevices[hostMemoryDevice], device) {
-		return instance, errors.New("physical memory device effective evidence inconsistent")
+		return instance, doctorCheck("physical memory device effective evidence inconsistent", nil)
 	}
 	for name, expanded := range instance.ExpandedDevices {
 		if name == hostMemoryDevice {
 			if device == nil || !reflect.DeepEqual(expanded, device) {
-				return instance, errors.New("physical memory device is inherited or divergent")
+				return instance, doctorCheck("physical memory device is inherited or divergent", nil)
 			}
 		} else if expanded["path"] == hostMemoryPath {
-			return instance, errors.New("physical memory path is occupied")
+			return instance, doctorCheck("physical memory path is occupied", nil)
 		}
 	}
 	for name, local := range instance.Devices {
 		if name != hostMemoryDevice && local["path"] == hostMemoryPath {
-			return instance, errors.New("physical memory path is occupied")
+			return instance, doctorCheck("physical memory path is occupied", nil)
 		}
 	}
 	return instance, nil

@@ -371,6 +371,16 @@ once, sorted and deduplicated. Public error details use `ActivationDiagnostic`;
 raw guest errors stay private.
 Recoverable reconcile failures retain validated public diagnostics after reobservation;
 ambiguous state and protected transition guards retain their own recovery instructions.
+The original public failure also remains visible when recovery observation adds a blocker
+or cannot establish a safe state. The recovery status and next action continue to describe
+the controlling guard. Settings blockers identify the yard without exposing assignment values.
+Failed update summaries render the validated execution outcome immediately; they do not
+run another inspection or claim that final readiness was verified.
+Stage adapters may implement `VerifyStageWithDiagnostic` for post-apply validation.
+Ordinary observations continue to return expected drift as a state; post-apply failures
+return the observed component reason through `ActivationDiagnostic`. The test VM broker
+uses bounded, source-owned readiness reasons for its host sink, backend and guest checks.
+Initial observation failures also retain these reasons; repairable drift stays a state.
 Materialized-config observation failures identify the yard and inspection phase, with a
 read-only config or integration status command. Known integration ownership conflicts retain
 their validated path and inspection command across the release boundary; they must not send

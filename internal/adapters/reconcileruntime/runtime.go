@@ -270,6 +270,15 @@ func (runtime Runtime) VerifyStage(ctx context.Context, stage ports.ReconcileSta
 	}
 }
 
+// VerifyStageWithDiagnostic is used at the post-apply boundary, where remaining
+// drift is a failure and its observed reason must reach the operator.
+func (runtime Runtime) VerifyStageWithDiagnostic(ctx context.Context, stage ports.ReconcileStageID) (bool, error) {
+	if stage == ports.ReconcileStageTestVMs {
+		return runtime.testVMsReadiness(ctx, true)
+	}
+	return runtime.VerifyStage(ctx, stage)
+}
+
 func (runtime Runtime) scriptConverged(ctx context.Context, name string, arguments ...string) (bool, error) {
 	return probeConverged(runtime.runScript(ctx, nil, name, arguments...))
 }
@@ -1033,28 +1042,59 @@ func (runtime Runtime) applyInstanceStage(ctx context.Context) error {
 }
 
 func (runtime Runtime) testVMsConverged(ctx context.Context) (bool, error) {
+	return runtime.testVMsReadiness(ctx, false)
+}
+
+func (runtime Runtime) testVMsReadiness(ctx context.Context, diagnostic bool) (bool, error) {
 	intent, err := runtime.powerService().Intent(ctx, runtime.Yard)
 	if err != nil {
 		if errors.Is(err, ports.ErrInstanceNotFound) ||
 			errors.Is(err, application.ErrPowerUnmanaged) {
+			if diagnostic {
+				return false, testvmsruntime.NewReadinessError(runtime.Yard.YardName,
+					"managed desired power is missing", err)
+			}
 			return false, nil
 		}
-		return false, err
+		return false, testvmsruntime.NewReadinessError(runtime.Yard.YardName,
+			"cannot inspect managed desired power", err)
 	}
-	if runtime.Yard.NestedE2EVMs && !runtime.testVMHostSinkConverged(ctx) {
-		return false, nil
+	if runtime.Yard.NestedE2EVMs {
+		if err := runtime.testVMHostSinkFailure(ctx); err != nil {
+			if diagnostic {
+				return false, err
+			}
+			return false, nil
+		}
 	}
-	return runtime.testVMBackend(intent.Desired).Converged(ctx)
+	backend := runtime.testVMBackend(intent.Desired)
+	if diagnostic {
+		return backend.Verify(ctx)
+	}
+	return backend.Converged(ctx)
 }
 
 func (runtime Runtime) testVMHostSinkConverged(ctx context.Context) bool {
+	return runtime.testVMHostSinkFailure(ctx) == nil
+}
+
+func (runtime Runtime) testVMHostSinkFailure(ctx context.Context) error {
+	failure := func(reason string, err error) error {
+		return testvmsruntime.NewReadinessError(runtime.Yard.YardName, reason, err)
+	}
 	sink := runtime.environmentDefault(
 		"SUBYARD_TEST_VMS_SINK_PATH",
 		"/usr/local/libexec/subyard/test-vms-host-sink",
 	)
 	engine := runtime.environmentValue("SUBYARD_DISPATCHER_PATH")
-	if engine == "" || !executable(sink) || !sameFile(engine, sink) {
-		return false
+	if engine == "" {
+		return failure("physical-host sink has no selected engine source", nil)
+	}
+	if !executable(sink) {
+		return failure("physical-host sink executable is missing or unusable", nil)
+	}
+	if !sameFile(engine, sink) {
+		return failure("physical-host sink engine differs from the selected release", nil)
 	}
 	service := runtime.environmentDefault(
 		"SUBYARD_TEST_VMS_SINK_SERVICE_PATH",
@@ -1065,21 +1105,25 @@ func (runtime Runtime) testVMHostSinkConverged(ctx context.Context) bool {
 		"/etc/systemd/system/subyard-test-vms-host-sink.timer",
 	)
 	contents, err := os.ReadFile(service)
-	if err != nil ||
-		!hasLine(string(contents), "ExecStart="+sink+" _test-vms-host-sink sync") ||
-		!strings.Contains(
-			string(contents),
-			`Environment="SUBYARD_HOME=`+runtime.Yard.Paths.DataHome+`"`,
-		) {
-		return false
+	if err != nil {
+		return failure("physical-host sink service cannot be read", err)
+	}
+	if !hasLine(string(contents), "ExecStart="+sink+" _test-vms-host-sink sync") {
+		return failure("physical-host sink service uses a different engine command", nil)
+	}
+	if !strings.Contains(string(contents), `Environment="SUBYARD_HOME=`+runtime.Yard.Paths.DataHome+`"`) {
+		return failure("physical-host sink service uses a different log root", nil)
 	}
 	systemctl, err := runtime.executableFromPath("systemctl")
 	if err != nil {
-		return false
+		return failure("systemctl is unavailable for physical-host sink verification", err)
 	}
 	command := exec.CommandContext(ctx, systemctl, "is-enabled", "--quiet", filepath.Base(timer))
 	command.Env = runtime.Environment
-	return command.Run() == nil
+	if err := command.Run(); err != nil {
+		return failure("physical-host sink timer is not enabled", err)
+	}
+	return nil
 }
 
 func (runtime Runtime) testVMBackend(desired string) *testvmsruntime.Backend {

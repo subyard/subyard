@@ -443,7 +443,13 @@ func (reconciler *activationStageReconciler) Reconcile(
 			return reconciler.failure("apply", err)
 		}
 	}
-	converged, err = platform.VerifyStage(ctx, reconciler.stage)
+	if verifier, ok := platform.(interface {
+		VerifyStageWithDiagnostic(context.Context, ports.ReconcileStageID) (bool, error)
+	}); ok {
+		converged, err = verifier.VerifyStageWithDiagnostic(ctx, reconciler.stage)
+	} else {
+		converged, err = platform.VerifyStage(ctx, reconciler.stage)
+	}
 	if err != nil {
 		return reconciler.failure("post-verify", err)
 	}

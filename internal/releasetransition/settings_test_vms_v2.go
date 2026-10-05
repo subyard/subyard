@@ -406,29 +406,29 @@ func (capability *testVMSettingsV2Capability) inspectYard(
 	template, templatePresent, safe := exactDirectSettingsV2Value(byName["YARD_TEMPLATE"])
 	if !safe {
 		return nil, []RedactedDecision{settingsV2Decision(yard, "YARD_TEMPLATE", DecisionBlock, "blocked")},
-			settingsV2YardBlocker(yard, "the yard template setting is ambiguous")
+			settingsV2YardBlocker(yard, "YARD_TEMPLATE is ambiguous")
 	}
 	if _, exists := inherited["YARD_TEMPLATE"]; exists {
-		return nil, nil, settingsV2YardBlocker(yard, "the yard template has inherited ownership")
+		return nil, nil, settingsV2YardBlocker(yard, "YARD_TEMPLATE has inherited ownership")
 	}
 	if !templatePresent {
 		return nil, nil, nil
 	}
 	if template != "e2e-vms" && template != "test-vms" {
 		return nil, []RedactedDecision{settingsV2Decision(yard, "YARD_TEMPLATE", DecisionBlock, "blocked")},
-			settingsV2YardBlocker(yard, "the yard template is not supported by this migration")
+			settingsV2YardBlocker(yard, "YARD_TEMPLATE is not supported by this migration")
 	}
 	nestedValue, nestedPresent, safe := exactDirectSettingsV2Value(byName["NESTED_E2E_VMS"])
 	if !safe {
 		return nil, []RedactedDecision{settingsV2Decision(yard, "NESTED_E2E_VMS", DecisionBlock, "blocked")},
-			settingsV2YardBlocker(yard, "the nested VM setting is ambiguous")
+			settingsV2YardBlocker(yard, "NESTED_E2E_VMS is ambiguous")
 	}
 	if _, exists := inherited["NESTED_E2E_VMS"]; exists {
-		return nil, nil, settingsV2YardBlocker(yard, "the nested VM setting has inherited ownership")
+		return nil, nil, settingsV2YardBlocker(yard, "NESTED_E2E_VMS has inherited ownership")
 	}
 	if nestedPresent && nestedValue != "0" && nestedValue != "1" {
 		return nil, []RedactedDecision{settingsV2Decision(yard, "NESTED_E2E_VMS", DecisionBlock, "blocked")},
-			settingsV2YardBlocker(yard, "the nested VM setting is not supported by this migration")
+			settingsV2YardBlocker(yard, "NESTED_E2E_VMS is not supported by this migration")
 	}
 
 	decisions := make([]RedactedDecision, 0, 2)
@@ -439,7 +439,7 @@ func (capability *testVMSettingsV2Capability) inspectYard(
 		value := "test-vms"
 		desired, err = config.EditPersistentAssignmentContent(path, desired, "YARD_TEMPLATE", &value)
 		if err != nil {
-			return nil, nil, settingsV2YardBlocker(yard, "the yard template cannot be edited safely")
+			return nil, nil, settingsV2YardBlocker(yard, "YARD_TEMPLATE cannot be edited safely")
 		}
 		changed = true
 		decisions = append(decisions, settingsV2Decision(
@@ -453,7 +453,7 @@ func (capability *testVMSettingsV2Capability) inspectYard(
 	if nestedPresent && nestedValue == "0" {
 		desired, err = config.EditPersistentAssignmentContent(path, desired, "NESTED_E2E_VMS", nil)
 		if err != nil {
-			return nil, nil, settingsV2YardBlocker(yard, "the nested VM setting cannot be reset safely")
+			return nil, nil, settingsV2YardBlocker(yard, "NESTED_E2E_VMS cannot be reset safely")
 		}
 		changed = true
 		fileDecision = DecisionReset
@@ -501,7 +501,8 @@ func affectedSettingsV2ID(name string) bool {
 func settingsV2YardBlocker(yard, message string) *Blocker {
 	return &Blocker{
 		Code: CodePreconditionBlocked, Resource: "yard." + yard,
-		Message: message, Retry: "repair the named yard settings, then run yard update",
+		Message: "yard " + yard + ": " + message,
+		Retry:   "repair the named yard settings, then run yard update",
 	}
 }
 

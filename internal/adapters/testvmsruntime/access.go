@@ -142,7 +142,7 @@ func (runtime *Runtime) collectFailureDiagnostics(ctx context.Context, cause err
 	return nil
 }
 
-func (runtime *Runtime) doctor(ctx context.Context, want map[string]string) error {
+func (runtime *Runtime) doctorChecks(ctx context.Context, want map[string]string) error {
 	cfg := runtime.Config
 	wantEnabled := want["WANT_ENABLED"]
 	actualEnabled := "0"
@@ -150,154 +150,154 @@ func (runtime *Runtime) doctor(ctx context.Context, want map[string]string) erro
 		actualEnabled = "1"
 	}
 	if wantEnabled != actualEnabled {
-		return errors.New("backend enabled state differs")
+		return doctorCheck("backend enabled state differs", nil)
 	}
 	if _, err := os.Stat(runtime.ConfigPath); err != nil {
-		return errors.New("backend config is missing")
+		return doctorCheck("backend config is missing", nil)
 	}
 	executable := runtime.ExecutablePath
 	if executable == "" {
 		var err error
 		executable, err = os.Executable()
 		if err != nil {
-			return err
+			return doctorCheck("installed test-vms engine cannot be located", err)
 		}
 	}
 	hash, err := fileSHA256(executable)
 	if err != nil {
-		return err
+		return doctorCheck("installed test-vms engine cannot be inspected", err)
 	}
 	if hash != want["WANT_ENGINE_HASH"] {
-		return errors.New("installed test-vms engine hash differs")
+		return doctorCheck("installed test-vms engine hash differs", nil)
 	}
 	if !cfg.Enabled {
 		if runtime.commandOK(ctx, "systemctl", "is-active", "--quiet",
 			"subyard-test-vms-lease-reaper.timer") {
-			return errors.New("lease reaper remains active")
+			return doctorCheck("lease reaper remains active", nil)
 		}
 		if runtime.commandOK(ctx, "systemctl", "is-active", "--quiet",
 			"subyard-test-vms-firewall.service") {
-			return errors.New("firewall remains active")
+			return doctorCheck("firewall remains active", nil)
 		}
 		for _, path := range []string{
 			"/etc/systemd/system/incus.service.d/subyard-nested-e2e.conf",
 			"/etc/ssh/sshd_config.d/90-subyard-e2e-agent.conf",
 		} {
 			if _, err := os.Stat(path); err == nil {
-				return fmt.Errorf("disabled backend artifact remains: %s", path)
+				return doctorCheck("disabled backend artifact remains", fmt.Errorf("disabled backend artifact remains: %s", path))
 			}
 		}
 		if _, err := user.Lookup(cfg.AgentUser); err == nil {
-			return errors.New("agent account remains")
+			return doctorCheck("agent account remains", nil)
 		}
 		return nil
 	}
 	if err := CheckHostMemory(); err != nil {
-		return err
+		return doctorCheck("physical host memory source is unavailable or unsafe", err)
 	}
-	for _, command := range []string{cfg.Incus, "qemu-system-x86_64", "nft"} {
+	for index, command := range []string{cfg.Incus, "qemu-system-x86_64", "nft"} {
 		if _, err := runtime.Runner.LookPath(command); err != nil {
-			return fmt.Errorf("required command is missing: %s", command)
+			return doctorCheck([]string{"required inner Incus command is missing", "required qemu-system-x86_64 command is missing", "required nft command is missing"}[index], fmt.Errorf("required command is missing: %s", command))
 		}
 	}
 	version, _, err := runtime.Runner.Run(ctx, cfg.Incus, []string{"--version"}, nil, nil)
 	if err != nil {
-		return err
+		return doctorCheck("inner Incus version cannot be inspected", err)
 	}
 	if !runtime.commandOK(ctx, "dpkg", "--compare-versions",
 		strings.TrimSpace(string(version)), "ge", "6.0.6") {
-		return errors.New("inner Incus is too old")
+		return doctorCheck("inner Incus is too old", nil)
 	}
 	if !runtime.commandOK(ctx, "systemctl", "is-active", "--quiet", "incus.service") {
-		return errors.New("inner Incus is inactive")
+		return doctorCheck("inner Incus is inactive", nil)
 	}
 	if !fileContains("/etc/systemd/system/incus.service.d/subyard-nested-e2e.conf",
 		"Environment=INCUS_SECURITY_APPARMOR=false") {
-		return errors.New("Incus drop-in differs")
+		return doctorCheck("Incus drop-in differs", nil)
 	}
 	if !runtime.commandOK(ctx, "systemctl", "is-enabled", "--quiet",
 		"subyard-test-vms-lease-reaper.timer") {
-		return errors.New("lease reaper is disabled")
+		return doctorCheck("lease reaper is disabled", nil)
 	}
 	if !runtime.commandOK(ctx, "systemctl", "is-active", "--quiet",
 		"subyard-test-vms-firewall.service") {
-		return errors.New("firewall is inactive")
+		return doctorCheck("firewall is inactive", nil)
 	}
 	if !runtime.commandOK(ctx, "nft", "list", "table", "inet", "subyard_e2e") {
-		return errors.New("firewall table is missing")
+		return doctorCheck("firewall table is missing", nil)
 	}
 	sshd, _, err := runtime.Runner.Run(ctx, "sshd", []string{"-T"}, nil, nil)
 	if err != nil {
-		return errors.New("cannot render sshd config")
+		return doctorCheck("cannot render sshd config", nil)
 	}
 	if !linePresent(string(sshd), "passwordauthentication no") ||
 		!linePresent(string(sshd), "kbdinteractiveauthentication no") {
-		return errors.New("SSH password login is enabled")
+		return doctorCheck("SSH password login is enabled", nil)
 	}
 	for _, node := range []string{"/dev/kvm", "/dev/vsock", "/dev/vhost-vsock", "/dev/net/tun"} {
 		info, err := os.Stat(node)
 		if err != nil || info.Mode()&os.ModeCharDevice == 0 {
-			return fmt.Errorf("required device is missing: %s", node)
+			return doctorCheck("required virtualization device is missing", fmt.Errorf("required device is missing: %s", node))
 		}
 	}
 	if err := requireRootMode(cfg.StateDir, 0o700); err != nil {
-		return err
+		return doctorCheck("broker state directory permissions differ", err)
 	}
 	devGroups, err := runtime.output(ctx, "id", "-nG", cfg.DevUser)
 	if err != nil {
-		return errors.New("yard developer account is missing")
+		return doctorCheck("yard developer account is missing", nil)
 	}
 	for _, group := range strings.Fields(devGroups) {
 		if group == "incus-admin" || group == "yard" {
-			return errors.New("yard developer has inner privileges")
+			return doctorCheck("yard developer has inner privileges", nil)
 		}
 	}
 	if _, err := user.Lookup(cfg.AgentUser); err != nil {
-		return errors.New("agent account is missing")
+		return doctorCheck("agent account is missing", nil)
 	}
 	account, err := runtime.output(ctx, "passwd", "--status", cfg.AgentUser)
 	if err != nil || !strings.HasPrefix(account, cfg.AgentUser+" P ") {
-		return errors.New("agent account cannot use key login")
+		return doctorCheck("agent account cannot use key login", nil)
 	}
 	groups, err := runtime.output(ctx, "id", "-nG", cfg.AgentUser)
 	if err != nil || len(strings.Fields(groups)) != 1 {
-		return errors.New("agent has supplementary groups")
+		return doctorCheck("agent has supplementary groups", nil)
 	}
 	groupName, err := runtime.output(ctx, "id", "-gn", cfg.AgentUser)
 	if err != nil {
-		return errors.New("cannot inspect agent group")
+		return doctorCheck("cannot inspect agent group", nil)
 	}
 	if err := requireOwnerMode(filepath.Join(cfg.AgentHome, ".ssh"),
 		"root", strings.TrimSpace(groupName), 0o750); err != nil {
-		return err
+		return doctorCheck("agent SSH directory permissions differ", err)
 	}
 	if err := requireOwnerMode(cfg.AgentAuthorizedKeys,
 		"root", strings.TrimSpace(groupName), 0o640); err != nil {
-		return err
+		return doctorCheck("agent authorized keys permissions differ", err)
 	}
 	authorized, err := os.ReadFile(cfg.AgentAuthorizedKeys)
 	if err != nil {
-		return errors.New("cannot inspect controller authorized_keys")
+		return doctorCheck("cannot inspect controller authorized_keys", nil)
 	}
 	if len(authorized) != 0 {
-		return errors.New("static controller key remains active")
+		return doctorCheck("static controller key remains active", nil)
 	}
 	const command = "/usr/local/libexec/subyard/test-vms-authorized-key"
 	if err := requireRootMode(command, 0o755); err != nil {
-		return err
+		return doctorCheck("controller authorized key command permissions differ", err)
 	}
 	commandPayload, err := os.ReadFile(command)
 	if err != nil || !strings.Contains(string(commandPayload),
 		`restrict,command="sudo -n /usr/local/libexec/subyard/test-vms-inner _test-vms-facade"`) {
-		return errors.New("default-open forced facade differs")
+		return doctorCheck("default-open forced facade differs", nil)
 	}
 	if !fileContains("/etc/ssh/sshd_config.d/90-subyard-e2e-agent.conf",
 		"AuthorizedKeysCommand "+command+" %u %t %k") {
-		return errors.New("controller AuthorizedKeysCommand differs")
+		return doctorCheck("controller AuthorizedKeysCommand differs", nil)
 	}
 	if !fileContains("/etc/sudoers.d/subyard-test-vms-facade",
 		`subyard-e2e-agent ALL=(root) NOPASSWD: /usr/local/libexec/subyard/test-vms-inner _test-vms-facade`) {
-		return errors.New("bounded facade sudo policy differs")
+		return doctorCheck("bounded facade sudo policy differs", nil)
 	}
 	return nil
 }

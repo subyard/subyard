@@ -1464,7 +1464,25 @@ func newReleaseTransitionGrant() (releasetransition.Authorization, error) {
 	return releasetransition.Authorization("grant-v1-" + hex.EncodeToString(value[:])), nil
 }
 
+type transitionOutcomeFailure struct {
+	outcome releasetransition.Outcome
+}
+
+// TransitionOutcome returns the validated public outcome retained by a release failure.
+func TransitionOutcome(err error) (releasetransition.Outcome, bool) {
+	var failure transitionOutcomeFailure
+	if !errors.As(err, &failure) {
+		return releasetransition.Outcome{}, false
+	}
+	return failure.outcome, true
+}
+
 func transitionOutcomeError(outcome releasetransition.Outcome) error {
+	return transitionOutcomeFailure{outcome: outcome}
+}
+
+func (failure transitionOutcomeFailure) Error() string {
+	outcome := failure.outcome
 	previous := "none"
 	if outcome.Previous != nil {
 		previous = string(*outcome.Previous)
@@ -1473,7 +1491,7 @@ func transitionOutcomeError(outcome releasetransition.Outcome) error {
 	if outcome.Transaction != nil {
 		transaction = string(*outcome.Transaction)
 	}
-	return fmt.Errorf(
+	return fmt.Sprintf(
 		"release transition %s: code=%s active=%s previous=%s target=%s transaction=%s; %s; next: %s",
 		outcome.Status, outcome.Code, outcome.Active, previous, outcome.Target,
 		transaction, outcome.Message, outcome.Retry,

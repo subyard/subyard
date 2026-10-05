@@ -420,7 +420,11 @@ func (runtime *Runtime) prepareCurrentReport(parsed currentOptions, report curre
 			fmt.Fprintf(&output, "Action: %s\n", releaseDecisionConsequence(decision))
 		}
 		for _, blocker := range report.Blockers {
-			fmt.Fprintf(&output, "Blocked: %s; next: %s\n", blocker.Message, blocker.Retry)
+			if blocker.Resource != "" {
+				fmt.Fprintf(&output, "Blocked (%s): %s; next: %s\n", blocker.Resource, blocker.Message, blocker.Retry)
+			} else {
+				fmt.Fprintf(&output, "Blocked: %s; next: %s\n", blocker.Message, blocker.Retry)
+			}
 		}
 		for _, warning := range report.Outcome.Warnings {
 			fmt.Fprintf(&output, "Warning: %s\n", warning)

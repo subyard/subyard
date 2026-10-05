@@ -49,36 +49,77 @@ type backendState struct {
 }
 
 func (backend *Backend) Converged(ctx context.Context) (bool, error) {
+	return backend.observeReadiness(ctx, false)
+}
+
+// Verify reports the first failed readiness check after applying the backend.
+// Initial observation uses Converged so expected drift stays quiet.
+func (backend *Backend) Verify(ctx context.Context) (bool, error) {
+	return backend.observeReadiness(ctx, true)
+}
+
+func (backend *Backend) observeReadiness(ctx context.Context, diagnostic bool) (bool, error) {
+	notReady := func(reason string, cause, observationError error) (bool, error) {
+		if diagnostic || observationError != nil {
+			return false, NewReadinessError(backend.YardName, reason, cause)
+		}
+		return false, nil
+	}
 	state, err := backend.state()
 	if err != nil {
-		return false, err
+		return notReady("backend engine or configuration could not be inspected", err, err)
 	}
 	if backend.Runner == nil {
 		backend.Runner = ProcessRunner{}
 	}
 	if ok, err := backend.hostMemoryConverged(ctx, state.enabled == "1"); err != nil || !ok {
-		return false, err
+		reason := "host memory device is not converged"
+		var check *doctorCheckError
+		if errors.As(err, &check) {
+			reason = check.reason
+		}
+		return notReady(reason, err, err)
 	}
 	marker, err := backend.incus(ctx, "config", "get", backend.Instance,
 		"user.subyard.test_vms_revision", "--project", backend.Project)
-	if err != nil || strings.TrimSpace(marker) != state.marker {
-		return false, nil
+	if err != nil {
+		return notReady("backend revision could not be inspected", err, nil)
+	}
+	if strings.TrimSpace(marker) != state.marker {
+		return notReady("backend revision differs", nil, nil)
 	}
 	outer, err := backend.outerState(ctx)
 	if err != nil {
-		return false, nil
+		return notReady("outer yard power state could not be inspected", err, nil)
 	}
 	if ok, err := backend.routeConverged(ctx, state, outer == "RUNNING"); err != nil || !ok {
-		return false, err
+		return notReady("published controller route is not converged", err, err)
 	}
 	if outer != "RUNNING" {
-		return outer == "STOPPED" && backend.DesiredPower == "stopped", nil
+		if outer == "STOPPED" && backend.DesiredPower == "stopped" {
+			return true, nil
+		}
+		return notReady("outer yard power state differs", nil, nil)
 	}
-	_, err = backend.incus(ctx,
+	arguments := []string{
 		"exec", backend.Instance, "--project", backend.Project,
-		"--env", "WANT_ENABLED="+state.enabled,
-		"--env", "WANT_ENGINE_HASH="+state.engineHash,
-		"--", DefaultInstalledPath, "_test-vms-worker", "doctor")
+		"--env", "WANT_ENABLED=" + state.enabled,
+		"--env", "WANT_ENGINE_HASH=" + state.engineHash,
+	}
+	if diagnostic {
+		arguments = append(arguments, "--env", "WANT_DIAGNOSTIC=1")
+	}
+	arguments = append(arguments, "--", DefaultInstalledPath, "_test-vms-worker", "doctor")
+	report, err := backend.incus(ctx, arguments...)
+	if diagnostic {
+		if converged, reason := parseDoctorReport(report); !converged || err != nil {
+			if converged {
+				reason = doctorFallback
+			}
+			return notReady(reason, err, nil)
+		}
+		return true, nil
+	}
 	return err == nil, nil
 }
 

@@ -538,6 +538,15 @@ func TestTestVMHostSinkProbeRequiresSelectedEngineUnitAndTimer(t *testing.T) {
 	if runtime.testVMHostSinkConverged(context.Background()) {
 		t.Fatal("stale test-vms host sink runtime was accepted")
 	}
+	var diagnostic interface{ ActivationDiagnostic() (string, string) }
+	if err := runtime.testVMHostSinkFailure(context.Background()); !errors.As(err, &diagnostic) {
+		t.Fatalf("stale sink lacks a public cause: %v", err)
+	}
+	message, _ := diagnostic.ActivationDiagnostic()
+	if !strings.Contains(message, "physical-host sink engine differs from the selected release") ||
+		strings.Contains(message, root) {
+		t.Fatalf("sink diagnostic lost its cause or exposed private paths: %q", message)
+	}
 }
 
 func TestFinalizeMapsDesiredPowerToLifecycleAction(t *testing.T) {

@@ -2432,6 +2432,58 @@ func TestActivationStageReconcilerReturnsApplyDiagnostics(t *testing.T) {
 	}
 }
 
+type diagnosticStageFixture struct {
+	*initPlatformFixture
+	diagnostic error
+	verifies   int
+}
+
+func (fixture *diagnosticStageFixture) VerifyStageWithDiagnostic(context.Context, ports.ReconcileStageID) (bool, error) {
+	fixture.verifies++
+	return false, fixture.diagnostic
+}
+
+func TestActivationStageReconcilerUsesDetailedPostApplyVerification(t *testing.T) {
+	platform := &diagnosticStageFixture{
+		initPlatformFixture: newInitPlatformFixture(),
+		diagnostic:          v2PublicStageTestError{},
+	}
+	platform.converged[ports.ReconcileStagePower] = false
+	reconciler := &activationStageReconciler{
+		id: "sample-runtime", stage: ports.ReconcileStagePower,
+		inspectApplicability: func(context.Context) (activationApplicability, error) {
+			return activationApplicability{state: "installed", applies: true}, nil
+		},
+		platform: func(context.Context, activationApplicability) (ports.ReconcileStageRunner, error) {
+			return platform, nil
+		},
+	}
+	observation, err := reconciler.Observe(context.Background(), releasetransition.ReleasePair{
+		From: "release-a", Target: "release-a",
+	}, releasetransition.ReleaseLinks{Active: "release-a"})
+	if err != nil || observation.Converged || platform.verifies != 0 {
+		t.Fatalf("expected drift observation = %#v, diagnostic verifies=%d err=%v", observation, platform.verifies, err)
+	}
+	err = reconciler.Reconcile(context.Background(), releasetransition.ReleaseLinks{})
+	var phased interface{ ActivationPhase() string }
+	var diagnostic interface{ ActivationDiagnostic() (string, string) }
+	if !errors.As(err, &phased) || phased.ActivationPhase() != "post-verify" ||
+		!errors.As(err, &diagnostic) || platform.verifies != 1 || len(platform.applied) != 1 {
+		t.Fatalf("post-apply diagnostic = %v, verifies=%d applied=%v", err, platform.verifies, platform.applied)
+	}
+	message, _ := diagnostic.ActivationDiagnostic()
+	if message != "sample runtime service is inactive" {
+		t.Fatalf("post-apply cause lost: %q", message)
+	}
+}
+
+type v2PublicStageTestError struct{}
+
+func (v2PublicStageTestError) Error() string { return "private transport detail" }
+func (v2PublicStageTestError) ActivationDiagnostic() (string, string) {
+	return "sample runtime service is inactive", "run yard init"
+}
+
 func TestBrokerActivationPlatformIgnoresInheritedDefaultContext(t *testing.T) {
 	repositoryRoot := repositoryRoot(t)
 	home := t.TempDir()

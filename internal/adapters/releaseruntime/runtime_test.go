@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -2306,6 +2307,9 @@ esac
 		if err == nil || !strings.Contains(err.Error(), "inconsistent release transition outcome") {
 			t.Fatalf("foreign recovery convergence error = %v", err)
 		}
+		if outcome, ok := TransitionOutcome(err); ok {
+			t.Fatalf("invalid process response exposed as a validated outcome: %#v", outcome)
+		}
 	})
 
 	for _, test := range []struct {
@@ -2330,6 +2334,14 @@ esac
 			if err == nil || !strings.Contains(err.Error(), "code="+test.code) ||
 				strings.Contains(err.Error(), "inconsistent release transition outcome") {
 				t.Fatalf("intermediate convergence error = %v", err)
+			}
+			var response releasetransition.ProcessResponse
+			if err := json.Unmarshal([]byte(test.convergence), &response); err != nil {
+				t.Fatal(err)
+			}
+			outcome, ok := TransitionOutcome(fmt.Errorf("wrapped adapter failure: %w", err))
+			if !ok || !reflect.DeepEqual(outcome, *response.Outcome) {
+				t.Fatalf("validated public outcome was lost: outcome=%#v expected=%#v ok=%v", outcome, response.Outcome, ok)
 			}
 		})
 	}

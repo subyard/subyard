@@ -11,8 +11,10 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/testkit"
 	"golang.org/x/sys/unix"
 )
 
@@ -2023,6 +2025,41 @@ func TestV2TransitionResumesEveryDurableCheckpointWithoutNewAuthorization(t *tes
 	}
 }
 
+func TestV2TransitionResumeRetainsLedgerOnlySettingsScope(t *testing.T) {
+	for _, faultPoint := range []string{"after-journal-authorized", "after-ledger-cas"} {
+		t.Run(faultPoint, func(t *testing.T) {
+			transition, configHome, settingsPath := v2TransitionFixture(t, func(point string) error {
+				if point == faultPoint {
+					return errors.New("interrupt settings ledger migration")
+				}
+				return nil
+			})
+			testkit.WriteFile(t, settingsPath, []byte("YARD_TEMPLATE=test-vms\n"), 0o600)
+			goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
+			inspection, err := transition.Inspect(context.Background(), goal)
+			if err != nil || len(inspection.Blockers) != 0 {
+				t.Fatalf("inspection = %#v, err=%v", inspection, err)
+			}
+			interrupted, err := transition.Converge(context.Background(), Execution{
+				Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
+			})
+			if err != nil || interrupted.Status != StatusRecovering {
+				t.Fatalf("interrupted migration = %#v, err=%v", interrupted, err)
+			}
+			transition.options.fault = nil
+			testkit.WriteFile(t, filepath.Join(configHome, "yards", "ordinary.env"),
+				[]byte("YARD_TEMPLATE=other-template\n"), 0o600)
+			resume, err := transition.Inspect(context.Background(), goal)
+			if err != nil || resume.Outcome == nil ||
+				resume.Outcome.Status != StatusOperatorActionRequired ||
+				resume.Outcome.Code != CodePreconditionBlocked || len(resume.Blockers) != 1 ||
+				resume.Blockers[0].Resource != "yard.ordinary" {
+				t.Fatalf("ledger-only settings scope = %#v, err=%v", resume, err)
+			}
+		})
+	}
+}
+
 func TestV2TransitionResumeAfterAnotherCallerCompletes(t *testing.T) {
 	for _, drift := range []bool{false, true} {
 		t.Run(fmt.Sprintf("drift=%t", drift), func(t *testing.T) {
@@ -2707,6 +2744,8 @@ func TestV2TransitionResumesDurableActivationOnlyRepairAtEveryCheckpoint(t *test
 			if err != nil || completed.Status != StatusReady {
 				t.Fatalf("initial convergence = %#v, err=%v", completed, err)
 			}
+			// Completed migration history must not reopen for later settings drift.
+			testkit.WriteFile(t, settingsPath, []byte("YARD_TEMPLATE=e2e-vms\nNESTED_E2E_VMS=0\n"), 0o600)
 			store, err := NewPOSIXV2Store(configHome)
 			if err != nil {
 				t.Fatal(err)
@@ -3125,6 +3164,7 @@ func TestV2TransitionPreservesExplicitPublicActivationDiagnostic(t *testing.T) {
 		{"unsafe\nmessage", "yard update --check", false},
 		{strings.Repeat("x", maxDiagnosticText+1), "yard update --check", false},
 		{"known message", "inspect; mutate", false},
+		{"invalid utf8\xff", "yard update --check", false},
 		{"", "", false},
 	} {
 		transition, _, _ := v2TransitionFixture(t, nil)
@@ -3190,6 +3230,226 @@ func TestV2TransitionPreservesPublicReconcileDiagnostic(t *testing.T) {
 				t.Fatalf("reconcile diagnostic = %#v, err=%v", outcome, err)
 			}
 		})
+	}
+}
+
+func TestV2TransitionPreservesPublicCauseAcrossSecondaryActivationFailures(t *testing.T) {
+	for _, branch := range []string{"reobserve", "release observation", "settings blocker", "unknown state", "bounded diagnostic"} {
+		for _, public := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/public=%t", branch, public), func(t *testing.T) {
+				transition, configHome, _ := v2TransitionFixture(t, nil)
+				diagnostic := v2PublicActivationError{"yard hermes: runtime reconciliation failed", "run yard -Y hermes status"}
+				if branch == "bounded diagnostic" {
+					diagnostic.message = "yard hermes: " + strings.Repeat("é", 249) + "x"
+				}
+				cause := errors.New("private primary sentinel")
+				if public {
+					cause = fmt.Errorf("private wrapper sentinel: %w", diagnostic)
+				}
+				reconciler := &v2PostErrorReconciler{
+					post: V2ActivationObservation{Actual: digestB, Desired: digestA}, reconcileErr: cause,
+				}
+				wantCode := CodeRecoveryAmbiguous
+				wantRecovery := "unknown state"
+				switch branch {
+				case "reobserve", "bounded diagnostic":
+					reconciler.postErr = errors.New("private secondary sentinel")
+					wantRecovery = "result cannot be observed safely"
+				case "release observation":
+					transition.options.ObserveLinks = func(context.Context) (ReleaseLinks, error) {
+						if reconciler.failed {
+							return ReleaseLinks{}, errors.New("private secondary sentinel")
+						}
+						return ReleaseLinks{Active: "release-a"}, nil
+					}
+					wantRecovery = "release facts cannot be observed"
+				case "settings blocker":
+					reconciler.onFailure = func() {
+						testkit.WriteFile(t, filepath.Join(configHome, "yards", "ordinary.env"),
+							[]byte("YARD_TEMPLATE=private-assignment-sentinel\n"), 0o600)
+					}
+					wantCode = CodePreconditionBlocked
+					wantRecovery = "yard ordinary: YARD_TEMPLATE is not supported"
+				case "unknown state":
+					reconciler.post.Actual = digestC
+				}
+				transition.options.Reconcilers = []V2ActivationReconciler{reconciler}
+				goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
+				inspection, err := transition.Inspect(context.Background(), goal)
+				if err != nil || len(inspection.Blockers) != 0 {
+					t.Fatalf("inspection = %#v, err=%v", inspection, err)
+				}
+				outcome, err := transition.Converge(context.Background(), Execution{
+					Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
+				})
+				wantRetry := "run yard update --check"
+				if branch == "settings blocker" {
+					wantRetry = "repair the named yard settings, then run yard update"
+				}
+				if err != nil || outcome.Status != StatusOperatorActionRequired || outcome.Code != wantCode ||
+					outcome.Retry != wantRetry || outcome.Transaction == nil || *outcome.Transaction != "tx-test-001" ||
+					outcome.Target != goal.Target || !strings.Contains(outcome.Message, wantRecovery) {
+					t.Fatalf("secondary failure = %#v, err=%v", outcome, err)
+				}
+				wantActive := ReleaseID("release-a")
+				if branch == "release observation" {
+					wantActive = ""
+				}
+				if outcome.Active != wantActive || outcome.Previous != nil ||
+					strings.Contains(outcome.Message, "sentinel") || strings.Contains(outcome.Message, "private observation detail") ||
+					strings.Contains(outcome.Message, "yard hermes:") != public ||
+					len(outcome.Message) > maxDiagnosticText || !utf8.ValidString(outcome.Message) {
+					t.Fatalf("unsafe or incomplete diagnostic = %#v", outcome)
+				}
+				if !public && !strings.Contains(outcome.Message, `activation reconciler "post-error-runtime" failed during reconcile`) {
+					t.Fatalf("secondary failure lost reconciler and phase: %#v", outcome)
+				}
+				if err := ValidateProcessConvergence(goal, inspection, outcome); err != nil {
+					t.Fatalf("outcome exceeds released protocol contract: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestV2TransitionBoundsPublicCauseAndRecoveryExplanation(t *testing.T) {
+	goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
+	for _, character := range []string{"x", "é", "🦄"} {
+		t.Run(character, func(t *testing.T) {
+			primary := "yard hermes: " + strings.Repeat(character, (maxDiagnosticText-13)/len(character))
+			recovery := "protected recovery: " + strings.Repeat(character, (maxDiagnosticText-20)/len(character))
+			guard := v2OperatorOutcome(ReleaseLinks{Active: "release-a", Previous: releaseIDPointer("release-old")},
+				goal.Target, transactionIDPointer("tx-test-001"), CodeRecoveryAmbiguous, recovery, "run yard update --check")
+			outcome := withPublicFailureCause(guard, v2PublicActivationError{primary, "run yard -Y hermes status"}, "")
+			if len(outcome.Message) > maxDiagnosticText || !utf8.ValidString(outcome.Message) ||
+				!strings.HasPrefix(outcome.Message, "yard hermes: ") ||
+				!strings.Contains(outcome.Message, "; protected recovery: ") {
+				t.Fatalf("bounded composition = %#v", outcome)
+			}
+			if err := ValidateProcessOutcome(goal, outcome); err != nil {
+				t.Fatalf("bounded outcome violates released protocol contract: %v", err)
+			}
+			outcome.Message = guard.Message
+			before, beforeErr := json.Marshal(guard)
+			after, afterErr := json.Marshal(outcome)
+			if beforeErr != nil || afterErr != nil || !bytes.Equal(before, after) {
+				t.Fatalf("public cause changed protected outcome fields: before=%s after=%s", before, after)
+			}
+		})
+	}
+}
+
+func TestV2TransitionPreservesPublicCauseAfterMutation(t *testing.T) {
+	for _, branch := range []string{"recovering", "terminal recovery", "release observation", "settings blocker", "stale settings"} {
+		t.Run(branch, func(t *testing.T) {
+			diagnostic := v2PublicActivationError{"yard hermes: settings reconciliation failed", "run yard -Y hermes status"}
+			failed := false
+			reconciler := &v2TestReconciler{}
+			var configHome, settingsPath string
+			transition, home, path := v2TransitionFixture(t, func(point string) error {
+				faultPoint := "after-settings-cas"
+				if branch == "terminal recovery" {
+					faultPoint = "after-journal-complete"
+				}
+				if point != faultPoint {
+					return nil
+				}
+				failed = true
+				switch branch {
+				case "terminal recovery":
+					reconciler.converged = false
+				case "settings blocker":
+					testkit.WriteFile(t, filepath.Join(configHome, "yards", "ordinary.env"),
+						[]byte("YARD_TEMPLATE=private-assignment-sentinel\n"), 0o600)
+				case "stale settings":
+					testkit.WriteFile(t, settingsPath, []byte("YARD_TEMPLATE=test-vms\nSSH_PORT=2299\n"), 0o600)
+				}
+				return fmt.Errorf("private primary sentinel: %w", diagnostic)
+			})
+			configHome, settingsPath = home, path
+			transition.options.Reconcilers = []V2ActivationReconciler{reconciler}
+			transition.options.ObserveLinks = func(context.Context) (ReleaseLinks, error) {
+				if failed && branch == "release observation" {
+					return ReleaseLinks{}, errors.New("private secondary sentinel")
+				}
+				return ReleaseLinks{Active: "release-a"}, nil
+			}
+			goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
+			inspection, err := transition.Inspect(context.Background(), goal)
+			if err != nil || len(inspection.Blockers) != 0 {
+				t.Fatalf("inspection = %#v, err=%v", inspection, err)
+			}
+			outcome, err := transition.Converge(context.Background(), Execution{
+				Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
+			})
+			wantStatus, wantCode := StatusOperatorActionRequired, CodeRecoveryAmbiguous
+			wantRetry, wantRecovery := "run yard update --check", "release facts cannot be observed"
+			wantActive := ReleaseID("release-a")
+			switch branch {
+			case "recovering":
+				wantStatus, wantCode = StatusRecovering, CodeVerificationFailed
+				wantRetry, wantRecovery = diagnostic.retry, diagnostic.message
+			case "terminal recovery":
+				wantStatus, wantCode = StatusRecovering, CodeRecoveryPending
+				wantRetry, wantRecovery = "run yard update", "can resume from observed facts"
+			case "release observation":
+				wantActive = ""
+			case "settings blocker":
+				wantCode, wantRecovery = CodePreconditionBlocked, "yard ordinary: YARD_TEMPLATE is not supported"
+				wantRetry = "repair the named yard settings, then run yard update"
+			case "stale settings":
+				wantCode, wantRecovery = CodeMigrationStale, "changed outside the authorized transition"
+			}
+			if err != nil || outcome.Status != wantStatus || outcome.Code != wantCode || outcome.Retry != wantRetry ||
+				outcome.Active != wantActive || outcome.Previous != nil || outcome.Target != goal.Target ||
+				outcome.Transaction == nil || *outcome.Transaction != "tx-test-001" ||
+				!strings.Contains(outcome.Message, diagnostic.message) || !strings.Contains(outcome.Message, wantRecovery) ||
+				strings.Contains(outcome.Message, "sentinel") {
+				t.Fatalf("post-mutation cause = %#v, err=%v", outcome, err)
+			}
+			if err := ValidateProcessConvergence(goal, inspection, outcome); err != nil {
+				t.Fatalf("outcome violates released protocol contract: %v", err)
+			}
+		})
+	}
+}
+
+func TestV2TransitionActivationOnlyRepairPreservesFailureAndResumes(t *testing.T) {
+	transition, configHome, settingsPath := v2TransitionFixture(t, nil)
+	seedAppliedV2Ledger(t, configHome)
+	testkit.WriteFile(t, settingsPath, []byte("YARD_TEMPLATE=test-vms\n"), 0o600)
+	unrelatedPath := filepath.Join(configHome, "yards", "ordinary.env")
+	unrelatedSettings := []byte("YARD_TEMPLATE=other-template\n")
+	testkit.WriteFile(t, unrelatedPath, unrelatedSettings, 0o600)
+	diagnostic := v2PublicActivationError{
+		"yard demo: runtime reconciliation failed", "run yard -Y demo status",
+	}
+	transition.options.Reconcilers = []V2ActivationReconciler{
+		&v2FailingReconciler{id: "test-runtime", reconcileErr: diagnostic},
+	}
+	goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
+	inspection, err := transition.Inspect(context.Background(), goal)
+	if err != nil || len(inspection.Blockers) != 0 || len(inspection.Decisions) != 1 {
+		t.Fatalf("activation-only inspection = %#v, err=%v", inspection, err)
+	}
+	outcome, err := transition.Converge(context.Background(), Execution{
+		Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
+	})
+	if err != nil || outcome.Status != StatusRecovering || outcome.Code != CodeDependencyUnavailable ||
+		outcome.Message != diagnostic.message || outcome.Retry != diagnostic.retry {
+		t.Fatalf("activation failure diagnostic = %#v, err=%v", outcome, err)
+	}
+	transition.options.Reconcilers = []V2ActivationReconciler{&v2TestReconciler{}}
+	resume, err := transition.Inspect(context.Background(), goal)
+	if err != nil || resume.Resume == nil || len(resume.Blockers) != 0 {
+		t.Fatalf("activation-only resume = %#v, err=%v", resume, err)
+	}
+	settled, err := transition.Converge(context.Background(), Execution{Plan: resume.Plan})
+	if err != nil || settled.Status != StatusReady {
+		t.Fatalf("resumed repair = %#v, err=%v", settled, err)
+	}
+	if actual, err := os.ReadFile(unrelatedPath); err != nil || !bytes.Equal(actual, unrelatedSettings) {
+		t.Fatalf("repair changed unrelated settings: %q, err=%v", actual, err)
 	}
 }
 
@@ -3469,7 +3729,8 @@ func TestV2TransitionReobservesFailedActivationReconcilerResult(t *testing.T) {
 					outcome, err, reconciler.postErrorObservations,
 				)
 			}
-			if test.failure != nil && (strings.Contains(outcome.Message, "public reconcile detail") ||
+			if test.failure != nil && (!strings.Contains(outcome.Message, "public reconcile detail") ||
+				!strings.Contains(outcome.Message, "unknown state") ||
 				outcome.Retry != "run yard update --check") {
 				t.Fatalf("reconcile diagnostic replaced recovery guard: %#v", outcome)
 			}
@@ -3621,6 +3882,8 @@ type v2TestReconciler struct {
 type v2PostErrorReconciler struct {
 	post                  V2ActivationObservation
 	reconcileErr          error
+	postErr               error
+	onFailure             func()
 	failed                bool
 	postErrorObservations int
 }
@@ -3881,13 +4144,16 @@ func (reconciler *v2PostErrorReconciler) Observe(
 ) (V2ActivationObservation, error) {
 	if reconciler.failed {
 		reconciler.postErrorObservations++
-		return reconciler.post, nil
+		return reconciler.post, reconciler.postErr
 	}
 	return V2ActivationObservation{Actual: digestB, Desired: digestA, Converged: false}, nil
 }
 
 func (reconciler *v2PostErrorReconciler) Reconcile(context.Context, ReleaseLinks) error {
 	reconciler.failed = true
+	if reconciler.onFailure != nil {
+		reconciler.onFailure()
+	}
 	if reconciler.reconcileErr != nil {
 		return reconciler.reconcileErr
 	}

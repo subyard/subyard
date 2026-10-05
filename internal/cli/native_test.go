@@ -828,6 +828,60 @@ func TestUpdatePrintsFinalWarnings(t *testing.T) {
 	}
 }
 
+func TestUpdatePrintsFinalBlockerResources(t *testing.T) {
+	var stdout bytes.Buffer
+	program := &CLI{options: Options{Stdout: &stdout}}
+	program.printUpdateResult(&releaseExecution{
+		prepared: releaseruntime.Prepared{Action: "update.activate"},
+		inspection: &releasetransition.Inspection{Outcome: &releasetransition.Outcome{
+			Status: releasetransition.StatusOperatorActionRequired, Active: "release-b",
+		}, Blockers: []releasetransition.Blocker{
+			{Resource: "yard.fixture", Message: "the candidate resource changed"},
+			{Message: "the transition is blocked"},
+		}},
+	}, false)
+	for _, expected := range []string{"Blocked (yard.fixture): the candidate resource changed", "Blocked: the transition is blocked"} {
+		if !strings.Contains(stdout.String(), expected) {
+			t.Fatalf("missing %q in %q", expected, stdout.String())
+		}
+	}
+}
+
+func TestUpdateReportsFailedExecutionOutcomeWithoutReinspection(t *testing.T) {
+	root, environment, runtimeRoot := updateReleaseFixture(t)
+	capture := filepath.Join(root, "transition-modes")
+	environment = append(environment, "UPDATE_CONVERGENCE_FAIL=1", "UPDATE_TRANSITION_CAPTURE="+capture)
+	var stdout, stderr bytes.Buffer
+	configs := &recordingConfigApplier{}
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", WorkingDir: root, Environment: environment,
+		Arguments: []string{"update", "--yes", "--version", "1.2.3", "--runtime-root", runtimeRoot},
+		Config:    configs, Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	for _, expected := range []string{
+		"[FAIL] Update did not complete successfully", "Final readiness: not verified",
+		"Status: recovering", "Active release: 1.2.3-f16d05ec6b29", "Previous release: release-old",
+		"activation configuration inspection failed for yard fixture", "Next: run yard -Y fixture config status",
+	} {
+		if !strings.Contains(stdout.String(), expected) {
+			t.Fatalf("missing %q in %q", expected, stdout.String())
+		}
+	}
+	modes, err := os.ReadFile(capture)
+	if err != nil || string(modes) != "inspect\ninspect\nconverge\n" || len(configs.yards) != 0 {
+		t.Fatalf("failed execution performed extra work: modes=%q configs=%v err=%v", modes, configs.yards, err)
+	}
+	if strings.Count(stdout.String(), "Warning: yard stopped: refresh deferred") != 1 {
+		t.Fatalf("failed execution warning missing or repeated: %q", stdout.String())
+	}
+}
+
 func TestUpdatePrintsFinalReadinessAndFailsOnDrift(t *testing.T) {
 	for _, drift := range []bool{false, true} {
 		t.Run(fmt.Sprintf("drift=%v", drift), func(t *testing.T) {
@@ -1297,6 +1351,7 @@ case "${1:-}" in
     mode=$(printf '%s' "$request" | jq -r .mode)
     runtime_root=$(printf '%s' "$request" | jq -r .runtimeRoot)
     target_release=$(printf '%s' "$request" | jq -r .target)
+    if [ -n "${UPDATE_TRANSITION_CAPTURE:-}" ]; then printf '%s\n' "$mode" >> "$UPDATE_TRANSITION_CAPTURE"; fi
     if [ "$mode" = inspect ]; then
       if [ "${UPDATE_CANCEL_INSPECTION:-}" = 1 ]; then exec sleep 30; fi
       if [ "${UPDATE_BLOCK_INSPECTION:-}" = 1 ]; then
@@ -1330,6 +1385,10 @@ case "${1:-}" in
     fi
     rm -f "$runtime_root/current"
     ln -s "releases/$target_release" "$runtime_root/current"
+	    if [ "${UPDATE_CONVERGENCE_FAIL:-}" = 1 ]; then
+	      printf '{"schemaVersion":1,"outcome":{"status":"recovering","reachedGoal":false,"active":"%s","previous":"%s","target":"%s","code":"dependency-unavailable","message":"activation configuration inspection failed for yard fixture","retry":"run yard -Y fixture config status","transaction":"tx-0123456789abcdef","warnings":["yard stopped: refresh deferred"]}}\n' "$target_release" "$old_release" "$target_release"
+	      exit 0
+	    fi
 	    if [ "$old_release" = "$target_release" ]; then
 	      printf '{"schemaVersion":1,"outcome":{"status":"ready","reachedGoal":true,"active":"%s","target":"%s","code":"ready","message":"verified","transaction":"tx-0123456789abcdef"}}\n' "$target_release" "$target_release"
 	    else

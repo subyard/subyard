@@ -98,6 +98,16 @@ func TestTestVMSettingsV2BlocksUnknownDuplicateAndDynamicValues(t *testing.T) {
 			if err != nil || len(plan.Blockers) != 1 || len(plan.Files) != 0 {
 				t.Fatalf("plan = %#v, err=%v", plan, err)
 			}
+			setting := "YARD_TEMPLATE"
+			if strings.Contains(test.name, "nested") {
+				setting = "NESTED_E2E_VMS"
+			}
+			if !strings.HasPrefix(plan.Blockers[0].Message, "yard hermes: "+setting+" ") {
+				t.Fatalf("blocker omits yard or setting: %#v", plan.Blockers[0])
+			}
+			if err := plan.Blockers[0].Validate(); err != nil {
+				t.Fatalf("blocker violates public text contract: %v", err)
+			}
 			public, err := json.Marshal(struct {
 				Decisions []RedactedDecision `json:"decisions"`
 				Blockers  []Blocker          `json:"blockers"`
@@ -212,6 +222,9 @@ func TestTestVMSettingsV2BlocksUnsafePersistentResources(t *testing.T) {
 			plan, err := newTestVMSettingsV2Capability(configHome, nil).Inspect()
 			if err != nil || len(plan.Blockers) != 1 || len(plan.Files) != 0 {
 				t.Fatalf("unsafe plan = %#v, err=%v", plan, err)
+			}
+			if !strings.HasPrefix(plan.Blockers[0].Message, "yard hermes: ") {
+				t.Fatalf("unsafe settings blocker omits yard: %#v", plan.Blockers[0])
 			}
 		})
 	}
