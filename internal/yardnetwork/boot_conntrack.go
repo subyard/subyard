@@ -78,6 +78,9 @@ func (s Service) ClearBootStaleUDP(ctx context.Context, target Yard) error {
 				return ErrNotConverged
 			}
 			for _, approved := range binding.ApprovedIngress {
+				if approved.Transport() != "udp" {
+					continue
+				}
 				endpoint, parseErr := netip.ParseAddrPort(strings.TrimPrefix(approved.Listen, "udp:"))
 				if parseErr != nil {
 					return parseErr

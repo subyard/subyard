@@ -8,7 +8,10 @@ import re
 import subprocess
 import sys
 
-DEVICE = 'amnezia-vpn'
+ADMIN = sys.argv[1:2] == ['--admin']
+if ADMIN:
+    sys.argv.pop(1)
+DEVICE = 'amnezia-admin' if ADMIN else 'amnezia-vpn'
 KEY = 'user.subyard.resource.' + DEVICE
 STARTUP = 'user.subyard.startup.' + DEVICE
 RUNTIME = '/usr/local/lib/subyard-amnezia/runtime.py'
@@ -67,15 +70,17 @@ def endpoint(instance):
     if len(links) != 1 or 'UP' not in links[0]['flags'] or not any(
             info.get('local') == str(address) for info in links[0]['addr_info']):
         raise RuntimeError('configured IPv4 is not active on the selected owner interface')
-    port = os.environ.get('RESOURCE_VPN_PORT', '51820')
+    port_setting = 'RESOURCE_VPN_ADMIN_PORT' if ADMIN else 'RESOURCE_VPN_PORT'
+    port = os.environ.get(port_setting, '2226' if ADMIN else '51820')
     if not port.isdecimal() or str(int(port)) != port or not 1024 <= int(port) <= 65535:
-        raise RuntimeError('RESOURCE_VPN_PORT must be in 1024..65535')
+        raise RuntimeError(port_setting + ' must be in 1024..65535')
     nic = instance['expanded_devices'].get('eth0', {})
     target = ipaddress.IPv4Address(nic.get('ipv4.address', ''))
     if target.is_unspecified or target.is_multicast or target.is_loopback or target.is_link_local:
         raise RuntimeError('VPN VM needs a pinned primary IPv4 address; rerun init')
+    protocol, guest_port = ('tcp', '22') if ADMIN else ('udp', port)
     device = dict(type='proxy', bind='host', nat='true',
-                  listen=f'udp:{address}:{port}', connect=f'udp:{target}:51820')
+                  listen=f'{protocol}:{address}:{port}', connect=f'{protocol}:{target}:{guest_port}')
     return str(address), interface, port, device
 
 
@@ -90,7 +95,8 @@ def settings_valid(require_selected=True):
 
 def runtime_status(instance):
     if instance.get('status') != 'Running':
-        return dict(ready=False, running=False, enabled=False)
+        return dict(ready=False, running=False, enabled=False, management_ready=False,
+                    vpn_installed=False, vpn_running=False)
     return json.loads(guest('python3', RUNTIME, 'observe').stdout)
 
 
@@ -101,7 +107,7 @@ def ready(instance):
     _, _, _, want = endpoint(instance)
     status = runtime_status(instance)
     return (owned(instance) == want and instance['config'].get(KEY) == fingerprint(want)
-            and status['ready'] and status['enabled'])
+            and (status['management_ready'] if ADMIN else status['ready'] and status['enabled']))
 
 
 def port_spec_contains(spec, port):
@@ -119,14 +125,25 @@ def port_spec_contains(spec, port):
     return found
 
 
+def binds_owner(host, address):
+    if host == '*':
+        return True
+    try:
+        parsed = ipaddress.ip_address(host.strip('[]'))
+    except ValueError:
+        return False
+    return parsed.is_unspecified or str(getattr(parsed, 'ipv4_mapped', None) or parsed) == address
+
+
 def collisions(want):
     listen = want['listen']
-    _, address, port = listen.split(':')
+    protocol, address, port = listen.split(':')
     wanted_port = int(port)
-    for line in run('ss', '-Hlun', 'sport', '=', ':' + port).stdout.decode().splitlines():
+    for line in run('ss', '-Hltn' if protocol == 'tcp' else '-Hlun', 'sport', '=', ':' + port).stdout.decode().splitlines():
         fields = line.split()
-        if len(fields) >= 5 and fields[-2] in (f'{address}:{port}', f'0.0.0.0:{port}', f'*:{port}', f'[::]:{port}'):
-            raise RuntimeError('owner UDP port is already bound')
+        host, _, listener_port = fields[-2].rpartition(':') if len(fields) >= 5 else ('', '', '')
+        if listener_port == port and binds_owner(host, address):
+            raise RuntimeError('owner ' + protocol.upper() + ' port is already bound')
     instances = query('/1.0/instances?recursion=1&all-projects=true')
     for instance in instances:
         for name, device in instance.get('expanded_devices', {}).items():
@@ -139,9 +156,9 @@ def collisions(want):
             proxy_listen = device.get('listen', '')
             if not isinstance(proxy_listen, str):
                 raise RuntimeError('invalid Incus proxy listener')
-            match = re.fullmatch(r'udp:(\[[^]]+\]|[^:]+):(.+)', proxy_listen)
-            if match and match.group(1) in (address, '0.0.0.0', '[::]') and port_spec_contains(match.group(2), wanted_port):
-                raise RuntimeError('owner UDP port conflicts with another Incus proxy')
+            match = re.fullmatch(protocol + r':(\[[^]]+\]|[^:]+):(.+)', proxy_listen)
+            if match and binds_owner(match.group(1), address) and port_spec_contains(match.group(2), wanted_port):
+                raise RuntimeError('owner port conflicts with another Incus proxy')
     # Native network forwards do not appear as listening sockets.
     for network in query('/1.0/networks?recursion=1'):
         if not network.get('managed'):
@@ -152,10 +169,10 @@ def collisions(want):
             if forward.get('config', {}).get('target_address'):
                 raise RuntimeError('owner address already belongs to an Incus network forward')
             for rule in forward.get('ports', []):
-                if rule.get('protocol') != 'udp':
+                if rule.get('protocol') != protocol:
                     continue
                 if port_spec_contains(rule.get('listen_port', ''), wanted_port):
-                    raise RuntimeError('owner UDP port conflicts with an Incus network forward')
+                    raise RuntimeError('owner port conflicts with an Incus network forward')
 
 
 def remove_ingress(retain_pending=False):
@@ -196,15 +213,32 @@ def ensure_ingress(want):
 def emit_native_plan(verb, instance, device, status=None, want=None, interface='', prestart=False):
     target = 'incus:' + PROJECT + '/' + YARD
     binding = dict(action=verb, project=PROJECT, instance=YARD)
+    if ADMIN:
+        present = bool(device or instance['config'].get(KEY))
+        converged = (device == want and instance['config'].get(KEY) == fingerprint(want)) if verb == 'up' else not present
+        if verb == 'up':
+            binding.update(endpoint=want, interface=interface)
+        consequence = (f'Publish administrative SSH access to the dedicated VM in {target}; AmneziaVPN manages the VPN'
+                       if verb == 'up' else f'Close administrative SSH access to the dedicated VM in {target}')
+        steps = [dict(id='ingress', target='owned administrative proxy ' + target,
+                      observed='matching owned route' if converged and verb == 'up' else ('absent' if not present else 'owned route present'),
+                      desired='matching owned route' if verb == 'up' else 'absent',
+                      decision='skip' if converged else 'apply',
+                      preconditions=['the administrative endpoint is exact and has no conflicting owner'],
+                      verify='read the owned administrative proxy and matching ownership marker', consequence=consequence)]
+        print(json.dumps(dict(schema='yard.resource-action-assessment.v2', action=verb, changed=not converged,
+                              consequences=[] if converged else [consequence], steps=steps,
+                              binding=hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest())))
+        return
     if verb == 'up':
         binding.update(endpoint=want, interface=interface)
         service_ready = bool(status and status['ready'] and status['enabled'])
-        service = dict(id='service', target='AmneziaWG service ' + target,
+        service = dict(id='service', target='VPN environment network boundary ' + target,
                        observed='unknown' if prestart else ('enabled and ready' if service_ready else 'not ready'),
                        desired='enabled and ready', decision='conditional' if prestart else ('skip' if service_ready else 'apply'),
                        preconditions=['the dedicated VM is running and has no work projects'],
                        verify='read native VPN readiness and service enablement',
-                       consequence=f'Enable the pinned AmneziaWG service in incus:{PROJECT}/{YARD}; preserve existing keys and peers')
+                       consequence=f'Enable the VPN network boundary in {target}; Amnezia retains ownership of its containers and clients')
         route_ready = device == want and instance['config'].get(KEY) == fingerprint(want)
         route = dict(id='ingress', target='owned VPN proxy ' + target,
                      observed=fingerprint(want) if route_ready else ('absent' if not device else fingerprint(device)),
@@ -223,7 +257,7 @@ def emit_native_plan(verb, instance, device, status=None, want=None, interface='
                      preconditions=['any current ingress device and marker have matching native ownership'],
                      verify='read the owned Incus proxy and marker and confirm both absent', consequence=consequence)
         service_stopped = bool(status and not status['running'] and not status['enabled'])
-        service = dict(id='service', target='AmneziaWG service ' + target,
+        service = dict(id='service', target='VPN environment network boundary ' + target,
                        observed='unknown' if status is None else ('disabled and stopped' if service_stopped else 'enabled or running'),
                        desired='disabled and stopped', decision='conditional' if status is None else ('skip' if service_stopped else 'apply'),
                        dependsOn=['ingress'], preconditions=['the owned ingress is closed before guest shutdown'],
@@ -251,7 +285,7 @@ def prepare(verb, prestart=False):
     if instance.get('status') != 'Running':
         if prestart and verb == 'up' and stopped:
             pass
-        elif verb == 'down' and stopped and not device and not instance['config'].get(KEY) and instance['config'].get(STARTUP) in ('pending', 'disabled'):
+        elif verb == 'down' and stopped and (ADMIN or (not device and not instance['config'].get(KEY) and instance['config'].get(STARTUP) in ('pending', 'disabled'))):
             emit_native_plan(verb, instance, device, status=dict(ready=False, running=False, enabled=False))
             return
         else:
@@ -261,6 +295,8 @@ def prepare(verb, prestart=False):
             status = runtime_status(instance)
         _, interface, _, want = endpoint(instance)
         collisions(want)
+        if ADMIN and (status is None or not status.get('management_ready')):
+            raise RuntimeError('administrative SSH environment is not ready; rerun init --profile amnezia')
         if prestart:
             if device or instance['config'].get(KEY):
                 raise RuntimeError('first-start VPN activation requires no existing ingress')
@@ -268,14 +304,16 @@ def prepare(verb, prestart=False):
             projects = guest('find', '/srv/workspaces', '-mindepth', '1', '-maxdepth', '1', '-print', '-quit')
             if projects.stdout:
                 raise RuntimeError('VPN cannot run in a yard containing work projects')
-    elif not device and not instance['config'].get(KEY):
+    elif not ADMIN and not device and not instance['config'].get(KEY):
         status = runtime_status(instance)
     emit_native_plan(verb, instance, device, status, want, interface, prestart)
 
 
 def shutdown_guest():
+    if ADMIN:
+        return
     try:
-        # Docker receives 15 seconds to stop; leave room in the engine's 30-second rollback.
+        # Leave room in the engine's 30-second rollback for owner-side verification.
         guest('python3', RUNTIME, 'down', timeout=20)
     except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
         raise RuntimeError('owned VPN ingress closed; guest shutdown is unverified; retry vpn down') from error
@@ -284,7 +322,7 @@ def shutdown_guest():
 def main():
     args = sys.argv[1:]
     if args in ([], ['help'], ['--help'], ['-h']):
-        print('Usage: yard -Y <vpn-yard> vpn <up|status|down>')
+        print('Usage: yard -Y <vpn-yard> ' + ('vpn-admin' if ADMIN else 'vpn') + ' <up|status|down>')
         return 0
     if len(args) != 1 or args[0] not in ('up', 'down', 'status', 'is-up', 'rollback-ingress'):
         print('vpn: expected up, status or down', file=sys.stderr)
@@ -311,8 +349,12 @@ def main():
         settings_valid()
         instance = inspect()
         status = runtime_status(instance)
-        print(json.dumps(dict(ready=ready(instance), running=status['running'], enabled=status['enabled'],
-                              ingress=bool(owned(instance)))))
+        print(json.dumps(dict(ready=ready(instance), network_enabled=status['enabled'],
+                              ingress=bool(owned(instance)), vpn_installed=status.get('vpn_installed', False),
+                              vpn_running=status.get('vpn_running', False),
+                              management=dict(application='AmneziaVPN', host=os.environ.get('RESOURCE_VPN_IPV4', ''),
+                                              port=int(os.environ.get('RESOURCE_VPN_ADMIN_PORT', '2226')), user='amnezia'),
+                              vpn_port=int(os.environ.get('RESOURCE_VPN_PORT', '51820')))))
     elif verb == 'down':
         instance = inspect()
         if instance.get('status') == 'Stopped' and not owned(instance) and not instance['config'].get(KEY) and instance['config'].get(STARTUP) in ('pending', 'disabled'):
@@ -326,7 +368,8 @@ def main():
         instance = inspect()
         address, _, port, want = endpoint(instance)
         collisions(want)
-        guest('python3', RUNTIME, 'up', '--endpoint', address, '--port', port)
+        if not ADMIN:
+            guest('python3', RUNTIME, 'up', '--endpoint', address, '--port', port)
         ensure_ingress(want)
         if not ready(inspect()):
             remove_ingress(retain_pending=True)

@@ -1,179 +1,251 @@
-# Amnezia VPN yard
+# AmneziaVPN yard
 
-The optional `amnezia` profile runs AmneziaWG in a dedicated named Incus VM. Ordinary installation,
-update, status and provisioning do not select it. The core supplies VM, storage, profile and typed
-resource APIs; the profile owns its VPN runtime, firewall and lifecycle.
+The optional `amnezia` profile provides a dedicated named Incus VM for the stock AmneziaVPN app.
+Subyard manages the VM, persistent storage, SSH administration route and VPN network boundary.
+AmneziaVPN installs and manages the VPN server, containers, protocols and clients through SSH.
+There is no browser administration panel or Subyard client registry.
 
-## Create and enable
+## Create the environment
 
 Use an amd64 owner with KVM, Incus 6.0.6 and a supported QEMU reporting implementation (8.2.x or
-10.0.x). The preset uses Debian 13, one virtual CPU, 1 GiB RAM, a 10 GiB root disk and a separate
-2 GiB state block volume. It requests Free Page Reporting and a pinned private IPv4. It excludes
-coding integrations, work projects, host mounts, shared credentials, agent forwarding and nested
-VM access. The SSH port defaults to 2225; select another unused port if necessary.
+10.0.x). The preset uses Debian 13, with Ubuntu 24.04 as its image fallback, one virtual CPU,
+1 GiB RAM, a 10 GiB root disk and a separate 2 GiB state block volume. It requests Free Page
+Reporting and a pinned private IPv4. Coding integrations, work projects, host mounts, shared
+credentials, agent forwarding and nested VM access are excluded.
 
 ```sh
 yard -Y vpn init --profile amnezia
-```
-
-This initializes the dedicated VM and provisions the selected profile, including the pinned VPN
-runtime. A separate `provision amnezia` is not needed. Repeat `init --profile amnezia` to retry an
-interrupted installation. Plain `init` continues to reconcile the base yard without installing
-environment-profile toolchains.
-
-If this first initialization added you to `incus-admin`, open a new login session before
-continuing so subsequent commands receive that group membership. Then start the yard:
-
-```sh
 yard -Y vpn start
 yard -Y vpn vpn status
+yard -Y vpn status
 ```
 
+Initialization prepares Docker, containerd, persistent storage and a dedicated SSH administrator.
+It does not install a VPN server. Repeat `init --profile amnezia` to reconcile or retry environment
+preparation. Plain `init` reconciles the base yard without selecting another environment profile.
+If initialization added you to `incus-admin`, open a new login session before subsequent commands
+so they receive that group membership.
+
+Three ports have separate purposes:
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `SSH_PORT` | TCP 2225 | Subyard's normal loopback SSH transport |
+| `RESOURCE_VPN_ADMIN_PORT` | TCP 2226 | Owner IPv4 to guest SSH port 22, for AmneziaVPN |
+| `RESOURCE_VPN_PORT` | UDP 51820 | Owner IPv4 to the same guest UDP port, for AmneziaWG |
+
+The VPN resource forwards the configured UDP port; it does not assume the app's randomly chosen
+port. Both public resource ports must be in `1024..65535` and unused on their exact owner address.
+Provider firewalls must separately allow the configured UDP port and, while administering the
+server, the configured TCP port.
+
 Profile initialization and explicit provisioning fill missing owner IPv4/interface settings when
-exactly one suitable public IPv4 is assigned to an active owner interface. The proposed settings
-appear in the operation assessment and are saved together. Existing nonempty settings and the
-port are preserved. Repeating provisioning does not switch a saved endpoint.
-No external IP-discovery service is used: an upstream NAT address is not a local owner address.
-
-Fresh initialization and provisioning leave the VPN stopped and arm its first activation on `yard start`.
-The first start assesses the exact public endpoint and service effects before one confirmation;
-it enables the guest service and publishes the owned UDP route. Later stops and starts preserve
-the enabled service. An explicit `vpn down` disables it persistently, including across repeated
-provisioning and yard restarts; use `vpn up` to enable it again.
-
-If there is no unique public address/interface, provisioning leaves the missing settings empty
-and prints which settings to supply. Set them before the first `yard start`. Specify an interface
-to narrow discovery, or an exact owner IPv4 to discover its interface, then rerun provisioning.
-Private and special-use addresses are never selected automatically; an explicitly supplied private IPv4 is allowed for test owners.
-For a manual endpoint or a different port:
+exactly one suitable public IPv4 is assigned to an active owner interface. Existing nonempty
+settings and ports are preserved. No external IP-discovery service is used. If discovery is
+ambiguous, supply the endpoint before starting the yard:
 
 ```sh
 yard -Y vpn config set RESOURCE_VPN_IPV4 203.0.113.10 --scope yard
 yard -Y vpn config set RESOURCE_VPN_INTERFACE eth0 --scope yard
 yard -Y vpn config set RESOURCE_VPN_PORT 51820 --scope yard
+yard -Y vpn config set RESOURCE_VPN_ADMIN_PORT 2226 --scope yard
 yard -Y vpn start
 ```
 
-Replace the documentation address and interface with the owner's real values. The advertised
-address must be assigned directly to that interface; a VPS behind another NAT is not covered.
-Source-managed configuration must receive endpoint settings through its registered source.
-Provider firewalls must independently permit that exact UDP port. First activation and explicit
-`vpn up` reject socket/proxy/forward collisions and foreign ownership metadata. Repeating them
-preserves keys and peers. If activation fails after the VM starts, fix the reported cause and
-retry `yard start`; the failed first activation remains pending.
+Replace the documentation address and interface with the owner's real values. The address must
+be assigned directly to an active owner interface; an upstream NAT address is not covered.
+Private addresses are not selected automatically, although explicitly configured private IPv4
+addresses are allowed for test owners. Source-managed configuration must receive settings through
+its registered source.
 
-The profile uses the upstream AmneziaWG image pinned in
-[`release.env`](../config/profiles/amnezia/release.env), with AmneziaVPN 5.0.3.0 as the protocol
-reference. It does not give the Amnezia app SSH administration of the owner or install its remote
-server manager. Subyard is the single writer of this runtime; use the app to import client access.
+Fresh initialization arms the UDP resource's first activation on `yard start`. That activation
+assesses the endpoint and publishes the owned route after the operation's confirmation. It can
+be ready before a VPN server has been installed. Later stop/start operations preserve the network
+enablement choice. An explicit `vpn down` disables it persistently, including across repeated
+provisioning and restarts; use `vpn up` to enable it again.
 
-## Client access and network policy
+## Install and manage through AmneziaVPN
 
-First enablement creates one client at `/srv/amnezia/client.conf` inside the VM. This file contains
-private keys. Export it on the owner into a private directory, without printing it to the terminal:
+Open the administration route explicitly:
+
+```sh
+yard -Y vpn vpn-admin up
+yard -Y vpn vpn-admin status
+yard -Y vpn status
+```
+
+The selected yard's detailed status includes a hint such as
+`Manage in AmneziaVPN: amnezia@203.0.113.10:2226`. It identifies the application, address, port and
+user without exposing credentials. Resource status and RPC responses do not contain private keys.
+The dedicated `amnezia` account has passwordless administrative access inside this VM, which the
+native installer requires. It is not an administrator account on the owner.
+
+Export its private key into a protected file on the owner, without printing it:
 
 ```sh
 install -d -m 0700 ./vpn-access
-install -m 0600 /dev/null ./vpn-access/client.conf
+install -m 0600 /dev/null ./vpn-access/admin.key
 incus exec yard-vpn --project subyard-vpn -- \
-  cat /srv/amnezia/client.conf > ./vpn-access/client.conf
+  cat /srv/amnezia/admin.key > ./vpn-access/admin.key
+chmod 0600 ./vpn-access/admin.key
 ```
 
-Use the instance and project names shown by `yard -Y vpn config show` if they differ. Transfer the
-file through a protected channel. In a compatible AmneziaVPN client, add a connection, choose
-**Connection settings file**, select `client.conf`, and connect; see the upstream
-[file import instructions](https://docs.amnezia.org/documentation/instructions/connect-via-config/).
-Do not put it in a repository, issue, chat, log or shared clipboard. This first
-version manages one client; concurrent devices need distinct peer addresses and are not supported
-by the resource command.
+Use the instance and project names shown by `yard -Y vpn config show` if they differ. The export
+uses the documented [Incus exec command](https://linuxcontainers.org/incus/docs/main/reference/manpages/incus/exec/).
+Transfer the file to the administrator's device through a protected channel. This key grants full
+administrative access to the dedicated VM; keep it out of repositories, issues, chat and logs.
+Subyard generates an ED25519 key, supported by the
+[native credentials screen](https://github.com/amnezia-vpn/amnezia-client/blob/5.0.3.0/client/ui/qml/Pages2/PageSetupWizardCredentials.qml).
+When entering it in the app, include the complete key with its BEGIN and END lines.
 
-The client routes IPv4 and IPv6 into the tunnel. The service forwards IPv4 Internet traffic, uses
-MTU 1280 and supplies public DNS addresses. IPv6 is intentionally dropped inside the tunnel.
-Client-side split routing or disabling the tunnel changes this protection. Decrypted traffic is
-blocked from private, loopback, metadata and special-use networks, from the owner's endpoint and
-from VM management services. ICMP echo to the tunnel address is allowed for diagnostics.
-Owner SSH and other yards retain their existing network policy.
+Use the stock [AmneziaVPN app](https://github.com/amnezia-vpn/amnezia-client/releases/tag/5.0.3.0),
+with 5.0.3.0 as this profile's acceptance reference:
 
-## Stop, update and recover
+1. Add a **Self-hosted VPN** connection.
+2. Enter the owner's advertised IPv4 and administration port, for example `203.0.113.10:2226`,
+   username `amnezia`, and the exported SSH private key.
+3. Choose **Manual**, select **AmneziaWG**, and set its UDP port to `RESOURCE_VPN_PORT`, normally
+   `51820`, before installing.
+4. Let the app install the server and create its administrator connection.
+
+The upstream [self-hosted setup guide](https://docs.amnezia.org/documentation/instructions/install-vpn-on-server/)
+explains the SSH workflow. The
+[5.0.3.0 protocol settings screen](https://github.com/amnezia-vpn/amnezia-client/blob/5.0.3.0/client/ui/qml/Pages2/PageSetupWizardProtocolSettings.qml)
+supports choosing the port before installation. Automatic setup chooses a random AmneziaWG port,
+which will not necessarily match Subyard's route. Use the owner's advertised address rather than
+the guest's private address: the native app also uses this host address for client configurations.
+
+After setup, close the administration route when it is not needed:
+
+```sh
+yard -Y vpn vpn-admin down
+```
+
+This closes public SSH administration while VPN traffic can continue through the separate UDP
+route. Reopen it before managing clients, checking the server or updating protocols. If adding
+an existing native server to another administrator's app, enter the same credentials and choose
+**Skip setup**, then **Management** → **Check the server for previously installed Amnezia services**;
+see [native server discovery](https://docs.amnezia.org/documentation/instructions/check-server/).
+
+## Share and revoke clients
+
+Use the app's **Share VPN Access** screen to create and name a separate guest client for each
+device. Select the server, AmneziaWG protocol and a format supported by the recipient. The app can
+share an AmneziaVPN key/file or export a native AmneziaWG `.conf` file. Treat exported access as a
+secret and keep local files in a private directory with mode `0600`.
+
+To remove access, open **Users**, select the named client, choose **Revoke access**, and confirm.
+This removes that client's peer while retaining the other clients. Creating, sharing and revoking
+clients are native app operations; Subyard does not generate a first client or edit the app's peer
+registry. See the official [sharing and revocation guide](https://docs.amnezia.org/documentation/instructions/share-connection/).
+
+Subyard's network boundary blocks decrypted VPN traffic to external private, loopback, metadata
+and special-use networks, the owner's configured endpoint and VM management services. IPv6
+traffic cannot leave the VM through its uplink. The native app owns client routes, DNS and protocol settings;
+client-side split routing or disconnecting the tunnel changes what traffic reaches this boundary.
+Owner SSH and neighboring yards retain their existing network policy.
+
+## Status and network control
+
+```sh
+yard -Y vpn vpn status
+yard -Y vpn vpn-admin status
+```
+
+The resource's JSON distinguishes environment/network readiness from native VPN installation:
+
+| Field | Meaning |
+| --- | --- |
+| `ready` | The selected resource's environment and owned route are ready |
+| `network_enabled` | The VPN network boundary is enabled |
+| `ingress` | The selected resource's owned ingress device exists |
+| `vpn_installed` | A recognized native AmneziaWG container exists |
+| `vpn_running` | A native container is running and listening on the configured UDP port |
+| `management` | AmneziaVPN application, host, administration port and username |
+| `vpn_port` | The configured VPN UDP port |
+
+An installed or running container does not by itself prove a working client connection. In
+particular, the app's container can remain running while `vpn down` has disabled the network
+boundary. A ready administration route does not imply that VPN installation has completed.
 
 ```sh
 yard -Y vpn vpn down
-yard -Y vpn vpn status
+yard -Y vpn vpn-admin down
+yard -Y vpn stop
 ```
 
-`down` removes the owned public ingress before disabling the guest service. It retains the entire
-state directory. If the guest agent is unavailable, `down` still closes an owned ingress and retains
-pending cleanup; retry `down` when guest access returns to verify shutdown. Start the yard first if
-it is stopped. To change the endpoint or deselect the profile, run `down` first; configuration
-commands reject changes while its service remains enabled.
-If a profile was manually deselected, `init` assesses and closes its exact owned ingress and calls
-the profile's declared shutdown. If guest shutdown cannot be verified, it retains cleanup intent
-and stops reconciliation with recovery instructions. Removing a UDP proxy alone does not terminate
-an established tunnel.
-A failed bring-up rollback also disables the guest service while preserving keys and peers; run
-`up` again to re-enable it. Bring-up also clears stale untranslated UDP connection state for the
-verified endpoint, allowing an existing client to reconnect after a disabled interval. This host
-step may require sudo authentication after the operation confirmation.
+`vpn down` removes the owned UDP ingress and disables VPN forwarding in the guest. Native
+containers, images, keys and peers remain app-owned and are retained. `vpn-admin down` removes
+only the administration route. Stopping the yard stops the VM and its processes. If the guest
+agent is unavailable, VPN shutdown still closes owned ingress and retains pending boundary
+cleanup; retry `vpn down` when guest access returns. Removing a UDP proxy alone does not prove
+that an established tunnel has terminated before guest cleanup converges.
 
-Guest service enablement survives a restart. A disabled service stays disabled. VM boot itself
-follows Subyard's managed desired-power workflow and host network guards; no independent Incus
-autostart bypass is installed. Stopping another yard does not stop this VM. Free Page Reporting
-returns idle guest memory to the immediate owner but does not reserve RAM or CPU priority.
+Close both routes before changing their endpoint settings or deselecting the profile. `vpn up`
+and `vpn-admin up` reject endpoint collisions and foreign ownership metadata. Changing the UDP
+port also requires changing it in AmneziaVPN and may require exporting updated client access.
+A failed bring-up can be retried without replacing the native server or its clients.
 
-The VPN service requires the dedicated `/srv` state volume to be mounted. If it is unavailable,
-bring-up stops without creating replacement keys on the VM root disk; repair the mount through
-`yard -Y vpn init` before retrying `vpn up`.
+VM boot follows Subyard's managed desired-power workflow and host network guards. No independent
+Incus autostart bypass is installed. Stopping another yard does not stop this VM. Free Page
+Reporting returns idle memory to the immediate owner without reserving RAM or CPU priority.
 
-For a runtime update: protect a current state backup, run `vpn down`, update the Subyard runtime,
-run `yard -Y vpn init --profile amnezia`, then `vpn up`. The image digest changes
-only with the profile release. Provisioning preserves service enablement and keys; it does not run
-an independent upstream updater. A service already running an older image requires explicit `up`
-to replace it.
+## Update, backup and recovery
 
-Back up `/srv/amnezia` while the service is down, using an encrypted backup tool and a destination
-outside the VPS. Preserve root ownership, directory mode `0700` and file mode `0600`. Keep the
-matching pinned profile version and non-secret endpoint settings with the recovery instructions.
-For recovery, initialize a fresh dedicated VM and disable its pending startup with `vpn down`.
-Start the VM, restore that directory and the endpoint settings, then run `vpn up` and verify the client. Do not restore onto an active
-service or merge two independently generated state directories. `teardown --keep-data` retains the
-state volume; ordinary destructive teardown can remove it and requires its existing confirmation.
+AmneziaVPN owns installation and updates of its server containers and images. Subyard does not
+pin or replace them during environment provisioning. Repeating profile initialization preserves
+native server state and the administrator key. Check free space before native image updates: the
+preset's separate state volume is 2 GiB, and existing volumes are not automatically enlarged.
+
+The environment sets public DNS resolvers for Docker image builds. Native container networks may
+communicate inside the dedicated VM, including Amnezia's DNS sidecar. Container traffic cannot
+reach VM-local management services or external private networks through either Docker bridge.
+Amnezia continues to own client DNS settings.
+
+Persistent Docker and containerd storage lives under `/srv/amnezia/docker` and
+`/srv/amnezia/containerd`. Native configuration remains in the app's container storage, rather
+than a Subyard client configuration file. Docker and containerd require the dedicated `/srv`
+volume; if it is unavailable, environment preparation refuses to create replacement state on
+the root disk. Repair the mount through `yard -Y vpn init` before retrying.
+
+Back up the entire `/srv/amnezia` state with the VM stopped, using an encrypted backup tool and
+a destination outside the VPS. Preserve ownership and permissions, including root ownership,
+mode `0700` on the state root and `0600` on the administrator key. Preserve the internal Docker
+and containerd permissions; do not apply those modes recursively. Keep non-secret endpoint
+settings and the administrator app's own backup with the recovery instructions.
+
+Restore a consistent state volume through the normal Incus/storage recovery workflow while the
+VM is stopped. Reconcile the dedicated profile, reopen administration, and check the restored
+server in AmneziaVPN before enabling the VPN route and verifying clients. Do not merge independently initialized
+state directories. `teardown --keep-data` retains the state volume; destructive teardown can
+remove it and requires its existing confirmation.
+
+State created by the old Subyard-managed custom VPN runtime is refused. Use a fresh dedicated
+named yard for the native app environment. There is no automatic conversion or implicit removal
+of existing users; retain the old environment and backup until its replacement is verified and
+you have decided how to retire it.
 
 The owner IP, uplink, physical memory and outage boundary remain shared with neighboring yards.
-Limits bound this VM; they do not guarantee latency, bandwidth, provider filtering behavior or
-recovery from loss of the VPS without an external backup.
+VM limits do not guarantee latency, bandwidth, provider filtering behavior or recovery from loss
+of the VPS without an external backup.
 
 ## Acceptance check
 
 On an available allocated two-VM test slot, run:
 
 ```sh
-config/profiles/amnezia/tests/e2e/acceptance.sh --slot N
+config/profiles/amnezia/tests/e2e/acceptance.sh --slot N --lane full
 ```
 
-The check creates a dedicated VPN VM on the first test host and a compatible upstream AmneziaWG
-client on the second. It verifies handshake, DNS, MTU, Internet transfer, management/private-network
-denial, isolation, state preservation, a neighboring workload, enabled and disabled reboot recovery,
-and two allocation/free RSS cycles before and after owner reboot. The RSS check keeps guest RAM
-unchanged and uses distinct pages to exclude deduplication. Test credentials stay in private files
-inside the disposable lease. This does not test the graphical client, provider filtering or production
-VPS performance. See [test VM ownership and allocation](test-vms.md).
+The acceptance workflow runs stock AmneziaVPN 5.0.3.0 under a virtual display on the second test
+VM. Through its GUI, it installs the server over dedicated SSH using Manual AmneziaWG and the
+configured port, creates two named clients, exports their native configurations, and revokes one
+while the other retains access. It also closes/reopens administration and rediscovers the native
+server. Independent compatible clients probe the exported configurations.
 
-Use `--lane reboot` for a focused fresh check of enabled and disabled restart/reboot recovery,
-client connectivity, and two Free Page Reporting cycles after reboot. It creates its own fixtures
-and does not reuse a released lease. Both lanes keep client traffic active during enabled owner
-reboots and verify recovery with isolation enabled and disabled.
-
-Use `--lane recovery` for a focused fresh check of ingress closure while the guest agent is
-unavailable, shutdown retry, and refusal to create state on an unmounted `/srv`. It also checks
-systemd mount restoration, unchanged keys and peers, and client connectivity after recovery.
-
-Use `--lane startup` to check the shortened `init --profile` → `start` workflow, repeated profile
-initialization, client connectivity, and enabled/explicitly disabled stop/start and host reboot
-recovery. This lane omits the workload and Free Page Reporting measurements.
-
-Use `--lane disabled` for a fresh first activation with isolation already enabled, followed by
-repeated shutdown, disabled stop/start/provision/reboot recovery, and explicit re-enablement.
-
-Use `--lane reconnect` for first activation with isolation enabled, then shutdown and an owner
-reboot with retained client traffic. It verifies a stale untranslated UDP flow exists before
-explicit bring-up and that the same client reconnects without replacing its configuration.
+The lifecycle checks cover repeated environment preparation, network shutdown/re-enablement,
+private/management-network denial, isolation, state preservation, neighboring workload behavior,
+VM and owner reboot recovery, unavailable guest-agent cleanup, mount recovery and Free Page
+Reporting cycles. Credentials remain in protected files inside the disposable lease. This describes
+acceptance coverage, not a recorded passing run; it does not establish provider filtering behavior
+or production VPS performance. See [test VM ownership and allocation](test-vms.md).

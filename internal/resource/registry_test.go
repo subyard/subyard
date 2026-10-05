@@ -366,6 +366,11 @@ func TestLoadPublicUDPContractIsValidatedGenerically(t *testing.T) {
 		valid                 bool
 	}{
 		{"sample", "relay", "sample-relay SAMPLE_IPV4 SAMPLE_PORT SAMPLE_INTERFACE udp:guest:41999 owner-metadata-v1 owner-ipv4-udp", true},
+		{"sample", "relay", "sample-relay SAMPLE_IPV4 SAMPLE_PORT SAMPLE_INTERFACE tcp:guest:22 owner-metadata-v1 owner-ipv4-tcp", true},
+		{"sample", "relay", "sample-relay SAMPLE_IPV4 SAMPLE_PORT SAMPLE_INTERFACE tcp:guest:host-port owner-metadata-v1 owner-ipv4-tcp", true},
+		{"sample", "relay", "sample-relay SAMPLE_IPV4 SAMPLE_PORT SAMPLE_INTERFACE udp:guest:host-port owner-metadata-v1 owner-ipv4-udp", true},
+		{"sample", "relay", "sample-relay SAMPLE_IPV4 SAMPLE_PORT SAMPLE_INTERFACE udp:guest:22 owner-metadata-v1 owner-ipv4-tcp", false},
+		{"sample", "relay", "sample-relay SAMPLE_IPV4 SAMPLE_PORT SAMPLE_INTERFACE tcp:guest:022 owner-metadata-v1 owner-ipv4-tcp", false},
 		{"other", "relay", "other-relay OTHER_IPV4 OTHER_PORT OTHER_INTERFACE udp:guest:51821 owner-metadata-v1 owner-ipv4-udp", true},
 		{"sample", "relay", "../relay SAMPLE_IPV4 SAMPLE_PORT SAMPLE_INTERFACE udp:guest:41999 owner-metadata-v1 owner-ipv4-udp", false},
 		{"sample", "relay", "sample-relay SAMPLE_IPV4 SAMPLE_PORT SAMPLE_INTERFACE udp:guest:0 owner-metadata-v1 owner-ipv4-udp", false},
@@ -387,10 +392,10 @@ ACTION="down down security-change reversible"
 		}
 		if test.valid {
 			contract := registry.ProxyContracts([]string{test.profile})[0]
-			if contract.AddressPolicy != ProxyAddressOwnerIPv4UDP || contract.OwnerInterfaceSetting == "" || !contract.OwnershipMetadata {
+			if !contract.IsOwnerIPv4Ingress() || contract.OwnerInterfaceSetting == "" || !contract.OwnershipMetadata {
 				t.Fatalf("unexpected UDP contract: %+v", contract)
 			}
-			if port, valid := contract.GuestUDPPort(); !valid || port < 1 {
+			if _, port, valid := contract.GuestEndpoint(42000); !valid || port < 1 {
 				t.Fatalf("invalid guest UDP port: %+v", contract)
 			}
 		}
@@ -793,4 +798,37 @@ SHUTDOWN=down
 		t.Fatal(err)
 	}
 	return registry, actions
+}
+
+func TestManagementContractKeepsNativeApplicationMetadataBounded(t *testing.T) {
+	valid := "SampleVPN SAMPLE_IPV4 SAMPLE_ADMIN_PORT sample"
+	contract, err := parseManagementContract(valid, "synthetic.res")
+	if err != nil || contract.Application != "SampleVPN" || contract.User != "sample" {
+		t.Fatalf("contract=%+v err=%v", contract, err)
+	}
+	root := testkit.TempDir(t)
+	writeTestResource(t, root, "sample", "relay", `
+HANDLER=resources/relay/handler.sh
+TITLE="Sample relay"
+MANAGEMENT="SampleVPN SAMPLE_IPV4 SAMPLE_ADMIN_PORT sample"
+ACTION="up up public-ingress-change reversible"
+ACTION="down down public-ingress-change reversible"
+`)
+	registry, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition := registry.Definitions()[0]
+	if !reflect.DeepEqual(definition.Management, contract) {
+		t.Fatalf("loaded metadata=%+v", definition.Management)
+	}
+	definition.Management.Application = "changed"
+	if registry.Definitions()[0].Management.Application != "SampleVPN" {
+		t.Fatal("management metadata aliases registry storage")
+	}
+	for _, record := range []string{"SampleVPN SAMPLE_IPV4 SAMPLE_ADMIN_PORT", "SampleVPN SAMPLE_IPV4 SAMPLE_ADMIN_PORT sample extra", "https://sample SAMPLE_IPV4 SAMPLE_ADMIN_PORT sample", "SampleVPN sample SAMPLE_ADMIN_PORT sample", "SampleVPN SAMPLE_IPV4 SAMPLE_ADMIN_PORT -user", "ghp_secret SAMPLE_IPV4 SAMPLE_ADMIN_PORT sample"} {
+		if _, err := parseManagementContract(record, "synthetic.res"); err == nil {
+			t.Fatalf("unsafe metadata accepted: %q", record)
+		}
+	}
 }

@@ -69,7 +69,7 @@ func (cli *CLI) networkService(yards []domain.Context) *yardnetwork.Service {
 	}
 	publicIngress := false
 	for _, definition := range cli.resources.Definitions() {
-		if definition.Proxy != nil && definition.Proxy.AddressPolicy == resource.ProxyAddressOwnerIPv4UDP {
+		if definition.Proxy != nil && definition.Proxy.IsOwnerIPv4Ingress() {
 			publicIngress = true
 			break
 		}

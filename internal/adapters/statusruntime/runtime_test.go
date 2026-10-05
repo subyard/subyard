@@ -417,6 +417,53 @@ func TestRuntimeProbesPreparedResources(t *testing.T) {
 	}
 }
 
+func TestRuntimeNativeManagementStatus(t *testing.T) {
+	root := testkit.TempDir(t)
+	resources := filepath.Join(root, "config", "profiles", "sample", "resources")
+	if err := os.MkdirAll(filepath.Join(resources, "service"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(resources, "service.res"), []byte(
+		"COMMAND=svc\nHANDLER=resources/service/handler.sh\nTITLE=Service\nMANAGEMENT=\"SampleApp SERVICE_HOST SERVICE_PORT operator\"\nACTION=\"up up yard-change reversible\"\nACTION=\"down down yard-change reversible\"\n"), 0o600)
+	testkit.WriteFile(t, filepath.Join(resources, "service", "handler.sh"), []byte("#!/bin/sh\n[ \"$1\" = is-up ] && [ \"$SERVICE_UP\" = yes ]\n"), 0o700)
+	registry, err := resource.Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name, host, port, up, hint string
+	}{
+		{"ipv4", "203.0.113.10", "2226", "yes", "Manage in SampleApp: operator@203.0.113.10:2226"},
+		{"hostname", "service.example", "2226", "yes", "Manage in SampleApp: operator@service.example:2226"},
+		{"ipv6", "2001:db8::1", "2226", "yes", "Manage in SampleApp: operator@[2001:db8::1]:2226"},
+		{"missing host", "", "2226", "yes", "yard svc down"},
+		{"unsafe host", "host@example", "2226", "yes", "yard svc down"},
+		{"host newline", "host\nexample", "2226", "yes", "yard svc down"},
+		{"missing port", "service.example", "", "yes", "yard svc down"},
+		{"zero port", "service.example", "0", "yes", "yard svc down"},
+		{"large port", "service.example", "65536", "yes", "yard svc down"},
+		{"noncanonical port", "service.example", "02226", "yes", "yard svc down"},
+		{"down", "service.example", "2226", "no", "yard svc up"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runtime := Runtime{Resources: registry.Definitions(), Environment: map[string]string{
+				"PATH": "/usr/bin:/bin", "SERVICE_HOST": test.host, "SERVICE_PORT": test.port, "SERVICE_UP": test.up,
+			}}
+			statuses := runtime.resourceStatus(context.Background(), true)
+			if len(statuses) != 1 || statuses[0].Hint != test.hint || statuses[0].URL != "" {
+				t.Fatalf("native management status = %#v", statuses)
+			}
+		})
+	}
+	runtime := Runtime{Resources: registry.Definitions(), Environment: map[string]string{
+		"PATH": "/usr/bin:/bin", "SERVICE_HOST": "service.example", "SERVICE_PORT": "2226", "SERVICE_UP": "yes",
+	}}
+	runtime.Resources[0].Dashboard = &resource.DashboardContract{Scheme: "https", HostSetting: "SERVICE_HOST", PortSetting: "SERVICE_PORT", Path: "/ui/"}
+	if status := runtime.resourceStatus(context.Background(), true)[0]; status.URL != "https://service.example:2226/ui/" {
+		t.Fatalf("dashboard URL lost with native management: %#v", status)
+	}
+}
+
 func TestRuntimeReportsSelectedProfilesAndAgentsWithVerifiedDashboard(t *testing.T) {
 	for _, route := range []struct{ host, marker string }{
 		{"127.0.0.1", "v1:18080"},

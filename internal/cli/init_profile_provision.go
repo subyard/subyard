@@ -20,7 +20,7 @@ import (
 
 func (cli *CLI) initProfileEndpointSetting(preset config.Loaded, name string) bool {
 	for _, contract := range cli.resources.ProxyContracts(strings.Fields(preset.Environment["ENVIRONMENT_PROFILES"])) {
-		if contract.AddressPolicy == resource.ProxyAddressOwnerIPv4UDP && (name == contract.AdvertiseHostSetting || name == contract.OwnerInterfaceSetting || name == contract.HostPortSetting) {
+		if contract.IsOwnerIPv4Ingress() && (name == contract.AdvertiseHostSetting || name == contract.OwnerInterfaceSetting || name == contract.HostPortSetting) {
 			return true
 		}
 	}

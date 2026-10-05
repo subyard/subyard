@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/config"
-	"github.com/Subyard/Subyard/internal/resource"
 )
 
 // Changing the authority or endpoint of a public resource must not strand its
@@ -19,7 +18,7 @@ func (cli *CLI) checkResourceConfigChange(ctx context.Context, loaded config.Loa
 	selected := strings.Fields(loaded.Environment["ENVIRONMENT_PROFILES"])
 	for _, definition := range cli.resources.Definitions() {
 		proxy := definition.Proxy
-		if proxy == nil || proxy.AddressPolicy != resource.ProxyAddressOwnerIPv4UDP ||
+		if proxy == nil || !proxy.IsOwnerIPv4Ingress() ||
 			!slices.Contains(selected, definition.Profile) {
 			continue
 		}

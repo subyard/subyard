@@ -19,11 +19,11 @@ var pendingOwnedIngress = regexp.MustCompile(`^v1:pending:[0-9a-f]{64}$`)
 // ownership marker preserves retry intent. Incus ETag protects concurrent edits.
 func (client *Client) RemoveOwnedResourceIngress(ctx context.Context, yard yardnetwork.Yard,
 	contract resource.ProxyContract, expectedDevice map[string]string, expectedMarker string, retainPending bool) error {
-	if contract.AddressPolicy != resource.ProxyAddressOwnerIPv4UDP || !contract.OwnershipMetadata ||
+	if !contract.IsOwnerIPv4Ingress() || !contract.OwnershipMetadata ||
 		contract.Device == "" || contract.Profile == "" || contract.Resource == "" {
 		return errors.New("invalid public ingress contract")
 	}
-	if _, valid := contract.GuestUDPPort(); !valid {
+	if _, _, valid := contract.GuestEndpoint(1); !valid {
 		return errors.New("invalid public ingress guest port")
 	}
 	if len(expectedDevice) == 0 {

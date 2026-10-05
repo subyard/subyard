@@ -340,8 +340,8 @@ func (runtime Runtime) checkOwnedProxy(
 	if contract == nil {
 		return fmt.Errorf("proxy device %q is not loopback-only or declared by an active resource: %s", name, device["listen"])
 	}
-	if contract.AddressPolicy == resource.ProxyAddressOwnerIPv4UDP {
-		return runtime.checkOwnedPublicUDPProxy(name, device, instanceConfig, guestNIC, localDevice, *contract)
+	if contract.IsOwnerIPv4Ingress() {
+		return runtime.checkOwnedPublicIngressProxy(name, device, instanceConfig, guestNIC, localDevice, *contract)
 	}
 	if device["type"] != "proxy" {
 		return fmt.Errorf("device %q does not have the proxy type required by its typed resource contract", name)
@@ -387,22 +387,23 @@ func (runtime Runtime) checkOwnedProxy(
 	return nil
 }
 
-func (runtime Runtime) checkOwnedPublicUDPProxy(name string, device, instanceConfig, guestNIC, localDevice map[string]string, contract resource.ProxyContract) error {
-	guestPort, validGuestPort := contract.GuestUDPPort()
-	if !validGuestPort || contract.AddressPolicy != resource.ProxyAddressOwnerIPv4UDP ||
+func (runtime Runtime) checkOwnedPublicIngressProxy(name string, device, instanceConfig, guestNIC, localDevice map[string]string, contract resource.ProxyContract) error {
+	hostPort, _ := strconv.Atoi(runtime.Environment[contract.HostPortSetting])
+	protocol, guestPort, validGuestPort := contract.GuestEndpoint(hostPort)
+	if !validGuestPort || !contract.IsOwnerIPv4Ingress() ||
 		contract.Profile == "" || contract.Resource == "" || contract.Device != name || !contract.OwnershipMetadata ||
 		runtime.Yard.YardKind != domain.YardVM || runtime.Yard.YardName == "" || runtime.Yard.YardName == "default" ||
 		!slices.Contains(strings.Fields(runtime.Environment["ENVIRONMENT_PROFILES"]), contract.Profile) {
-		return fmt.Errorf("proxy device %q has no valid public UDP VM contract", name)
+		return fmt.Errorf("proxy device %q has no valid public ingress VM contract", name)
 	}
 	if len(device) != 5 || !maps.Equal(device, localDevice) || device["type"] != "proxy" || device["bind"] != "host" || device["nat"] != "true" {
-		return fmt.Errorf("proxy device %q has invalid UDP NAT options", name)
+		return fmt.Errorf("proxy device %q has invalid ingress NAT options", name)
 	}
 	for key := range device {
 		switch key {
 		case "type", "bind", "nat", "listen", "connect":
 		default:
-			return fmt.Errorf("proxy device %q contains options outside its UDP contract", name)
+			return fmt.Errorf("proxy device %q contains options outside its ingress contract", name)
 		}
 	}
 	if instanceConfig[contract.OwnershipKey()] != contract.OwnershipValue(device) {
@@ -423,14 +424,14 @@ func (runtime Runtime) checkOwnedPublicUDPProxy(name string, device, instanceCon
 	portText := runtime.Environment[contract.HostPortSetting]
 	port, err := strconv.Atoi(portText)
 	if err != nil || port < 1 || port > 65535 || strconv.Itoa(port) != portText {
-		return fmt.Errorf("proxy device %q has no valid owner UDP port", name)
+		return fmt.Errorf("proxy device %q has no valid owner ingress port", name)
 	}
 	guestIP := guestNIC["ipv4.address"]
 	guest, err := netip.ParseAddr(guestIP)
 	if err != nil || !guest.Is4() || !guest.IsPrivate() || guestNIC["type"] != "nic" ||
-		device["listen"] != "udp:"+address.String()+":"+portText ||
-		device["connect"] != "udp:"+guest.String()+":"+strconv.Itoa(guestPort) {
-		return fmt.Errorf("proxy device %q does not match its pinned guest IPv4 UDP route", name)
+		device["listen"] != protocol+":"+address.String()+":"+portText ||
+		device["connect"] != protocol+":"+guest.String()+":"+strconv.Itoa(guestPort) {
+		return fmt.Errorf("proxy device %q does not match its pinned guest IPv4 ingress route", name)
 	}
 	return nil
 }

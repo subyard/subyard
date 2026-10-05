@@ -659,3 +659,29 @@ func safeState() ports.ReconcileState {
 		},
 	}
 }
+
+func TestSecurityPublicIngressResolvesTransportAndHostPort(t *testing.T) {
+	for _, test := range []struct{ protocol, declared, guest string }{
+		{"tcp", "22", "22"}, {"tcp", "host-port", "42000"}, {"udp", "host-port", "42000"},
+	} {
+		t.Run(test.protocol+"/"+test.declared, func(t *testing.T) {
+			contract := resource.ProxyContract{Profile: "sample", Resource: "relay", Device: "sample-relay", AdvertiseHostSetting: "SAMPLE_IPV4", HostPortSetting: "SAMPLE_PORT", OwnerInterfaceSetting: "SAMPLE_INTERFACE", Connect: test.protocol + ":guest:" + test.declared, AddressPolicy: resource.ProxyAddressPolicy("owner-ipv4-" + test.protocol), OwnershipMetadata: true}
+			runtime := testRuntime(t)
+			runtime.Yard.YardName, runtime.Yard.YardKind = "private", domain.YardVM
+			runtime.Environment["ENVIRONMENT_PROFILES"] = "sample"
+			runtime.Environment["SAMPLE_IPV4"], runtime.Environment["SAMPLE_PORT"], runtime.Environment["SAMPLE_INTERFACE"] = "10.20.30.40", "42000", "eth0"
+			runtime.OwnerIPv4OnInterface = func(name, address string) bool { return name == "eth0" && address == "10.20.30.40" }
+			device := map[string]string{"type": "proxy", "bind": "host", "nat": "true", "listen": test.protocol + ":10.20.30.40:42000", "connect": test.protocol + ":10.80.0.10:" + test.guest}
+			marker := map[string]string{contract.OwnershipKey(): contract.OwnershipValue(device)}
+			nic := map[string]string{"type": "nic", "ipv4.address": "10.80.0.10"}
+			if err := runtime.checkOwnedPublicIngressProxy(contract.Device, device, marker, nic, device, contract); err != nil {
+				t.Fatal(err)
+			}
+			device["connect"] = test.protocol + ":10.80.0.10:42002"
+			marker[contract.OwnershipKey()] = contract.OwnershipValue(device)
+			if err := runtime.checkOwnedPublicIngressProxy(contract.Device, device, marker, nic, device, contract); err == nil {
+				t.Fatal("wrong resolved guest port accepted")
+			}
+		})
+	}
+}

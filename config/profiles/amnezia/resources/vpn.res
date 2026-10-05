@@ -1,7 +1,7 @@
 COMMAND=vpn
 HANDLER=resources/vpn/handler.sh
-TITLE="AmneziaWG VPN"
-PROXY="amnezia-vpn RESOURCE_VPN_IPV4 RESOURCE_VPN_PORT RESOURCE_VPN_INTERFACE udp:guest:51820 owner-metadata-v1 owner-ipv4-udp"
+TITLE="Amnezia VPN network"
+PROXY="amnezia-vpn RESOURCE_VPN_IPV4 RESOURCE_VPN_PORT RESOURCE_VPN_INTERFACE udp:guest:host-port owner-metadata-v1 owner-ipv4-udp"
 ACTION="up up public-ingress-change reversible"
 ACTION="down down public-ingress-change reversible"
 ACTION="status status read-only not-needed"

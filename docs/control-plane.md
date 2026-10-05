@@ -870,7 +870,7 @@ Reporting and IPv4 pinning are opt-in enforcement capabilities: `0` or an unset 
 an override or address pin already installed on an existing VM, nor revoke its project permission.
 These inputs are not runtime on/off switches.
 
-### Explicit owner UDP ingress
+### Explicit owner TCP or UDP ingress
 
 A profile can declare one exact IPv4 NAT route to a pinned VM address:
 
@@ -880,8 +880,10 @@ PROXY="service-port RESOURCE_SERVICE_IPV4 RESOURCE_SERVICE_PORT RESOURCE_SERVICE
 
 `RESOURCE_<ID>_IPV4`, `_INTERFACE` and `_PORT` are typed yard/command settings. The IPv4 must be an
 explicit owner address on the selected interface; wildcard publication is forbidden. The descriptor
-declares the guest port. Its bring-up and shutdown use `public-ingress-change reversible` action
-metadata. Automatic port allocation and `BOOTSTRAP` are not supported for public UDP routes.
+declares the guest port. `tcp:guest:22` with `owner-ipv4-tcp` declares TCP;
+`udp:guest:host-port` (or TCP) uses the configured owner port inside the VM too. Its bring-up and
+shutdown use `public-ingress-change reversible` action metadata. Automatic port allocation and
+`BOOTSTRAP` are not supported for public owner routes. `STARTUP=bringup` is restricted to UDP ingress.
 Explicit provisioning of a selected profile in a local named VM yard can fill missing owner
 IPv4/interface settings from one unambiguous active public IPv4. Explicit values take precedence;
 ambiguous or non-public-only hosts receive a manual-configuration diagnostic. Discovery is local
@@ -895,21 +897,20 @@ confirmation, the engine serializes the operation with yard configuration change
 plan, applies the handler and reconciles the matching ingress ACL. The route must have the exact
 declared device shape and `user.subyard.resource.<device>` ownership fingerprint. Foreign or
 modified same-name devices are refused. Network isolation allows only the selected, declared and
-owned route; it does not grant broad UDP access. Failed network reconciliation invokes the handler's
+owned route; it does not grant broad transport access. Failed network reconciliation invokes the handler's
 internal `rollback-ingress` under the original bring-up operation to close its route. The engine
 verifies that both the proxy and ownership marker are absent before accepting a no-op or removing
 the matching ACL allowance, and checks closure again after ACL cleanup.
 Bring-up requires a converged network policy. Shutdown and rollback may remove only that route's
-persisted approval and exact UDP allowance, including after an interrupted shutdown; they refuse
+persisted approval and exact transport allowance, including after an interrupted shutdown; they refuse
 unrelated ACL, NIC or project drift instead of reconciling it as part of a resource action.
-For Amnezia, that rollback also disables the guest runtime while preserving VPN state; a later
-bring-up re-enables it.
 
-Isolation persists the approved route's device, owner endpoint and guest port in the existing
+Isolation persists the approved route's device, transport, owner endpoint and guest port in the existing
 network-policy binding. Boot restoration derives its ownership fingerprint from those parameters
 and the binding's guest address without loading profile files. It requires an exact match with the
-current local and effective proxy, ownership marker, pinned guest address and ACL. Older policies
-with a stored fingerprint remain readable after validation; subsequent writes omit that redundant
+current local and effective proxy, ownership marker, pinned guest address and ACL. An omitted
+transport means UDP for compatibility. Older policies with a stored fingerprint remain readable
+after validation; subsequent writes omit that redundant
 field. Missing or changed approval blocks managed starts. Ordinary reconciliation continues to
 use selected profile contracts; shutdown and deselection remove the persisted allowance.
 After a managed VM is newly started during owner boot, the reconciler checks its current owned
@@ -920,6 +921,16 @@ A changed public UDP bring-up performs the same bounded cleanup after route and 
 verification, restricted to the selected resource endpoint. This lets an existing client reconnect
 after sending packets while the service was disabled. Root authorization happens after confirmation
 and before activation; a no-op bring-up does not request privileges or clear connections.
+
+A resource may also declare a native application management endpoint:
+
+```text
+MANAGEMENT="NativeApp RESOURCE_SERVICE_IPV4 RESOURCE_ADMIN_PORT admin"
+```
+
+The declaration names the application, host and port settings, and SSH user. Detailed yard status
+renders these public values as a management hint for an active resource; it never reads or returns
+credentials. This does not imply a browser dashboard or enable the administrative route.
 
 Before changing an active route's endpoint, template or profile selection through `config set/unset`,
 run its shutdown verb. The read-only shutdown assessment must report no remaining enabled runtime

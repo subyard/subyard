@@ -64,7 +64,8 @@ func startupSeedEligible(loaded config.Loaded, instance ports.InstanceInfo, defi
 	if !localExists && !effectiveExists && !markerExists && !effectiveMarkerExists {
 		return true, nil
 	}
-	guestPort, valid := contract.GuestUDPPort()
+	hostPort, _ := strconv.Atoi(loaded.Environment[contract.HostPortSetting])
+	_, guestPort, valid := contract.GuestEndpoint(hostPort)
 	if !valid || !localExists || !effectiveExists || !markerExists || !effectiveMarkerExists ||
 		!maps.Equal(local, effective) || marker == "" || marker != effectiveMarker ||
 		marker != contract.OwnershipValue(local) {

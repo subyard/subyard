@@ -56,6 +56,7 @@ type Binding struct {
 // operator-controlled configuration tree.
 type ApprovedIngress struct {
 	Device    string `json:"device"`
+	Protocol  string `json:"protocol,omitempty"`
 	Listen    string `json:"listen"`
 	GuestPort int    `json:"guestPort"`
 
@@ -86,9 +87,17 @@ func (approved *ApprovedIngress) UnmarshalJSON(content []byte) error {
 	return nil
 }
 
+// Transport defaults legacy persisted approvals to UDP.
+func (approved ApprovedIngress) Transport() string {
+	if approved.Protocol == "" {
+		return "udp"
+	}
+	return approved.Protocol
+}
+
 func (approved ApprovedIngress) proxy(binding Binding) map[string]string {
 	return map[string]string{"type": "proxy", "listen": approved.Listen,
-		"connect": "udp:" + binding.IPv4 + ":" + strconv.Itoa(approved.GuestPort),
+		"connect": approved.Transport() + ":" + binding.IPv4 + ":" + strconv.Itoa(approved.GuestPort),
 		"bind":    "host", "nat": "true"}
 }
 
@@ -217,12 +226,16 @@ func (policy *Policy) normalize() error {
 		devices := map[string]bool{}
 		for approvedIndex := range binding.ApprovedIngress {
 			approved := &binding.ApprovedIngress[approvedIndex]
-			listen, listenErr := netip.ParseAddrPort(strings.TrimPrefix(approved.Listen, "udp:"))
+			if approved.Protocol == "udp" {
+				approved.Protocol = ""
+			}
+			listen, listenErr := netip.ParseAddrPort(strings.TrimPrefix(approved.Listen, approved.Transport()+":"))
 			if !domain.SafeName(approved.Device) || devices[approved.Device] ||
+				(approved.Transport() != "udp" && approved.Transport() != "tcp") ||
 				approved.GuestPort < 1 || approved.GuestPort > 65535 ||
-				!strings.HasPrefix(approved.Listen, "udp:") || listenErr != nil ||
+				!strings.HasPrefix(approved.Listen, approved.Transport()+":") || listenErr != nil ||
 				!resource.ExplicitOwnerIPv4(listen.Addr()) || listen.Port() == 0 ||
-				"udp:"+listen.String() != approved.Listen {
+				approved.Transport()+":"+listen.String() != approved.Listen {
 				return errors.New("network policy contains an invalid approved resource ingress")
 			}
 			if approved.legacyFingerprint != nil &&

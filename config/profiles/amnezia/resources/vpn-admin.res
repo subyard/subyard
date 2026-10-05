@@ -1,0 +1,11 @@
+COMMAND=vpn-admin
+HANDLER=resources/vpn-admin/handler.sh
+TITLE="AmneziaVPN administrative access"
+PROXY="amnezia-admin RESOURCE_VPN_IPV4 RESOURCE_VPN_ADMIN_PORT RESOURCE_VPN_INTERFACE tcp:guest:22 owner-metadata-v1 owner-ipv4-tcp"
+MANAGEMENT="AmneziaVPN RESOURCE_VPN_IPV4 RESOURCE_VPN_ADMIN_PORT amnezia"
+ACTION="up up public-ingress-change reversible"
+ACTION="down down public-ingress-change reversible"
+ACTION="status status read-only not-needed"
+ACTION="is-up is-up read-only not-needed"
+BRINGUP=up
+SHUTDOWN=down

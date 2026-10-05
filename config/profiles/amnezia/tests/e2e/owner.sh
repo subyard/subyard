@@ -36,7 +36,7 @@ fi
 yard() { "$YARD_BIN" -Y vpn-e2e "$@"; }
 guest() { incus exec yard-vpn-e2e --project subyard-vpn-e2e -- "$@"; }
 signature() {
-  guest sh -c 'cd /srv/amnezia && sha256sum awg0.conf client.conf settings.json' | sha256sum
+  guest sh -ceu 'sha256sum /srv/amnezia/admin.key; if docker container inspect amnezia-awg2 >/dev/null 2>&1; then docker exec amnezia-awg2 sha256sum /opt/amnezia/awg/awg0.conf; fi' | sha256sum
 }
 verify_state() {
   YARD_KIND=vm incus_wait_instance_agent subyard-vpn-e2e yard-vpn-e2e || die 'VM agent unavailable'
@@ -45,7 +45,7 @@ verify_state() {
 verify_enabled() {
   verify_state
   for _ in $(seq 1 45); do
-    if yard vpn status | jq -e '.ready and .running and .enabled and .ingress' >/dev/null; then
+    if yard vpn status | jq -e '.ready and .network_enabled and .ingress and .vpn_running' >/dev/null; then
       yard security --require-live --quiet
       return
     fi
@@ -55,15 +55,15 @@ verify_enabled() {
 }
 verify_disabled() {
   verify_state
-  yard vpn status | jq -e '(.ready or .running or .enabled or .ingress) | not' >/dev/null \
+  yard vpn status | jq -e '(.ready or .network_enabled or .ingress) | not' >/dev/null \
     || die 'disabled VPN recovered unexpectedly'
 }
 verify_deselected() {
   verify_state
   incus query '/1.0/instances/yard-vpn-e2e?project=subyard-vpn-e2e' \
-    | jq -e '(.devices["amnezia-vpn"] == null) and (.config["user.subyard.resource.amnezia-vpn"] == null)' >/dev/null
+    | jq -e '(.devices["amnezia-vpn"] == null) and (.config["user.subyard.resource.amnezia-vpn"] == null) and (.devices["amnezia-admin"] == null) and (.config["user.subyard.resource.amnezia-admin"] == null)' >/dev/null
   guest python3 /usr/local/lib/subyard-amnezia/runtime.py observe \
-    | jq -e '(.ready or .running or .enabled) | not' >/dev/null \
+    | jq -e '(.running or .enabled) | not' >/dev/null \
     || die 'deselected VPN runtime remains enabled'
 }
 verify_pending_ingress() {
@@ -105,7 +105,7 @@ capture_retry_down_state() {
   guest sh -ceu '
     systemctl show subyard-amnezia.service \
       --property=ActiveState --property=SubState --property=Result --property=ExecMainStatus
-    if docker container inspect subyard-amnezia \
+    if docker container inspect amnezia-awg2 \
       --format "container_status={{.State.Status}} running={{.State.Running}} exit_code={{.State.ExitCode}}"; then
       :
     else
@@ -139,10 +139,26 @@ case "$phase" in
       yard network isolation on --yes
     fi
     yard start --yes
+    yard vpn-admin up --yes
+    yard vpn status | jq -e ".ready and .network_enabled and .ingress and (.vpn_installed | not)" >/dev/null
+    yard status | grep -Fq "Manage in AmneziaVPN: amnezia@" || die "administrative status hint is missing"
+    guest findmnt -n -o FSTYPE,SIZE /srv
+    ;;
+  admin-down)
+    yard vpn-admin down --yes
+    yard vpn-admin down --yes
+    verify_enabled
+    ;;
+  admin-up)
+    yard vpn-admin up --yes
+    yard vpn-admin up --yes
+    verify_enabled
+    ;;
+  native-baseline)
     signature > "$fixture/state.sha256"
     chmod 0600 "$fixture/state.sha256"
     verify_enabled
-    guest findmnt -n -o FSTYPE,SIZE /srv
+    guest df -B1 --output=size,used,avail /srv
     ;;
   up)
     before="$(signature)"
@@ -163,7 +179,8 @@ case "$phase" in
     yard vpn down --yes
     [ "$(signature)" = "$before" ] || die 'shutdown changed VPN state'
     yard vpn status
-    guest systemctl is-enabled subyard-amnezia.service && die 'service remains enabled'
+    verify_disabled
+    guest docker inspect --format '{{.State.Running}}' amnezia-awg2 | grep -Fxq true || die 'network shutdown stopped the application-owned VPN'
     ;;
   recovery-agent-loss)
     # The transient unit runs inside the nested VPN VM. It makes the next
@@ -239,43 +256,23 @@ case "$phase" in
     fi
     printf 'amnezia_recovery_mount_down_seconds=%s\n' "$((SECONDS - mount_down_started))"
     verify_disabled
-    docker_root="$(guest docker info --format '{{.DockerRootDir}}')" \
-      || die 'could not inspect nested Docker data root'
-    case "$docker_root" in
-      /srv|/srv/*) die 'nested Docker data root is under the VPN state mount' ;;
-    esac
-    guest systemctl stop subyard-amnezia.service docker.service docker.socket >/dev/null
+    guest systemctl stop subyard-amnezia.service docker.service docker.socket containerd.service >/dev/null
     guest sh -ceu '
       findmnt -n /srv >/dev/null
       umount /srv
-      test ! -e /srv/workspaces
-      install -d -m 0700 /srv/workspaces
       test ! -e /srv/amnezia
     '
-    if guest python3 -c '
-import importlib.util
-spec = importlib.util.spec_from_file_location("runtime", "/usr/local/lib/subyard-amnezia/runtime.py")
-runtime = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(runtime)
-runtime.initialize("1.1.1.1", 51820)
-' >/dev/null 2>&1; then
-      die 'runtime initialize accepted an unmounted state volume'
-    fi
-    guest systemctl start docker.service
-    guest docker info >/dev/null || die 'nested Docker did not restart after state unmount'
-    if guest findmnt -n /srv >/dev/null 2>&1; then
-      die 'nested Docker start remounted the VPN state volume'
-    fi
+    for operation in provision start; do
+      if guest python3 /usr/local/lib/subyard-amnezia/runtime.py "$operation" >/dev/null 2>&1; then
+        die 'runtime accepted an unmounted state volume'
+      fi
+    done
     if yard vpn up --yes >/dev/null 2>&1; then
       die 'VPN up accepted an unmounted state volume'
     fi
-    if guest python3 /usr/local/lib/subyard-amnezia/runtime.py start >/dev/null 2>&1; then
-      die 'runtime start accepted an unmounted state volume'
-    fi
     guest test ! -e /srv/amnezia || die 'runtime wrote VPN state into the root filesystem'
-    guest rmdir /srv/workspaces
-    guest systemctl start subyard-amnezia.service
-    guest findmnt -n /srv >/dev/null || die 'service mount dependency did not restore /srv'
+    guest systemctl start containerd.service docker.service subyard-amnezia.service
+    guest findmnt -n /srv >/dev/null || die 'container service mount dependency did not restore /srv'
     yard vpn up --yes
     verify_enabled
     ;;
@@ -321,12 +318,13 @@ runtime.initialize("1.1.1.1", 51820)
     yard config set ENVIRONMENT_PROFILES amnezia --scope yard --yes
     yard init --yes
     yard vpn up --yes
+    yard vpn-admin up --yes
     verify_enabled
     ;;
   work-stop)
     "$YARD_BIN" -Y work-e2e stop --yes
     verify_enabled
-    guest docker stats --no-stream --format 'vpn_cpu={{.CPUPerc}} vpn_memory={{.MemUsage}}' subyard-amnezia
+    guest docker stats --no-stream --format 'vpn_cpu={{.CPUPerc}} vpn_memory={{.MemUsage}}' amnezia-awg2
     ;;
   work-load)
     definition="$SUBYARD_CONFIG_HOME/yards/work-e2e/config.env"
@@ -342,7 +340,7 @@ FORWARD_SSH_AGENT=0
 NESTED_E2E_VMS=0
 LIMITS_CPU=3
 LIMITS_MEMORY=512MiB
-SSH_PORT=2226
+SSH_PORT=2227
 CONFIG
       chmod 0600 "$definition"
     fi

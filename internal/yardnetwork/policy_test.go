@@ -28,6 +28,9 @@ func TestApprovedIngressReadsLegacyFingerprintWithoutPersistingIt(t *testing.T) 
 		valid       bool
 	}{
 		{"current", "", true},
+		{"explicit UDP", `,"protocol":"udp"`, true},
+		{"unknown transport", `,"protocol":"sctp"`, false},
+		{"mismatched transport", `,"protocol":"tcp"`, false},
 		{"legacy", `,"fingerprint":` + strconv.Quote(legacyHash), true},
 		{"wrong legacy hash", `,"fingerprint":"v1:wrong"`, false},
 		{"empty legacy hash", `,"fingerprint":""`, false},

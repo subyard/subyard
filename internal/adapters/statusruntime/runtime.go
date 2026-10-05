@@ -474,6 +474,9 @@ func (runtime Runtime) resourceStatus(ctx context.Context, running bool) []domai
 			if err == nil {
 				status.State = "up"
 				status.Hint = program + " " + definition.Command + " " + definition.Shutdown
+				if hint := runtime.managementHint(definition); hint != "" {
+					status.Hint = hint
+				}
 				status.URL = runtime.dashboardURL(definition)
 			} else {
 				status.State = "down"
@@ -491,20 +494,40 @@ func (runtime Runtime) dashboardURL(definition resource.Definition) string {
 	if definition.Dashboard == nil {
 		return ""
 	}
-	host := runtime.Environment[definition.Dashboard.HostSetting]
-	if net.ParseIP(host) == nil && !dashboardHostname.MatchString(host) {
-		return ""
-	}
-	portText := runtime.Environment[definition.Dashboard.PortSetting]
-	port, err := strconv.Atoi(portText)
-	if err != nil || port < 1 || port > 65535 || strconv.Itoa(port) != portText {
+	address := runtime.endpointAddress(definition.Dashboard.HostSetting, definition.Dashboard.PortSetting)
+	if address == "" {
 		return ""
 	}
 	return (&url.URL{
 		Scheme: definition.Dashboard.Scheme,
-		Host:   net.JoinHostPort(host, portText),
+		Host:   address,
 		Path:   definition.Dashboard.Path,
 	}).String()
+}
+
+func (runtime Runtime) managementHint(definition resource.Definition) string {
+	management := definition.Management
+	if management == nil {
+		return ""
+	}
+	address := runtime.endpointAddress(management.HostSetting, management.PortSetting)
+	if address == "" {
+		return ""
+	}
+	return "Manage in " + management.Application + ": " + management.User + "@" + address
+}
+
+func (runtime Runtime) endpointAddress(hostSetting, portSetting string) string {
+	host := runtime.Environment[hostSetting]
+	if net.ParseIP(host) == nil && !dashboardHostname.MatchString(host) {
+		return ""
+	}
+	portText := runtime.Environment[portSetting]
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 || strconv.Itoa(port) != portText {
+		return ""
+	}
+	return net.JoinHostPort(host, portText)
 }
 
 func environment(values map[string]string) []string {

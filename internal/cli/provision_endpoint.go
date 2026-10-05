@@ -60,7 +60,7 @@ func (cli *CLI) prepareProvisionEndpointWithBootstrap(loaded config.Loaded, prof
 	var notes []string
 	observed := false
 	for _, contract := range cli.resources.ProxyContracts(strings.Fields(loaded.Environment["ENVIRONMENT_PROFILES"])) {
-		if contract.AddressPolicy != resource.ProxyAddressOwnerIPv4UDP || !slices.Contains(profiles, contract.Profile) {
+		if !contract.IsOwnerIPv4Ingress() || !slices.Contains(profiles, contract.Profile) {
 			continue
 		}
 		address, iface := loaded.Environment[contract.AdvertiseHostSetting], loaded.Environment[contract.OwnerInterfaceSetting]

@@ -102,13 +102,13 @@ owner_phase() {
 client_probe() {
   printf 'amnezia_acceptance_stage=client-probe\n'
   guest 2 env SUBYARD_E2E_VM=2 bash "${GUEST_DIRS[2]}/src/config/profiles/amnezia/tests/e2e/client.sh" \
-    probe --owner-ip "${VM_IP[1]}" --owner-port 22 --private-ip "${VM_IP[2]}" </dev/null
+    probe --client "${1:-two}" --owner-ip "${VM_IP[1]}" --owner-port 22 --private-ip "${VM_IP[2]}" </dev/null
 }
 
 client_denied() {
   printf 'amnezia_acceptance_stage=client-denied\n'
   guest 2 env SUBYARD_E2E_VM=2 bash "${GUEST_DIRS[2]}/src/config/profiles/amnezia/tests/e2e/client.sh" \
-    denied </dev/null
+    denied --client "${1:-two}" </dev/null
 }
 
 client_reboot_traffic() {
@@ -117,21 +117,61 @@ client_reboot_traffic() {
     reboot-traffic </dev/null
 }
 
-transfer_client_config() {
-  printf 'amnezia_acceptance_stage=protected-client-transfer\n'
+native_app() {
+  printf 'amnezia_acceptance_stage=native-app-%s\n' "$1"
+  guest 2 env SUBYARD_E2E_VM=2 bash "${GUEST_DIRS[2]}/src/config/profiles/amnezia/tests/e2e/native-app.sh" "$@" </dev/null
+}
+
+prepare_native_clients() {
+  printf 'amnezia_acceptance_stage=protected-admin-transfer\n'
+  guest 2 bash -ceu '
+    directory=/var/tmp/subyard-amnezia-client
+    [ ! -e "$directory" ] && [ ! -L "$directory" ]
+    install -d -o 0 -g 0 -m 0700 "$directory"
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq
+    apt-get install -y -qq docker.io curl >/dev/null
+    systemctl start docker
+  ' </dev/null
   guest 1 incus exec yard-vpn-e2e --project subyard-vpn-e2e -- \
-    cat /srv/amnezia/client.conf </dev/null \
+    cat /srv/amnezia/admin.key </dev/null \
     | guest 2 bash -ceu '
-        directory=/var/tmp/subyard-amnezia-client
-        [ ! -L "$directory" ]
-        install -d -m 0700 "$directory"
-        temporary="$(mktemp "$directory/.client.conf.XXXXXX")"
-        trap '\''rm -f -- "$temporary"'\'' EXIT
-        cat > "$temporary"
-        [ -s "$temporary" ]
-        chmod 0600 "$temporary"
-        mv -f -- "$temporary" "$directory/client.conf"
+        destination=/var/tmp/subyard-amnezia-client/admin.key
+        install -o 0 -g 0 -m 0600 /dev/stdin "$destination"
+        test -s "$destination"
       '
+  native_app install
+  native_app setup --host "${VM_IP[1]}" --ssh-port 2226 --user amnezia \
+    --key-file /var/tmp/subyard-amnezia-client/admin.key --udp-port 51820
+  native_app share --name acceptance-one --output-file /var/tmp/subyard-amnezia-client/client-one.conf
+  native_app share --name acceptance-two --output-file /var/tmp/subyard-amnezia-client/client-two.conf
+  guest 2 python3 - <<'PYCLIENTS'
+from pathlib import Path
+root = Path('/var/tmp/subyard-amnezia-client')
+def identity(name):
+    values = dict((key.strip(), value.strip()) for key, value in
+                  (line.split('=', 1) for line in (root / ('client-' + name + '.conf')).read_text().splitlines() if '=' in line))
+    return tuple(values[key].strip() for key in ('PrivateKey', 'Address'))
+one, two = identity('one'), identity('two')
+assert all(left != right for left, right in zip(one, two)), 'native clients do not have independent identities'
+print('ok: two native clients have independent keys and addresses')
+PYCLIENTS
+  # Use precisely the native server image for independent protocol-compatible probes.
+  guest 1 incus exec yard-vpn-e2e --project subyard-vpn-e2e -- sh -ceu '
+    docker image save "$(docker inspect --format "{{.Image}}" amnezia-awg2)"
+  ' </dev/null | guest 2 docker image load >/dev/null
+  guest 1 incus exec yard-vpn-e2e --project subyard-vpn-e2e -- \
+    docker inspect --format '{{.Image}}' amnezia-awg2 </dev/null \
+    | guest 2 install -o 0 -g 0 -m 0600 /dev/stdin /var/tmp/subyard-amnezia-client/image
+  guest 1 incus exec yard-vpn-e2e --project subyard-vpn-e2e -- \
+    docker exec amnezia-awg2 ip -4 -j address show dev awg0 </dev/null \
+    | guest 2 python3 -c 'import json,os,sys; path="/var/tmp/subyard-amnezia-client/tunnel-ip"; fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600); os.fchmod(fd,0o600); os.write(fd,(json.load(sys.stdin)[0]["addr_info"][0]["local"]+"\n").encode()); os.close(fd)'
+  client_probe one
+  client_probe two
+  native_app revoke --name acceptance-one
+  client_denied one
+  client_probe two
+  owner_phase native-baseline
 }
 
 reboot_owner() {
@@ -190,8 +230,11 @@ if [ "$lane" = disabled ] || [ "$lane" = reconnect ]; then
 else
   owner_phase init
 fi
-transfer_client_config
+prepare_native_clients
+owner_phase admin-down
 client_probe
+owner_phase admin-up
+native_app discover --name acceptance-two
 if [ "$lane" = full ]; then
   owner_phase deselect
   client_denied
@@ -200,12 +243,17 @@ if [ "$lane" = full ]; then
 fi
 owner_phase isolation
 client_probe
-if [ "$lane" = recovery ]; then
+if [ "$lane" = recovery ] || [ "$lane" = full ]; then
   owner_phase recovery-state-mount
   client_probe
   owner_phase recovery-agent-loss
   client_probe
-  guest 2 env SUBYARD_E2E_VM=2 bash "${GUEST_DIRS[2]}/src/config/profiles/amnezia/tests/e2e/client.sh" cleanup </dev/null
+fi
+if [ "$lane" = recovery ]; then
+  for client in one two; do
+    guest 2 env SUBYARD_E2E_VM=2 bash "${GUEST_DIRS[2]}/src/config/profiles/amnezia/tests/e2e/client.sh" cleanup --client "$client" </dev/null
+  done
+  native_app close
   printf 'amnezia_acceptance=result-pass source_bundle_sha256=%s lane=%s\n' "$bundle_hash" "$lane"
   exit 0
 fi
@@ -229,6 +277,7 @@ if [ "$lane" != disabled ] && [ "$lane" != reconnect ]; then
   client_reboot_traffic
   reboot_owner
   owner_phase verify-enabled
+  native_app discover --name acceptance-two
   verify_boot_result
   client_probe
   if [ "$lane" != startup ]; then
@@ -240,6 +289,7 @@ if [ "$lane" != disabled ] && [ "$lane" != reconnect ]; then
     client_reboot_traffic
     reboot_owner
     owner_phase verify-enabled
+    native_app discover --name acceptance-two
     verify_boot_result
     client_probe
   fi
@@ -254,7 +304,7 @@ reboot_owner
 owner_phase verify-disabled
 verify_boot_result
 client_denied
-if [ "$lane" = reconnect ]; then
+if [ "$lane" = reconnect ] || [ "$lane" = full ]; then
   # Prove that packets sent while disabled created the stale pre-NAT flow.
   # Print only its presence, never connection tuples.
   guest 1 bash -ceu '
@@ -266,6 +316,10 @@ if [ "$lane" = reconnect ]; then
   ' -- "${VM_IP[1]}" </dev/null
 fi
 owner_phase up
+native_app discover --name acceptance-two
 client_probe
-guest 2 env SUBYARD_E2E_VM=2 bash "${GUEST_DIRS[2]}/src/config/profiles/amnezia/tests/e2e/client.sh" cleanup </dev/null
+for client in one two; do
+  guest 2 env SUBYARD_E2E_VM=2 bash "${GUEST_DIRS[2]}/src/config/profiles/amnezia/tests/e2e/client.sh" cleanup --client "$client" </dev/null
+done
+native_app close
 printf 'amnezia_acceptance=result-pass source_bundle_sha256=%s lane=%s\n' "$bundle_hash" "$lane"

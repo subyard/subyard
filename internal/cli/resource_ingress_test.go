@@ -202,7 +202,7 @@ func TestResourceIngressClearsOnlySelectedVerifiedUDPRoute(t *testing.T) {
 			cleared = append(cleared, endpoint)
 			return nil
 		}}
-	ingress := &resourceIngress{service: service, preview: yardnetwork.IngressPreview{Target: yard},
+	ingress := &resourceIngress{service: service, preview: yardnetwork.IngressPreview{Target: yard, Protocol: "udp"},
 		address: "10.20.30.40", port: 42000}
 	if err := ingress.clearStaleUDP(context.Background()); err != nil {
 		t.Fatal(err)
@@ -234,5 +234,32 @@ func TestResourceIngressNoOpUpHasNoUDPRecoveryEffect(t *testing.T) {
 	got := ingress.augment(assessment)
 	if got.Changed || len(got.Consequences) != 0 {
 		t.Fatalf("no-op up unexpectedly requested UDP cleanup: %+v", got)
+	}
+}
+
+func TestTCPIngressSkipsUDPRecoveryAndDescribesExactACL(t *testing.T) {
+	contract := resource.ProxyContract{AddressPolicy: resource.ProxyAddressOwnerIPv4TCP, Connect: "tcp:guest:22"}
+	ingress := &resourceIngress{up: true, contract: contract, service: &yardnetwork.Service{},
+		preview: yardnetwork.IngressPreview{Protocol: "tcp", GuestPort: 22, Target: yardnetwork.Yard{Name: "private"}, After: yardnetwork.Plan{Changed: true}}}
+	if err := ingress.clearStaleUDP(context.Background()); err != nil {
+		t.Fatalf("TCP used UDP cleaner: %v", err)
+	}
+	assessment := ingress.augment(domain.ActionAssessment{Changed: true})
+	if len(assessment.Consequences) != 1 || !strings.Contains(assessment.Consequences[0], "TCP/22") {
+		t.Fatalf("wrong transport confirmation: %v", assessment.Consequences)
+	}
+}
+
+func TestOrphanClosureResolvesDynamicPortFromOwnedDevice(t *testing.T) {
+	for _, protocol := range []string{"udp", "tcp"} {
+		contract := resource.ProxyContract{AddressPolicy: resource.ProxyAddressPolicy("owner-ipv4-" + protocol), Connect: protocol + ":guest:host-port"}
+		device := map[string]string{"type": "proxy", "listen": protocol + ":10.20.30.40:42000", "connect": protocol + ":10.80.0.10:42000", "bind": "host", "nat": "true"}
+		if !validOrphanPublicIngressDevice(device, contract) {
+			t.Fatalf("valid %s closure refused", protocol)
+		}
+		device["connect"] = protocol + ":10.80.0.10:42001"
+		if validOrphanPublicIngressDevice(device, contract) {
+			t.Fatalf("wrong %s guest port accepted", protocol)
+		}
 	}
 }

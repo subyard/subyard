@@ -20,9 +20,11 @@ import (
 // typed proxy mutation. It performs no writes and never changes links or
 // isolation mode.
 type IngressPreview struct {
-	Before Plan
-	After  Plan
-	Target Yard
+	Before    Plan
+	After     Plan
+	Target    Yard
+	Protocol  string
+	GuestPort int
 }
 
 var pendingIngressMarker = regexp.MustCompile(`^v1:pending:[0-9a-f]{64}$`)
@@ -52,7 +54,7 @@ func (preview IngressPreview) ValidateAfter(actual Plan) error {
 }
 
 // ValidateRollback requires a fresh down preview with no route or marker left
-// to remove, then permits only removal of the target's exact UDP allowance.
+// to remove, then permits only removal of the target's exact transport allowance.
 // A failed resource up must not turn this cleanup into a general reconcile.
 func (preview IngressPreview) ValidateRollback(closure IngressPreview, contract resource.ProxyContract) error {
 	if closure.Target != preview.Target || closure.Before.Fingerprint == "" ||
@@ -71,8 +73,8 @@ func validateResourceIngressRemoval(actual Plan, target Yard, contract resource.
 	if !actual.Changed {
 		return nil
 	}
-	guestPort, valid := contract.GuestUDPPort()
-	if !valid || contract.AddressPolicy != resource.ProxyAddressOwnerIPv4UDP ||
+	protocol, guestPort, valid := contract.GuestEndpoint(1)
+	if !valid ||
 		len(actual.Updates) > 1 || actual.Change != (Change{}) {
 		return errors.New("resource ingress removal has unapproved network effects")
 	}
@@ -86,7 +88,13 @@ func validateResourceIngressRemoval(actual Plan, target Yard, contract resource.
 		}
 		binding.ApprovedIngress = slices.Clone(binding.ApprovedIngress)
 		for approvedIndex, approved := range binding.ApprovedIngress {
-			if approved.Device == contract.Device && approved.GuestPort == guestPort {
+			if approved.Device == contract.Device && approved.Transport() == protocol {
+				listen, err := netip.ParseAddrPort(strings.TrimPrefix(approved.Listen, protocol+":"))
+				_, resolved, ok := contract.GuestEndpoint(int(listen.Port()))
+				if err != nil || !ok || approved.GuestPort != resolved {
+					return errors.New("resource ingress removal has invalid approved guest port")
+				}
+				guestPort = resolved
 				binding.ApprovedIngress = slices.Delete(binding.ApprovedIngress, approvedIndex, approvedIndex+1)
 				if len(binding.ApprovedIngress) == 0 {
 					binding.ApprovedIngress = nil
@@ -107,7 +115,7 @@ func validateResourceIngressRemoval(actual Plan, target Yard, contract resource.
 		if len(actual.Updates) != 0 {
 			return errors.New("resource ingress removal has unapproved network effects")
 		}
-		return nil // Another owned route may still require the same guest UDP ACL port.
+		return nil // Another owned route may still require the same guest transport ACL port.
 	}
 	if len(actual.Updates) != 1 {
 		return errors.New("resource ingress removal has unapproved network effects")
@@ -122,7 +130,7 @@ func validateResourceIngressRemoval(actual Plan, target Yard, contract resource.
 		!maps.Equal(current.Config, wanted.Config) || !slices.Equal(current.Egress, wanted.Egress) {
 		return errors.New("resource ingress removal would change more than the target ACL")
 	}
-	allowance := Rule{Action: "allow", State: "enabled", Protocol: "udp", DestinationPort: strconv.Itoa(guestPort)}
+	allowance := Rule{Action: "allow", State: "enabled", Protocol: protocol, DestinationPort: strconv.Itoa(guestPort)}
 	removed := false
 	remaining := make([]Rule, 0, len(current.Ingress))
 	for _, rule := range current.Ingress {
@@ -142,10 +150,14 @@ func (s Service) PreviewResourceIngress(ctx context.Context, yards []Yard, targe
 	if s.UseApprovedIngress {
 		return IngressPreview{}, errors.New("boot ingress verification is read-only")
 	}
-	guestPort, valid := contract.GuestUDPPort()
-	if !valid || contract.AddressPolicy != resource.ProxyAddressOwnerIPv4UDP || !contract.OwnershipMetadata ||
+	resolvedPort := port
+	if !up {
+		resolvedPort = 1
+	}
+	protocol, guestPort, valid := contract.GuestEndpoint(resolvedPort)
+	if !valid || !contract.OwnershipMetadata ||
 		contract.Profile == "" || contract.Resource == "" || contract.Device == "" || contract.OwnerInterfaceSetting == "" {
-		return IngressPreview{}, errors.New("resource has no valid public UDP ingress contract")
+		return IngressPreview{}, errors.New("resource has no valid public ingress contract")
 	}
 	stored, err := s.Host.ReadPolicy(ctx)
 	if err != nil {
@@ -217,15 +229,15 @@ func (s Service) PreviewResourceIngress(ctx context.Context, yards []Yard, targe
 	if up {
 		owner, parseErr := netip.ParseAddr(address)
 		if parseErr != nil || !resource.ExplicitOwnerIPv4(owner) || port < 1 || port > 65535 {
-			return IngressPreview{}, errors.New("resource ingress requires an explicit owner IPv4 and UDP port")
+			return IngressPreview{}, errors.New("resource ingress requires an explicit owner IPv4 and ingress port")
 		}
 		guest, parseErr := netip.ParseAddr(instance.Devices["eth0"]["ipv4.address"])
 		if parseErr != nil || !guest.Is4() || !guest.IsPrivate() {
 			return IngressPreview{}, errors.New("resource ingress requires a pinned private guest IPv4")
 		}
 		wanted := map[string]string{
-			"type": "proxy", "listen": "udp:" + owner.String() + ":" + strconv.Itoa(port),
-			"connect": "udp:" + guest.String() + ":" + strconv.Itoa(guestPort), "bind": "host", "nat": "true",
+			"type": "proxy", "listen": protocol + ":" + owner.String() + ":" + strconv.Itoa(port),
+			"connect": protocol + ":" + guest.String() + ":" + strconv.Itoa(guestPort), "bind": "host", "nat": "true",
 		}
 		instance.LocalDevices[contract.Device] = wanted
 		instance.Devices[contract.Device] = wanted
@@ -259,7 +271,24 @@ func (s Service) PreviewResourceIngress(ctx context.Context, yards []Yard, targe
 			return IngressPreview{}, err
 		}
 	}
-	return IngressPreview{Before: before, After: after, Target: target}, nil
+	if !up {
+		if endpoint, err := netip.ParseAddrPort(strings.TrimPrefix(current["listen"], protocol+":")); err == nil {
+			if _, resolved, valid := contract.GuestEndpoint(int(endpoint.Port())); valid {
+				guestPort = resolved
+			}
+		}
+		for _, binding := range stored.Policy.Bindings {
+			if binding.Yard != target {
+				continue
+			}
+			for _, approved := range binding.ApprovedIngress {
+				if approved.Device == contract.Device && approved.Transport() == protocol {
+					guestPort = approved.GuestPort
+				}
+			}
+		}
+	}
+	return IngressPreview{Before: before, After: after, Target: target, Protocol: protocol, GuestPort: guestPort}, nil
 }
 
 func scopedResourceIngressPlan(plan Plan, target Yard) error {

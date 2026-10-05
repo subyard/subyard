@@ -96,16 +96,18 @@ func applyApprovedBootIngress(snapshot *Snapshot, policy Policy) error {
 			approvedDevices[approved.Device] = true
 			yard.IngressContracts = append(yard.IngressContracts, resource.ProxyContract{
 				Profile: approved.Device, Resource: approved.Device, Device: approved.Device,
-				Connect:       fmt.Sprintf("udp:guest:%d", approved.GuestPort),
-				AddressPolicy: resource.ProxyAddressOwnerIPv4UDP, OwnershipMetadata: true,
+				Connect:       fmt.Sprintf("%s:guest:%d", approved.Transport(), approved.GuestPort),
+				AddressPolicy: resource.ProxyAddressPolicy("owner-ipv4-" + approved.Transport()), OwnershipMetadata: true,
 			})
 		}
 		if len(approvedDevices) != 0 {
 			for name, device := range yard.InstanceInfo.Devices {
 				if device["type"] == "proxy" && device["bind"] != "instance" &&
-					(strings.HasPrefix(device["listen"], "udp:") || strings.HasPrefix(device["connect"], "udp:")) &&
+					(strings.HasPrefix(device["listen"], "udp:") || strings.HasPrefix(device["connect"], "udp:") ||
+						(device["nat"] == "true" || strings.HasPrefix(device["connect"], "tcp:"+binding.IPv4+":")) &&
+							(strings.HasPrefix(device["listen"], "tcp:") || strings.HasPrefix(device["connect"], "tcp:"))) &&
 					!approvedDevices[name] {
-					return fmt.Errorf("%w: unapproved host UDP proxy in yard %s", ErrNotConverged, yard.Name)
+					return fmt.Errorf("%w: unapproved host ingress proxy in yard %s", ErrNotConverged, yard.Name)
 				}
 			}
 		}

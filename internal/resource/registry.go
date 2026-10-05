@@ -16,21 +16,22 @@ import (
 )
 
 type Definition struct {
-	Profile   string
-	Name      string
-	Command   string
-	Handler   string
-	BringUp   string
-	Shutdown  string
-	Verbs     []string
-	Title     string
-	Proxy     *ProxyContract
-	Dashboard *DashboardContract
-	Endpoint  *EndpointDefaults
-	Bootstrap bool
-	Startup   bool
-	path      string
-	actions   []actionDeclaration
+	Profile    string
+	Name       string
+	Command    string
+	Handler    string
+	BringUp    string
+	Shutdown   string
+	Verbs      []string
+	Title      string
+	Proxy      *ProxyContract
+	Dashboard  *DashboardContract
+	Management *ManagementContract
+	Endpoint   *EndpointDefaults
+	Bootstrap  bool
+	Startup    bool
+	path       string
+	actions    []actionDeclaration
 }
 
 type EndpointDefaults struct {
@@ -46,6 +47,14 @@ type DashboardContract struct {
 	HostSetting string
 	PortSetting string
 	Path        string
+}
+
+// ManagementContract describes a native application connection hint.
+type ManagementContract struct {
+	Application string
+	HostSetting string
+	PortSetting string
+	User        string
 }
 
 // ProxyContract describes one profile-owned owner-host proxy. The resource handler
@@ -69,6 +78,7 @@ const (
 	ProxyAddressTailscaleOnly       ProxyAddressPolicy = "tailscale-only"
 	ProxyAddressLoopbackOrTailscale ProxyAddressPolicy = "loopback-or-tailscale"
 	ProxyAddressOwnerIPv4UDP        ProxyAddressPolicy = "owner-ipv4-udp"
+	ProxyAddressOwnerIPv4TCP        ProxyAddressPolicy = "owner-ipv4-tcp"
 )
 
 // ExplicitOwnerIPv4 accepts only a unicast interface address, including a
@@ -88,6 +98,28 @@ func (contract ProxyContract) GuestUDPPort() (int, bool) {
 	text, ok := strings.CutPrefix(contract.Connect, "udp:guest:")
 	port, err := strconv.Atoi(text)
 	return port, ok && err == nil && port >= 1 && port <= 65535 && strconv.Itoa(port) == text
+}
+
+// IsOwnerIPv4Ingress reports whether the contract declares an owner IPv4 NAT route.
+func (contract ProxyContract) IsOwnerIPv4Ingress() bool {
+	return contract.AddressPolicy == ProxyAddressOwnerIPv4UDP || contract.AddressPolicy == ProxyAddressOwnerIPv4TCP
+}
+
+// GuestEndpoint resolves the declared guest port; host-port follows the owner port.
+func (contract ProxyContract) GuestEndpoint(hostPort int) (string, int, bool) {
+	protocol := "udp"
+	if contract.AddressPolicy == ProxyAddressOwnerIPv4TCP {
+		protocol = "tcp"
+	}
+	text, ok := strings.CutPrefix(contract.Connect, protocol+":guest:")
+	if !contract.IsOwnerIPv4Ingress() || !ok {
+		return "", 0, false
+	}
+	if text == "host-port" {
+		return protocol, hostPort, hostPort >= 1 && hostPort <= 65535
+	}
+	port, err := strconv.Atoi(text)
+	return protocol, port, err == nil && port >= 1 && port <= 65535 && strconv.Itoa(port) == text
 }
 
 func (contract ProxyContract) OwnershipValue(device map[string]string) string {
@@ -260,6 +292,10 @@ func cloneDefinition(definition Definition) Definition {
 		proxy := *definition.Proxy
 		definition.Proxy = &proxy
 	}
+	if definition.Management != nil {
+		management := *definition.Management
+		definition.Management = &management
+	}
 	if definition.Dashboard != nil {
 		dashboard := *definition.Dashboard
 		definition.Dashboard = &dashboard
@@ -294,6 +330,10 @@ func loadDefinition(root, path string) (Definition, []domain.ActionDefinition, e
 	if err != nil {
 		return Definition{}, nil, err
 	}
+	management, err := parseManagementContract(values.singletons["MANAGEMENT"], path)
+	if err != nil {
+		return Definition{}, nil, err
+	}
 	endpoint, err := parseEndpointDefaults(values.singletons["ENDPOINT_DEFAULTS"], path)
 	if err != nil {
 		return Definition{}, nil, err
@@ -305,8 +345,8 @@ func loadDefinition(root, path string) (Definition, []domain.ActionDefinition, e
 	if (endpoint != nil || bootstrap) && proxy == nil {
 		return Definition{}, nil, fmt.Errorf("endpoint defaults and profile bootstrap require PROXY in %s", path)
 	}
-	if proxy != nil && proxy.AddressPolicy == ProxyAddressOwnerIPv4UDP && bootstrap {
-		return Definition{}, nil, fmt.Errorf("public UDP ingress requires an already initialized yard in %s", path)
+	if proxy != nil && proxy.IsOwnerIPv4Ingress() && bootstrap {
+		return Definition{}, nil, fmt.Errorf("public ingress requires an already initialized yard in %s", path)
 	}
 	startup := values.singletons["STARTUP"]
 	if startup != "" && startup != "bringup" {
@@ -395,7 +435,7 @@ func loadDefinition(root, path string) (Definition, []domain.ActionDefinition, e
 	return Definition{
 		Profile: profile, Name: name, Command: command, Handler: handler,
 		BringUp: bringUp, Shutdown: shutdown, Verbs: verbs, Title: title, path: resolvedHandlerPath,
-		Proxy: proxy, Dashboard: dashboard, Endpoint: endpoint, Bootstrap: bootstrap, Startup: startup != "", actions: declarations,
+		Proxy: proxy, Dashboard: dashboard, Management: management, Endpoint: endpoint, Bootstrap: bootstrap, Startup: startup != "", actions: declarations,
 	}, actionDefinitions, nil
 }
 
@@ -485,6 +525,31 @@ func startupAction(definitions []domain.ActionDefinition, declarations []actionD
 	return found
 }
 
+func safeManagementApplication(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if !(character >= 'a' && character <= 'z') && !(character >= 'A' && character <= 'Z') &&
+			!(character >= '0' && character <= '9') && character != '-' && character != '_' && character != '.' {
+			return false
+		}
+	}
+	return value[0] != '-' && value[0] != '.'
+}
+
+func parseManagementContract(record, path string) (*ManagementContract, error) {
+	if record == "" {
+		return nil, nil
+	}
+	fields := strings.Fields(record)
+	if len(fields) != 4 || len(fields[0]) > 64 || !safeManagementApplication(fields[0]) || containsProtectedMaterial(record) ||
+		!safeSettingName(fields[1]) || !safeSettingName(fields[2]) || !domain.SafeName(fields[3]) || len(fields[3]) > 32 {
+		return nil, fmt.Errorf("invalid MANAGEMENT record in %s", path)
+	}
+	return &ManagementContract{Application: fields[0], HostSetting: fields[1], PortSetting: fields[2], User: fields[3]}, nil
+}
+
 func parseDashboardContract(record, path string) (*DashboardContract, error) {
 	if record == "" {
 		return nil, nil
@@ -509,21 +574,21 @@ func parseProxyContract(profile, resourceName, record, path string) (*ProxyContr
 		return nil, nil
 	}
 	fields := strings.Fields(record)
-	if len(fields) == 7 && fields[6] == string(ProxyAddressOwnerIPv4UDP) {
+	if len(fields) == 7 && (fields[6] == string(ProxyAddressOwnerIPv4UDP) || fields[6] == string(ProxyAddressOwnerIPv4TCP)) {
 		device, advertiseSetting, portSetting, interfaceSetting, connect := fields[0], fields[1], fields[2], fields[3], fields[4]
-		contract := ProxyContract{Connect: connect}
+		contract := ProxyContract{Connect: connect, AddressPolicy: ProxyAddressPolicy(fields[6])}
 		if !domain.SafeName(device) || !safeSettingName(advertiseSetting) || !safeSettingName(portSetting) ||
 			!safeSettingName(interfaceSetting) || fields[5] != "owner-metadata-v1" {
-			return nil, fmt.Errorf("invalid owner IPv4 UDP PROXY record %q in %s", record, path)
+			return nil, fmt.Errorf("invalid owner IPv4 PROXY record %q in %s", record, path)
 		}
-		if _, valid := contract.GuestUDPPort(); !valid {
-			return nil, fmt.Errorf("invalid owner IPv4 UDP PROXY record %q in %s", record, path)
+		if _, _, valid := contract.GuestEndpoint(1); !valid {
+			return nil, fmt.Errorf("invalid owner IPv4 PROXY record %q in %s", record, path)
 		}
 		return &ProxyContract{
 			Profile: profile, Resource: resourceName, Device: device,
 			AdvertiseHostSetting: advertiseSetting, HostPortSetting: portSetting,
 			OwnerInterfaceSetting: interfaceSetting, Connect: connect,
-			AddressPolicy: ProxyAddressOwnerIPv4UDP, OwnershipMetadata: true,
+			AddressPolicy: contract.AddressPolicy, OwnershipMetadata: true,
 		}, nil
 	}
 	if len(fields) < 5 || len(fields) > 6 {
@@ -634,7 +699,7 @@ func readDescriptor(path string) (descriptorValues, error) {
 	defer file.Close()
 	allowed := map[string]struct{}{
 		"COMMAND": {}, "HANDLER": {}, "TITLE": {}, "ACTION": {}, "BRINGUP": {}, "SHUTDOWN": {},
-		"PROXY": {}, "DASHBOARD": {}, "ENDPOINT_DEFAULTS": {}, "BOOTSTRAP": {}, "STARTUP": {},
+		"PROXY": {}, "DASHBOARD": {}, "MANAGEMENT": {}, "ENDPOINT_DEFAULTS": {}, "BOOTSTRAP": {}, "STARTUP": {},
 	}
 	values := descriptorValues{singletons: make(map[string]string)}
 	scanner := bufio.NewScanner(file)

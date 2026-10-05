@@ -32,14 +32,14 @@ type resourceIngress struct {
 }
 
 func (cli *CLI) prepareResourceIngress(ctx context.Context, loaded config.Loaded, definition resource.Definition, verb string) (*resourceIngress, error) {
-	if definition.Proxy == nil || definition.Proxy.AddressPolicy != resource.ProxyAddressOwnerIPv4UDP ||
+	if definition.Proxy == nil || !definition.Proxy.IsOwnerIPv4Ingress() ||
 		(verb != definition.BringUp && verb != definition.Shutdown) {
 		return nil, nil
 	}
 	if loaded.Context.AccessKind != domain.AccessLocal || loaded.Context.YardKind != domain.YardVM ||
 		loaded.Context.YardName == "" || loaded.Context.YardName == "default" ||
 		!slices.Contains(strings.Fields(loaded.Environment["ENVIRONMENT_PROFILES"]), definition.Profile) {
-		return nil, errors.New("public UDP ingress requires a selected resource in a local named VM yard")
+		return nil, errors.New("public ingress requires a selected resource in a local named VM yard")
 	}
 	contexts, err := cli.powerYardContexts(loaded)
 	if err != nil {
@@ -73,7 +73,7 @@ func (cli *CLI) prepareResourceIngress(ctx context.Context, loaded config.Loaded
 	if up {
 		port, err = strconv.Atoi(loaded.Environment[definition.Proxy.HostPortSetting])
 		if err != nil {
-			return nil, errors.New("resource owner UDP port is invalid")
+			return nil, errors.New("resource owner ingress port is invalid")
 		}
 	}
 	ingress := &resourceIngress{
@@ -92,7 +92,7 @@ func (ingress *resourceIngress) augment(assessment domain.ActionAssessment) doma
 	if ingress == nil {
 		return assessment
 	}
-	if ingress.up && (assessment.Changed || ingress.preview.After.Changed) {
+	if ingress.up && ingress.preview.Protocol == "udp" && (assessment.Changed || ingress.preview.After.Changed) {
 		assessment.Consequences = append(assessment.Consequences,
 			"clear stale UDP connection state for the exact approved owner endpoint")
 	}
@@ -104,7 +104,7 @@ func (ingress *resourceIngress) augment(assessment domain.ActionAssessment) doma
 		verb = "allow"
 	}
 	assessment.Changed = true
-	guestPort, _ := ingress.contract.GuestUDPPort()
+	guestPort := ingress.preview.GuestPort
 	interruption := "update the stopped yard"
 	for _, update := range ingress.preview.After.Updates {
 		if strings.EqualFold(update.Yard.InstanceInfo.Status, "running") {
@@ -112,8 +112,8 @@ func (ingress *resourceIngress) augment(assessment domain.ActionAssessment) doma
 		}
 	}
 	assessment.Consequences = append(assessment.Consequences,
-		fmt.Sprintf("%s owned UDP/%d ingress in yard %s's isolation ACL; %s %s; network fingerprint:%s",
-			verb, guestPort, ingress.preview.Target.Name, interruption, ingress.preview.Target.Name, ingress.preview.After.Fingerprint))
+		fmt.Sprintf("%s owned %s/%d ingress in yard %s's isolation ACL; %s %s; network fingerprint:%s",
+			verb, strings.ToUpper(ingress.preview.Protocol), guestPort, ingress.preview.Target.Name, interruption, ingress.preview.Target.Name, ingress.preview.After.Fingerprint))
 	return assessment
 }
 
@@ -178,7 +178,7 @@ func (ingress *resourceIngress) apply(ctx context.Context, runner *resourceApply
 	if err == nil && ingress.up {
 		err = ingress.probeReady(ctx, runner)
 	}
-	if err == nil && ingress.up {
+	if err == nil && ingress.up && ingress.preview.Protocol == "udp" {
 		err = ingress.clearStaleUDP(ctx)
 	}
 	if err == nil && !ingress.up {
@@ -216,6 +216,9 @@ func clearResourceStaleUDP(ctx context.Context, endpoint netip.AddrPort) error {
 }
 
 func (ingress *resourceIngress) clearStaleUDP(ctx context.Context) error {
+	if ingress.preview.Protocol != "udp" {
+		return nil
+	}
 	if ingress.service.ClearStaleUDP == nil {
 		return errors.New("public UDP conntrack cleaner is unavailable")
 	}
@@ -313,7 +316,7 @@ func (ingress *resourceIngress) probeReady(ctx context.Context, runner *resource
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return errors.New("public UDP resource is not ready after network reconciliation")
+			return errors.New("public resource is not ready after network reconciliation")
 		}
 		select {
 		case <-ctx.Done():

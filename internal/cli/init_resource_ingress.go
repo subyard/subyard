@@ -46,7 +46,7 @@ type orphanIngressPlan struct {
 	entries []orphanIngressEntry
 }
 
-// prepareOrphanIngress inspects only the target yard and only public UDP
+// prepareOrphanIngress inspects only the target yard and only public
 // devices declared by the resource registry. A missing selection cannot keep
 // a previously owned public route open through init.
 func (cli *CLI) prepareOrphanIngress(ctx context.Context, loaded config.Loaded) (*orphanIngressPlan, error) {
@@ -57,7 +57,7 @@ func (cli *CLI) prepareOrphanIngress(ctx context.Context, loaded config.Loaded) 
 	deselected := false
 	definitions := cli.resources.Definitions()
 	for _, definition := range definitions {
-		if definition.Proxy != nil && definition.Proxy.AddressPolicy == resource.ProxyAddressOwnerIPv4UDP &&
+		if definition.Proxy != nil && definition.Proxy.IsOwnerIPv4Ingress() &&
 			!slices.Contains(selected, definition.Profile) {
 			deselected = true
 			break
@@ -127,7 +127,7 @@ func planOrphanIngress(yard yardnetwork.Yard, instance *ports.InstanceInfo, sele
 	plan := &orphanIngressPlan{yard: yard}
 	for _, definition := range definitions {
 		contract := definition.Proxy
-		if contract == nil || contract.AddressPolicy != resource.ProxyAddressOwnerIPv4UDP ||
+		if contract == nil || !contract.IsOwnerIPv4Ingress() ||
 			slices.Contains(selected, definition.Profile) {
 			continue
 		}
@@ -143,7 +143,7 @@ func planOrphanIngress(yard yardnetwork.Yard, instance *ports.InstanceInfo, sele
 		}
 		if instance.Type != domain.YardVM ||
 			(len(device) != 0 || marker != "") && (len(device) == 0 && !pendingResourceIngress.MatchString(marker) ||
-				len(device) != 0 && (!validOrphanPublicUDPDevice(device, *contract) ||
+				len(device) != 0 && (!validOrphanPublicIngressDevice(device, *contract) ||
 					!maps.Equal(device, instance.Devices[contract.Device]) ||
 					(marker != contract.OwnershipValue(device) && marker != "v1:pending:"+strings.TrimPrefix(contract.OwnershipValue(device), "v1:")))) {
 			return nil, fmt.Errorf("resource ingress device %q has ambiguous ownership", contract.Device)
@@ -172,17 +172,21 @@ func validateOrphanShutdown(definition resource.Definition, assessment domain.Ac
 	return nil
 }
 
-func validOrphanPublicUDPDevice(device map[string]string, contract resource.ProxyContract) bool {
-	guestPort, valid := contract.GuestUDPPort()
+func validOrphanPublicIngressDevice(device map[string]string, contract resource.ProxyContract) bool {
+	listenProtocol, endpointText, _ := strings.Cut(device["listen"], ":")
+	endpoint, _ := netip.ParseAddrPort(endpointText)
+	protocol, guestPort, valid := contract.GuestEndpoint(int(endpoint.Port()))
+	valid = valid && listenProtocol == protocol
 	if !valid || len(device) != 5 || device["type"] != "proxy" || device["bind"] != "host" || device["nat"] != "true" {
 		return false
 	}
-	listenText, listenOK := strings.CutPrefix(device["listen"], "udp:")
-	connectText, connectOK := strings.CutPrefix(device["connect"], "udp:")
+	listenText, listenOK := strings.CutPrefix(device["listen"], protocol+":")
+	connectText, connectOK := strings.CutPrefix(device["connect"], protocol+":")
 	listen, listenErr := netip.ParseAddrPort(listenText)
 	connect, connectErr := netip.ParseAddrPort(connectText)
 	return listenOK && connectOK && listenErr == nil && connectErr == nil &&
-		resource.ExplicitOwnerIPv4(listen.Addr()) && connect.Addr().Is4() && connect.Addr().IsPrivate() &&
+		resource.ExplicitOwnerIPv4(listen.Addr()) && listen.Port() != 0 &&
+		device["listen"] == protocol+":"+listen.String() && device["connect"] == protocol+":"+connect.String() && connect.Addr().Is4() && connect.Addr().IsPrivate() &&
 		int(connect.Port()) == guestPort
 }
 
@@ -193,7 +197,7 @@ func (plan *orphanIngressPlan) consequences() []string {
 	result := make([]string, 0, len(plan.entries)*2)
 	for _, entry := range plan.entries {
 		if len(entry.device) != 0 || entry.marker != "" {
-			result = append(result, fmt.Sprintf("close owned public UDP ingress %s in yard %s; preserve guest state", entry.contract.Device, plan.yard.Name))
+			result = append(result, fmt.Sprintf("close owned public ingress %s in yard %s; preserve guest state", entry.contract.Device, plan.yard.Name))
 		}
 		if entry.shutdown != nil && entry.shutdown.Changed {
 			result = append(result, entry.shutdown.Consequences...)

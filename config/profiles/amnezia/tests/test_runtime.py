@@ -7,6 +7,7 @@ import importlib.util
 import io
 import json
 import os
+import runpy
 from pathlib import Path
 import shutil
 import signal
@@ -58,6 +59,50 @@ class OwnerHandlerTest(unittest.TestCase):
                 'config': {}, 'devices': {},
                 'expanded_devices': {'eth0': {'type': 'nic', 'ipv4.address': '10.80.0.10'}}}
 
+    @contextlib.contextmanager
+    def admin_handler(self):
+        with mock.patch.object(handler, 'ADMIN', True), \
+                mock.patch.object(handler, 'DEVICE', 'amnezia-admin'), \
+                mock.patch.object(handler, 'KEY', 'user.subyard.resource.amnezia-admin'), \
+                mock.patch.object(handler, 'STARTUP', 'user.subyard.startup.amnezia-admin'):
+            yield
+
+    def test_admin_custom_port_targets_guest_ssh_and_requires_management_ready(self):
+        os.environ.update(RESOURCE_VPN_IPV4='10.20.30.40', RESOURCE_VPN_INTERFACE='eth0', RESOURCE_VPN_ADMIN_PORT='22999')
+        instance = self.instance()
+        links = [{'flags': ['UP'], 'addr_info': [{'local': '10.20.30.40'}]}]
+        with self.admin_handler(), mock.patch.object(handler, 'run', return_value=result(json.dumps(links).encode())):
+            _, _, port, device = handler.endpoint(instance)
+            self.assertEqual(port, '22999')
+            self.assertEqual(device['listen'], 'tcp:10.20.30.40:22999')
+            self.assertEqual(device['connect'], 'tcp:10.80.0.10:22')
+            instance['devices'][handler.DEVICE] = device
+            instance['config'][handler.KEY] = handler.fingerprint(device)
+            with mock.patch.object(handler, 'runtime_status', return_value=dict(management_ready=False, ready=True, enabled=True)):
+                self.assertFalse(handler.ready(instance))
+            with mock.patch.object(handler, 'runtime_status', return_value=dict(management_ready=True, ready=False, enabled=False)):
+                self.assertTrue(handler.ready(instance))
+
+    def test_stopped_admin_route_is_not_ready_and_down_never_reaches_guest(self):
+        os.environ.update(SUBYARD_RESOURCE_MODE='apply', SUBYARD_RESOURCE_ACTION='down', SUBYARD_OPERATION_ID='op-test',
+                          RESOURCE_VPN_IPV4='10.20.30.40', RESOURCE_VPN_INTERFACE='eth0')
+        instance = self.instance()
+        instance['status'] = 'Stopped'
+        device = dict(type='proxy', bind='host', nat='true', listen='tcp:10.20.30.40:2226', connect='tcp:10.80.0.10:22')
+        with self.admin_handler():
+            instance['devices'][handler.DEVICE] = device
+            instance['config'][handler.KEY] = handler.fingerprint(device)
+            links = [{'flags': ['UP'], 'addr_info': [{'local': '10.20.30.40'}]}]
+            with mock.patch.object(handler, 'run', return_value=result(json.dumps(links).encode())), \
+                    mock.patch.object(handler, 'guest', side_effect=AssertionError('stopped admin guest accessed')):
+                self.assertFalse(handler.ready(instance))
+            with mock.patch.object(handler, 'inspect', return_value=instance), \
+                    mock.patch.object(handler, 'guest', side_effect=AssertionError('admin down changed guest')), \
+                    mock.patch.object(handler, 'remove_ingress') as remove, \
+                    mock.patch.object(sys, 'argv', ['vpn-admin', 'down']):
+                self.assertEqual(handler.main(), 0)
+            self.assertEqual(remove.call_args_list, [mock.call(retain_pending=True), mock.call()])
+
     def test_disabled_status_with_unset_endpoint_is_read_only(self):
         os.environ.update(SUBYARD_RESOURCE_MODE='apply', SUBYARD_RESOURCE_ACTION='status',
                           SUBYARD_OPERATION_ID='op-test')
@@ -69,6 +114,37 @@ class OwnerHandlerTest(unittest.TestCase):
             status = json.loads(output.getvalue())
         self.assertFalse(status['ready'])
         self.assertFalse(status['ingress'])
+        self.assertFalse(status['network_enabled'])
+        self.assertFalse(status['vpn_installed'])
+        self.assertFalse(status['vpn_running'])
+        self.assertEqual(status['management'], dict(application='AmneziaVPN', host='', port=2226, user='amnezia'))
+        self.assertEqual(status['vpn_port'], 51820)
+
+    def test_stopped_runtime_status_has_management_and_native_vpn_facts(self):
+        instance = self.instance()
+        instance['status'] = 'Stopped'
+        with mock.patch.object(handler, 'guest', side_effect=AssertionError('stopped guest accessed')):
+            self.assertEqual(handler.runtime_status(instance), dict(ready=False, running=False, enabled=False,
+                management_ready=False, vpn_installed=False, vpn_running=False))
+
+    def test_admin_down_on_stopped_vm_assesses_only_owned_route(self):
+        instance = self.instance()
+        instance['status'] = 'Stopped'
+        device = dict(type='proxy', bind='host', nat='true', listen='tcp:10.20.30.40:2226', connect='tcp:10.80.0.10:22')
+        admin_key = 'user.subyard.resource.amnezia-admin'
+        instance['devices']['amnezia-admin'] = device
+        instance['config'][admin_key] = handler.fingerprint(device)
+        with mock.patch.object(handler, 'ADMIN', True), \
+                mock.patch.object(handler, 'DEVICE', 'amnezia-admin'), \
+                mock.patch.object(handler, 'KEY', admin_key), \
+                mock.patch.object(handler, 'inspect', return_value=instance), \
+                mock.patch.object(handler, 'guest', side_effect=AssertionError('stopped guest accessed')), \
+                mock.patch.object(handler, 'incus', side_effect=AssertionError('assessment changed route')), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            handler.prepare('down')
+        assessment = json.loads(output.getvalue())
+        self.assertTrue(assessment['changed'])
+        self.assertEqual([step['id'] for step in assessment['steps']], ['ingress'])
 
     def test_first_start_prepares_from_stopped_vm_without_guest_access(self):
         instance = self.instance()
@@ -88,6 +164,15 @@ class OwnerHandlerTest(unittest.TestCase):
         assessment = json.loads(output.getvalue())
         self.assertTrue(assessment['changed'])
         self.assertIn('Publish UDP 10.20.30.40:51820', assessment['consequences'][1])
+
+    def test_custom_udp_port_is_preserved_at_guest_boundary(self):
+        os.environ.update(RESOURCE_VPN_IPV4='10.20.30.40', RESOURCE_VPN_INTERFACE='eth0', RESOURCE_VPN_PORT='51999')
+        links = [{'flags': ['UP'], 'addr_info': [{'local': '10.20.30.40'}]}]
+        with mock.patch.object(handler, 'run', return_value=result(json.dumps(links).encode())):
+            _, _, port, device = handler.endpoint(self.instance())
+        self.assertEqual(port, '51999')
+        self.assertEqual(device['listen'], 'udp:10.20.30.40:51999')
+        self.assertEqual(device['connect'], 'udp:10.80.0.10:51999')
 
     def test_native_v2_verifier_reads_real_service_and_ingress_postconditions(self):
         instance = self.instance()
@@ -188,6 +273,12 @@ class OwnerHandlerTest(unittest.TestCase):
         with mock.patch.object(handler, 'run', return_value=result(b'udp UNCONN 0 0 10.20.30.40:51820 0.0.0.0:*\n')):
             with self.assertRaisesRegex(RuntimeError, 'already bound'):
                 handler.collisions(want)
+        for protocol in ('tcp', 'udp'):
+            mapped = dict(want, listen=protocol + ':10.20.30.40:51820')
+            with mock.patch.object(handler, 'run', return_value=result(
+                    b'LISTEN 0 128 [::ffff:10.20.30.40]:51820 [::]:*\n')):
+                with self.assertRaisesRegex(RuntimeError, 'already bound'):
+                    handler.collisions(mapped)
 
         def foreign_proxy(*args, **_):
             if args[0] == 'ss':
@@ -413,60 +504,245 @@ class OwnerHandlerTest(unittest.TestCase):
 
 
 class GuestRuntimeTest(unittest.TestCase):
+    @contextlib.contextmanager
     def root_owned_stat(self):
         original = Path.lstat
+        with mock.patch.object(Path, 'lstat', lambda path: SimpleNamespace(
+                st_uid=0, st_gid=0, st_mode=original(path).st_mode)), \
+                mock.patch.object(runtime.os, 'fchown'):
+            yield
 
-        def fake_lstat(path):
-            info = original(path)
-            return SimpleNamespace(st_uid=0, st_mode=info.st_mode)
-
-        return mock.patch.object(Path, 'lstat', fake_lstat)
-
-    def test_state_modes_and_types_are_enforced(self):
+    @contextlib.contextmanager
+    def environment(self):
         with tempfile.TemporaryDirectory() as directory, self.root_owned_stat():
-            root = Path(directory) / 'state'
-            root.mkdir(mode=0o700)
-            root.chmod(0o700)
-            secret = root / 'awg0.conf'
-            secret.write_text('synthetic-server-key\n')
-            secret.chmod(0o644)
-            with self.assertRaisesRegex(RuntimeError, 'unsafe ownership or permissions'):
-                runtime.protected(secret)
-            secret.chmod(0o600)
-            runtime.protected(secret)
-            link = root / 'link'
-            link.symlink_to(secret)
-            with self.assertRaises(RuntimeError):
-                runtime.protected(link)
-            root.chmod(0o755)
-            with self.assertRaises(RuntimeError):
-                runtime.protected(root, True)
-
-    def test_state_mount_required_before_keys_endpoint_edits_or_start(self):
-        with tempfile.TemporaryDirectory() as directory:
-            srv = Path(directory) / 'srv'
-            srv.mkdir()
-            state = srv / 'amnezia'
+            state = Path(directory) / 'amnezia'
             with mock.patch.object(runtime, 'STATE', state), \
-                    mock.patch.object(runtime, 'awg') as awg, \
-                    mock.patch.object(runtime, 'container') as container:
-                self.assertFalse(os.path.ismount(srv))
-                with self.assertRaisesRegex(RuntimeError, 'not mounted'):
-                    runtime.initialize('10.20.30.40', 51820)
+                    mock.patch.object(runtime.os.path, 'ismount', return_value=True):
+                runtime.initialize()
+                yield state
+
+    def test_state_modes_types_ownership_and_idempotence(self):
+        with self.environment() as state:
+            before = {path.name: path.read_bytes() for path in state.iterdir()}
+            runtime.initialize()
+            self.assertEqual(before, {path.name: path.read_bytes() for path in state.iterdir()})
+            self.assertEqual(set(before), {'environment', 'settings.json'})
+            self.assertEqual(state.stat().st_mode & 0o777, 0o700)
+            for path in state.iterdir():
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            marker = state / 'environment'
+            marker.chmod(0o644)
+            with self.assertRaisesRegex(RuntimeError, 'unsafe ownership or permissions'):
+                runtime.initialize()
+            marker.chmod(0o600)
+            marker.write_text('foreign\n')
+            with self.assertRaisesRegex(RuntimeError, 'ownership does not match'):
+                runtime.initialize()
+            marker.unlink()
+            marker.symlink_to(state / 'settings.json')
+            with self.assertRaises(RuntimeError):
+                runtime.initialize()
+        with self.environment() as state:
+            state.chmod(0o755)
+            with self.assertRaises(RuntimeError):
+                runtime.initialize()
+
+    def test_legacy_state_is_rejected_without_modification(self):
+        with tempfile.TemporaryDirectory() as directory, self.root_owned_stat():
+            state = Path(directory) / 'amnezia'
+            state.mkdir(mode=0o700)
+            state.chmod(0o700)
+            legacy = state / 'awg0.conf'
+            legacy.write_text('synthetic legacy state\n')
+            with mock.patch.object(runtime, 'STATE', state), \
+                    mock.patch.object(runtime.os.path, 'ismount', return_value=True):
+                with self.assertRaisesRegex(RuntimeError, 'legacy or unowned'):
+                    runtime.initialize()
+            self.assertEqual(list(state.iterdir()), [legacy])
+            self.assertEqual(legacy.read_text(), 'synthetic legacy state\n')
+
+    def test_state_preflight_does_not_create_missing_state_or_acquire_lock(self):
+        with tempfile.TemporaryDirectory() as directory, self.root_owned_stat(), \
+                mock.patch.object(runtime, 'STATE', Path(directory) / 'amnezia'), \
+                mock.patch.object(runtime.os.path, 'ismount', return_value=True), \
+                mock.patch.object(runtime, 'open', side_effect=AssertionError('preflight wrote lock'), create=True), \
+                mock.patch.object(runtime, 'run', side_effect=AssertionError('preflight ran target command')), \
+                mock.patch.object(runtime.os, 'geteuid', return_value=0), \
+                mock.patch.object(sys, 'argv', ['runtime', 'check-state']):
+            self.assertFalse(runtime.check_state())
+            runtime.main()
+            self.assertEqual(list(Path(directory).iterdir()), [])
+        with self.environment() as state:
+            self.assertTrue(runtime.check_state())
+            (state / 'environment').unlink()
+            with self.assertRaisesRegex(RuntimeError, 'legacy or unowned'):
+                runtime.check_state()
+
+    def test_state_mount_required_before_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / 'amnezia'
+            with mock.patch.object(runtime, 'STATE', state), \
+                    mock.patch.object(runtime.os.path, 'ismount', return_value=False), \
+                    mock.patch.object(runtime, 'run') as run:
+                for operation in (runtime.initialize, runtime.settings,
+                                  lambda: runtime.up('10.20.30.40', 51820), runtime.down):
+                    with self.assertRaisesRegex(RuntimeError, 'not mounted'):
+                        operation()
+                run.assert_not_called()
                 self.assertFalse(state.exists())
-                state.mkdir()
-                with self.assertRaisesRegex(RuntimeError, 'not mounted'):
-                    runtime.up('10.20.30.41', 51820)
-                with self.assertRaisesRegex(RuntimeError, 'not mounted'):
-                    runtime.start()
-                awg.assert_not_called()
-                container.assert_not_called()
             link = Path(directory) / 'srv-link'
-            link.symlink_to(srv, target_is_directory=True)
+            link.symlink_to(directory, target_is_directory=True)
             with mock.patch.object(runtime, 'STATE', link / 'amnezia'), \
                     mock.patch.object(runtime.os.path, 'ismount', return_value=True):
                 with self.assertRaisesRegex(RuntimeError, 'not mounted'):
-                    runtime.initialize('10.20.30.40', 51820)
+                    runtime.initialize()
+
+    def test_readiness_does_not_require_native_vpn_installation(self):
+        with self.environment(), mock.patch.object(runtime, 'admin_ready', return_value=True), \
+                mock.patch.object(runtime, 'storage_initialized', return_value=True), \
+                mock.patch.object(runtime, 'docker_dns_ready', return_value=True), \
+                mock.patch.object(runtime, 'storage_policy_ready', return_value=True), \
+                mock.patch.object(runtime, 'storage_bound', return_value=True), \
+                mock.patch.object(runtime, 'firewall_ready', return_value=True), \
+                mock.patch.object(runtime, 'native_status', return_value=dict(vpn_installed=False, vpn_running=False)):
+            self.assertEqual(runtime.observe(), dict(ready=True, running=False, enabled=False,
+                management_ready=True, vpn_installed=False, vpn_running=False))
+            with mock.patch.object(runtime, 'storage_bound', return_value=False):
+                self.assertFalse(runtime.observe()['ready'])
+            with mock.patch.object(runtime, 'storage_initialized', return_value=False):
+                self.assertFalse(runtime.observe()['management_ready'])
+            with mock.patch.object(runtime, 'storage_policy_ready', return_value=False):
+                self.assertFalse(runtime.observe()['ready'])
+            with mock.patch.object(runtime, 'docker_dns_ready', return_value=False):
+                self.assertFalse(runtime.observe()['ready'])
+            with mock.patch.object(runtime, 'admin_ready', return_value=False):
+                self.assertFalse(runtime.observe()['ready'])
+            with mock.patch.object(runtime, 'firewall_ready', return_value=False):
+                self.assertFalse(runtime.observe()['ready'])
+
+    def test_native_status_checks_both_names_and_exact_configured_port(self):
+        calls = []
+        def command(*args, **kwargs):
+            calls.append(args)
+            if args[:3] == ('docker', 'container', 'inspect'):
+                return result(json.dumps([{'State': {'Running': args[3] == 'amnezia-awg2'}}]).encode())
+            return result(b'51999\n')
+        with mock.patch.object(runtime, 'run', side_effect=command):
+            self.assertEqual(runtime.native_status(51999), dict(vpn_installed=True, vpn_running=True))
+            self.assertFalse(runtime.native_status(51820)['vpn_running'])
+        self.assertTrue(all(args[:3] in (('docker', 'container', 'inspect'), ('docker', 'exec', 'amnezia-awg2'))
+                            for args in calls))
+        with mock.patch.object(runtime, 'run', return_value=result(code=1)):
+            self.assertEqual(runtime.native_status(51999), dict(vpn_installed=False, vpn_running=False))
+
+    def test_network_changes_preserve_native_state_and_never_manage_containers(self):
+        with self.environment() as state:
+            native = state / 'native-fixture'
+            native.write_bytes(b'native application data')
+            calls = []
+            with mock.patch.object(runtime, 'observe', return_value={'ready': True, 'running': False, 'enabled': False}), \
+                    mock.patch.object(runtime, 'run', side_effect=lambda *args, **kwargs: (calls.append(args), result())[1]):
+                runtime.up('10.20.30.40', 51999)
+                runtime.up('10.20.30.40', 51999)
+                self.assertEqual(runtime.settings(), dict(enabled=True, endpoint='10.20.30.40', port=51999))
+                runtime.down()
+                self.assertEqual(runtime.settings(), dict(enabled=False, endpoint='10.20.30.40', port=51999))
+            self.assertEqual(native.read_bytes(), b'native application data')
+            self.assertTrue(all(args == ('systemctl', 'restart', runtime.UNIT) for args in calls))
+            self.assertFalse((state / 'client.conf').exists())
+            self.assertFalse((state / 'awg0.conf').exists())
+
+    def test_firewall_boundary_closes_exact_port_and_denies_management_networks(self):
+        with self.environment() as state, mock.patch.object(runtime, 'uplink', return_value='eth0'):
+            runtime.atomic(state / 'settings.json', json.dumps(dict(enabled=True, endpoint='10.20.30.40', port=51999)))
+            policy = runtime.firewall_policy()
+            self.assertIn('iifname "lo" accept\n  iifname "eth0" accept\n  drop', policy)
+            self.assertIn('iifname != "eth0" oifname "eth0" meta nfproto ipv6 drop', policy)
+            self.assertIn('iifname != "eth0" oifname "eth0" ip daddr', policy)
+            self.assertNotIn('docker0', policy)
+            self.assertNotIn('amn0', policy)
+            self.assertNotIn('dport 53 accept', policy)
+            self.assertIn('10.20.30.40/32', policy)
+            self.assertIn('169.254.0.0/16', policy)
+            self.assertIn('udp sport 51999 ct direction reply', policy)
+            self.assertLess(policy.index('meta nfproto ipv6 drop'), policy.index('udp sport 51999 ct direction reply'))
+            self.assertNotIn('udp dport 51999 drop', policy)
+            runtime.atomic(state / 'settings.json', json.dumps(dict(enabled=False, endpoint='10.20.30.40', port=51999)))
+            self.assertIn('udp dport 51999 drop', runtime.firewall_policy())
+            self.assertNotIn('ct direction reply', runtime.firewall_policy())
+
+    def test_uplink_discovery_requires_one_safe_active_interface(self):
+        with mock.patch.object(runtime, 'run', side_effect=[
+                result(b'[{"dev":"eth0"}]'), result(b'[{"ifname":"eth0","flags":["UP"]}]')]) as run:
+            self.assertEqual(runtime.uplink(), 'eth0')
+        self.assertEqual(run.call_args_list, [mock.call('ip', '-4', '-j', 'route', 'get', '1.1.1.1'),
+                                             mock.call('ip', '-j', 'link', 'show', 'dev', 'eth0')])
+        for routes in (None, {}, [None], [], [{'dev': 'eth0'}, {'dev': 'eth1'}], [{'dev': 'lo'}],
+                       [{'dev': 'bad"name'}], [{'dev': 'bridge@eth0'}], [{}]):
+            with self.subTest(routes=routes), mock.patch.object(runtime, 'run', return_value=result(json.dumps(routes).encode())):
+                with self.assertRaises(RuntimeError):
+                    runtime.uplink()
+        for links in (None, {}, [None], [], [{'ifname': 'eth1', 'flags': ['UP']}],
+                      [{'ifname': 'eth0', 'flags': 'UP'}], [{'ifname': 'eth0', 'flags': []}]):
+            with self.subTest(links=links), mock.patch.object(runtime, 'run', side_effect=[
+                    result(b'[{"dev":"eth0"}]'), result(json.dumps(links).encode())]):
+                with self.assertRaisesRegex(RuntimeError, 'not active'):
+                    runtime.uplink()
+
+    def test_public_docker_dns_preserves_settings_and_repeated_preparation_is_noop(self):
+        with self.environment() as state, mock.patch.object(runtime, 'DOCKER_CONFIG', state / 'docker-config/daemon.json'):
+            runtime.DOCKER_CONFIG.parent.mkdir()
+            original = {'dns': ['10.0.0.1'], 'log-driver': 'local', 'features': {'containerd-snapshotter': True}}
+            runtime.DOCKER_CONFIG.write_text(json.dumps(original))
+            runtime.DOCKER_CONFIG.chmod(0o600)
+            self.assertFalse(runtime.docker_dns_ready())
+            with mock.patch.object(runtime.os, 'fchown') as ownership:
+                self.assertTrue(runtime.prepare_docker_dns())
+                ownership.assert_called_once()
+                self.assertEqual(ownership.call_args.args[1:], (0, 0))
+            self.assertEqual(runtime.DOCKER_CONFIG.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(json.loads(runtime.DOCKER_CONFIG.read_text()), original | {'dns': runtime.PUBLIC_DNS})
+            self.assertTrue(runtime.docker_dns_ready())
+            with mock.patch.object(runtime, 'atomic', side_effect=AssertionError('unchanged DNS was rewritten')):
+                self.assertFalse(runtime.prepare_docker_dns())
+
+    def test_docker_dns_rejects_unsafe_files_and_malformed_configuration(self):
+        with self.environment() as state, mock.patch.object(runtime, 'DOCKER_CONFIG', state / 'daemon.json'):
+            config = runtime.DOCKER_CONFIG
+            for content in ('{broken', '[]', 'null'):
+                config.write_text(content)
+                config.chmod(0o644)
+                self.assertFalse(runtime.docker_dns_ready())
+                with self.assertRaises((RuntimeError, ValueError)):
+                    runtime.prepare_docker_dns()
+                self.assertEqual(config.read_text(), content)
+            config.write_text('{}')
+            config.chmod(0o644)
+            for uid, gid in ((1000, 0), (0, 1000)):
+                with mock.patch.object(Path, 'lstat', return_value=SimpleNamespace(
+                        st_uid=uid, st_gid=gid, st_mode=config.stat().st_mode)):
+                    self.assertFalse(runtime.docker_dns_ready())
+                    with self.assertRaisesRegex(RuntimeError, 'unsafe ownership'):
+                        runtime.prepare_docker_dns()
+            config.chmod(0o666)
+            with self.assertRaisesRegex(RuntimeError, 'unsafe ownership or permissions'):
+                runtime.prepare_docker_dns()
+            config.unlink()
+            config.symlink_to(state / 'environment')
+            self.assertFalse(runtime.docker_dns_ready())
+            with self.assertRaises(RuntimeError):
+                runtime.prepare_docker_dns()
+            self.assertEqual((state / 'environment').read_text(), runtime.MARKER + '\n')
+
+    def test_provision_passes_dns_change_into_single_storage_restart(self):
+        for changed in (False, True):
+            with self.subTest(changed=changed), mock.patch.object(runtime, 'initialize'), \
+                    mock.patch.object(runtime, 'prepare_docker_dns', return_value=changed), \
+                    mock.patch.object(runtime, 'prepare_storage') as storage, \
+                    mock.patch.object(runtime, 'prepare_admin'), mock.patch.object(runtime, 'run'), \
+                    mock.patch.object(runtime, 'observe', return_value={'ready': True}):
+                runtime.provision()
+            storage.assert_called_once_with(force_restart=changed)
 
     def test_firewall_readiness_detects_effective_rule_drift(self):
         with tempfile.TemporaryDirectory() as directory, self.root_owned_stat():
@@ -482,126 +758,201 @@ class GuestRuntimeTest(unittest.TestCase):
                 with mock.patch.object(runtime, 'firewall_digest', return_value='modified-rules'):
                     self.assertFalse(runtime.firewall_ready())
 
-    def test_firewall_allows_ping_only_to_the_tunnel_address(self):
-        with tempfile.TemporaryDirectory() as directory, self.root_owned_stat():
-            state = Path(directory)
-            state.chmod(0o700)
-            settings = state / 'settings.json'
-            settings.write_text('{"endpoint":"10.20.30.40","port":51820}\n')
-            settings.chmod(0o600)
-            with mock.patch.object(runtime, 'STATE', state):
-                policy = runtime.firewall_policy()
-        self.assertIn('iifname "awg0" ip daddr 10.90.0.1 ip protocol icmp icmp type echo-request accept', policy)
-        self.assertIn('iifname "awg0" drop', policy)
-
-    def test_effective_container_drift_prevents_ready_and_up_restarts_without_key_change(self):
-        expected = {'State': {'Running': True},
-                    'Config': {'Image': runtime.IMAGE, 'Entrypoint': ['/bin/bash'],
-                               'Cmd': ['/opt/amnezia/start.sh']},
-                    'HostConfig': {'NetworkMode': 'host'},
-                    'Mounts': [{'Type': 'bind', 'Source': str(runtime.STATE / 'awg0.conf'),
-                                'Destination': '/etc/amnezia/awg0.conf', 'RW': False},
-                               {'Type': 'bind', 'Source': str(runtime.ROOT / 'container.sh'),
-                                'Destination': '/opt/amnezia/start.sh', 'RW': False}]}
-
-        def command(*args, **_):
-            if args[:3] == ('systemctl', 'is-active', '--quiet'):
-                return result()
-            if args[:4] == ('docker', 'exec', runtime.CONTAINER, 'awg'):
-                return result(b'51820\n')
-            return result()
-
-        with mock.patch.object(runtime, 'container', return_value=expected), \
-                mock.patch.object(runtime, 'firewall_ready', return_value=True), \
-                mock.patch.object(runtime, 'run', side_effect=command):
-            self.assertTrue(runtime.observe()['ready'])
-            for mutate in (lambda value: value['HostConfig'].update(NetworkMode='bridge'),
-                           lambda value: value['Mounts'][0].update(RW=True),
-                           lambda value: value['Mounts'][1].update(Source='/tmp/foreign-start.sh'),
-                           lambda value: value['Config'].update(Entrypoint=['/bin/sh']),
-                           lambda value: value['Config'].update(Cmd=['/bin/false']),
-                           lambda value: value['Config'].update(Image='other-image')):
-                with self.subTest(mutate=mutate):
-                    drifted = copy.deepcopy(expected)
-                    mutate(drifted)
-                    with mock.patch.object(runtime, 'container', return_value=drifted):
-                        self.assertFalse(runtime.observe()['ready'])
-        with mock.patch.object(runtime, 'container', return_value=expected), \
-                mock.patch.object(runtime, 'firewall_ready', return_value=True), \
-                mock.patch.object(runtime, 'run', side_effect=lambda *args, **kwargs: (
-                    result(code=3) if args[:3] == ('systemctl', 'is-active', '--quiet') else command(*args, **kwargs))):
-            self.assertFalse(runtime.observe()['ready'])
-
-        with tempfile.TemporaryDirectory() as directory, self.root_owned_stat():
-            state = Path(directory)
-            state.chmod(0o700)
-            for name, content in (('awg0.conf', 'synthetic-server-key\n'),
-                                  ('client.conf', 'PrivateKey = synthetic-client-key\n'),
-                                  ('settings.json', '{"endpoint": "10.20.30.40", "port": 51820}\n')):
-                path = state / name
-                path.write_text(content)
-                path.chmod(0o600)
+    def test_persistent_storage_seed_and_mounts_are_idempotent(self):
+        with self.environment() as state:
+            etc = state / 'systemd'
+            etc.mkdir()
+            sources = state / 'sources'
+            for name in ('docker', 'containerd'):
+                (state / name).mkdir(mode=0o700)
+                (sources / name).mkdir(parents=True)
+                (sources / name / 'native-data').write_text(name)
+            original_path = runtime.Path
+            def isolated_path(value):
+                return {'/var/lib': sources, '/etc/systemd/system': etc}.get(str(value), original_path(value))
             calls = []
-            with mock.patch.object(runtime, 'STATE', state), \
-                    mock.patch.object(runtime.os.path, 'ismount', return_value=True), \
-                    mock.patch.object(runtime, 'observe', side_effect=[{'ready': False}, {'ready': True}]), \
-                    mock.patch.object(runtime, 'run', side_effect=lambda *args, **_: (calls.append(args), result())[1]):
-                runtime.up('10.20.30.40', 51820)
-            self.assertIn(('systemctl', 'restart', runtime.UNIT), calls)
-            self.assertEqual((state / 'awg0.conf').read_text(), 'synthetic-server-key\n')
-            self.assertIn('synthetic-client-key', (state / 'client.conf').read_text())
-
-    def test_repeated_up_endpoint_change_and_down_preserve_synthetic_keys(self):
-        with tempfile.TemporaryDirectory() as directory, self.root_owned_stat():
-            root = Path(directory) / 'state'
-            keys = iter(('synthetic-server-key', 'synthetic-client-key',
-                         'synthetic-psk', 'synthetic-server-public', 'synthetic-client-public'))
-            with mock.patch.object(runtime, 'STATE', root), \
-                    mock.patch.object(runtime.os.path, 'ismount', return_value=True), \
-                    mock.patch.object(runtime, 'awg', side_effect=lambda *_: next(keys)):
-                runtime.initialize('10.20.30.40', 51820)
-            server = (root / 'awg0.conf').read_text()
-            client = (root / 'client.conf').read_text()
-            self.assertIn('synthetic-server-key', server)
-            self.assertIn('synthetic-client-key', client)
-            self.assertEqual(root.stat().st_mode & 0o777, 0o700)
-            for name in ('awg0.conf', 'client.conf', 'settings.json'):
-                self.assertEqual((root / name).stat().st_mode & 0o777, 0o600)
-            commands = []
-
-            def command(*args, **_):
-                commands.append(args)
+            foreign_ownership = set()
+            def command(*args, data=None, **kwargs):
+                calls.append(args)
+                if args[0] == 'install':
+                    Path(args[-1]).write_bytes(data)
+                    Path(args[-1]).chmod(0o644)
+                    foreign_ownership.discard(Path(args[-1]))
                 return result()
-
-            with mock.patch.object(runtime, 'STATE', root), \
-                    mock.patch.object(runtime.os.path, 'ismount', return_value=True), \
-                    mock.patch.object(runtime, 'observe', return_value={'ready': True, 'running': True, 'enabled': True}), \
+            with mock.patch.object(runtime, 'Path', side_effect=isolated_path), \
+                    mock.patch.object(runtime, 'storage_bound', return_value=True), \
                     mock.patch.object(runtime, 'run', side_effect=command):
-                runtime.up('10.20.30.40', 51820)
-                runtime.up('10.20.30.40', 51820)
-                self.assertEqual((root / 'awg0.conf').read_text(), server)
-                self.assertEqual((root / 'client.conf').read_text(), client)
-                runtime.up('10.20.30.41', 51820)
-                self.assertEqual((root / 'awg0.conf').read_text(), server)
-                self.assertIn('synthetic-client-key', (root / 'client.conf').read_text())
-                self.assertIn('Endpoint = 10.20.30.41:51820', (root / 'client.conf').read_text())
+                runtime.prepare_storage()
+                first_calls = len(calls)
+                runtime.prepare_storage()
+                self.assertEqual(len(calls), first_calls)
+                runtime.prepare_storage(force_restart=True)
+                self.assertEqual(calls[first_calls:], [('systemctl', 'daemon-reload'),
+                    ('systemctl', 'restart', 'containerd.service', 'docker.service')])
+                for name in ('docker', 'containerd'):
+                    self.assertEqual((state / name / 'native-data').read_text(), name)
+                    dropin = (etc / (name + '.service.d') / '90-subyard-amnezia-storage.conf').read_text()
+                    self.assertIn('AssertPathIsMountPoint=/srv', dropin)
+                    self.assertIn(f'BindPaths={state / name}:/var/lib/{name}', dropin)
+                    path, content = runtime.storage_policy(name)
+                    self.assertTrue(runtime.storage_policy_ready(name))
+                    path.write_text(content + '# drift\n')
+                    self.assertFalse(runtime.storage_policy_ready(name))
+                    runtime.prepare_storage()
+                    self.assertEqual(path.read_text(), content)
+                    path.chmod(0o600)
+                    self.assertFalse(runtime.storage_policy_ready(name))
+                    runtime.prepare_storage()
+                    self.assertEqual(path.stat().st_mode & 0o777, 0o644)
+                    original_lstat = Path.lstat
+                    foreign_ownership.add(path)
+                    def foreign_owner(candidate):
+                        info = original_lstat(candidate)
+                        if candidate in foreign_ownership:
+                            return SimpleNamespace(st_uid=1000, st_gid=1000, st_mode=info.st_mode)
+                        return info
+                    with mock.patch.object(Path, 'lstat', side_effect=foreign_owner, autospec=True):
+                        self.assertFalse(runtime.storage_policy_ready(name))
+                        runtime.prepare_storage()
+                        self.assertTrue(runtime.storage_policy_ready(name))
+                    path.unlink()
+                    path.symlink_to(state / 'environment')
+                    self.assertFalse(runtime.storage_policy_ready(name))
+                    with self.assertRaisesRegex(RuntimeError, 'must not be a symlink'):
+                        runtime.prepare_storage()
+                    path.unlink()
+                    path.write_text(content)
+                    path.chmod(0o644)
+                with mock.patch.object(runtime, 'storage_bound', return_value=False):
+                    with self.assertRaisesRegex(RuntimeError, 'not bound'):
+                        runtime.prepare_storage()
 
-                real_open = open
-                def lock_open(path, *args, **kwargs):
-                    if path == '/run/subyard-amnezia.lock':
-                        return real_open(root / 'lock', 'a')
-                    return real_open(path, *args, **kwargs)
+    def test_lost_storage_marker_rejects_existing_data_before_commands_or_copy(self):
+        with self.environment() as state:
+            marker = state / 'storage-seeded'
+            runtime.atomic(marker, runtime.MARKER + '\n')
+            self.assertTrue(runtime.storage_initialized())
+            marker.chmod(0o644)
+            self.assertFalse(runtime.storage_initialized())
+            marker.chmod(0o600)
+            marker.write_text('foreign ownership\n')
+            self.assertFalse(runtime.storage_initialized())
+            marker.unlink()
+            native = state / 'containerd/native-database'
+            native.parent.mkdir()
+            native.write_bytes(b'synthetic native data')
+            with mock.patch.object(runtime, 'run', side_effect=AssertionError('lost marker changed services')), \
+                    mock.patch.object(runtime.shutil, 'copytree', side_effect=AssertionError('lost marker merged data')):
+                with self.assertRaisesRegex(RuntimeError, 'data but no ownership marker'):
+                    runtime.prepare_storage()
+            self.assertEqual(native.read_bytes(), b'synthetic native data')
+            self.assertFalse(marker.exists())
+            self.assertFalse(runtime.storage_initialized())
+            with mock.patch.object(runtime, 'admin_ready', return_value=True), \
+                    mock.patch.object(runtime, 'docker_dns_ready', return_value=True), \
+                    mock.patch.object(runtime, 'storage_policy_ready', return_value=True), \
+                    mock.patch.object(runtime, 'storage_bound', return_value=True), \
+                    mock.patch.object(runtime, 'firewall_ready', return_value=True), \
+                    mock.patch.object(runtime, 'native_status', return_value=dict(vpn_installed=True, vpn_running=True)):
+                self.assertFalse(runtime.observe()['management_ready'])
+                self.assertFalse(runtime.observe()['ready'])
+            marker.symlink_to(state / 'missing-marker')
+            self.assertFalse(runtime.storage_initialized())
+            with mock.patch.object(runtime, 'run', side_effect=AssertionError('broken marker changed services')):
+                with self.assertRaises(RuntimeError):
+                    runtime.prepare_storage()
+            self.assertEqual(native.read_bytes(), b'synthetic native data')
 
-                with mock.patch.object(runtime.os, 'geteuid', return_value=0), \
-                        mock.patch.object(runtime, 'open', lock_open, create=True), \
-                        mock.patch.object(runtime, 'container', return_value=None), \
-                        mock.patch.object(runtime, 'firewall') as firewall, \
-                        mock.patch.object(sys, 'argv', ['runtime', 'down']):
-                    self.assertEqual(runtime.main(), 0)
-                firewall.assert_called_with(remove=True)
-            self.assertEqual((root / 'awg0.conf').read_text(), server)
-            self.assertIn('synthetic-client-key', (root / 'client.conf').read_text())
-            self.assertTrue(any(args[:3] == ('systemctl', 'disable', '--now') for args in commands))
+    def test_unseeded_storage_rejects_symlinks_and_non_directories_without_commands(self):
+        for kind in ('file', 'symlink'):
+            with self.subTest(kind=kind), self.environment() as state:
+                destination = state / 'docker'
+                if kind == 'file':
+                    destination.write_bytes(b'native data')
+                else:
+                    destination.symlink_to(state / 'missing')
+                with mock.patch.object(runtime, 'run', side_effect=AssertionError('unsafe storage changed services')):
+                    with self.assertRaisesRegex(RuntimeError, 'unsafe file type'):
+                        runtime.prepare_storage()
+
+    def test_systemd_start_installs_boundary_without_reacquiring_lifecycle_lock(self):
+        with self.environment(), mock.patch.object(runtime.os, 'geteuid', return_value=0), \
+                mock.patch.object(runtime, 'open', side_effect=AssertionError('start acquired parent lifecycle lock'), create=True), \
+                mock.patch.object(runtime.fcntl, 'flock', side_effect=AssertionError('start acquired parent lifecycle lock')), \
+                mock.patch.object(runtime, 'firewall') as firewall, \
+                mock.patch.object(sys, 'argv', ['runtime', 'start']):
+            runtime.main()
+        firewall.assert_called_once_with()
+
+    def test_runtime_errors_preserve_bounded_diagnostics_without_raw_exception_contents(self):
+        for error, message in ((RuntimeError('environment command failed: nft'), 'amnezia: environment command failed: nft'),
+                               (OSError('synthetic-private-value'), 'amnezia: environment operation failed'),
+                               (ValueError('synthetic-private-value'), 'amnezia: environment operation failed'),
+                               (KeyError('synthetic-private-value'), 'amnezia: environment operation failed')):
+            with self.subTest(error=type(error).__name__), \
+                    mock.patch.object(runtime.os, 'geteuid', return_value=0), \
+                    mock.patch.object(subprocess, 'run', side_effect=error), \
+                    mock.patch.object(sys, 'argv', ['runtime', 'start']), \
+                    contextlib.redirect_stderr(io.StringIO()) as output:
+                with self.assertRaises(SystemExit) as exit_status:
+                    runpy.run_path(str(PROFILE / 'runtime.py'), run_name='__main__')
+            self.assertEqual(exit_status.exception.code, 1)
+            self.assertEqual(output.getvalue().strip(), message)
+
+    def test_admin_preparation_reuses_key_and_restricts_authentication(self):
+        with self.environment() as state:
+            key = state / 'admin.key'
+            key.write_text('synthetic fixture\n')
+            key.chmod(0o600)
+            home = state / 'homes'
+            sudoers = state / 'sudoers'
+            policy = state / 'sshd.conf'
+            original_path = runtime.Path
+            def isolated_path(value):
+                return {'/home': home, '/etc/sudoers.d/91-subyard-amnezia-admin': sudoers,
+                        '/etc/ssh/sshd_config.d/01-subyard-amnezia-admin.conf': policy}.get(str(value), original_path(value))
+            calls = []
+            def command(*args, data=None, **kwargs):
+                calls.append(args)
+                if args[0] == 'install':
+                    if '-d' in args:
+                        Path(args[-1]).mkdir(parents=True, exist_ok=True)
+                    else:
+                        Path(args[-1]).write_bytes(data)
+                return result(b'ssh-ed25519 synthetic\n')
+            with mock.patch.object(runtime, 'Path', side_effect=isolated_path), \
+                    mock.patch.object(runtime, 'run', side_effect=command), \
+                    mock.patch.object(runtime, 'admin_ready', return_value=True):
+                runtime.prepare_admin()
+            self.assertEqual(key.read_text(), 'synthetic fixture\n')
+            self.assertFalse(any(args[:2] == ('ssh-keygen', '-q') for args in calls))
+            self.assertEqual((home / runtime.ADMIN / '.ssh/authorized_keys').read_text(), 'restrict ssh-ed25519 synthetic\n')
+            self.assertIn('AuthenticationMethods publickey', policy.read_text())
+            self.assertIn('PasswordAuthentication no', policy.read_text())
+            self.assertIn('DisableForwarding yes', policy.read_text())
+            self.assertIn(('visudo', '-cf', str(sudoers)), calls)
+            self.assertTrue(any(args[:8] == ('install', '-o', runtime.ADMIN, '-g', runtime.ADMIN, '-m', '0600', '/dev/stdin') for args in calls))
+            self.assertTrue(any(args[:8] == ('install', '-o', '0', '-g', '0', '-m', '0440', '/dev/stdin') for args in calls))
+
+    def test_admin_key_permissions_and_authorization_symlink_rejected(self):
+        with self.environment() as state:
+            key = state / 'admin.key'
+            key.write_text('synthetic fixture\n')
+            key.chmod(0o644)
+            with self.assertRaisesRegex(RuntimeError, 'unsafe ownership or permissions'):
+                runtime.prepare_admin()
+            key.chmod(0o600)
+            home = state / 'home'
+            home.mkdir()
+            (home / '.ssh').symlink_to(state, target_is_directory=True)
+            original_path = runtime.Path
+            def isolated_path(value):
+                return home.parent if str(value) == '/home' else original_path(value)
+            with mock.patch.object(runtime, 'ADMIN', 'home'), \
+                    mock.patch.object(runtime, 'Path', side_effect=isolated_path), \
+                    mock.patch.object(runtime, 'run', return_value=result(b'ssh-ed25519 synthetic\n')):
+                with self.assertRaisesRegex(RuntimeError, 'home must not be a symlink'):
+                    runtime.prepare_admin()
 
 
 class ProfileProvisionTest(unittest.TestCase):
@@ -612,7 +963,7 @@ class ProfileProvisionTest(unittest.TestCase):
             source.mkdir()
             destination = root / 'installed'
             unit = root / 'subyard-amnezia.service'
-            for name in ('runtime.py', 'container.sh', 'release.env', 'subyard-amnezia.service'):
+            for name in ('runtime.py', 'subyard-amnezia.service'):
                 shutil.copyfile(PROFILE / name, source / name)
             script = (PROFILE / 'provision.sh').read_text().replace(
                 'destination=/usr/local/lib/subyard-amnezia', f'destination={destination}').replace(
@@ -625,7 +976,9 @@ class ProfileProvisionTest(unittest.TestCase):
                 'id': '#!/bin/sh\n[ "$1" = -u ] && { echo 0; exit; }; exec /usr/bin/id "$@"\n',
                 'dpkg-query': '#!/bin/sh\necho "install ok installed"\n',
                 'docker': '#!/bin/sh\nexit 0\n',
-                'apt-get': '#!/bin/sh\nexit 0\n',
+                'uname': '#!/bin/sh\necho x86_64\n',
+                'python3': '#!/bin/sh\n[ "$1" != -c ] || { cat >/dev/null; exit; }\ncase "$2" in observe) echo \'{"ready":true}\' ;; check-state) [ "${PROFILE_LEGACY:-}" != yes ] || { echo "legacy or unowned VPN state" >&2; exit 1; } ;; provision) : ;; *) exit 2 ;; esac\n',
+                'apt-get': '#!/bin/sh\n[ -z "${PROFILE_MUTATION_LOG:-}" ] || echo apt >> "$PROFILE_MUTATION_LOG"\nexit 0\n',
                 'systemctl': '#!/bin/sh\nexit 0\n',
                 'stat': ('#!/bin/sh\n'
                          '[ "$1" = -c ] && [ "$2" = "%u:%g:%a" ] || exit 2\n'
@@ -659,14 +1012,23 @@ class ProfileProvisionTest(unittest.TestCase):
             self.assertEqual(applied.returncode, 0, applied.stderr)
             self.assertEqual(invoke('--check').returncode, 0)
             for path, mode in ((destination, 0o777), (destination / 'runtime.py', 0o666),
-                               (destination / 'container.sh', 0o666),
-                               (destination / 'release.env', 0o666), (unit, 0o666)):
+                               (unit, 0o666)):
                 with self.subTest(path=path):
                     path.chmod(mode)
                     self.assertEqual(invoke('--check').returncode, 10)
                     self.assertEqual(invoke().returncode, 0)
                     self.assertEqual(invoke('--check').returncode, 0)
             self.assertEqual(invoke('--check', environment_override={'PROFILE_FAKE_UID': '1000'}).returncode, 10)
+            (destination / 'runtime.py').write_bytes(b'synthetic legacy runtime\n')
+            unit.write_bytes(b'synthetic legacy unit\n')
+            before = ((destination / 'runtime.py').read_bytes(), unit.read_bytes())
+            mutation_log = root / 'mutations'
+            rejected = invoke(environment_override={'PROFILE_LEGACY': 'yes', 'PROFILE_MUTATION_LOG': str(mutation_log)})
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn('legacy or unowned', rejected.stderr)
+            self.assertEqual(((destination / 'runtime.py').read_bytes(), unit.read_bytes()), before)
+            self.assertFalse(mutation_log.exists())
+            self.assertEqual(invoke('--check', environment_override={'PROFILE_LEGACY': 'yes'}).returncode, 10)
 
 
 class FirstBootObserverTest(unittest.TestCase):
