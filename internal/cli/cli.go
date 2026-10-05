@@ -969,7 +969,7 @@ func (cli *CLI) projectExportStore(loaded config.Loaded) ports.ProjectExportStor
 	return projectruntime.PatchStore{Directory: filepath.Join(loaded.Context.Paths.DataHome, "exports")}
 }
 
-func (cli *CLI) projectVSCode() ports.VSCode {
+func (cli *CLI) projectVSCode(loaded config.Loaded) ports.VSCode {
 	if cli.options.ProjectVSCode != nil {
 		return cli.options.ProjectVSCode
 	}
@@ -977,7 +977,10 @@ func (cli *CLI) projectVSCode() ports.VSCode {
 	if err != nil {
 		return nil
 	}
-	return projectruntime.VSCode{Process: transport.Process{Program: program, Env: environmentList(cli.env, nil), MaxBytes: 4 << 20}}
+	return projectruntime.VSCode{
+		Process: transport.Process{Program: program, Env: environmentList(cli.env, nil), MaxBytes: 4 << 20},
+		Home:    loaded.Context.Paths.OperatorHome, SSHHost: loaded.Context.SSHHost, CodeSSHHost: loaded.Context.CodeSSHHost,
+	}
 }
 
 func (cli *CLI) projectDeviceManager() ports.InstanceDeviceManager {

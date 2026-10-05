@@ -482,6 +482,10 @@ The alias shares the yard's identity and host-key pins, but forwards only contro
 `ControlPersist no` isolate preview from ordinary yard connections. SSH convergence requires
 both aliases so repeated init upgrades older snippets. The controller checks port availability
 before launching VS Code; `ExitOnForwardFailure yes` handles a later bind race.
+It also checks the dedicated alias through OpenSSH's effective configuration. A legacy
+Subyard-managed snippet containing only the normal alias is atomically extended before
+launch, retaining its transport, identity and host-key pins. Unmanaged or unavailable
+configuration fails before VS Code starts with initialization or registration repair guidance.
 Owner-inventory project resolution retains a matching explicitly selected remote alias,
 so the resolved code alias stays consistent.
 

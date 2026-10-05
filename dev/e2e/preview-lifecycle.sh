@@ -336,7 +336,7 @@ assert_no_listener() {
   ! ss -Hltn 'sport = :8765' | grep -q . || fail 'unexpected preview listener remains'
 }
 check_preview() {
-  local name="$1" alias="$2" selector="${3:-$1}" command path preview_url=http://127.0.0.1:8765/ preview_port code_pid
+  local name="$1" alias="$2" selector="${3:-$1}" command path preview_url=http://127.0.0.1:8765/ preview_port code_pid snippet
   if [ "$TAILNET" = 1 ] && [ "$name" = preview-remote ]; then
     preview_port="$(peer sed -n 's/^WEB_PREVIEW_HOST_PORT=//p' "$STATE/config/yards/$NAME/config.env")"
     preview_url="http://$TAILNET_ADDRESS:$preview_port/"
@@ -376,7 +376,32 @@ PY
   grep -Fq 'preview port 127.0.0.1:8765 is unavailable' "$STATE/busy-code.log" || fail 'collision diagnostic is unclear'
   kill "$BUSY_PID"; wait "$BUSY_PID" 2>/dev/null || true; BUSY_PID=''
   rm -f "$STATE/busy.ready"
+  # Reproduce a controller registered before the dedicated code alias existed.
+  snippet="$HOME/.ssh/subyard-$name.config"
+  [ "$name" != default ] || snippet="$HOME/.ssh/subyard.config"
+  python3 - "$snippet" "$alias" <<'PY'
+import pathlib, sys
+path, alias = pathlib.Path(sys.argv[1]), sys.argv[2]
+output, skip, removed = [], False, False
+for line in path.read_text().splitlines(keepends=True):
+    if line.startswith("Host "):
+        skip = line.strip() == "Host " + alias + ".code"
+        removed |= skip
+        if line.strip() == "Host " + alias + " " + alias + ".code":
+            line = "Host " + alias + "\n"
+    if not skip:
+        output.append(line)
+assert removed, "dedicated alias fixture is missing"
+path.write_text("".join(output))
+PY
+  ssh -G "$alias.code" 2>/dev/null | grep -Fqx "hostname $alias.code" \
+    || fail 'legacy fixture still resolves the dedicated code alias'
   yard -Y "$selector" code PreviewFixture > "$STATE/code-$name.log" 2>&1 || fail 'yard code failed'
+  ssh -G "$alias.code" > "$STATE/code.options.after" 2>/dev/null
+  cmp -s "$STATE/code.options" "$STATE/code.options.after" || fail 'code launch did not restore the dedicated SSH route'
+  ssh -G "$alias" > "$STATE/normal.options.after" 2>/dev/null
+  cmp -s "$STATE/normal.options" "$STATE/normal.options.after" || fail 'code launch changed the ordinary SSH route'
+  [ "$(stat -c %a "$snippet")" = 600 ] || fail 'upgraded SSH snippet is not private'
   [ -f "$STATE/code.called" ] && [ -s "$STATE/project.path" ] || fail 'VS Code did not receive the workspace'
   path="$(cat "$STATE/project.path")"
   printf -v command 'cd %q; printf "%%s\\n" "$$" > .preview-test.pid; exec subyard-preview site' "$path"
@@ -439,7 +464,7 @@ PY
     sleep 0.1
   done
   assert_no_listener
-  printf 'ok: %s preview, live edits, collision gate and foreground shutdown\n' "$name"
+  printf 'ok: %s legacy code alias repair, preview, live edits, collision gate and foreground shutdown\n' "$name"
 }
 if [ "$REMOTE_ONLY" = 0 ]; then
   check_preview default yard

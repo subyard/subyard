@@ -637,7 +637,7 @@ func (prepared *preparedCommand) prepareProject(_ context.Context, _ *initBootst
 			incusPort, _ := cli.statusPorts()
 			orchestrator.Runner = application.ProjectActionRunner{
 				Data: cli.projectDataPlane(), Devices: cli.projectDeviceManager(), Archive: cli.projectArchiver(),
-				Exports: cli.projectExportStore(loaded), Instances: incusPort, VSCode: cli.projectVSCode(),
+				Exports: cli.projectExportStore(loaded), Instances: incusPort, VSCode: cli.projectVSCode(loaded),
 				Extensions:         strings.Fields(cli.env["CODE_RECOMMENDED_EXTENSIONS"]),
 				WorkspaceDirectory: filepath.Join(loaded.Context.Paths.ConfigHome, "workspaces"),
 				Yard:               loaded.Context, Project: project.Record, YardIdentity: project.YardIdentity,

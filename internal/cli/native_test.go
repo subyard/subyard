@@ -140,6 +140,9 @@ case "$1" in
 esac
 `, 0o700)
 	codeLog := filepath.Join(root, "code.log")
+	writeCLIFile(t, filepath.Join(bin, "ssh"), `#!/bin/sh
+printf 'hostname 127.0.0.1\nlocalforward 127.0.0.1:8765 127.0.0.1:8765\nexitonforwardfailure yes\ncontrolpath /fixture/.ssh/subyard-code-cm-fixture\ncontrolpersist no\n'
+`, 0o700)
 	writeCLIFile(t, filepath.Join(bin, "code"), `#!/bin/sh
 printf '%s\0' "$@" > "$CODE_LOG"
 `, 0o700)
