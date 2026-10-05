@@ -111,6 +111,37 @@ class TransportTests(unittest.TestCase):
         self.assertTrue(caught.exception.timed_out)
         self.assertEqual(["session.tabs.listAll"], requests)
 
+    def test_global_budget_timeout_preserves_read_timeout_flags(self):
+        requests = []
+
+        def stall(request, _):
+            requests.append(request["method"])
+            time.sleep(0.15)
+
+        self.server(stall)
+        with self.assertRaises(self.error) as caught:
+            self.client(self.metadata, timeout=5, deadline=time.monotonic() + 0.04).call("session.tabs.listAll")
+        self.assertEqual("Orca registration time budget exhausted", str(caught.exception))
+        self.assertFalse(caught.exception.unknown)
+        self.assertTrue(caught.exception.timed_out)
+        self.assertEqual(["session.tabs.listAll"], requests)
+
+    def test_global_budget_timeout_preserves_unknown_write(self):
+        requests = []
+
+        def stall(request, _):
+            requests.append(request["method"])
+            time.sleep(0.15)
+
+        self.server(stall)
+        with self.assertRaises(self.error) as caught:
+            self.client(self.metadata, timeout=5, deadline=time.monotonic() + 0.04).call(
+                "projectGroup.create", {"name": "Fixture"})
+        self.assertEqual("Orca registration time budget exhausted", str(caught.exception))
+        self.assertTrue(caught.exception.unknown)
+        self.assertTrue(caught.exception.timed_out)
+        self.assertEqual(["projectGroup.create"], requests)
+
     def test_rpc_rejection_is_known_failure_without_server_secret_text(self):
         self.server(lambda request, _: self.frame(request, ok=False,
             error={"code": "permission_denied", "message": "fixture-token-one secret"}))

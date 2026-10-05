@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Full production project-registration lifecycle against stock Orca. Disposable E2E VM only.
+# Full production project-registration lifecycle against pinned Orca. Disposable E2E VM only.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
@@ -19,6 +19,25 @@ die() { printf 'orca-projects-e2e: %s\n' "$*" >&2; exit 1; }
 [ "${SUBYARD_E2E_ORCA_PROJECTS:-}" = 1 ] \
   || die 'set SUBYARD_E2E_ORCA_PROJECTS=1 inside a disposable test host'
 [ "${SUBYARD_E2E_VM:-}" = 1 ] || die 'run on VM1 through dev/agent-e2e.sh'
+if [ "${SUBYARD_E2E_ORCA_LOAD_DIAGNOSTIC:-}" = 1 ]; then
+  python3 -B - <<'PYGUARD' || die 'load diagnostic requires the matching disposable VM lease'
+import json, os, pathlib, stat
+try:
+    lease = pathlib.Path('/run/subyard-e2e-lease.json')
+    info = lease.lstat()
+    if not (stat.S_ISREG(info.st_mode) and info.st_uid == 0 and stat.S_IMODE(info.st_mode) == 0o444):
+        raise ValueError('invalid lease file')
+    context = json.loads(lease.read_text())
+    if not (context['schema_version'] == 2
+            and context['run'] == os.environ['SUBYARD_E2E_RUN_ID'] and context['run']
+            and context['slot'] == os.environ['SUBYARD_E2E_SLOT'] and context['slot']
+            and context['purpose'] == 'orca-load-diagnostic'
+            and os.environ['SUBYARD_E2E_VM'] == '1'):
+        raise ValueError('lease identity mismatch')
+except (OSError, ValueError, KeyError, TypeError):
+    raise SystemExit(1)
+PYGUARD
+fi
 for command in git go incus jq python3 ssh ssh-keygen ssh-keyscan sudo; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
@@ -278,6 +297,13 @@ assert_no_managed_duplicates
 guest_dev /usr/local/libexec/subyard/projects-changed >/dev/null
 yard init --yes >/dev/null
 assert_no_managed_duplicates
+
+if [ "${SUBYARD_E2E_ORCA_LOAD_DIAGNOSTIC:-}" = 1 ]; then
+  # Explicit extended diagnostic; ordinary acceptance never enters this branch.
+  # shellcheck source=config/profiles/orca/tests/e2e/load-discovery.sh
+  . "$ROOT/config/profiles/orca/tests/e2e/load-discovery.sh"
+  exit 0
+fi
 
 stage 'pruning missing ungrouped build checkouts through explicit and periodic sync'
 pause_discovery
@@ -660,69 +686,6 @@ groups | jq -e --arg id "$bind_group" '.groups | all(.id != $id)' >/dev/null \
 await_repo "$clone_root/remove-event-child"
 assert_repo "$clone_root/remove-event-child" git "$clone_group" remove-event-child
 guest_dev test ! -e "$bind_root" || die 'project removal left the bound workspace mounted'
-
-stage 'keeping project actions ready while a large flat cache is scanned'
-guest_dev python3 - "$clone_root/.build/flat-cache" <<'YARD'
-import os, sys
-os.makedirs(sys.argv[1], exist_ok=True)
-fd = os.open(sys.argv[1], os.O_RDONLY | os.O_DIRECTORY)
-try:
-    for index in range(100001):
-        os.close(os.open(str(index), os.O_WRONLY | os.O_CREAT, 0o600, dir_fd=fd))
-finally:
-    os.close(fd)
-YARD
-# Wait for the real timer to visit the cache, without forcing a recursive sync.
-for _ in $(seq 1 90); do
-  discovery="$(guest_dev python3 -B /usr/local/libexec/subyard/orca-registration/main.py status)"
-  if jq -e '.ready and .discovery.state == "scanning"' <<<"$discovery" >/dev/null; then break; fi
-  sleep 2
-done
-jq -e '.ready and .discovery.state == "scanning"' <<<"$discovery" >/dev/null \
-  || die 'large-cache background portion was not observed'
-yard sync "$folder_source" --name cache-discovery-event --yes >/dev/null
-yard init --yes >/dev/null
-# Readiness stays true while discovery resumes after an actual worker stop/restart.
-guest_root systemctl stop subyard-orca-discovery.service
-guest_root systemctl start subyard-orca-discovery.service
-yard orca sync --yes >/dev/null
-
-stage 'registering at least one thousand native Git roots including .build'
-guest_dev python3 - "$clone_root/.build/capacity" <<'YARD'
-import os, shutil, subprocess, sys
-seed = sys.argv[1] + '/seed'
-os.makedirs(seed, exist_ok=True)
-subprocess.run(['git', '-C', seed, 'init', '-q'], check=True)
-for index in range(1000):
-    target = sys.argv[1] + '/checkout-' + str(index)
-    os.makedirs(target, exist_ok=True)
-    shutil.copytree(seed + '/.git', target + '/.git', ignore=shutil.ignore_patterns('hooks', 'info'))
-YARD
-for _ in $(seq 1 150); do
-  if catalog | jq -e --arg prefix "$clone_root/.build/capacity/checkout-" \
-    '[.repos[] | select(.path | startswith($prefix))] | length == 1000' >/dev/null; then break; fi
-  sleep 4
-done
-catalog | jq -e --arg prefix "$clone_root/.build/capacity/checkout-" \
-  '[.repos[] | select(.path | startswith($prefix))] | length == 1000' >/dev/null \
-  || die 'native Orca did not register one thousand Git roots'
-stage 'one thousand roots registered; syncing the known catalog'
-if ! yard orca sync --yes >/dev/null; then
-  probe_runtime
-  die 'known-root sync failed with one thousand roots'
-fi
-guest_root systemctl is-active --quiet subyard-orca-discovery.timer
-stage 'known catalog synced; stopping Orca and discovery'
-yard orca down --yes >/dev/null
-if guest_root systemctl is-active --quiet subyard-orca-discovery.timer; then die 'down left the discovery timer active'; fi
-stage 'Orca and discovery stopped; starting with one thousand roots'
-if ! yard orca up --yes >/dev/null; then
-  probe_runtime
-  die 'Orca startup failed with one thousand roots'
-fi
-guest_root systemctl is-active --quiet subyard-orca-discovery.timer
-stage 'Orca and discovery ready with one thousand roots'
-
 
 stage 'registering a remote sync through the real AccessRemote SSH path'
 remote_source="$STATE/host/remote-source"

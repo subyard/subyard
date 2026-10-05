@@ -91,4 +91,77 @@ for name, argv, accepted in (
     assert helper.valid_yard_action(command, "fixture") is accepted, name
 print("ok: owner role check preserves exact arity and selected yard")
 PY
+diagnostic=config/profiles/orca/tests/e2e/load-diagnostic.sh
+cp "$ROOT/$diagnostic" "$tmp/$diagnostic"
+: > "$PROFILE_CONTROLLER_CALLS"
+bash "$tmp/$diagnostic" --help > "$tmp/help"
+[ ! -s "$PROFILE_CONTROLLER_CALLS" ]
+for roots in 1000 1400; do
+  : > "$PROFILE_CONTROLLER_CALLS"
+  bash "$tmp/$diagnostic" --slot 7 --roots "$roots"
+  printf '%s\n' "--slot 7 --vm-count 1 --purpose orca-load-diagnostic --vm 1 -- env SUBYARD_E2E_ORCA_PROJECTS=1 SUBYARD_E2E_ORCA_LOAD_DIAGNOSTIC=1 SUBYARD_E2E_ORCA_LOAD_ROOTS=$roots SUBYARD_E2E_ORCA_LOAD_LANE=load timeout --signal=TERM --kill-after=30s 45m bash config/profiles/orca/tests/e2e/orca-projects.sh" > "$tmp/expected-load"
+  diff -u "$tmp/expected-load" "$PROFILE_CONTROLLER_CALLS"
+done
+: > "$PROFILE_CONTROLLER_CALLS"
+bash "$tmp/$diagnostic" --slot 7 --roots 1400 --lane cleanup
+sed 's/SUBYARD_E2E_ORCA_LOAD_LANE=load/SUBYARD_E2E_ORCA_LOAD_LANE=cleanup/' "$tmp/expected-load" > "$tmp/expected-cleanup"
+diff -u "$tmp/expected-cleanup" "$PROFILE_CONTROLLER_CALLS"
+controller="$diagnostic"
+reject_before_broker
+reject_before_broker --slot 0
+reject_before_broker --slot 7 --roots 999
+reject_before_broker --slot 7 --roots
+reject_before_broker --slot 7 --unknown
+reject_before_broker --slot 7 --lane invalid
+reject_before_broker --slot 7 --lane
+# Environment flags cannot authorize local fixture creation without a matching lease.
+rc=0
+env SUBYARD_E2E_ORCA_PROJECTS=1 SUBYARD_E2E_ORCA_LOAD_DIAGNOSTIC=1 \
+  SUBYARD_E2E_VM=1 SUBYARD_E2E_RUN_ID=invalid SUBYARD_E2E_SLOT=invalid \
+  bash "$ROOT/config/profiles/orca/tests/e2e/orca-projects.sh" > "$tmp/local-guard" 2>&1 || rc=$?
+[ "$rc" -eq 1 ]
+grep -Fq 'load diagnostic requires the matching disposable VM lease' "$tmp/local-guard"
+# Exercise bounded convergence without creating repositories or contacting a runtime.
+sed -n '/^load_sync() {$/,/^}$/p' "$ROOT/config/profiles/orca/tests/e2e/load-discovery.sh" > "$tmp/load-sync-function"
+cat > "$tmp/load-sync-check" <<'SH'
+set -euo pipefail
+die() { printf '%s\n' "$*" >&2; exit 1; }
+stage() { printf '%s\n' "$*" >&2; }
+sleep() { :; }
+guest_dev() {
+  local count=0
+  [ ! -f "$CHECK_DIR/progress" ] || count="$(<"$CHECK_DIR/progress")"
+  printf '%s' "$((count + 1))" > "$CHECK_DIR/progress"
+  if [ "$count" -eq 0 ] || [ "$CHECK_CASE" = no-progress ]; then printf '4\n'; else printf '0\n'; fi
+}
+yard() {
+  local count=0
+  [ ! -f "$CHECK_DIR/calls" ] || count="$(<"$CHECK_DIR/calls")"
+  printf '%s' "$((count + 1))" > "$CHECK_DIR/calls"
+  [ "$count" -eq 0 ] || return 0
+  case "$CHECK_CASE" in
+    lock) printf '%s\n' 'Orca registration error: Another Orca registration invocation holds the lock' ;;
+    *) printf '%s\n' 'Orca registration error: Orca registration time budget exhausted' ;;
+  esac
+  if [ "$CHECK_CASE" = mixed ]; then
+    printf '%s\n' 'Orca registration error: private fixture: Orca runtime request timed out: repo.rm (5.0s)'
+  fi
+  return 1
+}
+load_root=/unused
+. "$CHECK_FUNCTION"
+load_sync
+SH
+for check_case in progress lock no-progress mixed; do
+  mkdir "$tmp/$check_case"
+  rc=0
+  ROOT="$ROOT" CHECK_CASE="$check_case" CHECK_DIR="$tmp/$check_case" \
+    CHECK_FUNCTION="$tmp/load-sync-function" bash "$tmp/load-sync-check" \
+    > "$tmp/$check_case/output" 2>&1 || rc=$?
+  case "$check_case" in
+    progress|lock) [ "$rc" -eq 0 ] && [ "$(<"$tmp/$check_case/calls")" -eq 2 ] ;;
+    no-progress|mixed) [ "$rc" -eq 1 ] && [ "$(<"$tmp/$check_case/calls")" -eq 1 ] ;;
+  esac
+  ! grep -Fq 'private fixture' "$tmp/$check_case/output"
+done
 printf 'ok: complete and independent lane dispatch, argument rejection and failure propagation\n'

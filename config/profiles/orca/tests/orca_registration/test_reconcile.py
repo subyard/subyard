@@ -82,6 +82,157 @@ class ReconcileTests(unittest.TestCase):
         self.assertFalse(any(method == "repo.rm" and params["repo"] == "id:newly-appeared"
                              for method, params in self.rpc.calls))
 
+    def fill_catalog(self, total):
+        # Catalog-only rows: admission regressions create no mass Git fixtures.
+        self.rpc.repos.extend({"id": "manual-" + str(index), "path": "/manual/" + str(index),
+                               "kind": "folder", "executionHostId": "remote"}
+                              for index in range(len(self.rpc.repos), total))
+
+    def test_admission_rechecks_growth_after_the_cached_catalog_read(self):
+        self.assertTrue(self.run_sync()["ready"])
+        self.fill_catalog(999)
+        init_git(self.root / "new-checkout")
+        original = self.rpc.call
+        reads = 0
+
+        def changed(method, params=None, **kwargs):
+            nonlocal reads
+            result = original(method, params, **kwargs)
+            if method == "repo.list":
+                reads += 1
+                if reads == 1:
+                    self.fill_catalog(1000)
+            return result
+
+        self.rpc.call = changed
+        self.rpc.calls.clear()
+        report = self.run_sync()
+        self.assertEqual(1, report["deferred"])
+        self.assertEqual(1000, len(self.rpc.repos))
+        self.assertFalse(any(method == "repo.add" for method, _ in self.rpc.calls))
+
+    def test_definitely_rejected_add_does_not_reserve_capacity(self):
+        self.assertTrue(self.run_sync()["ready"])
+        self.fill_catalog(999)
+        rejected = self.root / "a-rejected"
+        accepted = self.root / "b-accepted"
+        init_git(rejected)
+        init_git(accepted)
+        original = self.rpc.call
+
+        def reject_one(method, params=None, before_send=None):
+            if method == "repo.add" and params["path"] == str(rejected):
+                before_send(self.rpc.runtime_id)
+                raise self.error("request rejected")
+            return original(method, params, before_send=before_send)
+
+        self.rpc.call = reject_one
+        report = self.run_sync()
+        self.assertFalse(report["ready"])
+        self.assertEqual(1000, len(self.rpc.repos))
+        self.assertIn(str(accepted), [repo["path"] for repo in self.rpc.repos])
+        self.assertNotIn(str(rejected), [repo["path"] for repo in self.rpc.repos])
+        self.assertEqual(1, report["deferred"])
+        self.rpc.call = original
+        self.rpc.repos = [repo for repo in self.rpc.repos if repo["path"] != str(accepted)]
+        shutil.rmtree(accepted)
+        self.assertTrue(self.run_sync()["ready"])
+        self.assertIn(str(rejected), [repo["path"] for repo in self.rpc.repos])
+
+    def test_admission_stops_at_1000_and_existing_records_remain_repairable(self):
+        self.fill_catalog(999)
+        self.assertTrue(self.run_sync()["ready"])
+        self.assertEqual(1000, len(self.rpc.repos))
+        existing = self.rpc.repos[-1]
+        existing.update(displayName="My project", sessionIds=["saved-session"])
+        existing_id = existing["id"]
+        init_git(self.root)
+        init_git(self.root / "new-checkout")
+        self.rpc.calls.clear()
+        report = self.run_sync()
+        self.assertFalse(report["ready"])
+        self.assertEqual(1, report["deferred"])
+        self.assertIn("admission limit reached", " ".join(report["errors"]))
+        self.assertEqual(1000, len(self.rpc.repos))
+        self.assertFalse(any(method in ("repo.add", "repo.rm") for method, _ in self.rpc.calls))
+        self.assertEqual((existing_id, "My project", ["saved-session"], "git"),
+                         tuple(existing[key] for key in ("id", "displayName", "sessionIds", "kind")))
+        # A pre-existing over-cap catalog is retained, too.
+        self.rpc.repos.append({"id": "outside-limit", "path": "/manual/outside", "kind": "folder"})
+        self.rpc.repos[-2]["externalWorktreeVisibility"] = "show"
+        self.assertFalse(self.run_sync()["ready"])
+        self.assertEqual(1001, len(self.rpc.repos))
+        self.assertEqual("hide", existing["externalWorktreeVisibility"])
+
+    def test_at_capacity_no_new_project_group_or_add_intent_is_created(self):
+        self.fill_catalog(1000)
+        before = copy.deepcopy(self.rpc.repos)
+        report = self.run_sync()
+        self.assertFalse(report["ready"])
+        self.assertEqual(1, report["deferred"])
+        self.assertEqual(before, self.rpc.repos)
+        self.assertEqual([], self.rpc.groups)
+        self.assertEqual({}, self.sidecar()["projects"]["sample-id"]["pending_repos"])
+        self.assertTrue(all(method.endswith(".list") for method, _ in self.rpc.calls))
+        self.assertEqual(1, self.run_sync(apply=False)["deferred"])
+
+    def test_pending_unknown_add_reserves_the_last_slot_across_projects(self):
+        project(self.workspaces, "other-id", "Other")
+        self.fill_catalog(999)
+        original = self.rpc.call
+        requests = []
+
+        def delayed(method, params=None, before_send=None):
+            if method == "repo.add":
+                before_send(self.rpc.runtime_id)
+                requests.append(params)
+                raise self.error("lost response", unknown=True)
+            return original(method, params, before_send=before_send)
+
+        self.rpc.call = delayed
+        report = self.run_sync()
+        self.assertFalse(report["ready"])
+        self.assertEqual(1, len(requests))
+        self.assertEqual(1, report["deferred"])
+        self.assertFalse(self.run_sync()["ready"])
+        self.assertEqual(1, len(requests))
+        # The old service can no longer finish the unknown request.
+        self.rpc.runtime_id = "runtime-2"
+        self.rpc.call = original
+        report = self.run_sync()
+        self.assertFalse(report["ready"])
+        self.assertEqual(1000, len(self.rpc.repos))
+        self.assertEqual(1, report["registered"])
+        self.assertEqual(1, report["deferred"])
+
+    def test_cap_deferral_does_not_suppress_safe_pruning_and_next_sync_admits(self):
+        gone = self.prepare_missing_repo()
+        init_git(self.root / "new-checkout")
+        self.fill_catalog(1000)
+        report = self.run_sync()
+        self.assertFalse(report["ready"])
+        self.assertNotIn(gone["id"], [repo["id"] for repo in self.rpc.repos])
+        self.assertEqual(999, len(self.rpc.repos))
+        self.assertTrue(self.run_sync()["ready"])
+        self.assertEqual(1000, len(self.rpc.repos))
+
+    def test_cap_rejections_reuse_catalog_and_skip_per_root_git_probes(self):
+        from discovery import Root
+        from reconcile import verify_root
+        self.assertTrue(self.run_sync()["ready"])
+        self.fill_catalog(1000)
+        scan = self.discover(self.workspaces)
+        scan.projects[0].roots.extend(Root(str(self.root / ("new-" + str(index))), "New", "git")
+                                     for index in range(10))
+        self.rpc.calls.clear()
+        with mock.patch("reconcile.verify_root", wraps=verify_root) as verify:
+            report = self.reconcile(scan, self.rpc, self.state, host_name=self.host_name)
+        self.assertEqual(10, report["deferred"])
+        self.assertFalse(report["ready"])
+        self.assertEqual([str(self.root)], [call.args[0].path for call in verify.call_args_list])
+        self.assertEqual(2, sum(method == "repo.list" for method, _ in self.rpc.calls))
+        self.assertTrue(all(method in ("repo.list", "projectGroup.list") for method, _ in self.rpc.calls))
+
     def test_create_exact_names_and_one_group_per_project_id_despite_same_name(self):
         init_git(self.root / "packages/backend")
         other = project(self.workspaces, "other-id")

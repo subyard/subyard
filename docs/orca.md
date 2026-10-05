@@ -4,6 +4,28 @@ Subyard runs a pinned stock Orca server inside a selected yard. The public resou
 profile at `config/profiles/orca/resources/orca.res` declares its endpoint defaults
 and first-run bootstrap. Tailscale and SSH stay on the physical owner host.
 
+## Repository admission safety
+
+Subyard pauses new registrations when the native Orca catalog has 1,000 repository
+records, including folder roots and records on other execution hosts. Unconfirmed
+additions in the same runtime reserve slots because a lost response can still finish
+later. Existing records remain editable at or above the limit; this policy does not
+evict repositories or discard saved terminal tabs. Safe removal of confirmed missing
+checkouts can free capacity for a subsequent sync.
+
+`sync` and `status` report deferred registrations and return an incomplete result
+while new roots cannot be admitted. At capacity, rejected roots reuse the catalog
+instead of issuing a fresh native request and Git probe for each path. Subyard also
+avoids creating empty groups for entirely unadmitted new projects.
+
+This is a limit on Subyard's registration calls. Native clients can independently
+add records, and the limit does not modify Orca or promise performance at 1,000
+repositories. The explicit [VM diagnostic](test-vms.md#extendedmanual-orca-load-diagnostic)
+checks admission and cleanup while reporting stock runtime CPU and RPC behavior.
+Automatic registration does not poll worktree inventories; it reads repository/group
+catalogs and validates Git roots. Periodic discovery leaves Codex settings checks to
+setup and project-event synchronization.
+
 ## Connect over Tailscale
 
 Install Subyard on the server and Orca Desktop on the laptop. Connect both machines
@@ -186,7 +208,8 @@ Desktop as described above.
 Repository discovery runs periodically in the yard, including ignored directories and
 `.build`. Status, project hooks and release activation validate known repository roots
 without scanning their files. Ordinary cache files do not consume a readiness budget;
-there is no per-file watcher or global file-count limit. At least 1000 Git roots are supported.
+there is no per-file watcher or global file-count limit. New registrations follow the
+[repository admission limit](#repository-admission-safety).
 
 The profile's systemd timer runs bounded discovery portions. A durable SQLite queue and
 Linux directory cookies resume across invocations and restarts, rotating between directories

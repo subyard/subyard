@@ -102,6 +102,26 @@ class MainTests(unittest.TestCase):
         self.assertEqual(0, self.run_cli("sync")[0])
         self.assertEqual(1, len(self.rpc.groups))
 
+    def test_cli_capacity_refuses_new_roots_and_recovers_after_a_slot_is_freed(self):
+        # Synthetic native records exercise real CLI/RPC without mass Git roots.
+        self.rpc.repos = [{"id": "manual-" + str(index), "path": "/manual/" + str(index),
+                           "kind": "folder"} for index in range(1000)]
+        self.start_server()
+        for command in ("discover", "status", "sync"):
+            code, report = self.run_cli(command)
+            self.assertNotEqual(0, code)
+            self.assertEqual(1, report["deferred"])
+            self.assertIn("admission limit reached", " ".join(report["errors"]))
+            self.assertEqual(1000, len(self.rpc.repos))
+            self.assertEqual([], self.rpc.groups)
+        self.assertTrue(all(method.endswith(".list") for method, _ in self.rpc.calls))
+        self.rpc.repos.pop()
+        code, report = self.run_cli("sync")
+        self.assertEqual(0, code, report)
+        self.assertEqual((1, 1, 0), (report["registered"], report["total"], report["deferred"]))
+        self.assertEqual(1000, len(self.rpc.repos))
+        self.assertEqual(str(self.root), self.rpc.repos[-1]["path"])
+
     def test_sync_and_periodic_discovery_prune_missing_ungrouped_git_checkouts(self):
         self.start_server()
         self.assertEqual(0, self.run_cli("sync")[0])

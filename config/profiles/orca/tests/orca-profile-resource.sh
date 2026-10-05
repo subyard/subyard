@@ -677,6 +677,10 @@ fi
 
 grep -Fq '/usr/bin/python3 -B /usr/local/libexec/subyard/orca-registration/settings.py' \
   "$ORCA_TEST_CAPTURE/orca-sync" || fail 'project/init hook omitted Codex default convergence'
+if grep -Fq '/usr/local/libexec/subyard/orca-registration/settings.py' \
+  "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration/discover"; then
+  fail 'periodic discovery queried unrelated Codex settings'
+fi
 grep -Fxq 'Environment=SUBYARD_ORCA_CODEX_CONFIG=1' "$ORCA_TEST_CAPTURE/subyard-orca.service" \
   || fail 'Orca service omitted its scoped Codex launch environment'
 dash -n "$ORCA_TEST_GUEST/etc/profile.d/subyard-orca-codex.sh" \

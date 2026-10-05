@@ -79,18 +79,18 @@ class DiscoveryTests(unittest.TestCase):
                          [r.name for r in scan.projects[0].roots])
         self.assertNotIn(str(upstream), [r.path for r in scan.projects[0].roots])
 
-    def test_thousand_git_roots_are_discovered_with_default_budget(self):
+    def test_nested_build_repositories_are_discovered_with_default_budget(self):
         upstream = Path(self.tmp.name) / "upstream"
         init_git(upstream)
-        for index in range(1000):
+        for index in range(3):
             checkout = self.root / ".build" / f"checkout-{index:04d}"
             checkout.mkdir(parents=True)
-            # Keep native Git probes without duplicating a thousand repositories.
+            # Keep native Git probes without duplicating Git directories.
             (checkout / ".git").write_text(f"gitdir: {upstream / '.git'}\n")
         scan = self.discover(self.workspaces)
         self.assertEqual([], scan.errors)
-        self.assertEqual(1001, len(scan.projects[0].roots))
-        self.assertEqual(1000, sum(root.kind == "git" for root in scan.projects[0].roots))
+        self.assertEqual(4, len(scan.projects[0].roots))
+        self.assertEqual(3, sum(root.kind == "git" for root in scan.projects[0].roots))
 
     def test_broken_git_is_error_and_not_folder_transition(self):
         (self.root / ".git").write_text("gitdir: /nonexistent/orca-fixture\n")

@@ -15,6 +15,23 @@ from state import State, StateError
 from transport import RpcError
 
 
+REPOSITORY_LIMIT = 1000
+
+
+class AdmissionLimit(RpcError):
+    pass
+
+
+def _admission_full(state, rpc, repos):
+    # A lost add response can still insert later. Reserve its slot until the
+    # row appears or the runtime that received the request is replaced.
+    local_paths = {repo["path"] for repo in repos if _local(repo)}
+    pending_paths = {path for entry in state.data["projects"].values()
+                     for path, pending in entry.get("pending_repos", {}).items()
+                     if pending.get("runtime_id") == rpc.runtime_id and path not in local_paths}
+    return len(repos) + len(pending_paths) >= REPOSITORY_LIMIT
+
+
 class CatalogRPC:
     """Reuse catalogs on no-op roots; invalidate before every possible mutation."""
     def __init__(self, rpc):
@@ -166,12 +183,16 @@ def _write_and_read(rpc, method, params, path):
 def _apply_repo(state, entry, root, group_id, rpc):
     if root.kind not in ("git", "folder"):
         raise RpcError("Git kind is unverified: " + root.path)
-    # Reject a directory replaced after discovery, including symlink ancestors.
-    if not verify_root(root, state.deadline):
-        raise RpcError("Workspace Git fact changed or became unavailable after discovery: " + root.path)
     repos = _records(rpc, "repo.list", "repos")
     repo = _repo_at(repos, root.path)
     pending_repos = entry.setdefault("pending_repos", {})
+    if repo is None and root.path not in pending_repos and _admission_full(state, rpc, repos):
+        # At capacity, cached facts can only defer a new root. Do not repeatedly
+        # probe Git or refresh the native catalog for every rejected fixture.
+        raise AdmissionLimit("Orca repository admission limit reached")
+    # Reject a directory replaced after discovery, including symlink ancestors.
+    if not verify_root(root, state.deadline):
+        raise RpcError("Workspace Git fact changed or became unavailable after discovery: " + root.path)
     if (repo is None or root.path in pending_repos or repo.get("displayName") in (None, "")
             or repo.get("kind", "git") != root.kind or repo.get("projectGroupId") != group_id
             or root.kind == "git" and repo.get("externalWorktreeVisibility") != "hide"):
@@ -182,13 +203,14 @@ def _apply_repo(state, entry, root, group_id, rpc):
         repo = _repo_at(repos, root.path)
     pending = pending_repos.get(root.path)
     if repo is None:
+        if pending and pending.get("runtime_id") == rpc.runtime_id:
+            raise RpcError("Pending Orca repository creation has no confirmed result; retry after runtime recovery: " + root.path)
+        if _admission_full(state, rpc, repos):
+            raise AdmissionLimit("Orca repository admission limit reached")
         if pending is None:
             pending = {"before_ids": [record["id"] for record in repos], "name": root.name}
             pending_repos[root.path] = pending
             state.save()
-        if pending.get("runtime_id") == rpc.runtime_id:
-            raise RpcError("Pending Orca repository creation has no confirmed result; retry after runtime recovery: " + root.path)
-
         def before_send(runtime_id):
             # addRepo checks duplicates before awaiting Git/icon discovery, so
             # a timed-out request can still insert after the next catalog read.
@@ -251,6 +273,8 @@ def _apply_repo(state, entry, root, group_id, rpc):
 def _report_catalog(report, scan, state, rpc, host_name):
     groups = _records(rpc, "projectGroup.list", "groups")
     repos = _records(rpc, "repo.list", "repos")
+    admission_full = _admission_full(state, rpc, repos)
+    report["deferred"] = 0
     group_ids = {group["id"] for group in groups if _local(group)}
     desired = {root.path for project in scan.projects for root in project.roots}
     project_roots = {project.root for project in scan.projects}
@@ -280,6 +304,13 @@ def _report_catalog(report, scan, state, rpc, host_name):
             if root.kind not in ("git", "folder"):
                 reasons.append("Git kind is unverified")
             if not repo:
+                if (not reasons and admission_full
+                        and entry.get("pending_repos", {}).get(root.path, {}).get("runtime_id") != rpc.runtime_id
+                        and not entry.get("pending_group")):
+                    report["deferred"] += 1
+                    detail["repos"].append({"path": root.path, "kind": root.kind, "ready": False,
+                                            "repoId": None, "deferred": True})
+                    continue
                 reasons.append("repository is missing")
             else:
                 if repo.get("displayName") in (None, ""):
@@ -300,6 +331,10 @@ def _report_catalog(report, scan, state, rpc, host_name):
                                     "repoId": repo.get("id") if repo else None})
             if reasons:
                 report["errors"].append(root.path + ": " + "; ".join(reasons))
+    if report["deferred"]:
+        report["errors"].append(
+            f"Orca repository admission limit reached ({REPOSITORY_LIMIT} records including pending additions); "
+            f"{report['deferred']} new registrations deferred; existing records are retained")
 
 
 def _session_snapshots(rpc):
@@ -475,6 +510,13 @@ def reconcile(scan, rpc, state_dir, apply=True, deadline=None, host_name="", kno
                     if entry.get("known_roots") != roots:
                         entry["known_roots"] = roots
                         state.save()
+                    repos = _records(rpc, "repo.list", "repos")
+                    if (not entry.get("group_id") and not entry.get("pending_group")
+                            and not entry.get("pending_repos") and _admission_full(state, rpc, repos)
+                            and not any(_repo_at(repos, root.path) for root in project.roots)):
+                        # Do not create empty groups for projects whose every
+                        # root would be refused by the admission policy.
+                        continue
                     try:
                         group_id = _group(state, entry, project, rpc, host_name)
                     except RpcError as error:
@@ -486,6 +528,10 @@ def reconcile(scan, rpc, state_dir, apply=True, deadline=None, host_name="", kno
                             break
                         try:
                             _apply_repo(state, entry, root, group_id, rpc)
+                        except AdmissionLimit:
+                            # Report capacity after pruning: new-admission
+                            # refusal must not prevent independently safe cleanup.
+                            continue
                         except RpcError as error:
                             report["errors"].append(root.path + ": " + str(error))
                 _prune_missing(report, scan, state, rpc, approved_ids)

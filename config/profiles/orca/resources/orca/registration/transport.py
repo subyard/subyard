@@ -56,6 +56,7 @@ class RuntimeRPC:
         if params is not None:
             request["params"] = params
         deadline = min(time.monotonic() + self.timeout, self.deadline or float("inf"))
+        budget_limited = self.deadline is not None and deadline == self.deadline
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
                 remaining = deadline - time.monotonic()
@@ -102,7 +103,9 @@ class RuntimeRPC:
                             raise RpcError("Orca runtime returned invalid envelope", unknown=write)
                         return frame["result"]
         except (TimeoutError, socket.timeout):
-            raise RpcError(f"Orca runtime request timed out: {method} ({time.monotonic() - started:.1f}s)",
+            message = ("Orca registration time budget exhausted" if budget_limited else
+                       f"Orca runtime request timed out: {method} ({time.monotonic() - started:.1f}s)")
+            raise RpcError(message,
                            unknown=write and sent, timed_out=True) from None
         except OSError:
             raise RpcError("Orca runtime connection failed", unknown=write and sent) from None

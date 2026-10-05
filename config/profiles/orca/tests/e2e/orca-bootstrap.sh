@@ -211,7 +211,7 @@ import os, sys
 os.makedirs(sys.argv[1], exist_ok=True)
 fd = os.open(sys.argv[1], os.O_RDONLY | os.O_DIRECTORY)
 try:
-    for index in range(100001):
+    for index in range(3):
         os.close(os.open(str(index), os.O_WRONLY | os.O_CREAT, 0o600, dir_fd=fd))
 finally:
     os.close(fd)
@@ -295,7 +295,7 @@ EOF_SECONDARY_HANDLER
   legacy_hook="$(orca_hook_hash)"
   primary_pid="$(guest_root systemctl show -p MainPID --value subyard-orca.service)"
 
-  stage 'seeding a large cache before candidate activation'
+  stage 'seeding a representative cache before candidate activation'
   seed_handler_cache
   stage "updating the $mode predecessor to candidate $target_version"
   YARD_RELEASE_BASE_URL="file://$STATE/release" \

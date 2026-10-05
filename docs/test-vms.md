@@ -541,6 +541,59 @@ dev/agent-e2e.sh --slot "$slot" --purpose orca-projects --vm 1 -- \
   env SUBYARD_E2E_ORCA_PROJECTS=1 bash config/profiles/orca/tests/e2e/orca-projects.sh
 ```
 
+### Extended/manual Orca load diagnostic
+
+This diagnostic is excluded from ordinary tests, profile acceptance and release
+acceptance. Select an available slot and explicitly generate 1,000 or 1,400 roots
+to exercise Subyard's admission limit:
+
+```sh
+bash config/profiles/orca/tests/e2e/load-diagnostic.sh --slot "$slot" --roots 1000
+# Optional larger rejected workload, using a new disposable lease:
+bash config/profiles/orca/tests/e2e/load-diagnostic.sh --slot "$slot" --roots 1400
+# Independent cleanup/interruption check with fresh setup:
+bash config/profiles/orca/tests/e2e/load-diagnostic.sh --slot "$slot" --roots 1400 --lane cleanup
+```
+
+The controller requests one standard VM with purpose `orca-load-diagnostic`. The
+payload has a 45-minute deadline and a 30-second TERM-to-KILL grace period; allocation
+and source transport precede that payload budget. The guest requires a matching lease,
+run, slot and VM identity before mutation, so environment opt-in alone cannot enable
+local execution. All mass Git roots and 100,001 flat files are generated inside the
+leased disposable VM's nested test yard, outside the live controller checkout.
+Marker-owned fixture cleanup runs on normal completion, failure and interruption;
+the runner also releases and deletes the disposable allocation.
+Mass pruning may need several existing 85-second registration cycles. Only an
+exact budget-exhaustion result with fewer fixture records and preserved baseline
+repository/tab IDs permits another batch, with at most six batches and a ten-minute
+retry window. Existing per-invocation deadlines still apply.
+RPC failures and pruning without progress fail the diagnostic. The cleanup lane
+prepares a fresh fixture; it cannot resume a released lease or replace load measurements.
+
+The workload uses stock Orca. Repository admission waits use only the repository
+catalog and saved-tab inventory, and require at most 1,000 total records while
+preserving baseline identities. Only the remaining capacity is admitted from the
+generated roots and seed; the seed does not have to be among the accepted records.
+The loaded fixture can therefore contain more Git roots than registered projects.
+The load lane measures stock behavior, restarts the service and polls for 65 seconds.
+It never switches or patches runtime bytes, and does not invoke sync while deliberately
+rejected fixture roots remain on disk.
+
+Cold measurements check their first RPC round immediately, report startup CPU
+separately, allow a fixed 25-second settlement interval, then measure ten seconds
+of steady idle and another RPC round. Loaded CPU, latency, worktree RPC failures
+and omissions are numeric diagnostics, not promises of native runtime capacity.
+Repository/tab read failures, lost baseline IDs, exceeded admission counts and
+incomplete cleanup fail the diagnostic. Baseline and cleaned phases retain strict
+RPC/completeness checks. Safe cleanup is checked immediately, after another timer
+cycle and after controlled interruption.
+The manual workload enables native main-thread diagnostics in its disposable service
+and emits bounded numeric event-loop and sampled Git trace aggregates per phase,
+including failed phases. Git durations include queue wait; these samples do not expose
+exact child execution time, filesystem probe counts or queue depth. RPC failures retain
+only allowlisted reasons. No raw journal, commands or trace attributes are published.
+Do not run this workload through ordinary acceptance or recreate its fixtures locally.
+
 Bootstrap installs a packaged candidate and exercises public commands through a real terminal.
 For the narrow Codex configuration regression, run:
 

@@ -305,9 +305,12 @@ registration_host_name() {
 }
 
 render_registration_hook() {
-  local version host_name mode="${1:-sync}"
+  local version host_name mode="${1:-sync}" settings_command=':'
   version="$(registration_contract_version)" || return 1
   host_name="$(registration_host_name)" || return 1
+  if [ "$mode" != discover ]; then
+    settings_command="/usr/bin/python3 -B $ORCA_REGISTRATION/settings.py"
+  fi
   cat <<SYNC_HEAD
 #!/usr/bin/env bash
 set -euo pipefail
@@ -330,7 +333,7 @@ fi
 jq -r '(.errors[] | "Orca registration error: " + .), (.warnings[] | "Orca registration warning: " + .)' <<<"\$report" >&2
 jq -r '"Orca checkouts registered: \(.registered)/\(.total)"' <<<"\$report"
 jq -e '.ready' <<<"\$report" >/dev/null || status=1
-[ "\$status" -ne 0 ] || /usr/bin/python3 -B $ORCA_REGISTRATION/settings.py
+[ "\$status" -ne 0 ] || $settings_command
 exit "\$status"
 SYNC_HEAD
 }

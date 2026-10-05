@@ -22,10 +22,11 @@ files because it adds fixtures; that copy needs no Git metadata.
 
 `make test`, `./tests/run.sh` and the host-free profile runner place disposable fixtures in
 `/tmp`, independently of a workspace-local `TMPDIR`, so Orca cannot discover them in the
-working project. Bulk Git-root fixtures also enforce this location when run directly.
-Local discovery tests share one Git directory across their checkout paths; hook-observation
-tests use synthetic Git metadata. The Orca projects acceptance fixture on disposable VMs
-still checks 1000 separate native repositories.
+working project.
+Representative local discovery tests share one Git directory across their checkout paths;
+hook-observation tests use synthetic Git metadata. Ordinary Orca projects acceptance uses
+small native fixtures; mass Git-root generation belongs only to the
+[extended/manual diagnostic](#extendedmanual-diagnostics) on a leased disposable VM.
 
 The runner prints one start/result line per check and a final `SUMMARY` with its
 status, check count, elapsed seconds and original exit code. Successful check output
@@ -166,6 +167,19 @@ contact model APIs or publish Git history. They cover the matcher invocation and
 handling, latest-release installation and preservation of a working binary after a bad download.
 Mocks do not establish compatibility with a real CLI release. Check its native `execpolicy check`
 against the shipped rules for that evidence; real client approve/deny needs separate acceptance.
+
+## Extended/manual diagnostics
+
+The Orca load diagnostic is an explicit manual check, separate from `tests/run.sh`,
+profile host-free runners, profile acceptance lanes and release acceptance. Ordinary
+missing-record regression uses a small representative fixture. The large workload
+of 1,000 or 1,400 Git roots and 100,001 flat files belongs only to the diagnostic's
+leased disposable VM; never generate it in a live controller checkout or its `.build`.
+Local `.build` directories may retain numeric results and sanitized logs.
+
+Run the [dedicated controller](test-vms.md#extendedmanual-orca-load-diagnostic)
+explicitly when measuring Orca catalog behavior. Passing ordinary tests does not prove
+load capacity, and a diagnostic timeout or interrupted run is incomplete evidence.
 
 ## Choose the VM allocation
 

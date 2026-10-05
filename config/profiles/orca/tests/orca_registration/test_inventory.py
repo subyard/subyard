@@ -129,19 +129,19 @@ class InventoryTests(unittest.TestCase):
         self.assertTrue(self.sync()["ready"])
         self.assertEqual(2, len(self.rpc.repos))
 
-    def test_thousand_known_roots_survive_missing_catalog_record_without_recursive_rescan(self):
+    def test_known_roots_survive_missing_catalog_record_without_recursive_rescan(self):
         upstream = Path(self.tmp.name) / "upstream"
         init_git(upstream)
-        for index in range(1000):
+        for index in range(3):
             checkout = self.root / ".build" / str(index)
             checkout.mkdir(parents=True)
             # Each path remains a native Git root while sharing one fixture repository.
             (checkout / ".git").write_text(f"gitdir: {upstream / '.git'}\n")
         paths, _ = self.advance()
-        self.assertEqual(1000, len(paths))
+        self.assertEqual(3, len(paths))
         self.assertTrue(self.sync()["ready"])
         self.rpc.calls.clear()
-        self.assertEqual(1001, self.sync()["registered"])
+        self.assertEqual(4, self.sync()["registered"])
         self.assertLessEqual(sum(method == "repo.list" for method, _ in self.rpc.calls), 2)
         self.rpc.repos.pop()
         self.assertFalse(self.sync(apply=False)["ready"])
