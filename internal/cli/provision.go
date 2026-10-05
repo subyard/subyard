@@ -25,7 +25,10 @@ type provisionExecution struct {
 	endpoint            *provisionEndpoint
 	profiles            []string
 	changedProfiles     []string
+	approvedProfiles    []application.ProvisionProfileStep
+	approvedPowerCycle  bool
 	startupSeeds        []resource.Definition
+	startupSlots        []resource.Definition
 	startupSeedDeferred bool
 	requiresPowerCycle  bool
 	list                bool
@@ -216,15 +219,43 @@ func (execution *provisionExecution) actionPlan(
 	return "yard.provision", delta, nil
 }
 
+// captureApproved freezes the first successful assessment; later observations
+// update the live delta only, never broaden the approved profile decisions.
+func (execution *provisionExecution) captureApproved(conditional bool) {
+	if execution.approvedProfiles != nil {
+		return
+	}
+	execution.approvedProfiles = make([]application.ProvisionProfileStep, 0, len(execution.profiles))
+	for _, name := range execution.profiles {
+		execution.approvedProfiles = append(execution.approvedProfiles, application.ProvisionProfileStep{
+			Profile: name, Converged: !conditional && !slices.Contains(execution.changedProfiles, name), Conditional: conditional,
+		})
+	}
+	execution.approvedPowerCycle = execution.requiresPowerCycle || conditional
+}
+
 func (cli *CLI) observeProvisionExecution(
 	ctx context.Context,
 	loaded config.Loaded,
 	definition command.Definition,
 	execution *provisionExecution,
-) error {
+) (err error) {
 	if execution == nil || execution.list {
 		return errors.New("provision execution is required")
 	}
+	defer func() {
+		if err == nil {
+			if execution.startupSlots == nil {
+				execution.startupSlots = []resource.Definition{}
+				for _, resource := range cli.selectedStartupResources(loaded) {
+					if slices.Contains(execution.profiles, resource.Profile) {
+						execution.startupSlots = append(execution.startupSlots, resource)
+					}
+				}
+			}
+			execution.captureApproved(execution.requiresPowerCycle)
+		}
+	}()
 	execution.changedProfiles = nil
 	execution.requiresPowerCycle = false
 	execution.startupSeeds = nil
@@ -346,7 +377,8 @@ func (cli *CLI) executeProvision(
 	}
 	orchestrator.Runner = application.ProvisionRunner{
 		Power: power, Physical: orchestrator.Runner, GuardStart: guardStart,
-		Yard: loaded.Context, Profiles: execution.profiles, Reporter: provisionReporter{output: diagnostics},
+		Yard: loaded.Context, Profiles: execution.profiles, ApprovedProfiles: slices.Clone(execution.approvedProfiles),
+		AllowTemporaryStart: execution.approvedPowerCycle, Reporter: provisionReporter{output: diagnostics},
 	}
 	request := domain.AdapterRequest{
 		Schema: shelladapter.ProtocolSchema, OperationID: plan.OperationID,

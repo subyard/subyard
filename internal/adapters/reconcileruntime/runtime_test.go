@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/adapters/incusclient"
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -154,6 +157,7 @@ func TestResetTeardownUsesNetworkPolicyBoundary(t *testing.T) {
 	policy := &networkPolicyFixture{startErr: errors.New("policy incomplete")}
 	runtime := Runtime{
 		RepositoryRoot: root, Environment: []string{"TEARDOWN_MARKER=" + marker}, NetworkPolicy: policy,
+		Incus: &testkit.Incus{}, TeardownResources: []ports.TeardownResource{},
 		Yard: domain.Context{
 			YardName: "default", IncusProject: "subyard",
 			YardInstanceName: "yard", IncusBridge: "incusbr0",
@@ -228,20 +232,22 @@ func TestProbeConvergedClassifiesExitStatus(t *testing.T) {
 }
 
 func TestInstallIncusUsesConfiguredSRVPool(t *testing.T) {
-	root := t.TempDir()
+	actor, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := testkit.TempDir(t)
 	scripts := filepath.Join(root, "scripts")
 	if err := os.Mkdir(scripts, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	capture := filepath.Join(root, "storage-pool")
-	if err := os.WriteFile(filepath.Join(scripts, "01-install-incus.sh"), []byte(
-		"#!/bin/sh\nprintf '%s\\n' \"${STORAGE_POOL:-}\" > \"$CAPTURE\"\n",
-	), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(scripts, "01-install-incus.sh"), []byte(
+		"#!/bin/sh\nprintf '%s\\n' \"${STORAGE_POOL:-}\" \"${SUBYARD_USER:-${SUDO_USER:-${USER:-root}}}\" \"$@\" > \"$CAPTURE\"\n",
+	), 0o700)
 	runtime := Runtime{
 		RepositoryRoot: root,
-		Environment:    []string{"CAPTURE=" + capture},
+		Environment:    []string{"CAPTURE=" + capture, "SUDO_USER=subyard-no-such-operator", "USER=root"},
 		Incus:          &testkit.Incus{},
 		SRVPool:        "nested-e2e",
 	}
@@ -252,8 +258,8 @@ func TestInstallIncusUsesConfiguredSRVPool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(pool) != "nested-e2e\n" {
-		t.Fatalf("installer storage pool = %q, want nested-e2e", pool)
+	if string(pool) != "nested-e2e\n"+actor.Username+"\n--yes\n--operator-uid="+strconv.Itoa(os.Getuid())+"\n" {
+		t.Fatalf("installer did not retain configured storage pool and kernel actor: %q", pool)
 	}
 }
 
@@ -876,7 +882,8 @@ func TestIncusProbeOwnsVersionPoolAndNetwork(t *testing.T) {
 		ServerInfo: ports.ServerInfo{Environment: "incus", Version: "6.0.6-debian13"},
 		Reconcile:  ports.ReconcileState{HostPoolFound: true, HostNetworkFound: true},
 	}
-	runtime := Runtime{Incus: incus, Yard: domain.Context{IncusBridge: "incusbr0"}}
+	runtime := Runtime{Incus: incus, Yard: domain.Context{IncusBridge: "incusbr0"},
+		ACLToolsAvailable: func() (bool, error) { return true, nil }}
 	assertStage(t, runtime, "incus", true, "matching Incus bootstrap")
 	incus.ServerInfo.Version = "6.0.5"
 	assertStage(t, runtime, "incus", false, "old Incus")
@@ -1118,7 +1125,8 @@ func TestVMMissingHostToolsAreRepairableIncusStageDrift(t *testing.T) {
 	incus := &testkit.Incus{ServerInfo: ports.ServerInfo{Version: "6.0.6"},
 		Reconcile: ports.ReconcileState{HostPoolFound: true, HostNetworkFound: true}}
 	runtime := Runtime{Incus: incus, Yard: domain.Context{YardKind: domain.YardVM},
-		Environment: []string{"VM_FREE_PAGE_REPORTING=1", "PATH=" + bin}}
+		Environment:       []string{"VM_FREE_PAGE_REPORTING=1", "PATH=" + bin},
+		ACLToolsAvailable: func() (bool, error) { return true, nil }}
 	converged, err := runtime.CheckStage(context.Background(), ports.ReconcileStageIncus)
 	if err != nil || converged {
 		t.Fatalf("absent QEMU should be repairable stage drift: converged %t, err %v", converged, err)
@@ -1128,6 +1136,22 @@ func TestVMMissingHostToolsAreRepairableIncusStageDrift(t *testing.T) {
 	converged, err = runtime.CheckStage(context.Background(), ports.ReconcileStageIncus)
 	if err != nil || !converged {
 		t.Fatalf("installed VM host tools should converge stage: converged %t, err %v", converged, err)
+	}
+	for _, kind := range []domain.YardKind{domain.YardVM, domain.YardContainer} {
+		runtime.Yard.YardKind = kind
+		runtime.ACLToolsAvailable = func() (bool, error) { return false, nil }
+		converged, err = runtime.CheckStage(context.Background(), ports.ReconcileStageIncus)
+		if err != nil || converged != (os.Getuid() == 0) {
+			t.Fatalf("missing named-access tools should be repairable for %s: converged %t, err %v", kind, converged, err)
+		}
+		unsafe := errors.New("unsafe native ACL tool")
+		runtime.ACLToolsAvailable = func() (bool, error) { return false, unsafe }
+		converged, err = runtime.CheckStage(context.Background(), ports.ReconcileStageIncus)
+		if os.Getuid() != 0 && (!errors.Is(err, unsafe) || converged) || os.Getuid() == 0 && (err != nil || !converged) {
+			t.Fatalf("unsafe named-access tools should fail closed for %s: converged %t, err %v", kind, converged, err)
+		}
+		runtime.ACLToolsAvailable = func() (bool, error) { return true, nil }
+		assertStage(t, runtime, "incus", true, "installed native ACL tools")
 	}
 }
 
@@ -1348,4 +1372,67 @@ func assertStage(t *testing.T, runtime Runtime, stage ports.ReconcileStageID, wa
 
 func charDevice(path string) map[string]string {
 	return map[string]string{"type": "unix-char", "source": path, "path": path}
+}
+
+func TestInstallIncusRejectsUnapprovedEndpointAndActorBeforeScript(t *testing.T) {
+	for _, scenario := range []string{"custom socket", "custom directory", "unknown actor"} {
+		t.Run(scenario, func(t *testing.T) {
+			root := testkit.TempDir(t)
+			if err := os.Mkdir(filepath.Join(root, "scripts"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(root, "installed")
+			testkit.WriteFile(t, filepath.Join(root, "scripts", "01-install-incus.sh"), []byte("#!/bin/sh\nprintf mutation > '"+marker+"'\n"), 0700)
+			runtime := Runtime{RepositoryRoot: root, Incus: &testkit.Incus{}}
+			switch scenario {
+			case "custom socket":
+				runtime.Incus = incusclient.New(filepath.Join(root, "custom.socket"))
+			case "custom directory":
+				runtime.Environment = []string{"INCUS_DIR=" + root}
+			case "unknown actor":
+				runtime.Environment = []string{"SUBYARD_USER=subyard-no-such-operator"}
+			}
+			if err := runtime.ApplyStage(context.Background(), ports.ReconcileStageIncus); err == nil {
+				t.Fatal("unapproved installer inputs were accepted")
+			}
+			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("unapproved installer wrote before refusal")
+			}
+		})
+	}
+}
+
+func TestNetworkStageCapturesKernelActorBeforeElevatedScript(t *testing.T) {
+	actor, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := testkit.TempDir(t)
+	if err := os.Mkdir(filepath.Join(root, "scripts"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(root, "arguments")
+	testkit.WriteFile(t, filepath.Join(root, "scripts", "06-network.sh"), []byte("#!/bin/sh\nprintf '%s\\n' \"${SUBYARD_USER:-${SUDO_USER:-${USER:-root}}}\" \"$@\" > '"+marker+"'\n"), 0700)
+	runtime := Runtime{RepositoryRoot: root, Environment: []string{"SUBYARD_USER=subyard-no-such-operator"}}
+	if err := runtime.ApplyStage(context.Background(), ports.ReconcileStageNetwork); err == nil {
+		t.Fatal("unknown network actor accepted")
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("network script ran before actor validation")
+	}
+	for _, environment := range [][]string{
+		nil,
+		{"SUBYARD_USER=" + actor.Username},
+		{"SUDO_USER=subyard-no-such-operator", "USER=root"},
+		{"SUBYARD_USER=" + actor.Username, "SUDO_USER=subyard-no-such-operator", "USER=root"},
+	} {
+		runtime.Environment = environment
+		if err := runtime.ApplyStage(context.Background(), ports.ReconcileStageNetwork); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(marker)
+		if err != nil || string(data) != actor.Username+"\n--yes\n--operator-uid="+strconv.Itoa(os.Getuid())+"\n" {
+			t.Fatalf("kernel actor not retained in script identity and argv: %v", err)
+		}
+	}
 }

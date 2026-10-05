@@ -94,6 +94,9 @@ func TestTestVMsUsesTypedWorkerInvocation(t *testing.T) {
 	}}}}
 	prompt := &testkit.Prompt{Answers: []bool{true}}
 	probe := &testVMStatusProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":1,"state":"available"},{"slot_id":"slot-002","resource_generation":7,"lease_epoch":3,"state":"held"}]}}`)}
+	runner.Steps[0].Apply = func(domain.AdapterRequest) {
+		probe.output = bytes.Replace(probe.output, []byte(`"state":"held"`), []byte(`"state":"available"`), 1)
+	}
 	program, err := New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"test-vms", "revoke", "--slot", "2"},
@@ -162,11 +165,8 @@ func TestRemoteTestVMsForwardsConfirmedLeaseIdentity(t *testing.T) {
 	if err := os.MkdirAll(fakeBin, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	sshLog := filepath.Join(root, "remote-test-vms-ssh.log")
-	writeCLIFile(t, filepath.Join(fakeBin, "ssh"), `#!/bin/sh
-`+trustedSSHMock(t)+`
-printf '%s\n' "$@" >"$SUBYARD_TEST_SSH_LOG"
-`, 0o700)
+	sshLog := writeStructuredOwnerFixture(t, fakeBin, "test-vms", []string{"revoke", "--slot", "2"}, []domain.OperationStep{{ID: "lease.revoke", Target: "inner/test-vms/slot-002", Observed: "held generation 7 epoch 3", Desired: "release generation 7 epoch 3", Decision: domain.StepApply, Verify: "native lease identity is revoked", Consequence: "revoke slot 2 generation 7 epoch 3"}}, "revoke slot 2 generation 7 epoch 3")
+
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
 	environment = append(environment,
 		"PATH="+os.Getenv("PATH"),
@@ -195,14 +195,20 @@ printf '%s\n' "$@" >"$SUBYARD_TEST_SSH_LOG"
 	command := string(forwarded)
 	for _, expected := range []string{
 		"owner.example", "test-vms", "revoke", "--slot", "2",
-		"--expect-resource-generation", "7", "--expect-lease-epoch", "3", "--yes",
+		"operation.plan", "stepSchema", "operation.execute", strings.Repeat("a", 64),
 	} {
 		if !strings.Contains(command, expected) {
 			t.Fatalf("remote forwarding omitted %q:\n%s", expected, command)
 		}
 	}
-	if len(prompt.Requests) != 1 {
-		t.Fatalf("confirmation requests=%#v", prompt.Requests)
+	if len(prompt.Requests) != 1 || !strings.Contains(strings.Join(prompt.Requests[0].Consequences, " "), "generation 7 epoch 3") {
+		t.Fatalf("confirmation lost owner lease identity: %#v", prompt.Requests)
+	}
+	if len(probe.requests) != 0 {
+		t.Fatalf("controller observed owner-native lease state: %#v", probe.requests)
+	}
+	if strings.Count(command, "session ") != 1 || strings.Count(command, `"method": "operation.execute"`) != 1 {
+		t.Fatalf("lease action did not use one exact owner session: %s", command)
 	}
 }
 
@@ -411,7 +417,7 @@ func TestTestVMRevokeAvailableSlotIsNoOpBeforeConfirmation(t *testing.T) {
 	if len(prompt.Requests) != 0 || len(runner.Requests) != 0 {
 		t.Fatalf("available revoke was not a no-op: prompts=%#v requests=%#v", prompt.Requests, runner.Requests)
 	}
-	if len(probe.requests) != 1 || !slices.Equal(probe.requests[0].Command,
+	if len(probe.requests) != 2 || !slices.Equal(probe.requests[0].Command,
 		[]string{"/usr/local/libexec/subyard/test-vms-inner", "_test-vms-worker", "status"}) {
 		t.Fatalf("status probe=%#v", probe.requests)
 	}
@@ -522,9 +528,11 @@ func TestTestVMPreflightRejectsNoncanonicalSlotInventory(t *testing.T) {
 }
 
 type testVMStatusProbe struct {
-	requests []ports.InstanceExecRequest
-	output   []byte
-	err      error
+	afterPath   string
+	afterOutput []byte
+	requests    []ports.InstanceExecRequest
+	output      []byte
+	err         error
 }
 
 func (probe *testVMStatusProbe) Execute(
@@ -535,6 +543,11 @@ func (probe *testVMStatusProbe) Execute(
 	probe.requests = append(probe.requests, request)
 	if probe.err != nil {
 		return ports.InstanceExecResult{}, probe.err
+	}
+	if probe.afterPath != "" {
+		if _, err := os.Stat(probe.afterPath); err == nil {
+			return ports.InstanceExecResult{Stdout: probe.afterOutput}, nil
+		}
 	}
 	return ports.InstanceExecResult{Stdout: probe.output}, nil
 }
@@ -611,16 +624,23 @@ func TestTeardownRejectsUnknownInputAndPublishesMode(t *testing.T) {
 		t.Fatal("unsafe teardown argument was accepted")
 	}
 	root, environment, _ := nativeFixture(t)
+	dispatcher := filepath.Join(root, ".build", "yard")
 	runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{
 		Schema: 1, OperationID: "teardown-test", Status: "ok",
 	}}}}
+	incus := lifecycleIncus()
+	incus.Reconcile.InstanceFound = true
+	runner.Steps[0].Apply = func(domain.AdapterRequest) {
+		incus.Reconcile.InstanceFound = false
+		incus.Instances = map[string]ports.InstanceInfo{}
+	}
 	prompt := &testkit.Prompt{Answers: []bool{true}}
 	var stderr bytes.Buffer
 	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Arguments: []string{"teardown", "--keep-data"},
-		Environment: append(environment, "SUBYARD_OPERATION_ID=teardown-test"), WorkingDir: root,
+		RepositoryRoot: root, Program: "yard", DispatcherPath: dispatcher, Arguments: []string{"teardown", "--keep-data"},
+		Environment: append(environment, "SUBYARD_OPERATION_ID=teardown-test", "SUBYARD_DISPATCHER_PATH=/ambient/engine"), WorkingDir: root,
 		AdapterRunner: runner, Prompt: prompt, Clock: testkit.NewManualClock(time.Unix(100, 0)),
-		Stderr: &stderr, Incus: &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true}},
+		Stderr: &stderr, Incus: incus,
 		NetworkPolicy: allowTestNetworkPolicy(),
 	})
 	if err != nil {
@@ -630,6 +650,7 @@ func TestTeardownRejectsUnknownInputAndPublishesMode(t *testing.T) {
 		t.Fatalf("teardown failed: code=%d stderr=%q", code, stderr.String())
 	}
 	if len(runner.Requests) != 1 || runner.Requests[0].Adapter != "teardown" ||
+		runner.Requests[0].Context["SUBYARD_DISPATCHER_PATH"] != dispatcher ||
 		runner.Requests[0].Context["SUBYARD_TEARDOWN_KEEP_DATA"] != "1" ||
 		runner.Requests[0].Context["SUBYARD_TEARDOWN_KEEP_SHARED"] != "0" {
 		t.Fatalf("requests=%#v", runner.Requests)
@@ -674,6 +695,11 @@ func TestLifecycleStartFailsClosedWithoutNetworkPolicyAdapter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	execution := &lifecycleExecution{action: "start"}
+	yard := domain.Context{YardName: "default", IncusProject: "subyard", YardInstanceName: "yard", IncusBridge: "incusbr0"}
+	if err := program.observeLifecycleExecution(context.Background(), yard, execution); err != nil {
+		t.Fatal(err)
+	}
 	result, err := program.executeLifecycle(
 		context.Background(),
 		program.operationOrchestrator("start-without-network-policy", config.Loaded{Context: domain.Context{
@@ -681,7 +707,7 @@ func TestLifecycleStartFailsClosedWithoutNetworkPolicyAdapter(t *testing.T) {
 		}}, nil, nil),
 		domain.Context{YardName: "default", IncusProject: "subyard", YardInstanceName: "yard", IncusBridge: "incusbr0"},
 		domain.OperationPlan{OperationID: "start-without-network-policy", Confirmed: true},
-		&lifecycleExecution{action: "start"}, io.Discard,
+		execution, io.Discard,
 	)
 	if err == nil || !strings.Contains(err.Error(), "network policy adapter is unavailable") ||
 		result.Status != "" || len(runner.Requests) != 0 {
@@ -791,14 +817,20 @@ func TestTeardownKeepsSharedIncusForAnotherRegisteredLocalYard(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeCLIFile(t, filepath.Join(yardDirectory, "config.env"), "SSH_PORT=2223\n", 0o600)
+	incus := lifecycleIncus()
+	incus.Reconcile.InstanceFound = true
 	runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{
 		Schema: 1, OperationID: "teardown-shared-test", Status: "ok",
 	}}}}
+	runner.Steps[0].Apply = func(domain.AdapterRequest) {
+		incus.Reconcile.InstanceFound = false
+		incus.Instances = map[string]ports.InstanceInfo{}
+	}
 	program, err := New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"teardown", "--yes"},
 		Environment: append(environment, "SUBYARD_OPERATION_ID=teardown-shared-test"), WorkingDir: root,
 		AdapterRunner: runner, Prompt: &testkit.Prompt{},
-		Incus: &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true}},
+		Incus: incus,
 		Clock: testkit.NewManualClock(time.Unix(100, 0)), NetworkPolicy: allowTestNetworkPolicy(),
 	})
 	if err != nil {
@@ -828,6 +860,8 @@ func TestLegacyVMRetirementRequiresDefaultNoAndExactIdentity(t *testing.T) {
 	instance.Status = "Running"
 	incus.Instances["subyard/yard"] = instance
 	probe := &testVMStatusProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":2,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":7,"lease_epoch":0,"state":"available","legacy_retained":true}]}}`)}
+	probe.afterPath = filepath.Join(root, "retirement-arguments")
+	probe.afterOutput = bytes.Replace(probe.output, []byte(`"legacy_retained":true`), []byte(`"legacy_retained":false`), 1)
 	prompt := &testkit.Prompt{Answers: []bool{true}}
 	if err := os.MkdirAll(filepath.Join(root, "scripts/e2e-lab"), 0o700); err != nil {
 		t.Fatal(err)

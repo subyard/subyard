@@ -543,7 +543,14 @@ func mergeLegacyRoutes(
 		if yard == "" {
 			yard = "default"
 		}
-		route := ownerinventory.YardRoute{SSHHost: "yard-" + record.Spec.LegacyAlias}
+		sshHost := record.SSHHost
+		if sshHost == "" {
+			sshHost = "yard-" + record.Spec.LegacyAlias
+		}
+		if !domain.SafeSSHTarget(sshHost) {
+			return false, errors.New("invalid registered remote data-plane SSH target")
+		}
+		route := ownerinventory.YardRoute{SSHHost: sshHost}
 		if existing, exists := connection.Yards[yard]; exists && existing != route {
 			return false, fmt.Errorf(
 				"OwnerHost %q has conflicting transport routes for yard %q",
@@ -839,7 +846,7 @@ func (cli *CLI) ownerYardRouteWithMode(
 	if err != nil {
 		return "", domain.Context{}, err
 	}
-	if hostID == localHostID {
+	if hostID == localHostID && loaded.Context.AccessKind != domain.AccessRemote {
 		contextValue, err := cli.loadInventoryContext(yardName, loaded)
 		return yardName, contextValue, err
 	}
@@ -886,6 +893,12 @@ func (cli *CLI) ownerYardRouteWithMode(
 			return "", domain.Context{}, fmt.Errorf("%w: remote yard alias conflicts with the registered owner route", domain.ErrPlanStale)
 		}
 		return loaded.Context.YardName, loaded.Context, nil
+	}
+	// An explicitly selected remote registration can address this physical host.
+	// Its owner yard still belongs to the remote config and data-plane authority.
+	if hostID == localHostID {
+		contextValue, err := cli.loadInventoryContext(yardName, loaded)
+		return yardName, contextValue, err
 	}
 	if route.SSHHost != "" {
 		contextValue := loaded.Context

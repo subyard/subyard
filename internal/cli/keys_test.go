@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -183,96 +182,19 @@ func TestRPCKeysPrepareBuildsOwnerPlanWithoutReadingProtectedInput(t *testing.T)
 	}
 }
 
-func TestRemoteKeysTransfersProtectedStdinOnlyAfterOwnerPlanConsent(t *testing.T) {
-	for _, test := range []struct {
-		name            string
-		arguments       []string
-		prompt          *testkit.Prompt
-		wantCode        int
-		wantPayloadRead bool
-	}{
-		{name: "declined", prompt: &testkit.Prompt{Answers: []bool{false}}, wantCode: 1},
-		{name: "accepted", prompt: &testkit.Prompt{Answers: []bool{true}}, wantCode: 0, wantPayloadRead: true},
-		{
-			name: "explicit yes", arguments: []string{"-Y", "remote", "--yes", "keys", "add", "fixture"},
-			wantCode: 0, wantPayloadRead: true,
-		},
-		{name: "non-terminal", wantCode: 1},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			root, home, configHome, environment := configCommandFixture(t)
-			writeConfigCommandFile(t,
-				filepath.Join(configHome, "yards", "remote", "config.env"),
-				"YARD_TYPE=remote\nREMOTE_DEST=owner.example\nREMOTE_YARD=inner\nSSH_PORT=4444\n")
-			operationID := "remote-credential-operation"
-			plan := remoteCredentialAddPlan(operationID)
-			response := filepath.Join(home, "owner-response")
-			writeCredentialRPCResponse(t, response, plan)
-			requestLog := filepath.Join(home, "owner-request")
-			payloadLog := filepath.Join(home, "protected-payload")
-			executeLog := filepath.Join(home, "owner-execute")
-			fakeBin := filepath.Join(home, "fake-bin")
-			writeConfigCommandFile(t, filepath.Join(fakeBin, "ssh"), `#!/bin/sh
-set -eu
-`+trustedSSHMock(t)+`
-for argument do
-  if [ "$argument" = "-T" ]; then
-  cp /dev/stdin "$SUBYARD_TEST_RPC_REQUEST"
-  cat "$SUBYARD_TEST_RPC_RESPONSE"
-  exit 0
-  fi
-done
-printf '%s\n' "$*" >"$SUBYARD_TEST_EXECUTE_ARGS"
-cp /dev/stdin "$SUBYARD_TEST_PAYLOAD"
-`, 0o700)
-			t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
-			environment = append(environment,
-				"PATH="+os.Getenv("PATH"),
-				"SUBYARD_OPERATION_ID="+operationID,
-				"SUBYARD_TEST_RPC_RESPONSE="+response,
-				"SUBYARD_TEST_RPC_REQUEST="+requestLog,
-				"SUBYARD_TEST_EXECUTE_ARGS="+executeLog,
-				"SUBYARD_TEST_PAYLOAD="+payloadLog)
+func TestRemoteKeysProtectedInputRequiresOwnerLocalTransport(t *testing.T) {
+	for _, arguments := range [][]string{{"add", "fixture"}, {"--yes", "add", "fixture"}, {"import", "owner-file"}, {"rotate", "credential"}, {"resolve", "credential", "--rotate"}} {
+		t.Run(strings.Join(arguments, " "), func(t *testing.T) {
 			input := &credentialInputProbe{reader: strings.NewReader("protected-value")}
-			var stderr bytes.Buffer
-			arguments := test.arguments
-			if arguments == nil {
-				arguments = []string{"-Y", "remote", "keys", "add", "fixture"}
+			prompt := &testkit.Prompt{Answers: []bool{true}}
+			program, loaded, definition, _ := credentialCLIFixture(t, input, prompt, true)
+			loaded.Context.AccessKind = domain.AccessRemote
+			loaded.Context.OwnerEndpoint = "unreachable.invalid"
+			if code := program.runRemoteKeys(context.Background(), loaded, definition, arguments); code != 1 {
+				t.Fatalf("protected remote code=%d", code)
 			}
-			options := Options{
-				RepositoryRoot: root, Program: "yard",
-				Arguments:   arguments,
-				Environment: environment, WorkingDir: root,
-				Stdin: input, Stdout: &bytes.Buffer{}, Stderr: &stderr,
-			}
-			if test.prompt != nil {
-				options.Prompt = test.prompt
-			}
-			program, err := New(options)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if code := program.Run(context.Background()); code != test.wantCode {
-				t.Fatalf("remote keys code=%d want=%d stderr=%q", code, test.wantCode, stderr.String())
-			}
-			request, err := os.ReadFile(requestLog)
-			if err != nil {
-				t.Fatalf("owner prepare RPC was not sent: %v", err)
-			}
-			if bytes.Contains(request, []byte("protected-value")) {
-				t.Fatal("protected payload crossed the owner prepare RPC")
-			}
-			payload, payloadErr := os.ReadFile(payloadLog)
-			if test.wantPayloadRead {
-				if payloadErr != nil || string(payload) != "protected-value" || input.reads == 0 {
-					t.Fatalf("accepted payload=%q reads=%d err=%v", payload, input.reads, payloadErr)
-				}
-				execute, err := os.ReadFile(executeLog)
-				if err != nil || strings.Index(string(execute), "fixture") > strings.Index(string(execute), "--yes") {
-					t.Fatalf("owner execute did not retain keys subcommand before explicit consent: %q err=%v", execute, err)
-				}
-			} else if !errors.Is(payloadErr, os.ErrNotExist) || input.reads != 0 {
-				t.Fatalf("unconfirmed payload crossed SSH: payload=%q reads=%d err=%v", payload, input.reads, payloadErr)
+			if input.reads != 0 || len(prompt.Requests) != 0 {
+				t.Fatal("protected remote action consumed payload or prompted")
 			}
 		})
 	}
@@ -303,50 +225,6 @@ func TestCredentialPreparedActionsReachCoreRegistry(t *testing.T) {
 			t.Fatalf("Prepared action %q cannot reach core registry: %v", action, err)
 		}
 	}
-}
-
-func remoteCredentialAddPlan(operationID string) domain.OperationPlan {
-	consequences := []string{
-		"add encrypted credential \"fixture\"",
-		"kind=token zone=staging consumer=none local-only=false exclusive=false",
-		"read the protected value only after confirmation and publish one signed immutable revision",
-	}
-	request := domain.ConfirmationRequest{
-		Summary: "Add encrypted credential", Consequences: append([]string(nil), consequences...),
-		Default: domain.ConfirmationDefaultYes,
-	}
-	assessment := domain.ActionAssessment{
-		Action: "keys.add", Effect: domain.ActionMutation, Changed: true,
-		Impacts: []domain.ActionImpact{
-			domain.ImpactAccess, domain.ImpactLocalMetadata, domain.ImpactPersistentData, domain.ImpactSecurity,
-		},
-		Recovery: domain.RecoveryReversible, Consequences: append([]string(nil), consequences...),
-	}
-	return domain.OperationPlan{
-		OperationID: operationID, Command: "keys add", Effect: domain.CommandMutate,
-		Confirmation: domain.ConfirmationPromptDefaultYes, Target: domain.TargetLocalOwner,
-		Consequences: append([]string(nil), consequences...), Assessment: &assessment,
-		ConfirmationRequest: &request, CreatedAt: time.Unix(100, 0).UTC(),
-	}
-}
-
-func writeCredentialRPCResponse(t *testing.T, path string, plan domain.OperationPlan) {
-	t.Helper()
-	var response bytes.Buffer
-	codec := rpc.NewCodec(bytes.NewReader(nil), &response)
-	if err := codec.Write(rpc.Response{
-		Version: rpc.ProtocolVersion, Type: "response", ID: "negotiate",
-		Result: map[string]any{"capabilities": []string{"credential-prepare-v1"}},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := codec.Write(rpc.Response{
-		Version: rpc.ProtocolVersion, Type: "response", ID: "keys-prepare",
-		OperationID: plan.OperationID, Result: plan,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	writeConfigCommandFile(t, path, response.String(), 0o600)
 }
 
 func credentialCLIFixture(

@@ -2,17 +2,18 @@ package reconcileruntime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"maps"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 
 	"github.com/Subyard/Subyard/internal/adapters/credentialruntime"
 	"github.com/Subyard/Subyard/internal/adapters/hostruntime"
@@ -21,10 +22,10 @@ import (
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/operatoraccess"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/resource"
-	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/sshidentity"
 	"github.com/Subyard/Subyard/internal/sshrelay"
 	"github.com/Subyard/Subyard/internal/systemdunit"
@@ -43,9 +44,14 @@ type vmIPv4Pinner interface {
 
 type Runtime struct {
 	RepositoryRoot string
+	// TeardownResources is the approved pre-consent reset inventory; nil is unprepared.
+	TeardownResources []ports.TeardownResource
 	// Profiles is the immutable per-operation profile snapshot when supplied by
 	// the caller. Nil falls back to loading the shipped declarations from disk.
-	Profiles    []profile.Definition
+	Profiles []profile.Definition
+	// RuntimePlan retains the individual native contracts approved before init.
+	RuntimePlan *ProfileRuntimePlan
+	HookPlan    *ProjectHookPlan
 	Environment []string
 	// AdoptLegacyIntegrations permits one initial, exact ownership adoption during
 	// a reviewed init plan. Ordinary integration commands leave it false.
@@ -53,14 +59,13 @@ type Runtime struct {
 	// LegacyIntegrationFingerprint binds the reviewed initial adoption until its
 	// first inventory publication. Retries with established evidence ignore it.
 	LegacyIntegrationFingerprint string
-	// LaunchEnvironment is the unresolved CLI input, used only when restarting
-	// the dispatcher. Resolved yard settings must not become command overrides.
+	// LaunchEnvironment retains unresolved caller inputs separately from yard settings.
 	LaunchEnvironment []string
-	// InitProfile preserves the explicitly selected profile across owner-group reexec.
+	// InitProfile preserves the explicitly selected profile.
 	InitProfile string
-	// ProvisionProfile resumes composed provisioning after owner-group reexec.
+	// ProvisionProfile retains composed provisioning selection.
 	ProvisionProfile string
-	// ResourceCommand and ResourceArguments resume validated resource bring-up.
+	// ResourceCommand and ResourceArguments retain validated resource bring-up.
 	ResourceCommand   string
 	ResourceArguments []string
 	Stdin             io.Reader
@@ -75,6 +80,8 @@ type Runtime struct {
 	SRVVolume         string
 	HostDeviceRoot    string
 	NetworkPolicy     YardNetworkPolicy
+	// ACLToolsAvailable overrides the native read-only prerequisite probe when supplied.
+	ACLToolsAvailable func() (bool, error)
 }
 
 func (runtime Runtime) CheckStage(ctx context.Context, stage ports.ReconcileStageID) (bool, error) {
@@ -162,7 +169,13 @@ func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStag
 	case ports.ReconcileStageGitIdentity:
 		return runtime.applyGitIdentity(ctx)
 	case ports.ReconcileStageNetwork:
-		return runtime.runScript(ctx, runtime.Stderr, "06-network.sh", "--yes")
+		operator, err := runtime.operatorIdentity()
+		if err != nil {
+			return err
+		}
+		return runtime.runScriptEnvironment(ctx, runtime.Stderr,
+			map[string]string{"SUBYARD_USER": operator.Username},
+			"06-network.sh", "--yes", "--operator-uid="+operator.Uid)
 	case ports.ReconcileStageNetworkPolicy:
 		if runtime.NetworkPolicy == nil {
 			return errors.New("yard network policy service is required")
@@ -674,6 +687,16 @@ func (runtime Runtime) incusReady(ctx context.Context) (bool, error) {
 }
 
 func (runtime Runtime) incusConverged(ctx context.Context) (bool, error) {
+	if os.Getuid() != 0 {
+		probe := runtime.ACLToolsAvailable
+		if probe == nil {
+			probe = operatoraccess.NativeACLToolsAvailable
+		}
+		available, err := probe()
+		if err != nil || !available {
+			return false, err
+		}
+	}
 	if runtime.Yard.YardKind == domain.YardVM {
 		path := runtime.environmentValue("PATH")
 		if path == "" {
@@ -751,63 +774,49 @@ func versionAtLeast(current, minimum string) bool {
 	return true
 }
 
+func (runtime Runtime) operatorIdentity() (*user.User, error) {
+	// An outer sudo may leave ambient account names for a different caller.
+	// Bind both the shell identity and approved UID to this process instead.
+	uid := strconv.Itoa(os.Getuid())
+	var operator *user.User
+	var err error
+	if actor := runtime.environmentValue("SUBYARD_USER"); actor != "" {
+		operator, err = user.Lookup(actor)
+	} else {
+		operator, err = user.LookupId(uid)
+	}
+	if err != nil {
+		return nil, errors.New("approved native operator identity is unavailable")
+	}
+	if operator.Uid != uid {
+		return nil, errors.New("approved native operator differs from the current caller")
+	}
+	return operator, nil
+}
+
 func (runtime Runtime) installIncus(ctx context.Context) error {
+	if endpoint, ok := runtime.Incus.(interface{ DefaultLocalEndpoint() bool }); ok && !endpoint.DefaultLocalEndpoint() {
+		return errors.New("Incus installation requires the default local server endpoint")
+	}
+	for _, name := range []string{"INCUS_SOCKET", "INCUS_DIR", "SUBYARD_INCUS_SOCKET"} {
+		if runtime.environmentValue(name) != "" {
+			return errors.New("Incus installation requires the default local server endpoint")
+		}
+	}
+	operator, err := runtime.operatorIdentity()
+	if err != nil {
+		return err
+	}
 	pool, _ := runtime.volumeNames()
 	if err := runtime.runScriptEnvironment(ctx, runtime.Stderr,
-		map[string]string{"STORAGE_POOL": pool}, "01-install-incus.sh", "--yes"); err != nil {
+		map[string]string{"STORAGE_POOL": pool, "SUBYARD_USER": operator.Username},
+		"01-install-incus.sh", "--yes", "--operator-uid="+operator.Uid); err != nil {
 		return err
 	}
 	if ready, _ := runtime.incusReady(ctx); ready {
 		return nil
 	}
-	dispatcher := runtime.environmentValue("SUBYARD_DISPATCHER_PATH")
-	if dispatcher == "" || runtime.LaunchEnvironment == nil || runtime.environmentValue("SUBYARD_SG_REEXEC") == "1" {
-		return errors.New("open a fresh incus-admin session, then rerun the same yard command")
-	}
-	sg, err := runtime.executableFromPath("sg")
-	if err != nil {
-		return errors.New("open a fresh incus-admin session, then rerun the same yard command")
-	}
-	arguments, err := runtime.initReexecArguments(dispatcher)
-	if err != nil {
-		return err
-	}
-	words := []string{"env", "SUBYARD_SG_REEXEC=1", "ASSUME_YES=1"}
-	for _, argument := range arguments {
-		words = append(words, shellquote.Word(argument))
-	}
-	command := strings.Join(words, " ")
-	environment := append([]string(nil), runtime.LaunchEnvironment...)
-	environment = append(environment, "SUBYARD_SG_REEXEC=1", "ASSUME_YES=1")
-	return syscall.Exec(sg, []string{"sg", "incus-admin", "-c", command}, environment)
-}
-
-func (runtime Runtime) initReexecArguments(dispatcher string) ([]string, error) {
-	arguments := []string{dispatcher}
-	if runtime.Yard.YardName != "" {
-		arguments = append(arguments, "-Y", runtime.Yard.YardName)
-	}
-	if runtime.ResourceCommand != "" || len(runtime.ResourceArguments) != 0 {
-		if !domain.SafeName(runtime.ResourceCommand) || len(runtime.ResourceArguments) == 0 || !domain.SafeName(runtime.ResourceArguments[0]) {
-			return nil, errors.New("invalid resource continuation for owner-group reexec")
-		}
-		arguments = append(arguments, "--yes", runtime.ResourceCommand)
-		return append(arguments, runtime.ResourceArguments...), nil
-	}
-	if runtime.ProvisionProfile != "" {
-		if !domain.SafeName(runtime.ProvisionProfile) {
-			return nil, errors.New("invalid provision profile for owner-group reexec")
-		}
-		return append(arguments, "provision", runtime.ProvisionProfile, "--yes"), nil
-	}
-	arguments = append(arguments, "init", "--yes")
-	if runtime.InitProfile != "" {
-		if !domain.SafeName(runtime.InitProfile) {
-			return nil, errors.New("invalid init profile for owner-group reexec")
-		}
-		arguments = append(arguments, "--profile", runtime.InitProfile)
-	}
-	return arguments, nil
+	return errors.New("native Incus access is still unavailable after installation; open a fresh incus-admin session, then rerun the same yard command for a new assessment")
 }
 
 func charDeviceMatches(device map[string]string, path string) bool {
@@ -829,17 +838,60 @@ func (runtime Runtime) Preflight(ctx context.Context, fresh bool) error {
 }
 
 func (runtime Runtime) Teardown(ctx context.Context) error {
+	if runtime.TeardownResources == nil {
+		return errors.New("approved exact reset teardown inventory is required")
+	}
+	current, err := runtime.TeardownInventory(ctx)
+	if err != nil {
+		return err
+	}
+	if err := ports.CheckTeardownResources(runtime.TeardownResources, current); err != nil {
+		return err
+	}
+	payload, err := json.Marshal(current)
+	if err != nil {
+		return err
+	}
+	if len(payload) > 64<<10 {
+		return errors.New("reset teardown inventory exceeds physical guard limit")
+	}
 	keepShared := "0"
 	if hasOtherRegisteredLocalYard(runtime.Yard.YardName, runtime.powerYards()) {
 		keepShared = "1"
 	}
-	return runtime.withNetworkStart(ctx, func() error {
+	err = runtime.withNetworkStart(ctx, func() error {
 		return runtime.runScriptEnvironment(ctx, runtime.Stdout,
 			map[string]string{
 				"SUBYARD_TEARDOWN_KEEP_DATA":   "0",
+				"SUBYARD_TEARDOWN_INVENTORY":   string(payload),
 				"SUBYARD_TEARDOWN_KEEP_SHARED": keepShared,
 			}, "teardown-physical.sh", "--yes")
 	})
+	if err != nil {
+		return err
+	}
+	remaining, err := runtime.TeardownInventory(ctx)
+	if err != nil {
+		return err
+	}
+	sharedRetained := hasOtherRegisteredLocalYard(runtime.Yard.YardName, runtime.powerYards())
+	if inventory, ok := runtime.Incus.(ports.InstanceInventory); ok {
+		survivors, err := inventory.ListInstances(ctx)
+		if err != nil {
+			return err
+		}
+		sharedRetained = sharedRetained || len(survivors) != 0
+	} else {
+		return errors.New("reset retention verification requires instance inventory")
+	}
+	for _, resource := range remaining {
+		if (resource.Kind == "network" || resource.Kind == "pool") && sharedRetained {
+			continue
+		}
+		return errors.New("reset teardown did not establish approved absence or shared retention")
+	}
+	return nil
+
 }
 
 func hasOtherRegisteredLocalYard(current string, yards []domain.Context) bool {
@@ -1931,4 +1983,33 @@ func (runtime Runtime) profileServicesConverged(ctx context.Context) (bool, erro
 		environment["SUBYARD_PROFILE_STOPPED"] = "1"
 	}
 	return probeConverged(runtime.runScriptEnvironment(ctx, nil, environment, "profile-services.sh", "--check"))
+}
+
+// TeardownInventory is read-only and must be called when the reset is planned.
+func (runtime Runtime) TeardownInventory(ctx context.Context) ([]ports.TeardownResource, error) {
+	reader, ok := runtime.Incus.(ports.TeardownInventoryReader)
+	if !ok {
+		return nil, errors.New("exact reset teardown inventory adapter is required")
+	}
+	resources, err := reader.TeardownInventory(ctx, runtime.Yard.IncusProject)
+	if err != nil {
+		return nil, err
+	}
+	sharedReader, ok := runtime.Incus.(ports.TeardownSharedInventoryReader)
+	if !ok {
+		return nil, errors.New("exact shared reset inventory adapter is required")
+	}
+	shared, err := sharedReader.TeardownSharedInventory(ctx, firstTeardownPool(runtime.environmentValue("STORAGE_POOL"), runtime.environmentValue("SRV_POOL")), runtime.Yard.IncusBridge)
+	resources = append(resources, shared...)
+	if resources == nil && err == nil {
+		resources = []ports.TeardownResource{}
+	}
+	return resources, err
+}
+
+func firstTeardownPool(pool, srvPool string) string {
+	if pool != "" {
+		return pool
+	}
+	return srvPool
 }

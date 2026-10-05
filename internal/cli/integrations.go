@@ -200,7 +200,29 @@ func (prepared *preparedCommand) prepareIntegration(ctx context.Context, _ *init
 	prepared.exactState = operationStateDigest(struct {
 		Runtime string
 		Write   *config.YardIntegrationWrite
-	}{plan.Fingerprint, write})
+	}{plan.StateBinding(), write})
+	prepared.stepsComplete = plan.Scope != ""
+	selectionConsequence := "store requested integrations for yard " + loaded.Context.YardName + ": "
+	if value == "" {
+		selectionConsequence += "none"
+	} else {
+		selectionConsequence += value
+	}
+	prepared.steps = func() []domain.OperationStep {
+		decision, observed := domain.StepSkip, "converged"
+		if desiredChanged {
+			decision, observed = domain.StepApply, "captured persistent registration"
+		}
+		target := write.SourcePath
+		if target == "" {
+			target = loaded.Context.Paths.ConfigHome + ":yard " + loaded.Context.YardName
+		}
+		steps := []domain.OperationStep{{ID: "integration.selection", Target: target, Observed: observed, Desired: "requested integrations [" + strings.Join(requested, ", ") + "]", Decision: decision,
+			Preconditions: []string{"canonical registration, role and persistent configuration remain valid"}, Verify: "read the canonical requested integration selection", Consequence: selectionConsequence}}
+		steps = append(steps, plan.OperationSteps(loaded.Context.IncusProject+"/"+loaded.Context.YardInstanceName)...)
+		steps[1].DependsOn = []string{steps[0].ID}
+		return steps
+	}
 	consequences := slices.Clone(plan.Steps)
 	gitRoot := filepath.Join(loaded.Context.Paths.ConfigHome, filepath.FromSlash(config.GitSettingsRelativePath))
 	if write.FlatBefore.Exists || (write.SourcePath != "" && !strings.HasPrefix(write.SourcePath, gitRoot+string(filepath.Separator))) {
@@ -245,8 +267,8 @@ func (prepared *preparedCommand) prepareIntegration(ctx context.Context, _ *init
 		if err != nil {
 			return result, err
 		}
-		if observed.Fingerprint != plan.Fingerprint {
-			return result, fmt.Errorf("%w: integration runtime changed", domain.ErrPlanStale)
+		if err := reconcileruntime.CheckIntegrationPlan(plan, observed); err != nil {
+			return result, err
 		}
 		if err = write.Apply(); err != nil {
 			return result, fmt.Errorf("%w: %v", domain.ErrPlanStale, err)

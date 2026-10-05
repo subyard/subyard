@@ -79,11 +79,34 @@ name|aliases|handler|arg0|remote|effect|confirmation|visibility|section|completi
   Typed action assessment resolves the concrete policy to `never`, `prompt-default-yes`, or
   `prompt-default-no`. Launch/session actions such as `code`, `shell`, and `start` do not prompt.
   `--yes` supplies confirmation consent; it does not bypass preconditions, stale checks, or guards.
+
 - `handler` is a script under `scripts/`, or a reserved dispatcher adapter such as `@help`/`@rpc`.
 - `completion` names a provider consumed by both Bash and Zsh completion; `options` and `verbs`
   carry their shared token lists.
 - Public dispatch, aliases, `yard --list`, top-level help, and completion metadata all use this
   registry. `yard --command-manifest` exposes the validated machine-readable rows.
+
+The prepared native Incus installer grants the approved operator `incus-admin` membership and
+a named access ACL on the current default root-owned socket. Trusted standalone adapters without
+a captured dispatcher retain group membership and require a fresh group session. The ACL preserves socket ownership, mode,
+the existing mask and unrelated entries, and lets the original approved parent continue without
+restarting or preparing another action. Custom endpoints fail closed. No directory default ACL
+or service hook persists the grant: replacing the socket removes it. Removing group membership
+alone does not revoke a surviving named socket ACL; remove that operator's entry as well.
+The approved network stage grants the same captured UID read/write access to the fixed native
+host policy lock. Native setup captures the kernel UID and passes its resolved account name to
+both elevated adapters, even when ambient sudo or user names describe another caller. It rejects
+any supplied operator name that differs from that caller. Non-root Incus readiness also checks
+both fixed native ACL tools: missing tools are installed by the approved Incus stage even when
+the server is already running; unsafe existing tools fail closed.
+This inode-bound ACL preserves ownership, mode, the mask and unrelated access;
+removing membership requires revoking this entry too. Recreating the lock or rebooting removes
+the grant. Active UFW rule files keep their existing
+group-based permissions. When the original parent lacks that group in its kernel credentials,
+post-apply verification alone can read them through its already authorized, noninteractive sudo
+context, after its own policy-lock check succeeds. Planning never uses that elevation.
+NetworkManager planning reads its effective configuration directly and cannot use cached sudo
+credentials. Approved lifecycle readers retain their explicitly authorized noninteractive readback.
 
 Profile resource commands use the separate `.res` interface below because profiles own those
 commands and mechanics.
@@ -178,14 +201,65 @@ explicit `confirmed=true`. The `operation-exact-plan-v1` capability adds `exact:
 Exact execution requires that digest in the same RPC session, consumes the plan once and rejects
 expiry, mismatched bindings and replay. The binding covers the owner context, arguments, public
 plan and captured private assessment fingerprint. Request deadlines remain separate from the
-five-minute plan lifetime. Integration mutations require this contract. Their controller keeps
-one SSH stdio session from owner assessment through central confirmation and owner execution;
-a disconnect discards the plan. `integration.status` uses the same read-only owner query.
+five-minute plan lifetime. Integration and provision mutations use owner preparation over one SSH
+stdio session. Lifecycle, initialization, teardown, test-VM administration, safe project actions,
+credential metadata, configuration changes and mutating v2 resources use the same owner session.
+`provision --list`, status queries and terminal sessions retain their query/session transport.
+Bounded actions keep `never` confirmation; project export uses the owner session to bind its source
+and controller destination. Protected credential values and SSH passphrases require their owner-local transport.
 
-Other command families retain their existing routing until explicitly migrated. Legacy execution
-still refuses a controller-side plan routed to a remote owner with `remote_owner_required`;
-controller plans cannot be transferred to another session. Command-specific stale checks and the
-release-transition authorization contract remain distinct from session-level plan storage.
+`operation-steps-v1` is a separate completeness capability. A mutating controller requires it and
+sends `exact:true, stepSchema:1`; the response must include `stepSchema:1` and a nonempty validated
+ordered `plan.steps`. An owner refuses an invocation without complete native steps with
+`operation_steps_unsupported`. The older exact envelope alone does not establish complete effects.
+There is no mutation fallback to an older owner. Each step has a stable ID, bounded target, safe
+observed fact, fixed desired state, `apply|skip|conditional` decision, preconditions, optional earlier
+dependencies, consequence and verified postcondition. CLI preview and confirmation consequences
+come from these same steps. Private inputs and retained protected drafts contribute only to the
+hidden digest binding.
+
+For example, a synthetic resource can approve `service.install` on one registered guest and a
+dependent conditional `service.start` on that guest's named service. The latter has observation
+`unknown`, a fixed desired service identity and a native guard after installation. It cannot add
+another service or guest during execution. A native refresh may skip an approved effect only after
+proving its original desired state; a previously skipped target requiring work, a replaced target,
+different inputs or expanded scope returns `plan_stale`. Guards run again at the owning write
+boundary under existing locks. A successful adapter response is followed by native observation of
+the postcondition. Dependent failures can occur after earlier approved writes and use their existing
+cleanup/recovery; the operation envelope does not create a cross-component transaction.
+
+Plans and active project transfers share a 64-operation session bound, including executions
+in progress. `operation.discard` closes an unused plan; expired plans are pruned on further planning.
+A confirmed execute attempt consumes its ID even when binding validation or apply fails;
+`confirmed:false` leaves it available. Disconnect/cancellation releases retained drafts and aborts
+unfinished admissions. Remote project sync retains controller archive bytes, binds a source digest
+to one owner admission, transfers through the existing data plane, then calls
+`project.copy.finalize` with the same digest. Finalization consumes the admission once, verifies the
+content tree and metadata, and commits through the native store. `project.copy.abort` discards it.
+Automatic project naming approves one independent copy within the owner's workspace namespace;
+an explicit name remains exact and refuses collisions.
+
+Remote clone and removal run on the authoritative owner even when their public command registry
+uses controller-facing local routing. Discovered project selectors resolve to the stable owner
+project ID. Owner execution commits the native record; the controller invalidates its inventory
+and removes an obsolete cached record without issuing a second owner mutation. Clone retains the
+prepared Git revision through checkout and verifies HEAD before native registration.
+An empty source binds an unborn repository with no refs; execution rejects newly advertised refs
+and verifies the empty working tree before native registration.
+
+Project export retains the controller archive, its digest and an exact private patch destination.
+The controller reads the authoritative record through `project.list` in the same owner session,
+validates its identity against the discovered project, and reads the original source locally.
+The owner resolves the project ID from its native registry and binds the guest source tree;
+controller host paths remain opaque on the owner. The existing data plane prepares the portable
+diff, and `project.copy.finalize` verifies the transferred baseline and unchanged native owner
+source before the controller publishes the patch. Publication verifies destination identity,
+patch bytes and exact permissions. Abort, disconnect and cancellation clean only operation-owned
+temporary state. Export keeps bounded-write policy and adds no confirmation prompt.
+
+Legacy execution still refuses a controller-side plan routed to a remote owner with
+`remote_owner_required`; controller plans cannot be transferred to another session. Durable release
+and config-sync recovery retain their existing authorization independently of outer plan expiry.
 
 The full snapshot contains one revision over context, public commands, project inventory, yard status and
 redacted credential metadata; `snapshot.ready` and Incus events use the same ordered event channel.
@@ -689,8 +763,18 @@ Resource handlers reserve prepare exit status 2 for invalid command-line argumen
 `svc_usage_error` helper exits with status 2; the dispatcher classifies this as
 `resource_usage_invalid` and returns CLI exit status 2; rejected arguments cannot reach apply. Help and an omitted verb return 0,
 while other prepare failures, precondition failures, and invalid plans return 1. The successful plan
-schema is unchanged. Resource preparation currently uses its dedicated non-RPC pipeline, so this
-exit-status contract does not imply an RPC resource-preparation interface.
+v1 schema remains available for dedicated actions. Mutating exact resource invocations use
+`yard.resource-action-assessment.v2` with public `steps` and an optional private SHA-256 `binding`.
+The engine retains the descriptor, handler identity, configuration and native binding, refreshes
+under the resource's owning lock, and passes the approved bounded plan to native apply. A v2 handler
+implements the read-only `verify` phase: its returned steps must retain the same targets and desired
+states and report `skip` with observed state equal to desired. The generic RPC endpoint dispatches
+safe mutating resource invocations through this prepared path; v1 handlers fail closed for exact
+RPC mutation. Read, session and protected actions keep their dedicated contracts. Public fields are
+bounded safe text; payloads, commands and protected content never enter the resource projection.
+Native identities use explicit namespaces such as `incus:`, `container:` or `invocation:`;
+safe fingerprints carry a digest label. Long unlabeled identifiers are checked as possible
+credential payloads. Namespace labels do not permit protected paths or credential assignments.
 
 `STARTUP=bringup` opts a selected dedicated VM resource into first-start activation. It requires
 an owner IPv4 UDP proxy and the declared bring-up/shutdown actions. Successful selected-profile
@@ -924,13 +1008,25 @@ in generic owner-port collision checks.
 A `runtime` declaration contains an `activation_id` and relative executable `handler`. The ID is
 unique across profile and core activation stages and remains durable across release transitions.
 The hook accepts `observe`, or `apply OPERATION_ID ACTUAL_SHA256 DESIRED_SHA256`, and emits only a
-bounded JSON object with `state`, `actual` and `desired`. States are `absent`, `deferred`, `current`
+bounded JSON object with `state`, `actual`, `desired` and optional `hook_binding`. States are `absent`, `deferred`, `current`
 and `stale`; installed states carry lowercase SHA-256 fingerprints. Observe must not mutate state.
 Core bounds execution and output, checks the assessment before apply, and verifies the resulting
 state separately. Hook paths retain the updater's pinned directory descriptor; symbolic links
 below that anchor are rejected. Missing/stopped yards are absent/deferred without starting them.
 Hooks run in activation-ID order before integration project hooks; update and rollback inspect all local yards.
 The Orca profile retains its existing `orca-runtime` identity and wire fingerprints.
+
+Optional `runtime.projects_changed_hooks` declares installed hooks owned by that runtime.
+Entries must be unique, clean absolute paths directly inside
+`/usr/local/libexec/subyard/projects-changed.d`, without carriage returns, line feeds or NUL. Core captures the
+bounded installed hook inventory, source fingerprints and project-root scope before consent,
+then rejects expansion or changed captured inputs before invoking a hook. An observation's
+optional `hook_binding` is a lowercase SHA-256 digest of safe native registration metadata.
+Core retains it privately and supplies `SUBYARD_PROJECT_HOOK_BINDING` to the corresponding
+declared hook for its native compare-and-swap check before effects. It is not a public plan fact
+and must not fingerprint credentials, protected contents or secret values. Genuinely unavailable
+observations may resolve within the explicitly approved conditional hook and root scope; this
+does not authorize additional hook paths or project roots.
 
 A `guest_environment` handler accepts `check|ensure DEV_USER` through the existing root guest
 execution boundary. Its source is read only from the validated shipped profile. `check` reports

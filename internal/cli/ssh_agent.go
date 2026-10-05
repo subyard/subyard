@@ -158,6 +158,9 @@ func (cli *CLI) runSSHAgent(ctx context.Context, loaded config.Loaded, definitio
 		return cli.writeSSHAgentStatus(status, invocation.json)
 	}
 	var setupScripts [][]byte
+	var keyIdentity ownerInputFile
+	var targetIdentity ports.InstanceInfo
+	var inputs *ownerInputBaseline
 	if invocation.verb == "unlock" {
 		if cli.operatorTerminal == nil || !cli.operatorTerminal() {
 			cli.errorf("ssh-agent unlock requires a terminal on the owner host for the key passphrase")
@@ -170,6 +173,16 @@ func (cli *CLI) runSSHAgent(ctx context.Context, loaded config.Loaded, definitio
 			cli.errorf("ssh-agent unlock: %v", keyErr)
 			return 1
 		}
+		info, statErr := os.Lstat(invocation.key)
+		if statErr != nil {
+			cli.errorf("ssh-agent unlock: %v", statErr)
+			return 1
+		}
+		keyIdentity, err = ownerInputIdentity(invocation.key, info)
+		if err != nil {
+			cli.errorf("ssh-agent unlock: %v", err)
+			return 1
+		}
 		if sshidentity.Classify(yard.Paths.OperatorHome, yard.Paths.DataHome, yard.YardName) != sshidentity.Dedicated {
 			cli.errorf("yard SSH transport requires reconciliation; run yard init first")
 			return 1
@@ -178,6 +191,12 @@ func (cli *CLI) runSSHAgent(ctx context.Context, loaded config.Loaded, definitio
 		instance, stateErr := incus.Instance(ctx, yard.IncusProject, yard.YardInstanceName)
 		if stateErr != nil || !strings.EqualFold(instance.Status, "running") {
 			cli.errorf("SSH access requires a running yard; run yard start first")
+			return 1
+		}
+		targetIdentity = instance
+		inputs, err = cli.captureOwnerInputs(loaded, "", nil)
+		if err != nil {
+			cli.errorf("ssh-agent unlock: %v", err)
 			return 1
 		}
 		setupScripts, err = sshAgentEnvironmentScripts(cli.options.RepositoryRoot, loaded.Catalog.Profiles())
@@ -196,8 +215,19 @@ func (cli *CLI) runSSHAgent(ctx context.Context, loaded config.Loaded, definitio
 		}
 	}
 	orchestrator := cli.operationOrchestrator(cli.ensureOperationID(), loaded, nil, &definition)
-	plan, err := orchestrator.PlanAction(ctx, yard, "ssh-agent "+invocation.verb, domain.RemotePolicy(definition.Remote),
-		domain.ActionID("ssh-agent."+invocation.verb), domain.ActionDelta{Changed: true, Consequences: consequences}, invocation.yes || cli.env["ASSUME_YES"] == "1")
+	plan, err := orchestrator.PrepareAction(yard, "ssh-agent "+invocation.verb, domain.RemotePolicy(definition.Remote),
+		domain.ActionID("ssh-agent."+invocation.verb), domain.ActionDelta{Changed: true, Consequences: consequences})
+	if err == nil {
+		plan.Steps = []domain.OperationStep{{ID: "ssh-agent.grant", Target: "yard " + yard.YardName + " owner SSH access", Observed: "existing native grant",
+			Desired: "locked", Decision: domain.StepApply, Preconditions: []string{"native manager retains the per-yard grant lock"}, Verify: "native status reports no usable grant"}}
+		if invocation.verb == "unlock" {
+			plan.Steps[0].Desired = "selected owner-local key available for " + invocation.ttl.String()
+			plan.Steps[0].Preconditions = append(plan.Steps[0].Preconditions, "captured key identity, protected mode and running yard ownership are unchanged", "key passphrase is read on the owner terminal after confirmation")
+			plan.Steps[0].Verify = "native grant active with bounded expiry and verified guest environment"
+			plan.Steps[0].Consequence = consequences[0]
+		}
+		plan, err = orchestrator.Confirm(ctx, plan, invocation.yes || cli.env["ASSUME_YES"] == "1")
+	}
 	if err != nil {
 		cli.errorf("ssh-agent: %v", err)
 		return 1
@@ -205,7 +235,39 @@ func (cli *CLI) runSSHAgent(ctx context.Context, loaded config.Loaded, definitio
 	var status sshagentruntime.Status
 	orchestrator.Runner = sshAgentAdapter{execute: func(ctx context.Context) error {
 		if invocation.verb == "lock" {
-			return manager.Lock(ctx)
+			if err := manager.Lock(ctx); err != nil {
+				return err
+			}
+			current, err := manager.Status(ctx)
+			if err != nil {
+				return err
+			}
+			if current.State != "locked" {
+				return errors.New("SSH access revocation verification failed")
+			}
+			return nil
+		}
+		if err := inputs.check(ctx, cli); err != nil {
+			return err
+		}
+		info, err := os.Lstat(invocation.key)
+		if err != nil {
+			return fmt.Errorf("%w: selected owner-local key is unavailable", domain.ErrPlanStale)
+		}
+		currentKey, err := ownerInputIdentity(invocation.key, info)
+		if err != nil {
+			return err
+		}
+		if currentKey != keyIdentity {
+			return fmt.Errorf("%w: selected owner-local key identity changed", domain.ErrPlanStale)
+		}
+		incus, _ := cli.statusPorts()
+		current, err := incus.Instance(ctx, yard.IncusProject, yard.YardInstanceName)
+		if err != nil {
+			return err
+		}
+		if operationStateDigest(current) != operationStateDigest(targetIdentity) {
+			return fmt.Errorf("%w: SSH access yard state changed", domain.ErrPlanStale)
 		}
 		_, executor := cli.statusPorts()
 		setupCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
@@ -214,6 +276,9 @@ func (cli *CLI) runSSHAgent(ctx context.Context, loaded config.Loaded, definitio
 			return err
 		}
 		status, err = manager.Unlock(ctx, invocation.key, invocation.ttl)
+		if err == nil && (status.State != "unlocked" || status.ExpiresAt.IsZero()) {
+			return errors.New("SSH access grant verification failed")
+		}
 		return err
 	}}
 	_, _, err = orchestrator.RunAdapter(ctx, plan, domain.AdapterRequest{Schema: shelladapter.ProtocolSchema,

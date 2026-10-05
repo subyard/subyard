@@ -55,13 +55,15 @@ if [ "${1:-}" = -G ]; then
   exit 0
 fi
 if [[ "$joined" == *yard* && "$joined" == *rpc* && "$joined" == *--stdio* ]]; then
-  exec env \
+  exec env -u SUBYARD_STATE_DIR -u SUBYARD_CONFIG_LOADED -u SUBYARD_ENGINE_CONTEXT \
+    -u OWNER_ENDPOINT -u OWNER_YARD_NAME -u SUBYARD_YARD -u YARD_NAME \
     SUBYARD_OPERATOR_HOME="$REMOTE_TEST_STATE/owner-home" \
     SUBYARD_CONFIG_HOME="$REMOTE_TEST_STATE/owner-config" \
     SUBYARD_HOME="$REMOTE_TEST_STATE/owner-data" \
     SUBYARD_CONFIG_DIR="$REMOTE_TEST_SHIPPED" \
     SUBYARD_NO_AUDIT=1 \
-    "$REMOTE_TEST_STATE/../runtime/bin/yard" rpc --stdio
+    ACCESS_KIND=local SSH_HOST=yard YARD_INSTANCE_NAME=yard \
+    "$REMOTE_TEST_STATE/../bin/project-owner-fixture"
 fi
 if [[ "$joined" == *_info* ]]; then
   case "$(cat "$REMOTE_TEST_STATE/info-mode" 2>/dev/null || printf fail)" in
@@ -71,33 +73,13 @@ if [[ "$joined" == *_info* ]]; then
   esac
   exit 0
 fi
-if [[ "$joined" == *'_project-state'* ]]; then
-  printf '%s\n' "$joined" >> "$REMOTE_TEST_STATE/owner-calls"
-  exit 0
+if [[ "$joined" == *'_project-state'* ]];then
+  printf 'unexpected legacy owner project mutation\n' >&2
+  exit 1
 fi
-if [[ "$joined" == *'yard-remote'*"'docker' 'info'"* ]]; then
-  [ "$(cat "$REMOTE_TEST_STATE/cleanup-mode" 2>/dev/null || printf ok)" != fail ] || exit 1
-  exit 0
-fi
-if [[ "$joined" == *'yard-remote'*'docker inspect "$1"'* ]]; then
-  [[ "$joined" != *'printf present'* ]] || printf 'present'
-  exit 0
-fi
-if [[ "$joined" == *'yard-remote'*"'docker' 'inspect' '-f'"* ]]; then
-  printf 'sha256:owned-container\t1\tdemo-12345678\tsynthetic\n'
-  exit 0
-fi
-if [[ "$joined" == *'yard-remote'*"'docker' 'rm'"* || "$joined" == *'/srv/env-secrets/'* ]]; then
-  : > "$REMOTE_TEST_STATE/data-cleanup"
-  exit 0
-fi
-if [[ "$joined" == *'yard-remote'*'/srv/workspaces/demo-12345678'* ]]; then
-  if [[ "$joined" == *'printf present'* ]]; then
-    printf 'present'
-    exit 0
-  fi
-  : > "$REMOTE_TEST_STATE/workspace-delete"
-  exit 0
+if [[ "$joined" == *yard-remote* ]];then
+  printf 'unexpected controller-owned project effect\n' >&2
+  exit 1
 fi
 exit 0
 MOCK
@@ -111,12 +93,14 @@ setup_test_repository "$TMP" "$ROOT"
 unset SUBYARD_STATE_DIR ACCESS_KIND YARD_INSTANCE_NAME INCUS_PROJECT SSH_HOST
 chmod 0700 "$TMP/config/yards/remote/projects"
 export PATH="$TMP/bin:$PATH"
+go build -o "$TMP/bin/project-owner-fixture" "$ROOT/tests/helpers/project-owner-fixture"
 export HOME="$TMP/home"
 export SUBYARD_CONFIG_DIR="$TMP/shipped"
 export SUBYARD_NO_AUDIT=1
 export REMOTE_TEST_STATE="$TMP/state"
 export REMOTE_TEST_ROOT="$ROOT"
 export REMOTE_TEST_SHIPPED="$TMP/shipped"
+export PROJECT_OWNER_REPOSITORY="$TMP/runtime"
 
 install -d -m 0700 "$REMOTE_TEST_STATE/owner-home" "$REMOTE_TEST_STATE/owner-config/projects" \
   "$REMOTE_TEST_STATE/owner-data"
@@ -150,6 +134,9 @@ assert_projects "$output" 1
 state_file="$SUBYARD_CONFIG_HOME/yards/remote/projects/demo-12345678.json"
 write_state() {
   local target="$1"
+  rm -f "$REMOTE_TEST_STATE/data-cleanup" "$REMOTE_TEST_STATE/staged-delete" "$REMOTE_TEST_STATE/workspace-delete"
+  install -d -m 0700 "$REMOTE_TEST_STATE/workspace" "$REMOTE_TEST_STATE/staged"
+  printf '%s\n' 'sha256:owned-container' > "$REMOTE_TEST_STATE/container"
   jq -n --arg target "$target" '{
     schema:1, projectId:"demo-12345678", name:"demo", hostPath:"/controller/demo",
     yardPath:"/srv/workspaces/demo-12345678/src", mode:"sync", sshHost:"yard-remote",
@@ -171,11 +158,13 @@ run_remove() {
 # L1 removal has no L2 promise, warning, or owner-host cleanup call.
 write_state yard
 rm -f "$REMOTE_TEST_STATE/data-cleanup" "$REMOTE_TEST_STATE/workspace-delete"
-output="$(run_remove --soft)"
+output="$(run_remove --soft 2>&1)"
 assert_not_contains "$output" 'L2'
 assert_not_contains "$output" 'box teardown'
 [ ! -e "$REMOTE_TEST_STATE/data-cleanup" ] || fail 'L1 removal called L2 cleanup'
 [ ! -e "$state_file" ] || fail 'native soft removal kept controller state'
+[ ! -e "$REMOTE_TEST_STATE/owner-config/projects/demo-12345678.json" ] || fail 'native soft removal retained owner state'
+[ -d "$REMOTE_TEST_STATE/workspace" ] || fail 'soft removal deleted the retained workspace'
 
 # An unreachable in-yard L2 environment fails during read-only removal preflight, before either
 # controller state or workspace deletion can change.
@@ -183,19 +172,20 @@ write_state synthetic
 printf 'fail\n' > "$REMOTE_TEST_STATE/cleanup-mode"
 rm -f "$REMOTE_TEST_STATE/data-cleanup" "$REMOTE_TEST_STATE/workspace-delete" "$REMOTE_TEST_STATE/owner-calls"
 if output="$(run_remove 2>&1)"; then fail 'remote L2 removal ignored failed environment preflight'; fi
-assert_contains "$output" 'prepare remove action: reach project environment before removal'
+assert_contains "$output" 'reach project environment before removal'
 [ -e "$state_file" ] || fail 'failed L2 preflight removed controller state'
 [ ! -e "$REMOTE_TEST_STATE/workspace-delete" ] || fail 'failed L2 preflight deleted the workspace'
-[ ! -e "$REMOTE_TEST_STATE/owner-calls" ] || fail 'failed L2 preflight changed owner state'
+[ -e "$REMOTE_TEST_STATE/owner-config/projects/demo-12345678.json" ] || fail 'failed L2 preflight changed owner registry state'
 
 # Once in-yard cleanup succeeds, native removal commits state after the workspace is gone.
 printf 'ok\n' > "$REMOTE_TEST_STATE/cleanup-mode"
 rm -f "$REMOTE_TEST_STATE/owner-calls"
-output="$(run_remove)"
+output="$(run_remove 2>&1)"
 assert_contains "$output" 'removed demo'
 [ -e "$REMOTE_TEST_STATE/data-cleanup" ] || fail 'successful L2 removal skipped in-yard cleanup'
 [ -e "$REMOTE_TEST_STATE/workspace-delete" ] || fail 'successful L2 removal skipped workspace deletion'
+[ ! -e "$REMOTE_TEST_STATE/workspace" ] && [ ! -e "$REMOTE_TEST_STATE/container" ] && [ ! -e "$REMOTE_TEST_STATE/staged" ] || fail 'native verification retained a removed physical target'
 [ ! -e "$state_file" ] || fail 'native L2 removal kept controller state'
-[ -s "$REMOTE_TEST_STATE/owner-calls" ] || fail 'native removal did not converge owner state'
+[ ! -e "$REMOTE_TEST_STATE/owner-config/projects/demo-12345678.json" ] || fail 'native removal did not converge owner registry state'
 
 printf 'ok: remote project counts are cached and native removal is target-aware\n'

@@ -4,7 +4,15 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+incus_pid=''
+cleanup() {
+  if [ -n "$incus_pid" ]; then
+    kill "$incus_pid" 2>/dev/null || true
+    wait "$incus_pid" 2>/dev/null || true
+  fi
+  rm -rf "$TMP"
+}
+trap cleanup EXIT
 
 # Copy today's public inputs because the packaging checks add local fixtures.
 bash "$ROOT/tests/helpers/source-files.sh" > "$TMP/source-files"
@@ -14,7 +22,21 @@ ROOT="$TMP/source"
 cd "$ROOT"
 
 release="$TMP/release"
-export SUBYARD_INCUS_SOCKET="$TMP/missing-incus.socket"
+# Release activation observes a reachable native API with an absent instance,
+# rather than confusing a missing transport with an absent managed yard.
+go build -o "$TMP/empty-incus" ./internal/testkit/cmd/empty-incus
+"$TMP/empty-incus" "$TMP" > "$TMP/empty-incus.log" 2>&1 &
+incus_pid=$!
+for ((attempt = 0; attempt < 100; attempt++)); do
+  if [ -S "$TMP/incus.socket" ] && grep -Fxq ready "$TMP/empty-incus.log"; then
+    break
+  fi
+  kill -0 "$incus_pid" 2>/dev/null || { printf 'engine release: Incus fixture exited\n' >&2; exit 1; }
+  sleep 0.1
+done
+[ -S "$TMP/incus.socket" ] && grep -Fxq ready "$TMP/empty-incus.log" \
+  || { printf 'engine release: Incus fixture startup timed out\n' >&2; exit 1; }
+export SUBYARD_INCUS_SOCKET="$TMP/incus.socket"
 export SUBYARD_OPERATOR_HOME="$TMP/home"
 export SUBYARD_CONFIG_HOME="$TMP/config"
 export SUBYARD_HOME="$TMP/data"
@@ -79,7 +101,6 @@ printf 'ignored staging secret\n' > "$staging_canary"
 printf 'ignored qa secret\n' > "$qa_canary"
 printf 'untracked public input\n' > "$untracked_canary"
 chmod 0600 "$staging_canary" "$qa_canary" "$untracked_canary"
-trap 'rm -f -- "$staging_canary" "$qa_canary" "$untracked_canary"; rm -rf "$TMP"' EXIT
 # A newly added profile must package without requiring a staged Git entry.
 fixture_profile="$ROOT/config/profiles/package-fixture"
 mkdir -p "$fixture_profile/cmd/worker" "$fixture_profile/tests"
@@ -780,9 +801,14 @@ for recovery_mutation in $recovery_negative_mutations; do
     || fail "ineligible v0.11.1 $recovery_mutation fixture changed protected state"
   rm -rf -- "$negative_root"
 done
+recovery_baseline_after="$TMP/v0111-recovery-baseline-after.sha256"
 snapshot_recovery_state "$recovery_baseline/runtime" "$recovery_baseline/config" \
-  | cmp -s "$recovery_baseline_before" - \
-  || fail 'v0.11.1 recovery negative matrix changed its shared baseline'
+  > "$recovery_baseline_after"
+if ! cmp -s "$recovery_baseline_before" "$recovery_baseline_after"; then
+  # These snapshots contain link targets and file fingerprints, never payloads.
+  diff -u "$recovery_baseline_before" "$recovery_baseline_after" | head -n 60 >&2 || true
+  fail 'v0.11.1 recovery negative matrix changed its shared baseline'
+fi
 snapshot_recovery_state "$source_version_baseline/runtime" "$source_version_baseline/config" \
   | cmp -s "$source_version_baseline_before" - \
   || fail 'v0.11.1 source-version negative case changed its shared baseline'

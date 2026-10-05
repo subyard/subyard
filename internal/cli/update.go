@@ -34,12 +34,20 @@ type releaseExecution struct {
 }
 
 func (execution *releaseExecution) Close() error {
-	if execution == nil || execution.runtime == nil {
+	if execution == nil {
 		return nil
+	}
+	var draftErr error
+	if execution.prepared.Close != nil {
+		draftErr = execution.prepared.Close()
+		execution.prepared.Close = nil
+	}
+	if execution.runtime == nil {
+		return draftErr
 	}
 	runtime := execution.runtime
 	execution.runtime = nil
-	return runtime.Close()
+	return errors.Join(draftErr, runtime.Close())
 }
 
 func (adapter releaseAdapter) Run(ctx context.Context, request domain.AdapterRequest, _ io.Reader) (domain.AdapterResult, string, error) {

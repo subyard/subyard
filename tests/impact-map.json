@@ -89,6 +89,7 @@
     "go-contracttest": ["go:contracttest", "host-free:core"],
     "go-domain": ["go:domain"],
     "go-ownerinventory": ["go:ownerinventory"],
+    "go-operatoraccess": ["go:operatoraccess"],
     "go-ports": ["go:ports"],
     "go-resource": ["go:resource"],
     "go-resourceendpoint": ["go:resourceendpoint"],
@@ -650,6 +651,13 @@
       "pattern": "^internal/adapters/reconcileruntime/.*$",
       "check_sets": ["boot-power"],
       "risk_domains": ["boot-lifecycle"]
+    },
+    {
+      "id": "internal-operatoraccess",
+      "priority": 705,
+      "pattern": "^internal/operatoraccess/.*$",
+      "check_sets": ["go-operatoraccess", "yard-network", "incus-real"],
+      "risk_domains": ["host-bootstrap", "incus-runtime"]
     },
     {
       "id": "internal-incusclient",

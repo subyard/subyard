@@ -21,10 +21,12 @@ subyard_require_engine_context
 
 BRIDGE="${INCUS_BRIDGE:-${INCUS_NETWORK:-incusbr0}}"
 mode=apply
+APPROVED_OPERATOR_UID=
 for arg in "$@"; do
   case "$arg" in
     --check) mode=check ;;
     --verify) mode=verify ;;
+    --operator-uid=*) APPROVED_OPERATOR_UID="${arg#--operator-uid=}" ;;
   esac
 done
 
@@ -32,8 +34,18 @@ ufw_active=0
 command -v ufw >/dev/null 2>&1 && systemctl is-active --quiet ufw 2>/dev/null && ufw_active=1
 
 if [ "$mode" != apply ]; then
+  # Planning must not use a cached sudo authorization from an outer operation.
+  [ "$mode" != check ] || export SUBYARD_SUDO_PREAUTHORIZED=0
   [ -n "${SUBYARD_DISPATCHER_PATH:-}" ] && [ -x "$SUBYARD_DISPATCHER_PATH" ] || exit 1
   "$SUBYARD_DISPATCHER_PATH" _network-lock check >/dev/null 2>&1 || exit 1
+  # Read back already approved root UFW effects without granting persistent
+  # file access. Planning never escalates, and lock access must work first.
+  if [ "$mode" = verify ] && [ "$ufw_active" = 1 ] \
+    && [ ! -r "${SUBYARD_UFW_RULES_FILE:-/etc/ufw/user.rules}" ] \
+    && [ "$(id -u)" -ne 0 ]; then
+    [ "${SUBYARD_SUDO_PREAUTHORIZED:-0}" = 1 ] || exit 1
+    require_root "read back the approved persisted UFW rules"
+  fi
   command -v incus >/dev/null 2>&1 && incus info >/dev/null 2>&1 || exit 1
   power_host_safe "$BRIDGE" || exit 1
   [ "$ufw_active" = 0 ] || ufw_yard_rules_present "$BRIDGE" || exit 1
@@ -82,10 +94,18 @@ else
 fi
 announce "$title" "${ann[@]}"
 proceed_or_die
+operator_user="${SUBYARD_USER:-${SUDO_USER:-${USER:-root}}}"
+operator_uid="$(id -u "$operator_user")"
+[ -z "$APPROVED_OPERATOR_UID" ] || [ "$operator_uid" = "$APPROVED_OPERATOR_UID" ] \
+  || die "operator numeric identity differs from the approved network stage"
 require_root "$why"
 [ -n "${SUBYARD_DISPATCHER_PATH:-}" ] && [ -x "$SUBYARD_DISPATCHER_PATH" ] \
   || die "current yard engine is required to initialize the network policy lock"
-"$SUBYARD_DISPATCHER_PATH" _network-lock ensure \
+[ "$(id -u "$operator_user")" = "$operator_uid" ] \
+  || die "operator numeric identity changed before the network access grant"
+lock_arguments=(ensure)
+[ -z "$APPROVED_OPERATOR_UID" ] || lock_arguments+=("$APPROVED_OPERATOR_UID")
+"$SUBYARD_DISPATCHER_PATH" _network-lock "${lock_arguments[@]}" \
   || die "could not initialize the host network policy lock"
 "$SUBYARD_DISPATCHER_PATH" _network-lock check \
   || die "host network policy lock did not match the required ownership and mode after initialization"

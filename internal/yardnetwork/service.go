@@ -169,8 +169,8 @@ func (s Service) Apply(ctx context.Context, approved Plan) error {
 	if err != nil {
 		return err
 	}
-	if approved.Fingerprint != current.Fingerprint {
-		return domain.ErrPlanStale
+	if err := CheckApproved(approved, current); err != nil {
+		return err
 	}
 	if !current.Changed {
 		return nil
@@ -210,6 +210,13 @@ func (s Service) applyLocked(ctx context.Context, plan Plan) error {
 			if u.Yard.InstanceFound && !strings.EqualFold(u.Yard.InstanceInfo.Status, "stopped") {
 				if err = s.Host.NetworkPower(ctx, u.Yard.Yard, "stop"); err != nil {
 					return fmt.Errorf("stop %s before changing network policy: %w; run yard network reconcile", u.Yard.Name, err)
+				}
+				observed, err := s.observe(ctx, u.Yard.Yard)
+				if err != nil {
+					return err
+				}
+				if !strings.EqualFold(observed.InstanceInfo.Status, "stopped") {
+					return errors.New("network stop postcondition failed")
 				}
 			}
 		}
@@ -307,6 +314,13 @@ func (s Service) applyLocked(ctx context.Context, plan Plan) error {
 		}
 		if err != nil {
 			return fmt.Errorf("restart %s: %w; run yard network reconcile", name, err)
+		}
+		verified, verifyErr := s.observe(ctx, target)
+		if verifyErr != nil {
+			return verifyErr
+		}
+		if !strings.EqualFold(verified.InstanceInfo.Status, "running") {
+			return errors.New("network restart postcondition failed")
 		}
 		if err = s.Guard(ctx); err != nil {
 			stopContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 45*time.Second)

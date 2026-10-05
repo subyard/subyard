@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -169,6 +170,7 @@ type AdapterStep struct {
 	Result domain.AdapterResult
 	Stderr string
 	Err    error
+	Apply  func(domain.AdapterRequest)
 }
 
 type ScriptedAdapter struct {
@@ -192,20 +194,24 @@ func (adapter *ScriptedAdapter) Run(_ context.Context, request domain.AdapterReq
 	}
 	step := adapter.Steps[0]
 	adapter.Steps = adapter.Steps[1:]
+	if step.Apply != nil && step.Err == nil && step.Result.Status == "ok" {
+		step.Apply(request)
+	}
 	return step.Result, step.Stderr, step.Err
 }
 
 type Incus struct {
-	ServerInfo    ports.ServerInfo
-	Instances     map[string]ports.InstanceInfo
-	Reconcile     ports.ReconcileState
-	EventsOut     chan domain.OperationEvent
-	ErrorsOut     chan error
-	Err           error
-	ExecSteps     []IncusExecStep
-	ExecCalls     []IncusExecCall
-	ConfigUpdates []InstanceConfigUpdate
-	PowerUpdates  []InstancePowerUpdate
+	ServerInfo        ports.ServerInfo
+	Instances         map[string]ports.InstanceInfo
+	Reconcile         ports.ReconcileState
+	TeardownResources []ports.TeardownResource
+	EventsOut         chan domain.OperationEvent
+	ErrorsOut         chan error
+	Err               error
+	ExecSteps         []IncusExecStep
+	ExecCalls         []IncusExecCall
+	ConfigUpdates     []InstanceConfigUpdate
+	PowerUpdates      []InstancePowerUpdate
 }
 
 type InstanceConfigUpdate struct {
@@ -433,4 +439,40 @@ func (remote *ScriptedRemote) Call(ctx context.Context, target string, request [
 	step := remote.Steps[0]
 	remote.Steps = remote.Steps[1:]
 	return bytes.Clone(step.Response), step.Err
+}
+
+func (fake *Incus) TeardownInventory(_ context.Context, project string) ([]ports.TeardownResource, error) {
+	if fake.Err != nil {
+		return nil, fake.Err
+	}
+	if fake.TeardownResources != nil {
+		return slices.Clone(fake.TeardownResources), nil
+	}
+	var resources []ports.TeardownResource
+	add := func(kind, name, pool string) {
+		resources = append(resources, ports.TeardownResource{Kind: kind, Name: name, Pool: pool, Binding: strings.Repeat("0", 64)})
+	}
+	for _, instance := range fake.Instances {
+		if instance.Project == project {
+			add("instance", instance.Name, "")
+		}
+	}
+	if fake.Reconcile.ProfileFound {
+		add("profile", "default", "")
+	}
+	return resources, nil
+}
+
+func (fake *Incus) TeardownSharedInventory(_ context.Context, pool, network string) ([]ports.TeardownResource, error) {
+	if fake.Err != nil {
+		return nil, fake.Err
+	}
+	resources := []ports.TeardownResource{}
+	if fake.Reconcile.HostNetworkFound {
+		resources = append(resources, ports.TeardownResource{Kind: "network", Name: network, Binding: strings.Repeat("0", 64)})
+	}
+	if fake.Reconcile.HostPoolFound {
+		resources = append(resources, ports.TeardownResource{Kind: "pool", Name: pool, Binding: strings.Repeat("0", 64)})
+	}
+	return resources, nil
 }

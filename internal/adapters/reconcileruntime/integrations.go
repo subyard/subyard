@@ -46,6 +46,15 @@ type IntegrationPlan struct {
 	Steps               []string `json:"steps"`
 	Adoption            []string `json:"adoption,omitempty"`
 	AdoptionFingerprint string   `json:"adoption_fingerprint,omitempty"`
+	Scope               string   `json:"-"`
+	facts               []integrationFact
+}
+
+type integrationFact struct {
+	Key       string `json:"key"`
+	Desired   string `json:"desired"`
+	Observed  string `json:"observed"`
+	AtDesired bool   `json:"at_desired"`
 }
 
 type integrationArtifact struct {
@@ -66,6 +75,7 @@ type integrationObservation struct {
 	Retired     []integrationArtifact `json:"retired"`
 	Adopted     []integrationArtifact `json:"adopted"`
 	Initial     bool                  `json:"initial"`
+	Facts       []integrationFact     `json:"facts"`
 }
 
 // IntegrationScope binds the selected artifact destinations and desired
@@ -321,6 +331,24 @@ func (runtime Runtime) observeIntegrations(ctx context.Context) (IntegrationPlan
 		return IntegrationPlan{}, observed, err
 	}
 	plan := IntegrationPlan{Changed: observed.Changed}
+	plan.facts = slices.Clone(observed.Facts)
+	scope, _, err := runtime.IntegrationScope()
+	if err != nil {
+		return plan, observed, err
+	}
+	instanceBytes, _ := json.Marshal(instance)
+	var guardInstance ports.InstanceInfo
+	_ = json.Unmarshal(instanceBytes, &guardInstance)
+	guardInstance.Status = ""
+	guardInstance.Config = cloneIntegrationConfig(guardInstance.Config)
+	guardInstance.LocalConfig = cloneIntegrationConfig(guardInstance.LocalConfig)
+	delete(guardInstance.Devices, "ai-observer")
+	delete(guardInstance.LocalDevices, "ai-observer")
+	identity, _ := json.Marshal(struct {
+		Scope    string
+		Instance ports.InstanceInfo
+	}{scope, guardInstance})
+	plan.Scope = fmt.Sprintf("%x", sha256.Sum256(identity))
 	fingerprints := []string{observed.Fingerprint, runtime.environmentDefault("ALLOWS_CODING_TOOLS", "true")}
 	proxy := instance.Devices["ai-observer"]
 	proxyMarker := instance.Config["user.subyard.ai_observer_proxy"]
@@ -358,6 +386,7 @@ func (runtime Runtime) observeIntegrations(ctx context.Context) (IntegrationPlan
 			return plan, observed, err
 		}
 		fingerprints = append(fingerprints, observation.Fingerprint)
+		plan.facts = append(plan.facts, integrationFact{Key: "structured:" + file.destination, Desired: fmt.Sprintf("%x", sha256.Sum256(payload)), Observed: observation.Fingerprint, AtDesired: observation.Converged})
 		plan.Changed = plan.Changed || !observation.Converged
 		if mode == configmaterial.ModeAssessAdopt && observation.Adoptable {
 			observed.Adopted = append(observed.Adopted, integrationArtifact{
@@ -382,6 +411,7 @@ func (runtime Runtime) observeIntegrations(ctx context.Context) (IntegrationPlan
 			return plan, observed, err
 		}
 		fingerprints = append(fingerprints, observation.Fingerprint)
+		plan.facts = append(plan.facts, integrationFact{Key: "retired-structured:" + entry.Path, Desired: "absent", Observed: observation.Fingerprint, AtDesired: observation.Converged})
 		plan.Changed = plan.Changed || !observation.Converged
 	}
 	ready, err := runtime.aiObserverConverged(ctx, instance)
@@ -389,6 +419,7 @@ func (runtime Runtime) observeIntegrations(ctx context.Context) (IntegrationPlan
 		return plan, observed, err
 	}
 	plan.Changed = plan.Changed || !ready
+	plan.facts = append(plan.facts, integrationFact{Key: "observer", Desired: "ready", Observed: fmt.Sprint(ready), AtDesired: ready})
 	commands, err := runtime.provisionAgentCommands()
 	if err != nil {
 		return plan, observed, err
@@ -400,6 +431,7 @@ func (runtime Runtime) observeIntegrations(ctx context.Context) (IntegrationPlan
 		}
 		plan.Changed = plan.Changed || !ready
 		fingerprints = append(fingerprints, fmt.Sprint(ready))
+		plan.facts = append(plan.facts, integrationFact{Key: "command:" + command, Desired: "ready", Observed: fmt.Sprint(ready), AtDesired: ready})
 	}
 	checks, err := runtime.provisionAgentChecks()
 	if err != nil {
@@ -412,6 +444,7 @@ func (runtime Runtime) observeIntegrations(ctx context.Context) (IntegrationPlan
 		}
 		plan.Changed = plan.Changed || !ready
 		fingerprints = append(fingerprints, fmt.Sprint(ready))
+		plan.facts = append(plan.facts, integrationFact{Key: "check:" + check, Desired: "ready", Observed: fmt.Sprint(ready), AtDesired: ready})
 	}
 	ready, err = runtime.projectHooksConverged(ctx)
 	if err != nil {
@@ -419,12 +452,14 @@ func (runtime Runtime) observeIntegrations(ctx context.Context) (IntegrationPlan
 	}
 	plan.Changed = plan.Changed || !ready
 	fingerprints = append(fingerprints, fmt.Sprint(ready))
+	plan.facts = append(plan.facts, integrationFact{Key: "hooks", Desired: "ready", Observed: fmt.Sprint(ready), AtDesired: ready})
 	serviceFingerprint, servicesChanged, err := runtime.integrationServices(ctx, "observe")
 	if err != nil {
 		return plan, observed, err
 	}
 	plan.Changed = plan.Changed || servicesChanged
 	fingerprints = append(fingerprints, serviceFingerprint)
+	plan.facts = append(plan.facts, integrationFact{Key: "services", Desired: "deselected managed services inactive; role-forbidden utility absent", Observed: serviceFingerprint, AtDesired: !servicesChanged})
 	fingerprints = append(fingerprints, instance.Config["user.subyard.ai_observer_proxy"], instance.Config["user.subyard.ai_observer_provision"])
 	plan.Fingerprint = fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(fingerprints, "\x00"))))
 	if plan.Changed {
@@ -573,8 +608,8 @@ func (runtime Runtime) ApplyIntegrations(ctx context.Context, plan IntegrationPl
 	if err != nil {
 		return err
 	}
-	if fresh.Fingerprint != plan.Fingerprint || fresh.Changed != plan.Changed {
-		return errors.New("integration plan is stale; reassess before applying")
+	if err := CheckIntegrationPlan(plan, fresh); err != nil {
+		return err
 	}
 	if !fresh.Changed {
 		return nil

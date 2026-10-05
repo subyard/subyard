@@ -130,17 +130,20 @@ type RemoteRecord struct {
 	Remote    bool       `json:"remote"`
 	Path      string     `json:"path,omitempty"`
 	SSHPort   int        `json:"sshPort"`
+	SSHHost   string     `json:"sshHost,omitempty"`
 	LastProbe time.Time  `json:"lastProbe,omitempty"`
 }
 
 type RemotePrepared struct {
-	Action   RemoteAction   `json:"action"`
-	Spec     RemoteSpec     `json:"spec"`
-	Existing *RemoteRecord  `json:"existing,omitempty"`
-	Owner    RemoteInfo     `json:"owner,omitempty"`
-	Recorded []RemoteKey    `json:"recorded,omitempty"`
-	Scanned  []RemoteKey    `json:"scanned,omitempty"`
-	Records  []RemoteRecord `json:"records,omitempty"`
+	Binding  string          `json:"-"`
+	Steps    []OperationStep `json:"steps,omitempty"`
+	Action   RemoteAction    `json:"action"`
+	Spec     RemoteSpec      `json:"spec"`
+	Existing *RemoteRecord   `json:"existing,omitempty"`
+	Owner    RemoteInfo      `json:"owner,omitempty"`
+	Recorded []RemoteKey     `json:"recorded,omitempty"`
+	Scanned  []RemoteKey     `json:"scanned,omitempty"`
+	Records  []RemoteRecord  `json:"records,omitempty"`
 }
 
 type RemoteResult struct {

@@ -8,9 +8,11 @@ import (
 	"os/user"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/operatoraccess"
 	"golang.org/x/sys/unix"
 )
 
@@ -46,6 +48,22 @@ func EnsureHostLock() error {
 		return err
 	}
 	return ensureHostLockAt(hostLockDirectory, 0, gid)
+}
+
+// EnsureHostLockOperator grants the captured operator access to only the fixed
+// policy lock after validating the already approved administrator membership.
+func EnsureHostLockOperator(ctx context.Context, uid string) error {
+	gid, err := operatoraccess.ApprovedActor(uid)
+	if err != nil {
+		return err
+	}
+	if err := ensureHostLockAt(hostLockDirectory, 0, int(gid)); err != nil {
+		return err
+	}
+	if uid == "0" {
+		return nil
+	}
+	return grantHostLockAccessAt(ctx, hostLockDirectory, 0, int(gid), uid, operatoraccess.NativeACL)
 }
 
 // CheckHostLock validates the fixed host lock without creating or locking it.
@@ -172,21 +190,34 @@ func acquireHostLockAt(
 		return nil, err
 	}
 
+	if err := flockHostLock(ctx, lockFD); err != nil {
+		_ = unix.Close(lockFD)
+		return nil, err
+	}
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			_ = unix.Flock(lockFD, unix.LOCK_UN)
+			_ = unix.Close(lockFD)
+		})
+	}, nil
+}
+
+func flockHostLock(ctx context.Context, lockFD int) error {
 	for {
 		select {
 		case <-ctx.Done():
-			_ = unix.Close(lockFD)
-			return nil, fmt.Errorf("acquire host network policy lock: %w", ctx.Err())
+			return fmt.Errorf("acquire host network policy lock: %w", ctx.Err())
 		default:
 		}
 
-		err = unix.Flock(lockFD, unix.LOCK_EX|unix.LOCK_NB)
+		err := unix.Flock(lockFD, unix.LOCK_EX|unix.LOCK_NB)
 		if err == nil {
 			break
 		}
 		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EAGAIN) && !errors.Is(err, unix.EINTR) {
-			_ = unix.Close(lockFD)
-			return nil, fmt.Errorf("acquire host network policy lock: %w", err)
+			return fmt.Errorf("acquire host network policy lock: %w", err)
 		}
 		timer := time.NewTimer(hostLockPoll)
 		select {
@@ -197,19 +228,12 @@ func acquireHostLockAt(
 				default:
 				}
 			}
-			_ = unix.Close(lockFD)
-			return nil, fmt.Errorf("acquire host network policy lock: %w", ctx.Err())
+			return fmt.Errorf("acquire host network policy lock: %w", ctx.Err())
 		case <-timer.C:
 		}
 	}
 
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			_ = unix.Flock(lockFD, unix.LOCK_UN)
-			_ = unix.Close(lockFD)
-		})
-	}, nil
+	return nil
 }
 
 func hostLockNotInitialized(err error) error {
@@ -305,4 +329,82 @@ func validateHostLockFD(fd int, ownerUID, groupGID int) error {
 		)
 	}
 	return nil
+}
+
+// Pin each ancestor before native tools access the fixed lock descriptor. The
+// root-owned sticky /run/lock parent is allowed; the native child stays 0755.
+func grantHostLockAccessAt(ctx context.Context, directory string, ownerUID, groupGID int, uid string, tools operatoraccess.Tools) error {
+	clean := filepath.Clean(directory)
+	if !filepath.IsAbs(clean) || clean == "/" {
+		return errors.New("invalid host network lock path")
+	}
+	fd, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = unix.Close(fd) }()
+	ancestors := map[string]unix.Stat_t{}
+	path := "/"
+	for _, component := range strings.Split(strings.TrimPrefix(clean, "/"), "/") {
+		var stat unix.Stat_t
+		if err := unix.Fstat(fd, &stat); err != nil {
+			return err
+		}
+		if stat.Uid != 0 && int(stat.Uid) != ownerUID || stat.Mode&0022 != 0 && (stat.Uid != 0 || stat.Mode&unix.S_ISVTX == 0) {
+			return errors.New("host network lock ancestor has unsafe ownership or permissions")
+		}
+		ancestors[path] = stat
+		next, err := unix.Openat(fd, component, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return errors.New("host network lock ancestor cannot be pinned")
+		}
+		_ = unix.Close(fd)
+		fd = next
+		path = filepath.Join(path, component)
+	}
+	if err := validateHostLockDirectoryFD(fd, ownerUID); err != nil {
+		return err
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return err
+	}
+	ancestors[clean] = stat
+	lockFD, err := unix.Openat(fd, hostLockName, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("pin host network policy lock: %w", err)
+	}
+	file := os.NewFile(uintptr(lockFD), "network-policy-lock")
+	defer file.Close()
+	if err := validateHostLockFD(lockFD, ownerUID, groupGID); err != nil {
+		return err
+	}
+	var approved unix.Stat_t
+	if err := unix.Fstat(lockFD, &approved); err != nil {
+		return err
+	}
+	if err := flockHostLock(ctx, lockFD); err != nil {
+		return err
+	}
+	check := func() error {
+		for path, before := range ancestors {
+			var current unix.Stat_t
+			if err := unix.Lstat(path, &current); err != nil || !sameHostLockIdentity(before, current) {
+				return errors.New("host network lock ancestor changed during operator grant")
+			}
+		}
+		var current, pinned unix.Stat_t
+		if err := unix.Fstat(lockFD, &pinned); err != nil || !sameHostLockIdentity(approved, pinned) {
+			return errors.New("native network lock identity or permissions changed")
+		}
+		if err := unix.Lstat(filepath.Join(clean, hostLockName), &current); err != nil || !sameHostLockIdentity(approved, current) {
+			return errors.New("host network lock changed during operator grant")
+		}
+		return nil
+	}
+	return operatoraccess.GrantRW(ctx, file, uid, check, tools)
+}
+
+func sameHostLockIdentity(before, after unix.Stat_t) bool {
+	return before.Dev == after.Dev && before.Ino == after.Ino && before.Uid == after.Uid && before.Gid == after.Gid && before.Mode == after.Mode && (before.Mode&unix.S_IFMT != unix.S_IFREG || before.Nlink == after.Nlink)
 }

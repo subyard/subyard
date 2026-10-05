@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 01-install-incus.sh — Phase 1: install Incus, grant the operator incus-admin,
-# init a dir pool under $HOME/.subyard. Idempotent. Self-elevates via sudo.
+# init a dir pool under $HOME/.subyard. A named socket ACL activates the approved
+# operator immediately while the parent retains its exact plan. Self-elevates via sudo.
 # QEMU and conntrack are installed only for VM yards.
 # Env: SUBYARD_USER, SUBYARD_HOME, STORAGE_POOL, STORAGE_PATH, INCUS_BRIDGE, MIN_INCUS_VER.
 # Flags: -y; --zabbly (install/upgrade incus from the Zabbly LTS-6.0 repo, for nested Docker);
@@ -13,6 +14,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/engine-context.sh
 . "$SCRIPT_DIR/lib/engine-context.sh"
 subyard_require_engine_context
+# This refusal must precede sudo's deliberately restricted environment handoff.
+[ -z "${INCUS_SOCKET:-}${INCUS_DIR:-}${SUBYARD_INCUS_SOCKET:-}" ] \
+  || subyard_context_error "Incus installation requires the default local server endpoint"
 # shellcheck source=scripts/lib/ui.sh
 . "$SCRIPT_DIR/lib/ui.sh"
 # shellcheck source=scripts/lib-power.sh
@@ -20,9 +24,10 @@ subyard_require_engine_context
 # shellcheck source=scripts/lib/host.sh
 . "$SCRIPT_DIR/lib/host.sh"
 
-USE_ZABBLY=auto; UPGRADE_ONLY=0
+USE_ZABBLY=auto; UPGRADE_ONLY=0; APPROVED_OPERATOR_UID=
 for _a in "$@"; do
   case "$_a" in
+    --operator-uid=*) APPROVED_OPERATOR_UID="${_a#--operator-uid=}" ;;
     --zabbly)       USE_ZABBLY=1 ;;
     --upgrade-only) UPGRADE_ONLY=1 ;;
   esac
@@ -38,6 +43,9 @@ fi
 OPERATOR_HOME="$(getent passwd "$OPERATOR_USER" | cut -d: -f6)"
 [ -n "$OPERATOR_HOME" ] || die "cannot resolve home dir for user '$OPERATOR_USER'"
 OPERATOR_GROUP="$(id -gn "$OPERATOR_USER")"
+operator_uid="$(id -u "$OPERATOR_USER")"
+[ -z "$APPROVED_OPERATOR_UID" ] || [ "$operator_uid" = "$APPROVED_OPERATOR_UID" ] \
+  || die "operator numeric identity differs from the approved installer"
 
 # $SUBYARD_HOME is already resolved under the real operator by explicit context loading (it reads
 # the same SUDO_USER), so it points at the operator's home even though this script self-elevates.
@@ -82,6 +90,7 @@ else
     "Install the 'incus' package if missing (apt)." \
     "${vm_qemu_note[@]}" \
     "Add user '$OPERATOR_USER' to group 'incus-admin' — this grants Incus access ≈ root on this host." \
+    "Activate captured-parent access on the current default socket; standalone callers need a fresh group session." \
     "Create the storage pool directory: $STORAGE_PATH" \
     "Run 'incus admin init': dir pool '$STORAGE_POOL' + bridge '$INCUS_BRIDGE' (only if not already initialized)."
   proceed_or_die
@@ -285,13 +294,33 @@ fi
 echo "Host networking (NetworkManager guard):"
 nm_unmanaged_guard "$INCUS_BRIDGE"
 
+# Grant only this approved actor on this socket inode. The native helper pins
+# root-owned ancestors/socket, preserves modes and unrelated ACLs, and verifies
+# readback. No default ACL or service hook makes this grant survive replacement.
+[ "$(id -u "$OPERATOR_USER")" = "$operator_uid" ] \
+  || die "operator numeric identity changed during installation"
+if [ "$operator_uid" != 0 ] && [ -n "${SUBYARD_DISPATCHER_PATH:-}" ]; then
+  if [ ! -x /usr/bin/setfacl ] || [ ! -x /usr/bin/getfacl ]; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends acl \
+      || die "POSIX ACL tools could not be installed"
+  fi
+  case "${SUBYARD_DISPATCHER_PATH:-}" in
+    /*) [ -x "$SUBYARD_DISPATCHER_PATH" ] || die "native operator access helper is unavailable" ;;
+    *) die "native operator access helper is unavailable" ;;
+  esac
+  "$SUBYARD_DISPATCHER_PATH" _incus-operator-access "$operator_uid" \
+    || die "native operator socket access could not be established"
+fi
+
 # --- summary -----------------------------------------------------------------
 echo
 ok "Phase 1 done."
 cat <<MSG
 
 Next:
-  - Re-login (or run 'newgrp incus-admin') so $OPERATOR_USER can use 'incus'
-    without sudo, then verify:  incus list
+  - Captured native parents receive current socket access; verify: incus list
+  - Standalone callers must open a fresh incus-admin session
+  - Re-login to activate incus-admin in other sessions. Socket recreation removes
+    the named grant; removing group membership alone does not revoke that grant.
   - Phase 1 cont.: scripts/02-create-project.sh (project 'subyard' + restricted config)
 MSG

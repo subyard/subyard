@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,9 +16,11 @@ import (
 )
 
 type lifecycleExecution struct {
-	action  string
-	force   bool
-	changed bool
+	action   string
+	force    bool
+	changed  bool
+	observed *ports.InstanceInfo
+	status   string
 }
 
 func prepareLifecycleExecution(
@@ -98,7 +101,7 @@ func (cli *CLI) observeLifecycleExecution(
 	yard domain.Context,
 	execution *lifecycleExecution,
 ) error {
-	if execution == nil || execution.action != "stop" {
+	if execution == nil {
 		return nil
 	}
 	incusPort, _ := cli.statusPorts()
@@ -106,7 +109,29 @@ func (cli *CLI) observeLifecycleExecution(
 	if err != nil {
 		return err
 	}
-	execution.changed = !strings.EqualFold(instance.Status, "stopped")
+	metadata := instance
+	metadata.Status = ""
+	if execution.observed != nil {
+		approved := *execution.observed
+		approved.Status = ""
+		if operationStateDigest(approved) != operationStateDigest(metadata) {
+			return fmt.Errorf("%w: lifecycle target metadata changed", domain.ErrPlanStale)
+		}
+		if execution.action == "stop" && strings.EqualFold(execution.status, "stopped") && !strings.EqualFold(instance.Status, "stopped") {
+			return fmt.Errorf("%w: stopped lifecycle target requires new work", domain.ErrPlanStale)
+		}
+	} else {
+		payload, _ := json.Marshal(instance)
+		var copy ports.InstanceInfo
+		_ = json.Unmarshal(payload, &copy)
+		execution.observed = &copy
+		execution.status = instance.Status
+	}
+	desired := "stopped"
+	if execution.action == "start" {
+		desired = "running"
+	}
+	execution.changed = !strings.EqualFold(instance.Status, desired)
 	return nil
 }
 
@@ -120,6 +145,15 @@ func (cli *CLI) executeLifecycle(
 ) (domain.AdapterResult, error) {
 	if execution == nil {
 		return domain.AdapterResult{}, errors.New("lifecycle execution is required")
+	}
+	if execution.observed == nil {
+		return domain.AdapterResult{}, errors.New("captured lifecycle target is required")
+	}
+	if err := cli.observeLifecycleExecution(ctx, yard, execution); err != nil {
+		return domain.AdapterResult{}, err
+	}
+	if execution.action == "stop" && !execution.changed {
+		return domain.AdapterResult{Schema: 1, OperationID: plan.OperationID, Status: "ok"}, nil
 	}
 	if execution.action == "start" && cli.options.AdapterRunner == nil {
 		if err := cli.prepareNetworkManagerPrivileges(
@@ -194,4 +228,26 @@ func (cli *CLI) preparePowerIntent(ctx context.Context, yard domain.Context) (st
 		return "", err
 	}
 	return intent.Desired, nil
+}
+
+func (execution *lifecycleExecution) binding() string {
+	return operationStateDigest(struct {
+		Action   string
+		Force    bool
+		Instance *ports.InstanceInfo
+	}{execution.action, execution.force, execution.observed})
+}
+func (execution *lifecycleExecution) steps(yard domain.Context) []domain.OperationStep {
+	if execution == nil || execution.observed == nil {
+		return nil
+	}
+	desired := "stopped"
+	if execution.action == "start" {
+		desired = "running"
+	}
+	decision := domain.StepApply
+	if !execution.changed {
+		decision = domain.StepSkip
+	}
+	return []domain.OperationStep{{ID: "power", Target: "incus/" + yard.IncusProject + "/instance/" + yard.YardInstanceName, Observed: strings.ToLower(execution.status), Desired: desired, Decision: decision, Preconditions: []string{"captured instance configuration and ownership remain unchanged"}, Verify: "instance " + desired + " before desired power commit", Consequence: execution.action + " yard instance"}}
 }

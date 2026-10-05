@@ -36,17 +36,53 @@ case "${1:-}" in
         fi
         ;;
       'device get')
+        [ -e "$state_root/up" ] && [ ! -e "$state_root/missing-orca-route" ] || exit 1
         [ "${5:-}" = orca-server ] || exit 1
         case "${6:-}" in
+          type) printf 'proxy\n' ;;
+          bind) printf 'host\n' ;;
           listen) printf 'tcp:127.0.0.1:17678\n' ;;
           connect) printf 'tcp:127.0.0.1:6768\n' ;;
           *) exit 1 ;;
         esac
         ;;
+      'device show')
+        [ -e "$state_root/up" ] || exit 1
+        printf 'unrelated-device:\n  type: disk\n  path: /unrelated\n'
+        if [ ! -e "$state_root/missing-orca-route" ]; then
+          printf 'orca-server:\n  type: proxy\n  bind: host\n  listen: tcp:127.0.0.1:17678\n  connect: tcp:127.0.0.1:6768\n'
+        fi
+        ;;
+      'device remove')
+        [ -e "$state_root/up" ] && [ ! -e "$state_root/missing-orca-route" ] || exit 1
+        [ "${5:-}" = orca-server ] || exit 1
+        touch "$state_root/missing-orca-route"
+        ;;
+      *) exit 1 ;;
     esac ;;
   exec)
     [ -e "$state_root/up" ] || exit 1
     case " $* " in
+      *' systemctl show -p InvocationID --value subyard-orca.service '*)
+        printf '%032x\n' 1 ;;
+      *' systemctl is-active --quiet subyard-orca.service '*)
+        [ -e "$state_root/service-active" ] ;;
+      *' systemctl is-active --quiet subyard-orca-discovery.timer '*)
+        [ -e "$state_root/discovery-active" ] ;;
+      *' systemctl is-active --quiet subyard-orca-discovery.service '*) exit 1 ;;
+      *' systemctl stop subyard-orca-discovery.timer '*)
+        rm -f "$state_root/discovery-active" ;;
+      *' systemctl disable --now subyard-orca.service '*)
+        rm -f "$state_root/service-active" "$state_root/listening" ;;
+      *' nft list chain inet subyard_orca input '*)
+        [ -e "$state_root/ingress" ] || exit 1
+        printf 'chain input { comment "subyard-orca-managed"; }\n' ;;
+      *' /usr/local/libexec/subyard/orca-ingress down '*)
+        rm -f "$state_root/ingress" ;;
+      *' /usr/bin/python3 -B /usr/local/libexec/subyard/orca-registration/main.py status --host-name '*)
+        printf '%s\n' '{"ready":true,"registered":2,"total":2,"errors":[],"warnings":[],"scopeDigest":"0000000000000000000000000000000000000000000000000000000000000001","catalogDigest":"0000000000000000000000000000000000000000000000000000000000000002"}' ;;
+      *' /usr/bin/python3 -B /usr/local/libexec/subyard/orca-registration/settings.py --check '*)
+        [ ! -e "$state_root/codex-default-drift" ] ;;
       *' ss -Hltn '*) [ -e "$state_root/listening" ] ;;
       *' dpkg --print-architecture '*) printf 'amd64\n' ;;
       *' dpkg-query -W '*orca-ide*) printf '%s\n' "$ORCA_TEST_VERSION" ;;
@@ -68,7 +104,7 @@ exit 0
 MOCK
 chmod 755 "$TMP/bin/incus" "$TMP/bin/curl" "$TMP/bin/ss"
 export RESOURCE_TEST_LOG="$TMP/incus.log"
-touch "$TMP/up" "$TMP/listening"
+touch "$TMP/up" "$TMP/listening" "$TMP/service-active" "$TMP/discovery-active" "$TMP/ingress" "$TMP/codex-default-drift"
 orca_handler="$ROOT/config/profiles/orca/resources/orca/handler.sh"
 # shellcheck source=tests/helpers/resource-lifecycle.sh
 . "$ROOT/tests/helpers/resource-lifecycle.sh"
@@ -99,12 +135,12 @@ SUBYARD_RESOURCE_MODE=prepare "$orca_handler" sync >"$TMP/orca-sync-plan.json" <
 SUBYARD_RESOURCE_MODE=prepare "$orca_handler" down >"$TMP/orca-down-plan.json" </dev/null
 SUBYARD_RESOURCE_MODE=prepare "$orca_handler" is-up >"$TMP/orca-is-up-plan.json" </dev/null
 SUBYARD_RESOURCE_MODE=prepare "$orca_handler" logs >"$TMP/orca-logs-plan.json" </dev/null
-grep -Fq '"action":"up","changed":true' "$TMP/orca-up-plan.json" || fail 'Orca up action is unreachable'
-grep -Fq '"action":"pair","changed":true' "$TMP/orca-pair-plan.json" || fail 'Orca pair action is unreachable'
-grep -Fq '"action":"restart","changed":true' "$TMP/orca-restart-plan.json" \
+jq -e '.action == "up" and .changed == true' "$TMP/orca-up-plan.json" >/dev/null || fail 'Orca up action is unreachable'
+jq -e '.action == "pair" and .changed == true' "$TMP/orca-pair-plan.json" >/dev/null || fail 'Orca pair action is unreachable'
+jq -e '.action == "restart" and .changed == true' "$TMP/orca-restart-plan.json" >/dev/null \
   || fail 'Orca restart action is unreachable'
-grep -Fq '"action":"sync","changed":true' "$TMP/orca-sync-plan.json" || fail 'explicit Orca sync must run its bounded reconciliation'
-grep -Fq '"action":"down","changed":true' "$TMP/orca-down-plan.json" || fail 'Orca down action is unreachable'
+jq -e '.action == "sync" and .changed == true' "$TMP/orca-sync-plan.json" >/dev/null || fail 'explicit Orca sync must run its bounded reconciliation'
+jq -e '.action == "down" and .changed == true' "$TMP/orca-down-plan.json" >/dev/null || fail 'Orca down action is unreachable'
 grep -Fq '"action":"is-up","changed":false' "$TMP/orca-is-up-plan.json" || fail 'Orca is-up read is unreachable'
 grep -Fq '"action":"logs","changed":false' "$TMP/orca-logs-plan.json" || fail 'Orca logs action is unreachable'
 if grep -Eq 'file push|docker (run|start|stop|rm|build)|systemctl (enable|start|restart|disable)|config device (add|remove)' \
@@ -130,4 +166,9 @@ check_resource_probe "$orca_handler"
 "$ROOT/bin/yard" orca down --yes >/dev/null
 grep -Fq 'systemctl disable --now subyard-orca.service' "$RESOURCE_TEST_LOG" \
   || fail 'Orca down did not reach its profile-owned service'
+[ ! -e "$TMP/service-active" ] && [ ! -e "$TMP/discovery-active" ] \
+  && [ ! -e "$TMP/ingress" ] && [ -e "$TMP/missing-orca-route" ] \
+  || fail 'Orca down did not converge all captured native targets'
+incus config device show yard | grep -Fq 'unrelated-device:' \
+  || fail 'Orca down removed an unrelated device'
 printf 'ok: Orca prepare, silent probes and dispatcher reverse lifecycle\n'

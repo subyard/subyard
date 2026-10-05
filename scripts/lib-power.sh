@@ -68,12 +68,13 @@ power_nm_prepare_reader() {
     sudo -v \
       || { power_fail "could not authorize NetworkManager configuration check"; return 1; }
   fi
+  export SUBYARD_SUDO_PREAUTHORIZED=1
 }
 
 power_nm_print_config() {
   local binary
   binary="$(power_nm_binary)" || return 1
-  if [ "$(id -u)" -eq 0 ]; then
+  if [ "$(id -u)" -eq 0 ] || [ "${SUBYARD_SUDO_PREAUTHORIZED:-0}" != 1 ]; then
     "$binary" --print-config
   else
     command -v sudo >/dev/null 2>&1 || return 1

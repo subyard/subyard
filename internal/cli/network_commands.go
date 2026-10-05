@@ -247,15 +247,20 @@ func (prepared *preparedCommand) prepareNetwork(ctx context.Context, _ *initBoot
 		return action, domain.ActionDelta{Changed: p.Changed, Consequences: consequences}, nil
 	}
 	prepared.assess = func(context.Context) (domain.ActionID, domain.ActionDelta, error) { return actionDelta(plan) }
+	prepared.exactState = plan.StateBinding()
+	prepared.stepsComplete = true
+	current := plan
+	prepared.steps = func() []domain.OperationStep { return plan.OperationSteps(current) }
 	prepared.executeNoOp = true
 	prepared.refresh = func(ctx context.Context) (domain.ActionID, domain.ActionDelta, error) {
 		fresh, err := service.Prepare(ctx, yards, change)
 		if err != nil {
 			return "", domain.ActionDelta{}, err
 		}
-		if fresh.Fingerprint != plan.Fingerprint {
-			return "", domain.ActionDelta{}, domain.ErrPlanStale
+		if err := yardnetwork.CheckApproved(plan, fresh); err != nil {
+			return "", domain.ActionDelta{}, err
 		}
+		current = fresh
 		return actionDelta(fresh)
 	}
 	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, _ io.Writer) (domain.AdapterResult, error) {

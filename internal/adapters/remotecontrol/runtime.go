@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
 	"strconv"
@@ -54,7 +55,10 @@ func (runtime Runtime) Lookup(_ context.Context, name string) (domain.RemoteReco
 			OwnerYardName: valueOr(values["OWNER_YARD_NAME"], values["REMOTE_YARD"]),
 		},
 		Remote: valueOr(values["ACCESS_KIND"], values["YARD_TYPE"]) == "remote",
-		Path:   path, SSHPort: port,
+		Path:   path, SSHPort: port, SSHHost: values["SSH_HOST"],
+	}
+	if record.Remote && record.SSHHost != "" && !domain.SafeSSHTarget(record.SSHHost) {
+		return domain.RemoteRecord{}, false, errors.New("invalid registered remote data-plane SSH target")
 	}
 	if _, lastProbe, err := runtime.readCache(name); err == nil {
 		record.LastProbe = lastProbe
@@ -140,6 +144,9 @@ func (runtime Runtime) Apply(ctx context.Context, prepared domain.RemotePrepared
 		return domain.RemoteResult{}, err
 	}
 	defer unlock()
+	if err := runtime.checkPreparedBinding(prepared); err != nil {
+		return domain.RemoteResult{}, err
+	}
 	if err := ctx.Err(); err != nil {
 		return domain.RemoteResult{}, fmt.Errorf("apply remote mutation: %w", context.Cause(ctx))
 	}
@@ -198,6 +205,14 @@ func (runtime Runtime) applyAdd(ctx context.Context, prepared domain.RemotePrepa
 	if err := runtime.verifyCurrent(ctx, prepared); err != nil {
 		return domain.RemoteResult{}, err
 	}
+	unlock, err := sshtrust.LockKnownHosts(ctx, runtime.knownHostsPath())
+	if err != nil {
+		return domain.RemoteResult{}, err
+	}
+	defer unlock()
+	if err := runtime.checkPreparedBinding(prepared); err != nil {
+		return domain.RemoteResult{}, err
+	}
 	publicKey, identity, err := runtime.ensureIdentity(ctx)
 	if err != nil {
 		return domain.RemoteResult{}, err
@@ -205,11 +220,6 @@ func (runtime Runtime) applyAdd(ctx context.Context, prepared domain.RemotePrepa
 	if _, err := runtime.ownerCall(ctx, prepared.Spec, publicKey, "_authorize"); err != nil {
 		return domain.RemoteResult{}, fmt.Errorf("authorize controller key: %w", err)
 	}
-	unlock, err := sshtrust.LockKnownHosts(ctx, runtime.knownHostsPath())
-	if err != nil {
-		return domain.RemoteResult{}, err
-	}
-	defer unlock()
 	envPath := filepath.Join(runtime.ConfigHome, "yards", prepared.Spec.LegacyAlias, "config.env")
 	if prepared.Existing != nil {
 		envPath = prepared.Existing.Path
@@ -228,18 +238,32 @@ func (runtime Runtime) applyAdd(ctx context.Context, prepared domain.RemotePrepa
 		if err != nil {
 			return err
 		}
-		for path, payload := range map[string][]byte{
+		expected := map[string][]byte{
 			envPath: renderContext(prepared, current), snippet: runtime.renderSnippet(prepared, identity),
-			sshConfig: addInclude(configData, filepath.Base(snippet)), known: knownData,
-		} {
+			sshConfig: addInclude(configData, filepath.Base(snippet)),
+		}
+		for path, payload := range expected {
 			if err := atomicWrite(path, payload, 0o600); err != nil {
 				return err
 			}
 		}
+		if err := atomicWrite(known, knownData, 0o600); err != nil {
+			return err
+		}
 		if err := runtime.verifyData(ctx, prepared); err != nil {
 			return err
 		}
-		return runtime.writeCache(cache, prepared.Owner)
+		if err := runtime.writeCache(cache, prepared.Owner); err != nil {
+			return err
+		}
+		cached, _, err := runtime.readCache(prepared.Spec.LegacyAlias)
+		if prepared.Owner.Projects == nil {
+			cached.Projects = nil
+		}
+		if err != nil || !reflect.DeepEqual(cached, prepared.Owner) {
+			return errors.New("remote status cache readback differs from approved owner metadata")
+		}
+		return verifyRemoteFiles(expected)
 	})
 	if err != nil {
 		return domain.RemoteResult{}, classifyProbe(err)
@@ -258,6 +282,9 @@ func (runtime Runtime) applyRepair(ctx context.Context, prepared domain.RemotePr
 		return domain.RemoteResult{}, err
 	}
 	defer unlock()
+	if err := runtime.checkPreparedBinding(prepared); err != nil {
+		return domain.RemoteResult{}, err
+	}
 	err = transactional([]string{known}, func() error {
 		payload, err := readOptional(known)
 		if err != nil {
@@ -284,6 +311,9 @@ func (runtime Runtime) applyRemove(ctx context.Context, prepared domain.RemotePr
 		return domain.RemoteResult{}, err
 	}
 	defer unlock()
+	if err := runtime.checkPreparedBinding(prepared); err != nil {
+		return domain.RemoteResult{}, err
+	}
 	err = transactional([]string{envPath, snippet, sshConfig, known, cache}, func() error {
 		configData, err := readOptional(sshConfig)
 		if err != nil {
@@ -304,9 +334,23 @@ func (runtime Runtime) applyRemove(ctx context.Context, prepared domain.RemotePr
 			}
 		}
 		if len(knownData) != 0 {
-			return atomicWrite(known, removeKnownHost(knownData, hostKeyAlias(prepared.Spec.LegacyAlias)), 0o600)
+			if err := atomicWrite(known, removeKnownHost(knownData, hostKeyAlias(prepared.Spec.LegacyAlias)), 0o600); err != nil {
+				return err
+			}
 		}
-		return nil
+		for _, path := range []string{envPath, snippet, cache} {
+			if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+				return errors.New("remote context removal did not converge")
+			}
+		}
+		expected := make(map[string][]byte)
+		if len(configData) != 0 {
+			expected[sshConfig] = removeInclude(configData, filepath.Base(snippet))
+		}
+		if len(knownData) != 0 {
+			expected[known] = removeKnownHost(knownData, hostKeyAlias(prepared.Spec.LegacyAlias))
+		}
+		return verifyRemoteFiles(expected)
 	})
 	if err != nil {
 		return domain.RemoteResult{}, err
@@ -332,12 +376,12 @@ func (runtime Runtime) verifyCurrent(ctx context.Context, prepared domain.Remote
 	}
 	if prepared.Existing == nil {
 		if exists {
-			return errors.New("remote context changed after planning; prepare the command again")
+			return fmt.Errorf("%w: remote context changed after planning", domain.ErrPlanStale)
 		}
 		return nil
 	}
 	if !exists || !record.Remote || record.Path != prepared.Existing.Path || record.Spec != prepared.Existing.Spec {
-		return errors.New("remote context changed after planning; prepare the command again")
+		return fmt.Errorf("%w: remote context changed after planning", domain.ErrPlanStale)
 	}
 	return nil
 }

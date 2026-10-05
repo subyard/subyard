@@ -23,6 +23,7 @@ type IntegrationCleanupPlan struct {
 	Fingerprint string
 	Changed     bool
 	Steps       []string
+	scope       string
 	hookState   string
 	script      []byte
 }
@@ -39,7 +40,8 @@ func (runtime Runtime) IntegrationCleanupPlan(ctx context.Context, id string) (I
 	if path == "" {
 		return plan, fmt.Errorf("integration %s does not declare a cleanup handler (AGENT_%s_CLEANUP); inspect its remaining installation manually", id, id)
 	}
-	if _, err := runtime.integrationPrecondition(ctx); err != nil {
+	instance, err := runtime.integrationPrecondition(ctx)
+	if err != nil {
 		return plan, err
 	}
 	script, err := (guestConfigFile{source: path}).readSource()
@@ -71,8 +73,9 @@ func (runtime Runtime) IntegrationCleanupPlan(ctx context.Context, id string) (I
 	identity, _ := json.Marshal([]string{id, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName,
 		runtime.devUser(), strconv.Itoa(runtime.Yard.DevUID), fmt.Sprintf("%x", sha256.Sum256(script)),
 		observed.Fingerprint, strconv.FormatBool(*observed.Changed), strings.Join(observed.Steps, "\n")})
+	scopeBytes, _ := json.Marshal([]any{id, path, script, runtime.Yard, instance, runtime.Environment})
 	return IntegrationCleanupPlan{Fingerprint: fmt.Sprintf("%x", sha256.Sum256(identity)), Changed: *observed.Changed,
-		Steps: observed.Steps, hookState: observed.Fingerprint, script: script}, nil
+		Steps: observed.Steps, hookState: observed.Fingerprint, script: script, scope: fmt.Sprintf("%x", sha256.Sum256(scopeBytes))}, nil
 }
 
 func (runtime Runtime) ApplyIntegrationCleanup(ctx context.Context, id string, plan IntegrationCleanupPlan) error {
@@ -80,7 +83,7 @@ func (runtime Runtime) ApplyIntegrationCleanup(ctx context.Context, id string, p
 	if err != nil {
 		return err
 	}
-	if fresh.Fingerprint != plan.Fingerprint || fresh.Changed != plan.Changed {
+	if (fresh.Fingerprint != plan.Fingerprint || fresh.Changed != plan.Changed) && !(plan.Changed && !fresh.Changed && plan.scope != "" && plan.scope == fresh.scope) {
 		return fmt.Errorf("%w: integration %s cleanup changed; assess it again", domain.ErrPlanStale, id)
 	}
 	if !fresh.Changed {

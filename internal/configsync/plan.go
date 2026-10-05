@@ -259,6 +259,7 @@ func validateCandidate(
 	source sourceSnapshot,
 	previous Manifest,
 	catalog config.Catalog,
+	capture ...*[]config.Loaded,
 ) error {
 	excluded, err := legacyLocalExclusions(options.ConfigHome, previous)
 	if err != nil {
@@ -344,7 +345,13 @@ func validateCandidate(
 			return err
 		}
 	}
-	return validateInventory(contexts)
+	if err := validateInventory(contexts); err != nil {
+		return err
+	}
+	if len(capture) != 0 {
+		*capture[0] = contexts
+	}
+	return nil
 }
 
 func candidateEnvironment(

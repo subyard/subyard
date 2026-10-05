@@ -57,6 +57,9 @@ func (runtime *Runtime) verifyPublishedCandidate(
 	runtimeRoot string,
 	expectedDigest *releasetransition.Fingerprint,
 ) (*verifiedPublishedCandidate, error) {
+	if relocated, ok := runtime.relocatedCandidates[candidate.root]; ok {
+		candidate.root = relocated
+	}
 	root, err := openVerifiedCandidateRoot(candidate, runtimeRoot)
 	if err != nil {
 		return nil, errors.New("published runtime directory is unavailable")

@@ -15,7 +15,16 @@ type RemoteService struct {
 	Control ports.RemoteControl
 }
 
-func (service RemoteService) Prepare(ctx context.Context, arguments []string) (domain.RemotePrepared, error) {
+func (service RemoteService) Prepare(ctx context.Context, arguments []string) (prepared domain.RemotePrepared, err error) {
+	defer func() {
+		if err == nil && prepared.Action != domain.RemoteList {
+			if capture, ok := service.Control.(interface {
+				CapturePrepared(context.Context, domain.RemotePrepared) (domain.RemotePrepared, error)
+			}); ok {
+				prepared, err = capture.CapturePrepared(ctx, prepared)
+			}
+		}
+	}()
 	if service.Control == nil {
 		return domain.RemotePrepared{}, errors.New("remote control port is required")
 	}
@@ -23,7 +32,7 @@ func (service RemoteService) Prepare(ctx context.Context, arguments []string) (d
 	if err != nil {
 		return domain.RemotePrepared{}, err
 	}
-	prepared := domain.RemotePrepared{Action: action, Spec: spec}
+	prepared = domain.RemotePrepared{Action: action, Spec: spec}
 	if action == domain.RemoteList {
 		prepared.Records, err = service.Control.List(ctx)
 		return prepared, err

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -633,6 +634,9 @@ func TestProjectHookFailureIsNonBlockingAndVisible(t *testing.T) {
 func TestProjectExportUsesDataPlaneAndPublishesPortablePatch(t *testing.T) {
 	data := &projectDataStub{}
 	data.run = func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+		if len(request.Command) >= 3 && strings.Contains(request.Command[2], "mkdir -m 700") {
+			return ports.InstanceExecResult{Stdout: []byte("1:2:1000\n")}, nil
+		}
 		if len(request.Command) > 0 && request.Command[0] == "diff" {
 			return ports.InstanceExecResult{ExitCode: 1, Stdout: []byte(
 				"diff -ruN /tmp/subyard-export-operation-export/a/file /srv/workspaces/demo-12345678/src/file\n" +
@@ -658,8 +662,8 @@ func TestProjectExportUsesDataPlaneAndPublishesPortablePatch(t *testing.T) {
 		!strings.Contains(string(exports.patch), "+/srv/workspaces/demo-12345678/src stays content\n") {
 		t.Fatalf("patch is not portable: %q", exports.patch)
 	}
-	if len(data.requests) != 4 || data.requests[1].Command[0] != "tar" ||
-		data.requests[2].Command[0] != "diff" || data.requests[3].Command[0] != "rm" {
+	if len(data.requests) != 6 || data.requests[2].Command[0] != "tar" ||
+		data.requests[4].Command[0] != "diff" || !strings.Contains(data.requests[5].Command[2], "rm -rf") {
 		t.Fatalf("unexpected export sequence: %#v", data.requests)
 	}
 }
@@ -845,5 +849,107 @@ func cloneRecord() domain.ProjectRecord {
 		Schema: 1, ProjectID: "demo-12345678", Name: "Demo",
 		HostPath: "https://example.invalid/demo.git", YardPath: "/srv/workspaces/demo-12345678/src",
 		Mode: domain.ProjectGit, SSHHost: "yard", Target: "sample-profile", ImportedAt: "2026-07-22T00:00:00Z",
+	}
+}
+
+type corruptPreparedProjectCopy struct {
+	projectProcessExecutor
+	path    string
+	corrupt bool
+}
+
+func (executor corruptPreparedProjectCopy) Stream(ctx context.Context, yard domain.Context, request ports.InstanceExecRequest, input io.Reader) (ports.InstanceExecResult, error) {
+	result, err := executor.projectProcessExecutor.Stream(ctx, yard, request, input)
+	if err != nil {
+		return result, fmt.Errorf("synthetic stream: stdout=%q stderr=%q: %w", result.Stdout, result.Stderr, err)
+	}
+	if err == nil && executor.corrupt && slices.Contains(request.Command, "-xf") {
+		err = os.WriteFile(filepath.Join(executor.path, "content.txt"), []byte("corrupted after transfer"), 0o600)
+	}
+	return result, err
+}
+
+func TestProjectPreparedSyncVerifiesExtractedPayloadBeforeMetadata(t *testing.T) {
+	for _, corrupt := range []bool{false, true} {
+		t.Run(fmt.Sprint(corrupt), func(t *testing.T) {
+			root := testkit.TempDir(t)
+			record := cloneRecord()
+			record.Mode, record.HostPath = domain.ProjectSync, "/controller/source"
+			record.YardPath = filepath.Join(root, "copy", "source")
+			archive := &countingProjectArchive{payload: validProjectArchive(t, "prepared source")}
+			runner := ProjectActionRunner{
+				Data: corruptPreparedProjectCopy{path: record.YardPath, corrupt: corrupt}, PreparedArchive: archive,
+				Yard: domain.Context{AccessKind: domain.AccessRemote, YardName: "test"}, Project: record,
+			}
+			err := runner.sync(context.Background())
+			marker := filepath.Join(filepath.Dir(record.YardPath), ".subyard-meta.json")
+			if corrupt {
+				if err == nil || !strings.Contains(err.Error(), "verify copied project archive") {
+					t.Fatalf("error=%v", err)
+				}
+				if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("unverified metadata published: %v", err)
+				}
+				if _, err := os.Stat(record.YardPath); err != nil {
+					t.Fatalf("partial workspace was removed: %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if archive.opens != 2 {
+				t.Fatalf("retained archive opens=%d", archive.opens)
+			}
+		})
+	}
+}
+
+func TestProjectPreparedSyncRejectsInputBeforeTargetMutation(t *testing.T) {
+	data := &projectDataStub{}
+	record := cloneRecord()
+	record.Mode = domain.ProjectSync
+	runner := ProjectActionRunner{Data: data, PreparedArchive: failedPreparedProjectArchive{}, Project: record}
+	if err := runner.sync(context.Background()); !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatalf("error=%v", err)
+	}
+	if len(data.requests) != 0 {
+		t.Fatalf("target touched before input check: %v", data.requests)
+	}
+}
+
+type failedPreparedProjectArchive struct{}
+
+func (failedPreparedProjectArchive) Open(context.Context, string) (io.ReadCloser, error) {
+	return nil, domain.ErrPlanStale
+}
+
+func TestProjectCloneChecksPreparedRevisionBeforeMetadata(t *testing.T) {
+	const revision = "0123456789012345678901234567890123456789"
+	for _, actual := range []string{revision, "fedcba9876543210012345678901234567890123"} {
+		data := &projectDataStub{run: func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+			if slices.Contains(request.Command, "rev-parse") {
+				return ports.InstanceExecResult{Stdout: []byte(actual + "\n")}, nil
+			}
+			if request.Command[0] == "cat" {
+				metadata, _ := ProjectMetadata(cloneRecord(), "test")
+				return ports.InstanceExecResult{Stdout: metadata}, nil
+			}
+			return ports.InstanceExecResult{}, nil
+		}}
+		runner := ProjectActionRunner{Data: data, Yard: domain.Context{AccessKind: domain.AccessRemote, YardName: "test"}, Project: cloneRecord(), CloneRevision: revision}
+		err := runner.clone(context.Background())
+		if actual == revision {
+			if err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			if err == nil {
+				t.Fatal("different cloned revision accepted")
+			}
+			for _, request := range data.requests {
+				if request.Command[0] == "tee" {
+					t.Fatal("unverified clone metadata published")
+				}
+			}
+		}
 	}
 }

@@ -1906,60 +1906,147 @@ data="${SUBYARD_HOME:?}/p0-profile-resource.data"
 verb="${1:-}"; [ $# -eq 0 ] || shift
 [ $# -eq 0 ] || { printf 'unexpected resource argument\n' >&2; exit 2; }
 
-emit() { # <action> <changed> [consequence]
-  if [ "$2" = true ]; then
-    printf '{"schema":"yard.resource-action-assessment.v1","action":"%s","changed":true,"consequences":["%s"]}\n' "$1" "$3"
-  else
-    printf '{"schema":"yard.resource-action-assessment.v1","action":"%s","changed":false,"consequences":[]}\n' "$1"
-  fi
-}
-require_apply() { # <action>
-  [ "${SUBYARD_RESOURCE_MODE:-}" = apply ] || exit 2
-  [ "${SUBYARD_RESOURCE_ACTION:-}" = "$1" ] || exit 2
-  [ -n "${SUBYARD_OPERATION_ID:-}" ] || exit 2
+emit_query() {
+  printf '{"schema":"yard.resource-action-assessment.v1","action":"%s","changed":false,"consequences":[]}\n' "$verb"
 }
 
-case "${SUBYARD_RESOURCE_MODE:-}" in
-  prepare)
-    case "$verb" in
-      up)
-        if [ "$(cat "$state" 2>/dev/null)" = up ]; then emit up false; else emit up true 'start the marker-owned P0 resource runtime'; fi
-        ;;
-      is-up) emit is-up false ;;
-      status) emit status false ;;
-      down)
-        if [ -e "$state" ]; then emit down true 'stop the marker-owned P0 resource runtime'; else emit down false; fi
-        ;;
-      purge)
-        if [ -e "$data" ]; then emit purge true 'irreversibly delete marker-owned P0 persistent data'; else emit purge false; fi
+case "$verb" in
+  is-up|status)
+    case "${SUBYARD_RESOURCE_MODE:-}" in
+      prepare) emit_query ;;
+      apply|'')
+        if [ "$verb" = is-up ]; then [ "$(cat "$state" 2>/dev/null)" = up ]
+        else [ "$(cat "$state" 2>/dev/null)" = up ] && printf 'up\n' || { printf 'down\n'; exit 1; }; fi
         ;;
       *) exit 2 ;;
     esac
+    exit
     ;;
-  apply)
-    require_apply "$verb"
-    case "$verb" in
-      up)
-        install -d -m 0700 "$(dirname "$state")"
-        printf 'up\n' > "$state"
-        printf 'persistent\n' > "$data"
-        ;;
-      is-up) [ "$(cat "$state" 2>/dev/null)" = up ] ;;
-      status) [ "$(cat "$state" 2>/dev/null)" = up ] && printf 'up\n' || { printf 'down\n'; exit 1; } ;;
-      down) find "$state" -delete 2>/dev/null || true ;;
-      purge) find "$data" -delete 2>/dev/null || true ;;
-      *) exit 2 ;;
-    esac
-    ;;
-  '')
-    case "$verb" in
-      is-up) [ "$(cat "$state" 2>/dev/null)" = up ] ;;
-      -h|--help|help|'') printf 'P0 typed resource fixture\n' ;;
-      *) exit 2 ;;
-    esac
-    ;;
+  -h|--help|help|'') printf 'P0 typed resource fixture\n'; exit ;;
+  up|down|purge) ;;
   *) exit 2 ;;
 esac
+
+# Native preparation and verification only observe these two fixture-owned
+# files. Apply holds the owner lock and checks the captured identities again.
+python3 - "$verb" <<'PYTHON'
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import stat
+import sys
+
+verb = sys.argv[1]
+mode = os.environ.get("SUBYARD_RESOURCE_MODE", "")
+root = Path(os.environ["SUBYARD_HOME"])
+paths = [root / "p0-profile-resource.state", root / "p0-profile-resource.data"]
+expected = [b"up\n", b"persistent\n"]
+
+def stale(reason):
+    raise SystemExit("plan_stale: " + reason)
+
+def fingerprint(path, content):
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return "absent"
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size != len(content) or path.read_bytes() != content:
+        stale("unexpected marker-owned P0 file")
+    identity = [metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_uid,
+                metadata.st_gid, metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns]
+    return "present native fingerprint " + hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+
+def assessment():
+    observed = [fingerprint(path, content) for path, content in zip(paths, expected)]
+    if verb == "up":
+        desired = ["up", "present"]
+        changed = [value == "absent" for value in observed]
+        consequences = ["start the marker-owned P0 resource runtime", "create marker-owned P0 persistent data"]
+    elif verb == "down":
+        desired = ["absent", "retain " + observed[1]]
+        changed = [observed[0] != "absent", False]
+        consequences = ["stop the marker-owned P0 resource runtime", "retain marker-owned P0 persistent data"]
+    else:
+        desired = ["retain " + observed[0], "absent"]
+        changed = [False, observed[1] != "absent"]
+        consequences = ["retain the marker-owned P0 resource runtime", "irreversibly delete marker-owned P0 persistent data"]
+    steps = [{"id": identity, "target": target, "observed": value,
+              "desired": want, "decision": "apply" if change else "skip",
+              "preconditions": ["only the two captured marker-owned P0 files"],
+              "verify": verify, "consequence": consequence}
+             for identity, target, value, want, change, verify, consequence in zip(
+                 ["runtime", "persistent-data"], ["marker-owned P0 runtime", "marker-owned P0 persistent data"],
+                 observed, desired, changed,
+                 ["read actual runtime presence and retained identity", "read actual persistent data presence and retained identity"],
+                 consequences)]
+    metadata = root.lstat()
+    if not stat.S_ISDIR(metadata.st_mode):
+        stale("P0 owner root replaced")
+    scope = [str(root), metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_uid,
+             metadata.st_gid, verb, [(step["id"], step["target"], step["desired"]) for step in steps]]
+    binding = hashlib.sha256(json.dumps(scope).encode()).hexdigest()
+    return {"schema": "yard.resource-action-assessment.v2", "action": verb,
+            "binding": binding, "steps": steps, "changed": any(changed),
+            "consequences": [step["consequence"] for step in steps if step["decision"] == "apply"]}
+
+def check(current):
+    try:
+        approved = json.loads(os.environ["SUBYARD_RESOURCE_STEPS"])
+    except (KeyError, ValueError):
+        stale("P0 approved native steps missing")
+    if (current["binding"] != os.environ.get("SUBYARD_RESOURCE_BINDING") or
+            not isinstance(approved, list) or len(approved) != 2 or
+            not all(isinstance(step, dict) for step in approved)):
+        stale("P0 native target scope changed")
+    for old, fresh in zip(approved, current["steps"]):
+        if any(old.get(key) != fresh[key] for key in
+               ("id", "target", "desired", "preconditions", "verify", "consequence")):
+            stale("P0 native desired state changed")
+        if old.get("decision") == "skip":
+            if fresh["decision"] != "skip" or fresh["observed"] != old.get("observed"):
+                stale("P0 native skipped identity changed")
+        elif old.get("decision") != "apply" or (fresh["decision"] == "apply" and old.get("observed") != fresh["observed"]):
+            stale("P0 native file identity changed")
+
+if mode == "prepare":
+    result = assessment()
+    if os.environ.get("SUBYARD_RESOURCE_STEPS"):
+        check(result)
+    print(json.dumps(result))
+elif mode == "verify":
+    result = assessment()
+    check(result)
+    if result["changed"]:
+        stale("P0 native postcondition did not converge")
+    for step in result["steps"]:
+        step["observed"] = step["desired"]
+    print(json.dumps(result))
+elif mode == "apply":
+    if os.environ.get("SUBYARD_RESOURCE_ACTION") != verb or not os.environ.get("SUBYARD_OPERATION_ID"):
+        stale("P0 native action is not approved")
+    with (root / ".p0-profile-resource.lock").open("a") as lock:
+        os.chmod(lock.name, 0o600)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        current = assessment()
+        check(current)
+        for path, content, step in zip(paths, expected, current["steps"]):
+            if step["decision"] == "skip":
+                continue
+            if verb == "up":
+                descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(descriptor, "wb") as output:
+                    output.write(content)
+            else:
+                path.unlink()
+        verified = assessment()
+        check(verified)
+        if verified["changed"]:
+            stale("P0 native apply did not converge")
+else:
+    raise SystemExit(2)
+PYTHON
 EOF
   chmod 0700 "$handler"
   ./dev/build-engine.sh

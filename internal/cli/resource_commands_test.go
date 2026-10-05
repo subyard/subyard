@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
@@ -436,20 +437,15 @@ func TestRemoteResourceCommandIsPreparedOnlyByOwner(t *testing.T) {
 	writeCLIFile(t, filepath.Join(remoteDirectory, "config.env"),
 		"YARD_TYPE=remote\nREMOTE_DEST=owner.example\nREMOTE_YARD=inner\nSSH_PORT=4444\n", 0o600)
 	fakeBin := filepath.Join(root, "fake-bin")
-	sshLog := filepath.Join(root, "remote-ssh.log")
 	if err := os.MkdirAll(fakeBin, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	writeCLIFile(t, filepath.Join(fakeBin, "ssh"), `#!/bin/sh
-set -eu
-`+trustedSSHMock(t)+`
-root="$(cd "$(dirname "$0")/.." && pwd)"
-printf '%s\n' "$@" >"$root/remote-ssh.log"
-`, 0o700)
+	sshLog := writeStructuredOwnerFixture(t, fakeBin, "demo", []string{"run"}, []domain.OperationStep{{ID: "resource.run", Target: "owner inner fixture resource", Observed: "pending native resource", Desired: "native resource converged", Decision: domain.StepApply, Verify: "owner native verifier reports converged", Consequence: "converge owner fixture resource"}}, "converge owner fixture resource")
+
 	path := fakeBin + ":" + os.Getenv("PATH")
 	t.Setenv("PATH", path)
 	environment = append(environment, "PATH="+path)
-	prompt := &testkit.Prompt{}
+	prompt := &testkit.Prompt{Answers: []bool{true}}
 	var stderr bytes.Buffer
 	program, err := New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"-Y", "remote", "demo", "run"},
@@ -461,8 +457,8 @@ printf '%s\n' "$@" >"$root/remote-ssh.log"
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
-	if len(prompt.Requests) != 0 {
-		t.Fatalf("controller prepared or prompted for owner action: %#v", prompt.Requests)
+	if len(prompt.Requests) != 1 {
+		t.Fatalf("controller did not confirm the owner prepared action: %#v", prompt.Requests)
 	}
 	if _, err := os.Stat(applyLog); !os.IsNotExist(err) {
 		t.Fatalf("controller ran resource handler: %v", err)
@@ -471,7 +467,7 @@ printf '%s\n' "$@" >"$root/remote-ssh.log"
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"owner.example", "'yard'", "'inner'", "'demo'", "'run'"} {
+	for _, expected := range []string{"owner.example", "'yard'", "'inner'", "operation.plan", "operation.execute", "stepSchema", strings.Repeat("a", 64)} {
 		if !strings.Contains(string(forwarded), expected) {
 			t.Fatalf("forwarded command missing %q:\n%s", expected, forwarded)
 		}

@@ -29,8 +29,9 @@ type Setting struct {
 }
 
 type RuntimeHook struct {
-	ActivationID string `json:"activation_id"`
-	Handler      string `json:"handler"`
+	ActivationID         string   `json:"activation_id"`
+	Handler              string   `json:"handler"`
+	ProjectsChangedHooks []string `json:"projects_changed_hooks,omitempty"`
 }
 
 type GuestEnvironmentHook struct {
@@ -99,6 +100,13 @@ func (definition Definition) validateExtensions() error {
 		}
 		if err := definition.validateExecutable(definition.Runtime.Handler); err != nil {
 			return fmt.Errorf("runtime handler: %w", err)
+		}
+		seen := map[string]bool{}
+		for _, path := range definition.Runtime.ProjectsChangedHooks {
+			if !strings.HasPrefix(path, "/usr/local/libexec/subyard/projects-changed.d/") || filepath.Clean(path) != path || filepath.Dir(path) != "/usr/local/libexec/subyard/projects-changed.d" || strings.ContainsAny(path, "\r\n\x00") || seen[path] {
+				return errors.New("invalid runtime project hook path")
+			}
+			seen[path] = true
 		}
 	}
 	if definition.GuestEnvironment != nil {

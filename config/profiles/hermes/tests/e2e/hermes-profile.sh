@@ -25,6 +25,7 @@ if [ ! -x "$YARD_BIN" ]; then
   command -v go >/dev/null 2>&1 || die "Go is required in the leased VM"
   "$ROOT/dev/build-engine.sh"; YARD_BIN="$ROOT/.build/yard"
 fi
+[ "$YARD_BIN" != "$ROOT/.build/yard" ] || "$ROOT/dev/build-profiles.sh"
 
 yard() {
   local name="$1"

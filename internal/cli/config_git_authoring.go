@@ -11,10 +11,9 @@ import (
 )
 
 func (cli *CLI) runConfigGitAuthoring(ctx context.Context, loaded config.Loaded, request configAuthoringRequest, content []byte) int {
-	return cli.runConfigSyncPushRequest(ctx, loaded, configSyncPushOptions{
-		message:   fmt.Sprintf("%s %s in %s settings", request.action, request.name, request.scope),
-		authoring: &request, content: content,
-	}, request.assumeYes)
+	return cli.runPreparedConfigMutation(ctx, loaded, []string{request.action}, request.assumeYes, func(prepared *preparedCommand) error {
+		return prepared.prepareConfigPush(ctx, configSyncPushOptions{message: fmt.Sprintf("%s %s in %s settings", request.action, request.name, request.scope), authoring: &request, content: content})
+	})
 }
 
 // exportSelectedConfig edits only the explicitly selected source setting. Local

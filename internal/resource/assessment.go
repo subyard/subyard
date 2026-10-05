@@ -19,10 +19,11 @@ const (
 	ResourceActionUnknown = "resource_action_unknown"
 	ResourceUsageInvalid  = "resource_usage_invalid"
 
-	PrepareAssessmentSchema = "yard.resource-action-assessment.v1"
-	MaxPrepareOutputBytes   = 64 << 10
-	maxConsequences         = 64
-	maxConsequenceBytes     = 512
+	PrepareAssessmentSchema   = "yard.resource-action-assessment.v1"
+	PrepareAssessmentSchemaV2 = "yard.resource-action-assessment.v2"
+	MaxPrepareOutputBytes     = 64 << 10
+	maxConsequences           = 64
+	maxConsequenceBytes       = 512
 )
 
 var (
@@ -39,6 +40,8 @@ type prepareAssessmentDocument struct {
 	Action       string    `json:"action"`
 	Changed      *bool     `json:"changed"`
 	Consequences *[]string `json:"consequences"`
+	Steps        *[]Step   `json:"steps,omitempty"`
+	Binding      string    `json:"binding,omitempty"`
 }
 
 func ResourceErrorClass(err error) string {
@@ -69,8 +72,11 @@ func (registry Registry) AssessPrepareResult(
 	if err != nil {
 		return domain.ActionAssessment{}, err
 	}
-	if document.Schema != PrepareAssessmentSchema {
+	if document.Schema != PrepareAssessmentSchema && document.Schema != PrepareAssessmentSchemaV2 {
 		return domain.ActionAssessment{}, resourcePlanInvalid("unsupported prepare assessment schema")
+	}
+	if err := validateStructuredAssessment(document); err != nil {
+		return domain.ActionAssessment{}, err
 	}
 	if document.Action == "" || document.Changed == nil || document.Consequences == nil {
 		return domain.ActionAssessment{}, resourcePlanInvalid("prepare assessment is incomplete")
@@ -102,6 +108,9 @@ func (registry Registry) AssessPrepareResult(
 }
 
 func decodePrepareAssessment(output []byte) (prepareAssessmentDocument, error) {
+	if err := rejectRecursiveDuplicates(output); err != nil {
+		return prepareAssessmentDocument{}, err
+	}
 	if err := rejectDuplicateFields(output); err != nil {
 		return prepareAssessmentDocument{}, err
 	}
@@ -110,6 +119,22 @@ func decodePrepareAssessment(output []byte) (prepareAssessmentDocument, error) {
 	var document prepareAssessmentDocument
 	if err := decoder.Decode(&document); err != nil {
 		return prepareAssessmentDocument{}, resourcePlanInvalid("decode prepare assessment: %v", err)
+	}
+	if document.Schema == PrepareAssessmentSchema {
+		var fields map[string]json.RawMessage
+		_ = json.Unmarshal(output, &fields)
+		for name := range fields {
+			if name == "steps" || name == "binding" {
+				return prepareAssessmentDocument{}, resourcePlanInvalid("v1 does not support field %q", name)
+			}
+		}
+	}
+	if document.Schema == PrepareAssessmentSchemaV2 {
+		var fields map[string]json.RawMessage
+		_ = json.Unmarshal(output, &fields)
+		if _, exists := fields["binding"]; exists && document.Binding == "" {
+			return prepareAssessmentDocument{}, resourcePlanInvalid("provided binding must be a lowercase SHA-256 digest")
+		}
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); err != io.EOF {
@@ -146,7 +171,7 @@ func rejectDuplicateFields(output []byte) error {
 		}
 		fields[foldedName] = struct{}{}
 		switch name {
-		case "schema", "action", "changed", "consequences":
+		case "schema", "action", "changed", "consequences", "steps", "binding":
 		default:
 			return resourcePlanInvalid("prepare assessment has unknown field %q", name)
 		}

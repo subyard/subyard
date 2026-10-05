@@ -4,6 +4,10 @@ import "github.com/Subyard/Subyard/internal/domain"
 
 func NewCoreActionRegistry() (*domain.ActionRegistry, error) {
 	definitions := []domain.ActionDefinition{
+		{Action: "host.add", Summary: "Register owner host", Effect: domain.ActionMutation, Impacts: []domain.ActionImpact{domain.ImpactLocalMetadata, domain.ImpactTrust}, Recovery: domain.RecoveryReversible},
+		{Action: "host.repair", Summary: "Repair owner host trust", Effect: domain.ActionMutation, Impacts: []domain.ActionImpact{domain.ImpactLocalMetadata, domain.ImpactTrust}, Recovery: domain.RecoveryReversible},
+		{Action: "host.remove", Summary: "Remove owner host registration", Effect: domain.ActionMutation, Impacts: []domain.ActionImpact{domain.ImpactLocalMetadata, domain.ImpactTrust}, Recovery: domain.RecoveryReversible},
+		{Action: "host.rename", Summary: "Rename owner host identity", Effect: domain.ActionMutation, Impacts: []domain.ActionImpact{domain.ImpactLocalMetadata}, Recovery: domain.RecoveryReversible},
 		{Action: "integration.reconcile", Summary: "Reconcile yard coding tool integrations", Effect: domain.ActionMutation, Impacts: []domain.ActionImpact{domain.ImpactLocalMetadata, domain.ImpactYardRuntime}, Recovery: domain.RecoveryReversible},
 		{Action: "integration.cleanup", Summary: "Clean up an unselected integration using its declared handler", Effect: domain.ActionMutation, Impacts: []domain.ActionImpact{domain.ImpactYardRuntime}, Recovery: domain.RecoveryReversible},
 		{

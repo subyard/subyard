@@ -16,6 +16,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
@@ -255,7 +256,7 @@ func writeProfileTestFile(t *testing.T, path string, data []byte, mode os.FileMo
 	testkit.WriteFile(t, path, data, mode)
 }
 
-func TestInitProfileSetupInitializesKeysBeforeIncus(t *testing.T) {
+func TestInitProfileSetupInitializesKeysBeforeCredential(t *testing.T) {
 	cli, execution := profileSetupFixture(t, "")
 	// The synthetic ledger stands in for the Keys stage's initialization. The
 	// rejected PEM then proves that no later host provisioning ran first.
@@ -270,6 +271,27 @@ func TestInitProfileSetupInitializesKeysBeforeIncus(t *testing.T) {
 	platform := execution.platform.(*initPlatformFixture)
 	platform.converged[ports.ReconcileStageKeys] = false
 	platform.converged[ports.ReconcileStageIncus] = false
+	for _, stage := range application.InitStages(execution.loaded.Context) {
+		if stage.ID == ports.ReconcileStageKeys {
+			execution.approvedPlan.Steps = []application.ReconcileStep{{Stage: stage, Conditional: true}}
+		}
+	}
+	execution.profileSetup = setup
+	execution.plan = execution.approvedPlan
+	steps := execution.operationSteps()
+	keys, profile, count := -1, -1, 0
+	for index, step := range steps {
+		if step.ID == "init.stage.keys" {
+			keys = index
+			count++
+		}
+		if step.ID == "init.profile.fixture" {
+			profile = index
+		}
+	}
+	if count != 1 || keys < 0 || profile <= keys || len(steps[profile].DependsOn) != 1 || steps[profile].DependsOn[0] != "init.stage.keys" {
+		t.Fatal("public steps did not retain the actual credential prerequisite ordering")
+	}
 	if err := setup.apply(context.Background(), execution, io.Discard); err == nil || !strings.Contains(err.Error(), "invalid RSA private key") {
 		t.Fatalf("error=%v", err)
 	}

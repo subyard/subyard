@@ -13,7 +13,6 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/domain"
@@ -66,93 +65,10 @@ func (cli *CLI) runConfigSyncConnect(
 		return 2
 	}
 	assumeYes = assumeYes || parsedYes
-	prepared, err := cli.prepareConfigSource(ctx, loaded, connect)
-	if err != nil {
-		cli.errorf("config sync connect: %v", err)
-		return 1
-	}
-	defer prepared.cleanup()
-
-	fmt.Fprintln(cli.options.Stdout, "Configuration source onboarding")
-	fmt.Fprintf(cli.options.Stdout, "  checkout: %s\n", prepared.checkout)
-	writeConfigSyncPlan(cli.options.Stdout, prepared.preview)
-	changed := prepared.needsClone || prepared.needsRegister || prepared.initialPush ||
-		prepared.preview.NeedsApply()
-	consequences := make([]string, 0, len(prepared.preview.Changes)+3)
-	if changed && prepared.needsClone {
-		consequences = append(consequences,
-			"install the prepared private Git checkout at "+prepared.checkout)
-	}
-	if changed && prepared.needsRegister {
-		consequences = append(consequences,
-			"register the owner-host configuration source checkout")
-	}
-	if changed && prepared.initialPush {
-		consequences = append(consequences,
-			"create and push the initial configuration commit without force")
-	}
-	if changed && prepared.initialCandidate != "" {
-		consequences = append(consequences,
-			"initialize the existing configuration source checkout from the prepared commit")
-	}
-	if changed && prepared.preview.InitializeHostID {
-		consequences = append(consequences,
-			"record owner host ID "+prepared.preview.HostID)
-	}
-	if changed {
-		for _, change := range prepared.preview.Changes {
-			consequences = append(consequences, change.Action+" "+change.Path)
-		}
-		if prepared.preview.ManifestChanged {
-			consequences = append(consequences,
-				"update versioned configuration manifest metadata")
-		}
-	}
-	if changed && connect.materialize && configSyncPlanNeedsMaterialization(prepared.preview) {
-		consequences = append(consequences,
-			"refresh affected file settings in running local yards")
-	}
-	orchestrator, operation, err := cli.planConfigSyncOperation(
-		ctx, loaded, "config sync connect", "config.sync.connect", changed,
-		consequences, assumeYes,
-	)
-	if errors.Is(err, application.ErrDeclined) {
-		cli.errorf("config sync connect: operation declined")
-		return 1
-	}
-	if err != nil {
-		cli.errorf("config sync connect: %v", err)
-		return 1
-	}
-	if !changed {
-		fmt.Fprintln(cli.options.Stdout, "config sync: already connected and converged")
-		return 0
-	}
-	adapter := &configSourceConnectAdapter{cli: cli, prepared: prepared}
-	orchestrator.Runner = adapter
-	if _, _, err := orchestrator.RunAdapter(ctx, operation, domain.AdapterRequest{
-		OperationID: operation.OperationID,
-		Adapter:     "config-source",
-		Action:      "connect",
-	}, nil); err != nil {
-		cli.errorf("config sync connect: %v", err)
-		return 1
-	}
-	fmt.Fprintf(cli.options.Stdout, "config sync: connected %s\n", prepared.checkout)
-	if adapter.plan.NeedsApply() {
-		fmt.Fprintf(cli.options.Stdout, "config sync: applied generation %d\n",
-			adapter.plan.Generation)
-		if connect.materialize {
-			if err := cli.materializeConfigSyncPlan(ctx, loaded, adapter.plan, true); err != nil {
-				cli.errorf("config sync connect --apply: %v", err)
-				return 1
-			}
-		}
-		cli.writeConfigSyncFollowups(loaded, adapter.plan, connect.materialize)
-	} else {
-		fmt.Fprintln(cli.options.Stdout, "config sync: already converged")
-	}
-	return 0
+	_ = connect
+	return cli.runPreparedConfigMutation(ctx, loaded, append([]string{"sync", "connect"}, arguments...), assumeYes, func(prepared *preparedCommand) error {
+		return prepared.prepareConfigConnect(ctx, arguments)
+	})
 }
 
 func (cli *CLI) runConfigSyncPath(

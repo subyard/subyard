@@ -262,6 +262,9 @@ func TestConfigStatusAndApplyAllLocalExcludeRemoteYards(t *testing.T) {
 	appendHashSteps(t, fake, defaultLoaded)
 	appendHashSteps(t, fake, namedLoaded)
 	appendHashSteps(t, fake, privateLoaded)
+	appendHashSteps(t, fake, defaultLoaded)
+	appendHashSteps(t, fake, namedLoaded)
+	appendHashSteps(t, fake, privateLoaded)
 	applier := &recordingConfigApplier{}
 	stdout.Reset()
 	stderr.Reset()
@@ -868,6 +871,7 @@ func TestConfigApplyConvergedSkipsPromptAndApplier(t *testing.T) {
 			Name: loaded.Context.YardInstanceName, Project: loaded.Context.IncusProject, Status: "Running",
 		},
 	}}
+	appendHashSteps(t, fake, loaded)
 	appendHashSteps(t, fake, loaded)
 	prompt := &testkit.Prompt{}
 	applier := &recordingConfigApplier{}
@@ -1756,10 +1760,7 @@ func TestConfigSyncRemoteRoutingIgnoresLocalRecoveryJournal(t *testing.T) {
 				"YARD_TYPE=remote\nREMOTE_DEST=owner.example\nREMOTE_YARD=inner\nSSH_PORT=4444\n")
 			fakeBin := filepath.Join(home, "fake-bin")
 			logPath := filepath.Join(home, "ssh-arguments")
-			writeConfigCommandFile(t, filepath.Join(fakeBin, "ssh"), `#!/bin/sh
-`+trustedSSHMock(t)+`
-printf '%s\n' "$@" >"$SUBYARD_TEST_SSH_LOG"
-`, 0o700)
+			writeConfigExactSSHMock(t, fakeBin, logPath)
 			t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
 			environment = append(environment,
 				"PATH="+os.Getenv("PATH"),
@@ -1822,9 +1823,9 @@ func TestConfigSourceConnectClonesRegistersAndAppliesWithOnePrompt(t *testing.T)
 		t.Fatalf("source connect requests=%#v", prompt.Requests)
 	}
 	for _, expected := range []string{
-		"Configuration source onboarding",
-		"checkout: " + checkout,
-		"owner-host: owner-a",
+		"[apply] config.sync.checkout: owner configuration checkout",
+		"[apply] config.sync.host-id: owner host identity",
+		"desired: owner-a",
 		"config sync: connected " + checkout,
 		"config sync: applied generation 1",
 	} {
@@ -1901,7 +1902,7 @@ func TestConfigSourceConnectClonesRegistersAndAppliesWithOnePrompt(t *testing.T)
 		t.Fatal(err)
 	}
 	if code := program.Run(context.Background()); code != 0 ||
-		!strings.Contains(stdout.String(), "already connected and converged") {
+		!strings.Contains(stdout.String(), "already converged") {
 		t.Fatalf("idempotent connect: code=%d stdout=%s stderr=%s",
 			code, stdout.String(), stderr.String())
 	}
@@ -1936,10 +1937,10 @@ func TestConfigSourceConnectOnboardsSharedOnlySource(t *testing.T) {
 			len(prompt.Seen), prompt.Seen)
 	}
 	for _, expected := range []string{
-		"checkout: " + checkout,
-		"owner-host: owner-a",
-		"initialize: host-id",
-		"add",
+		"[apply] config.sync.checkout: owner configuration checkout",
+		"[apply] config.sync.host-id: owner host identity",
+		"desired: owner-a",
+		"[apply] config.sync.file.0:",
 		"overrides/shared/config.env",
 		"config sync: connected " + checkout,
 	} {
@@ -2226,10 +2227,7 @@ func TestConfigSourceConnectRejectsEmbeddedCredentialsAndRemoteForwards(t *testi
 		"ACCESS_KIND=remote\nREMOTE_DEST=owner.example\nREMOTE_YARD=inner\nSSH_PORT=4444\n")
 	fakeBin := filepath.Join(home, "fake-bin")
 	logPath := filepath.Join(home, "ssh-arguments")
-	writeConfigCommandFile(t, filepath.Join(fakeBin, "ssh"), `#!/bin/sh
-`+trustedSSHMock(t)+`
-printf '%s\n' "$@" >"$SUBYARD_TEST_SSH_LOG"
-`, 0o700)
+	writeConfigExactSSHMock(t, fakeBin, logPath)
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
 	environment = append(environment,
 		"PATH="+os.Getenv("PATH"),
@@ -2257,12 +2255,7 @@ printf '%s\n' "$@" >"$SUBYARD_TEST_SSH_LOG"
 	}
 	output := string(forwarded)
 	for _, expected := range []string{
-		"-t\nowner.example\n--\nbash\n-lc\n",
-		`'\''yard'\'' '\''-Y'\'' '\''inner'\'' '\''config'\'' '\''sync'\'' '\''connect'\''`,
-		"git@example.invalid:private/config.git",
-		"--host-id",
-		"owner-b",
-		"--yes",
+		"rpc", "operation.plan", "operation.execute", "git@example.invalid:private/config.git", "--host-id", "owner-b",
 	} {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("remote source forwarding omitted %q:\n%s", expected, output)
@@ -2301,9 +2294,7 @@ printf '%s\n' "$@" >"$SUBYARD_TEST_SSH_LOG"
 		t.Fatal(err)
 	}
 	for _, expected := range []string{
-		`'\''yard'\'' '\''-Y'\'' '\''inner'\'' '\''config'\'' '\''set'\'' '\''SSH_PORT'\'' '\''2456'\''`,
-		`'\''--scope'\'' '\''yard'\''`,
-		`'\''--git'\''`, `'\''--yes'\''`,
+		"rpc", "operation.plan", "operation.execute", "SSH_PORT", "2456", "--scope", "yard", "--git",
 	} {
 		if !strings.Contains(string(forwarded), expected) {
 			t.Fatalf("remote Git authoring omitted %q:\n%s", expected, forwarded)
@@ -2548,6 +2539,8 @@ func TestConfigSyncConnectApplyRefreshesAffectedRunningYardWithOnePrompt(t *test
 			Status:  "Running",
 		},
 	}}
+	appendHashSteps(t, fake, loaded)
+	appendHashSteps(t, fake, loaded)
 	appendHashSteps(t, fake, loaded)
 	prompt := &testkit.Prompt{Answers: []bool{true}}
 	applier := &recordingConfigApplier{}
@@ -3353,7 +3346,7 @@ func TestConfigSyncPushRejectsConcurrentRemoteAdvanceWithoutForce(t *testing.T) 
 		},
 		Prompt: prompt, Stdout: &stdout, Stderr: &stderr,
 	}); code != 1 ||
-		!strings.Contains(stderr.String(), "upstream changed after preview; rerun operation") {
+		!strings.Contains(stderr.String(), "upstream changed after preview") {
 		t.Fatalf("concurrent push: code=%d stdout=%s stderr=%s",
 			code, stdout.String(), stderr.String())
 	}

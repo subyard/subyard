@@ -57,20 +57,20 @@ func TestReconcilerPlansLiveStateAndResumesAfterFailure(t *testing.T) {
 	if err != nil || plan.Pending() != 1 || !plan.Steps[0].Converged || plan.Steps[1].Converged {
 		t.Fatalf("unexpected plan: %#v, %v", plan, err)
 	}
-	if err := reconciler.Apply(context.Background()); err == nil {
+	if err := reconciler.Apply(context.Background(), plan); err == nil {
 		t.Fatal("partial failure was reported as success")
 	}
-	if err := reconciler.Apply(context.Background()); err != nil {
+	if err := reconciler.Apply(context.Background(), plan); err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(fixture.applied, []ports.ReconcileStageID{"b", "b"}) {
 		t.Fatalf("resume reapplied converged work: %#v", fixture.applied)
 	}
 	fixture.converged["a"] = false
-	if err := reconciler.Apply(context.Background()); err != nil {
-		t.Fatal(err)
+	if err := reconciler.Apply(context.Background(), plan); !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatalf("observed skip expansion accepted: %v", err)
 	}
-	if !reflect.DeepEqual(fixture.applied, []ports.ReconcileStageID{"b", "b", "a"}) {
+	if !reflect.DeepEqual(fixture.applied, []ports.ReconcileStageID{"b", "b"}) {
 		t.Fatalf("drift repair disturbed converged work: %#v", fixture.applied)
 	}
 }
@@ -85,7 +85,7 @@ func TestReconcilerPlanDoesNotCheckStagesAfterFirstPendingStage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Pending() != 2 || !reflect.DeepEqual(fixture.checked, []ports.ReconcileStageID{"base"}) {
+	if !plan.Steps[1].Conditional || plan.Steps[0].Conditional || plan.Pending() != 2 || !reflect.DeepEqual(fixture.checked, []ports.ReconcileStageID{"base"}) {
 		t.Fatalf("dependent stages were checked before their prerequisites: plan=%#v checked=%v",
 			plan, fixture.checked)
 	}
@@ -98,7 +98,11 @@ func TestReconcilerFailsClosedOnRegistryAndVerification(t *testing.T) {
 		verified:  map[ports.ReconcileStageID]bool{"a": false},
 	}
 	reconciler := Reconciler{Stages: []ReconcileStage{{ID: "a", Label: "A"}}, Runner: fixture}
-	if err := reconciler.Apply(context.Background()); err == nil || !strings.Contains(err.Error(), "did not converge") {
+	plan, err := reconciler.Plan(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.Apply(context.Background(), plan); err == nil || !strings.Contains(err.Error(), "did not converge") {
 		t.Fatalf("failed verification was accepted: %v", err)
 	}
 	for _, stages := range [][]ReconcileStage{
@@ -126,5 +130,48 @@ func TestInitStagesEnrollNetworkPolicyBeforeInstanceCreation(t *testing.T) {
 	}
 	if !strings.Contains(stages[policy].Label, "restart affected running yards") {
 		t.Fatalf("network policy consequence omits peer restarts: %q", stages[policy].Label)
+	}
+}
+
+func TestReconcilerAllowsApprovedWorkToConvergeAndConditionalWork(t *testing.T) {
+	stages := []ReconcileStage{{ID: "a", Label: "A"}, {ID: "b", Label: "B"}}
+	fixture := &reconcileFixture{converged: map[ports.ReconcileStageID]bool{}, verified: map[ports.ReconcileStageID]bool{}}
+	reconciler := Reconciler{Stages: stages, Runner: fixture}
+	plan, err := reconciler.Plan(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.converged["a"] = true
+	if err := reconciler.Apply(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(fixture.applied, []ports.ReconcileStageID{"b"}) {
+		t.Fatalf("applied=%v", fixture.applied)
+	}
+}
+
+func TestReconcilerRejectsMissingOrChangedApprovedScope(t *testing.T) {
+	stage := ReconcileStage{ID: "a", Label: "A"}
+	fixture := &reconcileFixture{converged: map[ports.ReconcileStageID]bool{}}
+	reconciler := Reconciler{Stages: []ReconcileStage{stage}, Runner: fixture}
+	for _, plan := range []ReconcilePlan{{}, {Steps: []ReconcileStep{{Stage: ReconcileStage{ID: "b", Label: "B"}}}}} {
+		if err := reconciler.Apply(context.Background(), plan); !errors.Is(err, domain.ErrPlanStale) {
+			t.Fatalf("error=%v", err)
+		}
+	}
+	if len(fixture.applied) != 0 {
+		t.Fatalf("applied=%v", fixture.applied)
+	}
+}
+
+func TestReconcilerRejectsLaterSkipExpansionBeforeEarlierApply(t *testing.T) {
+	stages := []ReconcileStage{{ID: "a", Label: "A"}, {ID: "b", Label: "B"}}
+	fixture := &reconcileFixture{converged: map[ports.ReconcileStageID]bool{}}
+	approved := ReconcilePlan{Steps: []ReconcileStep{{Stage: stages[0]}, {Stage: stages[1], Converged: true}}}
+	if err := (Reconciler{Stages: stages, Runner: fixture}).Apply(context.Background(), approved); !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatalf("error=%v", err)
+	}
+	if len(fixture.applied) != 0 {
+		t.Fatalf("applied before stale guard: %v", fixture.applied)
 	}
 }

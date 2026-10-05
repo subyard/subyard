@@ -50,7 +50,7 @@ func (runtime Runtime) observeProfileRuntimes(
 	}
 	instance, err := runtime.Incus.Instance(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName)
 	if err != nil {
-		if errors.Is(err, ports.ErrInstanceNotFound) || errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, ports.ErrInstanceNotFound) {
 			for _, definition := range definitions {
 				observations[definition.Runtime.ActivationID] = ports.RuntimeObservation{State: ports.RuntimeStateAbsent}
 			}
@@ -106,6 +106,10 @@ func (runtime Runtime) ApplyProfileRuntime(
 }
 
 func (runtime Runtime) applyProfileRuntimes(ctx context.Context) error {
+	if err := runtime.CheckProfileRuntimePlan(ctx); err != nil {
+		return err
+	}
+	runtime.resolveProfileRuntimePlan()
 	definitions, err := runtime.profileRuntimeDefinitions()
 	if err != nil {
 		return err
@@ -151,7 +155,7 @@ func (runtime Runtime) applyProfileRuntime(
 		return nil
 	}
 	if observation.State != ports.RuntimeStateStale || observation.Actual != actual || observation.Desired != desired {
-		return errors.New("profile runtime assessment changed before apply")
+		return fmt.Errorf("%w: profile runtime assessment changed before apply", domain.ErrPlanStale)
 	}
 	stdout, stderr, err := runtime.runProfileRuntimeHandler(ctx, definition, "apply", operationID, actual, desired)
 	if err != nil {
@@ -268,6 +272,9 @@ func decodeProfileRuntimeObservation(payload []byte) (ports.RuntimeObservation, 
 	var observation ports.RuntimeObservation
 	if err := decoder.Decode(&observation); err != nil {
 		return ports.RuntimeObservation{}, fmt.Errorf("decode runtime observation: %w", err)
+	}
+	if observation.HookBinding != "" && !profileRuntimeDigest.MatchString(observation.HookBinding) {
+		return ports.RuntimeObservation{}, errors.New("runtime observation has an invalid hook binding")
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {

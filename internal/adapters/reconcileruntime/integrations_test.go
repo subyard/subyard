@@ -615,7 +615,7 @@ func TestIntegrationInventoryAdoptsOnlyExactProtectedCoreArtifacts(t *testing.T)
 }
 
 func TestIntegrationInventoryAdoptsReleasedDispatcherPredecessor(t *testing.T) {
-	for _, version := range []string{"v0.3", "shared-hooks"} {
+	for _, version := range []string{"v0.3", "shared-hooks", "shared-hooks-comment"} {
 		t.Run(version, func(t *testing.T) {
 			root := t.TempDir()
 			home, state := root+"/home", root+"/state"
@@ -637,9 +637,17 @@ func TestIntegrationInventoryAdoptsReleasedDispatcherPredecessor(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			predecessor := []byte(strings.Replace(string(desired),
+			previous, err := os.ReadFile("testdata/projects-changed-shared.sh")
+			if err != nil {
+				t.Fatal(err)
+			}
+			predecessor := []byte(strings.Replace(string(previous),
 				"# Shared resources own hooks in projects-changed.d; selected agent hooks live in the list.\n", "", 1))
 			wantDigest := "cefded0322e335042ff9a0e74f2cba187fb1a2a6aa8a2ffbcdf249ecc8e12588"
+			if version == "shared-hooks-comment" {
+				predecessor = previous
+				wantDigest = "11af99ae9813d9ba1ee71c3d19eeb1457b4e6dae9c45e6f25b781b5ad69211d7"
+			}
 			if version == "v0.3" {
 				// Exact installer heredoc shipped in v0.3.0 through v0.5.2.
 				predecessor, err = os.ReadFile("testdata/projects-changed-v0.3.sh")

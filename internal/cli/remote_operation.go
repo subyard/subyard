@@ -16,20 +16,55 @@ import (
 
 	"github.com/Subyard/Subyard/internal/adapters/transport"
 	"github.com/Subyard/Subyard/internal/application"
+	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/rpc"
+	"github.com/Subyard/Subyard/internal/state"
 )
 
 const exactPlanCapability = "operation-exact-plan-v1"
+const operationStepsCapability = "operation-steps-v1"
 const exactPlanLifetime = 5 * time.Minute
+
+func ownerPreparedInvocation(definition command.Definition, arguments []string) bool {
+	if definition.Handler == "@config" {
+		arguments = configArguments(arguments)
+		return len(arguments) > 0 && (arguments[0] == "sync" || arguments[0] == "set" || arguments[0] == "unset" || arguments[0] == "apply")
+	}
+	// These commands retain controller-facing registry metadata, but their
+	// project mutations and authoritative record belong to the selected owner.
+	if definition.Remote == command.RemoteLocal && definition.Handler == "@project" && (definition.Name == "clone" || definition.Name == "remove") {
+		return true
+	}
+	if definition.Remote != command.RemoteForward {
+		return false
+	}
+	switch definition.Handler {
+	case "@integration", "@init", "@lifecycle", "@teardown":
+		return true
+	case "@provision":
+		return !slices.Contains(arguments, "--list") && !slices.Contains(arguments, "-l")
+	case "@test-vms":
+		return !testVMStatusInvocation(arguments)
+	case "@keys":
+		return credentialExactInvocation(definition, arguments)
+	case "@resource":
+		return definition.Name != "svc"
+	case "@project", "@project-env":
+		return definition.Name == "clone" || definition.Name == "remove" || definition.Name == "up" || definition.Name == "down"
+	default:
+		return false
+	}
+}
 
 // The additive capability leaves legacy callers unchanged. Exact clients must
 // retain this envelope and execute its digest over the same negotiated session.
 type exactOperationPlan struct {
-	Schema    int                  `json:"schema"`
-	Plan      domain.OperationPlan `json:"plan"`
-	Digest    string               `json:"digest"`
-	ExpiresAt time.Time            `json:"expiresAt"`
+	Schema     int                  `json:"schema"`
+	StepSchema int                  `json:"stepSchema,omitempty"`
+	Plan       domain.OperationPlan `json:"plan"`
+	Digest     string               `json:"digest"`
+	ExpiresAt  time.Time            `json:"expiresAt"`
 }
 
 func operationStateDigest(value any) string {
@@ -43,17 +78,21 @@ func operationStateDigest(value any) string {
 
 func exactOperationDigest(prepared *preparedCommand, plan exactOperationPlan) string {
 	return operationStateDigest(struct {
-		Schema    int
-		Plan      domain.OperationPlan
-		ExpiresAt time.Time
-		Context   domain.Context
-		Arguments []string
-		State     string
-	}{plan.Schema, plan.Plan, plan.ExpiresAt, prepared.Loaded.Context, prepared.Arguments, prepared.exactState})
+		Schema     int
+		StepSchema int
+		Plan       domain.OperationPlan
+		ExpiresAt  time.Time
+		Context    domain.Context
+		Arguments  []string
+		State      string
+	}{plan.Schema, plan.StepSchema, plan.Plan, plan.ExpiresAt, prepared.Loaded.Context, prepared.Arguments, prepared.exactState})
 }
 
 func bindExactOperationPlan(prepared *preparedCommand, now time.Time) exactOperationPlan {
 	plan := exactOperationPlan{Schema: 1, Plan: prepared.Plan, ExpiresAt: now.Add(exactPlanLifetime)}
+	if prepared.stepsComplete {
+		plan.StepSchema = 1
+	}
 	plan.Digest = exactOperationDigest(prepared, plan)
 	return plan
 }
@@ -62,7 +101,7 @@ func validateExactOperationPlan(plan exactOperationPlan, prepared *preparedComma
 	if !now.Before(plan.ExpiresAt) {
 		return fmt.Errorf("%w: operation plan expired", domain.ErrPlanStale)
 	}
-	if plan.Schema != 1 || digest == "" || digest != plan.Digest || digest != exactOperationDigest(prepared, plan) || operationStateDigest(plan.Plan) != operationStateDigest(prepared.Plan) {
+	if plan.Schema != 1 || plan.StepSchema < 0 || plan.StepSchema > 1 || (plan.StepSchema == 1 && (!prepared.stepsComplete || domain.ValidateOperationSteps(plan.Plan.Steps) != nil || len(plan.Plan.Steps) == 0)) || digest == "" || digest != plan.Digest || digest != exactOperationDigest(prepared, plan) || operationStateDigest(plan.Plan) != operationStateDigest(prepared.Plan) {
 		return errors.New("operation plan digest does not match the stored plan")
 	}
 	return nil
@@ -71,9 +110,10 @@ func validateExactOperationPlan(plan exactOperationPlan, prepared *preparedComma
 // ownerRPCSession owns one SSH process for negotiation, preview, confirmation,
 // and execution. Closing it discards owner-side plans; there is no replay path.
 type ownerRPCSession struct {
-	codec       *rpc.Codec
-	close       func() error
-	diagnostics func() []byte
+	codec        *rpc.Codec
+	close        func() error
+	diagnostics  func() []byte
+	capabilities []string
 }
 
 func (cli *CLI) openOwnerRPC(ctx context.Context, yard domain.Context) (*ownerRPCSession, error) {
@@ -180,6 +220,14 @@ func (session *ownerRPCSession) negotiate(ctx context.Context) error {
 	if !slices.Contains(response.Capabilities, exactPlanCapability) {
 		return errors.New("owner does not support exact operation plans; update Subyard on the owner host")
 	}
+	session.capabilities = slices.Clone(response.Capabilities)
+	return nil
+}
+
+func (session *ownerRPCSession) requireOperationSteps() error {
+	if !slices.Contains(session.capabilities, operationStepsCapability) {
+		return errors.New("owner does not support complete operation steps; update Subyard on the owner host")
+	}
 	return nil
 }
 
@@ -234,6 +282,9 @@ func (prepared *preparedCommand) prepareRemoteOperation(ctx context.Context) err
 	if err = session.negotiate(ctx); err != nil {
 		return err
 	}
+	if err = session.requireOperationSteps(); err != nil {
+		return err
+	}
 	planContext, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
 	if request.verb == "status" {
@@ -246,10 +297,11 @@ func (prepared *preparedCommand) prepareRemoteOperation(ctx context.Context) err
 	}
 	var exact exactOperationPlan
 	params := struct {
-		Command   string   `json:"command"`
-		Arguments []string `json:"arguments"`
-		Exact     bool     `json:"exact"`
-	}{prepared.Definition.Name, keysWithoutConsent(prepared.Arguments), true}
+		Command    string   `json:"command"`
+		Arguments  []string `json:"arguments"`
+		Exact      bool     `json:"exact"`
+		StepSchema int      `json:"stepSchema"`
+	}{prepared.Definition.Name, keysWithoutConsent(prepared.Arguments), true, 1}
 	if request.check {
 		params.Arguments = slices.DeleteFunc(params.Arguments, func(value string) bool { return value == "--check" })
 	}
@@ -260,8 +312,11 @@ func (prepared *preparedCommand) prepareRemoteOperation(ctx context.Context) err
 	// Native preparation pre-confirms actions whose concrete policy is never,
 	// including converged no-ops. Prompting actions still require this controller.
 	preconfirmedPrompt := exact.Plan.Confirmed && exact.Plan.Confirmation != domain.ConfirmationNever
-	if exact.Schema != 1 || exact.Plan.OperationID != cli.ensureOperationID() || exact.Plan.Command != prepared.Definition.Name || exact.Plan.Effect != domain.CommandMutate || exact.Plan.Target != domain.TargetLocalOwner || preconfirmedPrompt || decodeErr != nil || len(digest) != sha256.Size || exact.ExpiresAt.IsZero() {
+	if exact.Schema != 1 || exact.StepSchema != 1 || len(exact.Plan.Steps) == 0 || exact.Plan.OperationID != cli.ensureOperationID() || exact.Plan.Command != prepared.Definition.Name || exact.Plan.Effect != domain.CommandMutate || exact.Plan.Target != domain.TargetLocalOwner || preconfirmedPrompt || decodeErr != nil || len(digest) != sha256.Size || exact.ExpiresAt.IsZero() {
 		return errors.New("owner returned an invalid exact operation plan")
+	}
+	if err := domain.ValidateOperationSteps(exact.Plan.Steps); err != nil {
+		return err
 	}
 	if request.check {
 		prepared.displayOnly = func() {
@@ -297,6 +352,19 @@ func (prepared *preparedCommand) prepareRemoteOperation(ctx context.Context) err
 		}
 		if response.Plan.OperationID != exact.Plan.OperationID || response.Result.OperationID != exact.Plan.OperationID {
 			return domain.AdapterResult{}, errors.New("owner execution response identity mismatch")
+		}
+		if response.Result.Status == "ok" && prepared.Project != nil {
+			if err := cli.invalidateOwnerInventory(prepared.Loaded); err != nil {
+				return response.Result, fmt.Errorf("owner operation completed, but inventory invalidation failed: %w", err)
+			}
+			if prepared.Definition.Name == "remove" {
+				if err := prepared.Project.Store.Delete(ctx, prepared.Project.Record.ProjectID); err != nil && !errors.Is(err, state.ErrNotFound) {
+					return response.Result, fmt.Errorf("owner removal completed, but controller index cleanup failed: %w", err)
+				}
+				if err := cli.cleanupObsoleteRemoteProjectState(ctx, prepared.Loaded, prepared.Project.Record.ProjectID); err != nil {
+					return response.Result, fmt.Errorf("owner removal completed, but controller cache cleanup failed: %w", err)
+				}
+			}
 		}
 		return response.Result, nil
 	}

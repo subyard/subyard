@@ -27,54 +27,69 @@ if [ "${1:-}" = -G ]; then
     "$REGISTRY_TEST_STATE/known_hosts"
   exit 0
 fi
-if [[ "$joined" == *'_project-state'* ]]; then
-  printf '%s\n' "$joined" >> "$REGISTRY_TEST_STATE/owner-calls"
-  [ ! -e "$REGISTRY_TEST_STATE/fail-owner" ]
-  if [[ "$joined" == *finalize* && "$joined" == *RemoteDemo* ]]; then
-    finalized="$(cat "$REGISTRY_TEST_STATE/remote-sync-count" 2>/dev/null || printf 0)"
-    printf '%s\n' "$((finalized + 1))" > "$REGISTRY_TEST_STATE/remote-sync-count"
-  fi
-  if [[ "$joined" == *preview* && "$joined" == *RemoteDemo* ]]; then
-    finalized="$(cat "$REGISTRY_TEST_STATE/remote-sync-count" 2>/dev/null || printf 0)"
-    case "$finalized" in
-      0) allocated=RemoteDemo ;;
-      1) allocated=RemoteDemo-2 ;;
-      *) allocated=RemoteDemo-3 ;;
-    esac
-    printf '%s\n' "$allocated" > "$REGISTRY_TEST_STATE/remote-sync-next"
-    printf '{"projectId":"%s","name":"%s"}\n' "$allocated" "$allocated"
-  elif [[ "$joined" == *preview* && "$joined" == *StaleDemo* ]]; then
-    printf '%s\n' '{"projectId":"StaleDemo-3","name":"StaleDemo-3"}'
-  elif [[ "$joined" == *preview* && "$joined" == *ForeignClone* ]]; then
-    printf '%s\n' '{"projectId":"ForeignClone","name":"ForeignClone"}'
-  elif [[ "$joined" == *reserve* && "$joined" == *RemoteDemo* ]]; then
-    allocated="$(cat "$REGISTRY_TEST_STATE/remote-sync-next")"
-    printf '{"projectId":"%s","name":"%s","reserved":true}\n' "$allocated" "$allocated"
-  elif [[ "$joined" == *reserve* && "$joined" == *StaleDemo* ]]; then
-    printf '%s\n' '{"projectId":"StaleDemo-3","name":"StaleDemo-3","reserved":true}'
-  elif [[ "$joined" == *reserve* && "$joined" == *ForeignClone* ]]; then
-    printf '%s\n' '{"projectId":"ForeignClone","name":"ForeignClone","reserved":true}'
-  fi
-  exit
+if [[ "$joined" == *yard* && "$joined" == *rpc* && "$joined" == *--stdio* ]]; then
+  printf '%s\n' rpc >> "$REGISTRY_TEST_STATE/owner-calls"
+  exec env -u SUBYARD_STATE_DIR -u SUBYARD_CONFIG_LOADED -u SUBYARD_ENGINE_CONTEXT \
+    -u OWNER_ENDPOINT -u OWNER_YARD_NAME -u SUBYARD_YARD -u YARD_NAME \
+    SUBYARD_OPERATOR_HOME="$REGISTRY_TEST_STATE/owner-home" \
+    SUBYARD_CONFIG_HOME="$REGISTRY_TEST_STATE/owner-config" \
+    SUBYARD_HOME="$REGISTRY_TEST_STATE/owner-data" \
+    ACCESS_KIND=local SSH_HOST=yard-inner YARD_INSTANCE_NAME=yard-inner \
+    "$(dirname "$0")/project-owner-fixture" -Y inner rpc --stdio
+fi
+if [[ "$joined" == *"'git' 'ls-remote'"* ]];then
+  printf '1111111111111111111111111111111111111111\tHEAD\n'
+  exit 0
+fi
+if [[ "$joined" == *'_project-state'* ]];then
+  # The controller may read the canonical identity before exact owner admission.
+  # Mutating legacy verbs must never satisfy this fixture.
+  mapfile -d '' -t owner_arguments < <(python3 -c '
+import os,shlex,sys
+words=shlex.split(sys.argv[-1])
+if words[:2] == ["bash","-lc"]: words=shlex.split(words[2])
+while len(words)==1: words=shlex.split(words[0])
+words=words[next(i for i,word in enumerate(words) if os.path.basename(word)=="yard")+1:]
+assert "preview" in words or "check-role" in words
+sys.stdout.buffer.write(b"\0".join(word.encode() for word in words)+b"\0")
+' "$@")
+  [ "${#owner_arguments[@]}" -gt 0 ] || exit 1
+  exec env -u SUBYARD_STATE_DIR -u SUBYARD_CONFIG_LOADED -u SUBYARD_ENGINE_CONTEXT \
+    -u OWNER_ENDPOINT -u OWNER_YARD_NAME -u SUBYARD_YARD -u YARD_NAME \
+    SUBYARD_OPERATOR_HOME="$REGISTRY_TEST_STATE/owner-home" \
+    SUBYARD_CONFIG_HOME="$REGISTRY_TEST_STATE/owner-config" \
+    SUBYARD_HOME="$REGISTRY_TEST_STATE/owner-data" \
+    ACCESS_KIND=local SSH_HOST=yard-inner YARD_INSTANCE_NAME=yard-inner \
+    "$(dirname "$0")/project-owner-fixture" "${owner_arguments[@]}"
 fi
 if [[ "$joined" == *'.subyard-meta.json'* ]] && [[ "$joined" == *"'tee'"* || "$joined" == *'cat >'* ]]; then
   cat > "$REGISTRY_TEST_STATE/yard-meta.json"
+  [[ "$joined" =~ /srv/workspaces/([A-Za-z0-9_-]+)/.subyard-meta.json ]] || exit 1
+  cp "$REGISTRY_TEST_STATE/yard-meta.json" "$REGISTRY_TEST_STATE/guest/workspaces/${BASH_REMATCH[1]}/.subyard-meta.json"
   exit 0
 fi
 if [[ "$joined" == *'.subyard-meta.json'* ]]; then
-  [ ! -e "$REGISTRY_TEST_STATE/live-meta.json" ] || cat "$REGISTRY_TEST_STATE/live-meta.json"
+  if [ -e "$REGISTRY_TEST_STATE/live-meta.json" ];then cat "$REGISTRY_TEST_STATE/live-meta.json"
+  elif [ -e "$REGISTRY_TEST_STATE/yard-meta.json" ];then cat "$REGISTRY_TEST_STATE/yard-meta.json";fi
   exit 0
 fi
 if [[ "$joined" == *"'-xf' '-'"* ]]; then
-  finalized="$(cat "$REGISTRY_TEST_STATE/remote-sync-count" 2>/dev/null || printf 0)"
-  stream_index=$((finalized + 1))
+  stream_index="$(cat "$REGISTRY_TEST_STATE/stream-count" 2>/dev/null || printf 0)"
+  stream_index=$((stream_index + 1))
+  printf '%s\n' "$stream_index" > "$REGISTRY_TEST_STATE/stream-count"
   cat > "$REGISTRY_TEST_STATE/tar-stream-$stream_index.tar"
+  [[ "$joined" =~ /srv/workspaces/([A-Za-z0-9_-]+)/src ]] || exit 1
+  guest_source="$REGISTRY_TEST_STATE/guest/workspaces/${BASH_REMATCH[1]}/src"
+  install -d -m 0700 "$guest_source"
+  tar -C "$guest_source" -xf "$REGISTRY_TEST_STATE/tar-stream-$stream_index.tar"
   : > "$REGISTRY_TEST_STATE/tar-stream"
   exit 0
 fi
 exit 0
 MOCK
 chmod 755 "$TMP/bin/ssh"
+
+
 
 # shellcheck source=tests/helpers/test-context.sh
 . "$ROOT/tests/helpers/test-context.sh"
@@ -83,10 +98,16 @@ setup_test_repository "$TMP" "$ROOT"
 # Exercise resolver-owned registry paths and named-yard identity.
 unset SUBYARD_STATE_DIR ACCESS_KIND YARD_INSTANCE_NAME INCUS_PROJECT SSH_HOST
 export PATH="$TMP/bin:$PATH"
+go build -o "$TMP/bin/project-owner-fixture" "$ROOT/tests/helpers/project-owner-fixture"
 export HOME="$TMP/home"
 export SUBYARD_CONFIG_DIR="$TMP/shipped"
 export SUBYARD_NO_AUDIT=1
 export REGISTRY_TEST_STATE="$TMP/state"
+export PROJECT_OWNER_REPOSITORY="$TMP/runtime"
+install -d -m 0700 "$REGISTRY_TEST_STATE/owner-home" "$REGISTRY_TEST_STATE/owner-config/yards" "$REGISTRY_TEST_STATE/owner-data"
+printf 'SSH_PORT=3333\n' > "$REGISTRY_TEST_STATE/owner-config/yards/inner.env"
+chmod 0600 "$REGISTRY_TEST_STATE/owner-config/yards/inner.env"
+
 
 # The hidden owner endpoint creates a yard-originated record without importing a foreign path.
 owner_id='demo-12345678'
@@ -187,8 +208,20 @@ jq -e '.projectId == "RemoteDemo"' "$REGISTRY_TEST_STATE/yard-meta-first.json" >
   && [ "$(tar -xOf "$REGISTRY_TEST_STATE/tar-stream-3.tar" ./file.txt)" = third ] \
   || fail 'same-source sync snapshots did not preserve invocation contents'
 
+# The authoritative owner has two occupied names independently of the stale
+# controller record; native admission must choose the next safe identity.
+install -d -m 0700 "$REGISTRY_TEST_STATE/owner-config/yards/inner/projects"
+for occupied in StaleDemo StaleDemo-2;do
+  jq -n --arg id "$occupied" '{schema:1,identityVersion:2,projectId:$id,name:$id,
+    hostPath:("/owner/"+$id),yardPath:("/srv/workspaces/"+$id+"/src"),mode:"sync",
+    sshHost:"yard-inner",target:"yard"}' \
+    > "$REGISTRY_TEST_STATE/owner-config/yards/inner/projects/$occupied.json"
+  chmod 0600 "$REGISTRY_TEST_STATE/owner-config/yards/inner/projects/$occupied.json"
+done
+
 # A stale controller allocation is discarded before planning; the owner-returned
 # identity drives the physical operation and metadata on the first attempt.
+install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/remote/projects"
 stale_controller_state="$SUBYARD_CONFIG_HOME/yards/remote/projects/StaleDemo.json"
 jq -n '{
   schema:1, identityVersion:2, projectId:"StaleDemo", name:"StaleDemo",
@@ -219,5 +252,12 @@ clone_state="$SUBYARD_CONFIG_HOME/yards/remote/projects/$clone_id.json"
 [ -s "$REGISTRY_TEST_STATE/owner-calls" ] || fail 'native clone did not converge owner state'
 jq -e '.projectId == $id and .mode == "git" and .target == "synthetic"' --arg id "$clone_id" \
   "$REGISTRY_TEST_STATE/yard-meta.json" >/dev/null || fail 'clone metadata omitted its target'
+
+for admitted in RemoteDemo RemoteDemo-2 RemoteDemo-3 StaleDemo-3 ForeignClone;do
+  assert_json "$REGISTRY_TEST_STATE/owner-config/yards/inner/projects/$admitted.json" \
+    '.identityVersion == 2 and .projectId == .name'
+done
+[ "$(cat "$REGISTRY_TEST_STATE/guest/workspaces/ForeignClone/src/.git/HEAD")" = \
+  1111111111111111111111111111111111111111 ] || fail 'native owner clone did not retain the approved revision'
 
 printf 'ok: native sync and clone preserve registry ownership\n'

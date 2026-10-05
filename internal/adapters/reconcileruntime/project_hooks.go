@@ -62,11 +62,20 @@ func (runtime Runtime) ProjectHooksApplicable(ctx context.Context) (bool, error)
 }
 
 func (runtime Runtime) RunProjectHooks(ctx context.Context) error {
+	if err := runtime.CheckProjectHookPlan(ctx, false); err != nil {
+		return err
+	}
 	applicable, err := runtime.ProjectHooksApplicable(ctx)
 	if err != nil || !applicable {
 		return err
 	}
-	return application.RunProjectHooks(ctx, runtime.Yard, func(ctx context.Context, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	if err := application.RunProjectHooks(ctx, runtime.Yard, func(ctx context.Context, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+		for name, value := range runtime.HookPlan.Environment() {
+			request.Environment[name] = value
+		}
 		return runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, request)
-	})
+	}); err != nil {
+		return err
+	}
+	return runtime.CheckProjectHookPlan(ctx, false)
 }

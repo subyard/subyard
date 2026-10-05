@@ -91,6 +91,7 @@ require_secrets() {
 
 # Push secrets.env into the yard (0600 dev) so in-yard ops read it without it crossing argv.
 stage_secrets() {
+  openclaw_recheck_inputs "$sub"
   yexec install -d -m 0700 -o "$DEV_UID" -g "$DEV_UID" "$(dirname "$YSECRETS")"
   incus file push "$SECRETS" "$YARD_INSTANCE_NAME$YSECRETS" "${PROJ[@]}" \
     --mode 0600 --uid "$DEV_UID" --gid "$DEV_UID" >/dev/null \
@@ -187,8 +188,11 @@ cmd_up() {
   fi
 
   # 5) copy the broker source into our data root (never mutate the agent's live tree)
+  openclaw_recheck_inputs up
   yexec sh -c 'rm -rf "$1"/* "$1"/.[!.]* 2>/dev/null; cp -a "$2/." "$1/"' _ "$YSRC" "$BROKER_SRC"
   yexec test -r "$YSRC/convex.json" || die "broker source copy is incomplete ($YSRC/convex.json missing)"
+  yexec diff -qr -- "$BROKER_SRC" "$YSRC" >/dev/null || die "broker source copy differs from its prepared input"
+  openclaw_recheck_inputs up
 
   # 6) deploy functions + register role secrets (skip on re-up unless --redeploy)
   if [ "$redeploy" = 1 ] || ! yexec test -f "$YDEPLOYED"; then
@@ -278,7 +282,7 @@ while IFS= read -r line; do
     added=$((added+1)); existing="$existing
 $note"
   else
-    failed=$((failed+1)); echo "  add failed (note=$note): $(printf '%s' "$resp" | jq -rc '.code // .status // .' 2>/dev/null)" >&2
+    failed=$((failed+1)); echo "  add failed (note=$note): $(printf '%s' "$resp" | jq -rc '.code // .status // "failed"' 2>/dev/null)" >&2
   fi
 done < "$pool"
 echo "added=$added skipped=$skipped failed=$failed"
@@ -383,12 +387,12 @@ secrets="$1"; port="$2"; kind="$3"; owner="$4"
 . "$secrets"
 ci="${OPENCLAW_QA_CONVEX_SECRET_CI:-}"
 base="http://127.0.0.1:$port/qa-credentials/v1"
-acq() { curl -sS --max-time 25 -X POST "$base/acquire" -H "authorization: Bearer $ci" \
+acq() { curl -fsS --max-time 25 -X POST "$base/acquire" -H "authorization: Bearer $ci" \
   -H 'content-type: application/json' \
   -d "{\"kind\":\"$kind\",\"ownerId\":\"$owner\",\"actorRole\":\"ci\",\"leaseTtlMs\":60000,\"heartbeatIntervalMs\":30000}"; }
-rel() { curl -sS --max-time 25 -X POST "$base/release" -H "authorization: Bearer $ci" \
+rel() { curl -fsS --max-time 25 -X POST "$base/release" -H "authorization: Bearer $ci" \
   -H 'content-type: application/json' \
-  -d "{\"kind\":\"$kind\",\"ownerId\":\"$owner\",\"actorRole\":\"ci\",\"credentialId\":\"$1\",\"leaseToken\":\"$2\"}" >/dev/null; }
+  -d "{\"kind\":\"$kind\",\"ownerId\":\"$owner\",\"actorRole\":\"ci\",\"credentialId\":\"$1\",\"leaseToken\":\"$2\"}" | jq -e '.status == "ok"' >/dev/null; }
 
 ids=""; toks=""; n=0; distinct=1; exhausted=0
 for _ in $(seq 1 50); do
@@ -424,8 +428,9 @@ EOF
   if [ "${exhausted:-0}" = 1 ]; then
     ok "smoke PASS: leased $leased distinct bot(s); next acquire fast-failed POOL_EXHAUSTED; all released"
   else
-    warn "smoke: leased $leased distinct bot(s) and released them, but did not observe POOL_EXHAUSTED (pool > 50? or capped at the loop bound)"
+    die "smoke did not prove pool exhaustion"
   fi
+  printf '%s' "$SUBYARD_OPERATION_ID" | yexec sh -c 'umask 077; cat > "$1"; chmod 0600 "$1"' _ "$DATA_ROOT/.smoke-verified"
 }
 
 # ----------------------------------------------------------------------------------
@@ -451,7 +456,75 @@ cmd_destroy() {
 }
 
 # ----------------------------------------------------------------------------------
-emit_resource_assessment() { # <local-action> <true|false> [fixed consequence...]
+qa_artifact_identity() {
+  local path="$1"
+  if ! yexec test -e "$path"; then printf 'absent'; return; fi
+  yexec stat -c '%d:%i:%f:%u:%g' -- "$path" | sha256sum | awk '{print "sha256:"$1}'
+}
+
+qa_artifact_snapshot() {
+  local path="$1" metadata
+  if ! yexec test -e "$path"; then printf 'absent'; return; fi
+  metadata="$(yexec find "$path" -xdev -printf '%P\t%D:%i:%m:%U:%G:%s:%T@\n')" \
+    || die 'QA lifecycle artifact metadata unavailable'
+  [ "$(printf '%s\n' "$metadata" | wc -l)" -le 4096 ] && [ "${#metadata}" -le 65536 ] \
+    || die 'QA lifecycle artifact inventory exceeds limit'
+  printf '%s\n' "$metadata" | LC_ALL=C sort | sha256sum | awk '{print "sha256:"$1}'
+}
+
+qa_lifecycle_assessment() {
+  local action="$1" steps='[]' observed=absent desired=absent decision binding identity
+  if box_exists; then
+    identity="$(ydocker inspect -f '{{.Id}}' "$CNAME")"
+    [[ "$identity" =~ ^[0-9a-f]{64}$ ]] || die 'QA broker native container identity unavailable'
+    observed="sha256:$identity"
+    if [ "$action" = down ]; then
+      desired="stopped sha256:$identity"
+      if ! box_running; then observed="$desired"; fi
+    fi
+  elif [ "$action" = down ]; then desired=absent; fi
+  decision=apply
+  [ "$observed" != "$desired" ] || decision=skip
+  steps="$(jq -cn --arg target "incus:$INCUS_PROJECT/$YARD_INSTANCE_NAME/$CNAME" --arg observed "$observed" --arg desired "$desired" --arg decision "$decision" \
+    '[{id:"container",target:$target,observed:$observed,desired:$desired,decision:$decision,
+    preconditions:["captured Docker container identity unchanged"],verify:"captured container is stopped or absent as approved",consequence:"converge only the captured QA broker runtime lifecycle"}]')"
+  if [ "$action" != down ]; then
+    observed="$(qa_artifact_snapshot "$(dirname "$YSECRETS")")"
+    decision=apply; [ "$observed" != absent ] || decision=skip
+    steps="$(jq -cn --argjson steps "$steps" --arg target "incus:$INCUS_PROJECT/$YARD_INSTANCE_NAME/qa-pool/staged-inputs" --arg observed "$observed" --arg decision "$decision" \
+      '$steps + [{id:"staged-inputs",target:$target,observed:$observed,desired:"absent",decision:$decision,
+      preconditions:["captured profile-owned directory identity unchanged"],verify:"staged input directory is absent",consequence:"remove only the captured profile-owned staged inputs"}]')"
+    observed="$(qa_artifact_identity "$DATA_ROOT")"
+    desired="$observed"; decision=skip
+    if [ "$action" = destroy-purge ]; then
+      observed="$(qa_artifact_snapshot "$DATA_ROOT")"
+      desired=absent; [ "$observed" = absent ] || decision=apply
+    fi
+    steps="$(jq -cn --argjson steps "$steps" --arg target "incus:$INCUS_PROJECT/$YARD_INSTANCE_NAME/qa-pool/persistent-data" --arg observed "$observed" --arg desired "$desired" --arg decision "$decision" \
+      '$steps + [{id:"data",target:$target,observed:$observed,desired:$desired,decision:$decision,
+      preconditions:["captured profile-owned data directory identity unchanged"],verify:"data root is absent or retains its captured identity as approved",consequence:(if $desired == "absent" then "irreversibly delete the captured QA broker persistent data" else "retain the captured QA broker persistent data" end)}]')"
+  fi
+  binding="$(jq -c '[.[]|{id,target,desired}]' <<<"$steps" | sha256sum | awk '{print $1}')"
+  jq -cn --arg action "$action" --arg binding "$binding" --argjson steps "$steps" \
+    '{schema:"yard.resource-action-assessment.v2",action:$action,binding:$binding,steps:$steps,
+    changed:any($steps[];.decision == "apply"),consequences:(if any($steps[];.decision == "apply") then ["apply the captured QA broker lifecycle targets and retain unselected persistent data"] else [] end)}'
+}
+
+qa_lifecycle_guard() {
+  [ -n "${SUBYARD_RESOURCE_STEPS:-}" ] || return 0
+  local fresh
+  fresh="$(qa_lifecycle_assessment "$1")"
+  [ "$(jq -r .binding <<<"$fresh")" = "${SUBYARD_RESOURCE_BINDING:-}" ] \
+    || die 'plan_stale: QA lifecycle target binding changed'
+  jq -en --argjson approved "$SUBYARD_RESOURCE_STEPS" --argjson current "$(jq -c .steps <<<"$fresh")" '
+    ($approved|length) == ($current|length) and all(range(0; $approved|length); . as $i |
+    $approved[$i] as $a | $current[$i] as $c |
+    $a.id == $c.id and $a.target == $c.target and $a.desired == $c.desired and
+    (($c.decision == "skip") or ($a.decision == "apply" and $a.observed == $c.observed)))' >/dev/null \
+    || die 'plan_stale: QA lifecycle native targets changed'
+}
+
+emit_read_assessment() { # <local-action> <true|false> [fixed consequence...]
   local action="$1" changed="$2" separator=""
   shift 2
   printf '{"schema":"yard.resource-action-assessment.v1","action":"%s","changed":%s,"consequences":[' \
@@ -463,6 +536,13 @@ emit_resource_assessment() { # <local-action> <true|false> [fixed consequence...
   done
   printf ']}\n'
 }
+
+# shellcheck source=config/profiles/openclaw/resources/exact-plan.sh
+. "$RESOURCE_DIR/../exact-plan.sh"
+emit_resource_assessment() {
+ case "$1" in status|logs|shell|list) emit_read_assessment "$@" ;; *) openclaw_emit_exact "$@" ;; esac
+}
+
 
 require_no_resource_arguments() {
   local verb="$1"
@@ -526,6 +606,8 @@ prepare_resource() { # <public-verb> [validated args...]
       command -v incus >/dev/null 2>&1 || die "incus not found"
       [ -n "$BROKER_SRC" ] \
         || die "BROKER_SRC unset — configure the in-yard QA broker source before running qa-pool up"
+      case "$BROKER_SRC" in /*) ;; *) die "QA broker source must be an absolute yard path" ;; esac
+      case "/$BROKER_SRC/" in */../*|*/./*) die "QA broker source must be canonical" ;; esac
       yexec test -r "$BROKER_SRC/convex.json" \
         || die "the configured QA broker source has no readable convex.json"
       emit_resource_assessment up true \
@@ -561,27 +643,12 @@ prepare_resource() { # <public-verb> [validated args...]
     down)
       require_no_resource_arguments down "$@"
       svc_require_yard_running
-      if box_running; then
-        emit_resource_assessment down true "stop the QA broker runtime while preserving its data"
-      else
-        emit_resource_assessment down false
-      fi
+      qa_lifecycle_assessment down
       ;;
     destroy)
       action="$(destroy_action_for_arguments "$@")"
       svc_require_yard_running
-      [ "$action" != destroy-purge ] || purge_flag=1
-      qa_destroy_target_exists "$purge_flag" && changed=true
-      if [ "$changed" = false ]; then
-        emit_resource_assessment "$action" false
-      elif [ "$action" = destroy-purge ]; then
-        emit_resource_assessment "$action" true \
-          "remove the QA broker runtime and staged credentials" \
-          "irreversibly delete the persistent QA broker data root"
-      else
-        emit_resource_assessment "$action" true \
-          "remove the QA broker runtime and staged credentials while preserving broker data"
-      fi
+      qa_lifecycle_assessment "$action"
       ;;
     status)
       require_no_resource_arguments status "$@"
@@ -603,13 +670,115 @@ require_resource_apply() { # <expected-local-action>
   [ -n "${SUBYARD_OPERATION_ID:-}" ] || die "resource apply operation ID is required"
 }
 
+openclaw_target() {
+  printf '%s' "incus:$INCUS_PROJECT/$YARD_INSTANCE_NAME QA container:$CNAME data path:$DATA_ROOT staged QA input artifacts"
+}
+openclaw_binding() {
+  { printf '%s\0' "$1" "$YARD_INSTANCE_NAME" "$CNAME" "$DATA_ROOT" "$YSECRETS" "$BROKER_SRC" "$BACKEND_IMAGE" "$DEPLOY_IMAGE" "$CLOUD_PORT" "$SITE_PORT" "$KIND" "$OWNER_ID" "${resource_arguments[@]}"
+    openclaw_file_fact "$CONF"
+    case "$1" in up|seed|expose|smoke) openclaw_file_fact "$SECRETS"; openclaw_file_fact "$POOL" ;; esac
+    if [ "$1" = up ]; then yexec stat -c '%d:%i:%f:%u:%g' -- "$BROKER_SRC"; yexec tar -cf - -C "$BROKER_SRC" . | sha256sum | awk '{print $1}'; fi
+  } | sha256sum | awk '{print $1}'
+}
+openclaw_observation() {
+  { ydocker inspect -f '{{.Id}} {{.State.Running}} {{ index .Config.Labels "subyard.qa-broker" }}' "$CNAME" 2>/dev/null || printf absent
+    yexec sh -c 'for p; do if [ -e "$p" ] || [ -L "$p" ]; then stat -c "%f:%u:%g:%i" "$p"; else printf "absent\n"; fi; done' _ "$DATA_ROOT" "$(dirname "$YSECRETS")"
+  } | sha256sum | awk '{print $1}'
+}
+openclaw_prepare_fresh() { prepare_resource "$sub" "${resource_arguments[@]}"; }
+qa_staged_inputs_match() {
+  local digest
+  [ -f "$SECRETS" ] || return 1
+  digest="$(sha256sum "$SECRETS" | awk '{print $1}')"
+  yexec sh -c '[ -f "$1" ] && [ ! -L "$1" ] && [ "$(sha256sum "$1" | cut -d" " -f1)" = "$2" ]' _ "$YSECRETS" "$digest" >/dev/null
+}
+qa_exposed_converged() {
+  qa_staged_inputs_match || return 1
+  yexec sh -s -- "$YSECRETS" "$YCLIENT" "$SITE_PORT" <<'CHECK'
+set -eu
+[ -f "$2" ] && [ ! -L "$2" ]
+. "$1"
+expected_ci="${OPENCLAW_QA_CONVEX_SECRET_CI:-}"
+. "$2"
+[ "$OPENCLAW_QA_CONVEX_SECRET_CI" = "$expected_ci" ]
+[ "$OPENCLAW_QA_CONVEX_SITE_URL" = "http://127.0.0.1:$3" ]
+[ "$OPENCLAW_QA_CREDENTIAL_SOURCE" = convex ] && [ "$OPENCLAW_QA_CREDENTIAL_ROLE" = ci ] && [ "$OPENCLAW_QA_ALLOW_INSECURE_HTTP" = 1 ]
+CHECK
+}
+qa_seed_converged() {
+  [ -r "$POOL" ] || return 0
+  qa_staged_inputs_match || return 1
+  local digest
+  digest="$(sha256sum "$POOL" | awk '{print $1}')"
+  yexec sh -s -- "$YSECRETS" "$YPOOL" "$SITE_PORT" "$digest" <<'CHECK'
+set -eu
+[ -f "$2" ] && [ ! -L "$2" ]
+[ "$(sha256sum "$2" | cut -d' ' -f1)" = "$4" ]
+. "$1"
+existing="$(curl -fsS --max-time 25 -X POST "http://127.0.0.1:$3/qa-credentials/v1/admin/list" -H "authorization: Bearer $OPENCLAW_QA_CONVEX_SECRET_MAINTAINER" -H 'content-type: application/json' -d '{"status":"active","limit":500}' | jq -er '.credentials | map(.note // "")')"
+while IFS= read -r line; do
+ [ -n "$line" ] || continue
+ kind="$(printf '%s' "$line" | jq -r '.kind // empty')"
+ [ -n "$kind" ] || continue
+ note="$(printf '%s' "$line" | jq -r '.note // empty')"
+ [ -n "$note" ] || note="$kind:$(printf '%s' "$line" | jq -cS '.payload' | sha256sum | cut -c1-12)"
+ printf '%s' "$existing" | jq -e --arg note "$note" 'index($note)!=null' >/dev/null
+ done <"$2"
+CHECK
+}
+verify_resource() {
+  local action="$1"
+  case "$action" in
+    up)
+      box_running && qa_exposed_converged && qa_seed_converged || die "QA broker postcondition failed"
+      yexec test -f "$YDEPLOYED" || die "QA deployment marker is absent"
+      yexec sh -c 'curl -fsS --max-time 3 "http://127.0.0.1:$1/version" >/dev/null' _ "$CLOUD_PORT" || die "QA broker health verification failed"
+      ;;
+    seed) qa_seed_converged || die "QA generated pool verification failed" ;;
+    expose) qa_exposed_converged || die "QA worker environment verification failed" ;;
+    smoke)
+      box_running || die "QA smoke broker is not running"
+      yexec sh -c '[ "$(cat "$1")" = "$2" ]' _ "$DATA_ROOT/.smoke-verified" "$SUBYARD_OPERATION_ID" || die "QA smoke did not complete its native lease verification"
+      ;;
+    down) ! box_running || die "QA broker remains running" ;;
+    destroy|destroy-purge)
+      ! box_exists || die "QA broker remains present"
+      ! yexec test -e "$(dirname "$YSECRETS")" || die "QA staged credentials remain present"
+      if [ "$action" = destroy-purge ]; then ! yexec test -e "$DATA_ROOT" || die "QA broker data remains present"; fi
+      ;;
+    *) die "unsupported QA native verifier" ;;
+  esac
+  openclaw_emit_exact "$action" false
+}
+
 sub="${1:-}"; [ $# -gt 0 ] && shift
+resource_arguments=("$@")
 case "${SUBYARD_RESOURCE_MODE:-}" in
   prepare)
     [ -n "$sub" ] || svc_usage_error "resource verb is required"
     prepare_resource "$sub" "$@"
     ;;
+  verify)
+    case "$sub" in
+      down|destroy)
+        action="$sub"; [ "$sub" != destroy ] || action="$(destroy_action_for_arguments "$@")"
+        svc_require_yard_running
+        qa_lifecycle_assessment "$action"
+        ;;
+      *)
+        [ "$sub" != up ] || validate_up_arguments "$@"
+        verify_resource "$sub"
+        ;;
+    esac
+    ;;
   apply)
+    case "$sub" in up|seed|expose|smoke|down|destroy)
+      action="$sub"; [ "$sub" != destroy ] || action="$(destroy_action_for_arguments "$@")"
+      [ "$sub" != up ] || validate_up_arguments "$@"
+      require_resource_apply "$action"
+      openclaw_lock qa-broker
+      openclaw_recheck_exact "$action"
+      ;; esac
     case "$sub" in
       up)      validate_up_arguments "$@"; require_resource_apply up; cmd_up "$@" ;;
       seed)    require_no_resource_arguments seed "$@"; require_resource_apply seed; svc_require_yard_running; cmd_seed ;;
@@ -617,11 +786,12 @@ case "${SUBYARD_RESOURCE_MODE:-}" in
       status)  require_no_resource_arguments status "$@"; require_resource_apply status; cmd_status ;;
       logs)    validate_logs_arguments "$@"; require_resource_apply logs; svc_require_yard_running; cmd_logs "$@" ;;
       smoke)   require_no_resource_arguments smoke "$@"; require_resource_apply smoke; svc_require_yard_running; cmd_smoke ;;
-      down)    require_no_resource_arguments down "$@"; require_resource_apply down; svc_require_yard_running; cmd_down ;;
+      down)    require_no_resource_arguments down "$@"; require_resource_apply down; svc_require_yard_running; qa_lifecycle_guard down; cmd_down ;;
       destroy)
         action="$(destroy_action_for_arguments "$@")"
         require_resource_apply "$action"
         svc_require_yard_running
+        qa_lifecycle_guard "$action"
         cmd_destroy "$@"
         ;;
       *) die "unknown 'yard qa-pool' apply verb: '$sub'" ;;

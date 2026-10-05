@@ -16,7 +16,6 @@ import (
 	"text/tabwriter"
 
 	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
-	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/domain"
@@ -356,82 +355,9 @@ func (cli *CLI) runConfigSync(
 		fmt.Fprintln(cli.options.Stdout, "config sync check: converged")
 		return 0
 	}
-	changed := plan.NeedsApply()
-	consequences := make([]string, 0, len(plan.Changes)+1)
-	if changed {
-		if plan.InitializeHostID {
-			consequences = append(consequences, "record owner host ID "+plan.HostID)
-		}
-		for _, change := range plan.Changes {
-			consequences = append(consequences, change.Action+" "+change.Path)
-		}
-		if plan.ManifestChanged {
-			consequences = append(consequences,
-				"update versioned configuration manifest metadata")
-		}
-		if materialize && configSyncPlanNeedsMaterialization(plan) {
-			consequences = append(consequences,
-				"refresh affected file settings in running local yards")
-		}
-	}
-	orchestrator, operation, err := cli.planConfigSyncOperation(
-		ctx, loaded, "config sync", "config.sync", changed, consequences, assumeYes,
-	)
-	if errors.Is(err, application.ErrDeclined) {
-		cli.errorf("config sync: operation declined")
-		return 1
-	}
-	if err != nil {
-		cli.errorf("config sync: %v", err)
-		return 1
-	}
-	if changed {
-		orchestrator.Runner = configSyncAdapter{plan: plan}
-		if _, _, err := orchestrator.RunAdapter(ctx, operation, domain.AdapterRequest{
-			OperationID: operation.OperationID, Adapter: "config-sync", Action: "apply",
-		}, nil); err != nil {
-			cli.errorf("config sync: %v", err)
-			return 1
-		}
-	} else if err := configsync.Apply(plan); err != nil {
-		cli.errorf("config sync: %v", err)
-		return 1
-	}
-	if !plan.NeedsApply() {
-		fmt.Fprintln(cli.options.Stdout, "config sync: already converged")
-		return 0
-	}
-	fmt.Fprintf(cli.options.Stdout, "config sync: applied generation %d\n", plan.Generation)
-	if materialize {
-		if err := cli.materializeConfigSyncPlan(ctx, loaded, plan, true); err != nil {
-			cli.errorf("config sync --apply: %v", err)
-			return 1
-		}
-	}
-	cli.writeConfigSyncFollowups(loaded, plan, materialize)
-	return 0
-}
-
-func (cli *CLI) planConfigSyncOperation(
-	ctx context.Context,
-	loaded config.Loaded,
-	command string,
-	action domain.ActionID,
-	changed bool,
-	consequences []string,
-	assumeYes bool,
-) (*application.Orchestrator, domain.OperationPlan, error) {
-	if !changed {
-		consequences = nil
-	}
-	orchestrator := cli.operationOrchestrator(
-		cli.env["SUBYARD_OPERATION_ID"], loaded, nil, nil,
-	)
-	operation, err := orchestrator.PlanAction(
-		ctx, loaded.Context, command, domain.RemoteOnOwner, action,
-		domain.ActionDelta{Changed: changed, Consequences: consequences}, assumeYes,
-	)
-	return orchestrator, operation, err
+	return cli.runPreparedConfigMutation(ctx, loaded, append([]string{"sync"}, arguments...), assumeYes, func(prepared *preparedCommand) error {
+		return prepared.prepareConfigSync(ctx, arguments)
+	})
 }
 
 func (cli *CLI) writeConfigSyncHelp() {
@@ -1066,6 +992,7 @@ func (cli *CLI) configStatus(
 	ctx context.Context,
 	targets []configTarget,
 	checkDrift bool,
+	expectedDesired ...map[string]string,
 ) error {
 	if len(targets) == 0 {
 		return errors.New("no local yards selected")
@@ -1083,10 +1010,14 @@ func (cli *CLI) configStatus(
 	}
 	var drifted []string
 	for _, target := range targets {
-		state, drift, err := cli.configTargetDrift(ctx, target, checkDrift)
+		assessment, err := cli.assessConfigTarget(ctx, target, checkDrift)
 		if err != nil {
 			return fmt.Errorf("yard %s: %w", target.Name, err)
 		}
+		if len(expectedDesired) != 0 && assessment.DesiredFingerprint != expectedDesired[0][target.Name] {
+			return fmt.Errorf("yard %s: approved desired configuration changed during verification", target.Name)
+		}
+		state, drift := assessment.State, assessment.Changed
 		fmt.Fprintf(cli.options.Stdout, "yard %s materialized-config: %s\n", target.Name, state)
 		if drift {
 			drifted = append(drifted, target.Name)
@@ -1106,163 +1037,20 @@ func (cli *CLI) applyConfig(
 	assumeYes bool,
 	selector configTargetSelector,
 ) int {
-	if len(targets) == 0 {
-		cli.errorf("config apply: no local yards selected")
-		return 1
-	}
-	if err := validateManagedConfigTree(targets[0].Loaded.Context.Paths.ConfigHome); err != nil {
+	execution, err := cli.prepareConfigApply(ctx, targets, selector)
+	if err != nil {
 		cli.errorf("config apply: %v", err)
 		return 1
 	}
-	assessments := make([]configTargetAssessment, 0, len(targets))
-	drifted := make([]configTargetAssessment, 0, len(targets))
-	for _, target := range targets {
-		if target.Loaded.Context.AccessKind == domain.AccessRemote {
-			cli.errorf("config apply does not implicitly operate on remote yard %s", target.Name)
-			return 1
-		}
-		assessment, err := cli.assessConfigTarget(ctx, target, true)
-		if err != nil {
-			cli.errorf("config apply: yard %s: %v", target.Name, err)
-			return 1
-		}
-		assessments = append(assessments, assessment)
-		if assessment.Changed {
-			drifted = append(drifted, assessment)
-		} else {
-			fmt.Fprintf(cli.options.Stdout,
-				"yard %s materialized-config: %s; skipped\n", target.Name, assessment.State)
-		}
+	definition := nativeConfigCommandDefinition()
+	prepared := &preparedCommand{CLI: cli, Definition: definition, Loaded: targets[0].Loaded, Arguments: []string{"apply"}}
+	prepared.policy = commandPolicy(definition, prepared.Loaded.Context, prepared.Arguments, nil)
+	prepared.attachConfigApply(execution)
+	if err := prepared.preparePlan(ctx); err != nil {
+		return cli.reportPreparationError(definition, err)
 	}
-	if cli.configApplyRepair != nil && !cli.configApplyRepair.matchesRequestedConfigs(assessments) {
-		cli.errorf("config apply: release repair requires the persisted configuration; remove differing command overrides")
-		return 1
-	}
-	if len(drifted) == 0 {
-		if !cli.planConfigAction(ctx, targets[0].Loaded, "apply", assumeYes, true,
-			"no running local yards have materialized configuration drift") {
-			return 1
-		}
-		if cli.configApplyRepair != nil {
-			unlock, err := cli.lockConfigApplyRepair(ctx, cli.configApplyRepair)
-			if err != nil {
-				cli.errorf("config apply: %v", err)
-				return 1
-			}
-			defer unlock()
-			if err := cli.finishConfigApplyRepair(ctx, cli.configApplyRepair); err != nil {
-				cli.errorf("config apply verification: %v", err)
-				return 1
-			}
-		}
-		fmt.Fprintln(cli.options.Stdout, "config apply: no running local yards to refresh")
-		return 0
-	}
-	names := make([]string, 0, len(drifted))
-	for _, assessment := range drifted {
-		names = append(names, assessment.Target.Name)
-	}
-	if !cli.planConfigAction(ctx, targets[0].Loaded, "apply", assumeYes, false,
-		"refresh materialized agent configs in local running yards: "+strings.Join(names, ", ")) {
-		return 1
-	}
-	if cli.configApplyRepair != nil {
-		unlock, err := cli.lockConfigApplyRepair(ctx, cli.configApplyRepair)
-		if err != nil {
-			cli.errorf("config apply: %v", err)
-			return 1
-		}
-		defer unlock()
-	}
-	if selector == nil {
-		cli.errorf("config apply: target selector is required")
-		return 1
-	}
-	refreshedTargets, err := selector()
-	if err != nil {
-		cli.errorf("config apply: revalidate targets: %v", err)
-		return 1
-	}
-	if !sameConfigTargetSet(assessments, refreshedTargets) {
-		cli.errorf("config apply: %v", fmt.Errorf(
-			"%w: selected local yard set changed after confirmation", domain.ErrPlanStale,
-		))
-		return 1
-	}
-	refreshedByName := make(map[string]configTargetAssessment, len(refreshedTargets))
-	for _, target := range refreshedTargets {
-		assessment, err := cli.assessConfigTarget(ctx, target, true)
-		if err != nil {
-			cli.errorf("config apply: revalidate yard %s: %v", target.Name, err)
-			return 1
-		}
-		refreshedByName[target.Name] = assessment
-	}
-	driftedTargets := make([]configTarget, 0, len(drifted))
-	for _, initial := range assessments {
-		refreshed := refreshedByName[initial.Target.Name]
-		if initial.DesiredFingerprint != refreshed.DesiredFingerprint {
-			cli.errorf("config apply: yard %s: %v", initial.Target.Name, fmt.Errorf(
-				"%w: desired configuration or target changed after confirmation",
-				domain.ErrPlanStale,
-			))
-			return 1
-		}
-		if initial.Changed && !refreshed.Changed {
-			fmt.Fprintf(cli.options.Stdout,
-				"yard %s materialized-config: %s after confirmation; skipped\n",
-				refreshed.Target.Name, refreshed.State)
-			continue
-		}
-		if initial.MaterializedFingerprint != refreshed.MaterializedFingerprint ||
-			initial.Changed != refreshed.Changed {
-			cli.errorf("config apply: yard %s: %v", initial.Target.Name, fmt.Errorf(
-				"%w: materialized configuration changed after confirmation",
-				domain.ErrPlanStale,
-			))
-			return 1
-		}
-		if refreshed.Changed {
-			driftedTargets = append(driftedTargets, refreshed.Target)
-		}
-	}
-	if len(driftedTargets) == 0 {
-		if cli.configApplyRepair != nil {
-			if err := cli.finishConfigApplyRepair(ctx, cli.configApplyRepair); err != nil {
-				cli.errorf("config apply verification: %v", err)
-				return 1
-			}
-		}
-		fmt.Fprintln(cli.options.Stdout, "config apply: drift converged after confirmation; nothing to refresh")
-		return 0
-	}
-	applier := cli.options.Config
-	if applier == nil && cli.configApplyRepair != nil {
-		applier = releaseTransitionConfigApplier{cli: cli}
-	}
-	if applier == nil {
-		applier = dispatcherConfigApplier{
-			path: cli.options.DispatcherPath, environment: cli.baseEnv,
-			stdout: cli.options.Stdout, stderr: cli.options.Stderr,
-		}
-	}
-	for _, target := range driftedTargets {
-		if err := applier.ApplyConfig(ctx, target.Name); err != nil {
-			cli.errorf("config apply: yard %s: %v", target.Name, err)
-			return 1
-		}
-	}
-	if err := cli.configStatus(ctx, driftedTargets, true); err != nil {
-		cli.errorf("config apply verification: %v", err)
-		return 1
-	}
-	if cli.configApplyRepair != nil {
-		if err := cli.finishConfigApplyRepair(ctx, cli.configApplyRepair); err != nil {
-			cli.errorf("config apply verification: %v", err)
-			return 1
-		}
-	}
-	return 0
+	defer prepared.Close()
+	return cli.runPreparedCommand(ctx, prepared, assumeYes)
 }
 
 type dispatcherConfigApplier struct {

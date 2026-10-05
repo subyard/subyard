@@ -212,8 +212,26 @@ resolve_owner_address() {
   ORCA_TRANSPORT=Tailscale
 }
 
+orca_device_fingerprint() {
+  local configuration
+  configuration="$(incus config device show "$YARD_INSTANCE_NAME" "${PROJ[@]}" |
+    awk -v device="$ORCA_DEVICE" '$0 == device ":" {inside=1; print; next} inside && /^[^[:space:]]/ {exit} inside {print}')" \
+    || die 'Orca native proxy metadata unavailable'
+  [ -n "$configuration" ] || die 'Orca native proxy metadata unavailable'
+  printf '%s\n' "$configuration" | sha256sum | awk '{print $1}'
+}
+
+orca_device_exact_shape() {
+  local keys
+  keys="$(incus config device show "$YARD_INSTANCE_NAME" "${PROJ[@]}" |
+    awk -v device="$ORCA_DEVICE" '$0 == device ":" {inside=1;next} inside && /^[^[:space:]]/ {exit}
+      inside && /^  [A-Za-z0-9_.-]+:/ {key=$0;sub(/^  /,"",key);sub(/:.*/,"",key);print key}' | LC_ALL=C sort)"
+  [ "$keys" = $'bind\nconnect\nlisten\ntype' ]
+}
+
 route_matches() {
-  device_exists &&
+  device_exists && orca_device_exact_shape &&
+    [ "$(device_value type)" = proxy ] && [ "$(device_value bind)" = host ] &&
     [ "$(device_value listen)" = "tcp:$ORCA_OWNER_IP:$ORCA_HOST_PORT" ] &&
     [ "$(device_value connect)" = "tcp:127.0.0.1:$ORCA_GUEST_PORT" ]
 }
@@ -300,7 +318,9 @@ flock -s 9
   exit 1
 }
 systemctl is-active --quiet $ORCA_UNIT || exit 0
-/usr/bin/python3 -B $ORCA_REGISTRATION/settings.py
+if [ -n "\${SUBYARD_PROJECT_HOOK_BINDING:-}" ]; then
+  export SUBYARD_ORCA_REGISTRATION_SCOPE="\$SUBYARD_PROJECT_HOOK_BINDING"
+fi
 status=0
 report="\$(/usr/bin/python3 -B $ORCA_REGISTRATION/main.py $mode --host-name '$host_name')" || status=\$?
 if ! jq -e '(.ready | type == "boolean") and (.errors | type == "array") and (.warnings | type == "array")' <<<"\$report" >/dev/null; then
@@ -310,6 +330,7 @@ fi
 jq -r '(.errors[] | "Orca registration error: " + .), (.warnings[] | "Orca registration warning: " + .)' <<<"\$report" >&2
 jq -r '"Orca checkouts registered: \(.registered)/\(.total)"' <<<"\$report"
 jq -e '.ready' <<<"\$report" >/dev/null || status=1
+[ "\$status" -ne 0 ] || /usr/bin/python3 -B $ORCA_REGISTRATION/settings.py
 exit "\$status"
 SYNC_HEAD
 }
@@ -672,7 +693,19 @@ ensure_route() {
 }
 
 run_project_sync() {
-  yexec runuser -u "${DEV_USER:-dev}" -- "$ORCA_SYNC"
+  local expected=""
+  if [ -n "${SUBYARD_RESOURCE_STEPS:-}" ]; then
+    if [ "$(jq -r '.[]|select(.id == "registration")|.decision' <<<"$SUBYARD_RESOURCE_STEPS")" = skip ]; then
+      if [ "$(jq -r '.[]|select(.id == "codex-defaults")|.decision' <<<"$SUBYARD_RESOURCE_STEPS")" != skip ];then
+        yexec runuser -u "${DEV_USER:-dev}" -- /usr/bin/python3 -B "$ORCA_REGISTRATION/settings.py"
+      fi
+      return
+    fi
+    expected="$(jq -r '.[]|select(.id == "registration")|.observed|select(startswith("catalog:"))|sub("^catalog:";"")|split(":scope:")[0]' <<<"$SUBYARD_RESOURCE_STEPS")"
+    [ -n "$expected" ] || expected=conditional
+  fi
+  if [ -z "$expected" ];then yexec runuser -u "${DEV_USER:-dev}" -- "$ORCA_SYNC";return;fi
+  yexec runuser -u "${DEV_USER:-dev}" -- env "SUBYARD_ORCA_REGISTRATION_SCOPE=$expected" "$ORCA_SYNC"
 }
 
 codex_defaults_ready() {
@@ -888,7 +921,9 @@ cmd_sync() {
 cmd_restart() {
   yexec systemctl is-active --quiet "$ORCA_UNIT" \
     || die "Orca is not running; run '$(yard_cmd_hint) orca up' first"
-  yexec systemctl restart "$ORCA_UNIT"
+  if [ -z "${SUBYARD_RESOURCE_STEPS:-}" ] || [ "$(jq -r '.[]|select(.id == "service")|.decision' <<<"$SUBYARD_RESOURCE_STEPS")" != skip ]; then
+    yexec systemctl restart "$ORCA_UNIT"
+  fi
   yexec systemctl start "$ORCA_DISCOVERY_TIMER"
   wait_service_endpoint_ready || die "Orca did not become ready after restart"
   ok "Orca service restarted"
@@ -989,6 +1024,180 @@ stop_discovery() {
   done
 }
 
+orca_steps_emit() {
+  local action="$1" steps="$2" binding
+  binding="$( { jq -c '[.[]|{id,target,desired,preconditions,dependsOn,verify}]' <<<"$steps";
+    registration_contract_version; sha256sum "$RESOURCE_DIR/handler.sh" "$ORCA_PROFILE_DIR/release.env" | awk '{print $1}';
+    printf '%s\n' "${DEV_USER:-dev}" "$DEV_UID" "$ORCA_GUEST_PORT"; } | sha256sum | awk '{print $1}')"
+  jq -cn --arg action "$action" --arg binding "$binding" --argjson steps "$steps" \
+    '{schema:"yard.resource-action-assessment.v2",action:$action,binding:$binding,steps:$steps,
+    changed:any($steps[];.decision != "skip"),consequences:[$steps[]|select(.decision != "skip")|.consequence]}'
+}
+
+orca_step_add() {
+  local id="$1" target="$2" observed="$3" desired="$4" decision="$5" verify="$6" consequence="$7" dependencies="${8:-[]}"
+  ORCA_STEPS="$(jq -cn --argjson steps "$ORCA_STEPS" --arg id "$id" --arg target "incus:$INCUS_PROJECT/$YARD_INSTANCE_NAME/$target" \
+    --arg observed "$observed" --arg desired "$desired" --arg decision "$decision" --arg verify "$verify" --arg consequence "$consequence" --argjson dependencies "$dependencies" \
+    '$steps + [{id:$id,target:$target,observed:$observed,desired:$desired,decision:$decision,
+    preconditions:["only the declared profile-owned target scope; unavailable guest observations resolve after approved yard startup"],
+    dependsOn:$dependencies,verify:$verify,consequence:$consequence}]')"
+}
+
+orca_registration_observation() {
+  local report expected catalog
+  report="$(project_registration_report)" || { printf 'unavailable'; return; }
+  expected="$(jq -r '.scopeDigest // empty' <<<"$report")"
+  [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || die 'Orca native root-scope fingerprint unavailable; refresh the profile runtime'
+  catalog="$(jq -r '.catalogDigest // empty' <<<"$report")"
+  [[ "$catalog" =~ ^[0-9a-f]{64}$ ]] || die 'Orca native catalog fingerprint unavailable; refresh the profile runtime'
+  if [ "${SUBYARD_RESOURCE_MODE:-}" = verify ] && [ -n "${SUBYARD_RESOURCE_STEPS:-}" ]; then
+    local captured
+    captured="$(jq -r '.[]|select(.id == "registration")|.observed|select(startswith("catalog:"))|split(":scope:")[1] // empty' <<<"$SUBYARD_RESOURCE_STEPS")"
+    [ -z "$captured" ] || [ "$captured" = "$expected" ] || die 'Orca native verified-root scope changed after apply'
+  fi
+  if jq -e '.ready' <<<"$report" >/dev/null; then printf 'registered'; else printf 'catalog:%s:scope:%s' "$catalog" "$expected"; fi
+}
+
+emit_up_assessment() {
+  local available=false specification id predicate target desired observed decision report dependencies
+  require_runtime_settings
+  resolve_owner_address
+  refuse_port_collision
+  ORCA_STEPS='[]'
+  if incus info "$YARD_INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1 &&
+    [ "$(incus list "$YARD_INSTANCE_NAME" "${PROJ[@]}" -f csv -c s 2>/dev/null)" = RUNNING ]; then
+    available=true
+    select_release
+  fi
+  # Incus exec forwards stdin; keep the plan rows separate from predicate input.
+  while IFS='|' read -r id predicate target desired <&3; do
+    observed=unknown; decision=conditional
+    if [ "$available" = true ]; then
+      observed=unready; decision=apply
+      if "$predicate"; then observed="$desired"; decision=skip; fi
+      if [ "$id" = host-route ] && [ "$decision" = apply ];then
+        observed=absent
+        if device_exists;then observed="device:$(orca_device_fingerprint)";fi
+      fi
+    fi
+    dependencies='[]'
+    if [ "$id" = service ];then
+      dependencies='["package","runtime-contract"]'
+      if jq -e 'any(.[]; (.id == "package" or .id == "runtime-contract") and .decision != "skip")' <<<"$ORCA_STEPS" >/dev/null;then
+        observed=unknown;decision=conditional
+      fi
+    fi
+    orca_step_add "$id" "$target" "$observed" "$desired" "$decision" "native $id postcondition equals the approved desired fact" "converge the declared Orca $id target" "$dependencies"
+  done 3<<STEPS
+package|release_ready|package/orca-ide|pinned-$ORCA_VERSION
+headless-dependencies|dependencies_ready|packages/orca-headless|declared-headless-package-set-installed
+runtime-contract|runtime_contract_ready|profile/orca-runtime|profile-helper-source-and-service-contract-current
+service-enable|service_enabled|$ORCA_UNIT/enabled|enabled
+service|service_ready|$ORCA_UNIT/readiness|running-and-native-ready
+host-route|route_matches|$ORCA_DEVICE|tcp:$ORCA_OWNER_IP:$ORCA_HOST_PORT-to-loopback:$ORCA_GUEST_PORT
+ingress|ingress_active|inet/subyard_orca|managed-ingress-active
+owner-endpoint|owner_endpoint_ready|endpoint/$ORCA_OWNER_IP:$ORCA_HOST_PORT|reachable
+project-hook|automatic_project_hook_ready|profile/project-dispatcher|current-hook-and-helper-contract
+discovery|discovery_scheduled|$ORCA_DISCOVERY_TIMER|enabled-and-active
+codex-defaults|codex_defaults_ready|settings/codex-defaults|custom-arguments-retained-or-stock-default-disabled
+STEPS
+  observed=unknown; decision=conditional
+  if [ "$available" = true ] && registration_contract_ready && service_endpoint_ready; then
+    observed="$(orca_registration_observation)"; decision=apply
+    if [ "$observed" = registered ]; then decision=skip; fi
+    if [ "$observed" = unavailable ]; then observed=unknown; decision=conditional; fi
+  fi
+  orca_step_add registration workspace-driver/srv/workspaces "$observed" registered "$decision" \
+    'native verified local roots registered in their project groups; native saved-tab retention and removal checks succeed' \
+    'reconcile only the captured native verified-root catalog, or the bounded catalog revealed by approved startup'
+  orca_steps_emit up "$ORCA_STEPS"
+}
+
+emit_restart_assessment() {
+  local invocation previous desired observed decision
+  svc_require_yard_running
+  yexec systemctl is-active --quiet "$ORCA_UNIT" || die 'Orca is not running'
+  invocation="$(yexec systemctl show -p InvocationID --value "$ORCA_UNIT")"
+  [[ "$invocation" =~ ^[0-9a-f]{32}$ ]] || die 'Orca native service invocation identity unavailable'
+  previous="$invocation"
+  if [ -n "${SUBYARD_RESOURCE_STEPS:-}" ]; then
+    previous="$(jq -r '.[]|select(.id == "service")|.desired|sub("^running-after:";"")' <<<"$SUBYARD_RESOURCE_STEPS")"
+    [[ "$previous" =~ ^[0-9a-f]{32}$ ]] || die 'Orca approved restart identity invalid'
+  fi
+  desired="running-after:$previous"; observed="invocation:$invocation"; decision=apply
+  if [ "$invocation" != "$previous" ] && service_endpoint_ready; then observed="$desired"; decision=skip; fi
+  ORCA_STEPS='[]'
+  orca_step_add service "$ORCA_UNIT" "$observed" "$desired" "$decision" 'new native service invocation is running and its loopback endpoint is ready' 'restart the captured Orca service invocation'
+  observed=inactive;decision=apply
+  if yexec systemctl is-active --quiet "$ORCA_DISCOVERY_TIMER";then observed=active;decision=skip;fi
+  orca_step_add discovery "$ORCA_DISCOVERY_TIMER" "$observed" active "$decision" 'native discovery timer is active' 'start the selected Orca discovery timer'
+  orca_steps_emit restart "$ORCA_STEPS"
+}
+
+emit_sync_assessment() {
+  local observed decision
+  svc_require_yard_running
+  yexec systemctl is-active --quiet "$ORCA_UNIT" || die 'Orca is not running'
+  registration_contract_ready || die "Orca project helper is stale or incomplete; run '$(yard_cmd_hint) init' first"
+  ORCA_STEPS='[]'
+  observed=unready;decision=apply
+  if codex_defaults_ready;then observed=custom-arguments-retained-or-stock-default-disabled;decision=skip;fi
+  orca_step_add codex-defaults settings/codex-defaults "$observed" custom-arguments-retained-or-stock-default-disabled "$decision" \
+    'native Codex custom arguments are retained or stock default disabled' 'converge the bounded Orca Codex launch default'
+  observed="$(orca_registration_observation)";decision=apply
+  [ "$observed" != unavailable ] || die 'Orca native root catalog is unavailable'
+  if [ "$observed" = registered ];then
+    if [ "${SUBYARD_RESOURCE_MODE:-}" = verify ];then decision=skip;else
+      observed="$(project_registration_report | jq -r '"catalog:" + .catalogDigest + ":scope:" + .scopeDigest')"
+    fi
+  fi
+  orca_step_add registration workspace-driver/srv/workspaces "$observed" registered "$decision" \
+    'captured native verified-root catalog converged with saved-tab retention' 'reconcile the captured native verified-root catalog'
+  orca_steps_emit sync "$ORCA_STEPS"
+}
+
+orca_native_guard() {
+  [ -n "${SUBYARD_RESOURCE_STEPS:-}" ] || return 0
+  local fresh
+  fresh="$("emit_${1}_assessment")"
+  [ "$(jq -r .binding <<<"$fresh")" = "${SUBYARD_RESOURCE_BINDING:-}" ] || die 'plan_stale: Orca native desired scope changed'
+  jq -en --argjson approved "$SUBYARD_RESOURCE_STEPS" --argjson current "$(jq -c .steps <<<"$fresh")" '
+    ($approved|length) == ($current|length) and all(range(0; $approved|length); . as $i |
+    $approved[$i] as $a | $current[$i] as $c | $a.id == $c.id and $a.target == $c.target and $a.desired == $c.desired and
+    (($c.decision == "skip") or ($a.decision == "conditional") or ($a.decision == "apply" and $a.observed == $c.observed)))' >/dev/null \
+    || die 'plan_stale: Orca native captured observation changed'
+  SUBYARD_RESOURCE_STEPS="$(jq -c .steps <<<"$fresh")"
+}
+
+emit_down_assessment() {
+  local unit observed steps='[]' route=absent binding
+  for unit in "$ORCA_UNIT" "$ORCA_DISCOVERY_TIMER" "$ORCA_DISCOVERY_UNIT"; do
+    observed=stopped
+    if yexec systemctl is-active --quiet "$unit"; then observed=running; fi
+    steps="$(jq -cn --argjson steps "$steps" --arg unit "$unit" --arg target "incus:$INCUS_PROJECT/$YARD_INSTANCE_NAME/$unit" --arg observed "$observed" \
+      '$steps + [{id:($unit|gsub("[.]";"-")),target:$target,observed:$observed,desired:"stopped",
+      decision:(if $observed == "stopped" then "skip" else "apply" end),preconditions:["selected profile-owned unit"],verify:"native systemd unit is inactive",
+      consequence:("stop the captured Orca unit " + $unit + " while retaining its persistent data")}]')"
+  done
+  observed=absent
+  if ingress_active; then observed=present; fi
+  steps="$(jq -cn --argjson steps "$steps" --arg target "incus:$INCUS_PROJECT/$YARD_INSTANCE_NAME/inet/subyard_orca" --arg observed "$observed" \
+    '$steps + [{id:"ingress",target:$target,observed:$observed,desired:"absent",
+    decision:(if $observed == "absent" then "skip" else "apply" end),preconditions:["profile-owned nft table only"],verify:"managed ingress marker is absent",
+    consequence:"remove the captured Orca ingress table"}]')"
+  if device_exists; then
+    route="sha256:$(orca_device_fingerprint)"
+  fi
+  steps="$(jq -cn --argjson steps "$steps" --arg target "incus:$INCUS_PROJECT/$YARD_INSTANCE_NAME/$ORCA_DEVICE" --arg observed "$route" \
+    '$steps + [{id:"route",target:$target,observed:$observed,desired:"absent",
+    decision:(if $observed == "absent" then "skip" else "apply" end),preconditions:["captured selected proxy device metadata unchanged"],verify:"selected proxy device is absent",
+    consequence:"remove the captured Orca proxy device"}]')"
+  binding="$(printf '%s\n' "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" "$ORCA_UNIT" "$ORCA_DEVICE" | sha256sum | awk '{print $1}')"
+  jq -cn --argjson steps "$steps" --arg binding "$binding" \
+    '{schema:"yard.resource-action-assessment.v2",action:"down",binding:$binding,
+    changed:any($steps[];.decision == "apply"),consequences:[$steps[]|select(.decision != "skip")|.consequence],steps:$steps}'
+}
+
 emit_resource_assessment() { # <local-action> <true|false> [fixed consequence...]
   local action="$1" changed="$2" separator=""
   shift 2
@@ -1043,40 +1252,7 @@ prepare_resource() { # <public-verb>
   shift
   validate_resource_arguments "$verb" "$@"
   case "$verb" in
-    up)
-      require_runtime_settings
-      resolve_owner_address
-      refuse_port_collision
-      # The engine composes init with this resource action. A first-run plan
-      # must be inspectable before Incus or the selected yard is installed.
-      if incus info "$YARD_INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1 &&
-        [ "$(incus list "$YARD_INSTANCE_NAME" "${PROJ[@]}" -f csv -c s 2>/dev/null)" = RUNNING ]; then
-        select_release
-        release_ready || changed=true
-        dependencies_ready || changed=true
-        runtime_contract_ready || changed=true
-        service_enabled || changed=true
-        service_ready || changed=true
-        ingress_active || changed=true
-        route_matches || changed=true
-        owner_endpoint_ready || changed=true
-        automatic_project_hook_ready || changed=true
-        discovery_scheduled || changed=true
-        codex_defaults_ready || changed=true
-        projects_synced || changed=true
-      else
-        changed=true
-      fi
-      if [ "$changed" = true ]; then
-        emit_resource_assessment up true \
-          "converge the pinned Orca package, dependencies and service contract" \
-          "use the yard Codex configuration instead of the stock Orca YOLO launch default" \
-          "publish the owned guarded endpoint for the selected yard" \
-          "register Subyard roots and nested Git checkouts in their project groups"
-      else
-        emit_resource_assessment up false
-      fi
-      ;;
+    up) emit_up_assessment ;;
     pair)
       svc_require_yard_running
       require_pair_ready
@@ -1084,32 +1260,11 @@ prepare_resource() { # <public-verb>
         "briefly restart the Orca service, preserving existing client grants and server state" \
         "reconcile project groups and checkouts and issue one ${1:+mobile }single-client pairing link"
       ;;
-    restart)
-      svc_require_yard_running
-      yexec systemctl is-active --quiet "$ORCA_UNIT" \
-        || die "Orca is not running; run '$(yard_cmd_hint) orca up' first"
-      emit_resource_assessment restart true \
-        "restart the existing Orca service without returning a pairing capability"
-      ;;
-    sync)
-      svc_require_yard_running
-      yexec systemctl is-active --quiet "$ORCA_UNIT" \
-        || die "Orca is not running; run '$(yard_cmd_hint) orca up' first"
-      registration_contract_ready \
-        || die "Orca project helper is stale or incomplete; run '$(yard_cmd_hint) init' first"
-      # Repair known roots without restarting a recursive workspace traversal.
-      emit_resource_assessment sync true "reconcile Subyard project groups, roots and nested Git checkouts"
-      ;;
+    restart) emit_restart_assessment ;;
+    sync) emit_sync_assessment ;;
     down)
       svc_require_yard_running
-      if yexec systemctl is-active --quiet "$ORCA_UNIT" || ingress_active || device_exists ||
-        yexec systemctl is-active --quiet "$ORCA_DISCOVERY_TIMER" ||
-        yexec systemctl is-active --quiet "$ORCA_DISCOVERY_UNIT"; then
-        emit_resource_assessment down true \
-          "stop the Orca service and ingress guard and remove its owned owner-host proxy"
-      else
-        emit_resource_assessment down false
-      fi
+      emit_down_assessment
       ;;
     is-up|status|logs)
       emit_resource_assessment "$verb" false
@@ -1130,7 +1285,15 @@ if [ "$sub" = _runtime-contract ]; then
   case "${1:-}" in
     observe)
       [ "$#" -eq 1 ] || die "usage: _runtime-contract observe"
-      observe_registration_contract
+      observation="$(observe_registration_contract)"
+      hook_binding=""
+      if [ "$(jq -r .state <<<"$observation")" = current ] &&
+        [ "$(incus list "$YARD_INSTANCE_NAME" "${PROJ[@]}" -f csv -c s 2>/dev/null)" = RUNNING ] &&
+        yexec systemctl is-active --quiet "$ORCA_UNIT";then
+        hook_binding="$(project_registration_report | jq -r '.catalogDigest // empty')"
+        [[ "$hook_binding" =~ ^[0-9a-f]{64}$ ]] || die 'Orca native hook catalog fingerprint unavailable'
+      fi
+      jq --arg binding "$hook_binding" '. + {hook_binding:$binding}' <<<"$observation"
       ;;
     apply)
       [ "$#" -eq 4 ] \
@@ -1158,9 +1321,22 @@ if [ "$sub" = _runtime-contract ]; then
 fi
 
 case "${SUBYARD_RESOURCE_MODE:-}" in
-  prepare)
+  prepare|prepare-start)
+    if [ "${SUBYARD_RESOURCE_MODE:-}" = prepare-start ] && [ "$sub" != up ];then die 'Orca startup scope must use up';fi
     [ -n "$sub" ] || svc_usage_error "resource verb is required"
     prepare_resource "$sub" "$@"
+    ;;
+  verify)
+    case "$sub" in
+      up) validate_resource_arguments up "$@"; emit_up_assessment; exit ;;
+      restart) validate_resource_arguments restart "$@"; emit_restart_assessment; exit ;;
+      sync) validate_resource_arguments sync "$@"; emit_sync_assessment; exit ;;
+      down) ;;
+      *) die "unsupported Orca native verifier" ;;
+    esac
+    validate_resource_arguments "$sub" "$@"
+    svc_require_yard_running
+    emit_down_assessment
     ;;
   apply)
     case "$sub" in
@@ -1172,13 +1348,27 @@ case "${SUBYARD_RESOURCE_MODE:-}" in
     if [ "$sub" = is-up ]; then cmd_is_up; exit $?; fi
     svc_require_yard_running
     case "$sub" in
-      up) cmd_up ;;
+      up) orca_native_guard up; cmd_up ;;
       status) cmd_status ;;
       pair) cmd_pair "$@" ;;
-      restart) cmd_restart ;;
-      sync) cmd_sync ;;
+      restart) orca_native_guard restart; cmd_restart ;;
+      sync) orca_native_guard sync; cmd_sync ;;
       logs) cmd_logs "$@" ;;
-      down) cmd_down ;;
+      down)
+        if [ -n "${SUBYARD_RESOURCE_STEPS:-}" ]; then
+          fresh="$(emit_down_assessment)"
+          [ "$(jq -r .binding <<<"$fresh")" = "${SUBYARD_RESOURCE_BINDING:-}" ] \
+            || die "plan_stale: Orca down target binding changed"
+          jq -en --argjson approved "$SUBYARD_RESOURCE_STEPS" --argjson current "$(jq -c .steps <<<"$fresh")" '
+            ($approved|length) == ($current|length) and
+            all(range(0; $approved|length); . as $i |
+              $approved[$i] as $a | $current[$i] as $c |
+              $a.id == $c.id and $a.target == $c.target and $a.desired == $c.desired and
+              (($c.decision == "skip") or ($a.decision == "apply" and $a.observed == $c.observed)))' >/dev/null \
+            || die "plan_stale: Orca down native scope changed"
+        fi
+        cmd_down
+        ;;
     esac
     ;;
   '')

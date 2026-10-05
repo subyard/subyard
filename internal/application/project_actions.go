@@ -24,6 +24,14 @@ type ProjectActionRunner struct {
 	Data               ports.YardExecutor
 	Devices            ports.InstanceDeviceManager
 	Archive            ports.DirectoryArchiver
+	PreparedArchive    ports.DirectoryArchiver
+	CloneRevision      string
+	CloneUnborn        bool
+	ExportObservedTree string
+	ExportSourceTree   string
+	VerifyExport       func(context.Context) error
+	VerifyPrepared     bool
+	RemovalApproval    *ProjectRemovalApproval
 	Exports            ports.ProjectExportStore
 	Instances          ports.Incus
 	VSCode             ports.VSCode
@@ -66,8 +74,18 @@ func (runner ProjectActionRunner) Run(
 		}
 		message = fmt.Sprintf("cloned %s -> %s\n", runner.Project.Name, runner.Project.YardPath)
 	case "remove":
+		if runner.RemovalApproval != nil {
+			if err := runner.checkRemovalApproval(ctx); err != nil {
+				return domain.AdapterResult{}, "", err
+			}
+		}
 		if err := runner.remove(ctx); err != nil {
 			return domain.AdapterResult{}, "", err
+		}
+		if runner.RemovalApproval != nil {
+			if err := runner.verifyRemoval(ctx); err != nil {
+				return domain.AdapterResult{}, "", err
+			}
 		}
 		message = fmt.Sprintf("removed %s\n", runner.Project.Name)
 	case "sync":
@@ -227,43 +245,24 @@ func (runner ProjectActionRunner) codeTargetReady(ctx context.Context) error {
 	return nil
 }
 
-func (runner ProjectActionRunner) export(ctx context.Context, operationID string) (string, string, error) {
+func (runner ProjectActionRunner) export(ctx context.Context, operationID string) (message, path string, err error) {
 	if runner.Project.Mode != domain.ProjectSync {
 		return "", "", fmt.Errorf("%s projects cannot be exported", runner.Project.Mode)
 	}
-	if runner.Archive == nil || runner.Exports == nil {
+	if runner.Exports == nil {
 		return "", "", errors.New("project archive and export store are required")
 	}
-	temporary := filepath.Join("/tmp", "subyard-export-"+operationID)
-	defer func() { _ = runner.cleanup(ctx, temporary) }()
-	if err := runner.execute(ctx, "prepare export snapshot", ports.InstanceExecRequest{
-		Command: []string{"install", "-d", "--", filepath.Join(temporary, "a")},
-	}); err != nil {
+	draft, err := runner.PrepareExport(ctx, operationID, "")
+	if err != nil {
 		return "", "", err
 	}
-	archive, err := runner.Archive.Open(ctx, runner.Project.HostPath)
-	if err != nil {
-		return "", "", fmt.Errorf("read host copy: %w", err)
-	}
-	result, streamErr := runner.Data.Stream(ctx, runner.Yard, ports.InstanceExecRequest{
-		Command: []string{"tar", "-C", filepath.Join(temporary, "a"), "-xf", "-"},
-	}, archive)
-	if err := errors.Join(streamErr, archive.Close()); err != nil {
-		return "", "", executionError("copy host snapshot", result, err)
-	}
-	result, err = runner.Data.Execute(ctx, runner.Yard, ports.InstanceExecRequest{
-		Command: []string{"diff", "-ruN", "--exclude=.git", filepath.Join(temporary, "a"), runner.Project.YardPath},
-	})
-	if err == nil && result.ExitCode == 0 {
+	defer func() { err = errors.Join(err, draft.Close()) }()
+	if !draft.Changed {
 		return fmt.Sprintf("no changes in the yard (%s)\n", runner.Project.Name), "", nil
 	}
-	if result.ExitCode != 1 {
-		return "", "", executionError("diff project copies", result, err)
-	}
-	patch := portablePatch(result.Stdout, filepath.Join(temporary, "a"), runner.Project.YardPath)
-	path, err := runner.Exports.Publish(ctx, runner.Project.ProjectID, patch)
+	path, err = runner.PublishExport(ctx, draft)
 	if err != nil {
-		return "", "", fmt.Errorf("publish export: %w", err)
+		return "", "", err
 	}
 	return fmt.Sprintf("exported %s\npatch: %s\n", runner.Project.Name, path), path, nil
 }
@@ -282,13 +281,21 @@ func portablePatch(patch []byte, hostSnapshot, yardPath string) []byte {
 }
 
 func (runner ProjectActionRunner) clone(ctx context.Context) error {
+	if runner.CloneRevision != "" && (!validGitRevision(runner.CloneRevision) || runner.CloneUnborn) {
+		return fmt.Errorf("%w: invalid prepared clone revision", domain.ErrPlanStale)
+	}
+	if runner.CloneUnborn {
+		if err := CheckEmptyCloneSource(ctx, runner.Data, runner.Yard, runner.Project.HostPath); err != nil {
+			return err
+		}
+	}
 	directory := filepath.Dir(runner.Project.YardPath)
 	result, err := runner.Data.Execute(ctx, runner.Yard, ports.InstanceExecRequest{
 		Command: []string{
 			"sh", "-c", `[ ! -e "$1" ] && [ ! -L "$1" ]`, "subyard", directory,
 		},
 	})
-	if err != nil {
+	if err != nil || result.ExitCode != 0 {
 		if result.ExitCode == 1 {
 			return fmt.Errorf("clone workspace already exists: %s", directory)
 		}
@@ -307,8 +314,28 @@ func (runner ProjectActionRunner) clone(ctx context.Context) error {
 		Command:     []string{"git", "clone", "--", runner.Project.HostPath, runner.Project.YardPath},
 		Environment: map[string]string{"HOME": "/home/" + runner.Yard.DevUser}, User: dev, Group: dev,
 	}
+	if runner.CloneRevision != "" {
+		clone.Command = []string{"git", "clone", "--no-checkout", "--", runner.Project.HostPath, runner.Project.YardPath}
+	}
 	if err := runner.execute(ctx, "git clone", clone); err != nil {
 		return errors.Join(err, runner.cleanup(ctx, directory))
+	}
+	if runner.CloneRevision != "" {
+		checkout := ports.InstanceExecRequest{Command: []string{"git", "-C", runner.Project.YardPath, "checkout", "--detach", runner.CloneRevision}, User: dev, Group: dev}
+		if err := runner.execute(ctx, "checkout prepared clone revision", checkout); err != nil {
+			return err
+		}
+		result, err := runner.Data.Execute(ctx, runner.Yard, ports.InstanceExecRequest{
+			Command: []string{"git", "-C", runner.Project.YardPath, "rev-parse", "--verify", "HEAD"}, User: dev, Group: dev,
+		})
+		if err != nil || result.ExitCode != 0 || strings.TrimSpace(string(result.Stdout)) != runner.CloneRevision {
+			return fmt.Errorf("verify cloned revision: %w", errors.Join(err, errors.New("checkout does not match prepared revision")))
+		}
+	}
+	if runner.CloneUnborn {
+		if err := runner.verifyUnbornClone(ctx); err != nil {
+			return err
+		}
 	}
 	if err := runner.writeMetadata(ctx); err != nil {
 		return errors.Join(err, runner.cleanup(ctx, directory))
@@ -329,6 +356,14 @@ func (runner ProjectActionRunner) writeMetadata(ctx context.Context) error {
 	}
 	if err := runner.execute(ctx, "write project metadata", write); err != nil {
 		return err
+	}
+	if runner.VerifyPrepared || runner.PreparedArchive != nil || runner.CloneRevision != "" || runner.CloneUnborn {
+		result, err := runner.Data.Execute(ctx, runner.Yard, ports.InstanceExecRequest{
+			Command: []string{"cat", filepath.Join(directory, ".subyard-meta.json")}, User: dev, Group: dev,
+		})
+		if err != nil || result.ExitCode != 0 || !bytes.Equal(result.Stdout, metadata) {
+			return fmt.Errorf("verify project metadata: %w", errors.Join(err, errors.New("metadata differs from prepared project identity")))
+		}
 	}
 	return nil
 }
@@ -355,8 +390,24 @@ func ProjectMetadata(project domain.ProjectRecord, yardName string) ([]byte, err
 }
 
 func (runner ProjectActionRunner) sync(ctx context.Context) error {
-	if runner.Archive == nil {
+	archivePort := runner.Archive
+	if runner.PreparedArchive != nil {
+		archivePort = runner.PreparedArchive
+	}
+	if archivePort == nil {
 		return errors.New("project archive adapter is required")
+	}
+	var expected *projectArchiveManifest
+	if runner.PreparedArchive != nil {
+		// Validate the retained input before creating any target directory.
+		input, err := runner.PreparedArchive.Open(ctx, runner.Project.HostPath)
+		if err != nil {
+			return err
+		}
+		expected, err = readProjectArchiveManifest(input)
+		if err := errors.Join(err, input.Close()); err != nil {
+			return err
+		}
 	}
 	directory := filepath.Dir(runner.Project.YardPath)
 	dev := uint32(runner.Yard.DevUID)
@@ -376,7 +427,7 @@ func (runner ProjectActionRunner) sync(ctx context.Context) error {
 	if err := runner.execute(ctx, "create sync source directory", create); err != nil {
 		return err
 	}
-	archive, err := runner.Archive.Open(ctx, runner.Project.HostPath)
+	archive, err := archivePort.Open(ctx, runner.Project.HostPath)
 	if err != nil {
 		return err
 	}
@@ -390,7 +441,26 @@ func (runner ProjectActionRunner) sync(ctx context.Context) error {
 	if err := errors.Join(streamErr, archiveErr); err != nil {
 		return err
 	}
+	if expected != nil {
+		if err := expected.verify(ctx, runner.Data, runner.Yard, runner.Project.YardPath); err != nil {
+			return fmt.Errorf("verify copied project archive: %w", err)
+		}
+	}
 	return runner.writeMetadata(ctx)
+}
+
+func validGitRevision(value string) bool {
+	if len(value) != 40 && len(value) != 64 {
+		return false
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			if char < 'a' || char > 'f' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (runner ProjectActionRunner) bind(ctx context.Context) error {
@@ -413,6 +483,19 @@ func (runner ProjectActionRunner) bind(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if runner.VerifyPrepared {
+		if runner.Instances == nil {
+			return errors.New("bind verification requires instance reader")
+		}
+		instance, err := runner.Instances.Instance(ctx, runner.Yard.IncusProject, runner.Yard.YardInstanceName)
+		if err != nil {
+			return err
+		}
+		current := instance.LocalDevices[device]
+		if current["type"] != "disk" || current["source"] != runner.Project.HostPath || current["path"] != runner.Project.YardPath || current["shift"] != "true" {
+			return errors.New("bind device differs from the prepared source and target")
+		}
+	}
 	if err := runner.writeMetadata(ctx); err != nil {
 		if changed {
 			_, rollbackErr := runner.Devices.RemoveDevice(ctx, runner.Yard.IncusProject,
@@ -431,7 +514,7 @@ func (runner ProjectActionRunner) cleanup(ctx context.Context, directory string)
 }
 
 func (runner ProjectActionRunner) remove(ctx context.Context) error {
-	if runner.Project.Target != "" && runner.Project.Target != "yard" {
+	if runner.Project.Target != "" && runner.Project.Target != "yard" && (runner.RemovalApproval == nil || runner.RemovalApproval.EnvironmentPresent || runner.RemovalApproval.StagedEnvironmentPresent) {
 		if err := runner.removeEnvironment(ctx); err != nil {
 			return fmt.Errorf("remove project environment before state: %w", err)
 		}
@@ -443,6 +526,9 @@ func (runner ProjectActionRunner) remove(ctx context.Context) error {
 		if runner.Devices == nil {
 			return errors.New("Incus device manager is required for bind removal")
 		}
+		if runner.RemovalApproval != nil && !runner.RemovalApproval.DevicePresent {
+			return runner.cleanupBindWorkspace(ctx)
+		}
 		_, err := runner.Devices.RemoveDevice(ctx, runner.Yard.IncusProject,
 			runner.Yard.YardInstanceName, state.WorkspaceDeviceFor(runner.Project))
 		if err != nil {
@@ -450,7 +536,7 @@ func (runner ProjectActionRunner) remove(ctx context.Context) error {
 		}
 		return runner.cleanupBindWorkspace(ctx)
 	}
-	if runner.SoftRemove {
+	if runner.SoftRemove || runner.RemovalApproval != nil && !runner.RemovalApproval.WorkspacePresent {
 		return nil
 	}
 	return runner.cleanup(ctx, filepath.Dir(runner.Project.YardPath))
@@ -551,6 +637,9 @@ func (runner ProjectActionRunner) removeEnvironment(ctx context.Context) error {
 	} else if !dockerEnvironmentMissing(result, err) {
 		return executionError("inspect project environment ownership", result, err)
 	}
+	if runner.RemovalApproval != nil && !runner.RemovalApproval.StagedEnvironmentPresent {
+		return nil
+	}
 	return runner.execute(ctx, "remove staged project environment", ports.InstanceExecRequest{
 		Command: []string{"rm", "-rf", "--", "/srv/env-secrets/" + runner.Project.ProjectID,
 			"/srv/env-meta/" + runner.Project.ProjectID},
@@ -571,16 +660,141 @@ func dockerEnvironmentMissing(result ports.InstanceExecResult, err error) bool {
 
 func (runner ProjectActionRunner) execute(ctx context.Context, step string, request ports.InstanceExecRequest) error {
 	result, err := runner.Data.Execute(ctx, runner.Yard, request)
-	if err == nil {
+	if err == nil && result.ExitCode == 0 {
 		return nil
 	}
 	return executionError(step, result, err)
 }
 
 func executionError(step string, result ports.InstanceExecResult, err error) error {
+	if err == nil {
+		err = fmt.Errorf("exit status %d", result.ExitCode)
+	}
 	diagnostic := strings.TrimSpace(string(result.Stderr))
 	if diagnostic != "" {
 		return fmt.Errorf("%s: %s: %w", step, diagnostic, err)
 	}
 	return fmt.Errorf("%s: %w", step, err)
+}
+
+// ProjectRemovalApproval binds physical deletion to the observed targets.
+type ProjectRemovalApproval struct {
+	WorkspaceChecked, WorkspacePresent, EnvironmentChecked, EnvironmentPresent, DeviceChecked, DevicePresent bool
+	EnvironmentID                                                                                            string
+	StagedEnvironmentChecked, StagedEnvironmentPresent                                                       bool
+}
+
+func (runner ProjectActionRunner) removalWorkspacePresent(ctx context.Context) (bool, error) {
+	result, err := runner.Data.Execute(ctx, runner.Yard, ports.InstanceExecRequest{Command: []string{"sh", "-c", `if [ -e "$1" ] || [ -L "$1" ]; then printf present; else printf missing; fi`, "subyard", filepath.Dir(runner.Project.YardPath)}})
+	if err != nil || result.ExitCode != 0 {
+		return false, executionError("inspect prepared removal workspace", result, err)
+	}
+	switch strings.TrimSpace(string(result.Stdout)) {
+	case "present":
+		return true, nil
+	case "missing":
+		return false, nil
+	default:
+		return false, errors.New("invalid workspace removal observation")
+	}
+}
+
+func (runner ProjectActionRunner) checkRemovalApproval(ctx context.Context) error {
+	approved := runner.RemovalApproval
+	if approved.WorkspaceChecked && !approved.WorkspacePresent {
+		present, err := runner.removalWorkspacePresent(ctx)
+		if err != nil {
+			return err
+		}
+		if present {
+			return fmt.Errorf("%w: removal workspace appeared", domain.ErrPlanStale)
+		}
+	}
+	if approved.EnvironmentChecked && !approved.EnvironmentPresent {
+		result, err := runner.Data.Execute(ctx, runner.Yard, ports.InstanceExecRequest{Command: []string{"docker", "inspect", "subyard-box-" + state.ProjectTechnicalID(runner.Project)}})
+		if err == nil && result.ExitCode == 0 {
+			return fmt.Errorf("%w: removal environment appeared", domain.ErrPlanStale)
+		}
+		if !dockerEnvironmentMissing(result, err) {
+			return executionError("inspect prepared removal environment", result, err)
+		}
+	}
+	if approved.EnvironmentPresent && approved.EnvironmentID != "" {
+		result, err := runner.Data.Execute(ctx, runner.Yard, ports.InstanceExecRequest{Command: []string{"docker", "inspect", "-f", projectEnvironmentOwnershipFormat, "subyard-box-" + state.ProjectTechnicalID(runner.Project)}})
+		if dockerEnvironmentMissing(result, err) { // Approved destruction became a skip.
+		} else if err != nil {
+			return err
+		} else {
+			identity, err := projectEnvironmentContainerID(runner.Project, result.Stdout)
+			if err != nil {
+				return err
+			}
+			if identity != approved.EnvironmentID {
+				return fmt.Errorf("%w: removal environment identity changed", domain.ErrPlanStale)
+			}
+		}
+	}
+	if approved.StagedEnvironmentChecked && !approved.StagedEnvironmentPresent {
+		if err := runner.verifyStagedEnvironmentAbsent(ctx); err != nil {
+			return fmt.Errorf("%w: staged environment files appeared", domain.ErrPlanStale)
+		}
+	}
+	if approved.DeviceChecked && !approved.DevicePresent {
+		if runner.Instances == nil {
+			return errors.New("removal verification requires instance reader")
+		}
+		instance, err := runner.Instances.Instance(ctx, runner.Yard.IncusProject, runner.Yard.YardInstanceName)
+		if err != nil {
+			return err
+		}
+		if _, present := instance.Devices[state.WorkspaceDeviceFor(runner.Project)]; present {
+			return fmt.Errorf("%w: removal bind device appeared", domain.ErrPlanStale)
+		}
+	}
+	return nil
+}
+
+func (runner ProjectActionRunner) verifyRemoval(ctx context.Context) error {
+	approved := runner.RemovalApproval
+	if approved.WorkspaceChecked && !runner.SoftRemove {
+		present, err := runner.removalWorkspacePresent(ctx)
+		if err != nil {
+			return err
+		}
+		if present {
+			return errors.New("project removal workspace remains present")
+		}
+	}
+	if approved.EnvironmentChecked && approved.EnvironmentPresent {
+		result, err := runner.Data.Execute(ctx, runner.Yard, ports.InstanceExecRequest{Command: []string{"docker", "inspect", "subyard-box-" + state.ProjectTechnicalID(runner.Project)}})
+		if !dockerEnvironmentMissing(result, err) {
+			return errors.New("project removal environment absence was not verified")
+		}
+	}
+	if approved.StagedEnvironmentChecked {
+		if err := runner.verifyStagedEnvironmentAbsent(ctx); err != nil {
+			return err
+		}
+	}
+	if approved.DeviceChecked {
+		if runner.Instances == nil {
+			return errors.New("removal verification requires instance reader")
+		}
+		instance, err := runner.Instances.Instance(ctx, runner.Yard.IncusProject, runner.Yard.YardInstanceName)
+		if err != nil {
+			return err
+		}
+		if _, present := instance.Devices[state.WorkspaceDeviceFor(runner.Project)]; present {
+			return errors.New("project removal bind device remains present")
+		}
+	}
+	return nil
+}
+
+func (runner ProjectActionRunner) verifyStagedEnvironmentAbsent(ctx context.Context) error {
+	result, err := runner.Data.Execute(ctx, runner.Yard, ports.InstanceExecRequest{Command: []string{"sh", "-c", `[ ! -e "$1" ] && [ ! -L "$1" ] && [ ! -e "$2" ] && [ ! -L "$2" ]`, "subyard", "/srv/env-secrets/" + runner.Project.ProjectID, "/srv/env-meta/" + runner.Project.ProjectID}})
+	if err != nil || result.ExitCode != 0 {
+		return errors.New("project environment staged files remain present")
+	}
+	return nil
 }

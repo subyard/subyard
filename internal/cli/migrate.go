@@ -79,6 +79,9 @@ func (prepared *preparedCommand) prepareCurrentMigration(ctx context.Context, _ 
 	}
 	execution := &releaseExecution{prepared: operation, yard: "default", runtime: runtime, phase: "execute"}
 	prepared.closeResource = execution.Close
+	prepared.exactState = operation.Binding
+	prepared.stepsComplete = operation.Binding != "" && len(operation.Steps) != 0
+	prepared.steps = func() []domain.OperationStep { return domain.CloneOperationSteps(operation.Steps) }
 	prepared.executeNoOp = true
 	prepared.assess = func(context.Context) (domain.ActionID, domain.ActionDelta, error) {
 		return operation.Action, domain.ActionDelta{Changed: operation.Changed, Consequences: operation.Consequences}, nil

@@ -404,6 +404,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 	}
 	readOnlyInvocation := (core && commandHelpRequested(commandArguments)) ||
 		(core && definition.Effect == command.EffectRead) ||
+		(core && definition.Handler == "@host" && hostReadOnlyInvocation(commandArguments)) ||
 		resourceReadOnly ||
 		(core && definition.Handler == "@config" && (configReadOnlyInvocation(commandArguments) || configSyncCheck || configSyncStatus)) ||
 		(core && definition.Handler == "@test-vms" && testVMStatusInvocation(commandArguments)) ||
@@ -637,13 +638,33 @@ func (cli *CLI) Run(ctx context.Context) int {
 		}
 		return cli.runTestVMLogs(ctx, commandArguments)
 	}
+	if configSyncPending && loaded.Context.AccessKind == domain.AccessLocal {
+		switch {
+		case configSyncCheck:
+			cli.errorf("config sync --check: interrupted transaction requires recovery by a normal config sync")
+			return 1
+		case configSyncStatus:
+			return cli.runPendingConfigSyncStatus(ctx, configSyncHome, configSyncStatusArguments(commandArguments))
+		default:
+			if recoveryErr := resumeInterruptedConfigSync(configSyncHome); recoveryErr != nil {
+				cli.errorf("config sync recovery: %v", recoveryErr)
+				return 1
+			}
+			loaded, err = cli.loadContext(yard)
+			if err != nil {
+				cli.errorf("%v", err)
+				return 2
+			}
+			loadedContext = loaded.Context
+		}
+	}
 	if core && !commandHelpRequested(commandArguments) {
 		behavior, resolveErr := resolveCoreCommand(definition)
 		if resolveErr != nil {
 			cli.errorf("%v", resolveErr)
 			return 2
 		}
-		if behavior.prepare != nil {
+		if behavior.prepare != nil && definition.Handler != "@resource" && (definition.Handler != "@keys" || credentialExactInvocation(definition, commandArguments)) && (definition.Handler != "@config" || configExactInvocation(loaded, commandArguments)) {
 			prepared, prepareErr := cli.prepareCommand(ctx, prepareCommandRequest{
 				Loaded: loaded, Definition: definition, Arguments: commandArguments,
 				ExplicitYard: explicit, ReadOnly: readOnlyInvocation, Bootstrap: bootstrap, InteractiveSetup: true,
@@ -733,6 +754,15 @@ func (cli *CLI) Run(ctx context.Context) int {
 		releaseProject()
 	}()
 	if target == domain.TargetRemoteOwner {
+		if profileResource && cli.resourceExactInvocation(resourceDefinition, commandArguments) {
+			definition := resourceCommandDefinition(resourceDefinition)
+			prepared, err := cli.prepareCommand(ctx, prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: commandArguments, ExplicitYard: explicit, ReadOnly: true})
+			if err != nil {
+				return cli.reportPreparationError(definition, err)
+			}
+			defer prepared.Close()
+			return cli.runPreparedCommand(ctx, prepared, yes || cli.env["ASSUME_YES"] == "1")
+		}
 		if core && definition.Name == "keys" {
 			return cli.runRemoteKeys(ctx, loaded, definition, commandArguments)
 		}
@@ -751,30 +781,6 @@ func (cli *CLI) Run(ctx context.Context) int {
 		}
 		if configSyncTarget == domain.TargetRemoteOwner {
 			return cli.forwardRemote(ctx, loadedContext, name, commandArguments)
-		}
-	}
-	if configSyncPending {
-		switch {
-		case configSyncCheck:
-			cli.errorf(
-				"config sync --check: interrupted transaction requires recovery by a normal config sync",
-			)
-			return 1
-		case configSyncStatus:
-			return cli.runPendingConfigSyncStatus(
-				ctx, configSyncHome, configSyncStatusArguments(commandArguments),
-			)
-		default:
-			if recoveryErr := resumeInterruptedConfigSync(configSyncHome); recoveryErr != nil {
-				cli.errorf("config sync recovery: %v", recoveryErr)
-				return 1
-			}
-			loaded, err = cli.loadContext(yard)
-			if err != nil {
-				cli.errorf("%v", err)
-				return 2
-			}
-			loadedContext = loaded.Context
 		}
 	}
 	switch definition.Handler {
@@ -2998,6 +3004,9 @@ func confirmationPromptLabel(defaultValue domain.ConfirmationDefault) (string, b
 type rpcOperationEvents struct{ emit rpc.Emit }
 
 func (events rpcOperationEvents) Publish(_ context.Context, event domain.OperationEvent) error {
+	if events.emit == nil {
+		return nil
+	}
 	_, err := events.emit(event.Kind, event)
 	return err
 }
@@ -3031,6 +3040,8 @@ func (cli *CLI) operationOrchestrator(
 			"SUBYARD_PROJECT_REMOVE_SOFT", "SUBYARD_PROJECT_REBUILD",
 			"SUBYARD_POWER_DESIRED", "SUBYARD_SUDO_PREAUTHORIZED", "SUBYARD_TEARDOWN_KEEP_DATA",
 			"SUBYARD_TEARDOWN_KEEP_SHARED",
+			"SUBYARD_TEARDOWN_INVENTORY",
+			"SUBYARD_DISPATCHER_PATH",
 		} {
 			contextKeys[key] = struct{}{}
 		}
@@ -3670,7 +3681,7 @@ func (cli *CLI) serveRPC(ctx context.Context, yard string, arguments []string) i
 		"snapshot", "ordered-events", "cancellation", "deadlines", "commands", "context",
 		"projects", "yard-status", "credential-metadata", "credential-status",
 		"operation-plan", "operation-execute", "resync", "owner-inventory-v1",
-		credentialPrepareCapability, exactPlanCapability,
+		credentialPrepareCapability, exactPlanCapability, operationStepsCapability,
 	}, DrainOnEOF: true}
 	if err := session.Serve(ctx, cli.options.Stdin, cli.options.Stdout); err != nil {
 		if !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) {
@@ -3682,21 +3693,63 @@ func (cli *CLI) serveRPC(ctx context.Context, yard string, arguments []string) i
 }
 
 type rpcHandler struct {
-	cli        *CLI
-	loaded     config.Loaded
-	plansMu    sync.Mutex
-	plans      map[string]*preparedCommand
-	exactPlans map[string]exactOperationPlan
+	cli                 *CLI
+	loaded              config.Loaded
+	plansMu             sync.Mutex
+	plans               map[string]*preparedCommand
+	exactPlans          map[string]exactOperationPlan
+	activeProjectCopies map[string]activeProjectCopy
+	executingPlans      map[string]struct{}
+	clock               func() time.Time
+}
+
+type activeProjectCopy struct {
+	prepared *preparedCommand
+	exact    exactOperationPlan
+}
+
+func (handler *rpcHandler) now() time.Time {
+	if handler.clock != nil {
+		return handler.clock()
+	}
+	return time.Now()
+}
+
+func (handler *rpcHandler) pruneExpiredPlans() {
+	var expired []*preparedCommand
+	handler.plansMu.Lock()
+	for id, exact := range handler.exactPlans {
+		if !handler.now().Before(exact.ExpiresAt) {
+			expired = append(expired, handler.plans[id])
+			delete(handler.plans, id)
+			delete(handler.exactPlans, id)
+		}
+	}
+	for id, copy := range handler.activeProjectCopies {
+		if !handler.now().Before(copy.exact.ExpiresAt) {
+			expired = append(expired, copy.prepared)
+			delete(handler.activeProjectCopies, id)
+		}
+	}
+	handler.plansMu.Unlock()
+	for _, prepared := range expired {
+		_ = prepared.Close()
+	}
 }
 
 func (handler *rpcHandler) closePlans() {
 	handler.plansMu.Lock()
 	plans := handler.plans
+	copies := handler.activeProjectCopies
 	handler.plans = nil
 	handler.exactPlans = nil
+	handler.activeProjectCopies = nil
 	handler.plansMu.Unlock()
 	for _, prepared := range plans {
 		_ = prepared.Close()
+	}
+	for _, copy := range copies {
+		_ = copy.prepared.Close()
 	}
 }
 
@@ -3779,20 +3832,50 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		}
 		return plan, nil
 	case "operation.plan":
+		handler.pruneExpiredPlans()
 		var params struct {
-			Command   string   `json:"command"`
-			Arguments []string `json:"arguments"`
-			Exact     bool     `json:"exact,omitempty"`
+			Command    string                       `json:"command"`
+			Arguments  []string                     `json:"arguments"`
+			Exact      bool                         `json:"exact,omitempty"`
+			Source     *ProjectCopySourceDescriptor `json:"source,omitempty"`
+			Export     *ProjectExportDescriptor     `json:"export,omitempty"`
+			StepSchema int                          `json:"stepSchema,omitempty"`
 		}
 		if err := decodeRPCParams(call.Params, &params); err != nil {
 			return nil, err
 		}
+		if params.StepSchema < 0 || params.StepSchema > 1 || params.StepSchema != 0 && !params.Exact {
+			return nil, &rpc.Error{Code: "invalid_params", Message: "operation step schema requires exact planning"}
+		}
+		if params.Source != nil && (params.Command != "sync" || !params.Exact || len(params.Arguments) != 0) {
+			return nil, &rpc.Error{Code: "invalid_params", Message: "retained source requires exact sync without arguments"}
+		}
+		if params.Export != nil && (params.Command != "export" || !params.Exact || len(params.Arguments) != 0 || params.Source != nil) {
+			return nil, &rpc.Error{Code: "invalid_params", Message: "retained export requires exact export without arguments or copy source"}
+		}
 		definition, ok := handler.cli.manifest.Lookup(params.Command)
+		if !ok {
+			if resource, found := handler.cli.resources.Lookup(params.Command); found {
+				definition, ok = resourceCommandDefinition(resource), true
+			}
+		}
 		if !ok || definition.Visibility != command.VisibilityPublic {
 			return nil, &rpc.Error{Code: "command_not_found", Message: params.Command}
 		}
 		if definition.Effect != command.EffectMutate {
 			return nil, &rpc.Error{Code: "command_not_mutating", Message: params.Command}
+		}
+		if definition.Handler == "@keys" && !credentialExactInvocation(definition, params.Arguments) {
+			return nil, &rpc.Error{Code: "interactive_or_payload_command", Message: "credentials require dedicated owner-local transport"}
+		}
+		if definition.Handler == "@config" && !configExactInvocation(handler.loaded, params.Arguments) {
+			return nil, &rpc.Error{Code: "interactive_or_payload_command", Message: "configuration authoring requires dedicated owner-local transport"}
+		}
+		if definition.Handler == "@resource" {
+			resource, found := handler.cli.resources.Lookup(params.Command)
+			if !found || !handler.cli.resourceExactInvocation(resource, params.Arguments) {
+				return nil, &rpc.Error{Code: "interactive_or_payload_command", Message: "resource requires dedicated transport"}
+			}
 		}
 		if definition.Handler == "@integration" && !params.Exact {
 			return nil, &rpc.Error{Code: "exact_plan_required", Message: "integration requires operation-exact-plan-v1"}
@@ -3828,10 +3911,17 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 				}
 			}
 		}
-		prepared, err := operationCLI.prepareCommand(ctx, prepareCommandRequest{
-			Loaded: handler.loaded, Definition: definition, Arguments: params.Arguments,
-			ExplicitYard: true, ReadOnly: params.Exact,
-		})
+		var prepared *preparedCommand
+		if params.Source != nil {
+			prepared, err = operationCLI.prepareOwnerProjectCopy(ctx, handler.loaded, *params.Source)
+		} else if params.Export != nil {
+			prepared, err = operationCLI.prepareOwnerProjectExport(ctx, handler.loaded, *params.Export)
+		} else {
+			prepared, err = operationCLI.prepareCommand(ctx, prepareCommandRequest{
+				Loaded: handler.loaded, Definition: definition, Arguments: params.Arguments,
+				ExplicitYard: true, ReadOnly: params.Exact,
+			})
+		}
 		if err != nil {
 			return nil, preparationRPCError(definition, err)
 		}
@@ -3844,6 +3934,9 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		if prepared.displayOnly != nil {
 			return nil, operationRPCError("command_not_mutating", errors.New("read-only commands do not require an operation plan"))
 		}
+		if params.StepSchema == 1 && (!prepared.stepsComplete || len(prepared.Plan.Steps) == 0) {
+			return nil, &rpc.Error{Code: "operation_steps_unsupported", Message: "this invocation does not supply a complete native step plan"}
+		}
 		plan := prepared.Plan
 		handler.plansMu.Lock()
 		defer handler.plansMu.Unlock()
@@ -3853,7 +3946,13 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		if _, exists := handler.plans[plan.OperationID]; exists {
 			return nil, &rpc.Error{Code: "duplicate_plan", Message: plan.OperationID}
 		}
-		if len(handler.plans) >= 64 {
+		if _, exists := handler.activeProjectCopies[plan.OperationID]; exists {
+			return nil, &rpc.Error{Code: "duplicate_plan", Message: plan.OperationID}
+		}
+		if _, exists := handler.executingPlans[plan.OperationID]; exists {
+			return nil, &rpc.Error{Code: "duplicate_plan", Message: plan.OperationID}
+		}
+		if len(handler.plans)+len(handler.activeProjectCopies)+len(handler.executingPlans) >= 64 {
 			return nil, &rpc.Error{Code: "too_many_plans", Message: "execute an existing plan or start a new RPC session"}
 		}
 		handler.plans[plan.OperationID] = prepared
@@ -3862,7 +3961,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			if handler.exactPlans == nil {
 				handler.exactPlans = make(map[string]exactOperationPlan)
 			}
-			exact := bindExactOperationPlan(prepared, time.Now())
+			exact := bindExactOperationPlan(prepared, handler.now())
 			handler.exactPlans[plan.OperationID] = exact
 			return exact, nil
 		}
@@ -3885,14 +3984,26 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		if ok {
 			delete(handler.plans, call.OperationID)
 			delete(handler.exactPlans, call.OperationID)
+			if handler.executingPlans == nil {
+				handler.executingPlans = make(map[string]struct{})
+			}
+			handler.executingPlans[call.OperationID] = struct{}{}
 		}
 		handler.plansMu.Unlock()
 		if !ok {
 			return nil, &rpc.Error{Code: "plan_not_found", Message: call.OperationID}
 		}
-		defer planned.Close()
+		retainCopy := false
+		defer func() {
+			handler.plansMu.Lock()
+			delete(handler.executingPlans, call.OperationID)
+			handler.plansMu.Unlock()
+			if !retainCopy {
+				_ = planned.Close()
+			}
+		}()
 		if bound {
-			if err := validateExactOperationPlan(exact, planned, params.Digest, time.Now()); err != nil {
+			if err := validateExactOperationPlan(exact, planned, params.Digest, handler.now()); err != nil {
 				return nil, operationRPCError("plan_binding_invalid", err)
 			}
 		} else if params.Digest != "" || planned.Definition.Handler == "@integration" {
@@ -3938,8 +4049,66 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		if result.Status != "ok" {
 			return nil, &rpc.Error{Code: "adapter_failed", Message: result.ErrorCode}
 		}
+		if planned.Project != nil && (planned.Project.ownerCopy != nil || planned.Project.ownerExport != nil) {
+			if !bound {
+				return nil, &rpc.Error{Code: "exact_plan_required", Message: "project copy requires an exact plan"}
+			}
+			handler.plansMu.Lock()
+			if handler.activeProjectCopies == nil {
+				handler.activeProjectCopies = make(map[string]activeProjectCopy)
+			}
+			handler.activeProjectCopies[call.OperationID] = activeProjectCopy{prepared: planned, exact: exact}
+			handler.plansMu.Unlock()
+			retainCopy = true
+		}
 
 		return map[string]any{"plan": plan, "result": result}, nil
+	case "project.copy.finalize":
+		var params struct {
+			Digest string `json:"digest"`
+		}
+		if err := decodeRPCParams(call.Params, &params); err != nil {
+			return nil, err
+		}
+		handler.plansMu.Lock()
+		copy, exists := handler.activeProjectCopies[call.OperationID]
+		delete(handler.activeProjectCopies, call.OperationID)
+		handler.plansMu.Unlock()
+		if !exists {
+			return nil, &rpc.Error{Code: "plan_not_found", Message: call.OperationID}
+		}
+		defer copy.prepared.Close()
+		if !handler.now().Before(copy.exact.ExpiresAt) {
+			return nil, operationRPCError("plan_binding_invalid", fmt.Errorf("%w: operation plan expired", domain.ErrPlanStale))
+		}
+		if params.Digest == "" || params.Digest != copy.exact.Digest || params.Digest != exactOperationDigest(copy.prepared, copy.exact) {
+			return nil, &rpc.Error{Code: "plan_binding_invalid", Message: "project copy digest does not match the stored plan"}
+		}
+		result, err := copy.prepared.CLI.finalizeOwnerProjectTransfer(ctx, copy.prepared)
+		if err != nil {
+			return nil, operationRPCError("project_copy_failed", err)
+		}
+		return map[string]any{"plan": copy.prepared.Plan, "result": result}, nil
+	case "operation.discard", "project.copy.abort":
+		if err := decodeRPCParams(call.Params, &struct{}{}); err != nil {
+			return nil, err
+		}
+		handler.plansMu.Lock()
+		prepared, exists := handler.plans[call.OperationID]
+		if copy, active := handler.activeProjectCopies[call.OperationID]; active {
+			prepared, exists = copy.prepared, true
+			delete(handler.activeProjectCopies, call.OperationID)
+		}
+		delete(handler.plans, call.OperationID)
+		delete(handler.exactPlans, call.OperationID)
+		handler.plansMu.Unlock()
+		if !exists {
+			return nil, &rpc.Error{Code: "plan_not_found", Message: call.OperationID}
+		}
+		if err := prepared.Close(); err != nil {
+			return nil, operationRPCError("plan_cleanup_failed", err)
+		}
+		return map[string]any{"operationId": call.OperationID, "discarded": true}, nil
 	case "operation.route":
 		var params struct {
 			Command string `json:"command"`

@@ -120,7 +120,7 @@ func TestRPCExecuteUsesEnvironmentCapturedDuringPlan(t *testing.T) {
 	}}}}
 	program, err := New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
-		AdapterRunner: runner, Incus: lifecycleIncus(), NetworkPolicy: allowTestNetworkPolicy(),
+		AdapterRunner: runner, Incus: powerScriptedIncus(runner, nil), NetworkPolicy: allowTestNetworkPolicy(),
 	})
 	if err != nil {
 		t.Fatal(err)

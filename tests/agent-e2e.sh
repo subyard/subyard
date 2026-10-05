@@ -1862,6 +1862,79 @@ grep -Fq 'export SUBYARD_POWER_RECONCILER_PATH="$TMP/missing-power-reconciler"' 
   || fail "host-free engine release can observe the physical host power reconciler"
 v0111_recovery="$ROOT/dev/e2e/release-transition-v0111-recovery.sh"
 v0111_observer="$ROOT/dev/e2e/release-transition-post-cas-observer.py"
+assert_v0111_materialized_oracle_contract() {
+  local scenario output expected_error
+  for scenario in composed raw-only missing wrong-source body-drift extra host-mutated \
+    pending conflict unselected status-unavailable; do
+    output="$TMP/v0111-materialized-$scenario.log"
+    if bash -c '
+      set -euo pipefail
+      source "$1"
+      scenario="$2"
+      HOME_ROOT="$3/$scenario"
+      FIXTURE=success
+      FIXTURE_MARKER=subyard-p0-v0111-success-123
+      INSTANCE=yard-v0111-success-123
+      PROJECT=subyard-v0111-success-123
+      YARD_NAME=v0111-success-123
+      RUNTIME_ROOT="$HOME_ROOT/runtime"
+      guest="$HOME_ROOT/guest-AGENTS.md"
+      install -d -m 0700 "$HOME_ROOT/host"
+      printf "# %s\nThe v0.11.1 %s fixture owns this file.\n" \
+        "$FIXTURE_MARKER" "$FIXTURE" > "$HOME_ROOT/host/AGENTS.md"
+      {
+        cat "$HOME_ROOT/host/AGENTS.md"
+        printf "\n\n"
+        cat <<"PREVIEW"
+<!-- subyard-preview -->
+For a static web preview, run `subyard-preview <relative-static-dir>` from the Git workspace and keep it running with your background/async process mechanism. Share the printed URL. An owner Tailscale URL requires device reachability and Tailnet policy access; a loopback URL requires an active preview-enabled `yard code` SSH session. The helper must stay running for either URL.
+<!-- /subyard-preview -->
+PREVIEW
+      } > "$guest"
+      chmod 0600 "$HOME_ROOT/host/AGENTS.md" "$guest"
+      case "$scenario" in
+        raw-only) cp "$HOME_ROOT/host/AGENTS.md" "$guest" ;;
+        missing) guest="$HOME_ROOT/missing-AGENTS.md" ;;
+        wrong-source) sed -i "1s/success/other/" "$guest" ;;
+        body-drift) sed -i "s/foreground/other/;s/static web preview/modified web preview/" "$guest" ;;
+        extra) printf "unowned content\n" >> "$guest" ;;
+        host-mutated) printf "changed host input\n" >> "$HOME_ROOT/host/AGENTS.md" ;;
+      esac
+      incus() {
+        [ "$*" = "exec $INSTANCE --project $PROJECT -- sha256sum /home/dev/.codex/AGENTS.md" ] \
+          || exit 97
+        command sha256sum "$guest"
+      }
+      fixture_env() {
+        [ "$*" = "$RUNTIME_ROOT/current/bin/yard -Y $YARD_NAME integration status codex --json" ] \
+          || exit 98
+        case "$scenario" in
+          pending) printf "%s\n" "{\"observed\":\"pending\",\"selection\":{\"effective\":[\"codex\"]}}" ;;
+          conflict) printf "%s\n" "{\"observed\":\"conflict\",\"selection\":{\"effective\":[\"codex\"]}}" ;;
+          unselected) printf "%s\n" "{\"observed\":\"ready\",\"selection\":{\"effective\":[]}}" ;;
+          status-unavailable) return 1 ;;
+          *) printf "%s\n" "{\"observed\":\"ready\",\"selection\":{\"effective\":[\"codex\"]}}" ;;
+        esac
+      }
+      assert_materialized_fixed_point
+    ' _ "$v0111_recovery" "$scenario" "$TMP/v0111-materialized" >"$output" 2>&1; then
+      [ "$scenario" = composed ] \
+        || fail "v0.11.1 materialization oracle accepted $scenario"
+    else
+      case "$scenario" in
+        composed) fail 'v0.11.1 materialization oracle rejected exact composed instructions' ;;
+        host-mutated) expected_error='changed the configured host instructions' ;;
+        missing) expected_error='Codex target is unavailable' ;;
+        pending|conflict|unselected) expected_error='Codex integration is not at its native fixed point' ;;
+        status-unavailable) expected_error='integration status is unavailable' ;;
+        *) expected_error='did not materialize the configured Codex target' ;;
+      esac
+      grep -Fq "$expected_error" "$output" \
+        || fail "v0.11.1 materialization oracle did not check $scenario"
+    fi
+  done
+}
+assert_v0111_materialized_oracle_contract
 grep -Fq 'OLD_VERSION=0.9.1' "$v0111_recovery" \
   && grep -Fq 'SOURCE_VERSION=0.11.1' "$v0111_recovery" \
   && grep -Fq 'CANDIDATE_VERSION=0.11.2' "$v0111_recovery" \

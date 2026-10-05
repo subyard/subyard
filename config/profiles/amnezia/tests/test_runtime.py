@@ -89,6 +89,41 @@ class OwnerHandlerTest(unittest.TestCase):
         self.assertTrue(assessment['changed'])
         self.assertIn('Publish UDP 10.20.30.40:51820', assessment['consequences'][1])
 
+    def test_native_v2_verifier_reads_real_service_and_ingress_postconditions(self):
+        instance = self.instance()
+        want = {'type': 'proxy', 'bind': 'host', 'nat': 'true',
+                'listen': 'udp:10.20.30.40:51820', 'connect': 'udp:10.80.0.10:51820'}
+        instance['devices'][handler.DEVICE] = want
+        instance['config'][handler.KEY] = handler.fingerprint(want)
+        os.environ.update(RESOURCE_VPN_IPV4='10.20.30.40', RESOURCE_VPN_INTERFACE='eth0',
+                          SUBYARD_RESOURCE_MODE='verify')
+        with mock.patch.object(handler, 'inspect', return_value=instance), \
+                mock.patch.object(handler, 'endpoint', return_value=('10.20.30.40', 'eth0', '51820', want)), \
+                mock.patch.object(handler, 'collisions'), \
+                mock.patch.object(handler, 'runtime_status', return_value={'ready': True, 'running': True, 'enabled': True}), \
+                mock.patch.object(handler, 'incus', side_effect=AssertionError('verify wrote owner state')), \
+                mock.patch.object(handler, 'guest', return_value=result()) as guest, \
+                mock.patch.object(sys, 'argv', ['vpn', 'up']), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(handler.main(), 0)
+        converged = json.loads(output.getvalue())
+        self.assertEqual(converged['schema'], 'yard.resource-action-assessment.v2')
+        self.assertFalse(converged['changed'])
+        self.assertTrue(all(step['decision'] == 'skip' and step['observed'] == step['desired']
+                            for step in converged['steps']))
+        guest.assert_called_once_with('find', '/srv/workspaces', '-mindepth', '1', '-maxdepth', '1', '-print', '-quit')
+        with mock.patch.object(handler, 'inspect', return_value=instance), \
+                mock.patch.object(handler, 'endpoint', return_value=('10.20.30.40', 'eth0', '51820', want)), \
+                mock.patch.object(handler, 'collisions'), \
+                mock.patch.object(handler, 'runtime_status', return_value={'ready': False, 'running': True, 'enabled': True}), \
+                mock.patch.object(handler, 'guest', return_value=result()), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            handler.prepare('up')
+        divergent = json.loads(output.getvalue())
+        self.assertTrue(divergent['changed'])
+        self.assertEqual(divergent['binding'], converged['binding'])
+        self.assertEqual([step['decision'] for step in divergent['steps']], ['apply', 'skip'])
+
     def test_pending_stopped_yard_allows_endpoint_authoring_and_down(self):
         instance = self.instance()
         instance['status'] = 'Stopped'

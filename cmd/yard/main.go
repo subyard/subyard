@@ -23,6 +23,17 @@ import (
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if len(os.Args) > 1 && os.Args[1] == "_incus-operator-access" {
+		if len(os.Args) != 3 {
+			fmt.Fprintln(os.Stderr, "invalid Incus operator access invocation")
+			os.Exit(2)
+		}
+		if err := incusclient.GrantOperatorAccess(ctx, os.Args[2]); err != nil {
+			fmt.Fprintf(os.Stderr, "Incus operator access: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "_profile-services" {
 		if len(os.Args) < 4 {
 			fmt.Fprintln(os.Stderr, "usage: _profile-services ROOT VERB [PAUSED_IDS]")
@@ -35,12 +46,14 @@ func main() {
 		return
 	}
 	if len(os.Args) > 1 && os.Args[1] == "_network-lock" {
-		if len(os.Args) != 3 || (os.Args[2] != "ensure" && os.Args[2] != "check") {
-			fmt.Fprintln(os.Stderr, "usage: _network-lock <ensure|check>")
+		if len(os.Args) < 3 || (os.Args[2] != "ensure" && os.Args[2] != "check") || (len(os.Args) != 3 && (os.Args[2] != "ensure" || len(os.Args) != 4)) {
+			fmt.Fprintln(os.Stderr, "usage: _network-lock <ensure [UID]|check>")
 			os.Exit(2)
 		}
 		var err error
-		if os.Args[2] == "ensure" {
+		if os.Args[2] == "ensure" && len(os.Args) == 4 {
+			err = networkruntime.EnsureHostLockOperator(ctx, os.Args[3])
+		} else if os.Args[2] == "ensure" {
 			err = networkruntime.EnsureHostLock()
 		} else {
 			err = networkruntime.CheckHostLock()

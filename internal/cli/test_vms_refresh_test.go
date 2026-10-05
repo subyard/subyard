@@ -27,7 +27,7 @@ func TestTestVMRefreshUsesNormalConfirmationWithoutLeaseMutation(t *testing.T) {
 			}
 			writeCLIFile(t, filepath.Join(root, "scripts/e2e-lab/invoke.sh"), "#!/bin/sh\nprintf '%s\\n' \"$@\" > refresh-arguments\n", 0o700)
 			var stderr bytes.Buffer
-			probe := &testVMStatusProbe{}
+			probe := &testVMStatusProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":2,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":7,"lease_epoch":0,"state":"available"}]}}`)}
 			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"test-vms", "refresh", "android-test"}, Environment: environment, WorkingDir: root, Incus: incus, ProjectData: probe, Prompt: prompt, Stderr: &stderr})
 			if err != nil {
 				t.Fatal(err)
@@ -39,8 +39,13 @@ func TestTestVMRefreshUsesNormalConfirmationWithoutLeaseMutation(t *testing.T) {
 			if len(prompt.Requests) != 1 || prompt.Requests[0].Default != domain.ConfirmationDefaultYes {
 				t.Fatalf("refresh confirmation=%+v", prompt.Requests)
 			}
-			if len(probe.requests) != 0 {
-				t.Fatal("refresh probed or acquired a lease slot")
+			if len(probe.requests) != map[bool]int{false: 1, true: 2}[accept] {
+				t.Fatal("refresh did not capture and recheck its read-only pool snapshot")
+			}
+			for _, request := range probe.requests {
+				if request.Command[len(request.Command)-1] != "status" {
+					t.Fatal("refresh acquired or mutated a lease")
+				}
 			}
 			arguments, err := os.ReadFile(filepath.Join(root, "refresh-arguments"))
 			if !accept && !errors.Is(err, os.ErrNotExist) {

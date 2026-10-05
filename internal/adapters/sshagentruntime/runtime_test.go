@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
@@ -223,6 +225,10 @@ func TestActiveWorkerStopsAfterLock(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	preparedPending, err := m.PrepareLock(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
 	conn, err := net.Dial("unix", filepath.Join(cfg.Directory, "private.sock"))
 	if err != nil {
@@ -237,7 +243,14 @@ func TestActiveWorkerStopsAfterLock(t *testing.T) {
 	if err != nil || response.Error != "" {
 		t.Fatalf("activation: %v %s", err, response.Error)
 	}
-	if err := m.Lock(context.Background()); err != nil {
+	if err := m.LockPrepared(ctx, preparedPending); !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatalf("newly activated grant accepted: %v", err)
+	}
+	prepared, err := m.PrepareLock(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.LockPrepared(context.Background(), prepared); err != nil {
 		t.Fatal(err)
 	}
 	<-done

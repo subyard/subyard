@@ -565,7 +565,7 @@ func TestPreparedCredentialMutationsAssessReadOnlyStateBeforeExecution(t *testin
 			t.Fatal(err)
 		}
 		if err := prepared.Execute(context.Background()); err == nil ||
-			!strings.Contains(err.Error(), "mode 0600 or 0400") {
+			!errors.Is(err, domain.ErrPlanStale) {
 			t.Fatalf("apply did not reopen and revalidate the protected source: %v", err)
 		}
 	})

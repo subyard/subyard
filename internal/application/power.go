@@ -156,6 +156,13 @@ func (runner LifecycleRunner) Run(
 	if request.Action == "start" {
 		desired = PowerRunning
 	}
+	observed, verifyErr := runner.Power.Instances.Instance(ctx, runner.Yard.IncusProject, runner.Yard.YardInstanceName)
+	if verifyErr != nil {
+		return result, diagnostics, fmt.Errorf("verify physical power: %w", verifyErr)
+	}
+	if !strings.EqualFold(observed.Status, desired) {
+		return result, diagnostics, fmt.Errorf("physical %s did not establish %s before desired power commit", request.Action, desired)
+	}
 	if err := runner.Power.Commit(ctx, runner.Yard, desired); err != nil {
 		return result, diagnostics, fmt.Errorf("physical %s succeeded but desired power was not committed: %w",
 			request.Action, err)

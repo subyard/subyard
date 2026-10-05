@@ -45,9 +45,19 @@ func (prepared *preparedCommand) prepareIntegrationCleanup(ctx context.Context, 
 		return nil
 	}
 	prepared.exactState = operationStateDigest(struct{ Runtime, Configuration string }{
-		plan.Fingerprint, integrationConfigurationFingerprint(loaded),
+		plan.StateBinding(), integrationConfigurationFingerprint(loaded),
 	})
+	prepared.steps = func() []domain.OperationStep {
+		decision, observed := domain.StepSkip, "converged"
+		if plan.Changed {
+			decision, observed = domain.StepApply, "captured native cleanup ownership"
+		}
+		return []domain.OperationStep{{ID: "integration.cleanup", Target: loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName + ":integration " + request.id,
+			Observed: observed, Desired: "profile-owned installation absent; configured selection and unrelated artifacts retained", Decision: decision,
+			Preconditions: []string{"integration remains deselected", "captured cleanup handler and native target ownership remain valid"}, Verify: "native cleanup observation reports no remaining owned cleanup", Consequence: "remove only the captured profile-owned installation of " + request.id}}
+	}
 	prepared.preview = preview
+	prepared.stepsComplete = true
 	prepared.assess = func(context.Context) (domain.ActionID, domain.ActionDelta, error) {
 		return "integration.cleanup", domain.ActionDelta{Changed: plan.Changed, Consequences: slices.Clone(plan.Steps)}, nil
 	}

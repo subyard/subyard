@@ -464,6 +464,65 @@ func TestApplyRejectsChangedObservationBeforeAnyWrite(t *testing.T) {
 	}
 }
 
+func TestApprovedNetworkAllowsOneYardToConvergeWithoutRestartingIt(t *testing.T) {
+	h := newMemoryHost()
+	s := memoryService(h)
+	on := true
+	plan, err := s.Prepare(context.Background(), fixtureYards(h), Change{Isolation: &on})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The persisted desired revision already owns both bindings, while actual
+	// networking still needs reconciliation independently on each yard.
+	h.stored.Policy = cloneValue(plan.Policy)
+	h.stored.ETag = "desired"
+	plan, err = s.Prepare(context.Background(), fixtureYards(h), Change{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Updates) < 2 {
+		t.Fatal("fixture needs independently changing yards")
+	}
+	update := plan.Updates[0]
+	i := h.index(update.Yard.Yard)
+	h.snapshot.Yards[i].ProfileDevices["eth0"] = maps.Clone(update.NIC)
+	h.snapshot.Yards[i].ProjectConfig["restricted.networks.access"] = update.Access
+	h.snapshot.Yards[i].ACL = cloneValue(update.ACL)
+	h.snapshot.Yards[i].ACL.Exists = !update.RemoveACL
+	if err := s.Apply(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range h.events {
+		if event == "stop:"+update.Yard.Name || event == "start:"+update.Yard.Name {
+			t.Fatalf("converged approved yard was restarted: %v", h.events)
+		}
+	}
+	status, err := s.Status(context.Background(), fixtureYards(h))
+	if err != nil || !status.Converged {
+		t.Fatalf("remaining approved work did not converge: %+v %v", status, err)
+	}
+}
+
+func TestApprovedNetworkRefusesNewRepairInsideAlreadyChangingYard(t *testing.T) {
+	h := newMemoryHost()
+	h.snapshot.Yards[0].ProfileDevices["eth0"]["security.mac_filtering"] = "true"
+	s := memoryService(h)
+	on := true
+	plan, err := s.Prepare(context.Background(), fixtureYards(h), Change{Isolation: &on})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// ACL installation was approved, while MAC filtering already had its
+	// desired value. Losing it must not silently extend the same yard update.
+	h.snapshot.Yards[0].ProfileDevices["eth0"]["security.mac_filtering"] = "false"
+	if err := s.Apply(context.Background(), plan); !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatalf("fresh repair absorbed by approved update: %v", err)
+	}
+	if len(h.events) != 0 {
+		t.Fatalf("new repair mutated before rejection: %v", h.events)
+	}
+}
+
 func TestTeardownRestoresRetainedProfileAndRemovesOnlyEndpointLinks(t *testing.T) {
 	h := newMemoryHost()
 	s := memoryService(h)

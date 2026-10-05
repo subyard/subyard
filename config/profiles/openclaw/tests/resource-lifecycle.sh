@@ -32,9 +32,17 @@ case "${1:-}" in
       *' sh -s -- /srv/staging/_lease bot canonical '*)
         script="$(cat)"
         case "$script" in
-          *'echo "OWNED $kind '*) printf 'OWNED canonical 3600\n' ;;
+          *'echo "OWNED $kind '*) [ -e "$state_root/lease-owned" ] && printf 'OWNED canonical 3600\n' || printf 'MISSING\n' ;;
+          *'rm -f "$st"'*) rm -f "$state_root/lease-owned" ;;
         esac
         ;;
+      *'.holder //'*) [ -e "$state_root/lease-owned" ] ;;
+      *' cat "$1/$2.json" '* ) [ ! -e "$state_root/lease-owned" ] || printf '{"holder":"canonical","kind":"canonical","epoch":1}\n' ;;
+      *' docker exec '*' kill -0 '*) [ -e "$state_root/gateway-running" ] ;;
+      *' docker exec '*' kill "$pid" '*) rm -f "$state_root/gateway-running" ;;
+      *' docker stop subyard-qa-broker '*) touch "$state_root/qa-stopped" ;;
+      *' docker inspect -f {{.State.Running}} subyard-qa-broker '*) [ -e "$state_root/qa-stopped" ] && printf 'false\n' || printf 'true\n' ;;
+      *' docker inspect -f {{.Id}} '*) printf '%064d\n' 1 ;;
       *' docker inspect -f '*) printf 'true\n' ;;
     esac ;;
   file) : ;;
@@ -50,7 +58,7 @@ exit 0
 MOCK
 chmod 755 "$TMP/bin/incus" "$TMP/bin/curl" "$TMP/bin/ss"
 export RESOURCE_TEST_LOG="$TMP/incus.log"
-touch "$TMP/up" "$TMP/listening"
+touch "$TMP/up" "$TMP/listening" "$TMP/lease-owned" "$TMP/gateway-running"
 qa_handler="$ROOT/config/profiles/openclaw/resources/qa-bot-broker/handler.sh"
 staging_handler="$ROOT/config/profiles/openclaw/resources/staging-gateway/handler.sh"
 # shellcheck source=tests/helpers/resource-lifecycle.sh
@@ -83,9 +91,9 @@ EOF
 : > "$RESOURCE_TEST_LOG"
 SUBYARD_RESOURCE_MODE=prepare "$qa_handler" status >"$TMP/qa-status-plan.json" </dev/null
 SUBYARD_RESOURCE_MODE=prepare "$staging_handler" status >"$TMP/staging-status-plan.json" </dev/null
-grep -Fq '"action":"status","changed":false' "$TMP/qa-status-plan.json" \
+jq -e '.action == "status" and .changed == false' "$TMP/qa-status-plan.json" >/dev/null \
   || fail 'QA status prepare did not emit a read-only assessment'
-grep -Fq '"action":"status","changed":false' "$TMP/staging-status-plan.json" \
+jq -e '.action == "status" and .changed == false' "$TMP/staging-status-plan.json" >/dev/null \
   || fail 'staging status prepare did not emit a read-only assessment'
 # Every descriptor action variant is reachable from a handler prepare without mutation.
 BROKER_SRC=/srv/source SUBYARD_RESOURCE_MODE=prepare \
@@ -99,14 +107,14 @@ SUBYARD_RESOURCE_MODE=prepare "$qa_handler" smoke >"$TMP/qa-smoke-plan.json" </d
 SUBYARD_RESOURCE_MODE=prepare "$qa_handler" down >"$TMP/qa-down-plan.json" </dev/null
 SUBYARD_RESOURCE_MODE=prepare "$qa_handler" destroy >"$TMP/qa-destroy-plan.json" </dev/null
 SUBYARD_RESOURCE_MODE=prepare "$qa_handler" destroy --purge >"$TMP/qa-purge-plan.json" </dev/null
-grep -Fq '"action":"up","changed":true' "$TMP/qa-up-plan.json" || fail 'QA up action is unreachable'
-grep -Fq '"action":"seed","changed":false' "$TMP/qa-seed-plan.json" || fail 'QA empty seed is not a no-op'
-grep -Fq '"action":"expose","changed":true' "$TMP/qa-expose-plan.json" || fail 'QA expose action is unreachable'
-grep -Fq '"action":"logs","changed":false' "$TMP/qa-logs-plan.json" || fail 'QA logs action is unreachable'
-grep -Fq '"action":"smoke","changed":true' "$TMP/qa-smoke-plan.json" || fail 'QA smoke action is unreachable'
-grep -Fq '"action":"down","changed":true' "$TMP/qa-down-plan.json" || fail 'QA down action is unreachable'
-grep -Fq '"action":"destroy","changed":true' "$TMP/qa-destroy-plan.json" || fail 'QA destroy action is unreachable'
-grep -Fq '"action":"destroy-purge","changed":true' "$TMP/qa-purge-plan.json" || fail 'QA purge action is unreachable'
+jq -e '.action == "up" and .changed == true' "$TMP/qa-up-plan.json" >/dev/null || fail 'QA up action is unreachable'
+jq -e '.action == "seed" and .changed == false' "$TMP/qa-seed-plan.json" >/dev/null || fail 'QA empty seed is not a no-op'
+jq -e '.action == "expose" and .changed == true' "$TMP/qa-expose-plan.json" >/dev/null || fail 'QA expose action is unreachable'
+jq -e '.action == "logs" and .changed == false' "$TMP/qa-logs-plan.json" >/dev/null || fail 'QA logs action is unreachable'
+jq -e '.action == "smoke" and .changed == true' "$TMP/qa-smoke-plan.json" >/dev/null || fail 'QA smoke action is unreachable'
+jq -e '.action == "down" and .changed == true' "$TMP/qa-down-plan.json" >/dev/null || fail 'QA down action is unreachable'
+jq -e '.action == "destroy" and .changed == true' "$TMP/qa-destroy-plan.json" >/dev/null || fail 'QA destroy action is unreachable'
+jq -e '.action == "destroy-purge" and .changed == true' "$TMP/qa-purge-plan.json" >/dev/null || fail 'QA purge action is unreachable'
 
 SUBYARD_RESOURCE_MODE=prepare "$staging_handler" up >"$TMP/staging-up-plan.json" </dev/null
 SUBYARD_RESOURCE_MODE=prepare "$staging_handler" start >"$TMP/staging-start-plan.json" </dev/null
@@ -117,15 +125,15 @@ SUBYARD_RESOURCE_MODE=prepare "$staging_handler" down >"$TMP/staging-down-plan.j
 SUBYARD_RESOURCE_MODE=prepare "$staging_handler" destroy >"$TMP/staging-destroy-plan.json" </dev/null
 SUBYARD_RESOURCE_MODE=prepare "$staging_handler" destroy --purge >"$TMP/staging-purge-plan.json" </dev/null
 SUBYARD_RESOURCE_MODE=prepare "$staging_handler" list >"$TMP/staging-list-plan.json" </dev/null
-grep -Fq '"action":"up","changed":true' "$TMP/staging-up-plan.json" || fail 'staging up action is unreachable'
-grep -Fq '"action":"start","changed":false' "$TMP/staging-start-plan.json" || fail 'running staging start is not a no-op'
-grep -Fq '"action":"stop","changed":true' "$TMP/staging-stop-plan.json" || fail 'staging stop action is unreachable'
-grep -Fq '"action":"logs","changed":false' "$TMP/staging-logs-plan.json" || fail 'staging logs action is unreachable'
-grep -Fq '"action":"shell","changed":false' "$TMP/staging-shell-plan.json" || fail 'staging shell session is unreachable'
-grep -Fq '"action":"down","changed":true' "$TMP/staging-down-plan.json" || fail 'staging down action is unreachable'
-grep -Fq '"action":"destroy","changed":true' "$TMP/staging-destroy-plan.json" || fail 'staging destroy action is unreachable'
-grep -Fq '"action":"destroy-purge","changed":true' "$TMP/staging-purge-plan.json" || fail 'staging purge action is unreachable'
-grep -Fq '"action":"list","changed":false' "$TMP/staging-list-plan.json" || fail 'staging list action is unreachable'
+jq -e '.action == "up" and .changed == true' "$TMP/staging-up-plan.json" >/dev/null || fail 'staging up action is unreachable'
+jq -e '.action == "start" and .changed == false' "$TMP/staging-start-plan.json" >/dev/null || fail 'running staging start is not a no-op'
+jq -e '.action == "stop" and .changed == true' "$TMP/staging-stop-plan.json" >/dev/null || fail 'staging stop action is unreachable'
+jq -e '.action == "logs" and .changed == false' "$TMP/staging-logs-plan.json" >/dev/null || fail 'staging logs action is unreachable'
+jq -e '.action == "shell" and .changed == false' "$TMP/staging-shell-plan.json" >/dev/null || fail 'staging shell session is unreachable'
+jq -e '.action == "down" and .changed == true' "$TMP/staging-down-plan.json" >/dev/null || fail 'staging down action is unreachable'
+jq -e '.action == "destroy" and .changed == true' "$TMP/staging-destroy-plan.json" >/dev/null || fail 'staging destroy action is unreachable'
+jq -e '.action == "destroy-purge" and .changed == true' "$TMP/staging-purge-plan.json" >/dev/null || fail 'staging purge action is unreachable'
+jq -e '.action == "list" and .changed == false' "$TMP/staging-list-plan.json" >/dev/null || fail 'staging list action is unreachable'
 [ ! -e "$TMP/qa-secret-sourced" ] || fail 'QA prepare sourced generated credentials'
 [ ! -e "$TMP/staging-secret-sourced" ] || fail 'staging prepare sourced generated credentials'
 if grep -Eq 'file push|docker (run|start|stop|rm|build)|systemctl (enable|start|restart|disable)|config device (add|remove)' \
@@ -154,7 +162,7 @@ if "$ROOT/bin/yard" qa-pool destroy --purge \
   </dev/null >"$TMP/qa-purge-decline.out" 2>&1; then
   fail 'non-interactive QA purge bypassed central confirmation'
 fi
-if grep -Eq 'docker rm|/srv/env-secrets/qa-pool|rm -rf /srv/qa-pool' "$RESOURCE_TEST_LOG"; then
+if grep -Eq 'docker rm|file push|rm -rf /srv/env-secrets/qa-pool|rm -rf /srv/qa-pool' "$RESOURCE_TEST_LOG"; then
   fail 'declined QA purge mutated runtime, credentials or persistent data'
 fi
 

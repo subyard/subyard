@@ -3,6 +3,8 @@ package credentialruntime
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,7 +26,34 @@ type Prepared struct {
 	Action       domain.ActionID
 	Changed      bool
 	Consequences []string
+	Steps        []domain.OperationStep
+	Binding      string `json:"-"`
 	run          func(context.Context) error
+}
+
+// withPlan projects the native workflow's captured public metadata without
+// exposing ciphertext, protected input or executable handler instructions.
+func (prepared Prepared) withPlan(target, observed, desired, verify string, facts any) Prepared {
+	decision := domain.StepApply
+	if !prepared.Changed {
+		decision = domain.StepSkip
+	}
+	consequence := ""
+	if len(prepared.Consequences) != 0 {
+		consequence = prepared.Consequences[0]
+	}
+	prepared.Steps = []domain.OperationStep{{ID: "credential", Target: target, Observed: observed, Desired: desired, Decision: decision, Preconditions: []string{"captured ledger and peer metadata remain unchanged"}, Verify: verify, Consequence: consequence}}
+	payload, err := json.Marshal(struct {
+		Action domain.ActionID
+		Steps  []domain.OperationStep
+		Facts  any
+	}{prepared.Action, prepared.Steps, facts})
+	if err != nil {
+		panic("credential assessment must be JSON encodable")
+	}
+	digest := sha256.Sum256(payload)
+	prepared.Binding = hex.EncodeToString(digest[:])
+	return prepared
 }
 
 func (prepared Prepared) Execute(ctx context.Context) error {
@@ -113,7 +142,7 @@ func (runtime *Runtime) preparePublic(ctx context.Context, arguments []string) (
 	case "trust":
 		return runtime.prepareTrust(ctx, arguments)
 	case "untrust":
-		return runtime.prepareUntrust(arguments)
+		return runtime.prepareUntrust(ctx, arguments)
 	case "move":
 		return runtime.prepareMove(ctx, arguments)
 	default:
@@ -167,6 +196,7 @@ Secret values are read only after confirmation from a protected file, stdin or a
 type addOptions struct {
 	label, kind, zone, consumer, source string
 	localOnly, exclusive                bool
+	approval                            *protectedApproval
 }
 
 func parseAdd(arguments []string) (addOptions, error) {
@@ -242,8 +272,15 @@ func (runtime *Runtime) prepareAdd(ctx context.Context, arguments []string) (Pre
 			options.kind, options.zone, options.consumer, options.localOnly, options.exclusive),
 		"read the protected value only after confirmation and publish one signed immutable revision",
 	}
+	options.approval, err = runtime.captureProtectedApproval(ctx, options.source, options.consumer, options.zone)
+	if err != nil {
+		return Prepared{}, err
+	}
 	return runtime.mutation("keys.add", true, consequences, func(ctx context.Context) error {
 		return runtime.withLock(ctx, func() error {
+			if err := options.approval.check(ctx, runtime); err != nil {
+				return err
+			}
 			payload, err := runtime.capturePayload(options.source)
 			if err != nil {
 				return err
@@ -259,7 +296,7 @@ func (runtime *Runtime) prepareAdd(ctx context.Context, arguments []string) (Pre
 			fmt.Fprintf(runtime.config.Stderr, "  [ ok ] added credential %s (%s)\n", credentialID, options.label)
 			return nil
 		})
-	}), nil
+	}).withPlan("new credential/consumer/"+options.consumer+"/zone/"+options.zone, "captured recipient and consumer metadata; protected value unread", "publish one signed immutable revision with the approved classification and recipients", "native signed ledger readback has the approved classification and recipient set; protected source retained", []any{options, options.approval.binding}), nil
 }
 
 func (runtime *Runtime) add(ctx context.Context, options addOptions, payload []byte) (string, error) {
@@ -267,6 +304,9 @@ func (runtime *Runtime) add(ctx context.Context, options addOptions, payload []b
 	if options.localOnly {
 		scope = localLedger
 	} else if err := runtime.refreshShared(ctx); err != nil {
+		return "", err
+	}
+	if err := options.approval.check(ctx, runtime); err != nil {
 		return "", err
 	}
 	identity, err := runtime.Identity()
@@ -382,12 +422,19 @@ func (runtime *Runtime) prepareImport(ctx context.Context, arguments []string) (
 		return Prepared{}, fmt.Errorf("consumer %s/%s is already owned by %s; rotate it instead",
 			options.consumer, options.zone, conflict)
 	}
+	options.approval, err = runtime.captureProtectedApproval(ctx, options.source, options.consumer, options.zone)
+	if err != nil {
+		return Prepared{}, err
+	}
 	return runtime.mutation("keys.import", true, []string{
 		fmt.Sprintf("import static credential file %q", options.label),
 		"read the protected source only after confirmation",
 		"encrypt it into the host-only ledger and keep the source file",
 	}, func(ctx context.Context) error {
 		return runtime.withLock(ctx, func() error {
+			if err := options.approval.check(ctx, runtime); err != nil {
+				return err
+			}
 			payload, err := runtime.capturePayload(options.source)
 			if err != nil {
 				return err
@@ -403,7 +450,7 @@ func (runtime *Runtime) prepareImport(ctx context.Context, arguments []string) (
 			fmt.Fprintf(runtime.config.Stderr, "  [ ok ] imported credential %s; source file was kept\n", credentialID)
 			return nil
 		})
-	}), nil
+	}).withPlan("new credential/consumer/"+options.consumer+"/zone/"+options.zone, "captured source and recipient metadata; protected value unread", "publish one signed immutable imported revision with the approved classification and recipients", "native signed ledger readback verifies the approved revision; original protected source retained", []any{options, options.approval.binding}), nil
 }
 
 func (runtime *Runtime) prepareRotate(ctx context.Context, arguments []string) (Prepared, error) {
@@ -427,17 +474,24 @@ func (runtime *Runtime) prepareRotate(ctx context.Context, arguments []string) (
 			return Prepared{}, err
 		}
 	}
+	approval, err := runtime.captureProtectedApproval(ctx, source, expectedHead.Consumer, expectedHead.Zone)
+	if err != nil {
+		return Prepared{}, err
+	}
 	return runtime.mutation("keys.rotate", true, []string{
 		fmt.Sprintf("rotate credential %q", credentialID),
 		"read the replacement only after confirmation and publish a signed successor",
 	}, func(ctx context.Context) error {
 		return runtime.withLock(ctx, func() error {
+			if err := approval.check(ctx, runtime); err != nil {
+				return err
+			}
 			scope, head, err := runtime.singleHead(ctx, credentialID)
 			if err != nil {
 				return fmt.Errorf("credential %q has multiple heads; use resolve --rotate", credentialID)
 			}
 			if scope != expectedScope || head.RevisionID != expectedHead.RevisionID || head.State != "active" {
-				return errors.New("credential head changed while awaiting confirmation")
+				return fmt.Errorf("%w: credential head changed while awaiting confirmation", domain.ErrPlanStale)
 			}
 			payload, err := runtime.capturePayload(source)
 			if err != nil {
@@ -449,13 +503,16 @@ func (runtime *Runtime) prepareRotate(ctx context.Context, arguments []string) (
 			}
 			spec := specFromMetadata(head)
 			spec.State, spec.Parents = "active", []string{head.RevisionID}
+			if err := approval.check(ctx, runtime); err != nil {
+				return err
+			}
 			if _, err := runtime.publish(ctx, scope, spec, payload); err != nil {
 				return err
 			}
 			fmt.Fprintf(runtime.config.Stderr, "  [ ok ] rotated credential %q\n", credentialID)
 			return nil
 		})
-	}), nil
+	}).withPlan("credential/"+credentialID, "active revision "+expectedHead.RevisionID+"; replacement unread", "publish one successor of the approved revision with its original recipients", "native signed ledger readback verifies the approved parent, classification and recipients", []any{expectedScope, expectedHead, approval.binding}), nil
 }
 
 func (runtime *Runtime) prepareRollback(ctx context.Context, arguments []string) (Prepared, error) {
@@ -489,11 +546,11 @@ func (runtime *Runtime) prepareRollback(ctx context.Context, arguments []string)
 				return err
 			}
 			if scope != expectedScope || head.RevisionID != expectedHead.RevisionID || head.State != "active" {
-				return errors.New("credential head changed while awaiting confirmation")
+				return fmt.Errorf("%w: credential head changed while awaiting confirmation", domain.ErrPlanStale)
 			}
 			target, err := runtime.readRecordMetadata(targetPath)
 			if err != nil || target.RevisionID != expectedTarget.RevisionID || target.CredentialID != credentialID {
-				return errors.New("rollback revision changed while awaiting confirmation")
+				return fmt.Errorf("%w: rollback revision changed while awaiting confirmation", domain.ErrPlanStale)
 			}
 			payload, err := runtime.decrypt(ctx, scope, target)
 			if err != nil {
@@ -511,7 +568,7 @@ func (runtime *Runtime) prepareRollback(ctx context.Context, arguments []string)
 			fmt.Fprintf(runtime.config.Stderr, "  [ ok ] rolled back credential %q to %s\n", credentialID, revisionID)
 			return nil
 		})
-	}), nil
+	}).withPlan("credential/"+credentialID, "active revision "+expectedHead.RevisionID, "publish successor of historical revision "+revisionID, "successor is active and has the selected historical encrypted value", []any{expectedScope, expectedHead, expectedTarget}), nil
 }
 
 func (runtime *Runtime) prepareTerminal(
@@ -544,16 +601,16 @@ func (runtime *Runtime) prepareTerminal(
 		fmt.Sprintf("%s credential %q", action, credentialID),
 		fmt.Sprintf("publish a %s revision and remove its materialized consumer", state),
 	}, func(ctx context.Context) error {
-		if !changed {
-			return nil
-		}
 		return runtime.withLock(ctx, func() error {
 			scope, revisions, heads, err := runtime.credentialHeads(ctx, credentialID)
 			if err != nil || len(heads) == 0 {
 				return firstError(err, errors.New("credential has no revisions"))
 			}
 			if scope != expectedScope || !slices.Equal(headIDs(heads), expectedHeadIDs) {
-				return errors.New("credential heads changed while awaiting confirmation")
+				return fmt.Errorf("%w: credential heads changed while awaiting confirmation", domain.ErrPlanStale)
+			}
+			if !changed {
+				return nil
 			}
 			_ = revisions
 			recipients := credential.RecipientIntersection(heads)
@@ -575,7 +632,7 @@ func (runtime *Runtime) prepareTerminal(
 			fmt.Fprintf(runtime.config.Stderr, "  [ ok ] credential %q is %s\n", credentialID, state)
 			return nil
 		})
-	}), nil
+	}).withPlan("credential/"+credentialID, "heads "+strings.Join(expectedHeadIDs, ","), "publish "+state+" successor and remove mapped consumer", "ledger head is "+state+" and mapped consumer is absent", []any{expectedScope, expectedHeads, state}), nil
 }
 
 func (runtime *Runtime) prepareResolve(ctx context.Context, arguments []string) (Prepared, error) {
@@ -635,29 +692,39 @@ func (runtime *Runtime) prepareResolve(ctx context.Context, arguments []string) 
 			return Prepared{}, err
 		}
 	}
+	var approval *protectedApproval
+	if mode == "rotate" {
+		approval, err = runtime.captureProtectedApproval(ctx, source, expectedHeads[0].Consumer, expectedHeads[0].Zone)
+		if err != nil {
+			return Prepared{}, err
+		}
+	}
 	expectedHeadIDs := headIDs(expectedHeads)
 	actionID := domain.ActionID("keys.resolve-choose")
 	if mode == "rotate" {
 		actionID = "keys.resolve-rotate"
 	}
-	return runtime.mutation(actionID, true, []string{
+	prepared := runtime.mutation(actionID, true, []string{
 		fmt.Sprintf("resolve all heads of credential %q", credentialID),
 		map[string]string{"choose": "publish the chosen encrypted value as one successor", "rotate": "read an explicit replacement after confirmation"}[mode],
 	}, func(ctx context.Context) error {
 		return runtime.withLock(ctx, func() error {
+			if err := approval.check(ctx, runtime); err != nil {
+				return err
+			}
 			scope, _, heads, err := runtime.credentialHeads(ctx, credentialID)
 			if err != nil {
 				return err
 			}
 			if scope != expectedScope || !slices.Equal(headIDs(heads), expectedHeadIDs) {
-				return errors.New("credential heads changed while awaiting confirmation")
+				return fmt.Errorf("%w: credential heads changed while awaiting confirmation", domain.ErrPlanStale)
 			}
 			template := heads[0]
 			var payload []byte
 			if mode == "choose" {
 				chosenMetadata, err := runtime.readRecordMetadata(runtime.recordPath(scope, credentialID, chosen))
 				if err != nil || chosenMetadata.RevisionID != expectedChosen.RevisionID {
-					return errors.New("chosen revision changed while awaiting confirmation")
+					return fmt.Errorf("%w: chosen revision changed while awaiting confirmation", domain.ErrPlanStale)
 				}
 				template = chosenMetadata
 				payload, err = runtime.decrypt(ctx, scope, chosenMetadata)
@@ -677,13 +744,22 @@ func (runtime *Runtime) prepareResolve(ctx context.Context, arguments []string) 
 			defer clear(payload)
 			spec := specFromMetadata(template)
 			spec.State, spec.Parents, spec.RecipientActors = "active", headIDs(heads), recipients
+			if err := approval.check(ctx, runtime); err != nil {
+				return err
+			}
 			if _, err := runtime.publish(ctx, scope, spec, payload); err != nil {
 				return err
 			}
 			fmt.Fprintf(runtime.config.Stderr, "  [ ok ] resolved credential %q\n", credentialID)
 			return nil
 		})
-	}), nil
+	})
+	if mode == "choose" {
+		prepared = prepared.withPlan("credential/"+credentialID, "heads "+strings.Join(expectedHeadIDs, ","), "publish chosen revision "+chosen+" as sole successor", "sole active successor contains selected historical encrypted value and approved parent heads", []any{expectedScope, expectedHeads, expectedChosen, recipients})
+	} else {
+		prepared = prepared.withPlan("credential/"+credentialID, "heads "+strings.Join(expectedHeadIDs, ",")+"; replacement unread", "publish sole successor with approved parents and common recipients", "native signed ledger readback verifies original parents and recipient intersection", []any{expectedScope, expectedHeads, recipients, approval.binding})
+	}
+	return prepared, nil
 }
 
 func (runtime *Runtime) prepareMaterialize(ctx context.Context, arguments []string) (Prepared, error) {
@@ -701,6 +777,10 @@ func (runtime *Runtime) prepareMaterialize(ctx context.Context, arguments []stri
 	if err := runtime.requireInitialized(); err != nil {
 		return Prepared{}, err
 	}
+	expected, err := runtime.materializationSnapshot(ctx, zone)
+	if err != nil {
+		return Prepared{}, err
+	}
 	changed, err := runtime.materializationChanged(ctx, zone)
 	if err != nil {
 		return Prepared{}, err
@@ -709,11 +789,17 @@ func (runtime *Runtime) prepareMaterialize(ctx context.Context, arguments []stri
 		"materialize authorized active credential heads",
 		"atomically replace only verified mode-0600 consumer files",
 	}, func(ctx context.Context) error {
-		if !changed {
-			return nil
-		}
-		return runtime.withLock(ctx, func() error { return runtime.materializeAll(ctx, zone, false) })
-	}), nil
+		return runtime.withLock(ctx, func() error {
+			current, err := runtime.materializationSnapshot(ctx, zone)
+			if err != nil || metadataDigest(current) != metadataDigest(expected) {
+				return fmt.Errorf("%w: materialization targets changed while awaiting confirmation", domain.ErrPlanStale)
+			}
+			if !changed {
+				return nil
+			}
+			return runtime.materializeAll(ctx, zone, false)
+		})
+	}).withMaterializationPlan(expected), nil
 }
 
 func (runtime *Runtime) materializationChanged(ctx context.Context, zone string) (bool, error) {
@@ -846,7 +932,7 @@ func (runtime *Runtime) prepareSync(ctx context.Context, arguments []string) (Pr
 			}
 			return errors.Join(failures...)
 		})
-	}), nil
+	}).withPeerPlan(selected, "synchronize signed ledger with this captured active peer", "native signature, recipient and DAG verification succeeds", expectedHeads), nil
 }
 
 func (runtime *Runtime) prepareAutoSync(arguments []string) (Prepared, error) {
@@ -910,10 +996,13 @@ func (runtime *Runtime) prepareAutoSync(arguments []string) (Prepared, error) {
 		fmt.Sprintf("%s automatic credential synchronization", action),
 		"update only active outbound peer policy; passive peers remain respond-only",
 	}, func(ctx context.Context) error {
-		if !changed {
-			return nil
-		}
 		return runtime.withLock(ctx, func() error {
+			for _, expected := range selected {
+				current, err := runtime.peer(expected.Name)
+				if err != nil || current != expected {
+					return fmt.Errorf("%w: peer %q policy changed while awaiting confirmation", domain.ErrPlanStale, expected.Name)
+				}
+			}
 			for _, expected := range selected {
 				peer, err := runtime.peer(expected.Name)
 				if err != nil {
@@ -923,8 +1012,11 @@ func (runtime *Runtime) prepareAutoSync(arguments []string) (Prepared, error) {
 				if err != nil {
 					return err
 				}
-				if role != "active" || peer.ManualOnly != expected.ManualOnly {
-					return fmt.Errorf("peer %q policy changed while awaiting confirmation", peer.Name)
+				if role != "active" || peer != expected {
+					return fmt.Errorf("%w: peer %q policy changed while awaiting confirmation", domain.ErrPlanStale, peer.Name)
+				}
+				if !changed {
+					continue
 				}
 				peer.ManualOnly = desiredManual
 				payload, err := json.MarshalIndent(peer, "", "  ")
@@ -939,7 +1031,7 @@ func (runtime *Runtime) prepareAutoSync(arguments []string) (Prepared, error) {
 			fmt.Fprintf(runtime.config.Stderr, "  [ ok ] automatic credential sync %sd\n", action)
 			return nil
 		})
-	}), nil
+	}).withPeerPlan(selected, "manual-only="+strconv.FormatBool(desiredManual), "captured active peer has the approved manual-only policy", desiredManual), nil
 }
 
 func (runtime *Runtime) prepareTrust(ctx context.Context, arguments []string) (Prepared, error) {
@@ -1040,10 +1132,10 @@ func (runtime *Runtime) prepareTrust(ctx context.Context, arguments []string) (P
 			fmt.Fprintf(runtime.config.Stderr, "  [ ok ] trusted credential peer %q\n", name)
 			return nil
 		})
-	}), nil
+	}).withPlan("credential-peer/"+name, "actor "+identity.ActorID, "enroll actor "+identity.ActorID+"; reciprocal trust and shared-head rekey; manual-only="+strconv.FormatBool(manual), "captured peer identity enrolled and native reciprocal exchange and ledger verification succeed", []any{target, identity, expectedPeers, expectedHeads, manual}), nil
 }
 
-func (runtime *Runtime) prepareUntrust(arguments []string) (Prepared, error) {
+func (runtime *Runtime) prepareUntrust(ctx context.Context, arguments []string) (Prepared, error) {
 	value, err := requiredValue(arguments, "keys untrust needs @peer")
 	if err != nil || !strings.HasPrefix(value, "@") || !domain.SafeName(strings.TrimPrefix(value, "@")) {
 		return Prepared{}, errors.New("keys untrust needs @peer")
@@ -1056,6 +1148,10 @@ func (runtime *Runtime) prepareUntrust(arguments []string) (Prepared, error) {
 	if err != nil {
 		return Prepared{}, err
 	}
+	expectedHeads, err := runtime.headSnapshot(ctx)
+	if err != nil {
+		return Prepared{}, err
+	}
 	return runtime.mutation("keys.untrust", true, []string{
 		fmt.Sprintf("remove credential peer %q", name),
 		"publish successor revisions without that recipient and remove signing trust",
@@ -1064,10 +1160,14 @@ func (runtime *Runtime) prepareUntrust(arguments []string) (Prepared, error) {
 		return runtime.withLock(ctx, func() error {
 			current, err := runtime.peer(name)
 			if err != nil {
-				return fmt.Errorf("credential peer %q changed while awaiting confirmation: %w", name, err)
+				return fmt.Errorf("%w: credential peer %q changed while awaiting confirmation", domain.ErrPlanStale, name)
 			}
 			if current != peer {
-				return fmt.Errorf("credential peer %q changed while awaiting confirmation", name)
+				return fmt.Errorf("%w: credential peer %q changed while awaiting confirmation", domain.ErrPlanStale, name)
+			}
+			currentHeads, err := runtime.headSnapshot(ctx)
+			if err != nil || !slices.Equal(currentHeads, expectedHeads) {
+				return fmt.Errorf("%w: credential heads changed while awaiting confirmation", domain.ErrPlanStale)
 			}
 			if err := runtime.rekeyShared(ctx, peer.ActorID, false); err != nil {
 				return err
@@ -1091,7 +1191,7 @@ func (runtime *Runtime) prepareUntrust(arguments []string) (Prepared, error) {
 			fmt.Fprintf(runtime.config.Stderr, "  [ ok ] removed credential peer %q\n", name)
 			return nil
 		})
-	}), nil
+	}).withPlan("credential-peer/"+name, "actor "+peer.ActorID, "remove recipient from shared successors and local signing trust", "peer metadata and signing trust absent; shared successors exclude recipient", []any{peer, expectedHeads}), nil
 }
 
 type movePlan struct {
@@ -1127,7 +1227,11 @@ func (runtime *Runtime) prepareMove(ctx context.Context, arguments []string) (Pr
 			fmt.Sprintf("publish authority assignment epoch %d", plan.nextEpoch),
 			"sync and materialize on the target before reporting success")
 	}
-	return runtime.mutation("keys.move", true, consequences, func(ctx context.Context) error { return runtime.executeMove(ctx, plan) }), nil
+	desiredEpoch := plan.nextEpoch
+	if plan.resume {
+		desiredEpoch = plan.expectedEpoch
+	}
+	return runtime.mutation("keys.move", true, consequences, func(ctx context.Context) error { return runtime.executeMove(ctx, plan) }).withPlan("credential/"+plan.credentialID, "assignment "+plan.current, "assignment "+plan.targetAssignment+" epoch "+strconv.FormatInt(desiredEpoch, 10), "native old-consumer stop, target materialization and assignment checks succeed", []any{plan.expectedHead, plan.expectedPeer, plan.target, plan.targetAssignment, plan.expectedEpoch, plan.nextEpoch, plan.resume}), nil
 }
 
 func (runtime *Runtime) planMove(ctx context.Context, credentialID, targetName string) (movePlan, error) {
@@ -1259,7 +1363,7 @@ func (runtime *Runtime) executeMove(ctx context.Context, plan movePlan) error {
 		}
 		if scope != sharedLedger || head.RevisionID != plan.expectedRevision ||
 			head.AssignmentEpoch != plan.expectedEpoch || head.AssignedYard != plan.current {
-			return errors.New("exclusive assignment changed while awaiting confirmation")
+			return fmt.Errorf("%w: exclusive assignment changed while awaiting confirmation", domain.ErrPlanStale)
 		}
 		if err := runtime.stopAssignedConsumer(ctx, plan.current, head.Consumer, plan.zone); err != nil {
 			return errors.New("old assigned yard is unreachable or could not confirm stop; handoff aborted")
@@ -1384,7 +1488,7 @@ func (runtime *Runtime) prepareExchange(arguments []string) (Prepared, error) {
 					return fmt.Errorf("credential peer changed while awaiting confirmation: %w", err)
 				}
 				if !found || peer != expectedPeer {
-					return errors.New("credential peer changed while awaiting confirmation")
+					return fmt.Errorf("%w: credential peer changed while awaiting confirmation", domain.ErrPlanStale)
 				}
 				if err := runtime.rekeyShared(ctx, actor, false); err != nil {
 					return err
@@ -2186,4 +2290,83 @@ func ageHuman(seconds int64) string {
 	default:
 		return strconv.FormatInt(seconds/86400, 10) + "d"
 	}
+}
+
+// Snapshot includes metadata and resolved consumer destinations, never plaintext.
+type materializationFact struct {
+	Scope       ledgerScope
+	Head        domain.CredentialMetadata
+	Destination string
+}
+
+func (runtime *Runtime) materializationSnapshot(ctx context.Context, zone string) ([]materializationFact, error) {
+	all, err := runtime.allRecords(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var facts []materializationFact
+	for _, scope := range []ledgerScope{sharedLedger, localLedger} {
+		for _, id := range credentialIDs(all[scope]) {
+			for _, head := range credential.Heads(all[scope], id) {
+				if zone != "" && head.Zone != zone {
+					continue
+				}
+				path, mapped, err := runtime.consumerPath(head.Consumer, head.Zone)
+				if err != nil {
+					return nil, err
+				}
+				if !mapped {
+					continue
+				}
+				facts = append(facts, materializationFact{scope, head, path})
+			}
+		}
+	}
+	return facts, nil
+}
+
+func metadataDigest(facts any) string {
+	payload, err := json.Marshal(facts)
+	if err != nil {
+		panic("credential metadata must be JSON encodable")
+	}
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:])
+}
+
+func (prepared Prepared) withMaterializationPlan(facts []materializationFact) Prepared {
+	decision := domain.StepApply
+	if !prepared.Changed {
+		decision = domain.StepSkip
+	}
+	for i, fact := range facts {
+		desired := "mapped consumer absent"
+		if fact.Head.State == "active" {
+			desired = "authorized active revision materialized with mode 0600"
+		}
+		prepared.Steps = append(prepared.Steps, domain.OperationStep{ID: fmt.Sprintf("consumer-%d", i), Target: "credential/" + fact.Head.CredentialID + "/consumer/" + fact.Head.Consumer + "/zone/" + fact.Head.Zone, Observed: "revision " + fact.Head.RevisionID + " state " + fact.Head.State, Desired: desired, Decision: decision, Preconditions: []string{"captured ledger and owner consumer mapping remain unchanged"}, Verify: "native consumer ownership, permissions and materialization checks succeed", Consequence: "materialize the approved credential consumer " + fact.Head.Consumer + " in zone " + fact.Head.Zone})
+	}
+	prepared.Binding = metadataDigest(struct {
+		Action domain.ActionID
+		Steps  []domain.OperationStep
+		Facts  []materializationFact
+	}{prepared.Action, prepared.Steps, facts})
+	return prepared
+}
+
+func (prepared Prepared) withPeerPlan(peers []domain.CredentialPeer, desired, verify string, facts any) Prepared {
+	for index, peer := range peers {
+		decision := domain.StepApply
+		if !prepared.Changed || (strings.HasPrefix(desired, "manual-only=") && desired == "manual-only="+strconv.FormatBool(peer.ManualOnly)) {
+			decision = domain.StepSkip
+		}
+		prepared.Steps = append(prepared.Steps, domain.OperationStep{ID: fmt.Sprintf("peer-%d", index), Target: "credential-peer/" + peer.Name, Observed: "actor " + peer.ActorID + " manual-only=" + strconv.FormatBool(peer.ManualOnly), Desired: desired, Decision: decision, Preconditions: []string{"captured peer identity, destination and ledger metadata remain unchanged"}, Verify: verify, Consequence: "update credential peer " + peer.Name})
+	}
+	prepared.Binding = metadataDigest(struct {
+		Action domain.ActionID
+		Steps  []domain.OperationStep
+		Peers  []domain.CredentialPeer
+		Facts  any
+	}{prepared.Action, prepared.Steps, peers, facts})
+	return prepared
 }

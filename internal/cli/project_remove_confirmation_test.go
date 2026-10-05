@@ -19,9 +19,10 @@ import (
 )
 
 type projectRemovalProbe struct {
-	requests []ports.InstanceExecRequest
-	err      error
-	failAt   int
+	requests         []ports.InstanceExecRequest
+	err              error
+	failAt           int
+	workspaceRemoved bool
 }
 
 type projectRemovalRemoteControl struct {
@@ -41,6 +42,12 @@ func (probe *projectRemovalProbe) Execute(
 	probe.requests = append(probe.requests, request)
 	if probe.err != nil && (probe.failAt == 0 || len(probe.requests) == probe.failAt) {
 		return ports.InstanceExecResult{}, probe.err
+	}
+	if len(request.Command) > 1 && request.Command[0] == "rm" && request.Command[1] == "-rf" {
+		probe.workspaceRemoved = true
+	}
+	if probe.workspaceRemoved && len(request.Command) > 2 && strings.Contains(request.Command[2], "printf missing") {
+		return ports.InstanceExecResult{Stdout: []byte("missing")}, nil
 	}
 	return ports.InstanceExecResult{Stdout: []byte("present"), ExitCode: 0}, nil
 }
@@ -173,7 +180,7 @@ func TestProjectWorkspaceRemovalExplicitYesCommitsOnlyAfterPhysicalSuccess(t *te
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("remove returned %d", code)
 	}
-	if len(prompt.Requests) != 0 || len(runner.Requests) != 0 || len(probe.requests) != 4 {
+	if len(prompt.Requests) != 0 || len(runner.Requests) != 0 || len(probe.requests) != 5 {
 		t.Fatalf("explicit consent flow: prompts=%#v adapters=%#v probes=%#v", prompt.Requests, runner.Requests, probe.requests)
 	}
 	if _, err := store.Get(context.Background(), record.ProjectID); !errors.Is(err, state.ErrNotFound) {
@@ -509,6 +516,11 @@ func TestCanonicalOwnerProjectRemovalDeclinePreservesRoutingMetadata(t *testing.
 		},
 		Remote: true,
 	}}}
+	ownerCalls := writeStructuredOwnerFixture(t, fakeBin, "remove", []string{"--soft", record.ProjectID}, []domain.OperationStep{{
+		ID: "project.remove", Target: "owner default project " + record.ProjectID,
+		Observed: "owned project present", Desired: "environment and record absent; workspace retained", Decision: domain.StepApply,
+		Verify: "observe native removal and retained workspace", Consequence: "remove the owned project environment and registration",
+	}}, "remove the owned project environment and registration")
 	var stderr bytes.Buffer
 	program, err := New(Options{
 		RepositoryRoot: root, Program: "yard",
@@ -524,6 +536,10 @@ func TestCanonicalOwnerProjectRemovalDeclinePreservesRoutingMetadata(t *testing.
 	}
 	if len(prompt.Requests) != 1 {
 		t.Fatalf("canonical removal prompts=%#v", prompt.Requests)
+	}
+	calls, err := os.ReadFile(ownerCalls)
+	if err != nil || !strings.Contains(string(calls), "operation.plan") || strings.Contains(string(calls), "operation.execute") {
+		t.Fatalf("declined canonical removal did not retain an unexecuted owner plan: %s err=%v", calls, err)
 	}
 	afterConnection, err := os.ReadFile(connectionPath)
 	if err != nil {

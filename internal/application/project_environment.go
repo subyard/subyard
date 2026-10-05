@@ -28,13 +28,14 @@ type ProjectEnvironmentProfile struct {
 }
 
 type ProjectEnvironmentRunner struct {
-	Data      ports.YardExecutor
-	Yard      domain.Context
-	Project   domain.ProjectRecord
-	Profile   ProjectEnvironmentProfile
-	HostLinks []string
-	Rebuild   bool
-	HasSecret bool
+	Data                ports.YardExecutor
+	Yard                domain.Context
+	Project             domain.ProjectRecord
+	Profile             ProjectEnvironmentProfile
+	HostLinks           []string
+	Rebuild             bool
+	HasSecret           bool
+	PreparedObservation string
 }
 
 const projectEnvironmentOwnershipFormat = `{{.Id}}{{"\t"}}{{ index .Config.Labels "subyard.env" }}{{"\t"}}{{ index .Config.Labels "subyard.project" }}{{"\t"}}{{ index .Config.Labels "subyard.profile" }}`
@@ -61,9 +62,19 @@ func (runner ProjectEnvironmentRunner) Run(
 		return domain.AdapterResult{}, "", err
 	}
 
+	if runner.PreparedObservation != "" {
+		if err := runner.checkPreparedEnvironment(ctx); err != nil {
+			return domain.AdapterResult{}, "", err
+		}
+	}
 	message, err := runner.run(ctx, request.Action, protected)
 	if err != nil {
 		return domain.AdapterResult{}, "", err
+	}
+	if runner.PreparedObservation != "" && request.Action != "info" {
+		if err := runner.verifyEnvironment(ctx, request.Action); err != nil {
+			return domain.AdapterResult{}, "", err
+		}
 	}
 	return domain.AdapterResult{
 		Schema: 1, OperationID: request.OperationID, Status: "ok",
@@ -389,4 +400,57 @@ func (runner ProjectEnvironmentRunner) executeResult(
 		return result, nil
 	}
 	return result, executionError(step, result, err)
+}
+
+func (runner ProjectEnvironmentRunner) observePreparedEnvironment(ctx context.Context) (string, error) {
+	box := "subyard-box-" + state.ProjectTechnicalID(runner.Project)
+	result, err := runner.Data.Execute(ctx, runner.Yard, ports.InstanceExecRequest{Command: []string{
+		"sh", "-c", `if ! docker inspect "$1" >/dev/null 2>&1; then printf missing; else docker inspect -f '{{if .State.Running}}running{{else}}stopped{{end}}{{ "\t" }}{{ .Id }}{{ "\t" }}{{ index .Config.Labels "subyard.env" }}{{ "\t" }}{{ index .Config.Labels "subyard.project" }}{{ "\t" }}{{ index .Config.Labels "subyard.profile" }}' "$1"; fi`, "subyard", box,
+	}})
+	if err != nil || result.ExitCode != 0 {
+		return "", executionError("inspect prepared project environment", result, err)
+	}
+	return strings.TrimRight(string(result.Stdout), "\r\n"), nil
+}
+
+func (runner ProjectEnvironmentRunner) checkPreparedEnvironment(ctx context.Context) error {
+	observed, err := runner.observePreparedEnvironment(ctx)
+	if err != nil {
+		return err
+	}
+	if observed == runner.PreparedObservation {
+		return nil
+	}
+	before, after := strings.Split(runner.PreparedObservation, "\t"), strings.Split(observed, "\t")
+	if len(before) == 5 && len(after) == 5 && before[1] == after[1] && before[2] == after[2] && before[3] == after[3] && before[4] == after[4] {
+		return nil
+	}
+	return fmt.Errorf("%w: project environment identity changed", domain.ErrPlanStale)
+}
+
+func (runner ProjectEnvironmentRunner) verifyEnvironment(ctx context.Context, action string) error {
+	observed, err := runner.observePreparedEnvironment(ctx)
+	if err != nil {
+		return err
+	}
+	fields := strings.Split(observed, "\t")
+	desired := "running"
+	if action == "down" {
+		desired = "stopped"
+	}
+	if len(fields) != 5 || fields[0] != desired || fields[1] == "" || fields[2] != "1" || fields[3] != runner.Project.ProjectID || fields[4] != runner.Project.Target {
+		return errors.New("project environment did not reach its prepared ownership and power state")
+	}
+	if action == "up" {
+		manifest, err := ProjectEnvironmentManifest(runner.Project, runner.Profile, runner.HasSecret)
+		if err != nil {
+			return err
+		}
+		manifest = append(manifest, '\n')
+		result, err := runner.Data.Execute(ctx, runner.Yard, ports.InstanceExecRequest{Command: []string{"cat", "/srv/env-meta/" + runner.Project.ProjectID + "/profile.json"}})
+		if err != nil || result.ExitCode != 0 || string(result.Stdout) != string(manifest) {
+			return errors.New("project environment manifest does not match its prepared profile")
+		}
+	}
+	return nil
 }

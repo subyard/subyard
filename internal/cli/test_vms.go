@@ -169,6 +169,8 @@ type testVMExecution struct {
 	hasSnapshot    bool
 	legacyRetained bool
 	noOp           bool
+	snapshot       *testvmsruntime.LeaseSlot
+	poolSnapshot   *testvmsruntime.LeasePool
 }
 
 const testVMStatusMaxBytes = 64 << 10
@@ -295,6 +297,14 @@ func (cli *CLI) prepareTestVMExecution(
 		}
 	}
 	execution := &testVMExecution{action: action, slot: slot, environment: environment, json: jsonOutput}
+	if action == "refresh" && loaded.Context.AccessKind != domain.AccessRemote {
+		pool, err := cli.probeTestVMPool(ctx, loaded)
+		if err != nil {
+			return nil, err
+		}
+		execution.poolSnapshot = pool
+	}
+
 	if action != "status" && action != "refresh" {
 		slotSnapshot, err := cli.probeTestVMSlot(ctx, loaded, slot)
 		if err != nil {
@@ -302,6 +312,7 @@ func (cli *CLI) prepareTestVMExecution(
 		}
 		slotState := slotSnapshot.State
 		execution.legacyRetained = slotSnapshot.LegacyRetained
+		execution.snapshot = &slotSnapshot
 		execution.identity = testvmsruntime.LeaseIdentity{
 			SlotID:             slotSnapshot.SlotID,
 			ResourceGeneration: slotSnapshot.ResourceGeneration,
@@ -376,41 +387,45 @@ func (execution *testVMExecution) remoteArguments(arguments []string) ([]string,
 	return forwarded, nil
 }
 
-func (cli *CLI) probeTestVMSlot(
-	ctx context.Context,
-	loaded config.Loaded,
-	slot int,
-) (testvmsruntime.LeaseSlot, error) {
+func (cli *CLI) probeTestVMPool(ctx context.Context, loaded config.Loaded) (*testvmsruntime.LeasePool, error) {
 	probeContext, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	result, err := cli.projectDataPlane().Execute(probeContext, loaded.Context, ports.InstanceExecRequest{
 		Command: []string{testvmsruntime.DefaultInstalledPath, "_test-vms-worker", "status"},
 	})
 	if err != nil {
-		return testvmsruntime.LeaseSlot{}, fmt.Errorf("read test VM broker status: %w", err)
+		return nil, fmt.Errorf("read test VM broker status: %w", err)
 	}
 	if result.ExitCode != 0 {
-		return testvmsruntime.LeaseSlot{}, fmt.Errorf("read test VM broker status: exit status %d", result.ExitCode)
+		return nil, fmt.Errorf("read test VM broker status: exit status %d", result.ExitCode)
 	}
 	if len(result.Stdout) > testVMStatusMaxBytes {
-		return testvmsruntime.LeaseSlot{}, errors.New("test VM broker status exceeds the safe probe limit")
+		return nil, errors.New("test VM broker status exceeds the safe probe limit")
 	}
 	var response testVMStatusResponse
 	if err := json.Unmarshal(result.Stdout, &response); err != nil {
-		return testvmsruntime.LeaseSlot{}, fmt.Errorf("decode test VM broker status: %w", err)
+		return nil, fmt.Errorf("decode test VM broker status: %w", err)
 	}
 	if response.SchemaVersion != testvmsruntime.LeaseProtocolVersion || response.Status != "ok" ||
 		response.Pool == nil || (response.Pool.SchemaVersion != 1 && response.Pool.SchemaVersion != testvmsruntime.LeaseSchemaVersion) ||
 		response.Pool.ResourceType != "agent-e2e" || response.Pool.ResourceID != "test-vms" {
-		return testvmsruntime.LeaseSlot{}, errors.New("test VM broker returned an invalid status response")
+		return nil, errors.New("test VM broker returned an invalid status response")
 	}
 	if err := validateTestVMStatusSlots(response.Pool.Slots); err != nil {
-		return testvmsruntime.LeaseSlot{}, errors.New("test VM broker returned an invalid status response")
+		return nil, errors.New("test VM broker returned an invalid status response")
+	}
+	return response.Pool, nil
+}
+
+func (cli *CLI) probeTestVMSlot(ctx context.Context, loaded config.Loaded, slot int) (testvmsruntime.LeaseSlot, error) {
+	pool, err := cli.probeTestVMPool(ctx, loaded)
+	if err != nil {
+		return testvmsruntime.LeaseSlot{}, err
 	}
 	wanted := fmt.Sprintf("slot-%03d", slot)
-	for _, candidate := range response.Pool.Slots {
+	for _, candidate := range pool.Slots {
 		if candidate.SlotID == wanted {
-			if response.Pool.SchemaVersion == 1 {
+			if pool.SchemaVersion == 1 {
 				candidate.LegacyRetained = true
 			}
 			return candidate, nil
@@ -500,6 +515,24 @@ func (cli *CLI) executeTestVMs(
 	if execution == nil {
 		return domain.AdapterResult{}, errors.New("test-vms execution is required")
 	}
+	if execution.snapshot != nil {
+		current, err := cli.probeTestVMSlot(ctx, loaded, execution.slot)
+		if err != nil {
+			return domain.AdapterResult{}, err
+		}
+		if testVMSlotBinding(current) != testVMSlotBinding(*execution.snapshot) {
+			return domain.AdapterResult{}, fmt.Errorf("%w: test VM slot changed after confirmation", domain.ErrPlanStale)
+		}
+	}
+	if execution.poolSnapshot != nil {
+		current, err := cli.probeTestVMPool(ctx, loaded)
+		if err != nil {
+			return domain.AdapterResult{}, err
+		}
+		if testVMPoolBinding(*current) != testVMPoolBinding(*execution.poolSnapshot) {
+			return domain.AdapterResult{}, fmt.Errorf("%w: test VM pool changed after confirmation", domain.ErrPlanStale)
+		}
+	}
 	if execution.noOp {
 		return domain.AdapterResult{
 			Schema: shelladapter.ProtocolSchema, OperationID: plan.OperationID, Status: "ok",
@@ -556,5 +589,62 @@ func (cli *CLI) executeTestVMs(
 			domain.ErrPlanStale,
 		)
 	}
+	if err == nil && result.Status == "ok" && execution.snapshot != nil {
+		current, verifyErr := cli.probeTestVMSlot(ctx, loaded, execution.slot)
+		if verifyErr != nil {
+			return result, verifyErr
+		}
+		if current.State != testvmsruntime.SlotAvailable || current.LeaseID != "" || current.ResourceGeneration != execution.identity.ResourceGeneration || (execution.action == "retire-legacy" && current.LegacyRetained) {
+			return result, errors.New("test VM physical cleanup did not publish the approved available slot")
+		}
+	}
 	return result, err
+}
+
+func testVMSlotBinding(slot testvmsruntime.LeaseSlot) string {
+	// Heartbeat/deadline telemetry does not expand the captured allocation scope.
+	slot.LastHeartbeatAt = time.Time{}
+	slot.ExpiresAt = time.Time{}
+	slot.NextRecoveryAt = time.Time{}
+	return operationStateDigest(slot)
+}
+func testVMPoolBinding(pool testvmsruntime.LeasePool) string {
+	var bindings []string
+	for _, slot := range pool.Slots {
+		bindings = append(bindings, testVMSlotBinding(slot))
+	}
+	return operationStateDigest(bindings)
+}
+func (execution *testVMExecution) binding() string {
+	if execution.snapshot != nil {
+		return testVMSlotBinding(*execution.snapshot)
+	}
+	if execution.poolSnapshot != nil {
+		return testVMPoolBinding(*execution.poolSnapshot)
+	}
+	return operationStateDigest(struct{ Action, Environment string }{execution.action, execution.environment})
+}
+func (execution *testVMExecution) steps() []domain.OperationStep {
+	decision := domain.StepApply
+	if execution.noOp {
+		decision = domain.StepSkip
+	}
+	if execution.action == "status" {
+		return nil
+	}
+	if execution.action == "refresh" {
+		return []domain.OperationStep{{ID: "base", Target: "test-vms/base/" + execution.environment, Observed: "captured active lease pool", Desired: "validated immutable base for approved environment; active allocations retained", Decision: decision, Preconditions: []string{"captured pool allocation identities remain unchanged"}, Verify: "native base validation succeeds before immutable publication", Consequence: "publish the validated immutable test VM base while retaining active allocations"}}
+	}
+	observed := "captured lease identity"
+	if execution.snapshot != nil {
+		observed = string(execution.snapshot.State) + " generation=" + strconv.FormatUint(execution.snapshot.ResourceGeneration, 10) + " epoch=" + strconv.FormatUint(execution.snapshot.LeaseEpoch, 10)
+	}
+	desired := "available; disposable owned guest disks and snapshots absent"
+	if execution.noOp && execution.snapshot != nil && execution.snapshot.State == testvmsruntime.SlotRecovering {
+		desired = "existing native recovery retained"
+	}
+	if execution.legacyRetained && execution.action == "revoke" {
+		desired = "available; legacy retained disks preserved"
+	}
+	return []domain.OperationStep{{ID: "slot", Target: fmt.Sprintf("test-vms/slot-%03d", execution.slot), Observed: observed, Desired: desired, Decision: decision, Preconditions: []string{"captured resource generation and lease epoch match native CAS"}, Verify: "native stop/empty-storage verification and available pool status", Consequence: "apply the captured test VM slot transition"}}
 }

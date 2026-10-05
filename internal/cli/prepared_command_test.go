@@ -97,7 +97,7 @@ func TestPreparedCommandResolverContract(t *testing.T) {
 		{name: "info", prepared: true, rpc: false},
 		{name: "remote", prepared: true, rpc: false},
 		{name: "update", prepared: true, rpc: true},
-		{name: "keys", rpc: false},
+		{name: "keys", prepared: true, rpc: true},
 		{name: "svc", rpc: false},
 	}
 	for _, test := range tests {
@@ -183,6 +183,7 @@ func TestPreparedCommandExecutesItsCapturedStopPlan(t *testing.T) {
 	runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{
 		Result: domain.AdapterResult{Schema: 1, OperationID: "prepared-execute", Status: "ok"},
 	}}}
+	powerScriptedIncus(runner, incus)
 	program, err := New(Options{
 		RepositoryRoot: root,
 		Environment: append(environment,
@@ -231,6 +232,7 @@ func TestPreparedCommandClassifiesProjectCommitFailure(t *testing.T) {
 	runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{
 		Result: domain.AdapterResult{Schema: 1, OperationID: "prepared-commit", Status: "ok"},
 	}}}
+	powerScriptedIncus(runner, incus)
 	program, err := New(Options{
 		RepositoryRoot: root,
 		Environment: append(environment,

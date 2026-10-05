@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/domain"
@@ -62,144 +61,9 @@ func (cli *CLI) runConfigSyncPush(
 }
 
 func (cli *CLI) runConfigSyncPushRequest(ctx context.Context, loaded config.Loaded, request configSyncPushOptions, assumeYes bool) int {
-	prepared, err := cli.prepareConfigSyncPush(ctx, loaded, request)
-	if err != nil {
-		cli.errorf("config sync push: %v", err)
-		return 1
-	}
-	defer prepared.cleanup(cli, ctx)
-	if request.authoring != nil && (prepared.createdCommit || prepared.preview.NeedsApply()) {
-		if err := cli.checkResourceConfigChange(ctx, loaded, *request.authoring); err != nil {
-			cli.errorf("config --git: %v", err)
-			return 1
-		}
-	}
-
-	fmt.Fprintln(cli.options.Stdout, "Versioned configuration push")
-	fmt.Fprintf(cli.options.Stdout, "  checkout: %s\n", prepared.checkout)
-	fmt.Fprintf(cli.options.Stdout, "  target: %s\n", prepared.upstream)
-	if prepared.createdCommit {
-		fmt.Fprintf(cli.options.Stdout, "  commit: %s\n", prepared.candidate)
-	} else {
-		fmt.Fprintln(cli.options.Stdout, "  commit: no new persistent configuration changes")
-	}
-	writeConfigSyncPlan(cli.options.Stdout, prepared.preview)
-	changed := prepared.pushRequired || prepared.repairPermissions || prepared.preview.NeedsApply()
-	consequences := []string{}
-	if prepared.repairPermissions {
-		consequences = append(consequences,
-			"remove group/world write permissions from the registered configuration checkout")
-	}
-	if changed && prepared.createdCommit {
-		consequences = append(consequences,
-			"advance the registered checkout with one configuration commit")
-	}
-	if changed && prepared.preview.InitializeHostID {
-		consequences = append(consequences,
-			"record owner host ID "+prepared.preview.HostID)
-	}
-	if changed {
-		for _, change := range prepared.preview.Changes {
-			consequences = append(consequences, change.Action+" "+change.Path)
-		}
-		if prepared.preview.ManifestChanged {
-			consequences = append(consequences,
-				"update versioned configuration manifest metadata")
-		}
-	}
-	if changed && request.materialize && configSyncPlanNeedsMaterialization(prepared.preview) {
-		consequences = append(consequences,
-			"refresh affected file settings in running local yards")
-	}
-	if changed && prepared.pushRequired {
-		consequences = append(consequences,
-			"push HEAD to exact upstream "+prepared.upstream+" without force")
-	}
-	orchestrator, operation, err := cli.planConfigSyncOperation(
-		ctx, loaded, "config sync push", "config.sync.push", changed,
-		consequences, assumeYes,
-	)
-	if errors.Is(err, application.ErrDeclined) {
-		cli.errorf("config sync push: operation declined")
-		return 1
-	}
-	if err != nil {
-		cli.errorf("config sync push: %v", err)
-		return 1
-	}
-	if !changed {
-		fmt.Fprintln(cli.options.Stdout,
-			"config sync push: checkout, live configuration and upstream are already converged")
-		return 0
-	}
-	if request.authoring != nil && (prepared.createdCommit || prepared.preview.NeedsApply()) {
-		if request.authoring.scope == config.ScopeYard {
-			unlock, err := lockIntegrationYard(ctx, loaded)
-			if err != nil {
-				cli.errorf("config --git: %v", err)
-				return 1
-			}
-			defer unlock()
-		}
-		if err := cli.checkResourceConfigChange(ctx, loaded, *request.authoring); err != nil {
-			cli.errorf("config --git: %v", err)
-			return 1
-		}
-	}
-	adapter := &configSyncPushAdapter{cli: cli, prepared: prepared}
-	orchestrator.Runner = adapter
-	if _, _, err := orchestrator.RunAdapter(ctx, operation, domain.AdapterRequest{
-		OperationID: operation.OperationID,
-		Adapter:     "config-sync",
-		Action:      "push-prepare",
-	}, nil); err != nil {
-		cli.errorf("config sync push: %v", err)
-		return 1
-	}
-	if request.materialize {
-		if err := cli.materializeConfigSyncPlan(
-			ctx, loaded, adapter.plan, true,
-		); err != nil {
-			cli.errorf("config sync push --apply: %v; upstream was not changed", err)
-			return 1
-		}
-	}
-	if prepared.pushRequired {
-		current, err := cli.configGitOutput(
-			ctx, prepared.checkout, "rev-parse", "--verify", "HEAD",
-		)
-		if err != nil || strings.TrimSpace(current) != adapter.plan.SourceCommit {
-			cli.errorf(
-				"config sync push: checkout changed before push; upstream was not changed",
-			)
-			return 1
-		}
-		if err := cli.checkConfigGitPushTarget(ctx, prepared.checkout, prepared.remote, prepared.remoteURL); err != nil {
-			cli.errorf("config sync push: %v; upstream was not changed", err)
-			return 1
-		}
-		refspec := adapter.plan.SourceCommit + ":refs/heads/" + prepared.remoteBranch
-		if err := cli.configGitRun(
-			ctx, prepared.checkout, "push", "--porcelain", "--",
-			prepared.remote, refspec,
-		); err != nil {
-			cli.errorf(
-				"config sync push: push failed without force: %v; local checkout remains ahead and can be retried",
-				err,
-			)
-			return 1
-		}
-	}
-	if adapter.plan.NeedsApply() {
-		fmt.Fprintf(cli.options.Stdout, "config sync: applied generation %d\n",
-			adapter.plan.Generation)
-	} else {
-		fmt.Fprintln(cli.options.Stdout, "config sync: already converged")
-	}
-	fmt.Fprintf(cli.options.Stdout, "config sync push: pushed %s\n",
-		adapter.plan.SourceCommit)
-	cli.writeConfigSyncFollowups(loaded, adapter.plan, request.materialize)
-	return 0
+	return cli.runPreparedConfigMutation(ctx, loaded, []string{"sync", "push"}, assumeYes, func(prepared *preparedCommand) error {
+		return prepared.prepareConfigPush(ctx, request)
+	})
 }
 
 func parseConfigSyncPushOptions(

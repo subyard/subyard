@@ -134,6 +134,9 @@ case "${command[0]:-}" in
         mapped=("${command[@]}")
         if [ "${mapped[4]:-}" = /srv/staging/_lease ]; then mapped[4]="$state_root/lease"; fi
         case "${mapped[4]:-}" in
+          /srv/qa-pool/.smoke-verified)
+            mapped[4]="$state_root/smoke-verified"
+            ;;
           /srv/staging/canonical/*)
             mapped[4]="$state_root/staging/${mapped[4]##*/}"
             mkdir -p "$state_root/staging"

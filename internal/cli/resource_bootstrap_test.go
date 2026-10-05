@@ -232,7 +232,7 @@ func TestResourceBootstrapResumesResourceAfterPlatformRebuild(t *testing.T) {
 	bootstrap.init.rebuildPlatform(program)
 	runtime := bootstrap.init.platform.(reconcileruntime.Runtime)
 	if runtime.ResourceCommand != "demo" || !slices.Equal(runtime.ResourceArguments, []string{"run", "--fixture-value", "two words"}) {
-		t.Fatalf("owner-group reexec lost the outer resource command: %q, %q", runtime.ResourceCommand, runtime.ResourceArguments)
+		t.Fatalf("retained adapter rebuild lost the outer resource command: %q, %q", runtime.ResourceCommand, runtime.ResourceArguments)
 	}
 }
 
@@ -301,12 +301,12 @@ func TestResourceBootstrapKeepsGitOnlyYardSettingsAsFallback(t *testing.T) {
 	if next.Environment["ENVIRONMENT_PROFILES"] != "existing fixture" || next.Environment["YARD_IMAGE"] != "cache:image" {
 		t.Fatalf("next command lost local selection or Git fallback: profiles=%q image=%q", next.Environment["ENVIRONMENT_PROFILES"], next.Environment["YARD_IMAGE"])
 	}
-	// Owner-group reexec rebuilds the adapter after publishing the local selection.
+	// Retained execution rebuilds the adapter after publishing the local selection.
 	program.options.InitPlatform = nil
 	bootstrap.init.rebuildPlatform(program)
 	runtime := bootstrap.init.platform.(reconcileruntime.Runtime)
 	if runtime.Yard.YardName != "cached" || runtime.ResourceCommand != "demo" || !slices.Equal(runtime.ResourceArguments, arguments) {
-		t.Fatalf("owner-group reexec lost the selected yard or outer resource arguments: %s, %q, %q", runtime.Yard.YardName, runtime.ResourceCommand, runtime.ResourceArguments)
+		t.Fatalf("retained adapter rebuild lost the selected yard or outer resource arguments: %s, %q, %q", runtime.Yard.YardName, runtime.ResourceCommand, runtime.ResourceArguments)
 	}
 }
 

@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -43,6 +44,7 @@ func (cli *CLI) runResourceCommand(
 		))
 		return 2
 	}
+	baseline := loaded
 	bootstrap, err := cli.prepareResourceBootstrap(ctx, loaded, definition, invocation.arguments)
 	if err != nil {
 		cli.errorf("%s: prepare bootstrap: %v", definition.Command, err)
@@ -63,13 +65,14 @@ func (cli *CLI) runResourceCommand(
 		}
 		return 1
 	}
-	assessment, err := cli.resources.AssessPrepareResult(
+	native, err := cli.resources.PrepareResult(
 		cli.coreActions, definition.Command, invocation.verb, output,
 	)
 	if err != nil {
 		cli.errorf("%s: %v", definition.Command, err)
 		return 1
 	}
+	assessment := native.Assessment
 	resourceConsequences := slices.Clone(assessment.Consequences)
 	assessment = bootstrap.augment(assessment)
 	ingress, err := cli.prepareResourceIngress(ctx, loaded, definition, invocation.verb)
@@ -91,6 +94,25 @@ func (cli *CLI) runResourceCommand(
 			resource.ErrResourceActionUnknown, assessment.Action,
 		))
 		return 1
+	}
+
+	runner := &resourceApplyRunner{
+		cli: cli, loaded: loaded, definition: definition, verb: invocation.verb,
+		localAction: localAction, effect: assessment.Effect, arguments: slices.Clone(invocation.arguments),
+		bootstrap: bootstrap, consequences: resourceConsequences, ingress: ingress, startupIntent: intent,
+	}
+	if native.Schema == resource.PrepareAssessmentSchemaV2 && cli.resourceExactInvocation(definition, arguments) {
+		prepared := &preparedCommand{CLI: cli, Definition: resourceCommandDefinition(definition), Arguments: slices.Clone(arguments), Loaded: loaded}
+		if err := prepared.attachResourceExecution(runner, baseline, native); err != nil {
+			cli.errorf("%s: prepare exact resource: %v", definition.Command, err)
+			return 1
+		}
+		defer prepared.Close()
+		if err := prepared.preparePlan(ctx); err != nil {
+			cli.errorf("%s: plan exact resource: %v", definition.Command, err)
+			return 1
+		}
+		return cli.runPreparedCommand(ctx, prepared, globalAssumeYes || invocation.assumeYes || cli.env["ASSUME_YES"] == "1")
 	}
 
 	operationID := cli.env["SUBYARD_OPERATION_ID"]
@@ -176,12 +198,6 @@ func (cli *CLI) runResourceCommand(
 		}
 	}
 
-	runner := &resourceApplyRunner{
-		cli: cli, loaded: loaded, definition: definition, verb: invocation.verb,
-		localAction: localAction, effect: assessment.Effect, arguments: slices.Clone(invocation.arguments),
-		bootstrap: bootstrap, consequences: resourceConsequences,
-		ingress: ingress, startupIntent: intent,
-	}
 	orchestrator.Runner = runner
 	_, diagnostics, err := orchestrator.RunAdapter(ctx, plan, domain.AdapterRequest{
 		Schema:      1,
@@ -266,6 +282,7 @@ func (cli *CLI) prepareResourceModeTimeout(
 	arguments []string,
 	mode string,
 	timeout time.Duration,
+	nativeContext ...map[string]string,
 ) ([]byte, error) {
 	if err := validateResourceHandler(definition.HandlerPath()); err != nil {
 		return nil, err
@@ -276,6 +293,9 @@ func (cli *CLI) prepareResourceModeTimeout(
 	configureResourceProcess(command)
 	command.Dir = cli.options.WorkingDir
 	command.Env = cli.resourceEnvironment(loaded, definition, mode, "", "")
+	if len(nativeContext) != 0 {
+		command.Env = environmentList(environmentMap(command.Env), nativeContext[0])
+	}
 	command.Stdin = nil
 	stdout := &boundedResourceBuffer{limit: resource.MaxPrepareOutputBytes}
 	stderr := &boundedResourceBuffer{limit: resource.MaxPrepareOutputBytes}
@@ -409,6 +429,9 @@ type resourceApplyRunner struct {
 	consequences  []string
 	ingress       *resourceIngress
 	startupIntent *resourceStartupIntent
+	exact         *resourceExecution
+	verify        *resourceExecution
+	skipHandler   bool
 }
 
 type resourceSessionExitError struct{ code int }
@@ -433,6 +456,9 @@ func (runner *resourceApplyRunner) Run(
 	if err := validateResourceHandler(runner.definition.HandlerPath()); err != nil {
 		return result, "", err
 	}
+	if runner.exact != nil {
+		return runner.runExactResource(ctx, request)
+	}
 	if runner.bootstrap != nil {
 		if err := runner.bootstrap.apply(ctx, runner.cli); err != nil {
 			return result, "", err
@@ -455,52 +481,69 @@ func (runner *resourceApplyRunner) Run(
 			}
 		}
 	}
-	command := exec.CommandContext(ctx, runner.definition.HandlerPath(), runner.arguments...)
-	configureResourceProcess(command)
-	command.Dir = runner.cli.options.WorkingDir
-	command.Env = runner.cli.resourceApplyEnvironment(
-		runner.loaded, runner.definition, runner.localAction, request.OperationID, runner.effect,
-	)
-	var restoreForeground func() error
-	// The engine owns confirmation. Non-session handlers must not inherit the
-	// operator terminal: their separate process group can otherwise be stopped
-	// when a child such as incus exec probes or reads it.
-	if runner.effect == domain.ActionSession {
-		command.Stdin = runner.cli.options.Stdin
-		var err error
-		restoreForeground, err = configureResourceSessionForeground(command, command.Stdin)
-		if err != nil {
-			return result, "", err
-		}
-	}
-	command.Stdout = runner.cli.options.Stdout
-	command.Stderr = runner.cli.options.Stderr
-	var runErr error
-	if restoreForeground != nil {
-		runErr = runResourceTerminalSession(command)
-	} else {
-		runErr = command.Run()
-	}
-	if restoreForeground != nil {
-		if err := restoreForeground(); err != nil {
-			return result, "", err
-		}
-	}
-	if runErr != nil {
-		if rollbackErr := runner.ingress.rollback(runner, request.OperationID); rollbackErr != nil {
-			return result, "", fmt.Errorf("run resource handler: %w; owned ingress rollback failed: %v", runErr, rollbackErr)
-		}
-		if ctx.Err() != nil {
-			return result, "", fmt.Errorf("run resource handler: %w", ctx.Err())
-		}
-		var exitError *exec.ExitError
-		if errors.As(runErr, &exitError) {
-			if runner.effect == domain.ActionSession && exitError.ExitCode() >= 0 {
-				return result, "", &resourceSessionExitError{code: exitError.ExitCode()}
+	if !runner.skipHandler {
+		command := exec.CommandContext(ctx, runner.definition.HandlerPath(), runner.arguments...)
+		configureResourceProcess(command)
+		command.Dir = runner.cli.options.WorkingDir
+		command.Env = runner.cli.resourceApplyEnvironment(
+			runner.loaded, runner.definition, runner.localAction, request.OperationID, runner.effect,
+		)
+		if runner.verify != nil {
+			steps, err := json.Marshal(runner.verify.current.Steps)
+			if err != nil {
+				return result, "", err
 			}
-			return result, "", fmt.Errorf("resource handler exited with status %d", exitError.ExitCode())
+			command.Env = environmentList(environmentMap(command.Env), map[string]string{
+				"SUBYARD_RESOURCE_BINDING": runner.verify.current.Binding,
+				"SUBYARD_RESOURCE_STEPS":   string(steps),
+			})
 		}
-		return result, "", fmt.Errorf("run resource handler: %w", runErr)
+		var restoreForeground func() error
+		// The engine owns confirmation. Non-session handlers must not inherit the
+		// operator terminal: their separate process group can otherwise be stopped
+		// when a child such as incus exec probes or reads it.
+		if runner.effect == domain.ActionSession {
+			command.Stdin = runner.cli.options.Stdin
+			var err error
+			restoreForeground, err = configureResourceSessionForeground(command, command.Stdin)
+			if err != nil {
+				return result, "", err
+			}
+		}
+		command.Stdout = runner.cli.options.Stdout
+		command.Stderr = runner.cli.options.Stderr
+		var runErr error
+		if restoreForeground != nil {
+			runErr = runResourceTerminalSession(command)
+		} else {
+			runErr = command.Run()
+		}
+		if restoreForeground != nil {
+			if err := restoreForeground(); err != nil {
+				return result, "", err
+			}
+		}
+		if runErr != nil {
+			if rollbackErr := runner.ingress.rollback(runner, request.OperationID); rollbackErr != nil {
+				return result, "", fmt.Errorf("run resource handler: %w; owned ingress rollback failed: %v", runErr, rollbackErr)
+			}
+			if ctx.Err() != nil {
+				return result, "", fmt.Errorf("run resource handler: %w", ctx.Err())
+			}
+			var exitError *exec.ExitError
+			if errors.As(runErr, &exitError) {
+				if runner.effect == domain.ActionSession && exitError.ExitCode() >= 0 {
+					return result, "", &resourceSessionExitError{code: exitError.ExitCode()}
+				}
+				return result, "", fmt.Errorf("resource handler exited with status %d", exitError.ExitCode())
+			}
+			return result, "", fmt.Errorf("run resource handler: %w", runErr)
+		}
+	}
+	if runner.verify != nil {
+		if err := runner.verify.verify(ctx); err != nil {
+			return result, "", err
+		}
 	}
 	if err := runner.ingress.apply(ctx, runner, request.OperationID); err != nil {
 		return result, "", err

@@ -87,6 +87,14 @@ fi
 [ "$(/usr/bin/stat -c '%u:%g' "$TEST_DATA_HOME")" = "$(/usr/bin/id -u):$(/usr/bin/id -g)" ] || exit 47
 exit 43
 SH
+cat > "$TMP/bin/apt-get" <<'SH'
+#!/usr/bin/env bash
+[ "$*" = 'install -y -qq --no-install-recommends acl' ] || exit 97
+SH
+cat > "$TMP/bin/dispatcher" <<'SH'
+#!/usr/bin/env bash
+[ "$#" = 2 ] && [ "$1" = _incus-operator-access ] && [ "$2" = "$(/usr/bin/id -u)" ] || exit 96
+SH
 chmod 0755 "$TMP/bin"/*
 
 run_installer() {
@@ -104,6 +112,7 @@ run_installer() {
   TEST_INCUS_VERSION="${TEST_INCUS_VERSION:-}" \
   TEST_INCUS_FIXTURE="${TEST_INCUS_FIXTURE:-}" \
   TEST_FAKE_BIN="${TEST_FAKE_BIN:-}" \
+  SUBYARD_DISPATCHER_PATH="${TEST_DISPATCHER_PATH-$TMP/bin/dispatcher}" \
   SUBYARD_ENGINE_CONTEXT=1 \
   SUBYARD_ENGINE_CONTEXT_SCHEMA=1 \
   SUBYARD_USER="$(id -un)" \
@@ -166,6 +175,14 @@ rm -f "$TMP/chown.log"
 TEST_UID=1000 TEST_SUDO_MODE=reexec run_installer "$canonical_home" \
   || fail 'canonical root re-entry rejected the operator-prepared data home'
 [ ! -e "$TMP/chown.log" ] || fail 'canonical root re-entry attempted ownership repair'
+
+# Standalone trusted adapters need no captured dispatcher; they retain relogin semantics.
+TEST_UID=1000 TEST_SUDO_MODE=reexec TEST_DISPATCHER_PATH='' run_installer "$canonical_home" \
+  || fail 'standalone trusted installer required a dispatcher'
+# Captured numeric actors cannot be replaced before installation.
+if TEST_UID=0 run_installer "$canonical_home" --operator-uid=424242; then
+  fail 'installer accepted a changed captured numeric operator'
+fi
 
 # A direct root run cannot create a missing home or repair a foreign owner.
 missing_home="$TMP/missing/.subyard"

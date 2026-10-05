@@ -86,7 +86,8 @@ def core_adoption_problem(entry, current):
         '/usr/local/libexec/subyard/projects-changed': {
             # Original installer heredoc, before shared resource hooks.
             'b632dd04a13ba11abff0b7502785ae09d8a6119c0c1261f338861796de82df35',
-            'cefded0322e335042ff9a0e74f2cba187fb1a2a6aa8a2ffbcdf249ecc8e12588'
+            'cefded0322e335042ff9a0e74f2cba187fb1a2a6aa8a2ffbcdf249ecc8e12588',
+            '11af99ae9813d9ba1ee71c3d19eeb1457b4e6dae9c45e6f25b781b5ad69211d7'
         }
     }
     accepted_digests = {entry['digest']} | predecessor_digests.get(entry.get('path'), set())
@@ -300,8 +301,19 @@ def main():
     if expected and fingerprint != expected:
         raise ValueError('integration plan is stale')
     if mode == 'observe':
+        facts = []
+        for name in sorted(set(previous) | set(wanted)):
+            entry = wanted.get(name) or previous[name]
+            value = observed.get(name)
+            facts.append({'key': name, 'desired': digest(encode(clean(wanted[name]))) if name in wanted else 'absent',
+                          'observed': digest(encode([previous.get(name), value, metadata.get(name)])),
+                          'at_desired': (value is None if name not in wanted else
+                              previous.get(name) == clean(entry) and (
+                                  entry['kind'] in ('structured', 'package') or
+                                  value == entry['digest'] and metadata.get(name) == expected_metadata(entry, home, uid)))})
         print(json.dumps({'fingerprint': fingerprint, 'changed': changed, 'retired': retired,
-                          'adopted': [clean(e) for e in adopted], 'initial': not established}))
+                          'adopted': [clean(e) for e in adopted], 'initial': not established,
+                          'facts': facts}))
         return
     if mode not in ('apply', 'commit'):
         raise ValueError('invalid inventory operation')

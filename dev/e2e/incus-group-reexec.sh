@@ -15,6 +15,13 @@ POWER_UNIT=''
 POWER_RECONCILER=''
 SG_PROOF=''
 CANDIDATE=''
+OPERATOR_UID=''
+ACCESS_SOCKET=''
+SOCKET_ID=''
+SOCKET_ACL=''
+POLICY_LOCK=/run/lock/subyard-network/policy.lock
+POLICY_LOCK_ID=''
+POLICY_LOCK_ACL=''
 
 die() { printf 'incus-group-reexec-e2e: %s\n' "$*" >&2; exit 2; }
 info() { printf '  [ .. ] %s\n' "$*"; }
@@ -38,7 +45,7 @@ fi
 
 [ "${SUBYARD_GROUP_REEXEC_ROOT:-}" = 1 ] \
   || die 'run as the disposable VM operator, not directly as root'
-for command in getent grep runuser sg sha256sum ss systemctl timeout useradd userdel visudo; do
+for command in python3 getent grep runuser sg sha256sum ss systemctl timeout useradd userdel visudo; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
 [ -x "$ROOT/.build/yard" ] || die 'development candidate was not built'
@@ -104,6 +111,47 @@ cleanup_power_fixture() {
   [ ! -e "$POWER_UNIT" ]
 }
 
+cleanup_policy_lock_grant() {
+  [ -n "$POLICY_LOCK_ID" ] || return 0
+  # Pin the recorded inode: a privileged pathname tool must never select a
+  # replacement or a symlink. Failure retains the account instead of reusing its UID.
+  python3 - "$POLICY_LOCK" "$POLICY_LOCK_ID" "$OPERATOR_UID" "$POLICY_LOCK_ACL" <<'PYACL'
+import fcntl, os, stat, subprocess, sys
+path, identity, uid, unrelated = sys.argv[1:]
+fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    def key(value):
+        return f"{value.st_dev}:{value.st_ino}:{value.st_uid}:{value.st_gid}:{stat.S_IMODE(value.st_mode):o}"
+    def check():
+        pinned, current = os.fstat(fd), os.lstat(path)
+        if not stat.S_ISREG(pinned.st_mode) or pinned.st_nlink != 1 or key(pinned) != identity or key(current) != identity:
+            raise RuntimeError("recorded policy lock changed")
+    def acl():
+        result = subprocess.run(["/usr/bin/getfacl", "-cpnE", "--", f"/proc/self/fd/{fd}"],
+                                pass_fds=(fd,), check=True, capture_output=True, text=True, timeout=10)
+        return result.stdout.strip().splitlines()
+    check()
+    before = acl()
+    expected = [line for line in before if not line.startswith(f"user:{uid}:") and not line.startswith("mask:")]
+    if "\n".join(expected) != unrelated:
+        raise RuntimeError("unrelated policy lock access changed")
+    actor = [line for line in before if line.startswith(f"user:{uid}:")]
+    if actor and actor != [f"user:{uid}:rw-"]:
+        raise RuntimeError("fixture actor grant is ambiguous")
+    check()
+    if actor:
+        subprocess.run(["/usr/bin/setfacl", "-n", "-x", f"u:{uid}", "--", f"/proc/self/fd/{fd}"],
+                       pass_fds=(fd,), check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+    check()
+    after = acl()
+    if any(line.startswith(f"user:{uid}:") for line in after) or "\n".join(line for line in after if not line.startswith("mask:")) != unrelated:
+        raise RuntimeError("policy lock grant cleanup did not preserve native access")
+finally:
+    os.close(fd)
+PYACL
+}
+
 cleanup() {
   local rc=$? project_marker='' account_home='' expected_sudoers keep_state=0
   trap - EXIT INT TERM
@@ -160,7 +208,26 @@ cleanup() {
     if [[ "$OPERATOR" = sy-group-* ]] && [ "$account_home" = "$OPERATOR_HOME" ] \
       && [ -f "$OPERATOR_HOME/.subyard-group-reexec-home" ] \
       && [ "$(cat "$OPERATOR_HOME/.subyard-group-reexec-home")" = "$MARKER" ]; then
-      userdel "$OPERATOR" >/dev/null 2>&1 || rc=3
+      if [ -n "$ACCESS_SOCKET" ] && [ -S "$ACCESS_SOCKET" ] && [ ! -L "$ACCESS_SOCKET" ] \
+        && [ "$(stat -c '%d:%i:%u:%g:%a' "$ACCESS_SOCKET")" = "$SOCKET_ID" ]; then
+        if /usr/bin/getfacl -cpnE -- "$ACCESS_SOCKET" | grep -Fxq "user:$OPERATOR_UID:rw-"; then
+          /usr/bin/setfacl -n -x "u:$OPERATOR_UID" -- "$ACCESS_SOCKET" || { rc=3; keep_state=1; }
+        fi
+      elif [ -n "$ACCESS_SOCKET" ] && [ -S "$ACCESS_SOCKET" ] \
+        && /usr/bin/getfacl -cpnE -- "$ACCESS_SOCKET" | grep -Fxq "user:$OPERATOR_UID:rw-"; then
+        printf 'incus-group-reexec-e2e: retaining operator after socket identity changed\n' >&2
+        rc=3; keep_state=1
+      fi
+      if [ "$keep_state" = 0 ] && ! cleanup_policy_lock_grant; then
+        printf 'incus-group-reexec-e2e: retaining operator after ambiguous policy-lock ACL cleanup\n' >&2
+        rc=3; keep_state=1
+      fi
+      if [ "$keep_state" = 0 ]; then
+        [ "$(id -u "$OPERATOR")" = "$OPERATOR_UID" ] || { rc=3; keep_state=1; }
+      fi
+      if [ "$keep_state" = 0 ]; then
+        userdel "$OPERATOR" >/dev/null 2>&1 || rc=3
+      fi
     else
       printf 'incus-group-reexec-e2e: refusing to remove ambiguous fixture account %s\n' \
         "$OPERATOR" >&2
@@ -181,6 +248,7 @@ trap cleanup EXIT INT TERM
 ensure_incus_platform() {
   local base_operator base_home platform_root marker temporary
   if command -v incus >/dev/null 2>&1 \
+    && [ -x /usr/bin/getfacl ] && [ -x /usr/bin/setfacl ] \
     && incus info >/dev/null 2>&1 \
     && incus storage show default --project default >/dev/null 2>&1 \
     && incus network show incusbr0 --project default >/dev/null 2>&1; then
@@ -205,6 +273,7 @@ ensure_incus_platform() {
       . "$ROOT/tests/helpers/test-context.sh"
       setup_test_context "$PLATFORM_ROOT/bootstrap"
       export SUBYARD_USER SUBYARD_OPERATOR_HOME="$HOME"
+      export SUBYARD_DISPATCHER_PATH="$ROOT/.build/yard"
       export SUBYARD_CONFIG_DIR="$ROOT/config"
       export SUBYARD_CONFIG_HOME="$PLATFORM_ROOT/bootstrap-config"
       export SUBYARD_HOME="$PLATFORM_ROOT"
@@ -338,7 +407,37 @@ chmod 0600 "$OPERATOR_HOME/.config/subyard/yards/$YARD_NAME/config.env"
 [ "$(setting "$YARD_NAME" SSH_PORT)" = "$ssh_port" ] \
   || die 'named yard did not resolve its registered SSH port'
 
-info 'running the first named init through the stale-group process'
+OPERATOR_UID="$(id -u "$OPERATOR")"
+ACCESS_SOCKET=/var/lib/incus/unix.socket
+[ ! -S /run/incus/unix.socket ] || ACCESS_SOCKET=/run/incus/unix.socket
+[ -S "$ACCESS_SOCKET" ] && [ ! -L "$ACCESS_SOCKET" ] || die 'native socket is unavailable'
+[ -x /usr/bin/getfacl ] && [ -x /usr/bin/setfacl ] || die 'native ACL tools are unavailable'
+SOCKET_ID="$(stat -c '%d:%i:%u:%g:%a' "$ACCESS_SOCKET")"
+SOCKET_ACL="$(/usr/bin/getfacl -cpnE -- "$ACCESS_SOCKET" | sed '/^mask:/d')"
+# Initialize only the existing native lock contract, without actor grants or
+# network readiness. Its retained inode is the unrelated-access preservation oracle.
+"$ROOT/.build/yard" _network-lock ensure || die 'native policy lock initialization failed'
+[ -f "$POLICY_LOCK" ] && [ ! -L "$POLICY_LOCK" ] \
+  && [ "$(stat -c '%u:%g:%a:%h' "$POLICY_LOCK")" = "0:$(getent group incus-admin | cut -d: -f3):660:1" ] \
+  || die 'native policy lock ownership or permissions are unsafe'
+POLICY_LOCK_ID="$(stat -c '%d:%i:%u:%g:%a' "$POLICY_LOCK")"
+POLICY_LOCK_ACL="$(/usr/bin/getfacl -cpnE -- "$POLICY_LOCK" | sed '/^mask:/d')"
+if operator_env "$CANDIDATE/.build/yard" _network-lock check >/dev/null 2>&1; then
+  die 'fresh actor can already check the native policy lock'
+fi
+if operator_env python3 - "$POLICY_LOCK" >/dev/null 2>&1 <<'PYLOCK'
+import fcntl, os, sys
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_NOFOLLOW)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+finally:
+    os.close(fd)
+PYLOCK
+then
+  die 'fresh actor can already acquire the native policy lock'
+fi
+info 'running first named init while retaining its approved parent'
+
 first_output="$STATE/first-init.out"
 if ! operator_env DEV_UID=1357 "$CANDIDATE/.build/yard" \
   -Y "$YARD_NAME" init --yes > "$first_output" 2>&1; then
@@ -348,11 +447,25 @@ fi
 grep -Fq "added $OPERATOR to incus-admin" "$first_output" \
   || die 'product installer did not add the fixture operator to incus-admin'
 grep -Fq "SSH_PORT $ssh_port is unique across configured yards" "$first_output" \
-  || die 'resumed init did not validate the named SSH port in isolated contexts'
+  || die 'retained init did not validate the named SSH port in isolated contexts'
 grep -Fq 'Subyard initialized' "$first_output" \
-  || die 'resumed named init did not complete'
-[ "$(cat "$SG_PROOF")" = incus-admin ] \
-  || die 'first named init did not use exactly one real sg incus-admin re-exec'
+  || die 'retained named init did not complete'
+[ ! -s "$SG_PROOF" ] || die 'first named init replaced its approved parent through sg'
+[ "$(stat -c '%d:%i:%u:%g:%a' "$ACCESS_SOCKET")" = "$SOCKET_ID" ] \
+  || die 'operator activation changed native socket identity or permissions'
+/usr/bin/getfacl -cpnE -- "$ACCESS_SOCKET" | grep -Fxq "user:$OPERATOR_UID:rw-" \
+  || die 'first native init did not grant the captured operator socket access'
+[ "$(/usr/bin/getfacl -cpnE -- "$ACCESS_SOCKET" | sed "/^user:$OPERATOR_UID:/d; /^mask:/d")" = "$SOCKET_ACL" ] \
+  || die 'operator activation changed unrelated native socket access'
+
+[ "$(stat -c '%d:%i:%u:%g:%a' "$POLICY_LOCK")" = "$POLICY_LOCK_ID" ] \
+  || die 'operator activation changed native policy-lock identity or permissions'
+/usr/bin/getfacl -cpnE -- "$POLICY_LOCK" | grep -Fxq "user:$OPERATOR_UID:rw-" \
+  || die 'first native init did not grant the captured operator policy-lock access'
+[ "$(/usr/bin/getfacl -cpnE -- "$POLICY_LOCK" | sed "/^user:$OPERATOR_UID:/d; /^mask:/d")" = "$POLICY_LOCK_ACL" ] \
+  || die 'operator activation changed unrelated native policy-lock access'
+ok 'retained native parent verified and acquired the original policy lock without sg'
+
 id -nG "$OPERATOR" | tr ' ' '\n' | grep -Fxq incus-admin \
   || die 'product installer did not persist incus-admin membership'
 incus project show "$PROJECT" >/dev/null 2>&1 \
@@ -382,7 +495,7 @@ fi
   || die 'named init polluted the synthetic default SSH port'
 [ "$(setting "$YARD_NAME" SSH_PORT)" = "$ssh_port" ] \
   || die 'named init changed the named SSH port'
-ok 'real sg re-exec preserved the explicit override and named-yard boundary'
+ok 'retained parent preserved the explicit override and named-yard boundary'
 
 instance_snapshot() {
   local state config_hash init_start
@@ -402,13 +515,16 @@ if ! operator_env DEV_UID=1357 "$CANDIDATE/.build/yard" \
   tail -n 160 "$retry_output" >&2 || true
   die 'repeated named init failed'
 fi
-grep -Fq 'Everything is already set up' "$retry_output" \
-  || die 'repeated named init did not report convergence'
+if ! grep -Fq 'Everything is already set up' "$retry_output"; then
+  # Only canonical decisions and IDs: no config, target or private binding payload.
+  sed -nE 's/^  \[(apply|skip|conditional)\] (init\.[A-Za-z0-9_.-]+):.*/  [\1] \2/p' \
+    "$retry_output" | tail -n 40 >&2
+  die 'repeated named init did not report convergence'
+fi
 [ "$(instance_snapshot)" = "$before" ] \
   || die 'repeated named init restarted or mutated the converged yard'
-[ "$(cat "$SG_PROOF")" = incus-admin ] \
-  || die 'converged retry unexpectedly invoked sg again'
+[ ! -s "$SG_PROOF" ] || die 'converged retry unexpectedly invoked sg'
 [ "$(setting default SSH_PORT)" = 2222 ] \
   || die 'converged retry polluted the synthetic default SSH port'
 
-printf 'ok: first named init survives real incus-admin re-exec without crossing config boundaries\n'
+printf 'ok: first named init retains exact approval through native operator access without crossing config boundaries\n'

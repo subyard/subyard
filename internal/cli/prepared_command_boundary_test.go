@@ -49,7 +49,7 @@ func TestUnknownCoreHandlerFailsStartup(t *testing.T) {
 
 func TestRPCPlanLimitAndDuplicatePreserveOwnedPlans(t *testing.T) {
 	root, environment, _ := preparationParityFixture(t)
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root})
+	program, err := New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root, Incus: lifecycleIncus()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestRPCPlanLimitAndDuplicatePreserveOwnedPlans(t *testing.T) {
 
 func TestRPCDisconnectClosesPreparedResourcesWithoutExecution(t *testing.T) {
 	root, environment, _ := preparationParityFixture(t)
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root})
+	program, err := New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root, Incus: lifecycleIncus()})
 	if err != nil {
 		t.Fatal(err)
 	}

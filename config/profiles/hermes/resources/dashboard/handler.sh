@@ -324,16 +324,41 @@ cmd_status() {
 }
 
 emit_resource_assessment() {
-  local action="$1" changed="$2" separator=""
+  local action="$1" changed="$2" desired observed decision binding target consequence
   shift 2
-  printf '{"schema":"yard.resource-action-assessment.v1","action":"%s","changed":%s,"consequences":[' \
-    "$action" "$changed"
-  local consequence
-  for consequence in "$@"; do
-    printf '%s"%s"' "$separator" "$consequence"
-    separator=,
-  done
-  printf ']}\n'
+  # Queries remain on the dedicated read contract.
+  if [ "$action" != up ] && [ "$action" != down ]; then
+    printf '{"schema":"yard.resource-action-assessment.v1","action":"%s","changed":false,"consequences":[]}\n' "$action"
+    return
+  fi
+  case "$action" in
+    up) consequence="publish one owner-host Tailscale endpoint to the guest loopback endpoint" ;;
+    down) consequence="remove the owned owner-host route and its ownership metadata" ;;
+  esac
+  target="incus:$INCUS_PROJECT/$YARD_INSTANCE_NAME/$HERMES_DEVICE"
+  desired=absent
+  observed=absent
+  if [ "$action" = up ]; then
+    desired="sha256:$(desired_route_fingerprint)"
+    observed=absent
+    if device_exists; then observed="sha256:$(device_fingerprint)"; fi
+    # Active ownership and endpoint readiness are part of the same bounded route effect.
+    if route_matches && owner_endpoint_ready; then observed="$desired"; else observed="pending:$observed"; fi
+  elif device_exists; then
+    observed="sha256:$(device_fingerprint)"
+  elif [ -n "$(ownership_marker)" ]; then
+    observed=stale-ownership
+  fi
+  decision=apply
+  if [ "$changed" = false ]; then decision=skip; observed="$desired"; fi
+  binding="$(printf '%s\n' "$target" "$action" "$desired" | sha256sum | awk '{print $1}')"
+  jq -cn --arg action "$action" --argjson changed "$changed" --arg binding "$binding" \
+    --arg target "$target" --arg observed "$observed" --arg desired "$desired" --arg decision "$decision" --arg consequence "$consequence" \
+    '{schema:"yard.resource-action-assessment.v2",action:$action,changed:$changed,binding:$binding,
+      steps:[{id:"route",target:$target,observed:$observed,desired:$desired,
+        decision:$decision,preconditions:["route device is absent or matches its native ownership fingerprint"],
+        verify:"owned route and endpoint converge, or route and ownership marker are absent",consequence:$consequence}]}
+      | . + {consequences:[.steps[]|select(.decision != "skip")|.consequence]}'
 }
 
 require_no_resource_arguments() {
@@ -369,20 +394,15 @@ prepare_resource() {
       if [ "$changed" = false ]; then
         owner_endpoint_ready || changed=true
       fi
-      if [ "$changed" = true ]; then
-        emit_resource_assessment up true \
-          "publish one owner-host Tailscale endpoint to the guest loopback endpoint"
-      else
-        emit_resource_assessment up false
-      fi
+      emit_resource_assessment up "$changed"
       ;;
     down)
       svc_require_yard_running
       if device_exists; then
         device_is_authorized || die "refusing to remove foreign or unowned device '$HERMES_DEVICE'"
-        emit_resource_assessment down true "remove the owned owner-host route"
+        emit_resource_assessment down true
       elif [ -n "$(ownership_marker)" ]; then
-        emit_resource_assessment down true "remove stale owner-host route ownership metadata"
+        emit_resource_assessment down true
       else
         emit_resource_assessment down false
       fi
@@ -406,11 +426,26 @@ case "${SUBYARD_RESOURCE_MODE:-}" in
     [ -n "$sub" ] || svc_usage_error "resource verb is required"
     prepare_resource "$sub" "$@"
     ;;
+  verify)
+    case "$sub" in up|down) ;; *) die "unsupported Hermes verifier" ;; esac
+    prepare_resource "$sub" "$@"
+    ;;
   apply)
     case "$sub" in up|is-up|status|down) ;; *) die "unknown Hermes dashboard apply verb '$sub'" ;; esac
     require_no_resource_arguments "$sub" "$@"
     require_resource_apply "$sub"
     if [ "$sub" = is-up ]; then cmd_is_up; exit $?; fi
+    if [ -n "${SUBYARD_RESOURCE_STEPS:-}" ] && { [ "$sub" = up ] || [ "$sub" = down ]; }; then
+      fresh="$(prepare_resource "$sub")"
+      [ "$(jq -r .binding <<<"$fresh")" = "${SUBYARD_RESOURCE_BINDING:-}" ] \
+        || die "plan_stale: Hermes route target binding changed"
+      jq -en --argjson approved "$SUBYARD_RESOURCE_STEPS" --argjson current "$(jq -c .steps <<<"$fresh")" '
+        ($approved|length) == ($current|length) and
+        all(range(0; $approved|length); . as $i | $approved[$i] as $a | $current[$i] as $c |
+          $a.id == $c.id and $a.target == $c.target and $a.desired == $c.desired and
+          (($c.decision == "skip") or ($a.decision == "apply" and $a.observed == $c.observed)))' >/dev/null \
+        || die "plan_stale: Hermes route native scope changed"
+    fi
     svc_require_yard_running
     case "$sub" in
       up) cmd_up ;;

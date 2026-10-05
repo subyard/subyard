@@ -15,6 +15,7 @@ DEFAULT_POOL_BEFORE=''
 HOST_DEFAULT_ROUTE_BEFORE=''
 HOST_GLOBAL_IPV4_BEFORE=''
 BASELINE_BRIDGE=incusbr0
+FIXTURE_STARTED="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
 
 die() { printf 'nested-teardown-boundary: %s\n' "$*" >&2; exit 2; }
 
@@ -36,9 +37,8 @@ if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
   sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y qemu-system-x86 >/dev/null
 fi
 
-if [ ! -x "$ROOT/.build/yard" ]; then
-  "$ROOT/dev/build-engine.sh"
-fi
+# The synced development candidate includes every manifest-declared native profile.
+make -C "$ROOT" build
 
 bounded_command() {
   local label="$1" rc
@@ -260,12 +260,19 @@ remove_owned_outer_backend() {
 }
 
 cleanup() {
-  local rc=$? cleanup_failed=0
+  local rc=$? cleanup_failed=0 oom_state
   trap - EXIT INT TERM
   set +e
   if [ "$rc" != 0 ] && [ -n "$OUTER_INSTANCE" ] \
     && [ "$(incus config get "$OUTER_INSTANCE" user.subyard.managed \
       --project "$OUTER_PROJECT" 2>/dev/null)" = true ]; then
+    if oom_state="$(timeout 10 sudo -n journalctl -k --no-pager --since "$FIXTURE_STARTED" |
+      awk '/Out of memory: Killed process [0-9]+ \(qemu/ {found=1}
+        END {print found ? "present" : "absent"}')"; then
+      printf 'nested-teardown-boundary: fixture qemu_oom_kill=%s\n' "$oom_state" >&2
+    else
+      printf 'nested-teardown-boundary: fixture qemu_oom_kill=unknown\n' >&2
+    fi
     printf '\n== failed nested yard: instance and console ==\n' >&2
     timeout 10 incus info "$OUTER_INSTANCE" --project "$OUTER_PROJECT" --show-log >&2
     timeout 10 incus console "$OUTER_INSTANCE" --project "$OUTER_PROJECT" --show-log \
@@ -419,7 +426,7 @@ project_id="$(jq -r '.projectId' "$project_state")"
 outer_source="/srv/workspaces/$project_id/src"
 
 yard code "$project_id" --yes > "$STATE/code.out"
-outer_ssh="$(setting SSH_HOST)"
+outer_ssh="$(setting SSH_HOST).code"
 outer_ssh_namespace="$(printf '%s' "$outer_ssh" | base64 -w0 | tr '+/' '-_' | tr -d '=')"
 descriptor="$SUBYARD_CONFIG_HOME/workspaces/$outer_ssh_namespace.$project_id/NestedBoundary.code-workspace"
 [ -f "$descriptor" ] || die 'controller-local workspace descriptor is missing'

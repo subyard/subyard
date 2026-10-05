@@ -233,4 +233,18 @@ func TestRunAdapterRequiresOrchestratorAuthorizationForActionPlans(t *testing.T)
 			t.Fatalf("read result=%#v err=%v requests=%#v prompts=%#v", result, err, runner.Requests, prompt.Requests)
 		}
 	})
+	t.Run("confirmed steps cannot be altered through shared slices", func(t *testing.T) {
+		orchestrator, runner := newOrchestrator("operation-step-tampering")
+		plan := prepare(t, orchestrator, "remote.add", domain.ActionDelta{Changed: true, Consequences: []string{"register demo on owner"}})
+		plan.Steps = []domain.OperationStep{{ID: "registration", Target: "owner demo", Observed: "absent", Desired: "registered", Decision: domain.StepApply, Preconditions: []string{"exact native baseline"}, Verify: "registration readback"}}
+		plan, err = orchestrator.Confirm(context.Background(), plan, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan.Steps[0].Preconditions[0] = "weaker baseline"
+		_, _, err = orchestrator.RunAdapter(context.Background(), plan, domain.AdapterRequest{Schema: 1, OperationID: plan.OperationID, Adapter: "remote", Action: "add"}, nil)
+		if !errors.Is(err, domain.ErrActionPolicyInvalid) || len(runner.Requests) != 0 {
+			t.Fatalf("tampered steps applied: %v %#v", err, runner.Requests)
+		}
+	})
 }

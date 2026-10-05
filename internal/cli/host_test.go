@@ -5,6 +5,9 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -119,9 +122,9 @@ func TestHostAddPinsFingerprintAndRegistersInitialSnapshotTogether(t *testing.T)
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("host add failed: code=%d stderr=%s", code, stderr.String())
 	}
-	if len(prompt.Seen) != 1 || !strings.Contains(prompt.Seen[0], trust.Fingerprint) ||
-		!strings.Contains(prompt.Seen[0], "remote-owner") {
-		t.Fatalf("host add omitted exact trust/identity plan: %#v", prompt.Seen)
+	if len(prompt.Requests) != 1 || !strings.Contains(strings.Join(prompt.Requests[0].Consequences, "\n"), trust.Fingerprint) ||
+		!strings.Contains(strings.Join(prompt.Requests[0].Consequences, "\n"), "remote-owner") {
+		t.Fatalf("host add omitted exact trust/identity plan: %#v", prompt.Requests)
 	}
 	dataRoot := filepath.Join(home, ".subyard", "owner-inventory")
 	records, err := (ownerinventory.Connections{Root: dataRoot}).List()
@@ -237,11 +240,13 @@ func TestHostRepairShowsKeyAndHostIDChangeBeforeApplying(t *testing.T) {
 	if code := program.Run(context.Background()); code != 1 {
 		t.Fatalf("cancelled repair returned %d: %s", code, stderr.String())
 	}
-	if len(prompt.Seen) != 1 || !strings.Contains(prompt.Seen[0], "owner-a") ||
-		!strings.Contains(prompt.Seen[0], "owner-b") ||
-		!strings.Contains(prompt.Seen[0], oldTrust.Fingerprint) ||
-		!strings.Contains(prompt.Seen[0], newTrust.Fingerprint) {
-		t.Fatalf("repair omitted exact identity/key transition: %#v", prompt.Seen)
+	if len(prompt.Requests) != 1 {
+		t.Fatalf("repair confirmation requests: %#v", prompt.Requests)
+	}
+	consequences := strings.Join(prompt.Requests[0].Consequences, "\n")
+	if !strings.Contains(consequences, "owner-a") || !strings.Contains(consequences, "owner-b") ||
+		!strings.Contains(consequences, oldTrust.Fingerprint) || !strings.Contains(consequences, newTrust.Fingerprint) {
+		t.Fatalf("repair omitted exact identity/key transition: %#v", prompt.Requests)
 	}
 	records, err := store.List()
 	if err != nil || len(records) != 1 || records[0].HostID != "owner-a" ||
@@ -363,9 +368,9 @@ func TestHostRenamePrintsExactPlanAndAppliesAfterConfirmation(t *testing.T) {
 	if err != nil || string(content) != "owner-b\n" {
 		t.Fatalf("renamed identity = %q err=%v", content, err)
 	}
-	if len(prompt.Seen) != 1 || !strings.Contains(prompt.Seen[0], "owner-a") ||
-		!strings.Contains(prompt.Seen[0], "owner-b") {
-		t.Fatalf("rename did not present exact identity transition: %#v", prompt.Seen)
+	if len(prompt.Requests) != 1 || !strings.Contains(strings.Join(prompt.Requests[0].Consequences, "\n"), "owner-a") ||
+		!strings.Contains(strings.Join(prompt.Requests[0].Consequences, "\n"), "owner-b") {
+		t.Fatalf("rename did not present exact identity transition: %#v", prompt.Requests)
 	}
 	if !strings.Contains(stdout.String(), "owner-a -> owner-b") {
 		t.Fatalf("rename output omitted transition: %s", stdout.String())
@@ -390,5 +395,145 @@ func TestHostRenameRefusalLeavesIdentityUntouched(t *testing.T) {
 	content, err := os.ReadFile(filepath.Join(configHome, "host-id"))
 	if err != nil || string(content) != "owner-a\n" {
 		t.Fatalf("refused rename mutated identity = %q err=%v", content, err)
+	}
+}
+
+func TestHostExactRPCPlanUsesNativeTransactionAndRejectsReplay(t *testing.T) {
+	for _, verb := range []string{"add", "repair", "remove", "rename"} {
+		t.Run(verb, func(t *testing.T) {
+			root, home, configHome, environment := configCommandFixture(t)
+			writeConfigCommandFile(t, configsync.HostIDPath(configHome), "local-owner\n", 0o600)
+			store := ownerinventory.Connections{Root: filepath.Join(home, ".subyard", "owner-inventory")}
+			inventory := inventoryResult("owner-a", "default", "").inventory
+			_, trust := hostAddSSHFixture(t, inventory)
+			if verb == "repair" || verb == "remove" {
+				if err := store.Register(ownerinventory.Connection{HostID: "owner-a", Destination: "owner-alias", Trust: &trust}, ownerinventory.Snapshot{FetchedAt: time.Now(), Inventory: inventory}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			target := "owner-a"
+			if verb == "add" {
+				target = "owner-alias"
+			}
+			if verb == "repair" {
+				hostAddSSHFixture(t, inventoryResult("owner-b", "default", "").inventory)
+			}
+			if verb == "rename" {
+				target = "local-renamed"
+			}
+			var stdout bytes.Buffer
+			program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment,
+				WorkingDir: root, Stdout: &stdout, Stderr: io.Discard})
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := program.loadContext("default")
+			if err != nil {
+				t.Fatal(err)
+			}
+			handler := &rpcHandler{cli: program, loaded: loaded}
+			defer handler.closePlans()
+			params, _ := json.Marshal(map[string]any{"command": "host", "arguments": []string{verb, target}, "exact": true})
+			value, err := handler.Handle(context.Background(), rpc.Call{Method: "operation.plan", OperationID: "host-exact", Params: params}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan := value.(exactOperationPlan)
+			if plan.Plan.Assessment.Action != domain.ActionID("host."+verb) || len(plan.Plan.Steps) != 1 ||
+				plan.Plan.Steps[0].Decision != domain.StepApply || plan.Plan.ConfirmationRequest.Default != domain.ConfirmationDefaultYes ||
+				len(handler.plans["host-exact"].exactState) != 64 || plan.Plan.Confirmed {
+				t.Fatalf("host plan omitted exact native state or concrete policy: %#v", plan)
+			}
+			if len(stdout.String()) != 0 {
+				t.Fatalf("RPC preparation printed human output: %q", stdout.String())
+			}
+			before, err := store.List()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (verb == "add" || verb == "rename") && len(before) != 0 ||
+				(verb == "repair" || verb == "remove") && (len(before) != 1 || before[0].HostID != "owner-a") {
+				t.Fatalf("planning mutated registrations: %#v", before)
+			}
+			identity, err := os.ReadFile(configsync.HostIDPath(configHome))
+			if err != nil || string(identity) != "local-owner\n" {
+				t.Fatalf("planning mutated identity: %q, %v", identity, err)
+			}
+			params, _ = json.Marshal(map[string]any{"confirmed": true, "digest": plan.Digest})
+			if _, err := handler.Handle(context.Background(), rpc.Call{Method: "operation.execute", OperationID: "host-exact", Params: params}, nil); err != nil {
+				t.Fatal(err)
+			}
+			connections, err := store.List()
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch verb {
+			case "add":
+				if len(connections) != 1 || connections[0].HostID != "owner-a" || connections[0].Trust.Fingerprint != trust.Fingerprint {
+					t.Fatalf("add did not publish planned trust: %#v", connections)
+				}
+			case "repair":
+				if len(connections) != 1 || connections[0].HostID != "owner-b" {
+					t.Fatalf("repair did not migrate captured HostID: %#v", connections)
+				}
+			case "remove":
+				if len(connections) != 0 {
+					t.Fatalf("remove retained connection: %#v", connections)
+				}
+			case "rename":
+				identity, err := os.ReadFile(configsync.HostIDPath(configHome))
+				if err != nil || string(identity) != "local-renamed\n" {
+					t.Fatalf("rename result: %q, %v", identity, err)
+				}
+			}
+			_, err = handler.Handle(context.Background(), rpc.Call{Method: "operation.execute", OperationID: "host-exact", Params: params}, nil)
+			var fault *rpc.Error
+			if !errors.As(err, &fault) || fault.Code != "plan_not_found" {
+				t.Fatalf("host plan replay succeeded: %v", err)
+			}
+		})
+	}
+}
+
+func TestHostExactRPCRejectsChangedManifest(t *testing.T) {
+	root, _, configHome, environment := configCommandFixture(t)
+	writeConfigCommandFile(t, configsync.HostIDPath(configHome), "owner-a\n", 0o600)
+	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment,
+		WorkingDir: root, Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := program.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := &rpcHandler{cli: program, loaded: loaded}
+	defer handler.closePlans()
+	value, err := handler.Handle(context.Background(), rpc.Call{Method: "operation.plan", OperationID: "host-stale", Params: json.RawMessage(`{"command":"host","arguments":["rename","owner-b"],"exact":true}`)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := value.(exactOperationPlan)
+	// A manifest published after assessment requires new consent, even with an
+	// unchanged owner HostID and the same visible identity transition.
+	manifest, err := json.Marshal(configsync.Manifest{SchemaVersion: 2, Generation: 1, HostID: "owner-a",
+		SourceCommit: strings.Repeat("1", 40), SourceID: strings.Repeat("2", 64), SourceDigest: strings.Repeat("3", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeConfigCommandFile(t, configsync.ManifestPath(configHome), string(manifest), 0o600)
+	params, _ := json.Marshal(map[string]any{"confirmed": true, "digest": plan.Digest})
+	_, err = handler.Handle(context.Background(), rpc.Call{Method: "operation.execute", OperationID: "host-stale", Params: params}, nil)
+	var fault *rpc.Error
+	if !errors.As(err, &fault) || fault.Code != domain.PlanStaleCode {
+		t.Fatalf("rename did not reject its changed machine-local baseline as stale: %v", err)
+	}
+	identity, err := os.ReadFile(configsync.HostIDPath(configHome))
+	if err != nil || string(identity) != "owner-a\n" {
+		t.Fatalf("stale plan mutated owner identity: %q, %v", identity, err)
+	}
+	current, err := os.ReadFile(configsync.ManifestPath(configHome))
+	if err != nil || !bytes.Equal(current, manifest) {
+		t.Fatalf("stale plan mutated manifest: %q, %v", current, err)
 	}
 }

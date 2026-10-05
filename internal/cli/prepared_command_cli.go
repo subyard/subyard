@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 
 	"github.com/Subyard/Subyard/internal/application"
@@ -31,7 +32,7 @@ func (cli *CLI) reportPreparationError(definition command.Definition, err error)
 	if errors.Is(err, domain.ErrPlanStale) {
 		code = 1
 	}
-	if errors.Is(err, errNetworkUsage) {
+	if errors.Is(err, errNetworkUsage) || errors.Is(err, errHostUsage) || errors.Is(err, errConfigUsage) {
 		code = 2
 	}
 	cli.errorf("%s: %v", prefix, err)
@@ -39,7 +40,7 @@ func (cli *CLI) reportPreparationError(definition command.Definition, err error)
 }
 
 func preparationRPCError(definition command.Definition, err error) error {
-	if errors.Is(err, errNetworkUsage) {
+	if errors.Is(err, errNetworkUsage) || errors.Is(err, errHostUsage) || errors.Is(err, errConfigUsage) {
 		return operationRPCError("invalid_params", err)
 	}
 	code := "plan_failed"
@@ -61,7 +62,9 @@ func (cli *CLI) runPreparedCommand(ctx context.Context, prepared *preparedComman
 		prepared.displayOnly()
 		return 0
 	}
-	if prepared.preview != nil {
+	if len(prepared.Plan.Steps) != 0 {
+		cli.printOperationSteps(prepared.Plan)
+	} else if prepared.preview != nil {
 		prepared.preview()
 	}
 	assumeYes = assumeYes || slices.Contains(prepared.Arguments, "--yes") || slices.Contains(prepared.Arguments, "-y")
@@ -150,4 +153,15 @@ func (cli *CLI) runPreparedCommand(ctx context.Context, prepared *preparedComman
 		prepared.printResult(result)
 	}
 	return 0
+}
+
+func (cli *CLI) printOperationSteps(plan domain.OperationPlan) {
+	fmt.Fprintf(cli.options.Stdout, "Operation plan: %s\n", plan.OperationID)
+	for _, step := range plan.Steps {
+		fmt.Fprintf(cli.options.Stdout, "  [%s] %s: %s\n    observed: %s\n    desired: %s\n", step.Decision, step.ID, step.Target, step.Observed, step.Desired)
+		for _, guard := range step.Preconditions {
+			fmt.Fprintf(cli.options.Stdout, "    guard: %s\n", guard)
+		}
+		fmt.Fprintf(cli.options.Stdout, "    verify: %s\n", step.Verify)
+	}
 }

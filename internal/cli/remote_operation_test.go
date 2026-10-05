@@ -21,18 +21,19 @@ func TestExactRPCPlanBindingAndSingleUse(t *testing.T) {
 	for _, kind := range []string{"success", "missing-digest", "tampered", "expired", "changed-state", "other-session", "stopped"} {
 		t.Run(kind, func(t *testing.T) {
 			cli, incus, runtime, path, _ := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=\n")
+			runtime.plan.Scope = "subyard/yard:owned integration fixtures"
 			loaded, err := cli.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
 			}
 			handler := &rpcHandler{cli: cli, loaded: loaded}
 			defer handler.closePlans()
-			value, err := handler.Handle(context.Background(), rpc.Call{Method: "operation.plan", OperationID: "exact-test", Params: json.RawMessage(`{"command":"integration","arguments":["enable","codex"],"exact":true}`)}, nil)
+			value, err := handler.Handle(context.Background(), rpc.Call{Method: "operation.plan", OperationID: "exact-test", Params: json.RawMessage(`{"command":"integration","arguments":["enable","codex"],"exact":true,"stepSchema":1}`)}, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
 			plan := value.(exactOperationPlan)
-			if plan.Schema != 1 || len(plan.Digest) != 64 || !plan.ExpiresAt.After(time.Now()) {
+			if plan.Schema != 1 || plan.StepSchema != 1 || len(plan.Plan.Steps) == 0 || len(plan.Digest) != 64 || !plan.ExpiresAt.After(time.Now()) {
 				t.Fatalf("invalid binding: %#v", plan)
 			}
 			before, err := os.ReadFile(path)
@@ -84,6 +85,7 @@ func TestExactRPCPlanBindingAndSingleUse(t *testing.T) {
 
 func TestExactRPCRequiresCapabilityAndDiscardsOnDisconnect(t *testing.T) {
 	cli, _, runtime, path, _ := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=\n")
+	runtime.plan.Scope = "subyard/yard:owned integration fixtures"
 	loaded, err := cli.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -98,7 +100,7 @@ func TestExactRPCRequiresCapabilityAndDiscardsOnDisconnect(t *testing.T) {
 	client, server := net.Pipe()
 	done := make(chan error, 1)
 	go func() {
-		err := (rpc.Session{Handler: handler, Capabilities: []string{exactPlanCapability}}).Serve(context.Background(), server, server)
+		err := (rpc.Session{Handler: handler, Capabilities: []string{exactPlanCapability, operationStepsCapability}}).Serve(context.Background(), server, server)
 		handler.closePlans()
 		done <- err
 	}()
@@ -107,7 +109,7 @@ func TestExactRPCRequiresCapabilityAndDiscardsOnDisconnect(t *testing.T) {
 		t.Fatal(err)
 	}
 	var plan exactOperationPlan
-	if err = session.call(context.Background(), "operation.plan", "disconnect", map[string]any{"command": "integration", "arguments": []string{"enable", "codex"}, "exact": true}, &plan); err != nil {
+	if err = session.call(context.Background(), "operation.plan", "disconnect", map[string]any{"command": "integration", "arguments": []string{"enable", "codex"}, "exact": true, "stepSchema": 1}, &plan); err != nil {
 		t.Fatal(err)
 	}
 	_ = session.close()
@@ -126,13 +128,14 @@ func TestExactRPCRequiresCapabilityAndDiscardsOnDisconnect(t *testing.T) {
 }
 
 func TestRemoteIntegrationUsesOneOwnerRPCSession(t *testing.T) {
-	for _, kind := range []string{"provision", "accept", "ssh-trust-denied", "owner-clock-ahead", "owner-clock-behind", "no-op", "preconfirmed-prompt", "decline", "old-owner", "disconnect", "status", "cleanup-check", "rpc-status", "rpc-status-wrong-yard", "rpc-status-invalid-health"} {
+	for _, kind := range []string{"provision", "accept", "ssh-trust-denied", "owner-clock-ahead", "owner-clock-behind", "no-op", "preconfirmed-prompt", "decline", "old-owner", "exact-envelope-only", "disconnect", "status", "cleanup-check", "rpc-status", "rpc-status-wrong-yard", "rpc-status-invalid-health"} {
 		t.Run(kind, func(t *testing.T) {
 			selection := "CODING_TOOL_INTEGRATIONS=\n"
 			if kind == "no-op" {
 				selection = "CODING_TOOL_INTEGRATIONS='codex'\n"
 			}
 			cli, _, runtime, _, output := integrationFixture(t, selection)
+			runtime.plan.Scope = "subyard/yard:owned integration fixtures"
 			if kind == "no-op" {
 				runtime.plan.Changed = false
 				runtime.plan.Steps = nil
@@ -200,10 +203,10 @@ while True:
  if 'deadline' in req:sys.exit(8)
  method=req['method']
  with open(root+'/calls','a') as out: out.write(method+'\n')
- if method=='rpc.negotiate':send(req,{'capabilities':[] if kind=='old-owner' else ['operation-exact-plan-v1']})
+ if method=='rpc.negotiate':send(req,{'capabilities':[] if kind=='old-owner' else ['operation-exact-plan-v1'] if kind=='exact-envelope-only' else ['operation-exact-plan-v1','operation-steps-v1']})
  elif method=='operation.plan':
   with open(root+'/plan.json') as source:plan=json.load(source)
-  expected={'command':'provision','arguments':['sample'],'exact':True} if kind=='provision' else {'command':'integration','arguments':['cleanup' if kind=='cleanup-check' else 'enable','codex'],'exact':True}
+  expected={'command':'provision','arguments':['sample'],'exact':True,'stepSchema':1} if kind=='provision' else {'command':'integration','arguments':['cleanup' if kind=='cleanup-check' else 'enable','codex'],'exact':True,'stepSchema':1}
   if req['params']!=expected:sys.exit(4)
   send(req,plan)
   if kind=='disconnect':sys.exit(0)
@@ -286,9 +289,15 @@ while True:
 				}
 				return
 			}
-			if kind == "old-owner" || kind == "preconfirmed-prompt" {
+			if kind == "old-owner" || kind == "exact-envelope-only" || kind == "preconfirmed-prompt" {
 				if err == nil {
 					t.Fatalf("unsafe owner plan accepted: %s", kind)
+				}
+				if kind == "exact-envelope-only" {
+					calls, readErr := os.ReadFile(filepath.Join(folder, "calls"))
+					if readErr != nil || strings.Contains(string(calls), "operation.plan") || strings.Contains(string(calls), "operation.execute") || runtime.applied != 0 || len(prompt.Requests) != 0 {
+						t.Fatalf("envelope-only owner reached mutation preparation: calls=%s err=%v", calls, readErr)
+					}
 				}
 				return
 			}
@@ -332,4 +341,48 @@ while True:
 			}
 		})
 	}
+}
+
+// A framed owner accepts one exact operation, retains the reviewed native scope,
+// and requires its digest on execution. It never launches controller handlers.
+func writeStructuredOwnerFixture(t *testing.T, folder, command string, arguments []string, steps []domain.OperationStep, consequence string) string {
+	t.Helper()
+	plan := exactOperationPlan{Schema: 1, StepSchema: 1, Digest: strings.Repeat("a", 64), ExpiresAt: time.Now().Add(time.Minute), Plan: domain.OperationPlan{Command: command, Effect: domain.CommandMutate, Target: domain.TargetLocalOwner, Confirmation: domain.ConfirmationPromptDefaultYes, Consequences: []string{consequence}, Steps: steps}}
+	payload, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(folder, "owner-plan.json"), string(payload), 0600)
+	params, err := json.Marshal(map[string]any{"command": command, "arguments": arguments, "exact": true, "stepSchema": 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(folder, "owner-params.json"), string(params), 0600)
+	writeCLIFile(t, filepath.Join(folder, "owner.py"), `import json,os,struct,sys
+root=os.path.dirname(sys.argv[0])
+with open(root+'/owner-plan.json') as source: plan=json.load(source)
+with open(root+'/owner-params.json') as source: expected=json.load(source)
+executed=False
+with open(root+'/owner-calls','a') as out:out.write('session '+repr(sys.argv[1:])+'\n')
+def send(req,result):
+ data=json.dumps({'version':1,'type':'response','id':req['id'],'operationId':req.get('operationId',''),'result':result}).encode()
+ sys.stdout.buffer.write(struct.pack('>I',len(data))+data);sys.stdout.buffer.flush()
+while True:
+ header=sys.stdin.buffer.read(4)
+ if not header:break
+ req=json.loads(sys.stdin.buffer.read(struct.unpack('>I',header)[0]))
+ with open(root+'/owner-calls','a') as out:out.write(json.dumps(req)+'\n')
+ if req['method']=='rpc.negotiate':send(req,{'capabilities':['operation-exact-plan-v1','operation-steps-v1']})
+ elif req['method']=='operation.plan':
+  if req['params']!=expected:sys.exit(4)
+  plan['plan']['operationId']=req['operationId'];send(req,plan)
+ elif req['method']=='operation.execute':
+  if executed or req['operationId']!=plan['plan']['operationId'] or req['params']!={'confirmed':True,'digest':plan['digest']}:sys.exit(5)
+  executed=True
+  plan['plan']['confirmed']=True
+  send(req,{'plan':plan['plan'],'result':{'schema':1,'operationId':req['operationId'],'status':'ok'}})
+ else:sys.exit(6)
+`, 0600)
+	writeCLIFile(t, filepath.Join(folder, "ssh"), "#!/bin/sh\n"+trustedSSHMock(t)+"\nexec python3 '"+filepath.Join(folder, "owner.py")+"' \"$@\"\n", 0700)
+	return filepath.Join(folder, "owner-calls")
 }

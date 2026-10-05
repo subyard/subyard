@@ -35,6 +35,11 @@ case "$KEEP_SHARED" in 0 | 1) ;; *) die "prepared shared-infrastructure mode is 
 subyard_home_validate_root "$SUBYARD_HOME" \
   || die "refusing unsafe Subyard data root: $SUBYARD_HOME"
 SUBYARD_HOME="$SUBYARD_VALIDATED_HOME"
+[ "$INCUS_PROJECT" != default ] || die "teardown requires a dedicated project"
+TEARDOWN_GUARD="$SCRIPT_DIR/lib/teardown-plan.py"
+python3 "$TEARDOWN_GUARD" validate || die "prepared exact teardown inventory is required"
+approved_names() { python3 "$TEARDOWN_GUARD" list "$1"; }
+guard_resource() { python3 "$TEARDOWN_GUARD" guard "$1" "$2" "$INCUS_PROJECT" "${3:-}" || die "plan_stale: teardown resource changed after confirmation"; }
 require_root "removing the NetworkManager guard, ufw rules, and the Incus storage data needs root"
 
 if [ "$KEEP_DATA" = 0 ] && command -v incus >/dev/null 2>&1 && ! incus info >/dev/null 2>&1; then
@@ -47,14 +52,16 @@ PROJ=(--project "$INCUS_PROJECT")
 bridge_gone=0; pool_gone=0
 [ "$have_incus" = 1 ] || { bridge_gone=1; pool_gone=1; }
 
+python3 "$TEARDOWN_GUARD" guard-all "$INCUS_PROJECT" || die "plan_stale: teardown inventory changed before apply"
 bash "$SCRIPT_DIR/profile-services.sh" --remove
 
 echo "Instance:"
 if [ "$have_incus" = 1 ] && incus project show "$INCUS_PROJECT" >/dev/null 2>&1; then
   while IFS= read -r inst; do
     [ -n "$inst" ] || continue
+    guard_resource instance "$inst"
     if incus delete -f "$inst" "${PROJ[@]}"; then ok "deleted instance '$inst'"; else warn "could not delete instance '$inst'"; fi
-  done < <(incus list "${PROJ[@]}" -c n -f csv 2>/dev/null)
+  done < <(approved_names instance)
   ok "no instances left in '$INCUS_PROJECT'"
 else
   ok "Incus not reachable or project '$INCUS_PROJECT' absent — nothing to delete"
@@ -63,27 +70,33 @@ fi
 if [ "$KEEP_DATA" = 0 ]; then
   echo "Project + volume:"
   if [ "$have_incus" = 1 ] && incus project show "$INCUS_PROJECT" >/dev/null 2>&1; then
-    if incus storage volume show "$SRV_POOL" "$SRV_VOLUME" "${PROJ[@]}" >/dev/null 2>&1; then
-      incus storage volume delete "$SRV_POOL" "$SRV_VOLUME" "${PROJ[@]}" >/dev/null 2>&1 \
-        && ok "deleted volume '$SRV_VOLUME'" || warn "could not delete volume '$SRV_VOLUME'"
-    else
-      ok "volume '$SRV_VOLUME' absent"
-    fi
+    while IFS=$'\t' read -r approved_pool approved_volume; do
+      [ -n "$approved_volume" ] || continue
+      guard_resource volume "$approved_volume" "$approved_pool"
+      incus storage volume delete "$approved_pool" "$approved_volume" "${PROJ[@]}" >/dev/null 2>&1 \
+        && ok "deleted approved volume '$approved_volume'" || die "approved volume removal failed"
+    done < <(python3 "$TEARDOWN_GUARD" volumes)
     if incus_project_has_isolated_images "$INCUS_PROJECT"; then
       while IFS= read -r fp; do
         [ -n "$fp" ] || continue
+        guard_resource image "$fp"
         incus image delete "$fp" "${PROJ[@]}" >/dev/null 2>&1 \
           && ok "deleted cached image ${fp:0:12}" || true
-      done < <(incus image list "${PROJ[@]}" -f csv -c f 2>/dev/null)
+      done < <(approved_names image)
     else
       ok "kept images shared from the default project"
     fi
     while IFS= read -r prof; do
       [ -n "$prof" ] && [ "$prof" != default ] || continue
+      guard_resource profile "$prof"
       incus profile delete "$prof" "${PROJ[@]}" >/dev/null 2>&1 && ok "deleted profile '$prof'" || true
-    done < <(incus profile list "${PROJ[@]}" -f csv -c n 2>/dev/null)
+    done < <(approved_names profile)
+    if approved_names profile | grep -qx default; then
+    guard_resource profile default
     incus profile device remove default eth0 "${PROJ[@]}" >/dev/null 2>&1 || true
     incus profile device remove default root "${PROJ[@]}" >/dev/null 2>&1 || true
+    fi
+    guard_resource project "$INCUS_PROJECT"
     if incus project delete "$INCUS_PROJECT" >/dev/null 2>&1; then
       ok "deleted project '$INCUS_PROJECT'"
     else
@@ -108,14 +121,14 @@ if [ "$KEEP_DATA" = 0 ]; then
         >/dev/null 2>&1 || true
       if ! incus network show "$BRIDGE" --project default >/dev/null 2>&1; then
         bridge_gone=1; ok "bridge '$BRIDGE' absent"
-      elif incus network delete "$BRIDGE" --project default >/dev/null 2>&1; then
+      elif guard_resource network "$BRIDGE" && incus network delete "$BRIDGE" --project default >/dev/null 2>&1; then
         bridge_gone=1; ok "deleted bridge '$BRIDGE'"
       else
         warn "bridge '$BRIDGE' not deleted (still in use) — keeping the NetworkManager guard"
       fi
       if ! incus storage show "$STORAGE_POOL" --project default >/dev/null 2>&1; then
         pool_gone=1; ok "storage pool '$STORAGE_POOL' absent"
-      elif incus storage delete "$STORAGE_POOL" --project default >/dev/null 2>&1; then
+      elif guard_resource pool "$STORAGE_POOL" && incus storage delete "$STORAGE_POOL" --project default >/dev/null 2>&1; then
         pool_gone=1; ok "deleted storage pool '$STORAGE_POOL'"
       else
         warn "pool '$STORAGE_POOL' not deleted (still in use) — keeping its data dir to avoid an orphan"

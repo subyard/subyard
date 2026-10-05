@@ -27,6 +27,15 @@ type HostIDRenamePlan struct {
 	manifestWasPresent bool
 }
 
+// StateDigest binds the owner identity and machine-local manifest baseline.
+func (plan HostIDRenamePlan) StateDigest() string {
+	payload, _ := json.Marshal(struct {
+		OldHostID, NewHostID, HostID, Manifest string
+		ManifestChanged                        bool
+	}{plan.OldHostID, plan.NewHostID, plan.hostIDDigest, plan.manifestDigest, plan.ManifestChanged})
+	return digestBytes(payload)
+}
+
 type hostIDRenameJournal struct {
 	SchemaVersion      int    `json:"schemaVersion"`
 	OldHostID          string `json:"oldHostId"`

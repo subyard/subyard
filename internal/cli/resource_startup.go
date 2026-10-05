@@ -28,6 +28,14 @@ type resourceStartup struct {
 	ingress      *resourceIngress
 	intent       *resourceStartupIntent
 	localAction  string
+	assessment   resource.PrepareResult
+	scope        string
+}
+
+// A nil startup has no pending native resource effects. Legacy assessments
+// remain executable through their dedicated path but cannot prove full steps.
+func (startup *resourceStartup) stepsComplete() bool {
+	return startup == nil || startup.assessment.Schema == resource.PrepareAssessmentSchemaV2
 }
 
 func (cli *CLI) prepareResourceStartup(ctx context.Context, loaded config.Loaded) (*resourceStartup, error) {
@@ -53,10 +61,11 @@ func (cli *CLI) prepareResourceStartup(ctx context.Context, loaded config.Loaded
 	if err != nil {
 		return nil, err
 	}
-	assessment, err := cli.resources.AssessPrepareResult(cli.coreActions, definition.Command, definition.BringUp, output)
+	result, err := cli.resources.PrepareResult(cli.coreActions, definition.Command, definition.BringUp, output)
 	if err != nil {
 		return nil, err
 	}
+	assessment := result.Assessment
 	if !assessment.Changed {
 		return nil, errors.New("pending startup resource reported no activation")
 	}
@@ -74,12 +83,15 @@ func (cli *CLI) prepareResourceStartup(ctx context.Context, loaded config.Loaded
 	}
 	assessment = intent.augment(assessment)
 	return &resourceStartup{loaded: loaded, definition: definition, consequences: assessment.Consequences,
-		ingress: ingress, intent: intent, localAction: local}, nil
+		ingress: ingress, intent: intent, localAction: local, assessment: result, scope: operationStateDigest(definitions)}, nil
 }
 
 func (startup *resourceStartup) refresh(ctx context.Context, cli *CLI) error {
 	if startup == nil {
 		return nil
+	}
+	if operationStateDigest(cli.selectedStartupResources(startup.loaded)) != startup.scope {
+		return fmt.Errorf("%w: startup resource selection changed", domain.ErrPlanStale)
 	}
 	if err := startup.intent.refresh(ctx, cli); err != nil {
 		return err
@@ -94,7 +106,8 @@ func (startup *resourceStartup) refresh(ctx context.Context, cli *CLI) error {
 	if fresh == nil || fresh.localAction != startup.localAction ||
 		!slices.Equal(fresh.consequences, startup.consequences) ||
 		fresh.ingress.preview.Before.Fingerprint != startup.ingress.preview.Before.Fingerprint ||
-		fresh.ingress.preview.After.Fingerprint != startup.ingress.preview.After.Fingerprint {
+		fresh.ingress.preview.After.Fingerprint != startup.ingress.preview.After.Fingerprint ||
+		fresh.assessment.Binding != startup.assessment.Binding || !domain.EqualOperationSteps(fresh.assessment.Steps, startup.assessment.Steps) {
 		return domain.ErrPlanStale
 	}
 	return nil
@@ -130,12 +143,18 @@ func (startup *resourceStartup) apply(ctx context.Context, cli *CLI, operationID
 	if err != nil {
 		return err
 	}
-	assessment, err := cli.resources.AssessPrepareResult(cli.coreActions, startup.definition.Command, startup.definition.BringUp, output)
+	prepared, err := cli.resources.PrepareResult(cli.coreActions, startup.definition.Command, startup.definition.BringUp, output)
 	if err != nil {
 		return err
 	}
+	assessment := prepared.Assessment
+	if len(startup.assessment.Steps) != 0 {
+		if err := domain.CheckOperationSteps(startup.assessment.Steps, prepared.Steps); err != nil {
+			return err
+		}
+	}
 	local, ok := localResourceAction(startup.definition, assessment.Action)
-	if !ok || local != startup.localAction || !assessment.Changed {
+	if !ok || local != startup.localAction || (!assessment.Changed && prepared.Schema != resource.PrepareAssessmentSchemaV2) {
 		return domain.ErrPlanStale
 	}
 	for _, consequence := range assessment.Consequences {
@@ -154,6 +173,9 @@ func (startup *resourceStartup) apply(ctx context.Context, cli *CLI, operationID
 		verb: startup.definition.BringUp, localAction: local, effect: assessment.Effect,
 		arguments: []string{startup.definition.BringUp}, consequences: assessment.Consequences,
 		ingress: ingress, startupIntent: startup.intent}
+	if err := attachApprovedResourceVerification(runner, startup.assessment, prepared); err != nil {
+		return err
+	}
 	result, _, err := runner.Run(ctx, domain.AdapterRequest{Schema: 1, OperationID: operationID,
 		Adapter: "resource", Action: local}, nil)
 	if err != nil {
@@ -163,4 +185,56 @@ func (startup *resourceStartup) apply(ctx context.Context, cli *CLI, operationID
 		return errors.New("startup resource did not converge")
 	}
 	return nil
+}
+
+func (startup *resourceStartup) binding() string {
+	if startup == nil {
+		return ""
+	}
+	return operationStateDigest(struct {
+		Resource      resource.Definition
+		Assessment    resource.PrepareResult
+		Ingress       yardnetwork.IngressPreview
+		Before, After string
+	}{startup.definition, startup.assessment, startup.ingress.preview, startup.intent.before, startup.intent.after})
+}
+
+func (startup *resourceStartup) steps() []domain.OperationStep {
+	if startup == nil {
+		return nil
+	}
+	steps := domain.CloneOperationSteps(startup.assessment.Steps)
+	for index := range steps {
+		steps[index].ID = "startup-" + steps[index].ID
+		for dep := range steps[index].DependsOn {
+			steps[index].DependsOn[dep] = "startup-" + steps[index].DependsOn[dep]
+		}
+		if steps[index].Decision == domain.StepConditional && len(steps[index].DependsOn) == 0 {
+			steps[index].DependsOn = []string{"power"}
+		}
+	}
+	return steps
+}
+
+// This captures the original pending set even when no activation is needed.
+func (cli *CLI) startupScopeBinding(ctx context.Context, loaded config.Loaded) (string, error) {
+	definitions := cli.selectedStartupResources(loaded)
+	type selected struct {
+		Definition resource.Definition
+		Before     string
+		After      string
+	}
+	var values []selected
+	for _, definition := range definitions {
+		intent, err := cli.prepareResourceStartupIntent(ctx, loaded, definition, definition.BringUp)
+		if err != nil {
+			return "", err
+		}
+		before, after := "", ""
+		if intent != nil {
+			before, after = intent.before, intent.after
+		}
+		values = append(values, selected{definition, before, after})
+	}
+	return operationStateDigest(values), nil
 }

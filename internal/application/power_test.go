@@ -220,7 +220,19 @@ func TestLifecycleRunnerCommitsOnlyAfterPhysicalSuccess(t *testing.T) {
 		t.Fatalf("failed start changed desired power to %q", got)
 	}
 
+	falseSuccessIncus := newIncus()
+	falseSuccess := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{Schema: 1, OperationID: request.OperationID, Status: "ok"}}}}
+	runner = LifecycleRunner{Power: PowerService{Instances: falseSuccessIncus, Config: falseSuccessIncus}, Physical: falseSuccess, Yard: yard}
+	if _, _, err := runner.Run(context.Background(), request, nil); err == nil {
+		t.Fatal("adapter ok without actual running state committed desired power")
+	}
+	if got := falseSuccessIncus.Instances["subyard/yard"].Config["user.subyard.desired_power"]; got != PowerStopped {
+		t.Fatal("unverified power result changed desired power")
+	}
 	okIncus := newIncus()
+	observed := okIncus.Instances["subyard/yard"]
+	observed.Status = "Running"
+	okIncus.Instances["subyard/yard"] = observed
 	physical := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{
 		Schema: 1, OperationID: request.OperationID, Status: "ok",
 	}}}}

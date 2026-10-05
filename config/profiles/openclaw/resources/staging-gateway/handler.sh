@@ -80,6 +80,7 @@ load_prod_fingerprints() { # <file>
 }
 
 stage_prod_fingerprints() { # <validated normalized fingerprints>
+  openclaw_recheck_inputs up
   local fingerprints="$1" snapshot
   [ -n "$fingerprints" ] || die "production fingerprint validation produced no entries"
   snapshot="$(umask 077; mktemp "${TMPDIR:-/tmp}/subyard-prod-fingerprints.XXXXXX")" \
@@ -94,7 +95,7 @@ stage_prod_fingerprints() { # <validated normalized fingerprints>
   rm -f -- "$snapshot"
 }
 
-emit_resource_assessment() { # <local-action> <true|false> [fixed consequence...]
+emit_read_assessment() { # <local-action> <true|false> [fixed consequence...]
   local action="$1" changed="$2" separator=""
   shift 2
   printf '{"schema":"yard.resource-action-assessment.v1","action":"%s","changed":%s,"consequences":[' \
@@ -106,6 +107,13 @@ emit_resource_assessment() { # <local-action> <true|false> [fixed consequence...
   done
   printf ']}\n'
 }
+
+# shellcheck source=config/profiles/openclaw/resources/exact-plan.sh
+. "$RESOURCE_DIR/../exact-plan.sh"
+emit_resource_assessment() {
+ case "$1" in status|logs|shell|list) emit_read_assessment "$@" ;; *) openclaw_emit_exact "$@" ;; esac
+}
+
 
 require_resource_apply() { # <expected-local-action>
   local expected="$1"
@@ -211,6 +219,9 @@ zconf="$ZONES_DIR/$zone.conf"
 # shellcheck disable=SC1090
 [ -r "$zconf" ] && . "$zconf"
 [ -n "$src_override" ] && SOURCE_BIND="$src_override"   # --source overrides the zone-conf bind (live-bind a worktree)
+case "$BOT_LEASE_KEY" in ''|*[!a-zA-Z0-9_-]*) die "staging bot lease key must be a bounded resource name" ;; esac
+case "$SOURCE_BIND" in ''|/*) ;; *) die "staging source bind must be an absolute yard path" ;; esac
+case "/$SOURCE_BIND/" in */../*|*/./*) die "staging source bind must be canonical" ;; esac
 
 profile="$PROFILE"
 pf="$PROFILES_DIR/$profile/profile.conf"
@@ -261,13 +272,14 @@ echo "OK $epoch"
 LEASE
 }
 lease_release() {
-  yexec sh -s -- "$LEASE_DIR" "$BOT_LEASE_KEY" "$zone" <<'LEASE'
+  yexec sh -s -- "$LEASE_DIR" "$BOT_LEASE_KEY" "$zone" "${lease_expected_epoch:-}" <<'LEASE'
 set -eu
-dir="$1"; key="$2"; me="$3"
+dir="$1"; key="$2"; me="$3"; expected="${4:-}"
 st="$dir/$key.json"; lock="$dir/$key.lock"
 [ -r "$st" ] || exit 0
 exec 9>"$lock"; flock 9
 [ "$(jq -r '.holder // ""' "$st")" = "$me" ] || exit 0
+[ -z "$expected" ] || [ "$(jq -r '.epoch // 0' "$st")" = "$expected" ] || exit 0
 rm -f "$st"
 LEASE
 }
@@ -397,7 +409,7 @@ prepare_resource() {
       [ -z "$SOURCE_BIND" ] || yexec test -d "$SOURCE_BIND" \
         || die "SOURCE_BIND is not a directory in the yard"
       emit_resource_assessment up true \
-        "converge the isolated staging-runner box while leaving its gateway stopped"
+        "converge the isolated staging-runner box and preserve an existing gateway process"
       ;;
     start)
       if gateway_running; then
@@ -453,12 +465,83 @@ prepare_resource() {
   esac
 }
 
+openclaw_target() {
+  printf '%s' "incus:$INCUS_PROJECT/$YARD_INSTANCE_NAME staging zone:$zone container:$cname data path:$dataRoot staged zone input artifacts lease path:$LEASE_DIR/$BOT_LEASE_KEY helper path:/usr/local/bin/sy-stage"
+}
+openclaw_binding() {
+  { printf '%s\0' "$1" "$YARD_INSTANCE_NAME" "$zone" "$cname" "$dataRoot" "$ysecret" "$BOT_LEASE_KEY" "$LEASE_TTL" "$SOURCE_BIND" "$CREDS_DEST" "$GATEWAY_CMD" "$BUILD_CMD" "$profile" "$rebuild" "$purge"
+    openclaw_file_fact "$zconf"
+    openclaw_file_fact "$pf"
+    openclaw_file_fact "$RESOURCE_DIR/sy-stage.sh"
+    case "$1" in up|start)
+      openclaw_file_fact "$PROD_FP_FILE"
+      openclaw_file_fact "$SUBYARD_CONFIG_GENERATED_DIR/staging/$zone.env"
+      if [ -n "$SOURCE_BIND" ]; then yexec stat -c '%d:%i:%f:%u:%g' -- "$SOURCE_BIND"; yexec tar -cf - -C "$SOURCE_BIND" . | sha256sum | awk '{print $1}'; fi
+      ;;
+    esac
+    case "$1" in stop|down|destroy)
+      if yexec test -e "$dataRoot"; then yexec stat -c '%d:%i:%f:%u:%g' -- "$dataRoot"; else printf absent; fi
+      ;;
+    esac
+    case "$1" in start|stop|down)
+      if box_exists; then ydocker inspect -f '{{.Id}}' "$cname"; else printf absent; fi
+      ;;
+    esac
+  } | sha256sum | awk '{print $1}'
+}
+openclaw_observation() {
+  { ydocker inspect -f '{{.Id}} {{.State.Running}} {{ index .Config.Labels "subyard.zone" }}' "$cname" 2>/dev/null || printf absent
+    lease_show | jq -cS '{holder,kind,epoch}'
+    ydocker exec "$cname" sh -c 'if [ -r "$1" ]; then pid=$(cat "$1"); [ -r "/proc/$pid/stat" ] && printf "%s:%s" "$pid" "$(sed "s/.*) //" "/proc/$pid/stat" | cut -d" " -f20)"; fi' _ "$GW_PID" 2>/dev/null || true
+    case "$1" in destroy|destroy-purge)
+      yexec find "$(dirname "$ysecret")" -xdev -printf '%P:%D:%i:%m:%U:%G:%s:%T@\n' 2>/dev/null || true
+      if [ "$1" = destroy-purge ]; then yexec find "$dataRoot" -xdev -printf '%P:%D:%i:%m:%U:%G:%s:%T@\n' 2>/dev/null || true; fi
+      ;;
+    esac
+  } | sha256sum | awk '{print $1}'
+}
+openclaw_prepare_fresh() { prepare_resource; }
+verify_resource() {
+  local action="$1" expected
+  case "$action" in
+    up)
+      box_running || die "staging runner is not running"
+      [ "$(ydocker inspect -f '{{ index .Config.Labels "subyard.zone" }}' "$cname")" = "$zone" ] || die "staging runner ownership changed"
+      yexec test -f "$dataRoot/zone.env" && yexec test -f "$dataRoot/run-args" || die "staging runtime specification is absent"
+      expected="$(sha256sum "$RESOURCE_DIR/sy-stage.sh" | awk '{print $1}')"
+      yexec sh -c '[ "$(sha256sum "$1" | cut -d" " -f1)" = "$2" ]' _ /usr/local/bin/sy-stage "$expected" || die "staging helper verification failed"
+      ;;
+    start) gateway_running || die "staging gateway did not start"; validate_running_gateway_lease ;;
+    stop) ! gateway_running && ! lease_owned || die "staging gateway or owned lease remains" ;;
+    down) ! box_running && ! lease_owned || die "staging runner or owned lease remains" ;;
+    destroy|destroy-purge)
+      ! box_exists && ! lease_owned || die "staging runtime or lease remains"
+      ! yexec test -e "$(dirname "$ysecret")" || die "staging credentials remain"
+      if [ "$action" = destroy-purge ]; then ! yexec test -e "$dataRoot" || die "staging persistent data remains"; fi
+      ;;
+    *) die "unsupported staging verifier" ;;
+  esac
+  openclaw_emit_exact "$action" false
+}
+
 case "${SUBYARD_RESOURCE_MODE:-}" in
   prepare)
     prepare_resource
     exit 0
     ;;
+  verify)
+    action="$sub"; [ "$sub" != destroy ] || action="$(destroy_action)"
+    verify_resource "$action"
+    exit 0
+    ;;
   apply)
+    case "$sub" in up|start|stop|down|destroy)
+      action="$sub"; [ "$sub" != destroy ] || action="$(destroy_action)"
+      require_resource_apply "$action"
+      openclaw_lock "staging-$zone"
+      openclaw_recheck_exact "$action"
+      lease_expected_epoch="$(lease_show | jq -r '.epoch // 0')"
+      ;; esac
     case "$sub" in
       destroy) require_resource_apply "$(destroy_action)" ;;
       *) require_resource_apply "$sub" ;;
@@ -614,7 +697,7 @@ MSG
     # --- acquire the bot lease (canonical takes it too, so ephemeral can preempt) ---
     la="$(lease_acquire canonical normal)"
     case "$la" in
-      OK\ *)   epoch="${la#OK }"; ok "lease acquired (epoch $epoch)";;
+      OK\ *)   epoch="${la#OK }"; lease_expected_epoch="$epoch"; ok "lease acquired (epoch $epoch)";;
       BUSY\ *) die "bot lease held: ${la#BUSY } — another runner is polling; stop it or wait";;
       *)       die "could not acquire bot lease: $la";;
     esac
@@ -632,22 +715,22 @@ MSG
     # renews the lease (flock on the bind-mounted lease file) while the gateway pid is alive,
     # then releases. The lease dir is mounted at the same path, so the same inode is locked.
     ydocker exec -d "$cname" sh -c '
-      lease="$1/$2.json"; lock="$1/$2.lock"; me="$3"; ttl="$4"; gwpid="$5"; hbpid="$6"
+      lease="$1/$2.json"; lock="$1/$2.lock"; me="$3"; ttl="$4"; gwpid="$5"; hbpid="$6"; epoch="$7"
       echo $$ >"$hbpid"
       step=$((ttl/3)); [ "$step" -gt 0 ] || step=5
       while [ -f "$gwpid" ] && kill -0 "$(cat "$gwpid" 2>/dev/null)" 2>/dev/null; do
         ( exec 9>"$lock"; flock 9
-          [ -r "$lease" ] && [ "$(jq -r ".holder//\"\"" "$lease")" = "$me" ] || exit 0
+          [ -r "$lease" ] && [ "$(jq -r ".holder//\"\"" "$lease")" = "$me" ] && [ "$(jq -r ".epoch//0" "$lease")" = "$epoch" ] || exit 0
           now=$(date +%s); t="$lease.t.$$"
           jq --argjson e "$((now+ttl))" ".expires=\$e" "$lease" >"$t" && mv "$t" "$lease"
         ) 2>/dev/null || true
         sleep "$step"
       done
       ( exec 9>"$lock"; flock 9
-        [ -r "$lease" ] && [ "$(jq -r ".holder//\"\"" "$lease")" = "$me" ] && rm -f "$lease"
+        [ -r "$lease" ] && [ "$(jq -r ".holder//\"\"" "$lease")" = "$me" ] && [ "$(jq -r ".epoch//0" "$lease")" = "$epoch" ] && rm -f "$lease"
       ) 2>/dev/null || true
       rm -f "$hbpid"
-    ' _ "$LEASE_DIR" "$BOT_LEASE_KEY" "$zone" "$LEASE_TTL" "$GW_PID" "$HB_PID"
+    ' _ "$LEASE_DIR" "$BOT_LEASE_KEY" "$zone" "$LEASE_TTL" "$GW_PID" "$HB_PID" "$epoch"
     ok "gateway started for zone '$zone' (pid $(ydocker exec "$cname" cat "$GW_PID" 2>/dev/null))"
     info "follow it: ${PROG:-yard} staging logs $zone -f"
     ;;
@@ -664,9 +747,11 @@ MSG
     fi
     ydocker exec "$cname" sh -c '
       pid="$(cat "$1" 2>/dev/null)"; [ -n "$pid" ] || exit 0
+      identity() { [ -r "/proc/$pid/stat" ] && sed "s/.*) //" "/proc/$pid/stat" | cut -d" " -f20; }
+      started="$(identity)"; [ -n "$started" ] || exit 0
       kill "$pid" 2>/dev/null || true
-      for _ in 1 2 3 4 5; do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
-      kill -9 "$pid" 2>/dev/null || true
+      for _ in 1 2 3 4 5; do [ "$(identity)" = "$started" ] || break; sleep 1; done
+      if [ "$(identity)" = "$started" ]; then kill -9 "$pid" 2>/dev/null || true; fi
       rm -f "$1"
     ' _ "$GW_PID"
     ok "gateway stopped for zone '$zone'"

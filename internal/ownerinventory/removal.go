@@ -11,6 +11,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/Subyard/Subyard/internal/domain"
 )
 
 const removalSchema = 1
@@ -26,6 +28,9 @@ type RemovalPlan struct {
 	snapshot   Snapshot
 	digest     string
 }
+
+// StateDigest binds the captured connection and authoritative snapshot.
+func (plan RemovalPlan) StateDigest() string { return plan.digest }
 
 func (store Connections) PrepareRemoval(
 	connection Connection, snapshot Snapshot,
@@ -63,7 +68,7 @@ func (store Connections) prepareRemovalLocked(connection Connection, snapshot Sn
 		if candidate.HostID == connection.HostID {
 			found = candidate.Destination == connection.Destination
 			if !found {
-				return RemovalPlan{}, errors.New("owner connection changed before removal")
+				return RemovalPlan{}, fmt.Errorf("%w: owner connection changed before removal", domain.ErrPlanStale)
 			}
 			current = candidate
 		}
@@ -80,7 +85,7 @@ func (store Connections) prepareRemovalLocked(connection Connection, snapshot Sn
 		return RemovalPlan{}, err
 	}
 	if currentDigest != requestedDigest {
-		return RemovalPlan{}, errors.New("owner connection changed before removal")
+		return RemovalPlan{}, fmt.Errorf("%w: owner connection changed before removal", domain.ErrPlanStale)
 	}
 	if err := ensureInventoryHasNoProjects(snapshot.Inventory); err != nil {
 		return RemovalPlan{}, err
@@ -176,7 +181,7 @@ func (store Connections) validateRemovalPlan(plan RemovalPlan) error {
 		return err
 	}
 	if current.digest != plan.digest {
-		return errors.New("owner removal plan is stale")
+		return fmt.Errorf("%w: owner removal plan is stale", domain.ErrPlanStale)
 	}
 	return nil
 }

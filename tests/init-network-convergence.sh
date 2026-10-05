@@ -47,7 +47,7 @@ cat > "$TMP/bin/systemctl" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 case "$*" in
-  "is-active --quiet ufw") exit 3 ;;
+  "is-active --quiet ufw") [ "${MOCK_UFW_ACTIVE:-0}" = 1 ] ;;
   "is-active NetworkManager")
     case "${MOCK_NM_STATE:-inactive}" in
       active) printf 'active\n'; exit 0 ;;
@@ -62,7 +62,11 @@ cat > "$TMP/bin/yard-engine" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 case "$*" in
-  "_network-lock check") [ "${MOCK_NETWORK_LOCK_CHECK:-ok}" = ok ] ;;
+  "_network-lock check")
+    [ "${MOCK_REQUIRE_NOAUTH:-0}" != 1 ] || [ "${SUBYARD_SUDO_PREAUTHORIZED:-0}" != 1 ] || exit 1
+    [ -z "${MOCK_NETWORK_VERIFY_LOG:-}" ] || printf 'lock-check\n' >> "$MOCK_NETWORK_VERIFY_LOG"
+    [ "${MOCK_NETWORK_LOCK_CHECK:-ok}" = ok ] ;;
+
   "_network-lock ensure") exit 0 ;;
   *) exit 90 ;;
 esac
@@ -111,6 +115,9 @@ if MOCK_NETWORK_LOCK_CHECK=fail bash "$ROOT/scripts/06-network.sh" --verify; the
   fail "network verification ignored host-lock validation failure"
 fi
 
+SUBYARD_SUDO_PREAUTHORIZED=1 MOCK_REQUIRE_NOAUTH=1 bash "$ROOT/scripts/06-network.sh" --check \
+  || fail "read-only network planning retained authorization for privileged readers"
+
 # The network stage owns host guards, not desired-power reconciliation. A stopped instance is safe
 # here even when the later init finalizer still needs to restore desired=running.
 SUBYARD_POWER_DESIRED=running bash "$ROOT/scripts/06-network.sh" --verify \
@@ -149,5 +156,87 @@ if MOCK_INSTANCE_EXISTS=0 bash "$ROOT/scripts/06-network.sh" --check; then
 fi
 MOCK_INSTANCE_EXISTS=0 bash "$ROOT/scripts/06-network.sh" --verify \
   || fail "fresh-init network verify rejected an instance created by a later stage"
+
+# Model stale group credentials at the filesystem permission port. The real
+# leaf and require_root execute unchanged; the sudo port performs its exact env/argv retry.
+cat > "$TMP/bin/id" <<'SH'
+#!/usr/bin/env bash
+if [ "$*" = -u ]; then
+  [ "${SUBYARD_ELEVATED:-0}" = 1 ] && printf '0\n' || printf '1000\n'
+else
+  exec /usr/bin/id "$@"
+fi
+SH
+cat > "$TMP/bin/ufw" <<'SH'
+#!/usr/bin/env bash
+printf 'unexpected-ufw-write\n' >> "$MOCK_NETWORK_VERIFY_LOG"
+exit 90
+SH
+cat > "$TMP/bin/sudo" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$1" = -n ] || exit 90
+shift
+if [ "$*" = true ]; then
+  printf 'sudo-validation\n' >> "$MOCK_NETWORK_VERIFY_LOG"
+  [ "${MOCK_SUDO_EXPIRED:-0}" != 1 ]
+  exit
+fi
+[ "$1" = -- ] || exit 90
+shift
+[ "$1" = env ] || exit 90
+printf 'sudo-readback\n' >> "$MOCK_NETWORK_VERIFY_LOG"
+exec "$@"
+SH
+chmod 0700 "$TMP/bin/id" "$TMP/bin/ufw" "$TMP/bin/sudo"
+function [() {
+  if builtin [ "$#" = 4 ] && builtin [ "$1" = '!' ] && builtin [ "$2" = -r ] \
+    && builtin [ "$3" = "$SUBYARD_UFW_RULES_FILE" ] \
+    && builtin [ "${SUBYARD_ELEVATED:-0}" != 1 ]; then
+    return 0
+  fi
+  if builtin [ "$#" = 3 ] && builtin [ "$1" = -r ] \
+    && builtin [ "$2" = "$SUBYARD_UFW_RULES_FILE" ] \
+    && builtin [ "${SUBYARD_ELEVATED:-0}" != 1 ]; then
+    return 1
+  fi
+  builtin [ "$@"
+}
+export -f '['
+export MOCK_UFW_ACTIVE=1 MOCK_NETWORK_VERIFY_LOG="$TMP/verify.log"
+# The existing privilege handoff forwards only approved context; preserve the
+# test-owned readonly rule path through the port, not a product env exception.
+cat > "$TMP/bin/env" <<'SH'
+#!/usr/bin/env bash
+exec /usr/bin/env "SUBYARD_UFW_RULES_FILE=$SUBYARD_UFW_RULES_FILE" "$@"
+SH
+chmod 0700 "$TMP/bin/env"
+before_rules="$(sha256sum "$SUBYARD_UFW_RULES_FILE")"
+: > "$MOCK_NETWORK_VERIFY_LOG"
+SUBYARD_SUDO_PREAUTHORIZED=1 bash "$ROOT/scripts/06-network.sh" --verify \
+  || fail "authorized readonly UFW verification did not preserve the approved leaf"
+[ "$(cat "$MOCK_NETWORK_VERIFY_LOG")" = $'lock-check\nsudo-validation\nsudo-readback\nlock-check' ] \
+  || fail "UFW readback elevated before original lock validation or invoked a mutation"
+[ "$(sha256sum "$SUBYARD_UFW_RULES_FILE")" = "$before_rules" ] \
+  || fail "readonly verification changed persisted rules"
+for refusal in check noauth expired lock; do
+  : > "$MOCK_NETWORK_VERIFY_LOG"
+  case "$refusal" in
+    check) leaf_mode=--check; auth=1; expired=0; lock=ok ;;
+    noauth) leaf_mode=--verify; auth=0; expired=0; lock=ok ;;
+    expired) leaf_mode=--verify; auth=1; expired=1; lock=ok ;;
+    lock) leaf_mode=--verify; auth=1; expired=0; lock=fail ;;
+  esac
+  if SUBYARD_SUDO_PREAUTHORIZED="$auth" MOCK_SUDO_EXPIRED="$expired" \
+    MOCK_NETWORK_LOCK_CHECK="$lock" bash "$ROOT/scripts/06-network.sh" "$leaf_mode" >/dev/null 2>&1; then
+    fail "$refusal allowed unreadable active-UFW convergence"
+  fi
+  ! grep -Fq sudo-readback "$MOCK_NETWORK_VERIFY_LOG" \
+    || fail "$refusal escalated the leaf"
+done
+[ "$(sha256sum "$SUBYARD_UFW_RULES_FILE")" = "$before_rules" ] \
+  || fail "refused verification changed persisted rules"
+unset -f '['
+printf 'ok: readonly UFW readback preserves native lock checks and authorization\n'
 
 printf 'ok: network leaf owns guards independently from desired power\n'

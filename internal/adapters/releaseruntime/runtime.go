@@ -23,6 +23,7 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/blang/semver/v4"
+	"golang.org/x/sys/unix"
 )
 
 type Config struct {
@@ -45,10 +46,14 @@ type Prepared struct {
 	SourceVersion  string
 	TargetRelease  string
 	TargetVersion  string
+	Steps          []domain.OperationStep
+	Binding        string       `json:"-"`
+	Close          func() error `json:"-"`
 	// RepairCurrent identifies protected recovery of the active release before release selection.
 	RepairCurrent bool
 	run           func(context.Context) error
 	check         func(context.Context) (releasetransition.Inspection, error)
+	nativePlan    releasetransition.PlanToken
 }
 
 type verifiedPreparationError struct {
@@ -88,6 +93,7 @@ type Runtime struct {
 	config                 Config
 	pinnedCandidateRoot    *os.File
 	pinnedCandidateRelease releasetransition.ReleaseID
+	relocatedCandidates    map[string]string
 }
 
 func New(config Config) *Runtime {
@@ -448,10 +454,9 @@ func publicReleaseOutcome(
 	}
 }
 
-// PrepareTransition performs download, verification, immutable publication and
-// candidate-owned inspection before the caller asks for confirmation. Execute
-// then carries only the exact inspected plan and a fresh opaque confirmation
-// grant into candidate-owned convergence.
+// PrepareTransition downloads a private draft and performs verified, candidate-owned
+// inspection before confirmation. Execute publishes that approved draft when needed
+// and carries the exact inspected plan into candidate-owned convergence.
 func (runtime *Runtime) PrepareTransition(
 	ctx context.Context,
 	arguments []string,
@@ -548,11 +553,40 @@ func (runtime *Runtime) PrepareTransition(
 	if err := requirePreparedReleaseRoots(parsed, true); err != nil {
 		return Prepared{}, err
 	}
-	candidate, _, err := runtime.publishCandidate(ctx, parsed)
+	linksBefore, err := runtime.inspectRuntimeLinks(parsed.root)
 	if err != nil {
 		return Prepared{}, err
 	}
-	verified, err := runtime.verifyPublishedCandidate(ctx, candidate, parsed.root, nil)
+	parsed.expectedLinks = &linksBefore
+	rootBefore, err := os.Lstat(parsed.root)
+	if err != nil {
+		return Prepared{}, err
+	}
+	releasesBefore, err := os.Lstat(filepath.Join(parsed.root, "releases"))
+	if err != nil {
+		return Prepared{}, err
+	}
+	draftRoot, err := os.MkdirTemp(filepath.Dir(parsed.root), ".subyard-release-draft-")
+	if err != nil {
+		return Prepared{}, err
+	}
+	if err := os.Chmod(draftRoot, 0o700); err != nil {
+		os.Remove(draftRoot)
+		return Prepared{}, err
+	}
+	draftOwned := true
+	defer func() {
+		if draftOwned {
+			_ = os.RemoveAll(draftRoot)
+		}
+	}()
+	draftOptions := parsed
+	draftOptions.root = draftRoot
+	candidate, _, err := runtime.publishCandidate(ctx, draftOptions)
+	if err != nil {
+		return Prepared{}, err
+	}
+	verified, err := runtime.verifyPublishedCandidate(ctx, candidate, draftRoot, nil)
 	if err != nil {
 		return Prepared{}, fmt.Errorf("published runtime is not verified: %w", err)
 	}
@@ -562,6 +596,28 @@ func (runtime *Runtime) PrepareTransition(
 	}
 	if !strings.HasPrefix(string(candidate.release), verified.version+"-") {
 		return Prepared{}, errors.New("published release name does not match the verified engine version")
+	}
+	canonicalCandidate := publishedCandidate{release: candidate.release, root: filepath.Join(parsed.root, "releases", string(candidate.release))}
+	canonicalPresent := false
+	inspectionCandidate := verified
+	inspectionRoot := draftRoot
+	if _, err := os.Lstat(canonicalCandidate.root); err == nil {
+		canonicalPresent = true
+		existing, err := runtime.verifyPublishedCandidate(ctx, canonicalCandidate, parsed.root, &verified.manifestDigest)
+		if err != nil {
+			return Prepared{}, fmt.Errorf("existing release differs from candidate: %w", err)
+		}
+		matching := existing.version == verified.version && existing.registryDigest == verified.registryDigest
+		defer existing.Close()
+		if !matching {
+			return Prepared{}, errors.New("existing release differs from candidate")
+		}
+		// A completed journal may already pin this release. Inspect that same
+		// immutable directory, rather than a second inode with identical bytes.
+		inspectionCandidate = existing
+		inspectionRoot = parsed.root
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return Prepared{}, err
 	}
 	request := releasetransition.ProcessRequest{
 		SchemaVersion: releasetransition.ProcessProtocolSchemaV1,
@@ -573,8 +629,84 @@ func (runtime *Runtime) PrepareTransition(
 		SourceIngress:       sourceIngress,
 	}
 	runtime.progress(parsed, "Checking update requirements...")
-	prepared, err := runtime.prepareVerifiedCandidateTransition(ctx, parsed, verified, request)
+	prepared, err := runtime.prepareVerifiedCandidateTransition(ctx, parsed, inspectionCandidate, request)
 	if err == nil {
+		if parsed.check {
+			return prepared, nil
+		}
+		originalRun := prepared.run
+		publication := domain.OperationStep{ID: "release.publish", Target: filepath.Join(parsed.root, "releases", string(candidate.release)), Observed: "verified private release draft", Desired: "publish the exact verified candidate", Decision: domain.StepApply, Preconditions: []string{"native inspected plan and runtime directory identities remain unchanged"}, Verify: "reverify published manifest, registry and engine", Consequence: "publish immutable release " + string(candidate.release)}
+		if canonicalPresent {
+			publication.Observed = "exact verified candidate already published"
+			publication.Decision = domain.StepSkip
+		}
+		for index := range prepared.Steps {
+			prepared.Steps[index].DependsOn = append(prepared.Steps[index].DependsOn, publication.ID)
+		}
+		prepared.Steps = append([]domain.OperationStep{publication}, prepared.Steps...)
+		prepared.Close = func() error { return os.RemoveAll(draftRoot) }
+		prepared.run = func(ctx context.Context) error {
+			if err := requirePreparedReleaseRoots(parsed, false); err != nil {
+				return err
+			}
+			if parsed.expectedLinks != nil {
+				links, err := runtime.inspectRuntimeLinks(parsed.root)
+				if err != nil || links != *parsed.expectedLinks {
+					return fmt.Errorf("%w: runtime links changed after inspection", domain.ErrPlanStale)
+				}
+			}
+			if canonicalPresent {
+				fd, err := openApprovedReleaseDirectory(parsed.root, rootBefore, releasesBefore)
+				if err != nil {
+					return err
+				}
+				if err := unix.Close(fd); err != nil {
+					return err
+				}
+			}
+			fresh, err := runtime.verifyPublishedCandidate(ctx, inspectionCandidate.candidate, inspectionRoot, &verified.manifestDigest)
+			if err != nil {
+				return fmt.Errorf("reverify draft candidate: %w", err)
+			}
+			defer fresh.Close()
+			rechecked, err := runtime.invokeVerifiedCandidateTransition(ctx, fresh, request, "")
+			if err != nil {
+				return err
+			}
+			if rechecked.Inspection == nil || rechecked.Outcome != nil || rechecked.Inspection.Plan != prepared.nativePlan {
+				return fmt.Errorf("%w: release inspection changed before publication", domain.ErrPlanStale)
+			}
+			canonical := filepath.Join(parsed.root, "releases", string(candidate.release))
+			if canonicalPresent {
+				if _, err := os.Lstat(canonical); err != nil {
+					return fmt.Errorf("%w: approved published release disappeared", domain.ErrPlanStale)
+				}
+			}
+			if !canonicalPresent {
+				if err := publishApprovedDraft(candidate, parsed.root, rootBefore, releasesBefore); err != nil {
+					if !errors.Is(err, unix.EEXIST) {
+						return fmt.Errorf("publish approved release: %w", err)
+					}
+					existing, verifyErr := runtime.verifyPublishedCandidate(ctx, publishedCandidate{release: candidate.release, root: canonical}, parsed.root, &fresh.manifestDigest)
+					if verifyErr != nil {
+						return fmt.Errorf("%w: existing release differs from approved draft", domain.ErrPlanStale)
+					}
+					defer existing.Close()
+					if existing.version != fresh.version || existing.registryDigest != fresh.registryDigest {
+						return fmt.Errorf("%w: existing release differs from approved draft", domain.ErrPlanStale)
+					}
+					if err := runtime.Close(); err != nil {
+						return err
+					}
+				}
+				if runtime.relocatedCandidates == nil {
+					runtime.relocatedCandidates = map[string]string{}
+				}
+				runtime.relocatedCandidates[candidate.root] = canonical
+			}
+			return originalRun(ctx)
+		}
+		draftOwned = false
 		return prepared, nil
 	}
 	verifiedPreparation := Prepared{
@@ -1020,7 +1152,14 @@ func (runtime *Runtime) prepareInspectedCandidateTransition(
 	inspection releasetransition.Inspection,
 	activationReconciliationOwned bool,
 	revalidation *replacementRevalidation,
-) (Prepared, error) {
+) (prepared Prepared, err error) {
+	defer func() {
+		if err == nil && !parsed.check {
+			prepared.nativePlan = inspection.Plan
+			prepared.Steps = releaseOperationSteps(request, inspection)
+			prepared.Binding = releaseOperationBinding(request, inspection, owner, target, parsed.expectedLinks, revalidation)
+		}
+	}()
 	goal := releasetransition.Goal{Target: request.Target, Direction: request.Direction}
 	if err := releasetransition.ValidateProcessInspection(goal, inspection); err != nil {
 		return Prepared{}, fmt.Errorf("candidate returned an inconsistent release inspection: %w", err)

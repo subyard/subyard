@@ -45,6 +45,7 @@ type Plan struct {
 	Fingerprint string
 	Change      Change
 	Yards       []Yard
+	Snapshot    Snapshot `json:"-"`
 }
 
 func buildPlan(stored StoredPolicy, snapshot Snapshot, change Change) (Plan, error) {
@@ -56,7 +57,15 @@ func buildPlan(stored StoredPolicy, snapshot Snapshot, change Change) (Plan, err
 	if err != nil {
 		return Plan{}, err
 	}
-	plan := Plan{Before: stored, Change: change}
+	var captured Snapshot
+	capturedBytes, err := json.Marshal(snapshot)
+	if err != nil {
+		return Plan{}, err
+	}
+	if err := json.Unmarshal(capturedBytes, &captured); err != nil {
+		return Plan{}, err
+	}
+	plan := Plan{Before: stored, Change: change, Snapshot: captured}
 	known := map[string]bool{}
 	for _, y := range snapshot.Yards {
 		known[y.Name] = true

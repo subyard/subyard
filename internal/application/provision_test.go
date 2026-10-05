@@ -169,7 +169,12 @@ func TestProvisionKeepsDesiredRunningYardStarted(t *testing.T) {
 
 func provisionRunnerFixture(fixture *provisionFixture, names ...string) ProvisionRunner {
 	yard := domain.Context{YardName: "test", IncusProject: "subyard-test", YardInstanceName: "yard-test"}
+	approved := make([]ProvisionProfileStep, 0, len(names))
+	for _, name := range names {
+		approved = append(approved, ProvisionProfileStep{Profile: name, Conditional: true})
+	}
 	return ProvisionRunner{
+		ApprovedProfiles: approved, AllowTemporaryStart: true,
 		Power: PowerService{Instances: fixture, Config: fixture}, Physical: fixture,
 		GuardStart: func(_ context.Context, start func() error) error {
 			fixture.guarded++
@@ -189,4 +194,40 @@ func managedProvisionInstance(status, desired string) ports.InstanceInfo {
 
 func provisionRequest() domain.AdapterRequest {
 	return domain.AdapterRequest{Schema: 1, OperationID: "provision-test", Adapter: "provision", Action: "apply"}
+}
+
+func TestProvisionRejectsObservedSkipExpansionBeforeWrites(t *testing.T) {
+	fixture := &provisionFixture{instance: managedProvisionInstance("Running", PowerRunning)}
+	runner := provisionRunnerFixture(fixture, "sample-a")
+	runner.ApprovedProfiles = []ProvisionProfileStep{{Profile: "sample-a", Converged: true}}
+	if _, _, err := runner.Run(context.Background(), provisionRequest(), nil); !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatalf("error=%v", err)
+	}
+	if len(fixture.updates) != 0 || len(fixture.profiles) != 0 || len(fixture.actions) != 0 {
+		t.Fatalf("writes updates=%v profiles=%v actions=%v", fixture.updates, fixture.profiles, fixture.actions)
+	}
+}
+
+func TestProvisionRejectsUnapprovedStartBeforeWrites(t *testing.T) {
+	fixture := &provisionFixture{instance: managedProvisionInstance("Stopped", PowerStopped)}
+	runner := provisionRunnerFixture(fixture, "sample-a")
+	runner.AllowTemporaryStart = false
+	if _, _, err := runner.Run(context.Background(), provisionRequest(), nil); !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatalf("error=%v", err)
+	}
+	if len(fixture.updates) != 0 || len(fixture.actions) != 0 {
+		t.Fatalf("updates=%v actions=%v", fixture.updates, fixture.actions)
+	}
+}
+
+func TestProvisionAllowsApprovedProfileToBecomeSkip(t *testing.T) {
+	fixture := &provisionFixture{instance: managedProvisionInstance("Running", PowerRunning), profiles: []string{"sample-a"}}
+	runner := provisionRunnerFixture(fixture, "sample-a")
+	runner.ApprovedProfiles[0].Conditional = false
+	if _, _, err := runner.Run(context.Background(), provisionRequest(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.profiles) != 1 {
+		t.Fatalf("profiles=%v", fixture.profiles)
+	}
 }

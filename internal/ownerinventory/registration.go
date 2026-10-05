@@ -11,6 +11,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/Subyard/Subyard/internal/domain"
 )
 
 const registrationSchema = 1
@@ -30,6 +32,9 @@ type RegistrationPlan struct {
 	snapshot   Snapshot
 	digest     string
 }
+
+// StateDigest binds the captured registration state without exposing it.
+func (plan RegistrationPlan) StateDigest() string { return plan.digest }
 
 func (store Connections) PrepareRegistration(
 	connection Connection, snapshot Snapshot,
@@ -131,10 +136,10 @@ func (store Connections) ApplyRegistration(plan RegistrationPlan) error {
 	}
 	current, err := store.prepareRegistrationLocked(plan.connection, plan.snapshot)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %w", domain.ErrPlanStale, err)
 	}
 	if current.digest != plan.digest || current.HostID != plan.HostID || current.Destination != plan.Destination || current.Fingerprint != plan.Fingerprint {
-		return errors.New("owner registration plan is stale")
+		return fmt.Errorf("%w: owner registration plan is stale", domain.ErrPlanStale)
 	}
 	return store.registerLocked(plan.connection, plan.snapshot)
 }

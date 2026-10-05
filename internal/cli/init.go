@@ -59,6 +59,11 @@ type initExecution struct {
 	mode                  initMode
 	bootstrap             *initBootstrap
 	plan                  application.ReconcilePlan
+	approvedPlan          application.ReconcilePlan
+	approvedFinalize      application.ReconcilePlan
+	inputBaseline         *ownerInputBaseline
+	teardownResources     []ports.TeardownResource
+	resetBaseline         *resetTeardownBaseline
 	platform              ports.InitPlatform
 	powerYards            []domain.Context
 	hostID                string
@@ -67,6 +72,9 @@ type initExecution struct {
 	hooksApplicable       bool
 	orphanIngress         *orphanIngressPlan
 	orphanIngressDeferred bool
+	runtimePlan           *reconcileruntime.ProfileRuntimePlan
+	hookPlan              *reconcileruntime.ProjectHookPlan
+	hookProjects          []domain.ProjectRecord
 }
 
 func (execution *initExecution) refreshOrphanIngress(ctx context.Context, cli *CLI) error {
@@ -81,11 +89,6 @@ func (execution *initExecution) finishDeferredOrphanIngress(ctx context.Context,
 	if !execution.orphanIngressDeferred {
 		return nil
 	}
-	incusStage := application.InitStages(execution.loaded.Context)[0]
-	if err := (application.Reconciler{Stages: []application.ReconcileStage{incusStage},
-		Runner: execution.platform, Reporter: initReporter{output: output}}).Apply(ctx); err != nil {
-		return err
-	}
 	if err := execution.orphanIngress.refresh(ctx, cli, execution.loaded); err != nil {
 		if errors.Is(err, domain.ErrPlanStale) {
 			return fmt.Errorf("%w: deselected public ingress was discovered after owner Incus access was restored; rerun init for a new assessment and approval", domain.ErrPlanStale)
@@ -93,6 +96,16 @@ func (execution *initExecution) finishDeferredOrphanIngress(ctx context.Context,
 		return fmt.Errorf("inspect deselected public ingress after restoring owner Incus access: %w", err)
 	}
 	return nil
+}
+
+// approvedStages projects only authorization captured during read-only prepare.
+func (execution *initExecution) approvedStages(stage application.ReconcileStage) application.ReconcilePlan {
+	for _, step := range execution.approvedPlan.Steps {
+		if step.Stage == stage {
+			return application.ReconcilePlan{Steps: []application.ReconcileStep{step}}
+		}
+	}
+	return application.ReconcilePlan{}
 }
 
 type initReporter struct{ output io.Writer }
@@ -425,6 +438,14 @@ func (cli *CLI) prepareInitExecution(
 	}
 	if runtime, ok := execution.platform.(reconcileruntime.Runtime); ok {
 		runtime.InitProfile = request.profile
+		if mode == initReset {
+			execution.resetBaseline, err = cli.prepareResetTeardownBaseline(ctx, loaded)
+			if err != nil {
+				return nil, err
+			}
+			execution.teardownResources = execution.resetBaseline.resources()
+			runtime.TeardownResources = slices.Clone(execution.teardownResources)
+		}
 		execution.platform = runtime
 	}
 	if mode == initReconcile && cli.options.InitPlatform == nil {
@@ -434,9 +455,7 @@ func (cli *CLI) prepareInitExecution(
 		} else if err != nil {
 			return nil, fmt.Errorf("inspect deselected public ingress: %w", err)
 		}
-		if execution.orphanIngress != nil && cli.baseEnv["SUBYARD_SG_REEXEC"] == "1" {
-			return nil, fmt.Errorf("%w: deselected public ingress needs a new init assessment and approval from a fresh owner session", domain.ErrPlanStale)
-		}
+
 	}
 	if bootstrap == nil && mode == initReconcile && slices.Equal(baseline.Selection.Requested, loaded.Integrations.Requested) {
 		execution.platform, execution.integrationAdoption, err = prepareLegacyIntegrationAdoption(ctx, baseline.Selection, execution.platform)
@@ -465,13 +484,41 @@ func (cli *CLI) prepareInitExecution(
 	if mode == initReset {
 		execution.plan.Steps = make([]application.ReconcileStep, 0, len(stages))
 		for _, stage := range stages {
-			execution.plan.Steps = append(execution.plan.Steps, application.ReconcileStep{Stage: stage})
+			execution.plan.Steps = append(execution.plan.Steps, application.ReconcileStep{Stage: stage, Conditional: true})
 		}
 	} else {
 		execution.plan, err = (application.Reconciler{Stages: stages, Runner: execution.platform}).Plan(ctx)
 		if err != nil {
 			return nil, err
 		}
+	}
+	execution.approvedPlan = application.ReconcilePlan{Steps: slices.Clone(execution.plan.Steps)}
+	execution.approvedFinalize = application.ReconcilePlan{Steps: []application.ReconcileStep{{Stage: application.FinalizeStage(), Conditional: true}}}
+	if runtime, ok := execution.platform.(reconcileruntime.Runtime); ok {
+		unavailable := len(execution.plan.Steps) != 0 && !execution.plan.Steps[0].Converged
+		dependent := slices.ContainsFunc(execution.approvedPlan.Steps, func(step application.ReconcileStep) bool {
+			return step.Stage.ID == ports.ReconcileStageProvision && !step.Converged
+		})
+		execution.runtimePlan, err = runtime.PrepareProfileRuntimes(ctx, unavailable, mode == initReset, dependent)
+		if err != nil {
+			return nil, err
+		}
+		runtime.RuntimePlan = execution.runtimePlan
+		execution.hookPlan, err = runtime.PrepareProjectHooks(ctx, unavailable || mode == initReset)
+		if err != nil {
+			return nil, err
+		}
+		store, err := openProjectStoreReadOnly(loaded.Context.Paths.StateDir)
+		if err != nil {
+			return nil, err
+		}
+		execution.hookProjects, err = store.List(ctx)
+		if err != nil {
+			return nil, err
+		}
+		execution.hookPlan.CaptureOwnerProjects(execution.hookProjects)
+		runtime.HookPlan = execution.hookPlan
+		execution.platform = runtime
 	}
 	if execution.plan.Pending() != 0 || bootstrap != nil {
 		if err := execution.platform.Preflight(ctx, mode == initReset); err != nil {
@@ -594,6 +641,12 @@ func (execution *initExecution) refreshAssessment(ctx context.Context) error {
 	if execution == nil {
 		return errors.New("init execution is required")
 	}
+	if err := execution.checkHookProjects(ctx); err != nil {
+		return err
+	}
+	if err := execution.checkNativePlans(ctx, true); err != nil {
+		return err
+	}
 	if err := execution.profileSetup.check(); err != nil {
 		return err
 	}
@@ -606,6 +659,9 @@ func (execution *initExecution) refreshAssessment(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if hostID != execution.hostID {
+		return fmt.Errorf("%w: owner HostID changed after planning", domain.ErrPlanStale)
+	}
 	execution.hostID = hostID
 	execution.hostIDPending = pending
 	switch execution.mode {
@@ -616,6 +672,9 @@ func (execution *initExecution) refreshAssessment(ctx context.Context) error {
 		}
 		execution.configsChanged = !converged
 	case initReconcile:
+		if err := (application.Reconciler{Stages: application.InitStages(execution.loaded.Context), Runner: execution.platform}).CheckApproved(ctx, execution.approvedPlan); err != nil {
+			return err
+		}
 		plan, err := (application.Reconciler{
 			Stages: application.InitStages(execution.loaded.Context), Runner: execution.platform,
 		}).Plan(ctx)
@@ -666,13 +725,7 @@ func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Wri
 		return err
 	}
 	defer unlock()
-	if err := execution.checkIntegrationBaseline(cli); err != nil {
-		return err
-	}
-	if err := execution.profileSetup.check(); err != nil {
-		return err
-	}
-	if err := execution.checkIntegrationAdoption(ctx); err != nil {
+	if err := execution.checkBeforeInitWrites(ctx, cli); err != nil {
 		return err
 	}
 	if cli.options.InitPlatform == nil && execution.mode == initReconcile {
@@ -681,11 +734,34 @@ func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Wri
 		}
 	}
 	if execution.hooksOnly() {
-		execution.retryProjectHooks(ctx, output)
+		if err := execution.retryProjectHooks(ctx); err != nil {
+			return err
+		}
 		return nil
 	}
 	if err := execution.integrationSelection.check(ctx, cli, execution); err != nil {
 		return err
+	}
+	if execution.mode == initReconcile {
+		incusStage := application.InitStages(execution.loaded.Context)[0]
+		if err := (application.Reconciler{Stages: []application.ReconcileStage{incusStage},
+			Runner: execution.platform, Reporter: initReporter{output: output}}).Apply(ctx, execution.approvedStages(incusStage)); err != nil {
+			return err
+		}
+		// The installer activates access in this process. Keep the approved
+		// inputs and native plans, and reject drift before publishing yard state.
+		if err := execution.checkBeforeInitWrites(ctx, cli); err != nil {
+			return err
+		}
+		if err := (application.Reconciler{Stages: application.InitStages(execution.loaded.Context), Runner: execution.platform}).CheckApproved(ctx, execution.approvedPlan); err != nil {
+			return err
+		}
+		if err := execution.integrationSelection.check(ctx, cli, execution); err != nil {
+			return err
+		}
+		if err := execution.finishDeferredOrphanIngress(ctx, cli, output); err != nil {
+			return err
+		}
 	}
 	if !execution.orphanIngressDeferred {
 		if err := execution.orphanIngress.apply(ctx, cli, execution.loaded, execution.operationID); err != nil {
@@ -711,13 +787,10 @@ func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Wri
 		return fmt.Errorf("initialize owner HostID: %w", err)
 	}
 	fmt.Fprintf(output, "  [ ok ] owner HostID: %s\n", hostID)
-	if err := execution.profileSetup.apply(ctx, execution, output); err != nil {
-		return err
+	if hostID != execution.hostID {
+		return fmt.Errorf("%w: owner HostID changed during initialization", domain.ErrPlanStale)
 	}
-	// Persist the already approved named-yard registration before Incus may
-	// re-exec init in an incus-admin session. The orphan check still precedes
-	// every later reconcile stage and never applies a newly discovered route.
-	if err := execution.finishDeferredOrphanIngress(ctx, cli, output); err != nil {
+	if err := execution.profileSetup.apply(ctx, execution, output); err != nil {
 		return err
 	}
 	if execution.mode == initConfigs {
@@ -727,18 +800,35 @@ func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Wri
 		return execution.platform.RefreshConfigs(ctx)
 	}
 	if execution.mode == initReset {
+		if execution.resetBaseline != nil {
+			if err := execution.resetBaseline.check(ctx, cli); err != nil {
+				return err
+			}
+		}
 		if err := execution.platform.Teardown(ctx); err != nil {
 			return fmt.Errorf("teardown before reset: %w", err)
+		}
+		if execution.resetBaseline != nil {
+			if err := execution.resetBaseline.verify(ctx, cli); err != nil {
+				return fmt.Errorf("verify teardown before reset: %w", err)
+			}
 		}
 	}
 	reconciler := application.Reconciler{
 		Stages: application.InitStages(execution.loaded.Context), Runner: execution.platform,
 		Reporter: initReporter{output: output},
 	}
-	if err := reconciler.Apply(ctx); err != nil {
+	approved := execution.approvedPlan
+	if execution.mode == initReconcile {
+		reconciler.Stages = reconciler.Stages[1:]
+		approved.Steps = approved.Steps[1:]
+	}
+	if err := reconciler.Apply(ctx, approved); err != nil {
 		return err
 	}
-	execution.retryProjectHooks(ctx, output)
+	if err := execution.retryProjectHooks(ctx); err != nil {
+		return err
+	}
 	if execution.profileProvision == nil {
 		if err := cli.printInitProvisionHint(ctx, execution, output); err != nil {
 			return err
@@ -748,7 +838,7 @@ func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Wri
 		Stages: []application.ReconcileStage{application.FinalizeStage()},
 		Runner: execution.platform, Reporter: initReporter{output: output},
 	}
-	if err := finalizer.Apply(ctx); err != nil {
+	if err := finalizer.Apply(ctx, execution.approvedFinalize); err != nil {
 		return err
 	}
 	if execution.profileProvision == nil {
@@ -757,10 +847,45 @@ func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Wri
 	return nil
 }
 
-func (execution *initExecution) retryProjectHooks(ctx context.Context, output io.Writer) {
-	if err := execution.platform.RunProjectHooks(ctx); err != nil {
-		fmt.Fprintf(output, "  [warn] %s\n", err)
+func (execution *initExecution) checkBeforeInitWrites(ctx context.Context, cli *CLI) error {
+	if err := execution.checkNativePlans(ctx, true); err != nil {
+		return err
 	}
+	if err := execution.checkHookProjects(ctx); err != nil {
+		return err
+	}
+	if err := execution.inputBaseline.check(ctx, cli); err != nil {
+		return err
+	}
+	if err := execution.checkIntegrationBaseline(cli); err != nil {
+		return err
+	}
+	if err := execution.profileSetup.check(); err != nil {
+		return err
+	}
+	if err := execution.checkIntegrationAdoption(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (execution *initExecution) retryProjectHooks(ctx context.Context) error {
+	if err := execution.platform.RunProjectHooks(ctx); err != nil {
+		return fmt.Errorf("project hook verification failed; retry init: %w", err)
+	}
+	return nil
+}
+
+func (execution *initExecution) checkNativePlans(ctx context.Context, beforeWrites bool) error {
+	runtime, ok := execution.platform.(reconcileruntime.Runtime)
+	if !ok {
+		return nil
+	}
+
+	if err := runtime.CheckProfileRuntimePlan(ctx); err != nil {
+		return err
+	}
+	return runtime.CheckProjectHookPlan(ctx, beforeWrites)
 }
 
 func reconcileMigrationTestVMs(ctx context.Context, platform ports.InitPlatform) error {
@@ -882,7 +1007,12 @@ func (execution *initExecution) checkReleaseConfigOwnership(ctx context.Context,
 func (execution *initExecution) rebuildPlatform(cli *CLI) {
 	execution.platform = cli.initPlatform(execution.loaded, execution.powerYards)
 	if runtime, ok := execution.platform.(reconcileruntime.Runtime); ok {
+		runtime.RuntimePlan = execution.runtimePlan
+		runtime.HookPlan = execution.hookPlan
 		runtime.InitProfile = execution.requestedProfile
+		if execution.mode == initReset {
+			runtime.TeardownResources = slices.Clone(execution.teardownResources)
+		}
 		runtime.ProvisionProfile = execution.provisionProfile
 		runtime.ResourceCommand = execution.resourceCommand
 		runtime.ResourceArguments = slices.Clone(execution.resourceArguments)
@@ -892,4 +1022,22 @@ func (execution *initExecution) rebuildPlatform(cli *CLI) {
 		}
 		execution.platform = runtime
 	}
+}
+
+func (execution *initExecution) checkHookProjects(ctx context.Context) error {
+	if execution.hookPlan == nil {
+		return nil
+	}
+	store, err := openProjectStoreReadOnly(execution.loaded.Context.Paths.StateDir)
+	if err != nil {
+		return err
+	}
+	records, err := store.List(ctx)
+	if err != nil {
+		return err
+	}
+	if operationStateDigest(records) != operationStateDigest(execution.hookProjects) {
+		return fmt.Errorf("%w: captured project hook owner records changed", domain.ErrPlanStale)
+	}
+	return nil
 }

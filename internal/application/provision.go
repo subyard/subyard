@@ -16,13 +16,22 @@ type ProvisionReporter interface {
 	ProfileCompleted(string)
 }
 
+// ProvisionProfileStep binds one selected profile to its prepared decision.
+type ProvisionProfileStep struct {
+	Profile     string
+	Converged   bool
+	Conditional bool
+}
+
 type ProvisionRunner struct {
-	Power      PowerService
-	Physical   ports.AdapterRunner
-	GuardStart func(context.Context, func() error) error
-	Yard       domain.Context
-	Profiles   []string
-	Reporter   ProvisionReporter
+	Power               PowerService
+	Physical            ports.AdapterRunner
+	GuardStart          func(context.Context, func() error) error
+	Yard                domain.Context
+	Profiles            []string
+	ApprovedProfiles    []ProvisionProfileStep
+	AllowTemporaryStart bool
+	Reporter            ProvisionReporter
 }
 
 func (runner ProvisionRunner) Run(
@@ -36,6 +45,34 @@ func (runner ProvisionRunner) Run(
 	if runner.Power.Instances == nil || runner.Physical == nil {
 		return domain.AdapterResult{}, "", errors.New("provision ports are required")
 	}
+	if len(runner.ApprovedProfiles) != len(runner.Profiles) {
+		return domain.AdapterResult{}, "", fmt.Errorf("%w: provision profile scope changed", domain.ErrPlanStale)
+	}
+	for index, name := range runner.Profiles {
+		step := runner.ApprovedProfiles[index]
+		if step.Profile != name || step.Converged && step.Conditional {
+			return domain.AdapterResult{}, "", fmt.Errorf("%w: provision profile authorization changed", domain.ErrPlanStale)
+		}
+	}
+	observed, err := runner.Power.Instances.Instance(ctx, runner.Yard.IncusProject, runner.Yard.YardInstanceName)
+	if err != nil {
+		return domain.AdapterResult{}, "", err
+	}
+	if strings.EqualFold(observed.Status, "stopped") && !runner.AllowTemporaryStart {
+		return domain.AdapterResult{}, "", fmt.Errorf("%w: provision now requires temporary yard start", domain.ErrPlanStale)
+	}
+	// Check all observed skips before power metadata or any profile is written.
+	for _, step := range runner.ApprovedProfiles {
+		if step.Converged {
+			changed, err := runner.checkProfile(ctx, request, step.Profile)
+			if err != nil {
+				return domain.AdapterResult{}, "", err
+			}
+			if changed {
+				return domain.AdapterResult{}, "", fmt.Errorf("%w: provision profile %q now requires work", domain.ErrPlanStale, step.Profile)
+			}
+		}
+	}
 	intent, err := runner.Power.Ensure(ctx, runner.Yard)
 	if err != nil {
 		return domain.AdapterResult{}, "", fmt.Errorf("prepare power metadata: %w", err)
@@ -47,6 +84,9 @@ func (runner ProvisionRunner) Run(
 	started := false
 	var output strings.Builder
 	if strings.EqualFold(instance.Status, "stopped") {
+		if !runner.AllowTemporaryStart {
+			return domain.AdapterResult{}, "", fmt.Errorf("%w: provision now requires temporary yard start", domain.ErrPlanStale)
+		}
 		if runner.GuardStart == nil {
 			return domain.AdapterResult{}, output.String(), errors.New("yard network policy start guard is required")
 		}
@@ -93,7 +133,7 @@ func (runner ProvisionRunner) Run(
 		return nil
 	}
 
-	for _, profile := range runner.Profiles {
+	for index, profile := range runner.Profiles {
 		changed, checkErr := runner.checkProfile(ctx, request, profile)
 		if checkErr != nil {
 			restoreErr := restore()
@@ -103,6 +143,10 @@ func (runner ProvisionRunner) Run(
 		}
 		if !changed {
 			continue
+		}
+		if runner.ApprovedProfiles[index].Converged {
+			return domain.AdapterResult{}, output.String(), errors.Join(
+				fmt.Errorf("%w: provision profile %q now requires work", domain.ErrPlanStale, profile), restore())
 		}
 		if runner.Reporter != nil {
 			runner.Reporter.ProfileStarted(profile)

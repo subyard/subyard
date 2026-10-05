@@ -355,3 +355,15 @@ func TestServiceShellUsesRuntimeLauncher(t *testing.T) {
 		t.Fatalf("launcher dispatch: %s (%v)", output, err)
 	}
 }
+
+func TestRuntimeProjectHookPathsStayInsideNativeDispatcherDirectory(t *testing.T) {
+	for _, path := range []string{"relative-hook", "/usr/local/libexec/subyard/projects-changed.d/../outside", "/usr/local/libexec/subyard/projects-changed.d/nested/hook", "/usr/local/libexec/subyard/projects-changed.d/unsafe\n"} {
+		root := testkit.TempDir(t)
+		declaration := Definition{Runtime: &RuntimeHook{ActivationID: "fixture-runtime", Handler: "runtime.sh", ProjectsChangedHooks: []string{path}}}
+		file := fixture(t, root, "fixture", "", declaration)
+		testkit.WriteFile(t, filepath.Join(filepath.Dir(file), "runtime.sh"), []byte("#!/bin/sh\n"), 0o700)
+		if _, err := Load(root); err == nil {
+			t.Fatalf("unsafe native hook path accepted: %q", path)
+		}
+	}
+}

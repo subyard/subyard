@@ -276,6 +276,9 @@ func TestProvisionNoOpSkipsPromptAndApply(t *testing.T) {
 	runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{
 		Result: domain.AdapterResult{Schema: 1, OperationID: "provision-noop", Status: "ok"},
 		Stderr: "converged\n",
+	}, {
+		Result: domain.AdapterResult{Schema: 1, OperationID: "provision-noop", Status: "ok"},
+		Stderr: "converged\n",
 	}}}
 	prompt := &testkit.Prompt{}
 	program, err := New(Options{
@@ -289,7 +292,7 @@ func TestProvisionNoOpSkipsPromptAndApply(t *testing.T) {
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("provision no-op failed with %d", code)
 	}
-	if len(prompt.Requests) != 0 || len(runner.Requests) != 1 || runner.Requests[0].Action != "profile-check" {
+	if len(prompt.Requests) != 0 || len(runner.Requests) != 2 || runner.Requests[0].Action != "profile-check" || runner.Requests[1].Action != "profile-check" {
 		t.Fatalf("no-op prompted or applied: prompts=%#v requests=%#v", prompt.Requests, runner.Requests)
 	}
 }
@@ -315,4 +318,23 @@ func convergedProvisionInit(t *testing.T, root string) *initPlatformFixture {
 		platform.converged[stage] = true
 	}
 	return platform
+}
+
+func TestProvisionApprovalRetainsFirstObservedProfileDecisions(t *testing.T) {
+	execution := &provisionExecution{profiles: []string{"sample-a", "sample-b"}, changedProfiles: []string{"sample-b"}}
+	execution.captureApproved(false)
+	execution.changedProfiles = []string{"sample-a"}
+	execution.requiresPowerCycle = true
+	execution.captureApproved(true)
+	if len(execution.approvedProfiles) != 2 || !execution.approvedProfiles[0].Converged || execution.approvedProfiles[1].Converged || execution.approvedProfiles[0].Conditional || execution.approvedPowerCycle {
+		t.Fatalf("live observation broadened approval: profiles=%+v power=%t", execution.approvedProfiles, execution.approvedPowerCycle)
+	}
+}
+
+func TestProvisionPendingPrerequisiteCapturesConditionalProfiles(t *testing.T) {
+	execution := &provisionExecution{profiles: []string{"sample-a"}}
+	execution.captureApproved(true)
+	if !execution.approvedProfiles[0].Conditional || execution.approvedProfiles[0].Converged || !execution.approvedPowerCycle {
+		t.Fatalf("conditional approval=%+v power=%t", execution.approvedProfiles, execution.approvedPowerCycle)
+	}
 }

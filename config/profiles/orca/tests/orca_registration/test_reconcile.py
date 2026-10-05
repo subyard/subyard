@@ -41,6 +41,47 @@ class ReconcileTests(unittest.TestCase):
     def sidecar(self):
         return json.loads((self.state / "subyard-registration.json").read_text())
 
+    def test_exact_scope_rejects_new_root_before_registration_writes(self):
+        approved = self.run_sync(apply=False)["catalogDigest"]
+        init_git(self.root / "new-root")
+        self.rpc.calls.clear()
+        with mock.patch.dict(os.environ, {"SUBYARD_ORCA_REGISTRATION_SCOPE": approved}):
+            report = self.run_sync()
+        self.assertFalse(report["ready"])
+        self.assertIn("plan_stale", " ".join(report["errors"]))
+        self.assertFalse(any(method not in ("repo.list", "projectGroup.list", "folderWorkspace.list")
+                             for method, _ in self.rpc.calls))
+
+    def test_exact_catalog_rejects_new_missing_record_before_any_write(self):
+        self.assertTrue(self.run_sync()["ready"])
+        approved = self.run_sync(apply=False)["catalogDigest"]
+        self.rpc.repos.append({"id": "new-missing", "path": str(self.root / "missing"),
+                               "kind": "git", "projectGroupId": self.rpc.groups[0]["id"]})
+        self.rpc.calls.clear()
+        with mock.patch.dict(os.environ, {"SUBYARD_ORCA_REGISTRATION_SCOPE": approved}):
+            report = self.run_sync()
+        self.assertIn("plan_stale", " ".join(report["errors"]))
+        self.assertFalse(any(method not in ("repo.list", "projectGroup.list", "folderWorkspace.list")
+                             for method, _ in self.rpc.calls))
+
+    def test_exact_scope_does_not_prune_record_appearing_after_first_write(self):
+        self.assertTrue(self.run_sync()["ready"])
+        self.host_name = "renamed-host"
+        approved = self.run_sync(apply=False)["catalogDigest"]
+        new_record = {"id": "newly-appeared", "path": str(self.root / "missing-new"),
+                      "kind": "git", "projectGroupId": self.rpc.groups[0]["id"]}
+        def appeared(method, _):
+            if method == "projectGroup.update":
+                self.rpc.repos.append(new_record)
+        self.rpc.after = appeared
+        with mock.patch.dict(os.environ, {"SUBYARD_ORCA_REGISTRATION_SCOPE": approved}):
+            report = self.run_sync()
+        self.assertFalse(report["ready"])
+        self.assertIn("plan_stale", " ".join(report["errors"]))
+        self.assertIn(new_record, self.rpc.repos)
+        self.assertFalse(any(method == "repo.rm" and params["repo"] == "id:newly-appeared"
+                             for method, params in self.rpc.calls))
+
     def test_create_exact_names_and_one_group_per_project_id_despite_same_name(self):
         init_git(self.root / "packages/backend")
         other = project(self.workspaces, "other-id")

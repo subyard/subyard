@@ -83,18 +83,28 @@ func resolveCoreCommand(definition command.Definition) (coreCommandBehavior, err
 		behavior.prepare = (*preparedCommand).prepareCurrentMigration
 		behavior.prepareExit, behavior.prepareRPCCode = 1, "plan_failed"
 	case "@keys":
-		behavior.nonRPCReason = "protected credential transport"
+		behavior.prepare = (*preparedCommand).prepareKeys
+		behavior.prepareExit, behavior.prepareRPCCode = 1, "plan_failed"
 	case "@ssh-agent":
 		behavior.nonRPCReason = "protected owner-host credential transport"
 	case "@shell":
 		behavior.nonRPCReason = "interactive terminal session"
-	case "@config", "@host":
-		behavior.nonRPCReason = "dedicated configuration and registration workflow"
+	case "@config":
+		behavior.prepare = (*preparedCommand).prepareConfig
+		behavior.prepareExit, behavior.prepareRPCCode = 1, "plan_failed"
+	case "@host":
+		behavior.prepare = (*preparedCommand).prepareHost
+		behavior.prepareExit, behavior.prepareRPCCode = 1, "plan_failed"
 	case "@network":
 		behavior.prepare = (*preparedCommand).prepareNetwork
 		behavior.prepareExit, behavior.prepareRPCCode = 1, "plan_failed"
 	case "@resource":
-		behavior.nonRPCReason = "profile resource pipeline"
+		if definition.Name == "svc" {
+			behavior.nonRPCReason = "resource selector resolves its dedicated invocation"
+			break
+		}
+		behavior.prepare = (*preparedCommand).prepareResourceInvocation
+		behavior.prepareExit, behavior.prepareRPCCode = 1, "plan_failed"
 	case "@check", "@security", "@status", "@space", "@info", "@yards", "@logs", "@usage", "@list", "@help":
 		behavior.nonRPCReason = "read-only query"
 	case "@rpc", "@authorize", "@state", "@project-state", "@migrate", "@release-transition":
@@ -146,6 +156,8 @@ type preparedCommand struct {
 	policy           domain.CommandPolicy
 	assess           commandAssessment
 	refresh          commandAssessment
+	steps            func() []domain.OperationStep
+	stepsComplete    bool
 	execute          func(context.Context, *application.Orchestrator, io.Writer) (domain.AdapterResult, error)
 	closeResource    func() error
 	preview          func()
@@ -180,7 +192,7 @@ func (cli *CLI) prepareCommand(ctx context.Context, request prepareCommandReques
 	if behavior.prepare == nil {
 		return nil, fmt.Errorf("command has no prepared execution: %s", behavior.nonRPCReason)
 	}
-	operationID := cli.ensureOperationID()
+	cli.ensureOperationID()
 	prepared := &preparedCommand{CLI: cli, Definition: request.Definition,
 		Arguments: slices.Clone(request.Arguments), Loaded: request.Loaded, interactiveSetup: request.InteractiveSetup && !request.ReadOnly}
 	defer func() {
@@ -199,12 +211,43 @@ func (cli *CLI) prepareCommand(ctx context.Context, request prepareCommandReques
 		for name, value := range prepared.Project.Environment {
 			cli.env[name] = value
 		}
+		approved := prepared.Project.Record
+		prepared.Project.recordApproved = &approved
+		if prepared.Loaded.Context.AccessKind == domain.AccessLocal {
+			prepared.Project.inputBaseline, err = cli.captureOwnerInputs(prepared.Loaded, "", nil)
+			if err != nil {
+				return nil, err
+			}
+			if prepared.Project.SecretPath != "" {
+				info, statErr := os.Lstat(prepared.Project.SecretPath)
+				if statErr != nil {
+					return nil, statErr
+				}
+				identity, identityErr := ownerInputIdentity(prepared.Project.SecretPath, info)
+				if identityErr != nil {
+					return nil, identityErr
+				}
+				prepared.Project.secretIdentity = &identity
+			}
+		}
 	}
 	if request.OnResolved != nil {
 		request.OnResolved(prepared.Loaded, slices.Clone(prepared.Arguments))
 	}
 	prepared.policy = commandPolicy(prepared.Definition, prepared.Loaded.Context, prepared.Arguments, prepared.Project)
-	if (prepared.Definition.Handler == "@integration" || (prepared.Definition.Handler == "@provision" && !slices.Contains(prepared.Arguments, "--list") && !slices.Contains(prepared.Arguments, "-l"))) && prepared.Loaded.Context.AccessKind == domain.AccessRemote {
+	if prepared.Definition.Name == "sync" && prepared.Loaded.Context.AccessKind == domain.AccessRemote {
+		if err = prepared.prepareRemoteProjectCopy(ctx); err != nil {
+			return nil, &commandPreparationError{phase: "prepare", err: err}
+		}
+		return prepared, nil
+	}
+	if prepared.Definition.Name == "export" && prepared.Loaded.Context.AccessKind == domain.AccessRemote {
+		if err = prepared.prepareRemoteProjectExport(ctx); err != nil {
+			return nil, &commandPreparationError{phase: "prepare", err: err}
+		}
+		return prepared, nil
+	}
+	if ownerPreparedInvocation(prepared.Definition, prepared.Arguments) && prepared.Loaded.Context.AccessKind == domain.AccessRemote {
 		if err = prepared.prepareRemoteOperation(ctx); err != nil {
 			return nil, &commandPreparationError{phase: "prepare", err: err}
 		}
@@ -216,14 +259,29 @@ func (cli *CLI) prepareCommand(ctx context.Context, request prepareCommandReques
 	if prepared.displayOnly != nil {
 		return prepared, nil
 	}
-	if prepared.execute == nil {
-		return nil, errors.New("prepared command has no execution")
+	if err := prepared.preparePlan(ctx); err != nil {
+		return nil, err
 	}
-	orchestrator := cli.operationOrchestrator(operationID, prepared.Loaded, nil, nil)
+	return prepared, nil
+}
+
+func (prepared *preparedCommand) preparePlan(ctx context.Context) error {
+	if prepared.execute == nil {
+		return errors.New("prepared command has no execution")
+	}
+	orchestrator := prepared.CLI.operationOrchestrator(prepared.CLI.ensureOperationID(), prepared.Loaded, nil, nil)
+	var err error
 	if prepared.assess != nil {
 		action, delta, assessErr := prepared.assess(ctx)
 		if assessErr != nil {
-			return nil, &commandPreparationError{phase: "assessment", err: assessErr}
+			return &commandPreparationError{phase: "assessment", err: assessErr}
+		}
+		if prepared.steps != nil {
+			steps := domain.CloneOperationSteps(prepared.steps())
+			if err := domain.ValidateOperationSteps(steps); err != nil {
+				return &commandPreparationError{phase: "plan", err: err}
+			}
+			delta.Consequences = domain.OperationStepConsequences(steps)
 		}
 		prepared.Plan, err = orchestrator.PrepareAction(prepared.Loaded.Context,
 			prepared.policy.Name, prepared.policy.RemotePolicy, action, delta)
@@ -232,9 +290,15 @@ func (cli *CLI) prepareCommand(ctx context.Context, request prepareCommandReques
 			resolveCommandConfirmation(prepared.Definition, prepared.policy))
 	}
 	if err != nil {
-		return nil, &commandPreparationError{phase: "plan", err: err}
+		return &commandPreparationError{phase: "plan", err: err}
 	}
-	return prepared, nil
+	if prepared.steps != nil {
+		prepared.Plan.Steps = domain.CloneOperationSteps(prepared.steps())
+		if err := domain.ValidateOperationSteps(prepared.Plan.Steps); err != nil {
+			return &commandPreparationError{phase: "plan", err: err}
+		}
+	}
+	return nil
 }
 
 func (prepared *preparedCommand) Close() error {
@@ -246,8 +310,11 @@ func (prepared *preparedCommand) Close() error {
 		if prepared.CLI != nil {
 			prepared.CLI.abortProjectExecution(context.Background(), prepared.Project)
 		}
+		if prepared.Project != nil {
+			prepared.closeErr = prepared.Project.closePreparedSource()
+		}
 		if prepared.closeResource != nil {
-			prepared.closeErr = prepared.closeResource()
+			prepared.closeErr = errors.Join(prepared.closeErr, prepared.closeResource())
 		}
 	})
 	return prepared.closeErr
@@ -264,9 +331,6 @@ func (prepared *preparedCommand) Execute(ctx context.Context, orchestrator *appl
 	noOp := func() (domain.AdapterResult, error) {
 		return domain.AdapterResult{Schema: shelladapter.ProtocolSchema, OperationID: prepared.Plan.OperationID, Status: "ok"}, nil
 	}
-	if !prepared.executeNoOp && operationPlanNoOp(prepared.Plan) {
-		return noOp()
-	}
 	release, err := prepared.CLI.beginProjectMutation(ctx, prepared.Project)
 	if err != nil {
 		return domain.AdapterResult{}, err
@@ -282,22 +346,34 @@ func (prepared *preparedCommand) Execute(ctx context.Context, orchestrator *appl
 		if action != prepared.Plan.Assessment.Action {
 			return domain.AdapterResult{}, fmt.Errorf("%w: structured action changed after confirmation", domain.ErrPlanStale)
 		}
+		if prepared.steps != nil {
+			if err := domain.CheckOperationSteps(prepared.Plan.Steps, prepared.steps()); err != nil {
+				return domain.AdapterResult{}, err
+			}
+		} else if delta.Changed && !slices.Equal(delta.Consequences, prepared.Plan.Assessment.Consequences) {
+			return domain.AdapterResult{}, fmt.Errorf("%w: action consequences changed after confirmation", domain.ErrPlanStale)
+		}
+		if !prepared.Plan.Assessment.Changed && delta.Changed {
+			return domain.AdapterResult{}, fmt.Errorf("%w: previously converged action requires new work", domain.ErrPlanStale)
+		}
 		if !delta.Changed {
 			return prepared.commitResult(ctx, noOp)
 		}
-		if !slices.Equal(delta.Consequences, prepared.Plan.Assessment.Consequences) {
-			return domain.AdapterResult{}, fmt.Errorf("%w: action consequences changed after confirmation", domain.ErrPlanStale)
-		}
 	}
-	if err := prepared.CLI.reserveProjectExecution(ctx, prepared.Project); err != nil {
-		return domain.AdapterResult{}, err
+	if !prepared.executeNoOp && operationPlanNoOp(prepared.Plan) {
+		return noOp()
+	}
+	if !prepared.ownerPlan {
+		if err := prepared.CLI.reserveProjectExecution(ctx, prepared.Project); err != nil {
+			return domain.AdapterResult{}, err
+		}
 	}
 	return prepared.commitResult(ctx, func() (domain.AdapterResult, error) { return prepared.execute(ctx, orchestrator, diagnostics) })
 }
 
 func (prepared *preparedCommand) commitResult(ctx context.Context, execute func() (domain.AdapterResult, error)) (domain.AdapterResult, error) {
 	result, err := execute()
-	if err == nil && result.Status == "ok" && prepared.Project != nil && !operationPlanNoOp(prepared.Plan) {
+	if err == nil && result.Status == "ok" && !prepared.ownerPlan && prepared.Project != nil && !operationPlanNoOp(prepared.Plan) {
 		if commitErr := prepared.CLI.commitProjectExecution(ctx, prepared.Project); commitErr != nil {
 			return result, &commandCommitError{err: commitErr}
 		}
@@ -329,13 +405,28 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 	if err := execution.validateProfileRepair(ctx, cli); err != nil {
 		return err
 	}
+	preset := ""
+	if bootstrap != nil {
+		preset = bootstrap.sourcePath
+	}
+	execution.inputBaseline, err = cli.captureOwnerInputs(prepared.Loaded, preset, execution.powerYards)
+	if err != nil {
+		return err
+	}
 	prepared.exactState = operationStateDigest(struct {
 		Baseline *initIntegrationBaseline
 		Adoption reconcileruntime.IntegrationPlan
-	}{execution.integrationBaseline, execution.integrationAdoption})
+		Inputs   string
+		Captured string
+	}{execution.integrationBaseline, execution.integrationAdoption, execution.inputBaseline.binding(), execution.stateBinding()})
+	prepared.steps = execution.operationSteps
+	prepared.stepsComplete = cli.options.InitPlatform == nil
 	prepared.policy.Consequences = execution.consequences()
 	prepared.assess = func(context.Context) (domain.ActionID, domain.ActionDelta, error) { return execution.actionPlan() }
 	prepared.refresh = func(ctx context.Context) (domain.ActionID, domain.ActionDelta, error) {
+		if err := execution.inputBaseline.check(ctx, cli); err != nil {
+			return "", domain.ActionDelta{}, err
+		}
 		if err := execution.checkIntegrationBaseline(cli); err != nil {
 			return "", domain.ActionDelta{}, err
 		}
@@ -364,11 +455,13 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 	}
 	prepared.preview = func() {
 		cli.printInitPlan(execution)
+		if execution.hooksOnly() && execution.hooksApplicable {
+			fmt.Fprintln(cli.options.Stdout, "  [ .. ] retry installed project hooks")
+		}
+	}
+	prepared.printResult = func(domain.AdapterResult) {
 		if execution.hooksOnly() {
 			fmt.Fprintln(cli.options.Stdout, "  [ ok ] Everything is already set up")
-			if execution.hooksApplicable {
-				fmt.Fprintln(cli.options.Stdout, "  [ .. ] retry installed project hooks")
-			}
 		}
 	}
 	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (domain.AdapterResult, error) {
@@ -412,8 +505,16 @@ func (prepared *preparedCommand) prepareLifecycle(ctx context.Context, _ *initBo
 		return err
 	}
 	prepared.policy = execution.policy(prepared.Definition, prepared.Loaded.Context)
+	if err := prepared.CLI.observeLifecycleExecution(ctx, prepared.Loaded.Context, execution); err != nil {
+		return err
+	}
 	var startup *resourceStartup
+	var startupScope string
 	if execution.action == "start" {
+		startupScope, err = prepared.CLI.startupScopeBinding(ctx, prepared.Loaded)
+		if err != nil {
+			return err
+		}
 		startup, err = prepared.CLI.prepareResourceStartup(ctx, prepared.Loaded)
 		if err != nil {
 			return err
@@ -438,7 +539,22 @@ func (prepared *preparedCommand) prepareLifecycle(ctx context.Context, _ *initBo
 		}
 		prepared.refresh = prepared.assess
 	}
+	prepared.exactState = operationStateDigest(struct{ Lifecycle, Startup, Scope string }{execution.binding(), startup.binding(), startupScope})
+	prepared.stepsComplete = startup.stepsComplete()
+	prepared.steps = func() []domain.OperationStep {
+		return append(execution.steps(prepared.Loaded.Context), startup.steps()...)
+	}
+	prepared.executeNoOp = true
 	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (domain.AdapterResult, error) {
+		if execution.action == "start" {
+			current, err := prepared.CLI.startupScopeBinding(ctx, prepared.Loaded)
+			if err != nil {
+				return domain.AdapterResult{}, err
+			}
+			if current != startupScope {
+				return domain.AdapterResult{}, fmt.Errorf("%w: startup resource scope changed", domain.ErrPlanStale)
+			}
+		}
 		if startup == nil {
 			return prepared.CLI.executeLifecycle(ctx, orchestrator, prepared.Loaded.Context, prepared.Plan, execution, diagnostics)
 		}
@@ -468,6 +584,7 @@ func (prepared *preparedCommand) prepareLifecycle(ctx context.Context, _ *initBo
 }
 
 func (prepared *preparedCommand) prepareProvision(ctx context.Context, _ *initBootstrap) error {
+	prepared.stepsComplete = true
 	execution, err := prepared.CLI.prepareProvisionExecution(prepared.Loaded, prepared.Arguments, prepared.Project)
 	if err != nil {
 		return err
@@ -485,6 +602,14 @@ func (prepared *preparedCommand) prepareProvision(ctx context.Context, _ *initBo
 		prepared.Loaded = bootstrap.loaded
 	}
 	var notes []string
+	initial := prepared.Loaded
+	if bootstrap != nil {
+		initial = bootstrap.initial
+	}
+	inputs, err := prepared.CLI.captureOwnerInputs(initial, "", nil)
+	if err != nil {
+		return err
+	}
 	readAddresses := prepared.CLI.provisionEndpointAddresses
 	if readAddresses == nil {
 		readAddresses = hostruntime.OwnerIPv4Addresses
@@ -515,10 +640,24 @@ func (prepared *preparedCommand) prepareProvision(ctx context.Context, _ *initBo
 		action, delta, err := execution.actionPlan(prepared.Definition, prepared.Loaded.Context)
 		assessment := bootstrap.augment(domain.ActionAssessment{Changed: delta.Changed, Consequences: delta.Consequences})
 		delta.Changed, delta.Consequences = assessment.Changed, assessment.Consequences
+		if prepared.exactState == "" {
+			prepared.exactState = operationStateDigest(struct{ Inputs, Provision, Bootstrap string }{inputs.binding(), execution.stateBinding(), bootstrap.stateBinding()})
+		}
 		return action, delta, err
 	}
-	prepared.refresh = prepared.assess
+	prepared.steps = func() []domain.OperationStep {
+		return append(bootstrap.operationSteps(), execution.operationSteps(prepared.Loaded)...)
+	}
+	prepared.refresh = func(ctx context.Context) (domain.ActionID, domain.ActionDelta, error) {
+		if err := inputs.check(ctx, prepared.CLI); err != nil {
+			return "", domain.ActionDelta{}, err
+		}
+		return prepared.assess(ctx)
+	}
 	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (domain.AdapterResult, error) {
+		if err := inputs.check(ctx, prepared.CLI); err != nil {
+			return domain.AdapterResult{}, err
+		}
 		if bootstrap != nil {
 			if err := bootstrap.apply(ctx, prepared.CLI); err != nil {
 				return domain.AdapterResult{}, err
@@ -533,11 +672,15 @@ func (prepared *preparedCommand) prepareProvision(ctx context.Context, _ *initBo
 }
 
 func (prepared *preparedCommand) prepareTestVMs(ctx context.Context, _ *initBootstrap) error {
+	prepared.stepsComplete = true
 	execution, err := prepared.CLI.prepareTestVMExecution(ctx, prepared.Loaded, prepared.Arguments)
 	if err != nil {
 		return err
 	}
 	prepared.assess = func(context.Context) (domain.ActionID, domain.ActionDelta, error) { return execution.actionPlan() }
+	prepared.exactState = execution.binding()
+	prepared.steps = execution.steps
+	prepared.executeNoOp = true
 	prepared.remoteArguments = execution.remoteArguments
 	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (domain.AdapterResult, error) {
 		return prepared.CLI.executeTestVMs(ctx, orchestrator, prepared.Loaded, prepared.Plan, execution, diagnostics)
@@ -546,6 +689,7 @@ func (prepared *preparedCommand) prepareTestVMs(ctx context.Context, _ *initBoot
 }
 
 func (prepared *preparedCommand) prepareTeardown(_ context.Context, _ *initBootstrap) error {
+	prepared.stepsComplete = true
 	prepared.executeNoOp = true
 	execution, err := prepareTeardownExecution(prepared.Arguments)
 	if err != nil {
@@ -556,9 +700,13 @@ func (prepared *preparedCommand) prepareTeardown(_ context.Context, _ *initBoots
 		if err := prepared.CLI.observeTeardownExecution(ctx, prepared.Loaded, execution); err != nil {
 			return "", domain.ActionDelta{}, err
 		}
+		if prepared.exactState == "" {
+			prepared.exactState = execution.binding()
+		}
 		return execution.actionPlan(prepared.Definition, prepared.Loaded.Context)
 	}
 	prepared.refresh = prepared.assess
+	prepared.steps = func() []domain.OperationStep { return execution.steps(prepared.Loaded.Context) }
 	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (domain.AdapterResult, error) {
 		return prepared.CLI.executeTeardown(ctx, orchestrator, prepared.Loaded, prepared.Plan, execution, diagnostics)
 	}
@@ -571,6 +719,12 @@ func (prepared *preparedCommand) prepareRemote(ctx context.Context, _ *initBoots
 		return err
 	}
 	prepared.policy = application.RemotePolicy(*execution)
+	prepared.exactState = operationStateDigest(execution)
+	prepared.exactState = operationStateDigest(struct{ State, Native string }{prepared.exactState, execution.Binding})
+	if len(execution.Steps) != 0 {
+		prepared.stepsComplete = execution.Binding != ""
+		prepared.steps = func() []domain.OperationStep { return domain.CloneOperationSteps(execution.Steps) }
+	}
 	prepared.assess = func(context.Context) (domain.ActionID, domain.ActionDelta, error) {
 		return application.RemoteActionPlan(*execution)
 	}
@@ -592,6 +746,9 @@ func (prepared *preparedCommand) prepareUpdate(ctx context.Context, _ *initBoots
 	}
 	prepared.closeResource = execution.Close
 	prepared.release = execution
+	prepared.exactState = execution.prepared.Binding
+	prepared.steps = func() []domain.OperationStep { return domain.CloneOperationSteps(execution.prepared.Steps) }
+	prepared.stepsComplete = execution.prepared.Binding != "" && len(execution.prepared.Steps) != 0
 	prepared.executeNoOp = true
 	prepared.preview = func() {
 		prepared.CLI.printUpdatePreview(execution)
@@ -609,17 +766,33 @@ func (prepared *preparedCommand) prepareUpdate(ctx context.Context, _ *initBoots
 	return nil
 }
 
-func (prepared *preparedCommand) prepareProject(_ context.Context, _ *initBootstrap) error {
+func (prepared *preparedCommand) prepareProject(ctx context.Context, _ *initBootstrap) error {
 	project := prepared.Project
 	if project == nil {
 		return errors.New("project execution is required")
 	}
 	cli, loaded, definition := prepared.CLI, prepared.Loaded, prepared.Definition
+	if definition.Name == "sync" || definition.Name == "clone" || definition.Name == "export" {
+		if err := project.prepareSource(ctx, cli); err != nil {
+			return err
+		}
+		if definition.Name == "export" {
+			if err := project.prepareProjectExportDestination(ctx, cli); err != nil {
+				return err
+			}
+		}
+		prepared.exactState = project.sourceBinding()
+	}
+	prepared.steps = func() []domain.OperationStep { return project.operationSteps(definition.Name) }
+	prepared.stepsComplete = true
 	switch definition.Name {
 	case "remove":
 		prepared.assess = func(ctx context.Context) (domain.ActionID, domain.ActionDelta, error) {
 			if err := cli.prepareProjectRemoval(ctx, project); err != nil {
 				return "", domain.ActionDelta{}, err
+			}
+			if prepared.exactState == "" {
+				prepared.exactState = project.sourceBinding()
 			}
 			return project.removeActionPlan()
 		}
@@ -628,16 +801,33 @@ func (prepared *preparedCommand) prepareProject(_ context.Context, _ *initBootst
 			if err := cli.observeProjectAction(ctx, definition.Name, project); err != nil {
 				return "", domain.ActionDelta{}, err
 			}
+			if prepared.Plan.OperationID == "" {
+				prepared.exactState = project.sourceBinding()
+			}
 			return project.actionPlan(definition.Name)
 		}
 	}
-	prepared.refresh = prepared.assess
+	prepared.refresh = func(ctx context.Context) (domain.ActionID, domain.ActionDelta, error) {
+		if err := project.inputBaseline.check(ctx, cli); err != nil {
+			return "", domain.ActionDelta{}, err
+		}
+		if err := project.checkPreparedSource(ctx, cli); err != nil {
+			return "", domain.ActionDelta{}, err
+		}
+		return prepared.assess(ctx)
+	}
 	if definition.Handler == "@project" {
 		prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (domain.AdapterResult, error) {
 			incusPort, _ := cli.statusPorts()
 			orchestrator.Runner = application.ProjectActionRunner{
 				Data: cli.projectDataPlane(), Devices: cli.projectDeviceManager(), Archive: cli.projectArchiver(),
-				Exports: cli.projectExportStore(loaded), Instances: incusPort, VSCode: cli.projectVSCode(loaded),
+				PreparedArchive: project.preparedArchive, CloneRevision: project.cloneRevision, CloneUnborn: project.cloneUnborn, ExportObservedTree: project.exportObservedTree,
+				ExportSourceTree: project.exportSourceTree,
+				VerifyExport: func(ctx context.Context) error {
+					return cli.verifyLocalProjectExport(ctx, project)
+				},
+				VerifyPrepared: true, RemovalApproval: project.removalApproval(),
+				Exports: executionProjectExportStore(project, cli.projectExportStore(loaded)), Instances: incusPort, VSCode: cli.projectVSCode(loaded),
 				Extensions:         strings.Fields(cli.env["CODE_RECOMMENDED_EXTENSIONS"]),
 				WorkspaceDirectory: filepath.Join(loaded.Context.Paths.ConfigHome, "workspaces"),
 				Yard:               loaded.Context, Project: project.Record, YardIdentity: project.YardIdentity,
@@ -653,9 +843,30 @@ func (prepared *preparedCommand) prepareProject(_ context.Context, _ *initBootst
 		prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (domain.AdapterResult, error) {
 			var protected io.ReadCloser
 			if project.SecretPath != "" {
+				info, err := os.Lstat(project.SecretPath)
+				if err != nil {
+					return domain.AdapterResult{}, err
+				}
+				identity, err := ownerInputIdentity(project.SecretPath, info)
+				if err != nil {
+					return domain.AdapterResult{}, err
+				}
+				if project.secretIdentity == nil || identity != *project.secretIdentity {
+					return domain.AdapterResult{}, fmt.Errorf("%w: protected project input changed", domain.ErrPlanStale)
+				}
 				file, err := os.Open(project.SecretPath)
 				if err != nil {
 					return domain.AdapterResult{}, err
+				}
+				opened, err := file.Stat()
+				if err != nil {
+					_ = file.Close()
+					return domain.AdapterResult{}, err
+				}
+				openedIdentity, err := ownerInputIdentity(project.SecretPath, opened)
+				if err != nil || openedIdentity != identity {
+					_ = file.Close()
+					return domain.AdapterResult{}, fmt.Errorf("%w: protected project input was replaced", domain.ErrPlanStale)
 				}
 				protected = file
 				defer protected.Close()
@@ -664,10 +875,23 @@ func (prepared *preparedCommand) prepareProject(_ context.Context, _ *initBootst
 				Data: cli.projectDataPlane(), Yard: loaded.Context, Project: project.Record,
 				Profile: project.Profile, HostLinks: project.HostLinks,
 				Rebuild: project.Environment["SUBYARD_PROJECT_REBUILD"] == "1", HasSecret: project.SecretPath != "",
+				PreparedObservation: project.approvedEnvironment,
 			}
 			result, stderr, err := orchestrator.RunAdapter(ctx, prepared.Plan, domain.AdapterRequest{
 				Schema: shelladapter.ProtocolSchema, OperationID: prepared.Plan.OperationID, Adapter: "project-env", Action: definition.Name,
 			}, protected)
+			if err == nil && result.Status == "ok" && project.SecretPath != "" {
+				file := protected.(*os.File)
+				opened, statErr := file.Stat()
+				if statErr != nil {
+					return result, statErr
+				}
+				identity, identityErr := ownerInputIdentity(project.SecretPath, opened)
+				current, pathErr := os.Lstat(project.SecretPath)
+				if identityErr != nil || pathErr != nil || identity != *project.secretIdentity || !os.SameFile(opened, current) {
+					return result, fmt.Errorf("%w: protected project input changed during transfer", domain.ErrPlanStale)
+				}
+			}
 			writeAdapterDiagnostics(diagnostics, stderr)
 			return result, err
 		}

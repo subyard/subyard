@@ -348,6 +348,7 @@ func TestOldYardTeardownRequiresCanonicalTemplateMigration(t *testing.T) {
 	runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{
 		Schema: 1, OperationID: "operation-teardown", Status: "ok",
 	}}}}
+	teardownIncus := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true}}
 	var stderr bytes.Buffer
 	program, err = New(Options{
 		RepositoryRoot: root,
@@ -357,11 +358,23 @@ func TestOldYardTeardownRequiresCanonicalTemplateMigration(t *testing.T) {
 		WorkingDir:     root,
 		Stderr:         &stderr,
 		AdapterRunner:  runner,
-		Incus:          &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true}},
+		Incus:          teardownIncus,
 		NetworkPolicy:  allowTestNetworkPolicy(),
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	teardownLoaded, err := program.loadContext("e2e-yard")
+	if err != nil {
+		t.Fatal(err)
+	}
+	teardownIncus.Instances = map[string]ports.InstanceInfo{teardownLoaded.Context.IncusProject + "/" + teardownLoaded.Context.YardInstanceName: {Name: teardownLoaded.Context.YardInstanceName, Project: teardownLoaded.Context.IncusProject, Status: "Stopped"}}
+	runner.Steps[0].Apply = func(domain.AdapterRequest) {
+		teardownIncus.Reconcile.InstanceFound = false
+		teardownIncus.Instances = map[string]ports.InstanceInfo{}
+		if err := os.RemoveAll(teardownLoaded.Context.Paths.StateDir); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("canonical-template teardown failed: code=%d stderr=%q", code, stderr.String())

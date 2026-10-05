@@ -14,7 +14,9 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/resource"
@@ -41,8 +43,8 @@ func (stage orphanBootstrapStage) ApplyStage(_ context.Context, id ports.Reconci
 	if id != ports.ReconcileStageIncus {
 		return errors.New("unexpected later init stage")
 	}
-	if _, err := os.Stat(stage.target); err != nil {
-		return fmt.Errorf("named yard registration was not published before Incus enrollment: %w", err)
+	if _, err := os.Stat(stage.target); !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("named yard registration was published before Incus enrollment: %w", err)
 	}
 	return stage.stopped
 }
@@ -154,7 +156,8 @@ func TestColdNamedYardDefersOnlyUnixSocketPermission(t *testing.T) {
 		t.Fatalf("cold named yard was not deferred: %v", err)
 	}
 	execution := &initExecution{loaded: loaded, orphanIngressDeferred: true,
-		platform: &initPlatformFixture{converged: map[ports.ReconcileStageID]bool{}}}
+		platform:     &initPlatformFixture{converged: map[ports.ReconcileStageID]bool{}},
+		approvedPlan: application.ReconcilePlan{Steps: []application.ReconcileStep{{Stage: application.InitStages(loaded.Context)[0], Conditional: true}}}}
 	if err := execution.refreshOrphanIngress(context.Background(), program); err != nil {
 		t.Fatalf("pre-consent refresh rejected the same inaccessible socket: %v", err)
 	}
@@ -162,8 +165,8 @@ func TestColdNamedYardDefersOnlyUnixSocketPermission(t *testing.T) {
 	if err := execution.finishDeferredOrphanIngress(context.Background(), program, io.Discard); err != nil {
 		t.Fatalf("fresh named yard did not pass post-bootstrap inspection: %v", err)
 	}
-	if got := execution.platform.(*initPlatformFixture).applied; len(got) != 1 || got[0] != ports.ReconcileStageIncus {
-		t.Fatalf("deferred inspection bypassed the normal Incus stage: %v", got)
+	if got := execution.platform.(*initPlatformFixture).applied; len(got) != 0 {
+		t.Fatalf("deferred inspection repeated the Incus prerequisite: %v", got)
 	}
 	host.instanceErr = &url.Error{Op: "Get", Err: os.ErrPermission}
 	if _, err := program.prepareOrphanIngress(context.Background(), loaded); errors.Is(err, errOrphanIngressAccessDeferred) {
@@ -182,7 +185,8 @@ func TestDeferredOrphanIngressRequiresNewAssessmentAfterIncusStage(t *testing.T)
 			Devices:      map[string]map[string]string{contract.Device: maps.Clone(device)},
 			LocalConfig:  map[string]string{contract.OwnershipKey(): contract.OwnershipValue(device)}}}}
 	execution := &initExecution{loaded: loaded, orphanIngressDeferred: true,
-		platform: &initPlatformFixture{converged: map[ports.ReconcileStageID]bool{}}}
+		platform:     &initPlatformFixture{converged: map[ports.ReconcileStageID]bool{}},
+		approvedPlan: application.ReconcilePlan{Steps: []application.ReconcileStep{{Stage: application.InitStages(loaded.Context)[0], Conditional: true}}}}
 	if err := execution.finishDeferredOrphanIngress(context.Background(), program, io.Discard); !errors.Is(err, domain.ErrPlanStale) {
 		t.Fatalf("newly visible orphan reused old consent: %v", err)
 	}
@@ -192,26 +196,7 @@ func TestDeferredOrphanIngressRequiresNewAssessmentAfterIncusStage(t *testing.T)
 	}
 }
 
-func TestGroupReexecCannotAutoApproveNewOrphanIngress(t *testing.T) {
-	program, loaded, host := orphanIngressFixture(t, false)
-	contract := program.resources.Definitions()[0].Proxy
-	device := map[string]string{"type": "proxy", "listen": "udp:10.20.30.40:42000",
-		"connect": "udp:10.80.0.10:41999", "bind": "host", "nat": "true"}
-	host.snapshot.Yards = []yardnetwork.ObservedYard{{Yard: networkYard(loaded.Context), InstanceFound: true,
-		InstanceInfo: ports.InstanceInfo{Type: domain.YardVM,
-			LocalDevices: map[string]map[string]string{contract.Device: maps.Clone(device)},
-			Devices:      map[string]map[string]string{contract.Device: maps.Clone(device)},
-			LocalConfig:  map[string]string{contract.OwnershipKey(): contract.OwnershipValue(device)}}}}
-	program.baseEnv["SUBYARD_SG_REEXEC"] = "1"
-	if _, err := program.prepareInitExecution(context.Background(), loaded, nil, nil); !errors.Is(err, domain.ErrPlanStale) {
-		t.Fatalf("group re-exec would approve a newly visible public route: %v", err)
-	}
-	if len(host.snapshot.Yards[0].InstanceInfo.LocalDevices) != 1 {
-		t.Fatal("group re-exec changed the route before a fresh approval")
-	}
-}
-
-func TestDeferredIngressKeepsNamedBootstrapBeforeIncusEnrollment(t *testing.T) {
+func TestDeferredIngressKeepsIncusPrerequisiteBeforeNamedBootstrap(t *testing.T) {
 	program, _, host := orphanIngressFixture(t, false)
 	root := program.options.RepositoryRoot
 	writeCLIFile(t, filepath.Join(root, "config", "profiles", "sample", "yard.env"),
@@ -225,11 +210,16 @@ func TestDeferredIngressKeepsNamedBootstrapBeforeIncusEnrollment(t *testing.T) {
 	execution := &initExecution{loaded: loaded, bootstrap: bootstrap, orphanIngressDeferred: true,
 		platform: orphanBootstrapStage{initPlatformFixture: &initPlatformFixture{
 			converged: map[ports.ReconcileStageID]bool{}}, target: bootstrap.targetPath, stopped: stopped}}
-	if err := execution.run(context.Background(), program, io.Discard); !errors.Is(err, stopped) {
-		t.Fatalf("named bootstrap did not precede Incus re-exec boundary: %v", err)
+	execution.hostID, execution.hostIDPending, err = configsync.ResolveHostID(loaded.Context.Paths.ConfigHome, loaded.Environment)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if data, err := os.ReadFile(bootstrap.targetPath); err != nil || string(data) != string(bootstrap.content) {
-		t.Fatalf("approved registration was not published before Incus enrollment: %v", err)
+	execution.approvedPlan = application.ReconcilePlan{Steps: []application.ReconcileStep{{Stage: application.InitStages(loaded.Context)[0], Conditional: true}}}
+	if err := execution.run(context.Background(), program, io.Discard); !errors.Is(err, stopped) {
+		t.Fatalf("Incus prerequisite did not precede named publication: %v", err)
+	}
+	if _, err := os.Stat(bootstrap.targetPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("registration was published before Incus prerequisite completion: %v", err)
 	}
 }
 

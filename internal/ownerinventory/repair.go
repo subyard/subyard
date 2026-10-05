@@ -11,6 +11,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/Subyard/Subyard/internal/domain"
 )
 
 const connectionRepairSchema = 1
@@ -25,6 +27,17 @@ type RepairPlan struct {
 	newConnection Connection
 	snapshot      Snapshot
 	oldDigest     string
+}
+
+// StateDigest binds both the previous connection and the proposed repair.
+func (plan RepairPlan) StateDigest() string {
+	payload, _ := json.Marshal(struct {
+		Previous   string
+		Connection Connection
+		Snapshot   Snapshot
+	}{plan.oldDigest, plan.newConnection, plan.snapshot})
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:])
 }
 
 type connectionRepairJournal struct {
@@ -133,11 +146,11 @@ func (store Connections) ApplyRepair(plan RepairPlan) error {
 	}
 	current, err := store.prepareRepairLocked(plan.OldHostID, *plan.newConnection.Trust, plan.snapshot)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %w", domain.ErrPlanStale, err)
 	}
 	if current.oldDigest != plan.oldDigest || current.NewHostID != plan.NewHostID ||
 		current.NewFingerprint != plan.NewFingerprint {
-		return errors.New("owner repair plan is stale")
+		return fmt.Errorf("%w: owner repair plan is stale", domain.ErrPlanStale)
 	}
 	if plan.OldHostID != plan.NewHostID {
 		_, routeErr := os.Lstat(store.routingPath(plan.OldHostID))

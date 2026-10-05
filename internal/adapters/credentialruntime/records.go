@@ -302,6 +302,13 @@ func (runtime *Runtime) publish(ctx context.Context, scope ledgerScope, spec rev
 	if err := runtime.commitRecord(ctx, scope, metadata); err != nil {
 		return domain.CredentialMetadata{}, err
 	}
+	if err := runtime.verifyRecord(ctx, runtime.repository(scope), destination); err != nil {
+		return domain.CredentialMetadata{}, fmt.Errorf("verify published credential revision: %w", err)
+	}
+	actual, err := runtime.readRecordMetadata(destination)
+	if err != nil || metadataDigest(actual) != metadataDigest(metadata) {
+		return domain.CredentialMetadata{}, errors.New("published credential metadata differs from approved revision")
+	}
 	return metadata, nil
 }
 

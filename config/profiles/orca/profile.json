@@ -33,6 +33,7 @@
   ],
   "runtime": {
     "activation_id": "orca-runtime",
+    "projects_changed_hooks": ["/usr/local/libexec/subyard/projects-changed.d/orca"],
     "handler": "runtime.sh"
   },
   "guest_environment": {

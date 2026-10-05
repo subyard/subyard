@@ -1,24 +1,19 @@
 package cli
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/Subyard/Subyard/internal/adapters/credentialruntime"
 	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
-	"github.com/Subyard/Subyard/internal/adapters/transport"
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
-	"github.com/Subyard/Subyard/internal/rpc"
 )
 
 const credentialPrepareCapability = "credential-prepare-v1"
@@ -132,6 +127,9 @@ func (cli *CLI) runKeys(
 	definition command.Definition,
 	arguments []string,
 ) int {
+	if credentialExactInvocation(definition, arguments) || definition.Name == "keys" && credentialProtectedInvocation(arguments) {
+		return cli.runPreparedKeys(ctx, loaded, definition, arguments)
+	}
 	runtime, err := cli.credentialRuntime(loaded)
 	if err != nil {
 		cli.errorf("keys: %v", err)
@@ -178,127 +176,13 @@ func (cli *CLI) runKeys(
 	return 0
 }
 
-func (cli *CLI) runRemoteKeys(
-	ctx context.Context,
-	loaded config.Loaded,
-	definition command.Definition,
-	arguments []string,
-) int {
-	plan, err := cli.prepareRemoteKeys(ctx, loaded, arguments)
-	if err != nil {
-		cli.errorf("plan %s on owner: %v", publicKeysCommandName(arguments), err)
+func (cli *CLI) runRemoteKeys(ctx context.Context, loaded config.Loaded, definition command.Definition, arguments []string) int {
+	if credentialProtectedInvocation(arguments) {
+		cli.errorf("keys: protected credential input requires the owner host; run this command on the owner")
 		return 1
 	}
-	if plan.OperationID != cli.env["SUBYARD_OPERATION_ID"] ||
-		plan.Command != publicKeysCommandName(arguments) || plan.Target != domain.TargetLocalOwner {
-		cli.errorf("plan %s on owner: owner returned a plan for another operation", publicKeysCommandName(arguments))
-		return 1
+	if credentialExactInvocation(definition, arguments) {
+		return cli.runPreparedKeys(ctx, loaded, definition, arguments)
 	}
-	orchestrator := cli.operationOrchestrator(plan.OperationID, loaded, nil, &definition)
-	if _, err := orchestrator.Confirm(
-		ctx, plan, cli.env["ASSUME_YES"] == "1" || keysAssumeYes(arguments),
-	); err != nil {
-		if errors.Is(err, application.ErrDeclined) {
-			cli.errorf("operation declined")
-		} else {
-			cli.errorf("plan %s: %v", plan.Command, err)
-		}
-		return 1
-	}
-	forwardArguments := append(keysWithoutConsent(arguments), "--yes")
-	return cli.forwardRemote(ctx, loaded.Context, definition.Name, forwardArguments)
-}
-
-func (cli *CLI) prepareRemoteKeys(
-	ctx context.Context,
-	loaded config.Loaded,
-	arguments []string,
-) (domain.OperationPlan, error) {
-	ownerYard := loaded.Context.OwnerYardName
-	if ownerYard == "" {
-		ownerYard = "default"
-	}
-	process, err := transport.SSHYard("ssh", loaded.Context.OwnerEndpoint, ownerYard, 3*time.Second)
-	if err != nil {
-		return domain.OperationPlan{}, err
-	}
-	process.Env = environmentList(cli.env, nil)
-	process.Timeout = 8 * time.Second
-	process.MaxBytes = rpc.MaxFrameSize
-	params, err := json.Marshal(struct {
-		Arguments []string `json:"arguments"`
-	}{Arguments: arguments})
-	if err != nil {
-		return domain.OperationPlan{}, err
-	}
-	var request bytes.Buffer
-	codec := rpc.NewCodec(bytes.NewReader(nil), &request)
-	if err := codec.Write(rpc.Request{
-		Version: rpc.ProtocolVersion, Type: "request", ID: "negotiate", Method: "rpc.negotiate",
-	}); err != nil {
-		return domain.OperationPlan{}, err
-	}
-	if err := codec.Write(rpc.Request{
-		Version: rpc.ProtocolVersion, Type: "request", ID: "keys-prepare",
-		OperationID: cli.env["SUBYARD_OPERATION_ID"], Method: "keys.prepare", Params: params,
-	}); err != nil {
-		return domain.OperationPlan{}, err
-	}
-	response, err := process.Call(ctx, loaded.Context.OwnerEndpoint, request.Bytes())
-	if err != nil {
-		return domain.OperationPlan{}, err
-	}
-	return decodeRemoteKeysPlan(response)
-}
-
-func decodeRemoteKeysPlan(payload []byte) (domain.OperationPlan, error) {
-	codec := rpc.NewCodec(bytes.NewReader(payload), io.Discard)
-	negotiated := false
-	for {
-		response, err := codec.ReadResponse()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return domain.OperationPlan{}, fmt.Errorf("decode owner RPC: %w", err)
-		}
-		if response.Error != nil {
-			return domain.OperationPlan{}, response.Error
-		}
-		switch response.ID {
-		case "negotiate":
-			encoded, err := json.Marshal(response.Result)
-			if err != nil {
-				return domain.OperationPlan{}, err
-			}
-			var result struct {
-				Capabilities []string `json:"capabilities"`
-			}
-			if err := json.Unmarshal(encoded, &result); err != nil {
-				return domain.OperationPlan{}, errors.New("owner returned invalid RPC negotiation")
-			}
-			for _, capability := range result.Capabilities {
-				negotiated = negotiated || capability == credentialPrepareCapability
-			}
-			if !negotiated {
-				return domain.OperationPlan{}, errors.New("owner does not support credential preparation; update Subyard on the owner host")
-			}
-		case "keys-prepare":
-			if !negotiated {
-				return domain.OperationPlan{}, errors.New("owner credential plan arrived before RPC negotiation")
-			}
-			encoded, err := json.Marshal(response.Result)
-			if err != nil {
-				return domain.OperationPlan{}, err
-			}
-			var plan domain.OperationPlan
-			decoder := json.NewDecoder(bytes.NewReader(encoded))
-			decoder.DisallowUnknownFields()
-			if err := decoder.Decode(&plan); err != nil {
-				return domain.OperationPlan{}, errors.New("owner returned an invalid credential plan")
-			}
-			return plan, nil
-		}
-	}
-	return domain.OperationPlan{}, errors.New("owner returned no credential plan")
+	return cli.forwardRemote(ctx, loaded.Context, definition.Name, arguments)
 }

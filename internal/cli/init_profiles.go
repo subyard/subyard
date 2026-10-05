@@ -106,7 +106,7 @@ func (cli *CLI) prepareInitProfile(ctx context.Context, execution *initExecution
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	if !cli.promptInputTerminal() || keysAssumeYes(arguments) || cli.env["ASSUME_YES"] == "1" || cli.baseEnv["SUBYARD_SG_REEXEC"] == "1" {
+	if !cli.promptInputTerminal() || keysAssumeYes(arguments) || cli.env["ASSUME_YES"] == "1" {
 		fmt.Fprintf(cli.options.Stdout, "  [ .. ] %s is not configured. Run yard -Y %s init interactively on the owner host to set it up.\n", definition.Name, loaded.Context.YardName)
 		return nil, nil
 	}
@@ -247,12 +247,12 @@ func (set *initProfileSet) apply(ctx context.Context, execution *initExecution, 
 	}
 	for _, setup := range set.items {
 		if setup.key != nil {
-			// Persist approved credentials before Incus can exec a fresh group session.
+			// Initialize the approved credential owner before publishing its profile credential.
 			for _, stage := range application.InitStages(execution.loaded.Context) {
 				if stage.ID != ports.ReconcileStageKeys {
 					continue
 				}
-				if err := (application.Reconciler{Stages: []application.ReconcileStage{stage}, Runner: execution.platform, Reporter: initReporter{output: output}}).Apply(ctx); err != nil {
+				if err := (application.Reconciler{Stages: []application.ReconcileStage{stage}, Runner: execution.platform, Reporter: initReporter{output: output}}).Apply(ctx, execution.approvedStages(stage)); err != nil {
 					return err
 				}
 			}

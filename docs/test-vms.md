@@ -384,8 +384,10 @@ dev/agent-e2e.sh --slot "$slot" --purpose apparmor-probe --vm 1 -- \
 ```
 
 The Incus group regression uses a temporary operator to exercise the first named `init` before
-`incus-admin` membership is active. It verifies the real `sg` restart, explicit command overrides,
-independent yard SSH ports and an idempotent retry, then removes its marked operator and yard:
+`incus-admin` membership is active. It verifies native named socket and policy-lock ACL activation
+in the original prepared process, retained lock identity, explicit command overrides, independent
+yard SSH ports and an idempotent retry. It removes the marked operator ACLs, account and yard
+after the check:
 
 ```sh
 dev/agent-e2e.sh --slot "$slot" --purpose incus-group-reexec --vm 1 -- \

@@ -7,7 +7,6 @@ import (
 	"io"
 	"strings"
 
-	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/domain"
@@ -39,11 +38,10 @@ func (cli *CLI) runConfigSyncPull(
 		}
 		return cli.forwardRemote(ctx, loaded.Context, "config", forwarded)
 	}
-	materialize := false
+
 	for _, argument := range arguments {
 		switch argument {
 		case "--apply":
-			materialize = true
 		case "-y", "--yes":
 			assumeYes = true
 		default:
@@ -51,96 +49,9 @@ func (cli *CLI) runConfigSyncPull(
 			return 2
 		}
 	}
-	prepared, err := cli.prepareConfigSyncPull(ctx, loaded)
-	if err != nil {
-		cli.errorf("config sync pull: %v", err)
-		return 1
-	}
-	defer prepared.cleanup(cli, ctx)
-
-	fmt.Fprintln(cli.options.Stdout, "Versioned configuration pull")
-	fmt.Fprintf(cli.options.Stdout, "  checkout: %s\n", prepared.checkout)
-	if prepared.fastForward {
-		fmt.Fprintf(cli.options.Stdout, "  fast-forward: %s -> %s\n",
-			prepared.expectedHead, prepared.expectedRemote)
-	} else {
-		fmt.Fprintln(cli.options.Stdout, "  fast-forward: not required")
-	}
-	writeConfigSyncPlan(cli.options.Stdout, prepared.preview)
-
-	changed := prepared.fastForward || prepared.repairPermissions || prepared.preview.NeedsApply()
-	consequences := []string{}
-	if prepared.repairPermissions {
-		consequences = append(consequences,
-			"remove group/world write permissions from the registered configuration checkout")
-	}
-	if changed && prepared.fastForward {
-		consequences = append(consequences,
-			"fast-forward the registered configuration checkout")
-	}
-	if changed && prepared.preview.InitializeHostID {
-		consequences = append(consequences,
-			"record owner host ID "+prepared.preview.HostID)
-	}
-	if changed {
-		for _, change := range prepared.preview.Changes {
-			consequences = append(consequences, change.Action+" "+change.Path)
-		}
-		if prepared.preview.ManifestChanged {
-			consequences = append(consequences,
-				"update versioned configuration manifest metadata")
-		}
-	}
-	if changed && materialize && configSyncPlanNeedsMaterialization(prepared.preview) {
-		consequences = append(consequences,
-			"refresh affected file settings in running local yards")
-	}
-	orchestrator, operation, err := cli.planConfigSyncOperation(
-		ctx, loaded, "config sync pull", "config.sync.pull", changed,
-		consequences, assumeYes,
-	)
-	if errors.Is(err, application.ErrDeclined) {
-		cli.errorf("config sync pull: operation declined")
-		return 1
-	}
-	if err != nil {
-		cli.errorf("config sync pull: %v", err)
-		return 1
-	}
-	var applied configsync.Plan
-	if changed {
-		adapter := &configSyncPullAdapter{cli: cli, prepared: prepared}
-		orchestrator.Runner = adapter
-		if _, _, err := orchestrator.RunAdapter(ctx, operation, domain.AdapterRequest{
-			OperationID: operation.OperationID,
-			Adapter:     "config-sync",
-			Action:      "pull",
-		}, nil); err != nil {
-			cli.errorf("config sync pull: %v", err)
-			return 1
-		}
-		applied = adapter.plan
-	} else {
-		applied = prepared.preview
-		if err := configsync.Apply(applied); err != nil {
-			cli.errorf("config sync pull: %v", err)
-			return 1
-		}
-	}
-	if applied.NeedsApply() {
-		fmt.Fprintf(cli.options.Stdout, "config sync: applied generation %d\n",
-			applied.Generation)
-	} else {
-		fmt.Fprintln(cli.options.Stdout, "config sync: already converged")
-	}
-	if materialize {
-		if err := cli.materializeConfigSyncPlan(ctx, loaded, applied, true); err != nil {
-			cli.errorf("config sync pull --apply: %v", err)
-			return 1
-		}
-	}
-	cli.writeConfigSyncFollowups(loaded, applied, materialize)
-	return 0
+	return cli.runPreparedConfigMutation(ctx, loaded, append([]string{"sync", "pull"}, arguments...), assumeYes, func(prepared *preparedCommand) error {
+		return prepared.prepareConfigPull(ctx, arguments)
+	})
 }
 
 func (cli *CLI) prepareConfigSyncPull(

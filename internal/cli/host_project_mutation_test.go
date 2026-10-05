@@ -229,3 +229,46 @@ func TestPreparedProjectRejectsChangedOwnerBeforeRoleCheckOrPhysicalWork(t *test
 		})
 	}
 }
+
+func TestHostRemoveIdentityChangeDoesNotAdoptBeforeConsent(t *testing.T) {
+	root, home, configHome, environment := configCommandFixture(t)
+	writeConfigCommandFile(t, configsync.HostIDPath(configHome), "local-owner\n", 0o600)
+	inventory := inventoryResult("owner-a", "default", "").inventory
+	_, trust := hostAddSSHFixture(t, inventory)
+	store := ownerinventory.Connections{Root: filepath.Join(home, ".subyard", "owner-inventory")}
+	connection := ownerinventory.Connection{HostID: "owner-a", Destination: "owner-alias", Trust: &trust}
+	if err := store.Register(connection, ownerinventory.Snapshot{FetchedAt: time.Now(), Inventory: inventory}); err != nil {
+		t.Fatal(err)
+	}
+	paths := []string{filepath.Join(store.Root, "connections", "owner-a.json"), filepath.Join(store.Root, "owners", "owner-a.json")}
+	before := make([][]byte, len(paths))
+	for index, path := range paths {
+		var err error
+		before[index], err = os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeHostRPCFixture(t, os.Getenv("SSH_RPC_RESPONSE"), inventoryResult("owner-b", "default", "").inventory)
+	prompt := &testkit.Prompt{Answers: []bool{true}}
+	var stderr bytes.Buffer
+	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"host", "remove", "owner-a"},
+		Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: &stderr, Prompt: prompt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 || len(prompt.Requests) != 0 || !strings.Contains(stderr.String(), "identity changed") {
+		t.Fatalf("identity drift reached consent: code=%d requests=%#v stderr=%s", code, prompt.Requests, stderr.String())
+	}
+	for index, path := range paths {
+		after, err := os.ReadFile(path)
+		if err != nil || !bytes.Equal(after, before[index]) {
+			t.Fatalf("preflight rewrote captured owner state: %s, %v", path, err)
+		}
+	}
+	for _, path := range []string{filepath.Join(store.Root, "connections", "owner-b.json"), filepath.Join(store.Root, "owners", "owner-b.json")} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("preflight adopted unapproved HostID: %s, %v", path, err)
+		}
+	}
+}

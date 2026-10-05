@@ -63,6 +63,8 @@ cat > "$tmp/bin/NetworkManager" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 [ "${1:-}" = --print-config ] || exit 90
+[ "${MOCK_NM_REQUIRE_ROOT:-1}" = 0 ] || [ "${MOCK_UID:-1000}" = 0 ] \
+  || [ "${MOCK_NM_PRIVILEGED:-0}" = 1 ] || exit 7
 n=0
 [ ! -f "$MOCK_NM_COUNT" ] || n="$(cat "$MOCK_NM_COUNT")"
 n=$((n + 1)); printf '%s\n' "$n" > "$MOCK_NM_COUNT"
@@ -144,10 +146,11 @@ reset_case() {
   : > "$MOCK_INCUS_LOG"
   rm -f "$MOCK_NM_COUNT" "$MOCK_SUDO_AUTH" "$MOCK_INCUS_EXEC_COUNT"
   POWER_ERROR=''
+  unset SUBYARD_SUDO_PREAUTHORIZED
   export MOCK_NM_STATE=active MOCK_UID=1000 MOCK_SUDO_V_RC=0 MOCK_SUDO_N_RC=0 \
     MOCK_SUDO_REQUIRE_V=1 MOCK_NM_MODE=valid MOCK_RELOAD_RC=0 MOCK_NMCLI_RC=1 \
     MOCK_INCUS_STOP_RC=0 MOCK_INCUS_EXEC_READY_AFTER=1 MOCK_INCUS_EXEC_HANG=0 \
-    MOCK_INCUS_NETWORK_RC=0 MOCK_INCUS_NETWORKS='' MOCK_NM_CONFIG_FILE=''
+    MOCK_INCUS_NETWORK_RC=0 MOCK_INCUS_NETWORKS='' MOCK_NM_CONFIG_FILE='' MOCK_NM_REQUIRE_ROOT=1
 }
 
 reset_case
@@ -199,6 +202,18 @@ if power_nm_guard_effective incusbr0; then fail "incomplete effective config was
 
 reset_case
 if power_nm_guard_effective incusbr0; then fail "unprepared privileged read was accepted"; fi
+[ ! -s "$MOCK_SUDO_LOG" ] || fail "unprepared NetworkManager read invoked sudo"
+
+reset_case
+: > "$MOCK_SUDO_AUTH"
+if power_nm_guard_effective incusbr0; then fail "cached sudo bypassed missing operation authorization"; fi
+[ ! -s "$MOCK_SUDO_LOG" ] || fail "read-only planning used cached sudo credentials"
+
+reset_case
+MOCK_NM_REQUIRE_ROOT=0
+power_nm_guard_effective incusbr0 || fail "readable effective configuration required sudo"
+[ ! -s "$MOCK_SUDO_LOG" ] || fail "read-only effective configuration invoked sudo"
+grep -Fq '1:direct' "$MOCK_NM_LOG" || fail "read-only configuration did not use the direct reader"
 
 reset_case
 power_nm_prepare_reader || fail "sudo preparation failed before precheck case"

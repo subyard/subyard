@@ -10,6 +10,10 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 # shellcheck source=tests/helpers/test-context.sh
 . "$ROOT/tests/helpers/test-context.sh"
 setup_test_context "$TMP"
+if [ "${1:-}" = --prepare-parser-fixture ] || [ "${1:-}" = --startup-binding-fixture ]; then
+  export INCUS_PROJECT=subyard-orca-bootstrap-5b9fe2b7ea30
+  export YARD_INSTANCE_NAME=yard-orca-bootstrap-5b9fe2b7ea30
+fi
 # shellcheck source=config/profiles/orca/release.env
 . "$ROOT/config/profiles/orca/release.env"
 export ORCA_TEST_VERSION="$ORCA_VERSION"
@@ -77,9 +81,17 @@ case "${1:-}" in
       'device get')
         [ -f "$route" ] || exit 1
         case "${6:-}" in
+          type) printf 'proxy\n' ;;
+          bind) printf 'host\n' ;;
           listen) sed -n '1p' "$route" ;;
           connect) sed -n '2p' "$route" ;;
         esac
+        ;;
+      'device show')
+        if [ -f "$route" ]; then
+          printf 'orca-server:\n  type: proxy\n  bind: host\n  listen: %s\n  connect: %s\n' \
+            "$(sed -n '1p' "$route")" "$(sed -n '2p' "$route")"
+        fi
         ;;
       'device add')
         [ ! -e "$state_root/fail-route" ] || exit 1
@@ -96,6 +108,11 @@ case "${1:-}" in
     esac
     ;;
   exec)
+    if [ -e "$state_root/drain-exec-stdin" ]; then
+      # Native Incus forwards stdin even when the guest command does not read it.
+      # Explicit script execution keeps its intended script input.
+      case " $* " in *' bash -s'*) ;; *) cat >/dev/null ;; esac
+    fi
     case " $* " in
       *' bash -se -- '*'orca-registration.sha256'*)
         arguments=("$@")
@@ -140,7 +157,7 @@ case "${1:-}" in
       *' test -x /usr/local/libexec/subyard/projects-changed '*)
         [ ! -e "$state_root/missing-dispatcher" ]
         ;;
-      *' runuser -u dev -- /usr/local/libexec/subyard/projects-changed.d/orca '*)
+      *' runuser -u dev -- /usr/local/libexec/subyard/projects-changed.d/orca '*|*' runuser -u dev -- env SUBYARD_ORCA_REGISTRATION_SCOPE='*' /usr/local/libexec/subyard/projects-changed.d/orca '*)
         [ ! -e "$state_root/project-sync-fail" ] || exit 1
         rm -f "$state_root/codex-defaults-drift"
         ;;
@@ -172,6 +189,7 @@ case "${1:-}" in
       *' /usr/bin/python3 -B /usr/local/libexec/subyard/orca-registration/settings.py --check '*)
         [ ! -e "$state_root/codex-defaults-drift" ]
         ;;
+      *' /usr/bin/python3 -B /usr/local/libexec/subyard/orca-registration/settings.py '*) rm -f "$state_root/codex-defaults-drift" ;;
       *' mktemp -d /tmp/subyard-orca.XXXXXX '*)
         counter="$(cat "$stage_counter_file" 2>/dev/null || printf 0)"
         counter=$((counter + 1))
@@ -210,6 +228,9 @@ case "${1:-}" in
         printf 'unexpected destructive guest command: %s\n' "$*" >&2
         exit 1
         ;;
+      *' systemctl show -p InvocationID --value subyard-orca.service '*)
+        printf '%032x\n' "$(cat "$state_root/invocation" 2>/dev/null || printf 1)"
+        ;;
       *' systemctl is-active --quiet subyard-orca.service '*)
         [ -f "$service" ]
         ;;
@@ -227,6 +248,8 @@ case "${1:-}" in
       *' systemctl stop subyard-orca-discovery.timer '*) rm -f "$state_root/discovery-active" ;;
       *' systemctl start subyard-orca.service '*|*' systemctl restart subyard-orca.service '*)
         [ ! -e "$state_root/fail-restart" ] || exit 1
+        invocation="$(cat "$state_root/invocation" 2>/dev/null || printf 1)"
+        printf '%s\n' "$((invocation+1))" > "$state_root/invocation"
         touch "$service" "$ingress"
         ready="$guest/srv/agents/orca/ready.json"
         mkdir -p "${ready%/*}"
@@ -262,10 +285,10 @@ case "${1:-}" in
         if [ -e "$state_root/project-counts-fail" ]; then
           exit 1
         elif [ -e "$state_root/project-counts-drift" ]; then
-          printf '%s\n' '{"ready":false,"registered":1,"total":2,"errors":["nested checkout has the wrong group"],"warnings":[]}'
+          printf '%s\n' '{"ready":false,"registered":1,"total":2,"errors":["nested checkout has the wrong group"],"warnings":[],"scopeDigest":"0000000000000000000000000000000000000000000000000000000000000001","catalogDigest":"0000000000000000000000000000000000000000000000000000000000000002"}'
           exit 1
         else
-          printf '%s\n' '{"ready":true,"registered":2,"total":2,"errors":[],"warnings":[]}'
+          printf '%s\n' '{"ready":true,"registered":2,"total":2,"errors":[],"warnings":[],"scopeDigest":"0000000000000000000000000000000000000000000000000000000000000001","catalogDigest":"0000000000000000000000000000000000000000000000000000000000000002"}'
         fi
         ;;
     esac
@@ -370,8 +393,18 @@ run_orca() {
   action="$(jq -er '.action' <<<"$assessment")" || return
   ORCA_ADVERTISE_HOST="${ORCA_TEST_ADVERTISE:-owner.example-tailnet.ts.net}" \
     ORCA_HOST_PORT=17678 SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION="$action" \
+    SUBYARD_RESOURCE_BINDING="$(jq -r '.binding // ""' <<<"$assessment")" \
+    SUBYARD_RESOURCE_STEPS="$(jq -c 'if .steps then .steps else empty end' <<<"$assessment")" \
     SUBYARD_OPERATION_ID=orca-handler-test \
-    "$ROOT/config/profiles/orca/resources/orca/handler.sh" "$verb" "${arguments[@]}"
+    "$ROOT/config/profiles/orca/resources/orca/handler.sh" "$verb" "${arguments[@]}" || return
+  if [ "$(jq -r .schema <<<"$assessment")" = yard.resource-action-assessment.v2 ]; then
+    local verified
+    verified="$(ORCA_ADVERTISE_HOST="${ORCA_TEST_ADVERTISE:-owner.example-tailnet.ts.net}" ORCA_HOST_PORT=17678 SUBYARD_RESOURCE_MODE=verify SUBYARD_RESOURCE_BINDING="$(jq -r .binding <<<"$assessment")" SUBYARD_RESOURCE_STEPS="$(jq -c .steps <<<"$assessment")" "$ROOT/config/profiles/orca/resources/orca/handler.sh" "$verb" "${arguments[@]}")" || return
+    jq -e '.changed == false and all(.steps[]; .observed == .desired and .decision == "skip")' <<<"$verified" >/dev/null \
+      || fail 'native Orca verifier did not prove stopped/absent exact targets'
+    [ "$(jq -r .binding <<<"$assessment")" = "$(jq -r .binding <<<"$verified")" ] \
+      || fail 'native Orca verifier changed desired/target scope'
+  fi
 }
 
 assert_down() {
@@ -394,13 +427,62 @@ count_log() {
 }
 
 touch "$TMP/missing-yard"
-ORCA_ADVERTISE_HOST=127.0.0.1 ORCA_HOST_PORT=17678 SUBYARD_RESOURCE_MODE=prepare \
+prepare_mode=prepare
+[ "${1:-}" != --startup-binding-fixture ] || prepare_mode=prepare-start
+ORCA_ADVERTISE_HOST=127.0.0.1 ORCA_HOST_PORT=17678 SUBYARD_RESOURCE_MODE="$prepare_mode" \
   "$ROOT/config/profiles/orca/resources/orca/handler.sh" up >"$TMP/bootstrap-plan.json" \
   || fail 'first bring-up cannot be assessed before the yard exists'
 jq -e '.action == "up" and .changed == true' "$TMP/bootstrap-plan.json" >/dev/null \
   || fail 'absent yard did not produce an up assessment'
 [ ! -e "$ORCA_TEST_SERVICE" ] || fail 'bootstrap assessment started the service'
 rm -f "$TMP/missing-yard"
+if [ "${1:-}" = --startup-binding-fixture ]; then
+  cp "$TMP/bootstrap-plan.json" "$2/cold.json"
+  touch "$TMP/drain-exec-stdin"
+  export ORCA_ADVERTISE_HOST=127.0.0.1 ORCA_HOST_PORT=17678
+  export SUBYARD_RESOURCE_BINDING="$(jq -r .binding "$2/cold.json")"
+  export SUBYARD_RESOURCE_STEPS="$(jq -c .steps "$2/cold.json")"
+  SUBYARD_RESOURCE_MODE=prepare "$ROOT/config/profiles/orca/resources/orca/handler.sh" up > "$2/running.json"
+  SUBYARD_RESOURCE_MODE=prepare "$3" up > "$2/relocated.json"
+  SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION=up SUBYARD_OPERATION_ID=orca-startup-fixture \
+    "$3" up > "$TMP/startup-output"
+  SUBYARD_RESOURCE_MODE=verify "$3" up > "$2/verified.json"
+  stages="$(count_log 'mktemp -d /tmp/subyard-orca.')"
+  if SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION=up SUBYARD_OPERATION_ID=orca-startup-fixture \
+    "$4" up > "$TMP/source-drift-output" 2>&1; then fail 'changed native source bytes accepted'; fi
+  grep -Fq 'plan_stale: Orca native desired scope changed' "$TMP/source-drift-output" \
+    || fail 'native source byte guard did not reject before effects'
+  if ORCA_HOST_PORT=17679 SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION=up SUBYARD_OPERATION_ID=orca-startup-fixture \
+    "$3" up > "$TMP/target-drift-output" 2>&1; then fail 'changed native desired endpoint accepted'; fi
+  grep -Fq 'plan_stale: Orca native desired scope changed' "$TMP/target-drift-output" \
+    || fail 'native desired endpoint guard did not reject before effects'
+  [ "$stages" = "$(count_log 'mktemp -d /tmp/subyard-orca.')" ] || fail 'stale native input started target staging'
+  exit 0
+fi
+if [ "${1:-}" = --prepare-parser-fixture ]; then
+  cp "$TMP/bootstrap-plan.json" "$2/up.json"
+  ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes > "$TMP/up-output"
+  printf '3735928559\n' > "$TMP/invocation"
+  SUBYARD_RESOURCE_MODE=prepare "$ROOT/config/profiles/orca/resources/orca/handler.sh" restart > "$2/restart.json"
+  printf 'tcp:127.0.0.1:17678\ntcp:127.0.0.1:6768\n' > "$ORCA_TEST_ROUTE"
+  SUBYARD_RESOURCE_MODE=prepare "$ROOT/config/profiles/orca/resources/orca/handler.sh" down > "$2/down.json"
+  SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION=restart SUBYARD_OPERATION_ID=orca-parser-fixture \
+    SUBYARD_RESOURCE_BINDING="$(jq -r .binding "$2/restart.json")" \
+    SUBYARD_RESOURCE_STEPS="$(jq -c .steps "$2/restart.json")" \
+    "$ROOT/config/profiles/orca/resources/orca/handler.sh" restart > "$TMP/restart-output"
+  SUBYARD_RESOURCE_MODE=verify SUBYARD_RESOURCE_STEPS="$(jq -c .steps "$2/restart.json")" \
+    "$ROOT/config/profiles/orca/resources/orca/handler.sh" restart > "$2/restart-verified.json"
+  touch "$TMP/codex-defaults-drift"
+  SUBYARD_RESOURCE_MODE=prepare "$ROOT/config/profiles/orca/resources/orca/handler.sh" sync > "$2/sync.json"
+  rm -f "$TMP/codex-defaults-drift"
+  SUBYARD_RESOURCE_MODE=verify SUBYARD_RESOURCE_STEPS="$(jq -c .steps "$2/sync.json")" \
+    "$ROOT/config/profiles/orca/resources/orca/handler.sh" sync > "$2/sync-verified.json"
+  ORCA_ADVERTISE_HOST=127.0.0.1 ORCA_HOST_PORT=17678 SUBYARD_RESOURCE_MODE=prepare \
+    "$ROOT/config/profiles/orca/resources/orca/handler.sh" up > "$2/up-noop.json"
+  ORCA_TEST_ADVERTISE=127.0.0.1 run_orca down --yes > "$TMP/down-output"
+  SUBYARD_RESOURCE_MODE=prepare "$ROOT/config/profiles/orca/resources/orca/handler.sh" down > "$2/down-noop.json"
+  exit 0
+fi
 for mode in prepare apply; do
   for port in '' 17678; do
     if ORCA_ADVERTISE_HOST=127.0.0.1 ORCA_HOST_PORT="$port" \

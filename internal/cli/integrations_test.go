@@ -168,6 +168,33 @@ func TestIntegrationDesiredPersistsOnApplyFailureAndRetry(t *testing.T) {
 		t.Fatalf("retry=%d calls=%d %s", code, runtime.applied, output)
 	}
 }
+
+func TestIntegrationDisableLastSelectionPreparesAndPersistsEmptySet(t *testing.T) {
+	cli, _, runtime, path, output := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=codex\n")
+	runtime.plan.Scope = "native integration inventory"
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := prepareIntegrationTest(t, cli, "disable", "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.Close()
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) || runtime.applied != 0 {
+		t.Fatal("preparing the empty selection changed desired or runtime state")
+	}
+	if code := cli.runPreparedCommand(context.Background(), prepared, true); code != 0 {
+		t.Fatalf("disable failed: exit=%d %s", code, output)
+	}
+	assignments, err := config.ReadAssignments(path)
+	value, present := assignments["CODING_TOOL_INTEGRATIONS"]
+	if err != nil || !present || value != "" || len(runtime.requested) != 0 || runtime.applied != 1 {
+		t.Fatalf("last integration was not removed: present=%t empty=%t calls=%d err=%v", present, value == "", runtime.applied, err)
+	}
+}
+
 func TestIntegrationStoppedAfterPlanAndCASRacePreserveDesired(t *testing.T) {
 	for _, failure := range []string{"stopped", "cas", "runtime"} {
 		t.Run(failure, func(t *testing.T) {

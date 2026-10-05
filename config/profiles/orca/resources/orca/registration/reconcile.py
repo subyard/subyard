@@ -4,6 +4,8 @@ Catalog readback proves current runtime state only. Orca owns its debounced disk
 persistence, which is verified separately by service restart acceptance tests.
 """
 
+import hashlib
+import json
 import math
 import os
 import time
@@ -315,7 +317,7 @@ def _has_saved_tabs(snapshots, repo):
                for item in snapshots)
 
 
-def _prune_missing(report, scan, state, rpc):
+def _prune_missing(report, scan, state, rpc, approved_ids=None):
     # Missing project roots may be temporarily unmounted. A known checkout
     # losing Git metadata is retained without blocking independent missing paths.
     if report["errors"] or any(not project.roots for project in scan.projects):
@@ -339,6 +341,8 @@ def _prune_missing(report, scan, state, rpc):
                 and verify_missing(scan, repo["path"])):
             candidates.append(repo)
     for repo in candidates:
+        if approved_ids is not None and repo["id"] not in approved_ids[0]:
+            raise RpcError("plan_stale: unapproved Orca cleanup repository")
         if time.monotonic() >= state.deadline:
             raise RpcError("Orca registration time budget exhausted")
         # This API also covers saved tabs of now-missing linked worktrees.
@@ -379,6 +383,8 @@ def _prune_missing(report, scan, state, rpc):
         group_id = entry.get("group_id")
         if project_id in active or group_id not in owners or not verify_missing(scan, entry["root"]):
             continue
+        if approved_ids is not None and group_id not in approved_ids[1]:
+            raise RpcError("plan_stale: unapproved Orca cleanup group")
         rpc.refresh()
         groups = _records(rpc, "projectGroup.list", "groups")
         repos = _records(rpc, "repo.list", "repos")
@@ -419,6 +425,35 @@ def reconcile(scan, rpc, state_dir, apply=True, deadline=None, host_name="", kno
                 report["errors"].extend(scan.errors)
                 report["warnings"].extend(scan.warnings)
                 report["total"] = sum(len(project.roots) for project in scan.projects)
+            scope = [{"projectId": project.project_id, "name": project.name,
+                      "repos": [{"path": root.path, "kind": root.kind}
+                                for root in sorted(project.roots, key=lambda root: root.path)]}
+                     for project in sorted(scan.projects, key=lambda project: project.project_id)]
+            scope_digest = hashlib.sha256(json.dumps(scope, ensure_ascii=False, sort_keys=True,
+                                           separators=(",", ":")).encode()).hexdigest()
+            report["scopeDigest"] = scope_digest
+            # Only registration metadata is fingerprinted; saved tab contents and
+            # credentials never enter a public fact or digest.
+            keys = ("id", "path", "displayName", "kind", "projectGroupId", "parentPath",
+                    "name", "createdFrom", "connectionId", "executionHostId", "parentGroupId",
+                    "externalWorktreeVisibility")
+            repos = _records(rpc, "repo.list", "repos")
+            groups = _records(rpc, "projectGroup.list", "groups")
+            safe_records = lambda records: sorted(
+                [{key: record[key] for key in keys if key in record} for record in records],
+                key=lambda record: record["id"])
+            catalog = {"scope": scope, "repos": safe_records(repos),
+                       "groups": safe_records(groups), "registration": state.data}
+            catalog_digest = hashlib.sha256(json.dumps(catalog, ensure_ascii=False, sort_keys=True,
+                                             separators=(",", ":")).encode()).hexdigest()
+            report["catalogDigest"] = catalog_digest
+            expected_scope = os.environ.get("SUBYARD_ORCA_REGISTRATION_SCOPE", "")
+            approved_ids = None
+            if expected_scope:
+                if expected_scope != "conditional" and expected_scope != catalog_digest:
+                    raise RpcError("plan_stale: Orca verified project-root scope changed")
+                approved_ids = ({record["id"] for record in repos},
+                                {record["id"] for record in groups})
             if apply:
                 for project in scan.projects:
                     if not project.roots:
@@ -453,7 +488,7 @@ def reconcile(scan, rpc, state_dir, apply=True, deadline=None, host_name="", kno
                             _apply_repo(state, entry, root, group_id, rpc)
                         except RpcError as error:
                             report["errors"].append(root.path + ": " + str(error))
-                _prune_missing(report, scan, state, rpc)
+                _prune_missing(report, scan, state, rpc, approved_ids)
             rpc.refresh()
             _report_catalog(report, scan, state, rpc, host_name)
     except (RpcError, StateError) as error:

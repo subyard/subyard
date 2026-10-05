@@ -1053,12 +1053,16 @@ func TestNativeInitOwnsPlanResumeAndFinalization(t *testing.T) {
 		t.Fatalf("native init bypassed live plan/apply/finalize: preflight=%v applied=%v",
 			platform.preflightFresh, platform.applied)
 	}
-	if !strings.Contains(stdout.String(), "[do  ] Create the Incus project") ||
-		!strings.Contains(stdout.String(), "[do  ] Provision the yard") {
+	if !strings.Contains(stdout.String(), "[apply] init.stage.project:") ||
+		!strings.Contains(stdout.String(), "[conditional] init.stage.provision:") ||
+		!strings.Contains(stdout.String(), fmt.Sprintf("native policy lock access for operator UID %d", os.Getuid())) {
 		t.Fatalf("init plan omitted live stage state:\n%s", stdout.String())
 	}
 	if platform.projectHooks != 1 {
 		t.Fatalf("successful init did not retry project hooks once: %d", platform.projectHooks)
+	}
+	if strings.Contains(stdout.String(), "Everything is already set up") {
+		t.Fatal("pending init reported prior convergence")
 	}
 
 	stdout.Reset()
@@ -1072,16 +1076,37 @@ func TestNativeInitOwnsPlanResumeAndFinalization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code := program.Run(context.Background()); code != 0 ||
-		!strings.Contains(stdout.String(), "Everything is already set up") {
-		t.Fatalf("no-op init failed: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	if code := program.Run(context.Background()); code == 0 || !strings.Contains(stderr.String(), "project hook verification failed") {
+		t.Fatalf("failed hook verification did not fail init: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	if len(platform.applied) != 2 {
-		t.Fatalf("no-op init reapplied stages: %v", platform.applied)
+	if len(platform.applied) != 2 || platform.projectHooks != 2 {
+		t.Fatalf("hook failure changed native stage execution: applied=%v hooks=%d", platform.applied, platform.projectHooks)
 	}
-	if platform.projectHooks != 2 || !strings.Contains(stdout.String()+stderr.String(), "[warn] optional hook failed") {
-		t.Fatalf("no-op init did not retry with a non-blocking warning: attempts=%d stdout=%q stderr=%q",
-			platform.projectHooks, stdout.String(), stderr.String())
+	if strings.Contains(stdout.String(), "Everything is already set up") {
+		t.Fatal("failed hook verification reported successful convergence")
+	}
+	stdout.Reset()
+	stderr.Reset()
+	platform.projectHooksErr = nil
+	program, err = New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"init", "--yes"}, Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, InitPlatform: platform})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 || platform.projectHooks != 3 || len(platform.applied) != 2 {
+		t.Fatalf("converged init retry failed: code=%d hooks=%d applied=%v stderr=%s", code, platform.projectHooks, platform.applied, stderr.String())
+	}
+	if strings.Count(stdout.String(), "Everything is already set up") != 1 {
+		t.Fatal("successful converged retry omitted or duplicated its result summary")
+	}
+	stdout.Reset()
+	stderr.Reset()
+	platform.hooksApplicable = false
+	program, err = New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"init"}, Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, InitPlatform: platform})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 || platform.projectHooks != 3 || len(platform.applied) != 2 || strings.Count(stdout.String(), "Everything is already set up") != 1 {
+		t.Fatalf("converged no-op did not report one result without native work: code=%d hooks=%d applied=%v stderr=%s", code, platform.projectHooks, platform.applied, stderr.String())
 	}
 }
 

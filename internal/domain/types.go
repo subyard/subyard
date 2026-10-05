@@ -516,6 +516,7 @@ type OperationPlan struct {
 	Confirmation        ConfirmationPolicy   `json:"confirmation"`
 	Target              ExecutionTarget      `json:"target"`
 	Consequences        []string             `json:"consequences,omitempty"`
+	Steps               []OperationStep      `json:"steps,omitempty"`
 	Assessment          *ActionAssessment    `json:"assessment,omitempty"`
 	ConfirmationRequest *ConfirmationRequest `json:"confirmationRequest,omitempty"`
 	Confirmed           bool                 `json:"confirmed"`

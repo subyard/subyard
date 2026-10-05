@@ -33,16 +33,41 @@ yard() {
 }
 
 cleanup() {
-  local rc=$?
+  local rc=$? teardown_failed=0 diagnostics
   trap - EXIT INT TERM
   set +e
   if [ -n "$YARD_NAME" ] && [ -f "${SUBYARD_CONFIG_HOME:-}/yards/$YARD_NAME/config.env" ]; then
     install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/platform-sentinel"
     printf 'SSH_PORT=64998\n' > "$SUBYARD_CONFIG_HOME/yards/platform-sentinel/config.env"
     chmod 0600 "$SUBYARD_CONFIG_HOME/yards/platform-sentinel/config.env"
-    yard teardown --yes >/dev/null 2>&1 || rc=3
+    if [ -z "$STATE" ] || [[ "$STATE" != /var/tmp/subyard-bind-resource.* ]] \
+      || [ ! -f "$STATE/.marker" ] \
+      || [ "$(<"$STATE/.marker")" != subyard-bind-resource-e2e-v1 ]; then
+      printf 'bind-resource-profile-e2e: cannot retain teardown diagnostics in an unmarked fixture\n' >&2
+      rc=3
+      teardown_failed=1
+    else
+      diagnostics="$STATE/.teardown-diagnostics.log"
+      install -m 0600 /dev/null "$diagnostics"
+      if ! yard teardown --yes >"$diagnostics" 2>&1; then
+        rc=3
+        teardown_failed=1
+        printf 'bind-resource-profile-e2e: native teardown failed; preserving marker-owned fixture diagnostics\n' >&2
+        python3 - "$diagnostics" <<'PYTHON'
+import re
+import sys
+from pathlib import Path
+
+lines = Path(sys.argv[1]).read_text(errors="replace").splitlines()[-80:]
+relevant = [line for line in lines if re.search(r"yard:|plan_stale|\bError:|\bERROR:|\[FAIL\]", line)]
+for line in relevant[-20:]:
+    line = re.sub(r"[A-Za-z0-9_+/=-]{32,}", "[redacted]", line)
+    print(line[:512], file=sys.stderr)
+PYTHON
+      fi
+    fi
   fi
-  if [ -n "$STATE" ] && [[ "$STATE" = /var/tmp/subyard-bind-resource.* ]] \
+  if [ "$teardown_failed" = 0 ] && [ -n "$STATE" ] && [[ "$STATE" = /var/tmp/subyard-bind-resource.* ]] \
     && [ -f "$STATE/.marker" ] \
     && [ "$(<"$STATE/.marker")" = subyard-bind-resource-e2e-v1 ]; then
     sudo -n find "$STATE" -depth -delete || rc=3

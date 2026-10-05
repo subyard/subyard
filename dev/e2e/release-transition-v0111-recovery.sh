@@ -477,12 +477,34 @@ assert_ready_check() { # json-stream expected-active
 }
 
 assert_materialized_fixed_point() {
-  local expected actual
-  expected="$(sha256sum "$HOME_ROOT/host/AGENTS.md" | awk '{print $1}')"
+  local expected actual status
+  expected="$(printf '# %s\nThe v0.11.1 %s fixture owns this file.\n' \
+    "$FIXTURE_MARKER" "$FIXTURE" | sha256sum | awk '{print $1}')"
+  actual="$(sha256sum "$HOME_ROOT/host/AGENTS.md" | awk '{print $1}')"
+  [ "$actual" = "$expected" ] \
+    || die 'candidate recovery changed the configured host instructions'
+  # Independent byte oracle: selected instructions preserve the configured text
+  # and append this documented managed block, not the raw host digest.
+  expected="$({
+    cat "$HOME_ROOT/host/AGENTS.md"
+    printf '\n\n'
+    cat <<'PREVIEW'
+<!-- subyard-preview -->
+For a static web preview, run `subyard-preview <relative-static-dir>` from the Git workspace and keep it running with your background/async process mechanism. Share the printed URL. An owner Tailscale URL requires device reachability and Tailnet policy access; a loopback URL requires an active preview-enabled `yard code` SSH session. The helper must stay running for either URL.
+<!-- /subyard-preview -->
+PREVIEW
+  } | sha256sum | awk '{print $1}')"
   actual="$(incus exec "$INSTANCE" --project "$PROJECT" -- \
-    sha256sum /home/dev/.codex/AGENTS.md | awk '{print $1}')"
+    sha256sum /home/dev/.codex/AGENTS.md | awk '{print $1}')" \
+    || die 'candidate recovery Codex target is unavailable'
   [ "$actual" = "$expected" ] \
     || die 'candidate recovery did not materialize the configured Codex target'
+  status="$(fixture_env "$RUNTIME_ROOT/current/bin/yard" -Y "$YARD_NAME" \
+    integration status codex --json)" \
+    || die 'candidate recovery integration status is unavailable'
+  jq -e '.observed == "ready" and (.selection.effective | index("codex") != null)' \
+    <<<"$status" >/dev/null \
+    || die 'candidate recovery Codex integration is not at its native fixed point'
 }
 
 assert_terminal() { # expected-ledger recovery-plan

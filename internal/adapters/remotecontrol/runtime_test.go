@@ -17,6 +17,26 @@ import (
 
 const fixturePublicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA fixture"
 
+func TestCapturedRemotePlanRejectsControllerIdentityReplacementBeforeAuthorization(t *testing.T) {
+	runtime := remoteFixture(t)
+	prepared, err := runtime.CapturePrepared(context.Background(), domain.RemotePrepared{Action: domain.RemoteAdd, Spec: domain.RemoteSpec{LegacyAlias: "demo", OwnerEndpoint: "owner.example", OwnerYardName: "inner"}, Owner: domain.RemoteInfo{SSHPort: 2222, DevUser: "dev"}, Scanned: []domain.RemoteKey{remoteFixtureKey(t, "subyard-remote-demo")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeRemoteFile(t, runtime.PublicKey, fixturePublicKey+" changed-comment\n", 0o600)
+	calls := 0
+	runtime.processCall = func(context.Context, string, []string, []byte) ([]byte, error) { calls++; return nil, nil }
+	if _, err := runtime.Apply(context.Background(), prepared); !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatalf("changed controller identity accepted: %v", err)
+	}
+	if calls != 0 {
+		t.Fatal("controller identity drift reached owner authorization")
+	}
+	if _, err := os.Lstat(runtime.snippetPath("demo")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("controller identity drift published registration")
+	}
+}
+
 func TestRemotePreviewAliasesHaveSeparateEffectiveSSHOptions(t *testing.T) {
 	runtime := remoteFixture(t)
 	prepared := domain.RemotePrepared{Spec: domain.RemoteSpec{
@@ -53,6 +73,7 @@ func TestLookupAndListReadRegistryAndCache(t *testing.T) {
 		"ACCESS_KIND=remote",
 		"OWNER_ENDPOINT=owner.example",
 		"OWNER_YARD_NAME=inner",
+		"SSH_HOST=dev@data.example",
 		"REMOTE_SSH_PORT=2233",
 		"",
 	}, "\n"), 0o600)
@@ -64,16 +85,28 @@ func TestLookupAndListReadRegistryAndCache(t *testing.T) {
 	record, exists, err := runtime.Lookup(context.Background(), "demo")
 	if err != nil || !exists || !record.Remote || record.Path != contextPath ||
 		record.Spec.OwnerEndpoint != "owner.example" || record.Spec.OwnerYardName != "inner" ||
-		record.SSHPort != 2233 || !record.LastProbe.Equal(time.Unix(100, 0)) {
+		record.SSHPort != 2233 || record.SSHHost != "dev@data.example" || !record.LastProbe.Equal(time.Unix(100, 0)) {
 		t.Fatalf("unexpected lookup: record=%#v exists=%v err=%v", record, exists, err)
 	}
 	records, err := runtime.List(context.Background())
-	if err != nil || len(records) != 1 || records[0].Spec.LegacyAlias != "demo" {
+	if err != nil || len(records) != 1 || records[0].Spec.LegacyAlias != "demo" || records[0].SSHHost != record.SSHHost {
 		t.Fatalf("unexpected remote list: %#v err=%v", records, err)
 	}
 	defaultRecord, exists, err := runtime.Lookup(context.Background(), "default")
 	if err != nil || !exists || defaultRecord.Spec.LegacyAlias != "default" {
 		t.Fatalf("default lookup failed: %#v exists=%v err=%v", defaultRecord, exists, err)
+	}
+}
+
+func TestLookupAndListRejectUnsafeRegisteredDataPlane(t *testing.T) {
+	runtime := remoteFixture(t)
+	path := filepath.Join(runtime.ConfigHome, "yards", "demo", "config.env")
+	writeRemoteFile(t, path, "ACCESS_KIND=remote\nOWNER_ENDPOINT=owner.example\nSSH_HOST=-ProxyCommand=unexpected\n", 0o600)
+	if _, _, err := runtime.Lookup(context.Background(), "demo"); err == nil {
+		t.Fatal("unsafe registered data-plane target accepted by lookup")
+	}
+	if _, err := runtime.List(context.Background()); err == nil {
+		t.Fatal("unsafe registered data-plane target accepted by list")
 	}
 }
 

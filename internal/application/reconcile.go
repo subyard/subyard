@@ -17,6 +17,8 @@ type ReconcileStage struct {
 type ReconcileStep struct {
 	Stage     ReconcileStage
 	Converged bool
+	// Conditional authorizes bounded work whose prerequisite was not ready at prepare.
+	Conditional bool
 }
 
 type ReconcilePlan struct {
@@ -60,7 +62,7 @@ func (reconciler Reconciler) Plan(ctx context.Context) (ReconcilePlan, error) {
 		plan.Steps = append(plan.Steps, ReconcileStep{Stage: stage, Converged: converged})
 		if !converged {
 			for _, dependent := range reconciler.Stages[index+1:] {
-				plan.Steps = append(plan.Steps, ReconcileStep{Stage: dependent})
+				plan.Steps = append(plan.Steps, ReconcileStep{Stage: dependent, Conditional: true})
 			}
 			break
 		}
@@ -68,14 +70,41 @@ func (reconciler Reconciler) Plan(ctx context.Context) (ReconcilePlan, error) {
 	return plan, nil
 }
 
-func (reconciler Reconciler) Apply(ctx context.Context) error {
+// CheckApproved rejects observed skip expansion without applying any stage.
+func (reconciler Reconciler) CheckApproved(ctx context.Context, approved ReconcilePlan) error {
 	if err := validateStages(reconciler.Stages); err != nil {
 		return err
 	}
 	if reconciler.Runner == nil {
 		return errors.New("reconcile stage runner is required")
 	}
-	for _, stage := range reconciler.Stages {
+	if len(approved.Steps) != len(reconciler.Stages) {
+		return fmt.Errorf("%w: reconcile stage scope changed", domain.ErrPlanStale)
+	}
+	for index, stage := range reconciler.Stages {
+		step := approved.Steps[index]
+		if step.Stage != stage || step.Converged && step.Conditional {
+			return fmt.Errorf("%w: reconcile stage authorization changed", domain.ErrPlanStale)
+		}
+		// Reject observed skip expansion before applying any approved stage.
+		if step.Converged {
+			converged, err := reconciler.Runner.CheckStage(ctx, stage.ID)
+			if err != nil {
+				return fmt.Errorf("check init stage %q: %w", stage.ID, err)
+			}
+			if !converged {
+				return fmt.Errorf("%w: init stage %q now requires work", domain.ErrPlanStale, stage.ID)
+			}
+		}
+	}
+	return nil
+}
+
+func (reconciler Reconciler) Apply(ctx context.Context, approved ReconcilePlan) error {
+	if err := reconciler.CheckApproved(ctx, approved); err != nil {
+		return err
+	}
+	for index, stage := range reconciler.Stages {
 		converged, err := reconciler.Runner.CheckStage(ctx, stage.ID)
 		if err != nil {
 			return fmt.Errorf("check init stage %q: %w", stage.ID, err)
@@ -85,6 +114,9 @@ func (reconciler Reconciler) Apply(ctx context.Context) error {
 				reconciler.Reporter.StageSkipped(stage)
 			}
 			continue
+		}
+		if approved.Steps[index].Converged {
+			return fmt.Errorf("%w: init stage %q now requires work", domain.ErrPlanStale, stage.ID)
 		}
 		if reconciler.Reporter != nil {
 			reconciler.Reporter.StageStarted(stage)
@@ -113,7 +145,7 @@ func InitStages(yard domain.Context) []ReconcileStage {
 		testVMs = "Install/reconcile the trusted two-VM test backend inside the yard"
 	}
 	return []ReconcileStage{
-		{ID: ports.ReconcileStageIncus, Label: "Install or upgrade Incus and initialize storage"},
+		{ID: ports.ReconcileStageIncus, Label: "Install or upgrade Incus, initialize storage and grant the operator native socket access"},
 		{ID: ports.ReconcileStageProject, Label: fmt.Sprintf("Create the Incus project %q", yard.IncusProject)},
 		{ID: ports.ReconcileStageNetwork, Label: "Open host DHCP/DNS for the yard bridge"},
 		{ID: ports.ReconcileStageNetworkPolicy,

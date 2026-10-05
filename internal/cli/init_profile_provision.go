@@ -74,10 +74,18 @@ func (cli *CLI) prepareInitProfileProvision(ctx context.Context, initial config.
 	return cli.observeInitProfileProvision(ctx, execution)
 }
 
-func (cli *CLI) observeInitProfileProvision(ctx context.Context, execution *initExecution) error {
+func (cli *CLI) observeInitProfileProvision(ctx context.Context, execution *initExecution) (err error) {
 	p := execution.profileProvision
 	if p == nil {
 		return nil
+	}
+	if p.startupSlots == nil {
+		p.startupSlots = []resource.Definition{}
+		for _, definition := range cli.selectedStartupResources(execution.loaded) {
+			if slices.Contains(p.profiles, definition.Profile) {
+				p.startupSlots = append(p.startupSlots, definition)
+			}
+		}
 	}
 	pending := execution.bootstrap != nil
 	for _, step := range execution.plan.Steps {
@@ -92,6 +100,11 @@ func (cli *CLI) observeInitProfileProvision(ctx context.Context, execution *init
 		return err
 	}
 	if pending {
+		defer func() {
+			if err == nil {
+				p.captureApproved(true)
+			}
+		}()
 		p.changedProfiles = slices.Clone(p.profiles)
 		p.requiresPowerCycle = true
 		p.startupSeeds = nil

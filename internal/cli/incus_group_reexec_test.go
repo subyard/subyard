@@ -3,23 +3,39 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
+	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
+	"github.com/Subyard/Subyard/internal/application"
+	"github.com/Subyard/Subyard/internal/configsync"
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
-	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
-// Exercise the real CLI -> init runtime -> exec -> new CLI path. Only the
-// privileged installer, group switch and unavailable Incus socket are replaced.
-func TestIncusGroupReexecPreservesCommandEnvironment(t *testing.T) {
-	for _, scenario := range []string{"first init", "second failure does not loop", "resource continuation"} {
+type installedIncusAccess struct {
+	*testkit.Incus
+	marker      string
+	unavailable bool
+}
+
+func (fixture *installedIncusAccess) Server(context.Context) (ports.ServerInfo, error) {
+	if _, err := os.Stat(fixture.marker); err != nil || fixture.unavailable {
+		return ports.ServerInfo{}, errors.New("operator socket access is not active")
+	}
+	return ports.ServerInfo{Version: "6.0.6"}, nil
+}
+
+// Execute the real retained init adapter. Only the privileged installer/socket
+// are replaced; a dispatcher or sg invocation would fail this contract.
+func TestIncusInstallationRetainsPreparedCommandEnvironment(t *testing.T) {
+	for _, scenario := range []string{"access restored", "access unavailable", "resource continuation"} {
 		t.Run(scenario, func(t *testing.T) {
 			root, environment, _ := nativeFixture(t)
 			if scenario == "resource continuation" {
@@ -27,149 +43,196 @@ func TestIncusGroupReexecPreservesCommandEnvironment(t *testing.T) {
 			}
 			values := environmentMap(environment)
 			delete(values, "SSH_PORT")
-			values["DEV_UID"] = "2001" // Explicit launch override beats the named file.
-			values["SUBYARD_TEST_REEXEC_ROOT"] = root
-			values["SUBYARD_TEST_REEXEC_PHASE"] = "install"
-			if scenario == "second failure does not loop" {
-				values["SUBYARD_SG_REEXEC"] = "1"
-			}
-			if scenario == "resource continuation" {
-				values["SUBYARD_TEST_RESOURCE_REEXEC"] = "1"
-			}
+			values["DEV_UID"] = "2001"
+			values["CAPTURE"] = filepath.Join(root, "installed")
 			bin := filepath.Join(root, "bin")
-			if err := os.MkdirAll(bin, 0o700); err != nil {
+			if err := os.MkdirAll(bin, 0700); err != nil {
 				t.Fatal(err)
 			}
 			values["PATH"] = bin + ":" + os.Getenv("PATH")
-			yards := filepath.Join(root, "state", "yards")
-			if err := os.MkdirAll(yards, 0o700); err != nil {
+			for _, name := range []string{"sg", "dispatcher"} {
+				testkit.WriteFile(t, filepath.Join(bin, name), []byte("#!/bin/sh\nprintf forbidden > \"$CAPTURE.forbidden\"\nexit 75\n"), 0700)
+			}
+			testkit.WriteFile(t, filepath.Join(root, "config/subyard.env"), []byte("SSH_PORT=2222\n"), 0600)
+			path := filepath.Join(root, "state/yards/demo.env")
+			if scenario == "resource continuation" {
+				path = filepath.Join(root, "state/yards/demo/config.env")
+			}
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 				t.Fatal(err)
 			}
-			writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), "SSH_PORT=2222\n", 0o600)
-			yardPath := filepath.Join(yards, "demo.env")
+			testkit.WriteFile(t, path, []byte("SSH_PORT=2233\nDEV_UID=3001\nCODING_TOOL_INTEGRATIONS=\n"), 0600)
+			testkit.WriteFile(t, filepath.Join(root, "scripts/01-install-incus.sh"), []byte("#!/bin/sh\n[ \"$SSH_PORT\" = 2233 ] && [ \"$DEV_UID\" = 2001 ] && [ \"$1\" = --yes ] || exit 72\nprintf installed > \"$CAPTURE\"\n"), 0700)
+			native := &installedIncusAccess{Incus: &testkit.Incus{}, marker: values["CAPTURE"], unavailable: scenario == "access unavailable"}
+			options := Options{RepositoryRoot: root, DispatcherPath: filepath.Join(bin, "dispatcher"), Program: "yard", Environment: environmentList(values, nil), Incus: native}
 			if scenario == "resource continuation" {
-				yardPath = filepath.Join(yards, "demo", "config.env")
-				if err := os.MkdirAll(filepath.Dir(yardPath), 0o700); err != nil {
-					t.Fatal(err)
-				}
+				options.InitPlatform = newInitPlatformFixture()
 			}
-			writeCLIFile(t, yardPath, "SSH_PORT=2233\nDEV_UID=3001\nCODING_TOOL_INTEGRATIONS=\n", 0o600)
-			writeCLIFile(t, filepath.Join(root, "scripts", "01-install-incus.sh"),
-				"#!/bin/sh\n[ \"$SSH_PORT\" = 2233 ] && [ \"$DEV_UID\" = 2001 ] || exit 72\n"+
-					"printf installed > \"$SUBYARD_TEST_REEXEC_ROOT/installed\"\n", 0o700)
-			writeCLIFile(t, filepath.Join(bin, "sg"),
-				"#!/bin/sh\n[ \"$1\" = incus-admin ] && [ \"$2\" = -c ] || exit 73\nexec /bin/sh -c \"$3\"\n", 0o700)
-			executable, err := os.Executable()
+			program, err := New(options)
 			if err != nil {
 				t.Fatal(err)
 			}
-			writeCLIFile(t, filepath.Join(bin, "dispatcher"),
-				"#!/bin/sh\nexport SUBYARD_TEST_REEXEC_PHASE=child\nexec "+shellquote.Word(executable)+
-					" -test.run='^TestIncusGroupReexecProcess$' -- \"$@\"\n", 0o700)
-			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-			defer cancel()
-			command := exec.CommandContext(ctx, executable, "-test.run=^TestIncusGroupReexecProcess$")
-			command.Env = environmentList(values, nil)
-			if output, err := command.CombinedOutput(); err != nil {
-				t.Fatalf("group re-exec failed: %v\n%s", err, output)
+			loaded, err := program.resolveContextWithYardSettings("demo", "")
+			if err != nil {
+				t.Fatal(err)
 			}
-			if _, err := os.Stat(filepath.Join(root, "installed")); err != nil {
-				t.Fatalf("installer did not receive the resolved named context: %v", err)
+			platform := program.initPlatform(loaded, nil)
+			arguments := []string{"run", "--label=two words '$HOME'", "--", "--yes"}
+			if scenario == "resource continuation" {
+				definition, _ := program.resources.Lookup("demo")
+				bootstrap, err := program.prepareResourceBootstrap(context.Background(), loaded, definition, arguments)
+				if err != nil || bootstrap == nil || bootstrap.init == nil {
+					t.Fatalf("prepare resource bootstrap: %v", err)
+				}
+				program.options.InitPlatform = nil
+				bootstrap.init.rebuildPlatform(program)
+				platform = bootstrap.init.platform
+			}
+			beforePID := os.Getpid()
+			operation := program.ensureOperationID()
+			err = platform.ApplyStage(context.Background(), ports.ReconcileStageIncus)
+			if scenario == "access unavailable" {
+				if err == nil || !strings.Contains(err.Error(), "new assessment") {
+					t.Fatalf("unavailable access did not require explicit recovery: %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if os.Getpid() != beforePID || program.ensureOperationID() != operation {
+				t.Fatal("installer replaced approved parent operation")
+			}
+			if _, err := os.Stat(values["CAPTURE"]); err != nil {
+				t.Fatal("installer did not receive retained context")
+			}
+			if _, err := os.Stat(values["CAPTURE"] + ".forbidden"); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("installer re-entered a dispatcher or group session")
+			}
+			if loaded.Environment["DEV_UID"] != "2001" || program.baseEnv["DEV_UID"] != "2001" {
+				t.Fatal("installer lost caller override")
 			}
 			if scenario == "resource continuation" {
-				if got := readResourceApplyLog(t, filepath.Join(root, "resource-apply.log")); got != strings.Join(resourceReexecArguments, " ")+"\n" {
-					t.Fatalf("group re-exec did not apply the requested resource: %q", got)
+				runtime := platform.(reconcileruntime.Runtime)
+				if runtime.ResourceCommand != "demo" || !slices.Equal(runtime.ResourceArguments, arguments) {
+					t.Fatal("installer changed retained resource arguments")
 				}
+			}
+			yards, err := program.powerYardContexts(loaded)
+			if err != nil || len(yards) != 2 || yards[0].SSHPort != 2222 || yards[1].SSHPort != 2233 {
+				t.Fatalf("installer polluted independent yard ports: %v", err)
 			}
 		})
 	}
 }
 
-var resourceReexecArguments = []string{"run", "--label=two words '$HOME'", "--", "--yes"}
-
-func TestIncusGroupReexecProcess(t *testing.T) {
-	phase := os.Getenv("SUBYARD_TEST_REEXEC_PHASE")
-	if phase == "" {
-		return
-	}
-	root := os.Getenv("SUBYARD_TEST_REEXEC_ROOT")
-	resourceContinuation := os.Getenv("SUBYARD_TEST_RESOURCE_REEXEC") == "1"
-	options := Options{
-		RepositoryRoot: root, DispatcherPath: filepath.Join(root, "bin", "dispatcher"),
-		Program: "yard", Environment: os.Environ(),
-		Stdout: os.Stdout, Stderr: os.Stderr,
-		Incus: &testkit.Incus{Err: errors.New("group membership is not active")},
-	}
-	if resourceContinuation {
-		options.InitPlatform = newInitPlatformFixture()
-		if phase == "child" {
-			for index, argument := range os.Args {
-				if argument == "--" {
-					options.Arguments = os.Args[index+1:]
-					break
+func TestIncusPrerequisiteRejectsInstallerDriftBeforeOwnerPublication(t *testing.T) {
+	for _, changed := range []string{"unchanged", "configuration", "hook source", "project records"} {
+		t.Run(changed, func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			marker := filepath.Join(root, "installed")
+			later := filepath.Join(root, "later")
+			projectDir := filepath.Join(root, "state", "projects")
+			if err := os.MkdirAll(projectDir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			mutation := "printf '\nSSH_PORT=2223\n' >> '" + filepath.Join(root, "config", "subyard.env") + "'"
+			if changed == "unchanged" {
+				mutation = ":"
+			}
+			if changed == "hook source" {
+				mutation = "printf '# drift\n' >> '" + filepath.Join(root, "config", "projects-changed.sh") + "'"
+			}
+			if changed == "project records" {
+				// An exact native record appears during the approved dependency.
+				mutation = "printf '%s' '{\"schema\":1,\"projectId\":\"project-new\",\"name\":\"new\",\"mode\":\"sync\",\"hostPath\":\"/tmp/new\",\"yardPath\":\"/srv/workspaces/project-new/src\",\"sshHost\":\"yard\",\"target\":\"yard\"}' > '" + filepath.Join(projectDir, "project-new.json") + "'\nchmod 600 '" + filepath.Join(projectDir, "project-new.json") + "'"
+			}
+			testkit.WriteFile(t, filepath.Join(root, "config", "projects-changed.sh"), []byte("#!/bin/sh\nexit 0\n"), 0700)
+			testkit.WriteFile(t, filepath.Join(root, "scripts", "01-install-incus.sh"), []byte("#!/bin/sh\nset -eu\n"+mutation+"\nprintf installed > '"+marker+"'\n"), 0700)
+			testkit.WriteFile(t, filepath.Join(root, "scripts", "02-create-project.sh"), []byte("#!/bin/sh\nprintf later > '"+later+"'\nexit 69\n"), 0700)
+			native := &installedIncusAccess{Incus: &testkit.Incus{Reconcile: ports.ReconcileState{HostPoolFound: true, HostNetworkFound: true}}, marker: marker}
+			program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: native})
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := program.resolveContextWithYardSettings("", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtime := program.initPlatform(loaded, nil).(reconcileruntime.Runtime)
+			runtimePlan, err := runtime.PrepareProfileRuntimes(context.Background(), true, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtime.RuntimePlan = runtimePlan
+			hooks, err := runtime.PrepareProjectHooks(context.Background(), true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			baseline, err := program.captureOwnerInputs(loaded, "", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			execution := &initExecution{loaded: loaded, platform: runtime, inputBaseline: baseline, runtimePlan: runtimePlan, hookPlan: hooks, hookProjects: []domain.ProjectRecord{}}
+			execution.hostID, execution.hostIDPending, err = configsync.ResolveHostID(loaded.Context.Paths.ConfigHome, loaded.Environment)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, stage := range application.InitStages(loaded.Context) {
+				execution.approvedPlan.Steps = append(execution.approvedPlan.Steps, application.ReconcileStep{Stage: stage, Conditional: stage.ID != ports.ReconcileStageIncus})
+			}
+			execution.plan = execution.approvedPlan
+			// Exercise the same authorization transition as prepared init execution.
+			if err := program.prepareSudoPrivileges(context.Background(), io.Discard, 0, "init"); err != nil {
+				t.Fatal(err)
+			}
+			execution.rebuildPlatform(program)
+			attached := execution.platform.(reconcileruntime.Runtime)
+			// The synthetic installer provides both server access and native ACL tools.
+			attached.ACLToolsAvailable = func() (bool, error) {
+				_, err := os.Stat(marker)
+				if errors.Is(err, os.ErrNotExist) {
+					return false, nil
+				}
+				return err == nil, err
+			}
+			execution.platform = attached
+			if attached.RuntimePlan != runtimePlan || attached.HookPlan != hooks {
+				t.Fatal("native rebuild discarded approved plans")
+			}
+			beforeEnv, afterEnv := environmentMap(runtime.Environment), environmentMap(attached.Environment)
+			delete(afterEnv, "SUBYARD_SUDO_PREAUTHORIZED")
+			if operationStateDigest(beforeEnv) != operationStateDigest(afterEnv) {
+				t.Fatal("authorization rebuilt business inputs rather than changing only its internal marker")
+			}
+			steps := execution.operationSteps()
+			if len(steps) < 2 || steps[0].ID != "init.stage.incus" || steps[1].DependsOn[0] != steps[0].ID {
+				t.Fatal("public steps omit Incus-before-publication dependency")
+			}
+			err = execution.run(context.Background(), program, io.Discard)
+			if changed == "unchanged" {
+				if err == nil || !strings.Contains(err.Error(), `apply init stage "project"`) || !strings.Contains(err.Error(), "exit status 69") {
+					t.Fatalf("authorized parent did not reach later native stage: %v", err)
+				}
+				for _, path := range []string{marker, later, filepath.Join(loaded.Context.Paths.ConfigHome, "host-id")} {
+					if _, err := os.Stat(path); err != nil {
+						t.Fatal("authorized parent did not complete approved prerequisite/publication")
+					}
+				}
+				if !slices.Contains(attached.Environment, "SUBYARD_SUDO_PREAUTHORIZED=1") {
+					t.Fatal("real authorization transition was omitted")
+				}
+				return
+			}
+			if !errors.Is(err, domain.ErrPlanStale) {
+				t.Fatalf("installer %s drift was accepted: %v", changed, err)
+			}
+			for _, path := range []string{later, filepath.Join(loaded.Context.Paths.ConfigHome, "host-id")} {
+				if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("stale prerequisite published %s: %v", filepath.Base(path), err)
 				}
 			}
-		}
-	}
-	program, err := New(options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	loaded, err := program.resolveContextWithYardSettings("demo", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if phase == "install" {
-		platform := program.initPlatform(loaded, nil)
-		if resourceContinuation {
-			definition, _ := program.resources.Lookup("demo")
-			bootstrap, err := program.prepareResourceBootstrap(context.Background(), loaded, definition, resourceReexecArguments)
-			if err != nil || bootstrap == nil || bootstrap.init == nil {
-				t.Fatalf("prepare resource bootstrap: %v", err)
+			if _, err := os.Stat(marker); err != nil {
+				t.Fatal(fmt.Errorf("approved installer did not execute: %w; refusal: %v", err, execution.checkBeforeInitWrites(context.Background(), program)))
 			}
-			program.options.InitPlatform = nil
-			bootstrap.init.rebuildPlatform(program)
-			platform = bootstrap.init.platform
-		}
-		err := platform.ApplyStage(context.Background(), ports.ReconcileStageIncus)
-		if os.Getenv("SUBYARD_SG_REEXEC") == "1" && err != nil && strings.Contains(err.Error(), "fresh incus-admin session") {
-			return
-		}
-		t.Fatalf("expected process replacement or the retry guard, got %v", err)
-	}
-	if !resourceContinuation && !slices.Equal(os.Args[len(os.Args)-4:], []string{"-Y", "demo", "init", "--yes"}) {
-		t.Fatalf("re-exec lost the named init selection: %q", os.Args)
-	}
-	if os.Getenv("SUBYARD_SG_REEXEC") != "1" || os.Getenv("ASSUME_YES") != "1" {
-		t.Fatal("re-exec omitted its loop guard or init consent")
-	}
-	yards, err := program.powerYardContexts(loaded)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(yards) != 2 || yards[0].YardName != "default" || yards[0].SSHPort != 2222 ||
-		yards[1].YardName != "demo" || yards[1].SSHPort != 2233 {
-		t.Fatalf("group re-exec polluted independent yard ports: %#v", yards)
-	}
-	if program.baseEnv["DEV_UID"] != "2001" || loaded.Environment["DEV_UID"] != "2001" {
-		t.Fatal("group re-exec lost an explicit command override")
-	}
-	if resourceContinuation {
-		// The plain init continuation ends without executing the resource.
-		if slices.Equal(options.Arguments, []string{"-Y", "demo", "init", "--yes"}) {
-			return
-		}
-		want := append([]string{"-Y", "demo", "--yes", "demo"}, resourceReexecArguments...)
-		if !slices.Equal(options.Arguments, want) {
-			t.Fatalf("re-exec changed resource argument boundaries: %q", options.Arguments)
-		}
-		prompt := &testkit.Prompt{}
-		program.options.Prompt = prompt
-		if code := program.Run(context.Background()); code != 0 {
-			t.Fatalf("resumed resource command exited %d", code)
-		}
-		if len(prompt.Requests) != 0 {
-			t.Fatal("re-exec requested a second confirmation")
-		}
+		})
 	}
 }

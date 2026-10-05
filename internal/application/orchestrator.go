@@ -168,6 +168,9 @@ func (orchestrator *Orchestrator) Confirm(ctx context.Context, plan domain.Opera
 }
 
 func (orchestrator *Orchestrator) validateActionPlan(plan domain.OperationPlan) error {
+	if err := domain.ValidateOperationSteps(plan.Steps); err != nil {
+		return err
+	}
 	if plan.Assessment == nil {
 		if plan.ConfirmationRequest != nil {
 			return fmt.Errorf("%w: confirmation request without assessment", domain.ErrActionPolicyInvalid)
@@ -232,6 +235,7 @@ func (orchestrator *Orchestrator) actionPlanAuthorized(plan domain.OperationPlan
 
 func cloneActionPlan(plan domain.OperationPlan) domain.OperationPlan {
 	plan.Consequences = slices.Clone(plan.Consequences)
+	plan.Steps = domain.CloneOperationSteps(plan.Steps)
 	if plan.Assessment != nil {
 		copy := plan.Assessment.Clone()
 		plan.Assessment = &copy
@@ -246,6 +250,7 @@ func cloneActionPlan(plan domain.OperationPlan) domain.OperationPlan {
 func equalActionPlan(left, right domain.OperationPlan) bool {
 	return left.OperationID == right.OperationID && left.Command == right.Command &&
 		left.Effect == right.Effect && left.Confirmation == right.Confirmation && left.Target == right.Target &&
+		domain.EqualOperationSteps(left.Steps, right.Steps) &&
 		slices.Equal(left.Consequences, right.Consequences) && equalAssessment(left.Assessment, right.Assessment) &&
 		equalRequest(left.ConfirmationRequest, right.ConfirmationRequest) && left.Confirmed == right.Confirmed &&
 		left.CreatedAt.Equal(right.CreatedAt)

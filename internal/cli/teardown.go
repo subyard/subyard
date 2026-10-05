@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
@@ -24,10 +26,54 @@ type teardownExecution struct {
 	changed         bool
 	physicalChanged bool
 	networkRemoval  *yardnetwork.RemovalPlan
+	snapshot        *teardownSnapshot
+	liveSnapshot    *teardownSnapshot
+	pool            string
+	volume          string
+	revokeAgent     bool
+}
+
+// resetTeardownBaseline retains the same approved physical and artifact scope
+// as teardown. Init must check it before its native reset leaf and verify it
+// immediately afterwards, before recreating any installation state.
+type resetTeardownBaseline struct {
+	loaded    config.Loaded
+	execution *teardownExecution
+}
+
+func (cli *CLI) prepareResetTeardownBaseline(ctx context.Context, loaded config.Loaded) (*resetTeardownBaseline, error) {
+	execution := &teardownExecution{}
+	if err := cli.observeTeardownExecution(ctx, loaded, execution); err != nil {
+		return nil, err
+	}
+	return &resetTeardownBaseline{loaded: loaded, execution: execution}, nil
+}
+
+func (baseline *resetTeardownBaseline) binding() string {
+	return operationStateDigest(struct {
+		Snapshot *teardownSnapshot
+		Network  *yardnetwork.RemovalPlan
+	}{baseline.execution.snapshot, baseline.execution.networkRemoval})
+}
+
+func (baseline *resetTeardownBaseline) steps() []domain.OperationStep {
+	return baseline.execution.steps(baseline.loaded.Context)
+}
+
+func (baseline *resetTeardownBaseline) resources() []ports.TeardownResource {
+	return append([]ports.TeardownResource{}, baseline.execution.snapshot.Resources...)
+}
+
+func (baseline *resetTeardownBaseline) check(ctx context.Context, cli *CLI) error {
+	return cli.observeTeardownExecution(ctx, baseline.loaded, baseline.execution)
+}
+
+func (baseline *resetTeardownBaseline) verify(ctx context.Context, cli *CLI) error {
+	return cli.verifyTeardown(ctx, baseline.loaded, baseline.execution)
 }
 
 func prepareTeardownExecution(arguments []string) (*teardownExecution, error) {
-	execution := &teardownExecution{}
+	execution := &teardownExecution{revokeAgent: true}
 	for _, argument := range arguments {
 		switch argument {
 		case "-y", "--yes":
@@ -76,7 +122,7 @@ func (execution *teardownExecution) actionPlan(
 	if execution.keepData {
 		action = "yard.teardown.keep-data"
 	}
-	if !execution.physicalChanged && execution.networkRemoval != nil && execution.networkRemoval.Cleanup {
+	if !execution.physicalChanged && execution.snapshot != nil && execution.snapshot.Agent != nil && execution.snapshot.Agent.State() == "locked" && execution.networkRemoval != nil && execution.networkRemoval.Cleanup {
 		action = "yard.network.save"
 		if execution.networkRemoval.Stored.Policy.Isolation {
 			action = "yard.network.apply"
@@ -120,6 +166,8 @@ func (cli *CLI) observeTeardownExecution(
 		loaded.Context.Paths.StateDir,
 		filepath.Join(loaded.Context.Paths.OperatorHome, ".ssh", "subyard"+suffix+".config"),
 		filepath.Join(loaded.Context.Paths.DataHome, "space"+suffix+".cache"),
+		filepath.Join(loaded.Context.Paths.DataHome, "space"+suffix+".cache.lock"),
+		filepath.Join(loaded.Context.Paths.DataHome, "space"+suffix+".cache.tmp"),
 	}
 	definitions, err := profile.Load(cli.options.RepositoryRoot)
 	if err != nil {
@@ -134,6 +182,19 @@ func (cli *CLI) observeTeardownExecution(
 			paths = append(paths, filepath.Join(root, strings.ReplaceAll(managed.Path, "{yard}", loaded.Context.YardName)))
 		}
 	}
+	snapshot, err := cli.captureTeardownSnapshot(ctx, loaded, incusState, paths)
+	if err != nil {
+		return err
+	}
+	if execution.snapshot != nil {
+		if err := checkTeardownSnapshot(execution.snapshot, snapshot); err != nil {
+			return err
+		}
+	} else {
+		execution.snapshot = snapshot
+	}
+	execution.liveSnapshot = snapshot
+	execution.pool, execution.volume = loaded.Environment["SRV_POOL"], loaded.Environment["SRV_VOLUME"]
 	for _, path := range paths {
 		_, statErr := os.Lstat(path)
 		switch {
@@ -145,6 +206,9 @@ func (cli *CLI) observeTeardownExecution(
 		}
 	}
 	execution.physicalChanged = execution.changed
+	if execution.revokeAgent && snapshot.Agent.State() != "locked" {
+		execution.changed = true
+	}
 	service := cli.networkService([]domain.Context{loaded.Context})
 	if service == nil {
 		return errors.New("Incus network policy adapter is required for teardown")
@@ -172,7 +236,19 @@ func (cli *CLI) executeTeardown(
 	if execution == nil {
 		return domain.AdapterResult{}, errors.New("teardown execution is required")
 	}
+	if err := cli.observeTeardownExecution(ctx, loaded, execution); err != nil {
+		return domain.AdapterResult{}, err
+	}
 	contextValues := structuredCommandContext(loaded)
+	contextValues["SUBYARD_DISPATCHER_PATH"] = cli.options.DispatcherPath
+	inventory, err := json.Marshal(execution.liveSnapshot.Resources)
+	if err != nil {
+		return domain.AdapterResult{}, err
+	}
+	if len(inventory) > 64<<10 {
+		return domain.AdapterResult{}, errors.New("teardown inventory exceeds physical guard limit")
+	}
+	contextValues["SUBYARD_TEARDOWN_INVENTORY"] = string(inventory)
 	if execution.physicalChanged && cli.options.AdapterRunner == nil {
 		if err := cli.prepareSudoPrivileges(
 			ctx, diagnostics, cli.effectiveUID(), "teardown",
@@ -200,8 +276,10 @@ func (cli *CLI) executeTeardown(
 	agentManager := sshagentruntime.Manager{Config: sshagentruntime.Config{
 		Directory: sshagentruntime.Directory(loaded.Context.Paths.DataHome, loaded.Context.YardName),
 	}}
-	if agentErr := agentManager.Lock(ctx); agentErr != nil {
-		return domain.AdapterResult{}, agentErr
+	if execution.revokeAgent {
+		if agentErr := agentManager.LockPrepared(ctx, execution.snapshot.Agent); agentErr != nil {
+			return domain.AdapterResult{}, agentErr
+		}
 	}
 	request := domain.AdapterRequest{
 		Schema: shelladapter.ProtocolSchema, OperationID: plan.OperationID,
@@ -226,6 +304,9 @@ func (cli *CLI) executeTeardown(
 		return runErr
 	})
 	writeAdapterDiagnostics(diagnostics, stderr)
+	if err == nil && result.Status == "ok" {
+		err = cli.verifyTeardown(ctx, loaded, execution)
+	}
 	return result, err
 }
 

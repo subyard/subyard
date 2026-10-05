@@ -229,6 +229,8 @@ type RuntimeObservation struct {
 	State   RuntimeState `json:"state"`
 	Actual  string       `json:"actual"`
 	Desired string       `json:"desired"`
+	// HookBinding is an optional owner-private native project-hook scope digest.
+	HookBinding string `json:"hook_binding,omitempty"`
 }
 
 type RemoteTransport interface {

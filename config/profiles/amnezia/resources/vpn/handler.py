@@ -193,51 +193,84 @@ def ensure_ingress(want):
         raise
 
 
+def emit_native_plan(verb, instance, device, status=None, want=None, interface='', prestart=False):
+    target = 'incus:' + PROJECT + '/' + YARD
+    binding = dict(action=verb, project=PROJECT, instance=YARD)
+    if verb == 'up':
+        binding.update(endpoint=want, interface=interface)
+        service_ready = bool(status and status['ready'] and status['enabled'])
+        service = dict(id='service', target='AmneziaWG service ' + target,
+                       observed='unknown' if prestart else ('enabled and ready' if service_ready else 'not ready'),
+                       desired='enabled and ready', decision='conditional' if prestart else ('skip' if service_ready else 'apply'),
+                       preconditions=['the dedicated VM is running and has no work projects'],
+                       verify='read native VPN readiness and service enablement',
+                       consequence=f'Enable the pinned AmneziaWG service in incus:{PROJECT}/{YARD}; preserve existing keys and peers')
+        route_ready = device == want and instance['config'].get(KEY) == fingerprint(want)
+        route = dict(id='ingress', target='owned VPN proxy ' + target,
+                     observed=fingerprint(want) if route_ready else ('absent' if not device else fingerprint(device)),
+                     desired=fingerprint(want), decision='skip' if route_ready else 'apply', dependsOn=['service'],
+                     preconditions=['the exact owner address and interface are active and the UDP endpoint has no conflicting owner'],
+                     verify='read the owned Incus proxy and matching ownership marker',
+                     consequence=f'Publish UDP {os.environ.get("RESOURCE_VPN_IPV4")}:{os.environ.get("RESOURCE_VPN_PORT", "51820")} on {interface} to {want["connect"]}')
+        steps = [service, route]
+    else:
+        ingress_present = bool(device or instance['config'].get(KEY))
+        consequence = (f'Close the owned VPN ingress in incus:{PROJECT}/{YARD} and attempt guest shutdown; '
+                       'retain pending cleanup if the guest remains unavailable; preserve keys and peers')
+        route = dict(id='ingress', target='owned VPN proxy ' + target,
+                     observed='owned ingress present' if ingress_present else 'absent', desired='absent',
+                     decision='apply' if ingress_present else 'skip',
+                     preconditions=['any current ingress device and marker have matching native ownership'],
+                     verify='read the owned Incus proxy and marker and confirm both absent', consequence=consequence)
+        service_stopped = bool(status and not status['running'] and not status['enabled'])
+        service = dict(id='service', target='AmneziaWG service ' + target,
+                       observed='unknown' if status is None else ('disabled and stopped' if service_stopped else 'enabled or running'),
+                       desired='disabled and stopped', decision='conditional' if status is None else ('skip' if service_stopped else 'apply'),
+                       dependsOn=['ingress'], preconditions=['the owned ingress is closed before guest shutdown'],
+                       verify='read guest runtime running and enabled state', consequence=consequence)
+        steps = [route, service]
+    changed = any(step['decision'] != 'skip' for step in steps)
+    consequences = list(dict.fromkeys(step['consequence'] for step in steps if step['decision'] != 'skip'))
+    print(json.dumps(dict(schema='yard.resource-action-assessment.v2', action=verb, changed=changed,
+                          consequences=consequences, steps=steps,
+                          binding=hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest())))
+
+
 def prepare(verb, prestart=False):
-    changed, consequences = False, []
-    if verb in ('up', 'down'):
-        settings_valid(verb == 'up')
-        instance = inspect()
-        device = owned(instance)
-        if instance.get('type') != 'virtual-machine':
-            raise RuntimeError('VPN target is not a VM')
-        stopped = instance.get('status') == 'Stopped'
-        if instance.get('status') != 'Running':
-            if prestart and verb == 'up' and stopped:
-                pass
-            elif verb == 'down' and stopped and not device and not instance['config'].get(KEY) and instance['config'].get(STARTUP) in ('pending', 'disabled'):
-                print(json.dumps(dict(schema='yard.resource-action-assessment.v1', action=verb,
-                                      changed=False, consequences=[])))
-                return
-            else:
-                raise RuntimeError('start the dedicated VPN yard before changing its service')
-        if verb == 'up':
-            if not prestart:
-                status = runtime_status(instance)
-            address, interface, port, want = endpoint(instance)
-            collisions(want)
-            if prestart:
-                if device or instance['config'].get(KEY):
-                    raise RuntimeError('first-start VPN activation requires no existing ingress')
-                changed = True
-            else:
-                projects = guest('find', '/srv/workspaces', '-mindepth', '1', '-maxdepth', '1', '-print', '-quit')
-                if projects.stdout:
-                    raise RuntimeError('VPN cannot run in a yard containing work projects')
-                changed = device != want or instance['config'].get(KEY) != fingerprint(want) or not status['ready'] or not status['enabled']
-            if changed:
-                consequences = [f'Enable the pinned AmneziaWG service in {YARD}; preserve existing keys and peers',
-                                f'Publish UDP {address}:{port} on {interface} to {want["connect"]}']
+    if verb not in ('up', 'down'):
+        print(json.dumps(dict(schema='yard.resource-action-assessment.v1', action=verb,
+                              changed=False, consequences=[])))
+        return
+    settings_valid(verb == 'up')
+    instance = inspect()
+    device = owned(instance)
+    status, want, interface = None, None, ''
+    if instance.get('type') != 'virtual-machine':
+        raise RuntimeError('VPN target is not a VM')
+    stopped = instance.get('status') == 'Stopped'
+    if instance.get('status') != 'Running':
+        if prestart and verb == 'up' and stopped:
+            pass
+        elif verb == 'down' and stopped and not device and not instance['config'].get(KEY) and instance['config'].get(STARTUP) in ('pending', 'disabled'):
+            emit_native_plan(verb, instance, device, status=dict(ready=False, running=False, enabled=False))
+            return
         else:
-            changed = bool(device or instance['config'].get(KEY))
-            if not changed:
-                status = runtime_status(instance)
-                changed = bool(status['running'] or status['enabled'])
-            if changed:
-                consequences = [f'Close the owned VPN ingress in {YARD} and attempt guest shutdown; '
-                                'retain pending cleanup if the guest remains unavailable; preserve keys and peers']
-    print(json.dumps(dict(schema='yard.resource-action-assessment.v1', action=verb,
-                          changed=changed, consequences=consequences)))
+            raise RuntimeError('start the dedicated VPN yard before changing its service')
+    if verb == 'up':
+        if not prestart:
+            status = runtime_status(instance)
+        _, interface, _, want = endpoint(instance)
+        collisions(want)
+        if prestart:
+            if device or instance['config'].get(KEY):
+                raise RuntimeError('first-start VPN activation requires no existing ingress')
+        else:
+            projects = guest('find', '/srv/workspaces', '-mindepth', '1', '-maxdepth', '1', '-print', '-quit')
+            if projects.stdout:
+                raise RuntimeError('VPN cannot run in a yard containing work projects')
+    elif not device and not instance['config'].get(KEY):
+        status = runtime_status(instance)
+    emit_native_plan(verb, instance, device, status, want, interface, prestart)
 
 
 def shutdown_guest():
@@ -260,7 +293,7 @@ def main():
         raise RuntimeError('typed owner context is required')
     verb = args[0]
     mode = os.environ.get('SUBYARD_RESOURCE_MODE', '')
-    if mode in ('prepare', 'prepare-start') and verb != 'rollback-ingress':
+    if mode in ('prepare', 'prepare-start', 'verify') and verb != 'rollback-ingress':
         prepare(verb, mode == 'prepare-start')
         return 0
     if verb == 'is-up':

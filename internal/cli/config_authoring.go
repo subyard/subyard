@@ -98,77 +98,11 @@ func (cli *CLI) runConfigAuthoring(
 		if request.git {
 			return cli.runConfigGitAuthoring(ctx, loaded, request, nil)
 		}
-		path, err := configScalarAuthoringPath(loaded, request.scope)
-		if err != nil {
-			cli.errorf("config %s: %v", action, err)
-			return 2
-		}
-		snapshot, err := readConfigAuthoringTarget(path)
-		if err != nil {
-			cli.errorf("config %s: %v", action, err)
-			return 1
-		}
-		var value *string
-		if action == "set" {
-			value = &request.value
-		}
-		candidate, err := config.EditPersistentAssignmentContent(
-			path, snapshot.Content, request.name, value,
-		)
-		if err != nil {
-			cli.errorf("config %s: %v", action, err)
-			return 1
-		}
-		intended := config.PersistentFileSnapshot{Exists: true, Content: candidate}
-		if action == "unset" && len(candidate) == 0 {
-			intended = config.PersistentFileSnapshot{Exists: false}
-		}
-		unchanged := sameConfigAuthoringSnapshot(snapshot, intended)
-		if !unchanged {
-			if err := cli.checkResourceConfigChange(ctx, loaded, request); err != nil {
-				cli.errorf("config %s: %v", action, err)
-				return 1
-			}
-		}
-		if !cli.planConfigAction(ctx, loaded, request.action, request.assumeYes, unchanged,
-			fmt.Sprintf("%s %s in persistent %s settings at %s",
-				action, request.name, request.scope, path)) {
-			return 1
-		}
-		if unchanged {
-			fmt.Fprintf(cli.options.Stdout, "config %s: already current\n", action)
-			return 0
-		}
-		if request.scope == config.ScopeYard {
-			unlock, err := lockIntegrationYard(ctx, loaded)
-			if err != nil {
-				cli.errorf("config %s: %v", action, err)
-				return 1
-			}
-			defer unlock()
-			if err := cli.checkResourceConfigChange(ctx, loaded, request); err != nil {
-				cli.errorf("config %s: %v", action, err)
-				return 1
-			}
-			if request.name == "YARD_TEMPLATE" {
-				if err := config.ValidateYardTemplateIntegrations(loaded, request.value); err != nil {
-					cli.errorf("config %s: %v", action, err)
-					return 1
-				}
-			}
-		}
-		if err := config.WritePersistentAssignmentIfUnchanged(
-			loaded.Context.Paths.ConfigHome, path, request.name, value, snapshot,
-		); err != nil {
-			if errors.Is(err, config.ErrPersistentTargetStale) {
-				err = fmt.Errorf("%w: persistent configuration changed after confirmation", domain.ErrPlanStale)
-			}
-			cli.errorf("config %s: %v", action, err)
-			return 1
-		}
-		fmt.Fprintf(cli.options.Stdout, "config %s: updated %s\n", action, path)
-		return 0
+		return cli.runPreparedConfigMutation(ctx, loaded, append([]string{action}, arguments...), request.assumeYes, func(prepared *preparedCommand) error {
+			return prepared.prepareConfigScalar(ctx, action, arguments, true)
+		})
 	}
+
 	if definition.Kind != config.SettingFile {
 		cli.errorf(
 			"config %s: %s is a scalar setting; use config set",
@@ -215,36 +149,10 @@ func (cli *CLI) runConfigAuthoring(
 	if request.git {
 		return cli.runConfigGitAuthoring(ctx, loaded, request, content)
 	}
-	intended := config.PersistentFileSnapshot{Exists: true, Content: content}
-	unchanged := sameConfigAuthoringSnapshot(snapshot, intended)
-	if !cli.planConfigAction(ctx, loaded, request.action, request.assumeYes, unchanged,
-		fmt.Sprintf("replace persistent %s file setting %s at %s",
-			request.scope, request.name, target)) {
-		return 1
-	}
-	if unchanged {
-		fmt.Fprintf(cli.options.Stdout, "config %s: already current\n", action)
-		return 0
-	}
-	if request.scope == config.ScopeYard {
-		unlock, err := lockIntegrationYard(ctx, loaded)
-		if err != nil {
-			cli.errorf("config %s: %v", action, err)
-			return 1
-		}
-		defer unlock()
-	}
-	if err := config.WritePersistentFileIfUnchanged(
-		loaded.Context.Paths.ConfigHome, target, snapshot, content,
-	); err != nil {
-		if errors.Is(err, config.ErrPersistentTargetStale) {
-			err = fmt.Errorf("%w: persistent configuration changed after confirmation", domain.ErrPlanStale)
-		}
-		cli.errorf("config %s: %v", action, err)
-		return 1
-	}
-	fmt.Fprintf(cli.options.Stdout, "config %s: updated %s\n", action, target)
-	return 0
+	return cli.runPreparedConfigMutation(ctx, loaded, append([]string{action}, arguments...), request.assumeYes, func(prepared *preparedCommand) error {
+		prepared.attachConfigFileDraft(request, target, snapshot, content)
+		return nil
+	})
 }
 
 func sameConfigAuthoringSnapshot(left, right config.PersistentFileSnapshot) bool {

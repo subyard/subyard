@@ -41,6 +41,10 @@ grep -Fq 'user.subyard.resource.hermes-dashboard' "$HANDLER" \
 # shellcheck source=tests/helpers/test-context.sh
 . "$ROOT/tests/helpers/test-context.sh"
 setup_test_context "$TMP"
+if [ "${1:-}" = --prepare-parser-fixture ]; then
+  export INCUS_PROJECT=subyard-hermes-bootstrap-5b9fe2b7ea30
+  export YARD_INSTANCE_NAME=yard-hermes-bootstrap-5b9fe2b7ea30
+fi
 export HOME="$TMP/home" PATH="$TMP/bin:$PATH"
 export HERMES_DASHBOARD_ADVERTISE_HOST=owner.example-tailnet.ts.net
 export HERMES_DASHBOARD_HOST_PORT=19119
@@ -175,9 +179,32 @@ MOCK
 chmod 0755 "$TMP/bin/"*
 
 SUBYARD_RESOURCE_MODE=prepare "$HANDLER" up >"$TMP/up-plan.json"
+if [ "${1:-}" = --prepare-parser-fixture ]; then
+  cp "$TMP/up-plan.json" "$2/up.json"
+  for verb in up down; do
+    [ "$verb" = up ] || SUBYARD_RESOURCE_MODE=prepare "$HANDLER" "$verb" > "$2/$verb.json"
+    # The parser contract captures its approved plan before native apply runs.
+    printf '%s-plan\n' "$verb"
+    IFS= read -r approval
+    [ "$approval" = apply ] || fail 'parser fixture did not approve native apply'
+    SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION="$verb" SUBYARD_OPERATION_ID=hermes-parser-fixture \
+      SUBYARD_RESOURCE_BINDING="$(jq -r .binding "$2/$verb.json")" \
+      SUBYARD_RESOURCE_STEPS="$(jq -c .steps "$2/$verb.json")" "$HANDLER" "$verb" > "$TMP/$verb.out"
+    SUBYARD_RESOURCE_MODE=verify "$HANDLER" "$verb" > "$2/$verb-verified.json"
+    SUBYARD_RESOURCE_MODE=prepare "$HANDLER" "$verb" > "$2/$verb-noop.json"
+    printf '%s-verified\n' "$verb"
+  done
+  exit 0
+fi
 grep -Fq '"action":"up","changed":true' "$TMP/up-plan.json" \
   || fail 'up prepare did not describe the route change'
 [ ! -e "$TMP/route" ] || fail 'up prepare mutated the route'
+jq -e '.schema == "yard.resource-action-assessment.v2" and (.binding|test("^[0-9a-f]{64}$")) and .steps[0].decision == "apply"' \
+  "$TMP/up-plan.json" >/dev/null || fail 'up lacks a bounded exact native plan'
+if SUBYARD_RESOURCE_MODE=verify "$HANDLER" up >"$TMP/before-verify.json"; then
+  jq -e '.changed == true' "$TMP/before-verify.json" >/dev/null \
+    || fail 'native verify claimed an absent route converged'
+fi
 
 SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION=up SUBYARD_OPERATION_ID=op-up \
   "$HANDLER" up >"$TMP/up.out"
@@ -192,6 +219,11 @@ grep -Eq '^config device add [^ ]+ hermes-dashboard proxy .*listen=tcp:100\.64\.
 [ "$(<"$TMP/ownership")" = \
   'v1:d839b683e89c7f8706a2e0131fe0c5fd421031a09781e01b0ffede6239c54f26' ] \
   || fail 'route ownership metadata does not fingerprint the exact created device'
+SUBYARD_RESOURCE_MODE=verify "$HANDLER" up >"$TMP/up-verify.json"
+jq -e '.changed == false and .steps[0].decision == "skip" and .steps[0].observed == .steps[0].desired' \
+  "$TMP/up-verify.json" >/dev/null || fail 'up native verify did not prove convergence'
+[ "$(jq -r .binding "$TMP/up-plan.json")" = "$(jq -r .binding "$TMP/up-verify.json")" ] \
+  || fail 'up verify changed the approved target/desired binding'
 
 SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION=is-up SUBYARD_OPERATION_ID=op-is-up \
   "$HANDLER" is-up
@@ -235,6 +267,9 @@ SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION=down SUBYARD_OPERATION_ID=op
   "$HANDLER" down >"$TMP/down.out"
 [ ! -e "$TMP/route" ] || fail 'down left the owned route attached'
 [ ! -e "$TMP/ownership" ] || fail 'down left route ownership metadata behind'
+SUBYARD_RESOURCE_MODE=verify "$HANDLER" down >"$TMP/down-verify.json"
+jq -e '.changed == false and .steps[0].observed == "absent" and .steps[0].desired == "absent"' \
+  "$TMP/down-verify.json" >/dev/null || fail 'down native verify did not prove absence'
 
 export HERMES_DASHBOARD_ADVERTISE_HOST=owner.example-tailnet.ts.net
 export HERMES_DASHBOARD_HOST_PORT=19119

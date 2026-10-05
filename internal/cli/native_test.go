@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -10,6 +11,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -43,7 +45,18 @@ type projectActionObservationProbe struct {
 type projectActionArchive string
 
 func (archive projectActionArchive) Open(context.Context, string) (io.ReadCloser, error) {
-	return io.NopCloser(strings.NewReader(string(archive))), nil
+	var payload bytes.Buffer
+	w := tar.NewWriter(&payload)
+	if err := w.WriteHeader(&tar.Header{Name: "snapshot.txt", Mode: 0o600, Size: int64(len(archive))}); err != nil {
+		return nil, err
+	}
+	if _, err := w.Write([]byte(archive)); err != nil {
+		return nil, err
+	}
+	if err := w.Close(); err != nil {
+		return nil, err
+	}
+	return io.NopCloser(bytes.NewReader(payload.Bytes())), nil
 }
 
 func (probe projectActionObservationProbe) Execute(
@@ -417,7 +430,7 @@ func TestStructuredStartSharesPlanAndAdapterAcrossCLIAndRPC(t *testing.T) {
 		Environment: append(environment, "SUBYARD_OPERATION_ID=operation-cli"),
 		WorkingDir:  root,
 		Stdout:      &stdout, Stderr: &stderr, AdapterRunner: cliRunner, Prompt: prompt, Clock: clock,
-		Incus: lifecycleIncus(), NetworkPolicy: allowTestNetworkPolicy(),
+		Incus: powerScriptedIncus(cliRunner, nil), NetworkPolicy: allowTestNetworkPolicy(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -438,7 +451,7 @@ func TestStructuredStartSharesPlanAndAdapterAcrossCLIAndRPC(t *testing.T) {
 	}}}}
 	program, err = New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
-		Stderr: &stderr, AdapterRunner: rpcRunner, Clock: clock, Incus: lifecycleIncus(),
+		Stderr: &stderr, AdapterRunner: rpcRunner, Clock: clock, Incus: powerScriptedIncus(rpcRunner, nil),
 		NetworkPolicy: allowTestNetworkPolicy(),
 	})
 	if err != nil {
@@ -678,7 +691,7 @@ func TestUpdateTypedConfirmationSeparatesCheckActivationAndRollbackPreflight(t *
 		}
 	})
 
-	t.Run("declined activation leaves published candidate inactive", func(t *testing.T) {
+	t.Run("declined activation removes private draft without publishing candidate", func(t *testing.T) {
 		root, environment, runtimeRoot := updateReleaseFixture(t)
 		configs := &recordingConfigApplier{}
 		var stdout, stderr bytes.Buffer
@@ -695,7 +708,7 @@ func TestUpdateTypedConfirmationSeparatesCheckActivationAndRollbackPreflight(t *
 		if code := program.Run(context.Background()); code != 1 {
 			t.Fatalf("code=%d stderr=%q", code, stderr.String())
 		}
-		preview := strings.Index(stdout.String(), "Update: release-old -> 1.2.3\n")
+		preview := strings.Index(stdout.String(), "Operation plan:")
 		progress := strings.Index(stdout.String(), "Checking update requirements...\n")
 		if progress < 0 || progress >= preview || !strings.Contains(stdout.String(), "Downloading subyard-1.2.3-") {
 			t.Fatalf("expected update progress before the preview: %q", stdout.String())
@@ -708,8 +721,8 @@ func TestUpdateTypedConfirmationSeparatesCheckActivationAndRollbackPreflight(t *
 			target != "releases/release-old" {
 			t.Fatalf("decline changed active runtime: target=%q err=%v", target, err)
 		}
-		if _, err := os.Stat(filepath.Join(runtimeRoot, "releases", "1.2.3-f16d05ec6b29")); err != nil {
-			t.Fatalf("decline lost the safely published inspected candidate: %v", err)
+		if _, err := os.Stat(filepath.Join(runtimeRoot, "releases", "1.2.3-f16d05ec6b29")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("decline published a candidate: %v", err)
 		}
 		if len(configs.yards) != 0 {
 			t.Fatalf("decline refreshed configs: %#v", configs.yards)
@@ -900,6 +913,11 @@ func TestUpdateRefreshesConfigsWithActivatedRuntimeLauncher(t *testing.T) {
 			}
 			if test.sameVersion {
 				prepareCLIReleaseLinks(t, runtimeRoot, false)
+				installer := exec.Command("sh", filepath.Join(root, "scripts", "install-runtime-release.sh"), "--runtime-root", runtimeRoot, "--publish-only")
+				installer.Env = environment
+				if output, err := installer.CombinedOutput(); err != nil {
+					t.Fatalf("publish exact fixture candidate: %v %s", err, output)
+				}
 			}
 			if test.rollback {
 				prepareCLIReleaseLinks(t, runtimeRoot, true)
@@ -1265,6 +1283,7 @@ if [ "$rollback" = true ]; then
 fi
 target='__RELEASE_TARGET__'
 destination="$root/$target"
+install -d -m 0700 "$root/releases"
 mkdir -p "$destination/bin" "$destination/config"
 chmod 700 "$destination" "$destination/bin" "$destination/config"
 cat > "$destination/bin/yard-engine" <<'ENGINE'
@@ -1590,6 +1609,7 @@ func TestStructuredMutationSharesTypedAdapterAcrossCLIAndRPC(t *testing.T) {
 	cliRunner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{
 		Schema: 1, OperationID: "operation-stop-cli", Status: "ok",
 	}}}}
+	powerScriptedIncus(cliRunner, cliIncus)
 	prompt := &testkit.Prompt{Answers: []bool{true}}
 	var stderr bytes.Buffer
 	program, err := New(Options{
@@ -1617,6 +1637,7 @@ func TestStructuredMutationSharesTypedAdapterAcrossCLIAndRPC(t *testing.T) {
 	rpcInstance := rpcIncus.Instances["subyard/yard"]
 	rpcInstance.Status = "Running"
 	rpcIncus.Instances["subyard/yard"] = rpcInstance
+	powerScriptedIncus(rpcRunner, rpcIncus)
 	program, err = New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 		Stderr: &stderr, AdapterRunner: rpcRunner, Clock: clock, Incus: rpcIncus,
@@ -1721,7 +1742,7 @@ func TestStructuredStartAutomationSkipsOnlyTheLocalPrompt(t *testing.T) {
 				RepositoryRoot: root, Program: "yard", Arguments: test.arguments,
 				Environment: append(environment, "SUBYARD_OPERATION_ID=operation-automation"),
 				WorkingDir:  root, Stderr: &stderr, AdapterRunner: runner, Prompt: prompt,
-				Incus: lifecycleIncus(), NetworkPolicy: allowTestNetworkPolicy(),
+				Incus: powerScriptedIncus(runner, nil), NetworkPolicy: allowTestNetworkPolicy(),
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -1849,7 +1870,7 @@ exit 90
 	}
 	power := lifecycleIncus()
 	runner := application.LifecycleRunner{
-		Power:    application.PowerService{Instances: power, Config: power},
+		Power:    application.PowerService{Instances: filePowerOracle{Incus: power, path: statePath}, Config: power},
 		Physical: physical, Yard: loaded.Context,
 	}
 	request := domain.AdapterRequest{
@@ -1885,7 +1906,7 @@ func TestStructuredStartRunsOverFramedRPCSession(t *testing.T) {
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"rpc", "--stdio"},
 		Environment: environment, WorkingDir: root, Stdin: server, Stdout: server, Stderr: &stderr,
 		AdapterRunner: runner, Clock: testkit.NewManualClock(time.Unix(100, 0)),
-		Incus: lifecycleIncus(), NetworkPolicy: allowTestNetworkPolicy(),
+		Incus: powerScriptedIncus(runner, nil), NetworkPolicy: allowTestNetworkPolicy(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -3386,7 +3407,7 @@ func TestTrustedInProcessReleaseTransitionChildBypassesMutationGate(t *testing.T
 	program, err := New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Environment: environment, WorkingDir: root, Stderr: &stderr,
-		AdapterRunner: runner, Incus: lifecycleIncus(), NetworkPolicy: allowTestNetworkPolicy(),
+		AdapterRunner: runner, Incus: powerScriptedIncus(runner, nil), NetworkPolicy: allowTestNetworkPolicy(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -4454,7 +4475,7 @@ func TestExistingProjectExportCarriesOperationIDIntoAssessment(t *testing.T) {
 	if err := store.Put(context.Background(), record); err != nil {
 		t.Fatal(err)
 	}
-	probe := projectActionObservationProbe{stream: func(
+	probe := projectActionObservationProbe{execute: projectExportObservation(false), stream: func(
 		ports.InstanceExecRequest, io.Reader,
 	) (ports.InstanceExecResult, error) {
 		return ports.InstanceExecResult{ExitCode: 0}, nil
@@ -4584,18 +4605,7 @@ func TestObserveProjectActionDetectsExportAndEnvironmentNoOps(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root, environment, _ := nativeFixture(t)
-			probe := projectActionObservationProbe{stream: func(
-				request ports.InstanceExecRequest, _ io.Reader,
-			) (ports.InstanceExecResult, error) {
-				if len(request.Command) == 0 || request.Command[0] != "sh" {
-					t.Fatalf("export assessment=%#v", request.Command)
-				}
-				result := ports.InstanceExecResult{ExitCode: test.exitCode}
-				if test.exitCode == 1 {
-					return result, errors.New("diff")
-				}
-				return result, nil
-			}}
+			probe := projectActionObservationProbe{execute: projectExportObservation(test.changed)}
 			program, err := New(Options{
 				RepositoryRoot: root, Program: "yard", Environment: environment,
 				WorkingDir: root, Incus: lifecycleIncus(), ProjectData: probe,
@@ -4619,7 +4629,7 @@ func TestObserveProjectActionDetectsExportAndEnvironmentNoOps(t *testing.T) {
 	t.Run("unowned environment", func(t *testing.T) {
 		root, environment, _ := nativeFixture(t)
 		probe := projectActionObservationProbe{execute: func(ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
-			return ports.InstanceExecResult{Stdout: []byte("running\t\t\t"), ExitCode: 0}, nil
+			return ports.InstanceExecResult{Stdout: []byte("running\tcontainer-fixture\t\t\t"), ExitCode: 0}, nil
 		}}
 		program, err := New(Options{
 			RepositoryRoot: root, Program: "yard", Environment: environment,
@@ -4645,7 +4655,7 @@ func TestObserveProjectActionDetectsExportAndEnvironmentNoOps(t *testing.T) {
 			if slices.Contains(request.Command, "/srv/env-meta/Demo/profile.json") {
 				return ports.InstanceExecResult{Stdout: []byte("different"), ExitCode: 0}, nil
 			}
-			return ports.InstanceExecResult{Stdout: []byte("running\t1\tDemo\tfixture"), ExitCode: 0}, nil
+			return ports.InstanceExecResult{Stdout: []byte("running\tcontainer-fixture\t1\tDemo\tfixture"), ExitCode: 0}, nil
 		}}
 		program, err := New(Options{
 			RepositoryRoot: root, Program: "yard", Environment: environment,
@@ -4675,6 +4685,7 @@ func TestObserveProjectActionDetectsExportAndEnvironmentNoOps(t *testing.T) {
 	}{
 		{name: "up running", command: "up", state: "running"},
 		{name: "up stopped", command: "up", state: "stopped", changed: true},
+		{name: "up missing", command: "up", state: "missing", changed: true},
 		{name: "rebuild running", command: "up", state: "running", rebuild: true, changed: true},
 		{name: "down running", command: "down", state: "running", changed: true},
 		{name: "down stopped", command: "down", state: "stopped"},
@@ -4684,15 +4695,16 @@ func TestObserveProjectActionDetectsExportAndEnvironmentNoOps(t *testing.T) {
 			environmentRecord := record
 			environmentRecord.Target = "fixture"
 			root, environment, _ := nativeFixture(t)
+			containerID := strings.Repeat("a", 64)
+			observation := test.state
+			if test.state != "missing" {
+				observation += "\t" + containerID + "\t1\tDemo\tfixture"
+			}
 			probe := projectActionObservationProbe{execute: func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
 				if slices.Contains(request.Command, "/srv/env-meta/Demo/profile.json") {
 					return ports.InstanceExecResult{Stdout: []byte("match"), ExitCode: 0}, nil
 				}
-				observation := test.state
-				if test.state != "missing" {
-					observation += "\t1\tDemo\tfixture"
-				}
-				return ports.InstanceExecResult{Stdout: []byte(observation), ExitCode: 0}, nil
+				return ports.InstanceExecResult{Stdout: []byte(observation + "\n"), ExitCode: 0}, nil
 			}}
 			program, err := New(Options{
 				RepositoryRoot: root, Program: "yard", Environment: environment,
@@ -4711,6 +4723,47 @@ func TestObserveProjectActionDetectsExportAndEnvironmentNoOps(t *testing.T) {
 			err = program.observeProjectAction(context.Background(), test.command, execution)
 			if (err != nil) != test.wantError || execution.ActionChanged != test.changed {
 				t.Fatalf("changed=%t err=%v", execution.ActionChanged, err)
+			}
+			if test.wantError {
+				return
+			}
+			if execution.environmentObserved != observation || execution.approvedEnvironment != observation {
+				t.Fatal("native private observation was replaced by its public projection")
+			}
+			steps := execution.operationSteps(test.command)
+			if err := domain.ValidateOperationSteps(steps); err != nil {
+				t.Fatalf("native TSV observation cannot form an operation plan: %v", err)
+			}
+			wantObserved := "missing"
+			if test.state != "missing" {
+				wantObserved = test.state + " native identity sha256:" + operationStateDigest(observation)
+			}
+			if steps[0].Observed != wantObserved || strings.ContainsAny(steps[0].Observed, "\t\r\n") {
+				t.Fatal("public observation lost power/fingerprint or contains native control characters")
+			}
+			action, delta, err := execution.actionPlan(test.command)
+			if err != nil {
+				t.Fatal(err)
+			}
+			delta.Consequences = domain.OperationStepConsequences(steps)
+			assessment, err := program.coreActions.Assess(action, delta)
+			if err != nil {
+				t.Fatal(err)
+			}
+			policy, _, err := program.coreActions.Resolve(assessment)
+			if err != nil || assessment.Changed != test.changed || (policy == domain.ActionConfirmationNever) == test.changed {
+				t.Fatalf("native projection changed confirmation policy: changed=%t policy=%s err=%v", assessment.Changed, policy, err)
+			}
+			if test.state == "missing" {
+				return
+			}
+			binding := execution.sourceBinding()
+			observation = test.state + "\t" + strings.Repeat("b", 64) + "\t1\tDemo\tfixture"
+			if err := program.observeProjectAction(context.Background(), test.command, execution); !errors.Is(err, domain.ErrPlanStale) {
+				t.Fatalf("public projection weakened native identity CAS: %v", err)
+			}
+			if execution.sourceBinding() != binding || strings.Contains(execution.approvedEnvironment, strings.Repeat("b", 64)) {
+				t.Fatal("native identity drift replaced the private approved binding")
 			}
 		})
 	}
@@ -5366,5 +5419,21 @@ func TestConfigStatusRemainsReadOnlyDuringReleaseRecovery(t *testing.T) {
 	after, err := os.ReadFile(journal)
 	if err != nil || !bytes.Equal(before, after) {
 		t.Fatal("read-only status changed recovery journal")
+	}
+}
+
+func projectExportObservation(changed bool) func(ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	return func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+		if len(request.Command) >= 3 && strings.Contains(request.Command[2], "-printf") {
+			return ports.InstanceExecResult{Stdout: []byte("f\x00snapshot.txt\x00\x00")}, nil
+		}
+		if len(request.Command) >= 3 && strings.Contains(request.Command[2], "sha256sum --zero") {
+			content := "archive"
+			if changed {
+				content = "yard edit"
+			}
+			return ports.InstanceExecResult{Stdout: []byte(fmt.Sprintf("%x  ./snapshot.txt\x00", sha256.Sum256([]byte(content))))}, nil
+		}
+		return ports.InstanceExecResult{}, nil
 	}
 }
