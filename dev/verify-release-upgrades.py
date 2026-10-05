@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import select
 import signal
 import subprocess
 import sys
@@ -77,7 +78,7 @@ class Fixture:
             "SUBYARD_CONFIG_HOME": str(self.config), "YARD_RUNTIME_ROOT": str(self.runtime),
             "YARD_RELEASE_CACHE": str(self.data / "releases"),
             "YARD_RELEASE_BASE_URL": release.as_uri(), "SUBYARD_NO_AUDIT": "1",
-            "SUBYARD_INCUS_SOCKET": str(root / "missing-incus.socket"),
+            "SUBYARD_INCUS_SOCKET": str(root.parent / "incus.socket"),
             "SUBYARD_POWER_RECONCILER_PATH": str(root / "missing-power-reconciler"),
             "SUBYARD_POWER_UNIT_PATH": str(root / "missing-power-unit"),
         }
@@ -298,11 +299,32 @@ def main():
     # state and deliberate process interruption are confined to this owned root.
     with tempfile.TemporaryDirectory(prefix="subyard-release-compat-", dir="/tmp") as directory:
         root = Path(directory)
-        legacy = baseline_assets(root, args.legacy_baseline_dir, LEGACY_BASELINE,
-                                 LEGACY_BASELINE_SHA256, arch)
-        verify_legacy(release, args.version, legacy, arch, root)
-        baseline = baseline_assets(root, args.baseline_dir, BASELINE, BASELINE_SHA256, arch)
-        verify(release, args.version, baseline, arch, root)
+        # A retained yard registration needs a reachable API proving absence;
+        # a missing transport cannot establish the profile activation state.
+        source = Path(__file__).resolve().parent.parent
+        server_binary = root / "empty-incus"
+        built = run_process(["go", "-C", str(source), "build", "-buildvcs=false",
+                             "-o", str(server_binary), "./internal/testkit/cmd/empty-incus"],
+                            env=None, timeout=180)
+        require(built.returncode == 0, f"cannot build Incus fixture: {built.stdout}{built.stderr}")
+        with subprocess.Popen([str(server_binary), str(root)], stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, text=True) as server:
+            try:
+                readable, _, _ = select.select([server.stdout], [], [], 10)
+                require(readable and server.stdout.readline().strip() == "ready",
+                        "Incus fixture did not become ready")
+                legacy = baseline_assets(root, args.legacy_baseline_dir, LEGACY_BASELINE,
+                                         LEGACY_BASELINE_SHA256, arch)
+                verify_legacy(release, args.version, legacy, arch, root)
+                baseline = baseline_assets(root, args.baseline_dir, BASELINE, BASELINE_SHA256, arch)
+                verify(release, args.version, baseline, arch, root)
+            finally:
+                server.terminate()
+                try:
+                    server.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    server.kill()
+                    server.wait()
 
 
 def baseline_assets(root, directory, version, hashes, arch):

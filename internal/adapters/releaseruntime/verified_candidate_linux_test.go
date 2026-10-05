@@ -5,6 +5,7 @@ package releaseruntime
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,8 +13,73 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/testkit"
 	"golang.org/x/sys/unix"
 )
+
+func TestVerifiedCandidateRequiresExactManifestInventory(t *testing.T) {
+	for _, scenario := range []string{"exact", "extra-file", "omitted-entry", "unlisted-nested-manifest", "symlink", "fifo"} {
+		t.Run(scenario, func(t *testing.T) {
+			root := testkit.TempDir(t)
+			capture := filepath.Join(root, "engine-invoked")
+			candidate := writeRuntimeCandidatePayload(t, root, fmt.Sprintf(
+				"#!/bin/sh\n: > %q\nprintf 'yard-engine 1.2.3\\n'\n", capture,
+			))
+			manifestPath := filepath.Join(candidate.root, "runtime-files.sha256")
+			manifest, err := os.ReadFile(manifestPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			script := filepath.Join(candidate.root, "scripts", "nested.sh")
+			if err := os.Mkdir(filepath.Dir(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			payload := []byte("#!/bin/sh\nexit 0\n")
+			testkit.WriteFile(t, script, payload, 0o700)
+			scriptEntry := fmt.Sprintf("%x  ./scripts/nested.sh\n", sha256.Sum256(payload))
+			nestedEntry := fmt.Sprintf("%x  ./config/runtime-files.sha256\n", sha256.Sum256(payload))
+			testkit.WriteFile(t, filepath.Join(candidate.root, "config", "runtime-files.sha256"), payload, 0o600)
+			manifest = append(manifest, []byte(scriptEntry+nestedEntry)...)
+			switch scenario {
+			case "extra-file":
+				testkit.WriteFile(t, filepath.Join(candidate.root, "config", "extra.conf"), payload, 0o600)
+			case "omitted-entry":
+				manifest = []byte(strings.Replace(string(manifest), scriptEntry, "", 1))
+			case "unlisted-nested-manifest":
+				manifest = []byte(strings.Replace(string(manifest), nestedEntry, "", 1))
+			case "symlink", "fifo":
+				if err := os.Remove(script); err != nil {
+					t.Fatal(err)
+				}
+				if scenario == "symlink" {
+					err = os.Symlink(filepath.Join(candidate.root, "bin", "yard-engine"), script)
+				} else {
+					err = unix.Mkfifo(script, 0o600)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			testkit.WriteFile(t, manifestPath, manifest, 0o600)
+			runtime := New(Config{Stderr: &bytes.Buffer{}})
+			defer runtime.Close()
+			verified, err := runtime.verifyPublishedCandidate(context.Background(), candidate, root, nil)
+			if scenario == "exact" {
+				if err != nil || verified == nil || verified.version != "1.2.3" {
+					t.Fatalf("exact candidate = %#v, %v", verified, err)
+				}
+				defer verified.Close()
+			} else {
+				if err == nil || verified != nil {
+					t.Fatalf("unsafe inventory accepted: %#v, %v", verified, err)
+				}
+				if _, err := os.Lstat(capture); !os.IsNotExist(err) {
+					t.Fatalf("unsafe inventory executed the engine: %v", err)
+				}
+			}
+		})
+	}
+}
 
 func TestExecutableMemfdFallsBackForPreMFDExecKernels(t *testing.T) {
 	var flags []int

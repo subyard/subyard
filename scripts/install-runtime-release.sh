@@ -106,7 +106,13 @@ destination="$releases/$release_id"
 candidate="$(mktemp -d "$releases/.candidate.XXXXXX")"
 published=0
 cleanup_candidate() { [ "$published" = 1 ] || rm -rf -- "$candidate"; }
-trap cleanup_candidate EXIT
+actual_files=''; listed_files=''
+cleanup() {
+  [ -z "$actual_files" ] || rm -f -- "$actual_files"
+  [ -z "$listed_files" ] || rm -f -- "$listed_files"
+  cleanup_candidate
+}
+trap cleanup EXIT
 tar -xzf "$BUNDLE" -C "$candidate" --no-same-owner --no-same-permissions
 if find "$candidate" -type l -print -quit | grep -q .; then
   printf 'install-runtime-release: bundle contains a symbolic link\n' >&2
@@ -119,21 +125,19 @@ done
 [ -f "$candidate/runtime-files.sha256" ] && [ ! -L "$candidate/runtime-files.sha256" ] \
   || { printf 'install-runtime-release: runtime file manifest is missing\n' >&2; exit 1; }
 (
-  cd "$candidate"
+  cd "$candidate" &&
   sha256sum -c runtime-files.sha256 >/dev/null
 ) || { printf 'install-runtime-release: runtime file manifest verification failed\n' >&2; exit 1; }
 actual_files="$(mktemp "$releases/.actual-files.XXXXXX")"
 listed_files="$(mktemp "$releases/.listed-files.XXXXXX")"
-trap 'rm -f -- "$actual_files" "$listed_files"; cleanup_candidate' EXIT
 (
   cd "$candidate"
-  find . -type f ! -name runtime-files.sha256 -print | sort > "$actual_files"
+  find . -type f ! -path './runtime-files.sha256' -print | sort > "$actual_files"
   sed -E 's/^[0-9a-fA-F]{64}  //' runtime-files.sha256 | sort > "$listed_files"
 )
 cmp -s "$actual_files" "$listed_files" \
   || { printf 'install-runtime-release: runtime file manifest is not exact\n' >&2; exit 1; }
 rm -f -- "$actual_files" "$listed_files"
-trap cleanup_candidate EXIT
 chmod 0755 "$candidate/bin/yard" "$candidate/bin/yard-engine"
 candidate_version="$(SUBYARD_REPOSITORY_ROOT="$candidate" "$candidate/bin/yard-engine" --version 2>/dev/null | awk '{print $2}')" \
   || { printf 'install-runtime-release: candidate self-check failed\n' >&2; exit 1; }
@@ -154,17 +158,16 @@ if [ "$published" = 0 ]; then
     && cmp -s "$candidate/runtime-files.sha256" "$destination/runtime-files.sha256" \
     && ! find "$destination" -type l -print -quit | grep -q . \
     && (
-      cd "$destination"
-      sha256sum -c runtime-files.sha256 >/dev/null
-      find . -type f ! -name runtime-files.sha256 -print | sort > "$actual_files"
-      sed -E 's/^[0-9a-fA-F]{64}  //' runtime-files.sha256 | sort > "$listed_files"
+      cd "$destination" &&
+      sha256sum -c runtime-files.sha256 >/dev/null &&
+      find . -type f ! -path './runtime-files.sha256' -print | sort > "$actual_files" &&
+      sed -E 's/^[0-9a-fA-F]{64}  //' runtime-files.sha256 | sort > "$listed_files" &&
       cmp -s "$actual_files" "$listed_files"
     ) \
     || { printf 'install-runtime-release: published release identity conflicts with verified candidate\n' >&2; exit 1; }
   rm -rf -- "$candidate"
   published=1
 fi
-trap - EXIT
 
 if [ "$PUBLISH_ONLY" = 1 ]; then
   printf 'releases/%s\n' "$release_id"

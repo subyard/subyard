@@ -110,6 +110,7 @@ printf '%s\n' '# Synthetic profile' > "$fixture_profile/profile.conf"
 printf '%s\n' 'package main' 'import "fmt"' 'func main() { fmt.Println("profile native fixture") }' \
   > "$fixture_profile/cmd/worker/main.go"
 printf '%s\n' 'runtime fixture' > "$fixture_profile/asset.txt"
+printf '%s\n' 'nested runtime manifest fixture' > "$fixture_profile/runtime-files.sha256"
 printf '%s\n' '# Test-only fixture' > "$fixture_profile/tests/run.sh"
 legacy_installer="$ROOT/tests/fixtures/migrations/v0.1.0-install-runtime-release.sh"
 [ "$(sha256sum "$legacy_installer" | cut -d' ' -f1)" = \
@@ -192,7 +193,7 @@ tar -xpzf "$bundle_one" -C "$bundle_extract"
 (
   cd "$bundle_extract"
   sha256sum -c runtime-files.sha256 >/dev/null
-  find . -type f ! -name runtime-files.sha256 -print | sort > "$TMP/bundle-actual.list"
+  find . -type f ! -path './runtime-files.sha256' -print | sort > "$TMP/bundle-actual.list"
   sed -E 's/^[0-9a-fA-F]{64}  //' runtime-files.sha256 | sort > "$TMP/bundle-declared.list"
 )
 cmp -s "$TMP/bundle-actual.list" "$TMP/bundle-declared.list" \
@@ -410,6 +411,36 @@ esac
   && [ ! -e "$publish_only_root/current" ] && [ ! -L "$publish_only_root/current" ] \
   && [ ! -e "$publish_only_root/previous" ] && [ ! -L "$publish_only_root/previous" ] \
   || fail 'publish-only changed stable runtime links or omitted the immutable release'
+
+publish_again() {
+  "$ROOT/scripts/install-runtime-release.sh" \
+    --runtime-root "$publish_only_root" --publish-only \
+    --bundle "$bundle_two" --checksum "$bundle_two.sha256" \
+    --manifest "$bundle_two.manifest.json" --provenance "$bundle_two.provenance.json"
+}
+assert_publication_cleanup() {
+  [ -z "$(find "$publish_only_root/releases" -maxdepth 1 \
+    \( -name '.candidate.*' -o -name '.actual-files.*' -o -name '.listed-files.*' \) -print)" ] \
+    || fail 'runtime publication left temporary files'
+}
+[ "$(publish_again)" = "$published_release" ] || fail 'intact publication reuse failed'
+assert_publication_cleanup
+# Corrupting a nested file preserves names and the original manifest, exposing
+# checksum failures hidden by conditional errexit in the reuse branch.
+ln -s "$published_release" "$publish_only_root/current"
+ln -s "$published_release" "$publish_only_root/previous"
+damaged_file="$publish_only_root/$published_release/config/profiles/package-fixture/asset.txt"
+printf '%s\n' 'damaged runtime fixture' >> "$damaged_file"
+damaged_digest="$(sha256sum "$damaged_file")"
+if publish_again >"$TMP/damaged-reuse.out" 2>"$TMP/damaged-reuse.err"; then
+  fail 'publication reuse accepted a damaged nested file'
+fi
+grep -Fq 'published release identity conflicts' "$TMP/damaged-reuse.err" \
+  && [ "$(readlink "$publish_only_root/current")" = "$published_release" ] \
+  && [ "$(readlink "$publish_only_root/previous")" = "$published_release" ] \
+  && [ "$(sha256sum "$damaged_file")" = "$damaged_digest" ] \
+  || fail 'failed publication reuse changed retained bytes or stable links'
+assert_publication_cleanup
 
 # Installed release ingress: bootstrap creates only the first link; every
 # subsequent activation, same-version retry, and explicit rollback is owned by

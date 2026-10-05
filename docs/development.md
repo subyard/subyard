@@ -101,9 +101,10 @@ Verify a built candidate with the unmodified supported updater before release:
 python3 dev/verify-release-upgrades.py --release-dir .build/release --version <candidate-version>
 ```
 
-This Linux check needs Python 3 and downloads checksum-pinned v0.9.1 and v0.11.2 runtimes for the
-local architecture. It verifies the legacy standalone bridge as well as the frozen updater
-contract, confines all state to a temporary directory and interrupts only its own update process
+This Linux check needs Python 3 and Go to build the local empty-instance Incus API fixture. It
+downloads checksum-pinned v0.9.1 and v0.11.2 runtimes for the local architecture and verifies the
+legacy standalone bridge as well as the frozen updater contract. It confines all state to a
+temporary directory and interrupts only its own update process
 group. Use `--baseline-dir PATH` and `--legacy-baseline-dir PATH` to reuse downloaded official
 assets (including the legacy runtime installer). Publication runs this check after building the
 release assets.

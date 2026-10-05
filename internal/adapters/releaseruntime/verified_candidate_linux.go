@@ -91,6 +91,9 @@ func (runtime *Runtime) verifyPublishedCandidate(
 	if err != nil {
 		return fail(err)
 	}
+	if err := verifyCandidateInventory(rootFD, entries); err != nil {
+		return fail(err)
+	}
 	for _, entry := range entries {
 		file, openErr := openCandidateFile(rootFD, entry.path)
 		if openErr != nil {
@@ -137,6 +140,58 @@ func (runtime *Runtime) verifyPublishedCandidate(
 	}
 	verified.version = version
 	return verified, nil
+}
+
+func verifyCandidateInventory(rootFD int, entries []candidateManifestEntry) error {
+	remaining := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		remaining[entry.path] = struct{}{}
+	}
+	var walk func(int, string, string) error
+	walk = func(parentFD int, name, relative string) error {
+		fd, err := unix.Openat(parentFD, name,
+			unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return errors.New("published runtime inventory is unavailable")
+		}
+		directory := os.NewFile(uintptr(fd), "verified-release-directory")
+		defer directory.Close()
+		names, err := directory.Readdirnames(-1)
+		if err != nil {
+			return errors.New("published runtime inventory is unavailable")
+		}
+		for _, name := range names {
+			path := filepath.Join(relative, name)
+			var stat unix.Stat_t
+			if err := unix.Fstatat(fd, name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+				return errors.New("published runtime inventory is unavailable")
+			}
+			switch stat.Mode & unix.S_IFMT {
+			case unix.S_IFDIR:
+				if err := walk(fd, name, path); err != nil {
+					return err
+				}
+			case unix.S_IFREG:
+				if path == "runtime-files.sha256" {
+					continue
+				}
+				if _, listed := remaining[path]; !listed {
+					return errors.New("published runtime file manifest is not exact")
+				}
+				delete(remaining, path)
+			default:
+				return errors.New("published runtime contains a non-regular entry")
+			}
+		}
+		return nil
+	}
+	if err := walk(rootFD, ".", ""); err != nil {
+		return err
+	}
+	if len(remaining) != 0 {
+		return errors.New("published runtime file manifest is not exact")
+	}
+	return nil
 }
 
 func openVerifiedCandidateRoot(

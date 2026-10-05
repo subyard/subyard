@@ -2024,7 +2024,7 @@ case "${1:-}" in
 esac
 `, started, proceed, fixture.recoveringResponse())
 	writeProtectedRuntimeFixtureEngine(t, fixture, original)
-	replacement := filepath.Join(filepath.Dir(fixture.engine), "replacement-yard-engine")
+	replacement := filepath.Join(filepath.Dir(fixture.runtimeRoot), "replacement-yard-engine")
 	replacementPayload := fmt.Sprintf(`#!/bin/sh
 case "${1:-}" in
   --version) printf 'yard-engine 1.2.3\n' ;;

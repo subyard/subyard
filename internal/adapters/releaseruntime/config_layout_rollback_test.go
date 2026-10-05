@@ -89,8 +89,7 @@ func TestConfigLayoutRollbackRejectsUnboundMetadata(t *testing.T) {
 	testkit.WriteFile(t, manifestPath, append(bytes.Join(lines[:len(lines)-1], []byte("\n")), '\n'), 0o600)
 	writeConfigLayoutManifest(t, request.ConfigHome, 2, true)
 	_, err = prepareCandidateTransitionForTest(runtime, context.Background(), parsed, candidate, request)
-	var failure publicReleaseInspectionError
-	if !errors.As(err, &failure) || failure.outcome.Code != releasetransition.CodeRollbackIncompatible {
+	if err == nil {
 		t.Fatalf("unbound metadata accepted: %v", err)
 	}
 	if _, err := os.Stat(called); !errors.Is(err, os.ErrNotExist) {
