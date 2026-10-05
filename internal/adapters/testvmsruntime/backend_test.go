@@ -65,6 +65,16 @@ func fixtureBackend(t *testing.T) *Backend {
 
 func TestBackendApplyInstallsCurrentEngineAndPublishesRoute(t *testing.T) {
 	backend := fixtureBackend(t)
+	// Consumers traverse this directory as root inside an unprivileged yard, where
+	// the host owner uid is unmapped: publication must set the mode explicitly
+	// instead of leaving it to MkdirAll under the operator's umask.
+	clientExport := backend.Environment["SUBYARD_E2E_CLIENT_EXPORT_DIR"]
+	if err := os.MkdirAll(clientExport, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(clientExport, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	var power []string
 	recipesInstalled := false
 	memory := backendMemoryFixture(false)
@@ -171,6 +181,13 @@ func TestBackendApplyInstallsCurrentEngineAndPublishesRoute(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o755 {
 		t.Fatalf("route generation mode = %v", info.Mode().Perm())
+	}
+	clientInfo, err := os.Stat(clientExport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clientInfo.Mode().Perm() != 0o755 {
+		t.Fatalf("route client directory mode = %v", clientInfo.Mode().Perm())
 	}
 	known, err := os.ReadFile(filepath.Join(current, "known_hosts"))
 	if err != nil || !strings.HasPrefix(string(known), "subyard-e2e-bastion ssh-ed25519 ") {
