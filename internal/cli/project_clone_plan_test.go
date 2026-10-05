@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -49,6 +50,14 @@ func (data *emptyClonePlanData) Execute(ctx context.Context, yard domain.Context
 		// This native guest-port fixture executes the approved workspace commands
 		// against a private local root, while retaining canonical owner metadata.
 		request.Command = slices.Clone(request.Command)
+		if request.Command[0] == "install" {
+			uid := strconv.Itoa(yard.DevUID)
+			if len(request.Command) != 8 || !slices.Equal(request.Command[:7], []string{"install", "-d", "-o", uid, "-g", uid, "--"}) {
+				return ports.InstanceExecResult{}, errors.New("unexpected clone workspace ownership request")
+			}
+			// Map the validated guest ownership onto this unprivileged host user.
+			request.Command[3], request.Command[5] = strconv.Itoa(os.Geteuid()), strconv.Itoa(os.Getegid())
+		}
 		for index := range request.Command {
 			if strings.Contains(request.Command[index], "/usr/local/libexec/subyard/projects-changed") {
 				return ports.InstanceExecResult{}, nil
@@ -129,6 +138,8 @@ func emptyClonePlanFixture(t *testing.T) (*CLI, *projectExecution, string, *empt
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
 	root, environment, _ := nativeFixture(t)
+	// Keep the synthetic guest owner distinct from the unprivileged test user.
+	environment = append(environment, "DEV_UID="+strconv.Itoa(os.Geteuid()+1))
 	source := filepath.Join(testkit.TempDir(t), "Empty.git")
 	emptyCloneGit(t, "init", "--bare", "--initial-branch=main", source)
 	data := &emptyClonePlanData{}

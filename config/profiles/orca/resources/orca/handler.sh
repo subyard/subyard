@@ -1059,7 +1059,7 @@ orca_registration_observation() {
 }
 
 emit_up_assessment() {
-  local available=false specification id predicate target desired observed decision report dependencies
+  local available=false id predicate target desired observed decision report dependencies
   require_runtime_settings
   resolve_owner_address
   refuse_port_collision

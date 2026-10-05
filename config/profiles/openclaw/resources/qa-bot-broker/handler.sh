@@ -597,7 +597,7 @@ qa_destroy_target_exists() { # <purge:0|1>
 }
 
 prepare_resource() { # <public-verb> [validated args...]
-  local verb="$1" action changed=false purge_flag=0
+  local verb="$1" action changed=false
   shift
   case "$verb" in
     up)

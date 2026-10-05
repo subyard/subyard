@@ -440,8 +440,9 @@ if [ "${1:-}" = --startup-binding-fixture ]; then
   cp "$TMP/bootstrap-plan.json" "$2/cold.json"
   touch "$TMP/drain-exec-stdin"
   export ORCA_ADVERTISE_HOST=127.0.0.1 ORCA_HOST_PORT=17678
-  export SUBYARD_RESOURCE_BINDING="$(jq -r .binding "$2/cold.json")"
-  export SUBYARD_RESOURCE_STEPS="$(jq -c .steps "$2/cold.json")"
+  SUBYARD_RESOURCE_BINDING="$(jq -r .binding "$2/cold.json")"
+  SUBYARD_RESOURCE_STEPS="$(jq -c .steps "$2/cold.json")"
+  export SUBYARD_RESOURCE_BINDING SUBYARD_RESOURCE_STEPS
   SUBYARD_RESOURCE_MODE=prepare "$ROOT/config/profiles/orca/resources/orca/handler.sh" up > "$2/running.json"
   SUBYARD_RESOURCE_MODE=prepare "$3" up > "$2/relocated.json"
   SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION=up SUBYARD_OPERATION_ID=orca-startup-fixture \

@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # OpenClaw-only native resource consent projection; execution stays in each handler.
 openclaw_file_fact() {
   local path="$1"
