@@ -611,6 +611,9 @@ func (runtime Runtime) ApplyIntegrations(ctx context.Context, plan IntegrationPl
 	if err := CheckIntegrationPlan(plan, fresh); err != nil {
 		return err
 	}
+	if err := runtime.checkIntegrationHookScope(); err != nil {
+		return err
+	}
 	if !fresh.Changed {
 		return nil
 	}
@@ -650,6 +653,9 @@ func (runtime Runtime) ApplyIntegrations(ctx context.Context, plan IntegrationPl
 	}
 	// Keep the inventory pending until hooks succeed so the same requested
 	// selection remains retryable after a transient hook failure.
+	if err := runtime.captureProvisionedProjectHooks(ctx); err != nil {
+		return err
+	}
 	if err := runtime.RunProjectHooks(ctx); err != nil {
 		return err
 	}

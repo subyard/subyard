@@ -20,6 +20,7 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -160,6 +161,7 @@ type retryableIntegrationExecutor struct {
 	failFirstHook  bool
 	hookReady      string
 	requests       []ports.InstanceExecRequest
+	observeHooks   func() hookObservation
 }
 
 type preparedAdoptionExecutor struct {
@@ -354,6 +356,10 @@ func TestIntegrationScopeBindsDesiredArtifactsWithoutRuntimeProbes(t *testing.T)
 
 func (fixture *retryableIntegrationExecutor) Exec(_ context.Context, _, _ string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
 	fixture.requests = append(fixture.requests, request)
+	if len(request.Command) == 4 && request.Command[0] == "bash" && request.Command[3] == "--observe" && fixture.observeHooks != nil {
+		payload, _ := json.Marshal(fixture.observeHooks())
+		return ports.InstanceExecResult{Stdout: payload}, nil
+	}
 	command := strings.Join(request.Command, "\x00")
 	if len(request.Command) >= 5 && request.Command[0] == "python3" && strings.Contains(request.Command[3], "Version 1 records observed ownership only") {
 		switch request.Command[4] {
@@ -420,6 +426,107 @@ func TestIntegrationConvergenceNeverExecutesHealthProbes(t *testing.T) {
 		if slices.Contains(request.Command, "sentinel-health") {
 			t.Fatal("service health entered installation convergence")
 		}
+	}
+}
+
+func TestIntegrationProvisionedProjectHookRunsBeforeInventoryCommit(t *testing.T) {
+	for _, scenario := range []string{"cold", "replacement", "failed hook retry", "source tamper", "path tamper", "scope expansion", "unmanaged selected hook", "provision source before apply", "provision source after apply"} {
+		t.Run(scenario, func(t *testing.T) {
+			root := testkit.TempDir(t)
+			hookState := filepath.Join(root, "hook-state")
+			provision := filepath.Join(root, "provision.sh")
+			for path, content := range map[string]string{
+				"config/projects-changed.sh": "#!/bin/sh\nexit 0\n",
+				"scripts/reconcile-integrations.sh": "#!/bin/sh\nprintf installed > \"$HOOK_STATE\"\n" +
+					"if [ \"$CHANGE_SOURCE\" = 1 ]; then printf changed >> \"$AGENT_sample_PROVISION\"; fi\n",
+				"provision.sh": "#!/bin/sh\nexit 0\n",
+			} {
+				full := filepath.Join(root, path)
+				if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				testkit.WriteFile(t, full, []byte(content), 0o755)
+			}
+			const hook = "sample-projects"
+			observations := 0
+			executor := &retryableIntegrationExecutor{pending: true, failFirstHook: scenario == "failed hook retry"}
+			executor.observeHooks = func() hookObservation {
+				observations++
+				observation := hookObservation{Projects: testRuntimeOldDigest, Wiring: testRuntimeNewDigest}
+				_, stateErr := os.Stat(hookState)
+				if stateErr != nil && scenario == "cold" {
+					return observation
+				}
+				fingerprint := testRuntimeOldDigest
+				if stateErr == nil {
+					fingerprint = testRuntimeNewDigest
+				}
+				observation.Hooks = []string{hook}
+				observation.Facts = map[string]string{hook: fingerprint}
+				observation.Resolved = map[string]string{hook: "/usr/local/bin/" + hook}
+				if observations >= 3 {
+					switch scenario {
+					case "source tamper":
+						// Returning to the original source still changes the provisioned identity.
+						observation.Facts[hook] = testRuntimeOldDigest
+					case "path tamper":
+						observation.Resolved[hook] = "/usr/bin/" + hook
+					case "scope expansion":
+						observation.Hooks = append(observation.Hooks, "unapproved-hook")
+					}
+				}
+				return observation
+			}
+			incus := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running"}}}
+			changeSource := "0"
+			if scenario == "provision source after apply" {
+				changeSource = "1"
+			}
+			selectedProvision := provision
+			if scenario == "unmanaged selected hook" {
+				selectedProvision = ""
+			}
+			runtime := Runtime{RepositoryRoot: root, Incus: incus, Executor: executor, Profiles: []profile.Definition{},
+				Yard: domain.Context{IncusProject: "test", YardInstanceName: "yard", DevUser: "dev", DevUID: os.Getuid()},
+				Environment: []string{"CODING_TOOL_INTEGRATIONS=sample", "AGENT_sample_COMMAND=sample", "AGENT_sample_PROJECTS_CHANGED=" + hook,
+					"AGENT_sample_PROVISION=" + selectedProvision, "HOOK_STATE=" + hookState, "CHANGE_SOURCE=" + changeSource}}
+			var err error
+			runtime.HookPlan, err = runtime.PrepareProjectHooks(context.Background(), false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "provision source before apply" {
+				testkit.WriteFile(t, provision, []byte("#!/bin/sh\n# changed after approval\n"), 0o755)
+			}
+			plan, err := runtime.IntegrationPlan(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = runtime.ApplyIntegrations(context.Background(), plan)
+			if scenario == "failed hook retry" {
+				if err == nil || !executor.pending || executor.commits != 0 || executor.hookAttempts != 1 {
+					t.Fatalf("hook failure lost retry state: err=%v pending=%v commits=%d attempts=%d", err, executor.pending, executor.commits, executor.hookAttempts)
+				}
+				plan, err = runtime.IntegrationPlan(context.Background())
+				if err == nil {
+					err = runtime.ApplyIntegrations(context.Background(), plan)
+				}
+			}
+			if scenario != "cold" && scenario != "replacement" && scenario != "failed hook retry" {
+				if !errors.Is(err, domain.ErrPlanStale) || executor.hookAttempts != 0 || executor.commits != 0 {
+					t.Fatalf("unapproved source reached hooks: err=%v attempts=%d commits=%d", err, executor.hookAttempts, executor.commits)
+				}
+				if scenario == "provision source before apply" {
+					if _, err := os.Stat(hookState); !errors.Is(err, os.ErrNotExist) {
+						t.Fatal("changed provision source executed before rejection")
+					}
+				}
+				return
+			}
+			if err != nil || executor.pending || executor.commits != 1 || executor.hookAttempts == 0 {
+				t.Fatalf("approved provisioned hook did not commit: err=%v pending=%v commits=%d attempts=%d", err, executor.pending, executor.commits, executor.hookAttempts)
+			}
+		})
 	}
 }
 

@@ -29,6 +29,8 @@ type ProjectHookPlan struct {
 	executionWiring  string
 	hookBindings     map[string]string
 	unavailable      bool
+	integrationScope string
+	provisionedHooks hookObservation
 }
 
 type hookObservation struct {
@@ -96,6 +98,10 @@ func (runtime Runtime) PrepareProjectHooks(ctx context.Context, unavailable bool
 		return nil, err
 	}
 	plan.source = fmt.Sprintf("%x", sha256.Sum256(source))
+	plan.integrationScope, _, err = runtime.IntegrationScope()
+	if err != nil {
+		return nil, err
+	}
 	state, err := runtime.reconcileState(ctx)
 	if err != nil {
 		if !unavailable || !runtime.nativeObservationUnavailable(err) {
@@ -163,11 +169,13 @@ func (runtime Runtime) CheckProjectHookPlan(ctx context.Context, beforeWrites bo
 		}
 	}
 	for _, hook := range observation.Hooks {
-		if fingerprint := observation.Facts[hook]; fingerprint != plan.approved.Facts[hook] {
-			if beforeWrites && !plan.conditional {
+		_, provisioned := plan.provisionedHooks.Facts[hook]
+		changed := observation.Facts[hook] != plan.approved.Facts[hook] || observation.Resolved[hook] != plan.approved.Resolved[hook]
+		if changed || provisioned {
+			if changed && beforeWrites && !plan.conditional {
 				return fmt.Errorf("%w: captured project hook source changed", domain.ErrPlanStale)
 			}
-			owned, err := runtime.verifiedProjectHookSource(ctx, hook)
+			owned, err := runtime.verifiedProjectHookSource(ctx, hook, observation)
 			if err != nil {
 				return err
 			}
@@ -228,13 +236,14 @@ func (plan *ProjectHookPlan) Binding() string {
 		return ""
 	}
 	payload, _ := json.Marshal(struct {
-		Approved     hookObservation
-		Conditional  bool
-		Hooks        []string
-		Source       string
-		Owners       []domain.ProjectRecord
-		HookBindings map[string]string
-	}{plan.approved, plan.conditional, plan.allowedHooks, plan.source, plan.ownerProjects, plan.hookBindings})
+		Approved         hookObservation
+		Conditional      bool
+		Hooks            []string
+		Source           string
+		Owners           []domain.ProjectRecord
+		HookBindings     map[string]string
+		IntegrationScope string
+	}{plan.approved, plan.conditional, plan.allowedHooks, plan.source, plan.ownerProjects, plan.hookBindings, plan.integrationScope})
 	return fmt.Sprintf("%x", sha256.Sum256(payload))
 }
 
@@ -285,7 +294,58 @@ func (plan *ProjectHookPlan) Environment() map[string]string {
 	return map[string]string{"SUBYARD_PROJECT_HOOK_SCOPE": string(payload)}
 }
 
-func (runtime Runtime) verifiedProjectHookSource(ctx context.Context, hook string) (bool, error) {
+func (runtime Runtime) checkIntegrationHookScope() error {
+	if runtime.HookPlan == nil {
+		return nil
+	}
+	scope, _, err := runtime.IntegrationScope()
+	if err != nil {
+		return err
+	}
+	if scope != runtime.HookPlan.integrationScope {
+		return fmt.Errorf("%w: integration hook provision inputs changed", domain.ErrPlanStale)
+	}
+	return nil
+}
+
+// Capture only outputs of a successful, source-bound package provision. The
+// ownership inventory must remain pending until these hooks also succeed.
+func (runtime Runtime) captureProvisionedProjectHooks(ctx context.Context) error {
+	if runtime.HookPlan == nil {
+		return nil
+	}
+	if err := runtime.checkIntegrationHookScope(); err != nil {
+		return err
+	}
+	hooks := []string{}
+	for _, agent := range strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")) {
+		if runtime.environmentValue("AGENT_"+agent+"_PROVISION") == "" {
+			continue
+		}
+		if hook := runtime.environmentValue("AGENT_" + agent + "_PROJECTS_CHANGED"); hook != "" {
+			hooks = append(hooks, hook)
+		}
+	}
+	if len(hooks) == 0 {
+		return nil
+	}
+	observation, err := runtime.observeProjectHookInputs(ctx)
+	if err != nil {
+		return err
+	}
+	sources := hookObservation{Facts: map[string]string{}, Resolved: map[string]string{}}
+	for _, hook := range hooks {
+		if !slices.Contains(observation.Hooks, hook) || !profileRuntimeDigest.MatchString(observation.Facts[hook]) || !filepath.IsAbs(observation.Resolved[hook]) {
+			return fmt.Errorf("%w: provisioned integration hook source unavailable", domain.ErrPlanStale)
+		}
+		sources.Facts[hook] = observation.Facts[hook]
+		sources.Resolved[hook] = observation.Resolved[hook]
+	}
+	runtime.HookPlan.provisionedHooks = sources
+	return nil
+}
+
+func (runtime Runtime) verifiedProjectHookSource(ctx context.Context, hook string, source hookObservation) (bool, error) {
 	if runtime.RuntimePlan != nil {
 		plan := runtime.RuntimePlan
 		inputs, err := runtime.profileRuntimeInputs(plan.definitions)
@@ -313,6 +373,14 @@ func (runtime Runtime) verifiedProjectHookSource(ctx context.Context, hook strin
 	}
 	for _, agent := range strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")) {
 		if runtime.environmentValue("AGENT_"+agent+"_PROJECTS_CHANGED") == hook {
+			if runtime.HookPlan != nil {
+				if err := runtime.checkIntegrationHookScope(); err != nil {
+					return false, err
+				}
+				if fingerprint, captured := runtime.HookPlan.provisionedHooks.Facts[hook]; captured {
+					return fingerprint == source.Facts[hook] && runtime.HookPlan.provisionedHooks.Resolved[hook] == source.Resolved[hook], nil
+				}
+			}
 			plan, err := runtime.IntegrationPlan(ctx)
 			return err == nil && !plan.Changed, err
 		}

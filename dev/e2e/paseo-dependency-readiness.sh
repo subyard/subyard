@@ -93,8 +93,8 @@ instance="yard-$YARD_NAME"
 assert_guest_ready() {
   incus exec "$instance" --project "$project" --user 1000 --group 1000 \
     --env HOME=/home/dev --env CODEX_HOME=/home/dev/.codex -- sh -euc '
-      [ "$(codex --version)" = "codex-cli 0.147.0" ]
       [ "$(paseo --version)" = "0.2.1" ]
+      # Codex tracks stable releases; its managed check verifies version, capability and policy.
       codex-policy-check >/dev/null
       [ ! -e /home/dev/.codex/auth.json ]
     '

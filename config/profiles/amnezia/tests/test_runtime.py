@@ -804,5 +804,57 @@ time.sleep(60)
                 os.kill(int(pid.read_text()), 0)
 
 
+class DNSProbeTest(unittest.TestCase):
+    def test_external_dns_recovery_has_a_terminal_budget(self):
+        valid = (0, 'NOERROR', '203.0.113.11')
+        cases = {
+            'immediate': ([valid], 0, 1),
+            'transient': ([(9, '', ''), (0, 'SERVFAIL', ''), valid], 0, 3),
+            'query-error': ([(9, '', '')] * 3, 1, 3),
+            'servfail': ([(0, 'SERVFAIL', '')] * 3, 1, 3),
+            'no-answer': ([(0, 'NOERROR', '')] * 3, 1, 3),
+            'ipv6-only': ([(0, 'NOERROR', '2001:db8::1')] * 3, 1, 3),
+        }
+        for name, (responses, exit_code, attempts) in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                directory.chmod(0o700)
+                (directory / 'responses').write_text(json.dumps(responses))
+                dig = directory / 'dig'
+                dig.write_text('''#!/usr/bin/env python3
+import json
+from pathlib import Path
+import sys
+root = Path(__file__).parent
+assert sys.argv[-3:] == ['@1.1.1.1', 'example.com', 'A']
+assert '+time=5' in sys.argv and '+tries=1' in sys.argv
+count = root / 'count'
+index = int(count.read_text()) if count.exists() else 0
+count.write_text(str(index + 1))
+responses = json.loads((root / 'responses').read_text())
+status, rcode, address = responses[min(index, len(responses) - 1)]
+print('synthetic-private-response')
+print('synthetic-private-error', file=sys.stderr)
+if rcode:
+    print(';; ->>HEADER<<- opcode: QUERY, status: ' + rcode + ', id: 1')
+if address:
+    print('example.com. 60 IN A ' + address)
+sys.exit(status)
+''')
+                dig.chmod(0o755)
+                sleep = directory / 'sleep'
+                sleep.write_text('#!/bin/sh\nexit 0\n')
+                sleep.chmod(0o755)
+                probe = subprocess.run(['sh', str(PROFILE / 'tests/e2e/dns-probe.sh')],
+                                       env={'PATH': str(directory) + os.pathsep + os.environ['PATH']},
+                                       capture_output=True, text=True, timeout=3)
+                self.assertEqual(probe.returncode, exit_code, probe.stdout + probe.stderr)
+                self.assertEqual(int((directory / 'count').read_text()), attempts)
+                self.assertEqual(probe.stdout.count('amnezia_dns_probe attempt='), attempts)
+                self.assertIn('query_exit=', probe.stdout)
+                self.assertNotIn('synthetic-private', probe.stdout + probe.stderr)
+                self.assertNotIn('203.0.113.11', probe.stdout)
+
+
 if __name__ == '__main__':
     unittest.main()

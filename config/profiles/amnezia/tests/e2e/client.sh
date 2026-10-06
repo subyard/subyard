@@ -144,6 +144,8 @@ if ! docker exec "$CONTAINER" ip link show awg0 >/dev/null 2>&1; then
     "$CONTAINER" awg-quick up /etc/amnezia/awg0.conf >/dev/null 2>&1 \
     || die 'the imported AmneziaWG client configuration did not start'
 fi
+docker cp "$ROOT/config/profiles/amnezia/tests/e2e/dns-probe.sh" "$CONTAINER:/tmp/subyard-amnezia-dns-probe.sh" \
+  >/dev/null || die 'could not copy the owned DNS probe'
 
 docker exec -i -e "PROBE_OWNER_IP=$owner_ip" -e "PROBE_OWNER_PORT=$owner_port" \
   -e "PROBE_PRIVATE_IP=$private_ip" "$CONTAINER" sh -eu -s <<'CLIENT' \
@@ -195,10 +197,7 @@ set -- $download_metrics
 download_seconds="$1" download_bytes_per_second="$2"
 bytes="$(wc -c </tmp/subyard-amnezia-download)"
 [ "$bytes" -ge 1048576 ] || fail 'HTTPS download was shorter than 1 MiB'
-dns="$(dig +short +time=5 +tries=1 @1.1.1.1 example.com A)" \
-  || fail 'DNS query through tunnel failed'
-printf '%s\n' "$dns" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' \
-  || fail 'DNS query returned no IPv4 answer'
+sh /tmp/subyard-amnezia-dns-probe.sh || fail 'DNS query through tunnel did not recover'
 if timeout 5 nc -z -w 3 "$PROBE_OWNER_IP" "$PROBE_OWNER_PORT" >/dev/null 2>&1; then
   fail 'owner management port was reachable through the VPN'
 fi
