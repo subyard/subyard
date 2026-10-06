@@ -1169,6 +1169,106 @@ func TestVMMissingHostToolsAreRepairableIncusStageDrift(t *testing.T) {
 	}
 }
 
+func TestInstanceLimitApplyRejectsUnsafePowerBeforeMutation(t *testing.T) {
+	for _, kind := range []domain.YardKind{domain.YardContainer, domain.YardVM} {
+		for _, test := range []struct {
+			name, status, cpu, memory string
+			refused                   bool
+		}{
+			{name: "frozen CPU drift", status: "Frozen", cpu: "2", refused: true},
+			{name: "unknown memory drift", status: "Unknown", memory: "4GiB", refused: true},
+			{name: "missing power state", cpu: "2", memory: "4GiB", refused: true},
+			{name: "running drift", status: "rUnNiNg", cpu: "2", memory: "4GiB"},
+			{name: "stopped drift", status: "sToPpEd", cpu: "2", memory: "4GiB"},
+			{name: "frozen empty limits", status: "Frozen"},
+			{name: "unknown matching limits", status: "Unknown", cpu: "1", memory: "2GiB"},
+		} {
+			t.Run(string(kind)+"/"+test.name, func(t *testing.T) {
+				runtime, incus := appArmorRuntime(t, "", false)
+				runtime.Yard.YardKind = kind
+				instance := incus.Instances["subyard/yard"]
+				instance.Status = test.status
+				instance.LocalConfig["limits.cpu"] = "1"
+				instance.LocalConfig["limits.memory"] = "2GiB"
+				incus.Instances["subyard/yard"] = instance
+				called := filepath.Join(runtime.RepositoryRoot, "called")
+				runtime.Environment = append(runtime.Environment, "LIMITS_CPU="+test.cpu,
+					"LIMITS_MEMORY="+test.memory, "CALLED="+called)
+				scripts := filepath.Join(runtime.RepositoryRoot, "scripts")
+				if err := os.Mkdir(scripts, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				testkit.WriteFile(t, filepath.Join(scripts, "03-create-subyard.sh"),
+					[]byte("#!/bin/sh\nprintf 'called\\n' > \"$CALLED\"\n"), 0o700)
+				err := runtime.ApplyStage(context.Background(), ports.ReconcileStageInstance)
+				if test.refused {
+					if len(incus.ConfigUpdates) != 0 || instance.Config["user.subyard.initialized"] != "true" {
+						t.Fatal("unsafe limit update changed initialized power metadata")
+					}
+					if _, statErr := os.Stat(called); !errors.Is(statErr, os.ErrNotExist) {
+						t.Fatal("unsafe limit update invoked the shell adapter")
+					}
+					if err == nil || !strings.Contains(err.Error(), "power state") {
+						t.Fatalf("unsafe limit update lacks a bounded diagnostic: %v", err)
+					}
+				} else {
+					if err != nil {
+						t.Fatal(err)
+					}
+					if _, err := os.Stat(called); err != nil {
+						t.Fatal("safe or unchanged limits did not reach the shell adapter")
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestInstanceLimitsDetectDriftForContainersAndVMs(t *testing.T) {
+	bin := testkit.TempDir(t)
+	testkit.WriteFile(t, filepath.Join(bin, "systemctl"), []byte("#!/bin/sh\nexit 0\n"), 0o700)
+	for _, kind := range []domain.YardKind{domain.YardContainer, domain.YardVM} {
+		t.Run(string(kind), func(t *testing.T) {
+			incus := &testkit.Incus{
+				ServerInfo: ports.ServerInfo{Environment: "incus"},
+				Reconcile: ports.ReconcileState{
+					InstanceFound: true, VolumeFound: true,
+					Instance: ports.InstanceInfo{
+						Status: "Running", Config: map[string]string{},
+						LocalConfig: map[string]string{
+							"security.nesting": "true", "limits.cpu": "2", "limits.memory": "4GiB",
+						},
+						LocalDevices: map[string]map[string]string{
+							"srv": {"source": "yard-srv", "path": "/srv", "pool": "default"},
+							"subyard-e2e-routes": {"type": "disk", "source": "/data/e2e/routes",
+								"path": "/var/lib/subyard/e2e-routes", "readonly": "true"},
+						},
+					},
+				},
+			}
+			runtime := Runtime{Incus: incus, HostDeviceRoot: testkit.TempDir(t),
+				Environment: []string{"PATH=" + bin, "LIMITS_CPU=2", "LIMITS_MEMORY=4GiB"},
+				Yard:        domain.Context{YardKind: kind, Paths: domain.RuntimePaths{DataHome: "/data"}},
+			}
+			assertStageConverged(t, runtime, true, "matching requested limits")
+			incus.Reconcile.Instance.LocalConfig["limits.cpu"] = "1"
+			assertStageConverged(t, runtime, false, "CPU limit drift")
+			incus.Reconcile.Instance.LocalConfig["limits.cpu"] = "2"
+			incus.Reconcile.Instance.LocalConfig["limits.memory"] = "2GiB"
+			assertStageConverged(t, runtime, false, "memory limit drift")
+			runtime.Environment = []string{"PATH=" + bin, "LIMITS_CPU=", "LIMITS_MEMORY="}
+			assertStageConverged(t, runtime, true, "empty settings preserve installed limits")
+			delete(incus.Reconcile.Instance.LocalConfig, "limits.cpu")
+			delete(incus.Reconcile.Instance.LocalConfig, "limits.memory")
+			incus.Reconcile.Instance.Config["limits.cpu"] = "3"
+			incus.Reconcile.Instance.Config["limits.memory"] = "6GiB"
+			assertStageConverged(t, runtime, true, "empty settings preserve inherited limits")
+			runtime.Environment = []string{"PATH=" + bin}
+			assertStageConverged(t, runtime, true, "unset settings preserve inherited limits")
+		})
+	}
+}
+
 func TestInstanceProbeOwnsVolumeAndNestedBoundary(t *testing.T) {
 	deviceRoot := t.TempDir()
 	bin := t.TempDir()

@@ -22,6 +22,7 @@ type hookPlanExecutor struct {
 	observation hookObservation
 	calls       int
 	fail        bool
+	observeFail bool
 }
 
 type changingNativeHookExecutor struct {
@@ -114,6 +115,9 @@ func TestPreparedProjectHooksRunOnceAfterSuccessfulNativeCatalogChange(t *testin
 
 func (executor *hookPlanExecutor) Exec(_ context.Context, _ string, _ string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
 	if len(request.Command) > 1 && request.Command[0] == "bash" && request.Command[1] == "-s" {
+		if executor.observeFail {
+			return ports.InstanceExecResult{}, errors.New("observation unavailable")
+		}
 		payload, _ := json.Marshal(executor.observation)
 		return ports.InstanceExecResult{Stdout: payload}, nil
 	}
@@ -398,6 +402,119 @@ func TestProjectHookObservationBoundsUniquePaths(t *testing.T) {
 			}
 			if _, err := os.Stat(log); !errors.Is(err, os.ErrNotExist) {
 				t.Fatal("hook source drift reached a hook")
+			}
+		})
+	}
+}
+
+func TestStoppedProjectHooksSurviveApprovedTemporaryStart(t *testing.T) {
+	for _, unavailable := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reconstruction=%t", unavailable), func(t *testing.T) {
+			executor := &hookPlanExecutor{observation: hookObservation{Projects: testRuntimeOldDigest, Wiring: testRuntimeNewDigest}}
+			incus := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "stopped", Config: map[string]string{
+				"user.subyard.managed": "true", "user.subyard.initialized": "true", "user.subyard.desired_power": "stopped",
+			}}}}
+			runtime := Runtime{RepositoryRoot: "../../..", Profiles: []profile.Definition{}, Incus: incus, Executor: executor, Yard: domain.Context{IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev", DevUID: 1000}}
+			plan, err := runtime.PrepareProjectHooks(context.Background(), unavailable, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if plan.OperationStep("subyard/yard").Decision != domain.StepConditional {
+				t.Fatal("approved temporary boot was omitted from hook assessment")
+			}
+			runtime.HookPlan = plan
+			if err := runtime.CheckProjectHookPlan(context.Background(), true); err != nil {
+				t.Fatal(err)
+			}
+			// An approved instance repair temporarily boots the stopped yard; finalization
+			// still owns restoring desired=stopped after native runtime and hook verification.
+			incus.Reconcile.Instance.Status = "running"
+			incus.Reconcile.Instance.Config["user.subyard.initialized"] = "false"
+			if unavailable {
+				incus.Reconcile.Instance.Config["user.subyard.desired_power"] = "running"
+			}
+			if err := runtime.RunProjectHooks(context.Background()); err != nil {
+				t.Fatalf("approved temporary start acquired unplanned hook work: %v", err)
+			}
+			if executor.calls != 1 {
+				t.Fatalf("hook dispatcher calls=%d, want 1", executor.calls)
+			}
+		})
+	}
+}
+
+func TestTemporaryStoppedProjectHooksRetainScopeAndIntentGuards(t *testing.T) {
+	for _, scenario := range []string{"success", "new hook", "new project root", "desired power changed", "unexpected pre-write start", "observation unavailable", "native source changed", "projects changed after resolution", "skip without prerequisite"} {
+		t.Run(scenario, func(t *testing.T) {
+			root := testkit.TempDir(t)
+			runtime := profileRuntimeFixtureAt(t, root, "#!/bin/sh\nprintf '{\"state\":\"current\",\"actual\":\""+testRuntimeNewDigest+"\",\"desired\":\""+testRuntimeNewDigest+"\"}\\n'\n")
+			hook := "/usr/local/libexec/subyard/projects-changed.d/owned"
+			profileFile := filepath.Join(root, "config", "profiles", "synthetic", "profile.json")
+			testkit.WriteFile(t, profileFile, []byte(`{"schema_version":1,"runtime":{"activation_id":"synthetic-runtime","handler":"runtime.sh","projects_changed_hooks":["`+hook+`"]}}`), 0o600)
+			source, err := os.ReadFile("../../../config/projects-changed.sh")
+			if err != nil {
+				t.Fatal(err)
+			}
+			testkit.WriteFile(t, filepath.Join(root, "config", "projects-changed.sh"), source, 0o644)
+			executor := &hookPlanExecutor{observation: hookObservation{Projects: testRuntimeOldDigest, Wiring: testRuntimeNewDigest, Hooks: []string{hook}, Facts: map[string]string{hook: testRuntimeOldDigest}}}
+			runtime.Executor = executor
+			incus := runtime.Incus.(*testkit.Incus)
+			instance := ports.InstanceInfo{Status: "stopped", Config: map[string]string{"user.subyard.managed": "true", "user.subyard.initialized": "true", "user.subyard.desired_power": "stopped"}}
+			incus.Instances["subyard/yard"] = instance
+			incus.Reconcile = ports.ReconcileState{InstanceFound: true, Instance: instance}
+			runtime.RuntimePlan, err = runtime.PrepareProfileRuntimes(context.Background(), false, false, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtime.HookPlan, err = runtime.PrepareProjectHooks(context.Background(), false, scenario != "skip without prerequisite")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := runtime.CheckProjectHookPlan(context.Background(), true); err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "skip without prerequisite" {
+				if runtime.HookPlan.OperationStep("subyard/yard").Decision != domain.StepSkip {
+					t.Fatal("stopped no-op acquired hook work")
+				}
+				if err := runtime.RunProjectHooks(context.Background()); err != nil || executor.calls != 0 {
+					t.Fatalf("stopped no-op ran guest hooks: calls=%d err=%v", executor.calls, err)
+				}
+			}
+			incus.Reconcile.Instance.Status = "running"
+			incus.Reconcile.Instance.Config["user.subyard.initialized"] = "false"
+			instance.Status = "running"
+			incus.Instances["subyard/yard"] = instance
+			switch scenario {
+			case "new hook":
+				executor.observation.Hooks = append(executor.observation.Hooks, hook+"-new")
+			case "new project root":
+				executor.observation.Roots = []string{"/srv/workspaces/new"}
+			case "desired power changed":
+				incus.Reconcile.Instance.Config["user.subyard.desired_power"] = "running"
+			case "unexpected pre-write start":
+				if err := runtime.CheckProjectHookPlan(context.Background(), true); !errors.Is(err, domain.ErrPlanStale) || executor.calls != 0 {
+					t.Fatalf("unannounced start was approved: %v", err)
+				}
+				return
+			case "observation unavailable":
+				executor.observeFail = true
+			case "native source changed":
+				testkit.WriteFile(t, filepath.Join(root, "config", "profiles", "synthetic", "runtime.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o700)
+			case "projects changed after resolution":
+				if err := runtime.RunProjectHooks(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				executor.calls = 0
+				executor.observation.Projects = testRuntimeNewDigest
+			}
+			err = runtime.RunProjectHooks(context.Background())
+			if scenario == "success" {
+				if err != nil || executor.calls != 1 {
+					t.Fatalf("approved conditional hook failed: calls=%d err=%v", executor.calls, err)
+				}
+			} else if err == nil || executor.calls != 0 {
+				t.Fatalf("unapproved change reached hooks: calls=%d err=%v", executor.calls, err)
 			}
 		})
 	}

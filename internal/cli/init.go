@@ -505,7 +505,12 @@ func (cli *CLI) prepareInitExecution(
 			return nil, err
 		}
 		runtime.RuntimePlan = execution.runtimePlan
-		execution.hookPlan, err = runtime.PrepareProjectHooks(ctx, unavailable || mode == initReset)
+		// An approved instance repair can temporarily boot an intentionally stopped
+		// yard. Capture bounded conditional hooks before that prerequisite runs.
+		temporaryPower := slices.ContainsFunc(execution.approvedPlan.Steps, func(step application.ReconcileStep) bool {
+			return step.Stage.ID == ports.ReconcileStageInstance && !step.Converged
+		})
+		execution.hookPlan, err = runtime.PrepareProjectHooks(ctx, unavailable || mode == initReset, temporaryPower)
 		if err != nil {
 			return nil, err
 		}

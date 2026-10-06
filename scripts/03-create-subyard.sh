@@ -226,38 +226,48 @@ fi
 vm_storage_check_device_boundary true \
   || die 'existing instance has an unexpected effective host device or root disk override'
 
-if vm_page_reporting_required || [ "$YARD_KIND" = vm ] || [ "${ALLOWS_HOST_ACCESS:-true}" = false ]; then
-  # raw.qemu.conf is a non-live setting. Stop through the normal session/network
-  # guard before changing it, then let the existing desired-power fence start it.
-  vm_drift=0
-  if vm_page_reporting_required; then
-    [ "$(instance_get raw.qemu.conf)" = "$VM_PAGE_REPORTING_CONF" ] || vm_drift=1
+# Stop before changing non-live VM settings or limits that could pressure a running
+# guest. The existing desired-power fence handles its temporary boot and restoration.
+settings_drift=0
+limit_changes=()
+for setting in "limits.cpu=${LIMITS_CPU:-}" "limits.memory=${LIMITS_MEMORY:-}"; do
+  key="${setting%%=*}" want="${setting#*=}"
+  if [ -n "$want" ] && [ "$(instance_get "$key")" != "$want" ]; then
+    limit_changes+=("$setting")
+    settings_drift=1
   fi
-  if [ "$YARD_KIND" = vm ]; then
-    [ -z "${LIMITS_CPU:-}" ] || [ "$(instance_get limits.cpu)" = "$LIMITS_CPU" ] || vm_drift=1
-    [ -z "${LIMITS_MEMORY:-}" ] || [ "$(instance_get limits.memory)" = "$LIMITS_MEMORY" ] || vm_drift=1
-  fi
-  if [ "${ALLOWS_HOST_ACCESS:-true}" = false ]; then
-    device_exists subyard-e2e-routes && vm_drift=1
-  fi
-  if [ "$vm_drift" = 1 ] \
-    && [ "$(power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")" = RUNNING ]; then
-    "$SCRIPT_DIR/lifecycle-guard.sh" stop --reconcile \
-      || die "could not safely stop the yard to reconcile VM settings"
-  fi
-  if vm_page_reporting_required; then
-    incus config set "$YARD_INSTANCE_NAME" raw.qemu.conf "$VM_PAGE_REPORTING_CONF" "${PROJ[@]}" \
-      || die "could not enable Free Page Reporting on the existing QEMU balloon"
-    vm_page_reporting_check_raw "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" true \
-      || die "VM Free Page Reporting setting did not converge"
-  fi
-  if [ "$YARD_KIND" = vm ]; then
-    [ -z "${LIMITS_CPU:-}" ] || incus config set "$YARD_INSTANCE_NAME" limits.cpu "$LIMITS_CPU" "${PROJ[@]}"
-    [ -z "${LIMITS_MEMORY:-}" ] || incus config set "$YARD_INSTANCE_NAME" limits.memory "$LIMITS_MEMORY" "${PROJ[@]}"
-  fi
-  if [ "${ALLOWS_HOST_ACCESS:-true}" = false ] && device_exists subyard-e2e-routes; then
-    incus config device remove "$YARD_INSTANCE_NAME" subyard-e2e-routes "${PROJ[@]}" >/dev/null
-  fi
+done
+if vm_page_reporting_required; then
+  [ "$(instance_get raw.qemu.conf)" = "$VM_PAGE_REPORTING_CONF" ] || settings_drift=1
+fi
+if [ "${ALLOWS_HOST_ACCESS:-true}" = false ]; then
+  device_exists subyard-e2e-routes && settings_drift=1
+fi
+if [ "$settings_drift" = 1 ]; then
+  state="$(power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")" \
+    || die "could not inspect yard power before reconciling instance settings"
+  case "$state" in
+    RUNNING)
+      "$SCRIPT_DIR/lifecycle-guard.sh" stop --reconcile \
+        || die "could not safely stop the yard to reconcile instance settings" ;;
+    STOPPED) ;;
+    *) die "cannot reconcile instance settings from unknown yard power state" ;;
+  esac
+fi
+if vm_page_reporting_required; then
+  incus config set "$YARD_INSTANCE_NAME" raw.qemu.conf "$VM_PAGE_REPORTING_CONF" "${PROJ[@]}" \
+    || die "could not enable Free Page Reporting on the existing QEMU balloon"
+  vm_page_reporting_check_raw "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" true \
+    || die "VM Free Page Reporting setting did not converge"
+fi
+for setting in "${limit_changes[@]}"; do
+  key="${setting%%=*}" want="${setting#*=}"
+  incus config set "$YARD_INSTANCE_NAME" "$key" "$want" "${PROJ[@]}" \
+    || die "could not reconcile $key"
+  [ "$(instance_get "$key")" = "$want" ] || die "$key did not converge"
+done
+if [ "${ALLOWS_HOST_ACCESS:-true}" = false ] && device_exists subyard-e2e-routes; then
+  incus config device remove "$YARD_INSTANCE_NAME" subyard-e2e-routes "${PROJ[@]}" >/dev/null
 fi
 if [ "${ALLOWS_HOST_ACCESS:-true}" != false ]; then
   # Ordinary yards receive the non-secret route/host-key registry.

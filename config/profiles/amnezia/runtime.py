@@ -134,18 +134,33 @@ def storage_bound(service, name):
         return False
 
 
+def storage_views_bound():
+    return all(storage_bound(service + '.service', name)
+               for service in ('docker', 'containerd') for name in ('docker', 'containerd'))
+
+
 def storage_policy(name):
     dropin = Path('/etc/systemd/system') / (name + '.service.d') / '90-subyard-amnezia-storage.conf'
     content = ('# Managed by the Subyard Amnezia environment.\n'
                '[Unit]\nRequiresMountsFor=/srv\nAssertPathIsMountPoint=/srv\n'
-               f'[Service]\nBindPaths={STATE / name}:/var/lib/{name}\n'
+               'Requires=var-lib-docker.mount var-lib-containerd.mount\n'
+               'After=var-lib-docker.mount var-lib-containerd.mount\n'
+               '[Service]\n'
                + ('ExecStartPre=/usr/bin/python3 /usr/local/lib/subyard-amnezia/runtime.py start\n'
                   if name == 'docker' else ''))
     return dropin, content
 
 
-def storage_policy_ready(name):
-    dropin, content = storage_policy(name)
+def storage_mount_policy(name):
+    unit = Path('/etc/systemd/system') / f'var-lib-{name}.mount'
+    content = ('# Managed by the Subyard Amnezia environment.\n'
+               '[Unit]\nRequiresMountsFor=/srv\nAssertPathIsMountPoint=/srv\n'
+               f'AssertPathIsDirectory={STATE / name}\n'
+               f'[Mount]\nWhat={STATE / name}\nWhere=/var/lib/{name}\nType=none\nOptions=bind\n')
+    return unit, content
+
+
+def storage_file_ready(dropin, content):
     try:
         info = dropin.lstat()
         return (not dropin.parent.is_symlink() and stat.S_ISREG(info.st_mode)
@@ -153,6 +168,74 @@ def storage_policy_ready(name):
                 and dropin.read_text() == content)
     except OSError:
         return False
+
+
+def storage_policy_ready(name):
+    return storage_file_ready(*storage_policy(name))
+
+
+def storage_global_bound(name):
+    target = Path('/var/lib') / name
+    mounted = run('findmnt', '--mountpoint', str(target), '--noheadings', '--output', 'TARGET', check=False)
+    if mounted.returncode or mounted.stdout.decode().strip() != str(target):
+        return False
+    try:
+        source, destination = (STATE / name).stat(), target.stat()
+        return (source.st_dev, source.st_ino) == (destination.st_dev, destination.st_ino)
+    except OSError:
+        return False
+
+
+def storage_mounts_ready():
+    return all(storage_file_ready(*storage_mount_policy(name)) and storage_global_bound(name)
+               for name in ('docker', 'containerd'))
+
+
+def storage_preflight():
+    fstab = Path('/etc/fstab')
+    if fstab.exists() or fstab.is_symlink():
+        protected(fstab, modes=(0o600, 0o644))
+        if fstab.lstat().st_gid != 0:
+            raise RuntimeError('filesystem definitions have unsafe ownership')
+        for line in fstab.read_text().splitlines():
+            fields = line.split('#', 1)[0].split()
+            if len(fields) >= 2 and re.sub(r'\\([0-7]{3})', lambda value: chr(int(value[1], 8)), fields[1]) in (
+                    '/var/lib/docker', '/var/lib/containerd'):
+                raise RuntimeError('container storage conflicts with an existing filesystem definition')
+    for name in ('docker', 'containerd'):
+        target = Path('/var/lib') / name
+        if target.exists() or target.is_symlink():
+            info = target.lstat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_gid != 0 or info.st_mode & 0o022:
+                raise RuntimeError('container storage has an unsafe file type or ownership')
+        unit, _ = storage_mount_policy(name)
+        for directory in ('/usr/lib/systemd/system', '/lib/systemd/system', '/run/systemd/system',
+                          '/run/systemd/generator', '/run/systemd/generator.early', '/run/systemd/generator.late'):
+            foreign = Path(directory) / unit.name
+            if foreign.exists() or foreign.is_symlink():
+                raise RuntimeError('container storage conflicts with a foreign mount unit')
+        for directory in ('/etc/systemd/system', '/usr/lib/systemd/system', '/lib/systemd/system', '/run/systemd/system',
+                          '/run/systemd/generator', '/run/systemd/generator.early', '/run/systemd/generator.late'):
+            dropins = Path(directory) / (unit.name + '.d')
+            if dropins.exists() or dropins.is_symlink():
+                raise RuntimeError('container storage conflicts with foreign mount configuration')
+        fragment = run('systemctl', 'show', unit.name, '--property=FragmentPath', '--value', check=False).stdout.decode().strip()
+        if fragment and fragment != str(unit):
+            raise RuntimeError('container storage conflicts with a foreign mount unit')
+        for path, _ in (storage_policy(name), storage_mount_policy(name)):
+            if path.parent.is_symlink():
+                raise RuntimeError('container service directory must not be a symlink')
+            if path.parent.exists():
+                info = path.parent.lstat()
+                if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_gid != 0 or info.st_mode & 0o022:
+                    raise RuntimeError('container service directory has unsafe ownership or permissions')
+            if path.exists() or path.is_symlink():
+                protected(path, modes=(0o600, 0o644))
+                if path.lstat().st_gid != 0 or not path.read_text().startswith('# Managed by the Subyard Amnezia environment.\n'):
+                    raise RuntimeError('refusing foreign container service configuration')
+        mounted = run('findmnt', '--mountpoint', str(target), '--noheadings', '--output', 'TARGET', check=False)
+        if mounted.returncode == 0 and (not storage_initialized() or not storage_global_bound(name)):
+            raise RuntimeError('refusing an unexpected container storage mount')
 
 
 def docker_settings():
@@ -199,17 +282,39 @@ def storage_initialized():
 
 
 def prepare_storage(force_restart=False):
-    # Private service mounts retain both classic Docker and containerd image stores.
-    # RequiresMountsFor and AssertPathIsMountPoint forbid a fallback onto the root disk.
+    # Global mounts let dockerd and containerd's shims share runtime rootfs mounts.
+    # Service-private BindPaths block propagation even when directory inodes match.
+    require_state_mount()
     seeded = STATE / 'storage-seeded'
-    if not seeded.exists() and not seeded.is_symlink():
+    unseeded = not seeded.exists() and not seeded.is_symlink()
+    if unseeded:
         for name in ('docker', 'containerd'):
             destination = STATE / name
             if destination.is_symlink() or (destination.exists() and not destination.is_dir()):
                 raise RuntimeError('unseeded persistent container storage has an unsafe file type')
             if destination.exists() and any(destination.iterdir()):
                 raise RuntimeError('persistent container storage has data but no ownership marker; preserve it for recovery')
+            if destination.exists():
+                info = destination.lstat()
+                if info.st_uid != 0 or info.st_gid != 0 or info.st_mode & 0o022:
+                    raise RuntimeError('unseeded persistent container storage has unsafe ownership or permissions')
+    else:
+        protected(seeded)
+        if seeded.read_text() != MARKER + '\n':
+            raise RuntimeError('container storage ownership does not match')
+        for name in ('docker', 'containerd'):
+            destination = STATE / name
+            info = destination.lstat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_gid != 0 or info.st_mode & 0o022:
+                raise RuntimeError('persistent container storage has an unsafe file type or ownership')
+    storage_preflight()
+    policies = [policy(name) for name in ('docker', 'containerd')
+                for policy in (storage_policy, storage_mount_policy)]
+    changed = any(not storage_file_ready(path, content) for path, content in policies)
+    repair = unseeded or force_restart or changed or not storage_mounts_ready() or not storage_views_bound()
+    if repair:
         run('systemctl', 'stop', 'docker.service', 'docker.socket', 'containerd.service')
+    if unseeded:
         for name in ('docker', 'containerd'):
             destination = STATE / name
             if destination.is_symlink():
@@ -219,32 +324,21 @@ def prepare_storage(force_restart=False):
             if source.exists():
                 if source.is_symlink() or not source.is_dir():
                     raise RuntimeError('container storage has an unsafe file type')
-                shutil.copytree(source, destination, dirs_exist_ok=True, symlinks=True)
+                # Native stores include special files and hardlinks, not just regular files.
+                run('cp', '--archive', '--', str(source) + '/.', str(destination))
         atomic(seeded, MARKER + '\n')
-    else:
-        protected(seeded)
-        if seeded.read_text() != MARKER + '\n':
-            raise RuntimeError('container storage ownership does not match')
-    changed = False
-    for name in ('docker', 'containerd'):
-        dropin, content = storage_policy(name)
+    for dropin, content in policies:
         destination = dropin.parent
-        if destination.is_symlink():
-            raise RuntimeError('container service directory must not be a symlink')
         destination.mkdir(mode=0o755, exist_ok=True)
-        if dropin.is_symlink():
-            raise RuntimeError('container service configuration must not be a symlink')
-        if dropin.exists() and not stat.S_ISREG(dropin.lstat().st_mode):
-            raise RuntimeError('container service configuration must be a regular file')
-        if not storage_policy_ready(name):
+        if not storage_file_ready(dropin, content):
             run('install', '-o', '0', '-g', '0', '-m', '0644', '/dev/stdin', str(dropin),
                 data=content.encode())
-            changed = True
-    if force_restart or changed or not all(storage_bound(name + '.service', name) for name in ('docker', 'containerd')):
+    if changed:
         run('systemctl', 'daemon-reload')
-        run('systemctl', 'restart', 'containerd.service', 'docker.service')
-    if not all(storage_policy_ready(name) and storage_bound(name + '.service', name)
-               for name in ('docker', 'containerd')):
+    if repair:
+        run('systemctl', 'start', 'var-lib-docker.mount', 'var-lib-containerd.mount')
+        run('systemctl', 'start', 'containerd.service', 'docker.service')
+    if not all(storage_policy_ready(name) for name in ('docker', 'containerd')) or not storage_mounts_ready() or not storage_views_bound():
         raise RuntimeError('container storage is not bound to the persistent state volume')
 
 
@@ -253,6 +347,9 @@ def admin_ready():
     if not key.exists():
         return False
     protected(key)
+    groups = run('id', '-nG', ADMIN, check=False)
+    if groups.returncode or b'sudo' not in groups.stdout.split():
+        return False
     public = run('ssh-keygen', '-y', '-f', str(key)).stdout.decode().strip()
     home = Path('/home') / ADMIN
     authorized = home / '.ssh' / 'authorized_keys'
@@ -289,6 +386,9 @@ def prepare_admin():
     home = Path('/home') / ADMIN
     if home.is_symlink() or (home / '.ssh').is_symlink():
         raise RuntimeError('administrative home must not be a symlink')
+    # Stock Amnezia checks sudo-group membership before evaluating sudoers grants.
+    if b'sudo' not in run('id', '-nG', ADMIN).stdout.split():
+        run('usermod', '--append', '--groups', 'sudo', ADMIN)
     run('install', '-d', '-o', ADMIN, '-g', ADMIN, '-m', '0700', str(home / '.ssh'))
     authorized = home / '.ssh' / 'authorized_keys'
     if authorized.is_symlink():
@@ -412,15 +512,23 @@ def native_status(port):
     return dict(vpn_installed=installed, vpn_running=running)
 
 
+def management_ready():
+    return storage_initialized() and admin_ready() and docker_dns_ready() and all(
+        storage_policy_ready(name) for name in ('docker', 'containerd')) and storage_mounts_ready() and storage_views_bound()
+
+
+def observe_management():
+    settings()
+    return dict(management_ready=management_ready())
+
+
 def observe():
     value = settings()
-    management_ready = storage_initialized() and admin_ready() and docker_dns_ready() and all(
-        storage_policy_ready(name) and storage_bound(name + '.service', name)
-        for name in ('docker', 'containerd'))
+    managed = management_ready()
     boundary_ready = firewall_ready()
     enabled = value['enabled']
-    return dict(ready=management_ready and boundary_ready, running=enabled and boundary_ready,
-                enabled=enabled, management_ready=management_ready, **native_status(value['port']))
+    return dict(ready=managed and boundary_ready, running=enabled and boundary_ready,
+                enabled=enabled, management_ready=managed, **native_status(value['port']))
 
 
 def up(endpoint, port):
@@ -444,18 +552,31 @@ def down():
 
 
 def provision():
-    initialize()
-    prepare_storage(force_restart=prepare_docker_dns())
-    prepare_admin()
-    run('systemctl', 'enable', UNIT)
-    run('systemctl', 'restart', UNIT)
-    if not observe()['ready']:
-        raise RuntimeError('VPN environment preparation did not converge')
+    phase = 'state'
+    try:
+        initialize()
+        phase = 'docker-dns'
+        restart = prepare_docker_dns()
+        phase = 'storage'
+        prepare_storage(force_restart=restart)
+        phase = 'admin'
+        prepare_admin()
+        phase = 'service'
+        run('systemctl', 'enable', UNIT)
+        run('systemctl', 'restart', UNIT)
+        phase = 'readiness'
+        if not observe()['ready']:
+            raise RuntimeError('VPN environment preparation did not converge')
+    except (OSError, ValueError, KeyError) as error:
+        kind = 'OSError' if isinstance(error, OSError) else 'ValueError' if isinstance(error, ValueError) else 'KeyError'
+        number = getattr(error, 'errno', None)
+        code = str(number) if type(number) is int and 0 <= number <= 4095 else 'unknown'
+        raise RuntimeError(f'environment preparation failed: phase={phase} exception={kind} errno={code}') from None
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('command', choices=['observe', 'provision', 'up', 'down', 'start', 'check-state'])
+    parser.add_argument('command', choices=['observe', 'observe-management', 'provision', 'up', 'down', 'start', 'check-state'])
     parser.add_argument('--endpoint')
     parser.add_argument('--port', type=int, default=51820)
     args = parser.parse_args()
@@ -477,6 +598,8 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX)
         if args.command == 'observe':
             print(json.dumps(observe()))
+        elif args.command == 'observe-management':
+            print(json.dumps(observe_management()))
         elif args.command == 'provision':
             provision()
         elif args.command == 'up':

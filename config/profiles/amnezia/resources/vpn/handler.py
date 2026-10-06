@@ -93,11 +93,11 @@ def settings_valid(require_selected=True):
         raise RuntimeError('amnezia is not selected in this yard')
 
 
-def runtime_status(instance):
+def runtime_status(instance, management_only=False):
     if instance.get('status') != 'Running':
         return dict(ready=False, running=False, enabled=False, management_ready=False,
                     vpn_installed=False, vpn_running=False)
-    return json.loads(guest('python3', RUNTIME, 'observe').stdout)
+    return json.loads(guest('python3', RUNTIME, 'observe-management' if management_only else 'observe').stdout)
 
 
 def ready(instance):
@@ -105,7 +105,7 @@ def ready(instance):
     if not owned(instance):
         return False
     _, _, _, want = endpoint(instance)
-    status = runtime_status(instance)
+    status = runtime_status(instance, management_only=ADMIN)
     return (owned(instance) == want and instance['config'].get(KEY) == fingerprint(want)
             and (status['management_ready'] if ADMIN else status['ready'] and status['enabled']))
 

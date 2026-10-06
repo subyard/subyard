@@ -32,6 +32,7 @@ type ProjectHookPlan struct {
 	integrationScope string
 	provisionedHooks hookObservation
 	completed        bool
+	stopped          bool
 }
 
 type hookObservation struct {
@@ -69,7 +70,7 @@ func (runtime Runtime) observeProjectHookInputs(ctx context.Context) (hookObserv
 	return observation, nil
 }
 
-func (runtime Runtime) PrepareProjectHooks(ctx context.Context, unavailable bool) (*ProjectHookPlan, error) {
+func (runtime Runtime) PrepareProjectHooks(ctx context.Context, unavailable bool, temporaryPower ...bool) (*ProjectHookPlan, error) {
 	plan := &ProjectHookPlan{conditional: unavailable, hookBindings: map[string]string{}}
 	definitions, err := runtime.profileRuntimeDefinitions()
 	if err != nil {
@@ -116,9 +117,14 @@ func (runtime Runtime) PrepareProjectHooks(ctx context.Context, unavailable bool
 		if state.InstanceFound && !strings.EqualFold(state.Instance.Status, "stopped") {
 			return nil, fmt.Errorf("project hook observation requires a running or stopped yard")
 		}
-		if state.InstanceFound && instanceIntentionallyStopped(state.Instance) && !unavailable {
-			plan.conditional = false
-			return plan, nil
+		if state.InstanceFound && instanceIntentionallyStopped(state.Instance) {
+			// Cold/reset plans already authorize reconstruction; preserve the
+			// existing power intent only for repair of this captured instance.
+			plan.stopped = !unavailable
+			if !unavailable && !(len(temporaryPower) != 0 && temporaryPower[0]) {
+				plan.conditional = false
+				return plan, nil
+			}
 		}
 		plan.conditional = true
 		plan.approved.Projects = fmt.Sprintf("%x", sha256.Sum256(nil))
@@ -149,6 +155,14 @@ func (runtime Runtime) CheckProjectHookPlan(ctx context.Context, beforeWrites bo
 			return nil
 		}
 		return err
+	}
+	if plan.stopped {
+		managed, _ := state.Instance.EffectiveConfig("user.subyard.managed")
+		desired, _ := state.Instance.EffectiveConfig("user.subyard.desired_power")
+		if !state.InstanceFound || managed != "true" || desired != "stopped" ||
+			beforeWrites && !instanceIntentionallyStopped(state.Instance) {
+			return fmt.Errorf("%w: captured stopped project hook power intent changed", domain.ErrPlanStale)
+		}
 	}
 	if !state.InstanceFound || !strings.EqualFold(state.Instance.Status, "running") {
 		if state.InstanceFound && instanceIntentionallyStopped(state.Instance) {
@@ -239,12 +253,13 @@ func (plan *ProjectHookPlan) Binding() string {
 	payload, _ := json.Marshal(struct {
 		Approved         hookObservation
 		Conditional      bool
+		Stopped          bool
 		Hooks            []string
 		Source           string
 		Owners           []domain.ProjectRecord
 		HookBindings     map[string]string
 		IntegrationScope string
-	}{plan.approved, plan.conditional, plan.allowedHooks, plan.source, plan.ownerProjects, plan.hookBindings, plan.integrationScope})
+	}{plan.approved, plan.conditional, plan.stopped, plan.allowedHooks, plan.source, plan.ownerProjects, plan.hookBindings, plan.integrationScope})
 	return fmt.Sprintf("%x", sha256.Sum256(payload))
 }
 

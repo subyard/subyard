@@ -414,12 +414,10 @@ func (runtime Runtime) instanceConverged(ctx context.Context) (bool, error) {
 			return false, err
 		}
 	}
-	if runtime.Yard.YardKind == domain.YardVM {
-		for key, want := range map[string]string{"limits.cpu": runtime.environmentValue("LIMITS_CPU"),
-			"limits.memory": runtime.environmentValue("LIMITS_MEMORY")} {
-			if want != "" && state.Instance.LocalConfig[key] != want {
-				return false, nil
-			}
+	for key, want := range map[string]string{"limits.cpu": runtime.environmentValue("LIMITS_CPU"),
+		"limits.memory": runtime.environmentValue("LIMITS_MEMORY")} {
+		if want != "" && state.Instance.LocalConfig[key] != want {
+			return false, nil
 		}
 	}
 	if runtime.environmentValue("VM_PIN_IPV4") == "1" {
@@ -1001,8 +999,15 @@ func (runtime Runtime) applyInstanceStage(ctx context.Context) error {
 		}
 	}
 	desired := application.InitialPower(runtime.Yard)
-	_, err = runtime.Incus.Instance(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName)
+	instance, err := runtime.Incus.Instance(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName)
 	if err == nil {
+		for key, want := range map[string]string{"limits.cpu": runtime.environmentValue("LIMITS_CPU"),
+			"limits.memory": runtime.environmentValue("LIMITS_MEMORY")} {
+			if want != "" && instance.LocalConfig[key] != want &&
+				!strings.EqualFold(instance.Status, "running") && !strings.EqualFold(instance.Status, "stopped") {
+				return errors.New("cannot reconcile resource limits from unknown yard power state")
+			}
+		}
 		intent, ensureErr := runtime.powerService().Ensure(ctx, runtime.Yard)
 		if ensureErr != nil {
 			return ensureErr

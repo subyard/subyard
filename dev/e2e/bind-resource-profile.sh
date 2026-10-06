@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Real-host regression for minimal init and bind wrapper cleanup.
+# Real-host regression for minimal init, resource limits and bind wrapper cleanup.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -110,6 +110,45 @@ yard start --yes
 
 project="subyard-$YARD_NAME"
 instance="yard-$YARD_NAME"
+
+# Existing container limits must reconcile through the product without replacing state.
+incus exec "$instance" --project "$project" -- sh -ceu \
+  'printf "retained state\n" > /srv/resource-limits-marker'
+assert_limits() {
+  [ "$(incus config get "$instance" limits.cpu --project "$project")" = "$1" ] \
+    && [ "$(incus config get "$instance" limits.memory --project "$project")" = "$2" ] \
+    || die 'existing container resource limits did not converge'
+  incus exec "$instance" --project "$project" -- grep -Fxq 'retained state' /srv/resource-limits-marker
+}
+yard config set LIMITS_CPU 1 --scope yard --yes
+yard config set LIMITS_MEMORY 512MiB --scope yard --yes
+yard init --yes
+assert_limits 1 512MiB
+init_pid="$(incus query "/1.0/instances/$instance/state?project=$project" | jq -er '.pid | select(. > 0)')"
+yard init </dev/null
+assert_limits 1 512MiB
+[ "$(incus query "/1.0/instances/$instance/state?project=$project" | jq -er '.pid | select(. > 0)')" = "$init_pid" ] \
+  || die 'converged init restarted the container'
+yard config set LIMITS_CPU 2 --scope yard --yes
+yard config set LIMITS_MEMORY 768MiB --scope yard --yes
+yard init --yes
+assert_limits 2 768MiB
+yard stop --yes
+yard config set LIMITS_CPU 1 --scope yard --yes
+yard config set LIMITS_MEMORY 1GiB --scope yard --yes
+yard init --yes
+[ "$(incus config get "$instance" limits.cpu --project "$project")" = 1 ] \
+  && [ "$(incus config get "$instance" limits.memory --project "$project")" = 1GiB ] \
+  || die 'stopped container limits did not converge'
+incus list "$instance" --project "$project" --format csv -c s | grep -Fxq STOPPED \
+  || die 'resource limit reconciliation lost stopped power intent'
+yard start --yes
+assert_limits 1 1GiB
+yard config set LIMITS_CPU '' --scope yard --yes
+yard config set LIMITS_MEMORY '' --scope yard --yes
+yard init </dev/null
+assert_limits 1 1GiB
+printf 'ok: existing container limits, repeat init and stopped power intent\n'
 
 # Incus numeric UID/GID exec does not initialize the account's supplementary groups.
 # Shell sessions must retain the same identity and Docker access as a login session.

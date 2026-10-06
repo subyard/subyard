@@ -156,13 +156,25 @@ one, two = identity('one'), identity('two')
 assert all(left != right for left, right in zip(one, two)), 'native clients do not have independent identities'
 print('ok: two native clients have independent keys and addresses')
 PYCLIENTS
-  # Use precisely the native server image for independent protocol-compatible probes.
+  # Transfer the exact native image by a temporary tag: image IDs depend on the
+  # source daemon's image store and need not resolve in the destination daemon.
   guest 1 incus exec yard-vpn-e2e --project subyard-vpn-e2e -- sh -ceu '
-    docker image save "$(docker inspect --format "{{.Image}}" amnezia-awg2)"
+    reference=subyard-amnezia-e2e/native:source
+    if docker image inspect "$reference" >/dev/null 2>&1; then
+      printf "native image transfer reference already exists\n" >&2
+      exit 1
+    fi
+    image="$(docker inspect --format "{{.Image}}" amnezia-awg2)"
+    docker image tag "$image" "$reference"
+    cleanup_reference() { docker image rm "$reference" >/dev/null; }
+    trap cleanup_reference EXIT
+    [ "$(docker image inspect --format "{{.Id}}" "$reference")" = "$image" ]
+    docker image save "$reference"
   ' </dev/null | guest 2 docker image load >/dev/null
-  guest 1 incus exec yard-vpn-e2e --project subyard-vpn-e2e -- \
-    docker inspect --format '{{.Image}}' amnezia-awg2 </dev/null \
-    | guest 2 install -o 0 -g 0 -m 0600 /dev/stdin /var/tmp/subyard-amnezia-client/image
+  guest 2 bash -ceu '
+    docker image inspect --format "{{.Id}}" subyard-amnezia-e2e/native:source \
+      | install -o 0 -g 0 -m 0600 /dev/stdin /var/tmp/subyard-amnezia-client/image
+  ' </dev/null
   guest 1 incus exec yard-vpn-e2e --project subyard-vpn-e2e -- \
     docker exec amnezia-awg2 ip -4 -j address show dev awg0 </dev/null \
     | guest 2 python3 -c 'import json,os,sys; path="/var/tmp/subyard-amnezia-client/tunnel-ip"; fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600); os.fchmod(fd,0o600); os.write(fd,(json.load(sys.stdin)[0]["addr_info"][0]["local"]+"\n").encode()); os.close(fd)'

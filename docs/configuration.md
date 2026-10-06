@@ -84,6 +84,19 @@ highest precedence. It is never persisted by config sync. `yard [-Y <yard>] conf
 is the authoritative explanation of the actual chain, including derived values. Start from
 [`config/settings.env.example`](../config/settings.env.example).
 
+### Yard resource limits
+
+`LIMITS_CPU` and `LIMITS_MEMORY` are optional Incus resource limits for both container and VM
+yards. A nonempty value is applied at creation and reconciled on existing yards by `yard init`.
+Changing a value in configuration takes effect on the next init; readiness checks report a
+differing local instance limit as drift.
+
+Before changing a limit on a running yard, init stops it through the existing guarded lifecycle
+and then uses the normal temporary-power and finalization flow to restore its desired power.
+An intentionally stopped yard returns to stopped after init. Matching limits are left untouched.
+Empty or unset values leave manually installed and inherited Incus limits in place; clearing a
+setting does not remove a previously applied limit. Subyard imposes no default CPU or memory cap.
+
 ## File settings
 
 Known file settings, such as coding-agent configuration and rules, start with a shipped file and may

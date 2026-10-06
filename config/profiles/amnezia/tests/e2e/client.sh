@@ -2,6 +2,7 @@
 # Disposable VM2 client proof for the profile-owned AmneziaWG endpoint.
 # The native application exports each client; credentials are never printed here.
 set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd -P)"
 
 CONFIG_DIR=/var/tmp/subyard-amnezia-client
 MARKER=subyard-amnezia-e2e-client-v1

@@ -13,6 +13,11 @@ Use an amd64 owner with KVM, Incus 6.0.6 and a supported QEMU reporting implemen
 Reporting and a pinned private IPv4. Coding integrations, work projects, host mounts, shared
 credentials, agent forwarding and nested VM access are excluded.
 
+Budget CPU and RAM for the VPN and owner alongside busy coding yards. Use the shared
+[yard resource limits](configuration.md#yard-resource-limits) to cap those yards, including
+`default`; `yard init` reconciles nonempty limits on existing instances. Choose limits for the
+owner's capacity and workload. The VPN preset's limits are ceilings rather than reserved capacity.
+
 ```sh
 yard -Y vpn init --profile amnezia
 yard -Y vpn start
@@ -77,8 +82,9 @@ yard -Y vpn status
 The selected yard's detailed status includes a hint such as
 `Manage in AmneziaVPN: amnezia@203.0.113.10:2226`. It identifies the application, address, port and
 user without exposing credentials. Resource status and RPC responses do not contain private keys.
-The dedicated `amnezia` account has passwordless administrative access inside this VM, which the
-native installer requires. It is not an administrator account on the owner.
+Initialization adds the dedicated `amnezia` account to the VM's `sudo` group and grants it
+passwordless administrative access, which the native installer requires. These rights apply
+inside the VPN VM.
 
 Export its private key into a protected file on the owner, without printing it:
 
@@ -134,7 +140,7 @@ device. Select the server, AmneziaWG protocol and a format supported by the reci
 share an AmneziaVPN key/file or export a native AmneziaWG `.conf` file. Treat exported access as a
 secret and keep local files in a private directory with mode `0600`.
 
-To remove access, open **Users**, select the named client, choose **Revoke access**, and confirm.
+To remove access, open **Users**, select the named client, choose **Revoke**, and confirm with **Continue**.
 This removes that client's peer while retaining the other clients. Creating, sharing and revoking
 clients are native app operations; Subyard does not generate a first client or edit the app's peer
 registry. See the official [sharing and revocation guide](https://docs.amnezia.org/documentation/instructions/share-connection/).

@@ -32,15 +32,50 @@ export MIN_DISK_GIB=1
 if [ "$YARD_BIN" = "$root/.build/yard" ]; then
   "$root/dev/build-engine.sh" --output "$fixture/yard"
   install -D -m 0755 "$fixture/yard" "$YARD_BIN"
+else
+  candidate_version="$(jq -er '.version | select(type == "string" and test("^[A-Za-z0-9._+-]+$"))' \
+    "$root/.subyard-acceptance/candidate.json")"
+  if [ ! -e "$fixture/bin/yard" ] && [ ! -L "$fixture/bin/yard" ]; then
+    YARD_RUNTIME_ROOT="$SUBYARD_HOME/runtime" YARD_RELEASE_CACHE="$SUBYARD_HOME/releases" \
+      YARD_BIN_DIR="$fixture/bin" YARD_SHELL_RC="$fixture/bashrc" YARD_LOGIN_RC="$fixture/profile" \
+      YARD_RELEASE_BASE_URL="file://$root/.subyard-acceptance/release" \
+      YARD_RELEASE_VERSION="$candidate_version" \
+      "$root/.subyard-acceptance/release/subyard-install.sh" --yes >/dev/null
+  fi
+  YARD_BIN="$fixture/bin/yard"
+  [ -L "$YARD_BIN" ] \
+    && [ "$(readlink "$YARD_BIN")" = "$SUBYARD_HOME/runtime/current/bin/yard" ] \
+    && [ "$("$YARD_BIN" --version)" = "yard $candidate_version" ] \
+    || die 'installed candidate runtime is not active'
+  printf 'amnezia_installed_candidate_verified=true\n'
 fi
 yard() { "$YARD_BIN" -Y vpn-e2e "$@"; }
 guest() { incus exec yard-vpn-e2e --project subyard-vpn-e2e -- "$@"; }
 signature() {
-  guest sh -ceu 'sha256sum /srv/amnezia/admin.key; if docker container inspect amnezia-awg2 >/dev/null 2>&1; then docker exec amnezia-awg2 sha256sum /opt/amnezia/awg/awg0.conf; fi' | sha256sum
+  local state
+  # The VM agent can return before Docker has restored the native container.
+  # Compare both files only after they are readable; never hash partial state.
+  state="$(guest timeout 100 sh -ceu '
+    for attempt in $(seq 1 45); do
+      if docker container inspect --format "{{.State.Running}}" amnezia-awg2 2>/dev/null | grep -Fxq true \
+        && server="$(docker exec amnezia-awg2 sha256sum /opt/amnezia/awg/awg0.conf 2>/dev/null)"; then
+        sha256sum /srv/amnezia/admin.key
+        printf "%s\n" "$server"
+        printf "amnezia_native_state_wait_attempts=%s\n" "$attempt" >&2
+        exit 0
+      fi
+      sleep 2
+    done
+    printf "native VPN state is unavailable\n" >&2
+    exit 1
+  ')" || return "$?"
+  printf '%s\n' "$state" | sha256sum
 }
 verify_state() {
+  local observed
   YARD_KIND=vm incus_wait_instance_agent subyard-vpn-e2e yard-vpn-e2e || die 'VM agent unavailable'
-  [ "$(signature)" = "$(cat "$fixture/state.sha256")" ] || die 'VPN state changed across lifecycle'
+  observed="$(signature)" || die 'VPN state is unavailable after lifecycle'
+  [ "$observed" = "$(cat "$fixture/state.sha256")" ] || die 'VPN state changed across lifecycle'
 }
 verify_enabled() {
   verify_state
@@ -141,7 +176,17 @@ case "$phase" in
     yard start --yes
     yard vpn-admin up --yes
     yard vpn status | jq -e ".ready and .network_enabled and .ingress and (.vpn_installed | not)" >/dev/null
-    yard status | grep -Fq "Manage in AmneziaVPN: amnezia@" || die "administrative status hint is missing"
+    status_started=$SECONDS
+    status_output="$(yard status)"
+    printf 'amnezia_status_probe_duration_seconds=%s\n' "$((SECONDS - status_started))"
+    if ! grep -F 'Manage in AmneziaVPN: amnezia@' >/dev/null <<<"$status_output"; then
+      # Report only the owned resources' bounded states, never their endpoints.
+      awk '$1 == "amnezia" && ($2 == "vpn" || $2 == "vpn-admin") &&
+           ($3 == "up" || $3 == "down" || $3 == "?") {
+             printf "amnezia_status_resource=%s state=%s\n", $2, $3
+           }' <<<"$status_output"
+      die 'administrative status hint is missing'
+    fi
     guest findmnt -n -o FSTYPE,SIZE /srv
     ;;
   admin-down)

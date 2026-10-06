@@ -11,6 +11,7 @@ import runpy
 from pathlib import Path
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -78,10 +79,12 @@ class OwnerHandlerTest(unittest.TestCase):
             self.assertEqual(device['connect'], 'tcp:10.80.0.10:22')
             instance['devices'][handler.DEVICE] = device
             instance['config'][handler.KEY] = handler.fingerprint(device)
-            with mock.patch.object(handler, 'runtime_status', return_value=dict(management_ready=False, ready=True, enabled=True)):
+            with mock.patch.object(handler, 'runtime_status', return_value=dict(management_ready=False, ready=True, enabled=True)) as status:
                 self.assertFalse(handler.ready(instance))
-            with mock.patch.object(handler, 'runtime_status', return_value=dict(management_ready=True, ready=False, enabled=False)):
+                status.assert_called_once_with(instance, management_only=True)
+            with mock.patch.object(handler, 'runtime_status', return_value=dict(management_ready=True, ready=False, enabled=False)) as status:
                 self.assertTrue(handler.ready(instance))
+                status.assert_called_once_with(instance, management_only=True)
 
     def test_stopped_admin_route_is_not_ready_and_down_never_reaches_guest(self):
         os.environ.update(SUBYARD_RESOURCE_MODE='apply', SUBYARD_RESOURCE_ACTION='down', SUBYARD_OPERATION_ID='op-test',
@@ -126,6 +129,13 @@ class OwnerHandlerTest(unittest.TestCase):
         with mock.patch.object(handler, 'guest', side_effect=AssertionError('stopped guest accessed')):
             self.assertEqual(handler.runtime_status(instance), dict(ready=False, running=False, enabled=False,
                 management_ready=False, vpn_installed=False, vpn_running=False))
+            self.assertFalse(handler.runtime_status(instance, management_only=True)['management_ready'])
+        instance['status'] = 'Running'
+        for management_only, command in ((False, 'observe'), (True, 'observe-management')):
+            response = dict(management_ready=True) if management_only else dict(ready=True, enabled=True)
+            with mock.patch.object(handler, 'guest', return_value=result(json.dumps(response).encode())) as guest:
+                self.assertEqual(handler.runtime_status(instance, management_only=management_only), response)
+                guest.assert_called_once_with('python3', handler.RUNTIME, command)
 
     def test_admin_down_on_stopped_vm_assesses_only_owned_route(self):
         instance = self.instance()
@@ -534,18 +544,26 @@ class GuestRuntimeTest(unittest.TestCase):
             marker.chmod(0o644)
             with self.assertRaisesRegex(RuntimeError, 'unsafe ownership or permissions'):
                 runtime.initialize()
+            with self.assertRaisesRegex(RuntimeError, 'unsafe ownership or permissions'):
+                runtime.observe_management()
             marker.chmod(0o600)
             marker.write_text('foreign\n')
             with self.assertRaisesRegex(RuntimeError, 'ownership does not match'):
                 runtime.initialize()
+            with self.assertRaisesRegex(RuntimeError, 'ownership does not match'):
+                runtime.observe_management()
             marker.unlink()
             marker.symlink_to(state / 'settings.json')
             with self.assertRaises(RuntimeError):
                 runtime.initialize()
+            with self.assertRaises(RuntimeError):
+                runtime.observe_management()
         with self.environment() as state:
             state.chmod(0o755)
             with self.assertRaises(RuntimeError):
                 runtime.initialize()
+            with self.assertRaises(RuntimeError):
+                runtime.observe_management()
 
     def test_legacy_state_is_rejected_without_modification(self):
         with tempfile.TemporaryDirectory() as directory, self.root_owned_stat():
@@ -570,6 +588,8 @@ class GuestRuntimeTest(unittest.TestCase):
                 mock.patch.object(runtime.os, 'geteuid', return_value=0), \
                 mock.patch.object(sys, 'argv', ['runtime', 'check-state']):
             self.assertFalse(runtime.check_state())
+            with self.assertRaises(OSError):
+                runtime.observe_management()
             runtime.main()
             self.assertEqual(list(Path(directory).iterdir()), [])
         with self.environment() as state:
@@ -584,7 +604,7 @@ class GuestRuntimeTest(unittest.TestCase):
             with mock.patch.object(runtime, 'STATE', state), \
                     mock.patch.object(runtime.os.path, 'ismount', return_value=False), \
                     mock.patch.object(runtime, 'run') as run:
-                for operation in (runtime.initialize, runtime.settings,
+                for operation in (runtime.initialize, runtime.settings, runtime.prepare_storage, runtime.observe_management,
                                   lambda: runtime.up('10.20.30.40', 51820), runtime.down):
                     with self.assertRaisesRegex(RuntimeError, 'not mounted'):
                         operation()
@@ -602,23 +622,41 @@ class GuestRuntimeTest(unittest.TestCase):
                 mock.patch.object(runtime, 'storage_initialized', return_value=True), \
                 mock.patch.object(runtime, 'docker_dns_ready', return_value=True), \
                 mock.patch.object(runtime, 'storage_policy_ready', return_value=True), \
+                mock.patch.object(runtime, 'storage_mounts_ready', return_value=True), \
                 mock.patch.object(runtime, 'storage_bound', return_value=True), \
                 mock.patch.object(runtime, 'firewall_ready', return_value=True), \
                 mock.patch.object(runtime, 'native_status', return_value=dict(vpn_installed=False, vpn_running=False)):
             self.assertEqual(runtime.observe(), dict(ready=True, running=False, enabled=False,
                 management_ready=True, vpn_installed=False, vpn_running=False))
+            with mock.patch.object(runtime, 'firewall_ready', side_effect=AssertionError('management inspected firewall')), \
+                    mock.patch.object(runtime, 'native_status', side_effect=AssertionError('management inspected native VPN')):
+                self.assertEqual(runtime.observe_management(), dict(management_ready=True))
             with mock.patch.object(runtime, 'storage_bound', return_value=False):
                 self.assertFalse(runtime.observe()['ready'])
+                self.assertEqual(runtime.observe_management(), dict(management_ready=False))
+            with mock.patch.object(runtime, 'storage_mounts_ready', return_value=False):
+                self.assertFalse(runtime.observe()['management_ready'])
+                self.assertFalse(runtime.observe_management()['management_ready'])
+            for missing in (('docker.service', 'containerd'), ('containerd.service', 'docker')):
+                with mock.patch.object(runtime, 'storage_bound', side_effect=lambda service, store:
+                                       (service, store) != missing):
+                    self.assertFalse(runtime.observe()['management_ready'])
+                    self.assertFalse(runtime.observe_management()['management_ready'])
             with mock.patch.object(runtime, 'storage_initialized', return_value=False):
                 self.assertFalse(runtime.observe()['management_ready'])
+                self.assertFalse(runtime.observe_management()['management_ready'])
             with mock.patch.object(runtime, 'storage_policy_ready', return_value=False):
                 self.assertFalse(runtime.observe()['ready'])
+                self.assertFalse(runtime.observe_management()['management_ready'])
             with mock.patch.object(runtime, 'docker_dns_ready', return_value=False):
                 self.assertFalse(runtime.observe()['ready'])
+                self.assertFalse(runtime.observe_management()['management_ready'])
             with mock.patch.object(runtime, 'admin_ready', return_value=False):
                 self.assertFalse(runtime.observe()['ready'])
+                self.assertFalse(runtime.observe_management()['management_ready'])
             with mock.patch.object(runtime, 'firewall_ready', return_value=False):
                 self.assertFalse(runtime.observe()['ready'])
+                self.assertTrue(runtime.observe_management()['management_ready'])
 
     def test_native_status_checks_both_names_and_exact_configured_port(self):
         calls = []
@@ -744,6 +782,24 @@ class GuestRuntimeTest(unittest.TestCase):
                 runtime.provision()
             storage.assert_called_once_with(force_restart=changed)
 
+    def test_preparation_diagnostics_identify_phase_without_private_values(self):
+        operations = ('initialize', 'prepare_docker_dns', 'prepare_storage', 'prepare_admin', 'run', 'observe')
+        phases = ('state', 'docker-dns', 'storage', 'admin', 'service', 'readiness')
+        errors = ((OSError(13, 'synthetic-private-value', '/synthetic-private-path'), 'OSError', '13'),
+                  (OSError('synthetic-private-value'), 'OSError', 'unknown'),
+                  (ValueError('synthetic-private-value'), 'ValueError', 'unknown'),
+                  (KeyError('synthetic-private-value'), 'KeyError', 'unknown'))
+        for operation, phase in zip(operations, phases):
+            for error, kind, code in errors:
+                with self.subTest(phase=phase, kind=kind, errno=code), contextlib.ExitStack() as stack:
+                    for name in operations:
+                        stack.enter_context(mock.patch.object(runtime, name, return_value={'ready': True},
+                                                              side_effect=error if name == operation else None))
+                    with self.assertRaises(RuntimeError) as failure:
+                        runtime.provision()
+                    self.assertEqual(str(failure.exception),
+                                     f'environment preparation failed: phase={phase} exception={kind} errno={code}')
+
     def test_firewall_readiness_detects_effective_rule_drift(self):
         with tempfile.TemporaryDirectory() as directory, self.root_owned_stat():
             record = Path(directory) / 'firewall.json'
@@ -762,38 +818,80 @@ class GuestRuntimeTest(unittest.TestCase):
         with self.environment() as state:
             etc = state / 'systemd'
             etc.mkdir()
+            etc.chmod(0o755)
             sources = state / 'sources'
             for name in ('docker', 'containerd'):
                 (state / name).mkdir(mode=0o700)
                 (sources / name).mkdir(parents=True)
+                (sources / name).chmod(0o755)
                 (sources / name / 'native-data').write_text(name)
             original_path = runtime.Path
             def isolated_path(value):
+                if str(value).startswith(('/run/systemd/', '/usr/lib/systemd/', '/lib/systemd/')) or str(value) == '/etc/fstab':
+                    return state / 'foreign' / str(value).lstrip('/')
                 return {'/var/lib': sources, '/etc/systemd/system': etc}.get(str(value), original_path(value))
             calls = []
             foreign_ownership = set()
+            missing_views = set()
+            global_mounts = set()
+            original_run = runtime.run
             def command(*args, data=None, **kwargs):
+                if args[:2] == ('systemctl', 'show'):
+                    return result()
+                if args[0] == 'findmnt':
+                    return result(args[2].encode(), code=0) if Path(args[2]).name in global_mounts else result(code=1)
                 calls.append(args)
+                if args[0] == 'cp':
+                    return original_run(*args, data=data, **kwargs)
                 if args[0] == 'install':
                     Path(args[-1]).write_bytes(data)
                     Path(args[-1]).chmod(0o644)
                     foreign_ownership.discard(Path(args[-1]))
+                if args[:3] == ('systemctl', 'start', 'var-lib-docker.mount'):
+                    global_mounts.update(('docker', 'containerd'))
+                if args[:3] == ('systemctl', 'start', 'containerd.service'):
+                    missing_views.clear()
                 return result()
             with mock.patch.object(runtime, 'Path', side_effect=isolated_path), \
-                    mock.patch.object(runtime, 'storage_bound', return_value=True), \
+                    mock.patch.object(runtime, 'storage_bound', side_effect=lambda service, store:
+                                      (service, store) not in missing_views), \
+                    mock.patch.object(runtime, 'storage_global_bound', side_effect=lambda store: store in global_mounts), \
                     mock.patch.object(runtime, 'run', side_effect=command):
                 runtime.prepare_storage()
+                preserved = (state / 'docker' / 'native-data').stat().st_ino
                 first_calls = len(calls)
                 runtime.prepare_storage()
                 self.assertEqual(len(calls), first_calls)
                 runtime.prepare_storage(force_restart=True)
-                self.assertEqual(calls[first_calls:], [('systemctl', 'daemon-reload'),
-                    ('systemctl', 'restart', 'containerd.service', 'docker.service')])
+                repair_commands = [('systemctl', 'stop', 'docker.service', 'docker.socket', 'containerd.service'),
+                    ('systemctl', 'start', 'var-lib-docker.mount', 'var-lib-containerd.mount'),
+                    ('systemctl', 'start', 'containerd.service', 'docker.service')]
+                self.assertEqual(calls[first_calls:], repair_commands)
+                for missing in (('docker.service', 'containerd'), ('containerd.service', 'docker')):
+                    missing_views.add(missing)
+                    before_restart = len(calls)
+                    runtime.prepare_storage()
+                    self.assertEqual(calls[before_restart:], repair_commands)
+                    after_restart = len(calls)
+                    runtime.prepare_storage()
+                    self.assertEqual(len(calls), after_restart)
+                global_mounts.remove('containerd')
+                before_restart = len(calls)
+                runtime.prepare_storage()
+                self.assertEqual(calls[before_restart:], repair_commands)
+                self.assertEqual((state / 'docker' / 'native-data').stat().st_ino, preserved)
                 for name in ('docker', 'containerd'):
                     self.assertEqual((state / name / 'native-data').read_text(), name)
                     dropin = (etc / (name + '.service.d') / '90-subyard-amnezia-storage.conf').read_text()
                     self.assertIn('AssertPathIsMountPoint=/srv', dropin)
-                    self.assertIn(f'BindPaths={state / name}:/var/lib/{name}', dropin)
+                    self.assertNotIn('BindPaths=', dropin)
+                    self.assertIn('Requires=var-lib-docker.mount var-lib-containerd.mount', dropin)
+                    self.assertIn('After=var-lib-docker.mount var-lib-containerd.mount', dropin)
+                    mount, mount_content = runtime.storage_mount_policy(name)
+                    self.assertEqual(mount.read_text(), mount_content)
+                    self.assertIn(f'AssertPathIsDirectory={state / name}', mount_content)
+                    self.assertIn('AssertPathIsMountPoint=/srv', mount_content)
+                    self.assertIn(f'What={state / name}\nWhere=/var/lib/{name}\nType=none\nOptions=bind', mount_content)
                     path, content = runtime.storage_policy(name)
                     self.assertTrue(runtime.storage_policy_ready(name))
                     path.write_text(content + '# drift\n')
@@ -813,12 +911,15 @@ class GuestRuntimeTest(unittest.TestCase):
                         return info
                     with mock.patch.object(Path, 'lstat', side_effect=foreign_owner, autospec=True):
                         self.assertFalse(runtime.storage_policy_ready(name))
-                        runtime.prepare_storage()
-                        self.assertTrue(runtime.storage_policy_ready(name))
+                        before = len(calls)
+                        with self.assertRaisesRegex(RuntimeError, 'unsafe ownership'):
+                            runtime.prepare_storage()
+                        self.assertEqual(len(calls), before)
+                    foreign_ownership.clear()
                     path.unlink()
                     path.symlink_to(state / 'environment')
                     self.assertFalse(runtime.storage_policy_ready(name))
-                    with self.assertRaisesRegex(RuntimeError, 'must not be a symlink'):
+                    with self.assertRaisesRegex(RuntimeError, 'unsafe'):
                         runtime.prepare_storage()
                     path.unlink()
                     path.write_text(content)
@@ -826,6 +927,154 @@ class GuestRuntimeTest(unittest.TestCase):
                 with mock.patch.object(runtime, 'storage_bound', return_value=False):
                     with self.assertRaisesRegex(RuntimeError, 'not bound'):
                         runtime.prepare_storage()
+
+    def test_storage_seed_preserves_special_files_links_and_metadata(self):
+        with self.environment() as state:
+            sources = state / 'sources'
+            etc = state / 'systemd'
+            etc.mkdir()
+            source = sources / 'docker'
+            source.mkdir(parents=True)
+            source.chmod(0o710)
+            native = source / 'native-data'
+            native.write_bytes(b'synthetic native data')
+            native.chmod(0o640)
+            os.utime(native, ns=(1_700_000_000_000_000_000, 1_700_000_001_000_000_000))
+            os.link(native, source / 'hardlink')
+            (source / 'symlink').symlink_to('native-data')
+            os.mkfifo(source / 'special-file', 0o600)
+            (source / 'special-file').chmod(0o600)
+            original_path, original_run = runtime.Path, runtime.run
+            calls = []
+            def isolated_path(value):
+                return {'/var/lib': sources, '/etc/systemd/system': etc}.get(str(value), original_path(value))
+            def command(*args, **kwargs):
+                calls.append(args)
+                return original_run(*args, **kwargs) if args[0] == 'cp' else result()
+            with mock.patch.object(runtime, 'Path', side_effect=isolated_path), \
+                    mock.patch.object(runtime, 'run', side_effect=command), \
+                    mock.patch.object(runtime, 'storage_preflight'), \
+                    mock.patch.object(runtime, 'storage_file_ready', return_value=True), \
+                    mock.patch.object(runtime, 'storage_mounts_ready', return_value=True), \
+                    mock.patch.object(runtime, 'storage_policy_ready', return_value=True), \
+                    mock.patch.object(runtime, 'storage_bound', return_value=True):
+                runtime.prepare_storage()
+                first_calls = list(calls)
+                runtime.prepare_storage()
+            destination = state / 'docker'
+            self.assertEqual(calls, first_calls)
+            self.assertEqual(calls[0], ('systemctl', 'stop', 'docker.service', 'docker.socket', 'containerd.service'))
+            self.assertTrue(stat.S_ISFIFO((destination / 'special-file').lstat().st_mode))
+            self.assertEqual((destination / 'special-file').stat().st_mode & 0o777, 0o600)
+            self.assertEqual((destination / 'native-data').read_bytes(), native.read_bytes())
+            self.assertEqual((destination / 'symlink').readlink(), Path('native-data'))
+            self.assertEqual((destination / 'hardlink').stat().st_ino, (destination / 'native-data').stat().st_ino)
+            for before, after in ((source, destination), (native, destination / 'native-data')):
+                self.assertEqual(before.stat().st_mode, after.stat().st_mode)
+                self.assertEqual((before.stat().st_uid, before.stat().st_gid),
+                                 (after.stat().st_uid, after.stat().st_gid))
+                self.assertEqual(before.stat().st_mtime_ns, after.stat().st_mtime_ns)
+            self.assertEqual((state / 'storage-seeded').read_text(), runtime.MARKER + '\n')
+
+    def test_failed_storage_seed_preserves_partial_data_without_marker_or_merge(self):
+        with self.environment() as state:
+            sources = state / 'sources'
+            (sources / 'docker').mkdir(parents=True)
+            original_path = runtime.Path
+            calls = []
+            native = state / 'docker/native-data'
+            def isolated_path(value):
+                return sources if str(value) == '/var/lib' else original_path(value)
+            def command(*args, **kwargs):
+                calls.append(args)
+                if args[0] == 'cp':
+                    native.write_bytes(b'synthetic partial data')
+                    raise RuntimeError('environment command failed: cp')
+                return result()
+            with mock.patch.object(runtime, 'Path', side_effect=isolated_path), \
+                    mock.patch.object(runtime, 'storage_preflight'), \
+                    mock.patch.object(runtime, 'run', side_effect=command):
+                with self.assertRaisesRegex(RuntimeError, 'environment command failed: cp'):
+                    runtime.prepare_storage()
+                first_calls = list(calls)
+                with self.assertRaisesRegex(RuntimeError, 'data but no ownership marker'):
+                    runtime.prepare_storage()
+            self.assertEqual(calls, first_calls)
+            self.assertEqual(native.read_bytes(), b'synthetic partial data')
+            self.assertFalse((state / 'storage-seeded').exists())
+
+    def test_storage_rejects_foreign_definitions_and_mounts_before_mutation(self):
+        for collision in ('unit', 'vendor', 'generated', 'dropin', 'fragment', 'fstab', 'escaped-fstab', 'symlink', 'writable-target', 'active-mount'):
+            with self.subTest(collision=collision), self.environment() as state:
+                etc, sources = state / 'systemd', state / 'sources'
+                etc.mkdir()
+                etc.chmod(0o755)
+                for name in ('docker', 'containerd'):
+                    (sources / name).mkdir(parents=True)
+                    (sources / name).chmod(0o755)
+                original_path = runtime.Path
+                def isolated_path(value):
+                    if str(value).startswith(('/run/systemd/', '/usr/lib/systemd/', '/lib/systemd/')) or str(value) == '/etc/fstab':
+                        return state / 'foreign' / str(value).lstrip('/')
+                    return {'/var/lib': sources, '/etc/systemd/system': etc}.get(str(value), original_path(value))
+                if collision == 'unit':
+                    (etc / 'var-lib-docker.mount').write_text('[Mount]\nWhat=/foreign\n')
+                    (etc / 'var-lib-docker.mount').chmod(0o644)
+                elif collision in ('vendor', 'generated'):
+                    directory = '/usr/lib/systemd/system' if collision == 'vendor' else '/run/systemd/generator'
+                    path = isolated_path(directory) / 'var-lib-docker.mount'
+                    path.parent.mkdir(parents=True)
+                    path.parent.chmod(0o755)
+                    path.write_text('[Mount]\nWhat=/foreign\n')
+                    path.chmod(0o644)
+                elif collision == 'dropin':
+                    (etc / 'var-lib-docker.mount.d').mkdir()
+                    (etc / 'var-lib-docker.mount.d').chmod(0o755)
+                elif collision in ('fstab', 'escaped-fstab'):
+                    path = isolated_path('/etc/fstab')
+                    path.parent.mkdir(parents=True)
+                    path.parent.chmod(0o755)
+                    target = '/var/lib/docker' if collision == 'fstab' else r'/var/lib/\144ocker'
+                    path.write_text('/foreign ' + target + ' none bind 0 0\n')
+                    path.chmod(0o644)
+                elif collision == 'symlink':
+                    (sources / 'docker').rmdir()
+                    (sources / 'docker').symlink_to(state)
+                elif collision == 'writable-target':
+                    (sources / 'docker').chmod(0o777)
+                calls = []
+                def command(*args, **kwargs):
+                    calls.append(args)
+                    if args[:2] == ('systemctl', 'show'):
+                        return result(b'/run/systemd/generator/var-lib-docker.mount' if collision == 'fragment' else b'')
+                    if args[0] == 'findmnt':
+                        return result(args[2].encode(), code=0) if collision == 'active-mount' else result(code=1)
+                    self.fail('unsafe storage mutated the environment')
+                with mock.patch.object(runtime, 'Path', side_effect=isolated_path), \
+                        mock.patch.object(runtime, 'run', side_effect=command):
+                    with self.assertRaises(RuntimeError):
+                        runtime.prepare_storage()
+                self.assertFalse((state / 'storage-seeded').exists())
+                self.assertFalse((state / 'docker').exists())
+
+    def test_global_storage_readiness_requires_mountpoint_and_matching_inode(self):
+        with self.environment() as state:
+            (state / 'docker').mkdir()
+            original_path = runtime.Path
+            with mock.patch.object(runtime, 'Path', side_effect=lambda value:
+                                   state if str(value) == '/var/lib' else original_path(value)), \
+                    mock.patch.object(runtime, 'run', return_value=result(str(state / 'docker').encode())):
+                self.assertTrue(runtime.storage_global_bound('docker'))
+                with mock.patch.object(runtime, 'run', return_value=result(code=1)):
+                    self.assertFalse(runtime.storage_global_bound('docker'))
+                with mock.patch.object(runtime, 'run', return_value=result(b'/')):
+                    self.assertFalse(runtime.storage_global_bound('docker'))
+            elsewhere = state / 'other'
+            (elsewhere / 'docker').mkdir(parents=True)
+            with mock.patch.object(runtime, 'Path', side_effect=lambda value:
+                                   elsewhere if str(value) == '/var/lib' else original_path(value)), \
+                    mock.patch.object(runtime, 'run', return_value=result(str(elsewhere / 'docker').encode())):
+                self.assertFalse(runtime.storage_global_bound('docker'))
 
     def test_lost_storage_marker_rejects_existing_data_before_commands_or_copy(self):
         with self.environment() as state:
@@ -841,8 +1090,7 @@ class GuestRuntimeTest(unittest.TestCase):
             native = state / 'containerd/native-database'
             native.parent.mkdir()
             native.write_bytes(b'synthetic native data')
-            with mock.patch.object(runtime, 'run', side_effect=AssertionError('lost marker changed services')), \
-                    mock.patch.object(runtime.shutil, 'copytree', side_effect=AssertionError('lost marker merged data')):
+            with mock.patch.object(runtime, 'run', side_effect=AssertionError('lost marker changed services or copied data')):
                 with self.assertRaisesRegex(RuntimeError, 'data but no ownership marker'):
                     runtime.prepare_storage()
             self.assertEqual(native.read_bytes(), b'synthetic native data')
@@ -884,6 +1132,21 @@ class GuestRuntimeTest(unittest.TestCase):
             runtime.main()
         firewall.assert_called_once_with()
 
+    def test_management_observation_command_uses_operation_lock(self):
+        lock = mock.mock_open()
+        lock.return_value.fileno.return_value = 17
+        with mock.patch.object(runtime.os, 'geteuid', return_value=0), \
+                mock.patch.object(runtime, 'open', lock, create=True), \
+                mock.patch.object(runtime.os, 'fstat', return_value=SimpleNamespace(st_uid=0, st_mode=stat.S_IFREG | 0o600)), \
+                mock.patch.object(runtime.fcntl, 'flock') as flock, \
+                mock.patch.object(runtime, 'observe_management', return_value=dict(management_ready=True)) as observe, \
+                mock.patch.object(sys, 'argv', ['runtime', 'observe-management']), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            runtime.main()
+        flock.assert_called_once_with(lock.return_value, runtime.fcntl.LOCK_EX)
+        observe.assert_called_once_with()
+        self.assertEqual(json.loads(output.getvalue()), dict(management_ready=True))
+
     def test_runtime_errors_preserve_bounded_diagnostics_without_raw_exception_contents(self):
         for error, message in ((RuntimeError('environment command failed: nft'), 'amnezia: environment command failed: nft'),
                                (OSError('synthetic-private-value'), 'amnezia: environment operation failed'),
@@ -912,18 +1175,33 @@ class GuestRuntimeTest(unittest.TestCase):
                 return {'/home': home, '/etc/sudoers.d/91-subyard-amnezia-admin': sudoers,
                         '/etc/ssh/sshd_config.d/01-subyard-amnezia-admin.conf': policy}.get(str(value), original_path(value))
             calls = []
+            groups = [b'amnezia existing-group\n']
             def command(*args, data=None, **kwargs):
                 calls.append(args)
+                if args[:2] == ('id', '-nG'):
+                    return result(groups[0])
+                if args[0] == 'usermod':
+                    groups[0] += b' sudo\n'
                 if args[0] == 'install':
+                    mode = int(args[args.index('-m') + 1], 8)
                     if '-d' in args:
                         Path(args[-1]).mkdir(parents=True, exist_ok=True)
                     else:
+                        Path(args[-1]).unlink(missing_ok=True)
                         Path(args[-1]).write_bytes(data)
+                    Path(args[-1]).chmod(mode)
                 return result(b'ssh-ed25519 synthetic\n')
             with mock.patch.object(runtime, 'Path', side_effect=isolated_path), \
                     mock.patch.object(runtime, 'run', side_effect=command), \
-                    mock.patch.object(runtime, 'admin_ready', return_value=True):
+                    mock.patch.object(runtime.pwd, 'getpwnam', return_value=SimpleNamespace(pw_uid=0)):
                 runtime.prepare_admin()
+                self.assertIn(('usermod', '--append', '--groups', 'sudo', runtime.ADMIN), calls)
+                calls.clear()
+                runtime.prepare_admin()
+                self.assertFalse(any(args[0] == 'usermod' for args in calls))
+                self.assertTrue(runtime.admin_ready())
+                groups[0] = b'amnezia existing-group\n'
+                self.assertFalse(runtime.admin_ready())
             self.assertEqual(key.read_text(), 'synthetic fixture\n')
             self.assertFalse(any(args[:2] == ('ssh-keygen', '-q') for args in calls))
             self.assertEqual((home / runtime.ADMIN / '.ssh/authorized_keys').read_text(), 'restrict ssh-ed25519 synthetic\n')
@@ -950,9 +1228,10 @@ class GuestRuntimeTest(unittest.TestCase):
                 return home.parent if str(value) == '/home' else original_path(value)
             with mock.patch.object(runtime, 'ADMIN', 'home'), \
                     mock.patch.object(runtime, 'Path', side_effect=isolated_path), \
-                    mock.patch.object(runtime, 'run', return_value=result(b'ssh-ed25519 synthetic\n')):
+                    mock.patch.object(runtime, 'run', return_value=result(b'ssh-ed25519 synthetic\n')) as command:
                 with self.assertRaisesRegex(RuntimeError, 'home must not be a symlink'):
                     runtime.prepare_admin()
+                self.assertFalse(any(call.args[0] == 'usermod' for call in command.call_args_list))
 
 
 class ProfileProvisionTest(unittest.TestCase):
