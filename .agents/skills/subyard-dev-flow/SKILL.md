@@ -92,10 +92,9 @@ requirements when the task depends on them.
 
 ## Test execution and delegation
 
-- Use `model="gpt-6.1-sol"`, `reasoning_effort="high"` for main tasks, and
-  `model="gpt-6.1-sol"`, `reasoning_effort="low"` for cheap mechanical work.
-- Run short checks directly. For long runs, use one worker with
-  `model="gpt-6.1-sol"`, `reasoning_effort="low"`, `fork_turns="none"`;
+- Use `model="gpt-6.1-sol"`, `reasoning_effort="high"` for main development tasks.
+- Run short checks directly. For long runs, use one mechanical monitoring worker with
+  `model="gpt-6-luna"`, `reasoning_effort="low"`, `fork_turns="none"`;
   run locally if unavailable.
 - Pass the working directory, exact commands, source state, known facts, relevant
   file/section references and result paths. Do not copy chat history or whole
@@ -104,8 +103,11 @@ requirements when the task depends on them.
   reads. Prefer completion events; otherwise poll about every 60 seconds within
   client limits. Leave lease heartbeats and cleanup to the runner.
 - Return the exit code, duration, summary/log paths and a short failure excerpt.
-  Read `summary.tsv` first. Do not edit source or rerun the full suite without
-  the parent's instruction.
+  Read `summary.tsv` first. The worker executes the parent's prescribed checks and
+  observes progress/results. On failure, hand the evidence to the main developer agent,
+  which owns failure analysis, repairs and rerun decisions. The worker does not investigate
+  failures, edit source or retry on its own; it executes further checks only as instructed
+  by the main developer agent.
 
 ## Boundaries
 
