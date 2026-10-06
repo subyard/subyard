@@ -321,8 +321,9 @@ func (runner ProjectActionRunner) clone(ctx context.Context) error {
 		return errors.Join(err, runner.cleanup(ctx, directory))
 	}
 	if runner.CloneRevision != "" {
-		checkout := ports.InstanceExecRequest{Command: []string{"git", "-C", runner.Project.YardPath, "checkout", "--detach", runner.CloneRevision}, User: dev, Group: dev}
-		if err := runner.execute(ctx, "checkout prepared clone revision", checkout); err != nil {
+		// Retain the native clone's branch and upstream at the approved revision.
+		reset := ports.InstanceExecRequest{Command: []string{"git", "-C", runner.Project.YardPath, "reset", "--hard", runner.CloneRevision}, User: dev, Group: dev}
+		if err := runner.execute(ctx, "reset to prepared clone revision", reset); err != nil {
 			return err
 		}
 		result, err := runner.Data.Execute(ctx, runner.Yard, ports.InstanceExecRequest{

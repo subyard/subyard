@@ -141,19 +141,31 @@ func TestProjectEmptyCloneSourceRefusesFailedOrMalformedAdvertisement(t *testing
 }
 
 func TestProjectClonePinnedNativeRevisionRemainsIndependentOfNewHEAD(t *testing.T) {
-	source := projectCloneBare(t)
-	projectCloneAddRef(t, source)
-	revision := projectCloneGit(t, "-C", source, "rev-parse", "HEAD")
-	tree := projectCloneGit(t, "-C", source, "mktree")
-	later := projectCloneGit(t, "-C", source, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit-tree", tree, "-p", revision, "-m", "later")
-	projectCloneGit(t, "-C", source, "update-ref", "refs/heads/main", later)
-	record := cloneRecord()
-	record.HostPath, record.YardPath = source, filepath.Join(testkit.TempDir(t), "copy", "src")
-	runner := ProjectActionRunner{Data: projectProcessExecutor{}, Yard: domain.Context{AccessKind: domain.AccessRemote}, Project: record, CloneRevision: revision}
-	if err := runner.clone(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if projectCloneGit(t, "-C", record.YardPath, "rev-parse", "HEAD") != revision {
-		t.Fatal("native committed clone followed a newly advertised HEAD")
+	for _, change := range []string{"unchanged", "advanced"} {
+		t.Run(change, func(t *testing.T) {
+			source := projectCloneBare(t)
+			projectCloneAddRef(t, source)
+			revision := projectCloneGit(t, "-C", source, "rev-parse", "HEAD")
+			if change == "advanced" {
+				tree := projectCloneGit(t, "-C", source, "mktree")
+				later := projectCloneGit(t, "-C", source, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit-tree", tree, "-p", revision, "-m", "later")
+				projectCloneGit(t, "-C", source, "update-ref", "refs/heads/main", later)
+			}
+			record := cloneRecord()
+			record.HostPath, record.YardPath = source, filepath.Join(testkit.TempDir(t), "copy", "src")
+			runner := ProjectActionRunner{Data: projectProcessExecutor{}, Yard: domain.Context{AccessKind: domain.AccessRemote}, Project: record, CloneRevision: revision}
+			if err := runner.clone(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if projectCloneGit(t, "-C", record.YardPath, "rev-parse", "HEAD") != revision {
+				t.Fatal("native committed clone followed a newly advertised HEAD")
+			}
+			if projectCloneGit(t, "-C", record.YardPath, "symbolic-ref", "HEAD") != "refs/heads/main" {
+				t.Fatal("native committed clone lost its default branch")
+			}
+			if projectCloneGit(t, "-C", record.YardPath, "rev-parse", "--symbolic-full-name", "@{upstream}") != "refs/remotes/origin/main" {
+				t.Fatal("native committed clone lost its default branch upstream")
+			}
+		})
 	}
 }
