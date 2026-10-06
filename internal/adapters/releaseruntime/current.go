@@ -107,6 +107,10 @@ func (runtime *Runtime) PrepareCurrentTransition(ctx context.Context, arguments 
 			return Prepared{}, err
 		}
 	}
+	var delegate *candidateVerification
+	if protected != nil {
+		protected, delegate = runtime.inspectV0173ActivationOnlyRecovery(ctx, parsed.root, before, protected)
+	}
 	var owner, target candidateVerification
 	var request releasetransition.ProcessRequest
 	var inspection releasetransition.Inspection
@@ -237,7 +241,7 @@ func (runtime *Runtime) PrepareCurrentTransition(ctx context.Context, arguments 
 		blockerOutcome.Retry = inspection.Blockers[index].Retry
 		inspection.Blockers[index].Retry = CurrentReleaseRetry(blockerOutcome)
 	}
-	prepared, err := runtime.prepareInspectedCandidateTransition(options{root: parsed.root, expectedLinks: &before.links}, owner, target, request, inspection, activationOwned, nil)
+	prepared, err := runtime.prepareInspectedCandidateTransitionWithDelegate(options{root: parsed.root, expectedLinks: &before.links}, owner, target, request, inspection, activationOwned, nil, delegate)
 	if err != nil {
 		return Prepared{}, err
 	}

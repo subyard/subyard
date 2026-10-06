@@ -2760,6 +2760,13 @@ func TestV2TransitionResumesDurableActivationOnlyRepairAtEveryCheckpoint(t *test
 			}
 			owner := transition.options.OwnerRegistration.(*v2TestOwnerRegistration)
 			ownerCalls := [3]int{owner.prepares, owner.observes, owner.commits}
+			unrelatedSettings := map[string][]byte{
+				filepath.Join(configHome, "yards", "unrelated.env"): []byte("YARD_TEMPLATE=synthetic-other\n"),
+				filepath.Join(configHome, "yards", "empty.env"):     []byte("YARD_TEMPLATE=\n"),
+			}
+			for path, payload := range unrelatedSettings {
+				testkit.WriteFile(t, path, payload, 0o600)
+			}
 			transition.options.NewTransactionID = func() TransactionID { return "tx-test-002" }
 			for _, reconciler := range reconcilers {
 				reconciler.converged = false
@@ -2805,6 +2812,12 @@ func TestV2TransitionResumesDurableActivationOnlyRepairAtEveryCheckpoint(t *test
 				ownerCalls != [3]int{owner.prepares, owner.observes, owner.commits} {
 				t.Fatalf("repair changed migration state: ledger before=%q after=%q settings before=%q after=%q owner=%#v err=%v settingsErr=%v",
 					ledgerBefore.Payload, ledgerAfter.Payload, settingsBefore, settingsAfter, owner, err, settingsErr)
+			}
+			for path, payload := range unrelatedSettings {
+				preserved, err := os.ReadFile(path)
+				if err != nil || !bytes.Equal(payload, preserved) {
+					t.Errorf("activation-only repair changed unrelated settings %s: %v", path, err)
+				}
 			}
 		})
 	}

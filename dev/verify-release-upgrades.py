@@ -12,6 +12,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 
 
@@ -26,6 +27,11 @@ LEGACY_BASELINE_SHA256 = {
     "arm64": "4c349fe6316f90242c09398261e7f76f9bf07c94fa50862e8e707989cd76eea5",
 }
 LEGACY_INSTALLER_SHA256 = "7932034b1c4f42c7fd66975ff1291bec5ea83b687988d634d67d46ff93ce6d06"
+ACTIVATION_BASELINE = "0.17.3"
+ACTIVATION_BASELINE_SHA256 = {
+    "amd64": "3ea73ca51dae023600997a07bbfaa5df8be1f4c1c4f5c9ead1b261b5aec4363b",
+    "arm64": "dcc1ae42dc25760b9f4fd290c8aec23c09b729d4a04f780107022710f1247e79",
+}
 
 
 def require(condition, message):
@@ -44,12 +50,20 @@ def snapshot(root):
     }
 
 
-def run_process(command, env, timeout, input_text=None):
+def run_process(command, env, timeout, input_text=None, interrupt_marker=None):
     child = subprocess.Popen(command, env=env,
                              stdin=subprocess.DEVNULL if input_text is None else subprocess.PIPE,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              text=True, start_new_session=True)
     try:
+        if interrupt_marker is not None:
+            deadline = time.monotonic() + timeout
+            while not interrupt_marker.is_file() and child.poll() is None:
+                if time.monotonic() >= deadline:
+                    raise subprocess.TimeoutExpired(command, timeout)
+                time.sleep(0.02)
+            if interrupt_marker.is_file():
+                os.killpg(child.pid, signal.SIGKILL)
         stdout, stderr = child.communicate(input=input_text, timeout=timeout)
         return subprocess.CompletedProcess(command, child.returncode, stdout, stderr)
     finally:
@@ -280,6 +294,145 @@ def verify(release, version, baseline, arch, root):
     print(f"PASS: released {BASELINE} updater resumes the candidate's journal after SIGKILL", flush=True)
 
 
+def verify_activation_only_recovery(release, version, baseline, arch, root):
+    started = time.monotonic()
+    fixture = Fixture(root / "activation-only", release, version, baseline, arch, ACTIVATION_BASELINE)
+    host_settings = fixture.config / "config.env"
+    host_settings.write_text("CODING_TOOL_INTEGRATIONS=codex\n")
+    host_settings.chmod(0o600)
+    fixture.run([str(fixture.old_launcher), "migrate", "--yes"])
+    completed_source_transaction = json.loads(fixture.journal.read_text())["transaction"]
+    ledger = fixture.config / "release-transition/v2/ledger.json"
+    ledger_before = ledger.read_bytes()
+    registration = fixture.config / "yards/unrelated/config.env"
+    registration.parent.mkdir(parents=True, mode=0o700)
+    registration.write_text("YARD_TEMPLATE=''\nSSH_PORT=2226\n")
+    registration.chmod(0o600)
+    registration_before = registration.read_bytes()
+
+    control = root / "incus-observation.json"
+
+    def observe(status, hold):
+        payload = json.dumps({"instances": [{"project": "subyard", "name": "yard",
+                                             "info": {"name": "yard", "status": status,
+                                                      "type": "container", "config": {}, "devices": {}}}],
+                              "holdJournal": str(fixture.journal) if hold else ""})
+        control.write_text(payload)
+        control.chmod(0o600)
+        deadline = time.monotonic() + 10
+        applied = Path(str(control) + ".applied")
+        while time.monotonic() < deadline:
+            if applied.exists() and applied.read_text() == payload:
+                return
+            time.sleep(0.02)
+        require(False, "Incus fixture did not apply the requested observation")
+
+    observe("Running", True)
+    shims = fixture.root / "commands"
+    shims.mkdir()
+    unexpected = fixture.root / "unexpected-host-command"
+    interrupted = Path(str(control) + ".held")
+    systemctl = shims / "systemctl"
+    systemctl.write_text("#!/usr/bin/python3\nimport pathlib, sys\n"
+                        f"pathlib.Path({str(unexpected)!r}).write_text('systemctl operation rejected')\n"
+                        "sys.exit(99)\n")
+    systemctl.chmod(0o700)
+    sudo = shims / "sudo"
+    sudo.write_text("#!/usr/bin/python3\nimport pathlib, sys\n"
+                    "if sys.argv[1:] == ['-n', 'true']:\n    sys.exit(0)\n"
+                    f"pathlib.Path({str(unexpected)!r}).write_text('sudo operation rejected')\n"
+                    "sys.exit(99)\n")
+    sudo.chmod(0o700)
+    incus = shims / "incus"
+    incus.write_text("#!/usr/bin/python3\nimport pathlib, sys\n"
+                     "arguments = sys.argv[1:]\n"
+                     "if arguments and arguments[0] == 'exec' and '--' in arguments:\n"
+                     "    command = arguments[arguments.index('--') + 1:]\n"
+                     "    if command[:3] == ['bash', '-se', '--'] and '\"state\":\"absent\"' in sys.stdin.read():\n"
+                     "        print('{\"state\":\"absent\",\"actual\":\"\",\"desired\":\"\"}')\n"
+                     "        sys.exit(0)\n"
+                     f"pathlib.Path({str(unexpected)!r}).write_text('incus operation rejected')\n"
+                     "sys.exit(99)\n")
+    incus.chmod(0o700)
+    fixture.env["PATH"] = str(shims) + ":/usr/bin:/bin"
+    observed_config = run_process([str(fixture.old_launcher), "config", "status"], fixture.env, timeout=30)
+    require(observed_config.returncode == 1 and "drift" in observed_config.stdout + observed_config.stderr,
+            "synthetic config drift unavailable: " + observed_config.stdout + observed_config.stderr)
+
+    # The fixture backend holds observation after the real engine persists its
+    # journal. Interrupt only this owned session as soon as the marker appears.
+    result = run_process([str(fixture.old_launcher), "migrate", "--yes"], fixture.env,
+                         timeout=60, interrupt_marker=interrupted)
+    rejected = unexpected.read_text() if unexpected.exists() else "none"
+    require(interrupted.is_file() and result.returncode == -signal.SIGKILL,
+            "published baseline did not reach the interrupted observation "
+            f"(rejected: {rejected}): {result.stdout}{result.stderr}")
+    journal = json.loads(fixture.journal.read_text())
+    require(journal["checkpoint"] == "reconciling" and journal["steps"] == []
+            and journal["releases"]["from"] == journal["releases"]["target"],
+            "published baseline did not create the activation-only journal")
+    require(not unexpected.exists(), "activation fixture attempted a privileged or mutating host command")
+    # A stopped synthetic instance has no live config consumers. Its desired
+    # settings and asset inventory remain identical to the running observation.
+    observe("Stopped", False)
+    blocked = json.loads(fixture.run([str(fixture.old_launcher), "migrate", "--check", "--json"]))
+    require(len(blocked.get("blockers", [])) == 1
+            and blocked["blockers"][0]["resource"] == "yard.unrelated"
+            and blocked["blockers"][0]["message"] == "the yard template is not supported by this migration",
+            "published baseline did not reproduce the sole unrelated-template blocker")
+    journal_before = fixture.journal.read_bytes()
+    config_before = snapshot(fixture.config)
+    bundle = release / f"subyard-{version}-linux-{arch}.tar.gz"
+    published = fixture.run(["bash", str(release / "subyard-install-runtime-release.sh"),
+                             "--publish-only", "--runtime-root", str(fixture.runtime),
+                             "--bundle", str(bundle), "--checksum", str(bundle) + ".sha256",
+                             "--manifest", str(bundle) + ".manifest.json",
+                             "--provenance", str(bundle) + ".provenance.json"]).strip()
+    require(published.startswith(f"releases/{version}-") and "/" not in published[len("releases/"):],
+            "installer returned an invalid recovery candidate identity")
+    candidate = fixture.runtime / published / "bin/yard"
+    inspected = json.loads(fixture.run([str(candidate), "migrate", "--check", "--json"]))
+    require(inspected["outcome"]["status"] == "recovering" and not inspected.get("blockers")
+            and inspected["current"] == journal["goal"]["target"]
+            and inspected["outcome"].get("transaction") == journal["transaction"],
+            "standalone candidate did not inspect the original authorized resume")
+    require(snapshot(fixture.config) == config_before and fixture.journal.read_bytes() == journal_before,
+            "delegated inspection changed protected metadata or settings")
+    fixture.run([str(candidate), "migrate"])
+    completed = json.loads(fixture.journal.read_text())
+    require(completed["checkpoint"] == "complete"
+            and {key: value for key, value in completed.items() if key != "checkpoint"}
+            == {key: value for key, value in journal.items() if key != "checkpoint"},
+            "delegation replaced or changed the original authorized journal bindings")
+    require(ledger.read_bytes() == ledger_before and registration.read_bytes() == registration_before
+            and digest(fixture.retained) == fixture.retained_hash
+            and fixture.project_marker.read_text() == "project data\n",
+            "delegation changed retained settings, migration ledger or project data")
+    completed_config = snapshot(fixture.config)
+    journal_relative = str(fixture.journal.relative_to(fixture.config))
+    config_changes = sorted(key for key in completed_config.keys() | config_before.keys()
+                            if key != journal_relative and completed_config.get(key) != config_before.get(key))
+    # Normal terminal cleanup may remove only historical migration evidence.
+    historical_evidence = f"release-transition/v2/transactions/{completed_source_transaction}/evidence/"
+    require(all(key.startswith(historical_evidence) and key in config_before and key not in completed_config
+                for key in config_changes), "delegation changed persistent configuration beyond terminal cleanup: "
+            + ", ".join(config_changes))
+    require(os.readlink(fixture.runtime / "current") == fixture.initial
+            and not (fixture.runtime / "previous").exists() and not unexpected.exists(),
+            "delegation changed runtime links or invoked a host mutation")
+    ready = json.loads(fixture.run([str(fixture.old_launcher), "migrate", "--check", "--json"]))
+    require(ready["outcome"]["status"] == "ready", "original published owner cannot verify completed recovery")
+    print(f"PASS: unmodified released {ACTIVATION_BASELINE} activation-only journal resumes with {version} code and original assets",
+          flush=True)
+    fixture.update("--version", version, "--yes")
+    fixture.complete(old=False)
+    require(os.readlink(fixture.runtime / "previous") == fixture.initial
+            and ledger.read_bytes() == ledger_before and registration.read_bytes() == registration_before
+            and not unexpected.exists(), "ordinary update changed retained state or invoked a host mutation")
+    print(f"PASS: released {ACTIVATION_BASELINE} ordinary updater reaches {version} after delegated recovery "
+          f"({time.monotonic() - started:.1f}s)", flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--release-dir", type=Path, required=True)
@@ -288,11 +441,15 @@ def main():
                         help="optional directory containing the pinned official baseline assets")
     parser.add_argument("--legacy-baseline-dir", type=Path,
                         help="optional directory containing the pinned official legacy baseline assets")
+    parser.add_argument("--activation-baseline-dir", type=Path,
+                        help="optional directory containing the pinned activation-recovery baseline assets")
+    parser.add_argument("--only-activation-recovery", action="store_true",
+                        help="run only the published activation-only recovery regression")
     args = parser.parse_args()
     arch = {"x86_64": "amd64", "aarch64": "arm64"}.get(platform.machine())
     require(platform.system() == "Linux" and arch in BASELINE_SHA256, "unsupported platform")
     release = args.release_dir.resolve()
-    require(args.version not in (BASELINE, LEGACY_BASELINE),
+    require(args.version not in (BASELINE, LEGACY_BASELINE, ACTIVATION_BASELINE),
             "candidate must differ from the released baselines")
     os.umask(0o077)
     # Protected runtime roots reject writable workspace ancestors. All mutable
@@ -307,17 +464,23 @@ def main():
                              "-o", str(server_binary), "./internal/testkit/cmd/empty-incus"],
                             env=None, timeout=180)
         require(built.returncode == 0, f"cannot build Incus fixture: {built.stdout}{built.stderr}")
-        with subprocess.Popen([str(server_binary), str(root)], stdout=subprocess.PIPE,
+        observation = root / "incus-observation.json"
+        observation.write_text("{}")
+        with subprocess.Popen([str(server_binary), str(root), str(observation)], stdout=subprocess.PIPE,
                               stderr=subprocess.STDOUT, text=True) as server:
             try:
                 readable, _, _ = select.select([server.stdout], [], [], 10)
                 require(readable and server.stdout.readline().strip() == "ready",
                         "Incus fixture did not become ready")
-                legacy = baseline_assets(root, args.legacy_baseline_dir, LEGACY_BASELINE,
-                                         LEGACY_BASELINE_SHA256, arch)
-                verify_legacy(release, args.version, legacy, arch, root)
-                baseline = baseline_assets(root, args.baseline_dir, BASELINE, BASELINE_SHA256, arch)
-                verify(release, args.version, baseline, arch, root)
+                if not args.only_activation_recovery:
+                    legacy = baseline_assets(root, args.legacy_baseline_dir, LEGACY_BASELINE,
+                                             LEGACY_BASELINE_SHA256, arch)
+                    verify_legacy(release, args.version, legacy, arch, root)
+                    baseline = baseline_assets(root, args.baseline_dir, BASELINE, BASELINE_SHA256, arch)
+                    verify(release, args.version, baseline, arch, root)
+                activation = baseline_assets(root, args.activation_baseline_dir, ACTIVATION_BASELINE,
+                                             ACTIVATION_BASELINE_SHA256, arch)
+                verify_activation_only_recovery(release, args.version, activation, arch, root)
             finally:
                 server.terminate()
                 try:

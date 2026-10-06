@@ -472,6 +472,12 @@ activation and uses the old updater to resume the same authorized candidate tran
 released-binary check complements tests of the frozen codecs; rebuilding both ends from current
 source does not establish cross-release compatibility.
 
+The same harness runs the checksum-pinned v0.17.3 engine to create and interrupt an activation-only
+repair, reproduce its unrelated-template blocker, resume through the standalone candidate with
+the original assets, and complete a subsequent ordinary update. Its synthetic Incus backend changes
+only observed running/stopped state; settings, ledger and original journal bindings must survive
+recovery. Privileged commands are rejected by fixture shims.
+
 ### Legacy upgrades
 
 Runtimes older than v0.11.0 use a legacy updater that cannot authorize the current release
@@ -536,6 +542,28 @@ PATCH_VERSION=0.11.2 # or a later supported patch release
 
 The command is interactive by default. Add `--yes` only for an intentional non-interactive run
 after reviewing the reported changes.
+
+The published v0.17.3 engine can also reopen completed settings migrations while resuming a
+same-release activation repair. Its journal has no migration steps, checkpoint `reconciling`, and
+one `yard.<name>` blocker saying the template is unsupported. A newer verified standalone
+candidate with the same registry can resume that exact transaction using its engine and the
+original owner's verified runtime assets. It preserves the original authorization, observation
+scope, settings, ledger and stable runtime links; it does not replace the journal or migrate the
+unrelated yard. Other blocked transactions retain their existing recovery rules.
+
+After the runtime installer publishes the verified candidate without activating it, use its exact
+launcher path to inspect and resume the installed release before retrying the ordinary update:
+
+```bash
+"<runtime-root>/releases/<candidate-release>/bin/yard" -Y default migrate --check --json
+"<runtime-root>/releases/<candidate-release>/bin/yard" -Y default migrate
+yard migrate --check
+yard update
+```
+
+The standalone candidate's blocked update reports this recovery path. The installed v0.17.3
+launcher cannot perform the delegated repair. Keep its configuration and durable transaction
+records intact until recovery completes.
 
 Registry v2 contains only compiled, typed one-time capabilities. Activation reconcilers separately
 refresh materialized config, an already-active test-VM broker and an installed host power runtime;

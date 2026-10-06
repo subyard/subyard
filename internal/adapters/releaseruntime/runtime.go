@@ -504,6 +504,7 @@ func (runtime *Runtime) PrepareTransition(
 				)
 			}
 			runtime.setV0111StandaloneRetry(ctx, parsed.root, protected)
+			runtime.setV0173StandaloneRetry(ctx, parsed.root, protected)
 			return runtime.prepareProtectedTransition(parsed, protected)
 		}
 	}
@@ -1152,12 +1153,28 @@ func (runtime *Runtime) prepareInspectedCandidateTransition(
 	inspection releasetransition.Inspection,
 	activationReconciliationOwned bool,
 	revalidation *replacementRevalidation,
+) (Prepared, error) {
+	return runtime.prepareInspectedCandidateTransitionWithDelegate(
+		parsed, owner, target, request, inspection, activationReconciliationOwned, revalidation, nil,
+	)
+}
+
+func (runtime *Runtime) prepareInspectedCandidateTransitionWithDelegate(
+	parsed options,
+	owner candidateVerification,
+	target candidateVerification,
+	request releasetransition.ProcessRequest,
+	inspection releasetransition.Inspection,
+	activationReconciliationOwned bool,
+	revalidation *replacementRevalidation,
+	delegate *candidateVerification,
 ) (prepared Prepared, err error) {
 	defer func() {
 		if err == nil && !parsed.check {
 			prepared.nativePlan = inspection.Plan
 			prepared.Steps = releaseOperationSteps(request, inspection)
 			prepared.Binding = releaseOperationBinding(request, inspection, owner, target, parsed.expectedLinks, revalidation)
+			prepared.Binding = delegatedReleaseOperationBinding(prepared.Binding, delegate)
 		}
 	}()
 	goal := releasetransition.Goal{Target: request.Target, Direction: request.Direction}
@@ -1289,8 +1306,8 @@ func (runtime *Runtime) prepareInspectedCandidateTransition(
 			request.Execution = &releasetransition.Execution{
 				Plan: inspection.Plan, Authorization: grant,
 			}
-			converged, convergeErr := runtime.invokeVerifiedCandidateTransition(
-				ctx, verifiedOwner, request, grant,
+			converged, convergeErr := runtime.invokeTransitionExecution(
+				ctx, verifiedOwner, delegate, request, grant,
 			)
 			if convergeErr != nil {
 				return convergeErr
@@ -1308,8 +1325,8 @@ func (runtime *Runtime) prepareInspectedCandidateTransition(
 				if converged.Outcome.Code == releasetransition.CodePlanStale {
 					request.Mode = releasetransition.ProcessInspect
 					request.Execution = nil
-					rechecked, recheckErr := runtime.invokeVerifiedCandidateTransition(
-						ctx, verifiedOwner, request, "",
+					rechecked, recheckErr := runtime.invokeTransitionExecution(
+						ctx, verifiedOwner, delegate, request, "",
 					)
 					if recheckErr != nil {
 						return recheckErr

@@ -28,6 +28,7 @@ type IncusServer struct {
 	mu          sync.Mutex
 	serverInfo  map[string]any
 	instances   map[string]map[string]any
+	projects    map[string]map[string]any
 	connections map[*websocket.Conn]struct{}
 	connected   chan struct{}
 	execStarted chan struct{}
@@ -92,6 +93,7 @@ func NewIncusServer(root string) (*IncusServer, error) {
 			"environment":    map[string]any{"server": "incus", "server_version": "6.23"},
 		},
 		instances:   make(map[string]map[string]any),
+		projects:    make(map[string]map[string]any),
 		connections: make(map[*websocket.Conn]struct{}),
 		connected:   make(chan struct{}, 1),
 		execStarted: make(chan struct{}, 1),
@@ -186,6 +188,12 @@ func (fake *IncusServer) SetInstance(project, name string, instance map[string]a
 	fake.instances[project+"/"+name] = cloneAnyMap(instance)
 }
 
+func (fake *IncusServer) SetProject(name string, project map[string]any) {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	fake.projects[name] = cloneAnyMap(project)
+}
+
 func (fake *IncusServer) WaitForEventClient(ctx context.Context) error {
 	select {
 	case <-fake.connected:
@@ -246,6 +254,17 @@ func (fake *IncusServer) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		fake.serveOperation(writer, request)
 	case request.Method == http.MethodGet && request.URL.Path == "/1.0/instances":
 		fake.listInstances(writer, request)
+	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/1.0/projects/"):
+		project := strings.TrimPrefix(request.URL.Path, "/1.0/projects/")
+		fake.mu.Lock()
+		metadata, found := fake.projects[project]
+		metadata = cloneAnyMap(metadata)
+		fake.mu.Unlock()
+		if !found {
+			writeIncusError(writer, http.StatusNotFound, "project not found")
+			return
+		}
+		writeIncusSync(writer, metadata)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/1.0/instances/"):
 		name := strings.TrimPrefix(request.URL.Path, "/1.0/instances/")
 		project := request.URL.Query().Get("project")

@@ -102,12 +102,13 @@ python3 dev/verify-release-upgrades.py --release-dir .build/release --version <c
 ```
 
 This Linux check needs Python 3 and Go to build the local empty-instance Incus API fixture. It
-downloads checksum-pinned v0.9.1 and v0.11.2 runtimes for the local architecture and verifies the
-legacy standalone bridge as well as the frozen updater contract. It confines all state to a
+downloads checksum-pinned v0.9.1, v0.11.2 and v0.17.3 runtimes for the local architecture and verifies
+the legacy standalone bridge, frozen updater contract and activation-only recovery. It confines all state to a
 temporary directory and interrupts only its own update process
-group. Use `--baseline-dir PATH` and `--legacy-baseline-dir PATH` to reuse downloaded official
-assets (including the legacy runtime installer). Publication runs this check after building the
-release assets.
+group. Use `--baseline-dir PATH`, `--legacy-baseline-dir PATH` and `--activation-baseline-dir PATH`
+to reuse downloaded official assets (including the legacy runtime installer). For a focused
+v0.17.3 regression, add `--only-activation-recovery`; publication requires the complete check after
+building the release assets.
 
 Choose local checks with [Subyard dev-flow](../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk).
 `./tests/run.sh` is the full unprivileged suite. It runs formatting, vet, race-enabled Go tests, a
