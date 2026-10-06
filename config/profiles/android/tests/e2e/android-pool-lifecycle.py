@@ -63,7 +63,9 @@ def acquire(directory, name, device=None, api=None):
         child = re.search(r'\(exit (-?\d+)\)', result.stderr)
         raise Failure(f"acquire failed (client={result.returncode}, "
                       f"code={kind[1] if kind else 'unknown'}, installer={child[1] if child else 'unknown'})")
-    return path, read_lease(path, device or "phone", api or 36)
+    lease = read_lease(path, device or "phone", api or 36)
+    observe_network(lease, 'acquisition')
+    return path, lease
 def adb(lease, *args, timeout=120):
     allocation = lease["allocation"]
     env = dict(os.environ, ADB_SERVER_SOCKET="localfilesystem:" + lease["endpoint"],
@@ -200,35 +202,84 @@ def require_sdk_pair(phone, tablet):
                 adb(lease, 'shell', 'wm', 'density') != 'Physical density: ' + density):
             raise Failure('live device dimensions or density differ from preset')
     phase('both APIs, image revisions and physical presets verified')
-def observe_network_failure(lease):
+def observe_network(lease, context='failure'):
     # Only fixed enums and a validated PID leave the guest; never addresses, headers or stderr.
     fields = dict(boot='unknown', framework='unknown', wifi_service='unknown',
-                  wifi='unknown', ipv4='unknown', default_route='unknown')
+                  wifi='unknown', ipv4='unknown', default_route='unknown',
+                  framework_exit='unknown', wifi_exit='unknown',
+                  ipv4_exit='unknown', route_exit='unknown',
+                  boot_exit='unknown', wifi_service_exit='unknown')
     try:
         output = adb(lease, 'shell',
-            'echo boot=$(getprop sys.boot_completed); echo framework=$(pidof system_server); '
-            'case "$(service check wifi)" in "Service wifi: found") echo wifi_service=found;; '
+            'boot=$(getprop sys.boot_completed 2>/dev/null); boot_exit=$?; '
+            'echo boot=$boot; echo boot_exit=$boot_exit; '
+            'framework=$(pidof system_server 2>/dev/null); framework_exit=$?; '
+            'echo framework=$framework; echo framework_exit=$framework_exit; '
+            'wifi_service=$(service check wifi 2>/dev/null); wifi_service_exit=$?; '
+            'echo wifi_service_exit=$wifi_service_exit; '
+            'case "$wifi_service" in "Service wifi: found") echo wifi_service=found;; '
             '"Service wifi: not found") echo wifi_service=missing;; esac; '
-            'echo wifi=$(settings get global wifi_on); '
-            'if ip -4 addr show scope global | grep -q " inet "; then echo ipv4=1; else echo ipv4=0; fi; '
-            'if ip -4 route show default | grep -q "^default "; '
-            'then echo default_route=1; else echo default_route=0; fi', timeout=5)
+            'wifi=$(settings get global wifi_on 2>/dev/null); wifi_exit=$?; '
+            'echo wifi=$wifi; echo wifi_exit=$wifi_exit; '
+            'addresses=$(ip -4 addr show scope global 2>/dev/null); address_exit=$?; '
+            'echo ipv4_exit=$address_exit; '
+            'if [ "$address_exit" != 0 ]; then echo ipv4=unknown; '
+            'else case "$addresses" in *" inet "*) echo ipv4=1;; *) echo ipv4=0;; esac; fi; '
+            'routes=$(ip -4 route show table all 2>/dev/null); route_exit=$?; '
+            'echo route_exit=$route_exit; '
+            'if [ "$route_exit" != 0 ]; then echo default_route=unknown; '
+            'else printf "%s\\n" "$routes" | grep -q "^default "; route_match=$?; '
+            'case "$route_match" in 0) echo default_route=1;; 1) echo default_route=0;; '
+            '*) echo default_route=unknown;; esac; fi', timeout=5)
         for line in output.splitlines():
-            match = re.fullmatch(r'(boot|wifi|ipv4|default_route)=([01])|'
-                                 r'(framework)=([1-9][0-9]{0,9})|'
-                                 r'(wifi_service)=(found|missing)', line)
-            if match:
-                parts = [part for part in match.groups() if part is not None]
-                fields[parts[0]] = parts[1]
+            key, _, value = line.partition('=')
+            if ((key in ('boot', 'wifi', 'ipv4', 'default_route') and value in ('0', '1')) or
+                    (key == 'framework' and re.fullmatch(r'[1-9][0-9]{0,9}', value)) or
+                    (key == 'wifi_service' and value in ('found', 'missing')) or
+                    (key in ('boot_exit', 'framework_exit', 'wifi_service_exit',
+                             'wifi_exit', 'ipv4_exit', 'route_exit') and
+                     re.fullmatch(r'[0-9]{1,3}', value) and int(value) <= 255)):
+                fields[key] = value
+        for field, command_exit in (('boot', 'boot_exit'), ('framework', 'framework_exit'),
+                                    ('wifi_service', 'wifi_service_exit'), ('wifi', 'wifi_exit'),
+                                    ('ipv4', 'ipv4_exit'), ('default_route', 'route_exit')):
+            if fields[command_exit] != '0':
+                fields[field] = 'unknown'
         outcome = 'ok'
     except CommandTimeout:
         outcome = 'timeout'
     except Failure:
         outcome = 'failed'
     # The L2 facade intentionally cannot inspect the owner's systemd egress unit.
-    phase('network failure observation adb=' + outcome + ' ' +
+    allocation = lease['allocation']
+    slot = allocation.get('slot_id')
+    slot = slot if isinstance(slot, str) and re.fullmatch(r'[0-9]{3}', slot) else 'unknown'
+    generation = allocation.get('generation')
+    generation = generation if type(generation) is int and 0 < generation < 1000000000 else 'unknown'
+    context = context if context in ('acquisition', 'failure') else 'unknown'
+    phase(f'network {context} observation slot={slot} gen={generation} adb=' + outcome + ' ' +
           ' '.join(f'{key}={value}' for key, value in fields.items()) +
           ' egress_service=unavailable_in_agent_context')
+def network_result(result):
+    status = http_status(result.stdout)
+    if result.returncode != 0:
+        return status, 'adb_transport_failed'
+    markers = [line for line in result.stdout.splitlines() if line.startswith('SUBYARD_NC_EXIT=')]
+    match = re.fullmatch(r'SUBYARD_NC_EXIT=([0-9]{1,3})', markers[0]) if len(markers) == 1 else None
+    if not match or int(match[1]) > 255 or not result.stdout.endswith(markers[0] + '\n'):
+        return status, 'invalid_nc_sentinel'
+    code = int(match[1])
+    error = 'none' if code == 0 else 'unknown'
+    if code:
+        # Classify captured errors locally; arbitrary stderr never enters evidence.
+        for name, pattern in (
+                ('unsupported_option', r'(?:bad|unknown|invalid|unrecognized) option'),
+                ('dns', r'getaddrinfo|unknown host|name or service not known|nodename nor servname'),
+                ('connect', r'connection refused|network is unreachable|no route to host|connection timed out')):
+            if re.search(pattern, result.stderr[:4096], re.I):
+                error = name
+                break
+    return status, f'nc_exit={code}(error={error})'
 def require_network_and_renderer(lease):
     # Android ships toybox nc; a DNS name plus HTTP response proves DNS and TCP egress.
     phase('verify DNS/TCP egress')
@@ -236,23 +287,29 @@ def require_network_and_renderer(lease):
     # Bound external reachability here; pool readiness must not depend on this public site.
     deadline = time.monotonic() + 90
     first_error = last_error = None
+    allocation = lease['allocation']
+    env = dict(os.environ, ADB_SERVER_SOCKET='localfilesystem:' + lease['endpoint'],
+               ANDROID_SERIAL=allocation['android_serial'])
     while time.monotonic() < deadline:
         try:
-            reply = adb(lease, 'shell', "printf 'GET /generate_204 HTTP/1.0\\r\\nHost: connectivitycheck.gstatic.com\\r\\n\\r\\n' "
-                        '| toybox nc -4 -w 10 -W 15 connectivitycheck.gstatic.com 80',
-                        timeout=min(20, max(0.1, deadline - time.monotonic())))
-            if re.match(r'HTTP/1\.[01] 204\b', reply):
+            result = call([ADB, 'shell', "printf 'GET /generate_204 HTTP/1.0\\r\\nHost: connectivitycheck.gstatic.com\\r\\n\\r\\n' "
+                          '| toybox nc -4 -w 10 -W 15 connectivitycheck.gstatic.com 80; '
+                          'printf "\\nSUBYARD_NC_EXIT=%s\\n" "$?"'],
+                          timeout=min(20, max(0.1, deadline - time.monotonic())), env=env)
+            status, outcome = network_result(result)
+            if status == '204' and outcome.startswith('nc_exit='):
                 break
-            last_error = 'completed(http=' + http_status(reply) + ')'
+            last_error = outcome + '(http=' + status + ')'
         except CommandTimeout as exc:
-            last_error = 'completion_timeout(http=' + getattr(exc, 'http_status', 'none') + ')'
+            status = getattr(exc, 'http_status', 'none')
+            last_error = 'completion_timeout(http=' + status + ')'
         except Failure:
-            last_error = 'adb_failed'
+            last_error = 'adb_unavailable'
         if first_error is None:
             first_error = last_error
         time.sleep(min(2, max(0, deadline - time.monotonic())))
     else:
-        observe_network_failure(lease)
+        observe_network(lease)
         raise Failure('Android DNS/TCP egress did not return HTTP 204 within 90 seconds: '
                       f'first={first_error} last={last_error}')
     phase('verify software renderer')
@@ -448,6 +505,7 @@ def main():
 
                 phase("acquire compatibility phone API 35")
                 step = "acquire compatibility phone"; compat_path, compat_phone = acquire(directory, "phone-compat", "phone", 35); leases.add(compat_path)
+                step = "compatibility phone SDK"; require_sdk(compat_phone, 35)
                 step = "compatibility phone network and renderer"; require_network_and_renderer(compat_phone)
                 step = "idle compatibility phone display"; idle_display(compat_phone)
                 phase("acquire tablet")

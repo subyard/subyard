@@ -27,6 +27,86 @@ def load(name):
 capture = load('android-pool-capture')
 viewer = load('android-pool-viewer')
 monitor = load('android-pool-monitor')
+lifecycle = load('android-pool-lifecycle')
+
+# Completed HTTP evidence survives a guest nc error; remote errors remain enums.
+private_probe = 'private-token-and-address'
+response = 'HTTP/1.0 204 No Content\r\nPrivate-Header: ' + private_probe + '\r\n\r\n'
+for code, raw, error, expected in (
+        (0, response + '\nSUBYARD_NC_EXIT=1\n', 'unexpected ' + private_probe, 'nc_exit=1(error=unknown)'),
+        (0, '\nSUBYARD_NC_EXIT=1\n', 'nc: getaddrinfo: ' + private_probe, 'nc_exit=1(error=dns)'),
+        (0, '\nSUBYARD_NC_EXIT=1\n', 'nc: Unknown option W ' + private_probe, 'nc_exit=1(error=unsupported_option)'),
+        (0, '\nSUBYARD_NC_EXIT=1\n', 'nc: Connection refused ' + private_probe, 'nc_exit=1(error=connect)'),
+        (1, '', 'adb: ' + private_probe, 'adb_transport_failed'),
+        (0, response, private_probe, 'invalid_nc_sentinel'),
+        (0, response + '\nSUBYARD_NC_EXIT=256\n', private_probe, 'invalid_nc_sentinel'),
+        (0, response + '\nSUBYARD_NC_EXIT=' + private_probe + '\n', '', 'invalid_nc_sentinel'),
+        (0, response + '\nSUBYARD_NC_EXIT=0\nSUBYARD_NC_EXIT=1\n', '', 'invalid_nc_sentinel'),
+        (0, response + '\nSUBYARD_NC_EXIT=0\ntrailing', '', 'invalid_nc_sentinel')):
+    result = lifecycle.network_result(SimpleNamespace(returncode=code, stdout=raw, stderr=error))
+    assert result == ('204' if raw.startswith('HTTP/') else 'none', expected)
+    assert private_probe not in str(result)
+
+lease = dict(endpoint=private_probe, allocation=dict(slot_id='001', generation=2,
+                                                    android_serial=private_probe))
+completion = SimpleNamespace(returncode=0, stdout=response + '\nSUBYARD_NC_EXIT=1\n',
+                             stderr=private_probe)
+with patch.object(lifecycle, 'call', side_effect=[completion]), \
+        patch.object(lifecycle, 'adb', return_value='GLES: SwiftShader') as renderer, \
+        patch.object(lifecycle.time, 'monotonic', side_effect=[0, 0, 0, 91, 91]), \
+        patch.object(lifecycle.time, 'sleep'), contextlib.redirect_stdout(io.StringIO()) as output:
+    lifecycle.require_network_and_renderer(lease)
+renderer.assert_called_once_with(lease, 'shell', 'dumpsys', 'SurfaceFlinger')
+assert 'DNS/TCP egress and software renderer verified' in output.getvalue()
+assert private_probe not in output.getvalue()
+
+with patch.object(lifecycle.subprocess, 'run', side_effect=subprocess.TimeoutExpired(
+        private_probe, 20, output=response.encode(), stderr=private_probe.encode())):
+    try:
+        lifecycle.call(['unused'])
+        raise AssertionError('timeout accepted as a command completion')
+    except lifecycle.CommandTimeout as exc:
+        assert exc.http_status == '204' and private_probe not in str(exc)
+
+# Run the actual observer shell with command-local stubs: failures are unknown,
+# empty successful observations are absent, and policy-table defaults are found.
+for ip_body, expected in (
+        ('return 23', 'ipv4=unknown default_route=unknown'),
+        ('return 0', 'ipv4=0 default_route=0'),
+        ('case "$*" in "-4 addr show scope global") printf " inet private-address/24\\n";; '
+         '"-4 route show table all") printf "default via private-address dev wlan0 table 1030\\n";; '
+         '*) return 23;; esac', 'ipv4=1 default_route=1')):
+    def observer_adb(_lease, *arguments, timeout):
+        assert arguments[0] == 'shell' and timeout == 5
+        program = ('getprop() { printf "1\\n"; }; pidof() { printf "596\\n"; }; '
+                   'service() { printf "Service wifi: found\\n"; }; '
+                   'settings() { printf "1\\n"; }; ip() { ' + ip_body + '; }; ' + arguments[1])
+        result = subprocess.run(['/bin/sh', '-c', program], capture_output=True, text=True, check=True)
+        return result.stdout.strip()
+    with patch.object(lifecycle, 'adb', side_effect=observer_adb), \
+            contextlib.redirect_stdout(io.StringIO()) as output:
+        lifecycle.observe_network(lease, 'acquisition')
+    assert expected in output.getvalue()
+    assert 'acquisition observation slot=001 gen=2 adb=ok boot=1 framework=596' in output.getvalue()
+    assert 'framework_exit=0 wifi_exit=0' in output.getvalue()
+    assert ('ipv4_exit=23 route_exit=23' if ip_body == 'return 23' else
+            'ipv4_exit=0 route_exit=0') in output.getvalue()
+    assert 'private-' not in output.getvalue()
+
+with patch.object(lifecycle, 'adb', side_effect=lifecycle.Failure(private_probe)), \
+        contextlib.redirect_stdout(io.StringIO()) as output:
+    lifecycle.observe_network(lease)
+assert 'adb=failed boot=unknown framework=unknown' in output.getvalue()
+assert 'ipv4=unknown default_route=unknown' in output.getvalue()
+assert private_probe not in output.getvalue()
+with patch.object(lifecycle, 'adb', return_value='boot=1\nboot_exit=23\nframework=596\n'
+                  'framework_exit=23\nwifi_service=found\nwifi_service_exit=23\n'
+                  'wifi=1\nwifi_exit=23\nipv4=1\nipv4_exit=23\n'
+                  'default_route=1\nroute_exit=23\n'), \
+        contextlib.redirect_stdout(io.StringIO()) as output:
+    lifecycle.observe_network(lease)
+assert 'boot=unknown framework=unknown wifi_service=unknown wifi=unknown' in output.getvalue()
+assert 'ipv4=unknown default_route=unknown' in output.getvalue()
 
 # Exact pinned v4.1 layout: device64, codec4, session12, then packets.
 # Session/config/keyframe bits are 63/62/61, respectively.
