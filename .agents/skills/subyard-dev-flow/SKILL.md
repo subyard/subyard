@@ -29,8 +29,10 @@ requirements when the task depends on them.
 ## Work
 
 1. Establish the requested outcome, scope, plan steps, and acceptance checks before
-   editing. Follow the overlay's task-file workflow when present. Keep remaining
-   steps current; change the agreed scope only with the user's agreement.
+   editing. Unless other instructions specify a location, keep task plans in
+   `private/tasks/`, creating it as needed; it is gitignored and needs no separate
+   private repository. Follow the overlay's task-file workflow when present. Keep
+   remaining steps current; change the agreed scope only with the user's agreement.
 2. Preserve unrelated edits and follow the affected component's architecture.
    Make host fixes reproducible through product setup, including repeat runs.
    Choose tests by the policy below and existing coverage.
