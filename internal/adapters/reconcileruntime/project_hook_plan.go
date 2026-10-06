@@ -31,6 +31,7 @@ type ProjectHookPlan struct {
 	unavailable      bool
 	integrationScope string
 	provisionedHooks hookObservation
+	completed        bool
 }
 
 type hookObservation struct {

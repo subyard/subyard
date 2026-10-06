@@ -599,10 +599,9 @@ guest_dev git init -q "$saved_gone"
 await_repo "$saved_gone"
 yard orca sync --yes >/dev/null
 saved_gone_id="$(repo_id "$saved_gone")"
-saved_session="$(orca_rpc session.tabs.createTerminal \
-  "$(rpc_params --arg selector "id:$saved_gone_id::$saved_gone" \
-    '{worktree:$selector,activate:false,clientMutationId:"orca-projects-saved-gone"}')")"
-saved_session_id="$(jq -er '.tab.id' <<<"$saved_session")"
+saved_session="$(guest_dev python3 -B /tmp/orca-projects-helper.py cleanup-terminal \
+  create "id:$saved_gone_id::$saved_gone")"
+saved_session_id="$(jq -er '.tab_id' <<<"$saved_session")"
 guest_dev rm -rf -- "$stale_folder/.git" "$stale_gone"
 guest_dev rm -rf -- "$saved_gone"
 if ! yard orca sync --yes >"$STATE/stale.out" 2>"$STATE/stale.err"; then
@@ -621,6 +620,74 @@ orca_rpc session.tabs.listAll | jq -e --arg id "$saved_session_id" \
 guest_dev test ! -e "$stale_folder/.git" \
   && guest_dev test ! -e "$stale_gone" \
   || die 'registration repaired project filesystem content'
+
+stage 'pruning missing checkouts retained only by stopped terminal layouts'
+pause_discovery
+clone_id="$(repo_id "$clone_root")"
+pending_selectors=()
+for mode in sync periodic; do
+  pending_checkout="$clone_root/cleanup-pending-$mode"
+  guest_dev git init -q "$pending_checkout"
+  # Use ordinary grouped discovery, rather than injecting a legacy repo record.
+  resume_discovery
+  await_repo "$pending_checkout"
+  pause_discovery
+  yard orca sync --yes >/dev/null
+  pending_id="$(repo_id "$pending_checkout")" \
+    || die "pending terminal checkout was not registered: $pending_checkout"
+  assert_repo "$pending_checkout" git "$clone_group" "cleanup-pending-$mode"
+  pending_selector="id:$pending_id::$pending_checkout"
+  pending_selectors+=("$pending_selector")
+  pending_session="$(guest_dev python3 -B /tmp/orca-projects-helper.py cleanup-terminal \
+    create "$pending_selector")"
+  pending_tab="$(jq -er '.tab_id' <<<"$pending_session")"
+  pending_pty="$(jq -er '.pty_id' <<<"$pending_session")"
+  # Native close removes the layout. A reversible exact PTY stop retains it.
+  stop_result="$(orca_rpc terminal.stopExact "$(rpc_params \
+    --arg selector "$pending_selector" --arg pty "$pending_pty" \
+    '{worktree:$selector,expectedPtyIds:[$pty],keepHistory:true}')")"
+  jq -e '.stopped == 1 and .postStopVerified == true' <<<"$stop_result" >/dev/null \
+    || die 'native terminal stop did not verify the stopped PTY'
+  guest_dev python3 -B /tmp/orca-projects-helper.py cleanup-terminal \
+    pending "$pending_selector" --tab-id "$pending_tab" --pty-id "$pending_pty"
+  guest_dev rm -rf -- "$pending_checkout"
+  if [ "$mode" = sync ]; then
+    yard orca sync --yes >/dev/null
+  else
+    resume_discovery
+    for _ in $(seq 1 60); do
+      catalog | jq -e --arg path "$pending_checkout" '.repos | all(.path != $path)' >/dev/null && break
+      sleep 2
+    done
+    pause_discovery
+  fi
+  assert_absent_repo "$pending_checkout"
+  guest_dev python3 -B /tmp/orca-projects-helper.py cleanup-terminal \
+    absent "$pending_selector" --tab-id "$pending_tab" --pty-id "$pending_pty"
+  [ "$(repo_id "$clone_root")" = "$clone_id" ] \
+    && [ "$(repo_id "$folder_root")" = "$folder_id" ] \
+    && [ "$(repo_id "$saved_gone")" = "$saved_gone_id" ] \
+    && [ "$(group_id "$clone_root")" = "$clone_group" ] \
+    && [ "$(group_id "$folder_root")" = "$folder_group" ] \
+    && [ "$(group_id "$bind_root")" = "$bind_group" ] \
+    || die 'pending-layout cleanup changed unrelated project identities'
+  orca_rpc session.tabs.listAll | jq -e --arg root "$session_id" --arg live "$saved_session_id" \
+    '[.snapshots[].tabs[].id] | index($root) != null and index($live) != null' >/dev/null \
+    || die 'pending-layout cleanup removed unrelated saved or live tabs'
+done
+sleep 3
+yard orca restart --yes >/dev/null
+for mode in sync periodic; do
+  assert_absent_repo "$clone_root/cleanup-pending-$mode"
+done
+for pending_selector in "${pending_selectors[@]}"; do
+  guest_dev python3 -B /tmp/orca-projects-helper.py cleanup-terminal absent "$pending_selector"
+done
+orca_rpc session.tabs.listAll | jq -e \
+  --arg root "$session_id" --arg live "$saved_session_id" \
+  '[.snapshots[].tabs[].id] | index($root) != null and index($live) != null' >/dev/null \
+  || die 'restart lost unrelated tabs after pending-layout cleanup'
+resume_discovery
 
 stage 'preserving a changed hook list and repairing the missing dispatcher through explicit init'
 pause_discovery
@@ -646,7 +713,21 @@ guest_root grep -Fxq stale-hook /etc/subyard/agent-project-hooks \
   || die 'init changed the conflicting hook list'
 # Undo only this fixture's injected edit; missing owned files remain repairable.
 guest_root cp /tmp/orca-project-hooks-original /etc/subyard/agent-project-hooks
-yard init --yes >/dev/null
+if ! yard init --yes >/dev/null; then
+  expected_helpers="$(python3 - "$RUNTIME_ROOT" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+root = Path(sys.argv[1]) / 'config/profiles/orca/resources/orca/registration'
+print(json.dumps({path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+                  for path in root.glob('*.py')}, sort_keys=True))
+PY
+)"
+  expected_dispatcher="$(sha256sum "$RUNTIME_ROOT/config/projects-changed.sh" | cut -d ' ' -f 1)"
+  guest_dev python3 -B /tmp/orca-projects-helper.py init-failure-diagnostics \
+    --expected-registration "$expected_helpers" --expected-dispatcher "$expected_dispatcher" \
+    || true
+  die 'restored-wiring init failed; safe read-only diagnostics collected before teardown'
+fi
 guest_root test -x /usr/local/libexec/subyard/projects-changed \
   && [ "$(guest_root sha256sum /etc/subyard/agent-project-hooks | cut -d ' ' -f 1)" = \
     "$(printf '\n' | sha256sum | cut -d ' ' -f 1)" ] \

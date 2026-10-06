@@ -111,6 +111,15 @@ class TransportTests(unittest.TestCase):
         self.assertTrue(caught.exception.timed_out)
         self.assertEqual(["session.tabs.listAll"], requests)
 
+    def test_fresh_terminal_inventory_timeout_is_known_read(self):
+        self.server(lambda request, _: time.sleep(0.15))
+        with self.assertRaises(self.error) as caught:
+            self.client(self.metadata, timeout=0.04).call("terminal.list", {
+                "requireFreshPtyLiveness": True, "includeVisualLayouts": False,
+            })
+        self.assertFalse(caught.exception.unknown)
+        self.assertTrue(caught.exception.timed_out)
+
     def test_global_budget_timeout_preserves_read_timeout_flags(self):
         requests = []
 

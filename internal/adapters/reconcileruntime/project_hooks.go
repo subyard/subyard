@@ -65,6 +65,11 @@ func (runtime Runtime) RunProjectHooks(ctx context.Context) error {
 	if err := runtime.CheckProjectHookPlan(ctx, false); err != nil {
 		return err
 	}
+	// Integration repair may already have run these hooks during this init.
+	// Recheck captured inputs, then preserve that successful native result.
+	if runtime.HookPlan != nil && runtime.HookPlan.completed {
+		return nil
+	}
 	applicable, err := runtime.ProjectHooksApplicable(ctx)
 	if err != nil || !applicable {
 		return err
@@ -77,5 +82,11 @@ func (runtime Runtime) RunProjectHooks(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
-	return runtime.CheckProjectHookPlan(ctx, false)
+	if err := runtime.CheckProjectHookPlan(ctx, false); err != nil {
+		return err
+	}
+	if runtime.HookPlan != nil {
+		runtime.HookPlan.completed = true
+	}
+	return nil
 }

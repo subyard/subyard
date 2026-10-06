@@ -309,8 +309,17 @@ Ungrouped Git records below an active, reconciled project root are also cleaned 
 including legacy or interrupted registrations. Explicit membership in an unrelated
 group, remote records and manually added nested folders are left alone. Periodic
 discovery uses the same cleanup rules as explicit sync.
-Records with open or saved session tabs are retained with a warning. Orca's removal API
-discards the removed record's worktree metadata; it does not delete files on disk.
+Records with live terminals, other saved tabs or unverified tab state are retained with a warning.
+Exposed agent sessions, launch drafts, chat leaves and saved terminal buffers are also retained.
+An absent checkout's terminal layouts can be removed when all belong to that exact checkout,
+explicitly lack a terminal handle, and a fresh, complete local terminal inventory has no matching
+worktree or saved PTY. This also checks orphan terminals. Saved tabs are read again before removal;
+unavailable or incomplete terminal evidence stops cleanup. Subyard closes the exact stale parent
+tabs through Orca's API before removing the repository, so cached layouts are also cleared.
+It repeats the snapshot, terminal, runtime and missing-path checks immediately before each close.
+These reads and native close are separate operations: stock Orca does not provide atomic protection
+against concurrent revival of the same null-handle tab. Orca's removal API then discards the record's
+saved worktree metadata; no files on disk are deleted.
 Empty groups of removed Subyard projects are also removed, unless they contain child groups
 or native Orca folder workspaces. These rules apply to project hooks as well as explicit sync.
 

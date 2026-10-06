@@ -3,6 +3,7 @@
 
 import argparse
 import grp
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -419,6 +420,162 @@ def forced_command(arguments):
     os.execve(arguments.engine, argv, environment)
 
 
+def cleanup_terminal(arguments):
+    """Exercise native PTY stops without editing stock session persistence."""
+    metadata = "/srv/agents/orca/config/orca/orca-runtime.json"
+    worktree = arguments.worktree.removeprefix("id:")
+    call = lambda method, params=None: call_any_result(metadata, method, params)
+
+    def inventory():
+        result = call("terminal.list", {"limit": 1000, "requireFreshPtyLiveness": True,
+                                        "includeVisualLayouts": False})
+        rows = result["terminals"]
+        scope = result["hostScope"]
+        assert result["truncated"] is False and result["totalCount"] == len(rows)
+        assert "local" in scope["hostIds"] and "local" not in scope["omittedHostIds"]
+        return rows
+
+    try:
+        if arguments.phase == "create":
+            created = call("session.tabs.createTerminal", {
+                "worktree": arguments.worktree, "activate": False,
+                "command": "printf 'cleanup-fixture\\n'; exec sleep 3600",
+                "clientMutationId": "cleanup-" + str(uuid.uuid4()),
+            })
+            tab_id = created["tab"]["id"]
+        else:
+            tab_id = arguments.tab_id
+        deadline = time.monotonic() + 30
+        while True:
+            snapshots = snapshot_tabs(call("session.tabs.listAll"))
+            target_snapshots = [item for item in snapshots
+                                if item["worktree"].startswith(worktree.split("::", 1)[0] + "::")]
+            tabs = [tab for item in snapshots if item["worktree"] == worktree
+                    for tab in item["tabs"] if tab["id"] == tab_id]
+            rows = inventory()
+            matching_pty = any(arguments.pty_id is not None and row["ptyId"] == arguments.pty_id
+                               for row in rows)
+            matching_worktree = any(row["worktreeId"].startswith(worktree.split("::", 1)[0] + "::")
+                                    for row in rows)
+            if arguments.phase == "create":
+                if len(tabs) == 1 and tabs[0].get("status") == "ready":
+                    pty_id = tabs[0]["ptyId"]
+                    if any(row["ptyId"] == pty_id and row["worktreeId"] == worktree
+                           and row["executionHostId"] == "local" and row["connected"] is True
+                           for row in rows):
+                        print(json.dumps({"tab_id": tab_id, "pty_id": pty_id}))
+                        return 0
+            elif arguments.phase == "pending":
+                if (len(tabs) == 1 and tabs[0].get("type") == "terminal"
+                        and tabs[0].get("status") == "pending-handle"
+                        and "terminal" in tabs[0] and tabs[0]["terminal"] is None
+                        and tabs[0].get("ptyId") == arguments.pty_id
+                        and not any(row["ptyId"] == arguments.pty_id
+                                    or row["worktreeId"].startswith(worktree.split("::", 1)[0] + "::")
+                                    for row in rows)):
+                    return 0
+            elif arguments.phase == "absent":
+                # Stock may retain an empty in-memory snapshot after native tab close.
+                if (all(item["tabs"] == [] for item in target_snapshots)
+                        and not matching_pty and not matching_worktree):
+                    return 0
+            if time.monotonic() >= deadline:
+                print("orca-cleanup-fixture: " + json.dumps({
+                    "phase": arguments.phase,
+                    "target_snapshot_count": len(target_snapshots),
+                    "target_nonempty_tab_count": sum(len(item["tabs"]) for item in target_snapshots),
+                    "selected_tab_present": bool(tabs),
+                    "matching_old_pty": matching_pty,
+                    "matching_worktree": matching_worktree,
+                }, sort_keys=True), file=sys.stderr)
+                raise SafeRpcError("native terminal cleanup fixture did not reach " + arguments.phase)
+            time.sleep(0.2)
+    except SafeRpcError as error:
+        print("orca-cleanup-fixture: " + str(error), file=sys.stderr)
+    except (AssertionError, KeyError, TypeError, ValueError):
+        print("orca-cleanup-fixture: invalid native terminal inventory", file=sys.stderr)
+    return 1
+
+
+def init_failure_diagnostics(arguments):
+    """Report only fixture-safe categories; never copy product or RPC payloads."""
+    diagnostics = {"registration_status_available": False, "terminal_census_available": False}
+    try:
+        hook = Path("/usr/local/libexec/subyard/projects-changed.d/orca").read_text()
+        host_names = re.findall(r"--host-name '([a-zA-Z0-9._][a-zA-Z0-9._-]*)'", hook)
+        assert len(host_names) == 1 and host_names[0] not in (".", "..")
+        result = subprocess.run(
+            ["python3", "-B", "/usr/local/libexec/subyard/orca-registration/main.py", "status",
+             "--host-name", host_names[0]],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=90, check=False,
+        )
+        report = json.loads(result.stdout)
+        errors = report["errors"]
+        assert isinstance(errors, list) and all(isinstance(error, str) for error in errors)
+        diagnostics.update(registration_status_available=True, registration_error_count=len(errors),
+                           registration_warning_count=len(report["warnings"]),
+                           registration_ready=report.get("ready") is True)
+        for category, marker in {
+            "terminal_census_rejected": "rejected terminal.list",
+            "rpc_rejected": "runtime rejected",
+            "timed_out": "timed out",
+            "budget_exhausted": "budget exhausted",
+            "inventory_incomplete": "inventory is incomplete",
+            "scope_changed": "scope changed",
+            "cleanup_changed": "cleanup candidate changed",
+        }.items():
+            diagnostics[category] = any(marker in error for error in errors)
+    except (OSError, ValueError, KeyError, TypeError, AssertionError, subprocess.TimeoutExpired):
+        pass
+    diagnostics["launch_defaults_check_available"] = False
+    try:
+        result = subprocess.run(
+            ["python3", "-B", "/usr/local/libexec/subyard/orca-registration/settings.py", "--check"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15, check=False,
+        )
+        diagnostics.update(launch_defaults_check_available=True,
+                           launch_defaults_ready=result.returncode == 0)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    try:
+        result = call_any_result("/srv/agents/orca/config/orca/orca-runtime.json", "terminal.list", {
+            "limit": 1000, "requireFreshPtyLiveness": True, "includeVisualLayouts": False,
+        })
+        rows, scope = result["terminals"], result["hostScope"]
+        assert isinstance(rows, list) and isinstance(scope, dict)
+        diagnostics.update(terminal_census_available=True, terminal_count=len(rows),
+                           terminal_census_complete=result.get("truncated") is False
+                           and result.get("totalCount") == len(rows)
+                           and "local" in scope.get("hostIds", [])
+                           and "local" not in scope.get("omittedHostIds", []))
+    except (SafeRpcError, KeyError, TypeError, AssertionError):
+        pass
+    for property_name in ("Result", "ExecMainStatus"):
+        try:
+            value = subprocess.run(
+                ["systemctl", "show", "subyard-orca-discovery.service", "--value", "-p", property_name],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5, check=True,
+            ).stdout.decode().strip()
+            if (property_name == "ExecMainStatus" and value.isdigit()) or value in {
+                "success", "exit-code", "signal", "timeout", "resources", "core-dump", "oom-kill",
+                "start-limit-hit", "protocol", "watchdog",
+            }:
+                diagnostics["discovery_" + property_name] = int(value) if value.isdigit() else value
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+    try:
+        expected = json.loads(arguments.expected_registration)
+        diagnostics["registration_helpers_equal"] = all(
+            hashlib.sha256((Path("/usr/local/libexec/subyard/orca-registration") / name).read_bytes()).hexdigest() == digest
+            for name, digest in expected.items())
+        diagnostics["dispatcher_equal"] = hashlib.sha256(
+            Path("/usr/local/libexec/subyard/projects-changed").read_bytes()).hexdigest() == arguments.expected_dispatcher
+    except (OSError, ValueError, TypeError):
+        pass
+    print("orca-init-diagnostics: " + json.dumps(diagnostics, sort_keys=True), file=sys.stderr)
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -427,6 +584,16 @@ def main():
     rpc.add_argument("method")
     rpc.add_argument("params", nargs="?")
     rpc.add_argument("--state", default="/srv/agents/orca")
+
+    cleanup = subparsers.add_parser("cleanup-terminal")
+    cleanup.add_argument("phase", choices=("create", "pending", "absent"))
+    cleanup.add_argument("worktree")
+    cleanup.add_argument("--tab-id")
+    cleanup.add_argument("--pty-id")
+
+    init_diagnostics = subparsers.add_parser("init-failure-diagnostics")
+    init_diagnostics.add_argument("--expected-registration", required=True)
+    init_diagnostics.add_argument("--expected-dispatcher", required=True)
 
     probe = subparsers.add_parser("stock-probe")
     probe.add_argument("--binary", default="/usr/bin/orca-ide")
@@ -454,6 +621,10 @@ def main():
     arguments = parser.parse_args()
     if arguments.command == "rpc":
         return rpc_call(arguments)
+    if arguments.command == "cleanup-terminal":
+        return cleanup_terminal(arguments)
+    if arguments.command == "init-failure-diagnostics":
+        return init_failure_diagnostics(arguments)
     if arguments.command == "stock-probe":
         return stock_probe(arguments)
     if arguments.command == "set-isolation":

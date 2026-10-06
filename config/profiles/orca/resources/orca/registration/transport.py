@@ -29,7 +29,7 @@ class RuntimeRPC:
 
     def call(self, method, params=None, before_send=None):
         started = time.monotonic()
-        write = method not in ("repo.list", "projectGroup.list", "folderWorkspace.list",
+        write = method not in ("repo.list", "terminal.list", "projectGroup.list", "folderWorkspace.list",
                                "settings.get", "session.tabs.listAll")
         sent = False
         try:

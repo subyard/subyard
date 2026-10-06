@@ -429,6 +429,253 @@ class ReconcileTests(unittest.TestCase):
         self.assertTrue(self.run_sync()["ready"])
         self.assertEqual(before[:1] + before[2:], self.rpc.repos)
 
+    def pending_terminal_snapshot(self, repo):
+        return {"worktree": repo["id"] + "::" + repo["path"], "tabs": [{
+            "id": "saved-terminal", "type": "terminal", "status": "pending-handle",
+            "terminal": None, "ptyId": "old-pty",
+        }]}
+
+    def test_missing_checkout_with_stale_terminal_layout_is_pruned(self):
+        repo = self.prepare_missing_repo()
+        self.rpc.snapshots = [self.pending_terminal_snapshot(repo)]
+        self.assertTrue(self.run_sync(apply=False)["ready"])
+        self.assertIn(repo, self.rpc.repos)
+        self.assertEqual(1, len(self.rpc.snapshots))
+        report = self.run_sync()
+        self.assertTrue(report["ready"], report)
+        self.assertNotIn(repo, self.rpc.repos)
+        self.assertEqual([dict(self.pending_terminal_snapshot(repo), tabs=[])], self.rpc.snapshots)
+        closes = [params for method, params in self.rpc.calls if method == "session.tabs.close"]
+        self.assertEqual([{"worktree": "id:" + repo["id"] + "::" + repo["path"],
+                           "tabId": "saved-terminal", "reason": "user"}], closes)
+        methods = [method for method, _ in self.rpc.calls]
+        self.assertLess(methods.index("session.tabs.close"), methods.index("repo.rm"))
+        census = [params for method, params in self.rpc.calls if method == "terminal.list"]
+        self.assertTrue(census)
+        self.assertTrue(all(params.get("requireFreshPtyLiveness") is True for params in census))
+        self.assertFalse(any("worktree" in params or "handles" in params for params in census))
+
+    def test_cleanup_retains_saved_tabs_without_explicit_stale_terminal_proof(self):
+        for index, changes in enumerate((
+                {"type": "browser"}, {"type": "editor"}, {"status": "ready"},
+                {"terminal": "live-handle"}, {"ptyId": None}, {"status": None},
+                {"sessionId": "saved-session"}, {"agentSessionId": "agent-session"},
+                {"agentStatus": {"providerSession": "resumable-session"}},
+                {"launchDraft": {"command": "retained draft"}},
+                {"parentLayout": {"buffersByLeafId": {"leaf": "saved buffer"}}},
+                {"parentLayout": {"scrollbackRefsByLeafId": {"leaf": "saved scrollback"}}},
+                {"parentLayout": {"chatLeafId": "saved-chat"}}, {"parentLayout": "unknown"},
+                {"parentTabId": []}, {"parentTabId": ""})):
+            with self.subTest(changes=changes):
+                self.rpc = Catalog()
+                self.state = Path(self.tmp.name) / ("saved-" + str(index))
+                repo = self.prepare_missing_repo()
+                snapshot = self.pending_terminal_snapshot(repo)
+                snapshot["tabs"][0].update(changes)
+                self.rpc.snapshots = [snapshot]
+                report = self.run_sync()
+                self.assertTrue(report["ready"], report)
+                self.assertIn(repo, self.rpc.repos)
+                self.assertFalse(any(method == "terminal.list" for method, _ in self.rpc.calls))
+
+    def test_cleanup_retains_stale_layout_for_a_different_worktree(self):
+        repo = self.prepare_missing_repo()
+        snapshot = self.pending_terminal_snapshot(repo)
+        snapshot["worktree"] = repo["id"] + "::/another/worktree"
+        self.rpc.snapshots = [snapshot]
+        report = self.run_sync()
+        self.assertTrue(report["ready"], report)
+        self.assertIn(repo, self.rpc.repos)
+
+    def test_cleanup_retains_live_orphan_by_worktree_or_saved_pty(self):
+        for index, (pty, worktree) in enumerate((
+                ("different-pty", "same"), ("different-pty", "related"), ("old-pty", "other::/elsewhere"))):
+            with self.subTest(pty=pty, worktree=worktree):
+                self.rpc = Catalog()
+                self.state = Path(self.tmp.name) / ("live-" + str(index))
+                repo = self.prepare_missing_repo()
+                self.rpc.snapshots = [self.pending_terminal_snapshot(repo)]
+                key = repo["id"] + "::" + repo["path"] if worktree == "same" else (
+                    repo["id"] + "::/linked" if worktree == "related" else worktree)
+                self.rpc.terminals = [{"ptyId": pty, "worktreeId": key, "executionHostId": "local",
+                                       "connected": True, "orphaned": True}]
+                report = self.run_sync()
+                self.assertTrue(report["ready"], report)
+                self.assertIn(repo, self.rpc.repos)
+                self.assertEqual(1, len(self.rpc.snapshots))
+
+    def test_stale_terminal_cleanup_refuses_incomplete_or_invalid_live_inventory(self):
+        complete = {"terminals": [], "totalCount": 0, "truncated": False,
+                    "hostScope": {"hostIds": ["local"], "omittedHostIds": []}}
+        variants = (
+            {}, dict(complete, truncated=True), dict(complete, totalCount=1),
+            dict(complete, hostScope={"hostIds": [], "omittedHostIds": ["local"]}),
+            dict(complete, hostScope={"hostIds": ["local"], "omittedHostIds": ["local"]}),
+            dict(complete, terminals=[{"ptyId": "pty", "worktreeId": None,
+                                      "executionHostId": "local", "connected": True}], totalCount=1),
+        )
+        for index, inventory in enumerate(variants):
+            with self.subTest(inventory=inventory):
+                self.rpc = Catalog()
+                self.state = Path(self.tmp.name) / ("incomplete-" + str(index))
+                repo = self.prepare_missing_repo()
+                self.rpc.snapshots = [self.pending_terminal_snapshot(repo)]
+                self.rpc.terminal_inventory = inventory
+                report = self.run_sync()
+                self.assertFalse(report["ready"], report)
+                self.assertIn(repo, self.rpc.repos)
+                self.assertFalse(any(method == "repo.rm" for method, _ in self.rpc.calls))
+
+    def test_stale_terminal_cleanup_retains_new_saved_tab_before_removal(self):
+        repo = self.prepare_missing_repo()
+        self.rpc.snapshots = [self.pending_terminal_snapshot(repo)]
+        reads = 0
+
+        def new_saved_tab(method, _):
+            nonlocal reads
+            if method == "session.tabs.listAll":
+                reads += 1
+                if reads == 2:
+                    self.rpc.snapshots[0]["tabs"].append({"id": "new-browser", "type": "browser"})
+
+        self.rpc.after = new_saved_tab
+        report = self.run_sync()
+        self.assertTrue(report["ready"], report)
+        self.assertEqual(2, reads)
+        self.assertIn(repo, self.rpc.repos)
+
+    def test_stale_terminal_cleanup_keeps_record_when_fresh_liveness_fails(self):
+        repo = self.prepare_missing_repo()
+        self.rpc.snapshots = [self.pending_terminal_snapshot(repo)]
+        original = self.rpc.call
+
+        def unavailable(method, params=None, **kwargs):
+            if method == "terminal.list":
+                raise self.error("fresh terminal liveness unavailable", timed_out=True)
+            return original(method, params, **kwargs)
+
+        self.rpc.call = unavailable
+        report = self.run_sync()
+        self.assertFalse(report["ready"], report)
+        self.assertIn(repo, self.rpc.repos)
+        self.assertFalse(any(method == "repo.rm" for method, _ in self.rpc.calls))
+
+    def test_stale_terminal_cleanup_refuses_runtime_replaced_after_proof(self):
+        repo = self.prepare_missing_repo()
+        self.rpc.snapshots = [self.pending_terminal_snapshot(repo)]
+
+        def replaced(method, _):
+            if method == "terminal.list":
+                self.rpc.runtime_id = "replacement-runtime"
+
+        self.rpc.after = replaced
+        report = self.run_sync()
+        self.assertFalse(report["ready"], report)
+        self.assertIn(repo, self.rpc.repos)
+        self.assertIn("Orca cleanup runtime changed; retry sync", report["errors"])
+        self.assertFalse(any(method == "repo.rm" for method, _ in self.rpc.calls))
+
+    def test_stale_layout_close_rereads_snapshot_before_sending(self):
+        repo = self.prepare_missing_repo()
+        self.rpc.snapshots = [self.pending_terminal_snapshot(repo)]
+
+        def new_tab(method, _):
+            if method == "terminal.list":
+                self.rpc.snapshots[0]["tabs"].append({"id": "new-editor", "type": "editor"})
+
+        self.rpc.after = new_tab
+        report = self.run_sync()
+        self.assertFalse(report["ready"], report)
+        self.assertIn(repo, self.rpc.repos)
+        self.assertFalse(any(method in ("session.tabs.close", "repo.rm") for method, _ in self.rpc.calls))
+
+    def test_stale_layout_close_refreshes_liveness_before_sending(self):
+        repo = self.prepare_missing_repo()
+        self.rpc.snapshots = [self.pending_terminal_snapshot(repo)]
+        reads = 0
+
+        def revived(method, _):
+            nonlocal reads
+            if method == "session.tabs.listAll":
+                reads += 1
+                if reads == 3:
+                    self.rpc.terminals = [{"ptyId": "revived-pty",
+                        "worktreeId": repo["id"] + "::" + repo["path"],
+                        "executionHostId": "local", "connected": True}]
+
+        self.rpc.after = revived
+        report = self.run_sync()
+        self.assertFalse(report["ready"], report)
+        self.assertIn(repo, self.rpc.repos)
+        self.assertFalse(any(method in ("session.tabs.close", "repo.rm") for method, _ in self.rpc.calls))
+
+    def test_stale_layout_closes_each_parent_once_and_keeps_unrelated_tabs(self):
+        repo = self.prepare_missing_repo()
+        snapshot = self.pending_terminal_snapshot(repo)
+        snapshot["tabs"][0]["parentTabId"] = "parent-one"
+        snapshot["tabs"].extend([
+            dict(snapshot["tabs"][0], id="second-leaf", ptyId="second-pty"),
+            dict(snapshot["tabs"][0], id="third-leaf", ptyId="third-pty", parentTabId="parent-two"),
+        ])
+        other = {"worktree": "unrelated::/checkout", "tabs": [{"id": "kept", "type": "browser"}]}
+        self.rpc.snapshots = [snapshot, other]
+        report = self.run_sync()
+        self.assertTrue(report["ready"], report)
+        self.assertNotIn(repo, self.rpc.repos)
+        self.assertEqual([], self.rpc.snapshots[0]["tabs"])
+        self.assertEqual(other, self.rpc.snapshots[1])
+        closes = [params["tabId"] for method, params in self.rpc.calls if method == "session.tabs.close"]
+        self.assertEqual(["parent-one", "parent-two"], closes)
+
+    def test_stale_layout_close_unknown_reply_uses_readback_without_retry(self):
+        repo = self.prepare_missing_repo()
+        self.rpc.snapshots = [self.pending_terminal_snapshot(repo)]
+
+        def lost_reply(method, _):
+            if method == "session.tabs.close":
+                raise self.error("lost close reply", unknown=True)
+
+        self.rpc.after = lost_reply
+        report = self.run_sync()
+        self.assertTrue(report["ready"], report)
+        self.assertNotIn(repo, self.rpc.repos)
+        self.assertEqual(1, sum(method == "session.tabs.close" for method, _ in self.rpc.calls))
+
+    def test_stale_layout_close_requires_confirmed_removal_before_repo_rm(self):
+        repo = self.prepare_missing_repo()
+        self.rpc.snapshots = [self.pending_terminal_snapshot(repo)]
+        original = self.rpc.call
+
+        def refused(method, params=None, before_send=None):
+            if method == "session.tabs.close":
+                if before_send:
+                    before_send(self.rpc.runtime_id)
+                self.rpc.calls.append((method, params))
+                return {"closed": True, "refused": True}
+            return original(method, params, before_send=before_send)
+
+        self.rpc.call = refused
+        report = self.run_sync()
+        self.assertFalse(report["ready"], report)
+        self.assertIn(repo, self.rpc.repos)
+        self.assertTrue(self.rpc.snapshots[0]["tabs"])
+        self.assertFalse(any(method == "repo.rm" for method, _ in self.rpc.calls))
+
+    def test_stale_layout_close_keeps_repo_if_followup_tab_identity_is_invalid(self):
+        repo = self.prepare_missing_repo()
+        self.rpc.snapshots = [self.pending_terminal_snapshot(repo)]
+
+        def malformed(method, _):
+            if method == "session.tabs.close":
+                self.rpc.snapshots[0]["tabs"].append("invalid-tab")
+
+        self.rpc.after = malformed
+        report = self.run_sync()
+        self.assertFalse(report["ready"], report)
+        self.assertIn(repo, self.rpc.repos)
+        self.assertIn("Orca returned an invalid session tab identity; cleanup skipped", report["errors"])
+        self.assertFalse(any(method == "repo.rm" for method, _ in self.rpc.calls))
+
     def test_timed_out_saved_tab_read_retries_once_and_positive_result_preserves_repo(self):
         repo = self.prepare_missing_repo()
         original_call = self.rpc.call

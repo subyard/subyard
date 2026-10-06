@@ -38,6 +38,8 @@ class Catalog:
         self.groups = []
         self.repos = []
         self.snapshots = []
+        self.terminals = []
+        self.terminal_inventory = None
         self.folders = []
         self.runtime_id = "runtime-1"
         self.calls = []
@@ -51,11 +53,25 @@ class Catalog:
             result = {"repos": self.repos}
         elif method == "session.tabs.listAll":
             result = {"snapshots": self.snapshots}
+        elif method == "terminal.list":
+            result = self.terminal_inventory if self.terminal_inventory is not None else {
+                "terminals": self.terminals, "totalCount": len(self.terminals), "truncated": False,
+                "hostScope": {"hostIds": ["local"], "omittedHostIds": []},
+            }
         elif method == "folderWorkspace.list":
             result = {"folderWorkspaces": self.folders}
         elif method == "repo.rm":
             self.repos = [r for r in self.repos if "id:" + r["id"] != params["repo"]]
+            # Stock removes persisted state but can retain cached snapshots.
             result = {}
+        elif method == "session.tabs.close":
+            assert params["reason"] == "user" and params["worktree"].startswith("id:")
+            worktree = params["worktree"][3:]
+            for snapshot in self.snapshots:
+                if snapshot["worktree"] == worktree:
+                    snapshot["tabs"] = [tab for tab in snapshot["tabs"]
+                                        if (tab.get("parentTabId") or tab["id"]) != params["tabId"]]
+            result = {"closed": True}
         elif method == "projectGroup.list":
             result = {"groups": self.groups}
         elif method == "projectGroup.delete":

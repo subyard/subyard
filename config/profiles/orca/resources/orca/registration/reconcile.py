@@ -352,6 +352,108 @@ def _has_saved_tabs(snapshots, repo):
                for item in snapshots)
 
 
+def _only_stale_terminal_layouts(snapshots, repo):
+    found = False
+    prefix = repo["id"] + "::"
+    for item in snapshots:
+        if not item["worktree"].startswith(prefix) or not item["tabs"]:
+            continue
+        # A saved linked checkout may still be usable outside this missing root.
+        if item["worktree"] != prefix + repo["path"]:
+            return False
+        for tab in item["tabs"]:
+            if (not isinstance(tab, dict) or tab.get("type") != "terminal"
+                    or tab.get("status") != "pending-handle" or "terminal" not in tab
+                    or tab["terminal"] is not None or not isinstance(tab.get("id"), str)
+                    or not tab["id"] or not isinstance(tab.get("ptyId"), str) or not tab["ptyId"]
+                    or (tab.get("parentTabId") is not None and (
+                        not isinstance(tab["parentTabId"], str) or not tab["parentTabId"]))
+                    or tab.get("sessionId") or tab.get("agentSessionId")
+                    or tab.get("agentStatus") or tab.get("launchDraft")):
+                return False
+            layout = tab.get("parentLayout")
+            if layout is not None and (not isinstance(layout, dict) or any(
+                    layout.get(key) for key in ("buffersByLeafId", "scrollbackRefsByLeafId", "chatLeafId"))):
+                return False
+        found = True
+    return found
+
+
+def _has_terminal_reference(rpc, repo, snapshots):
+    # A pending layout can fail to bind a live orphan PTY. Request the native
+    # controller's fresh census without worktree/handle filters before pruning.
+    result = rpc.call("terminal.list", {"limit": 1000, "requireFreshPtyLiveness": True,
+                                        "includeVisualLayouts": False})
+    terminals = result.get("terminals")
+    scope = result.get("hostScope")
+    if (not isinstance(terminals, list) or result.get("truncated") is not False
+            or type(result.get("totalCount")) is not int or result["totalCount"] != len(terminals)
+            or not isinstance(scope, dict) or not isinstance(scope.get("hostIds"), list)
+            or not isinstance(scope.get("omittedHostIds"), list)
+            or "local" not in scope["hostIds"] or "local" in scope["omittedHostIds"]):
+        raise RpcError("Orca terminal inventory is incomplete or invalid; cleanup skipped")
+    prefix = repo["id"] + "::"
+    pty_ids = {tab["ptyId"] for item in snapshots if item["worktree"].startswith(prefix)
+               for tab in item["tabs"] if isinstance(tab, dict) and isinstance(tab.get("ptyId"), str)}
+    matched = False
+    for terminal in terminals:
+        if (not isinstance(terminal, dict) or not isinstance(terminal.get("ptyId"), str)
+                or not terminal["ptyId"] or not isinstance(terminal.get("worktreeId"), str)
+                or "::" not in terminal["worktreeId"]
+                or not isinstance(terminal.get("executionHostId"), str) or not terminal["executionHostId"]
+                or type(terminal.get("connected")) is not bool):
+            raise RpcError("Orca terminal inventory has an unknown identity; cleanup skipped")
+        if terminal["executionHostId"] == "local" and (
+                terminal["worktreeId"].startswith(prefix) or terminal["ptyId"] in pty_ids):
+            matched = True
+    return matched
+
+
+def _close_stale_terminal_layouts(scan, rpc, repo, snapshots, same_runtime):
+    prefix = repo["id"] + "::"
+    relevant = lambda items: [item for item in items
+                              if item["worktree"].startswith(prefix) and item["tabs"]]
+    expected = relevant(snapshots)
+    observed = snapshots
+    parents = {(item["worktree"], tab.get("parentTabId") or tab["id"])
+               for item in expected for tab in item["tabs"]}
+    for worktree, parent in sorted(parents):
+        def before_close(runtime_id):
+            same_runtime(runtime_id)
+            observed = _session_snapshots(rpc)
+            if relevant(observed) != expected or not _only_stale_terminal_layouts(observed, repo):
+                raise RpcError("Orca cleanup tab state changed; retry sync")
+            if _has_terminal_reference(rpc, repo, snapshots + observed):
+                raise RpcError("Orca cleanup terminal appeared; retry sync")
+            rpc.refresh()
+            if (_repo_at(_records(rpc, "repo.list", "repos"), repo["path"]) != repo
+                    or not verify_missing(scan, repo["path"])):
+                raise RpcError("Orca cleanup candidate changed; retry sync: " + repo["path"])
+            same_runtime(rpc.runtime_id)
+
+        # Stock lifecycle close cannot retire a null-handle layout. Ordinary
+        # close checks native retirement ownership, but has no atomic liveness
+        # fence; repeat our exact snapshot/census proof immediately before send.
+        try:
+            result = rpc.call("session.tabs.close", {"worktree": "id:" + worktree,
+                              "tabId": parent, "reason": "user"}, before_send=before_close)
+            if result.get("closed") is not True or result.get("refused"):
+                raise RpcError("Orca terminal layout removal is unconfirmed; retry sync")
+        except RpcError as error:
+            if not error.unknown:
+                raise
+        observed = _session_snapshots(rpc)
+        if any(not isinstance(tab, dict) or not isinstance(tab.get("id"), str) or not tab["id"]
+               for item in relevant(observed) for tab in item["tabs"]):
+            raise RpcError("Orca returned an invalid session tab identity; cleanup skipped")
+        if any((tab.get("parentTabId") or tab["id"]) == parent
+               for item in relevant(observed) for tab in item["tabs"]):
+            raise RpcError("Orca terminal layout removal is unconfirmed; retry sync")
+        expected = relevant(observed)
+    if expected or _has_terminal_reference(rpc, repo, snapshots + observed):
+        raise RpcError("Orca terminal layout cleanup changed; retry sync")
+
+
 def _prune_missing(report, scan, state, rpc, approved_ids=None):
     # Missing project roots may be temporarily unmounted. A known checkout
     # losing Git metadata is retained without blocking independent missing paths.
@@ -399,15 +501,34 @@ def _prune_missing(report, scan, state, rpc, approved_ids=None):
                 "Missing Orca checkout has session tabs and is retained: " + repo["path"]
             )
             return
-        if _has_saved_tabs(snapshots, repo):
+        proof_runtime = rpc.runtime_id
+        saved = _has_saved_tabs(snapshots, repo)
+        if saved and not _only_stale_terminal_layouts(snapshots, repo):
             report["warnings"].append("Missing Orca checkout has session tabs and is retained: " + repo["path"])
             continue
+        if saved:
+            latest = _session_snapshots(rpc)
+            if (_has_saved_tabs(latest, repo) and not _only_stale_terminal_layouts(latest, repo)
+                    or _has_terminal_reference(rpc, repo, snapshots + latest)):
+                report["warnings"].append("Missing Orca checkout has session tabs and is retained: " + repo["path"])
+                continue
         rpc.refresh()
         current = _repo_at(_records(rpc, "repo.list", "repos"), repo["path"])
         if current != repo or not verify_missing(scan, repo["path"]):
             raise RpcError("Orca cleanup candidate changed; retry sync: " + repo["path"])
+
+        def same_runtime(runtime_id):
+            if runtime_id != proof_runtime:
+                raise RpcError("Orca cleanup runtime changed; retry sync")
+
+        if saved and _has_saved_tabs(latest, repo):
+            _close_stale_terminal_layouts(scan, rpc, repo, latest, same_runtime)
+            rpc.refresh()
+            if (_repo_at(_records(rpc, "repo.list", "repos"), repo["path"]) != repo
+                    or not verify_missing(scan, repo["path"])):
+                raise RpcError("Orca cleanup candidate changed; retry sync: " + repo["path"])
         try:
-            rpc.call("repo.rm", {"repo": "id:" + repo["id"]})
+            rpc.call("repo.rm", {"repo": "id:" + repo["id"]}, before_send=same_runtime)
         except RpcError as error:
             if not error.unknown:
                 raise

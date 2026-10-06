@@ -24,6 +24,88 @@ type hookPlanExecutor struct {
 	fail        bool
 }
 
+type changingNativeHookExecutor struct {
+	hookPlanExecutor
+	binding      string
+	observations int
+}
+
+func (executor *changingNativeHookExecutor) Exec(ctx context.Context, project, name string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	if len(request.Command) > 1 && request.Command[0] == "bash" && request.Command[1] == "-s" {
+		executor.observations++
+	}
+	if len(request.Command) > 1 && request.Command[0] == "sh" && request.Command[1] == "-c" {
+		var scope struct {
+			Bindings map[string]string `json:"bindings"`
+		}
+		if err := json.Unmarshal([]byte(request.Environment["SUBYARD_PROJECT_HOOK_SCOPE"]), &scope); err != nil {
+			return ports.InstanceExecResult{}, err
+		}
+		if scope.Bindings["/usr/local/libexec/subyard/projects-changed.d/owned"] != executor.binding {
+			executor.calls++
+			return ports.InstanceExecResult{ExitCode: 1}, nil
+		}
+		result, err := executor.hookPlanExecutor.Exec(ctx, project, name, request)
+		if err == nil && result.ExitCode == 0 {
+			executor.binding = testRuntimeNewDigest
+		}
+		return result, err
+	}
+	return executor.hookPlanExecutor.Exec(ctx, project, name, request)
+}
+
+func TestPreparedProjectHooksRunOnceAfterSuccessfulNativeCatalogChange(t *testing.T) {
+	for _, scenario := range []string{"repeat", "project changed", "source changed", "failed first invocation"} {
+		t.Run(scenario, func(t *testing.T) {
+			hook := "/usr/local/libexec/subyard/projects-changed.d/owned"
+			executor := &changingNativeHookExecutor{hookPlanExecutor: hookPlanExecutor{observation: hookObservation{
+				Projects: testRuntimeOldDigest, Wiring: testRuntimeNewDigest, Hooks: []string{hook},
+				Facts: map[string]string{hook: testRuntimeOldDigest}, Resolved: map[string]string{hook: hook},
+			}}, binding: testRuntimeOldDigest}
+			incus := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "running"}}}
+			runtime := Runtime{RepositoryRoot: "../../..", Profiles: []profile.Definition{}, Incus: incus, Executor: executor,
+				Yard: domain.Context{IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev", DevUID: 1000}}
+			prepare := func() {
+				t.Helper()
+				plan, err := runtime.PrepareProjectHooks(context.Background(), false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				plan.hookBindings[hook] = executor.binding
+				runtime.HookPlan = plan
+			}
+			prepare()
+			executor.fail = scenario == "failed first invocation"
+			err := runtime.RunProjectHooks(context.Background())
+			if (err != nil) != executor.fail || executor.calls != 1 {
+				t.Fatalf("first hook: calls=%d err=%v", executor.calls, err)
+			}
+			if executor.fail {
+				executor.fail = false
+				prepare()
+				if err := runtime.RunProjectHooks(context.Background()); err != nil || executor.calls != 2 {
+					t.Fatalf("fresh plan did not retry failed hook: calls=%d err=%v", executor.calls, err)
+				}
+				return
+			}
+			switch scenario {
+			case "project changed":
+				executor.observation.Projects = testRuntimeNewDigest
+			case "source changed":
+				executor.observation.Facts[hook] = testRuntimeNewDigest
+			}
+			observations := executor.observations
+			err = runtime.RunProjectHooks(context.Background())
+			if scenario == "repeat" && err != nil || scenario != "repeat" && !errors.Is(err, domain.ErrPlanStale) {
+				t.Errorf("repeated plan guard: scenario=%s err=%v", scenario, err)
+			}
+			if executor.calls != 1 || executor.observations <= observations {
+				t.Errorf("successful plan must recheck guards without repeating effects: calls=%d observations=%d->%d", executor.calls, observations, executor.observations)
+			}
+		})
+	}
+}
+
 func (executor *hookPlanExecutor) Exec(_ context.Context, _ string, _ string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
 	if len(request.Command) > 1 && request.Command[0] == "bash" && request.Command[1] == "-s" {
 		payload, _ := json.Marshal(executor.observation)
