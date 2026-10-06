@@ -43,6 +43,42 @@ func TestReleaseActivationRefreshesProfileRuntimeBeforeMaterializedConfig(t *tes
 	}
 }
 
+func TestMaterializedConfigScopeBindsPersistedIntegrationSelection(t *testing.T) {
+	root, _, configHome, environment := configCommandFixture(t)
+	settingsPath := filepath.Join(configHome, "config.env")
+	writeConfigCommandFile(t, settingsPath, "CODING_TOOL_INTEGRATIONS='codex'\n")
+	incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{}}
+	program, err := New(Options{RepositoryRoot: root, Environment: environment,
+		Incus: incus, Executor: incus, Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciler := &materializedConfigActivationReconciler{
+		cli: program, yard: "default", configHome: configHome, scopeResolved: true,
+	}
+	ctx := context.Background()
+	observe := func() releasetransition.V2ActivationObservation {
+		t.Helper()
+		observation, err := reconciler.Observe(ctx,
+			releasetransition.ReleasePair{From: "release-a", Target: "release-a"},
+			releasetransition.ReleaseLinks{Active: "release-a"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return observation
+	}
+	original := observe()
+	writeConfigCommandFile(t, settingsPath, "CODING_TOOL_INTEGRATIONS='claude'\n")
+	changed := observe()
+	if changed.Desired == original.Desired {
+		t.Fatal("persisted supported selection change did not change activation desired scope")
+	}
+	writeConfigCommandFile(t, settingsPath, "CODING_TOOL_INTEGRATIONS='codex'\n")
+	if restored := observe(); restored.Desired != original.Desired {
+		t.Fatal("known original persisted selection did not restore the exact desired scope")
+	}
+}
+
 func TestMaterializedConfigObservationDirectsToReadOnlyDiagnostic(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	configHome := filepath.Join(root, "state")

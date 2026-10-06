@@ -3884,6 +3884,7 @@ func TestV2TransitionDoesNotFabricateLinksWhenPostMutationObservationFails(t *te
 type v2TestReconciler struct {
 	id            string
 	converged     bool
+	desired       Fingerprint
 	drift         Fingerprint
 	observes      int
 	reconciles    int
@@ -4199,6 +4200,10 @@ func (v2NamedReconciler) Reconcile(context.Context, ReleaseLinks) error { return
 
 func (reconciler *v2TestReconciler) Observe(context.Context, ReleasePair, ReleaseLinks) (V2ActivationObservation, error) {
 	reconciler.observes++
+	desired := reconciler.desired
+	if desired == "" {
+		desired = digestA
+	}
 	drift := reconciler.drift
 	if drift == "" {
 		drift = digestB
@@ -4208,8 +4213,8 @@ func (reconciler *v2TestReconciler) Observe(context.Context, ReleasePair, Releas
 		warnings = append(warnings, reconciler.driftWarnings...)
 	}
 	return V2ActivationObservation{
-		Actual:  map[bool]Fingerprint{true: digestA, false: drift}[reconciler.converged],
-		Desired: digestA, Converged: reconciler.converged,
+		Actual:  map[bool]Fingerprint{true: desired, false: drift}[reconciler.converged],
+		Desired: desired, Converged: reconciler.converged,
 		Consequences: slices.Clone(reconciler.consequences), Warnings: warnings,
 	}, nil
 }
