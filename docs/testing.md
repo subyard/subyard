@@ -12,6 +12,53 @@ Use `testkit.WriteFile` for exact file modes and `testkit.TempDir` for private
 fixture roots. Keep raw calls for creation-semantics tests. The Go race gate runs uncached under
 umasks `0002`, `0022` and `0077` in separate processes.
 
+## Execution and reporting principles
+
+Follow [test execution and delegation](../.agents/skills/subyard-dev-flow/SKILL.md#test-execution-and-delegation)
+for roles and model settings. Preserve required coverage and candidate identity.
+
+- Only the assigned observer reads progress/logs; the parent may do independent work,
+  without duplicate polls or status requests. Process control, lease heartbeats and cleanup
+  remain runner-owned.
+- Prefer supported completion events; necessary timed waits may still invoke the model.
+  Send interim messages only for material results, changed conditions or decisions.
+  Escalate failures, blocked/interrupted execution, questions and approvals when observed;
+  never answer approvals for the operator.
+- Read native summaries/receipts first. Return one final report: run/check identity, check
+  and overall candidate statuses where applicable, original exit code, total duration and
+  evidence paths. Verify every field; mark unavailable values explicitly. Use native duration
+  or launch-to-completion time, never an individual wait's wall time. Preserve full logs;
+  identify shortened output and include a relevant failure excerpt with its complete log path.
+- Preserve failed, blocked, interrupted and incomplete outcomes. Missing expected final
+  evidence is incomplete; heartbeats, process disappearance or one passing check do not
+  prove complete acceptance.
+- Reuse applicable evidence; do not duplicate logs/receipts in separate reports or run extra
+  acceptance cycles solely to measure efficiency. Rerun reasons belong in the current task.
+
+### Launch and observe long checks
+
+Start the prescribed runner once; retain its process/session handle and evidence paths.
+Set wait intervals explicitly, about once a minute within tool limits and applicable rules:
+`exec_command` initial `yield_time_ms=30000`, then `write_stdin` with empty `chars` and
+`yield_time_ms=55000`; an enclosing `functions.exec` uses `yield_time_ms=60000` to cover
+the inner wait and bounded reads. Resume a yielded script cell before another process poll:
+its cell ID is distinct from the process session ID. Short default waits add model returns.
+
+For parallel acceptance, read new `check-result` events/current receipt as well as process
+completion. Report failed/blocked checks when observed, without waiting for `run-result`;
+keep observing the same controller through completion and cleanup unless the main developer
+directs an owned interruption. Then return the final report and end the bounded assignment.
+
+### Report deviations from the guide
+
+If execution or reporting differs from this guide, promptly notify the operator before the
+final task report: expected vs observed behavior, safe command/check and run identity,
+evidence paths, and impact on coverage, result confidence or cleanup.
+After reporting and investigating, correct code or outdated docs within the authorized scope
+and verify; affected acceptance stays unconfirmed until valid evidence exists. Do not conceal
+the discrepancy or weaken gates. A correctly reported failure/capacity refusal is an outcome,
+not itself a guide deviation.
+
 ## Run the core checks
 
 `./tests/run.sh` checks the current source files, including uncommitted edits. No Git history,

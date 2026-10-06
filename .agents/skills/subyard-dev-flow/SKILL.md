@@ -38,6 +38,12 @@ requirements when the task depends on them.
 3. Run the applicable checks against the final changes using the policy below.
    Planned checks on available allocated VMs are agent work: complete them before
    reporting readiness.
+4. Batch independent reads/searches and short checks without shared mutable resources;
+   use `Promise.allSettled` where available and inspect every result/exit code.
+   Keep dependencies, edits, approvals and decisions sequential.
+5. Before handoff or compaction, update the concise task plan: remaining work, decisions,
+   evidence and candidate identities. Preserve required rules and relevant architecture,
+   without a chat journal or full history; leave compaction defaults unchanged.
 
 ## Choose checks by risk
 
@@ -93,21 +99,18 @@ requirements when the task depends on them.
 ## Test execution and delegation
 
 - Use `model="gpt-6.1-sol"`, `reasoning_effort="high"` for main development tasks.
-- Run short checks directly. For long runs, use one mechanical monitoring worker with
+- Run short checks directly. For long runs, use one mechanical observer with
   `model="gpt-6-luna"`, `reasoning_effort="medium"`, `fork_turns="none"`;
   run locally if unavailable.
-- Pass the working directory, exact commands, source state, known facts, relevant
-  file/section references and result paths. Do not copy chat history or whole
-  documents, or ask the worker to repeat project discovery.
-- Only the worker monitors the run; the parent does not duplicate polls or log
-  reads. Prefer completion events; otherwise poll about every 60 seconds within
-  client limits. Leave lease heartbeats and cleanup to the runner.
-- Return the exit code, duration, summary/log paths and a short failure excerpt.
-  Read `summary.tsv` first. The worker executes the parent's prescribed checks and
-  observes progress/results. On failure, hand the evidence to the main developer agent,
-  which owns failure analysis, repairs and rerun decisions. The worker does not investigate
-  failures, edit source or retry on its own; it executes further checks only as instructed
-  by the main developer agent.
+- Give each bounded phase a self-contained assignment: working directory, exact commands,
+  source state, known facts, relevant references, stop conditions and evidence paths.
+  The observer reads mandatory repository/overlay and applicable testing/VM rules,
+  without copied chat history, whole documents or repeated project discovery.
+- The observer runs prescribed checks only; the main developer owns failure analysis,
+  repairs and rerun decisions.
+- Follow the guide's [execution and reporting protocol](../../../docs/testing.md#execution-and-reporting-principles),
+  including waits, cleanup and evidence. Promptly report guide deviations to the operator
+  under its [deviation contract](../../../docs/testing.md#report-deviations-from-the-guide).
 
 ## Boundaries
 
