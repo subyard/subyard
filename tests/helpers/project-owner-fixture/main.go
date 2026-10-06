@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/cli"
@@ -125,6 +126,19 @@ func (e executor) projectExec(r ports.InstanceExecRequest) (ports.InstanceExecRe
 	args := append([]string(nil), r.Command...)
 	for i, arg := range args {
 		args[i] = strings.ReplaceAll(arg, "/srv/workspaces", filepath.Join(e.root, "guest", "workspaces"))
+	}
+	if args[0] == "install" {
+		// Guest ownership is translated to the controller's disposable fixture.
+		for i := 1; i+1 < len(args) && args[i] != "--"; i++ {
+			switch args[i] {
+			case "-o":
+				i++
+				args[i] = strconv.Itoa(os.Getuid())
+			case "-g":
+				i++
+				args[i] = strconv.Itoa(os.Getgid())
+			}
+		}
 	}
 	switch args[0] {
 	case "git":

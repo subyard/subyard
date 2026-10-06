@@ -465,11 +465,20 @@ func (fake *IncusServer) serveOperationWebsocket(
 		fake.execCalls[operation.callIndex].Stdin = bytes.Clone(stdin.Bytes())
 		fake.mu.Unlock()
 		close(operation.stdinDone)
-	case "stdout":
-		_ = connection.WriteMessage(websocket.BinaryMessage, operation.step.Stdout)
-		_ = connection.WriteMessage(websocket.TextMessage, nil)
-	case "stderr":
-		_ = connection.WriteMessage(websocket.BinaryMessage, operation.step.Stderr)
+	case "stdout", "stderr":
+		output := operation.step.Stdout
+		if stream == "stderr" {
+			output = operation.step.Stderr
+		}
+		_ = connection.WriteMessage(websocket.BinaryMessage, output)
+		// The client closes stdin when both output streams finish.
+		select {
+		case <-operation.stdinDone:
+		case <-operation.cancelled:
+			return
+		case <-request.Context().Done():
+			return
+		}
 		_ = connection.WriteMessage(websocket.TextMessage, nil)
 	default:
 		_ = connection.WriteControl(websocket.CloseMessage,

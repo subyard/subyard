@@ -94,6 +94,8 @@ chmod 755 "$TMP/bin/ssh"
 # shellcheck source=tests/helpers/test-context.sh
 . "$ROOT/tests/helpers/test-context.sh"
 setup_test_context "$TMP"
+# Guest ownership must not depend on the controller's UID.
+export DEV_UID="$(( $(id -u) + 1 ))"
 setup_test_repository "$TMP" "$ROOT"
 # Exercise resolver-owned registry paths and named-yard identity.
 unset SUBYARD_STATE_DIR ACCESS_KIND YARD_INSTANCE_NAME INCUS_PROJECT SSH_HOST

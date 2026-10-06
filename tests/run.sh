@@ -23,8 +23,13 @@ record_check() {
   printf '%s %s duration_seconds=%s exit_code=%s\n' \
     "$status" "$CHECK_NAME" "$duration" "$rc"
   if [ "$rc" -ne 0 ]; then
-    printf 'LOG %s/%s (last 40 lines)\n' "$RUN_DIR" "$CHECK_LOG" >&2
-    tail -n 40 "$RUN_DIR/$CHECK_LOG" >&2
+    if [ "$CURRENT_SUITE" = go ]; then
+      printf 'LOG %s/%s (full failing Go output)\n' "$RUN_DIR" "$CHECK_LOG" >&2
+      cat "$RUN_DIR/$CHECK_LOG" >&2
+    else
+      printf 'LOG %s/%s (last 40 lines)\n' "$RUN_DIR" "$CHECK_LOG" >&2
+      tail -n 40 "$RUN_DIR/$CHECK_LOG" >&2
+    fi
   fi
   CHECK_NAME=''
 }

@@ -31,7 +31,8 @@ small native fixtures; mass Git-root generation belongs only to the
 The runner prints one start/result line per check and a final `SUMMARY` with its
 status, check count, elapsed seconds and original exit code. Successful check output
 stays in separate logs under a unique `.build/test-runs/run.*/` directory. On the
-first failure it stops, prints the last 40 log lines and points to the complete log.
+first failure it stops, prints the full failed Go check output or the last 40 log lines
+for other checks, and points to the complete log.
 `RESULTS` and `SUMMARY` identify the run's `summary.tsv`, which has these columns:
 `kind`, `suite`, `check`, `status`, `exit_code`, `duration_seconds`, `log`.
 Log names are relative to that summary's directory. Each completed check has a

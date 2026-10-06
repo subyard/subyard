@@ -17,7 +17,11 @@ set -eu
 case " $* " in
   *' test -race '*)
     printf '%s %s\n' "$(umask)" "$*" >> "$RUNNER_GO_LOG"
-    [ "$(umask)" != "${RUNNER_FAIL_UMASK:-}" ] || exit 24
+    if [ "$(umask)" = "${RUNNER_FAIL_UMASK:-}" ]; then
+      printf '%s\n' '--- FAIL: TestEarlyFailure' '    fixture_test.go:1: expected failure detail'
+      for ((i=0; i<50; i++)); do printf 'ok trailing/package/%s\n' "$i"; done
+      exit 24
+    fi
     ;;
 esac
 SH
@@ -84,6 +88,9 @@ rm "$fixture/tests/after-stdin.sh"
 rc=0
 RUNNER_FAIL_UMASK=0022 run_fixture umask-failure || rc=$?
 [ "$rc" -eq 24 ] || fail 'umask matrix hid a failed Go run'
+grep -Fq -- '--- FAIL: TestEarlyFailure' "$tmp/umask-failure.out" \
+  && grep -Fq 'fixture_test.go:1: expected failure detail' "$tmp/umask-failure.out" \
+  || fail 'early Go failure was hidden by trailing package output'
 ! grep -q '^0077 ' "$tmp/umask-failure.go" || fail 'umask matrix continued after failure'
 ! grep -q 'RUN build' "$tmp/umask-failure.out" || fail 'runner built after a failed Go run'
 
