@@ -846,7 +846,7 @@ func TestEngineReexecDoesNotLeakPriorYardContext(t *testing.T) {
 	if ctx.NestedE2EVMs || loaded.Environment["YARD_TEMPLATE"] != "" {
 		t.Fatalf("prior E2E context leaked into named reload: %#v", loaded.Environment)
 	}
-	for name, expected := range map[string]string{"E2E_DISK_BUDGET": "0GiB", "E2E_CACHE_BUDGET": "24GiB", "E2E_DISK_RESERVE": "5GiB", "E2E_MEMORY_RESERVE": "8GiB", "E2E_VM_OVERHEAD": "512MiB"} {
+	for name, expected := range map[string]string{"E2E_DISK_BUDGET": "0GiB", "E2E_CACHE_BUDGET": "24GiB", "E2E_DISK_RESERVE": "5GiB", "E2E_MEMORY_RESERVE": "4GiB", "E2E_VM_OVERHEAD": "512MiB"} {
 		if loaded.Environment[name] != expected {
 			t.Fatalf("prior budget leaked: %s", name)
 		}

@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/Subyard/Subyard/internal/config"
 )
 
 // CapacityError is safe to retry only when no working allocation was created.
@@ -277,7 +279,7 @@ func (runtime *Runtime) reserveEnvironment(ctx context.Context, store LeaseStore
 			return &CapacityError{"disk", "storage telemetry unavailable"}
 		}
 		memoryBefore := memory.Available
-		overhead := budgetBytes(runtime.Config.VMOverhead, "512MiB")
+		overhead := budgetBytes(runtime.Config.VMOverhead, config.DefaultTestVMOverhead)
 		var ram, disk uint64
 		for _, current := range pool.Slots {
 			if current.SlotID != grant.SlotID && !current.Reserved && current.Environment != nil {
@@ -309,8 +311,8 @@ func (runtime *Runtime) reserveEnvironment(ctx context.Context, store LeaseStore
 		storage.Used = max(storageBefore.Used, storage.Used)
 		storage.BudgetUsed = max(storageBefore.BudgetUsed, storage.BudgetUsed)
 		if err := checkCapacity(memory, storage, ram, disk,
-			budgetBytes(runtime.Config.MemoryReserve, "8GiB"), budgetBytes(runtime.Config.DiskReserve, "5GiB"),
-			budgetBytes(runtime.Config.DiskBudget, "0GiB")); err != nil {
+			budgetBytes(runtime.Config.MemoryReserve, config.DefaultTestVMMemoryReserve), budgetBytes(runtime.Config.DiskReserve, config.DefaultTestVMDiskReserve),
+			budgetBytes(runtime.Config.DiskBudget, config.DefaultTestVMDiskBudget)); err != nil {
 			return err
 		}
 		slot.Reserved = true

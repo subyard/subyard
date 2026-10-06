@@ -65,6 +65,7 @@ func fixtureBackend(t *testing.T) *Backend {
 
 func TestBackendApplyInstallsCurrentEngineAndPublishesRoute(t *testing.T) {
 	backend := fixtureBackend(t)
+	delete(backend.Environment, "E2E_MEMORY_RESERVE")
 	// Consumers traverse this directory as root inside an unprivileged yard, where
 	// the host owner uid is unmapped: publication must set the mode explicitly
 	// instead of leaving it to MkdirAll under the operator's umask.
@@ -132,8 +133,11 @@ func TestBackendApplyInstallsCurrentEngineAndPublishesRoute(t *testing.T) {
 			if err != nil || string(payload) != "fixture-download\nfixture-provision\n" {
 				return nil, nil, fmt.Errorf("wrong provision payload: %q", payload)
 			}
-			for _, name := range []string{"E2E_DISK_BUDGET", "E2E_CACHE_BUDGET", "E2E_DISK_RESERVE", "E2E_MEMORY_RESERVE", "E2E_VM_OVERHEAD"} {
-				if !strings.Contains(joined, "--env "+name+"="+backend.Environment[name]+" ") {
+			for name, expected := range map[string]string{
+				"E2E_DISK_BUDGET": "120GiB", "E2E_CACHE_BUDGET": "20GiB",
+				"E2E_DISK_RESERVE": "6GiB", "E2E_MEMORY_RESERVE": "4GiB", "E2E_VM_OVERHEAD": "768MiB",
+			} {
+				if !strings.Contains(joined, "--env "+name+"="+expected+" ") {
 					return nil, nil, fmt.Errorf("provisioning lost %s", name)
 				}
 			}

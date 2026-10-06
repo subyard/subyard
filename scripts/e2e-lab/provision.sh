@@ -393,10 +393,10 @@ reconcile_inner_incus() {
 
   inner_incus profile show default --project default >/dev/null 2>&1 \
     || inner_incus profile create default --project default
-  if ! inner_incus profile device list default --project default 2>/dev/null | grep -qx root; then
+  if ! inner_incus profile device list default --project default 2>/dev/null | grep -x root >/dev/null; then
     inner_incus profile device add default root disk pool=default path=/ --project default
   fi
-  if ! inner_incus profile device list default --project default 2>/dev/null | grep -qx eth0; then
+  if ! inner_incus profile device list default --project default 2>/dev/null | grep -x eth0 >/dev/null; then
     inner_incus profile device add default eth0 nic network=incusbr0 --project default
   fi
 }
@@ -430,11 +430,10 @@ EOF
 [ "$(id -u)" = 0 ] || { printf 'test-vms provision requires root inside the yard\n' >&2; exit 1; }
 : "${NESTED_E2E_VMS:=0}"
 : "${DEV_USER:=dev}"
-: "${E2E_DISK_BUDGET:=0GiB}"
-: "${E2E_CACHE_BUDGET:=24GiB}"
-: "${E2E_DISK_RESERVE:=5GiB}"
-: "${E2E_MEMORY_RESERVE:=8GiB}"
-: "${E2E_VM_OVERHEAD:=512MiB}"
+# The engine resolves admission budgets before streaming this adapter.
+for e2e_budget_name in E2E_DISK_BUDGET E2E_CACHE_BUDGET E2E_DISK_RESERVE E2E_MEMORY_RESERVE E2E_VM_OVERHEAD; do
+  [ -n "${!e2e_budget_name:-}" ] || { printf 'missing %s\n' "$e2e_budget_name" >&2; exit 1; }
+done
 E2E_RECIPE_ROOT=/usr/local/libexec/subyard/e2e-recipes
 : "${E2E_VM_IMAGE:=images:debian/13/cloud}"
 : "${E2E_VM_CPU:=4}"

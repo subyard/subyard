@@ -15,6 +15,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/Subyard/Subyard/internal/config"
 )
 
 const baseMaxAge = 7 * 24 * time.Hour
@@ -384,7 +386,7 @@ func (rt *Runtime) buildBase(ctx context.Context, store LeaseStore, grant LeaseG
 	cfg.Image = source
 	cfg.AgentPublicKey = ""
 	builder := &Runtime{Config: cfg, Runner: rt.Runner, Stdout: rt.Stdout, Stderr: rt.Stderr, Now: rt.Now, Sleep: rt.Sleep}
-	buildRAM, buildDisk := environmentCommitment(spec, budgetBytes(rt.Config.VMOverhead, "512MiB"))
+	buildRAM, buildDisk := environmentCommitment(spec, budgetBytes(rt.Config.VMOverhead, config.DefaultTestVMOverhead))
 	// Keep room for builder root plus publication/unpacked image cache.
 	buildDisk *= 3
 	if err := rt.admitBuild(ctx, store, grant, buildRAM, buildDisk, registry); err != nil {
@@ -512,7 +514,7 @@ func (rt *Runtime) admitBuild(ctx context.Context, store LeaseStore, pending Lea
 			return &CapacityError{"disk", "builder storage telemetry unavailable"}
 		}
 		memoryBefore := memory.Available
-		overhead := budgetBytes(rt.Config.VMOverhead, "512MiB")
+		overhead := budgetBytes(rt.Config.VMOverhead, config.DefaultTestVMOverhead)
 		if pending.SlotID != "" {
 			slot, err := findSlot(pool, pending.SlotID)
 			if err != nil {
@@ -561,8 +563,8 @@ func (rt *Runtime) admitBuild(ctx context.Context, store LeaseStore, pending Lea
 		storage.Total = min(storageBefore.Total, storage.Total)
 		storage.Used = max(storageBefore.Used, storage.Used)
 		storage.BudgetUsed = max(storageBefore.BudgetUsed, storage.BudgetUsed)
-		return checkCapacity(memory, storage, ram, disk, budgetBytes(rt.Config.MemoryReserve, "8GiB"),
-			budgetBytes(rt.Config.DiskReserve, "5GiB"), budgetBytes(rt.Config.DiskBudget, "0GiB"))
+		return checkCapacity(memory, storage, ram, disk, budgetBytes(rt.Config.MemoryReserve, config.DefaultTestVMMemoryReserve),
+			budgetBytes(rt.Config.DiskReserve, config.DefaultTestVMDiskReserve), budgetBytes(rt.Config.DiskBudget, config.DefaultTestVMDiskBudget))
 	})
 }
 

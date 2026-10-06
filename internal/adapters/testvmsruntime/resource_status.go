@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"os"
 	"time"
+
+	"github.com/Subyard/Subyard/internal/config"
 )
 
 type ResourceStatus struct {
@@ -86,11 +88,11 @@ func (rt *Runtime) ResourceStatus(ctx context.Context, pool LeasePool) ResourceS
 		now = rt.Now()
 	}
 	result := ResourceStatus{OuterHostEvidence: "unavailable: allocation boundary", WorkingDiskEvidence: "unknown", Slots: []SlotResourceStatus{}, Bases: []BaseResourceStatus{}, Budgets: map[string]uint64{
-		"disk_bytes":           budgetBytes(rt.Config.DiskBudget, "0GiB"),
-		"cache_bytes":          budgetBytes(rt.Config.CacheBudget, "24GiB"),
-		"disk_reserve_bytes":   budgetBytes(rt.Config.DiskReserve, "5GiB"),
-		"memory_reserve_bytes": budgetBytes(rt.Config.MemoryReserve, "8GiB"),
-		"vm_overhead_bytes":    budgetBytes(rt.Config.VMOverhead, "512MiB"),
+		"disk_bytes":           budgetBytes(rt.Config.DiskBudget, config.DefaultTestVMDiskBudget),
+		"cache_bytes":          budgetBytes(rt.Config.CacheBudget, config.DefaultTestVMCacheBudget),
+		"disk_reserve_bytes":   budgetBytes(rt.Config.DiskReserve, config.DefaultTestVMDiskReserve),
+		"memory_reserve_bytes": budgetBytes(rt.Config.MemoryReserve, config.DefaultTestVMMemoryReserve),
+		"vm_overhead_bytes":    budgetBytes(rt.Config.VMOverhead, config.DefaultTestVMOverhead),
 	}}
 	memory, err := rt.readMemoryCapacity()
 	if err == nil {

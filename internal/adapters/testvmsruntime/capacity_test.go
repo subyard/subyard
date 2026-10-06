@@ -143,13 +143,15 @@ func TestMemoryReserveAppliesToWorkingVMsAndSequentialBuilder(t *testing.T) {
 			refused       bool
 		}{
 			{"available headroom", "", 2, 18 << 30, false},
-			{"exact default reserve", "", 2, 17 << 30, false},
-			{"below default reserve", "", 2, (17 << 30) - 1, true},
-			{"insufficient for updated reserve", "", 2, 15 << 30, true},
+			{"exact default reserve", "", 2, 13 << 30, false},
+			{"below default reserve", "", 2, (13 << 30) - 1, true},
+			{"insufficient pair headroom", "", 2, 11 << 30, true},
 			{"explicit override", "2GiB", 2, 11 << 30, false},
-			{"single exact default reserve", "", 1, 25 << 29, false},
-			{"single below default reserve", "", 1, (25 << 29) - 1, true},
-			{"pair refused at single headroom", "", 2, 25 << 29, true},
+			{"higher explicit override", "8GiB", 2, 17 << 30, false},
+			{"below higher explicit override", "8GiB", 2, (17 << 30) - 1, true},
+			{"single exact default reserve", "", 1, 17 << 29, false},
+			{"single below default reserve", "", 1, (17 << 29) - 1, true},
+			{"pair refused at single headroom", "", 2, 17 << 29, true},
 		} {
 			t.Run(fmt.Sprintf("builder=%t/%s", builder, test.name), func(t *testing.T) {
 				cfg := fixtureConfig(t)
@@ -228,7 +230,7 @@ func TestConcurrentMixedAdmissionAndRetryAfterReady(t *testing.T) {
 		}
 		return nil, nil, fmt.Errorf("unexpected mutation: %v", args)
 	}}
-	rt := &Runtime{Config: cfg, Runner: runner, diskUsageProbe: func(context.Context) (uint64, error) { return 10 << 30, nil }, memoryProbe: func() (MemoryCapacity, error) { return MemoryCapacity{Available: 17 << 30}, nil }}
+	rt := &Runtime{Config: cfg, Runner: runner, diskUsageProbe: func(context.Context) (uint64, error) { return 10 << 30, nil }, memoryProbe: func() (MemoryCapacity, error) { return MemoryCapacity{Available: 13 << 30}, nil }}
 	var group sync.WaitGroup
 	results := make([]error, 2)
 	for i := range grants {
@@ -290,7 +292,7 @@ func TestCanceledProvisioningRetainsMemoryUntilCleanup(t *testing.T) {
 				t.Fatal(err)
 			}
 			rt := Runtime{Config: cfg,
-				memoryProbe:    func() (MemoryCapacity, error) { return MemoryCapacity{Available: 25 << 29}, nil },
+				memoryProbe:    func() (MemoryCapacity, error) { return MemoryCapacity{Available: 17 << 29}, nil },
 				diskUsageProbe: func(context.Context) (uint64, error) { return 10 << 30, nil },
 				usageProbe:     func(context.Context, LeaseSlot) allocationUsage { return allocationUsage{} },
 				Runner: &fakeRunner{handler: func(_ string, args, _ []string, _ io.Reader) ([]byte, []byte, error) {
@@ -401,14 +403,14 @@ func TestAdmissionBoundsChangingHostCapacityAndDiskCredit(t *testing.T) {
 		budgetUsed     [2]uint64
 		missingSecond  bool
 	}{
-		{"reserve memory", "memory", false, [2]uint64{15 << 30, 22 << 30}, [2]uint64{20 << 30, 20 << 30}, [2]uint64{20 << 30, 20 << 30}, false},
+		{"reserve memory", "memory", false, [2]uint64{11 << 30, 22 << 30}, [2]uint64{20 << 30, 20 << 30}, [2]uint64{20 << 30, 20 << 30}, false},
 		{"reserve disk", "disk", false, [2]uint64{30 << 30, 30 << 30}, [2]uint64{50 << 30, 20 << 30}, [2]uint64{20 << 30, 20 << 30}, false},
-		{"builder memory", "memory", true, [2]uint64{15 << 30, 22 << 30}, [2]uint64{20 << 30, 20 << 30}, [2]uint64{20 << 30, 20 << 30}, false},
+		{"builder memory", "memory", true, [2]uint64{11 << 30, 22 << 30}, [2]uint64{20 << 30, 20 << 30}, [2]uint64{20 << 30, 20 << 30}, false},
 		{"builder disk", "disk", true, [2]uint64{30 << 30, 30 << 30}, [2]uint64{50 << 30, 20 << 30}, [2]uint64{20 << 30, 20 << 30}, false},
 		{"reserve budget", "disk", false, [2]uint64{30 << 30, 30 << 30}, [2]uint64{20 << 30, 20 << 30}, [2]uint64{115 << 30, 85 << 30}, false},
 		{"builder budget", "disk", true, [2]uint64{30 << 30, 30 << 30}, [2]uint64{20 << 30, 20 << 30}, [2]uint64{115 << 30, 85 << 30}, false},
-		{"reserve physical memory falls", "memory", false, [2]uint64{22 << 30, 15 << 30}, [2]uint64{20 << 30, 20 << 30}, [2]uint64{20 << 30, 20 << 30}, false},
-		{"builder physical memory falls", "memory", true, [2]uint64{22 << 30, 15 << 30}, [2]uint64{20 << 30, 20 << 30}, [2]uint64{20 << 30, 20 << 30}, false},
+		{"reserve physical memory falls", "memory", false, [2]uint64{22 << 30, 11 << 30}, [2]uint64{20 << 30, 20 << 30}, [2]uint64{20 << 30, 20 << 30}, false},
+		{"builder physical memory falls", "memory", true, [2]uint64{22 << 30, 11 << 30}, [2]uint64{20 << 30, 20 << 30}, [2]uint64{20 << 30, 20 << 30}, false},
 		{"reserve second physical sample missing", "memory", false, [2]uint64{30 << 30, 30 << 30}, [2]uint64{20 << 30, 20 << 30}, [2]uint64{20 << 30, 20 << 30}, true},
 		{"builder second physical sample missing", "memory", true, [2]uint64{30 << 30, 30 << 30}, [2]uint64{20 << 30, 20 << 30}, [2]uint64{20 << 30, 20 << 30}, true},
 	} {

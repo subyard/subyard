@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"github.com/Subyard/Subyard/internal/config"
 )
 
 // CacheUsage includes the daemon's complete archive cache, including upstream
@@ -37,7 +39,7 @@ func (runtime *Runtime) checkCacheBudget(ctx context.Context) error {
 	if err != nil {
 		return &CapacityError{Resource: "disk", Reason: "image cache telemetry unavailable"}
 	}
-	if usage.ChargedBytes > budgetBytes(runtime.Config.CacheBudget, "24GiB") {
+	if usage.ChargedBytes > budgetBytes(runtime.Config.CacheBudget, config.DefaultTestVMCacheBudget) {
 		return &CapacityError{Resource: "disk", Reason: "image cache budget exceeded"}
 	}
 	return nil

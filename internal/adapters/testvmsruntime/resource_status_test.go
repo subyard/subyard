@@ -36,6 +36,9 @@ func TestResourceStatusIsReadOnlyAndSeparatesPhysicalUsage(t *testing.T) {
 		return allocationUsage{disk: 5 << 30, diskKnown: true}
 	}}
 	empty := rt.ResourceStatus(context.Background(), LeasePool{})
+	if empty.Budgets["memory_reserve_bytes"] != 4<<30 {
+		t.Fatalf("incorrect default memory reserve: %+v", empty.Budgets)
+	}
 	if len(empty.Bases) != 0 {
 		t.Fatal("missing registry invented bases")
 	}

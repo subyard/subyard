@@ -98,12 +98,21 @@ for expected in E2E_DISK_BUDGET=120GiB E2E_CACHE_BUDGET=20GiB E2E_DISK_RESERVE=6
   grep -Fxq "$expected" <<<"$config_result" \
     || fail "provisioning lost a configured budget: $expected"
 done
-config_result="$(E2E_DISK_BUDGET=0GiB bash "$provision_config_fixture")"
+budget_fixture=(E2E_DISK_BUDGET=0GiB E2E_CACHE_BUDGET=24GiB E2E_DISK_RESERVE=5GiB
+  E2E_MEMORY_RESERVE=4GiB E2E_VM_OVERHEAD=512MiB)
+config_result="$(env "${budget_fixture[@]}" bash "$provision_config_fixture")"
 grep -Fxq E2E_DISK_BUDGET=0GiB <<<"$config_result" \
   || fail "provisioning lost the unlimited disk quota"
+grep -Fxq E2E_MEMORY_RESERVE=4GiB <<<"$config_result" \
+  || fail "provisioning lost the resolved memory reserve"
 for budget_name in E2E_CACHE_BUDGET E2E_DISK_RESERVE E2E_MEMORY_RESERVE E2E_VM_OVERHEAD; do
-  if env "$budget_name=0GiB" bash "$provision_config_fixture" >/dev/null 2>&1; then
+  if env "${budget_fixture[@]}" "$budget_name=0GiB" bash "$provision_config_fixture" >/dev/null 2>&1; then
     fail "provisioning accepted invalid budget $budget_name"
+  fi
+done
+for budget_name in E2E_DISK_BUDGET E2E_CACHE_BUDGET E2E_DISK_RESERVE E2E_MEMORY_RESERVE E2E_VM_OVERHEAD; do
+  if env "${budget_fixture[@]}" "$budget_name=" bash "$provision_config_fixture" >/dev/null 2>&1; then
+    fail "provisioning accepted missing budget $budget_name"
   fi
 done
 
@@ -246,6 +255,8 @@ incus() {
     'profile device list default --project default')
       [ -f "$INNER_FIXTURE/root" ] && printf 'root\n'
       [ -f "$INNER_FIXTURE/eth0" ] && printf 'eth0\n'
+      # Keep writing beyond a pipe buffer to expose an early-closing consumer.
+      printf 'fixture-unrelated-profile-device-%04d\n' {1..4096}
       return 0
       ;;
     'profile device add default root disk pool=default path=/ --project default')

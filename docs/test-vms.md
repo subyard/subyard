@@ -95,8 +95,8 @@ outer-host cgroup limits, peaks or OOM counters.
 No per-VM resident memory measurement is needed. Status reports pending RAM promises through
 `reserved_vm_memory_bytes` and per-slot `memory_commitment_bytes` and
 `remaining_memory_growth_bytes`; held slots report zero in these fields. With no other pending
-requests, a standard 4.5 GiB singleton needs 12.5 GiB available and a 9 GiB pair needs 17 GiB
-available to preserve the default 8 GiB host reserve. Other provisioning requests and builders
+requests, a standard 4.5 GiB singleton needs 8.5 GiB available and a 9 GiB pair needs 13 GiB
+available to preserve the default 4 GiB host reserve. Other provisioning requests and builders
 can require additional headroom.
 A typed `capacity` refusal identifies `memory` or `disk` and is safe to retry after resources are
 freed. It does not quarantine a healthy slot. Partial provisioning failures are cleaned up and
@@ -125,7 +125,7 @@ installed by `yard init`. These initial defaults still require workload peak mea
 | `E2E_DISK_BUDGET` | `0GiB` | Optional total disk quota; `0GiB` means no fixed ceiling |
 | `E2E_CACHE_BUDGET` | `24GiB` | Base and build cache budget |
 | `E2E_DISK_RESERVE` | `5GiB` | Free physical storage reserve |
-| `E2E_MEMORY_RESERVE` | `8GiB` | Memory headroom outside VM commitments |
+| `E2E_MEMORY_RESERVE` | `4GiB` | Memory headroom outside VM commitments |
 | `E2E_VM_OVERHEAD` | `512MiB` | Additional RAM reserved per VM |
 
 Values must be positive `MiB` or `GiB` sizes, except `E2E_DISK_BUDGET=0GiB`, which disables

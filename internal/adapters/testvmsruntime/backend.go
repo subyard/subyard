@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/ports"
 )
 
@@ -323,11 +324,11 @@ func (backend *Backend) state() (backendState, error) {
 		return fallback
 	}
 	state := backendState{
-		diskBudget:    value("E2E_DISK_BUDGET", "0GiB"),
-		cacheBudget:   value("E2E_CACHE_BUDGET", "24GiB"),
-		diskReserve:   value("E2E_DISK_RESERVE", "5GiB"),
-		memoryReserve: value("E2E_MEMORY_RESERVE", "8GiB"),
-		vmOverhead:    value("E2E_VM_OVERHEAD", "512MiB"),
+		diskBudget:    value("E2E_DISK_BUDGET", config.DefaultTestVMDiskBudget),
+		cacheBudget:   value("E2E_CACHE_BUDGET", config.DefaultTestVMCacheBudget),
+		diskReserve:   value("E2E_DISK_RESERVE", config.DefaultTestVMDiskReserve),
+		memoryReserve: value("E2E_MEMORY_RESERVE", config.DefaultTestVMMemoryReserve),
+		vmOverhead:    value("E2E_VM_OVERHEAD", config.DefaultTestVMOverhead),
 
 		enabled: value("NESTED_E2E_VMS", "0"), cpu: value("E2E_VM_CPU", "4"),
 		image:           value("E2E_VM_IMAGE", "images:debian/13/cloud"),
