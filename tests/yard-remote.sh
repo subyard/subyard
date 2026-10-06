@@ -8,7 +8,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 assert_file_contains() { grep -Fq -- "$2" "$1" || fail "$1 does not contain: $2"; }
-assert_contains() { grep -Fq -- "$2" <<<"$1" || fail "output does not contain: $2"; }
+assert_contains() { grep -Fq -- "$2" <<<"$1" || { printf '%s\n' "$1" >&2; fail "output does not contain: $2"; }; }
 assert_not_contains() { ! grep -Fq -- "$2" <<<"$1" || fail "output unexpectedly contains: $2"; }
 
 mkdir -p "$TMP/bin" "$TMP/home/.ssh" "$TMP/state/keys" "$TMP/state/info" \
@@ -154,6 +154,7 @@ export YARD_VERSION=test
 export REMOTE_TEST_ROOT="$TMP/state"
 
 mkdir -p "$SUBYARD_HOME/ssh"
+install -m 0600 /dev/null "$SUBYARD_HOME/ssh/known_hosts"
 for owner in one two three four stopped; do
   printf 'owner-%s %s\n' "$owner" "$(cut -d' ' -f1,2 "$TMP/state/$owner.pub")" \
     >> "$SUBYARD_HOME/ssh/known_hosts"
@@ -168,6 +169,7 @@ if output="$(printf 'n\n' | script --echo never -qefc \
 fi
 output="${output//$'\r'/}"
 assert_contains "$output" 'yard ssh key: SHA256:'
+assert_contains "$output" 'operation declined'
 [ ! -e "$REMOTE_TEST_ROOT/owner-mode/authorized-owner-three" ] || fail 'prepare authorized a key before confirmation'
 [ ! -e "$SUBYARD_CONFIG_HOME/yards/preview/config.env" ] || fail 'prepare wrote a context before confirmation'
 [ ! -e "$HOME/.ssh/subyard-preview.config" ] || fail 'prepare wrote an alias before confirmation'
