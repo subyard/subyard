@@ -165,6 +165,11 @@ func (backend *Backend) observeReadiness(ctx context.Context, diagnostic bool) (
 	arguments = append(arguments, "--", DefaultInstalledPath, "_test-vms-worker", "doctor")
 	report, err := backend.incus(ctx, arguments...)
 	if diagnostic {
+		// Released doctors return only an exit status. Their successful silent
+		// result still proves the same readiness checks for retained runtimes.
+		if report == "" && err == nil {
+			return true, nil
+		}
 		if converged, reason := parseDoctorReport(report); !converged || err != nil {
 			if converged {
 				reason = doctorFallback

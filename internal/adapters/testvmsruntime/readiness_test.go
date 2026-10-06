@@ -98,7 +98,9 @@ func TestBackendVerifyReportsDriftAndSafeDoctorReasons(t *testing.T) {
 		{"doctor", "doctor", `{"converged":false,"reason":"firewall table is missing"}`, "firewall table is missing", true},
 		{"raw doctor", "doctor", "private guest output", doctorFallback, true},
 		{"unsafe reason", "doctor", `{"converged":false,"reason":"private lease secret"}`, doctorFallback, true},
-		{"unsupported doctor", "doctor", "", doctorFallback, false},
+		{"legacy ready", "doctor", "", "", false},
+		{"legacy failure", "doctor", "", doctorFallback, true},
+		{"malformed successful doctor", "doctor", "private guest output", doctorFallback, false},
 		{"success with transport failure", "doctor", `{"converged":true,"reason":""}`, doctorFallback, true},
 		{"ready", "doctor", `{"converged":true,"reason":""}`, "", false},
 	} {
