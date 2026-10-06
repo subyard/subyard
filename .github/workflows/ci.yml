@@ -35,7 +35,8 @@ jobs:
     # Ubuntu 24.04 carries systemd 255, whose real parser guards the oldest
     # supported RestartForceExitStatus=/Type= compatibility boundary.
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # Include setup and ShellCheck alongside all core and profile checks.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

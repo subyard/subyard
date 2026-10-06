@@ -60,7 +60,8 @@ jobs:
   publish:
     needs: [native-engine-arm64, paseo-headless]
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Include full verification, packaging and released-updater compatibility.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - name: Set up Go
