@@ -15,7 +15,7 @@ choices that widen it.
   and repositories.
 - [Per-yard SSH agent](ssh-agent.md) — grant temporary access to one owner-host SSH key.
 - [AI Observer](ai-observer.md) — inspect persistent Claude Code and Codex usage statistics.
-- [Agent E2E VM pool](test-vms.md) — configure and use the retained, leased nested test-VM pairs.
+- [Agent E2E VM pool](test-vms.md) — configure and use disposable leased test VMs.
 
 ## Optional integrations
 
@@ -39,9 +39,18 @@ choices that widen it.
 - [Testing](testing.md) — select and run checks in proportion to a change.
 - [Agent E2E VM pool](test-vms.md) — use the real GNU/Linux test hosts and their lease contract.
 - [Real-host acceptance](real-host-acceptance.md) — verify physical host and release boundaries.
-- [Control-plane architecture](control-plane.md) — command, adapter, reconciliation and extension
+- [Control-plane reference](control-plane.md) — current command, adapter, reconciliation and extension
   contracts.
 
 The shipped [OpenClaw L1 guide](../config/profiles/openclaw/openclaw-l1.md) documents that profile's
 build and test lane. Profile-specific resources such as OpenClaw staging remain part of their owning
 profile rather than a generic Subyard service.
+
+## References
+
+- [Decisions and glossary](reference/decisions-and-glossary.md) — current accepted decisions,
+  their rationale and project terminology.
+- [Architecture](reference/control-plane-architecture.md) — CLI, control-plane and Veranda design,
+  ownership boundaries and resource budgets.
+- [Release transitions](reference/resumable-release-transition-design.md) — migration, activation
+  and recovery invariants, decision matrices and design tradeoffs.

@@ -1,7 +1,8 @@
 # Subyard — agent instructions
 
 This is the **public** repository. Keep everything here generic and in English; no private
-data. Project background, specs, and planning live in a separate private repo.
+data. Architecture, accepted decisions and release-transition design live in `docs/reference/`.
+Operator-specific requirements and planning may live in the optional private overlay.
 
 ## Development workflow
 
