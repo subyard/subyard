@@ -1070,6 +1070,9 @@ declared hook for its native compare-and-swap check before effects. It is not a 
 and must not fingerprint credentials, protected contents or secret values. Genuinely unavailable
 observations may resolve within the explicitly approved conditional hook and root scope; this
 does not authorize additional hook paths or project roots.
+One successful, verified hook invocation satisfies its prepared operation, including when
+integration repair runs it before committing ownership. Repeated internal calls still verify
+captured inputs; a new explicit init prepares a new plan and retries the hooks.
 
 A `guest_environment` handler accepts `check|ensure DEV_USER` through the existing root guest
 execution boundary. Its source is read only from the validated shipped profile. `check` reports

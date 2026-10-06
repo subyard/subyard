@@ -102,6 +102,12 @@ func TestPreparedProjectHooksRunOnceAfterSuccessfulNativeCatalogChange(t *testin
 			if executor.calls != 1 || executor.observations <= observations {
 				t.Errorf("successful plan must recheck guards without repeating effects: calls=%d observations=%d->%d", executor.calls, observations, executor.observations)
 			}
+			if scenario == "repeat" {
+				prepare()
+				if err := runtime.RunProjectHooks(context.Background()); err != nil || executor.calls != 2 {
+					t.Fatalf("fresh plan did not retry successful hook: calls=%d err=%v", executor.calls, err)
+				}
+			}
 		})
 	}
 }
