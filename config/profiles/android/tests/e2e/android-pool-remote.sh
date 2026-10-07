@@ -3,11 +3,19 @@
 set -euo pipefail
 
 fail() { printf 'android-pool-remote: %s\n' "$*" >&2; exit 1; }
-[ "$#" -eq 5 ] || [ "$#" -eq 6 ] || fail 'usage: script ROOT STATE YARD PROJECT INSTANCE [OWNER_ADB]'
+[ "$#" -eq 5 ] || [ "$#" -eq 6 ] || [ "$#" -eq 9 ] \
+  || fail 'usage: script ROOT STATE YARD PROJECT INSTANCE [OWNER_ADB [--viewer TOOLS YARD_LEASE]]'
 root="$1" state="$2" yard_name="$3" project="$4" instance="$5"
 . "$root/tests/helpers/release-candidate.sh"
 if YARD_BIN="$(release_candidate_prepare "$root")"; then unset YARD_ENGINE_PATH; else candidate_rc=$?; [ "$candidate_rc" = 1 ] || exit "$candidate_rc"; YARD_BIN="$root/.build/yard"; fi
 owner_adb="${6:-}"
+viewer_tools="${8:-}" viewer_lease="${9:-}"
+if [ "$#" -eq 9 ]; then
+  [ "$7" = --viewer ] && [[ "$viewer_tools" = "$state"/android-recovery.* ]] \
+    && [ "$(cat "$viewer_tools/.marker" 2>/dev/null)" = subyard-android-pool-recovery-v1 ] \
+    && [[ "$viewer_lease" =~ ^/home/dev/\.cache/subyard-android-recovery\.[a-zA-Z0-9]+/first.json$ ]] \
+    || fail 'viewer tools or lease are not the retained recovery fixture'
+fi
 [[ "$root" = /* && "$state" = /* ]] || fail 'root and state must be absolute paths'
 [[ "$yard_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]*$ \
   && "$project" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]*$ \
@@ -147,20 +155,26 @@ try:
         outer.pop(0)
     assert len(outer) == 3 and outer[:2] == ["bash", "-lc"]
     inner = shlex.split(outer[2])
-    assert len(inner) >= 6 and inner[1:5] == ["yard", "-Y", yard, "emu"]
-    arguments = inner[5:]
-    assert arguments in (["catalog"], ["status"]) or (payload and arguments ==
-        ["run", "--", "/usr/bin/python3", payload])
-    assert re.fullmatch(r"SUBYARD_OPERATION_ID=[A-Za-z0-9_-]{1,128}", inner[0])
+    operation = None
+    if inner == ["yard", "-Y", yard, "emu", "--session-wire", "view"]:
+        arguments = ["--session-wire", "view"]
+    else:
+        assert len(inner) >= 6 and inner[1:5] == ["yard", "-Y", yard, "emu"]
+        arguments = inner[5:]
+        assert arguments in (["catalog"], ["status"]) or (payload and arguments ==
+            ["run", "--", "/usr/bin/python3", payload])
+        assert re.fullmatch(r"SUBYARD_OPERATION_ID=[A-Za-z0-9_-]{1,128}", inner[0])
+        operation = inner[0].split("=", 1)[1]
 except (AssertionError, ValueError):
     sys.exit("android-pool-remote: rejected SSH command")
 env = os.environ.copy()
-for key in ("CODING_TOOL_INTEGRATIONS", "AGENTS", "SUBYARD_ENGINE_CONTEXT", "SUBYARD_CONFIG_LOADED"):
+for key in ("CODING_TOOL_INTEGRATIONS", "AGENTS", "SUBYARD_ENGINE_CONTEXT", "SUBYARD_CONFIG_LOADED", "SUBYARD_OPERATION_ID"):
     env.pop(key, None)
 env.update(SUBYARD_OPERATOR_HOME=home, SUBYARD_CONFIG_HOME=state + "/config",
            SUBYARD_HOME=state + "/data", SUBYARD_REPOSITORY_ROOT=root,
-           STORAGE_PATH=storage, SUBYARD_NO_AUDIT="1", SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE="1",
-           SUBYARD_OPERATION_ID=inner[0].split("=", 1)[1])
+           STORAGE_PATH=storage, SUBYARD_NO_AUDIT="1", SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE="1")
+if operation is not None:
+    env["SUBYARD_OPERATION_ID"] = operation
 os.execve(yard_bin, [yard_bin, "-Y", yard, "emu", *arguments], env)
 '''.replace('VALUES', repr((root, state, yard, home, storage, payload, yard_bin)), 1)
 pathlib.Path(path).write_text(source)
@@ -210,6 +224,11 @@ Host android-e2e-owner
 CONFIG
 printf '#!/bin/sh\nexec /usr/bin/ssh -F %s "$@"\n' "$work/ssh_config" > "$work/client-bin/ssh"
 chmod 0700 "$work/client-bin/ssh"
+if [ -n "$viewer_tools" ]; then
+  # The Linux controller must not need Incus; owner SSH gets its own login PATH.
+  printf '#!/bin/sh\n: > %s\nexit 89\n' "$work/controller-incus-called" > "$work/client-bin/incus"
+  chmod 0700 "$work/client-bin/incus"
+fi
 for _ in $(seq 1 50); do
   kill -0 "$sshd_job" 2>/dev/null || fail 'temporary sshd exited'
   if ss -Hln "sport = :$port" | grep -q .; then break; fi
@@ -229,7 +248,7 @@ controller catalog > "$work/remote-catalog.json" 2> "$work/remote-catalog.err" \
 owner emu status > "$work/local-status.json"
 controller status > "$work/remote-status.json" 2> "$work/remote-status.err" \
   || fail 'remote status failed'
-python3 - "$work" <<'PY'
+python3 - "$work" "$viewer_lease" <<'PY'
 import json, pathlib, sys
 root = pathlib.Path(sys.argv[1])
 def load(name):
@@ -242,10 +261,20 @@ fields = ('schema', 'resource_type', 'resource_id', 'defaults', 'graphics_mode',
           'heartbeat_seconds', 'ttl_seconds', 'slots')
 assert {key: local_status[key] for key in fields} == {key: remote_status[key] for key in fields}, \
     'remote status differs from owner status'
-assert len(remote_status['slots']) == 2 and all(slot['state'] == 'available' for slot in remote_status['slots']), \
-    'Android slots were not idle during remote route check'
+assert len(remote_status['slots']) == 2
+if not sys.argv[2]:
+    assert all(slot['state'] == 'available' for slot in remote_status['slots']), \
+        'Android slots were not idle during remote route check'
 PY
-if [ -n "$run_payload" ]; then
+if [ -n "$viewer_tools" ]; then
+  PATH="$work/client-bin:$PATH" SUBYARD_CONFIG_HOME="$work/controller-config" \
+    SUBYARD_HOME="$work/controller-data" python3 -B \
+    "$root/config/profiles/android/tests/e2e/android-pool-remote-viewer.py" \
+    "$YARD_BIN" "$work" "$viewer_tools" "$yard_name" "$project" "$instance" "$viewer_lease"
+  [ ! -e "$work/controller-incus-called" ] || fail 'remote controller invoked local Incus'
+  printf 'android-pool-remote controller-incus=unused\n'
+fi
+if [ -n "$run_payload" ] && [ -z "$viewer_tools" ]; then
   run_status=0
   controller run -- /usr/bin/python3 "$run_payload" \
     > "$work/remote-run.out" 2> "$work/remote-run.err" || run_status=$?

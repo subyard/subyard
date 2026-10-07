@@ -18,6 +18,7 @@ import (
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/resource"
+	"github.com/Subyard/Subyard/internal/shellquote"
 )
 
 const resourcePrepareTimeout = 30 * time.Second
@@ -29,6 +30,23 @@ func (cli *CLI) runResourceCommand(
 	arguments []string,
 	globalAssumeYes bool,
 ) int {
+	if len(arguments) == 2 && arguments[0] == "--session-wire" &&
+		loaded.Context.AccessKind == domain.AccessLocal && slices.Contains(definition.ControllerSessions, arguments[1]) {
+		cli.resourceWire = arguments[1]
+		defer func() { cli.resourceWire = "" }()
+		runner := &resourceApplyRunner{cli: cli, loaded: loaded, definition: definition,
+			arguments: arguments, effect: domain.ActionSession}
+		_, _, err := runner.Run(ctx, domain.AdapterRequest{Adapter: "resource", OperationID: cli.ensureOperationID(), Arguments: arguments[1:]}, nil)
+		if err != nil {
+			var sessionExit *resourceSessionExitError
+			if errors.As(err, &sessionExit) {
+				return sessionExit.code
+			}
+			cli.errorf("%s: session transport: %v", definition.Command, err)
+			return 1
+		}
+		return 0
+	}
 	invocation, err := parseResourceInvocation(arguments)
 	if err != nil {
 		cli.errorf("%s: %v", definition.Command, err)
@@ -43,6 +61,28 @@ func (cli *CLI) runResourceCommand(
 			resource.ErrResourceActionUnknown, definition.Command, invocation.verb,
 		))
 		return 2
+	}
+	if loaded.Context.AccessKind == domain.AccessRemote && definition.RemotePolicy(invocation.verb) == domain.RemoteOnController {
+		remote := []string{"yard"}
+		if loaded.Context.OwnerYardName != "" {
+			remote = append(remote, "-Y", loaded.Context.OwnerYardName)
+		}
+		remote = append(remote, definition.Command, "--session-wire", invocation.verb)
+		for index := range remote {
+			remote[index] = shellquote.Word(remote[index])
+		}
+		ssh, err := cli.sshArguments(ctx, loaded.Context.OwnerEndpoint, []string{"-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3", "-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "ClearAllForwardings=yes", loaded.Context.OwnerEndpoint, "--", "bash", "-lc", shellquote.Word(strings.Join(remote, " "))})
+		if err != nil {
+			cli.errorf("SSH trust: %v", err)
+			return 1
+		}
+		encoded, err := json.Marshal(append([]string{"ssh"}, ssh...))
+		if err != nil {
+			cli.errorf("session transport: %v", err)
+			return 1
+		}
+		cli.resourceSessionTransport = string(encoded)
+		defer func() { cli.resourceSessionTransport = "" }()
 	}
 	baseline := loaded
 	bootstrap, err := cli.prepareResourceBootstrap(ctx, loaded, definition, invocation.arguments)
@@ -121,7 +161,7 @@ func (cli *CLI) runResourceCommand(
 		ctx,
 		loaded.Context,
 		definition.Command,
-		domain.RemoteOnOwner,
+		definition.RemotePolicy(invocation.verb),
 		assessment.Action,
 		domain.ActionDelta{
 			Changed: assessment.Changed, Consequences: slices.Clone(assessment.Consequences),
@@ -376,6 +416,16 @@ func (cli *CLI) resourceEnvironment(
 	values["PATH"] = path
 	values["LANG"] = "C.UTF-8"
 	values["LC_ALL"] = "C.UTF-8"
+	if cli.resourceSessionTransport != "" {
+		values["SUBYARD_RESOURCE_SESSION_TRANSPORT"] = cli.resourceSessionTransport
+		if agent, ok := cli.baseEnv["SSH_AUTH_SOCK"]; ok {
+			values["SSH_AUTH_SOCK"] = agent
+		}
+	}
+	if cli.resourceWire != "" {
+		mode = "wire"
+		values["SUBYARD_RESOURCE_VERB"] = cli.resourceWire
+	}
 	if mode != "" {
 		values["SUBYARD_RESOURCE_MODE"] = mode
 	}

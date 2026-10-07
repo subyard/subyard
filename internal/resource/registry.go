@@ -16,22 +16,23 @@ import (
 )
 
 type Definition struct {
-	Profile    string
-	Name       string
-	Command    string
-	Handler    string
-	BringUp    string
-	Shutdown   string
-	Verbs      []string
-	Title      string
-	Proxy      *ProxyContract
-	Dashboard  *DashboardContract
-	Management *ManagementContract
-	Endpoint   *EndpointDefaults
-	Bootstrap  bool
-	Startup    bool
-	path       string
-	actions    []actionDeclaration
+	Profile            string
+	Name               string
+	Command            string
+	Handler            string
+	BringUp            string
+	Shutdown           string
+	Verbs              []string
+	Title              string
+	Proxy              *ProxyContract
+	Dashboard          *DashboardContract
+	Management         *ManagementContract
+	Endpoint           *EndpointDefaults
+	Bootstrap          bool
+	Startup            bool
+	ControllerSessions []string
+	path               string
+	actions            []actionDeclaration
 }
 
 type EndpointDefaults struct {
@@ -137,6 +138,13 @@ func (contract ProxyContract) OwnershipValue(device map[string]string) string {
 }
 
 func (definition Definition) HandlerPath() string { return definition.path }
+
+func (definition Definition) RemotePolicy(verb string) domain.RemotePolicy {
+	if slices.Contains(definition.ControllerSessions, verb) {
+		return domain.RemoteOnController
+	}
+	return domain.RemoteOnOwner
+}
 
 type Registry struct {
 	definitions       []Definition
@@ -287,6 +295,7 @@ func (registry Registry) definition(value string) (Definition, bool) {
 
 func cloneDefinition(definition Definition) Definition {
 	definition.Verbs = slices.Clone(definition.Verbs)
+	definition.ControllerSessions = slices.Clone(definition.ControllerSessions)
 	definition.actions = slices.Clone(definition.actions)
 	if definition.Proxy != nil {
 		proxy := *definition.Proxy
@@ -407,6 +416,17 @@ func loadDefinition(root, path string) (Definition, []domain.ActionDefinition, e
 	if startup != "" && !startupAction(actionDefinitions, declarations, bringUp) {
 		return Definition{}, nil, fmt.Errorf("startup bring-up must use public-ingress-change with reversible mutation in %s", path)
 	}
+	controllerSessions := strings.Fields(values.singletons["CONTROLLER_SESSION"])
+	for index, verb := range controllerSessions {
+		if !slices.Contains(verbs, verb) || slices.Contains(controllerSessions[:index], verb) {
+			return Definition{}, nil, fmt.Errorf("invalid CONTROLLER_SESSION verb %q in %s", verb, path)
+		}
+		for actionIndex, declaration := range declarations {
+			if declaration.verb == verb && actionDefinitions[actionIndex].Effect != domain.ActionSession {
+				return Definition{}, nil, fmt.Errorf("CONTROLLER_SESSION requires session actions in %s", path)
+			}
+		}
+	}
 	profileRoot := filepath.Join(root, "config", "profiles", profile)
 	handlerPath := filepath.Clean(filepath.Join(profileRoot, handler))
 	relative, err := filepath.Rel(profileRoot, handlerPath)
@@ -435,7 +455,7 @@ func loadDefinition(root, path string) (Definition, []domain.ActionDefinition, e
 	return Definition{
 		Profile: profile, Name: name, Command: command, Handler: handler,
 		BringUp: bringUp, Shutdown: shutdown, Verbs: verbs, Title: title, path: resolvedHandlerPath,
-		Proxy: proxy, Dashboard: dashboard, Management: management, Endpoint: endpoint, Bootstrap: bootstrap, Startup: startup != "", actions: declarations,
+		Proxy: proxy, Dashboard: dashboard, Management: management, Endpoint: endpoint, Bootstrap: bootstrap, Startup: startup != "", ControllerSessions: controllerSessions, actions: declarations,
 	}, actionDefinitions, nil
 }
 
@@ -699,7 +719,7 @@ func readDescriptor(path string) (descriptorValues, error) {
 	defer file.Close()
 	allowed := map[string]struct{}{
 		"COMMAND": {}, "HANDLER": {}, "TITLE": {}, "ACTION": {}, "BRINGUP": {}, "SHUTDOWN": {},
-		"PROXY": {}, "DASHBOARD": {}, "MANAGEMENT": {}, "ENDPOINT_DEFAULTS": {}, "BOOTSTRAP": {}, "STARTUP": {},
+		"PROXY": {}, "DASHBOARD": {}, "MANAGEMENT": {}, "ENDPOINT_DEFAULTS": {}, "BOOTSTRAP": {}, "STARTUP": {}, "CONTROLLER_SESSION": {},
 	}
 	values := descriptorValues{singletons: make(map[string]string)}
 	scanner := bufio.NewScanner(file)

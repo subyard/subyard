@@ -111,6 +111,8 @@ type CLI struct {
 	updateProgress               io.Writer
 	releaseTransitionChild       bool
 	configApplyRepair            *configApplyRepairPermit
+	resourceSessionTransport     string
+	resourceWire                 string
 	profileInitRepair            *configApplyRepairPermit
 }
 
@@ -544,6 +546,9 @@ func (cli *CLI) Run(ctx context.Context) int {
 	remotePlane := command.RemoteForward
 	if core {
 		remotePlane = definition.Remote
+	} else if profileResource {
+		invocation, _ := parseResourceInvocation(commandArguments)
+		remotePlane = command.RemotePlane(resourceDefinition.RemotePolicy(invocation.verb))
 	}
 	var loaded config.Loaded
 	var bootstrap *initBootstrap

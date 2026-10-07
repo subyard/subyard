@@ -126,16 +126,79 @@ L2 mounts the SDK, JDK and client code read-only and needs no KVM, Incus or sudo
 owner host, `yard emu ...` uses the profile handler; `yard -Y OWNER/YARD emu ...` follows the
 standard owner routing.
 The Android profile does not install a `yard` binary inside the yard.
-The command, its lease file and ADB relay live in the environment where the command executes. For a
-remote owner, use `run` to execute work there; its Unix socket is not a controller-local endpoint.
+`run` executes work on the selected owner. Its ADB Unix socket belongs to that execution
+environment and is not a controller-local endpoint. Remote `view` instead runs the viewer on
+the controller and carries broker requests, ADB and media over SSH to the selected yard.
 
 L1 agents share the yard's `/srv/cache/gradle`. Each L2 environment keeps its own writable Gradle
 home at `/home/dev/.gradle` in that container; it survives container stops and is discarded when
 the environment is recreated. A writable Gradle cache is never shared across container boundaries.
 
+## View from a Linux laptop
+
+Run `yard emu view` on the computer where the window should appear. Install Subyard,
+`scrcpy` and ADB on that computer. The Android profile and emulator hardware belong to
+the server's yard; the laptop does not need an Android profile or KVM.
+
+Register the owner once over SSH, then use its authoritative HostID and yard name:
+
 ```sh
-android-broker view --device tablet --api 35
-android-broker view --lease-file /tmp/my-android-lease.json
+# On the laptop, once per owner:
+yard host add me@my-server
+yard yards
+
+# On the laptop, for each viewing session:
+yard -Y owner-host/default emu view
+yard -Y owner-host/default emu view --control --device tablet --api 35
+```
+
+Replace `owner-host/default` with the `<HostID>/<yard>` reported by registration and
+`yard yards`. The selector determines which server and yard supply the emulator.
+Without a selector, `view` uses the default yard; it does not select a remote server
+automatically. A short yard name is usable only when it identifies one known yard.
+See [owner registration and yard selection](workflows.md#select-local-and-remote-yards).
+
+For a remote yard, this one command opens local `scrcpy` and uses the registered SSH
+connection to reach the pool. It needs no manually opened tunnel or graphical session
+on the server. Keep the command running while viewing. Both machines must have a
+Subyard runtime that supports controller viewer sessions, and the Android profile must
+be provisioned on the selected owner. After updating Subyard, refresh the in-yard client
+through `yard -Y owner-host/default provision android` on the laptop, or
+`yard -Y default provision android` on the server.
+
+For a local yard, `yard -Y NAME emu view` opens the viewer on that yard's owner host.
+The in-yard client also provides `android-broker view`, but it requires a graphical
+environment where it executes; an ordinary headless agent shell does not provide one.
+
+## Show an agent's leased device
+
+A standalone `view` acquires a new emulator. To show the same device an agent is using,
+the agent acquires an explicit lease inside the yard. These handoff instructions are also
+available to agents through the installed `android-broker --help`:
+
+```sh
+android-broker acquire --device phone --api 36 --lease-file /tmp/my-android-lease.json
+android-broker renew --lease-file /tmp/my-android-lease.json
+```
+
+Choose a new private lease-file path, use the ADB environment returned by acquire, and
+renew at least once per minute throughout the work. Tell the operator the selected yard
+and the absolute lease-file path; do not send the file contents or put them in a repository.
+The operator runs this on the laptop:
+
+```sh
+yard -Y owner-host/default emu view --lease-file /tmp/my-android-lease.json
+```
+
+For a remote yard, `--lease-file` is a path inside that selected yard. A lease created in an
+Android project environment can be attached only when its file is also accessible from the yard.
+The client reads it through the authenticated SSH connection; no manual copy to the laptop is needed. For a
+local owner invocation or `android-broker view`, the path is local to the invoking environment.
+Add `--control` when operator input is wanted. The agent remains responsible for renewing
+and releasing its lease after the attached viewer closes.
+
+```sh
+android-broker release --lease-file /tmp/my-android-lease.json
 ```
 
 The viewer requires `scrcpy` and ADB in the invoking environment. It is view-only unless

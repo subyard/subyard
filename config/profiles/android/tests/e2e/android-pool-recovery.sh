@@ -296,6 +296,13 @@ grep -Eq '^INFO: Texture: [0-9]{1,4}x[0-9]{1,4}$' "$phase_log" || fail 'owner vi
 [ "$(check_guest 30 allocation "$first")" = "$before_view" ] \
   || fail 'owner viewer released or renewed the attached lease'
 printf 'android-pool-recovery owner-viewer=PASS lease=unchanged\n'
+android_phase_begin public-remote-viewer
+printf 'android-pool-recovery phase=public-remote-viewer\n'
+timeout --foreground --kill-after=30 "$(remaining 1800)" \
+  bash "$root/config/profiles/android/tests/e2e/android-pool-remote.sh" \
+  "$root" "$state" "$yard_name" "$project" "$instance" "$owner_adb" \
+  --viewer "$work" "$first"
+android_phase_end 0
 android_phase_begin attached-standalone-capture
 printf 'android-pool-recovery phase=viewer\n'
 phase_log="$work/viewer.log"

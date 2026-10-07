@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -736,4 +737,113 @@ func readResourceApplyLog(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(value)
+}
+
+func TestRemoteControllerSessionUsesTrustedOwnerWireAndLocalEnvironment(t *testing.T) {
+	root, environment, _ := resourceCommandFixture(t)
+	// The fixture profile identity is kept generic; only a declared session can opt in.
+	matches, _ := filepath.Glob(filepath.Join(root, "config/profiles/*/resources/demo.res"))
+	if len(matches) != 1 {
+		t.Fatal("missing fixture descriptor")
+	}
+	resourcePath := matches[0]
+	descriptor, err := os.ReadFile(resourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, resourcePath, string(descriptor)+"CONTROLLER_SESSION=view\n", 0o600)
+	handlerPath := filepath.Join(filepath.Dir(resourcePath), "demo/handler.sh")
+	handler, err := os.ReadFile(handlerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Readiness and the session both execute the trusted argv using the retained agent.
+	probe := `    [ "$SSH_AUTH_SOCK" = /fixture/agent ] || exit 81
+    python3 -c 'import json,os,subprocess; subprocess.run(json.loads(os.environ["SUBYARD_RESOURCE_SESSION_TRANSPORT"]),input=b"private-protocol\n",check=True)' > "$SUBYARD_REPOSITORY_ROOT/wire-output"
+`
+	handlerText := strings.Replace(string(handler), "  prepare)\n", "  prepare)\n"+probe, 1)
+	handlerText = strings.Replace(handlerText, "  apply)\n", "  apply)\n"+probe, 1)
+	writeCLIFile(t, handlerPath, handlerText, 0o700)
+	if err := os.MkdirAll(filepath.Join(root, "state/yards/remote"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(root, "state/yards/remote/config.env"), "YARD_TYPE=remote\nREMOTE_DEST=owner.example\nREMOTE_YARD=inner\nSSH_PORT=4444\n", 0o600)
+	fakeBin := filepath.Join(root, "fake-bin")
+	sshLog := filepath.Join(root, "wire-ssh.jsonl")
+	if err := os.MkdirAll(fakeBin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(fakeBin, "ssh"), "#!/bin/sh\n"+trustedSSHMock(t)+`exec python3 -c 'import json,sys; open("`+sshLog+`", "a").write(json.dumps(sys.argv[1:])+"\n"); assert sys.stdin.buffer.read()==b"private-protocol\n"; print("wire-payload")' "$@"
+`, 0o700)
+	path := fakeBin + ":" + os.Getenv("PATH")
+	t.Setenv("PATH", path)
+	var stderr bytes.Buffer
+	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"-Y", "remote", "demo", "view"},
+		Environment: append(environment, "PATH="+path, "DISPLAY=:77", "SSH_AUTH_SOCK=/fixture/agent"), WorkingDir: root, Stderr: &stderr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	value, err := os.ReadFile(sshLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := strings.Split(strings.TrimSpace(string(value)), "\n")
+	if len(rows) != 2 {
+		t.Fatalf("wire executions=%d", len(rows))
+	}
+	for _, row := range rows {
+		var arguments []string
+		if err := json.Unmarshal([]byte(row), &arguments); err != nil {
+			t.Fatal(err)
+		}
+		joined := strings.Join(arguments, " ")
+		for _, want := range []string{"StrictHostKeyChecking=yes", "owner.example", "-T", "inner", "--session-wire", "ForwardAgent=no", "ForwardX11=no", "ClearAllForwardings=yes", "BatchMode=yes", "ConnectTimeout=3"} {
+			if !strings.Contains(joined, want) {
+				t.Fatalf("transport misses %s: %s", want, joined)
+			}
+		}
+		if strings.Contains(joined, "private-protocol") || strings.Contains(joined, ":77") {
+			t.Fatal("private protocol or GUI passed in arguments")
+		}
+	}
+	value, err = os.ReadFile(filepath.Join(root, "resource-session-env.log"))
+	if err != nil || !strings.Contains(string(value), "|:77|") {
+		t.Fatalf("controller display missing: %q %v", value, err)
+	}
+}
+
+func TestResourceWireIsOptInAndKeepsProtocolStdout(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		root, environment, _ := resourceCommandFixture(t)
+		matches, _ := filepath.Glob(filepath.Join(root, "config/profiles/*/resources/demo.res"))
+		if enabled {
+			value, err := os.ReadFile(matches[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeCLIFile(t, matches[0], string(value)+"CONTROLLER_SESSION=view\n", 0o600)
+		}
+		writeCLIFile(t, filepath.Join(filepath.Dir(matches[0]), "demo/handler.sh"), `#!/bin/sh
+[ "$SUBYARD_RESOURCE_MODE" = wire ] || exit 91
+[ "$1" = --session-wire ] || exit 92
+cat
+`, 0o700)
+		var stdout, stderr bytes.Buffer
+		program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "--session-wire", "view"}, Environment: environment,
+			WorkingDir: root, Stdin: strings.NewReader("private-framed-protocol\n"), Stdout: &stdout, Stderr: &stderr})
+		if err != nil {
+			t.Fatal(err)
+		}
+		code := program.Run(context.Background())
+		if enabled {
+			if code != 0 || stdout.String() != "private-framed-protocol\n" {
+				t.Fatalf("wire code=%d stdout=%q stderr=%s", code, stdout.String(), stderr.String())
+			}
+		} else if code != 2 {
+			t.Fatalf("undeclared wire code=%d", code)
+		}
+	}
 }

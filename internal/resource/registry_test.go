@@ -832,3 +832,47 @@ ACTION="down down public-ingress-change reversible"
 		}
 	}
 }
+
+func TestControllerSessionDeclarationRequiresOnlySessionActions(t *testing.T) {
+	for _, test := range []struct {
+		record string
+		valid  bool
+	}{
+		{"", true}, {"CONTROLLER_SESSION=view", true}, {"CONTROLLER_SESSION=status", false},
+		{"CONTROLLER_SESSION=missing", false}, {`CONTROLLER_SESSION="view view"`, false},
+		{"CONTROLLER_SESSION=mixed", false},
+	} {
+		t.Run(test.record, func(t *testing.T) {
+			root := testkit.TempDir(t)
+			writeTestResource(t, root, "sample", "service", `
+COMMAND=demo
+HANDLER=resources/service/handler.sh
+TITLE="Sample viewer"
+ACTION="status status read-only not-needed"
+ACTION="view view session not-needed"
+ACTION="mixed-session mixed session not-needed"
+ACTION="mixed-write mixed bounded-write not-needed"
+BRINGUP=status
+SHUTDOWN=status
+`+test.record)
+			registry, err := Load(root)
+			if !test.valid {
+				if err == nil {
+					t.Fatal("invalid controller session accepted")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			definition := registry.Definitions()[0]
+			want := domain.RemoteOnOwner
+			if test.record != "" {
+				want = domain.RemoteOnController
+			}
+			if definition.RemotePolicy("view") != want || definition.RemotePolicy("status") != domain.RemoteOnOwner {
+				t.Fatal("incorrect per-verb routing")
+			}
+		})
+	}
+}

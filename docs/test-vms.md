@@ -301,9 +301,11 @@ The attached viewer check deliberately delays scrcpy's server launch by 20 secon
 bounded startup waiting on a real device, without allocating another emulator.
 
 After a viewer-only change, pass `--lane viewer` to `config/profiles/android/tests/e2e/android-pool-runtime.sh`.
-It checks owner and yard viewers, delayed startup, attachment without lease renewal or release,
-and a standalone viewer alongside the borrowed lease, then cleans up. It prepares both API35 and
-API36 images, skipping the separate remote route and repeated API35 preparation assertions.
+It checks owner, yard and remote controller viewers, including real SSH transport and rendered
+frames, delayed startup, attachment without lease renewal or release, and a standalone viewer
+alongside the borrowed lease, then cleans up. Remote controller coverage also checks cancellation
+and EOF cleanup of wire processes. It prepares both API35 and
+API36 images, skipping the separate remote workload-run and repeated API35 preparation assertions.
 Those assertions remain in the full lane. It uses the same single VM.
 
 After a recovery change, pass `--lane recovery` to

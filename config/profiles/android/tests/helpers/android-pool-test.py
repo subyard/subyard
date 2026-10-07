@@ -1175,6 +1175,7 @@ os.write(1, result.stdout)
                             command = [sys.executable, '-I', '-B', '-c', program]
                         return original_spawn(command, *args, **kwargs)
                     with patch.object(client, 'CONTROL', address), \
+                            patch.object(client.shutil, 'which', return_value='/fixture/tool'), \
                             patch.object(client.subprocess, 'Popen', side_effect=spawn), \
                             contextlib.redirect_stderr(io.StringIO()) as output:
                         self.assertEqual(client.main(['view']), 139)
@@ -1184,6 +1185,62 @@ os.write(1, result.stdout)
         finally:
             server.shutdown()
             server.server_close()
+
+    def test_remote_viewer_uses_private_wire_and_keeps_attached_lease(self):
+        address = str(self.root / 'control.sock')
+        server = poolmod.Server(address, poolmod.Handler)
+        server.pool = self.pool
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        original_spawn = subprocess.Popen
+        config = json.dumps(dict(public_root=str(self.root), state_root=str(self.root)))
+        wire_command = ('import importlib.util; from unittest.mock import patch; '
+                        f'spec=importlib.util.spec_from_file_location("wire_client", {str(ROOT / "config/profiles/android/client.py")!r}); '
+                        'module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module); '
+                        f'config={config!r}; '
+                        'guard=patch.object(module.Path,"read_text",return_value=config); guard.start(); module.wire()')
+        transport = [sys.executable, '-I', '-B', '-c', wire_command]
+        def spawn(command, *args, **kwargs):
+            if command[0] == 'scrcpy':
+                self.assertEqual(kwargs['env']['DISPLAY'], ':fixture')
+                self.assertEqual(kwargs['env']['ANDROID_SERIAL'], 'emulator-5554')
+                command = [sys.executable, '-I', '-B', '-c', 'raise SystemExit(23)']
+            else:
+                self.assertEqual(command, transport)
+            return original_spawn(command, *args, **kwargs)
+        try:
+            with patch.dict(os.environ, SUBYARD_RESOURCE_SESSION_TRANSPORT=json.dumps(transport),
+                            SUBYARD_EMU_INSTANCE='must-not-use-owner-incus', DISPLAY=':fixture'), \
+                    patch.object(client.shutil, 'which', return_value='/fixture/tool'), \
+                    patch.object(client.subprocess, 'Popen', side_effect=spawn), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(client.main(['view']), 23)
+                self.assertTrue(all(slot['state'] == 'available' for slot in self.pool.status()['slots']))
+                token, allocation = self.acquire()
+                lease_file = self.root / 'remote-lease.json'
+                client.save_lease(lease_file, dict(token=token))
+                # The controller cannot read the remote path; only the wire subprocess does.
+                with patch.object(client, 'read_lease', side_effect=AssertionError('local lease read')):
+                    self.assertEqual(client.main(['view', '--lease-file', str(lease_file)]), 23)
+                self.assertEqual(self.pool.allocation(token)['state'], 'held')
+                self.assertEqual(self.pool.allocation(token)['generation'], allocation['generation'])
+                os.chmod(lease_file, 0o644)
+                with self.assertRaisesRegex(client.Error, 'private regular file'):
+                    client.main(['view', '--lease-file', str(lease_file)])
+                self.assertEqual(self.pool.allocation(token)['state'], 'held')
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_missing_viewer_tools_and_invalid_remote_path_do_not_reserve(self):
+        with patch.object(client, 'rpc', side_effect=AssertionError('pool operation')), \
+                patch.object(client.shutil, 'which', return_value=None):
+            with self.assertRaisesRegex(client.Error, 'scrcpy must be installed'):
+                client.main(['view'])
+        with patch.dict(os.environ, SUBYARD_RESOURCE_SESSION_TRANSPORT='["ssh"]'), \
+                contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as error:
+                client.validate(['view', '--lease-file', 'relative.json'])
+            self.assertEqual(error.exception.code, 2)
 
     def test_authorized_revoke_fences_tunnel_and_retries_quarantine(self):
         public = str(self.root / 'control.sock')

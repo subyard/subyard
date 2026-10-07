@@ -9,6 +9,7 @@ ACTION="renew renew bounded-write not-needed"
 ACTION="release release bounded-write not-needed"
 ACTION="cache cache bounded-write not-needed"
 ACTION="view view session not-needed"
+CONTROLLER_SESSION=view
 ACTION="revoke revoke shared-workload-change reversible"
 ACTION="down down shared-workload-change reversible"
 BRINGUP=status

@@ -798,6 +798,7 @@ PROXY="..."                       # optional typed owner-host proxy contract
 DASHBOARD="http HOST_SETTING PORT_SETTING /path" # optional browser endpoint metadata
 ENDPOINT_DEFAULTS="tailscale-self 6768" # optional automatic owner endpoint policy
 BOOTSTRAP=profile                 # optional profile selection and init on bring-up
+CONTROLLER_SESSION="view"         # optional session verbs run on the controller for remote yards
 ```
 
 `ACTION` is repeatable and is the source of the public verb list. Its assessment and recovery classes
@@ -810,6 +811,17 @@ Each resource process group remains cancellable as a unit. Declared read-only ve
 available during an unfinished release transition; verbs with any non-read action remain gated.
 At least one action is required, and the `BRINGUP` and `SHUTDOWN` verbs must be declared by actions.
 `HANDLER` is relative to the owning profile.
+
+`CONTROLLER_SESSION` opts declared session verbs into controller-local execution when a
+remote yard is selected. Other verbs retain owner routing. The controller validates the
+registered owner SSH trust and supplies the handler with a private structured transport
+description in `SUBYARD_RESOURCE_SESSION_TRANSPORT`. The reserved
+`yard RESOURCE --session-wire VERB` invocation is accepted only on the selected owner for a
+declared controller session and launches the handler in `wire` mode with
+`SUBYARD_RESOURCE_VERB`. The profile owns its wire protocol and resource authentication; core owns
+route selection, SSH trust, session environment and cancellation. GUI environment variables
+remain on the controller. Controller routing is rejected for non-session actions.
+
 Registry validation rejects unknown descriptor fields, path traversal, duplicate names/commands or
 local action IDs, collisions with core commands, invalid actions, and missing executables. The handler
 owns every lifecycle verb including the silent `is-up` probe. Core code discovers, dispatches,

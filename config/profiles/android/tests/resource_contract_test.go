@@ -5,11 +5,21 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/testkit/profilecontract"
 )
 
 func TestShippedResourceContract(t *testing.T) {
 	root := filepath.Clean(filepath.Join("..", "..", "..", ".."))
+	registry, err := resource.Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, definition := range registry.Definitions() {
+		if definition.Profile == "android" && (definition.RemotePolicy("view") != domain.RemoteOnController || definition.RemotePolicy("run") != domain.RemoteOnOwner) {
+			t.Fatal("Android viewer must run on controller while workloads stay on owner")
+		}
+	}
 	profilecontract.CheckResourceProfileContract(t, root, "android", []profilecontract.ResourceActionExpectation{
 		{Resource: "emulator", LocalID: "catalog", Verb: "catalog", Effect: domain.ActionRead, Recovery: domain.RecoveryNotNeeded},
 		{Resource: "emulator", LocalID: "status", Verb: "status", Effect: domain.ActionRead, Recovery: domain.RecoveryNotNeeded},

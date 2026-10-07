@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import secrets
 import select
+import shutil
 import signal
 import socket
 import socketserver
@@ -38,12 +39,14 @@ def line(stream):
     while not data.endswith(b'\n'):
         part = stream.recv(1) if isinstance(stream, socket.socket) else stream.read(1)
         if not part or len(data) >= 1024 * 1024:
-            raise Error('transport', 'Android pool response was interrupted or oversized')
+            raise Error('transport', 'Android pool response interrupted or oversized; verify the selected yard is running and its owner runtime is current')
         data.extend(part)
     return json.loads(data)
 
 
 def transport():
+    if command := os.environ.get('SUBYARD_RESOURCE_SESSION_TRANSPORT'):
+        return json.loads(command)
     if os.environ.get('SUBYARD_EMU_INSTANCE'):
         return ['incus', 'exec', os.environ['SUBYARD_EMU_INSTANCE'], '--project',
                 os.environ['SUBYARD_EMU_PROJECT'], '--', 'python3',
@@ -399,7 +402,11 @@ def context(allocation, endpoint):
 
 def parser():
     result = argparse.ArgumentParser(description='Exclusive Android emulators; profile defaults: phone, API 36, google_apis/x86_64. '
-                                     'Heartbeat 60s; lease TTL 600s. See catalog/status for configured defaults.')
+                                     'Heartbeat 60s; lease TTL 600s. See catalog/status for configured defaults.',
+                                     epilog='Agents: use run -- COMMAND for automatic renewal and release. '
+                                     'To share your screen, acquire --lease-file ABSOLUTE_PATH and renew the lease while working; '
+                                     'the operator opens yard -Y OWNER/YARD emu view --lease-file ABSOLUTE_PATH on their laptop. '
+                                     'For a remote yard this path is inside the selected yard.')
     commands = result.add_subparsers(dest='verb', required=True)
     commands.add_parser('catalog')
     commands.add_parser('status')
@@ -453,6 +460,19 @@ def relay_daemon(path):
 def wire():
     # Owner-side byte transport: first line is private control data, never an argument or log.
     request = json.loads(sys.stdin.buffer.readline(16385))
+    if request.get('operation') == 'lease':
+        try:
+            path = request.get('lease_file', '')
+            if not isinstance(path, str) or not Path(path).is_absolute():
+                raise Error('credential', 'remote lease file requires an absolute path in the selected yard')
+            lease = read_lease(path)
+            payload = dict(ok=True, result=dict(token=lease['token']))
+        except (OSError, ValueError, KeyError, Error):
+            payload = dict(ok=False, error='credential',
+                           message='remote lease file must exist in the selected yard and be a private regular file owned by the yard user')
+        sys.stdout.buffer.write(json.dumps(payload).encode() + b'\n')
+        sys.stdout.buffer.flush()
+        return
     stream = socket.socket(socket.AF_UNIX)
     config = json.loads(Path('/etc/subyard-android.json').read_text())
     address = (Path(config['state_root']) / 'admin.sock' if request.get('operation') in ('drain', 'revoke')
@@ -492,6 +512,8 @@ def validate(argv=None):
     args = parser().parse_args(argv)
     if hasattr(args, 'wait') and not 0 <= args.wait <= 3600:
         parser().error('--wait must be between 0 and 3600 seconds')
+    if args.verb == 'view' and os.environ.get('SUBYARD_RESOURCE_SESSION_TRANSPORT') and args.lease_file and not Path(args.lease_file).is_absolute():
+        parser().error('--lease-file requires an absolute path in the selected remote yard')
     if args.verb == 'run' and (not args.command or args.command[0] != '--' or len(args.command) == 1):
         parser().error('run requires -- COMMAND [ARG...]')
     return args
@@ -536,8 +558,20 @@ def main(argv=None):
         lease = read_lease(args.lease_file)
         print(json.dumps(rpc(args.verb, token=lease['token']), indent=2))
         return 0
+    if args.verb == 'view':
+        for program in ('scrcpy', 'adb'):
+            if shutil.which(program) is None:
+                raise Error('viewer', f'{program} must be installed on the machine running emu view')
     attached = args.verb == 'view' and args.lease_file
-    token = read_lease(args.lease_file)['token'] if attached else secrets.token_hex(32)
+    if attached and os.environ.get('SUBYARD_RESOURCE_SESSION_TRANSPORT'):
+        try:
+            token = rpc('lease', lease_file=args.lease_file)['token']
+        except Error as exc:
+            if exc.code == 'request' and str(exc) == 'unknown Android pool operation':
+                raise Error('transport', 'remote Android client is outdated; run yard -Y OWNER/YARD provision android to refresh it') from exc
+            raise
+    else:
+        token = read_lease(args.lease_file)['token'] if attached else secrets.token_hex(32)
     retained = False
     server = None
     viewer_server = None
@@ -638,6 +672,9 @@ if __name__ == '__main__':
             code = 0
         elif sys.argv[1:2] == ['_assessment']:
             assessment(sys.argv[2:])
+            code = 0
+        elif sys.argv[1:2] == ['_ready']:
+            rpc('status')
             code = 0
         elif sys.argv[1:2] == ['_wire']:
             wire()
