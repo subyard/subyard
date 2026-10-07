@@ -193,11 +193,16 @@ SSH_FAILURES={
     'authentication_failed':r'Failed publickey for (?:invalid user )?[A-Za-z0-9_.-]{1,128} from [0-9a-fA-F:.]{1,64} port [0-9]{1,5} ssh2(?:: [A-Za-z0-9_@+.-]{1,64} [A-Za-z0-9+/=:]{1,256})?(?: \[preauth\])?',
     'connection_throttled':SSH_DROP+r'Maxstartups|Maxstartups logging rate-limited: additional [0-9]{1,10} connections dropped',
     'source_penalized':SSH_DROP+r'penalty: connections without attempting authentication|PerSourcePenalties logging rate-limited: additional [0-9]{1,10} connections dropped'}
+INTERFACE_CHECKPOINTS={
+    'operation':{'setup','namespaces','links','listener','client','phase','remove','restore','assertions','receipt'},
+    'cleanup':{'lock','supervisor','namespaces','links','terminate','kill','processes','delete_links','delete_namespaces','save'},
+    'wait':{'client','listener'}}
+INTERFACE_EXCEPTIONS={'ValueError','OSError','TypeError','KeyError','IndexError','TimeoutExpired','CalledProcessError','SystemExit','Other'}
 def parse(raw,supervisor=b'',ssh=b''):
     locations=[]; codes=[]; markers=[]; last_stage=None; last_churn=None; ssh_codes=[]
     last_editor_stage=None; editor_deadline=False
     last_editor_checkpoint=None; last_editor_exception=None
-    editor_repeats=[]; palette_states=[]
+    editor_repeats=[]; palette_states=[]; interface_failures=[]
     for line in raw[:MAX_READ].splitlines():
         if len(line)>MAX_LINE: continue
         try: line=line.decode('ascii')
@@ -227,6 +232,15 @@ def parse(raw,supervisor=b'',ssh=b''):
         for code,pattern in SSH_FAILURES.items():
             if code not in ssh_codes and re.fullmatch(pattern,line): ssh_codes.append(code)
     lines=[line for line in supervisor[:MAX_READ].splitlines() if len(line)<=MAX_LINE]
+    for line in raw[:MAX_READ].splitlines()+lines:
+        if len(line)>MAX_LINE: continue
+        try: line=line.decode('ascii')
+        except UnicodeDecodeError: continue
+        failure=re.fullmatch(r'veranda-native-interface: failure=(operation|cleanup|wait) checkpoint=([a-z_]{1,32}) exception=([A-Za-z]{1,32}) child=(unknown|-?[0-9]{1,3})',line)
+        if failure and failure[2] in INTERFACE_CHECKPOINTS[failure[1]] and failure[3] in INTERFACE_EXCEPTIONS:
+            status=None if failure[4]=='unknown' else int(failure[4])
+            if (status is None or -64<=status<=255 and str(status)==failure[4]) and not any(item['seam']==failure[1] for item in interface_failures):
+                interface_failures.append({'seam':failure[1],'checkpoint':failure[2],'exception':failure[3],'childReturncode':status})
     drops=None
     for line in lines+raw[:MAX_READ].splitlines():
         count=re.fullmatch(rb'veranda-native-packet-loss: dropped=([0-9]{1,20})',line)
@@ -235,7 +249,7 @@ def parse(raw,supervisor=b'',ssh=b''):
     if b'veranda-native-supervisor: timeout' in lines: category='native_timeout'
     elif b'Traceback (most recent call last):' in lines: category='supervisor_failure'
     elif locations: category='native_panic'
-    return {'category':category,'panicLocations':locations,'nativeErrorCodes':codes,'completedStages':markers,'lastStage':last_stage,'lastEditorStage':last_editor_stage,'lastEditorCheckpoint':last_editor_checkpoint,'lastEditorException':last_editor_exception,'editorTraversalRepeats':editor_repeats,'editorPaletteStates':palette_states,'editorDeadlineReached':editor_deadline,'lastChurn':last_churn,'sshFailureCodes':ssh_codes,'packetLossDrops':drops}
+    return {'category':category,'panicLocations':locations,'nativeErrorCodes':codes,'completedStages':markers,'lastStage':last_stage,'lastEditorStage':last_editor_stage,'lastEditorCheckpoint':last_editor_checkpoint,'lastEditorException':last_editor_exception,'editorTraversalRepeats':editor_repeats,'editorPaletteStates':palette_states,'editorDeadlineReached':editor_deadline,'lastChurn':last_churn,'sshFailureCodes':ssh_codes,'packetLossDrops':drops,'interfaceFailures':interface_failures}
 def network_summary(result):
     count=result.get('packetLossDrops')
     if not NETWORK_MARKERS.issubset(result.get('completedStages',[])) or type(count) is not int or not 0<count<=18446744073709551615:
@@ -274,6 +288,29 @@ if sys.argv[1:]==['--self-test']:
     assert not any(value in json.dumps(result) for value in ['private','secret','key-material','ssh-ed25519','bad-code','hidden'])
     assert parse(raw,b'veranda-native-supervisor: timeout\n')['category']=='native_timeout'
     assert parse(raw,b'Traceback (most recent call last):\n')['category']=='supervisor_failure'
+    interface=b'veranda-native-interface: failure=operation checkpoint=assertions exception=ValueError child=101\n'
+    cleanup=b'veranda-native-interface: failure=cleanup checkpoint=processes exception=OSError child=unknown\n'
+    wait=b'veranda-native-interface: failure=wait checkpoint=client exception=TimeoutExpired child=-9\n'
+    expected=[{'seam':'operation','checkpoint':'assertions','exception':'ValueError','childReturncode':101},
+              {'seam':'cleanup','checkpoint':'processes','exception':'OSError','childReturncode':None},
+              {'seam':'wait','checkpoint':'client','exception':'TimeoutExpired','childReturncode':-9}]
+    assert parse(interface+cleanup+wait+interface)['interfaceFailures']==expected
+    assert parse(interface,cleanup+wait)['interfaceFailures']==expected
+    assert parse(cleanup)['interfaceFailures']==expected[1:2]
+    assert parse(b'',cleanup)['interfaceFailures']==expected[1:2]
+    for seam,checkpoints in INTERFACE_CHECKPOINTS.items():
+        for checkpoint in checkpoints:
+            for exception in INTERFACE_EXCEPTIONS:
+                for status in ['-64','0','255','unknown']:
+                    marker=f'veranda-native-interface: failure={seam} checkpoint={checkpoint} exception={exception} child={status}'.encode()
+                    assert len(parse(marker)['interfaceFailures'])==1
+    for invalid in [b'private-value '+interface,interface.rstrip()+b' private-value',interface.replace(b'assertions',b'private_value'),
+                    interface.replace(b'ValueError',b'PrivateError'),interface.replace(b'operation',b'private'),
+                    interface.replace(b'assertions',b'processes'),interface.replace(b'101',b'256'),interface.replace(b'101',b'-65'),
+                    interface.replace(b'101',b'001'),interface.replace(b'101',b'-0'),interface.replace(b'101',b'True'),
+                    interface.replace(b'101',b'private-value'),interface.rstrip()+b'\x00',interface.rstrip()+b'\xff']:
+        assert not parse(invalid)['interfaceFailures']
+    assert len(parse((interface+cleanup+wait)*100)['interfaceFailures'])==3
     assert parse(b'',b'veranda-native-packet-loss: dropped=12\n')['packetLossDrops']==12
     for count in [b'0',b'-1',b'18446744073709551616',b'1 private-value',b'private-value']:
         assert parse(b'',b'veranda-native-packet-loss: dropped='+count+b'\n')['packetLossDrops'] is None

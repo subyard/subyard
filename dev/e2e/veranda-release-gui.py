@@ -22,13 +22,14 @@ sys.dont_write_bytecode = True
 CASES = frozenset(context + '-' + pair for context in ['default', 'named', 'remote']
                   for pair in ['next-match', 'base-next', 'next-base'])
 STAGES = frozenset(['preparation', 'preparation.ssh', 'preparation.display', 'preparation.accessibility',
+                   'preparation.fleet', 'preparation.compositor',
                    'launch.ready', 'launch.accessible', 'launch.connect-link', 'select.owner',
                    'matched.heading', 'matched.yard', 'matched.details', 'matched.alerts', 'matched.reconcile',
                    'select.yard', 'remote.form', 'remote.destination', 'remote.window', 'remote.focus',
                    'remote.input', 'remote.readback', 'remote.assess', 'remote.fingerprint',
                    'remote.consent', 'remote.connect', 'remote.saved', 'remote.route', 'remote.reload',
                    'remote.select', 'remote.state', 'route', 'mismatch.message', 'mismatch.mutations',
-                   'growth.removal', 'growth.idle', 'growth.budget',
+                   'growth.removal', 'growth.fleet', 'growth.idle', 'growth.budget',
                    'screenshot', 'case.cleanup', 'cleanup', 'session'])
 CATEGORIES = frozenset(['timeout', 'ambiguity', 'accessible_api', 'accessible_action', 'accessible_bounds',
                        'process', 'screenshot', 'ownership', 'fixture_data', 'assertion', 'cleanup', 'unexpected', 'resource_budget'])
@@ -313,6 +314,104 @@ def growth_result(samples, warmup, cycles):
             'withinLimit': growth <= 10 * 1024 * 1024 if growth is not None else None}
 
 
+def wayland_growth_observation():
+    return {'backend': 'weston-x11-gl', 'input': 'xtest-to-wayland', 'renderer': 'unobserved',
+            'geometryVerified': False, 'screen': None, 'debian13Verified': False,
+            'westonVersion': None, 'webkitVersion': None, 'mesaVersion': None,
+            'logicalCpus': None, 'memoryBytes': None, 'kernelVersion': None,
+            'fleet': None, 'guiFleetVerified': False, 'compositorExcluded': True}
+
+
+def ordinary_inventory(inventory, names, named):
+    require(type(inventory) is dict and inventory.get('schema') == 1, 'fixture_data')
+    yards = inventory.get('yards')
+    require(type(yards) is list and len(yards) == 20 and len(names) == 20, 'fixture_data')
+    require(all(type(item) is dict and type(item.get('name')) is str
+                and type(item.get('projects')) is list and len(item['projects']) == 10 for item in yards), 'fixture_data')
+    require(sorted(item['name'] for item in yards) == sorted(names), 'fixture_data')
+    projects = [project for item in yards for project in item['projects']]
+    require(all(type(project) is dict and type(project.get('projectId')) is str and project['projectId']
+                and type(project.get('name')) is str and project['name'] for project in projects), 'fixture_data')
+    require(len({project['projectId'] for project in projects}) == 200
+            and all(len({project['name'] for project in item['projects']}) == 10 for item in yards), 'fixture_data')
+    require(all(type(item.get('state')) is str and item['state'].upper() == ('RUNNING' if item['name'] == named else 'NOT_CREATED')
+                for item in yards), 'fixture_data')
+    return {'yards': 20, 'projects': 200, 'running': 1, 'notCreated': 19}
+
+
+def seed_ordinary_fleet(owner, fixture, named, measure):
+    """Extend only this owned fixture; retain its running yard and real project."""
+    config = owner / 'config'; yards = config / 'yards'
+    private(config, True); private(yards, True)
+    require({path.name for path in yards.iterdir()} == {'default', named}, 'fixture_data')
+    preserved = {}
+    for name in ['default', named]:
+        private(yards / name, True)
+        preserved[yards / name / 'config.env'] = read(yards / name / 'config.env')
+    names = ['default', named, *('wg-' + str(index).zfill(2) for index in range(1, 19))]
+    measure.private_dir(fixture / 'projects')
+    for index, name in enumerate(names):
+        yard = yards / name
+        if name not in {'default', named}:
+            measure.private_dir(yard)
+            write(yard / 'config.env', f'YARD_KIND=container\nSSH_PORT={64000 + index}\n'
+                  f'HOST_BASE={fixture}/host-{name}\nRESTRICTED_DISK_PATHS={fixture}/host-{name}\n'
+                  'ENVIRONMENT_PROFILES=\nCODING_TOOL_INTEGRATIONS=\n')
+        records = config / 'projects' if name == 'default' else yard / 'projects'
+        if not records.exists(): measure.private_dir(records)
+        private(records, True)
+        entries = list(records.iterdir()); require(len(entries) <= 64, 'fixture_data')
+        existing = [path for path in entries if path.suffix == '.json']
+        require(len(existing) <= 10 and (name != named or existing), 'fixture_data')
+        for path in existing: preserved[path] = read(path)
+        for project in range(10 - len(existing)):
+            identity = f'wg-project-{index:02}-{project:02}'
+            path = records / (identity + '.json')
+            require(not path.exists() and not path.is_symlink(), 'fixture_data')
+            host = fixture / 'projects' / identity; measure.private_dir(host)
+            write(path, json.dumps({'schema': 1, 'identityVersion': 2, 'projectId': identity,
+                                   'name': identity, 'hostPath': str(host), 'yardPath': f'/srv/workspaces/{identity}/src',
+                                   'mode': 'sync', 'sshHost': 'yard' if name == 'default' else 'yard-' + name}))
+    require(all(read(path) == value for path, value in preserved.items()), 'ownership')
+    return names, preserved
+
+
+def xauthority_record(display, cookie):
+    require(re.fullmatch(r':[0-9]{1,6}', display) is not None and len(cookie) == 16, 'ownership')
+    # FamilyWild avoids hostname dependence; only the recorded display number matches.
+    parts = [b'', display[1:].encode('ascii'), b'MIT-MAGIC-COOKIE-1', cookie]
+    return struct.pack('>H', 65535) + b''.join(struct.pack('>H', len(part)) + part for part in parts)
+
+
+def wayland_application_environment(env, socket):
+    result = dict(env)
+    result.pop('DISPLAY', None); result.pop('XAUTHORITY', None)
+    result.update(GDK_BACKEND='wayland', WAYLAND_DISPLAY=str(socket))
+    return result
+
+
+def validate_wayland_growth(value, passed):
+    expected = wayland_growth_observation()
+    assert type(value) is dict and set(value) == set(expected)
+    for field in ['backend', 'input']: assert value[field] == expected[field]
+    assert value['compositorExcluded'] is True
+    assert value['renderer'] in {'unobserved', 'llvmpipe', 'softpipe', 'other'}
+    for field in ['geometryVerified', 'debian13Verified', 'guiFleetVerified']: assert type(value[field]) is bool
+    screen = value['screen']
+    assert screen is None or type(screen) is dict and screen == {'width': 1920, 'height': 1080, 'refresh_millihertz': 60000, 'scale': 1} and all(type(n) is int for n in screen.values())
+    for field in ['westonVersion', 'webkitVersion', 'mesaVersion']:
+        assert value[field] is None or type(value[field]) is str and re.fullmatch(r'[0-9][0-9A-Za-z.+:~_-]{0,63}', value[field])
+    assert value['logicalCpus'] is None or type(value['logicalCpus']) is int and 1 <= value['logicalCpus'] <= 4096
+    assert value['memoryBytes'] is None or type(value['memoryBytes']) is int and 0 < value['memoryBytes'] < 2**64
+    kernel = value['kernelVersion']
+    assert kernel is None or type(kernel) is list and len(kernel) == 3 and all(type(n) is int and 0 <= n <= 65535 for n in kernel)
+    assert value['fleet'] is None or type(value['fleet']) is dict and value['fleet'] == {'yards': 20, 'projects': 200, 'running': 1, 'notCreated': 19} and all(type(n) is int for n in value['fleet'].values())
+    if passed:
+        assert value['geometryVerified'] and value['screen'] is not None and value['debian13Verified'] and value['guiFleetVerified'] and value['renderer'] == 'llvmpipe'
+        assert value['fleet'] is not None and value['logicalCpus'] == 4 and value['memoryBytes'] >= 7 * 1024**3
+        assert all(value[field] is not None for field in ['westonVersion', 'webkitVersion', 'mesaVersion', 'kernelVersion'])
+
+
 def growth_self_test():
     diagnostic_self_test()
     samples = [{'cycle': cycle, 'rssBytes': (100 if cycle <= 10 else 110) * 1024 * 1024, 'processCount': 4}
@@ -339,9 +438,81 @@ def growth_self_test():
     return 0
 
 
-def validate_summary(result, rc, growth=False):
+def wayland_growth_self_test():
+    import copy
+    import tempfile
+    from types import SimpleNamespace
+    growth_self_test()
+    with tempfile.TemporaryDirectory(prefix='veranda-wayland-growth-') as directory:
+        root = Path(directory); root.chmod(0o700)
+        def directory(path): path.mkdir(mode=0o700); path.chmod(0o700)
+        owner = root / 'owner'; fixture = root / 'fixture'
+        for path in [owner, fixture, owner / 'config', owner / 'config/yards', owner / 'config/yards/default',
+                     owner / 'config/yards/named', owner / 'config/yards/named/projects']:
+            directory(path)
+        write(owner / 'config/yards/default/config.env', 'default preserved\n')
+        write(owner / 'config/yards/named/config.env', 'named preserved\n')
+        record = owner / 'config/yards/named/projects/real.json'
+        write(record, json.dumps({'projectId': 'real', 'name': 'Real project', 'sourceKey': 'preserved'}))
+        write(record.parent / '.lock', '')
+        names, preserved = seed_ordinary_fleet(owner, fixture, 'named', SimpleNamespace(private_dir=directory))
+        assert read(record) == preserved[record] and len(names) == 20
+        inventory = {'schema': 1, 'yards': []}
+        for name in names:
+            records = owner / 'config/projects' if name == 'default' else owner / 'config/yards' / name / 'projects'
+            inventory['yards'].append({'name': name, 'state': 'Running' if name == 'named' else 'NOT_CREATED',
+                                       'projects': [json.loads(read(path)) for path in records.glob('*.json')]})
+        counts = ordinary_inventory(inventory, names, 'named')
+        for mutation in ['missing', 'duplicate', 'unknown', 'short-projects']:
+            invalid = copy.deepcopy(inventory)
+            if mutation == 'missing': invalid['yards'].pop()
+            if mutation == 'duplicate': invalid['yards'][-1] = copy.deepcopy(invalid['yards'][0])
+            if mutation == 'unknown': invalid['yards'][0]['state'] = 'UNKNOWN'
+            if mutation == 'short-projects': invalid['yards'][0]['projects'].pop()
+            try: ordinary_inventory(invalid, names, 'named')
+            except FixtureFailure: pass
+            else: raise AssertionError('incomplete ordinary workload accepted')
+        observation = wayland_growth_observation()
+        validate_wayland_growth(observation, False)
+        observation.update(renderer='llvmpipe', geometryVerified=True, debian13Verified=True,
+                           screen={'width': 1920, 'height': 1080, 'refresh_millihertz': 60000, 'scale': 1},
+                           westonVersion='14.0.2-1', webkitVersion='2.48.3-1', mesaVersion='25.0.7-2',
+                           logicalCpus=4, memoryBytes=8 * 1024**3, kernelVersion=[6, 12, 0],
+                           fleet=counts, guiFleetVerified=True)
+        validate_wayland_growth(observation, True)
+        samples = [{'cycle': cycle, 'rssBytes': 100 * 1024**2, 'processCount': 4}
+                   for cycle in [*range(1, 11), *range(91, 101)]]
+        result = {'passed': ['remote-next-match'], 'failedCase': None, 'cleanup': True,
+                  'failureStage': None, 'failureCategory': None, 'selectionState': None, 'selectionFailure': None,
+                  'growth': growth_result(samples, 10, 100), 'wayland': observation}
+        validate_summary(result, 0, True, True)
+        result.update(passed=[], failedCase='remote-next-match', failureStage='remote.input', failureCategory='process',
+                      growth=growth_result([], 0, 0), wayland=wayland_growth_observation())
+        validate_summary(result, 1, True, True)
+        for invalid in [dict(observation, guiFleetVerified=False), dict(observation, compositorExcluded=1),
+                        dict(observation, rawError='private'), dict(observation, westonVersion='/private/path'),
+                        dict(observation, logicalCpus=True), dict(observation, fleet=None)]:
+            try: validate_wayland_growth(invalid, True)
+            except AssertionError: pass
+            else: raise AssertionError('invalid or incomplete Wayland receipt accepted')
+        cookie = b'\x01' * 16
+        value = xauthority_record(':123', cookie)
+        assert value == b'\xff\xff\x00\x00\x00\x03123\x00\x12MIT-MAGIC-COOKIE-1\x00\x10' + cookie
+        write(fixture / 'authority', value)
+        assert read(fixture / 'authority', 512, True) == value
+        inherited = {'DISPLAY': ':123', 'XAUTHORITY': 'private', 'PATH': '/usr/bin:/bin'}
+        env = wayland_application_environment(inherited, fixture / 'runtime/veranda-growth')
+        assert 'DISPLAY' not in env and 'XAUTHORITY' not in env and env['GDK_BACKEND'] == 'wayland'
+        assert inherited['DISPLAY'] == ':123' and env['WAYLAND_DISPLAY'].endswith('/runtime/veranda-growth')
+    print('ok: Wayland growth workload preservation, blocked observations and protected input classification')
+    return 0
+
+
+def validate_summary(result, rc, growth=False, wayland=False):
     assert type(rc) is int
-    assert isinstance(result, dict) and set(result) == {'passed', 'failedCase', 'cleanup', 'failureStage', 'failureCategory', 'selectionState', 'selectionFailure'} | ({'growth'} if growth else set())
+    assert not wayland or growth
+    assert isinstance(result, dict) and set(result) == {'passed', 'failedCase', 'cleanup', 'failureStage', 'failureCategory', 'selectionState', 'selectionFailure'} | ({'growth'} if growth else set()) | ({'wayland'} if wayland else set())
+    if wayland: validate_wayland_growth(result['wayland'], rc == 0)
     assert isinstance(result['passed'], list) and len(result['passed']) <= 9
     assert all(isinstance(case, str) and case in CASES for case in result['passed'])
     assert len(set(result['passed'])) == len(result['passed'])
@@ -719,10 +890,10 @@ def private(path, directory=False):
     require(directory or info.st_nlink == 1, 'ownership')
 
 
-def read(path, limit=131072):
+def read(path, limit=131072, binary=False):
     private(path)
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    with os.fdopen(fd) as stream:
+    with os.fdopen(fd, 'rb' if binary else 'r') as stream:
         info = os.fstat(stream.fileno())
         assert stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == 0o600
         value = stream.read(limit + 1)
@@ -734,7 +905,7 @@ def write(path, value):
     private(path.parent, True)
     temporary = path.with_name(path.name + '.new')
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(fd, 'w') as stream:
+    with os.fdopen(fd, 'wb' if isinstance(value, bytes) else 'w') as stream:
         os.fchmod(stream.fileno(), 0o600)
         stream.write(value)
     if path.exists() or path.is_symlink():
@@ -978,8 +1149,10 @@ def main():
     from gi.repository import Atspi, GLib
     root, fixture, owner = map(Path, sys.argv[1:4])
     yard, storage = sys.argv[4:6]
-    growth = sys.argv[6:] == ['--growth']
-    assert sys.argv[6:] in [[], ['--growth']]
+    wayland = sys.argv[6:] == ['--wayland-growth']
+    growth = wayland or sys.argv[6:] == ['--growth']
+    assert sys.argv[6:] in [[], ['--growth'], ['--wayland-growth']]
+    wayland_observation = wayland_growth_observation() if wayland else None
     growth_samples = []; warmup_completed = cycles_completed = 0
     private(owner, True); private(fixture, True)
     assert read(fixture / '.marker', 128) == 'subyard-veranda-release-gui-v1\n'
@@ -989,6 +1162,8 @@ def main():
     spec = importlib.util.spec_from_file_location('measure', root / 'dev/measure-veranda.py')
     measure = importlib.util.module_from_spec(spec); spec.loader.exec_module(measure)
     children = []; app = None; app_tree = None; gui = None; display = None; server = None
+    compositor = None; compositor_start = None; compositor_window = None; socket_identity = None
+    authority = fixture / 'Xauthority'; cookie = None; fleet_names = None; fleet_preserved = None
     app_stderr = None; bound_failure = None
     passed = []; current = 'preparation'; cleanup = True; stage = 'preparation'; category = None; selection = None; selection_error = None; selection_point = 'tree'; yard_point = 'tree'; fingerprint_point = 'tree'; reconcile_point = 'tree'; yard_end = time.monotonic()
     heading_point = 'tree'; heading_site = 'local'; observing = False
@@ -1008,6 +1183,19 @@ def main():
                 'HOME': str(fixture / 'owner-home'), 'SUBYARD_OPERATOR_HOME': str(fixture / 'operator'),
                 'SUBYARD_CONFIG_HOME': str(owner / 'config'), 'SUBYARD_HOME': str(owner / 'data'),
                 'SUBYARD_REPOSITORY_ROOT': str(root), 'SUBYARD_NO_AUDIT': '1', 'STORAGE_PATH': storage}
+
+    def owned_composition():
+        if not wayland: return
+        private(fixture / 'runtime', True)
+        require(read(authority, 512, True) == xauthority_record(display, cookie), 'ownership')
+        live = measure.processes()
+        server_start = next(tree.known.get(server.pid) for process, tree in children if process is server)
+        for process, start in [(server, server_start), (compositor, compositor_start)]:
+            require(start is not None and process.poll() is None and live.get(process.pid, {}).get('start') == start
+                    and Path('/proc', str(process.pid)).stat().st_uid == os.geteuid(), 'ownership')
+        socket = (fixture / 'runtime' / 'veranda-growth').lstat()
+        require(stat.S_ISSOCK(socket.st_mode) and socket.st_uid == os.geteuid()
+                and (socket.st_dev, socket.st_ino) == socket_identity, 'ownership')
 
     def spawn(args, env, log):
         write(fixture / log, '')
@@ -1191,13 +1379,15 @@ def main():
             for process, start in [(server, server_start), (app, app_start)]:
                 require(live.get(process.pid, {}).get('start') == start
                         and Path('/proc', str(process.pid)).stat().st_uid == os.geteuid(), 'ownership')
+            owned_composition()
             return live
 
         def xdo(args, capture=False):
             owned_input()
             remaining = min(3, deadline - 12 - time.monotonic())
             require(remaining > 0, 'timeout')
-            result = subprocess.run(['xdotool', *args], env=dict(base_env, DISPLAY=display),
+            result = subprocess.run(['xdotool', *args], env=dict(base_env, DISPLAY=display,
+                                    **({'XAUTHORITY': str(authority)} if wayland else {})),
                                     stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
                                     stderr=subprocess.DEVNULL, check=True, timeout=remaining)
             if capture:
@@ -1205,15 +1395,21 @@ def main():
                 return result.stdout
 
         boundary('remote.window')
-        windows = xdo(['search', '--onlyvisible', '--pid', str(app.pid)], True)
+        windows = xdo(['search', '--onlyvisible', '--class', '^Weston Compositor$'] if wayland
+                      else ['search', '--onlyvisible', '--pid', str(app.pid)], True)
         require(len(windows.split()) == 1, 'ambiguity')
         candidate = windows.strip()
         require(candidate.isdigit() and len(candidate) <= 20, 'ownership')
-        pid = xdo(['getwindowpid', candidate.decode('ascii')], True).strip()
-        require(pid.isdigit() and len(pid) <= 20, 'ownership')
-        live = owned_input()
-        window = input_window(windows, int(pid), app.pid, app_start, live[app.pid]['start'],
-                              Path('/proc', str(app.pid)).stat().st_uid)
+        if wayland:
+            require(candidate == compositor_window, 'ownership')
+            require(xdo(['search', '--onlyvisible', '--name', '.+'], True).split() == [compositor_window], 'ownership')
+            window = candidate.decode('ascii')
+        else:
+            pid = xdo(['getwindowpid', candidate.decode('ascii')], True).strip()
+            require(pid.isdigit() and len(pid) <= 20, 'ownership')
+            live = owned_input()
+            window = input_window(windows, int(pid), app.pid, app_start, live[app.pid]['start'],
+                                  Path('/proc', str(app.pid)).stat().st_uid)
         boundary('remote.focus')
         xdo(['windowfocus', '--sync', window])
         component = entry.get_component_iface()
@@ -1248,11 +1444,14 @@ def main():
                    XDG_CONFIG_HOME=str(paths['config']), XDG_RUNTIME_DIR=str(paths['runtime']),
                    DISPLAY=display, SSH_AUTH_SOCK=str(fixture / 'agent.sock'),
                    DBUS_SESSION_BUS_ADDRESS=os.environ['DBUS_SESSION_BUS_ADDRESS'], VERANDA_RESOURCE_PROBE='1')
+        if wayland:
+            env = wayland_application_environment(env, fixture / 'runtime' / 'veranda-growth')
         app_stderr = case / 'gui-stderr.log'
         stderr_fd = private_stderr(app_stderr)
         try:
             app, app_tree, _ = measure.launch(fixture / ('base' if version == '0.1.0' else 'next') / 'usr/bin/subyard-veranda',
-                                             env, 20, stderr=stderr_fd if stderr_fd is not None else subprocess.DEVNULL)
+                                             env, 20, expected_fleet=measure.FLEET_COUNTS if wayland else None,
+                                             stderr=stderr_fd if stderr_fd is not None else subprocess.DEVNULL)
         finally:
             if stderr_fd is not None: os.close(stderr_fd)
         def accessible():
@@ -1319,6 +1518,9 @@ def main():
         default.mkdir(mode=0o700)
         write(default / 'config.env', 'YARD_KIND=container\nSSH_PORT=64996\nLIMITS_MEMORY=512MiB\n'
               + 'HOST_BASE=' + str(fixture / 'default-host') + '\nRESTRICTED_DISK_PATHS=' + str(fixture / 'default-host') + '\nENVIRONMENT_PROFILES=\nCODING_TOOL_INTEGRATIONS=\n')
+        if wayland:
+            boundary('preparation.fleet')
+            fleet_names, fleet_preserved = seed_ordinary_fleet(owner, fixture, yard, measure)
         (fixture / 'bin').mkdir(mode=0o700)
         # Fixed RPC forms only; these wrappers never rewrite a protocol response.
         for transport in ['local', 'remote']:
@@ -1371,16 +1573,79 @@ def main():
         assert port.isdecimal() and 1024 <= int(port) <= 65535
         destination = account + '@127.0.0.1:' + port
         boundary('preparation.display')
+        if wayland:
+            cookie = os.urandom(16)
+            write(authority, xauthority_record(':0', cookie))
         readfd, writefd = os.pipe()
-        server = subprocess.Popen(['Xvfb', '-displayfd', str(writefd), '-screen', '0', '1280x800x24', '-nolisten', 'tcp'],
+        server = subprocess.Popen(['Xvfb', '-displayfd', str(writefd), '-screen', '0',
+                                   '1920x1080x24' if wayland else '1280x800x24', '-nolisten', 'tcp',
+                                   *(['-auth', str(authority)] if wayland else [])],
                                   env=base_env, pass_fds=(writefd,), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         children.append((server, measure.Tree(server.pid))); os.close(writefd)
         with selectors.DefaultSelector() as selector:
             selector.register(readfd, selectors.EVENT_READ); assert selector.select(3)
         display = ':' + os.read(readfd, 32).decode().strip(); os.close(readfd)
+        if wayland:
+            boundary('preparation.compositor')
+            write(authority, xauthority_record(display, cookie))
+            private(fixture / 'runtime', True)
+            compositor_env = dict(base_env, DISPLAY=display, XAUTHORITY=str(authority),
+                                  XDG_RUNTIME_DIR=str(fixture / 'runtime'),
+                                  WAYLAND_DISPLAY='veranda-growth', DBUS_SESSION_BUS_ADDRESS=os.environ['DBUS_SESSION_BUS_ADDRESS'])
+            compositor = spawn(['weston', '--no-config', '--backend=x11', '--renderer=gl',
+                                '--shell=kiosk-shell.so', '--width=1920', '--height=1080', '--scale=1',
+                                '--output-count=1', '--idle-time=0', '--socket=veranda-growth'],
+                               compositor_env, 'weston.log')
+            compositor_start = next(tree.known.get(compositor.pid) for process, tree in children if process is compositor)
+            require(compositor_start is not None, 'ownership')
+            wait(lambda: compositor.poll() is None and (fixture / 'runtime' / 'veranda-growth').is_socket(), 10)
+            socket = (fixture / 'runtime' / 'veranda-growth').lstat()
+            require(stat.S_ISSOCK(socket.st_mode) and socket.st_uid == os.geteuid(), 'ownership')
+            socket_identity = (socket.st_dev, socket.st_ino)
+            spec = importlib.util.spec_from_file_location('wayland_resources', root / 'dev/e2e/veranda-wayland-resources.py')
+            wayland_resources = importlib.util.module_from_spec(spec); spec.loader.exec_module(wayland_resources)
+            info = subprocess.check_output(['wayland-info', '--interface', 'wl_output'], env=compositor_env,
+                                           stderr=subprocess.DEVNULL, text=True, timeout=3)
+            wayland_observation['screen'] = wayland_resources.output_geometry(info)
+            wayland_observation['geometryVerified'] = True
+            window = subprocess.check_output(['xdotool', 'search', '--onlyvisible', '--class', '^Weston Compositor$'],
+                                             env=compositor_env, stderr=subprocess.DEVNULL, timeout=3)
+            require(len(window) <= 1024 and window.isascii() and len(window.split()) == 1
+                    and window.strip().isdigit() and 0 < len(window.strip()) <= 20, 'ownership')
+            compositor_window = window.strip()
+            # Only this cookie-bearing compositor creates X windows; the app receives no X display or cookie.
+            only = subprocess.check_output(['xdotool', 'search', '--onlyvisible', '--name', '.+'],
+                                           env=compositor_env, stderr=subprocess.DEVNULL, timeout=3)
+            require(only.split() == [compositor_window], 'ownership')
+            renderer = re.search(r'GL renderer: ([ -~]{1,200})', read(fixture / 'weston.log'))
+            require(renderer is not None, 'fixture_data')
+            wayland_observation['renderer'] = 'llvmpipe' if 'llvmpipe' in renderer[1] else 'softpipe' if 'softpipe' in renderer[1] else 'other'
+            wayland_observation['logicalCpus'] = os.cpu_count()
+            wayland_observation['memoryBytes'] = next(int(line.split()[1]) * 1024 for line in Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemTotal:'))
+            kernel = re.match(r'(\d+)\.(\d+)\.(\d+)', os.uname().release)
+            require(kernel is not None, 'fixture_data')
+            wayland_observation['kernelVersion'] = list(map(int, kernel.groups()))
+            release = dict(line.split('=', 1) for line in Path('/etc/os-release').read_text().splitlines() if '=' in line)
+            wayland_observation['debian13Verified'] = release.get('ID', '').strip('"') == 'debian' and release.get('VERSION_ID', '').strip('"') == '13'
+            for key, package in [('westonVersion', 'weston'), ('webkitVersion', 'libwebkit2gtk-4.1-0'), ('mesaVersion', 'libgl1-mesa-dri')]:
+                version = subprocess.check_output(['dpkg-query', '-W', '-f=${Version}', package],
+                                                  text=True, stderr=subprocess.DEVNULL, timeout=3).strip()
+                require(re.fullmatch(r'[0-9][0-9A-Za-z.+:~_-]{0,63}', version) is not None, 'fixture_data')
+                wayland_observation[key] = version
+            require(wayland_observation['westonVersion'].startswith('14.')
+                    and wayland_observation['renderer'] == 'llvmpipe' and wayland_observation['debian13Verified']
+                    and wayland_observation['logicalCpus'] == 4 and wayland_observation['memoryBytes'] >= 7 * 1024**3, 'fixture_data')
+            validate_wayland_growth(wayland_observation, False)
+            owner_spec = importlib.util.spec_from_file_location('growth_owner', root / 'dev/e2e/veranda-owner.py')
+            owner_api = importlib.util.module_from_spec(owner_spec); owner_spec.loader.exec_module(owner_api)
+            client = owner_api.Owner([str(fixture / 'yard-0.1.1')], env=base_env, timeout=10)
+            try:
+                client.result('rpc.negotiate')
+                wayland_observation['fleet'] = ordinary_inventory(client.result('owner.inventory'), fleet_names, yard)
+            finally: client.close()
         boundary('preparation.accessibility')
         subprocess.run(['gsettings', 'set', 'org.gnome.desktop.interface', 'toolkit-accessibility', 'true'],
-                       env=dict(os.environ, DISPLAY=display), check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+                       env=dict(os.environ, DISPLAY=display, **({'XAUTHORITY': str(authority)} if wayland else {})), check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
         Atspi.set_timeout(500, 1000); Atspi.init()
         for context in ['remote'] if growth else ['default', 'named', 'remote']:
             for pair, version, engine in [('next-match', '0.1.1', '0.1.1')] if growth else [('next-match', '0.1.1', '0.1.1'), ('base-next', '0.1.0', '0.1.1'), ('next-base', '0.1.1', '0.1.0')]:
@@ -1426,6 +1691,7 @@ def main():
                         # The first destination uses owned XTEST; Svelte retains it thereafter.
                         for cycle in range(-9, 101):
                             app_tree.sample(); listener_tree.sample()
+                            owned_composition()
                             live = measure.processes()
                             ssh = {pid: start for pid, start in app_tree.known.items()
                                    if live.get(pid, {}).get('start') == start and live[pid]['name'] == 'ssh'}
@@ -1442,6 +1708,15 @@ def main():
                                 return gone and len(owners) == 1 and find('+ Connect remote host', buttons) and not find('Confirm removal', buttons)
                             wait(removed)
                             require(not any(info['name'] == 'ssh' for info in app_tree.sample()['processes']), 'process')
+                            if wayland:
+                                boundary('growth.fleet')
+                                def ordinary_gui():
+                                    visible = [node.get_name() for node in nodes() if node.get_role() in buttons
+                                               and (node.get_name() or '').startswith('Show yard ')]
+                                    return sorted(visible) == sorted('Show yard ' + name for name in fleet_names) and find('Overview', {Atspi.Role.HEADING})
+                                wait(ordinary_gui)
+                                require(all(read(path) == value for path, value in fleet_preserved.items()), 'ownership')
+                                wayland_observation['guiFleetVerified'] = True
                             if cycle <= 0:
                                 warmup_completed += 1
                             else:
@@ -1451,7 +1726,7 @@ def main():
                                     until = time.monotonic() + 30
                                     while time.monotonic() < until:
                                         require(app.poll() is None and time.monotonic() < deadline - 12, 'timeout')
-                                        app_tree.sample(); time.sleep(0.1)
+                                        owned_composition(); app_tree.sample(); time.sleep(0.1)
                                     sample = app_tree.sample()
                                     growth_samples.append({'cycle': cycle, 'rssBytes': sample['rss_bytes'],
                                                            'processCount': sample['process_count']})
@@ -1469,6 +1744,13 @@ def main():
                             matched(site='post-save')
                         boundary('growth.budget')
                         require(growth_result(growth_samples, warmup_completed, cycles_completed)['withinLimit'], 'resource_budget')
+                        if wayland:
+                            boundary('growth.fleet')
+                            client = owner_api.Owner([str(fixture / 'yard-0.1.1')], env=base_env, timeout=10)
+                            try:
+                                client.result('rpc.negotiate')
+                                require(ordinary_inventory(client.result('owner.inventory'), fleet_names, yard) == wayland_observation['fleet'], 'fixture_data')
+                            finally: client.close()
                         boundary('case.cleanup'); close(); passed.append(current)
                         continue
                     boundary('remote.reload')
@@ -1575,7 +1857,8 @@ def main():
                   'failureStage': stage if category else None, 'failureCategory': category, 'selectionState': selection, 'selectionFailure': selection_error}
         if growth:
             result['growth'] = growth_result([sample for sample in growth_samples if sample['cycle'] <= cycles_completed], warmup_completed, cycles_completed)
-        validate_summary(result, 0 if len(passed) == expected_count and cleanup else 1, growth)
+        if wayland: result['wayland'] = wayland_observation
+        validate_summary(result, 0 if len(passed) == expected_count and cleanup else 1, growth, wayland)
         write(fixture / 'summary.json', json.dumps(result))
     return 0 if len(passed) == expected_count and cleanup else 1
 
@@ -1588,7 +1871,8 @@ def session():
     spec = importlib.util.spec_from_file_location('measure', root / 'dev/measure-veranda.py')
     measure = importlib.util.module_from_spec(spec); spec.loader.exec_module(measure)
     process = subprocess.Popen(['dbus-run-session', '--', sys.executable, __file__, *sys.argv[2:]], start_new_session=True)
-    growth = sys.argv[7:] == ['--growth']
+    wayland = sys.argv[7:] == ['--wayland-growth']
+    growth = wayland or sys.argv[7:] == ['--growth']
     tree = measure.Tree(process.pid); end = time.monotonic() + (1825 if growth else 325)
     def interrupted(*_): raise TimeoutError()
     signal.signal(signal.SIGTERM, interrupted); signal.signal(signal.SIGINT, interrupted)
@@ -1623,16 +1907,18 @@ def session():
             'passed': [], 'failedCase': 'preparation', 'cleanup': not remaining,
             'failureStage': 'session', 'failureCategory': 'timeout' if rc == 124 else 'process', 'selectionState': None, 'selectionFailure': None}
         if growth and 'growth' not in result: result['growth'] = growth_result([], 0, 0)
+        if wayland and 'wayland' not in result: result['wayland'] = wayland_growth_observation()
         if remaining: result['cleanup'] = False
         if rc != 0 and result['failureCategory'] is None:
             result['failureStage'] = 'cleanup' if remaining else 'session'
             result['failureCategory'] = 'cleanup' if remaining else 'timeout' if rc == 124 else 'process'
-        validate_summary(result, rc, growth)
+        validate_summary(result, rc, growth, wayland)
         write(summary, json.dumps(result))
     return rc
 
 
 if __name__ == '__main__':
-    sys.exit(growth_self_test() if sys.argv[1:] == ['--growth-self-test']
+    sys.exit(wayland_growth_self_test() if sys.argv[1:] == ['--wayland-growth-self-test']
+             else growth_self_test() if sys.argv[1:] == ['--growth-self-test']
              else summary_self_test() if sys.argv[1:] == ['--summary-self-test']
              else session() if sys.argv[1:2] == ['--session'] else main())

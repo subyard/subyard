@@ -546,6 +546,9 @@ func (prepared *preparedCommand) prepareLifecycle(ctx context.Context, _ *initBo
 	}
 	prepared.executeNoOp = true
 	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (domain.AdapterResult, error) {
+		if err := prepared.CLI.observeLifecycleExecution(ctx, prepared.Loaded.Context, execution); err != nil {
+			return domain.AdapterResult{}, err
+		}
 		if execution.action == "start" {
 			current, err := prepared.CLI.startupScopeBinding(ctx, prepared.Loaded)
 			if err != nil {

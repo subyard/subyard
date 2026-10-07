@@ -3294,6 +3294,193 @@ fn native_interface_recovery() {
     .unwrap();
 }
 
+/// Two real kernel sleeps are controlled by the owning pair supervisor. This
+/// test deliberately exercises the production wait and autonomous monitor.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires the marked RTC sleep pair and a real awake owner"]
+fn native_sleep_recovery() {
+    assert_eq!(std::env::var("VERANDA_TEST_DISPOSABLE_OWNER").unwrap(), "1");
+    let root = PathBuf::from(std::env::var("VERANDA_TEST_SLEEP_CONTROL_ROOT").unwrap());
+    actor_private_directory(&root).unwrap();
+    let run = std::env::var("SUBYARD_E2E_RUN_ID").unwrap();
+    let slot = std::env::var("SUBYARD_E2E_SLOT").unwrap();
+    let token = std::env::var("SUBYARD_E2E_SLEEP_TOKEN").unwrap();
+    assert_eq!(
+        actor_read(&root.join(".marker")).unwrap(),
+        format!("subyard-veranda-sleep-v1:{run}:{slot}:1:{token}\n").as_bytes()
+    );
+    let clock = || {
+        let mut value = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        assert_eq!(
+            unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut value) },
+            0
+        );
+        Duration::new(
+            value.tv_sec.try_into().unwrap(),
+            value.tv_nsec.try_into().unwrap(),
+        )
+    };
+    let deadline = clock() + Duration::from_secs(170);
+    let wait_file = |name: &str| {
+        while !root.join(name).exists() {
+            assert!(clock() < deadline, "sleep control deadline");
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(actor_read(&root.join(name)).unwrap(), b"sleep-cycle-v1\n");
+    };
+    let write = |name: &str| actor_write(&root.join(name), b"sleep-cycle-v1\n").unwrap();
+    let fixture = OwnerFixture::new();
+    let (sender, events) = mpsc::sync_channel(256);
+    let client = Client::new(
+        fixture.store_root(),
+        Arc::new(move |event| {
+            let _ = sender.try_send(event);
+        }),
+    );
+    let _shutdown = SmokeShutdown(client.clone());
+    let assessment = client
+        .assess(
+            &std::env::var("VERANDA_TEST_SSH_DESTINATION").unwrap(),
+            None,
+        )
+        .unwrap();
+    let registered = client
+        .connect(&assessment.assessment_id, true, &assessment.fingerprint)
+        .unwrap();
+    let initial = client.fleet(Some(registered.id.clone())).unwrap();
+    let yard = std::env::var("VERANDA_TEST_SLEEP_YARD").unwrap();
+    assert!(initial
+        .owner
+        .yards
+        .iter()
+        .any(|item| item.name == yard && item.state.eq_ignore_ascii_case("running")));
+    let key = SessionKey {
+        connection: Some(registered.id.clone()),
+        yard: None,
+    };
+    let established = client.sessions.lock().unwrap()[&key].clone();
+    let store_path = fixture.store_root().join("connections.json");
+    let pin_path = fixture
+        .store_root()
+        .join(format!("veranda-stored-{}.known_hosts", registered.id));
+    let saved = actor_read(&store_path).unwrap();
+    let pin = actor_read(&pin_path).unwrap();
+    let call = established
+        .rpc
+        .begin("settings.list", "sleep-query", json!({}))
+        .unwrap();
+    let (query_sender, query_result) = mpsc::sync_channel(1);
+    let query_session = established.clone();
+    let query_root = root.clone();
+    thread::spawn(move || {
+        actor_write(
+            &query_root.join("query-clock.json"),
+            &serde_json::to_vec(&json!({
+                "started_boottime_ms": clock().as_millis() as u64,
+                "timeout_ms": QUERY_TIMEOUT.as_millis() as u64
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        actor_write(&query_root.join("query-waiting"), b"sleep-cycle-v1\n").unwrap();
+        let _ = query_sender.send(query_session.rpc.wait(call, QUERY_TIMEOUT));
+    });
+    wait_file("query-waiting");
+    write("cycle-1.request");
+    wait_file("cycle-1.wake");
+    let wake = clock();
+    let first = query_result.recv_timeout(Duration::from_secs(1));
+    let expired_promptly = first.is_ok();
+    let result = first.unwrap_or_else(|_| {
+        query_result
+            .recv_timeout(Duration::from_secs(6))
+            .expect("sleep query deadline")
+    });
+    let query_after_wake_ms = (clock() - wake).as_millis() as u64;
+    let expired_failed = result
+        .as_ref()
+        .is_err_and(|error| error.code == "rpc_timeout");
+    write("query-observed");
+    wait_file("query-released");
+    // The released response belongs to a removed pending request. A separate
+    // real read must remain usable; no mutating operation is submitted.
+    let no_late_success = expired_failed
+        && established
+            .rpc
+            .call("settings.list", "", json!({}), QUERY_TIMEOUT)
+            .is_ok();
+    while events.try_recv().is_ok() {}
+    write("cycle-2.request");
+    wait_file("cycle-2.wake");
+    let recovery_deadline = clock() + Duration::from_secs(45);
+    let mut reconnected_snapshot = false;
+    while clock() < recovery_deadline {
+        if let Ok(event) = events.recv_timeout(Duration::from_millis(100)) {
+            if event.connection_id.as_deref() != Some(&registered.id) || event.yard.is_some() {
+                continue;
+            }
+            if let Some(snapshot) = event.snapshot {
+                if event.state == "connected"
+                    && snapshot.owner.id == registered.host_id
+                    && snapshot
+                        .owner
+                        .yards
+                        .iter()
+                        .any(|item| item.name == yard && item.state.eq_ignore_ascii_case("stopped"))
+                {
+                    reconnected_snapshot = true;
+                    break;
+                }
+            }
+        }
+    }
+    write("event.request");
+    let event_deadline = clock() + Duration::from_secs(45);
+    let mut lifecycle = false;
+    let mut changed_snapshot = false;
+    while clock() < event_deadline && !(lifecycle && changed_snapshot) {
+        if let Ok(event) = events.recv_timeout(Duration::from_millis(100)) {
+            if event.connection_id.as_deref() != Some(&registered.id) || event.yard.is_some() {
+                continue;
+            }
+            lifecycle |= event.message.as_deref() == Some("incus.lifecycle");
+            if let Some(snapshot) = event.snapshot {
+                changed_snapshot |= event.state == "connected"
+                    && snapshot.owner.id == registered.host_id
+                    && snapshot.owner.yards.iter().any(|item| {
+                        item.name == yard && item.state.eq_ignore_ascii_case("running")
+                    });
+            }
+        }
+    }
+    let replacement = client.sessions.lock().unwrap()[&key].clone();
+    reconnected_snapshot &=
+        !Arc::ptr_eq(&established, &replacement) && !replacement.rpc.is_closed();
+    let proof = json!({"expired_promptly": expired_promptly, "expired_failed": expired_failed,
+        "no_late_success": no_late_success, "query_after_wake_ms": query_after_wake_ms,
+        "reconnected_snapshot": reconnected_snapshot, "owner_event": lifecycle && changed_snapshot,
+        "store_unchanged": actor_read(&store_path).unwrap() == saved,
+        "pin_unchanged": actor_read(&pin_path).unwrap() == pin,
+        "no_mutations": client.running.lock().unwrap().is_empty() && client.connections().unwrap() == vec![registered]});
+    actor_write(
+        &root.join("native-proof.json"),
+        &serde_json::to_vec(&proof).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        proof
+            .as_object()
+            .unwrap()
+            .iter()
+            .all(|(name, value)| name == "query_after_wake_ms" || value == &json!(true)),
+        "sleep acceptance failed"
+    );
+}
+
 #[test]
 #[ignore = "requires an explicitly disposable installed owner and optional isolated SSH fixture"]
 fn native_owner_smoke() {

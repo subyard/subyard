@@ -902,6 +902,10 @@ The VM's configured vCPU and memory limits remain in effect. Setup, ordinary pro
 network reconciliation restarts and host boot reapply the persisted scheduling policy to all
 QEMU threads. Unset CPU weight preserves an already installed policy. Readiness inspects the
 process ownership, root-slice placement and live `cpu.weight` without changing the host.
+Start plans include a separate `vm-cpu` step for persisted CPU weight: apply for live drift,
+skip for convergence, or conditional on the approved power transition. CLI and RPC recheck
+these steps before startup work and privilege preparation; new work after a skipped assessment
+returns `plan_stale` before authorization.
 Hosts with constrained source ancestors retain their existing cgroup placement and return a
 diagnostic: copying an aggregate service ceiling onto each VM would not preserve that ceiling.
 An instance restarted directly through Incus requires the next product start or init to restore

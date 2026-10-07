@@ -13,6 +13,22 @@ import sys
 import time
 
 ADDRESSES = ('198.18.0.1', '198.18.0.2')
+CHECKPOINTS = {
+    'operation': {'setup', 'namespaces', 'links', 'listener', 'client', 'phase', 'remove', 'restore', 'assertions', 'receipt'},
+    'cleanup': {'lock', 'supervisor', 'namespaces', 'links', 'terminate', 'kill', 'processes', 'delete_links', 'delete_namespaces', 'save'},
+    'wait': {'client', 'listener'},
+}
+EXCEPTIONS = {ValueError: 'ValueError', OSError: 'OSError', TypeError: 'TypeError', KeyError: 'KeyError',
+              IndexError: 'IndexError', subprocess.TimeoutExpired: 'TimeoutExpired',
+              subprocess.CalledProcessError: 'CalledProcessError', SystemExit: 'SystemExit'}
+
+
+def diagnostic(seam, checkpoint, error, child=None):
+    if checkpoint not in CHECKPOINTS.get(seam, set()):
+        raise ValueError('invalid interface diagnostic checkpoint')
+    exception = next((name for kind, name in EXCEPTIONS.items() if isinstance(error, kind)), 'Other')
+    status = str(child) if type(child) is int and -64 <= child <= 255 else 'unknown'
+    print(f'veranda-native-interface: failure={seam} checkpoint={checkpoint} exception={exception} child={status}', flush=True)
 
 
 def link_identity(value, name, alias):
@@ -111,7 +127,7 @@ class Fixture:
             self.namespace(namespace)
             command += ['-n', self.names[namespace]]
         if numeric:
-            command += ['-j', '-s']
+            command += ['-j', '-s', '-d']
         remaining = self.limit - time.monotonic()
         if remaining <= 0:
             raise ValueError('interface command deadline')
@@ -269,12 +285,14 @@ class Fixture:
         if self.state is None or self.state.get('cleaned'):
             return
         self.limit = time.monotonic() + 5
+        self.checkpoint = 'namespaces'
         for side, expected in enumerate(self.state['namespaces']):
             if expected is not None:
                 self.namespace(side)
             elif (pathlib.Path('/run/netns') / self.names[side]).exists():
                 raise ValueError('unclaimed namespace collision')
         # Do not delete any namespace containing an unrecognized interface.
+        self.checkpoint = 'links'
         if self.state['links'] is not None:
             self.links_now()
         else:
@@ -283,6 +301,7 @@ class Fixture:
                     if any(link['ifname'] != 'lo' for link in self.ip('link', 'show', namespace=side, numeric=True)):
                         raise ValueError('unrecognized namespace interface')
         for sig in [signal.SIGTERM, signal.SIGKILL]:
+            self.checkpoint = 'terminate' if sig == signal.SIGTERM else 'kill'
             for expected in self.remember():
                 try:
                     if self.process(expected['pid']) == expected:
@@ -290,13 +309,16 @@ class Fixture:
                 except FileNotFoundError:
                     pass
             time.sleep(0.1)
+        self.checkpoint = 'processes'
         if self.remember():
             raise ValueError('namespace process cleanup failed')
         if self.state['links'] is not None:
+            self.checkpoint = 'delete_links'
             self.links_now()
             self.ip('link', 'delete', 'dev', self.links[0], namespace=0)
             self.state['links'] = None
             self.save()
+        self.checkpoint = 'delete_namespaces'
         for side in range(2):
             if self.state['namespaces'][side] is not None:
                 self.namespace(side)
@@ -305,6 +327,7 @@ class Fixture:
                     raise ValueError('namespace cleanup failed')
                 self.state['namespaces'][side] = None
                 self.save()
+        self.checkpoint = 'save'
         self.state['cleaned'] = True
         self.save()
 
@@ -313,6 +336,8 @@ class Fixture:
         listener = client = None
         passed = False
         owns_job = False
+        primary_error = None
+        self.checkpoint = 'setup'
         try:
             print('native-stage: ssh.interface.setup', flush=True)
             with self.locked():
@@ -326,6 +351,7 @@ class Fixture:
                     raise ValueError('interface child ownership unavailable')
                 signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
                 self.limit = time.monotonic() + 10
+                self.checkpoint = 'namespaces'
                 for side in range(2):
                     path = pathlib.Path('/run/netns') / self.names[side]
                     if path.exists() or path.is_symlink():
@@ -335,7 +361,9 @@ class Fixture:
                     self.state['namespaces'][side] = [info.st_dev, info.st_ino]
                     self.save()
                     self.ip('link', 'set', 'dev', 'lo', 'up', namespace=side)
+                self.checkpoint = 'links'
                 self.create_links()
+                self.checkpoint = 'listener'
                 config = self.read(self.root / 'owner.conf', self.uid, 65536).decode()
                 if config.count('ListenAddress 127.0.0.1\n') != 1:
                     raise ValueError('interface listener configuration changed')
@@ -357,16 +385,19 @@ class Fixture:
                 environment = {'PATH': str(self.root / 'bin') + ':/usr/local/bin:/usr/bin:/bin',
                                'SSH_AUTH_SOCK': str(self.root / 'agent.sock'),
                                'VERANDA_TEST_NATIVE_CONTROL_ROOT': str(self.root), 'VERANDA_TEST_DISPOSABLE_OWNER': '1'}
+                self.checkpoint = 'client'
                 client = subprocess.Popen([self.native, 'native_interface_recovery', '--ignored', '--nocapture'],
                                           env=environment, preexec_fn=self.enter(0), start_new_session=True)
                 self.remember()
             self.limit = min(until - 5, time.monotonic() + 45)
             removed = restored = False
             while client.poll() is None:
+                self.checkpoint = 'phase'
                 if time.monotonic() >= self.limit:
                     raise ValueError('interface phase deadline')
                 for action, ready in [('remove', not removed), ('restore', removed and not restored)]:
                     if ready and (self.root / ('interface.' + action + '.request')).exists():
+                        self.checkpoint = action
                         with self.locked():
                             self.control(action)
                         if action == 'remove':
@@ -374,22 +405,46 @@ class Fixture:
                         else:
                             restored = True
                 time.sleep(0.025)
+            self.checkpoint = 'assertions'
             if client.returncode != 0 or not restored or self.read(self.root / 'interface.finish.request', self.uid, 128) != b'interface-finish-v1\n':
                 raise ValueError('interface native assertions incomplete')
             passed = True
+        except BaseException as error:
+            primary_error = error
+            diagnostic('operation', self.checkpoint, error, client.returncode if client is not None else None)
+            raise
         finally:
+            cleanup_failed = False
             if owns_job:
                 print('native-stage: ssh.interface.cleanup', flush=True)
-                with self.locked():
-                    self.cleanup()
-            for child in [client, listener]:
-                if child is not None:
-                    child.wait(timeout=1)
+                self.checkpoint = 'lock'
+                try:
+                    with self.locked():
+                        self.cleanup()
+                except BaseException as error:
+                    diagnostic('cleanup', self.checkpoint, error, client.returncode if client is not None else None)
+                    cleanup_failed = True
+                    if primary_error is None:
+                        raise
+            if not cleanup_failed:
+                for name, child in [('client', client), ('listener', listener)]:
+                    if child is not None:
+                        try:
+                            child.wait(timeout=1)
+                        except BaseException as error:
+                            diagnostic('wait', name, error, child.returncode)
+                            if primary_error is None:
+                                raise
+                            break
         if passed:
-            value = receipt({'schema_version': 1, 'interface_replacement': 'passed', 'cleanup': 'verified', **self.state['proof']})
-            self.write('interface.proof', json.dumps(value, separators=(',', ':')), self.uid)
-            self.write('interface.run.done', 'interface-run-v1\n', self.uid)
-            print('native-stage: ssh.interface.finish', flush=True)
+            try:
+                value = receipt({'schema_version': 1, 'interface_replacement': 'passed', 'cleanup': 'verified', **self.state['proof']})
+                self.write('interface.proof', json.dumps(value, separators=(',', ':')), self.uid)
+                self.write('interface.run.done', 'interface-run-v1\n', self.uid)
+                print('native-stage: ssh.interface.finish', flush=True)
+            except BaseException as error:
+                diagnostic('operation', 'receipt', error, client.returncode)
+                raise
 
 
 def main(action, context, native, sshd, gid, groups, read):
@@ -399,27 +454,34 @@ def main(action, context, native, sshd, gid, groups, read):
             raise ValueError('invalid interface segment request')
         fixture.run()
     elif action == 'interface-cleanup':
-        with fixture.locked():
-            if fixture.state is None or fixture.state.get('cleaned'):
-                return
-            fixture.remember()
-            expected = fixture.state['job']
+        fixture.checkpoint = 'lock'
         try:
-            if fixture.process(expected['pid']) == expected:
-                entry = pathlib.Path('/proc', str(expected['pid']))
-                if expected['uid'] != 0 or (entry / 'exe').resolve() != pathlib.Path(sys.executable).resolve() or str(fixture.root / 'bin/packet-loss').encode() not in (entry / 'cmdline').read_bytes().split(b'\0'):
-                    raise ValueError('interface supervisor identity changed')
-                os.kill(expected['pid'], signal.SIGTERM)
-                until = time.monotonic() + 5
-                while fixture.process(expected['pid']) == expected:
-                    if time.monotonic() >= until:
-                        os.kill(expected['pid'], signal.SIGKILL)
-                        break
-                    time.sleep(0.025)
-        except FileNotFoundError:
-            pass
-        with fixture.locked():
-            fixture.cleanup()
+            with fixture.locked():
+                if fixture.state is None or fixture.state.get('cleaned'):
+                    return
+                fixture.checkpoint = 'supervisor'
+                fixture.remember()
+                expected = fixture.state['job']
+            try:
+                if fixture.process(expected['pid']) == expected:
+                    entry = pathlib.Path('/proc', str(expected['pid']))
+                    if expected['uid'] != 0 or (entry / 'exe').resolve() != pathlib.Path(sys.executable).resolve() or str(fixture.root / 'bin/packet-loss').encode() not in (entry / 'cmdline').read_bytes().split(b'\0'):
+                        raise ValueError('interface supervisor identity changed')
+                    os.kill(expected['pid'], signal.SIGTERM)
+                    until = time.monotonic() + 5
+                    while fixture.process(expected['pid']) == expected:
+                        if time.monotonic() >= until:
+                            os.kill(expected['pid'], signal.SIGKILL)
+                            break
+                        time.sleep(0.025)
+            except FileNotFoundError:
+                pass
+            fixture.checkpoint = 'lock'
+            with fixture.locked():
+                fixture.cleanup()
+        except BaseException as error:
+            diagnostic('cleanup', fixture.checkpoint, error)
+            raise
     else:
         raise ValueError('invalid interface helper action')
 
@@ -435,6 +497,32 @@ if __name__ == '__main__' and sys.argv[1:] == ['--self-test']:
             pass
         else:
             raise AssertionError('unsafe interface ownership accepted')
+    fixture = Fixture.__new__(Fixture)
+    fixture.names = fixture.links = ('client', 'owner')
+    fixture.alias, fixture.state = 'marker', {'links': None}
+    fixture.namespace = lambda _: None
+    fixture.limit = time.monotonic() + 5
+    def observed_links(command, **_):
+        side = fixture.names.index(command[command.index('-n') + 1])
+        observed = {**link, 'ifname': fixture.links[side], 'ifindex': 3 + side, 'link_index': 4 - side}
+        observed.pop('linkinfo')
+        if ('-d' in command or '-details' in command) and kind is not None:
+            observed['linkinfo'] = {'info_kind': kind}
+        return subprocess.CompletedProcess(command, 0, json.dumps([{'ifname': 'lo'}, observed]).encode())
+    original_run = subprocess.run
+    try:
+        subprocess.run = observed_links
+        kind = 'veth'
+        assert fixture.links_now() == [{'index': 3, 'peer': 4}, {'index': 4, 'peer': 3}]
+        for kind in [None, 'dummy']:
+            try:
+                fixture.links_now()
+            except ValueError:
+                pass
+            else:
+                raise AssertionError('missing or foreign observed link kind accepted')
+    finally:
+        subprocess.run = original_run
     value = {'schema_version': 1, 'interface_replacement': 'passed', 'cleanup': 'verified',
              'old_client_index': 3, 'old_owner_index': 4, 'new_client_index': 5, 'new_owner_index': 6,
              'client_rx_packets': 10, 'client_tx_packets': 11, 'owner_rx_packets': 11, 'owner_tx_packets': 10}
@@ -489,4 +577,58 @@ if __name__ == '__main__' and sys.argv[1:] == ['--self-test']:
         raise AssertionError('duplicate interface run accepted')
     assert collision.cleanup_calls == 0 and collision.lock_calls == 1
     assert json.dumps(collision.state, sort_keys=True) == previous_state
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        for status in [-64, 0, 255, None, True, -65, 256, 'private-value']:
+            diagnostic('wait', 'client', FileNotFoundError('private-value'), status)
+    assert output.getvalue().splitlines() == [
+        'veranda-native-interface: failure=wait checkpoint=client exception=OSError child=' + status
+        for status in ['-64', '0', '255', 'unknown', 'unknown', 'unknown', 'unknown', 'unknown']]
+    for seam, checkpoint in [('private-value', 'client'), ('wait', 'private-value'), ('operation', 'processes')]:
+        try:
+            diagnostic(seam, checkpoint, ValueError('private-value'))
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('unsafe diagnostic checkpoint accepted')
+
+    class FailingFixture(CollisionFixture):
+        def __init__(self):
+            super().__init__()
+            self.state = None
+            self.alias, self.names = 'marker', ['client', 'owner']
+
+        def process(self, _):
+            return {'pid': 42, 'start': '123'}
+
+        def write(self, *_):
+            pass
+
+        def cleanup(self):
+            self.cleanup_calls += 1
+            self.checkpoint = 'processes'
+            raise ValueError('private cleanup message')
+
+    primary = RuntimeError('private operation message')
+    def unavailable_ownership(*_):
+        raise primary
+    original_cdll = ctypes.CDLL
+    failed = FailingFixture()
+    output = io.StringIO()
+    try:
+        ctypes.CDLL = unavailable_ownership
+        with contextlib.redirect_stdout(output):
+            failed.run()
+    except RuntimeError as error:
+        assert error is primary
+    else:
+        raise AssertionError('operation failure lost during cleanup')
+    finally:
+        ctypes.CDLL = original_cdll
+    assert failed.cleanup_calls == 1 and failed.lock_calls == 2
+    assert output.getvalue().splitlines() == [
+        'native-stage: ssh.interface.setup',
+        'veranda-native-interface: failure=operation checkpoint=setup exception=Other child=unknown',
+        'native-stage: ssh.interface.cleanup',
+        'veranda-native-interface: failure=cleanup checkpoint=processes exception=ValueError child=unknown']
     print('ok: interface ownership and replacement receipt contracts')

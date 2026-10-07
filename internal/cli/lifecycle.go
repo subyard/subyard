@@ -16,11 +16,13 @@ import (
 )
 
 type lifecycleExecution struct {
-	action   string
-	force    bool
-	changed  bool
-	observed *ports.InstanceInfo
-	status   string
+	action        string
+	force         bool
+	changed       bool
+	observed      *ports.InstanceInfo
+	status        string
+	vmCPUReady    bool
+	approvedSteps []domain.OperationStep
 }
 
 func prepareLifecycleExecution(
@@ -125,13 +127,30 @@ func (cli *CLI) observeLifecycleExecution(
 		var copy ports.InstanceInfo
 		_ = json.Unmarshal(payload, &copy)
 		execution.observed = &copy
-		execution.status = instance.Status
 	}
 	desired := "stopped"
 	if execution.action == "start" {
 		desired = "running"
 	}
 	execution.changed = !strings.EqualFold(instance.Status, desired)
+	execution.status = instance.Status
+	if execution.action == "start" && !execution.changed && execution.observed.Config["user.subyard.vm_cpu_weight"] != "" {
+		scheduler, ok := incusPort.(interface {
+			VMCPUConverged(context.Context, string, string, bool) (bool, error)
+		})
+		if !ok {
+			return errors.New("native VM host CPU scheduling is unavailable")
+		}
+		execution.vmCPUReady, err = scheduler.VMCPUConverged(ctx, yard.IncusProject, yard.YardInstanceName, false)
+		if err != nil {
+			return err
+		}
+	}
+	steps := execution.steps(yard)
+	if execution.approvedSteps != nil {
+		return domain.CheckOperationSteps(execution.approvedSteps, steps)
+	}
+	execution.approvedSteps = domain.CloneOperationSteps(steps)
 	return nil
 }
 
@@ -227,8 +246,18 @@ func (cli *CLI) prepareLifecycleVMCPUPrivileges(ctx context.Context, diagnostics
 		if !ok {
 			return errors.New("native VM host CPU scheduling is unavailable")
 		}
-		if ready, err := scheduler.VMCPUConverged(ctx, yard.IncusProject, yard.YardInstanceName, false); err != nil || ready {
+		ready, err := scheduler.VMCPUConverged(ctx, yard.IncusProject, yard.YardInstanceName, false)
+		if err != nil {
 			return err
+		}
+		execution.vmCPUReady = ready
+		if execution.approvedSteps != nil {
+			if err := domain.CheckOperationSteps(execution.approvedSteps, execution.steps(yard)); err != nil {
+				return err
+			}
+		}
+		if ready {
+			return nil
 		}
 	}
 	return cli.prepareSudoPrivileges(ctx, diagnostics, cli.effectiveUID(), execution.action)
@@ -274,5 +303,19 @@ func (execution *lifecycleExecution) steps(yard domain.Context) []domain.Operati
 	if !execution.changed {
 		decision = domain.StepSkip
 	}
-	return []domain.OperationStep{{ID: "power", Target: "incus/" + yard.IncusProject + "/instance/" + yard.YardInstanceName, Observed: strings.ToLower(execution.status), Desired: desired, Decision: decision, Preconditions: []string{"captured instance configuration and ownership remain unchanged"}, Verify: "instance " + desired + " before desired power commit", Consequence: execution.action + " yard instance"}}
+	target := "incus/" + yard.IncusProject + "/instance/" + yard.YardInstanceName
+	steps := []domain.OperationStep{{ID: "power", Target: target, Observed: strings.ToLower(execution.status), Desired: desired, Decision: decision, Preconditions: []string{"captured instance configuration and ownership remain unchanged"}, Verify: "instance " + desired + " before desired power commit", Consequence: execution.action + " yard instance"}}
+	if weight := execution.observed.Config["user.subyard.vm_cpu_weight"]; execution.action == "start" && weight != "" {
+		observed, decision := "drift", domain.StepApply
+		if execution.changed {
+			observed, decision = strings.ToLower(execution.status), domain.StepConditional
+		} else if execution.vmCPUReady {
+			observed, decision = "current", domain.StepSkip
+		}
+		steps = append(steps, domain.OperationStep{ID: "vm-cpu", Target: target, Observed: observed,
+			Desired: "cpu.weight=" + weight, Decision: decision,
+			Preconditions: []string{"captured instance configuration and ownership remain unchanged"}, DependsOn: []string{"power"},
+			Verify: "host CPU scheduling matches persisted weight", Consequence: "converge yard host CPU scheduling"})
+	}
+	return steps
 }

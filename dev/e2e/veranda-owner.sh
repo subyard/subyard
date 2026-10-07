@@ -33,9 +33,29 @@ case "${SUBYARD_E2E_VERANDA_GUI_GROWTH:-0}" in
   1) [ "${SUBYARD_E2E_VERANDA_RELEASE_GUI_ONLY:-0}" = 1 ] || die 'GUI growth requires independent release GUI mode' ;;
   *) die 'SUBYARD_E2E_VERANDA_GUI_GROWTH must be 0 or 1' ;;
 esac
+case "${SUBYARD_E2E_VERANDA_GUI_WAYLAND_GROWTH:-0}" in
+  0) ;;
+  1)
+    [ "${SUBYARD_E2E_VERANDA_GUI_GROWTH:-0}" = 1 ] && [ "${SUBYARD_E2E_TYPE:-}" = android-test ] \
+      || die 'Wayland growth requires independent GUI growth on android-test VM1'
+    ;;
+  *) die 'SUBYARD_E2E_VERANDA_GUI_WAYLAND_GROWTH must be 0 or 1' ;;
+esac
 for command in go python3 sudo sg git; do command -v "$command" >/dev/null || die "$command is required"; done
 sudo -n true || die 'allocated VM requires passwordless sudo'
-"$ROOT/dev/build-engine.sh"
+YARD_ENGINE="$ROOT/.build/yard"
+if [ "${SUBYARD_E2E_VERANDA_GUI_WAYLAND_GROWTH:-0}" = 1 ]; then
+  YARD_ENGINE="${SUBYARD_E2E_VERANDA_GUI_ENGINE:?frozen current engine is required}"
+  python3 - "$YARD_ENGINE" 2>/dev/null <<'PY' || die 'unsafe frozen engine'
+import os,pathlib,stat,sys
+info=pathlib.Path(sys.argv[1]).lstat()
+assert stat.S_ISREG(info.st_mode) and info.st_uid==os.geteuid() and info.st_nlink==1
+assert os.access(sys.argv[1],os.X_OK) and not stat.S_IMODE(info.st_mode)&0o022
+PY
+  [ "$(timeout 5s "$YARD_ENGINE" --version)" = "$(basename -- "$YARD_ENGINE") 0.1.1" ] || die 'frozen engine release version mismatch'
+else
+  "$ROOT/dev/build-engine.sh"
+fi
 STATE="$(mktemp -d /var/tmp/subyard-veranda-owner.XXXXXX)"
 chmod 0700 "$STATE"
 token="$(printf '%s' "${STATE##*.}" | tr '[:upper:]' '[:lower:]')"
@@ -54,10 +74,10 @@ yard_in() {
   shift
   if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
     && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
-    printf -v invocation '%q ' "$ROOT/.build/yard" -Y "$selected_yard" "$@"
+    printf -v invocation '%q ' "$YARD_ENGINE" -Y "$selected_yard" "$@"
     sg incus-admin -c "exec $invocation"
   else
-    "$ROOT/.build/yard" -Y "$selected_yard" "$@"
+    "$YARD_ENGINE" -Y "$selected_yard" "$@"
   fi
 }
 yard() { yard_in "$YARD_NAME" "$@"; }
@@ -169,6 +189,9 @@ if [ "${SUBYARD_E2E_VERANDA_RELEASE_GUI_ONLY:-0}" = 1 ]; then
   gui_args=("$gui_base" "$gui_next" "$YARD_NAME" "$STATE")
   if [ "${SUBYARD_E2E_VERANDA_GUI_GROWTH:-0}" = 1 ]; then
     gui_args=(--growth "$gui_next" "$YARD_NAME" "$STATE")
+  fi
+  if [ "${SUBYARD_E2E_VERANDA_GUI_WAYLAND_GROWTH:-0}" = 1 ]; then
+    gui_args=(--wayland-growth "$gui_next" "$YARD_ENGINE" "$YARD_NAME" "$STATE")
   fi
   printf -v gui_scenario '%q ' bash "$ROOT/dev/e2e/veranda-release-gui.sh" \
     "${gui_args[@]}"
