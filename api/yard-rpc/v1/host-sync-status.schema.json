@@ -1,0 +1,211 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "host-sync-status.schema.json",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "hostId": {
+      "type": "string",
+      "maxLength": 8192
+    },
+    "hostIdPending": {
+      "type": "boolean"
+    },
+    "automation": {
+      "const": "manual"
+    },
+    "offline": {
+      "const": true
+    },
+    "registration": {
+      "enum": [
+        "configured",
+        "not-configured",
+        "broken"
+      ]
+    },
+    "recoveryRequired": {
+      "type": "boolean"
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "appliedCommit": {
+      "type": "string",
+      "maxLength": 8192
+    },
+    "git": {
+      "type": "object",
+      "properties": {
+        "branch": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "upstream": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "head": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "relation": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "worktree": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "remote": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "staged": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unstaged": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "untracked": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "conflicts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ahead": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "behind": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "lastFetch": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "available": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "branch",
+        "upstream",
+        "head",
+        "relation",
+        "worktree",
+        "remote",
+        "staged",
+        "unstaged",
+        "untracked",
+        "conflicts",
+        "ahead",
+        "behind",
+        "lastFetch",
+        "available"
+      ],
+      "additionalProperties": false
+    },
+    "credentials": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "enum": [
+            "available",
+            "unavailable"
+          ]
+        },
+        "records": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "conflicts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "peers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "maxLength": 8192
+              },
+              "role": {
+                "type": "string",
+                "maxLength": 8192
+              },
+              "manualOnly": {
+                "type": "boolean"
+              },
+              "trusted": {
+                "type": "boolean"
+              },
+              "lastAttempt": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "lastSuccess": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "consecutiveFailures": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "nextRetry": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "failed": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "name",
+              "role",
+              "manualOnly",
+              "trusted",
+              "lastAttempt",
+              "lastSuccess",
+              "consecutiveFailures",
+              "nextRetry",
+              "failed"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 1024
+        }
+      },
+      "required": [
+        "state",
+        "records",
+        "conflicts",
+        "peers"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "hostId",
+    "hostIdPending",
+    "automation",
+    "offline",
+    "registration",
+    "recoveryRequired",
+    "generation",
+    "appliedCommit",
+    "credentials"
+  ],
+  "additionalProperties": false
+}

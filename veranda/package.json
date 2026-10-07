@@ -14,7 +14,8 @@
     "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "desktop:build": "node ../dev/build-veranda.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2"

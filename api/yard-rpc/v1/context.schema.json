@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "context.schema.json",
+  "type": "object",
+  "properties": {
+    "yardName": {
+      "type": "string",
+      "maxLength": 8192
+    },
+    "accessKind": {
+      "type": "string",
+      "maxLength": 8192
+    },
+    "yardKind": {
+      "type": "string",
+      "maxLength": 8192
+    },
+    "yardInstanceName": {
+      "type": "string",
+      "maxLength": 8192
+    },
+    "incusProject": {
+      "type": "string",
+      "maxLength": 8192
+    },
+    "incusBridge": {
+      "type": "string",
+      "maxLength": 8192
+    },
+    "sshHost": {
+      "type": "string",
+      "maxLength": 8192
+    },
+    "codeSshHost": {
+      "type": "string",
+      "maxLength": 8192
+    },
+    "devUser": {
+      "type": "string",
+      "maxLength": 8192
+    },
+    "ownerEndpoint": {
+      "type": "string",
+      "maxLength": 8192
+    },
+    "ownerYardName": {
+      "type": "string",
+      "maxLength": 8192
+    },
+    "yardImageRef": {
+      "type": "string",
+      "maxLength": 8192
+    },
+    "shiftMode": {
+      "type": "string",
+      "maxLength": 8192
+    },
+    "forwardSshAgent": {
+      "type": "boolean"
+    },
+    "devSudo": {
+      "type": "boolean"
+    },
+    "nestedE2EVMs": {
+      "type": "boolean"
+    },
+    "sshPort": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "devUid": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "paths": {
+      "type": "object",
+      "properties": {
+        "repositoryRoot": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "configDir": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "operatorHome": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "configHome": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "dataHome": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "storagePath": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "hostBase": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "stateDir": {
+          "type": "string",
+          "maxLength": 8192
+        }
+      },
+      "required": [
+        "repositoryRoot",
+        "configDir",
+        "operatorHome",
+        "configHome",
+        "dataHome",
+        "storagePath",
+        "hostBase",
+        "stateDir"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "yardName",
+    "accessKind",
+    "yardKind",
+    "yardInstanceName",
+    "incusProject",
+    "incusBridge",
+    "sshHost",
+    "devUser",
+    "shiftMode",
+    "forwardSshAgent",
+    "devSudo",
+    "nestedE2EVMs",
+    "sshPort",
+    "devUid",
+    "paths"
+  ],
+  "additionalProperties": false
+}

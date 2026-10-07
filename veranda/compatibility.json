@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "productVersion": "0.1.0",
+  "productVersionPolicy": "exact-match",
+  "rpc": { "minimum": 1, "maximum": 1 },
+  "requiredCapabilities": ["owner-inventory-v1", "ordered-events"],
+  "featureCapabilities": {
+    "yardDetails": ["profile-list-v1", "settings-list-v1"],
+    "hostSettings": ["settings-list-v1", "host-sync-status-v1"],
+    "operations": ["operation-exact-plan-v1", "operation-steps-v1"],
+    "sessions": ["session-prepare-v1"],
+    "yardCreation": ["yard-bootstrap-v1", "profile-list-v1", "operation-exact-plan-v1", "operation-steps-v1"]
+  }
+}

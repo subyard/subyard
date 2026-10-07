@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "profile-list.schema.json",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "yardName": {
+      "type": "string",
+      "maxLength": 8192
+    },
+    "selection": {
+      "type": "object",
+      "properties": {
+        "value": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "provenance": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "scope": {
+                "type": "string",
+                "maxLength": 8192
+              },
+              "role": {
+                "type": "string",
+                "maxLength": 8192
+              },
+              "status": {
+                "enum": [
+                  "effective",
+                  "overridden",
+                  "unset"
+                ]
+              },
+              "value": {
+                "type": "string",
+                "maxLength": 8192
+              }
+            },
+            "required": [
+              "scope",
+              "role",
+              "status"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 1024
+        }
+      },
+      "required": [
+        "value",
+        "provenance"
+      ],
+      "additionalProperties": false
+    },
+    "profiles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 8192
+          },
+          "descriptorVersion": {
+            "const": 1
+          },
+          "selected": {
+            "type": "boolean"
+          },
+          "provisionable": {
+            "type": "boolean"
+          },
+          "provisionScope": {
+            "enum": [
+              "shared",
+              "dedicated"
+            ]
+          },
+          "eligible": {
+            "type": "boolean"
+          },
+          "eligibility": {
+            "enum": [
+              "allowed",
+              "exclusive-role",
+              "dedicated-role-required"
+            ]
+          },
+          "convergence": {
+            "enum": [
+              "unknown",
+              "not-applicable",
+              "current",
+              "changes-required"
+            ]
+          },
+          "diagnostic": {
+            "enum": [
+              "not-selected",
+              "role-restricted",
+              "yard-unavailable",
+              "yard-not-running",
+              "check-unavailable"
+            ]
+          },
+          "resources": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 8192
+            },
+            "maxItems": 1024
+          },
+          "hasYardPreset": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "selected",
+          "provisionable",
+          "provisionScope",
+          "eligible",
+          "eligibility",
+          "convergence",
+          "resources",
+          "hasYardPreset"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 1024
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "yardName",
+    "selection",
+    "profiles"
+  ],
+  "additionalProperties": false
+}

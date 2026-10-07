@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "session-prepare.schema.json",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "kind": {
+      "enum": [
+        "shell",
+        "resources",
+        "vscode"
+      ]
+    },
+    "scope": {
+      "enum": [
+        "yard",
+        "host"
+      ]
+    },
+    "yardName": {
+      "type": "string",
+      "maxLength": 8192
+    },
+    "projectId": {
+      "type": "string",
+      "maxLength": 8192
+    },
+    "ownerArguments": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 8192
+      },
+      "maxItems": 1024
+    },
+    "localArguments": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 8192
+      },
+      "maxItems": 1024
+    },
+    "vscode": {
+      "type": "object",
+      "properties": {
+        "sshAlias": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "devUser": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "address": {
+          "const": "127.0.0.1"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "folderPath": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "previewPort": {
+          "const": 8765
+        },
+        "hostKey": {
+          "type": "string",
+          "pattern": "^ssh-ed25519 [A-Za-z0-9+/]+={0,2}$"
+        },
+        "hostKeyFingerprint": {
+          "type": "string",
+          "pattern": "^SHA256:[A-Za-z0-9+/]+$"
+        },
+        "remoteAuthentication": {
+          "const": "already-authorized-desktop-agent-key"
+        }
+      },
+      "required": [
+        "sshAlias",
+        "devUser",
+        "address",
+        "port",
+        "folderPath",
+        "previewPort",
+        "hostKey",
+        "hostKeyFingerprint",
+        "remoteAuthentication"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "kind",
+    "scope",
+    "yardName"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "vscode"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "projectId",
+          "localArguments",
+          "vscode"
+        ],
+        "properties": {
+          "scope": {
+            "const": "yard"
+          }
+        },
+        "not": {
+          "required": [
+            "ownerArguments"
+          ]
+        }
+      },
+      "else": {
+        "required": [
+          "ownerArguments"
+        ],
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "vscode"
+              ]
+            },
+            {
+              "required": [
+                "localArguments"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

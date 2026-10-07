@@ -687,10 +687,10 @@ dependency integrity and licensing. YAML convenience alone is insufficient.
 
 ## Veranda: accepted direction
 
-Veranda already implements a read-only local fleet view. Its architecture is Tauri 2 with a thin
-native Rust shell and Svelte/TypeScript over versioned Yard RPC. Remote connections and native
-connection/trust management below remain requirements for subsequent work; Windows/macOS are
-intended to reach Linux owners remotely. Minimize resources according to [architecture
+The current Veranda candidate includes local and pinned SSH fleet views, native connection/trust
+management and typed owner operations. Its architecture is Tauri 2 with a thin native Rust shell
+and Svelte/TypeScript over versioned Yard RPC. Platform, reliability and resource acceptance remain
+pending; Windows/macOS are intended to reach Linux owners remotely. Minimize resources according to [architecture
 budgets](control-plane-architecture.md#veranda-resource-budgets). Slint is a fallback only after
 same-screen startup, idle RAM/CPU, and keyboard comparisons on target OS demonstrate value;
 replacing UI does not require Go/RPC rewrite.
@@ -702,7 +702,7 @@ versions/capabilities negotiate independently, without a promised arbitrary adja
 matrix. Shared behavior must have conformance coverage against the [RPC
 contract](../control-plane.md#rpc); GUI source lives in `veranda/`.
 
-Profile editing is a remaining GUI requirement. It must use current shipped optional schema 1
+Profile editing uses current shipped optional schema 1
 and descriptorless/resource-only profiles without depending on a future registry. Owner
 projection must separate selection from observed provision; deselection does not delete
 artifacts. Product/schema/capability mismatch must give actionable same-release guidance rather

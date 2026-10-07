@@ -1,47 +1,62 @@
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+#[cfg(test)]
 use serde_json::Value;
 use std::collections::HashSet;
 use std::io::{self, Read, Write};
+#[cfg(test)]
 use std::process::{Child, Command, Stdio};
+#[cfg(test)]
 use std::sync::mpsc;
+#[cfg(test)]
 use std::thread;
+#[cfg(test)]
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
 const PROTOCOL_VERSION: u32 = 1;
 const MAX_FRAME_SIZE: usize = 1024 * 1024;
+#[cfg(test)]
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(test)]
 const EXIT_GRACE: Duration = Duration::from_millis(500);
+#[cfg(test)]
 const OWNER_INVENTORY_CAPABILITY: &str = "owner-inventory-v1";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalProject {
-    id: String,
-    name: String,
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalYard {
-    name: String,
-    kind: String,
-    state: String,
-    projects: Vec<LocalProject>,
+    pub name: String,
+    pub kind: String,
+    pub state: String,
+    pub projects: Vec<LocalProject>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct LocalOwnerHost {
-    id: String,
-    yards: Vec<LocalYard>,
+    pub id: String,
+    pub yards: Vec<LocalYard>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalFleetSnapshot {
-    engine_version: String,
-    observed_at: String,
-    current_yard_name: String,
-    owner: LocalOwnerHost,
+    pub engine_version: String,
+    pub observed_at: String,
+    pub current_yard_name: String,
+    pub owner: LocalOwnerHost,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub veranda_version: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -71,6 +86,7 @@ impl NativeError {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RpcRequest<'a> {
@@ -81,6 +97,7 @@ struct RpcRequest<'a> {
     method: &'a str,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RpcResponse {
@@ -97,6 +114,7 @@ struct RpcResponse {
     error: Option<RpcFault>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct RpcFault {
     code: String,
@@ -104,6 +122,7 @@ struct RpcFault {
     message: String,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Negotiation {
@@ -114,6 +133,7 @@ struct Negotiation {
     capabilities: Vec<String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CurrentContext {
@@ -122,7 +142,7 @@ struct CurrentContext {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct OwnerInventory {
+pub(crate) struct OwnerInventory {
     schema: u32,
     host_id: String,
     observed_at: String,
@@ -145,6 +165,7 @@ struct OwnerProject {
     name: String,
 }
 
+#[cfg(test)]
 pub fn load_from_yard() -> Result<LocalFleetSnapshot, NativeError> {
     let mut child = Command::new("yard")
         .args(["rpc", "--stdio"])
@@ -201,6 +222,7 @@ pub fn load_from_yard() -> Result<LocalFleetSnapshot, NativeError> {
     result
 }
 
+#[cfg(test)]
 fn finish_child(child: &mut Child) {
     let deadline = Instant::now() + EXIT_GRACE;
     while Instant::now() < deadline {
@@ -214,6 +236,7 @@ fn finish_child(child: &mut Child) {
     let _ = child.wait();
 }
 
+#[cfg(test)]
 fn exchange(
     mut send: impl FnMut(&RpcRequest<'_>) -> Result<(), NativeError>,
     mut receive: impl FnMut() -> Result<RpcResponse, NativeError>,
@@ -254,6 +277,7 @@ fn exchange(
     inventory.into_snapshot(negotiation.engine_version, context.yard_name)
 }
 
+#[cfg(test)]
 fn request<'a>(id: &'a str, method: &'a str) -> RpcRequest<'a> {
     RpcRequest {
         version: PROTOCOL_VERSION,
@@ -263,6 +287,7 @@ fn request<'a>(id: &'a str, method: &'a str) -> RpcRequest<'a> {
     }
 }
 
+#[cfg(test)]
 fn response_result<T: DeserializeOwned>(
     response: RpcResponse,
     expected_id: &str,
@@ -307,7 +332,7 @@ fn response_result<T: DeserializeOwned>(
 }
 
 impl OwnerInventory {
-    fn into_snapshot(
+    pub(crate) fn into_snapshot(
         self,
         engine_version: String,
         current_yard_name: String,
@@ -382,11 +407,17 @@ impl OwnerInventory {
                 id: self.host_id,
                 yards,
             },
+            connection_id: None,
+            capabilities: Vec::new(),
+            veranda_version: None,
         })
     }
 }
 
-fn write_frame<T: Serialize>(writer: &mut impl Write, value: &T) -> Result<(), NativeError> {
+pub(crate) fn write_frame<T: Serialize>(
+    writer: &mut impl Write,
+    value: &T,
+) -> Result<(), NativeError> {
     let payload = serde_json::to_vec(value).map_err(|_| {
         NativeError::new(
             "native_encode_failed",
@@ -406,7 +437,7 @@ fn write_frame<T: Serialize>(writer: &mut impl Write, value: &T) -> Result<(), N
         .map_err(|error| NativeError::io("Veranda could not write to Yard", error))
 }
 
-fn read_frame<T: DeserializeOwned>(reader: &mut impl Read) -> Result<T, NativeError> {
+pub(crate) fn read_frame<T: DeserializeOwned>(reader: &mut impl Read) -> Result<T, NativeError> {
     let mut header = [0_u8; 4];
     reader
         .read_exact(&mut header)
@@ -430,7 +461,7 @@ fn invalid_response(message: &'static str) -> NativeError {
     NativeError::new("invalid_response", message)
 }
 
-fn safe_id(value: &str, max_len: usize) -> bool {
+pub(crate) fn safe_id(value: &str, max_len: usize) -> bool {
     !value.is_empty()
         && value.len() <= max_len
         && value != "."
@@ -441,7 +472,7 @@ fn safe_id(value: &str, max_len: usize) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
-fn safe_name(value: &str) -> bool {
+pub(crate) fn safe_name(value: &str) -> bool {
     value.len() <= 128
         && value
             .as_bytes()
@@ -452,6 +483,7 @@ fn safe_name(value: &str) -> bool {
         })
 }
 
+#[cfg(test)]
 fn safe_error_code(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64

@@ -43,6 +43,7 @@ import (
 	"github.com/Subyard/Subyard/internal/credential"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/migration"
+	"github.com/Subyard/Subyard/internal/ownerapi"
 	"github.com/Subyard/Subyard/internal/ownerinventory"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
@@ -116,6 +117,8 @@ type CLI struct {
 func (cli *CLI) rpcOperation(operationID string) *CLI {
 	operation := *cli
 	operation.updateProgress = nil
+	// The session owns framed stdin; native children must see EOF, not RPC frames.
+	operation.options.Stdin = strings.NewReader("")
 	operation.env = maps.Clone(cli.env)
 	operation.env["SUBYARD_OPERATION_ID"] = operationID
 	operation.inventoryRoutes = maps.Clone(cli.inventoryRoutes)
@@ -3673,8 +3676,8 @@ func (cli *CLI) serveRPC(ctx context.Context, yard string, arguments []string) i
 		cli.errorf("load RPC context: %v", err)
 		return 2
 	}
-	// An RPC session is bound to one validated context. Cross-yard selection is represented as a
-	// remote-owner route, never as an implicit context switch inside the session.
+	// The session context remains immutable. Exact named-yard bootstrap retains
+	// its own native context without switching the query session.
 	cli.env["SUBYARD_YARD_EXPLICIT"] = "1"
 	handler := &rpcHandler{cli: cli, loaded: loaded, plans: make(map[string]*preparedCommand)}
 	defer handler.closePlans()
@@ -3682,6 +3685,8 @@ func (cli *CLI) serveRPC(ctx context.Context, yard string, arguments []string) i
 		"snapshot", "ordered-events", "cancellation", "deadlines", "commands", "context",
 		"projects", "yard-status", "credential-metadata", "credential-status",
 		"operation-plan", "operation-execute", "resync", "owner-inventory-v1",
+		profileListCapability, settingsListCapability, hostSyncStatusCapability, sessionPrepareCapability,
+		yardBootstrapCapability,
 		credentialPrepareCapability, exactPlanCapability, operationStepsCapability,
 	}, DrainOnEOF: true}
 	if err := session.Serve(ctx, cli.options.Stdin, cli.options.Stdout); err != nil {
@@ -3841,6 +3846,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			Source     *ProjectCopySourceDescriptor `json:"source,omitempty"`
 			Export     *ProjectExportDescriptor     `json:"export,omitempty"`
 			StepSchema int                          `json:"stepSchema,omitempty"`
+			TargetYard *string                      `json:"targetYard,omitempty"`
 		}
 		if err := decodeRPCParams(call.Params, &params); err != nil {
 			return nil, err
@@ -3853,6 +3859,14 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		}
 		if params.Export != nil && (params.Command != "export" || !params.Exact || len(params.Arguments) != 0 || params.Source != nil) {
 			return nil, &rpc.Error{Code: "invalid_params", Message: "retained export requires exact export without arguments or copy source"}
+		}
+		if params.TargetYard != nil {
+			request, err := parseInitArguments(params.Arguments)
+			if params.Command != "init" || !params.Exact || params.Source != nil || params.Export != nil ||
+				!domain.SafeName(*params.TargetYard) || *params.TargetYard == "default" ||
+				err != nil || request.profile == "" {
+				return nil, &rpc.Error{Code: "invalid_params", Message: "targetYard requires exact init with a profile and a safe non-default yard name"}
+			}
 		}
 		definition, ok := handler.cli.manifest.Lookup(params.Command)
 		if !ok {
@@ -3892,9 +3906,25 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			return nil, &rpc.Error{Code: "interactive_or_payload_command", Message: params.Command}
 		}
 		operationCLI := handler.cli.rpcOperation(call.OperationID)
+		operationLoaded := handler.loaded
+		var bootstrap *initBootstrap
+		if params.TargetYard != nil {
+			// Reload from original command inputs, never inherited settings of the
+			// session yard. Native init owns preset validation and registration.
+			operationCLI.env = maps.Clone(handler.cli.baseEnv)
+			operationCLI.env["SUBYARD_OPERATION_ID"] = call.OperationID
+			operationCLI.env["SUBYARD_YARD_EXPLICIT"] = "1"
+			operationLoaded, bootstrap, err = operationCLI.loadInitContext(*params.TargetYard, true, params.Arguments)
+			if err != nil {
+				return nil, preparationRPCError(definition, err)
+			}
+			if operationLoaded.Context.Paths.ConfigHome != handler.loaded.Context.Paths.ConfigHome {
+				return nil, &rpc.Error{Code: "owner_context_changed", Message: "bootstrap owner context changed; reconnect before planning"}
+			}
+		}
 		if !releaseRecoveryCommand(definition) {
-			outcome, gateErr := handler.cli.inspectMutationGate(
-				ctx, handler.loaded.Context.YardName,
+			outcome, gateErr := operationCLI.inspectMutationGate(
+				ctx, operationLoaded.Context.YardName,
 			)
 			if gateErr != nil {
 				return nil, operationRPCError("mutation_gate_failed", gateErr)
@@ -3902,7 +3932,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			if outcome != nil {
 				if definition.Handler == "@init" {
 					operationCLI.profileInitRepair, gateErr = operationCLI.prepareProfileInitRepair(
-						ctx, handler.loaded.Context.YardName, params.Arguments, *outcome)
+						ctx, operationLoaded.Context.YardName, params.Arguments, *outcome)
 					if gateErr != nil {
 						return nil, operationRPCError("mutation_gate_failed", gateErr)
 					}
@@ -3919,8 +3949,8 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			prepared, err = operationCLI.prepareOwnerProjectExport(ctx, handler.loaded, *params.Export)
 		} else {
 			prepared, err = operationCLI.prepareCommand(ctx, prepareCommandRequest{
-				Loaded: handler.loaded, Definition: definition, Arguments: params.Arguments,
-				ExplicitYard: true, ReadOnly: params.Exact,
+				Loaded: operationLoaded, Definition: definition, Arguments: params.Arguments,
+				ExplicitYard: true, ReadOnly: params.Exact, Bootstrap: bootstrap,
 			})
 		}
 		if err != nil {
@@ -4012,7 +4042,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		}
 		if !releaseRecoveryCommand(planned.Definition) {
 			outcome, gateErr := planned.CLI.inspectMutationGate(
-				ctx, handler.loaded.Context.YardName,
+				ctx, planned.Loaded.Context.YardName,
 			)
 			if gateErr != nil {
 				return nil, operationRPCError("mutation_gate_failed", gateErr)
@@ -4137,6 +4167,36 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			return nil, err
 		}
 		return handler.projects(ctx, params.Live)
+	case "profile.list":
+		if err := decodeRPCParams(call.Params, &struct{}{}); err != nil {
+			return nil, err
+		}
+		query, err := handler.currentOwnerQuery()
+		if err != nil {
+			return nil, err
+		}
+		query.cli = query.cli.rpcOperation(call.OperationID)
+		return boundedOwnerQuery(query.profileList(ctx))
+	case "session.prepare":
+		var params ownerapi.SessionParams
+		if err := decodeRPCParams(call.Params, &params); err != nil {
+			return nil, err
+		}
+		return boundedOwnerQuery(handler.prepareSession(ctx, params))
+	case "settings.list":
+		if err := decodeRPCParams(call.Params, &struct{}{}); err != nil {
+			return nil, err
+		}
+		query, err := handler.currentOwnerQuery()
+		if err != nil {
+			return nil, err
+		}
+		return boundedOwnerQuery(query.settingsList())
+	case "host.sync.status":
+		if err := decodeRPCParams(call.Params, &struct{}{}); err != nil {
+			return nil, err
+		}
+		return boundedOwnerQuery(handler.hostSyncStatus(ctx))
 	case "owner.inventory":
 		if err := decodeRPCParams(call.Params, &struct{}{}); err != nil {
 			return nil, err

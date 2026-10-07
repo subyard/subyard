@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "type": "response",
+  "id": "owner-inventory",
+  "result": {
+    "schema": 1,
+    "hostId": "example-owner",
+    "observedAt": "2026-01-01T00:00:00Z",
+    "yards": [
+      {
+        "name": "default",
+        "kind": "container",
+        "instance": "yard",
+        "state": "Running",
+        "sshPort": 2222,
+        "devUser": "dev",
+        "projects": [
+          {
+            "projectId": "sample",
+            "identityVersion": 2,
+            "name": "sample",
+            "mode": "sync",
+            "target": "default"
+          }
+        ]
+      }
+    ]
+  }
+}

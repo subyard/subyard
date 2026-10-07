@@ -1,0 +1,1104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "core-results.schema.json",
+  "description": "Current core result definitions. Owner-native paths in existing core DTOs must stay out of frontend IPC. New narrow projections are separate versioned schemas.",
+  "$defs": {
+    "commands": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "effect": {
+            "type": "string"
+          },
+          "remote": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "aliases": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "options": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "verbs": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "name",
+          "effect",
+          "remote",
+          "summary",
+          "aliases",
+          "options",
+          "verbs"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "project": {
+      "type": "object",
+      "properties": {
+        "projectId": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "hostPath": {
+          "type": "string"
+        },
+        "yardPath": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "sshHost": {
+          "type": "string"
+        },
+        "sourceKey": {
+          "type": "string"
+        },
+        "importedAt": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        },
+        "profile": {
+          "type": "string"
+        },
+        "registrySource": {
+          "type": "string"
+        },
+        "schema": {
+          "const": 1
+        },
+        "identityVersion": {
+          "enum": [
+            0,
+            2
+          ]
+        }
+      },
+      "required": [
+        "schema",
+        "projectId",
+        "name",
+        "hostPath",
+        "yardPath",
+        "mode",
+        "sshHost"
+      ],
+      "additionalProperties": false
+    },
+    "projects": {
+      "type": "object",
+      "properties": {
+        "projects": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/project"
+          }
+        },
+        "observation": {
+          "type": "object",
+          "properties": {
+            "reached": {
+              "type": "boolean"
+            },
+            "running": {
+              "type": "boolean"
+            },
+            "live": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/$defs/project"
+              }
+            },
+            "presence": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "additionalProperties": {
+                "enum": [
+                  "?",
+                  "present",
+                  "missing"
+                ]
+              }
+            },
+            "boxes": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "additionalProperties": {
+                "enum": [
+                  "?",
+                  "none",
+                  "up",
+                  "down"
+                ]
+              }
+            },
+            "warnings": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "reached",
+            "running",
+            "presence",
+            "boxes"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "projects",
+        "observation"
+      ],
+      "additionalProperties": false
+    },
+    "status": {
+      "type": "object",
+      "properties": {
+        "context": {
+          "$ref": "context.schema.json"
+        },
+        "resolvedYardImage": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "startState": {
+          "type": "string"
+        },
+        "waitingForAddresses": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "desired": {
+          "type": "string"
+        },
+        "initialized": {
+          "type": "string"
+        },
+        "incusAutostart": {
+          "type": "string"
+        },
+        "ip": {
+          "type": "string"
+        },
+        "sshConfigured": {
+          "type": "boolean"
+        },
+        "mounts": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "services": {
+          "type": "string"
+        },
+        "vscode": {
+          "type": "string"
+        },
+        "projectCount": {
+          "type": "integer"
+        },
+        "facts": {
+          "type": "object",
+          "properties": {
+            "profiles": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            },
+            "agents": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "state": {
+                    "type": "string"
+                  },
+                  "hint": {
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "dashboardPort": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "name",
+                  "state"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "shared": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "object",
+                "properties": {
+                  "profile": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "state": {
+                    "type": "string"
+                  },
+                  "hint": {
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "profile",
+                  "name",
+                  "state"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "security": {
+              "type": "string"
+            },
+            "space": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "profiles",
+            "agents",
+            "shared",
+            "security",
+            "space"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "context",
+        "state",
+        "desired",
+        "initialized",
+        "incusAutostart",
+        "sshConfigured",
+        "mounts",
+        "projectCount",
+        "facts"
+      ],
+      "additionalProperties": false
+    },
+    "credentials": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "object",
+        "properties": {
+          "credentialId": {
+            "type": "string"
+          },
+          "revisionId": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "zone": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          },
+          "consumer": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "authorityHost": {
+            "type": "string"
+          },
+          "assignedYard": {
+            "type": "string"
+          },
+          "actorId": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "string"
+          },
+          "schemaVersion": {
+            "type": "integer"
+          },
+          "assignmentEpoch": {
+            "type": "integer"
+          },
+          "actorCounter": {
+            "type": "integer"
+          },
+          "exclusive": {
+            "type": "boolean"
+          },
+          "syncable": {
+            "type": "boolean"
+          },
+          "parents": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "recipientActors": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "credentialId",
+          "revisionId",
+          "label",
+          "kind",
+          "zone",
+          "scope",
+          "consumer",
+          "state",
+          "authorityHost",
+          "assignedYard",
+          "actorId",
+          "timestamp",
+          "schemaVersion",
+          "assignmentEpoch",
+          "actorCounter",
+          "exclusive",
+          "syncable",
+          "parents",
+          "recipientActors"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "credentialStatus": {
+      "type": "object",
+      "properties": {
+        "credentials": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "object",
+            "properties": {
+              "credentialId": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "zone": {
+                "type": "string"
+              },
+              "consumer": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string"
+              },
+              "conflictReason": {
+                "type": "string"
+              },
+              "authorityHost": {
+                "type": "string"
+              },
+              "assignedYard": {
+                "type": "string"
+              },
+              "needsMerge": {
+                "type": "boolean"
+              },
+              "conflict": {
+                "type": "boolean"
+              },
+              "exclusive": {
+                "type": "boolean"
+              },
+              "syncable": {
+                "type": "boolean"
+              },
+              "heads": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
+              },
+              "assignmentEpoch": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "credentialId",
+              "label",
+              "kind",
+              "zone",
+              "consumer",
+              "state",
+              "heads",
+              "needsMerge",
+              "conflict",
+              "exclusive",
+              "syncable"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "peers": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "maxLength": 8192
+              },
+              "role": {
+                "type": "string",
+                "maxLength": 8192
+              },
+              "manualOnly": {
+                "type": "boolean"
+              },
+              "trusted": {
+                "type": "boolean"
+              },
+              "lastAttempt": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "lastSuccess": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "consecutiveFailures": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "nextRetry": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "failed": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "name",
+              "role",
+              "manualOnly",
+              "trusted",
+              "lastAttempt",
+              "lastSuccess",
+              "consecutiveFailures",
+              "nextRetry",
+              "failed"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "credentials",
+        "peers"
+      ],
+      "additionalProperties": false
+    },
+    "snapshot": {
+      "type": "object",
+      "properties": {
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "context": {
+          "$ref": "context.schema.json"
+        },
+        "commands": {
+          "$ref": "#/$defs/commands"
+        },
+        "projects": {
+          "$ref": "#/$defs/projects"
+        },
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "credentials": {
+          "$ref": "#/$defs/credentials"
+        },
+        "credentialStatus": {
+          "$ref": "#/$defs/credentialStatus"
+        }
+      },
+      "required": [
+        "revision",
+        "context",
+        "commands",
+        "projects",
+        "status",
+        "credentials",
+        "credentialStatus"
+      ],
+      "additionalProperties": false
+    },
+    "route": {
+      "type": "object",
+      "properties": {
+        "operationId": {
+          "type": "string"
+        },
+        "command": {
+          "type": "string"
+        },
+        "effect": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "operationId",
+        "command",
+        "effect",
+        "target",
+        "summary"
+      ],
+      "additionalProperties": false
+    },
+    "execute": {
+      "type": "object",
+      "properties": {
+        "plan": {
+          "$ref": "#/$defs/plan"
+        },
+        "result": {
+          "type": "object",
+          "properties": {
+            "schema": {
+              "const": 1
+            },
+            "operationId": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "output": {
+              "type": "object"
+            },
+            "errorCode": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "schema",
+            "operationId",
+            "status"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "plan",
+        "result"
+      ],
+      "additionalProperties": false
+    },
+    "discard": {
+      "type": "object",
+      "properties": {
+        "operationId": {
+          "type": "string"
+        },
+        "discarded": {
+          "const": true
+        }
+      },
+      "required": [
+        "operationId",
+        "discarded"
+      ],
+      "additionalProperties": false
+    },
+    "ping": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "const": true
+        }
+      },
+      "required": [
+        "ok"
+      ],
+      "additionalProperties": false
+    },
+    "eventsClosed": {
+      "type": "object",
+      "properties": {
+        "closed": {
+          "const": true
+        }
+      },
+      "required": [
+        "closed"
+      ],
+      "additionalProperties": false
+    },
+    "integration": {
+      "type": "object",
+      "properties": {
+        "yard": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "selection": {
+          "type": "object",
+          "properties": {
+            "requested": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            },
+            "effective": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            },
+            "present": {
+              "type": "boolean"
+            },
+            "provenance": {
+              "type": "object",
+              "properties": {
+                "Scope": {
+                  "type": "string"
+                },
+                "Role": {
+                  "type": "string"
+                },
+                "Path": {
+                  "type": "string"
+                },
+                "Value": {
+                  "type": "string"
+                },
+                "Status": {
+                  "type": "string"
+                },
+                "Detail": {
+                  "type": "string"
+                },
+                "Line": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "Scope",
+                "Role",
+                "Path",
+                "Value",
+                "Status",
+                "Detail",
+                "Line"
+              ],
+              "additionalProperties": false
+            },
+            "dependency_reasons": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "additionalProperties": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "allows_coding_tools": {
+              "type": "boolean"
+            },
+            "suppressed": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "requested",
+            "effective",
+            "present",
+            "provenance",
+            "dependency_reasons",
+            "allows_coding_tools",
+            "suppressed"
+          ],
+          "additionalProperties": false
+        },
+        "observed": {
+          "type": "string"
+        },
+        "observed_scope": {
+          "type": "string"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "health": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "yard",
+        "selection",
+        "observed",
+        "observed_scope"
+      ],
+      "additionalProperties": false
+    },
+    "plan": {
+      "type": "object",
+      "properties": {
+        "operationId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "command": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "effect": {
+          "enum": [
+            "read",
+            "mutate"
+          ]
+        },
+        "confirmation": {
+          "enum": [
+            "never",
+            "prompt-default-yes",
+            "prompt-default-no"
+          ]
+        },
+        "target": {
+          "enum": [
+            "local-controller",
+            "local-owner",
+            "remote-owner"
+          ]
+        },
+        "consequences": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 8192
+          },
+          "maxItems": 1024
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "maxLength": 128
+              },
+              "target": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "observed": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "desired": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "decision": {
+                "enum": [
+                  "apply",
+                  "skip",
+                  "conditional"
+                ]
+              },
+              "preconditions": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512
+                },
+                "maxItems": 64
+              },
+              "dependsOn": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "maxItems": 64
+              },
+              "verify": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "consequence": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "required": [
+              "id",
+              "target",
+              "observed",
+              "desired",
+              "decision",
+              "verify"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 256
+        },
+        "assessment": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string"
+            },
+            "effect": {
+              "enum": [
+                "read",
+                "session",
+                "bounded-write",
+                "mutation",
+                "destruction"
+              ]
+            },
+            "changed": {
+              "type": "boolean"
+            },
+            "impacts": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "enum": [
+                  "local-metadata",
+                  "yard-runtime",
+                  "host-os",
+                  "host-network",
+                  "host-incus",
+                  "security",
+                  "trust",
+                  "access",
+                  "external-system",
+                  "shared-workload",
+                  "persistent-data"
+                ]
+              }
+            },
+            "recovery": {
+              "enum": [
+                "not-needed",
+                "reversible",
+                "recreatable",
+                "irreversible"
+              ]
+            },
+            "consequences": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "action",
+            "effect",
+            "changed",
+            "recovery"
+          ],
+          "additionalProperties": false
+        },
+        "confirmationRequest": {
+          "type": "object",
+          "properties": {
+            "summary": {
+              "type": "string"
+            },
+            "consequences": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            },
+            "default": {
+              "enum": [
+                "yes",
+                "no"
+              ]
+            }
+          },
+          "required": [
+            "summary",
+            "default"
+          ],
+          "additionalProperties": false
+        },
+        "confirmed": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "operationId",
+        "command",
+        "effect",
+        "confirmation",
+        "target",
+        "confirmed",
+        "createdAt"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,701 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "methods.schema.json",
+  "description": "Method-specific request params for current engine RPC. Exact mutations require the complete step contract. See README for result schemas and dedicated transports.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "command.list"
+        },
+        "params": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "context.get"
+        },
+        "params": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "owner.inventory"
+        },
+        "params": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "yard.status"
+        },
+        "params": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "credential.list"
+        },
+        "params": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "credential.status"
+        },
+        "params": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "profile.list"
+        },
+        "params": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "settings.list"
+        },
+        "params": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "host.sync.status"
+        },
+        "params": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "operation.discard"
+        },
+        "params": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "project.copy.abort"
+        },
+        "params": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "system.snapshot"
+        },
+        "params": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "system.resync"
+        },
+        "params": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "system.ping"
+        },
+        "params": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "rpc.negotiate"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "operation.route"
+        },
+        "params": {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
+              "maxLength": 8192
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "operation.plan"
+        },
+        "params": {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
+              "maxLength": 8192
+            },
+            "arguments": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 8192
+              },
+              "maxItems": 1024
+            },
+            "exact": {
+              "type": "boolean"
+            },
+            "stepSchema": {
+              "enum": [
+                0,
+                1
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "schema": {
+                  "const": 1
+                },
+                "source": {
+                  "type": "string"
+                },
+                "archiveDigest": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "archiveSize": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "treeDigest": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "requestedName": {
+                  "type": "string"
+                },
+                "explicitName": {
+                  "type": "boolean"
+                },
+                "targetProfile": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "schema",
+                "source",
+                "archiveDigest",
+                "archiveSize",
+                "treeDigest",
+                "requestedName",
+                "explicitName",
+                "targetProfile"
+              ],
+              "additionalProperties": false
+            },
+            "export": {
+              "type": "object",
+              "properties": {
+                "schema": {
+                  "const": 1
+                },
+                "projectId": {
+                  "type": "string"
+                },
+                "sourceKey": {
+                  "type": "string"
+                },
+                "archiveDigest": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "archiveSize": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "sourceTree": {
+                  "type": "string"
+                },
+                "destination": {
+                  "type": "string"
+                },
+                "destinationBinding": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "schema",
+                "projectId",
+                "sourceKey",
+                "archiveDigest",
+                "archiveSize",
+                "sourceTree",
+                "destination",
+                "destinationBinding"
+              ],
+              "additionalProperties": false
+            },
+            "targetYard": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9_-]*$",
+              "maxLength": 8192,
+              "not": {
+                "const": "default"
+              },
+              "description": "Only exact init with --profile; retains the native bootstrap on the existing owner session."
+            }
+          },
+          "required": [
+            "command",
+            "arguments"
+          ],
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "required": [
+                  "targetYard"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "command": {
+                    "const": "init"
+                  },
+                  "exact": {
+                    "const": true
+                  },
+                  "arguments": {
+                    "minItems": 2,
+                    "contains": {
+                      "const": "--profile"
+                    }
+                  }
+                },
+                "required": [
+                  "exact"
+                ],
+                "not": {
+                  "anyOf": [
+                    {
+                      "required": [
+                        "source"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "export"
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "operation.execute"
+        },
+        "params": {
+          "type": "object",
+          "properties": {
+            "confirmed": {
+              "const": true
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "confirmed",
+            "digest"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "project.copy.finalize"
+        },
+        "params": {
+          "type": "object",
+          "properties": {
+            "digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "digest"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "integration.status"
+        },
+        "params": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "maxLength": 8192
+            },
+            "ownerOnly": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "project.list"
+        },
+        "params": {
+          "type": "object",
+          "properties": {
+            "live": {
+              "type": "boolean"
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "incus.events"
+        },
+        "params": {
+          "type": "object",
+          "properties": {
+            "types": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 8192
+              },
+              "maxItems": 8
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "keys.prepare"
+        },
+        "params": {
+          "type": "object",
+          "properties": {
+            "arguments": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 8192
+              },
+              "maxItems": 1024
+            }
+          },
+          "required": [
+            "arguments"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "session.prepare"
+        },
+        "params": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": [
+                "shell",
+                "resources",
+                "vscode"
+              ]
+            },
+            "scope": {
+              "enum": [
+                "yard",
+                "host"
+              ]
+            },
+            "projectId": {
+              "type": "string",
+              "maxLength": 8192
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

@@ -1,0 +1,185 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "settings-list.schema.json",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "yardName": {
+      "type": "string",
+      "maxLength": 8192
+    },
+    "settings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 8192
+          },
+          "kind": {
+            "enum": [
+              "scalar",
+              "file"
+            ]
+          },
+          "type": {
+            "enum": [
+              "string",
+              "boolean",
+              "integer",
+              "port",
+              "size",
+              "name",
+              "name-list",
+              "absolute-path",
+              "relative-path",
+              "image-reference",
+              "multiline",
+              "mount-list",
+              "link-list",
+              "executable",
+              "regular-file",
+              "sha256",
+              "version",
+              "ipv4",
+              "interface"
+            ]
+          },
+          "default": {
+            "type": "string",
+            "maxLength": 8192
+          },
+          "value": {
+            "type": "string",
+            "maxLength": 8192
+          },
+          "valueAvailable": {
+            "type": "boolean"
+          },
+          "aliases": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 8192
+            },
+            "maxItems": 1024
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "enum": [
+                "shipped",
+                "shared",
+                "host",
+                "yard",
+                "command"
+              ]
+            },
+            "maxItems": 1024
+          },
+          "syncable": {
+            "type": "boolean"
+          },
+          "merge": {
+            "type": "string",
+            "maxLength": 8192
+          },
+          "application": {
+            "enum": [
+              "next command",
+              "yard init",
+              "config apply"
+            ]
+          },
+          "owner": {
+            "type": "string",
+            "maxLength": 8192
+          },
+          "enum": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 8192
+            },
+            "maxItems": 1024
+          },
+          "minimum": {
+            "type": "integer"
+          },
+          "maximum": {
+            "type": "integer"
+          },
+          "optional": {
+            "type": "boolean"
+          },
+          "editable": {
+            "type": "boolean"
+          },
+          "provenance": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "scope": {
+                  "type": "string",
+                  "maxLength": 8192
+                },
+                "role": {
+                  "type": "string",
+                  "maxLength": 8192
+                },
+                "status": {
+                  "enum": [
+                    "effective",
+                    "overridden",
+                    "unset"
+                  ]
+                },
+                "value": {
+                  "type": "string",
+                  "maxLength": 8192
+                }
+              },
+              "required": [
+                "scope",
+                "role",
+                "status"
+              ],
+              "additionalProperties": false
+            },
+            "maxItems": 1024
+          }
+        },
+        "required": [
+          "name",
+          "kind",
+          "type",
+          "valueAvailable",
+          "aliases",
+          "scopes",
+          "syncable",
+          "merge",
+          "application",
+          "owner",
+          "enum",
+          "minimum",
+          "maximum",
+          "optional",
+          "editable",
+          "provenance"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 1024
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "yardName",
+    "settings"
+  ],
+  "additionalProperties": false
+}

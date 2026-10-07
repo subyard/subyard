@@ -65,12 +65,20 @@
         <div class="app">
           <div class="title">Yard selected</div><div class="bar"><b>Veranda</b><span>+ Connect remote host</span></div>
           <div class="layout"><aside class="fleet"><span class="eyebrow">Hosts</span><br><br>▾ local-host<br>　<b>default</b><br>　dev-yard<br>　test-yard<br><br>▸ remote-host</aside>
-            <div class="workspace"><div class="object-head"><div><span class="eyebrow">Yard · local-host</span><h3>default</h3><span>RUNNING · 2 projects</span></div><div><button>Yard shell</button><button>Copy command</button></div></div>
+            <div class="workspace"><div class="object-head"><div><span class="eyebrow">Yard · local-host</span><h3>default</h3><span>RUNNING · 2 projects</span></div><div><button>Yard shell</button><button>Copy command</button><button>Preview stop</button><button>Reconcile yard</button></div></div>
               <div class="tabs"><strong>Overview</strong> Projects Profiles Diagnostics Settings</div>
               <div class="card"><b>Projects</b><br>web-app · api-service</div><div class="card"><b>Profiles</b><br>developer · android</div><div class="card"><b>Diagnostics</b><br>SSH configured · VS Code ready</div>
             </div></div>
         </div>
       </div>
+    </section>
+
+    <section id="yard-creation">
+      <h2>Create a named yard</h2><p class="note">The owner reports available profile presets. Creation uses its single-use exact plan before writing a definition or starting a runtime.</p>
+      <div class="app"><div class="title">Host · local-host · Yards</div><div class="workspace">
+        <label>Yard name</label><input placeholder="dev-yard"><label>Profile preset</label><select><option>owner-reported preset</option></select>
+        <button>Preview creation</button><button>Cancel creation</button>
+      </div></div>
     </section>
 
     <section id="projects">
@@ -79,6 +87,7 @@
         <div class="tabs">Overview <strong>Projects</strong> Profiles Diagnostics Settings</div>
         <div class="row"><b>web-app</b><div><button>Open in VS Code</button><button>Shell</button></div></div>
         <div class="row"><b>api-service</b><div><button>Open in VS Code</button><button>Shell</button></div></div>
+        <p class="note">Remote VS Code requires an SSH agent key already authorized in this yard.</p>
       </div></div>
     </section>
 
@@ -122,7 +131,7 @@
     <section id="connect">
       <h2>Inline remote owner-host connection</h2><p class="note">This workspace appears only after the fleet link is selected.</p>
       <div class="app"><div class="bar"><b>Veranda</b><span>Cancel connection</span></div><div class="layout"><aside class="fleet"><span class="eyebrow">Hosts</span><br><br>▾ local-host<br>　default<br>　dev-yard<br><br><b>+ New connection</b></aside>
-        <div class="workspace"><span class="eyebrow">New connection</span><h3>Connect a remote Subyard host</h3><p>All yards discovered through this owner host will appear in the fleet.</p><label>Display name</label><input placeholder="Build host"><label>SSH destination</label><input placeholder="user@hostname"><label>Authentication</label><input value="SSH agent" readonly><button>Test connection</button><p class="note">Next: verify host key → negotiate RPC → discover yards → save connection.</p></div>
+        <div class="workspace"><span class="eyebrow">New connection</span><h3>Connect a remote Subyard host</h3><p>All yards discovered through this owner host will appear in the fleet.</p><label>SSH destination</label><input placeholder="user@hostname"><label>Authentication</label><input value="System SSH agent" readonly><button>Review host key</button><p class="note">Next: explicitly accept the fingerprint → negotiate RPC → discover yards → save connection. Cancel discards the pending assessment.</p></div>
       </div></div>
     </section>
 

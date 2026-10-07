@@ -579,3 +579,27 @@ footer {
     transition-duration: 0.01ms !important;
   }
 }
+input, select, textarea {font: inherit; max-width: 100%; padding: .55rem; border: 1px solid #7b857f; border-radius: .25rem;}
+input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible {outline: 3px solid #d99a3a; outline-offset: 2px;}
+input[type='checkbox'] {accent-color: #356d57; width: 1.1rem; height: 1.1rem;}
+.workspace button {min-height: 2.5rem; padding: .5rem .8rem; border: 1px solid #a9b3ac; border-radius: .3rem; cursor: pointer;}
+button:disabled {opacity: .6; cursor: default;}
+.actions {display: flex; gap: .5rem; flex-wrap: wrap;}
+.project-list .actions {margin-left: auto;}
+.tabs {flex-wrap: wrap; gap: .65rem;}
+.tabs button {border: 0; border-radius: 0; background: transparent;}
+form {display: grid; gap: .75rem; max-width: 34rem; margin: 1rem 0;}
+.connect-link {margin-top: 1rem; padding: .7rem; color: #e9eee9; border: 1px solid #586861; background: transparent; cursor: pointer; text-align: left;}
+.fingerprint {display: block; padding: 1rem; overflow-wrap: anywhere; background: #e2e6df;}
+.profile-list {padding: 0; list-style: none;}
+.profile-list li {padding: 1rem 0; border-bottom: 1px solid #dfe3dd;}
+.profile-list li > span {float: right;}
+.profile-list details {margin-top: .65rem;}
+summary {cursor: pointer;}
+table {width: 100%; border-collapse: collapse;}
+th, td {text-align: left; padding: .75rem .4rem; border-bottom: 1px solid #dfe3dd; overflow-wrap: anywhere;}
+dl {display: grid; grid-template-columns: minmax(8rem, 1fr) 2fr; gap: .5rem;}
+dd {margin: 0; overflow-wrap: anywhere;}
+.sync-cards {display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: 1rem;}
+.operation-panel {margin-top: 1.5rem !important; padding: 1rem; background: #fff8e9; border: 1px solid #d99a3a;}
+.operation-log {max-height: 15rem; overflow: auto; overflow-wrap: anywhere;}

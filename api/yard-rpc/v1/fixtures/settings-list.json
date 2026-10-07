@@ -1,0 +1,107 @@
+{
+  "version": 1,
+  "type": "response",
+  "id": "settings-list",
+  "result": {
+    "schemaVersion": 1,
+    "yardName": "default",
+    "settings": [
+      {
+        "name": "SSH_PORT",
+        "kind": "scalar",
+        "type": "port",
+        "default": "2222",
+        "value": "2222",
+        "valueAvailable": true,
+        "aliases": [],
+        "scopes": [
+          "shipped",
+          "host",
+          "yard",
+          "command"
+        ],
+        "syncable": true,
+        "merge": "replace",
+        "application": "next command",
+        "owner": "host-network",
+        "enum": [],
+        "minimum": 1,
+        "maximum": 65535,
+        "optional": false,
+        "editable": true,
+        "provenance": [
+          {
+            "scope": "default",
+            "role": "shipped",
+            "status": "effective",
+            "value": "2222"
+          }
+        ]
+      },
+      {
+        "name": "AGENT_fixture_PERSIST",
+        "kind": "scalar",
+        "type": "multiline",
+        "default": "\n.fixture/sessions:/mnt/host/agent-sessions/fixture/sessions\n.fixture/cache:/mnt/host/agent-sessions/fixture/cache\n",
+        "value": "\n.fixture/sessions:/mnt/host/agent-sessions/fixture/sessions\n.fixture/cache:/mnt/host/agent-sessions/fixture/cache\n",
+        "valueAvailable": true,
+        "aliases": [],
+        "scopes": [
+          "shipped",
+          "host",
+          "yard",
+          "command"
+        ],
+        "syncable": false,
+        "merge": "replace",
+        "application": "yard init",
+        "owner": "agent-integration",
+        "enum": [],
+        "minimum": 0,
+        "maximum": 0,
+        "optional": false,
+        "editable": true,
+        "provenance": [
+          {
+            "scope": "default",
+            "role": "shipped",
+            "status": "effective",
+            "value": "\n.fixture/sessions:/mnt/host/agent-sessions/fixture/sessions\n.fixture/cache:/mnt/host/agent-sessions/fixture/cache\n"
+          }
+        ]
+      },
+      {
+        "name": "HOST_LINKS",
+        "kind": "scalar",
+        "type": "link-list",
+        "default": "\n.fixture/sessions:/mnt/host/agent-sessions/fixture/sessions\n.fixture/cache:/mnt/host/agent-sessions/fixture/cache\n",
+        "value": "\n.fixture/sessions:/mnt/host/agent-sessions/fixture/sessions\n.fixture/cache:/mnt/host/agent-sessions/fixture/cache\n",
+        "valueAvailable": true,
+        "aliases": [],
+        "scopes": [
+          "shipped",
+          "host",
+          "yard",
+          "command"
+        ],
+        "syncable": true,
+        "merge": "replace",
+        "application": "yard init",
+        "owner": "yard-storage",
+        "enum": [],
+        "minimum": 0,
+        "maximum": 0,
+        "optional": true,
+        "editable": true,
+        "provenance": [
+          {
+            "scope": "default",
+            "role": "shipped",
+            "status": "effective",
+            "value": "\n.fixture/sessions:/mnt/host/agent-sessions/fixture/sessions\n.fixture/cache:/mnt/host/agent-sessions/fixture/cache\n"
+          }
+        ]
+      }
+    ]
+  }
+}

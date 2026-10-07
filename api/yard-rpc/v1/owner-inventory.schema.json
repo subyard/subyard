@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "owner-inventory.schema.json",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": 1
+    },
+    "hostId": {
+      "type": "string",
+      "maxLength": 8192
+    },
+    "observedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "yards": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 8192
+          },
+          "kind": {
+            "enum": [
+              "container",
+              "vm"
+            ]
+          },
+          "instance": {
+            "type": "string",
+            "maxLength": 8192
+          },
+          "state": {
+            "type": "string",
+            "maxLength": 8192
+          },
+          "startState": {
+            "type": "string",
+            "maxLength": 8192
+          },
+          "waitingForAddresses": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 8192
+            },
+            "maxItems": 1024
+          },
+          "sshPort": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "devUser": {
+            "type": "string",
+            "maxLength": 8192
+          },
+          "yardImageRef": {
+            "type": "string",
+            "maxLength": 8192
+          },
+          "resolvedYardImage": {
+            "type": "string",
+            "maxLength": 8192
+          },
+          "projects": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "projectId": {
+                  "type": "string",
+                  "maxLength": 8192
+                },
+                "identityVersion": {
+                  "enum": [
+                    0,
+                    2
+                  ]
+                },
+                "name": {
+                  "type": "string",
+                  "maxLength": 8192
+                },
+                "mode": {
+                  "type": "string",
+                  "maxLength": 8192
+                },
+                "target": {
+                  "type": "string",
+                  "maxLength": 8192
+                },
+                "sourceKey": {
+                  "type": "string",
+                  "maxLength": 8192
+                }
+              },
+              "required": [
+                "projectId",
+                "name",
+                "mode",
+                "target"
+              ],
+              "additionalProperties": false
+            },
+            "maxItems": 100000
+          }
+        },
+        "required": [
+          "name",
+          "kind",
+          "instance",
+          "state",
+          "sshPort",
+          "devUser",
+          "projects"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 1024
+    }
+  },
+  "required": [
+    "schema",
+    "hostId",
+    "observedAt",
+    "yards"
+  ],
+  "additionalProperties": false
+}

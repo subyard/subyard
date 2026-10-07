@@ -21,11 +21,25 @@
       }
     ],
     "security": {
-      "capabilities": ["main-read-only"],
+      "capabilities": [
+        "main-read-only"
+      ],
       "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'"
     }
   },
   "bundle": {
-    "active": false
+    "active": false,
+    "icon": [
+      "icons/icon.png"
+    ],
+    "shortDescription": "Nice view into every yard",
+    "category": "DeveloperTool",
+    "linux": {
+      "deb": {
+        "depends": [
+          "openssh-client"
+        ]
+      }
+    }
   }
 }

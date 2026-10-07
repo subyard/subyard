@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "type": "response",
+  "id": "negotiate",
+  "result": {
+    "version": 1,
+    "protocolMin": 1,
+    "protocolMax": 1,
+    "engineVersion": "0.1.0-dev",
+    "capabilities": [
+      "snapshot",
+      "ordered-events",
+      "cancellation",
+      "deadlines",
+      "commands",
+      "context",
+      "projects",
+      "yard-status",
+      "credential-metadata",
+      "credential-status",
+      "operation-plan",
+      "operation-execute",
+      "resync",
+      "owner-inventory-v1",
+      "profile-list-v1",
+      "settings-list-v1",
+      "host-sync-status-v1",
+      "operation-exact-plan-v1",
+      "operation-steps-v1",
+      "session-prepare-v1",
+      "yard-bootstrap-v1"
+    ]
+  }
+}

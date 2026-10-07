@@ -245,6 +245,12 @@ func (runner ProjectActionRunner) codeTargetReady(ctx context.Context) error {
 	return nil
 }
 
+// CheckCodeTargetReady observes the existing VS Code transport contract without
+// preparing workspace files, launching an editor or changing SSH configuration.
+func (runner ProjectActionRunner) CheckCodeTargetReady(ctx context.Context) error {
+	return runner.codeTargetReady(ctx)
+}
+
 func (runner ProjectActionRunner) export(ctx context.Context, operationID string) (message, path string, err error) {
 	if runner.Project.Mode != domain.ProjectSync {
 		return "", "", fmt.Errorf("%s projects cannot be exported", runner.Project.Mode)

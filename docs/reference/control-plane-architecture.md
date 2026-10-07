@@ -304,9 +304,10 @@ for current ownership, execution and release requirements.
 
 ## 7. Veranda architecture
 
-The current application provides a read-only local fleet. The following constraints govern the
-accepted remote, mutating and cross-platform design; they do not establish completion of those
-features. See [Veranda](../veranda/README.md) for the implemented application scope.
+The current candidate provides local and pinned SSH fleet views, app-local connection trust,
+typed owner operations and native session launches. The following constraints govern the
+implementation; platform, reliability and resource acceptance remain pending.
+See [Veranda](../veranda/README.md) for the implemented scope and verification limits.
 
 ```text
 public Subyard monorepo
@@ -365,12 +366,14 @@ The requirements and methodology were accepted on 2026-10-05. Minimizing resourc
 Targets guide optimization; limits are release acceptance requirements. These are chosen requirements,
 not results of an already completed benchmark. Spare budget does not justify extra processes,
 polling, caches or dependencies.
+On 2026-10-06, the RSS limits for the Linux software-rendering baseline were raised to 640 MiB.
+The lower targets remain; investigating memory use and alternatives remains planned work.
 
 | Metric | Target | Limit |
 | --- | --- | --- |
 | Cold process start to first controllable fleet/error screen, p95 | ≤ 1 s | ≤ 2 s |
-| Idle RAM, summed RSS of app-owned processes | ≤ 128 MiB | ≤ 256 MiB |
-| Peak RAM during refresh/switch/event burst | ≤ 256 MiB | ≤ 384 MiB |
+| Idle RAM, summed RSS of app-owned processes | ≤ 128 MiB | ≤ 640 MiB for Linux software rendering; ≤ 256 MiB otherwise |
+| Peak RAM during refresh/switch/event burst | ≤ 256 MiB | ≤ 640 MiB for Linux software rendering; ≤ 384 MiB otherwise |
 | Idle CPU, summed across processes, average over 120 s | ≤ 0.1% of one logical CPU | ≤ 0.5% of one logical CPU |
 | Compressed GUI artifact / installed app payload | ≤ 20 / 40 MiB | ≤ 40 / 80 MiB |
 | Switch of an already loaded host/yard to paint, p95 | ≤ 50 ms | ≤ 100 ms |

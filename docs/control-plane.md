@@ -16,6 +16,7 @@ internal/
   ├── command, config, domain           manifest and immutable context
   ├── cli/prepared_command.go           shared core-command prepare/execute ownership
   ├── application, credential           routing/reconciliation and credential DAG policy
+  ├── ownerapi                          typed owner queries and session preparation
   ├── state, migration, rpc              atomic state, schema checks and framed sessions
   └── adapters/                          Incus, release, metadata and local/SSH transports
 scripts/
@@ -142,7 +143,8 @@ CLI / operation.plan → manifest → resolveCoreCommand → prepareCommand
 
 The handler-family resolver binds preparation and physical leaves in one place. Startup rejects
 unknown internal handlers. A prepared command owns canonical arguments, resolved context, the
-unconfirmed operation plan and one execution closure capturing its typed state. Its idempotent
+operation plan and one execution closure capturing its typed state. Plans with `confirmation:never`
+are already confirmed; prompt policies remain unconfirmed until consent. Its idempotent
 cleanup releases an outstanding project reservation and any retained release handle. CLI and RPC
 share assessment, execution and successful project-state commit; CLI owns human previews and
 prompts, while RPC owns bounded session storage, events and protocol errors. Dedicated query,
@@ -191,7 +193,8 @@ The outer event `sequence` and `revision` are one monotonic per-session stream; 
 revisions remain typed event data and cannot make the RPC revision move backwards after a snapshot.
 
 The switched surface exposes `command.list`, `context.get`, `operation.route`, `operation.plan`,
-`operation.execute`, `integration.status`, `project.list`, `owner.inventory`, `yard.status`, `credential.list`, `credential.status`,
+`operation.execute`, `integration.status`, `project.list`, `owner.inventory`, `yard.status`,
+`profile.list`, `settings.list`, `host.sync.status`, `session.prepare`, `credential.list`, `credential.status`,
 `incus.events`, `system.snapshot`, `system.resync` and `system.ping`. `operation.plan` accepts every
 public mutating core command whose handler family supports preparation. Interactive terminal and
 protected credential-payload commands keep their dedicated transport rather than treating human
@@ -272,6 +275,29 @@ project registry. It excludes controller aliases, absolute host paths and secret
 the complete response by HostID for 30 seconds; replacement is atomic, so removals cannot leave
 per-record ghosts. A failed refresh keeps the last good response only as explicitly stale data and
 makes an incomplete aggregate command fail.
+
+The [Yard RPC v1 schemas and golden frames](../api/yard-rpc/v1/README.md) describe the
+language-neutral desktop contract. `profile.list` (`profile-list-v1`) projects the current profile
+catalog, selection provenance, role eligibility and observed native convergence without starting a
+stopped yard. `settings.list` (`settings-list-v1`) returns typed non-secret effective settings and
+provenance, preserving multiline and list representations. `host.sync.status`
+(`host-sync-status-v1`) observes sanitized Git registration and redacted credential metadata offline;
+it does not fetch or expose checkout paths, credentials or payloads. `session.prepare`
+(`session-prepare-v1`) resolves an explicit host/yard/project into a fixed launch descriptor without
+launching a tool or authorizing an additional SSH key. Desktop mutations continue through the same
+single-use owner exact plan rather than a parallel domain API.
+
+These query services and their typed projections live in `internal/ownerapi`, independently of the
+desktop client and RPC transport. The CLI boundary decodes requests, verifies the bound owner
+context, reloads persisted configuration where required, converts query errors and enforces response
+frame limits. Existing domain operations remain in `internal/application`; `internal/rpc` owns the
+framed protocol and session lifecycle.
+
+`yard-bootstrap-v1` allows an exact `init --profile <preset>` plan to specify `targetYard` on an
+existing owner session. The native loader assesses the preset and absent definition without
+publishing either; confirmation and execution use the ordinary init input and stale-state guards.
+The session's own context remains immutable. `profile.list.hasYardPreset` reports available preset
+files without exposing their paths or contents.
 
 ### Config and context
 

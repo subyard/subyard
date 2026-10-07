@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "type": "event",
+  "id": "snapshot-1",
+  "operationId": "snapshot-1",
+  "sequence": 1,
+  "revision": 1,
+  "event": "snapshot.ready",
+  "data": {
+    "complete": true
+  }
+}
