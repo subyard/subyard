@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d /tmp/subyard-project-registry.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
@@ -36,10 +36,6 @@ if [[ "$joined" == *yard* && "$joined" == *rpc* && "$joined" == *--stdio* ]]; th
     SUBYARD_HOME="$REGISTRY_TEST_STATE/owner-data" \
     ACCESS_KIND=local SSH_HOST=yard-inner YARD_INSTANCE_NAME=yard-inner \
     "$(dirname "$0")/project-owner-fixture" -Y inner rpc --stdio
-fi
-if [[ "$joined" == *"'git' 'ls-remote'"* ]];then
-  printf '1111111111111111111111111111111111111111\tHEAD\n'
-  exit 0
 fi
 if [[ "$joined" == *'_project-state'* ]];then
   # The controller may read the canonical identity before exact owner admission.
@@ -104,6 +100,7 @@ go build -o "$TMP/bin/project-owner-fixture" "$ROOT/tests/helpers/project-owner-
 export HOME="$TMP/home"
 export SUBYARD_CONFIG_DIR="$TMP/shipped"
 export SUBYARD_NO_AUDIT=1
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0
 export REGISTRY_TEST_STATE="$TMP/state"
 export PROJECT_OWNER_REPOSITORY="$TMP/runtime"
 install -d -m 0700 "$REGISTRY_TEST_STATE/owner-home" "$REGISTRY_TEST_STATE/owner-config/yards" "$REGISTRY_TEST_STATE/owner-data"
@@ -245,9 +242,15 @@ fi
   || fail 'remote sync published owner identity into controller project state'
 
 # Native remote clone owns the data-plane sequence and then converges both registries.
+clone_source="$TMP/clone source.git"
+git init -q --initial-branch=main "$clone_source"
+printf 'approved content\n' > "$clone_source/file.txt"
+git -C "$clone_source" add file.txt
+git -C "$clone_source" -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm fixture
+clone_revision="$(git -C "$clone_source" rev-parse HEAD)"
 : > "$REGISTRY_TEST_STATE/owner-calls"
 clone_id=ForeignClone
-"$TMP/runtime/bin/yard" -Y remote clone https://example.invalid/repo.git ForeignClone \
+"$TMP/runtime/bin/yard" -Y remote clone "$clone_source" ForeignClone \
   --target synthetic --yes >/dev/null
 clone_state="$SUBYARD_CONFIG_HOME/yards/remote/projects/$clone_id.json"
 [ ! -e "$clone_state" ] || fail 'native clone published obsolete controller project state'
@@ -259,7 +262,14 @@ for admitted in RemoteDemo RemoteDemo-2 RemoteDemo-3 StaleDemo-3 ForeignClone;do
   assert_json "$REGISTRY_TEST_STATE/owner-config/yards/inner/projects/$admitted.json" \
     '.identityVersion == 2 and .projectId == .name'
 done
-[ "$(cat "$REGISTRY_TEST_STATE/guest/workspaces/ForeignClone/src/.git/HEAD")" = \
-  1111111111111111111111111111111111111111 ] || fail 'native owner clone did not retain the approved revision'
+clone_path="$REGISTRY_TEST_STATE/guest/workspaces/$clone_id/src"
+[ "$(git -C "$clone_path" rev-parse HEAD)" = "$clone_revision" ] \
+  || fail 'native owner clone did not retain the approved revision'
+[ "$(git -C "$clone_path" symbolic-ref HEAD)" = refs/heads/main ] \
+  || fail 'native owner clone lost its default branch'
+[ "$(git -C "$clone_path" rev-parse --symbolic-full-name '@{upstream}')" = refs/remotes/origin/main ] \
+  || fail 'native owner clone lost its default branch upstream'
+[ "$(cat "$clone_path/file.txt")" = 'approved content' ] \
+  || fail 'native owner clone did not materialize the approved contents'
 
 printf 'ok: native sync and clone preserve registry ownership\n'

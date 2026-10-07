@@ -56,9 +56,9 @@ func (e executor) mark(name string) error {
 	}
 	return os.WriteFile(filepath.Join(e.root, name), nil, 0600)
 }
-func (e executor) Exec(_ context.Context, _, _ string, r ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+func (e executor) Exec(ctx context.Context, _, _ string, r ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
 	if e.registry {
-		return e.projectExec(r)
+		return e.projectExec(ctx, r)
 	}
 	command := strings.Join(r.Command, " ")
 	result := ports.InstanceExecResult{}
@@ -117,9 +117,9 @@ func (e executor) Exec(_ context.Context, _, _ string, r ports.InstanceExecReque
 	return result, nil
 }
 
-// Only native project tools run here; logical guest paths map into this
-// disposable fixture root, and Git uses an actual retained revision file.
-func (e executor) projectExec(r ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+// Native project tools run here; logical guest paths map into the disposable
+// fixture root, and Git sources are fixture-owned local repositories.
+func (e executor) projectExec(ctx context.Context, r ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
 	if len(r.Command) == 0 {
 		return ports.InstanceExecResult{}, fmt.Errorf("empty fixture command")
 	}
@@ -141,27 +141,6 @@ func (e executor) projectExec(r ports.InstanceExecRequest) (ports.InstanceExecRe
 		}
 	}
 	switch args[0] {
-	case "git":
-		revision := "1111111111111111111111111111111111111111"
-		if len(args) > 1 && args[1] == "ls-remote" {
-			return ports.InstanceExecResult{Stdout: []byte(revision + "\tHEAD\n")}, nil
-		}
-		if len(args) > 1 && args[1] == "clone" {
-			target := args[len(args)-1]
-			if err := os.MkdirAll(filepath.Join(target, ".git"), 0700); err != nil {
-				return ports.InstanceExecResult{}, err
-			}
-			return ports.InstanceExecResult{}, os.WriteFile(filepath.Join(target, ".git", "HEAD"), []byte(revision+"\n"), 0600)
-		}
-		if len(args) > 3 && args[1] == "-C" {
-			if len(args) == 6 && args[3] == "reset" && args[4] == "--hard" {
-				return ports.InstanceExecResult{}, os.WriteFile(filepath.Join(args[2], ".git", "HEAD"), []byte(args[5]+"\n"), 0600)
-			}
-			if args[3] == "rev-parse" {
-				data, err := os.ReadFile(filepath.Join(args[2], ".git", "HEAD"))
-				return ports.InstanceExecResult{Stdout: data}, err
-			}
-		}
 	case "chown":
 		// UID translation belongs to Incus; filesystem observations remain real.
 		return ports.InstanceExecResult{}, nil
@@ -176,8 +155,8 @@ func (e executor) projectExec(r ports.InstanceExecRequest) (ports.InstanceExecRe
 			return ports.InstanceExecResult{}, err
 		}
 		return ports.InstanceExecResult{Stdout: r.Stdin}, nil
-	case "cat", "mkdir", "install", "chmod", "tar", "find", "rm", "sh":
-		command := exec.Command(args[0], args[1:]...)
+	case "cat", "mkdir", "install", "chmod", "tar", "find", "rm", "sh", "git":
+		command := exec.CommandContext(ctx, args[0], args[1:]...)
 		command.Stdin = bytes.NewReader(r.Stdin)
 		var stdout, stderr bytes.Buffer
 		command.Stdout, command.Stderr = &stdout, &stderr
