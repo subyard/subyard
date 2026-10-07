@@ -28,8 +28,9 @@ type ProtectedSnapshot struct {
 }
 
 type POSIXV2Store struct {
-	configHome string
-	fault      func(string) error
+	configHome              string
+	fault                   func(string) error
+	retirementCaptureFailed bool
 }
 
 func NewPOSIXV2Store(configHome string) (*POSIXV2Store, error) {
@@ -60,6 +61,25 @@ func (store *POSIXV2Store) CompareAndSwapCurrentJournal(
 	expected ProtectedSnapshot,
 	payload []byte,
 ) error {
+	// Capture completion while the exact journal is still selected. A failed
+	// retirement attempt keeps the live receipt and is reported after readiness.
+	if expected.Exists {
+		before, parseErr := ParseJournal(expected.Payload)
+		after, nextErr := ParseJournal(payload)
+		if parseErr == nil && nextErr == nil && before.Checkpoint == JournalComplete &&
+			IsRecoveryTransaction(before.Transaction) && before.Transaction != after.Transaction {
+			current, err := store.ReadCurrentJournal()
+			if err != nil {
+				return err
+			}
+			if !sameProtectedSnapshot(current, expected) {
+				return ErrProtectedStoreStale
+			}
+			if err := store.RecordCompletedRecovery(before); err != nil {
+				store.retirementCaptureFailed = true
+			}
+		}
+	}
 	return store.compareAndSwap(
 		[]string{"release-transition", "v2"}, "journal.json", expected, payload,
 	)

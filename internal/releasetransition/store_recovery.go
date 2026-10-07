@@ -2,6 +2,7 @@ package releasetransition
 
 import (
 	"bytes"
+	"slices"
 	"strings"
 )
 
@@ -13,7 +14,7 @@ func (store *POSIXV2Store) ReadRecoveryReceipt(transaction TransactionID) (Prote
 	if err := validateTransactionID(transaction); err != nil {
 		return ProtectedSnapshot{}, err
 	}
-	return store.readRecord(recoveryReceiptParts, string(transaction)+".json")
+	return store.readRecord(recoveryParts(transaction), string(transaction)+".json")
 }
 
 // ReadRecoveryReceiptForPublication includes a fsynced pending receipt so a
@@ -23,6 +24,9 @@ func (store *POSIXV2Store) ReadRecoveryReceipt(transaction TransactionID) (Prote
 func (store *POSIXV2Store) ReadRecoveryReceiptForPublication(transaction TransactionID) (RecoveryReceiptV1, bool, error) {
 	if err := validateTransactionID(transaction); err != nil {
 		return RecoveryReceiptV1{}, false, err
+	}
+	if strings.HasPrefix(string(transaction), RecoveryTransactionPrefixV2) {
+		return store.readLifecycleReceiptForPublication(transaction)
 	}
 	receipts, err := store.readRecoveryReceipts()
 	if err != nil {
@@ -45,6 +49,9 @@ func (store *POSIXV2Store) CreateRecoveryReceipt(transaction TransactionID, payl
 	}
 	if !bytes.Equal(payload, canonical) || receipt.Successor.Transaction != transaction {
 		return invalid("recovery receipt is not the canonical selected successor")
+	}
+	if receipt.Contract == ActivationOnlyRecoveryContractV2 {
+		return store.createLifecycleRecoveryReceipt(transaction, receipt, payload)
 	}
 	resolved, err := store.ResolveRecoveryTransaction(transaction, receipt.Replacement, receipt.Successor.AuthorizationPlan)
 	if err != nil {
@@ -74,8 +81,11 @@ func (store *POSIXV2Store) ResolveRecoveryTransaction(
 		return "", err
 	}
 	if !strings.HasPrefix(string(proposed), RecoveryTransactionPrefixV1) ||
-		strings.HasPrefix(string(replacement.Transaction), RecoveryTransactionPrefixV1) || proposed == replacement.Transaction {
+		IsRecoveryTransaction(replacement.Transaction) || proposed == replacement.Transaction {
 		return "", invalid("activation recovery V1 does not admit replacement chains")
+	}
+	if err := store.rejectLifecycleReservation(replacement.Transaction); err != nil {
+		return "", err
 	}
 	receipts, err := store.readRecoveryReceipts()
 	if err != nil {
@@ -101,28 +111,49 @@ func (store *POSIXV2Store) ResolveRecoveryTransaction(
 // ValidateCurrentRecovery requires provenance for the reserved successor IDs.
 // Ordinary journals remain independent of unrelated recovery receipts.
 func (store *POSIXV2Store) ValidateCurrentRecovery(current JournalRecord) error {
-	if !strings.HasPrefix(string(current.Transaction), RecoveryTransactionPrefixV1) {
-		return nil
+	_, err := store.ValidatedCurrentRecovery(current)
+	return err
+}
+
+func (store *POSIXV2Store) ValidatedCurrentRecovery(current JournalRecord) (RecoveryReceiptV1, error) {
+	if !IsRecoveryTransaction(current.Transaction) {
+		return RecoveryReceiptV1{}, nil
 	}
 	snapshot, err := store.ReadRecoveryReceipt(current.Transaction)
 	if err != nil {
-		return err
+		return RecoveryReceiptV1{}, err
 	}
 	if !snapshot.Exists {
-		return invalid("activation recovery successor has no protected receipt")
+		return RecoveryReceiptV1{}, invalid("activation recovery successor has no protected receipt")
 	}
 	receipt, err := ParseRecoveryReceipt(snapshot.Payload)
 	if err != nil {
-		return err
+		return RecoveryReceiptV1{}, err
 	}
-	if _, err := store.readRecoveryReceipts(); err != nil {
-		return err
+	if _, err := store.readRecoveryReceiptsAt(recoveryParts(current.Transaction)); err != nil {
+		return RecoveryReceiptV1{}, err
 	}
-	return receipt.MatchesSuccessor(current)
+	if err := receipt.MatchesSuccessor(current); err != nil {
+		return RecoveryReceiptV1{}, err
+	}
+	if strings.HasPrefix(string(current.Transaction), RecoveryTransactionPrefixV2) {
+		terminal, present, err := store.readLifecycleRecord(current.Transaction)
+		if err != nil {
+			return RecoveryReceiptV1{}, err
+		}
+		if present && (terminal.Cancellation != nil || !sameRecoveryReceipt(terminal.Receipt, receipt)) {
+			return RecoveryReceiptV1{}, invalid("current recovery successor has conflicting terminal evidence")
+		}
+	}
+	return receipt, nil
 }
 
 func (store *POSIXV2Store) readRecoveryReceipts() (map[TransactionID]RecoveryReceiptV1, error) {
-	entries, present, err := store.readDirectoryEntries(recoveryReceiptParts, maxTransactionGraphEntries*2)
+	return store.readRecoveryReceiptsAt(recoveryReceiptParts)
+}
+
+func (store *POSIXV2Store) readRecoveryReceiptsAt(parts []string) (map[TransactionID]RecoveryReceiptV1, error) {
+	entries, present, err := store.readDirectoryEntries(parts, maxTransactionGraphEntries*2)
 	if err != nil || !present {
 		return nil, err
 	}
@@ -145,7 +176,7 @@ func (store *POSIXV2Store) readRecoveryReceipts() (map[TransactionID]RecoveryRec
 		if err := validateTransactionID(transaction); err != nil {
 			return nil, err
 		}
-		snapshot, err := store.readRecord(recoveryReceiptParts, name)
+		snapshot, err := store.readRecord(parts, name)
 		if err != nil {
 			return nil, err
 		}
@@ -157,7 +188,8 @@ func (store *POSIXV2Store) readRecoveryReceipts() (map[TransactionID]RecoveryRec
 			return nil, err
 		}
 		canonical, err := MarshalRecoveryReceipt(receipt)
-		if err != nil || !bytes.Equal(canonical, snapshot.Payload) || receipt.Successor.Transaction != transaction {
+		if err != nil || !bytes.Equal(canonical, snapshot.Payload) || receipt.Successor.Transaction != transaction ||
+			!slices.Equal(recoveryParts(transaction), parts) {
 			return nil, invalid("activation recovery receipt does not match canonical successor")
 		}
 		if prior, exists := receipts[transaction]; exists {

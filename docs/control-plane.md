@@ -496,11 +496,11 @@ The fresh assessment binds the predecessor journal, ledger, links, actual state,
 native plans. `yard migrate` or `yard update` presents its consequences and requires new consent;
 the predecessor's grant and resume token cannot authorize changed inputs.
 
-This path uses the separate strict process schema 2, negotiated by an explicit
-`activation-only-replacement-v1` capability probe against the same sealed owner. Ordinary calls
+This path uses the separate strict process schema 2, negotiated against the same sealed owner. Ordinary calls
 remain V1. Owners without that capability retain exact-input resume and never receive replacement
 writes. A V1 retained caller can inspect and resume the successor through its verified owner.
-The journal stays canonical V2. Immutable receipt schema 1 under
+The journal stays canonical V2. The original `capabilities` probe advertises only
+`activation-only-replacement-v1`. Immutable receipt schema 1 under
 `release-transition/recovery/v1/transactions` stores the canonical predecessor and initial successor,
 ledger fingerprint, owner, links and native plan bindings outside the frozen V2 cleanup graph.
 Under the shared update lock, the owner rechecks the assessment, publishes the receipt, then uses
@@ -509,6 +509,32 @@ reuses the exact receipt after fresh authorization; after CAS, ordinary resume c
 successor. Links and completed ledger bytes stay unchanged. Replacement chains, settings journals
 (including verified steps), source migrations, foreign state and unproven partial apply remain
 excluded. The protocol does not reconstruct original inputs from a hash or reset settings.
+
+New callers first probe `lifecycle-capabilities` for `activation-only-replacement-v2`, and
+fall back to the original probe when it is unsupported. Only a successful lifecycle probe selects
+the explicit request `contract`. Receipt schema 2 uses the `recovery-v2-` transaction prefix and
+`release-transition/recovery/v2/transactions`; canonical terminal records live under its sibling
+`archive`. The plan binds both current native inputs and an exact existing reservation. Fresh consent
+can cancel that reservation only while the exact predecessor is still selected and no current,
+prepared or ordinary archived journal references the successor. Only an exact prepared Authorized
+successor CAS file can be invalidated. Cancellation evidence is published durably before protected
+live-record removal and fsync. A cancelled successor cannot be selected again. An interruption after
+cancellation publication but before removal requires retrying that exact authorized replacement
+assessment before another change of inputs. Legacy V1 reservations keep their exact-input retry
+semantics and are never cancelled automatically. Neither contract permits replacement chains.
+
+Completion evidence includes the exact completed journal, captured before it can be overwritten.
+Absence from the current journal does not prove completion. Cleanup runs under the shared lock only
+after readiness, preserves current/prepared/ordinary archive references and live cancellation
+bindings, and retires at most 32 live and 32 terminal records per invocation. Unreferenced terminal
+history is trimmed toward 32 records; protected records can exceed that target. Live and archive
+admission remain bounded at 256 records and fail closed on unknown or conflicting evidence.
+Legacy V1 live receipts retain their original conservative ceiling; live-record retirement applies
+only to the separately negotiated V2 contract.
+An active V2 successor validates its own terminal record directly, so unrelated historical archive
+corruption blocks cleanup or new admission without blocking its exact resume. Retirement failures
+leave evidence intact and add `recovery cleanup is pending` to the ready outcome. No index, daemon,
+ledger format change or age-based deletion is involved.
 
 The release-transition journal is authoritative recovery state, not an operator transcript. A
 separate structured update history under `$SUBYARD_HOME/logs/updates` records each committed

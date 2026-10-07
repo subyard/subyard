@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"maps"
 	"path/filepath"
 	"sort"
 
@@ -30,10 +29,7 @@ func (reconciler *profileRuntimeActivationReconciler) failure(yard, phase string
 }
 
 func (reconciler *profileRuntimeActivationReconciler) targets() (*CLI, []configTarget, error) {
-	operation := *reconciler.cli
-	environment := operation.freshMigrationEnvironment(operation.baseEnv, operation.options.RepositoryRoot)
-	environment["SUBYARD_OPERATION_ID"] = operation.env["SUBYARD_OPERATION_ID"]
-	operation.baseEnv, operation.env = environment, maps.Clone(environment)
+	operation := reconciler.cli.releaseActivationOperation()
 	// Host-wide inventory must not require the caller's yard to exist.
 	loaded, err := operation.resolveReleaseTransitionContext("default", reconciler.request.ConfigHome)
 	if err != nil {
@@ -41,7 +37,7 @@ func (reconciler *profileRuntimeActivationReconciler) targets() (*CLI, []configT
 	}
 	targets, err := operation.localConfigTargets(loaded, true)
 	sort.Slice(targets, func(i, j int) bool { return targets[i].Name < targets[j].Name })
-	return &operation, targets, err
+	return operation, targets, err
 }
 
 func (reconciler *profileRuntimeActivationReconciler) sourceMigrationsComplete() (bool, error) {

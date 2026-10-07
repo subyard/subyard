@@ -80,7 +80,7 @@ def run_process(command, env, timeout, input_text=None, interrupt_marker=None,
                 os.killpg(child.pid, signal.SIGSTOP)
                 current = json.loads(journal.read_text())
                 if current["transaction"] != predecessor:
-                    require(current["transaction"].startswith("recovery-v1-")
+                    require(current["transaction"].startswith(("recovery-v1-", "recovery-v2-"))
                             and current["checkpoint"] != "complete",
                             "fresh recovery passed its observed publication boundary")
                     marker.write_text(json.dumps({"transaction": current["transaction"],
@@ -593,6 +593,16 @@ def verify_fresh_activation_recovery(release, version, baseline, arch, root):
         require(result.returncode == 0, "candidate recovery protocol failed: " + result.stdout + result.stderr)
         return json.loads(result.stdout)
 
+    for mode, contract, schema in (("capabilities", "activation-only-replacement-v1", 1),
+                                   ("lifecycle-capabilities", "activation-only-replacement-v2", 2)):
+        capabilities = protocol({"schemaVersion": 2, "mode": mode})["capabilities"]
+        require(capabilities == {"contract": contract, "processSchema": 2,
+                                 "journalSchema": 2, "receiptSchema": schema},
+                "recovery capability negotiation changed its closed contract")
+    legacy_inspection = protocol(request)["inspection"]
+    require(not legacy_inspection.get("blockers") and snapshot(fixture.config) == before,
+            "original recovery V1 inspection semantics changed")
+    request["contract"] = "activation-only-replacement-v2"
     inspection = protocol(request)["inspection"]
     require(inspection.get("resume") is None and inspection["assessment"]["changed"]
             and inspection["plan"] not in (original["authorizationPlan"], original["resumePlan"])
@@ -625,13 +635,14 @@ def verify_fresh_activation_recovery(release, version, baseline, arch, root):
             "fresh authorized recovery did not reach durable successor publication")
     successor = json.loads(fixture.journal.read_text())
     transaction = successor["transaction"]
-    require(transaction.startswith("recovery-v1-") and transaction != original["transaction"]
+    require(transaction.startswith("recovery-v2-") and transaction != original["transaction"]
             and successor["steps"] == [] and successor["checkpoint"] != "complete",
             "fresh replacement did not publish a distinct ordinary V2 successor")
-    receipt_path = fixture.config / "release-transition/recovery/v1/transactions" / (transaction + ".json")
+    receipt_path = fixture.config / "release-transition/recovery/v2/transactions" / (transaction + ".json")
     receipt_bytes = receipt_path.read_bytes()
     receipt = json.loads(receipt_bytes)
-    require(receipt["contract"] == "activation-only-replacement-v1"
+    require(receipt["schemaVersion"] == 2 and receipt["contract"] == "activation-only-replacement-v2"
+            and receipt["basePlan"]
             and (json.dumps(receipt["predecessor"], separators=(",", ":")) + "\n").encode() == original_bytes
             and receipt["replacement"] == request["recovery"]
             and receipt["ledgerFingerprint"] == hashlib.sha256(ledger_before).hexdigest(),
@@ -651,7 +662,10 @@ def verify_fresh_activation_recovery(release, version, baseline, arch, root):
             "fresh recovery made the retained runtime unavailable for explicit rollback")
     fixture.update("--offline", "--version", version, "--yes")
     fixture.complete()
-    require(receipt_path.read_bytes() == receipt_bytes and ledger.read_bytes() == ledger_before
+    terminal_path = fixture.config / "release-transition/recovery/v2/archive" / (transaction + ".json")
+    retained_receipt = receipt_path.read_bytes() if receipt_path.exists() else (
+        json.dumps(json.loads(terminal_path.read_text())["receipt"], separators=(",", ":")) + "\n").encode()
+    require(retained_receipt == receipt_bytes and ledger.read_bytes() == ledger_before
             and host_settings.read_bytes() == changed_bytes and not unexpected.exists(),
             "rollback and forward update changed protected recovery history")
     print(f"PASS: capable {version} fresh activation recovery preserves ledger and links; released {BASELINE} "

@@ -1162,7 +1162,7 @@ func (runtime *Runtime) prepareInspectedCandidateTransition(
 	revalidation *replacementRevalidation,
 ) (Prepared, error) {
 	return runtime.prepareInspectedCandidateTransitionWithDelegate(
-		parsed, owner, target, request, inspection, activationReconciliationOwned, revalidation, nil,
+		parsed, owner, target, request, inspection, activationReconciliationOwned, revalidation, nil, nil,
 	)
 }
 
@@ -1175,11 +1175,10 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithDelegate(
 	activationReconciliationOwned bool,
 	revalidation *replacementRevalidation,
 	delegate *candidateVerification,
-	recoveryRequests ...*releasetransition.RecoveryProcessRequest,
+	recoveryRequest *releasetransition.RecoveryProcessRequest,
 ) (prepared Prepared, err error) {
-	var recoveryRequest *releasetransition.RecoveryProcessRequest
-	if len(recoveryRequests) != 0 && recoveryRequests[0] != nil {
-		requestCopy := *recoveryRequests[0]
+	if recoveryRequest != nil {
+		requestCopy := *recoveryRequest
 		requestCopy.InheritedSettingIDs = slices.Clone(requestCopy.InheritedSettingIDs)
 		if requestCopy.Recovery != nil {
 			replacement := *requestCopy.Recovery

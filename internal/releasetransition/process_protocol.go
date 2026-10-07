@@ -51,6 +51,8 @@ const (
 // the authorization verifier itself is injected through a separate trusted
 // process boundary.
 type ProcessRequest struct {
+	// Set only by the separately negotiated recovery ingress; never in V1 JSON.
+	RecoveryContract    string                `json:"-"`
 	SchemaVersion       int                   `json:"schemaVersion"`
 	Mode                ProcessMode           `json:"mode"`
 	RuntimeRoot         string                `json:"runtimeRoot"`

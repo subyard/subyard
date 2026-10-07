@@ -727,7 +727,9 @@ For targeted migration and activation recovery acceptance, freeze a candidate wi
 one available slot and `--vm-count 1 --vm 1`. The fixture installs checksum-pinned v0.17.3,
 changes persistent file settings in default and named local yards, verifies real guest convergence
 through public update, then interrupts activation-only reconciliation through an owned systemctl
-wrapper. Changed desired inputs require fresh consent and immutable predecessor evidence;
+wrapper. A second interruption leaves an immutable receipt before journal CAS; changed inputs then
+require new consent and a durable cancellation record before a replacement reaches ready.
+Changed desired inputs require fresh consent and immutable predecessor evidence;
 completed ledger and runtime links stay unchanged. Stopped, absent and remote yards are preserved.
 This is targeted evidence; it does not replace release smoke or shipped-profile acceptance.
 

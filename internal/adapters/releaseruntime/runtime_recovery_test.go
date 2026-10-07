@@ -29,7 +29,11 @@ func TestVerifiedRecoveryProcessNegotiatesOnlyTheSealedOwner(t *testing.T) {
 case "${1:-}" in
   --version) printf 'yard-engine 1.2.3\n' ;;
   _release-transition)
-    cat >/dev/null
+    request=$(cat)
+    case "$request" in
+      *lifecycle-capabilities*) printf 'unsupported optional capability\n' >&2; exit 2 ;;
+      *'"mode":"inspect"'*) printf 'native operation diagnostic\n' >&2 ;;
+    esac
     : > %q
     printf '%%s\n' '%s'
     ;;
@@ -37,7 +41,8 @@ case "${1:-}" in
 esac
 `, marker, response)
 	candidate := writeDelegateRuntimeFixture(t, root, "1.2.3-owner", "owner", []byte("{}\n"), engine)
-	runtime := New(Config{Stderr: &bytes.Buffer{}})
+	var stderr bytes.Buffer
+	runtime := New(Config{Stderr: &stderr})
 	defer runtime.Close()
 	verified, err := runtime.verifyPublishedCandidate(ctx, candidate, root, nil)
 	if err != nil {
@@ -59,12 +64,23 @@ esac
 	}
 	probe := releasetransition.RecoveryProcessRequest{SchemaVersion: releasetransition.ProcessRecoverySchemaV2,
 		Mode: releasetransition.RecoveryProcessCapabilities}
+	lifecycleProbe := probe
+	lifecycleProbe.Mode = releasetransition.RecoveryProcessLifecycleCapabilities
+	if _, err := runtime.invokeVerifiedRecoveryTransition(ctx, verified, root, lifecycleProbe, ""); err == nil {
+		t.Fatal("legacy owner accepted the lifecycle probe")
+	}
 	result, err := runtime.invokeVerifiedRecoveryTransition(ctx, verified, root, probe, "")
 	if err != nil || result.Capabilities == nil || result.Capabilities.Validate() != nil {
 		t.Fatalf("sealed owner capability negotiation: %#v %v", result, err)
 	}
+	if stderr.Len() != 0 {
+		t.Fatalf("optional negotiation leaked a rejected probe: %q", stderr.String())
+	}
 	if _, err := runtime.invokeVerifiedRecoveryTransition(ctx, verified, root, request, ""); err == nil {
 		t.Fatal("capability response accepted as a fresh inspection")
+	}
+	if !strings.Contains(stderr.String(), "native operation diagnostic") {
+		t.Fatal("ordinary operation diagnostic was discarded")
 	}
 }
 

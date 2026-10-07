@@ -50,8 +50,11 @@ func (cli *CLI) runReleaseTransition(ctx context.Context, arguments []string) in
 			cli.errorf("release recovery request is invalid")
 			return 2
 		}
-		if parsed.Mode == releasetransition.RecoveryProcessCapabilities {
+		if parsed.Mode == releasetransition.RecoveryProcessCapabilities || parsed.Mode == releasetransition.RecoveryProcessLifecycleCapabilities {
 			capabilities := releasetransition.ActivationOnlyRecoveryCapabilities()
+			if parsed.Mode == releasetransition.RecoveryProcessLifecycleCapabilities {
+				capabilities = releasetransition.ActivationRecoveryLifecycleCapabilities()
+			}
 			response := releasetransition.RecoveryProcessResponse{SchemaVersion: releasetransition.ProcessRecoverySchemaV2, Capabilities: &capabilities}
 			encoded, err := releasetransition.MarshalRecoveryProcessResponse(response)
 			if err != nil {
@@ -756,12 +759,16 @@ func (err materializedConfigActivationError) ActivationDiagnostic() (string, str
 }
 
 func (reconciler *materializedConfigActivationReconciler) operation() *CLI {
-	operation := *reconciler.cli
+	return reconciler.cli.releaseActivationOperation()
+}
+
+func (cli *CLI) releaseActivationOperation() *CLI {
+	operation := *cli
 	environment := operation.freshMigrationEnvironment(
-		reconciler.cli.baseEnv,
-		reconciler.cli.options.RepositoryRoot,
+		cli.baseEnv,
+		cli.options.RepositoryRoot,
 	)
-	if operationID := reconciler.cli.env["SUBYARD_OPERATION_ID"]; operationID != "" {
+	if operationID := cli.env["SUBYARD_OPERATION_ID"]; operationID != "" {
 		environment["SUBYARD_OPERATION_ID"] = operationID
 	}
 	operation.baseEnv = environment
@@ -1186,6 +1193,7 @@ func executeReleaseTransitionRequest(
 	}
 	transitionOptions := candidateTransitionOptions(request, releasetransition.V2Options{
 		ConfigHome: request.ConfigHome, Releases: releases, Direction: request.Direction,
+		RecoveryContract:   request.RecoveryContract,
 		CandidateConfigDir: filepath.Join(repositoryRoot, "config"),
 		ObserveLinks: func(context.Context) (releasetransition.ReleaseLinks, error) {
 			return links.Observe()

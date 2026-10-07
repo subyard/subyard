@@ -46,11 +46,12 @@ After interruption, durable intent and fresh observations determine the safe nex
   work; that does not make migration a general command runner.
 - Generic migration does not reset secrets, inherited/profile-owned values or unknown data.
 - Ordinary application readers do not retain support for every historical schema. Compatibility
-  readers are bounded by supported upgrade and unfinished-transaction recovery horizons.
+  readers have an explicit supported upgrade floor; unfinished transactions retain their exact
+  recovery owner and evidence until terminal completion.
 - Rollback requires an intact retained release and proven state compatibility. Some declared resets
   can remove rollback eligibility; their recovery class must be visible before authorization.
-- Recovery evidence is protected and bounded by the retained runtime horizon. Cleanup is separate
-  from transition correctness.
+- Recovery evidence is protected. Retirement requires proof that terminal evidence is closed and
+  unreferenced; age or release count does not authorize cleanup.
 
 ## Canonical terms
 
@@ -241,7 +242,10 @@ after fresh native ownership-aware planning and new authorization. The target an
 verified owner/artifact/registry/catalog, completed ledger and canonical predecessor evidence remain
 bound. A separate negotiated process contract and immutable receipt precede current-journal CAS;
 the ordinary V2 successor resumes without rotating links or replaying migrations. Source/settings
-steps, replacement chains and unknown partial application are excluded. See the implemented
+steps and unknown partial application are excluded. `activation-only-replacement-v1` also excludes
+replacement chains and automatic cancellation of a legacy reservation. Cancellation and subsequent
+reassessment require the separately negotiated `activation-only-replacement-v2` lifecycle contract;
+they do not extend frozen process V1 or canonical journal V2. See the implemented
 [recovery contract](../control-plane.md#release-migrations).
 
 At each process boundary the owner revalidates the protected sealed target against `ArtifactDigest`
@@ -287,6 +291,23 @@ steps; they do not gain independent runtime activation or a second rollback stat
 
 ## Supported compatibility and recovery
 
+Three independent policies determine support:
+
+- The **upgrade floor** is the minimum readable domain epoch declared by the registry, not a release
+  age or release count.
+- **Rollback eligibility** requires an intact, verified retained `current`/`previous` runtime and
+  compatibility with actual persisted state and completed capabilities. Passing the upgrade floor
+  does not itself prove rollback eligibility.
+- An **in-flight transaction** pins its exact sealed owner, artifacts and protected evidence until
+  it reaches a terminal state, regardless of age or intervening releases. Raising the ordinary
+  upgrade floor cannot revoke that recovery contract or permit deletion of its inputs.
+
+Released-binary acceptance retains a supported baseline for each distinct caller, producer or
+compatibility-bridge contract. Checks use the actual published binaries; rebuilding current source
+does not prove their compatibility. This is a contract matrix, not every pair of released versions.
+Removing a baseline requires an explicit support decision and replacement evidence where needed;
+neither a fixed time window nor a release-count limit silently removes coverage.
+
 The frozen [process protocol v1](../../internal/releasetransition/protocol/v1) and
 [journal v2](../../internal/releasetransition/journal/v2) preserve the supported published-updater,
 retained-runtime rollback and unfinished-transaction recovery contracts. Internal types do not
@@ -308,9 +329,23 @@ and [interrupted recovery](../control-plane.md#interrupted-release-recovery) gui
 Protocol evolution first ships readers/writers alongside the old version while continuing to send
 that version; only a later release replaces the default protocol with supporting owners. Optional
 same-owner recovery is capability-negotiated separately and must prove retained-caller compatibility
-before writing its unchanged V2 successor. Retain old semantics
-for the supported upgrade/rollback/recovery horizon. Rebuilding both ends from current source does
-not prove published-binary compatibility.
+before writing its unchanged V2 successor. The lifecycle extension negotiates
+`activation-only-replacement-v2` through process schema 2 `lifecycle-capabilities`, with
+`recovery-v2-` identities and receipt schema 2. Its live and archived evidence belongs to that
+separate contract; older recovery receipts retain their existing semantics. Terminal receipt
+retirement requires proof of closure and absence of current, pending or retained references;
+unknown or corrupt evidence blocks retirement. Age and release count supply no authority.
+Detailed cancellation, publication and storage rules belong to the
+[recovery contract](../control-plane.md#release-migrations).
+
+### Migration retirement
+
+Ledger V2 validates `Applied` as the exact completed registry prefix. Raising `minimumEpochs` or
+deleting old migration IDs alone cannot retire that history: it can make an otherwise valid ledger
+unreadable. A future checkpoint must introduce its own compatible durable transition, ship readers
+before changing writers, and preserve completed history and unfinished recovery bindings. Such a
+transition must establish a new supported upgrade floor explicitly. No checkpoint format is
+implemented now; the shipped registry contains two one-time migrations.
 
 ## Public error taxonomy
 

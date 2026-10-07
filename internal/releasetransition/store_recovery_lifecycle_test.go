@@ -1,0 +1,489 @@
+package releasetransition
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/Subyard/Subyard/internal/testkit"
+	"golang.org/x/sys/unix"
+)
+
+func lifecycleReceiptFixture(t *testing.T) RecoveryReceiptV1 {
+	t.Helper()
+	receipt := recoveryReceiptFixture(t)
+	receipt.SchemaVersion, receipt.Contract = RecoveryReceiptSchemaV2, ActivationOnlyRecoveryContractV2
+	receipt.Successor.Transaction = RecoveryTransactionPrefixV2 + "selected"
+	receipt.BasePlan = receipt.Successor.AuthorizationPlan
+	if err := receipt.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	return receipt
+}
+
+func lifecycleStoreFixture(t *testing.T) (*POSIXV2Store, RecoveryReceiptV1) {
+	t.Helper()
+	store, err := NewPOSIXV2Store(protectedConfigHome(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt := lifecycleReceiptFixture(t)
+	payload, err := MarshalJournal(receipt.Predecessor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompareAndSwapCurrentJournal(absentProtectedSnapshot(), payload); err != nil {
+		t.Fatal(err)
+	}
+	createLifecycleReceipt(t, store, receipt)
+	return store, receipt
+}
+
+func createLifecycleReceipt(t *testing.T, store *POSIXV2Store, receipt RecoveryReceiptV1) {
+	t.Helper()
+	payload, err := MarshalRecoveryReceipt(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateRecoveryReceipt(receipt.Successor.Transaction, payload); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func lifecycleNewPlan(t *testing.T, store *POSIXV2Store, request ActivationOnlyRecoveryRequest) (PlanToken, PlanToken, Fingerprint) {
+	t.Helper()
+	base := PlanToken("plan-v1-" + strings.Repeat("b", 64))
+	reservation, err := store.RecoveryReservation(request, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := BindRecoveryLifecyclePlan(base, reservation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base, plan, reservation
+}
+
+func TestRecoveryLifecycleCancellationResumesEveryDurableBoundary(t *testing.T) {
+	for _, point := range []string{"before-recovery-cancellation", "after-pending-fsync", "before-publish", "after-publish-before-dir-fsync", "after-recovery-cancellation", "after-recovery-lifecycle-unlink"} {
+		t.Run(point, func(t *testing.T) {
+			store, receipt := lifecycleStoreFixture(t)
+			unlock, err := store.Lock()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer unlock()
+			before, err := store.ReadCurrentJournal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			base, plan, reservation := lifecycleNewPlan(t, store, receipt.Replacement)
+			if reservation != fingerprintPayload(mustRecoveryReceiptPayload(receipt)) {
+				t.Fatal("fresh plan did not bind the exact cancelled receipt")
+			}
+			injected := errors.New("interrupted lifecycle storage")
+			store.fault = func(actual string) error {
+				if point == actual {
+					return injected
+				}
+				return nil
+			}
+			proposed := TransactionID(RecoveryTransactionPrefixV2 + "fresh")
+			if _, err := store.ResolveLifecycleRecoveryTransaction(proposed, receipt.Replacement, base, plan, digestC); !errors.Is(err, injected) {
+				t.Fatalf("fault %s was not observed: %v", point, err)
+			}
+			store.fault = nil
+			again, err := store.RecoveryReservation(receipt.Replacement, base)
+			if err != nil || again != reservation {
+				t.Fatalf("reservation changed across restart: got=%s err=%v", again, err)
+			}
+			transaction, err := store.ResolveLifecycleRecoveryTransaction(proposed, receipt.Replacement, base, plan, digestB)
+			if err != nil || transaction != proposed {
+				t.Fatalf("restart cancellation: transaction=%s err=%v", transaction, err)
+			}
+			terminal, present, err := store.readLifecycleRecord(receipt.Successor.Transaction)
+			if err != nil || !present || terminal.Cancellation == nil || !sameRecoveryReceipt(terminal.Receipt, receipt) {
+				t.Fatalf("cancellation evidence lost: present=%t err=%v", present, err)
+			}
+			active, err := store.ReadRecoveryReceipt(receipt.Successor.Transaction)
+			if err != nil || active.Exists {
+				t.Fatalf("cancelled reservation remains active: exists=%t err=%v", active.Exists, err)
+			}
+			after, err := store.ReadCurrentJournal()
+			if err != nil || !bytes.Equal(before.Payload, after.Payload) {
+				t.Fatalf("cancellation changed current journal: %v", err)
+			}
+			next := receipt
+			next.BasePlan, next.Reservation = base, reservation
+			next.Successor.Transaction, next.Successor.AuthorizationPlan = proposed, plan
+			next.Successor.IntentDigest = bindJournalIntent(plan, next.Successor.ResumePlan, next.Successor.ObservationScope, next.Successor.Steps)
+			createLifecycleReceipt(t, store, next)
+			if got, err := store.RecoveryReservation(receipt.Replacement, base); err != nil || got != reservation {
+				t.Fatalf("own new receipt changed authorization binding: got=%s err=%v", got, err)
+			}
+			if err := store.CreateRecoveryReceipt(receipt.Successor.Transaction, mustRecoveryReceiptPayload(receipt)); err == nil {
+				t.Fatal("cancelled successor was republished")
+			}
+		})
+	}
+}
+
+func TestRecoveryLifecycleCancellationInvalidatesOnlyExactPendingCAS(t *testing.T) {
+	for _, foreign := range []bool{false, true} {
+		t.Run(fmt.Sprintf("foreign=%t", foreign), func(t *testing.T) {
+			store, receipt := lifecycleStoreFixture(t)
+			base, plan, _ := lifecycleNewPlan(t, store, receipt.Replacement)
+			pending := receipt.Successor
+			if foreign {
+				pending.Transaction = "tx-foreign"
+			}
+			payload, err := MarshalJournal(pending)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(store.configHome, "release-transition", "v2", ".journal.json.pending")
+			testkit.WriteFile(t, path, payload, 0o600)
+			_, err = store.ResolveLifecycleRecoveryTransaction(RecoveryTransactionPrefixV2+"fresh", receipt.Replacement, base, plan, digestC)
+			if foreign {
+				if err == nil {
+					t.Fatal("foreign pending CAS was cancelled")
+				}
+				got, readErr := os.ReadFile(path)
+				if readErr != nil || !bytes.Equal(got, payload) {
+					t.Fatal("failed cancellation changed foreign pending evidence")
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			} else if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+				t.Fatal("cancelled successor still has a prepared CAS")
+			}
+		})
+	}
+}
+
+func TestRecoveryLifecycleRejectsCrossFamilyReservationsAndSelectedCancellation(t *testing.T) {
+	t.Run("legacy reservation", func(t *testing.T) {
+		store, err := NewPOSIXV2Store(protectedConfigHome(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		receipt := recoveryReceiptFixture(t)
+		createLifecycleReceipt(t, store, receipt)
+		if _, err := store.RecoveryReservation(receipt.Replacement, receipt.Successor.AuthorizationPlan); err == nil {
+			t.Fatal("lifecycle admission bypassed a legacy reservation")
+		}
+		if _, err := store.ResolveRecoveryTransaction(RecoveryTransactionPrefixV1+"retry", receipt.Replacement, receipt.Successor.AuthorizationPlan); err != nil {
+			t.Fatalf("legacy exact retry changed: %v", err)
+		}
+	})
+	t.Run("lifecycle reservation", func(t *testing.T) {
+		store, receipt := lifecycleStoreFixture(t)
+		if _, err := store.ResolveRecoveryTransaction(RecoveryTransactionPrefixV1+"other", receipt.Replacement, receipt.Successor.AuthorizationPlan); err == nil {
+			t.Fatal("legacy writer bypassed a lifecycle reservation")
+		}
+		before, err := store.ReadCurrentJournal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload, err := MarshalJournal(receipt.Successor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.CompareAndSwapCurrentJournal(before, payload); err != nil {
+			t.Fatal(err)
+		}
+		base, plan, _ := lifecycleNewPlan(t, store, receipt.Replacement)
+		if _, err := store.ResolveLifecycleRecoveryTransaction(RecoveryTransactionPrefixV2+"other", receipt.Replacement, base, plan, digestC); err == nil {
+			t.Fatal("selected successor was cancelled")
+		}
+		if _, err := store.ValidatedCurrentRecovery(receipt.Successor); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestRecoveryLifecycleExactResumeIgnoresUnrelatedHistoricalCorruption(t *testing.T) {
+	store, receipt := lifecycleStoreFixture(t)
+	parent, _, err := store.openParent(recoveryArchiveParts, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unix.Close(parent)
+	path := filepath.Join(store.configHome, "release-transition", "recovery", "v2", "archive", "unrelated.json")
+	testkit.WriteFile(t, path, []byte("malformed history\n"), 0o600)
+	if _, err := store.ValidatedCurrentRecovery(receipt.Successor); err != nil {
+		t.Fatalf("unrelated history prevented exact resume: %v", err)
+	}
+	current := receipt.Successor
+	current.Checkpoint = JournalComplete
+	before, err := store.ReadCurrentJournal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := MarshalJournal(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompareAndSwapCurrentJournal(before, payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CleanupRecovery(current.Transaction); err == nil {
+		t.Fatal("cleanup accepted malformed historical evidence")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal("failed cleanup discarded malformed history")
+	}
+}
+
+func TestRecoveryLifecycleCleanupRequiresTerminalProofAndPreservesReferences(t *testing.T) {
+	store, receipt := lifecycleStoreFixture(t)
+	current := receipt.Predecessor
+	current.Transaction, current.Checkpoint = "tx-next", JournalComplete
+	before, err := store.ReadCurrentJournal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := MarshalJournal(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompareAndSwapCurrentJournal(before, payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CleanupRecovery(current.Transaction); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot, err := store.ReadRecoveryReceipt(receipt.Successor.Transaction); err != nil || !snapshot.Exists {
+		t.Fatal("unreferenced initial receipt was treated as completed")
+	}
+	completed := receipt.Successor
+	completed.Checkpoint = JournalComplete
+	terminal := RecoveryLifecycleRecord{SchemaVersion: RecoveryLifecycleSchemaV1, Receipt: receipt, Completed: &completed}
+	if err := store.createLifecycleRecord(terminal); err != nil {
+		t.Fatal(err)
+	}
+	parts := []string{"release-transition", "v2", "transactions", "tx-reference"}
+	archive := SupersededJournalRecord{SchemaVersion: SupersededJournalSchemaV1,
+		AuthorizationPlan: current.AuthorizationPlan,
+		Replacement:       JournalReplacement{Transaction: completed.Transaction, Fingerprint: fingerprintPayload(mustJournalPayload(t, completed)), Reason: JournalReplacementPostActivationScopeV0111, SourceVersion: "1.0.0"}, Journal: completed}
+	archivePayload, err := MarshalSupersededJournal(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(append([]string{store.configHome}, append(parts, ".superseded-journal.json.pending")...)...)
+	parent, _, err := store.openParent(parts, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unix.Close(parent)
+	testkit.WriteFile(t, path, archivePayload, 0o600)
+	if err := store.CleanupRecovery(current.Transaction); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot, err := store.ReadRecoveryReceipt(receipt.Successor.Transaction); err != nil || !snapshot.Exists {
+		t.Fatal("pending ordinary archive lost referenced recovery receipt")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CleanupRecovery(current.Transaction); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot, err := store.ReadRecoveryReceipt(receipt.Successor.Transaction); err != nil || snapshot.Exists {
+		t.Fatal("unreachable receipt with terminal proof was not retired")
+	}
+}
+
+func mustJournalPayload(t *testing.T, journal JournalRecord) []byte {
+	t.Helper()
+	payload, err := MarshalJournal(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return payload
+}
+
+func TestRecoveryLifecycleHistoryStaysBoundedBeyondLegacyCeiling(t *testing.T) {
+	store, err := NewPOSIXV2Store(protectedConfigHome(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < maxTransactionGraphEntries+2; index++ {
+		receipt := lifecycleReceiptFixture(t)
+		receipt.Predecessor.Transaction = TransactionID(fmt.Sprintf("tx-source-%03d", index))
+		receipt.Replacement.Transaction = receipt.Predecessor.Transaction
+		before := mustJournalPayload(t, receipt.Predecessor)
+		receipt.Replacement.Fingerprint = fingerprintPayload(before)
+		receipt.Successor.Transaction = TransactionID(fmt.Sprintf("recovery-v2-cycle-%03d", index))
+		selected, err := store.ReadCurrentJournal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.CompareAndSwapCurrentJournal(selected, before); err != nil {
+			t.Fatal(err)
+		}
+		createLifecycleReceipt(t, store, receipt)
+		selected, err = store.ReadCurrentJournal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		completed := receipt.Successor
+		completed.Checkpoint = JournalComplete
+		if err := store.CompareAndSwapCurrentJournal(selected, mustJournalPayload(t, completed)); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.CleanupRecovery(completed.Transaction); err != nil {
+			t.Fatalf("cycle %d: %v", index, err)
+		}
+	}
+	active, err := store.readRecoveryReceiptsAt(recoveryLifecycleParts)
+	if err != nil || len(active) != 1 {
+		t.Fatalf("active receipt history: count=%d err=%v", len(active), err)
+	}
+	archive, err := store.readLifecycleArchive()
+	if err != nil || len(archive) > 32 {
+		t.Fatalf("terminal archive history: count=%d err=%v", len(archive), err)
+	}
+}
+
+func TestRecoveryLifecycleCleanupMakesRoomForCompletionAtArchiveCapacity(t *testing.T) {
+	store, receipt := lifecycleStoreFixture(t)
+	for index := 0; index < maxTransactionGraphEntries; index++ {
+		history := lifecycleReceiptFixture(t)
+		history.Predecessor.Transaction = TransactionID(fmt.Sprintf("tx-history-source-%03d", index))
+		history.Replacement.Transaction = history.Predecessor.Transaction
+		history.Replacement.Fingerprint = fingerprintPayload(mustJournalPayload(t, history.Predecessor))
+		history.Successor.Transaction = TransactionID(fmt.Sprintf("recovery-v2-history-%03d", index))
+		completed := history.Successor
+		completed.Checkpoint = JournalComplete
+		payload, err := MarshalRecoveryLifecycleRecord(RecoveryLifecycleRecord{
+			SchemaVersion: RecoveryLifecycleSchemaV1, Receipt: history, Completed: &completed,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.createImmutable(recoveryArchiveParts, string(history.Successor.Transaction)+".json", payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	completed := receipt.Successor
+	completed.Checkpoint = JournalComplete
+	selected, err := store.ReadCurrentJournal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompareAndSwapCurrentJournal(selected, mustJournalPayload(t, completed)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordCompletedRecovery(completed); err == nil {
+		t.Fatal("fixture did not reach the archive capacity boundary")
+	}
+	if err := store.CleanupRecovery(completed.Transaction); err != nil {
+		t.Fatalf("eligible full archive prevented completion capture: %v", err)
+	}
+	archive, err := store.readLifecycleArchive()
+	if err != nil || len(archive) != maxTransactionGraphEntries-32+1 {
+		t.Fatalf("bounded capacity cleanup: count=%d err=%v", len(archive), err)
+	}
+	witness, present, err := store.readLifecycleRecord(completed.Transaction)
+	if err != nil || !present || witness.Completed == nil || witness.Completed.Transaction != completed.Transaction {
+		t.Fatalf("current completion witness was not captured: present=%t err=%v", present, err)
+	}
+	active, err := store.ReadRecoveryReceipt(completed.Transaction)
+	if err != nil || !active.Exists {
+		t.Fatal("capacity cleanup deleted the selected current receipt")
+	}
+}
+
+func TestRecoveryLifecycleReadOnlyRejectsChangedInputsAfterCancellationArchive(t *testing.T) {
+	store, receipt := lifecycleStoreFixture(t)
+	base, plan, reservation := lifecycleNewPlan(t, store, receipt.Replacement)
+	injected := errors.New("stop after cancellation publication")
+	store.fault = func(point string) error {
+		if point == "after-recovery-cancellation" {
+			return injected
+		}
+		return nil
+	}
+	if _, err := store.ResolveLifecycleRecoveryTransaction(RecoveryTransactionPrefixV2+"next", receipt.Replacement, base, plan, digestC); !errors.Is(err, injected) {
+		t.Fatal(err)
+	}
+	store.fault = nil
+	before, err := store.ReadRecoveryReceipt(receipt.Successor.Transaction)
+	if err != nil {
+		t.Fatal(err)
+	}
+	third := PlanToken("plan-v1-" + strings.Repeat("e", 64))
+	if _, err := store.RecoveryReservation(receipt.Replacement, third); err == nil {
+		t.Fatal("read-only assessment admitted changed cancellation continuation")
+	}
+	after, err := store.ReadRecoveryReceipt(receipt.Successor.Transaction)
+	if err != nil || !bytes.Equal(before.Payload, after.Payload) {
+		t.Fatal("read-only blocked assessment mutated the live reservation")
+	}
+	if got, err := store.RecoveryReservation(receipt.Replacement, base); err != nil || got != reservation {
+		t.Fatalf("exact cancellation continuation was lost: got=%s err=%v", got, err)
+	}
+}
+
+func TestRecoveryLifecycleJournalOverwriteCapturesCompletionOrRetainsEvidence(t *testing.T) {
+	for _, interrupt := range []bool{false, true} {
+		t.Run(fmt.Sprintf("interrupt=%t", interrupt), func(t *testing.T) {
+			store, receipt := lifecycleStoreFixture(t)
+			completed := receipt.Successor
+			completed.Checkpoint = JournalComplete
+			selected, err := store.ReadCurrentJournal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.CompareAndSwapCurrentJournal(selected, mustJournalPayload(t, completed)); err != nil {
+				t.Fatal(err)
+			}
+			selected, err = store.ReadCurrentJournal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if interrupt {
+				store.fault = func(point string) error {
+					if point == "before-recovery-completion" {
+						return errors.New("terminal evidence capture interrupted")
+					}
+					return nil
+				}
+			}
+			later := receipt.Predecessor
+			later.Transaction, later.Checkpoint = "tx-later", JournalComplete
+			payload := mustJournalPayload(t, later)
+			if err := store.CompareAndSwapCurrentJournal(selected, payload); err != nil {
+				t.Fatalf("completion capture prevented otherwise valid journal CAS: %v", err)
+			}
+			store.fault = nil
+			current, err := store.ReadCurrentJournal()
+			if err != nil || !bytes.Equal(current.Payload, payload) {
+				t.Fatal("journal overwrite did not publish exact new selection")
+			}
+			terminal, present, err := store.readLifecycleRecord(completed.Transaction)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if interrupt {
+				if present || !store.retirementCaptureFailed {
+					t.Fatal("completion failure did not retain conservative cleanup state")
+				}
+				if err := store.CleanupRecovery(later.Transaction); err == nil {
+					t.Fatal("completion evidence loss did not surface as pending cleanup")
+				}
+				active, err := store.ReadRecoveryReceipt(completed.Transaction)
+				if err != nil || !active.Exists {
+					t.Fatal("completion capture failure discarded the old live receipt")
+				}
+			} else if !present || terminal.Completed == nil || !bytes.Equal(mustJournalPayload(t, *terminal.Completed), selected.Payload) {
+				t.Fatal("journal overwrite did not preserve exact selected completion witness")
+			}
+		})
+	}
+}

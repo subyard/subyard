@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"slices"
 	"sort"
-	"strings"
 )
 
 // V2ActivationRecoveryPlanner proves that an owner's current native plan can
@@ -23,6 +22,15 @@ type activationRecoveryAssessment struct {
 	observation v2Observation
 	plans       []RecoveryNativePlan
 	inspection  Inspection
+	basePlan    PlanToken
+	reservation Fingerprint
+}
+
+func (transition *V2Transition) activationRecoveryContract() string {
+	if transition.options.RecoveryContract == ActivationOnlyRecoveryContractV2 {
+		return ActivationOnlyRecoveryContractV2
+	}
+	return ActivationOnlyRecoveryContractV1
 }
 
 func recoveryActiveLinksMatch(links ReleaseLinks, releases ReleasePair) bool {
@@ -39,6 +47,7 @@ func (transition *V2Transition) InspectActivationRecovery(ctx context.Context, r
 
 func (transition *V2Transition) assessActivationRecovery(ctx context.Context, request ActivationOnlyRecoveryRequest) (activationRecoveryAssessment, error) {
 	var result activationRecoveryAssessment
+	contract := transition.activationRecoveryContract()
 	if err := request.Validate(); err != nil {
 		return result, err
 	}
@@ -53,7 +62,7 @@ func (transition *V2Transition) assessActivationRecovery(ctx context.Context, re
 		result.inspection = Inspection{Assessment: observation.assessment.Clone(), Blockers: []Blocker{{Code: code, Resource: resource, Message: message, Retry: retry}}, Outcome: &outcome}
 		facts := transition.planFacts(observation)
 		facts.Blockers = slices.Clone(result.inspection.Blockers)
-		facts.Observations = append(facts.Observations, ResourceObservation{Resource: "recovery.predecessor", Class: ActivationOnlyRecoveryContractV1, Fingerprint: request.Fingerprint})
+		facts.Observations = append(facts.Observations, ResourceObservation{Resource: "recovery.predecessor", Class: contract, Fingerprint: request.Fingerprint})
 		var bindErr error
 		result.inspection.Plan, bindErr = BindPlan(facts)
 		if bindErr != nil {
@@ -70,7 +79,7 @@ func (transition *V2Transition) assessActivationRecovery(ctx context.Context, re
 		transition.options.Direction != DirectionActivateTarget || before.Goal != goal ||
 		before.ArtifactDigest != transition.options.ArtifactDigest || before.RegistryDigest != transition.registryDigest ||
 		before.CatalogDigest != transition.catalog.Digest() || !recoveryActiveLinksMatch(observation.links, before.Releases) ||
-		strings.HasPrefix(string(before.Transaction), "recovery-v1-") {
+		IsRecoveryTransaction(before.Transaction) {
 		return blocked(CodeRecoveryAmbiguous, "transition.recovery", "fresh recovery requires an unchanged verified owner and an activation-only reconciling journal; migration steps and replacement chains are excluded", "restore exactly known original inputs to resume, or use supported recovery tooling")
 	}
 	pending, err := transition.registry.PendingPath(observation.ledger)
@@ -95,7 +104,7 @@ func (transition *V2Transition) assessActivationRecovery(ctx context.Context, re
 	observation.journal = nil
 	observation.blockers = nil
 	observation.observations = []ResourceObservation{
-		{Resource: "recovery.predecessor", Class: ActivationOnlyRecoveryContractV1, Fingerprint: request.Fingerprint},
+		{Resource: "recovery.predecessor", Class: contract, Fingerprint: request.Fingerprint},
 		{Resource: "recovery.ledger", Class: "completed-ledger-v2", Fingerprint: observation.ledgerSnapshot.Fingerprint},
 	}
 	for _, reconciler := range fresh.options.Reconcilers {
@@ -129,13 +138,28 @@ func (transition *V2Transition) assessActivationRecovery(ctx context.Context, re
 		observation.observations = append(observation.observations, ResourceObservation{Resource: "activation." + reconciler.ID(), Class: "native-recovery-plan-v1", Fingerprint: fingerprintPayload(payload)})
 	}
 	sort.Slice(result.plans, func(i, j int) bool { return result.plans[i].ID < result.plans[j].ID })
-	observation.assessment, err = assessV2Action(fresh.policy, true, false, append([]string{"preserve the interrupted journal as immutable evidence and authorize a new activation-only transaction; keep migration ledger and runtime links"}, observation.activationConsequences...))
+	consequences := []string{"preserve the interrupted journal as immutable evidence and authorize a new activation-only transaction; keep migration ledger and runtime links"}
+	if contract == ActivationOnlyRecoveryContractV2 {
+		consequences = append(consequences, "retire only an exact unselected recovery reservation and preserve its authorized cancellation evidence")
+	}
+	observation.assessment, err = assessV2Action(fresh.policy, true, false, append(consequences, observation.activationConsequences...))
 	if err != nil {
 		return result, err
 	}
 	plan, err := BindPlan(fresh.planFacts(observation))
 	if err != nil {
 		return result, err
+	}
+	result.basePlan = plan
+	if contract == ActivationOnlyRecoveryContractV2 {
+		result.reservation, err = transition.store.RecoveryReservation(request, plan)
+		if err != nil {
+			return blocked(CodeRecoveryAmbiguous, "transition.recovery-reservation", "the existing recovery reservation cannot be safely retired; legacy reservations and referenced or invalid evidence remain protected", "restore exactly known reserved activation inputs, then run yard migrate --check")
+		}
+		plan, err = BindRecoveryLifecyclePlan(plan, result.reservation)
+		if err != nil {
+			return result, err
+		}
 	}
 	outcome := v2RecoveringOutcome(observation.links, goal.Target, transactionIDPointer(before.Transaction), CodeRecoveryPending, "changed activation inputs require a fresh recovery plan and new authorization")
 	outcome.Retry = "review and confirm the fresh plan with yard migrate or yard update"
@@ -178,7 +202,18 @@ func (transition *V2Transition) ConvergeActivationRecovery(ctx context.Context, 
 	if fresh.inspection.Plan != execution.Plan || !slices.Equal(fresh.plans, assessment.plans) {
 		return v2OperatorOutcome(fresh.observation.links, fresh.before.Goal.Target, transactionIDPointer(request.Transaction), CodePlanStale, "the fresh recovery assessment changed after confirmation", "run yard migrate --check"), nil
 	}
-	transaction, err := transition.store.ResolveRecoveryTransaction(TransactionID("recovery-v1-"+string(transition.options.NewTransactionID())), request, execution.Plan)
+	contract := transition.activationRecoveryContract()
+	prefix := RecoveryTransactionPrefixV1
+	if contract == ActivationOnlyRecoveryContractV2 {
+		prefix = RecoveryTransactionPrefixV2
+	}
+	proposed := TransactionID(prefix + string(transition.options.NewTransactionID()))
+	var transaction TransactionID
+	if contract == ActivationOnlyRecoveryContractV2 {
+		transaction, err = transition.store.ResolveLifecycleRecoveryTransaction(proposed, request, fresh.basePlan, execution.Plan, fingerprintPayload([]byte(execution.Authorization)))
+	} else {
+		transaction, err = transition.store.ResolveRecoveryTransaction(proposed, request, execution.Plan)
+	}
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -205,6 +240,10 @@ func (transition *V2Transition) ConvergeActivationRecovery(ctx context.Context, 
 		created = prior.Successor
 	}
 	receipt := RecoveryReceiptV1{SchemaVersion: RecoveryReceiptSchemaV1, Contract: ActivationOnlyRecoveryContractV1, Replacement: request, Predecessor: fresh.before, Successor: created, Ledger: fresh.observation.ledgerSnapshot.Fingerprint, Links: fresh.observation.links, Owner: RecoveryOwner{Release: created.Goal.Target, Artifact: created.ArtifactDigest, Registry: created.RegistryDigest, Catalog: created.CatalogDigest}, NativePlans: fresh.plans}
+	if contract == ActivationOnlyRecoveryContractV2 {
+		receipt.SchemaVersion, receipt.Contract = RecoveryReceiptSchemaV2, contract
+		receipt.BasePlan, receipt.Reservation = fresh.basePlan, fresh.reservation
+	}
 	if err := transition.inject("before-recovery-receipt"); err != nil {
 		return Outcome{}, err
 	}

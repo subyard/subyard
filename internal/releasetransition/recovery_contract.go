@@ -8,8 +8,12 @@ import (
 
 const (
 	ActivationOnlyRecoveryContractV1 = "activation-only-replacement-v1"
+	ActivationOnlyRecoveryContractV2 = "activation-only-replacement-v2"
 	RecoveryReceiptSchemaV1          = 1
+	RecoveryReceiptSchemaV2          = 2
+	RecoveryLifecycleSchemaV1        = 1
 	RecoveryTransactionPrefixV1      = "recovery-v1-"
+	RecoveryTransactionPrefixV2      = "recovery-v2-"
 )
 
 // ActivationOnlyRecoveryRequest selects an exact unfinished journal. It is
@@ -58,10 +62,19 @@ type RecoveryReceiptV1 struct {
 	Links         ReleaseLinks                  `json:"links"`
 	Owner         RecoveryOwner                 `json:"owner"`
 	NativePlans   []RecoveryNativePlan          `json:"nativePlans"`
+	BasePlan      PlanToken                     `json:"basePlan,omitempty"`
+	Reservation   Fingerprint                   `json:"reservation,omitempty"`
 }
 
 func (receipt RecoveryReceiptV1) Validate() error {
-	if receipt.SchemaVersion != RecoveryReceiptSchemaV1 || receipt.Contract != ActivationOnlyRecoveryContractV1 {
+	prefix := RecoveryTransactionPrefixV1
+	if receipt.Contract == ActivationOnlyRecoveryContractV2 && receipt.SchemaVersion == RecoveryReceiptSchemaV2 {
+		prefix = RecoveryTransactionPrefixV2
+		bound, err := BindRecoveryLifecyclePlan(receipt.BasePlan, receipt.Reservation)
+		if err != nil || bound != receipt.Successor.AuthorizationPlan {
+			return invalid("recovery receipt does not bind its assessed reservation")
+		}
+	} else if receipt.SchemaVersion != RecoveryReceiptSchemaV1 || receipt.Contract != ActivationOnlyRecoveryContractV1 || receipt.BasePlan != "" || receipt.Reservation != "" {
 		return invalid("unsupported activation recovery receipt contract")
 	}
 	if err := receipt.Replacement.Validate(); err != nil {
@@ -94,8 +107,8 @@ func (receipt RecoveryReceiptV1) Validate() error {
 	if after.Checkpoint != JournalAuthorized || after.SourceIngress != nil || len(after.Steps) != 0 ||
 		after.Goal != before.Goal || after.Releases.From != receipt.Links.Active ||
 		after.Releases.Target != receipt.Links.Active || !releaseIDsEqual(after.Releases.Previous, receipt.Links.Previous) ||
-		after.Transaction == before.Transaction || !strings.HasPrefix(string(after.Transaction), RecoveryTransactionPrefixV1) ||
-		strings.HasPrefix(string(before.Transaction), RecoveryTransactionPrefixV1) || after.AuthorizationPlan == before.AuthorizationPlan ||
+		after.Transaction == before.Transaction || !strings.HasPrefix(string(after.Transaction), prefix) ||
+		IsRecoveryTransaction(before.Transaction) || after.AuthorizationPlan == before.AuthorizationPlan ||
 		after.ResumePlan == before.ResumePlan || after.AuthorizationDigest == before.AuthorizationDigest ||
 		after.ObservationScope == before.ObservationScope {
 		return invalid("recovery successor does not bind a fresh same-target activation-only grant")
@@ -129,6 +142,97 @@ func (receipt RecoveryReceiptV1) Validate() error {
 		}
 	}
 	return nil
+}
+
+func IsRecoveryTransaction(transaction TransactionID) bool {
+	return strings.HasPrefix(string(transaction), RecoveryTransactionPrefixV1) || strings.HasPrefix(string(transaction), RecoveryTransactionPrefixV2)
+}
+
+// BindRecoveryLifecyclePlan keeps the grant stable across its own receipt
+// publication while binding any exact unselected reservation it may cancel.
+func BindRecoveryLifecyclePlan(base PlanToken, reservation Fingerprint) (PlanToken, error) {
+	if err := validatePlanToken(base); err != nil {
+		return "", err
+	}
+	if reservation == "" {
+		return base, nil
+	}
+	if err := validateFingerprint(reservation, "recovery reservation fingerprint"); err != nil {
+		return "", err
+	}
+	payload, err := json.Marshal(struct {
+		Contract    string      `json:"contract"`
+		Base        PlanToken   `json:"base"`
+		Reservation Fingerprint `json:"reservation"`
+	}{ActivationOnlyRecoveryContractV2, base, reservation})
+	if err != nil {
+		return "", err
+	}
+	return PlanToken("plan-v1-" + string(fingerprintPayload(payload))), nil
+}
+
+type RecoveryCancellation struct {
+	BasePlan            PlanToken   `json:"basePlan"`
+	Plan                PlanToken   `json:"plan"`
+	AuthorizationDigest Fingerprint `json:"authorizationDigest"`
+}
+
+// Terminal evidence is separate from the live receipt. It never authorizes
+// publication, and only a completed witness or proven pre-CAS cancellation
+// allows the live record to retire.
+type RecoveryLifecycleRecord struct {
+	SchemaVersion int                   `json:"schemaVersion"`
+	Receipt       RecoveryReceiptV1     `json:"receipt"`
+	Completed     *JournalRecord        `json:"completed,omitempty"`
+	Cancellation  *RecoveryCancellation `json:"cancellation,omitempty"`
+}
+
+func (record RecoveryLifecycleRecord) Validate() error {
+	if record.SchemaVersion != RecoveryLifecycleSchemaV1 || (record.Completed == nil) == (record.Cancellation == nil) {
+		return invalid("invalid recovery lifecycle record")
+	}
+	if err := record.Receipt.Validate(); err != nil {
+		return err
+	}
+	if record.Completed != nil {
+		if record.Completed.Checkpoint != JournalComplete {
+			return invalid("recovery completion witness is not complete")
+		}
+		return record.Receipt.MatchesSuccessor(*record.Completed)
+	}
+	cancellation := record.Cancellation
+	payload, err := MarshalRecoveryReceipt(record.Receipt)
+	if err != nil {
+		return err
+	}
+	plan, err := BindRecoveryLifecyclePlan(cancellation.BasePlan, fingerprintPayload(payload))
+	if err != nil || record.Receipt.Contract != ActivationOnlyRecoveryContractV2 || cancellation.BasePlan == record.Receipt.BasePlan || plan != cancellation.Plan {
+		return invalid("recovery cancellation does not bind a new assessed plan")
+	}
+	return validateFingerprint(cancellation.AuthorizationDigest, "recovery cancellation authorization")
+}
+
+func ParseRecoveryLifecycleRecord(payload []byte) (RecoveryLifecycleRecord, error) {
+	var record RecoveryLifecycleRecord
+	if err := decodeBoundedRecord(payload, MaxProtectedRecordBytes, &record); err != nil {
+		return record, err
+	}
+	return record, record.Validate()
+}
+
+func MarshalRecoveryLifecycleRecord(record RecoveryLifecycleRecord) ([]byte, error) {
+	if err := record.Validate(); err != nil {
+		return nil, err
+	}
+	payload, err := json.Marshal(record)
+	if err != nil {
+		return nil, err
+	}
+	payload = append(payload, '\n')
+	if err := validateProtectedPayload(payload); err != nil {
+		return nil, err
+	}
+	return payload, nil
 }
 
 // MatchesSuccessor validates immutable receipt bindings against any ordinary

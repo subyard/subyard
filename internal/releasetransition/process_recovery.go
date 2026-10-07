@@ -12,9 +12,10 @@ const ProcessRecoverySchemaV2 = 2
 type RecoveryProcessMode string
 
 const (
-	RecoveryProcessCapabilities RecoveryProcessMode = "capabilities"
-	RecoveryProcessInspect      RecoveryProcessMode = "inspect"
-	RecoveryProcessConverge     RecoveryProcessMode = "converge"
+	RecoveryProcessCapabilities          RecoveryProcessMode = "capabilities"
+	RecoveryProcessLifecycleCapabilities RecoveryProcessMode = "lifecycle-capabilities"
+	RecoveryProcessInspect               RecoveryProcessMode = "inspect"
+	RecoveryProcessConverge              RecoveryProcessMode = "converge"
 )
 
 // RecoveryCapabilities is explicitly negotiated with the sealed owner before
@@ -30,8 +31,12 @@ func ActivationOnlyRecoveryCapabilities() RecoveryCapabilities {
 	return RecoveryCapabilities{ActivationOnlyRecoveryContractV1, ProcessRecoverySchemaV2, JournalSchemaV2, RecoveryReceiptSchemaV1}
 }
 
+func ActivationRecoveryLifecycleCapabilities() RecoveryCapabilities {
+	return RecoveryCapabilities{ActivationOnlyRecoveryContractV2, ProcessRecoverySchemaV2, JournalSchemaV2, RecoveryReceiptSchemaV2}
+}
+
 func (capabilities RecoveryCapabilities) Validate() error {
-	if capabilities != ActivationOnlyRecoveryCapabilities() {
+	if capabilities != ActivationOnlyRecoveryCapabilities() && capabilities != ActivationRecoveryLifecycleCapabilities() {
 		return invalid("unsupported activation recovery capabilities")
 	}
 	return nil
@@ -42,6 +47,7 @@ func (capabilities RecoveryCapabilities) Validate() error {
 type RecoveryProcessRequest struct {
 	SchemaVersion       int                            `json:"schemaVersion"`
 	Mode                RecoveryProcessMode            `json:"mode"`
+	Contract            string                         `json:"contract,omitempty"`
 	RuntimeRoot         string                         `json:"runtimeRoot,omitempty"`
 	ConfigHome          string                         `json:"configHome,omitempty"`
 	Yard                string                         `json:"yard,omitempty"`
@@ -56,7 +62,8 @@ type RecoveryProcessRequest struct {
 
 func (request RecoveryProcessRequest) TransitionRequest() ProcessRequest {
 	return ProcessRequest{SchemaVersion: ProcessProtocolSchemaV1, Mode: ProcessMode(request.Mode),
-		RuntimeRoot: request.RuntimeRoot, ConfigHome: request.ConfigHome, Yard: request.Yard,
+		RecoveryContract: request.Contract,
+		RuntimeRoot:      request.RuntimeRoot, ConfigHome: request.ConfigHome, Yard: request.Yard,
 		Target: request.Target, Direction: request.Direction, ArtifactDigest: request.ArtifactDigest,
 		RegistryDigest: request.RegistryDigest, InheritedSettingIDs: slices.Clone(request.InheritedSettingIDs),
 		Execution: request.Execution}
@@ -66,16 +73,19 @@ func (request RecoveryProcessRequest) Validate() error {
 	if request.SchemaVersion != ProcessRecoverySchemaV2 {
 		return invalid("unsupported recovery process schema")
 	}
-	if request.Mode == RecoveryProcessCapabilities {
+	if request.Mode == RecoveryProcessCapabilities || request.Mode == RecoveryProcessLifecycleCapabilities {
 		if request.RuntimeRoot != "" || request.ConfigHome != "" || request.Yard != "" || request.Target != "" ||
 			request.Direction != "" || request.ArtifactDigest != "" || request.RegistryDigest != "" ||
-			len(request.InheritedSettingIDs) != 0 || request.Recovery != nil || request.Execution != nil {
+			len(request.InheritedSettingIDs) != 0 || request.Recovery != nil || request.Execution != nil || request.Contract != "" {
 			return invalid("recovery capability probe carries transition inputs")
 		}
 		return nil
 	}
 	if request.Mode != RecoveryProcessInspect && request.Mode != RecoveryProcessConverge {
 		return invalid("unknown recovery process mode")
+	}
+	if request.Contract != "" && request.Contract != ActivationOnlyRecoveryContractV1 && request.Contract != ActivationOnlyRecoveryContractV2 {
+		return invalid("unsupported recovery process contract")
 	}
 	if request.Direction != DirectionActivateTarget || request.Recovery == nil {
 		return invalid("recovery process requires a selected forward activation-only journal")

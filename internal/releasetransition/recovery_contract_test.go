@@ -240,6 +240,18 @@ func TestRecoveryProcessV2StrictShapesLeaveFrozenV1Unchanged(t *testing.T) {
 	if _, err := ParseRecoveryProcessResponse(responsePayload); err != nil {
 		t.Fatal(err)
 	}
+	lifecycleProbe := RecoveryProcessRequest{SchemaVersion: ProcessRecoverySchemaV2, Mode: RecoveryProcessLifecycleCapabilities}
+	if _, err := MarshalRecoveryProcessRequest(lifecycleProbe); err != nil {
+		t.Fatal(err)
+	}
+	lifecycleCapabilities := ActivationRecoveryLifecycleCapabilities()
+	lifecyclePayload, err := MarshalRecoveryProcessResponse(RecoveryProcessResponse{SchemaVersion: ProcessRecoverySchemaV2, Capabilities: &lifecycleCapabilities})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed, err := ParseRecoveryProcessResponse(lifecyclePayload); err != nil || *parsed.Capabilities != lifecycleCapabilities {
+		t.Fatalf("lifecycle negotiation: %#v %v", parsed, err)
+	}
 	receipt := recoveryReceiptFixture(t)
 	request := RecoveryProcessRequest{SchemaVersion: ProcessRecoverySchemaV2, Mode: RecoveryProcessInspect,
 		RuntimeRoot: "/runtime", ConfigHome: "/config", Yard: "default", Target: receipt.Owner.Release,
@@ -251,6 +263,16 @@ func TestRecoveryProcessV2StrictShapesLeaveFrozenV1Unchanged(t *testing.T) {
 	}
 	if _, err := ParseRecoveryProcessRequest(payload); err != nil {
 		t.Fatal(err)
+	}
+	request.Contract = ActivationOnlyRecoveryContractV2
+	if encoded, err := MarshalRecoveryProcessRequest(request); err != nil {
+		t.Fatal(err)
+	} else if parsed, err := ParseRecoveryProcessRequest(encoded); err != nil || parsed.TransitionRequest().RecoveryContract != request.Contract {
+		t.Fatalf("explicit lifecycle contract: %#v %v", parsed, err)
+	}
+	request.Contract = "future-contract"
+	if _, err := MarshalRecoveryProcessRequest(request); err == nil {
+		t.Fatal("unknown lifecycle contract accepted")
 	}
 	for name, corrupted := range map[string][]byte{
 		"V1 reason":                  bytes.Replace(payload, []byte(`"recovery":{`), []byte(`"recovery":{"reason":"post-activation-scope-v0.11.1",`), 1),

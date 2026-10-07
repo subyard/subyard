@@ -540,15 +540,8 @@ func (runtime *Runtime) invokeVerifiedRuntimeTransition(
 		return releasetransition.ProcessResponse{}, errors.New("candidate release transition response is too large")
 	}
 	var response releasetransition.ProcessResponse
-	decoder := json.NewDecoder(bytes.NewReader(stdout.Bytes()))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&response); err != nil ||
-		response.SchemaVersion != releasetransition.ProcessProtocolSchemaV1 {
-		return releasetransition.ProcessResponse{},
-			errors.New("candidate returned an invalid release transition response")
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+	// ProcessResponse's frozen V1 codec owns schema, shape and trailing-data checks.
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
 		return releasetransition.ProcessResponse{},
 			errors.New("candidate returned an invalid release transition response")
 	}

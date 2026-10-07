@@ -165,8 +165,21 @@ candidate_update() {
   operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" "$@"
 }
 
+recovery_state_digest() {
+  operator_env python3 - "$CONFIG_HOME/release-transition/recovery" <<'PY'
+import hashlib, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+digest = hashlib.sha256()
+for path in sorted(root.rglob('*')):
+    if path.is_file():
+        digest.update(str(path.relative_to(root)).encode() + b'\0' + path.read_bytes())
+print(digest.hexdigest())
+PY
+}
+
 assert_no_consent() {
-  local operation="$1" output="$STATE_ROOT/no-consent-$1.log" rc=0
+  local operation="$1" output="$STATE_ROOT/no-consent-$1.log" rc=0 before
+  before="$(recovery_state_digest)"
   if [ "$operation" = migrate ]; then
     operator_yard migrate </dev/null > "$output" 2>&1 || rc=$?
   else
@@ -175,12 +188,31 @@ assert_no_consent() {
   [ "$rc" = 1 ] && grep -Fq 'confirmation required: interactive terminal required' "$output" || die "$operation did not require fresh consent"
   sudo -n cmp "$ACTIVATION_JOURNAL_BASELINE" "$V2_JOURNAL" || die "$operation changed interrupted journal without consent"
   sudo -n cmp "$ACTIVATION_LEDGER_BASELINE" "$V2_LEDGER" || die "$operation changed migration ledger without consent"
-  operator_env test ! -e "$CONFIG_HOME/release-transition/recovery/v1/transactions" || die "$operation published a recovery receipt without consent"
+  [ "$(recovery_state_digest)" = "$before" ] || die "$operation changed recovery evidence without consent"
   assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
 }
 
+install_pre_cas_fault() {
+  local temporary="$STATE_ROOT/pre-cas-systemctl"
+  printf '%s\n' '#!/bin/sh' 'set -eu' \
+    "journal=$V2_JOURNAL" "predecessor=$1" \
+    "receipts=$CONFIG_HOME/release-transition/recovery/v2/transactions" \
+    "probe=$ACTIVATION_FAULT_PROBE.pre-cas" \
+    'if [ "${1:-}" = show ] && [ "${2:-}" = subyard-power-reconcile.service ] &&' \
+    '  [ -d "$receipts" ] && [ ! -e "$probe" ] &&' \
+    '  [ "$(/usr/bin/jq -er .transaction "$journal")" = "$predecessor" ]; then' \
+    '  for receipt in "$receipts"/*.json; do' \
+    '    [ -f "$receipt" ] || continue' \
+    '    printf "%s\n" "receipt published before journal CAS" > "$probe"' \
+    '    exit 75' \
+    '  done' \
+    'fi' \
+    "exec $ACTIVATION_SYSTEMCTL_DELEGATE \"\$@\"" > "$temporary"
+  sudo -n install -o "$OPERATOR" -g "$OPERATOR" -m 0755 "$temporary" "$ACTIVATION_SYSTEMCTL_WRAPPER"
+}
+
 run_acceptance() {
-  local yard source host_settings before_tx replacement receipt rc=0
+  local yard source host_settings before_tx replacement receipt reserved cancelled rc=0
   # shellcheck source=tests/helpers/release-candidate.sh
   . "$ROOT/tests/helpers/release-candidate.sh"
   release_candidate_prepare "$ROOT" >/dev/null
@@ -263,18 +295,40 @@ run_acceptance() {
   assert_no_consent migrate
   assert_no_consent update
 
+  info 'interrupting recovery after immutable receipt publication and before journal CAS'
+  install_pre_cas_fault "$before_tx"
+  rc=0
+  operator_yard migrate --yes > "$STATE_ROOT/pre-cas.log" 2>&1 || rc=$?
+  [ "$rc" != 0 ] && operator_env test -f "$ACTIVATION_FAULT_PROBE.pre-cas" || die 'pre-CAS interruption was not reached'
+  operator_env find "$ACTIVATION_SYSTEMCTL_WRAPPER" -delete
+  sudo -n cmp "$ACTIVATION_JOURNAL_BASELINE" "$V2_JOURNAL" || die 'pre-CAS interruption changed predecessor'
+  sudo -n cmp "$ACTIVATION_LEDGER_BASELINE" "$V2_LEDGER" || die 'pre-CAS interruption changed ledger'
+  reserved="$(operator_env python3 -c 'import pathlib,sys; paths=list(pathlib.Path(sys.argv[1]).glob("*.json")); assert len(paths)==1; print(paths[0])' "$CONFIG_HOME/release-transition/recovery/v2/transactions")"
+  cancelled="$(sudo -n jq -er .successor.transaction "$reserved")"
+  sudo -n install -m 0600 "$reserved" "$STATE_ROOT/cancelled-receipt.json"
+  write_settings "$host_settings" "$host_settings" default-v3
+  candidate_update --check --json > "$STATE_ROOT/update-plan.json"
+  jq -e '.assessment.changed == true and .resume == null and (.blockers | length) == 0' "$STATE_ROOT/update-plan.json" >/dev/null
+  [ "$(jq -r .plan "$STATE_ROOT/update-plan.json")" != "$(sudo -n jq -r .successor.authorizationPlan "$reserved")" ] || die 'changed inputs reused reserved plan'
+  assert_no_consent migrate
+  assert_no_consent update
+
   info 'fresh explicit consent must publish replacement receipt and reach ready'
   operator_yard migrate --yes
   replacement="$(sudo -n jq -er .transaction "$V2_JOURNAL")"
   [ "$replacement" != "$before_tx" ] || die 'recovery overwrote predecessor transaction'
   sudo -n jq -e '.checkpoint == "complete" and (.steps | length) == 0' "$V2_JOURNAL" >/dev/null
-  receipt="$CONFIG_HOME/release-transition/recovery/v1/transactions/$replacement.json"
+  receipt="$CONFIG_HOME/release-transition/recovery/v2/transactions/$replacement.json"
   sudo -n jq -e --slurpfile predecessor "$ACTIVATION_JOURNAL_BASELINE" --slurpfile plan "$STATE_ROOT/update-plan.json" \
-    '.schemaVersion == 1 and .contract == "activation-only-replacement-v1" and .predecessor == $predecessor[0] and .replacement.transaction == $predecessor[0].transaction and .successor.authorizationPlan == $plan[0].plan and .successor.authorizationDigest != .predecessor.authorizationDigest and .successor.observationScope != .predecessor.observationScope and (.nativePlans | length) > 0' "$receipt" >/dev/null
+    '.schemaVersion == 2 and .contract == "activation-only-replacement-v2" and .basePlan != null and .reservation != null and .predecessor == $predecessor[0] and .replacement.transaction == $predecessor[0].transaction and .successor.authorizationPlan == $plan[0].plan and .successor.authorizationDigest != .predecessor.authorizationDigest and .successor.observationScope != .predecessor.observationScope and (.nativePlans | length) > 0' "$receipt" >/dev/null
+  operator_env test ! -e "$reserved" || die 'cancelled live reservation remains selected'
+  sudo -n jq -e --slurpfile original "$STATE_ROOT/cancelled-receipt.json" --slurpfile plan "$STATE_ROOT/update-plan.json" \
+    '.receipt == $original[0] and .cancellation.plan == $plan[0].plan and .completed == null' \
+    "$CONFIG_HOME/release-transition/recovery/v2/archive/$cancelled.json" >/dev/null
   [ "$(sudo -n jq -er .ledgerFingerprint "$receipt")" = "$(sudo -n sha256sum "$ACTIVATION_LEDGER_BASELINE" | awk '{print $1}')" ] || die 'receipt did not preserve ledger fingerprint'
   sudo -n cmp "$ACTIVATION_LEDGER_BASELINE" "$V2_LEDGER"
   assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
-  assert_materialized default default-v2
+  assert_materialized default default-v3
   assert_materialized named named-v1
   assert_excluded_yards
   operator_yard migrate --check --json > "$STATE_ROOT/ready.json"
@@ -285,7 +339,7 @@ run_acceptance() {
   sudo -n cmp "$STATE_ROOT/completed-journal.json" "$V2_JOURNAL" || die 'ready repeat changed successor journal'
   sudo -n cmp "$STATE_ROOT/completed-receipt.json" "$receipt" || die 'ready repeat changed recovery receipt'
   sudo -n cmp "$ACTIVATION_LEDGER_BASELINE" "$V2_LEDGER" || die 'ready repeat changed migration ledger'
-  assert_materialized default default-v2
+  assert_materialized default default-v3
   assert_materialized named named-v1
   assert_excluded_yards
   # A short root-only regression covers the ownership case unavailable on dev hosts.

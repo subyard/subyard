@@ -1,7 +1,7 @@
 ---
 title: Decisions, assumptions, and glossary
 status: living
-updated: 2026-10-06
+updated: 2026-10-07
 note: Current accepted contracts, rationale, and explicit implementation limits.
 ---
 
@@ -359,6 +359,19 @@ construction projects known legacy aliases. Child clears inherited config-loaded
 explicitly selected yard context, preventing default overrides from replacing identity;
 internal-child marker prevents recursion.
 
+The upgrade floor is expressed in domain epochs, separately from rollback eligibility of intact,
+compatible retained current/previous runtimes. An unfinished transaction pins its exact sealed
+owner, artifacts and protected evidence until terminal completion, regardless of age or release
+count. Released acceptance keeps an actual published baseline per distinct supported caller,
+producer or compatibility-bridge contract, rather than testing every version pair. Support and
+coverage retire only by explicit decision; no arbitrary time or release-count horizon removes them.
+
+Ledger V2 requires exact `Applied` registry-prefix history. Raising `minimumEpochs` or deleting old
+IDs alone is not migration retirement. A future checkpoint needs a separate compatible durable
+transition with readers shipped first, preserved completed history and preserved in-flight
+bindings. No checkpoint format is implemented; the shipped registry has two one-time migrations.
+See [Supported compatibility and recovery](resumable-release-transition-design.md#supported-compatibility-and-recovery).
+
 Current systemd convergence requires observed loaded/no pending daemon reload plus exact
 bytes/enablement. Do not re-enable already enabled units merely to hide missing reload. Exact
 rollback to published v0.7.2 permits its known systemd 255 bad-setting only after exact old
@@ -379,8 +392,14 @@ only forward activation-only reconciling journals without migration steps, with 
 active, exact links, unchanged sealed owner and completed ledger. Native owners prove safe plans
 against current ownership; a new grant binds the predecessor and new desired scope. A negotiated
 separate contract publishes immutable predecessor evidence before journal CAS while retaining
-frozen V1 and canonical V2 semantics for old callers. No replacement chains or generic bypass:
-unknown partial mutation, source/settings work (including verified steps), ownership conflict and
+frozen V1 and canonical V2 semantics for old callers. `activation-only-replacement-v1` remains
+strict: no replacement chains and no automatic cancellation of a legacy reservation. The separate
+`activation-only-replacement-v2` lifecycle contract is explicitly negotiated through process
+schema 2 `lifecycle-capabilities`; its `recovery-v2-` receipts use schema 2 with live and archived
+evidence. Cancellation admits only a proven unactivated successor; it preserves the predecessor
+and requires fresh authorized reassessment. Terminal receipt retirement requires proven closure
+and no current, pending or retained references; age and release count do not authorize deletion.
+Unknown partial mutation, source/settings work (including verified steps), ownership conflict and
 corrupt/foreign state remain blocked. See [Release migrations](../control-plane.md#release-migrations).
 
 <a id="resources-and-test-vm-admission"></a>

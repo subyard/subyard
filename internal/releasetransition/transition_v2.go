@@ -84,6 +84,7 @@ type V2Options struct {
 	InheritedSettingIDs []string
 	SourceIngress       *SourceIngressRequest
 	Replacement         *JournalReplacement
+	RecoveryContract    string
 	NewTransactionID    func() TransactionID
 	VerifyAuthorization func(PlanToken, Authorization) bool
 	fault               func(string) error
@@ -174,6 +175,9 @@ type settingsRecoveryV1 struct {
 }
 
 func NewV2Transition(options V2Options) (*V2Transition, error) {
+	if options.RecoveryContract != "" && options.RecoveryContract != ActivationOnlyRecoveryContractV1 && options.RecoveryContract != ActivationOnlyRecoveryContractV2 {
+		return nil, invalid("unsupported activation recovery contract")
+	}
 	if !filepath.IsAbs(options.ConfigHome) || options.ObserveLinks == nil ||
 		options.VerifyAuthorization == nil {
 		return nil, errors.New("v2 transition requires config home, link observer, and authorization verifier")
@@ -875,6 +879,9 @@ func (transition *V2Transition) cleanupReady(
 	}
 	if err := transition.inject("before-recovery-gc"); err == nil {
 		err = transition.store.CleanupTransactions(transaction)
+		if err == nil {
+			err = transition.store.CleanupRecovery(transaction)
+		}
 		if err == nil {
 			return outcome
 		}

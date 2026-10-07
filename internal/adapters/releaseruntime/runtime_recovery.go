@@ -8,8 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
-	"strings"
 
 	"github.com/Subyard/Subyard/internal/releasetransition"
 )
@@ -29,7 +29,7 @@ func (runtime *Runtime) inspectActivationRecovery(
 	if journal.Checkpoint != releasetransition.JournalReconciling ||
 		journal.Goal.Direction != releasetransition.DirectionActivateTarget ||
 		journal.SourceIngress != nil || len(journal.Steps) != 0 || protected.owner != protected.target ||
-		!protected.activationReconciliationOwned || strings.HasPrefix(string(journal.Transaction), releasetransition.RecoveryTransactionPrefixV1) {
+		!protected.activationReconciliationOwned || releasetransition.IsRecoveryTransaction(journal.Transaction) {
 		return protected, nil
 	}
 	observed, err := runtime.inspectRuntimeLinks(protected.request.RuntimeRoot)
@@ -46,8 +46,15 @@ func (runtime *Runtime) inspectActivationRecovery(
 		return protected, nil
 	}
 	probe := releasetransition.RecoveryProcessRequest{SchemaVersion: releasetransition.ProcessRecoverySchemaV2,
-		Mode: releasetransition.RecoveryProcessCapabilities}
+		Mode: releasetransition.RecoveryProcessLifecycleCapabilities}
 	capabilities, probeErr := runtime.invokeVerifiedRecoveryTransition(ctx, verifiedOwner, protected.request.RuntimeRoot, probe, "")
+	if probeErr != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		probe.Mode = releasetransition.RecoveryProcessCapabilities
+		capabilities, probeErr = runtime.invokeVerifiedRecoveryTransition(ctx, verifiedOwner, protected.request.RuntimeRoot, probe, "")
+	}
 	if probeErr != nil || capabilities.Capabilities == nil || capabilities.Capabilities.Validate() != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -69,6 +76,9 @@ func (runtime *Runtime) inspectActivationRecovery(
 		ArtifactDigest: journal.ArtifactDigest, RegistryDigest: journal.RegistryDigest,
 		InheritedSettingIDs: slices.Clone(protected.request.InheritedSettingIDs),
 		Recovery:            &releasetransition.ActivationOnlyRecoveryRequest{Transaction: journal.Transaction, Fingerprint: protected.journalSnapshot.Fingerprint},
+	}
+	if capabilities.Capabilities.Contract == releasetransition.ActivationOnlyRecoveryContractV2 {
+		request.Contract = capabilities.Capabilities.Contract
 	}
 	response, err := runtime.invokeVerifiedRecoveryTransition(ctx, verifiedOwner, request.RuntimeRoot, request, "")
 	if err != nil {
@@ -122,7 +132,8 @@ func (runtime *Runtime) invokeVerifiedRecoveryTransition(
 	if owner == nil || owner.root == nil || owner.engine == nil || owner.registryDigest == "" {
 		return releasetransition.RecoveryProcessResponse{}, errors.New("verified recovery owner is unavailable")
 	}
-	if request.Mode != releasetransition.RecoveryProcessCapabilities &&
+	capabilityProbe := request.Mode == releasetransition.RecoveryProcessCapabilities || request.Mode == releasetransition.RecoveryProcessLifecycleCapabilities
+	if !capabilityProbe &&
 		(request.RegistryDigest != owner.registryDigest || request.ArtifactDigest != owner.manifestDigest || request.Target != owner.candidate.release) {
 		return releasetransition.RecoveryProcessResponse{}, errors.New("recovery request does not match its sealed owner")
 	}
@@ -134,7 +145,12 @@ func (runtime *Runtime) invokeVerifiedRecoveryTransition(
 		return releasetransition.RecoveryProcessResponse{}, err
 	}
 	var stdout boundedResponseBuffer
-	if err := runtime.runVerifiedRuntimeEngine(ctx, owner, owner, runtimeRoot, []string{"_release-transition"},
+	processRuntime := *runtime
+	if capabilityProbe {
+		// An older owner may reject the optional probe before V1 fallback.
+		processRuntime.config.Stderr = io.Discard
+	}
+	if err := processRuntime.runVerifiedRuntimeEngine(ctx, owner, owner, runtimeRoot, []string{"_release-transition"},
 		bytes.NewReader(append(payload, '\n')), &stdout, grant); err != nil {
 		return releasetransition.RecoveryProcessResponse{}, fmt.Errorf("verified recovery process failed: %w", err)
 	}
@@ -142,9 +158,16 @@ func (runtime *Runtime) invokeVerifiedRecoveryTransition(
 	if err != nil {
 		return releasetransition.RecoveryProcessResponse{}, err
 	}
-	if request.Mode == releasetransition.RecoveryProcessCapabilities {
+	if capabilityProbe {
 		if response.Capabilities == nil {
 			return releasetransition.RecoveryProcessResponse{}, errors.New("recovery capability probe returned transition results")
+		}
+		expected := releasetransition.ActivationOnlyRecoveryCapabilities()
+		if request.Mode == releasetransition.RecoveryProcessLifecycleCapabilities {
+			expected = releasetransition.ActivationRecoveryLifecycleCapabilities()
+		}
+		if *response.Capabilities != expected {
+			return releasetransition.RecoveryProcessResponse{}, errors.New("recovery capability probe returned another contract")
 		}
 	} else if response.Capabilities != nil ||
 		request.Mode == releasetransition.RecoveryProcessInspect && response.Inspection == nil ||
@@ -207,7 +230,7 @@ func (runtime *Runtime) validateFreshRecoveryConvergence(request releasetransiti
 		}
 		return nil
 	}
-	if !strings.HasPrefix(string(*outcome.Transaction), releasetransition.RecoveryTransactionPrefixV1) {
+	if !releasetransition.IsRecoveryTransaction(*outcome.Transaction) {
 		return errors.New("fresh recovery returned an unrecognized successor identity")
 	}
 	store, err := releasetransition.NewPOSIXV2Store(request.ConfigHome)
@@ -222,15 +245,12 @@ func (runtime *Runtime) validateFreshRecoveryConvergence(request releasetransiti
 	if err != nil || current.Transaction != *outcome.Transaction {
 		return errors.New("fresh recovery outcome disagrees with the current successor")
 	}
-	if err := store.ValidateCurrentRecovery(current); err != nil {
-		return err
+	receipt, err := store.ValidatedCurrentRecovery(current)
+	contract := request.Contract
+	if contract == "" {
+		contract = releasetransition.ActivationOnlyRecoveryContractV1
 	}
-	receiptSnapshot, err := store.ReadRecoveryReceipt(current.Transaction)
-	if err != nil {
-		return err
-	}
-	receipt, err := releasetransition.ParseRecoveryReceipt(receiptSnapshot.Payload)
-	if err != nil || receipt.Replacement != *request.Recovery || receipt.Successor.AuthorizationPlan != request.Execution.Plan ||
+	if err != nil || receipt.Contract != contract || receipt.Replacement != *request.Recovery || receipt.Successor.AuthorizationPlan != request.Execution.Plan ||
 		receipt.Owner.Release != request.Target || receipt.Owner.Artifact != request.ArtifactDigest || receipt.Owner.Registry != request.RegistryDigest {
 		return errors.New("fresh recovery successor does not match the inspected predecessor, owner and new plan")
 	}
