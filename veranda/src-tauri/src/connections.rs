@@ -1548,8 +1548,11 @@ mod tests {
     }
     impl Fixture {
         fn new() -> Self {
-            let parent =
-                std::env::temp_dir().join(format!("veranda-test-{}", random_id().unwrap()));
+            // macOS may expose its temporary directory through the /var symlink.
+            let parent = std::env::temp_dir()
+                .canonicalize()
+                .unwrap()
+                .join(format!("veranda-test-{}", random_id().unwrap()));
             create_private_dir(&parent).unwrap();
             let store = ConnectionStore::new(parent.join("connections"));
             Self { parent, store }
@@ -2148,6 +2151,15 @@ mod tests {
         symlink(&root, &root_alias).unwrap();
         assert_eq!(
             ConnectionStore::new(root_alias).list().unwrap_err().code,
+            "unsafe_connection_store"
+        );
+        let parent_alias = fixture.parent.join("parent-alias");
+        symlink(&fixture.parent, &parent_alias).unwrap();
+        assert_eq!(
+            ConnectionStore::new(parent_alias.join("connections"))
+                .list()
+                .unwrap_err()
+                .code,
             "unsafe_connection_store"
         );
         fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();

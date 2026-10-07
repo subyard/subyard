@@ -510,7 +510,7 @@ def main():
                     tree.stop(process)
             timings = sorted(item['ready_seconds'] for item in launches)
             os_release = dict(line.split('=', 1) for line in Path('/etc/os-release').read_text().splitlines() if '=' in line)
-            cpu = next(line.split(':', 1)[1].strip() for line in Path('/proc/cpuinfo').read_text().splitlines() if line.startswith('model name'))
+            cpu = next((line.split(':', 1)[1].strip() for line in Path('/proc/cpuinfo').read_text().splitlines() if line.startswith('model name')), 'not measured')
             result = {
                 'scope': ('Linux Wayland isolated local owner; screen, GPU, compositor and workload pinning remain caller gates; no prepared physical fleet or mutations'
                           if args.wayland else 'Linux Xvfb isolated local owner; screenshot defines rendered state; no prepared physical fleet or mutations'),

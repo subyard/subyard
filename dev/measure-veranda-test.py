@@ -279,8 +279,15 @@ time.sleep(30)
         output = self.root / 'metrics.json'
         args = ['probe', '--wayland', '--binary', str(binary), '--engine', str(binary),
                 '--starts', '1', '--idle-seconds', '1', '--output', str(output)]
+        original_read_text = Path.read_text
+        cpuinfo = 'processor\t: 0\nCPU implementer\t: 0x41\nCPU architecture: 8\n'
+
+        def read_text(path, *args, **kwargs):
+            return cpuinfo if path == Path('/proc/cpuinfo') else original_read_text(path, *args, **kwargs)
+
         with patch.dict(os.environ, self.ambient, clear=True), patch('sys.argv', args), \
                 patch.object(probe, 'ROOT', self.root), \
+                patch.object(Path, 'read_text', read_text), \
                 patch.object(probe.subprocess, 'Popen') as popen, patch.object(probe, 'screenshot') as screenshot, \
                 patch.object(probe, 'launch', return_value=(SimpleNamespace(poll=lambda: None), FakeTree(), 0.1)) as launch, \
                 patch.object(probe.time, 'monotonic', side_effect=itertools.count(0, 0.5)), \
@@ -292,14 +299,17 @@ time.sleep(30)
         self.assertEqual(launch.call_args.args[1]['GDK_BACKEND'], 'wayland')
         self.assertNotIn('DISPLAY', launch.call_args.args[1])
         metrics = json.loads(output.read_text())
+        self.assertEqual(metrics['system']['cpu'], 'not measured')
         self.assertFalse(metrics['screenshot_captured'])
         self.assertEqual(metrics['display']['server'], 'Wayland')
         self.assertEqual(metrics['display']['gpu'], 'not measured')
         self.assertNotIn(str(self.endpoint), output.read_text())
         self.assertNotIn('credential-sentinel', output.read_text())
         self.assertFalse(metrics['diagnostic_disable_gdk_gl'])
+        cpuinfo = 'processor\t: 0\nmodel name\t: Fixture CPU\n'
         with patch.dict(os.environ, self.ambient, clear=True), patch('sys.argv', args + ['--disable-gdk-gl']), \
                 patch.object(probe, 'ROOT', self.root), patch.object(probe.subprocess, 'Popen'), \
+                patch.object(Path, 'read_text', read_text), \
                 patch.object(probe, 'launch', return_value=(SimpleNamespace(poll=lambda: None), FakeTree(), 0.1)) as launch, \
                 patch.object(probe.time, 'monotonic', side_effect=itertools.count(0, 0.5)), \
                 patch.object(probe.time, 'sleep'), patch.object(probe, 'command_output', return_value='fixture'), \
@@ -308,6 +318,7 @@ time.sleep(30)
             self.assertEqual(launch.call_args.args[1]['GDK_GL'], 'disable')
             self.assertEqual(os.environ['GDK_GL'], 'credential-sentinel')
         self.assertTrue(json.loads(output.read_text())['diagnostic_disable_gdk_gl'])
+        self.assertEqual(json.loads(output.read_text())['system']['cpu'], 'Fixture CPU')
         output.unlink()
         with patch.dict(os.environ, self.ambient, clear=True), patch('sys.argv', args), \
                 patch.object(probe, 'ROOT', self.root), patch.object(probe.subprocess, 'Popen'), \

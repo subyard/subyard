@@ -753,7 +753,7 @@ impl ManagerFixture {
             std::fs::create_dir(&directory).unwrap();
             let public =
                 PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../api/yard-rpc/v1/fixtures");
-            for name in ["negotiate", "operation-exact"] {
+            for name in ["negotiate", "operation-exact", "owner-inventory"] {
                 std::fs::copy(
                     public.join(format!("{name}.frame")),
                     directory.join(format!("{name}.frame")),
@@ -769,7 +769,7 @@ impl ManagerFixture {
                 use std::os::unix::fs::PermissionsExt;
                 std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
                     .unwrap();
-                for name in ["negotiate", "operation-exact"] {
+                for name in ["negotiate", "operation-exact", "owner-inventory"] {
                     std::fs::set_permissions(
                         directory.join(format!("{name}.frame")),
                         std::fs::Permissions::from_mode(0o600),
@@ -1435,6 +1435,7 @@ fn reviewed_execution_is_explicit_and_single_use(mode: &str, confirmation: &str)
         }
     }
     assert!(fixture.client.running.lock().unwrap().is_empty());
+    assert!(fixture.client.snapshot(&fixture.session).is_ok());
     assert_eq!(
         fixture
             .client
