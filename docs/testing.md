@@ -67,9 +67,14 @@ clean checkout, base commit or `.git` directory is required. Install the tools l
 temporary repositories. The release packaging test uses a disposable copy of the current public
 files because it adds fixtures; that copy needs no Git metadata.
 
-`make test`, `./tests/run.sh` and the host-free profile runner place disposable fixtures in
-`/tmp`, independently of a workspace-local `TMPDIR`, so Orca cannot discover them in the
-working project.
+`make test`, `./tests/run.sh`, the host-free profile runners and `dev/process-coverage.sh`
+place disposable fixtures in `/tmp`, independently of a workspace-local `TMPDIR`, so Orca
+cannot discover them in the working project. When invoking an individual test script or `go test` directly, use
+`TMPDIR=/tmp`. Manual local reproductions must also create disposable Git repositories and
+short-lived test worktrees under `/tmp`, outside managed workspace trees. `.gitignore` does
+not prevent Orca from discovering nested Git roots, including those under `.build`.
+Test worktrees must belong to fixture repositories.
+Reserve `.build` for artifacts and logs; persistent development worktrees can remain there.
 Representative local discovery tests share one Git directory across their checkout paths;
 hook-observation tests use synthetic Git metadata. Ordinary Orca projects acceptance uses
 small native fixtures; mass Git-root generation belongs only to the

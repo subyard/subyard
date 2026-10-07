@@ -27,7 +27,7 @@ LAUNCH = (
 
 class PreviewTest(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="subyard-preview-test-")
+        self.temp = tempfile.TemporaryDirectory(prefix="subyard-preview-test-", dir="/tmp")
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name)
         self.endpoint = self.base / "preview.json"

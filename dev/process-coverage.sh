@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Merge package coverage with commands exercised through the real yard process boundary.
 set -euo pipefail
+export TMPDIR=/tmp
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUTPUT="$ROOT/.build/coverage"

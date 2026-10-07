@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Format, vet and race-test Go checks owned by one profile.
 set -euo pipefail
+export TMPDIR=/tmp
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 profile="${1:-}"
 [[ "$profile" =~ ^[a-z][a-z0-9-]*$ ]] || { printf 'usage: profile-go.sh PROFILE\n' >&2; exit 2; }

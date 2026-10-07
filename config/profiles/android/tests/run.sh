@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Host-free checks owned by the android profile.
 set -euo pipefail
+export TMPDIR=/tmp
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 bash "$ROOT/tests/helpers/profile-go.sh" android
 bash "$ROOT/config/profiles/android/tests/android-provision-check.sh"

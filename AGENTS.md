@@ -33,3 +33,9 @@ read and follow it **in addition** to this file. It carries private, non-public 
 
 Before building, running, or changing tests, read and follow the
 [testing guide](docs/testing.md) and the [agent E2E VM guide](docs/test-vms.md).
+
+Host-free tests and manual local reproductions must keep disposable Git repositories and
+short-lived test worktrees under `/tmp`, outside managed workspace trees, even when `TMPDIR`
+points into the checkout. Create test worktrees from fixture-owned repositories. Keep `.build`
+for artifacts and logs; run catalog/load reproductions only on leased disposable VMs as
+described in the testing guides.

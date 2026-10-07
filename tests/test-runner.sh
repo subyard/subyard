@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Exercise the real runner against a tiny checkout, without recursively running this suite.
 set -euo pipefail
+export TMPDIR=/tmp
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -127,6 +128,15 @@ cp "$ROOT/Makefile" "$fixture/Makefile"
 TMPDIR="$fixture/.build" PATH="$tmp/tools:$PATH" \
   make -s -C "$fixture" test > "$tmp/make-test.out" 2>&1
 grep -q 'profile check ran' "$tmp/make-test.out" || fail 'make test skipped profile tests'
+
+# The Go helper is also a supported direct entrypoint, without the profile wrapper.
+mkdir -p "$fixture/tests/helpers"
+cp "$ROOT/tests/helpers/profile-go.sh" "$fixture/tests/helpers/profile-go.sh"
+TMPDIR="$fixture/.build" PATH="$tmp/tools:$PATH" RUNNER_GO_LOG="$tmp/profile-go.log" \
+  bash "$fixture/tests/helpers/profile-go.sh" example > "$tmp/profile-go.out" 2>&1
+[ "$(wc -l < "$tmp/profile-go.log")" -eq 3 ] \
+  || fail 'standalone profile Go checks did not complete with isolated fixtures'
+
 printf '#!/usr/bin/env bash\nexit 29\n' > "$fixture/config/profiles/example/tests/run.sh"
 rc=0
 bash "$fixture/dev/test-profiles.sh" > "$tmp/profiles-failure.out" 2>&1 || rc=$?

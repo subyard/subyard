@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Broker and integration checks owned by the GitHub profile.
 set -euo pipefail
+export TMPDIR=/tmp
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 mapfile -t unformatted < <(gofmt -l "$ROOT/config/profiles/github")
 [ "${#unformatted[@]}" -eq 0 ] \
