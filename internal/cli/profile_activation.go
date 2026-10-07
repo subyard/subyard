@@ -25,6 +25,10 @@ func (cli *CLI) profileActivationReconciler(request releasetransition.ProcessReq
 
 func (reconciler *profileRuntimeActivationReconciler) ID() string { return reconciler.id }
 
+func (reconciler *profileRuntimeActivationReconciler) failure(yard, phase string, cause error) error {
+	return materializedConfigActivationError{cause, yard, "profile " + reconciler.id + " runtime", "status", phase, reconciler.request.ConfigHome}
+}
+
 func (reconciler *profileRuntimeActivationReconciler) targets() (*CLI, []configTarget, error) {
 	operation := *reconciler.cli
 	environment := operation.freshMigrationEnvironment(operation.baseEnv, operation.options.RepositoryRoot)
@@ -33,7 +37,7 @@ func (reconciler *profileRuntimeActivationReconciler) targets() (*CLI, []configT
 	// Host-wide inventory must not require the caller's yard to exist.
 	loaded, err := operation.resolveReleaseTransitionContext("default", reconciler.request.ConfigHome)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, reconciler.failure("default", "inspect", err)
 	}
 	targets, err := operation.localConfigTargets(loaded, true)
 	sort.Slice(targets, func(i, j int) bool { return targets[i].Name < targets[j].Name })
@@ -85,7 +89,7 @@ func (reconciler *profileRuntimeActivationReconciler) Observe(
 	}
 	operation, targets, err := reconciler.targets()
 	if err != nil {
-		return releasetransition.V2ActivationObservation{}, err
+		return releasetransition.V2ActivationObservation{}, reconciler.failure("default", "inspect", err)
 	}
 	type observation struct {
 		Yard, Project, Instance, State, Digest string
@@ -96,7 +100,7 @@ func (reconciler *profileRuntimeActivationReconciler) Observe(
 	for _, target := range targets {
 		state, err := observeProfileRuntime(ctx, profileActivationPlatform(operation, target), reconciler.id)
 		if err != nil {
-			return releasetransition.V2ActivationObservation{}, fmt.Errorf("yard %s profile runtime: %w", target.Name, err)
+			return releasetransition.V2ActivationObservation{}, reconciler.failure(target.Name, "inspect", err)
 		}
 		kind := string(state.State)
 		if kind == "current" || kind == "stale" {
@@ -134,20 +138,20 @@ func (reconciler *profileRuntimeActivationReconciler) Reconcile(ctx context.Cont
 		platform := profileActivationPlatform(operation, target)
 		state, err := observeProfileRuntime(ctx, platform, reconciler.id)
 		if err != nil {
-			return fmt.Errorf("yard %s profile runtime: %w", target.Name, err)
+			return reconciler.failure(target.Name, "inspect", err)
 		}
 		if state.State != "stale" {
 			continue
 		}
 		if err := platform.ApplyProfileRuntime(ctx, reconciler.id, operation.ensureOperationID(), state.Actual, state.Desired); err != nil {
-			return fmt.Errorf("yard %s profile runtime refresh: %w", target.Name, err)
+			return reconciler.failure(target.Name, "apply", err)
 		}
 		state, err = observeProfileRuntime(ctx, platform, reconciler.id)
 		if err != nil {
-			return err
+			return reconciler.failure(target.Name, "verify", err)
 		}
 		if state.State != "current" {
-			return fmt.Errorf("yard %s profile runtime did not converge", target.Name)
+			return reconciler.failure(target.Name, "verify", fmt.Errorf("profile runtime did not converge"))
 		}
 	}
 	return nil

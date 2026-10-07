@@ -3282,7 +3282,7 @@ func TestV2TransitionPreservesPublicCauseAcrossSecondaryActivationFailures(t *te
 							[]byte("YARD_TEMPLATE=private-assignment-sentinel\n"), 0o600)
 					}
 					wantCode = CodePreconditionBlocked
-					wantRecovery = "yard ordinary: YARD_TEMPLATE is not supported"
+					wantRecovery = "yards/ordinary.env:1: YARD_TEMPLATE"
 				case "unknown state":
 					reconciler.post.Actual = digestC
 				}
@@ -3297,7 +3297,7 @@ func TestV2TransitionPreservesPublicCauseAcrossSecondaryActivationFailures(t *te
 				})
 				wantRetry := "run yard update --check"
 				if branch == "settings blocker" {
-					wantRetry = "repair the named yard settings, then run yard update"
+					wantRetry = "run yard -Y ordinary config status"
 				}
 				if err != nil || outcome.Status != StatusOperatorActionRequired || outcome.Code != wantCode ||
 					outcome.Retry != wantRetry || outcome.Transaction == nil || *outcome.Transaction != "tx-test-001" ||
@@ -3408,8 +3408,8 @@ func TestV2TransitionPreservesPublicCauseAfterMutation(t *testing.T) {
 			case "release observation":
 				wantActive = ""
 			case "settings blocker":
-				wantCode, wantRecovery = CodePreconditionBlocked, "yard ordinary: YARD_TEMPLATE is not supported"
-				wantRetry = "repair the named yard settings, then run yard update"
+				wantCode, wantRecovery = CodePreconditionBlocked, "yards/ordinary.env:1: YARD_TEMPLATE"
+				wantRetry = "run yard -Y ordinary config status"
 			case "stale settings":
 				wantCode, wantRecovery = CodeMigrationStale, "changed outside the authorized transition"
 			}

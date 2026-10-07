@@ -247,7 +247,7 @@ func (cli *CLI) prepareConfigApply(ctx context.Context, targets []configTarget, 
 		}
 		assessment, err := cli.assessConfigTarget(ctx, target, true)
 		if err != nil {
-			return nil, fmt.Errorf("yard %s: %w", target.Name, err)
+			return nil, materializedConfigActivationError{err, target.Name, "materialized config", "config status", "inspect", target.Loaded.Context.Paths.ConfigHome}
 		}
 		execution.approved = append(execution.approved, assessment)
 	}
@@ -295,7 +295,7 @@ func (cli *CLI) refreshConfigApply(ctx context.Context, execution *configApplyEx
 	for _, target := range targets {
 		assessment, err := cli.assessConfigTarget(ctx, target, true)
 		if err != nil {
-			return fmt.Errorf("revalidate yard %s: %w", target.Name, err)
+			return materializedConfigActivationError{err, target.Name, "materialized config", "config status", "verify", target.Loaded.Context.Paths.ConfigHome}
 		}
 		byName[target.Name] = assessment
 	}
@@ -369,7 +369,7 @@ func (cli *CLI) executeConfigApply(ctx context.Context, execution *configApplyEx
 	}
 	for _, target := range targets {
 		if err := applier.ApplyConfig(ctx, target.Name); err != nil {
-			return fmt.Errorf("yard %s: %w", target.Name, err)
+			return materializedConfigActivationError{err, target.Name, "materialized config", "config status", "apply", target.Loaded.Context.Paths.ConfigHome}
 		}
 	}
 	if len(targets) != 0 {

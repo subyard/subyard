@@ -236,6 +236,14 @@ grant, release pair, artifact/registry/catalog bindings and observation scope ma
 resets require a new plan and authorization. Completed history cannot reuse a grant to authorize
 new drift repair.
 
+Changed scope in an activation-only forward `reconciling` journal may receive a bounded replacement
+after fresh native ownership-aware planning and new authorization. The target and exact links,
+verified owner/artifact/registry/catalog, completed ledger and canonical predecessor evidence remain
+bound. A separate negotiated process contract and immutable receipt precede current-journal CAS;
+the ordinary V2 successor resumes without rotating links or replaying migrations. Source/settings
+steps, replacement chains and unknown partial application are excluded. See the implemented
+[recovery contract](../control-plane.md#release-migrations).
+
 At each process boundary the owner revalidates the protected sealed target against `ArtifactDigest`
 bound to the plan and journal, deriving version/registry facts from that artifact. Owner registry
 and target registry are checked separately. An altered or unavailable sealed target blocks before
@@ -298,7 +306,9 @@ permission to replace journals or links. Use the maintained [legacy upgrade](../
 and [interrupted recovery](../control-plane.md#interrupted-release-recovery) guidance.
 
 Protocol evolution first ships readers/writers alongside the old version while continuing to send
-that version; only a later release uses the new protocol with supporting owners. Retain old semantics
+that version; only a later release replaces the default protocol with supporting owners. Optional
+same-owner recovery is capability-negotiated separately and must prove retained-caller compatibility
+before writing its unchanged V2 successor. Retain old semantics
 for the supported upgrade/rollback/recovery horizon. Rebuilding both ends from current source does
 not prove published-binary compatibility.
 

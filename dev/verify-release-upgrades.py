@@ -2,6 +2,7 @@
 """Exercise the frozen update contract with an unmodified released updater."""
 
 import argparse
+import ctypes
 import hashlib
 import json
 import os
@@ -50,12 +51,46 @@ def snapshot(root):
     }
 
 
-def run_process(command, env, timeout, input_text=None, interrupt_marker=None):
+def run_process(command, env, timeout, input_text=None, interrupt_marker=None,
+                interrupt_replacement=None):
+    watch = None
+    if interrupt_replacement is not None:
+        journal, _, _ = interrupt_replacement
+        libc = ctypes.CDLL(None, use_errno=True)
+        watch = libc.inotify_init1(os.O_CLOEXEC | os.O_NONBLOCK)
+        require(watch >= 0, "cannot observe the owned recovery journal")
+        require(libc.inotify_add_watch(watch, os.fsencode(journal.parent), 0x00000080) >= 0,
+                "cannot watch the owned recovery journal directory")
     child = subprocess.Popen(command, env=env,
                              stdin=subprocess.DEVNULL if input_text is None else subprocess.PIPE,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              text=True, start_new_session=True)
     try:
+        if interrupt_replacement is not None:
+            journal, predecessor, marker = interrupt_replacement
+            deadline = time.monotonic() + timeout
+            observed = False
+            while child.poll() is None and time.monotonic() < deadline:
+                readable, _, _ = select.select([watch], [], [], 0.02)
+                if not readable:
+                    continue
+                os.read(watch, 65536)
+                # Pause this owned session before reading the durable state;
+                # no journal phase edits or runtime-link changes are fixtures.
+                os.killpg(child.pid, signal.SIGSTOP)
+                current = json.loads(journal.read_text())
+                if current["transaction"] != predecessor:
+                    require(current["transaction"].startswith("recovery-v1-")
+                            and current["checkpoint"] != "complete",
+                            "fresh recovery passed its observed publication boundary")
+                    marker.write_text(json.dumps({"transaction": current["transaction"],
+                                                  "checkpoint": current["checkpoint"]}) + "\n")
+                    marker.chmod(0o600)
+                    os.killpg(child.pid, signal.SIGKILL)
+                    observed = True
+                    break
+                os.killpg(child.pid, signal.SIGCONT)
+            require(observed, "fresh recovery did not publish an observable successor")
         if interrupt_marker is not None:
             deadline = time.monotonic() + timeout
             while not interrupt_marker.is_file() and child.poll() is None:
@@ -67,6 +102,8 @@ def run_process(command, env, timeout, input_text=None, interrupt_marker=None):
         stdout, stderr = child.communicate(input=input_text, timeout=timeout)
         return subprocess.CompletedProcess(command, child.returncode, stdout, stderr)
     finally:
+        if watch is not None:
+            os.close(watch)
         # A timed-out updater may still have a candidate holding the fixture's
         # locks. Stop every process in this owned session before removing state.
         try:
@@ -332,6 +369,9 @@ def verify_activation_only_recovery(release, version, baseline, arch, root):
     shims.mkdir()
     unexpected = fixture.root / "unexpected-host-command"
     interrupted = Path(str(control) + ".held")
+    # Each phase needs its own observed interruption. A prior fixture's marker
+    # must never kill this session before it has published its own journal.
+    interrupted.unlink(missing_ok=True)
     systemctl = shims / "systemctl"
     systemctl.write_text("#!/usr/bin/python3\nimport pathlib, sys\n"
                         f"pathlib.Path({str(unexpected)!r}).write_text('systemctl operation rejected')\n"
@@ -370,7 +410,9 @@ def verify_activation_only_recovery(release, version, baseline, arch, root):
     journal = json.loads(fixture.journal.read_text())
     require(journal["checkpoint"] == "reconciling" and journal["steps"] == []
             and journal["releases"]["from"] == journal["releases"]["target"],
-            "published baseline did not create the activation-only journal")
+            "published baseline did not create the activation-only journal: checkpoint="
+            + journal["checkpoint"] + "; steps=" + str(len(journal["steps"]))
+            + "; same_release=" + str(journal["releases"]["from"] == journal["releases"]["target"]))
     require(not unexpected.exists(), "activation fixture attempted a privileged or mutating host command")
     # A stopped synthetic instance has no live config consumers. Its desired
     # settings and asset inventory remain identical to the running observation.
@@ -391,6 +433,22 @@ def verify_activation_only_recovery(release, version, baseline, arch, root):
     require(published.startswith(f"releases/{version}-") and "/" not in published[len("releases/"):],
             "installer returned an invalid recovery candidate identity")
     candidate = fixture.runtime / published / "bin/yard"
+    # A newer caller may resume the exact old scope, but the released owner has
+    # never advertised the fresh-replacement contract. Changed inputs remain
+    # excluded until their exactly known original bytes are restored.
+    original_host_settings = host_settings.read_bytes()
+    host_settings.write_text("CODING_TOOL_INTEGRATIONS=claude\n")
+    host_settings.chmod(0o600)
+    excluded_before = snapshot(fixture.config)
+    excluded = json.loads(fixture.run([str(candidate), "migrate", "--check", "--json"]))
+    require(excluded["outcome"]["status"] == "operator-action-required"
+            and snapshot(fixture.config) == excluded_before,
+            "legacy owner admitted changed-scope fresh recovery")
+    excluded_apply = run_process([str(candidate), "migrate", "--yes"], fixture.env, timeout=60)
+    require(excluded_apply.returncode != 0 and snapshot(fixture.config) == excluded_before,
+            "legacy owner replaced the original journal under new consent")
+    host_settings.write_bytes(original_host_settings)
+    host_settings.chmod(0o600)
     inspected = json.loads(fixture.run([str(candidate), "migrate", "--check", "--json"]))
     require(inspected["outcome"]["status"] == "recovering" and not inspected.get("blockers")
             and inspected["current"] == journal["goal"]["target"]
@@ -438,6 +496,168 @@ def verify_activation_only_recovery(release, version, baseline, arch, root):
           f"({time.monotonic() - started:.1f}s)", flush=True)
 
 
+def verify_fresh_activation_recovery(release, version, baseline, arch, root):
+    fixture = Fixture(root / "fresh-activation", release, version, baseline, arch)
+    host_settings = fixture.config / "config.env"
+    host_settings.write_text("CODING_TOOL_INTEGRATIONS=codex\n")
+    host_settings.chmod(0o600)
+    fixture.update("--version", version, "--yes")
+    fixture.complete()
+    launcher = fixture.runtime / "current/bin/yard"
+    ledger = fixture.config / "release-transition/v2/ledger.json"
+    ledger_before = ledger.read_bytes()
+    links_before = tuple(os.readlink(fixture.runtime / name) for name in ("current", "previous"))
+    control = root / "incus-observation.json"
+
+    def observe(status, hold):
+        payload = json.dumps({"instances": [{"project": "subyard", "name": "yard",
+                                             "info": {"name": "yard", "status": status,
+                                                      "type": "container", "config": {}, "devices": {}}}],
+                              "holdJournal": str(fixture.journal) if hold else ""})
+        control.write_text(payload)
+        control.chmod(0o600)
+        deadline = time.monotonic() + 10
+        applied = Path(str(control) + ".applied")
+        while time.monotonic() < deadline:
+            if applied.exists() and applied.read_text() == payload:
+                return
+            time.sleep(0.02)
+        require(False, "fresh recovery Incus observation was not applied")
+
+    # Native observations are synthetic; any privileged or mutating host command
+    # is rejected. This exercises the actual candidate engine and wire contract.
+    shims = fixture.root / "commands"
+    shims.mkdir()
+    unexpected = fixture.root / "unexpected-host-command"
+    for name in ("sudo", "systemctl"):
+        shim = shims / name
+        shim.write_text("#!/usr/bin/python3\nimport pathlib, sys\n"
+                        "if sys.argv[0].endswith('/sudo') and sys.argv[1:] == ['-n', 'true']:\n"
+                        "    sys.exit(0)\n"
+                        f"pathlib.Path({str(unexpected)!r}).write_text('host mutation rejected')\n"
+                        "sys.exit(99)\n")
+        shim.chmod(0o700)
+    incus = shims / "incus"
+    incus.write_text("#!/usr/bin/python3\nimport pathlib, sys\n"
+                     "arguments = sys.argv[1:]\n"
+                     "if arguments and arguments[0] == 'exec' and '--' in arguments:\n"
+                     "    command = arguments[arguments.index('--') + 1:]\n"
+                     "    if command[:3] == ['bash', '-se', '--'] and '\"state\":\"absent\"' in sys.stdin.read():\n"
+                     "        print('{\"state\":\"absent\",\"actual\":\"\",\"desired\":\"\"}')\n"
+                     "        sys.exit(0)\n"
+                     f"pathlib.Path({str(unexpected)!r}).write_text('incus mutation rejected')\n"
+                     "sys.exit(99)\n")
+    incus.chmod(0o700)
+    fixture.env["PATH"] = str(shims) + ":/usr/bin:/bin"
+    interrupted = Path(str(control) + ".held")
+    if interrupted.exists():
+        interrupted.unlink()
+    observe("Running", True)
+    result = run_process([str(launcher), "migrate", "--yes"], fixture.env,
+                         timeout=60, interrupt_marker=interrupted)
+    require(result.returncode == -signal.SIGKILL and interrupted.is_file(),
+            "candidate did not interrupt activation-only reconciliation: " + result.stdout + result.stderr)
+    original_bytes = fixture.journal.read_bytes()
+    original = json.loads(original_bytes)
+    require(original["checkpoint"] == "reconciling" and original["steps"] == []
+            and not original.get("sourceIngress")
+            and original["releases"]["from"] == original["releases"]["target"],
+            "candidate did not publish a supported activation-only predecessor")
+    observe("Stopped", False)
+    unchanged = json.loads(fixture.run([str(launcher), "migrate", "--check", "--json"]))
+    require(unchanged["outcome"]["status"] == "recovering" and not unchanged.get("blockers"),
+            "unchanged activation inputs did not retain ordinary resume")
+    host_settings.write_text("CODING_TOOL_INTEGRATIONS=claude\n")
+    host_settings.chmod(0o600)
+    changed_bytes = host_settings.read_bytes()
+    before = snapshot(fixture.config)
+    fresh = json.loads(fixture.run([str(launcher), "migrate", "--check", "--json"]))
+    require(fresh["outcome"]["status"] == "recovering" and not fresh.get("blockers")
+            and fresh["outcome"].get("transaction") == original["transaction"],
+            "capable owner did not offer an authorized fresh assessment")
+    require(snapshot(fixture.config) == before, "fresh recovery inspection mutated protected state")
+    declined = run_process([str(launcher), "migrate"], fixture.env, timeout=60)
+    require(declined.returncode != 0 and "confirmation" in (declined.stdout + declined.stderr).lower()
+            and snapshot(fixture.config) == before,
+            "fresh recovery reused old consent or changed state without consent")
+    request = {"schemaVersion": 2, "mode": "inspect", "runtimeRoot": str(fixture.runtime),
+               "configHome": str(fixture.config), "yard": "default", "target": original["goal"]["target"],
+               "direction": "activate-target", "artifactDigest": original["artifactDigest"],
+               "registryDigest": original["registryDigest"],
+               "recovery": {"transaction": original["transaction"],
+                            "fingerprint": hashlib.sha256(original_bytes).hexdigest()}}
+
+    def protocol(value):
+        result = run_process([str(launcher), "_release-transition"], fixture.env, timeout=60,
+                             input_text=json.dumps(value))
+        require(result.returncode == 0, "candidate recovery protocol failed: " + result.stdout + result.stderr)
+        return json.loads(result.stdout)
+
+    inspection = protocol(request)["inspection"]
+    require(inspection.get("resume") is None and inspection["assessment"]["changed"]
+            and inspection["plan"] not in (original["authorizationPlan"], original["resumePlan"])
+            and snapshot(fixture.config) == before,
+            "fresh recovery did not bind a new plan without mutation")
+    apply = dict(request, mode="converge", execution={"plan": original["authorizationPlan"], "authorization": ""})
+    refused = protocol(apply)["outcome"]
+    require(refused["code"] == "plan-stale" and snapshot(fixture.config) == before,
+            "old activation authorization admitted replacement")
+    apply["execution"] = {"plan": inspection["plan"], "authorization": ""}
+    refused = protocol(apply)["outcome"]
+    after_refusal = snapshot(fixture.config)
+    changed_paths = sorted(path for path in before.keys() | after_refusal.keys()
+                           if before.get(path) != after_refusal.get(path))
+    require(refused["code"] == "confirmation-required" and after_refusal == before,
+            "fresh recovery missing-grant guard disagreed: code=" + refused["code"]
+            + "; changed_paths=" + ",".join(changed_paths))
+    host_settings.write_text("CODING_TOOL_INTEGRATIONS=\n")
+    host_settings.chmod(0o600)
+    stale_before = snapshot(fixture.config)
+    refused = protocol(apply)["outcome"]
+    require(refused["code"] == "plan-stale" and snapshot(fixture.config) == stale_before,
+            "stale fresh recovery assessment permitted mutation")
+    host_settings.write_bytes(changed_bytes)
+    host_settings.chmod(0o600)
+    marker = fixture.root / "successor-observed.json"
+    result = run_process([str(launcher), "migrate", "--yes"], fixture.env, timeout=60,
+                         interrupt_replacement=(fixture.journal, original["transaction"], marker))
+    require(result.returncode == -signal.SIGKILL and marker.is_file(),
+            "fresh authorized recovery did not reach durable successor publication")
+    successor = json.loads(fixture.journal.read_text())
+    transaction = successor["transaction"]
+    require(transaction.startswith("recovery-v1-") and transaction != original["transaction"]
+            and successor["steps"] == [] and successor["checkpoint"] != "complete",
+            "fresh replacement did not publish a distinct ordinary V2 successor")
+    receipt_path = fixture.config / "release-transition/recovery/v1/transactions" / (transaction + ".json")
+    receipt_bytes = receipt_path.read_bytes()
+    receipt = json.loads(receipt_bytes)
+    require(receipt["contract"] == "activation-only-replacement-v1"
+            and (json.dumps(receipt["predecessor"], separators=(",", ":")) + "\n").encode() == original_bytes
+            and receipt["replacement"] == request["recovery"]
+            and receipt["ledgerFingerprint"] == hashlib.sha256(ledger_before).hexdigest(),
+            "fresh recovery lost canonical predecessor or completed ledger bindings")
+    require(fixture.check()["outcome"]["status"] == "recovering",
+            "released V1 caller cannot inspect the ordinary V2 successor")
+    fixture.update("--offline", "--version", version)
+    fixture.complete()
+    require(json.loads(fixture.journal.read_text())["transaction"] == transaction
+            and receipt_path.read_bytes() == receipt_bytes and ledger.read_bytes() == ledger_before
+            and host_settings.read_bytes() == changed_bytes
+            and tuple(os.readlink(fixture.runtime / name) for name in ("current", "previous")) == links_before
+            and not unexpected.exists(),
+            "released-caller resume changed recovery evidence, selections, ledger or runtime links")
+    fixture.update("--rollback", "--yes", old=False)
+    require(os.readlink(fixture.runtime / "current") == fixture.initial,
+            "fresh recovery made the retained runtime unavailable for explicit rollback")
+    fixture.update("--offline", "--version", version, "--yes")
+    fixture.complete()
+    require(receipt_path.read_bytes() == receipt_bytes and ledger.read_bytes() == ledger_before
+            and host_settings.read_bytes() == changed_bytes and not unexpected.exists(),
+            "rollback and forward update changed protected recovery history")
+    print(f"PASS: capable {version} fresh activation recovery preserves ledger and links; released {BASELINE} "
+          "caller inspects and resumes V2 successor, rollback and forward", flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--release-dir", type=Path, required=True)
@@ -483,6 +703,7 @@ def main():
                     verify_legacy(release, args.version, legacy, arch, root)
                     baseline = baseline_assets(root, args.baseline_dir, BASELINE, BASELINE_SHA256, arch)
                     verify(release, args.version, baseline, arch, root)
+                    verify_fresh_activation_recovery(release, args.version, baseline, arch, root)
                 activation = baseline_assets(root, args.activation_baseline_dir, ACTIVATION_BASELINE,
                                              ACTIVATION_BASELINE_SHA256, arch)
                 verify_activation_only_recovery(release, args.version, activation, arch, root)

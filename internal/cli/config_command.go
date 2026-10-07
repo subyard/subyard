@@ -964,7 +964,7 @@ func (cli *CLI) localConfigTargets(loaded config.Loaded, allLocal bool) ([]confi
 	for _, name := range names {
 		targetLoaded, err := cli.loadInventoryLoaded(name, loaded)
 		if err != nil {
-			return nil, fmt.Errorf("yard %s: %w", name, err)
+			return nil, materializedConfigActivationError{err, name, "configuration", "config status", "inspect", loaded.Context.Paths.ConfigHome}
 		}
 		if targetLoaded.Context.AccessKind == domain.AccessRemote {
 			continue
@@ -983,7 +983,7 @@ func (cli *CLI) refreshLocalConfigTargets(
 	}
 	refreshed, err := cli.loadInventoryLoaded(loaded.Context.YardName, loaded)
 	if err != nil {
-		return nil, err
+		return nil, materializedConfigActivationError{err, loaded.Context.YardName, "configuration", "config status", "inspect", loaded.Context.Paths.ConfigHome}
 	}
 	return []configTarget{{Name: loaded.Context.YardName, Loaded: refreshed}}, nil
 }
@@ -1012,7 +1012,7 @@ func (cli *CLI) configStatus(
 	for _, target := range targets {
 		assessment, err := cli.assessConfigTarget(ctx, target, checkDrift)
 		if err != nil {
-			return fmt.Errorf("yard %s: %w", target.Name, err)
+			return materializedConfigActivationError{err, target.Name, "materialized config", "config status", "verify", configHome}
 		}
 		if len(expectedDesired) != 0 && assessment.DesiredFingerprint != expectedDesired[0][target.Name] {
 			return fmt.Errorf("yard %s: approved desired configuration changed during verification", target.Name)

@@ -121,6 +121,7 @@ type protectedTransitionInspection struct {
 	request                       releasetransition.ProcessRequest
 	inspection                    releasetransition.Inspection
 	activationReconciliationOwned bool
+	recoveryRequest               *releasetransition.RecoveryProcessRequest
 }
 
 type redactedReleaseInspectionError struct{ cause error }
@@ -206,6 +207,11 @@ func (runtime *Runtime) inspectProtectedTransition(
 			"the protected release transition journal is invalid",
 			"restore protected release metadata from backup, then run yard update --check",
 		)
+	}
+	if err := store.ValidateCurrentRecovery(journal); err != nil {
+		return nil, newPublicReleaseInspectionError(err, runtimeRoot, journal.Goal.Target, &journal.Transaction,
+			releasetransition.CodeJournalInvalid, "the activation recovery receipt is missing or invalid",
+			"restore protected release metadata from backup, then run yard update --check")
 	}
 	root, err := validateReleaseRoot(runtimeRoot, "runtime root")
 	if err != nil {
@@ -392,7 +398,7 @@ func (runtime *Runtime) inspectProtectedTransition(
 		outcome.Message = "the inspected release transition has not started"
 		inspection.Outcome = &outcome
 	}
-	return &protectedTransitionInspection{
+	protected := &protectedTransitionInspection{
 		journal: journal, journalSnapshot: snapshot,
 		owner: candidateVerification{
 			candidate: owner, digest: verifiedOwner.manifestDigest, version: verifiedOwner.version,
@@ -404,7 +410,8 @@ func (runtime *Runtime) inspectProtectedTransition(
 		},
 		request: request, inspection: *inspection,
 		activationReconciliationOwned: response.ActivationReconciliationOwned,
-	}, nil
+	}
+	return runtime.inspectActivationRecovery(ctx, verifiedOwner, protected)
 }
 
 func newPublicReleaseInspectionError(
@@ -916,10 +923,10 @@ func (runtime *Runtime) prepareProtectedTransition(
 			protected.target.candidate.release, retry,
 		)
 	}
-	prepared, err := runtime.prepareInspectedCandidateTransition(
+	prepared, err := runtime.prepareInspectedCandidateTransitionWithDelegate(
 		parsed, protected.owner, protected.target,
 		protected.request, protected.inspection,
-		protected.activationReconciliationOwned, nil,
+		protected.activationReconciliationOwned, nil, nil, protected.recoveryRequest,
 	)
 	if err == nil && !parsed.check {
 		prepared.RepairCurrent = protected.inspection.Outcome.Active == protected.request.Target &&
@@ -1168,13 +1175,25 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithDelegate(
 	activationReconciliationOwned bool,
 	revalidation *replacementRevalidation,
 	delegate *candidateVerification,
+	recoveryRequests ...*releasetransition.RecoveryProcessRequest,
 ) (prepared Prepared, err error) {
+	var recoveryRequest *releasetransition.RecoveryProcessRequest
+	if len(recoveryRequests) != 0 && recoveryRequests[0] != nil {
+		requestCopy := *recoveryRequests[0]
+		requestCopy.InheritedSettingIDs = slices.Clone(requestCopy.InheritedSettingIDs)
+		if requestCopy.Recovery != nil {
+			replacement := *requestCopy.Recovery
+			requestCopy.Recovery = &replacement
+		}
+		recoveryRequest = &requestCopy
+	}
 	defer func() {
 		if err == nil && !parsed.check {
 			prepared.nativePlan = inspection.Plan
 			prepared.Steps = releaseOperationSteps(request, inspection)
 			prepared.Binding = releaseOperationBinding(request, inspection, owner, target, parsed.expectedLinks, revalidation)
 			prepared.Binding = delegatedReleaseOperationBinding(prepared.Binding, delegate)
+			prepared.Binding = activationRecoveryOperationBinding(prepared.Binding, recoveryRequest)
 		}
 	}()
 	goal := releasetransition.Goal{Target: request.Target, Direction: request.Direction}
@@ -1306,9 +1325,7 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithDelegate(
 			request.Execution = &releasetransition.Execution{
 				Plan: inspection.Plan, Authorization: grant,
 			}
-			converged, convergeErr := runtime.invokeTransitionExecution(
-				ctx, verifiedOwner, delegate, request, grant,
-			)
+			converged, convergeErr := runtime.invokePreparedTransitionExecution(ctx, verifiedOwner, delegate, request, grant, recoveryRequest)
 			if convergeErr != nil {
 				return convergeErr
 			}
@@ -1325,9 +1342,7 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithDelegate(
 				if converged.Outcome.Code == releasetransition.CodePlanStale {
 					request.Mode = releasetransition.ProcessInspect
 					request.Execution = nil
-					rechecked, recheckErr := runtime.invokeTransitionExecution(
-						ctx, verifiedOwner, delegate, request, "",
-					)
+					rechecked, recheckErr := runtime.invokePreparedTransitionExecution(ctx, verifiedOwner, delegate, request, "", recoveryRequest)
 					if recheckErr != nil {
 						return recheckErr
 					}

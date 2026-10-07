@@ -1,0 +1,179 @@
+package releasetransition
+
+import (
+	"bytes"
+	"strings"
+)
+
+var recoveryReceiptParts = []string{"release-transition", "recovery", "v1", "transactions"}
+
+// Recovery receipts live outside the frozen V2 transaction graph so retained
+// cleanup cannot erase predecessor evidence it does not understand.
+func (store *POSIXV2Store) ReadRecoveryReceipt(transaction TransactionID) (ProtectedSnapshot, error) {
+	if err := validateTransactionID(transaction); err != nil {
+		return ProtectedSnapshot{}, err
+	}
+	return store.readRecord(recoveryReceiptParts, string(transaction)+".json")
+}
+
+// ReadRecoveryReceiptForPublication includes a fsynced pending receipt so a
+// fresh authorized process can reuse the exact initial successor after a crash.
+// The caller still revalidates the plan and obtains fresh authorization; it
+// cannot manufacture or recover the original ephemeral grant from this data.
+func (store *POSIXV2Store) ReadRecoveryReceiptForPublication(transaction TransactionID) (RecoveryReceiptV1, bool, error) {
+	if err := validateTransactionID(transaction); err != nil {
+		return RecoveryReceiptV1{}, false, err
+	}
+	receipts, err := store.readRecoveryReceipts()
+	if err != nil {
+		return RecoveryReceiptV1{}, false, err
+	}
+	receipt, found := receipts[transaction]
+	return receipt, found, nil
+}
+
+// CreateRecoveryReceipt publishes immutable evidence before journal CAS. The
+// caller holds the shared update lock through assessment, publication and CAS.
+func (store *POSIXV2Store) CreateRecoveryReceipt(transaction TransactionID, payload []byte) error {
+	receipt, err := ParseRecoveryReceipt(payload)
+	if err != nil {
+		return err
+	}
+	canonical, err := MarshalRecoveryReceipt(receipt)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(payload, canonical) || receipt.Successor.Transaction != transaction {
+		return invalid("recovery receipt is not the canonical selected successor")
+	}
+	resolved, err := store.ResolveRecoveryTransaction(transaction, receipt.Replacement, receipt.Successor.AuthorizationPlan)
+	if err != nil {
+		return err
+	}
+	if resolved != transaction {
+		return invalid("recovery predecessor already has another selected successor")
+	}
+	return store.createImmutable(recoveryReceiptParts, string(transaction)+".json", payload)
+}
+
+// ResolveRecoveryTransaction admits one successor per predecessor and reuses
+// exact evidence already published (or fsynced pending) before a failed CAS.
+// Recovery V1 intentionally excludes replacement chains. The caller holds Lock.
+func (store *POSIXV2Store) ResolveRecoveryTransaction(
+	proposed TransactionID,
+	replacement ActivationOnlyRecoveryRequest,
+	authorizationPlan PlanToken,
+) (TransactionID, error) {
+	if err := replacement.Validate(); err != nil {
+		return "", err
+	}
+	if err := validateTransactionID(proposed); err != nil {
+		return "", err
+	}
+	if err := validatePlanToken(authorizationPlan); err != nil {
+		return "", err
+	}
+	if !strings.HasPrefix(string(proposed), RecoveryTransactionPrefixV1) ||
+		strings.HasPrefix(string(replacement.Transaction), RecoveryTransactionPrefixV1) || proposed == replacement.Transaction {
+		return "", invalid("activation recovery V1 does not admit replacement chains")
+	}
+	receipts, err := store.readRecoveryReceipts()
+	if err != nil {
+		return "", err
+	}
+	for transaction, receipt := range receipts {
+		if receipt.Replacement.Transaction == replacement.Transaction {
+			if receipt.Replacement == replacement && receipt.Successor.AuthorizationPlan == authorizationPlan {
+				return transaction, nil
+			}
+			return "", invalid("recovery predecessor already has a different successor plan")
+		}
+		if transaction == proposed {
+			return "", invalid("recovery successor transaction already exists")
+		}
+	}
+	if len(receipts) >= maxTransactionGraphEntries {
+		return "", invalid("activation recovery receipt horizon is full")
+	}
+	return proposed, nil
+}
+
+// ValidateCurrentRecovery requires provenance for the reserved successor IDs.
+// Ordinary journals remain independent of unrelated recovery receipts.
+func (store *POSIXV2Store) ValidateCurrentRecovery(current JournalRecord) error {
+	if !strings.HasPrefix(string(current.Transaction), RecoveryTransactionPrefixV1) {
+		return nil
+	}
+	snapshot, err := store.ReadRecoveryReceipt(current.Transaction)
+	if err != nil {
+		return err
+	}
+	if !snapshot.Exists {
+		return invalid("activation recovery successor has no protected receipt")
+	}
+	receipt, err := ParseRecoveryReceipt(snapshot.Payload)
+	if err != nil {
+		return err
+	}
+	if _, err := store.readRecoveryReceipts(); err != nil {
+		return err
+	}
+	return receipt.MatchesSuccessor(current)
+}
+
+func (store *POSIXV2Store) readRecoveryReceipts() (map[TransactionID]RecoveryReceiptV1, error) {
+	entries, present, err := store.readDirectoryEntries(recoveryReceiptParts, maxTransactionGraphEntries*2)
+	if err != nil || !present {
+		return nil, err
+	}
+	if len(entries) > maxTransactionGraphEntries*2 {
+		return nil, invalid("too many activation recovery receipt entries")
+	}
+	receipts := make(map[TransactionID]RecoveryReceiptV1, len(entries))
+	predecessors := make(map[TransactionID]TransactionID, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		transactionName := name
+		if strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".json.pending") {
+			transactionName = strings.TrimSuffix(strings.TrimPrefix(name, "."), ".json.pending")
+		} else if strings.HasSuffix(name, ".json") {
+			transactionName = strings.TrimSuffix(name, ".json")
+		} else {
+			return nil, invalid("unrecognized activation recovery receipt entry")
+		}
+		transaction := TransactionID(transactionName)
+		if err := validateTransactionID(transaction); err != nil {
+			return nil, err
+		}
+		snapshot, err := store.readRecord(recoveryReceiptParts, name)
+		if err != nil {
+			return nil, err
+		}
+		if !snapshot.Exists {
+			return nil, invalid("activation recovery receipt disappeared during inspection")
+		}
+		receipt, err := ParseRecoveryReceipt(snapshot.Payload)
+		if err != nil {
+			return nil, err
+		}
+		canonical, err := MarshalRecoveryReceipt(receipt)
+		if err != nil || !bytes.Equal(canonical, snapshot.Payload) || receipt.Successor.Transaction != transaction {
+			return nil, invalid("activation recovery receipt does not match canonical successor")
+		}
+		if prior, exists := receipts[transaction]; exists {
+			priorPayload, err := MarshalRecoveryReceipt(prior)
+			if err != nil || !bytes.Equal(priorPayload, canonical) {
+				return nil, invalid("pending activation recovery receipt conflicts with published evidence")
+			}
+		}
+		if successor, exists := predecessors[receipt.Replacement.Transaction]; exists && successor != transaction {
+			return nil, invalid("activation recovery receipts share a predecessor")
+		}
+		receipts[transaction] = receipt
+		predecessors[receipt.Replacement.Transaction] = transaction
+	}
+	if len(receipts) > maxTransactionGraphEntries {
+		return nil, invalid("too many activation recovery receipts")
+	}
+	return receipts, nil
+}

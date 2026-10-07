@@ -67,16 +67,17 @@ func assessV2BlockedRollback(policy *domain.ActionRegistry) (domain.ActionAssess
 }
 
 type V2Options struct {
-	ConfigHome        string
-	Releases          ReleasePair
-	Direction         Direction
-	ObserveLinks      func(context.Context) (ReleaseLinks, error)
-	ActivateLinks     func(context.Context, ReleasePair) (ReleaseLinks, error)
-	Reconcilers       []V2ActivationReconciler
-	OwnerRegistration V2OwnerRegistration
-	Ingress           V2Ingress
-	RegistryPayload   []byte
-	ArtifactDigest    Fingerprint
+	ConfigHome         string
+	CandidateConfigDir string
+	Releases           ReleasePair
+	Direction          Direction
+	ObserveLinks       func(context.Context) (ReleaseLinks, error)
+	ActivateLinks      func(context.Context, ReleasePair) (ReleaseLinks, error)
+	Reconcilers        []V2ActivationReconciler
+	OwnerRegistration  V2OwnerRegistration
+	Ingress            V2Ingress
+	RegistryPayload    []byte
+	ArtifactDigest     Fingerprint
 	// CandidateVersion is the trusted compiled runtime semver; ReleaseIDs remain opaque identities.
 	CandidateVersion    string
 	RollbackTarget      *RollbackTarget
@@ -217,6 +218,9 @@ func NewV2Transition(options V2Options) (*V2Transition, error) {
 		journal, parseErr := ParseJournal(journalSnapshot.Payload)
 		if parseErr != nil {
 			return nil, parseErr
+		}
+		if err := store.ValidateCurrentRecovery(journal); err != nil {
+			return nil, err
 		}
 		if options.Replacement == nil && journal.Checkpoint != JournalComplete {
 			// The protected journal owns the immutable release pair while it is
@@ -1073,6 +1077,9 @@ func (transition *V2Transition) observe(ctx context.Context, goal Goal) (v2Obser
 		if graphErr := transition.store.validateCurrentSupersession(parsed); graphErr != nil {
 			return v2Observation{}, graphErr
 		}
+		if err := transition.store.ValidateCurrentRecovery(parsed); err != nil {
+			return v2Observation{}, err
+		}
 		journal = &parsed
 	}
 	observation := v2Observation{
@@ -1141,16 +1148,11 @@ func (transition *V2Transition) observe(ctx context.Context, goal Goal) (v2Obser
 		}
 	}
 	if observation.observationScope == "" {
-		if err := transition.observeActivation(ctx, &observation); err != nil {
+		if err := transition.observeActivationScope(ctx, &observation); err != nil {
 			return v2Observation{}, err
 		}
-		observationScope, err := transition.bindObservationScope(observation.activationScope)
-		if err != nil {
-			return v2Observation{}, err
-		}
-		observation.observationScope = observationScope
 		if journal != nil && journal.Checkpoint != JournalComplete &&
-			journal.ObservationScope != observationScope {
+			journal.ObservationScope != observation.observationScope {
 			observation.blockers = append(observation.blockers, Blocker{
 				Code: CodePlanStale, Resource: "transition.observation-scope",
 				Message: "the authorized transition observation scope differs from this engine",
@@ -1420,10 +1422,12 @@ func (transition *V2Transition) observeFresh(
 	for _, migration := range pending {
 		switch migration.Kind {
 		case "test-vms-settings-v1-to-v2":
-			plan, inspectErr := newTestVMSettingsV2Capability(
+			capability := newTestVMSettingsV2Capability(
 				transition.options.ConfigHome, transition.options.InheritedSettingIDs,
 				settingsView,
-			).Inspect()
+			)
+			capability.candidateConfigDir = transition.options.CandidateConfigDir
+			plan, inspectErr := capability.Inspect()
 			if inspectErr != nil {
 				return inspectErr
 			}
@@ -1571,10 +1575,12 @@ func (transition *V2Transition) observeResume(
 		if exists && migration.Kind == "test-vms-settings-v1-to-v2" {
 			// Ledger-only steps retain migration scope; activation-only repair
 			// must not reopen completed settings migration history.
-			capabilityPlan, err = newTestVMSettingsV2Capability(
+			capability := newTestVMSettingsV2Capability(
 				transition.options.ConfigHome, transition.options.InheritedSettingIDs,
 				ingressPlan.Prospective,
-			).Inspect()
+			)
+			capability.candidateConfigDir = transition.options.CandidateConfigDir
+			capabilityPlan, err = capability.Inspect()
 			if err != nil {
 				return err
 			}
@@ -2660,8 +2666,37 @@ func (transition *V2Transition) reconcileActivation(
 			), nil
 		}
 		actual, err := reconciler.Observe(ctx, journal.Releases, links)
-		if err != nil || validateActivationObservation(id, actual) != nil ||
-			!actual.Converged {
+		links, guardOutcome, guardErr = transition.guardJournalLinks(ctx, journal)
+		if guardErr != nil {
+			guardOutcome = v2OperatorOutcome(ReleaseLinks{}, journal.Goal.Target,
+				transactionIDPointer(journal.Transaction), CodeRecoveryAmbiguous,
+				"release links cannot be observed during activation verification", "run yard update --check")
+			guardErr = nil
+		}
+		if guardErr != nil || guardOutcome.Code != "" {
+			if err != nil {
+				guardOutcome = withPublicFailureCause(guardOutcome, err,
+					fmt.Sprintf("activation reconciler %q failed during verification", id))
+			}
+			return guardOutcome, guardErr
+		}
+		if err != nil {
+			blocker := activationObservationBlocker(id, err)
+			outcome := v2RecoveringOutcome(links, journal.Goal.Target,
+				transactionIDPointer(journal.Transaction), blocker.Code, blocker.Message)
+			if blocker.Code == CodeActivationAmbiguous {
+				outcome.Status = StatusOperatorActionRequired
+			}
+			outcome.Retry = blocker.Retry
+			return outcome, nil
+		}
+		if validateActivationObservation(id, actual) != nil {
+			return v2OperatorOutcome(links, journal.Goal.Target,
+				transactionIDPointer(journal.Transaction), CodeRecoveryAmbiguous,
+				fmt.Sprintf("activation reconciler %q reported an invalid state during verification", id),
+				"run yard migrate --check"), nil
+		}
+		if !actual.Converged {
 			return v2RecoveringOutcome(links, journal.Goal.Target,
 				transactionIDPointer(journal.Transaction), CodeDependencyUnavailable,
 				fmt.Sprintf("activation reconciler %q did not reach its fixed point during verification", id),
@@ -2675,8 +2710,38 @@ func (transition *V2Transition) reconcileActivation(
 	if guardErr != nil || guardOutcome.Code != "" {
 		return guardOutcome, guardErr
 	}
-	id, fixed, warnings := transition.activationFixedPointStatus(ctx, journal.Releases, links)
+	id, fixed, warnings, verifyErr := transition.activationFixedPointDiagnostic(ctx, journal.Releases, links)
+	links, guardOutcome, guardErr = transition.guardJournalLinks(ctx, journal)
+	if guardErr != nil {
+		guardOutcome = v2OperatorOutcome(ReleaseLinks{}, journal.Goal.Target,
+			transactionIDPointer(journal.Transaction), CodeRecoveryAmbiguous,
+			"release links cannot be observed during aggregate activation verification", "run yard update --check")
+		guardErr = nil
+	}
+	if guardErr != nil || guardOutcome.Code != "" {
+		if verifyErr != nil {
+			guardOutcome = withPublicFailureCause(guardOutcome, verifyErr,
+				fmt.Sprintf("activation reconciler %q failed during aggregate verification", id))
+		}
+		return withActivationWarnings(guardOutcome, warnings), guardErr
+	}
 	if !fixed {
+		if verifyErr != nil {
+			if errors.Is(verifyErr, ErrInvalid) {
+				return withActivationWarnings(v2OperatorOutcome(links, journal.Goal.Target,
+					transactionIDPointer(journal.Transaction), CodeRecoveryAmbiguous,
+					fmt.Sprintf("activation reconciler %q reported an invalid state during aggregate verification", id),
+					"run yard migrate --check"), warnings), nil
+			}
+			blocker := activationObservationBlocker(id, verifyErr)
+			outcome := v2RecoveringOutcome(links, journal.Goal.Target,
+				transactionIDPointer(journal.Transaction), blocker.Code, blocker.Message)
+			if blocker.Code == CodeActivationAmbiguous {
+				outcome.Status = StatusOperatorActionRequired
+			}
+			outcome.Retry = blocker.Retry
+			return withActivationWarnings(outcome, warnings), nil
+		}
 		message := "activation reconcilers did not retain their aggregate fixed point"
 		if id != "" {
 			message = fmt.Sprintf(
@@ -2953,25 +3018,37 @@ func (transition *V2Transition) activationFixedPointStatus(
 	releases ReleasePair,
 	links ReleaseLinks,
 ) (string, bool, []string) {
+	id, fixed, warnings, _ := transition.activationFixedPointDiagnostic(ctx, releases, links)
+	return id, fixed, warnings
+}
+
+func (transition *V2Transition) activationFixedPointDiagnostic(
+	ctx context.Context,
+	releases ReleasePair,
+	links ReleaseLinks,
+) (string, bool, []string, error) {
 	warnings := []string{}
 	for _, reconciler := range transition.options.Reconcilers {
 		if reconciler == nil {
-			return "", false, warnings
+			return "", false, warnings, invalid("activation reconciler is unavailable")
 		}
 		id := reconciler.ID()
 		if validateSafeID(id, "activation reconciler ID") != nil {
-			return "", false, warnings
+			return "", false, warnings, invalid("activation reconciler identity is invalid")
 		}
 		actual, err := reconciler.Observe(ctx, releases, links)
-		if err != nil || validateActivationObservation(id, actual) != nil {
-			return id, false, warnings
+		if err != nil {
+			return id, false, warnings, err
+		}
+		if err := validateActivationObservation(id, actual); err != nil {
+			return id, false, warnings, err
 		}
 		warnings = canonicalWarnings(append(warnings, actual.Warnings...))
 		if !actual.Converged {
-			return id, false, warnings
+			return id, false, warnings, nil
 		}
 	}
-	return "", true, canonicalWarnings(warnings)
+	return "", true, canonicalWarnings(warnings), nil
 }
 
 func (transition *V2Transition) cachedGoal(plan PlanToken) (Goal, bool) {

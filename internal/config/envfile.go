@@ -3,7 +3,6 @@ package config
 import (
 	"bufio"
 	"errors"
-	"fmt"
 	"os"
 	"sort"
 	"strings"
@@ -56,7 +55,7 @@ func applyEnvFile(path string, values environment) error {
 func applyEnvFileObserved(path string, values environment, observer assignmentObserver) error {
 	file, err := os.Open(path)
 	if err != nil {
-		return err
+		return sourceAccessError(path, "scalar settings", err)
 	}
 	defer file.Close()
 	discardRetiredSettings(values)
@@ -90,15 +89,15 @@ func applyEnvFileObserved(path string, values environment, observer assignmentOb
 			}
 		}
 		if err := applyRecord(record.String(), values, recordObserver); err != nil {
-			return fmt.Errorf("%s:%d: %w", path, recordLine, err)
+			return sourceContext(path, recordLine, recordSettingKey(record.String()), "scalar settings", err)
 		}
 		record.Reset()
 	}
 	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("read config: %w", err)
+		return sourceError(path, lineNumber+1, "", "scalar settings", "cannot read config within the line size bound", err)
 	}
 	if quote != 0 || record.Len() != 0 {
-		return fmt.Errorf("%s:%d: unterminated quoted assignment", path, recordLine)
+		return sourceError(path, recordLine, recordSettingKey(record.String()), "scalar settings", "unterminated quoted assignment", nil)
 	}
 	return nil
 }
@@ -142,11 +141,11 @@ func applyRecord(record string, values environment, observer func(name, value st
 	}
 	separator := strings.IndexByte(record, '=')
 	if separator < 1 {
-		return errors.New("only variable assignments are allowed")
+		return sourceError("", 0, "", "scalar settings", "only variable assignments are allowed", nil)
 	}
 	name := strings.TrimSpace(record[:separator])
 	if !ValidVariable(name) {
-		return fmt.Errorf("invalid variable name %q", name)
+		return sourceError("", 0, "", "scalar settings", "invalid variable name", nil)
 	}
 	if isRetiredSetting(name) {
 		// Validate the old expression without allowing its assignments or nested
@@ -193,7 +192,7 @@ func expandValue(
 	observer func(name, value string),
 ) (string, error) {
 	if strings.Contains(value, "$(") || strings.ContainsRune(value, '`') {
-		return "", errors.New("command substitution is not allowed in config")
+		return "", sourceError("", 0, "", "scalar settings", "command substitution is not allowed in config", nil)
 	}
 	var result strings.Builder
 	for index := 0; index < len(value); {
@@ -255,7 +254,7 @@ func parameterEnd(value string, start int) (int, error) {
 			}
 		}
 	}
-	return 0, errors.New("unterminated parameter expansion")
+	return 0, sourceError("", 0, "", "scalar settings", "unterminated parameter expansion", nil)
 }
 
 func expandParameter(
@@ -265,7 +264,7 @@ func expandParameter(
 ) (string, error) {
 	name, operator, fallback := splitParameter(expression)
 	if !ValidVariable(name) {
-		return "", fmt.Errorf("invalid parameter name %q", name)
+		return "", sourceError("", 0, "", "scalar settings", "invalid parameter name", nil)
 	}
 	if isRetiredSetting(name) {
 		values = cloneEnvironment(values)
@@ -287,7 +286,7 @@ func expandParameter(
 			if expanded == "" {
 				expanded = name + " is required"
 			}
-			return "", errors.New(expanded)
+			return "", sourceError("", 0, recognizedSettingKey(Catalog{}, name), "scalar settings", "required parameter is unset", errors.New(expanded))
 		}
 		if operator == ":=" {
 			values[name] = expanded
@@ -297,7 +296,7 @@ func expandParameter(
 		}
 		return expanded, nil
 	default:
-		return "", fmt.Errorf("unsupported parameter operator %q", operator)
+		return "", sourceError("", 0, recognizedSettingKey(Catalog{}, name), "scalar settings", "unsupported parameter operator", nil)
 	}
 }
 

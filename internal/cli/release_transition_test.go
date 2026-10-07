@@ -79,6 +79,40 @@ func TestMaterializedConfigScopeBindsPersistedIntegrationSelection(t *testing.T)
 	}
 }
 
+func TestMaterializedConfigRecoveryPlanExcludesOperationContext(t *testing.T) {
+	root, _, configHome, environment := configCommandFixture(t)
+	settingsPath := filepath.Join(configHome, "config.env")
+	writeConfigCommandFile(t, settingsPath, "CODING_TOOL_INTEGRATIONS='codex'\n")
+	incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{}}
+	program, err := New(Options{RepositoryRoot: root, Environment: environment,
+		Incus: incus, Executor: incus, Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciler := &materializedConfigActivationReconciler{
+		cli: program, yard: "default", configHome: configHome, allLocal: true, scopeResolved: true,
+	}
+	plan := func(operationID string) releasetransition.Fingerprint {
+		t.Helper()
+		program.env["SUBYARD_OPERATION_ID"] = operationID
+		binding, err := reconciler.PrepareActivationRecovery(context.Background(),
+			releasetransition.ReleasePair{From: "release-a", Target: "release-a"},
+			releasetransition.ReleaseLinks{Active: "release-a"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return binding
+	}
+	original := plan("op-first")
+	if repeated := plan("op-second"); repeated != original {
+		t.Fatal("operation context changed the native resource recovery plan")
+	}
+	writeConfigCommandFile(t, settingsPath, "CODING_TOOL_INTEGRATIONS='claude'\n")
+	if changed := plan("op-third"); changed == original {
+		t.Fatal("changed desired resources did not change the native recovery plan")
+	}
+}
+
 func TestMaterializedConfigObservationDirectsToReadOnlyDiagnostic(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	configHome := filepath.Join(root, "state")
@@ -274,8 +308,15 @@ esac
 	writeCLIFile(t, filepath.Join(home, "fail-sample"), "", 0o600)
 	if err := reconciler.Reconcile(ctx, releasetransition.ReleaseLinks{}); err == nil {
 		t.Fatal("failed helper installation was accepted")
-	} else if !strings.Contains(err.Error(), "yard default profile runtime refresh:") {
-		t.Fatalf("failed helper installation lost its diagnostic: %v", err)
+	} else {
+		var diagnostic interface{ ActivationDiagnostic() (string, string) }
+		if !errors.As(err, &diagnostic) {
+			t.Fatalf("failed helper installation lost its diagnostic: %v", err)
+		}
+		message, retry := diagnostic.ActivationDiagnostic()
+		if !strings.Contains(message, "yard default") || !strings.Contains(message, "sample-runtime") || !strings.Contains(message, "apply") || retry != "run yard -Y default status" {
+			t.Fatalf("failed helper diagnostic: %q / %q", message, retry)
+		}
 	}
 	if err := os.Remove(filepath.Join(home, "fail-sample")); err != nil {
 		t.Fatal(err)

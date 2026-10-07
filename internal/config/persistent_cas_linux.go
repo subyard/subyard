@@ -41,7 +41,13 @@ func compareAndSwapPersistentFileGuarded(
 	desired []byte,
 	guard func() error,
 	fault func(string) error,
-) error {
+) (result error) {
+	defer func() {
+		var source *SourceError
+		if errors.As(result, &source) && source.Path == "" {
+			result = sourceContext(path, 0, "", source.Role, result)
+		}
+	}()
 	if !expected.Exists || expected.Identity == (PersistentFileIdentity{}) {
 		return errors.New("protected persistent CAS requires an exact existing snapshot")
 	}
@@ -58,12 +64,13 @@ func compareAndSwapPersistentFileGuarded(
 		0,
 	)
 	if err != nil {
-		return err
+		return sourceAccessError(configHome, "persistent settings directory", err)
 	}
 	defer unix.Close(root)
 	current := root
+	currentPath := filepath.Clean(configHome)
 	if err := validatePersistentDirectoryFD(current); err != nil {
-		return err
+		return sourceContext(currentPath, 0, "", "persistent settings directory", err)
 	}
 	if err := unix.Flock(root, unix.LOCK_EX); err != nil {
 		return err
@@ -84,19 +91,21 @@ func compareAndSwapPersistentFileGuarded(
 			if current != root {
 				_ = unix.Close(current)
 			}
-			return openErr
+			return sourceAccessError(filepath.Join(currentPath, part), "persistent settings directory", openErr)
 		}
+		nextPath := filepath.Join(currentPath, part)
 		if err := validatePersistentDirectoryFD(next); err != nil {
 			_ = unix.Close(next)
 			if current != root {
 				_ = unix.Close(current)
 			}
-			return err
+			return sourceContext(nextPath, 0, "", "persistent settings directory", err)
 		}
 		if current != root {
 			_ = unix.Close(current)
 		}
 		current = next
+		currentPath = nextPath
 	}
 	if current != root {
 		defer unix.Close(current)
@@ -165,9 +174,14 @@ func validatePersistentDirectoryFD(fd int) error {
 	if err := unix.Fstat(fd, &stat); err != nil {
 		return err
 	}
-	if stat.Mode&unix.S_IFMT != unix.S_IFDIR || stat.Mode&0o022 != 0 ||
-		stat.Uid != uint32(os.Getuid()) {
-		return errors.New("persistent setting directory has unsafe type, mode, or ownership")
+	if stat.Mode&unix.S_IFMT != unix.S_IFDIR {
+		return sourceError("", 0, "", "persistent settings directory", "directory has unsafe type", nil)
+	}
+	if stat.Mode&0o022 != 0 {
+		return sourceError("", 0, "", "persistent settings directory", "directory is group/world writable", nil)
+	}
+	if stat.Uid != uint32(os.Getuid()) {
+		return sourceError("", 0, "", "persistent settings directory", "directory is not operator-owned", nil)
 	}
 	return nil
 }
@@ -178,26 +192,35 @@ func readPersistentSnapshotAt(parent int, name string) (PersistentFileSnapshot, 
 		return PersistentFileSnapshot{}, nil
 	}
 	if err != nil {
-		return PersistentFileSnapshot{}, err
+		return PersistentFileSnapshot{}, sourceAccessError("", "persistent settings", err)
 	}
 	file := os.NewFile(uintptr(fd), name)
 	defer file.Close()
 	var stat unix.Stat_t
 	if err := unix.Fstat(fd, &stat); err != nil {
-		return PersistentFileSnapshot{}, err
+		return PersistentFileSnapshot{}, sourceAccessError("", "persistent settings", err)
 	}
-	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Mode&0o022 != 0 ||
-		stat.Uid != uint32(os.Getuid()) || stat.Nlink != 1 || stat.Size > 8<<20 {
-		return PersistentFileSnapshot{}, errors.New(
-			"persistent setting target has unsafe type, mode, ownership, links, or size",
-		)
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG {
+		return PersistentFileSnapshot{}, sourceError("", 0, "", "persistent settings", "target must be a regular non-symlink file", nil)
+	}
+	if stat.Mode&0o022 != 0 {
+		return PersistentFileSnapshot{}, sourceError("", 0, "", "persistent settings", "target is group/world writable", nil)
+	}
+	if stat.Uid != uint32(os.Getuid()) {
+		return PersistentFileSnapshot{}, sourceError("", 0, "", "persistent settings", "target is not operator-owned", nil)
+	}
+	if stat.Nlink != 1 {
+		return PersistentFileSnapshot{}, sourceError("", 0, "", "persistent settings", "target has hard links", nil)
+	}
+	if stat.Size > 8<<20 {
+		return PersistentFileSnapshot{}, sourceError("", 0, "", "persistent settings", "target exceeds its size bound", nil)
 	}
 	content, err := io.ReadAll(io.LimitReader(file, (8<<20)+1))
 	if err != nil {
-		return PersistentFileSnapshot{}, err
+		return PersistentFileSnapshot{}, sourceAccessError("", "persistent settings", err)
 	}
 	if len(content) > 8<<20 {
-		return PersistentFileSnapshot{}, errors.New("persistent setting content exceeds its size bound")
+		return PersistentFileSnapshot{}, sourceError("", 0, "", "persistent settings", "target exceeds its size bound", nil)
 	}
 	return PersistentFileSnapshot{
 		Exists:  true,

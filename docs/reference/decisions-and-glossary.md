@@ -374,9 +374,14 @@ inputs may yield plan-stale; file-bound verified settings receipts can also yiel
 migration-stale. New consent alone cannot bypass either, and deleting/editing journal is
 forbidden. Exactly restored original inputs may resume existing authorization. Current records
 contain a hash of observation scope, not a complete frozen copy of original inputs; they cannot
-safely support arbitrary replacement or silent settings reset. No generic activation-repair
-bypass is promised. Unknown partial mutation, unfinished source/settings work, ownership
-conflict, and corrupt/foreign state require supported recovery rather than invented convergence.
+safely support arbitrary replacement or silent settings reset. Bounded fresh-plan recovery admits
+only forward activation-only reconciling journals without migration steps, with the target already
+active, exact links, unchanged sealed owner and completed ledger. Native owners prove safe plans
+against current ownership; a new grant binds the predecessor and new desired scope. A negotiated
+separate contract publishes immutable predecessor evidence before journal CAS while retaining
+frozen V1 and canonical V2 semantics for old callers. No replacement chains or generic bypass:
+unknown partial mutation, source/settings work (including verified steps), ownership conflict and
+corrupt/foreign state remain blocked. See [Release migrations](../control-plane.md#release-migrations).
 
 <a id="resources-and-test-vm-admission"></a>
 

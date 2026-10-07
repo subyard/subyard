@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestTestVMSettingsV2PlansAggregateCanonicalizeAndReset(t *testing.T) {
@@ -65,6 +66,69 @@ func TestTestVMSettingsV2PreservesCurrentAndUnrelatedSettings(t *testing.T) {
 	}
 }
 
+func TestTestVMSettingsV2PreservesSupportedNonTargetTemplate(t *testing.T) {
+	configHome := settingsV2Fixture(t, map[string]string{
+		"yards/ordinary/config.env": "YARD_TEMPLATE=synthetic-other\nNESTED_E2E_VMS=0\nSSH_PORT=2224\n",
+		"yards/hermes/config.env":   "YARD_TEMPLATE=e2e-vms\nNESTED_E2E_VMS=0\n",
+	})
+	candidateConfigDir := filepath.Join(configHome, "candidate", "config")
+	profilePath := filepath.Join(candidateConfigDir, "yards", "profiles", "synthetic-other.env")
+	if err := os.MkdirAll(filepath.Dir(profilePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, profilePath, []byte("YARD_KIND=vm\n"), 0o600)
+	capability := newTestVMSettingsV2Capability(configHome, nil)
+	capability.candidateConfigDir = candidateConfigDir
+	plan, err := capability.Inspect()
+	if err != nil || len(plan.Blockers) != 0 || len(plan.Files) != 1 || plan.Files[0].Yard != "hermes" {
+		t.Fatalf("mixed supported-template plan = %#v, err=%v", plan, err)
+	}
+	ordinaryPath := filepath.Join(configHome, "yards", "ordinary", "config.env")
+	ordinary, err := os.ReadFile(ordinaryPath)
+	if err != nil || string(ordinary) != "YARD_TEMPLATE=synthetic-other\nNESTED_E2E_VMS=0\nSSH_PORT=2224\n" {
+		t.Fatalf("non-target settings changed: %q, err=%v", ordinary, err)
+	}
+	assertSettingsV2Decision(t, plan.Decisions, "ordinary", "YARD_TEMPLATE", DecisionPreserve, "preserved")
+}
+
+func TestTestVMSettingsV2IgnoresInheritedSettingsOnSupportedNonTarget(t *testing.T) {
+	configHome := settingsV2Fixture(t, map[string]string{
+		"yards/ordinary/config.env": "YARD_TEMPLATE=synthetic-other\n",
+	})
+	candidateConfigDir := filepath.Join(configHome, "candidate", "config")
+	profilePath := filepath.Join(candidateConfigDir, "yards", "profiles", "synthetic-other.env")
+	if err := os.MkdirAll(filepath.Dir(profilePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, profilePath, []byte("YARD_KIND=vm\n"), 0o600)
+	capability := newTestVMSettingsV2Capability(
+		configHome, []string{"YARD_TEMPLATE", "NESTED_E2E_VMS"},
+	)
+	capability.candidateConfigDir = candidateConfigDir
+	plan, err := capability.Inspect()
+	if err != nil || len(plan.Blockers) != 0 || len(plan.Files) != 0 {
+		t.Fatalf("non-target inherited plan = %#v, err=%v", plan, err)
+	}
+}
+
+func TestTestVMSettingsV2DoesNotTrustInvalidCandidateTemplate(t *testing.T) {
+	configHome := settingsV2Fixture(t, map[string]string{
+		"yards/ordinary/config.env": "YARD_TEMPLATE=synthetic-other\n",
+	})
+	candidateConfigDir := filepath.Join(configHome, "candidate", "config")
+	profilePath := filepath.Join(candidateConfigDir, "yards", "profiles", "synthetic-other.env")
+	if err := os.MkdirAll(filepath.Dir(profilePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, profilePath, []byte("NOT_A_SETTING=value\n"), 0o600)
+	capability := newTestVMSettingsV2Capability(configHome, nil)
+	capability.candidateConfigDir = candidateConfigDir
+	plan, err := capability.Inspect()
+	if err != nil || len(plan.Blockers) != 1 || len(plan.Files) != 0 {
+		t.Fatalf("invalid candidate template plan = %#v, err=%v", plan, err)
+	}
+}
+
 func TestTestVMSettingsV2ResetsCurrentProfileOverride(t *testing.T) {
 	configHome := settingsV2Fixture(t, map[string]string{
 		"yards/hermes.env": "YARD_TEMPLATE=test-vms\nNESTED_E2E_VMS=0\n",
@@ -102,7 +166,7 @@ func TestTestVMSettingsV2BlocksUnknownDuplicateAndDynamicValues(t *testing.T) {
 			if strings.Contains(test.name, "nested") {
 				setting = "NESTED_E2E_VMS"
 			}
-			if !strings.HasPrefix(plan.Blockers[0].Message, "yard hermes: "+setting+" ") {
+			if !strings.HasPrefix(plan.Blockers[0].Message, "yard hermes: yards/hermes/config.env:") || !strings.Contains(plan.Blockers[0].Message, setting) {
 				t.Fatalf("blocker omits yard or setting: %#v", plan.Blockers[0])
 			}
 			if err := plan.Blockers[0].Validate(); err != nil {

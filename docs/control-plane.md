@@ -386,9 +386,13 @@ forward recovery and post-activation reconciliation. A completed one-time migrat
 history and is never reopened to repair later drift.
 When switching releases after source migrations are complete, materialized-config
 activation observes and reconciles all registered local yards, using the same scope
-as the completed release's readiness check. Pending source migrations retain their
-selected-yard scope across recovery because they can rename yard registrations.
-This config reconciliation leaves stopped or absent yards untouched.
+as the completed release's readiness check. Fresh plans whose prepared source work
+only advances the ledger also assess all local yards before authorization. Actual
+settings, registration or ingress mutations retain their selected-yard scope across
+recovery because they can change configuration or rename registrations. Historical
+journals keep their recorded scope; a reconstructed all-local scope may resume only
+when its complete observation binding matches that journal exactly. Config
+reconciliation leaves stopped or absent yards untouched.
 
 Activation observers do not print diagnostics. Return expected drift as
 `Converged: false`, persistent notices as `V2ActivationObservation.Warnings`, and
@@ -400,6 +404,12 @@ ambiguous state and protected transition guards retain their own recovery instru
 The original public failure also remains visible when recovery observation adds a blocker
 or cannot establish a safe state. The recovery status and next action continue to describe
 the controlling guard. Settings blockers identify the yard without exposing assignment values.
+Configuration failures retain the failing yard, inspect/apply/verify phase, source role,
+path relative to config home, canonical key and line when known. Their public reason is fixed;
+assignment values, arbitrary parser text and guest stderr are never rendered. A suggested
+`yard -Y <yard> config status` remains read-only during recovery and preserves this source context.
+Post-apply observation failure retains its adapter diagnostic; invalid observation requires
+operator action, while valid remaining drift stays recoverable.
 Failed update summaries render the validated execution outcome immediately; they do not
 run another inspection or claim that final readiness was verified.
 Stage adapters may implement `VerifyStageWithDiagnostic` for post-apply validation.
@@ -415,6 +425,9 @@ their validated path and inspection command across the release boundary; they mu
 Each compiled capability classifies its bounded resources as preserve, transform, canonicalize,
 reset or block before confirmation. An authorized reset is a successful, journaled one-time result;
 unknown or ambiguous state produces a structured operator-action outcome without overwriting it.
+Settings migration classifies direct yard templates against the verified candidate's configuration
+catalog and shipped template contract. Supported templates outside the migration's resource scope
+are preserved byte for byte; unknown, dynamic or duplicate template assignments still block.
 
 `yard migrate --check` reports readiness of the exact installed `current` release: per-domain
 recorded and required epochs, applied and pending migration IDs, transaction/step checkpoints,
@@ -474,6 +487,29 @@ transition owner after interruption or rollback. New migration internals do not 
 shared representation automatically; runtime-specific recovery changes require an explicit,
 compatible storage design.
 
+Changed inputs in an unfinished activation-only transaction have a bounded fresh-plan path.
+It requires a forward `reconciling` journal with no source ingress or migration steps, the target
+already active, exact runtime links, an unchanged verified owner/artifact/registry/catalog and
+a completed migration ledger. Each drifting activation owner must provide a safe native plan
+that validates current ownership; observation hashes alone do not prove safe partial application.
+The fresh assessment binds the predecessor journal, ledger, links, actual state, desired scope and
+native plans. `yard migrate` or `yard update` presents its consequences and requires new consent;
+the predecessor's grant and resume token cannot authorize changed inputs.
+
+This path uses the separate strict process schema 2, negotiated by an explicit
+`activation-only-replacement-v1` capability probe against the same sealed owner. Ordinary calls
+remain V1. Owners without that capability retain exact-input resume and never receive replacement
+writes. A V1 retained caller can inspect and resume the successor through its verified owner.
+The journal stays canonical V2. Immutable receipt schema 1 under
+`release-transition/recovery/v1/transactions` stores the canonical predecessor and initial successor,
+ledger fingerprint, owner, links and native plan bindings outside the frozen V2 cleanup graph.
+Under the shared update lock, the owner rechecks the assessment, publishes the receipt, then uses
+CAS to replace the exact current journal. A crash before CAS retains the original journal and
+reuses the exact receipt after fresh authorization; after CAS, ordinary resume completes the
+successor. Links and completed ledger bytes stay unchanged. Replacement chains, settings journals
+(including verified steps), source migrations, foreign state and unproven partial apply remain
+excluded. The protocol does not reconstruct original inputs from a hash or reset settings.
+
 The release-transition journal is authoritative recovery state, not an operator transcript. A
 separate structured update history under `$SUBYARD_HOME/logs/updates` records each committed
 activation or rollback attempt, direct preparation failure, and declined confirmation with a unique
@@ -485,7 +521,9 @@ that history and `yard logs --audit [-n N]` reads the current command audit file
 through normal owner routing.
 
 Introduce a new protocol by first shipping support alongside V1 while continuing to send V1.
-Only a subsequent release may start using the new protocol with owners that support it. Retain
+Only a subsequent release may replace the default protocol with owners that support it. An optional
+same-owner recovery extension may use its separate contract only after an explicit capability probe
+and proof that retained V1 callers can read, select and resume its unchanged V2 successor. Retain
 the old reader, writer and semantics throughout the supported upgrade, retained-runtime rollback
 and unfinished-transaction recovery horizon. A runtime version bump alone never changes these
 contracts. Do not weaken validation or silently discard a new safety requirement to fit an old

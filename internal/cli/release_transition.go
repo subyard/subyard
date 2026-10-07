@@ -34,15 +34,37 @@ func (cli *CLI) runReleaseTransition(ctx context.Context, arguments []string) in
 	protocolOutput := cli.options.Stdout
 	cli.options.Stdout = io.Discard
 	defer func() { cli.options.Stdout = protocolOutput }()
-	var request releasetransition.ProcessRequest
-	decoder := json.NewDecoder(io.LimitReader(cli.options.Stdin, releaseTransitionRequestLimit+1))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&request); err != nil {
+	payload, err := io.ReadAll(io.LimitReader(cli.options.Stdin, releaseTransitionRequestLimit+1))
+	var envelope struct {
+		SchemaVersion int `json:"schemaVersion"`
+	}
+	if err != nil || len(payload) > releaseTransitionRequestLimit || json.Unmarshal(payload, &envelope) != nil {
 		cli.errorf("release transition request is invalid")
 		return 2
 	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+	var request releasetransition.ProcessRequest
+	var recovery *releasetransition.ActivationOnlyRecoveryRequest
+	if envelope.SchemaVersion == releasetransition.ProcessRecoverySchemaV2 {
+		parsed, err := releasetransition.ParseRecoveryProcessRequest(payload)
+		if err != nil {
+			cli.errorf("release recovery request is invalid")
+			return 2
+		}
+		if parsed.Mode == releasetransition.RecoveryProcessCapabilities {
+			capabilities := releasetransition.ActivationOnlyRecoveryCapabilities()
+			response := releasetransition.RecoveryProcessResponse{SchemaVersion: releasetransition.ProcessRecoverySchemaV2, Capabilities: &capabilities}
+			encoded, err := releasetransition.MarshalRecoveryProcessResponse(response)
+			if err != nil {
+				return 1
+			}
+			_, err = fmt.Fprintln(protocolOutput, string(encoded))
+			if err != nil {
+				return 1
+			}
+			return 0
+		}
+		request, recovery = parsed.TransitionRequest(), parsed.Recovery
+	} else if envelope.SchemaVersion != releasetransition.ProcessProtocolSchemaV1 || json.Unmarshal(payload, &request) != nil {
 		cli.errorf("release transition request is invalid")
 		return 2
 	}
@@ -64,13 +86,21 @@ func (cli *CLI) runReleaseTransition(ctx context.Context, arguments []string) in
 		ctx, cli.options.RepositoryRoot, request,
 		func(plan releasetransition.PlanToken, authorization releasetransition.Authorization) bool {
 			return expectedAuthorization != "" && authorization == expectedAuthorization
-		}, reconcilers, ownerRegistration, ingressFactory,
+		}, reconcilers, ownerRegistration, ingressFactory, recovery,
 	)
 	if err != nil {
 		cli.errorf("release transition: %v", err)
 		return 1
 	}
-	if err := json.NewEncoder(protocolOutput).Encode(response); err != nil {
+	var publicResponse any = response
+	if recovery != nil {
+		publicResponse = releasetransition.RecoveryProcessResponse{
+			SchemaVersion:                 releasetransition.ProcessRecoverySchemaV2,
+			ActivationReconciliationOwned: response.ActivationReconciliationOwned,
+			Inspection:                    response.Inspection, Outcome: response.Outcome,
+		}
+	}
+	if err := json.NewEncoder(protocolOutput).Encode(publicResponse); err != nil {
 		cli.errorf("release transition response: %v", err)
 		return 1
 	}
@@ -672,6 +702,7 @@ type materializedConfigActivationReconciler struct {
 	allLocal         bool
 	scopeResolved    bool
 	integrationPlans map[string]reconcileruntime.IntegrationPlan
+	recoveryApply    *configApplyExecution
 }
 
 type releaseTransitionConfigApplier struct{ cli *CLI }
@@ -699,23 +730,29 @@ func (*materializedConfigActivationReconciler) ID() string { return "materialize
 type materializedConfigActivationError struct {
 	cause                        error
 	yard, phase, command, action string
+	configHome                   string
 }
 
 func (err materializedConfigActivationError) Error() string {
 	return fmt.Sprintf("yard %s %s: %v", err.yard, err.phase, err.cause)
 }
 
-func (err materializedConfigActivationError) Unwrap() error { return err.cause }
+func (err materializedConfigActivationError) Unwrap() error           { return err.cause }
+func (err materializedConfigActivationError) ActivationPhase() string { return err.action }
 
 func (err materializedConfigActivationError) ActivationDiagnostic() (string, string) {
+	retry := fmt.Sprintf("run yard -Y %s %s", err.yard, err.command)
 	// Preserve more specific, explicitly public diagnostics from the adapter.
 	var diagnostic interface{ ActivationDiagnostic() (string, string) }
 	if errors.As(err.cause, &diagnostic) {
 		return diagnostic.ActivationDiagnostic()
 	}
+	if source, ok := config.SourceDiagnostic(err.configHome, err.cause); ok {
+		return fmt.Sprintf("yard %s, %s %s: %s", err.yard, err.phase, err.action, source), retry
+	}
 	// Only validated yard names and fixed phase/command text cross this boundary.
 	return fmt.Sprintf("yard %s: cannot %s %s for release activation", err.yard, err.action, err.phase),
-		fmt.Sprintf("run yard -Y %s %s", err.yard, err.command)
+		retry
 }
 
 func (reconciler *materializedConfigActivationReconciler) operation() *CLI {
@@ -756,11 +793,11 @@ func (reconciler *materializedConfigActivationReconciler) Observe(
 	operation := reconciler.operation()
 	loaded, err := operation.resolveReleaseTransitionContext(yard, reconciler.configHome)
 	if err != nil {
-		return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{err, yard, "configuration", "config status", "inspect"}
+		return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{err, yard, "configuration", "config status", "inspect", reconciler.configHome}
 	}
 	targets, err := operation.localConfigTargets(loaded, reconciler.allLocal)
 	if err != nil {
-		return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{err, yard, "local yard configurations", "config status --all-local", "inspect"}
+		return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{err, yard, "local yard configurations", "config status --all-local", "inspect", reconciler.configHome}
 	}
 	type targetFingerprint struct {
 		Name         string `json:"name"`
@@ -779,7 +816,7 @@ func (reconciler *materializedConfigActivationReconciler) Observe(
 	for _, target := range targets {
 		assessment, assessErr := operation.assessConfigTarget(ctx, target, true)
 		if assessErr != nil {
-			return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{assessErr, target.Name, "materialized config", "config status", "inspect"}
+			return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{assessErr, target.Name, "materialized config", "config status", "inspect", reconciler.configHome}
 		}
 		integrationScope := ""
 		var managedPaths []string
@@ -788,16 +825,16 @@ func (reconciler *materializedConfigActivationReconciler) Observe(
 		if runtime, ok := platform.(reconcileruntime.Runtime); ok && target.Loaded.Integrations.AllowsCodingTools {
 			integrationScope, managedPaths, err = runtime.IntegrationScope()
 			if err != nil {
-				return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{err, target.Name, "integration scope", "integration status", "inspect"}
+				return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{err, target.Name, "integration scope", "integration status", "inspect", reconciler.configHome}
 			}
 			if assessment.State == "drift" || assessment.State == "converged" {
 				platform, _, err = prepareLegacyIntegrationAdoption(ctx, target.Loaded.Integrations, platform)
 				if err != nil {
-					return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{err, target.Name, "legacy integrations", "integration status", "inspect"}
+					return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{err, target.Name, "legacy integrations", "integration status", "inspect", reconciler.configHome}
 				}
 				integration, err = platform.(reconcileruntime.Runtime).IntegrationPlan(ctx)
 				if err != nil {
-					return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{err, target.Name, "integration plan", "integration status", "inspect"}
+					return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{err, target.Name, "integration plan", "integration status", "inspect", reconciler.configHome}
 				}
 				if captureIntegrationPlans {
 					reconciler.integrationPlans[target.Name] = integration
@@ -900,6 +937,20 @@ func (reconciler *materializedConfigActivationReconciler) resolveScope(
 	return nil
 }
 
+func (reconciler *materializedConfigActivationReconciler) UseSourceStableActivationScope() func() {
+	if reconciler == nil || (reconciler.allLocal && reconciler.scopeResolved) {
+		return nil
+	}
+	allLocal, resolved := reconciler.allLocal, reconciler.scopeResolved
+	reconciler.allLocal, reconciler.scopeResolved = true, true
+	// Plans captured for selected scope cannot authorize additional targets.
+	reconciler.integrationPlans = nil
+	return func() {
+		reconciler.allLocal, reconciler.scopeResolved = allLocal, resolved
+		reconciler.integrationPlans = nil
+	}
+}
+
 func (reconciler *materializedConfigActivationReconciler) sourceMigrationsComplete(
 	store *releasetransition.POSIXV2Store,
 ) (bool, error) {
@@ -941,6 +992,44 @@ func (reconciler *materializedConfigActivationReconciler) reconcileCLI() *CLI {
 	return operation
 }
 
+func (reconciler *materializedConfigActivationReconciler) PrepareActivationRecovery(
+	ctx context.Context, releases releasetransition.ReleasePair, links releasetransition.ReleaseLinks,
+) (releasetransition.Fingerprint, error) {
+	// Recapture native ownership plans from actual state, including any known
+	// partial integration apply. Unknown ownership remains an adapter failure.
+	reconciler.integrationPlans = nil
+	if _, err := reconciler.Observe(ctx, releases, links); err != nil {
+		return "", err
+	}
+	operation := reconciler.reconcileCLI()
+	loaded, err := operation.resolveReleaseTransitionContext("default", reconciler.configHome)
+	if err != nil {
+		return "", materializedConfigActivationError{err, "default", "configuration", "config status", "inspect", reconciler.configHome}
+	}
+	targets, err := operation.localConfigTargets(loaded, true)
+	if err != nil {
+		return "", err
+	}
+	selector := func() ([]configTarget, error) { return operation.refreshLocalConfigTargets(loaded, true) }
+	execution, err := operation.prepareConfigApply(ctx, targets, selector)
+	if err != nil {
+		return "", err
+	}
+	reconciler.recoveryApply = execution
+	return activationStageFingerprint(struct {
+		Configs      []domain.OperationStep
+		Integrations map[string]string
+	}{execution.steps(), integrationRecoveryBindings(reconciler.integrationPlans)})
+}
+
+func integrationRecoveryBindings(plans map[string]reconcileruntime.IntegrationPlan) map[string]string {
+	bindings := make(map[string]string, len(plans))
+	for yard, plan := range plans {
+		bindings[yard] = plan.StateBinding()
+	}
+	return bindings
+}
+
 func (reconciler *materializedConfigActivationReconciler) Reconcile(
 	ctx context.Context,
 	_ releasetransition.ReleaseLinks,
@@ -955,26 +1044,35 @@ func (reconciler *materializedConfigActivationReconciler) Reconcile(
 	}
 	loaded, err := operation.resolveReleaseTransitionContext(yard, reconciler.configHome)
 	if err != nil {
-		return err
+		return materializedConfigActivationError{err, yard, "configuration", "config status", "apply", reconciler.configHome}
 	}
 	targets, err := operation.localConfigTargets(loaded, reconciler.allLocal)
 	if err != nil {
 		return err
 	}
+	if reconciler.recoveryApply != nil {
+		if err := operation.refreshConfigApply(ctx, reconciler.recoveryApply); err != nil {
+			return err
+		}
+	}
 	// Enroll only the exact legacy state shown in the top-level release plan,
 	// before the ordinary config refresh can replace any unowned bytes.
 	for _, target := range targets {
 		if err := reconciler.reconcileIntegrationTarget(ctx, operation, target); err != nil {
-			return materializedConfigActivationError{err, target.Name, "integrations", "integration status", "reconcile"}
+			return materializedConfigActivationError{err, target.Name, "integrations", "integration status", "reconcile", reconciler.configHome}
 		}
 	}
 	selector := func() ([]configTarget, error) {
 		return operation.refreshLocalConfigTargets(loaded, reconciler.allLocal)
 	}
-	if code := operation.applyConfig(ctx, targets, true, selector); code != 0 {
-		return fmt.Errorf("materialized config reconcile returned status %d", code)
+	execution := reconciler.recoveryApply
+	if execution == nil {
+		execution, err = operation.prepareConfigApply(ctx, targets, selector)
+		if err != nil {
+			return err
+		}
 	}
-	return nil
+	return operation.executeConfigApply(ctx, execution, execution.steps(), operation.options.Stdout)
 }
 
 func (cli *CLI) resolveReleaseTransitionContext(
@@ -1028,6 +1126,7 @@ func executeReleaseTransitionRequest(
 	reconcilers []releasetransition.V2ActivationReconciler,
 	ownerRegistration releasetransition.V2OwnerRegistration,
 	ingressFactory func(releasetransition.ReleasePair) (releasetransition.V2Ingress, error),
+	recoveryRequests ...*releasetransition.ActivationOnlyRecoveryRequest,
 ) (releasetransition.ProcessResponse, error) {
 	if request.SchemaVersion != releasetransition.ProcessProtocolSchemaV1 ||
 		(request.Mode != releasetransition.ProcessInspect && request.Mode != releasetransition.ProcessConverge) {
@@ -1087,6 +1186,7 @@ func executeReleaseTransitionRequest(
 	}
 	transitionOptions := candidateTransitionOptions(request, releasetransition.V2Options{
 		ConfigHome: request.ConfigHome, Releases: releases, Direction: request.Direction,
+		CandidateConfigDir: filepath.Join(repositoryRoot, "config"),
 		ObserveLinks: func(context.Context) (releasetransition.ReleaseLinks, error) {
 			return links.Observe()
 		},
@@ -1120,7 +1220,13 @@ func executeReleaseTransitionRequest(
 		if request.Execution != nil {
 			return releasetransition.ProcessResponse{}, errors.New("inspect request contains an execution")
 		}
-		inspection, inspectErr := transition.InspectProcessV1(ctx, goal)
+		var inspection releasetransition.Inspection
+		var inspectErr error
+		if len(recoveryRequests) != 0 && recoveryRequests[0] != nil {
+			inspection, inspectErr = transition.InspectActivationRecovery(ctx, *recoveryRequests[0])
+		} else {
+			inspection, inspectErr = transition.InspectProcessV1(ctx, goal)
+		}
 		if inspectErr != nil {
 			return releasetransition.ProcessResponse{}, inspectErr
 		}
@@ -1136,7 +1242,13 @@ func executeReleaseTransitionRequest(
 		if request.Execution == nil {
 			return releasetransition.ProcessResponse{}, errors.New("converge request has no execution")
 		}
-		outcome, convergeErr := transition.Converge(ctx, *request.Execution)
+		var outcome releasetransition.Outcome
+		var convergeErr error
+		if len(recoveryRequests) != 0 && recoveryRequests[0] != nil {
+			outcome, convergeErr = transition.ConvergeActivationRecovery(ctx, *recoveryRequests[0], *request.Execution)
+		} else {
+			outcome, convergeErr = transition.Converge(ctx, *request.Execution)
+		}
 		if convergeErr != nil {
 			return releasetransition.ProcessResponse{}, convergeErr
 		}

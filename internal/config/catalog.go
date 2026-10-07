@@ -405,13 +405,13 @@ func (settings Catalog) ValidateSetting(scope SettingScope, name, value string, 
 		return err
 	}
 	if definition.Sensitive {
-		return fmt.Errorf("setting %s appears to contain secret material; use the secret or credential store", name)
+		return sourceError("", 0, recognizedSettingKey(settings, name), "scalar settings", "appears to contain secret material; use the secret or credential store", nil)
 	}
 	if err := ValidateNonSecretContent(name, value); err != nil {
-		return err
+		return sourceError("", 0, recognizedSettingKey(settings, name), "scalar settings", "appears to contain secret material; use the secret or credential store", err)
 	}
 	if err := validateSettingValue(definition, value); err != nil {
-		return fmt.Errorf("setting %s: %w", name, err)
+		return sourceError("", 0, recognizedSettingKey(settings, name), "scalar settings", settingValueReason(definition), err)
 	}
 	return nil
 }
@@ -433,15 +433,13 @@ func (settings Catalog) ValidateSettingName(
 ) (SettingDefinition, error) {
 	definition, ok := settings.LookupSetting(name)
 	if !ok {
-		return SettingDefinition{}, fmt.Errorf("unknown setting %q", name)
+		return SettingDefinition{}, sourceError("", 0, "", "scalar settings", "unknown setting", nil)
 	}
 	if !definition.allows(scope) {
-		return SettingDefinition{}, fmt.Errorf("setting %s is not allowed in %s scope", name, scope)
+		return SettingDefinition{}, sourceError("", 0, recognizedSettingKey(settings, name), "scalar settings", "setting is not allowed in "+string(scope)+" scope", nil)
 	}
 	if requireSyncable && !definition.Syncable {
-		return SettingDefinition{}, fmt.Errorf(
-			"setting %s is local-only and cannot be imported from versioned configuration", name,
-		)
+		return SettingDefinition{}, sourceError("", 0, recognizedSettingKey(settings, name), "scalar settings", "setting is local-only and cannot be imported from versioned configuration", nil)
 	}
 	return definition, nil
 }

@@ -295,7 +295,7 @@ func load(
 				return domain.Context{}, nil, err
 			}
 			if err := validateBootstrapConfigHome(values, configHome, layer.path); err != nil {
-				return domain.Context{}, nil, err
+				return domain.Context{}, nil, tracker.sourceError("SUBYARD_CONFIG_HOME", "cannot relocate config root; set SUBYARD_CONFIG_HOME before launch", err)
 			}
 		}
 		extendAgentAssetMappings(logicalAssets, values)
@@ -318,7 +318,7 @@ func load(
 	for name, value := range commandEnvironment {
 		if _, ok := tracker.catalog.LookupSetting(name); ok {
 			if err := tracker.catalog.ValidateSetting(ScopeCommand, name, value, false); err != nil {
-				return domain.Context{}, nil, fmt.Errorf("environment: %w", err)
+				return domain.Context{}, nil, sourceContext("", 0, recognizedSettingKey(tracker.catalog, name), "command override", err)
 			}
 		}
 		values[name] = value
@@ -479,8 +479,7 @@ func PendingConfigurationTransaction(configHome string) (bool, error) {
 
 func validateBootstrapConfigHome(values environment, expected, source string) error {
 	if actual := filepath.Clean(values["SUBYARD_CONFIG_HOME"]); actual != expected {
-		return fmt.Errorf("%s cannot relocate its config root from %s to %s; set SUBYARD_CONFIG_HOME before launch",
-			source, expected, actual)
+		return sourceError(source, 0, "SUBYARD_CONFIG_HOME", "scalar settings", "cannot relocate config root; set SUBYARD_CONFIG_HOME before launch", nil)
 	}
 	return nil
 }
@@ -556,7 +555,7 @@ func applyAgentAssetLayer(
 		}
 		exists, err := regularFileExists(candidate)
 		if err != nil {
-			return fmt.Errorf("%s override: %w", name, err)
+			return sourceContext(candidate, 0, recognizedSettingKey(tracker.catalog, name), "file settings", err)
 		}
 		if exists {
 			values[name] = candidate
@@ -581,10 +580,10 @@ func regularFileExists(path string) (bool, error) {
 		return false, nil
 	}
 	if err != nil {
-		return false, err
+		return false, sourceAccessError(path, "configuration source", err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return false, fmt.Errorf("%s must be a regular non-symlink file", path)
+		return false, sourceError(path, 0, "", "configuration source", "must be a regular non-symlink file", nil)
 	}
 	return true, nil
 }
@@ -598,22 +597,22 @@ func normalizeAgentAssetPaths(
 			continue
 		}
 		if !filepath.IsAbs(value) {
-			return fmt.Errorf("%s must name an absolute regular file", name)
+			return tracker.sourceError(name, "must name an absolute regular file", nil)
 		}
 		path := filepath.Clean(value)
 		info, err := os.Lstat(path)
 		if err != nil {
-			return fmt.Errorf("%s is not openable: %w", name, err)
+			return tracker.sourceError(name, "file setting source is not openable", err)
 		}
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return fmt.Errorf("%s must name a regular non-symlink file", name)
+			return tracker.sourceError(name, "must name a regular non-symlink file", nil)
 		}
 		file, err := os.Open(path)
 		if err != nil {
-			return fmt.Errorf("%s is not openable: %w", name, err)
+			return tracker.sourceError(name, "file setting source is not openable", err)
 		}
 		if err := file.Close(); err != nil {
-			return fmt.Errorf("%s: %w", name, err)
+			return tracker.sourceError(name, "cannot close file setting source", err)
 		}
 		values[name] = path
 		if path != value {
@@ -803,10 +802,7 @@ func (settings Catalog) applyEnvFileValidated(
 		assignment.value = normalizeLegacySelection(assignment.name, assignment.value)
 		if previous, exists := seen[canonical]; exists && previous.input != assignment.name &&
 			previous.value != assignment.value {
-			return fmt.Errorf(
-				"%s:%d: conflicting settings %s=%q and %s=%q",
-				path, assignment.line, previous.input, previous.value, assignment.name, assignment.value,
-			)
+			return sourceError(path, assignment.line, recognizedSettingKey(settings, canonical), "scalar settings", "conflicting legacy and canonical settings", nil)
 		}
 		seen[canonical] = layerValue{input: assignment.name, value: assignment.value, line: assignment.line}
 		probe[canonical] = assignment.value
@@ -822,7 +818,7 @@ func (settings Catalog) applyEnvFileValidated(
 	}
 	for _, assignment := range assignments {
 		if err := settings.ValidateSetting(scope, assignment.name, assignment.value, requireSyncable); err != nil {
-			return fmt.Errorf("%s:%d: %w", path, assignment.line, err)
+			return sourceContext(path, assignment.line, recognizedSettingKey(settings, assignment.name), "scalar settings", err)
 		}
 	}
 	for name := range values {

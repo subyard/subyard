@@ -25,11 +25,12 @@ const (
 type settingsV2SettingLookup func(string) (config.SettingDefinition, bool)
 
 type testVMSettingsV2Capability struct {
-	configHome      string
-	inherited       map[string]struct{}
-	lookupSetting   settingsV2SettingLookup
-	snapshotView    V2SettingsSnapshotView
-	parseAssignment func(string, []byte) ([]config.PersistentAssignment, error)
+	configHome         string
+	candidateConfigDir string
+	inherited          map[string]struct{}
+	lookupSetting      settingsV2SettingLookup
+	snapshotView       V2SettingsSnapshotView
+	parseAssignment    func(string, []byte) ([]config.PersistentAssignment, error)
 }
 
 type settingsV2Plan struct {
@@ -244,8 +245,8 @@ func (capability *testVMSettingsV2Capability) observeInheritedSettings() (
 			}
 			return nil, "", &Blocker{
 				Code: CodePreconditionBlocked, Resource: "settings.inherited",
-				Message: "inherited persistent settings cannot be observed safely",
-				Retry:   "repair the inherited settings file, then run yard update",
+				Message: capability.sourceDiagnostic(resource.path, "", 0, "inherited persistent settings cannot be observed safely", err),
+				Retry:   "run yard -Y default config status",
 			}, nil
 		}
 		entry := inheritedResource{Role: resource.role, Settings: []string{}}
@@ -257,8 +258,8 @@ func (capability *testVMSettingsV2Capability) observeInheritedSettings() (
 		if err != nil {
 			return nil, "", &Blocker{
 				Code: CodePreconditionBlocked, Resource: "settings.inherited",
-				Message: "inherited persistent settings cannot be classified safely",
-				Retry:   "repair the inherited settings file, then run yard update",
+				Message: capability.sourceDiagnostic(resource.path, "", 0, "inherited persistent settings cannot be classified safely", err),
+				Retry:   "run yard -Y default config status",
 			}, nil
 		}
 		for _, assignment := range assignments {
@@ -376,8 +377,11 @@ func (capability *testVMSettingsV2Capability) inspectYard(
 	legacyPath := filepath.Join(capability.configHome, "yards", yard+".env")
 	nested, nestedErr := capability.snapshotView.ReadSnapshot(nestedPath)
 	legacy, legacyErr := capability.snapshotView.ReadSnapshot(legacyPath)
-	if nestedErr != nil || legacyErr != nil {
-		return nil, nil, settingsV2YardBlocker(yard, "persistent yard settings are unsafe")
+	if nestedErr != nil {
+		return nil, nil, capability.sourceBlocker(yard, nestedPath, "", 0, "persistent yard settings are unsafe", nestedErr)
+	}
+	if legacyErr != nil {
+		return nil, nil, capability.sourceBlocker(yard, legacyPath, "", 0, "persistent yard settings are unsafe", legacyErr)
 	}
 	if nested.Exists && legacy.Exists {
 		return nil, nil, &Blocker{
@@ -395,7 +399,7 @@ func (capability *testVMSettingsV2Capability) inspectYard(
 	}
 	assignments, err := capability.parseAssignment(path, snapshot.Content)
 	if err != nil {
-		return nil, nil, settingsV2YardBlocker(yard, "persistent yard settings cannot be parsed safely")
+		return nil, nil, capability.sourceBlocker(yard, path, "", 0, "persistent yard settings cannot be parsed safely", err)
 	}
 	byName := map[string][]config.PersistentAssignment{}
 	for _, assignment := range assignments {
@@ -403,32 +407,48 @@ func (capability *testVMSettingsV2Capability) inspectYard(
 			byName[assignment.Name] = append(byName[assignment.Name], assignment)
 		}
 	}
+	blocker := func(key, reason string) *Blocker {
+		line := 0
+		if values := byName[key]; len(values) != 0 {
+			line = values[0].Line
+		}
+		return capability.sourceBlocker(yard, path, key, line, reason, nil)
+	}
 	template, templatePresent, safe := exactDirectSettingsV2Value(byName["YARD_TEMPLATE"])
 	if !safe {
 		return nil, []RedactedDecision{settingsV2Decision(yard, "YARD_TEMPLATE", DecisionBlock, "blocked")},
-			settingsV2YardBlocker(yard, "YARD_TEMPLATE is ambiguous")
-	}
-	if _, exists := inherited["YARD_TEMPLATE"]; exists {
-		return nil, nil, settingsV2YardBlocker(yard, "YARD_TEMPLATE has inherited ownership")
+			blocker("YARD_TEMPLATE", "YARD_TEMPLATE is ambiguous")
 	}
 	if !templatePresent {
+		if _, exists := inherited["YARD_TEMPLATE"]; exists {
+			return nil, nil, blocker("YARD_TEMPLATE", "YARD_TEMPLATE has inherited ownership")
+		}
 		return nil, nil, nil
 	}
+	if template == "" {
+		return nil, []RedactedDecision{settingsV2Decision(yard, "YARD_TEMPLATE", DecisionPreserve, "preserved")}, nil
+	}
 	if template != "e2e-vms" && template != "test-vms" {
+		if config.IsSupportedYardTemplate(capability.candidateConfigDir, template) {
+			return nil, []RedactedDecision{settingsV2Decision(yard, "YARD_TEMPLATE", DecisionPreserve, "preserved")}, nil
+		}
 		return nil, []RedactedDecision{settingsV2Decision(yard, "YARD_TEMPLATE", DecisionBlock, "blocked")},
-			settingsV2YardBlocker(yard, "YARD_TEMPLATE is not supported by this migration")
+			blocker("YARD_TEMPLATE", "YARD_TEMPLATE is not supported by this migration")
+	}
+	if _, exists := inherited["YARD_TEMPLATE"]; exists {
+		return nil, nil, blocker("YARD_TEMPLATE", "YARD_TEMPLATE has inherited ownership")
 	}
 	nestedValue, nestedPresent, safe := exactDirectSettingsV2Value(byName["NESTED_E2E_VMS"])
 	if !safe {
 		return nil, []RedactedDecision{settingsV2Decision(yard, "NESTED_E2E_VMS", DecisionBlock, "blocked")},
-			settingsV2YardBlocker(yard, "NESTED_E2E_VMS is ambiguous")
+			blocker("NESTED_E2E_VMS", "NESTED_E2E_VMS is ambiguous")
 	}
 	if _, exists := inherited["NESTED_E2E_VMS"]; exists {
-		return nil, nil, settingsV2YardBlocker(yard, "NESTED_E2E_VMS has inherited ownership")
+		return nil, nil, blocker("NESTED_E2E_VMS", "NESTED_E2E_VMS has inherited ownership")
 	}
 	if nestedPresent && nestedValue != "0" && nestedValue != "1" {
 		return nil, []RedactedDecision{settingsV2Decision(yard, "NESTED_E2E_VMS", DecisionBlock, "blocked")},
-			settingsV2YardBlocker(yard, "NESTED_E2E_VMS is not supported by this migration")
+			blocker("NESTED_E2E_VMS", "NESTED_E2E_VMS is not supported by this migration")
 	}
 
 	decisions := make([]RedactedDecision, 0, 2)
@@ -439,7 +459,7 @@ func (capability *testVMSettingsV2Capability) inspectYard(
 		value := "test-vms"
 		desired, err = config.EditPersistentAssignmentContent(path, desired, "YARD_TEMPLATE", &value)
 		if err != nil {
-			return nil, nil, settingsV2YardBlocker(yard, "YARD_TEMPLATE cannot be edited safely")
+			return nil, nil, blocker("YARD_TEMPLATE", "YARD_TEMPLATE cannot be edited safely")
 		}
 		changed = true
 		decisions = append(decisions, settingsV2Decision(
@@ -453,7 +473,7 @@ func (capability *testVMSettingsV2Capability) inspectYard(
 	if nestedPresent && nestedValue == "0" {
 		desired, err = config.EditPersistentAssignmentContent(path, desired, "NESTED_E2E_VMS", nil)
 		if err != nil {
-			return nil, nil, settingsV2YardBlocker(yard, "NESTED_E2E_VMS cannot be reset safely")
+			return nil, nil, blocker("NESTED_E2E_VMS", "NESTED_E2E_VMS cannot be reset safely")
 		}
 		changed = true
 		fileDecision = DecisionReset
@@ -498,11 +518,19 @@ func affectedSettingsV2ID(name string) bool {
 	return name == "YARD_TEMPLATE" || name == "NESTED_E2E_VMS"
 }
 
-func settingsV2YardBlocker(yard, message string) *Blocker {
+func (capability *testVMSettingsV2Capability) sourceDiagnostic(path, key string, line int, reason string, cause error) string {
+	if diagnostic, ok := config.SourceDiagnostic(capability.configHome, cause); ok {
+		return diagnostic
+	}
+	diagnostic, _ := config.SourceDiagnostic(capability.configHome, &config.SourceError{Path: path, Key: key, Line: line, Role: "scalar settings", Reason: reason})
+	return diagnostic
+}
+
+func (capability *testVMSettingsV2Capability) sourceBlocker(yard, path, key string, line int, reason string, cause error) *Blocker {
 	return &Blocker{
 		Code: CodePreconditionBlocked, Resource: "yard." + yard,
-		Message: "yard " + yard + ": " + message,
-		Retry:   "repair the named yard settings, then run yard update",
+		Message: "yard " + yard + ": " + capability.sourceDiagnostic(path, key, line, reason, cause),
+		Retry:   "run yard -Y " + yard + " config status",
 	}
 }
 

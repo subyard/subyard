@@ -62,32 +62,43 @@ func ReadPersistentFileSnapshot(
 		return PersistentFileSnapshot{}, errors.New("persistent setting path escaped the configuration root")
 	}
 	file, exists, err := openPersistentFileAt(configHome, relative)
-	if err != nil || !exists {
-		return PersistentFileSnapshot{}, err
+	if err != nil {
+		var source *SourceError
+		if errors.As(err, &source) {
+			return PersistentFileSnapshot{}, err
+		}
+		return PersistentFileSnapshot{}, sourceAccessError(path, "persistent settings", err)
+	}
+	if !exists {
+		return PersistentFileSnapshot{}, nil
 	}
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil {
-		return PersistentFileSnapshot{}, err
+		return PersistentFileSnapshot{}, sourceAccessError(path, "persistent settings", err)
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() ||
-		info.Mode().Perm()&0o022 != 0 || info.Size() > 8<<20 {
-		return PersistentFileSnapshot{}, errors.New(
-			"persistent setting target must be a protected bounded regular non-symlink file",
-		)
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return PersistentFileSnapshot{}, sourceError(path, 0, "", "persistent settings", "target must be a regular non-symlink file", nil)
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return PersistentFileSnapshot{}, sourceError(path, 0, "", "persistent settings", "target is group/world writable", nil)
+	}
+	if info.Size() > 8<<20 {
+		return PersistentFileSnapshot{}, sourceError(path, 0, "", "persistent settings", "target exceeds its size bound", nil)
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != uint32(os.Getuid()) || stat.Nlink != 1 {
-		return PersistentFileSnapshot{}, errors.New(
-			"persistent setting target has unsafe ownership or hard links",
-		)
+	if !ok || stat.Uid != uint32(os.Getuid()) {
+		return PersistentFileSnapshot{}, sourceError(path, 0, "", "persistent settings", "target is not operator-owned", nil)
+	}
+	if stat.Nlink != 1 {
+		return PersistentFileSnapshot{}, sourceError(path, 0, "", "persistent settings", "target has hard links", nil)
 	}
 	content, err := io.ReadAll(io.LimitReader(file, (8<<20)+1))
 	if err != nil {
-		return PersistentFileSnapshot{}, err
+		return PersistentFileSnapshot{}, sourceAccessError(path, "persistent settings", err)
 	}
 	if len(content) > 8<<20 {
-		return PersistentFileSnapshot{}, errors.New("persistent setting target exceeds its size bound")
+		return PersistentFileSnapshot{}, sourceError(path, 0, "", "persistent settings", "target exceeds its size bound", nil)
 	}
 	return PersistentFileSnapshot{
 		Exists: true, Content: content, Identity: persistentFileIdentity(stat),
@@ -104,7 +115,7 @@ func openPersistentFileAt(
 		0,
 	)
 	if err != nil {
-		return nil, false, err
+		return nil, false, sourceAccessError(configHome, "persistent settings directory", err)
 	}
 	current := os.NewFile(uintptr(rootFD), configHome)
 	if err := validateOpenedPersistentDirectory(current, configHome); err != nil {
@@ -125,7 +136,7 @@ func openPersistentFileAt(
 		}
 		if openErr != nil {
 			current.Close()
-			return nil, false, openErr
+			return nil, false, sourceAccessError(filepath.Join(current.Name(), part), "persistent settings directory", openErr)
 		}
 		next := os.NewFile(uintptr(fd), filepath.Join(current.Name(), part))
 		if err := validateOpenedPersistentDirectory(next, next.Name()); err != nil {
@@ -157,12 +168,15 @@ func validateOpenedPersistentDirectory(file *os.File, path string) error {
 	if err != nil {
 		return err
 	}
-	if !info.IsDir() || info.Mode().Perm()&0o022 != 0 {
-		return fmt.Errorf("persistent setting directory is unsafe: %s", path)
+	if !info.IsDir() {
+		return sourceError(path, 0, "", "persistent settings directory", "directory has unsafe type", nil)
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return sourceError(path, 0, "", "persistent settings directory", "directory is group/world writable", nil)
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Uid != uint32(os.Getuid()) {
-		return fmt.Errorf("persistent setting directory is not operator-owned: %s", path)
+		return sourceError(path, 0, "", "persistent settings directory", "directory is not operator-owned", nil)
 	}
 	return nil
 }
@@ -209,11 +223,11 @@ func ParsePersistentAssignments(
 				Direct: isDirect, Dynamic: dynamic || !isDirect,
 			})
 		}); err != nil {
-			return nil, fmt.Errorf("%s:%d: %w", path, recordLine, err)
+			return nil, sourceContext(path, recordLine, recordSettingKey(record), "persistent settings", err)
 		}
 	}
 	if quote != 0 || current.Len() != 0 {
-		return nil, fmt.Errorf("%s:%d: unterminated quoted assignment", path, recordLine)
+		return nil, sourceError(path, recordLine, recordSettingKey(current.String()), "persistent settings", "unterminated quoted assignment", nil)
 	}
 	return assignments, nil
 }
@@ -509,7 +523,7 @@ func parseEnvEditRecords(path string, content []byte) ([]envEditRecord, error) {
 			if err := applyRecord(trimmed, values, func(name, _ string) {
 				assigned = name
 			}); err != nil {
-				return nil, fmt.Errorf("%s:%d: %w", path, recordLine, err)
+				return nil, sourceContext(path, recordLine, recordSettingKey(trimmed), "persistent settings", err)
 			}
 			record.name = assigned
 		}
@@ -517,7 +531,7 @@ func parseEnvEditRecords(path string, content []byte) ([]envEditRecord, error) {
 		current.Reset()
 	}
 	if quote != 0 || current.Len() != 0 {
-		return nil, fmt.Errorf("%s:%d: unterminated quoted assignment", path, recordLine)
+		return nil, sourceError(path, recordLine, recordSettingKey(current.String()), "persistent settings", "unterminated quoted assignment", nil)
 	}
 	return records, nil
 }

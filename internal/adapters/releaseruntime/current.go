@@ -241,7 +241,11 @@ func (runtime *Runtime) PrepareCurrentTransition(ctx context.Context, arguments 
 		blockerOutcome.Retry = inspection.Blockers[index].Retry
 		inspection.Blockers[index].Retry = CurrentReleaseRetry(blockerOutcome)
 	}
-	prepared, err := runtime.prepareInspectedCandidateTransitionWithDelegate(options{root: parsed.root, expectedLinks: &before.links}, owner, target, request, inspection, activationOwned, nil, delegate)
+	var recoveryRequest *releasetransition.RecoveryProcessRequest
+	if protected != nil {
+		recoveryRequest = protected.recoveryRequest
+	}
+	prepared, err := runtime.prepareInspectedCandidateTransitionWithDelegate(options{root: parsed.root, expectedLinks: &before.links}, owner, target, request, inspection, activationOwned, nil, delegate, recoveryRequest)
 	if err != nil {
 		return Prepared{}, err
 	}

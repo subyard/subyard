@@ -720,6 +720,17 @@ For SSH fixture debugging, capture evidence before the lease ends. A fixture ret
 gets clean VMs, so `SUBYARD_E2E_ORCA_RESUME` cannot continue a previous lease. Record the failure,
 evidence and remaining checks in the current task plan and rerun the independent segment.
 
+For targeted migration and activation recovery acceptance, freeze a candidate with
+`dev/release-acceptance.py prepare`, then transport its `candidate-bundle.tar.gz` through
+`SUBYARD_E2E_CANDIDATE_BUNDLE` and `SUBYARD_E2E_CANDIDATE_SHA256`. Run
+`bash dev/e2e/reliable-migrations-recovery.sh run NUMERIC_TOKEN` with the standard wrapper,
+one available slot and `--vm-count 1 --vm 1`. The fixture installs checksum-pinned v0.17.3,
+changes persistent file settings in default and named local yards, verifies real guest convergence
+through public update, then interrupts activation-only reconciliation through an owned systemctl
+wrapper. Changed desired inputs require fresh consent and immutable predecessor evidence;
+completed ledger and runtime links stay unchanged. Stopped, absent and remote yards are preserved.
+This is targeted evidence; it does not replace release smoke or shipped-profile acceptance.
+
 For a narrow predecessor upgrade check, set `SUBYARD_E2E_ORCA_UPGRADE_FROM` to an exact published
 version and `SUBYARD_E2E_ORCA_UPGRADE_INSTALLER_SHA256` to that release's installer asset digest.
 This mode starts Orca on a converged published release with two local yards, changes the candidate's

@@ -166,6 +166,39 @@ func (cli *CLI) runReleaseTransitionYardCommandIO(
 	operation.releaseTransitionChild = true
 	operation.configApplyRepair = nil
 	operation.profileInitRepair = nil
+	if slices.Equal(arguments, []string{"init", "--configs", "--yes"}) {
+		// Keep the native execution error in process. Only the outer command
+		// boundary renders it or converts it to an exit status.
+		loaded, bootstrap, err := operation.loadInitContext(yard, true, arguments[1:])
+		if err != nil {
+			return err
+		}
+		definition, ok := operation.manifest.Lookup("init")
+		if !ok {
+			return errors.New("release config init command is unavailable")
+		}
+		prepared, err := operation.prepareCommand(ctx, prepareCommandRequest{
+			Loaded: loaded, Definition: definition, Arguments: arguments[1:],
+			ExplicitYard: true, Bootstrap: bootstrap, InteractiveSetup: true,
+		})
+		if err != nil {
+			return err
+		}
+		defer prepared.Close()
+		orchestrator := operation.operationOrchestrator(operationID, loaded, nil, &definition)
+		prepared.Plan, err = orchestrator.Confirm(ctx, prepared.Plan, true)
+		if err != nil {
+			return err
+		}
+		result, err := prepared.Execute(ctx, orchestrator, stdout)
+		if err != nil {
+			return err
+		}
+		if result.Status != "ok" {
+			return errors.New("release config init adapter failed")
+		}
+		return nil
+	}
 	if code := operation.Run(ctx); code != 0 {
 		return fmt.Errorf("yard command exited with status %d", code)
 	}
@@ -613,7 +646,16 @@ func (cli *CLI) Run(ctx context.Context) int {
 		loaded, err = cli.loadContext(yard)
 	}
 	if err != nil {
-		cli.errorf("%v", err)
+		operatorHome := cli.env["SUBYARD_OPERATOR_HOME"]
+		if operatorHome == "" {
+			operatorHome = cli.env["HOME"]
+		}
+		configHome, _ := config.ResolveConfigHome(operatorHome, cli.env)
+		if source, ok := config.SourceDiagnostic(configHome, err); ok {
+			cli.errorf("yard %s, config inspection: %s", yard, source)
+		} else {
+			cli.errorf("%v", err)
+		}
 		return 2
 	}
 	if !readOnlyInvocation && !registrationRepair && !(core && definition.Handler == "@integration") {
