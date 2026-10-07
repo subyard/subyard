@@ -107,20 +107,20 @@ def main():
     spec.loader.exec_module(evidence)
     viewer_bin = work / 'viewer-bin'
     viewer_bin.mkdir(mode=0o700)
-    # Keep the stock scrcpy observation helper and extend only its quit window.
     wrapper = viewer_bin / 'scrcpy'
     window = Path(__file__).parent.parent / 'helpers/scrcpy-view-window.py'
-    wrapper.write_text('#!/usr/bin/python3\nimport importlib.util, os, sys\n'
-                       f'spec = importlib.util.spec_from_file_location("window", {str(window)!r})\n'
-                       'window = importlib.util.module_from_spec(spec)\nspec.loader.exec_module(window)\n'
-                       f'raise SystemExit(window.run([{str(tools / "subyard-e2e-scrcpy/scrcpy")!r}, *sys.argv[1:]], '
-                       'seconds=int(os.environ.get("ANDROID_E2E_VIEW_SECONDS", "30"))))\n')
-    wrapper.chmod(0o700)
     environment = dict(os.environ, PATH=f'{viewer_bin}:{tools / "platform-tools"}:' + os.environ['PATH'],
                        ADB=str(tools / 'platform-tools/adb'), SDL_RENDER_DRIVER='software',
                        PYTHONDONTWRITEBYTECODE='1')
 
     def view(arguments, phase, seconds=30, cancel=False, observe=None):
+        # Resource sessions filter ambient variables; embed the observation window.
+        wrapper.write_text('#!/usr/bin/python3\nimport importlib.util, sys\n'
+                           f'spec = importlib.util.spec_from_file_location("window", {str(window)!r})\n'
+                           'window = importlib.util.module_from_spec(spec)\nspec.loader.exec_module(window)\n'
+                           f'raise SystemExit(window.run([{str(tools / "subyard-e2e-scrcpy/scrcpy")!r}, *sys.argv[1:]], '
+                           f'seconds={seconds}))\n')
+        wrapper.chmod(0o700)
         started = time.monotonic()
         print(f'E2E_PHASE phase=fixture/viewer-remote-{phase} state=start duration_seconds=0 exit_code=0', flush=True)
         log = work / f'viewer-{phase}.log'
@@ -131,7 +131,7 @@ def main():
                     ['xvfb-run', '-a', '-s', '-screen 0 1280x800x24 -nolisten tcp', yard_bin,
                      '-Y', 'remote', 'emu', 'view', *arguments, '--',
                      '--max-size=640', '--no-audio', '--verbosity=debug'],
-                    env=dict(environment, ANDROID_E2E_VIEW_SECONDS=str(seconds)),
+                    env=environment,
                     stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
                     start_new_session=True)
                 deadline = started + 1440
