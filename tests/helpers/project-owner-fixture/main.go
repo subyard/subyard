@@ -154,8 +154,8 @@ func (e executor) projectExec(r ports.InstanceExecRequest) (ports.InstanceExecRe
 			return ports.InstanceExecResult{}, os.WriteFile(filepath.Join(target, ".git", "HEAD"), []byte(revision+"\n"), 0600)
 		}
 		if len(args) > 3 && args[1] == "-C" {
-			if args[3] == "checkout" {
-				return ports.InstanceExecResult{}, nil
+			if len(args) == 6 && args[3] == "reset" && args[4] == "--hard" {
+				return ports.InstanceExecResult{}, os.WriteFile(filepath.Join(args[2], ".git", "HEAD"), []byte(args[5]+"\n"), 0600)
 			}
 			if args[3] == "rev-parse" {
 				data, err := os.ReadFile(filepath.Join(args[2], ".git", "HEAD"))
