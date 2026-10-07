@@ -17,6 +17,7 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/testvmsruntime"
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/cli"
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/yardnetwork"
@@ -25,6 +26,31 @@ import (
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if len(os.Args) > 1 && os.Args[1] == "_vm-cpu" {
+		if (len(os.Args) != 5 && len(os.Args) != 6) || (os.Args[2] != "apply" && os.Args[2] != "check") ||
+			!domain.SafeName(os.Args[3]) || !domain.SafeName(os.Args[4]) {
+			fmt.Fprintln(os.Stderr, "usage: _vm-cpu <apply|check> PROJECT INSTANCE [SOCKET]")
+			os.Exit(2)
+		}
+		socket := os.Getenv("SUBYARD_INCUS_SOCKET")
+		if len(os.Args) == 6 {
+			socket = os.Args[5]
+		}
+		if socket != "" && !filepath.IsAbs(socket) {
+			fmt.Fprintln(os.Stderr, "VM CPU scheduling requires an absolute Incus socket")
+			os.Exit(2)
+		}
+		client := incusclient.New(socket, "projects")
+		ready, err := client.VMCPUConverged(ctx, os.Args[3], os.Args[4], os.Args[2] == "apply")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "VM CPU scheduling: %v\n", err)
+			os.Exit(2)
+		}
+		if !ready {
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "_incus-operator-access" {
 		if len(os.Args) != 3 {
 			fmt.Fprintln(os.Stderr, "invalid Incus operator access invocation")
@@ -196,9 +222,16 @@ func main() {
 		os.Exit(cli.RunBootPower(ctx, os.Args[2:], os.Stdout, os.Stderr,
 			application.BootPowerReconciler{
 				Inventory: client, Instances: client, Power: client,
-				Network:           hostruntime.NetworkGuard{},
-				NetworkPolicy:     bootPolicy,
-				AfterStart:        bootPolicy.ClearBootStaleUDP,
+				Network:       hostruntime.NetworkGuard{},
+				NetworkPolicy: bootPolicy,
+				AfterStart:    bootPolicy.ClearBootStaleUDP,
+				ReconcileRunning: func(ctx context.Context, yard yardnetwork.Yard) error {
+					ready, err := client.VMCPUConverged(ctx, yard.Project, yard.Instance, true)
+					if err == nil && !ready {
+						return errors.New("VM host CPU weight did not converge")
+					}
+					return err
+				},
 				EnsureNetworkLock: networkruntime.EnsureHostLock,
 				LocalAddresses:    hostruntime.LocalAddresses,
 			}))

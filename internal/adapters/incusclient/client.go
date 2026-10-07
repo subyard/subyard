@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -141,6 +142,13 @@ func (client *Client) SetInstancePower(
 	}
 	if err := operation.Wait(); err != nil {
 		return normalizeOperationError("wait for "+action+" instance", operation.Get(), err)
+	}
+	if action == "start" {
+		if err := client.applyVMCPU(ctx, project, name); err != nil {
+			stopContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 45*time.Second)
+			defer cancel()
+			return errors.Join(err, client.SetInstancePower(stopContext, project, name, "stop", true))
+		}
 	}
 	return nil
 }

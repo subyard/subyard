@@ -4,7 +4,16 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+cleanup() {
+  local rc=$?
+  if [ "$rc" -ne 0 ]; then
+    [ ! -f "$TMP/output" ] || cat "$TMP/output" >&2
+    [ ! -f "$TMP/incus.log" ] || cat "$TMP/incus.log" >&2
+  fi
+  rm -rf "$TMP"
+  exit "$rc"
+}
+trap cleanup EXIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
 # shellcheck source=tests/helpers/test-context.sh
@@ -14,6 +23,7 @@ export ASSUME_YES=1 SUBYARD_NO_AUDIT=1 SUBYARD_POWER_DESIRED=running
 export PATH="$TMP/bin:$PATH"
 export MOCK_STATE_DIR="$TMP/state" MOCK_INCUS_LOG="$TMP/incus.log"
 export MOCK_STOP_EXIT=0 MOCK_LIMIT_SET_EXIT=0 MOCK_LIMIT_NOOP=0 MOCK_STATE_EXIT=0
+export MOCK_DEVICE_LIST_PADDING=0
 export LIMITS_CPU=2 LIMITS_MEMORY=4GiB
 install -d -m 0700 "$TMP/bin" "$MOCK_STATE_DIR"
 
@@ -39,7 +49,10 @@ set -euo pipefail
 printf '%s\n' "$*" >> "$MOCK_INCUS_LOG"
 case "${1:-} ${2:-} ${3:-}" in
   'info  ' | 'info yard --project' | 'project show subyard' | 'storage volume show') ;;
-  'config device list') printf 'srv\nsubyard-e2e-routes\nkvm\n' ;;
+  'config device list')
+    printf 'srv\nsubyard-e2e-routes\nkvm\n'
+    if [ "$MOCK_DEVICE_LIST_PADDING" = 1 ]; then printf 'fixture-device-%05d\n' {1..10000}; fi
+    ;;
   'config device get')
     case "$5:$6" in
       srv:pool) printf 'default\n' ;;
@@ -166,5 +179,14 @@ for YARD_KIND in container vm; do
   ! grep -q '^start ' "$MOCK_INCUS_LOG" || fail "$YARD_KIND booted with nonconverged limits"
   MOCK_LIMIT_NOOP=0
 done
+
+# A long device list must not report an attached volume as missing when the
+# producer is still writing after its first matching device.
+reset_state RUNNING 2 4GiB
+MOCK_DEVICE_LIST_PADDING=1
+run_create
+assert_no_limit_writes
+! grep -Eq '^config device (add|remove) ' "$MOCK_INCUS_LOG" \
+  || fail 'complete device-list inspection mutated an already attached device'
 
 printf 'ok: existing container and VM limits converge safely and preserve empty settings\n'

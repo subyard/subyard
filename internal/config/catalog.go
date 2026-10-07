@@ -87,6 +87,8 @@ var catalog = map[string]SettingDefinition{
 		scopes(ScopeShipped, ScopeYard, ScopeCommand), enum("0", "1")),
 	"VM_PIN_IPV4": scalar("yard-runtime", SettingBoolean, SettingYardInit, true,
 		scopes(ScopeShipped, ScopeYard, ScopeCommand), enum("0", "1")),
+	"VM_CPU_WEIGHT": scalar("yard-resources", SettingInteger, SettingYardInit, true,
+		scopes(ScopeShipped, ScopeYard, ScopeCommand), optionalRange(1, 10000)),
 	"ROOT_DISK_SIZE": scalar("yard-storage", SettingSize, SettingYardInit, true,
 		scopes(ScopeShipped, ScopeYard, ScopeCommand)),
 	"SRV_VOLUME_SIZE": scalar("yard-storage", SettingSize, SettingYardInit, true,
@@ -507,6 +509,9 @@ func validateSettingValue(definition SettingDefinition, value string) error {
 		number, err := strconv.Atoi(value)
 		if err != nil {
 			return errors.New("must be an integer")
+		}
+		if definition.Name == "VM_CPU_WEIGHT" && strconv.Itoa(number) != value {
+			return errors.New("must be a canonical positive integer")
 		}
 		if number < definition.Minimum ||
 			(definition.Maximum != 0 && number > definition.Maximum) {

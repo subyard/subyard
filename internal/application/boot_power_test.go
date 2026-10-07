@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -18,6 +19,15 @@ type networkGuardFunc func(context.Context, []string) error
 type inventoryFunc func(context.Context) ([]ports.InstanceInfo, error)
 
 type bootNetworkPolicyFunc func(context.Context, yardnetwork.Yard, func() error) error
+
+type bootPowerWithContext struct{ *testkit.Incus }
+
+func (power bootPowerWithContext) SetInstancePower(ctx context.Context, project, name, action string, force bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return power.Incus.SetInstancePower(ctx, project, name, action, force)
+}
 
 func (function inventoryFunc) ListInstances(ctx context.Context) ([]ports.InstanceInfo, error) {
 	return function(ctx)
@@ -161,7 +171,7 @@ func TestBootPowerPostStartRunsOnlyAfterSuccessfulStartInsidePolicyLock(t *testi
 		"p/running": managedPowerInstance("p", "running", "Running", PowerRunning),
 		"p/start":   managedPowerInstance("p", "start", "Stopped", PowerRunning),
 	}}
-	locked, cleanups := false, 0
+	locked, cleanups, reconciles := false, 0, 0
 	reconciler := BootPowerReconciler{
 		Inventory: fake, Instances: fake, Power: fake,
 		Network: networkGuardFunc(func(context.Context, []string) error { return nil }),
@@ -177,13 +187,20 @@ func TestBootPowerPostStartRunsOnlyAfterSuccessfulStartInsidePolicyLock(t *testi
 			}
 			return nil
 		},
+		ReconcileRunning: func(_ context.Context, yard yardnetwork.Yard) error {
+			reconciles++
+			if !locked || yard.Name != "running" {
+				t.Fatal("running policy reconciliation escaped its network lock")
+			}
+			return nil
+		},
 		EnsureNetworkLock: ensureBootNetworkLock,
 	}
 	if _, err := reconciler.Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if cleanups != 1 {
-		t.Fatalf("cleanup ran %d times; expected only newly started instance", cleanups)
+	if cleanups != 1 || reconciles != 1 {
+		t.Fatalf("cleanup=%d running reconciliation=%d; expected each once", cleanups, reconciles)
 	}
 }
 
@@ -203,6 +220,41 @@ func TestBootPowerReconcilerInitializesLockBeforeInventory(t *testing.T) {
 	_, err := reconciler.Run(context.Background())
 	if !errors.Is(err, failure) || inventoryCalled {
 		t.Fatalf("lock error=%v inventoryCalled=%v", err, inventoryCalled)
+	}
+}
+
+func TestBootRunningPolicyFailureStopsOnlyItsOwnedTarget(t *testing.T) {
+	for _, cancelled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cancelled=%t", cancelled), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+				"p/priority": managedPowerInstance("p", "priority", "Running", PowerRunning),
+				"p/ordinary": managedPowerInstance("p", "ordinary", "Running", PowerRunning),
+			}}
+			failure := errors.New("scheduling placement cannot preserve host ceilings")
+			if cancelled {
+				failure = context.Canceled
+			}
+			reconciler := BootPowerReconciler{
+				Inventory: fake, Instances: fake, Power: bootPowerWithContext{fake},
+				Network:       networkGuardFunc(func(context.Context, []string) error { return nil }),
+				NetworkPolicy: bootNetworkPolicyFunc(allowBootNetworkPolicy),
+				ReconcileRunning: func(_ context.Context, yard yardnetwork.Yard) error {
+					if yard.Name == "priority" {
+						if cancelled {
+							cancel()
+						}
+						return failure
+					}
+					return nil
+				}, EnsureNetworkLock: ensureBootNetworkLock,
+			}
+			_, err := reconciler.Run(ctx)
+			if !errors.Is(err, failure) || fake.Instances["p/priority"].Status != "Stopped" || fake.Instances["p/ordinary"].Status != "Running" {
+				t.Fatalf("policy failure crossed another yard: states=%+v err=%v", fake.Instances, err)
+			}
+		})
 	}
 }
 

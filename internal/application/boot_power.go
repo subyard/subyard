@@ -38,6 +38,7 @@ type BootPowerReconciler struct {
 	// AfterStart runs inside NetworkPolicy.WithStart's host network lock, only
 	// after a stopped instance has been started successfully.
 	AfterStart        func(context.Context, yardnetwork.Yard) error
+	ReconcileRunning  func(context.Context, yardnetwork.Yard) error
 	EnsureNetworkLock func() error
 	Clock             ports.Clock
 	IncusWait         time.Duration
@@ -98,9 +99,22 @@ func (reconciler BootPowerReconciler) Run(ctx context.Context) (BootPowerResult,
 		reference := instanceReference(instance)
 		switch strings.ToLower(instance.Status) {
 		case "running":
+			var runtimeErr error
 			if err := reconciler.NetworkPolicy.WithStart(
-				ctx, bootNetworkYard(instance), func() error { return nil },
+				ctx, bootNetworkYard(instance), func() error {
+					if reconciler.ReconcileRunning != nil {
+						runtimeErr = reconciler.ReconcileRunning(ctx, bootNetworkYard(instance))
+						return runtimeErr
+					}
+					return nil
+				},
 			); err != nil {
+				if runtimeErr != nil {
+					stopContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 45*time.Second)
+					defer cancel()
+					stopErr := reconciler.Power.SetInstancePower(stopContext, instance.Project, instance.Name, "stop", true)
+					return result, fmt.Errorf("reconcile running %s: %w", reference, errors.Join(runtimeErr, stopErr))
+				}
 				return result, reconciler.stopRunningFailClosed(
 					ctx, fmt.Errorf("validate network policy for %s: %w", reference, err),
 				)

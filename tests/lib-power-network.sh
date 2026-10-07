@@ -234,6 +234,38 @@ MOCK_NM_MODE=valid-then-invalid MOCK_INCUS_STOP_RC=1
 if power_start_guarded test-project test-yard incusbr0; then fail "failed fail-closed stop returned success"; fi
 case "$POWER_ERROR" in *"FAILED to stop unsafe"*) ;; *) fail "stop failure was reported as success" ;; esac
 
+for engine_case in unset missing nonexecutable; do
+  reset_case
+  MOCK_NM_STATE=inactive
+  VM_CPU_WEIGHT=1000
+  case "$engine_case" in
+    unset) SUBYARD_DISPATCHER_PATH='' ;;
+    missing) SUBYARD_DISPATCHER_PATH="$tmp/missing-dispatcher" ;;
+    nonexecutable)
+      SUBYARD_DISPATCHER_PATH="$tmp/nonexecutable-dispatcher"
+      printf '#!/bin/sh\nexit 0\n' > "$SUBYARD_DISPATCHER_PATH"
+      chmod 0600 "$SUBYARD_DISPATCHER_PATH"
+      ;;
+  esac
+  if power_start_guarded test-project test-yard incusbr0; then
+    fail "unavailable CPU scheduling engine was accepted: $engine_case"
+  fi
+  [ "$(cat "$MOCK_INCUS_LOG")" = $'start\nstop' ] \
+    || fail "unavailable CPU scheduling engine left the VM running: $engine_case"
+  case "$POWER_ERROR" in *"engine is unavailable"*"was stopped fail-closed"*) ;; *)
+    fail "CPU scheduling engine failure lost its diagnostic: $engine_case" ;;
+  esac
+done
+reset_case
+MOCK_NM_STATE=inactive MOCK_INCUS_STOP_RC=1
+if power_start_guarded test-project test-yard incusbr0; then
+  fail 'CPU scheduling failure with failed stop returned success'
+fi
+case "$POWER_ERROR" in *"engine is unavailable"*"FAILED to stop"*) ;; *)
+  fail 'CPU scheduling stop failure was reported as success' ;;
+esac
+unset VM_CPU_WEIGHT SUBYARD_DISPATCHER_PATH
+
 # shellcheck disable=SC2034 # consumed by sourced config module
 SUBYARD_CONFIG_LOADED=1
 DEV_UID="$(id -u)"

@@ -420,6 +420,21 @@ func (runtime Runtime) instanceConverged(ctx context.Context) (bool, error) {
 			return false, nil
 		}
 	}
+	if want := runtime.environmentValue("VM_CPU_WEIGHT"); want != "" && state.Instance.LocalConfig["user.subyard.vm_cpu_weight"] != want {
+		return false, nil
+	}
+	if state.Instance.Config["user.subyard.vm_cpu_weight"] != "" {
+		scheduler, ok := runtime.Incus.(interface {
+			VMCPUConverged(context.Context, string, string, bool) (bool, error)
+		})
+		if !ok {
+			return false, errors.New("native VM host CPU scheduling is unavailable")
+		}
+		ready, err := scheduler.VMCPUConverged(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, false)
+		if err != nil || !ready {
+			return false, err
+		}
+	}
 	if runtime.environmentValue("VM_PIN_IPV4") == "1" {
 		if runtime.Yard.YardKind != domain.YardVM {
 			return false, errors.New("VM_PIN_IPV4 requires YARD_KIND=vm")
@@ -999,8 +1014,12 @@ func (runtime Runtime) applyInstanceStage(ctx context.Context) error {
 		}
 	}
 	desired := application.InitialPower(runtime.Yard)
+	vmWeight := runtime.environmentValue("VM_CPU_WEIGHT")
 	instance, err := runtime.Incus.Instance(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName)
 	if err == nil {
+		if vmWeight == "" {
+			vmWeight = instance.Config["user.subyard.vm_cpu_weight"]
+		}
 		for key, want := range map[string]string{"limits.cpu": runtime.environmentValue("LIMITS_CPU"),
 			"limits.memory": runtime.environmentValue("LIMITS_MEMORY")} {
 			if want != "" && instance.LocalConfig[key] != want &&
@@ -1023,6 +1042,7 @@ func (runtime Runtime) applyInstanceStage(ctx context.Context) error {
 		return runtime.runScriptEnvironment(ctx, runtime.Stderr, map[string]string{
 			"SUBYARD_POWER_DESIRED":           desired,
 			"SUBYARD_PREPARED_INCUS_APPARMOR": appArmor,
+			"VM_CPU_WEIGHT":                   vmWeight,
 		}, "03-create-subyard.sh", "--yes")
 	}); err != nil {
 		return err

@@ -33,7 +33,8 @@ YARD_LABEL="${YARD_NAME:-default}"
 desired_power="${SUBYARD_POWER_DESIRED:-}"
 
 PROJ=(--project "$INCUS_PROJECT")
-device_exists() { incus config device list "$YARD_INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null | grep -qx "$1"; }
+# Consume the complete list: grep -q can SIGPIPE Incus under pipefail.
+device_exists() { incus config device list "$YARD_INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null | grep -Fx -- "$1" >/dev/null; }
 device_get() { incus config device get "$YARD_INSTANCE_NAME" "$1" "$2" "${PROJ[@]}" 2>/dev/null || true; }
 instance_get() { incus config get "$YARD_INSTANCE_NAME" "$1" "${PROJ[@]}" 2>/dev/null || true; }
 reporting_preflight() {
@@ -266,6 +267,15 @@ for setting in "${limit_changes[@]}"; do
     || die "could not reconcile $key"
   [ "$(instance_get "$key")" = "$want" ] || die "$key did not converge"
 done
+if [ -n "${VM_CPU_WEIGHT:-}" ]; then
+  [ "$YARD_KIND" = vm ] || die 'VM_CPU_WEIGHT requires YARD_KIND=vm'
+  [[ "$VM_CPU_WEIGHT" =~ ^[1-9][0-9]*$ ]] && [ "$VM_CPU_WEIGHT" -le 10000 ] \
+    || die 'VM_CPU_WEIGHT must be in range 1..10000'
+  if [ "$(instance_get user.subyard.vm_cpu_weight)" != "$VM_CPU_WEIGHT" ]; then
+    incus config set "$YARD_INSTANCE_NAME" user.subyard.vm_cpu_weight "$VM_CPU_WEIGHT" "${PROJ[@]}" \
+      || die 'could not persist VM host CPU weight'
+  fi
+fi
 if [ "${ALLOWS_HOST_ACCESS:-true}" = false ] && device_exists subyard-e2e-routes; then
   incus config device remove "$YARD_INSTANCE_NAME" subyard-e2e-routes "${PROJ[@]}" >/dev/null
 fi

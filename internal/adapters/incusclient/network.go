@@ -647,6 +647,14 @@ func (client *Client) NetworkPower(ctx context.Context, yard yardnetwork.Yard, a
 	if err := operation.WaitContext(powerContext); err != nil {
 		return normalizeOperationError("wait for "+action+" network-managed instance", operation.Get(), err)
 	}
+	if action == "start" {
+		if err := client.applyVMCPU(powerContext, yard.Project, yard.Instance); err != nil {
+			stopContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 45*time.Second)
+			defer cancel()
+			stopErr := client.NetworkPower(stopContext, yard, "stop")
+			return errors.Join(err, stopErr)
+		}
+	}
 	return nil
 }
 

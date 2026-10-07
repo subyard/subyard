@@ -68,9 +68,9 @@ func validateProfileConstraints(configDir, yard string, values environment) erro
 			}
 		}
 	}
-	if values["VM_FREE_PAGE_REPORTING"] == "1" || values["VM_PIN_IPV4"] == "1" || values["SRV_VOLUME_TYPE"] == "block" {
+	if values["VM_FREE_PAGE_REPORTING"] == "1" || values["VM_PIN_IPV4"] == "1" || values["SRV_VOLUME_TYPE"] == "block" || values["VM_CPU_WEIGHT"] != "" {
 		if values["YARD_KIND"] != "vm" {
-			return fmt.Errorf("VM page reporting, IPv4 pinning and block storage require YARD_KIND=vm")
+			return fmt.Errorf("VM page reporting, CPU weight, IPv4 pinning and block storage require YARD_KIND=vm")
 		}
 	}
 	if values["SRV_VOLUME_TYPE"] == "block" && values["SRV_VOLUME_SIZE"] == "" {

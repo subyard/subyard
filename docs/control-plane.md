@@ -855,6 +855,7 @@ The generic VM settings are:
 | --- | --- |
 | `VM_FREE_PAGE_REPORTING=1` | Set the existing virtio balloon's fixed reporting property and guest reporting order 1; reject unsupported Incus/QEMU or conflicting raw configuration. No arbitrary QEMU input is accepted. |
 | `VM_PIN_IPV4=1` | Pin the private primary NIC to its observed DHCP address after ownership and collision checks. |
+| `VM_CPU_WEIGHT` | Optional Linux cgroup-v2 CPU weight (1–10000; normal weight 100). Persist local owned VM metadata and attach its verified QEMU process to a transient systemd scope in the root slice. Refuse placement that would bypass an ancestor CPU, memory, task, cpuset or I/O ceiling. |
 | `ROOT_DISK_SIZE` | Bound the root disk at creation; refuse implicit resizing of an existing VM. |
 | `SRV_VOLUME_TYPE=block` | Attach an owned custom block volume and mount its ext4 filesystem at `/srv` by UUID. |
 | `SRV_VOLUME_SIZE` | Required explicit size for block storage; refuse foreign volumes or size changes. |
@@ -869,6 +870,16 @@ the exact rule and its permissions, and the live kernel order; drift remains a r
 Reporting and IPv4 pinning are opt-in enforcement capabilities: `0` or an unset value does not undo
 an override or address pin already installed on an existing VM, nor revoke its project permission.
 These inputs are not runtime on/off switches.
+
+CPU weight is a relative share during host CPU competition, not a reservation or quota.
+The VM's configured vCPU and memory limits remain in effect. Setup, ordinary product start,
+network reconciliation restarts and host boot reapply the persisted scheduling policy to all
+QEMU threads. Unset CPU weight preserves an already installed policy. Readiness inspects the
+process ownership, root-slice placement and live `cpu.weight` without changing the host.
+Hosts with constrained source ancestors retain their existing cgroup placement and return a
+diagnostic: copying an aggregate service ceiling onto each VM would not preserve that ceiling.
+An instance restarted directly through Incus requires the next product start or init to restore
+its scope; the product does not install a polling service for external lifecycle actions.
 
 ### Explicit owner TCP or UDP ingress
 

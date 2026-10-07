@@ -22,6 +22,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
+	"github.com/Subyard/Subyard/internal/adapters/transport"
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/audit"
 	"github.com/Subyard/Subyard/internal/config"
@@ -153,9 +154,6 @@ case "$1" in
 esac
 `, 0o700)
 	codeLog := filepath.Join(root, "code.log")
-	writeCLIFile(t, filepath.Join(bin, "ssh"), `#!/bin/sh
-printf 'hostname 127.0.0.1\nlocalforward 127.0.0.1:8765 127.0.0.1:8765\nexitonforwardfailure yes\ncontrolpath /fixture/.ssh/subyard-code-cm-fixture\ncontrolpersist no\n'
-`, 0o700)
 	writeCLIFile(t, filepath.Join(bin, "code"), `#!/bin/sh
 printf '%s\0' "$@" > "$CODE_LOG"
 `, 0o700)
@@ -180,6 +178,8 @@ printf '%s\0' "$@" > "$CODE_LOG"
 		Arguments: []string{"code", "Demo"}, Environment: environment, WorkingDir: root,
 		Stdin: strings.NewReader(""), Incus: incus, Executor: incus,
 		Prompt: codePrompt, Stderr: &codeStderr,
+		// Preview-port readiness belongs to the VSCode adapter, not credential sync.
+		ProjectVSCode: transport.Process{Program: filepath.Join(bin, "code"), Env: environment},
 	})
 	if err != nil {
 		t.Fatal(err)

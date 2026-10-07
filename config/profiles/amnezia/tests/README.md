@@ -10,6 +10,7 @@ From the repository root:
 bash config/profiles/amnezia/tests/run.sh
 config/profiles/amnezia/tests/e2e/acceptance.sh --slot N --lane full
 config/profiles/amnezia/tests/e2e/acceptance.sh --slot N --lane recovery
+config/profiles/amnezia/tests/e2e/acceptance.sh --slot N --lane resources
 ```
 
 Live checks use fresh allocated test VMs and the shared `dev/agent-e2e.sh` lease

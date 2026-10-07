@@ -9,7 +9,7 @@ VM_COUNT_REQUESTED=2
 VM_COUNT=2
 
 lane=full
-usage() { printf 'Usage: config/profiles/amnezia/tests/e2e/acceptance.sh --slot N [--lane full|reboot|recovery|startup|disabled|reconnect]\n'; }
+usage() { printf 'Usage: config/profiles/amnezia/tests/e2e/acceptance.sh --slot N [--lane full|resources|reboot|recovery|startup|disabled|reconnect]\n'; }
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --slot)
@@ -18,8 +18,8 @@ while [ "$#" -gt 0 ]; do
       shift 2
       ;;
     --lane)
-      [ "$#" -ge 2 ] || die '--lane requires full, reboot, recovery, startup, disabled or reconnect'
-      case "$2" in full|reboot|recovery|startup|disabled|reconnect) lane="$2" ;; *) die '--lane requires full, reboot, recovery, startup, disabled or reconnect' ;; esac
+      [ "$#" -ge 2 ] || die '--lane requires full, resources, reboot, recovery, startup, disabled or reconnect'
+      case "$2" in full|resources|reboot|recovery|startup|disabled|reconnect) lane="$2" ;; *) die '--lane requires full, resources, reboot, recovery, startup, disabled or reconnect' ;; esac
       shift 2
       ;;
     -h|--help) usage; exit 0 ;;
@@ -91,8 +91,9 @@ prepare_guest 2 "$bundle" "$bundle_hash"
 
 owner_phase() {
   local phase="$1" directory="${GUEST_DIRS[1]}"
+  shift
   printf 'amnezia_acceptance_stage=owner-%s\n' "$phase"
-  write_guest_command 1 "$directory" bash config/profiles/amnezia/tests/e2e/owner.sh "$phase" \
+  write_guest_command 1 "$directory" bash config/profiles/amnezia/tests/e2e/owner.sh "$phase" "$@" \
     | guest 1 dd "of=$directory/run.sh" status=none
   guest 1 chmod 0700 "$directory/run.sh" </dev/null
   guest 1 "$directory/run.sh" </dev/null
@@ -243,6 +244,41 @@ else
   owner_phase init
 fi
 prepare_native_clients
+if [ "$lane" = resources ] || [ "$lane" = full ]; then
+  owner_phase resources
+  client_probe
+  owner_phase priority-neutral
+  owner_phase priority-start 100
+  client_probe
+  owner_phase priority-finish 100
+  owner_phase priority-high
+  owner_phase priority-start 1000
+  client_probe
+  owner_phase priority-finish 1000
+  owner_phase priority-guard
+  client_probe
+fi
+if [ "$lane" = resources ]; then
+  printf 'amnezia_acceptance_stage=free-page-reporting-before-reboot\n'
+  guest 1 env SUBYARD_E2E_VM=1 bash "${GUEST_DIRS[1]}/src/dev/e2e/vm-page-reporting.sh" \
+    subyard-vpn-e2e yard-vpn-e2e </dev/null
+  owner_phase restart-enabled
+  client_probe
+  client_reboot_traffic
+  reboot_owner
+  owner_phase verify-enabled
+  verify_boot_result
+  client_probe
+  printf 'amnezia_acceptance_stage=free-page-reporting-after-reboot\n'
+  guest 1 env SUBYARD_E2E_VM=1 bash "${GUEST_DIRS[1]}/src/dev/e2e/vm-page-reporting.sh" \
+    subyard-vpn-e2e yard-vpn-e2e </dev/null
+  for client in one two; do
+    guest 2 env SUBYARD_E2E_VM=2 bash "${GUEST_DIRS[2]}/src/config/profiles/amnezia/tests/e2e/client.sh" cleanup --client "$client" </dev/null
+  done
+  native_app close
+  printf 'amnezia_acceptance=result-pass source_bundle_sha256=%s lane=%s\n' "$bundle_hash" "$lane"
+  exit 0
+fi
 owner_phase admin-down
 client_probe
 owner_phase admin-up

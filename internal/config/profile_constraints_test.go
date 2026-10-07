@@ -69,3 +69,19 @@ func TestResourceEndpointSettingsAreTypedWithoutAProfile(t *testing.T) {
 		})
 	}
 }
+
+func TestVMCPUWeightContract(t *testing.T) {
+	for _, value := range []string{"", "1", "100", "1000", "10000"} {
+		if err := ValidateSetting(ScopeYard, "VM_CPU_WEIGHT", value, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, value := range []string{"0", "-5", "10001", "high", "01000", "+1000"} {
+		if err := ValidateSetting(ScopeYard, "VM_CPU_WEIGHT", value, false); err == nil {
+			t.Fatalf("accepted %q", value)
+		}
+	}
+	if err := validateProfileConstraints(testkit.TempDir(t), "synthetic", environment{"YARD_KIND": "container", "VM_CPU_WEIGHT": "1000"}); err == nil {
+		t.Fatal("container accepted VM-only scheduling")
+	}
+}

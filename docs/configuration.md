@@ -97,6 +97,14 @@ An intentionally stopped yard returns to stopped after init. Matching limits are
 Empty or unset values leave manually installed and inherited Incus limits in place; clearing a
 setting does not remove a previously applied limit. Subyard imposes no default CPU or memory cap.
 
+`VM_CPU_WEIGHT` optionally assigns a VM a host CPU scheduling weight from 1 to 10000.
+The normal Linux cgroup weight is 100; larger values receive a larger relative share under
+competition. The owner persists this policy and reapplies it through init, start, network
+reconciliation and host boot. It requires systemd and cgroup v2 with unrestricted source
+ancestors: Subyard refuses to bypass operator service or slice ceilings. Unset values retain
+an installed policy. A direct external Incus restart requires a subsequent product start or
+init to restore the scheduling scope.
+
 ## File settings
 
 Known file settings, such as coding-agent configuration and rules, start with a shipped file and may

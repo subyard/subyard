@@ -161,12 +161,21 @@ func (cli *CLI) executeLifecycle(
 		); err != nil {
 			return domain.AdapterResult{}, err
 		}
+		if execution.observed.Config["user.subyard.vm_cpu_weight"] != "" {
+			if err := cli.prepareLifecycleVMCPUPrivileges(ctx, diagnostics, yard, execution); err != nil {
+				return domain.AdapterResult{}, err
+			}
+		}
 	}
 	power, err := cli.lifecyclePowerService()
 	if err != nil {
 		return domain.AdapterResult{}, err
 	}
 	contextValues := structuredAdapterContext(yard)
+	if weight := execution.observed.Config["user.subyard.vm_cpu_weight"]; weight != "" {
+		contextValues["VM_CPU_WEIGHT"] = weight
+		contextValues["SUBYARD_DISPATCHER_PATH"] = cli.options.DispatcherPath
+	}
 	arguments := make([]string, 0, 1)
 	if execution.force {
 		arguments = append(arguments, "--force")
@@ -207,6 +216,22 @@ func (cli *CLI) executeLifecycle(
 		}
 	}
 	return result, err
+}
+
+func (cli *CLI) prepareLifecycleVMCPUPrivileges(ctx context.Context, diagnostics io.Writer, yard domain.Context, execution *lifecycleExecution) error {
+	if !execution.changed {
+		incusPort, _ := cli.statusPorts()
+		scheduler, ok := incusPort.(interface {
+			VMCPUConverged(context.Context, string, string, bool) (bool, error)
+		})
+		if !ok {
+			return errors.New("native VM host CPU scheduling is unavailable")
+		}
+		if ready, err := scheduler.VMCPUConverged(ctx, yard.IncusProject, yard.YardInstanceName, false); err != nil || ready {
+			return err
+		}
+	}
+	return cli.prepareSudoPrivileges(ctx, diagnostics, cli.effectiveUID(), execution.action)
 }
 
 func (cli *CLI) lifecyclePowerService() (application.PowerService, error) {

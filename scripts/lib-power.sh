@@ -170,6 +170,22 @@ power_start_guarded() { # <project> <instance> <bridge...>
     fi
     return 1
   fi
+  if [ -n "${VM_CPU_WEIGHT:-}" ]; then
+    local engine="${SUBYARD_DISPATCHER_PATH:-}" rc=0
+    err='VM CPU scheduling failed'
+    if [ -z "$engine" ] || [ ! -x "$engine" ]; then
+      err='VM CPU scheduling engine is unavailable'
+      rc=1
+    else
+      "$engine" _vm-cpu apply "$project" "$instance" "${SUBYARD_INCUS_SOCKET:-${INCUS_SOCKET:-}}" || rc=$?
+    fi
+    if [ "$rc" -ne 0 ]; then
+      incus stop "$instance" --project "$project" --force >/dev/null 2>&1 \
+        || { power_fail "$err; FAILED to stop $project/$instance"; return 1; }
+      power_fail "$err; $project/$instance was stopped fail-closed"
+      return 1
+    fi
+  fi
 }
 
 power_stop_instance() { # <project> <instance>

@@ -8,8 +8,8 @@ There is no browser administration panel or Subyard client registry.
 ## Create the environment
 
 Use an amd64 owner with KVM, Incus 6.0.6 and a supported QEMU reporting implementation (8.2.x or
-10.0.x). The preset uses Debian 13, with Ubuntu 24.04 as its image fallback, one virtual CPU,
-1 GiB RAM, a 10 GiB root disk and a separate 2 GiB state block volume. It requests Free Page
+10.0.x). The preset uses Debian 13, with Ubuntu 24.04 as its image fallback, two virtual CPUs,
+2 GiB RAM, host CPU weight 1000, a 10 GiB root disk and a separate 2 GiB state block volume. It requests Free Page
 Reporting and a pinned private IPv4. Coding integrations, work projects, host mounts, shared
 credentials, agent forwarding and nested VM access are excluded.
 
@@ -17,6 +17,12 @@ Budget CPU and RAM for the VPN and owner alongside busy coding yards. Use the sh
 [yard resource limits](configuration.md#yard-resource-limits) to cap those yards, including
 `default`; `yard init` reconciles nonempty limits on existing instances. Choose limits for the
 owner's capacity and workload. The VPN preset's limits are ceilings rather than reserved capacity.
+The CPU weight gives QEMU a larger relative share when it competes for host CPU; it does not
+reserve physical cores or guarantee latency. Subyard applies it through a dedicated systemd scope,
+since Incus 6.0.6's `limits.cpu.priority` applies only to containers. The owner must support cgroup v2
+CPU control and have unrestricted ancestors between the Incus service and the root cgroup.
+Initialization refuses to move QEMU if that would bypass an existing CPU, memory, task, I/O or
+CPU-affinity limit. Ancestor limits that remain above the scope continue to apply.
 
 ```sh
 yard -Y vpn init --profile amnezia
@@ -194,7 +200,10 @@ A failed bring-up can be retried without replacing the native server or its clie
 
 VM boot follows Subyard's managed desired-power workflow and host network guards. No independent
 Incus autostart bypass is installed. Stopping another yard does not stop this VM. Free Page
-Reporting returns idle memory to the immediate owner without reserving RAM or CPU priority.
+Reporting returns idle memory to the immediate owner without reserving RAM. The CPU scheduling
+policy is restored through managed starts, repeated initialization and owner boot reconciliation.
+After starting or restarting a VM directly through Incus, run `yard -Y vpn init` to restore the
+managed scheduling policy.
 
 ## Update, backup and recovery
 
@@ -241,6 +250,7 @@ On an available allocated two-VM test slot, run:
 
 ```sh
 config/profiles/amnezia/tests/e2e/acceptance.sh --slot N --lane full
+config/profiles/amnezia/tests/e2e/acceptance.sh --slot N --lane resources
 ```
 
 The acceptance workflow runs stock AmneziaVPN 5.0.3.0 under a virtual display on the second test
@@ -255,3 +265,11 @@ VM and owner reboot recovery, unavailable guest-agent cleanup, mount recovery an
 Reporting cycles. Credentials remain in protected files inside the disposable lease. This describes
 acceptance coverage, not a recorded passing run; it does not establish provider filtering behavior
 or production VPS performance. See [test VM ownership and allocation](test-vms.md).
+
+The focused `resources` lane checks the new two-CPU preset, convergence from the prior one-CPU
+limit without changing RAM or native server state, repeat initialization without a VM restart,
+and reporting before and after owner reboot. It compares neutral and elevated CPU weights under
+controlled competition with an ordinary yard while a native VPN client remains usable. It also
+checks refusal to bypass an Incus service CPU ceiling without stopping the ordinary yard, and
+the scheduling policy after managed VM restart and owner reboot. The full lane includes these
+resource checks alongside its recovery and network scenarios.

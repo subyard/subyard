@@ -51,6 +51,45 @@ else
 fi
 yard() { "$YARD_BIN" -Y vpn-e2e "$@"; }
 guest() { incus exec yard-vpn-e2e --project subyard-vpn-e2e -- "$@"; }
+verify_resources() {
+  [ "$(incus config get yard-vpn-e2e limits.cpu --project subyard-vpn-e2e)" = 2 ] \
+    && [ "$(incus config get yard-vpn-e2e limits.memory --project subyard-vpn-e2e)" = 2GiB ] \
+    || die 'VM CPU or memory limits do not match the preset'
+  guest python3 - <<'PYRESOURCES'
+import os
+from pathlib import Path
+memory = next(int(line.split()[1]) for line in Path('/proc/meminfo').read_text().splitlines()
+              if line.startswith('MemTotal:'))
+assert os.cpu_count() == 2, 'guest CPU count does not match the preset'
+assert 1850 * 1024 <= memory < 2048 * 1024, 'guest memory does not match the 2 GiB ceiling'
+print(f'amnezia_guest_cpus=2 memory_kib={memory}')
+PYRESOURCES
+}
+prepare_work_yard() {
+  local definition="$SUBYARD_CONFIG_HOME/yards/work-e2e/config.env"
+  if [ ! -f "$definition" ]; then
+    install -d -m 0700 "$(dirname "$definition")"
+    cat > "$definition" <<'CONFIG'
+YARD_KIND=container
+ENVIRONMENT_PROFILES=
+CODING_TOOL_INTEGRATIONS=
+HOST_MOUNTS=
+HOST_LINKS=
+FORWARD_SSH_AGENT=0
+NESTED_E2E_VMS=0
+LIMITS_CPU=3
+LIMITS_MEMORY=512MiB
+SSH_PORT=2227
+CONFIG
+    chmod 0600 "$definition"
+  fi
+  "$YARD_BIN" -Y work-e2e init --yes
+  "$YARD_BIN" -Y work-e2e start --yes
+}
+verify_cpu_policy() {
+  sudo -n "$YARD_BIN" _vm-cpu check subyard-vpn-e2e yard-vpn-e2e \
+    || die 'VM host CPU scheduling policy is not effective'
+}
 signature() {
   local state
   # The VM agent can return before Docker has restored the native container.
@@ -74,6 +113,7 @@ signature() {
 verify_state() {
   local observed
   YARD_KIND=vm incus_wait_instance_agent subyard-vpn-e2e yard-vpn-e2e || die 'VM agent unavailable'
+  verify_resources
   observed="$(signature)" || die 'VPN state is unavailable after lifecycle'
   [ "$observed" = "$(cat "$fixture/state.sha256")" ] || die 'VPN state changed across lifecycle'
 }
@@ -174,6 +214,8 @@ case "$phase" in
       yard network isolation on --yes
     fi
     yard start --yes
+    verify_resources
+    verify_cpu_policy
     yard vpn-admin up --yes
     yard vpn status | jq -e ".ready and .network_enabled and .ingress and (.vpn_installed | not)" >/dev/null
     status_started=$SECONDS
@@ -217,6 +259,109 @@ case "$phase" in
     yard init --profile amnezia --yes
     [ "$(signature)" = "$before" ] || die 'repeat reconciliation changed VPN state'
     yard vpn status
+    ;;
+  resources)
+    # Exercise a lower CPU count on an existing native server, then converge
+    # through public init without changing RAM, state or desired power.
+    before="$(signature)"
+    yard config set LIMITS_CPU 1 --scope yard --yes
+    yard init --yes
+    [ "$(incus config get yard-vpn-e2e limits.cpu --project subyard-vpn-e2e)" = 1 ] \
+      && [ "$(incus config get yard-vpn-e2e limits.memory --project subyard-vpn-e2e)" = 2GiB ] \
+      && [ "$(guest getconf _NPROCESSORS_ONLN)" = 1 ] \
+      && [ "$(signature)" = "$before" ] || die 'prior CPU limit did not preserve the native server'
+    yard config set LIMITS_CPU 2 --scope yard --yes
+    yard init --yes
+    verify_enabled
+    before_pid="$(incus query '/1.0/instances/yard-vpn-e2e/state?project=subyard-vpn-e2e' | jq -er '.pid | select(. > 0)')"
+    yard init </dev/null
+    verify_cpu_policy
+    after_pid="$(incus query '/1.0/instances/yard-vpn-e2e/state?project=subyard-vpn-e2e' | jq -er '.pid | select(. > 0)')"
+    [ "$after_pid" = "$before_pid" ] && [ "$(signature)" = "$before" ] \
+      || die 'converged resource reconciliation restarted the VM or changed native state'
+    printf 'amnezia_resources_existing_upgrade=true repeat_noop=true native_state_preserved=true\n'
+    ;;
+  priority-neutral|priority-high)
+    weight=100
+    [ "$phase" != priority-high ] || weight=1000
+    yard config set VM_CPU_WEIGHT "$weight" --scope yard --yes
+    yard init --yes
+    verify_enabled
+    prepare_work_yard
+    ;;
+  priority-start)
+    weight="${2:-}"
+    case "$weight" in 100|1000) ;; *) die 'invalid contention weight' ;; esac
+    unit="subyard-amnezia-priority-$weight.service"
+    [ "$(systemctl show "$unit" -p LoadState --value)" = not-found ] \
+      || die 'CPU contention unit already exists'
+    sudo -n systemd-run --no-block --unit="$unit" --property=Type=oneshot \
+      --property=RemainAfterExit=yes --property=TimeoutStartSec=150 \
+      /usr/bin/python3 "$root/config/profiles/amnezia/tests/e2e/cpu-priority.py" "$fixture" "$weight"
+    ready=0
+    for _ in $(seq 1 45); do
+      if sudo -n test -f "$fixture/priority-$weight.ready"; then ready=1; break; fi
+      [ "$(systemctl show "$unit" -p ActiveState --value)" != failed ] \
+        || die 'CPU contention probe failed before readiness'
+      sleep 1
+    done
+    [ "$ready" = 1 ] || die 'CPU contention probe did not become ready'
+    ;;
+  priority-finish)
+    weight="${2:-}"
+    case "$weight" in 100|1000) ;; *) die 'invalid contention weight' ;; esac
+    unit="subyard-amnezia-priority-$weight.service"
+    sudo -n install -o 0 -g 0 -m 0600 /dev/null "$fixture/priority-$weight.client-done"
+    finished=0
+    for _ in $(seq 1 90); do
+      state="$(systemctl show "$unit" -p SubState --value)"
+      [ "$state" != failed ] || die 'CPU contention probe failed'
+      if [ "$state" = exited ]; then finished=1; break; fi
+      sleep 1
+    done
+    [ "$finished" = 1 ] \
+      && [ "$(systemctl show "$unit" -p Result --value)" = success ] \
+      && [ "$(systemctl show "$unit" -p ExecMainStatus --value)" = 0 ] \
+      || die 'CPU contention probe did not finish successfully'
+    sudo -n systemctl stop "$unit"
+    if [ "$weight" = 1000 ]; then
+      sudo -n python3 - "$fixture" <<'PYPRIORITY'
+import json
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+normal, high = (json.loads((root / f'priority-{weight}.json').read_text()) for weight in (100, 1000))
+normal_ratio = normal['vm_cpu_usec'] / normal['neighbor_cpu_usec']
+high_ratio = high['vm_cpu_usec'] / high['neighbor_cpu_usec']
+print(f'amnezia_cpu_priority_neutral_ratio={normal_ratio:.3f} high_ratio={high_ratio:.3f}')
+assert high_ratio > normal_ratio * 1.5, 'VM CPU priority did not improve CPU share under contention'
+PYPRIORITY
+      verify_enabled
+    fi
+    ;;
+  priority-guard)
+    [ -f /run/subyard-e2e-lease.json ] || die 'allocated owner required for CPU ceiling check'
+    [ "$(systemctl show incus.service -p CPUQuotaPerSecUSec --value)" = infinity ] \
+      || die 'CPU ceiling fixture requires an initially unlimited Incus service'
+    yard stop --yes
+    trap 'sudo -n systemctl set-property --runtime incus.service CPUQuota=infinity >/dev/null 2>&1 || true' EXIT
+    sudo -n systemctl set-property --runtime incus.service CPUQuota=50%
+    diagnostic="$fixture/priority-ceiling.log"
+    install -m 0600 /dev/null "$diagnostic"
+    if yard start --yes >"$diagnostic" 2>&1; then die 'VM startup bypassed the Incus CPU ceiling'; fi
+    grep -Fq 'cpu.max' "$diagnostic" || die 'CPU ceiling refusal lost its primary diagnostic'
+    incus list yard-vpn-e2e --project subyard-vpn-e2e --format csv -c s \
+      | grep -Fxq STOPPED || die 'rejected scheduling left the VM running'
+    [ "$(incus config get yard-vpn-e2e user.subyard.desired_power --project subyard-vpn-e2e)" = stopped ] \
+      || die 'rejected startup changed managed power intent'
+    incus list yard-work-e2e --project subyard-work-e2e --format csv -c s \
+      | grep -Fxq RUNNING || die 'VM scheduling refusal stopped the ordinary yard'
+    sudo -n systemctl set-property --runtime incus.service CPUQuota=infinity
+    trap - EXIT
+    yard start --yes
+    verify_enabled
+    verify_cpu_policy
+    printf 'amnezia_cpu_ceiling_refusal=true stopped_intent_preserved=true neighbor_preserved=true\n'
     ;;
   down)
     before="$(signature)"
@@ -325,8 +470,12 @@ case "$phase" in
     yard stop --yes
     yard start --yes
     verify_enabled
+    verify_cpu_policy
     incus restart yard-vpn-e2e --project subyard-vpn-e2e --timeout 120
+    # Direct Incus starts bypass product scheduling; public init restores it.
+    yard init --yes
     verify_enabled
+    verify_cpu_policy
     ;;
   restart-disabled)
     yard stop --yes
@@ -335,7 +484,7 @@ case "$phase" in
     yard provision amnezia --yes
     verify_disabled
     ;;
-  verify-enabled) verify_enabled ;;
+  verify-enabled) verify_enabled; verify_cpu_policy ;;
   verify-disabled) verify_disabled ;;
   isolation)
     yard network isolation on --yes
@@ -372,25 +521,7 @@ case "$phase" in
     guest docker stats --no-stream --format 'vpn_cpu={{.CPUPerc}} vpn_memory={{.MemUsage}}' amnezia-awg2
     ;;
   work-load)
-    definition="$SUBYARD_CONFIG_HOME/yards/work-e2e/config.env"
-    if [ ! -f "$definition" ]; then
-      install -d -m 0700 "$(dirname "$definition")"
-      cat > "$definition" <<'CONFIG'
-YARD_KIND=container
-ENVIRONMENT_PROFILES=
-CODING_TOOL_INTEGRATIONS=
-HOST_MOUNTS=
-HOST_LINKS=
-FORWARD_SSH_AGENT=0
-NESTED_E2E_VMS=0
-LIMITS_CPU=3
-LIMITS_MEMORY=512MiB
-SSH_PORT=2227
-CONFIG
-      chmod 0600 "$definition"
-    fi
-    "$YARD_BIN" -Y work-e2e init --yes
-    "$YARD_BIN" -Y work-e2e start --yes
+    prepare_work_yard
     incus exec yard-work-e2e --project subyard-work-e2e -- \
       test ! -e /usr/local/lib/subyard-amnezia/runtime.py
     # A bounded neighbor workload; no priority or throughput guarantee is asserted.
