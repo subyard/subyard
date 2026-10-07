@@ -53,7 +53,7 @@ func BuiltInRegistry() (Registry, error) {
 		{
 			ID:            "host-free:all",
 			Tier:          "T2",
-			Members:       []string{"host-free:core", "profiles:host-free", "veranda:build", "veranda:check", "veranda:rust-test", "veranda:test"},
+			Members:       []string{"host-free:core", "profiles:host-free", "veranda:build", "veranda:check", "veranda:packaging-test", "veranda:probe-test", "veranda:runner-test", "veranda:rust-test", "veranda:test"},
 			BudgetSeconds: 2700,
 			Rationale:     "universal host-free fallback including Veranda",
 		},
@@ -61,7 +61,7 @@ func BuiltInRegistry() (Registry, error) {
 
 	goPackages := []string{
 		"application", "audit", "cli", "command", "config", "configsync", "credential",
-		"domain", "migration", "operatoraccess", "ownerinventory", "ports", "previewroute", "releasetransition", "resource", "resourceendpoint", "rpc", "shellquote",
+		"domain", "migration", "operatoraccess", "ownerapi", "ownerinventory", "ports", "previewroute", "releasetransition", "resource", "resourceendpoint", "rpc", "shellquote",
 		"sshidentity", "sshrelay", "sshtrust", "state", "systemdunit", "testyardmigration", "yardnetwork",
 		"adapters/configmaterial", "adapters/credentialmeta", "adapters/credentialruntime", "adapters/hostruntime",
 		"adapters/incusclient", "adapters/networkruntime", "adapters/projectruntime", "adapters/reconcileruntime",
@@ -87,7 +87,7 @@ func BuiltInRegistry() (Registry, error) {
 	shellTests := []string{
 		"agent-e2e", "agent-selection", "aiobserver-provision", "aiobserver-proxy", "build-engine", "release-acceptance",
 		"ccusage-provision", "cli-contract", "codex-agent-defaults", "codex-agent-provision", "codex-legacy-config",
-		"command-registry", "create-subyard-docker-apparmor", "docker-forwarding-convergence",
+		"command-registry", "create-subyard-docker-apparmor", "create-subyard-limits", "docker-forwarding-convergence",
 		"engine-release", "init-extras-convergence", "init-network-convergence", "init-project-convergence",
 		"install-incus-data-home", "install-runtime-release-rollback", "key-tools-install", "lib-power-network",
 		"lifecycle-guard", "opencode-agent-defaults", "opencode-agent-provision",
@@ -121,7 +121,10 @@ func BuiltInRegistry() (Registry, error) {
 		Check{ID: "veranda:test", Tier: "T1", Argv: []string{"npm", "run", "test"}, WorkingDirectory: "veranda", BudgetSeconds: 180, Rationale: "Veranda unit tests"},
 		Check{ID: "veranda:check", Tier: "T1", Argv: []string{"npm", "run", "check"}, WorkingDirectory: "veranda", BudgetSeconds: 180, Rationale: "Veranda static checks"},
 		Check{ID: "veranda:build", Tier: "T1", Argv: []string{"npm", "run", "build"}, WorkingDirectory: "veranda", BudgetSeconds: 180, Rationale: "Veranda production build"},
-		Check{ID: "veranda:rust-test", Tier: "T1", Argv: []string{"cargo", "test", "--manifest-path", "veranda/src-tauri/Cargo.toml", "--no-default-features"}, BudgetSeconds: 300, Rationale: "Veranda Rust tests without desktop dependencies"},
+		Check{ID: "veranda:packaging-test", Tier: "T1", Argv: []string{"node", "--test", "dev/build-veranda.test.mjs"}, BudgetSeconds: 60, Rationale: "Veranda packaging contract"},
+		Check{ID: "veranda:probe-test", Tier: "T1", Argv: []string{"python3", "dev/measure-veranda-test.py"}, BudgetSeconds: 60, Rationale: "Veranda Linux resource probe isolation"},
+		Check{ID: "veranda:runner-test", Tier: "T1", Argv: []string{"python3", "dev/check-veranda-test.py"}, BudgetSeconds: 60, Rationale: "Veranda check runner contract"},
+		Check{ID: "veranda:rust-test", Tier: "T1", Argv: []string{"python3", "dev/check-veranda.py", "--rust-only"}, BudgetSeconds: 300, Rationale: "Veranda Rust tests without desktop dependencies"},
 	)
 
 	p0Lanes := []string{

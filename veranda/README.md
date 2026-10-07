@@ -19,19 +19,29 @@ Exception details are not displayed or sent through IPC.
 
 ## Develop and check
 
-Install the [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/), Rust 1.88 or
-newer, and Node.js 22. From the repository root:
+Host-free checks require Python 3, Rust 1.88 or newer, Node.js 22 and npm. Install the
+locked frontend dependencies first; the check target does not install them. From the
+repository root:
 
 ```sh
 npm --prefix veranda ci
-npm --prefix veranda test
-npm --prefix veranda run check
-npm --prefix veranda run build
-cargo test --manifest-path veranda/src-tauri/Cargo.toml --no-default-features --locked
-node --test dev/build-veranda.test.mjs
-python3 dev/measure-veranda-test.py # Linux resource probe isolation
+make verify-veranda
 ```
 
+`make verify-veranda` runs [the shared local/CI entrypoint](../dev/check-veranda.py):
+the runner's temporary-path contract, Linux resource probe isolation, frontend type
+checks and tests, packaging contracts, the frontend build and native Rust tests
+without desktop features. CI uses
+`python dev/check-veranda.py` with Rust 1.88.0 after `npm ci`.
+Set `PYTHON` for another interpreter, such as `make verify-veranda PYTHON=python`.
+The entrypoint passes its Python executable to native test fixtures. On Linux, the
+native suite runs once with child-only `TMPDIR` pointing through an owned temporary
+symlink, checking the alias behavior also found on macOS; other platforms explicitly
+skip that probe. `python3 dev/check-veranda.py --rust-only` runs just the native suite.
+These checks do not establish native ARM/macOS/Windows results on Linux or physical
+desktop, SSH, package installation and resource acceptance.
+
+Install the [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/) for desktop builds.
 The committed npm policy disables dependency lifecycle scripts. Start the desktop app with
 `npm --prefix veranda run tauri dev`. For Linux local mode, install the matching `yard` on
 `PATH`; from a source checkout use `make build` and the repository's `bin/` directory.
@@ -86,9 +96,10 @@ operate without Veranda; desktop installation and updates remain separate.
 ## Focused E2E checks
 
 Native transport tests require Python 3: the synthetic owner fixture defaults to `python3`
-and accepts an executable through `VERANDA_TEST_PYTHON`. CI explicitly provisions Python
-and selects `python`. Python is a test/probe requirement, not an installed Veranda runtime
-dependency; a Windows `python3` alias must not be assumed to exist.
+and accepts an executable through `VERANDA_TEST_PYTHON`. The shared check entrypoint
+selects its own Python executable; CI explicitly provisions Python. Python is a test/probe
+requirement, not an installed Veranda runtime dependency; a Windows `python3` alias must
+not be assumed to exist.
 
 The [owner RPC harness](../dev/e2e/veranda-owner.sh) requires a disposable allocated VM,
 Incus and the fixture's prerequisites. Run it through the allocation workflow in the

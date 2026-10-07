@@ -27,7 +27,7 @@ done
 
 emit_bootstrap_fallback() {
   if [ "$output_format" = json ]; then
-    printf '%s\n' '{"schema_version":1,"status":"fallback","changes":[],"check_sets":["host-free:all"],"risk_domains":[],"host_free_checks":[{"id":"host-free:core","tier":"T2","budget_seconds":1800,"rationale":"required core host-free merge gate"},{"id":"profiles:host-free","tier":"T1","budget_seconds":180,"rationale":"host-free checks owned by source profiles"},{"id":"veranda:build","tier":"T1","budget_seconds":180,"rationale":"Veranda production build"},{"id":"veranda:check","tier":"T1","budget_seconds":180,"rationale":"Veranda static checks"},{"id":"veranda:rust-test","tier":"T1","budget_seconds":300,"rationale":"Veranda Rust tests without desktop dependencies"},{"id":"veranda:test","tier":"T1","budget_seconds":180,"rationale":"Veranda unit tests"}],"e2e_checks":[],"full_p0":{"required":true,"reasons":[{"code":"universal_fallback","risk_domains":[]}]},"reasons":[],"errors":[{"code":"BOOTSTRAP_FAILURE","message":"test-impact command could not be started"}]}'
+    printf '%s\n' '{"schema_version":1,"status":"fallback","changes":[],"check_sets":["host-free:all"],"risk_domains":[],"host_free_checks":[{"id":"host-free:core","tier":"T2","budget_seconds":1800,"rationale":"required core host-free merge gate"},{"id":"profiles:host-free","tier":"T1","budget_seconds":180,"rationale":"host-free checks owned by source profiles"},{"id":"veranda:build","tier":"T1","budget_seconds":180,"rationale":"Veranda production build"},{"id":"veranda:check","tier":"T1","budget_seconds":180,"rationale":"Veranda static checks"},{"id":"veranda:packaging-test","tier":"T1","budget_seconds":60,"rationale":"Veranda packaging contract"},{"id":"veranda:probe-test","tier":"T1","budget_seconds":60,"rationale":"Veranda Linux resource probe isolation"},{"id":"veranda:runner-test","tier":"T1","budget_seconds":60,"rationale":"Veranda check runner contract"},{"id":"veranda:rust-test","tier":"T1","budget_seconds":300,"rationale":"Veranda Rust tests without desktop dependencies"},{"id":"veranda:test","tier":"T1","budget_seconds":180,"rationale":"Veranda unit tests"}],"e2e_checks":[],"full_p0":{"required":true,"reasons":[{"code":"universal_fallback","risk_domains":[]}]},"reasons":[],"errors":[{"code":"BOOTSTRAP_FAILURE","message":"test-impact command could not be started"}]}'
   else
     printf '%s\n' \
       'schema version: 1' \
@@ -41,6 +41,9 @@ emit_bootstrap_fallback() {
       '  - id="profiles:host-free" tier="T1" budget_seconds=180 rationale="host-free checks owned by source profiles"' \
       '  - id="veranda:build" tier="T1" budget_seconds=180 rationale="Veranda production build"' \
       '  - id="veranda:check" tier="T1" budget_seconds=180 rationale="Veranda static checks"' \
+      '  - id="veranda:packaging-test" tier="T1" budget_seconds=60 rationale="Veranda packaging contract"' \
+      '  - id="veranda:probe-test" tier="T1" budget_seconds=60 rationale="Veranda Linux resource probe isolation"' \
+      '  - id="veranda:runner-test" tier="T1" budget_seconds=60 rationale="Veranda check runner contract"' \
       '  - id="veranda:rust-test" tier="T1" budget_seconds=300 rationale="Veranda Rust tests without desktop dependencies"' \
       '  - id="veranda:test" tier="T1" budget_seconds=180 rationale="Veranda unit tests"' \
       'e2e checks:' \

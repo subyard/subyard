@@ -89,6 +89,8 @@
     "go-contracttest": ["go:contracttest", "host-free:core"],
     "go-domain": ["go:domain"],
     "go-ownerinventory": ["go:ownerinventory"],
+    "owner-api": ["go:ownerapi", "go:cli"],
+    "yard-rpc-contract": ["go:cli", "go:rpc", "go:ownerapi", "veranda:rust-test"],
     "go-operatoraccess": ["go:operatoraccess"],
     "go-ports": ["go:ports"],
     "go-resource": ["go:resource"],
@@ -199,7 +201,10 @@
       "veranda:check",
       "veranda:test"
     ],
-    "veranda-rust": ["veranda:rust-test"]
+    "veranda-rust": ["veranda:rust-test"],
+    "veranda-probe": ["veranda:probe-test"],
+    "veranda-runner": ["veranda:runner-test"],
+    "veranda-packaging": ["veranda:packaging-test"]
   },
   "risk_domains": [
     "allocation-fencing-lease-identity",
@@ -730,6 +735,20 @@
       "risk_domains": ["command-control"]
     },
     {
+      "id": "internal-ownerapi",
+      "priority": 600,
+      "pattern": "^internal/ownerapi/.*$",
+      "check_sets": ["owner-api"],
+      "risk_domains": ["command-control"]
+    },
+    {
+      "id": "yard-rpc-contract",
+      "priority": 600,
+      "pattern": "^api/yard-rpc/.*$",
+      "check_sets": ["yard-rpc-contract"],
+      "risk_domains": ["veranda"]
+    },
+    {
       "id": "internal-rpc",
       "priority": 600,
       "pattern": "^internal/rpc/.*$",
@@ -910,6 +929,34 @@
       "pattern": "^dev/e2e/.*$",
       "check_sets": ["e2e-infrastructure"],
       "risk_domains": ["project-lifecycle"]
+    },
+    {
+      "id": "veranda-probe",
+      "priority": 425,
+      "pattern": "^dev/measure-veranda(-test)?\\.py$",
+      "check_sets": ["veranda-probe"],
+      "risk_domains": []
+    },
+    {
+      "id": "veranda-packaging",
+      "priority": 425,
+      "pattern": "^dev/build-veranda(\\.test)?\\.mjs$",
+      "check_sets": ["veranda-packaging"],
+      "risk_domains": []
+    },
+    {
+      "id": "veranda-check-entrypoint",
+      "priority": 425,
+      "pattern": "^dev/check-veranda\\.py$",
+      "check_sets": ["veranda-frontend", "veranda-rust", "veranda-probe", "veranda-packaging", "veranda-runner"],
+      "risk_domains": []
+    },
+    {
+      "id": "veranda-check-runner-test",
+      "priority": 425,
+      "pattern": "^dev/check-veranda-test\\.py$",
+      "check_sets": ["veranda-runner"],
+      "risk_domains": []
     },
     {
       "id": "development-tools",

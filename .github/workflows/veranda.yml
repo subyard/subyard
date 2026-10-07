@@ -2,11 +2,11 @@ name: Veranda desktop candidates
 
 on:
   pull_request:
-    paths: ['veranda/**', 'api/yard-rpc/**', 'dev/build-veranda*', 'dev/measure-veranda*.py', '.github/workflows/veranda.yml']
+    paths: ['veranda/**', 'api/yard-rpc/**', 'dev/build-veranda*', 'dev/check-veranda*.py', 'dev/measure-veranda*.py', '.github/workflows/veranda.yml']
   push:
     branches: ['**']
     tags: ['v*']
-    paths: ['veranda/**', 'api/yard-rpc/**', 'dev/build-veranda*', 'dev/measure-veranda*.py', '.github/workflows/veranda.yml']
+    paths: ['veranda/**', 'api/yard-rpc/**', 'dev/build-veranda*', 'dev/check-veranda*.py', 'dev/measure-veranda*.py', '.github/workflows/veranda.yml']
   workflow_dispatch:
 
 permissions:
@@ -38,9 +38,6 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.13'
-      - name: Check Linux resource probe isolation
-        if: runner.os == 'Linux'
-        run: python dev/measure-veranda-test.py
       - name: Install Linux desktop prerequisites
         if: runner.os == 'Linux'
         run: sudo apt-get update -qq && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libxdo-dev libssl-dev librsvg2-dev patchelf
@@ -48,18 +45,10 @@ jobs:
         run: rustup toolchain install 1.88.0 --profile minimal --no-self-update
       - name: Install frontend dependencies
         run: npm --prefix veranda ci
-      - name: Check frontend and packaging contract
-        run: |
-          npm --prefix veranda run check
-          npm --prefix veranda test
-          node --test dev/build-veranda.test.mjs
-      - name: Check native transport without desktop requirements
+      - name: Check Veranda host-free contracts
         env:
           RUSTUP_TOOLCHAIN: 1.88.0
-          VERANDA_TEST_PYTHON: python
-        run: |
-          python --version
-          cargo test --manifest-path veranda/src-tauri/Cargo.toml --no-default-features --locked
+        run: python dev/check-veranda.py
       - name: Build matched unsigned desktop candidate
         env:
           RUSTUP_TOOLCHAIN: 1.88.0

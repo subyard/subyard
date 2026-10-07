@@ -28,6 +28,30 @@ func TestSelectEmptyDiffReturnsAnEmptySelectedPlan(t *testing.T) {
 	}
 }
 
+func TestSelectVerandaAndOwnerRPCChecks(t *testing.T) {
+	policy, registry := selectorFixture(t)
+	for _, test := range []struct {
+		path string
+		want []string
+	}{
+		{"dev/measure-veranda.py", []string{"veranda:probe-test"}},
+		{"dev/measure-veranda-test.py", []string{"veranda:probe-test"}},
+		{"dev/build-veranda.mjs", []string{"veranda:packaging-test"}},
+		{"dev/build-veranda.test.mjs", []string{"veranda:packaging-test"}},
+		{"dev/check-veranda.py", []string{"veranda:build", "veranda:check", "veranda:packaging-test", "veranda:probe-test", "veranda:runner-test", "veranda:rust-test", "veranda:test"}},
+		{"dev/check-veranda-test.py", []string{"veranda:runner-test"}},
+		{"api/yard-rpc/v1/fixtures/negotiate.frame", []string{"go:cli", "go:ownerapi", "go:rpc", "veranda:rust-test"}},
+		{"internal/ownerapi/settings.go", []string{"go:cli", "go:ownerapi"}},
+	} {
+		t.Run(test.path, func(t *testing.T) {
+			got := Select(policy, registry, ChangeSet{SchemaVersion: 1, Changes: []Change{modifiedChange(test.path)}})
+			if !slices.Equal(recommendationIDs(got.HostFreeChecks), test.want) || len(got.E2EChecks) != 0 || got.FullP0.Required || len(got.Errors) != 0 {
+				t.Fatalf("selection for %s = %#v, want only %v", test.path, got, test.want)
+			}
+		})
+	}
+}
+
 func TestSelectPreviewPathsRecommendBoundedLifecycle(t *testing.T) {
 	policy, registry := selectorFixture(t)
 	for _, path := range []string{

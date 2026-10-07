@@ -23,7 +23,7 @@ func TestRegistryContainsRequiredChecksAndFixedCommands(t *testing.T) {
 
 	goPackages := []string{
 		"application", "audit", "cli", "command", "config", "configsync", "credential",
-		"domain", "migration", "ownerinventory", "ports", "resource", "rpc", "shellquote",
+		"domain", "migration", "ownerapi", "ownerinventory", "ports", "resource", "rpc", "shellquote",
 		"sshidentity", "sshrelay", "state", "systemdunit", "testyardmigration",
 		"adapters/credentialmeta", "adapters/credentialruntime", "adapters/hostruntime",
 		"adapters/incusclient", "adapters/projectruntime", "adapters/reconcileruntime",
@@ -49,7 +49,10 @@ func TestRegistryContainsRequiredChecksAndFixedCommands(t *testing.T) {
 		{ID: "veranda:test", Tier: "T1", Argv: []string{"npm", "run", "test"}, WorkingDirectory: "veranda", BudgetSeconds: 180, Rationale: "Veranda unit tests"},
 		{ID: "veranda:check", Tier: "T1", Argv: []string{"npm", "run", "check"}, WorkingDirectory: "veranda", BudgetSeconds: 180, Rationale: "Veranda static checks"},
 		{ID: "veranda:build", Tier: "T1", Argv: []string{"npm", "run", "build"}, WorkingDirectory: "veranda", BudgetSeconds: 180, Rationale: "Veranda production build"},
-		{ID: "veranda:rust-test", Tier: "T1", Argv: []string{"cargo", "test", "--manifest-path", "veranda/src-tauri/Cargo.toml", "--no-default-features"}, BudgetSeconds: 300, Rationale: "Veranda Rust tests without desktop dependencies"},
+		{ID: "veranda:packaging-test", Tier: "T1", Argv: []string{"node", "--test", "dev/build-veranda.test.mjs"}, BudgetSeconds: 60, Rationale: "Veranda packaging contract"},
+		{ID: "veranda:probe-test", Tier: "T1", Argv: []string{"python3", "dev/measure-veranda-test.py"}, BudgetSeconds: 60, Rationale: "Veranda Linux resource probe isolation"},
+		{ID: "veranda:runner-test", Tier: "T1", Argv: []string{"python3", "dev/check-veranda-test.py"}, BudgetSeconds: 60, Rationale: "Veranda check runner contract"},
+		{ID: "veranda:rust-test", Tier: "T1", Argv: []string{"python3", "dev/check-veranda.py", "--rust-only"}, BudgetSeconds: 300, Rationale: "Veranda Rust tests without desktop dependencies"},
 	}
 	for _, want := range exact {
 		assertRegistryCheck(t, registry, want)
@@ -59,7 +62,7 @@ func TestRegistryContainsRequiredChecksAndFixedCommands(t *testing.T) {
 	if !ok {
 		t.Fatal("registry is missing host-free:all")
 	}
-	wantMembers := []string{"host-free:core", "profiles:host-free", "veranda:build", "veranda:check", "veranda:rust-test", "veranda:test"}
+	wantMembers := []string{"host-free:core", "profiles:host-free", "veranda:build", "veranda:check", "veranda:packaging-test", "veranda:probe-test", "veranda:runner-test", "veranda:rust-test", "veranda:test"}
 	if all.Tier != "T2" || len(all.Argv) != 0 || !reflect.DeepEqual(all.Members, wantMembers) {
 		t.Fatalf("host-free:all = %#v, want non-executing T2 composite with members %v", all, wantMembers)
 	}
@@ -67,7 +70,7 @@ func TestRegistryContainsRequiredChecksAndFixedCommands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Expand(host-free:all) error = %v", err)
 	}
-	wantExpanded := []string{"host-free:core", "profiles:host-free", "veranda:build", "veranda:check", "veranda:rust-test", "veranda:test"}
+	wantExpanded := []string{"host-free:core", "profiles:host-free", "veranda:build", "veranda:check", "veranda:packaging-test", "veranda:probe-test", "veranda:runner-test", "veranda:rust-test", "veranda:test"}
 	if got := checkIDs(expanded); !reflect.DeepEqual(got, wantExpanded) {
 		t.Fatalf("Expand(host-free:all) IDs = %v, want %v", got, wantExpanded)
 	}

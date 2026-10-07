@@ -381,6 +381,9 @@ func emergencyHostFreeChecks() []testimpact.CheckRecommendation {
 		{ID: "profiles:host-free", Tier: "T1", BudgetSeconds: 180, Rationale: "host-free checks owned by source profiles"},
 		{ID: "veranda:build", Tier: "T1", BudgetSeconds: 180, Rationale: "Veranda production build"},
 		{ID: "veranda:check", Tier: "T1", BudgetSeconds: 180, Rationale: "Veranda static checks"},
+		{ID: "veranda:packaging-test", Tier: "T1", BudgetSeconds: 60, Rationale: "Veranda packaging contract"},
+		{ID: "veranda:probe-test", Tier: "T1", BudgetSeconds: 60, Rationale: "Veranda Linux resource probe isolation"},
+		{ID: "veranda:runner-test", Tier: "T1", BudgetSeconds: 60, Rationale: "Veranda check runner contract"},
 		{ID: "veranda:rust-test", Tier: "T1", BudgetSeconds: 300, Rationale: "Veranda Rust tests without desktop dependencies"},
 		{ID: "veranda:test", Tier: "T1", BudgetSeconds: 180, Rationale: "Veranda unit tests"},
 	}

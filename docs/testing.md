@@ -216,6 +216,36 @@ handling, latest-release installation and preservation of a working binary after
 Mocks do not establish compatibility with a real CLI release. Check its native `execpolicy check`
 against the shipped rules for that evidence; real client approve/deny needs separate acceptance.
 
+## Run Veranda host-free checks
+
+Install Python 3, Node.js 22/npm and Rust 1.88 or newer, then run from the repository root:
+
+```sh
+npm --prefix veranda ci
+make verify-veranda
+```
+
+The target runs `python3 dev/check-veranda.py`; override the interpreter with
+`make verify-veranda PYTHON=python` when needed. CI runs the same entrypoint with
+`python` and Rust 1.88.0 after installing locked frontend dependencies. Neither
+the target nor the entrypoint installs dependencies. `make verify` retains its
+separate core and shipped-profile scope.
+
+Checks stop at the first failure: runner temporary-path contract, Linux resource
+probe isolation, frontend type checks, frontend tests, packaging contracts,
+frontend build and native Rust tests with `--no-default-features --locked`.
+Python fixtures use the entrypoint's own
+interpreter. `python3 dev/check-veranda.py --rust-only` selects only native tests.
+On Linux that suite runs once with a child-only `TMPDIR` alias to a private real
+directory under an owned `/tmp` fixture. This exercises symlink temporary paths
+without mutating the parent environment or parallel Rust tests' global state;
+cleanup failure fails the check. Non-Linux runs explicitly skip the Linux probes.
+
+A local Linux pass does not verify native ARM, macOS or Windows; those remain
+separate CI matrix results. Desktop launches, real local/SSH owners, package
+installation/upgrade/rollback and physical resource acceptance remain separate
+[Veranda delivery gates](../veranda/README.md#delivery-gates).
+
 ## Extended/manual diagnostics
 
 The Orca load diagnostic is an explicit manual check, separate from `tests/run.sh`,
