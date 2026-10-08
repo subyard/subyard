@@ -2,7 +2,7 @@
 
 AI Observer is included in the default `CODING_TOOL_INTEGRATIONS` as `aiobserver`.
 `yard init` installs and starts its dashboard inside the yard. The integration pins
-the upstream `0.5.0` multi-architecture Docker image by SHA-256 digest.
+the upstream `0.6.0` multi-architecture Docker image by SHA-256 digest.
 
 The observer reads Claude Code and Codex session files through read-only mounts.
 It imports existing sessions on the first start and watches for new records. Agent
@@ -82,4 +82,4 @@ blocked, resolve its blocker and finish the exact installed transition before
 an ordinary update; this change does not supersede that saved transition plan.
 
 Upstream: [AI Observer](https://github.com/tobilg/ai-observer),
-[watch mode](https://github.com/tobilg/ai-observer/blob/v0.5.0/README.md#watch-command).
+[watch mode](https://github.com/tobilg/ai-observer/blob/v0.6.0/README.md#watch-command).
