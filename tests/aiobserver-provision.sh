@@ -136,7 +136,7 @@ case "${1:-}" in
     name="${1:?}"; shift
     [ "$(cat "$(container_dir "$name")/running")" = true ] || exit 1
     [ "$*" = '/app/ai-observer --version' ] || exit 90
-    printf 'ai-observer 0.5.0\n'
+    printf 'ai-observer 0.6.0\n'
     ;;
   logs) exit 0 ;;
   *) printf 'unsupported docker call: %s\n' "$*" >&2; exit 89 ;;
@@ -243,7 +243,7 @@ for file in "$wrapper" "$check" "$installed" "$health" "$unit" "$managed_marker"
 [ "$(stat -c %a "$managed_marker")" = 644 ] || fail 'managed marker mode is not 0644'
 [ "$(cat "$managed_marker")" = subyard-ai-observer-v1 ] || fail 'managed marker content drifted'
 [ -d "$state/data" ] || fail 'persistent data directory missing'
-[ "$(cat "$container/image")" = 'tobilg/ai-observer:0.5.0@sha256:e2d8f8fdf5e0b55b2cbb1f0db84288eca4d8c3727f9ec569a92704c3a2ecc30f' ] \
+[ "$(cat "$container/image")" = 'tobilg/ai-observer:0.6.0@sha256:01c84f99157f5a5688bcf7c96cd01fe24d56958c16d711d8f1afc05c43d8993a' ] \
   || fail 'container image is not the pinned release'
 [ "$(cat "$container/user")" = "$(id -u):$(id -g)" ] || fail 'container does not use developer UID:GID'
 [ "$(cat "$container/binds")" = "[\"$state/data:/app/data:rw\",\"$TMP/shared/claude:/sessions/claude:ro\",\"$dev_home/.codex/sessions:/sessions/codex:ro\"]" ] \
@@ -263,9 +263,9 @@ grep -Fq 'ExecStop='"$wrapper"' stop' "$unit" || fail 'unit stop is not controll
 "$check" >/dev/null || fail 'installed HTTP readiness check failed'
 "$installed" >/dev/null || fail 'installed convergence check failed'
 [ "$("$health" | jq -r .state)" = ready ] || fail 'installed health state is not ready'
-[ "$("$wrapper" --version)" = 'ai-observer 0.5.0' ] || fail 'wrapper version command failed'
+[ "$("$wrapper" --version)" = 'ai-observer 0.6.0' ] || fail 'wrapper version command failed'
 status_output="$("$wrapper" status)" || fail 'wrapper status command failed'
-[[ "$status_output" == *'ai-observer 0.5.0 ready'* ]] || fail 'wrapper status omitted readiness'
+[[ "$status_output" == *'ai-observer 0.6.0 ready'* ]] || fail 'wrapper status omitted readiness'
 [[ "$status_output" != *"$TMP"* ]] && [[ "$status_output" != *'AI_OBSERVER_'* ]] \
   || fail 'wrapper status exposed container paths or environment'
 grep -Eq 'curl .*--connect-timeout 2 .*--max-time 5 .*http://127[.]0[.]0[.]1:8080/health' "$FAKE_LOG" \
@@ -520,7 +520,7 @@ starting_health="$(AI_OBSERVER_FAKE_HTTP_FAIL=1 "$health")"
 [ "$starting_health" = '{"state":"starting"}' ] \
   || fail 'health hook did not emit the exact starting state'
 starting_status="$(AI_OBSERVER_FAKE_HTTP_FAIL=1 "$wrapper" status)"
-[[ "$starting_status" == *'ai-observer 0.5.0 starting'* ]] \
+[[ "$starting_status" == *'ai-observer 0.6.0 starting'* ]] \
   || fail 'operator status did not report starting during backfill'
 : >"$FAKE_LOG"
 AI_OBSERVER_FAKE_HTTP_FAIL=1 run_hook "$test_root" "$dev_home" 'claude codex aiobserver' >/dev/null

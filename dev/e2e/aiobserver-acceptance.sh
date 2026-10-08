@@ -211,7 +211,7 @@ fi
 [ "$(<"$HOME/.cache/subyard-e2e-platform/.subyard-e2e-platform-marker")" = \
     subyard-e2e-platform-v1 ] || die 'unexpected shared E2E platform marker'
 
-expected_image='tobilg/ai-observer:0.5.0@sha256:e2d8f8fdf5e0b55b2cbb1f0db84288eca4d8c3727f9ec569a92704c3a2ecc30f'
+expected_image='tobilg/ai-observer:0.6.0@sha256:01c84f99157f5a5688bcf7c96cd01fe24d56958c16d711d8f1afc05c43d8993a'
 initial_provision_marker="$(incus config get \
   "$INSTANCE" user.subyard.ai_observer_provision --project "$PROJECT")"
 [[ "$initial_provision_marker" =~ ^[0-9a-f]{64}$ ]] \

@@ -2,8 +2,8 @@
 # Install and reconcile the pinned AI Observer file watcher inside one enabled yard.
 set -euo pipefail
 
-IMAGE='tobilg/ai-observer:0.5.0@sha256:e2d8f8fdf5e0b55b2cbb1f0db84288eca4d8c3727f9ec569a92704c3a2ecc30f'
-VERSION=0.5.0
+IMAGE='tobilg/ai-observer:0.6.0@sha256:01c84f99157f5a5688bcf7c96cd01fe24d56958c16d711d8f1afc05c43d8993a'
+VERSION=0.6.0
 CONTAINER=subyard-ai-observer
 UNIT=subyard-ai-observer.service
 OWNER_LABEL=ai-observer-v1
