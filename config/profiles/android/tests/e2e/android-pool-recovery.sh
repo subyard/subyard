@@ -246,6 +246,7 @@ if [ "$recovery_only" = 0 ]; then
     fi
     incus_exec 30 -- sh -c 'cat > /opt/subyard-e2e-native-debug.py; chmod 0644 /opt/subyard-e2e-native-debug.py' < "$root/config/profiles/android/tests/helpers/scrcpy-native-debug.py" >/dev/null
   fi
+  incus_exec 30 -- sh -c 'cat > /opt/subyard-e2e-lifecycle.py; chmod 0644 /opt/subyard-e2e-lifecycle.py' < "$root/config/profiles/android/tests/e2e/android-pool-lifecycle.py" >/dev/null
   incus_exec 30 -- sh -c 'cat > /opt/subyard-e2e-capture.py; chmod 0644 /opt/subyard-e2e-capture.py' < "$root/config/profiles/android/tests/e2e/android-pool-capture.py" >/dev/null
   incus_exec 30 -- sh -c 'cat > /opt/subyard-e2e-view-window.py; chmod 0644 /opt/subyard-e2e-view-window.py' < "$root/config/profiles/android/tests/helpers/scrcpy-view-window.py" >/dev/null
 fi
@@ -296,6 +297,7 @@ grep -Eq '^INFO: Texture: [0-9]{1,4}x[0-9]{1,4}$' "$phase_log" || fail 'owner vi
 [ "$(check_guest 30 allocation "$first")" = "$before_view" ] \
   || fail 'owner viewer released or renewed the attached lease'
 printf 'android-pool-recovery owner-viewer=PASS lease=unchanged\n'
+phase_log=''
 android_phase_begin public-remote-viewer
 printf 'android-pool-recovery phase=public-remote-viewer\n'
 timeout --foreground --kill-after=30 "$(remaining 1800)" \

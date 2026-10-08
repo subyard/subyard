@@ -648,7 +648,10 @@ out.flush()
         service.write_text('#!/bin/sh\nprintf "%s\\n" "$*" > "$WIFI_CALL"\nexit "$WIFI_EXIT"\n')
         service.chmod(0o755)
         command = commands / 'cmd'
-        command.write_text('#!/bin/sh\nprintf "%s\\n" "$*" > "$CONNECT_CALL"\nexit "$CONNECT_EXIT"\n')
+        command.write_text('#!/bin/sh\ncase "$*" in\n'
+                           '"wifi status") printf "%s\\n" "$ACTUAL_WIFI_STATUS";;\n'
+                           '"wifi connect-network AndroidWifi open") printf "%s\\n" "$*" > "$CONNECT_CALL"; '
+                           'exit "$CONNECT_EXIT";;\n*) exit 2;;\nesac\n')
         command.chmod(0o755)
         protocol = r'''
 import os, subprocess
@@ -698,6 +701,7 @@ os.write(1, result.stdout)
                            WIFI_ENABLED=wifi, WIFI_EXIT=wifi_exit, WIFI_CALL=str(wifi_call),
                            CONNECT_EXIT=connect_exit, CONNECT_CALL=str(connect_call),
                            FRAMEWORK_PID='101', WIFI_SERVICE='Service wifi: found',
+                           ACTUAL_WIFI_STATUS='Wifi is enabled\nprivate connection details',
                            PATH=str(commands) + ':' + os.environ['PATH'])
                 process = subprocess.Popen([sys.executable, '-c', protocol], env=env,
                                            stdin=subprocess.PIPE, stdout=subprocess.PIPE)
@@ -726,7 +730,10 @@ os.write(1, result.stdout)
             path.chmod(0o755)
         submissions = self.root / 'wifi-submissions'
         command = commands / 'cmd'
-        command.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$SUBMISSIONS"\n')
+        command.write_text('#!/bin/sh\ncase "$*" in\n'
+                           '"wifi status") printf "%s\\n" "$ACTUAL_WIFI_STATUS";;\n'
+                           '"wifi connect-network AndroidWifi open") printf "%s\\n" "$*" >> "$SUBMISSIONS";;\n'
+                           '*) exit 2;;\nesac\n')
         command.chmod(0o755)
         protocol = r'''
 import os, subprocess
@@ -747,8 +754,10 @@ result = subprocess.run(['/bin/sh', '-c', command[6:].decode()], stdout=subproce
 os.write(1, result.stdout)
 '''
         state = {}
-        def probe(pid='101', service='Service wifi: found', address=''):
+        def probe(pid='101', service='Service wifi: found', address='',
+                  radio='Wifi is enabled\nprivate connection details'):
             env = dict(os.environ, FRAMEWORK_PID=pid, WIFI_SERVICE=service,
+                       ACTUAL_WIFI_STATUS=radio,
                        GUEST_ADDRESS=address, SUBMISSIONS=str(submissions),
                        PATH=str(commands) + ':' + os.environ['PATH'])
             process = subprocess.Popen([sys.executable, '-c', protocol], env=env,
@@ -762,7 +771,14 @@ os.write(1, result.stdout)
         def count():
             return len(submissions.read_text().splitlines()) if submissions.exists() else 0
 
+        # Desired wifi_on=1 precedes an actually enabled radio; status is disabled
+        # while Android is enabling. No accepted connection may be cached yet.
+        self.assertEqual(probe(radio='Wifi is disabled'), (False, False))
+        self.assertEqual(probe(radio='Wifi is disabled\nWifi is enabled'), (False, False))
+        self.assertEqual(state, {})
+        self.assertEqual(count(), 0)
         self.assertEqual(probe(), (False, True))
+        self.assertEqual(state, {'submitted_for': '101'})
         self.assertEqual(probe(), (False, False))
         self.assertEqual(count(), 1, 'pending DHCP must not trigger another connection')
         self.assertEqual(probe(pid='202'), (False, True))

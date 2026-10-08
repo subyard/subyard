@@ -28,6 +28,119 @@ capture = load('android-pool-capture')
 viewer = load('android-pool-viewer')
 monitor = load('android-pool-monitor')
 lifecycle = load('android-pool-lifecycle')
+remote_viewer = load('android-pool-remote-viewer')
+
+# Execute the private guest protocol: confirmed Doze, restoration, bounded CPU
+# projection and failed/unknown observations never expose helper output.
+cpu_sample = ('CPU usage from 100ms to 0ms ago (private timestamp):\n'
+              '  80% 123/system_server: 60% user + 20% kernel\n'
+              '    70% 124/private-thread: 50% user + 20% kernel\n'
+              '   +10% 125/system_server: 10% user + 0% kernel\n'
+              '  20% 126/surfaceflinger: 10% user + 10% kernel\n'
+              ' +30% 127/dex2oat64: 20% user + 10% kernel / faults: 2 minor 1 major\n'
+              ' -5% 128/artd: 5% user + 0% kernel\n'
+              '  3.5% 129/private-process-token: 1.5% user + 2% kernel\n'
+              '40% TOTAL: 25% user + 10% kernel + 5% iowait\n')
+for display_mode, failure in (
+        ('idle-display', None), ('idle-display', 'sleep-timeout'),
+        ('idle-display', 'force-timeout'), ('idle-display', 'missing-deep'),
+        ('idle-display', 'missing-force'), ('idle-display', 'cpu-timeout'),
+        ('idle-display', 'cpu-missing'), ('idle-display', 'cpu-malformed'),
+        ('idle-display', 'cpu-total'),
+        ('idle-display', 'cpu-limit'), ('idle-display', 'not-held'),
+        ('wake-display', None), ('wake-display', 'wake-timeout'),
+        ('wake-display', 'missing-force'), ('wake-display', 'missing-deep')):
+    now, samples = [0], []
+    lease = dict(token='private-idle-display-token')
+    def idle_adb(value, *arguments, timeout=120):
+        assert value is lease
+        samples.append(arguments)
+        print('private display helper output')
+        if arguments == ('shell', 'dumpsys', 'cpuinfo'):
+            assert timeout == 5
+            if failure == 'cpu-timeout':
+                raise lifecycle.CommandTimeout('private CPU timeout')
+            if failure == 'cpu-missing':
+                return 'private process output without a summary'
+            if failure == 'cpu-malformed':
+                return cpu_sample.replace('80% 123/', 'invalid% 123/')
+            if failure == 'cpu-total':
+                return cpu_sample.replace('40% TOTAL:', '140% TOTAL:')
+            if failure == 'cpu-limit':
+                return cpu_sample + 'private-process-token' * 65536
+            return cpu_sample
+        if arguments[:3] == ('shell', 'cmd', 'deviceidle'):
+            assert timeout == 10
+            operation = arguments[3:]
+            if operation == ('force-idle', 'deep'):
+                if failure == 'force-timeout':
+                    raise lifecycle.CommandTimeout('private Doze timeout')
+                return 'private ignored force response'
+            if operation == ('unforce',):
+                return 'private ignored restoration response'
+            assert operation in (('get', 'deep'), ('get', 'force'))
+            if failure == 'missing-' + operation[1]:
+                return 'private invalid state'
+            return ('IDLE' if display_mode == 'idle-display' else 'ACTIVE') if operation[1] == 'deep' else (
+                'true' if display_mode == 'idle-display' else 'false')
+        if arguments == ('shell', 'input', 'keyevent', 'KEYCODE_WAKEUP'):
+            assert display_mode == 'wake-display' and timeout == 30
+            if failure == 'wake-timeout':
+                raise lifecycle.CommandTimeout('slow private display wake')
+            return ''
+        if arguments == ('shell', 'input', 'keyevent', 'KEYCODE_SLEEP'):
+            assert display_mode == 'idle-display'
+            return ''
+        assert arguments == ('shell', 'dumpsys', 'power') and timeout <= 5
+        now[0] += timeout
+        if failure == 'sleep-timeout':
+            raise lifecycle.CommandTimeout('slow private display')
+        return 'mWakefulness=Awake' if len(samples) == 2 else 'mWakefulness=Asleep'
+    def idle_helper(path):
+        assert path == '/opt/subyard-e2e-lifecycle.py'
+        return dict(idle_display=lifecycle.idle_display, adb=lifecycle.adb)
+    guest_client = SimpleNamespace(read_lease=lambda path: lease,
+                                   rpc=lambda operation, **kwargs: dict(state='available' if failure == 'not-held' else 'held'))
+    succeeds = failure is None or failure.startswith('cpu-') or failure == 'not-held'
+    with patch.dict(sys.modules, client=guest_client), \
+            patch.object(sys, 'argv', ['guest', display_mode, '/private/guest-lease.json']), \
+            patch.object(sys, 'path', list(sys.path)), \
+            patch('runpy.run_path', side_effect=idle_helper), \
+            patch.object(lifecycle, 'adb', side_effect=idle_adb), \
+            patch.object(lifecycle.time, 'monotonic', side_effect=lambda: now[0]), \
+            patch.object(lifecycle.time, 'sleep') as sleep, contextlib.redirect_stdout(io.StringIO()) as idle_output:
+        try:
+            exec(compile(remote_viewer.GUEST_CHECK, '<guest-check>', 'exec'), {})
+            assert succeeds, 'guest accepted failed display setup'
+        except (lifecycle.Failure, RuntimeError):
+            assert not succeeds
+    raw = idle_output.getvalue()
+    assert 'private' not in raw and '123' not in raw and '127' not in raw
+    if succeeds:
+        projected = json.loads(raw)
+        if display_mode == 'wake-display':
+            assert projected is True
+        else:
+            assert projected['held'] is (failure != 'not-held')
+            assert projected['forced'] is True and projected['deep'] == 'IDLE'
+            for observation in (projected['cpu_before'], projected['cpu_after']):
+                if failure and failure.startswith('cpu-'):
+                    assert observation['observation'] == 'unknown' and observation['total_percent'] is None
+                    assert all(value is None for value in observation['process_percent'].values())
+                else:
+                    assert observation == dict(observation='ok', total_percent=40.0,
+                                               process_percent=dict(framework=80.0, composer=20.0,
+                                                                    optimizer=35.0, other=3.5))
+    else:
+        assert raw == ''
+        if failure != 'sleep-timeout':
+            assert samples[-1] == ('shell', 'cmd', 'deviceidle', 'unforce')
+    if failure == 'sleep-timeout':
+        assert len(samples) == 5
+    if succeeds and display_mode == 'idle-display':
+        assert samples[-1] == ('shell', 'dumpsys', 'cpuinfo')
+        assert samples.count(('shell', 'dumpsys', 'cpuinfo')) == 2
+        assert sleep.call_args.args == (6,)
 
 # Completed HTTP evidence survives a guest nc error; remote errors remain enums.
 private_probe = 'private-token-and-address'
@@ -395,7 +508,261 @@ for status, raw in [('timeout', valid), ('limit', valid), ('transport_unavailabl
     result = monitor.display_values(status, raw)
     assert result['screen_state'] == 'unknown' and secret not in json.dumps(result)
 
+# A validated framework PID change captures one bounded private logcat window.
+# Initial/unknown PIDs and repeated samples do not manufacture restart evidence.
+crash_log = ('--------- beginning of crash\n'
+             'E/AndroidRuntime(101):     at android.os.BinderProxy.transact(Unknown Source)\n'
+             f'E/Watchdog( 101): *** WATCHDOG KILLING SYSTEM PROCESS: Blocked in handler on main thread ({secret}) for 60s, '
+             f'Blocked in monitor com.android.server.Watchdog$BinderThreadMonitor on monitor thread ({secret}) for 60s\n'
+             f'I/watchdog( 101): [{secret}]\n'
+             f'W/Watchdog(101): {secret} annotated stack trace:\n'
+             'W/Watchdog(101):     at com.android.server.Watchdog$BinderThreadMonitor.monitor(Watchdog.java:448)\n'
+             'W/Watchdog(101):     - waiting to lock <0x0123abcd> (a private.CapabilityIdentifier7)\n'
+             'W/Watchdog(101):     at com.android.server.display.CapabilityIdentifier7.privateMethod7(Source.java:1)\n'
+             'W/Watchdog(101): *** GOODBYE!\n'
+             'W/Watchdog(101):     at android.os.BinderProxy.transactNative(Native Method)\n'
+             f'E/AndroidRuntime( 101): *** FATAL EXCEPTION IN SYSTEM PROCESS: {secret}\n'
+             f'E/AndroidRuntime( 101): java.lang.IllegalStateException: {secret}\n'
+             'E/AndroidRuntime(101):     at com.android.server.display.CapabilityIdentifier7.privateMethod7(Source.java:1)\n'
+             'E/AndroidRuntime(101):     at android.os.Parcel.createExceptionOrNull(Parcel.java:1)\n'
+             f'E/AndroidRuntime( 101): Caused by: android.os.DeadObjectException: {secret}\n'
+             'E/AndroidRuntime(101):     at android.os.BinderProxy.transactNative(Native Method)\n'
+             'E/AndroidRuntime(101):     at android.view.SurfaceControl$CapabilityIdentifier7.privateMethod7(Unknown Source)\n'
+             f'E/AndroidRuntime( 101): java.lang.OutOfMemoryError: {secret}\n'
+             f'E/AndroidRuntime( 101): private.Exception: {secret}\n'
+             f'E/AndroidRuntime(101): unrelated log message {secret}\n'
+             'E/AndroidRuntime(101):     at android.os.BinderProxy.transact(Unknown Source)\n'
+             f'F/libc    ( 101): Fatal signal 6 (SIGABRT), {secret}\n'
+             f'F/libc( 101): Fatal signal 65 {secret}\n'
+             f'E/AndroidRuntime( 999): java.lang.NullPointerException: {secret}\n'
+             f'D/WifiClientModeImpl[wlan0]( 101): {secret}\n'
+             f'I/NetworkMonitor/100( 101): {secret}\n'
+             f'D/Framework dynamic tag( 101): {secret}\n'
+             '\nSUBYARD_QUERY_EXIT=0\n').encode()
+history, slot = {}, dict(slot_id='001', generation=7)
+with patch.object(monitor, 'shell_read', side_effect=[('ok', crash_log), ('timeout', crash_log)]) as probe:
+    for status, raw in [('ok', b'framework=\n'), ('timeout', b'framework=101\n'),
+                        ('ok', b'framework=2147483648\n'), ('ok', b'framework=101\n'),
+                        ('ok', b'framework=\n'), ('ok', b'framework=101\nframework=202\n'),
+                        ('timeout', b'framework=202\n')]:
+        assert monitor.framework_restart(slot, history, status, raw) is None
+    probe.assert_not_called()
+    observed = monitor.framework_restart(slot, history, 'ok', b'framework=202\n')
+    assert observed == dict(previous_pid=101, current_pid=202, restart=1, query='ok',
+                            evidence='matching_records', lines=26, record_limit=256, line_limit=1024,
+                            counts=dict(watchdog=2, java_fatal=1, java_oom=1, native_fatal=1),
+                            java_exceptions=['DeadObjectException', 'IllegalStateException', 'OutOfMemoryError'],
+                            native_signals=[6], stack_subsystems=['binder', 'display', 'display', 'binder', 'binder', 'composer'],
+                            stack_components=['binder', 'composer', 'display'],
+                            public_frames=['com.android.server.Watchdog$BinderThreadMonitor.monitor',
+                                           'android.os.BinderProxy.transactNative'],
+                            watchdog_handlers=['binder', 'main', 'monitor'], stack_capped=False)
+    assert monitor.framework_restart(slot, history, 'ok', b'framework=202\n') is None
+    failed = monitor.framework_restart(slot, history, 'ok', b'framework=303\n')
+    assert failed['query'] == 'timeout' and failed['evidence'] == 'unknown' and failed['counts'] is None
+    assert monitor.framework_restart(slot, history, 'ok', b'framework=303\n') is None
+    assert monitor.framework_restart(dict(slot, generation=8), history, 'ok', b'framework=404\n') is None
+    assert probe.call_count == 2
+    command = probe.call_args_list[0].args
+    assert command[0] == slot and command[2:] == (5, 65536)
+    assert all(argument in command[1] for argument in ('-b crash', '-b system', '-b events',
+                                                       '-t 256', '-v brief', '--pid=101'))
+assert secret not in json.dumps([observed, failed])
+assert 'CapabilityIdentifier7' not in json.dumps(observed) and 'privateMethod7' not in json.dumps(observed)
+trace_prefix = b'E/AndroidRuntime(101): *** FATAL EXCEPTION IN SYSTEM PROCESS: private\n'
+stack_frame = b'E/AndroidRuntime(101):     at com.android.server.wifi.CapabilityIdentifier7.privateMethod7(Source.java:1)\n'
+deep_cause = (b'E/AndroidRuntime(101): Caused by: android.os.DeadObjectException: private\n'
+              b'E/AndroidRuntime(101):     at android.view.SurfaceControl$CapabilityIdentifier7.privateMethod7(Unknown Source)\n')
+limited = monitor.restart_values('ok', trace_prefix + stack_frame * 17 + deep_cause + b'SUBYARD_QUERY_EXIT=0\n', 101)
+assert limited['stack_subsystems'] == ['wifi'] * 16 and limited['stack_capped']
+assert limited['stack_components'] == ['composer', 'wifi']
+assert 'CapabilityIdentifier7' not in json.dumps(limited)
+private_frame = b'E/AndroidRuntime(101):     at android.os.BinderProxy.transactNative(/private/path.java:1)\n'
+rejected = monitor.restart_values('ok', trace_prefix + private_frame + stack_frame + b'SUBYARD_QUERY_EXIT=0\n', 101)
+assert rejected['stack_subsystems'] == [] and rejected['public_frames'] == []
+assert 'private/path' not in json.dumps(rejected)
+for status, raw in [('timeout', crash_log), ('limit', crash_log), ('transport_unavailable', crash_log),
+                    ('ok', crash_log.removesuffix(b'SUBYARD_QUERY_EXIT=0\n')),
+                    ('ok', crash_log.replace(b'EXIT=0', b'EXIT=1')), ('ok', crash_log + b'x'),
+                    ('ok', b'x' * 65537), (secret, crash_log),
+                    ('ok', secret.encode() + b'\nSUBYARD_QUERY_EXIT=0\n'),
+                    ('ok', b'I/Watchdog(101): pending\n' * 1025 + b'SUBYARD_QUERY_EXIT=0\n')]:
+    result = monitor.restart_values(status, raw, 101)
+    assert result['evidence'] == 'unknown' and result['counts'] is None
+    assert result['stack_subsystems'] is None and result['stack_components'] is None and result['public_frames'] is None
+    assert secret not in json.dumps(result)
+empty = monitor.restart_values('ok', b'\nSUBYARD_QUERY_EXIT=0\n', 101)
+assert empty['query'] == 'ok' and empty['evidence'] == 'unknown' and not any(empty['counts'].values())
+# Multiline records may render more lines than logcat's 256-record window.
+multiline = monitor.restart_values('ok', b'E/AndroidRuntime(101): private stack frame\n' * 300 + crash_log, 101)
+assert multiline['query'] == 'ok' and multiline['lines'] == 326
+assert multiline['counts'] == observed['counts'] and secret not in json.dumps(multiline)
+
+# Early boot tracks real PID changes and takes only two scheduled scoped windows.
+startup_log = ('SUBYARD_GUEST_MEM_TOTAL_KB=2048000\nSUBYARD_GUEST_MEM_AVAILABLE_KB=123456\n'
+               'SUBYARD_GUEST_OOM_KILL=2\nSUBYARD_GUEST_DATA_AVAILABLE_KIB=98765\n'
+               'SUBYARD_CORE_PID_system_server=202\nSUBYARD_CORE_PID_zygote=303\n'
+               'SUBYARD_CORE_PID_zygote64=\nSUBYARD_CORE_PID_surfaceflinger=404\n'
+               f'E/AndroidRuntime(101): *** FATAL EXCEPTION IN SYSTEM PROCESS: {secret}\n'
+               f'E/AndroidRuntime(101): java.lang.OutOfMemoryError: {secret}\n'
+               f'E/Watchdog(101): *** WATCHDOG KILLING SYSTEM PROCESS: {secret}\n'
+               f'F/libc(303): Fatal signal 6 (SIGABRT), {secret}\n'
+               f'F/libc(405): Fatal signal 11 (SIGSEGV), {secret} in tid 405 (render), pid 405 (surfaceflinger)\n'
+               f'E/AndroidRuntime(999): FATAL EXCEPTION: {secret}\n'
+               f'E/AndroidRuntime(999): java.lang.NullPointerException: {secret}\n'
+               f'F/libc(999): Fatal signal 9, pid 999 ({secret})\n'
+               f'F/libc(998): Fatal signal 9, pid 999 (surfaceflinger)\n'
+               f'D/WifiClientModeImpl[wlan0](202): {secret}\n'
+               '\nSUBYARD_QUERY_EXIT=0\n').encode()
+scoped = monitor.restart_values('ok', startup_log)
+assert scoped['query'] == 'ok' and scoped['evidence'] == 'matching_records'
+assert scoped['counts'] == dict(watchdog=1, java_fatal=1, java_oom=1, native_fatal=2)
+assert scoped['core_roles'] == ['surfaceflinger', 'system_server', 'zygote']
+assert scoped['java_exceptions'] == ['OutOfMemoryError'] and scoped['native_signals'] == [6, 11]
+assert scoped['guest'] == dict(mem_total_kb=2048000, mem_available_kb=123456, oom_kill=2, data_available_kib=98765)
+assert secret not in json.dumps(scoped)
+for invalid in (secret.encode(), b'-1', b'18446744073709551616', b'1 kB', b''):
+    projected = monitor.restart_values('ok', startup_log.replace(b'MEM_AVAILABLE_KB=123456', b'MEM_AVAILABLE_KB=' + invalid))
+    assert projected['guest']['mem_available_kb'] is None and projected['guest']['mem_total_kb'] == 2048000
+    assert secret not in json.dumps(projected)
+duplicate = monitor.restart_values('ok', b'SUBYARD_GUEST_OOM_KILL=3\n' + startup_log)
+assert duplicate['guest']['oom_kill'] is None
+for status, raw in [('timeout', startup_log), ('limit', startup_log),
+                    ('ok', startup_log.removesuffix(b'SUBYARD_QUERY_EXIT=0\n')),
+                    ('ok', startup_log.replace(b'system_server=202', b'system_server=2147483648'))]:
+    result = monitor.restart_values(status, raw)
+    assert result['evidence'] == 'unknown' and result['counts'] is None and secret not in json.dumps(result)
+    assert all(value is None for value in result['guest'].values())
+
+# Native VM counters read bounded kernel fixtures, never Android or process data.
+cpu_raw = b'cpu  10 20 30 40 50 60 70 80 90 100\ncpu0 private-counter-token\n'
+mem_raw = b'MemTotal:       8388608 kB\nMemAvailable:   1048576 kB\nPrivate: private-counter-token\n'
+native_sample = dict(cpu_ticks=dict(user=10, nice=20, system=30, idle=40, iowait=50, irq=60, softirq=70, steal=80),
+                     ticks_per_second=100, mem_total_kb=8388608, mem_available_kb=1048576)
+with tempfile.TemporaryDirectory(prefix='subyard-native-observation-') as directory:
+    proc = Path(directory)
+    for stat_raw, memory_raw, expected_cpu, expected_memory in (
+            (cpu_raw, mem_raw, native_sample['cpu_ticks'], (8388608, 1048576)),
+            (None, None, None, (None, None)),
+            (b'cpu private-counter-token\n', mem_raw, None, (8388608, 1048576)),
+            (b'cpu 1 2 3 4 5 6 7\n', mem_raw, None, (8388608, 1048576)),
+            (b'cpu 1 2 3 4 5 6 7 8', mem_raw, None, (8388608, 1048576)),
+            (b'cpu -1 2 3 4 5 6 7 8\n', mem_raw, None, (8388608, 1048576)),
+            (b'cpu 18446744073709551616 2 3 4 5 6 7 8\n', mem_raw, None, (8388608, 1048576)),
+            (b'cpu ' + b'1 ' * 300 + b'\n', mem_raw, None, (8388608, 1048576)),
+            (cpu_raw, b'MemTotal: private-counter-token kB\nMemAvailable: 0 kB\n', native_sample['cpu_ticks'], (None, 0)),
+            (cpu_raw, b'MemTotal: 1 kB\nMemTotal: 2 kB\n', native_sample['cpu_ticks'], (None, None)),
+            (cpu_raw, b'MemTotal: 1 kB\nMemAvailable: 2 kB', native_sample['cpu_ticks'], (None, None)),
+            (cpu_raw, mem_raw + b'x' * 8192, native_sample['cpu_ticks'], (None, None))):
+        for name, raw in (('stat', stat_raw), ('meminfo', memory_raw)):
+            path = proc / name
+            if raw is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_bytes(raw)
+        with patch.object(monitor.os, 'sysconf', return_value=100):
+            observed_native = monitor.native_observation(proc)
+        assert observed_native == dict(cpu_ticks=expected_cpu, ticks_per_second=100,
+                                       mem_total_kb=expected_memory[0], mem_available_kb=expected_memory[1])
+        assert 'private' not in json.dumps(observed_native) and 'guest' not in json.dumps(observed_native)
+    for invalid_ticks in (0, -1, True, 100.5, 'private-counter-token'):
+        with patch.object(monitor.os, 'sysconf', return_value=invalid_ticks):
+            assert monitor.native_observation(proc)['ticks_per_second'] is None
+    with patch.object(monitor.os, 'sysconf', side_effect=OSError(secret)):
+        assert monitor.native_observation(proc)['ticks_per_second'] is None
+
+clock, scheduled = [0], []
+native_samples = []
+def native_snapshot():
+    native_samples.append(clock[0])
+    return native_sample
+def display_snapshot(slot):
+    assert native_samples[-1] == clock[0], 'native counters must precede blocking ADB queries'
+    return dict(query='timeout', screen_state='unknown')
+ages = iter((451, 481, 1101, 1131, 1161))
+def monitor_sleep(_seconds):
+    clock[0] = next(ages)
+def early_shell(slot, command, seconds, limit, first_line=False):
+    if first_line:
+        assert command == 'echo framework=$(pidof system_server)' and (seconds, limit) == (3, 128)
+        return 'ok', b'framework=101\n' if clock[0] == 0 else b'framework=202\n'
+    if limit == 256:
+        assert 'echo framework=$(pidof system_server)' in command and seconds == 5
+        return 'ok', ('framework=202\nwifi_service=0\nwifi=0\nwifi_radio=enabled\n'
+                      f'wifi_radio={secret}\nipv4=0\n').encode()
+    assert (seconds, limit) == (5, 65536) and '-t 256' in command
+    scheduled.append(command)
+    if '--pid=101' in command:
+        return 'ok', crash_log
+    assert 'for role in system_server zygote zygote64 surfaceflinger' in command
+    assert 'while read key value unit rest' in command and 'df -k /data' in command
+    return ('ok', startup_log) if clock[0] < 1100 else ('timeout', startup_log)
+with patch.object(monitor, 'initialize'), patch.object(monitor, 'slot_states', return_value=[(slot, 'provisioning')]), \
+        patch.object(monitor, 'metrics', return_value=None), \
+        patch.object(monitor, 'native_observation', side_effect=native_snapshot), \
+        patch.object(monitor, 'display_observation', side_effect=display_snapshot), \
+        patch.object(monitor, 'property_value', side_effect=lambda slot, name:
+                     '36' if name == 'ro.build.version.sdk' else '1' if name == 'sys.boot_completed' and clock[0] >= 1101 else '0'), \
+        patch.object(monitor, 'shell_read', side_effect=early_shell), \
+        patch.object(monitor.Path, 'exists', side_effect=lambda: clock[0] >= 1161), \
+        patch.object(monitor.time, 'monotonic', side_effect=lambda: clock[0]), \
+        patch.object(monitor.time, 'sleep', side_effect=monitor_sleep), \
+        patch.object(sys, 'argv', ['monitor', '/run/subyard-e2e-android-monitor-test.stop']), \
+        contextlib.redirect_stdout(io.StringIO()) as early_output:
+    monitor.main()
+reports = [json.loads(line.removeprefix('android-boot-monitor ')) for line in early_output.getvalue().splitlines()
+           if line.startswith('android-boot-monitor {')]
+assert [report['sys.boot_completed'] for report in reports] == ['0', '0', '0', '1', '1', '1']
+assert native_samples == [0, 451, 481, 1101, 1131, 1161]
+assert all(report['native_vm'] == native_sample for report in reports)
+assert len(scheduled) == 3 and sum('framework_restart' in report for report in reports) == 1
+windows = [report['startup_crash'] for report in reports if 'startup_crash' in report]
+assert [window['threshold_seconds'] for window in windows] == [450, 1100]
+assert windows[0]['counts'] == scoped['counts']
+assert windows[1]['query'] == 'timeout' and windows[1]['evidence'] == 'unknown'
+assert all(value is None for value in windows[1]['guest'].values())
+assert all('wifi_radio=enabled' in report['network'] for report in reports if 'network' in report)
+assert secret not in early_output.getvalue()
+
+# Execute the generated POSIX kernel-only extraction against private fixtures.
+with tempfile.TemporaryDirectory(prefix='subyard-guest-observation-') as directory:
+    fixture = Path(directory)
+    (fixture / 'meminfo').write_text('MemTotal: 3276800 kB\nMemAvailable: 1000 kB\nPrivate: ' + secret + '\n')
+    (fixture / 'vmstat').write_text('oom_kill 7\nprivate ' + secret + '\n')
+    kernel = scheduled[1].split('for role in ', 1)[0]
+    kernel = kernel.replace('/proc/meminfo', '"$1/meminfo"').replace('/proc/vmstat', '"$1/vmstat"')
+    for available in ('Available', 'unsupported'):
+        script = ('df() { printf "%s\\n" "Filesystem 1K-blocks Used ' + available + ' Use% Mounted" '
+                  '"private-path 2048 1024 1024 50% /private/data"; }; ' + kernel)
+        native = subprocess.run(['sh', '-c', script, 'guest', directory], capture_output=True, timeout=5)
+        assert native.returncode == 0 and not native.stderr and secret.encode() not in native.stdout
+        assert b'private' not in native.stdout
+        projection = monitor.restart_values('ok', native.stdout + startup_log[startup_log.index(b'SUBYARD_CORE_PID_'):])
+        assert projection['guest'] == dict(mem_total_kb=3276800, mem_available_kb=1000, oom_kill=7,
+                                           data_available_kib=1024 if available == 'Available' else None)
+
+# CPU pressure shares the existing memory-pressure numeric projection.
+unit = 'subyard-emu-001-7.service'
+numeric_pressure = 'some avg10=1.00 avg60=0.20 avg300=0.10 total=123'
+def metric_read(path):
+    name = str(path)
+    if name == '/proc/123/cgroup':
+        return '0::/system.slice/' + unit + '\n'
+    if path.name.endswith('.pressure'):
+        return numeric_pressure + '\n' + secret
+    return 'usage_usec 123' if path.name == 'cpu.stat' else 'oom 0' if path.name == 'memory.events' else '123'
+with patch.object(monitor, 'Runtime', SimpleNamespace(unit=lambda slot: unit), create=True), \
+        patch.object(monitor, 'host_netns_inode', 1, create=True), \
+        patch.object(monitor.subprocess, 'run', return_value=SimpleNamespace(returncode=0,
+                          stdout=f'ControlGroup=/system.slice/{unit}\nMainPID=123\nActiveState=active\n')), \
+        patch.object(monitor.Path, 'read_text', metric_read), \
+        patch.object(monitor.os, 'stat', return_value=SimpleNamespace(st_ino=2)):
+    measured = monitor.metrics(slot)
+assert measured['cpu.pressure'] == measured['memory.pressure'] == [numeric_pressure]
+assert secret not in json.dumps(measured)
+
 with patch.object(monitor, 'initialize'), patch.object(monitor, 'slot_states', return_value=[]), \
+        patch.object(monitor, 'native_observation', return_value=native_sample), \
         patch.object(monitor.Path, 'exists', return_value=True), \
         patch.object(sys, 'argv', ['monitor', '/run/subyard-e2e-android-monitor-test.stop']), \
         contextlib.redirect_stdout(io.StringIO()) as output:

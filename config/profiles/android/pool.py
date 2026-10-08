@@ -645,6 +645,7 @@ class Runtime:
         # A clean image can retain a disabled default network even after radio enable.
         # Submission is asynchronous, and boot-complete can survive a framework restart.
         # Submit once per observed framework/service lifetime, without interrupting pending DHCP.
+        # wifi_on is the desired setting; wait for the radio to finish enabling.
         submitted_for = wifi_state.get('submitted_for', '')
         if not re.fullmatch(r'[1-9][0-9]{0,9}', str(submitted_for)):
             submitted_for = ''
@@ -659,6 +660,7 @@ class Runtime:
                 'if ip -4 addr show scope global | grep -q " inet "; then '
                 'printf "%s:ready\\n" "$framework"; '
                 f'elif [ "$framework" != "{submitted_for}" ] && '
+                'cmd wifi status 2>/dev/null | { IFS= read -r radio; [ "$radio" = "Wifi is enabled" ]; } && '
                 'cmd wifi connect-network AndroidWifi open >/dev/null 2>&1; then '
                 'printf "%s:submitted\\n" "$framework"; '
                 'else printf "%s:pending\\n" "$framework"; fi; fi')

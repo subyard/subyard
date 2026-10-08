@@ -15,7 +15,7 @@ import time
 
 
 GUEST_CHECK = '''
-import hashlib, json, os, pathlib, stat, sys
+import contextlib, hashlib, io, json, os, pathlib, re, runpy, stat, sys, time
 sys.path.insert(0, '/usr/local/lib/subyard-android')
 import client
 mode, path = sys.argv[1:]
@@ -34,7 +34,81 @@ elif mode == 'status':
     result = client.rpc('status')['slots']
 else:
     lease = client.read_lease(path)
-    if mode == 'renew':
+    if mode in ('idle-display', 'wake-display'):
+        with contextlib.redirect_stdout(io.StringIO()):
+            helper = runpy.run_path('/opt/subyard-e2e-lifecycle.py')
+            def adb(*arguments, timeout=10):
+                return helper['adb'](lease, 'shell', *arguments, timeout=timeout)
+            def cpuinfo():
+                unknown = dict(observation='unknown', total_percent=None,
+                               process_percent=dict.fromkeys(('framework', 'composer', 'optimizer', 'other')))
+                try:
+                    raw = adb('dumpsys', 'cpuinfo', timeout=5)
+                except Exception:
+                    return unknown
+                if len(raw.encode()) > 65536:
+                    return unknown
+                number = r'[0-9]{1,6}(?:\\.[0-9])?'
+                usage = number + r'% user \\+ ' + number + r'% kernel'
+                usage += r'(?: \\+ ' + number + r'% (?:iowait|irq|softirq))*'
+                usage += r'(?: / faults:(?: [0-9]{1,12} (?:minor|major)){1,2})?'
+                categories = dict.fromkeys(unknown['process_percent'], 0)
+                total = None
+                for line in raw.splitlines():
+                    # ProcessCpuTracker indents processes by two, threads by four.
+                    if line.startswith(('    ', '   +', '   -')):
+                        continue
+                    match = re.fullmatch('(' + number + r')% TOTAL: ' + usage, line)
+                    if match:
+                        if total is not None:
+                            return unknown
+                        total = float(match[1])
+                    elif line.startswith(('  ', ' +', ' -')):
+                        match = re.fullmatch(r'(?:  | \\+| -)(' + number + r')% [1-9][0-9]{0,9}/([^:\\r\\n]{1,512}): ' + usage, line)
+                        if not match:
+                            return unknown
+                        name = match[2]
+                        category = ('framework' if name == 'system_server' else
+                                    'composer' if name == 'surfaceflinger' else
+                                    'optimizer' if name in ('dex2oat', 'dex2oat64', 'artd', 'installd') else 'other')
+                        categories[category] += float(match[1])
+                    elif '% TOTAL:' in line:
+                        return unknown
+                if total is None or total > 100:
+                    return unknown
+                return dict(observation='ok', total_percent=total,
+                            process_percent={key: round(value, 1) for key, value in categories.items()})
+            attempted = False
+            try:
+                if mode == 'idle-display':
+                    helper['idle_display'](lease)
+                    before = cpuinfo()
+                    attempted = True
+                    adb('cmd', 'deviceidle', 'force-idle', 'deep')
+                    deep = adb('cmd', 'deviceidle', 'get', 'deep').strip()
+                    forced = adb('cmd', 'deviceidle', 'get', 'force').strip()
+                    if deep != 'IDLE' or forced != 'true':
+                        raise RuntimeError('fixture did not confirm forced deep idle')
+                    time.sleep(6)  # Allow asynchronous job restrictions to propagate.
+                    result = dict(deep=deep, forced=True, cpu_before=before, cpu_after=cpuinfo())
+                else:
+                    adb('input', 'keyevent', 'KEYCODE_WAKEUP', timeout=30)
+                    adb('cmd', 'deviceidle', 'unforce')
+                    if (adb('cmd', 'deviceidle', 'get', 'force').strip() != 'false' or
+                            adb('cmd', 'deviceidle', 'get', 'deep').strip() != 'ACTIVE'):
+                        raise RuntimeError('fixture did not confirm restored active state')
+                    result = True
+            except BaseException:
+                if attempted or mode == 'wake-display':
+                    with contextlib.suppress(Exception):
+                        adb('cmd', 'deviceidle', 'unforce')
+                raise
+        held = client.rpc('allocation', token=lease['token'])['state'] == 'held'
+        if mode == 'idle-display':
+            result['held'] = held
+        else:
+            result = held
+    elif mode == 'renew':
         client.rpc('renew', token=lease['token'])
         result = True
     elif mode == 'request':
@@ -73,7 +147,8 @@ def main():
         result = subprocess.run(
             [*incus, '--project', project, 'exec', instance, '--user', '1000', '--group', '1000',
              '--env', 'HOME=/home/dev', '--', 'python3', '-c', GUEST_CHECK, mode, lease],
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=35)
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=180 if mode == 'idle-display' else 75 if mode == 'wake-display' else 35)
         require(result.returncode == 0, 'private guest lease check failed')
         return json.loads(result.stdout)
 
@@ -215,11 +290,25 @@ def main():
                 if slot['expires_at'] > prior['expires_at']:
                     observed['renewed'] = True
     try:
+        sleeping = guest('idle-display')
+        require(sleeping['held'] is True and sleeping['forced'] is True and sleeping['deep'] == 'IDLE',
+                'idle display did not confirm Doze and retain its borrowed lease')
+        print('android-pool-remote idle-display=asleep deep=IDLE forced=true borrowed=held cpuinfo=' +
+              json.dumps(dict(before=sleeping['cpu_before'], after=sleeping['cpu_after']), sort_keys=True), flush=True)
         view(['--device', 'phone', '--api', '36', '--purpose', 'remote-viewer-acceptance'],
              'standalone', seconds=75, observe=observe)
     finally:
-        stopped.set()
-        worker.join(timeout=40)
+        original_error = sys.exc_info()[0] is not None
+        try:
+            # Restore even on failure, before any read-only attached viewer.
+            require(guest('wake-display') is True, 'display restoration did not retain its borrowed lease')
+        except Exception:
+            if not original_error:
+                raise
+            print('android-pool-remote display-restoration=failed', file=sys.stderr, flush=True)
+        finally:
+            stopped.set()
+            worker.join(timeout=40)
     require(not worker.is_alive() and not failed.is_set(), 'fixture lease renewal failed')
     after = guest('allocation')
     require(all(after[key] == before[key] for key in ('state', 'slot', 'generation', 'uid', 'mode', 'digest')),

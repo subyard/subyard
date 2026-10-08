@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import signal
 import subprocess
 import sys
@@ -259,15 +260,12 @@ def main():
     require(after['state'] == 'held' and after['expires_at'] == before['expires_at'],
             'attached viewer released or renewed the borrowed lease')
     print('android viewer: attached rendered without release or renewal', flush=True)
-    # The fixture owns this now-unviewed lease; let its display sleep during the next boot.
-    result = subprocess.run(
-        ['/srv/cache/android-sdk/platform-tools/adb', 'shell', 'input', 'keyevent', 'KEYCODE_SLEEP'],
-        env=dict(os.environ, ADB_SERVER_SOCKET='localfilesystem:' + lease['endpoint'],
-                 ANDROID_SERIAL=lease['allocation']['android_serial']),
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
-    require(result.returncode == 0, 'could not idle the borrowed display')
     stopped, failed, worker = heartbeat_borrowed(lease['token'])
     try:
+        runpy.run_path('/opt/subyard-e2e-lifecycle.py')['idle_display'](lease)
+        require(client.rpc('allocation', token=lease['token'])['state'] == 'held',
+                'idle display did not retain its borrowed lease')
+        print('android viewer: idle display asleep; borrowed lease held', flush=True)
         view(['--device', 'phone', '--api', '35', '--purpose', 'viewer-acceptance'], 'standalone-capture', native_debug=native_debug)
     finally:
         stopped.set()
