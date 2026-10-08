@@ -870,6 +870,14 @@ next lease provisions its requested environment from a validated base. Failure t
 incident or prove ownership leaves the slot quarantined without deletion. Ordinary resource
 shortage is a retryable admission refusal and does not quarantine a healthy empty slot.
 
+If a disposable guest remains `RUNNING` after recovery's 60-second graceful stop, recovery saves
+a fresh durable incident and force-stop event before refreshing the exact project, generation and
+lease-epoch markers. It then attempts a native force stop with a 30-second command budget and
+verifies `STOPPED` within five seconds before deletion. Cancellation, unavailable state, changed
+ownership or evidence-write failure prevents escalation. Initial release still uses graceful stop;
+this fallback belongs only to quarantined disposable recovery, never retained legacy guests or
+base-image builders. Incus or kernel failures can still delay recovery through its normal retry schedule.
+
 The root reaper starts recovery immediately after the incident is durable. Failed rebuilds retry
 after 1, 5 and 15 minutes, then hourly without an attempt limit. A temporary Incus, image, network
 or capacity failure delays recovery; it does not turn quarantine into a permanent terminal state.
@@ -901,6 +909,13 @@ recovery timing and the available lease attribution. They do not contain capabil
 fingerprints, keys, guest command payloads or agent output. Full bounded evidence is stored as an
 immutable JSON artifact under `$SUBYARD_HOME/logs/test-vms-broker-incidents/` and referenced by
 `incident_id`.
+
+Local incident collection has a five-second budget with one-second native probes. It prioritizes
+VM state, QEMU information/logs and the guest console log, which can retain kernel suspend or
+panic output without a responsive guest agent. Project and bounded service journal observations
+follow. Empty responses, probe failures and exhausted budgets are recorded as missing measurements;
+the existing artifact redaction and size limits apply. Force-stop events link the fresh incident
+and report the graceful command and forced-stop durations when available.
 
 The host sink also saves a bounded observation in `test-vms-broker-incidents/host/<incident_id>.json`:
 visible host/allocation cgroup memory limits, current/peak values, OOM counters, outer instance state,

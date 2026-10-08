@@ -642,7 +642,16 @@ func (runtime *Runtime) stopRetainedWithEvidence(ctx context.Context) (stopEvide
 			if runtime.allocation == nil {
 				runtime.trimRetainedGuest(trimCtx, vm)
 			}
-			stopErr := runtime.stopRunningVM(ctx, vm)
+			stopCtx := ctx
+			cancelStop := func() {}
+			if runtime.recoverySlot != nil {
+				stopCtx, cancelStop = context.WithTimeout(ctx, 65*time.Second)
+			}
+			stopErr := runtime.stopRunningVM(stopCtx, vm)
+			cancelStop()
+			if stopErr != nil && runtime.recoverySlot != nil {
+				stopErr = runtime.forceStopRecoveryVM(ctx, vm, stopErr)
+			}
 			if stopErr != nil {
 				return evidence, errors.Join(keyCleanupErr, stopErr)
 			}

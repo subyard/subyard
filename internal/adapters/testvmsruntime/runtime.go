@@ -34,6 +34,7 @@ type Runtime struct {
 	AvailableBytes    func(string) (uint64, error)
 	ExecutablePath    string
 	Events            *EventRecorder
+	recoverySlot      *LeaseSlot
 	finishDrain       func(context.Context, LeaseStore, LeaseSlot) error
 	finishQuarantine  func(context.Context, LeaseStore, LeaseSlot, error) error
 	finishRecovery    func(context.Context, LeaseStore, LeaseSlot) error

@@ -373,8 +373,8 @@ func (runtime *Runtime) reserveEnvironment(ctx context.Context, store LeaseStore
 	})
 }
 
-func (runtime *Runtime) capacityEvidence() string {
-	value, err := runtime.readMemoryCapacity()
+func (runtime *Runtime) capacityEvidence(ctx context.Context) string {
+	value, err := runtime.readMemoryCapacityContext(ctx)
 	if err != nil {
 		return "memory telemetry unavailable"
 	}
@@ -386,6 +386,10 @@ func (runtime *Runtime) capacityEvidence() string {
 }
 
 func (runtime *Runtime) readMemoryCapacity() (MemoryCapacity, error) {
+	return runtime.readMemoryCapacityContext(context.Background())
+}
+
+func (runtime *Runtime) readMemoryCapacityContext(ctx context.Context) (MemoryCapacity, error) {
 	if runtime.memoryProbe != nil {
 		return runtime.memoryProbe()
 	}
@@ -395,7 +399,7 @@ func (runtime *Runtime) readMemoryCapacity() (MemoryCapacity, error) {
 	// Incus launches QEMU/builders from its daemon, independently of the
 	// broker worker. Preserve the daemon's applicable source ancestors, including
 	// an operator's finite system.slice/incus.service ceiling, before physical RAM.
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	runner := runtime.Runner
 	if runner == nil {

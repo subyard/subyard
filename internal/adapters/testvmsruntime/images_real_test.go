@@ -189,9 +189,32 @@ func TestRealBrokerStorageContract(t *testing.T) {
 	if err := rt.deleteAllocation(ctx); err == nil || !strings.Contains(err.Error(), "not stopped") || !rt.vmExists(ctx, vm) {
 		t.Fatalf("running allocation was not preserved: %v", err)
 	}
-	// There is no OS agent or ACPI consumer in an empty firmware-only fixture.
-	command("stop", vm, "--force", "--project", rt.Config.Project)
-	must(rt.stopRunningVM(ctx, vm))
+	// This fixture has no OS agent, ACPI consumer, network or forwarding account.
+	// Prove the native graceful timeout before exercising disposable recovery's
+	// guarded fallback; disabling an agent would not prove a stalled stop.
+	rt.prepareDefaults()
+	slot, err := storeSlot(store, grant.SlotID)
+	must(err)
+	slot.State = SlotRecovering
+	gracefulErr := rt.stopRunningVM(ctx, vm)
+	if gracefulErr == nil {
+		t.Fatal("firmware fixture unexpectedly stopped gracefully; stalled-stop reproduction incomplete")
+	}
+	initial, err := rt.eventRecorder().SaveIncident(slot, gracefulErr, rt.recoveryDiagnostics(ctx, vm))
+	must(err)
+	slot.IncidentID = initial.IncidentID
+	rt.recoverySlot = &slot
+	must(rt.forceStopRecoveryVM(ctx, vm, gracefulErr))
+	batch, err := rt.eventRecorder().Export()
+	must(err)
+	if len(batch.Incidents) != 2 || len(batch.Events) != 2 ||
+		batch.Events[0].Kind != "vm.force_stop_planned" || batch.Events[1].Kind != "vm.force_stop_succeeded" {
+		t.Fatalf("missing durable stalled-stop/fallback evidence: incidents=%d events=%#v", len(batch.Incidents), batch.Events)
+	}
+	if state := command("list", vm, "--project", rt.Config.Project, "-f", "csv", "-c", "s"); state != "STOPPED" {
+		t.Fatalf("force stop did not reach STOPPED: %s", state)
+	}
+	t.Log("native graceful stop failed; disposable recovery saved fresh evidence and force-stopped the exact allocation")
 	rt.allocation.ResourceGeneration++
 	if err := rt.deleteAllocation(ctx); err == nil || !strings.Contains(err.Error(), "allocation marker mismatch") || !rt.vmExists(ctx, vm) {
 		t.Fatalf("mismatched allocation was not preserved: %v", err)

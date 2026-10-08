@@ -76,7 +76,7 @@ func (runtime *Runtime) handleQuarantineLocked(
 			fmt.Errorf("remove quarantined guest keys: %w", guestKeyErr),
 		)
 	}
-	diagnostics := child.recoveryDiagnostics(ctx)
+	diagnostics := child.recoveryDiagnostics(ctx, "")
 	artifact, err := runtime.eventRecorder().SaveIncident(slot, cause, diagnostics)
 	if err != nil {
 		return fmt.Errorf("persist emergency incident before recovery: %w", err)
@@ -321,10 +321,100 @@ func (runtime *Runtime) rebuildSlotPair(ctx context.Context, slot LeaseSlot) err
 	if slot.Environment == nil {
 		return errors.New("missing allocation environment; explicit legacy retirement required")
 	}
+	child.recoverySlot = &slot
 	if err := child.stopRetained(ctx); err != nil {
 		return err
 	}
 	return child.deleteAllocation(ctx)
+}
+
+// Only recovery of an already fenced disposable allocation may escalate a
+// failed graceful stop. Builders and retained legacy disks keep their semantics.
+func (runtime *Runtime) forceStopRecoveryVM(ctx context.Context, vm string, gracefulErr error) error {
+	slot := runtime.recoverySlot
+	if slot == nil || slot.LegacyRetained || slot.Environment == nil || runtime.allocation == nil ||
+		!slotMatchesLeaseIdentity(*slot, *runtime.allocation) || slot.State != SlotRecovering {
+		return errors.Join(gracefulErr, errors.New("force stop requires exact disposable recovery identity"))
+	}
+	if err := ctx.Err(); err != nil {
+		return errors.Join(gracefulErr, err)
+	}
+	stateCtx, cancelState := context.WithTimeout(ctx, 5*time.Second)
+	state, stateErr := runtime.incus(stateCtx, "list", vm, "--project", runtime.Config.Project, "-f", "csv", "-c", "s")
+	cancelState()
+	if stateErr != nil {
+		return errors.Join(gracefulErr, stateErr)
+	}
+	if strings.TrimSpace(state) == "STOPPED" {
+		return nil
+	}
+	if strings.TrimSpace(state) != "RUNNING" {
+		return errors.Join(gracefulErr, fmt.Errorf("%s cannot be force stopped from state %q", vm, strings.TrimSpace(state)))
+	}
+	diagnostics := runtime.recoveryDiagnostics(ctx, vm)
+	diagnostics["force_stop_vm"] = vm
+	diagnostics["force_stop_state"] = strings.TrimSpace(state)
+	diagnostics["original_incident_id"] = slot.IncidentID
+	artifact, err := runtime.eventRecorder().SaveIncident(*slot, gracefulErr, diagnostics)
+	if err != nil {
+		return errors.Join(gracefulErr, fmt.Errorf("persist incident before force stop: %w", err))
+	}
+	event := BrokerEvent{
+		Kind: "vm.force_stop_planned", SlotID: slot.SlotID, ResourceGeneration: slot.ResourceGeneration,
+		LeaseEpoch: slot.LeaseEpoch, RecoveryAttempt: slot.RecoveryAttempt, IncidentID: artifact.IncidentID,
+		Error: errorString(gracefulErr), Context: leaseContextFromSlot(*slot),
+	}
+	if artifact.Command != nil {
+		event.DurationMS = artifact.Command.DurationMS
+	}
+	if _, err := runtime.eventRecorder().Record(event); err != nil {
+		return errors.Join(gracefulErr, fmt.Errorf("persist force stop event: %w", err))
+	}
+	// Diagnostics may take time: refresh ownership and state immediately before
+	// the destructive operation rather than trusting the earlier inventory.
+	guardCtx, cancelGuard := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelGuard()
+	if err := runtime.requireProjectMarker(guardCtx); err != nil {
+		return errors.Join(gracefulErr, err)
+	}
+	if err := runtime.Config.validateManagedNames([]string{vm}); err != nil {
+		return errors.Join(gracefulErr, err)
+	}
+	if err := runtime.requireAllocationMarker(guardCtx, vm); err != nil {
+		return errors.Join(gracefulErr, err)
+	}
+	state, stateErr = runtime.incus(guardCtx, "list", vm, "--project", runtime.Config.Project, "-f", "csv", "-c", "s")
+	if stateErr != nil {
+		return errors.Join(gracefulErr, stateErr)
+	}
+	if strings.TrimSpace(state) == "STOPPED" {
+		return nil
+	}
+	if strings.TrimSpace(state) != "RUNNING" {
+		return errors.Join(gracefulErr, fmt.Errorf("%s changed state before force stop: %q", vm, strings.TrimSpace(state)))
+	}
+	if err := ctx.Err(); err != nil {
+		return errors.Join(gracefulErr, err)
+	}
+	started := time.Now()
+	forceCtx, cancelForce := context.WithTimeout(ctx, 30*time.Second)
+	_, forceErr := runtime.incus(forceCtx, "stop", vm, "--project", runtime.Config.Project, "--force")
+	cancelForce()
+	verifyCtx, cancelVerify := context.WithTimeout(ctx, 5*time.Second)
+	state, stateErr = runtime.incus(verifyCtx, "list", vm, "--project", runtime.Config.Project, "-f", "csv", "-c", "s")
+	cancelVerify()
+	var result error
+	if stateErr != nil || strings.TrimSpace(state) != "STOPPED" {
+		result = errors.Join(forceErr, stateErr, fmt.Errorf("%s stop could not be verified after force; state=%q", vm, strings.TrimSpace(state)))
+	}
+	event.Kind = "vm.force_stop_succeeded"
+	if result != nil {
+		event.Kind = "vm.force_stop_failed"
+	}
+	event.DurationMS = time.Since(started).Milliseconds()
+	event.Error = errorStringOrEmpty(result)
+	_, eventErr := runtime.eventRecorder().Record(event)
+	return errors.Join(result, eventErr)
 }
 
 func (runtime *Runtime) removeQuarantinedGuestKeys(ctx context.Context) error {
@@ -373,44 +463,57 @@ func (runtime *Runtime) removeQuarantinedGuestKeys(ctx context.Context) error {
 	return result
 }
 
-func (runtime *Runtime) recoveryDiagnostics(ctx context.Context) map[string]string {
+func (runtime *Runtime) recoveryDiagnostics(ctx context.Context, firstVM string) map[string]string {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
 	cfg := runtime.Config
-	diagnostics := map[string]string{"capacity": runtime.capacityEvidence()}
+	diagnostics := map[string]string{}
 	if payload, err := os.ReadFile(cfg.failureLog()); err == nil {
 		diagnostics["legacy_failure_log"] = string(payload)
 	}
-	if runtime.projectExists(ctx) {
-		if value, err := runtime.incus(ctx, "project", "show", cfg.Project); err == nil {
-			diagnostics["project"] = value
+	// Native state and console evidence do not depend on a responsive guest agent.
+	// Give each probe its own ceiling so a stalled probe cannot consume all later evidence.
+	probe := func(section string, args ...string) {
+		probeCtx, cancelProbe := context.WithTimeout(ctx, time.Second)
+		defer cancelProbe()
+		value, err := runtime.incus(probeCtx, args...)
+		if err != nil {
+			diagnostics[section] = "unavailable: " + errorString(err)
+		} else if strings.TrimSpace(value) == "" {
+			diagnostics[section] = "empty native response (no measurement)"
+		} else {
+			diagnostics[section] = value
 		}
-		for selector := 1; selector <= cfg.guestCount(); selector++ {
-			vm := cfg.vm(selector)
-			if !runtime.vmExists(ctx, vm) {
-				continue
-			}
-			if value, err := runtime.incus(ctx, "info", "--show-log", vm,
-				"--project", cfg.Project); err == nil {
-				diagnostics[fmt.Sprintf("vm_%d_info_log", selector)] = value
-			}
-		}
-	} else {
-		diagnostics["project"] = "absent"
 	}
-	if stdout, stderr, err := runtime.Runner.Run(
-		ctx,
-		"journalctl",
-		[]string{
-			"--no-pager", "-n", "400",
-			"-u", "incus.service",
-			"-u", "subyard-test-vms-broker.service",
-			"-u", "subyard-test-vms-lease-reaper.service",
-		},
-		nil,
-		nil,
-	); err == nil {
+	selectors := []int{1}
+	if cfg.guestCount() == 2 {
+		selectors = append(selectors, 2)
+		if firstVM == cfg.vm(2) {
+			selectors[0], selectors[1] = selectors[1], selectors[0]
+		}
+	}
+	for _, selector := range selectors {
+		vm := cfg.vm(selector)
+		probe(fmt.Sprintf("vm_%d_state", selector), "list", vm, "--project", cfg.Project, "-f", "csv", "-c", "s")
+		probe(fmt.Sprintf("vm_%d_info_log", selector), "info", "--show-log", vm, "--project", cfg.Project)
+		probe(fmt.Sprintf("vm_%d_console_log", selector), "console", vm, "--show-log", "--project", cfg.Project)
+	}
+	capacityCtx, cancelCapacity := context.WithTimeout(ctx, time.Second)
+	diagnostics["capacity"] = runtime.capacityEvidence(capacityCtx)
+	cancelCapacity()
+	probe("project", "project", "show", cfg.Project)
+	journalCtx, cancelJournal := context.WithTimeout(ctx, time.Second)
+	defer cancelJournal()
+	stdout, _, err := runtime.Runner.Run(journalCtx, "journalctl", []string{
+		"--no-pager", "-n", "400", "-u", "incus.service",
+		"-u", "subyard-test-vms-broker.service", "-u", "subyard-test-vms-lease-reaper.service",
+	}, nil, nil)
+	if err != nil {
+		diagnostics["service_journal"] = "unavailable: " + errorString(err)
+	} else if len(stdout) == 0 {
+		diagnostics["service_journal"] = "empty native response (no measurement)"
+	} else {
 		diagnostics["service_journal"] = string(stdout)
-	} else if len(stderr) != 0 {
-		diagnostics["service_journal"] = string(stderr)
 	}
 	return diagnostics
 }
