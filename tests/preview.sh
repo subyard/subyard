@@ -50,22 +50,16 @@ for name in default demo demo-code; do
     export SSH_HOST="yard-$name"
     snippet="$HOME/.ssh/subyard-$name.config"
   fi
-  export SSH_CODE_HOST="$SSH_HOST.code"
   bash "$ROOT/scripts/07-ssh-access.sh" > "$TMP/access.out" 2>&1 \
     || { cat "$TMP/access.out" >&2; fail "$name SSH setup"; }
   normal="$(/usr/bin/ssh -G -F "$snippet" "$SSH_HOST" 2>/dev/null)"
-  code="$(/usr/bin/ssh -G -F "$snippet" "$SSH_CODE_HOST" 2>/dev/null | tr -d '[]')"
-  ! grep -q '^localforward ' <<< "$normal" || fail 'normal alias forwards preview'
-  grep -qx 'localforward 127.0.0.1:8765 127.0.0.1:8765' <<< "$code" \
-    || fail 'code alias lacks loopback forward'
-  grep -qx 'exitonforwardfailure yes' <<< "$code" || fail 'code alias permits silent forward failure'
-  grep -q '^controlpath .*/subyard-code-cm-' <<< "$code" || fail 'code alias lacks isolated master'
-  grep -qx 'controlpersist no' <<< "$code" || fail 'code alias outlives its connection'
-  grep -qx 'identitiesonly yes' <<< "$code" || fail 'code alias lost dedicated transport identity'
-  grep -qx 'stricthostkeychecking true' <<< "$code" || fail 'code alias lost strict host-key checking'
+  ! grep -q '^localforward ' <<< "$normal" || fail 'ordinary alias forwards preview'
+  ! grep -q '\.code' "$snippet" || fail 'SSH snippet retains a code alias'
+  grep -qx 'identitiesonly yes' <<< "$normal" || fail 'ordinary alias lost dedicated transport identity'
+  grep -qx 'stricthostkeychecking true' <<< "$normal" || fail 'ordinary alias lost strict host-key checking'
   before="$(sha256sum "$snippet")"
   bash "$ROOT/scripts/07-ssh-access.sh" > "$TMP/access.out" 2>&1 \
     || { cat "$TMP/access.out" >&2; fail "$name repeated SSH setup"; }
   [ "$(sha256sum "$snippet")" = "$before" ] || fail 'repeated SSH setup changed snippet'
 done
-printf 'ok: local and named preview SSH options and repeat setup\n'
+printf 'ok: local and named SSH options without preview forwarding and repeat setup\n'

@@ -819,7 +819,7 @@ def editor_forwarding(restore=False):
         if text.count('AllowTcpForwarding no\n')!=1: raise RuntimeError('unexpected editor listener configuration')
         with original.open('x') as output: output.write(text); os.fchmod(output.fileno(),0o600)
         text=text.replace('AllowTcpForwarding no\n','AllowTcpForwarding local\n')
-        text+='AllowStreamLocalForwarding no\nPermitOpen 127.0.0.1:'+str(value['port'])+' 127.0.0.1:8765\n'
+        text+='AllowStreamLocalForwarding no\nPermitOpen 127.0.0.1:'+str(value['port'])+'\n'
     temporary=root/'owner.conf.editor-tmp'
     with temporary.open('x') as output:
         output.write(text); output.flush(); os.fchmod(output.fileno(),0o600); os.fsync(output.fileno())

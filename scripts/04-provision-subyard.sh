@@ -14,8 +14,6 @@ subyard_require_engine_context
 . "$SCRIPT_DIR/lib/ui.sh"
 # shellcheck source=scripts/lib/host.sh
 . "$SCRIPT_DIR/lib/host.sh"
-# shellcheck source=scripts/lib/preview-proxy.sh
-. "$SCRIPT_DIR/lib/preview-proxy.sh"
 
 INCUS_PROJECT="${INCUS_PROJECT:-subyard}"
 YARD_INSTANCE_NAME="${YARD_INSTANCE_NAME:-yard}"
@@ -31,6 +29,9 @@ incus_preflight "init"
 incus info "$YARD_INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1 \
   || die "instance '$YARD_INSTANCE_NAME' missing — run scripts/03-create-subyard.sh first"
 
+PREVIEW_ENDPOINT="${SUBYARD_PREVIEW_ENDPOINT:-}"
+[ -n "$PREVIEW_ENDPOINT" ] || die "prepared static preview endpoint is required"
+
 announce_confirm "Subyard Phase 3 — provision the yard ($YARD_INSTANCE_NAME)" \
   "Inside the yard: apt-get install core packages (ssh, git, build tools, python…; Node is per-profile)." \
   "Inside the yard: install Docker Engine + Compose via the get.docker.com script (downloads & runs it)." \
@@ -38,7 +39,7 @@ announce_confirm "Subyard Phase 3 — provision the yard ($YARD_INSTANCE_NAME)" 
   "Inside the yard: install the pinned native ccusage reporter." \
   "Inside the yard: bootstrap enabled agent CLIs when missing." \
   "On the host: reconcile the selected AI Observer dashboard on its owned container route." \
-  "On the host: publish static preview on one active Tailscale address (containers only)." \
+  "On the host: publish static preview on one active Tailscale or private owner IPv4 address." \
   "On the host: set the /dev/kvm device GID to the in-yard 'kvm' group." \
   "On the host: copy instructions for enabled agents into the yard, if present." \
   "This pulls packages from the network and changes the yard's userspace (not the host system)."
@@ -184,9 +185,8 @@ incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- sh -eu -c '
   mv -fT -- "$temporary" /usr/local/bin/subyard-preview
 ' < "$PREVIEW_SOURCE" || die "static preview helper installation failed"
 ok "static preview helper ready"
-PREVIEW_ENDPOINT="$(subyard_preview_endpoint)" || die "static preview endpoint publication failed"
-PREVIEW_ENDPOINT_SHA256="$(printf '%s\n' "$PREVIEW_ENDPOINT" | sha256sum | cut -d ' ' -f1)"
-printf '%s\n' "$PREVIEW_ENDPOINT" | incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- sh -eu -c '
+PREVIEW_ENDPOINT_SHA256="$(printf '%s' "$PREVIEW_ENDPOINT" | sha256sum | cut -d ' ' -f1)"
+printf '%s' "$PREVIEW_ENDPOINT" | incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- sh -eu -c '
   [ ! -L /etc/subyard ]
   install -d -m 0755 -o root -g root /etc/subyard
   temporary=$(mktemp /etc/subyard/.preview.XXXXXX)

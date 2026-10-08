@@ -37,7 +37,7 @@ func TestCapturedRemotePlanRejectsControllerIdentityReplacementBeforeAuthorizati
 	}
 }
 
-func TestRemotePreviewAliasesHaveSeparateEffectiveSSHOptions(t *testing.T) {
+func TestRemoteSSHOptionsPreserveTransportWithoutPreview(t *testing.T) {
 	runtime := remoteFixture(t)
 	prepared := domain.RemotePrepared{Spec: domain.RemoteSpec{
 		LegacyAlias: "demo", OwnerEndpoint: "owner.example",
@@ -52,17 +52,19 @@ func TestRemotePreviewAliasesHaveSeparateEffectiveSSHOptions(t *testing.T) {
 		}
 		return strings.NewReplacer("[", "", "]", "").Replace(string(output))
 	}
-	normal, code := options("yard-demo"), options("yard-demo.code")
+	normal := options("yard-demo")
 	for _, value := range []string{"hostname 127.0.0.1\n", "port 2233\n", "proxyjump owner.example\n", "hostkeyalias subyard-remote-demo\n"} {
-		if !strings.Contains(normal, value) || !strings.Contains(code, value) {
+		if !strings.Contains(normal, value) {
 			t.Fatalf("shared remote route missing %q", value)
 		}
 	}
-	if strings.Contains(normal, "localforward ") || !strings.Contains(code, "localforward 127.0.0.1:8765 127.0.0.1:8765\n") ||
-		!strings.Contains(code, "exitonforwardfailure yes\n") ||
-		!strings.Contains(normal, "/subyard-cm-") || !strings.Contains(code, "/subyard-code-cm-") ||
-		!strings.Contains(code, "controlpersist no\n") {
-		t.Fatalf("preview transport isolation failed:\nnormal=%s\ncode=%s", normal, code)
+	if strings.Contains(normal, "localforward ") ||
+		!strings.Contains(normal, "/subyard-cm-") ||
+		!strings.Contains(normal, "controlpersist 60\n") ||
+		!strings.Contains(normal, "identitiesonly yes\n") ||
+		!strings.Contains(normal, "stricthostkeychecking accept-new\n") ||
+		strings.Contains(string(runtime.renderSnippet(prepared, "/tmp/fixture-key")), "yard-demo.code") {
+		t.Fatalf("ordinary remote SSH route drifted:\n%s", normal)
 	}
 }
 

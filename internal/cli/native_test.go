@@ -17,12 +17,12 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
-	"github.com/Subyard/Subyard/internal/adapters/transport"
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/audit"
 	"github.com/Subyard/Subyard/internal/config"
@@ -118,6 +118,12 @@ func (stub spaceIncusStub) Instance(
 }
 
 func TestNativeCodeAndShellDoNotStartCredentialAutoSync(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:8765")
+	if err == nil {
+		defer listener.Close()
+	} else if !errors.Is(err, syscall.EADDRINUSE) {
+		t.Fatal(err)
+	}
 	root, environment, stateDirectory := nativeFixture(t)
 	store, err := state.NewFileStore(stateDirectory)
 	if err != nil {
@@ -171,6 +177,12 @@ printf '%s\0' "$@" > "$CODE_LOG"
 			Status: "Running", Devices: map[string]map[string]string{"ssh": {"type": "proxy"}},
 		}},
 	}
+	snippet := filepath.Join(environmentValue(environment, "SUBYARD_OPERATOR_HOME"), ".ssh", "subyard.config")
+	if err := os.MkdirAll(filepath.Dir(snippet), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	originalSnippet := "# Managed by Subyard\nHost yard\n    HostName 127.0.0.1\n    Port 2222\n"
+	testkit.WriteFile(t, snippet, []byte(originalSnippet), 0o600)
 	codePrompt := &testkit.Prompt{}
 	var codeStderr bytes.Buffer
 	codeProgram, err := New(Options{
@@ -178,8 +190,6 @@ printf '%s\0' "$@" > "$CODE_LOG"
 		Arguments: []string{"code", "Demo"}, Environment: environment, WorkingDir: root,
 		Stdin: strings.NewReader(""), Incus: incus, Executor: incus,
 		Prompt: codePrompt, Stderr: &codeStderr,
-		// Preview-port readiness belongs to the VSCode adapter, not credential sync.
-		ProjectVSCode: transport.Process{Program: filepath.Join(bin, "code"), Env: environment},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -187,8 +197,11 @@ printf '%s\0' "$@" > "$CODE_LOG"
 	if code := codeProgram.Run(context.Background()); code != 0 {
 		t.Fatalf("code failed: code=%d stderr=%q", code, codeStderr.String())
 	}
+	if after, err := os.ReadFile(snippet); err != nil || string(after) != originalSnippet {
+		t.Fatalf("editor launch changed SSH configuration: %q err=%v", after, err)
+	}
 	wantWorkspace := filepath.Join(
-		configHome, "workspaces", "eWFyZC5jb2Rl.demo-12345678", "Demo.code-workspace",
+		configHome, "workspaces", "eWFyZA.demo-12345678", "Demo.code-workspace",
 	)
 	codeArguments, readErr := os.ReadFile(codeLog)
 	if readErr != nil || string(codeArguments) != wantWorkspace+"\x00" ||
@@ -205,7 +218,7 @@ printf '%s\0' "$@" > "$CODE_LOG"
 		Settings        map[string]string `json:"settings"`
 	}
 	if err := json.Unmarshal(workspacePayload, &workspace); err != nil ||
-		workspace.RemoteAuthority != "ssh-remote+yard.code" ||
+		workspace.RemoteAuthority != "ssh-remote+yard" ||
 		workspace.Settings["window.title"] != "${rootNameShort} — Yard SSH: owner-a/default" ||
 		strings.Contains(workspace.Settings["window.title"], "yard-") {
 		t.Fatalf("code workspace identity drifted: workspace=%#v err=%v", workspace, err)

@@ -80,30 +80,42 @@ Run this inside a project's Git checkout:
 subyard-preview dist
 ```
 
-The directory is relative to the Git workspace root. For a container yard with an active owner
-Tailscale IPv4 address, the helper prints `Preview: http://<owner-tailscale-ip>:<preview-port>/`.
-Open or share that printed URL from a device that can reach the owner under its Tailnet policy.
-This direct URL does not require a `yard code` SSH session. Agents can keep the foreground helper
-running through their usual background process mechanism. File edits appear on the next request.
+The directory is relative to the Git workspace root. For container and VM yards, the helper
+prints `Preview: http://<owner-ip>:<preview-port>/`. It prefers the owner's active Tailscale IPv4;
+without one it uses the private IPv4 source address of the owner's default route. Public owner
+addresses are never published automatically. Open or share the printed URL from a device that can
+reach that network; a Tailscale URL also requires Tailnet policy access. Agents can keep the
+foreground helper running through their usual background process mechanism. File edits appear on
+the next request. The helper must stay running for the URL to work.
 
-The owner proxy listens only on that active Tailscale address. Its default port is the yard's
-SSH host port plus 30000, wrapping into `1024..65535` if needed: default SSH port `2222`
-gives preview port `32222`.
-Set `WEB_PREVIEW_HOST_PORT` to choose a different owner port, then repeat `yard init`.
-Repeat `yard init` after the owner's Tailscale address or proxy configuration changes.
-The helper must stay running for the URL to work.
+The owner proxy uses only the selected address. Its default port is the yard's SSH host port plus
+30000, wrapping into `1024..65535` if needed: SSH port `2222` gives preview port `32222`.
+Set `WEB_PREVIEW_HOST_PORT` to choose another owner port, then repeat `yard init`.
+Repeat `yard init` after owner address or proxy configuration changes. Private-network publication
+makes the preview reachable to other devices on that network.
 
-VM yards and owners without an active Tailscale IPv4 address use
-`Preview: http://127.0.0.1:8765/`. Open the project with `yard code` and use that link on the
-machine running VS Code. Both the helper and its dedicated Remote-SSH connection must stay active.
-Only one forwarded preview can use the fixed controller port at a time; `yard code` reports a busy
-port before opening VS Code. Ordinary yard SSH aliases have no preview forwarding.
+If the owner has no eligible address, the helper prints `Preview: http://127.0.0.1:8765/`.
+That endpoint is local to the yard. When an operator requests a tunnel, run this on the operator's
+machine, choosing a free local port and the operator's yard SSH alias:
+
+```sh
+ssh -S none -N -L 127.0.0.1:<local-port>:127.0.0.1:8765 <yard-alias>
+```
+
+Open `http://127.0.0.1:<local-port>/` and keep the tunnel and helper running. The same recipe is
+available in `subyard-preview --help`. Find `<yard-alias>` in the `Host` entry of the operator's
+`~/.ssh/subyard*.config`: local aliases come from `SSH_HOST` during `yard init`, while remote aliases
+come from the registration described in the [CLI reference](cli-reference.md).
+An agent inside the yard cannot infer the operator's remote alias; provide this recipe only when
+requested, with the alias and free local port supplied by the operator.
 
 Preview directories must be readable and contain static files; the helper does not build the
 project. Symlinks, parent traversal, `.git`, special files and directory listings are rejected.
-Repeat `yard init` to install the helper and update an older local SSH snippet; refresh an older
-remote registration to install its dedicated preview alias.
-Remote projects require the owner registration described below (`yard host add`).
+`yard code` opens the ordinary yard SSH alias and does not reserve or forward preview ports.
+Repeat `yard init` to refresh older local SSH snippets, or `yard remote add` to refresh remote
+registration. Saved VS Code recent entries using `ssh-remote+<alias>.code` must be reopened through
+`yard code`; the retired `.code` alias is removed on refresh. Remote projects require the owner
+registration described below (`yard host add`).
 
 ## Select local and remote yards
 

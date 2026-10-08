@@ -16,11 +16,17 @@ import unittest
 
 
 HELPER = Path(__file__).resolve().parents[1] / "config/preview/subyard-preview"
-ADDRESS = ("127.0.0.1", 8765)
+with socket.socket() as reservation:
+    reservation.bind(("127.0.0.1", 0))
+    ADDRESS = reservation.getsockname()
+URL = "http://%s:%d/" % ADDRESS
 PREVIEW = runpy.run_path(str(HELPER))
 LAUNCH = (
     "import runpy, sys; helper = runpy.run_path(sys.argv.pop(1)); "
-    "helper['main'].__globals__['ENDPOINT_FILE'] = sys.argv.pop(1); "
+    "settings = helper['main'].__globals__; "
+    "settings['ENDPOINT_FILE'] = sys.argv.pop(1); "
+    "settings['ADDRESS'] = ('127.0.0.1', int(sys.argv.pop(1))); "
+    "settings['URL'] = 'http://%s:%d/' % settings['ADDRESS']; "
     "sys.exit(helper['main']())"
 )
 
@@ -46,7 +52,7 @@ class PreviewTest(unittest.TestCase):
 
     def launch(self, *args, cwd=None):
         process = subprocess.Popen(
-            [sys.executable, "-c", LAUNCH, str(HELPER), str(self.endpoint), *args],
+            [sys.executable, "-c", LAUNCH, str(HELPER), str(self.endpoint), str(ADDRESS[1]), *args],
             cwd=cwd or self.nested,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
@@ -64,7 +70,7 @@ class PreviewTest(unittest.TestCase):
         process.stdout.close()
         process.stderr.close()
 
-    def start(self, directory="site", cwd=None, url="http://127.0.0.1:8765/"):
+    def start(self, directory="site", cwd=None, url=URL):
         process = self.launch(directory, cwd=cwd)
         with selectors.DefaultSelector() as selector:
             selector.register(process.stdout, selectors.EVENT_READ)
@@ -208,9 +214,9 @@ class PreviewTest(unittest.TestCase):
             listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             listener.bind(ADDRESS)
             listener.listen()
-            self.assertIn(b"127.0.0.1:8765 is already in use", self.reject("site"))
+            self.assertIn(("%s:%d is already in use" % ADDRESS).encode(), self.reject("site"))
             self.write(self.endpoint, b'{"version":1,"host":"100.64.1.20","port":32222}', 0o644)
-            self.assertIn(b"127.0.0.1:8765 is already in use", self.reject("site"))
+            self.assertIn(("%s:%d is already in use" % ADDRESS).encode(), self.reject("site"))
 
     def test_installed_endpoint_advertises_owner_but_serves_guest_loopback(self):
         endpoint = {"version": 1, "host": "100.64.1.20", "port": 32222}
@@ -220,14 +226,19 @@ class PreviewTest(unittest.TestCase):
         with socket.socket() as other_address:
             other_address.bind(("127.0.0.2", ADDRESS[1]))
         self.stop(process)
-        self.write(self.endpoint, b'{"version":1,"host":"127.0.0.1","port":8765}', 0o644)
+        self.write(self.endpoint, json.dumps({"version": 1, "host": ADDRESS[0], "port": ADDRESS[1]}).encode(), 0o644)
         self.start()
         self.assertEqual(self.request()[2], b"first preview")
 
     def test_endpoint_schema_and_address_validation(self):
+        self.assertEqual(PREVIEW["ADDRESS"], ("127.0.0.1", 8765))
         for host, port in (("127.0.0.1", 8765), ("100.64.0.0", 1024), ("100.127.255.255", 65535)):
             payload = json.dumps({"version": 1, "host": host, "port": port})
-            self.assertEqual(PREVIEW["parse_endpoint"](payload), "http://%s:%d/" % (host, port))
+            self.assertEqual(PREVIEW["parse_endpoint"](payload), ("http://%s:%d/" % (host, port), None))
+        for host in ("10.1.2.3", "172.16.0.1", "172.31.255.254", "192.168.1.2"):
+            endpoint = {"version": 1, "host": host, "port": 32222, "bindHost": "10.80.0.2"}
+            self.assertEqual(PREVIEW["parse_endpoint"](json.dumps(endpoint)),
+                             ("http://%s:32222/" % host, "10.80.0.2"))
         valid = {"version": 1, "host": "100.64.1.20", "port": 32222}
         invalid = [
             {}, [], None, {**valid, "extra": 1}, {**valid, "version": 2},
@@ -238,6 +249,12 @@ class PreviewTest(unittest.TestCase):
             {**valid, "host": "100.63.255.255"}, {**valid, "host": "100.128.0.0"},
             {**valid, "host": "100.064.1.20"}, {**valid, "host": "::1"},
             {**valid, "host": "owner.example"}, {**valid, "host": 100},
+            {**valid, "host": "8.8.8.8"}, {**valid, "host": "172.32.0.1"},
+            {**valid, "host": "169.254.1.2"}, {**valid, "host": "198.18.0.1"},
+            {**valid, "bindHost": "0.0.0.0"}, {**valid, "bindHost": "127.0.0.1"},
+            {**valid, "bindHost": "8.8.8.8"}, {**valid, "bindHost": None},
+            {**valid, "bindHost": "100.64.1.2"},
+            {"version": 1, "host": "127.0.0.1", "port": 8765, "bindHost": "10.80.0.2"},
         ]
         for endpoint in invalid:
             with self.subTest(endpoint=endpoint), self.assertRaises(ValueError):
@@ -246,8 +263,23 @@ class PreviewTest(unittest.TestCase):
             with self.subTest(payload=payload), self.assertRaises(ValueError):
                 PREVIEW["parse_endpoint"](payload)
 
+    def test_unavailable_vm_bind_fails_and_releases_loopback(self):
+        self.write(self.endpoint, json.dumps({"version": 1, "host": "192.168.1.2",
+                   "port": 32222, "bindHost": "10.255.255.254"}).encode(), 0o644)
+        self.assertEqual(self.reject("site"), ("subyard-preview: cannot listen on 10.255.255.254:%d\n" % ADDRESS[1]).encode())
+        with socket.socket() as listener:
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(ADDRESS)
+
+    def test_help_provides_operator_tunnel_recipe(self):
+        process = self.launch("--help")
+        stdout, stderr = process.communicate(timeout=5)
+        self.assertEqual((process.returncode, stderr), (0, b""))
+        self.assertIn(b"ssh -S none -N -L 127.0.0.1:<local-port>:127.0.0.1:8765 <yard-alias>", stdout)
+        self.assertIn(b"operator's ~/.ssh/subyard*.config", stdout)
+
     def test_invalid_endpoint_metadata_fails_before_listening(self):
-        valid = b'{"version":1,"host":"127.0.0.1","port":8765}'
+        valid = json.dumps({"version": 1, "host": ADDRESS[0], "port": ADDRESS[1]}).encode()
         for payload, mode in ((b"invalid JSON", 0o644), (valid + b" " * 1024, 0o644), (valid, 0o664), (valid, 0o646)):
             with self.subTest(payload=payload[:20], mode=mode):
                 self.write(self.endpoint, payload, mode)

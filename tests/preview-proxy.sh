@@ -23,6 +23,10 @@ elif args[:2] == ['config', 'unset']:
     del state['config'][args[3]]
 elif args[:3] == ['config', 'device', 'remove']:
     del state['devices'][args[4]]
+elif args[:3] in (['config', 'device', 'set'], ['config', 'device', 'override']):
+    name = args[4]
+    state['devices'].setdefault(name, dict(state.get('expanded_devices', {}).get(name, {})))
+    state['devices'][name].update(arg.split('=', 1) for arg in args[5:] if '=' in arg)
 elif args[:3] == ['config', 'device', 'add']:
     if os.environ.get('PREVIEW_PROXY_FAIL') == '1': sys.exit(1)
     assert args[5] == 'proxy'
@@ -30,34 +34,40 @@ elif args[:3] == ['config', 'device', 'add']:
         arg.split('=', 1) for arg in args[6:] if '=' in arg)}
 else:
     raise RuntimeError(args)
+if 'expanded_devices' in state:
+    for name in list(state['expanded_devices']):
+        if name != 'eth0' and name not in state['devices']: del state['expanded_devices'][name]
+    state['expanded_devices'].update(state['devices'])
 with open(path, 'w') as target: json.dump(state, target)
 # Mutation output must never corrupt the endpoint JSON returned by the library.
 print('updated')
 PY
-cat >"$temporary/bin/tailscale" <<'SH'
-#!/bin/sh
-[ "$*" = 'ip -4' ] || exit 2
-[ -n "${PREVIEW_TAIL_ADDRESS:-}" ] || exit 1
-printf '%s\n' "$PREVIEW_TAIL_ADDRESS"
-SH
 cat >"$temporary/bin/ip" <<'SH'
 #!/bin/sh
-printf '[{"addr_info":[{"local":"%s"}]}]\n' "${PREVIEW_ACTIVE_ADDRESS:-}"
+if [ "$*" = '-j -4 route get 1.1.1.1' ]; then
+  printf '[{"prefsrc":"%s"}]\n' "${PREVIEW_SOURCE_ADDRESS:-}"
+else
+  printf '[{"addr_info":[{"local":"%s"},{"local":"%s"}]}]\n' "${PREVIEW_ACTIVE_ADDRESS:-}" "${PREVIEW_SOURCE_ACTIVE:-}"
+fi
 SH
-chmod 0755 "$temporary/bin/incus" "$temporary/bin/tailscale" "$temporary/bin/ip"
+cat >"$temporary/bin/ss" <<'SH'
+#!/bin/sh
+printf '%s\n' "${PREVIEW_SOCKET:-}"
+SH
+chmod 0755 "$temporary/bin/incus" "$temporary/bin/ip" "$temporary/bin/ss"
 export PATH="$temporary/bin:$PATH"
 # shellcheck source=scripts/lib/preview-proxy.sh
 . "$ROOT/scripts/lib/preview-proxy.sh"
+
 YARD_INSTANCE_NAME=fixture
 INCUS_PROJECT=fixture
 YARD_KIND=container
+PREVIEW_HOST=127.0.0.1
 WEB_PREVIEW_HOST_PORT=32222
 PROJ=(--project fixture)
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
-endpoint() {
-  local actual
-  actual="$(subyard_preview_endpoint)"
-  [ "$actual" = "$1" ] || fail "unexpected endpoint: $actual"
+route() {
+  subyard_preview_route "$PREVIEW_HOST"
 }
 rewrite() {
   jq "$1" "$PREVIEW_PROXY_STATE" >"$temporary/next.json"
@@ -66,34 +76,34 @@ rewrite() {
 unchanged_failure() {
   local before
   before="$(wc -l <"$PREVIEW_PROXY_LOG")"
-  if subyard_preview_endpoint; then fail 'foreign or divergent route accepted'; fi
+  if subyard_preview_route "$PREVIEW_HOST"; then fail 'foreign or divergent route accepted'; fi
   [ "$(wc -l <"$PREVIEW_PROXY_LOG")" = "$before" ] || fail 'foreign route mutated'
 }
-fallback='{"version":1,"host":"127.0.0.1","port":8765}'
-endpoint "$fallback"
+route
 [ ! -s "$PREVIEW_PROXY_LOG" ] || fail 'fresh fallback mutated state'
-export PREVIEW_TAIL_ADDRESS=100.101.102.103 PREVIEW_ACTIVE_ADDRESS=100.101.102.104
-endpoint "$fallback"
-[ ! -s "$PREVIEW_PROXY_LOG" ] || fail 'inactive Tailnet address was published'
+PREVIEW_HOST=100.101.102.103
+export PREVIEW_ACTIVE_ADDRESS=100.101.102.104
+unchanged_failure
 export PREVIEW_ACTIVE_ADDRESS=100.101.102.103
-endpoint '{"version":1,"host":"100.101.102.103","port":32222}'
+route
 jq -e '.devices["subyard-preview"] == {type:"proxy",bind:"host",listen:"tcp:100.101.102.103:32222",connect:"tcp:127.0.0.1:8765"} and
   .config["user.subyard.preview_proxy"] == "v1:100.101.102.103:32222"' "$PREVIEW_PROXY_STATE" >/dev/null
 before="$(wc -l <"$PREVIEW_PROXY_LOG")"
-endpoint '{"version":1,"host":"100.101.102.103","port":32222}'
+route
 [ "$(wc -l <"$PREVIEW_PROXY_LOG")" = "$before" ] || fail 'exact route was mutated'
 rewrite '.devices={}'
-endpoint '{"version":1,"host":"100.101.102.103","port":32222}'
+route
 jq -e '.config["user.subyard.preview_proxy"] == "v1:100.101.102.103:32222"' "$PREVIEW_PROXY_STATE" >/dev/null
 
 # Address/port drift and interrupted publication reconcile only owned state.
-export PREVIEW_TAIL_ADDRESS=100.101.102.104 PREVIEW_ACTIVE_ADDRESS=100.101.102.104
+PREVIEW_HOST=100.101.102.104
+export PREVIEW_ACTIVE_ADDRESS=100.101.102.104
 WEB_PREVIEW_HOST_PORT=32223
-if PREVIEW_PROXY_FAIL=1 subyard_preview_endpoint; then fail 'publication failure accepted'; fi
+if PREVIEW_PROXY_FAIL=1 subyard_preview_route "$PREVIEW_HOST"; then fail 'publication failure accepted'; fi
 jq -e '.devices == {} and .config["user.subyard.preview_proxy"] == "v1:pending:100.101.102.104:32223"' "$PREVIEW_PROXY_STATE" >/dev/null
-endpoint '{"version":1,"host":"100.101.102.104","port":32223}'
+route
 rewrite '.config["user.subyard.preview_proxy"]="v1:pending:100.101.102.104:32223"'
-endpoint '{"version":1,"host":"100.101.102.104","port":32223}'
+route
 jq -e '.config["user.subyard.preview_proxy"] == "v1:100.101.102.104:32223"' "$PREVIEW_PROXY_STATE" >/dev/null
 rewrite '.devices["subyard-preview"].connect="tcp:127.0.0.1:9999"'
 unchanged_failure
@@ -106,18 +116,55 @@ unchanged_failure
 rewrite '.devices={} | .config["user.subyard.preview_proxy"]="v1:100.101.102.104:032223"'
 unchanged_failure
 
-# No Tailnet and VM fallback remove only exactly owned container routes.
+# A prepared private source must still be active; loopback removes only owned state.
 rewrite '.config={} | .devices={}'
-endpoint '{"version":1,"host":"100.101.102.104","port":32223}'
-unset PREVIEW_TAIL_ADDRESS PREVIEW_ACTIVE_ADDRESS
-endpoint "$fallback"
+PREVIEW_HOST=192.168.1.20
+export PREVIEW_SOURCE_ACTIVE=192.168.1.21
+unchanged_failure
+export PREVIEW_SOURCE_ACTIVE=192.168.1.20
+route
+PREVIEW_HOST=203.0.113.20
+export PREVIEW_SOURCE_ACTIVE=203.0.113.20
+unchanged_failure
+PREVIEW_HOST=127.0.0.1
+route
 jq -e '.devices == {} and .config == {}' "$PREVIEW_PROXY_STATE" >/dev/null
-export PREVIEW_TAIL_ADDRESS=100.101.102.104 PREVIEW_ACTIVE_ADDRESS=100.101.102.104
-endpoint '{"version":1,"host":"100.101.102.104","port":32223}'
+
+# VMs consume the instance stage pin before publishing an owned NAT route.
 YARD_KIND=vm
-endpoint "$fallback"
+PREVIEW_HOST=192.168.1.20
+export PREVIEW_SOURCE_ACTIVE=192.168.1.20
+rewrite '.devices.eth0={type:"nic",network:"incusbr0"}'
+unchanged_failure
+rewrite '.devices.eth0["ipv4.address"]="10.80.0.10"'
+route
+jq -e '.devices.eth0["ipv4.address"] == "10.80.0.10" and
+  .devices["subyard-preview"] == {type:"proxy",bind:"host",nat:"true",listen:"tcp:192.168.1.20:32223",connect:"tcp:10.80.0.10:8765"} and
+  .config["user.subyard.preview_proxy"] == "v2:192.168.1.20:32223:10.80.0.10"' "$PREVIEW_PROXY_STATE" >/dev/null
+before="$(wc -l <"$PREVIEW_PROXY_LOG")"
+route
+[ "$(wc -l <"$PREVIEW_PROXY_LOG")" = "$before" ] || fail 'exact VM route was mutated'
+rewrite '.config["user.subyard.preview_proxy"]="v2:pending:192.168.1.20:32223:10.80.0.10"'
+route
+rewrite '.devices["subyard-preview"].connect="tcp:10.80.0.11:8765"'
+unchanged_failure
+rewrite '.devices["subyard-preview"].connect="tcp:10.80.0.10:8765"'
+rewrite 'del(.devices.eth0["ipv4.address"])'
+unchanged_failure
+rewrite '.devices.eth0["ipv4.address"]="10.80.0.10"'
+
+# NAT must not override an existing owner socket; profile pins stay profile-owned.
+rewrite '.config={} | .devices={} | .expanded_devices={eth0:{type:"nic",network:"incusbr0","ipv4.address":"10.80.0.10"}}'
+VM_PIN_IPV4=1
+export PREVIEW_SOCKET='LISTEN 0 1 192.168.1.20:32223 0.0.0.0:*'
+unchanged_failure
+unset PREVIEW_SOCKET
+route
+jq -e '.devices.eth0 == null' "$PREVIEW_PROXY_STATE" >/dev/null
+PREVIEW_HOST=127.0.0.1
+route
 jq -e '.devices == {} and .config == {}' "$PREVIEW_PROXY_STATE" >/dev/null
 before="$(wc -l <"$PREVIEW_PROXY_LOG")"
-endpoint "$fallback"
+route
 [ "$(wc -l <"$PREVIEW_PROXY_LOG")" = "$before" ] || fail 'VM fallback was mutated'
 printf 'ok: preview owner proxy lifecycle\n'

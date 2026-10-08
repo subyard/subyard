@@ -47,7 +47,6 @@ type Context struct {
 	IncusProject     string       `json:"incusProject"`
 	IncusBridge      string       `json:"incusBridge"`
 	SSHHost          string       `json:"sshHost"`
-	CodeSSHHost      string       `json:"codeSshHost,omitempty"`
 	DevUser          string       `json:"devUser"`
 	SSHPort          int          `json:"sshPort"`
 	OwnerEndpoint    string       `json:"ownerEndpoint,omitempty"`
@@ -127,7 +126,6 @@ func (ctx *Context) UnmarshalJSON(payload []byte) error {
 }
 
 func NormalizeContext(ctx Context) (Context, error) {
-	ctx.CodeSSHHost = CodeSSHHost(ctx.SSHHost)
 	if ctx.DevUser == "" {
 		ctx.DevUser = "dev"
 	}
@@ -163,9 +161,6 @@ func NormalizeContext(ctx Context) (Context, error) {
 	}
 	return ctx, nil
 }
-
-// CodeSSHHost keeps preview sessions separate from ordinary yard connections.
-func CodeSSHHost(sshHost string) string { return sshHost + ".code" }
 
 func (ctx Context) Validate() error {
 	if ctx.YardName == "" {

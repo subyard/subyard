@@ -506,7 +506,7 @@ func (cli *CLI) prepareProjectExecution(
 	defer func() {
 		if err == nil && execution != nil {
 			execution.RequiresProjects = projectCommandRequiresProjects(definition.Name)
-			err = cli.captureProjectOwner(execution)
+			err = cli.captureProjectOwner(ctx, execution)
 			if err == nil && execution.Loaded.Context.AccessKind == domain.AccessRemote {
 				err = cli.recheckProjectRole(ctx, execution)
 			}
@@ -544,7 +544,7 @@ func requireProjectRole(loaded config.Loaded) error {
 
 // Capture the registration during preparation without creating locks or state.
 // Execute checks it again under the host mutation lock after confirmation.
-func (cli *CLI) captureProjectOwner(execution *projectExecution) error {
+func (cli *CLI) captureProjectOwner(ctx context.Context, execution *projectExecution) error {
 	yard := execution.Loaded.Context
 	if yard.AccessKind != domain.AccessRemote {
 		return nil
@@ -554,21 +554,36 @@ func (cli *CLI) captureProjectOwner(execution *projectExecution) error {
 	if err != nil {
 		return err
 	}
-	routingRoot := filepath.Join(root, "routing") + string(filepath.Separator)
-	canonical := strings.HasPrefix(filepath.Clean(yard.Paths.StateDir), routingRoot)
 	for _, connection := range connections {
 		if connection.Destination != yard.OwnerEndpoint {
 			continue
 		}
-		if canonical && (yard.Paths.StateDir != filepath.Join(root, "routing", connection.HostID, yard.OwnerYardName, "projects") ||
-			connection.Yards[yard.OwnerYardName].SSHHost != yard.SSHHost) {
-			return fmt.Errorf("%w: owner project route changed; prepare the command again", domain.ErrPlanStale)
+		if err := cli.checkProjectOwnerRoute(ctx, execution, connection); err != nil {
+			return err
 		}
 		execution.OwnerConnection = &connection
 		return nil
 	}
-	if canonical {
+	if strings.HasPrefix(filepath.Clean(yard.Paths.StateDir), filepath.Join(root, "routing")+string(filepath.Separator)) {
 		return fmt.Errorf("%w: owner project route is no longer registered", domain.ErrPlanStale)
+	}
+	return nil
+}
+
+func (cli *CLI) checkProjectOwnerRoute(ctx context.Context, execution *projectExecution, connection ownerinventory.Connection) error {
+	yard := execution.Loaded.Context
+	root := filepath.Join(yard.Paths.DataHome, "owner-inventory")
+	if !strings.HasPrefix(filepath.Clean(yard.Paths.StateDir), filepath.Join(root, "routing")+string(filepath.Separator)) {
+		return nil
+	}
+	effective, err := cli.effectiveOwnerConnection(ctx, execution.Loaded, connection)
+	if err != nil {
+		return fmt.Errorf("%w: revalidate owner project route: %v", domain.ErrPlanStale, err)
+	}
+	if yard.OwnerEndpoint != connection.Destination ||
+		yard.Paths.StateDir != filepath.Join(root, "routing", connection.HostID, yard.OwnerYardName, "projects") ||
+		effective.Yards[yard.OwnerYardName].SSHHost != yard.SSHHost {
+		return fmt.Errorf("%w: owner project route changed; prepare the command again", domain.ErrPlanStale)
 	}
 	return nil
 }
@@ -581,6 +596,12 @@ func (cli *CLI) beginProjectMutation(ctx context.Context, execution *projectExec
 		release, err = store.BeginHostMutation(ctx, *execution.OwnerConnection)
 		if err != nil {
 			return nil, fmt.Errorf("revalidate project owner: %w", err)
+		}
+		// The lease guards the persisted owner. Compatibility route metadata
+		// remains in its registration, so validate that effective route again.
+		if err := cli.checkProjectOwnerRoute(ctx, execution, *execution.OwnerConnection); err != nil {
+			release()
+			return nil, err
 		}
 	}
 	if err := cli.recheckProjectRole(ctx, execution); err != nil {

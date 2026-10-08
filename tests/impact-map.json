@@ -240,7 +240,7 @@
     {
       "id": "web-preview-source",
       "priority": 1002,
-      "pattern": "^(config/preview/.*|scripts/lib/preview-proxy\\.sh|internal/previewroute/.*|internal/adapters/reconcileruntime/preview\\.go|internal/adapters/projectruntime/vscode\\.go)$",
+      "pattern": "^(config/preview/.*|scripts/(lib/preview-proxy|prepare-preview-route)\\.sh|internal/previewroute/.*|internal/adapters/reconcileruntime/preview\\.go|internal/adapters/projectruntime/vscode\\.go)$",
       "check_sets": ["web-preview"],
       "risk_domains": ["ssh-remote-transport"]
     },

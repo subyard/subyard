@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/previewroute"
 	"github.com/Subyard/Subyard/internal/resource"
 )
 
@@ -87,6 +88,14 @@ func applyApprovedBootIngress(snapshot *Snapshot, policy Policy) error {
 		approvedDevices := make(map[string]bool, len(binding.ApprovedIngress))
 		for _, approved := range binding.ApprovedIngress {
 			expected := approved.proxy(binding)
+			if approved.Device == previewroute.DeviceName {
+				if approved.Transport() != "tcp" || approved.GuestPort != 8765 || !ownedPreviewIngress(*yard, binding) ||
+					!maps.Equal(yard.InstanceInfo.Devices[approved.Device], expected) {
+					return fmt.Errorf("%w: approved static preview ingress for yard %s changed", ErrNotConverged, yard.Name)
+				}
+				approvedDevices[approved.Device] = true
+				continue
+			}
 			if !yard.InstanceFound || yard.InstanceInfo.Type != domain.YardVM ||
 				!maps.Equal(yard.InstanceInfo.LocalDevices[approved.Device], expected) ||
 				!maps.Equal(yard.InstanceInfo.Devices[approved.Device], expected) ||
@@ -99,6 +108,10 @@ func applyApprovedBootIngress(snapshot *Snapshot, policy Policy) error {
 				Connect:       fmt.Sprintf("%s:guest:%d", approved.Transport(), approved.GuestPort),
 				AddressPolicy: resource.ProxyAddressPolicy("owner-ipv4-" + approved.Transport()), OwnershipMetadata: true,
 			})
+		}
+		if len(yard.InstanceInfo.Devices[previewroute.DeviceName]) != 0 &&
+			yard.InstanceInfo.Devices[previewroute.DeviceName]["nat"] == "true" && !approvedDevices[previewroute.DeviceName] {
+			return fmt.Errorf("%w: unapproved static preview ingress in yard %s", ErrNotConverged, yard.Name)
 		}
 		if len(approvedDevices) != 0 {
 			for name, device := range yard.InstanceInfo.Devices {

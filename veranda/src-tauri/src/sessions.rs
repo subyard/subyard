@@ -31,7 +31,6 @@ struct CodeTarget {
     address: String,
     port: u16,
     folder_path: String,
-    preview_port: u16,
     host_key: String,
     host_key_fingerprint: String,
     remote_authentication: String,
@@ -87,7 +86,6 @@ impl Descriptor {
                 || !safe_name(&target.dev_user)
                 || target.address != "127.0.0.1"
                 || target.port == 0
-                || target.preview_port != 8765
                 || target.remote_authentication != "already-authorized-desktop-agent-key"
                 || !target.folder_path.starts_with('/')
                 || target.folder_path.len() > 4096
@@ -174,8 +172,8 @@ pub fn launch(
                 )?;
                 let proxy =
                     pin.proxy_command_with_pin(target.port, &root.join("owner-known-hosts"))?;
-                let config = format!("Host veranda-{editor_id}\n HostName 127.0.0.1\n User {}\n Port {}\n HostKeyAlias veranda-guest-{editor_id}\n UserKnownHostsFile {}\n GlobalKnownHostsFile none\n StrictHostKeyChecking yes\n UpdateHostKeys no\n VerifyHostKeyDNS no\n BatchMode yes\n IdentityFile none\n IdentitiesOnly no\n ForwardAgent no\n LocalForward 127.0.0.1:{} 127.0.0.1:{}\n ProxyCommand {}\n", target.dev_user, target.port,
-                    ssh_config_path(&root.join("guest-known-hosts"))?, target.preview_port, target.preview_port, display_command(&proxy)?.replace('%', "%%"));
+                let config = format!("Host veranda-{editor_id}\n HostName 127.0.0.1\n User {}\n Port {}\n HostKeyAlias veranda-guest-{editor_id}\n UserKnownHostsFile {}\n GlobalKnownHostsFile none\n StrictHostKeyChecking yes\n UpdateHostKeys no\n VerifyHostKeyDNS no\n BatchMode yes\n IdentityFile none\n IdentitiesOnly no\n ForwardAgent no\n ProxyCommand {}\n", target.dev_user, target.port,
+                    ssh_config_path(&root.join("guest-known-hosts"))?, display_command(&proxy)?.replace('%', "%%"));
                 // VS Code's dedicated app-local user data keeps global SSH/Code settings untouched.
                 let settings = serde_json::to_string(&serde_json::json!({"remote.SSH.configFile":root.join("ssh-config"),"remote.SSH.showLoginTerminal":false})).map_err(|_| transport::invalid())?;
                 store.write_editor_profile(

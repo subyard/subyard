@@ -263,7 +263,7 @@ func (runtime Runtime) liveFindings(ctx context.Context, state ports.ReconcileSt
 			}
 		}
 		if name == previewroute.DeviceName {
-			if err := runtime.checkPreviewProxy(ctx, device, instance.LocalDevices[name], instance.LocalConfig); err != nil {
+			if err := runtime.checkPreviewProxy(ctx, device, instance.LocalDevices[name], instance.LocalConfig, instance.Devices["eth0"]); err != nil {
 				result = append(result, finding{"fail", err.Error()})
 			}
 		} else if name == "ai-observer" && deviceType == "proxy" && !loopbackProxy(device["listen"]) {
@@ -293,19 +293,25 @@ func (runtime Runtime) liveFindings(ctx context.Context, state ports.ReconcileSt
 	return result
 }
 
-func (runtime Runtime) checkPreviewProxy(ctx context.Context, device, localDevice, instanceConfig map[string]string) error {
+func (runtime Runtime) checkPreviewProxy(ctx context.Context, device, localDevice, instanceConfig, guestNIC map[string]string) error {
 	host, port, ready := previewroute.Owned(instanceConfig[previewroute.Key], device)
+	guest := ""
+	if runtime.Yard.YardKind == domain.YardVM {
+		guest = guestNIC["ipv4.address"]
+	}
 	if !ready || port != runtime.Environment["WEB_PREVIEW_HOST_PORT"] ||
-		runtime.Yard.YardKind != domain.YardContainer || !maps.Equal(device, localDevice) {
-		return errors.New("static preview proxy does not match its owned container Tailscale route")
+		(runtime.Yard.YardKind != domain.YardContainer && runtime.Yard.YardKind != domain.YardVM) ||
+		(runtime.Yard.YardKind == domain.YardVM && guest == "") ||
+		!maps.Equal(device, localDevice) || !maps.Equal(device, previewroute.Device(host, port, guest)) {
+		return errors.New("static preview proxy does not match its owned route")
 	}
 	resolver := runtime.ResolveOwnerAddress
 	if resolver == nil {
-		resolver = resolveOwnerAddress
+		resolver = func(ctx context.Context, _ string) (string, error) { return previewroute.Host(ctx), nil }
 	}
 	address, err := resolver(ctx, host)
 	if err != nil || address != host {
-		return errors.New("static preview proxy is not bound to an active owner Tailscale address")
+		return errors.New("static preview proxy is not bound to the active private owner address")
 	}
 	return nil
 }

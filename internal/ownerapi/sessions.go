@@ -45,7 +45,6 @@ type SessionVSCode struct {
 	Address              string `json:"address"`
 	Port                 int    `json:"port"`
 	FolderPath           string `json:"folderPath"`
-	PreviewPort          int    `json:"previewPort"`
 	HostKey              string `json:"hostKey"`
 	HostKeyFingerprint   string `json:"hostKeyFingerprint"`
 	RemoteAuthentication string `json:"remoteAuthentication"`
@@ -114,22 +113,22 @@ func (service Service) PrepareSession(ctx context.Context, params SessionParams)
 		}
 		return result, nil
 	}
-	if !domain.SafeSSHTarget(yard.CodeSSHHost) || yard.CodeSSHHost != domain.CodeSSHHost(yard.SSHHost) || yard.CodeSSHHost == record.SSHHost {
-		return result, &Error{Code: "session_ssh_unavailable", Message: "dedicated VS Code SSH transport is unavailable; reconcile the yard explicitly"}
+	if !domain.SafeSSHTarget(yard.SSHHost) {
+		return result, &Error{Code: "session_ssh_unavailable", Message: "yard SSH transport is unavailable; reconcile the yard explicitly"}
 	}
 	if err := (application.ProjectActionRunner{Yard: yard, Instances: incus}).CheckCodeTargetReady(ctx); err != nil {
 		if ctx.Err() != nil {
 			return result, ctx.Err()
 		}
-		return result, &Error{Code: "session_ssh_unavailable", Message: "dedicated VS Code SSH transport is unavailable; reconcile the yard explicitly"}
+		return result, &Error{Code: "session_ssh_unavailable", Message: "yard SSH transport is unavailable; reconcile the yard explicitly"}
 	}
 	key, err := sessionGuestHostKey(yard)
 	if err != nil {
 		return result, &Error{Code: "session_host_key_unavailable", Message: "protected owner guest SSH pin is unavailable or ambiguous; reconcile the yard explicitly"}
 	}
 	result.LocalArguments = []string{"yard", "-Y", yard.YardName, "code", record.ProjectID}
-	result.VSCode = &SessionVSCode{SSHAlias: yard.CodeSSHHost, DevUser: yard.DevUser, Address: "127.0.0.1", Port: yard.SSHPort,
-		FolderPath: record.YardPath, PreviewPort: 8765, HostKey: strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key))),
+	result.VSCode = &SessionVSCode{SSHAlias: yard.SSHHost, DevUser: yard.DevUser, Address: "127.0.0.1", Port: yard.SSHPort,
+		FolderPath: record.YardPath, HostKey: strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key))),
 		HostKeyFingerprint: ssh.FingerprintSHA256(key), RemoteAuthentication: "already-authorized-desktop-agent-key"}
 	return result, nil
 }

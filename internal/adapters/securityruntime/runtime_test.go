@@ -685,3 +685,35 @@ func TestSecurityPublicIngressResolvesTransportAndHostPort(t *testing.T) {
 		})
 	}
 }
+
+func TestPreviewProxyAcceptsOnlyExactContainerAndVMRoutes(t *testing.T) {
+	for _, kind := range []domain.YardKind{domain.YardContainer, domain.YardVM} {
+		for _, host := range []string{"100.64.1.20", "192.168.1.20"} {
+			t.Run(string(kind)+"/"+host, func(t *testing.T) {
+				runtime := testRuntime(t)
+				runtime.Yard.YardKind = kind
+				runtime.Environment["WEB_PREVIEW_HOST_PORT"] = "32222"
+				runtime.ResolveOwnerAddress = func(context.Context, string) (string, error) { return host, nil }
+				guest := ""
+				marker := "v1:" + host + ":32222"
+				if kind == domain.YardVM {
+					guest = "10.80.0.10"
+					marker = "v2:" + host + ":32222:" + guest
+				}
+				device := previewroute.Device(host, "32222", guest)
+				local := maps.Clone(device)
+				config := map[string]string{previewroute.Key: marker}
+				nic := map[string]string{"ipv4.address": guest}
+				if err := runtime.checkPreviewProxy(context.Background(), device, local, config, nic); err != nil {
+					t.Fatal(err)
+				}
+				if kind == domain.YardVM {
+					nic["ipv4.address"] = "10.80.0.11"
+					if err := runtime.checkPreviewProxy(context.Background(), device, local, config, nic); err == nil {
+						t.Fatal("VM proxy accepted a different NIC pin")
+					}
+				}
+			})
+		}
+	}
+}

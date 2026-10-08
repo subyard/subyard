@@ -7,9 +7,11 @@ import json
 import mimetypes
 import os
 import shutil
+import selectors
 import stat
 import subprocess
 import sys
+from contextlib import ExitStack
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import unquote, urlsplit
 
@@ -17,6 +19,9 @@ from urllib.parse import unquote, urlsplit
 ADDRESS = ("127.0.0.1", 8765)
 URL = "http://127.0.0.1:8765/"
 ENDPOINT_FILE = "/etc/subyard/preview.json"
+PRIVATE_NETWORKS = tuple(ipaddress.IPv4Network(network) for network in (
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+))
 
 
 def endpoint_fields(pairs):
@@ -28,7 +33,9 @@ def endpoint_fields(pairs):
 
 def parse_endpoint(payload):
     endpoint = json.loads(payload, object_pairs_hook=endpoint_fields)
-    if not isinstance(endpoint, dict) or set(endpoint) != {"version", "host", "port"}:
+    if not isinstance(endpoint, dict) or set(endpoint) not in (
+        {"version", "host", "port"}, {"version", "host", "port", "bindHost"},
+    ):
         raise ValueError
     version, host, port = endpoint["version"], endpoint["host"], endpoint["port"]
     if type(version) is not int or version != 1 or type(port) is not int or not isinstance(host, str):
@@ -39,16 +46,24 @@ def parse_endpoint(payload):
     if host == ADDRESS[0]:
         if port != ADDRESS[1]:
             raise ValueError
-    elif address not in ipaddress.IPv4Network("100.64.0.0/10") or not 1024 <= port <= 65535:
+    elif not (address in ipaddress.IPv4Network("100.64.0.0/10") or
+              any(address in network for network in PRIVATE_NETWORKS)) or not 1024 <= port <= 65535:
         raise ValueError
-    return "http://%s:%d/" % (host, port)
+    bind_host = endpoint.get("bindHost")
+    if "bindHost" in endpoint:
+        if not isinstance(bind_host, str) or host == ADDRESS[0]:
+            raise ValueError
+        guest = ipaddress.IPv4Address(bind_host)
+        if str(guest) != bind_host or not any(guest in network for network in PRIVATE_NETWORKS):
+            raise ValueError
+    return "http://%s:%d/" % (host, port), bind_host
 
 
-def endpoint_url():
+def endpoint():
     try:
         fd = os.open(ENDPOINT_FILE, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
-        return URL
+        return URL, None
     with os.fdopen(fd, "rb") as source:
         metadata = os.fstat(source.fileno())
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o022 or metadata.st_size > 1024:
@@ -171,6 +186,12 @@ def main():
     if sys.argv[1:] in (["--help"], ["-h"]):
         print("Usage: subyard-preview <relative-dir>")
         print("Serve a static directory relative to the current Git checkout root.")
+        print("Keep this process running and share its printed URL.")
+        print("For a loopback endpoint, request a tunnel on the operator's machine:")
+        print("  ssh -S none -N -L 127.0.0.1:<local-port>:127.0.0.1:8765 <yard-alias>")
+        print("Choose a free local port and open http://127.0.0.1:<local-port>/.")
+        print("Use the Host alias in the operator's ~/.ssh/subyard*.config, created")
+        print("by yard init for local yards or yard remote add for remote yards.")
         return 0
     if len(sys.argv) != 2 or not sys.argv[1] or os.path.isabs(sys.argv[1]):
         return fail("expected one relative directory")
@@ -197,20 +218,30 @@ def main():
         os.close(workspace_fd)
     try:
         try:
-            url = endpoint_url()
+            url, bind_host = endpoint()
         except (OSError, ValueError):
             return fail("invalid preview endpoint metadata")
-        try:
-            server = PreviewServer(ADDRESS, PreviewHandler)
-        except OSError as error:
-            if error.errno == errno.EADDRINUSE:
-                return fail("127.0.0.1:8765 is already in use")
-            return fail("cannot listen on 127.0.0.1:8765")
-        with server:
-            server.root_fd = root_fd
+        with ExitStack() as stack:
+            selector = stack.enter_context(selectors.DefaultSelector())
+            addresses = [ADDRESS]
+            if bind_host:
+                addresses.append((bind_host, ADDRESS[1]))
+            for address in addresses:
+                try:
+                    server = stack.enter_context(PreviewServer(address, PreviewHandler))
+                except OSError as error:
+                    listener = "%s:%d" % address
+                    if error.errno == errno.EADDRINUSE:
+                        return fail(listener + " is already in use")
+                    return fail("cannot listen on " + listener)
+                server.root_fd = root_fd
+                server.timeout = 0
+                selector.register(server, selectors.EVENT_READ)
             try:
                 print("Preview: " + url, flush=True)
-                server.serve_forever()
+                while True:
+                    for key, _ in selector.select():
+                        key.fileobj.handle_request()
             except KeyboardInterrupt:
                 pass
     finally:

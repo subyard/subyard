@@ -31,10 +31,6 @@
       "type": "string",
       "maxLength": 8192
     },
-    "codeSshHost": {
-      "type": "string",
-      "maxLength": 8192
-    },
     "devUser": {
       "type": "string",
       "maxLength": 8192

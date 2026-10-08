@@ -16,12 +16,11 @@
       "Demo"
     ],
     "vscode": {
-      "sshAlias": "yard.code",
+      "sshAlias": "yard",
       "devUser": "dev",
       "address": "127.0.0.1",
       "port": 2222,
       "folderPath": "/srv/workspaces/Demo/src",
-      "previewPort": 8765,
       "hostKey": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
       "hostKeyFingerprint": "SHA256:RXm/ruZ0eTzRXKwi1AQEDynB0VgHQ2ac9KPSFdf/YnA",
       "remoteAuthentication": "already-authorized-desktop-agent-key"

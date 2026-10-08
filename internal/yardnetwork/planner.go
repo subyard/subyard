@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/previewroute"
 	"github.com/Subyard/Subyard/internal/resource"
 )
 
@@ -201,7 +202,7 @@ func buildPlan(stored StoredPolicy, snapshot Snapshot, change Change) (Plan, err
 	return plan, nil
 }
 
-// Only selected, registry-validated contracts and matching owned Incus routes
+// Only core preview routes or selected, registry-validated contracts with owned Incus routes
 // may extend a yard's default-deny isolation ACL.
 func ownedPublicIngressRules(y ObservedYard, binding Binding) []Rule {
 	var rules []Rule
@@ -224,10 +225,17 @@ func ownedPublicIngressRules(y ObservedYard, binding Binding) []Rule {
 }
 
 func approvedPublicIngress(y ObservedYard, binding Binding) []ApprovedIngress {
-	if y.Name == "" || y.Name == "default" || !y.InstanceFound || y.InstanceInfo.Type != domain.YardVM {
+	if !y.InstanceFound || y.InstanceInfo.Type != domain.YardVM {
 		return nil
 	}
 	var approved []ApprovedIngress
+	if ownedPreviewIngress(y, binding) {
+		approved = append(approved, ApprovedIngress{Device: previewroute.DeviceName,
+			Listen: y.InstanceInfo.Devices[previewroute.DeviceName]["listen"], Protocol: "tcp", GuestPort: 8765})
+	}
+	if y.Name == "" || y.Name == "default" {
+		return approved
+	}
 	for _, contract := range y.IngressContracts {
 		device := y.InstanceInfo.LocalDevices[contract.Device]
 		listenProtocol, listenText, _ := strings.Cut(device["listen"], ":")
@@ -246,6 +254,15 @@ func approvedPublicIngress(y ObservedYard, binding Binding) []ApprovedIngress {
 	}
 	sort.Slice(approved, func(i, j int) bool { return approved[i].Device < approved[j].Device })
 	return approved
+}
+
+func ownedPreviewIngress(y ObservedYard, binding Binding) bool {
+	device := y.InstanceInfo.Devices[previewroute.DeviceName]
+	host, port, ready := previewroute.Owned(y.InstanceInfo.LocalConfig[previewroute.Key], device)
+	return y.InstanceFound && y.InstanceInfo.Type == domain.YardVM && ready &&
+		y.InstanceInfo.Devices["eth0"]["ipv4.address"] == binding.IPv4 &&
+		maps.Equal(device, y.InstanceInfo.LocalDevices[previewroute.DeviceName]) &&
+		maps.Equal(device, previewroute.Device(host, port, binding.IPv4))
 }
 
 func ownedPublicIngress(y ObservedYard, binding Binding, contract resource.ProxyContract, protocol string, guestPort int) bool {

@@ -689,7 +689,7 @@ func TestProjectCodeWritesRemoteWorkspaceAndOpensDescriptor(t *testing.T) {
 	runner := ProjectActionRunner{
 		Data: data, Instances: incus, VSCode: code,
 		WorkspaceDirectory: workspaceDirectory,
-		Yard:               domain.Context{AccessKind: domain.AccessLocal, IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev", DevUID: 1000, CodeSSHHost: "yard.code"},
+		Yard:               domain.Context{AccessKind: domain.AccessLocal, IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev", DevUID: 1000, SSHHost: "yard"},
 		Project:            record, Extensions: []string{"anthropic.claude-code"},
 		YardIdentity: "owner/default",
 	}
@@ -703,7 +703,7 @@ func TestProjectCodeWritesRemoteWorkspaceAndOpensDescriptor(t *testing.T) {
 		t.Fatalf("workspace descriptor was written inside the yard: %#v", data.requests)
 	}
 	workspacePath := filepath.Join(
-		workspaceDirectory, "eWFyZC5jb2Rl.demo-12345678", "Demo.code-workspace",
+		workspaceDirectory, "eWFyZA.demo-12345678", "Demo.code-workspace",
 	)
 	payload, readErr := os.ReadFile(workspacePath)
 	if readErr != nil {
@@ -718,10 +718,10 @@ func TestProjectCodeWritesRemoteWorkspaceAndOpensDescriptor(t *testing.T) {
 		} `json:"extensions"`
 	}
 	if err := json.Unmarshal(payload, &workspace); err != nil ||
-		workspace.RemoteAuthority != "ssh-remote+yard.code" ||
+		workspace.RemoteAuthority != "ssh-remote+yard" ||
 		len(workspace.Folders) != 1 ||
 		workspace.Folders[0]["name"] != "Demo" ||
-		workspace.Folders[0]["uri"] != "vscode-remote://ssh-remote+yard.code"+record.YardPath ||
+		workspace.Folders[0]["uri"] != "vscode-remote://ssh-remote+yard"+record.YardPath ||
 		workspace.Settings["window.title"] != "${rootNameShort} — Yard SSH: owner/default" ||
 		!slices.Equal(workspace.Extensions.Recommendations, []string{"anthropic.claude-code"}) {
 		t.Fatalf("invalid workspace: %#v err=%v", workspace, err)
@@ -781,7 +781,7 @@ func TestProjectCodeWorkspaceNamespaceSeparatesHostAndProjectIdentity(t *testing
 		record.YardPath = "/srv/workspaces/" + identity.projectID + "/src"
 		runner := ProjectActionRunner{
 			Data: &projectDataStub{}, VSCode: code, WorkspaceDirectory: workspaceDirectory,
-			Yard: domain.Context{AccessKind: domain.AccessRemote, CodeSSHHost: domain.CodeSSHHost(identity.host)}, Project: record,
+			Yard: domain.Context{AccessKind: domain.AccessRemote, SSHHost: identity.host}, Project: record,
 			YardIdentity: "owner/default",
 		}
 		if _, _, err := runner.Run(context.Background(), domain.AdapterRequest{
@@ -809,18 +809,18 @@ func TestProjectCodeRequiresCanonicalYardIdentity(t *testing.T) {
 	}
 }
 
-func TestProjectCodeRequiresDedicatedResolvedAlias(t *testing.T) {
-	for _, alias := range []string{"", "yard", "-invalid"} {
+func TestProjectCodeRequiresResolvedAlias(t *testing.T) {
+	for _, alias := range []string{"", "-invalid"} {
 		code := &vsCodeStub{}
 		runner := ProjectActionRunner{
 			Data: &projectDataStub{}, VSCode: code, WorkspaceDirectory: t.TempDir(),
-			Yard:    domain.Context{AccessKind: domain.AccessRemote, CodeSSHHost: alias},
+			Yard:    domain.Context{AccessKind: domain.AccessRemote, SSHHost: alias},
 			Project: cloneRecord(), YardIdentity: "owner/default",
 		}
 		_, _, err := runner.Run(context.Background(), domain.AdapterRequest{
 			Schema: 1, OperationID: "operation-code", Adapter: "project", Action: "code",
 		}, nil)
-		if err == nil || !strings.Contains(err.Error(), "dedicated VS Code SSH") || len(code.calls) != 0 {
+		if err == nil || !strings.Contains(err.Error(), "yard SSH access") || len(code.calls) != 0 {
 			t.Fatalf("code accepted alias %q: calls=%#v err=%v", alias, code.calls, err)
 		}
 	}
@@ -831,7 +831,7 @@ func TestProjectCodeManualFallbackUsesPositionalControllerDescriptor(t *testing.
 	workspaceDirectory := filepath.Join(t.TempDir(), "directory with spaces")
 	runner := ProjectActionRunner{
 		Data: &projectDataStub{}, WorkspaceDirectory: workspaceDirectory,
-		Yard: domain.Context{AccessKind: domain.AccessRemote, CodeSSHHost: "yard.code"}, Project: record,
+		Yard: domain.Context{AccessKind: domain.AccessRemote, SSHHost: "yard"}, Project: record,
 		YardIdentity: "owner/default",
 	}
 	_, message, err := runner.Run(context.Background(), domain.AdapterRequest{

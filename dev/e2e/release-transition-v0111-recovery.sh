@@ -490,7 +490,7 @@ assert_materialized_fixed_point() {
     printf '\n\n'
     cat <<'PREVIEW'
 <!-- subyard-preview -->
-For a static web preview, run `subyard-preview <relative-static-dir>` from the Git workspace and keep it running with your background/async process mechanism. Share the printed URL. An owner Tailscale URL requires device reachability and Tailnet policy access; a loopback URL requires an active preview-enabled `yard code` SSH session. The helper must stay running for either URL.
+For a static web preview, run `subyard-preview <relative-static-dir>` from the Git workspace and keep it running with your background/async process mechanism. Share the printed URL. Owner URLs require network reachability (and Tailnet policy access for Tailscale). A loopback URL is local to the yard; provide the operator-machine tunnel recipe from `subyard-preview --help` only when the operator requests it. The helper must stay running.
 <!-- /subyard-preview -->
 PREVIEW
   } | sha256sum | awk '{print $1}')"

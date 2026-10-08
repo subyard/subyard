@@ -90,7 +90,7 @@ func TestNetworkPolicyStageMapsDriftAndUsesResolvedYard(t *testing.T) {
 		Name: "demo", Project: "subyard-demo", Instance: "yard-demo", Network: "incusbr0",
 	}
 	policy := &networkPolicyFixture{checkErr: yardnetwork.ErrNotConverged}
-	runtime := Runtime{Yard: yard, NetworkPolicy: policy}
+	runtime := Runtime{Yard: yard, NetworkPolicy: policy, Incus: &testkit.Incus{}}
 
 	converged, err := runtime.CheckStage(context.Background(), ports.ReconcileStageNetworkPolicy)
 	if err != nil || converged {
@@ -633,9 +633,7 @@ func TestSSHProbeOwnsProxyAndClientConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(home, ".ssh", "subyard.config"), []byte(
-		"Host yard.code\n    LocalForward 127.0.0.1:8765 127.0.0.1:8765\n"+
-			"    ExitOnForwardFailure yes\n    ControlPath ~/.ssh/subyard-code-cm-%C\n    ControlPersist no\n"+
-			"Host yard yard.code\n    Port 2222\n    IdentityFile \""+identity+"\"\n"+
+		"Host yard\n    Port 2222\n    IdentityFile \""+identity+"\"\n"+
 			"    IdentitiesOnly yes\n    StrictHostKeyChecking yes\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -673,15 +671,17 @@ func TestSSHProbeOwnsProxyAndClientConfig(t *testing.T) {
 	}
 	assertStage(t, runtime, "ssh", true, "matching SSH state")
 	snippetPath := filepath.Join(home, ".ssh", "subyard.config")
-	previewSnippet, err := os.ReadFile(snippetPath)
+	ordinarySnippet, err := os.ReadFile(snippetPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	testkit.WriteFile(t, snippetPath, []byte(
-		"Host yard\n    Port 2222\n    IdentityFile \""+identity+"\"\n"+
-			"    IdentitiesOnly yes\n    StrictHostKeyChecking yes\n"), 0o600)
-	assertStage(t, runtime, "ssh", false, "legacy snippet needs dedicated preview access")
-	testkit.WriteFile(t, snippetPath, previewSnippet, 0o600)
+	legacySnippet := "Host yard.code\n    LocalForward 127.0.0.1:8765 127.0.0.1:8765\n" +
+		"    ExitOnForwardFailure yes\n    ControlPath ~/.ssh/subyard-code-cm-%C\n    ControlPersist no\n" +
+		strings.Replace(string(ordinarySnippet), "Host yard\n", "Host yard yard.code\n", 1)
+	testkit.WriteFile(t, snippetPath, []byte(legacySnippet), 0o600)
+	assertStage(t, runtime, "ssh", false, "legacy preview alias needs reconciliation")
+	testkit.WriteFile(t, snippetPath, ordinarySnippet, 0o600)
+	assertStage(t, runtime, "ssh", true, "ordinary alias converges after preview removal")
 	if err := os.Chmod(identity, 0o640); err != nil {
 		t.Fatal(err)
 	}
@@ -708,6 +708,7 @@ func TestSSHProbeOwnsProxyAndClientConfig(t *testing.T) {
 
 	runtime.Yard.YardKind = domain.YardVM
 	incus.Reconcile.Instance.LocalDevices["eth0"] = map[string]string{"ipv4.address": "10.0.0.2"}
+	incus.Reconcile.Instance.Devices = map[string]map[string]string{"eth0": incus.Reconcile.Instance.LocalDevices["eth0"]}
 	unitDir := filepath.Join(root, "systemd")
 	if err := os.Mkdir(unitDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -775,6 +776,7 @@ func TestSSHProbeOwnsProxyAndClientConfig(t *testing.T) {
 }
 
 func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
+	previewLoopbackFixture(t)
 	steps := func(stat, configHash string) []testkit.IncusExecStep {
 		return []testkit.IncusExecStep{
 			{}, {}, {}, {Result: ports.InstanceExecResult{Stdout: []byte("dev:x:1000:1000::/home/dev:/bin/bash\n")}},
@@ -871,7 +873,10 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	incus.Reconcile.Instance.Config["user.subyard.preview_sha256"] = previewHash
-	endpointHash := runtime.previewEndpointHash(context.Background())
+	endpointHash, err := runtime.previewEndpointHash(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
 	incus.Reconcile.Instance.Config[previewroute.EndpointKey] = endpointHash
 	assertStage(t, runtime, "provision", true, "matching stopped provision marker")
 	for _, marker := range []string{"", "pending", "stale"} {
@@ -1254,6 +1259,10 @@ func TestInstanceLimitsDetectDriftForContainersAndVMs(t *testing.T) {
 				Environment: []string{"PATH=" + bin, "LIMITS_CPU=2", "LIMITS_MEMORY=4GiB"},
 				Yard:        domain.Context{YardKind: kind, Paths: domain.RuntimePaths{DataHome: "/data"}},
 			}
+			if kind == domain.YardVM {
+				assertStageConverged(t, runtime, false, "VM needs an instance-owned IPv4 pin")
+				incus.Reconcile.Instance.Devices = map[string]map[string]string{"eth0": {"ipv4.address": "10.0.0.2"}}
+			}
 			assertStageConverged(t, runtime, true, "matching requested limits")
 			incus.Reconcile.Instance.LocalConfig["limits.cpu"] = "1"
 			assertStageConverged(t, runtime, false, "CPU limit drift")
@@ -1363,6 +1372,7 @@ printf '%s\n' "${INCUS_SERVICE_ENV:-}"
 			"path": "/var/lib/subyard/e2e-routes", "readonly": "true",
 		},
 	}
+	incus.Reconcile.Instance.Devices = map[string]map[string]string{"eth0": {"ipv4.address": "10.0.0.2"}}
 	assertStageConverged(t, runtime, true, "VM volume")
 	incus.Reconcile.Instance.LocalDevices["subyard-docker-apparmor"] = map[string]string{
 		"type": "disk", "source": "/dev/null",

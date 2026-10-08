@@ -466,4 +466,19 @@ func TestPreviewInstructionsComposeOnlySelectedEffectivePayloads(t *testing.T) {
 	if err != nil || bytes.Count(result, []byte(previewInstructions)) != 1 {
 		t.Fatalf("duplicate preview paragraph: %v", err)
 	}
+	legacy := "Before.\n<!-- subyard-preview -->\nLegacy preview instructions.\n<!-- /subyard-preview -->\nAfter.\n"
+	testkit.WriteFile(t, composed, []byte(legacy), 0o600)
+	result, err = (guestConfigFile{source: composed, previewInstructions: true}).readSource()
+	if err != nil || string(result) != "Before.\n"+previewInstructions+"After.\n" {
+		t.Fatalf("legacy preview block refresh lost host text: %q %v", result, err)
+	}
+	for _, malformed := range []string{
+		"<!-- subyard-preview -->\nunfinished",
+		legacy + legacy,
+	} {
+		testkit.WriteFile(t, composed, []byte(malformed), 0o600)
+		if _, err := (guestConfigFile{source: composed, previewInstructions: true}).readSource(); err == nil {
+			t.Fatal("ambiguous preview instruction block accepted")
+		}
+	}
 }

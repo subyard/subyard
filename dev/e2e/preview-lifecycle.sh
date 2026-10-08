@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Synthetic static projects and real initialized yards, only on allocated VMs.
-set -euo pipefail
+set -Eeuo pipefail
 umask 022
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 RUN_ID="${SUBYARD_E2E_RUN_ID:?run through preview-acceptance.sh}"
@@ -11,7 +11,9 @@ PHASE="${1:-}"
 REMOTE_ONLY="${SUBYARD_PREVIEW_REMOTE_ONLY:-0}"
 TAILNET="${SUBYARD_PREVIEW_TAILNET:-0}"
 CANONICAL="${SUBYARD_PREVIEW_CANONICAL:-0}"
+KIND="${SUBYARD_PREVIEW_KIND:-container}"
 TAILNET_ADDRESS=100.64.12.20
+case "$KIND" in container|vm) ;; *) printf 'preview-lifecycle: invalid yard kind\n' >&2; exit 2 ;; esac
 case "$REMOTE_ONLY" in 0|1) ;; *) printf 'preview-lifecycle: invalid fixture scope\n' >&2; exit 2 ;; esac
 case "$TAILNET" in 0|1) ;; *) printf 'preview-lifecycle: invalid Tailnet fixture scope\n' >&2; exit 2 ;; esac
 case "$CANONICAL" in 0|1) ;; *) printf 'preview-lifecycle: invalid canonical fixture scope\n' >&2; exit 2 ;; esac
@@ -20,11 +22,12 @@ STATE="/var/tmp/subyard-preview-$RUN_ID"
 MARKER="subyard-preview-acceptance-v1:$RUN_ID:$VM"
 NAME="pv-$RUN_ID"
 NORMAL_PID='' HELPER_PID='' BUSY_PID=''
+trap 'printf "preview-lifecycle: failed phase=%s line=%s exit=%s\n" "$PHASE" "$LINENO" "$?" >&2' ERR
 fail() {
   printf 'preview-lifecycle: %s\n' "$*" >&2
   # These fixture logs contain only synthetic project and SSH diagnostics.
   local log
-  for log in "$STATE/busy-code.log" "$STATE"/code-*.log "$STATE/helper.err"; do
+  for log in "$STATE/busy-code.log" "$STATE"/code-*.log "$STATE/normal-ssh.log" "$STATE/helper.err"; do
     [ ! -f "$log" ] || [ ! -s "$log" ] || {
       printf 'preview-lifecycle: %s\n' "${log##*/}" >&2
       tail -n 30 "$log" >&2
@@ -37,12 +40,31 @@ export SUBYARD_REPOSITORY_ROOT="$ROOT" SUBYARD_NO_AUDIT=1 SUBYARD_KEYS_SYSTEMD_S
 export STORAGE_PATH="$HOME/.cache/subyard-e2e-platform/incus/incus/storage"
 export PATH="$STATE/bin:$ROOT/bin:/usr/local/bin:/usr/bin:/bin"
 
+# shellcheck source=scripts/lib/host.sh
+. "$ROOT/scripts/lib/host.sh"
+
 incus() {
   if [ -S /var/lib/incus/unix.socket ] && [ ! -w /var/lib/incus/unix.socket ]; then
     sudo -n /usr/bin/incus "$@"
   else
     /usr/bin/incus "$@"
   fi
+}
+wait_vm_agent() {
+  if [ "$KIND" = vm ]; then
+    YARD_KIND=vm incus_wait_instance_agent "$1" "$2" \
+      || fail 'VM agent did not become ready for preview verification'
+  fi
+}
+print_fixture_logs() {
+  local _modified log
+  [ -f "$STATE/.marker" ] && [ "$(cat "$STATE/.marker")" = "$MARKER" ] || return 0
+  while IFS=$'\t' read -r _modified log; do
+    [ -n "$log" ] || continue
+    printf 'preview-lifecycle: %s\n' "${log##*/}" >&2
+    tail -n 30 "$log" >&2
+  done < <(find "$STATE" -maxdepth 1 -type f -name '*.log' -printf '%T@\t%p\n' \
+    | sort -nr | head -n 3 || true)
 }
 yard() {
   if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
@@ -84,6 +106,9 @@ cleanup_state() {
     install -m 0600 "$STATE/project-role-config.backup" "$SUBYARD_CONFIG_HOME/yards/$NAME/config.env" || failed=1
   fi
   stop_sessions
+  if [ -f "$STATE/isolation-enabled" ]; then
+    yard network isolation off --yes > "$STATE/isolation-cleanup.log" 2>&1 || failed=1
+  fi
   if [ -f "$STATE/sshd.pid" ]; then
     sudo -n python3 - "$STATE" <<'PY' || failed=1
 import os, pathlib, signal, sys
@@ -108,6 +133,9 @@ PY
     if [ "$name" = default ]; then instance=yard; project=subyard; else instance="yard-$name"; project="subyard-$name"; fi
     managed="$(incus config get "$instance" user.subyard.managed --project "$project" 2>/dev/null || true)"
     if [ -z "$managed" ] || [ "$managed" = true ]; then
+      if [ "$KIND" = vm ] && [ "$(incus list "$instance" --project "$project" -f csv -c s)" = RUNNING ]; then
+        YARD_KIND=vm incus_wait_instance_agent "$project" "$instance" || failed=1
+      fi
       yard -Y "$name" teardown --yes > "$STATE/cleanup-$name.log" 2>&1 || failed=1
     else
       failed=1
@@ -131,6 +159,9 @@ PY
       sudo -n ip address del "$address/32" dev "$(cat "$STATE/tailnet-interface")" 2>/dev/null || true
     done
   fi
+  if [ -f "$STATE/public-interface" ]; then
+    sudo -n ip address del 203.0.113.10/32 dev "$(cat "$STATE/public-interface")" 2>/dev/null || true
+  fi
   if [ -f "$STATE/tailnet-route" ]; then
     sudo -n ip route del "$TAILNET_ADDRESS/32" via "$(cat "$STATE/tailnet-route")" || failed=1
   fi
@@ -144,6 +175,10 @@ PY
 if [ "$PHASE" = owner-cleanup ]; then cleanup_state; exit; fi
 [ ! -e "$STATE" ] && [ ! -L "$STATE" ] || fail 'fixture state already exists'
 sudo -n true || fail 'disposable VM requires passwordless sudo'
+if [ "$KIND" = vm ] && ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
+  sudo -n apt-get update >/dev/null
+  sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y qemu-system-x86 >/dev/null
+fi
 [ -x "$ROOT/.build/yard" ] || make -C "$ROOT" build > /dev/null
 install -d -m 0700 "$STATE" "$STATE/bin" "$STATE/config/yards" "$STATE/data" "$HOME/.ssh"
 printf '%s\n' "$MARKER" > "$STATE/.marker"
@@ -154,12 +189,29 @@ else
 fi
 cleanup() {
   local rc=$?
-  trap - EXIT INT TERM
+  trap - EXIT INT TERM ERR
   set +e
-  cleanup_state || rc=3
+  [ "$rc" = 0 ] || print_fixture_logs
+  cleanup_state || {
+    printf 'preview-lifecycle: cleanup failed after original exit %s\n' "$rc" >&2
+    print_fixture_logs
+    rc=3
+  }
   exit "$rc"
 }
 trap cleanup EXIT INT TERM
+
+if [ "$KIND" = vm ]; then
+  # The bounded readiness helper executes Incus under timeout, outside shell functions.
+  cat > "$STATE/bin/incus" <<'INCUS'
+#!/usr/bin/env bash
+if [ -S /var/lib/incus/unix.socket ] && [ ! -w /var/lib/incus/unix.socket ]; then
+  exec sudo -n /usr/bin/incus "$@"
+fi
+exec /usr/bin/incus "$@"
+INCUS
+  chmod 0700 "$STATE/bin/incus"
+fi
 
 setup_yard() {
   local name="$1" port preview_port config instance project platform marker temporary
@@ -171,6 +223,9 @@ setup_yard() {
   cat > "$config" <<EOF
 # $MARKER
 SSH_PORT=$port
+YARD_KIND=$KIND
+LIMITS_MEMORY=1GiB
+LIMITS_CPU=2
 WEB_PREVIEW_HOST_PORT=$preview_port
 HOST_BASE=$STATE/host-$name
 RESTRICTED_DISK_PATHS=$STATE/host-$name
@@ -181,6 +236,12 @@ HOST_CLAUDE_MD=
 HOST_CODEX_AGENTS_MD=
 HOST_OPENCODE_AGENTS_MD=
 EOF
+  if [ "$KIND" = vm ]; then
+    # Match the existing VM fixture: avoid hot-adding Incus 6.0 virtiofs mounts.
+    printf 'HOST_MOUNTS=\nHOST_LINKS=\n' >> "$config"
+    # Exercise ordinary local pinning and the profile pin needed by isolation.
+    [ "$name" = default ] || printf 'VM_PIN_IPV4=1\n' >> "$config"
+  fi
   chmod 0600 "$config"
   platform="$HOME/.cache/subyard-e2e-platform"
   marker="$platform/.subyard-e2e-platform-marker"
@@ -206,7 +267,13 @@ EOF
     test "$(stat -c %u:%a /usr/local/bin/subyard-preview)" = 0:755
     test "$(stat -c %u:%g:%a /etc/subyard/preview.json)" = 0:0:644
   ' || fail 'provisioned helper ownership or mode is wrong'
+  # Upgrade an old managed snippet that still contains the retired editor route.
+  local alias snippet
+  if [ "$name" = default ]; then alias=yard; snippet="$HOME/.ssh/subyard.config"; else alias="yard-$name"; snippet="$HOME/.ssh/subyard-$name.config"; fi
+  printf '\nHost %s.code\n    LocalForward 127.0.0.1:8765 127.0.0.1:8765\n    ExitOnForwardFailure yes\n' "$alias" >> "$snippet"
   yard -Y "$name" init --yes > "$STATE/reinit-$name.log" 2>&1 || fail 'repeat init failed'
+  wait_vm_agent "$project" "$instance"
+  ! grep -Fqx "Host $alias.code" "$snippet" || fail 'repeat init retained the retired code alias'
 }
 
 if [ "$PHASE" = owner-setup ]; then
@@ -215,28 +282,109 @@ if [ "$PHASE" = owner-setup ]; then
     [ ! -e /usr/local/bin/tailscale ] && [ ! -L /usr/local/bin/tailscale ] || fail 'synthetic tailscale path already exists'
   fi
   setup_yard "$NAME"
+  instance="yard-$NAME" project="subyard-$NAME"
+  preview_port="$(sed -n 's/^WEB_PREVIEW_HOST_PORT=//p' "$SUBYARD_CONFIG_HOME/yards/$NAME/config.env")"
+  owner_address="$(ip -j -4 route get 1.1.1.1 | jq -er '.[0].prefsrc')"
+  python3 - "$owner_address" <<'PYPRIVATE' || fail 'disposable owner requires a private default-route source'
+import ipaddress, sys
+address = ipaddress.IPv4Address(sys.argv[1])
+assert any(address in ipaddress.IPv4Network(network) for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+PYPRIVATE
+  assert_route() {
+    local host="$1" port="$2" guest_address='' device receipt
+    # Isolation and reconciliation can restart the VM before its guest agent is ready.
+    wait_vm_agent "$project" "$instance"
+    incus exec "$instance" --project "$project" -- cat /etc/subyard/preview.json > "$STATE/route.json"
+    if [ "$host" = 127.0.0.1 ]; then
+      jq -e '. == {version:1,host:"127.0.0.1",port:8765}' "$STATE/route.json" >/dev/null \
+        || fail 'loopback metadata is incorrect'
+      incus query "/1.0/instances/$instance?project=$project" \
+        | jq -e '.devices["subyard-preview"] == null and .config["user.subyard.preview_proxy"] == null' >/dev/null \
+        || fail 'loopback fallback retained an owner proxy'
+      return
+    fi
+    if [ "$KIND" = vm ]; then
+      guest_address="$(jq -er .bindHost "$STATE/route.json")"
+      receipt="v2:$host:$port:$guest_address"
+      device="$(jq -cn --arg listen "tcp:$host:$port" --arg connect "tcp:$guest_address:8765" '{type:"proxy",bind:"host",listen:$listen,connect:$connect,nat:"true"}')"
+    else
+      receipt="v1:$host:$port"
+      device="$(jq -cn --arg listen "tcp:$host:$port" '{type:"proxy",bind:"host",listen:$listen,connect:"tcp:127.0.0.1:8765"}')"
+      [ "$(sudo -n ss -Hltn "sport = :$port" | awk '{print $4}')" = "$host:$port" ] \
+        || fail 'owner preview listener is not bound to the exact selected address'
+    fi
+    jq -e --arg host "$host" --argjson port "$port" --arg guest "$guest_address" '
+      . == ({version:1,host:$host,port:$port} + if $guest == "" then {} else {bindHost:$guest} end)
+    ' "$STATE/route.json" >/dev/null || fail 'installed preview endpoint is incorrect'
+    incus query "/1.0/instances/$instance?project=$project" \
+      | jq -e --argjson device "$device" --arg receipt "$receipt" --arg guest "$guest_address" '
+        .devices["subyard-preview"] == $device
+        and .config["user.subyard.preview_proxy"] == $receipt
+        and ($guest == "" or .expanded_devices.eth0["ipv4.address"] == $guest)
+      ' >/dev/null || fail 'owner proxy, ownership receipt or static VM address is incorrect'
+  }
+  assert_route "$owner_address" "$preview_port"
+  # Missing owned devices are recoverable; unreceipted and divergent devices are not.
+  incus config device remove "$instance" subyard-preview --project "$project" >/dev/null
+  yard -Y "$NAME" init --yes > "$STATE/route-recovery.log" 2>&1 || fail 'missing preview device recovery failed'
+  assert_route "$owner_address" "$preview_port"
+  receipt="$(incus config get "$instance" user.subyard.preview_proxy --project "$project")"
+  incus config unset "$instance" user.subyard.preview_proxy --project "$project"
+  before="$(incus query "/1.0/instances/$instance?project=$project" | jq -c '.devices["subyard-preview"]')"
+  if yard -Y "$NAME" security --require-live > "$STATE/foreign-security.log" 2>&1; then fail 'live security audit accepted a foreign preview device'; fi
+  if yard -Y "$NAME" init --yes > "$STATE/foreign-init.log" 2>&1; then fail 'init adopted a foreign preview device'; fi
+  [ "$(incus query "/1.0/instances/$instance?project=$project" | jq -c '.devices["subyard-preview"]')" = "$before" ] \
+    && [ -z "$(incus config get "$instance" user.subyard.preview_proxy --project "$project")" ] \
+    || fail 'init changed a foreign preview device'
+  incus config set "$instance" user.subyard.preview_proxy "$receipt" --project "$project"
+  listen="$(incus config device get "$instance" subyard-preview listen --project "$project")"
+  drift_port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
+  incus config device set "$instance" subyard-preview "listen=tcp:$owner_address:$drift_port" --project "$project"
+  if yard -Y "$NAME" init --yes > "$STATE/divergent-init.log" 2>&1; then fail 'init replaced a divergent preview device'; fi
+  [ "$(incus config device get "$instance" subyard-preview listen --project "$project")" = "tcp:$owner_address:$drift_port" ] \
+    && [ "$(incus config get "$instance" user.subyard.preview_proxy --project "$project")" = "$receipt" ] \
+    || fail 'init changed a divergent preview device'
+  incus config device set "$instance" subyard-preview "listen=$listen" --project "$project"
+  assert_route "$owner_address" "$preview_port"
+  if [ "$KIND" = vm ]; then
+    # Keep generic isolation active through endpoint drift and the later peer HTTP checks.
+    touch "$STATE/isolation-enabled"
+    yard network isolation on --yes > "$STATE/isolation-enable.log" 2>&1 || fail 'VM owner network isolation failed'
+    yard network status --json | jq -e '.isolation == true and .appliedIsolation == true and .converged == true' >/dev/null \
+      || fail 'VM owner network isolation did not converge'
+    assert_route "$owner_address" "$preview_port"
+    incus config device remove "$instance" subyard-preview --project "$project" >/dev/null
+    yard -Y "$NAME" init --yes > "$STATE/isolated-recovery.log" 2>&1 || fail 'isolated VM preview recovery failed'
+    assert_route "$owner_address" "$preview_port"
+  fi
+  yard -Y "$NAME" security --require-live > "$STATE/private-security.log" 2>&1 \
+    || fail 'owned private preview failed the live security audit'
+  # A documentation-range source models a public owner without changing its route.
+  interface="$(ip -j -4 route get 1.1.1.1 | jq -er '.[0].dev')"
+  [ "$(ip -j -4 address show | jq -r '[.[].addr_info[] | select(.local == "203.0.113.10")] | length')" = 0 ] \
+    || fail 'synthetic public owner address already exists'
+  printf '%s\n' "$interface" > "$STATE/public-interface"
+  sudo -n ip address add 203.0.113.10/32 dev "$interface"
+  cat > "$STATE/bin/ip" <<'PYIP'
+#!/usr/bin/env python3
+import json, subprocess, sys
+arguments = sys.argv[1:]
+if arguments == ["-j", "-4", "route", "get", "1.1.1.1"]:
+    routes = json.loads(subprocess.check_output(["/usr/sbin/ip", *arguments]))
+    routes[0]["prefsrc"] = "203.0.113.10"
+    print(json.dumps(routes))
+else:
+    sys.exit(subprocess.call(["/usr/sbin/ip", *arguments]))
+PYIP
+  chmod 0755 "$STATE/bin/ip"
+  yard -Y "$NAME" init --yes > "$STATE/public-fallback.log" 2>&1 || fail 'public owner fallback init failed'
+  assert_route 127.0.0.1 8765
+  rm "$STATE/bin/ip"
+  sudo -n ip address del 203.0.113.10/32 dev "$interface"
+  rm "$STATE/public-interface"
+  yard -Y "$NAME" init --yes > "$STATE/private-restore.log" 2>&1 || fail 'private owner route restore failed'
+  assert_route "$owner_address" "$preview_port"
   if [ "$TAILNET" = 1 ]; then
-    instance="yard-$NAME" project="subyard-$NAME"
-    preview_port="$(sed -n 's/^WEB_PREVIEW_HOST_PORT=//p' "$SUBYARD_CONFIG_HOME/yards/$NAME/config.env")"
-    assert_route() {
-      local host="$1" port="$2"
-      incus exec "$instance" --project "$project" -- cat /etc/subyard/preview.json \
-        | jq -e --arg host "$host" --argjson port "$port" '. == {version:1,host:$host,port:$port}' >/dev/null \
-        || fail 'installed preview endpoint is incorrect'
-      if [ "$host" = 127.0.0.1 ]; then
-        incus query "/1.0/instances/$instance?project=$project" \
-          | jq -e '.devices["subyard-preview"] == null and .config["user.subyard.preview_proxy"] == null' >/dev/null \
-          || fail 'fallback retained an owner proxy'
-      else
-        incus query "/1.0/instances/$instance?project=$project" \
-          | jq -e --arg listen "tcp:$host:$port" --arg receipt "v1:$host:$port" '
-            .devices["subyard-preview"] == {type:"proxy",bind:"host",listen:$listen,connect:"tcp:127.0.0.1:8765"}
-            and .config["user.subyard.preview_proxy"] == $receipt' >/dev/null || fail 'owner proxy is incorrect'
-        [ "$(sudo -n ss -Hltn "sport = :$port" | awk '{print $4}')" = "$host:$port" ] \
-          || fail 'owner preview listener is not bound to the exact Tailnet address'
-      fi
-    }
-    assert_route 127.0.0.1 8765
     interface="$(ip -j route get "${SUBYARD_PREVIEW_PEER_IP:?}" | jq -er '.[0].dev')"
     [ "$(ip -j -4 address show | jq -r '[.[].addr_info[] | select(.local == "100.64.12.20" or .local == "100.64.12.21")] | length')" = 0 ] \
       || fail 'synthetic Tailnet addresses already exist'
@@ -256,31 +404,23 @@ EOF
     assert_route "$TAILNET_ADDRESS" "$preview_port"
     yard -Y "$NAME" init --yes > "$STATE/tailnet-repeat.log" 2>&1 || fail 'Tailnet repeat init failed'
     assert_route "$TAILNET_ADDRESS" "$preview_port"
-    yard -Y "$NAME" security --require-live > "$STATE/tailnet-security.log" 2>&1 || fail 'owned Tailnet preview failed the live security audit'
-    incus config device remove "$instance" subyard-preview --project "$project" >/dev/null
-    yard -Y "$NAME" init --yes > "$STATE/tailnet-recovery.log" 2>&1 || fail 'missing preview device recovery failed'
-    assert_route "$TAILNET_ADDRESS" "$preview_port"
-    # An unreceipted device must survive the refused reconciliation unchanged.
-    incus config unset "$instance" user.subyard.preview_proxy --project "$project"
-    if yard -Y "$NAME" security --require-live > "$STATE/tailnet-foreign-security.log" 2>&1; then fail 'live security audit accepted a foreign preview device'; fi
-    if yard -Y "$NAME" init --yes > "$STATE/tailnet-foreign.log" 2>&1; then fail 'init adopted a foreign preview device'; fi
-    incus query "/1.0/instances/$instance?project=$project" \
-      | jq -e --arg listen "tcp:$TAILNET_ADDRESS:$preview_port" '
-        .devices["subyard-preview"] == {type:"proxy",bind:"host",listen:$listen,connect:"tcp:127.0.0.1:8765"}
-        and .config["user.subyard.preview_proxy"] == null' >/dev/null || fail 'init changed a foreign preview device'
-    incus config set "$instance" user.subyard.preview_proxy "v1:$TAILNET_ADDRESS:$preview_port" --project "$project"
+    yard -Y "$NAME" security --require-live > "$STATE/tailnet-security.log" 2>&1 || fail 'owned preview failed the live security audit'
     printf '%s\n' 100.64.12.21 > "$STATE/tailscale-address"
     sudo -n ip address add 100.64.12.21/32 dev "$interface"
     yard -Y "$NAME" init --yes > "$STATE/tailnet-drift.log" 2>&1 || fail 'address drift init failed'
     assert_route 100.64.12.21 "$preview_port"
     : > "$STATE/tailscale-address"
-    yard -Y "$NAME" init --yes > "$STATE/tailnet-fallback.log" 2>&1 || fail 'no-Tailnet fallback init failed'
-    assert_route 127.0.0.1 8765
+    yard -Y "$NAME" init --yes > "$STATE/tailnet-fallback.log" 2>&1 || fail 'no-Tailnet private fallback init failed'
+    assert_route "$owner_address" "$preview_port"
     printf '%s\n' "$TAILNET_ADDRESS" > "$STATE/tailscale-address"
     yard -Y "$NAME" init --yes > "$STATE/tailnet-restore.log" 2>&1 || fail 'Tailnet restore init failed'
     assert_route "$TAILNET_ADDRESS" "$preview_port"
-    printf 'ok: exact owner Tailnet proxy, repeat init, address drift, fallback and foreign-device protection\n'
   fi
+  if [ "$KIND" = vm ]; then
+    yard network status --json | jq -e '.isolation == true and .appliedIsolation == true and .converged == true' >/dev/null \
+      || fail 'VM preview drift left network isolation unconverged'
+  fi
+  printf 'ok: %s owner route, repeat init, owned recovery and foreign-device protection\n' "$KIND"
   printf '%s\n' "$ROOT" > "$STATE/source-root"
   trap - EXIT INT TERM
   printf 'ok: remote owner yard initialized with installed preview helper\n'
@@ -326,7 +466,9 @@ folder = urlsplit(workspace["folders"][0]["uri"])
 assert folder.scheme == "vscode-remote" and folder.netloc == authority, "incorrect folder authority"
 (state / "project.path").write_text(unquote(folder.path))
 with (state / "code-ssh.log").open("wb") as output:
-    process = subprocess.Popen(["ssh", "-N", "-T", alias], stdout=output, stderr=output, start_new_session=True)
+    # A real command keeps the multiplexed editor session active; -N can exit
+    # successfully when the ordinary alias already has a persistent master.
+    process = subprocess.Popen(["ssh", "-T", alias, "--", "sleep", "120"], stdout=output, stderr=output, start_new_session=True)
 (state / "code.pid").write_text(str(process.pid))
 PY
 chmod 0755 "$STATE/bin/code"
@@ -336,74 +478,60 @@ assert_no_listener() {
   ! ss -Hltn 'sport = :8765' | grep -q . || fail 'unexpected preview listener remains'
 }
 check_preview() {
-  local name="$1" alias="$2" selector="${3:-$1}" command path preview_url=http://127.0.0.1:8765/ preview_port code_pid snippet
-  if [ "$TAILNET" = 1 ] && [ "$name" = preview-remote ]; then
-    preview_port="$(peer sed -n 's/^WEB_PREVIEW_HOST_PORT=//p' "$STATE/config/yards/$NAME/config.env")"
-    preview_url="http://$TAILNET_ADDRESS:$preview_port/"
-  fi
-  export PREVIEW_EXPECTED_ALIAS="$alias.code"
+  local name="$1" alias="$2" selector="${3:-$1}" command path preview_url code_pid bind_host
+  export PREVIEW_EXPECTED_ALIAS="$alias"
   yard -Y "$selector" sync "$STATE/PreviewFixture" --yes > "$STATE/sync-$name.log" 2>&1 || {
     tail -n 80 "$STATE/sync-$name.log" >&2
     fail 'fixture sync failed'
   }
-  ssh -G "$alias" > "$STATE/normal.options" 2>/dev/null
-  ssh -G "$alias.code" > "$STATE/code.options" 2>/dev/null
-  ! grep -q '^localforward ' "$STATE/normal.options" || fail 'normal alias has a preview forward'
-  sed 's/\[127\.0\.0\.1\]/127.0.0.1/g' "$STATE/code.options" \
-    | grep -Fqx 'localforward 127.0.0.1:8765 127.0.0.1:8765' || fail 'code alias has wrong forwarding'
-  grep -Fqx 'exitonforwardfailure yes' "$STATE/code.options" || fail 'code alias permits silent forwarding failure'
-  grep -q 'subyard-code-cm-' "$STATE/code.options" || fail 'code alias lacks isolated multiplexing'
-  ! cmp -s <(grep '^controlpath ' "$STATE/normal.options") <(grep '^controlpath ' "$STATE/code.options") \
-    || fail 'normal and code aliases share a control socket'
+  ssh -G "$alias" > "$STATE/code.options" 2>/dev/null
+  ! grep -q '^localforward ' "$STATE/code.options" || fail 'ordinary alias has a preview forward'
+  ssh -G "$alias.code" 2>/dev/null | grep -Fqx "hostname $alias.code" \
+    || fail 'retired code alias still resolves to the yard'
   ssh -T "$alias" -- sleep 120 > "$STATE/normal-ssh.log" 2>&1 & NORMAL_PID=$!
   sleep 0.2
   kill -0 "$NORMAL_PID" || { cat "$STATE/normal-ssh.log" >&2; fail 'ordinary SSH session failed'; }
   assert_no_listener
-  python3 - "$STATE/busy.ready" <<'PY' > "$STATE/busy.log" 2>&1 &
+  python3 - "$STATE/busy.ready" <<'PYBUSY' > "$STATE/busy.log" 2>&1 &
 import pathlib, socket, sys, time
 listener = socket.socket()
 listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 listener.bind(("127.0.0.1", 8765)); listener.listen()
 pathlib.Path(sys.argv[1]).touch()
 time.sleep(120)
-PY
+PYBUSY
   BUSY_PID=$!
   for _ in {1..50}; do [ ! -f "$STATE/busy.ready" ] || break; sleep 0.1; done
   [ -f "$STATE/busy.ready" ] || fail 'collision listener failed'
   rm -f "$STATE/code.called"
-  if yard -Y "$selector" code PreviewFixture > "$STATE/busy-code.log" 2>&1; then fail 'yard code accepted an occupied preview port'; fi
-  [ ! -f "$STATE/code.called" ] || fail 'VS Code was invoked before the collision check'
-  grep -Fq 'preview port 127.0.0.1:8765 is unavailable' "$STATE/busy-code.log" || fail 'collision diagnostic is unclear'
+  yard -Y "$selector" code PreviewFixture > "$STATE/busy-code.log" 2>&1 \
+    || fail 'yard code failed with occupied controller preview port'
+  [ -f "$STATE/code.called" ] && [ -s "$STATE/project.path" ] || fail 'VS Code did not receive the workspace'
+  kill -0 "$BUSY_PID" || fail 'yard code disturbed the occupied controller port'
+  code_pid="$(cat "$STATE/code.pid")"
+  [[ "$code_pid" =~ ^[0-9]+$ ]] || fail 'invalid code session PID'
+  kill "$code_pid"
+  rm -f "$STATE/code.pid"
   kill "$BUSY_PID"; wait "$BUSY_PID" 2>/dev/null || true; BUSY_PID=''
   rm -f "$STATE/busy.ready"
-  # Reproduce a controller registered before the dedicated code alias existed.
-  snippet="$HOME/.ssh/subyard-$name.config"
-  [ "$name" != default ] || snippet="$HOME/.ssh/subyard.config"
-  python3 - "$snippet" "$alias" <<'PY'
-import pathlib, sys
-path, alias = pathlib.Path(sys.argv[1]), sys.argv[2]
-output, skip, removed = [], False, False
-for line in path.read_text().splitlines(keepends=True):
-    if line.startswith("Host "):
-        skip = line.strip() == "Host " + alias + ".code"
-        removed |= skip
-        if line.strip() == "Host " + alias + " " + alias + ".code":
-            line = "Host " + alias + "\n"
-    if not skip:
-        output.append(line)
-assert removed, "dedicated alias fixture is missing"
-path.write_text("".join(output))
-PY
-  ssh -G "$alias.code" 2>/dev/null | grep -Fqx "hostname $alias.code" \
-    || fail 'legacy fixture still resolves the dedicated code alias'
+  assert_no_listener
   yard -Y "$selector" code PreviewFixture > "$STATE/code-$name.log" 2>&1 || fail 'yard code failed'
-  ssh -G "$alias.code" > "$STATE/code.options.after" 2>/dev/null
-  cmp -s "$STATE/code.options" "$STATE/code.options.after" || fail 'code launch did not restore the dedicated SSH route'
+  code_pid="$(cat "$STATE/code.pid")"
+  for _ in {1..50}; do
+    [ -z "$(ss -Hltn 'sport = :8765')" ] || fail 'yard code created a controller preview listener'
+    kill -0 "$code_pid" || fail 'code SSH session failed'
+    sleep 0.1
+  done
   ssh -G "$alias" > "$STATE/normal.options.after" 2>/dev/null
-  cmp -s "$STATE/normal.options" "$STATE/normal.options.after" || fail 'code launch changed the ordinary SSH route'
-  [ "$(stat -c %a "$snippet")" = 600 ] || fail 'upgraded SSH snippet is not private'
-  [ -f "$STATE/code.called" ] && [ -s "$STATE/project.path" ] || fail 'VS Code did not receive the workspace'
+  cmp -s "$STATE/code.options" "$STATE/normal.options.after" || fail 'code launch changed the ordinary SSH route'
+  # Preview starts in a normal terminal with every editor session already closed.
+  kill "$code_pid"
+  rm -f "$STATE/code.pid"
   path="$(cat "$STATE/project.path")"
+  ssh -T "$alias" -- cat /etc/subyard/preview.json > "$STATE/preview.json"
+  preview_url="$(jq -er '"http://" + .host + ":" + (.port|tostring) + "/"' "$STATE/preview.json")"
+  [ "$(jq -r .host "$STATE/preview.json")" != 127.0.0.1 ] || fail 'private owner did not publish an external preview route'
+  bind_host="$(jq -r '.bindHost // ""' "$STATE/preview.json")"
   printf -v command 'cd %q; printf "%%s\\n" "$$" > .preview-test.pid; exec subyard-preview site' "$path"
   ssh -T "$alias" -- "$command" > "$STATE/helper.log" 2> "$STATE/helper.err" & HELPER_PID=$!
   for _ in {1..100}; do
@@ -413,58 +541,36 @@ PY
   done
   [ "$(cat "$STATE/helper.log")" = "Preview: $preview_url" ] || fail 'helper readiness URL is incorrect'
   preview_url="$(sed -n 's/^Preview: //p' "$STATE/helper.log")"
+  # VM NAT is exercised from the other machine, as an ordinary browser would be.
+  fetch_preview() {
+    if [ "$KIND" = vm ] && [ "$name" != preview-remote ]; then
+      peer curl --noproxy '*' -fsS --max-time 3 -D - "$preview_url"
+    else
+      curl --noproxy '*' -fsS --max-time 3 -D - "$preview_url"
+    fi
+  }
   for _ in {1..50}; do
-    curl -fsS --max-time 3 -D "$STATE/headers" http://127.0.0.1:8765/ > "$STATE/page" 2>/dev/null && break
+    fetch_preview > "$STATE/response" 2>/dev/null && break
     sleep 0.1
   done
-  [ "$(cat "$STATE/page")" = 'initial preview' ] || fail 'forwarded initial page is incorrect'
-  grep -Fqi 'Cache-Control: no-store' "$STATE/headers" || fail 'forwarded response lacks no-store'
-  if [ "$TAILNET" = 1 ] && [ "$name" = preview-remote ]; then
-    curl --noproxy '*' -fsS --max-time 3 "$preview_url" > "$STATE/page" \
-      || fail 'peer cannot fetch the printed owner Tailnet URL'
-    [ "$(cat "$STATE/page")" = 'initial preview' ] || fail 'initial owner Tailnet page is incorrect'
-  fi
-  [ "$(ss -Hltn 'sport = :8765' | awk '{print $4}')" = 127.0.0.1:8765 ] || fail 'controller preview listener is not loopback-only'
-  printf -v command 'cd %q; python3 -c %q' "$path" 'import pathlib; rows=pathlib.Path("/proc/net/tcp").read_text().splitlines()[1:]; listeners=[r.split()[1] for r in rows if r.split()[3]=="0A" and r.split()[1].endswith(":223D")]; assert listeners==["0100007F:223D"]'
-  ssh -T "$alias" -- "$command" || fail 'yard preview listener is not loopback-only'
-  if [ "$name" = preview-remote ]; then
-    peer python3 -c 'import pathlib; rows=pathlib.Path("/proc/net/tcp").read_text().splitlines()[1:]; assert not any(r.split()[3]=="0A" and r.split()[1].endswith(":223D") for r in rows)' \
-      || fail 'remote owner host has a preview listener'
-  fi
+  grep -Fqx 'initial preview' "$STATE/response" || fail 'printed owner URL returned an incorrect initial page'
+  grep -Fqi 'Cache-Control: no-store' "$STATE/response" || fail 'direct response lacks no-store'
+  assert_no_listener
+  printf -v command 'python3 -c %q %q' 'import pathlib, socket, struct, sys; expected={"127.0.0.1"}; expected.update([sys.argv[1]] if sys.argv[1] else []); rows=pathlib.Path("/proc/net/tcp").read_text().splitlines()[1:]; listeners={socket.inet_ntoa(struct.pack("<I", int(r.split()[1].split(":")[0],16))) for r in rows if r.split()[3]=="0A" and r.split()[1].endswith(":223D")}; assert listeners==expected, (listeners,expected)' "$bind_host"
+  ssh -T "$alias" -- "$command" || fail 'yard preview is not bound to its exact allowed addresses'
   printf -v command 'cd %q; printf "edited preview\\n" > site/index.html' "$path"
   ssh -T "$alias" -- "$command"
-  curl -fsS --max-time 3 http://127.0.0.1:8765/ > "$STATE/page" 2>/dev/null
-  [ "$(cat "$STATE/page")" = 'edited preview' ] || fail 'live edit did not reach the controller'
-  if [ "$TAILNET" = 1 ] && [ "$name" = preview-remote ]; then
-    curl --noproxy '*' -fsS --max-time 3 -D "$STATE/tailnet-headers" "$preview_url" > "$STATE/page" \
-      || fail 'peer cannot fetch the printed owner Tailnet URL'
-    [ "$(cat "$STATE/page")" = 'edited preview' ] || fail 'live edit did not reach the peer Tailnet URL'
-    grep -Fqi 'Cache-Control: no-store' "$STATE/tailnet-headers" || fail 'direct Tailnet response lacks no-store'
-    code_pid="$(cat "$STATE/code.pid")"
-    [[ "$code_pid" =~ ^[0-9]+$ ]] || fail 'invalid code session PID'
-    kill "$code_pid"
-    rm -f "$STATE/code.pid"
-    for _ in {1..50}; do ss -Hltn 'sport = :8765' | grep -q . || break; sleep 0.1; done
-    assert_no_listener
-    curl --noproxy '*' -fsS --max-time 3 "$preview_url" > "$STATE/page" \
-      || fail 'direct Tailnet preview required the code SSH session'
-    [ "$(cat "$STATE/page")" = 'edited preview' ] || fail 'direct preview changed after code SSH shutdown'
-  fi
-  printf -v command 'cd %q; kill "$(cat .preview-test.pid)"; rm -f .preview-test.pid' "$path"
+  fetch_preview > "$STATE/response" || fail 'live edit URL fetch failed'
+  grep -Fqx 'edited preview' "$STATE/response" || fail 'live edit did not reach the printed owner URL'
+  assert_no_listener
+  printf -v command 'cd %q; kill "$(cat .preview-test.pid)"; rm -f .preview-test.pid; printf "initial preview\\n" > site/index.html' "$path"
   ssh -T "$alias" -- "$command"
   wait "$HELPER_PID" 2>/dev/null || true; HELPER_PID=''
-  if curl -fsS --max-time 3 http://127.0.0.1:8765/ >/dev/null 2>&1; then fail 'preview survived helper termination'; fi
-  if [ "$TAILNET" = 1 ] && [ "$name" = preview-remote ]; then
-    if curl --noproxy '*' -fsS --max-time 3 "$preview_url" >/dev/null 2>&1; then fail 'owner Tailnet preview survived helper termination'; fi
-  fi
+  if fetch_preview >/dev/null 2>&1; then fail 'owner preview survived helper termination'; fi
   [ ! -s "$STATE/helper.err" ] || fail 'helper emitted unexpected diagnostics'
   stop_sessions
-  for _ in {1..50}; do
-    ss -Hltn 'sport = :8765' | grep -q . || break
-    sleep 0.1
-  done
   assert_no_listener
-  printf 'ok: %s legacy code alias repair, preview, live edits, collision gate and foreground shutdown\n' "$name"
+  printf 'ok: %s ordinary code alias, occupied port independence, terminal preview, live edits and foreground shutdown\n' "$name"
 }
 if [ "$REMOTE_ONLY" = 0 ]; then
   check_preview default yard
@@ -561,10 +667,27 @@ yard remote add preview-remote "$OWNER_ALIAS" --yard "$NAME" --yes \
     tail -n 80 "$STATE/remote-add.log" >&2
     fail 'production remote registration failed'
   }
+printf '\nHost yard-preview-remote.code\n    LocalForward 127.0.0.1:8765 127.0.0.1:8765\n' >> "$HOME/.ssh/subyard-preview-remote.config"
+yard remote add preview-remote "$OWNER_ALIAS" --yard "$NAME" --yes \
+  > "$STATE/remote-repeat.log" 2>&1 || fail 'remote registration did not converge its old SSH snippet'
+check_remote_preview() {
+  local selector="$1"
+  check_preview preview-remote yard-preview-remote "$selector"
+  if [ "$TAILNET" = 1 ]; then
+    # Reconcile the owner from an ordinary terminal, then fetch its printed fallback URL.
+    ssh -T "$OWNER_ALIAS" -- "truncate -s 0 '$STATE/tailscale-address'; yard -Y '$NAME' init --yes" \
+      > "$STATE/remote-fallback.log" 2>&1 || fail 'remote private fallback init failed'
+    check_preview preview-remote yard-preview-remote "$selector"
+    ssh -T "$OWNER_ALIAS" -- "yard -Y '$NAME' security --require-live" \
+      > "$STATE/remote-fallback-security.log" 2>&1 || fail 'remote private fallback failed the live security audit'
+    ssh -T "$OWNER_ALIAS" -- "printf '%s\\n' '$TAILNET_ADDRESS' > '$STATE/tailscale-address'; yard -Y '$NAME' init --yes" \
+      > "$STATE/remote-restore.log" 2>&1 || fail 'remote Tailnet restore init failed'
+  fi
+}
 if [ "$CANONICAL" = 1 ]; then
   owner_id="$(peer cat "$STATE/config/host-id")"
   [[ "$owner_id" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]] || fail 'invalid canonical owner identity'
-  check_preview preview-remote yard-preview-remote "$owner_id/$NAME"
+  check_remote_preview "$owner_id/$NAME"
   # The controller's default role permits projects; only the owner can deny this yard.
   peer bash -s -- "$STATE" "$RUN_ID" "$NAME" <<'EOS'
 set -euo pipefail
@@ -582,21 +705,20 @@ chmod 0600 "$state/project-role-config.backup"
 chown dev:dev "$state/project-role-config.backup"
 printf 'YARD_TEMPLATE=canonical-no-projects\n' >> "$state/config/yards/$name/config.env"
 EOS
-  # Keep the inventory fresh before snapshotting so refusals cannot refresh the cache.
+  # Probe current inventory without writing the cache before testing role refusal.
   yard list --live > "$STATE/role-inventory.log" 2>&1 || fail 'role fixture inventory refresh failed'
   cat > "$STATE/state-fingerprint.py" <<'PY'
-import hashlib, os, pathlib, stat, sys
-digest = hashlib.sha256()
-for directory in sys.argv[1:]:
+import hashlib, json, os, pathlib, stat, sys
+for index, directory in enumerate(sys.argv[1:]):
     root = pathlib.Path(directory)
     for path in sorted([root, *root.rglob("*")]):
         info = path.lstat()
-        digest.update(repr((str(path.relative_to(root)), info.st_mode, info.st_uid, info.st_gid)).encode())
+        value = None
         if stat.S_ISREG(info.st_mode):
-            digest.update(path.read_bytes())
+            value = hashlib.sha256(path.read_bytes()).hexdigest()
         elif stat.S_ISLNK(info.st_mode):
-            digest.update(os.readlink(path).encode())
-print(digest.hexdigest())
+            value = os.readlink(path)
+        print(json.dumps((index, str(path.relative_to(root)), info.st_mode, info.st_uid, info.st_gid, value)))
 PY
   controller_before="$(python3 "$STATE/state-fingerprint.py" "$STATE/config" "$STATE/data")"
   owner_before="$(peer python3 - "$STATE/config" "$STATE/data" < "$STATE/state-fingerprint.py")"
@@ -610,14 +732,20 @@ PY
     grep -Fq 'selected yard role does not accept work projects' "$STATE/denied-$command.log" \
       || fail "canonical $command did not report the owner role denial"
     [ ! -f "$STATE/code.called" ] || fail 'role denial reached VS Code'
-    [ "$(python3 "$STATE/state-fingerprint.py" "$STATE/config" "$STATE/data")" = "$controller_before" ] \
-      || fail 'denied assessment changed controller state'
-    [ "$(peer python3 - "$STATE/config" "$STATE/data" < "$STATE/state-fingerprint.py")" = "$owner_before" ] \
-      || fail 'denied assessment changed owner state'
+    controller_after="$(python3 "$STATE/state-fingerprint.py" "$STATE/config" "$STATE/data")"
+    if [ "$controller_after" != "$controller_before" ]; then
+      diff -u <(printf '%s\n' "$controller_before") <(printf '%s\n' "$controller_after") | tail -n 40 >&2 || true
+      fail 'denied assessment changed controller state'
+    fi
+    owner_after="$(peer python3 - "$STATE/config" "$STATE/data" < "$STATE/state-fingerprint.py")"
+    if [ "$owner_after" != "$owner_before" ]; then
+      diff -u <(printf '%s\n' "$owner_before") <(printf '%s\n' "$owner_after") | tail -n 40 >&2 || true
+      fail 'denied assessment changed owner state'
+    fi
   done
   printf 'ok: canonical remote sync/code and owner role denial without state writes\n'
 else
-  check_preview preview-remote yard-preview-remote
+  check_remote_preview preview-remote
 fi
-grep -Fqx "proxyjump $OWNER_ALIAS" "$STATE/code.options" || fail 'remote code alias lost ProxyJump'
+grep -Fqx "proxyjump $OWNER_ALIAS" "$STATE/code.options" || fail 'remote ordinary alias lost ProxyJump'
 printf 'ok: remote owner stays free of controller-port preview listeners\n'

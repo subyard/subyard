@@ -573,7 +573,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		if baseErr != nil {
 			err = baseErr
 		} else {
-			readOnlyRoute := readOnlyInvocation || registrationRepair || (core && (definition.Name == "remove" || definition.Handler == "@integration"))
+			readOnlyRoute := readOnlyInvocation || registrationRepair || (core && (definition.Handler == "@project" || definition.Handler == "@integration"))
 			var results []ownerInventoryResult
 			if readOnlyRoute {
 				results = cli.allOwnerInventoriesReadOnly(ctx, base, false)
@@ -583,6 +583,8 @@ func (cli *CLI) Run(ctx context.Context) int {
 			selected, _, selectErr := selectOwnerYards(results, canonical)
 			if selectErr != nil {
 				err = selectErr
+			} else if core && definition.Handler == "@project" && errors.Is(selected[0].err, ownerinventory.ErrIntegrity) {
+				err = fmt.Errorf("resolve canonical project owner: %w", selected[0].err)
 			} else {
 				hostID := selected[0].inventory.HostID
 				yardName := selected[0].inventory.Yards[0].Name
@@ -991,10 +993,7 @@ func (cli *CLI) projectVSCode(loaded config.Loaded) ports.VSCode {
 	if err != nil {
 		return nil
 	}
-	return projectruntime.VSCode{
-		Process: transport.Process{Program: program, Env: environmentList(cli.env, nil), MaxBytes: 4 << 20},
-		Home:    loaded.Context.Paths.OperatorHome, SSHHost: loaded.Context.SSHHost, CodeSSHHost: loaded.Context.CodeSSHHost,
-	}
+	return transport.Process{Program: program, Env: environmentList(cli.env, nil), MaxBytes: 4 << 20}
 }
 
 func (cli *CLI) projectDeviceManager() ports.InstanceDeviceManager {

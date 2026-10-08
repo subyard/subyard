@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/previewroute"
 	"github.com/Subyard/Subyard/internal/resource"
 )
 
@@ -113,5 +114,85 @@ func TestBootUsesOnlyAppliedSelectedIngressApproval(t *testing.T) {
 	}
 	if len(plan.Policy.Bindings[0].ApprovedIngress) != 0 || !plan.Changed {
 		t.Fatalf("deselection retained boot ingress approval: %+v", plan.Policy.Bindings[0].ApprovedIngress)
+	}
+}
+
+func TestBootPreservesOnlyAppliedOwnedPreviewIngress(t *testing.T) {
+	ctx := context.Background()
+	host := newMemoryHost()
+	normal := memoryService(host)
+	target := &host.snapshot.Yards[0]
+	target.InstanceInfo.Type = domain.YardVM
+	device := previewroute.Device("192.168.1.20", "32222", "10.80.0.10")
+	marker := "v2:192.168.1.20:32222:10.80.0.10"
+	target.InstanceInfo.LocalDevices = map[string]map[string]string{previewroute.DeviceName: maps.Clone(device)}
+	target.InstanceInfo.Devices = map[string]map[string]string{previewroute.DeviceName: maps.Clone(device), "eth0": {"type": "nic", "ipv4.address": "10.80.0.10"}}
+	target.InstanceInfo.LocalConfig = map[string]string{previewroute.Key: marker}
+	on := true
+	initial, err := normal.Prepare(ctx, fixtureYards(host), Change{Isolation: &on})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := normal.Apply(ctx, initial); err != nil {
+		t.Fatal(err)
+	}
+	approved := host.stored.Policy.Bindings[0].ApprovedIngress
+	if len(approved) != 1 || approved[0].Device != previewroute.DeviceName || approved[0].GuestPort != 8765 || approved[0].Transport() != "tcp" {
+		t.Fatalf("preview approval missing: %+v", approved)
+	}
+	found := false
+	for _, rule := range target.ACL.Ingress {
+		if rule.Protocol == "tcp" && rule.DestinationPort == "8765" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("preview ingress is blocked")
+	}
+	boot := memoryService(host)
+	boot.UseApprovedIngress = true
+	called := false
+	start := func() error { called = true; return nil }
+	if err := boot.WithStart(ctx, target.Yard, start); err != nil || !called {
+		t.Fatalf("approved preview could not boot: %v", err)
+	}
+	saved := cloneValue(host.stored)
+	host.stored.Policy.Bindings[0].ApprovedIngress = nil
+	called = false
+	if err := boot.WithStart(ctx, target.Yard, start); !errors.Is(err, ErrNotConverged) || called {
+		t.Fatalf("unapproved preview booted: %v", err)
+	}
+	host.stored = saved
+	for _, fault := range []string{"receipt", "target", "pending", "NIC pin"} {
+		t.Run(fault, func(t *testing.T) {
+			target.InstanceInfo.LocalConfig[previewroute.Key] = marker
+			target.InstanceInfo.Devices[previewroute.DeviceName] = maps.Clone(device)
+			target.InstanceInfo.Devices["eth0"]["ipv4.address"] = "10.80.0.10"
+			switch fault {
+			case "receipt":
+				delete(target.InstanceInfo.LocalConfig, previewroute.Key)
+			case "target":
+				target.InstanceInfo.Devices[previewroute.DeviceName]["connect"] = "tcp:10.80.0.11:8765"
+			case "pending":
+				target.InstanceInfo.LocalConfig[previewroute.Key] = "v2:pending:192.168.1.20:32222:10.80.0.10"
+			case "NIC pin":
+				target.InstanceInfo.Devices["eth0"]["ipv4.address"] = "10.80.0.11"
+			}
+			called = false
+			if err := boot.WithStart(ctx, target.Yard, start); !errors.Is(err, ErrNotConverged) || called {
+				t.Fatalf("divergent preview booted: %v", err)
+			}
+		})
+	}
+	delete(target.InstanceInfo.Devices, previewroute.DeviceName)
+	delete(target.InstanceInfo.LocalDevices, previewroute.DeviceName)
+	delete(target.InstanceInfo.LocalConfig, previewroute.Key)
+	target.InstanceInfo.Devices["eth0"]["ipv4.address"] = "10.80.0.10"
+	plan, err := normal.Prepare(ctx, fixtureYards(host), Change{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Policy.Bindings[0].ApprovedIngress) != 0 || !plan.Changed {
+		t.Fatal("removed preview retained its ACL approval")
 	}
 }

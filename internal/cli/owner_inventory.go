@@ -570,6 +570,23 @@ func mergeLegacyRoutes(
 	return changed, nil
 }
 
+// Compatibility registrations supply effective routes without changing the
+// persisted connection used to guard project mutations.
+func (cli *CLI) effectiveOwnerConnection(
+	ctx context.Context, loaded config.Loaded, connection ownerinventory.Connection,
+) (ownerinventory.Connection, error) {
+	connection.Yards = maps.Clone(connection.Yards)
+	connection.LegacyNames = slices.Clone(connection.LegacyNames)
+	legacy, err := cli.remoteControl(loaded, 0).List(ctx)
+	if err != nil {
+		return ownerinventory.Connection{}, err
+	}
+	if _, err := mergeLegacyRoutes(&connection, legacy); err != nil {
+		return ownerinventory.Connection{}, fmt.Errorf("%w: %v", domain.ErrPlanStale, err)
+	}
+	return connection, nil
+}
+
 func selectOwnerYards(
 	results []ownerInventoryResult, selector string,
 ) ([]ownerInventoryResult, string, error) {
@@ -739,6 +756,7 @@ func (cli *CLI) resolveOwnerProjectFromInventories(
 		hostID  string
 		yard    domain.OwnerYard
 		project domain.OwnerProject
+		err     error
 	}
 	var exact, named []match
 	for _, result := range results {
@@ -747,7 +765,7 @@ func (cli *CLI) resolveOwnerProjectFromInventories(
 				continue
 			}
 			for _, project := range yard.Projects {
-				candidate := match{hostID: result.inventory.HostID, yard: yard, project: project}
+				candidate := match{hostID: result.inventory.HostID, yard: yard, project: project, err: result.err}
 				if projectSelectorMatches(
 					selector, project.ProjectID, yard.Name, result.inventory.HostID, false,
 				) {
@@ -780,6 +798,10 @@ func (cli *CLI) resolveOwnerProjectFromInventories(
 			state.ErrAmbiguous, strings.Join(candidates, ", "))
 	}
 	selected := matches[0]
+	if errors.Is(selected.err, ownerinventory.ErrIntegrity) && strings.HasPrefix(filepath.Clean(loaded.Context.Paths.StateDir),
+		filepath.Join(loaded.Context.Paths.DataHome, "owner-inventory", "routing")+string(filepath.Separator)) {
+		return state.Match{}, fmt.Errorf("refresh canonical project owner: %w", selected.err)
+	}
 	var contextName string
 	var contextValue domain.Context
 	var err error
@@ -867,16 +889,15 @@ func (cli *CLI) ownerYardRouteWithMode(
 		connections = append(connections, discovered)
 	}
 	destination := ""
-	for _, connection := range connections {
-		if connection.HostID == hostID {
-			destination = connection.Destination
-			break
-		}
-	}
 	var route ownerinventory.YardRoute
 	for _, connection := range connections {
 		if connection.HostID == hostID {
-			route = connection.Yards[yardName]
+			effective, err := cli.effectiveOwnerConnection(ctx, loaded, connection)
+			if err != nil {
+				return "", domain.Context{}, err
+			}
+			destination = connection.Destination
+			route = effective.Yards[yardName]
 			break
 		}
 	}
@@ -907,7 +928,6 @@ func (cli *CLI) ownerYardRouteWithMode(
 		contextValue.OwnerEndpoint = destination
 		contextValue.OwnerYardName = yardName
 		contextValue.SSHHost = route.SSHHost
-		contextValue.CodeSSHHost = domain.CodeSSHHost(route.SSHHost)
 		contextValue.Paths.StateDir = filepath.Join(contextValue.Paths.DataHome,
 			"owner-inventory", "routing", hostID, yardName, "projects")
 		if legacyDiscovery && len(discovered.LegacyNames) == 1 {
@@ -924,7 +944,6 @@ func (cli *CLI) ownerYardRouteWithMode(
 		environment["OWNER_ENDPOINT"] = destination
 		environment["OWNER_YARD_NAME"] = yardName
 		environment["SSH_HOST"] = route.SSHHost
-		environment["SSH_CODE_HOST"] = contextValue.CodeSSHHost
 		environment["SUBYARD_STATE_DIR"] = contextValue.Paths.StateDir
 		routeKey := hostID + "/" + yardName
 		cli.inventoryRoutes[routeKey] = config.Loaded{

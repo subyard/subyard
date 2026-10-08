@@ -5,11 +5,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 # shellcheck source=dev/agent-e2e.sh
 . "$ROOT/dev/agent-e2e.sh"
 
-usage() { printf 'Usage: dev/e2e/preview-acceptance.sh --slot N [--remote-only] [--tailnet] [--canonical]\n'; }
+usage() { printf 'Usage: dev/e2e/preview-acceptance.sh --slot N [--remote-only] [--tailnet] [--canonical] [--kind container|vm]\n'; }
 slot_seen=0
 remote_only=0
 tailnet=0
 canonical=0
+kind=container
+kind_seen=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --slot)
@@ -17,6 +19,12 @@ while [ "$#" -gt 0 ]; do
       [ "$slot_seen" = 0 ] || die '--slot may be specified only once'
       set_requested_slot "$2" --slot
       slot_seen=1
+      shift 2 ;;
+    --kind)
+      [ "$#" -ge 2 ] || die '--kind needs container or vm'
+      [ "$kind_seen" = 0 ] || die '--kind may be specified only once'
+      case "$2" in container|vm) kind="$2" ;; *) die '--kind needs container or vm' ;; esac
+      kind_seen=1
       shift 2 ;;
     --remote-only) remote_only=1; shift ;;
     --tailnet) tailnet=1; shift ;;
@@ -38,6 +46,7 @@ payload() {
     SUBYARD_E2E_RUN_ID="$LEASE_RUN" SUBYARD_E2E_VM="$vm" \
     SUBYARD_E2E_TYPE=subyard-pair "$@" \
     SUBYARD_PREVIEW_TAILNET="$tailnet" \
+    SUBYARD_PREVIEW_KIND="$kind" \
     SUBYARD_PREVIEW_CANONICAL="$canonical" \
     bash -c 'cd "$1"; shift; exec bash "$@"' subyard \
     "${GUEST_DIRS[$vm]}/src" "${GUEST_DIRS[$vm]}/src/dev/e2e/preview-lifecycle.sh" "$phase"

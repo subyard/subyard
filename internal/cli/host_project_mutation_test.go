@@ -75,7 +75,7 @@ func TestPreparedProjectRejectsRemovedOwnerBeforeRefreshOrPhysicalWork(t *testin
 	yard.Paths.StateDir = filepath.Join(routing, "default", "projects")
 	project := &projectExecution{Loaded: config.Loaded{Context: yard}}
 	cli := &CLI{}
-	if err := cli.captureProjectOwner(project); err != nil {
+	if err := cli.captureProjectOwner(ctx, project); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := openProjectPreparationStore(ctx, yard); err != nil {
@@ -114,7 +114,7 @@ func TestPreparedProjectRejectsRemovedOwnerBeforeRefreshOrPhysicalWork(t *testin
 	if _, err := os.Stat(routing); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("stale command recreated routing state: %v", err)
 	}
-	if err := cli.captureProjectOwner(&projectExecution{Loaded: config.Loaded{Context: yard}}); !errors.Is(err, domain.ErrPlanStale) {
+	if err := cli.captureProjectOwner(ctx, &projectExecution{Loaded: config.Loaded{Context: yard}}); !errors.Is(err, domain.ErrPlanStale) {
 		t.Fatalf("removed canonical route still prepares: %v", err)
 	}
 }
@@ -139,7 +139,7 @@ func TestPreparedProjectRejectsChangedOwnerBeforeRoleCheckOrPhysicalWork(t *test
 			yard.Paths.StateDir = filepath.Join(routing, "build", "projects")
 			project := &projectExecution{Loaded: config.Loaded{Context: yard}, RequiresProjects: true}
 			cli := &CLI{options: Options{WorkingDir: data, Stderr: io.Discard}}
-			if err := cli.captureProjectOwner(project); err != nil {
+			if err := cli.captureProjectOwner(ctx, project); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := openProjectPreparationStore(ctx, yard); err != nil {

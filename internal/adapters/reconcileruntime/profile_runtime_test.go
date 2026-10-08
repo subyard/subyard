@@ -218,12 +218,14 @@ func TestApplyProfileRuntimeRejectsObservationChangesAfterAssessment(t *testing.
 }
 
 func TestProvisionRefreshesProfileRuntimesAfterBaseBeforeIntegrationHooks(t *testing.T) {
-	for _, failure := range []string{"", "base", "runtime"} {
+	previewLoopbackFixture(t)
+	for _, failure := range []string{"", "route", "network", "base", "runtime"} {
 		t.Run("failure="+failure, func(t *testing.T) {
 			root := testkit.TempDir(t)
 			handler := `#!/bin/sh
 set -eu
 [ -e "$BASE_READY" ]
+[ -e "$AGENT_READY" ]
 case "$1" in
   observe)
     if [ -e "$RUNTIME_READY" ]; then
@@ -240,8 +242,29 @@ case "$1" in
 esac
 `
 			runtime := profileRuntimeFixtureAt(t, root, handler)
+			runtime.Yard.YardKind = domain.YardVM
+			policy := &networkPolicyFixture{}
+			if failure == "network" {
+				policy.ensureErr = errors.New("fixture preview ingress error")
+			}
+			runtime.NetworkPolicy = policy
 			for path, content := range map[string]string{
-				"scripts/04-provision-subyard.sh":   "#!/bin/sh\nset -eu\n[ \"$FAIL_STAGE\" != base ]\n: > \"$BASE_READY\"\n",
+				"scripts/prepare-preview-route.sh": `#!/bin/sh
+set -eu
+[ "$1" = 127.0.0.1 ]
+[ "$FAIL_STAGE" != route ]
+: > "$ROUTE_READY"
+`,
+				"scripts/04-provision-subyard.sh": `#!/bin/sh
+set -eu
+[ "$1" = --yes ]
+[ -n "$SUBYARD_PREVIEW_ENDPOINT" ]
+[ -e "$ROUTE_READY" ]
+[ ! -e "$BASE_READY" ]
+[ "$FAIL_STAGE" != base ]
+: > "$AGENT_READY"
+: > "$BASE_READY"
+`,
 				"config/projects-changed.sh":        "#!/bin/sh\nexit 0\n",
 				"scripts/reconcile-integrations.sh": "#!/bin/sh\nexit 0\n",
 			} {
@@ -254,13 +277,30 @@ esac
 			executor := &retryableIntegrationExecutor{pending: true, hookReady: ready}
 			runtime.Executor = executor
 			incus := runtime.Incus.(*testkit.Incus)
+			instance := incus.Instances["subyard/yard"]
+			instance.LocalConfig = map[string]string{"user.subyard.preview_proxy": "v1:pending:100.101.102.103:32222"}
+			incus.Instances["subyard/yard"] = instance
 			incus.Reconcile = ports.ReconcileState{InstanceFound: true, Instance: incus.Instances["subyard/yard"]}
 			runtime.Environment = []string{
 				"BASE_READY=" + filepath.Join(root, "base-ready"), "RUNTIME_READY=" + ready,
+				"AGENT_READY=" + filepath.Join(root, "agent-ready"),
+				"ROUTE_READY=" + filepath.Join(root, "route-ready"),
 				"FAIL_STAGE=" + failure, "OLD=" + testRuntimeOldDigest, "NEW=" + testRuntimeNewDigest,
 				"SUBYARD_OPERATION_ID=op-12345678",
 			}
 			err := runtime.ApplyStage(context.Background(), ports.ReconcileStageProvision)
+			wantEnsure := 1
+			if failure == "route" {
+				wantEnsure = 0
+			}
+			if len(policy.ensured) != wantEnsure {
+				t.Fatalf("network reconciliation calls=%d want=%d", len(policy.ensured), wantEnsure)
+			}
+			if failure == "route" || failure == "network" {
+				if _, err := os.Stat(filepath.Join(root, "base-ready")); !os.IsNotExist(err) {
+					t.Fatal("guest provisioning ran before preview route/network readiness")
+				}
+			}
 			if failure != "" {
 				if err == nil || executor.hookAttempts != 0 || executor.commits != 0 {
 					t.Fatalf("failed %s reached hooks/commit: err=%v hooks=%d commits=%d", failure, err, executor.hookAttempts, executor.commits)

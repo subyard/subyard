@@ -460,9 +460,24 @@ power_start_guarded "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" "$BRIDGE" || die "$PO
 if [ "${SRV_VOLUME_TYPE:-filesystem}" = block ]; then
   vm_storage_mount
 fi
-if vm_page_reporting_required; then
+if [ "$YARD_KIND" = vm ]; then
   incus_wait_instance_agent "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" \
-    || die 'VM agent did not become ready for Free Page Reporting verification'
+    || die 'VM agent did not become ready for boot verification'
+fi
+if [ "$YARD_KIND" = vm ] && [ "${VM_PIN_IPV4:-0}" != 1 ]; then
+  vm_ipv4="$(incus_instance_primary_ipv4 "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")"
+  [ -n "$vm_ipv4" ] || die 'VM has no primary IPv4 address'
+  pinned_ipv4="$(incus query "/1.0/instances/$YARD_INSTANCE_NAME?project=$INCUS_PROJECT" |
+    jq -r '(.expanded_devices // .devices).eth0["ipv4.address"] // ""')"
+  if [ -n "$pinned_ipv4" ]; then
+    [ "$pinned_ipv4" = "$vm_ipv4" ] || die 'VM primary IPv4 pin is divergent'
+  elif device_exists eth0; then
+    incus config device set "$YARD_INSTANCE_NAME" eth0 "ipv4.address=$vm_ipv4" "${PROJ[@]}"
+  else
+    incus config device override "$YARD_INSTANCE_NAME" eth0 "ipv4.address=$vm_ipv4" "${PROJ[@]}"
+  fi
+fi
+if vm_page_reporting_required; then
   vm_page_reporting_prepare_guest "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" \
     || die 'VM Free Page Reporting guest configuration failed'
 fi

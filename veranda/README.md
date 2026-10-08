@@ -141,8 +141,8 @@ working directory and window cleanup, with a 300-second GUI segment bound after 
 tool preparation. Only the synthetic
 agent's public key is added to the disposable guest; existing authorized keys are preserved.
 Code data, extensions and settings remain isolated, workspace trust stays enabled, and the
-owned owner listener allows local forwarding only to the selected guest port and preview
-port 8765. This check does not establish other editor versions or desktop platforms.
+owned owner listener allows local forwarding only to the selected guest SSH port.
+This check does not establish other editor versions or desktop platforms.
 
 The [Debian package harness](../dev/e2e/veranda-package.sh) runs only on allocated VM1
 with Veranda initially absent. Supply two explicitly staged `.deb` paths: baseline 0.1.0

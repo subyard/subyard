@@ -3,12 +3,15 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/command"
@@ -16,7 +19,261 @@ import (
 	"github.com/Subyard/Subyard/internal/ownerinventory"
 	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/state"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
+
+func TestCanonicalProjectRoleDenialPreservesStaleControllerState(t *testing.T) {
+	for _, name := range []string{"sync", "code"} {
+		for _, test := range []struct {
+			name          string
+			expired       bool
+			fresh         bool
+			compatibility bool
+			renamed       bool
+			unreachable   bool
+		}{
+			{name: "invalidated/native"},
+			{name: "expired/native", expired: true},
+			{name: "invalidated/compatibility", compatibility: true},
+			{name: "expired/compatibility", expired: true, compatibility: true},
+			{name: "renamed/native", renamed: true},
+			{name: "renamed/compatibility", renamed: true, compatibility: true},
+			{name: "renamed-fresh/native", renamed: true, fresh: true},
+			{name: "renamed-fresh/compatibility", renamed: true, fresh: true, compatibility: true},
+			{name: "unreachable/native", unreachable: true},
+			{name: "unreachable/compatibility", unreachable: true, compatibility: true},
+		} {
+			if test.fresh && name != "code" {
+				continue
+			}
+			t.Run(name+"/"+test.name, func(t *testing.T) {
+				root, environment, stateDirectory := nativeFixture(t)
+				manifest := filepath.Join(root, "config", "commands.registry")
+				current, err := os.ReadFile(manifest)
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeCLIFile(t, manifest, string(current)+"sync||@project||local|mutate|dynamic|public|projects|project-target|sync [path]|sync|--name --target --yes --help|\n", 0o600)
+				writeDisabledProjectRole(t, root)
+				if err := os.Mkdir(stateDirectory, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				writeCLIFile(t, filepath.Join(stateDirectory, "sentinel"), "existing project state\n", 0o600)
+				source := filepath.Join(root, "source")
+				if err := os.Mkdir(source, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				now := time.Unix(1_000, 0).UTC()
+				fetchedAt := time.Unix(1, 0).UTC()
+				if test.expired {
+					fetchedAt = now.Add(-ownerinventory.Freshness - time.Second)
+				}
+				if test.fresh {
+					fetchedAt = now
+				}
+				ownerRoot := filepath.Join(environmentValue(environment, "SUBYARD_HOME"), "owner-inventory")
+				trust, err := ownerinventory.NewSSHHostTrust("remote.example ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+				if err != nil {
+					t.Fatal(err)
+				}
+				connection := ownerinventory.Connection{
+					HostID: "remote-owner", Destination: "dev@remote.example", Trust: &trust,
+					Yards: map[string]ownerinventory.YardRoute{"build": {SSHHost: "yard-remote"}},
+				}
+				if test.compatibility {
+					connection.Yards = nil
+					writeProjectCompatibilityRoute(t, root, "")
+				}
+				if err := (ownerinventory.Connections{Root: ownerRoot}).Write(connection); err != nil {
+					t.Fatal(err)
+				}
+				inventory := inventoryResult("remote-owner", "build", "Demo").inventory
+				if err := (ownerinventory.Cache{Root: ownerRoot}).Write(ownerinventory.Snapshot{
+					FetchedAt: fetchedAt, Inventory: inventory,
+				}); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(filepath.Join(ownerRoot, "tmp"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				bin := t.TempDir()
+				responsePath := filepath.Join(bin, "response")
+				if test.renamed {
+					inventory.HostID = "renamed-owner"
+				}
+				writeHostRPCFixture(t, responsePath, inventory)
+				physicalCall := filepath.Join(bin, "physical-call")
+				inventoryReply := "cat " + shellquote.Word(responsePath)
+				if test.unreachable {
+					inventoryReply = "exit 255"
+				}
+				roleReply := "printf 'selected yard role does not accept work projects\\n' >&2; exit 1"
+				if test.renamed {
+					roleReply = "printf x > " + shellquote.Word(physicalCall) + "; printf 'unexpected owner query after identity mismatch\\n' >&2; exit 1"
+				}
+				writeCLIFile(t, filepath.Join(bin, "ssh"), "#!/bin/sh\n"+trustedSSHMock(t)+
+					"case \"$*\" in\n"+
+					"  *rpc*--stdio*) "+inventoryReply+" ;;\n"+
+					"  *_project-state*preview*|*_project-state*check-role*) "+roleReply+" ;;\n"+
+					"  *) printf x > "+shellquote.Word(physicalCall)+"; exit 1 ;;\nesac\n", 0o700)
+				writeCLIFile(t, filepath.Join(bin, "code"), "#!/bin/sh\nprintf x > "+shellquote.Word(physicalCall)+"\n", 0o700)
+				t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+				argument := "Demo"
+				if name == "sync" {
+					argument = source
+				}
+				var stdout, stderr bytes.Buffer
+				incus := lifecycleIncus()
+				program, err := New(Options{
+					RepositoryRoot: root, Program: "yard", Arguments: []string{"-Y", "remote-owner/build", name, argument, "--yes"},
+					Environment: append(environment, "SUBYARD_HOST_ID=controller"), WorkingDir: root,
+					Stdout: &stdout, Stderr: &stderr, Clock: testkit.NewManualClock(now), Incus: incus, Executor: incus,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				stateRoots := []string{filepath.Join(root, "config"), filepath.Join(root, "state"), filepath.Join(root, "data")}
+				before := make([][]string, len(stateRoots))
+				for index, path := range stateRoots {
+					before[index] = nativeTreeSnapshot(t, path)
+				}
+				wantCode, wantError := 1, "does not accept work projects"
+				if test.renamed {
+					wantCode, wantError = 2, "owner HostID mismatch"
+					if test.fresh {
+						wantCode = 1
+					}
+				}
+				if code := program.Run(context.Background()); code != wantCode || !strings.Contains(stderr.String(), wantError) {
+					t.Errorf("canonical %s refusal: code=%d stderr=%q; want code=%d error=%q", name, code, stderr.String(), wantCode, wantError)
+				}
+				if _, err := os.Lstat(physicalCall); !os.IsNotExist(err) || len(incus.ExecCalls) != 0 || len(incus.PowerUpdates) != 0 || len(incus.ConfigUpdates) != 0 {
+					t.Fatalf("role refusal reached an editor or physical action: marker=%v exec=%d power=%d config=%d", err, len(incus.ExecCalls), len(incus.PowerUpdates), len(incus.ConfigUpdates))
+				}
+				for index, path := range stateRoots {
+					if !slices.Equal(before[index], nativeTreeSnapshot(t, path)) {
+						t.Errorf("role refusal changed controller %s files", filepath.Base(path))
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestCanonicalCompatibilityProjectRouteRevalidatedBeforeWork(t *testing.T) {
+	for _, change := range []string{"unchanged", "changed", "removed"} {
+		t.Run(change, func(t *testing.T) {
+			ctx := context.Background()
+			root, environment, _ := nativeFixture(t)
+			registration := writeProjectCompatibilityRoute(t, root, "")
+			ownerRoot := filepath.Join(environmentValue(environment, "SUBYARD_HOME"), "owner-inventory")
+			connection := ownerinventory.Connection{HostID: "remote-owner", Destination: "dev@remote.example"}
+			connections := ownerinventory.Connections{Root: ownerRoot}
+			if err := connections.Write(connection); err != nil {
+				t.Fatal(err)
+			}
+			now := time.Unix(1_000, 0).UTC()
+			inventory := inventoryResult(connection.HostID, "build", "Demo").inventory
+			if err := (ownerinventory.Cache{Root: ownerRoot}).Write(ownerinventory.Snapshot{FetchedAt: now, Inventory: inventory}); err != nil {
+				t.Fatal(err)
+			}
+			bin := t.TempDir()
+			responsePath := filepath.Join(bin, "response")
+			writeHostRPCFixture(t, responsePath, inventory)
+			physicalCall := filepath.Join(bin, "physical-call")
+			writeCLIFile(t, filepath.Join(bin, "ssh"), "#!/bin/sh\n"+trustedSSHMock(t)+
+				"case \"$*\" in\n"+
+				"  *rpc*--stdio*) cat "+shellquote.Word(responsePath)+" ;;\n"+
+				"  *_project-state*check-role*) exit 0 ;;\n"+
+				"  *) printf x > "+shellquote.Word(physicalCall)+"; exit 1 ;;\nesac\n", 0o700)
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: append(environment, "SUBYARD_HOST_ID=controller"),
+				WorkingDir: root, Clock: testkit.NewManualClock(now), Incus: lifecycleIncus(), Stdout: io.Discard, Stderr: io.Discard})
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := program.loadContext("default")
+			if err != nil {
+				t.Fatal(err)
+			}
+			beforePreparation := nativeTreeSnapshot(t, root)
+			program.allOwnerInventoriesReadOnly(ctx, loaded, false)
+			route, _, err := program.ownerYardRouteReadOnly(ctx, loaded, connection.HostID, "build")
+			if err != nil {
+				t.Fatal(err)
+			}
+			selected, err := program.activateProjectContext(route, loaded, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			execution, err := program.prepareProjectExecution(ctx, selected, command.Definition{Name: "code"}, []string{"Demo"}, true, true)
+			if err != nil {
+				t.Fatalf("allowed canonical preparation failed: %v", err)
+			}
+			if execution.OwnerConnection == nil || !reflect.DeepEqual(*execution.OwnerConnection, connection) {
+				t.Fatal("preparation captured a synthesized connection instead of the persisted owner")
+			}
+			if after := nativeTreeSnapshot(t, root); !slices.Equal(beforePreparation, after) {
+				t.Fatal("compatibility route preparation changed controller files")
+			}
+			// Warm the lease's lock files before checking that stale execution does
+			// not change project, cache, or routing state.
+			capturedOwner := execution.OwnerConnection
+			release, err := program.beginProjectMutation(ctx, execution)
+			if err != nil {
+				t.Fatalf("persisted owner did not acquire its lease: %v", err)
+			}
+			release()
+			if execution.OwnerConnection != capturedOwner {
+				t.Fatal("route revalidation rebound the prepared owner snapshot")
+			}
+			switch change {
+			case "changed":
+				writeProjectCompatibilityRoute(t, root, "yard-replacement")
+			case "removed":
+				if err := os.Remove(registration); err != nil {
+					t.Fatal(err)
+				}
+			}
+			beforeExecution := nativeTreeSnapshot(t, root)
+			called := false
+			prepared := &preparedCommand{CLI: program, Project: execution, Plan: domain.OperationPlan{Confirmed: true},
+				execute: func(context.Context, *application.Orchestrator, io.Writer) (domain.AdapterResult, error) {
+					called = true
+					return domain.AdapterResult{Status: "ok"}, nil
+				}}
+			_, err = prepared.Execute(ctx, &application.Orchestrator{}, io.Discard)
+			if change == "unchanged" {
+				if err != nil || !called {
+					t.Fatalf("unchanged compatibility route was refused: called=%v err=%v", called, err)
+				}
+			} else if !errors.Is(err, domain.ErrPlanStale) || called {
+				t.Fatalf("stale compatibility route reached work: called=%v err=%v", called, err)
+			}
+			if _, err := os.Lstat(physicalCall); !os.IsNotExist(err) {
+				t.Fatalf("compatibility route preparation or revalidation reached physical work: %v", err)
+			}
+			if after := nativeTreeSnapshot(t, root); !slices.Equal(beforeExecution, after) {
+				t.Fatal("compatibility route execution changed controller files")
+			}
+		})
+	}
+}
+
+func writeProjectCompatibilityRoute(t *testing.T, root, sshHost string) string {
+	t.Helper()
+	directory := filepath.Join(root, "state", "yards", "preview-remote")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	contents := "ACCESS_KIND=remote\nOWNER_ENDPOINT=dev@remote.example\nOWNER_YARD_NAME=build\n"
+	if sshHost != "" {
+		contents += "SSH_HOST=" + sshHost + "\n"
+	}
+	path := filepath.Join(directory, "config.env")
+	writeCLIFile(t, path, contents, 0o600)
+	return path
+}
 
 func TestProjectRoleRejectsAdmissionBeforeStateMutation(t *testing.T) {
 	root, environment, stateDirectory := nativeFixture(t)
@@ -184,7 +441,7 @@ func TestCanonicalRemoteProjectRoleRecheckedOnOwner(t *testing.T) {
 				"if [ -f "+shellquote.Word(denied)+" ]; then printf 'selected yard role does not accept work projects\\n' >&2; exit 1; fi\nexit 0\n", 0o700)
 			t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
 			execution := &projectExecution{Loaded: selected, RequiresProjects: projectCommandRequiresProjects(name)}
-			if err := program.captureProjectOwner(execution); err != nil {
+			if err := program.captureProjectOwner(context.Background(), execution); err != nil {
 				t.Fatal(err)
 			}
 			release, err := program.beginProjectMutation(context.Background(), execution)

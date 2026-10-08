@@ -146,9 +146,9 @@ func (runner ProjectActionRunner) code(ctx context.Context) (string, error) {
 	if runner.YardIdentity == "" {
 		return "", errors.New("canonical yard identity is required for VS Code")
 	}
-	codeHost := runner.Yard.CodeSSHHost
-	if !domain.SafeSSHTarget(codeHost) || codeHost == runner.Project.SSHHost {
-		return "", errors.New("dedicated VS Code SSH access is not configured; run yard init")
+	codeHost := runner.Yard.SSHHost
+	if !domain.SafeSSHTarget(codeHost) {
+		return "", errors.New("yard SSH access is not configured; run yard init")
 	}
 	if err := runner.codeTargetReady(ctx); err != nil {
 		return "", err

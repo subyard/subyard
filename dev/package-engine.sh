@@ -87,6 +87,7 @@ runtime_extras=(
   scripts/e2e-lab/base.sh
   scripts/lib/ai-observer-proxy.sh
   scripts/lib/preview-proxy.sh
+  scripts/prepare-preview-route.sh
   scripts/lib/engine-context.sh
   scripts/install-ssh-relay.sh
   scripts/install-test-vms-host-sink.sh
@@ -134,6 +135,7 @@ for required in \
   scripts/install-ssh-relay.sh \
   scripts/install-test-vms-host-sink.sh \
   scripts/reconcile-integrations.sh \
+  scripts/prepare-preview-route.sh \
   config/systemd/subyard-test-vms-host-sink.service.in \
   config/systemd/subyard-test-vms-host-sink.timer.in \
   config/commands.registry \

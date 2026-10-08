@@ -175,7 +175,8 @@ func TestAppArmorApplyRechecksBeforePowerMutation(t *testing.T) {
 
 func TestAppArmorVMDoesNotProbe(t *testing.T) {
 	for _, mask := range []bool{false, true} {
-		runtime, _ := appArmorRuntime(t, "", mask)
+		runtime, incus := appArmorRuntime(t, "", mask)
+		incus.Reconcile.Instance.Devices = map[string]map[string]string{"eth0": {"ipv4.address": "10.0.0.2"}}
 		runtime.Yard.YardKind = domain.YardVM
 		runtime.Environment = append(runtime.Environment, "PROBE_EXIT=90")
 		converged, err := runtime.CheckStage(context.Background(), ports.ReconcileStageInstance)

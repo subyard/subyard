@@ -24,6 +24,7 @@ export PATH="$TMP/bin:$PATH"
 export MOCK_STATE_DIR="$TMP/state" MOCK_INCUS_LOG="$TMP/incus.log"
 export MOCK_STOP_EXIT=0 MOCK_LIMIT_SET_EXIT=0 MOCK_LIMIT_NOOP=0 MOCK_STATE_EXIT=0
 export MOCK_DEVICE_LIST_PADDING=0
+export MOCK_AGENT_READY_AFTER=1
 export LIMITS_CPU=2 LIMITS_MEMORY=4GiB
 install -d -m 0700 "$TMP/bin" "$MOCK_STATE_DIR"
 
@@ -50,7 +51,7 @@ printf '%s\n' "$*" >> "$MOCK_INCUS_LOG"
 case "${1:-} ${2:-} ${3:-}" in
   'info  ' | 'info yard --project' | 'project show subyard' | 'storage volume show') ;;
   'config device list')
-    printf 'srv\nsubyard-e2e-routes\nkvm\n'
+    printf 'srv\nsubyard-e2e-routes\nkvm\neth0\n'
     if [ "$MOCK_DEVICE_LIST_PADDING" = 1 ]; then printf 'fixture-device-%05d\n' {1..10000}; fi
     ;;
   'config device get')
@@ -64,6 +65,11 @@ case "${1:-} ${2:-} ${3:-}" in
       subyard-e2e-routes:readonly) printf 'true\n' ;;
       *) exit 90 ;;
     esac ;;
+  'query /1.0/instances/yard?project=subyard ')
+    printf '{"devices":{"eth0":{"type":"nic","network":"incusbr0","ipv4.address":"%s"}}}\n' "$(cat "$MOCK_STATE_DIR/ipv4-pin")" ;;
+  'config device set')
+    [ "$5" = eth0 ] && [ "$6" = ipv4.address=10.80.0.10 ] || exit 90
+    printf '10.80.0.10\n' > "$MOCK_STATE_DIR/ipv4-pin" ;;
   'config get yard')
     case "$4" in
       limits.cpu | limits.memory) cat "$MOCK_STATE_DIR/$4" ;;
@@ -86,6 +92,15 @@ case "${1:-} ${2:-} ${3:-}" in
     [ "$MOCK_STOP_EXIT" = 0 ] || exit "$MOCK_STOP_EXIT"
     printf 'STOPPED\n' > "$MOCK_STATE_DIR/power" ;;
   'start yard --project') printf 'RUNNING\n' > "$MOCK_STATE_DIR/power" ;;
+  'exec yard --project')
+    if [ "$*" != 'exec yard --project subyard -- true' ]; then
+      printf '2: eth0    inet 10.80.0.10/24 brd 10.80.0.255 scope global eth0\n'
+      exit 0
+    fi
+    attempts="$(cat "$MOCK_STATE_DIR/agent-attempts")"
+    attempts=$((attempts + 1))
+    printf '%s\n' "$attempts" > "$MOCK_STATE_DIR/agent-attempts"
+    [ "$attempts" -ge "$MOCK_AGENT_READY_AFTER" ] ;;
   *) printf 'unexpected incus call: %s\n' "$*" >&2; exit 90 ;;
 esac
 MOCK
@@ -95,6 +110,8 @@ reset_state() {
   printf '%s\n' "$1" > "$MOCK_STATE_DIR/power"
   printf '%s\n' "$2" > "$MOCK_STATE_DIR/limits.cpu"
   printf '%s\n' "$3" > "$MOCK_STATE_DIR/limits.memory"
+  printf '0\n' > "$MOCK_STATE_DIR/agent-attempts"
+  : > "$MOCK_STATE_DIR/ipv4-pin"
   : > "$MOCK_INCUS_LOG"
 }
 run_create() {
@@ -189,4 +206,34 @@ assert_no_limit_writes
 ! grep -Eq '^config device (add|remove) ' "$MOCK_INCUS_LOG" \
   || fail 'complete device-list inspection mutated an already attached device'
 
+# Profile IPv4 pinning runs after this stage and needs the booted guest's NIC state,
+# including when Free Page Reporting is disabled.
+reset_state STOPPED 2 4GiB
+YARD_KIND=vm VM_PIN_IPV4=1 VM_FREE_PAGE_REPORTING=0 MOCK_AGENT_READY_AFTER=2 run_create
+[ "$(cat "$MOCK_STATE_DIR/agent-attempts")" = 2 ] \
+  || fail 'VM IPv4 pinning stage completed before its agent was ready'
+grep -Fq 'Phase 2 (instance) done.' "$TMP/output" || fail 'ready pinned VM did not complete'
+reset_state STOPPED 2 4GiB
+if YARD_KIND=vm VM_PIN_IPV4=1 VM_FREE_PAGE_REPORTING=0 MOCK_AGENT_READY_AFTER=9999 \
+  SUBYARD_INCUS_AGENT_WAIT_TIMEOUT=1 run_create; then
+  fail 'VM IPv4 pinning stage accepted an unavailable guest agent'
+fi
+grep -Fq 'VM agent did not become ready' "$TMP/output" || fail 'missing VM agent lost its diagnostic'
+! grep -Fq 'Phase 2 (instance) done.' "$TMP/output" || fail 'failed pinned VM reported completion'
+
+# Ordinary VMs reserve once in the instance stage; consumers never repin.
+reset_state STOPPED 2 4GiB
+YARD_KIND=vm VM_PIN_IPV4=0 VM_FREE_PAGE_REPORTING=0 run_create
+[ "$(cat "$MOCK_STATE_DIR/ipv4-pin")" = 10.80.0.10 ] || fail 'ordinary VM was not pinned'
+: > "$MOCK_INCUS_LOG"
+YARD_KIND=vm VM_PIN_IPV4=0 VM_FREE_PAGE_REPORTING=0 run_create
+! grep -q '^config device set yard eth0' "$MOCK_INCUS_LOG" || fail 'ordinary VM was repinned'
+printf '10.80.0.11\n' > "$MOCK_STATE_DIR/ipv4-pin"
+: > "$MOCK_INCUS_LOG"
+if YARD_KIND=vm VM_PIN_IPV4=0 VM_FREE_PAGE_REPORTING=0 run_create; then
+  fail 'divergent VM pin accepted'
+fi
+! grep -q '^config device set yard eth0' "$MOCK_INCUS_LOG" || fail 'divergent VM pin replaced'
+
 printf 'ok: existing container and VM limits converge safely and preserve empty settings\n'
+printf 'ok: VM IPv4 pinning waits for the guest agent and rejects readiness timeout\n'

@@ -345,7 +345,7 @@ func productionShellContracts(t *testing.T) map[string]shellContract {
 	goPrepared := "internal/cli/prepared_command.go"
 	contracts := map[string]shellContract{
 		"scripts/lib/ai-observer-proxy.sh":      {"library", "scripts/reconcile-integrations.sh", `lib/ai-observer-proxy.sh`},
-		"scripts/lib/preview-proxy.sh":          {"library", "scripts/04-provision-subyard.sh", `lib/preview-proxy.sh`},
+		"scripts/lib/preview-proxy.sh":          {"library", "scripts/prepare-preview-route.sh", `lib/preview-proxy.sh`},
 		"config/agents/aiobserver/provision.sh": {"profile", "config/agents.env", `agents/aiobserver/provision.sh`},
 		"config/agents/ccusage/provision.sh":    {"profile", "config/agents.env", `agents/ccusage/provision.sh`},
 		"config/agents/codex/provision.sh":      {"profile", "config/agents.env", `agents/codex/provision.sh`},
@@ -356,6 +356,7 @@ func productionShellContracts(t *testing.T) map[string]shellContract {
 		"scripts/02-create-project.sh":          {"leaf", goReconcile, `"02-create-project.sh"`},
 		"scripts/03-create-subyard.sh":          {"leaf", goReconcile, `"03-create-subyard.sh"`},
 		"scripts/04-provision-subyard.sh":       {"leaf", goReconcile, `"04-provision-subyard.sh"`},
+		"scripts/prepare-preview-route.sh":      {"leaf", goReconcile, `preparePreviewRoute`},
 		"scripts/reconcile-integrations.sh":     {"leaf", "internal/adapters/reconcileruntime/integrations.go", `"reconcile-integrations.sh"`},
 		"scripts/05-mount-host-paths.sh":        {"leaf", goReconcile, `"05-mount-host-paths.sh"`},
 		"scripts/06-network.sh":                 {"leaf", goReconcile, `"06-network.sh"`},
@@ -485,6 +486,7 @@ func productionLeafContracts() map[string]leafContract {
 		"scripts/02-create-project.sh":        {"reconcile", "ports.ReconcileStageProject"},
 		"scripts/03-create-subyard.sh":        {"reconcile", "ports.ReconcileStageInstance"},
 		"scripts/04-provision-subyard.sh":     {"reconcile", "ports.ReconcileStageProvision"},
+		"scripts/prepare-preview-route.sh":    {"reconcile", "ports.ReconcileStageNetworkPolicy"},
 		"scripts/05-mount-host-paths.sh":      {"reconcile", "ports.ReconcileStageMounts"},
 		"scripts/06-network.sh":               {"reconcile", "ports.ReconcileStageNetwork"},
 		"scripts/07-ssh-access.sh":            {"reconcile", "ports.ReconcileStageSSH"},

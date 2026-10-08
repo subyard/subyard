@@ -614,34 +614,42 @@ Native `clone`, `sync`, `bind`, `remove`, `code` and `export` actions use `@proj
 shell handlers. The in-yard VS Code session probe is a lifecycle safety leaf. The retired project
 handlers and `state/*` shims must not return.
 
-`code` uses the resolved context's dedicated `codeSshHost` alias for its controller workspace.
-The alias shares the yard's identity and host-key pins, but forwards only controller loopback
-`127.0.0.1:8765` to yard loopback `127.0.0.1:8765`. Its separate control-socket prefix and
-`ControlPersist no` isolate preview from ordinary yard connections. SSH convergence requires
-both aliases so repeated init upgrades older snippets. The controller checks port availability
-before launching VS Code; `ExitOnForwardFailure yes` handles a later bind race.
-It also checks the dedicated alias through OpenSSH's effective configuration. A legacy
-Subyard-managed snippet containing only the normal alias is atomically extended before
-launch, retaining its transport, identity and host-key pins. Unmanaged or unavailable
-configuration fails before VS Code starts with initialization or registration repair guidance.
-Owner-inventory project resolution retains a matching explicitly selected remote alias,
-so the resolved code alias stays consistent.
+`code` uses the resolved context's ordinary `sshHost` alias for its controller workspace.
+Launching VS Code does not inspect or bind preview ports or mutate SSH configuration. SSH
+convergence treats older snippets containing the retired `.code` alias as expected drift;
+repeat `yard init` or refresh `yard remote add` to replace them. No one-time release migration is
+needed: ordinary reconciliation owns these generated artifacts. Saved VS Code recent entries
+using `ssh-remote+<alias>.code` must be reopened through `yard code` after convergence.
+Owner-inventory project resolution retains a matching explicitly selected remote alias.
+Desktop session targets also use the ordinary alias and carry no preview port or forward.
 
 Core provisioning atomically installs `subyard-preview` as root-owned mode `0755`. Running-yard
 convergence checks its bytes and metadata; stopped yards use the installed source-hash marker.
-The helper always serves guest loopback `127.0.0.1:8765` in the foreground. Provisioning installs
-root-owned mode `0644` endpoint metadata at `/etc/subyard/preview.json`: version `1`, host and port.
-For a container yard with an active owner Tailscale IPv4 address, an owner proxy listens only on
-that exact address and forwards to the guest helper. Its port defaults to the SSH host port plus
-30000, wrapping into `1024..65535` (`2222` gives `32222`), with `WEB_PREVIEW_HOST_PORT` as the override. VM yards and owners
-without an active Tailscale address install the loopback endpoint. Repeat init after address or
-proxy changes. The helper validates the bounded endpoint file before listening and prints its URL
-only after binding; a missing file retains the legacy/source-checkout loopback URL. Direct Tailscale
-access requires device reachability and Tailnet policy access, plus the running helper; loopback
-access also needs the dedicated `code` SSH session.
-Selected supported agent instruction adapters preserve host text and add a short preview block
-through the existing inventory. Initial legacy adoption can accept exact original source bytes
-after consent; that digest is input-only and does not change the stored ownership schema.
+The helper serves guest loopback `127.0.0.1:8765` in the foreground. Provisioning installs
+root-owned mode `0644` endpoint metadata at `/etc/subyard/preview.json`: version `1`, host and port,
+plus `bindHost` for an externally published VM endpoint. The owner address is the active Tailscale
+IPv4, otherwise the private RFC1918 IPv4 source address of the default route. Public, link-local
+and wildcard addresses are not published. Both container and VM yards use the same selection.
+The owner port defaults to the SSH host port plus 30000, wrapping into `1024..65535`
+(`2222` gives `32222`), with `WEB_PREVIEW_HOST_PORT` as the override.
+
+Container proxy devices forward to guest loopback. VM proxies use `nat=true` and a pinned primary
+IPv4; the helper additionally binds that exact guest address, retaining loopback for manual tunnels.
+The instance stage owns IPv4 pinning; preview and SSH consume that pin. The network-policy stage
+repairs an existing owner preview route before calculating ingress. Fresh instances prepare the route
+after instance creation and pinning, then reconcile ingress before provisioning the guest metadata.
+Exact ownership receipts and local device checks prevent replacing foreign or divergent routes.
+The network policy preserves the owned VM preview ingress when isolation is enabled.
+Repeat init after address or proxy changes. The helper validates the bounded endpoint file before
+listening and prints its URL only after all required listeners bind. A missing file retains the
+source-checkout loopback URL. Direct access requires network reachability and, for Tailscale,
+Tailnet policy access. Private-network endpoints are visible to reachable devices on that network.
+
+Selected supported agent instruction adapters preserve host text and refresh the marked preview
+block through the existing inventory. Agents share the printed URL and provide the operator-machine
+tunnel recipe from `subyard-preview --help` only on request. The operator supplies their SSH alias;
+it cannot be inferred uniquely inside the yard. Initial legacy adoption can accept exact original
+source bytes after consent; that digest is input-only and does not change the stored ownership schema.
 
 Remote registration, trust repair, removal and listing are native. Preparation probes the trusted
 owner and scans the yard key without local mutation; old and new fingerprints enter the operation

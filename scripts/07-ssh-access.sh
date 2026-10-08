@@ -75,10 +75,10 @@ if [ "${YARD_KIND:-container}" = vm ]; then
     ! device_exists eth0 || die 'pinned VM must use its profile-owned primary NIC'
     pinned_ipv4="$(incus profile device get default eth0 ipv4.address "${PROJ[@]}")"
     [ "$pinned_ipv4" = "$vm_ipv4" ] || die 'VM primary IPv4 pin is missing or divergent; rerun init'
-  elif device_exists eth0; then
-    incus config device set "$YARD_INSTANCE_NAME" eth0 ipv4.address="$vm_ipv4" "${PROJ[@]}"
   else
-    incus config device override "$YARD_INSTANCE_NAME" eth0 ipv4.address="$vm_ipv4" "${PROJ[@]}"
+    pinned_ipv4="$(incus query "/1.0/instances/$YARD_INSTANCE_NAME?project=$INCUS_PROJECT" |
+      jq -r '(.expanded_devices // .devices).eth0["ipv4.address"] // ""')"
+    [ "$pinned_ipv4" = "$vm_ipv4" ] || die 'VM primary IPv4 pin is missing or divergent; rerun init'
   fi
   previous_relay_target=""
   relay_service="/etc/systemd/system/subyard-ssh-relay-$SSH_PORT.service"
@@ -263,14 +263,7 @@ snip_temp="$(mktemp "$sshdir/.subyard-snippet.XXXXXX")" \
   || { rm -f -- "$snip_backup"; die "could not stage SSH client config"; }
 if ! cat > "$snip_temp" <<EOF
 # Managed by Subyard (scripts/07-ssh-access.sh) — regenerated on setup; do not edit.
-Host ${SSH_CODE_HOST:?resolved code alias is required}
-    LocalForward 127.0.0.1:8765 127.0.0.1:8765
-    ExitOnForwardFailure yes
-    ControlMaster auto
-    ControlPath ~/.ssh/subyard-code-cm-%C
-    ControlPersist no
-
-Host $SSH_HOST $SSH_CODE_HOST
+Host $SSH_HOST
     HostName 127.0.0.1
     Port $SSH_PORT
     User $DEV_USER

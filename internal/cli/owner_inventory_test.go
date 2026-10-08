@@ -191,7 +191,7 @@ func TestReadOnlyOwnerInventoriesDoNotRefreshOrMigrateConnections(t *testing.T) 
 		t.Fatalf("read-only inventories=%#v", results)
 	}
 	_, route, err := program.ownerYardRouteReadOnly(context.Background(), loaded, "remote-owner", "default")
-	if err != nil || route.CodeSSHHost != "yard-remote.code" || route.CodeSSHHost == loaded.Context.CodeSSHHost {
+	if err != nil || route.SSHHost != "yard-remote" || route.SSHHost == loaded.Context.SSHHost {
 		t.Fatalf("remote code route inherited the local alias: route=%#v err=%v", route, err)
 	}
 	afterConnection, err := os.ReadFile(connectionPath)
@@ -268,7 +268,7 @@ func TestNamedCodePreservesExplicitRemoteAliasWithoutOwnerRouteWrites(t *testing
 				t.Fatalf("named remote project resolved through a different route: match=%#v err=%v", match, err)
 			}
 			selected, err := program.activateProjectContext(match.Yard, loaded, true)
-			if err != nil || selected.Context != loaded.Context || selected.Environment["SSH_CODE_HOST"] != "yard-preview-remote.code" {
+			if err != nil || selected.Context != loaded.Context || selected.Environment["SSH_HOST"] != "yard-preview-remote" {
 				t.Fatalf("selected alias changed: selected=%#v err=%v", selected.Context, err)
 			}
 			bin := filepath.Join(root, "fake-bin")
@@ -290,12 +290,12 @@ func TestNamedCodePreservesExplicitRemoteAliasWithoutOwnerRouteWrites(t *testing
 			if _, _, err := runner.Run(context.Background(), domain.AdapterRequest{Adapter: "project", Action: "code"}, nil); err != nil {
 				t.Fatal(err)
 			}
-			workspace := filepath.Join(workspaceRoot, base64.RawURLEncoding.EncodeToString([]byte(selected.Context.CodeSSHHost))+"."+record.ProjectID, "Preview.code-workspace")
+			workspace := filepath.Join(workspaceRoot, base64.RawURLEncoding.EncodeToString([]byte(selected.Context.SSHHost))+"."+record.ProjectID, "Preview.code-workspace")
 			payload, err := os.ReadFile(workspace)
 			var document struct {
 				RemoteAuthority string `json:"remoteAuthority"`
 			}
-			if err != nil || json.Unmarshal(payload, &document) != nil || document.RemoteAuthority != "ssh-remote+yard-preview-remote.code" {
+			if err != nil || json.Unmarshal(payload, &document) != nil || document.RemoteAuthority != "ssh-remote+yard-preview-remote" {
 				t.Fatalf("wrong controller code authority: %q err=%v", payload, err)
 			}
 			for index, path := range protected {

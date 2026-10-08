@@ -24,6 +24,7 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/operatoraccess"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/previewroute"
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/sshidentity"
@@ -105,10 +106,11 @@ func (runtime Runtime) CheckStage(ctx context.Context, stage ports.ReconcileStag
 			return false, errors.New("yard network policy service is required")
 		}
 		err = runtime.NetworkPolicy.Check(ctx, runtime.networkPolicyYard())
-		if errors.Is(err, yardnetwork.ErrNotConverged) {
-			return false, nil
+		if err != nil && !errors.Is(err, yardnetwork.ErrNotConverged) {
+			return false, err
 		}
-		return err == nil, err
+		drift, routeErr := runtime.previewRouteDrift(ctx, previewroute.Host(ctx))
+		return err == nil && !drift, routeErr
 	case ports.ReconcileStagePower, ports.ReconcileStageFinalize:
 		return runtime.powerConverged(ctx, true)
 	case ports.ReconcileStageTestVMs:
@@ -181,6 +183,9 @@ func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStag
 		if runtime.NetworkPolicy == nil {
 			return errors.New("yard network policy service is required")
 		}
+		if err := runtime.preparePreviewRoute(ctx, previewroute.Host(ctx)); err != nil {
+			return err
+		}
 		return runtime.NetworkPolicy.Ensure(ctx, runtime.networkPolicyYard())
 	case ports.ReconcileStagePower:
 		return runtime.runScript(ctx, runtime.Stderr, "install-power-reconciler.sh", "--yes")
@@ -222,7 +227,13 @@ func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStag
 	case ports.ReconcileStageSSH:
 		return runtime.runScript(ctx, runtime.Stderr, "07-ssh-access.sh", "--yes")
 	case ports.ReconcileStageProvision:
-		if err := runtime.runScript(ctx, runtime.Stderr, "04-provision-subyard.sh", "--yes"); err != nil {
+		endpoint, err := runtime.preparePreview(ctx)
+		if err != nil {
+			return err
+		}
+		if err := runtime.runScriptEnvironment(ctx, runtime.Stderr,
+			map[string]string{"SUBYARD_PREVIEW_ENDPOINT": string(endpoint)},
+			"04-provision-subyard.sh", "--yes"); err != nil {
 			return err
 		}
 		// Base provisioning makes a fresh guest reachable before repairing installed hooks.
@@ -451,6 +462,8 @@ func (runtime Runtime) instanceConverged(ctx context.Context) (bool, error) {
 		if err != nil || !pinned {
 			return false, err
 		}
+	} else if runtime.Yard.YardKind == domain.YardVM && state.Instance.Devices["eth0"]["ipv4.address"] == "" {
+		return false, nil
 	}
 	switch {
 	case strings.EqualFold(state.Instance.Status, "running"):
@@ -1500,7 +1513,7 @@ func (runtime Runtime) sshConverged(ctx context.Context) (bool, error) {
 	device := state.Instance.LocalDevices["ssh"]
 	connect := "tcp:127.0.0.1:22"
 	if runtime.Yard.YardKind == domain.YardVM {
-		address := state.Instance.LocalDevices["eth0"]["ipv4.address"]
+		address := state.Instance.Devices["eth0"]["ipv4.address"]
 		if runtime.environmentValue("VM_PIN_IPV4") == "1" {
 			if _, overridden := state.Instance.LocalDevices["eth0"]; overridden {
 				return false, errors.New("VM SSH transport requires profile-pinned eth0 without a local override")
@@ -1529,13 +1542,9 @@ func (runtime Runtime) sshConverged(ctx context.Context) (bool, error) {
 	if sshHost == "" {
 		sshHost = runtime.environmentDefault("SSH_HOST", "yard")
 	}
-	codeHost := domain.CodeSSHHost(sshHost)
-	if err != nil || !hasLine(string(snippetContents), "Host "+sshHost+" "+codeHost) ||
-		!hasLine(string(snippetContents), "Host "+codeHost) ||
-		!hasLine(string(snippetContents), "    LocalForward 127.0.0.1:8765 127.0.0.1:8765") ||
-		!hasLine(string(snippetContents), "    ExitOnForwardFailure yes") ||
-		!hasLine(string(snippetContents), "    ControlPath ~/.ssh/subyard-code-cm-%C") ||
-		!hasLine(string(snippetContents), "    ControlPersist no") ||
+	if err != nil || !hasLine(string(snippetContents), "Host "+sshHost) ||
+		hasLine(string(snippetContents), "Host "+sshHost+".code") ||
+		hasLine(string(snippetContents), "    LocalForward 127.0.0.1:8765 127.0.0.1:8765") ||
 		!hasLine(string(snippetContents), "    Port "+port) ||
 		!hasLine(string(snippetContents), "    StrictHostKeyChecking yes") {
 		return false, nil
@@ -1686,7 +1695,10 @@ func (runtime Runtime) provisionConverged(ctx context.Context) (bool, error) {
 		if installedHash != previewHash {
 			return false, nil
 		}
-		endpointHash := runtime.previewEndpointHash(ctx)
+		endpointHash, err := runtime.previewEndpointHash(ctx)
+		if err != nil {
+			return false, err
+		}
 		installedEndpointHash, _ := instance.EffectiveConfig("user.subyard.preview_endpoint_sha256")
 		if installedEndpointHash != endpointHash {
 			return false, nil

@@ -175,8 +175,8 @@ Host resources require an available owner `htop`; absence returns the static
 `session_tool_unavailable` diagnostic before launch.
 They contain no project source paths. VS Code results instead contain
 `localArguments` for the owner's existing local `yard code` launch and a native
-`vscode` descriptor: the guest folder, dedicated alias, developer, loopback relay
-address/port, existing preview port and protected owner-pinned public Ed25519 host
+`vscode` descriptor: the guest folder, ordinary yard alias, developer, loopback relay
+address/port and protected owner-pinned public Ed25519 host
 key with its SHA-256 fingerprint. The existing native VS Code readiness check is
 shared with CLI code; preparation neither writes a workspace/SSH config nor reads
 a private identity or runs guest actions.
