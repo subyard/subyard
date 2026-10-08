@@ -6,10 +6,10 @@ lane=full
 if [ "$#" -eq 2 ] && [ "$1" = --lane ]; then
   lane="$2"
 elif [ "$#" -ne 0 ]; then
-  printf 'usage: android-pool-runtime.sh [--lane full|recovery|viewer|viewer-native-debug|sdk-images]\n' >&2
+  printf 'usage: android-pool-runtime.sh [--lane full|recovery|viewer|viewer-native-debug|sdk-images|memory-lease]\n' >&2
   exit 2
 fi
-case "$lane" in full|recovery|viewer|viewer-native-debug|sdk-images) ;; *) printf 'invalid Android test lane\n' >&2; exit 2 ;; esac
+case "$lane" in full|recovery|viewer|viewer-native-debug|sdk-images|memory-lease) ;; *) printf 'invalid Android test lane\n' >&2; exit 2 ;; esac
 
 [ "${SUBYARD_E2E_VM:-}" = 1 ] || { printf 'android-pool-runtime: requires VM1\n' >&2; exit 1; }
 [ -r /run/subyard-e2e-lease.json ] || { printf 'android-pool-runtime: missing E2E lease guard\n' >&2; exit 1; }
@@ -55,6 +55,8 @@ yard() {
 }
 # shellcheck source=config/profiles/android/tests/e2e/android-pool-phases.sh
 . "$root/config/profiles/android/tests/e2e/android-pool-phases.sh"
+# Used by the sourced phase recorder.
+# shellcheck disable=SC2034
 android_fixture=runtime
 android_phase_begin setup
 project=''
@@ -153,6 +155,53 @@ incus --project "$project" exec "$instance" -- timeout 30 sh -c '
     sleep 0.2
   done
 '
+if [ "$lane" = memory-lease ]; then
+  if [ -S /var/lib/incus/unix.socket ] && [ ! -w /var/lib/incus/unix.socket ]; then
+    incus_binary=(sudo -n /usr/bin/incus)
+  fi
+  android_phase_begin memory-budget
+  for pass in before-restart after-restart; do
+    [ "$pass" != after-restart ] || incus --project "$project" exec "$instance" -- systemctl restart subyard-android-pool.service
+    incus --project "$project" exec "$instance" -- python3 - "$pass" <<'PY'
+import importlib.util, json, subprocess, sys
+spec = importlib.util.spec_from_file_location('android_pool', '/usr/local/lib/subyard-android/pool.py')
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+runtime = module.Runtime(json.load(open('/etc/subyard-android.json')))
+pid = subprocess.check_output(['systemctl', 'show', 'subyard-android-pool.service', '-p', 'MainPID', '--value'], text=True).strip()
+budget = runtime.broker_memory(pid)
+assert budget['ram_limit_bytes'] + budget['swap_limit_bytes'] == 4 * 1024**3
+assert budget['effective_ram_limit_bytes'] >= 2 * 1024**3
+memory = runtime.memory_capacity()
+assert memory['physical_available_bytes'] is not None
+print('android broker memory budget=' + sys.argv[1] + ' ' + json.dumps(budget, sort_keys=True))
+print('android memory bounds ' + json.dumps(memory, sort_keys=True))
+PY
+  done
+  incus --project "$project" exec "$instance" -- timeout 30 sh -c '
+    until runuser -u dev -- /usr/bin/python3 /usr/local/lib/subyard-android/client.py status >/dev/null 2>&1; do sleep 0.2; done
+  '
+  android_phase_begin images
+  yard emu cache prepare --api 36
+  android_phase_begin memory-lease
+  timeout --foreground --kill-after=15 4800 "${incus_binary[@]}" --project "$project" exec "$instance" \
+    --user 1000 --group 1000 --env HOME=/home/dev -- env \
+    PATH=/srv/cache/android-sdk/.subyard/bin:/srv/cache/android-sdk/platform-tools:/opt/jdk-17/bin:/usr/bin:/bin \
+    python3 - --lane memory-lease < "$root/config/profiles/android/tests/e2e/android-pool-lifecycle.py"
+  incus --project "$project" exec "$instance" -- python3 - <<'PY'
+import json, pathlib, subprocess
+status = json.loads(subprocess.check_output(['/usr/bin/python3', '/usr/local/lib/subyard-android/client.py', 'status']))
+assert all(slot['state'] == 'available' for slot in status['slots'])
+assert not list(pathlib.Path('/var/lib/subyard-android/runtimes').iterdir())
+units = subprocess.check_output(['systemctl', 'list-units', '--all', '--no-legend', '--plain', 'subyard-android-slot-*.service'], text=True)
+assert not units.strip()
+namespaces = subprocess.check_output(['ip', 'netns', 'list'], text=True)
+assert not any(line.startswith('subyard-android-slot-') for line in namespaces.splitlines())
+print('android runtime, network and disposable cleanup=PASS')
+PY
+  android_phase_end 0
+  exit 0
+fi
 direct_catalog="$state/direct-catalog.log"
 wire_catalog="$state/wire-catalog.log"
 host_catalog="$state/host-catalog.log"
@@ -235,6 +284,7 @@ if [ "$lane" = full ]; then
   timeout --foreground --kill-after=15 1320 "${incus_binary[@]}" --project "$project" exec "$instance" \
     --user 1000 --group 1000 --env HOME=/home/dev -- env \
     PATH=/srv/cache/android-sdk/.subyard/bin:/srv/cache/android-sdk/platform-tools:/opt/jdk-17/bin:/usr/bin:/bin \
+    python3 -c 'import subprocess,sys; sys.exit(subprocess.call(sys.argv[1:]))' \
     android-broker run --purpose android-pool-runtime -- \
     sh -c 'adb shell getprop ro.build.version.sdk && exit 23' >"$adb_log" 2>&1 || adb_status=$?
   if [ "$adb_status" -ne 23 ]; then

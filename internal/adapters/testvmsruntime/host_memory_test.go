@@ -104,6 +104,9 @@ func TestPhysicalMemoryCapacityPreservesVisibleBoundary(t *testing.T) {
 		got := capPhysicalMemory(visible, physical)
 		want := visible
 		want.Available = min(visible.Available, physical)
+		if physical <= visible.Available {
+			want.LimitingSource = "verified_physical_meminfo"
+		}
 		want.PhysicalAvailable, want.PhysicalAvailableKnown = physical, true
 		if got != want {
 			t.Fatalf("physical cap changed visible boundary evidence: got %+v, want %+v", got, want)

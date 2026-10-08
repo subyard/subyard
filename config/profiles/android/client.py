@@ -20,7 +20,8 @@ import threading
 import time
 
 CONTROL = os.environ.get('ANDROID_PUBLIC_ROOT', '/srv/cache/android-sdk/.subyard') + '/control.sock'
-TTL = 600
+TTL = 1200
+HEARTBEAT = 300
 VIEWER_START_TIMEOUT = 60
 
 
@@ -357,12 +358,25 @@ def attribution(args):
     return dict(yard=yard, project=project, run=secrets.token_hex(8), purpose=args.purpose)
 
 
-def acquire(args, token):
+def requester_identity(pid):
+    if pid <= 1:
+        return None
+    try:
+        # comm can contain spaces and parentheses; starttime follows its final ')'.
+        fields = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
+        return fields[19] if fields[0] not in ('Z', 'X') else None
+    except (OSError, IndexError):
+        return None
+
+
+def acquire(args, token, requester_alive=lambda: True):
     request = {key: value for key in ('device', 'api', 'variant', 'abi')
                if (value := getattr(args, key, None)) is not None}
     deadline = time.monotonic() + args.wait
     owner = attribution(args)
     while True:
+        if not requester_alive():
+            raise Error('owner', 'requesting session ended')
         try:
             rpc('reserve', token=token, request=request, owner=owner)
             break
@@ -372,14 +386,18 @@ def acquire(args, token):
             if time.monotonic() >= deadline:
                 raise Error('timeout', 'timed out waiting for an Android emulator slot') from exc
             time.sleep(min(1, max(0, deadline - time.monotonic())))
-    last_renew = time.monotonic()
+    last_renew = args.last_renew = time.monotonic()
     while True:
+        if not requester_alive():
+            raise Error('owner', 'requesting session ended')
         result = rpc('allocation', token=token)
+        if not requester_alive():
+            raise Error('owner', 'requesting session ended')
+        if time.monotonic() - last_renew >= HEARTBEAT:
+            rpc('renew', token=token)
+            last_renew = args.last_renew = time.monotonic()
         if result['state'] == 'held':
             return result
-        if time.monotonic() - last_renew >= 60:
-            rpc('renew', token=token)
-            last_renew = time.monotonic()
         time.sleep(0.5)
 
 
@@ -402,7 +420,7 @@ def context(allocation, endpoint):
 
 def parser():
     result = argparse.ArgumentParser(description='Exclusive Android emulators; profile defaults: phone, API 36, google_apis/x86_64. '
-                                     'Heartbeat 60s; lease TTL 600s. See catalog/status for configured defaults.',
+                                     f'Heartbeat {HEARTBEAT}s; lease TTL {TTL}s. See catalog/status for configured defaults.',
                                      epilog='Agents: use run -- COMMAND for automatic renewal and release. '
                                      'To share your screen, acquire --lease-file ABSOLUTE_PATH and renew the lease while working; '
                                      'the operator opens yard -Y OWNER/YARD emu view --lease-file ABSOLUTE_PATH on their laptop. '
@@ -579,13 +597,17 @@ def main(argv=None):
     child = None
     finished = threading.Event()
     heartbeat_failed = threading.Event()
+    requester = os.getppid()
+    identity = requester_identity(requester)
+    def requester_alive():
+        return identity is not None and os.getppid() == requester and requester_identity(requester) == identity
     def interrupted(signum, _frame):
         raise SystemExit(128 + signum)
     signal.signal(signal.SIGINT, interrupted)
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGHUP, interrupted)
     try:
-        allocation = rpc('allocation', token=token) if attached else acquire(args, token)
+        allocation = rpc('allocation', token=token) if attached else acquire(args, token, requester_alive)
         if allocation['state'] != 'held':
             raise Error('unavailable', 'lease is not ready for a viewer')
         temporary = Path(tempfile.mkdtemp(prefix='subyard-emu-'))
@@ -606,9 +628,15 @@ def main(argv=None):
             return 0
         server = start_relay(token, endpoint)
         def heartbeat():
-            while not finished.wait(60):
+            last_renew = args.last_renew
+            while not finished.wait(1):
                 try:
+                    if not requester_alive():
+                        raise Error('owner', 'requesting session ended')
+                    if time.monotonic() - last_renew < HEARTBEAT:
+                        continue
                     rpc('renew', token=token)
+                    last_renew = time.monotonic()
                 except (Error, OSError, ValueError):
                     heartbeat_failed.set()
                     if child is not None:
@@ -620,8 +648,6 @@ def main(argv=None):
                             with contextlib.suppress(ProcessLookupError):
                                 os.killpg(child.pid, signal.SIGKILL)
                     return
-        if not attached:
-            threading.Thread(target=heartbeat, daemon=True).start()
         command = args.command[1:] if args.command and args.command[0] == '--' else args.command
         if args.verb == 'view':
             viewer_server = start_viewer_relay(endpoint, allocation['android_serial'])
@@ -629,6 +655,8 @@ def main(argv=None):
             command = ['scrcpy', *(command or []), *([] if args.control else ['--no-control']),
                        '--port=' + port, '--tunnel-host=127.0.0.1', '--tunnel-port=' + port]
         child = subprocess.Popen(command, env=dict(os.environ, **environment), start_new_session=True)
+        if not attached:
+            threading.Thread(target=heartbeat, daemon=True).start()
         code = child.wait()
         if args.verb == 'view' and code:
             print(f'Android viewer: child returncode {code}', file=sys.stderr)

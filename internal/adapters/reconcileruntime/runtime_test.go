@@ -202,7 +202,11 @@ func TestTestVMBackendStartUsesNetworkPolicy(t *testing.T) {
 			YardInstanceName: "yard", IncusBridge: "incusbr0",
 		},
 	}
-	if err := runtime.testVMBackend(application.PowerRunning).Start(context.Background()); err != nil {
+	backend, err := runtime.testVMBackend(application.PowerRunning)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if len(policy.started) != 1 {
@@ -1402,7 +1406,7 @@ func TestExtrasDesiredStateIsParsedAndValidatedInGo(t *testing.T) {
 		}
 	}
 	writeProfile("a", "YARD_MOUNTS='cache:/srv/cache:rw:0755'\nYARD_CAPS='fuse'\n")
-	writeProfile("b", "YARD_CAPS='rootless-docker fuse'\nYARD_DEVICES='gpu'\n")
+	writeProfile("b", "YARD_CAPS='rootless-docker fuse host-memory'\nYARD_DEVICES='gpu'\n")
 	runtime := Runtime{RepositoryRoot: root, Environment: []string{"ENVIRONMENT_PROFILES=a"}}
 	values, err := runtime.extrasContext()
 	if err != nil {
@@ -1410,7 +1414,7 @@ func TestExtrasDesiredStateIsParsedAndValidatedInGo(t *testing.T) {
 	}
 	if values["SUBYARD_EXTRAS_MOUNTS"] != "cache:/srv/cache:rw:0755" ||
 		values["SUBYARD_EXTRAS_CAPABILITIES"] != "fuse" ||
-		values["SUBYARD_EXTRAS_DEVICES"] != "" {
+		values["SUBYARD_EXTRAS_DEVICES"] != "" || values["SUBYARD_EXTRAS_HOST_MEMORY"] != "0" {
 		t.Fatalf("unselected profile leaked extras: %#v", values)
 	}
 	runtime.Environment = []string{"ENVIRONMENT_PROFILES=a b"}
@@ -1420,18 +1424,19 @@ func TestExtrasDesiredStateIsParsedAndValidatedInGo(t *testing.T) {
 	}
 	if values["SUBYARD_EXTRAS_MOUNTS"] != "cache:/srv/cache:rw:0755" ||
 		values["SUBYARD_EXTRAS_CAPABILITIES"] != "fuse rootless-docker" ||
-		values["SUBYARD_EXTRAS_DEVICES"] != "gpu" {
+		values["SUBYARD_EXTRAS_DEVICES"] != "gpu" || values["SUBYARD_EXTRAS_HOST_MEMORY"] != "1" {
 		t.Fatalf("unexpected extras context: %#v", values)
 	}
 	runtime.Yard.YardKind = domain.YardVM
 	values, err = runtime.extrasContext()
-	if err != nil || values["SUBYARD_EXTRAS_DEVICES"] != "" {
+	if err != nil || values["SUBYARD_EXTRAS_DEVICES"] != "" || values["SUBYARD_EXTRAS_HOST_MEMORY"] != "0" {
 		t.Fatalf("VM inherited container-only device extras: %#v, %v", values, err)
 	}
 	for name, contents := range map[string]string{
 		"mount":  "YARD_MOUNTS='cache:/srv/cache:rw:0755'\n",
 		"cap":    "YARD_CAPS='fuse'\n",
 		"device": "YARD_DEVICES='gpu'\n",
+		"memory": "YARD_CAPS='host-memory'\n",
 	} {
 		writeProfile(name, contents)
 		runtime.Environment = []string{"ENVIRONMENT_PROFILES=" + name, "ALLOWS_HOST_ACCESS=false"}

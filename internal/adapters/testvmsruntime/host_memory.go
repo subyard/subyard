@@ -117,6 +117,9 @@ func parseMemAvailable(data []byte) (uint64, error) {
 }
 
 func capPhysicalMemory(visible MemoryCapacity, available uint64) MemoryCapacity {
+	if available <= visible.Available {
+		visible.LimitingSource = "verified_physical_meminfo"
+	}
 	visible.Available = min(visible.Available, available)
 	visible.PhysicalAvailable = available
 	visible.PhysicalAvailableKnown = true

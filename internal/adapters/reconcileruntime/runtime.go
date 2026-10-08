@@ -200,7 +200,11 @@ func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStag
 				return err
 			}
 		}
-		return runtime.testVMBackend(intent.Desired).Apply(ctx)
+		backend, err := runtime.testVMBackend(intent.Desired)
+		if err != nil {
+			return err
+		}
+		return backend.Apply(ctx)
 	case ports.ReconcileStageKeys:
 		if err := runtime.runScript(ctx, runtime.Stderr, "install-key-tools.sh", "--yes"); err != nil {
 			return err
@@ -1092,7 +1096,10 @@ func (runtime Runtime) testVMsReadiness(ctx context.Context, diagnostic bool) (b
 			return false, nil
 		}
 	}
-	backend := runtime.testVMBackend(intent.Desired)
+	backend, err := runtime.testVMBackend(intent.Desired)
+	if err != nil {
+		return false, err
+	}
 	if diagnostic {
 		return backend.Verify(ctx)
 	}
@@ -1110,7 +1117,11 @@ func (runtime Runtime) ObserveTestVMSlotCountRepair(ctx context.Context) (ports.
 	if err != nil {
 		return ineligible, err
 	}
-	return runtime.testVMBackend(intent.Desired).ObserveSlotCountRepair(ctx)
+	backend, err := runtime.testVMBackend(intent.Desired)
+	if err != nil {
+		return ineligible, err
+	}
+	return backend.ObserveSlotCountRepair(ctx)
 }
 
 func (runtime Runtime) testVMHostSinkConverged(ctx context.Context) bool {
@@ -1165,8 +1176,12 @@ func (runtime Runtime) testVMHostSinkFailure(ctx context.Context) error {
 	return nil
 }
 
-func (runtime Runtime) testVMBackend(desired string) *testvmsruntime.Backend {
+func (runtime Runtime) testVMBackend(desired string) (*testvmsruntime.Backend, error) {
 	environment := runtimeEnvironment(runtime.Environment)
+	extras, err := runtime.extrasContext()
+	if err != nil {
+		return nil, err
+	}
 	return &testvmsruntime.Backend{
 		RepositoryRoot: runtime.RepositoryRoot,
 		DataHome:       runtime.Yard.Paths.DataHome,
@@ -1175,6 +1190,7 @@ func (runtime Runtime) testVMBackend(desired string) *testvmsruntime.Backend {
 		Instance:       runtime.Yard.YardInstanceName,
 		YardName:       runtime.Yard.YardName,
 		DesiredPower:   desired,
+		HostMemory:     extras["SUBYARD_EXTRAS_HOST_MEMORY"] == "1",
 		Environment:    environment,
 		Output:         runtime.Stderr,
 		Start: func(ctx context.Context) error {
@@ -1187,13 +1203,14 @@ func (runtime Runtime) testVMBackend(desired string) *testvmsruntime.Backend {
 			return runtime.runScript(ctx, runtime.Stderr,
 				"lifecycle-guard.sh", "stop", "--reconcile")
 		},
-	}
+	}, nil
 }
 
 func (runtime Runtime) extrasContext() (map[string]string, error) {
 	mounts := map[string]bool{}
 	capabilities := map[string]bool{}
 	devices := map[string]bool{}
+	hostMemory := "0"
 	base := runtimeEnvironment(runtime.Environment)
 	for _, profile := range strings.Fields(base["ENVIRONMENT_PROFILES"]) {
 		if !domain.SafeName(profile) {
@@ -1234,6 +1251,12 @@ func (runtime Runtime) extrasContext() (map[string]string, error) {
 		}
 		for _, capability := range strings.Fields(values["YARD_CAPS"]) {
 			switch capability {
+			case "host-memory":
+				// VMs have their own physical procfs counters. Containers need
+				// the exact, owned read-only source reconciled with the backend.
+				if runtime.Yard.YardKind != domain.YardVM {
+					hostMemory = "1"
+				}
 			case "nesting", "rootless-docker", "fuse":
 				capabilities[capability] = true
 			default:
@@ -1257,6 +1280,7 @@ func (runtime Runtime) extrasContext() (map[string]string, error) {
 		"SUBYARD_EXTRAS_MOUNTS":       sortedSet(mounts),
 		"SUBYARD_EXTRAS_CAPABILITIES": sortedSet(capabilities),
 		"SUBYARD_EXTRAS_DEVICES":      sortedSet(devices),
+		"SUBYARD_EXTRAS_HOST_MEMORY":  hostMemory,
 	}, nil
 }
 

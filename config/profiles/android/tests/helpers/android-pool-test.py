@@ -153,6 +153,15 @@ class Runtime:
     def preflight(self, request, reserved, slot):
         pass
 
+    def check_capacity(self, request, reserved):
+        pass
+
+    def memory_capacity(self):
+        raise poolmod.PoolError('memory_source', 'fixture has no physical memory evidence')
+
+    def broker_memory(self):
+        raise poolmod.PoolError('memory_source', 'fixture has no broker memory evidence')
+
     def start(self, slot, image, cancel):
         self.running.add((slot['slot_id'], slot['generation']))
         self.started.set()
@@ -270,9 +279,11 @@ class Leases(unittest.TestCase):
 
     def test_expiry_renew_and_restart(self):
         token, _ = self.acquire()
-        self.now += 590
+        self.assertEqual(self.pool.status()['heartbeat_seconds'], 300)
+        self.assertEqual(self.pool.status()['ttl_seconds'], 1200)
+        self.now += 1190
         self.pool.allocation(token, renew=True)
-        self.now += 590
+        self.now += 1190
         self.pool.reap()
         self.assertEqual(self.pool.allocation(token)['state'], 'held')
         self.now += 11
@@ -363,6 +374,7 @@ class Leases(unittest.TestCase):
              patch.object(poolmod.os, 'access', return_value=True), \
              patch.object(poolmod.shutil, 'which', return_value='/usr/bin/tool'), \
              patch.object(poolmod.Runtime, 'nameservers', return_value=['1.1.1.1']), \
+             patch.object(poolmod.Runtime, 'check_capacity'), \
              patch.object(poolmod.Path, 'glob', side_effect=AssertionError('software inspected render nodes')), \
              patch.object(poolmod, 'run', return_value=result) as command:
             runtime.preflight(dict(device='phone'), [], dict(slot_id='001'))
@@ -371,6 +383,15 @@ class Leases(unittest.TestCase):
         self.assertFalse(any('check-graphics' in call for call in calls))
 
     def test_emulator_ram_floors_admit_pair_and_reject_insufficient_memory(self):
+        cgroups = self.root / 'cgroups'
+        (cgroups / 'system.slice').mkdir(parents=True)
+        for directory in (cgroups, cgroups / 'system.slice'):
+            (directory / 'memory.max').write_text('max')
+            (directory / 'memory.current').write_text('0')
+        self.addCleanup(patch.stopall)
+        patch.object(poolmod.Runtime, 'CGROUP_ROOT', cgroups).start()
+        patch.object(poolmod.Runtime, 'HOST_MEMORY', self.root / 'absent-host-meminfo').start()
+        patch.object(poolmod.Runtime, 'physical_memory', return_value=None).start()
         sdk = self.root / 'sdk'
         emulator = sdk / 'emulator/emulator'
         emulator.parent.mkdir(parents=True)
@@ -389,7 +410,7 @@ class Leases(unittest.TestCase):
              patch.object(poolmod.Runtime, 'nameservers', return_value=['1.1.1.1']), \
              patch.object(poolmod.Path, 'read_text', new=read_text), \
              patch.object(poolmod, 'run', return_value=result):
-            runtime.preflight(dict(device='phone'), [dict(device='tablet')], dict(slot_id='001'))
+            runtime.preflight(dict(device='phone'), [dict(request=dict(device='tablet'), state='held')], dict(slot_id='001'))
 
         def constrained_memory(path, *args, **kwargs):
             if str(path) == '/proc/meminfo':
@@ -402,7 +423,126 @@ class Leases(unittest.TestCase):
              patch.object(poolmod.Path, 'read_text', new=constrained_memory), \
              patch.object(poolmod, 'run', return_value=result):
             with self.assertRaisesRegex(poolmod.PoolError, 'insufficient memory'):
-                runtime.preflight(dict(device='tablet'), [dict(device='tablet')], dict(slot_id='001'))
+                runtime.preflight(dict(device='tablet'), [dict(request=dict(device='tablet'), state='held')], dict(slot_id='001'))
+
+    def test_memory_bounds_exclude_broker_ceiling_and_reject_unsafe_physical_source(self):
+        proc, cgroups = self.root / 'proc', self.root / 'cgroups'
+        (proc / 'self').mkdir(parents=True)
+        unit = cgroups / 'system.slice/subyard-android-pool.service'
+        unit.mkdir(parents=True)
+        gib = 1024**3
+        (proc / 'meminfo').write_text('MemTotal: 16777216 kB\nMemAvailable: 12582912 kB\n'
+                                    'MemFree: 1024 kB\nSReclaimable: 1048576 kB\nSwapFree: 999999999 kB\n')
+        (proc / 'self/mountinfo').write_text('')
+        (proc / 'self/cgroup').write_text('0::/system.slice/subyard-android-pool.service\n')
+        for directory, limit, used in ((cgroups, 16*gib, 0), (unit.parent, 10*gib, 2*gib),
+                                       (unit, 2*gib, gib)):
+            (directory / 'memory.max').write_text(str(limit))
+            (directory / 'memory.current').write_text(str(used))
+        (unit / 'memory.swap.max').write_text(str(2*gib))
+        (unit / 'memory.swap.current').write_text('0')
+        runtime = poolmod.Runtime(dict(state_root=str(self.root / 'runtime'), sdk_root='/unused'))
+        runtime.PROC_ROOT, runtime.CGROUP_ROOT, runtime.HOST_MEMORY = proc, cgroups, self.root / 'host-meminfo'
+        self.assertEqual(runtime.memory_capacity()['available_bytes'], 8*gib)
+        self.assertEqual(runtime.broker_memory()['ram_limit_bytes'], 2*gib)
+        with patch.object(runtime, 'physical_memory', return_value=dict(MemTotal=16*gib, MemAvailable=6*gib)):
+            capacity = runtime.memory_capacity()
+            self.assertEqual((capacity['available_bytes'], capacity['limiting_source']), (6*gib, 'physical'))
+        (unit.parent / 'memory.current').write_text(str(11*gib))
+        self.assertEqual(runtime.memory_capacity()['available_bytes'], 0)
+        (unit.parent / 'memory.max').write_text(str(gib))
+        with self.assertRaisesRegex(poolmod.PoolError, 'ancestor'):
+            runtime.broker_memory()
+        (unit.parent / 'memory.max').write_text('max')
+        (cgroups / 'memory.max').unlink()
+        (cgroups / 'cgroup.controllers').write_text('cpu memory')
+        self.assertEqual(runtime.memory_capacity()['available_bytes'], 12*gib)
+        (proc / 'self/mountinfo').write_text('1 2 0:1 / /proc/meminfo rw - fuse.lxcfs lxcfs rw\n')
+        with self.assertRaisesRegex(poolmod.PoolError, 'required'):
+            runtime.memory_capacity()
+        runtime.HOST_MEMORY.symlink_to(proc / 'meminfo')
+        with self.assertRaisesRegex(poolmod.PoolError, 'unsafe'):
+            runtime.memory_capacity()
+        runtime.HOST_MEMORY.unlink()
+        runtime.HOST_MEMORY.write_text('MemTotal: 16777216 kB\nMemAvailable: 12582912 kB\n')
+        original_read_text = poolmod.Path.read_text
+        def descriptor(path, *args, **kwargs):
+            if '/fdinfo/' in str(path):
+                return 'mnt_id: 91\n'
+            return original_read_text(path, *args, **kwargs)
+        (proc / 'self/mountinfo').write_text(f'91 2 0:1 /meminfo {runtime.HOST_MEMORY} rw - proc proc rw\n')
+        with patch.object(poolmod.Path, 'read_text', new=descriptor):
+            with self.assertRaisesRegex(poolmod.PoolError, 'read-only procfs'):
+                runtime.memory_capacity()
+        (proc / 'meminfo').write_text('MemTotal: 16777216 kB\nMemAvailable: invalid kB\n')
+        with self.assertRaisesRegex(poolmod.PoolError, 'invalid memory'):
+            runtime.memory_capacity()
+
+    def test_pending_starts_are_atomic_and_held_memory_is_not_subtracted_twice(self):
+        self.runtime.budget = poolmod.Runtime.budget
+        self.runtime.memory_capacity = lambda: dict(total_bytes=16*1024**3, available_bytes=8*1024**3,
+                                                   limiting_source='visible')
+        self.runtime.check_capacity = lambda request, reserved: poolmod.Runtime.check_capacity(self.runtime, request, reserved)
+        self.runtime.preflight = lambda request, reserved, slot: self.runtime.check_capacity(request, reserved)
+        self.runtime.block = threading.Event()
+        self.pool = poolmod.Pool(dict(self.config, size=3), self.runtime, self.images, lambda: self.now)
+        first, second = secrets.token_hex(32), secrets.token_hex(32)
+        self.pool.reserve({}, first, self.owner)
+        self.assertTrue(self.runtime.started.wait(2))
+        self.pool.reserve({}, second, self.owner)
+        with self.assertRaisesRegex(poolmod.PoolError, 'pending=7516192768'):
+            self.pool.reserve({}, secrets.token_hex(32), self.owner)
+        self.runtime.block.set()
+        for worker in list(self.pool.workers.values()):
+            worker.join(2)
+        self.assertEqual(self.pool.allocation(first)['state'], 'held')
+        self.assertEqual(self.pool.allocation(second)['state'], 'held')
+        # Availability already measures both running emulators. Only the new request needs RAM.
+        self.runtime.memory_capacity = lambda: dict(total_bytes=16*1024**3, available_bytes=4*1024**3,
+                                                   limiting_source='visible')
+        self.pool.reserve({}, secrets.token_hex(32), self.owner)
+
+    def test_acquire_renewal_cadence_and_requester_identity(self):
+        args = client.parser().parse_args(['acquire', '--lease-file', '/unused'])
+        now, renewals, allocations = [0], [], [0]
+        def rpc(operation, **kwargs):
+            if operation == 'renew':
+                renewals.append(now[0])
+            if operation == 'allocation':
+                allocations[0] += 1
+                return dict(state='held' if now[0] >= 601 else 'provisioning')
+            return {}
+        with patch.object(client, 'attribution', return_value=self.owner), \
+             patch.object(client, 'rpc', side_effect=rpc), \
+             patch.object(client.time, 'monotonic', side_effect=lambda: now[0]), \
+             patch.object(client.time, 'sleep', side_effect=lambda seconds: now.__setitem__(0, now[0] + seconds)):
+            self.assertEqual(client.acquire(args, secrets.token_hex(32))['state'], 'held')
+        self.assertEqual(renewals, [300, 600])
+        with patch.object(client, 'rpc', side_effect=AssertionError('orphan made request')):
+            with self.assertRaisesRegex(client.Error, 'requesting session ended'):
+                client.acquire(args, secrets.token_hex(32), lambda: False)
+        alive = [True]
+        now[0] = 0
+        renewals.clear()
+        def ended_during_allocation(operation, **kwargs):
+            if operation == 'allocation':
+                alive[0] = False
+                now[0] = 301
+                return dict(state='held')
+            if operation == 'renew':
+                renewals.append(now[0])
+            return {}
+        with patch.object(client, 'attribution', return_value=self.owner), \
+             patch.object(client, 'rpc', side_effect=ended_during_allocation), \
+             patch.object(client.time, 'monotonic', side_effect=lambda: now[0]):
+            with self.assertRaisesRegex(client.Error, 'requesting session ended'):
+                client.acquire(args, secrets.token_hex(32), lambda: alive[0])
+        self.assertEqual(renewals, [])
+        pid = os.getpid()
+        self.assertIsNotNone(client.requester_identity(pid))
+        self.assertIsNone(client.requester_identity(1))
+        with patch.object(client.Path, 'read_text', return_value='1 (reused pid) Z ' + ' '.join(['0']*20)):
+            self.assertIsNone(client.requester_identity(pid))
 
     def test_runtime_software_graphics_check_requires_no_cage_or_render_node(self):
         root = self.root / 'software-runtime'
@@ -1352,6 +1492,76 @@ os.write(1, result.stdout)
             if command.poll() is None:
                 command.kill()
                 command.communicate()
+            server.shutdown()
+            server.server_close()
+
+    def test_run_stops_before_renew_when_requester_identity_changes(self):
+        address = str(self.root / 'control.sock')
+        server = poolmod.Server(address, poolmod.Handler)
+        server.pool = self.pool
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        marker = self.root / 'requester-ended'
+        payload = f'import pathlib,time; pathlib.Path({str(marker)!r}).touch(); time.sleep(30)'
+        renewals = []
+        original = self.pool.allocation
+        original_spawn = subprocess.Popen
+        def delayed_spawn(*args, **kwargs):
+            command = original_spawn(*args, **kwargs)
+            time.sleep(1.2)
+            return command
+        def allocation(token, renew=False):
+            if renew:
+                renewals.append(token)
+            return original(token, renew)
+        try:
+            with patch.object(client, 'CONTROL', address), patch.object(client, 'HEARTBEAT', 0.01), \
+                 patch.object(client, 'requester_identity', side_effect=lambda pid: 'reused' if marker.exists() else 'original'), \
+                 patch.object(client.subprocess, 'Popen', side_effect=delayed_spawn), \
+                 patch.object(self.pool, 'allocation', side_effect=allocation):
+                started = time.monotonic()
+                with self.assertRaisesRegex(client.Error, 'renewal failed'):
+                    client.main(['run', '--', sys.executable, '-c', payload])
+                self.assertLess(time.monotonic() - started, 5)
+            self.assertEqual(renewals, [])
+            self.assertFalse(self.runtime.running)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_standalone_viewer_renews_but_attached_viewer_does_not(self):
+        address = str(self.root / 'control.sock')
+        server = poolmod.Server(address, poolmod.Handler)
+        server.pool = self.pool
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        original_rpc, original_spawn = client.rpc, subprocess.Popen
+        operations = []
+        def rpc(operation, **kwargs):
+            operations.append(operation)
+            return original_rpc(operation, **kwargs)
+        def spawn(command, *args, **kwargs):
+            if command[0] == 'scrcpy':
+                command = [sys.executable, '-c', 'import time; time.sleep(1.2)']
+            return original_spawn(command, *args, **kwargs)
+        try:
+            with patch.object(client, 'CONTROL', address), patch.object(client, 'HEARTBEAT', 0), \
+                 patch.object(client, 'rpc', side_effect=rpc), \
+                 patch.object(client.shutil, 'which', return_value='/fixture/scrcpy'), \
+                 patch.object(client.subprocess, 'Popen', side_effect=spawn):
+                self.assertEqual(client.main(['view']), 0)
+                self.assertIn('renew', operations)
+                self.assertFalse(self.runtime.running)
+                token, allocation = self.acquire()
+                lease_file = self.root / 'attached.json'
+                client.save_lease(lease_file, dict(token=token))
+                operations.clear()
+                self.assertEqual(client.main(['view', '--lease-file', str(lease_file)]), 0)
+                self.assertNotIn('renew', operations)
+                self.assertNotIn('release', operations)
+                self.assertEqual(self.pool.allocation(token)['generation'], allocation['generation'])
+                self.now += 1201
+                self.pool.reap()
+                self.assertFalse(self.runtime.running)
+        finally:
             server.shutdown()
             server.server_close()
 

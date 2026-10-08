@@ -26,6 +26,12 @@ import (
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if len(os.Args) > 1 && (os.Args[1] == "_test-vms-facade" || os.Args[1] == "_test-vms-worker") {
+		if err := testvmsruntime.RestoreBrokerMemoryInputs(); err != nil {
+			fmt.Fprintf(os.Stderr, "test-vms: %v\n", err)
+			os.Exit(1)
+		}
+	}
 	if len(os.Args) > 1 && os.Args[1] == "_vm-cpu" {
 		if (len(os.Args) != 5 && len(os.Args) != 6) || (os.Args[2] != "apply" && os.Args[2] != "check") ||
 			!domain.SafeName(os.Args[3]) || !domain.SafeName(os.Args[4]) {
@@ -118,6 +124,9 @@ func main() {
 			configPath = testvmsruntime.DefaultConfigPath
 		}
 		cfg, err := testvmsruntime.LoadConfig(configPath)
+		if err == nil && cfg.Enabled {
+			err = testvmsruntime.EnterBrokerMemoryScope(configPath)
+		}
 		if err == nil {
 			events := &testvmsruntime.EventRecorder{
 				StateDir: cfg.StateDir,
@@ -174,6 +183,9 @@ func main() {
 			configPath = testvmsruntime.DefaultConfigPath
 		}
 		runtime, err := testvmsruntime.LoadRuntime(configPath, os.Stdout, os.Stderr)
+		if err == nil && runtime.Config.Enabled {
+			err = testvmsruntime.EnterBrokerMemoryScope(configPath)
+		}
 		if err == nil {
 			runtime.ExecutablePath, err = os.Executable()
 		}

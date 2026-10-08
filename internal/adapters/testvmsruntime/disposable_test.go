@@ -41,7 +41,9 @@ func TestFacadeDisposableAdmissionAndLegacyRequestRejection(t *testing.T) {
 		if err := store.mutateOwned(grant, func(slot *LeaseSlot, _ time.Time) error { slot.Reserved = true; return nil }); err != nil {
 			t.Fatal(err)
 		}
-		return grant, &CapacityError{Resource: "memory", Reason: "insufficient capacity"}
+		evidence := memoryAdmission(capPhysicalMemory(MemoryCapacity{Available: 32 << 30, VisibleAvailable: 32 << 30}, 10<<30), 4<<30, 0, 0, 17<<29)
+		evidence.Environment, evidence.Count = grant.Environment.Name, grant.Environment.Count
+		return grant, &CapacityError{Resource: "memory", Reason: "insufficient capacity", Admission: &evidence}
 	}
 	command := "acquire-v3 android-test client SHA256:key yard Project run tests " + fixturePublicKey(t) + " slot-001"
 	if err := facade.Run(command); err != nil {
@@ -53,6 +55,20 @@ func TestFacadeDisposableAdmissionAndLegacyRequestRejection(t *testing.T) {
 	}
 	if response.Code != "capacity" || response.Reason != "memory" || response.Grant != nil {
 		t.Fatalf("capacity result: %s", output.String())
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(output.Bytes(), &envelope); err != nil || len(envelope) != 5 {
+		t.Fatalf("changed released capacity envelope: %s (%v)", output.String(), err)
+	}
+	for _, name := range []string{"schema_version", "status", "code", "reason", "message"} {
+		if envelope[name] == nil {
+			t.Fatalf("missing retained capacity field %s", name)
+		}
+	}
+	_, snapshot, found := strings.Cut(response.Message, "; admission=")
+	var evidence MemoryAdmission
+	if !found || len(response.Message) > 1024 || json.Unmarshal([]byte(snapshot), &evidence) != nil || evidence.Required != 17<<29 || evidence.Headroom != 6<<30 || evidence.PhysicalAvailable != 10<<30 {
+		t.Fatalf("capacity arithmetic truncated or incorrect: %s", response.Message)
 	}
 	slot, err := storeSlot(store, "slot-001")
 	if err != nil {

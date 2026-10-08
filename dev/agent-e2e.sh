@@ -112,6 +112,8 @@ NAME defaults to test-yard. During a temporary migration, select the old yard ex
 --prepare creates or verifies the shared controller identity at ~/.subyard/e2e/id_ed25519. P1
 accepts standard controller keys through the bounded forced-command facade. Every run creates a
 separate ephemeral guest key.
+The wrapper renews every five minutes while it and its original launching process remain alive.
+Held leases expire twenty minutes after the last successful renewal or the initial held grant.
 
 The operator owns the outer test yard. Acquire creates disposable VMs from an immutable base;
 release fences access and deletes their disks. --type defaults to subyard-pair (two VMs);
@@ -692,6 +694,34 @@ lease_grant_matches_request() {
   [ -z "$LEASE_REQUESTED_SLOT" ] || [ "$LEASE_SLOT" = "$LEASE_REQUESTED_SLOT" ]
 }
 
+capacity_refusal_snapshot() {
+  # Render only the bounded numeric contract; arbitrary backend error text stays private.
+  jq -ce '
+    (.message | split("; admission=")) as $parts | select($parts | length == 2) |
+    ($parts[1] | fromjson) as $snapshot |
+    ["effective_available_bytes", "reserve_bytes", "pending_vm_bytes", "pending_builder_bytes",
+     "headroom_bytes", "required_bytes", "visible_available_bytes", "physical_available_bytes",
+     "cgroup_headroom_bytes"] as $numbers |
+    ($numbers + ["physical_available_known", "cgroup_limit_available", "limiting_source",
+                 "type", "vm_count", "slot_state"]) as $allowed |
+    select($snapshot | type == "object") |
+    select(($snapshot | keys) - $allowed | length == 0) |
+    select(all($numbers[]; . as $key | $snapshot[$key] |
+      type == "number" and . >= 0 and . <= 18446744073709551615 and floor == .)) |
+    select($snapshot.physical_available_known | type == "boolean") |
+    select($snapshot.cgroup_limit_available | type == "boolean") |
+    select($snapshot.limiting_source == "visible_meminfo" or
+           $snapshot.limiting_source == "visible_cgroup" or
+           $snapshot.limiting_source == "verified_physical_meminfo") |
+    select(($snapshot | has("type") | not) or
+           $snapshot.type == "subyard-pair" or $snapshot.type == "android-test") |
+    select(($snapshot | has("vm_count") | not) or
+           $snapshot.vm_count == 1 or $snapshot.vm_count == 2) |
+    select(($snapshot | has("slot_state") | not) or $snapshot.slot_state == "provisioning") |
+    $snapshot
+  ' <<<"$1" 2>/dev/null
+}
+
 acquire_lease() {
   resolve_vm_count
   local client fingerprint type blob response code reason state started last_report request
@@ -783,6 +813,10 @@ acquire_lease() {
         || die "lease acquire outcome is unknown; refusing a second allocation"
       printf 'agent-e2e: retryable capacity refusal for %s: resource=%s; retry after resources become available\n' \
         "$LEASE_REQUESTED_SLOT" "$reason" >&2
+      local admission_snapshot
+      if [ "$reason" = memory ] && admission_snapshot="$(capacity_refusal_snapshot "$response")"; then
+        printf 'agent-e2e: memory admission=%s\n' "$admission_snapshot" >&2
+      fi
       return 4
     fi
     if [ "$code" != busy ]; then
@@ -853,25 +887,71 @@ release_lease() {
   printf 'E2E lease released: slot=%s run=%s\n' "$released_slot" "$released_run" >&2
 }
 
-lease_keeper() {
-  local owner_pid="$1" response keeper_timer_pid=''
-  trap 'if [ -n "${keeper_timer_pid:-}" ]; then
-    kill "$keeper_timer_pid" >/dev/null 2>&1 || true
-    wait "$keeper_timer_pid" >/dev/null 2>&1 || true
-  fi' EXIT
-  trap 'exit 0' INT TERM
-  while true; do
-    sleep 60 &
+lease_process_identity() {
+  local stat
+  local -a fields=()
+  [[ "$1" =~ ^[1-9][0-9]*$ ]] || return 1
+  IFS= read -r stat 2>/dev/null < "/proc/$1/stat" || return 1
+  # The command name may contain spaces and ')'; fields after its last ')' are fixed.
+  read -r -a fields <<<"${stat##*) }"
+  [ "${fields[0]:-Z}" != Z ] && [ "${fields[0]:-X}" != X ] \
+    && [[ "${fields[19]:-}" =~ ^[0-9]+$ && "${fields[1]:-}" =~ ^[0-9]+$ ]] || return 1
+  printf '%s:%s\n' "${fields[19]}" "${fields[1]}"
+}
+
+lease_keeper_owner_alive() {
+  [ "$(lease_process_identity "$owner_pid")" = "$owner_identity" ] \
+    && [ "$(lease_process_identity "$requester_pid")" = "$requester_identity" ]
+}
+
+lease_keeper_wait() {
+  while kill -0 "$keeper_job_pid" >/dev/null 2>&1; do
+    lease_keeper_owner_alive || return 1
+    sleep 1 &
     keeper_timer_pid=$!
-    wait "$keeper_timer_pid" || return 0
+    wait "$keeper_timer_pid" 2>/dev/null || return 1
     keeper_timer_pid=''
-    if ! response="$(facade_request "$(lease_command renew)")" ||
+  done
+  lease_keeper_owner_alive
+}
+
+lease_keeper() {
+  local owner_pid="$1" owner_identity="$2" requester_pid="$3" requester_identity="$4"
+  local response response_file keeper_timer_pid='' keeper_job_pid='' renew_rc=0 pid
+  # Separate background process groups let cleanup close every transport descendant's streams.
+  set -m
+  response_file="$(mktemp "${LOCAL_TEMP:-/tmp}/.subyard-lease-renew.XXXXXX")"
+  trap 'for pid in "$keeper_timer_pid" "$keeper_job_pid"; do
+    [ -z "$pid" ] || {
+      kill -KILL -- "-$pid" >/dev/null 2>&1 || true
+      wait "$pid" >/dev/null 2>&1 || true
+    }
+  done
+  rm -f "$response_file"' EXIT
+  trap 'exit 0' INT TERM
+  # Exit the background child directly, keeping local PIDs in scope for its EXIT trap.
+  while true; do
+    lease_keeper_owner_alive || exit 0
+    sleep 300 &
+    keeper_job_pid=$!
+    lease_keeper_wait || exit 0
+    wait "$keeper_job_pid" 2>/dev/null || exit 0
+    keeper_job_pid=''
+    lease_keeper_owner_alive || exit 0
+    (set +m; facade_request "$(lease_command renew)" || exit "$?") > "$response_file" &
+    keeper_job_pid=$!
+    lease_keeper_wait || exit 0
+    renew_rc=0
+    wait "$keeper_job_pid" 2>/dev/null || renew_rc=$?
+    keeper_job_pid=''
+    response="$(cat "$response_file")"
+    if [ "$renew_rc" != 0 ] ||
       [ "$(jq -r '.status // empty' <<<"$response")" != ok ]; then
       [ -z "$LEASE_KEEPER_LOG" ] \
         || printf '%s\tfailure\n' "$(date +%s)" >> "$LEASE_KEEPER_LOG"
       printf 'agent-e2e: lease lost; stopping payload transport\n' >&2
-      kill -TERM "$owner_pid" >/dev/null 2>&1 || true
-      return 1
+      lease_keeper_owner_alive && kill -TERM "$owner_pid" >/dev/null 2>&1 || true
+      exit 1
     fi
     [ -z "$LEASE_KEEPER_LOG" ] \
       || printf '%s\tok\n' "$(date +%s)" >> "$LEASE_KEEPER_LOG"
@@ -879,13 +959,20 @@ lease_keeper() {
 }
 
 start_lease_keeper() {
+  local owner_pid="$BASHPID" owner_identity requester_pid requester_identity
+  owner_identity="$(lease_process_identity "$owner_pid")" \
+    || die 'cannot identify lease-owning wrapper'
+  requester_pid="${owner_identity#*:}"
+  [ "$requester_pid" -gt 1 ] \
+    && requester_identity="$(lease_process_identity "$requester_pid")" \
+    || die 'cannot identify lease requester'
   if [ -n "$LOCAL_TEMP" ]; then
     LEASE_KEEPER_LOG="$LOCAL_TEMP/lease-keeper.tsv"
     : > "$LEASE_KEEPER_LOG"
     chmod 0600 "$LEASE_KEEPER_LOG"
     printf '%s\tstarted\n' "$(date +%s)" >> "$LEASE_KEEPER_LOG"
   fi
-  lease_keeper "$$" &
+  lease_keeper "$owner_pid" "$owner_identity" "$requester_pid" "$requester_identity" &
   LEASE_KEEPER_PID=$!
 }
 

@@ -9,20 +9,32 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Subyard/Subyard/internal/config"
 )
 
 // CapacityError is safe to retry only when no working allocation was created.
 // It deliberately contains no host paths or ambient configuration.
-type CapacityError struct{ Resource, Reason string }
+type CapacityError struct {
+	Resource, Reason string
+	Admission        *MemoryAdmission
+}
 
 func (err *CapacityError) Error() string {
-	return "test environment capacity: " + err.Resource + ": " + err.Reason
+	message := "test environment capacity: " + err.Resource + ": " + err.Reason
+	if err.Admission != nil {
+		body, _ := json.Marshal(err.Admission)
+		message += "; admission=" + string(body)
+	}
+	return message
 }
 
 type MemoryCapacity struct {
 	Available              uint64 `json:"available_bytes"`
+	VisibleAvailable       uint64 `json:"visible_available_bytes"`
+	LimitingSource         string `json:"limiting_source"`
+	CgroupHeadroom         uint64 `json:"cgroup_headroom_bytes"`
 	PhysicalAvailable      uint64 `json:"physical_available_bytes"`
 	PhysicalAvailableKnown bool   `json:"physical_available_known"`
 	Current                uint64 `json:"cgroup_current_bytes"`
@@ -52,38 +64,33 @@ func memoryCapacityForProcess(procRoot, cgroupRoot, process string) (MemoryCapac
 	if err != nil {
 		return result, err
 	}
-	for _, line := range strings.Split(string(data), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) == 3 && fields[0] == "MemAvailable:" && fields[2] == "kB" {
-			value, parseErr := strconv.ParseUint(fields[1], 10, 64)
-			if parseErr != nil || value > ^uint64(0)/1024 {
-				return result, errors.New("invalid available memory")
-			}
-			result.Available = value * 1024
-		}
+	result.Available, err = parseMemAvailable(data)
+	if err != nil {
+		return result, err
 	}
-	if result.Available == 0 {
-		return result, errors.New("available memory unavailable")
-	}
+	result.VisibleAvailable = result.Available
+	result.LimitingSource = "visible_meminfo"
 	// Inspect all visible ancestors. A namespaced root may hide outer limits;
 	// report that boundary explicitly instead of claiming physical-host evidence.
 	membership, err := os.ReadFile(filepath.Join(procRoot, process, "cgroup"))
 	if err != nil {
 		return result, errors.New("cgroup membership unavailable")
 	}
-	path := ""
-	found := false
-	for _, line := range strings.Split(string(membership), "\n") {
-		if strings.HasPrefix(line, "0::/") {
-			path = strings.TrimPrefix(line, "0::/")
-			found = true
-		}
-	}
-	if !found || strings.Contains(path, "..") || strings.Contains(path, " (deleted)") {
+	membershipPath, err := brokerCgroupPath(string(membership))
+	if err != nil {
 		return result, errors.New("invalid unified cgroup membership")
 	}
+	path := strings.TrimPrefix(membershipPath, "/")
 	root := filepath.Clean(cgroupRoot)
 	current := filepath.Join(root, path)
+	// The broker's own budget does not contain daemon-created guests/builders.
+	// Exclude only our exact, verified top-level slice; retain its allocation parent.
+	if path == brokerMemorySlice || strings.HasPrefix(path, brokerMemorySlice+"/") {
+		if _, err := brokerMemoryCapacity(root); err != nil {
+			return result, err
+		}
+		current = root
+	}
 	tightest := ^uint64(0)
 	result.scope = root
 	rootMissingLimit := false
@@ -127,6 +134,10 @@ func memoryCapacityForProcess(procRoot, cgroupRoot, process string) (MemoryCapac
 					result.scope = current
 				}
 				result.LimitAvailable = true
+				result.CgroupHeadroom = tightest
+				if free <= result.Available {
+					result.LimitingSource = "visible_cgroup"
+				}
 				result.Available = min(result.Available, free)
 			}
 		}
@@ -164,6 +175,38 @@ func memoryCapacityForProcess(procRoot, cgroupRoot, process string) (MemoryCapac
 	}
 
 	return result, nil
+}
+
+// MemoryAdmission uses saturating subtraction, so exhausted bounds never wrap.
+// Required describes only this request; pending excludes that request.
+type MemoryAdmission struct {
+	Available         uint64    `json:"effective_available_bytes"`
+	Reserve           uint64    `json:"reserve_bytes"`
+	PendingVM         uint64    `json:"pending_vm_bytes"`
+	PendingBuilder    uint64    `json:"pending_builder_bytes"`
+	Headroom          uint64    `json:"headroom_bytes"`
+	Required          uint64    `json:"required_bytes,omitempty"`
+	Environment       string    `json:"type,omitempty"`
+	Count             int       `json:"vm_count,omitempty"`
+	SlotState         SlotState `json:"slot_state,omitempty"`
+	LimitingSource    string    `json:"limiting_source"`
+	VisibleAvailable  uint64    `json:"visible_available_bytes"`
+	PhysicalAvailable uint64    `json:"physical_available_bytes"`
+	PhysicalKnown     bool      `json:"physical_available_known"`
+	CgroupHeadroom    uint64    `json:"cgroup_headroom_bytes"`
+	CgroupKnown       bool      `json:"cgroup_limit_available"`
+}
+
+func memoryAdmission(memory MemoryCapacity, reserve, pendingVM, pendingBuilder, required uint64) MemoryAdmission {
+	headroom := memory.Available
+	for _, amount := range []uint64{reserve, pendingVM, pendingBuilder} {
+		headroom -= min(headroom, amount)
+	}
+	return MemoryAdmission{Available: memory.Available, Reserve: reserve, PendingVM: pendingVM,
+		PendingBuilder: pendingBuilder, Required: required, Headroom: headroom,
+		LimitingSource: memory.LimitingSource, VisibleAvailable: memory.VisibleAvailable,
+		PhysicalAvailable: memory.PhysicalAvailable, PhysicalKnown: memory.PhysicalAvailableKnown,
+		CgroupHeadroom: memory.CgroupHeadroom, CgroupKnown: memory.LimitAvailable}
 }
 
 func budgetBytes(value, fallback string) uint64 {
@@ -241,17 +284,17 @@ func (runtime *Runtime) outstandingCommitment(ctx context.Context, slot LeaseSlo
 // blocks are counted only by Incus at the pool level.
 func checkCapacity(memory MemoryCapacity, storage StorageCapacity, ram, disk, ramReserve, diskReserve, diskBudget uint64) error {
 	if ram > memory.Available || ramReserve > memory.Available-ram {
-		return &CapacityError{"memory", "insufficient confirmed memory reserve"}
+		return &CapacityError{Resource: "memory", Reason: "insufficient confirmed memory reserve"}
 	}
 	if storage.Used > storage.Total {
-		return &CapacityError{"disk", "invalid storage telemetry"}
+		return &CapacityError{Resource: "disk", Reason: "invalid storage telemetry"}
 	}
 	free := storage.Total - storage.Used
 	if disk > free || diskReserve > free-disk {
-		return &CapacityError{"disk", "insufficient storage headroom"}
+		return &CapacityError{Resource: "disk", Reason: "insufficient storage headroom"}
 	}
 	if diskBudget != 0 && (storage.BudgetUsed > diskBudget || disk > diskBudget-storage.BudgetUsed) {
-		return &CapacityError{"disk", "broker disk budget exceeded"}
+		return &CapacityError{Resource: "disk", Reason: "broker disk budget exceeded"}
 	}
 	return nil
 }
@@ -271,14 +314,14 @@ func (runtime *Runtime) reserveEnvironment(ctx context.Context, store LeaseStore
 		}
 		memory, err := runtime.readMemoryCapacity()
 		if err != nil {
-			return &CapacityError{"memory", "memory telemetry unavailable"}
+			return &CapacityError{Resource: "memory", Reason: "memory telemetry unavailable"}
 		}
 		memoryScope := memory.scope
 		storageBefore, err := runtime.storageCapacity(ctx)
 		if err != nil {
-			return &CapacityError{"disk", "storage telemetry unavailable"}
+			return &CapacityError{Resource: "disk", Reason: "storage telemetry unavailable"}
 		}
-		memoryBefore := memory.Available
+		memoryBefore := memory
 		overhead := budgetBytes(runtime.Config.VMOverhead, config.DefaultTestVMOverhead)
 		var ram, disk uint64
 		for _, current := range pool.Slots {
@@ -300,19 +343,29 @@ func (runtime *Runtime) reserveEnvironment(ctx context.Context, store LeaseStore
 		// blocks that received allocation credit.
 		memory, err = runtime.readMemoryCapacity()
 		if err != nil || memory.scope != memoryScope {
-			return &CapacityError{"memory", "memory telemetry unavailable"}
+			return &CapacityError{Resource: "memory", Reason: "memory telemetry unavailable"}
 		}
 		storage, err := runtime.storageCapacity(ctx)
 		if err != nil {
-			return &CapacityError{"disk", "storage telemetry unavailable"}
+			return &CapacityError{Resource: "disk", Reason: "storage telemetry unavailable"}
 		}
-		memory.Available = min(memoryBefore, memory.Available)
+		if memoryBefore.Available < memory.Available {
+			memory = memoryBefore
+		}
 		storage.Total = min(storageBefore.Total, storage.Total)
 		storage.Used = max(storageBefore.Used, storage.Used)
 		storage.BudgetUsed = max(storageBefore.BudgetUsed, storage.BudgetUsed)
 		if err := checkCapacity(memory, storage, ram, disk,
 			budgetBytes(runtime.Config.MemoryReserve, config.DefaultTestVMMemoryReserve), budgetBytes(runtime.Config.DiskReserve, config.DefaultTestVMDiskReserve),
 			budgetBytes(runtime.Config.DiskBudget, config.DefaultTestVMDiskBudget)); err != nil {
+			var capacity *CapacityError
+			if errors.As(err, &capacity) && capacity.Resource == "memory" {
+				required, _ := environmentCommitment(*slot.Environment, overhead)
+				evidence := memoryAdmission(memory, budgetBytes(runtime.Config.MemoryReserve, config.DefaultTestVMMemoryReserve), ram-min(ram, required), 0, required)
+				evidence.Environment, evidence.Count = slot.Environment.Name, slot.Environment.Count
+				evidence.SlotState = slot.State
+				capacity.Admission = &evidence
+			}
 			return err
 		}
 		slot.Reserved = true
@@ -336,8 +389,25 @@ func (runtime *Runtime) readMemoryCapacity() (MemoryCapacity, error) {
 	if runtime.memoryProbe != nil {
 		return runtime.memoryProbe()
 	}
-	visible, err := memoryCapacity("/proc", "/sys/fs/cgroup")
-	if err != nil || !runtime.Config.Enabled {
+	if !runtime.Config.Enabled {
+		return memoryCapacity("/proc", "/sys/fs/cgroup")
+	}
+	// Incus launches QEMU/builders from its daemon, independently of the
+	// broker worker. Preserve the daemon's applicable source ancestors, including
+	// an operator's finite system.slice/incus.service ceiling, before physical RAM.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	runner := runtime.Runner
+	if runner == nil {
+		runner = ProcessRunner{}
+	}
+	body, _, err := runner.Run(ctx, "systemctl", []string{"show", "incus.service", "--property=MainPID", "--value"}, nil, nil)
+	pid, parseErr := strconv.ParseUint(strings.TrimSpace(string(body)), 10, 32)
+	if err != nil || parseErr != nil || pid <= 1 {
+		return MemoryCapacity{}, errors.New("guest launch memory scope unavailable")
+	}
+	visible, err := memoryCapacityForProcess("/proc", "/sys/fs/cgroup", strconv.FormatUint(pid, 10))
+	if err != nil {
 		return visible, err
 	}
 	physical, err := readHostMemoryAvailable(hostMemoryPath)

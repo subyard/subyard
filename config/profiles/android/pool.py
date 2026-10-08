@@ -27,8 +27,8 @@ import traceback
 import urllib.request
 import xml.etree.ElementTree as ET
 
-TTL = 600
-HEARTBEAT = 60
+TTL = 1200
+HEARTBEAT = 300
 BOOT_TIMEOUT = 1200
 SCHEMA = 'subyard.android-pool.v1'
 VERSIONS = {34: '14', 35: '15', 36: '16'}
@@ -38,6 +38,7 @@ VERSIONS = {34: '14', 35: '15', 36: '16'}
 # https://android.googlesource.com/platform/external/qemu/+/refs/heads/emu-main-dev/android/android-emu/android/main-common.c
 PRESETS = {'phone': (1080, 1920, 420, 2560), 'tablet': (800, 1280, 160, 2560)}
 RUNTIME_OVERHEAD_MIB = 1024
+MEMORY_RESERVE = 512 * 1024**2
 VARIANTS = {'google_apis', 'google_apis_playstore'}
 
 
@@ -344,12 +345,143 @@ class Images:
 
 class Runtime:
     NETNS_ROOT = Path('/run/netns')
+    PROC_ROOT = Path('/proc')
+    CGROUP_ROOT = Path('/sys/fs/cgroup')
+    HOST_MEMORY = Path('/var/lib/subyard/host-meminfo')
 
     def __init__(self, config):
         self.config = config
         self.root = Path(config['state_root']) / 'runtimes'
         self.root.mkdir(parents=True, exist_ok=True)
         self.sdk = Path(config['sdk_root'])
+
+    @staticmethod
+    def budget(request):
+        return (PRESETS[request['device']][3] + RUNTIME_OVERHEAD_MIB) * 1024**2
+
+    @staticmethod
+    def meminfo(body):
+        values = {}
+        for line in body.splitlines():
+            fields = line.split()
+            if fields and fields[0] in ('MemTotal:', 'MemAvailable:'):
+                require(len(fields) == 3 and fields[2] == 'kB' and fields[1].isdigit()
+                        and fields[0][:-1] not in values, 'memory_source', 'invalid memory counters')
+                values[fields[0][:-1]] = int(fields[1]) * 1024
+        require(set(values) == {'MemTotal', 'MemAvailable'} and values['MemTotal'] > 0
+                and values['MemAvailable'] <= values['MemTotal'],
+                'memory_source', 'memory counters unavailable')
+        return values
+
+    def physical_memory(self, mountinfo):
+        path = self.HOST_MEMORY
+        required = any(len(fields := line.split()) >= 10 and fields[4] == '/proc/meminfo'
+                       and fields[fields.index('-') + 1] == 'fuse.lxcfs'
+                       for line in mountinfo.splitlines() if ' - ' in line)
+        if not os.path.lexists(path):
+            require(not required, 'memory_source', 'physical memory source required for virtualized counters')
+            return None
+        for parent in (path, *path.parents):
+            require(not parent.is_symlink(), 'memory_source', 'physical memory source is unsafe')
+        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd) as stream:
+            descriptor = (self.PROC_ROOT / f'self/fdinfo/{fd}').read_text()
+            ids = [line.split()[1] for line in descriptor.splitlines() if line.startswith('mnt_id:')]
+            require(len(ids) == 1, 'memory_source', 'physical memory mount evidence unavailable')
+            mounts = [line.split() for line in mountinfo.splitlines() if line.split()[0] == ids[0]]
+            require(len(mounts) == 1, 'memory_source', 'physical memory mount evidence unavailable')
+            fields = mounts[0]
+            require(fields[3] == '/meminfo' and fields[4] == str(path)
+                    and fields[fields.index('-') + 1] == 'proc'
+                    and 'ro' in fields[5].split(',') and 'rw' not in fields[5].split(',')
+                    and os.fstatvfs(fd).f_flag & os.ST_RDONLY,
+                    'memory_source', 'physical memory source is not an exact read-only procfs bind')
+            body = stream.read(65537)
+            require(len(body) <= 65536, 'memory_source', 'physical memory counters unavailable')
+            return self.meminfo(body)
+
+    def memory_capacity(self):
+        try:
+            visible = self.meminfo((self.PROC_ROOT / 'meminfo').read_text())
+            physical = self.physical_memory((self.PROC_ROOT / 'self/mountinfo').read_text())
+            available, total, source = visible['MemAvailable'], visible['MemTotal'], 'visible'
+            if physical is not None:
+                total = min(total, physical['MemTotal'])
+                if physical['MemAvailable'] < available:
+                    available, source = physical['MemAvailable'], 'physical'
+            # Runtime units explicitly use system.slice, outside the owner's service ceiling.
+            current = self.CGROUP_ROOT / 'system.slice'
+            require(current.is_dir(), 'memory_source', 'runtime allocation cgroup unavailable')
+            headroom = None
+            while True:
+                maximum = current / 'memory.max'
+                if maximum.exists():
+                    limit = maximum.read_text().strip()
+                    used = int((current / 'memory.current').read_text().strip())
+                    require(used >= 0 and (limit == 'max' or limit.isdigit()),
+                            'memory_source', 'invalid allocation memory limit')
+                    if limit != 'max':
+                        limit = int(limit)
+                        free = max(0, limit - used)
+                        total = min(total, limit)
+                        headroom = min(headroom, free) if headroom is not None else free
+                        if free < available:
+                            available, source = free, 'cgroup'
+                else:
+                    require(current == self.CGROUP_ROOT
+                            and 'memory' in (current / 'cgroup.controllers').read_text().split(),
+                            'memory_source', 'allocation memory controller unavailable')
+                if current == self.CGROUP_ROOT:
+                    break
+                current = current.parent
+            return dict(visible_available_bytes=visible['MemAvailable'],
+                        physical_available_bytes=physical['MemAvailable'] if physical else None,
+                        cgroup_headroom_bytes=headroom, available_bytes=available, total_bytes=total,
+                        limiting_source=source, reserve_bytes=MEMORY_RESERVE)
+        except (OSError, ValueError, IndexError) as exc:
+            raise PoolError('memory_source', 'allocation memory evidence unavailable') from exc
+
+    def check_capacity(self, request, reserved):
+        capacity = self.memory_capacity()
+        pending = sum(self.budget(item['request']) for item in reserved
+                      if item['state'] != 'held' and 'ready_at' not in item)
+        committed = sum(self.budget(item['request']) for item in reserved)
+        required = self.budget(request)
+        require(required + committed + MEMORY_RESERVE <= capacity['total_bytes']
+                and required + pending + MEMORY_RESERVE <= capacity['available_bytes'], 'capacity',
+                f'insufficient memory: required={required} available={capacity["available_bytes"]} '
+                f'reserve={MEMORY_RESERVE} pending={pending} source={capacity["limiting_source"]}; no slot was preempted')
+
+    def broker_memory(self, process='self'):
+        try:
+            memberships = [line[3:] for line in (self.PROC_ROOT / str(process) / 'cgroup').read_text().splitlines()
+                           if line.startswith('0::/')]
+            require(len(memberships) == 1 and '..' not in memberships[0].split('/')
+                    and memberships[0].endswith('/system.slice/subyard-android-pool.service'),
+                    'memory_source', 'broker memory scope unavailable')
+            current = self.CGROUP_ROOT / memberships[0].lstrip('/')
+            own = current
+            limits = []
+            while True:
+                if (current / 'memory.max').exists():
+                    value = (current / 'memory.max').read_text().strip()
+                    if value != 'max':
+                        limits.append(int(value))
+                else:
+                    require(current == self.CGROUP_ROOT, 'memory_source', 'broker memory limit unavailable')
+                if current == self.CGROUP_ROOT:
+                    break
+                current = current.parent
+            memory = int((own / 'memory.max').read_text().strip())
+            swap = int((own / 'memory.swap.max').read_text().strip())
+            require(memory == 2 * 1024**3 and swap == 2 * 1024**3 and min(limits) >= memory,
+                    'memory_source', 'broker requires 2 GiB RAM and 2 GiB swap limits within ancestor RAM ceilings')
+            return dict(ram_limit_bytes=memory, swap_limit_bytes=swap,
+                        ram_current_bytes=int((own / 'memory.current').read_text().strip()),
+                        swap_current_bytes=int((own / 'memory.swap.current').read_text().strip()),
+                        effective_ram_limit_bytes=min(limits))
+        except (OSError, ValueError) as exc:
+            raise PoolError('memory_source', 'broker memory evidence unavailable') from exc
 
     @staticmethod
     def unit(slot):
@@ -514,21 +646,11 @@ class Runtime:
             finally:
                 shutil.rmtree(probe, ignore_errors=True)
 
-        info = {line.split(':')[0]: int(line.split()[1]) * 1024
-                for line in Path('/proc/meminfo').read_text().splitlines() if line.startswith(('MemTotal:', 'MemAvailable:'))}
-        budget = lambda item: (PRESETS[item['device']][3] + RUNTIME_OVERHEAD_MIB) * 1024**2
-        required = budget(request)
-        reserved_bytes = sum(budget(item) for item in reserved)
-        require(required + reserved_bytes + 512 * 1024**2 <= info['MemTotal']
-                and required <= info['MemAvailable'], 'capacity',
-                'insufficient memory for this allocation and existing lease budgets; no slot was preempted')
+        self.check_capacity(request, reserved)
 
     def start(self, slot, image, cancel):
         request = slot['request']
         width, height, density, memory = PRESETS[request['device']]
-        available = int(next(line.split()[1] for line in Path('/proc/meminfo').read_text().splitlines()
-                             if line.startswith('MemAvailable:'))) * 1024
-        require(available >= (memory + RUNTIME_OVERHEAD_MIB) * 1024**2, 'capacity', 'insufficient memory for requested emulator')
         # Require initial free-space headroom for every slot; this is not a userdata quota.
         require(shutil.disk_usage(self.root).free > (2 * self.config['size'] + 1) * 1024**3,
                 'capacity', 'insufficient space for disposable Android userdata and yard disk headroom')
@@ -565,6 +687,7 @@ class Runtime:
         namespace = self.create_namespace(slot, directory)
         run(['systemd-run', '--quiet', '--collect', '--unit', self.unit(slot), '--service-type=exec',
              '--property=User=' + account.pw_name, '--property=KillMode=control-group',
+             '--property=Slice=system.slice',
              '--property=NetworkNamespacePath=' + str(namespace), '--property=PrivateTmp=yes', '--property=NoNewPrivileges=yes',
              '--property=ProtectHome=yes', '--property=ProtectSystem=strict',
              '--property=ReadWritePaths=' + str(home),
@@ -847,9 +970,23 @@ class Pool:
 
     def status(self):
         with self.lock:
-            return dict(schema=SCHEMA, schema_version=1, resource_type='android-emulator', resource_id='emulator',
+            result = dict(schema=SCHEMA, schema_version=1, resource_type='android-emulator', resource_id='emulator',
                         defaults=self.normalize({}), graphics_mode=self.config.get('gpu', 'host'), heartbeat_seconds=HEARTBEAT,
                         ttl_seconds=TTL, slots=[self.public(s) for s in self.slots])
+            try:
+                capacity = self.runtime.memory_capacity()
+                capacity['pending_bytes'] = sum(self.runtime.budget(s['request']) for s in self.slots
+                                                if 'request' in s and s['state'] != 'held' and 'ready_at' not in s)
+                capacity['admission_headroom_bytes'] = max(0, capacity['available_bytes']
+                                                          - MEMORY_RESERVE - capacity['pending_bytes'])
+                result['memory'] = capacity
+            except PoolError as exc:
+                result['memory_error'] = exc.code
+            try:
+                result['broker_memory'] = self.runtime.broker_memory()
+            except PoolError as exc:
+                result['broker_memory_error'] = exc.code
+            return result
 
     def catalog(self):
         images = []
@@ -894,7 +1031,7 @@ class Pool:
             require(not any(s.get('credential') == digest for s in self.slots), 'credential', 'credential already used')
             slot = next((s for s in self.slots if s['state'] == 'available' and s['slot_id'] not in self.workers), None)
             require(slot is not None, 'busy', 'all Android emulator slots are occupied')
-            self.runtime.preflight(request, [s['request'] for s in self.slots if 'request' in s], slot)
+            self.runtime.preflight(request, [s for s in self.slots if 'request' in s], slot)
             sdk_lock = open(self.config.get('sdk_lock', '/run/lock/subyard-android/sdk.lock'), 'a')
             try:
                 fcntl.flock(sdk_lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
@@ -917,6 +1054,9 @@ class Pool:
     def provision(self, slot, cancel):
         try:
             image = self.images.ensure(slot['image'], cancel)
+            with self.lock:
+                require(not cancel.is_set(), 'cancelled', 'allocation cancelled')
+                self.runtime.check_capacity(slot['request'], [s for s in self.slots if 'request' in s and s is not slot])
             self.runtime.start(slot, image, cancel)
             with self.lock:
                 require(slot['state'] == 'provisioning' and not cancel.is_set(), 'cancelled', 'allocation cancelled')
@@ -1213,6 +1353,7 @@ def serve():
     # A broker restart revokes old capabilities and cleans every recorded runtime before serving.
     pool.reap(recovery=True)
     pool.runtime.recover(pool.slots)
+    pool.runtime.broker_memory()
     server = Server(str(address), Handler)
     server.pool = pool
     os.chmod(address, 0o666)

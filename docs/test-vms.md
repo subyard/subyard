@@ -81,6 +81,10 @@ is accounted for by host available memory; ready, stopped and empty environments
 growth promise. Working VMs and builders have autostart disabled; each new allocation passes admission.
 An interrupted provisioning request retains its admitted RAM promise until cleanup finishes,
 because an in-flight start may still consume it.
+Successful native starts alone do not release that promise: boot, tool and transport readiness
+can still be incomplete. The existing persisted phase remains `provisioning` until `MarkHeld`;
+it conservatively keeps the full promise even while started guests occupy physical pages.
+Earlier release would require crash-safe phase evidence and compatibility for retained readers.
 Bounded disk growth remains reserved for existing allocations. Admission also accounts for
 configured safety reserves, measured image size and filesystem/pool headroom.
 Memory admission uses the lower of visible memory/cgroup headroom and physical-owner
@@ -92,14 +96,27 @@ malformed or unverified physical counters refuse admission rather than falling b
 Swap is not RAM headroom. Status reports `physical_available_bytes` and
 `physical_available_known` separately from the limiting visible cgroup; this does not establish
 outer-host cgroup limits, peaks or OOM counters.
+The visible cgroup walk follows the Incus daemon's guest-launch ancestry, preserving finite
+daemon and slice ceilings. The broker worker's separate process ceiling is not a VM budget.
 No per-VM resident memory measurement is needed. Status reports pending RAM promises through
 `reserved_vm_memory_bytes` and per-slot `memory_commitment_bytes` and
 `remaining_memory_growth_bytes`; held slots report zero in these fields. With no other pending
 requests, a standard 4.5 GiB singleton needs 8.5 GiB available and a 9 GiB pair needs 13 GiB
 available to preserve the default 4 GiB host reserve. Other provisioning requests and builders
 can require additional headroom.
+`resources.memory` also reports raw `visible_available_bytes`, `cgroup_headroom_bytes`
+(applicable only when `limit_available=true`) and `limiting_source` as `visible_meminfo`,
+`visible_cgroup` or `verified_physical_meminfo`. `resources.memory_admission` shows the
+effective available bytes, reserve, pending VM and builder promises, and saturating headroom:
+`max(0, effective available - reserve - pending VM - pending builder)`. Swap never increases it.
+An active builder serializes new admission under the image lock until confirmed cleanup; status
+reports its separate promise and a conservative headroom bound because the retained builder
+record does not identify an associated requesting slot.
 A typed `capacity` refusal identifies `memory` or `disk` and is safe to retry after resources are
-freed. It does not quarantine a healthy slot. Partial provisioning failures are cleaned up and
+freed. Memory refusals include this request's required RAM, type/count and the same numeric
+admission components in the existing bounded message, preserving the released response envelope.
+An occupied-slot refusal remains a distinct `busy` outcome.
+It does not quarantine a healthy slot. Partial provisioning failures are cleaned up and
 recovered automatically after 1, 5 and 15 minutes, then hourly while the slot remains eligible.
 
 Physical headroom is checked against the entire backing filesystem. With the `dir` driver,
@@ -127,6 +144,31 @@ installed by `yard init`. These initial defaults still require workload peak mea
 | `E2E_DISK_RESERVE` | `5GiB` | Free physical storage reserve |
 | `E2E_MEMORY_RESERVE` | `4GiB` | Memory headroom outside VM commitments |
 | `E2E_VM_OVERHEAD` | `512MiB` | Additional RAM reserved per VM |
+
+Broker workers have a separate 4 GiB process budget: 2 GiB RAM and up to 2 GiB swap.
+Setup installs the native `subyardtestvms.slice` budget and reapplies it on repeat runs;
+service dependencies recreate it after restart. `resources.broker_memory` reports its own
+RAM/swap use and limits, separately from guest commitments and host admission. Its verified
+allocation scope is the visible cgroup namespace only; hidden owner-host ancestor evidence
+remains unavailable. An allocation ceiling below 2 GiB RAM fails closed.
+The 4 GiB host safety reserve is a separate admission margin. The broker's occupied pages
+already affect available memory, so its configured 4 GiB budget is not subtracted a second time.
+Incus creates guest and builder processes outside the broker's process budget; their VM limits
+and per-VM overhead apply independently.
+Lifecycle and reaper units run directly in the slice. Other workers run in transient services
+created by PID1; the original process execs
+`systemd-run` as its native stdio transport, retaining the caller's existing resource ceilings.
+Direct Incus commands with an invisible parent first exec a small transport waiter at the
+original attached PID; its child then has a visible requester to verify. The waiter forwards
+literal arguments and stdin, preserves the child exit status and exits promptly on cancellation.
+A root-private native credential carries request inputs; capabilities stay out of unit
+Environment and command properties. A persistent drop-in restores `LoadCredential` only for
+this worker family after container images' type-wide credential reset, preserving their other
+settings. The protected source filename matches the exact native unit. The worker verifies both
+the transport and original requester's PID/start identities and its exact service membership. If either dies, cancellation
+begins within one second and a bounded fallback terminates the service; systemd removes its
+remaining child processes and collects the transient unit. The minute reaper removes protected
+handoff files left by a crashed launch.
 
 Values must be positive `MiB` or `GiB` sizes, except `E2E_DISK_BUDGET=0GiB`, which disables
 the optional quota. Physical free-space reserves and outstanding VM/builder commitments always
@@ -206,7 +248,7 @@ Inspect the redacted pool without acquiring:
 
 ```text
 SLOT     STATE        YARD             PROJECT                          RUN        PURPOSE                  AGE      EXPIRES
-slot-001 held         default          Subyard-2                        c291a4ef   release-migration        3m12s    in 9m48s
+slot-001 held         default          Subyard-2                        c291a4ef   release-migration        3m12s    in 16m48s
 slot-002 available    -                -                                -          -                        -        -
 ```
 
@@ -429,7 +471,12 @@ device without restarting the yard, and verifies boot persistence. It holds a sm
 pair during ordinary update and rollback, checking lease identity, guest uptime and continued
 renewal. Its cold base builder reserves 30 GiB of disk before the nested pair can start,
 so use the generic 40 GiB `android-test` target; the standard 20 GiB guest has insufficient
-disk headroom. The fixture verifies available disk before requesting the nested lease:
+disk headroom. The fixture verifies available disk before requesting the nested lease.
+It also verifies the broker's separate 2 GiB RAM plus 2 GiB swap budget across setup and boot,
+compares live owner counters with admission arithmetic, and runs a pair whose combined startup
+budget is 5 GiB outside that process ceiling. Finally it kills the nested requesting wrapper,
+checks that renewal stops and waits for the advertised 20-minute expiry and disposable cleanup,
+then verifies SSH fencing and clean reacquisition. Run it with:
 
 ```sh
 dev/agent-e2e.sh --slot "$slot" --type android-test --purpose broker-memory-boundary --vm 1 -- \
@@ -755,8 +802,19 @@ dev/agent-e2e.sh --slot "$slot" --ssh 1
 dev/agent-e2e.sh --slot "$slot" --ssh 2 -- id -u
 ```
 
-The wrapper creates an ephemeral Ed25519 key per lease, starts a keeper that renews once per minute,
-and releases in its exit trap. Ten minutes without a successful heartbeat expires the lease. For a
+The wrapper creates an ephemeral Ed25519 key per lease, starts a keeper that renews every five minutes
+(300 seconds), and releases in its exit trap. Twenty minutes (1200 seconds) after the last successful
+renewal expires a held lease; before its first renewal, that deadline starts when the grant becomes
+held. Provisioning, boot and download deadlines are separate. More frequent renewals from older
+clients remain valid, and changing the installed timing does not rewrite existing lease deadlines.
+
+The keeper checks the wrapper and its original launching process once per second, including while
+a renewal transport is blocked. It verifies process start times and parent identities, so PID reuse,
+zombies and an orphaned detached wrapper cannot keep renewing. The launching process is the local
+requester/session boundary; a live child alone does not establish that its requester is still active.
+An interactive shell that intentionally keeps running remains a live requester. After wrapper or
+requester death, the keeper stops and closes its timer and renewal transport; abrupt wrapper death
+leaves the broker to expire and fence the lease through its ordinary reaper. For a
 held slot, immediate busy, wait progress and timeout diagnostics use the bounded form
 `owner=YARD/PROJECT run=RUN purpose=PURPOSE acquired=TIME expires=TIME label=LABEL`. They never include
 a controller identity, lease credential, endpoint, host key or private path. The raw OpenSSH config
@@ -795,6 +853,11 @@ Release, heartbeat expiry, operator drain or outer stop:
 2. removes guest lease keys when agents are reachable;
 3. verifies marker ownership, stops and deletes the disposable VM disks;
 4. publishes `available` only after cleanup is verified.
+
+Both standard and Android VM allocations use this expiry policy. The server reaper cadence is
+independent of the five-minute renewal cadence: cleanup begins on its next ordinary pass after
+expiry, without another five-minute delay. Shared bases and caches survive disposable allocation
+cleanup; cleanup failures keep the slot unavailable through quarantine and recovery.
 
 A rebooting guest does not prevent fencing at the data route. No subsequent lease receives a prior
 lease's disk or key. Generation, epoch, lease ID and server-side capability verification fence old

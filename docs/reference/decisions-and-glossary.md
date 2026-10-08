@@ -387,7 +387,12 @@ owner/purpose/timestamps, revoke, and
 provisioning/available/held/draining/quarantined/recovering/unavailable states. Backends remain
 resource-owned: Android adapter, root test broker/SSH fencing, credential broker. Shared
 semantics/conformance do not require a common daemon/database. Lease timing and resource limits
-belong to the owning backend; the test-VM runner uses minute heartbeats and ten-minute expiry.
+belong to the owning backend; the test-VM runner renews every five minutes and held leases expire
+twenty minutes after the last successful renewal (or the initial held grant). Provisioning deadlines
+and server reaper cadence remain separate. The runner's keeper verifies the wrapper's and original
+launching process's start times and parent identities every second, including during renewal
+transport, and closes its timer and transport after either owner disappears. A detached child is
+not evidence of a live requester/session; PID reuse does not preserve renewal authority.
 
 Test pool defaults to two configurable outer slots shared across environment types. Each acquire
 atomically reserves an explicitly chosen slot and creates fresh disposable VM disks from a

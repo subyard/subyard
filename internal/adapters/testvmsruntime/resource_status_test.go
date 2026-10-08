@@ -14,6 +14,11 @@ import (
 	"time"
 )
 
+func syntheticBrokerMemory() (BrokerMemoryCapacity, error) {
+	return BrokerMemoryCapacity{RAMLimit: brokerRAMBytes, SwapLimit: brokerSwapBytes,
+		EffectiveRAMLimit: brokerRAMBytes, AllocationScopeVerified: true}, nil
+}
+
 func TestResourceStatusIsReadOnlyAndSeparatesPhysicalUsage(t *testing.T) {
 	cfg := fixtureConfig(t)
 	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
@@ -27,10 +32,10 @@ func TestResourceStatusIsReadOnlyAndSeparatesPhysicalUsage(t *testing.T) {
 			return nil, nil, fmt.Errorf("status attempted unexpected operation: %v", args)
 		}
 	}}
-	rt := Runtime{Config: cfg, Runner: runner, Now: func() time.Time { return now }, cacheProbe: func(context.Context) (CacheUsage, error) {
+	rt := Runtime{Config: cfg, Runner: runner, brokerMemoryProbe: syntheticBrokerMemory, Now: func() time.Time { return now }, cacheProbe: func(context.Context) (CacheUsage, error) {
 		return CacheUsage{Driver: "zfs", ChargedBytes: 1234, Accounting: "conservative-shared-inclusive"}, nil
 	}, memoryProbe: func() (MemoryCapacity, error) {
-		return capPhysicalMemory(MemoryCapacity{Available: 32 << 30, scope: "synthetic-boundary",
+		return capPhysicalMemory(MemoryCapacity{Available: 32 << 30, VisibleAvailable: 32 << 30, scope: "synthetic-boundary",
 			OuterHostEvidence: "unavailable: allocation boundary"}, 16<<30), nil
 	}, usageProbe: func(_ context.Context, _ LeaseSlot) allocationUsage {
 		return allocationUsage{disk: 5 << 30, diskKnown: true}
@@ -38,6 +43,9 @@ func TestResourceStatusIsReadOnlyAndSeparatesPhysicalUsage(t *testing.T) {
 	empty := rt.ResourceStatus(context.Background(), LeasePool{})
 	if empty.Budgets["memory_reserve_bytes"] != 4<<30 {
 		t.Fatalf("incorrect default memory reserve: %+v", empty.Budgets)
+	}
+	if empty.MemoryAdmission == nil || empty.MemoryAdmission.Headroom != 12<<30 || empty.BrokerMemory == nil {
+		t.Fatalf("memory arithmetic or own budget omitted: %+v", empty)
 	}
 	if len(empty.Bases) != 0 {
 		t.Fatal("missing registry invented bases")
@@ -69,6 +77,9 @@ func TestResourceStatusIsReadOnlyAndSeparatesPhysicalUsage(t *testing.T) {
 	}
 	if value.VirtualDiskCapacity != 2*budgetBytes(spec.Disk, "20GiB") || value.ReservedMemory != 0 || value.Builder.DiskPeak != 120<<30 {
 		t.Fatal("reservations omitted or mixed with physical usage")
+	}
+	if value.MemoryAdmission.Headroom != 4<<30 || value.MemoryAdmission.PendingBuilder != 8<<30 || value.MemoryAdmission.PendingVM != 0 {
+		t.Fatalf("builder promise hidden or held RAM counted twice: %+v", value.MemoryAdmission)
 	}
 	if len(value.Slots) != 1 || value.ConfirmedWorkingDisk != 5<<30 || value.WorkingDiskEvidence != "complete" ||
 		value.Slots[0].RemainingDisk != value.VirtualDiskCapacity-5<<30 ||
@@ -117,7 +128,8 @@ func TestResourceStatusScalesRequestedVMCount(t *testing.T) {
 			}
 			spec.Count = count
 			rt := Runtime{
-				Config: cfg,
+				Config:            cfg,
+				brokerMemoryProbe: syntheticBrokerMemory,
 				memoryProbe: func() (MemoryCapacity, error) {
 					return MemoryCapacity{Available: 16 << 30}, nil
 				},
@@ -143,6 +155,9 @@ func TestResourceStatusScalesRequestedVMCount(t *testing.T) {
 			wantMemory, wantDisk := uint64(count)*(9<<29), uint64(count)*(20<<30)
 			if len(status.Errors) != 0 || status.ReservedMemory != wantMemory || status.VirtualDiskCapacity != wantDisk || len(status.Slots) != 1 {
 				t.Fatalf("wrong aggregate commitments: %+v", status)
+			}
+			if status.MemoryAdmission.Headroom != (12<<30)-wantMemory || status.MemoryAdmission.PendingVM != wantMemory {
+				t.Fatalf("status arithmetic differs from admission: %+v", status.MemoryAdmission)
 			}
 			slot := status.Slots[0]
 			if slot.MemoryCommitment != wantMemory || slot.RemainingMemory != wantMemory || slot.VirtualDiskCapacity != wantDisk || slot.RemainingDisk != wantDisk {

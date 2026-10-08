@@ -569,17 +569,42 @@ retire_agent_static_keys
 reconcile_inner_incus
 install_inner_firewall
 
+# This top-level slice contains only broker workers. The Go entrypoint
+# execs systemd-run as the stdio transport; PID1 starts each real worker inside
+# the slice. Existing SSH/lifecycle transport ceilings remain in place, and
+# Incus guests and builders are daemon-created outside the process budget.
+cat > /etc/systemd/system/subyardtestvms.slice <<'EOF'
+[Unit]
+Description=Subyard test VM broker process memory budget
+
+[Slice]
+MemoryAccounting=yes
+MemoryMax=2G
+MemorySwapMax=2G
+EOF
+
+# Container images may reset LoadCredential in a type-wide LXC drop-in.
+# Restore only this worker family's credential after that reset, preserving
+# every other image/operator setting. %N binds the source to the exact unit.
+install -d -m 0755 /etc/systemd/system/subyard-test-vms-worker-.service.d
+cat > /etc/systemd/system/subyard-test-vms-worker-.service.d/zzzz-subyard-credentials.conf <<'EOF'
+[Service]
+LoadCredential=subyard-broker-request:/run/subyard-test-vms-workers/%N.json
+EOF
+chmod 0644 /etc/systemd/system/subyard-test-vms-worker-.service.d/zzzz-subyard-credentials.conf
+
 systemctl disable --now subyard-test-vms-gc.timer >/dev/null 2>&1 || true
 rm -f /etc/systemd/system/subyard-test-vms-gc.service \
   /etc/systemd/system/subyard-test-vms-gc.timer
 cat > /etc/systemd/system/subyard-test-vms-lease-reaper.service <<'EOF'
 [Unit]
 Description=Fence expired Subyard test VM leases
-After=incus.service
-Requires=incus.service
+After=incus.service subyardtestvms.slice
+Requires=incus.service subyardtestvms.slice
 
 [Service]
 Type=oneshot
+Slice=subyardtestvms.slice
 ExecStart=/usr/local/libexec/subyard/test-vms-inner _test-vms-worker gc
 EOF
 cat > /etc/systemd/system/subyard-test-vms-lease-reaper.timer <<'EOF'
@@ -597,11 +622,12 @@ EOF
 cat > /etc/systemd/system/subyard-test-vms-broker.service <<'EOF'
 [Unit]
 Description=Subyard test VM lease broker lifecycle
-After=incus.service
-Requires=incus.service
+After=incus.service subyardtestvms.slice
+Requires=incus.service subyardtestvms.slice
 
 [Service]
 Type=oneshot
+Slice=subyardtestvms.slice
 RemainAfterExit=yes
 ExecStart=/usr/local/libexec/subyard/test-vms-inner _test-vms-worker broker-start
 ExecStart=/usr/local/libexec/subyard/test-vms-inner _test-vms-worker gc
@@ -612,6 +638,9 @@ TimeoutStopSec=10min
 WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
+systemctl start subyardtestvms.slice
+# Apply changed limits to an already-active slice on a repeated setup.
+systemctl set-property --runtime subyardtestvms.slice MemoryMax=2G MemorySwapMax=2G
 
 SUBYARD_TEST_VMS_CONFIG="$config_candidate" \
   /usr/local/libexec/subyard/test-vms-inner _test-vms-worker reconcile-pool --yes

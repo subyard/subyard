@@ -36,7 +36,8 @@ YARD=test-yard
 # These functions own the keeper, release capability and bounded process cleanup.
 # shellcheck disable=SC1090
 . <(sed -n '/^hold_lease() (/,/^)/p; /^start_holder_child() {/,/^}/p; /^stop_holder_child() {/,/^}/p; /^recovery_monotonic_seconds() {/,/^}/p' \
-  "$ROOT/dev/e2e/p0-broker-recovery.sh")
+  "$ROOT/dev/e2e/p0-broker-recovery.sh" | sed '/^  start_lease_keeper$/a\
+  printf "%s\\t%s\\n" "$BASHPID" "$LEASE_KEEPER_PID" > "$STATE_PARENT/$client.processes"')
 
 die() { printf 'broker-memory-boundary: %s\n' "$*" >&2; exit 2; }
 outer_exec() { incus exec "$INSTANCE" --project "$PROJECT" -- "$@"; }
@@ -162,6 +163,323 @@ sample_available() {
   printf '%s\n' "$mounted"
 }
 
+assert_memory_accounting() {
+  local status before after
+  before="$(awk '/^MemAvailable:/ {print $2 * 1024}' /proc/meminfo)"
+  status="$(runtime_yard -Y test-yard test-vms status --json)"
+  after="$(awk '/^MemAvailable:/ {print $2 * 1024}' /proc/meminfo)"
+  jq -e --argjson before "$before" --argjson after "$after" '
+    .resources as $r |
+    $r.broker_memory.ram_limit_bytes == 2147483648 and
+    $r.broker_memory.swap_limit_bytes == 2147483648 and
+    $r.broker_memory.effective_ram_limit_bytes >= 2147483648 and
+    $r.broker_memory.allocation_scope_verified == true and
+    $r.memory.physical_available_known == true and
+    $r.memory.physical_available_bytes >= ([$before, $after] | min) - 67108864 and
+    $r.memory.physical_available_bytes <= ([$before, $after] | max) + 67108864 and
+    $r.memory_admission.headroom_bytes ==
+      ([0, ($r.memory_admission.effective_available_bytes -
+        $r.memory_admission.reserve_bytes - $r.memory_admission.pending_vm_bytes -
+        $r.memory_admission.pending_builder_bytes)] | max)
+  ' <<< "$status" >/dev/null || die 'broker budget or admission arithmetic did not match live bounds'
+  # Keep only safe numeric counters and public source classifications in evidence.
+  printf '%s\n' "$status" | jq -c '
+    .resources | {memory, memory_admission, broker_memory,
+      reserved_vm_memory_bytes, slots: [.slots[] | {slot_id, memory_commitment_bytes}]}'
+  printf 'owner-memory '
+  awk '/^(MemTotal|MemFree|MemAvailable|Buffers|Cached|SReclaimable|SwapTotal|SwapFree):/ {printf "%s%s_kib=%s", sep, substr($1,1,length($1)-1), $2; sep=" "} END {print ""}' /proc/meminfo
+  printf 'visible-memory '
+  outer_exec awk '/^(MemTotal|MemFree|MemAvailable|Buffers|Cached|SReclaimable|SwapTotal|SwapFree):/ {printf "%s%s_kib=%s", sep, substr($1,1,length($1)-1), $2; sep=" "} END {print ""}' /proc/meminfo
+}
+
+assert_owned_pool() {
+  outer_exec python3 - <<'PYTHON'
+import json, pathlib, stat
+def owned_pool(root, config, marker, owner=(0, 0)):
+    for path, mode, directory in ((root, 0o700, True), (config, 0o644, False),
+                                  (marker, 0o644, False), (root / "leases.json", 0o600, False),
+                                  (root / "leases.json.lock", 0o600, False)):
+        assert not any(p.is_symlink() for p in (path, *path.parents)), "pool fixture path is a symlink"
+        info = path.stat()
+        assert (info.st_uid, info.st_gid) == owner and stat.S_IMODE(info.st_mode) == mode, "pool fixture ownership or mode differs"
+        assert (stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)), "pool fixture file type differs"
+    expected = {"E2E_VM_STATE_DIR": str(root), "E2E_VM_PROJECT": "subyard-e2e-vms", "E2E_VM_PREFIX": "e2e-vm"}
+    seen = set()
+    for line in config.read_text().splitlines():
+        key, separator, value = line.partition("=")
+        if key in expected:
+            assert separator and key not in seen and value == expected[key], "pool fixture configuration differs"
+            seen.add(key)
+    assert "E2E_VM_STATE_DIR" in seen, "pool fixture state root is not configured"
+    # Provisioning owns the slot-account marker before any VM is allocated.
+    # The pool root has no marker until a runtime explicitly creates one.
+    assert marker.read_text().strip() == "test-vms-v1", "slot-account marker differs"
+    pool = json.loads((root / "leases.json").read_text())
+    assert pool["schema_version"] == 2 and pool["resource_type"] == "agent-e2e" and pool["resource_id"] == "test-vms", "pool fixture identity differs"
+    assert pool["slots"] and any(s["slot_id"] == "slot-001" for s in pool["slots"]), "pool fixture slot is missing"
+owned_pool(pathlib.Path("/var/lib/subyard/test-vms"), pathlib.Path("/etc/subyard/test-vms.env"),
+           pathlib.Path("/var/lib/subyard/e2e-slots/1/.subyard-managed"))
+PYTHON
+}
+
+assert_native_worker_lifetime() {
+  printf '  [ .. ] checking native worker requester and transport lifetime\n'
+  assert_owned_device
+  assert_owned_pool
+  outer_exec python3 - "$ENGINE" <<'PYTHON'
+import fcntl, json, os, pathlib, signal, subprocess, sys, time
+engine = sys.argv[1]
+root = pathlib.Path("/var/lib/subyard/test-vms")
+assert all(s["state"] == "available" for s in json.loads((root / "leases.json").read_text())["slots"])
+lockpath = root / "leases.json.lock"
+assert not lockpath.is_symlink() and lockpath.stat().st_uid == 0 and lockpath.stat().st_mode & 0o777 == 0o600
+show = lambda unit, prop: subprocess.check_output(["systemctl", "show", unit, "--property=" + prop, "--value"], stderr=subprocess.DEVNULL).decode().strip()
+start = lambda pid: pathlib.Path("/proc", str(pid), "stat").read_text().rsplit(") ", 1)[1].split()[19]
+request = "renew slot-001 memory-boundary-invalid 1 memory-boundary-synthetic-capability"
+with lockpath.open("r+") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    for victim in ("requester", "transport"):
+        owner = subprocess.Popen([sys.executable, "-c", "import subprocess,sys,time; p=subprocess.Popen([sys.argv[1], '_test-vms-facade'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); print(p.pid, flush=True); time.sleep(60)", engine],
+                                 env=dict(os.environ, SSH_ORIGINAL_COMMAND=request), stdout=subprocess.PIPE)
+        unit = ""
+        bridge = 0
+        identity = ""
+        try:
+            bridge = int(owner.stdout.readline())
+            identity = start(bridge)
+            unit = "subyard-test-vms-worker-" + str(bridge) + "-" + identity + ".service"
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                worker = int(show(unit, "MainPID") or "0")
+                source = pathlib.Path("/run/subyard-test-vms-workers", unit.removesuffix(".service") + ".json")
+                if worker > 1 and not source.exists():
+                    break
+                assert owner.poll() is None, "native requester exited before credential restoration"
+                time.sleep(0.1)
+            else:
+                raise AssertionError("native worker did not restore its credential")
+            assert pathlib.Path("/proc", str(worker), "cgroup").read_text().strip() == "0::/subyardtestvms.slice/" + unit
+            assert pathlib.Path("/proc", str(worker), "root/run/credentials", unit, "subyard-broker-request").is_file()
+            # Inspect privately: neither raw unit environment nor request inputs enter evidence.
+            for prop in ("Environment", "ExecStart"):
+                value = show(unit, prop)
+                assert "SSH_ORIGINAL_COMMAND=" not in value and "memory-boundary-synthetic-capability" not in value, "unit properties exposed request inputs"
+            if victim == "requester":
+                owner.kill()
+                owner.wait(timeout=5)
+            else:
+                assert start(bridge) == identity
+                os.kill(bridge, signal.SIGKILL)
+                assert owner.poll() is None
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                if show(unit, "LoadState") == "not-found" and not pathlib.Path("/sys/fs/cgroup/subyardtestvms.slice", unit).exists():
+                    break
+                time.sleep(0.2)
+            else:
+                raise AssertionError("dead " + victim + " retained native worker service")
+            assert not source.exists(), "native request source remained after cleanup"
+        finally:
+            if owner.poll() is None:
+                owner.kill()
+            owner.wait(timeout=5)
+            if unit and show(unit, "LoadState") != "not-found":
+                subprocess.run(["systemctl", "stop", unit], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20, check=True)
+            if bridge and pathlib.Path("/proc", str(bridge)).exists() and start(bridge) == identity:
+                os.kill(bridge, signal.SIGKILL)
+print("  [ ok ] native credentials hide inputs; requester and transport death collect bounded workers")
+PYTHON
+}
+
+assert_native_namespace_waiter_lifetime() {
+  printf '  [ .. ] checking direct Incus namespace waiter lifetime\n'
+  assert_owned_device
+  assert_owned_pool
+  python3 - "$INSTANCE" "$PROJECT" "$ENGINE" <<'PYTHON'
+import json, select, subprocess, sys, time
+instance, project, engine = sys.argv[1:]
+base = ["incus", "exec", instance, "--project", project]
+locker_code = '''import fcntl,json,os,pathlib,time
+root=pathlib.Path("/var/lib/subyard/test-vms")
+assert all(s["state"]=="available" for s in json.loads((root/"leases.json").read_text())["slots"])
+path=root/"leases.json.lock"
+assert not path.is_symlink() and path.stat().st_uid==0 and path.stat().st_mode&0o777==0o600
+with path.open("r+") as lock:
+ fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+ assert all(s["state"]=="available" for s in json.loads((root/"leases.json").read_text())["slots"])
+ start=pathlib.Path("/proc/self/stat").read_text().rsplit(") ",1)[1].split()[19]
+ print(os.getpid(),start,flush=True)
+ time.sleep(60)
+'''
+inspect_code = '''import json,os,pathlib,re,subprocess
+request="renew slot-001 memory-boundary-invalid 1 memory-boundary-synthetic-capability"
+stat=lambda pid:pathlib.Path("/proc",str(pid),"stat").read_text().rsplit(") ",1)[1].split()
+show=lambda unit,prop:subprocess.check_output(["systemctl","show",unit,"--property="+prop,"--value"],stderr=subprocess.DEVNULL,timeout=3).decode().strip()
+result=None
+for leaf in pathlib.Path("/sys/fs/cgroup/subyardtestvms.slice").glob("subyard-test-vms-worker-*.service"):
+ unit=leaf.name
+ assert re.fullmatch(r"subyard-test-vms-worker-[1-9][0-9]*-[1-9][0-9]*\\.service",unit)
+ try:
+  worker=int(show(unit,"MainPID") or "0")
+  source=pathlib.Path("/run/subyard-test-vms-workers",unit.removesuffix(".service")+".json")
+  if worker<=1 or source.exists(): continue
+  credential=pathlib.Path("/proc",str(worker),"root/run/credentials",unit,"subyard-broker-request")
+  if not credential.is_file(): continue
+  info=credential.stat()
+  assert info.st_uid==0 and info.st_nlink==1 and info.st_mode&0o077==0
+  inputs=json.loads(credential.read_text())
+ except (FileNotFoundError,subprocess.CalledProcessError):
+  continue
+ if inputs["environment"].get("SSH_ORIGINAL_COMMAND")!=request: continue
+ bridge,owner=int(inputs["bridge_pid"]),int(inputs["requester_pid"])
+ assert bridge>1 and owner>1 and unit=="subyard-test-vms-worker-"+str(bridge)+"-"+inputs["bridge_start"]+".service"
+ assert stat(bridge)[19]==inputs["bridge_start"] and int(stat(bridge)[1])==owner
+ assert stat(owner)[19]==inputs["requester_start"] and stat(owner)[1]=="0"
+ assert pathlib.Path("/proc",str(owner),"comm").read_text().strip()=="sh"
+ assert pathlib.Path("/proc",str(worker),"cgroup").read_text().strip()=="0::/subyardtestvms.slice/"+unit
+ assert (leaf.parent/"memory.max").read_text().strip()=="2147483648"
+ assert (leaf.parent/"memory.swap.max").read_text().strip()=="2147483648"
+ for prop in ("Environment","ExecStart"):
+  value=show(unit,prop)
+  assert "SSH_ORIGINAL_COMMAND=" not in value and "memory-boundary-synthetic-capability" not in value
+ result={"unit":unit,"owner":owner,"start":inputs["requester_start"]}
+ break
+print(json.dumps(result))
+'''
+def inner(code, *args):
+    return subprocess.check_output(base+["--","python3","-c",code,*map(str,args)], stderr=subprocess.DEVNULL, timeout=25)
+def kill_identity(pid, identity):
+    inner('import os,pathlib,signal,sys; p=sys.argv[1]; f=pathlib.Path("/proc",p,"stat"); assert int(p)>1; s=f.read_text().rsplit(") ",1)[1].split() if f.exists() else []; assert not s or s[19]==sys.argv[2]; os.kill(int(p),signal.SIGKILL) if s else None', pid, identity)
+locker = subprocess.Popen(base+["--","python3","-c",locker_code], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+owner = None
+identity = None
+locked = None
+try:
+    assert select.select([locker.stdout], [], [], 10)[0], "native lock fixture did not become ready"
+    locked = locker.stdout.readline().decode().split()
+    assert len(locked)==2 and all(v.isdigit() for v in locked) and int(locked[0])>1 and int(locked[1])>0
+    request="renew slot-001 memory-boundary-invalid 1 memory-boundary-synthetic-capability"
+    owner = subprocess.Popen(base+["--env","SSH_ORIGINAL_COMMAND="+request,"--",engine,"_test-vms-facade"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    deadline=time.monotonic()+20
+    while time.monotonic()<deadline:
+        identity=json.loads(inner(inspect_code))
+        if identity: break
+        assert owner.poll() is None, "direct Incus native worker exited before credential restoration"
+        time.sleep(0.1)
+    else:
+        raise AssertionError("direct Incus native waiter did not become ready")
+    kill_identity(identity["owner"], identity["start"])
+    owner.wait(timeout=20)
+    inner('''import pathlib,subprocess,sys,time
+unit=sys.argv[1]
+deadline=time.monotonic()+20
+while time.monotonic()<deadline:
+ state=subprocess.check_output(["systemctl","show",unit,"--property=LoadState","--value"],stderr=subprocess.DEVNULL,timeout=3).decode().strip()
+ if state=="not-found" and not pathlib.Path("/sys/fs/cgroup/subyardtestvms.slice",unit).exists(): break
+ time.sleep(.2)
+else: raise AssertionError("namespace requester death retained native service")
+assert not pathlib.Path("/run/subyard-test-vms-workers",unit.removesuffix(".service")+".json").exists()
+''', identity["unit"])
+finally:
+    try:
+        if identity:
+            kill_identity(identity["owner"], identity["start"])
+            subprocess.run(base+["--","systemctl","stop",identity["unit"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+    finally:
+        try:
+            if owner and owner.poll() is None: owner.kill()
+            if owner: owner.wait(timeout=5)
+        finally:
+            try:
+                if locked: kill_identity(*locked)
+            finally:
+                if locker.poll() is None: locker.kill()
+                locker.wait(timeout=5)
+print("  [ ok ] direct Incus namespace waiter preserves private native scope and collects after requester death")
+PYTHON
+}
+
+assert_launch_memory_bound() {
+  local finite="${1:-no}"
+  printf '  [ .. ] checking native Incus launch memory bound and admission\n'
+  assert_owned_device
+  assert_owned_pool
+  outer_exec python3 - "$ENGINE" "$finite" <<'PYTHON'
+import json, os, pathlib, subprocess, sys, tempfile
+engine, finite = sys.argv[1:]
+run = lambda *args: subprocess.check_output(args, stderr=subprocess.DEVNULL)
+def launch():
+    pid = int(run("systemctl", "show", "incus.service", "--property=MainPID", "--value"))
+    assert pid > 1
+    lines = pathlib.Path("/proc", str(pid), "cgroup").read_text().splitlines()
+    paths = [line[3:] for line in lines if line.startswith("0::/")]
+    assert len(paths) == 1 and "/subyardtestvms.slice" not in paths[0]
+    current = pathlib.Path("/sys/fs/cgroup" + paths[0])
+    leaf, bounds = current, []
+    while True:
+        limit = current / "memory.max"
+        if limit.exists() and limit.read_text().strip() != "max":
+            maximum = int(limit.read_text())
+            used = int((current / "memory.current").read_text())
+            bounds.append((max(0, maximum-used), maximum))
+        if current == pathlib.Path("/sys/fs/cgroup"):
+            break
+        current = current.parent
+    return leaf, min(bounds) if bounds else None
+
+def status_bound():
+    leaf, before = launch()
+    status = json.loads(run(engine, "_test-vms-worker", "status"))
+    _, after = launch()
+    memory = status["resources"]["memory"]
+    assert memory["limit_available"] == (before is not None)
+    if before is not None:
+        assert after is not None and memory["cgroup_limit_bytes"] in (before[1], after[1])
+        assert min(before[0], after[0])-67108864 <= memory["cgroup_headroom_bytes"] <= max(before[0], after[0])+67108864
+    bounds = [memory["visible_available_bytes"], memory["physical_available_bytes"]]
+    if memory["limit_available"]:
+        bounds.append(memory["cgroup_headroom_bytes"])
+    assert memory["available_bytes"] == min(bounds)
+    return leaf, status
+
+leaf, status = status_bound()
+if finite == "yes":
+    # This boot has no nested leases or workloads; never lower a running VM/builder's ceiling.
+    assert all(s["state"] == "available" for s in status["pool"]["slots"])
+    assert json.loads(run("incus", "list", "--all-projects", "--format=json")) == [], "foreign or running inner workload prevents finite-bound fixture"
+    assert status["resources"]["memory"]["available_bytes"] >= 536870912, "insufficient safe RAM margin for finite-bound fixture"
+    limit = leaf / "memory.max"
+    original = limit.read_text()
+    ceiling = int((leaf / "memory.current").read_text()) + 268435456
+    assert original.strip() == "max" or int(original) > ceiling, "launch ceiling lacks safe room for finite-bound fixture"
+    try:
+        limit.write_text(str(ceiling))
+        _, bounded = status_bound()
+        assert bounded["resources"]["memory"]["cgroup_limit_bytes"] == ceiling
+        with tempfile.TemporaryDirectory(prefix="subyard-memory-boundary-", dir="/tmp") as temporary:
+            key = str(pathlib.Path(temporary, "lease-key"))
+            subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", key], check=True)
+            keytype, blob, *_ = pathlib.Path(key + ".pub").read_text().split()
+            request = " ".join(["acquire-v3", "subyard-pair", "memory-boundary", "memory-boundary", "test-yard", "Subyard-2", "memory-boundary", "memory-boundary", keytype, blob, "slot-001", "2"])
+            refusal = json.loads(subprocess.check_output([engine, "_test-vms-facade"], env=dict(os.environ, SSH_ORIGINAL_COMMAND=request), stderr=subprocess.DEVNULL))
+        assert set(refusal) == {"schema_version", "status", "code", "reason", "message"}
+        assert refusal["status"] == "error" and refusal["code"] == "capacity" and refusal["reason"] == "memory"
+        admission = json.loads(refusal["message"].split("; admission=", 1)[1])
+        assert admission["headroom_bytes"] == max(0, admission["effective_available_bytes"]-admission["reserve_bytes"]-admission["pending_vm_bytes"]-admission["pending_builder_bytes"])
+        assert admission["headroom_bytes"] <= 268435456 and admission["required_bytes"] == 5368709120
+        assert admission["slot_state"] == "provisioning" and admission["vm_count"] == 2
+        print("native-memory-refusal " + json.dumps(admission, separators=(",", ":")))
+        assert json.loads(run("incus", "list", "--all-projects", "--format=json")) == [], "refused request created a guest or builder"
+        assert all(s["state"] == "available" for s in json.loads(run(engine, "_test-vms-worker", "status"))["pool"]["slots"])
+    finally:
+        limit.write_text(original)
+        assert limit.read_text().strip() == original.strip()
+    status_bound()
+    print("  [ ok ] restored finite Incus launch ceiling proves native typed memory refusal without allocation")
+print("  [ ok ] status RAM bound matches real Incus MainPID ancestry")
+PYTHON
+}
+
 live_pressure() {
   local before after restored attempt
   before="$(sample_available)"
@@ -183,6 +501,7 @@ PY
   after="$(sample_available)"
   [ "$((before - after))" -ge $((64 * 1024)) ] \
     || die '128MiB physical pressure was not reflected in live telemetry'
+  assert_memory_accounting
   kill "$PRESSURE_PID"
   wait "$PRESSURE_PID" || true
   PRESSURE_PID=''
@@ -237,6 +556,100 @@ assert_held_ram_released() {
     || die 'held allocation retained a startup RAM promise'
 }
 
+assert_guests_outside_broker_budget() {
+  outer_exec python3 - <<'PY'
+import json, pathlib, subprocess
+for name in ("e2e-vm-1", "e2e-vm-2"):
+    state = json.loads(subprocess.check_output([
+        "incus", "query", "/1.0/instances/" + name + "/state?project=subyard-e2e-vms-slot-1"
+    ]))
+    assert state["status"] == "Running" and state["pid"] > 0
+    path, = [line[3:] for line in pathlib.Path("/proc", str(state["pid"]), "cgroup").read_text().splitlines() if line.startswith("0::/")]
+    assert "/subyardtestvms.slice" not in path, "guest was charged to broker process budget"
+    daemon = int(subprocess.check_output(["systemctl", "show", "incus.service", "--property=MainPID", "--value"]))
+    launch, = [line[3:] for line in pathlib.Path("/proc", str(daemon), "cgroup").read_text().splitlines() if line.startswith("0::/")]
+    assert path == launch or path.startswith(launch.rstrip("/") + "/"), "guest escaped sampled Incus launch ancestry"
+print("  [ ok ] both running guests retain Incus launch ancestors outside the broker process cgroup")
+PY
+}
+
+assert_orphan_expiry() {
+  local owner keeper heartbeat expiry now state attempt generation prior_epoch stale_rc guest fresh_config
+  prior_epoch="$(runtime_yard -Y test-yard test-vms status --json | jq -er '.pool.slots[] | select(.slot_id == "slot-001") | .lease_epoch')"
+  for guest in 1 2; do
+    ssh -F "$HELD_CONFIG" -T -o ConnectTimeout=10 "e2e-vm-$guest" -- touch /root/subyard-owner-death-marker
+  done
+  IFS=$'\t' read -r owner keeper < "$STATE_PARENT/holder.processes"
+  [[ "$owner:$keeper" =~ ^[1-9][0-9]*:[1-9][0-9]*$ ]] || die 'holder process identities unavailable'
+  kill -0 "$owner" && kill -0 "$keeper" || die 'holder or keeper exited before the owner-death check'
+  kill -KILL "$owner"
+  wait "$HOLDER_PID" 2>/dev/null || true
+  HOLDER_PID=''
+  for ((attempt=0; attempt<10; attempt++)); do
+    [ ! -r "/proc/$keeper/stat" ] || [ "$(awk '{print $3}' "/proc/$keeper/stat")" = Z ] || { sleep 1; continue; }
+    break
+  done
+  if [ -r "/proc/$keeper/stat" ] && [ "$(awk '{print $3}' "/proc/$keeper/stat")" != Z ]; then
+    die 'orphan keeper survived requester death'
+  fi
+  heartbeat="$(held_heartbeat)"
+  expiry="$(runtime_yard -Y test-yard test-vms status --json | python3 -c '
+import datetime, json, sys
+slot, = [s for s in json.load(sys.stdin)["pool"]["slots"] if s["slot_id"] == "slot-001"]
+stamp = lambda s: datetime.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+assert 1199 <= stamp(slot["expires_at"]) - stamp(slot["last_heartbeat_at"]) <= 1201
+print(int(stamp(slot["expires_at"])))
+')" || die 'held lease did not advertise the 20-minute renewal timeout'
+  printf '  [ .. ] requester stopped; waiting for natural lease expiry\n'
+  for ((attempt=0; ; attempt++)); do
+    state="$(runtime_yard -Y test-yard test-vms status --json | jq -er '.pool.slots[] | select(.slot_id == "slot-001") | .state')"
+    now="$(date +%s)"
+    if [ "$state" = available ]; then
+      [ "$now" -ge "$((expiry - 2))" ] || die 'orphan allocation was freed before its advertised expiry'
+      break
+    fi
+    [ "$now" -le "$((expiry + 180))" ] || die 'expired orphan allocation was not cleaned up'
+    if [ "$state" = held ]; then
+      [ "$(held_heartbeat)" = "$heartbeat" ] || die 'orphan requester lease was renewed'
+    fi
+    [ "$((attempt % 12))" -ne 0 ] || printf '  [ .. ] orphan state=%s expiry_remaining_seconds=%s\n' "$state" "$((expiry - now))"
+    sleep 5
+  done
+  assert_memory_accounting
+  outer_exec incus list --project subyard-e2e-vms-slot-1 --format json | jq -e 'length == 0' >/dev/null \
+    || die 'expired allocation retained a disposable guest'
+  stale_rc=0
+  timeout 15 ssh -F "$HELD_CONFIG" -N -o BatchMode=yes -o ConnectTimeout=5 subyard-e2e-data \
+    >/dev/null 2>"$STATE_PARENT/stale-data.log" || stale_rc=$?
+  [ "$stale_rc" = 255 ] && grep -Fq 'Permission denied (publickey)' "$STATE_PARENT/stale-data.log" \
+    || die 'expired lease data account did not reject its former key'
+  printf '  [ ok ] requester death stopped renew; natural expiry removed both disposable guests\n'
+
+  SUBYARD_E2E_STATE_DIR="$STATE_PARENT/reuse" "$RUNNER" --yard test-yard --prepare >/dev/null
+  start_holder_child hold_lease reuse memory-boundary-reuse slot-001 > "$STATE_PARENT/reuse.log" 2>&1
+  HOLDER_PID="$HOLDER_STARTED_PID"
+  for ((attempt=0; attempt<600; attempt++)); do
+    [ ! -s "$STATE_PARENT/reuse.ready" ] || break
+    kill -0 "$HOLDER_PID" || die 'fresh lease failed after orphan cleanup'
+    sleep 1
+  done
+  [ -s "$STATE_PARENT/reuse.ready" ] || die 'fresh lease did not become ready'
+  IFS=$'\t' read -r _ fresh_config _ _ _ generation _ < "$STATE_PARENT/reuse.ready"
+  runtime_yard -Y test-yard test-vms status --json | jq -e --argjson previous "$prior_epoch" --argjson generation "$generation" '
+    .pool.slots[] | select(.slot_id == "slot-001") |
+      .state == "held" and .lease_epoch > $previous and .resource_generation == $generation' >/dev/null \
+    || die 'fresh allocation did not advance the lease epoch'
+  for guest in 1 2; do
+    ssh -F "$fresh_config" -T -o ConnectTimeout=10 "e2e-vm-$guest" -- test ! -e /root/subyard-owner-death-marker \
+      || die 'fresh allocation retained former guest data'
+  done
+  assert_memory_accounting
+  : > "$STATE_PARENT/reuse.release"
+  wait "$HOLDER_PID" || die 'fresh allocation release failed'
+  HOLDER_PID=''
+  printf '  [ ok ] clean reacquire advanced epoch; disposable data absent; release succeeded\n'
+}
+
 holder_failure() {
   # Preserve bounded controller diagnostics before marker-owned cleanup. Never
   # print the private lease/config store or arbitrary provisioning output.
@@ -268,7 +681,7 @@ OWNER_BASELINE_IMAGES="$(incus image list --project default --format csv -c f)"
 OWNER_BASELINE_CAPTURED=1
 ensure_owner_base_image
 # shellcheck disable=SC2034
-OWNER_DIAGNOSTIC_VM_MEMORY=512MiB
+OWNER_DIAGNOSTIC_VM_MEMORY=2GiB
 install_owner_runtime
 prepare_broker_recovery_update
 prepare_owner_image_cache_project "$PROJECT"
@@ -287,6 +700,7 @@ CONFIG
 p0_retry_init_after_plan_stale ./bin/yard -Y test-yard init --yes
 assert_owned_device
 OUTER_BEFORE="$(outer_identity)"
+assert_memory_accounting
 remove_owned_device
 assert_unverified_source_rejected
 reject_snapshot_source
@@ -295,6 +709,7 @@ p0_retry_init_after_plan_stale ./bin/yard -Y test-yard init --yes
 assert_owned_device
 assert_outer_unchanged
 live_pressure
+assert_memory_accounting
 printf '  [ ok ] init and live hotplug preserve yard power and process identity\n'
 
 # Only this nested, marker-owned fixture is restarted, before any nested lease.
@@ -303,7 +718,11 @@ runtime_yard -Y test-yard start --yes >/dev/null
 wait_for_outer_default_route "$INSTANCE" "$PROJECT"
 assert_owned_device
 OUTER_BEFORE="$(outer_identity)"
+assert_memory_accounting
 printf '  [ ok ] telemetry survives fixture container boot\n'
+assert_native_worker_lifetime
+assert_native_namespace_waiter_lifetime
+assert_launch_memory_bound yes
 
 # Free compiler cache before reserving the nested pair's disks on the allocated VM.
 p0_capacity_remove_build_cache
@@ -340,6 +759,13 @@ for guest in 1 2; do
     cat /proc/sys/kernel/random/boot_id </dev/null)"
 done
 assert_held_ram_released
+assert_memory_accounting
+assert_guests_outside_broker_budget
+assert_launch_memory_bound
+runtime_yard -Y test-yard test-vms status --json | jq -e '
+  .pool.slots[] | select(.slot_id == "slot-001") |
+    .environment.vm_count == 2 and .environment.memory_per_vm == "2GiB"' >/dev/null \
+  || die 'guest allocation exceeding the broker process budget was not held'
 printf '  [ ok ] ready guests release startup RAM promises to host accounting\n'
 
 release="$(dirname "$P0_BROKER_RECOVERY_UPDATE_ARTIFACT")"
@@ -352,6 +778,7 @@ YARD_RELEASE_BASE_URL="file://$release" runtime_yard update \
   --runtime-root "$runtime_root" --version p0-broker-recovery-update --yes >/dev/null
 assert_owned_device
 assert_held_unchanged
+assert_memory_accounting
 new_hash="$(outer_exec sha256sum "$ENGINE" | awk '{print $1}')"
 expected_hash="$(sha256sum "$runtime_root/current/bin/yard-engine" | awk '{print $1}')"
 [ "$new_hash" = "$expected_hash" ] && [ "$new_hash" != "$old_hash" ] \
@@ -365,6 +792,7 @@ runtime_yard migrate --check --json | jq -e '.outcome.status == "ready"' >/dev/n
 runtime_yard update --runtime-root "$runtime_root" --rollback --yes >/dev/null
 assert_owned_device
 assert_held_unchanged
+assert_memory_accounting
 [ "$(outer_exec sha256sum "$ENGINE" | awk '{print $1}')" = "$old_hash" ] \
   || die 'ordinary rollback did not restore the original engine'
 runtime_yard migrate --check --json | jq -e '.outcome.status == "ready"' >/dev/null \
@@ -372,7 +800,7 @@ runtime_yard migrate --check --json | jq -e '.outcome.status == "ready"' >/dev/n
 printf '  [ ok ] ordinary rollback preserves telemetry, held lease, guests and yard\n'
 
 HEARTBEAT_BEFORE="$(held_heartbeat)"
-for ((attempt=0; attempt<45; attempt++)); do
+for ((attempt=0; attempt<165; attempt++)); do
   [ "$(held_heartbeat)" = "$HEARTBEAT_BEFORE" ] || break
   kill -0 "$HOLDER_PID" || die 'held keeper exited before renewing the lease'
   sleep 2
@@ -382,9 +810,7 @@ done
 assert_held_unchanged
 printf '  [ ok ] held lease renewal continues after update and rollback\n'
 
-: > "$STATE_PARENT/holder.release"
-wait "$HOLDER_PID" || die 'nested lease did not release successfully'
-HOLDER_PID=''
+assert_orphan_expiry
 printf 'evidence: original_engine_sha256=%s candidate_engine_sha256=%s held_identity_sha256=%s\n' \
   "$old_hash" "$new_hash" "$HELD_BEFORE"
-printf 'ok: broker physical-memory mount, live counters, boot and held update/rollback\n'
+printf 'ok: broker memory bounds, process budget, boot, held update/rollback and orphan expiry\n'

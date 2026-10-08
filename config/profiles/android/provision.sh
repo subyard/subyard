@@ -89,7 +89,9 @@ except (OSError, ValueError):
 PYCONFIG
   unit="$(rooted /etc/systemd/system/subyard-android-pool.service)"
   [ -f "$unit" ] && grep -Fxq 'ExecStart=/usr/bin/python3 /usr/local/lib/subyard-android/pool.py serve' "$unit" \
-    && grep -Fxq 'KillMode=control-group' "$unit" && grep -Fxq 'TimeoutStopSec=120' "$unit" || changed=1
+    && grep -Fxq 'KillMode=control-group' "$unit" && grep -Fxq 'TimeoutStopSec=120' "$unit" \
+    && grep -Fxq 'MemoryAccounting=yes' "$unit" && grep -Fxq 'MemoryMax=2G' "$unit" \
+    && grep -Fxq 'MemorySwapMax=2G' "$unit" && grep -Fxq 'Slice=system.slice' "$unit" || changed=1
   systemctl is-enabled --quiet subyard-android-pool.service >/dev/null 2>&1 || changed=1
   systemctl is-active --quiet subyard-android-pool.service >/dev/null 2>&1 || changed=1
   [ -S "$public_root/control.sock" ] || changed=1

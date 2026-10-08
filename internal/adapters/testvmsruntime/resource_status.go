@@ -11,6 +11,8 @@ import (
 
 type ResourceStatus struct {
 	Memory               *MemoryCapacity        `json:"memory,omitempty"`
+	MemoryAdmission      *MemoryAdmission       `json:"memory_admission,omitempty"`
+	BrokerMemory         *BrokerMemoryCapacity  `json:"broker_memory,omitempty"`
 	OuterHostEvidence    string                 `json:"outer_host_evidence"`
 	Cache                *CacheUsage            `json:"cache,omitempty"`
 	Storage              *PoolStorageStatus     `json:"storage,omitempty"`
@@ -97,8 +99,21 @@ func (rt *Runtime) ResourceStatus(ctx context.Context, pool LeasePool) ResourceS
 	memory, err := rt.readMemoryCapacity()
 	if err == nil {
 		result.Memory = &memory
+		admission := memoryAdmission(memory, result.Budgets["memory_reserve_bytes"], 0, 0, 0)
+		result.MemoryAdmission = &admission
 	} else {
 		result.Errors = append(result.Errors, "memory_telemetry_unavailable")
+	}
+	if rt.Config.Enabled {
+		probe := rt.brokerMemoryProbe
+		if probe == nil {
+			probe = func() (BrokerMemoryCapacity, error) { return brokerMemoryCapacity("/sys/fs/cgroup") }
+		}
+		if own, err := probe(); err == nil {
+			result.BrokerMemory = &own
+		} else {
+			result.Errors = append(result.Errors, "broker_memory_unavailable")
+		}
 	}
 	storage, err := rt.storageCapacity(ctx)
 	if err == nil {
@@ -162,6 +177,10 @@ func (rt *Runtime) ResourceStatus(ctx context.Context, pool LeasePool) ResourceS
 			result.WorkingDiskEvidence = "partial"
 		}
 	}
+	if result.MemoryAdmission != nil {
+		admission := memoryAdmission(memory, result.Budgets["memory_reserve_bytes"], result.ReservedMemory, 0, 0)
+		result.MemoryAdmission = &admission
+	}
 	// Do not call any create/repair/GC path when the registry has not been installed.
 	if _, err := os.Stat(rt.imageRegistryPath()); os.IsNotExist(err) {
 		return result
@@ -180,6 +199,13 @@ func (rt *Runtime) ResourceStatus(ctx context.Context, pool LeasePool) ResourceS
 	}
 	if registry.Build != nil {
 		result.Builder = &BuilderResourceStatus{Environment: registry.Build.Environment, Memory: registry.Build.Memory, DiskPeak: registry.Build.Disk, PeakMeasurement: "unavailable"}
+		if result.MemoryAdmission != nil {
+			// New admission waits for the image lock and confirmed builder cleanup.
+			// Until then report its separate promise and a conservative lower bound;
+			// the persisted build has no safe association with a requesting slot.
+			admission := memoryAdmission(memory, result.Budgets["memory_reserve_bytes"], result.ReservedMemory, registry.Build.Memory, 0)
+			result.MemoryAdmission = &admission
+		}
 	}
 	current := map[string]BaseImage{}
 	for _, base := range registry.Bases {

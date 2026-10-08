@@ -506,14 +506,14 @@ func (rt *Runtime) admitBuild(ctx context.Context, store LeaseStore, pending Lea
 	return store.withLock(true, func(pool *LeasePool) error {
 		memory, err := rt.readMemoryCapacity()
 		if err != nil {
-			return &CapacityError{"memory", "builder memory telemetry unavailable"}
+			return &CapacityError{Resource: "memory", Reason: "builder memory telemetry unavailable"}
 		}
 		memoryScope := memory.scope
 		storageBefore, err := rt.storageCapacity(ctx)
 		if err != nil {
-			return &CapacityError{"disk", "builder storage telemetry unavailable"}
+			return &CapacityError{Resource: "disk", Reason: "builder storage telemetry unavailable"}
 		}
-		memoryBefore := memory.Available
+		memoryBefore := memory
 		overhead := budgetBytes(rt.Config.VMOverhead, config.DefaultTestVMOverhead)
 		if pending.SlotID != "" {
 			slot, err := findSlot(pool, pending.SlotID)
@@ -533,6 +533,7 @@ func (rt *Runtime) admitBuild(ctx context.Context, store LeaseStore, pending Lea
 				disk = futureDisk
 			}
 		}
+		requiredRAM := ram
 		for _, slot := range pool.Slots {
 			if slot.SlotID == pending.SlotID || slot.State == SlotAvailable || slot.State == SlotUnavailable {
 				continue
@@ -553,18 +554,30 @@ func (rt *Runtime) admitBuild(ctx context.Context, store LeaseStore, pending Lea
 		}
 		memory, err = rt.readMemoryCapacity()
 		if err != nil || memory.scope != memoryScope {
-			return &CapacityError{"memory", "builder memory telemetry unavailable"}
+			return &CapacityError{Resource: "memory", Reason: "builder memory telemetry unavailable"}
 		}
 		storage, err := rt.storageCapacity(ctx)
 		if err != nil {
-			return &CapacityError{"disk", "builder storage telemetry unavailable"}
+			return &CapacityError{Resource: "disk", Reason: "builder storage telemetry unavailable"}
 		}
-		memory.Available = min(memoryBefore, memory.Available)
+		if memoryBefore.Available < memory.Available {
+			memory = memoryBefore
+		}
 		storage.Total = min(storageBefore.Total, storage.Total)
 		storage.Used = max(storageBefore.Used, storage.Used)
 		storage.BudgetUsed = max(storageBefore.BudgetUsed, storage.BudgetUsed)
-		return checkCapacity(memory, storage, ram, disk, budgetBytes(rt.Config.MemoryReserve, config.DefaultTestVMMemoryReserve),
+		err = checkCapacity(memory, storage, ram, disk, budgetBytes(rt.Config.MemoryReserve, config.DefaultTestVMMemoryReserve),
 			budgetBytes(rt.Config.DiskReserve, config.DefaultTestVMDiskReserve), budgetBytes(rt.Config.DiskBudget, config.DefaultTestVMDiskBudget))
+		var capacity *CapacityError
+		if errors.As(err, &capacity) && capacity.Resource == "memory" {
+			evidence := memoryAdmission(memory, budgetBytes(rt.Config.MemoryReserve, config.DefaultTestVMMemoryReserve), ram-requiredRAM, 0, requiredRAM)
+			if pending.Environment != nil {
+				evidence.Environment, evidence.Count = pending.Environment.Name, pending.Environment.Count
+				evidence.SlotState = SlotProvisioning
+			}
+			capacity.Admission = &evidence
+		}
+		return err
 	})
 }
 

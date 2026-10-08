@@ -71,6 +71,23 @@ func TestMemoryCapacityExhaustionAndMissingTelemetry(t *testing.T) {
 	}
 }
 
+func TestMemoryCapacityDistinguishesZeroFromInvalidAvailable(t *testing.T) {
+	proc, group, write := memoryFixture(t)
+	for _, available := range []string{"MemAvailable: 0 kB\n", "MemAvailable: 0 kB\nSwapFree: 1000000 kB\n"} {
+		write(filepath.Join(proc, "meminfo"), available)
+		value, err := memoryCapacity(proc, group)
+		if err != nil || value.Available != 0 || value.VisibleAvailable != 0 {
+			t.Fatalf("exhaustion misreported as missing or swap credited: %+v %v", value, err)
+		}
+	}
+	for _, invalid := range []string{"MemFree: 1 kB\n", "MemAvailable: 1 MB\n", "MemAvailable: 1 kB\nMemAvailable: 2 kB\n"} {
+		write(filepath.Join(proc, "meminfo"), invalid)
+		if _, err := memoryCapacity(proc, group); err == nil {
+			t.Fatalf("accepted malformed availability: %q", invalid)
+		}
+	}
+}
+
 func TestMemoryCapacityRealRootWithoutLimit(t *testing.T) {
 	proc, group, write := memoryFixture(t)
 	if err := os.Remove(filepath.Join(group, "memory.max")); err != nil {
@@ -260,6 +277,24 @@ func TestConcurrentMixedAdmissionAndRetryAfterReady(t *testing.T) {
 		t.Fatalf("no single winner: %v", results)
 	}
 	if err := store.AbortProvisioning(grants[loser]); err != nil {
+		t.Fatal(err)
+	}
+	// Native boot completion alone does not establish a crash-safe persisted
+	// RAM phase. Transport/tool readiness may still be in progress; retain the
+	// full admitted promise until MarkHeld even if physical pages are occupied.
+	betweenBootAndHeld, err := store.AcquireV3Slot(*grants[loser].Environment, "client", "SHA256:key", "yard", "Project", "boot-ready", "capacity", grants[loser].SlotID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var refusal *CapacityError
+	if err := rt.reserveEnvironment(context.Background(), store, betweenBootAndHeld); !errors.As(err, &refusal) || refusal.Admission == nil {
+		t.Fatalf("unpersisted boot completion released a RAM promise: %v", err)
+	}
+	winnerRAM, _ := environmentCommitment(*grants[winner].Environment, 512<<20)
+	if refusal.Admission.PendingVM != winnerRAM || refusal.Admission.Headroom >= refusal.Admission.Required {
+		t.Fatalf("refusal concealed the provisioning promise: %+v", refusal.Admission)
+	}
+	if err := store.AbortProvisioning(betweenBootAndHeld); err != nil {
 		t.Fatal(err)
 	}
 	// Once ready, the winner is accounted for by host available memory. Its

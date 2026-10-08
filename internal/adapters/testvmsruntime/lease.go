@@ -25,7 +25,7 @@ const (
 	LeaseAttributionSchemaVersion = 2
 	LeaseAttributionSchemaV1      = 1
 	LeaseTargetStaleExitCode      = 75
-	LeaseTTL                      = 10 * time.Minute
+	LeaseTTL                      = 20 * time.Minute
 	ProvisioningTTL               = provisionedGuestCount*guestToolchainTimeout +
 		provisioningSafetyMargin
 )

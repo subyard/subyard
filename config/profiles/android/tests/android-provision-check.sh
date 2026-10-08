@@ -41,6 +41,10 @@ cat > "$test_root/etc/systemd/system/subyard-android-pool.service" <<'UNIT'
 ExecStart=/usr/bin/python3 /usr/local/lib/subyard-android/pool.py serve
 KillMode=control-group
 TimeoutStopSec=120
+MemoryAccounting=yes
+MemoryMax=2G
+MemorySwapMax=2G
+Slice=system.slice
 UNIT
 for source in pool.py client.py runtime.sh; do
   cp "$ROOT/config/profiles/android/$source" "$test_root/usr/local/lib/subyard-android/$source"

@@ -16,7 +16,7 @@ if bash "$tmp/$controller" > "$tmp/missing" 2>&1; then
   printf 'FAIL: controller accepted a missing slot\n' >&2; exit 1
 fi
 if grep -q -- '--purpose' "$tmp/missing"; then exit 1; fi
-for lane in full recovery viewer viewer-native-debug sdk-images; do
+for lane in full recovery viewer viewer-native-debug sdk-images memory-lease; do
   arguments=(--slot 7)
   [[ "$lane" = full ]] || arguments+=(--lane "$lane")
   bash "$tmp/$controller" "${arguments[@]}" > "$tmp/calls"

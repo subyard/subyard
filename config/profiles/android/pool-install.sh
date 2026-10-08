@@ -39,10 +39,14 @@ After=network-online.target
 [Service]
 Type=simple
 User=root
+Slice=system.slice
 ExecStart=/usr/bin/python3 /usr/local/lib/subyard-android/pool.py serve
 Restart=on-failure
 KillMode=control-group
 TimeoutStopSec=120
+MemoryAccounting=yes
+MemoryMax=2G
+MemorySwapMax=2G
 
 [Install]
 WantedBy=multi-user.target

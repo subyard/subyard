@@ -309,59 +309,66 @@ func TestBackendConvergenceUsesExactBundleAndLiveRoute(t *testing.T) {
 	}
 }
 func TestDisabledBackendRemovesPublishedRoute(t *testing.T) {
-	backend := fixtureBackend(t)
-	backend.Environment["NESTED_E2E_VMS"] = "0"
-	client := backend.Environment["SUBYARD_E2E_CLIENT_EXPORT_DIR"]
-	if err := os.MkdirAll(client, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	generation := filepath.Join(client, ".route-stale")
-	if err := os.MkdirAll(generation, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(filepath.Base(generation), filepath.Join(client, "current")); err != nil {
-		t.Fatal(err)
-	}
-	memory := backendMemoryFixture(true)
-	provisioned := false
-	backend.Runner = &fakeRunner{handler: func(_ string, arguments, _ []string, stdin io.Reader) ([]byte, []byte, error) {
-		if body, handled := memory.handle(t, arguments); handled {
-			if !provisioned {
-				t.Fatal("physical source retired before disabling the broker")
+	for _, hostMemory := range []bool{false, true} {
+		t.Run(fmt.Sprintf("host-memory=%t", hostMemory), func(t *testing.T) {
+			backend := fixtureBackend(t)
+			backend.HostMemory = hostMemory
+			backend.Environment["NESTED_E2E_VMS"] = "0"
+			client := backend.Environment["SUBYARD_E2E_CLIENT_EXPORT_DIR"]
+			if err := os.MkdirAll(client, 0o755); err != nil {
+				t.Fatal(err)
 			}
-			return body, nil, nil
-		}
-		joined := strings.Join(arguments, " ")
-		switch {
-		case joined == "list yard-test --project subyard-test -f csv -c s":
-			return []byte("RUNNING\n"), nil, nil
-		case strings.HasPrefix(joined, "file push "):
-			return nil, nil, nil
-		case joined == "exec yard-test --project subyard-test -- mv -f -- "+
-			DefaultInstalledPath+".new "+DefaultInstalledPath:
-			return nil, nil, nil
-		case strings.Contains(joined, " install-recipes "):
-			_, _ = io.Copy(io.Discard, stdin)
-			return nil, nil, nil
-		case strings.HasSuffix(joined, "-- bash -euo pipefail -s"):
-			_, _ = io.Copy(io.Discard, stdin)
-			provisioned = true
-			return nil, nil, nil
-		case strings.HasPrefix(joined, "config set yard-test user.subyard.test_vms_revision "):
-			return nil, nil, nil
-		case joined == "config set yard-test user.subyard.test_vms_spool_schema 1 --project subyard-test":
-			return nil, nil, nil
-		}
-		return nil, nil, fmt.Errorf("unexpected call: %s", joined)
-	}}
-	if err := backend.Apply(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Lstat(filepath.Join(client, "current")); !os.IsNotExist(err) {
-		t.Fatalf("current route remains: %v", err)
-	}
-	if memory.Config[hostMemoryOwnerKey] != "" || memory.Devices[hostMemoryDevice] != nil {
-		t.Fatal("disabled backend retained the owned physical memory device")
+			generation := filepath.Join(client, ".route-stale")
+			if err := os.MkdirAll(generation, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Base(generation), filepath.Join(client, "current")); err != nil {
+				t.Fatal(err)
+			}
+			memory := backendMemoryFixture(true)
+			provisioned := false
+			backend.Runner = &fakeRunner{handler: func(_ string, arguments, _ []string, stdin io.Reader) ([]byte, []byte, error) {
+				if body, handled := memory.handle(t, arguments); handled {
+					if !provisioned && !hostMemory {
+						t.Fatal("physical source retired before disabling the broker")
+					}
+					return body, nil, nil
+				}
+				joined := strings.Join(arguments, " ")
+				switch {
+				case joined == "list yard-test --project subyard-test -f csv -c s":
+					return []byte("RUNNING\n"), nil, nil
+				case strings.HasSuffix(joined, "_test-vms-host-memory-check"):
+					return nil, nil, nil
+				case strings.HasPrefix(joined, "file push "):
+					return nil, nil, nil
+				case joined == "exec yard-test --project subyard-test -- mv -f -- "+
+					DefaultInstalledPath+".new "+DefaultInstalledPath:
+					return nil, nil, nil
+				case strings.Contains(joined, " install-recipes "):
+					_, _ = io.Copy(io.Discard, stdin)
+					return nil, nil, nil
+				case strings.HasSuffix(joined, "-- bash -euo pipefail -s"):
+					_, _ = io.Copy(io.Discard, stdin)
+					provisioned = true
+					return nil, nil, nil
+				case strings.HasPrefix(joined, "config set yard-test user.subyard.test_vms_revision "):
+					return nil, nil, nil
+				case joined == "config set yard-test user.subyard.test_vms_spool_schema 1 --project subyard-test":
+					return nil, nil, nil
+				}
+				return nil, nil, fmt.Errorf("unexpected call: %s", joined)
+			}}
+			if err := backend.Apply(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Lstat(filepath.Join(client, "current")); !os.IsNotExist(err) {
+				t.Fatalf("current route remains: %v", err)
+			}
+			if present := memory.Config[hostMemoryOwnerKey] == hostMemoryOwnerVersion && memory.Devices[hostMemoryDevice] != nil; present != hostMemory {
+				t.Fatalf("physical memory device after disabling broker: present=%t requested=%t", present, hostMemory)
+			}
+		})
 	}
 }
 
@@ -404,30 +411,38 @@ func (instance *hostMemoryInstance) handle(t *testing.T, args []string) ([]byte,
 }
 
 func TestBackendRejectsUnsafePhysicalSourceBeforeEnginePublication(t *testing.T) {
-	backend := fixtureBackend(t)
-	backend.DesiredPower = "running"
-	backend.Start = func(context.Context) error { t.Fatal("running yard was restarted"); return nil }
-	backend.Stop = backend.Start
-	memory := backendMemoryFixture(false)
-	backend.Runner = &fakeRunner{handler: func(_ string, arguments, _ []string, _ io.Reader) ([]byte, []byte, error) {
-		if body, handled := memory.handle(t, arguments); handled {
-			return body, nil, nil
-		}
-		joined := strings.Join(arguments, " ")
-		switch {
-		case joined == "list yard-test --project subyard-test -f csv -c s":
-			return []byte("RUNNING\n"), nil, nil
-		case strings.HasPrefix(joined, "file push "):
-			return nil, nil, nil
-		case strings.HasSuffix(joined, "_test-vms-host-memory-check"):
-			return nil, nil, errors.New("unverified memory source")
-		default:
-			t.Fatalf("mutation after failed source validation: %v", arguments)
-			return nil, nil, nil
-		}
-	}}
-	if err := backend.Apply(context.Background()); err == nil {
-		t.Fatal("unverified physical source accepted")
+	for _, nested := range []bool{true, false} {
+		t.Run(fmt.Sprintf("nested=%t", nested), func(t *testing.T) {
+			backend := fixtureBackend(t)
+			if !nested {
+				backend.Environment["NESTED_E2E_VMS"] = "0"
+				backend.HostMemory = true
+			}
+			backend.DesiredPower = "running"
+			backend.Start = func(context.Context) error { t.Fatal("running yard was restarted"); return nil }
+			backend.Stop = backend.Start
+			memory := backendMemoryFixture(false)
+			backend.Runner = &fakeRunner{handler: func(_ string, arguments, _ []string, _ io.Reader) ([]byte, []byte, error) {
+				if body, handled := memory.handle(t, arguments); handled {
+					return body, nil, nil
+				}
+				joined := strings.Join(arguments, " ")
+				switch {
+				case joined == "list yard-test --project subyard-test -f csv -c s":
+					return []byte("RUNNING\n"), nil, nil
+				case strings.HasPrefix(joined, "file push "):
+					return nil, nil, nil
+				case strings.HasSuffix(joined, "_test-vms-host-memory-check"):
+					return nil, nil, errors.New("unverified memory source")
+				default:
+					t.Fatalf("mutation after failed source validation: %v", arguments)
+					return nil, nil, nil
+				}
+			}}
+			if err := backend.Apply(context.Background()); err == nil {
+				t.Fatal("unverified physical source accepted")
+			}
+		})
 	}
 }
 
@@ -468,6 +483,51 @@ func TestBackendPhysicalSourcePreservesConflictingDevices(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestProfileHostMemoryReadinessChecksLiveSource(t *testing.T) {
+	backend := fixtureBackend(t)
+	backend.Environment["NESTED_E2E_VMS"] = "0"
+	backend.HostMemory = true
+	backend.DesiredPower = "running"
+	state, err := backend.state()
+	if err != nil {
+		t.Fatal(err)
+	}
+	memory := backendMemoryFixture(true)
+	verified := false
+	backend.Runner = &fakeRunner{handler: func(_ string, arguments, _ []string, _ io.Reader) ([]byte, []byte, error) {
+		if body, handled := memory.handle(t, arguments); handled {
+			return body, nil, nil
+		}
+		joined := strings.Join(arguments, " ")
+		switch {
+		case joined == "config get yard-test user.subyard.test_vms_revision --project subyard-test":
+			return []byte(state.marker), nil, nil
+		case joined == "list yard-test --project subyard-test -f csv -c s":
+			return []byte("RUNNING\n"), nil, nil
+		case strings.HasSuffix(joined, "_test-vms-host-memory-check"):
+			if !verified {
+				return nil, nil, errors.New("unverified live physical source")
+			}
+			return nil, nil, nil
+		case strings.HasSuffix(joined, "_test-vms-worker doctor"):
+			return nil, nil, nil
+		default:
+			t.Fatalf("unexpected readiness call: %v", arguments)
+			return nil, nil, nil
+		}
+	}}
+	if ready, err := backend.Converged(context.Background()); err != nil || ready {
+		t.Fatalf("unsafe live source passed quiet readiness: ready=%t err=%v", ready, err)
+	}
+	if ready, err := backend.Verify(context.Background()); err == nil || ready || !strings.Contains(err.Error(), "physical host memory source") {
+		t.Fatalf("unsafe live source had no diagnostic: ready=%t err=%v", ready, err)
+	}
+	verified = true
+	if ready, err := backend.Converged(context.Background()); err != nil || !ready {
+		t.Fatalf("verified live source failed readiness: ready=%t err=%v", ready, err)
 	}
 }
 

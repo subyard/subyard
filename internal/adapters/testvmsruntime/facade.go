@@ -127,7 +127,14 @@ func (facade Facade) Run(originalCommand string) error {
 					if errors.Is(err, ErrLegacyRetained) {
 						return facade.writeAcquireError("unavailable", "legacy_retirement_required", "retained guest data requires explicit operator retirement")
 					}
-					return facade.writeAcquireError("capacity", capacity.Resource, capacity.Error())
+					// Keep the released five-key refusal envelope. Numeric evidence fits
+					// its existing bounded message; older strict readers need no new keys.
+					message := capacity.Error()
+					if len(message) > 1024 {
+						message = message[:1024]
+					}
+					return facade.write(facadeResponse{SchemaVersion: LeaseProtocolVersion,
+						Status: "error", Code: "capacity", Reason: capacity.Resource, Message: message})
 				}
 				_ = facade.quarantine(grant, err)
 				return facade.writeError("quarantined", "slot provisioning failed")

@@ -36,7 +36,14 @@ two guest vCPUs and 2560 MiB guest RAM plus 1024 MiB per emulator for the runtim
 These are fixed presets, not a fallback chosen under memory pressure. The tablet stays below
 the emulator's three-million-pixel threshold, which otherwise forces 4 GiB guest RAM in
 [current emulator sources](https://android.googlesource.com/platform/external/qemu/+/refs/heads/emu-main-dev/android/android-emu/android/main-common.c).
-Admission also checks available memory. Initial image installation requires at least
+Admission bounds visible available RAM by every finite runtime cgroup ancestor and any verified
+read-only physical-owner meminfo bind. Virtualized LXCFS counters require that physical source;
+missing or unsafe evidence blocks allocation. Status reports these bounds, the limiting source,
+a 512 MiB reserve and pending startup promises. Concurrent provisioning reserves the full preset
+budget until readiness or confirmed cleanup; held emulators are already reflected in available RAM.
+Swap does not increase allocation headroom. The pool service has its own 2 GiB RAM and 2 GiB swap
+ceilings, verified against ancestor RAM limits. Runtime services use separate cgroups and their
+existing per-device memory ceilings. Initial image installation requires at least
 8 GiB free disk space for staging, potentially more for a larger image and its temporary SDK dependencies,
 plus 2 GiB per configured slot and 1 GiB for yard headroom (13 GiB total for the default pool).
 The installer preserves that slot/headroom allowance and removes failed staging data. Runtime starts
@@ -97,13 +104,17 @@ service supplies outbound networking without publishing inbound ports or changin
 rules. It blocks access through the host loopback gateway and uses the yard's configured
 non-loopback IPv4 DNS servers. Release verifies that both runtime and network helper have stopped.
 
-The wrapper renews every 60 seconds, preserves the command's exit code and releases on exit,
+The wrapper renews every 300 seconds, preserves the command's exit code and releases on exit,
 interrupt, hangup or termination. The pool owner checks expiry independently of the wrapper. After
-600 seconds without a successful renewal, it closes access and stops the runtime. Inactivity in
+1200 seconds without a successful renewal, it closes access and stops the runtime. Inactivity in
 ADB or CPU usage does not release a live lease. A failed stop quarantines the slot and keeps its
 image protected until an owner retry confirms cleanup. Restarting the pool owner revokes previous
 leases and cleans recorded runtimes before accepting requests; stopping the yard also stops its
 runtime services.
+Renewal also stops when the requesting parent session exits or changes identity. Killing the
+wrapper stops its renewal thread; the remaining command or detached ADB relay cannot renew it.
+The server checks expiry every five seconds, independently of the renewal cadence, and removes
+disposable userdata after stopping runtime and network helpers. Shared images and SDK caches remain.
 
 For explicit multi-step use, choose a new private lease-file path:
 
@@ -115,7 +126,7 @@ android-broker release --lease-file /tmp/my-android-lease.json
 
 Acquire prints JSON containing allocation metadata and the connection environment. The secret
 credential stays in the mode-0600 lease file; keep it private. Explicit acquire does **not** renew
-automatically: call `renew` at least once per minute while working, or prefer `run -- bash`.
+automatically: call `renew` every five minutes while working, or prefer `run -- bash`.
 Repeated release is safe. Public status contains owner yard/project/run/purpose and timestamps,
 without capabilities or connection endpoints. `--yard`, `--project` and `--purpose` supply display
 attribution when the client is outside a managed workspace; these labels do not authorize access.
@@ -182,7 +193,7 @@ android-broker renew --lease-file /tmp/my-android-lease.json
 ```
 
 Choose a new private lease-file path, use the ADB environment returned by acquire, and
-renew at least once per minute throughout the work. Tell the operator the selected yard
+renew every five minutes throughout the work. Tell the operator the selected yard
 and the absolute lease-file path; do not send the file contents or put them in a repository.
 The operator runs this on the laptop:
 

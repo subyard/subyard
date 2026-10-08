@@ -1054,6 +1054,13 @@ Choose validation for these changes using the skill's risk-based test-selection 
 
 ## Profile extensions
 
+A container profile can declare `YARD_CAPS="host-memory"` to request the fixed read-only
+owner `/proc/meminfo` bind at `/var/lib/subyard/host-meminfo`. The generic reconciler validates
+ownership, repairs drift without restarting the yard and verifies the live procfs source before
+publishing its runtime. This supplies physical memory counters when LXCFS virtualizes the
+container's view; it grants no host shell or Incus access. VM profiles use their own physical
+procfs counters. Roles that forbid host access also forbid this capability.
+
 Optional behavior and its tests belong to `config/profiles/<name>/`. A shipped `profile.json`
 (schema version `1`) extends existing profile provisioning with declarations read by
 `internal/profile`; profiles without that file retain their existing provision hook behavior.

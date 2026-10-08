@@ -99,7 +99,7 @@ keeper_probe_output="$(timeout 5 bash -c '
   . "$1/dev/agent-e2e.sh"
   timer_file="$2/timer"
   sleep() {
-    printf "%s\n" "$BASHPID" > "$timer_file"
+    [ "$1" != 300 ] || printf "%s\n" "$BASHPID" > "$timer_file"
     exec /bin/sleep "$@"
   }
   start_lease_keeper
@@ -115,6 +115,143 @@ keeper_probe_output="$(timeout 5 bash -c '
   ! kill -0 "$timer_pid" >/dev/null 2>&1
 ' _ "$ROOT" "$keeper_probe_dir" 2>&1)" || keeper_probe_rc=$?
 [ "$keeper_probe_rc" = 0 ] || fail "keeper left its timer/capture pipe open: $keeper_probe_rc $keeper_probe_output"
+
+# Real owner death must stop a sleeping keeper and an in-flight renewal, without waiting 300s.
+cat > "$keeper_probe_dir/wrapper.sh" <<'EOF'
+set -euo pipefail
+. "$1/dev/agent-e2e.sh"
+probe="$2" mode="$3"
+LOCAL_TEMP="$probe"
+sleep() {
+  printf '%s\t%s\n' "$BASHPID" "$1" >> "$probe/timers"
+  if [ "$1" = 300 ] && [ "$mode" = transport ]; then return 0; fi
+  exec /bin/sleep "$@"
+}
+facade_request() {
+  printf 'renew\n' >> "$probe/renewals"
+  printf '%s\n' "$BASHPID" > "$probe/transport"
+  /bin/sleep 300 &
+  printf '%s\n' "$!" > "$probe/transport-child"
+  wait "$!"
+}
+start_lease_keeper
+printf '%s\n' "$LEASE_KEEPER_PID" > "$probe/keeper"
+printf '%s\n' "$BASHPID" > "$probe/owner"
+# Keep the same owner identity without adding a payload child that holds captured streams.
+exec /bin/sleep 300
+EOF
+for keeper_death_case in timer transport requester; do
+  probe="$keeper_probe_dir/death-$keeper_death_case"
+  mkdir "$probe"
+  keeper_probe_rc=0
+  keeper_probe_output="$(timeout 8 bash -c '
+    set -euo pipefail
+    . "$1/dev/agent-e2e.sh"
+    probe="$2" mode="$3"
+    if [ "$mode" = requester ]; then
+      bash -c '\''bash "$1/wrapper.sh" "$2" "$3" timer & wait "$!"'\'' \
+        _ "${probe%/*}" "$1" "$probe" &
+      requester=$!
+    else
+      bash "${probe%/*}/wrapper.sh" "$1" "$probe" "$mode" &
+      requester=$!
+    fi
+    trap '\''kill -KILL "${owner:-}" "$requester" "${keeper:-}" 2>/dev/null || true'\'' EXIT
+    for ((attempt=0; attempt<300; attempt++)); do
+      if [ -s "$probe/owner" ] && [ -s "$probe/keeper" ] && [ -s "$probe/timers" ]; then
+        [ "$mode" != transport ] || [ -s "$probe/transport-child" ] && break
+      fi
+      /bin/sleep 0.01
+    done
+    owner="$(cat "$probe/owner")" keeper="$(cat "$probe/keeper")"
+    owner_identity="$(lease_process_identity "$owner")"
+    keeper_identity="$(lease_process_identity "$keeper")"
+    [ "$mode" != transport ] || [ "$(cat "$probe/renewals")" = renew ]
+    kill -KILL "$requester"
+    wait "$requester" 2>/dev/null || true
+    for ((attempt=0; attempt<250; attempt++)); do
+      current_keeper="$(lease_process_identity "$keeper" || true)"
+      [ "${current_keeper%%:*}" = "${keeper_identity%%:*}" ] || break
+      /bin/sleep 0.01
+    done
+    current_keeper="$(lease_process_identity "$keeper" || true)"
+    [ "${current_keeper%%:*}" != "${keeper_identity%%:*}" ]
+    if [ "$mode" = requester ]; then
+      # The detached wrapper is alive, but its original requester is gone.
+      kill -0 "$owner"
+      [ "$(lease_process_identity "$owner")" != "$owner_identity" ]
+      kill -KILL "$owner"
+    fi
+    while IFS=$'\''\t'\'' read -r pid seconds; do
+      ! lease_process_identity "$pid" >/dev/null
+    done < "$probe/timers"
+    if [ "$mode" = transport ]; then
+      ! lease_process_identity "$(cat "$probe/transport")" >/dev/null
+      ! lease_process_identity "$(cat "$probe/transport-child")" >/dev/null
+      [ "$(cat "$probe/renewals")" = renew ]
+    else
+      [ ! -e "$probe/renewals" ]
+    fi
+    [ -z "$(find "$probe" -name .subyard-lease-renew.\*)" ]
+  ' _ "$ROOT" "$probe" "$keeper_death_case" 2>&1)" || keeper_probe_rc=$?
+  [ "$keeper_probe_rc" = 0 ] \
+    || fail "keeper did not stop/close streams after $keeper_death_case death: $keeper_probe_rc $keeper_probe_output"
+done
+
+# PID reuse is simulated by replacing the saved start time for a still-live PID.
+(
+  owner_pid="$BASHPID"
+  owner_identity="$(lease_process_identity "$owner_pid")"
+  requester_pid="${owner_identity#*:}"
+  requester_identity="$(lease_process_identity "$requester_pid")"
+  lease_keeper_owner_alive
+  saved_identity="$owner_identity"
+  owner_identity="0:${owner_identity#*:}"
+  ! lease_keeper_owner_alive
+  owner_identity="$saved_identity"
+  requester_identity="0:${requester_identity#*:}"
+  ! lease_keeper_owner_alive
+) || fail 'keeper accepts a reused owner/requester PID'
+
+# Fake only waits: two successful renewals each require the complete 300-second cadence.
+keeper_cadence_rc=0
+keeper_cadence_output="$(timeout 5 bash -c '
+  set -euo pipefail
+  . "$1/dev/agent-e2e.sh"
+  probe="$2"
+  LOCAL_TEMP="$probe"
+  sleep() {
+    if [ "$1" = 300 ]; then
+      printf "%s\n" "$1" >> "$probe/cadence"
+    fi
+    exec /bin/sleep 0.01
+  }
+  facade_request() { printf "renew\n" >> "$probe/cadence-renewals"; printf '\''{"status":"ok"}\n'\''; }
+  start_lease_keeper
+  trap '\''kill "$LEASE_KEEPER_PID" 2>/dev/null || true; wait "$LEASE_KEEPER_PID" 2>/dev/null || true'\'' EXIT
+  for ((attempt=0; attempt<200; attempt++)); do
+    [ ! -f "$probe/cadence-renewals" ] || \
+      [ "$(wc -l < "$probe/cadence-renewals")" -lt 2 ] || break
+    /bin/sleep 0.01
+  done
+  [ "$(head -n2 "$probe/cadence")" = $'\''300\n300'\'' ]
+  [ "$(head -n2 "$probe/cadence-renewals")" = $'\''renew\nrenew'\'' ]
+' _ "$ROOT" "$keeper_probe_dir" 2>&1)" || keeper_cadence_rc=$?
+[ "$keeper_cadence_rc" = 0 ] || fail "keeper renewal cadence failed: $keeper_cadence_rc $keeper_cadence_output"
+keeper_failure_rc=0
+keeper_failure_output="$(timeout 5 bash -c '
+  set -euo pipefail
+  . "$1/dev/agent-e2e.sh"
+  trap '\''printf "owner stopped\n"; exit 0'\'' TERM
+  sleep() { exec /bin/sleep 0.01; }
+  facade_request() { return 23; }
+  start_lease_keeper
+  wait "$LEASE_KEEPER_PID" || true
+  exit 1
+' _ "$ROOT" 2>&1)" || keeper_failure_rc=$?
+[ "$keeper_failure_rc" = 0 ] && grep -Fq 'owner stopped' <<<"$keeper_failure_output" \
+  && grep -Fq 'lease lost; stopping payload transport' <<<"$keeper_failure_output" \
+  || fail "failed renewal no longer stops its authorized owner: $keeper_failure_rc $keeper_failure_output"
 
 [ "$E2E_YARD" = test-yard ] || fail "agent runner default yard is not test-yard"
 [ "$STATE_ROOT" = "$TMP/client/yards/test-yard" ] \
@@ -2545,6 +2682,16 @@ case "$command" in
       wrong-grant) printf '%s\n' "$wrong_grant" ;;
       android-success|count-success|count-mismatch|phase-*) printf '%s\n' "$grant" ;;
       capacity) printf '%s\n' '{"schema_version":1,"status":"error","code":"capacity","reason":"memory","message":"insufficient memory"}' ;;
+      capacity-snapshot|capacity-unsafe|capacity-state-unsafe)
+        snapshot='{"effective_available_bytes":100,"reserve_bytes":20,"pending_vm_bytes":30,"pending_builder_bytes":10,"headroom_bytes":40,"required_bytes":50,"visible_available_bytes":110,"physical_available_bytes":100,"cgroup_headroom_bytes":120,"physical_available_known":true,"cgroup_limit_available":true,"limiting_source":"verified_physical_meminfo","type":"subyard-pair","vm_count":1,"slot_state":"provisioning"}'
+        if [ "$FAKE_SCENARIO" = capacity-unsafe ]; then
+          snapshot="$(jq -c '.limiting_source = "private-value"' <<<"$snapshot")"
+        elif [ "$FAKE_SCENARIO" = capacity-state-unsafe ]; then
+          snapshot="$(jq -c '.slot_state = "private-value"' <<<"$snapshot")"
+        fi
+        jq -cn --arg message "test environment capacity: memory: insufficient confirmed memory reserve; admission=$snapshot" \
+          '{schema_version:1,status:"error",code:"capacity",reason:"memory",message:$message}'
+        ;;
       wait-success) [ "$count" -eq 1 ] && printf '%s\n' "$busy" || printf '%s\n' "$grant" ;;
       *) printf '%s\n' "$busy" ;;
     esac
@@ -2742,6 +2889,25 @@ set -e
   || fail "capacity refusal was not typed and fail-fast: $capacity_output"
 assert_phase_markers "$capacity_output" \
   $'allocation:start:0:-\nallocation:end:4:-\ncleanup/release:start:0:-\ncleanup/release:end:0:-'
+[ "$(capacity_refusal_snapshot '{"message":"insufficient memory"}' || true)" = '' ] \
+  || fail 'legacy capacity refusal acquired an invented snapshot'
+for capacity_case in capacity-snapshot capacity-unsafe capacity-state-unsafe; do
+  new_runner_fixture "$capacity_case"
+  capacity_rc=0
+  capacity_output="$(run_runner_fixture "$capacity_case" --slot 2 --ssh 1 -- true 2>&1)" || capacity_rc=$?
+  [ "$capacity_rc" = 4 ] && [ "$(grep -c '^acquire' "$RUNNER_FIXTURE/facade.log")" = 1 ] \
+    || fail 'capacity snapshot changed fail-fast allocation semantics'
+  if [ "$capacity_case" = capacity-snapshot ]; then
+    grep -Fq '"headroom_bytes":40,"required_bytes":50' <<<"$capacity_output" \
+      && grep -Fq '"reserve_bytes":20,"pending_vm_bytes":30,"pending_builder_bytes":10' <<<"$capacity_output" \
+      && grep -Fq '"slot_state":"provisioning"' <<<"$capacity_output" \
+      || fail 'runner discarded safe memory admission evidence'
+  else
+    ! grep -Fq 'private-value' <<<"$capacity_output" \
+      && ! grep -Fq 'memory admission=' <<<"$capacity_output" \
+      || fail 'runner rendered arbitrary capacity error data'
+  fi
+done
 
 new_runner_fixture exact-busy
 set +e

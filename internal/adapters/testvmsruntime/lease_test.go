@@ -414,6 +414,36 @@ func TestLeaseStoreHeldDeadlineStartsAfterProvisioning(t *testing.T) {
 	}
 }
 
+func TestLeaseStoreFiveMinuteRenewExtendsTwentyMinuteDeadline(t *testing.T) {
+	if LeaseTTL != 20*time.Minute {
+		t.Fatalf("lease TTL=%s, want 20m", LeaseTTL)
+	}
+	now := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1, Now: func() time.Time { return now }}
+	grant, err := store.AcquireSlot("client", "SHA256:key", "", "", "slot-001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.MarkHeld(grant); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(5 * time.Minute)
+	expires, err := store.Renew(grant)
+	if err != nil || !expires.Equal(now.Add(20*time.Minute)) {
+		t.Fatalf("renew deadline=%s: %v", expires, err)
+	}
+	now = expires.Add(-time.Second)
+	pool, err := store.Status()
+	if err != nil || pool.Slots[0].State != SlotHeld {
+		t.Fatalf("expired before last-renew deadline: %+v %v", pool, err)
+	}
+	now = expires
+	pool, err = store.Status()
+	if err != nil || pool.Slots[0].State != SlotDraining {
+		t.Fatalf("failed to expire at last-renew deadline: %+v %v", pool, err)
+	}
+}
+
 func TestProvisioningDeadlineContainsColdToolchainBudget(t *testing.T) {
 	want := time.Duration(provisionedGuestCount)*guestToolchainTimeout +
 		provisioningSafetyMargin

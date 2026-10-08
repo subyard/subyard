@@ -24,6 +24,7 @@ type Backend struct {
 	Instance       string
 	YardName       string
 	DesiredPower   string
+	HostMemory     bool
 	Environment    map[string]string
 	Runner         CommandRunner
 	Output         io.Writer
@@ -125,7 +126,7 @@ func (backend *Backend) observeReadiness(ctx context.Context, diagnostic bool) (
 	if backend.Runner == nil {
 		backend.Runner = ProcessRunner{}
 	}
-	if ok, err := backend.hostMemoryConverged(ctx, state.enabled == "1"); err != nil || !ok {
+	if ok, err := backend.hostMemoryConverged(ctx, state.enabled == "1" || backend.HostMemory); err != nil || !ok {
 		reason := "host memory device is not converged"
 		var check *doctorCheckError
 		if errors.As(err, &check) {
@@ -153,6 +154,12 @@ func (backend *Backend) observeReadiness(ctx context.Context, diagnostic bool) (
 			return true, nil
 		}
 		return notReady("outer yard power state differs", nil, nil)
+	}
+	if backend.HostMemory && state.enabled != "1" {
+		if _, err := backend.incus(ctx, "exec", backend.Instance, "--project", backend.Project,
+			"--", DefaultInstalledPath, "_test-vms-host-memory-check"); err != nil {
+			return notReady("physical host memory source is unavailable or unsafe", err, nil)
+		}
 	}
 	arguments := []string{
 		"exec", backend.Instance, "--project", backend.Project,
@@ -221,7 +228,7 @@ func (backend *Backend) Apply(ctx context.Context) (err error) {
 		}
 	}()
 
-	if state.enabled == "1" {
+	if state.enabled == "1" || backend.HostMemory {
 		if err := backend.reconcileHostMemory(ctx, true); err != nil {
 			return err
 		}
@@ -235,7 +242,7 @@ func (backend *Backend) Apply(ctx context.Context) (err error) {
 		"--create-dirs", "--uid", "0", "--gid", "0", "--mode", "0755"); err != nil {
 		return err
 	}
-	if state.enabled == "1" {
+	if state.enabled == "1" || backend.HostMemory {
 		// Use the candidate checker even when upgrading an older broker. Fresh
 		// setup has no broker config yet, and the installed engine stays intact
 		// if the live source cannot be established.
@@ -299,8 +306,10 @@ func (backend *Backend) Apply(ctx context.Context) (err error) {
 			return err
 		}
 	} else {
-		if err := backend.reconcileHostMemory(ctx, false); err != nil {
-			return err
+		if !backend.HostMemory {
+			if err := backend.reconcileHostMemory(ctx, false); err != nil {
+				return err
+			}
 		}
 		if err := backend.removeRoute(state); err != nil {
 			return err

@@ -18,24 +18,25 @@ import (
 const provisionedGuestCount = 2
 
 type Runtime struct {
-	allocation       *LeaseIdentity
-	memoryProbe      func() (MemoryCapacity, error)
-	usageProbe       func(context.Context, LeaseSlot) allocationUsage
-	cacheProbe       func(context.Context) (CacheUsage, error)
-	diskUsageProbe   func(context.Context) (uint64, error)
-	Config           Config
-	ConfigPath       string
-	Runner           CommandRunner
-	Stdout           io.Writer
-	Stderr           io.Writer
-	Now              func() time.Time
-	Sleep            func(context.Context, time.Duration) error
-	AvailableBytes   func(string) (uint64, error)
-	ExecutablePath   string
-	Events           *EventRecorder
-	finishDrain      func(context.Context, LeaseStore, LeaseSlot) error
-	finishQuarantine func(context.Context, LeaseStore, LeaseSlot, error) error
-	finishRecovery   func(context.Context, LeaseStore, LeaseSlot) error
+	allocation        *LeaseIdentity
+	memoryProbe       func() (MemoryCapacity, error)
+	brokerMemoryProbe func() (BrokerMemoryCapacity, error)
+	usageProbe        func(context.Context, LeaseSlot) allocationUsage
+	cacheProbe        func(context.Context) (CacheUsage, error)
+	diskUsageProbe    func(context.Context) (uint64, error)
+	Config            Config
+	ConfigPath        string
+	Runner            CommandRunner
+	Stdout            io.Writer
+	Stderr            io.Writer
+	Now               func() time.Time
+	Sleep             func(context.Context, time.Duration) error
+	AvailableBytes    func(string) (uint64, error)
+	ExecutablePath    string
+	Events            *EventRecorder
+	finishDrain       func(context.Context, LeaseStore, LeaseSlot) error
+	finishQuarantine  func(context.Context, LeaseStore, LeaseSlot, error) error
+	finishRecovery    func(context.Context, LeaseStore, LeaseSlot) error
 }
 
 func LoadRuntime(path string, stdout, stderr io.Writer) (*Runtime, error) {
@@ -292,6 +293,11 @@ func expectedLeaseIdentity(
 }
 
 func (runtime *Runtime) runGC(ctx context.Context) error {
+	defer func() {
+		if err := CleanupBrokerMemoryInputs(); err != nil {
+			fmt.Fprintln(runtime.Stderr, "test-vms: native worker handoff cleanup unavailable")
+		}
+	}()
 	if _, err := runtime.eventRecorder().Record(BrokerEvent{Kind: "reaper.start"}); err != nil {
 		return fmt.Errorf("persist reaper start: %w", err)
 	}

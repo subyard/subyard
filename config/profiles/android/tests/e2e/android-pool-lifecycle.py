@@ -108,7 +108,7 @@ class Leases:
             self.paths.discard(path)
             return dict(lease, allocation=allocation)
     def _heartbeat(self):
-        while not self.stop.wait(45):
+        while not self.stop.wait(300):
             with self.lock:
                 for path in self.paths:
                     try:
@@ -405,7 +405,7 @@ def require_expiry(path, lease):
         expiry = calendar.timegm(time.strptime(allocation["expires_at"], "%Y-%m-%dT%H:%M:%SZ")) - time.time()
     except (KeyError, TypeError, ValueError, OverflowError) as exc:
         raise Failure("lease expiry was invalid") from exc
-    if not 0 < expiry <= 600:
+    if not 0 < expiry <= 1200:
         raise Failure("lease expiry was outside the advertised TTL")
     if slot_status(allocation["slot_id"], allocation["generation"]) != "held":
         raise Failure("lease was not held before expiry")
@@ -472,9 +472,136 @@ def require_phone_reuse(leases, directory, phone_path, phone, api, name):
     require_sdk(new_phone, api); leases.check()
     return new_path, new_phone
 
+def memory_lease():
+    """One natural expiry window proves a killed run wrapper cannot be kept alive by its child."""
+    process = None
+    child_pid = None
+    with tempfile.TemporaryDirectory(prefix='subyard-android-memory-lease-') as temporary:
+        directory = Path(temporary)
+        marker = directory / 'command.json'
+        payload = ('import json,os,pathlib,time; '
+                   f'pathlib.Path({str(marker)!r}).write_text(json.dumps(dict(pid=os.getpid(), '
+                   'endpoint=os.environ["ADB_SERVER_SOCKET"].split(":",1)[1], '
+                   'slot=os.environ["SUBYARD_EMU_SLOT"], generation=int(os.environ["SUBYARD_EMU_GENERATION"])))); '
+                   'time.sleep(5400)')
+        purpose = 'android-memory-lease'
+        try:
+            process = subprocess.Popen([EMU, 'run', '--purpose', purpose, '--', sys.executable, '-c', payload],
+                                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            deadline = time.monotonic() + 1320
+            while not marker.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(1)
+            if not marker.exists():
+                raise Failure('run wrapper did not start its command')
+            command = json.loads(marker.read_text())
+            child_pid = command['pid']
+            def selected():
+                result = call([EMU, 'status'])
+                status = json.loads(result.stdout)
+                if result.returncode or status['heartbeat_seconds'] != 300 or status['ttl_seconds'] != 1200:
+                    raise Failure('status timing differs from 300s renewal and 1200s expiry')
+                memory = status['memory']
+                bounds = [memory['visible_available_bytes']]
+                bounds += [memory[key] for key in ('physical_available_bytes', 'cgroup_headroom_bytes')
+                           if memory[key] is not None]
+                if (memory['available_bytes'] != min(bounds) or memory['admission_headroom_bytes'] !=
+                        max(0, min(bounds) - memory['reserve_bytes'] - memory['pending_bytes'])):
+                    raise Failure('memory status arithmetic is inconsistent')
+                slot = next(slot for slot in status['slots'] if slot['slot_id'] == command['slot'])
+                if slot['generation'] != command['generation']:
+                    raise Failure('allocation generation changed unexpectedly')
+                return slot
+            allocation = selected()
+            if allocation['state'] != 'held' or allocation['owner']['purpose'] != purpose:
+                raise Failure('run allocation attribution differs')
+            unit = f'subyard-android-slot-{command["slot"]}-{command["generation"]}.service'
+            cgroup = call(['systemctl', 'show', unit, '-p', 'ControlGroup', '--value'])
+            if cgroup.returncode or cgroup.stdout.strip() != '/system.slice/' + unit:
+                raise Failure('runtime is not outside the broker service memory ceiling')
+            allocation['android_serial'] = 'emulator-5554'
+            lease = dict(endpoint=command['endpoint'], allocation=allocation)
+            retained_marker = '/data/local/tmp/subyard-owner-death-marker'
+            adb(lease, 'shell', f'printf retained > {retained_marker}')
+            initial_heartbeat = calendar.timegm(time.strptime(
+                allocation['last_heartbeat_at'], '%Y-%m-%dT%H:%M:%SZ'))
+            deadline, progress = time.monotonic() + 335, time.monotonic()
+            while True:
+                current = selected()
+                if process.poll() is not None or current['state'] != 'held':
+                    raise Failure('live run wrapper did not preserve its held lease')
+                heartbeat = calendar.timegm(time.strptime(
+                    current['last_heartbeat_at'], '%Y-%m-%dT%H:%M:%SZ'))
+                if heartbeat != initial_heartbeat:
+                    if not 295 <= heartbeat - initial_heartbeat <= 335:
+                        raise Failure('native successful renewal was outside the five-minute cadence')
+                    phase('live wrapper renewed its held lease after five minutes')
+                    break
+                if time.monotonic() > deadline:
+                    raise Failure('live run wrapper did not renew within five minutes')
+                if time.monotonic() >= progress:
+                    phase('waiting for live wrapper five-minute renewal')
+                    progress += 30
+                time.sleep(2)
+            process.kill()
+            process.wait(timeout=10)
+            frozen = selected()
+            heartbeat, expiry = frozen['last_heartbeat_at'], frozen['expires_at']
+            expires = calendar.timegm(time.strptime(expiry, '%Y-%m-%dT%H:%M:%SZ'))
+            renewed = calendar.timegm(time.strptime(heartbeat, '%Y-%m-%dT%H:%M:%SZ'))
+            if expires - renewed != 1200:
+                raise Failure('expiry was not 1200 seconds after the final successful renewal')
+            earliest = time.monotonic() + max(0, expires - time.time() - 2)
+            deadline, progress = earliest + 62, time.monotonic() + 60
+            while True:
+                current = selected()
+                if current['state'] == 'available':
+                    break
+                if current['last_heartbeat_at'] != heartbeat or current['expires_at'] != expiry:
+                    raise Failure('orphan command sustained the killed wrapper lease')
+                if time.monotonic() > deadline:
+                    raise Failure('killed requester lease did not naturally expire')
+                if time.monotonic() >= progress:
+                    phase('waiting for killed requester natural expiry')
+                    progress += 60
+                time.sleep(5)
+            if time.monotonic() < earliest:
+                raise Failure('killed requester lease ended before advertised expiry')
+            require_adb_unusable(lease)
+            path, fresh = acquire(directory, 'fresh')
+            if (fresh['allocation']['slot_id'] != command['slot'] or
+                    fresh['allocation']['generation'] <= command['generation']):
+                raise Failure('clean reacquire did not advance the expired slot generation')
+            adb(fresh, 'shell', 'test', '!', '-e', retained_marker)
+            require_sdk(fresh, 36)
+            if call([EMU, 'release', '--lease-file', str(path)], timeout=120).returncode:
+                raise Failure('fresh lease release failed')
+            phase('memory bounds and killed requester natural expiry: PASS')
+            return 0
+        finally:
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.wait(timeout=10)
+            if process is not None and process.stderr is not None:
+                process.stderr.close()
+            if child_pid is not None:
+                try:
+                    os.killpg(child_pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            for path in directory.glob('fresh.json'):
+                call([EMU, 'release', '--lease-file', str(path)], timeout=120)
+
+
 def main():
     if os.geteuid() == 0:
         raise Failure("must run as the unprivileged yard user")
+    if sys.argv[1:] == ['--lane', 'memory-lease']:
+        try:
+            return memory_lease()
+        except Exception as exc:
+            detail = str(exc) if isinstance(exc, Failure) else type(exc).__name__
+            print(f'android memory lease: FAIL: {detail}', file=sys.stderr)
+            return 1
     leases, step = Leases(), "initialization"
     leases.start()
     try:
@@ -498,8 +625,8 @@ def main():
                 step = "primary image cache protection"; require_prune_protection((36,)); leases.check()
                 step = "primary phone reuse"
                 new_path, new_phone = require_phone_reuse(leases, directory, phone_path, phone, 36, "phone-new")
-                phase("verify default phone lease expiry")
-                step = "lease expiry"; require_expiry(new_path, leases.for_expiry(new_path, new_phone))
+                phase("verify killed requester natural lease expiry")
+                step = "lease expiry"; leases.release(new_path); memory_lease()
                 leases.check()
                 phase("primary default phone lifecycle: PASS")
 
