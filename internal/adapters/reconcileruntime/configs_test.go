@@ -482,3 +482,94 @@ func TestPreviewInstructionsComposeOnlySelectedEffectivePayloads(t *testing.T) {
 		}
 	}
 }
+
+func TestPreviewInstructionsFollowRuntimeAssets(t *testing.T) {
+	root := testkit.TempDir(t)
+	source := filepath.Join(root, "AGENTS.md")
+	host := []byte("Host instructions.\n")
+	testkit.WriteFile(t, source, host, 0o600)
+	fileForRuntime := func(repository string) guestConfigFile {
+		t.Helper()
+		files, err := (Runtime{RepositoryRoot: repository, Environment: []string{
+			"CODING_TOOL_INTEGRATIONS=codex", "HOST_CODEX_AGENTS_MD=" + source,
+		}}).guestConfigFiles()
+		if err != nil || len(files) != 1 {
+			t.Fatalf("runtime instruction files=%#v err=%v", files, err)
+		}
+		return files[0]
+	}
+	assertPayload := func(file guestConfigFile, want []byte) string {
+		t.Helper()
+		got, err := file.readSource()
+		if err != nil || !bytes.Equal(got, want) {
+			t.Fatalf("runtime instruction payload=%q want=%q err=%v", got, want, err)
+		}
+		digest, err := file.sourceHash()
+		if err != nil || digest != fmt.Sprintf("%x", sha256.Sum256(want)) {
+			t.Fatalf("runtime instruction hash=%q err=%v", digest, err)
+		}
+		return digest
+	}
+	currentRoot := filepath.Join("..", "..", "..")
+	current, err := os.ReadFile(filepath.Join(currentRoot, "config", "preview", "instructions.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentFile := fileForRuntime(currentRoot)
+	wantCurrent := append(append([]byte(nil), host...), append([]byte("\n\n"), current...)...)
+	currentHash := assertPayload(currentFile, wantCurrent)
+
+	// A host copy cannot override the instruction asset of the selected runtime.
+	testkit.WriteFile(t, source, []byte("Before.\n"+previewInstructions+"After.\n"), 0o600)
+	assertPayload(currentFile, []byte("Before.\n"+string(current)+"After.\n"))
+	testkit.WriteFile(t, source, host, 0o600)
+
+	versionedRoot := filepath.Join(root, "versioned-runtime")
+	asset := filepath.Join(versionedRoot, "config", "preview", "instructions.md")
+	if err := os.MkdirAll(filepath.Dir(asset), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, asset, current, 0o644)
+	versionedFile := fileForRuntime(versionedRoot)
+	if assertPayload(versionedFile, wantCurrent) != currentHash {
+		t.Fatal("identical runtime assets changed the desired hash")
+	}
+	changed := bytes.Replace(current, []byte("Share the printed URL."), []byte("Share the updated URL."), 1)
+	testkit.WriteFile(t, asset, changed, 0o644)
+	wantChanged := append(append([]byte(nil), host...), append([]byte("\n\n"), changed...)...)
+	if assertPayload(versionedFile, wantChanged) == currentHash {
+		t.Fatal("changed runtime asset did not change the desired hash")
+	}
+	assertPayload(currentFile, wantCurrent)
+
+	// Freeze the published v0.17.3 bytes independently of the compiled fallback.
+	legacy := "<!-- subyard-preview -->\nFor a static web preview, run `subyard-preview <relative-static-dir>` from the Git workspace and keep it running with your background/async process mechanism. Share the printed URL. An owner Tailscale URL requires device reachability and Tailnet policy access; a loopback URL requires an active preview-enabled `yard code` SSH session. The helper must stay running for either URL.\n<!-- /subyard-preview -->\n"
+	wantLegacy := []byte(string(host) + "\n\n" + legacy)
+	assertPayload(fileForRuntime(filepath.Join(root, "old-runtime")), wantLegacy)
+}
+
+func TestPreviewInstructionAssetRejectsNonregularSources(t *testing.T) {
+	for _, kind := range []string{"directory", "symlink"} {
+		t.Run(kind, func(t *testing.T) {
+			root := testkit.TempDir(t)
+			asset := filepath.Join(root, "config", "preview", "instructions.md")
+			if err := os.MkdirAll(filepath.Dir(asset), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if kind == "directory" {
+				if err := os.Mkdir(asset, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.Symlink("missing.md", asset); err != nil {
+				t.Fatal(err)
+			}
+			files, err := (Runtime{RepositoryRoot: root, Environment: []string{"CODING_TOOL_INTEGRATIONS=codex"}}).guestConfigFiles()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := files[0].readSource(); err == nil || os.IsNotExist(err) {
+				t.Fatalf("invalid runtime instruction asset silently fell back: %v", err)
+			}
+		})
+	}
+}

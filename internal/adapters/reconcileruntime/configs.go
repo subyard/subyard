@@ -25,6 +25,7 @@ type guestConfigFile struct {
 	destination         string
 	followSymlinks      bool
 	previewInstructions bool
+	previewSource       string
 	ownedFormat         string
 }
 
@@ -253,6 +254,7 @@ func (runtime Runtime) guestConfigFiles() ([]guestConfigFile, error) {
 	for _, agent := range strings.Fields(values["CODING_TOOL_INTEGRATIONS"]) {
 		if instruction, ok := instructions[agent]; ok && values["ALLOWS_CODING_TOOLS"] != "false" {
 			instruction.integration = agent
+			instruction.previewSource = filepath.Join(runtime.RepositoryRoot, "config", "preview", "instructions.md")
 			files = append(files, instruction)
 		}
 		for _, asset := range assets {
@@ -274,6 +276,16 @@ func (file guestConfigFile) readSource() ([]byte, error) {
 	if err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
+	// Older published runtimes lack this asset; preserve their exact desired bytes.
+	preview := []byte(previewInstructions)
+	if file.previewSource != "" {
+		asset, err := (config.MaterializedAsset{Source: file.previewSource}).ReadSource()
+		if err == nil {
+			preview = asset
+		} else if !os.IsNotExist(err) {
+			return nil, err
+		}
+	}
 	// Refresh the generated block when a host instruction source includes an older copy.
 	start, end := []byte("<!-- subyard-preview -->"), []byte("<!-- /subyard-preview -->")
 	if begin := bytes.Index(payload, start); begin >= 0 {
@@ -283,17 +295,17 @@ func (file guestConfigFile) readSource() ([]byte, error) {
 		}
 		finish += begin + len(end)
 		updated := append([]byte(nil), payload[:begin]...)
-		updated = append(updated, bytes.TrimSuffix([]byte(previewInstructions), []byte("\n"))...)
+		updated = append(updated, bytes.TrimSuffix(preview, []byte("\n"))...)
 		return append(updated, payload[finish:]...), nil
 	}
 	if len(payload) != 0 {
 		payload = append(payload, '\n', '\n')
 	}
-	return append(payload, previewInstructions...), nil
+	return append(payload, preview...), nil
 }
 
 const previewInstructions = `<!-- subyard-preview -->
-For a static web preview, run ` + "`subyard-preview <relative-static-dir>`" + ` from the Git workspace and keep it running with your background/async process mechanism. Share the printed URL. Owner URLs require network reachability (and Tailnet policy access for Tailscale). A loopback URL is local to the yard; provide the operator-machine tunnel recipe from ` + "`subyard-preview --help`" + ` only when the operator requests it. The helper must stay running.
+For a static web preview, run ` + "`subyard-preview <relative-static-dir>`" + ` from the Git workspace and keep it running with your background/async process mechanism. Share the printed URL. An owner Tailscale URL requires device reachability and Tailnet policy access; a loopback URL requires an active preview-enabled ` + "`yard code`" + ` SSH session. The helper must stay running for either URL.
 <!-- /subyard-preview -->
 `
 

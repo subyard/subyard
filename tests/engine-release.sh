@@ -22,6 +22,7 @@ ROOT="$TMP/source"
 cd "$ROOT"
 # A restrictive checkout must still produce public executable runtime assets.
 chmod 0700 "$ROOT/config/preview/subyard-preview"
+chmod 0600 "$ROOT/config/preview/instructions.md"
 
 release="$TMP/release"
 # Release activation observes a reachable native API with an absent instance,
@@ -167,6 +168,7 @@ grep -Fxq './bin/yard' "$bundle_list" \
   && grep -Fxq './config/migrations.json' "$bundle_list" \
   && grep -Fxq './config/release-transition.json' "$bundle_list" \
   && grep -Fxq './config/preview/subyard-preview' "$bundle_list" \
+  && grep -Fxq './config/preview/instructions.md' "$bundle_list" \
   && grep -Fxq './config/agents/codex/provision.sh' "$bundle_list" \
   && grep -Fxq './config/agents/aiobserver/provision.sh' "$bundle_list" \
   && grep -Fxq './scripts/lib/ai-observer-proxy.sh' "$bundle_list" \
@@ -192,6 +194,9 @@ tar -xpzf "$bundle_one" -C "$bundle_extract"
 [ "$(stat -c '%a' "$bundle_extract/config/preview/subyard-preview")" = 755 ] \
   && cmp -s "$ROOT/config/preview/subyard-preview" "$bundle_extract/config/preview/subyard-preview" \
   || fail 'runtime bundle changed preview helper bytes or executable mode'
+[ "$(stat -c '%a' "$bundle_extract/config/preview/instructions.md")" = 644 ] \
+  && cmp -s "$ROOT/config/preview/instructions.md" "$bundle_extract/config/preview/instructions.md" \
+  || fail 'runtime bundle changed preview instruction bytes or public data mode'
 [ "$(stat -c '%a' "$bundle_extract/config/profiles/package-fixture/asset.txt")" = 644 ] \
   || fail 'runtime bundle inherited restrictive source data permissions'
 [ "$("$bundle_extract/config/profiles/package-fixture/bin/worker")" = "profile native fixture" ] \

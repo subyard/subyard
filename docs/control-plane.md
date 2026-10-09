@@ -504,6 +504,11 @@ the original assets, and complete a subsequent ordinary update. Its synthetic In
 only observed running/stopped state; settings, ledger and original journal bindings must survive
 recovery. Privileged commands are rejected by fixture shims.
 
+Generated preview instructions come from the bound runtime's
+`config/preview/instructions.md` asset. Runtimes predating that asset use the frozen legacy
+text so that a delegated engine preserves the original authorized observation scope.
+The Release workflow retains the compatibility check's output with its other failure diagnostics.
+
 ### Legacy upgrades
 
 Runtimes older than v0.11.0 use a legacy updater that cannot authorize the current release

@@ -787,12 +787,11 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 			{}, {Result: ports.InstanceExecResult{ExitCode: 1}, Err: errors.New("not a link")}, {}, {},
 		}
 	}
-	instructions := filepath.Join(t.TempDir(), "AGENTS.md")
+	instructions := filepath.Join(testkit.TempDir(t), "AGENTS.md")
 	payload := []byte("fixture\n")
-	if err := os.WriteFile(instructions, payload, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	digest, err := (guestConfigFile{source: instructions, previewInstructions: true}).sourceHash()
+	testkit.WriteFile(t, instructions, payload, 0o600)
+	previewSource := filepath.Join("..", "..", "..", "config", "preview", "instructions.md")
+	digest, err := (guestConfigFile{source: instructions, previewInstructions: true, previewSource: previewSource}).sourceHash()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -817,9 +816,7 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 		command[0] != "sha256sum" || command[2] != "/home/dev/.config/opencode/AGENTS.md" {
 		t.Fatalf("OpenCode instructions were not checked natively: %#v", command)
 	}
-	if err := os.WriteFile(instructions, []byte("updated\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, instructions, []byte("updated\n"), 0o600)
 	incus.ExecSteps = steps("regular file|755|0:0", digest)
 	assertStage(t, runtime, "provision", false, "stale materialized agent config")
 	linkedInstructions := filepath.Join(filepath.Dir(instructions), "linked-AGENTS.md")
@@ -830,7 +827,7 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 		"CODING_TOOL_INTEGRATIONS=opencode", "CCUSAGE_VERSION=1.2.3",
 		"HOST_OPENCODE_AGENTS_MD=" + linkedInstructions,
 	}
-	linkedDigest, err := (guestConfigFile{source: linkedInstructions, followSymlinks: true, previewInstructions: true}).sourceHash()
+	linkedDigest, err := (guestConfigFile{source: linkedInstructions, followSymlinks: true, previewInstructions: true, previewSource: previewSource}).sourceHash()
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -99,11 +99,17 @@ line_of() {
 
 release_adapter_line="$(line_of "$RELEASE_WORKFLOW" "run: bash $RUNNER")"
 release_build_line="$(line_of "$RELEASE_WORKFLOW" 'name: Build release assets')"
+release_compat_line="$(line_of "$RELEASE_WORKFLOW" 'name: Verify released updater compatibility')"
 release_publish_line="$(line_of "$RELEASE_WORKFLOW" 'name: Publish GitHub Release')"
 [ "$release_adapter_line" -lt "$release_publish_line" ] \
   || fail 'Release must pass the real-adapter gate before publishing assets'
 [ "$release_build_line" -lt "$release_publish_line" ] \
   || fail 'Release must build assets before publishing'
+[ "$release_build_line" -lt "$release_compat_line" ] \
+  && [ "$release_compat_line" -lt "$release_publish_line" ] \
+  || fail 'Release must verify built assets against released updaters before publishing'
+grep -Fq '2>&1 | tee .build/ci-logs/verify-release-upgrades.log' "$RELEASE_WORKFLOW" \
+  || fail 'Release must preserve failed released-updater compatibility diagnostics'
 ! grep -Fq 'runs-on: ubuntu-latest' "$RELEASE_WORKFLOW" \
   || fail 'Release must use the same explicit Ubuntu baseline as CI'
 for workflow in "$PASEO_WORKFLOW" "$RELEASE_WORKFLOW"; do

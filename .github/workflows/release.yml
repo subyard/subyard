@@ -115,7 +115,10 @@ jobs:
             dev/package-engine.sh --output-dir .build/release --version "$version" --arch "$arch"
           done
       - name: Verify released updater compatibility
-        run: python3 dev/verify-release-upgrades.py --release-dir .build/release --version "${GITHUB_REF_NAME#v}"
+        run: |
+          set -o pipefail
+          mkdir -p .build/ci-logs
+          python3 dev/verify-release-upgrades.py --release-dir .build/release --version "${GITHUB_REF_NAME#v}" 2>&1 | tee .build/ci-logs/verify-release-upgrades.log
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}

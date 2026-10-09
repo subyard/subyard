@@ -145,6 +145,7 @@ for required in \
   config/migrations.json \
   config/release-transition.json \
   config/preview/subyard-preview \
+  config/preview/instructions.md \
   completions/yard.bash; do
   [ -f "$bundle_stage/$required" ] \
     || { printf 'package-engine: runtime allowlist omitted %s\n' "$required" >&2; exit 1; }

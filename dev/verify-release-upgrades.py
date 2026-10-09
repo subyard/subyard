@@ -395,7 +395,12 @@ def verify_activation_only_recovery(release, version, baseline, arch, root):
     require(inspected["outcome"]["status"] == "recovering" and not inspected.get("blockers")
             and inspected["current"] == journal["goal"]["target"]
             and inspected["outcome"].get("transaction") == journal["transaction"],
-            "standalone candidate did not inspect the original authorized resume")
+            "standalone candidate did not inspect the original authorized resume: "
+            + json.dumps({"status": inspected["outcome"]["status"],
+                          "code": inspected["outcome"].get("code"),
+                          "blockers": inspected.get("blockers"),
+                          "current_matches": inspected["current"] == journal["goal"]["target"],
+                          "transaction_matches": inspected["outcome"].get("transaction") == journal["transaction"]}))
     require(snapshot(fixture.config) == config_before and fixture.journal.read_bytes() == journal_before,
             "delegated inspection changed protected metadata or settings")
     fixture.run([str(candidate), "migrate"])
