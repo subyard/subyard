@@ -121,7 +121,10 @@ while IFS= read -r -d '' relative; do
   [ -f "$REPO/$relative" ] && [ ! -L "$REPO/$relative" ] \
     || { printf 'package-engine: runtime input must be a regular file: %s\n' "$relative" >&2; exit 1; }
   install -d "$bundle_stage/$(dirname "$relative")"
-  cp -p -- "$REPO/$relative" "$bundle_stage/$relative"
+  # Public runtime assets need fixed modes regardless of the checkout's umask.
+  mode=0644
+  [ ! -x "$REPO/$relative" ] || mode=0755
+  install -m "$mode" -- "$REPO/$relative" "$bundle_stage/$relative"
 done < "$runtime_list"
 rm -f -- "$runtime_list"
 GOOS="$goos" GOARCH="$goarch" "$SCRIPT_DIR/build-profiles.sh" \

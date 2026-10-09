@@ -62,8 +62,9 @@ compatibility manifest and provenance. Follow the
 [dev-flow publication policy](../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk)
 before pushing a `vMAJOR.MINOR.PATCH` tag; GitHub workflows do not have
 access to that pool. The tag starts the independent Release workflow checks: host-free,
-native Paseo, adapter and upgrade compatibility. The workflow publishes both architectures to a
-tag-backed GitHub Release after they pass. Branch CI does not run for tag pushes. `yard update`
+native Paseo, CLI reference freshness, complete profile acceptance inventory, adapter and
+upgrade compatibility on the same Ubuntu 24.04 baseline as CI. The workflow publishes both
+architectures to a tag-backed GitHub Release after they pass. Branch CI does not run for tag pushes. `yard update`
 verifies all release inputs, applies the candidate's migration registry, publishes an immutable
 release directory and atomically rotates
 `current`/`previous`. See [release migrations](control-plane.md#release-migrations) for the runtime
@@ -74,6 +75,16 @@ transition. Its bounded [`scripts/migrate-source-install.sh`](../scripts/migrate
 leaf publishes recovery facts before importing config and later switches shell entrypoints; it does
 not authorize, activate or roll back a release. An interruption resumes from the protected outer
 journal and observed facts.
+
+Native Paseo builds retain npm downloads in `.build/paseo-npm-cache`, with separate
+CI caches per architecture and pinned build inputs. Network downloads use bounded
+retries; dependency integrity, version and native-module failures still stop the build.
+Registry requests and archive transfers allow five minutes each; archive connections
+allow one minute. Paseo jobs allow 90 minutes for slow downloads and bounded retries.
+Failed npm attempts retain safe error codes and public registry request diagnostics
+under `.build/paseo-diagnostics`. Both Paseo workflows upload those diagnostics on
+failure with seven-day retention. The cache, raw npm debug logs, configuration and
+environment values are excluded from diagnostic artifacts.
 
 After activation or rollback and configuration refresh, `yard update` reinspects the exact selected
 release without fetching another version. Its final human-readable summary reports readiness and

@@ -20,6 +20,8 @@ mkdir "$TMP/source"
 tar -C "$ROOT" --null -T "$TMP/source-files" -cf - | tar -C "$TMP/source" -xpf -
 ROOT="$TMP/source"
 cd "$ROOT"
+# A restrictive checkout must still produce public executable runtime assets.
+chmod 0700 "$ROOT/config/preview/subyard-preview"
 
 release="$TMP/release"
 # Release activation observes a reachable native API with an absent instance,
@@ -110,6 +112,7 @@ printf '%s\n' '# Synthetic profile' > "$fixture_profile/profile.conf"
 printf '%s\n' 'package main' 'import "fmt"' 'func main() { fmt.Println("profile native fixture") }' \
   > "$fixture_profile/cmd/worker/main.go"
 printf '%s\n' 'runtime fixture' > "$fixture_profile/asset.txt"
+chmod 0600 "$fixture_profile/asset.txt"
 printf '%s\n' 'nested runtime manifest fixture' > "$fixture_profile/runtime-files.sha256"
 printf '%s\n' '# Test-only fixture' > "$fixture_profile/tests/run.sh"
 legacy_installer="$ROOT/tests/fixtures/migrations/v0.1.0-install-runtime-release.sh"
@@ -189,6 +192,8 @@ tar -xpzf "$bundle_one" -C "$bundle_extract"
 [ "$(stat -c '%a' "$bundle_extract/config/preview/subyard-preview")" = 755 ] \
   && cmp -s "$ROOT/config/preview/subyard-preview" "$bundle_extract/config/preview/subyard-preview" \
   || fail 'runtime bundle changed preview helper bytes or executable mode'
+[ "$(stat -c '%a' "$bundle_extract/config/profiles/package-fixture/asset.txt")" = 644 ] \
+  || fail 'runtime bundle inherited restrictive source data permissions'
 [ "$("$bundle_extract/config/profiles/package-fixture/bin/worker")" = "profile native fixture" ] \
   || fail 'packaged native profile executable does not run'
 (

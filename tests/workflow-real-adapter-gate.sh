@@ -72,6 +72,13 @@ for workflow in "$CI_WORKFLOW" "$RELEASE_WORKFLOW"; do
     || fail "$(basename "$workflow") must build, run and test the native ARM64 engine"
   grep -Fq 'make verify' "$workflow" \
     || fail "$(basename "$workflow") must verify core and shipped profiles"
+  grep -Fq 'run: make cli-docs-check' "$workflow" \
+    && grep -Fq 'bash dev/test-profiles.sh --e2e --list' "$workflow" \
+    || fail "$(basename "$workflow") must check CLI docs and shipped profile E2E inventory"
+  grep -Fq '.build/test-runs/' "$workflow" \
+    && grep -Fq 'make verify 2>&1 | tee .build/ci-logs/verify.log' "$workflow" \
+    && grep -Fq 'if: failure()' "$workflow" \
+    || fail "$(basename "$workflow") must preserve failed host-free diagnostics"
   grep -Fq "bash $RUNNER" "$workflow" \
     || fail "$(basename "$workflow") must invoke the shared runner"
   ! grep -Fq 'scripts/install-key-tools.sh' "$workflow" \
@@ -80,7 +87,7 @@ done
 grep -Fxq '    needs: [native-engine-arm64, paseo-headless]' "$RELEASE_WORKFLOW" \
   || fail 'Release publication must require native ARM64 engine and Paseo checks'
 
-grep -Fq 'run: make verify' "$CI_WORKFLOW" \
+grep -Fq 'make verify 2>&1 | tee .build/ci-logs/verify.log' "$CI_WORKFLOW" \
   && grep -Fq 'shellcheck -x -S warning' "$CI_WORKFLOW" \
   || fail 'CI must run the core and ShellCheck gates'
 verify_recipe="$(awk '/^verify:/ {inside=1; next} inside && /^[^[:space:]]/ {exit} inside {print}' "$ROOT/Makefile")"
@@ -97,7 +104,12 @@ release_publish_line="$(line_of "$RELEASE_WORKFLOW" 'name: Publish GitHub Releas
   || fail 'Release must pass the real-adapter gate before publishing assets'
 [ "$release_build_line" -lt "$release_publish_line" ] \
   || fail 'Release must build assets before publishing'
-grep -Fq 'bash dev/test-profiles.sh --e2e --list' "$CI_WORKFLOW" \
-  || fail 'CI must preflight the shipped profile E2E inventory'
+! grep -Fq 'runs-on: ubuntu-latest' "$RELEASE_WORKFLOW" \
+  || fail 'Release must use the same explicit Ubuntu baseline as CI'
+for workflow in "$PASEO_WORKFLOW" "$RELEASE_WORKFLOW"; do
+  grep -Fq 'path: .build/paseo-npm-cache' "$workflow" \
+    && grep -Fq 'path: .build/paseo-diagnostics/' "$workflow" \
+    || fail "$(basename "$workflow") must cache npm downloads and preserve safe diagnostics"
+done
 
 printf 'ok: CI and Release share the prepared-context real-adapter gate\n'

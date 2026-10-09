@@ -44,8 +44,78 @@ done
 temporary="$(mktemp -d /tmp/subyard-paseo-build.XXXXXX)"
 cleanup() { rm -rf -- "$temporary"; }
 trap cleanup EXIT HUP INT TERM
+npm_cache="$REPO/.build/paseo-npm-cache"
+mkdir -p "$REPO/.build/paseo-diagnostics"
+npm_diagnostics="$(mktemp -d "$REPO/.build/paseo-diagnostics/$TARGET_ARCH.XXXXXX")"
+mkdir -p "$npm_cache" "$temporary/npm-home" "$temporary/npm-logs"
+: >"$temporary/npm-user.npmrc"
+: >"$temporary/npm-global.npmrc"
+
+# The public bundle must not inherit developer credentials or private npm settings.
+run_npm() {
+  env -i HOME="$temporary/npm-home" PATH="$node_root/bin:$PATH" TMPDIR=/tmp \
+    "$node_root/bin/node" "$node_root/lib/node_modules/npm/bin/npm-cli.js" \
+    --userconfig="$temporary/npm-user.npmrc" --globalconfig="$temporary/npm-global.npmrc" \
+    --registry=https://registry.npmjs.org --cache="$npm_cache" \
+    --logs-dir="$temporary/npm-logs" "$@"
+}
+
+npm_ci() {
+  local attempt status error_code console diagnostic log
+  local -a logs
+  for attempt in 1 2 3; do
+    console="$temporary/npm-attempt-$attempt.log"
+    diagnostic="$npm_diagnostics/attempt-$attempt.log"
+    if run_npm ci --omit=dev --no-audit --no-fund \
+      --fetch-retries=2 --fetch-timeout=300000 \
+      --fetch-retry-mintimeout=10000 --fetch-retry-maxtimeout=60000 >"$console" 2>&1; then
+      status=0
+    else
+      status=$?
+    fi
+    # Retain only structured records, never arbitrary script output or raw npm debug logs.
+    printf 'attempt=%s exit_code=%s\n' "$attempt" "$status" >"$diagnostic"
+    logs=("$console")
+    for log in "$temporary/npm-logs/"*; do
+      [ ! -f "$log" ] || logs+=("$log")
+    done
+    awk '
+      /^npm (error|ERR!) (code|syscall) [A-Za-z0-9_]+$/ { print }
+      /^[0-9]+ verbose (exit|code) -?[0-9]+$/ { print }
+      {
+        if (match($0, /https:\/\/registry[.]npmjs[.]org\/[A-Za-z0-9@%._~+\/-]+/)) {
+          url = substr($0, RSTART, RLENGTH)
+          if ($0 ~ /http fetch (GET|POST) [0-9][0-9][0-9] /) {
+            record = $0
+            sub(/^.*http fetch /, "", record)
+            split(record, fields, " ")
+            print "http", fields[1], fields[2], url
+          } else {
+            print "registry_url=" url
+          }
+        }
+      }
+    ' "${logs[@]}" >"$diagnostic.records"
+    sort -u "$diagnostic.records" >>"$diagnostic"
+    rm -f -- "$diagnostic.records"
+    cat "$diagnostic" >&2
+    printf 'build-paseo-headless: npm diagnostics: %s\n' "$diagnostic" >&2
+    [ "$status" -ne 0 ] || return 0
+    error_code="$(awk '/^npm (error|ERR!) code [A-Za-z0-9_]+$/ { code = $NF } END { print code }' "$console")"
+    case "$error_code" in
+      ETIMEDOUT|ESOCKETTIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|EPIPE|E429|E500|E502|E503|E504) ;;
+      *) return "$status" ;;
+    esac
+    [ "$attempt" -lt 3 ] || return "$status"
+    printf 'build-paseo-headless: retrying npm ci after %s (attempt %s/3)\n' "$error_code" "$attempt" >&2
+    sleep "$((attempt * 2))"
+  done
+}
+
 node_archive="node-v$NODE_VERSION-linux-$node_arch.tar.xz"
-curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+curl --disable --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+  --retry 3 --retry-connrefused --retry-delay 2 --retry-max-time 600 \
+  --connect-timeout 60 --max-time 300 \
   "https://nodejs.org/download/release/v$NODE_VERSION/$node_archive" \
   -o "$temporary/$node_archive"
 [ "$(sha256sum "$temporary/$node_archive" | cut -d' ' -f1)" = "$node_sha" ] \
@@ -54,7 +124,9 @@ tar -xJf "$temporary/$node_archive" -C "$temporary"
 node_root="$temporary/node-v$NODE_VERSION-linux-$node_arch"
 
 upstream_archive="$temporary/paseo-$PASEO_REVISION.tar.gz"
-curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+curl --disable --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+  --retry 3 --retry-connrefused --retry-delay 2 --retry-max-time 600 \
+  --connect-timeout 60 --max-time 300 \
   "https://github.com/getpaseo/paseo/archive/$PASEO_REVISION.tar.gz" \
   -o "$upstream_archive"
 mkdir "$temporary/upstream"
@@ -76,8 +148,7 @@ mkdir "$app"
 cp "$PACKAGE_DIR/bundle/package.json" "$PACKAGE_DIR/bundle/package-lock.json" "$app/"
 (
   cd "$app"
-  "$node_root/bin/node" "$node_root/lib/node_modules/npm/bin/npm-cli.js" \
-    ci --omit=dev --no-audit --no-fund >&2
+  npm_ci
 )
 
 for package_spec in \
@@ -134,8 +205,7 @@ done < <(find "$app/node_modules" -type f -name '*.node' -print | sort)
   '
   "$node_root/bin/node" "$app/node_modules/@getpaseo/cli/bin/paseo" --version \
     | grep -Fxq "$PASEO_VERSION"
-  "$node_root/bin/node" "$node_root/lib/node_modules/npm/bin/npm-cli.js" \
-    sbom --sbom-format spdx >"$temporary/sbom.raw.spdx.json"
+  run_npm sbom --sbom-format spdx >"$temporary/sbom.raw.spdx.json"
 )
 jq --arg arch "$TARGET_ARCH" '
   .creationInfo.created = "1970-01-01T00:00:00Z" |

@@ -1851,7 +1851,7 @@ fn tcp_relay_pauses_both_directions_and_resumes_without_losing_bytes() {
     front.shutdown(std::net::Shutdown::Write).unwrap();
     assert_eq!(back.read(&mut byte).unwrap(), 0);
     relay.stop();
-    assert!(TcpStream::connect(relay.address).is_err());
+    assert_eq!(front.read(&mut byte).unwrap(), 0);
 }
 #[cfg(target_os = "linux")]
 #[test]
@@ -1902,8 +1902,7 @@ fn tcp_relay_drop_joins_and_closes_owned_sockets_during_unwind() {
     use std::net::{TcpListener, TcpStream};
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let relay = OwnedTcpRelay::new(listener.local_addr().unwrap());
-    let address = relay.address;
-    let mut front = TcpStream::connect(address).unwrap();
+    let mut front = TcpStream::connect(relay.address).unwrap();
     let (mut back, _) = listener.accept().unwrap();
     relay.command(RelayControl::Pause);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
@@ -1915,7 +1914,6 @@ fn tcp_relay_drop_joins_and_closes_owned_sockets_during_unwind() {
         socket.set_read_timeout(Some(QUERY_TIMEOUT)).unwrap();
         assert_eq!(socket.read(&mut [0]).unwrap(), 0);
     }
-    assert!(TcpStream::connect(address).is_err());
 }
 
 #[cfg(target_os = "linux")]

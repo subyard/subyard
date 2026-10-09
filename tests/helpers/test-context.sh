@@ -42,6 +42,8 @@ setup_test_context() { # <temp-root> [incus-project] [instance-name]
   export E2E_VM_DISK=10GiB
   export E2E_VM_SLOT_COUNT=2
   export E2E_VM_BOOT_TIMEOUT=300
+  # Allow slow CI scheduling while bounding missing fake agent responses below VM boot deadlines.
+  export SUBYARD_INCUS_AGENT_WAIT_TIMEOUT=30
   export INCUS_PROJECT="${2:-subyard}"
   export INCUS_BRIDGE=incusbr0
   export YARD_INSTANCE_NAME="${3:-yard}"

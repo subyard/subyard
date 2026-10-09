@@ -4,7 +4,16 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+cleanup() {
+  local rc=$?
+  if [ "$rc" -ne 0 ]; then
+    [ ! -f "$TMP/output" ] || cat "$TMP/output" >&2
+    [ ! -f "$TMP/incus.log" ] || cat "$TMP/incus.log" >&2
+  fi
+  rm -rf "$TMP"
+  exit "$rc"
+}
+trap cleanup EXIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
 # shellcheck source=tests/helpers/test-context.sh
@@ -52,7 +61,7 @@ case "${1:-} ${2:-} ${3:-}" in
     tr ' ' '\n' <<<"$MOCK_INCUS_DEVICES"
     ;;
   'config device get')
-    case "${4:-}:${5:-}" in
+    case "${5:-}:${6:-}" in
       subyard-docker-apparmor:type) printf 'disk\n' ;;
       subyard-docker-apparmor:source) printf '/dev/null\n' ;;
       subyard-docker-apparmor:path) printf '/sys/module/apparmor/parameters/enabled\n' ;;
@@ -67,6 +76,17 @@ case "${1:-} ${2:-} ${3:-}" in
   'storage volume show') ;;
   'list yard --project') printf '%s\n' "$MOCK_POWER_STATE" ;;
   'start yard --project') ;;
+  'exec yard --project')
+    case "$*" in
+      'exec yard --project subyard -- true') ;;
+      *'ip -4 -o address show dev'*)
+        printf '2: eth0    inet 10.80.0.10/24 brd 10.80.0.255 scope global eth0\n' ;;
+      *) printf 'unexpected incus call: %s\n' "$*" >&2; exit 90 ;;
+    esac
+    ;;
+  'query /1.0/instances/yard?project=subyard ')
+    printf '%s\n' '{"devices":{"eth0":{"type":"nic","network":"incusbr0","ipv4.address":"10.80.0.10"}}}'
+    ;;
   *) printf 'unexpected incus call: %s\n' "$*" >&2; exit 90 ;;
 esac
 MOCK
@@ -74,7 +94,7 @@ chmod +x "$TMP/bin/systemctl" "$TMP/bin/ip" "$TMP/bin/incus"
 
 run_create() {
   : > "$MOCK_INCUS_LOG"
-  bash "$ROOT/scripts/03-create-subyard.sh" --yes >/dev/null
+  bash "$ROOT/scripts/03-create-subyard.sh" --yes >"$TMP/output" 2>&1
 }
 
 MOCK_INCUS_APPARMOR_ENV='INCUS_SECURITY_APPARMOR=false'
@@ -156,7 +176,7 @@ run_create
 grep -q 'device add yard subyard-docker-apparmor' "$MOCK_INCUS_LOG" \
   || fail 'prepared disabled state was not applied'
 SUBYARD_PREPARED_INCUS_APPARMOR=invalid
-if run_create 2>"$TMP/output"; then fail 'invalid prepared state was accepted'; fi
+if run_create; then fail 'invalid prepared state was accepted'; fi
 ! grep -Eq '^(init |config (set|unset|device (add|remove)) |storage volume create |start |stop )' "$MOCK_INCUS_LOG" \
   || fail 'invalid prepared state allowed mutation'
 unset SUBYARD_PREPARED_INCUS_APPARMOR

@@ -87,7 +87,7 @@ rg -q 'ubuntu-24[.]04-arm' "$ROOT/.github/workflows/release.yml" \
   "$ROOT/internal/domain" "$ROOT/internal/rpc" "$ROOT/scripts/04-provision-subyard.sh" \
   || fail "Paseo-specific core CLI/domain/RPC plumbing appeared"
 
-wrapper_temp="$(mktemp -d)"
+wrapper_temp="$(mktemp -d /tmp/subyard-paseo-contract.XXXXXX)"
 cleanup_wrapper() { rm -rf -- "$wrapper_temp"; }
 trap cleanup_wrapper EXIT HUP INT TERM
 mkdir -p "$wrapper_temp/bin" "$wrapper_temp/check-bin" "$wrapper_temp/runtime/node/bin" \
@@ -140,5 +140,85 @@ if PASEO_FAKE_CURL_NEVER=1 PASEO_FAKE_CURL_STATE="$wrapper_temp/curl-count" \
   fail "startup sync accepted a daemon that never became healthy"
 fi
 [ ! -e "$wrapper_temp/node.log" ] || fail "startup sync ran after its health deadline"
+
+# Exercise the builder's install boundary without downloads or a real npm installation.
+awk '/^(run_npm|npm_ci)\(\) \{/ { copying = 1 } copying { print } copying && /^\}$/ { copying = 0 }' \
+  "$ROOT/dev/build-paseo-headless.sh" >"$wrapper_temp/npm-functions.sh"
+# shellcheck source=/dev/null
+source "$wrapper_temp/npm-functions.sh"
+temporary="$wrapper_temp/npm"
+npm_cache="$wrapper_temp/npm-cache"
+npm_diagnostics="$wrapper_temp/npm-diagnostics"
+node_root="$wrapper_temp/fake-node"
+mkdir -p "$temporary/npm-home" "$temporary/npm-logs" "$npm_cache" "$npm_diagnostics" "$node_root/bin"
+: >"$temporary/npm-user.npmrc"
+: >"$temporary/npm-global.npmrc"
+cat >"$node_root/bin/node" <<'SH'
+#!/bin/sh
+set -eu
+state_root="${0%/bin/node}"
+[ -z "${PASEO_TEST_PRIVATE_VALUE:-}${npm_config_registry:-}" ] || exit 99
+userconfig= globalconfig= cache= logs=
+for arg in "$@"; do
+  case "$arg" in
+    --userconfig=*) userconfig="${arg#*=}" ;;
+    --globalconfig=*) globalconfig="${arg#*=}" ;;
+    --cache=*) cache="${arg#*=}" ;;
+    --logs-dir=*) logs="${arg#*=}" ;;
+  esac
+done
+[ -f "$userconfig" ] && [ ! -s "$userconfig" ] \
+  && [ -f "$globalconfig" ] && [ ! -s "$globalconfig" ] \
+  && [ "$userconfig" != "$globalconfig" ] || exit 98
+[ -d "$cache" ] && [ -d "$logs" ] || exit 97
+printf 'retained cache\n' >"$cache/fixture"
+count=0
+[ ! -f "$state_root/count" ] || count="$(cat "$state_root/count")"
+count=$((count + 1))
+printf '%s\n' "$count" >"$state_root/count"
+printf '%s\n' \
+  '12 http fetch GET 503 https://registry.npmjs.org/node-pty 123ms (cache miss)' \
+  '13 verbose authorization Bearer test-private-secret' >"$logs/debug-$count.log"
+printf '%s\n' \
+  'npm error network request to https://registry.npmjs.org/node-pty?token=test-private-secret failed' \
+  'npm error network request to https://user:test-private-secret@private.example.invalid/package failed' \
+  'npm error _authToken=test-private-secret'
+case "$(cat "$state_root/scenario")" in
+  recover) [ "$count" -lt 2 ] || exit 0 ;;
+  integrity) printf 'npm error code ETIMEDOUT\nnpm error code EINTEGRITY\n'; exit 42 ;;
+  lifecycle) printf 'npm error code 1\n'; exit 7 ;;
+esac
+printf 'npm error code ETIMEDOUT\nnpm error syscall read\n'
+exit 146
+SH
+chmod 0755 "$node_root/bin/node"
+
+run_install_case() {
+  local scenario="$1" expected_status="$2" expected_attempts="$3" status diagnostic
+  rm -f -- "$node_root/count" "$npm_diagnostics/"* "$temporary/npm-logs/"*
+  printf '%s\n' "$scenario" >"$node_root/scenario"
+  if (PASEO_TEST_PRIVATE_VALUE=test-private-secret npm_config_registry=https://private.example.invalid npm_ci) \
+    >"$wrapper_temp/install-$scenario.log" 2>&1; then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -eq "$expected_status" ] || fail "$scenario install returned $status, expected $expected_status"
+  [ "$(cat "$node_root/count")" -eq "$expected_attempts" ] \
+    || fail "$scenario install attempted the wrong number of times"
+  diagnostic="$npm_diagnostics/attempt-$expected_attempts.log"
+  [ -s "$npm_cache/fixture" ] && [ -s "$diagnostic" ] || fail "$scenario install lost its cache or diagnostic"
+  grep -Fxq "attempt=$expected_attempts exit_code=$expected_status" "$diagnostic" \
+    || fail "$scenario install lost its original exit code in diagnostics"
+  grep -Fxq 'http GET 503 https://registry.npmjs.org/node-pty' "$diagnostic" \
+    || fail "$scenario install lost the public package URL/status"
+  ! rg -q 'test-private-secret|private[.]example|authorization|_authToken' \
+    "$npm_diagnostics" "$wrapper_temp/install-$scenario.log" \
+    || fail "$scenario install exposed private diagnostic content"
+}
+run_install_case recover 0 2
+run_install_case timeout 146 3
+run_install_case integrity 42 1
+run_install_case lifecycle 7 1
 
 printf 'PASS: Paseo remains an opt-in generic agent package\n'

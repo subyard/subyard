@@ -91,9 +91,17 @@ Log names are relative to that summary's directory. Each completed check has a
 `check` row; the final `run` row reports the whole invocation. A missing final row
 means the run did not finish reporting; absent checks have not passed. Durations
 use Bash's elapsed seconds and may be zero for short checks. Separate invocations
-never overwrite each other's results. Logs stay local until explicitly removed;
-they are not uploaded by CI. Agents should read the summary first and open only
-the relevant log when a check fails.
+never overwrite each other's results. Local logs stay until explicitly removed.
+On failure, CI and Release upload the core logs and summaries plus the complete
+`make verify` console output as `ci-host-free-<attempt>` or `release-host-free-<attempt>`
+artifacts, retained for seven days. Read the summary first and open only the relevant
+log when a check fails.
+
+Host-free shell fixtures use a 30-second Incus agent deadline with margin for slow
+CI scheduling instead of real VM boot deadlines. Tests of the deadline itself explicitly
+select their intended timeout.
+Keep fake responses current when shared lifecycle adapters gain new probes; include
+captured fixture output and command logs when a fixture fails.
 
 Profile-specific assertions live in `config/profiles/<name>/tests/`. Each shipped profile must own a
 host-free `tests/run.sh` and, when it has live scenarios, `tests/e2e/acceptance.sh`. The shared
