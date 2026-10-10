@@ -110,6 +110,7 @@ check_go_race() {
     './internal/testyardmigration:TestCommitAcceptsCompatiblePublishedRegistrationModes' \
     './internal/releasetransition:TestPOSIXV2StoreCASPersistsProtectedLedgerAndRejectsStaleSnapshot|TestPOSIXV2StoreCheckpointEvidenceIsWriteOnceAndIdempotentForExactBytes|TestPOSIXV2StoreSupersededJournalIsWriteOnceAndIdempotentForExactBytes|TestPOSIXV2StoreRecoversDeterministicPendingCreate|TestPOSIXV2StorePinsParentDirectoryAcrossSymlinkSwap|TestPOSIXV2StoreUsesSharedMigrationUpdateLock' \
     './internal/adapters/credentialruntime:TestProtectedJSONAtomicWriteAndCounter|TestSetupCredentialImportMaterializeAndResume' \
+    './internal/adapters/codexdesktop:TestProtectedCreationModes' \
     './internal/adapters/projectruntime:TestPatchStorePublishesProtectedArtifact' \
     './internal/adapters/remotecontrol:TestTransactionalRestoresExistingFilesAndRemovesNewFiles' \
     './internal/adapters/networkruntime:TestEnsureHostLockCreatesAndPreservesValidatedInode' \

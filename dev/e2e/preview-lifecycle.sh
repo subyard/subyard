@@ -11,12 +11,16 @@ PHASE="${1:-}"
 REMOTE_ONLY="${SUBYARD_PREVIEW_REMOTE_ONLY:-0}"
 TAILNET="${SUBYARD_PREVIEW_TAILNET:-0}"
 CANONICAL="${SUBYARD_PREVIEW_CANONICAL:-0}"
+CODEX_EXPORT="${SUBYARD_PREVIEW_CODEX_EXPORT:-0}"
 KIND="${SUBYARD_PREVIEW_KIND:-container}"
 TAILNET_ADDRESS=100.64.12.20
 case "$KIND" in container|vm) ;; *) printf 'preview-lifecycle: invalid yard kind\n' >&2; exit 2 ;; esac
 case "$REMOTE_ONLY" in 0|1) ;; *) printf 'preview-lifecycle: invalid fixture scope\n' >&2; exit 2 ;; esac
 case "$TAILNET" in 0|1) ;; *) printf 'preview-lifecycle: invalid Tailnet fixture scope\n' >&2; exit 2 ;; esac
 case "$CANONICAL" in 0|1) ;; *) printf 'preview-lifecycle: invalid canonical fixture scope\n' >&2; exit 2 ;; esac
+case "$CODEX_EXPORT" in 0|1) ;; *) printf 'preview-lifecycle: invalid Codex fixture scope\n' >&2; exit 2 ;; esac
+[ "$CODEX_EXPORT" = 0 ] || [ "$REMOTE_ONLY:$TAILNET:$CANONICAL" = 0:0:0 ] \
+  || { printf 'preview-lifecycle: Codex scope cannot include preview-only flags\n' >&2; exit 2; }
 case "$VM:$PHASE" in 1:controller|2:owner-setup|2:owner-cleanup) ;; *) printf 'preview-lifecycle: invalid phase or VM\n' >&2; exit 2 ;; esac
 STATE="/var/tmp/subyard-preview-$RUN_ID"
 MARKER="subyard-preview-acceptance-v1:$RUN_ID:$VM"
@@ -165,6 +169,11 @@ PY
   if [ -f "$STATE/tailnet-route" ]; then
     sudo -n ip route del "$TAILNET_ADDRESS/32" via "$(cat "$STATE/tailnet-route")" || failed=1
   fi
+  local sources="/tmp/subyard-codex-$RUN_ID-$VM"
+  if [ -e "$sources" ] || [ -L "$sources" ]; then
+    [ -d "$sources" ] && [ ! -L "$sources" ] && [ "$(cat "$sources/.marker" 2>/dev/null)" = "$MARKER" ] \
+      && find "$sources" -depth -delete || failed=1
+  fi
   if [ "$failed" = 0 ]; then
     sudo -n find "$STATE" -depth -delete || return 1
   else
@@ -199,7 +208,9 @@ cleanup() {
   }
   exit "$rc"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 if [ "$KIND" = vm ]; then
   # The bounded readiness helper executes Incus under timeout, outside shell functions.
@@ -262,6 +273,10 @@ EOF
   printf '%s\n' subyard-e2e-platform-v1 > "$temporary"
   chmod 0600 "$temporary"
   mv -fT "$temporary" "$marker"
+  if [ "$CODEX_EXPORT" = 1 ]; then
+    wait_vm_agent "$project" "$instance"
+    return
+  fi
   incus exec "$instance" --project "$project" -- sh -eu -c '
     test -x /usr/local/bin/subyard-preview
     test "$(stat -c %u:%a /usr/local/bin/subyard-preview)" = 0:755
@@ -282,6 +297,12 @@ if [ "$PHASE" = owner-setup ]; then
     [ ! -e /usr/local/bin/tailscale ] && [ ! -L /usr/local/bin/tailscale ] || fail 'synthetic tailscale path already exists'
   fi
   setup_yard "$NAME"
+  if [ "$CODEX_EXPORT" = 1 ]; then
+    printf '%s\n' "$ROOT" > "$STATE/source-root"
+    trap - EXIT INT TERM
+    printf 'ok: remote owner yard initialized for Codex export\n'
+    exit 0
+  fi
   instance="yard-$NAME" project="subyard-$NAME"
   preview_port="$(sed -n 's/^WEB_PREVIEW_HOST_PORT=//p' "$SUBYARD_CONFIG_HOME/yards/$NAME/config.env")"
   owner_address="$(ip -j -4 route get 1.1.1.1 | jq -er '.[0].prefsrc')"
@@ -436,6 +457,7 @@ if [ "$TAILNET" = 1 ]; then
   sudo -n ip route add "$TAILNET_ADDRESS/32" via "${SUBYARD_PREVIEW_PEER_IP:?}"
   printf '%s\n' "$SUBYARD_PREVIEW_PEER_IP" > "$STATE/tailnet-route"
 fi
+if [ "$CODEX_EXPORT" = 0 ]; then
 install -d -m 0700 "$STATE/PreviewFixture/site"
 git -C "$STATE/PreviewFixture" init -q
 printf 'initial preview\n' > "$STATE/PreviewFixture/site/index.html"
@@ -576,6 +598,7 @@ if [ "$REMOTE_ONLY" = 0 ]; then
   check_preview default yard
   check_preview "$NAME" "yard-$NAME"
 fi
+fi
 
 # The peer owner SSH server accepts only a temporary synthetic key. Its root
 # administration route is used only to create this fixture inside allocated VM2.
@@ -667,6 +690,11 @@ yard remote add preview-remote "$OWNER_ALIAS" --yard "$NAME" --yes \
     tail -n 80 "$STATE/remote-add.log" >&2
     fail 'production remote registration failed'
   }
+if [ "$CODEX_EXPORT" = 1 ]; then
+  # shellcheck source=dev/e2e/codex-export-check.sh
+  . "$ROOT/dev/e2e/codex-export-check.sh"
+  exit 0
+fi
 printf '\nHost yard-preview-remote.code\n    LocalForward 127.0.0.1:8765 127.0.0.1:8765\n' >> "$HOME/.ssh/subyard-preview-remote.config"
 yard remote add preview-remote "$OWNER_ALIAS" --yard "$NAME" --yes \
   > "$STATE/remote-repeat.log" 2>&1 || fail 'remote registration did not converge its old SSH snippet'

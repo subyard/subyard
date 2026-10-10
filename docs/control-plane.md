@@ -766,6 +766,21 @@ using `ssh-remote+<alias>.code` must be reopened through `yard code` after conve
 Owner-inventory project resolution retains a matching explicitly selected remote alias.
 Desktop session targets also use the ordinary alias and carry no preview port or forward.
 
+Controller-side desktop exports use the `@client-projects` prepared command family.
+`internal/clientprojects` carries the canonical identity, ordinary L1 SSH alias and
+authoritative project paths for exactly one yard. Preparation fetches fresh selected-owner
+inventory through the existing pinned RPC client without cache publication, registration
+recovery or identity adoption; the read-only SSH trust gate refuses unknown keys throughout
+the proxy chain. The bounded L1 probe checks the configured user/port, instance hostname and
+workspace root before client assessment. Execution rechecks the inventory and route before
+the client's captured file plan applies. No project directory discovery or per-project RPC
+is involved. Client serialization, protected JSON publication and URL launch belong to
+`internal/adapters/codexdesktop`, composed at `internal/cli/client_integrations.go`; they
+require no server profile. `client.projects-export` is a bounded local action without a
+confirmation prompt. `--check` displays the assessment without writes, desktop publication
+locks or GUI launch, while retaining normal configuration read coherence. Desktop actions
+are refused at the generic RPC planning boundary and run only on the native controller.
+
 Core provisioning atomically installs `subyard-preview` as root-owned mode `0755`. Running-yard
 convergence checks its bytes and metadata; stopped yards use the installed source-hash marker.
 The helper serves guest loopback `127.0.0.1:8765` in the foreground. Provisioning installs

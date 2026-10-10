@@ -34,6 +34,10 @@ type coreCommandBehavior struct {
 func resolveCoreCommand(definition command.Definition) (coreCommandBehavior, error) {
 	behavior := coreCommandBehavior{prepareExit: 2, prepareRPCCode: "invalid_params"}
 	switch definition.Handler {
+	case "@client-projects":
+		behavior.prepare = (*preparedCommand).prepareClientProjects
+		behavior.nonRPCReason = "desktop integration requires the native controller"
+		behavior.prepareExit, behavior.prepareRPCCode = 1, "plan_failed"
 	case "@profile":
 		behavior.prepare = (*preparedCommand).prepareProfile
 		behavior.prepareExit, behavior.prepareRPCCode = 1, "plan_failed"

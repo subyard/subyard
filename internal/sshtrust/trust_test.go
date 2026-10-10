@@ -136,6 +136,32 @@ func TestFirstTrustConsentAndVerification(t *testing.T) {
 	}
 }
 
+func TestReadOnlyTrustRefusesUnknownKeyBeforeAssessment(t *testing.T) {
+	manager, program, known := fixture(t, "subyard-remote-example")
+	manager.ReadOnly = true
+	manager.Confirm = func(context.Context, []Proposal) error {
+		t.Fatal("read-only connection reached confirmation")
+		return nil
+	}
+	if _, err := manager.Options(context.Background(), program, "example"); err == nil || !strings.Contains(err.Error(), "no existing trusted key") {
+		t.Fatalf("unknown key=%v", err)
+	}
+	if _, err := os.Stat(known); !errors.Is(err, os.ErrNotExist) || len(manager.temporary) != 0 {
+		t.Fatal("read-only trust assessed or published an unknown key")
+	}
+	content, err := os.ReadFile(filepath.Join(filepath.Dir(known), "candidate"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(known, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	options, err := manager.Options(context.Background(), program, "example")
+	if err != nil || !strings.Contains(strings.Join(options, " "), "StrictHostKeyChecking=yes") {
+		t.Fatalf("known key=%v options=%v", err, options)
+	}
+}
+
 func TestFirstTrustFailureLeavesStoreUnchanged(t *testing.T) {
 	for _, scenario := range []string{"declined", "confirmation-required", "authentication", "rotation", "concurrent-trust", "witness-mismatch"} {
 		t.Run(scenario, func(t *testing.T) {

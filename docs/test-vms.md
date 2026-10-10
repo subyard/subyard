@@ -421,6 +421,19 @@ dev/e2e/preview-acceptance.sh --slot N --remote-only --canonical
 It checks `sync` and `code` through `HostID/yard`, real SSH forwarding, and owner
 role refusal without changing controller or owner state.
 
+Codex Desktop source and route acceptance reuses that disposable pair:
+
+```sh
+dev/e2e/preview-acceptance.sh --slot N --codex-export
+```
+
+This mode checks local default/named and remote alias/canonical selection, fresh
+owner inventory, additive protected declarations, explicit import retries and
+pre-write refusal of unavailable or L0-only SSH routes. It uses a synthetic
+desktop URL handler for import-request dispatch. This is the export integration's
+acceptance lane; physical desktop hardware and an external Tailscale account are
+not required. The lane uses ordinary SSH routes between disposable VMs.
+
 The same-host network policy acceptance creates synthetic local yards and verifies explicit
 links, isolation toggles, spoofing protection and managed lifecycle behavior. Choose an available
 slot from fresh status, then run:

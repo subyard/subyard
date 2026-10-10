@@ -223,6 +223,18 @@ open a project with VS Code Remote-SSH.
 Usage: yard code [project]
 ```
 
+## codex
+
+export all projects of the selected yard to Codex Desktop on this Linux controller.
+
+```text
+Usage: yard [-Y <yard or HostID/yard>] codex export|open [--check] [--config PATH]
+Export every registered project of one selected yard using its existing L1 SSH alias.
+Run on the GNU/Linux desktop controller. --check previews without writing or opening the application.
+--config selects the absolute configuration file used by the GUI. open requests import even after an unchanged export.
+Prepare SSH and host trust separately; this command never registers, repairs or starts a yard.
+```
+
 ## export
 
 copy changes from a synced yard project back to the host.

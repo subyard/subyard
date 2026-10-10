@@ -37,6 +37,7 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/transport"
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/audit"
+	"github.com/Subyard/Subyard/internal/clientprojects"
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
@@ -91,6 +92,8 @@ type Options struct {
 	Config             ports.ConfigApplier
 	Clock              ports.Clock
 	Audit              ports.AuditSink
+	ClientProjects     func(context.Context, string, clientprojects.Export, string) (clientprojects.Plan, error)
+	ClientYardProbe    func(context.Context, domain.Context, domain.OwnerYard) error
 }
 
 type CLI struct {
@@ -448,6 +451,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 			cli.resources.VerbReadOnly(resourceDefinition.Command, invocation.verb))
 	}
 	readOnlyInvocation := (core && commandHelpRequested(commandArguments)) ||
+		(core && definition.Handler == "@client-projects") ||
 		(core && definition.Effect == command.EffectRead) ||
 		(core && definition.Handler == "@host" && hostReadOnlyInvocation(commandArguments)) ||
 		resourceReadOnly ||
@@ -563,6 +567,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 	}
 	configSyncHome := ""
 	trust := cli.sshTrust(ownerDataHome, yes || cli.env["ASSUME_YES"] == "1" || sshTrustConsent(commandArguments))
+	trust.ReadOnly = core && definition.Handler == "@client-projects"
 	defer trust.Close()
 	ctx = transport.WithSSHTrust(ctx, trust.Options)
 	configSyncPending := false
@@ -593,7 +598,9 @@ func (cli *CLI) Run(ctx context.Context) int {
 	}
 	var loaded config.Loaded
 	var bootstrap *initBootstrap
-	if core && definition.Handler == "@init" && !commandHelpRequested(commandArguments) {
+	if core && definition.Handler == "@client-projects" {
+		loaded, err = cli.loadContext("default")
+	} else if core && definition.Handler == "@init" && !commandHelpRequested(commandArguments) {
 		loaded, bootstrap, err = cli.loadInitContext(yard, explicit, commandArguments)
 	} else if configSyncPending {
 		loaded, err = cli.resolveContextAllowPending(yard)
@@ -608,7 +615,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		loaded, err = cli.loadContext(yard)
 	}
 	if strings.Contains(yard, "/") && !(core && (definition.Handler == "@list" ||
-		definition.Handler == "@status" || definition.Handler == "@yards")) {
+		definition.Handler == "@status" || definition.Handler == "@yards" || definition.Handler == "@client-projects")) {
 		canonical := yard
 		base, baseErr := cli.loadContext("default")
 		if baseErr != nil {
@@ -733,7 +740,8 @@ func (cli *CLI) Run(ctx context.Context) int {
 					if resolved.Context.AccessKind == domain.AccessRemote {
 						remote = resolved.Context.OwnerEndpoint
 					}
-					if cli.env["SUBYARD_NO_AUDIT"] == "" {
+					if cli.env["SUBYARD_NO_AUDIT"] == "" &&
+						!(definition.Handler == "@client-projects" && slices.Contains(arguments, "--check")) {
 						cli.audit(name, arguments, yard, remote)
 					}
 				},
@@ -844,6 +852,9 @@ func (cli *CLI) Run(ctx context.Context) int {
 		}
 	}
 	switch definition.Handler {
+	case "@client-projects":
+		cli.clientProjectsUsage(definition)
+		return 0
 	case "@check":
 		return cli.runHostCheck(ctx, loaded, commandArguments)
 	case "@security":
@@ -3966,7 +3977,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		if err != nil {
 			return nil, operationRPCError("invalid_params", err)
 		}
-		if behavior.prepare == nil {
+		if behavior.prepare == nil || behavior.nonRPCReason != "" {
 			return nil, &rpc.Error{Code: "interactive_or_payload_command", Message: params.Command}
 		}
 		operationCLI := handler.cli.rpcOperation(call.OperationID)

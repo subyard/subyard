@@ -5,11 +5,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 # shellcheck source=dev/agent-e2e.sh
 . "$ROOT/dev/agent-e2e.sh"
 
-usage() { printf 'Usage: dev/e2e/preview-acceptance.sh --slot N [--remote-only] [--tailnet] [--canonical] [--kind container|vm]\n'; }
+usage() { printf 'Usage: dev/e2e/preview-acceptance.sh --slot N [--codex-export] [--remote-only] [--tailnet] [--canonical] [--kind container|vm]\n'; }
 slot_seen=0
 remote_only=0
 tailnet=0
 canonical=0
+codex_export=0
 kind=container
 kind_seen=0
 while [ "$#" -gt 0 ]; do
@@ -29,15 +30,20 @@ while [ "$#" -gt 0 ]; do
     --remote-only) remote_only=1; shift ;;
     --tailnet) tailnet=1; shift ;;
     --canonical) canonical=1; shift ;;
+    --codex-export) [ "$codex_export" = 0 ] || die '--codex-export may be specified only once'; codex_export=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die 'unknown argument' ;;
   esac
 done
 [ -n "$LEASE_REQUESTED_SLOT" ] || die '--slot N is required'
+if [ "$codex_export" = 1 ]; then
+  [ "$remote_only:$tailnet:$canonical" = 0:0:0 ] || die '--codex-export cannot be combined with preview-only flags'
+fi
 LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
 # Used by the sourced lease helpers.
 # shellcheck disable=SC2034
 LEASE_PURPOSE=preview-lifecycle
+[ "$codex_export" = 0 ] || LEASE_PURPOSE=codex-export
 
 payload() {
   local vm="$1" phase="$2"; shift 2
@@ -48,6 +54,7 @@ payload() {
     SUBYARD_PREVIEW_TAILNET="$tailnet" \
     SUBYARD_PREVIEW_KIND="$kind" \
     SUBYARD_PREVIEW_CANONICAL="$canonical" \
+    SUBYARD_PREVIEW_CODEX_EXPORT="$codex_export" \
     bash -c 'cd "$1"; shift; exec bash "$@"' subyard \
     "${GUEST_DIRS[$vm]}/src" "${GUEST_DIRS[$vm]}/src/dev/e2e/preview-lifecycle.sh" "$phase"
 }
@@ -72,7 +79,9 @@ cleanup_acceptance() {
   [ "$cleanup_failed" = 0 ] || rc=3
   exit "$rc"
 }
-trap cleanup_acceptance EXIT INT TERM
+trap cleanup_acceptance EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 acquire_lease
 start_lease_keeper
@@ -106,12 +115,16 @@ guest 1 dd "of=$guest_root/peer-config" status=none < "$LOCAL_TEMP/peer-config"
 guest 1 chown dev:dev "$guest_root/peer-key" "$guest_root/peer-known-hosts" "$guest_root/peer-config"
 guest 1 chmod 0600 "$guest_root/peer-key" "$guest_root/peer-known-hosts" "$guest_root/peer-config"
 
-printf 'preview acceptance: source SHA-256 %s\n' "$bundle_hash"
+printf '%s acceptance: source SHA-256 %s\n' "$LEASE_PURPOSE" "$bundle_hash"
 payload 2 owner-setup SUBYARD_PREVIEW_PEER_IP="${VM_IP[1]}"
 payload 1 controller \
   SUBYARD_PREVIEW_REMOTE_ONLY="$remote_only" \
   SUBYARD_PREVIEW_PEER_CONFIG="$guest_root/peer-config" \
   SUBYARD_PREVIEW_PEER_IP="${VM_IP[2]}"
+if [ "$codex_export" = 1 ]; then
+  printf 'ok: local default/named and remote alias/canonical Codex export over existing L1 SSH routes verified\n'
+  exit 0
+fi
 if [ "$tailnet" = 1 ]; then
   printf 'ok: synthetic owner Tailnet route, fallback and peer HTTP verified\n'
 fi

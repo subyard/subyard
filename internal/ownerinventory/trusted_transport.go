@@ -63,8 +63,10 @@ type managedTrustTransport struct {
 func (transport *managedTrustTransport) Call(
 	ctx context.Context, _ string, request []byte,
 ) ([]byte, error) {
-	if err := os.MkdirAll(transport.root, 0o700); err != nil {
-		return nil, err
+	if transport.root != "" {
+		if err := os.MkdirAll(transport.root, 0o700); err != nil {
+			return nil, err
+		}
 	}
 	temporary, err := os.MkdirTemp(transport.root, ".ssh-trust-*")
 	if err != nil {
@@ -125,11 +127,30 @@ func sshHostKeyChanged(message string) bool {
 func (store Connections) TrustedSSHClient(
 	connection Connection, program string, timeout time.Duration,
 ) (Client, error) {
+	return store.trustedSSHClient(connection, program, timeout, false)
+}
+
+// TrustedSSHClientReadOnly uses the registered pin without recovery or persistent
+// transport files. Its caller supplies a read-only SSH trust gate for proxy hops.
+func (store Connections) TrustedSSHClientReadOnly(
+	connection Connection, program string, timeout time.Duration,
+) (Client, error) {
+	return store.trustedSSHClient(connection, program, timeout, true)
+}
+
+func (store Connections) trustedSSHClient(
+	connection Connection, program string, timeout time.Duration, readOnly bool,
+) (Client, error) {
 	trust, err := connection.RequireTrust()
 	if err != nil {
 		return Client{}, err
 	}
-	registered, err := store.List()
+	var registered []Connection
+	if readOnly {
+		registered, err = store.ListReadOnly()
+	} else {
+		registered, err = store.List()
+	}
 	if err != nil {
 		return Client{}, err
 	}
@@ -150,9 +171,13 @@ func (store Connections) TrustedSSHClient(
 	if !matched {
 		return Client{}, errors.New("owner connection is not registered")
 	}
+	root := filepath.Join(store.Root, "tmp")
+	if readOnly {
+		root = ""
+	}
 	return Client{
 		Transport: &managedTrustTransport{
-			root: filepath.Join(store.Root, "tmp"), program: program,
+			root: root, program: program,
 			target: connection.Destination, knownHostsLine: trust.KnownHostsLine,
 			timeout: timeout, checkProxyTrust: true,
 		},
