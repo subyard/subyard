@@ -25,6 +25,7 @@ export MOCK_STATE_DIR="$TMP/state" MOCK_INCUS_LOG="$TMP/incus.log"
 export MOCK_STOP_EXIT=0 MOCK_LIMIT_SET_EXIT=0 MOCK_LIMIT_NOOP=0 MOCK_STATE_EXIT=0
 export MOCK_DEVICE_LIST_PADDING=0
 export MOCK_AGENT_READY_AFTER=1
+export MOCK_AGENT_EXIT=0 MOCK_REPORTING_EXIT=0
 export LIMITS_CPU=2 LIMITS_MEMORY=4GiB
 install -d -m 0700 "$TMP/bin" "$MOCK_STATE_DIR"
 
@@ -99,10 +100,11 @@ case "${1:-} ${2:-} ${3:-}" in
         attempts="$(cat "$MOCK_STATE_DIR/agent-attempts")"
         attempts=$((attempts + 1))
         printf '%s\n' "$attempts" > "$MOCK_STATE_DIR/agent-attempts"
+        [ "$MOCK_AGENT_EXIT" = 0 ] || exit "$MOCK_AGENT_EXIT"
         [ "$attempts" -ge "$MOCK_AGENT_READY_AFTER" ]
         ;;
       *'/virtio_balloon/'*) printf '000001\n' ;;
-      *'systemd-tmpfiles --create'*) cat >/dev/null ;;
+      *'systemd-tmpfiles --create'*) cat >/dev/null; exit "$MOCK_REPORTING_EXIT" ;;
       *'rule-missing-or-unsafe'*) printf 'ready\n' ;;
       *'ip -4 -o address show'*) printf '2: eth0    inet 10.80.0.10/24 brd 10.80.0.255 scope global eth0\n' ;;
       *) exit 90 ;;
@@ -284,6 +286,50 @@ for operation in run_create run_start; do
     [ "$(grep -c '^start ' "$MOCK_INCUS_LOG")" = 1 ] || fail "$operation restarted the ready VM"
   done
 done
+
+# A failed agent must not leave replacement QEMU running without its CPU scope.
+# Reporting preparation runs only after that scope has converged.
+export SUBYARD_INCUS_AGENT_WAIT_TIMEOUT=1
+MOCK_CPU_REAPPLY_EXIT=0
+for operation in run_create run_start; do
+  for fault in agent stop-refusal unweighted reporting; do
+    [ "$fault:$operation" != reporting:run_start ] || continue
+    VM_CPU_WEIGHT=1000 MOCK_AGENT_EXIT=0 MOCK_REPORTING_EXIT=0 MOCK_STOP_EXIT=0
+    case "$fault" in
+      agent) MOCK_AGENT_EXIT=1 ;;
+      stop-refusal) MOCK_AGENT_EXIT=1 MOCK_STOP_EXIT=1 ;;
+      unweighted) MOCK_AGENT_EXIT=1 VM_CPU_WEIGHT='' ;;
+      reporting) MOCK_REPORTING_EXIT=1 ;;
+    esac
+    reset_state STOPPED 2 4GiB
+    printf '100\n' > "$MOCK_STATE_DIR/qemu-pid"
+    : > "$MOCK_STATE_DIR/cpu-applied-pid"
+    if "$operation"; then fail "$operation accepted $fault guest failure"; fi
+    diagnostic='agent did not become ready'
+    [ "$fault" != reporting ] || diagnostic='VM Free Page Reporting guest configuration failed'
+    grep -Fq "$diagnostic" "$TMP/output" || fail "$operation lost its $fault diagnostic"
+    case "$fault" in
+      agent)
+        [ "$(cat "$MOCK_STATE_DIR/power")" = STOPPED ] || fail "$operation left unscoped QEMU running"
+        grep -Fxq 'stop yard --project subyard --force' "$MOCK_INCUS_LOG" \
+          || fail "$operation did not stop the exact VM fail-closed"
+        ;;
+      stop-refusal)
+        [ "$(cat "$MOCK_STATE_DIR/power")" = RUNNING ] || fail 'stop refusal fixture did not retain the VM'
+        grep -Fq 'FAILED to stop subyard/yard' "$TMP/output" || fail "$operation hid its failed stop"
+        ;;
+      unweighted|reporting)
+        [ "$(cat "$MOCK_STATE_DIR/power")" = RUNNING ] || fail "$operation unexpectedly stopped $fault VM"
+        ! grep -q '^stop ' "$MOCK_INCUS_LOG" || fail "$operation attempted an unnecessary stop"
+        if [ "$fault" = reporting ]; then
+          [ "$(cat "$MOCK_STATE_DIR/cpu-applied-pid")" = 200 ] || fail 'reporting failure left QEMU unscoped'
+        fi
+        ;;
+    esac
+    [ "$(grep -c '^start ' "$MOCK_INCUS_LOG")" = 1 ] || fail "$operation restarted the failed VM"
+  done
+done
+VM_CPU_WEIGHT=1000 MOCK_AGENT_EXIT=0 MOCK_REPORTING_EXIT=0 MOCK_STOP_EXIT=0
 
 VM_FREE_PAGE_REPORTING=0 MOCK_CPU_REAPPLY_EXIT=0
 reset_state STOPPED 2 4GiB

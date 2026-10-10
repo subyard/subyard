@@ -457,12 +457,19 @@ vm_storage_check_device_boundary false \
 state="$(power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")"
 [ "$state" = RUNNING ] || info "starting $YARD_INSTANCE_NAME temporarily (was: ${state:-unknown})"
 power_start_guarded "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" "$BRIDGE" || die "$POWER_ERROR"
+if [ "$YARD_KIND" = vm ]; then
+  incus_wait_instance_agent "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" || {
+    power_guest_start_failed "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" \
+      'VM agent did not become ready for boot verification' || die "$POWER_ERROR"
+  }
+fi
+# Cloud-image seeding can replace QEMU during the agent wait.
+# Scope its replacement before guest preparation can fail.
+if [ -n "${VM_CPU_WEIGHT:-}" ]; then
+  power_start_guarded "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" "$BRIDGE" || die "$POWER_ERROR"
+fi
 if [ "${SRV_VOLUME_TYPE:-filesystem}" = block ]; then
   vm_storage_mount
-fi
-if [ "$YARD_KIND" = vm ]; then
-  incus_wait_instance_agent "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" \
-    || die 'VM agent did not become ready for boot verification'
 fi
 if [ "$YARD_KIND" = vm ] && [ "${VM_PIN_IPV4:-0}" != 1 ]; then
   vm_ipv4="$(incus_instance_primary_ipv4 "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")"
@@ -480,10 +487,6 @@ fi
 if vm_page_reporting_required; then
   vm_page_reporting_prepare_guest "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" \
     || die 'VM Free Page Reporting guest configuration failed'
-fi
-# Cloud-image seeding can replace QEMU during the agent wait.
-if [ -n "${VM_CPU_WEIGHT:-}" ]; then
-  power_start_guarded "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" "$BRIDGE" || die "$POWER_ERROR"
 fi
 
 # --- summary -----------------------------------------------------------------

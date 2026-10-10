@@ -188,6 +188,21 @@ power_start_guarded() { # <project> <instance> <bridge...>
   fi
 }
 
+power_guest_start_failed() { # <project> <instance> <error>
+  local project="$1" instance="$2" err="$3" current
+  if [ -n "${VM_CPU_WEIGHT:-}" ]; then
+    current="$(power_state "$project" "$instance")" || current=
+    if [ "$current" != STOPPED ]; then
+      if incus stop "$instance" --project "$project" --force >/dev/null 2>&1; then
+        err="$err; $project/$instance was stopped fail-closed"
+      else
+        err="$err; FAILED to stop $project/$instance"
+      fi
+    fi
+  fi
+  power_fail "$err"
+}
+
 power_stop_instance() { # <project> <instance>
   local current
   current="$(power_state "$1" "$2")"
