@@ -6,7 +6,7 @@ import sys
 
 
 def launch_arguments(arguments):
-    # Orca 1.4.218's codex-shell-function.ts skips an existing shell function.
+    # Orca's codex-shell-function.ts skips an existing shell function.
     # Keep its preparation and whole-argument isolation rule in our scoped launcher.
     preflight = os.environ.get("ORCA_CODEX_LAUNCH_PREFLIGHT")
     if preflight and os.access(preflight, os.X_OK):

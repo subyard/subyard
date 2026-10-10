@@ -253,7 +253,7 @@ terminals keep their launch behavior.
 
 The shipped Codex configuration uses `tui.fullscreen_transcript=false` so mouse
 selection belongs to the terminal and works with **Copy** and **Ctrl+Shift+C**,
-including Orca 1.4.218's Codex launch wrapper. This default applies when Codex
+including Orca's Codex launch wrapper. This default applies when Codex
 reads the yard configuration. To use Codex's fullscreen transcript instead, set
 `tui.fullscreen_transcript=true` in an `AGENT_codex_CONFIG` override or pass
 `-c tui.fullscreen_transcript=true` for one launch. After updating Subyard, run
@@ -363,3 +363,8 @@ history and then follows new entries.
 
 `down` removes the owner proxy and stops Orca while preserving the installed package,
 projects, sessions, and paired-client state.
+
+Orca 1.4.224 starts a new background service for new terminals; already-open terminals
+keep their previous service. Its [upstream release notes](https://github.com/stablyai/orca/releases/tag/v1.4.224)
+state that terminals started in 1.4.224 cannot be reached from 1.4.223 after a downgrade
+until Orca is upgraded again. Account for this limitation before rolling back the package.
