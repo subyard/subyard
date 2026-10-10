@@ -29,6 +29,10 @@ requirements when the task depends on them.
 
 ## Work
 
+The coordinator owns this section's task planning and acceptance. Assigned workers follow
+the engineering and testing rules within their assignment, report remaining work to the
+coordinator, and do not create or close shared task files or start another full role cycle.
+
 1. Establish the requested outcome, scope, plan steps, and acceptance checks before
    editing. Unless other instructions specify a location, keep task plans in
    `private/tasks/`, creating it as needed; it is gitignored and needs no separate
@@ -101,7 +105,8 @@ requirements when the task depends on them.
 
 ## Test execution and delegation
 
-- Use `model="gpt-6.1-sol"`, `reasoning_effort="high"` for main development tasks.
+- Use `model="gpt-6.1-sol"`, `reasoning_effort="high"` for main development tasks,
+  developer and independent reviewer.
 - Run short checks directly. For long runs, use one mechanical observer with
   `model="gpt-6-luna"`, `reasoning_effort="medium"`, `fork_turns="none"`;
   run locally if unavailable.
@@ -114,6 +119,68 @@ requirements when the task depends on them.
 - Follow the guide's [execution and reporting protocol](../../../docs/testing.md#execution-and-reporting-principles),
   including waits, cleanup and evidence. Promptly report guide deviations to the operator
   under its [deviation contract](../../../docs/testing.md#report-deviations-from-the-guide).
+
+## Coordinator role pilot
+
+The coordinator → developer → independent reviewer workflow is an explicitly selected,
+bounded pilot, not yet the default for all development. During the pilot, delegate substantial
+implementation, behavioral fixes and changes spanning related components as complete,
+reviewable blocks. Keep typos, formatting, simple mechanical edits and short read-only answers
+direct; add review only for a concrete risk. Preserve every existing acceptance requirement
+and the risk-based check policy above. Do not add test runs just to exercise the workflow.
+
+Role contracts belong to this skill: [developer](agents/subyard_developer.toml),
+[reviewer](agents/subyard_reviewer.toml) and [observer](agents/subyard_observer.toml).
+Read the selected contract when assigning that role. For tool-based orchestration, use its
+instructions in a self-contained assignment and only supported model/effort/fork fields.
+These files are not automatically discovered as native custom agents from the skill directory;
+CLI/IDE integration requires a separate supported project configuration, not a global change.
+
+The coordinator owns original requirements, editable scope, one shared task and final acceptance.
+Do only the discovery needed to assign work or resolve a finding; do not duplicate implementation,
+observer polling or the whole review. Use this cycle:
+
+1. Assign one sole writer a complete block. Start developer and fresh reviewer with
+   `model="gpt-6.1-sol"`, `reasoning_effort="high"`, `fork_turns="none"`. Record a comparable
+   available alternative if needed; do not downgrade independent review to an observer.
+2. Wait for the developer to stop writing and finish relevant checks, then assign independent
+   review of the exact dirty/untracked candidate. Preliminary review with incomplete checks must
+   state that limit and cannot establish readiness. Read-only is a contract unless effective
+   isolation is verified; live parent overrides can defeat native sandbox defaults.
+3. Resolve unsupported findings with a reason; return confirmed repairs via `followup_task` to
+   the same developer while its context is relevant. Recheck affected claims after writing stops,
+   broadening only when the delta warrants it. Unresolved correctness/coverage blockers remain.
+4. Accept only when original requirements, findings and required evidence match the final
+   candidate. Read native receipts and concrete risky areas as needed. No findings alone is
+   not acceptance; only the coordinator closes the task and responds to the operator.
+
+Keep assignments short: role, canonical coordinator/developer targets, working directory,
+original requirements, editable scope/exclusions, known facts and source links, acceptance,
+candidate/evidence paths, a bounded checkpoint and stop conditions, and the expected result.
+Do not copy the full chat or guides. Only a necessary long check adds one observer, assigned by
+the developer with both canonical targets, an exact runner command and existing deadlines.
+
+Before handoff/compaction preserve remaining work, decisions, active writer/runner ownership,
+candidate identities and evidence in the shared task; workers send updates instead of editing it.
+Loss of context or an unavailable agent is not success. Before takeover confirm the former
+writer stopped and establish runner/cleanup status; stopping an agent does not drain its lease.
+Use supported event waits within runtime limits, without duplicate raw polling or periodic
+status requests. A missed checkpoint or concrete stall permits one targeted ownership/blocker
+check, then a reasoned continuation with a new bounded deadline, owned interruption or takeover.
+Do not restart blindly or extend indefinitely. A substantial block still needs an independent
+reviewer; if none is available, leave review pending and finish other executable work. Self-review
+does not satisfy that requirement. Workers do not recursively orchestrate this cycle.
+
+Set the pilot's eligible blocks, baseline, model settings, deadline and promotion/rollback
+criteria in the governing task before using it. Keep it bounded to three suitable ordinary
+blocks or fourteen calendar days, whichever comes first; retain the direct path for a needed
+small edit. At the boundary, keep, narrow or roll back only for classes supported by evidence.
+Missing comparable baseline or usage leaves savings unknown. Missed requirements/checks,
+false readiness, lost changes/evidence or unsafe authority expansion stop the affected class
+until repaired; do not trade quality for lower usage. Unexplained repeated growth above 20%
+in two comparable blocks calls for narrowing or rollback, not a causal claim from mixed data.
+Unobserved failure, compaction or long-run cases remain unverified. Leave compaction defaults,
+global settings and existing runner infrastructure unchanged.
 
 ## Boundaries
 
@@ -129,8 +196,8 @@ requirements when the task depends on them.
 ## Completion
 
 **Done means every agreed requirement and plan step is satisfied, and every
-required check has passed for the final changes.** Only then close or delete the
-task plan according to the governing task workflow.
+required check has passed for the final changes.** Only then may the coordinator close or
+delete the task plan according to the governing task workflow.
 
 If steps remain, report **partial** and continue executable work. If no remaining
 step can proceed without missing input or access, report **blocked** and name what

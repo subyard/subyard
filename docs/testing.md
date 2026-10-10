@@ -27,12 +27,14 @@ broker protected-file checks under `0002` and `0077`.
 Follow [test execution and delegation](../.agents/skills/subyard-dev-flow/SKILL.md#test-execution-and-delegation)
 for roles and model settings. Preserve required coverage and candidate identity.
 
-- Only the assigned observer reads progress/logs; the parent may do independent work,
+- Only the assigned observer reads progress/logs; developer and coordinator may do independent work,
   without duplicate polls or status requests. Process control, lease heartbeats and cleanup
   remain runner-owned.
 - Prefer supported completion events; necessary timed waits may still invoke the model.
   Send interim messages only for material results, changed conditions or decisions.
-  Escalate failures, blocked/interrupted execution, questions and approvals when observed;
+  Send failures, blocked/interrupted execution and cleanup problems immediately to both the
+  assigned developer and coordinator (canonical targets in the observer assignment).
+  Escalate questions and approvals when observed;
   never answer approvals for the operator.
 - Read native summaries/receipts first. Return one final report: run/check identity, check
   and overall candidate statuses where applicable, original exit code, total duration and
@@ -56,8 +58,10 @@ its cell ID is distinct from the process session ID. Short default waits add mod
 
 For parallel acceptance, read new `check-result` events/current receipt as well as process
 completion. Report failed/blocked checks when observed, without waiting for `run-result`;
-keep observing the same controller through completion and cleanup unless the main developer
+keep observing the same controller through completion and cleanup unless the assigned developer
 directs an owned interruption. Then return the final report and end the bounded assignment.
+Make the native final summary/evidence available to both developer and coordinator; they need
+not rewrite it. Stopping an observer does not establish that its runner or lease has drained.
 
 ### Report deviations from the guide
 
