@@ -112,6 +112,14 @@ _yard() {
             '--yes[accept the compatible global option]' '--help[show help]'
           ;;
         stop|simple|teardown) _arguments ${registry_options[@]} ;;
+        profile)
+          if (( CURRENT == 2 )); then
+            local -a sub; sub=( ${=command_verbs} ); _describe -t subcommands 'profile subcommand' sub
+          else
+            local -a profiles; profiles=( ${(f)"$(_yard_profiles)"} )
+            _arguments ${registry_options[@]} '*:profile:compadd -a profiles'
+          fi
+          ;;
         integration)
           if (( CURRENT == 2 )); then
             local -a sub; sub=( ${=command_verbs} )

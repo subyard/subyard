@@ -85,6 +85,7 @@ type Options struct {
 	AdapterRunner      ports.AdapterRunner
 	InitPlatform       ports.InitPlatform
 	IntegrationRuntime func(config.Loaded) IntegrationRuntime
+	ProfileRuntime     func(config.Loaded) ProfileServiceRuntime
 	RemoteControl      ports.RemoteControl
 	Prompt             ports.Prompter
 	Config             ports.ConfigApplier
@@ -447,6 +448,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		(core && definition.Handler == "@config" && (configReadOnlyInvocation(commandArguments) || configSyncCheck || configSyncStatus)) ||
 		(core && definition.Handler == "@test-vms" && testVMStatusInvocation(commandArguments)) ||
 		(core && definition.Handler == "@integration" && integrationReadOnlyInvocation(commandArguments)) ||
+		(core && definition.Handler == "@profile" && profileReadOnlyInvocation(commandArguments)) ||
 		(core && definition.Handler == "@project-state" && len(commandArguments) > 0 &&
 			(commandArguments[0] == "check-role" || commandArguments[0] == "preview")) ||
 		(core && definition.Handler == "@network" && len(commandArguments) > 0 && commandArguments[0] == "status") ||
@@ -547,7 +549,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 			ownerDataHome = filepath.Join(operatorHome, ".subyard")
 		}
 	}
-	if ownerDataHome != "" && !readOnlyInvocation && !registrationRepair && !(core && definition.Handler == "@integration") {
+	if ownerDataHome != "" && !readOnlyInvocation && !registrationRepair && !(core && (definition.Handler == "@integration" || definition.Handler == "@profile")) {
 		if err := (ownerinventory.Connections{Root: filepath.Join(ownerDataHome, "owner-inventory")}).Recover(); err != nil {
 			cli.errorf("recover owner inventory transaction: %v", err)
 			return 1
@@ -606,7 +608,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		if baseErr != nil {
 			err = baseErr
 		} else {
-			readOnlyRoute := readOnlyInvocation || registrationRepair || (core && (definition.Handler == "@project" || definition.Handler == "@integration"))
+			readOnlyRoute := readOnlyInvocation || registrationRepair || (core && (definition.Handler == "@project" || definition.Handler == "@integration" || definition.Handler == "@profile"))
 			var results []ownerInventoryResult
 			if readOnlyRoute {
 				results = cli.allOwnerInventoriesReadOnly(ctx, base, false)
@@ -658,7 +660,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		}
 		return 2
 	}
-	if !readOnlyInvocation && !registrationRepair && !(core && definition.Handler == "@integration") {
+	if !readOnlyInvocation && !registrationRepair && !(core && (definition.Handler == "@integration" || definition.Handler == "@profile")) {
 		if err := configsync.RecoverHostIDRename(loaded.Context.Paths.ConfigHome); err != nil {
 			cli.errorf("recover owner HostID rename: %v", err)
 			return 1
@@ -848,6 +850,14 @@ func (cli *CLI) Run(ctx context.Context) int {
 		return cli.runUpdate(ctx, loaded, definition, commandArguments)
 	case "@integration":
 		fmt.Fprintf(cli.options.Stdout, "Usage: %s integration enable|disable <id> | cleanup <id> [--check] | status [id] [--json]\n", cli.options.Program)
+		return 0
+	case "@profile":
+		fmt.Fprintf(cli.options.Stdout, "Usage: %s profile enable|disable|setup|status <id> [--yes] [--json]\n", cli.options.Program)
+		fmt.Fprintln(cli.options.Stdout, "Manage a profile that declares an owner service, without general yard initialization.")
+		fmt.Fprintln(cli.options.Stdout, "Enable and disable require an existing running yard; only that profile's owner/guest hook runs.")
+		fmt.Fprintln(cli.options.Stdout, "Enable offers missing setup interactively. Setup prepares the owner connection separately, even while the yard is stopped.")
+		fmt.Fprintln(cli.options.Stdout, "Run setup on the owner host. --yes and non-interactive commands require an existing protected connection.")
+		fmt.Fprintln(cli.options.Stdout, "Disable preserves shared credentials. Status reports selection, connection and observed runtime; --json applies only to status.")
 		return 0
 	case "@config":
 		return cli.runConfig(ctx, loaded, commandArguments)

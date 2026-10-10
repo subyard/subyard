@@ -111,7 +111,7 @@ func (cli *CLI) prepareInitProfile(ctx context.Context, execution *initExecution
 		return nil, err
 	}
 	if !cli.promptInputTerminal() || keysAssumeYes(arguments) || cli.env["ASSUME_YES"] == "1" {
-		fmt.Fprintf(cli.options.Stdout, "  [ .. ] %s is not configured. Run yard -Y %s init interactively on the owner host to set it up.\n", definition.Name, loaded.Context.YardName)
+		fmt.Fprintf(cli.options.Stdout, "  [ .. ] %s is not configured. Run yard -Y %s %s interactively on the owner host to set it up.\n", definition.Name, loaded.Context.YardName, profileSetupCommand(definition))
 		return nil, nil
 	}
 	fmt.Fprintf(cli.options.Stdout, "\n%s (optional)\n", schema.Title)
@@ -185,7 +185,7 @@ func (cli *CLI) readProfileSetupLine(ctx context.Context, label string) (string,
 			return "", err
 		}
 		if _, err := io.ReadFull(cli.options.Stdin, one[:]); err != nil {
-			return "", errors.New("profile setup input ended; no setup was applied, rerun init to continue")
+			return "", errors.New("profile setup input ended; no setup was applied, rerun setup to continue")
 		}
 		if one[0] == '\n' {
 			return strings.TrimSpace(line.String()), nil
@@ -228,9 +228,16 @@ func (setup *initProfileSetup) check() error {
 		return err
 	}
 	if !sameConfigAuthoringSnapshot(current, setup.before) || current.Identity != setup.before.Identity {
-		return fmt.Errorf("%w: profile settings changed; rerun init", domain.ErrPlanStale)
+		return fmt.Errorf("%w: profile settings changed; rerun setup", domain.ErrPlanStale)
 	}
 	return nil
+}
+
+func profileSetupCommand(definition profile.Definition) string {
+	if definition.OwnerService != "" {
+		return "profile setup " + definition.Name
+	}
+	return "init"
 }
 func (set *initProfileSet) consequences() []string {
 	if set == nil {
@@ -251,6 +258,17 @@ func (set *initProfileSet) consequences() []string {
 	return result
 }
 func (set *initProfileSet) apply(ctx context.Context, execution *initExecution, output io.Writer) error {
+	return set.applyWith(ctx, output, func(ctx context.Context) error {
+		for _, stage := range application.InitStages(execution.loaded.Context) {
+			if stage.ID == ports.ReconcileStageKeys {
+				return (application.Reconciler{Stages: []application.ReconcileStage{stage}, Runner: execution.platform, Reporter: initReporter{output: output}}).Apply(ctx, execution.approvedStages(stage))
+			}
+		}
+		return errors.New("credential initialization stage is unavailable")
+	})
+}
+
+func (set *initProfileSet) applyWith(ctx context.Context, output io.Writer, initialize func(context.Context) error) error {
 	if set == nil {
 		return nil
 	}
@@ -260,13 +278,8 @@ func (set *initProfileSet) apply(ctx context.Context, execution *initExecution, 
 	for _, setup := range set.items {
 		if setup.key != nil {
 			// Initialize the approved credential owner before publishing its profile credential.
-			for _, stage := range application.InitStages(execution.loaded.Context) {
-				if stage.ID != ports.ReconcileStageKeys {
-					continue
-				}
-				if err := (application.Reconciler{Stages: []application.ReconcileStage{stage}, Runner: execution.platform, Reporter: initReporter{output: output}}).Apply(ctx, execution.approvedStages(stage)); err != nil {
-					return err
-				}
+			if err := initialize(ctx); err != nil {
+				return err
 			}
 			if err := setup.key.Execute(ctx); err != nil {
 				return fmt.Errorf("set up profile credential: %w", err)

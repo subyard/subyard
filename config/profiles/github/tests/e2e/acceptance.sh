@@ -611,6 +611,7 @@ else
   cmp -s "$APP_KEY" <(jq -jr '.private_key' "$MATERIALIZED_KEY") || die 'init did not migrate the App connection'
   jq -e '.schema_version == 1 and .settings.app_id == "123456" and .settings.installation_id == 42' \
     "$MATERIALIZED_KEY" >/dev/null || die 'migrated App settings differ'
+  yard profile setup github --yes
   wait_status '{"configured":true}'
   credential="$(yard keys list | awk -F '\t' '$8=="github-broker-e2e" {print $1}')"
   [ -n "$credential" ] || die 'GitHub key record is missing'
@@ -630,10 +631,15 @@ else
 fi
 
 info 'explicitly disabling GitHub in default yard'
+connection_hash="$(sha256sum "$SUBYARD_KEYS_CONSUMER_ROOT/github/connection.json" | awk '{print $1}')"
 write_config disable
 yard init --yes
 [ ! -e "$UNIT_FILE" ] && [ ! -L "$UNIT_FILE" ] || die 'disable left owner broker service'
 assert_removed
+yard profile status github --json | jq -e '.enabled == false and .configured == true and .runtime == "removed" and .ready == false' >/dev/null \
+  || die 'disabled profile status is incorrect'
+[ "$(sha256sum "$SUBYARD_KEYS_CONSUMER_ROOT/github/connection.json" | awk '{print $1}')" = "$connection_hash" ] \
+  || die 'disable changed the shared connection'
 ok 'explicit no-github selection removed service, helper and skills'
 
 info 'initializing a fresh named Hermes yard from its preset'
@@ -711,6 +717,37 @@ hermes_yard init --yes
 [ "$(hermes_dev sha256sum "$opaque" | awk '{print $1}')" = "$opaque_before" ] \
   || die 'Hermes init changed operator-managed opaque state'
 ok 'named Hermes init/provision selects GitHub, preserves opaque state and keeps DEV_SUDO=0'
+
+info 'scoped enable/disable preserves the second yard and unrelated init drift'
+hermes_pid="$(systemctl_user show "$HERMES_UNIT" -p MainPID --value)"
+profiles_before="$(setting ENVIRONMENT_PROFILES)"
+guest mv /home/dev/.gitconfig /home/dev/.gitconfig-scoped-fixture
+yard profile enable github --yes
+yard profile enable github --yes
+guest test ! -e /home/dev/.gitconfig || die 'scoped enable reconciled unrelated git identity drift'
+guest mv /home/dev/.gitconfig-scoped-fixture /home/dev/.gitconfig
+yard profile status github --json | jq -e '.enabled and .configured and .ready and .runtime == "ready"' >/dev/null \
+  || die 'scoped enable status is incorrect'
+wait_status '{"configured":true}'
+assert_wiring
+yard profile disable github --yes
+[ "$(setting ENVIRONMENT_PROFILES)" = "$profiles_before" ] || die 'scoped disable changed neighboring selections'
+[ "$(systemctl_user show "$HERMES_UNIT" -p MainPID --value)" = "$hermes_pid" ] || die 'scoped operations restarted another yard broker'
+[ "$(hermes_status || true)" = '{"configured":true}' ] || die 'scoped disable disconnected the other yard'
+[ "$(sha256sum "$SUBYARD_KEYS_CONSUMER_ROOT/github/connection.json" | awk '{print $1}')" = "$connection_hash" ] \
+  || die 'scoped operations changed the shared connection'
+yard stop --yes
+if yard profile enable github --yes >"$STATE/stopped-profile.log" 2>&1; then die 'scoped enable accepted a stopped yard'; fi
+[ "$(setting ENVIRONMENT_PROFILES)" = "$profiles_before" ] || die 'stopped enable wrote the profile selection'
+yard profile setup github --yes
+yard profile status github --json | jq -e '.configured and .runtime == "unavailable" and .ready == false' >/dev/null \
+  || die 'stopped profile status is incorrect'
+yard start --yes
+yard profile enable github --yes
+wait_status '{"configured":true}'
+[ "$(hermes_dev sha256sum "$opaque" | awk '{print $1}')" = "$opaque_before" ] \
+  || die 'scoped operations changed Hermes opaque state'
+ok 'scoped lifecycle preserved credentials, neighboring profiles/yard and explicit power control'
 credential="$(yard keys list | awk -F '\t' '$8=="github-broker-e2e" {print $1}')"
 [ -n "$credential" ] || die 'GitHub key record is missing after reboot'
 yard keys revoke "$credential" --yes

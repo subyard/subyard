@@ -22,7 +22,7 @@ func RunServices(ctx context.Context, root string, arguments []string, environme
 		return errors.New("invalid profile service arguments")
 	}
 	action := arguments[0]
-	if !slices.Contains([]string{"--check", "--yes", "--pause", "--resume", "--remove"}, action) || len(arguments) == 2 && action != "--resume" {
+	if !slices.Contains([]string{"--check", "--yes", "--pause", "--resume", "--remove"}, action) || len(arguments) == 2 && !slices.Contains([]string{"--check", "--yes", "--remove", "--resume"}, action) {
 		return errors.New("invalid profile service action")
 	}
 	definitions, err := Load(root)
@@ -32,10 +32,13 @@ func RunServices(ctx context.Context, root string, arguments []string, environme
 	selectedResume := []string{}
 	if len(arguments) == 2 {
 		selectedResume = strings.Fields(arguments[1])
+		if action != "--resume" && len(selectedResume) != 1 {
+			return errors.New("scoped profile service requires one profile")
+		}
 	}
 	for _, name := range selectedResume {
 		if !slices.ContainsFunc(definitions, func(d Definition) bool { return d.Name == name && d.OwnerService != "" }) {
-			return errors.New("unknown paused profile service")
+			return errors.New("unknown profile service")
 		}
 	}
 	paused := []Definition{}
@@ -70,7 +73,7 @@ func RunServices(ctx context.Context, root string, arguments []string, environme
 		if definition.OwnerService == "" {
 			continue
 		}
-		if action == "--resume" && len(arguments) == 2 && !slices.Contains(selectedResume, definition.Name) {
+		if len(arguments) == 2 && !slices.Contains(selectedResume, definition.Name) {
 			continue
 		}
 		var captured bytes.Buffer

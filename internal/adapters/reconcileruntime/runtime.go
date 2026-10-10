@@ -2117,6 +2117,22 @@ func (runtime Runtime) profileServicesConverged(ctx context.Context) (bool, erro
 	return probeConverged(runtime.runScriptEnvironment(ctx, nil, environment, "profile-services.sh", "--check"))
 }
 
+// Scoped profile operations never enter the general init reconciler.
+func (runtime Runtime) ProfileServiceConverged(ctx context.Context, name string) (bool, error) {
+	return probeConverged(runtime.runScript(ctx, nil, "profile-services.sh", "--check", name))
+}
+
+func (runtime Runtime) ApplyProfileService(ctx context.Context, name string, artifacts []ports.TeardownArtifact) error {
+	if artifacts != nil {
+		payload, err := json.Marshal(artifacts)
+		if err != nil {
+			return err
+		}
+		return runtime.runScriptEnvironment(ctx, runtime.Stderr, map[string]string{"SUBYARD_TEARDOWN_ARTIFACTS": string(payload)}, "profile-services.sh", "--remove", name)
+	}
+	return runtime.runScript(ctx, runtime.Stderr, "profile-services.sh", "--yes", name)
+}
+
 // TeardownInventory is read-only and must be called when the reset is planned.
 func (runtime Runtime) TeardownInventory(ctx context.Context) ([]ports.TeardownResource, error) {
 	reader, ok := runtime.Incus.(ports.TeardownInventoryReader)

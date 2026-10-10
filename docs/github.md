@@ -8,16 +8,30 @@ profile is wanted. An explicit empty value disables it for that yard.
 Named yards do not receive the profile unless their explicit list includes `github`.
 The `test-vms` backend does not receive the broker profile.
 
-For a fresh default yard, run `yard init` to converge the shipped selection. For an existing yard,
-edit its registered yard setting through the supported yard configuration path, preserving the
-current list, then run `yard init`. The write is local by default; add `--git` to commit and push
-only that selection to a registered source. Local settings continue to override the Git fallback.
-For example, the yard-scoped writer documented in [configuration](configuration.md) is:
+For a fresh yard, run `yard init` once to create its core configuration. For an existing running
+yard, enable or disable the broker independently:
 
 ```sh
-yard -Y <yard> config set ENVIRONMENT_PROFILES "<current entries> github" --scope yard
-yard -Y <yard> init
+yard -Y <yard> profile enable github
+yard -Y <yard> profile status github --json
+yard -Y <yard> profile disable github
 ```
+
+Enable preserves the other entries in the yard's effective `ENVIRONMENT_PROFILES` and writes the
+selection locally, including when Git supplies the previous list. It invokes only the GitHub
+profile's owner/guest hook; it does not run general yard initialization or reconcile other profiles.
+Enable and disable require an existing running yard and never start it automatically. Repeat the
+same command after an interrupted installation: the desired selection is retained for repair.
+Ordinary init still reconciles selected profiles as part of its broader work.
+
+Status reports `enabled` (effective profile selection), `configured` (valid protected owner
+connection), `runtime` (profile hook convergence) and `ready` (all three ready). A stopped or missing
+yard reports runtime `unavailable`; status never starts it. Readiness does not test repository
+permissions against the real GitHub API.
+
+Disable removes this yard's broker service and managed guest client/skill. It preserves the shared
+App connection, encrypted credentials, other yards and ordinary `gh` authentication. Already issued
+tokens remain valid until their expiry or external revocation; disable stops new issuance here.
 
 Implementation, owner-service hooks, setup declarations and tests live in
 [`config/profiles/github/`](../config/profiles/github/). The profile ships its own native broker/client
@@ -25,9 +39,17 @@ binary; the core invokes it through the [profile extension contract](control-pla
 
 ## First-time setup
 
-Run ordinary `yard -Y <yard> init` in a terminal **on the owner host**. When the `github`
-profile is selected and App settings or the default key are missing, init offers a short setup
-conversation:
+Run `yard -Y <yard> profile enable github` in a terminal **on the owner host**. If the App
+connection is missing, enable offers a short setup conversation before its single confirmation.
+To prepare the connection separately, including while the yard is stopped, run:
+
+```sh
+yard -Y <yard> profile setup github
+```
+
+Setup does not select the profile or change the yard runtime. The connection is shared by enabled
+yards on this owner; a second yard reuses it. Ordinary interactive init also offers this setup for
+selected profiles. Profile commands run on the owner host, where the protected download is available.
 
 1. Create a GitHub App, choose its repository permissions, install it on the intended repositories,
    and download its RSA private key. Follow [GitHub’s App setup](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app).
@@ -35,9 +57,9 @@ conversation:
    **installation ID** from the installation URL, for example the numeric suffix of
    `https://github.com/settings/installations/12345678`.
 3. Enter the downloaded PEM's path on that owner host. `~/` is supported. If the encrypted ledger
-   already has the complete connection, init restores it without asking for identifiers or another
+   already has the complete connection, setup restores it without asking for identifiers or another
    download. A legacy key-only entry can reuse the protected local App settings.
-4. Review the ordinary init plan and confirm once. Init protects the selected PEM and stores it
+4. Review the connection/profile plan and confirm once. Setup protects the selected PEM and stores it
    together with both identifiers in one encrypted revision. It materializes the complete connection
    as one mode-`0600` owner-side JSON file.
 
@@ -47,7 +69,8 @@ confirmation. The source must be an operator-owned regular file, not a symbolic 
 The original download is kept. The complete connection follows the ledger's normal synchronization
 to trusted credential peers; use `--local-only` when adding or importing it if it must stay on this host.
 
-Enter at any field postpones setup; run interactive init again to resume. End-of-input cancels
+Enter at any field postpones setup; run interactive profile setup again to resume. Enable does not
+change the selection when required setup is skipped. End-of-input cancels
 preparation without applying setup. Existing valid settings are reused, and missing default key
 material can be restored without duplicating a ledger entry. Existing malformed settings or
 unsafe key files are reported and preserved for explicit repair. Connection rotation remains a
@@ -57,7 +80,9 @@ unsafe key files are reported and preserved for explicit repair. Connection rota
 do not collect setup input. A synchronized connection can be restored non-interactively, and
 ordinary init can migrate a valid legacy key plus protected local settings under its existing
 confirmation. When required inputs are missing, non-interactive init reports how to finish setup
-on the owner host. Remote controllers do not receive the App key or prompt for a local download.
+on the owner host. Non-interactive profile enable/setup require a complete connection or a ledger
+entry that can be restored without input. Remote controllers do not receive the App key or prompt
+for a local download.
 For a fresh Hermes yard, its preset already selects `hermes github`; after creating the yard,
 plain `yard -Y hermes init` also resumes any postponed setup.
 
@@ -96,7 +121,8 @@ yard keys import /secure/path/github-connection.json --label github-app --consum
 yard keys materialize global
 ```
 
-`yard init` initializes the encrypted ledger. The broker reads the generated connection directly,
+Interactive `yard profile setup github` initializes the encrypted ledger when needed; ordinary
+`yard init` also initializes it. The broker reads the generated connection directly,
 including a custom consumer root. Import keeps the original file; remove that duplicate separately
 after verifying the consumer.
 
@@ -111,9 +137,9 @@ enters L1; broker commands, status,
 service logs and diagnostics do not print it. A wrapped command still controls its own output.
 
 Existing key-only ledgers and `$SUBYARD_CONFIG_HOME/github-app.json` remain supported migration
-inputs. Ordinary `yard init` combines a valid protected local JSON and the existing key into the
+inputs. `yard profile setup github` and ordinary `yard init` combine a valid protected local JSON and the existing key into the
 encrypted connection, preserving its credential ID and local-only scope. Repeating init does not
-publish another migration revision. After verifying a matching legacy connection, init replaces
+publish another migration revision. After verifying a matching legacy connection, setup replaces
 its local settings with the protected delegation marker `{"use_credential_settings":true}` so later
 revisions can change identifiers and key together. Invalid files or conflicting local and
 synchronized settings are preserved for explicit repair. Local absolute `private_key_file` overrides remain supported;
@@ -157,11 +183,11 @@ still valid. GitHub installation tokens expire after one hour; rerun the wrapper
 for a later command. See [GitHub’s installation-token contract](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-an-installation-access-token-for-a-github-app). The read-only status surface reports a configured boolean; it does not
 expose token material or per-request authorization details.
 
-Disabling `github` and running `yard init` removes the profile wiring and service. Tokens already
+`yard -Y <yard> profile disable github` removes the profile wiring and service. Tokens already
 issued remain valid until GitHub expiry or [explicit GitHub revocation](https://docs.github.com/en/rest/apps/installations#revoke-an-installation-access-token). The owner service loads the
 protected connection for each request, so materializing a new revision takes effect on
 the next request without placing credentials in the yard.
 
 For transport failures, inspect `systemctl --user status subyard-github-<YARD>.service` on the
-owner host and repeat `yard -Y <yard> init` to repair the managed files and pinned yard transport.
+owner host and repeat `yard -Y <yard> profile enable github` to repair the managed files and pinned yard transport.
 Remote controllers use the same `init` path on the owner; no App credential belongs on the controller.

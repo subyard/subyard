@@ -85,7 +85,7 @@ func (cli *CLI) prepareSyncedInitProfile(ctx context.Context, execution *initExe
 	legacyFieldsNeeded := protectedSetupKeyExists(setup.keyPath) || protectedSetupKeyExists(setup.runtime.LegacyConsumerPath(schema.Consumer))
 	if !setup.before.Exists && (existing == "" || legacyFieldsNeeded) {
 		if !interactive {
-			fmt.Fprintf(cli.options.Stdout, "  [ .. ] %s is not configured. Run yard -Y %s init interactively on the owner host to set it up.\n", setup.definition.Name, execution.loaded.Context.YardName)
+			fmt.Fprintf(cli.options.Stdout, "  [ .. ] %s is not configured. Run yard -Y %s %s interactively on the owner host to set it up.\n", setup.definition.Name, execution.loaded.Context.YardName, profileSetupCommand(setup.definition))
 			return nil, nil
 		}
 		fmt.Fprintf(cli.options.Stdout, "\n%s (optional)\n", schema.Title)
@@ -110,7 +110,7 @@ func (cli *CLI) prepareSyncedInitProfile(ctx context.Context, execution *initExe
 	for {
 		if source == "" && existing == "" {
 			if !interactive {
-				fmt.Fprintf(cli.options.Stdout, "  [ .. ] %s credential is unavailable; restore its protected PEM or run init interactively on the owner host.\n", setup.definition.Name)
+				fmt.Fprintf(cli.options.Stdout, "  [ .. ] %s credential is unavailable; restore its protected PEM or run yard -Y %s %s interactively on the owner host.\n", setup.definition.Name, execution.loaded.Context.YardName, profileSetupCommand(setup.definition))
 				return nil, nil
 			}
 			source, err = cli.readProfileSetupLine(ctx, "Credential file path on this host (Enter to set up later): ")

@@ -119,6 +119,12 @@ _yard() {
       else COMPREPLY=( $(compgen -W "$(_yard_profiles "${COMP_WORDS[0]}")" -- "$cur") ); fi
       ;;
     teardown|stop|simple|status) COMPREPLY=( $(compgen -W "$command_options" -- "$cur") ) ;;
+    profile)
+      if [ "$cword" -eq "$((cmdidx + 1))" ] && [[ "$cur" != -* ]]; then
+        COMPREPLY=( $(compgen -W "$command_verbs" -- "$cur") )
+      elif [[ "$cur" == -* ]]; then COMPREPLY=( $(compgen -W "$command_options" -- "$cur") )
+      else COMPREPLY=( $(compgen -W "$(_yard_profiles "${COMP_WORDS[0]}")" -- "$cur") ); fi
+      ;;
     integration)
       if [ "$cword" -eq "$((cmdidx + 1))" ] && [[ "$cur" != -* ]]; then
         COMPREPLY=( $(compgen -W "$command_verbs" -- "$cur") )

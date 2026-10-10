@@ -1193,6 +1193,16 @@ Choose validation for these changes using the skill's risk-based test-selection 
 
 ## Profile extensions
 
+`yard profile enable|disable|setup|status <id>` operates on one shipped profile declaring
+`owner_service`. Enable and disable require a running, existing yard, preserve neighboring profile
+selections and invoke only the selected hook. They do not enter the general init reconciler. Setup
+reuses the profile's declarative credential conversation on the owner host without selecting it or
+starting the yard. Credential-owner initialization, when needed, is the only shared reconcile stage
+in this path. One typed plan and confirmation precede credential import, the CAS selection write and
+native apply/verify. Failed runtime apply retains the desired selection for retry; disabling a
+profile preserves its shared credentials. Core tests use synthetic profiles; provider lifecycle and
+external-service acceptance remain profile-owned. These commands currently require the owner host.
+
 A container profile can declare `YARD_CAPS="host-memory"` to request the fixed read-only
 owner `/proc/meminfo` bind at `/var/lib/subyard/host-meminfo`. The generic reconciler validates
 ownership, repairs drift without restarting the yard and verifies the live procfs source before
@@ -1228,7 +1238,7 @@ Unknown fields, unsupported versions, unsafe relative paths and duplicate consum
   directory names, without traversal, wildcards or control characters. Only shipped declarations
   supply this policy; generic coding-tool authentication-store exclusions remain core-owned.
 - `setup` declares nonsecret fields, prompts, config filename and an owned credential consumer.
-  Interactive init prepares these inputs before its existing single confirmation. It checks
+  Interactive init and scoped profile enable/setup prepare these inputs before their single confirmation. They check
   descriptor/config/source drift before applying; automation never answers profile prompts.
   `sync_fields` includes declared fields with the key in the encrypted consumer; local key override
   paths remain excluded. Existing protected settings and key-only entries can migrate under normal
@@ -1241,6 +1251,8 @@ Unknown fields, unsupported versions, unsafe relative paths and duplicate consum
   `--resume` restores that service. Core retains the paused profile IDs and restores earlier
   services if a later pause fails. Hooks own their service-specific identity and recovery guards.
   `SUBYARD_PROFILE_STOPPED=1` asks readiness checks to honor the yard's stopped intent.
+  Scoped disable invokes only that profile's `--remove`, carrying metadata bindings for its declared
+  managed paths so replacement artifacts fail stale guards before deletion.
 - `managed_paths` declares owned `data`/`operator` paths for teardown assessment, with optional
   `{yard}` substitution; the hook still owns physical cleanup and ownership checks. Teardown and
   `init --reset` carry approved metadata bindings in `SUBYARD_TEARDOWN_ARTIFACTS`. Removal hooks

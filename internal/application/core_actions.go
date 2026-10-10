@@ -4,6 +4,8 @@ import "github.com/Subyard/Subyard/internal/domain"
 
 func NewCoreActionRegistry() (*domain.ActionRegistry, error) {
 	definitions := []domain.ActionDefinition{
+		{Action: "profile.reconcile", Summary: "Reconcile one yard profile", Effect: domain.ActionMutation, Impacts: []domain.ActionImpact{domain.ImpactLocalMetadata, domain.ImpactYardRuntime, domain.ImpactAccess}, Recovery: domain.RecoveryReversible},
+		{Action: "profile.setup", Summary: "Configure a profile connection on the owner host", Effect: domain.ActionMutation, Impacts: []domain.ActionImpact{domain.ImpactLocalMetadata, domain.ImpactTrust, domain.ImpactAccess}, Recovery: domain.RecoveryReversible},
 		{Action: "host.add", Summary: "Register owner host", Effect: domain.ActionMutation, Impacts: []domain.ActionImpact{domain.ImpactLocalMetadata, domain.ImpactTrust}, Recovery: domain.RecoveryReversible},
 		{Action: "host.repair", Summary: "Repair owner host trust", Effect: domain.ActionMutation, Impacts: []domain.ActionImpact{domain.ImpactLocalMetadata, domain.ImpactTrust}, Recovery: domain.RecoveryReversible},
 		{Action: "host.remove", Summary: "Remove owner host registration", Effect: domain.ActionMutation, Impacts: []domain.ActionImpact{domain.ImpactLocalMetadata, domain.ImpactTrust}, Recovery: domain.RecoveryReversible},

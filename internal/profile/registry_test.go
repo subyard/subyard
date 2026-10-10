@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -325,6 +326,40 @@ exit 9
 	}
 	if err := RunServices(context.Background(), root, []string{"--yes"}, nil, &out, &out); err == nil {
 		t.Fatal("accepted unprepared context")
+	}
+}
+
+func TestServicesScopedCheckAndApplyLeaveNeighborsUntouched(t *testing.T) {
+	root := testkit.TempDir(t)
+	hook := "#!/bin/bash\nprintf '%s:%s\\n' \"$1\" \"$SUBYARD_PROFILE_SELECTED\" >> \"$EVENTS\"\n"
+	fixture(t, root, "one", "#!/bin/bash\nexit 99\n", Definition{})
+	fixture(t, root, "two", hook, Definition{})
+	events := filepath.Join(root, "events")
+	env := map[string]string{"SUBYARD_ENGINE_CONTEXT": "1", "SUBYARD_ENGINE_CONTEXT_SCHEMA": "1", "SUBYARD_YARD": "default", "ENVIRONMENT_PROFILES": "two", "EVENTS": events}
+	for _, action := range []string{"--check", "--yes"} {
+		if err := RunServices(context.Background(), root, []string{action, "two"}, env, io.Discard, io.Discard); err != nil {
+			t.Fatal(err)
+		}
+	}
+	env["ENVIRONMENT_PROFILES"] = ""
+	if err := RunServices(context.Background(), root, []string{"--yes", "two"}, env, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(events)
+	if string(data) != "--check:1\n--yes:1\n--yes:0\n" {
+		t.Fatalf("scoped dispatch: %s", data)
+	}
+	if err := RunServices(context.Background(), root, []string{"--remove", "two"}, env, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(events)
+	if !strings.HasSuffix(string(data), "--remove:0\n") {
+		t.Fatal("scoped remove did not invoke the owning hook")
+	}
+	for _, arguments := range [][]string{{"--yes", "missing"}, {"--check", "one two"}, {"--pause", "two"}} {
+		if err := RunServices(context.Background(), root, arguments, env, io.Discard, io.Discard); err == nil {
+			t.Fatalf("accepted %v", arguments)
+		}
 	}
 }
 

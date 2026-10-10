@@ -303,6 +303,19 @@ select, reconcile or clean up coding tools for this yard.
 Usage: yard integration enable|disable <id> | cleanup <id> [--check] | status [id] [--json]
 ```
 
+## profile
+
+enable, disable or configure one profile without yard init.
+
+```text
+Usage: yard profile enable|disable|setup|status <id> [--yes] [--json]
+Manage a profile that declares an owner service, without general yard initialization.
+Enable and disable require an existing running yard; only that profile's owner/guest hook runs.
+Enable offers missing setup interactively. Setup prepares the owner connection separately, even while the yard is stopped.
+Run setup on the owner host. --yes and non-interactive commands require an existing protected connection.
+Disable preserves shared credentials. Status reports selection, connection and observed runtime; --json applies only to status.
+```
+
 ## config
 
 inspect, author, sync and reconcile Subyard settings.
