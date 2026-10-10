@@ -171,7 +171,8 @@ func prepareObserved(
 		return Prepared{}, err
 	}
 	if projects.legacy && projects.current {
-		return Prepared{}, errors.New("both legacy and current test-yard Incus projects exist; refusing migration")
+		return Prepared{}, ownerProjectDiagnostic(errors.New("both legacy and current test-yard Incus projects exist; refusing migration"),
+			"both legacy subyard-e2e-yard and current subyard-test-yard projects exist; refusing migration", true)
 	}
 	switch observed.state {
 	case StateCurrent:
@@ -179,7 +180,8 @@ func prepareObserved(
 			return Prepared{}, err
 		}
 		if projects.legacy {
-			return Prepared{}, errors.New("legacy test-yard Incus project conflicts with current registration")
+			return Prepared{}, ownerProjectDiagnostic(errors.New("legacy test-yard Incus project conflicts with current registration"),
+				"legacy subyard-e2e-yard project conflicts with current registration", true)
 		}
 		prepared, prepareErr := preparedObservedRegistration(
 			observed.state, observed.currentRegistration, prospectiveDigest,
@@ -867,7 +869,10 @@ func inspectRegistration(options Options) (registration, error) {
 		return registration{}, err
 	}
 	if found.legacy && found.current {
-		return registration{}, errors.New("test-yard already exists; refusing to replace either yard")
+		legacyPath, _ := filepath.Rel(options.ConfigHome, found.oldRegistration)
+		currentPath, _ := filepath.Rel(options.ConfigHome, found.currentRegistration)
+		return registration{}, ownerStateDiagnostic(errors.New("test-yard already exists; refusing to replace either yard"),
+			"conflicting config-home-relative registrations "+filepath.ToSlash(legacyPath)+" and "+filepath.ToSlash(currentPath)+"; both preserved")
 	}
 	if found.legacy {
 		_, currentRegistration := registrationPaths(options, found.legacyState)
@@ -939,10 +944,12 @@ func inspectRegistrationSet(options Options) (registrationSet, error) {
 		}
 	}
 	if len(foundLegacy) > 1 {
-		return registrationSet{}, errors.New("multiple e2e-yard registrations exist")
+		return registrationSet{}, ownerStateDiagnostic(errors.New("multiple e2e-yard registrations exist"),
+			"multiple config-home-relative registrations yards/e2e-yard/config.env and yards/e2e-yard.env; both preserved")
 	}
 	if len(foundCurrent) > 1 {
-		return registrationSet{}, errors.New("multiple test-yard registrations exist")
+		return registrationSet{}, ownerStateDiagnostic(errors.New("multiple test-yard registrations exist"),
+			"multiple config-home-relative registrations yards/test-yard/config.env and yards/test-yard.env; both preserved")
 	}
 	result := registrationSet{}
 	if len(foundLegacy) > 0 {
@@ -1571,31 +1578,37 @@ func runIncus(ctx context.Context, options Options, arguments ...string) ([]byte
 func inspectProjects(ctx context.Context, options Options) (projectSet, error) {
 	payload, err := runIncus(ctx, options, "project", "list", "--format=json")
 	if err != nil {
-		return projectSet{}, fmt.Errorf("list test-yard Incus projects: %w", err)
+		return projectSet{}, ownerProjectDiagnostic(fmt.Errorf("list test-yard Incus projects: %w", err),
+			"owner project inventory inspection failed", false)
 	}
 	var projects []struct {
 		Name string `json:"name"`
 	}
 	if err := json.Unmarshal(payload, &projects); err != nil {
-		return projectSet{}, fmt.Errorf("decode test-yard Incus projects: %w", err)
+		return projectSet{}, ownerProjectDiagnostic(fmt.Errorf("decode test-yard Incus projects: %w", err),
+			"owner project inventory is invalid", false)
 	}
 	if projects == nil {
-		return projectSet{}, errors.New("test-yard Incus project inventory must be a JSON array")
+		return projectSet{}, ownerProjectDiagnostic(errors.New("test-yard Incus project inventory must be a JSON array"),
+			"owner project inventory must be a JSON array", false)
 	}
 	result := projectSet{}
 	for _, project := range projects {
 		if project.Name == "" {
-			return projectSet{}, errors.New("test-yard Incus project inventory has an incomplete identity")
+			return projectSet{}, ownerProjectDiagnostic(errors.New("test-yard Incus project inventory has an incomplete identity"),
+				"owner project inventory has an incomplete identity", false)
 		}
 		switch project.Name {
 		case "subyard-" + LegacyYard:
 			if result.legacy {
-				return projectSet{}, errors.New("duplicate legacy test-yard Incus project")
+				return projectSet{}, ownerProjectDiagnostic(errors.New("duplicate legacy test-yard Incus project"),
+					"duplicate legacy subyard-e2e-yard project", true)
 			}
 			result.legacy = true
 		case "subyard-" + CurrentYard:
 			if result.current {
-				return projectSet{}, errors.New("duplicate current test-yard Incus project")
+				return projectSet{}, ownerProjectDiagnostic(errors.New("duplicate current test-yard Incus project"),
+					"duplicate current subyard-test-yard project", true)
 			}
 			result.current = true
 		}
@@ -1995,17 +2008,19 @@ func pathExists(path string) (bool, error) {
 }
 
 func validateNoLegacyOwnerState(options Options) error {
-	for _, path := range []string{
-		filepath.Join(options.ConfigHome, "yards", LegacyYard),
-		filepath.Join(options.ConfigHome, "yards", LegacyYard+".env"),
-		filepath.Join(options.DataHome, "e2e", "controllers", LegacyYard),
+	for _, resource := range []struct{ root, relative, role string }{
+		{options.ConfigHome, "yards/e2e-yard", "config-home-relative"},
+		{options.ConfigHome, "yards/e2e-yard.env", "config-home-relative"},
+		{options.DataHome, "e2e/controllers/e2e-yard", "data-home-relative"},
 	} {
+		path := filepath.Join(resource.root, filepath.FromSlash(resource.relative))
 		exists, err := pathExists(path)
 		if err != nil {
 			return err
 		}
 		if exists {
-			return errors.New("legacy owner state remains beside the canonical registration")
+			return ownerStateDiagnostic(errors.New("legacy owner state remains beside the canonical registration"),
+				"legacy owner state remains at "+resource.role+" "+resource.relative+" beside the canonical registration")
 		}
 	}
 	return nil

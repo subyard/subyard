@@ -800,6 +800,39 @@ func TestUpdateCheckReturnsZeroForBlockedV2Inspection(t *testing.T) {
 	}
 }
 
+func TestUpdateReportsPreparationDiagnosticWithoutReinspection(t *testing.T) {
+	root, environment, runtimeRoot := updateReleaseFixture(t)
+	capture := filepath.Join(root, "transition-modes")
+	environment = append(environment, "UPDATE_BLOCK_INSPECTION=1", "UPDATE_TRANSITION_CAPTURE="+capture)
+	var stdout, stderr bytes.Buffer
+	prompt := &testkit.Prompt{}
+	configs := &recordingConfigApplier{}
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", WorkingDir: root, Environment: environment,
+		Arguments: []string{"update", "--version", "1.2.3", "--runtime-root", runtimeRoot},
+		Prompt:    prompt, Config: configs, Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	for _, expected := range []string{"yard: update:", "operator-action-required", "the candidate resource changed", "next: run yard update --check"} {
+		if !strings.Contains(stderr.String(), expected) {
+			t.Fatalf("missing preparation diagnostic %q in %q", expected, stderr.String())
+		}
+	}
+	modes, err := os.ReadFile(capture)
+	if err != nil || string(modes) != "inspect\n" || len(prompt.Requests) != 0 || len(configs.yards) != 0 {
+		t.Fatalf("blocked update performed extra work: modes=%q prompts=%v configs=%v err=%v",
+			modes, prompt.Requests, configs.yards, err)
+	}
+	if active, err := os.Readlink(filepath.Join(runtimeRoot, "current")); err != nil || active != "releases/release-old" {
+		t.Fatalf("blocked update changed the active release: %q, %v", active, err)
+	}
+}
+
 func TestRollbackDoesNotExecuteRetainedEngineBeforeVerification(t *testing.T) {
 	root, environment, runtimeRoot := updateReleaseFixture(t)
 	prepareCLIReleaseLinks(t, runtimeRoot, true)

@@ -429,6 +429,9 @@ Ordinary observations continue to return expected drift as a state; post-apply f
 return the observed component reason through `ActivationDiagnostic`. The test VM broker
 uses bounded, source-owned readiness reasons for its host sink, backend and guest checks.
 Initial observation failures also retain these reasons; repairable drift stays a state.
+Route-consumer ownership conflicts identify the affected yard, validated native instance
+and route device, with a read-only Incus inspection command. Configuration inspection
+failures retain safe source context and direct operators to the affected yard's config status.
 Materialized-config observation failures identify the yard and inspection phase, with a
 read-only config or integration status command. Known integration ownership conflicts retain
 their validated path and inspection command across the release boundary; they must not send

@@ -45,24 +45,29 @@ type managedYard struct {
 // live owner backend. Teardown may retain settings, a project and data volumes;
 // release activation must not recreate its removed compute backend. The one-time
 // migration's Prepare/Commit/VerifyRouteConsumers contract remains unchanged.
-func PrepareRouteConsumerActivation(ctx context.Context, options Options) (State, error) {
+func PrepareRouteConsumerActivation(ctx context.Context, options Options) (state State, err error) {
+	defer func() {
+		err = routeDiagnostic(err, "owner registration or backend inspection failed", CurrentYard, "", "", false)
+	}()
 	if err := validateOptions(&options); err != nil {
 		return "", err
 	}
 	prepared, err := Prepare(ctx, options)
 	if err != nil || prepared.State != StateCurrent {
-		return prepared.State, err
+		return prepared.State, routeConfigDiagnostic(err, "owner registration preparation failed", CurrentYard, options.ConfigHome)
 	}
 	projects, err := inspectProjects(ctx, options)
 	if err != nil {
 		return "", err
 	}
 	if projects.legacy {
-		return "", errors.New("legacy project conflicts with canonical route activation")
+		return "", ownerProjectDiagnostic(errors.New("legacy project conflicts with canonical route activation"),
+			"legacy project subyard-e2e-yard conflicts with canonical route activation", true)
 	}
 	payload, err := runIncus(ctx, options, "list", "--all-projects", "--format=json")
 	if err != nil {
-		return "", fmt.Errorf("inspect route activation backend: %w", err)
+		return "", routeDiagnostic(fmt.Errorf("inspect route activation backend: %w", err),
+			"backend inventory inspection failed", CurrentYard, "", "", false)
 	}
 	var instances []struct {
 		Name    string            `json:"name"`
@@ -71,14 +76,16 @@ func PrepareRouteConsumerActivation(ctx context.Context, options Options) (State
 		Config  map[string]string `json:"config"`
 	}
 	if err := json.Unmarshal(payload, &instances); err != nil || instances == nil {
-		return "", errors.New("route activation backend inventory must be a JSON array")
+		return "", routeDiagnostic(errors.New("route activation backend inventory must be a JSON array"),
+			"backend inventory must be a JSON array", CurrentYard, "", "", false)
 	}
 	found := false
 	seenInstances := make(map[string]bool)
 	for _, instance := range instances {
 		key := consumerKey(instance.Project, instance.Name)
 		if instance.Project == "" || instance.Name == "" || seenInstances[key] {
-			return "", errors.New("route activation backend inventory is duplicated or incomplete")
+			return "", routeDiagnostic(errors.New("route activation backend inventory is duplicated or incomplete"),
+				"backend inventory is duplicated or incomplete", CurrentYard, instance.Project, instance.Name, true)
 		}
 		seenInstances[key] = true
 		yard := instance.Config["user.subyard.name"]
@@ -90,10 +97,12 @@ func PrepareRouteConsumerActivation(ctx context.Context, options Options) (State
 		if found || !projects.current || instance.Project != "subyard-test-yard" ||
 			instance.Name != "yard-test-yard" || yard != CurrentYard ||
 			instance.Config["user.subyard.managed"] != "true" {
-			return "", errors.New("route activation backend has a conflicting or foreign identity")
+			return "", routeDiagnostic(errors.New("route activation backend has a conflicting or foreign identity"),
+				"backend has a conflicting or foreign identity; expected subyard-test-yard/yard-test-yard", CurrentYard, instance.Project, instance.Name, true)
 		}
 		if !strings.EqualFold(instance.Status, "running") && !strings.EqualFold(instance.Status, "stopped") {
-			return "", errors.New("route activation backend has an unsupported instance state")
+			return "", routeDiagnostic(errors.New("route activation backend has an unsupported instance state"),
+				"backend has an unsupported instance state", CurrentYard, instance.Project, instance.Name, false)
 		}
 		found = true
 	}
@@ -112,7 +121,8 @@ func PrepareRouteConsumers(ctx context.Context, options Options) (string, error)
 // PrepareRouteConsumersActivation snapshots current route consumers according
 // to their effective host-access policy, independently of the frozen migration.
 func PrepareRouteConsumersActivation(ctx context.Context, options Options) (string, error) {
-	return prepareRouteConsumers(ctx, options, true)
+	before, err := prepareRouteConsumers(ctx, options, true)
+	return before, routeDiagnostic(err, "consumer preparation failed", "", "", "", false)
 }
 
 func prepareRouteConsumers(ctx context.Context, options Options, activation bool) (string, error) {
@@ -121,7 +131,7 @@ func prepareRouteConsumers(ctx context.Context, options Options, activation bool
 	}
 	registration, err := inspectRegistration(options)
 	if err != nil {
-		return "", err
+		return "", routeConfigDiagnostic(err, "owner registration inspection failed", CurrentYard, options.ConfigHome)
 	}
 	prepared := routeConsumersState{
 		SchemaVersion: routeConsumersSchema,
@@ -164,7 +174,8 @@ func CommitRouteConsumers(ctx context.Context, options Options, before string) e
 // CommitRouteConsumersActivation repairs only consumers whose effective policy
 // permits host access. It retains native ownership and prepared-inventory guards.
 func CommitRouteConsumersActivation(ctx context.Context, options Options, before string) error {
-	return commitRouteConsumers(ctx, options, before, true)
+	return routeDiagnostic(commitRouteConsumers(ctx, options, before, true),
+		"consumer reconciliation failed", "", "", "", false)
 }
 
 func commitRouteConsumers(ctx context.Context, options Options, before string, activation bool) error {
@@ -255,7 +266,8 @@ func VerifyRouteConsumers(ctx context.Context, options Options, before string) e
 // VerifyRouteConsumersActivation checks the current eligible consumer set;
 // registration-only changes do not require replaying the historical migration.
 func VerifyRouteConsumersActivation(ctx context.Context, options Options, before string) error {
-	return verifyPreparedRouteConsumers(ctx, options, before, true)
+	return routeDiagnostic(verifyPreparedRouteConsumers(ctx, options, before, true),
+		"consumer verification failed", "", "", "", false)
 }
 
 func verifyPreparedRouteConsumers(ctx context.Context, options Options, before string, activation bool) error {
@@ -457,7 +469,8 @@ func validatePreparedSet(
 func inspectManagedYards(ctx context.Context, options Options) ([]managedYard, error) {
 	payload, err := runIncus(ctx, options, "list", "--all-projects", "--format=json")
 	if err != nil {
-		return nil, fmt.Errorf("list local Incus instances: %w", err)
+		return nil, routeDiagnostic(fmt.Errorf("list local Incus instances: %w", err),
+			"managed instance inventory inspection failed", "", "", "", false)
 	}
 	var instances []struct {
 		Name            string                       `json:"name"`
@@ -468,7 +481,8 @@ func inspectManagedYards(ctx context.Context, options Options) ([]managedYard, e
 		ExpandedDevices map[string]map[string]string `json:"expanded_devices"`
 	}
 	if err := json.Unmarshal(payload, &instances); err != nil {
-		return nil, fmt.Errorf("decode local Incus instances: %w", err)
+		return nil, routeDiagnostic(fmt.Errorf("decode local Incus instances: %w", err),
+			"managed instance inventory is invalid", "", "", "", false)
 	}
 	source := routeSource(options)
 	result := make([]managedYard, 0, len(instances))
@@ -479,24 +493,25 @@ func inspectManagedYards(ctx context.Context, options Options) ([]managedYard, e
 		}
 		yardName := instance.Config["user.subyard.name"]
 		if yardName == "" {
-			return nil, fmt.Errorf(
+			return nil, routeDiagnostic(fmt.Errorf(
 				"managed Incus instance %s/%s has no yard identity",
 				instance.Project,
 				instance.Name,
-			)
+			), "managed instance has no yard identity", "", instance.Project, instance.Name, true)
 		}
 		expectedProject, expectedInstance := yardIdentity(yardName)
 		if instance.Project != expectedProject || instance.Name != expectedInstance {
-			return nil, fmt.Errorf(
+			return nil, routeDiagnostic(fmt.Errorf(
 				"managed yard %q has unexpected Incus identity %s/%s",
 				yardName,
 				instance.Project,
 				instance.Name,
-			)
+			), "managed yard has unexpected Incus identity", yardName, instance.Project, instance.Name, true)
 		}
 		key := consumerKey(instance.Project, instance.Name)
 		if seen[key] {
-			return nil, fmt.Errorf("duplicate managed Incus instance %s", key)
+			return nil, routeDiagnostic(fmt.Errorf("duplicate managed Incus instance %s", key),
+				"duplicate managed instance", yardName, instance.Project, instance.Name, true)
 		}
 		seen[key] = true
 		device, local := instance.Devices[routeDeviceName]
@@ -505,19 +520,19 @@ func inspectManagedYards(ctx context.Context, options Options) ([]managedYard, e
 		switch {
 		case local:
 			if !routeDeviceMatches(device, source) {
-				return nil, fmt.Errorf(
+				return nil, routeDiagnostic(fmt.Errorf(
 					"managed yard %s has a foreign or drifted %s device",
 					key,
 					routeDeviceName,
-				)
+				), "foreign or drifted subyard-e2e-routes device", yardName, instance.Project, instance.Name, true)
 			}
 			mounted = true
 		case expanded:
-			return nil, fmt.Errorf(
+			return nil, routeDiagnostic(fmt.Errorf(
 				"managed yard %s inherits a foreign %s device",
 				key,
 				routeDeviceName,
-			)
+			), "inherited foreign subyard-e2e-routes device", yardName, instance.Project, instance.Name, true)
 		}
 		result = append(result, managedYard{
 			Project:          instance.Project,
@@ -545,14 +560,16 @@ func inspectRouteConsumerYards(ctx context.Context, options Options, activation 
 	for index := range yards {
 		loaded, err := loadBrokerYard(options, yards[index].Yard)
 		if err != nil {
-			return nil, fmt.Errorf("inspect route consumer eligibility: %w", err)
+			return nil, routeConfigDiagnostic(fmt.Errorf("inspect route consumer eligibility: %w", err),
+				"consumer eligibility configuration inspection failed", yards[index].Yard, options.ConfigHome)
 		}
 		yards[index].AllowsHostAccess = loaded.Environment["ALLOWS_HOST_ACCESS"] != "false"
 		if !yards[index].AllowsHostAccess && yards[index].Mounted {
-			return nil, fmt.Errorf(
+			return nil, routeDiagnostic(fmt.Errorf(
 				"managed yard %s/%s has the shared E2E route mount but its effective policy forbids host access",
 				yards[index].Project, yards[index].Instance,
-			)
+			), "subyard-e2e-routes device remains but effective policy forbids host access", yards[index].Yard,
+				yards[index].Project, yards[index].Instance, true)
 		}
 	}
 	return yards, nil
@@ -562,6 +579,12 @@ func inspectCurrentRoute(options Options) (bool, error) {
 	_, ready, err := testvmsruntime.ReadPublishedRoute(
 		filepath.Join(routeSource(options), CurrentYard),
 	)
+	if err != nil {
+		err = &routeActivationDiagnostic{
+			cause: err, message: "route consumer activation for yard test-yard: published E2E route inspection failed",
+			retry: "run yard -Y test-yard test-vms status",
+		}
+	}
 	return ready, err
 }
 
