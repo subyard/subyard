@@ -37,9 +37,10 @@ var tokenPattern = regexp.MustCompile(`^[A-Za-z0-9._~+\-/=]+$`)
 // Config identifies the one GitHub App installation an owner-host broker serves.
 // PrivateKeyFile is read only by the owner-side issuer and is never returned.
 type Config struct {
-	AppID          string `json:"app_id"`
-	InstallationID int64  `json:"installation_id"`
-	PrivateKeyFile string `json:"private_key_file"`
+	AppID                 string `json:"app_id"`
+	InstallationID        int64  `json:"installation_id"`
+	PrivateKeyFile        string `json:"private_key_file"`
+	UseCredentialSettings bool   `json:"use_credential_settings,omitempty"`
 }
 
 type Token struct {
@@ -73,6 +74,13 @@ func LoadConfig(path, defaultKeyFile string) (Config, error) {
 	if decoder.Decode(&extra) != io.EOF {
 		return Config{}, errors.New("invalid github broker config")
 	}
+	if cfg.UseCredentialSettings {
+		if cfg.AppID != "" || cfg.InstallationID != 0 || cfg.PrivateKeyFile != "" {
+			return Config{}, errors.New("invalid managed github config")
+		}
+		cfg.PrivateKeyFile = defaultKeyFile
+		return cfg, nil
+	}
 	if cfg.PrivateKeyFile == "" {
 		cfg.PrivateKeyFile = defaultKeyFile
 		if cfg.PrivateKeyFile == "" {
@@ -90,7 +98,74 @@ func NewIssuer(cfg Config) (*Issuer, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Issuer{cfg: cfg, key: key, client: &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, base: defaultBaseURL, now: time.Now}, nil
+	return newIssuerWithKey(cfg, key), nil
+}
+
+// LoadIssuer reads the synchronized connection as one protected file. The local
+// config remains usable for legacy PEM installations and explicit key overrides.
+func LoadIssuer(configPath, connectionPath string) (*Issuer, error) {
+	local, localErr := LoadConfig(configPath, connectionPath)
+	if localErr != nil {
+		if _, err := os.Lstat(configPath); !errors.Is(err, os.ErrNotExist) {
+			return nil, localErr
+		}
+	}
+	if localErr == nil && local.PrivateKeyFile != connectionPath {
+		return NewIssuer(local)
+	}
+	_, statErr := os.Lstat(connectionPath)
+	if errors.Is(statErr, os.ErrNotExist) {
+		// The pre-connection path is read only for existing local installations.
+		if localErr != nil {
+			return nil, localErr
+		}
+		local.PrivateKeyFile = filepath.Join(filepath.Dir(connectionPath), "github-app.pem")
+		return NewIssuer(local)
+	}
+	data, err := readProtected(connectionPath, 2*maxKeyBytes+maxConfigBytes)
+	if err != nil {
+		return nil, err
+	}
+	defer clear(data)
+	if !bytes.HasPrefix(bytes.TrimSpace(data), []byte("{")) {
+		if localErr != nil {
+			return nil, localErr
+		}
+		key, err := parsePrivateKey(data)
+		if err != nil {
+			return nil, err
+		}
+		return newIssuerWithKey(local, key), nil
+	}
+	var bundle struct {
+		SchemaVersion int `json:"schema_version"`
+		Settings      struct {
+			AppID          string `json:"app_id"`
+			InstallationID int64  `json:"installation_id"`
+		} `json:"settings"`
+		PrivateKey string `json:"private_key"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&bundle) != nil || decoder.Decode(new(any)) != io.EOF || bundle.SchemaVersion != 1 {
+		return nil, errors.New("invalid github connection")
+	}
+	cfg := Config{AppID: bundle.Settings.AppID, InstallationID: bundle.Settings.InstallationID, PrivateKeyFile: connectionPath}
+	if localErr == nil && !local.UseCredentialSettings && (local.AppID != cfg.AppID || local.InstallationID != cfg.InstallationID) {
+		return nil, errors.New("local github settings conflict with the synchronized connection")
+	}
+	if err := ValidateConfig(cfg); err != nil {
+		return nil, err
+	}
+	key, err := parsePrivateKey([]byte(bundle.PrivateKey))
+	if err != nil {
+		return nil, err
+	}
+	return newIssuerWithKey(cfg, key), nil
+}
+
+func newIssuerWithKey(cfg Config, key *rsa.PrivateKey) *Issuer {
+	return &Issuer{cfg: cfg, key: key, client: &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, base: defaultBaseURL, now: time.Now}
 }
 
 func (issuer *Issuer) Issue(ctx context.Context) (Token, error) {
@@ -281,12 +356,22 @@ func readProtected(path string, maximum int64) ([]byte, error) {
 		return nil, errors.New("file is not a regular file")
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || int(stat.Uid) != os.Geteuid() || (info.Mode().Perm() != 0o600 && info.Mode().Perm() != 0o400) {
+	if !ok || int(stat.Uid) != os.Geteuid() || stat.Nlink != 1 || (info.Mode().Perm() != 0o600 && info.Mode().Perm() != 0o400) {
 		return nil, errors.New("file permissions are unsafe")
 	}
 	data, err := io.ReadAll(io.LimitReader(file, maximum+1))
 	if err != nil || int64(len(data)) > maximum {
 		return nil, errors.New("file is too large")
+	}
+	now, err := file.Stat()
+	if err != nil {
+		clear(data)
+		return nil, errors.New("protected file changed during read")
+	}
+	current, ok := now.Sys().(*syscall.Stat_t)
+	if !ok || stat.Dev != current.Dev || stat.Ino != current.Ino || stat.Mode != current.Mode || stat.Uid != current.Uid || stat.Gid != current.Gid || stat.Nlink != current.Nlink || stat.Size != current.Size || stat.Mtim != current.Mtim || stat.Ctim != current.Ctim {
+		clear(data)
+		return nil, errors.New("protected file changed during read")
 	}
 	return data, nil
 }

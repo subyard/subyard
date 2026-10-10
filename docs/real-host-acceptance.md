@@ -167,3 +167,17 @@ extends lease acquisition when the pool is busy.
 This checks profile defaults, persistent owner service, SSH reconnect, crash recovery, reboot,
 explicit disable and preservation of Hermes state. Real GitHub App permissions and token use
 still require an operator-configured installation and an authorized sandbox repository.
+
+For complete connection synchronization, run the focused two-owner fixture in one disposable
+`subyard-pair` lease:
+
+```sh
+bash config/profiles/github/tests/e2e/connection-sync.sh --slot "$slot"
+```
+
+It installs the same current-worktree candidate on both owners and checks legacy migration,
+real SSH/SOPS exchange of identifiers and PEM, automatic materialization without local ID input,
+the installed automatic-sync worker, coherent rotation, revoke and local-only exclusion. A
+loopback synthetic issuer verifies the received App ID, installation route and RSA signature;
+no real GitHub token is minted. Owner service status and guest isolation are checked through
+the actual profile transport.

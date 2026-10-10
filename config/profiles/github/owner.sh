@@ -44,7 +44,7 @@ user_systemctl() {
 unit_quote() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/%/%%/g'; }
 render_runtime() {
   jq -n --arg app "$app_config" --argjson port "$SSH_PORT" --arg dev "$DEV_USER" \
-    --arg key "${SUBYARD_KEYS_CONSUMER_ROOT:-$SUBYARD_CONFIG_HOME/generated}/github/github-app.pem" \
+    --arg key "${SUBYARD_KEYS_CONSUMER_ROOT:-$SUBYARD_CONFIG_HOME/generated}/github/connection.json" \
     --arg identity "$SUBYARD_HOME/ssh/id_ed25519" --arg known "$SUBYARD_HOME/ssh/known_hosts" \
     '{app_config:$app,key_file:$key,ssh_port:$port,developer:$dev,identity_file:$identity,known_hosts_file:$known}'
 }
@@ -208,4 +208,4 @@ for _ in {1..30}; do
   sleep 1
 done
 [ "$ready" = 1 ] || die "GitHub broker did not connect; inspect systemctl --user status $unit"
-printf 'GitHub broker profile configured; App settings stay in owner-side github-app.json\n'
+printf 'GitHub broker profile configured; App connection stays on the owner host\n'

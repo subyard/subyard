@@ -1211,8 +1211,11 @@ Unknown fields, unsupported versions, unsafe relative paths and duplicate consum
   `selected_provision_only` applies this selection to implicit provisioning.
 - `native` lists Go package directories and artifact paths relative to the profile. Development
   and release builds discover these declarations; installed profiles contain the native artifacts.
-- `consumers` declares credential ID, zone, relative materialization path and format (`file` or
-  `rsa-private-key`). Zone `*` accepts any validated credential zone; a single `{zone}` filename
+- `consumers` declares credential ID, zone, relative materialization path and format (`file`,
+  `rsa-private-key` or `rsa-private-key-with-settings`). The latter stores the setup's declared
+  fields and RSA key in one encrypted, atomically materialized JSON revision. Optional `legacy_path`
+  identifies the previous relative consumer path for migration and cleanup. Zone `*` accepts any
+  validated credential zone; a single `{zone}` filename
   placeholder expands to that zone. Dynamic paths reserve their parent subtree, and overlapping
   materialization paths fail before execution. An optional `stop_handler` names a shipped executable
   that receives dispatcher path, yard context and zone, with no credential payload. The internal
@@ -1227,6 +1230,10 @@ Unknown fields, unsupported versions, unsafe relative paths and duplicate consum
 - `setup` declares nonsecret fields, prompts, config filename and an owned credential consumer.
   Interactive init prepares these inputs before its existing single confirmation. It checks
   descriptor/config/source drift before applying; automation never answers profile prompts.
+  `sync_fields` includes declared fields with the key in the encrypted consumer; local key override
+  paths remain excluded. Existing protected settings and key-only entries can migrate under normal
+  init consent; synchronized settings restore without interactive input. Validation is generic;
+  concrete fields and broker behavior remain owned by the profile.
 - `owner_service` names an executable Bash hook. Core invokes it only with prepared engine context,
   passing `SUBYARD_PROFILE_SELECTED=0|1`, including unselected profiles so they can clean up.
   `--check` inspects convergence; `--yes` reconciles; `--remove` removes owned service state.

@@ -137,11 +137,7 @@ func serveSSH(ctx context.Context, cfg RuntimeConfig) error {
 		}
 	}()
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cfg, err := LoadConfig(cfg.AppConfig, cfg.KeyFile)
-		var issuer *Issuer
-		if err == nil {
-			issuer, err = NewIssuer(cfg)
-		}
+		issuer, err := LoadIssuer(cfg.AppConfig, cfg.KeyFile)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("Cache-Control", "no-store")

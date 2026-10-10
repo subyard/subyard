@@ -603,17 +603,21 @@ else
   printf '{"app_id":"123456","installation_id":42}\n' > "$APP_CONFIG"
   yard keys import "$APP_KEY" --label github-broker-e2e --consumer github-app-key --yes
   yard keys materialize global --yes
-  MATERIALIZED_KEY="$SUBYARD_KEYS_CONSUMER_ROOT/github/github-app.pem"
-  cmp -s "$APP_KEY" "$MATERIALIZED_KEY" || die 'ledger did not materialize the App key'
-  [ "$(stat -c %a "$MATERIALIZED_KEY")" = 600 ] || die 'materialized App key is not protected'
+  MATERIALIZED_KEY="$SUBYARD_KEYS_CONSUMER_ROOT/github/connection.json"
+  cmp -s "$APP_KEY" "$MATERIALIZED_KEY" || die 'ledger did not materialize the legacy App key'
+  [ "$(stat -c %a "$MATERIALIZED_KEY")" = 600 ] || die 'materialized App connection is not protected'
   chmod 0600 "$APP_CONFIG"
+  yard init --yes
+  cmp -s "$APP_KEY" <(jq -jr '.private_key' "$MATERIALIZED_KEY") || die 'init did not migrate the App connection'
+  jq -e '.schema_version == 1 and .settings.app_id == "123456" and .settings.installation_id == 42' \
+    "$MATERIALIZED_KEY" >/dev/null || die 'migrated App settings differ'
   wait_status '{"configured":true}'
   credential="$(yard keys list | awk -F '\t' '$8=="github-broker-e2e" {print $1}')"
   [ -n "$credential" ] || die 'GitHub key record is missing'
   openssl genrsa -out "$APP_KEY" 2048 >/dev/null 2>&1
   yard keys rotate "$credential" --file "$APP_KEY" --yes
   yard keys materialize global --yes
-  cmp -s "$APP_KEY" "$MATERIALIZED_KEY" || die 'App key rotation did not materialize'
+  cmp -s "$APP_KEY" <(jq -jr '.private_key' "$MATERIALIZED_KEY") || die 'App key rotation did not materialize'
   wait_status '{"configured":true}'
   guest test ! -e "$MATERIALIZED_KEY" || die 'owner App key entered the yard'
   ok 'broker loaded and rotated the yard keys consumer without a GitHub request'
@@ -710,7 +714,7 @@ ok 'named Hermes init/provision selects GitHub, preserves opaque state and keeps
 credential="$(yard keys list | awk -F '\t' '$8=="github-broker-e2e" {print $1}')"
 [ -n "$credential" ] || die 'GitHub key record is missing after reboot'
 yard keys revoke "$credential" --yes
-[ ! -e "$SUBYARD_KEYS_CONSUMER_ROOT/github/github-app.pem" ] || die 'revoked App key remained materialized'
+[ ! -e "$SUBYARD_KEYS_CONSUMER_ROOT/github/connection.json" ] || die 'revoked App connection remained materialized'
 [ "$(hermes_status || true)" = '{"configured":false}' ] || die 'Hermes broker kept using a revoked App key'
 if hermes_dev /usr/local/bin/subyard-github run -- true >/dev/null 2>&1; then
   die 'broker authorized a command after key revocation'

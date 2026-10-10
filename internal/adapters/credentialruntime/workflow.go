@@ -498,6 +498,11 @@ func (runtime *Runtime) prepareRotate(ctx context.Context, arguments []string) (
 				return err
 			}
 			defer clear(payload)
+			payload, err = runtime.preserveCredentialSettings(ctx, scope, head, payload)
+			defer clear(payload)
+			if err != nil {
+				return err
+			}
 			if err := runtime.rejectProductionPayload(payload); err != nil {
 				return err
 			}
@@ -557,6 +562,11 @@ func (runtime *Runtime) prepareRollback(ctx context.Context, arguments []string)
 				return errors.New("historical revision cannot be decrypted")
 			}
 			defer clear(payload)
+			payload, err = runtime.preserveCredentialSettings(ctx, scope, head, payload)
+			defer clear(payload)
+			if err != nil {
+				return err
+			}
 			if err := runtime.rejectProductionPayload(payload); err != nil {
 				return err
 			}
@@ -742,6 +752,11 @@ func (runtime *Runtime) prepareResolve(ctx context.Context, arguments []string) 
 				}
 			}
 			defer clear(payload)
+			payload, err = runtime.preserveResolvedSettings(ctx, scope, heads, payload)
+			defer clear(payload)
+			if err != nil {
+				return err
+			}
 			spec := specFromMetadata(template)
 			spec.State, spec.Parents, spec.RecipientActors = "active", headIDs(heads), recipients
 			if err := approval.check(ctx, runtime); err != nil {
@@ -1868,7 +1883,7 @@ func (runtime *Runtime) materializeCredential(ctx context.Context, scope ledgerS
 		if err := os.Remove(destination); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		return nil
+		return runtime.removeLegacyConsumer(head.Consumer, head.Zone)
 	}
 	identity, err := runtime.Identity()
 	if err != nil {
@@ -1921,6 +1936,9 @@ func (runtime *Runtime) materializeCredential(ctx context.Context, scope ledgerS
 		return err
 	}
 	if err := atomicWrite(destination, payload, 0o600); err != nil {
+		return err
+	}
+	if err := runtime.removeLegacyConsumer(head.Consumer, head.Zone); err != nil {
 		return err
 	}
 	if !automatic {

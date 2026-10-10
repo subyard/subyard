@@ -5,13 +5,14 @@
   "selected_provision_only": true,
   "owner_service": "owner.sh",
   "native": [{"package": "cmd/broker", "path": "bin/broker"}],
-  "consumers": [{"id": "github-app-key", "zone": "global", "path": "github/github-app.pem", "format": "rsa-private-key"}],
+  "consumers": [{"id": "github-app-key", "zone": "global", "path": "github/connection.json", "legacy_path": "github/github-app.pem", "format": "rsa-private-key-with-settings"}],
   "managed_paths": [
     {"root": "data", "path": "github-broker/{yard}-engine"},
     {"root": "data", "path": "github-broker/{yard}.json"},
     {"root": "operator", "path": ".config/systemd/user/subyard-github-{yard}.service"}
   ],
   "setup": {
+    "sync_fields": true,
     "title": "Connect GitHub",
     "instructions": [
       "Create a GitHub App, install it on the repositories you want to allow, and download its RSA private key.",

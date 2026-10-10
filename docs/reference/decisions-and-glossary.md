@@ -541,6 +541,11 @@ acceptance is distinct from package/VM readiness; see [Paseo](../paseo.md).
 
 ## GitHub App token broker
 
+App ID, installation ID and the RSA private key form one synchronized encrypted connection.
+Instances serving the same App installation use the same identifiers. One atomic owner-side
+consumer file prevents mixing IDs and keys across revisions; local paths and transport identities
+are excluded. Existing PEM-only entries migrate through ordinary init, preserving local-only scope.
+
 Long-lived App private keys/PATs/refresh tokens stay on owner in protected encrypted-ledger
 consumer. Short-lived installation token may enter L1 command environment without Git/gh
 auth-store persistence, remaining valid until GitHub expiry (up to an hour), not revoked at

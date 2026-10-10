@@ -35,76 +35,97 @@ conversation:
    **installation ID** from the installation URL, for example the numeric suffix of
    `https://github.com/settings/installations/12345678`.
 3. Enter the downloaded PEM's path on that owner host. `~/` is supported. If the encrypted ledger
-   already has the key, init restores its consumer instead of asking for another download.
-4. Review the ordinary init plan and confirm once. Init protects the selected PEM, imports it into
-   the encrypted ledger, materializes the key and creates the mode-`0600` App JSON automatically.
+   already has the complete connection, init restores it without asking for identifiers or another
+   download. A legacy key-only entry can reuse the protected local App settings.
+4. Review the ordinary init plan and confirm once. Init protects the selected PEM and stores it
+   together with both identifiers in one encrypted revision. It materializes the complete connection
+   as one mode-`0600` owner-side JSON file.
 
 No manual JSON, import flags or separate materialization command is needed. Input collection
 reads source metadata only; the downloaded key is read and its permissions tightened only after
 confirmation. The source must be an operator-owned regular file, not a symbolic or hard link.
-The original download is kept. The key follows the ledger's normal synchronization to trusted
-credential peers; use the manual `--local-only` import below if it must stay on this host.
+The original download is kept. The complete connection follows the ledger's normal synchronization
+to trusted credential peers; use `--local-only` when adding or importing it if it must stay on this host.
 
 Enter at any field postpones setup; run interactive init again to resume. End-of-input cancels
 preparation without applying setup. Existing valid settings are reused, and missing default key
 material can be restored without duplicating a ledger entry. Existing malformed settings or
-unsafe key files are reported and preserved for explicit repair. Key rotation remains a
+unsafe key files are reported and preserved for explicit repair. Connection rotation remains a
 `yard keys rotate` operation.
 
 `--yes`, `ASSUME_YES=1`, non-interactive runs, RPC planning, `init --configs` and `init --reset`
-do not collect setup input. A direct non-interactive init reports how to finish setup on the
-owner host. Remote controllers do not receive the App key or prompt for a local download.
+do not collect setup input. A synchronized connection can be restored non-interactively, and
+ordinary init can migrate a valid legacy key plus protected local settings under its existing
+confirmation. When required inputs are missing, non-interactive init reports how to finish setup
+on the owner host. Remote controllers do not receive the App key or prompt for a local download.
 For a fresh Hermes yard, its preset already selects `hermes github`; after creating the yard,
 plain `yard -Y hermes init` also resumes any postponed setup.
 
 The approved key setup runs before Incus provisioning can restart init in a new group session.
 If later provisioning fails, the saved App setup remains available to the next init. Invalid PEM
-contents are rejected before publishing a credential or App JSON; source permissions may already
+contents are rejected before publishing a connection; source permissions may already
 have been tightened. Setup validates the local key and config, but does not contact GitHub or mint
 a token. Verify actual installation permissions afterward with a wrapped command against an
 intended repository, as shown below.
 
 ## Manual setup and automation
 
-The owner host keeps the GitHub App configuration in `$SUBYARD_CONFIG_HOME/github-app.json` (normally `~/.config/subyard/github-app.json`). Its
-schema is:
+The `github-app-key` consumer uses zone `global` and materializes the complete connection at
+`$SUBYARD_KEYS_CONSUMER_ROOT/github/connection.json` (normally
+`~/.config/subyard/generated/github/connection.json`). It contains one coherent version of the
+identifiers and private key:
 
 ```json
 {
-  "app_id": "123456",
-  "installation_id": 12345678
+  "schema_version": 1,
+  "settings": {
+    "app_id": "123456",
+    "installation_id": 12345678
+  },
+  "private_key": "<complete RSA private-key PEM, with JSON-escaped newlines>"
 }
 ```
 
-`app_id` contains digits and `installation_id` is a positive integer. Keep the JSON as an
-operator-owned, non-symlink mode-`0600`/`0400` file. Import the downloaded PEM on the owner host
-through [yard keys](keys.md) (interactive init does these steps for you):
+`app_id` contains digits and `installation_id` is a positive integer. The example above shows the
+schema; replace the private-key placeholder with the complete PEM. Keep an import file as an
+operator-owned, non-symlink mode-`0600`/`0400` file and import it through [yard keys](keys.md):
 
 ```sh
-chmod 0600 /secure/path/github-app.pem
-yard keys import /secure/path/github-app.pem --label github-app --consumer github-app-key
+chmod 0600 /secure/path/github-connection.json
+yard keys import /secure/path/github-connection.json --label github-app --consumer github-app-key
 yard keys materialize global
 ```
 
-`yard init` initializes the encrypted ledger. The `github-app-key` consumer uses the `global` zone
-and writes `$SUBYARD_KEYS_CONSUMER_ROOT/github/github-app.pem` (normally
-`~/.config/subyard/generated/github/github-app.pem`) with mode `0600`. The broker reads this path
-automatically, including a custom consumer root. An explicit absolute `private_key_file` in the
-App JSON remains supported as an override. Import keeps the original download; remove that duplicate
-separately after verifying the consumer.
+`yard init` initializes the encrypted ledger. The broker reads the generated connection directly,
+including a custom consumer root. Import keeps the original file; remove that duplicate separately
+after verifying the consumer.
 
-The key uses the existing encrypted ledger synchronization: enroll an owner peer with
-`yard keys trust @peer`, then run `yard keys sync @peer --now`. The peer materializes the key through
-the same consumer; configure its App ID and installation ID locally. Default and Hermes yards on
-one owner share the materialized key. Use `--local-only` on import to keep a key out of peer sync.
-Plaintext keys, the App JSON and the ledger identity stay outside guest delivery, config sync,
-host mounts and backups that enter a yard. The App key never enters L1; broker commands, status,
+The whole connection uses existing encrypted ledger synchronization: enroll an owner peer with
+`yard keys trust @peer`, then run `yard keys sync @peer --now`, or let the enrolled automatic route
+sync it. The peer materializes the same App ID, installation ID and key without manual setup.
+Different broker instances using the same GitHub App installation use the same identifiers.
+Default and Hermes yards on one owner share the connection. Use `--local-only` on import to keep
+the whole connection out of peer sync. Plaintext connection files and the ledger identity stay
+outside guest delivery, config sync, host mounts and backups that enter a yard. The App key never
+enters L1; broker commands, status,
 service logs and diagnostics do not print it. A wrapped command still controls its own output.
 
-Use `yard keys list` to find the credential ID. After `yard keys rotate <id> --file <new.pem>`, run
+Existing key-only ledgers and `$SUBYARD_CONFIG_HOME/github-app.json` remain supported migration
+inputs. Ordinary `yard init` combines a valid protected local JSON and the existing key into the
+encrypted connection, preserving its credential ID and local-only scope. Repeating init does not
+publish another migration revision. After verifying a matching legacy connection, init replaces
+its local settings with the protected delegation marker `{"use_credential_settings":true}` so later
+revisions can change identifiers and key together. Invalid files or conflicting local and
+synchronized settings are preserved for explicit repair. Local absolute `private_key_file` overrides remain supported;
+their paths and transport settings are not included in the synchronized connection.
+
+Use `yard keys list` to find the credential ID. Rotating with a raw PEM keeps both identifiers;
+rotating with a complete connection JSON changes all three values together.
+After `yard keys rotate <id> --file <new.pem>`, run
 `yard keys materialize global` locally and `yard keys sync @peer --now` for peers. The broker reloads
-the key on each request. `yard keys revoke <id>` removes the local consumer; synchronize to propagate
-revocation. Missing or invalid key material makes status unconfigured and rejects new token requests.
+the complete connection on each request. `yard keys revoke <id>` removes the local consumer;
+synchronize to propagate revocation. Missing or invalid key material makes status unconfigured
+and rejects new token requests.
 Revoking a ledger entry does not revoke the key in GitHub or tokens already issued; remove the old
 App key in GitHub when retiring it. Removing peer trust cannot erase copies already received.
 Concurrent ledger conflicts retain the last verified consumer until resolved, as described in
@@ -138,7 +159,7 @@ expose token material or per-request authorization details.
 
 Disabling `github` and running `yard init` removes the profile wiring and service. Tokens already
 issued remain valid until GitHub expiry or [explicit GitHub revocation](https://docs.github.com/en/rest/apps/installations#revoke-an-installation-access-token). The owner service loads the
-protected key and configuration for each request, so replacing the key or JSON takes effect after
+protected connection for each request, so materializing a new revision takes effect on
 the next request without placing credentials in the yard.
 
 For transport failures, inspect `systemctl --user status subyard-github-<YARD>.service` on the

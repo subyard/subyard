@@ -51,11 +51,14 @@ Import accepts only a regular, non-symlink mode-`0600`/`0400` file. Preview read
 import keeps the legacy source; verify the materialized consumer and its service before separately
 removing that duplicate. Secret input otherwise comes from a silent TTY, stdin, or `--file`, never an
 argument or environment variable. The OpenClaw profile declares `staging-env`, `qa-secrets` and `qa-pool`, preserving their generated
-staging and QA paths. The GitHub profile owns `github-app-key`. That consumer requires zone `global` and materializes the PEM at
-`$SUBYARD_KEYS_CONSUMER_ROOT/github/github-app.pem` for the owner-side
-[GitHub broker](github.md); it never delivers the key into a yard. Interactive `yard init` can
-collect the App identifiers and PEM path, import this consumer and create the protected App
-settings in one confirmed setup. Broad `.codex`, `.claude` and OAuth credential paths are rejected.
+staging and QA paths. The GitHub profile owns `github-app-key`. That consumer requires zone `global`
+and materializes App ID, installation ID and PEM together at
+`$SUBYARD_KEYS_CONSUMER_ROOT/github/connection.json` for the owner-side
+[GitHub broker](github.md); it never delivers the connection into a yard. Both explicit and automatic
+sync transfer the complete connection as encrypted data. Interactive `yard init` collects the App
+identifiers and PEM path in one confirmed setup; trusted peers restore them without reentering the
+identifiers. Ordinary init also migrates a protected legacy local JSON and key-only entry while
+preserving local-only scope. Broad `.codex`, `.claude` and OAuth credential paths are rejected.
 The OpenClaw profile also excludes mutable staging-runner credentials through its shipped
 `credential_import_exclusions`: a canonical source containing both `/srv/staging/` and `/creds/`
 is rejected before any contents are read.

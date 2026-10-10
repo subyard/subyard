@@ -27,6 +27,7 @@ type initProfileSetup struct {
 	values                    map[string]any
 	runtime                   *credentialruntime.Runtime
 	key                       *credentialruntime.Prepared
+	keyBinding                string
 }
 type initProfileSet struct {
 	root        string
@@ -80,6 +81,9 @@ func (cli *CLI) prepareInitProfile(ctx context.Context, execution *initExecution
 		return nil, err
 	}
 	setup.keyPath = defaultKey
+	if schema.SyncFields {
+		return cli.prepareSyncedInitProfile(ctx, execution, arguments, setup)
+	}
 	if setup.before.Exists {
 		setup.values, err = schema.Decode(setup.before.Content)
 		if err != nil || setup.before.Identity.Mode&0o777 != 0o600 && setup.before.Identity.Mode&0o777 != 0o400 {
@@ -213,6 +217,12 @@ func (set *initProfileSet) check() error {
 	return nil
 }
 func (setup *initProfileSetup) check() error {
+	if setup.keyBinding != "" && setup.key == nil {
+		binding, err := setup.runtime.ConsumerFileBinding(setup.keyPath)
+		if err != nil || binding != setup.keyBinding {
+			return fmt.Errorf("%w: synchronized profile connection changed", domain.ErrPlanStale)
+		}
+	}
 	current, err := readInitSelectionSnapshot(setup.configHome, setup.path)
 	if err != nil {
 		return err
@@ -230,7 +240,9 @@ func (set *initProfileSet) consequences() []string {
 	for _, setup := range set.items {
 		result = append(result, "configure "+setup.definition.Name+" on this owner host")
 		for _, field := range setup.definition.Setup.Fields {
-			result = append(result, fmt.Sprintf("%s: %v", field.Label, setup.values[field.Name]))
+			if value, exists := setup.values[field.Name]; exists {
+				result = append(result, fmt.Sprintf("%s: %v", field.Label, value))
+			}
 		}
 		if setup.key != nil {
 			result = append(result, setup.key.Consequences...)
@@ -264,7 +276,28 @@ func (set *initProfileSet) apply(ctx context.Context, execution *initExecution, 
 		if err := setup.runtime.ValidateConsumerFile(schema.Consumer, schema.Zone, setup.keyPath); err != nil {
 			return fmt.Errorf("verify profile credential: %w", err)
 		}
-		if !setup.before.Exists {
+		if schema.SyncFields {
+			fields, err := setup.runtime.ConsumerSettings(schema.Consumer, schema.Zone, setup.keyPath)
+			if err != nil {
+				return err
+			}
+			if fields == nil {
+				return errors.New("legacy profile credential needs its setup identifiers before it can synchronize a complete connection")
+			}
+			if setup.before.Exists && len(setup.values) != 0 {
+				want, err := schema.SharedSettings(setup.values)
+				if err != nil || !reflect.DeepEqual(fields, want) {
+					return fmt.Errorf("%w: synchronized profile fields changed before local adoption", domain.ErrPlanStale)
+				}
+				if err := setup.check(); err != nil {
+					return err
+				}
+				if err := config.CompareAndSwapPersistentFile(setup.configHome, setup.path, setup.before, []byte("{\"use_credential_settings\":true}\n")); err != nil {
+					return err
+				}
+			}
+		}
+		if !setup.before.Exists && !schema.SyncFields {
 			payload, err := json.MarshalIndent(setup.values, "", "  ")
 			if err != nil {
 				return err
@@ -272,8 +305,10 @@ func (set *initProfileSet) apply(ctx context.Context, execution *initExecution, 
 			if err := config.CreatePersistentFile(setup.configHome, setup.path, append(payload, '\n')); err != nil {
 				return err
 			}
-		} else if err := setup.check(); err != nil {
-			return err
+		} else if !schema.SyncFields {
+			if err := setup.check(); err != nil {
+				return err
+			}
 		}
 		fmt.Fprintf(output, "  [ ok ] %s settings and credential are ready on this owner host.\n", setup.definition.Name)
 		if schema.Followup != "" {

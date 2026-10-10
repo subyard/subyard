@@ -24,6 +24,7 @@ type Consumer struct {
 	Zone        string `json:"zone"`
 	Path        string `json:"path"`
 	Format      string `json:"format"`
+	LegacyPath  string `json:"legacy_path,omitempty"`
 	StopHandler string `json:"stop_handler,omitempty"`
 }
 type ManagedPath struct {
@@ -45,6 +46,7 @@ type Setup struct {
 	Label            string   `json:"label"`
 	KeyOverrideField string   `json:"key_override_field,omitempty"`
 	Followup         string   `json:"followup"`
+	SyncFields       bool     `json:"sync_fields,omitempty"`
 }
 type Definition struct {
 	SchemaVersion              int                   `json:"schema_version"`
@@ -212,8 +214,14 @@ func (definition Definition) validate() error {
 		if strings.Contains(consumer.Path, "{zone}") && (consumer.Zone != "*" || strings.Count(consumer.Path, "{zone}") != 1 || strings.Contains(filepath.Dir(consumer.Path), "{zone}")) {
 			return errors.New("credential zone placeholder requires a wildcard zone and a filename")
 		}
-		if consumer.Format != "file" && consumer.Format != "rsa-private-key" {
+		if consumer.Format != "file" && consumer.Format != "rsa-private-key" && consumer.Format != "rsa-private-key-with-settings" {
 			return errors.New("unsupported profile credential format")
+		}
+		if consumer.Format == "rsa-private-key-with-settings" && (definition.Setup == nil || !definition.Setup.SyncFields || definition.Setup.Consumer != consumer.ID) {
+			return errors.New("credential settings require a matching synchronized setup")
+		}
+		if consumer.LegacyPath != "" && (consumer.Format != "rsa-private-key-with-settings" || !relative(consumer.LegacyPath) || strings.ContainsAny(consumer.LegacyPath, "{}") || consumer.LegacyPath == consumer.Path) {
+			return errors.New("invalid legacy credential path")
 		}
 		if consumer.StopHandler != "" {
 			if err := definition.validateExecutable(consumer.StopHandler); err != nil {
@@ -275,6 +283,9 @@ func (definition Definition) validate() error {
 		found := false
 		for _, consumer := range definition.Consumers {
 			found = found || consumer.ID == setup.Consumer && consumer.Zone == setup.Zone
+			if setup.SyncFields && consumer.ID == setup.Consumer && consumer.Format != "rsa-private-key-with-settings" {
+				return errors.New("synchronized setup requires a credential settings consumer")
+			}
 		}
 		if !found {
 			return errors.New("setup references undeclared credential consumer")

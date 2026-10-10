@@ -1,7 +1,9 @@
 package credentialruntime
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -55,9 +57,21 @@ func (runtime *Runtime) ConsumerCredentialID(ctx context.Context, consumer, zone
 // Preparation reads metadata only and also works before init creates the ledger.
 type SetupCredentialOptions struct {
 	Consumer, Zone, Label, Source string
+	Settings                      map[string]any
 }
 
 func (runtime *Runtime) PrepareSetupCredential(ctx context.Context, options SetupCredentialOptions) (Prepared, error) {
+	if options.Settings != nil {
+		owner := runtime.consumerOwners[options.Consumer]
+		if owner.Setup == nil || !owner.Setup.SyncFields {
+			return Prepared{}, errors.New("consumer does not synchronize setup fields")
+		}
+		fields, err := owner.Setup.SharedSettings(options.Settings)
+		if err != nil {
+			return Prepared{}, err
+		}
+		options.Settings = fields
+	}
 	source := options.Source
 	if err := validateClassification(options.Label, "file", options.Zone, options.Consumer); err != nil {
 		return Prepared{}, err
@@ -79,6 +93,11 @@ func (runtime *Runtime) PrepareSetupCredential(ctx context.Context, options Setu
 	}
 	if targetBefore != nil && !targetBefore.Mode().IsRegular() {
 		return Prepared{}, errors.New("profile credential consumer is not a regular file")
+	}
+	legacyPath := runtime.LegacyConsumerPath(options.Consumer)
+	legacyBefore, err := protectedFileMetadata(legacyPath)
+	if err != nil {
+		return Prepared{}, err
 	}
 	expectedRevision := ""
 	if expected != "" {
@@ -117,6 +136,10 @@ func (runtime *Runtime) PrepareSetupCredential(ctx context.Context, options Setu
 			return err
 		}
 		return runtime.withLock(ctx, func() error {
+			legacyNow, err := protectedFileMetadata(legacyPath)
+			if err != nil || legacyNow != legacyBefore {
+				return fmt.Errorf("%w: legacy profile credential changed; rerun init", domain.ErrPlanStale)
+			}
 			targetNow, err := os.Lstat(destination)
 			if targetBefore == nil {
 				if !errors.Is(err, os.ErrNotExist) {
@@ -173,9 +196,58 @@ func (runtime *Runtime) PrepareSetupCredential(ctx context.Context, options Setu
 				if err := runtime.rejectProductionPayload(payload); err != nil {
 					return err
 				}
+				if options.Settings != nil {
+					payload, _, err = runtime.withSetupSettings(options.Consumer, options.Settings, payload)
+					defer clear(payload)
+					if err != nil {
+						return err
+					}
+				}
 				current, err = runtime.add(ctx, addOptions{label: options.Label, kind: "file", zone: options.Zone, consumer: options.Consumer}, payload)
 				if err != nil {
 					return err
+				}
+			}
+			if expected != "" && options.Settings != nil {
+				scope, head, err := runtime.singleHead(ctx, current)
+				if err != nil {
+					return err
+				}
+				payload, err := runtime.decrypt(ctx, scope, head)
+				if err != nil {
+					return err
+				}
+				defer clear(payload)
+				if !bytes.HasPrefix(bytes.TrimSpace(payload), []byte("{")) {
+					localPath := ""
+					if targetBefore != nil {
+						localPath = destination
+					} else if legacyBefore.Exists {
+						localPath = legacyPath
+					}
+					if localPath != "" {
+						local, err := runtime.readConsumerFile(options.Consumer, options.Zone, localPath)
+						if err != nil {
+							return err
+						}
+						agrees := bytes.Equal(bytes.TrimSpace(local), bytes.TrimSpace(payload))
+						clear(local)
+						if !agrees {
+							return errors.New("local profile key conflicts with the ledger; existing connection was kept")
+						}
+					}
+				}
+				bundle, changed, err := runtime.withSetupSettings(options.Consumer, options.Settings, payload)
+				defer clear(bundle)
+				if err != nil {
+					return err
+				}
+				if changed {
+					spec := specFromMetadata(head)
+					spec.Parents = []string{head.RevisionID}
+					if _, err := runtime.publish(ctx, scope, spec, bundle); err != nil {
+						return err
+					}
 				}
 			}
 			scope, err := runtime.findScope(current)
@@ -185,6 +257,34 @@ func (runtime *Runtime) PrepareSetupCredential(ctx context.Context, options Setu
 			return runtime.materializeCredential(ctx, scope, current, false)
 		})
 	}), nil
+}
+
+func (runtime *Runtime) withSetupSettings(consumer string, settings map[string]any, payload []byte) ([]byte, bool, error) {
+	schema := runtime.consumerOwners[consumer].Setup
+	if !bytes.HasPrefix(bytes.TrimSpace(payload), []byte("{")) {
+		bundle, err := schema.EncodeCredentialSettings(settings, payload)
+		return bundle, true, err
+	}
+	bundle, err := schema.DecodeCredentialSettings(payload)
+	if err != nil {
+		return nil, false, err
+	}
+	want, err := schema.SharedSettings(settings)
+	if err != nil {
+		return nil, false, err
+	}
+	a, _ := json.Marshal(bundle.Settings)
+	b, _ := json.Marshal(want)
+	if !bytes.Equal(a, b) {
+		return nil, false, errors.New("local profile settings conflict with the synchronized connection; existing settings were kept")
+	}
+	return payload, false, nil
+}
+
+// ConsumerFileBinding captures only metadata for init's local settings adoption.
+func (runtime *Runtime) ConsumerFileBinding(path string) (string, error) {
+	fact, err := protectedFileMetadata(path)
+	return metadataDigest(fact), err
 }
 
 func inspectSetupSource(path string) (os.FileInfo, error) {
@@ -230,6 +330,15 @@ func (runtime *Runtime) validateConsumerPayload(id string, payload []byte) error
 			continue
 		}
 		switch consumer.Format {
+		case "rsa-private-key-with-settings":
+			if !bytes.HasPrefix(bytes.TrimSpace(payload), []byte("{")) {
+				return credential.ValidateRSAPrivateKey(payload)
+			}
+			bundle, err := runtime.consumerOwners[id].Setup.DecodeCredentialSettings(payload)
+			if err != nil {
+				return err
+			}
+			return credential.ValidateRSAPrivateKey([]byte(bundle.PrivateKey))
 		case "rsa-private-key":
 			return credential.ValidateRSAPrivateKey(payload)
 		case "file":
@@ -241,40 +350,156 @@ func (runtime *Runtime) validateConsumerPayload(id string, payload []byte) error
 	return nil
 }
 
+func (runtime *Runtime) preserveCredentialSettings(ctx context.Context, scope ledgerScope, head domain.CredentialMetadata, replacement []byte) ([]byte, error) {
+	owner := runtime.consumerOwners[head.Consumer]
+	if owner.Setup == nil || !owner.Setup.SyncFields || bytes.HasPrefix(bytes.TrimSpace(replacement), []byte("{")) {
+		return replacement, nil
+	}
+	previous, err := runtime.decrypt(ctx, scope, head)
+	if err != nil {
+		return nil, err
+	}
+	defer clear(previous)
+	if !bytes.HasPrefix(bytes.TrimSpace(previous), []byte("{")) {
+		return replacement, nil
+	}
+	bundle, err := owner.Setup.DecodeCredentialSettings(previous)
+	if err != nil {
+		return nil, err
+	}
+	return owner.Setup.EncodeCredentialSettings(bundle.Settings, replacement)
+}
+
+// Selecting or rotating a legacy key retains fields only when active bundle
+// heads agree. Choosing a complete bundle explicitly selects its entire value.
+func (runtime *Runtime) preserveResolvedSettings(ctx context.Context, scope ledgerScope, heads []domain.CredentialMetadata, replacement []byte) ([]byte, error) {
+	if bytes.HasPrefix(bytes.TrimSpace(replacement), []byte("{")) {
+		return replacement, nil
+	}
+	var preserved []byte
+	for _, head := range heads {
+		if head.State != "active" {
+			continue
+		}
+		next, err := runtime.preserveCredentialSettings(ctx, scope, head, replacement)
+		if err != nil {
+			clear(preserved)
+			return nil, err
+		}
+		if bytes.Equal(next, replacement) {
+			continue
+		}
+		if preserved != nil && !bytes.Equal(preserved, next) {
+			clear(next)
+			clear(preserved)
+			return nil, errors.New("conflicting connection fields require choosing or supplying a complete bundle")
+		}
+		if preserved == nil {
+			preserved = next
+		} else {
+			clear(next)
+		}
+	}
+	if preserved == nil {
+		return replacement, nil
+	}
+	return preserved, nil
+}
+
 // ValidateConsumerFile checks a protected, pinned file against its declared format.
 // It does not return file contents or permit undeclared consumers.
 func (runtime *Runtime) ValidateConsumerFile(consumer, zone, path string) error {
-	if _, err := runtime.ConsumerPath(consumer, zone); err != nil {
+	payload, err := runtime.readConsumerFile(consumer, zone, path)
+	defer clear(payload)
+	return err
+}
+
+// ConsumerSettings returns only declared fields from an atomically materialized bundle.
+// A legacy PEM has no shared fields yet.
+func (runtime *Runtime) ConsumerSettings(consumer, zone, path string) (map[string]any, error) {
+	payload, err := runtime.readConsumerFile(consumer, zone, path)
+	defer clear(payload)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.HasPrefix(bytes.TrimSpace(payload), []byte("{")) {
+		return nil, nil
+	}
+	owner := runtime.consumerOwners[consumer]
+	if owner.Setup == nil || !owner.Setup.SyncFields {
+		return nil, nil
+	}
+	bundle, err := owner.Setup.DecodeCredentialSettings(payload)
+	return bundle.Settings, err
+}
+
+func (runtime *Runtime) LegacyConsumerPath(consumer string) string {
+	for _, item := range runtime.consumers {
+		if item.ID == consumer && item.LegacyPath != "" {
+			return filepath.Join(runtime.config.ConsumerRoot, item.LegacyPath)
+		}
+	}
+	return ""
+}
+
+func (runtime *Runtime) removeLegacyConsumer(consumer, zone string) error {
+	path := runtime.LegacyConsumerPath(consumer)
+	if path == "" {
+		return nil
+	}
+	before, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
 		return err
 	}
+	if err := runtime.ValidateConsumerFile(consumer, zone, path); err != nil {
+		return err
+	}
+	now, err := os.Lstat(path)
+	if err != nil || !sameSetupSource(before, now) {
+		return fmt.Errorf("%w: legacy credential changed during migration", domain.ErrPlanStale)
+	}
+	return os.Remove(path)
+}
+
+func (runtime *Runtime) readConsumerFile(consumer, zone, path string) ([]byte, error) {
+	if _, err := runtime.ConsumerPath(consumer, zone); err != nil {
+		return nil, err
+	}
 	if !filepath.IsAbs(path) || strings.ContainsAny(path, "\r\n\x00") {
-		return errors.New("credential file path is invalid")
+		return nil, errors.New("credential file path is invalid")
 	}
 	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
 	if err != nil {
-		return errors.New("cannot open protected credential file")
+		return nil, errors.New("cannot open protected credential file")
 	}
 	file := os.NewFile(uintptr(fd), path)
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() {
-		return errors.New("credential file must be regular")
+		return nil, errors.New("credential file must be regular")
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Uid != uint32(os.Geteuid()) || stat.Nlink != 1 || (info.Mode().Perm() != 0o600 && info.Mode().Perm() != 0o400) {
-		return errors.New("credential file ownership or permissions are unsafe")
+		return nil, errors.New("credential file ownership or permissions are unsafe")
 	}
 	if info.Size() <= 0 || info.Size() > maximumPayload {
-		return errors.New("credential file has an invalid size")
+		return nil, errors.New("credential file has an invalid size")
 	}
 	payload, err := io.ReadAll(io.LimitReader(file, maximumPayload+1))
-	defer clear(payload)
 	if err != nil || len(payload) == 0 || len(payload) > maximumPayload {
-		return errors.New("cannot read bounded credential file")
+		clear(payload)
+		return nil, errors.New("cannot read bounded credential file")
 	}
 	now, err := file.Stat()
 	if err != nil || !sameSetupSource(info, now) {
-		return errors.New("credential file changed during validation")
+		clear(payload)
+		return nil, errors.New("credential file changed during validation")
 	}
-	return runtime.validateConsumerPayload(consumer, payload)
+	if err := runtime.validateConsumerPayload(consumer, payload); err != nil {
+		clear(payload)
+		return nil, err
+	}
+	return payload, nil
 }

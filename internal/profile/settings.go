@@ -32,6 +32,9 @@ func (setup Setup) Decode(data []byte) (map[string]any, error) {
 	if decoder.Decode(&values) != nil || decoder.Decode(new(any)) != io.EOF {
 		return nil, errors.New("invalid profile settings JSON")
 	}
+	if setup.SyncFields && values["use_credential_settings"] == true && len(values) == 1 {
+		return values, nil
+	}
 	allowed := map[string]bool{}
 	for _, field := range setup.Fields {
 		allowed[field.Name] = true

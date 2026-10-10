@@ -143,13 +143,19 @@ func New(config Config) (*Runtime, error) {
 			if strings.Contains(reservedPath, "{zone}") {
 				reservedPath = filepath.Dir(reservedPath)
 			}
-			for _, path := range consumerPaths {
-				if pathWithin(reservedPath, path) || pathWithin(path, reservedPath) {
-					return nil, errors.New("credential consumer materialization paths overlap")
+			paths := []string{reservedPath}
+			if consumer.LegacyPath != "" {
+				paths = append(paths, consumer.LegacyPath)
+			}
+			for _, reserved := range paths {
+				for _, path := range consumerPaths {
+					if pathWithin(reserved, path) || pathWithin(path, reserved) {
+						return nil, errors.New("credential consumer materialization paths overlap")
+					}
 				}
+				consumerPaths = append(consumerPaths, reserved)
 			}
 			consumerIDs[consumer.ID] = true
-			consumerPaths = append(consumerPaths, reservedPath)
 			runtime.consumers = append(runtime.consumers, consumer)
 			runtime.consumerOwners[consumer.ID] = definition
 		}
