@@ -21,15 +21,18 @@ window = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(window)
 BASE = "import os,signal,sys,time,resource; resource.setrlimit(resource.RLIMIT_CORE,(0,0)); "
 GRACEFUL = "signal.signal(signal.SIGTERM,lambda *_: sys.exit(0)); "
-MARKER = "print('DEBUG: Server connected',flush=True); "
+CONNECTED = "print('DEBUG: Server connected',flush=True); "
+FRAME = "print('INFO: Texture: 320x640',flush=True); "
+MARKER = CONNECTED + FRAME
 
 
 class WindowTest(unittest.TestCase):
-    def run_child(self, body, seconds=0.12, shutdown=0.12, args=()):
+    def run_child(self, body, seconds=0.12, shutdown=0.12, args=(), startup=None):
         output = io.StringIO()
         start = time.monotonic()
         with contextlib.redirect_stdout(output):
-            code = window.run([sys.executable, '-I', '-B', '-c', BASE + body, *args], seconds, shutdown)
+            options = {} if startup is None else {'startup_seconds': startup}
+            code = window.run([sys.executable, '-I', '-B', '-c', BASE + body, *args], seconds, shutdown, **options)
         lines = output.getvalue().splitlines()
         evidence = json.loads(lines[-1].removeprefix('scrcpy-view-window '))
         self.assertEqual(code, evidence['wrapper_status'])
@@ -37,15 +40,38 @@ class WindowTest(unittest.TestCase):
         return code, evidence, lines, time.monotonic() - start
 
     def test_exact_marker_graceful(self):
-        code, value, lines, elapsed = self.run_child("assert sys.stdout.isatty() and sys.stderr.isatty() and not sys.stdin.isatty(); " + GRACEFUL + MARKER + "print('INFO: Texture: 320x640',flush=True); time.sleep(10)")
+        code, value, lines, elapsed = self.run_child("assert sys.stdout.isatty() and sys.stderr.isatty() and not sys.stdin.isatty(); " + GRACEFUL + MARKER + "time.sleep(10)")
         self.assertEqual((code,value['native_returncode'],value['window_completed']), (0,0,True))
         self.assertIn('INFO: Texture: 320x640', lines)
         self.assertGreaterEqual(elapsed, 0.12)
 
     def test_fragmented_delayed_marker(self):
-        code, value, _, elapsed = self.run_child(GRACEFUL + "time.sleep(.1); os.write(1,b'DEBUG: Server '); time.sleep(.08); os.write(1,b'connected\\n'); time.sleep(10)")
+        code, value, _, elapsed = self.run_child(GRACEFUL + "time.sleep(.1); os.write(1,b'DEBUG: Server '); time.sleep(.08); os.write(1,b'connected\\n'); " + FRAME + "time.sleep(10)")
         self.assertEqual(code, 0)
         self.assertGreaterEqual(elapsed, .3)
+
+    def test_delayed_first_frame_starts_observation_window(self):
+        # Connection can precede a cold decoder's first frame by more than the window.
+        code, value, lines, elapsed = self.run_child(GRACEFUL + CONNECTED + "time.sleep(.3); " + FRAME + "time.sleep(10)")
+        self.assertEqual((code,value['native_returncode'],value['window_completed']), (0,0,True))
+        self.assertIn('INFO: Texture: 320x640', lines)
+        self.assertGreaterEqual(elapsed, .42)
+
+    def test_no_first_frame_is_bounded_without_completed_window(self):
+        code, value, _, elapsed = self.run_child(GRACEFUL + CONNECTED + 'time.sleep(10)', startup=.12)
+        self.assertEqual((code,value['native_returncode'],value['window_completed']), (124,0,False))
+        self.assertLess(elapsed, 2)
+
+    def test_exit_tail_preserves_safe_lines_and_native_status(self):
+        original_waitid = os.waitid
+        def exited_before_read(kind, pid, flags):
+            return original_waitid(kind, pid, os.WEXITED | os.WNOWAIT)
+        for ending, status, native in [('pass',1,0), ('sys.exit(7)',7,7), ('os.kill(os.getpid(),signal.SIGSEGV)',139,-11)]:
+            with self.subTest(native=native), mock.patch.object(window.os, 'waitid', side_effect=exited_before_read):
+                code, value, lines, _ = self.run_child(FRAME + "print('private-sentinel',flush=True); " + ending)
+                self.assertEqual((code,value['native_returncode'],value['window_completed']), (status,native,False))
+                self.assertIn('INFO: Texture: 320x640', lines)
+                self.assertNotIn('private-sentinel', '\n'.join(lines))
 
     def test_no_marker_and_early_zero_fail(self):
         for body in ("pass", MARKER + 'pass', "print('prefix DEBUG: Server connected',flush=True)", "print('DEBUG: Server connected\\r',flush=True)"):
@@ -122,7 +148,7 @@ class WindowTest(unittest.TestCase):
         code, value, lines, elapsed = self.run_child(body)
         self.assertEqual(code, 0)
         self.assertLess(elapsed, 2)
-        self.assertEqual(lines[:-1], ['[server] ERROR: Capture/encoding error: classified', 'DEBUG: Server connected'])
+        self.assertEqual(lines[:-1], ['[server] ERROR: Capture/encoding error: classified', 'DEBUG: Server connected', 'INFO: Texture: 320x640'])
         self.assertNotIn('SECRET', '\n'.join(lines))
         self.assertNotIn('private-value', '\n'.join(lines))
 

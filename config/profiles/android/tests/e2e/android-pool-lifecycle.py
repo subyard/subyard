@@ -179,29 +179,23 @@ def require_sdk(lease, api):
     if not identity_ok(lease, api, observed):
         identity_diagnostic(lease, api, observed)
         raise Failure('unexpected Android API, ABI or image revision')
-def require_sdk_pair(phone, tablet):
-    checks = [(phone, 35, identity(phone)), (tablet, 36, identity(tablet))]
-    if not all(identity_ok(lease, api, observed) for lease, api, observed in checks):
-        for lease, api, observed in checks:
-            identity_diagnostic(lease, api, observed)
-        raise Failure('concurrent Android API, ABI or image revision mismatch')
+def require_image_and_preset(lease, api, size, density):
+    require_sdk(lease, api)
     result = call([EMU, 'catalog'])
     if result.returncode != 0:
         raise Failure('catalog unavailable while validating allocations')
     images = json.loads(result.stdout)['images']
-    for lease, api, size, density in ((phone, 35, '1080x1920', '420'),
-                                       (tablet, 36, '800x1280', '160')):
-        allocation = lease['allocation']
-        request = allocation['request']
-        if not any(image['api'] == api and image['variant'] == request['variant']
-                   and image['abi'] == request['abi']
-                   and image['revision'] == allocation['image_revision'] and image['cached']
-                   for image in images):
-            raise Failure('allocation image differs from prepared catalog revision')
-        if (adb(lease, 'shell', 'wm', 'size') != 'Physical size: ' + size or
-                adb(lease, 'shell', 'wm', 'density') != 'Physical density: ' + density):
-            raise Failure('live device dimensions or density differ from preset')
-    phase('both APIs, image revisions and physical presets verified')
+    allocation = lease['allocation']
+    request = allocation['request']
+    if not any(image['api'] == api and image['variant'] == request['variant']
+               and image['abi'] == request['abi']
+               and image['revision'] == allocation['image_revision'] and image['cached']
+               for image in images):
+        raise Failure('allocation image differs from prepared catalog revision')
+    if (adb(lease, 'shell', 'wm', 'size') != 'Physical size: ' + size or
+            adb(lease, 'shell', 'wm', 'density') != 'Physical density: ' + density):
+        raise Failure('live device dimensions or density differ from preset')
+    phase(f'API{api}, image revision and physical preset verified')
 def observe_network(lease, context='failure'):
     # Only fixed enums and a validated PID leave the guest; never addresses, headers or stderr.
     fields = dict(boot='unknown', framework='unknown', wifi_service='unknown',
@@ -318,18 +312,6 @@ def require_network_and_renderer(lease):
     if not re.search(r'SwiftShader|llvmpipe|lavapipe', renderer, re.I):
         raise Failure('software renderer was not reported by SurfaceFlinger')
     phase('DNS/TCP egress and software renderer verified')
-def require_busy(directory):
-    path = directory / "third.json"
-    result = call([EMU, "acquire", "--device", "phone", "--api", "34", "--wait", "0",
-                   "--lease-file", str(path)], timeout=30)
-    if result.returncode != 3 or not result.stderr.startswith("Android busy:") or path.exists():
-        raise Failure("third allocation was not busy")
-    started = time.monotonic()
-    result = call([EMU, "acquire", "--api", "35", "--wait", "1", "--lease-file", str(path)], timeout=30)
-    if result.returncode != 4 or not result.stderr.startswith("Android timeout:") or path.exists():
-        raise Failure("busy wait did not time out")
-    if time.monotonic() - started > 10:
-        raise Failure("busy wait exceeded its bound")
 def idle_display(lease):
     # Keep the lease and Android running while its unused software-rendered display sleeps.
     phase('idle display sleep input')
@@ -472,7 +454,7 @@ def require_phone_reuse(leases, directory, phone_path, phone, api, name):
     require_sdk(new_phone, api); leases.check()
     return new_path, new_phone
 
-def memory_lease():
+def memory_lease(*, yard_host=False):
     """One natural expiry window proves a killed run wrapper cannot be kept alive by its child."""
     process = None
     child_pid = None
@@ -514,10 +496,12 @@ def memory_lease():
             allocation = selected()
             if allocation['state'] != 'held' or allocation['owner']['purpose'] != purpose:
                 raise Failure('run allocation attribution differs')
-            unit = f'subyard-android-slot-{command["slot"]}-{command["generation"]}.service'
-            cgroup = call(['systemctl', 'show', unit, '-p', 'ControlGroup', '--value'])
-            if cgroup.returncode or cgroup.stdout.strip() != '/system.slice/' + unit:
-                raise Failure('runtime is not outside the broker service memory ceiling')
+            # L2 uses the broker facade; full recovery checks placement on the yard host.
+            if yard_host:
+                unit = f'subyard-android-slot-{command["slot"]}-{command["generation"]}.service'
+                cgroup = call(['systemctl', 'show', unit, '-p', 'ControlGroup', '--value'])
+                if cgroup.returncode or cgroup.stdout.strip() != '/system.slice/' + unit:
+                    raise Failure('runtime is not outside the broker service memory ceiling')
             allocation['android_serial'] = 'emulator-5554'
             lease = dict(endpoint=command['endpoint'], allocation=allocation)
             retained_marker = '/data/local/tmp/subyard-owner-death-marker'
@@ -597,7 +581,7 @@ def main():
         raise Failure("must run as the unprivileged yard user")
     if sys.argv[1:] == ['--lane', 'memory-lease']:
         try:
-            return memory_lease()
+            return memory_lease(yard_host=True)
         except Exception as exc:
             detail = str(exc) if isinstance(exc, Failure) else type(exc).__name__
             print(f'android memory lease: FAIL: {detail}', file=sys.stderr)
@@ -614,11 +598,7 @@ def main():
                 step = "acquire default phone"; phone_path, phone = acquire(directory, "phone-old"); leases.add(phone_path)
                 step = 'network and renderer'; require_network_and_renderer(phone)
                 step = 'idle phone display'; idle_display(phone)
-                step = "primary phone SDK"; require_sdk(phone, 36)
-                step = "primary phone preset"
-                if (adb(phone, "shell", "wm", "size") != "Physical size: 1080x1920" or
-                        adb(phone, "shell", "wm", "density") != "Physical density: 420"):
-                    raise Failure("default phone dimensions or density differ from preset")
+                step = "primary phone SDK and preset"; require_image_and_preset(phone, 36, '1080x1920', '420')
                 step = "explicit renew"
                 if call([EMU, "renew", "--lease-file", str(phone_path)], timeout=30).returncode != 0:
                     raise Failure("explicit renew failed")
@@ -632,31 +612,25 @@ def main():
 
                 phase("acquire compatibility phone API 35")
                 step = "acquire compatibility phone"; compat_path, compat_phone = acquire(directory, "phone-compat", "phone", 35); leases.add(compat_path)
-                step = "compatibility phone SDK"; require_sdk(compat_phone, 35)
+                step = "compatibility phone SDK and preset"; require_image_and_preset(compat_phone, 35, '1080x1920', '420')
                 step = "compatibility phone network and renderer"; require_network_and_renderer(compat_phone)
                 step = "idle compatibility phone display"; idle_display(compat_phone)
-                phase("acquire tablet")
-                step = "acquire tablet"; tablet_path, tablet = acquire(directory, "tablet", "tablet", 36); leases.add(tablet_path)
-                if (compat_phone['endpoint'] == tablet['endpoint'] or
-                        compat_phone['allocation']['slot_id'] == tablet['allocation']['slot_id']):
-                    raise Failure('concurrent leases share an endpoint or slot')
-                phase("verify concurrent leases")
-                step = "initial ADB"; require_sdk_pair(compat_phone, tablet); leases.check()
-                step = "tablet network and renderer"; require_network_and_renderer(tablet)
-                phase("verify busy and renew")
-                step = "busy allocation"; require_busy(directory)
                 step = "explicit renew"
                 if call([EMU, "renew", "--lease-file", str(compat_path)], timeout=30).returncode != 0:
                     raise Failure("explicit renew failed")
-                step = "cache protection"; require_prune_protection(); leases.check()
+                step = "compatibility cache protection"; require_prune_protection((35,)); leases.check()
+                step = "compatibility phone reuse"
+                compat_new_path, _ = require_phone_reuse(leases, directory, compat_path, compat_phone, 35, "phone-compat-new")
+                leases.release(compat_new_path)
+                phase("acquire tablet after phone release")
+                step = "acquire tablet"; tablet_path, tablet = acquire(directory, "tablet", "tablet", 36); leases.add(tablet_path)
+                step = "tablet SDK and preset"; require_image_and_preset(tablet, 36, '800x1280', '160')
+                step = "tablet network and renderer"; require_network_and_renderer(tablet)
+                step = "tablet cache protection"; require_prune_protection((36,)); leases.check()
                 step = 'idle tablet display'; idle_display(tablet)
-                step = "compatibility phone reuse with held tablet"
-                compat_new_path, compat_new = require_phone_reuse(leases, directory, compat_path, compat_phone, 35, "phone-compat-new")
-                if slot_status(tablet["allocation"]["slot_id"], tablet["allocation"]["generation"]) != "held":
-                    raise Failure("tablet lease changed during phone reuse")
-                require_sdk(tablet, 36); leases.check()
-                phase("release concurrent leases")
-                step = "release concurrent leases"; leases.release(compat_new_path); leases.release(tablet_path)
+                step = "release tablet"; leases.release(tablet_path); require_stale(tablet_path)
+                require_adb_unusable(tablet)
+                phase("phone/tablet APIs and presets verified sequentially; simultaneous isolation not exercised")
                 print("android pool lifecycle: PASS")
                 return 0
             finally:

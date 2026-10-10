@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -201,6 +202,56 @@ func TestSourceStableActivationScopeExcludesActualSourceMutations(t *testing.T) 
 				}
 			})
 		}
+	}
+}
+
+func TestCheckpointPublicationPreservesMigratingSourceScope(t *testing.T) {
+	for _, interrupt := range []bool{false, true} {
+		t.Run(map[bool]string{false: "complete", true: "resume"}[interrupt], func(t *testing.T) {
+			owner := &sourceScopeReconciler{}
+			transition := sourceScopeTransitionFixture(t, owner)
+			testkit.WriteFile(t, filepath.Join(transition.options.ConfigHome, "yards", "hermes", "config.env"),
+				[]byte("YARD_TEMPLATE=e2e-vms\nNESTED_E2E_VMS=0\nSSH_PORT=2224\n"), 0o600)
+			transition.options.MigrationCheckpoint = true
+			if interrupt {
+				transition.options.fault = func(point string) error {
+					if point == "before-checkpoint-publication" {
+						return errors.New("interrupt terminal checkpoint")
+					}
+					return nil
+				}
+			}
+			goal := Goal{Target: "release-b", Direction: DirectionActivateTarget}
+			inspection, err := transition.Inspect(context.Background(), goal)
+			if err != nil || len(inspection.Blockers) != 0 || owner.wide {
+				t.Fatalf("source migration assessment: %#v wide=%t err=%v", inspection, owner.wide, err)
+			}
+			outcome, err := transition.Converge(context.Background(), Execution{
+				Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
+			})
+			if interrupt {
+				if err != nil || outcome.Status != StatusRecovering {
+					t.Fatalf("checkpoint interruption: %#v err=%v", outcome, err)
+				}
+				transition = freshSourceScopeOwner(t, transition, &sourceScopeReconciler{converged: true})
+				inspection, err = transition.Inspect(context.Background(), goal)
+				if err != nil || inspection.Resume == nil || len(inspection.Blockers) != 0 {
+					t.Fatalf("checkpoint resume: %#v err=%v", inspection, err)
+				}
+				outcome, err = transition.Converge(context.Background(), Execution{Plan: inspection.Plan})
+			}
+			if err != nil || outcome.Status != StatusReady {
+				t.Fatalf("checkpoint completion: %#v err=%v", outcome, err)
+			}
+			checkpoint, err := transition.store.ReadMigrationCheckpoint()
+			if err != nil || !checkpoint.Exists {
+				t.Fatalf("authorized checkpoint missing: %#v err=%v", checkpoint, err)
+			}
+			final, err := transition.Inspect(context.Background(), goal)
+			if err != nil || final.Outcome.Status != StatusReady || final.Assessment.Changed {
+				t.Fatalf("completed release-wide fixed point: %#v err=%v", final, err)
+			}
+		})
 	}
 }
 

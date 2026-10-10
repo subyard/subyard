@@ -2,6 +2,7 @@ package releasetransition
 
 import (
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 )
@@ -64,17 +65,25 @@ type RecoveryReceiptV1 struct {
 	NativePlans   []RecoveryNativePlan          `json:"nativePlans"`
 	BasePlan      PlanToken                     `json:"basePlan,omitempty"`
 	Reservation   Fingerprint                   `json:"reservation,omitempty"`
+	Generation    uint64                        `json:"generation,omitempty"`
 }
 
 func (receipt RecoveryReceiptV1) Validate() error {
 	prefix := RecoveryTransactionPrefixV1
 	if receipt.Contract == ActivationOnlyRecoveryContractV2 && receipt.SchemaVersion == RecoveryReceiptSchemaV2 {
 		prefix = RecoveryTransactionPrefixV2
+		if receipt.Generation == 0 {
+			return invalid("generationless prerelease recovery V2 requires its exact verified draft owner to resume; preserve the original journal and receipt")
+		}
+		transaction, err := RecoveryLifecycleTransaction(receipt.Replacement, receipt.Generation)
+		if err != nil || transaction != receipt.Successor.Transaction {
+			return invalid("recovery lifecycle successor does not bind its generation")
+		}
 		bound, err := BindRecoveryLifecyclePlan(receipt.BasePlan, receipt.Reservation)
 		if err != nil || bound != receipt.Successor.AuthorizationPlan {
 			return invalid("recovery receipt does not bind its assessed reservation")
 		}
-	} else if receipt.SchemaVersion != RecoveryReceiptSchemaV1 || receipt.Contract != ActivationOnlyRecoveryContractV1 || receipt.BasePlan != "" || receipt.Reservation != "" {
+	} else if receipt.SchemaVersion != RecoveryReceiptSchemaV1 || receipt.Contract != ActivationOnlyRecoveryContractV1 || receipt.BasePlan != "" || receipt.Reservation != "" || receipt.Generation != 0 {
 		return invalid("unsupported activation recovery receipt contract")
 	}
 	if err := receipt.Replacement.Validate(); err != nil {
@@ -144,6 +153,75 @@ func (receipt RecoveryReceiptV1) Validate() error {
 	return nil
 }
 
+// The generation is part of the opaque V2 transaction identity. A compacted
+// cancelled generation cannot be republished while its predecessor is selectable.
+func RecoveryLifecycleTransaction(request ActivationOnlyRecoveryRequest, generation uint64) (TransactionID, error) {
+	if err := request.Validate(); err != nil {
+		return "", err
+	}
+	if generation == 0 {
+		return "", invalid("recovery lifecycle generation must be positive")
+	}
+	return TransactionID(fmt.Sprintf("%s%s-%x", RecoveryTransactionPrefixV2, request.Fingerprint, generation)), nil
+}
+
+// RecoveryFrontier is the single bounded mutable state for one predecessor.
+// Cancellation is the latest full durable witness, not an authorization for
+// new desired inputs. Earlier cancelled identities are excluded by Generation.
+type RecoveryFrontier struct {
+	SchemaVersion int                           `json:"schemaVersion"`
+	Replacement   ActivationOnlyRecoveryRequest `json:"replacement"`
+	Generation    uint64                        `json:"generation"`
+	Cancellation  *RecoveryLifecycleRecord      `json:"cancellation,omitempty"`
+}
+
+func (frontier RecoveryFrontier) Validate() error {
+	if frontier.SchemaVersion != RecoveryLifecycleSchemaV1 || frontier.Generation == 0 {
+		return invalid("invalid recovery lifecycle frontier")
+	}
+	if err := frontier.Replacement.Validate(); err != nil {
+		return err
+	}
+	if frontier.Generation == 1 {
+		if frontier.Cancellation != nil {
+			return invalid("initial recovery frontier cannot have a cancellation")
+		}
+		return nil
+	}
+	terminal := frontier.Cancellation
+	if terminal == nil || terminal.Cancellation == nil || terminal.Receipt.Generation != frontier.Generation-1 || terminal.Receipt.Replacement != frontier.Replacement {
+		return invalid("recovery frontier does not bind its preceding cancelled generation")
+	}
+	return terminal.Validate()
+}
+
+func (frontier RecoveryFrontier) Reservation() Fingerprint {
+	if frontier.Cancellation == nil {
+		return ""
+	}
+	return fingerprintPayload(mustRecoveryReceiptPayload(frontier.Cancellation.Receipt))
+}
+
+func ParseRecoveryFrontier(payload []byte) (RecoveryFrontier, error) {
+	var frontier RecoveryFrontier
+	if err := decodeBoundedRecord(payload, MaxProtectedRecordBytes, &frontier); err != nil {
+		return frontier, err
+	}
+	return frontier, frontier.Validate()
+}
+
+func MarshalRecoveryFrontier(frontier RecoveryFrontier) ([]byte, error) {
+	if err := frontier.Validate(); err != nil {
+		return nil, err
+	}
+	payload, err := json.Marshal(frontier)
+	if err != nil {
+		return nil, err
+	}
+	payload = append(payload, '\n')
+	return payload, validateProtectedPayload(payload)
+}
+
 func IsRecoveryTransaction(transaction TransactionID) bool {
 	return strings.HasPrefix(string(transaction), RecoveryTransactionPrefixV1) || strings.HasPrefix(string(transaction), RecoveryTransactionPrefixV2)
 }
@@ -181,14 +259,21 @@ type RecoveryCancellation struct {
 // publication, and only a completed witness or proven pre-CAS cancellation
 // allows the live record to retire.
 type RecoveryLifecycleRecord struct {
-	SchemaVersion int                   `json:"schemaVersion"`
-	Receipt       RecoveryReceiptV1     `json:"receipt"`
-	Completed     *JournalRecord        `json:"completed,omitempty"`
-	Cancellation  *RecoveryCancellation `json:"cancellation,omitempty"`
+	SchemaVersion        int                   `json:"schemaVersion"`
+	Receipt              RecoveryReceiptV1     `json:"receipt"`
+	Completed            *JournalRecord        `json:"completed,omitempty"`
+	Cancellation         *RecoveryCancellation `json:"cancellation,omitempty"`
+	PredecessorCompleted *JournalRecord        `json:"predecessorCompleted,omitempty"`
 }
 
 func (record RecoveryLifecycleRecord) Validate() error {
-	if record.SchemaVersion != RecoveryLifecycleSchemaV1 || (record.Completed == nil) == (record.Cancellation == nil) {
+	kinds := 0
+	for _, present := range []bool{record.Completed != nil, record.Cancellation != nil, record.PredecessorCompleted != nil} {
+		if present {
+			kinds++
+		}
+	}
+	if record.SchemaVersion != RecoveryLifecycleSchemaV1 || kinds != 1 {
 		return invalid("invalid recovery lifecycle record")
 	}
 	if err := record.Receipt.Validate(); err != nil {
@@ -199,6 +284,25 @@ func (record RecoveryLifecycleRecord) Validate() error {
 			return invalid("recovery completion witness is not complete")
 		}
 		return record.Receipt.MatchesSuccessor(*record.Completed)
+	}
+	if record.PredecessorCompleted != nil {
+		current := *record.PredecessorCompleted
+		if err := current.Validate(); err != nil {
+			return err
+		}
+		if current.Checkpoint != JournalComplete {
+			return invalid("recovery predecessor closure witness is not complete")
+		}
+		current.Checkpoint = record.Receipt.Predecessor.Checkpoint
+		want, err := MarshalJournal(record.Receipt.Predecessor)
+		if err != nil {
+			return err
+		}
+		got, err := MarshalJournal(current)
+		if err != nil || !slices.Equal(got, want) {
+			return invalid("recovery predecessor closure witness differs from the exact original journal")
+		}
+		return nil
 	}
 	cancellation := record.Cancellation
 	payload, err := MarshalRecoveryReceipt(record.Receipt)
@@ -263,6 +367,17 @@ func ParseRecoveryReceipt(payload []byte) (RecoveryReceiptV1, error) {
 	var receipt RecoveryReceiptV1
 	if err := decodeBoundedRecord(payload, MaxProtectedRecordBytes, &receipt); err != nil {
 		return RecoveryReceiptV1{}, err
+	}
+	if receipt.SchemaVersion == RecoveryReceiptSchemaV1 {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(payload, &fields); err != nil {
+			return RecoveryReceiptV1{}, err
+		}
+		for _, name := range []string{"basePlan", "reservation", "generation"} {
+			if _, exists := fields[name]; exists {
+				return RecoveryReceiptV1{}, invalid("recovery V1 receipt contains lifecycle fields")
+			}
+		}
 	}
 	return receipt, receipt.Validate()
 }

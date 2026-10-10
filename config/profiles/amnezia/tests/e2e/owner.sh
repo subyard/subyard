@@ -344,7 +344,7 @@ PYPRIORITY
     [ "$(systemctl show incus.service -p CPUQuotaPerSecUSec --value)" = infinity ] \
       || die 'CPU ceiling fixture requires an initially unlimited Incus service'
     yard stop --yes
-    trap 'sudo -n systemctl set-property --runtime incus.service CPUQuota=infinity >/dev/null 2>&1 || true' EXIT
+    trap 'sudo -n systemctl set-property --runtime incus.service CPUQuota= >/dev/null 2>&1 || true' EXIT
     sudo -n systemctl set-property --runtime incus.service CPUQuota=50%
     diagnostic="$fixture/priority-ceiling.log"
     install -m 0600 /dev/null "$diagnostic"
@@ -356,7 +356,9 @@ PYPRIORITY
       || die 'rejected startup changed managed power intent'
     incus list yard-work-e2e --project subyard-work-e2e --format csv -c s \
       | grep -Fxq RUNNING || die 'VM scheduling refusal stopped the ordinary yard'
-    sudo -n systemctl set-property --runtime incus.service CPUQuota=infinity
+    sudo -n systemctl set-property --runtime incus.service CPUQuota=
+    [ "$(systemctl show incus.service -p CPUQuotaPerSecUSec --value)" = infinity ] \
+      || die 'Incus CPU ceiling was not restored'
     trap - EXIT
     yard start --yes
     verify_enabled
@@ -471,7 +473,7 @@ PYPRIORITY
     yard start --yes
     verify_enabled
     verify_cpu_policy
-    incus restart yard-vpn-e2e --project subyard-vpn-e2e --timeout 120
+    restart_vpn_guest
     # Direct Incus starts bypass product scheduling; public init restores it.
     yard init --yes
     verify_enabled

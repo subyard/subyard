@@ -14,6 +14,7 @@ import (
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
@@ -55,6 +56,7 @@ type networkCLIHost struct {
 	writes      int
 	ready       bool
 	allowWrites bool
+	instances   map[string]ports.InstanceInfo
 }
 
 func (h *networkCLIHost) ReadPolicy(context.Context) (yardnetwork.StoredPolicy, error) {
@@ -69,6 +71,7 @@ func (h *networkCLIHost) InspectNetwork(_ context.Context, yards []yardnetwork.Y
 	}
 	for _, y := range yards {
 		observed := yardnetwork.ObservedYard{Yard: y}
+		observed.InstanceInfo, observed.InstanceFound = h.instances[y.Name]
 		if h.ready {
 			observed.ProjectFound = true
 			observed.ProfileFound = true
@@ -81,32 +84,40 @@ func (h *networkCLIHost) InspectNetwork(_ context.Context, yards []yardnetwork.Y
 	return s, nil
 }
 
-func TestNetworkIsolationRequiresTypedConsentBeforeMutation(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
-	p, _ := yardnetwork.Decode(nil)
-	host := &networkCLIHost{policy: p, ready: true}
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root, Incus: &testkit.Incus{}, NetworkPolicy: &yardnetwork.Service{Host: host}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	loaded, err := program.loadContext("default")
-	if err != nil {
-		t.Fatal(err)
-	}
-	definition := command.Definition{Name: "network", Handler: "@network", Remote: command.RemoteLocal, Effect: command.EffectMutate, Confirmation: command.ConfirmationDynamic, Visibility: command.VisibilityPublic}
-	prepared, err := program.prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: []string{"isolation", "on"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer prepared.Close()
-	if prepared.Plan.Assessment == nil || prepared.Plan.Assessment.Action != "yard.network.apply" || !prepared.Plan.Assessment.Changed || prepared.Plan.Confirmed {
-		t.Fatalf("isolation did not require confirmation: %+v", prepared.Plan)
-	}
-	if _, err = prepared.Execute(context.Background(), &application.Orchestrator{}, io.Discard); !errors.Is(err, domain.ErrConfirmationRequired) {
-		t.Fatalf("execution without consent: %v", err)
-	}
-	if host.writes != 0 {
-		t.Fatal("unconfirmed isolation wrote policy")
+func TestNetworkRestartRequiresTypedConsentBeforeMutation(t *testing.T) {
+	for _, args := range [][]string{{"isolation", "on"}, {"reconcile"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			p, _ := yardnetwork.Decode(nil)
+			host := &networkCLIHost{policy: p, ready: true}
+			if args[0] == "reconcile" {
+				host.policy.PendingStart = []string{"default"}
+				host.instances = map[string]ports.InstanceInfo{"default": {Type: domain.YardVM, Status: "Stopped"}}
+			}
+			program, err := New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root, Incus: &testkit.Incus{}, NetworkPolicy: &yardnetwork.Service{Host: host}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := program.loadContext("default")
+			if err != nil {
+				t.Fatal(err)
+			}
+			definition := command.Definition{Name: "network", Handler: "@network", Remote: command.RemoteLocal, Effect: command.EffectMutate, Confirmation: command.ConfirmationDynamic, Visibility: command.VisibilityPublic}
+			prepared, err := program.prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: args})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer prepared.Close()
+			if prepared.Plan.Assessment == nil || prepared.Plan.Assessment.Action != "yard.network.apply" || !prepared.Plan.Assessment.Changed || prepared.Plan.Confirmed {
+				t.Fatalf("restart did not require confirmation: action=%v confirmed=%t", prepared.Plan.Assessment, prepared.Plan.Confirmed)
+			}
+			if _, err = prepared.Execute(context.Background(), &application.Orchestrator{}, io.Discard); !errors.Is(err, domain.ErrConfirmationRequired) {
+				t.Fatalf("execution without consent: %v", err)
+			}
+			if host.writes != 0 {
+				t.Fatal("unconfirmed isolation wrote policy")
+			}
+		})
 	}
 }
 func (h *networkCLIHost) WritePolicy(_ context.Context, _ yardnetwork.StoredPolicy, policy yardnetwork.Policy) (yardnetwork.StoredPolicy, error) {
@@ -117,6 +128,76 @@ func (h *networkCLIHost) WritePolicy(_ context.Context, _ yardnetwork.StoredPoli
 		return yardnetwork.StoredPolicy{Policy: policy, Content: string(content), ETag: "one"}, nil
 	}
 	return yardnetwork.StoredPolicy{}, errors.New("unexpected mutation during assessment")
+}
+
+func TestNetworkCPUAuthorizationPrecedesMutation(t *testing.T) {
+	commands := testkit.TempDir(t)
+	writeCLIFile(t, filepath.Join(commands, "sudo"), "#!/bin/sh\nexit 1\n", 0o700)
+	t.Setenv("PATH", commands)
+	for _, tc := range []struct {
+		name       string
+		kind       domain.YardKind
+		status     string
+		weight     string
+		isolation  bool
+		pending    bool
+		wantError  string
+		wantWrites int
+	}{
+		{"running weighted VM", domain.YardVM, "Running", "1000", true, false, "sudo authorization is required", 0},
+		{"pending stopped weighted VM", domain.YardVM, "Stopped", "1000", false, true, "sudo authorization is required", 0},
+		{"stopped weighted VM", domain.YardVM, "Stopped", "1000", true, false, "unexpected mutation during assessment", 1},
+		{"unweighted VM", domain.YardVM, "Running", "", true, false, "unexpected mutation during assessment", 1},
+		{"container", domain.YardContainer, "Running", "", true, false, "unexpected mutation during assessment", 1},
+		{"already running pending VM", domain.YardVM, "Running", "1000", false, true, "unexpected mutation during assessment", 1},
+		{"no-op weighted VM", domain.YardVM, "Running", "1000", false, false, "", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			p, _ := yardnetwork.Decode(nil)
+			if tc.pending {
+				p.PendingStart = []string{"default"}
+			}
+			host := &networkCLIHost{policy: p, ready: true,
+				instances: map[string]ports.InstanceInfo{"default": {Type: tc.kind, Status: tc.status,
+					Config: map[string]string{"user.subyard.vm_cpu_weight": tc.weight}}}}
+			program, err := New(Options{RepositoryRoot: root, WorkingDir: root,
+				Environment: append(environment, "PATH="+commands), Incus: &testkit.Incus{},
+				NetworkPolicy: &yardnetwork.Service{Host: host, Lock: testNetworkPolicyLock{},
+					Guard: func(context.Context) error { return nil }}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			program.effectiveUID = func() int { return 1000 }
+			program.operatorTerminal = func() bool { return false }
+			loaded, err := program.loadContext("default")
+			if err != nil {
+				t.Fatal(err)
+			}
+			args := []string{"reconcile"}
+			if tc.isolation {
+				args = []string{"isolation", "on"}
+			}
+			definition := command.Definition{Name: "network", Handler: "@network", Remote: command.RemoteLocal,
+				Effect: command.EffectMutate, Confirmation: command.ConfirmationDynamic, Visibility: command.VisibilityPublic}
+			prepared, err := program.prepareCommand(context.Background(),
+				prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: args})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer prepared.Close()
+			orchestrator := program.operationOrchestrator(prepared.Plan.OperationID, loaded, nil, &definition)
+			prepared.Plan, err = orchestrator.Confirm(context.Background(), prepared.Plan, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = prepared.Execute(context.Background(), orchestrator, io.Discard)
+			if (err != nil) != (tc.wantError != "") ||
+				(err != nil && !strings.Contains(err.Error(), tc.wantError)) || host.writes != tc.wantWrites {
+				t.Fatalf("network authorization: err=%v writes=%d; want %q/%d", err, host.writes, tc.wantError, tc.wantWrites)
+			}
+		})
+	}
 }
 
 func TestNetworkLinkExecutesThroughAuthorizedOperation(t *testing.T) {

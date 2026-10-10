@@ -334,18 +334,18 @@ retains its owner/client pair. Android retains its larger guest. The generic And
 does not include the SDK; the fixture provisions it.
 The full lane first checks the default phone (API 36), including native and remote use,
 viewers, recovery, APK installation, clean userdata on reuse and lease expiry. It then checks
-the API 35 phone and API 36 tablet concurrently, including phone reuse while the tablet remains
-held. Complete acceptance requires both phases.
-The fixture sleeps an idle leased device's display while another device boots, retaining its
-lease and ADB access. This avoids spending software-rendering CPU on an unused display; both
-devices still run concurrently with their configured RAM and screen dimensions.
+the API 35 phone and API 36 tablet sequentially. Complete acceptance requires both phases.
+On the standard 8 GiB VM, acceptance checks one emulator and a typed safe memory refusal
+for a second request, preserving the first lease and its runtime. It releases the first
+emulator before testing successful standalone acquire, rendering, renewal and release.
+The idle-display recovery check returns the device to ACTIVE before cancellation and cleanup.
 The attached viewer check deliberately delays scrcpy's server launch by 20 seconds to verify
 bounded startup waiting on a real device, without allocating another emulator.
 
 After a viewer-only change, pass `--lane viewer` to `config/profiles/android/tests/e2e/android-pool-runtime.sh`.
 It checks owner, yard and remote controller viewers, including real SSH transport and rendered
 frames, delayed startup, attachment without lease renewal or release, and a standalone viewer
-alongside the borrowed lease, then cleans up. Remote controller coverage also checks cancellation
+after the borrowed lease is released, then cleans up. Remote controller coverage also checks cancellation
 and EOF cleanup of wire processes. It prepares both API35 and
 API36 images, skipping the separate remote workload-run and repeated API35 preparation assertions.
 Those assertions remain in the full lane. It uses the same single VM.
@@ -727,11 +727,26 @@ For targeted migration and activation recovery acceptance, freeze a candidate wi
 one available slot and `--vm-count 1 --vm 1`. The fixture installs checksum-pinned v0.17.3,
 changes persistent file settings in default and named local yards, verifies real guest convergence
 through public update, then interrupts activation-only reconciliation through an owned systemctl
-wrapper. A second interruption leaves an immutable receipt before journal CAS; changed inputs then
-require new consent and a durable cancellation record before a replacement reaches ready.
-Changed desired inputs require fresh consent and immutable predecessor evidence;
-completed ledger and runtime links stay unchanged. Stopped, absent and remote yards are preserved.
-This is targeted evidence; it does not replace release smoke or shipped-profile acceptance.
+wrapper. Further interruptions leave immutable receipts before journal CAS and exercise a desired-input
+cycle, including return to earlier inputs. Each replacement needs new consent, durable cancellation
+and the next protected frontier generation before ready. Declined consent preserves the predecessor,
+migration history and links; ready repetition checks the same fixed point. Stopped, absent and remote
+yards are preserved. Checkpoint writer acceptance also requires interruption at publication and
+reboot/resume, with the compact authority and unchanged legacy projection verified separately.
+The release smoke's existing prepare/reboot/finish controller interrupts atomic checkpoint
+publication before reboot, compares the checkpoint, legacy projection and completed journal before
+the fresh updater resumes, and then checks the exact release links and unchanged history. Publication
+follows journal completion but precedes final updater cleanup. Record this segment's result explicitly;
+a recovery-only pass cannot substitute for it.
+Namespace capacity, aggregate-byte limits and sequences beyond 512 cancellations are host-free stress
+contracts, not claims of this physical fixture. This targeted evidence does not replace release smoke
+or shipped-profile acceptance.
+
+Four declared external profile checks are deferred separately: GitHub App live API, Hermes live model
+provider, OpenClaw staging gateway and OpenClaw QA credential broker. Their required accounts,
+credentials and authorized external actions belong to the owning profile. Reproducible VM results
+leave those obligations unpassed; record their evidence separately under the
+[same-candidate acceptance contract](testing.md#one-release-candidate).
 
 For a narrow predecessor upgrade check, set `SUBYARD_E2E_ORCA_UPGRADE_FROM` to an exact published
 version and `SUBYARD_E2E_ORCA_UPGRADE_INSTALLER_SHA256` to that release's installer asset digest.

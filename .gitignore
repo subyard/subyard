@@ -31,9 +31,9 @@
 /veranda/build/
 /veranda/src-tauri/target/
 
-# Bytecode from development probes and acceptance helpers.
-/dev/__pycache__/
-/dev/e2e/__pycache__/
+# Generated Python bytecode.
+__pycache__/
+*.py[co]
 
 # QA credential broker: the role secrets, the bot-token pool, and the (host-path-naming)
 # broker.conf stay host-only. Only the *.example templates are committed.

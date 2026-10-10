@@ -58,8 +58,8 @@ type currentStepReport struct {
 }
 
 type currentSnapshot struct {
-	links           runtimeLinkSnapshot
-	journal, ledger releasetransition.ProtectedSnapshot
+	links                       runtimeLinkSnapshot
+	journal, ledger, checkpoint releasetransition.ProtectedSnapshot
 }
 
 // PrepareCurrentTransition inspects and completes the exact installed current
@@ -187,7 +187,7 @@ func (runtime *Runtime) PrepareCurrentTransition(ctx context.Context, arguments 
 			report.Journal.Steps = append(report.Journal.Steps, currentStepReport{ID: step.ID, Migration: step.Migration, Checkpoint: step.Checkpoint})
 		}
 	}
-	report.Domains, err = runtime.currentDomains(ctx, parsed.root, owner, before.ledger)
+	report.Domains, err = runtime.currentDomains(ctx, parsed.root, owner, before)
 	if err != nil {
 		// A validated owner diagnostic remains useful even when its registry or
 		// ledger cannot be represented by this caller. Never invent domain state.
@@ -320,42 +320,32 @@ func (runtime *Runtime) readCurrentSnapshot(root, configHome string) (currentSna
 		return result, err
 	}
 	result.ledger, err = store.ReadLedger()
+	if err == nil {
+		result.checkpoint, err = store.ReadMigrationCheckpoint()
+	}
 	return result, err
 }
 
 func sameCurrentSnapshot(left, right currentSnapshot) bool {
-	return left.links == right.links && sameProtectedSnapshot(left.journal, right.journal) && sameProtectedSnapshot(left.ledger, right.ledger)
+	return left.links == right.links && sameProtectedSnapshot(left.journal, right.journal) &&
+		sameProtectedSnapshot(left.ledger, right.ledger) && sameProtectedSnapshot(left.checkpoint, right.checkpoint)
 }
 
-func (runtime *Runtime) currentDomains(ctx context.Context, root string, owner candidateVerification, snapshot releasetransition.ProtectedSnapshot) ([]currentDomainReport, error) {
+func (runtime *Runtime) currentDomains(ctx context.Context, root string, owner candidateVerification, snapshot currentSnapshot) ([]currentDomainReport, error) {
 	verified, err := runtime.verifyPublishedCandidate(ctx, owner.candidate, root, &owner.digest)
 	if err != nil {
 		return nil, err
 	}
 	defer verified.Close()
-	file, err := openCandidateFile(int(verified.root.Fd()), "config/release-transition.json")
+	registry, digest, err := readVerifiedTransitionRegistry(verified)
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
-	payload, err := io.ReadAll(io.LimitReader(file, releasetransition.MaxRegistryV2Bytes+1))
+	state, err := releasetransition.ParseMigrationLedger(snapshot.ledger, snapshot.checkpoint, registry, digest)
 	if err != nil {
 		return nil, err
 	}
-	registry, digest, err := releasetransition.ParseRegistryV2(payload, releasetransition.BuiltinCapabilityCatalog())
-	if err != nil {
-		return nil, err
-	}
-	if digest != owner.registryDigest {
-		return nil, errors.New("verified transition registry changed during inspection")
-	}
-	ledger := releasetransition.BaselineLedgerV2(registry)
-	if snapshot.Exists {
-		ledger, _, err = releasetransition.ParseLedgerV2(snapshot.Payload, registry)
-		if err != nil {
-			return nil, err
-		}
-	}
+	ledger := state.Ledger
 	pending, err := registry.PendingPath(ledger)
 	if err != nil {
 		return nil, err
@@ -368,7 +358,7 @@ func (runtime *Runtime) currentDomains(ctx context.Context, root string, owner c
 	domains := make([]currentDomainReport, 0, len(names))
 	for _, name := range names {
 		state := ledger.Domains[name]
-		row := currentDomainReport{Domain: name, Epoch: state.Epoch, RequiredEpoch: registry.CurrentEpochs[name], LedgerPresent: snapshot.Exists, Applied: append([]string{}, state.Applied...), Pending: []string{}}
+		row := currentDomainReport{Domain: name, Epoch: state.Epoch, RequiredEpoch: registry.CurrentEpochs[name], LedgerPresent: snapshot.ledger.Exists || snapshot.checkpoint.Exists, Applied: append([]string{}, state.Applied...), Pending: []string{}}
 		for _, migration := range pending {
 			if migration.Domain == name {
 				row.Pending = append(row.Pending, migration.ID)
@@ -377,6 +367,26 @@ func (runtime *Runtime) currentDomains(ctx context.Context, root string, owner c
 		domains = append(domains, row)
 	}
 	return domains, nil
+}
+
+func readVerifiedTransitionRegistry(verified *verifiedPublishedCandidate) (releasetransition.RegistryV2, releasetransition.Fingerprint, error) {
+	file, err := openCandidateFile(int(verified.root.Fd()), "config/release-transition.json")
+	if err != nil {
+		return releasetransition.RegistryV2{}, "", err
+	}
+	defer file.Close()
+	payload, err := io.ReadAll(io.LimitReader(file, releasetransition.MaxRegistryV2Bytes+1))
+	if err != nil {
+		return releasetransition.RegistryV2{}, "", err
+	}
+	registry, digest, err := releasetransition.ParseRegistryV2(payload, releasetransition.BuiltinCapabilityCatalog())
+	if err != nil {
+		return releasetransition.RegistryV2{}, "", err
+	}
+	if digest != verified.registryDigest {
+		return releasetransition.RegistryV2{}, "", errors.New("verified transition registry changed during inspection")
+	}
+	return registry, digest, nil
 }
 
 func (runtime *Runtime) prepareCurrentReport(parsed currentOptions, report currentReport) Prepared {

@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -16,6 +18,153 @@ type activationLifecycleFixture struct {
 	initial                 Inspection
 	links                   ReleaseLinks
 	reserved                RecoveryReceiptV1
+}
+
+func TestActivationRecoveryLifecycleRepeatedPreCASDesiredCycle(t *testing.T) {
+	fixture := interruptedLifecycleReservation(t, false)
+	interruption := errors.New("stop after receipt before journal CAS")
+	fixture.transition.options.fault = func(point string) error {
+		if point == "after-recovery-receipt" {
+			return interruption
+		}
+		return nil
+	}
+	// The original protected journal/ledger/native actual state never changes.
+	// Returning to B must select its latest generation rather than an older
+	// cancellation whose desired base happens to be the same.
+	desired := []Fingerprint{digestD, Fingerprint(strings.Repeat("e", 64)), digestD}
+	for index, value := range desired {
+		fixture.reconciler.desired = value
+		fixture.transition.options.NewTransactionID = func() TransactionID {
+			return TransactionID(fmt.Sprintf("cycle-%d", index))
+		}
+		inspection, err := fixture.transition.InspectActivationRecovery(context.Background(), fixture.request)
+		if err != nil || len(inspection.Blockers) != 0 {
+			t.Fatalf("cycle %d inspection: %#v %v", index, inspection, err)
+		}
+		outcome, err := fixture.transition.ConvergeActivationRecovery(context.Background(), fixture.request,
+			Execution{Plan: inspection.Plan, Authorization: v2TestAuthorization(fixture.initial.Plan)})
+		if err != nil || outcome.Code != CodeConfirmationRequired {
+			t.Fatalf("old grant accepted cycle %d: %#v %v", index, outcome, err)
+		}
+		_, err = fixture.transition.ConvergeActivationRecovery(context.Background(), fixture.request,
+			Execution{Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan)})
+		if !errors.Is(err, interruption) {
+			t.Fatalf("cycle %d did not publish its fresh receipt: %v", index, err)
+		}
+		fixture.assertState(t, fixture.before)
+		frontier, present, err := fixture.transition.store.recoveryFrontier(fixture.request)
+		if err != nil || !present || frontier.Generation != uint64(index+2) {
+			t.Fatalf("cycle %d frontier: %#v %v", index, frontier, err)
+		}
+	}
+	fixture.transition.options.fault = nil
+	restarted, err := NewV2Transition(fixture.transition.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inspection, err := restarted.InspectActivationRecovery(context.Background(), fixture.request)
+	if err != nil || len(inspection.Blockers) != 0 {
+		t.Fatalf("final inspection: %#v %v", inspection, err)
+	}
+	outcome, err := restarted.ConvergeActivationRecovery(context.Background(), fixture.request,
+		Execution{Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan)})
+	if err != nil || outcome.Status != StatusReady {
+		t.Fatalf("B -> C -> B did not reach ready: %#v %v", outcome, err)
+	}
+}
+
+func TestActivationRecoveryLifecycleChangedInputsAfterCancellationCrash(t *testing.T) {
+	for _, point := range []string{"after-recovery-cancellation", "before-recovery-frontier", "after-recovery-frontier", "after-recovery-lifecycle-unlink"} {
+		t.Run(point, func(t *testing.T) {
+			fixture := interruptedLifecycleReservation(t, false)
+			second := fixture.changedPlan(t)
+			interruption := errors.New("interrupted durable cancellation")
+			fixture.transition.store.fault = func(actual string) error {
+				if actual == point {
+					return interruption
+				}
+				return nil
+			}
+			_, err := fixture.transition.ConvergeActivationRecovery(context.Background(), fixture.request,
+				Execution{Plan: second.Plan, Authorization: v2TestAuthorization(second.Plan)})
+			if !errors.Is(err, interruption) {
+				t.Fatalf("cancellation crash: %v", err)
+			}
+			fixture.transition.store.fault = nil
+			fixture.reconciler.desired = Fingerprint(strings.Repeat("e", 64))
+			restarted, err := NewV2Transition(fixture.transition.options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fixture.transition = restarted
+			before, err := restarted.store.ReadRecoveryReceipt(fixture.reserved.Successor.Transaction)
+			if err != nil {
+				t.Fatal(err)
+			}
+			third, err := restarted.InspectActivationRecovery(context.Background(), fixture.request)
+			if err != nil || len(third.Blockers) != 0 || third.Plan == second.Plan {
+				t.Fatalf("third inputs were not assessed: %#v %v", third, err)
+			}
+			after, err := restarted.store.ReadRecoveryReceipt(fixture.reserved.Successor.Transaction)
+			if err != nil || !sameProtectedSnapshot(before, after) {
+				t.Fatal("read-only assessment mutated cancellation")
+			}
+			for _, authorization := range []Authorization{"", v2TestAuthorization(second.Plan)} {
+				outcome, err := restarted.ConvergeActivationRecovery(context.Background(), fixture.request,
+					Execution{Plan: third.Plan, Authorization: authorization})
+				if err != nil || outcome.Code != CodeConfirmationRequired {
+					t.Fatalf("third inputs used old/missing grant: %#v %v", outcome, err)
+				}
+				fixture.assertState(t, fixture.before)
+			}
+			outcome, err := restarted.ConvergeActivationRecovery(context.Background(), fixture.request,
+				Execution{Plan: third.Plan, Authorization: v2TestAuthorization(third.Plan)})
+			if err != nil || outcome.Status != StatusReady {
+				t.Fatalf("third fresh grant did not finish durable cancellation: %#v %v", outcome, err)
+			}
+		})
+	}
+}
+
+func TestActivationRecoveryLifecyclePendingFrontierReplaysBeforeThirdInputs(t *testing.T) {
+	fixture := interruptedLifecycleReservation(t, false)
+	second := fixture.changedPlan(t)
+	interruption := errors.New("interrupted pending frontier fsync")
+	cancelling := false
+	fixture.transition.store.fault = func(point string) error {
+		if point == "after-recovery-cancellation" {
+			cancelling = true
+		}
+		if cancelling && point == "after-pending-fsync" {
+			return interruption
+		}
+		return nil
+	}
+	_, err := fixture.transition.ConvergeActivationRecovery(context.Background(), fixture.request,
+		Execution{Plan: second.Plan, Authorization: v2TestAuthorization(second.Plan)})
+	if !errors.Is(err, interruption) {
+		t.Fatalf("pending frontier fault: %v", err)
+	}
+	fixture.transition.store.fault = nil
+	fixture.reconciler.desired = Fingerprint(strings.Repeat("e", 64))
+	restarted, err := NewV2Transition(fixture.transition.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	third, err := restarted.InspectActivationRecovery(context.Background(), fixture.request)
+	if err != nil || len(third.Blockers) != 0 {
+		t.Fatalf("pending frontier third-input inspection: %#v %v", third, err)
+	}
+	outcome, err := restarted.ConvergeActivationRecovery(context.Background(), fixture.request,
+		Execution{Plan: third.Plan, Authorization: v2TestAuthorization(third.Plan)})
+	if err != nil || outcome.Status != StatusReady {
+		t.Fatalf("pending frontier did not replay before third inputs: %#v %v", outcome, err)
+	}
+	frontier, published, pending, err := restarted.store.readFrontierPair(fixture.request.Transaction)
+	if err != nil || !published.Exists || pending.Exists || frontier.Generation != 2 || frontier.Cancellation.Cancellation.Plan != second.Plan {
+		t.Fatalf("durable cancellation intent was replaced: %#v %v", frontier, err)
+	}
 }
 
 // Interrupt the real publication path with an immutable receipt durable and
@@ -49,7 +198,7 @@ func interruptedLifecycleReservation(t *testing.T, pending bool) activationLifec
 	if !errors.Is(err, interruption) {
 		t.Fatalf("publication interruption: %v", err)
 	}
-	receipt, err := transition.store.ReadRecoveryReceipt(RecoveryTransactionPrefixV2 + "tx-test-002")
+	receipt, err := transition.store.ReadRecoveryReceipt(lifecycleTransaction(t, request, 1))
 	if err != nil || !receipt.Exists {
 		t.Fatalf("live reservation: %#v %v", receipt, err)
 	}
@@ -139,7 +288,7 @@ func TestActivationRecoveryLifecycleChangedReservationNeedsFreshGrant(t *testing
 		}
 	}
 	outcome, err := fixture.transition.ConvergeActivationRecovery(ctx, fixture.request, Execution{Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan)})
-	if err != nil || outcome.Status != StatusReady || outcome.Transaction == nil || *outcome.Transaction != RecoveryTransactionPrefixV2+"tx-test-003" {
+	if err != nil || outcome.Status != StatusReady || outcome.Transaction == nil || *outcome.Transaction != lifecycleTransaction(t, fixture.request, 2) {
 		t.Fatalf("fresh authorized reassessment: %#v %v", outcome, err)
 	}
 	fixture.assertCancelled(t, inspection.Plan)
@@ -222,7 +371,7 @@ func TestActivationRecoveryLifecycleCancellationBoundaryRetry(t *testing.T) {
 			}
 			fixture.transition = restarted
 			outcome, err := restarted.ConvergeActivationRecovery(ctx, fixture.request, execution)
-			if err != nil || outcome.Status != StatusReady || outcome.Transaction == nil || *outcome.Transaction != RecoveryTransactionPrefixV2+"tx-test-003" {
+			if err != nil || outcome.Status != StatusReady || outcome.Transaction == nil || *outcome.Transaction != lifecycleTransaction(t, fixture.request, 2) {
 				t.Fatalf("exact authorized durable retry: %#v %v", outcome, err)
 			}
 			current, err := restarted.store.ReadCurrentJournal()

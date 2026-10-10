@@ -6,12 +6,15 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/rpc"
 	"github.com/Subyard/Subyard/internal/testkit"
+	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
 
 func TestProvisionSelectionUsesYardThenProjectProfiles(t *testing.T) {
@@ -196,10 +199,19 @@ func TestProvisionAssessmentChecksRunningProfilesReadOnly(t *testing.T) {
 func TestProvisionCLIAndRPCUseNativeRunner(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	writeProvisionProfile(t, root, "sample-s")
-	for _, rpcMode := range []bool{false, true} {
+	dispatcher := filepath.Join(root, "selected-engine")
+	writeCLIFile(t, dispatcher, "#!/bin/sh\nexit 0\n", 0o700)
+	environment = append(environment, "YARD_KIND=vm", "VM_CPU_WEIGHT=100", "SUBYARD_DISPATCHER_PATH=/ambient/engine")
+	for _, scenario := range []struct{ rpcMode, stopped bool }{{false, true}, {true, true}, {false, false}, {true, false}} {
+		rpcMode := scenario.rpcMode
 		incus := lifecycleIncus()
 		instance := incus.Instances["subyard/yard"]
 		instance.Status = "Running"
+		if scenario.stopped {
+			instance.Status = "Stopped"
+		}
+		instance.Type = domain.YardVM
+		instance.Config["user.subyard.vm_cpu_weight"] = "1000"
 		incus.Instances["subyard/yard"] = instance
 		clock := testkit.NewManualClock(time.Unix(100, 0))
 		operationID := "provision-cli"
@@ -214,9 +226,21 @@ func TestProvisionCLIAndRPCUseNativeRunner(t *testing.T) {
 			{Result: okResult},
 			{Result: okResult, Stderr: "converged\n"},
 		}}
+		if scenario.stopped {
+			runner.Steps = []testkit.AdapterStep{
+				{Result: okResult},
+				{Result: okResult, Stderr: "changed\n"},
+				{Result: okResult},
+				{Result: okResult, Stderr: "converged\n"},
+				{Result: okResult},
+			}
+			powerScriptedIncus(runner, incus)
+		}
 		options := Options{
 			RepositoryRoot: root, Program: "yard", Environment: environment,
 			WorkingDir: root, Incus: incus, AdapterRunner: runner, Clock: clock,
+			DispatcherPath: dispatcher,
+			NetworkPolicy:  &yardnetwork.Service{Host: &networkCLIHost{}, Lock: testNetworkPolicyLock{}},
 		}
 		if !rpcMode {
 			options.Arguments = []string{"provision", "--yes"}
@@ -251,16 +275,70 @@ func TestProvisionCLIAndRPCUseNativeRunner(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if len(runner.Requests) != 5 || runner.Requests[3].Action != "profile" ||
-			!slices.Equal(runner.Requests[3].Arguments, []string{"sample-s"}) {
+		profileIndex := 3
+		checkIndexes := []int{0, 1, 2, 4}
+		if scenario.stopped {
+			profileIndex, checkIndexes = 2, []int{1, 3}
+			if len(runner.Requests) != 5 || runner.Requests[0].Action != "start" ||
+				runner.Requests[4].Action != "stop" || incus.Instances["subyard/yard"].Status != "Stopped" {
+				t.Fatalf("temporary startup did not restore power: rpc=%v state=%s requests=%d", rpcMode,
+					incus.Instances["subyard/yard"].Status, len(runner.Requests))
+			}
+		}
+		if len(runner.Requests) != 5 || runner.Requests[profileIndex].Action != "profile" ||
+			!slices.Equal(runner.Requests[profileIndex].Arguments, []string{"sample-s"}) {
 			t.Fatalf("rpc=%v physical=%v", rpcMode, runner.Requests)
 		}
-		for _, index := range []int{0, 1, 2, 4} {
+		for _, request := range runner.Requests {
+			if request.Action != "profile-check" && (request.Context["SUBYARD_DISPATCHER_PATH"] != dispatcher ||
+				request.Context["VM_CPU_WEIGHT"] != "1000") {
+				t.Fatalf("provision lost selected scheduler: rpc=%v action=%s", rpcMode, request.Action)
+			}
+		}
+		for _, index := range checkIndexes {
 			if runner.Requests[index].Action != "profile-check" ||
 				!slices.Equal(runner.Requests[index].Arguments, []string{"--check", "sample-s"}) {
 				t.Fatalf("rpc=%v check[%d]=%#v", rpcMode, index, runner.Requests[index])
 			}
 		}
+	}
+}
+
+func TestProvisionCPUAuthorizationPrecedesTemporaryStart(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	writeProvisionProfile(t, root, "sample-s")
+	commands := testkit.TempDir(t)
+	writeCLIFile(t, filepath.Join(commands, "systemctl"), "#!/bin/sh\nprintf 'inactive\\n'\nexit 3\n", 0o700)
+	writeCLIFile(t, filepath.Join(commands, "sudo"), "#!/bin/sh\nexit 1\n", 0o700)
+	t.Setenv("PATH", commands)
+	incus := lifecycleIncus()
+	incus.Instances["subyard/yard"].Config["user.subyard.vm_cpu_weight"] = "1000"
+	program, err := New(Options{RepositoryRoot: root, WorkingDir: root, Incus: incus,
+		Environment: append(environment, "YARD_KIND=vm", "PATH="+commands)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	program.effectiveUID = func() int { return 1000 }
+	program.operatorTerminal = func() bool { return false }
+	loaded, err := program.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution, err := program.prepareProvisionExecution(loaded, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, _ := program.manifest.Lookup("provision")
+	if err := program.observeProvisionExecution(context.Background(), loaded, definition, execution); err != nil {
+		t.Fatal(err)
+	}
+	runner := &testkit.ScriptedAdapter{}
+	_, err = program.executeProvision(context.Background(), &application.Orchestrator{Runner: runner}, loaded,
+		domain.OperationPlan{OperationID: "provision-auth"}, execution, &strings.Builder{})
+	if err == nil || !strings.Contains(err.Error(), "sudo authorization is required") || len(runner.Requests) != 0 ||
+		incus.Instances["subyard/yard"].Status != "Stopped" {
+		t.Fatalf("CPU authorization did not precede startup: err=%v requests=%d state=%s", err,
+			len(runner.Requests), incus.Instances["subyard/yard"].Status)
 	}
 }
 

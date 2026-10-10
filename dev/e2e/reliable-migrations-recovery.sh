@@ -65,8 +65,8 @@ cleanup_recovery_fixture() {
 trap cleanup_recovery_fixture EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-# Report only the source location and status, never shell arguments or values.
-trap 'printf "reliable-migrations-recovery: line %s failed (exit %s)\n" "$LINENO" "$?" >&2' ERR
+# Report only the source basename, line and status, never arguments or values.
+trap 'printf "reliable-migrations-recovery: %s line %s failed (exit %s)\n" "${BASH_SOURCE[0]##*/}" "$LINENO" "$?" >&2' ERR
 
 ensure_platform() {
   if ! incus info >/dev/null 2>&1 || ! incus storage show default --project default >/dev/null 2>&1; then
@@ -134,7 +134,7 @@ create_local_yard() {
   printf '%s\n' "$MARKER" > "$PROJECT_MUTATION_ARMED"
   incus project create "$PROJECT" -c features.images=false -c user.subyard.p0-power-systemd="$MARKER" >/dev/null
   operator_yard -Y "$yard" init --yes
-  operator_yard -Y "$yard" start --yes
+  [ "$yard" = stopped ] || operator_yard -Y "$yard" start --yes
 }
 
 write_settings() {
@@ -197,12 +197,13 @@ install_pre_cas_fault() {
   printf '%s\n' '#!/bin/sh' 'set -eu' \
     "journal=$V2_JOURNAL" "predecessor=$1" \
     "receipts=$CONFIG_HOME/release-transition/recovery/v2/transactions" \
-    "probe=$ACTIVATION_FAULT_PROBE.pre-cas" \
+    "probe=$ACTIVATION_FAULT_PROBE.pre-cas" "previous=${2:-}" \
     'if [ "${1:-}" = show ] && [ "${2:-}" = subyard-power-reconcile.service ] &&' \
     '  [ -d "$receipts" ] && [ ! -e "$probe" ] &&' \
     '  [ "$(/usr/bin/jq -er .transaction "$journal")" = "$predecessor" ]; then' \
     '  for receipt in "$receipts"/*.json; do' \
     '    [ -f "$receipt" ] || continue' \
+    '    [ "$(/usr/bin/jq -er .successor.transaction "$receipt")" != "$previous" ] || continue' \
     '    printf "%s\n" "receipt published before journal CAS" > "$probe"' \
     '    exit 75' \
     '  done' \
@@ -212,7 +213,7 @@ install_pre_cas_fault() {
 }
 
 run_acceptance() {
-  local yard source host_settings before_tx replacement receipt reserved cancelled rc=0
+  local yard source host_settings before_tx replacement receipt reserved cancelled desired rc=0
   # shellcheck source=tests/helpers/release-candidate.sh
   . "$ROOT/tests/helpers/release-candidate.sh"
   release_candidate_prepare "$ROOT" >/dev/null
@@ -252,7 +253,30 @@ run_acceptance() {
   for yard in stopped absent remote; do
     sudo -n install -m 0600 "$CONFIG_HOME/yards/$yard/config.env" "$STATE_ROOT/$yard.retained"
   done
-  info 'ordinary public update must converge default and named persistent settings'
+  assert_excluded_yards
+  info 'interrupting ordinary public update at compact checkpoint publication'
+  candidate_update --check --json > "$STATE_ROOT/checkpoint-plan.json"
+  local checkpoint="$V2_STATE_ROOT/history-checkpoint.json" target
+  target="$(jq -er .outcome.target "$STATE_ROOT/checkpoint-plan.json")"
+  # Prepare only the empty watch directory; the real updater owns all records.
+  operator_env install -d -m 0700 "$CONFIG_HOME/release-transition" "$V2_STATE_ROOT"
+  sudo -n install -o "$OPERATOR" -g "$OPERATOR" -m 0644 \
+    "$ROOT/dev/e2e/release-transition-post-cas-observer.py" "$OPERATOR_HOME/checkpoint-observer.py"
+  rc=0
+  operator_env setsid python3 "$OPERATOR_HOME/checkpoint-observer.py" \
+    --runtime-root "$OPERATOR_HOME/.subyard/runtime" --journal "$V2_JOURNAL" \
+    --source-transaction none \
+    --candidate-target "$target" --checkpoint "$checkpoint" \
+    --marker "$OPERATOR_HOME/checkpoint-observed.json" --timeout 300 -- \
+    env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" "$OPERATOR_HOME/.local/bin/yard" \
+      update --version "$CANDIDATE_VERSION" --yes > "$STATE_ROOT/checkpoint-interruption.log" 2>&1 || rc=$?
+  if [ "$rc" != 137 ] || ! operator_env test -f "$OPERATOR_HOME/checkpoint-observed.json"; then
+    cat "$STATE_ROOT/checkpoint-interruption.log" >&2
+    die 'atomic checkpoint interruption was not reached'
+  fi
+  sudo -n jq -e '.schemaVersion == 1 and all(.domains[]; .compactedThrough == .epoch and (.appliedSuffix | length) == 0)' \
+    "$checkpoint" >/dev/null || die 'completed history was not compacted'
+  info 'resuming the published checkpoint in a fresh process'
   candidate_update --yes
   CANDIDATE_RELEASE_TARGET="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
   assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
@@ -263,6 +287,7 @@ run_acceptance() {
   operator_yard config status --all-local
   sudo -n jq -e '.checkpoint == "complete"' "$V2_JOURNAL" >/dev/null
   sudo -n install -m 0600 "$V2_LEDGER" "$ACTIVATION_LEDGER_BASELINE"
+  sudo -n install -m 0600 "$checkpoint" "$STATE_ROOT/checkpoint.before"
 
   info 'interrupting actual same-release activation reconciliation through owned systemctl wrapper'
   materialize_unit "$OLD_UNIT_FIXTURE" "$STATE_ROOT/drift.service"
@@ -304,6 +329,27 @@ run_acceptance() {
   sudo -n cmp "$ACTIVATION_JOURNAL_BASELINE" "$V2_JOURNAL" || die 'pre-CAS interruption changed predecessor'
   sudo -n cmp "$ACTIVATION_LEDGER_BASELINE" "$V2_LEDGER" || die 'pre-CAS interruption changed ledger'
   reserved="$(operator_env python3 -c 'import pathlib,sys; paths=list(pathlib.Path(sys.argv[1]).glob("*.json")); assert len(paths)==1; print(paths[0])' "$CONFIG_HOME/release-transition/recovery/v2/transactions")"
+  # Revisit the same desired inputs after two independently authorized cancellations.
+  # The wrapper ignores the old receipt, interrupting only after the new one is durable.
+  for desired in default-v3 default-v2; do
+    cancelled="$(sudo -n jq -er .successor.transaction "$reserved")"
+    write_settings "$host_settings" "$host_settings" "$desired"
+    candidate_update --check --json > "$STATE_ROOT/update-plan.json"
+    jq -e '.assessment.changed == true and .resume == null and (.blockers | length) == 0' "$STATE_ROOT/update-plan.json" >/dev/null
+    assert_no_consent migrate
+    assert_no_consent update
+    operator_env find "$ACTIVATION_FAULT_PROBE.pre-cas" -delete
+    install_pre_cas_fault "$before_tx" "$cancelled"
+    rc=0
+    operator_yard migrate --yes > "$STATE_ROOT/pre-cas-$desired.log" 2>&1 || rc=$?
+    [ "$rc" != 0 ] && operator_env test -f "$ACTIVATION_FAULT_PROBE.pre-cas" || die 'cyclic pre-CAS interruption was not reached'
+    operator_env find "$ACTIVATION_SYSTEMCTL_WRAPPER" -delete
+    sudo -n cmp "$ACTIVATION_JOURNAL_BASELINE" "$V2_JOURNAL" || die 'cyclic cancellation changed predecessor'
+    sudo -n cmp "$ACTIVATION_LEDGER_BASELINE" "$V2_LEDGER" || die 'cyclic cancellation changed ledger'
+    assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
+    operator_env test ! -e "$reserved" || die 'previous cyclic reservation remains live'
+    reserved="$(operator_env python3 -c 'import pathlib,sys; paths=list(pathlib.Path(sys.argv[1]).glob("*.json")); assert len(paths)==1; print(paths[0])' "$CONFIG_HOME/release-transition/recovery/v2/transactions")"
+  done
   cancelled="$(sudo -n jq -er .successor.transaction "$reserved")"
   sudo -n install -m 0600 "$reserved" "$STATE_ROOT/cancelled-receipt.json"
   write_settings "$host_settings" "$host_settings" default-v3
@@ -339,6 +385,7 @@ run_acceptance() {
   sudo -n cmp "$STATE_ROOT/completed-journal.json" "$V2_JOURNAL" || die 'ready repeat changed successor journal'
   sudo -n cmp "$STATE_ROOT/completed-receipt.json" "$receipt" || die 'ready repeat changed recovery receipt'
   sudo -n cmp "$ACTIVATION_LEDGER_BASELINE" "$V2_LEDGER" || die 'ready repeat changed migration ledger'
+  sudo -n cmp "$STATE_ROOT/checkpoint.before" "$checkpoint" || die 'activation-only recovery changed completed migration history'
   assert_materialized default default-v3
   assert_materialized named named-v1
   assert_excluded_yards

@@ -917,6 +917,19 @@ func (reconciler *materializedConfigActivationReconciler) resolveScope(
 	matches := snapshot.Exists && journal.Goal == reconciler.goal &&
 		journal.ArtifactDigest == reconciler.artifactDigest &&
 		(reconciler.registryDigest == "" || journal.RegistryDigest == reconciler.registryDigest)
+	if matches && journal.Checkpoint == releasetransition.JournalComplete &&
+		journal.Releases.From != journal.Releases.Target {
+		pending, err := releaseCheckpointPublicationPending(reconciler.cli.options.RepositoryRoot, store)
+		if err != nil {
+			return err
+		}
+		if pending {
+			// Keep the original selected scope through its authorized checkpoint
+			// publication. Ledger-only work may explicitly select the wide scope.
+			reconciler.scopeResolved = true
+			return nil
+		}
+	}
 	if releases.From != releases.Target {
 		// Source migrations can rename registrations. Their authorized scope
 		// must remain stable even after they advance the ledger during recovery.
@@ -968,24 +981,51 @@ func releaseSourceMigrationsComplete(
 	repositoryRoot string,
 	store *releasetransition.POSIXV2Store,
 ) (bool, error) {
-	snapshot, err := store.ReadLedger()
-	if err != nil || !snapshot.Exists {
+	registry, state, err := releaseSourceMigrationState(repositoryRoot, store)
+	if err != nil || !state.AuthoritySnapshot.Exists {
 		return false, err
+	}
+	pending, err := registry.PendingPath(state.Ledger)
+	return len(pending) == 0 && err == nil, err
+}
+
+func releaseCheckpointPublicationPending(repositoryRoot string, store *releasetransition.POSIXV2Store) (bool, error) {
+	capability, err := os.ReadFile(filepath.Join(repositoryRoot, "config", "release-checkpoint.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if err := releasetransition.ValidateMigrationCheckpointCapability(capability); err != nil {
+		return false, err
+	}
+	_, state, err := releaseSourceMigrationState(repositoryRoot, store)
+	return state.RequiresCheckpointPublication(), err
+}
+
+func releaseSourceMigrationState(
+	repositoryRoot string,
+	store *releasetransition.POSIXV2Store,
+) (registry releasetransition.RegistryV2, state releasetransition.MigrationLedgerSnapshot, err error) {
+	projection, err := store.ReadLedger()
+	if err != nil {
+		return registry, state, err
+	}
+	checkpoint, err := store.ReadMigrationCheckpoint()
+	if err != nil || (!projection.Exists && !checkpoint.Exists) {
+		return registry, state, err
 	}
 	payload, err := os.ReadFile(filepath.Join(repositoryRoot, "config", "release-transition.json"))
 	if err != nil {
-		return false, err
+		return registry, state, err
 	}
-	registry, _, err := releasetransition.ParseRegistryV2(payload, releasetransition.BuiltinCapabilityCatalog())
+	registry, digest, err := releasetransition.ParseRegistryV2(payload, releasetransition.BuiltinCapabilityCatalog())
 	if err != nil {
-		return false, err
+		return registry, state, err
 	}
-	ledger, _, err := releasetransition.ParseLedgerV2(snapshot.Payload, registry)
-	if err != nil {
-		return false, err
-	}
-	pending, err := registry.PendingPath(ledger)
-	return len(pending) == 0 && err == nil, err
+	state, err = releasetransition.ParseMigrationLedger(projection, checkpoint, registry, digest)
+	return registry, state, err
 }
 
 func (reconciler *materializedConfigActivationReconciler) reconcileCLI() *CLI {
@@ -1208,6 +1248,33 @@ func executeReleaseTransitionRequest(
 		InheritedSettingIDs: request.InheritedSettingIDs,
 		VerifyAuthorization: verifyAuthorization,
 	})
+	checkpointCapability, capabilityErr := os.ReadFile(filepath.Join(repositoryRoot, "config", "release-checkpoint.json"))
+	if capabilityErr == nil {
+		if err := releasetransition.ValidateMigrationCheckpointCapability(checkpointCapability); err != nil {
+			return releasetransition.ProcessResponse{}, err
+		}
+		transitionOptions.MigrationCheckpoint = true
+	} else if !errors.Is(capabilityErr, os.ErrNotExist) {
+		return releasetransition.ProcessResponse{}, capabilityErr
+	}
+	if request.Direction == releasetransition.DirectionActivateTarget {
+		store, storeErr := releasetransition.NewPOSIXV2Store(request.ConfigHome)
+		if storeErr != nil {
+			return releasetransition.ProcessResponse{}, storeErr
+		}
+		checkpoint, checkpointErr := store.ReadMigrationCheckpoint()
+		if checkpointErr != nil {
+			return releasetransition.ProcessResponse{}, checkpointErr
+		}
+		if checkpoint.Exists {
+			transitionOptions.SourceMigrationCheckpoint, err = releaseruntime.VerifyMigrationCheckpointReader(
+				ctx, request.RuntimeRoot, releases.From,
+			)
+			if err != nil {
+				return releasetransition.ProcessResponse{}, err
+			}
+		}
+	}
 	transition, err := releasetransition.NewV2Transition(transitionOptions)
 	if err != nil {
 		if errors.Is(err, releasetransition.ErrRegistryInvalid) {

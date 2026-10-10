@@ -30,6 +30,8 @@ type configApplyRepairPermit struct {
 	configHome          string
 	journal             releasetransition.ProtectedSnapshot
 	ledger              releasetransition.ProtectedSnapshot
+	ledgerProjection    releasetransition.ProtectedSnapshot
+	checkpointed        bool
 	gate                releasetransition.Outcome
 	factsFingerprint    string
 	driftedTargetNames  []string
@@ -137,15 +139,12 @@ func (cli *CLI) prepareActivationRepairMode(
 	if err != nil || registryDigest != journal.RegistryDigest || catalog.Digest() != journal.CatalogDigest {
 		return nil, nil
 	}
-	ledgerSnapshot, err := store.ReadLedger()
-	if err != nil || !ledgerSnapshot.Exists {
+	ledgerState, err := store.ReadMigrationLedger(registry, registryDigest)
+	if err != nil || !ledgerState.AuthoritySnapshot.Exists {
 		return nil, nil
 	}
-	ledger, _, err := releasetransition.ParseLedgerV2(ledgerSnapshot.Payload, registry)
-	if err != nil {
-		return nil, nil
-	}
-	pending, err := registry.PendingPath(ledger)
+	ledgerSnapshot := ledgerState.AuthoritySnapshot
+	pending, err := registry.PendingPath(ledgerState.Ledger)
 	if err != nil || len(pending) != 0 {
 		return nil, nil
 	}
@@ -305,7 +304,8 @@ func (cli *CLI) prepareActivationRepairMode(
 	driftedNames = slices.Compact(driftedNames)
 	return &configApplyRepairPermit{
 		yard: yard, allLocal: allLocal, configHome: options.ConfigHome,
-		journal: snapshot, ledger: ledgerSnapshot, gate: outcome, factsFingerprint: fingerprint,
+		journal: snapshot, ledger: ledgerSnapshot, ledgerProjection: ledgerState.ProjectionSnapshot,
+		checkpointed: ledgerState.Checkpointed, gate: outcome, factsFingerprint: fingerprint,
 		driftedTargetNames:  driftedNames,
 		requestedTargets:    requestedDesired,
 		selectedTargetNames: slices.Clone(selectedNames),
@@ -447,6 +447,20 @@ func (cli *CLI) finishConfigApplyRepair(
 	ledger, err := store.ReadLedger()
 	if err != nil {
 		return err
+	}
+	if ledger.Fingerprint != permit.ledgerProjection.Fingerprint ||
+		!bytes.Equal(ledger.Payload, permit.ledgerProjection.Payload) {
+		return errors.New("config apply changed the release ledger compatibility projection")
+	}
+	checkpoint, err := store.ReadMigrationCheckpoint()
+	if err != nil {
+		return err
+	}
+	if checkpoint.Exists != permit.checkpointed {
+		return errors.New("config apply changed the release ledger authority")
+	}
+	if permit.checkpointed {
+		ledger = checkpoint
 	}
 	if ledger.Fingerprint != permit.ledger.Fingerprint ||
 		!bytes.Equal(ledger.Payload, permit.ledger.Payload) {

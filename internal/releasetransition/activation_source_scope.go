@@ -18,7 +18,11 @@ func (transition *V2Transition) sourceWorkStable(observation v2Observation) bool
 		transition.options.SourceIngress != nil || len(observation.blockers) != 0 {
 		return false
 	}
-	if journal := observation.journal; journal != nil && journal.Checkpoint != JournalComplete {
+	if journal := observation.journal; journal != nil &&
+		(journal.Checkpoint != JournalComplete ||
+			(transition.options.MigrationCheckpoint && observation.migrationLedgerSnapshot.RequiresCheckpointPublication())) {
+		// Terminal checkpoint publication still uses the source scope that was
+		// authorized before these migrations changed configuration/registration.
 		if journal.SourceIngress != nil {
 			return false
 		}
@@ -60,11 +64,64 @@ func (transition *V2Transition) observeActivationScope(ctx context.Context, obse
 	if err := transition.observeActivation(ctx, observation); err != nil {
 		return err
 	}
-	scope, err := transition.bindObservationScope(observation.activationScope)
+	checkpointSource := observation.ledgerSnapshot.Fingerprint
+	if journal != nil {
+		baseScope, scopeErr := transition.bindObservationScope(observation.activationScope)
+		oldScope := scopeErr == nil && journal.ObservationScope == baseScope
+		if resume || !oldScope {
+			for _, step := range journal.Steps {
+				if strings.HasPrefix(step.Resource, "ledger.") {
+					checkpointSource = step.Expected
+					break
+				}
+			}
+		}
+	}
+	if observation.checkpointAuthority {
+		checkpointSource = ""
+		hasLedgerWork := false
+		hasCurrentLedgerWork := false
+		for _, work := range observation.work {
+			if work.kind == v2LedgerWork {
+				hasLedgerWork = true
+				hasCurrentLedgerWork = true
+			}
+		}
+		if journal != nil {
+			for _, step := range journal.Steps {
+				hasLedgerWork = hasLedgerWork || strings.HasPrefix(step.Resource, "ledger.")
+			}
+		}
+		if !hasLedgerWork {
+			checkpointSource = observation.checkpointSnapshot.Fingerprint
+		} else if transition.options.MigrationCheckpoint && journal != nil &&
+			journal.Checkpoint == JournalComplete &&
+			!hasCurrentLedgerWork &&
+			ledgerCheckpointHasSuffix(observation.migrationLedgerSnapshot.Checkpoint) {
+			// A fresh compaction journal following a completed legacy transaction
+			// binds the unchanged checkpoint authority. A journal whose marked
+			// scope was created for its own ledger work keeps that scope stable.
+			markedWithoutSource, scopeErr := transition.bindObservationScopeWithCheckpoint(
+				observation.activationScope, true,
+			)
+			if scopeErr != nil {
+				return scopeErr
+			}
+			if journal.ObservationScope != markedWithoutSource {
+				checkpointSource = observation.checkpointSnapshot.Fingerprint
+			}
+		}
+	}
+	scope, consent, err := transition.currentObservationScope(
+		observation.activationScope, journal,
+		transition.options.MigrationCheckpoint,
+		checkpointSource,
+	)
 	if err != nil {
 		return err
 	}
 	observation.observationScope = scope
+	observation.checkpointConsent = consent
 	if !stable || !resume || journal.ObservationScope == scope {
 		return nil
 	}
@@ -81,7 +138,11 @@ func (transition *V2Transition) observeActivationScope(ctx context.Context, obse
 	alternate.observations = slices.Clone(base.observations)
 	err = transition.observeActivation(ctx, &alternate)
 	if err == nil {
-		alternate.observationScope, err = transition.bindObservationScope(alternate.activationScope)
+		alternate.observationScope, alternate.checkpointConsent, err = transition.currentObservationScope(
+			alternate.activationScope, journal,
+			transition.options.MigrationCheckpoint,
+			checkpointSource,
+		)
 	}
 	if err == nil && alternate.observationScope == journal.ObservationScope {
 		*observation = alternate

@@ -15,7 +15,7 @@ import time
 
 
 GUEST_CHECK = '''
-import contextlib, hashlib, io, json, os, pathlib, re, runpy, stat, sys, time
+import contextlib, hashlib, io, json, os, pathlib, re, runpy, shutil, stat, sys, time
 sys.path.insert(0, '/usr/local/lib/subyard-android')
 import client
 mode, path = sys.argv[1:]
@@ -30,8 +30,47 @@ if mode == 'wires':
         except (FileNotFoundError, PermissionError, ProcessLookupError):
             pass
     result = count
-elif mode == 'status':
-    result = client.rpc('status')['slots']
+elif mode in ('status', 'heartbeat'):
+    result = client.rpc('status')['slots' if mode == 'status' else 'heartbeat_seconds']
+elif mode == 'runtimes':
+    import subprocess
+    units = subprocess.run(['systemctl', 'list-units', '--all', '--no-legend', '--plain',
+                            'subyard-android-slot-*.service'], capture_output=True, text=True, timeout=10)
+    if units.returncode:
+        raise RuntimeError('runtime unit observation failed')
+    lines = units.stdout.splitlines()
+    primary = sum(bool(re.fullmatch(r'subyard-android-slot-[0-9]{3}-[1-9][0-9]*[.]service', line.split()[0]))
+                  for line in lines if line.split())
+    result = dict(primary=primary, units=len(lines))
+elif mode == 'capacity':
+    status = client.rpc('status')
+    memory = status.get('memory', {})
+    if type(memory) is not dict:
+        memory = {}
+    result = {}
+    for key in ('visible_available_bytes', 'physical_available_bytes', 'cgroup_headroom_bytes',
+                'available_bytes', 'total_bytes', 'reserve_bytes', 'pending_bytes', 'admission_headroom_bytes'):
+        value = memory.get(key)
+        result[key] = value if type(value) is int and 0 <= value <= 1 << 60 else None
+    source = memory.get('limiting_source')
+    result['limiting_source'] = source if source in ('visible', 'physical', 'cgroup') else 'unknown'
+    broker = status.get('broker_memory', {})
+    result['broker_memory'] = {}
+    for key in ('ram_current_bytes', 'swap_current_bytes'):
+        value = broker.get(key) if type(broker) is dict else None
+        result['broker_memory'][key] = value if type(value) is int and 0 <= value <= 1 << 60 else None
+    try:
+        config = json.loads(pathlib.Path('/etc/subyard-android.json').read_text())
+        size = config['size']
+        result['disk_reserve_bytes'] = (2 * size + 1) * 1024**3 if type(size) is int and 1 <= size <= 64 else None
+        for name in ('images', 'runtimes'):
+            try:
+                free = shutil.disk_usage(pathlib.Path(config['state_root']) / name).free
+                result[name + '_free_bytes'] = free if 0 <= free <= 1 << 60 else None
+            except OSError:
+                result[name + '_free_bytes'] = None
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
 else:
     lease = client.read_lease(path)
     if mode in ('idle-display', 'wake-display'):
@@ -138,7 +177,7 @@ def main():
     require(len(sys.argv) == 8, 'invalid remote viewer fixture arguments')
     yard_bin, work, tools, owner_yard, project, instance, lease = sys.argv[1:]
     work, tools = Path(work), Path(tools)
-    require(not Path(lease).exists(), 'attached lease path must exist only inside the selected yard')
+    require(not lease or not Path(lease).exists(), 'attached lease path must exist only inside the selected yard')
     incus = ['/usr/bin/incus']
     if not os.access('/var/lib/incus/unix.socket', os.W_OK):
         incus = ['sudo', '-n', *incus]
@@ -188,7 +227,7 @@ def main():
                        ADB=str(tools / 'platform-tools/adb'), SDL_RENDER_DRIVER='software',
                        PYTHONDONTWRITEBYTECODE='1')
 
-    def view(arguments, phase, seconds=30, cancel=False, observe=None):
+    def view(arguments, phase, seconds=30, cancel=False, observe=None, capacity_refusal=False):
         # Resource sessions filter ambient variables; embed the observation window.
         wrapper.write_text('#!/usr/bin/python3\nimport importlib.util, sys\n'
                            f'spec = importlib.util.spec_from_file_location("window", {str(window)!r})\n'
@@ -242,9 +281,14 @@ def main():
                 code = completed.si_status if completed.si_code == os.CLD_EXITED else 128 + completed.si_status
             summary = evidence.capture_summary(log.read_bytes()[:262145], code)
             print('android viewer evidence: ' + json.dumps(summary, sort_keys=True), flush=True)
-            require(summary['rendered'] is True, 'public remote viewer did not render a frame')
-            require(cancelled and code != 0 if cancel else code == 0 and summary['result'] == 'passed',
-                    'public remote viewer returned an unexpected exit')
+            if summary.get('pool_error') == 'capacity':
+                report_capacity('refused')
+            if capacity_refusal:
+                require(evidence.safe_memory_refusal(summary), 'second viewer did not safely refuse memory capacity')
+            else:
+                require(summary['rendered'] is True, 'public remote viewer did not render a frame')
+                require(cancelled and code != 0 if cancel else code == 0 and summary['result'] == 'passed',
+                        'public remote viewer returned an unexpected exit')
             no_wires()
             print(f'E2E_PHASE phase=fixture/viewer-remote-{phase} state=end duration_seconds={int(time.monotonic() - started)} exit_code=0', flush=True)
         finally:
@@ -258,6 +302,38 @@ def main():
                     with contextlib.suppress(ProcessLookupError):
                         os.killpg(process.pid, signal.SIGKILL)
                     process.wait(timeout=5)
+
+    def report_capacity(observation):
+        try:
+            value = guest('capacity')
+        except Exception:
+            value = dict(observation='unavailable')
+        print('android-pool-remote capacity-' + observation + '=' + json.dumps(value, sort_keys=True), flush=True)
+
+    if not lease:
+        idle = {slot['slot_id']: slot for slot in guest('status')}
+        require(idle and all(slot['state'] == 'available' for slot in idle.values()),
+                'standalone viewer requires an idle pool')
+        heartbeat = guest('heartbeat')
+        require(type(heartbeat) is int and 1 <= heartbeat <= 1200,
+                'invalid public heartbeat interval')
+        observed = {}
+        def observe():
+            for slot in guest('status'):
+                if slot['state'] == 'held':
+                    prior = observed.setdefault(slot['slot_id'], dict(slot))
+                    if slot['expires_at'] > prior['expires_at']:
+                        observed['renewed'] = True
+        view(['--device', 'phone', '--api', '36', '--purpose', 'remote-viewer-acceptance'],
+             'standalone', seconds=heartbeat + 30, observe=observe)
+        slots = guest('status')
+        require(observed.get('renewed') and any(slot['generation'] > idle[slot['slot_id']]['generation']
+                                               for slot in slots),
+                'remote standalone viewer did not acquire and renew its own lease')
+        require(all(slot['state'] == 'available' for slot in slots) and guest('runtimes')['units'] == 0,
+                'remote standalone viewer leaked a lease or runtime')
+        print('android-pool-remote standalone-view=PASS lease=renewed-released slots=available', flush=True)
+        return
 
     guest('renew')
     before = guest('allocation')
@@ -282,26 +358,23 @@ def main():
     worker.start()
     slots = guest('status')
     idle = {slot['slot_id']: slot for slot in slots if slot['state'] == 'available'}
-    observed = {}
-    def observe():
-        for slot in guest('status'):
-            if slot['slot_id'] in idle and slot['state'] == 'held':
-                prior = observed.setdefault(slot['slot_id'], dict(slot))
-                if slot['expires_at'] > prior['expires_at']:
-                    observed['renewed'] = True
+    runtimes = guest('runtimes')
+    require(idle and runtimes['primary'] == 1, 'expected one borrowed runtime and a free slot')
     try:
         sleeping = guest('idle-display')
         require(sleeping['held'] is True and sleeping['forced'] is True and sleeping['deep'] == 'IDLE',
                 'idle display did not confirm Doze and retain its borrowed lease')
         print('android-pool-remote idle-display=asleep deep=IDLE forced=true borrowed=held cpuinfo=' +
               json.dumps(dict(before=sleeping['cpu_before'], after=sleeping['cpu_after']), sort_keys=True), flush=True)
+        report_capacity('before-standalone')
         view(['--device', 'phone', '--api', '36', '--purpose', 'remote-viewer-acceptance'],
-             'standalone', seconds=75, observe=observe)
+             'capacity-refusal', capacity_refusal=True)
     finally:
         original_error = sys.exc_info()[0] is not None
         try:
             # Restore even on failure, before any read-only attached viewer.
             require(guest('wake-display') is True, 'display restoration did not retain its borrowed lease')
+            print('android-pool-remote display-restoration=PASS deep=ACTIVE forced=false borrowed=held', flush=True)
         except Exception:
             if not original_error:
                 raise
@@ -314,11 +387,10 @@ def main():
     require(all(after[key] == before[key] for key in ('state', 'slot', 'generation', 'uid', 'mode', 'digest')),
             'remote standalone viewer changed borrowed lease ownership')
     slots = guest('status')
-    require(observed.get('renewed') and any(slot['slot_id'] in idle and slot['state'] == 'available'
-                                         and slot['generation'] > idle[slot['slot_id']]['generation'] for slot in slots),
-            'remote standalone viewer did not acquire, renew and release its own lease')
-    require(sum(slot['state'] == 'held' for slot in slots) == 1, 'remote viewer leaked an owned lease')
-    print('android-pool-remote standalone-view=PASS lease=renewed-released borrowed=held', flush=True)
+    require({slot['slot_id']: slot for slot in slots if slot['slot_id'] in idle} == idle
+            and sum(slot['state'] == 'held' for slot in slots) == 1 and guest('runtimes') == runtimes,
+            'refused second viewer changed a free slot or leaked a runtime')
+    print('android-pool-remote capacity-refusal=PASS borrowed=held free-slots=unchanged runtimes=1', flush=True)
 
     guest('renew')
     before = guest('allocation')

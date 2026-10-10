@@ -138,6 +138,48 @@ class LifecycleObservation(unittest.TestCase):
             with self.assertRaisesRegex(lifecycle.Failure, '^command unavailable$'):
                 lifecycle.call(['private-argument'])
 
+    def test_l2_requester_expiry_does_not_query_host_systemd(self):
+        now, killed = [0], [False]
+        process = SimpleNamespace(stderr=io.BytesIO(), poll=lambda: 0 if killed[0] else None,
+                                  kill=lambda: killed.__setitem__(0, True), wait=lambda **kwargs: 0)
+        def launch(arguments, **kwargs):
+            marker = lifecycle.re.search(r"pathlib.Path\('([^']+)'\)", arguments[-1])[1]
+            Path(marker).write_text(json.dumps(dict(pid=12345, endpoint='private-endpoint',
+                                                   slot='001', generation=2)))
+            return process
+        def run(arguments, **kwargs):
+            if arguments[0] == 'systemctl':
+                raise FileNotFoundError('host systemctl is unavailable in L2')
+            if arguments[1] == 'release':
+                return SimpleNamespace(returncode=0)
+            self.assertEqual(arguments[1], 'status')
+            heartbeat = 300 if now[0] >= 300 else 0
+            stamp = lambda seconds: time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(seconds))
+            slot = dict(slot_id='001', generation=2, owner=dict(purpose='android-memory-lease'),
+                        state='available' if killed[0] and now[0] >= 1500 else 'held',
+                        last_heartbeat_at=stamp(heartbeat), expires_at=stamp(heartbeat + 1200))
+            memory = dict(visible_available_bytes=1000, physical_available_bytes=800,
+                          cgroup_headroom_bytes=None, available_bytes=800, reserve_bytes=100,
+                          pending_bytes=0, admission_headroom_bytes=700)
+            return SimpleNamespace(returncode=0, stdout=json.dumps(dict(slots=[slot], memory=memory,
+                                  heartbeat_seconds=300, ttl_seconds=1200)))
+        fresh = dict(allocation=dict(slot_id='001', generation=3))
+        with patch.object(lifecycle.subprocess, 'Popen', side_effect=launch), \
+                patch.object(lifecycle.subprocess, 'run', side_effect=run), \
+                patch.object(lifecycle.time, 'monotonic', side_effect=lambda: now[0]), \
+                patch.object(lifecycle.time, 'time', side_effect=lambda: now[0]), \
+                patch.object(lifecycle.time, 'sleep', side_effect=lambda seconds: now.__setitem__(0, now[0] + seconds)), \
+                patch.object(lifecycle, 'adb', return_value=''), \
+                patch.object(lifecycle, 'acquire', side_effect=lambda directory, name: (directory / 'fresh.json', fresh)), \
+                patch.object(lifecycle, 'require_adb_unusable') as stale, \
+                patch.object(lifecycle, 'require_sdk') as sdk, \
+                patch.object(lifecycle.os, 'killpg'), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(lifecycle.memory_lease(), 0)
+        self.assertTrue(killed[0])
+        self.assertEqual(now[0], 1500)
+        stale.assert_called_once()
+        sdk.assert_called_once_with(fresh, 36)
+
 
 class Runtime:
     def __init__(self):
@@ -1506,6 +1548,8 @@ os.write(1, result.stdout)
         original = self.pool.allocation
         original_spawn = subprocess.Popen
         def delayed_spawn(*args, **kwargs):
+            # Initial provisioning may legitimately renew before the requester changes.
+            renewals.clear()
             command = original_spawn(*args, **kwargs)
             time.sleep(1.2)
             return command

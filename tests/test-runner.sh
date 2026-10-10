@@ -23,6 +23,10 @@ case " $* " in
       for ((i=0; i<50; i++)); do printf 'ok trailing/package/%s\n' "$i"; done
       exit 24
     fi
+    if [ "$(umask)" = "${RUNNER_BLOCK_UMASK:-}" ] && [ -n "${RUNNER_SIGNAL_MARKER:-}" ]; then
+      : > "$RUNNER_SIGNAL_MARKER"
+      while :; do sleep 1; done
+    fi
     ;;
 esac
 SH
@@ -106,6 +110,79 @@ awk -F '\t' '$1 == "check" && $3 == "tests/unit.sh" && $4 == "failed" && $5 == 2
 tail -n 1 "$summary" | grep -q $'^run\tall\tall\tfailed\t23\t' || fail 'failed run reported incorrectly'
 grep -q 'expected failure detail' "$tmp/failure.out" || fail 'failure detail was suppressed'
 ! grep -q 'RUN tests/contract.sh' "$tmp/failure.out" || fail 'runner continued after failure'
+
+# Signals during a foreground check must finalize the active check and run as failed.
+python3 - "$fixture/tests/run.sh" "$tmp" <<'PY'
+import csv
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+runner = Path(sys.argv[1])
+root = Path(sys.argv[2])
+def interrupted_case(name, sig, expected_status):
+    case = root / name
+    case.mkdir()
+    marker = case / 'blocked'
+    output_path = case / 'runner.out'
+    env = os.environ.copy()
+    env.update({
+        'PATH': str(root / 'tools') + os.pathsep + env.get('PATH', ''),
+        'RUNNER_GO_LOG': str(case / 'go.log'),
+        'RUNNER_BLOCK_UMASK': '0077',
+        'RUNNER_SIGNAL_MARKER': str(marker),
+        'TMPDIR': str(root / 'source with spaces' / '.build'),
+    })
+    with output_path.open('w') as output:
+        process = subprocess.Popen(
+            ['bash', str(runner)], stdout=output, stderr=subprocess.STDOUT,
+            env=env, start_new_session=True,
+        )
+        try:
+            deadline = time.monotonic() + 10
+            while not marker.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.05)
+            if not marker.exists():
+                raise AssertionError(f'{name}: runner did not reach blocked umask 0077 check')
+            os.killpg(process.pid, sig)
+            status = process.wait(timeout=10)
+        except BaseException:
+            if process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait(timeout=5)
+            raise
+
+    output = output_path.read_text()
+    summaries = [line.removeprefix('RESULTS ') for line in output.splitlines()
+                 if line.startswith('RESULTS ')]
+    if len(summaries) != 1:
+        raise AssertionError(f'{name}: missing unique summary path')
+    with Path(summaries[0]).open(newline='') as summary_file:
+        rows = list(csv.DictReader(summary_file, delimiter='\t'))
+    checks = [row for row in rows if row['kind'] == 'check']
+    runs = [row for row in rows if row['kind'] == 'run']
+    if status != expected_status:
+        raise AssertionError(f'{name}: native status {status}, expected {expected_status}')
+    summary_code = str(expected_status)
+    if not checks or (checks[-1]['suite'], checks[-1]['check'], checks[-1]['status'], checks[-1]['exit_code']) != (
+            'go', 'go-race', 'failed', summary_code):
+        raise AssertionError(f'{name}: interrupted check summary is wrong: {checks!r}')
+    if len(runs) != 1 or (runs[0]['status'], runs[0]['exit_code']) != ('failed', summary_code):
+        raise AssertionError(f'{name}: run summary is wrong: {runs!r}')
+    if any(line.startswith(('RUN go-fuzz', 'RUN build', 'RUN tests/')) for line in output.splitlines()):
+        raise AssertionError(f'{name}: runner continued after the interrupted check')
+
+
+for name, sig, expected in (('signal-int', signal.SIGINT, 130), ('signal-term', signal.SIGTERM, 143)):
+    interrupted_case(name, sig, expected)
+print('ok: SIGINT/SIGTERM fail the active check and stop the runner')
+PY
 
 # A failure inside a composite function must still stop it, even if its last command would pass.
 printf 'if\n' > "$fixture/scripts/00-broken.sh"

@@ -602,6 +602,7 @@ saved_gone_id="$(repo_id "$saved_gone")"
 saved_session="$(guest_dev python3 -B /tmp/orca-projects-helper.py cleanup-terminal \
   create "id:$saved_gone_id::$saved_gone")"
 saved_session_id="$(jq -er '.tab_id' <<<"$saved_session")"
+saved_session_pty_id="$(jq -er '.pty_id' <<<"$saved_session")"
 guest_dev rm -rf -- "$stale_folder/.git" "$stale_gone"
 guest_dev rm -rf -- "$saved_gone"
 if ! yard orca sync --yes >"$STATE/stale.out" 2>"$STATE/stale.err"; then
@@ -683,10 +684,16 @@ done
 for pending_selector in "${pending_selectors[@]}"; do
   guest_dev python3 -B /tmp/orca-projects-helper.py cleanup-terminal absent "$pending_selector"
 done
-orca_rpc session.tabs.listAll | jq -e \
-  --arg root "$session_id" --arg live "$saved_session_id" \
-  '[.snapshots[].tabs[].id] | index($root) != null and index($live) != null' >/dev/null \
-  || die 'restart lost unrelated tabs after pending-layout cleanup'
+# Restart stops this bare PTY; its missing checkout now has only a stale layout.
+# Reconcile explicitly so the assertion does not race periodic discovery.
+yard orca sync --yes >/dev/null
+assert_absent_repo "$saved_gone"
+guest_dev python3 -B /tmp/orca-projects-helper.py cleanup-terminal \
+  absent "id:$saved_gone_id::$saved_gone" --tab-id "$saved_session_id" \
+  --pty-id "$saved_session_pty_id"
+orca_rpc session.tabs.listAll | jq -e --arg root "$session_id" \
+  '.snapshots | any(.tabs | any(.id == $root))' >/dev/null \
+  || die 'restart lost the existing project terminal tab after pending-layout cleanup'
 resume_discovery
 
 stage 'preserving a changed hook list and repairing the missing dispatcher through explicit init'

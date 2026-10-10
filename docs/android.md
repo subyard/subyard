@@ -30,12 +30,16 @@ not flags to `yard init`. Setup never changes the outer yard's trust lane or ena
 privileges to work around missing devices. Both container and VM yards are supported.
 
 Provision adequate capacity before use: two devices reserve 7.5 GiB including the pool's
-yard allowance, so an 8 GiB yard has little remaining capacity for builds. Both presets use
+yard allowance. Yard processes and other workloads need additional capacity; this budget
+does not guarantee that two active emulators fit in 8 GiB. Both presets use
 two guest vCPUs and 2560 MiB guest RAM plus 1024 MiB per emulator for the runtime and renderer. Phone is
 1080×1920 at 420 dpi; tablet is 800×1280 at 160 dpi (an 800×1280 dp tablet layout).
 These are fixed presets, not a fallback chosen under memory pressure. The tablet stays below
 the emulator's three-million-pixel threshold, which otherwise forces 4 GiB guest RAM in
 [current emulator sources](https://android.googlesource.com/platform/external/qemu/+/refs/heads/emu-main-dev/android/android-emu/android/main-common.c).
+Native acceptance on the standard 8 GiB VM verifies one active emulator and safe capacity
+refusal for a second. Device/API combinations and owned viewers run sequentially; simultaneous
+native lease isolation is outside that scope.
 Admission bounds visible available RAM by every finite runtime cgroup ancestor and any verified
 read-only physical-owner meminfo bind. Virtualized LXCFS counters require that physical source;
 missing or unsafe evidence blocks allocation. Status reports these bounds, the limiting source,

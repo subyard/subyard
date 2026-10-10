@@ -367,9 +367,21 @@ producer or compatibility-bridge contract, rather than testing every version pai
 coverage retire only by explicit decision; no arbitrary time or release-count horizon removes them.
 
 Ledger V2 requires exact `Applied` registry-prefix history. Raising `minimumEpochs` or deleting old
-IDs alone is not migration retirement. A future checkpoint needs a separate compatible durable
-transition with readers shipped first, preserved completed history and preserved in-flight
-bindings. No checkpoint format is implemented; the shipped registry has two one-time migrations.
+IDs alone is not migration retirement. Separate schema 1 history checkpoints store prefix proofs and
+applied suffixes; the byte-identical legacy ledger remains a validated compatibility projection.
+A sealed optional owner marker selects the writer; new readers honor existing checkpoints. Initial
+conversion needs assessed authorization and verified readiness, preserving in-flight bindings.
+The existing observation scope binds the synthetic checkpoint capability and stable source-ledger
+fingerprint: marked grants retain conversion on restart; old exact scopes resume without conversion
+and need fresh consent later. Ordinary marked updates include conversion in their single consent.
+Advancing an existing checkpoint requires a verified reader marker in the exact current/from
+sealed release. An unaware source must activate a matching-epoch reader bridge first; a capable
+future target alone cannot satisfy that prerequisite. A frozen projection is not rollback
+permission after authoritative epochs advance. The checkpoint-aware runtime boundary validates
+unaware retained targets against their sealed registry and matching checkpoint/projection epochs,
+then rechecks pinned records at execution while preserving frozen transition-owner/catalog bindings.
+The main registry keeps both migrations. Future prefix/handler retirement needs proved history,
+an explicit new floor and released compatibility pins, with the documented bridge.
 See [Supported compatibility and recovery](resumable-release-transition-design.md#supported-compatibility-and-recovery).
 
 Current systemd convergence requires observed loaded/no pending daemon reload plus exact
@@ -397,8 +409,19 @@ strict: no replacement chains and no automatic cancellation of a legacy reservat
 `activation-only-replacement-v2` lifecycle contract is explicitly negotiated through process
 schema 2 `lifecycle-capabilities`; its `recovery-v2-` receipts use schema 2 with live and archived
 evidence. Cancellation admits only a proven unactivated successor; it preserves the predecessor
-and requires fresh authorized reassessment. Terminal receipt retirement requires proven closure
+and requires fresh authorized reassessment. A protected monotonic frontier binds the exact predecessor,
+generation and latest cancellation witness. Input cycles select fresh generations; changed inputs
+after a cancellation crash need a new grant while finishing original durable intent. Older
+cancellations compact only with frontier proof and reference checks. Terminal retirement needs closure
 and no current, pending or retained references; age and release count do not authorize deletion.
+Exact successor or predecessor completion can close unused receipts, including V1; V1 reservations
+are never cancelled automatically. Modern live/archive/frontier namespaces each have independent
+512 logical-record and 32 MiB byte budgets. Published/pending pairs count once logically; both files
+consume bytes. The frozen ordinary graph and V1 live namespace keep 256-record limits. Eligible
+cleanup precedes admission; failures preserve evidence with a ready cleanup warning.
+Earlier generationless prerelease V2 state cannot be adopted or rebaselined; preserve its journal,
+receipt and exact verified draft owner for original-owner resume. Local tags through v0.17.8 predate
+that draft recovery implementation; published release inventory was not inferred from those tags.
 Unknown partial mutation, source/settings work (including verified steps), ownership conflict and
 corrupt/foreign state remain blocked. See [Release migrations](../control-plane.md#release-migrations).
 
@@ -609,8 +632,12 @@ default.
 
 Phone 1080×1920/420dpi; tablet 800×1280/160dpi preserves tablet dp layout below automatic
 large-screen RAM floor. Each 2560 MiB guest plus 1024 MiB runtime, 512 MiB yard reserve totals
-7680 MiB; fixed presets, never silent resizing. One 8 GiB/40 GiB VM is agreed software-GLES
-acceptance scope; separate nested-broker pair requirement does not apply. See
+7680 MiB; fixed presets, never silent resizing. This admission budget does not guarantee
+that two active emulators fit alongside the yard and its other processes. Software-GLES
+acceptance uses one 8 GiB/40 GiB VM: one active emulator, a safe capacity refusal for a second,
+and sequential device/API and standalone-viewer checks. Simultaneous native lease isolation
+requires separate capacity and is outside this acceptance scope; synthetic fencing/busy checks
+remain required. The separate nested-broker pair requirement does not apply. See
 [Android](../android.md) and [emulator
 source](https://android.googlesource.com/platform/external/qemu/+/refs/heads/emu-main-dev/android/android-emu/android/main-common.c).
 
@@ -755,6 +782,10 @@ prove real Desktop/VPN/external account behavior. Native ARM checks run in CI. C
 shipped-profile same-candidate gates remain required for runtime publication; limited current VM
 checks do not replace that gate. See [Testing](../testing.md), [Test VMs](../test-vms.md), and
 [Development](../development.md).
+
+External profile acceptance is separately deferred for GitHub App live API, Hermes live provider,
+OpenClaw staging gateway and OpenClaw QA credential broker. Reproducible checks keep those four declared
+obligations unpassed until their own authorized external evidence is recorded for the same candidate.
 
 Choose the smallest allocation that proves the behavior: one standard VM for independent
 single-host checks, a pair for checks that coordinate two hosts, and the dedicated larger guest

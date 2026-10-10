@@ -107,6 +107,44 @@ func TestRegistryV2PathRejectsUnknownUnsupportedAndFutureEpochs(t *testing.T) {
 	}
 }
 
+func TestRegistryV2RetirementPreservesPrefixDigestAcrossRemainingSuffix(t *testing.T) {
+	catalog := registryV2TestCatalog(t)
+	original := RegistryV2{
+		SchemaVersion: RegistrySchemaV2,
+		MinimumEpochs: map[string]int{"settings": 1},
+		CurrentEpochs: map[string]int{"settings": 3},
+		Migrations: []MigrationDefinitionV2{
+			{ID: "settings-v2", Domain: "settings", FromEpoch: 1, ToEpoch: 2, Kind: "test-vms-settings-v1-to-v2"},
+			{ID: "settings-v3", Domain: "settings", FromEpoch: 2, ToEpoch: 3, Kind: "settings-fixture-v2-to-v3"},
+		},
+	}
+	if err := original.Validate(catalog); err != nil {
+		t.Fatal(err)
+	}
+	retiredDigest, err := original.MigrationPrefixDigest("settings", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retired := original
+	retired.MinimumEpochs = cloneEpochs(original.MinimumEpochs)
+	retired.MinimumEpochs["settings"] = 2
+	retired.Migrations = append([]MigrationDefinitionV2(nil), original.Migrations[1:]...)
+	retired.RetiredPrefixes = map[string]RetiredMigrationPrefixV2{
+		"settings": {ThroughEpoch: 2, Digest: retiredDigest},
+	}
+	if err := retired.Validate(catalog); err != nil {
+		t.Fatalf("retired registry invalid: %v", err)
+	}
+	want, err := original.MigrationPrefixDigest("settings", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := retired.MigrationPrefixDigest("settings", 3)
+	if err != nil || got != want {
+		t.Fatalf("prefix digest after retirement = %q, want %q, err=%v", got, want, err)
+	}
+}
+
 func TestCapabilityCatalogDigestIsCanonicalAndRejectsDuplicates(t *testing.T) {
 	left, err := NewCapabilityCatalog([]CapabilityDescriptor{
 		{Kind: "b-v1", Domain: "settings", Version: 1},

@@ -127,6 +127,11 @@ Each migration advances exactly one domain by one epoch. Cross-domain dependenci
 migration IDs and must precede their dependents in registry order. Validation rejects cycles, gaps,
 unknown domains/kinds and mismatched applied history before mutation.
 
+Completed history can use a separate compact checkpoint: per-domain prefix proof and applied suffix
+replace the growing applied list in the authoritative record. Frozen Ledger V2 remains an immutable
+compatibility projection, validated on every checkpoint read. Native migrations advance authoritative
+history once; existing journal/evidence bindings keep their meaning. See [Migration retirement](#migration-retirement).
+
 Derived runtime artifacts are outside migration epochs. Owner/registration schema changes are
 one-time migrations; broker engine/facade and installed power executable/unit convergence are
 activation responsibilities, including systemd reload and verification. A resource's persisted
@@ -335,6 +340,13 @@ before writing its unchanged V2 successor. The lifecycle extension negotiates
 separate contract; older recovery receipts retain their existing semantics. Terminal receipt
 retirement requires proof of closure and absence of current, pending or retained references;
 unknown or corrupt evidence blocks retirement. Age and release count supply no authority.
+A protected predecessor frontier binds a monotonic generation and the latest authorized cancellation
+witness. Pre-CAS input cycles select fresh generations; crash retry finishes durable cancellation
+intent while requiring a new grant for changed inputs. Compaction preserves that proof and cannot
+resurrect cancelled successors. V1 receipts retire only with exact terminal closure and reference
+checks; V1 cancellation and replacement chains remain excluded. Modern live/archive/frontier
+namespaces have independent 512-record and 32 MiB budgets; the frozen ordinary graph and V1 live
+namespace retain their 256-record limits.
 Detailed cancellation, publication and storage rules belong to the
 [recovery contract](../control-plane.md#release-migrations).
 
@@ -342,10 +354,48 @@ Detailed cancellation, publication and storage rules belong to the
 
 Ledger V2 validates `Applied` as the exact completed registry prefix. Raising `minimumEpochs` or
 deleting old migration IDs alone cannot retire that history: it can make an otherwise valid ledger
-unreadable. A future checkpoint must introduce its own compatible durable transition, ship readers
-before changing writers, and preserve completed history and unfinished recovery bindings. Such a
-transition must establish a new supported upgrade floor explicitly. No checkpoint format is
-implemented now; the shipped registry contains two one-time migrations.
+unreadable. The separate schema 1 `release-transition/v2/history-checkpoint.json` records per-domain
+epoch, compaction boundary, prefix digest and applied suffix, registry provenance and the immutable
+legacy projection's existence, fingerprint and epochs. Publication atomically switches authority;
+suffix advances update only the checkpoint. The assessed transition compacts the completed suffix
+after verified readiness, so later migrations do not accumulate completed IDs in the authoritative
+history. A changed or missing bound projection blocks reading.
+
+The verified owner's separate `config/release-checkpoint.json` marker selects the
+`migration-history-checkpoint-v1` writer. New readers honor existing checkpoints regardless of that
+marker. Initial conversion must be assessed, authorized and performed after verified readiness,
+preserving unfinished authorization and journal bindings. The checkpoint capability and
+stable source-ledger fingerprint bind that consent into existing `ObservationScope`. Exact marked
+scope resumes conversion under the original grant; exact legacy scope resumes without conversion and
+needs fresh consent afterward. A normal marked update includes conversion in one consent. Publication
+runs under the shared lock after verified readiness, with atomic authority and retry across interruption.
+Terminal publication retains the selected activation scope authorized before source mutations;
+completed readiness can widen after the checkpoint is compact. A post-activation journal replacement
+binds its fresh checkpoint consent to the actual ledger authority, after the legacy eligibility proof.
+Retained assets without the marker do not enable initial conversion. Once a checkpoint exists,
+advancing migration history requires the exact current/from sealed release to support its reader
+contract. An unaware source can activate a reader bridge while checkpoint and projection epochs
+agree; it cannot skip that bridge by selecting a checkpoint-capable future target. Initial conversion
+can retain the full result in the legacy projection because no prior checkpoint authority exists.
+After checkpoint history advances, the frozen projection is compatibility evidence, not rollback
+permission. Before dispatching rollback to an unaware retained target, the checkpoint-aware runtime
+boundary validates the checkpoint and pinned projection against that target's sealed registry,
+requires matching authoritative/projection epochs and rechecks both captured records at execution.
+It preserves the original selected transition owner, catalog and journal bindings. A marked target
+reads the checkpoint itself; a target without a transition registry keeps the existing active-owner
+route. An incompatible target blocks before mutation.
+
+Actual released-caller acceptance must prove the compatible owner path and frozen projection.
+The supplied checkpoint-capable candidate can serve as the matching-epoch bridge; this does not
+announce or publish it. The compatibility harness also seals a synthetic future epoch-3 owner from
+the same bound source to test bridge-first refusal, successful advance and refusal of epoch-2 rollback.
+That synthetic owner is a contract fixture, not a released baseline.
+
+The main registry retains both one-time migration IDs and the current floor. Future removal needs an
+explicit retired-prefix digest matching completed history, a declared new readable floor, and release
+of recovery/rollback compatibility pins that still need the full projection or old handlers. The
+[legacy support policy](legacy-migration-support.md) governs bridge publication and the notice window;
+preparing a checkpoint-capable candidate does not publish that bridge.
 
 ## Public error taxonomy
 

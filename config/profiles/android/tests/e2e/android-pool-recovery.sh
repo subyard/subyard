@@ -142,6 +142,10 @@ if mode == 'allocation':
     import client
     value = client.rpc('allocation', token=lease(sys.argv[2])['token'])
     assert value['state'] == 'held'
+    unit = f'subyard-android-slot-{value["slot_id"]}-{value["generation"]}.service'
+    cgroup = call('systemctl', 'show', unit, '-p', 'ControlGroup', '--value')
+    assert cgroup.returncode == 0 and cgroup.stdout.strip() == ('/system.slice/' + unit).encode(), \
+        'runtime is not outside the broker service memory ceiling'
     print(json.dumps([value['slot_id'], value['generation'], value['expires_at']]))
 elif mode == 'adb':
     value = lease(sys.argv[2])
@@ -252,7 +256,9 @@ if [ "$recovery_only" = 0 ]; then
 fi
 android_phase_begin boot
 printf 'android-pool-recovery phase=pool-service\n'
-guest 1320 android-broker acquire --lease-file "$first" \
+# Incus's launcher can be outside the guest PID namespace; keep a visible requester.
+guest 1320 python3 -c 'import subprocess,sys; sys.exit(subprocess.call(sys.argv[1:]))' \
+  android-broker acquire --lease-file "$first" \
   </dev/null >/dev/null
 check_guest 150 adb "$first"
 android_phase_end 0
@@ -305,7 +311,7 @@ timeout --foreground --kill-after=30 "$(remaining 1800)" \
   "$root" "$state" "$yard_name" "$project" "$instance" "$owner_adb" \
   --viewer "$work" "$first"
 android_phase_end 0
-android_phase_begin attached-standalone-capture
+android_phase_begin attached-capture
 printf 'android-pool-recovery phase=viewer\n'
 phase_log="$work/viewer.log"
 native_args=()
@@ -318,9 +324,6 @@ android_phase_end 0
 printf 'android-pool-recovery viewer=PASS server-start-delay=20s\n'
 phase_log=''
 fi
-[ "$viewer_only" = 0 ] || exit 0
-android_phase_begin pool-restart
-incus_exec 120 -- systemctl restart subyard-android-pool.service </dev/null
 await_idle() {
   local observed units attempt
   for ((attempt = 0; attempt < 45; attempt++)); do
@@ -333,13 +336,37 @@ await_idle() {
   done
   fail 'pool did not return to cached idle state'
 }
+if [ "$viewer_only" = 1 ]; then
+  # Fixture-owned release follows all borrowed-view assertions; viewers never release it.
+  guest 120 android-broker release --lease-file "$first" </dev/null >/dev/null
+else
+  android_phase_begin pool-restart
+  incus_exec 120 -- systemctl restart subyard-android-pool.service </dev/null
+fi
 await_idle
 check_guest 60 stale "$first"
-printf 'android-pool-recovery pool-restart=PASS\n'
+[ "$viewer_only" = 1 ] || printf 'android-pool-recovery pool-restart=PASS\n'
+
+if [ "$recovery_only" = 0 ]; then
+  # One emulator fits the standard VM. Exercise owned viewers sequentially on an idle pool.
+  android_phase_begin standalone-capture
+  phase_log="$work/standalone-viewer.log"
+  guest 1440 python3 - --standalone "${native_args[@]}" < "$root/config/profiles/android/tests/e2e/android-pool-viewer.py" \
+    > "$phase_log" 2>&1
+  python3 "$root/config/profiles/android/tests/e2e/android-pool-viewer.py" --summary "$phase_log" 0
+  phase_log=''
+  android_phase_begin public-remote-standalone
+  timeout --foreground --kill-after=30 "$(remaining 1800)" \
+    bash "$root/config/profiles/android/tests/e2e/android-pool-remote.sh" \
+    "$root" "$state" "$yard_name" "$project" "$instance" "$owner_adb" --standalone-viewer "$work"
+  android_phase_end 0
+fi
+[ "$viewer_only" = 0 ] || exit 0
 
 android_phase_begin yard-restart
 printf 'android-pool-recovery phase=yard-stop-start\n'
-guest 1320 android-broker acquire --lease-file "$second" \
+guest 1320 python3 -c 'import subprocess,sys; sys.exit(subprocess.call(sys.argv[1:]))' \
+  android-broker acquire --lease-file "$second" \
   </dev/null >/dev/null
 check_guest 150 adb "$second" "$first"
 yard 180 stop --yes >/dev/null

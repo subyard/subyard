@@ -98,6 +98,71 @@ func TestRecoveryReceiptPreservesCanonicalJournalsAndRequiresFreshBindings(t *te
 	}
 }
 
+func TestRecoveryLifecycleFrontierStrictShapeAndGenerationIdentity(t *testing.T) {
+	receipt := lifecycleReceiptFixture(t)
+	draft := receipt
+	draft.Generation = 0
+	if err := draft.Validate(); err == nil || !strings.Contains(err.Error(), "exact verified draft owner") {
+		t.Fatalf("generationless draft lacks actionable refusal: %v", err)
+	}
+	frontier := RecoveryFrontier{SchemaVersion: RecoveryLifecycleSchemaV1, Replacement: receipt.Replacement, Generation: 1}
+	payload, err := MarshalRecoveryFrontier(frontier)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, corrupted := range [][]byte{
+		bytes.Replace(payload, []byte(`"generation":1`), []byte(`"generation":0`), 1),
+		bytes.Replace(payload, []byte(`"generation":1`), []byte(`"generation":2`), 1),
+		bytes.Replace(payload, []byte(`"schemaVersion":1`), []byte(`"schemaVersion":1,"foreign":true`), 1),
+		append(append([]byte(nil), payload...), []byte("{}")...),
+	} {
+		if _, err := ParseRecoveryFrontier(corrupted); err == nil {
+			t.Fatal("invalid generation/frontier shape was accepted")
+		}
+	}
+	receipt.Generation++
+	if receipt.Validate() == nil {
+		t.Fatal("receipt accepted identity from another generation")
+	}
+	legacy, err := MarshalRecoveryReceipt(recoveryReceiptFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{`"generation":0,`, `"basePlan":"",`, `"reservation":"",`} {
+		corrupted := bytes.Replace(legacy, []byte(`"contract":`), []byte(field+`"contract":`), 1)
+		if _, err := ParseRecoveryReceipt(corrupted); err == nil {
+			t.Fatal("legacy V1 receipt accepted lifecycle fields")
+		}
+	}
+}
+
+func TestRecoveryLifecyclePredecessorCompletionWitnessRequiresExactJournal(t *testing.T) {
+	receipt := lifecycleReceiptFixture(t)
+	completed := receipt.Predecessor
+	completed.Checkpoint = JournalComplete
+	record := RecoveryLifecycleRecord{SchemaVersion: RecoveryLifecycleSchemaV1, Receipt: receipt, PredecessorCompleted: &completed}
+	if _, err := MarshalRecoveryLifecycleRecord(record); err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func(*JournalRecord){
+		func(journal *JournalRecord) { journal.Checkpoint = JournalReconciling },
+		func(journal *JournalRecord) { journal.Transaction = "tx-other" },
+		func(journal *JournalRecord) { journal.ObservationScope = digestC },
+		func(journal *JournalRecord) { journal.AuthorizationDigest = digestD },
+	} {
+		wrong := completed
+		mutate(&wrong)
+		record.PredecessorCompleted = &wrong
+		if record.Validate() == nil {
+			t.Fatal("predecessor witness accepted guessed journal fields")
+		}
+	}
+	record.PredecessorCompleted, record.Completed = &completed, &receipt.Successor
+	if record.Validate() == nil {
+		t.Fatal("two terminal kinds were accepted")
+	}
+}
+
 func TestRecoveryReceiptStoreResumesPublicationBoundariesWithoutJournalMutation(t *testing.T) {
 	for _, point := range []string{"after-pending-fsync", "before-publish", "after-publish-before-dir-fsync"} {
 		t.Run(point, func(t *testing.T) {

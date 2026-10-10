@@ -148,6 +148,76 @@ func TestCurrentTransitionCatchesUpInstalledReleaseWithoutSelection(t *testing.T
 	}
 }
 
+func TestCurrentDomainsReportsCheckpointAuthorityBeyondPinnedProjection(t *testing.T) {
+	fixture := newCurrentProcessFixture(t)
+	registry, digest, err := releasetransition.ParseRegistryV2(fixture.registry, releasetransition.BuiltinCapabilityCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := releasetransition.NewPOSIXV2Store(fixture.configHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline := releasetransition.BaselineLedgerV2(registry)
+	payload, _, err := releasetransition.MarshalLedgerV2(baseline, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing, err := store.ReadLedger()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompareAndSwapLedger(missing, payload); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := store.ReadMigrationLedger(registry, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ConvertMigrationLedger(initial, registry, digest, registry, digest); err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, err := store.ReadMigrationLedger(registry, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := baseline
+	for _, migration := range registry.Migrations {
+		state := completed.Domains[migration.Domain]
+		state.Epoch = migration.ToEpoch
+		state.Applied = append(state.Applied, migration.ID)
+		completed.Domains[migration.Domain] = state
+	}
+	if err := store.CompareAndSwapMigrationLedger(checkpoint, completed, registry, digest); err != nil {
+		t.Fatal(err)
+	}
+	runtime := New(Config{Environment: fixture.environment()})
+	defer runtime.Close()
+	snapshot, err := runtime.readCurrentSnapshot(fixture.runtimeRoot, fixture.configHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := runtime.verifyPublishedCandidate(context.Background(), fixture.candidate, fixture.runtimeRoot, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	verification := candidateVerification{candidate: fixture.candidate, digest: owner.manifestDigest,
+		version: owner.version, registryDigest: owner.registryDigest}
+	domains, err := runtime.currentDomains(context.Background(), fixture.runtimeRoot, verification, snapshot)
+	if err != nil || len(domains) != len(registry.CurrentEpochs) {
+		t.Fatalf("checkpoint domains = %#v, err=%v", domains, err)
+	}
+	for _, domain := range domains {
+		if domain.Epoch != registry.CurrentEpochs[domain.Domain] || len(domain.Pending) != 0 || !domain.LedgerPresent {
+			t.Fatalf("reported stale projection instead of authoritative checkpoint: %#v", domain)
+		}
+	}
+	if !bytes.Equal(snapshot.ledger.Payload, payload) {
+		t.Fatal("reporting checkpoint state changed pinned legacy projection")
+	}
+}
+
 func TestStaleCompletedRepairKeepsPlanStaleCurrentRetry(t *testing.T) {
 	fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalComplete)
 	marker := filepath.Join(filepath.Dir(fixture.runtimeRoot), "plan-stale")

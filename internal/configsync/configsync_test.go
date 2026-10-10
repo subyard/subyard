@@ -265,8 +265,11 @@ func TestVersionedConfigSyncRejectsInvalidLiveDefaultYardSettings(t *testing.T) 
 	)
 
 	_, err := BuildPlan(fixture.options(false))
-	if err == nil || !strings.Contains(err.Error(), "NOT_A_SUBYARD_SETTING") {
+	if err == nil || !strings.Contains(err.Error(), "unknown setting") {
 		t.Fatalf("invalid default-yard candidate setting was accepted: %v", err)
+	}
+	if strings.Contains(err.Error(), "NOT_A_SUBYARD_SETTING") {
+		t.Fatalf("unknown setting name leaked in diagnostic: %v", err)
 	}
 }
 

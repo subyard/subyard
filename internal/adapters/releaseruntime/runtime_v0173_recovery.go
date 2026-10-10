@@ -68,7 +68,7 @@ func (runtime *Runtime) inspectV0173ActivationOnlyRecovery(
 	if !isV0173ActivationOnlyBlocker(protected) || !before.ledger.Exists {
 		return protected, nil
 	}
-	domains, err := runtime.currentDomains(ctx, root, protected.owner, before.ledger)
+	domains, err := runtime.currentDomains(ctx, root, protected.owner, before)
 	if err != nil {
 		return protected, nil
 	}

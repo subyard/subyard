@@ -593,14 +593,24 @@ while True: time.sleep(1)
                 stream.write(b"\n")
                 for _ in range(220):
                     stream.write(b"ordinary controller line\n")
-                stream.write(b"E2E lease: secret-do-not-export type=subyard-pair vms=2 base=" + b"a" * 64 + b"\n")
+                for kind, count, fingerprint in ((b"subyard-pair", b"2", b"a"),
+                                                  (b"subyard-pair", b"1", b"b"),
+                                                  (b"android-test", b"1", b"c"),
+                                                  (b"android-test", b"2", b"d")):
+                    stream.write(b"E2E lease: secret-do-not-export type=" + kind + b" vms=" + count
+                                 + b" base=" + fingerprint * 64 + b"\n")
                 stream.write(b"E2E_PHASE phase=cleanup/release state=end duration_seconds=3 exit_code=0\n")
                 stream.write(b"E2E_PHASE phase=guest state=start duration_seconds=4 exit_code=0 vm=1\n")
             m.phase_events(output, "profile:sample/one", log, offset, seen, final=True)
             events = [json.loads(line) for line in (output / "events.jsonl").read_text().splitlines()]
-            self.assertEqual([item["event"] for item in events], ["environment", "controller-phase"])
-            self.assertEqual(events[0]["base_fingerprint"], "a" * 64)
-            self.assertEqual(events[1]["phase"], "cleanup/release")
+            self.assertEqual([item["event"] for item in events], ["environment"] * 3 + ["controller-phase"])
+            environments = [(item["type"], item["vm_count"], item["base_fingerprint"]) for item in events[:3]]
+            self.assertEqual(environments, [("subyard-pair", 2, "a" * 64),
+                                            ("subyard-pair", 1, "b" * 64),
+                                            ("android-test", 1, "c" * 64)])
+            self.assertEqual({marker for marker in seen if marker[0] == "environment"},
+                             {("environment", *environment) for environment in environments})
+            self.assertEqual(events[3]["phase"], "cleanup/release")
             self.assertNotIn("secret-do-not-export", json.dumps(events))
 
     def test_fixture_phases_are_bounded_and_preserve_failure(self):

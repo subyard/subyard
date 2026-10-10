@@ -397,7 +397,7 @@ if grep -Fq 'incus launch' "$ROOT/scripts/03-create-subyard.sh"; then
   fail "instance creation still bypasses the guarded start"
 fi
 srv_line="$(grep -nF 'incus config device add "$YARD_INSTANCE_NAME" srv disk' "$ROOT/scripts/03-create-subyard.sh" | cut -d: -f1)"
-start_line="$(grep -nF 'power_start_guarded "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" "$BRIDGE"' "$ROOT/scripts/03-create-subyard.sh" | cut -d: -f1)"
+start_line="$(grep -nF 'power_start_guarded "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" "$BRIDGE"' "$ROOT/scripts/03-create-subyard.sh" | cut -d: -f1 | sed -n '1p')"
 [ "$srv_line" -lt "$start_line" ] || fail "VM /srv can still be hot-added after the first start"
 grep -Fq 'incus_wait_instance_agent "$INCUS_PROJECT" "$YARD_INSTANCE_NAME"' \
   "$ROOT/scripts/lifecycle-guard.sh" || fail "yard start can return before the VM agent is ready"

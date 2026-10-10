@@ -228,7 +228,10 @@ func (prepared *preparedCommand) prepareNetwork(ctx context.Context, _ *initBoot
 	actionDelta := func(p yardnetwork.Plan) (domain.ActionID, domain.ActionDelta, error) {
 		action := domain.ActionID("yard.network.save")
 		consequences := []string{"save explicit network links on this host; isolation remains disabled"}
-		if p.Physical || p.Before.Policy.Isolation || p.Policy.Isolation {
+		pendingRestart := slices.ContainsFunc(p.Snapshot.Yards, func(y yardnetwork.ObservedYard) bool {
+			return slices.Contains(p.Policy.PendingStart, y.Name) && !strings.EqualFold(y.InstanceInfo.Status, "running")
+		})
+		if p.Physical || p.Before.Policy.Isolation || p.Policy.Isolation || pendingRestart {
 			action = "yard.network.apply"
 			mode := "disable host yard isolation and restore original network settings; retain saved links"
 			if p.Policy.Isolation {
@@ -263,7 +266,21 @@ func (prepared *preparedCommand) prepareNetwork(ctx context.Context, _ *initBoot
 		current = fresh
 		return actionDelta(fresh)
 	}
-	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, _ io.Writer) (domain.AdapterResult, error) {
+	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (domain.AdapterResult, error) {
+		for _, y := range current.Snapshot.Yards {
+			if !current.Changed || !y.InstanceFound || y.InstanceInfo.Type != domain.YardVM || y.InstanceInfo.Config["user.subyard.vm_cpu_weight"] == "" {
+				continue
+			}
+			running := strings.EqualFold(y.InstanceInfo.Status, "running")
+			willStart := slices.Contains(current.Policy.PendingStart, y.Name) && !running ||
+				current.Physical && running && slices.ContainsFunc(current.Updates, func(u yardnetwork.Update) bool { return u.Yard.Yard == y.Yard })
+			if willStart {
+				if err := prepared.CLI.prepareSudoPrivileges(ctx, diagnostics, prepared.CLI.effectiveUID(), "network"); err != nil {
+					return domain.AdapterResult{}, err
+				}
+				break
+			}
+		}
 		orchestrator.Runner = networkPolicyAdapter{service: service, plan: plan}
 		result, _, err := orchestrator.RunAdapter(ctx, prepared.Plan, domain.AdapterRequest{Schema: shelladapter.ProtocolSchema, OperationID: prepared.Plan.OperationID, Adapter: "network", Action: "apply"}, nil)
 		return result, err

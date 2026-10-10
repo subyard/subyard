@@ -219,6 +219,48 @@ func TestConfigApplyRepairUsesCompletedProtectedGateAndStableLock(t *testing.T) 
 	}
 }
 
+func TestConfigApplyRepairBindsCheckpointAuthorityAfterConversion(t *testing.T) {
+	fixture := newConfigApplyRepairFixture(t, false)
+	payload, err := readConfigApplyRegistry(fixture.cli.options.RepositoryRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, digest, err := releasetransition.ParseRegistryV2(payload, releasetransition.BuiltinCapabilityCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := releasetransition.NewPOSIXV2Store(fixture.cli.env["SUBYARD_CONFIG_HOME"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := store.ReadMigrationLedger(registry, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ConvertMigrationLedger(initial, registry, digest, registry, digest); err != nil {
+		t.Fatal(err)
+	}
+	permit, err := fixture.cli.prepareConfigApplyRepair(context.Background(), "default", false, fixture.outcome)
+	if err != nil || permit == nil || !permit.checkpointed {
+		t.Fatalf("checkpoint repair permit=%#v, err=%v", permit, err)
+	}
+	unlock, err := fixture.cli.lockConfigApplyRepair(context.Background(), permit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock()
+	checkpoint, err := store.ReadMigrationCheckpoint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(permit.configHome, "release-transition", "v2", "history-checkpoint.json"),
+		string(checkpoint.Payload)+"\n", 0o600)
+	if unlock, err := fixture.cli.lockConfigApplyRepair(context.Background(), permit); err == nil {
+		unlock()
+		t.Fatal("changed checkpoint authority admitted a previously assessed repair")
+	}
+}
+
 func TestConfigApplyRepairRejectsUnfinishedAndCorruptProtectedJournals(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	runtimeRoot := filepath.Join(root, "runtime-v2-config-apply-pending")

@@ -355,11 +355,20 @@ func (cli *CLI) executeProvision(
 		return domain.AdapterResult{}, err
 	}
 	contextValues := structuredCommandContext(loaded)
+	contextValues["SUBYARD_DISPATCHER_PATH"] = cli.options.DispatcherPath
+	if weight := instance.Config["user.subyard.vm_cpu_weight"]; weight != "" {
+		contextValues["VM_CPU_WEIGHT"] = weight
+	}
 	if strings.EqualFold(instance.Status, "stopped") && cli.options.AdapterRunner == nil {
 		if err := cli.prepareNetworkManagerPrivileges(
 			ctx, diagnostics, cli.effectiveUID(), "provision",
 		); err != nil {
 			return domain.AdapterResult{}, err
+		}
+		if contextValues["VM_CPU_WEIGHT"] != "" {
+			if err := cli.prepareSudoPrivileges(ctx, diagnostics, cli.effectiveUID(), "provision"); err != nil {
+				return domain.AdapterResult{}, err
+			}
 		}
 		if cli.env["SUBYARD_SUDO_PREAUTHORIZED"] == "1" {
 			contextValues["SUBYARD_SUDO_PREAUTHORIZED"] = "1"

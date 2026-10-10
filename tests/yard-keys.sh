@@ -322,8 +322,9 @@ grep -Fq 'invalid credential zone' "$TMP/zone.out" || fail 'invalid zone rejecti
 printf 'host-only-value' | yard_one keys add host-only --local-only --yes >/dev/null
 local_id="$(yard_one keys list | awk -F '\t' '$8=="host-only" {print $1}')"
 yard_one keys sync @two --now --yes >/dev/null
-yard_two keys list | grep -Fq shared-file || fail 'shared credential did not reach peer'
-if yard_two keys list | grep -Fq "$local_id"; then fail 'local-only credential reached peer'; fi
+peer_credentials="$(yard_two keys list)"
+grep -Fq shared-file <<<"$peer_credentials" || fail 'shared credential did not reach peer'
+if grep -Fq "$local_id" <<<"$peer_credentials"; then fail 'local-only credential reached peer'; fi
 
 # Same-value divergent rotations converge automatically.
 printf 'same-rotation' | yard_one keys rotate "$shared_id" --yes >/dev/null
@@ -446,7 +447,8 @@ bootstrap_keys four >/dev/null
 yard_three keys trust @srv4 --yes >/dev/null
 printf 'remote-wire-dummy' | yard_three keys add remote-static --yes >/dev/null
 yard_three keys sync @srv4 --now --yes >/dev/null
-yard_four keys list | grep -Fq remote-static || fail 'OWNER_YARD_NAME owner-host exchange did not converge'
+peer_credentials="$(yard_four keys list)"
+grep -Fq remote-static <<<"$peer_credentials" || fail 'OWNER_YARD_NAME owner-host exchange did not converge'
 grep -Fq 'ConnectTimeout=8' "$SUBYARD_TEST_SSH_LOG" || fail 'SSH/Git exchange omitted its bounded timeout'
 grep -Eq 'Y.*four' "$SUBYARD_TEST_SSH_LOG" || fail 'remote helper omitted OWNER_YARD_NAME composition'
 

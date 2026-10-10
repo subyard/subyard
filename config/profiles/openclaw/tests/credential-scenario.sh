@@ -27,8 +27,9 @@ grep -Fq 'invalid credential zone' "$TMP/zone.out" || fail 'invalid zone rejecti
 printf 'openclaw-host-only-value' | yard_one keys add openclaw-host-only --local-only --yes >/dev/null
 local_id="$(yard_one keys list | awk -F '\t' '$8=="openclaw-host-only" {print $1}')"
 yard_one keys sync @two --now --yes >/dev/null
-yard_two keys list | grep -Fq staging-file || fail 'shared credential did not reach peer'
-if yard_two keys list | grep -Fq "$local_id"; then fail 'local-only credential reached peer'; fi
+peer_credentials="$(yard_two keys list)"
+grep -Fq staging-file <<<"$peer_credentials" || fail 'shared credential did not reach peer'
+if grep -Fq "$local_id" <<<"$peer_credentials"; then fail 'local-only credential reached peer'; fi
 
 yard_one keys materialize canonical --yes >/dev/null
 [ "$(cat "$TMP/consumer-one/staging/canonical.env")" = "$secret" ] || fail 'local materialized content differs'

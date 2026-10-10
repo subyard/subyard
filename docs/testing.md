@@ -87,6 +87,8 @@ first failure it stops, prints the full failed Go check output or the last 40 lo
 for other checks, and points to the complete log.
 `RESULTS` and `SUMMARY` identify the run's `summary.tsv`, which has these columns:
 `kind`, `suite`, `check`, `status`, `exit_code`, `duration_seconds`, `log`.
+SIGINT and SIGTERM exit with 130 and 143 respectively; the active check and run are recorded as
+failed with that status, rather than passed with partial output.
 Log names are relative to that summary's directory. Each completed check has a
 `check` row; the final `run` row reports the whole invocation. A missing final row
 means the run did not finish reporting; absent checks have not passed. Durations

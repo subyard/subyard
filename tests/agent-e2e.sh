@@ -2145,7 +2145,7 @@ grep -Fq 'setsid env' "$v0111_recovery" \
   && grep -Fq 'IN_MOVED_TO' "$v0111_observer" \
   && grep -Fq 'os.O_NOFOLLOW' "$v0111_observer" \
   && grep -Fq 'os.getpid() != os.getpgrp()' "$v0111_observer" \
-  && grep -Fq 'os.getpgid(child.pid) != os.getpgrp()' "$v0111_observer" \
+  && grep -Fq 'os.getpgid(child.pid) != expected_group' "$v0111_observer" \
   && grep -Fq '"activation-intent", "target-active", "reconciling"' "$v0111_observer" \
   && grep -Fq 'journal.get("goal", {}).get("target") != args.candidate_target' \
     "$v0111_observer" \
@@ -2187,6 +2187,31 @@ fi
     .active == "releases/0.11.2-candidate"' \
     "$v0111_observer_probe/observed.json" >/dev/null \
   || fail 'v0.11.1 post-CAS observer did not interrupt its synthetic link activation'
+checkpoint_observer_rc=0
+setsid python3 "$v0111_observer" \
+  --runtime-root "$v0111_observer_probe/runtime" \
+  --journal "$v0111_observer_probe/journal.json" \
+  --source-transaction source --candidate-target 0.11.2-candidate \
+  --checkpoint "$v0111_observer_probe/history-checkpoint.json" \
+  --marker "$v0111_observer_probe/checkpoint-observed.json" --timeout 5 -- \
+  sh -c '
+    flock "$1/checkpoint-child.lock" sh -c '\''touch "$1/checkpoint-child.ready"; sleep 10'\'' _ "$1" &
+    while [ ! -f "$1/checkpoint-child.ready" ]; do sleep 0.01; done
+    sleep 0.05
+    printf "{\"schemaVersion\":1,\"domains\":{\"settings\":{\"epoch\":2,\"compactedThrough\":2,\"appliedSuffix\":[]}}}\n" \
+      > "$1/checkpoint.next"
+    mv "$1/checkpoint.next" "$1/history-checkpoint.json"
+    sleep 5
+  ' _ "$v0111_observer_probe" \
+  >/dev/null 2>"$v0111_observer_probe/checkpoint.stderr" &
+checkpoint_observer_pid=$!
+wait "$checkpoint_observer_pid" || checkpoint_observer_rc=$?
+[ "$checkpoint_observer_rc" = 137 ] \
+  && jq -e '.migrationCheckpoint.domains.settings.compactedThrough == 2' \
+    "$v0111_observer_probe/checkpoint-observed.json" >/dev/null \
+  || fail 'checkpoint observer did not interrupt its atomic publication'
+flock -n "$v0111_observer_probe/checkpoint-child.lock" true \
+  || fail 'checkpoint observer left a delegated child alive after interruption'
 v0111_unisolated_rc=0
 python3 "$v0111_observer" \
   --runtime-root "$v0111_observer_probe/runtime" \
@@ -3612,6 +3637,183 @@ for release_smoke_failure in success prepare reboot finish; do
       || fail "release smoke concealed $release_smoke_failure failure or disarmed cleanup"
   fi
 done
+
+# Publication must stop before reboot; altered retained state must fail before resume.
+# shellcheck disable=SC2034 # context globals are consumed by the extracted fixture helpers
+smoke_checkpoint_fixture_contract() {
+  (
+    set -euo pipefail
+    umask 0022
+    local scenario="$1" smoke_root="$TMP/smoke-checkpoint-$1"
+    STATE_ROOT="$smoke_root/state" OPERATOR_HOME="$smoke_root/operator"
+    RELEASE_ROOT="$STATE_ROOT/candidate"
+    OPERATOR=synthetic-smoke CANDIDATE_VERSION=candidate
+    OLD_RELEASE_TARGET=releases/predecessor
+    CANDIDATE_RELEASE_TARGET=releases/candidate-aaaaaaaaaaaa
+    V2_STATE_ROOT="$OPERATOR_HOME/.config/subyard/release-transition/v2"
+    V2_LEDGER="$V2_STATE_ROOT/ledger.json" V2_JOURNAL="$V2_STATE_ROOT/journal.json"
+    install -d -m 0700 "$STATE_ROOT" "$OPERATOR_HOME" "$OPERATOR_HOME/.config" "$OPERATOR_HOME/.config/subyard"
+    eval "$(sed -n '/^interrupt_checkpoint_update() {/,/^}/p' "$ROOT/dev/e2e/p0-release-smoke.sh")"
+    eval "$(sed -n '/^resume_checkpoint_update() {/,/^}/p' "$ROOT/dev/e2e/p0-release-smoke.sh")"
+    die() { printf '%s\n' "$*" >&2; exit 2; }
+    info() { :; }
+    ok() { printf '%s\n' "$*"; }
+    assert_runtime_links() {
+      case "$1 $2" in
+        'releases/predecessor ') ;;
+        'releases/candidate-aaaaaaaaaaaa releases/predecessor') ;;
+        *) die 'checkpoint fixture selected unexpected release links' ;;
+      esac
+    }
+    sudo() {
+      [ "$1" = -n ] || die 'unexpected fixture sudo call'
+      shift
+      if [ "$1" = install ] && [ "${2:-}" = -o ]; then
+        shift 5
+        command install "$@"
+      else
+        "$@"
+      fi
+    }
+    operator_env() {
+      case "$1" in
+        env)
+          case "${*: -1}" in
+            --check) printf '{"outcome":{"target":"candidate-aaaaaaaaaaaa"},"blockers":[]}\n' ;;
+            --yes)
+              printf 'resume\n' >> "$STATE_ROOT/updates"
+              [ "$scenario" != post-resume-change ] || printf 'changed\n' > "$V2_LEDGER"
+              if [ "$scenario" = post-resume-replacement ]; then
+                jq '.transaction = "replacement-tx"' "$V2_JOURNAL" > "$V2_JOURNAL.next"
+                mv "$V2_JOURNAL.next" "$V2_JOURNAL"
+              fi
+              ;;
+            *) die 'unexpected updater argument or unsupported predecessor flag' ;;
+          esac
+          ;;
+        setsid)
+          printf '%s\n' "$@" > "$STATE_ROOT/observer.argv"
+          printf '{"schemaVersion":1,"domains":{"core":{"epoch":1,"compactedThrough":1,"appliedSuffix":[]}}}\n' \
+            > "$V2_STATE_ROOT/history-checkpoint.json"
+          printf '{"schemaVersion":1,"projection":"retained"}\n' > "$V2_LEDGER"
+          printf '{"transaction":"smoke-tx","checkpoint":"complete","goal":{"direction":"activate-target","target":"candidate-aaaaaaaaaaaa"},"releases":{"target":"candidate-aaaaaaaaaaaa"}}\n' \
+            > "$V2_JOURNAL"
+          if [ "$scenario" != missing-observation ]; then
+            jq -n --slurpfile checkpoint "$V2_STATE_ROOT/history-checkpoint.json" \
+              '{transaction:"smoke-tx",checkpoint:"complete",migrationCheckpoint:$checkpoint[0]}' \
+              > "$OPERATOR_HOME/checkpoint-observed.json"
+          fi
+          if [ "$scenario" = mismatched-observation ]; then
+            jq '.transaction = "different-tx"' "$V2_JOURNAL" > "$V2_JOURNAL.next"
+            mv "$V2_JOURNAL.next" "$V2_JOURNAL"
+          fi
+          [ "$scenario" != wrong-interruption-status ] || return 0
+          return 137
+          ;;
+        test|install) "$@" ;;
+        *) die 'unexpected fixture operator call' ;;
+      esac
+    }
+    interrupt_checkpoint_update
+    [ "$(stat -c %a "$OPERATOR_HOME/.config/subyard/release-transition")" = 700 ] \
+      && [ "$(stat -c %a "$V2_STATE_ROOT")" = 700 ] \
+      || die 'unsafe transition directory mode after a fresh predecessor'
+    [ ! -e "$STATE_ROOT/updates" ] || die 'checkpoint publication resumed before reboot'
+    grep -Fxq -- --checkpoint "$STATE_ROOT/observer.argv"
+    grep -Fxq candidate-aaaaaaaaaaaa "$STATE_ROOT/observer.argv"
+    for record in checkpoint ledger journal; do
+      [ "$(stat -c %a "$STATE_ROOT/$record.before")" = 600 ] || die 'unsafe retained fixture record mode'
+    done
+    case "$scenario" in
+      changed-checkpoint) printf 'changed\n' > "$V2_STATE_ROOT/history-checkpoint.json" ;;
+      changed-ledger) printf 'changed\n' > "$V2_LEDGER" ;;
+      changed-journal) printf 'changed\n' > "$V2_JOURNAL" ;;
+    esac
+    resume_checkpoint_update
+    [ "$(cat "$STATE_ROOT/updates")" = resume ] || die 'checkpoint resumed more than once'
+  )
+}
+for smoke_checkpoint_scenario in success missing-observation wrong-interruption-status \
+  mismatched-observation changed-checkpoint changed-ledger changed-journal post-resume-change post-resume-replacement; do
+  smoke_checkpoint_log="$TMP/smoke-checkpoint-$smoke_checkpoint_scenario.log"
+  set +e
+  smoke_checkpoint_fixture_contract "$smoke_checkpoint_scenario" > "$smoke_checkpoint_log" 2>&1
+  smoke_checkpoint_rc=$?
+  set -e
+  if [ "$smoke_checkpoint_scenario" = success ]; then
+    if [ "$smoke_checkpoint_rc" != 0 ]; then
+      cat "$smoke_checkpoint_log" >&2
+      fail 'checkpoint publication did not resume with exact retained state'
+    fi
+  else
+    [ "$smoke_checkpoint_rc" = 2 ] || fail "checkpoint fixture hid $smoke_checkpoint_scenario"
+    if [[ "$smoke_checkpoint_scenario" != post-resume-* ]]; then
+      [ ! -e "$TMP/smoke-checkpoint-$smoke_checkpoint_scenario/state/updates" ] \
+        || fail "checkpoint resumed with $smoke_checkpoint_scenario"
+    fi
+    ! grep -q 'fresh-process resume passed' "$smoke_checkpoint_log" \
+      || fail 'checkpoint fixture reported PASS before checking preserved state'
+  fi
+done
+
+# shellcheck disable=SC2034 # context globals are consumed by the extracted fixture helper
+reliable_migrations_fixture_contract() {
+  (
+    eval "$(sed -n '/^create_local_yard() {/,/^}/p' "$ROOT/dev/e2e/reliable-migrations-recovery.sh")"
+    MARKER=synthetic-reliable-migrations
+    PROJECT_MUTATION_ARMED="$TMP/reliable-migrations-project-armed"
+    OWNED_EXTRA_YARDS=()
+    fixture_state='' fixture_intent='' fixture_starts=0
+    incus() {
+      case "$1 $2" in
+        'project show') return 1 ;;
+        'project create') ;;
+        *) fail 'unexpected reliable migrations fixture Incus call' ;;
+      esac
+    }
+    operator_yard() {
+      [ "$1" = -Y ] || fail 'fixture omitted explicit yard selection'
+      case "$3" in
+        init)
+          fixture_state=STOPPED fixture_intent=stopped
+          [ "$2" != default ] || { fixture_state=RUNNING; fixture_intent=running; }
+          ;;
+        start)
+          fixture_state=RUNNING fixture_intent=running
+          fixture_starts=$((fixture_starts + 1))
+          ;;
+        *) fail 'unexpected reliable migrations fixture yard command' ;;
+      esac
+    }
+    create_local_yard stopped
+    [ "$fixture_state" = STOPPED ] && [ "$fixture_intent" = stopped ] \
+      && [ "$fixture_starts" = 0 ] \
+      || fail 'stopped migration fixture was unnecessarily started or changed power intent'
+    for fixture_yard in default named; do
+      fixture_starts=0
+      create_local_yard "$fixture_yard"
+      [ "$fixture_state" = RUNNING ] && [ "$fixture_intent" = running ] \
+        && [ "$fixture_starts" = 1 ] \
+        || fail 'running migration fixture lost its explicit start'
+    done
+  )
+  local diagnostic_root="$TMP/private-diagnostic-sentinel" diagnostic_output diagnostic_rc=0
+  install -d -m 0700 "$diagnostic_root"
+  cat > "$diagnostic_root/diagnostic-helper.sh" <<'SH'
+helper_failure() { return 37; }
+helper_failure
+SH
+  chmod 0600 "$diagnostic_root/diagnostic-helper.sh"
+  diagnostic_output="$(DIAGNOSTIC_SENTINEL=private-environment-sentinel bash -Eeuo pipefail -c '
+    eval "$(sed -n '\''/^trap .* ERR$/p'\'' "$1")"
+    . "$2"
+  ' _ "$ROOT/dev/e2e/reliable-migrations-recovery.sh" \
+    "$diagnostic_root/diagnostic-helper.sh" private-argument-sentinel 2>&1)" || diagnostic_rc=$?
+  [ "$diagnostic_rc" = 37 ] \
+    && [[ "$diagnostic_output" =~ ^reliable-migrations-recovery:\ diagnostic-helper\.sh\ line\ [0-9]+\ failed\ \(exit\ 37\)$ ]] \
+    || fail 'fixture error diagnostic lost its source basename or original exit, or exposed private data'
+}
+reliable_migrations_fixture_contract
 
 # Switching fixture operators must isolate identity and the private working directory.
 (

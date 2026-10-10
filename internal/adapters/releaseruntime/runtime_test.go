@@ -18,6 +18,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -589,6 +590,130 @@ esac
 		t.Fatalf("missing owner fabricated readiness: %s", reportOutput.String())
 	}
 
+}
+
+func TestFrozenRollbackRequiresMatchingCheckpointProjection(t *testing.T) {
+	for _, scenario := range []string{"equal", "advanced", "changed-projection"} {
+		t.Run(scenario, func(t *testing.T) {
+			fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalComplete)
+			root := filepath.Dir(filepath.Dir(fixture.engine))
+			payload, err := os.ReadFile(filepath.Join("..", "..", "..", "config", "release-transition.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			testkit.WriteFile(t, filepath.Join(root, "config", "release-transition.json"), payload, 0o600)
+			engine, err := os.ReadFile(fixture.engine)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeProtectedRuntimeFixtureEngine(t, fixture, string(engine))
+			registry, digest, err := releasetransition.ParseRegistryV2(payload, releasetransition.BuiltinCapabilityCatalog())
+			if err != nil {
+				t.Fatal(err)
+			}
+			ledger := releasetransition.BaselineLedgerV2(registry)
+			complete := ledger
+			for _, migration := range registry.Migrations {
+				complete, err = complete.Advance(registry, migration)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if scenario != "advanced" {
+				ledger = complete
+			}
+			store, err := releasetransition.NewPOSIXV2Store(fixture.configHome)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, err := store.ReadLedger()
+			if err != nil {
+				t.Fatal(err)
+			}
+			projection, _, err := releasetransition.MarshalLedgerV2(ledger, registry)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.CompareAndSwapLedger(raw, projection); err != nil {
+				t.Fatal(err)
+			}
+			state, err := store.ReadMigrationLedger(registry, digest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.ConvertMigrationLedger(state, registry, digest, registry, digest); err != nil {
+				t.Fatal(err)
+			}
+			state, err = store.ReadMigrationLedger(registry, digest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "advanced" {
+				if err := store.CompareAndSwapMigrationLedger(state, complete, registry, digest); err != nil {
+					t.Fatal(err)
+				}
+			} else if scenario == "changed-projection" {
+				testkit.WriteFile(t, filepath.Join(filepath.Dir(fixture.journalPath), "ledger.json"), append(projection, '\n'), 0o600)
+			}
+			runtime := New(Config{Environment: fixture.environment()})
+			verified, err := runtime.verifyPublishedCandidate(context.Background(), publishedCandidate{
+				release: releasetransition.ReleaseID(fixture.target), root: root,
+			}, fixture.runtimeRoot, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer verified.Close()
+			checkpoint, err := store.ReadMigrationCheckpoint()
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = verifyCheckpointProjectionRollback(verified, store, checkpoint)
+			if (err == nil) != (scenario == "equal") {
+				t.Fatalf("frozen rollback %s: %v", scenario, err)
+			}
+			after, err := store.ReadMigrationCheckpoint()
+			if err != nil || !sameProtectedSnapshot(checkpoint, after) {
+				t.Fatalf("rollback guard changed checkpoint: %v", err)
+			}
+		})
+	}
+}
+
+func TestMigrationCheckpointReaderRequiresSealedCapability(t *testing.T) {
+	for _, scenario := range []string{"absent", "valid", "unmanifested", "changed", "invalid-contract"} {
+		t.Run(scenario, func(t *testing.T) {
+			fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalComplete)
+			root := filepath.Dir(filepath.Dir(fixture.engine))
+			path := filepath.Join(root, "config", "release-checkpoint.json")
+			payload := []byte(`{"schemaVersion":1,"contract":"migration-history-checkpoint-v1"}`)
+			if scenario == "invalid-contract" {
+				payload = []byte(`{"schemaVersion":1,"contract":"unknown"}`)
+			}
+			if scenario != "absent" {
+				testkit.WriteFile(t, path, payload, 0o600)
+				if scenario != "unmanifested" {
+					manifestPath := filepath.Join(root, "runtime-files.sha256")
+					manifest, err := os.ReadFile(manifestPath)
+					if err != nil {
+						t.Fatal(err)
+					}
+					manifest = append(manifest, []byte(fmt.Sprintf("%x  ./config/release-checkpoint.json\n", sha256.Sum256(payload)))...)
+					testkit.WriteFile(t, manifestPath, manifest, 0o600)
+				}
+				if scenario == "changed" {
+					testkit.WriteFile(t, path, []byte("changed"), 0o600)
+				}
+			}
+			reader, err := VerifyMigrationCheckpointReader(context.Background(), fixture.runtimeRoot, releasetransition.ReleaseID(fixture.target))
+			if scenario == "valid" || scenario == "absent" {
+				if err != nil || reader != (scenario == "valid") {
+					t.Fatalf("sealed source reader = %v, %v", reader, err)
+				}
+			} else if err == nil || reader {
+				t.Fatalf("unsafe source %s returned reader=%v, error=%v", scenario, reader, err)
+			}
+		})
+	}
 }
 
 func TestRollbackFactsRequireExactSealedArtifact(t *testing.T) {

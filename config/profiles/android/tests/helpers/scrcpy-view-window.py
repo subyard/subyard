@@ -15,9 +15,10 @@ import termios
 import time
 
 # Official v4.1 starts its timeout thread before publishing its callbacks.
-# Keep stock rendering, but request SDL quit externally after connection.
+# Keep stock rendering, but request SDL quit externally after observing video.
 # https://github.com/Genymobile/scrcpy/blob/v4.1/app/src/util/timeout.c
 MARKER = b'DEBUG: Server connected'
+TEXTURE = re.compile(rb'INFO: Texture: [0-9]{1,4}x[0-9]{1,4}')
 
 
 def safe_line(line):
@@ -25,7 +26,7 @@ def safe_line(line):
                 b'[server] ERROR: Video encoding error',
                 b'[server] DEBUG: Screen streaming stopped'):
         return line.decode('ascii')
-    if re.fullmatch(rb'INFO: Texture: [0-9]{1,4}x[0-9]{1,4}', line):
+    if TEXTURE.fullmatch(line):
         return line.decode('ascii')
     if re.fullmatch(rb"\[server\] DEBUG: Using video encoder: '(?:c2\.android\.avc\.encoder|c2\.goldfish\.h264\.encoder|c2\.ranchu\.h264\.encoder|OMX\.google\.h264\.encoder)'", line):
         return line.decode('ascii')
@@ -34,12 +35,12 @@ def safe_line(line):
     return None
 
 
-def run(command, seconds=30, shutdown_seconds=5):
+def run(command, seconds=30, shutdown_seconds=5, startup_seconds=120):
     if (type(command) is not list or not command or
             any(type(arg) is not str or not arg or '\0' in arg for arg in command) or
             not os.path.isabs(command[0]) or
             any(type(value) not in (int, float) or not math.isfinite(value) or value <= 0
-                for value in (seconds, shutdown_seconds))):
+                for value in (seconds, shutdown_seconds, startup_seconds))):
         return 125
     cancelled = [0]
     def cancel(number, frame):
@@ -48,8 +49,9 @@ def run(command, seconds=30, shutdown_seconds=5):
                 for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
     master = slave = pidfd = -1
     process = None
-    connected = stopping = None
+    first_frame = stopping = None
     requested = False
+    startup_expired = False
     native = None
     status = 125
     failed = False
@@ -62,6 +64,7 @@ def run(command, seconds=30, shutdown_seconds=5):
         termios.tcsetattr(slave, termios.TCSANOW, attrs)
         process = subprocess.Popen(command, stdin=subprocess.DEVNULL,
                                    stdout=slave, stderr=slave, start_new_session=True)
+        startup_deadline = time.monotonic() + startup_seconds
         os.close(slave)
         slave = -1
         if hasattr(os, 'pidfd_open'):
@@ -75,33 +78,12 @@ def run(command, seconds=30, shutdown_seconds=5):
         os.set_blocking(master, False)
         with selectors.DefaultSelector() as selector:
             selector.register(master, selectors.EVENT_READ)
-            while True:
-                # Keep the child unreaped until group cleanup: its PID/PGID cannot
-                # be reused for an unrelated process while it remains our zombie.
-                if os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT):
-                    break
-                now = time.monotonic()
-                if cancelled[0] and stopping is None:
-                    try:
-                        os.killpg(process.pid, signal.SIGTERM)
-                    except ProcessLookupError:
-                        continue
-                    stopping = now
-                elif connected is not None and not requested and stopping is None and now >= connected + seconds:
-                    try:
-                        if pidfd >= 0 and hasattr(signal, 'pidfd_send_signal'):
-                            signal.pidfd_send_signal(pidfd, signal.SIGTERM)
-                        else:
-                            os.kill(process.pid, signal.SIGTERM)
-                    except ProcessLookupError:
-                        continue  # Native exit won the race; preserve its signed result.
-                    requested, stopping = True, now
-                if stopping is not None and now >= stopping + shutdown_seconds:
-                    status = 128 + cancelled[0] if cancelled[0] else 124
-                    break
-                if not selector.select(0.02):
-                    continue
-                for _ in range(4):  # At most 64 KiB before checking timers/cancellation.
+            eof = False
+            def read_output():
+                nonlocal first_frame, pending, dropping, eof
+                if eof:
+                    return
+                for _ in range(4):  # At most 64 KiB per read, including the exit tail.
                     try:
                         data = os.read(master, 16384)
                     except BlockingIOError:
@@ -112,6 +94,7 @@ def run(command, seconds=30, shutdown_seconds=5):
                         data = b''
                     if not data:
                         selector.unregister(master)
+                        eof = True
                         break
                     parts = data.split(b'\n')
                     for index, part in enumerate(parts):
@@ -123,12 +106,42 @@ def run(command, seconds=30, shutdown_seconds=5):
                         if index == len(parts) - 1:
                             continue
                         if not dropping:
-                            if pending == MARKER and connected is None:
-                                connected = time.monotonic()
+                            if TEXTURE.fullmatch(pending) and first_frame is None:
+                                first_frame = time.monotonic()
                             line = safe_line(pending)
                             if line is not None:
                                 print(line, flush=True)
                         pending, dropping = b'', False
+            while True:
+                # Keep the child unreaped until group cleanup: its PID/PGID cannot
+                # be reused for an unrelated process while it remains our zombie.
+                if os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT):
+                    read_output()  # Preserve buffered evidence before closing the PTY.
+                    break
+                now = time.monotonic()
+                if cancelled[0] and stopping is None:
+                    try:
+                        os.killpg(process.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        continue
+                    stopping = now
+                elif not requested and stopping is None and (
+                        now >= first_frame + seconds if first_frame is not None else now >= startup_deadline):
+                    try:
+                        if pidfd >= 0 and hasattr(signal, 'pidfd_send_signal'):
+                            signal.pidfd_send_signal(pidfd, signal.SIGTERM)
+                        else:
+                            os.kill(process.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        continue  # Native exit won the race; preserve its signed result.
+                    requested, stopping = True, now
+                    startup_expired = first_frame is None
+                if stopping is not None and now >= stopping + shutdown_seconds:
+                    status = 128 + cancelled[0] if cancelled[0] else 124
+                    break
+                if not selector.select(0.02):
+                    continue
+                read_output()
     except (OSError, ValueError):
         failed = True
         status = 125
@@ -142,7 +155,7 @@ def run(command, seconds=30, shutdown_seconds=5):
             if cancelled[0]:
                 status = 128 + cancelled[0]
             elif not failed and status != 124:
-                status = native if native > 0 else 128 - native if native < 0 else 0 if requested else 1
+                status = native if native > 0 else 128 - native if native < 0 else 124 if startup_expired else 0 if requested else 1
         for fd in (master, slave, pidfd):
             if fd >= 0:
                 os.close(fd)

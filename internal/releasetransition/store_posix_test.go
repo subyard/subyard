@@ -9,6 +9,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func readCheckpointEvidence(
@@ -442,6 +444,157 @@ func TestPOSIXV2StoreCleanupKeepsWholeComponentAtDeletionBound(t *testing.T) {
 	}
 	if _, err := store.inspectTransactionGraph("tx-current", &journal); err != nil {
 		t.Fatalf("bounded cleanup left an invalid graph: %v", err)
+	}
+}
+
+func TestPOSIXV2StoreCleanupPreservesPreparedRoots(t *testing.T) {
+	for _, kind := range []string{"journal", "archive", "both"} {
+		t.Run(kind, func(t *testing.T) {
+			configHome := protectedConfigHome(t)
+			store, err := NewPOSIXV2Store(configHome)
+			if err != nil {
+				t.Fatal(err)
+			}
+			authorization := PlanToken("plan-v1-" + strings.Repeat("c", 64))
+			writeStoreCurrentJournal(t, store, "tx-current", authorization)
+			createStoreTransaction(t, store, "tx-prepared-source")
+			createStoreSupersession(t, store, "tx-prepared", "tx-prepared-source", authorization)
+			createStoreTransaction(t, store, "tx-unrelated")
+			if kind == "journal" || kind == "both" {
+				current, err := store.ReadCurrentJournal()
+				if err != nil {
+					t.Fatal(err)
+				}
+				journal, err := ParseJournal(current.Payload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				journal.Transaction = "tx-prepared"
+				journal.Checkpoint = JournalAuthorized
+				payload, err := MarshalJournal(journal)
+				if err != nil {
+					t.Fatal(err)
+				}
+				testkit.WriteFile(t, filepath.Join(configHome, "release-transition", "v2", ".journal.json.pending"), payload, 0o600)
+			}
+			if kind == "archive" || kind == "both" {
+				root := filepath.Join(configHome, "release-transition", "v2", "transactions", "tx-prepared")
+				if err := os.Rename(filepath.Join(root, "superseded-journal.json"), filepath.Join(root, ".superseded-journal.json.pending")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := store.CleanupTransactions("tx-current"); err != nil {
+				t.Fatal(err)
+			}
+			for _, transaction := range []string{"tx-prepared", "tx-prepared-source"} {
+				if _, err := os.Stat(filepath.Join(configHome, "release-transition", "v2", "transactions", transaction)); err != nil {
+					t.Fatalf("prepared root %s was removed: %v", transaction, err)
+				}
+			}
+			if _, err := os.Stat(filepath.Join(configHome, "release-transition", "v2", "transactions", "tx-unrelated")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("unrelated evidence was retained: %v", err)
+			}
+			archive := storeSupersessionRecord(t, "tx-prepared-source", authorization)
+			resolved, err := store.ResolveSupersededJournalTransaction("tx-another", archive.Replacement, authorization)
+			if err != nil || resolved != "tx-prepared" {
+				t.Fatalf("prepared intent no longer resumes exactly: %s, %v", resolved, err)
+			}
+		})
+	}
+}
+
+func TestPOSIXV2StoreCleanupRejectsInvalidPreparedRootsWithoutDeletion(t *testing.T) {
+	for _, kind := range []string{"journal", "archive", "conflict", "authorization", "missing source"} {
+		t.Run(kind, func(t *testing.T) {
+			configHome := protectedConfigHome(t)
+			store, err := NewPOSIXV2Store(configHome)
+			if err != nil {
+				t.Fatal(err)
+			}
+			authorization := PlanToken("plan-v1-" + strings.Repeat("c", 64))
+			writeStoreCurrentJournal(t, store, "tx-current", authorization)
+			createStoreTransaction(t, store, "tx-unrelated")
+			createStoreTransaction(t, store, "tx-source")
+			createStoreSupersession(t, store, "tx-prepared", "tx-source", authorization)
+			root := filepath.Join(configHome, "release-transition", "v2")
+			switch kind {
+			case "journal":
+				testkit.WriteFile(t, filepath.Join(root, ".journal.json.pending"), []byte("{\n"), 0o600)
+			case "archive":
+				testkit.WriteFile(t, filepath.Join(root, "transactions", "tx-prepared", ".superseded-journal.json.pending"), []byte("{\n"), 0o600)
+			case "conflict", "missing source":
+				source := TransactionID("tx-source")
+				if kind == "missing source" {
+					source = "tx-absent"
+				}
+				archive := storeSupersessionRecord(t, source, PlanToken("plan-v1-"+strings.Repeat("d", 64)))
+				payload, err := MarshalSupersededJournal(archive)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if kind == "missing source" {
+					if err := os.Remove(filepath.Join(root, "transactions", "tx-prepared", "superseded-journal.json")); err != nil {
+						t.Fatal(err)
+					}
+				}
+				testkit.WriteFile(t, filepath.Join(root, "transactions", "tx-prepared", ".superseded-journal.json.pending"), payload, 0o600)
+			case "authorization":
+				current, err := store.ReadCurrentJournal()
+				if err != nil {
+					t.Fatal(err)
+				}
+				journal, err := ParseJournal(current.Payload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				journal.Transaction = "tx-prepared"
+				journal.AuthorizationPlan = PlanToken("plan-v1-" + strings.Repeat("d", 64))
+				journal.IntentDigest = bindJournalIntent(journal.AuthorizationPlan, journal.ResumePlan, journal.ObservationScope, journal.Steps)
+				payload, err := MarshalJournal(journal)
+				if err != nil {
+					t.Fatal(err)
+				}
+				testkit.WriteFile(t, filepath.Join(root, ".journal.json.pending"), payload, 0o600)
+			}
+			before := snapshotStoreV2Tree(t, configHome)
+			if err := store.CleanupTransactions("tx-current"); err == nil {
+				t.Fatal("invalid prepared root was accepted")
+			}
+			if after := snapshotStoreV2Tree(t, configHome); !bytes.Equal(before, after) {
+				t.Fatal("cleanup changed evidence before rejecting invalid prepared roots")
+			}
+		})
+	}
+}
+
+func TestPOSIXV2StoreIndependentSupersessionHistoryBeyondGraphCeiling(t *testing.T) {
+	configHome := protectedConfigHome(t)
+	store, err := NewPOSIXV2Store(configHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorization := PlanToken("plan-v1-" + strings.Repeat("c", 64))
+	for index := 0; index < maxTransactionGraphEntries+2; index++ {
+		source := TransactionID(fmt.Sprintf("tx-source-%03d", index))
+		successor := TransactionID(fmt.Sprintf("tx-successor-%03d", index))
+		createStoreTransaction(t, store, source)
+		archive := storeSupersessionRecord(t, source, authorization)
+		resolved, err := store.ResolveSupersededJournalTransaction(successor, archive.Replacement, authorization)
+		if err != nil || resolved != successor {
+			t.Fatalf("admission %d failed: %s, %v", index, resolved, err)
+		}
+		createStoreSupersession(t, store, successor, source, authorization)
+		writeStoreCurrentJournal(t, store, successor, authorization)
+		if err := store.CleanupTransactions(successor); err != nil {
+			t.Fatalf("cleanup %d: %v", index, err)
+		}
+		graph, err := store.readTransactionGraph()
+		if err != nil || len(graph.entries) != 2 {
+			t.Fatalf("history %d did not converge to the exact current pair: %#v, %v", index, graph, err)
+		}
+		if err := graph.validateMissingPredecessors(); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

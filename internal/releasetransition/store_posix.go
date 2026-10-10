@@ -67,7 +67,7 @@ func (store *POSIXV2Store) CompareAndSwapCurrentJournal(
 		before, parseErr := ParseJournal(expected.Payload)
 		after, nextErr := ParseJournal(payload)
 		if parseErr == nil && nextErr == nil && before.Checkpoint == JournalComplete &&
-			IsRecoveryTransaction(before.Transaction) && before.Transaction != after.Transaction {
+			before.Transaction != after.Transaction {
 			current, err := store.ReadCurrentJournal()
 			if err != nil {
 				return err
@@ -405,6 +405,7 @@ type v2TransactionGraph struct {
 	directories map[TransactionID]struct{}
 	known       map[TransactionID]struct{}
 	archives    map[TransactionID]SupersededJournalRecord
+	pending     map[TransactionID]struct{}
 	edges       map[TransactionID]TransactionID
 	successors  map[TransactionID]TransactionID
 	protected   map[string]struct{}
@@ -482,12 +483,47 @@ func (store *POSIXV2Store) inspectTransactionGraph(
 		return nil, err
 	}
 	graph.protected = map[string]struct{}{string(current): {}}
-	if predecessor, exists := graph.edges[current]; exists {
-		archive := graph.archives[current]
-		if currentJournal == nil || archive.AuthorizationPlan != currentJournal.AuthorizationPlan {
-			return nil, errors.New("superseded journal does not match the current authorization plan")
+	protectJournal := func(journal *JournalRecord) error {
+		if journal == nil {
+			if _, archived := graph.edges[current]; archived {
+				return errors.New("superseded journal has no selected journal authorization")
+			}
+			return nil
 		}
-		graph.protected[string(predecessor)] = struct{}{}
+		graph.protected[string(journal.Transaction)] = struct{}{}
+		if predecessor, exists := graph.edges[journal.Transaction]; exists {
+			if graph.archives[journal.Transaction].AuthorizationPlan != journal.AuthorizationPlan {
+				return errors.New("superseded journal does not match selected or prepared authorization plan")
+			}
+			graph.protected[string(predecessor)] = struct{}{}
+		}
+		return nil
+	}
+	if err := protectJournal(currentJournal); err != nil {
+		return nil, err
+	}
+	pending, err := store.readRecord([]string{"release-transition", "v2"}, ".journal.json.pending")
+	if err != nil {
+		return nil, err
+	}
+	if pending.Exists {
+		journal, err := ParseJournal(pending.Payload)
+		if err != nil {
+			return nil, err
+		}
+		canonical, err := MarshalJournal(journal)
+		if err != nil || !bytes.Equal(canonical, pending.Payload) {
+			return nil, errors.New("prepared journal is not canonical protected evidence")
+		}
+		if err := protectJournal(&journal); err != nil {
+			return nil, err
+		}
+	}
+	// Fsynced archive publication is its own durable prepared intent. Its
+	// successor and source survive cleanup until that pending intent is resolved.
+	for transaction := range graph.pending {
+		graph.protected[string(transaction)] = struct{}{}
+		graph.protected[string(graph.edges[transaction])] = struct{}{}
 	}
 	return graph, nil
 }
@@ -522,12 +558,27 @@ func (store *POSIXV2Store) readTransactionGraph() (*v2TransactionGraph, error) {
 		known[transaction] = struct{}{}
 	}
 	archives := make(map[TransactionID]SupersededJournalRecord)
+	pending := make(map[TransactionID]struct{})
 	edges := make(map[TransactionID]TransactionID)
 	successors := make(map[TransactionID]TransactionID)
 	for transaction := range directories {
+		parts := []string{"release-transition", "v2", "transactions", string(transaction)}
 		snapshot, err := store.ReadSupersededJournal(transaction)
 		if err != nil {
 			return nil, err
+		}
+		prepared, err := store.readRecord(parts, ".superseded-journal.json.pending")
+		if err != nil {
+			return nil, err
+		}
+		if snapshot.Exists && prepared.Exists && !bytes.Equal(snapshot.Payload, prepared.Payload) {
+			return nil, errors.New("pending superseded journal conflicts with published archive")
+		}
+		if prepared.Exists {
+			pending[transaction] = struct{}{}
+			if !snapshot.Exists {
+				snapshot = prepared
+			}
 		}
 		if !snapshot.Exists {
 			continue
@@ -535,6 +586,10 @@ func (store *POSIXV2Store) readTransactionGraph() (*v2TransactionGraph, error) {
 		archive, err := ParseSupersededJournal(snapshot.Payload)
 		if err != nil {
 			return nil, err
+		}
+		canonical, err := MarshalSupersededJournal(archive)
+		if err != nil || !bytes.Equal(canonical, snapshot.Payload) {
+			return nil, errors.New("superseded journal is not canonical protected evidence")
 		}
 		predecessor := archive.Replacement.Transaction
 		known[predecessor] = struct{}{}
@@ -581,6 +636,7 @@ func (store *POSIXV2Store) readTransactionGraph() (*v2TransactionGraph, error) {
 	return &v2TransactionGraph{
 		entries: entries, directories: directories, known: known,
 		archives: archives, edges: edges, successors: successors,
+		pending: pending,
 	}, nil
 }
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Kill an E2E transition after its journaled atomic link activation."""
+"""Kill an owned E2E transition at atomic activation or checkpoint publication."""
 
 import argparse
 import ctypes
@@ -18,6 +18,7 @@ import time
 IN_CREATE = 0x00000100
 IN_MOVED_TO = 0x00000080
 EVENT_HEADER = struct.Struct("iIII")
+checkpoint_child_group: int | None = None
 
 
 def fail(message: str) -> int:
@@ -32,6 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source-transaction", required=True)
     parser.add_argument("--candidate-target", required=True)
     parser.add_argument("--marker", required=True)
+    parser.add_argument("--checkpoint", help="observe this new migration checkpoint instead of current")
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
@@ -84,6 +86,18 @@ def observe_activation(args: argparse.Namespace) -> dict | None:
     }
 
 
+def observe_checkpoint(args: argparse.Namespace) -> dict | None:
+    checkpoint = read_journal(args.checkpoint)
+    journal = read_journal(args.journal)
+    if (checkpoint.get("schemaVersion") != 1
+            or not checkpoint.get("domains")
+            or journal.get("goal", {}).get("target") != args.candidate_target
+            or journal.get("releases", {}).get("target") != args.candidate_target):
+        return None
+    return {"transaction": journal["transaction"],
+            "checkpoint": journal["checkpoint"], "migrationCheckpoint": checkpoint}
+
+
 def write_marker(path: str, observation: dict) -> None:
     payload = (json.dumps(observation, sort_keys=True) + "\n").encode()
     descriptor = os.open(
@@ -118,12 +132,15 @@ def child_status(child: subprocess.Popen[bytes]) -> int:
     return status
 
 
-def interrupt_live_child(child: subprocess.Popen[bytes]) -> None:
+def interrupt_live_child(child: subprocess.Popen[bytes], separate_group: bool = False) -> None:
     status = child.poll()
     if status is not None:
         fail_group(f"transition exited with status {child_status(child)} before exact activation")
     try:
-        os.kill(child.pid, signal.SIGKILL)
+        if separate_group:
+            os.killpg(child.pid, signal.SIGKILL)
+        else:
+            os.kill(child.pid, signal.SIGKILL)
     except ProcessLookupError:
         fail_group("transition exited before exact activation SIGKILL")
     status = child.wait()
@@ -134,6 +151,11 @@ def interrupt_live_child(child: subprocess.Popen[bytes]) -> None:
 def kill_isolated_group(signum: signal.Signals) -> None:
     if os.getpid() != os.getpgrp():
         os._exit(125)
+    if checkpoint_child_group is not None:
+        try:
+            os.killpg(checkpoint_child_group, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
     if signum != signal.SIGKILL:
         signal.signal(signum, signal.SIG_DFL)
     os.killpg(os.getpgrp(), signum)
@@ -150,6 +172,7 @@ def forward_signal(signum: int, _frame: object) -> None:
 
 
 def main() -> int:
+    global checkpoint_child_group
     args = parse_args()
     child: subprocess.Popen[bytes] | None = None
     if (
@@ -161,6 +184,8 @@ def main() -> int:
         or args.runtime_root == os.path.sep
         or not args.candidate_target
         or "/" in args.candidate_target
+        or (args.checkpoint and (not os.path.isabs(args.checkpoint)
+                               or os.path.dirname(args.checkpoint) != os.path.dirname(args.journal)))
     ):
         return fail("invalid arguments")
     if os.getpid() != os.getpgrp():
@@ -171,6 +196,8 @@ def main() -> int:
         pass
     else:
         return fail("observation marker already exists")
+    if args.checkpoint and os.path.lexists(args.checkpoint):
+        return fail("migration checkpoint already exists")
 
     libc = ctypes.CDLL(None, use_errno=True)
     descriptor = libc.inotify_init1(os.O_CLOEXEC | os.O_NONBLOCK)
@@ -180,7 +207,7 @@ def main() -> int:
     try:
         watch = libc.inotify_add_watch(
             descriptor,
-            os.fsencode(args.runtime_root),
+            os.fsencode(os.path.dirname(args.checkpoint) if args.checkpoint else args.runtime_root),
             IN_CREATE | IN_MOVED_TO,
         )
         if watch < 0:
@@ -189,8 +216,12 @@ def main() -> int:
 
         for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
             signal.signal(signum, forward_signal)
-        child = subprocess.Popen(args.command, stdin=subprocess.DEVNULL)
-        if os.getpgid(child.pid) != os.getpgrp():
+        child = subprocess.Popen(args.command, stdin=subprocess.DEVNULL,
+                                 start_new_session=bool(args.checkpoint))
+        if args.checkpoint:
+            checkpoint_child_group = child.pid
+        expected_group = child.pid if args.checkpoint else os.getpgrp()
+        if os.getpgid(child.pid) != expected_group:
             child.kill()
             child.wait()
             return fail("transition child did not join the isolated process group")
@@ -209,12 +240,21 @@ def main() -> int:
                     offset += EVENT_HEADER.size
                     name = events[offset : offset + length].split(b"\0", 1)[0]
                     offset += length
-                    if name != b"current" or not mask & IN_MOVED_TO:
+                    expected = os.fsencode(os.path.basename(args.checkpoint)) if args.checkpoint else b"current"
+                    if name != expected or not mask & IN_MOVED_TO:
                         continue
-                    observation = observe_activation(args)
+                    if args.checkpoint:
+                        # Freeze the updater and any delegated writer at the
+                        # rename event before reading its final records.
+                        os.killpg(child.pid, signal.SIGSTOP)
+                        observation = observe_checkpoint(args)
+                    else:
+                        observation = observe_activation(args)
                     if observation is None:
+                        if args.checkpoint:
+                            os.killpg(child.pid, signal.SIGCONT)
                         continue
-                    interrupt_live_child(child)
+                    interrupt_live_child(child, separate_group=bool(args.checkpoint))
                     write_marker(args.marker, observation)
                     kill_isolated_group(signal.SIGKILL)
             status = child_status(child)

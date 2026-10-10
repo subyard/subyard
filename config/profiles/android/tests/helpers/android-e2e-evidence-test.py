@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import re
 import struct
 import subprocess
 import sys
@@ -29,6 +30,94 @@ viewer = load('android-pool-viewer')
 monitor = load('android-pool-monitor')
 lifecycle = load('android-pool-lifecycle')
 remote_viewer = load('android-pool-remote-viewer')
+
+# The full recovery verifier checks the live unit in the yard's systemd namespace.
+recovery_check = (E2E / 'android-pool-recovery.sh').read_text().split(
+    'cat > "$work/check.py" <<\'PY\'\n', 1)[1].split('\nPY\n', 1)[0]
+with tempfile.TemporaryDirectory(prefix='android-host-cgroup-') as temporary:
+    lease_path = Path(temporary, 'lease.json')
+    lease_path.write_text(json.dumps(dict(token='private-token', allocation=dict(request=dict(device='phone', api=36)))))
+    lease_path.chmod(0o600)
+    unit = 'subyard-android-slot-001-2.service'
+    allocation = dict(state='held', slot_id='001', generation=2, expires_at='2026-10-09T00:20:00Z')
+    for code, group in ((0, '/system.slice/' + unit), (0, '/system.slice/subyard-android-pool.service'),
+                        (0, ''), (1, '/system.slice/' + unit)):
+        with patch.dict(sys.modules, client=SimpleNamespace(rpc=lambda *args, **kwargs: allocation)), \
+                patch.object(sys, 'argv', ['guest', 'allocation', str(lease_path)]), \
+                patch.object(sys, 'path', list(sys.path)), \
+                patch('subprocess.run', return_value=SimpleNamespace(returncode=code, stdout=group.encode())), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            try:
+                exec(compile(recovery_check, '<recovery-check>', 'exec'), {})
+            except AssertionError:
+                assert code != 0 or group != '/system.slice/' + unit
+                assert not output.getvalue()
+            else:
+                assert code == 0 and group == '/system.slice/' + unit
+                assert json.loads(output.getvalue()) == ['001', 2, allocation['expires_at']]
+        assert ('001' in output.getvalue()) is (code == 0 and group == '/system.slice/' + unit)
+        assert 'private-token' not in output.getvalue()
+
+# A fast boot must still leave enough rendered time for an owned viewer heartbeat.
+for heartbeat, renew in ((300, True), (300, False), (True, True), (0, True), (1201, True)):
+    with tempfile.TemporaryDirectory(prefix='android-remote-renewal-') as temporary:
+        clock, process_state = [0], {}
+        def remote_run(arguments, **kwargs):
+            mode = arguments[-2]
+            if mode == 'heartbeat':
+                result = heartbeat
+            elif mode == 'status':
+                active = process_state and clock[0] < process_state['window']
+                slot = dict(slot_id=1, generation=2 if process_state else 1,
+                            state='held' if active else 'available')
+                if active:
+                    slot['expires_at'] = '2026-10-09T00:%02d:00Z' % (30 if renew and clock[0] >= heartbeat else 25)
+                result = [slot]
+            else:
+                assert mode in ('wires', 'runtimes')
+                result = 0 if mode == 'wires' else dict(primary=0, units=0)
+            return SimpleNamespace(returncode=0, stdout=json.dumps(result).encode())
+        def remote_process(arguments, **kwargs):
+            wrapper = Path(temporary, 'viewer-bin/scrcpy').read_text()
+            process_state['window'] = int(re.search(r'seconds=([0-9]+)', wrapper)[1])
+            kwargs['stdout'].write(b'INFO: Texture: 640x360\n')
+            return SimpleNamespace(pid=12345, wait=lambda timeout: 0)
+        def remote_wait(*arguments):
+            if clock[0] >= process_state['window']:
+                return SimpleNamespace(si_code=remote_viewer.os.CLD_EXITED, si_status=0)
+            return None
+        with patch.object(sys, 'argv', ['remote-viewer', '/candidate/yard', temporary,
+                                       '/controller/tools', 'owner', 'project', 'instance', '']), \
+                patch.object(remote_viewer.subprocess, 'run', side_effect=remote_run), \
+                patch.object(remote_viewer.subprocess, 'Popen', side_effect=remote_process), \
+                patch.object(remote_viewer.os, 'waitid', side_effect=remote_wait), \
+                patch.object(remote_viewer.os, 'killpg'), \
+                patch.object(remote_viewer.signal, 'signal'), \
+                patch.object(remote_viewer.time, 'monotonic', side_effect=lambda: clock[0]), \
+                patch.object(remote_viewer.time, 'sleep', side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            try:
+                remote_viewer.main()
+                assert type(heartbeat) is int and 1 <= heartbeat <= 1200 and renew
+            except RuntimeError as exc:
+                expected = ('remote standalone viewer did not acquire and renew its own lease'
+                            if type(heartbeat) is int and 1 <= heartbeat <= 1200 else 'invalid public heartbeat interval')
+                assert str(exc) == expected and (not renew or type(heartbeat) is not int or not 1 <= heartbeat <= 1200)
+        assert ('standalone-view=PASS lease=renewed-released' in output.getvalue()) is (heartbeat == 300 and renew)
+
+# One emulator has a primary and an egress unit; idle cleanup requires neither.
+for units, expected in (
+        ('', dict(primary=0, units=0)),
+        ('subyard-android-slot-001-2.service loaded active running private-description\n'
+         'subyard-android-slot-001-2-egress.service loaded active running private-description\n',
+         dict(primary=1, units=2))):
+    with patch.dict(sys.modules, client=SimpleNamespace()), \
+            patch.object(sys, 'argv', ['guest', 'runtimes', '']), \
+            patch.object(sys, 'path', list(sys.path)), \
+            patch('subprocess.run', return_value=SimpleNamespace(returncode=0, stdout=units)), \
+            contextlib.redirect_stdout(io.StringIO()) as output:
+        exec(compile(remote_viewer.GUEST_CHECK, '<guest-check>', 'exec'), {})
+    assert json.loads(output.getvalue()) == expected and 'private-' not in output.getvalue()
 
 # Execute the private guest protocol: confirmed Doze, restoration, bounded CPU
 # projection and failed/unknown observations never expose helper output.
@@ -291,6 +380,108 @@ with contextlib.redirect_stdout(io.StringIO()):
 assert bytes(sink.sent) == metadata + frame and observed.frames == 1
 
 secret = 'private-token-and-endpoint'
+memory_error = ('Android capacity: insufficient memory: required=3758096384 available=4294967295 '
+                'reserve=536870912 pending=0 source=cgroup; no slot was preempted')
+expected_capacity = dict(kind='memory', required_bytes=3758096384, available_bytes=4294967295,
+                         reserve_bytes=536870912, pending_bytes=0, limiting_source='cgroup')
+for suffix in ('', '; runtime was stopped'):
+    summary = viewer.capture_summary(memory_error + suffix, 1)
+    assert summary['capacity'] == expected_capacity and viewer.valid_viewer_summary(summary)
+    assert viewer.safe_memory_refusal(summary)
+# Only a bounded, failed, non-rendering memory refusal with a real deficit is expected.
+for raw, code in ((memory_error, 0), (memory_error, 124),
+                  (memory_error + '\nINFO: Texture: 640x360', 1),
+                  (memory_error.replace('available=4294967295', 'available=4294967296'), 1),
+                  (memory_error.replace('required=3758096384', 'required=0'), 1),
+                  ('Android capacity: insufficient space for image download and extraction', 1),
+                  ('Android capacity: ' + secret, 1),
+                  ('Android boot_timeout: ' + secret, 1), (secret * 262144, 1)):
+    assert not viewer.safe_memory_refusal(viewer.capture_summary(raw, code))
+
+# Standalone mode never borrows a lease and must leave its pool idle on success.
+for diagnostic, before_state, after_state in ((False, 'available', 'available'),
+                                            (True, 'available', 'available'),
+                                            (False, 'held', 'available'),
+                                            (False, 'available', 'held')):
+    client = SimpleNamespace(rpc=lambda operation: next(statuses))
+    statuses = iter(dict(slots=[dict(state=state)]) for state in (before_state, after_state))
+    with patch.object(viewer.importlib.util, 'spec_from_file_location'), \
+            patch.object(viewer.importlib.util, 'module_from_spec', return_value=client), \
+            patch.object(viewer.os, 'getuid', return_value=1000), \
+            patch.object(sys, 'argv', ['viewer', '--standalone', *(['--native-debug'] if diagnostic else [])]), \
+            patch.object(viewer, 'view') as view, contextlib.redirect_stdout(io.StringIO()):
+        try:
+            viewer.main()
+            assert before_state == after_state == 'available'
+        except RuntimeError:
+            assert 'held' in (before_state, after_state)
+    if before_state == 'available':
+        view.assert_called_once_with(['--device', 'phone', '--api', '35', '--purpose', 'viewer-acceptance'],
+                                     'standalone-capture', native_debug=diagnostic)
+    else:
+        view.assert_not_called()
+for message, kind in viewer.CAPACITY_DISK_ERRORS.items():
+    summary = viewer.capture_summary('Android capacity: ' + message + '; runtime was stopped', 1)
+    assert summary['capacity'] == dict(kind=kind) and viewer.valid_viewer_summary(summary)
+for raw in (memory_error + secret, memory_error.replace('source=cgroup', 'source=' + secret),
+            memory_error.replace('pending=0', 'pending=-1'),
+            memory_error.replace('required=3758096384', 'required=1152921504606846977'),
+            'Android capacity: ' + secret,
+            'Android capacity: insufficient space for image download and extraction ' + secret):
+    summary = viewer.capture_summary(raw, 1)
+    assert 'capacity' not in summary and secret not in json.dumps(summary)
+    assert summary['pool_error'] == 'capacity' and viewer.valid_viewer_summary(summary)
+summary = viewer.capture_summary('Android stale: private\n' + memory_error, 1)
+assert summary['pool_error'] == 'stale' and 'capacity' not in summary
+for key, invalid in (('required_bytes', True), ('available_bytes', -1), ('reserve_bytes', 1 << 61),
+                     ('pending_bytes', secret), ('limiting_source', secret), ('extra', secret)):
+    summary = viewer.capture_summary(memory_error, 1)
+    summary['capacity'][key] = invalid
+    assert not viewer.valid_viewer_summary(summary)
+for capacity in (None, [], dict(kind=secret), dict(kind='memory'), dict(kind='userdata', extra=secret)):
+    summary = viewer.capture_summary('Android capacity: unknown', 1)
+    summary['capacity'] = capacity
+    assert not viewer.valid_viewer_summary(summary)
+
+# Execute the actual guest projection; private status/config values never leave it.
+for memory in (dict(total_bytes=8 * 1024**3, available_bytes=4 * 1024**3, reserve_bytes=536870912,
+                    limiting_source='physical', private=secret, pending_bytes=True,
+                    visible_available_bytes=-1, cgroup_headroom_bytes=1 << 61), [secret]):
+    guest_client = SimpleNamespace(rpc=lambda operation: dict(memory=memory, private=secret,
+                                   broker_memory=dict(ram_current_bytes=123, swap_current_bytes=True, private=secret)))
+    config = dict(state_root='/private/pool-root', size=2, token=secret)
+    with patch.dict(sys.modules, client=guest_client), \
+            patch.object(sys, 'argv', ['guest', 'capacity', '/private/guest-lease.json']), \
+            patch.object(sys, 'path', list(sys.path)), \
+            patch.object(Path, 'read_text', return_value=json.dumps(config)), \
+            patch('shutil.disk_usage', return_value=SimpleNamespace(free=123456789)), \
+            contextlib.redirect_stdout(io.StringIO()) as capacity_output:
+        exec(compile(remote_viewer.GUEST_CHECK, '<guest-check>', 'exec'), {})
+    raw = capacity_output.getvalue()
+    assert secret not in raw and '/private' not in raw
+    projected = json.loads(raw)
+    assert projected['disk_reserve_bytes'] == 5 * 1024**3
+    assert projected['images_free_bytes'] == projected['runtimes_free_bytes'] == 123456789
+    assert projected['pending_bytes'] is projected['visible_available_bytes'] is projected['cgroup_headroom_bytes'] is None
+    assert projected['limiting_source'] == ('physical' if type(memory) is dict else 'unknown')
+    assert projected['total_bytes'] == (8 * 1024**3 if type(memory) is dict else None)
+    assert projected['broker_memory'] == dict(ram_current_bytes=123, swap_current_bytes=None)
+
+for pool_error in ('boot_timeout', 'stale', 'transport', 'heartbeat'):
+    summary = viewer.capture_summary(f'Android {pool_error}: {secret}\n', 1)
+    assert summary['pool_error'] == pool_error and summary['result'] == 'failed'
+    assert viewer.valid_viewer_summary(summary) and secret not in json.dumps(summary)
+summary = viewer.capture_summary('Android boot_timeout: private\nAndroid stale: private\n', 1)
+assert summary['pool_error'] == 'boot_timeout'
+for raw in (f'Android {secret}: private\n', 'prefix Android stale: private\n',
+            'Android stale_suffix: private\n'):
+    summary = viewer.capture_summary(raw, 1)
+    assert 'pool_error' not in summary and secret not in json.dumps(summary)
+for invalid in (secret, [], {}, 23):
+    summary = viewer.capture_summary('', 1)
+    summary['pool_error'] = invalid
+    assert not viewer.valid_viewer_summary(summary)
+
 malicious = {'metadata': secret, 'complete_frames': 2, 'stream': 'observed',
              'result': 'passed', 'child_exit': 0, 'relay': secret}
 for raw in ('android-capture {malformed', 'android-capture ' + json.dumps(malicious),
@@ -634,15 +825,15 @@ for status, raw in [('timeout', startup_log), ('limit', startup_log),
     assert result['evidence'] == 'unknown' and result['counts'] is None and secret not in json.dumps(result)
     assert all(value is None for value in result['guest'].values())
 
-# Native VM counters read bounded kernel fixtures, never Android or process data.
+# Yard-visible counters read bounded kernel fixtures, never Android or process data.
 cpu_raw = b'cpu  10 20 30 40 50 60 70 80 90 100\ncpu0 private-counter-token\n'
 mem_raw = b'MemTotal:       8388608 kB\nMemAvailable:   1048576 kB\nPrivate: private-counter-token\n'
-native_sample = dict(cpu_ticks=dict(user=10, nice=20, system=30, idle=40, iowait=50, irq=60, softirq=70, steal=80),
+yard_sample = dict(cpu_ticks=dict(user=10, nice=20, system=30, idle=40, iowait=50, irq=60, softirq=70, steal=80),
                      ticks_per_second=100, mem_total_kb=8388608, mem_available_kb=1048576)
 with tempfile.TemporaryDirectory(prefix='subyard-native-observation-') as directory:
     proc = Path(directory)
     for stat_raw, memory_raw, expected_cpu, expected_memory in (
-            (cpu_raw, mem_raw, native_sample['cpu_ticks'], (8388608, 1048576)),
+            (cpu_raw, mem_raw, yard_sample['cpu_ticks'], (8388608, 1048576)),
             (None, None, None, (None, None)),
             (b'cpu private-counter-token\n', mem_raw, None, (8388608, 1048576)),
             (b'cpu 1 2 3 4 5 6 7\n', mem_raw, None, (8388608, 1048576)),
@@ -650,10 +841,10 @@ with tempfile.TemporaryDirectory(prefix='subyard-native-observation-') as direct
             (b'cpu -1 2 3 4 5 6 7 8\n', mem_raw, None, (8388608, 1048576)),
             (b'cpu 18446744073709551616 2 3 4 5 6 7 8\n', mem_raw, None, (8388608, 1048576)),
             (b'cpu ' + b'1 ' * 300 + b'\n', mem_raw, None, (8388608, 1048576)),
-            (cpu_raw, b'MemTotal: private-counter-token kB\nMemAvailable: 0 kB\n', native_sample['cpu_ticks'], (None, 0)),
-            (cpu_raw, b'MemTotal: 1 kB\nMemTotal: 2 kB\n', native_sample['cpu_ticks'], (None, None)),
-            (cpu_raw, b'MemTotal: 1 kB\nMemAvailable: 2 kB', native_sample['cpu_ticks'], (None, None)),
-            (cpu_raw, mem_raw + b'x' * 8192, native_sample['cpu_ticks'], (None, None))):
+            (cpu_raw, b'MemTotal: private-counter-token kB\nMemAvailable: 0 kB\n', yard_sample['cpu_ticks'], (None, 0)),
+            (cpu_raw, b'MemTotal: 1 kB\nMemTotal: 2 kB\n', yard_sample['cpu_ticks'], (None, None)),
+            (cpu_raw, b'MemTotal: 1 kB\nMemAvailable: 2 kB', yard_sample['cpu_ticks'], (None, None)),
+            (cpu_raw, mem_raw + b'x' * 8192, yard_sample['cpu_ticks'], (None, None))):
         for name, raw in (('stat', stat_raw), ('meminfo', memory_raw)):
             path = proc / name
             if raw is None:
@@ -661,23 +852,23 @@ with tempfile.TemporaryDirectory(prefix='subyard-native-observation-') as direct
             else:
                 path.write_bytes(raw)
         with patch.object(monitor.os, 'sysconf', return_value=100):
-            observed_native = monitor.native_observation(proc)
-        assert observed_native == dict(cpu_ticks=expected_cpu, ticks_per_second=100,
+            observed_yard = monitor.yard_observation(proc)
+        assert observed_yard == dict(cpu_ticks=expected_cpu, ticks_per_second=100,
                                        mem_total_kb=expected_memory[0], mem_available_kb=expected_memory[1])
-        assert 'private' not in json.dumps(observed_native) and 'guest' not in json.dumps(observed_native)
+        assert 'private' not in json.dumps(observed_yard) and 'guest' not in json.dumps(observed_yard)
     for invalid_ticks in (0, -1, True, 100.5, 'private-counter-token'):
         with patch.object(monitor.os, 'sysconf', return_value=invalid_ticks):
-            assert monitor.native_observation(proc)['ticks_per_second'] is None
+            assert monitor.yard_observation(proc)['ticks_per_second'] is None
     with patch.object(monitor.os, 'sysconf', side_effect=OSError(secret)):
-        assert monitor.native_observation(proc)['ticks_per_second'] is None
+        assert monitor.yard_observation(proc)['ticks_per_second'] is None
 
 clock, scheduled = [0], []
-native_samples = []
-def native_snapshot():
-    native_samples.append(clock[0])
-    return native_sample
+yard_samples = []
+def yard_snapshot():
+    yard_samples.append(clock[0])
+    return yard_sample
 def display_snapshot(slot):
-    assert native_samples[-1] == clock[0], 'native counters must precede blocking ADB queries'
+    assert yard_samples[-1] == clock[0], 'native counters must precede blocking ADB queries'
     return dict(query='timeout', screen_state='unknown')
 ages = iter((451, 481, 1101, 1131, 1161))
 def monitor_sleep(_seconds):
@@ -699,7 +890,7 @@ def early_shell(slot, command, seconds, limit, first_line=False):
     return ('ok', startup_log) if clock[0] < 1100 else ('timeout', startup_log)
 with patch.object(monitor, 'initialize'), patch.object(monitor, 'slot_states', return_value=[(slot, 'provisioning')]), \
         patch.object(monitor, 'metrics', return_value=None), \
-        patch.object(monitor, 'native_observation', side_effect=native_snapshot), \
+        patch.object(monitor, 'yard_observation', side_effect=yard_snapshot), \
         patch.object(monitor, 'display_observation', side_effect=display_snapshot), \
         patch.object(monitor, 'property_value', side_effect=lambda slot, name:
                      '36' if name == 'ro.build.version.sdk' else '1' if name == 'sys.boot_completed' and clock[0] >= 1101 else '0'), \
@@ -713,8 +904,8 @@ with patch.object(monitor, 'initialize'), patch.object(monitor, 'slot_states', r
 reports = [json.loads(line.removeprefix('android-boot-monitor ')) for line in early_output.getvalue().splitlines()
            if line.startswith('android-boot-monitor {')]
 assert [report['sys.boot_completed'] for report in reports] == ['0', '0', '0', '1', '1', '1']
-assert native_samples == [0, 451, 481, 1101, 1131, 1161]
-assert all(report['native_vm'] == native_sample for report in reports)
+assert yard_samples == [0, 451, 481, 1101, 1131, 1161]
+assert all(report['yard_visible'] == yard_sample for report in reports)
 assert len(scheduled) == 3 and sum('framework_restart' in report for report in reports) == 1
 windows = [report['startup_crash'] for report in reports if 'startup_crash' in report]
 assert [window['threshold_seconds'] for window in windows] == [450, 1100]
@@ -750,19 +941,25 @@ def metric_read(path):
         return '0::/system.slice/' + unit + '\n'
     if path.name.endswith('.pressure'):
         return numeric_pressure + '\n' + secret
+    if path.name == 'memory.stat':
+        return 'anon 123\nfile 321\nprivate 987\nshmem -1\nkernel ' + str(1 << 61) + '\n' + secret
     return 'usage_usec 123' if path.name == 'cpu.stat' else 'oom 0' if path.name == 'memory.events' else '123'
 with patch.object(monitor, 'Runtime', SimpleNamespace(unit=lambda slot: unit), create=True), \
         patch.object(monitor, 'host_netns_inode', 1, create=True), \
         patch.object(monitor.subprocess, 'run', return_value=SimpleNamespace(returncode=0,
                           stdout=f'ControlGroup=/system.slice/{unit}\nMainPID=123\nActiveState=active\n')), \
         patch.object(monitor.Path, 'read_text', metric_read), \
+        patch.object(monitor.Path, 'open', return_value=io.BytesIO(
+            b'private memory header\nRss: 456 kB\nPss: 234 kB\nPrivate: secret\n')), \
         patch.object(monitor.os, 'stat', return_value=SimpleNamespace(st_ino=2)):
     measured = monitor.metrics(slot)
 assert measured['cpu.pressure'] == measured['memory.pressure'] == [numeric_pressure]
+assert measured['memory.stat'] == dict(anon=123, file=321)
+assert measured['main_process_memory_kb'] == dict(rss=456, pss=234)
 assert secret not in json.dumps(measured)
 
 with patch.object(monitor, 'initialize'), patch.object(monitor, 'slot_states', return_value=[]), \
-        patch.object(monitor, 'native_observation', return_value=native_sample), \
+        patch.object(monitor, 'yard_observation', return_value=yard_sample), \
         patch.object(monitor.Path, 'exists', return_value=True), \
         patch.object(sys, 'argv', ['monitor', '/run/subyard-e2e-android-monitor-test.stop']), \
         contextlib.redirect_stdout(io.StringIO()) as output:

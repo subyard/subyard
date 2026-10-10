@@ -370,7 +370,7 @@ android_phase_end 0
 [ "$lane" != viewer-native-debug ] || exit 0
 if [ "$lane" = full ]; then
   android_phase_begin projects
-  # The L2 fixture exercises concurrent leases and clean reuse through its normal agent facade.
+  # The L2 fixture exercises sequential device/API leases and clean reuse through its normal facade.
   bash "$root/config/profiles/android/tests/e2e/android-pool-projects.sh" "$root" "$state" "$YARD_NAME" "$project" "$instance"
   android_phase_end 0
 fi

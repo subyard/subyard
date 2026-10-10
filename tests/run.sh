@@ -47,6 +47,8 @@ finish() {
   exit "$rc"
 }
 trap 'finish "$?"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 run_check() {
   CHECK_NAME="$1"; shift

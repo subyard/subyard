@@ -3,19 +3,26 @@
 set -euo pipefail
 
 fail() { printf 'android-pool-remote: %s\n' "$*" >&2; exit 1; }
-[ "$#" -eq 5 ] || [ "$#" -eq 6 ] || [ "$#" -eq 9 ] \
-  || fail 'usage: script ROOT STATE YARD PROJECT INSTANCE [OWNER_ADB [--viewer TOOLS YARD_LEASE]]'
+[ "$#" -eq 5 ] || [ "$#" -eq 6 ] || [ "$#" -eq 8 ] || [ "$#" -eq 9 ] \
+  || fail 'usage: script ROOT STATE YARD PROJECT INSTANCE [OWNER_ADB [--viewer TOOLS YARD_LEASE|--standalone-viewer TOOLS]]'
 root="$1" state="$2" yard_name="$3" project="$4" instance="$5"
 . "$root/tests/helpers/release-candidate.sh"
 if YARD_BIN="$(release_candidate_prepare "$root")"; then unset YARD_ENGINE_PATH; else candidate_rc=$?; [ "$candidate_rc" = 1 ] || exit "$candidate_rc"; YARD_BIN="$root/.build/yard"; fi
 owner_adb="${6:-}"
 viewer_tools="${8:-}" viewer_lease="${9:-}"
-if [ "$#" -eq 9 ]; then
-  [ "$7" = --viewer ] && [[ "$viewer_tools" = "$state"/android-recovery.* ]] \
+if [ -n "$viewer_tools" ]; then
+  [[ "$viewer_tools" = "$state"/android-recovery.* ]] \
     && [ "$(cat "$viewer_tools/.marker" 2>/dev/null)" = subyard-android-pool-recovery-v1 ] \
-    && [[ "$viewer_lease" =~ ^/home/dev/\.cache/subyard-android-recovery\.[a-zA-Z0-9]+/first.json$ ]] \
-    || fail 'viewer tools or lease are not the retained recovery fixture'
+    || fail 'viewer tools are not the retained recovery fixture'
 fi
+case "$#:${7:-}" in
+  5:|6:) ;;
+  8:--standalone-viewer) [ -n "$viewer_tools" ] || fail 'standalone viewer tools are missing' ;;
+  9:--viewer)
+    [[ "$viewer_lease" =~ ^/home/dev/\.cache/subyard-android-recovery\.[a-zA-Z0-9]+/first.json$ ]] \
+      && [ -n "$viewer_tools" ] || fail 'viewer lease is not the retained recovery fixture' ;;
+  *) fail 'invalid remote viewer arguments' ;;
+esac
 [[ "$root" = /* && "$state" = /* ]] || fail 'root and state must be absolute paths'
 [[ "$yard_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]*$ \
   && "$project" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]*$ \

@@ -1009,6 +1009,32 @@ func (runtime *Runtime) prepareRetainedTransition(
 	var active *verifiedPublishedCandidate
 	// A pre-v2 target remains the verified rollback artifact, but it has no
 	// transition registry. The verified active v2 release owns that exact goal.
+	// Preserve the frozen target-owner convention. An unaware target is safe
+	// only while its projection agrees with the authoritative checkpoint.
+	store, err := releasetransition.NewPOSIXV2Store(configHome)
+	if err != nil {
+		return Prepared{}, verifiedPreparation(err)
+	}
+	checkpoint, err := store.ReadMigrationCheckpoint()
+	if err != nil {
+		return Prepared{}, verifiedPreparation(err)
+	}
+	var projection releasetransition.ProtectedSnapshot
+	guardCheckpoint := false
+	if checkpoint.Exists && verified.registryDigest != "" {
+		reader, err := verifiedMigrationCheckpointReader(verified)
+		if err == nil && !reader {
+			projection, err = verifyCheckpointProjectionRollback(verified, store, checkpoint)
+			guardCheckpoint = true
+		}
+		if err != nil {
+			return Prepared{}, verifiedPreparation(transitionOutcomeError(publicReleaseOutcome(
+				observed, release, nil, releasetransition.CodeRollbackIncompatible,
+				"the retained release cannot verify the authoritative migration checkpoint",
+				"retain a compatible checkpoint-reader release, then run yard update --check",
+			)))
+		}
+	}
 	if verified.registryDigest == "" {
 		activeCandidate := publishedCandidate{
 			release: releasetransition.ReleaseID(
@@ -1044,6 +1070,23 @@ func (runtime *Runtime) prepareRetainedTransition(
 			"restore a compatible retained release, then run yard update --rollback",
 		)))
 	}
+	if guardCheckpoint {
+		execute := prepared.run
+		prepared.run = func(ctx context.Context) error {
+			currentCheckpoint, err := store.ReadMigrationCheckpoint()
+			if err != nil {
+				return err
+			}
+			currentProjection, err := store.ReadLedger()
+			if err != nil {
+				return err
+			}
+			if !sameProtectedSnapshot(checkpoint, currentCheckpoint) || !sameProtectedSnapshot(projection, currentProjection) {
+				return fmt.Errorf("%w: migration history changed after rollback inspection; run yard update --check", domain.ErrPlanStale)
+			}
+			return execute(ctx)
+		}
+	}
 	return prepared, nil
 }
 
@@ -1076,6 +1119,59 @@ func VerifyRollbackTarget(ctx context.Context, runtimeRoot string, target releas
 		return nil, err
 	}
 	return facts, nil
+}
+
+// VerifyMigrationCheckpointReader derives the source capability from its exact
+// sealed artifact. Presence in the current engine cannot prove an older source
+// will safely read the checkpoint when retained for rollback.
+func VerifyMigrationCheckpointReader(ctx context.Context, runtimeRoot string, source releasetransition.ReleaseID) (bool, error) {
+	runtime := New(Config{})
+	verified, err := runtime.verifyPublishedCandidate(ctx, publishedCandidate{
+		release: source, root: filepath.Join(runtimeRoot, "releases", string(source)),
+	}, runtimeRoot, nil)
+	if err != nil {
+		return false, fmt.Errorf("verify checkpoint source owner: %w", err)
+	}
+	defer verified.Close()
+	return verifiedMigrationCheckpointReader(verified)
+}
+
+func verifiedMigrationCheckpointReader(verified *verifiedPublishedCandidate) (bool, error) {
+	file, err := openCandidateFile(int(verified.root.Fd()), "config/release-checkpoint.json")
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer file.Close()
+	payload, err := io.ReadAll(io.LimitReader(file, releasetransition.MaxMigrationCheckpointCapabilityBytes+1))
+	if err != nil {
+		return false, err
+	}
+	if err := releasetransition.ValidateMigrationCheckpointCapability(payload); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func verifyCheckpointProjectionRollback(verified *verifiedPublishedCandidate, store *releasetransition.POSIXV2Store, checkpoint releasetransition.ProtectedSnapshot) (releasetransition.ProtectedSnapshot, error) {
+	registry, digest, err := readVerifiedTransitionRegistry(verified)
+	if err != nil {
+		return releasetransition.ProtectedSnapshot{}, err
+	}
+	projection, err := store.ReadLedger()
+	if err != nil {
+		return releasetransition.ProtectedSnapshot{}, err
+	}
+	state, err := releasetransition.ParseMigrationLedger(projection, checkpoint, registry, digest)
+	if err != nil {
+		return releasetransition.ProtectedSnapshot{}, err
+	}
+	if state.DiffersFromProjection(registry) {
+		return releasetransition.ProtectedSnapshot{}, errors.New("authoritative migration epochs differ from the retained projection")
+	}
+	return projection, nil
 }
 
 func (runtime *Runtime) prepareVerifiedCandidateTransition(

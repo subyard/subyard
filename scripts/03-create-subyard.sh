@@ -481,6 +481,10 @@ if vm_page_reporting_required; then
   vm_page_reporting_prepare_guest "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" \
     || die 'VM Free Page Reporting guest configuration failed'
 fi
+# Cloud-image seeding can replace QEMU during the agent wait.
+if [ -n "${VM_CPU_WEIGHT:-}" ]; then
+  power_start_guarded "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" "$BRIDGE" || die "$POWER_ERROR"
+fi
 
 # --- summary -----------------------------------------------------------------
 echo

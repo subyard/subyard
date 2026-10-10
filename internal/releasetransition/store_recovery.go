@@ -33,6 +33,15 @@ func (store *POSIXV2Store) ReadRecoveryReceiptForPublication(transaction Transac
 		return RecoveryReceiptV1{}, false, err
 	}
 	receipt, found := receipts[transaction]
+	if found {
+		terminal, present, err := store.readLifecycleRecord(transaction)
+		if err != nil {
+			return RecoveryReceiptV1{}, false, err
+		}
+		if present && (!sameRecoveryReceipt(terminal.Receipt, receipt) || terminal.Cancellation != nil || terminal.PredecessorCompleted != nil || terminal.Completed != nil) {
+			return RecoveryReceiptV1{}, false, invalid("closed legacy recovery intent cannot be published")
+		}
+	}
 	return receipt, found, nil
 }
 
@@ -102,6 +111,13 @@ func (store *POSIXV2Store) ResolveRecoveryTransaction(
 			return "", invalid("recovery successor transaction already exists")
 		}
 	}
+	if err := store.retireClosedRecoveryEvidence(); err != nil {
+		return "", err
+	}
+	receipts, err = store.readRecoveryReceipts()
+	if err != nil {
+		return "", err
+	}
 	if len(receipts) >= maxTransactionGraphEntries {
 		return "", invalid("activation recovery receipt horizon is full")
 	}
@@ -136,13 +152,18 @@ func (store *POSIXV2Store) ValidatedCurrentRecovery(current JournalRecord) (Reco
 	if err := receipt.MatchesSuccessor(current); err != nil {
 		return RecoveryReceiptV1{}, err
 	}
+	terminal, present, err := store.readLifecycleRecord(current.Transaction)
+	if err != nil {
+		return RecoveryReceiptV1{}, err
+	}
+	if present && (terminal.Cancellation != nil || terminal.PredecessorCompleted != nil || !sameRecoveryReceipt(terminal.Receipt, receipt) ||
+		terminal.Completed != nil && current.Checkpoint != JournalComplete) {
+		return RecoveryReceiptV1{}, invalid("current recovery successor has conflicting terminal evidence")
+	}
 	if strings.HasPrefix(string(current.Transaction), RecoveryTransactionPrefixV2) {
-		terminal, present, err := store.readLifecycleRecord(current.Transaction)
-		if err != nil {
-			return RecoveryReceiptV1{}, err
-		}
-		if present && (terminal.Cancellation != nil || !sameRecoveryReceipt(terminal.Receipt, receipt)) {
-			return RecoveryReceiptV1{}, invalid("current recovery successor has conflicting terminal evidence")
+		frontier, found, err := store.recoveryFrontier(receipt.Replacement)
+		if err != nil || !found || frontier.Generation != receipt.Generation || frontier.Reservation() != receipt.Reservation {
+			return RecoveryReceiptV1{}, invalid("current recovery successor does not match its durable frontier")
 		}
 	}
 	return receipt, nil
@@ -153,12 +174,9 @@ func (store *POSIXV2Store) readRecoveryReceipts() (map[TransactionID]RecoveryRec
 }
 
 func (store *POSIXV2Store) readRecoveryReceiptsAt(parts []string) (map[TransactionID]RecoveryReceiptV1, error) {
-	entries, present, err := store.readDirectoryEntries(parts, maxTransactionGraphEntries*2)
-	if err != nil || !present {
+	entries, _, err := store.recoveryEntries(parts)
+	if err != nil {
 		return nil, err
-	}
-	if len(entries) > maxTransactionGraphEntries*2 {
-		return nil, invalid("too many activation recovery receipt entries")
 	}
 	receipts := make(map[TransactionID]RecoveryReceiptV1, len(entries))
 	predecessors := make(map[TransactionID]TransactionID, len(entries))
@@ -204,7 +222,11 @@ func (store *POSIXV2Store) readRecoveryReceiptsAt(parts []string) (map[Transacti
 		receipts[transaction] = receipt
 		predecessors[receipt.Replacement.Transaction] = transaction
 	}
-	if len(receipts) > maxTransactionGraphEntries {
+	limit := maxTransactionGraphEntries
+	if slices.Equal(parts, recoveryLifecycleParts) {
+		limit = maxRecoveryLifecycleEntries
+	}
+	if len(receipts) > limit {
 		return nil, invalid("too many activation recovery receipts")
 	}
 	return receipts, nil

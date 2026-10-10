@@ -113,13 +113,23 @@ python3 dev/verify-release-upgrades.py --release-dir .build/release --version <c
 ```
 
 This Linux check needs Python 3 and Go to build the local empty-instance Incus API fixture. It
-downloads checksum-pinned v0.9.1, v0.11.2 and v0.17.3 runtimes for the local architecture and verifies
-the legacy standalone bridge, frozen updater contract and activation-only recovery. It confines all state to a
-temporary directory and interrupts only its own update process
-group. Use `--baseline-dir PATH`, `--legacy-baseline-dir PATH` and `--activation-baseline-dir PATH`
-to reuse downloaded official assets (including the legacy runtime installer). For a focused
-v0.17.3 regression, add `--only-activation-recovery`; publication requires the complete check after
-building the release assets.
+downloads checksum-pinned v0.9.1, v0.11.2, v0.17.3 and v0.18.1 runtimes for the local architecture
+and verifies the legacy standalone bridge, frozen and published updater contracts, and activation-only
+recovery. It confines all state to a temporary directory and interrupts only its own update process
+group. Use `--baseline-dir PATH`, `--legacy-baseline-dir PATH`, `--activation-baseline-dir PATH`
+and `--published-baseline-dir PATH` to reuse downloaded official assets (including the legacy runtime
+installer). For a focused v0.17.3 regression, add `--only-activation-recovery`; publication requires
+the complete check after building the release assets.
+
+The complete check also uses the actual v0.11.2 and v0.18.1 callers to verify checkpoint-reader bridge
+ordering and rollback refusal after authoritative epochs exceed the frozen projection. It packages a
+synthetic epoch-3 owner from the invoking bound source with an explicit test version and unchanged published
+baseline pins. Add `--only-checkpoint-source` for this focused regression; it does not replace the
+complete release compatibility gate or publish the reader bridge.
+
+The [legacy migration support policy](reference/legacy-migration-support.md) separates supported
+source formats, frozen caller contracts and the future deprecation window. Bridge publication
+and the notice window remain pending; candidate preparation alone does not start that window.
 
 Choose local checks with [Subyard dev-flow](../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk).
 `./tests/run.sh` is the full unprivileged suite. It runs formatting, vet, race-enabled Go tests, a

@@ -67,17 +67,19 @@ func assessV2BlockedRollback(policy *domain.ActionRegistry) (domain.ActionAssess
 }
 
 type V2Options struct {
-	ConfigHome         string
-	CandidateConfigDir string
-	Releases           ReleasePair
-	Direction          Direction
-	ObserveLinks       func(context.Context) (ReleaseLinks, error)
-	ActivateLinks      func(context.Context, ReleasePair) (ReleaseLinks, error)
-	Reconcilers        []V2ActivationReconciler
-	OwnerRegistration  V2OwnerRegistration
-	Ingress            V2Ingress
-	RegistryPayload    []byte
-	ArtifactDigest     Fingerprint
+	ConfigHome                string
+	CandidateConfigDir        string
+	MigrationCheckpoint       bool
+	SourceMigrationCheckpoint bool
+	Releases                  ReleasePair
+	Direction                 Direction
+	ObserveLinks              func(context.Context) (ReleaseLinks, error)
+	ActivateLinks             func(context.Context, ReleasePair) (ReleaseLinks, error)
+	Reconcilers               []V2ActivationReconciler
+	OwnerRegistration         V2OwnerRegistration
+	Ingress                   V2Ingress
+	RegistryPayload           []byte
+	ArtifactDigest            Fingerprint
 	// CandidateVersion is the trusted compiled runtime semver; ReleaseIDs remain opaque identities.
 	CandidateVersion    string
 	RollbackTarget      *RollbackTarget
@@ -138,25 +140,31 @@ type v2Work struct {
 }
 
 type v2Observation struct {
-	goal                   Goal
-	links                  ReleaseLinks
-	ledger                 LedgerV2
-	ledgerSnapshot         ProtectedSnapshot
-	journal                *JournalRecord
-	journalSnapshot        ProtectedSnapshot
-	assessment             domain.ActionAssessment
-	decisions              []RedactedDecision
-	blockers               []Blocker
-	observations           []ResourceObservation
-	intents                []PlannerStepIntent
-	work                   []v2Work
-	activationScope        []v2ActivationScope
-	activationConsequences []string
-	activationWarnings     []string
-	observationScope       Fingerprint
-	activationFixed        bool
-	replacement            *JournalReplacement
-	supersededJournal      *JournalRecord
+	goal                    Goal
+	links                   ReleaseLinks
+	ledger                  LedgerV2
+	ledgerSnapshot          ProtectedSnapshot
+	migrationLedgerSnapshot MigrationLedgerSnapshot
+	checkpointSnapshot      ProtectedSnapshot
+	checkpointAuthority     bool
+	checkpointConsent       bool
+	checkpointConversion    bool
+	checkpointCompaction    bool
+	journal                 *JournalRecord
+	journalSnapshot         ProtectedSnapshot
+	assessment              domain.ActionAssessment
+	decisions               []RedactedDecision
+	blockers                []Blocker
+	observations            []ResourceObservation
+	intents                 []PlannerStepIntent
+	work                    []v2Work
+	activationScope         []v2ActivationScope
+	activationConsequences  []string
+	activationWarnings      []string
+	observationScope        Fingerprint
+	activationFixed         bool
+	replacement             *JournalReplacement
+	supersededJournal       *JournalRecord
 }
 
 type v2ActivationScope struct {
@@ -290,6 +298,20 @@ func (transition *V2Transition) inspect(ctx context.Context, goal Goal, processV
 		return Inspection{}, err
 	}
 	outcome := transition.inspectionOutcome(observation)
+	if observation.journal != nil && observation.journal.Checkpoint == JournalComplete &&
+		observation.checkpointConversion && observation.checkpointConsent &&
+		transition.fixedPoint(observation) {
+		transaction := observation.journal.Transaction
+		outcome = v2RecoveringOutcome(
+			observation.links, observation.goal.Target, &transaction, CodeRecoveryPending,
+			"the authorized migration checkpoint publication can resume",
+		)
+		return Inspection{
+			Plan: observation.journal.ResumePlan, Assessment: observation.assessment.Clone(),
+			Decisions: slices.Clone(observation.decisions), Blockers: slices.Clone(observation.blockers),
+			Resume: &transaction, Outcome: &outcome,
+		}, nil
+	}
 	if processV1 && outcome.Status == StatusMigrationRequired && transition.completedJournalMatches(observation) {
 		// Frozen V1 callers require the completed journal's transaction, but
 		// reject it on migration-required. This is a wire presentation only:
@@ -326,7 +348,7 @@ func (transition *V2Transition) inspect(ctx context.Context, goal Goal, processV
 func (transition *V2Transition) inspectionOutcome(observation v2Observation) (outcome Outcome) {
 	defer func() { outcome = withActivationWarnings(outcome, observation.activationWarnings) }()
 	journal := observation.journal
-	completedHistory := transition.completedJournalMatches(observation)
+	completedHistory := transition.completedJournalMatches(observation) && !observation.checkpointConversion
 	if journal != nil && journal.Checkpoint == JournalComplete && journal.Goal != observation.goal {
 		// A completed journal for another exact goal is immutable history, not
 		// recovery state for a new forward target or explicit rollback.
@@ -343,7 +365,7 @@ func (transition *V2Transition) inspectionOutcome(observation v2Observation) (ou
 			blocker.Code, blocker.Message, blocker.Retry,
 		)
 	}
-	if completedHistory {
+	if completedHistory && !observation.checkpointConversion {
 		base := Outcome{
 			Active: observation.links.Active, Previous: cloneReleaseID(observation.links.Previous),
 			Target: observation.goal.Target,
@@ -364,6 +386,15 @@ func (transition *V2Transition) inspectionOutcome(observation v2Observation) (ou
 			CodeRecoveryPending,
 			"the authorized release transition can resume from observed facts",
 		)
+	}
+	if observation.checkpointConversion {
+		return Outcome{
+			Status: StatusMigrationRequired, Code: CodeTransitionRequired,
+			Active: observation.links.Active, Previous: cloneReleaseID(observation.links.Previous),
+			Target:  observation.goal.Target,
+			Message: "compact migration history checkpoint publication requires authorization",
+			Retry:   "run yard update",
+		}
 	}
 	facts := TransitionFacts{
 		Goal: observation.goal, Releases: transition.options.Releases,
@@ -437,14 +468,23 @@ func (transition *V2Transition) preflightConverge(
 		outcome = withActivationWarnings(outcome, observation.activationWarnings)
 		return "", &outcome, nil
 	}
+	if observation.journal != nil && observation.journal.Checkpoint == JournalComplete &&
+		observation.checkpointConversion && observation.checkpointConsent &&
+		(execution.Plan == observation.journal.ResumePlan || execution.Plan == observation.journal.AuthorizationPlan) &&
+		transition.fixedPoint(observation) {
+		return execution.Plan, nil, nil
+	}
 	if outcome := transition.completedResumeOutcome(observation, execution.Plan); outcome != nil &&
+		!observation.checkpointConversion &&
 		outcome.Status != StatusReady {
 		*outcome = withActivationWarnings(*outcome, observation.activationWarnings)
 		return "", outcome, nil
 	}
 	if observation.journal != nil && observation.journal.Checkpoint == JournalComplete &&
 		observation.journal.Goal == observation.goal &&
-		(!transition.completedJournalMatches(observation) || transition.fixedPoint(observation)) {
+		(!transition.completedJournalMatches(observation) ||
+			(transition.fixedPoint(observation) && !observation.checkpointConversion)) &&
+		!(observation.checkpointConversion && len(observation.work) != 0) {
 		return "", nil, nil
 	}
 	if observation.journal != nil && observation.journal.Checkpoint != JournalComplete {
@@ -473,7 +513,8 @@ func (transition *V2Transition) preflightConverge(
 		outcome = withActivationWarnings(outcome, observation.activationWarnings)
 		return "", &outcome, nil
 	}
-	if len(observation.work) == 0 && transition.fixedPoint(observation) {
+	if len(observation.work) == 0 && transition.fixedPoint(observation) &&
+		!observation.checkpointConversion {
 		outcome := readyOutcome(Outcome{
 			Active: observation.links.Active, Previous: cloneReleaseID(observation.links.Previous),
 			Target: goal.Target,
@@ -501,6 +542,14 @@ func (transition *V2Transition) resolveConvergeGoal(
 		current.Goal.Target == transition.options.Releases.Target &&
 		current.Goal.Direction == transition.options.Direction {
 		return current.Goal, true
+	}
+	if current != nil && current.Checkpoint == JournalComplete &&
+		execution.Plan == current.AuthorizationPlan && transition.options.MigrationCheckpoint {
+		observation, err := transition.observe(ctx, current.Goal)
+		if err == nil && observation.checkpointConversion && observation.checkpointConsent &&
+			transition.fixedPoint(observation) {
+			return current.Goal, true
+		}
 	}
 	if found || (current != nil && current.Checkpoint != JournalComplete &&
 		transition.options.Replacement == nil) {
@@ -620,8 +669,15 @@ func (transition *V2Transition) Converge(
 			blocker.Code, blocker.Message, blocker.Retry,
 		), nil
 	}
+	if observation.journal != nil && observation.journal.Checkpoint == JournalComplete &&
+		observation.checkpointConversion && observation.checkpointConsent &&
+		(execution.Plan == observation.journal.ResumePlan || execution.Plan == observation.journal.AuthorizationPlan) &&
+		transition.fixedPoint(observation) {
+		return transition.evaluateTerminal(ctx, *observation.journal)
+	}
 
-	if outcome := transition.completedResumeOutcome(observation, execution.Plan); outcome != nil {
+	if outcome := transition.completedResumeOutcome(observation, execution.Plan); outcome != nil &&
+		!observation.checkpointConversion {
 		if outcome.Status == StatusReady {
 			return transition.cleanupReady(ctx, observation.journal.Transaction, *outcome), nil
 		}
@@ -629,10 +685,10 @@ func (transition *V2Transition) Converge(
 	}
 	completedHistory := transition.completedJournalMatches(observation)
 	if observation.journal != nil && observation.journal.Checkpoint == JournalComplete &&
-		observation.journal.Goal == observation.goal && !completedHistory {
+		observation.journal.Goal == observation.goal && !completedHistory && authorizedPlan == "" {
 		return transition.inspectionOutcome(observation), nil
 	}
-	if completedHistory && transition.fixedPoint(observation) {
+	if completedHistory && transition.fixedPoint(observation) && !observation.checkpointConversion {
 		outcome := transition.inspectionOutcome(observation)
 		return transition.cleanupReady(ctx, observation.journal.Transaction, outcome), nil
 	}
@@ -653,7 +709,8 @@ func (transition *V2Transition) Converge(
 				CodePlanStale, "the inspected release transition changed before convergence",
 				"run yard update --check"), nil
 		}
-		if len(observation.work) == 0 && transition.fixedPoint(observation) {
+		if len(observation.work) == 0 && transition.fixedPoint(observation) &&
+			!observation.checkpointConversion {
 			return readyOutcome(Outcome{
 				Active: observation.links.Active, Previous: cloneReleaseID(observation.links.Previous),
 				Target: goal.Target,
@@ -866,7 +923,68 @@ func (transition *V2Transition) evaluateTerminal(
 	if err != nil || outcome.Status != StatusReady {
 		return outcome, err
 	}
+	if _, err := transition.publishCheckpointAfterReady(ctx, journal); err != nil {
+		return Outcome{}, err
+	}
 	return transition.cleanupReady(ctx, journal.Transaction, outcome), nil
+}
+
+func (transition *V2Transition) checkpointConversionPending(ctx context.Context, journal JournalRecord) (bool, error) {
+	if !transition.options.MigrationCheckpoint {
+		return false, nil
+	}
+	state, err := transition.store.ReadMigrationLedger(transition.registry, transition.registryDigest)
+	if err != nil {
+		return false, err
+	}
+	if !state.RequiresCheckpointPublication() {
+		return false, nil
+	}
+	observation, err := transition.observe(ctx, journal.Goal)
+	if err != nil {
+		return false, err
+	}
+	if !observation.checkpointConversion || !observation.checkpointConsent || !transition.fixedPoint(observation) {
+		return false, nil
+	}
+	var finalLedgerFingerprint Fingerprint
+	for _, step := range journal.Steps {
+		if !strings.HasPrefix(step.Resource, "ledger.") {
+			continue
+		}
+		if step.Checkpoint != StepVerified {
+			return false, nil
+		}
+		finalLedgerFingerprint = step.Desired
+	}
+	if finalLedgerFingerprint != "" && observation.ledgerSnapshot.Fingerprint != finalLedgerFingerprint {
+		return false, nil
+	}
+	return true, nil
+}
+
+func (transition *V2Transition) publishCheckpointAfterReady(ctx context.Context, journal JournalRecord) (bool, error) {
+	pending, err := transition.checkpointConversionPending(ctx, journal)
+	if err != nil || !pending {
+		return false, err
+	}
+	if err := transition.inject("before-checkpoint-publication"); err != nil {
+		return false, err
+	}
+	state, err := transition.store.ReadMigrationLedger(transition.registry, transition.registryDigest)
+	if err != nil {
+		return false, err
+	}
+	if err := transition.store.ConvertMigrationLedger(
+		state, transition.registry, transition.registryDigest,
+		transition.registry, transition.registryDigest,
+	); err != nil {
+		return false, err
+	}
+	if err := transition.inject("after-checkpoint-publication"); err != nil {
+		return true, err
+	}
+	return true, nil
 }
 
 func (transition *V2Transition) cleanupReady(
@@ -979,6 +1097,12 @@ func (transition *V2Transition) reducePostMutationFailure(
 		terminal, evaluateErr := transition.evaluateCurrent(ctx, journal)
 		if evaluateErr == nil {
 			if terminal.Status == StatusReady {
+				pending, pendingErr := transition.checkpointConversionPending(ctx, journal)
+				if pendingErr == nil && pending {
+					return v2RecoveringOutcome(links, journal.Goal.Target,
+						transactionIDPointer(journal.Transaction), CodeVerificationFailed,
+						"the authorized migration checkpoint publication is pending"), nil
+				}
 				return transition.cleanupReady(ctx, journal.Transaction, terminal), nil
 			}
 			return terminal, nil
@@ -1053,6 +1177,32 @@ func (transition *V2Transition) observe(ctx context.Context, goal Goal) (v2Obser
 		return v2Observation{}, err
 	}
 	ledger := BaselineLedgerV2(transition.registry)
+	checkpointSnapshot := absentProtectedSnapshot()
+	migrationLedgerSnapshot := MigrationLedgerSnapshot{
+		Ledger: ledger, AuthoritySnapshot: ledgerSnapshot,
+		ProjectionSnapshot: ledgerSnapshot,
+	}
+	checkpointSnapshot, err = transition.store.ReadMigrationCheckpoint()
+	if err != nil {
+		return v2Observation{}, err
+	}
+	checkpointAuthority := checkpointSnapshot.Exists
+	if transition.options.MigrationCheckpoint || checkpointAuthority {
+		migrationLedgerSnapshot, err = ParseMigrationLedger(
+			ledgerSnapshot, checkpointSnapshot, transition.registry, transition.registryDigest,
+		)
+		if err != nil {
+			return v2Observation{}, err
+		}
+		ledger = migrationLedgerSnapshot.Ledger
+		if migrationLedgerSnapshot.Checkpointed {
+			payload, _, marshalErr := MarshalLedgerV2(ledger, transition.registry)
+			if marshalErr != nil {
+				return v2Observation{}, marshalErr
+			}
+			ledgerSnapshot = protectedSnapshotFromPayload(payload)
+		}
+	}
 	var rollbackBlocker *Blocker
 	if transition.options.Direction == DirectionActivatePrevious &&
 		(transition.options.RollbackTarget == nil ||
@@ -1060,7 +1210,7 @@ func (transition *V2Transition) observe(ctx context.Context, goal Goal) (v2Obser
 				transition.options.RollbackTarget.RegistryDigest != transition.registryDigest)) {
 		rollbackBlocker = rollbackIncompatibleBlocker()
 	}
-	if ledgerSnapshot.Exists && rollbackBlocker == nil {
+	if !checkpointAuthority && !transition.options.MigrationCheckpoint && ledgerSnapshot.Exists && rollbackBlocker == nil {
 		ledger, _, err = ParseLedgerV2(ledgerSnapshot.Payload, transition.registry)
 		if err != nil {
 			if transition.options.Direction != DirectionActivatePrevious ||
@@ -1091,7 +1241,10 @@ func (transition *V2Transition) observe(ctx context.Context, goal Goal) (v2Obser
 	}
 	observation := v2Observation{
 		goal: goal, links: links, ledger: ledger, ledgerSnapshot: ledgerSnapshot,
-		journal: journal, journalSnapshot: journalSnapshot,
+		migrationLedgerSnapshot: migrationLedgerSnapshot,
+		checkpointSnapshot:      checkpointSnapshot,
+		checkpointAuthority:     checkpointAuthority,
+		journal:                 journal, journalSnapshot: journalSnapshot,
 	}
 	if rollbackBlocker == nil {
 		rollbackBlocker = transition.rollbackCompatibilityBlocker()
@@ -1108,6 +1261,17 @@ func (transition *V2Transition) observe(ctx context.Context, goal Goal) (v2Obser
 		}
 		observation.assessment, err = assessV2BlockedRollback(transition.policy)
 		return observation, err
+	}
+	checkpointSourceBlocked := false
+	if journal == nil || journal.Checkpoint == JournalComplete {
+		blocker, err := transition.checkpointSourceCompatibilityBlocker(observation)
+		if err != nil {
+			return v2Observation{}, err
+		}
+		if blocker != nil {
+			checkpointSourceBlocked = true
+			observation.blockers = append(observation.blockers, *blocker)
+		}
 	}
 	completedHistory := journal != nil && journal.Checkpoint == JournalComplete &&
 		transition.completedJournalMatches(observation)
@@ -1135,6 +1299,8 @@ func (transition *V2Transition) observe(ctx context.Context, goal Goal) (v2Obser
 			}
 			observation = v2Observation{
 				goal: goal, links: links, ledger: ledger, ledgerSnapshot: ledgerSnapshot,
+				migrationLedgerSnapshot: migrationLedgerSnapshot,
+				checkpointSnapshot:      checkpointSnapshot, checkpointAuthority: checkpointAuthority,
 				journalSnapshot: journalSnapshot, replacement: replacement,
 			}
 			if err := transition.observeFresh(ctx, &observation); err != nil {
@@ -1148,7 +1314,7 @@ func (transition *V2Transition) observe(ctx context.Context, goal Goal) (v2Obser
 				Message: "release links do not match the exact unstarted transition",
 				Retry:   "run yard update --check",
 			})
-		} else {
+		} else if !checkpointSourceBlocked {
 			if err := transition.observeFresh(ctx, &observation); err != nil {
 				return v2Observation{}, err
 			}
@@ -1167,8 +1333,33 @@ func (transition *V2Transition) observe(ctx context.Context, goal Goal) (v2Obser
 			})
 		}
 	}
+	checkpointConversion := transition.options.MigrationCheckpoint && !checkpointAuthority &&
+		(journal == nil || journal.Checkpoint == JournalComplete || observation.checkpointConsent)
+	checkpointCompaction := false
+	if transition.options.MigrationCheckpoint && checkpointAuthority &&
+		(journal == nil || journal.Checkpoint == JournalComplete || observation.checkpointConsent) {
+		pending, pendingErr := transition.registry.PendingPath(observation.ledger)
+		if pendingErr != nil {
+			return v2Observation{}, pendingErr
+		}
+		checkpointCompaction = ledgerCheckpointHasSuffix(migrationLedgerSnapshot.Checkpoint) ||
+			len(pending) != 0
+	}
+	if checkpointConversion || checkpointCompaction {
+		observation.checkpointConversion = true
+		observation.checkpointCompaction = checkpointCompaction
+		observation.decisions = append(observation.decisions, RedactedDecision{
+			Resource: "migration-history.checkpoint", Scope: "migration-history",
+			Decision: DecisionTransform, Result: "compact-migration-history",
+		})
+		observation.activationConsequences = append(
+			observation.activationConsequences, "compact completed migration history checkpoint",
+		)
+	}
+	checkpointWork := checkpointConversion || checkpointCompaction
+	completedHistory = completedHistory && !checkpointWork
 	changed := len(observation.intents) != 0 || links.Active != goal.Target ||
-		!observation.activationFixed
+		!observation.activationFixed || checkpointWork
 	if journal != nil && journal.Checkpoint != JournalComplete {
 		changed = true
 	}
@@ -1230,9 +1421,12 @@ func (transition *V2Transition) observePostActivationReplacement(
 	candidate := v2Observation{
 		goal: observation.goal, links: observation.links,
 		ledger: observation.ledger, ledgerSnapshot: observation.ledgerSnapshot,
-		journalSnapshot:   observation.journalSnapshot,
-		replacement:       cloneJournalReplacement(request),
-		supersededJournal: journal,
+		migrationLedgerSnapshot: observation.migrationLedgerSnapshot,
+		checkpointSnapshot:      observation.checkpointSnapshot,
+		checkpointAuthority:     observation.checkpointAuthority,
+		journalSnapshot:         observation.journalSnapshot,
+		replacement:             cloneJournalReplacement(request),
+		supersededJournal:       journal,
 	}
 	if err := transition.observeActivation(ctx, &candidate); err != nil {
 		return false, err
@@ -1246,6 +1440,15 @@ func (transition *V2Transition) observePostActivationReplacement(
 	}
 	if candidate.observationScope == journal.ObservationScope {
 		return false, nil
+	}
+	// This replacement receives a fresh grant. Bind its checkpoint consent to
+	// the actual authority, preserving the legacy scope comparison above.
+	candidate.observationScope, candidate.checkpointConsent, err = transition.currentObservationScope(
+		candidate.activationScope, nil, transition.options.MigrationCheckpoint,
+		candidate.migrationLedgerSnapshot.AuthoritySnapshot.Fingerprint,
+	)
+	if err != nil {
+		return false, err
 	}
 	*observation = candidate
 	return true, nil
@@ -1392,10 +1595,39 @@ func (transition *V2Transition) canReplacePreActivationJournal(
 	return true
 }
 
+func (transition *V2Transition) checkpointSourceCompatibilityBlocker(observation v2Observation) (*Blocker, error) {
+	if !observation.checkpointAuthority || transition.options.Direction != DirectionActivateTarget ||
+		transition.options.SourceMigrationCheckpoint {
+		return nil, nil
+	}
+	pending, err := transition.registry.PendingPath(observation.ledger)
+	if err != nil {
+		return nil, err
+	}
+	if len(pending) == 0 && !observation.migrationLedgerSnapshot.DiffersFromProjection(transition.registry) {
+		return nil, nil
+	}
+	return &Blocker{
+		Code: CodeRollbackIncompatible, Resource: "transition.source-checkpoint-compatibility",
+		Message: "the current source release cannot verify the authoritative migration checkpoint",
+		Retry:   "install a verified checkpoint-reader bridge before advancing migrations, then run yard update --check",
+	}, nil
+}
+
 func (transition *V2Transition) observeFresh(
 	ctx context.Context,
 	observation *v2Observation,
 ) error {
+	// Exact authorized resume keeps its original bindings. A fresh replan after
+	// replacing a stale incomplete journal must prove source compatibility again.
+	blocker, err := transition.checkpointSourceCompatibilityBlocker(*observation)
+	if err != nil {
+		return err
+	}
+	if blocker != nil {
+		observation.blockers = append(observation.blockers, *blocker)
+		return nil
+	}
 	var ingressAfterSettings *V2IngressOperation
 	var settingsView V2SettingsSnapshotView
 	if transition.options.Ingress != nil {
@@ -1995,7 +2227,39 @@ func (transition *V2Transition) convergeStep(
 					}
 					work.ledgerTo = advanced
 				}
-				if err := transition.store.CompareAndSwapLedger(work.ledgerFrom, work.ledgerTo); err != nil && !errors.Is(err, ErrProtectedStoreStale) {
+				checkpointSnapshot, checkpointErr := transition.store.ReadMigrationCheckpoint()
+				if checkpointErr != nil {
+					return Outcome{}, checkpointErr
+				}
+				if transition.options.MigrationCheckpoint || checkpointSnapshot.Exists {
+					actual, readErr := transition.store.ReadMigrationLedger(transition.registry, transition.registryDigest)
+					if readErr != nil {
+						return Outcome{}, readErr
+					}
+					virtual, _, marshalErr := MarshalLedgerV2(actual.Ledger, transition.registry)
+					if marshalErr != nil {
+						return Outcome{}, marshalErr
+					}
+					if !actual.Checkpointed && !actual.ProjectionSnapshot.Exists {
+						virtual = nil
+					}
+					virtualSnapshot := ProtectedSnapshot{}
+					if virtual == nil {
+						virtualSnapshot = absentProtectedSnapshot()
+					} else {
+						virtualSnapshot = protectedSnapshotFromPayload(virtual)
+					}
+					if !sameProtectedSnapshot(virtualSnapshot, work.ledgerFrom) {
+						return Outcome{}, ErrProtectedStoreStale
+					}
+					next, _, parseErr := ParseLedgerV2(work.ledgerTo, transition.registry)
+					if parseErr != nil {
+						return Outcome{}, parseErr
+					}
+					if err := transition.store.CompareAndSwapMigrationLedger(actual, next, transition.registry, transition.registryDigest); err != nil && !errors.Is(err, ErrProtectedStoreStale) {
+						return Outcome{}, err
+					}
+				} else if err := transition.store.CompareAndSwapLedger(work.ledgerFrom, work.ledgerTo); err != nil && !errors.Is(err, ErrProtectedStoreStale) {
 					return Outcome{}, err
 				}
 				if err := transition.inject("after-ledger-cas"); err != nil {
@@ -2157,6 +2421,13 @@ func requiresSupersededJournalArchive(replacement *JournalReplacement) bool {
 }
 
 func (transition *V2Transition) planFacts(observation v2Observation) PlanFacts {
+	observations := slices.Clone(observation.observations)
+	if transition.options.MigrationCheckpoint || observation.checkpointAuthority {
+		observations = append(observations, ResourceObservation{
+			Resource: "migration-history.checkpoint", Class: "migration-history-checkpoint-v1",
+			Fingerprint: observation.checkpointSnapshot.Fingerprint,
+		})
+	}
 	return PlanFacts{
 		Goal: observation.goal, Releases: transition.options.Releases, Links: observation.links,
 		ArtifactDigest: transition.options.ArtifactDigest,
@@ -2164,7 +2435,7 @@ func (transition *V2Transition) planFacts(observation v2Observation) PlanFacts {
 		RollbackTarget:   cloneRollbackTarget(transition.options.RollbackTarget),
 		ObservationScope: observation.observationScope,
 		Assessment:       observation.assessment.Clone(), Decisions: slices.Clone(observation.decisions),
-		Observations: slices.Clone(observation.observations), Intents: slices.Clone(observation.intents),
+		Observations: observations, Intents: slices.Clone(observation.intents),
 		Blockers: slices.Clone(observation.blockers), Replacement: observation.replacement,
 	}
 }
@@ -2410,7 +2681,7 @@ func (transition *V2Transition) workFingerprint(
 			progress, work.owner.ExpectedFingerprint, work.owner.DesiredFingerprint,
 		)
 	case v2LedgerWork:
-		snapshot, err := transition.store.ReadLedger()
+		snapshot, _, err := transition.readLedgerSemanticSnapshot()
 		if err != nil {
 			return "", err
 		}
@@ -2585,6 +2856,13 @@ func (transition *V2Transition) observeActivation(
 func (transition *V2Transition) bindObservationScope(
 	activation []v2ActivationScope,
 ) (Fingerprint, error) {
+	return transition.bindObservationScopeWithCheckpoint(activation, false)
+}
+
+func (transition *V2Transition) bindObservationScopeWithCheckpoint(
+	activation []v2ActivationScope,
+	checkpoint bool,
+) (Fingerprint, error) {
 	if len(activation) > MaxPlanItems || len(transition.options.InheritedSettingIDs) > MaxPlanItems {
 		return "", invalid("release transition observation scope is too large")
 	}
@@ -2609,14 +2887,60 @@ func (transition *V2Transition) bindObservationScope(
 		SchemaVersion         int                 `json:"schemaVersion"`
 		ActivationReconcilers []v2ActivationScope `json:"activationReconcilers"`
 		InheritedSettingIDs   []string            `json:"inheritedSettingIds"`
+		MigrationCheckpoint   bool                `json:"migrationCheckpoint,omitempty"`
 	}{
 		SchemaVersion: 1, ActivationReconcilers: activation,
-		InheritedSettingIDs: inherited,
+		InheritedSettingIDs: inherited, MigrationCheckpoint: checkpoint,
 	})
 	if err != nil {
 		return "", err
 	}
 	return fingerprintPayload(payload), nil
+}
+
+func (transition *V2Transition) currentObservationScope(
+	activation []v2ActivationScope,
+	journal *JournalRecord,
+	preferCheckpoint bool,
+	checkpointSource Fingerprint,
+) (Fingerprint, bool, error) {
+	baseScope, err := transition.bindObservationScopeWithCheckpoint(activation, false)
+	if err != nil {
+		return "", false, err
+	}
+	markedActivation := slices.Clone(activation)
+	if checkpointSource != "" {
+		if err := validateFingerprint(checkpointSource, "checkpoint source ledger fingerprint"); err != nil {
+			return "", false, err
+		}
+		markedActivation = append(markedActivation, v2ActivationScope{
+			ID: "migration-history-source", Desired: checkpointSource,
+		})
+	}
+	markedScope, err := transition.bindObservationScopeWithCheckpoint(markedActivation, true)
+	if err != nil {
+		return "", false, err
+	}
+	if journal != nil {
+		switch journal.ObservationScope {
+		case markedScope:
+			return markedScope, true, nil
+		case baseScope:
+			if journal.Checkpoint != JournalComplete || !preferCheckpoint {
+				return baseScope, false, nil
+			}
+			return markedScope, false, nil
+		default:
+			if preferCheckpoint {
+				return markedScope, false, nil
+			}
+			return baseScope, false, nil
+		}
+	}
+	if preferCheckpoint {
+		return markedScope, true, nil
+	}
+	return baseScope, false, nil
 }
 
 func (transition *V2Transition) reconcileActivation(
@@ -2973,11 +3297,7 @@ func (transition *V2Transition) evaluateCurrent(
 	if err != nil {
 		return Outcome{}, err
 	}
-	ledgerSnapshot, err := transition.store.ReadLedger()
-	if err != nil {
-		return Outcome{}, err
-	}
-	ledger, _, err := ParseLedgerV2(ledgerSnapshot.Payload, transition.registry)
+	_, ledger, err := transition.readLedgerSemanticSnapshot()
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -3009,6 +3329,42 @@ func (transition *V2Transition) evaluateCurrent(
 		FixedPointVerified:         fixedPointVerified,
 	})
 	return withActivationWarnings(outcome, warnings), nil
+}
+
+// readLedgerSemanticSnapshot preserves raw legacy bytes until checkpoint
+// authority is active. Thereafter it returns the canonical V2 semantic view
+// used by frozen journal ledger-step bindings.
+func (transition *V2Transition) readLedgerSemanticSnapshot() (ProtectedSnapshot, LedgerV2, error) {
+	checkpoint, err := transition.store.ReadMigrationCheckpoint()
+	if err != nil {
+		return ProtectedSnapshot{}, LedgerV2{}, err
+	}
+	if !transition.options.MigrationCheckpoint && !checkpoint.Exists {
+		snapshot, err := transition.store.ReadLedger()
+		if err != nil {
+			return ProtectedSnapshot{}, LedgerV2{}, err
+		}
+		ledger := BaselineLedgerV2(transition.registry)
+		if snapshot.Exists {
+			ledger, _, err = ParseLedgerV2(snapshot.Payload, transition.registry)
+			if err != nil {
+				return ProtectedSnapshot{}, LedgerV2{}, err
+			}
+		}
+		return snapshot, ledger, nil
+	}
+	actual, err := transition.store.ReadMigrationLedger(transition.registry, transition.registryDigest)
+	if err != nil {
+		return ProtectedSnapshot{}, LedgerV2{}, err
+	}
+	if !actual.Checkpointed {
+		return actual.ProjectionSnapshot, actual.Ledger, nil
+	}
+	payload, _, err := MarshalLedgerV2(actual.Ledger, transition.registry)
+	if err != nil {
+		return ProtectedSnapshot{}, LedgerV2{}, err
+	}
+	return protectedSnapshotFromPayload(payload), actual.Ledger, nil
 }
 
 func (transition *V2Transition) activationFixedPoint(

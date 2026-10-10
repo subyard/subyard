@@ -6,12 +6,10 @@ import json
 import os
 from pathlib import Path
 import re
-import runpy
 import signal
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 
 CLIENT = '/usr/local/lib/subyard-android/client.py'
@@ -40,6 +38,53 @@ SCRCPY_EVENTS = {
 
 ENCODERS = {'c2.android.avc.encoder': 'android_avc', 'c2.goldfish.h264.encoder': 'goldfish_avc',
             'c2.ranchu.h264.encoder': 'ranchu_avc', 'OMX.google.h264.encoder': 'google_avc'}
+
+POOL_ERRORS = {'boot', 'boot_timeout', 'capacity', 'cancelled', 'busy', 'stale', 'timeout', 'network', 'preflight',
+               'ownership', 'transport', 'credential', 'unavailable', 'heartbeat'}
+
+
+CAPACITY_DISK_ERRORS = {
+    'insufficient space for image download and extraction': 'image_download',
+    'image installation stopped to preserve yard disk headroom': 'image_installation',
+    'insufficient space for disposable Android userdata and yard disk headroom': 'userdata',
+}
+
+
+def valid_capacity_evidence(value):
+    if type(value) is not dict:
+        return False
+    if set(value) == {'kind'}:
+        return value['kind'] in CAPACITY_DISK_ERRORS.values()
+    numbers = {'required_bytes', 'available_bytes', 'reserve_bytes', 'pending_bytes'}
+    return (set(value) == numbers | {'kind', 'limiting_source'} and value['kind'] == 'memory'
+            and value['limiting_source'] in ('visible', 'physical', 'cgroup')
+            and all(type(value[key]) is int and 0 <= value[key] <= 1 << 60 for key in numbers))
+
+
+def capacity_evidence(line):
+    memory = re.fullmatch(
+        r'Android capacity: insufficient memory: required=([0-9]{1,19}) available=([0-9]{1,19}) '
+        r'reserve=([0-9]{1,19}) pending=([0-9]{1,19}) source=(visible|physical|cgroup); no slot was preempted'
+        r'(?:; runtime was stopped)?', line)
+    if memory:
+        value = dict(kind='memory', limiting_source=memory[5],
+                     **dict(zip(('required_bytes', 'available_bytes', 'reserve_bytes', 'pending_bytes'),
+                                map(int, memory.group(1, 2, 3, 4)))))
+        return value if valid_capacity_evidence(value) else None
+    message = line.removeprefix('Android capacity: ').removesuffix('; runtime was stopped')
+    if line.startswith('Android capacity: ') and message in CAPACITY_DISK_ERRORS:
+        return dict(kind=CAPACITY_DISK_ERRORS[message])
+    return None
+
+
+def safe_memory_refusal(summary):
+    capacity = summary.get('capacity', {})
+    return (valid_viewer_summary(summary) and summary['viewer_exit'] == 1
+            and summary['result'] == 'failed' and summary['rendered'] is False
+            and summary['output'] == 'bounded' and summary.get('pool_error') == 'capacity'
+            and capacity.get('kind') == 'memory' and capacity['required_bytes'] > 0
+            and capacity['required_bytes'] + capacity['reserve_bytes'] + capacity['pending_bytes']
+            > capacity['available_bytes'])
 
 
 def valid_framebuffer(value):
@@ -100,6 +145,13 @@ def capture_summary(output, returncode, timed_out=False):
     summary['output'] = 'bounded'
     native_invalid = False
     for line in output.decode('ascii', 'replace').splitlines():
+        pool_error = re.match(r'Android ([a-z_]+): ', line)
+        if pool_error and pool_error[1] in POOL_ERRORS:
+            summary.setdefault('pool_error', pool_error[1])
+            if summary['pool_error'] == pool_error[1] == 'capacity':
+                capacity = capacity_evidence(line)
+                if capacity is not None:
+                    summary.setdefault('capacity', capacity)
         for prefix, field in (('scrcpy-native-stack ', 'stack'), ('scrcpy-native-result ', 'result')):
             if line.startswith(prefix):
                 try:
@@ -226,24 +278,6 @@ def view(arguments, phase, delay_server=False, native_debug=False):
         raise SystemExit(exit_code)
 
 
-def heartbeat_borrowed(token):
-    stopped, failed = threading.Event(), threading.Event()
-
-    def renew():
-        while not stopped.wait(45):
-            try:
-                client.rpc('renew', timeout=30, token=token)
-            except (client.Error, OSError, ValueError):
-                failed.set()
-                return
-
-    # The attached-view assertion has already proved that the viewer itself did not renew.
-    client.rpc('renew', timeout=30, token=token)
-    worker = threading.Thread(target=renew, daemon=True)
-    worker.start()
-    return stopped, failed, worker
-
-
 def main():
     global client
     spec = importlib.util.spec_from_file_location('android_client', CLIENT)
@@ -251,6 +285,15 @@ def main():
     spec.loader.exec_module(client)
     native_debug = sys.argv[2:] == ['--native-debug']
     require(os.getuid() == 1000 and (len(sys.argv) == 2 or native_debug), 'requires dev and its private lease file')
+    if sys.argv[1] == '--standalone':
+        require(all(slot['state'] == 'available' for slot in client.rpc('status')['slots']),
+                'standalone viewer requires an idle pool')
+        view(['--device', 'phone', '--api', '35', '--purpose', 'viewer-acceptance'],
+             'standalone-capture', native_debug=native_debug)
+        require(all(slot['state'] == 'available' for slot in client.rpc('status')['slots']),
+                'standalone viewer did not release its own lease')
+        print('android viewer: standalone rendered and released its own lease', flush=True)
+        return
     lease = client.read_lease(Path(sys.argv[1]))
     before = client.rpc('allocation', token=lease['token'])
     require(before['state'] == 'held', 'borrowed lease is not held')
@@ -260,29 +303,11 @@ def main():
     require(after['state'] == 'held' and after['expires_at'] == before['expires_at'],
             'attached viewer released or renewed the borrowed lease')
     print('android viewer: attached rendered without release or renewal', flush=True)
-    stopped, failed, worker = heartbeat_borrowed(lease['token'])
-    try:
-        runpy.run_path('/opt/subyard-e2e-lifecycle.py')['idle_display'](lease)
-        require(client.rpc('allocation', token=lease['token'])['state'] == 'held',
-                'idle display did not retain its borrowed lease')
-        print('android viewer: idle display asleep; borrowed lease held', flush=True)
-        view(['--device', 'phone', '--api', '35', '--purpose', 'viewer-acceptance'], 'standalone-capture', native_debug=native_debug)
-    finally:
-        stopped.set()
-        worker.join(timeout=35)
-    require(not worker.is_alive() and not failed.is_set(), 'borrowed lease renewal failed')
-    require(client.rpc('allocation', token=lease['token'])['state'] == 'held',
-            'standalone viewer affected the borrowed lease')
-    slots = client.rpc('status')['slots']
-    require(sum(slot['state'] == 'held' for slot in slots) == 1 and
-            sum(slot['state'] == 'available' for slot in slots) == len(slots) - 1,
-            'standalone viewer did not release its own lease')
-    print('android viewer: standalone rendered and released only its own lease', flush=True)
 
 
 def valid_viewer_summary(value):
     required = {'metadata', 'complete_frames', 'relay', 'child_exit', 'viewer_exit', 'rendered', 'result', 'output'}
-    if type(value) is not dict or not required <= set(value) <= required | {'stream', 'child_returncode', 'timing', 'scrcpy_events', 'encoder', 'framebuffer', 'native_debug'}:
+    if type(value) is not dict or not required <= set(value) <= required | {'stream', 'child_returncode', 'timing', 'scrcpy_events', 'encoder', 'framebuffer', 'native_debug', 'pool_error', 'capacity'}:
         return False
     return (value['metadata'] in ('unknown', 'pending', 'complete', 'malformed')
             and (value['complete_frames'] == 'unknown' or type(value['complete_frames']) is int and 0 <= value['complete_frames'] <= 10000000)
@@ -294,6 +319,9 @@ def valid_viewer_summary(value):
             and value['output'] in ('bounded', 'limit')
             and value.get('stream', 'observed') in ('observed', 'malformed')
             and value.get('encoder', 'other') in (*ENCODERS.values(), 'other')
+            and ('pool_error' not in value or type(value['pool_error']) is str and value['pool_error'] in POOL_ERRORS)
+            and ('capacity' not in value or value.get('pool_error') == 'capacity'
+                 and valid_capacity_evidence(value['capacity']))
             and ('native_debug' not in value or valid_native_evidence(value['native_debug'])
                  and (value['result'] != 'passed' or native_passed(value['native_debug'])))
             and ('framebuffer' not in value or valid_framebuffer(value['framebuffer']))

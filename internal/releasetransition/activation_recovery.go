@@ -243,6 +243,11 @@ func (transition *V2Transition) ConvergeActivationRecovery(ctx context.Context, 
 	if contract == ActivationOnlyRecoveryContractV2 {
 		receipt.SchemaVersion, receipt.Contract = RecoveryReceiptSchemaV2, contract
 		receipt.BasePlan, receipt.Reservation = fresh.basePlan, fresh.reservation
+		frontier, present, err := transition.store.recoveryFrontier(request)
+		if err != nil || !present {
+			return Outcome{}, invalid("recovery publication has no durable generation frontier")
+		}
+		receipt.Generation = frontier.Generation
 	}
 	if err := transition.inject("before-recovery-receipt"); err != nil {
 		return Outcome{}, err

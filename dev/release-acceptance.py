@@ -345,7 +345,7 @@ def phase_events(output, name, log, offset, seen, final=False):
                       state=stage[2].decode(), duration_seconds=int(stage[3]),
                       exit_code=int(stage[4]), **({"vm": int(stage[5])} if stage[5] else {}))
             environment = re.fullmatch(rb"E2E lease: [^\r\n]{0,2000} type=(subyard-pair|android-test) vms=([12]) base=([0-9a-f]{64})\n", line)
-            if environment and (environment[1], environment[2]) in ((b"subyard-pair", b"2"), (b"android-test", b"1")):
+            if environment and (environment[1], environment[2]) in ((b"subyard-pair", b"1"), (b"subyard-pair", b"2"), (b"android-test", b"1")):
                 key = ("environment", environment[1].decode(), int(environment[2]), environment[3].decode())
                 if key not in seen:
                     seen.add(key)

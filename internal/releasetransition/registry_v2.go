@@ -1,6 +1,7 @@
 package releasetransition
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 )
@@ -11,10 +12,19 @@ const (
 )
 
 type RegistryV2 struct {
-	SchemaVersion int                     `json:"schemaVersion"`
-	MinimumEpochs map[string]int          `json:"minimumEpochs"`
-	CurrentEpochs map[string]int          `json:"currentEpochs"`
-	Migrations    []MigrationDefinitionV2 `json:"migrations"`
+	SchemaVersion   int                                 `json:"schemaVersion"`
+	MinimumEpochs   map[string]int                      `json:"minimumEpochs"`
+	CurrentEpochs   map[string]int                      `json:"currentEpochs"`
+	Migrations      []MigrationDefinitionV2             `json:"migrations"`
+	RetiredPrefixes map[string]RetiredMigrationPrefixV2 `json:"retiredPrefixes,omitempty"`
+}
+
+// RetiredMigrationPrefixV2 describes completed history whose executable
+// definitions have left the live migration path. Digest binds the retired
+// definitions without keeping them in the active registry.
+type RetiredMigrationPrefixV2 struct {
+	ThroughEpoch int         `json:"throughEpoch"`
+	Digest       Fingerprint `json:"digest"`
 }
 
 type MigrationDefinitionV2 struct {
@@ -65,6 +75,15 @@ func (registry RegistryV2) Validate(catalog CapabilityCatalog) error {
 	for domain := range registry.CurrentEpochs {
 		if _, exists := registry.MinimumEpochs[domain]; !exists {
 			return invalid("registry current epoch has unknown domain %q", domain)
+		}
+	}
+	for domain, prefix := range registry.RetiredPrefixes {
+		minimum, exists := registry.MinimumEpochs[domain]
+		if !exists || prefix.ThroughEpoch != minimum {
+			return invalid("registry retired prefix for domain %q has an invalid floor", domain)
+		}
+		if err := validateFingerprint(prefix.Digest, "retired migration prefix digest"); err != nil {
+			return err
 		}
 	}
 
@@ -134,6 +153,71 @@ func (registry RegistryV2) Validate(catalog CapabilityCatalog) error {
 		}
 	}
 	return nil
+}
+
+// MigrationPrefixDigest binds the ordered migration definitions completed
+// through an epoch. Previously retired history is represented by its digest,
+// so repeated retirement does not retain an ever-growing definition list.
+func (registry RegistryV2) MigrationPrefixDigest(domain string, throughEpoch int) (Fingerprint, error) {
+	minimum, exists := registry.MinimumEpochs[domain]
+	if !exists || throughEpoch < minimum || throughEpoch > registry.CurrentEpochs[domain] {
+		return "", invalid("retired migration prefix is outside the registry path")
+	}
+	baseEpoch := minimum
+	baseDigest, err := migrationPrefixSeed(domain, minimum)
+	if err != nil {
+		return "", err
+	}
+	if retired, exists := registry.RetiredPrefixes[domain]; exists {
+		baseEpoch, baseDigest = retired.ThroughEpoch, retired.Digest
+		if throughEpoch == baseEpoch {
+			return baseDigest, nil
+		}
+	}
+	if throughEpoch < baseEpoch {
+		return "", invalid("retired migration prefix precedes existing checkpoint")
+	}
+	entries := make([]MigrationDefinitionV2, 0, throughEpoch-baseEpoch)
+	for _, migration := range registry.Migrations {
+		if migration.Domain == domain && migration.FromEpoch >= baseEpoch && migration.ToEpoch <= throughEpoch {
+			entries = append(entries, migration)
+		}
+	}
+	expectedEpoch := baseEpoch
+	for _, migration := range entries {
+		if migration.FromEpoch != expectedEpoch {
+			return "", invalid("retired migration prefix has a gap")
+		}
+		expectedEpoch = migration.ToEpoch
+	}
+	if expectedEpoch != throughEpoch {
+		return "", invalid("retired migration prefix is incomplete")
+	}
+	digest := baseDigest
+	for _, migration := range entries {
+		payload, err := json.Marshal(struct {
+			Domain    string                `json:"domain"`
+			FromEpoch int                   `json:"fromEpoch"`
+			Previous  Fingerprint           `json:"previous"`
+			Migration MigrationDefinitionV2 `json:"migration"`
+		}{domain, migration.FromEpoch, digest, migration})
+		if err != nil {
+			return "", err
+		}
+		digest = fingerprintPayload(payload)
+	}
+	return digest, nil
+}
+
+func migrationPrefixSeed(domain string, epoch int) (Fingerprint, error) {
+	payload, err := json.Marshal(struct {
+		Domain string `json:"domain"`
+		Epoch  int    `json:"epoch"`
+	}{domain, epoch})
+	if err != nil {
+		return "", err
+	}
+	return fingerprintPayload(payload), nil
 }
 
 func (registry RegistryV2) Path(domain string, fromEpoch int) ([]MigrationDefinitionV2, error) {

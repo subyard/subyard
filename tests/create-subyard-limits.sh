@@ -75,6 +75,9 @@ case "${1:-} ${2:-} ${3:-}" in
       limits.cpu | limits.memory) cat "$MOCK_STATE_DIR/$4" ;;
       security.nesting) printf 'true\n' ;;
       security.syscalls.intercept.bpf | security.syscalls.intercept.bpf.devices) ;;
+      user.subyard.vm_cpu_weight) printf '%s\n' "${VM_CPU_WEIGHT:-}" ;;
+      raw.qemu.conf) printf '[device "qemu_balloon"]\nfree-page-reporting = "on"\n' ;;
+      raw.qemu*) ;;
       *) exit 90 ;;
     esac ;;
   'config set yard')
@@ -84,23 +87,31 @@ case "${1:-} ${2:-} ${3:-}" in
         [ "$MOCK_LIMIT_SET_EXIT" = 0 ] || exit "$MOCK_LIMIT_SET_EXIT"
         [ "$MOCK_LIMIT_NOOP" = 1 ] || printf '%s\n' "$5" > "$MOCK_STATE_DIR/$4"
         ;;
+      raw.qemu.conf) ;;
       *) exit 90 ;;
     esac ;;
   'config unset yard') ;;
+  'profile get default') ;;
+  'exec yard --project')
+    case "$*" in
+      *' -- true')
+        printf '200\n' > "$MOCK_STATE_DIR/qemu-pid"
+        attempts="$(cat "$MOCK_STATE_DIR/agent-attempts")"
+        attempts=$((attempts + 1))
+        printf '%s\n' "$attempts" > "$MOCK_STATE_DIR/agent-attempts"
+        [ "$attempts" -ge "$MOCK_AGENT_READY_AFTER" ]
+        ;;
+      *'/virtio_balloon/'*) printf '000001\n' ;;
+      *'systemd-tmpfiles --create'*) cat >/dev/null ;;
+      *'rule-missing-or-unsafe'*) printf 'ready\n' ;;
+      *'ip -4 -o address show'*) printf '2: eth0    inet 10.80.0.10/24 brd 10.80.0.255 scope global eth0\n' ;;
+      *) exit 90 ;;
+    esac ;;
   'list yard --project') cat "$MOCK_STATE_DIR/power"; exit "$MOCK_STATE_EXIT" ;;
   'stop yard --project')
     [ "$MOCK_STOP_EXIT" = 0 ] || exit "$MOCK_STOP_EXIT"
     printf 'STOPPED\n' > "$MOCK_STATE_DIR/power" ;;
   'start yard --project') printf 'RUNNING\n' > "$MOCK_STATE_DIR/power" ;;
-  'exec yard --project')
-    if [ "$*" != 'exec yard --project subyard -- true' ]; then
-      printf '2: eth0    inet 10.80.0.10/24 brd 10.80.0.255 scope global eth0\n'
-      exit 0
-    fi
-    attempts="$(cat "$MOCK_STATE_DIR/agent-attempts")"
-    attempts=$((attempts + 1))
-    printf '%s\n' "$attempts" > "$MOCK_STATE_DIR/agent-attempts"
-    [ "$attempts" -ge "$MOCK_AGENT_READY_AFTER" ] ;;
   *) printf 'unexpected incus call: %s\n' "$*" >&2; exit 90 ;;
 esac
 MOCK
@@ -234,6 +245,52 @@ if YARD_KIND=vm VM_PIN_IPV4=0 VM_FREE_PAGE_REPORTING=0 run_create; then
   fail 'divergent VM pin accepted'
 fi
 ! grep -q '^config device set yard eth0' "$MOCK_INCUS_LOG" || fail 'divergent VM pin replaced'
+# Cloud-image seeding replaces QEMU before the agent becomes ready. Both init
+# and explicit start must apply CPU scheduling to that replacement process.
+cat > "$TMP/bin/qemu-system-x86_64" <<'MOCK'
+#!/usr/bin/env bash
+case "$*" in
+  --version) printf 'QEMU emulator version 8.2.0\n' ;;
+  '-device virtio-balloon-pci,help') printf 'free-page-reporting\n' ;;
+  *) exit 90 ;;
+esac
+MOCK
+cat > "$TMP/bin/cpu-dispatcher" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$#" = 5 ] && [ "$1 $2 $3 $4" = '_vm-cpu apply subyard yard' ] || exit 90
+pid="$(cat "$MOCK_STATE_DIR/qemu-pid")"
+[ "$pid" != 200 ] || [ "$MOCK_CPU_REAPPLY_EXIT" = 0 ] || exit "$MOCK_CPU_REAPPLY_EXIT"
+printf '%s\n' "$pid" > "$MOCK_STATE_DIR/cpu-applied-pid"
+MOCK
+chmod 0700 "$TMP/bin/"{qemu-system-x86_64,cpu-dispatcher}
+export VM_CPU_WEIGHT=1000 VM_FREE_PAGE_REPORTING=1 MOCK_CPU_REAPPLY_EXIT=0
+export SUBYARD_DISPATCHER_PATH="$TMP/bin/cpu-dispatcher"
+run_start() { bash "$ROOT/scripts/lifecycle-guard.sh" start > "$TMP/output" 2>&1; }
+for operation in run_create run_start; do
+  for MOCK_CPU_REAPPLY_EXIT in 0 1; do
+    reset_state STOPPED 2 4GiB
+    printf '100\n' > "$MOCK_STATE_DIR/qemu-pid"
+    if [ "$MOCK_CPU_REAPPLY_EXIT" = 0 ]; then
+      "$operation" || fail "$operation failed after cloud-image reboot"
+      [ "$(cat "$MOCK_STATE_DIR/cpu-applied-pid")" = 200 ] \
+        || fail "$operation left replacement QEMU outside its CPU scope"
+      [ "$(cat "$MOCK_STATE_DIR/power")" = RUNNING ] || fail "$operation did not leave the VM running"
+      ! grep -q '^stop ' "$MOCK_INCUS_LOG" || fail "$operation stopped a successfully scoped VM"
+    else
+      if "$operation"; then fail "$operation accepted failed replacement CPU scheduling"; fi
+      [ "$(cat "$MOCK_STATE_DIR/power")" = STOPPED ] || fail "$operation did not stop fail-closed"
+    fi
+    [ "$(grep -c '^start ' "$MOCK_INCUS_LOG")" = 1 ] || fail "$operation restarted the ready VM"
+  done
+done
+
+VM_FREE_PAGE_REPORTING=0 MOCK_CPU_REAPPLY_EXIT=0
+reset_state STOPPED 2 4GiB
+printf '100\n' > "$MOCK_STATE_DIR/qemu-pid"
+run_create
+[ "$(cat "$MOCK_STATE_DIR/cpu-applied-pid")" = 200 ] \
+  || fail 'CPU-only init did not wait for the replacement QEMU process'
 
 printf 'ok: existing container and VM limits converge safely and preserve empty settings\n'
 printf 'ok: VM IPv4 pinning waits for the guest agent and rejects readiness timeout\n'

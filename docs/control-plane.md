@@ -435,6 +435,45 @@ runtime reconciliation actions and blockers. Add `--json` for the versioned mach
 report. A successful inspection exits 0 even when work remains; inspect `outcome.status` for
 readiness. Unavailable or unsupported inspection never means ready.
 
+Migration history has a separate schema 1 compact representation at
+`release-transition/v2/history-checkpoint.json`: registry provenance, per-domain epoch, compacted
+prefix boundary and digest, and applied suffix. Before publication, `release-transition/v2/ledger.json`
+is authoritative; afterward the checkpoint is authoritative and the legacy ledger remains a
+byte-identical, read-only compatibility projection. Each read checks its recorded existence,
+fingerprint and epochs. Changed or corrupt projection data blocks rather than becoming a new baseline.
+Prefix proof is validated against the trusted registry, including an explicit retired-prefix proof
+when a future registry raises its floor. Suffix completion updates only the checkpoint through CAS;
+after verified readiness, the assessed transition compacts that completed suffix into its prefix proof.
+
+The separately sealed optional [`config/release-checkpoint.json`](../config/release-checkpoint.json)
+marker selects `migration-history-checkpoint-v1` writer support from the verified owner assets.
+Retained assets without that marker do not enable initial conversion; a new engine always reads an
+existing checkpoint. Marker selection does not extend process V1 or journal V2 or authorize conversion under
+an older grant. Initial conversion requires an assessed, authorized transition after verified
+readiness, preserving unfinished journal bindings. The checkpoint capability and a stable
+source-ledger fingerprint bind conversion consent into the existing
+`ObservationScope`; no journal field or separate authorization artifact is added. Resume accepts
+either the exact legacy scope, which preserves the old grant without conversion, or the exact marked
+scope, whose conversion consent survives restart. An ordinary marked update includes conversion in
+its single assessment and consent; completed legacy history requires a fresh assessed grant.
+Publication runs under the shared lock after verified readiness. Failure before or after atomic
+publication preserves one authoritative record and a retryable path. The main registry retains its two migration IDs.
+Older released binaries consume the frozen projection; acceptance must prove delegation to the
+checkpoint-capable owner rather than assume they decode the compact format. See the
+[migration retirement contract](reference/resumable-release-transition-design.md#migration-retirement).
+
+Before advancing an existing checkpoint, the exact current/from release must itself carry the
+verified, sealed checkpoint-reader marker. An unaware current release must first activate a
+compatible reader bridge at matching checkpoint and projection epochs; sealing only the future
+target does not satisfy this prerequisite. Initial conversion without an existing checkpoint can
+record the full migration result in the legacy projection. Retaining that projection does not make
+rollback eligible after checkpoint epochs advance. The checkpoint-aware runtime boundary validates
+authoritative history against the exact sealed target registry before dispatching rollback to an
+unaware retained target. Its projection must match the checkpoint epochs and pinned data; the captured
+checkpoint and projection must remain unchanged through execution. The original registry-based
+transition owner, catalog and journal bindings are preserved. A marked target validates the checkpoint
+itself; a target without a transition registry retains the existing active-owner route.
+
 `yard migrate` assesses and confirms the necessary work, then uses the same verified transition
 owner, authorization, lock, journal and convergence engine as `yard update`. It does not download
 or publish a release, choose a version, or rotate runtime links to another release. Completed
@@ -514,27 +553,47 @@ New callers first probe `lifecycle-capabilities` for `activation-only-replacemen
 fall back to the original probe when it is unsupported. Only a successful lifecycle probe selects
 the explicit request `contract`. Receipt schema 2 uses the `recovery-v2-` transaction prefix and
 `release-transition/recovery/v2/transactions`; canonical terminal records live under its sibling
-`archive`. The plan binds both current native inputs and an exact existing reservation. Fresh consent
+`archive`. Protected mutable `frontiers/<original-transaction>.json` records the exact predecessor,
+generation and latest authorized cancellation witness. The opaque successor identity binds that
+predecessor fingerprint and generation. The plan binds current native inputs and the exact frontier
+reservation, so returning to earlier desired inputs cannot select a cancelled generation. Fresh consent
 can cancel that reservation only while the exact predecessor is still selected and no current,
 prepared or ordinary archived journal references the successor. Only an exact prepared Authorized
-successor CAS file can be invalidated. Cancellation evidence is published durably before protected
-live-record removal and fsync. A cancelled successor cannot be selected again. An interruption after
-cancellation publication but before removal requires retrying that exact authorized replacement
-assessment before another change of inputs. Legacy V1 reservations keep their exact-input retry
+successor CAS file can be invalidated. Cancellation evidence is published durably, the frontier
+advances by exactly one generation through CAS, then exact live/pending records are removed and
+fsynced before a new receipt and journal CAS. Pending frontier state must prove the exact next
+generation. After interruption, changed inputs bind the existing cancellation witness and need a
+new grant; apply finishes unchanged durable intent without restoring earlier desired inputs.
+Read-only inspection and declined consent leave state unchanged. Generation exhaustion blocks.
+Legacy V1 reservations keep their exact-input retry
 semantics and are never cancelled automatically. Neither contract permits replacement chains.
 
-Completion evidence includes the exact completed journal, captured before it can be overwritten.
-Absence from the current journal does not prove completion. Cleanup runs under the shared lock only
-after readiness, preserves current/prepared/ordinary archive references and live cancellation
-bindings, and retires at most 32 live and 32 terminal records per invocation. Unreferenced terminal
-history is trimmed toward 32 records; protected records can exceed that target. Live and archive
-admission remain bounded at 256 records and fail closed on unknown or conflicting evidence.
-Legacy V1 live receipts retain their original conservative ceiling; live-record retirement applies
-only to the separately negotiated V2 contract.
+Generationless V2 receipts from an earlier prerelease candidate are unsupported by the current
+frontier contract. Preserve their exact journal, receipt and verified draft owner/assets; resume
+through that original owner rather than adopting or rebaselining the evidence. The checked local tag
+history has no tag containing the generationless change `382a4aa`, and the v0.17.8 tree has no recovery
+contract implementation. This is local-tag evidence, not verification of the published release API.
+Released compatibility gates cover the supported frozen V1 baselines separately.
+
+Completion evidence captures the exact completed successor journal before overwrite. Exact predecessor
+completion can instead close a never-selected receipt; absence from current state alone supplies no
+proof. V1 live receipts retire only with terminal proof and no required predecessor/successor references;
+their reservations are never cancelled. Cleanup runs under the shared lock after readiness and before
+admission, with a 32-record budget per phase. Older cancellations compact before readiness only when
+the frontier preserves the latest witness and retired-generation proof. Current, pending and ordinary
+archived journals and live reservation bindings remain roots. A retained release ID alone does not pin
+every transaction it once owned; verified rollback eligibility and exact unfinished owners remain
+separate requirements. Unreferenced terminal history is trimmed toward 32; protected history can exceed it.
+
+Modern live, archive and frontier namespaces each allow 512 logical records and 32 MiB of physical
+record bytes. Matching published/pending pairs count once logically; both files consume bytes. The
+ordinary frozen V2 transaction graph and V1 live namespace retain 256-record limits. Eligible cleanup
+precedes admission, including at archive capacity; protected exhaustion, unknown or conflicting state blocks.
 An active V2 successor validates its own terminal record directly, so unrelated historical archive
 corruption blocks cleanup or new admission without blocking its exact resume. Retirement failures
-leave evidence intact and add `recovery cleanup is pending` to the ready outcome. No index, daemon,
-ledger format change or age-based deletion is involved.
+leave evidence intact and add `recovery cleanup is pending` to the ready outcome. Failed terminal
+capture retains live evidence and reports pending cleanup even when a completed journal is replaced.
+There is no age-based deletion or background cleanup daemon.
 
 The release-transition journal is authoritative recovery state, not an operator transcript. A
 separate structured update history under `$SUBYARD_HOME/logs/updates` records each committed
@@ -556,11 +615,14 @@ contracts. Do not weaken validation or silently discard a new safety requirement
 response: the compatibility adapter must preserve its meaning.
 
 Before publication, `dev/verify-release-upgrades.py` runs the unmodified, checksum-pinned v0.11.2
-updater against the built candidate on the runner's architecture. It verifies inspection, activation,
-the completed fixed point, completed activation drift inspection, rollback and forward retry. It also kills a real update after journaled
-activation and uses the old updater to resume the same authorized candidate transaction. This
-released-binary check complements tests of the frozen codecs; rebuilding both ends from current
-source does not establish cross-release compatibility.
+and v0.18.1 updaters against the built candidate on the runner's architecture. It verifies inspection,
+activation, the completed fixed point, completed activation drift inspection, rollback and forward retry.
+It also kills a real update after journaled activation and uses the old updater to resume the same
+authorized candidate transaction. This released-binary check complements tests of the frozen codecs;
+rebuilding both ends from current source does not establish cross-release compatibility. Both released callers also exercise checkpoint-reader
+bridge ordering and rollback refusal after authoritative epochs exceed the frozen projection. The v0.18.1
+caller reports completed activation drift as a fresh migration-required plan; v0.11.2 retains its frozen
+recovering presentation. Neither reuses completed authorization.
 
 The same harness runs the checksum-pinned v0.17.3 engine to create and interrupt an activation-only
 repair, reproduce its unrelated-template blocker, resume through the standalone candidate with

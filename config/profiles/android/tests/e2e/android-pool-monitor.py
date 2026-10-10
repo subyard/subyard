@@ -271,8 +271,8 @@ def pairs(path):
             for key, value in [line.split()]}
 
 
-def native_observation(proc=Path('/proc')):
-    # This is the native E2E VM's kernel, separate from Android guest queries.
+def yard_observation(proc=Path('/proc')):
+    # These are yard-visible /proc counters; LXCFS may virtualize them.
     result = dict(cpu_ticks=None, ticks_per_second=None, mem_total_kb=None, mem_available_kb=None)
     try:
         ticks = os.sysconf('SC_CLK_TCK')
@@ -340,6 +340,22 @@ def metrics(slot):
                   active_state=active_state if active_state in ('active', 'activating', 'failed', 'inactive')
                   else 'other')
     values['memory.events'] = pairs(group / 'memory.events')
+    memory_stat = pairs(group / 'memory.stat')
+    values['memory.stat'] = None if memory_stat is None else {
+        key: memory_stat.get(key) for key in ('anon', 'file', 'shmem', 'kernel', 'active_file', 'inactive_file')
+        if type(memory_stat.get(key)) is int and 0 <= memory_stat[key] <= 1 << 60}
+    values['main_process_memory_kb'] = dict(rss=None, pss=None)
+    try:
+        with Path(f'/proc/{pid}/smaps_rollup').open('rb') as source:
+            raw = source.read(8193)
+        if len(raw) <= 8192:
+            for key, field in ((b'Rss', 'rss'), (b'Pss', 'pss')):
+                lines = re.findall(rb'^' + key + rb':[^\n]*$', raw, re.M)
+                match = re.fullmatch(key + rb': +([0-9]{1,20}) kB', lines[0]) if len(lines) == 1 else None
+                if match and int(match[1]) <= 1 << 60:
+                    values['main_process_memory_kb'][field] = int(match[1])
+    except OSError:
+        pass
     values['cpu.stat'] = pairs(group / 'cpu.stat')
     for name in ('memory.pressure', 'cpu.pressure'):
         try:
@@ -462,13 +478,13 @@ def main():
             if now >= next_report or identity != last_state or stopping:
                 if not samples:
                     report = {'sampled_at': time.time(), 'state': 'idle',
-                              'native_vm': native_observation(),
+                              'yard_visible': yard_observation(),
                               'last_cgroups': [last_metrics[key] for key in sorted(last_metrics)]}
                     print('android-boot-monitor ' + json.dumps(report, sort_keys=True), flush=True)
                 for slot, status, cgroup in samples:
                     key = (slot['slot_id'], slot['generation'])
                     report = {'sampled_at': time.time(), 'slot': slot['slot_id'], 'generation': slot['generation'],
-                              'native_vm': native_observation(),
+                              'yard_visible': yard_observation(),
                               'state': status, 'cgroup': cgroup}
                     if status in ('provisioning', 'held'):
                         report['display'] = display_observation(slot)

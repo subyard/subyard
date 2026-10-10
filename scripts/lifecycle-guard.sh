@@ -130,6 +130,10 @@ case "$action" in
     info "waiting for $YARD_INSTANCE_NAME agent"
     incus_wait_instance_agent "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" \
       || die "instance '$YARD_INSTANCE_NAME' agent did not become ready"
+    # Cloud-image seeding can replace the QEMU process scoped at first start.
+    if [ -n "${VM_CPU_WEIGHT:-}" ]; then
+      power_start_guarded "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" "$BRIDGE" || die "$POWER_ERROR"
+    fi
     ;;
   stop)
     cur="$(state)"

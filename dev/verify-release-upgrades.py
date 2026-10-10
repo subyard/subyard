@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the frozen update contract with an unmodified released updater."""
+"""Exercise supported update contracts with unmodified released updaters."""
 
 import argparse
 import ctypes
@@ -10,6 +10,7 @@ from pathlib import Path
 import platform
 import select
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -32,6 +33,11 @@ ACTIVATION_BASELINE = "0.17.3"
 ACTIVATION_BASELINE_SHA256 = {
     "amd64": "3ea73ca51dae023600997a07bbfaa5df8be1f4c1c4f5c9ead1b261b5aec4363b",
     "arm64": "dcc1ae42dc25760b9f4fd290c8aec23c09b729d4a04f780107022710f1247e79",
+}
+PUBLISHED_BASELINE = "0.18.1"
+PUBLISHED_BASELINE_SHA256 = {
+    "amd64": "a2e4a18ac806079b70b35a5b679ef6c616bc22137453d6f3f0e0e34ef491ef74",
+    "arm64": "2172f375871fe280297f69e9ae88a7d1ca1df5678c02d6189551cfa98aa07d9a",
 }
 
 
@@ -122,6 +128,7 @@ class Fixture:
         self.runtime = self.data / "runtime"
         self.journal = self.config / "release-transition/v2/journal.json"
         self.version = version
+        self.baseline_version = baseline_version
         self.config.mkdir(parents=True)
         self.env = {
             "PATH": "/usr/bin:/bin", "HOME": str(self.home), "SHELL": "/bin/bash",
@@ -173,16 +180,201 @@ class Fixture:
                 "inspection changed the retained runtime")
         return inspection
 
-    def complete(self, old=True):
+    def complete(self, old=True, expected_previous=None):
         journal = json.loads(self.journal.read_text())
         require(journal["schemaVersion"] == 2 and journal["checkpoint"] == "complete",
                 "transition did not complete in the supported journal format")
         require(self.run([str(self.runtime / "current/bin/yard"), "--version"]).strip()
                 == f"yard {self.version}", "candidate is not active")
-        require(os.readlink(self.runtime / "previous") == self.initial, "baseline was not retained")
+        require(os.readlink(self.runtime / "previous") == (expected_previous or self.initial),
+                "the exact previous runtime was not retained")
         require(digest(self.retained) == self.retained_hash, "operator settings changed")
         require(self.project_marker.read_text() == "project data\n", "project data changed")
         require(self.check(old=old)["outcome"]["status"] == "ready", "updater cannot inspect completion")
+        self.compact_history()
+
+    def compact_history(self):
+        capability = self.runtime / "current/config/release-checkpoint.json"
+        if not capability.exists():
+            return
+        checkpoint_path = self.config / "release-transition/v2/history-checkpoint.json"
+        require(checkpoint_path.is_file(), "capable candidate did not convert its completed migration history")
+        checkpoint = json.loads(checkpoint_path.read_text())
+        projection = self.config / "release-transition/v2/ledger.json"
+        binding = checkpoint["legacyProjection"]
+        require(checkpoint["schemaVersion"] == 1 and checkpoint["domains"]
+                and binding["exists"] == projection.exists()
+                and (not projection.exists() or binding["fingerprint"] == digest(projection)),
+                "compact history lost its immutable legacy projection binding")
+        require(all(state["compactedThrough"] == state["epoch"] and not state["appliedSuffix"]
+                    for state in checkpoint["domains"].values()),
+                "completed migration IDs remain in the authoritative history")
+        registry = json.loads((self.runtime / "current/config/release-transition.json").read_text())
+        require({domain: state["epoch"] for domain, state in checkpoint["domains"].items()}
+                == registry["currentEpochs"], "compact history does not match the active registry epochs")
+
+
+def verify_checkpoint_refusal(fixture):
+    checkpoint = fixture.config / "release-transition/v2/history-checkpoint.json"
+    if not checkpoint.exists():
+        return
+    projection = fixture.config / "release-transition/v2/ledger.json"
+    retained = projection.read_bytes()
+    # The only authority switch is protected checkpoint publication. Neither
+    # reader may silently select a legacy projection changed by an old writer.
+    projection.write_bytes(retained + b"\n")
+    try:
+        before = snapshot(fixture.config)
+        for old in (False, True):
+            launcher = fixture.old_launcher if old else fixture.runtime / "current/bin/yard"
+            result = run_process([str(launcher), "update", "--check", "--version", fixture.version],
+                                 fixture.env, timeout=180)
+            ready = result.returncode == 0 and json.loads(result.stdout)["outcome"]["status"] == "ready"
+            require(not ready and snapshot(fixture.config) == before,
+                    "reader trusted or changed a divergent compatibility projection")
+    finally:
+        projection.write_bytes(retained)
+    fixture.complete()
+    print(f"PASS: candidate and released {fixture.baseline_version} caller refuse a changed pinned ledger projection without mutation",
+          flush=True)
+
+
+def verify_checkpoint_source(release, version, baseline, arch, root, baseline_version=BASELINE):
+    fixture = Fixture(root / f"checkpoint-source-{baseline_version}", release, version, baseline, arch,
+                      baseline_version)
+    fixture.update("--version", version, "--yes")
+    fixture.complete()
+    bridge = os.readlink(fixture.runtime / "current")
+    require((fixture.runtime / bridge / "config/release-checkpoint.json").is_file(),
+            "checkpoint-source acceptance requires a sealed checkpoint-reader candidate")
+    checkpoint = fixture.config / "release-transition/v2/history-checkpoint.json"
+    projection = fixture.config / "release-transition/v2/ledger.json"
+    retained_projection = projection.read_bytes()
+    projection_epochs = {domain: state["epoch"] for domain, state in
+                         json.loads(retained_projection)["domains"].items()}
+    require(projection_epochs["settings"] == 2 and
+            {domain: state["epoch"] for domain, state in
+             json.loads(checkpoint.read_text())["domains"].items()} == projection_epochs,
+            "initial checkpoint does not agree with the released caller's epoch-2 projection")
+
+    # This rollback uses the actual released caller and target. It is safe only
+    # while the authoritative checkpoint and its frozen projection still agree.
+    fixture.update("--rollback", "--yes")
+    require(os.readlink(fixture.runtime / "current") == fixture.initial,
+            "released caller could not roll back at matching checkpoint/projection epochs")
+    require(projection.read_bytes() == retained_projection,
+            "matching-epoch rollback changed the pinned legacy projection")
+    before = snapshot(fixture.config)
+    rollback_links = tuple(os.readlink(fixture.runtime / name) for name in ("current", "previous"))
+    bridge_inspection = json.loads(fixture.run([
+        str(fixture.runtime / bridge / "bin/yard"), "update", "--check", "--version", version,
+    ]))
+    bridge_outcome = bridge_inspection["outcome"]
+    require(bridge_outcome["status"] in {"ready", "migration-required", "recovering"} and
+            bridge_outcome["active"] == fixture.initial.removeprefix("releases/") and
+            bridge_outcome["target"] == bridge.removeprefix("releases/") and
+            bridge_inspection.get("plan", "").startswith("plan-v1-") and
+            bridge_inspection.get("resume") is None,
+            f"retained bridge cannot assess a fresh forward plan after released-caller rollback: {bridge_outcome}")
+    require(snapshot(fixture.config) == before and
+            tuple(os.readlink(fixture.runtime / name) for name in ("current", "previous")) == rollback_links,
+            "retained bridge inspection changed the frozen rollback journal or runtime links")
+
+    # Build a future owner from exactly the invoking (normally frozen) public
+    # source. Only this private copy gains a synthetic settings migration.
+    source = Path(__file__).resolve().parent.parent
+    future_source = root / f"checkpoint-future-source-{baseline_version}"
+    selected = run_process(["bash", str(source / "tests/helpers/source-files.sh"), str(source)],
+                           env=None, timeout=30)
+    require(selected.returncode == 0, "cannot select public inputs for the synthetic future owner")
+    for relative in filter(None, selected.stdout.split("\0")):
+        path = source / relative
+        require(path.is_file() and not path.is_symlink(),
+                "synthetic future source must contain only regular public files")
+        destination = future_source / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, destination)
+    registry_path = future_source / "config/release-transition.json"
+    registry = json.loads(registry_path.read_text())
+    require(registry["currentEpochs"] == projection_epochs,
+            "synthetic future source does not match the supplied bridge registry")
+    registry["currentEpochs"]["settings"] = 3
+    registry["migrations"].append({
+        "id": "canonicalize-test-vms-settings-v3", "domain": "settings",
+        "fromEpoch": 2, "toEpoch": 3, "kind": "test-vms-settings-v1-to-v2",
+    })
+    registry_path.write_text(json.dumps(registry, indent=2) + "\n")
+    major, minor, patch = version.split("+", 1)[0].split("-", 1)[0].split(".")
+    future_version = f"{major}.{minor}.{int(patch) + 1}-checkpoint-future"
+    future_release = root / f"checkpoint-future-release-{baseline_version}"
+    future_release.mkdir()
+    for path in release.iterdir():
+        if path.is_file():
+            shutil.copy2(path, future_release / path.name)
+    built = run_process(["bash", str(future_source / "dev/package-engine.sh"),
+                         "--version", future_version, "--arch", arch,
+                         "--output-dir", str(future_release)], env=None, timeout=180)
+    require(built.returncode == 0,
+            f"cannot package the synthetic sealed future owner: {built.stdout}{built.stderr}")
+    fixture.env["YARD_RELEASE_BASE_URL"] = future_release.as_uri()
+
+    def links():
+        return tuple(os.readlink(fixture.runtime / name) for name in ("current", "previous"))
+
+    before, prior_links = snapshot(fixture.config), links()
+    inspection = json.loads(fixture.update("--check", "--version", future_version))
+    outcome = inspection["outcome"]
+    # The released caller projects the public outcome, not the newer owner's
+    # complete blocker inventory. Assert its supported diagnostic contract.
+    require(outcome["status"] == "operator-action-required" and
+            outcome["code"] == "rollback-incompatible" and
+            "verified checkpoint-reader bridge" in outcome["retry"],
+            "released caller omitted the checkpoint-reader bridge prerequisite")
+    require(snapshot(fixture.config) == before and links() == prior_links,
+            "blocked future inspection changed protected state or runtime links")
+    refused = run_process([str(fixture.old_launcher), "update", "--version", future_version, "--yes"],
+                          fixture.env, timeout=180)
+    require(refused.returncode != 0 and
+            "verified checkpoint-reader bridge" in refused.stdout + refused.stderr and
+            snapshot(fixture.config) == before and links() == prior_links,
+            "released caller advanced checkpoint history from an unaware retained source")
+
+    # No new intermediate published baseline is invented: the exact supplied
+    # epoch-2 candidate is the reader bridge before checkpoint history advances.
+    fixture.update("--version", version, "--yes")
+    fixture.complete()
+    require(os.readlink(fixture.runtime / "current") == bridge,
+            "released caller did not install the exact assessed reader bridge")
+    fixture.update("--version", future_version, "--yes")
+    fixture.version = future_version
+    fixture.complete(expected_previous=bridge)
+    require(projection.read_bytes() == retained_projection and
+            json.loads(checkpoint.read_text())["domains"]["settings"]["epoch"] == 3,
+            "future owner did not preserve projection epoch 2 while advancing compact history to epoch 3")
+
+    before, prior_links = snapshot(fixture.config), links()
+    for old in (False, True):
+        launcher = fixture.old_launcher if old else fixture.runtime / "current/bin/yard"
+        checked = run_process([str(launcher), "update", "--rollback", "--check"],
+                              fixture.env, timeout=180)
+        if checked.returncode == 0:
+            outcome = json.loads(checked.stdout)["outcome"]
+            require(outcome["status"] == "operator-action-required" and
+                    outcome["code"] == "rollback-incompatible",
+                    "caller reported epoch-2 rollback eligible after authoritative epoch 3")
+        else:
+            require(any(word in (checked.stdout + checked.stderr).lower()
+                        for word in ("rollback", "checkpoint")),
+                    "rollback inspection failed without its compatibility diagnostic")
+        refused = run_process([str(launcher), "update", "--rollback", "--yes"],
+                              fixture.env, timeout=180)
+        require(refused.returncode != 0 and
+                any(word in (refused.stdout + refused.stderr).lower()
+                    for word in ("rollback", "checkpoint")) and
+                snapshot(fixture.config) == before and links() == prior_links,
+                "caller rolled back or changed protected state using a stale epoch-2 projection")
+    print(f"PASS: released {baseline_version} caller requires the sealed reader bridge before synthetic "
+          "epoch 3; both callers refuse rollback to epoch 2 and preserve the pinned projection", flush=True)
 
 
 def verify_legacy(release, version, baseline, arch, root):
@@ -265,10 +457,17 @@ def verify_completed_activation_drift(fixture):
     try:
         retained = fixture.check()
         current = fixture.check(old=False)
-        require(retained["outcome"]["status"] == "recovering"
-                and retained["outcome"]["code"] == "recovery-pending"
-                and retained["outcome"].get("transaction") == transaction,
-                "released updater rejected completed activation drift")
+        if fixture.baseline_version == BASELINE:
+            require(retained["outcome"]["status"] == "recovering"
+                    and retained["outcome"]["code"] == "recovery-pending"
+                    and retained["outcome"].get("transaction") == transaction,
+                    "frozen released updater rejected completed activation drift")
+        else:
+            require(fixture.baseline_version == PUBLISHED_BASELINE
+                    and retained["outcome"]["status"] == "migration-required"
+                    and retained["outcome"]["code"] == "transition-required"
+                    and retained["outcome"].get("transaction") is None,
+                    "published updater did not preserve fresh activation-plan semantics")
         require(current["outcome"]["status"] == "migration-required"
                 and current["outcome"].get("transaction") is None,
                 "current updater did not preserve fresh activation-plan semantics")
@@ -287,24 +486,26 @@ def verify_completed_activation_drift(fixture):
     finally:
         power.unlink()
     fixture.complete()
-    print(f"PASS: released {BASELINE} updater inspects completed activation drift with a fresh plan",
+    print(f"PASS: released {fixture.baseline_version} updater inspects completed activation drift with a fresh plan",
           flush=True)
 
 
-def verify(release, version, baseline, arch, root):
-    normal = Fixture(root / "normal", release, version, baseline, arch)
+def verify(release, version, baseline, arch, root, baseline_version=BASELINE):
+    normal = Fixture(root / f"normal-{baseline_version}", release, version, baseline, arch, baseline_version)
     require(normal.check()["outcome"]["status"] == "migration-required",
             "old updater could not inspect candidate activation")
     normal.update("--version", version, "--yes")
     normal.complete()
+    verify_checkpoint_refusal(normal)
     verify_completed_activation_drift(normal)
     normal.update("--rollback", "--yes", old=False)
     require(os.readlink(normal.runtime / "current") == normal.initial, "rollback lost the old runtime")
     normal.update("--offline", "--version", version, "--yes")
     normal.complete()
-    print(f"PASS: released {BASELINE} updater -> {version}, fixed point, rollback and forward retry", flush=True)
+    print(f"PASS: released {baseline_version} updater -> {version}, fixed point, rollback and forward retry", flush=True)
 
-    interrupted = Fixture(root / "interrupted", release, version, baseline, arch)
+    interrupted = Fixture(root / f"interrupted-{baseline_version}", release, version, baseline, arch,
+                          baseline_version)
     inspection = interrupted.check()
     target = inspection["outcome"]["target"]
     marker = interrupted.root / "activation-observed.json"
@@ -328,7 +529,7 @@ def verify(release, version, baseline, arch, root):
     interrupted.complete()
     require(json.loads(interrupted.journal.read_text())["transaction"] == transaction,
             "resume replaced the authorized transaction")
-    print(f"PASS: released {BASELINE} updater resumes the candidate's journal after SIGKILL", flush=True)
+    print(f"PASS: released {baseline_version} updater resumes the candidate's journal after SIGKILL", flush=True)
 
 
 def verify_activation_only_recovery(release, version, baseline, arch, root):
@@ -682,13 +883,19 @@ def main():
                         help="optional directory containing the pinned official legacy baseline assets")
     parser.add_argument("--activation-baseline-dir", type=Path,
                         help="optional directory containing the pinned activation-recovery baseline assets")
+    parser.add_argument("--published-baseline-dir", type=Path,
+                        help="optional directory containing the pinned published-caller baseline assets")
     parser.add_argument("--only-activation-recovery", action="store_true",
                         help="run only the published activation-only recovery regression")
+    parser.add_argument("--only-checkpoint-source", action="store_true",
+                        help="run only released-caller checkpoint source and future rollback compatibility")
     args = parser.parse_args()
+    require(not (args.only_activation_recovery and args.only_checkpoint_source),
+            "choose only one focused compatibility regression")
     arch = {"x86_64": "amd64", "aarch64": "arm64"}.get(platform.machine())
     require(platform.system() == "Linux" and arch in BASELINE_SHA256, "unsupported platform")
     release = args.release_dir.resolve()
-    require(args.version not in (BASELINE, LEGACY_BASELINE, ACTIVATION_BASELINE),
+    require(args.version not in (BASELINE, LEGACY_BASELINE, ACTIVATION_BASELINE, PUBLISHED_BASELINE),
             "candidate must differ from the released baselines")
     os.umask(0o077)
     # Protected runtime roots reject writable workspace ancestors. All mutable
@@ -711,13 +918,22 @@ def main():
                 readable, _, _ = select.select([server.stdout], [], [], 10)
                 require(readable and server.stdout.readline().strip() == "ready",
                         "Incus fixture did not become ready")
-                if not args.only_activation_recovery:
+                if not args.only_activation_recovery and not args.only_checkpoint_source:
                     legacy = baseline_assets(root, args.legacy_baseline_dir, LEGACY_BASELINE,
                                              LEGACY_BASELINE_SHA256, arch)
                     verify_legacy(release, args.version, legacy, arch, root)
-                    baseline = baseline_assets(root, args.baseline_dir, BASELINE, BASELINE_SHA256, arch)
-                    verify(release, args.version, baseline, arch, root)
-                    verify_fresh_activation_recovery(release, args.version, baseline, arch, root)
+                if not args.only_activation_recovery:
+                    for baseline_version, hashes, directory in (
+                            (BASELINE, BASELINE_SHA256, args.baseline_dir),
+                            (PUBLISHED_BASELINE, PUBLISHED_BASELINE_SHA256, args.published_baseline_dir)):
+                        baseline = baseline_assets(root, directory, baseline_version, hashes, arch)
+                        if not args.only_checkpoint_source:
+                            verify(release, args.version, baseline, arch, root, baseline_version)
+                        verify_checkpoint_source(release, args.version, baseline, arch, root, baseline_version)
+                        if baseline_version == BASELINE and not args.only_checkpoint_source:
+                            verify_fresh_activation_recovery(release, args.version, baseline, arch, root)
+                    if args.only_checkpoint_source:
+                        return
                 activation = baseline_assets(root, args.activation_baseline_dir, ACTIVATION_BASELINE,
                                              ACTIVATION_BASELINE_SHA256, arch)
                 verify_activation_only_recovery(release, args.version, activation, arch, root)
