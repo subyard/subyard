@@ -415,11 +415,15 @@ users:
     lock_passwd: true
 ssh_pwauth: false
 `
-	if _, err := builder.incus(ctx, "init", source, vm, "--vm", "--project", cfg.Project,
-		"-c", "limits.cpu="+fmt.Sprint(spec.CPU), "-c", "limits.memory="+spec.Memory,
+	args := []string{"init", source, vm, "--vm", "--project", cfg.Project,
+		"-c", "limits.cpu=" + fmt.Sprint(spec.CPU), "-c", "limits.memory=" + spec.Memory,
 		"-c", "boot.autostart=false",
-		"-c", "user.subyard.managed="+managedMarker, "-c", "user.subyard.base_owner="+registry.Owner,
-		"-c", "user.subyard.base_key="+buildKey, "-c", "cloud-init.user-data="+cloud); err != nil {
+		"-c", "user.subyard.managed=" + managedMarker, "-c", "user.subyard.base_owner=" + registry.Owner,
+		"-c", "user.subyard.base_key=" + buildKey, "-c", "cloud-init.user-data=" + cloud}
+	if _, rawQEMU := vmSleepPolicy(imageArchitecture()); rawQEMU != "" {
+		args = append(args, "-c", "raw.qemu.conf="+rawQEMU)
+	}
+	if _, err := builder.incus(ctx, args...); err != nil {
 		return result, err
 	}
 	if err := builder.startVM(ctx, vm); err != nil {

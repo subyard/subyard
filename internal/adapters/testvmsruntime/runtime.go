@@ -17,6 +17,16 @@ import (
 
 const provisionedGuestCount = 2
 
+// Only the broker configures low-level VM settings. Incus disables q35 S3 by
+// default; override that fixed ICH9 setting so x86_64 guests can suspend to RAM.
+// Other architectures retain Incus's default low-level restriction.
+func vmSleepPolicy(architecture string) (lowlevel, rawQEMU string) {
+	if architecture == "x86_64" {
+		return "allow", "[global][0]\ndriver = \"ICH9-LPC\"\nproperty = \"disable_s3\"\nvalue = \"0\"\n"
+	}
+	return "", ""
+}
+
 type Runtime struct {
 	allocation        *LeaseIdentity
 	memoryProbe       func() (MemoryCapacity, error)
@@ -411,6 +421,11 @@ func (runtime *Runtime) ensureProject(ctx context.Context) error {
 		if err := cfg.validateManagedNames(names); err != nil {
 			return err
 		}
+		for _, name := range names {
+			if err := runtime.requireAllocationMarker(ctx, name); err != nil {
+				return err
+			}
+		}
 		currentCPU, err := runtime.incus(ctx, "project", "get", cfg.Project, "limits.cpu")
 		if err != nil {
 			return err
@@ -455,11 +470,15 @@ func (runtime *Runtime) ensureProject(ctx context.Context) error {
 		}
 		fmt.Fprintf(runtime.Stdout, "  [ ok ] created inner Incus project %q\n", cfg.Project)
 	}
-	for _, setting := range [][2]string{
+	settings := [][2]string{
 		{"limits.instances", strconv.Itoa(cfg.guestCount())}, {"limits.virtual-machines", strconv.Itoa(cfg.guestCount())},
 		{"restricted", "true"}, {"restricted.networks.access", cfg.Network},
 		{"user.subyard.managed", managedMarker},
-	} {
+	}
+	if lowlevel, _ := vmSleepPolicy(imageArchitecture()); lowlevel != "" {
+		settings = append(settings, [2]string{"restricted.virtual-machines.lowlevel", lowlevel})
+	}
+	for _, setting := range settings {
 		if _, err := runtime.incus(ctx, "project", "set", cfg.Project, setting[0], setting[1]); err != nil {
 			return err
 		}
@@ -533,6 +552,12 @@ func (runtime *Runtime) ensureVM(ctx context.Context, vm string) error {
 		"false", "--project", cfg.Project); err != nil {
 		return err
 	}
+	if _, rawQEMU := vmSleepPolicy(imageArchitecture()); rawQEMU != "" {
+		if _, err := runtime.incus(ctx, "config", "set", vm, "raw.qemu.conf", rawQEMU,
+			"--project", cfg.Project); err != nil {
+			return err
+		}
+	}
 	raw, err := runtime.incus(ctx, "config", "get", vm, "raw.apparmor", "--project", cfg.Project)
 	if err != nil {
 		return err
@@ -557,6 +582,9 @@ func (runtime *Runtime) initVM(ctx context.Context, vm string) error {
 		if runtime.allocation != nil {
 			args = append(args, "-c", "user.subyard.generation="+strconv.FormatUint(runtime.allocation.ResourceGeneration, 10),
 				"-c", "user.subyard.lease-epoch="+strconv.FormatUint(runtime.allocation.LeaseEpoch, 10))
+		}
+		if _, rawQEMU := vmSleepPolicy(imageArchitecture()); rawQEMU != "" {
+			args = append(args, "-c", "raw.qemu.conf="+rawQEMU)
 		}
 		_, err := runtime.incus(ctx, args...)
 		if err == nil || !remoteImageLookupError(err) || attempt == attempts {
@@ -588,6 +616,9 @@ func (runtime *Runtime) tightenProject(ctx context.Context) error {
 		if _, err := runtime.incus(ctx, "project", "set", cfg.Project, setting[0], setting[1]); err != nil {
 			return err
 		}
+	}
+	if lowlevel, _ := vmSleepPolicy(imageArchitecture()); lowlevel != "" {
+		return nil
 	}
 	_, err := runtime.incus(ctx, "project", "unset", cfg.Project,
 		"restricted.virtual-machines.lowlevel")

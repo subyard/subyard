@@ -1425,6 +1425,9 @@ func TestProjectLimitsShrinkOnlyAfterVMReconciliation(t *testing.T) {
 			return []byte(managedMarker + "\n"), nil, nil
 		case "list --project " + cfg.Project + " -f csv -c n":
 			return []byte(cfg.vm(1) + "\n" + cfg.vm(2) + "\n"), nil, nil
+		case "config get " + cfg.vm(1) + " user.subyard.managed --project " + cfg.Project,
+			"config get " + cfg.vm(2) + " user.subyard.managed --project " + cfg.Project:
+			return []byte(managedMarker + "\n"), nil, nil
 		case "project get " + cfg.Project + " limits.cpu":
 			return []byte("4\n"), nil, nil
 		case "project get " + cfg.Project + " limits.memory":
@@ -1444,6 +1447,19 @@ func TestProjectLimitsShrinkOnlyAfterVMReconciliation(t *testing.T) {
 			t.Fatal("aggregate memory was lowered before VM limits")
 		}
 	}
+	projectCalls := callsText(runner.calls)
+	allow := "incus project set " + cfg.Project + " restricted.virtual-machines.lowlevel allow"
+	if strings.Contains(projectCalls, allow) != (imageArchitecture() == "x86_64") {
+		t.Fatalf("low-level permission does not match architecture: %s", projectCalls)
+	}
+	for _, expected := range []string{
+		"incus project set " + cfg.Project + " restricted true",
+		"incus project set " + cfg.Project + " restricted.networks.access " + cfg.Network,
+	} {
+		if !strings.Contains(projectCalls, expected) {
+			t.Errorf("missing isolation setting %q in:\n%s", expected, projectCalls)
+		}
+	}
 	runner.calls = nil
 	if err := runtime.tightenProject(context.Background()); err != nil {
 		t.Fatal(err)
@@ -1452,18 +1468,33 @@ func TestProjectLimitsShrinkOnlyAfterVMReconciliation(t *testing.T) {
 	for _, expected := range []string{
 		"incus project set " + cfg.Project + " limits.cpu 4",
 		"incus project set " + cfg.Project + " limits.memory 1536MiB",
-		"incus project unset " + cfg.Project + " restricted.virtual-machines.lowlevel",
 	} {
 		if !strings.Contains(got, expected) {
 			t.Errorf("missing call %q in:\n%s", expected, got)
 		}
 	}
-	if strings.Contains(got, "lowlevel allow") {
-		t.Fatal("obsolete low-level allowance returned")
+	unset := "incus project unset " + cfg.Project + " restricted.virtual-machines.lowlevel"
+	if strings.Contains(got, unset) != (imageArchitecture() != "x86_64") {
+		t.Fatalf("low-level restriction does not match architecture: %s", got)
 	}
 }
 
-func TestExistingVMDropsLegacyRawAppArmorPolicy(t *testing.T) {
+func TestVMSleepPolicyIsFixedAndArchitectureScoped(t *testing.T) {
+	for _, architecture := range []string{"x86_64", "aarch64", "unknown"} {
+		t.Run(architecture, func(t *testing.T) {
+			lowlevel, rawQEMU := vmSleepPolicy(architecture)
+			if architecture == "x86_64" {
+				if lowlevel != "allow" || rawQEMU != "[global][0]\ndriver = \"ICH9-LPC\"\nproperty = \"disable_s3\"\nvalue = \"0\"\n" {
+					t.Fatalf("unexpected x86_64 sleep policy: %q, %q", lowlevel, rawQEMU)
+				}
+			} else if lowlevel != "" || rawQEMU != "" {
+				t.Fatalf("unsupported architecture received low-level override: %q, %q", lowlevel, rawQEMU)
+			}
+		})
+	}
+}
+
+func TestExistingVMReconcilesSleepAndDropsLegacyRawAppArmorPolicy(t *testing.T) {
 	cfg := fixtureConfig(t)
 	runner := &fakeRunner{handler: func(_ string, arguments, _ []string, _ io.Reader) ([]byte, []byte, error) {
 		switch strings.Join(arguments, " ") {
@@ -1485,6 +1516,70 @@ func TestExistingVMDropsLegacyRawAppArmorPolicy(t *testing.T) {
 	if !strings.Contains(callsText(runner.calls),
 		"incus config unset "+cfg.vm(1)+" raw.apparmor --project "+cfg.Project) {
 		t.Fatal("legacy raw.apparmor was not removed")
+	}
+	rawQEMU := "incus config set " + cfg.vm(1) + " raw.qemu.conf [global][0]\ndriver = \"ICH9-LPC\"\nproperty = \"disable_s3\"\nvalue = \"0\"\n --project " + cfg.Project
+	if strings.Contains(callsText(runner.calls), rawQEMU) != (imageArchitecture() == "x86_64") {
+		t.Fatalf("VM sleep config does not match architecture: %s", callsText(runner.calls))
+	}
+}
+
+func TestVMSleepReconciliationRejectsForeignOwnership(t *testing.T) {
+	for _, marker := range []string{"project", "user.subyard.managed", "user.subyard.generation", "user.subyard.lease-epoch"} {
+		t.Run(marker, func(t *testing.T) {
+			for _, route := range []string{"project then VM", "VM"} {
+				if marker == "project" && route == "VM" {
+					continue
+				}
+				t.Run(route, func(t *testing.T) {
+					cfg := fixtureConfig(t)
+					runner := &fakeRunner{handler: func(_ string, args, _ []string, _ io.Reader) ([]byte, []byte, error) {
+						command := strings.Join(args, " ")
+						switch command {
+						case "project list --format csv -c n":
+							return []byte(cfg.Project), nil, nil
+						case "project get " + cfg.Project + " user.subyard.managed":
+							if marker == "project" {
+								return []byte("foreign"), nil, nil
+							}
+							return []byte(managedMarker), nil, nil
+						case "list --project " + cfg.Project + " -f csv -c n":
+							return []byte(cfg.vm(1)), nil, nil
+						case "project get " + cfg.Project + " limits.cpu":
+							return []byte("8"), nil, nil
+						case "project get " + cfg.Project + " limits.memory":
+							return []byte("8GiB"), nil, nil
+						case "info " + cfg.vm(1) + " --project " + cfg.Project:
+							return nil, nil, nil
+						case "list " + cfg.vm(1) + " --project " + cfg.Project + " -f csv -c t":
+							return []byte("VIRTUAL-MACHINE"), nil, nil
+						}
+						if len(args) > 3 && args[0] == "config" && args[1] == "get" {
+							if args[3] == marker {
+								return []byte("foreign"), nil, nil
+							}
+							if args[3] == "user.subyard.managed" {
+								return []byte(managedMarker), nil, nil
+							}
+							return []byte("7"), nil, nil
+						}
+						t.Fatalf("ownership failure allowed mutation: %v", args)
+						return nil, nil, nil
+					}}
+					runtime := Runtime{Config: cfg, Runner: runner,
+						allocation: &LeaseIdentity{ResourceGeneration: 7, LeaseEpoch: 7}}
+					var err error
+					if route == "project then VM" {
+						err = runtime.ensureProject(context.Background())
+					}
+					if err == nil {
+						err = runtime.ensureVM(context.Background(), cfg.vm(1))
+					}
+					if err == nil {
+						t.Fatal("foreign ownership was accepted")
+					}
+				})
+			}
+		})
 	}
 }
 

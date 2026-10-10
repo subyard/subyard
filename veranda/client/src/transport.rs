@@ -310,7 +310,11 @@ impl RpcClient {
         })
     }
     pub fn wait(&self, call: Call, timeout: Duration) -> Result<Value, NativeError> {
-        match call.receiver.recv_timeout(timeout) {
+        #[cfg(target_os = "linux")]
+        let received = receive_with_deadline(&call.receiver, timeout, boottime);
+        #[cfg(not(target_os = "linux"))]
+        let received = call.receiver.recv_timeout(timeout);
+        match received {
             Ok(result) => result,
             Err(_) => {
                 if let Ok(mut pending) = self.shared.pending.lock() {
@@ -465,6 +469,54 @@ impl RpcClient {
             if let Some(writer) = writer.take() {
                 let _ = writer.join();
             }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn boottime() -> Option<Duration> {
+    let mut value = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    if unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut value) } != 0
+        || !(0..1_000_000_000).contains(&value.tv_nsec)
+    {
+        return None;
+    }
+    Some(Duration::new(
+        value.tv_sec.try_into().ok()?,
+        value.tv_nsec.try_into().ok()?,
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn receive_with_deadline<T>(
+    receiver: &mpsc::Receiver<T>,
+    timeout: Duration,
+    mut clock: impl FnMut() -> Option<Duration>,
+) -> Result<T, mpsc::RecvTimeoutError> {
+    use mpsc::RecvTimeoutError::Timeout;
+    let mut previous = clock().ok_or(Timeout)?;
+    let deadline = previous.checked_add(timeout).ok_or(Timeout)?;
+    loop {
+        let now = clock().ok_or(Timeout)?;
+        if now < previous || now >= deadline {
+            return Err(Timeout);
+        }
+        previous = now;
+        // Linux channel waits exclude suspend. Short slices bound the wake-up
+        // delay while CLOCK_BOOTTIME includes time spent asleep.
+        match receiver.recv_timeout((deadline - now).min(Duration::from_millis(100))) {
+            Ok(result) => {
+                let now = clock().ok_or(Timeout)?;
+                if now < previous || now >= deadline {
+                    return Err(Timeout);
+                }
+                return Ok(result);
+            }
+            Err(Timeout) => {}
+            Err(error) => return Err(error),
         }
     }
 }

@@ -530,6 +530,62 @@ fn timeout_cancels_the_operation_and_late_reply_cannot_complete_another_request(
     client.close();
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn suspend_clock_expiry_is_checked_after_a_bounded_receive_slice() {
+    let (_sender, receiver) = mpsc::channel::<Value>();
+    let mut readings = [0, 0, 12].into_iter();
+    let started = Instant::now();
+    assert_eq!(
+        receive_with_deadline(&receiver, Duration::from_secs(5), || {
+            Some(Duration::from_secs(readings.next().unwrap()))
+        }),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    );
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_queued_response_cannot_succeed_after_the_suspend_clock_deadline() {
+    let (sender, receiver) = mpsc::channel();
+    sender.send(json!({"late":true})).unwrap();
+    let mut readings = [0, 4, 12].into_iter();
+    assert_eq!(
+        receive_with_deadline(&receiver, Duration::from_secs(5), || {
+            Some(Duration::from_secs(readings.next().unwrap()))
+        }),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn unavailable_or_invalid_suspend_clock_deadlines_fail_closed() {
+    for readings in [
+        vec![None],
+        vec![Some(Duration::ZERO), None],
+        vec![Some(Duration::ZERO), Some(Duration::ZERO), None],
+        vec![Some(Duration::MAX)],
+        vec![Some(Duration::from_secs(8)), Some(Duration::from_secs(7))],
+        vec![
+            Some(Duration::from_secs(8)),
+            Some(Duration::from_secs(9)),
+            Some(Duration::from_secs(8)),
+        ],
+    ] {
+        let (sender, receiver) = mpsc::channel();
+        sender.send(json!({"pong":true})).unwrap();
+        let mut readings = readings.into_iter();
+        assert_eq!(
+            receive_with_deadline(&receiver, Duration::from_secs(5), || {
+                readings.next().unwrap()
+            }),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        );
+    }
+}
+
 #[test]
 fn bounded_pending_capacity_still_allows_cancellation() {
     let fixture = OwnerFixture::new();

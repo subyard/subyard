@@ -117,6 +117,13 @@ func TestConcurrentColdPrepareBuildsOnceAndPreservesBothPins(t *testing.T) {
 			if properties()["boot.autostart"] != "false" {
 				return nil, nil, errors.New("builder can start without admission after daemon restart")
 			}
+			wantRawQEMU := ""
+			if imageArchitecture() == "x86_64" {
+				wantRawQEMU = "[global][0]\ndriver = \"ICH9-LPC\"\nproperty = \"disable_s3\"\nvalue = \"0\"\n"
+			}
+			if properties()["raw.qemu.conf"] != wantRawQEMU {
+				return nil, nil, errors.New("builder sleep configuration does not match architecture")
+			}
 			builds++
 			vmExists, buildKey = true, properties()["user.subyard.base_key"]
 		case strings.HasPrefix(command, "publish e2e-base-1 "):

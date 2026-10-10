@@ -75,6 +75,14 @@ grant. Virtual capacity is distinct from physical storage usage and retained ima
 (two standard guests or one Android guest). The historical `subyard-pair` type name is retained
 so singleton and pair allocations reuse the same prepared base.
 
+On x86_64, broker-owned VMs expose ACPI S3 (`deep`) for real suspend with RTC wakeup.
+The broker applies a fixed `raw.qemu.conf` override to enable the q35 ICH9-LPC S3
+global, which Incus disables by default. Restricted projects allow VM low-level
+configuration for this broker-owned setting; their resource, device and network
+restrictions remain in place. The forced agent facade accepts no QEMU configuration
+and provides no Incus access. Other architectures retain the default low-level
+restriction and receive no ICH9 override.
+
 The broker reserves each requested environment's RAM atomically while it is being provisioned,
 including concurrent requests and the base-image builder. Once the grant is held, occupied RAM
 is accounted for by host available memory; ready, stopped and empty environments retain no RAM
