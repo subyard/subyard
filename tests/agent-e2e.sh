@@ -550,7 +550,7 @@ run_b="$(new_run_id)"
 LEASE_YARD=default
 LEASE_PROJECT=Subyard-2
 LEASE_RUN="$run_a"
-LEASE_PURPOSE=contract-tests
+LEASE_PURPOSE='contract-tests'
 LEASE_GENERATION=7
 LEASE_REQUESTED_SLOT='slot-002'
 lease_request="$(lease_acquire_request client SHA256:key ssh-ed25519 keyblob)"
@@ -615,6 +615,32 @@ if (build_bundle "$fixture" "$TMP/private-alias.tar.gz") >/dev/null 2>&1; then
 fi
 rm "$fixture/private-alias"
 
+# Execute only generated public context exports; never the chown/runuser body.
+saved_type="$ENVIRONMENT_TYPE"
+saved_count="$VM_COUNT"
+saved_cpu="$GRANT_CPU_PER_VM"
+saved_memory="$GRANT_MEMORY_PER_VM"
+saved_disk="$GRANT_DISK_PER_VM"
+for contract in subyard-pair:2 subyard-pair:1 android-test:1; do
+  ENVIRONMENT_TYPE="${contract%:*}" VM_COUNT="${contract#*:}"
+  GRANT_CPU_PER_VM=4 GRANT_MEMORY_PER_VM=4GiB GRANT_DISK_PER_VM=20GiB
+  if [ "$ENVIRONMENT_TYPE" = android-test ]; then
+    GRANT_MEMORY_PER_VM=8GiB GRANT_DISK_PER_VM=40GiB
+  fi
+  write_guest_command 1 "$TMP" true > "$TMP/count-command.sh"
+  sed -n '/^export SUBYARD_E2E_/p' "$TMP/count-command.sh" > "$TMP/resource-exports.sh"
+  chmod 0600 "$TMP/count-command.sh" "$TMP/resource-exports.sh"
+  env -i PATH=/usr/bin:/bin bash --noprofile --norc -c '
+    . "$1"
+    test "$SUBYARD_E2E_VM_COUNT" = "$2" && test "$SUBYARD_E2E_TYPE" = "$3" &&
+    test "$SUBYARD_E2E_CPU_PER_VM" = "$4" && test "$SUBYARD_E2E_MEMORY_PER_VM" = "$5" &&
+    test "$SUBYARD_E2E_DISK_PER_VM" = "$6"
+  ' guest-export-check "$TMP/resource-exports.sh" "$VM_COUNT" "$ENVIRONMENT_TYPE" \
+    "$GRANT_CPU_PER_VM" "$GRANT_MEMORY_PER_VM" "$GRANT_DISK_PER_VM" \
+    || fail "guest command did not forward the validated grant resources"
+done
+ENVIRONMENT_TYPE="$saved_type" VM_COUNT="$saved_count"
+GRANT_CPU_PER_VM="$saved_cpu" GRANT_MEMORY_PER_VM="$saved_memory" GRANT_DISK_PER_VM="$saved_disk"
 command_root="$TMP/command path"
 mkdir -p "$command_root/src"
 write_guest_command 2 "$command_root" sh -c \
@@ -646,6 +672,22 @@ normalized_progress="$({
 [ "$normalized_progress" = "$(printf '%s\n%s\n%s\n%s' \
   'download 100%' 'plain output' 'apt 100%' 'final line without newline')" ] \
   || fail "runner did not coalesce terminal progress to its final update"
+
+# Large structured frames contain escaped CRs; plain long lines must stay byte-exact.
+printf -v long_progress '%1048576s' ''
+for progress_file in terminal-progress.in terminal-progress.out; do
+  install -m 0600 /dev/null "$TMP/$progress_file"
+done
+printf 'VERANDA_MEMORY_CASE {"padding":"%s"}\n' "$long_progress" > "$TMP/terminal-progress.in"
+unset long_progress
+timeout 5 bash -c '
+  set -euo pipefail
+  eval "$(sed -n "/^normalize_terminal_progress() {/,/^}/p" "$1/dev/agent-e2e.sh")"
+  normalize_terminal_progress
+' _ "$ROOT" < "$TMP/terminal-progress.in" > "$TMP/terminal-progress.out" \
+  || fail 'terminal-progress normalization exceeded its bound or failed on a long frame'
+cmp -s "$TMP/terminal-progress.in" "$TMP/terminal-progress.out" \
+  || fail 'terminal-progress normalization changed a long structured frame'
 
 mkdir -p "$TMP/direct-bin"
 cat > "$TMP/direct-bin/ssh" <<'SH'
@@ -2487,11 +2529,12 @@ fi
 LEASE_YARD=default
 LEASE_PROJECT=Subyard/Attribution
 LEASE_RUN='run-a'
-LEASE_PURPOSE=contract-tests
+LEASE_PURPOSE='contract-tests'
 structured_response="$(printf '{"schema_version":1,"status":"ok","grant":{"environment":{"type":"subyard-pair","vm_count":2,"cpu_per_vm":4,"memory_per_vm":"4GiB","disk_per_vm":"20GiB","lifecycle":"disposable-v1"},"base_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","slot_id":"slot-002","resource_generation":5,"lease_id":"eeff","capability":"1122","lease_epoch":4,"context":{"schema_version":2,"yard":"default","project":"Subyard/Attribution","run":"run-a","purpose":"contract-tests"},"data_user":"subyard-e2e-slot-2","targets":[{"selector":1,"name":"e2e-vm-1","address":"10.42.2.11","host_key_type":"ssh-ed25519","host_key_blob":"%s"},{"selector":2,"name":"e2e-vm-2","address":"10.42.2.12","host_key_type":"ssh-ed25519","host_key_blob":"%s"}]}}' "$lease_blob" "$lease_blob")"
 parse_lease_grant "$structured_response" \
   || fail "structured lease grant was rejected"
 [ "$LEASE_SLOT" = slot-002 ] && [ "$DATA_USER" = subyard-e2e-slot-2 ] \
+  && [ "$GRANT_CPU_PER_VM" = 4 ] && [ "$GRANT_MEMORY_PER_VM" = 4GiB ] && [ "$GRANT_DISK_PER_VM" = 20GiB ] \
   && [ "$LEASE_GENERATION" = 5 ] \
   && [ "${VM_IP[1]}" = 10.42.2.11 ] && [ "${VM_IP[2]}" = 10.42.2.12 ] \
   || fail "lease grant did not materialize exact attributed transport state"
@@ -2506,6 +2549,8 @@ done
   VM_COUNT=1
   android_grant="$(jq -c '.grant.environment.type = "android-test" | .grant.environment.vm_count = 1 | .grant.environment.memory_per_vm = "8GiB" | .grant.environment.disk_per_vm = "40GiB" | .grant.targets = [.grant.targets[0]]' <<<"$structured_response")"
   parse_lease_grant "$android_grant"
+  [ "$GRANT_CPU_PER_VM" = 4 ] && [ "$GRANT_MEMORY_PER_VM" = 8GiB ] && [ "$GRANT_DISK_PER_VM" = 40GiB ] \
+    || fail 'Android grant resource descriptor was not bound'
   [ "${#VM_IP[@]}" = 1 ] && [ "$(wc -l < "$GUEST_KNOWN_HOSTS")" = 1 ] \
     || fail 'Android transport retained a second target'
   android_config="$(render_client_config)"
@@ -2516,6 +2561,8 @@ done
   VM_COUNT=1
   singleton_grant="$(jq -c '.grant.environment.vm_count = 1 | .grant.targets = [.grant.targets[0]]' <<<"$structured_response")"
   parse_lease_grant "$singleton_grant"
+  [ "$GRANT_CPU_PER_VM" = 4 ] && [ "$GRANT_MEMORY_PER_VM" = 4GiB ] && [ "$GRANT_DISK_PER_VM" = 20GiB ] \
+    || fail 'standard singleton resource descriptor was not bound'
   [ "${#VM_IP[@]}" = 1 ] && [ "$(grep -c '^Host e2e-vm-' <<<"$(render_client_config)")" = 1 ] \
     || fail 'standard singleton exposed a second guest'
 ) || fail 'standard singleton transport rejected a valid grant'

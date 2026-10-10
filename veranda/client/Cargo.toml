@@ -1,21 +1,13 @@
 [package]
-name = "subyard-veranda"
+name = "subyard-veranda-client"
 version = "0.1.0"
-description = "A clear view into every Subyard"
+description = "Native Subyard Veranda RPC, trust and session client"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT"
 
 [lib]
 name = "veranda_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
-
-[features]
-default = ["desktop"]
-desktop = ["dep:tauri", "dep:webkit2gtk"]
-
-[build-dependencies]
-tauri-build = { version = "2", features = [] }
 
 [dependencies]
 getrandom = "0.3"
@@ -23,10 +15,6 @@ libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 time = { version = "0.3", features = ["parsing"] }
-tauri = { version = "~2.11", features = [], optional = true }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-webkit2gtk = { version = "2.0", features = ["v2_16"], optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_Storage_FileSystem", "Win32_System_Memory", "Win32_System_IO"] }

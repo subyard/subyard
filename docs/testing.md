@@ -243,22 +243,20 @@ against the shipped rules for that evidence; real client approve/deny needs sepa
 
 ## Run Veranda host-free checks
 
-Install Python 3, Node.js 22/npm and Rust 1.88 or newer, then run from the repository root:
+Install Python 3 and Rust 1.88 or newer, then run from the repository root:
 
 ```sh
-npm --prefix veranda ci
 make verify-veranda
 ```
 
 The target runs `python3 dev/check-veranda.py`; override the interpreter with
 `make verify-veranda PYTHON=python` when needed. CI runs the same entrypoint with
-`python` and Rust 1.88.0 after installing locked frontend dependencies. Neither
-the target nor the entrypoint installs dependencies. `make verify` retains its
+`python` and Rust 1.88.0. The native client has no npm/WebKit dependencies.
+The target and entrypoint do not install toolchains. `make verify` retains its
 separate core and shipped-profile scope.
 
 Checks stop at the first failure: runner temporary-path contract, Linux resource
-probe isolation, frontend type checks, frontend tests, packaging contracts,
-frontend build and native Rust tests with `--no-default-features --locked`.
+probe isolation and native Rust client tests with `--locked`.
 Python fixtures use the entrypoint's own
 interpreter. `python3 dev/check-veranda.py --rust-only` selects only native tests.
 On Linux that suite runs once with a child-only `TMPDIR` alias to a private real
@@ -270,6 +268,13 @@ A local Linux pass does not verify native ARM, macOS or Windows; those remain
 separate CI matrix results. Desktop launches, real local/SSH owners, package
 installation/upgrade/rollback and physical resource acceptance remain separate
 [Veranda delivery gates](../veranda/README.md#delivery-gates).
+
+Before a long Veranda VM scenario, use the same build in the target environment for
+preparation, launch, one real product action, normal closure and cleanup. Verify actual
+API responses and UI states. On the first failure, preserve the result, distinguish fixture
+and product causes, repair the cause and repeat the short check before the long scenario.
+Check nonzero executed test counts and calibrate the producer's actual offered, dispatched
+and completed load. Reuse unaffected passes and retain the original acceptance criteria.
 
 ## Extended/manual diagnostics
 

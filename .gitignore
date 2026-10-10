@@ -25,7 +25,8 @@
 # prod-guard refuses against — operator-specific, host-only.
 /config/prod-fingerprints
 
-# Veranda frontend and Rust build artifacts.
+# Native Veranda client artifacts and retained retired-stack caches.
+/veranda/client/target/
 /veranda/node_modules/
 /veranda/.svelte-kit/
 /veranda/build/

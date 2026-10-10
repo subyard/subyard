@@ -1,6 +1,7 @@
 //! The native boundary keeps session handles, exact plans, and trust capabilities out of JS.
 use crate::connections::{
-    ConnectionStore, ConnectionSummary, ConsentedConnection, RemoveAssessment, TrustAssessment,
+    ConnectionStore, ConnectionSummary, ConsentedConnection, NavigationSelection, RemoveAssessment,
+    TrustAssessment,
 };
 use crate::local_fleet::{safe_id, safe_name, LocalFleetSnapshot, NativeError, OwnerInventory};
 use crate::sessions::{self, Descriptor, Launch};
@@ -84,6 +85,7 @@ struct Running {
 pub struct Client {
     store: Mutex<ConnectionStore>,
     sessions: Mutex<HashMap<SessionKey, Arc<Session>>>,
+    read_scope: Mutex<Option<SessionKey>>,
     opening: Mutex<HashSet<SessionKey>>,
     trust_epoch: AtomicU64,
     plans: Mutex<HashMap<String, HeldPlan>>,
@@ -101,6 +103,7 @@ impl Client {
         let client = Arc::new(Self {
             store: Mutex::new(ConnectionStore::new(root)),
             sessions: Mutex::new(HashMap::new()),
+            read_scope: Mutex::new(None),
             opening: Mutex::new(HashSet::new()),
             trust_epoch: AtomicU64::new(0),
             plans: Mutex::new(HashMap::new()),
@@ -118,6 +121,21 @@ impl Client {
 
     pub fn connections(&self) -> Result<Vec<ConnectionSummary>, NativeError> {
         self.store.lock().map_err(|_| unavailable())?.list()
+    }
+    pub fn navigation_selection(&self) -> Result<Option<NavigationSelection>, NativeError> {
+        self.store
+            .lock()
+            .map_err(|_| unavailable())?
+            .navigation_selection()
+    }
+    pub fn save_navigation_selection(
+        &self,
+        selection: &NavigationSelection,
+    ) -> Result<(), NativeError> {
+        self.store
+            .lock()
+            .map_err(|_| unavailable())?
+            .save_navigation_selection(selection)
     }
     pub fn assess(
         &self,
@@ -515,6 +533,51 @@ impl Client {
         Ok(session)
     }
 
+    /// Opt into retaining only the selected read scope and owner inventory sessions.
+    /// Plans, running operations and in-flight reads retain their own session handles.
+    pub fn retain_read_scope(
+        &self,
+        connection: Option<String>,
+        yard: Option<String>,
+    ) -> Result<(), NativeError> {
+        if self.stopped.load(Ordering::Acquire) {
+            return Err(unavailable());
+        }
+        let key = SessionKey { connection, yard };
+        validate_key(&key)?;
+        {
+            // Use the cache lock for both publication and retention decisions.
+            let _sessions = self.sessions.lock().map_err(|_| unavailable())?;
+            *self.read_scope.lock().map_err(|_| unavailable())? = Some(key);
+        }
+        self.trim_read_sessions()?;
+        let _ = self.wake.try_send(());
+        Ok(())
+    }
+
+    pub(crate) fn trim_read_sessions(&self) -> Result<(), NativeError> {
+        let retired = {
+            let mut sessions = self.sessions.lock().map_err(|_| unavailable())?;
+            let scope = self.read_scope.lock().map_err(|_| unavailable())?;
+            let Some(scope) = scope.as_ref() else {
+                return Ok(());
+            };
+            let keys: Vec<_> = sessions
+                .iter()
+                .filter(|(key, session)| {
+                    key.yard.is_some() && *key != scope && Arc::strong_count(session) == 1
+                })
+                .map(|(key, _)| key.clone())
+                .collect();
+            keys.into_iter()
+                .filter_map(|key| sessions.remove(&key))
+                .collect::<Vec<_>>()
+        };
+        // Session drop deliberately retires and reaps the child outside the cache lock.
+        drop(retired);
+        Ok(())
+    }
+
     pub fn fleet(&self, connection: Option<String>) -> Result<LocalFleetSnapshot, NativeError> {
         let session = self.session(SessionKey {
             connection,
@@ -720,6 +783,17 @@ impl Client {
         digest: &str,
         confirmed: bool,
     ) -> Result<Started, NativeError> {
+        let result = self.execute_reviewed(id, digest, confirmed);
+        // Rejected executions also release a held plan before waking the monitor.
+        let _ = self.wake.try_send(());
+        result
+    }
+    fn execute_reviewed(
+        self: &Arc<Self>,
+        id: &str,
+        digest: &str,
+        confirmed: bool,
+    ) -> Result<Started, NativeError> {
         if !confirmed {
             return Err(NativeError::new(
                 "confirmation_required",
@@ -795,6 +869,7 @@ impl Client {
                 snapshot: None,
             });
             held.session.dirty.store(true, Ordering::Release);
+            drop(held.session);
             let _ = client.wake.try_send(());
         });
         Ok(Started { operation_id })
@@ -806,13 +881,15 @@ impl Client {
             .map_err(|_| unavailable())?
             .remove(id)
             .ok_or_else(expired)?;
-        held.session.rpc.call(
+        let result = held.session.rpc.call(
             "operation.discard",
             &held.plan.operation_id,
             json!({}),
             QUERY_TIMEOUT,
-        )?;
-        Ok(())
+        );
+        drop(held);
+        let _ = self.wake.try_send(());
+        result.map(|_| ())
     }
     pub fn cancel(&self, operation_id: &str) -> Result<(), NativeError> {
         let running = self.running.lock().map_err(|_| unavailable())?;
@@ -955,15 +1032,18 @@ fn monitor(weak: Weak<Client>, receiver: mpsc::Receiver<()>) {
         if client.stopped.load(Ordering::Acquire) {
             break;
         }
-        let sessions: Vec<_> = match client.sessions.lock() {
-            Ok(sessions) => sessions.values().cloned().collect(),
-            Err(_) => break,
-        };
         let mut deadline: Option<Instant> = None;
         if let Ok(mut plans) = client.plans.lock() {
             client.expire_plans(&mut plans);
             deadline = plans.values().map(|held| held.expires).min();
         }
+        if client.trim_read_sessions().is_err() {
+            break;
+        }
+        let sessions: Vec<_> = match client.sessions.lock() {
+            Ok(sessions) => sessions.values().cloned().collect(),
+            Err(_) => break,
+        };
         let mut started = false;
         for session in sessions {
             if session.refreshing.load(Ordering::Acquire) {
@@ -1037,6 +1117,7 @@ fn monitor(weak: Weak<Client>, receiver: mpsc::Receiver<()>) {
                     }
                 }
                 session.refreshing.store(false, Ordering::Release);
+                drop(session);
                 let _ = client.wake.try_send(());
             });
         }

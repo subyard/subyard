@@ -38,8 +38,16 @@ def private_log(path):
 
 
 @contextlib.contextmanager
-def cleanup_on_exit(action, label):
+def cleanup_on_exit(action, label, observer=None):
     failed = False
+    notification_error = None
+    def notify(phase, rc, status):
+        nonlocal notification_error
+        if observer is not None:
+            try:
+                observer(phase, label, rc, status)
+            except BaseException as error:
+                notification_error = error
     try:
         yield
     except BaseException:
@@ -47,11 +55,19 @@ def cleanup_on_exit(action, label):
         raise
     finally:
         try:
+            # A reporting failure must never prevent the owned cleanup action.
+            notify('start', None, 'started')
             action()
-        except BaseException:
+        except BaseException as error:
+            notify('end', error.returncode if isinstance(error, subprocess.CalledProcessError) else None, 'failed')
             if not failed:
                 raise
-            print('veranda-wayland-resources: ' + label + ' cleanup failed; original error preserved', file=sys.stderr)
+            with contextlib.suppress(BaseException):
+                print('veranda-wayland-resources: ' + label + ' cleanup failed; original error preserved', file=sys.stderr)
+        else:
+            notify('end', 0, 'passed')
+            if notification_error is not None and not failed:
+                raise notification_error
 
 
 def create_state():
@@ -84,13 +100,14 @@ subprocess.run(['find', '-P', str(root), '-xdev', '-depth', '-delete'],
                check=True, timeout=8)
 assert not os.path.lexists(root)
 '''
-    subprocess.run(['sudo', '-n', sys.executable, '-c', code, str(state), *(str(value) for value in identity)],
+    subprocess.run(['sudo', '-n', 'timeout', '--signal=TERM', '--kill-after=2s', '10s',
+                    sys.executable, '-c', code, str(state), *(str(value) for value in identity)],
                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                   check=True, timeout=10)
+                   check=True, timeout=15)
 
 
 @contextlib.contextmanager
-def recorded_state():
+def recorded_state(observer=None):
     state, identity = create_state()
     def export_logs():
         # The observer redirects complete evidence privately; never echo it in chat.
@@ -99,7 +116,7 @@ def recorded_state():
                              'platform-cleanup.log', 'weston.log', 'probe.log', 'probe-gdk.log')
                 if (state / name).is_file()}
         print('VERANDA_WAYLAND_LOGS ' + json.dumps(logs), flush=True)
-    with cleanup_on_exit(lambda: cleanup_state(state, identity), 'fixture'):
+    with cleanup_on_exit(lambda: cleanup_state(state, identity), 'fixture', observer):
         with cleanup_on_exit(export_logs, 'logs'):
             yield state
 
@@ -175,7 +192,7 @@ time.sleep(60)
 
 
 @contextlib.contextmanager
-def prepared_platform(state, engine):
+def prepared_platform(state, engine, observer=None):
     """Use the product reconciler; keep the temporary yard outside the measured fleet."""
     home = Path(pwd.getpwuid(os.getuid()).pw_dir)
     platform = home / '.cache/subyard-e2e-platform'
@@ -186,7 +203,7 @@ def prepared_platform(state, engine):
     config, data = state / 'prepare-config', state / 'prepare-data'
     for directory in (config, data, config / 'yards'):
         probe.private_dir(directory)
-    name = 'vp-' + state.name.rsplit('-', 1)[-1]
+    name = 'vp-' + state.name.rsplit('-', 1)[-1].replace('_', '-') + '-0'
     yard = config / 'yards' / name
     probe.private_dir(yard)
     probe.private_file(config / 'config.env', '')
@@ -208,7 +225,7 @@ def prepared_platform(state, engine):
         if rc:
             raise RuntimeError(log_name.removesuffix('.log') + ' failed')
 
-    with cleanup_on_exit(lambda: product(['teardown'], 'platform-cleanup.log'), 'platform'):
+    with cleanup_on_exit(lambda: product(['teardown'], 'platform-cleanup.log'), 'platform', observer):
         product(['init'], 'platform-prepare.log')
         product(['teardown', '--keep-data'], 'platform-remove.log')
         substrate = platform / 'incus'

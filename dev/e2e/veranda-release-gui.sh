@@ -18,6 +18,10 @@ elif [ "$1" = --growth ]; then
 else
   BASE="$1" NEXT="$2" YARD_NAME="$3" OWNER="$4"
 fi
+growth_cycles="${SUBYARD_E2E_VERANDA_GUI_GROWTH_CYCLES-20}"
+case "$growth_cycles" in 20|100) ;; *) die 'SUBYARD_E2E_VERANDA_GUI_GROWTH_CYCLES must be 20 or 100' ;; esac
+[ "$growth" = 1 ] || [ -z "${SUBYARD_E2E_VERANDA_GUI_GROWTH_CYCLES+x}" ] \
+  || die 'growth cycle selection requires a growth mode'
 [[ "$OWNER" =~ ^/var/tmp/subyard-veranda-owner\.[a-zA-Z0-9]+$ ]] || die 'invalid owner root'
 [[ "$YARD_NAME" =~ ^vo-[a-z0-9]+$ ]] || die 'invalid named yard'
 [ "${SUBYARD_CONFIG_HOME:-}" = "$OWNER/config" ] && [ "${SUBYARD_HOME:-}" = "$OWNER/data" ] || die 'owner configuration mismatch'
@@ -112,6 +116,7 @@ set +e
 growth_args=()
 [ "$growth" = 0 ] || growth_args=(--growth)
 [ "$wayland" = 0 ] || growth_args=(--wayland-growth)
+[ "$growth" = 0 ] || growth_args+=(--growth-cycles "$growth_cycles")
 env -i PATH=/usr/sbin:/usr/bin:/bin LANG=C.UTF-8 HOME="$FIXTURE/home" \
   XDG_CONFIG_HOME="$FIXTURE/config" XDG_CACHE_HOME="$FIXTURE/cache" XDG_RUNTIME_DIR="$FIXTURE/runtime" \
   /usr/bin/python3 "$ROOT/dev/e2e/veranda-release-gui.py" --session \
@@ -120,7 +125,7 @@ env -i PATH=/usr/sbin:/usr/bin:/bin LANG=C.UTF-8 HOME="$FIXTURE/home" \
 rc=$?
 set -e
 # Print only the supervisor's fixed, bounded JSON summary after private-file validation.
-/usr/bin/python3 - "$ROOT" "$FIXTURE" "$rc" "$growth" "$wayland" 2>/dev/null <<'PY' || die 'private GUI summary unavailable'
+/usr/bin/python3 - "$ROOT" "$FIXTURE" "$rc" "$growth" "$wayland" "$growth_cycles" 2>/dev/null <<'PY' || die 'private GUI summary unavailable'
 import base64,importlib.util,json,os,pathlib,stat,sys
 sys.dont_write_bytecode=True
 root=pathlib.Path(sys.argv[2]); info=root.lstat()
@@ -137,7 +142,7 @@ spec=importlib.util.spec_from_file_location('release_gui',pathlib.Path(sys.argv[
 module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
 growth = sys.argv[4]=='1'
 wayland = sys.argv[5]=='1'
-module.validate_summary(result,int(sys.argv[3]),growth,wayland)
+module.validate_summary(result,int(sys.argv[3]),growth,wayland,int(sys.argv[6]) if growth else None)
 print(('veranda-wayland-growth: ' if wayland else 'veranda-gui-growth: ' if growth else 'veranda-release-gui: ')+json.dumps(result,separators=(',',':')))
 if int(sys.argv[3]) != 0:
     diagnostic=module.failure_diagnostic(root)

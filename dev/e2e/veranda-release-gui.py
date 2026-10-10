@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Narrow release GUI acceptance; run only through veranda-release-gui.sh."""
+import argparse
 import ctypes
 import importlib.util
 import json
@@ -29,7 +30,7 @@ STAGES = frozenset(['preparation', 'preparation.ssh', 'preparation.display', 'pr
                    'remote.input', 'remote.readback', 'remote.assess', 'remote.fingerprint',
                    'remote.consent', 'remote.connect', 'remote.saved', 'remote.route', 'remote.reload',
                    'remote.select', 'remote.state', 'route', 'mismatch.message', 'mismatch.mutations',
-                   'growth.removal', 'growth.fleet', 'growth.idle', 'growth.budget',
+                   'growth.removal', 'growth.fleet', 'growth.idle', 'growth.budget', 'growth.natural-close',
                    'screenshot', 'case.cleanup', 'cleanup', 'session'])
 CATEGORIES = frozenset(['timeout', 'ambiguity', 'accessible_api', 'accessible_action', 'accessible_bounds',
                        'process', 'screenshot', 'ownership', 'fixture_data', 'assertion', 'cleanup', 'unexpected', 'resource_budget'])
@@ -302,24 +303,69 @@ def accessible_nodes(start, defunct, api_error, checkpoint=None, failed=None):
     return result
 
 
-def growth_result(samples, warmup, cycles):
-    first = [sample['rssBytes'] for sample in samples if sample['cycle'] <= 10]
-    last = [sample['rssBytes'] for sample in samples if sample['cycle'] >= 91]
+def growth_options(arguments):
+    parser = argparse.ArgumentParser(add_help=False)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--growth', action='store_true')
+    mode.add_argument('--wayland-growth', action='store_true')
+    parser.add_argument('--growth-cycles', type=int, choices=(20, 100))
+    args = parser.parse_args(arguments)
+    growth = args.growth or args.wayland_growth
+    if args.growth_cycles is not None and not growth:
+        parser.error('--growth-cycles requires a growth mode')
+    return growth, args.wayland_growth, (args.growth_cycles or 20) if growth else None
+
+
+def settled_growth_sample(tree, cycle, retention=False):
+    sample = tree.sample()
+    result = {'cycle': cycle, 'rssBytes': sample['rss_bytes'], 'processCount': sample['process_count']}
+    if retention:
+        counts = tree.sample(pss=True)
+        identities = lambda value: {(item['pid'], item['start_ticks']) for item in value['processes']}
+        require(identities(sample) == identities(counts)
+                and counts['fd_missing_processes'] == counts['identity_changed_processes'] == 0
+                and all(type(counts[key]) is int and counts[key] >= 0 for key in ('fds', 'threads'))
+                and all(type(item[key]) is int and item[key] >= 0
+                        for item in counts['processes'] for key in ('fds', 'threads')), 'process')
+        result.update(fds=counts['fds'], threads=counts['threads'])
+    return result
+
+
+def growth_result(samples, warmup, cycles, requested=20, retention=False):
+    assert type(requested) is int and requested in (20, 100)
+    first = [sample['rssBytes'] for sample in samples if 1 <= sample['cycle'] <= 10]
+    last = [sample['rssBytes'] for sample in samples if requested - 9 <= sample['cycle'] <= requested]
     first_median = statistics.median(first) if len(first) == 10 else None
     last_median = statistics.median(last) if len(last) == 10 else None
-    growth = max(0, last_median - first_median) if first_median is not None and last_median is not None else None
-    return {'warmupCompleted': warmup, 'cyclesCompleted': cycles, 'idleSettleSeconds': 30,
+    complete = (warmup == 10 and cycles == requested
+                and [sample['cycle'] for sample in samples] == [*range(1, 11), *range(requested - 9, requested + 1)])
+    growth = max(0, last_median - first_median) if complete and first_median is not None and last_median is not None else None
+    result = {'cyclesRequested': requested, 'warmupCompleted': warmup, 'cyclesCompleted': cycles, 'idleSettleSeconds': 30,
             'samples': samples, 'firstMedianBytes': first_median, 'lastMedianBytes': last_median,
             'growthBytes': growth, 'limitBytes': 10 * 1024 * 1024,
             'withinLimit': growth <= 10 * 1024 * 1024 if growth is not None else None}
+    if retention:
+        result.update(schemaVersion=2, retention={})
+        for metric in ('fds', 'threads'):
+            assert all(type(sample[metric]) is int and sample[metric] >= 0 for sample in samples)
+            first = [sample[metric] for sample in samples if 1 <= sample['cycle'] <= 10]
+            last = [sample[metric] for sample in samples if requested - 9 <= sample['cycle'] <= requested]
+            first_median = statistics.median(first) if len(first) == 10 else None
+            last_median = statistics.median(last) if len(last) == 10 else None
+            delta = last_median - first_median if complete else None
+            result['retention'][metric] = {'firstMedian': first_median, 'lastMedian': last_median,
+                                          'medianGrowth': delta, 'limit': 0,
+                                          'withinLimit': delta <= 0 if delta is not None else None}
+    return result
 
 
 def wayland_growth_observation():
-    return {'backend': 'weston-x11-gl', 'input': 'xtest-to-wayland', 'renderer': 'unobserved',
+    return {'backend': 'weston-x11-gl-desktop-shell', 'input': 'xtest-to-wayland', 'renderer': 'unobserved',
             'geometryVerified': False, 'screen': None, 'debian13Verified': False,
             'westonVersion': None, 'webkitVersion': None, 'mesaVersion': None,
             'logicalCpus': None, 'memoryBytes': None, 'kernelVersion': None,
-            'fleet': None, 'guiFleetVerified': False, 'compositorExcluded': True}
+            'fleet': None, 'guiFleetVerified': False, 'compositorExcluded': True,
+            'shell': 'desktop-shell.so', 'compositorProcessCount': None, 'appSize': None, 'naturalClose': None}
 
 
 def ordinary_inventory(inventory, names, named):
@@ -376,6 +422,74 @@ def seed_ordinary_fleet(owner, fixture, named, measure):
     return names, preserved
 
 
+def compositor_command_timeout(end):
+    remaining = min(3, end - time.monotonic())
+    require(remaining > 0, 'timeout')
+    return remaining
+
+
+X11_ROOT_QUERY = """import ctypes, os, sys
+try:
+    x = ctypes.CDLL('libX11.so.6')
+    x.XOpenDisplay.argtypes = [ctypes.c_char_p]; x.XOpenDisplay.restype = ctypes.c_void_p
+    x.XScreenCount.argtypes = [ctypes.c_void_p]; x.XScreenCount.restype = ctypes.c_int
+    x.XDefaultRootWindow.argtypes = [ctypes.c_void_p]; x.XDefaultRootWindow.restype = ctypes.c_ulong
+    x.XCloseDisplay.argtypes = [ctypes.c_void_p]; x.XCloseDisplay.restype = ctypes.c_int
+    display = x.XOpenDisplay(os.environ['DISPLAY'].encode('ascii'))
+    if not display: sys.exit(2)
+    try:
+        if x.XScreenCount(display) != 1: sys.exit(2)
+        root = x.XDefaultRootWindow(display)
+        if not 0 < root <= 0xffffffff: sys.exit(2)
+        print(root)
+    finally:
+        x.XCloseDisplay(display)
+except (OSError, KeyError, UnicodeError):
+    sys.exit(2)
+"""
+
+
+def compositor_visible_window(env, diagnostic, expected_window, end):
+    # Both queries share the existing three-second command budget on the owned display.
+    until = min(end, time.monotonic() + 3)
+    root_result = subprocess.run([sys.executable, '-c', X11_ROOT_QUERY], env=env,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 timeout=compositor_command_timeout(until))
+    diagnostic.update(commandExitCode=root_result.returncode, stdoutBytes=len(root_result.stdout),
+                      stderrBytes=len(root_result.stderr))
+    root_result.check_returncode()  # A root-query failure is never the retryable class-not-found case.
+    root_window = compositor_search_result(root_result, diagnostic)
+    result = subprocess.run(['xdotool', 'search', '--onlyvisible', '--name', '.*'], env=env,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            timeout=compositor_command_timeout(until))
+    return compositor_search_result(result, diagnostic, expected_window, root_window)
+
+
+def compositor_search_result(result, diagnostic, expected_window=None, root_window=None):
+    diagnostic.update(commandExitCode=result.returncode, stdoutBytes=len(result.stdout), stderrBytes=len(result.stderr))
+    require(len(result.stdout) <= 1024 and len(result.stderr) <= MAX_STDERR_SCAN, 'ownership')
+    if expected_window is None and result.returncode == 1 and not result.stdout and not result.stderr:
+        return None  # Only the fixed class search's empty not-found result is retryable.
+    result.check_returncode()  # Preserve every unexpected original tool failure.
+    require(not result.stderr, 'process')
+    require(result.stdout.isascii(), 'ownership')
+    if root_window is not None:
+        windows = result.stdout.split()
+        require(1 <= len(windows) <= 64 and len(set(windows)) == len(windows), 'ownership')
+        require(all(re.fullmatch(rb'[1-9][0-9]{0,9}', window) and int(window) <= 0xffffffff
+                    for window in windows), 'ownership')
+        require(root_window in windows and expected_window != root_window, 'ownership')
+        # Exclude only the exact server root. Unnamed/unclassed foreign windows still count.
+        require([window for window in windows if window != root_window] == [expected_window], 'ownership')
+        return expected_window
+    if expected_window is not None:
+        require(result.stdout.split() == [expected_window], 'ownership')
+        return expected_window
+    require(len(result.stdout.split()) == 1 and result.stdout.strip().isdigit()
+            and 0 < len(result.stdout.strip()) <= 20, 'ownership')
+    return result.stdout.strip()
+
+
 def xauthority_record(display, cookie):
     require(re.fullmatch(r':[0-9]{1,6}', display) is not None and len(cookie) == 16, 'ownership')
     # FamilyWild avoids hostname dependence; only the recorded display number matches.
@@ -393,7 +507,16 @@ def wayland_application_environment(env, socket):
 def validate_wayland_growth(value, passed):
     expected = wayland_growth_observation()
     assert type(value) is dict and set(value) == set(expected)
-    for field in ['backend', 'input']: assert value[field] == expected[field]
+    for field in ['backend', 'input', 'shell']: assert value[field] == expected[field]
+    count = value['compositorProcessCount']
+    assert count is None or type(count) is int and 1 <= count <= 64
+    size = value['appSize']
+    assert size is None or type(size) is dict and set(size) == {'width', 'height'} and all(type(n) is int for n in size.values()) and 0 < size['width'] <= 1920 and 0 < size['height'] <= 1080
+    close = value['naturalClose']
+    assert close is None or type(close) is dict and set(close) == {'request', 'appExitCode', 'trackedProcessesGone'}
+    if close is not None:
+        assert close['request'] == 'gtk-titlebar-close'
+        assert type(close['appExitCode']) is int and close['appExitCode'] == 0 and close['trackedProcessesGone'] is True
     assert value['compositorExcluded'] is True
     assert value['renderer'] in {'unobserved', 'llvmpipe', 'softpipe', 'other'}
     for field in ['geometryVerified', 'debian13Verified', 'guiFleetVerified']: assert type(value[field]) is bool
@@ -407,34 +530,99 @@ def validate_wayland_growth(value, passed):
     assert kernel is None or type(kernel) is list and len(kernel) == 3 and all(type(n) is int and 0 <= n <= 65535 for n in kernel)
     assert value['fleet'] is None or type(value['fleet']) is dict and value['fleet'] == {'yards': 20, 'projects': 200, 'running': 1, 'notCreated': 19} and all(type(n) is int for n in value['fleet'].values())
     if passed:
+        assert count is not None and size is not None and close is not None
         assert value['geometryVerified'] and value['screen'] is not None and value['debian13Verified'] and value['guiFleetVerified'] and value['renderer'] == 'llvmpipe'
         assert value['fleet'] is not None and value['logicalCpus'] == 4 and value['memoryBytes'] >= 7 * 1024**3
         assert all(value[field] is not None for field in ['westonVersion', 'webkitVersion', 'mesaVersion', 'kernelVersion'])
 
 
 def growth_self_test():
+    import contextlib
+    import copy
+    import io
     diagnostic_self_test()
-    samples = [{'cycle': cycle, 'rssBytes': (100 if cycle <= 10 else 110) * 1024 * 1024, 'processCount': 4}
-               for cycle in [*range(1, 11), *range(91, 101)]]
-    samples[0]['rssBytes'] *= 4  # One startup outlier must not replace the idle median.
-    metrics = growth_result(samples, 10, 100)
-    assert metrics['growthBytes'] == 10 * 1024 * 1024 and metrics['withinLimit'] is True
-    result = {'passed': ['remote-next-match'], 'failedCase': None, 'cleanup': True,
-              'failureStage': None, 'failureCategory': None, 'selectionState': None, 'selectionFailure': None,
-              'growth': metrics}
-    validate_summary(result, 0, True)
-    for sample in samples[10:]: sample['rssBytes'] += 1
-    result['growth'] = growth_result(samples, 10, 100)
-    try: validate_summary(result, 0, True)
+    assert growth_options(['--growth']) == (True, False, 20)
+    assert growth_options(['--wayland-growth', '--growth-cycles', '100']) == (True, True, 100)
+    for requested in (20, 100):
+        samples = [{'cycle': cycle, 'rssBytes': (100 if cycle <= 10 else 110) * 1024 * 1024, 'processCount': 4}
+                   for cycle in [*range(1, 11), *range(requested - 9, requested + 1)]]
+        samples[0]['rssBytes'] *= 4  # One startup outlier must not replace the idle median.
+        metrics = growth_result(samples, 10, requested, requested)
+        assert metrics['growthBytes'] == 10 * 1024 * 1024 and metrics['withinLimit'] is True
+        result = {'passed': ['remote-next-match'], 'failedCase': None, 'cleanup': True,
+                  'failureStage': None, 'failureCategory': None, 'selectionState': None, 'selectionFailure': None,
+                  'growth': metrics}
+        validate_summary(result, 0, True, requested_cycles=requested)
+        for invalid in [dict(metrics, cyclesRequested=True), dict(metrics, cyclesRequested=30),
+                        growth_result(samples[:-1], 10, requested, requested)]:
+            try: validate_summary(dict(result, growth=invalid), 0, True, requested_cycles=requested)
+            except AssertionError: pass
+            else: raise AssertionError('invalid count or incomplete samples accepted')
+        try: validate_summary(result, 0, True, requested_cycles=100 if requested == 20 else 20)
+        except AssertionError: pass
+        else: raise AssertionError('receipt count differs from requested workload')
+        legacy = copy.deepcopy(result); legacy['growth'].pop('cyclesRequested')
+        if requested == 100:
+            validate_summary(legacy, 0, True)
+            validate_summary(legacy, 0, True, requested_cycles=100)
+        else:
+            try: validate_summary(legacy, 0, True)
+            except AssertionError: pass
+            else: raise AssertionError('undeclared twenty-cycle receipt accepted as legacy')
+        try: validate_summary(legacy, 0, True, requested_cycles=20)
+        except AssertionError: pass
+        else: raise AssertionError('legacy receipt silently interpreted as twenty cycles')
+        for sample in samples[10:]: sample['rssBytes'] += 1
+        result['growth'] = growth_result(samples, 10, requested, requested)
+        try: validate_summary(result, 0, True, requested_cycles=requested)
+        except AssertionError: pass
+        else: raise AssertionError('over-budget growth accepted')
+        result.update(passed=[], failedCase='remote-next-match', failureStage='growth.budget', failureCategory='resource_budget')
+        validate_summary(result, 1, True, requested_cycles=requested)
+        result['growth'] = growth_result(samples[:3], 10, 3, requested)
+        result.update(failureStage='growth.idle', failureCategory='timeout')
+        validate_summary(result, 1, True, requested_cycles=requested)
+        assert result['growth']['withinLimit'] is None
+        if requested == 100:
+            legacy = copy.deepcopy(result); legacy['growth'].pop('cyclesRequested')
+            validate_summary(legacy, 1, True)
+    for arguments in [['--growth-cycles', '20'], ['--growth', '--growth-cycles', '21'],
+                      ['--growth', '--growth-cycles', '0'], ['--growth', '--growth-cycles', '101']]:
+        with contextlib.redirect_stderr(io.StringIO()):
+            try: growth_options(arguments)
+            except SystemExit as error: assert error.code == 2
+            else: raise AssertionError('unsupported growth workload accepted')
+    observation = wayland_growth_observation()
+    validate_wayland_growth(observation, False)
+    observation.update(renderer='llvmpipe', geometryVerified=True, debian13Verified=True,
+                       screen={'width': 1920, 'height': 1080, 'refresh_millihertz': 60000, 'scale': 1},
+                       westonVersion='14.0.2-1', webkitVersion='2.54.0-1~deb13u2', mesaVersion='25.0.7-2',
+                       logicalCpus=4, memoryBytes=8 * 1024**3, kernelVersion=[6, 12, 0],
+                       fleet={'yards': 20, 'projects': 200, 'running': 1, 'notCreated': 19}, guiFleetVerified=True,
+                       compositorProcessCount=2, appSize={'width': 1180, 'height': 760})
+    close = {'request': 'gtk-titlebar-close', 'appExitCode': 0, 'trackedProcessesGone': True}
+    observation['naturalClose'] = close
+    samples = [{'cycle': n, 'rssBytes': 100 * 1024**2, 'processCount': 4, 'fds': 40, 'threads': 12} for n in range(1, 21)]
+    success = {'passed': ['remote-next-match'], 'failedCase': None, 'cleanup': True, 'failureStage': None,
+               'failureCategory': None, 'selectionState': None, 'selectionFailure': None,
+               'growth': growth_result(samples, 10, 20, retention=True), 'wayland': observation}
+    validate_summary(success, 0, True, True, 20)
+    assert len(json.dumps(success).encode()) <= 4096
+    for invalid in [None, {}, dict(close, appExitCode=1), dict(close, appExitCode=True),
+                    dict(close, trackedProcessesGone=False), dict(close, request='alt-f4')]:
+        broken = copy.deepcopy(success); broken['wayland']['naturalClose'] = invalid
+        try: validate_summary(broken, 0, True, True, 20)
+        except AssertionError: pass
+        else: raise AssertionError('missing or invalid natural-close proof accepted')
+    missing = copy.deepcopy(success); missing['wayland'].pop('naturalClose')
+    try: validate_summary(missing, 0, True, True, 20)
     except AssertionError: pass
-    else: raise AssertionError('over-budget growth accepted')
-    result.update(passed=[], failedCase='remote-next-match', failureStage='growth.budget', failureCategory='resource_budget')
-    validate_summary(result, 1, True)
-    result['growth'] = growth_result(samples[:3], 10, 3)
-    result.update(failureStage='growth.idle', failureCategory='timeout')
-    validate_summary(result, 1, True)
-    assert result['growth']['withinLimit'] is None
-    print('veranda-gui-growth: median, budget, incomplete-receipt and safe diagnostic checks passed')
+    else: raise AssertionError('legacy Wayland summary accepted without natural-close proof')
+    failed = copy.deepcopy(success)
+    failed.update(passed=[], failedCase='remote-next-match', failureStage='growth.natural-close', failureCategory='process')
+    failed['wayland']['naturalClose'] = None
+    validate_summary(failed, 1, True, True, 20)
+    print('veranda-gui-growth: 20/100 cycles, median, budget, incomplete/legacy receipts and bounded arguments passed')
     return 0
 
 
@@ -443,6 +631,21 @@ def wayland_growth_self_test():
     import tempfile
     from types import SimpleNamespace
     growth_self_test()
+    spec = importlib.util.spec_from_file_location('retention_measure', Path(__file__).resolve().parents[2] / 'dev/measure-veranda.py')
+    measure = importlib.util.module_from_spec(spec); spec.loader.exec_module(measure)
+    child = subprocess.Popen([sys.executable, '-c',
+                              'import sys,threading,time; threading.Thread(target=lambda: sys.stdin.read(),daemon=True).start(); '
+                              'print("ready",flush=True); time.sleep(30)'],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
+    tree = measure.Tree(child.pid)
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(child.stdout, selectors.EVENT_READ)
+            assert selector.select(3) and child.stdout.readline() == b'ready\n'
+        sample = settled_growth_sample(tree, 1, retention=True)
+        assert sample['fds'] == 3 and sample['threads'] == 2 and sample['processCount'] == 1 and sample['rssBytes'] > 0
+    finally:
+        tree.stop(child); child.wait(timeout=3); child.stdin.close(); child.stdout.close()
     with tempfile.TemporaryDirectory(prefix='veranda-wayland-growth-') as directory:
         root = Path(directory); root.chmod(0o700)
         def directory(path): path.mkdir(mode=0o700); path.chmod(0o700)
@@ -478,16 +681,38 @@ def wayland_growth_self_test():
                            screen={'width': 1920, 'height': 1080, 'refresh_millihertz': 60000, 'scale': 1},
                            westonVersion='14.0.2-1', webkitVersion='2.48.3-1', mesaVersion='25.0.7-2',
                            logicalCpus=4, memoryBytes=8 * 1024**3, kernelVersion=[6, 12, 0],
-                           fleet=counts, guiFleetVerified=True)
+                           fleet=counts, guiFleetVerified=True, compositorProcessCount=2, appSize={'width': 1180, 'height': 760},
+                           naturalClose={'request': 'gtk-titlebar-close', 'appExitCode': 0, 'trackedProcessesGone': True})
         validate_wayland_growth(observation, True)
-        samples = [{'cycle': cycle, 'rssBytes': 100 * 1024**2, 'processCount': 4}
-                   for cycle in [*range(1, 11), *range(91, 101)]]
-        result = {'passed': ['remote-next-match'], 'failedCase': None, 'cleanup': True,
-                  'failureStage': None, 'failureCategory': None, 'selectionState': None, 'selectionFailure': None,
-                  'growth': growth_result(samples, 10, 100), 'wayland': observation}
-        validate_summary(result, 0, True, True)
+        for requested in (20, 100):
+            samples = [{'cycle': cycle, 'rssBytes': 100 * 1024**2, 'processCount': 4, 'fds': 40, 'threads': 12}
+                       for cycle in [*range(1, 11), *range(requested - 9, requested + 1)]]
+            result = {'passed': ['remote-next-match'], 'failedCase': None, 'cleanup': True,
+                      'failureStage': None, 'failureCategory': None, 'selectionState': None, 'selectionFailure': None,
+                      'growth': growth_result(samples, 10, requested, requested, retention=True), 'wayland': observation}
+            validate_summary(result, 0, True, True, requested)
+            assert len(json.dumps(result).encode()) <= 4096
+            for metric in ('fds', 'threads'):
+                increased = copy.deepcopy(samples)
+                for sample in increased[10:]: sample[metric] += 1
+                invalid = dict(result, growth=growth_result(increased, 10, requested, requested, retention=True))
+                try: validate_summary(invalid, 0, True, True, requested)
+                except AssertionError: pass
+                else: raise AssertionError('positive settled retention growth accepted')
+                invalid.update(passed=[], failedCase='remote-next-match', failureStage='growth.budget', failureCategory='resource_budget')
+                validate_summary(invalid, 1, True, True, requested)
+                for unknown in (None, True, -1):
+                    invalid_samples = copy.deepcopy(samples); invalid_samples[-1][metric] = unknown
+                    try: growth_result(invalid_samples, 10, requested, requested, retention=True)
+                    except AssertionError: pass
+                    else: raise AssertionError('unknown or invalid retention count accepted')
+            old = dict(result, growth=growth_result([{key: value for key, value in sample.items() if key not in ('fds', 'threads')}
+                                                   for sample in samples], 10, requested, requested))
+            try: validate_summary(old, 0, True, True, requested)
+            except AssertionError: pass
+            else: raise AssertionError('old Wayland evidence accepted as retention evidence')
         result.update(passed=[], failedCase='remote-next-match', failureStage='remote.input', failureCategory='process',
-                      growth=growth_result([], 0, 0), wayland=wayland_growth_observation())
+                      growth=growth_result([], 0, 0, retention=True), wayland=wayland_growth_observation())
         validate_summary(result, 1, True, True)
         for invalid in [dict(observation, guiFleetVerified=False), dict(observation, compositorExcluded=1),
                         dict(observation, rawError='private'), dict(observation, westonVersion='/private/path'),
@@ -508,7 +733,7 @@ def wayland_growth_self_test():
     return 0
 
 
-def validate_summary(result, rc, growth=False, wayland=False):
+def validate_summary(result, rc, growth=False, wayland=False, requested_cycles=None):
     assert type(rc) is int
     assert not wayland or growth
     assert isinstance(result, dict) and set(result) == {'passed', 'failedCase', 'cleanup', 'failureStage', 'failureCategory', 'selectionState', 'selectionFailure'} | ({'growth'} if growth else set()) | ({'wayland'} if wayland else set())
@@ -557,24 +782,37 @@ def validate_summary(result, rc, growth=False, wayland=False):
     if growth:
         metrics = result['growth']
         assert isinstance(metrics, dict)
+        if wayland:
+            assert type(metrics.get('schemaVersion')) is int and metrics['schemaVersion'] == 2
+        # Old receipts have exactly the original leaf schema and imply the old
+        # 100-cycle workload. Active callers always bind their explicit count.
+        legacy = 'cyclesRequested' not in metrics
+        requested = 100 if legacy else metrics['cyclesRequested']
+        assert type(requested) is int and requested in (20, 100)
+        if requested_cycles is not None:
+            assert type(requested_cycles) is int and requested_cycles in (20, 100)
+            assert requested == requested_cycles
         assert type(metrics['warmupCompleted']) is int and 0 <= metrics['warmupCompleted'] <= 10
-        assert type(metrics['cyclesCompleted']) is int and 0 <= metrics['cyclesCompleted'] <= 100
+        assert type(metrics['cyclesCompleted']) is int and 0 <= metrics['cyclesCompleted'] <= requested
         assert metrics['warmupCompleted'] == 10 or metrics['cyclesCompleted'] == 0
         samples = metrics['samples']
         assert isinstance(samples, list) and len(samples) <= 20
-        measured = [index for index in range(1, metrics['cyclesCompleted'] + 1) if index <= 10 or index >= 91]
+        measured = [index for index in range(1, metrics['cyclesCompleted'] + 1) if index <= 10 or index > requested - 10]
         assert [sample['cycle'] for sample in samples] == measured
         for sample in samples:
-            assert set(sample) == {'cycle', 'rssBytes', 'processCount'}
+            assert set(sample) == {'cycle', 'rssBytes', 'processCount'} | ({'fds', 'threads'} if wayland else set())
             assert type(sample['cycle']) is int
             assert type(sample['rssBytes']) is int and sample['rssBytes'] > 0
             assert type(sample['processCount']) is int and sample['processCount'] > 0
-        assert metrics == growth_result(samples, metrics['warmupCompleted'], metrics['cyclesCompleted'])
+        calculated = growth_result(samples, metrics['warmupCompleted'], metrics['cyclesCompleted'], requested, retention=wayland)
+        if legacy: calculated.pop('cyclesRequested')
+        assert metrics == calculated
         assert set(result['passed']) <= expected
     if rc == 0:
         assert set(result['passed']) == expected and result['failedCase'] is None and result['cleanup']
         assert result['failureStage'] is None and result['failureCategory'] is None
-        if growth: assert metrics['cyclesCompleted'] == 100 and metrics['withinLimit'] is True
+        if growth: assert metrics['cyclesCompleted'] == requested and metrics['withinLimit'] is True
+        if wayland: assert all(value['withinLimit'] is True for value in metrics['retention'].values())
     else:
         assert result['failureStage'] is not None and result['failureCategory'] is not None
         assert result['failedCase'] is not None or set(result['passed']) == expected
@@ -987,8 +1225,18 @@ def process_diagnostic(app, tree, live):
 
 
 def validate_diagnostic(result):
-    assert type(result) is dict and set(result) == {'schemaVersion', 'failedCase', 'failureStage',
-                                                  'failureCategory', 'accessibleBound', 'stderr', 'processes'}
+    fields = {'schemaVersion', 'failedCase', 'failureStage', 'failureCategory', 'accessibleBound', 'stderr', 'processes'}
+    assert type(result) is dict and set(result) in (fields, fields | {'compositor'})
+    compositor = result.get('compositor')
+    if 'compositor' in result:
+        assert result['failedCase'] == 'preparation' and result['failureStage'] == 'preparation.compositor'
+        assert type(compositor) is dict and set(compositor) == {'checkpoint', 'commandExitCode', 'stdoutBytes', 'stderrBytes'}
+        assert compositor['checkpoint'] in {'class-search', 'single-window'}
+        rc = compositor['commandExitCode']
+        assert rc is None or type(rc) is int and -255 <= rc <= 255
+        for key in ('stdoutBytes', 'stderrBytes'):
+            value = compositor[key]
+            assert value is None if rc is None else type(value) is int and 0 <= value <= 2**63 - 1
     assert type(result['schemaVersion']) is int and result['schemaVersion'] == 1
     assert result['failedCase'] in CASES | {'preparation'}
     assert result['failureStage'] in STAGES and result['failureCategory'] in CATEGORIES
@@ -1083,6 +1331,72 @@ def diagnostic_self_test():
               'failureCategory': 'accessible_bounds', 'accessibleBound': {'kind': 'depth', 'observed': 33, 'clamped': False},
               'stderr': None, 'processes': None}
     validate_diagnostic(result)  # Missing optional observations preserve the failure.
+    # Distinct tool-result/receipt boundaries; these do not simulate a GUI or establish mapping readiness.
+    command = ['xdotool', 'search']
+    observed = {'checkpoint': 'class-search', 'commandExitCode': None, 'stdoutBytes': None, 'stderrBytes': None}
+    assert compositor_search_result(subprocess.CompletedProcess(command, 1, b'', b''), observed) is None
+    assert observed == {'checkpoint': 'class-search', 'commandExitCode': 1, 'stdoutBytes': 0, 'stderrBytes': 0}
+    assert compositor_search_result(subprocess.CompletedProcess(command, 0, b'123\n', b''), observed) == b'123'
+    observed['checkpoint'] = 'single-window'
+    assert compositor_search_result(subprocess.CompletedProcess(command, 0, b'123\n', b''), observed, b'123') == b'123'
+    for rc, output, error, expected in [(2, b'', b'', None), (1, b'', b'private display error', None),
+                                       (1, b'123\n', b'', None), (1, b'', b'', b'123')]:
+        try: compositor_search_result(subprocess.CompletedProcess(command, rc, output, error), observed, expected)
+        except subprocess.CalledProcessError as failure: assert failure.returncode == rc
+        else: raise AssertionError('unexpected command failure was retried')
+    for output, error, expected in [(b'123\n456\n', b'', None), (b'123\n456\n', b'', b'123'),
+                                    (b'456\n', b'', b'123'), (b'123\n', b'private warning', None),
+                                    (b'1' * 1025, b'', None), (b'', b'x' * (MAX_STDERR_SCAN + 1), None)]:
+        try: compositor_search_result(subprocess.CompletedProcess(command, 0, output, error), observed, expected)
+        except FixtureFailure: pass
+        else: raise AssertionError('unsafe compositor search accepted')
+    # Wildcard search includes the real root and unnamed/unclassed windows; omit only the root.
+    wildcard = ['xdotool', 'search', '--onlyvisible', '--name', '.*']
+    assert compositor_search_result(subprocess.CompletedProcess(wildcard, 0, b'100\n123\n', b''),
+                                    observed, b'123', b'100') == b'123'
+    for output in [b'100\n123\n456\n', b'100\n', b'123\n', b'100\n123\n123\n',
+                   b'100\n100\n123\n', b'100\ninvalid\n', b'100\n0123\n',
+                   b'100\n4294967296\n', b'100\n0\n', b'100\n' + b'1 ' * 64]:
+        try: compositor_search_result(subprocess.CompletedProcess(wildcard, 0, output, b''), observed, b'123', b'100')
+        except FixtureFailure: pass
+        else: raise AssertionError('unsafe all-visible singleton accepted')
+    from unittest.mock import patch
+    original_rc = subprocess.CompletedProcess(wildcard, 17, b'', b'')
+    roots = subprocess.CompletedProcess(['python3', '-c', 'fixed root query'], 0, b'100\n', b'')
+    observed.update(checkpoint='single-window')
+    with patch.object(subprocess, 'run', side_effect=[roots, original_rc]):
+        try: compositor_visible_window({}, observed, b'123', time.monotonic() + 3)
+        except subprocess.CalledProcessError as failure: assert failure.returncode == 17 and observed['commandExitCode'] == 17
+        else: raise AssertionError('original wildcard command failure was lost')
+    with patch.object(subprocess, 'run', side_effect=[subprocess.CompletedProcess(['fixed root query'], 17, b'', b'')]):
+        try: compositor_visible_window({}, observed, b'123', time.monotonic() + 3)
+        except subprocess.CalledProcessError as failure: assert failure.returncode == 17 and observed['commandExitCode'] == 17
+        else: raise AssertionError('original root-query failure was lost')
+    for output in [b'100\n123\n456\n', b'100\n123\n123\n']:
+        with patch.object(subprocess, 'run', side_effect=[roots, subprocess.CompletedProcess(wildcard, 0, output, b'')]):
+            try: compositor_visible_window({}, observed, b'123', time.monotonic() + 3)
+            except FixtureFailure: pass
+            else: raise AssertionError('ambiguous native-search outcome accepted')
+    try: compositor_command_timeout(time.monotonic() - 1)
+    except FixtureFailure as failure: assert failure.category == 'timeout'
+    else: raise AssertionError('expired compositor command launched')
+    assert 0 < compositor_command_timeout(time.monotonic() + 30) <= 3
+    observation = {'checkpoint': 'class-search', 'commandExitCode': 1, 'stdoutBytes': 0, 'stderrBytes': 0}
+    preparation = dict(result, failedCase='preparation', failureStage='preparation.compositor',
+                       failureCategory='process', accessibleBound=None, compositor=observation)
+    validate_diagnostic(preparation)
+    validate_diagnostic(dict(preparation, failureCategory='timeout'))
+    validate_diagnostic(dict(preparation, compositor=dict(observation, commandExitCode=None, stdoutBytes=None, stderrBytes=None)))
+    for invalid in [dict(preparation, compositor=None), dict(preparation, failureStage='growth.removal'),
+                    dict(preparation, compositor=dict(observation, checkpoint='/private/unsafe')),
+                    dict(preparation, compositor=dict(observation, stderr='private value')),
+                    dict(preparation, compositor=dict(observation, commandExitCode=True)),
+                    dict(preparation, compositor=dict(observation, stdoutBytes=-1)),
+                    dict(preparation, compositor=dict(observation, stderrBytes='private value')),
+                    dict(preparation, compositor=dict(observation, commandExitCode=None))]:
+        try: validate_diagnostic(invalid)
+        except (AssertionError, TypeError): pass
+        else: raise AssertionError('unsafe compositor diagnostic accepted')
     for kind in ACCESSIBLE_LIMITS:
         try: accessible_bound(kind, 1 << 40)
         except AccessibleBoundFailure as error:
@@ -1144,14 +1458,12 @@ def diagnostic_self_test():
 
 
 def main():
+    growth, wayland, cycles_requested = growth_options(sys.argv[6:])
     import gi
     gi.require_version('Atspi', '2.0')
     from gi.repository import Atspi, GLib
     root, fixture, owner = map(Path, sys.argv[1:4])
     yard, storage = sys.argv[4:6]
-    wayland = sys.argv[6:] == ['--wayland-growth']
-    growth = wayland or sys.argv[6:] == ['--growth']
-    assert sys.argv[6:] in [[], ['--growth'], ['--wayland-growth']]
     wayland_observation = wayland_growth_observation() if wayland else None
     growth_samples = []; warmup_completed = cycles_completed = 0
     private(owner, True); private(fixture, True)
@@ -1164,7 +1476,7 @@ def main():
     children = []; app = None; app_tree = None; gui = None; display = None; server = None
     compositor = None; compositor_start = None; compositor_window = None; socket_identity = None
     authority = fixture / 'Xauthority'; cookie = None; fleet_names = None; fleet_preserved = None
-    app_stderr = None; bound_failure = None
+    app_stderr = None; bound_failure = None; compositor_diagnostic = None
     passed = []; current = 'preparation'; cleanup = True; stage = 'preparation'; category = None; selection = None; selection_error = None; selection_point = 'tree'; yard_point = 'tree'; fingerprint_point = 'tree'; reconcile_point = 'tree'; yard_end = time.monotonic()
     heading_point = 'tree'; heading_site = 'local'; observing = False
     remote_select_point = None
@@ -1402,7 +1714,10 @@ def main():
         require(candidate.isdigit() and len(candidate) <= 20, 'ownership')
         if wayland:
             require(candidate == compositor_window, 'ownership')
-            require(xdo(['search', '--onlyvisible', '--name', '.+'], True).split() == [compositor_window], 'ownership')
+            owned_input()
+            compositor_visible_window(dict(base_env, DISPLAY=display, XAUTHORITY=str(authority)), {},
+                                      compositor_window, deadline - 12)
+            owned_input()
             window = candidate.decode('ascii')
         else:
             pid = xdo(['getwindowpid', candidate.decode('ascii')], True).strip()
@@ -1470,6 +1785,71 @@ def main():
             return found[0] if found else None
         boundary('launch.accessible'); gui = wait(accessible)
         boundary('launch.connect-link'); wait(lambda: find('+ Connect remote host', buttons))
+
+    def natural_close():
+        nonlocal app, app_tree, gui
+        boundary('growth.natural-close')
+        def owned_close():
+            private(owner, True); private(fixture, True); private(fixture / current, True)
+            require(read(fixture / '.marker', 128) == 'subyard-veranda-release-gui-v1\n', 'ownership')
+            owned_composition(); app_tree.sample()
+            start = app_tree.known.get(app.pid); live = measure.processes()
+            require(start is not None and app.poll() is None and live.get(app.pid, {}).get('start') == start
+                    and Path('/proc', str(app.pid)).stat().st_uid == os.geteuid()
+                    and gui.get_process_id() == app.pid, 'ownership')
+            env = dict(base_env, DISPLAY=display, XAUTHORITY=str(authority))
+            remaining = min(3, deadline - 12 - time.monotonic()); require(remaining > 0, 'timeout')
+            windows = subprocess.check_output(['xdotool', 'search', '--onlyvisible', '--class', '^Weston Compositor$'],
+                                             env=env, stderr=subprocess.DEVNULL, timeout=remaining)
+            require(len(windows) <= 1024 and windows.isascii() and windows.split() == [compositor_window], 'ownership')
+            compositor_visible_window(env, {}, compositor_window, deadline - 12)
+            owned_composition()
+        def titlebar_close():
+            matches = []
+            for node in nodes():
+                if node.get_role() not in buttons or node.get_name() != 'Close': continue
+                require(node.get_process_id() == app.pid, 'ownership')
+                parent = node.get_parent(); panel = False
+                for _ in range(32):
+                    require(parent is not None and parent.get_process_id() == app.pid, 'ownership')
+                    role = parent.get_role()
+                    require(role not in {Atspi.Role.DOCUMENT_WEB, Atspi.Role.DIALOG}, 'ownership')
+                    panel |= role == Atspi.Role.PANEL
+                    if role == Atspi.Role.FRAME:
+                        require(panel and parent.get_name() == 'Subyard Veranda'
+                                and parent.get_application().get_process_id() == gui.get_process_id(), 'ownership')
+                        component = parent.get_component_iface(); require(component is not None, 'accessible_action')
+                        size = component.get_extents(Atspi.CoordType.WINDOW)
+                        require(type(size.width) is int and type(size.height) is int
+                                and 0 < size.width <= 1920 and 0 < size.height <= 1080, 'fixture_data')
+                        wayland_observation['appSize'] = {'width': size.width, 'height': size.height}
+                        break
+                    parent = parent.get_parent()
+                else: accessible_bound('depth', 33)
+                states = node.get_state_set()
+                require(states.contains(Atspi.StateType.SHOWING) and states.contains(Atspi.StateType.VISIBLE)
+                        and states.contains(Atspi.StateType.ENABLED), 'accessible_action')
+                matches.append(node)
+            require(len(matches) <= 1, 'ambiguity')
+            return matches[0] if matches else None
+        owned_close(); button = wait(titlebar_close); owned_close(); act(button)
+        def exited():
+            app_tree.sample(); owned_composition()
+            code = app.poll()
+            if code is None: return False
+            require(code == 0, 'process')
+            live = measure.processes()
+            for pid, start in app_tree.known.items():
+                if live.get(pid, {}).get('start') == start:
+                    try: os.waitpid(pid, os.WNOHANG)
+                    except ChildProcessError: pass
+            live = measure.processes()
+            return not any(live.get(pid, {}).get('start') == start for pid, start in app_tree.known.items())
+        wait(exited)
+        require(app.wait(timeout=1) == 0, 'process')
+        wayland_observation['naturalClose'] = {'request': 'gtk-titlebar-close', 'appExitCode': 0,
+                                               'trackedProcessesGone': True}
+        app = app_tree = gui = None  # Only after the natural predicate, before signal fallback.
 
     def close():
         nonlocal app, app_tree, gui
@@ -1593,10 +1973,11 @@ def main():
                                   XDG_RUNTIME_DIR=str(fixture / 'runtime'),
                                   WAYLAND_DISPLAY='veranda-growth', DBUS_SESSION_BUS_ADDRESS=os.environ['DBUS_SESSION_BUS_ADDRESS'])
             compositor = spawn(['weston', '--no-config', '--backend=x11', '--renderer=gl',
-                                '--shell=kiosk-shell.so', '--width=1920', '--height=1080', '--scale=1',
+                                '--shell=desktop-shell.so', '--width=1920', '--height=1080', '--scale=1',
                                 '--output-count=1', '--idle-time=0', '--socket=veranda-growth'],
                                compositor_env, 'weston.log')
-            compositor_start = next(tree.known.get(compositor.pid) for process, tree in children if process is compositor)
+            compositor_tree = next(tree for process, tree in children if process is compositor)
+            compositor_start = compositor_tree.known.get(compositor.pid)
             require(compositor_start is not None, 'ownership')
             wait(lambda: compositor.poll() is None and (fixture / 'runtime' / 'veranda-growth').is_socket(), 10)
             socket = (fixture / 'runtime' / 'veranda-growth').lstat()
@@ -1608,15 +1989,24 @@ def main():
                                            stderr=subprocess.DEVNULL, text=True, timeout=3)
             wayland_observation['screen'] = wayland_resources.output_geometry(info)
             wayland_observation['geometryVerified'] = True
-            window = subprocess.check_output(['xdotool', 'search', '--onlyvisible', '--class', '^Weston Compositor$'],
-                                             env=compositor_env, stderr=subprocess.DEVNULL, timeout=3)
-            require(len(window) <= 1024 and window.isascii() and len(window.split()) == 1
-                    and window.strip().isdigit() and 0 < len(window.strip()) <= 20, 'ownership')
-            compositor_window = window.strip()
+            compositor_diagnostic = {'checkpoint': 'class-search', 'commandExitCode': None,
+                                     'stdoutBytes': None, 'stderrBytes': None}
+            map_end = min(deadline - 12, time.monotonic() + 3)
+            def compositor_mapped():
+                owned_composition()
+                remaining = compositor_command_timeout(map_end)
+                compositor_diagnostic.update(commandExitCode=None, stdoutBytes=None, stderrBytes=None)
+                result = subprocess.run(['xdotool', 'search', '--onlyvisible', '--class', '^Weston Compositor$'],
+                                        env=compositor_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=remaining)
+                window = compositor_search_result(result, compositor_diagnostic)
+                owned_composition()
+                return window
+            compositor_window = wait(compositor_mapped, 3)
             # Only this cookie-bearing compositor creates X windows; the app receives no X display or cookie.
-            only = subprocess.check_output(['xdotool', 'search', '--onlyvisible', '--name', '.+'],
-                                           env=compositor_env, stderr=subprocess.DEVNULL, timeout=3)
-            require(only.split() == [compositor_window], 'ownership')
+            owned_composition()
+            compositor_diagnostic.update(checkpoint='single-window', commandExitCode=None, stdoutBytes=None, stderrBytes=None)
+            compositor_visible_window(compositor_env, compositor_diagnostic, compositor_window, deadline - 12)
+            owned_composition()
             renderer = re.search(r'GL renderer: ([ -~]{1,200})', read(fixture / 'weston.log'))
             require(renderer is not None, 'fixture_data')
             wayland_observation['renderer'] = 'llvmpipe' if 'llvmpipe' in renderer[1] else 'softpipe' if 'softpipe' in renderer[1] else 'other'
@@ -1635,6 +2025,7 @@ def main():
             require(wayland_observation['westonVersion'].startswith('14.')
                     and wayland_observation['renderer'] == 'llvmpipe' and wayland_observation['debian13Verified']
                     and wayland_observation['logicalCpus'] == 4 and wayland_observation['memoryBytes'] >= 7 * 1024**3, 'fixture_data')
+            wayland_observation['compositorProcessCount'] = compositor_tree.sample()['process_count']
             validate_wayland_growth(wayland_observation, False)
             owner_spec = importlib.util.spec_from_file_location('growth_owner', root / 'dev/e2e/veranda-owner.py')
             owner_api = importlib.util.module_from_spec(owner_spec); owner_spec.loader.exec_module(owner_api)
@@ -1689,7 +2080,7 @@ def main():
                     if growth:
                         # Keep the same GUI/WebKit/native/local RPC processes throughout.
                         # The first destination uses owned XTEST; Svelte retains it thereafter.
-                        for cycle in range(-9, 101):
+                        for cycle in range(-9, cycles_requested + 1):
                             app_tree.sample(); listener_tree.sample()
                             owned_composition()
                             live = measure.processes()
@@ -1720,18 +2111,17 @@ def main():
                             if cycle <= 0:
                                 warmup_completed += 1
                             else:
-                                if cycle <= 10 or cycle >= 91:
+                                if cycle <= 10 or cycle > cycles_requested - 10:
                                     boundary('growth.idle')
                                     # Sample during settling to retain descendant identities; no UI input.
                                     until = time.monotonic() + 30
                                     while time.monotonic() < until:
                                         require(app.poll() is None and time.monotonic() < deadline - 12, 'timeout')
                                         owned_composition(); app_tree.sample(); time.sleep(0.1)
-                                    sample = app_tree.sample()
-                                    growth_samples.append({'cycle': cycle, 'rssBytes': sample['rss_bytes'],
-                                                           'processCount': sample['process_count']})
+                                    if wayland: require(removed(), 'process')
+                                    growth_samples.append(settled_growth_sample(app_tree, cycle, retention=wayland))
                                 cycles_completed = cycle
-                            if cycle == 100: break
+                            if cycle == cycles_requested: break
                             boundary('remote.form'); click('+ Connect remote host')
                             boundary('remote.destination')
                             entry = wait(lambda: find('SSH destination', {Atspi.Role.ENTRY}))
@@ -1743,7 +2133,10 @@ def main():
                             boundary('remote.saved'); wait(lambda: find('Repair connection', buttons))
                             matched(site='post-save')
                         boundary('growth.budget')
-                        require(growth_result(growth_samples, warmup_completed, cycles_completed)['withinLimit'], 'resource_budget')
+                        metrics = growth_result(growth_samples, warmup_completed, cycles_completed, cycles_requested, retention=wayland)
+                        require(metrics['withinLimit'], 'resource_budget')
+                        if wayland:
+                            require(all(value['withinLimit'] is True for value in metrics['retention'].values()), 'resource_budget')
                         if wayland:
                             boundary('growth.fleet')
                             client = owner_api.Owner([str(fixture / 'yard-0.1.1')], env=base_env, timeout=10)
@@ -1751,6 +2144,7 @@ def main():
                                 client.result('rpc.negotiate')
                                 require(ordinary_inventory(client.result('owner.inventory'), fleet_names, yard) == wayland_observation['fleet'], 'fixture_data')
                             finally: client.close()
+                        if wayland: natural_close()
                         boundary('case.cleanup'); close(); passed.append(current)
                         continue
                     boundary('remote.reload')
@@ -1821,6 +2215,8 @@ def main():
                               'failureCategory': category, 'accessibleBound': bound_failure,
                               'stderr': stderr_diagnostic(app_stderr) if app_stderr is not None else None,
                               'processes': processes}
+                if stage == 'preparation.compositor' and compositor_diagnostic is not None:
+                    diagnostic['compositor'] = compositor_diagnostic
                 validate_diagnostic(diagnostic)
                 write(fixture / 'diagnostic.json', json.dumps(diagnostic))
             except BaseException:
@@ -1856,23 +2252,22 @@ def main():
         result = {'passed': passed, 'failedCase': None if len(passed) == expected_count else current, 'cleanup': cleanup,
                   'failureStage': stage if category else None, 'failureCategory': category, 'selectionState': selection, 'selectionFailure': selection_error}
         if growth:
-            result['growth'] = growth_result([sample for sample in growth_samples if sample['cycle'] <= cycles_completed], warmup_completed, cycles_completed)
+            result['growth'] = growth_result([sample for sample in growth_samples if sample['cycle'] <= cycles_completed], warmup_completed, cycles_completed, cycles_requested, retention=wayland)
         if wayland: result['wayland'] = wayland_observation
-        validate_summary(result, 0 if len(passed) == expected_count and cleanup else 1, growth, wayland)
+        validate_summary(result, 0 if len(passed) == expected_count and cleanup else 1, growth, wayland, cycles_requested)
         write(fixture / 'summary.json', json.dumps(result))
     return 0 if len(passed) == expected_count and cleanup else 1
 
 
 def session():
     """Reap the private bus and activated services, including independent groups."""
+    growth, wayland, cycles_requested = growth_options(sys.argv[7:])
     root, fixture = map(Path, sys.argv[2:4]); private(fixture, True)
     assert read(fixture / '.marker', 128) == 'subyard-veranda-release-gui-v1\n'
     assert ctypes.CDLL(None).prctl(36, 1, 0, 0, 0) == 0
     spec = importlib.util.spec_from_file_location('measure', root / 'dev/measure-veranda.py')
     measure = importlib.util.module_from_spec(spec); spec.loader.exec_module(measure)
     process = subprocess.Popen(['dbus-run-session', '--', sys.executable, __file__, *sys.argv[2:]], start_new_session=True)
-    wayland = sys.argv[7:] == ['--wayland-growth']
-    growth = wayland or sys.argv[7:] == ['--growth']
     tree = measure.Tree(process.pid); end = time.monotonic() + (1825 if growth else 325)
     def interrupted(*_): raise TimeoutError()
     signal.signal(signal.SIGTERM, interrupted); signal.signal(signal.SIGINT, interrupted)
@@ -1906,13 +2301,13 @@ def session():
         result = json.loads(read(summary, 4096)) if summary.exists() else {
             'passed': [], 'failedCase': 'preparation', 'cleanup': not remaining,
             'failureStage': 'session', 'failureCategory': 'timeout' if rc == 124 else 'process', 'selectionState': None, 'selectionFailure': None}
-        if growth and 'growth' not in result: result['growth'] = growth_result([], 0, 0)
+        if growth and 'growth' not in result: result['growth'] = growth_result([], 0, 0, cycles_requested, retention=wayland)
         if wayland and 'wayland' not in result: result['wayland'] = wayland_growth_observation()
         if remaining: result['cleanup'] = False
         if rc != 0 and result['failureCategory'] is None:
             result['failureStage'] = 'cleanup' if remaining else 'session'
             result['failureCategory'] = 'cleanup' if remaining else 'timeout' if rc == 124 else 'process'
-        validate_summary(result, rc, growth, wayland)
+        validate_summary(result, rc, growth, wayland, cycles_requested)
         write(summary, json.dumps(result))
     return rc
 

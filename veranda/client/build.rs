@@ -13,7 +13,4 @@ fn main() {
         );
         println!("cargo:rustc-env=VERANDA_PRODUCT_VERSION={version}");
     }
-    if std::env::var_os("CARGO_FEATURE_DESKTOP").is_some() {
-        tauri_build::build();
-    }
 }

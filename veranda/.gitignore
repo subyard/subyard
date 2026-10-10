@@ -1,4 +1,6 @@
+# Retired desktop caches remain outside public candidate inputs.
 node_modules/
 .svelte-kit/
 build/
 src-tauri/target/
+client/target/

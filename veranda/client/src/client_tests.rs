@@ -549,12 +549,98 @@ fn production_monitor_resyncs_a_gap_and_resubscribes_after_transport_loss() {
             !root.join("unexpected-context-query").exists(),
             "invalid context reached inventory, subscription or detail queries"
         );
+        // Retention is opt-in: the LRU and reconnect checks above keep their
+        // original cache behavior. Reuse their children to prove real reaping.
+        let held = client
+            .plan(
+                None,
+                Some("next".into()),
+                "config.set".into(),
+                vec!["SSH_PORT".into(), "65001".into()],
+            )
+            .unwrap();
+        let next_weak = Arc::downgrade(&next);
+        drop(next);
+        let reopened_weak = Arc::downgrade(&reopened);
+        drop(reopened);
+        let temporary = retained.pop().unwrap();
+        let temporary_key = temporary.key.clone();
+        let temporary_weak = Arc::downgrade(&temporary);
+        while events.try_recv().is_ok() {}
+        client
+            .retain_read_scope(None, Some("default".into()))
+            .unwrap();
+        let wait_released = |weak: &Weak<Session>| {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while weak.upgrade().is_some() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                weak.upgrade().is_none(),
+                "unused read session remained cached"
+            );
+        };
+        wait_released(&reopened_weak);
+        assert!(
+            next_weak.upgrade().is_some(),
+            "retention lost the exact plan's session"
+        );
+        assert!(client.sessions.lock().unwrap().contains_key(&temporary_key));
+        assert!(Arc::ptr_eq(
+            &replacement,
+            &client.session(key.clone()).unwrap()
+        ));
+        drop(temporary);
+        let _ = client.wake.try_send(());
+        wait_released(&temporary_weak);
+        assert!(!client.sessions.lock().unwrap().contains_key(&temporary_key));
+        let started = client.execute(&held.plan_id, &held.digest, true).unwrap();
+        assert_eq!(started.operation_id, held.operation_id);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let event = events
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("retained exact plan did not complete");
+            assert_ne!(
+                event.state, "disconnected",
+                "retirement reported transport loss"
+            );
+            if event.operation_id.as_deref() == Some(&held.operation_id) {
+                assert_eq!(event.state, "completed");
+                break;
+            }
+        }
+        wait_released(&next_weak);
+        assert!(client.running.lock().unwrap().is_empty());
+        assert!(events.try_iter().all(|event| event.state != "disconnected"));
+        for generation in [8, 10, 11] {
+            let identity = actor_read(&root.join(format!("owner-{generation}.identity"))).unwrap();
+            let pid: i32 = std::str::from_utf8(&identity)
+                .unwrap()
+                .split_whitespace()
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while unsafe { libc::kill(pid, 0) } == 0 && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            assert_eq!(
+                unsafe { libc::kill(pid, 0) },
+                -1,
+                "retired child was not reaped"
+            );
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH)
+            );
+        }
         let started = Instant::now();
         client.shutdown();
         assert!(started.elapsed() < Duration::from_secs(2));
         assert!(initial.rpc.is_closed() && replacement.rpc.is_closed());
-        assert!(next.rpc.is_closed() && retained.iter().all(|session| session.rpc.is_closed()));
-        assert!(reopened.rpc.is_closed());
+        assert!(retained.iter().all(|session| session.rpc.is_closed()));
         assert!(client.sessions.lock().unwrap().is_empty());
         for generation in 1..=MAX_SESSIONS + 6 {
             let identity = actor_read(&root.join(format!("owner-{generation}.identity"))).unwrap();

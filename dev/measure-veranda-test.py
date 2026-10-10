@@ -25,6 +25,98 @@ wayland_spec.loader.exec_module(wayland_fixture)
 
 
 class WaylandProbeTest(unittest.TestCase):
+    def test_resource_assessment_is_separate_and_fail_closed(self):
+        base = {'schema_version': 1,
+                'guest_memory_bytes': {'status': 'ok', 'values': {'MemTotal': 4096, 'MemAvailable': 2048, 'SwapTotal': 8, 'SwapFree': 8}},
+                'guest_vm_counters': {'status': 'ok', 'values': dict.fromkeys(('pswpin', 'pswpout', 'pgscan_direct', 'pgscan_kswapd', 'pgsteal_direct', 'pgsteal_kswapd', 'oom_kill'), 0)},
+                'guest_memory_psi_microseconds': {'status': 'ok', 'values': {'some': 0, 'full': 0}},
+                'app_cgroup_events': {'status': 'incomplete', 'values': {'high': 0, 'max': 0, 'oom': 0, 'oom_kill': 0, 'oom_group_kill': None}}}
+        def clone():
+            return json.loads(json.dumps(base))
+        self.assertEqual(probe.assess_resource_witnesses([clone(), clone()], require_app=True)['status'], 'no_recorded_pressure')
+        for block, key in [('guest_vm_counters', key) for key in base['guest_vm_counters']['values']] + \
+                [('guest_memory_psi_microseconds', 'some'), ('guest_memory_psi_microseconds', 'full'), ('app_cgroup_events', 'oom_kill')]:
+            with self.subTest(block=block, key=key):
+                last = clone(); last[block]['values'][key] = 1
+                result = probe.assess_resource_witnesses([clone(), last, last], require_app=True)
+                self.assertEqual(result['status'], 'pressure_observed')
+                self.assertEqual(result['increased_counters'], [block + '.' + key])
+                last[block]['values'][key] = None
+                self.assertEqual(probe.assess_resource_witnesses([clone(), last], require_app=True)['status'], 'unknown')
+        first, last = clone(), clone()
+        first['guest_memory_psi_microseconds']['values']['full'] = 2
+        last['guest_vm_counters']['values']['oom_kill'] = 1
+        result = probe.assess_resource_witnesses([first, last])
+        self.assertEqual(result['status'], 'unknown')
+        self.assertIn('guest_memory_psi_microseconds.full', result['unknown_counters'])
+        self.assertIn('guest_vm_counters.oom_kill', result['increased_counters'])
+        for malformed in (None, True, -1):
+            last = clone(); last['guest_vm_counters']['values']['pswpin'] = malformed
+            self.assertEqual(probe.assess_resource_witnesses([clone(), last])['status'], 'unknown')
+        first, last = clone(), clone()
+        for witness in (first, last):
+            witness['app_cgroup_events'] = {'status': 'missing', 'values': {}}
+        self.assertEqual(probe.assess_resource_witnesses([first, last])['status'], 'no_recorded_pressure')
+        self.assertEqual(probe.assess_resource_witnesses([first, last], require_app=True)['status'], 'unknown')
+        last = clone(); last['guest_memory_bytes']['values']['SwapFree'] = 4
+        self.assertEqual(probe.assess_resource_witnesses([clone(), last])['status'], 'pressure_observed')
+        for sequence in ([], [clone()], [None, clone()]):
+            self.assertEqual(probe.assess_resource_witnesses(sequence)['status'], 'unknown')
+
+    def test_resource_witness_preserves_unknown_and_numeric_pressure(self):
+        # Owned files only: never sample this test host's /proc or cgroups.
+        proc, groups = self.root / 'proc', self.root / 'groups'
+        for path in (proc, proc / 'pressure', groups):
+            path.mkdir(mode=0o700)
+            path.chmod(0o700)
+        def write(path, text):
+            probe.private_file(path, text)
+        write(proc / 'meminfo', 'MemTotal: 4096 kB\nMemAvailable: 1024 kB\nSwapTotal: 8 kB\nSwapFree: 4 kB\n')
+        write(proc / 'vmstat', 'pswpin 1\npswpout 2\npgscan_direct 3\npgscan_kswapd 4\n'
+              'pgsteal_direct 5\npgsteal_kswapd 6\noom_kill 7\n')
+        write(proc / 'pressure/memory', 'some avg10=0.00 avg60=0.00 avg300=0.00 total=42\n'
+              'full avg10=0.00 avg60=0.00 avg300=0.00 total=12\n')
+        write(groups / 'memory.events', 'low 0\nhigh 1\nmax 2\noom 3\noom_kill 4\noom_group_kill 5\n')
+        group = SimpleNamespace(path=groups, members=lambda: set())
+        def witness():
+            with patch.object(probe.os, 'statvfs', return_value=SimpleNamespace(f_bavail=10, f_frsize=4096, f_favail=8)):
+                return probe.resource_witness(proc=proc, cgroup_root=groups, app_cgroup=group, disk=self.root)
+        result = witness()
+        self.assertEqual(result['guest_memory_bytes']['values']['MemAvailable'], 1024 * 1024)
+        self.assertEqual(result['guest_memory_psi_microseconds']['values'], {'some': 42, 'full': 12})
+        self.assertEqual(result['guest_vm_counters']['values']['pswpout'], 2)
+        self.assertEqual(result['app_cgroup_events']['values']['oom_kill'], 4)
+        self.assertEqual(result['disk'], {'status': 'ok', 'available_bytes': 40960, 'available_inodes': 8})
+        self.assertGreaterEqual(result['collection_seconds'], 0)
+        (proc / 'meminfo').unlink()
+        result = witness()
+        self.assertEqual(result['guest_memory_bytes']['status'], 'missing')
+        self.assertTrue(all(value is None for value in result['guest_memory_bytes']['values'].values()))
+        for invalid in ('MemAvailable: -1 kB\n', 'MemAvailable: 3 bytes\n',
+                        'MemAvailable: 1 kB\nMemAvailable: 2 kB\n', 'MemAvailable: ' + '9' * 80 + ' kB\n',
+                        'x' * 65537):
+            with self.subTest(invalid_length=len(invalid)):
+                write(proc / 'meminfo', invalid)
+                result = witness()
+                self.assertEqual(result['guest_memory_bytes']['status'], 'malformed')
+                self.assertTrue(all(value is None for value in result['guest_memory_bytes']['values'].values()))
+                (proc / 'meminfo').unlink()
+        write(proc / 'meminfo', 'MemAvailable: 0 kB\n')
+        result = witness()
+        self.assertEqual(result['guest_memory_bytes']['status'], 'incomplete')
+        self.assertEqual(result['guest_memory_bytes']['values']['MemAvailable'], 0)
+        self.assertIsNone(result['guest_memory_bytes']['values']['SwapFree'])
+        (proc / 'pressure/memory').unlink()
+        result = witness()
+        self.assertEqual(result['guest_memory_psi_microseconds']['status'], 'missing')
+        write(proc / 'pressure/memory', 'some total=1 total=2\nfull total=0\n')
+        self.assertEqual(witness()['guest_memory_psi_microseconds']['status'], 'malformed')
+        original = RuntimeError('owned leaf identity changed')
+        group.members = lambda: (_ for _ in ()).throw(original)
+        with self.assertRaises(RuntimeError) as caught:
+            witness()
+        self.assertIs(caught.exception, original)
+
     def test_launch_stderr_target_is_optional_and_default_is_unchanged(self):
         binary = self.root / 'launch-fixture'
         binary.write_text('#!/usr/bin/python3\nimport sys,time\nprint("private-stderr-fixture",file=sys.stderr,flush=True)\nprint("VERANDA_READY",flush=True)\ntime.sleep(30)\n')
@@ -171,7 +263,7 @@ time.sleep(30)
             probe.webkit_version()
 
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix='veranda-wayland-test-')
+        self.temporary = tempfile.TemporaryDirectory(prefix='veranda-wayland-test-', dir='/tmp')
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.root.chmod(0o700)
@@ -196,7 +288,8 @@ time.sleep(30)
         for ambient, expected in cases:
             with self.subTest(expected=expected):
                 error = io.StringIO()
-                with patch.dict(os.environ, ambient, clear=True), patch('sys.argv', ['probe', '--wayland']), \
+                with patch.dict(os.environ, ambient, clear=True), \
+                        patch('sys.argv', ['probe', '--wayland', '--binary', str(self.root / 'unused-binary')]), \
                         patch.object(probe.subprocess, 'Popen') as popen, patch.object(probe, 'launch') as launch, \
                         contextlib.redirect_stderr(error), self.assertRaises(SystemExit) as stopped:
                     probe.main()

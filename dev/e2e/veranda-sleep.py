@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 """Bounded prerequisites and real sleep acceptance on a marked disposable pair."""
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -199,7 +200,7 @@ def valid_context_ids(run, slot, vm, purpose, token, environment_type):
             and bool(re.fullmatch(r'[0-9a-f]{32}', token)) and environment_type == 'subyard-pair')
 
 
-def context(create=False):
+def context(create=False, evidence=False):
     """Every mutating mode is fenced by the broker marker and its own exclusive root."""
     if sys.platform != 'linux' or os.geteuid() != 0:
         raise ValueError()
@@ -227,12 +228,49 @@ def context(create=False):
         root.mkdir(mode=0o700)
         root.chmod(0o700)
         put(root, '.marker', marker)
+    if evidence and not root.exists() and not root.is_symlink():
+        return root, source, run, vm
     info = root.lstat()
     if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0
             or stat.S_IMODE(info.st_mode) != 0o700 or root.resolve() != root
             or private_read(root / '.marker') != marker):
         raise ValueError()
     return root, source, run, vm
+
+
+def evidence_log(path, uid=0):
+    """Copy a fixed private artifact; oversized or changing logs stay incomplete."""
+    limit = 8 * 1024 * 1024
+    fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != uid or info.st_nlink != 1
+                or stat.S_IMODE(info.st_mode) != 0o600):
+            raise ValueError()
+        with os.fdopen(os.dup(fd), 'rb') as stream:
+            data = stream.read(limit)
+        after = os.fstat(fd)
+        stable = info.st_size == after.st_size and info.st_mtime_ns == after.st_mtime_ns
+        return {'name': path.name, 'original_bytes': info.st_size, 'retained_bytes': len(data),
+                'truncated': len(data) < info.st_size, 'stable': stable,
+                'sha256': hashlib.sha256(data).hexdigest(), 'data_base64': base64.b64encode(data).decode('ascii')}
+    finally:
+        os.close(fd)
+
+
+def export_evidence():
+    root, source, _run, vm = context(evidence=True)
+    paths = [source.parent / 'owner-setup.log'] if vm == '2' else [root / 'receipt.json']
+    if vm == '1':
+        if (root / 'native.log').exists() or (root / 'native.log').is_symlink():
+            paths.append(root / 'native.log')
+        elif (root / 'native-process').exists():
+            raise ValueError()
+    artifacts = [evidence_log(path) for path in paths]
+    complete = all(not artifact['truncated'] and artifact['stable'] for artifact in artifacts)
+    print(json.dumps({'schema_version': 1, 'vm': int(vm),
+                      'result': 'complete' if complete else 'incomplete', 'artifacts': artifacts}, sort_keys=True))
+    return 0 if complete else 1
 
 
 def process_identity(pid):
@@ -284,12 +322,19 @@ def stop_owned(record):
         os.close(fd)
 
 
-def owner_environment(run):
+def owner_environment(run, source):
     state = '/var/tmp/subyard-preview-' + run
-    return {**os.environ, 'HOME': '/home/dev', 'SUBYARD_OPERATOR_HOME': '/home/dev',
+    return {**os.environ, 'HOME': '/home/dev', 'USER': 'dev', 'LOGNAME': 'dev',
+            'SUBYARD_OPERATOR_HOME': '/home/dev', 'SUBYARD_REPOSITORY_ROOT': str(source),
             'SUBYARD_CONFIG_HOME': state + '/config', 'SUBYARD_HOME': state + '/data',
             'SUBYARD_NO_AUDIT': '1', 'SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE': '1', 'MIN_DISK_GIB': '1',
             'STORAGE_PATH': '/home/dev/.cache/subyard-e2e-platform/incus/incus/storage'}
+
+
+def owner_command(source, run, *arguments):
+    # Preview setup owns the yard as dev; changing HOME alone does not change UID.
+    return ['/usr/sbin/runuser', '-u', 'dev', '--', str(source / '.build/yard'),
+            '-Y', 'pv-' + run, *arguments]
 
 
 def owner_start():
@@ -338,6 +383,27 @@ def frame(stream):
     return value, header + data
 
 
+def retain_owner_fault(source, fault):
+    # Export fixed diagnostics through the existing private setup log, never payload text.
+    code = 'owner_inventory_failed' if fault.get('code') == 'owner_inventory_failed' else 'other'
+    message = fault.get('message', '')
+    reason = next((name for suffix, name in [
+        ('configuration root is not operator-owned', 'config_owner'),
+        ('state directory is not owned by the operator', 'state_owner')]
+        if type(message) is str and message.endswith(suffix)), 'redacted')
+    fd = os.open(source.parent / 'owner-setup.log', os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1
+                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > 8 * 1024 * 1024 - 128):
+            raise ValueError()
+        data = ('sleep-owner-rpc: code=' + code + ' reason=' + reason + '\n').encode('ascii')
+        if os.write(fd, data) != len(data):
+            raise ValueError()
+    finally:
+        os.close(fd)
+
+
 def rpc_proxy():
     root, source, run, vm = context()
     if vm != '2' or sys.argv[1:] != ['--rpc-proxy']:
@@ -345,8 +411,9 @@ def rpc_proxy():
     def terminated(_signal, _frame):
         raise SystemExit(143)
     signal.signal(signal.SIGTERM, terminated)
-    child = subprocess.Popen([str(source / '.build/yard'), '-Y', 'pv-' + run, 'rpc', '--stdio'],
-                             env=owner_environment(run), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+    child = subprocess.Popen(owner_command(source, run, 'rpc', '--stdio'),
+                             env=owner_environment(run, source), cwd=source,
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                              stderr=subprocess.DEVNULL)
     token = str(os.getpid()) + '-' + process_identity(os.getpid())
     put(root, 'proxy-' + token + '.json', {'pid': os.getpid(), 'start': process_identity(os.getpid())})
@@ -384,6 +451,8 @@ def rpc_proxy():
             if item is None:
                 break
             value, data = item
+            if type(value.get('error')) is dict:
+                retain_owner_fault(source, value['error'])
             with lock:
                 if value.get('id') == held_id[0] and value.get('type') in {'response', 'result', 'error'}:
                     if held[0] is not None:
@@ -439,8 +508,9 @@ def owner_action(action):
         if type(value) is not dict or set(value) != {'responses'} or type(value['responses']) is not int or value['responses'] != 1:
             raise ValueError()
     elif action == 'event':
-        subprocess.run([str(source / '.build/yard'), '-Y', 'pv-' + run, 'start', '--yes'],
-                       env=owner_environment(run), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        subprocess.run(owner_command(source, run, 'start', '--yes'),
+                       env=owner_environment(run, source), cwd=source,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                        check=True, timeout=45)
     elif action in {'observe-1', 'observe-2'}:
         path = root / ('owner-' + action[-1] + '.json')
@@ -470,8 +540,9 @@ def owner_cycle(cycle):
         raise ValueError()
     def change():
         nonlocal changed, closed, changed_at, closed_at
-        subprocess.run([str(source / '.build/yard'), '-Y', 'pv-' + run, 'stop', '--force', '--yes'],
-                       env=owner_environment(run), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        subprocess.run(owner_command(source, run, 'stop', '--force', '--yes'),
+                       env=owner_environment(run, source), cwd=source,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                        check=True, timeout=8)
         changed = True
         changed_at = (time.monotonic_ns() - started) // 1000000
@@ -929,6 +1000,7 @@ def main():
     mode.add_argument('--owner-cycle', type=int, choices=[1, 2])
     mode.add_argument('--acceptance-client', action='store_true')
     mode.add_argument('--cleanup', action='store_true')
+    mode.add_argument('--evidence', action='store_true', help='export only fixed private acceptance logs before cleanup')
     parser.add_argument('--native')
     parser.add_argument('--peer-config')
     parser.add_argument('--destination')
@@ -951,6 +1023,8 @@ def main():
     if args.cleanup:
         cleanup_sleep()
         return 0
+    if args.evidence:
+        return export_evidence()
     if args.acceptance_client:
         return acceptance_client(args.native, args.peer_config, args.destination)
     result = prerequisites()

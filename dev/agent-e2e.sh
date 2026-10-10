@@ -40,6 +40,9 @@ ENVIRONMENT_TYPE=subyard-pair
 VM_COUNT=2
 VM_COUNT_REQUESTED=''
 BASE_FINGERPRINT=""
+GRANT_CPU_PER_VM=""
+GRANT_MEMORY_PER_VM=""
+GRANT_DISK_PER_VM=""
 WAIT_SECONDS=0
 E2E_ACTIVE_PHASE=""
 E2E_PHASE_STARTED=0
@@ -650,6 +653,9 @@ parse_lease_grant() {
     (.grant.targets | type == "array" and length == $count)
   ' <<<"$response" >/dev/null 2>&1 \
     || die "facade returned an invalid disposable environment grant"
+  GRANT_CPU_PER_VM="$(jq -r '.grant.environment.cpu_per_vm' <<<"$response")"
+  GRANT_MEMORY_PER_VM="$(jq -r '.grant.environment.memory_per_vm' <<<"$response")"
+  GRANT_DISK_PER_VM="$(jq -r '.grant.environment.disk_per_vm' <<<"$response")"
   BASE_FINGERPRINT="$(jq -r '.grant.base_fingerprint' <<<"$response")"
   count="$VM_COUNT"
   VM_IP=(); VM_HOST_KEY=()
@@ -1196,6 +1202,10 @@ write_guest_command() {
 	printf 'export SUBYARD_E2E_SLOT=%q\n' "$LEASE_SLOT"
 	printf 'export SUBYARD_E2E_GENERATION=%q\n' "$LEASE_GENERATION"
 	printf 'export SUBYARD_E2E_TYPE=%q\n' "$ENVIRONMENT_TYPE"
+	printf 'export SUBYARD_E2E_VM_COUNT=%q\n' "$VM_COUNT"
+	printf 'export SUBYARD_E2E_CPU_PER_VM=%q\n' "$GRANT_CPU_PER_VM"
+	printf 'export SUBYARD_E2E_MEMORY_PER_VM=%q\n' "$GRANT_MEMORY_PER_VM"
+	printf 'export SUBYARD_E2E_DISK_PER_VM=%q\n' "$GRANT_DISK_PER_VM"
 	printf 'export SUBYARD_E2E_BASE_FINGERPRINT=%q\n' "$BASE_FINGERPRINT"
 	printf 'export SUBYARD_E2E_VM=%q\n' "$vm"
 	if [ "${1:-}" = ./bin/yard ]; then
@@ -1252,8 +1262,11 @@ run_guest() {
 normalize_terminal_progress() {
   local line
   while IFS= read -r line || [ -n "$line" ]; do
-    line="${line%$'\r'}"
-    printf '%s\n' "${line##*$'\r'}"
+    if [[ "$line" == *$'\r'* ]]; then
+      line="${line%$'\r'}"
+      line="${line##*$'\r'}"
+    fi
+    printf '%s\n' "$line"
   done
 }
 

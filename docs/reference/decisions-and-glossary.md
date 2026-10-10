@@ -743,13 +743,18 @@ dependency integrity and licensing. YAML convenience alone is insufficient.
 
 ## Veranda: accepted direction
 
-The current Veranda candidate includes local and pinned SSH fleet views, native connection/trust
-management and typed owner operations. Its architecture is Tauri 2 with a thin native Rust shell
-and Svelte/TypeScript over versioned Yard RPC. Platform, reliability and resource acceptance remain
-pending; Windows/macOS are intended to reach Linux owners remotely. Minimize resources according to [architecture
-budgets](control-plane-architecture.md#veranda-resource-budgets). Slint is a fallback only after
-same-screen startup, idle RAM/CPU, and keyboard comparisons on target OS demonstrate value;
-replacing UI does not require Go/RPC rewrite.
+Veranda retains a native Rust client for local and pinned SSH fleet views, connection/trust
+management and typed owner operations over versioned Yard RPC. Tauri/WebKitGTK is excluded:
+roughly 500–600 MiB idle RSS is unacceptable, and its temporary 640 MiB exception is revoked.
+Historical [memory measurements](../veranda/webview-memory-reference.md) remain for comparison.
+Slint is the Linux migration finalist after the [matched native comparison](../veranda/native-framework-comparison.md)
+on 2026-10-10: 62.48 MiB summed desktop RSS, GTK4 76.72 MiB and Qt Widgets 86.93 MiB,
+with the real Rust/Go backend and 10 yards/100 projects in total. Slint's measured prototype
+includes four pinned correctness forks; stock Slint is unqualified. Full UI, startup, resource,
+keyboard, accessibility and session acceptance precedes delivery. Replacing the UI does not
+require a Go/RPC rewrite. Platform, reliability and resource acceptance remain pending;
+Windows/macOS are intended to reach Linux owners remotely. Minimize resources according to
+[architecture budgets](control-plane-architecture.md#veranda-resource-budgets).
 
 The accepted distribution contract keeps Yard/Veranda in one public monorepo/product SemVer
 release with separate artifacts. Core bootstrap/update remains CLI/engine-only; GUI installation

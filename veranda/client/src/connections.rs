@@ -14,6 +14,45 @@ const CONNECTION_LIMIT: usize = 128;
 const ASSESSMENT_LIMIT: usize = 32;
 const ASSESSMENT_TTL: Duration = Duration::from_secs(120);
 const STORE_FILE: &str = "connections.json";
+const NAVIGATION_FILE: &str = "navigation.json";
+
+/// Reversible UI preferences have their own file and never change trust revisions.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct NavigationSelection {
+    pub schema_version: u32,
+    pub connection_id: Option<String>,
+    pub yard_name: Option<String>,
+    pub tab: String,
+}
+impl NavigationSelection {
+    fn validate(&self) -> Result<(), NativeError> {
+        if self.schema_version != 1
+            || self.connection_id.as_deref().is_some_and(|id| !safe_id(id))
+            || self
+                .yard_name
+                .as_deref()
+                .is_some_and(|yard| !crate::local_fleet::safe_name(yard))
+            || !matches!(
+                self.tab.as_str(),
+                "Overview"
+                    | "Yards"
+                    | "Projects"
+                    | "Profiles"
+                    | "Settings"
+                    | "Diagnostics"
+                    | "Sync"
+                    | "About"
+            )
+        {
+            return Err(NativeError::new(
+                "invalid_navigation",
+                "The saved view is invalid. Choose an available owner and yard.",
+            ));
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -221,6 +260,46 @@ impl ConnectionStore {
             .iter()
             .map(Record::summary)
             .collect())
+    }
+
+    pub fn navigation_selection(&self) -> Result<Option<NavigationSelection>, NativeError> {
+        self.read()?;
+        let mut file = match open_private_read(&self.root.join(NAVIGATION_FILE)) {
+            Ok(file) => file,
+            Err(error) if error.code == "store_missing" => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let mut bytes = Vec::new();
+        Read::by_ref(&mut file)
+            .take(4097)
+            .read_to_end(&mut bytes)
+            .map_err(|_| store_io())?;
+        if bytes.len() > 4096 {
+            return Err(invalid_store());
+        }
+        let selection: NavigationSelection =
+            serde_json::from_slice(&bytes).map_err(|_| invalid_store())?;
+        selection.validate()?;
+        Ok(Some(selection))
+    }
+
+    pub fn save_navigation_selection(
+        &self,
+        selection: &NavigationSelection,
+    ) -> Result<(), NativeError> {
+        selection.validate()?;
+        ensure_private_root(&self.root)?;
+        let _lock = StoreLock::acquire(&self.root)?;
+        let data = self.read()?.1;
+        if selection
+            .connection_id
+            .as_deref()
+            .is_some_and(|id| !data.connections.iter().any(|record| record.id == id))
+        {
+            return Err(not_found());
+        }
+        let bytes = serde_json::to_vec(selection).map_err(|_| store_io())?;
+        atomic_private_replace(&self.root.join(NAVIGATION_FILE), &bytes)
     }
 
     /// Keyscan and assessment are read-only: no store, pin, registration or
@@ -1584,6 +1663,100 @@ mod tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.parent);
+        }
+    }
+
+    #[test]
+    fn navigation_selection_is_private_and_does_not_change_trust() {
+        let mut fixture = Fixture::new();
+        assert_eq!(fixture.store.navigation_selection().unwrap(), None);
+        assert!(!fixture.store.root.exists());
+        let record = fixture.register();
+        let removal = fixture.store.prepare_remove(&record.id).unwrap();
+        let trust_before = fixture.store.read().unwrap().0;
+        let selection = NavigationSelection {
+            schema_version: 1,
+            connection_id: Some(record.id.clone()),
+            yard_name: Some("synthetic-yard".into()),
+            tab: "Settings".into(),
+        };
+        fixture.store.save_navigation_selection(&selection).unwrap();
+        check_private_file(&fixture.store.root.join(NAVIGATION_FILE)).unwrap();
+        let reloaded = ConnectionStore::new(fixture.store.root.clone());
+        assert_eq!(
+            reloaded.navigation_selection().unwrap(),
+            Some(selection.clone())
+        );
+        assert_eq!(fixture.store.read().unwrap().0, trust_before);
+        for tab in ["Yards", "About"] {
+            let host_selection = NavigationSelection {
+                yard_name: None,
+                tab: tab.into(),
+                ..selection.clone()
+            };
+            fixture
+                .store
+                .save_navigation_selection(&host_selection)
+                .unwrap();
+            check_private_file(&fixture.store.root.join(NAVIGATION_FILE)).unwrap();
+            assert_eq!(
+                reloaded.navigation_selection().unwrap(),
+                Some(host_selection)
+            );
+            assert_eq!(fixture.store.read().unwrap().0, trust_before);
+        }
+        fixture.store.save_navigation_selection(&selection).unwrap();
+        fixture.store.remove(&removal.token, true).unwrap();
+        // A stale preference is harmless metadata; the frontend resolves it against
+        // fresh registration and owner inventory before choosing a scope.
+        assert_eq!(
+            reloaded.navigation_selection().unwrap(),
+            Some(selection.clone())
+        );
+        assert!(reloaded.save_navigation_selection(&selection).is_err());
+        for invalid in [
+            NavigationSelection {
+                schema_version: 2,
+                connection_id: None,
+                ..selection.clone()
+            },
+            NavigationSelection {
+                connection_id: Some("../escape".into()),
+                ..selection.clone()
+            },
+            NavigationSelection {
+                connection_id: None,
+                yard_name: Some("../escape".into()),
+                ..selection.clone()
+            },
+            NavigationSelection {
+                connection_id: None,
+                tab: "unknown".into(),
+                ..selection.clone()
+            },
+        ] {
+            assert!(reloaded.save_navigation_selection(&invalid).is_err());
+        }
+        #[cfg(unix)]
+        {
+            let target = fixture.parent.join("unrelated.json");
+            create_private_file(&target)
+                .unwrap()
+                .write_all(b"preserve")
+                .unwrap();
+            let path = fixture.store.root.join(NAVIGATION_FILE);
+            fs::remove_file(&path).unwrap();
+            std::os::unix::fs::symlink(&target, &path).unwrap();
+            assert_eq!(
+                reloaded.navigation_selection().unwrap_err().code,
+                "unsafe_connection_store"
+            );
+            let local = NavigationSelection {
+                connection_id: None,
+                ..selection
+            };
+            assert!(reloaded.save_navigation_selection(&local).is_err());
+            assert_eq!(fs::read(target).unwrap(), b"preserve");
         }
     }
     fn key(replacement: bool) -> HostKey {

@@ -1,20 +1,20 @@
-name: Veranda desktop candidates
+name: Veranda native client contracts
 
 on:
   pull_request:
-    paths: ['veranda/**', 'api/yard-rpc/**', 'dev/build-veranda*', 'dev/check-veranda*.py', 'dev/measure-veranda*.py', '.github/workflows/veranda.yml']
+    paths: ['veranda/**', 'api/yard-rpc/**', 'dev/check-veranda*.py', 'dev/measure-veranda*.py', '.github/workflows/veranda.yml']
   push:
     branches: ['**']
     tags: ['v*']
-    paths: ['veranda/**', 'api/yard-rpc/**', 'dev/build-veranda*', 'dev/check-veranda*.py', 'dev/measure-veranda*.py', '.github/workflows/veranda.yml']
+    paths: ['veranda/**', 'api/yard-rpc/**', 'dev/check-veranda*.py', 'dev/measure-veranda*.py', '.github/workflows/veranda.yml']
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  desktop:
-    name: Unsigned ${{ matrix.runner }} candidate
+  native-client:
+    name: Native client on ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
@@ -30,40 +30,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: veranda/package-lock.json
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.13'
-      - name: Install Linux desktop prerequisites
-        if: runner.os == 'Linux'
-        run: sudo apt-get update -qq && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libxdo-dev libssl-dev librsvg2-dev patchelf
       - name: Install Rust toolchain
         run: rustup toolchain install 1.88.0 --profile minimal --no-self-update
-      - name: Install frontend dependencies
-        run: npm --prefix veranda ci
       - name: Check Veranda host-free contracts
         env:
           RUSTUP_TOOLCHAIN: 1.88.0
         run: python dev/check-veranda.py
-      - name: Build matched unsigned desktop candidate
-        env:
-          RUSTUP_TOOLCHAIN: 1.88.0
-        run: |
-          version="$(node -p "require('./veranda/package.json').version")"
-          if [ "$GITHUB_REF_TYPE" = tag ]; then version="${GITHUB_REF_NAME#v}"; fi
-          node dev/build-veranda.mjs --version "$version"
-          git diff --exit-code -- veranda/package.json veranda/package-lock.json veranda/src-tauri/Cargo.toml veranda/src-tauri/Cargo.lock veranda/src-tauri/tauri.conf.json veranda/compatibility.json
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: veranda-unsigned-${{ matrix.runner }}-${{ github.sha }}
-          path: |
-            .build/veranda/**/candidate.json
-            .build/veranda/**/compatibility.json
-            .build/veranda/**/packages/*
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 14

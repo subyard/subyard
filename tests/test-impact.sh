@@ -670,7 +670,7 @@ jq -s -e 'length == 1 and .[0].schema_version == 1 and .[0].status == "fallback"
   .[0].changes == [] and .[0].check_sets == ["host-free:all"] and .[0].risk_domains == [] and
   .[0].e2e_checks == [] and .[0].full_p0.required == true and
   .[0].errors == [{"code":"BOOTSTRAP_FAILURE","message":"test-impact command could not be started"}] and
-  (.[0].host_free_checks | length) == 9 and
+  (.[0].host_free_checks | length) == 5 and
   all(.[0].host_free_checks[]; has("id") and has("tier") and has("budget_seconds") and has("rationale"))' \
   "$TEST_TMP/bootstrap.json" >/dev/null || fail 'bootstrap fallback JSON contract failed'
 [ "$(<"$TEST_TMP/bootstrap.err")" = 'test-impact: BOOTSTRAP_FAILURE: test-impact command could not be started' ] \

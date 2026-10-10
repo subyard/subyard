@@ -865,8 +865,12 @@ one request or use one slot as affinity for another.
 Before guest access, the runner prints the exact assignment and the broker installs the same public
 context at `/run/subyard-e2e-lease.json`. Normal payloads also receive
 `SUBYARD_E2E_YARD`, `SUBYARD_E2E_PROJECT`, `SUBYARD_E2E_RUN_ID`,
-`SUBYARD_E2E_PURPOSE`, `SUBYARD_E2E_SLOT`, `SUBYARD_E2E_VM`, `SUBYARD_E2E_TYPE`
-and `SUBYARD_E2E_BASE_FINGERPRINT`.
+`SUBYARD_E2E_PURPOSE`, `SUBYARD_E2E_SLOT`, `SUBYARD_E2E_VM`, `SUBYARD_E2E_TYPE`,
+`SUBYARD_E2E_VM_COUNT`, `SUBYARD_E2E_CPU_PER_VM`, `SUBYARD_E2E_MEMORY_PER_VM`,
+`SUBYARD_E2E_DISK_PER_VM` and `SUBYARD_E2E_BASE_FINGERPRINT`. Count and resource
+values come from the runner's validated actual environment grant, including configured
+resource overrides. These exports do not extend the lease marker schema or provide
+independent lease authentication.
 
 ## Lifecycle and fencing
 

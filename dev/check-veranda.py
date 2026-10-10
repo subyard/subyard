@@ -3,7 +3,6 @@
 import argparse
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -25,8 +24,7 @@ def check(name, command, env):
 
 
 def rust_check(env):
-    command = ["cargo", "test", "--manifest-path", "veranda/src-tauri/Cargo.toml",
-               "--no-default-features", "--locked"]
+    command = ["cargo", "test", "--manifest-path", "veranda/client/Cargo.toml", "--locked"]
     if sys.platform != "linux":
         print("Linux symlink TMPDIR probe: skipped on this platform", flush=True)
         return check("native Rust tests", command, env)
@@ -64,19 +62,6 @@ def main():
                 return code
         else:
             print("Linux resource probe isolation: skipped on this platform", flush=True)
-        npm = shutil.which("npm.cmd" if os.name == "nt" else "npm")
-        if not npm:
-            print("Veranda checks require npm on PATH", file=sys.stderr)
-            return 1
-        for name, command in [
-            ("frontend types", [npm, "--prefix", "veranda", "run", "check"]),
-            ("frontend tests", [npm, "--prefix", "veranda", "test"]),
-            ("packaging contract", ["node", "--test", "dev/build-veranda.test.mjs"]),
-            ("frontend build", [npm, "--prefix", "veranda", "run", "build"]),
-        ]:
-            code = check(name, command, env)
-            if code:
-                return code
     code = rust_check(env)
     if not code:
         print("Veranda native Rust checks passed" if args.rust_only else "Veranda host-free checks passed", flush=True)

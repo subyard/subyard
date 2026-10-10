@@ -1,7 +1,7 @@
 ---
 title: Architecture of the CLI, control plane and Subyard Veranda
 status: architecture and design constraints
-updated: 2026-10-06
+updated: 2026-10-10
 note: >
   Current architectural boundaries and accepted design constraints. The implementation guide
   describes shipped interfaces; Veranda requirements do not claim that future GUI features are shipped.
@@ -12,8 +12,9 @@ note: >
 This reference explains current system boundaries and the decisions that constrain further work.
 [Control-plane implementation](../control-plane.md) describes the current components and implemented
 interfaces. The production CLI/control plane is a Go engine with narrow Bash physical adapters.
-Veranda currently provides a read-only local fleet; its remote connections, owner mutations and
-cross-platform delivery below are accepted design constraints, not claims of shipped GUI features.
+Veranda's native client provides local/SSH RPC, trust storage and session contracts. Slint is the
+Linux migration finalist after a matched native comparison; the GUI and cross-platform delivery remain
+accepted design constraints, not claims of a shipped desktop application.
 
 The runtime layers `L0 host → L1 yard → optional L2 project-env → nested test runtime` and profiles as
 an orthogonal axis remain unchanged. A profile describes toolchains, caches, environment and devices
@@ -27,7 +28,8 @@ across L1 and/or L2; it is not another runtime layer. See [Workflows](../workflo
   **Veranda - Nice view into every yard.**
 - Go owns the Linux owner-side engine, CLI/control plane and official Incus client. Bash owns
   bounded platform integration and safety guards for host/Incus/network/storage/systemd and profile
-  hooks. Rust supplies Veranda's thin Tauri 2 native shell; Svelte/TypeScript supplies its UI.
+  hooks. Rust supplies Veranda's native client and presentation boundary. Slint is the Linux UI
+  migration finalist; Tauri/WebKitGTK is excluded because of its unacceptable idle memory footprint.
 - Veranda uses versioned Yard RPC. It duplicates neither owner domain logic nor Incus access.
 - Each operation has exactly one production implementation path. A compatibility shim may redirect
   a call but owns no business logic.
@@ -121,8 +123,8 @@ OwnerHost (L0)
 |---|---|---|---|
 | CLI/control plane | Go | command registry, config/context, state/transactions, cross-yard routing, operation identity/audit, Incus operations/events, credential metadata/revision/trust/assignment/sync decisions, RPC | host-specific implementation details, profile process identity and secret payload |
 | System/safety adapters | Bash | fresh-host bootstrap, bounded host `check/plan/apply/verify` mechanics, Incus/storage/network/UFW, mounts/idmap, systemd, destructive guards/rollback, pinned credential tools, protected crypto/materialization, profile/consumer hooks | command registry, cross-yard/credential business policy, RPC |
-| Veranda native shell | Rust/Tauri 2 | app lifecycle, capabilities, local/SSH transport, app-local connection/trust store and consent, credential references, typed IPC | Incus, owner state/plans/mutations, ledger payload |
-| Veranda UI | Svelte/TypeScript | presentation, navigation, client state machine, progress/diagnostics | domain validation and authoritative operation result |
+| Veranda native client | Rust | app lifecycle, capabilities, local/SSH transport, app-local connection/trust store and consent, credential references, typed presentation boundary | Incus, owner state/plans/mutations, ledger payload |
+| Veranda native UI | Slint, Linux migration finalist | presentation, navigation, client state machine, progress/diagnostics | domain validation and authoritative operation result |
 | In-yard desired state | Go-owned reconcile + Bash/component hooks | packages/users/files/services in an already created L1 | host/Incus/control plane |
 
 In-yard provisioning uses Go-owned reconciliation with Bash/component hooks, rather than an
@@ -313,13 +315,13 @@ See [Veranda](../veranda/README.md) for the implemented scope and verification l
 public Subyard monorepo
   ├─ cmd/yard + internal/             Go engine/CLI and RPC contracts
   └─ veranda/
-       ├─ Svelte/TypeScript UI
-       └─ typed Tauri IPC → thin Rust shell
+       ├─ planned Slint UI (implementation and qualification pending)
+       └─ typed presentation calls → native Rust client
             ├─ local child: yard rpc --stdio
             └─ SSH session: yard rpc --stdio on owner-host
 ```
 
-- The frontend has no arbitrary shell/file access; Tauri capabilities use a minimal allowlist.
+- The UI has no arbitrary shell/file access; the native client exposes only typed, bounded actions.
 - The Rust shell contains no owner domain rules and does not parse human CLI output.
 - On every OS, connection/trust metadata lives in one Veranda app-local store in a private app-data
   directory. The native shell owns versioned records keyed by authoritative HostID, destinations,
@@ -350,10 +352,10 @@ public Subyard monorepo
   before the corresponding mutations. The UI reports Veranda/Subyard versions and recommends
   installing both products from one release. There is no automatic conversion or fallback through
   human CLI output.
-- Go, Rust and TypeScript do not import each other's implementation types. The
+- The Go engine and Rust client do not import each other's implementation types. The
   [versioned RPC contract](../control-plane.md#rpc) defines the engine/client boundary. Contract
-  changes require conformance coverage for the engine and client, with separate typed Tauri IPC
-  coverage at the Rust/TypeScript boundary. No shared runtime/library is introduced between the
+  changes require conformance coverage for the engine and client, with separate typed presentation
+  coverage at the native UI boundary. No shared runtime/library is introduced between the
   engine and Veranda.
 
 ## 8. Performance, reliability and delivery
@@ -366,32 +368,39 @@ The requirements and methodology were accepted on 2026-10-05. Minimizing resourc
 Targets guide optimization; limits are release acceptance requirements. These are chosen requirements,
 not results of an already completed benchmark. Spare budget does not justify extra processes,
 polling, caches or dependencies.
-On 2026-10-06, the RSS limits for the Linux software-rendering baseline were raised to 640 MiB.
-The lower targets remain; investigating memory use and alternatives remains planned work.
+Tauri/WebKitGTK was rejected on 2026-10-09 after historical idle measurements of roughly
+500–600 MiB RSS. Its temporary 640 MiB software-rendering exception is revoked. Native UI
+candidates must meet the limits below; [historical measurements](../veranda/webview-memory-reference.md)
+remain available for comparison, without further WebView acceptance or optimization work.
+
+The 2026-10-10 [matched native comparison](../veranda/native-framework-comparison.md) recorded
+62.48 MiB desktop RSS for the patched Slint prototype, 76.72 MiB for GTK4 and 86.93 MiB for
+Qt Widgets. Its 10-yard/100-project workload selects a migration finalist; it does not replace
+the full application workloads and release limits below.
 
 | Metric | Target | Limit |
 | --- | --- | --- |
 | Cold process start to first controllable fleet/error screen, p95 | ≤ 1 s | ≤ 2 s |
-| Idle RAM, summed RSS of app-owned processes | ≤ 128 MiB | ≤ 640 MiB for Linux software rendering; ≤ 256 MiB otherwise |
-| Peak RAM during refresh/switch/event burst | ≤ 256 MiB | ≤ 640 MiB for Linux software rendering; ≤ 384 MiB otherwise |
+| Idle RAM, summed RSS of app-owned processes | ≤ 128 MiB | ≤ 256 MiB |
+| Peak RAM during refresh/switch/event burst | ≤ 256 MiB | ≤ 384 MiB |
 | Idle CPU, summed across processes, average over 120 s | ≤ 0.1% of one logical CPU | ≤ 0.5% of one logical CPU |
 | Compressed GUI artifact / installed app payload | ≤ 20 / 40 MiB | ≤ 40 / 80 MiB |
 | Switch of an already loaded host/yard to paint, p95 | ≤ 50 ms | ≤ 100 ms |
 | Local snapshot request → paint, p95 | ≤ 500 ms | ≤ 1 s |
 | Received RPC event → paint, p95 | ≤ 50 ms | ≤ 150 ms |
 | Remote reconnect after network restoration to fresh fleet, p95 | ≤ 2 s | ≤ 5 s |
-| Retained RSS growth after 100 connect/disconnect cycles | ≤ 5 MiB | ≤ 10 MiB |
+| Retained RSS growth after 20 measured connect/disconnect cycles | ≤ 5 MiB | ≤ 10 MiB |
 
 Methodology for the first Linux release check:
 
 - Baseline: Debian 13 amd64, 4 logical CPUs, 8 GiB RAM, SSD, graphical Wayland session at
-  1920×1080 and 60 Hz. Record the actual CPU/GPU, kernel, compositor, WebKitGTK and rendering backend
+  1920×1080 and 60 Hz. Record the actual CPU/GPU, kernel, compositor, UI toolkit and rendering backend
   for comparability; debug/dev servers are excluded. Windows/macOS repeat the requirements in their
-  release lanes with recorded OS/WebView versions.
+  release lanes with recorded OS/toolkit versions.
 - Ordinary workload: one owner, 20 yards and 200 project names. Stress: 5 owners, 100 yards,
   1000 project names and a burst of 100 events/s for 10 s. External terminals/editors, Incus and
   guest workloads are outside the app resource budget.
-- RSS and CPU include the Rust shell, all app-owned WebView/helper/SSH processes and the local
+- RSS and CPU include the Rust shell, all app-owned helper/SSH processes and the local
   `yard rpc` child. Sum RSS explicitly without subtracting shared pages; Linux PSS may be reported
   separately. Measure idle after 30 s of quiescence with the window open and no input/events/network
   traffic; the app must not repaint continuously. Measure peaks under ordinary and stress workloads.
@@ -403,9 +412,13 @@ Methodology for the first Linux release check:
   remote snapshot total time and RTT separately, while processing an already received response
   obeys the UI latency budget. Reconnect includes backoff, SSH, negotiation and snapshot with
   RTT ≤ 50 ms, a pinned host key and an available SSH agent; manual credential entry is outside the gate.
-- Cycle growth compares median idle RSS of the first and last 10 cycles after warmup. Orphan
-  processes, open sessions/subscriptions and unbounded queues are forbidden regardless of RSS.
-  App-owned engine/SSH children terminate when the app exits.
+- As clarified on 2026-10-07, routine cycle checks use 20 measured connect/disconnect cycles after
+  warmup. Compare median idle RSS of the first and last 10 cycles with the same workload and
+  quiescence. This shorter check has less sensitivity to slow accumulation than 100 cycles;
+  record the actual cycle count and do not reinterpret earlier results. Extend to 100 only for
+  observed growth, noisy or ambiguous retention, or a specific recovery regression requiring
+  longer exposure. Orphan processes, open sessions/subscriptions and unbounded queues are
+  forbidden regardless of RSS. App-owned engine/SSH children terminate when the app exits.
 - Package budgets include assets and bundled helpers; the CLI/engine ships separately. System
   WebViews and other OS prerequisites are outside the GUI artifact, but report their additional
   download/disk cost on a clean machine separately. Typed replay fixtures prove only client resource

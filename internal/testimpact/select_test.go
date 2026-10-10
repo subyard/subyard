@@ -36,10 +36,9 @@ func TestSelectVerandaAndOwnerRPCChecks(t *testing.T) {
 	}{
 		{"dev/measure-veranda.py", []string{"veranda:probe-test"}},
 		{"dev/measure-veranda-test.py", []string{"veranda:probe-test"}},
-		{"dev/build-veranda.mjs", []string{"veranda:packaging-test"}},
-		{"dev/build-veranda.test.mjs", []string{"veranda:packaging-test"}},
-		{"dev/check-veranda.py", []string{"veranda:build", "veranda:check", "veranda:packaging-test", "veranda:probe-test", "veranda:runner-test", "veranda:rust-test", "veranda:test"}},
+		{"dev/check-veranda.py", []string{"veranda:probe-test", "veranda:runner-test", "veranda:rust-test"}},
 		{"dev/check-veranda-test.py", []string{"veranda:runner-test"}},
+		{"veranda/client/src/client.rs", []string{"veranda:rust-test"}},
 		{"api/yard-rpc/v1/fixtures/negotiate.frame", []string{"go:cli", "go:ownerapi", "go:rpc", "veranda:rust-test"}},
 		{"internal/ownerapi/settings.go", []string{"go:cli", "go:ownerapi"}},
 	} {

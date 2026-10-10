@@ -33,6 +33,12 @@ case "${SUBYARD_E2E_VERANDA_GUI_GROWTH:-0}" in
   1) [ "${SUBYARD_E2E_VERANDA_RELEASE_GUI_ONLY:-0}" = 1 ] || die 'GUI growth requires independent release GUI mode' ;;
   *) die 'SUBYARD_E2E_VERANDA_GUI_GROWTH must be 0 or 1' ;;
 esac
+case "${SUBYARD_E2E_VERANDA_GUI_GROWTH_CYCLES-20}" in
+  20|100) ;;
+  *) die 'SUBYARD_E2E_VERANDA_GUI_GROWTH_CYCLES must be 20 or 100' ;;
+esac
+[ "${SUBYARD_E2E_VERANDA_GUI_GROWTH:-0}" = 1 ] || [ -z "${SUBYARD_E2E_VERANDA_GUI_GROWTH_CYCLES+x}" ] \
+  || die 'growth cycle selection requires independent GUI growth mode'
 case "${SUBYARD_E2E_VERANDA_GUI_WAYLAND_GROWTH:-0}" in
   0) ;;
   1)
@@ -102,7 +108,8 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME" "$STATE/project"
+install -d -m 0700 "$SUBYARD_CONFIG_HOME" "$SUBYARD_CONFIG_HOME/yards" \
+  "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME" "$STATE/project"
 profile="$ROOT/config/profiles/$PROFILE_NAME"
 [ ! -e "$profile" ] || die 'fixture profile already exists'
 install -d -m 0755 "$profile"

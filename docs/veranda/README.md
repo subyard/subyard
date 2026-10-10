@@ -1,8 +1,10 @@
 # Veranda UX design
 
 Veranda is the graphical Subyard client for users who prefer not to use the terminal for routine
-configuration, navigation, monitoring, and diagnostics. It is a Tauri 2 desktop application with a
-thin Rust shell and a Svelte/TypeScript interface over the typed Yard RPC protocol.
+configuration, navigation, monitoring, and diagnostics. Slint is the Linux migration finalist
+after a [matched native comparison](native-framework-comparison.md) over the real Rust/Go backend.
+Full native UI qualification remains pending. Tauri/WebKitGTK is excluded; its historical
+[memory measurements](webview-memory-reference.md) remain for reference.
 
 This directory records the initial UX contract. It is a planning artifact, not a promise that every
 illustrated control is implemented by the current engine. A surface must remain hidden or disabled
@@ -12,10 +14,10 @@ Open [`wireframes.html`](wireframes.html) in a browser to review the approved lo
 
 ## Current implementation
 
-The implementation under [`../../veranda/`](../../veranda/) includes local fleet navigation,
-SSH host registration and repair, profile selection and observed convergence, typed host/yard
-settings and diagnostics, offline synchronization status, exact operation review and cancellation,
-yard creation, and shell/editor launch descriptors. Persistent native RPC sessions handle bounded
+The shared client under [`../../veranda/client/`](../../veranda/client/) retains local/SSH fleet,
+registration and trust, profile selection/convergence, typed host/yard settings and diagnostics,
+synchronization, exact operation review/cancellation, yard creation and shell/editor launch
+contracts. Native UI parity and physical behavior remain qualification work. Persistent RPC sessions handle bounded
 requests and ordered events; a lost or inconsistent stream triggers an authoritative refresh.
 An interrupted mutation stays unknown until the owner provides a confirmed result.
 
@@ -34,8 +36,8 @@ acceptance still require their platform checks. A successful candidate build alo
 establish release readiness. Development and verification commands are documented in
 [`../../veranda/README.md`](../../veranda/README.md).
 
-The advisory [change-impact testing workflow](../testing.md) may recommend Veranda unit tests,
-static checks, the production build, and Rust tests without desktop features. It recommends these
+The advisory [change-impact testing workflow](../testing.md) may recommend native Rust client,
+resource-probe and check-runner tests. It recommends these
 host-free checks without executing them.
 
 ## Product model

@@ -196,15 +196,9 @@
       "shell:lifecycle-guard",
       "shell:teardown-runtime-preservation"
     ],
-    "veranda-frontend": [
-      "veranda:build",
-      "veranda:check",
-      "veranda:test"
-    ],
     "veranda-rust": ["veranda:rust-test"],
     "veranda-probe": ["veranda:probe-test"],
-    "veranda-runner": ["veranda:runner-test"],
-    "veranda-packaging": ["veranda:packaging-test"]
+    "veranda-runner": ["veranda:runner-test"]
   },
   "risk_domains": [
     "allocation-fencing-lease-identity",
@@ -938,17 +932,10 @@
       "risk_domains": []
     },
     {
-      "id": "veranda-packaging",
-      "priority": 425,
-      "pattern": "^dev/build-veranda(\\.test)?\\.mjs$",
-      "check_sets": ["veranda-packaging"],
-      "risk_domains": []
-    },
-    {
       "id": "veranda-check-entrypoint",
       "priority": 425,
       "pattern": "^dev/check-veranda\\.py$",
-      "check_sets": ["veranda-frontend", "veranda-rust", "veranda-probe", "veranda-packaging", "veranda-runner"],
+      "check_sets": ["veranda-rust", "veranda-probe", "veranda-runner"],
       "risk_domains": []
     },
     {
@@ -975,15 +962,15 @@
     {
       "id": "veranda-rust",
       "priority": 380,
-      "pattern": "^veranda/src-tauri/.*$",
+      "pattern": "^veranda/client/.*$",
       "check_sets": ["veranda-rust"],
       "risk_domains": ["veranda"]
     },
     {
-      "id": "veranda-frontend",
+      "id": "veranda-sources",
       "priority": 370,
       "pattern": "^veranda/.*$",
-      "check_sets": ["veranda-frontend"],
+      "check_sets": ["veranda-rust"],
       "risk_domains": ["veranda"]
     },
     {

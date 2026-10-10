@@ -152,7 +152,7 @@ func TestRunAnalysisFailuresReturnUniversalFallback(t *testing.T) {
 		{"unmatched path", []string{"--changes-from", unmatchedFile, "--format", "json"}, "UNMATCHED_PATH", 1},
 	}
 
-	wantLeaves := []string{"host-free:core", "profiles:host-free", "veranda:build", "veranda:check", "veranda:packaging-test", "veranda:probe-test", "veranda:runner-test", "veranda:rust-test", "veranda:test"}
+	wantLeaves := []string{"host-free:core", "profiles:host-free", "veranda:probe-test", "veranda:runner-test", "veranda:rust-test"}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			status, stdout, stderr := invokeRun(test.args, strings.NewReader(""), repo)
@@ -202,7 +202,7 @@ func TestRunRegistryValidationFailureReturnsOneUniversalFallbackDocument(t *test
 	if result.Status != "fallback" || !result.FullP0.Required {
 		t.Fatalf("result status/full P0 = %q/%t, want fallback/true", result.Status, result.FullP0.Required)
 	}
-	wantLeaves := []string{"host-free:core", "profiles:host-free", "veranda:build", "veranda:check", "veranda:packaging-test", "veranda:probe-test", "veranda:runner-test", "veranda:rust-test", "veranda:test"}
+	wantLeaves := []string{"host-free:core", "profiles:host-free", "veranda:probe-test", "veranda:runner-test", "veranda:rust-test"}
 	if got := hostFreeIDs(result); !reflect.DeepEqual(got, wantLeaves) {
 		t.Fatalf("fallback leaves = %v, want %v", got, wantLeaves)
 	}

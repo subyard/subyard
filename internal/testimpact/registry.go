@@ -53,7 +53,7 @@ func BuiltInRegistry() (Registry, error) {
 		{
 			ID:            "host-free:all",
 			Tier:          "T2",
-			Members:       []string{"host-free:core", "profiles:host-free", "veranda:build", "veranda:check", "veranda:packaging-test", "veranda:probe-test", "veranda:runner-test", "veranda:rust-test", "veranda:test"},
+			Members:       []string{"host-free:core", "profiles:host-free", "veranda:probe-test", "veranda:runner-test", "veranda:rust-test"},
 			BudgetSeconds: 2700,
 			Rationale:     "universal host-free fallback including Veranda",
 		},
@@ -118,10 +118,6 @@ func BuiltInRegistry() (Registry, error) {
 	}
 
 	checks = append(checks,
-		Check{ID: "veranda:test", Tier: "T1", Argv: []string{"npm", "run", "test"}, WorkingDirectory: "veranda", BudgetSeconds: 180, Rationale: "Veranda unit tests"},
-		Check{ID: "veranda:check", Tier: "T1", Argv: []string{"npm", "run", "check"}, WorkingDirectory: "veranda", BudgetSeconds: 180, Rationale: "Veranda static checks"},
-		Check{ID: "veranda:build", Tier: "T1", Argv: []string{"npm", "run", "build"}, WorkingDirectory: "veranda", BudgetSeconds: 180, Rationale: "Veranda production build"},
-		Check{ID: "veranda:packaging-test", Tier: "T1", Argv: []string{"node", "--test", "dev/build-veranda.test.mjs"}, BudgetSeconds: 60, Rationale: "Veranda packaging contract"},
 		Check{ID: "veranda:probe-test", Tier: "T1", Argv: []string{"python3", "dev/measure-veranda-test.py"}, BudgetSeconds: 60, Rationale: "Veranda Linux resource probe isolation"},
 		Check{ID: "veranda:runner-test", Tier: "T1", Argv: []string{"python3", "dev/check-veranda-test.py"}, BudgetSeconds: 60, Rationale: "Veranda check runner contract"},
 		Check{ID: "veranda:rust-test", Tier: "T1", Argv: []string{"python3", "dev/check-veranda.py", "--rust-only"}, BudgetSeconds: 300, Rationale: "Veranda Rust tests without desktop dependencies"},
